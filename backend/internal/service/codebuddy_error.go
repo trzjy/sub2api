@@ -135,6 +135,16 @@ func ClassifyCodeBuddyError(statusCode int, body []byte) CodeBuddyErrKind {
 	return CodeBuddyErrKindNone
 }
 
+// codeBuddyCodeAccountRestricted 是 CodeBuddy 403 的顶层业务码 11140。
+//
+// 注意：**该码语义已分化**，不能单独作为任何判定的充分条件——
+//   - 内容安全审核拒绝：displayMsg 含「安全审核 / safety review」（请求级，不罚账号）；
+//   - 账号级限制：displayMsg/zh=「账号存在异常行为，已被限制使用」（2026-10-18 生产实测，
+//     账号 258/259/285/286/287，判死路径见 isCodeBuddyAccountRestrictedError）。
+//
+// 常量化的目的正是禁止各调用点散写魔法数字导致两边口径漂移。
+const codeBuddyCodeAccountRestricted = 11140
+
 // isCodeBuddyContentSafetyError 检测上游响应体是否为 CodeBuddy 内容安全审核拒绝
 // （生产实测形态：HTTP 403 + {"code":11140,"msg":"request illegal","requestId":"...",
 //   "displayMsg":{"en":"The content did not pass the safety review...","zh":"内容未通过安全审核，请调整后重试。"}}）。
@@ -143,23 +153,37 @@ func ClassifyCodeBuddyError(statusCode int, body []byte) CodeBuddyErrKind {
 // 失效的证据——不得据此把账号置 error / temp-unschedulable（与 HTML 403 #5334
 // 豁免同类：只跳过账号处罚，不改 failover 行为）。
 //
-// 宽容解析：命中任一即 true——①顶层 code 字段（数字或字符串）== 11140；
-// ②顶层 displayMsg 对象任一语言值含「安全审核」或 "safety review"（大小写不敏感）。
-// 解析失败 / 非 JSON 对象 / 不命中 → false。
+// 判定依据（2026-10-18 收窄）：**只看响应体是否含内容审核语义**（小写后命中
+// 「安全审核」或 "safety review"），displayMsg 是最主要的出现位置，其余字段同样计入。
+// 顶层 code == 11140 **不再作为判定依据**——生产已实测该码被账号级限制复用，
+// 单凭 code 会把「账号存在异常行为，已被限制使用」误判为请求级内容拒绝（一旦
+// 误判，账号保持 active/可调度，请求轮换全池后 502）。
+// 空体 / 无审核语义 → false。
 func isCodeBuddyContentSafetyError(responseBody []byte) bool {
 	if len(responseBody) == 0 {
 		return false
 	}
-	if codeBuddyBodyHasCode(responseBody, 11140) {
-		return true
-	}
-	displayMsg := gjson.GetBytes(responseBody, "displayMsg")
-	if !displayMsg.IsObject() {
-		return false
-	}
-	lower := strings.ToLower(displayMsg.Raw)
+	lower := strings.ToLower(string(responseBody))
 	return strings.Contains(lower, "安全审核") ||
 		strings.Contains(lower, "safety review")
+}
+
+// isCodeBuddyAccountRestrictedError 判定 HTTP 403 + 顶层 code=11140 是否为
+// **账号级限制**（生产实测：displayMsg.zh=「账号存在异常行为，已被限制使用」、
+// displayTips.zh=「系统检测到该账号存在异常使用行为，如需申诉请提交反馈」）。
+//
+// 与 isCodeBuddyContentSafetyError 互斥：11140 先按内容审核语义分流，剩余才是
+// 账号级限制。这是 2026-10-18 用户裁决的默认口径——11140 默认判死账号，只有明确
+// 含审核语义才降级为请求级拒绝。
+// 非 403 / code 不等于 11140 / 命中内容审核语义 → false。
+func isCodeBuddyAccountRestrictedError(statusCode int, responseBody []byte) bool {
+	if statusCode != http.StatusForbidden {
+		return false
+	}
+	if !codeBuddyBodyHasCode(responseBody, codeBuddyCodeAccountRestricted) {
+		return false
+	}
+	return !isCodeBuddyContentSafetyError(responseBody)
 }
 
 // codeBuddyBodyIndicatesInsufficientBalance 通过响应体文案识别余额/积分不足。
@@ -241,6 +265,27 @@ func (s *RateLimitService) handleCodeBuddySessionDead(ctx context.Context, accou
 	until := time.Now().Add(24 * time.Hour)
 	s.notifyAccountSchedulingBlocked(account, until, "codebuddy_session_dead")
 	// handleAuthError 将账号置永久 error（status=error），由后台刷新/重新 OAuth 恢复。
+	s.handleAuthError(ctx, account, msg)
+}
+
+// handleCodeBuddyAccountRestricted 将 403 + code=11140（非内容审核语义，生产形态：
+// displayMsg.zh=「账号存在异常行为，已被限制使用」）判定为账号级限制，走既有
+// handleAuthError 判死路径（SetError：status=error + schedulable=false）。
+//
+// 这是上游侧风控结论，不是请求内容问题——换内容/换模型都不会自愈，只有账号申诉或
+// 重新授权后人工恢复；留在池里只会像 2026-10-18 事故那样被逐请求重放，轮换全池后 502。
+// 当前请求仍返回 failover 信号（true）由上层换下一个健康账号。
+func (s *RateLimitService) handleCodeBuddyAccountRestricted(ctx context.Context, account *Account, statusCode int, upstreamMsg string) {
+	msg := "CodeBuddy 账号存在异常行为已被上游限制 (需申诉或重新授权): " + upstreamMsg
+	slog.Warn(
+		"codebuddy_account_restricted_disabled",
+		"account_id", account.ID,
+		"platform", account.Platform,
+		"status_code", statusCode,
+		"upstream_code", codeBuddyCodeAccountRestricted,
+		"upstream_message", truncateForLog([]byte(upstreamMsg), 512),
+		"reason", "account_restricted_by_upstream",
+	)
 	s.handleAuthError(ctx, account, msg)
 }
 

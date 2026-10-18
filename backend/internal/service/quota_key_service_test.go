@@ -1279,9 +1279,9 @@ func mustCreateGroup(t *testing.T, client *ent.Client, allowlist domain.GroupMod
 	return g
 }
 
-// mustCreateCursorGroup 创建【cursor 平台】且带模型白名单的分组（R3-2 水位口径用）：
-// §13.1"当前允许 M 的分组"限定 cursor 平台分组，水位用例必须用 cursor 分组构造，
-// 否则（默认 anthropic 平台）按正确口径不计入 cursor 水位。
+// mustCreateCursorGroup 创建 cursor 平台分组并挂模型白名单，仅用于构造【特定覆盖形态】的用例
+// （水位/挂载对分组平台无偏好，裁定 1 已不限定 platform=cursor；取 cursor 平台仅为直观构造
+// 覆盖某模型的账号分组，不影响口径判定）。
 func mustCreateCursorGroup(t *testing.T, client *ent.Client, allowlist domain.GroupModelAllowlist) *ent.Group {
 	t.Helper()
 	g, err := client.Group.Create().
@@ -1554,9 +1554,10 @@ func TestQuotaKeyService_Pull_NoModelContextSkipsMount(t *testing.T) {
 }
 
 // TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups：B1 缺陷修复——手动入口
-// RefreshAccounts 改走挂载语义，拉到的 cursor 账号挂入"active + 未软删且白名单不显式拒绝
-// cursor 的全部分组"（2026-10-15 用户裁定"放宽挂载解析"：生产无 platform=cursor 分组，
-// cursor 账号实际由 composite 聚合组调度），而非落成裸号（group_count=0）。
+// RefreshAccounts 改走挂载语义，拉到的 cursor 账号挂入"配置勾选模型 ∩ 分组白名单"的交集
+// （findCursorPlatformGroups 裁定 1 口径，与 ListAllowedModels 同源同判），而非落成裸号
+// （group_count=0）。用例构造语义不变：composite 聚合组（白名单未启用）与覆盖实供模型的分组
+// 入选，显式不含 cursor 的分组不入选。
 func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -1594,7 +1595,7 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 	})
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
 
-	// 手动刷新：不带模型上下文，但应挂载到全部 cursor 分组。
+	// 手动刷新：不带模型上下文，按交集口径挂载（用例分组均为 allow-all / 白名单覆盖实供模型，全部入选）。
 	require.NoError(t, svc.RefreshAccounts(ctx, qk.ID))
 
 	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).WithGroups().All(ctx)
@@ -1711,10 +1712,9 @@ func TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly(t *testing.T) {
 }
 
 // TestQuotaKeyModelWater_WaterLevelFiltersByModel 验证水位按模型 M 过滤：仅"白名单含 M"
-// 的【cursor】分组内的候选账号计入水位（跨模型不串），且阈值恒为常量 10。
+// 的分组内的候选账号计入水位（跨模型不串），且阈值恒为常量 10。
 //
-// R3-2：分组必须限定 platform=cursor（与 ListAllowedModels 同范围），故本用例改用
-// mustCreateCursorGroup 构造覆盖分组——非 cursor 平台分组按正确口径不计入 cursor 水位。
+// 用例用 mustCreateCursorGroup 构造覆盖分组（任意平台分组均可，裁定 1 不限定 platform=cursor）。
 func TestQuotaKeyModelWater_WaterLevelFiltersByModel(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -1724,7 +1724,7 @@ func TestQuotaKeyModelWater_WaterLevelFiltersByModel(t *testing.T) {
 	modelA := fix1UniqueModel("cursor-fix1-a")
 	modelB := fix1UniqueModel("cursor-fix1-b")
 	// 持久库清理：历史轮次遗留的 c11-grp-cursor-* 组（无主、白名单各异）会把遗留账号计入
-	// 本轮水位（R3-2 后 WaterLevel 扫全 cursor 平台组）。用例级清理只删本前缀测试自建组，
+	// 本轮水位（WaterLevel 扫全未软删活跃分组）。用例级清理只删本前缀测试自建组，
 	// 不触碰生产数据（此库仅测试使用）。前置清理在建组前执行，t.Cleanup 兜底本轮产物。
 	cleanupLegacyCursorGroups := func() {
 		_, _ = client.Group.Delete().
@@ -1817,7 +1817,7 @@ func TestQuotaKeyModelWater_WaterLevelExcludesTempWindow(t *testing.T) {
 	w := NewQuotaKeyModelWater(client, nil)
 
 	modelM := fix1UniqueModel("cursor-fix1-temp")
-	// R3-2：水位口径的覆盖分组须为 cursor 平台分组。
+	// 覆盖分组用 mustCreateCursorGroup 构造（平台不限，裁定 1）。
 	grp := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
 
 	holder := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)

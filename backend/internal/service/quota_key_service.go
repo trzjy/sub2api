@@ -234,10 +234,10 @@ type QuotaKeyService struct {
 	// 生产默认走 findGroupsAllowingModel；测试可替换以注入挂载失败等边界。
 	groupResolver func(ctx context.Context, tx *ent.Tx, modelM string) ([]int64, error)
 
-	// cursorGroupResolver 解析"当前白名单允许平台 cursor 的全部分组"ID（B1 手动挂载
-	// 事实源）。用于手动入口 RefreshAccounts：手动刷新不携带模型上下文，挂载目标为
-	// 全部 cursor 平台、active、未软删分组（与 findGroupsAllowingModel 同判——后者对
-	// 传入的 M 取 Allows(M)，而手动入口无 M，故改为枚举所有 cursor 分组）。
+	// cursorGroupResolver 解析 B1 手动挂载目标分组 ID（B1 事实源）。用于手动入口
+	// RefreshAccounts：手动刷新不携带模型上下文，挂载目标 = 【配置勾选模型集合】∩【分组
+	// 白名单覆盖】的交集（findCursorPlatformGroups 裁定 1 口径），与自动链路 ListAllowedModels
+	// 同源同判。勾选空 → ErrQuotaKeyModelNoCoverage 失败关闭。
 	// 生产默认走 findCursorPlatformGroups；测试可替换以注入边界。
 	// 注意：该解析器不计模型，与 groupResolver(modelM) 是两个独立的 seam。
 	cursorGroupResolver func(ctx context.Context, tx *ent.Tx) ([]int64, error)
@@ -604,10 +604,10 @@ func (s *QuotaKeyService) PullAccountsForModel(ctx context.Context, quotaKeyID i
 // RefreshAccounts 手动触发拉号（§4.4），与 PullAccounts 共享同一 advisory 互斥域。
 //
 // 与 PullAccounts 的唯一差异（B1 缺陷修复，2026-10-15）：手动入口【走挂载语义】。手动刷新
-// 不携带模型上下文，挂载目标不是某模型 M 的覆盖组，而是"当前白名单允许平台 cursor 的全部分组"
-// （cursorGroupResolver：枚举所有 cursor 平台 / active / 未软删分组，与 findGroupsAllowingModel
-// 同判——后者对传入 M 取 Allows(M)，手动无 M 故改为枚举所有 cursor 分组）。这样手动拉到的
-// cursor 账号会挂入白名单分组（group_count>0、可用），而非落成裸号（group_count=0）。
+// 不携带模型上下文，挂载目标 = 配置勾选模型 ∩ 现有活跃分组白名单的交集（findCursorPlatformGroups，
+// 与自动链路 ListAllowedModels 同源同判）。这样手动拉到的 cursor 账号会挂入白名单分组
+// （group_count>0、可用），而非落成裸号（group_count=0）。勾选空 → ErrQuotaKeyModelNoCoverage
+// 失败关闭。
 // PullAccounts(reconciler 内部) 保持 mountResolver=nil、不挂载——两入口行为差异在此显式区分。
 func (s *QuotaKeyService) RefreshAccounts(ctx context.Context, quotaKeyID int64) error {
 	return s.pull(ctx, quotaKeyID, s.cursorGroupResolver, true)
@@ -772,7 +772,7 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		// §13.3 新号挂载：mountResolver 由触发方在落库事务内执行，提交前挂入其解析出的
 		// 全部分组。mountResolver 为 nil（reconciler 内部入口 PullAccounts）时跳过挂载。
 		// mountResolver 非空即代表"触发方要求挂载"——无论携带模型 M（PullAccountsForModel）
-		// 还是手动枚举全部 cursor 分组（RefreshAccounts，B1）。
+		// 还是手动交集口径挂载（RefreshAccounts，B1，经 cursorGroupResolver → findCursorPlatformGroups）。
 		if mountResolver != nil {
 			groupIDs, err := mountResolver(ctx, tx)
 			if err != nil {

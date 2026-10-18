@@ -105,15 +105,14 @@ func TestClassifyCodeBuddyError_None(t *testing.T) {
 	}
 }
 
-// TestIsCodeBuddyContentSafetyError 覆盖内容安全审核拒绝检测（403 + 11140）：
-// 正例（数字/字符串 code、displayMsg 中英文）与负例（429、11128、无 displayMsg
-// 的普通 403、非 JSON、空体）。
+// TestIsCodeBuddyContentSafetyError 覆盖内容安全审核拒绝检测。**只认审核语义**，
+// 顶层 code 不再参与判定（2026-10-18 收窄：11140 已被上游复用为「账号异常行为限制」，
+// 单凭 code 判定的旧口径会把账号级限制误判成请求级内容拒绝，账号留在池里被逐请求
+// 重放，轮换全池后 502）。
 func TestIsCodeBuddyContentSafetyError(t *testing.T) {
 	positive := []string{
 		// 生产实测形态：数字 code + displayMsg 中英双语。
 		`{"code":11140,"msg":"request illegal","requestId":"abc","displayMsg":{"en":"The content did not pass the safety review...","zh":"内容未通过安全审核，请调整后重试。"}}`,
-		// 字符串 code。
-		`{"code":"11140","msg":"request illegal"}`,
 		// 仅 displayMsg 中文命中。
 		`{"code":0,"displayMsg":{"zh":"内容未通过安全审核，请调整后重试。"}}`,
 		// 仅 displayMsg 英文命中（大小写不敏感）。
@@ -132,11 +131,92 @@ func TestIsCodeBuddyContentSafetyError(t *testing.T) {
 		`{"code":"not-a-number"}`,
 		`plain text error page`,
 		``,
+		// 语义变更：由正例移入反例。仅顶层 code==11140 且无任何审核语义，不再判定为
+		// 内容审核——该形态交由 isCodeBuddyAccountRestrictedError 按账号限制处理。
+		`{"code":"11140","msg":"request illegal"}`,
+		`{"code":11140,"msg":"request illegal"}`,
+		// 生产原文形态（2026-10-18，账号 258/259/285/286/287）：账号级限制，无审核语义。
+		`{"code":11140,"msg":"request illegal","displayMsg":{"en":"Your account has been restricted due to unusual activity","zh":"账号存在异常行为，已被限制使用"},"displayTips":{"zh":"系统检测到该账号存在异常使用行为，如需申诉请提交反馈"}}`,
 	}
 	for _, body := range negative {
 		if isCodeBuddyContentSafetyError([]byte(body)) {
 			t.Fatalf("expected false for body %q", body)
 		}
+	}
+}
+
+// codeBuddyAccountRestricted403Body 是 2026-10-18 生产实测的账号限制原文
+// （账号 258/259/285/286/287：/v1/messages 恒返回 403 + 顶层 code=11140）。
+const codeBuddyAccountRestricted403Body = `{"code":11140,"msg":"request illegal","displayMsg":{"en":"Your account has been restricted due to unusual activity","zh":"账号存在异常行为，已被限制使用"},"displayTips":{"zh":"系统检测到该账号存在异常使用行为，如需申诉请提交反馈"}}`
+
+func TestIsCodeBuddyAccountRestrictedError(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{
+			name:   "403 + 11140 + 账号限制文案 → true",
+			status: http.StatusForbidden,
+			body:   codeBuddyAccountRestricted403Body,
+			want:   true,
+		},
+		{
+			name:   "403 + 字符串码 11140 + 无审核语义 → true",
+			status: http.StatusForbidden,
+			body:   `{"code":"11140","msg":"request illegal"}`,
+			want:   true,
+		},
+		{
+			name:   "403 + 11140 + safety review → false（内容审核，非账号限制）",
+			status: http.StatusForbidden,
+			body:   `{"code":11140,"msg":"request illegal","displayMsg":{"en":"The content did not pass the safety review","zh":"内容未通过安全审核，请调整后重试。"}}`,
+			want:   false,
+		},
+		{
+			name:   "403 + 11140 + 中文安全审核 → false",
+			status: http.StatusForbidden,
+			body:   `{"code":11140,"msg":"request illegal","displayMsg":{"zh":"内容未通过安全审核，请调整后重试。"}}`,
+			want:   false,
+		},
+		{
+			name:   "非 403（400）+ 11140 + 限制文案 → false",
+			status: http.StatusBadRequest,
+			body:   codeBuddyAccountRestricted403Body,
+			want:   false,
+		},
+		{
+			name:   "非 403（429）+ 限制文案 → false",
+			status: http.StatusTooManyRequests,
+			body:   codeBuddyAccountRestricted403Body,
+			want:   false,
+		},
+		{
+			name:   "403 + code 不等于 11140 → false",
+			status: http.StatusForbidden,
+			body:   `{"code":11128,"msg":"first message is not system prompt"}`,
+			want:   false,
+		},
+		{
+			name:   "403 + 非 CodeBuddy 信封 → false",
+			status: http.StatusForbidden,
+			body:   `{"error":{"message":"temporary edge rejection"}}`,
+			want:   false,
+		},
+		{
+			name:   "403 + 空体 → false",
+			status: http.StatusForbidden,
+			body:   ``,
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCodeBuddyAccountRestrictedError(tc.status, []byte(tc.body)); got != tc.want {
+				t.Fatalf("expected %v, got %v (body=%q)", tc.want, got, tc.body)
+			}
+		})
 	}
 }
 
