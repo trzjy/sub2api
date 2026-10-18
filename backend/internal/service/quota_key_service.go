@@ -316,6 +316,11 @@ func NewQuotaKeyService(repo QuotaKeyRepository, enc QuotaKeyEncryptor, upstream
 	if sac, ok := upstream.(*shareAIUpstreamClient); ok {
 		sac.SetDeviceResolver(s)
 	}
+	// P1-S：cursor 调度资格门所需的激活码状态读取器（包级安装，沿
+	// codeBuddyQuotaInstance 的模式）。调度谓词是包级纯函数、拿不到 service 句柄，
+	// 故在此装配点一次性注入；未装配时资格门降级为不收紧（见
+	// cursorAccountQuotaKeyVetoReason 注释）。
+	InstallCursorQuotaKeyStateProvider(s)
 	return s
 }
 
@@ -326,6 +331,35 @@ func (s *QuotaKeyService) GetStatus(ctx context.Context, id int64) (*QuotaKeySta
 		return nil, err
 	}
 	return quotaKeyToStatus(qk), nil
+}
+
+// CursorQuotaKeyStatus 返回激活码在调度口径下的状态，供 cursor 账号的调度资格门消费
+// （P1-S §15.4-I2：key 终态只约束账号的调度资格，账号本体不动）。
+//
+// 归一化：「落盘 status=expired」与「expires_at 已到期但 sweeper 尚未落盘」是同一事实的
+// 两个时序切片，对调度而言没有区别，统一归一为 domain.QuotaKeyStatusExpired——
+// 资格门只关心"这个码是否已停供"，不该被后台落盘时序左右。
+// 其余状态（active/exhausted/disabled…）原样返回，由资格门按自身语义裁决。
+//
+// 读取失败（码不存在 / 存储故障）返回 error：调用方据此失败关闭，不静默放行。
+func (s *QuotaKeyService) CursorQuotaKeyStatus(ctx context.Context, quotaKeyID int64) (string, error) {
+	if s == nil || s.repo == nil {
+		return "", errors.New("quota_key_service: quota key repository unavailable")
+	}
+	if quotaKeyID <= 0 {
+		return "", fmt.Errorf("quota_key_service: invalid quota key id %d", quotaKeyID)
+	}
+	qk, err := s.repo.GetByID(ctx, quotaKeyID)
+	if err != nil {
+		return "", err
+	}
+	if qk == nil {
+		return "", fmt.Errorf("quota_key_service: quota key %d not found", quotaKeyID)
+	}
+	if qk.Status == domain.QuotaKeyStatusExpired || isExpired(qk) {
+		return domain.QuotaKeyStatusExpired, nil
+	}
+	return qk.Status, nil
 }
 
 // RotateCredentials 加密新激活码原文后写入 code_encrypted / code_mac / code_last4，
