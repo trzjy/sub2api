@@ -113,7 +113,8 @@ var ErrCursorRelayAuthRejected = errors.New("cursor: relay rejected the request 
 // 判据与 A1 交付的哨兵 ErrCursorKeyRejectedUpstream 同源（同一固定模板、同一触发条件）；
 // 本卡在解析前对流内原始字节做同判据扫描，故不依赖 A1 侧符号即可终态返回。
 // 命中即终态错误：**不得**当成功、**不得**伪造 usage。
-var ErrCursorKeyRejectedTerminal = errors.New("cursor: upstream rejected the key inside the stream (terminal)")
+// ErrCursorKeyRejectedTerminal 整合后统一到 A1 契约哨兵（见 cursor_protocol_response.go）
+var ErrCursorKeyRejectedTerminal = ErrCursorKeyRejectedUpstream // alias（errors.Is 双哨兵均成立）
 
 // cursorAccountAuthProvider 为**单个账号**提供 x-jg-auth 鉴权材料。
 //
@@ -512,7 +513,10 @@ func (s *OpenAIGatewayService) cursorHandleKeyRejected(
 	// ops 上报：只含模板片段（已脱敏：片段内不含任何凭证）。
 	s.cursorRecordUpstreamError(c, account, 0, "key_rejected", "上游流内拒绝："+rej.Snippet, upstreamURL)
 
-	terminal := fmt.Errorf("%w: %s", ErrCursorKeyRejectedTerminal, rej.Snippet)
+	terminal := cursorMatchKeyRejected(rej.Snippet)
+	if terminal == nil {
+		terminal = &CursorKeyRejectedError{Template: rej.Snippet}
+	}
 
 	lookup := s.cursorKeyStatusLookupOrDefault()
 	if lookup == nil || account == nil || account.QuotaKeyID == nil {
