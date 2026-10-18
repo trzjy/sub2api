@@ -994,12 +994,16 @@
       @cancel="showResetRateLimitDialog = false"
     />
 
-    <!-- Use Key Modal -->
+    <!-- Use Key Modal
+         platform 用 ?? 而非 ||：内部供给组的 Key 在用户 DTO 边界已被剥离平台
+         （platform=''），?? 保留空串传给弹窗（弹窗据此区分"未绑定"与"已绑定但
+         平台隐藏"），|| 会把空串折叠成 null 导致已绑定 Key 被误报未分组
+         （user-visibility-closure 2026-10-18 修复）。 -->
     <UseKeyModal
       :show="showUseKeyModal"
       :api-key="selectedKey?.key || ''"
       :base-url="publicSettings?.api_base_url || ''"
-      :platform="selectedKey?.group?.platform || null"
+      :platform="selectedKey?.group?.platform ?? null"
       :claude-code-only="selectedKey?.group?.claude_code_only || false"
       :allow-messages-dispatch="selectedKey?.group?.allow_messages_dispatch || false"
       @close="closeUseKeyModal"

@@ -1103,4 +1103,96 @@ describe('UseKeyModal', () => {
       }
     }
   )
+
+  // user-visibility-closure 2026-10-18：内部供给组的 Key 在用户 DTO 边界被剥离平台
+  // （platform=''），KeysView 用 ?? 保留空串传入。修复前两种状态都被 `!platform`
+  // 折叠成"未分组"，已绑定 Key 被误报"请先分配分组"、配置说明消失。
+  it('shows the no-group warning only for keys with no group (platform null)', () => {
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-unbound-test',
+        baseUrl: 'https://example.com/v1',
+        platform: null
+      },
+      global: {
+        stubs: {
+          BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' },
+          Icon: { template: '<span />' }
+        }
+      }
+    })
+
+    expect(wrapper.text()).toContain('keys.useKeyModal.noGroupTitle')
+    expect(wrapper.text()).toContain('keys.useKeyModal.noGroupDescription')
+    expect(wrapper.findAll('pre code')).toHaveLength(0)
+  })
+
+  it('renders the generic usage config for a key bound to a hidden internal-supply group (platform "")', () => {
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-internal-bound',
+        baseUrl: 'https://example.com/v1',
+        platform: ''
+      },
+      global: {
+        stubs: {
+          BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' },
+          Icon: { template: '<span />' }
+        }
+      }
+    })
+
+    // 不误报未分组：警告与配置说明同时出现（v-if/v-else 互斥，警告块必须缺席）。
+    expect(wrapper.text()).not.toContain('keys.useKeyModal.noGroupTitle')
+    expect(wrapper.text()).not.toContain('keys.useKeyModal.noGroupDescription')
+    // 既有使用配置恢复：通用描述 + 通用三 tab + Claude Code 配置（default tab）。
+    expect(wrapper.text()).toContain('keys.useKeyModal.description')
+    const clientTabs = wrapper.find('nav[aria-label="Client"]').text()
+    expect(clientTabs).toContain('keys.useKeyModal.cliTabs.claudeCode')
+    expect(clientTabs).toContain('keys.useKeyModal.cliTabs.codexCli')
+    expect(clientTabs).toContain('keys.useKeyModal.cliTabs.opencode')
+    expect(wrapper.find('pre code').text()).toContain('ANTHROPIC_BASE_URL')
+    // 供给平台身份零暴露。
+    expect(wrapper.text()).not.toContain('CodeBuddy')
+    expect(wrapper.text()).not.toContain('Muse')
+  })
+
+  it('generates a neutral routed-codex config for hidden-platform groups on the codex tab', async () => {
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-internal-bound',
+        baseUrl: 'https://example.com/v1',
+        platform: ''
+      },
+      global: {
+        stubs: {
+          BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' },
+          Icon: { template: '<span />' }
+        }
+      }
+    })
+
+    const codexTab = wrapper.findAll('button').find((button) =>
+      button.text().includes('keys.useKeyModal.cliTabs.codexCli')
+    )
+    expect(codexTab).toBeDefined()
+    await codexTab!.trigger('click')
+
+    const config = wrapper.findAll('pre code')
+      .map((code) => code.text())
+      .find((content) => content.includes('[model_providers.sub2api]'))
+    expect(config).toBeDefined()
+    expect(config!).toContain('model_provider = "sub2api"')
+    expect(config!).toContain('SUB2API_API_KEY')
+    // 中性名回退：标题只写 Sub2API，不暴露供给平台身份，也不出现 undefined。
+    expect(config!).toContain('# Codex CLI -> Sub2API group')
+    expect(config!).toContain('name = "Sub2API"')
+    expect(config!).not.toContain('undefined')
+    expect(config!).not.toContain('CodeBuddy')
+    expect(config!).not.toContain('Muse')
+    expect(config!).not.toContain('Cursor')
+  })
 })

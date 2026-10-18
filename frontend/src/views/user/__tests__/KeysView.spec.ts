@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
 
-import type { ApiKey } from '@/types'
+import type { ApiKey, Group } from '@/types'
 import { keysAPI } from '@/api'
 import KeysView from '../KeysView.vue'
 
@@ -220,7 +220,7 @@ const IconStub = {
   template: '<span data-test="icon">{{ name }}</span>',
 }
 
-const mountView = async () => {
+const mountView = async (useKeyModalStub: unknown = true) => {
   const wrapper = mount(KeysView, {
     global: {
       stubs: {
@@ -238,7 +238,7 @@ const mountView = async () => {
         Select: SelectStub,
         SearchInput: SearchInputStub,
         Icon: IconStub,
-        UseKeyModal: true,
+        UseKeyModal: useKeyModalStub,
         BulkEditKeysModal: true,
         EndpointPopover: true,
         GroupBadge: true,
@@ -653,5 +653,82 @@ describe('user KeysView column settings', () => {
       expect(wrapper.find('[data-tour="key-form-provider"]').exists()).toBe(false)
       expect(optionIds(wrapper)).toHaveLength(12)
     })
+  })
+})
+
+describe('user KeysView use-key modal binding', () => {
+  // user-visibility-closure 2026-10-18：用户 DTO 输出进入弹窗的契约——内部供给组
+  // 的 Key 在后端 APIKeyFromServiceForUser 剥离平台（platform=''），KeysView 用
+  // ?? 保留空串传入弹窗（弹窗据此区分"未绑定"与"已绑定但平台隐藏"）。
+  const UseKeyModalCapture = {
+    name: 'UseKeyModal',
+    props: ['show', 'apiKey', 'baseUrl', 'platform', 'claudeCodeOnly', 'allowMessagesDispatch'],
+    emits: ['close'],
+    template: '<div data-test="use-key-modal-capture" />',
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+
+    listKeys.mockReset()
+    updateKey.mockReset()
+    vi.mocked(keysAPI.create).mockReset()
+    getPublicSettings.mockReset()
+    getDashboardApiKeysUsage.mockReset()
+    getAvailableGroups.mockReset()
+    getUserGroupRates.mockReset()
+    showError.mockReset()
+    showSuccess.mockReset()
+    copyToClipboard.mockReset()
+    isCurrentStep.mockReset()
+    nextStep.mockReset()
+
+    listKeys.mockResolvedValue({
+      items: [createApiKey()],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+    getPublicSettings.mockResolvedValue({})
+    getDashboardApiKeysUsage.mockResolvedValue({ stats: {} })
+    getAvailableGroups.mockResolvedValue([])
+    getUserGroupRates.mockResolvedValue({})
+    isCurrentStep.mockReturnValue(false)
+  })
+
+  it('passes the stripped empty platform through to the modal for keys bound to internal groups', async () => {
+    listKeys.mockResolvedValue({
+      items: [{
+        ...createApiKey(),
+        group_id: 113,
+        group: { id: 113, name: 'space-bunny', platform: '' } as Group,
+      }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+    const wrapper = await mountView(UseKeyModalCapture)
+
+    await getButtonByText(wrapper, 'keys.useKey').trigger('click')
+    await nextTick()
+    const modal = wrapper.findComponent(UseKeyModalCapture)
+    expect(modal.exists()).toBe(true)
+    expect(modal.props('show')).toBe(true)
+    // 空串必须原样传入（|| null 折叠会让弹窗误判未绑定）。
+    expect(modal.props('platform')).toBe('')
+    wrapper.unmount()
+  })
+
+  it('passes null platform to the modal for unbound keys', async () => {
+    const wrapper = await mountView(UseKeyModalCapture)
+
+    await getButtonByText(wrapper, 'keys.useKey').trigger('click')
+    await nextTick()
+    const modal = wrapper.findComponent(UseKeyModalCapture)
+    expect(modal.exists()).toBe(true)
+    expect(modal.props('platform')).toBeNull()
+    wrapper.unmount()
   })
 })

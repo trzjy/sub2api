@@ -6,8 +6,8 @@
     @close="emit('close')"
   >
     <div class="space-y-4">
-      <!-- No Group Assigned Warning -->
-      <div v-if="!platform" class="flex items-start gap-3 p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+      <!-- No Group Assigned Warning (only for keys truly unbound; see isUnbound) -->
+      <div v-if="isUnbound" class="flex items-start gap-3 p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
         <svg class="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
         </svg>
@@ -302,6 +302,15 @@ interface FileConfig {
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
 
+// platform 为 null = Key 未绑定任何分组（KeysView 对 group 缺失的 key 传 null）。
+// platform 为空串 = Key 已绑定内部供给分组：后端 APIKeyFromServiceForUser 在用户
+// DTO 边界剥离了供给平台身份（platform 置空串，2026-10-18 用户裁定），group 对象
+// 本身保留。两种状态此前都被 `!platform` 折叠成"未分组"，导致已绑定 Key 被
+// 误报"请先分配分组"、配置说明消失（user-visibility-closure 2026-10-18 修复）。
+// 修复后：仅真正未绑定才显示警告；已绑定的隐藏平台 Key 走通用配置分支
+// （claude/codex/opencode，全部 default case），不重新暴露供给平台身份。
+const isUnbound = computed(() => props.platform === null)
+
 const { t } = useI18n()
 const { copyToClipboard: clipboardCopy } = useClipboard()
 
@@ -442,7 +451,9 @@ const SparkleIcon = {
 }
 
 const clientTabs = computed((): TabConfig[] => {
-  if (!props.platform) return []
+  // 仅未绑定 Key（platform=null）不渲染客户端 tab；空串（已绑定内部供给分组，
+  // 平台身份已剥离）落入 default 分支返回通用三 tab。
+  if (isUnbound.value) return []
   // take UPSTREAM: Claude Code-only groups expose exactly one tab. Guarded ahead of the
   // platform switch so it also wins over our codebuddy/muse/other platforms.
   if (props.claudeCodeOnly) {
@@ -797,7 +808,11 @@ const currentFiles = computed((): FileConfig[] => {
       }
       return generateAnthropicFiles(baseRoot, apiKey)
     default:
-      if (activeClientTab.value === 'codex' && props.platform) {
+      // 已绑定隐藏平台（platform=''）的 Key 走 default 分支：codex tab 仍生成
+      // routed codex 配置（与剥离前内部分组的既有行为一致），标签走中性名回退，
+      // 不暴露供给平台身份；非 codex tab 生成通用 Claude Code 配置。
+      // platform !== null（非 !platform）：空串是真值判定会跳过 codex 生成。
+      if (activeClientTab.value === 'codex' && props.platform !== null) {
         return generateRoutedCodexFiles(apiBase, apiKey, props.platform)
       }
       return generateAnthropicFiles(baseUrl, apiKey)
@@ -1283,12 +1298,16 @@ function generateRoutedCodexFiles(
     cline: 'Cline',
     cursor: 'Cursor'
   }
-  const label = labels[platform]
+  // 已绑定内部供给分组的 Key（platform=''，身份已在用户 DTO 边界剥离）走中性名
+  // 回退：标题只写 Sub2API，不暴露供给平台身份（user-visibility-closure 2026-10-18）。
+  // 有已知标签的平台行为不变。
+  const label = labels[platform] || ''
+  const providerName = label ? `Sub2API ${label}` : 'Sub2API'
   const envContent = isWindows
     ? `$env:SUB2API_API_KEY="${apiKey}"`
     : `export SUB2API_API_KEY="${apiKey}"`
 
-  const configContent = `# Codex CLI -> Sub2API ${label} group
+  const configContent = `# Codex CLI -> ${providerName} group
 model_provider = "sub2api"
 model = "${model}"
 review_model = "${model}"
@@ -1296,7 +1315,7 @@ disable_response_storage = true
 model_catalog_json = "${escapeTomlBasicString(codexModelCatalogPath.value)}"
 
 [model_providers.sub2api]
-name = "Sub2API ${label}"
+name = "${providerName}"
 base_url = "${baseUrl}"
 env_key = "SUB2API_API_KEY"
 wire_api = "responses"
