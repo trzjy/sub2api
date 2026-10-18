@@ -1175,15 +1175,11 @@ func (s *AntigravityGatewayService) updateAccountModelRateLimitInCache(ctx conte
 		return
 	}
 
-	// 更新账号对象的 Extra 字段
-	if account.Extra == nil {
-		account.Extra = make(map[string]any)
-	}
-
-	limits, _ := account.Extra["model_rate_limits"].(map[string]any)
+	// 更新账号对象的 Extra 字段（经并发安全边界 ExtraValue / MergeExtra）
+	v, _ := account.ExtraValue("model_rate_limits")
+	limits, _ := v.(map[string]any)
 	if limits == nil {
 		limits = make(map[string]any)
-		account.Extra["model_rate_limits"] = limits
 	}
 
 	limits[modelKey] = map[string]any{
@@ -1192,6 +1188,7 @@ func (s *AntigravityGatewayService) updateAccountModelRateLimitInCache(ctx conte
 	}
 
 	// 更新 Redis 快照
+	account.MergeExtra(map[string]any{"model_rate_limits": limits})
 	if err := s.schedulerSnapshot.UpdateAccountInCache(ctx, account); err != nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] cache_update_failed account=%d model=%s err=%v", account.ID, modelKey, err)
 	}

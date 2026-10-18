@@ -30,8 +30,8 @@ func (r memorySQLResult) RowsAffected() (int64, error) { return r.affected, nil 
 
 // captureSQLExecutor 捕获最近一次 Exec/Query 的 SQL 与参数，并返回可编程结果。
 type captureSQLExecutor struct {
-	lastQuery string
-	lastArgs  []any
+	lastQuery  string
+	lastArgs   []any
 	execResult sql.Result
 	execErr    error
 	rowsErr    error
@@ -53,7 +53,7 @@ func (c *captureSQLExecutor) QueryContext(_ context.Context, query string, args 
 	c.lastQuery = query
 	c.lastArgs = args
 	// 取号路径在单元测试中只验证错误分支（rowsErr），成功分支的真实 Rows
-	 // 扫描由 -tags integration 门禁覆盖（*sql.Rows 无法在内存中构造）。
+	// 扫描由 -tags integration 门禁覆盖（*sql.Rows 无法在内存中构造）。
 	if c.rowsErr != nil {
 		return nil, c.rowsErr
 	}
@@ -73,14 +73,16 @@ func TestWriteCodeBuddyCreditSnapshot_SQLShapeAndKeys(t *testing.T) {
 	accepted, err := repo.WriteCodeBuddyCreditSnapshot(context.Background(), 42, service.CodeBuddyCreditSnapshotWrite{
 		SuccessTime: now,
 		Version:     9,
-		Packages: []service.CodeBuddyCreditPackage{{
-			ID: "a", Name: "p", Unit: "credits",
+		UrgencyPackages: []service.CodeBuddyUrgencyPackage{{
 			Remaining: decimal.RequireFromString("10"), Total: decimal.RequireFromString("100"),
-			ExpiresAt: "2026-10-15T21:26:43Z", Status: 0,
+			ExpiresAt: "2026-10-15T21:26:43Z", Unit: "credits", Status: 0,
 		}},
-		UsedPercent: 90,
-		ResetAt:     now.Add(time.Hour),
-		ErrorMsg:    "",
+		TotalRemaining: "10",
+		TotalTotal:     "100",
+		HasExcluded:    false,
+		UsedPercent:    90,
+		ResetAt:        now.Add(time.Hour),
+		ErrorMsg:       "",
 	})
 	require.NoError(t, err)
 	require.True(t, accepted)
@@ -92,7 +94,10 @@ func TestWriteCodeBuddyCreditSnapshot_SQLShapeAndKeys(t *testing.T) {
 
 	// jsonb_build_object 只合并 B4 键，不触碰旧总量/updated_at 旧键。
 	for _, key := range []string{
-		service.CodeBuddyCreditPackagesKey,
+		service.CodeBuddyUrgencyPackagesKey,
+		service.CodeBuddyCreditTotalRemainingKey,
+		service.CodeBuddyCreditTotalTotalKey,
+		service.CodeBuddyCreditHasExcludedKey,
 		service.CodeBuddyCreditPackagesUpdatedAtKey,
 		service.CodeBuddyCreditResetAtKey,
 		service.CodeBuddyCreditUsedPercentKey,
@@ -117,16 +122,20 @@ func TestWriteCodeBuddyCreditSnapshot_SQLShapeAndKeys(t *testing.T) {
 	require.True(t, strings.Contains(exec.lastQuery, "-infinity"))
 	require.True(t, strings.Contains(exec.lastQuery, "GREATEST"))
 
-	// 参数顺序：$1=SuccessTime, $2=Version, $3=packages JSON, $4=ResetAt,
-	// $5=UsedPercent, $6=ErrorMsg, $7=accountID。
-	require.Len(t, exec.lastArgs, 7)
+	// 参数顺序：$1=SuccessTime, $2=Version, $3=urgencyPackages JSON, $4=ResetAt,
+	// $5=UsedPercent, $6=ErrorMsg, $7=accountID, $8=TotalRemaining, $9=TotalTotal,
+	// $10=HasExcluded。
+	require.Len(t, exec.lastArgs, 10)
 	require.Equal(t, now, exec.lastArgs[0])
 	require.Equal(t, int64(9), exec.lastArgs[1])
-	require.IsType(t, "", exec.lastArgs[2], "packages 必须以 JSON 字符串传参")
+	require.IsType(t, "", exec.lastArgs[2], "urgencyPackages 必须以 JSON 字符串传参")
 	require.Equal(t, now.Add(time.Hour), exec.lastArgs[3])
 	require.Equal(t, 90.0, exec.lastArgs[4])
 	require.Equal(t, "", exec.lastArgs[5], "无错误时 ErrorMsg 为空 → 删除旧错误键")
 	require.Equal(t, int64(42), exec.lastArgs[6])
+	require.Equal(t, "10", exec.lastArgs[7], "TotalRemaining 以十进制字符串传参")
+	require.Equal(t, "100", exec.lastArgs[8], "TotalTotal 以十进制字符串传参")
+	require.Equal(t, false, exec.lastArgs[9], "HasExcluded 以 bool 传参")
 }
 
 func TestWriteCodeBuddyCreditSnapshot_WithErrorKeepsErrorKey(t *testing.T) {
@@ -135,12 +144,15 @@ func TestWriteCodeBuddyCreditSnapshot_WithErrorKeepsErrorKey(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
 	_, err := repo.WriteCodeBuddyCreditSnapshot(context.Background(), 1, service.CodeBuddyCreditSnapshotWrite{
-		SuccessTime: now,
-		Version:     1,
-		Packages:    nil,
-		UsedPercent: 0,
-		ResetAt:     now,
-		ErrorMsg:    `[{"id":"a","reason":"unit_mismatch","raw":{"unit":"tokens"}}]`,
+		SuccessTime:     now,
+		Version:         1,
+		UrgencyPackages: nil,
+		TotalRemaining:  "",
+		TotalTotal:      "",
+		HasExcluded:     false,
+		UsedPercent:     0,
+		ResetAt:         now,
+		ErrorMsg:        `[{"id":"a","reason":"unit_mismatch","raw":{"unit":"tokens"}}]`,
 	})
 	require.NoError(t, err)
 
@@ -157,11 +169,14 @@ func TestWriteCodeBuddyCreditSnapshot_RowsAffectedZeroMeansRejected(t *testing.T
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
 	accepted, err := repo.WriteCodeBuddyCreditSnapshot(context.Background(), 1, service.CodeBuddyCreditSnapshotWrite{
-		SuccessTime: now,
-		Version:     1,
-		Packages:    nil,
-		UsedPercent: 0,
-		ResetAt:     now,
+		SuccessTime:     now,
+		Version:         1,
+		UrgencyPackages: nil,
+		TotalRemaining:  "",
+		TotalTotal:      "",
+		HasExcluded:     false,
+		UsedPercent:     0,
+		ResetAt:         now,
 	})
 	require.NoError(t, err)
 	require.False(t, accepted, "RowsAffected=0 = 条件更新被拒绝")
@@ -193,7 +208,7 @@ func TestWriteCodeBuddyCreditAttemptError_OnlyFailureKeys(t *testing.T) {
 	}
 	// 不得触碰成功快照/freshness/reset_at/used_percent 的**写入**。
 	for _, forbidden := range []string{
-		service.CodeBuddyCreditPackagesKey,
+		service.CodeBuddyUrgencyPackagesKey,
 		service.CodeBuddyCreditPackagesUpdatedAtKey,
 		service.CodeBuddyCreditResetAtKey,
 		service.CodeBuddyCreditUsedPercentKey,

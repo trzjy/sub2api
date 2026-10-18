@@ -189,10 +189,11 @@ func (s *OpenAIGatewayService) resolveCCFallbackTarget(account *Account) (apiKey
 //
 // 仅此 helper 一处实现，禁止在其他文件或本文件重复定义第二份逻辑。
 func (s *OpenAIGatewayService) injectAccountIdentitySystemMessage(account *Account, body []byte) []byte {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return body
 	}
-	prompt, ok := account.Extra["identity_prompt"].(string)
+	prompt, ok := accountsnap["identity_prompt"].(string)
 	if !ok || strings.TrimSpace(prompt) == "" {
 		return body
 	}

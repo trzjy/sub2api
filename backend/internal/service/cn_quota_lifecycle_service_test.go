@@ -245,12 +245,10 @@ func (r *quotaLifecycleFakeRepo) UpdateExtra(_ context.Context, id int64, update
 	if !ok {
 		return errors.New("account not found")
 	}
-	if a.Extra == nil {
-		a.Extra = map[string]any{}
-	}
-	for k, v := range updates {
-		a.Extra[k] = v
-	}
+	// 经 MergeExtra 走 account 自身 RWMutex 写边界，与生产读方 SnapshotExtra()
+	// 的 RLock 处于同一锁边界，消除 -race 下 concurrent map 读写竞态（派发单
+	// RACE-R2：写端原 a.Extra[k] = v 无锁直写 → 收进同一锁边界）。
+	a.MergeExtra(updates)
 	if raw, ok := updates[cnQuotaLifecycleExtraKey]; ok {
 		if m, ok := raw.(map[string]any); ok {
 			if due, ok := m["probe_due_at"].(string); ok {
@@ -329,17 +327,18 @@ func (r *quotaLifecycleFakeRepo) Mark403PausedWithRecovery(_ context.Context, ac
 		Owner:         http403RecoveryOwnerF3,
 		StateRevision: r.f3GlobalRev[accountID],
 	}
-	if a.Extra == nil {
-		a.Extra = map[string]any{}
-	}
-	a.Extra[http403RecoveryExtraKey] = map[string]any{
-		"until":          until.UTC().Format(time.RFC3339),
-		"generation":     generation,
-		"reason":         reason,
-		"owner":          http403RecoveryOwnerF3,
-		"state_revision": r.f3GlobalRev[accountID],
-	}
-	a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+	// 经 MergeExtra 走 account 自身 RWMutex 写边界，与 SnapshotExtra 的 RLock
+	// 同一锁边界（派发单 RACE-R2：同形态夹具写收口）。
+	a.MergeExtra(map[string]any{
+		http403RecoveryExtraKey: map[string]any{
+			"until":          until.UTC().Format(time.RFC3339),
+			"generation":     generation,
+			"reason":         reason,
+			"owner":          http403RecoveryOwnerF3,
+			"state_revision": r.f3GlobalRev[accountID],
+		},
+		schedStateRevisionExtraKey: r.f3GlobalRev[accountID],
+	})
 	return nil
 }
 
@@ -361,8 +360,11 @@ func (r *quotaLifecycleFakeRepo) ClearHTTP403RecoveryIfOwned(_ context.Context, 
 		a.Status = StatusActive
 		a.ErrorMessage = ""
 		a.Schedulable = true
-		delete(a.Extra, http403RecoveryExtraKey)
-		a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+		// 经 MutateExtra 走 account 自身 RWMutex 写边界（删键+置键原子，同锁边界）。
+		a.MutateExtra(func(extra map[string]any) {
+			delete(extra, http403RecoveryExtraKey)
+			extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+		})
 	}
 	return true, nil
 }
@@ -395,8 +397,11 @@ func (r *quotaLifecycleFakeRepo) TransitionHTTP403RecoveryTo(_ context.Context, 
 		} else if strings.HasPrefix(a.TempUnschedulableReason, http403RecoveryTempUnschedulableReasonPrefix) {
 			a.TempUnschedulableReason = ""
 		}
-		delete(a.Extra, http403RecoveryExtraKey)
-		a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+		// 经 MutateExtra 走 account 自身 RWMutex 写边界（同锁边界收口）。
+		a.MutateExtra(func(extra map[string]any) {
+			delete(extra, http403RecoveryExtraKey)
+			extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+		})
 	}
 	return true, nil
 }
@@ -455,17 +460,17 @@ func (r *quotaLifecycleFakeRepo) UpdateHTTP403RecoveryUntil(_ context.Context, a
 	rec.Reason = reason
 	rec.StateRevision = r.f3GlobalRev[accountID]
 	if a := r.accounts[accountID]; a != nil {
-		if a.Extra == nil {
-			a.Extra = map[string]any{}
-		}
-		a.Extra[http403RecoveryExtraKey] = map[string]any{
-			"until":          rec.Until,
-			"generation":     rec.Generation,
-			"reason":         rec.Reason,
-			"owner":          rec.Owner,
-			"state_revision": rec.StateRevision,
-		}
-		a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+		// 经 MergeExtra 走 account 自身 RWMutex 写边界（同锁边界收口）。
+		a.MergeExtra(map[string]any{
+			http403RecoveryExtraKey: map[string]any{
+				"until":          rec.Until,
+				"generation":     rec.Generation,
+				"reason":         rec.Reason,
+				"owner":          rec.Owner,
+				"state_revision": rec.StateRevision,
+			},
+			schedStateRevisionExtraKey: r.f3GlobalRev[accountID],
+		})
 	}
 	return true, nil
 }
@@ -480,11 +485,11 @@ func (r *quotaLifecycleFakeRepo) RemoveHTTP403RecoveryRecord(_ context.Context, 
 	delete(r.f3Records, accountID)
 	r.f3GlobalRev[accountID]++
 	if a := r.accounts[accountID]; a != nil {
-		if a.Extra == nil {
-			a.Extra = map[string]any{}
-		}
-		delete(a.Extra, http403RecoveryExtraKey)
-		a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+		// 经 MutateExtra 走 account 自身 RWMutex 写边界（删键+置键原子，同锁边界收口）。
+		a.MutateExtra(func(extra map[string]any) {
+			delete(extra, http403RecoveryExtraKey)
+			extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+		})
 	}
 	return true, nil
 }

@@ -154,15 +154,16 @@ func (r *accountRepository) DisableOpenCodeGoUsageAutoRefresh(ctx context.Contex
 }
 
 func openCodeGoUsageManagedPayload(account *service.Account) map[string]any {
+	accountsnap := account.SnapshotExtra()
 	payload := make(map[string]any, 2)
-	if account == nil || account.Extra == nil {
+	if account == nil || accountsnap == nil {
 		return payload
 	}
 	for _, key := range []string{
 		service.OpenCodeGoUsageAutoRefreshExtraKey,
 		service.OpenCodeGoUsageSnapshotExtraKey,
 	} {
-		if value, ok := account.Extra[key]; ok {
+		if value, ok := accountsnap[key]; ok {
 			payload[key] = value
 		}
 	}

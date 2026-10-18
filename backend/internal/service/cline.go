@@ -73,11 +73,12 @@ func (a *Account) clineAccountAPISupported() bool {
 
 // clinePassSubscribed 报告最近一次用量探测是否显示账号订阅了 ClinePass（有窗口快照）。
 func (a *Account) clinePassSubscribed() bool {
-	if a == nil || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
 		return false
 	}
 	for _, suffix := range []string{cnExtraSuffix5hUsed, cnExtraSuffixWeeklyUsed, cnExtraSuffixMonthlyUsed} {
-		if value, ok := a.Extra[cnExtraKey(PlatformCline, suffix)]; ok && value != nil {
+		if value, ok := asnap[cnExtraKey(PlatformCline, suffix)]; ok && value != nil {
 			return true
 		}
 	}

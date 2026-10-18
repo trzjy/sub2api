@@ -14,10 +14,11 @@ import (
 // 双向补齐，不改 CC↔Responses / Anthropic / Grok 桥。
 
 func isOllamaCloudRawChatCompletionsAccount(account *Account) bool {
+	accountsnap := account.SnapshotExtra()
 	if account == nil || account.Platform != PlatformOpenAI || account.Type != AccountTypeAPIKey {
 		return false
 	}
-	mode, _ := account.Extra[openai_compat.ExtraKeyResponsesMode].(string)
+	mode, _ := accountsnap[openai_compat.ExtraKeyResponsesMode].(string)
 	if openai_compat.NormalizeResponsesSupportMode(mode) != openai_compat.ResponsesSupportModeForceChatCompletions {
 		return false
 	}
@@ -32,7 +33,8 @@ func isOllamaCloudRawChatCompletionsAccount(account *Account) bool {
 }
 
 func accountHasOllamaCloudUsageExtra(account *Account) bool {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return false
 	}
 	for _, key := range []string{
@@ -40,7 +42,7 @@ func accountHasOllamaCloudUsageExtra(account *Account) bool {
 		OllamaCloudUsageAutoRefreshExtraKey,
 		OllamaCloudUsageSnapshotExtraKey,
 	} {
-		if _, ok := account.Extra[key]; ok {
+		if _, ok := accountsnap[key]; ok {
 			return true
 		}
 	}

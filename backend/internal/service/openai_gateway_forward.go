@@ -1476,6 +1476,7 @@ func (a *openAIFirstOutputHeaderGuardAdapter) close() {
 }
 
 func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
+	accountsnap := account.SnapshotExtra()
 	if account == nil || account.Type != AccountTypeAPIKey {
 		return false
 	}
@@ -1502,7 +1503,7 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 			return false
 		}
 	}
-	return !openai_compat.ShouldUseResponsesAPI(account.Extra)
+	return !openai_compat.ShouldUseResponsesAPI(accountsnap)
 }
 
 // normalizeWebRequestBodyForAdapter 把 OpenAI Responses 形状（顶层 "input"）的请求体

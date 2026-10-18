@@ -19,6 +19,7 @@ func NewGrokQuotaFetcher() *GrokQuotaFetcher {
 }
 
 func (f *GrokQuotaFetcher) BuildUsageInfo(account *Account) *UsageInfo {
+	accountsnap := account.SnapshotExtra()
 	now := time.Now()
 	usage := &UsageInfo{
 		Source:             "passive",
@@ -31,8 +32,8 @@ func (f *GrokQuotaFetcher) BuildUsageInfo(account *Account) *UsageInfo {
 		return usage
 	}
 
-	billing, _ := grokBillingSnapshotFromExtra(account.Extra)
-	snapshot, err := grokQuotaSnapshotFromExtra(account.Extra)
+	billing, _ := grokBillingSnapshotFromExtra(accountsnap)
+	snapshot, err := grokQuotaSnapshotFromExtra(accountsnap)
 	activeProbeClearsForbidden := newerSuccessfulGrokActiveProbeClearsBillingForbidden(billing, snapshot)
 	if billing != nil {
 		usage.GrokBilling = billing
@@ -250,6 +251,7 @@ func grokBillingSnapshotFromExtra(extra map[string]any) (*xai.BillingSummary, er
 }
 
 func stampGrokQuotaSnapshotForPlan(account *Account, snapshot *xai.QuotaSnapshot, model string) {
+	accountsnap := account.SnapshotExtra()
 	if snapshot == nil {
 		return
 	}
@@ -261,7 +263,7 @@ func stampGrokQuotaSnapshotForPlan(account *Account, snapshot *xai.QuotaSnapshot
 	}
 	var prev *xai.QuotaSnapshot
 	if account != nil {
-		prev, _ = grokQuotaSnapshotFromExtra(account.Extra)
+		prev, _ = grokQuotaSnapshotFromExtra(accountsnap)
 	}
 	snapshot.ApplyGrok45ResponsesPlanSignal(prev)
 }

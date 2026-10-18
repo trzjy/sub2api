@@ -509,8 +509,9 @@ func (s *OpenCodeGoUsageService) ResolveOpenCodeGoUsageAccounts(ctx context.Cont
 	resolvedSources := make(map[string]*Account, len(sources))
 	for fingerprint, source := range sources {
 		clone := *source
-		clone.Extra = make(map[string]any, len(source.Extra))
-		maps.Copy(clone.Extra, source.Extra)
+		srcSnap := source.SnapshotExtra()
+		clone.Extra = make(map[string]any, len(srcSnap))
+		maps.Copy(clone.Extra, srcSnap)
 		resolvedSources[fingerprint] = &clone
 	}
 	for index := range siblings {
@@ -520,10 +521,12 @@ func (s *OpenCodeGoUsageService) ResolveOpenCodeGoUsageAccounts(ctx context.Cont
 		if !valid || source == nil {
 			continue
 		}
-		candidateSnapshot := decodeOpenCodeGoUsageSnapshot(candidate.Extra)
-		currentSnapshot := decodeOpenCodeGoUsageSnapshot(source.Extra)
+		candidateSnapshot := decodeOpenCodeGoUsageSnapshot(candidate.SnapshotExtra())
+		currentSnapshot := decodeOpenCodeGoUsageSnapshot(source.SnapshotExtra())
 		if candidateSnapshot != nil && (currentSnapshot == nil || candidateSnapshot.LastAttemptAt.After(currentSnapshot.LastAttemptAt)) {
-			source.Extra[OpenCodeGoUsageSnapshotExtraKey] = candidate.Extra[OpenCodeGoUsageSnapshotExtraKey]
+			if val, ok := candidate.ExtraValue(OpenCodeGoUsageSnapshotExtraKey); ok {
+				source.MergeExtra(map[string]any{OpenCodeGoUsageSnapshotExtraKey: val})
+			}
 		}
 	}
 	for _, account := range eligible {
@@ -537,20 +540,23 @@ func applyOpenCodeGoUsageManagedExtra(target, source *Account) {
 	if target == nil {
 		return
 	}
-	if target.Extra == nil {
-		target.Extra = make(map[string]any)
-	}
-	for _, key := range []string{
+	// 读源账号 Extra 走快照（锁），写目标账号 Extra 走 MergeExtra/DeleteExtra（锁）。
+	srcSnap := source.SnapshotExtra()
+	keys := []string{
 		OpenCodeGoUsageAutoRefreshExtraKey,
 		OpenCodeGoUsageSnapshotExtraKey,
-	} {
-		delete(target.Extra, key)
-		if source != nil && source.Extra != nil {
-			if value, ok := source.Extra[key]; ok {
-				target.Extra[key] = value
-			}
+	}
+	toSet := make(map[string]any)
+	toDelete := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if v, ok := srcSnap[key]; ok {
+			toSet[key] = v
+		} else {
+			toDelete = append(toDelete, key)
 		}
 	}
+	target.MergeExtra(toSet)
+	target.DeleteExtra(toDelete...)
 }
 
 func (s *OpenCodeGoUsageService) SetAutoRefresh(ctx context.Context, accountID int64, enabled bool) (*OpenCodeGoUsageState, error) {
@@ -629,7 +635,7 @@ func (s *OpenCodeGoUsageService) RunDue(ctx context.Context) error {
 			continue
 		}
 		seenGroups[fingerprint] = struct{}{}
-		snapshot := decodeOpenCodeGoUsageSnapshot(account.Extra)
+		snapshot := decodeOpenCodeGoUsageSnapshot(account.SnapshotExtra())
 		// ListDue stamps Account.LastUsedAt with the api_key group MAX(last_used_at).
 		if !openCodeGoUsageIsAutoRefreshDue(snapshot, account.LastUsedAt, now, debounce, maxWait) {
 			continue
@@ -691,7 +697,7 @@ func (s *OpenCodeGoUsageService) refreshAccount(ctx context.Context, accountID i
 			return nil, err
 		}
 		if !requireEnabled {
-			if snapshot := decodeOpenCodeGoUsageSnapshot(account.Extra); snapshot != nil && !snapshot.LastAttemptAt.IsZero() {
+			if snapshot := decodeOpenCodeGoUsageSnapshot(account.SnapshotExtra()); snapshot != nil && !snapshot.LastAttemptAt.IsZero() {
 				retryAt := snapshot.LastAttemptAt.Add(opencodeGoUsageManualRefreshInterval)
 				if now := s.currentTime(); now.Before(retryAt) {
 					remaining := retryAt.Sub(now)
@@ -720,7 +726,7 @@ func (s *OpenCodeGoUsageService) refreshAccount(ctx context.Context, accountID i
 					groupLastUsed = maxOpenCodeGoUsageGroupLastUsed(siblings)
 				}
 			}
-			if !openCodeGoUsageIsAutoRefreshDue(decodeOpenCodeGoUsageSnapshot(account.Extra), groupLastUsed, s.currentTime(), debounce, maxWait) {
+			if !openCodeGoUsageIsAutoRefreshDue(decodeOpenCodeGoUsageSnapshot(account.SnapshotExtra()), groupLastUsed, s.currentTime(), debounce, maxWait) {
 				return nil, nil
 			}
 		}
@@ -819,7 +825,8 @@ func (s *OpenCodeGoUsageService) persistFailure(
 	retryAfterDuration time.Duration,
 	unauthorized bool,
 ) (*OpenCodeGoUsageSnapshot, error) {
-	previous := decodeOpenCodeGoUsageSnapshot(account.Extra)
+	accountsnap := account.SnapshotExtra()
+	previous := decodeOpenCodeGoUsageSnapshot(accountsnap)
 	failureCount := 1
 	if previous != nil {
 		failureCount = previous.FailureCount + 1
@@ -855,6 +862,7 @@ func (s *OpenCodeGoUsageService) updateSnapshot(ctx context.Context, account *Ac
 }
 
 func OpenCodeGoUsageStateFromAccount(account *Account) *OpenCodeGoUsageState {
+	accountsnap := account.SnapshotExtra()
 	state := &OpenCodeGoUsageState{}
 	if account == nil {
 		return state
@@ -865,7 +873,7 @@ func OpenCodeGoUsageStateFromAccount(account *Account) *OpenCodeGoUsageState {
 		return state
 	}
 	state.AutoRefreshEnabled = openCodeGoUsageAutoRefreshEnabled(account)
-	state.Snapshot = decodeOpenCodeGoUsageSnapshot(account.Extra)
+	state.Snapshot = decodeOpenCodeGoUsageSnapshot(accountsnap)
 	return state
 }
 
@@ -969,10 +977,11 @@ func isExactOpenCodeGoUsageURL(parsed *url.URL) bool {
 }
 
 func openCodeGoUsageAutoRefreshEnabled(account *Account) bool {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return false
 	}
-	enabled, ok := account.Extra[OpenCodeGoUsageAutoRefreshExtraKey].(bool)
+	enabled, ok := accountsnap[OpenCodeGoUsageAutoRefreshExtraKey].(bool)
 	return ok && enabled
 }
 

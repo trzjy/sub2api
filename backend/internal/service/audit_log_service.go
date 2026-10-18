@@ -118,6 +118,8 @@ func (s *AuditLogService) ClearAll(ctx context.Context, trace *AuditLog) (int64,
 		if trace.Extra == nil {
 			trace.Extra = map[string]any{}
 		}
+		// trace 为 *AuditLog（审计留痕实体，非 service.Account），其 Extra 为本方法内构造的
+		// 局部 map，不存在跨 goroutine 并发读写，属正当保留，不套用 MergeExtra。
 		trace.Extra["deleted_rows"] = deleted
 		if err := s.repo.Insert(ctx, trace); err != nil {
 			// 留痕失败必须显式暴露：清空已发生，但审计链断裂。

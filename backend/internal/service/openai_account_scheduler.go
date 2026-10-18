@@ -3651,10 +3651,11 @@ func (o openAILegacyUpstreamRateOrder) compare(a, b *Account) int {
 }
 
 func openAIFreshUpstreamBillingRate(account *Account, now time.Time) (float64, bool) {
+	accountsnap := account.SnapshotExtra()
 	if !isUpstreamBillingProbeAccount(account) {
 		return 0, false
 	}
-	snapshot := decodeUpstreamBillingProbeSnapshot(account.Extra)
+	snapshot := decodeUpstreamBillingProbeSnapshot(accountsnap)
 	if snapshot == nil || (snapshot.Status != UpstreamBillingProbeStatusOK && snapshot.Status != UpstreamBillingProbeStatusFailed) ||
 		snapshot.ReceivedAt == nil || snapshot.ReceivedAt.IsZero() {
 		return 0, false
@@ -3674,10 +3675,11 @@ func openAIFreshUpstreamBillingRate(account *Account, now time.Time) (float64, b
 }
 
 func openAIQuotaHeadroomFactor(account *Account, now time.Time) float64 {
-	if account == nil || len(account.Extra) == 0 || openAIQuotaHeadroomSnapshotStale(account.Extra, now) {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || len(accountsnap) == 0 || openAIQuotaHeadroomSnapshotStale(accountsnap, now) {
 		return openAIQuotaHeadroomNeutralFactor
 	}
-	window5h, window7d := openAICanonicalQuotaWindows(account.Extra, now)
+	window5h, window7d := openAICanonicalQuotaWindows(accountsnap, now)
 	if !window7d.hasUsed || window7d.reset {
 		return openAIQuotaHeadroomNeutralFactor
 	}
@@ -3748,10 +3750,11 @@ func openAICanonicalQuotaWindows(extra map[string]any, now time.Time) (window5h,
 }
 
 func openAISchedulingResetWindowEnd(account *Account, now time.Time) (time.Time, bool) {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return time.Time{}, false
 	}
-	if end, ok := openAICodexWindowResetAt(account.Extra, "5h"); ok && now.Before(end) {
+	if end, ok := openAICodexWindowResetAt(accountsnap, "5h"); ok && now.Before(end) {
 		return end, true
 	}
 	if end := account.SessionWindowEnd; end != nil && now.Before(*end) {

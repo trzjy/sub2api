@@ -302,19 +302,19 @@ type volcanoPlanScanResult struct {
 
 // VolcanoPlanSyncResult 是火山订阅号同步接口对外的分类结果与差异（预览/应用共用）。
 type VolcanoPlanSyncResult struct {
-	Kind        string                 `json:"kind"`
-	Confirmed   []string               `json:"confirmed"`    // 本账号真实端点确认可用的模型
-	Unavailable []string               `json:"unavailable"`  // 明确不可用（提示，不并入）
-	Unverified  []string               `json:"unverified"`   // 未能确认（提示，不并入）
-	WillAdd     []string               `json:"will_add"`     // 应用后将新增到 model_mapping
-	WillRemove  []string               `json:"will_remove"`  // 完全确认替换时将下架（官方下线收敛）
+	Kind        string   `json:"kind"`
+	Confirmed   []string `json:"confirmed"`   // 本账号真实端点确认可用的模型
+	Unavailable []string `json:"unavailable"` // 明确不可用（提示，不并入）
+	Unverified  []string `json:"unverified"`  // 未能确认（提示，不并入）
+	WillAdd     []string `json:"will_add"`    // 应用后将新增到 model_mapping
+	WillRemove  []string `json:"will_remove"` // 完全确认替换时将下架（官方下线收敛）
 	// PlatformFiltered 是探活确认可用、但因与账号平台不符被平台过滤拦截、不写入
 	// model_mapping 的模型（如 deepseek 平台账号遇到套餐里的 glm/kimi/doubao 模型）。
 	// other/未知平台不过滤时为空。
 	PlatformFiltered []string               `json:"platform_filtered,omitempty"`
-	FullConfirm bool                   `json:"full_confirm"` // 完全确认：托管集按候选全集替换；部分确认只取本轮探活确认集
-	Applied     bool                   `json:"applied"`      // 本次是否已落库
-	Evidence    VolcanoPlanDocEvidence `json:"evidence"`
+	FullConfirm      bool                   `json:"full_confirm"` // 完全确认：托管集按候选全集替换；部分确认只取本轮探活确认集
+	Applied          bool                   `json:"applied"`      // 本次是否已落库
+	Evidence         VolcanoPlanDocEvidence `json:"evidence"`
 }
 
 // VolcanoPlanManagedModelExtraKey 是账号 extra 中火山订阅号系统托管模型快照的 key。
@@ -690,10 +690,7 @@ func (s *AccountTestService) persistVolcanoManagedSnapshot(ctx context.Context, 
 	if s.accountRepo == nil {
 		return nil
 	}
-	if account.Extra == nil {
-		account.Extra = make(map[string]any)
-	}
-	account.Extra[VolcanoPlanManagedModelExtraKey] = snap
+	account.MergeExtra(map[string]any{VolcanoPlanManagedModelExtraKey: snap})
 	return s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
 		VolcanoPlanManagedModelExtraKey: snap,
 	})
@@ -745,10 +742,11 @@ func rebuildVolcanoModelMapping(account *Account, oldIdentityKeys map[string]str
 
 // GetVolcanoPlanManagedModels 读取账号 extra 中的火山订阅号系统托管模型快照。
 func (a *Account) GetVolcanoPlanManagedModels() *VolcanoPlanManagedModels {
-	if a == nil || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
 		return nil
 	}
-	raw, ok := a.Extra[VolcanoPlanManagedModelExtraKey]
+	raw, ok := asnap[VolcanoPlanManagedModelExtraKey]
 	if !ok || raw == nil {
 		return nil
 	}

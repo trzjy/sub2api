@@ -166,13 +166,14 @@ func clinePassWindow(body []byte) string {
 
 // clinePassLimitCooldown 冷却到用量快照中该窗口的重置时间；没有可用快照时按窗口估计。
 func clinePassLimitCooldown(account *Account, window string, now time.Time) time.Duration {
-	if account != nil && account.Extra != nil {
+	accountsnap := account.SnapshotExtra()
+	if account != nil && accountsnap != nil {
 		resetKey := map[string]string{
 			"5h":      cnExtraSuffix5hReset,
 			"weekly":  cnExtraSuffixWeeklyReset,
 			"monthly": cnExtraSuffixMonthlyReset,
 		}[window]
-		if resetAt := parseSchedulingResetAt(account.Extra[cnExtraKey(PlatformCline, resetKey)]); resetAt != nil {
+		if resetAt := parseSchedulingResetAt(accountsnap[cnExtraKey(PlatformCline, resetKey)]); resetAt != nil {
 			if wait := resetAt.Sub(now); wait > 0 && wait <= clinePassMaxCooldown {
 				return wait
 			}

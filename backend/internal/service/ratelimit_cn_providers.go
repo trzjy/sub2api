@@ -230,7 +230,8 @@ func cnBalanceCheckCooldown(cfg *config.Config) time.Duration {
 // 经 resolveCNQuotaProvider 解析（兼容 payg 火山号 platform 误存的场景）。其余账号
 // 无滚动窗口快照，返回 nil。
 func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
-	if account == nil || len(account.Extra) == 0 {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || len(accountsnap) == 0 {
 		return nil
 	}
 	var provider string
@@ -239,7 +240,7 @@ func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
 		provider = account.Platform
 	case account.IsCommandCode():
 		// 有充值积分时上游跳过窗口检查，429 与窗口无关。
-		if !commandCodeWindowsBinding(account.Extra) {
+		if !commandCodeWindowsBinding(accountsnap) {
 			return nil
 		}
 		provider = account.Platform
@@ -261,7 +262,7 @@ func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
 	}
 	var earliest *time.Time
 	for _, suffix := range suffixes {
-		t := parseSchedulingResetAt(account.Extra[cnExtraKey(provider, suffix)])
+		t := parseSchedulingResetAt(accountsnap[cnExtraKey(provider, suffix)])
 		if t == nil || !t.After(now) {
 			continue
 		}
@@ -375,7 +376,7 @@ func reconcileCNProviderRateLimits(ctx context.Context, repo AccountRepository, 
 			if provider == "" {
 				continue
 			}
-			if cnQuotaSnapshotAnyWindowExhausted(account.Extra, provider) {
+			if cnQuotaSnapshotAnyWindowExhausted(account.SnapshotExtra(), provider) {
 				continue
 			}
 			if err := repo.ClearRateLimit(ctx, account.ID); err != nil {
@@ -419,6 +420,7 @@ func (s *RateLimitService) applyCNProviderReactive429(
 	account *Account,
 	responseBody []byte,
 ) bool {
+	accountsnap := account.SnapshotExtra()
 	// 0) OpenCode Go：429 先冷却到配额快照最早的未来窗口重置点；无快照时解析响应体
 	// 中的重置时间（秒级 unix）；两者皆无则不处理，交回默认 429 逻辑。
 	if account.IsOpenCodeGo() {
@@ -489,7 +491,7 @@ func (s *RateLimitService) applyCNProviderReactive429(
 	// 否则 payg 火山号的 429 读不到 volcano_* 快照。
 	provider := resolveCNQuotaProvider(account)
 	if provider != "" {
-		if reset := cnQuotaSnapshotEarliestExhaustedReset(account.Extra, provider, time.Now()); reset != nil {
+		if reset := cnQuotaSnapshotEarliestExhaustedReset(accountsnap, provider, time.Now()); reset != nil {
 			s.notifyAccountSchedulingBlocked(account, *reset, "429")
 			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *reset); err != nil {
 				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)

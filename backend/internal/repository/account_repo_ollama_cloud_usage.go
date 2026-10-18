@@ -145,8 +145,9 @@ func (r *accountRepository) DisableOllamaCloudUsageAutoRefresh(ctx context.Conte
 }
 
 func ollamaCloudUsageManagedPayload(account *service.Account) map[string]any {
+	accountsnap := account.SnapshotExtra()
 	payload := make(map[string]any, 3)
-	if account == nil || account.Extra == nil {
+	if account == nil || accountsnap == nil {
 		return payload
 	}
 	for _, key := range []string{
@@ -154,7 +155,7 @@ func ollamaCloudUsageManagedPayload(account *service.Account) map[string]any {
 		service.OllamaCloudUsageAutoRefreshExtraKey,
 		service.OllamaCloudUsageSnapshotExtraKey,
 	} {
-		if value, ok := account.Extra[key]; ok {
+		if value, ok := accountsnap[key]; ok {
 			payload[key] = value
 		}
 	}
@@ -162,10 +163,11 @@ func ollamaCloudUsageManagedPayload(account *service.Account) map[string]any {
 }
 
 func ollamaCloudUsageAccountHasSession(account *service.Account) bool {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return false
 	}
-	value, ok := account.Extra[service.OllamaCloudUsageSessionExtraKey].(string)
+	value, ok := accountsnap[service.OllamaCloudUsageSessionExtraKey].(string)
 	return ok && value != ""
 }
 
@@ -343,9 +345,10 @@ func lockOllamaCloudUsageGroup(
 }
 
 func canonicalAccountExtraJSON(account *service.Account, key string) (string, error) {
+	accountsnap := account.SnapshotExtra()
 	var value any
-	if account != nil && account.Extra != nil {
-		value = account.Extra[key]
+	if account != nil && accountsnap != nil {
+		value = accountsnap[key]
 	}
 	raw, err := json.Marshal(value)
 	if err != nil {

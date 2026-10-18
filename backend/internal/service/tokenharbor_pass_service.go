@@ -329,10 +329,11 @@ func (s *TokenHarborPassService) PersistSnapshot(ctx context.Context, accountID 
 
 // TokenHarborPassSnapshotFromExtra 从账号 Extra 读回订阅快照（JSON 兼容任意存法）。
 func TokenHarborPassSnapshotFromExtra(account *Account) (*TokenHarborPassSnapshot, bool) {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return nil, false
 	}
-	raw, ok := account.Extra[TokenHarborPassSnapshotExtraKey]
+	raw, ok := accountsnap[TokenHarborPassSnapshotExtraKey]
 	if !ok || raw == nil {
 		return nil, false
 	}
@@ -358,10 +359,11 @@ func (s *TokenHarborPassService) PersistUsageSnapshot(ctx context.Context, accou
 
 // TokenHarborUsageSnapshotFromExtra 从账号 Extra 读回用量窗口快照。
 func TokenHarborUsageSnapshotFromExtra(account *Account) (*TokenHarborUsageSnapshot, bool) {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return nil, false
 	}
-	raw, ok := account.Extra[TokenHarborUsageSnapshotExtraKey]
+	raw, ok := accountsnap[TokenHarborUsageSnapshotExtraKey]
 	if !ok || raw == nil {
 		return nil, false
 	}
@@ -378,10 +380,11 @@ func TokenHarborUsageSnapshotFromExtra(account *Account) (*TokenHarborUsageSnaps
 
 // TokenHarborWalletSnapshotFromExtra 从账号 Extra 读回钱包余额快照（JSON 兼容任意存法）。
 func TokenHarborWalletSnapshotFromExtra(account *Account) (*TokenHarborWalletSnapshot, bool) {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return nil, false
 	}
-	raw, ok := account.Extra[TokenHarborWalletSnapshotExtraKey]
+	raw, ok := accountsnap[TokenHarborWalletSnapshotExtraKey]
 	if !ok || raw == nil {
 		return nil, false
 	}
@@ -740,18 +743,19 @@ func (s *TokenHarborPassService) noteTokenHarborProbeSuccess(ctx context.Context
 // tokenHarborProbeBackoffFromExtra 从账号 Extra 读回生效中的退避（until > now
 // 才算"已有"；缺失/null/过期/形态不符统一视为无退避）。
 func tokenHarborProbeBackoffFromExtra(account *Account, now time.Time) (tokenHarborProbeBackoff, bool) {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return tokenHarborProbeBackoff{}, false
 	}
-	untilUnix, ok := tokenHarborExtraInt64(account.Extra[TokenHarborProbeBackoffUntilExtraKey])
+	untilUnix, ok := tokenHarborExtraInt64(accountsnap[TokenHarborProbeBackoffUntilExtraKey])
 	if !ok || untilUnix <= now.Unix() {
 		return tokenHarborProbeBackoff{}, false
 	}
 	backoff := tokenHarborProbeBackoff{until: time.Unix(untilUnix, 0)}
-	if level, ok := tokenHarborExtraInt64(account.Extra[TokenHarborProbeBackoffLevelExtraKey]); ok {
+	if level, ok := tokenHarborExtraInt64(accountsnap[TokenHarborProbeBackoffLevelExtraKey]); ok {
 		backoff.level = int(level)
 	}
-	if reason, ok := account.Extra[TokenHarborProbeBackoffReasonExtraKey].(string); ok {
+	if reason, ok := accountsnap[TokenHarborProbeBackoffReasonExtraKey].(string); ok {
 		backoff.reason = reason
 	}
 	return backoff, true
@@ -1070,8 +1074,8 @@ func parseTokenHarborPassPage(text string, fetchedAt time.Time) (TokenHarborPass
 // （字段名与官方 API 逐字一致，冻结；D-QLM-006）。顶层 reset_at / plan_used_pct /
 // plan_exhausted / used_pct / exhausted，嵌套 plan.window_days。
 type tokenHarborFreeTierResponse struct {
-	ResetAt        string `json:"reset_at"`
-	Plan           struct {
+	ResetAt string `json:"reset_at"`
+	Plan    struct {
 		WindowDays int `json:"window_days"`
 	} `json:"plan"`
 	PlanUsedPct   float64 `json:"plan_used_pct"`

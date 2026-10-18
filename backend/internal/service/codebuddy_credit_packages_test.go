@@ -79,16 +79,25 @@ func TestParseCodeBuddyCreditPackages_ContractAndDerivation(t *testing.T) {
 		require.IsType(t, "", item["total"], "total 必须以字符串承载以避免精度损失")
 	}
 
-	// Status=3（耗尽/过期）条目保留在存储中，但不参与 used_percent 分子/分母。
+	// 整改②：Status=3（耗尽/过期）包纳入 used_percent 与 totals 的同一参与集合
+	// （参与性谓词 codeBuddyCreditParticipatesInPercent 接受 Status∈{0,3}），
+	// 不再被稀释为低用量。
 	exhausted := packages[0]
 	require.Equal(t, int64(codebuddyCreditPackageStatusExhausted), exhausted.Status)
 	require.Equal(t, "3000", exhausted.Total.String())
 
-	// 仅 Status=0 参与：(1000+100 − (207.49000063+100)) / (1000+100) × 100。
+	// ② 参与集合 = Status∈{0,3} 全部三包：Σtotal = 3000+1000+100 = 4100，
+	// Σremaining = 0 + 207.49000063 + 100 = 307.49000063；
+	// used = (4100 − 307.49000063)/4100 × 100 = 92.500243887。
 	usedPercent, ok := DeriveCodeBuddyCreditUsedPercent(packages)
 	require.True(t, ok)
-	require.InDelta(t, 72.0463635790909, usedPercent, 1e-6,
-		"Status=3 的 total=3000 不得稀释分母")
+	require.InDelta(t, 92.500243887, usedPercent, 1e-6,
+		"整改②：Status=3 的 total=3000 须纳入分母（耗尽不再被稀释）")
+
+	// 整改②：totals 同一参与集合（含 Status=3），十进制字符串精确求和。
+	totalRemaining, totalTotal := deriveTotalsFromPackages(packages)
+	require.Equal(t, "307.49000063", totalRemaining, "Σremaining 含 Status=3 包")
+	require.Equal(t, "4100", totalTotal, "Σtotal 含 Status=3 包")
 
 	// Asia/Shanghai 字面量 → UTC RFC3339。
 	require.Equal(t, "2026-10-15T21:26:43Z", packages[1].ExpiresAt)
@@ -195,6 +204,31 @@ func TestParseCodeBuddyCreditPackages_MissingOrInvalidExpiryKept(t *testing.T) {
 		require.True(t, IsValidCodeBuddyCreditPackage(packages[0]),
 			"基础谓词不含时间条件，缺失到期时间仍参与 used_percent")
 	}
+}
+
+// TestParseCodeBuddyCreditPackages_UnknownStatusSetsHasExcluded 验证②排除项：
+// 未知 Status（非 0 非 3）分包被整包剔除——不计入 used_percent/totals（parse 不入集合），
+// 且其 reason=unknown_status → codeBuddyCreditHasExcludedFromErrors 返回 true（可比性标注）。
+// 异单位（unit_mismatch）条目同样使 has_excluded=true。
+func TestParseCodeBuddyCreditPackages_UnknownStatusSetsHasExcluded(t *testing.T) {
+	body := codeBuddyCreditPackagesBody(
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":7,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
+	packages, errEntries, envelopeErr := parseCodeBuddyCreditPackages(body, "")
+	require.False(t, envelopeErr)
+	require.Empty(t, packages, "未知 status 分包不计入参与集合（不计入 used_percent/totals）")
+	require.Len(t, errEntries, 1)
+	require.Equal(t, "unknown_status", errEntries[0].Reason)
+	require.True(t, codeBuddyCreditHasExcludedFromErrors(errEntries),
+		"未知 status 条目 → has_excluded=true（可比性标注）")
+
+	// 合法包 + 异单位包混合：仅合法包进集合，异单位条目 → has_excluded=true。
+	mixed := codeBuddyCreditPackagesBody(
+		`{"AccountId":"a-2","PackageName":"ok","CapacityUnit":"credits","Status":0,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"},` +
+			`{"AccountId":"a-3","PackageName":"bad","CapacityUnit":"tokens","Status":0,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
+	pkgs2, errs2, _ := parseCodeBuddyCreditPackages(mixed, "")
+	require.Len(t, pkgs2, 1, "仅合法分包进集合，异单位被剔除")
+	require.True(t, codeBuddyCreditHasExcludedFromErrors(errs2),
+		"异单位条目 → has_excluded=true（可比性标注）")
 }
 
 // TestIsValidCodeBuddyCreditPackage_ExcludesExhausted 基础谓词：字段有效 + 非 Status=3。

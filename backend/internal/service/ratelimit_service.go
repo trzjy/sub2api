@@ -632,12 +632,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 				if err := s.accountRepo.UpdateExtra(ctx, authAccount.ID, extraUpdates); err != nil {
 					slog.Warn("antigravity_401_force_refresh_mark_failed", "account_id", authAccount.ID, "error", err)
 				} else {
-					if authAccount.Extra == nil {
-						authAccount.Extra = make(map[string]any, len(extraUpdates))
-					}
-					for k, v := range extraUpdates {
-						authAccount.Extra[k] = v
-					}
+					authAccount.MergeExtra(extraUpdates)
 					slog.Info("antigravity_401_force_refresh_marked", "account_id", authAccount.ID)
 				}
 			}
@@ -2618,17 +2613,18 @@ func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID
 }
 
 func hasRecoverableRuntimeState(account *Account) bool {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return false
 	}
 	if account.RateLimitedAt != nil || account.RateLimitResetAt != nil || account.OverloadUntil != nil || account.TempUnschedulableUntil != nil {
 		return true
 	}
-	if len(account.Extra) == 0 {
+	if len(accountsnap) == 0 {
 		return false
 	}
-	return hasNonEmptyMapValue(account.Extra, "model_rate_limits") ||
-		hasNonEmptyMapValue(account.Extra, "antigravity_quota_scopes")
+	return hasNonEmptyMapValue(accountsnap, "model_rate_limits") ||
+		hasNonEmptyMapValue(accountsnap, "antigravity_quota_scopes")
 }
 
 func hasNonEmptyMapValue(extra map[string]any, key string) bool {

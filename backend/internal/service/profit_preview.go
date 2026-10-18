@@ -157,13 +157,14 @@ func previewAccountProfitAdmission(
 	thresholdMinD float64,
 	evalAt time.Time,
 ) ProfitPreviewAccountVerdict {
+	accountsnap := account.SnapshotExtra()
 	verdict := ProfitPreviewAccountVerdict{
 		AccountID:  account.ID,
 		Name:       account.Name,
 		Platform:   account.Platform,
 		RateSource: ProfitPreviewRateSourceManual,
 	}
-	if enabled, _ := account.Extra[UpstreamBillingRateSyncEnabledExtraKey].(bool); enabled {
+	if enabled, _ := accountsnap[UpstreamBillingRateSyncEnabledExtraKey].(bool); enabled {
 		verdict.RateSource = ProfitPreviewRateSourceUpstreamProbe
 		verdict.Warnings = append(verdict.Warnings, profitPreviewProbeWarnings(account, evalAt)...)
 	} else if account.RateMultiplier != nil && *account.RateMultiplier == 1 {
@@ -193,7 +194,8 @@ func previewAccountProfitAdmission(
 }
 
 func profitPreviewProbeWarnings(account *Account, evalAt time.Time) []string {
-	snapshot := decodeUpstreamBillingProbeSnapshot(account.Extra)
+	accountsnap := account.SnapshotExtra()
+	snapshot := decodeUpstreamBillingProbeSnapshot(accountsnap)
 	if snapshot == nil {
 		return []string{ProfitPreviewWarningProbeMissing}
 	}

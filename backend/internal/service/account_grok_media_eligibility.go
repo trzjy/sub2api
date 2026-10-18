@@ -37,6 +37,7 @@ func normalizeGrokMediaEligibilityExtra(platform string, extra map[string]any) (
 }
 
 func normalizeGrokMediaEligibilityUpdateExtra(account *Account, input *UpdateAccountInput, normalized map[string]any) (map[string]any, error) {
+	accountsnap := account.SnapshotExtra()
 	if account == nil || account.Platform != PlatformGrok {
 		return normalized, nil
 	}
@@ -58,7 +59,7 @@ func normalizeGrokMediaEligibilityUpdateExtra(account *Account, input *UpdateAcc
 		}
 		return normalized, nil
 	}
-	if current, ok := account.Extra[GrokMediaEligibleExtraKey].(bool); ok {
+	if current, ok := accountsnap[GrokMediaEligibleExtraKey].(bool); ok {
 		normalized[GrokMediaEligibleExtraKey] = current
 	}
 	return normalized, nil

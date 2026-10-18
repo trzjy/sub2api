@@ -517,10 +517,11 @@ type openAIQuotaAutoPauseDecision struct {
 }
 
 func shouldAutoPauseGrokAccountByQuota(account *Account) (bool, openAIQuotaAutoPauseDecision) {
+	accountsnap := account.SnapshotExtra()
 	if account == nil || !account.IsGrok() || account.Type != AccountTypeOAuth {
 		return false, openAIQuotaAutoPauseDecision{}
 	}
-	snapshot, err := grokQuotaSnapshotFromExtra(account.Extra)
+	snapshot, err := grokQuotaSnapshotFromExtra(accountsnap)
 	if err != nil || snapshot == nil {
 		return false, openAIQuotaAutoPauseDecision{}
 	}
@@ -581,6 +582,7 @@ func grokQuotaSnapshotStaleForPause(snapshot *xai.QuotaSnapshot, now time.Time) 
 }
 
 func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) (bool, openAIQuotaAutoPauseDecision) {
+	accountsnap := account.SnapshotExtra()
 	if account == nil || !account.IsOpenAI() {
 		return false, openAIQuotaAutoPauseDecision{}
 	}
@@ -588,8 +590,8 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 	// 只有新鲜状态明确存在可用卡才继续放行到消费阈值。
 	if config := ResolveOpenAIAutoResetCreditConfig(account); config.Enabled {
 		now := time.Now()
-		utilization5h, has5h := resolveOpenAIQuotaUtilization(account.Extra, "5h", now)
-		utilization7d, has7d := resolveOpenAIQuotaUtilization(account.Extra, "7d", now)
+		utilization5h, has5h := resolveOpenAIQuotaUtilization(accountsnap, "5h", now)
+		utilization7d, has7d := resolveOpenAIQuotaUtilization(accountsnap, "7d", now)
 		if has5h && utilization5h >= config.Threshold5h {
 			notifyOpenAIAutoResetFromScheduler(account.ID)
 			return true, openAIQuotaAutoPauseDecision{window: "5h", threshold: config.Threshold5h, utilization: utilization5h, reason: "quota_auto_reset_pending_5h"}
@@ -599,13 +601,13 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 			return true, openAIQuotaAutoPauseDecision{window: "7d", threshold: config.Threshold7d, utilization: utilization7d, reason: "quota_auto_reset_pending_7d"}
 		}
 
-		disabled5h := resolveAccountExtraBool(account.Extra, "auto_pause_5h_disabled")
-		disabled7d := resolveAccountExtraBool(account.Extra, "auto_pause_7d_disabled")
+		disabled5h := resolveAccountExtraBool(accountsnap, "auto_pause_5h_disabled")
+		disabled7d := resolveAccountExtraBool(accountsnap, "auto_pause_7d_disabled")
 		pause5h, pause7d := resolveOpenAIQuotaAutoPauseThresholds(ctx, account)
 		pauseReached5h := !disabled5h && pause5h > 0 && has5h && utilization5h >= pause5h
 		pauseReached7d := !disabled7d && pause7d > 0 && has7d && utilization7d >= pause7d
 		if pauseReached5h || pauseReached7d {
-			state := openAIAutoResetStateFromExtra(account.Extra)
+			state := openAIAutoResetStateFromExtra(accountsnap)
 			if state != nil && state.Status == OpenAIAutoResetStatusAvailable && state.AvailableCount > 0 && !openAIAutoResetStateStale(state, now) {
 				return false, openAIQuotaAutoPauseDecision{}
 			}
@@ -621,17 +623,17 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 	// so an admin has no way to exempt a single account from auto-pause once a global
 	// default exists. The disable flag is per-window so an account can opt out of
 	// only 5h or only 7d auto-pause.
-	disabled5h := resolveAccountExtraBool(account.Extra, "auto_pause_5h_disabled")
-	disabled7d := resolveAccountExtraBool(account.Extra, "auto_pause_7d_disabled")
+	disabled5h := resolveAccountExtraBool(accountsnap, "auto_pause_5h_disabled")
+	disabled7d := resolveAccountExtraBool(accountsnap, "auto_pause_7d_disabled")
 	threshold5h, threshold7d := resolveOpenAIQuotaAutoPauseThresholds(ctx, account)
 	now := time.Now()
 	if !disabled5h && threshold5h > 0 {
-		if utilization, ok := resolveOpenAIQuotaUtilization(account.Extra, "5h", now); ok && utilization >= threshold5h {
+		if utilization, ok := resolveOpenAIQuotaUtilization(accountsnap, "5h", now); ok && utilization >= threshold5h {
 			return true, openAIQuotaAutoPauseDecision{window: "5h", threshold: threshold5h, utilization: utilization}
 		}
 	}
 	if !disabled7d && threshold7d > 0 {
-		if utilization, ok := resolveOpenAIQuotaUtilization(account.Extra, "7d", now); ok && utilization >= threshold7d {
+		if utilization, ok := resolveOpenAIQuotaUtilization(accountsnap, "7d", now); ok && utilization >= threshold7d {
 			return true, openAIQuotaAutoPauseDecision{window: "7d", threshold: threshold7d, utilization: utilization}
 		}
 	}
@@ -672,8 +674,9 @@ func resolveAccountExtraBool(extra map[string]any, key string) bool {
 }
 
 func resolveOpenAIQuotaAutoPauseThresholds(ctx context.Context, account *Account) (float64, float64) {
-	threshold5h, _ := resolveAccountExtraNumber(account.Extra, "auto_pause_5h_threshold")
-	threshold7d, _ := resolveAccountExtraNumber(account.Extra, "auto_pause_7d_threshold")
+	accountsnap := account.SnapshotExtra()
+	threshold5h, _ := resolveAccountExtraNumber(accountsnap, "auto_pause_5h_threshold")
+	threshold7d, _ := resolveAccountExtraNumber(accountsnap, "auto_pause_7d_threshold")
 	threshold5h = clamp01(threshold5h)
 	threshold7d = clamp01(threshold7d)
 	if threshold5h > 0 && threshold7d > 0 {

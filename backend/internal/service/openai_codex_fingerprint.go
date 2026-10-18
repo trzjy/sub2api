@@ -152,11 +152,12 @@ func prepareCodexFingerprintExtraForCreate(platform, accountType string, extra m
 }
 
 func prepareCodexFingerprintExtraForUpdate(account *Account, extra map[string]any) map[string]any {
+	accountsnap := account.SnapshotExtra()
 	prepared := stripCodexFingerprintSeed(extra)
 	if account == nil || !account.IsOpenAIOAuthLike() {
 		return prepared
 	}
-	if seed, ok := codexFingerprintSeed(account.Extra); ok {
+	if seed, ok := codexFingerprintSeed(accountsnap); ok {
 		if prepared == nil {
 			prepared = make(map[string]any, 1)
 		}
@@ -203,10 +204,11 @@ func ShouldEnsureCodexFingerprintSeedForExtraUpdates(updates map[string]any) boo
 // 的 A/B 实测。上游的配额判定策略不可观测，因此这里取兼容安全的一侧：
 // 不显式 opt-in 就保持 v0.1.175 之前的客户端身份（#5610）。
 func (a *Account) GetCodexFingerprintMode() codexFingerprintMode {
+	asnap := a.SnapshotExtra()
 	if a == nil || !a.IsOpenAIOAuthLike() {
 		return codexFingerprintOff
 	}
-	return codexFingerprintModeFromExtra(a.Extra)
+	return codexFingerprintModeFromExtra(asnap)
 }
 
 // deriveStableUUIDv4 从种子确定性派生一个 UUIDv4 格式的字符串。
@@ -280,10 +282,11 @@ type codexFingerprintIDs struct {
 // 返回 nil 表示 off 模式，不需要改写。
 // 注意：包含随机生成的 turn_id，调用方必须只调用一次并共享结果给头改写和体改写。
 func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode codexFingerprintMode) *codexFingerprintIDs {
+	accountsnap := account.SnapshotExtra()
 	if account == nil || mode == codexFingerprintOff {
 		return nil
 	}
-	seed, ok := codexFingerprintSeed(account.Extra)
+	seed, ok := codexFingerprintSeed(accountsnap)
 	if !ok {
 		return nil
 	}

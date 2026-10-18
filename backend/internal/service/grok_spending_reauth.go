@@ -12,8 +12,9 @@ import (
 const grokSpendingLimitProbeCooldown = 10 * time.Minute
 
 func grokSpendingLimitResetAt(account *Account, now time.Time) time.Time {
+	accountsnap := account.SnapshotExtra()
 	if account != nil {
-		if billing, err := grokBillingSnapshotFromExtra(account.Extra); err == nil && billing != nil {
+		if billing, err := grokBillingSnapshotFromExtra(accountsnap); err == nil && billing != nil {
 			for _, raw := range []string{billing.PeriodEnd, billing.BillingPeriodEnd} {
 				if resetAt, err := time.Parse(time.RFC3339, strings.TrimSpace(raw)); err == nil && resetAt.After(now) {
 					return resetAt
@@ -40,6 +41,7 @@ func clearGrokNeedsReauthExtra(ctx context.Context, repo AccountRepository, acco
 }
 
 func accountGrokNeedsReauth(account *Account) bool {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return false
 	}
@@ -49,10 +51,10 @@ func accountGrokNeedsReauth(account *Account) bool {
 			return true
 		}
 	}
-	if v, ok := account.Extra["grok_needs_reauth"].(bool); ok && v {
+	if v, ok := accountsnap["grok_needs_reauth"].(bool); ok && v {
 		return true
 	}
-	if s, ok := account.Extra["grok_needs_reauth"].(string); ok {
+	if s, ok := accountsnap["grok_needs_reauth"].(string); ok {
 		return strings.EqualFold(s, "true") || s == "1"
 	}
 	return false

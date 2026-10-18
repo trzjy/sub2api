@@ -8,8 +8,10 @@ import (
 )
 
 // 本文件实现 §4.2 到期紧迫度调度（Card D）。纯函数部分可全场景单测；
-// 谓词复用 Card A 的 IsValidCodeBuddyCreditPackage（基础快照有效性），在此叠加
-// 168h 窗口（条件②）与 24h 新鲜度（条件③），不复制第二份基础实现。
+// 基础有效性谓词复用 codebuddy_quota_service.go 的 IsValidCodeBuddyCreditPackage
+// （写入侧过滤）与五字段复检（读链），在此叠加 168h 窗口（条件②）与 24h 新鲜度
+// （条件③）。整改③：紧迫度读链改读 codebuddy_urgency_packages（五字段），不再读
+// 已停用的逐包明细分包数组。
 
 // codebuddyCreditUrgencyWindow 是 §4.2 参与性谓词的到期窗口：now < expires_at ≤ now+168h。
 const codebuddyCreditUrgencyWindow = 168 * time.Hour
@@ -40,12 +42,13 @@ func (b codeBuddyUrgencyBoost) normalize() codeBuddyUrgencyBoost {
 }
 
 // codeBuddyUrgencySnapshot 是读自 Account.Extra 的快照输入：
-//   - Packages: 分包数组（存储契约 codebuddy_credit_packages）
+//   - Packages: 紧迫度专用分包数组（存储契约 codebuddy_urgency_packages，五字段）
 //   - UpdatedAt: 最后成功快照时间（codebuddy_credit_packages_updated_at，RFC3339）
 //
-// 解析失败的分包由 Card A 的校验保证剔除；此处仅按基础谓词再次过滤（防御）。
+// 解析失败的条目由读链解析器整条丢弃（失败关闭，不兜底）；此处仅按五字段复检再次
+// 过滤（防御）。
 type codeBuddyUrgencySnapshot struct {
-	Packages  []CodeBuddyCreditPackage
+	Packages  []CodeBuddyUrgencyPackage
 	UpdatedAt time.Time // zero → 无成功快照（不参与）
 }
 
@@ -61,15 +64,27 @@ type CodeBuddyUrgencyResult struct {
 	ParticipatingCount int
 }
 
-// IsCodeBuddyUrgencyEligible 是**紧迫度参与性谓词**（§1/§4.2 定义）：
+// IsCodeBuddyUrgencyEligible 是**紧迫度参与性谓词**（§1/§4.2 定义，整改③元组版）：
 // 分包须同时满足：
-//   - ① 基础快照有效性（复用 Card A IsValidCodeBuddyCreditPackage：字段有效 + 非 Status=3）
-//   - ② now < expires_at ≤ now+168h（Asia/Shanghai 字面量已由 Card A 解析转 UTC RFC3339）
+//   - ① 五字段有效性复检（与写入侧过滤同一基础有效性：unit==credits && status==0 &&
+//     非负 && remaining≤total；写入侧已仅容纳 status==0，此处防御性复检）
+//   - ② now < expires_at ≤ now+168h（UTC RFC3339，写入侧已保证可解析）
 //   - ③ 所属快照 ≤24h 新鲜（UpdatedAt 距服务器 UTC now ≤ 24h）
 //
-// 任一不满足 → 该分包不参与分子、也不参与分母 D。
-func IsCodeBuddyUrgencyEligible(pkg CodeBuddyCreditPackage, snapshotUpdatedAt time.Time, now time.Time) bool {
-	if !IsValidCodeBuddyCreditPackage(pkg) {
+// 任一不满足 → 该分包不参与分子、也不参与分母 D。Status=3 不得进 urgency（写入侧过滤
+// 已剔除，复检再次拦截）。语义与旧实现逐位一致。
+func IsCodeBuddyUrgencyEligible(pkg CodeBuddyUrgencyPackage, snapshotUpdatedAt time.Time, now time.Time) bool {
+	// ① 五字段有效性复检（基础谓词：字段有效 + 非 Status=3）。
+	if pkg.Unit != codebuddyCreditCanonicalUnit {
+		return false
+	}
+	if pkg.Status != codebuddyCreditPackageStatusActive {
+		return false
+	}
+	if pkg.Remaining.IsNegative() || pkg.Total.IsNegative() {
+		return false
+	}
+	if pkg.Remaining.GreaterThan(pkg.Total) {
 		return false
 	}
 	// ③ 新鲜度：快照时间必须存在且距今 ≤ 24h（陈旧快照按无快照处理，紧迫度归零）。
@@ -94,8 +109,9 @@ func IsCodeBuddyUrgencyEligible(pkg CodeBuddyCreditPackage, snapshotUpdatedAt ti
 }
 
 // ComputeCodeBuddyUrgency 计算 §4.2 公式：
-//   urgency = Σremaining(参与)；D = Σtotal(参与)；
-//   urgency_norm = urgency/D（D=0 → 0）截断 [0,1]。
+//
+//	urgency = Σremaining(参与)；D = Σtotal(参与)；
+//	urgency_norm = urgency/D（D=0 → 0）截断 [0,1]。
 //
 // 参与集合 = IsCodeBuddyUrgencyEligible（分子分母同一集合）。
 func ComputeCodeBuddyUrgency(snapshot codeBuddyUrgencySnapshot, now time.Time) CodeBuddyUrgencyResult {
@@ -152,12 +168,12 @@ func CodeBuddyUrgencySnapshotFromExtra(extra map[string]any, now time.Time) code
 	if len(extra) == 0 {
 		return snap
 	}
-	if raw, ok := extra[codebuddyCreditPackagesKey]; ok && raw != nil {
+	if raw, ok := extra[codebuddyUrgencyPackagesKey]; ok && raw != nil {
 		switch v := raw.(type) {
-		case []CodeBuddyCreditPackage:
+		case []CodeBuddyUrgencyPackage:
 			snap.Packages = v
 		case []any:
-			snap.Packages = parseCodeBuddyPackagesFromAnySlice(v)
+			snap.Packages = parseCodeBuddyUrgencyPackagesFromAnySlice(v)
 		default:
 			// 形态不符 → 空集合（无参与），失败关闭语义由写入侧保证，此处不兜底。
 		}
@@ -172,17 +188,18 @@ func CodeBuddyUrgencySnapshotFromExtra(extra map[string]any, now time.Time) code
 	return snap
 }
 
-// parseCodeBuddyPackagesFromAnySlice 从 Extra 反序列化的 []any（map 形态）重建
-// 分包数组。只接受存储契约字段形态（与 Card A MarshalJSON 对称）；字段类型不符
-// 的条目整条丢弃（失败关闭语义，不静默钳位）。
-func parseCodeBuddyPackagesFromAnySlice(items []any) []CodeBuddyCreditPackage {
-	out := make([]CodeBuddyCreditPackage, 0, len(items))
+// parseCodeBuddyUrgencyPackagesFromAnySlice 从 Extra 反序列化的 []any（map 形态）
+// 重建紧迫度专用分包数组（codebuddy_urgency_packages，五字段）。只接受存储契约
+// 字段形态（与 CodeBuddyUrgencyPackage.MarshalJSON 对称）；字段类型不符的条目整条
+// 丢弃（失败关闭语义，不静默钳位）。
+func parseCodeBuddyUrgencyPackagesFromAnySlice(items []any) []CodeBuddyUrgencyPackage {
+	out := make([]CodeBuddyUrgencyPackage, 0, len(items))
 	for _, item := range items {
 		m, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		pkg, ok := codeBuddyPackageFromExtraMap(m)
+		pkg, ok := codeBuddyUrgencyPackageFromExtraMap(m)
 		if !ok {
 			continue
 		}
@@ -191,22 +208,23 @@ func parseCodeBuddyPackagesFromAnySlice(items []any) []CodeBuddyCreditPackage {
 	return out
 }
 
-func codeBuddyPackageFromExtraMap(m map[string]any) (CodeBuddyCreditPackage, bool) {
-	var pkg CodeBuddyCreditPackage
+// codeBuddyUrgencyPackageFromExtraMap 从 Extra 反序列化的 map 重建单个紧迫度分包。
+// 五字段：remaining/total（decimal 字符串）/expires_at（UTC RFC3339 字符串）/
+// unit（"credits"）/status（数值 0）。字段缺失/类型不符 → 整条丢弃（失败关闭）。
+func codeBuddyUrgencyPackageFromExtraMap(m map[string]any) (CodeBuddyUrgencyPackage, bool) {
+	var pkg CodeBuddyUrgencyPackage
 	getStr := func(key string) string {
 		if v, ok := m[key].(string); ok {
 			return v
 		}
 		return ""
 	}
-	pkg.ID = getStr("id")
-	pkg.Name = getStr("name")
 	pkg.Unit = getStr("unit")
 	pkg.ExpiresAt = getStr("expires_at")
 	rem, ok1 := decimalFromExtraAny(m["remaining"])
 	tot, ok2 := decimalFromExtraAny(m["total"])
 	if !ok1 || !ok2 {
-		return CodeBuddyCreditPackage{}, false
+		return CodeBuddyUrgencyPackage{}, false
 	}
 	pkg.Remaining = rem
 	pkg.Total = tot
@@ -217,7 +235,7 @@ func codeBuddyPackageFromExtraMap(m map[string]any) (CodeBuddyCreditPackage, boo
 	} else if st, ok := m["status"].(int); ok {
 		pkg.Status = int64(st)
 	} else {
-		return CodeBuddyCreditPackage{}, false
+		return CodeBuddyUrgencyPackage{}, false
 	}
 	return pkg, true
 }
@@ -256,4 +274,3 @@ func codeBuddyUrgencySnapshotsFor(accounts []*Account, now time.Time) map[int64]
 // 旧最小视图（gateway_scheduling.go 场景）经 D-2 实证不承载 codebuddy 选号，
 // 配置读取改由 openai_account_scheduler.go 的 OpenAIGatewayService 直接提供
 // （codeBuddyUrgencyBoostForRequest，与既有 schedulingConfig 同模式）。
-

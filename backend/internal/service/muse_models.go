@@ -297,10 +297,7 @@ func (s *AccountTestService) persistMuseManagedSnapshot(ctx context.Context, acc
 	if s.accountRepo == nil || account == nil || account.ID == 0 {
 		return
 	}
-	if account.Extra == nil {
-		account.Extra = make(map[string]any)
-	}
-	account.Extra[museManagedModelExtraKey] = snap
+	account.MergeExtra(map[string]any{museManagedModelExtraKey: snap})
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{museManagedModelExtraKey: snap}); err != nil {
 		slog.Warn("muse_managed_snapshot_persist_failed", "account_id", museAccountID(account), "error", err)
 	}
@@ -308,10 +305,11 @@ func (s *AccountTestService) persistMuseManagedSnapshot(ctx context.Context, acc
 
 // loadMuseManagedModels 读取账号 extra 中的 muse 系统托管模型快照。
 func loadMuseManagedModels(account *Account) *MuseManagedModels {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return nil
 	}
-	raw, ok := account.Extra[museManagedModelExtraKey]
+	raw, ok := accountsnap[museManagedModelExtraKey]
 	if !ok || raw == nil {
 		return nil
 	}

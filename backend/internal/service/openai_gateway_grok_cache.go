@@ -251,13 +251,14 @@ func applyGrokFreeRequestToolCacheRoute(c *gin.Context, body, intentSourceBody [
 // accounts positively identified as Grok Free OAuth; paid, API-key, and unknown
 // accounts remain fail-closed.
 func grokClientToolCacheAccountPolicy(account *Account) (enabled, explicit bool) {
+	accountsnap := account.SnapshotExtra()
 	if !isKnownGrokFreeAccount(account) {
 		return false, false
 	}
-	if account.Extra == nil {
+	if accountsnap == nil {
 		return true, false
 	}
-	value, exists := account.Extra[grokClientToolCacheOptInExtraKey]
+	value, exists := accountsnap[grokClientToolCacheOptInExtraKey]
 	if !exists {
 		return true, false
 	}
@@ -317,6 +318,7 @@ func applyGrokFreeToolCacheRoute(body, intentSourceBody []byte, account *Account
 // Free cache routing / media free_tier blocks (broader than soft-gate).
 // Soft-gate uses isExplicitGrokFreeOAuthAccount (exact "free" only).
 func isKnownGrokFreeAccount(account *Account) bool {
+	accountsnap := account.SnapshotExtra()
 	if account == nil || !account.IsGrokOAuth() {
 		return false
 	}
@@ -328,7 +330,7 @@ func isKnownGrokFreeAccount(account *Account) bool {
 	freeSignal := false
 	paidSignal := false
 	inferredFreeSignal := false
-	if billing, err := grokBillingSnapshotFromExtra(account.Extra); err == nil && billing != nil {
+	if billing, err := grokBillingSnapshotFromExtra(accountsnap); err == nil && billing != nil {
 		if tier := strings.TrimSpace(billing.Plan); tier != "" {
 			if isGrokFreeSubscriptionTier(tier) {
 				freeSignal = true
@@ -348,7 +350,7 @@ func isKnownGrokFreeAccount(account *Account) bool {
 			inferredFreeSignal = true
 		}
 	}
-	if snapshot, err := grokQuotaSnapshotFromExtra(account.Extra); err == nil && snapshot != nil {
+	if snapshot, err := grokQuotaSnapshotFromExtra(accountsnap); err == nil && snapshot != nil {
 		if tier := strings.TrimSpace(snapshot.SubscriptionTier); tier != "" {
 			if isGrokFreeSubscriptionTier(tier) {
 				freeSignal = true
