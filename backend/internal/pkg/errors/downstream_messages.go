@@ -217,4 +217,95 @@ const (
 	UpstreamStreamIntervalTimeout = "上游流式数据间隔超时"
 	// UpstreamResponseLineTooLong: 上游响应行过长（502 response_too_large）。
 	UpstreamResponseLineTooLong = "上游响应行过长"
+
+	// ===== 收口扩展（2026-10-18 收口轮，授权：docs-local/downstream-error-zh-completion-execution-prompt-20261018.md；
+	// 遗漏清单：downstream-error-zh-http-ws-audit-20261018.md + downstream-error-zh-stream-audit-20261018.md）=====
+	// 规则沿用二期：稳定 code / HTTP 状态码 / WS close code 不变，仅换 message/reason 文本。
+
+	// 认证中间件（api_key_auth / api_key_auth_google；稳定 code 不变）。
+	AuthRateLimited                   = "无效认证尝试过多，请稍后重试"
+	APIKeyValidationFailed            = "API 密钥校验失败，请联系管理员"
+	AccessDeniedIPFormat              = "访问被拒绝，您的 IP 为 %s"
+	UserNotFoundForAPIKey             = "该 API 密钥关联的用户不存在"
+	UserAccountInactive               = "用户账号未激活"
+	NoActiveSubscriptionForGroup      = "该分组无有效订阅"
+	SubscriptionWindowsMaintainFailed = "订阅用量窗口维护失败，请联系管理员"
+	APIKeyQueryParamDeprecated        = "查询参数 api_key 已弃用，请改用 Authorization 请求头或 key 参数。"
+
+	// 请求校验补充（413/400/404 固定文案）。
+	RequestBodyTooLarge         = "请求体过大"
+	ModelNotExistInGroupFormat  = "模型 %s 不存在或在该分组不可用"
+	UnsupportedResponsesSubpath = "不支持的 Responses 子路径"
+	ModelMissingInURL           = "URL 中缺少模型名称"
+	MissingActionInURL          = "URL 中缺少 action 名称"
+	InvalidModelInURL           = "URL 中模型名称无效"
+	UnsupportedActionFormat     = "不支持的操作：%s"
+	UpstreamRequestBuildFailed  = "构建上游请求失败，请联系管理员"
+	// AccountConfigUnsupported: 泛化措辞（§0.5 防泄露裁定），替代 "Unsupported account type" /
+	// "Invalid account token type" —— 不暴露账号类型内部分类。
+	AccountConfigUnsupported           = "该请求不支持当前账号配置，请联系管理员"
+	UpstreamResponseReadFailed         = "读取上游响应失败，请稍后重试"
+	UpstreamStreamReadFailed           = "读取上游响应流失败，请稍后重试"
+	UpstreamResponseMissingTokenCount  = "上游响应缺少 token 计数结果"
+	TokenCountingUnsupported           = "该平台不支持 count_tokens 端点"
+	TokenCountingUnsupportedByUpstream = "上游不支持 token 计数"
+	AggregatedResponseMarshalFailed    = "聚合响应编码失败，请联系管理员"
+	UpstreamGatewayError               = "上游网关错误，请稍后重试"
+	RequestConvertFailed               = "请求转换失败，请联系管理员"
+	// CodexOfficialClientsOnly: Codex 为用户侧产品名（客户端限制策略），非上游真身，不属防泄露。
+	CodexOfficialClientsOnly = "该账号仅允许 Codex 官方客户端"
+	// WSv1Unsupported: responses_websockets_v2 为配置字段名（协议字段），保留英文。
+	WSv1Unsupported = "OpenAI WSv1 暂不支持，请启用 responses_websockets_v2"
+
+	// 平台能力补充（404 not_found_error）。
+	VideosAPINotSupported     = "该平台不支持 Videos API"
+	EmbeddingsAPINotSupported = "该平台不支持 Embeddings API"
+	WebSearchAPINotSupported  = "该平台不支持 Web Search API"
+	XSearchAPINotSupported    = "该平台不支持 X Search API"
+
+	// Claude Code 客户端版本限制（npm 命令与环境变量名为命令，保留英文）。
+	CCVersionUndetermined   = "无法确定 Claude Code 版本，请更新 Claude Code：npm update -g @anthropic-ai/claude-code"
+	CCVersionBelowMinFormat = "您的 Claude Code 版本（%s）低于最低要求版本（%s），请更新：npm update -g @anthropic-ai/claude-code"
+	CCVersionAboveMaxFormat = "您的 Claude Code 版本（%s）超过最高允许版本（%s），请降级：npm install -g @anthropic-ai/claude-code@%s 并设置 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 以防止自动升级"
+
+	// Gemini 平台分组（gemini v1beta 入口；gemini 为客户端所调协议名，非上游真身，不属防泄露）。
+	GroupPlatformNotGemini = "该分组不支持 Gemini API"
+
+	// WebSocket 关闭 reason（openai_ws_v2；close code 不变，仅 reason 文本）。
+	WSModelSwitchReconnect   = "模型已切换，请重新连接"
+	WSMissingFirstCreate     = "首帧缺少 response.create 消息"
+	WSUnsupportedMessageType = "不支持的 WebSocket 消息类型"
+	WSInvalidJSONPayload     = "WebSocket 消息 JSON 无效"
+	WSModelRequiredInCreate  = "response.create 载荷缺少 model 字段"
+	WSCompositeOpenAIOnly    = "复合分组的 Responses WebSocket 仅支持 OpenAI 兼容模型"
+	WSCyberSessionBlocked    = "该会话已被网络安全策略屏蔽，请开启新会话"
+	WSBillingCheckFailed     = "计费校验失败，请稍后重试"
+	WSAccountBusy            = "账号正忙，请稍后重试"
+	WSInvalidRequestPayload  = "无效的 WebSocket 请求载荷"
+	WSModeDisabled           = "该账号已禁用 WebSocket 模式"
+	// WSModeBridgeUnsupported: 泛化措辞（§0.5 防泄露裁定），不暴露内部传输模式分类
+	//（ctx_pool/passthrough/http_bridge）。
+	WSModeBridgeUnsupported              = "该账号配置不支持当前 WebSocket 模式，请联系管理员"
+	WSEmptyRequestPayload                = "WebSocket 请求载荷为空"
+	WSAppendUnsupported                  = "response.append 在 WebSocket v2 中不支持；请使用携带 previous_response_id 的 response.create"
+	WSUnsupportedRequestTypeFormat       = "不支持的 WebSocket 请求类型：%s"
+	WSInvalidIdentityMetadata            = "WebSocket 身份元数据无效"
+	WSUnsupportedClientMessageTypeFormat = "不支持的 WebSocket 客户端消息类型：%s"
+	WSIngressCapacityUnavailable         = "WebSocket 接入容量暂时不可用，请稍后重试"
+	WSIdleTimeout                        = "WebSocket 连接空闲超时"
+
+	// 流式错误（共享读错分类 + SSE 错误帧 + 图片流；帧结构/code 不变）。
+	UpstreamStreamEndedEarly           = "上游响应流提前结束，内容可能不完整，请稍后重试"
+	UpstreamHTTP2StreamFailed          = "上游 HTTP/2 流失败，请稍后重试"
+	UpstreamStreamInterrupted          = "上游响应流中断，请稍后重试"
+	UpstreamFirstByteTimeout           = "上游首字节超时，请稍后重试"
+	UpstreamFirstByteTimeoutAfterStart = "上游首字节超时，流已中断，请稍后重试"
+	ImageStreamDisconnectedEarly       = "图片生成完成前流已中断，请稍后重试"
+
+	// 异步图片任务/批量结果（错误 JSON/轮询返回/ZIP errors.json；泛化不提 provider/账号池架构）。
+	ImageTaskStorageUnavailable = "图片任务存储不可用，请稍后重试"
+	ImageStorageFailed          = "生成图片存储失败，请稍后重试"
+	ImageGenerationFailed       = "图片生成失败，请稍后重试"
+	ProviderImageOutputMissing  = "上游未返回图片输出"
+	ProviderResultItemMissing   = "上游结果缺少该条目的输出"
 )

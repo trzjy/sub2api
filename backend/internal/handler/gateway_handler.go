@@ -175,7 +175,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	} else if changed {
 		if err := parsedReq.ReplaceBody(policyBody); err != nil {
 			reqLog.Warn("gateway.reasoning_effort_policy_parse_failed", zap.Error(err))
-			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to apply reasoning effort policy")
+			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", pkgerrors.ReasoningEffortPolicyFailed)
 			return
 		}
 		body = parsedReq.Body.Bytes()
