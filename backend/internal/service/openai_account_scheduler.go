@@ -2491,10 +2491,10 @@ const (
 )
 
 // TierRoutingInputThreshold 是分层路由的 input-only 估算阈值（含边界：估算值
-// 恰好等于阈值判小），统一采用 2000 input tokens。input-only 口径沿用
+// 恰好等于阈值判小），统一采用 3000 input tokens。input-only 口径沿用
 // 2026-10-07 用户裁定（docs-local/model-source-tier-routing-plan.md §2）；阈值按
-// 2026-10-17 用户裁定统一为 2000。
-const TierRoutingInputThreshold = 2000
+// 2026-10-19 用户裁定统一为 3000。
+const TierRoutingInputThreshold = 3000
 
 // TierRoutingClassForEstimate 按估算 input 值分档；=阈值判小。
 func TierRoutingClassForEstimate(estimatedInputTokens int) TierRoutingClass {
