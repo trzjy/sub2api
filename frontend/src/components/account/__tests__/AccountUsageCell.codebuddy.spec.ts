@@ -7,7 +7,7 @@ import type { Account } from '@/types'
 // 方案 N6：CodeBuddy 母账号余额/配额走 account.Extra 快照（Card F 分包展示）。
 // 本 spec 钉住两件事：
 //   1) 错误键就是后端写入的 codebuddy_credit_error（§4.1 SSOT；旧错误键名已废弃）；
-//   2) 分包卡片渲染 + 合计（异单位不计入）+ 无快照空态（绝不渲染 0%）。
+//   2) 进度条 + 合计行（异单位不计入）+ 无快照空态（绝不渲染 0%）。
 const { getUsage } = vi.hoisted(() => ({ getUsage: vi.fn() }))
 
 vi.mock('@/api/admin', () => ({
@@ -25,15 +25,8 @@ vi.mock('vue-i18n', async () => {
   const messages: Record<string, string> = {
     'admin.accounts.usageWindow.codebuddyCredit': '积分',
     'admin.accounts.usageWindow.codebuddyCreditNotProbed': '未探测',
-    'admin.accounts.usageWindow.codebuddyPackageRemaining': '剩余 {value}',
-    'admin.accounts.usageWindow.codebuddyPackageTotal': '总量 {value}',
-    'admin.accounts.usageWindow.codebuddyPackageExpiry': '到期 {date}',
     'admin.accounts.usageWindow.codebuddyPackageTotalRow': '合计 {remaining} / {total}',
     'admin.accounts.usageWindow.codebuddyPackageUpdated': '更新于 {date}',
-    'admin.accounts.usageWindow.codebuddyPackageUnitMismatch': '异单位',
-    'admin.accounts.usageWindow.codebuddyPackageInactive': '不可用',
-    'admin.accounts.usageWindow.codebuddyPackageParseFailed': '解析失败',
-    'admin.accounts.usageWindow.codebuddyPackageExcludedHint': 'hint',
     'admin.accounts.usageWindow.codebuddyPackageExcludedNote': '部分分包未计入合计',
   }
   return {
@@ -108,7 +101,7 @@ afterEach(() => {
 })
 
 describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
-  it('有分包快照时渲染利用率、周期截止与分包卡片', async () => {
+  it('有分包快照时渲染利用率、周期截止与合计行（逐包行已移除）', async () => {
     const wrapper = mountCell(
       makeAccount({
         codebuddy_credit_packages: [
@@ -133,9 +126,8 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
     expect(bar.exists()).toBe(true)
     expect(bar.attributes('data-utilization')).toBe('30.05')
     expect(wrapper.text()).toContain('积分')
-    expect(wrapper.text()).toContain('Pro 月包')
-    expect(wrapper.text()).toContain('剩余 300.50')
-    expect(wrapper.text()).toContain('总量 1000.00')
+    // 逐包行已移除：包名不再渲染（负断言）
+    expect(wrapper.text()).not.toContain('Pro 月包')
     // 合计行（更新时间格式随运行环境 Intl locale，宽松断言日期年份）
     expect(wrapper.text()).toContain('合计 300.50 / 1000.00')
     expect(wrapper.text()).toContain('更新于')
@@ -217,7 +209,9 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
 
     // 合计只含 credits 包：10.00 / 20.00
     expect(wrapper.text()).toContain('合计 10.00 / 20.00')
-    expect(wrapper.text()).toContain('异单位')
+    // 逐包行已移除：包名不再渲染（异单位包不计入合计，仅在合计行标注）
+    expect(wrapper.text()).not.toContain('积分包')
+    expect(wrapper.text()).not.toContain('美元包')
     expect(wrapper.text()).toContain('部分分包未计入合计')
   })
 
