@@ -40,6 +40,12 @@ func (s *GatewayService) ForwardAsResponses(
 	defer func() { cf524ResolveGuardOutcome(c, ctx, fwdErr) }()
 	startTime := time.Now()
 
+	// Cursor 账号前置分流：Responses 入站先转 Chat Completions，再走契约 0.1
+	// 文本桥接；响应按 Responses 协议回桥。usage 由 handler 既有链计费一次。
+	if isCursorAccount(account) {
+		return s.forwardCursorAsResponses(ctx, c, account, body)
+	}
+
 	normalizedBody, normalized, err := normalizeOpenAIResponsesLegacyIngress(body)
 	if err != nil {
 		return nil, err
