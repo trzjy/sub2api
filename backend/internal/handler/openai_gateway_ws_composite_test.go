@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	coderws "github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
@@ -75,10 +76,10 @@ func TestOpenAIResponsesWebSocket_CompositeRouteRejections(t *testing.T) {
 		repoErr                                 error
 		status                                  coderws.StatusCode
 	}{
-		{name: "disallowed platform", platform: service.PlatformAnthropic, endpoint: "responses", model: "public-alias", reason: "only supports OpenAI-compatible"},
-		{name: "wrong endpoint", platform: service.PlatformOpenAI, endpoint: "messages", model: "public-alias", reason: "only supports OpenAI-compatible"},
-		{name: "unknown alias", platform: service.PlatformOpenAI, endpoint: "responses", model: "unknown-alias", reason: "only supports OpenAI-compatible"},
-		{name: "resolver error", model: "gpt-5.4", repoErr: errors.New("database unavailable"), reason: "Failed to resolve composite model route", status: coderws.StatusInternalError},
+		{name: "disallowed platform", platform: service.PlatformAnthropic, endpoint: "responses", model: "public-alias", reason: infraerrors.WSCompositeOpenAIOnly},
+		{name: "wrong endpoint", platform: service.PlatformOpenAI, endpoint: "messages", model: "public-alias", reason: infraerrors.WSCompositeOpenAIOnly},
+		{name: "unknown alias", platform: service.PlatformOpenAI, endpoint: "responses", model: "unknown-alias", reason: infraerrors.WSCompositeOpenAIOnly},
+		{name: "resolver error", model: "gpt-5.4", repoErr: errors.New("database unavailable"), reason: infraerrors.CompositeModelRouteFailed, status: coderws.StatusInternalError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resolver := compositeWSResolver(tc.platform, tc.endpoint, "gpt-5.4")
@@ -108,7 +109,7 @@ func TestOpenAIResponsesWebSocket_CompositeModelSwitchRequiresReconnect(t *testi
 					firstPayload:  `{"type":"response.create","model":"public-alias"}`,
 					secondPayload: `{"type":"response.create","model":"` + model + `"}`, group: compositeWSGroup(), ingressMode: mode,
 					compositeResolver:       compositeWSResolver(service.PlatformOpenAI, "responses", "gpt-5.4"),
-					secondTurnCloseExpected: true, closeReason: "model switch requires reconnect",
+					secondTurnCloseExpected: true, closeReason: infraerrors.WSModelSwitchReconnect,
 				})
 			})
 		}
@@ -154,6 +155,6 @@ func TestOpenAIResponsesWebSocket_CompositeSessionModelSwitchRequiresReconnect(t
 		midPayload:    `{"type":"session.update","session":{"model":"grok-4.3"}}`,
 		secondPayload: `{"type":"response.create"}`, group: compositeWSGroup(),
 		compositeResolver:       compositeWSResolver(service.PlatformOpenAI, "responses", "gpt-5.4"),
-		secondTurnCloseExpected: true, closeReason: "model switch requires reconnect",
+		secondTurnCloseExpected: true, closeReason: infraerrors.WSModelSwitchReconnect,
 	})
 }

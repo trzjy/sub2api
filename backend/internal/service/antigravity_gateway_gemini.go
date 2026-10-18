@@ -56,10 +56,10 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	prefix := logPrefix(sessionID, account.Name)
 
 	if strings.TrimSpace(originalModel) == "" {
-		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Missing model in URL")
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.ModelMissingInURL)
 	}
 	if strings.TrimSpace(action) == "" {
-		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Missing action in URL")
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.MissingActionInURL)
 	}
 	if len(body) == 0 {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.RequestBodyEmpty)
@@ -84,7 +84,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 			FirstTokenMs: nil,
 		}, nil
 	default:
-		return nil, s.writeGoogleError(c, http.StatusNotFound, "Unsupported action: "+action)
+		return nil, s.writeGoogleError(c, http.StatusNotFound, fmt.Sprintf(infraerrors.UnsupportedActionFormat, action))
 	}
 
 	// 裸模型名（gemini-3.8-flash）按 thinkingConfig 解析到 -low/-medium/-high 变体；
@@ -95,13 +95,13 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	}
 	if mappedModel == "" {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
-		return nil, s.writeGoogleError(c, http.StatusForbidden, fmt.Sprintf("model %s not in whitelist", originalModel))
+		return nil, s.writeGoogleError(c, http.StatusForbidden, fmt.Sprintf(infraerrors.ModelNotInGroup, originalModel))
 	}
 	forwardedModel := mappedModel
 
 	// 获取 access_token
 	if s.tokenProvider == nil {
-		return nil, s.writeGoogleError(c, http.StatusBadGateway, "Antigravity token provider not configured")
+		return nil, s.writeGoogleError(c, http.StatusBadGateway, infraerrors.CompatTokenProviderNotConfigured)
 	}
 	accessToken, err := s.tokenProvider.GetAccessToken(ctx, account)
 	if err != nil {
@@ -145,7 +145,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	// 包装请求
 	wrappedBody, err := s.wrapV1InternalRequest(projectID, mappedModel, injectedBody)
 	if err != nil {
-		return nil, s.writeGoogleError(c, http.StatusInternalServerError, "Failed to build upstream request")
+		return nil, s.writeGoogleError(c, http.StatusInternalServerError, infraerrors.UpstreamRequestBuildFailed)
 	}
 
 	// Antigravity 上游只支持流式请求，统一使用 streamGenerateContent

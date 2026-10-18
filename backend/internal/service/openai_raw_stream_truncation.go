@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -157,7 +158,7 @@ func openAIRawStreamTruncatedErrorBody(cause error) []byte {
 	})
 	if err != nil {
 		return []byte(`{"error":{"type":"upstream_error","code":"` + OpenAIUpstreamStreamTruncatedCode +
-			`","message":"Upstream response stream ended before completion"}}`)
+			`","message":"` + infraerrors.UpstreamStreamEndedEarly + `"}}`)
 	}
 	return body
 }

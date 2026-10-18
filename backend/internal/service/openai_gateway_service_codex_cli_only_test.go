@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -102,7 +103,7 @@ func TestOpenAIGatewayService_Forward_VersionGateMessage(t *testing.T) {
 		_, err := svc.Forward(context.Background(), c, account(), body)
 		require.Error(t, err)
 		require.Equal(t, http.StatusForbidden, rec.Code)
-		require.Contains(t, rec.Body.String(), "This account only allows Codex official clients")
+		require.Contains(t, rec.Body.String(), infraerrors.CodexOfficialClientsOnly)
 	})
 }
 

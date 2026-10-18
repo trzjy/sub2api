@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -143,7 +144,7 @@ type httpUpstreamFreshConn interface {
 }
 
 // openAICNFirstByteTimeoutFailoverBody 是超时触发 failover 后的客户端可见错误体。
-var openAICNFirstByteTimeoutFailoverBody = []byte(`{"error":{"type":"upstream_error","message":"upstream first byte timeout"}}`)
+var openAICNFirstByteTimeoutFailoverBody = []byte(`{"error":{"type":"upstream_error","message":"` + infraerrors.UpstreamFirstByteTimeout + `"}`)
 
 // isOpenAICNFirstByteTimeout 报告 err 是否为网关内部 CN 首包超时（可穿过包装）。
 func isOpenAICNFirstByteTimeout(err error) bool {
@@ -656,7 +657,7 @@ func (s *OpenAIGatewayService) abortCCNativeStreamAfterHeaders(
 	err error,
 ) (*OpenAIForwardResult, error) {
 	if c != nil && c.Writer != nil {
-		if _, werr := fmt.Fprint(c.Writer, buildChatStreamErrorSSE("upstream_error", "upstream first byte timeout after stream started")); werr == nil {
+		if _, werr := fmt.Fprint(c.Writer, buildChatStreamErrorSSE("upstream_error", infraerrors.UpstreamFirstByteTimeoutAfterStart)); werr == nil {
 			if _, werr := fmt.Fprint(c.Writer, "data: [DONE]\n\n"); werr == nil {
 				if fl, ok := c.Writer.(http.Flusher); ok {
 					fl.Flush()
@@ -676,7 +677,7 @@ func (s *OpenAIGatewayService) abortResponsesNativeStreamAfterHeaders(
 	err error,
 ) (*OpenAIForwardResult, error) {
 	if c != nil && c.Writer != nil {
-		sse := buildOpenAIResponseFailedSSE("", "", []byte("{}"), "upstream first byte timeout after stream started")
+		sse := buildOpenAIResponseFailedSSE("", "", []byte("{}"), infraerrors.UpstreamFirstByteTimeoutAfterStart)
 		if _, werr := fmt.Fprint(c.Writer, sse); werr == nil {
 			if fl, ok := c.Writer.(http.Flusher); ok {
 				fl.Flush()

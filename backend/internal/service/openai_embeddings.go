@@ -161,7 +161,7 @@ func (s *OpenAIGatewayService) ForwardEmbeddings(
 	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
 		if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
-			writeOpenAIEmbeddingsError(c, http.StatusBadGateway, "api_error", "Failed to read upstream response")
+			writeOpenAIEmbeddingsError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamResponseReadFailed)
 		}
 		return nil, fmt.Errorf("read upstream body: %w", err)
 	}

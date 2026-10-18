@@ -610,7 +610,7 @@ func (c *openAIWSClientFrameConn) ReadFrame(ctx context.Context) (coderws.Messag
 		c.conn,
 		c.interTurnIdleTimeout,
 		coderws.StatusNormalClosure,
-		"websocket idle timeout",
+		infraerrors.WSIdleTimeout,
 		c.interTurnStarted,
 		func() bool { return c.waitingForNextTurn.Load() },
 	)
@@ -764,7 +764,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 	accountScopedFirst, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(firstClientMessage, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	if scopeErr != nil {
-		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidIdentityMetadata, scopeErr)
 	}
 	if accountScoped {
 		firstClientMessage = accountScopedFirst
@@ -1000,7 +1000,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			responsesLite := isResponseCreate && isOpenAIResponsesLiteWebSocketPayload(payload)
 			if isResponseCreate {
 				if normalized, compatibilityChanged, normalizeErr := normalizeOpenAIResponsesWebSocketCompatibilityBody(payload, account, responsesLite); normalizeErr != nil {
-					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", normalizeErr)
+					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, normalizeErr)
 				} else if compatibilityChanged {
 					payload = normalized
 				}
@@ -1018,7 +1018,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if isResponseCreate || eventType == "session.update" {
 				accountScopedPayload, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(payload, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 				if scopeErr != nil {
-					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
+					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidIdentityMetadata, scopeErr)
 				}
 				if accountScoped {
 					payload = accountScopedPayload
@@ -1335,7 +1335,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			return errOpenAIWSSessionPreempted
 		}
 		status := coderws.StatusGoingAway
-		reason := "websocket request canceled"
+		reason := infraerrors.WSRequestCanceled
 		if errors.Is(cause, ErrOpenAIWSIngressLeaseLost) {
 			status = coderws.StatusTryAgainLater
 			reason = infraerrors.WSIngressCapacityLost
@@ -1451,7 +1451,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if relayExit.Stage == "idle_timeout" {
 		relayErr = NewOpenAIWSClientCloseError(
 			coderws.StatusPolicyViolation,
-			"client websocket idle timeout",
+			infraerrors.WSIdleTimeout,
 			relayErr,
 		)
 	}

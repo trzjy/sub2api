@@ -443,11 +443,11 @@ func (s *OpenAIGatewayService) readCCUpstreamJSONResponse(
 			return nil, OpenAIUsage{}, err
 		}
 		// 其余读取错误恢复原契约：响应超限走 TooLarge 格式；其余走
-		// "Failed to read upstream response"（原 helper 语义）。
+		// UpstreamResponseReadFailed（原 helper 语义）。
 		if errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
 			openAITooLargeError(c)
 		} else if writeError != nil {
-			writeError(c, http.StatusBadGateway, "api_error", "Failed to read upstream response")
+			writeError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamResponseReadFailed)
 		}
 		return nil, OpenAIUsage{}, fmt.Errorf("read upstream body: %w", err)
 	}

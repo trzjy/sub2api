@@ -382,7 +382,7 @@ func (i *BatchImageResultIndexer) Index(ctx context.Context, job *BatchImageJob,
 				Status:               BatchImageItemStatusFailed,
 				ProviderSourceObject: batchImageOptionalStringPtr(sourceObject),
 				ErrorCode:            batchImageStringPtr("PROVIDER_RESULT_MISSING"),
-				ErrorMessage:         batchImageStringPtr("provider output did not include a result for this item"),
+				ErrorMessage:         batchImageStringPtr(infraerrors.ProviderResultItemMissing),
 				IndexedAt:            &now,
 			})
 			result.FailCount++
@@ -494,13 +494,13 @@ func ParseBatchImageResultLine(line []byte, lineNumber int) (*ParsedBatchImageRe
 	if _, hasResponse := obj["response"]; hasResponse || batchImageHasCandidates(obj) {
 		parsed.Status = BatchImageParsedStatusFailed
 		parsed.ErrorCode = "EMPTY_IMAGE_OUTPUT"
-		parsed.ErrorMessage = "provider response contained no image output"
+		parsed.ErrorMessage = infraerrors.ProviderImageOutputMissing
 		return parsed, nil
 	}
 
 	parsed.Status = BatchImageParsedStatusFailed
 	parsed.ErrorCode = "PROVIDER_ITEM_FAILED"
-	parsed.ErrorMessage = "provider result line contained no image output"
+	parsed.ErrorMessage = infraerrors.ProviderImageOutputMissing
 	return parsed, nil
 }
 

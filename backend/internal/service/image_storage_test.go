@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -249,6 +250,6 @@ func TestImageTaskServiceCompleteOffloadFailureMarksFailed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ImageTaskStatusFailed, got.Status)
 	require.Equal(t, http.StatusBadGateway, got.HTTPStatus)
-	require.Contains(t, string(got.Error), "object storage")
+	require.Contains(t, string(got.Error), infraerrors.ImageStorageFailed)
 	require.NotContains(t, string(got.Result), "b64_json", "failed offload must not persist base64 to Redis")
 }

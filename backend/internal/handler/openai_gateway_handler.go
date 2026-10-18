@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -77,7 +78,7 @@ var errOpenAIWSUnsupportedModelSwitch = errors.New("selected account does not su
 
 func newOpenAIWSUnsupportedModelSwitchError(model string) error {
 	cause := fmt.Errorf("%w: model %q", errOpenAIWSUnsupportedModelSwitch, strings.TrimSpace(model))
-	return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "model switch requires reconnect", cause)
+	return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSModelSwitchReconnect, cause)
 }
 
 func shouldReportOpenAIWSProxyAccountFailure(err error) bool {
@@ -381,7 +382,7 @@ func openAICompatibleTextTargetAllowed(c *gin.Context, apiKey *service.APIKey, m
 // isResponsesWebSocketCompositePlatform 限定 composite 分组在 Responses WebSocket
 // 上可服务的目标平台。CN 供应商（kimi/zhipu/deepseek）刻意排除：其账号无法通过
 // WSv2 ingress 的 transport 过滤，且 WS HTTP 桥没有面向 CN 的 Responses 转换，
-// 放行只会把明确的策略拒绝变成误导性的 "no available account"。
+// 放行只会把明确的策略拒绝变成误导性的 infraerrors.NoAvailableAccounts。
 func isResponsesWebSocketCompositePlatform(platform string) bool {
 	switch platform {
 	case service.PlatformOpenAI, service.PlatformGrok:
@@ -731,7 +732,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, forwardModel, forwardModel, service.TierRoutingProtocolResponses, body, gateOpen)
 	if err != nil {
 		reqLog.Warn("openai.responses.kimi_tier_estimate_failed", zap.Error(err))
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "tier routing estimate failed")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.TierRoutingEstimateFailed)
 		return
 	}
 	c.Request = c.Request.WithContext(tierCtx)
@@ -1156,7 +1157,7 @@ func (h *OpenAIGatewayHandler) normalizeOpenAIResponsesCompactRequest(c *gin.Con
 	}
 	normalizedCompactBody, normalizedCompact, compactErr := service.NormalizeOpenAICompactRequestBodyForTest(body)
 	if compactErr != nil {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to normalize compact request body")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.CompactNormalizeFailed)
 		return nil, false
 	}
 	if normalizedCompact {
@@ -1422,7 +1423,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, routingModel, estimateModel, service.TierRoutingProtocolMessages, body, gateOpen)
 	if err != nil {
 		reqLog.Warn("openai_messages.kimi_tier_estimate_failed", zap.Error(err))
-		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "tier routing estimate failed", streamStarted)
+		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.TierRoutingEstimateFailed, streamStarted)
 		return
 	}
 	c.Request = c.Request.WithContext(tierCtx)
@@ -2625,7 +2626,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	ingressLease, ingressLeaseAcquired, ingressLeaseErr := h.concurrencyHelper.AcquireOpenAIWSIngressLease(ctx, apiKey.ID, maxIngressConnections)
 	if ingressLeaseErr != nil {
 		reqLog.Error("openai.websocket_ingress_lease_acquire_failed", zap.Error(ingressLeaseErr))
-		h.errorResponse(c, http.StatusServiceUnavailable, "service_unavailable", "WebSocket ingress capacity is temporarily unavailable")
+		h.errorResponse(c, http.StatusServiceUnavailable, "service_unavailable", infraerrors.WSIngressCapacityUnavailable)
 		return
 	}
 	if !ingressLeaseAcquired {
@@ -2666,7 +2667,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		wsConn,
 		firstMessageTimeout,
 		coderws.StatusPolicyViolation,
-		"missing first response.create message",
+		infraerrors.WSMissingFirstCreate,
 	)
 	if err != nil {
 		if errors.Is(context.Cause(ctx), service.ErrOpenAIWSIngressLeaseLost) {
@@ -2682,21 +2683,21 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			zap.String("close_reason", closeReason),
 			zap.Duration("read_timeout", firstMessageTimeout),
 		)
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "missing first response.create message")
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSMissingFirstCreate)
 		return
 	}
 	firstTurnStartedAt := time.Now()
 	if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "unsupported websocket message type")
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSUnsupportedMessageType)
 		return
 	}
 	if !gjson.ValidBytes(firstMessage) {
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "invalid JSON payload")
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSInvalidJSONPayload)
 		return
 	}
 	reqModel := strings.TrimSpace(gjson.GetBytes(firstMessage, "model").String())
 	if reqModel == "" {
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "model is required in first response.create payload")
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSModelRequiredInCreate)
 		return
 	}
 	// 分组级模型白名单：首帧校验客户端模型，不通过则关闭连接并标记运维原因。
@@ -2706,7 +2707,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	if blocked := blockedModelAllowlistCandidate(apiKey.Group, requestmodel.FromBodyCandidates("", "application/json", firstMessage)); blocked != "" {
 		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
 		middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked))
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, fmt.Sprintf(infraerrors.ModelNotInGroup, blocked))
 		return
 	}
 	// 合成路由解析(WS 首帧):上游 v0.2.15 在此以 compositeResolver 解析 Responses
@@ -2721,7 +2722,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		decision, resolveErr := h.compositeResolver.Resolve(c.Request.Context(), apiKey.Group.ID, reqModel, service.CompositeRouteEndpointResponses)
 		if resolveErr != nil {
 			reqLog.Error("openai.websocket_composite_route_failed", zap.Error(resolveErr))
-			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "Failed to resolve composite model route")
+			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, infraerrors.CompositeModelRouteFailed)
 			return
 		}
 		if decision.Matched {
@@ -2733,14 +2734,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	if apiKey.Group != nil && apiKey.Group.Platform == service.PlatformComposite {
 		platform, ok := service.ResolvedTargetPlatformFromContext(ctx)
 		if !ok || !isResponsesWebSocketCompositePlatform(platform) {
-			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "Responses WebSocket API only supports OpenAI-compatible models for composite groups")
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSCompositeOpenAIOnly)
 			return
 		}
 	}
 	previousResponseID := strings.TrimSpace(gjson.GetBytes(firstMessage, "previous_response_id").String())
 	previousResponseIDKind := service.ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
 	if previousResponseID != "" && previousResponseIDKind == service.OpenAIPreviousResponseIDKindMessageID {
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "previous_response_id must be a response.id (resp_*), not a message id")
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.PreviousResponseIDBadFormat)
 		return
 	}
 	firstMessageToolCoverage := service.AnalyzeToolCallOutputContextCoverageBytes(firstMessage)
@@ -2770,7 +2771,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// checked directly and body-derived sessions use the coarse scope gate.
 	if cyberBlockKey := h.findBlockedCyberSessionForAPIKey(c, apiKey, firstMessage); cyberBlockKey != "" {
 		writeCyberSessionBlockedWSError(c.Request.Context(), wsConn)
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "session blocked by cyber-security policy")
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSCyberSessionBlocked)
 		h.enqueueCyberSessionBlockedOpsEntry(c, apiKey, reqModel, cyberBlockKey)
 		return
 	}
@@ -2823,7 +2824,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	scope := resolveConcurrencyScope(c, subject, subscription)
 
 	// 订阅/计量用户撞并发上限时渲染可配文案；account 维度（本路径不涉及）保持英文。
-	userSlotLimitMsg := "too many concurrent requests, please retry later"
+	userSlotLimitMsg := infraerrors.ConcurrencyLimitReachedNoLimit
 	if h.settingService != nil {
 		if tmpl := h.settingService.GetConcurrencyLimitMessage(ctx); strings.TrimSpace(tmpl) != "" {
 			userSlotLimitMsg = renderConcurrencyLimitMessage(tmpl, scope.Kind, scope.Max)
@@ -2840,7 +2841,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	userReleaseFunc, userAcquired, err := acquireUserSlot()
 	if err != nil {
 		reqLog.Warn("openai.websocket_user_slot_acquire_failed", zap.Error(err))
-		closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to acquire user concurrency slot")
+		closeOpenAIClientWS(wsConn, coderws.StatusInternalError, infraerrors.ServiceTemporarilyUnavailable)
 		return
 	}
 	if !userAcquired {
@@ -2855,7 +2856,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		userReleaseFunc, userAcquired, err := acquireUserSlot()
 		if err != nil {
 			reqLog.Warn("openai.websocket_user_slot_reacquire_failed", zap.Error(err))
-			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to acquire user concurrency slot")
+			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, infraerrors.ServiceTemporarilyUnavailable)
 			return false
 		}
 		if !userAcquired {
@@ -2873,7 +2874,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 	if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
 		reqLog.Info("openai.websocket_billing_eligibility_check_failed", zap.Error(err))
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSBillingCheckFailed)
 		return
 	}
 
@@ -2882,7 +2883,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	inflightCtx, inflightDone, inflightErr := reserveInflightBalanceCtx(ctx, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, firstMessage))
 	if inflightErr != nil {
 		reqLog.Info("openai.websocket_inflight_reservation_rejected", zap.Error(inflightErr))
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSBillingCheckFailed)
 		return
 	}
 	defer inflightDone()
@@ -2897,7 +2898,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			return nil
 		}
 		if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(ctx, apiKey)); err != nil {
-			return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "billing check failed", err)
+			return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSBillingCheckFailed, err)
 		}
 		return nil
 	}
@@ -3004,7 +3005,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	tierCtx, err := applyTierRouting(c, ctx, reqLog, wsForwardModel, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage, gateOpen)
 	if err != nil {
 		reqLog.Warn("openai.websocket.kimi_tier_estimate_failed", zap.Error(err))
-		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "tier routing estimate failed")
+		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.TierRoutingEstimateFailed)
 		return
 	}
 	ctx = tierCtx
@@ -3047,7 +3048,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(c, wsConn, lastFailoverErr)
 			} else {
-				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.NoAvailableAccounts)
 			}
 			return
 		}
@@ -3055,7 +3056,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(c, wsConn, lastFailoverErr)
 			} else {
-				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.NoAvailableAccounts)
 			}
 			return
 		}
@@ -3079,7 +3080,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				reqLog.Debug("openai.websocket_account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
 				if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
 					reqLog.Warn("openai.websocket_profit_veto_attempts_exhausted", zap.Int("profit_veto_count", profitVetoCount))
-					closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
+					closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.NoAvailableAccounts)
 					return
 				}
 				continue
@@ -3089,7 +3090,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 		if !selection.Acquired {
 			if selection.WaitPlan == nil {
-				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "account is busy, please retry later")
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.WSAccountBusy)
 				return
 			}
 			fastReleaseFunc, fastAcquired, err := h.concurrencyHelper.TryAcquireAccountSlot(
@@ -3099,11 +3100,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			)
 			if err != nil {
 				reqLog.Warn("openai.websocket_account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to acquire account concurrency slot")
+				closeOpenAIClientWS(wsConn, coderws.StatusInternalError, infraerrors.ServiceTemporarilyUnavailable)
 				return
 			}
 			if !fastAcquired {
-				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "account is busy, please retry later")
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.WSAccountBusy)
 				return
 			}
 			// 分组利润控制：WS 快速抢槽成功后终检，越线则释放
@@ -3116,7 +3117,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				reqLog.Debug("openai.websocket_account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
 				if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
 					reqLog.Warn("openai.websocket_profit_veto_attempts_exhausted", zap.Int("profit_veto_count", profitVetoCount))
-					closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
+					closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.NoAvailableAccounts)
 					return
 				}
 				continue
@@ -3148,7 +3149,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				}
 				return
 			}
-			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to get access token")
+			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, infraerrors.UpstreamAuthFailed)
 			return
 		}
 
@@ -3190,7 +3191,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		var turnBillingAPIKeys openAIWSTurnBillingAPIKeys
 		// Passthrough ingress does not invoke BeforeTurn for the first frame.
 		if err := checkSimpleModeTurnBilling(); err != nil {
-			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSBillingCheckFailed)
 			return
 		}
 		hooks := &service.OpenAIWSIngressHooks{
@@ -3215,7 +3216,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					return nil
 				}
 				if !gjson.ValidBytes(payload) {
-					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
+					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, errors.New("invalid json"))
 				}
 				model := strings.TrimSpace(originalModel)
 				if model == "" {
@@ -3233,7 +3234,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if blocked := blockedModelAllowlistCandidate(apiKey.Group, candidates); blocked != "" {
 					service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
 					middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
-					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked), nil)
+					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, fmt.Sprintf(infraerrors.ModelNotInGroup, blocked), nil)
 				}
 				if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, model, payload, "subsequent_turn"); decision != nil && !decision.AllowNextStage {
 					writeSecurityAuditWSError(ctx, wsConn, decision)
@@ -3300,7 +3301,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					userReleaseFunc, userAcquired, slotErr = h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, subject.UserID, scope.Max, apiKey.ID)
 				}
 				if slotErr != nil {
-					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "failed to acquire user concurrency slot", slotErr)
+					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, infraerrors.ServiceTemporarilyUnavailable, slotErr)
 				}
 				if !userAcquired {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, userSlotLimitMsg, nil)
@@ -3310,13 +3311,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					if userReleaseFunc != nil {
 						userReleaseFunc()
 					}
-					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "failed to acquire account concurrency slot", err)
+					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, infraerrors.ServiceTemporarilyUnavailable, err)
 				}
 				if !accountAcquired {
 					if userReleaseFunc != nil {
 						userReleaseFunc()
 					}
-					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account is busy, please retry later", nil)
+					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, infraerrors.WSAccountBusy, nil)
 				}
 				currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
 				currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
@@ -3492,7 +3493,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 								zap.Int64("account_id", account.ID),
 								zap.Error(acquireErr),
 							)
-							closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "account is busy, please retry later")
+							closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.WSAccountBusy)
 							return
 						}
 						currentAccountRelease = wrapReleaseOnDone(ctx, accountRelease)
@@ -3603,7 +3604,7 @@ func (h *OpenAIGatewayHandler) recoverAnthropicMessagesPanic(c *gin.Context, str
 		zap.ByteString("stack", debug.Stack()),
 	)
 	if !started {
-		h.anthropicErrorResponse(c, http.StatusInternalServerError, "api_error", "Internal server error")
+		h.anthropicErrorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.InternalServerErrorGeneric)
 	}
 }
 
@@ -4306,8 +4307,16 @@ func closeOpenAIClientWS(conn *coderws.Conn, status coderws.StatusCode, reason s
 		return
 	}
 	reason = strings.TrimSpace(reason)
-	if len(reason) > 120 {
-		reason = reason[:120]
+	// WebSocket close reason 必须是不超 120 字节的合法 UTF-8（WS 控制帧上限 125 字节）。
+	// 仅按字节在 120 处切割会把多字节汉字截成非法 UTF-8，导致 coder/websocket 丢弃
+	// close 帧、客户端只拿到 EOF 而非状态码。故在 120 字节内向回退到 rune 边界。
+	const maxCloseReasonBytes = 120
+	if len(reason) > maxCloseReasonBytes {
+		cut := reason[:maxCloseReasonBytes]
+		for len(cut) > 0 && !utf8.ValidString(cut) {
+			cut = cut[:len(cut)-1]
+		}
+		reason = cut
 	}
 	_ = conn.Close(status, reason)
 	_ = conn.CloseNow()
@@ -4487,7 +4496,7 @@ func buildCyberPolicyOpsErrorEntry(meta cyberPolicyOpsErrorMeta, mark *service.C
 }
 
 // 双语单串：网关客户端面向中英用户，且本错误无 i18n 协商通道。
-const cyberSessionBlockedClientMsg = "该会话已被网络安全策略屏蔽，请开启新会话 / This session is blocked by cyber-security policy, please start a new session"
+const cyberSessionBlockedClientMsg = infraerrors.WSCyberSessionBlocked
 
 // buildCyberSessionBlockedOpsEntry builds the ops_error_logs entry for a request
 // rejected locally by the cyber session block (F5a). Distinct error_type from

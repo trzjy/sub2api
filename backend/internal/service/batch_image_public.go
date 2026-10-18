@@ -1414,7 +1414,7 @@ func sanitizeBatchImagePublicMessage(message string) string {
 	message = strings.TrimSpace(message)
 	for _, marker := range []string{"gs://", "files/", "projects/"} {
 		if strings.Contains(message, marker) {
-			message = "upstream provider operation failed"
+			message = infraerrors.UpstreamProviderOperationFailed
 			break
 		}
 	}

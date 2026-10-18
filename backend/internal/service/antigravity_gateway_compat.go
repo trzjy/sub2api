@@ -220,7 +220,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 	)
 	if mappedModel == "" {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
-		message := fmt.Sprintf("model %s not in whitelist", request.originalModel)
+		message := fmt.Sprintf(infraerrors.ModelNotInGroup, request.originalModel)
 		return nil, s.writeAntigravityCompatError(c, http.StatusForbidden, "permission_error", message)
 	}
 	thinkingEnabled := claudeRequest.Thinking != nil &&

@@ -36,7 +36,7 @@ func (h *BatchImageHandler) Submit(c *gin.Context) {
 	}
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	if !h.checkSecurityAuditBeforeSubmit(c, &req) {
@@ -59,7 +59,7 @@ func (h *BatchImageHandler) checkSecurityAuditBeforeSubmit(c *gin.Context, req *
 	}
 	apiKey, ok := middleware.GetAPIKeyFromContext(c)
 	if !ok || apiKey == nil {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return false
 	}
 	subject, ok := middleware.GetAuthSubjectFromContext(c)
@@ -78,7 +78,7 @@ func (h *BatchImageHandler) checkSecurityAuditBeforeSubmit(c *gin.Context, req *
 	}
 	body, err := json.Marshal(map[string]any{"request": map[string]any{"items": items}})
 	if err != nil {
-		batchImageError(c, infraerrors.New(http.StatusBadRequest, "INVALID_BATCH_PROMPT", "batch prompts are invalid"))
+		batchImageError(c, infraerrors.New(http.StatusBadRequest, "INVALID_BATCH_PROMPT", infraerrors.BatchPromptsInvalid))
 		return false
 	}
 	reqLog := requestLogger(c, "handler.batch_image.security_audit",
@@ -94,7 +94,7 @@ func (h *BatchImageHandler) checkSecurityAuditBeforeSubmit(c *gin.Context, req *
 func (h *BatchImageHandler) Get(c *gin.Context) {
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	got, err := h.service.Get(c.Request.Context(), owner, c.Param("id"))
@@ -108,7 +108,7 @@ func (h *BatchImageHandler) Get(c *gin.Context) {
 func (h *BatchImageHandler) List(c *gin.Context) {
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	limit, _ := strconv.Atoi(c.Query("limit"))
@@ -131,7 +131,7 @@ func (h *BatchImageHandler) List(c *gin.Context) {
 func (h *BatchImageHandler) Models(c *gin.Context) {
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	got, err := h.service.ListModels(c.Request.Context(), owner)
@@ -164,7 +164,7 @@ func filterBatchImageModelsByAllowlist(models []service.BatchImagePublicModel, a
 func (h *BatchImageHandler) Items(c *gin.Context) {
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	limit, _ := strconv.Atoi(c.Query("limit"))
@@ -183,7 +183,7 @@ func (h *BatchImageHandler) Items(c *gin.Context) {
 func (h *BatchImageHandler) Cancel(c *gin.Context) {
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	got, err := h.service.Cancel(c.Request.Context(), owner, c.Param("id"))
@@ -197,7 +197,7 @@ func (h *BatchImageHandler) Cancel(c *gin.Context) {
 func (h *BatchImageHandler) ItemContent(c *gin.Context) {
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	imageIndex := 0
@@ -244,7 +244,7 @@ func (h *BatchImageHandler) markDownloadedBestEffort(c *gin.Context, owner servi
 func (h *BatchImageHandler) Download(c *gin.Context) {
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	maxItems, _ := strconv.Atoi(c.Query("max_items"))
@@ -270,7 +270,7 @@ func (h *BatchImageHandler) Download(c *gin.Context) {
 func (h *BatchImageHandler) DeleteRecord(c *gin.Context) {
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	if err := h.service.DeleteRecord(c.Request.Context(), owner, c.Param("id")); err != nil {
@@ -283,7 +283,7 @@ func (h *BatchImageHandler) DeleteRecord(c *gin.Context) {
 func (h *BatchImageHandler) DeleteOutputs(c *gin.Context) {
 	owner, ok := batchImageOwnerFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
+		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", infraerrors.APIKeyMissing))
 		return
 	}
 	got, err := h.cleanup.DeleteOutputsForOwner(c.Request.Context(), owner, c.Param("id"))
@@ -323,7 +323,7 @@ func batchImageError(c *gin.Context, err error) {
 	if errors.Is(err, service.ErrBatchImageJobNotFound) {
 		status = http.StatusNotFound
 		code = "BATCH_IMAGE_NOT_FOUND"
-		message = "batch image job not found"
+		message = infraerrors.BatchImageJobNotFound
 	}
 	c.JSON(status, gin.H{
 		"error": gin.H{

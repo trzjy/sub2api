@@ -380,7 +380,7 @@ func TestBatchImagePublicService_Submit(t *testing.T) {
 		for _, job := range repo.jobs {
 			require.Equal(t, BatchImageJobStatusFailed, job.Status)
 			require.Equal(t, "PROVIDER_SUBMIT_FAILED", batchImageDerefString(job.LastErrorCode))
-			require.Equal(t, "upstream provider operation failed", batchImageDerefString(job.LastErrorMessage))
+			require.Equal(t, infraerrors.UpstreamProviderOperationFailed, batchImageDerefString(job.LastErrorMessage))
 			require.NotNil(t, job.UserDeletedAt)
 		}
 	})
@@ -658,7 +658,7 @@ func TestBatchImagePublicService_StatusItemsAndCancel(t *testing.T) {
 		require.Len(t, filtered.Data, 1)
 		require.Equal(t, "failed", filtered.Data[0].Status)
 		require.NotNil(t, filtered.Data[0].Error)
-		require.Equal(t, "upstream provider operation failed", filtered.Data[0].Error.Message)
+		require.Equal(t, infraerrors.UpstreamProviderOperationFailed, filtered.Data[0].Error.Message)
 
 		body, err := json.Marshal(filtered)
 		require.NoError(t, err)

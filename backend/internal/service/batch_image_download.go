@@ -304,7 +304,7 @@ func (s *BatchImageDownloadService) writeZipImages(ctx context.Context, zipWrite
 		}
 		delete(missing, images.CustomID)
 		if len(images.Images) == 0 {
-			zipErrors = append(zipErrors, batchImageZipError{CustomID: images.CustomID, Code: "EMPTY_IMAGE_OUTPUT", Message: "provider response contained no image output"})
+			zipErrors = append(zipErrors, batchImageZipError{CustomID: images.CustomID, Code: "EMPTY_IMAGE_OUTPUT", Message: infraerrors.ProviderImageOutputMissing})
 			continue
 		}
 		for idx, image := range images.Images {
@@ -446,11 +446,11 @@ func ExtractBatchImagePartsFromResultLine(line []byte) (*BatchImageLineImages, e
 	}
 	if _, hasResponse := obj["response"]; hasResponse || batchImageHasCandidates(obj) {
 		out.ErrorCode = "EMPTY_IMAGE_OUTPUT"
-		out.ErrorMessage = "provider response contained no image output"
+		out.ErrorMessage = infraerrors.ProviderImageOutputMissing
 		return out, nil
 	}
 	out.ErrorCode = "PROVIDER_ITEM_FAILED"
-	out.ErrorMessage = "provider result line contained no image output"
+	out.ErrorMessage = infraerrors.ProviderImageOutputMissing
 	return out, nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/typesafe"
 	"github.com/gin-gonic/gin"
 )
@@ -24,7 +25,7 @@ const (
 func (s *AccountTestService) testTypeSafeAccountConnection(c *gin.Context, account *Account, prompt string) error {
 	ctx := c.Request.Context()
 	if account.Type != AccountTypeAPIKey {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
+		return s.sendErrorAndEnd(c, infraerrors.AccountConfigUnsupported)
 	}
 	apiKey := account.GetTypeSafeAPIKey()
 	if apiKey == "" {

@@ -26,7 +26,7 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 	}
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok || apiKey.Group == nil {
-		h.errorResponse(c, http.StatusUnauthorized, "invalid_request_error", "API key group is required")
+		h.errorResponse(c, http.StatusUnauthorized, "invalid_request_error", infraerrors.APIKeyGroupRequired)
 		return
 	}
 	if apiKey.Group.Platform != service.PlatformOpenAI && apiKey.Group.Platform != service.PlatformComposite {
@@ -118,11 +118,11 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 			if c.Request.Context().Err() != nil {
 				return
 			}
-		if service.IsRetryableCodexModelsManifestError(err) {
-			failedAccountIDs[account.ID] = struct{}{}
-			switchCount++
-			lastUpstreamErr = err
-			continue
+			if service.IsRetryableCodexModelsManifestError(err) {
+				failedAccountIDs[account.ID] = struct{}{}
+				switchCount++
+				lastUpstreamErr = err
+				continue
 			}
 			h.errorResponse(c, infraerrors.Code(err), "upstream_error", infraerrors.Message(err))
 			return

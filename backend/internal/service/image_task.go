@@ -26,7 +26,7 @@ const (
 var (
 	ErrImageTaskNotFound    = infraerrors.New(http.StatusNotFound, "IMAGE_TASK_NOT_FOUND", "image task not found")
 	ErrImageTaskForbidden   = infraerrors.New(http.StatusForbidden, "IMAGE_TASK_FORBIDDEN", "image task does not belong to this API key")
-	ErrImageTaskUnavailable = infraerrors.New(http.StatusServiceUnavailable, "IMAGE_TASK_UNAVAILABLE", "image task storage is unavailable")
+	ErrImageTaskUnavailable = infraerrors.New(http.StatusServiceUnavailable, "IMAGE_TASK_UNAVAILABLE", infraerrors.ImageTaskStorageUnavailable)
 )
 
 // ImageTaskRecord is the private Redis representation of an asynchronous image
@@ -196,7 +196,7 @@ func (s *ImageTaskService) Complete(ctx context.Context, id string, statusCode i
 		if err != nil {
 			// 转存失败不回退存 base64，避免大 blob 撑爆 Redis：直接把任务标记为失败。
 			logger.L().Error("image_task.offload_failed", zap.String("task_id", id), zap.Error(err))
-			return s.Fail(ctx, id, http.StatusBadGateway, imageTaskErrorJSON("api_error", "failed to store generated image to object storage"))
+			return s.Fail(ctx, id, http.StatusBadGateway, imageTaskErrorJSON("api_error", infraerrors.ImageStorageFailed))
 		}
 		result = rewritten
 	}
@@ -205,7 +205,7 @@ func (s *ImageTaskService) Complete(ctx context.Context, id string, statusCode i
 
 func (s *ImageTaskService) Fail(ctx context.Context, id string, statusCode int, taskErr json.RawMessage) error {
 	if !json.Valid(taskErr) {
-		taskErr = imageTaskErrorJSON("api_error", "image generation failed")
+		taskErr = imageTaskErrorJSON("api_error", infraerrors.ImageGenerationFailed)
 	}
 	return s.finish(ctx, id, ImageTaskStatusFailed, statusCode, nil, taskErr)
 }

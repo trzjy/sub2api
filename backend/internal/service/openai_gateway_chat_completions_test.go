@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -84,7 +85,7 @@ func TestHandleChatStreamingResponse_ClassifiesHTTP2ReadError(t *testing.T) {
 	code, message, ok := OpenAIUpstreamStreamReadErrorDetails(err)
 	require.True(t, ok)
 	require.Equal(t, OpenAIUpstreamHTTP2StreamErrorCode, code)
-	require.Equal(t, "Upstream HTTP/2 stream failed", message)
+	require.Equal(t, infraerrors.UpstreamHTTP2StreamFailed, message)
 	require.NotContains(t, message, "stream ID")
 	require.NotContains(t, message, "INTERNAL_ERROR")
 }

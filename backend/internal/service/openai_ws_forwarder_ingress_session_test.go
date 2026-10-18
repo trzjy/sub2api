@@ -466,14 +466,14 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_IdleTimeoutRelea
 	var clientClose coderws.CloseError
 	require.ErrorAs(t, err, &clientClose)
 	require.Equal(t, coderws.StatusNormalClosure, clientClose.Code)
-	require.Equal(t, "websocket idle timeout", clientClose.Reason)
+	require.Equal(t, infraerrors.WSIdleTimeout, clientClose.Reason)
 
 	select {
 	case proxyErr := <-serverErrCh:
 		var closeErr *OpenAIWSClientCloseError
 		require.ErrorAs(t, proxyErr, &closeErr)
 		require.Equal(t, coderws.StatusNormalClosure, closeErr.StatusCode())
-		require.Equal(t, "websocket idle timeout", closeErr.Reason())
+		require.Equal(t, infraerrors.WSIdleTimeout, closeErr.Reason())
 	case <-time.After(4 * time.Second):
 		t.Fatal("timed out waiting for idle ingress session to close")
 	}
@@ -1639,7 +1639,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_ModeOffReturnsPo
 		var closeErr *OpenAIWSClientCloseError
 		require.ErrorAs(t, serverErr, &closeErr)
 		require.Equal(t, coderws.StatusPolicyViolation, closeErr.StatusCode())
-		require.Equal(t, "websocket mode is disabled for this account", closeErr.Reason())
+		require.Equal(t, infraerrors.WSModeDisabled, closeErr.Reason())
 	case <-time.After(5 * time.Second):
 		t.Fatal("等待 ingress websocket 结束超时")
 	}
@@ -4315,7 +4315,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_RejectsMessageID
 		var closeErr *OpenAIWSClientCloseError
 		require.ErrorAs(t, serverErr, &closeErr)
 		require.Equal(t, coderws.StatusPolicyViolation, closeErr.StatusCode())
-		require.Contains(t, closeErr.Reason(), "previous_response_id must be a response.id")
+		require.Contains(t, closeErr.Reason(), infraerrors.PreviousResponseIDBadFormat)
 	case <-time.After(5 * time.Second):
 		t.Fatal("等待 ingress websocket 结束超时")
 	}
