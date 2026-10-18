@@ -1940,7 +1940,7 @@ export default {
         grokProbeTooltip: 'Send a minimal xAI Responses probe and read quota headers',
         codebuddyCredit: 'Credits',
         codebuddyCreditNotProbed: 'Not probed yet',
-        codebuddyPackageTotalRow: 'Total {remaining} / {total}',
+        codebuddyPackageTotalRow: 'Remaining {remaining} / Total {total}',
         codebuddyPackageUpdated: 'updated {date}',
         codebuddyPackageExcludedNote: 'Some packages are excluded from the total',
         grokResetUnsupported: 'Reset unsupported',

@@ -31,6 +31,24 @@ describe('parseCodeBuddyCredit — 聚合键读取', () => {
     expect(snap!.usedPercent).toBeCloseTo(20.725, 6)
   })
 
+  it('页面示例形态：remaining=600、total=2500、used_percent=76（生产账号 264 快照）', () => {
+    const snap = parseCodeBuddyCredit({
+      codebuddy_credit_total_remaining: '600.00000000',
+      codebuddy_credit_total_total: '2500.00000000',
+      codebuddy_credit_used_percent: 76,
+      codebuddy_credit_packages_updated_at: '2026-10-19T02:33:35.593+08:00',
+    })
+    expect(snap).not.toBeNull()
+    expect(snap!.totalRemaining).toBe('600')
+    expect(snap!.totalTotal).toBe('2500')
+    expect(snap!.remainingDisplay).toBe('600.00')
+    expect(snap!.totalDisplay).toBe('2500.00')
+    expect(snap!.summary).toBe('600.00 / 2500.00')
+    expect(snap!.usedPercent).toBe(76)
+    // (2500-600)/2500 = 76%，前端展示百分比与剩余/总额口径一致
+    expect((2500 - 600) / 2500 * 100).toBeCloseTo(snap!.usedPercent, 6)
+  })
+
   it('has_excluded=true 表示后端有分包未计入合计', () => {
     const snap = parseCodeBuddyCredit({
       codebuddy_credit_total_remaining: '10.00000000',

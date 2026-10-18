@@ -792,7 +792,7 @@ export default {
         grokProbeTooltip: '发送最小 xAI Responses 探测请求并读取配额响应头',
         codebuddyCredit: '积分',
         codebuddyCreditNotProbed: '未探测',
-        codebuddyPackageTotalRow: '合计 {remaining} / {total}',
+        codebuddyPackageTotalRow: '剩余 {remaining} / 总额 {total}',
         codebuddyPackageUpdated: '更新于 {date}',
         codebuddyPackageExcludedNote: '部分分包未计入合计',
         grokResetUnsupported: '不支持重置',
