@@ -80,7 +80,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	bindRequestedReasoningEffort(c, body, reqModel)
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.gatewayService)
 	if !compositeTargetPlatformResolved(c, apiKey, reqModel, h.gatewayService) {
-		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by composite groups")
+		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
 		return
 	}
 	if rejectSystemOneOnlyPlatform(c, apiKey, h.responsesErrorResponse) {

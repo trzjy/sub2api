@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
 const (
@@ -71,7 +73,7 @@ func OpenAIUpstreamStreamReadErrorDetails(err error) (code, message string, ok b
 func classifyOpenAIUpstreamStreamReadError(err error) (code, message string) {
 	if err != nil {
 		if errors.Is(err, ErrOpenAIUpstreamStreamTruncated) {
-			return OpenAIUpstreamStreamTruncatedCode, "Upstream response stream ended before completion"
+			return OpenAIUpstreamStreamTruncatedCode, infraerrors.UpstreamStreamEndedEarly
 		}
 		lower := strings.ToLower(err.Error())
 		// net/http's HTTP/2 stream error is unexported. Its stable text contains
@@ -79,8 +81,8 @@ func classifyOpenAIUpstreamStreamReadError(err error) (code, message string) {
 		// never pass the original text to the client.
 		if strings.Contains(lower, "stream error: stream id ") ||
 			(strings.Contains(lower, "http2:") && strings.Contains(lower, "stream")) {
-			return OpenAIUpstreamHTTP2StreamErrorCode, "Upstream HTTP/2 stream failed"
+			return OpenAIUpstreamHTTP2StreamErrorCode, infraerrors.UpstreamHTTP2StreamFailed
 		}
 	}
-	return OpenAIUpstreamStreamReadErrorCode, "Upstream response stream was interrupted"
+	return OpenAIUpstreamStreamReadErrorCode, infraerrors.UpstreamStreamInterrupted
 }

@@ -8,8 +8,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/httptrace"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +18,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -239,7 +240,7 @@ func TestOpenAICNFirstByteTimeout_ClientDisconnectViaRealClientCtxNoCooldown(t *
 // —— 竞态方向①：父 context 取消优先于 60s 定时器到期 ——
 // 客户端取消（父 context 中断）与定时器近乎同时到达时，绝不能把定时器触发
 // 误判为内部首包超时（内部超时→冷却+换号；客户端取消→不冷却不换号）。
-func TestOpenAICNFirstByteTimeout_RaceParentCancelBeatsTimer(t *testing.T) {	// 父 context 在 watchdog 建立后立即取消（模拟客户端断开刚发生），
+func TestOpenAICNFirstByteTimeout_RaceParentCancelBeatsTimer(t *testing.T) { // 父 context 在 watchdog 建立后立即取消（模拟客户端断开刚发生），
 	// 定时器随后到期：expire 必须识别父已取消，不得置内部超时标志。
 	parent, cancelParent := context.WithCancel(context.Background())
 	watchdog, _ := newOpenAICNFirstByteWatchdog(parent, parent, 20*time.Millisecond)
@@ -1179,7 +1180,7 @@ func TestOpenAICNFirstByteTimeout_CCNativeStreamingAfterHeadersEmitsErrorEvent(t
 	require.True(t, c.Writer.Written(), "响应头已提交后客户端应已收到首字节")
 	body := rec.Body.String()
 	require.Contains(t, body, `"error"`, "响应头提交后的超时必须下发流内错误事件")
-	require.Contains(t, body, "upstream first byte timeout", "错误事件必须携带可识别的超时消息")
+	require.Contains(t, body, infraerrors.UpstreamFirstByteTimeoutAfterStart, "错误事件必须携带可识别的超时消息")
 }
 
 // TestOpenAICNFirstByteTimeout_ResponsesNativeStreamingHeadlessConsumesFailover
@@ -1255,10 +1256,11 @@ func TestOpenAICNFirstByteTimeout_ResponsesNativeStreamingAfterHeadersEmitsError
 // 使 watchdog 标记穿透三层包装仍可达（forward.go:1130 openAIRequestContextReadCloser
 // 与 :1245 responsesClientToolStreamBody 可对 resp.Body 双重包装，旧直接类型断言
 // 在此失效）：
-//  ① watchdog body 直接断言命中（既有行为不回归）；
-//  ② openAIRequestContextReadCloser 包装后命中；
-//  ③ newResponsesClientToolStreamBody 包装（source 为 watchdog body）后命中；
-//  ④ 普通 body 返回 nil（非 CN 路径行为不变）。
+//
+//	① watchdog body 直接断言命中（既有行为不回归）；
+//	② openAIRequestContextReadCloser 包装后命中；
+//	③ newResponsesClientToolStreamBody 包装（source 为 watchdog body）后命中；
+//	④ 普通 body 返回 nil（非 CN 路径行为不变）。
 func TestOpenAICNFirstByteTimeout_CarrierPenetrationThroughWrappers(t *testing.T) {
 	watchdog, _ := newOpenAICNFirstByteWatchdog(context.Background(), context.Background(), 30*time.Second)
 	pr, _ := io.Pipe()
@@ -1311,4 +1313,3 @@ func TestOpenAICNFirstByteTimeout_CarrierPenetrationThroughWrappers(t *testing.T
 			"双重包装（openAIRequestContextReadCloser→responsesClientToolStreamBody）下载体接口必须仍可达 watchdog")
 	})
 }
-

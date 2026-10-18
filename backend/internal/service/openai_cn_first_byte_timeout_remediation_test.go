@@ -427,9 +427,9 @@ func ccFallbackConsumers() []ccFallbackConsumer {
 // TestOpenAICNFirstByteTimeout_NonTimeoutReadErrorsKeepEndpointContract 钉死整改
 // 项 4：内部首包超时仍走 failover；其余三类读取/解析错误按原 endpoint 契约
 // 分别回写，三类不得互相归并：
-//   - ErrUpstreamResponseBodyTooLarge → upstream_error: Upstream response too large
-//   - JSON 解析失败 → api_error: Failed to parse upstream response
-//   - 其他读取错误 → api_error: Failed to read upstream response
+//   - ErrUpstreamResponseBodyTooLarge → upstream_error: 上游响应超出网关大小限制
+//   - JSON 解析失败 → api_error: 上游响应解析失败
+//   - 其他读取错误 → api_error: 读取上游响应失败，请稍后重试
 func TestOpenAICNFirstByteTimeout_NonTimeoutReadErrorsKeepEndpointContract(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -453,7 +453,7 @@ func TestOpenAICNFirstByteTimeout_NonTimeoutReadErrorsKeepEndpointContract(t *te
 				require.Error(t, err)
 				require.Nil(t, result)
 				require.Equal(t, http.StatusBadGateway, rec.Code, "超限契约是 502")
-				require.Contains(t, rec.Body.String(), "Upstream response too large",
+				require.Contains(t, rec.Body.String(), infraerrors.UpstreamResponseTooLarge,
 					"超限必须走 TooLarge 契约，不得归并到 read/parse")
 				require.NotContains(t, rec.Body.String(), "Failed to read upstream response")
 				require.NotContains(t, rec.Body.String(), infraerrors.UpstreamResponseParseFailed)
@@ -495,7 +495,7 @@ func TestOpenAICNFirstByteTimeout_NonTimeoutReadErrorsKeepEndpointContract(t *te
 				require.Error(t, err)
 				require.Nil(t, result)
 				require.Equal(t, http.StatusBadGateway, rec.Code)
-				require.Contains(t, rec.Body.String(), "Failed to read upstream response",
+				require.Contains(t, rec.Body.String(), infraerrors.UpstreamResponseReadFailed,
 					"读取错误必须走 read 契约，不得归并到 parse/TooLarge")
 				require.NotContains(t, rec.Body.String(), infraerrors.UpstreamResponseParseFailed)
 				require.NotContains(t, rec.Body.String(), "Upstream response too large")
@@ -536,7 +536,7 @@ func TestOpenAICNFirstByteTimeout_ReadHelperDistinguishesTimeoutFromOtherErrors(
 
 		require.Error(t, err)
 		require.False(t, isOpenAICNFirstByteTimeout(err), "非内部超时不得被误判为内部超时")
-		require.Contains(t, rec.Body.String(), "Failed to read upstream response")
+		require.Contains(t, rec.Body.String(), infraerrors.UpstreamResponseReadFailed)
 	})
 }
 

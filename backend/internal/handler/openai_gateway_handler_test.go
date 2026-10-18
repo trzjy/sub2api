@@ -1288,7 +1288,7 @@ func TestOpenAIResponsesWebSocket_PreviousResponseIDKindLoggedBeforeAcquireFailu
 	var closeErr coderws.CloseError
 	require.ErrorAs(t, err, &closeErr)
 	require.Equal(t, coderws.StatusInternalError, closeErr.Code)
-	require.Contains(t, strings.ToLower(closeErr.Reason), "failed to acquire user concurrency slot")
+	require.Contains(t, closeErr.Reason, infraerrors.ServiceTemporarilyUnavailable)
 }
 
 type contentModerationHandlerSettingRepo struct {
@@ -1795,7 +1795,7 @@ func TestShouldReportOpenAIWSProxyAccountFailure(t *testing.T) {
 		var closeErr *service.OpenAIWSClientCloseError
 		require.ErrorAs(t, err, &closeErr)
 		require.Equal(t, coderws.StatusPolicyViolation, closeErr.StatusCode())
-		require.Equal(t, "model switch requires reconnect", closeErr.Reason())
+		require.Equal(t, infraerrors.WSModelSwitchReconnect, closeErr.Reason())
 	})
 
 	t.Run("upstream policy violation still penalizes account", func(t *testing.T) {
@@ -3154,7 +3154,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	require.NoError(t, err)
 
 	if tc.closeReason == "" {
-		tc.closeReason = "not available for this group"
+		tc.closeReason = "不在当前分组支持范围内"
 	}
 	if tc.closeStatus == 0 {
 		tc.closeStatus = coderws.StatusPolicyViolation
@@ -3173,7 +3173,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		require.Equal(t, status, closeErr.Code)
 		reason := tc.closeReason
 		if reason == "" {
-			reason = "not available for this group"
+			reason = "不在当前分组支持范围内"
 		}
 		require.Contains(t, closeErr.Reason, reason)
 		require.Empty(t, upstreamPayloadCh, "rejected first frame must not reach upstream")
@@ -3230,7 +3230,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 			require.Equal(t, status, closeErr.Code)
 			reason := tc.closeReason
 			if reason == "" {
-				reason = "not available for this group"
+				reason = "不在当前分组支持范围内"
 			}
 			require.Contains(t, closeErr.Reason, reason)
 			require.Len(t, upstreamPayloadCh, turnCount-1, "rejected turn must not reach upstream")
@@ -3430,14 +3430,14 @@ func TestOpenAIResponsesWebSocketSimpleModeRechecksKeyWindows(t *testing.T) {
 		t.Run(mode+"/after-account-selection", func(t *testing.T) {
 			runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
 				firstPayload: `{"type":"response.create","model":"gpt-5.1"}`,
-				ingressMode:  mode, simpleModeRejectAtRead: 2, firstFrameCloseExpected: true, closeReason: "billing check failed",
+				ingressMode:  mode, simpleModeRejectAtRead: 2, firstFrameCloseExpected: true, closeReason: infraerrors.WSBillingCheckFailed,
 			})
 		})
 		t.Run(mode+"/followup-turn", func(t *testing.T) {
 			runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
 				firstPayload:  `{"type":"response.create","model":"gpt-5.1"}`,
 				secondPayload: `{"type":"response.create","model":"gpt-5.1"}`,
-				ingressMode:   mode, simpleModeRejectAtRead: 3, secondTurnCloseExpected: true, closeReason: "billing check failed",
+				ingressMode:   mode, simpleModeRejectAtRead: 3, secondTurnCloseExpected: true, closeReason: infraerrors.WSBillingCheckFailed,
 			})
 		})
 	}

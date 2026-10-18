@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -1869,7 +1870,7 @@ func TestForwardGrokMedia429ReconcilesRateLimitBeforeCustomErrorBypass(t *testin
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.Equal(t, http.StatusInternalServerError, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "Upstream gateway error")
+	require.Contains(t, recorder.Body.String(), infraerrors.UpstreamGatewayError)
 	require.NotContains(t, recorder.Body.String(), "do not expose")
 	require.Equal(t, 1, repo.rateLimitedCalls)
 	require.Zero(t, repo.tempUnschedCalls)

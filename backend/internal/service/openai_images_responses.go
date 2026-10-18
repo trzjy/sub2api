@@ -973,7 +973,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 		upErr := &OpenAIImagesUpstreamError{
 			StatusCode:        http.StatusInternalServerError,
 			ErrorType:         "upstream_error",
-			Message:           "Upstream gateway error",
+			Message:           infraerrors.UpstreamGatewayError,
 			UpstreamRequestID: strings.TrimSpace(resp.Header.Get("x-request-id")),
 		}
 		writeOpenAIImagesUpstreamErrorResponse(c, upErr)
@@ -1622,7 +1622,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 			return nil
 		}
 
-		streamErr := fmt.Errorf("stream disconnected before image generation completed")
+		streamErr := fmt.Errorf("%s", infraerrors.ImageStreamDisconnectedEarly)
 		s.tryWriteOpenAIImagesStreamEvent(c, flusher, &clientDisconnected, &lastDownstreamWriteAt, "error", buildOpenAIImagesStreamErrorBody(streamErr.Error()))
 		return streamErr
 	}
@@ -1765,7 +1765,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 				return usage, imageCount, imageOutputSizes, firstTokenMs, fmt.Errorf("image stream incomplete after timeout")
 			}
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Images responses stream data interval timeout: interval=%s", streamInterval)
-			s.tryWriteOpenAIImagesStreamEvent(c, flusher, &clientDisconnected, &lastDownstreamWriteAt, "error", buildOpenAIImagesStreamErrorBody(fmt.Sprintf("upstream image stream idle for %s", streamInterval)))
+			s.tryWriteOpenAIImagesStreamEvent(c, flusher, &clientDisconnected, &lastDownstreamWriteAt, "error", buildOpenAIImagesStreamErrorBody(infraerrors.UpstreamStreamIntervalTimeout))
 			return usage, imageCount, imageOutputSizes, firstTokenMs, fmt.Errorf("image stream data interval timeout")
 		case <-keepaliveCh:
 			if clientDisconnected || time.Since(lastDownstreamWriteAt) < keepaliveInterval {

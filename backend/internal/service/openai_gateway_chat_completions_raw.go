@@ -576,7 +576,7 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
 		}
 		if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
-			writeChatCompletionsError(c, http.StatusBadGateway, "api_error", "Failed to read upstream response")
+			writeChatCompletionsError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamResponseReadFailed)
 		}
 		return nil, fmt.Errorf("read upstream body: %w", err)
 	}
@@ -721,7 +721,7 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsRawCC(
 	// 透传会污染非流式响应，显式强制 JSON（与既有非流式缓冲分支同契约）。
 	ccBytes, err := json.Marshal(ccResp)
 	if err != nil {
-		writeChatCompletionsError(c, http.StatusBadGateway, "api_error", "Failed to marshal aggregated response")
+		writeChatCompletionsError(c, http.StatusBadGateway, "api_error", infraerrors.AggregatedResponseMarshalFailed)
 		return nil, fmt.Errorf("marshal aggregated chat completions response: %w", err)
 	}
 	observer := upstreamResponseModelObserverFromContext(c)
