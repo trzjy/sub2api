@@ -19,16 +19,22 @@
 
 import { apiClient } from '../client'
 
-/** 激活码脱敏视图（与后端 QuotaKeyStatus DTO 对齐）。 */
+/** 激活码脱敏视图（与后端 QuotaKeyStatus / dto.QuotaKey 对齐）。 */
 export interface QuotaKey {
   id: number
   status: string
   exhausted: boolean
   code_masked: string
+  // 契约口径（P1-B3 对齐后端，不新增字段）：
+  // - 列表端点（dto.QuotaKey）只返 id / code_masked / status / exhausted /
+  //   account_count / working_count，expires_at / last_refresh_* 为空。
+  // - 详情端点额外内嵌 QuotaKeyStatus，才带 last_refresh_at / last_refresh_error /
+  //   expires_at（QuotaKeyDetail 沿用本类型）。
   last_refresh_at: string | null
   last_refresh_error: string | null
   expires_at: string | null
-  // 以下字段派发单要求展示；后端当前 QuotaKeyStatus 未必返回，故可选。
+  // 账号层字段由详情端点回填（列表与详情同源）；账号层不承载 key 级额度数值
+  // （两层额度独立，见 QuotaKeysView 的 key 级用量弹窗）。
   account_count?: number
   working_count?: number
   notes?: string | null
@@ -149,7 +155,13 @@ export interface AutoEntryConfig {
   available_models?: AutoEntryModelRef[]
 }
 
-/** 用量查询（D2-a probe_quota）返回的 key_info 摘要。 */
+/**
+ * 用量查询（D2-a probe_quota）返回的 key_info 摘要。
+ *
+ * 口径：全部字段均为「激活码（key）层」（第一层）——总额度 max / 已用 used / 期限
+ * expired_at / 设备 device_* / 取号结果 accounts_written。账号余额属第二层，
+ * 不由本结构复制派生（见 QuotaKeysView 两层展示）。
+ */
 export interface KeyQuotaInfo {
   group: string
   status_code: number
