@@ -39,6 +39,11 @@ func (s *GrokQuotaService) scheduleGrokObservedModelsSync(account *Account) {
 	if _, loaded := grokObservedModelsFlight.LoadOrStore(id, struct{}{}); loaded {
 		return
 	}
+	// 值拷贝共享同一底层 Extra map，而 extraMu 以 unsafe.Pointer 存于 Account：
+	// 若拷贝时源 extraMu 仍为 nil（账号刚从 DB 加载、尚无人触碰过 Extra），
+	// 副本与源各自 CAS 懒初始化会造出两把锁保护同一 map → 数据竞争（fatal 级）。
+	// 因此必须在拷贝前强制源锁就位，副本拷到的 extraMu 与源同一指针、共用一把锁。
+	_ = account.extraLock()
 	// Copy credentials for background use.
 	acc := *account
 	go func() {
