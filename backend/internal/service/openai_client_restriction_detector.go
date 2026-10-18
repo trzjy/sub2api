@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
 )
@@ -12,7 +13,7 @@ import (
 // CodexOfficialClientsOnlyMessage 是 codex_cli_only 拒绝时面向客户端的通用兜底文案。
 // 仅当拒绝原因不是「可解析版本但越界」（VersionTooLow/VersionTooHigh）时使用：
 // 未命中官方/黑名单/缺指纹/版本无法识别都沿用这句（避免向伪装客户端泄露门控细节）。
-const CodexOfficialClientsOnlyMessage = "This account only allows Codex official clients"
+const CodexOfficialClientsOnlyMessage = infraerrors.CodexOfficialClientsOnly
 
 const (
 	// CodexClientRestrictionReasonDisabled 表示账号未开启 codex_cli_only。

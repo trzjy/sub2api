@@ -47,7 +47,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaNativeAnthropic(
 	// 1. Lower Codex client-side tools to function tools understood by Anthropic.
 	adaptedBody, clientToolMapping, err := adaptResponsesClientToolsForAnthropic(body)
 	if err != nil {
-		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", "Failed to adapt request tools")
+		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestConvertFailed)
 		return nil, fmt.Errorf("adapt responses client tools: %w", err)
 	}
 

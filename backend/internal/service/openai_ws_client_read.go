@@ -112,7 +112,7 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 					cause,
 				)
 			}
-			return closeAndJoin(coderws.StatusGoingAway, "websocket request canceled", cause)
+			return closeAndJoin(coderws.StatusGoingAway, infraerrors.WSRequestCanceled, cause)
 		}
 	}
 }

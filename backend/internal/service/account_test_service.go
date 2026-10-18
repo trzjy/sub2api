@@ -28,6 +28,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -1277,7 +1278,7 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		// 避免裸拼 "/v1/messages" 造成 /v1/v1 双段 404。
 		apiURL = buildVersionedEndpointURL(endpointFamilyAnthropic, normalizedBaseURL, "/v1/messages") + "?beta=true"
 	} else {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
+		return s.sendErrorAndEnd(c, infraerrors.AccountConfigUnsupported)
 	}
 
 	// Set SSE headers
@@ -1377,7 +1378,7 @@ func (s *AccountTestService) testClaudeVertexServiceAccountConnection(c *gin.Con
 	}
 
 	if s.claudeTokenProvider == nil {
-		return s.sendErrorAndEnd(c, "Claude token provider not configured")
+		return s.sendErrorAndEnd(c, infraerrors.CompatTokenProviderNotConfigured)
 	}
 	accessToken, err := s.claudeTokenProvider.GetAccessToken(ctx, account)
 	if err != nil {
@@ -1603,7 +1604,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		}
 		apiURL = openAIResponsesURLForBase(credentialAccount.Platform, normalizedBaseURL)
 	} else {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
+		return s.sendErrorAndEnd(c, infraerrors.AccountConfigUnsupported)
 	}
 
 	// Set SSE headers
@@ -2970,7 +2971,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 		}
 		apiURL = openAIResponsesURLForBase(account.Platform, normalizedBaseURL)
 	default:
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
+		return s.sendErrorAndEnd(c, infraerrors.AccountConfigUnsupported)
 	}
 
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -3170,7 +3171,7 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 	case AccountTypeServiceAccount:
 		req, err = s.buildGeminiServiceAccountRequest(ctx, account, testModelID, payload)
 	default:
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
+		return s.sendErrorAndEnd(c, infraerrors.AccountConfigUnsupported)
 	}
 
 	if err != nil {

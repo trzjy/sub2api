@@ -823,7 +823,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": gin.H{
 				"type":    "upstream_error",
-				"message": "Upstream gateway error",
+				"message": infraerrors.UpstreamGatewayError,
 			},
 		})
 		if upstreamMsg == "" {
@@ -1056,7 +1056,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 			Detail:             upstreamDetail,
 		})
 		MarkResponseCommitted(c)
-		writeError(c, http.StatusInternalServerError, "api_error", "Upstream gateway error")
+		writeError(c, http.StatusInternalServerError, "api_error", infraerrors.UpstreamGatewayError)
 		if upstreamMsg == "" {
 			return nil, fmt.Errorf("upstream error: %d (not in custom error codes)", resp.StatusCode)
 		}

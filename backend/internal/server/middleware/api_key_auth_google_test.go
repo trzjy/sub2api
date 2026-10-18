@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -329,7 +330,7 @@ func TestApiKeyAuthWithSubscriptionGoogle_QueryApiKeyRejected(t *testing.T) {
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, http.StatusBadRequest, resp.Error.Code)
-	require.Equal(t, "Query parameter api_key is deprecated. Use Authorization header or key instead.", resp.Error.Message)
+	require.Equal(t, infraerrors.APIKeyQueryParamDeprecated, resp.Error.Message)
 	require.Equal(t, "INVALID_ARGUMENT", resp.Error.Status)
 }
 
@@ -453,7 +454,7 @@ func TestApiKeyAuthWithSubscriptionGoogle_InvalidKey(t *testing.T) {
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, http.StatusUnauthorized, resp.Error.Code)
-	require.Equal(t, "Invalid API key", resp.Error.Message)
+	require.Equal(t, infraerrors.InvalidAPIKey, resp.Error.Message)
 	require.Equal(t, "UNAUTHENTICATED", resp.Error.Status)
 	require.True(t, rejected)
 	require.Equal(t, IngressRejectInvalidAPIKey, rejectReason)
@@ -547,7 +548,7 @@ func TestApiKeyAuthWithSubscriptionGoogle_RepoError(t *testing.T) {
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, http.StatusInternalServerError, resp.Error.Code)
-	require.Equal(t, "Failed to validate API key", resp.Error.Message)
+	require.Equal(t, infraerrors.APIKeyValidationFailed, resp.Error.Message)
 	require.Equal(t, "INTERNAL", resp.Error.Status)
 }
 
@@ -614,7 +615,7 @@ func TestApiKeyAuthWithSubscriptionGoogle_InsufficientBalance(t *testing.T) {
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, http.StatusForbidden, resp.Error.Code)
-	require.Equal(t, "Insufficient account balance", resp.Error.Message)
+	require.Equal(t, infraerrors.InsufficientBalance, resp.Error.Message)
 	require.Equal(t, "PERMISSION_DENIED", resp.Error.Status)
 }
 
@@ -682,7 +683,7 @@ func TestApiKeyAuthWithSubscriptionGoogle_RejectsExhaustedBalance(t *testing.T) 
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, http.StatusForbidden, resp.Error.Code)
-	require.Equal(t, "Insufficient account balance", resp.Error.Message)
+	require.Equal(t, infraerrors.InsufficientBalance, resp.Error.Message)
 	require.Equal(t, "PERMISSION_DENIED", resp.Error.Status)
 }
 

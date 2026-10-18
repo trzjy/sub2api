@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -921,7 +923,7 @@ func TestAPIKeyAuthIPRestrictionUsesTrustedPathWhenSwitchDisabled(t *testing.T) 
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusForbidden, w.Code)
-	requireAPIKeyAuthError(t, w, "ACCESS_DENIED", "Access denied. Your IP is 9.9.9.9")
+	requireAPIKeyAuthError(t, w, "ACCESS_DENIED", fmt.Sprintf(infraerrors.AccessDeniedIPFormat, "9.9.9.9"))
 	require.True(t, markedBusinessLimited)
 	require.Equal(t, service.OpsClientBusinessLimitedReasonIPRestriction, businessLimitedReason)
 }
@@ -971,7 +973,7 @@ func TestAPIKeyAuthIPRestrictionIncludesClientIPForBlacklistDenial(t *testing.T)
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusForbidden, w.Code)
-	requireAPIKeyAuthError(t, w, "ACCESS_DENIED", "Access denied. Your IP is 9.9.9.9")
+	requireAPIKeyAuthError(t, w, "ACCESS_DENIED", fmt.Sprintf(infraerrors.AccessDeniedIPFormat, "9.9.9.9"))
 }
 
 func TestAPIKeyAuthIPRestrictionUsesConfiguredTrustedProxy(t *testing.T) {
@@ -1074,7 +1076,7 @@ func TestAPIKeyAuthIPRestrictionUsesForwardedClientIPInDenialWhenTrusted(t *test
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusForbidden, w.Code)
-	requireAPIKeyAuthError(t, w, "ACCESS_DENIED", "Access denied. Your IP is 1.2.3.4")
+	requireAPIKeyAuthError(t, w, "ACCESS_DENIED", fmt.Sprintf(infraerrors.AccessDeniedIPFormat, "1.2.3.4"))
 }
 
 func TestAPIKeyAuthTouchesLastUsedOnSuccess(t *testing.T) {
@@ -1424,7 +1426,7 @@ func TestAPIKeyAuthRejectsExhaustedBalance(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusForbidden, w.Code)
-	requireAPIKeyAuthError(t, w, "INSUFFICIENT_BALANCE", "Insufficient account balance")
+	requireAPIKeyAuthError(t, w, "INSUFFICIENT_BALANCE", infraerrors.InsufficientBalance)
 }
 
 func TestAPIKeyAuthOpenAIQuotaErrorFormat(t *testing.T) {

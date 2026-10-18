@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -141,7 +142,7 @@ func TestGroupModelAllowlistRequestBodyTooLargePassesThrough413(t *testing.T) {
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "Request body is too large") {
+	if !strings.Contains(w.Body.String(), infraerrors.RequestBodyTooLarge) {
 		t.Fatalf("expected too-large message, got %s", w.Body.String())
 	}
 	if len(*calls) != 0 {
@@ -171,7 +172,7 @@ func TestGroupModelAllowlistJSONBodyDeniedOpenAIFormat(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"model_not_found"`) {
 		t.Fatalf("expected OpenAI error format, got %s", w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `gpt-5.4\" is not available for this group`) {
+	if !strings.Contains(w.Body.String(), `gpt-5.4`) {
 		t.Fatalf("expected model in message, got %s", w.Body.String())
 	}
 	if len(*calls) != 0 {

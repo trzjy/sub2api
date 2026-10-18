@@ -98,7 +98,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 	if service.IsGPTImageGenerationModel(reqModel) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "This model is not supported on the Chat Completions endpoint")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedOnChatCompletio)
 		return
 	}
 
@@ -196,7 +196,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, forwardModel, forwardModel, service.TierRoutingProtocolChatCompletions, body, gateOpen)
 	if err != nil {
 		reqLog.Warn("openai_chat_completions.kimi_tier_estimate_failed", zap.Error(err))
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "tier routing estimate failed")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.TierRoutingEstimateFailed)
 		return
 	}
 	c.Request = c.Request.WithContext(tierCtx)

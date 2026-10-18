@@ -54,7 +54,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 
 	// Bedrock 不支持 count_tokens 端点
 	if account != nil && account.IsBedrock() {
-		s.countTokensError(c, http.StatusNotFound, "not_found_error", "count_tokens endpoint is not supported for Bedrock")
+		s.countTokensError(c, http.StatusNotFound, "not_found_error", infraerrors.TokenCountingUnsupported)
 		return nil
 	}
 
@@ -107,7 +107,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	// Antigravity 账户不支持 count_tokens，返回 404 让客户端 fallback 到本地估算。
 	// 返回 nil 避免 handler 层记录为错误，也不设置 ops 上游错误上下文。
 	if account.Platform == PlatformAntigravity {
-		s.countTokensError(c, http.StatusNotFound, "not_found_error", "count_tokens endpoint is not supported for this platform")
+		s.countTokensError(c, http.StatusNotFound, "not_found_error", infraerrors.TokenCountingUnsupported)
 		return nil
 	}
 
@@ -144,14 +144,14 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	// 获取凭证
 	token, tokenType, err := s.GetAccessToken(ctx, account)
 	if err != nil {
-		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to get access token")
+		s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamAuthFailed)
 		return err
 	}
 
 	// 构建上游请求
 	upstreamReq, wireBody, err := s.buildCountTokensRequest(ctx, c, account, body, token, tokenType, reqModel, shouldMimicClaudeCode)
 	if err != nil {
-		s.countTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
+		s.countTokensError(c, http.StatusInternalServerError, "api_error", infraerrors.UpstreamRequestBuildFailed)
 		return err
 	}
 	// 先记录首发 wire body；如果后面进入 400 retry，retry 会基于未签名的逻辑 body 重新构建。
@@ -169,19 +169,19 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	resp, err := s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		setOpsUpstreamError(c, 0, sanitizeUpstreamErrorMessage(err.Error()), "")
-		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Request failed")
+		s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 		return fmt.Errorf("upstream request failed: %w", err)
 	}
 
 	// 读取响应体
 	countTokensTooLarge := func(c *gin.Context) {
-		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Upstream response too large")
+		s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseTooLarge)
 	}
 	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, countTokensTooLarge)
 	_ = resp.Body.Close()
 	if err != nil {
 		if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
-			s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to read response")
+			s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseReadFailed)
 		}
 		return err
 	}
@@ -204,7 +204,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 				_ = resp.Body.Close()
 				if err != nil {
 					if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
-						s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to read response")
+						s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseReadFailed)
 					}
 					return err
 				}
@@ -271,17 +271,17 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx context.Context, c *gin.Context, account *Account, body []byte) error {
 	token, tokenType, err := s.GetAccessToken(ctx, account)
 	if err != nil {
-		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to get access token")
+		s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamAuthFailed)
 		return err
 	}
 	if tokenType != "apikey" {
-		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Invalid account token type")
+		s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.AccountConfigUnsupported)
 		return fmt.Errorf("anthropic api key passthrough requires apikey token, got: %s", tokenType)
 	}
 
 	upstreamReq, err := s.buildCountTokensRequestAnthropicAPIKeyPassthrough(ctx, c, account, body, token)
 	if err != nil {
-		s.countTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
+		s.countTokensError(c, http.StatusInternalServerError, "api_error", infraerrors.UpstreamRequestBuildFailed)
 		return err
 	}
 
@@ -305,18 +305,18 @@ func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx contex
 			Kind:               "request_error",
 			Message:            sanitizeUpstreamErrorMessage(err.Error()),
 		})
-		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Request failed")
+		s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 		return fmt.Errorf("upstream request failed: %w", err)
 	}
 
 	countTokensTooLarge := func(c *gin.Context) {
-		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Upstream response too large")
+		s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseTooLarge)
 	}
 	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, countTokensTooLarge)
 	_ = resp.Body.Close()
 	if err != nil {
 		if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
-			s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to read response")
+			s.countTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseReadFailed)
 		}
 		return err
 	}
@@ -336,7 +336,7 @@ func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx contex
 			logger.LegacyPrintf("service.gateway",
 				"[count_tokens] Upstream does not support count_tokens (404), returning 404: account=%d name=%s msg=%s",
 				account.ID, account.Name, truncateString(upstreamMsg, 512))
-			s.countTokensError(c, http.StatusNotFound, "not_found_error", "count_tokens endpoint is not supported by upstream")
+			s.countTokensError(c, http.StatusNotFound, "not_found_error", infraerrors.TokenCountingUnsupportedByUpstream)
 			return nil
 		}
 

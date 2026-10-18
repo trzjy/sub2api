@@ -304,7 +304,7 @@ func extractImageTaskError(body []byte) json.RawMessage {
 		}
 		return json.RawMessage(body)
 	}
-	return imageTaskErrorPayload("api_error", "image generation failed")
+	return imageTaskErrorPayload("api_error", infraerrors.ImageGenerationFailed)
 }
 
 func imageTaskErrorPayload(errorType, message string) json.RawMessage {

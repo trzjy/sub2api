@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
@@ -2335,14 +2336,14 @@ func TestOpenAIWSHTTPBridge_IdleTimeoutClosesClientSession(t *testing.T) {
 	var clientClose coderws.CloseError
 	require.ErrorAs(t, err, &clientClose)
 	require.Equal(t, coderws.StatusNormalClosure, clientClose.Code)
-	require.Equal(t, "websocket idle timeout", clientClose.Reason)
+	require.Equal(t, infraerrors.WSIdleTimeout, clientClose.Reason)
 
 	select {
 	case proxyErr := <-errCh:
 		var closeErr *OpenAIWSClientCloseError
 		require.ErrorAs(t, proxyErr, &closeErr)
 		require.Equal(t, coderws.StatusNormalClosure, closeErr.StatusCode())
-		require.Equal(t, "websocket idle timeout", closeErr.Reason())
+		require.Equal(t, infraerrors.WSIdleTimeout, closeErr.Reason())
 	case <-time.After(4 * time.Second):
 		t.Fatal("timed out waiting for idle HTTP bridge session to close")
 	}

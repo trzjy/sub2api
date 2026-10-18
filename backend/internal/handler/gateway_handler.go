@@ -175,7 +175,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	} else if changed {
 		if err := parsedReq.ReplaceBody(policyBody); err != nil {
 			reqLog.Warn("gateway.reasoning_effort_policy_parse_failed", zap.Error(err))
-			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to apply reasoning effort policy")
+			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", pkgerrors.ReasoningEffortPolicyFailed)
 			return
 		}
 		body = parsedReq.Body.Bytes()
@@ -221,7 +221,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 	if !compositeTargetPlatformResolved(c, apiKey, reqModel, h.gatewayService) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by composite groups")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", pkgerrors.ModelNotSupportedByComposite)
 		return
 	}
 	if rejectSystemOneOnlyPlatform(c, apiKey, h.errorResponse) {
@@ -1277,7 +1277,7 @@ func (h *GatewayHandler) CodexModels(c *gin.Context) {
 		modelIDs,
 	)
 	if err != nil {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to build Codex models manifest")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", pkgerrors.CodexManifestBuildFailed)
 		return
 	}
 	etag := service.CodexModelsManifestETag(body)
@@ -2283,23 +2283,19 @@ func (h *GatewayHandler) checkClaudeCodeVersion(c *gin.Context) bool {
 	clientVersion := service.GetClaudeCodeVersion(ctx)
 	if clientVersion == "" {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error",
-			"Unable to determine Claude Code version. Please update Claude Code: npm update -g @anthropic-ai/claude-code")
+			pkgerrors.CCVersionUndetermined)
 		return false
 	}
 
 	if minVersion != "" && service.CompareVersions(clientVersion, minVersion) < 0 {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error",
-			fmt.Sprintf("Your Claude Code version (%s) is below the minimum required version (%s). Please update: npm update -g @anthropic-ai/claude-code",
-				clientVersion, minVersion))
+			fmt.Sprintf(pkgerrors.CCVersionBelowMinFormat, clientVersion, minVersion))
 		return false
 	}
 
 	if maxVersion != "" && service.CompareVersions(clientVersion, maxVersion) > 0 {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error",
-			fmt.Sprintf("Your Claude Code version (%s) exceeds the maximum allowed version (%s). "+
-				"Please downgrade: npm install -g @anthropic-ai/claude-code@%s && "+
-				"set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 to prevent auto-upgrade",
-				clientVersion, maxVersion, maxVersion))
+			fmt.Sprintf(pkgerrors.CCVersionAboveMaxFormat, clientVersion, maxVersion, maxVersion))
 		return false
 	}
 
@@ -2385,7 +2381,7 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 		return
 	}
 	if !compositeTargetPlatformResolved(c, apiKey, parsedReq.Model, h.gatewayService) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by composite groups")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", pkgerrors.ModelNotSupportedByComposite)
 		return
 	}
 	if rejectSystemOneOnlyPlatform(c, apiKey, h.errorResponse) {

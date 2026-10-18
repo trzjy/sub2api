@@ -1039,7 +1039,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				// 客户端未断开，正常的错误处理
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.gateway", "SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, ev.err)
-					sendErrorEvent("response_too_large", fmt.Sprintf("upstream SSE line exceeded %d bytes", maxLineSize))
+					sendErrorEvent("response_too_large", infraerrors.UpstreamResponseLineTooLong)
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs}, ev.err
 				}
 				// 上游中途读错误（unexpected EOF / connection reset 等，常见于 HTTP/2 GOAWAY）：
@@ -1133,7 +1133,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			if s.rateLimitService != nil {
 				s.rateLimitService.HandleStreamTimeout(ctx, account, originalModel)
 			}
-			sendErrorEvent("stream_timeout", fmt.Sprintf("upstream stream idle for %s", streamInterval))
+			sendErrorEvent("stream_timeout", infraerrors.UpstreamStreamIntervalTimeout)
 			return &streamingResult{usage: usage, firstTokenMs: firstTokenMs}, fmt.Errorf("stream data interval timeout")
 
 		case <-keepaliveCh:

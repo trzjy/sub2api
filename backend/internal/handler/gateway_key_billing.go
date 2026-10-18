@@ -40,11 +40,11 @@ func (h *GatewayHandler) KeyBillingInfo(c *gin.Context) {
 		return
 	}
 	if h.cfg != nil && h.cfg.RunMode == config.RunModeSimple {
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Billing information is not supported in simple mode")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", pkgerrors.BillingInfoSimpleModeUnsupported)
 		return
 	}
 	if apiKey.GroupID == nil {
-		h.errorResponse(c, http.StatusForbidden, "permission_error", "API key is not assigned to a group")
+		h.errorResponse(c, http.StatusForbidden, "permission_error", pkgerrors.APIKeyNotAssignedToGroup)
 		return
 	}
 	if apiKey.Group == nil {

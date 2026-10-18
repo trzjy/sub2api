@@ -2337,12 +2337,16 @@ func isOpsClientAuthError(code string, msg string) bool {
 	}
 	return strings.Contains(msg, "invalid api key") ||
 		strings.Contains(msg, "api key is required") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.APIKeyGroupRequired)) ||
 		strings.Contains(msg, "api key is disabled") ||
 		strings.Contains(msg, "user associated with api key not found") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.UserNotFoundForAPIKey)) ||
 		strings.Contains(msg, "user account is not active") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.UserAccountInactive)) ||
 		strings.Contains(msg, "api key 所属分组已删除") ||
 		strings.Contains(msg, "api key 所属分组已停用") ||
 		strings.Contains(msg, "api key is not assigned to any group") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.APIKeyNotAssignedToGroup)) ||
 		strings.Contains(msg, infraerrors.InvalidAPIKey)
 }
 
@@ -2358,11 +2362,14 @@ func isOpsLocalBusinessLimitError(code string, msg string) bool {
 	}
 	return strings.Contains(msg, "api key in query parameter is deprecated") ||
 		strings.Contains(msg, "query parameter api_key is deprecated") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.APIKeyQueryParamDeprecated)) ||
 		strings.Contains(msg, "no active subscription found for this group") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.NoActiveSubscriptionForGroup)) ||
 		strings.Contains(msg, infraerrors.SubscriptionInvalid) ||
 		strings.Contains(msg, infraerrors.InsufficientBalance) ||
 		strings.Contains(msg, "insufficient account balance") ||
 		strings.Contains(msg, "api key group platform is not gemini") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.GroupPlatformNotGemini)) ||
 		strings.Contains(msg, "api key 额度已用完") ||
 		strings.Contains(msg, "api key 5小时限额已用完") ||
 		strings.Contains(msg, "api key 日限额已用完") ||
@@ -2387,14 +2394,19 @@ func isOpsLocalBusinessLimitError(code string, msg string) bool {
 		strings.Contains(msg, infraerrors.ImageGenerationNotEnabled) ||
 		(strings.Contains(msg, "reasoning effort") && strings.Contains(msg, "exceeds this group's limit")) ||
 		strings.Contains(msg, "token counting is not supported for this platform") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.TokenCountingUnsupported)) ||
 		strings.Contains(msg, "images api is not supported for this platform") ||
 		strings.Contains(msg, infraerrors.ImagesAPINotSupported) ||
 		(strings.Contains(msg, "model ") && strings.Contains(msg, " not in whitelist")) ||
+		strings.Contains(msg, "不在当前分组支持范围内") ||
 		(strings.Contains(msg, "beta feature ") && strings.Contains(msg, " is not allowed")) ||
 		(strings.Contains(msg, "openai service_tier=") && strings.Contains(msg, " is not allowed for model")) ||
 		strings.Contains(msg, "this account only allows codex official clients") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.CodexOfficialClientsOnly)) ||
 		strings.Contains(msg, "openai wsv1 is temporarily unsupported") ||
-		strings.Contains(msg, "openai codex passthrough requires a non-empty instructions field")
+		strings.Contains(msg, strings.ToLower(infraerrors.WSv1Unsupported)) ||
+		strings.Contains(msg, "openai codex passthrough requires a non-empty instructions field") ||
+		strings.Contains(msg, strings.ToLower(infraerrors.CodexInstructionsRequired))
 }
 
 func hasOpsUpstreamErrorContext(c *gin.Context) bool {

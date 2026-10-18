@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -333,14 +334,14 @@ func TestCodexClientRestrictionMessage(t *testing.T) {
 		msg := CodexClientRestrictionMessage(CodexClientRestrictionDetectionResult{
 			Reason: CodexClientRestrictionReasonVersionUndetectable,
 		})
-		require.Equal(t, "This account only allows Codex official clients", msg)
+		require.Equal(t, infraerrors.CodexOfficialClientsOnly, msg)
 	})
 
 	t.Run("未命中官方：保持原通用句", func(t *testing.T) {
 		msg := CodexClientRestrictionMessage(CodexClientRestrictionDetectionResult{
 			Reason: CodexClientRestrictionReasonNotMatchedUA,
 		})
-		require.Equal(t, "This account only allows Codex official clients", msg)
+		require.Equal(t, infraerrors.CodexOfficialClientsOnly, msg)
 	})
 }
 

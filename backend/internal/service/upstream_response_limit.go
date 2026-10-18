@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -67,7 +68,7 @@ func anthropicTooLargeError(c *gin.Context) {
 		"type": "error",
 		"error": gin.H{
 			"type":    "upstream_error",
-			"message": "Upstream response too large",
+			"message": infraerrors.UpstreamResponseTooLarge,
 		},
 	})
 }
@@ -77,7 +78,7 @@ func openAITooLargeError(c *gin.Context) {
 	c.JSON(http.StatusBadGateway, gin.H{
 		"error": gin.H{
 			"type":    "upstream_error",
-			"message": "Upstream response too large",
+			"message": infraerrors.UpstreamResponseTooLarge,
 		},
 	})
 }

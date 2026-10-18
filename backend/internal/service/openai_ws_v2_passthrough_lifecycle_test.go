@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -616,7 +617,7 @@ func TestPassthroughLifecycle_CompletedTurnStartsInterTurnIdle(t *testing.T) {
 	var closeErr coderws.CloseError
 	require.ErrorAs(t, err, &closeErr)
 	require.Equal(t, coderws.StatusNormalClosure, closeErr.Code)
-	require.Equal(t, "websocket idle timeout", closeErr.Reason)
+	require.Equal(t, infraerrors.WSIdleTimeout, closeErr.Reason)
 	select {
 	case <-serverErr:
 	case <-time.After(3 * time.Second):
@@ -797,14 +798,14 @@ func TestPassthroughLifecycle_TerminalSwitchesToInterTurnIdleTimeout(t *testing.
 	var websocketCloseErr coderws.CloseError
 	require.ErrorAs(t, err, &websocketCloseErr)
 	require.Equal(t, coderws.StatusNormalClosure, websocketCloseErr.Code)
-	require.Equal(t, "websocket idle timeout", websocketCloseErr.Reason)
+	require.Equal(t, infraerrors.WSIdleTimeout, websocketCloseErr.Reason)
 
 	select {
 	case err := <-serverErr:
 		var closeErr *OpenAIWSClientCloseError
 		require.ErrorAs(t, err, &closeErr)
 		require.Equal(t, coderws.StatusNormalClosure, closeErr.StatusCode())
-		require.Equal(t, "websocket idle timeout", closeErr.Reason())
+		require.Equal(t, infraerrors.WSIdleTimeout, closeErr.Reason())
 	case <-time.After(3 * time.Second):
 		t.Fatal("passthrough terminal turn did not use inter-turn idle timeout")
 	}

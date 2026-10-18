@@ -1110,7 +1110,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		if useUpstreamStream {
 			collected, usageObj, err := collectGeminiSSE(resp.Body, true)
 			if err != nil {
-				return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Failed to read upstream stream")
+				return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamStreamReadFailed)
 			}
 			collectedBytes, _ := json.Marshal(collected)
 			upstreamResponseModelObserverFromContext(c).ObserveGemini(collectedBytes)
@@ -1165,10 +1165,10 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	startTime := time.Now()
 
 	if strings.TrimSpace(originalModel) == "" {
-		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Missing model in URL")
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.ModelMissingInURL)
 	}
 	if strings.TrimSpace(action) == "" {
-		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Missing action in URL")
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.MissingActionInURL)
 	}
 	if len(body) == 0 {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.RequestBodyEmpty)
@@ -1183,7 +1183,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	case "generateContent", "streamGenerateContent", "countTokens":
 		// ok
 	default:
-		return nil, s.writeGoogleError(c, http.StatusNotFound, "Unsupported action: "+action)
+		return nil, s.writeGoogleError(c, http.StatusNotFound, fmt.Sprintf(infraerrors.UnsupportedActionFormat, action))
 	}
 
 	// Some Gemini upstreams validate tool call parts strictly; ensure any `functionCall` part includes a
@@ -1336,7 +1336,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		requestIDHeader = "x-request-id"
 
 	default:
-		return nil, s.writeGoogleError(c, http.StatusBadGateway, "Unsupported account type: "+account.Type)
+		return nil, s.writeGoogleError(c, http.StatusBadGateway, infraerrors.AccountConfigUnsupported)
 	}
 
 	var resp *http.Response
@@ -1613,7 +1613,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				}
 			})
 			if err != nil {
-				return nil, s.writeGoogleError(c, http.StatusBadGateway, "Failed to read upstream stream")
+				return nil, s.writeGoogleError(c, http.StatusBadGateway, infraerrors.UpstreamStreamReadFailed)
 			}
 			s.finalizeGeminiSSESignal(c, account, false, requestID, best, stats.dataEvents > 0, stats.fallback)
 			b, _ := json.Marshal(collected)
@@ -1736,8 +1736,8 @@ func (s *GeminiMessagesCompatService) skippedErrorPolicyFailoverError(c *gin.Con
 }
 
 // geminiCustomCodeSkippedClientMessage 自定义错误码未命中时对客户端隐藏上游细节的固定文案，
-// 与 OpenAI 网关路径同场景的文案一致。
-const geminiCustomCodeSkippedClientMessage = "Upstream gateway error"
+// 与 OpenAI 网关路径同场景的文案一致，复用 UpstreamGatewayError 常量避免裸串。
+const geminiCustomCodeSkippedClientMessage = infraerrors.UpstreamGatewayError
 
 // upstreamErrorDetail 按配置截断上游错误响应体，用于 ops 错误日志的 Detail 字段；
 // 未开启 LogUpstreamErrorBody 时返回空。
@@ -2090,7 +2090,7 @@ type geminiStreamResult struct {
 func (s *GeminiMessagesCompatService) handleNonStreamingResponse(c *gin.Context, resp *http.Response, originalModel string) (*ClaudeUsage, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Failed to read upstream response")
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseReadFailed)
 	}
 
 	unwrappedBody, err := unwrapGeminiResponse(body)
