@@ -67,20 +67,27 @@ var (
 //
 // 换轨依据（/root/cursor-p1-evidence/*-current-protocol-results.json，10 份活体样本，
 // 全部 `path: /agent.v1.AgentService/Run`、status 200）：
+//
 //   - 33 / 37 / 45 / 47 / 51：单轮成功文本（"OK"）+ TurnEnded 真实 usage；
+//
 //   - 63：多轮历史消费成功（"ORCHID" 证明第二轮读到了历史）；
+//
 //   - 53 / 125 / 134：HTTP 200 正常帧里的固定拒付模板（流内拒付，非传输错误）；
+//
 //   - 54：不同 wire 模型（gpt / claude）身份对照同样走该路径。
 //
-//	⚠️ 各条的证据强度不同，**不得**整体宣称"全部活体验证过"：
-//	  - 已活体 200：AvailableModels、StreamUnifiedChatWithTools（B-1 关闭项）
-//	  - 静态确认存在、未活体探测：StreamUnifiedChatWithToolsSSE
-//	  - 不存在（已删除）：…SSEWithMcp、GenerateUnifiedCompletionWithToolsSSE、
-//	    AIServiceService/* 全部
+//     ⚠️ 各条的证据强度不同，**不得**整体宣称"全部活体验证过"：
 //
-//	P1-A2 旧链删除（合同 §4）：AuthService 的两个会话令牌端点（换 token / 校验 token）
-//	连同其常量与白名单条目一并删除——出站已改用账号已存 Bearer，进程内不再存在任何
-//	"按 key 换 session token"的客户端。
+//   - 已活体 200：AvailableModels、StreamUnifiedChatWithTools（B-1 关闭项）
+//
+//   - 静态确认存在、未活体探测：StreamUnifiedChatWithToolsSSE
+//
+//   - 不存在（已删除）：…SSEWithMcp、GenerateUnifiedCompletionWithToolsSSE、
+//     AIServiceService/* 全部
+//
+//     P1-A2 旧链删除（合同 §4）：AuthService 的两个会话令牌端点（换 token / 校验 token）
+//     连同其常量与白名单条目一并删除——出站已改用账号已存 Bearer，进程内不再存在任何
+//     "按 key 换 session token"的客户端。
 const (
 	// cursorPathAvailableModels —— 模型列表。**活体 200**（135,922 字节 / 12 个模型）。
 	// 服务名是 AiService（不是 AIServiceService），方法名是 AvailableModels
@@ -104,9 +111,8 @@ const (
 
 // cursorAllowedUpstreamPaths 是已取证的出站路径白名单（失败关闭用）。
 var cursorAllowedUpstreamPaths = map[string]struct{}{
-	cursorPathAvailableModels:   {},
-	cursorPathAgentRun:          {},
-	cursorPathStreamUnifiedChatWithTools: {}, // 别名 == cursorPathAgentRun，保持 e2e 断言兼容
+	cursorPathAvailableModels: {},
+	cursorPathAgentRun:        {},
 }
 
 // IsCursorAllowedUpstreamPath 报告给定路径是否在已取证白名单内（E2 卡可用）。

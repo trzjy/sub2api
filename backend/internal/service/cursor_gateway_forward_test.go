@@ -159,8 +159,8 @@ func newCursorOutboundTestService(
 func cursorOKStreamBody(t *testing.T) []byte {
 	t.Helper()
 	var out []byte
-	out = append(out, cursorStreamStartFrame(t)...)
-	out = append(out, cursorTextFrame(t, "Hello")...)
+	out = append(out, cursorTextDeltaFrame(t, "")...)
+	out = append(out, cursorTextDeltaFrame(t, "Hello")...)
 	out = append(out, cursorTestEndStream(t, `{}`)...)
 	return out
 }
@@ -352,8 +352,8 @@ func (l *cursorStubKeyStatusLookup) LookupKeyStatus(context.Context, int64) (cur
 func cursorRejectedStreamBody(t *testing.T) []byte {
 	t.Helper()
 	var out []byte
-	out = append(out, cursorStreamStartFrame(t)...)
-	out = append(out, cursorTextFrame(t, "密钥已过期或额度耗尽，请续费后使用 (1792327810746-28d0be39)")...)
+	out = append(out, cursorTextDeltaFrame(t, "")...)
+	out = append(out, cursorTextDeltaFrame(t, "密钥已过期或额度耗尽，请续费后使用 (1792327810746-28d0be39)")...)
 	out = append(out, cursorTestEndStream(t, `{}`)...)
 	return out
 }
