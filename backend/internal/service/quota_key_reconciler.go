@@ -20,10 +20,11 @@ const (
 	quotaKeyReconcileTimeout = 30 * time.Second
 	// quotaKeyReconcileHeartbeatTimeout 写心跳的超时（照 quota_key_sweep 同型）。
 	quotaKeyReconcileHeartbeatTimeout = 5 * time.Second
-	// quotaKeyWaterLevelThreshold 是统一水位阈值（C10 硬口径，不得改动）：
-	// 任一允许模型 M 的候选计数低于此值即视为水位不足，按差额触发拉号。
+	// quotaKeyWaterLevelThreshold 是统一补池目标（C10 硬口径，P1-D2 转总量语义，数值不变）：
+	// 【cursor 可服务账号去重总量】低于此值即视为水位不足，按缺口触发拉号；
+	// 同一账号跨多个覆盖模型只计一次（方案 §6.3 / §16.1）。
 	// 该阈值与单 key 通用语义（MaxAccountsPerQuotaKey=15）解耦——水位衡量的是
-	// "可用候选 key 数"，不是单 key 的 working 计数。
+	// 池内可服务账号总量，不是单 key 的 working 计数，也不是"每模型各 10"。
 	quotaKeyWaterLevelThreshold = 10
 )
 
@@ -38,23 +39,23 @@ type quotaKeyPuller interface {
 	PullAccountsForModel(ctx context.Context, quotaKeyID int64, modelM string) error
 }
 
-// QuotaKeyModelWaterProvider 是 C10 水位 reconciler 需要的"模型 M 上下文"窄面
-// （C10 仅定义契约；真实实现由 C11 接入，见禁区：C10 不实现拉号事务改造、
-// 不碰 schema/migration、不碰 quota_key_service.go/wire）。
+// QuotaKeyModelWaterProvider 是 C10 水位 reconciler 依赖的"补池水位"窄面
+// （真实实现 quotaKeyModelWater 见 quota_key_service.go；reconciler 侧不实现聚合 SQL）。
 //
-// 语义约定（窄接口只暴露编排所需的最小信息，所有 field/聚合 SQL 收敛在 C11 实现内）：
-//   - 水位：属于指定模型 M 分组、cursor、schedulable、正常、未软删、且不在 temp 窗口的候选计数；
-//   - 阈值：由 reconciler 侧常量 quotaKeyWaterLevelThreshold 统一固定为 10，不随模型变化；
-//   - 低于阈值时，reconciler 按"差额 = threshold - current"取候选 key 触发已有
-//     quotaKeyPuller.PullAccounts 拉号（不新造拉号接口、不改 key 通用语义）。
+// P1-D2 总量制（方案 §6.3 / §15.6 / §16.1）：补池水位口径由"每模型 10"改为
+// "cursor 可服务账号总量 10"——同一账号被多个覆盖模型的分组命中只计一次。因此 WaterLevel
+// 返回的是池级去重总量，modelM 仅作为调用上下文（新号挂载目标）保留，不再收窄计数；
+// ListCandidateKeys 同样是池级候选集（不按模型收窄）。
+// 所有 field/聚合 SQL 收敛在 quotaKeyModelWater 实现内。
 type QuotaKeyModelWaterProvider interface {
 	// ListAllowedModels 枚举当前允许（在允许 M 分组内）的模型 M。
 	ListAllowedModels(ctx context.Context) ([]string, error)
-	// WaterLevel 返回指定模型 M 的当前水位（候选计数）与阈值；返回的阈值恒为统一阈值。
+	// WaterLevel 返回 cursor 可服务账号【去重总量】与阈值；返回的阈值恒为统一阈值
+	// quotaKeyWaterLevelThreshold（=10），且不随 modelM 变化。
 	WaterLevel(ctx context.Context, modelM string) (current int, threshold int, err error)
-	// ListCandidateKeys 返回指定模型 M 下、需要补池的候选 quota_key ID；
-	// limit>0 时由实现方按需截断（reconciler 已传入差额），limit<=0 表示不限制。
-	// 返回的 key 已经过 cursor/schedulable/正常/未软删/temp窗口 过滤，reconciler 不再重复过滤。
+	// ListCandidateKeys 返回池级候选 quota_key ID（不按模型收窄）：已经过
+	// active/未过期/未 exhausted/非冷却/有剩余容量（working<15）预检，reconciler 不再重复过滤；
+	// limit>0 时由实现方按需截断（reconciler 传入的是总量缺口）。
 	ListCandidateKeys(ctx context.Context, modelM string, limit int) ([]int64, error)
 }
 
@@ -65,9 +66,10 @@ type QuotaKeyModelWaterProvider interface {
 // 锁串行化，reconciler 再叠加单 flight 防止同一 key 并发重复拉号）。
 //
 // 与旧版（C9 逐 key working<15 补满）的区别：旧版直接扫 quota_keys 逐 key 补满；
-// C10 改为"枚举模型 M → 比对每组水位 → 低于阈值按差额触发已有 pull 接口"。
+// C10 改为"枚举模型 M → 比对池级总量水位 → 低于阈值按缺口触发已有 pull 接口"。
+// P1-D2 总量制：不再逐模型各补 10，而是"cursor 可服务账号去重总量达 10"即停拉；
 // 模型 M 的枚举/水位/候选 key 查询全部收敛到 QuotaKeyModelWaterProvider 窄面
-// （C11 接入真实实现），reconciler 只负责编排与节流。
+// （reconciler 只负责编排与节流）。
 //
 // 严格约束：
 //   - 拉号直接调 quotaKeyPuller.PullAccounts（= QuotaKeyService.PullAccounts），
@@ -78,7 +80,9 @@ type QuotaKeyModelWaterProvider interface {
 //     发起动作与停机置位共享 coalescer 同一互斥域（F3），Stop() 返回后零新发起；
 //   - F4 哨兵消费：拉号返回 ErrQuotaKeyMountFailed（上游成功但本地挂载失败，非幂等边界）
 //     时记告警级日志并停止本轮后续候选，写失败心跳记录原因（不重试、不 fallback）；
-//   - 无候选 key（所有模型均达水位、或无允许模型、或提供方未接入）时停拉并记录原因。
+//   - 无候选 key（池级总量已达水位、或无允许模型、或提供方未接入）时停拉并记录原因；
+//   - P1-D2 如实报告：无有效码 / 冷却 / 容量满 / 选中码未实际增号时记录总量缺口与成因，
+//     不虚报补满、不生成或购买激活码；本轮已尝试过的 key 同轮不重复拉（含非幂等失败）。
 //
 // 生命周期严格复用 QuotaKeySweeper / AccountExpiryService 形态：
 // goroutine + time.NewTicker(interval) + 立即 runOnce() 后再按 tick 循环 +
@@ -238,9 +242,17 @@ func (r *QuotaKeyReconciler) isStopping() bool {
 	return r.stopping.Load()
 }
 
-// runOnce 在一轮超时上下文内：
-// 枚举允许模型 M → 逐组比对水位 → 低于阈值按差额取候选 key 触发 PullAccounts 补池
-// → 写一次 job 心跳。无候选 key 时停拉并记录原因；失败只记日志、不 panic。
+// runOnce 在一轮超时上下文内按【cursor 可服务账号总量】编排补池（P1-D2 总量制），
+// 末写一次 job 心跳；失败只记日志、不 panic。
+//
+// 编排（缺口驱动）：
+//  1. 枚举允许模型 M（仅用于决定新号挂组上下文，不再按模型分别定水位）；
+//  2. 读池级总量 total 与统一阈值 10，缺口 deficit = threshold - total；达标即停拉；
+//  3. 未达标则按 deficit 取候选 key（有效码预检已由提供方完成）；
+//  4. 逐个候选串行走既有 pull/锁/原子挂组链路（B2 链），每次拉号后按实际入库账号重算总量：
+//     达标即停，且不以"已选中 key 次数"冒充账号增量；
+//  5. 本轮已尝试过的 key 不再重复拉（含冷却、失败、非幂等失败），不盲重试；
+//  6. 无有效码 / 冷却 / 容量满 / 选中码未实际增号 → 记录缺口与成因，不虚报补满。
 func (r *QuotaKeyReconciler) runOnce() {
 	ctx, cancel := context.WithTimeout(context.Background(), quotaKeyReconcileTimeout)
 	defer cancel()
@@ -267,55 +279,107 @@ func (r *QuotaKeyReconciler) runOnce() {
 		return
 	}
 
-	candidateCount := 0
-	// mountStopReason 非空表示本轮命中 F4 哨兵（ErrQuotaKeyMountFailed）：立即停止本轮
-	// 后续候选拉号，并改写失败心跳（不再走成功摘要）。
-	mountStopReason := ""
-	// R15-1：本轮 ErrUpstreamKeyBlocked（上游失败、key 已 exhausted 占位）计数。
-	// 单 key 失败不停轮（既有语义），但收尾心跳必须如实记失败，不得记成功。
-	blockedCount := 0
-models:
-	for _, m := range models {
-		// double-checked exit：每处理一组前确认未停止。
+	var (
+		// mountStopReason 非空表示本轮命中 F4 哨兵（ErrQuotaKeyMountFailed）：立即停止本轮
+		// 后续候选拉号，并改写失败心跳（不再走成功摘要）。
+		mountStopReason string
+		// R15-1：本轮 ErrUpstreamKeyBlocked（上游失败、key 已 exhausted 占位）计数。
+		// 单 key 失败不停轮（既有语义），但收尾心跳必须如实记失败，不得记成功。
+		blockedCount int
+		// shortfallReason 非空表示本轮如实报告缺口与成因（见 poolShortfall）：
+		// 无有效码 / 冷却 / 容量满 / 选中码未实际增号 —— 不虚报补满。
+		shortfallReason string
+		candidateCount  int
+		// modelIdx 轮换挂载目标模型：总量口径不按模型分别补池，但新号仍须按具体模型上下文
+		// 挂组（§13.3），故每轮次轮流选中一个允许模型，避免全部挂在单一模型的分组下。
+		modelIdx int
+		// stopped 记录"轮中层碰到停机信号"，用于跳出编排循环（double-checked exit）。
+		stopped bool
+	)
+	// attempted 记录本轮已尝试过的 key：成功/失败/冷却一律记入，保证同轮不重复拉同一激活码
+	//（非幂等拉号不得盲重试），也使"耗尽候选后立即如实停轮"不依赖提供方去重。
+	attempted := make(map[int64]bool)
+	for {
 		if r.isStopping() {
+			stopped = true
 			break
 		}
-		current, threshold, werr := r.modelWater.WaterLevel(ctx, m)
+		mountModel := models[modelIdx%len(models)]
+		modelIdx++
+		// 总量水位：同一账号跨多个覆盖模型只计一次，modelM 仅作调用上下文。
+		total, threshold, werr := r.modelWater.WaterLevel(ctx, mountModel)
 		if werr != nil {
-			log.Printf("[QuotaKeyReconcile] water level for model %q failed: %v", m, werr)
-			continue
+			log.Printf("[QuotaKeyReconcile] water level failed: %v", werr)
+			r.recordHeartbeat(ctx, runAt, false, werr, "")
+			return
 		}
-		// 已达水位（候选计数 >= 阈值），无需补池。
-		if current >= threshold {
-			continue
+		deficit := threshold - total
+		if deficit <= 0 {
+			break // 达标：停止补池
 		}
-		// 低于阈值：按差额取候选 key。
-		deficit := threshold - current
-		candidates, cerr := r.modelWater.ListCandidateKeys(ctx, m, deficit)
+		candidates, cerr := r.modelWater.ListCandidateKeys(ctx, mountModel, deficit)
 		if cerr != nil {
-			log.Printf("[QuotaKeyReconcile] list candidate keys for model %q failed: %v", m, cerr)
-			continue
+			log.Printf("[QuotaKeyReconcile] list candidate keys failed: %v", cerr)
+			r.recordHeartbeat(ctx, runAt, false, cerr, "")
+			return
 		}
-		if len(candidates) == 0 {
-			// 该模型水位不足但无可用候选 key 补池。
-			continue
-		}
-		candidateCount += len(candidates)
+		// 本轮未尝试过的候选（冷却/容量满/已尝试的码由提供方或 attempted 排除）。
+		batch := make([]int64, 0, len(candidates))
 		for _, keyID := range candidates {
+			if attempted[keyID] {
+				continue
+			}
+			batch = append(batch, keyID)
+		}
+		if len(batch) == 0 {
+			shortfallReason = poolShortfall(total, threshold, deficit,
+				"no effective quota key (all exhausted, in cooldown, at capacity or already attempted this round)")
+			break
+		}
+		candidateCount += len(batch)
+		batchTotal := total
+		increased, reached := false, false
+		for _, keyID := range batch {
 			if r.isStopping() {
+				stopped = true
 				break
 			}
-			// F2：持有模型 m 传入 pullKey，使补池拉号携带 M 上下文
-			//（触发 §13.3 分组挂载，而非落成裸号）。
-			// F4：命中 MountFailed 哨兵 → 停本轮后续候选拉号（含其余模型）。
-			if mf, blk := r.pullKey(ctx, keyID, m); mf {
+			attempted[keyID] = true
+			// 携带 mountModel 上下文拉号（F2：触发 §13.3 分组挂载，而非落成裸号）。
+			mf, blk := r.pullKey(ctx, keyID, mountModel)
+			if mf {
+				// F4 哨兵：停止本轮后续候选拉号（含同一批的其余 key），不重试该 key。
 				mountStopReason = fmt.Sprintf("stopped: upstream may have been consumed (mount failed) for quota key %d", keyID)
-				_ = blk
-				break models
-			} else if blk {
+				break
+			}
+			if blk {
 				blockedCount++
 			}
+			// 按实际成功入库账号重算总量：达标即停拉，不把"已拉/已选中 key 数"当账号增量。
+			nowTotal, _, rerr := r.modelWater.WaterLevel(ctx, mountModel)
+			if rerr != nil {
+				log.Printf("[QuotaKeyReconcile] recompute water level after quota key %d failed: %v", keyID, rerr)
+				continue
+			}
+			if nowTotal > batchTotal {
+				increased = true
+			}
+			if nowTotal >= threshold {
+				reached = true
+				break
+			}
 		}
+		if mountStopReason != "" || reached || stopped {
+			break
+		}
+		if !increased {
+			// 候选码拉了但池内可服务账号没有增加（上游无号 / 拉号失败 / 挂号不可调度）：
+			// 如实记录缺口并停轮，绝不把"拉过几次"报成"已补多少号"。
+			shortfallReason = poolShortfall(total, threshold, deficit,
+				"candidate keys pulled but no new servable cursor account registered")
+			break
+		}
+		// 确有增量但仍未达标：继续下一批（重算缺口后再取候选）。
 	}
 
 	// F4：哨兵停轮 —— 写失败心跳并在 LastResult 记录原因（告警日志已在 pullKey 内打出）。
@@ -333,12 +397,24 @@ models:
 			"")
 		return
 	}
+	if shortfallReason != "" {
+		// 如实报告：本轮仍有缺口 —— 记录总量/阈值/缺口与成因，不虚报补满、不生成或购买激活码。
+		r.recordHeartbeat(ctx, runAt, true, nil, shortfallReason)
+		return
+	}
 	if candidateCount == 0 {
-		// 无候选 key：停止补池并记录原因（可能是所有模型均达水位，或候选 key 不可补）。
+		// 无候选 key：停止补池并记录原因（可能是池级总量已达水位，或候选 key 不可补）。
 		r.recordHeartbeat(ctx, runAt, true, nil, "no candidate keys for any allowed model")
 		return
 	}
 	r.recordHeartbeat(ctx, runAt, true, nil, "")
+}
+
+// poolShortfall 生成本轮水位缺口的如实摘要（total/threshold/deficit + 成因），用于心跳
+// LastResult：既不说"已补满"，也不把"选中/拉取的 key 数"报成账号增量。
+func poolShortfall(total, threshold, deficit int, cause string) string {
+	return fmt.Sprintf("pool below target: servable cursor accounts total=%d threshold=%d deficit=%d unresolved; %s",
+		total, threshold, deficit, cause)
 }
 
 // pullKey 对单个 quota key 触发拉号，叠加单 flight + pending wakeup + double-checked exit。
