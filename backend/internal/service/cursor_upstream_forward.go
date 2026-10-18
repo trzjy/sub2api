@@ -62,31 +62,40 @@ var (
 
 // 已取证的 Cursor 原生端点路径。
 //
-// **依据（2026-10-16 活体 + 静态双重实证，见证据目录
-// ~/.sub2api-acceptance/cursor-20261016-protocol/07-live-b1-closed.md §4）**：
+// **对话出站路径已于 P1-A1 从 ChatService/StreamUnifiedChatWithTools 换为
+// agent.v1.AgentService/Run**（双向 Connect 文本流）。
 //
-//	B-1 纠错前的 4 条常量里，第 1 条服务名错、另 2 条方法全盘不存在（静态 0 命中），
-//	第 4 条服务名与方法名均错。此处已整体替换为下面这组。
+// 换轨依据（/root/cursor-p1-evidence/*-current-protocol-results.json，10 份活体样本，
+// 全部 `path: /agent.v1.AgentService/Run`、status 200）：
+//   - 33 / 37 / 45 / 47 / 51：单轮成功文本（"OK"）+ TurnEnded 真实 usage；
+//   - 63：多轮历史消费成功（"ORCHID" 证明第二轮读到了历史）；
+//   - 53 / 125 / 134：HTTP 200 正常帧里的固定拒付模板（流内拒付，非传输错误）；
+//   - 54：不同 wire 模型（gpt / claude）身份对照同样走该路径。
 //
-//	⚠️ 各条的证据强度不同，**不得**整体宣称"全部活体验证过"：
-//	  - 已活体 200：AvailableModels、StreamUnifiedChatWithTools（B-1 关闭项）
-//	  - 静态确认存在、未活体探测：StreamUnifiedChatWithToolsSSE、GetSessionToken、
-//	    CheckSessionToken
-//	  - 不存在（已删除）：…SSEWithMcp、GenerateUnifiedCompletionWithToolsSSE、
-//	    AIServiceService/* 全部
+// 其余端点的证据强度不同，**不得**整体宣称"全部活体验证过"：
+//   - 已活体 200：AvailableModels
+//   - 静态确认存在、未活体探测：GetSessionToken、CheckSessionToken
+//   - 不存在（已删除）：AIServiceService/* 全部、…SSEWithMcp、
+//     GenerateUnifiedCompletionWithToolsSSE
 const (
 	// cursorPathAvailableModels —— 模型列表。**活体 200**（135,922 字节 / 12 个模型）。
 	// 服务名是 AiService（不是 AIServiceService），方法名是 AvailableModels
 	// （不是 GetAvailableModels）。
 	cursorPathAvailableModels = "/aiserver.v1.AiService/AvailableModels"
 
-	// cursorPathStreamUnifiedChatWithTools —— 对话主路径（BiDiStreaming）。
-	// **活体 200 + 业务错误**（非 404 ⇒ 路径存在，且中转不改写 path）。
-	cursorPathStreamUnifiedChatWithTools = "/aiserver.v1.ChatService/StreamUnifiedChatWithTools"
+	// cursorPathAgentRun —— 对话主路径（agent.v1.AgentService/Run，BiDiStreaming）。
+	//
+	// **P1-A1 起唯一对话出站路径**：10 份活体样本全部 200，且是唯一能同时拿到
+	// 增量文本与 TurnEnded 真实 usage 的端点。
+	cursorPathAgentRun = "/agent.v1.AgentService/Run"
 
-	// cursorPathStreamUnifiedChatWithToolsSSE —— 对话的 ServerStreaming 变体，
-	// 首字段是 BidiRequestId{1 request_id}（**不是**聊天请求体）。静态确认存在。
-	cursorPathStreamUnifiedChatWithToolsSSE = "/aiserver.v1.ChatService/StreamUnifiedChatWithToolsSSE"
+	// cursorPathStreamUnifiedChatWithTools —— 旧 ChatService 对话路径常量。
+	//
+	// Deprecated: **该名字已不代表 ChatService**。P1-A1 换轨后其值指向
+	// cursorPathAgentRun，只为让尚未改完的调用点（cursor_gateway_forward.go，
+	// 属 P1-A2 改动范围）在 A2 落地前仍能编译、且**实际出站打到 AgentService/Run**。
+	// P1-A2 落地后必须删除本别名并直接使用 cursorPathAgentRun。
+	cursorPathStreamUnifiedChatWithTools = cursorPathAgentRun
 
 	// cursorPathGetSessionToken —— B-13 用户级 token 换取（Unary）。
 	// 静态确认存在 + **活体已抵达其业务逻辑**（见 cursor_auth_token.go）。
@@ -98,11 +107,10 @@ const (
 
 // cursorAllowedUpstreamPaths 是已取证的出站路径白名单（失败关闭用）。
 var cursorAllowedUpstreamPaths = map[string]struct{}{
-	cursorPathAvailableModels:               {},
-	cursorPathStreamUnifiedChatWithTools:    {},
-	cursorPathStreamUnifiedChatWithToolsSSE: {},
-	cursorPathGetSessionToken:               {},
-	cursorPathCheckSessionToken:             {},
+	cursorPathAvailableModels:   {},
+	cursorPathAgentRun:          {},
+	cursorPathGetSessionToken:   {},
+	cursorPathCheckSessionToken: {},
 }
 
 // IsCursorAllowedUpstreamPath 报告给定路径是否在已取证白名单内（E2 卡可用）。

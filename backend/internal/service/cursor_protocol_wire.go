@@ -52,10 +52,13 @@ var (
 	// ErrCursorProtocol 表示帧结构不合法（截断、未知 wire type、压缩帧等）。
 	ErrCursorProtocol = errors.New("cursor: malformed protocol frame (fail closed)")
 
-	// ErrCursorMissingEndStream 表示流已结束但没有 EndStreamResponse 帧。
+	// ErrCursorMissingEndStream 表示流已结束但**没有任何终态标记**。
 	//
-	// 该帧是**强制**的（客户端 @14784500：缺失即 `protocol error: missing
-	// EndStreamResponse`），故本层不复用「流正常结束」路径，直接失败关闭。
+	// Connect 侧该标记是 EndStreamResponse（客户端 @14784500：缺失即
+	// `protocol error: missing EndStreamResponse`）；AgentRun 侧的常规终态是
+	// InteractionUpdate.turn_ended（证据 33/63 均在流尾给出）。两者皆无 ⇒
+	// 这是一条被取消或截断的流，**不复用「流正常结束」路径**，直接失败关闭：
+	// 它拿不到真实 usage，按成功收尾就等于回写一条 0 usage 的成功响应并误导计费。
 	ErrCursorMissingEndStream = errors.New("cursor: missing EndStreamResponse (protocol error)")
 )
 
