@@ -462,18 +462,6 @@ func TestCursorUpstreamForwardAllowedPathWhitelist(t *testing.T) {
 	}
 }
 
-// 14b) 旧 ChatService 常量已不代表 ChatService：其值必须等于 AgentService/Run
-// （P1-A1 换轨后代码内不再存在 ChatService 出站路径；A2 落地后删掉该别名）。
-func TestCursorUpstreamForwardLegacyPathAlias(t *testing.T) {
-	if cursorPathStreamUnifiedChatWithTools != cursorPathAgentRun {
-		t.Fatalf("legacy constant = %q, want %q — 它必须指向 AgentRun，否则生产路径会打回 ChatService",
-			cursorPathStreamUnifiedChatWithTools, cursorPathAgentRun)
-	}
-	if strings.Contains(cursorPathAgentRun, "ChatService") {
-		t.Fatalf("agent run path must not be a ChatService path: %q", cursorPathAgentRun)
-	}
-}
-
 // 15) 取消传播：请求上下文被取消时，出站必须立刻失败，绝不当成功返回。
 //
 // 取消的请求拿不到终态标记（turn_ended / EndStream），若把它当成功就会回写一条

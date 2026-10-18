@@ -653,7 +653,7 @@ func (s *OpenAIGatewayService) forwardCursor(
 	}
 
 	resp, err := fwd.Do(ctx, &CursorUpstreamRequest{
-		Path: cursorPathStreamUnifiedChatWithTools,
+		Path: cursorPathAgentRun,
 		Body: payload,
 		// 账号级鉴权材料：转发器是进程级共享的，材料必须逐请求携带，
 		// 否则会把 A 号的 x-jg-auth 发给 B 号（方案 §2 E1 遗留风险登记）。

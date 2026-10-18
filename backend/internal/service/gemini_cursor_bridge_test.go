@@ -85,7 +85,7 @@ func TestGeminiCursorMessagesForwardNonStreaming(t *testing.T) {
 	// 出站必须是 Cursor 原生协议（protobuf envelope），不是 Anthropic/Gemini JSON。
 	require.Equal(t, 1, upstream.count())
 	req := upstream.requestAt(0)
-	require.Equal(t, cursorPathStreamUnifiedChatWithTools, req.path)
+	require.Equal(t, cursorPathAgentRun, req.path)
 	require.Equal(t, cursorConnectContentType, req.header.Get("Content-Type"))
 	require.Contains(t, string(req.body), "claude-opus-4-8-low")
 }

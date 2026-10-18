@@ -90,7 +90,7 @@ func TestCursorBridgeForwardMessagesStreamKeepsAnthropicProtocol(t *testing.T) {
 
 	// cursor 前置分支命中：上游只调用一次，且入站 Anthropic 已转换为 CC 形状。
 	require.Equal(t, 1, up.count())
-	require.Equal(t, cursorPathStreamUnifiedChatWithTools, up.at(0).path)
+	require.Equal(t, cursorPathAgentRun, up.at(0).path)
 	wire := string(up.at(0).body)
 	require.Contains(t, wire, "upstream-sonnet", "账号 model_mapping 必须作为唯一模型出口")
 	require.Contains(t, wire, "hi from messages")

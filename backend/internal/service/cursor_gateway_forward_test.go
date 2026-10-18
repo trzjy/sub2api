@@ -215,8 +215,8 @@ func TestCursorOutboundHeadersCarryPerAccountBearerAndDeviceAuth(t *testing.T) {
 
 	// 旧链已删：出站只应有对话调用，不得再打任何 AuthService 端点。
 	require.Equal(t, []string{
-		cursorPathStreamUnifiedChatWithTools,
-		cursorPathStreamUnifiedChatWithTools,
+		cursorPathAgentRun,
+		cursorPathAgentRun,
 	}, up.paths())
 
 	reqA, reqB := up.at(0), up.at(1)
@@ -532,7 +532,7 @@ func TestCursorBridgeInboundOpenAIChatDispatchesToForwarder(t *testing.T) {
 	require.Equal(t, 1, up.count())
 	require.Equal(t, "Bearer BEARER-ACCOUNT-A", up.at(0).header.Get("Authorization"))
 	require.NotEmpty(t, up.at(0).header.Get("x-jg-auth"))
-	require.Equal(t, cursorPathStreamUnifiedChatWithTools, up.at(0).path)
+	require.Equal(t, cursorPathAgentRun, up.at(0).path)
 
 	// 桥接只做字段搬运：usage 逐字段直搬，绝不折算、绝不补默认值。
 	out := cursorForwardResultToOpenAI(res)

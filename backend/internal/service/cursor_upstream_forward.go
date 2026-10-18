@@ -100,14 +100,7 @@ const (
 	// 增量文本与 TurnEnded 真实 usage 的端点。
 	cursorPathAgentRun = "/agent.v1.AgentService/Run"
 
-	// cursorPathStreamUnifiedChatWithTools —— 旧 ChatService 对话路径常量。
-	//
-	// Deprecated: **该名字已不代表 ChatService**。P1-A1 换轨后其值指向
-	// cursorPathAgentRun，只为让 cursor_gateway_forward.go 的 forwardCursor
-	// 出站拼接点保持可编译。P1-A2 已落地（出站改用账号 Bearer），下一次
-	// 触碰 cursor_gateway_forward.go 时删除本别名并直接使用 cursorPathAgentRun。
-	cursorPathStreamUnifiedChatWithTools = cursorPathAgentRun
-)
+	)
 
 // cursorAllowedUpstreamPaths 是已取证的出站路径白名单（失败关闭用）。
 var cursorAllowedUpstreamPaths = map[string]struct{}{

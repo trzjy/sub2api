@@ -171,7 +171,7 @@ func TestCursorProtocolEndToEnd(t *testing.T) {
 	require.Equal(t, 1, chatCalls)
 
 	// 出站只有对话一次调用：旧链的 GetSessionToken 必须彻底消失（合同 §4）。
-	require.Equal(t, []string{cursorPathStreamUnifiedChatWithTools}, upstream.paths())
+	require.Equal(t, []string{cursorPathAgentRun}, upstream.paths())
 
 	// 对话请求必须带用户级身份（账号已存 access_token）与设备级身份（x-jg-auth）。
 	chatReq := upstream.requestAt(0)
@@ -243,7 +243,7 @@ func TestCursorProtocolTokenCachedAcrossCalls(t *testing.T) {
 	chatCalls := upstream.count()
 	require.Equal(t, 3, chatCalls)
 	for _, p := range upstream.paths() {
-		require.Equal(t, cursorPathStreamUnifiedChatWithTools, p, "出站只应有对话调用，不得再打 AuthService")
+		require.Equal(t, cursorPathAgentRun, p, "出站只应有对话调用，不得再打 AuthService")
 	}
 	for i := 0; i < 3; i++ {
 		require.Equal(t, "Bearer "+cursorE2EAccountBearer, upstream.requestAt(i).header.Get("Authorization"),
