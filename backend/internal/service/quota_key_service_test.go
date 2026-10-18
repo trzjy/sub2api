@@ -1293,6 +1293,19 @@ func mustCreateCursorGroup(t *testing.T, client *ent.Client, allowlist domain.Gr
 	return g
 }
 
+// mustCreateCompositeGroup 创建 composite 聚合组并挂模型白名单（P1-B2 U7 挂载目标形态：
+// 生产库无 cursor 平台分组，cursor 账号由 composite 聚合组调度）。
+func mustCreateCompositeGroup(t *testing.T, client *ent.Client, allowlist domain.GroupModelAllowlist) *ent.Group {
+	t.Helper()
+	g, err := client.Group.Create().
+		SetName(fmt.Sprintf("c11-grp-composite-%d", time.Now().UnixNano())).
+		SetPlatform(domain.PlatformComposite).
+		SetModelAllowlist(allowlist).
+		Save(context.Background())
+	require.NoError(t, err)
+	return g
+}
+
 // accountGroupLinked 报告指定账号是否已挂入指定分组（account_groups M2M）。
 func accountGroupLinked(t *testing.T, ctx context.Context, client *ent.Client, accountID, groupID int64) bool {
 	t.Helper()
@@ -1554,35 +1567,45 @@ func TestQuotaKeyService_Pull_NoModelContextSkipsMount(t *testing.T) {
 }
 
 // TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups：B1 缺陷修复——手动入口
-// RefreshAccounts 改走挂载语义，拉到的 cursor 账号挂入"配置勾选模型 ∩ 分组白名单"的交集
-// （findCursorPlatformGroups 裁定 1 口径，与 ListAllowedModels 同源同判），而非落成裸号
-// （group_count=0）。用例构造语义不变：composite 聚合组（白名单未启用）与覆盖实供模型的分组
-// 入选，显式不含 cursor 的分组不入选。
+// RefreshAccounts 改走挂载语义，拉到的 cursor 账号按 P1-B2 U7「按模型平台挂组」挂入
+// 【静态实供清单】∩【模型所属平台（cursor）的目标分组】∩【分组白名单实际覆盖】
+// （findCursorPlatformGroups，与 ListAllowedModels 同源同判 cursorMountTargetGroups），
+// 而非落成裸号（group_count=0）。
+//
+// 用例构造（U7 三条件逐条钉死）：
+//   - 入选：composite 聚合组 + 白名单启用且覆盖实供模型（生产形态）；
+//   - 不入选：composite 聚合组但白名单未启用（allow-all，无对应模型）；
+//   - 不入选：白名单覆盖实供模型但分组平台非 cursor/composite（挂了也路由不到 cursor 账号）；
+//   - 不入选：白名单启用但不覆盖任何实供模型（显式拒绝型）。
 func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 
-	// 应被挂入的分组（生产形态复刻）：composite 聚合组，白名单未启用（Allows 恒真）。
-	grpComposite := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: false})
-	// 应被挂入的分组：白名单启用且覆盖某一实供模型（R4-1 口径：enabled=true 仅当覆盖
-	// 实供模型才挂入；仅含 "cursor" 字样、不含实供模型的分组依 R4-1 不挂）。
-	grpWhitelistCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// 应被挂入的分组（生产形态复刻）：composite 聚合组，白名单启用且覆盖实供模型。
+	grpComposite := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{"claude-sonnet-5-5"},
 	})
-	// 不应挂入的分组：白名单启用且明确不含 cursor（如 DeepSeek 计量组形态）。
-	grpRejectCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// 不应挂入：composite 聚合组但白名单未启用（allow-all，无对应模型）。
+	grpAllowAll := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: false})
+	// 不应挂入：白名单覆盖实供模型，但分组平台非模型所属平台（默认 anthropic）。
+	grpOtherPlatform := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{"claude-sonnet-5-5"},
+	})
+	// 不应挂入：白名单启用且明确不含任何实供模型（如 DeepSeek 计量组形态）。
+	grpRejectCursor := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{"deepseek-v4-1-flash"},
 	})
 
 	// 本用例自建的分组（含 allow-all 的 composite 聚合组）必须自行清理，不得遗留为共享库
-	// 污染：allow-all 组（grpComposite）若被他用例（如 TestCURF1_AllowedModels_... 的全等
+	// 污染：allow-all 组（grpAllowAll）若被他用例（如 TestCURF1_AllowedModels_... 的全等
 	// 断言）读到，会使其允许集合混入非预期模型而断言失败。R9-1 已删除"遍历删全库 allow-all"
 	// 的隔离段，故此处显式复原本用例数据。
 	t.Cleanup(func() {
 		ctx := context.Background()
-		for _, gid := range []int64{grpComposite.ID, grpWhitelistCursor.ID, grpRejectCursor.ID} {
+		for _, gid := range []int64{grpComposite.ID, grpAllowAll.ID, grpOtherPlatform.ID, grpRejectCursor.ID} {
 			_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(gid)).Exec(ctx)
 			_, _ = client.Group.Delete().Where(entgroup.IDEQ(gid)).Exec(ctx)
 		}
@@ -1595,7 +1618,7 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 	})
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
 
-	// 手动刷新：不带模型上下文，按交集口径挂载（用例分组均为 allow-all / 白名单覆盖实供模型，全部入选）。
+	// 手动刷新：不带模型上下文，按 U7 口径挂载。
 	require.NoError(t, svc.RefreshAccounts(ctx, qk.ID))
 
 	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).WithGroups().All(ctx)
@@ -1605,12 +1628,16 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 
 	// group_count > 0：手动拉到的账号已挂组（修复前恒 0）。
 	require.Greater(t, len(accs[0].Edges.Groups), 0, "manual refresh must mount account to groups (group_count > 0)")
-	// 挂入 composite 聚合组（白名单未启用）与白名单显式含 cursor 的组。
+	// 挂入 composite 聚合组（白名单启用且覆盖实供模型）。
 	require.True(t, accountGroupLinked(t, ctx, client, accID, grpComposite.ID),
-		"manual refresh must mount account to whitelist-disabled composite group")
-	require.True(t, accountGroupLinked(t, ctx, client, accID, grpWhitelistCursor.ID),
-		"manual refresh must mount account to whitelist-containing-cursor group")
-	// 不挂入白名单启用且显式拒绝 cursor 的组。
+		"manual refresh must mount account to the composite group covering a real-supply model")
+	// allow-all（白名单未启用）聚合组不挂：无对应模型。
+	require.False(t, accountGroupLinked(t, ctx, client, accID, grpAllowAll.ID),
+		"manual refresh must NOT mount to an allow-all group (no corresponding model)")
+	// 非模型所属平台的分组不挂。
+	require.False(t, accountGroupLinked(t, ctx, client, accID, grpOtherPlatform.ID),
+		"manual refresh must NOT mount to a group whose platform is not the model's owning platform")
+	// 不挂入白名单启用且不覆盖任何实供模型的组。
 	require.False(t, accountGroupLinked(t, ctx, client, accID, grpRejectCursor.ID),
 		"manual refresh must NOT mount account to whitelist-rejecting-cursor group")
 	// 手动刷新成功路径清 exhausted。
@@ -1667,13 +1694,17 @@ func mustLinkAccountToGroup(t *testing.T, client *ent.Client, accountID, groupID
 	require.NoError(t, err)
 }
 
-// TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly 验证裁定 1：ListAllowedModels
-// 不再限定 group.Platform(cursor)。配置勾选实供模型 grok-4.7 / gpt-6-sol，分别由 cursor 平台
-// 分组与非 cursor 平台分组的白名单覆盖 → 两者都应入选（补池按白名单覆盖，不按平台收窄）。
-func TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly(t *testing.T) {
+// TestQuotaKeyModelWater_ListAllowedModelsPlatformScoped 验证 P1-B2 U7：ListAllowedModels
+// 按【模型所属平台的目标分组】枚举可补池模型。实供模型 grok-4.7 由 cursor 平台分组覆盖 →
+// 入选；gpt-6-sol 仅由非 cursor/composite 平台分组（默认 anthropic）覆盖 → 不入选
+// （挂进去也路由不到 cursor 账号，U7 不再让补池把号灌进对模型无声明的裸组）。
+//
+// 补池左项不再取"人工勾选"（入库退出人工勾选定义能力），恒为静态实供清单。
+func TestQuotaKeyModelWater_ListAllowedModelsPlatformScoped(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	// 配置勾选两个实供模型（vendor 随实供清单），交集左操作数取自该配置。
+	// 配置勾选两个实供模型（vendor 随实供清单）；U7 下配置勾选不参与补池左项，
+	// 保留配置源仅为钉死"人工勾选取值不再是模型集合来源"。
 	w := NewQuotaKeyModelWater(client, curF1ConfigSelecting("grok-4.7", "gpt-6-sol"))
 
 	// cursor 平台分组允许 grok-4.7。
@@ -1683,7 +1714,7 @@ func TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly(t *testing.T) {
 		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"grok-4.7"}}).
 		Save(ctx)
 	require.NoError(t, err)
-	// 非 cursor 平台分组（默认 anthropic）允许 gpt-6-sol。
+	// 非模型所属平台分组（默认 anthropic）允许 gpt-6-sol。
 	// 注意：本用例只创建"白名单启用"的分组——白名单未启用（enabled=false）的分组按既有
 	// Allows 语义是"放行一切"，会污染 quota_test 持久库里其它用例的挂载/水位断言。
 	anthropicGrp, err := client.Group.Create().
@@ -1707,8 +1738,8 @@ func TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly(t *testing.T) {
 	models, err := w.ListAllowedModels(ctx)
 	require.NoError(t, err)
 	require.Contains(t, models, "grok-4.7", "model covered by a cursor group allowlist must be enumerated")
-	require.Contains(t, models, "gpt-6-sol",
-		"model covered ONLY by a NON-cursor group allowlist must ALSO be enumerated (裁定 1 removed platform=cursor scoping)")
+	require.NotContains(t, models, "gpt-6-sol",
+		"model covered ONLY by a group outside the model's owning platform must NOT be enumerated (P1-B2 U7)")
 }
 
 // TestQuotaKeyModelWater_WaterLevelFiltersByModel 验证水位按模型 M 过滤：仅"白名单含 M"
@@ -2266,8 +2297,9 @@ func (c *curF1ConfigSource) ApplyEntryDefaults(_ context.Context, _ *ent.Tx, acc
 }
 
 // curF1ConfigSelecting 构造一个 AutoEntryConfigProvider 测试替身：启用全部已知厂商，
-// 并勾选给定的【实供】模型（vendor 取自 CursorRealSupplyModels，与 ComputeEntryModels 门控一致）。
-// 仅用于把"配置勾选集合"注入 quotaKeyModelWater 以验证裁定 1 的交集语义。
+// 并勾选给定的【实供】模型（vendor 取自 CursorRealSupplyModels）。
+// P1-B2 起配置勾选不再是入库模型 / 补池的输入；保留该替身仅用于钉死"勾选态不影响
+// 静态清单产出与会挂结果"（回归用例仍以它构造非空勾选态）。
 func curF1ConfigSelecting(models ...string) *curF1ConfigSource {
 	vendors := make(map[string]bool, len(cursorKnownVendors))
 	for v := range cursorKnownVendors {
@@ -2307,8 +2339,9 @@ func TestCURF1_AllowedModels_NoCursorGroup_RealSupplyModel(t *testing.T) {
 	}
 	w := NewQuotaKeyModelWater(client, &curF1ConfigSource{cfg: cfg})
 
-	// 非 cursor 平台的活跃分组，白名单允许 grok-4.7（生产无 cursor 平台分组，聚合组按白名单覆盖）。
-	grp := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// composite 聚合组（模型所属平台 cursor 的目标分组；生产无 cursor 平台分组，
+	// cursor 账号由 composite 聚合组调度），白名单启用且允许 grok-4.7。
+	grp := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{"grok-4.7"},
 	})
@@ -2406,9 +2439,11 @@ func TestCURF1_AllowedModels_IntersectionExcludesOutside(t *testing.T) {
 	}
 	w := NewQuotaKeyModelWater(client, &curF1ConfigSource{cfg: cfg})
 
-	// 仅允许 grok-4.7 的分组（无分组允许 gpt-6.1-sol）。
+	// 仅允许 grok-4.7 的分组（无分组允许 gpt-6.1-sol）。P1-B2 U7：须为模型所属平台的目标
+	// 分组——composite 聚合组（生产形态），否则不构成覆盖。
 	grp, err := client.Group.Create().
 		SetName(fmt.Sprintf("c11-f1-out-%d", time.Now().UnixNano())).
+		SetPlatform(domain.PlatformComposite).
 		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"grok-4.7"}}).
 		Save(ctx)
 	require.NoError(t, err)

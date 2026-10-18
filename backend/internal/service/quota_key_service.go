@@ -721,9 +721,10 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			return nil
 		}
 
-		// D2-a 配置单次读取（同批号一致性口径，方案审 F2 消化）：本快照同时供
-		// ①账号凭证 model_mapping 构造（下方插入循环）与 ②既有 ApplyEntryDefaults
-		// （挂组路径，替换原挂组内的第二次 GetConfig），同批账号两处同源同快照。
+		// 配置单次读取（同批号一致性口径，方案审 F2 消化）：本快照供既有 ApplyEntryDefaults
+		// （挂组路径，替换原挂组内的第二次 GetConfig）使用；model_mapping 已改为静态清单
+		// （P1-B2：入库退出人工勾选定义能力，entry 模型 = CursorRealSupplyModels 恒等映射），
+		// 不再随配置勾选漂移——首次按静态清单写 model_mapping，后续校准由 B1 入口覆盖同一字段。
 		// autoEntry 未装配（nil）时跳过：账号无映射 → IsModelSupported 对 cursor 失败
 		// 关闭（既有闸门，不放宽），与 D1 既有测试/未装配场景行为一致。
 		//
@@ -739,7 +740,7 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 				return fmt.Errorf("quota_key_service: load auto entry config: %w: %w", ErrQuotaKeyMountFailed, cerr)
 			}
 			entryCfg = cfg
-			entryModelMapping = CursorAccountModelMapping(ComputeEntryModels(cfg))
+			entryModelMapping = CursorAccountModelMapping(CursorStaticEntryModels())
 		}
 		insertedIDs := make([]int64, 0, len(result.Accounts))
 		for i, ua := range result.Accounts {
@@ -754,8 +755,9 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			//
 			// 模型映射在加密之前并入（浅拷贝，不改上游产物）：model_mapping 非敏感键、明文存
 			// JSONB（与其他平台 admin 建号形态一致），MAC 覆盖含映射的最终明文——单次加密+
-			// 单次指纹，契约零改动。空映射集（配置空选/未装配）不写键 → cursor 账号对一切
-			// 模型失败关闭（account.go IsModelSupported 平台分支）。
+			// 单次指纹，契约零改动。映射为静态实供清单恒等映射（P1-B2），仅当 autoEntry 未装配
+			// （entryModelMapping 为 nil）时不写键 → cursor 账号对一切模型失败关闭
+			// （account.go IsModelSupported 平台分支）。
 			creds := ua.Credentials
 			if entryModelMapping != nil {
 				merged := make(map[string]any, len(creds)+1)
@@ -1193,46 +1195,63 @@ func (s *QuotaKeyService) findGroupsAllowingModel(ctx context.Context, tx *ent.T
 	return out, nil
 }
 
-// selectedEntryModelsOf 返回"配置勾选模型"集合（裁定 1 交集左操作数）：取配置 →
-// ComputeEntryModels（以实供清单 CursorRealSupplyModels 为门控）。cfgSrc 为 nil 时用缺省配置。
-// 与 quotaKeyModelWater.selectedEntryModels 同源（同一函数），保证手动挂组与自动补池
-// （ListAllowedModels）使用同一配置源、同一 Allows 判定口径（R7-1：CUR-F10）。
-func selectedEntryModelsOf(ctx context.Context, cfgSrc AutoEntryConfigProvider) ([]string, error) {
-	if cfgSrc == nil {
-		return ComputeEntryModels(DefaultAutoEntryConfig()), nil
+// cursorModelOwningPlatform 是 cursor 实供清单模型的【所属平台】。
+//
+// 判定依据：实供清单模型由 cursor 平台账号经 credentials.model_mapping 供给，composite 归属层
+// （resolveCompositeModelOwnership）亦按"账号平台"判定模型归属 → 清单模型恒归 cursor 平台。
+// P1-B2「按模型平台挂组」以此为挂载判据，取代此前"配置勾选模型 ∩ 白名单"的人工勾选口径。
+const cursorModelOwningPlatform = PlatformCursor
+
+// cursorMountTargetGroups 是 P1-B2 U7「按模型平台挂组」的唯一判定出口（手动挂组与自动补池
+// 同源同判，避免两处口径漂移）。返回 groups 中可作为入库挂载目标的子集（保序）。
+//
+// 入选三条件（AND）：
+//  1. 平台：分组平台必须是"模型所属平台（cursor）的目标分组"——
+//     group.platform = cursor 的专属分组，或能把请求目标平台解析到 cursor 的 composite 聚合分组
+//     （聚合组自身无原生模型，只有在其白名单实际声明了实供模型时才是该模型的目标分组）；
+//  2. 有对应模型：白名单必须启用（enabled=true）——allow-all（enabled=false，Allows 恒真）
+//     恒真判入已收敛：未启用白名单 = 无对应模型，不挂（聚合组/福利组的典型形态）；
+//  3. 覆盖：白名单对静态实供清单（CursorStaticEntryModels）至少一个模型 Allows 命中
+//     （沿用既有 Allows 的前缀/通配语义；仅含 "cursor" 字样、不含任何实供模型的组不挂）。
+func cursorMountTargetGroups(groups []*ent.Group, entryModels []string) []*ent.Group {
+	if len(entryModels) == 0 {
+		return nil
 	}
-	cfg, err := cfgSrc.GetConfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("quota_key_service: load auto entry config: %w", err)
+	out := make([]*ent.Group, 0, len(groups))
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		platform := strings.TrimSpace(g.Platform)
+		if platform != cursorModelOwningPlatform && platform != PlatformComposite {
+			continue // 不是模型所属平台的目标分组
+		}
+		al := GroupModelAllowlistFromDomain(g.ModelAllowlist)
+		if !al.Enabled {
+			continue // allow-all（无对应模型）→ 不挂
+		}
+		hit := false
+		for _, m := range entryModels {
+			if al.Allows(m) {
+				hit = true
+				break
+			}
+		}
+		if hit {
+			out = append(out, g)
+		}
 	}
-	return ComputeEntryModels(cfg), nil
+	return out
 }
 
-// selectedEntryModels 返回"配置勾选模型"集合（裁定 1 交集左操作数）：取入库配置 →
-// ComputeEntryModels（以实供清单 CursorRealSupplyModels 为门控）。与 quotaKeyModelWater
-// 同源（selectedEntryModelsOf），保证手动挂组与自动补池统一口径（R7-1：CUR-F10）。
-func (s *QuotaKeyService) selectedEntryModels(ctx context.Context) ([]string, error) {
-	return selectedEntryModelsOf(ctx, s.autoEntry)
-}
-
-// findCursorPlatformGroups 是 B1 手动挂载事实源（裁定 1 口径，2026-10-17 经 CUR-F7 R4-1
-// 收紧，2026-10-17 经 CUR-F10 R7-1 改为与 ListAllowedModels 同源）。
+// findCursorPlatformGroups 是 B1 手动挂载事实源（P1-B2 起改为「按模型平台挂组」U7 口径）。
 //
-// 手动挂载目标 = 【配置勾选模型集合】∩【分组白名单覆盖】的交集，与自动链路 ListAllowedModels
-// 同一配置源（GetConfig → ComputeEntryModels，cfgSrc=nil 用缺省配置）、同一 Allows 判定
-// （GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows）。即：
-//   - enabled=false（未启用白名单，Allows 恒真）→ 入选（接受任意模型）；
-//   - enabled=true → 对"配置勾选模型集合"任一 Allows 命中才入选。
+// 手动挂载目标 = 【静态实供清单】∩【模型所属平台（cursor）的目标分组】∩【分组白名单实际覆盖】，
+// 与自动链路 ListAllowedModels 共用 cursorMountTargetGroups（同源同判）。模型集合取自
+// CursorStaticEntryModels（静态实供清单），不再取"人工勾选"——入库退出人工勾选定义能力。
 //
-// 判据来源：裁定 1（配置勾选模型 ∩ 分组白名单）+ 与 ListAllowedModels 同源。
-// 配置只勾 grok-4.7、而某分组只覆盖 gpt-6-sol（实供但不被勾选）时，该分组不再被手动挂入
-// （配置对勾选模型不可用），避免手动拉的号落入对勾选模型不可用的组。
-//
-// 勾选集合为空（用户全关）= 无模型上下文：此时"挂到允许相应模型的现有分组"无从满足，
-// 直接零覆盖失败关闭（ErrQuotaKeyModelNoCoverage，走既有回滚路径，号不入库），与自动链路
-// 一致（勾选空时自动链路不触发）。enabled=false 的 allow-all 组仅在 selected 非空时才可能
-// 入选（此时 allow-all 确实覆盖勾选模型）；selected 为空时不再收录 allow-all 组
-// （CUR-F12 R9-3，2026-10-17）。
+// 零覆盖（无任何目标分组）= 无模型上下文：此时"挂到允许相应模型的现有分组"无从满足，
+// 直接失败关闭（ErrQuotaKeyModelNoCoverage，走既有回滚路径，号不入库）。
 func (s *QuotaKeyService) findCursorPlatformGroups(ctx context.Context, tx *ent.Tx) ([]int64, error) {
 	groups, err := tx.Group.Query().
 		Where(
@@ -1243,39 +1262,13 @@ func (s *QuotaKeyService) findCursorPlatformGroups(ctx context.Context, tx *ent.
 	if err != nil {
 		return nil, fmt.Errorf("quota_key_service: query candidate groups: %w", err)
 	}
-	// R7-1（裁定 1 + 与 ListAllowedModels 同源）：手动挂载口径改为"配置勾选模型集合"
-	// （selectedEntryModels 同源：GetConfig → ComputeEntryModels，cfgSrc=nil 用缺省配置）。
-	selected, err := s.selectedEntryModels(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("quota_key_service: load selected entry models for cursor mount: %w", err)
+	targets := cursorMountTargetGroups(groups, CursorStaticEntryModels())
+	out := make([]int64, 0, len(targets))
+	for _, g := range targets {
+		out = append(out, g.ID)
 	}
-	// R9-3（CUR-F12，2026-10-17）：勾选集合为空 = 无模型上下文，"挂到允许相应模型的现有分组"
-	// 无从满足 → 直接零覆盖失败关闭。allow-all 组（enabled=false）也不例外：其 Allows 恒真
-	// 只在"有勾选模型可被覆盖"时才有意义；勾选空时收录它会让手动拉号落入无模型上下文的裸挂，
-	// 与自动链路（勾选空不触发）语义冲突。走既有 ErrQuotaKeyModelNoCoverage 回滚路径（号不入库）。
-	if len(selected) == 0 {
+	if len(out) == 0 {
 		return nil, ErrQuotaKeyModelNoCoverage
-	}
-	out := make([]int64, 0, len(groups))
-	for _, g := range groups {
-		al := GroupModelAllowlistFromDomain(g.ModelAllowlist)
-		// enabled=false：白名单未启用，Allows 恒真 → 该组接受任意模型，cursor 可挂。
-		if !al.Enabled {
-			out = append(out, g.ID)
-			continue
-		}
-		// enabled=true：对"配置勾选模型集合"任一 Allows 命中即入选（含前缀/通配匹配）；
-		// 仅含 "cursor" 字样、不含任何【勾选】模型的组不挂（路由不出账号）。
-		hit := false
-		for _, m := range selected {
-			if al.Allows(m) {
-				hit = true
-				break
-			}
-		}
-		if hit {
-			out = append(out, g.ID)
-		}
 	}
 	return out, nil
 }
@@ -1382,47 +1375,18 @@ func (w *quotaKeyModelWater) SetConfigSource(s AutoEntryConfigProvider) {
 	}
 }
 
-// selectedEntryModels 返回"配置勾选模型"集合（裁定 1 交集左操作数）：与手动挂组
-// （QuotaKeyService.findCursorPlatformGroups）同源（selectedEntryModelsOf），保证自动补池
-// 与手动挂组使用同一配置源、同一 Allows 判定口径（R7-1：CUR-F10）。
-func (w *quotaKeyModelWater) selectedEntryModels(ctx context.Context) ([]string, error) {
-	return selectedEntryModelsOf(ctx, w.cfgSrc)
-}
-
-// ListAllowedModels 枚举当前可补池的模型 M（裁定 1）：
-// 【入库配置勾选的模型】∩【现有活跃且未软删分组的模型白名单 Allows(M) 命中的模型】。
+// ListAllowedModels 枚举当前可补池的模型 M（P1-B2：按模型平台挂组口径，与手动挂组同源同判）：
+// 【静态实供清单 CursorStaticEntryModels】∩【模型所属平台（cursor）的目标分组白名单实际覆盖的模型】。
 //
-// 交集左项（配置勾选模型）取自 selectedEntryModels（ComputeEntryModels，以实供清单
-// CursorRealSupplyModels 为门控，非官方模型名快照）；交集右项取自全部 active + 未软删分组的
-// 白名单（GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows(M)）。
+// 交集左项不再取"人工勾选"（入库退出人工勾选定义能力），右项与 findCursorPlatformGroups 共用
+// cursorMountTargetGroups：只认"模型所属平台的目标分组 + 白名单启用且 Allows(M)"——allow-all
+// （无对应模型）的聚合/福利组不构成覆盖，不再让补池把号灌进对模型无声明的裸组。
 //
-// 不再限定 group.Platform(domain.PlatformCursor)：生产库无 cursor 平台分组（cursor 账号由
-// composite 聚合组调度），若只枚举 cursor 平台分组则交集恒空、reconciler 每轮空跑。模型 M
-// 只要被任一 active 未软删分组的白名单 Allows 命中即进入候选集合（禁止把其它平台分组模型
-// 盲目纳入：M 必须先在左项勾选集合内，否则不在补池范围）。
+// 空集语义（运营空态，非配置错误）：清单内模型但无目标分组覆盖 → 返回空集 + nil，reconciler
+// 正常空跑停轮（沿用 CUR-F17 外审 R14 回修的两态分界：分组覆盖是运营态，不记失败心跳）。
 func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, error) {
-	// 原始勾选集合（未经过实供清单门控）：用于区分"用户真关了"与"勾选了但全被实供清单剔除"
-	// 两种空集语义（R8-1：CUR-F11）。
-	rawSelected, err := w.rawConfigModelIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// selected 是经实供清单门控后的有效勾选模型（ComputeEntryModels）。
-	selected, err := w.selectedEntryModels(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(selected) == 0 {
-		if len(rawSelected) == 0 {
-			// 用户本来就全关 / 配置无勾选 / 缺省配置无模型 → 正常空跑（现状语义不回归）。
-			return nil, nil
-		}
-		// 勾选非空但经实供清单门控后为空：勾选模型均不在实供清单内（如 D2-a 旧配置残留的
-		// 官方模型名 gpt-4.1），属配置问题——走可识别错误使 reconciler 记失败心跳，ops 直接
-		// 可见"配置问题"，而非被记成"无允许模型"的正常空跑。
-		return nil, infraerrors.New(http.StatusUnprocessableEntity,
-			"CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION",
-			"勾选的模型均不在实供清单内（可能残留旧官方模型名），需管理员重新选择模型")
+	if w.client == nil {
+		return nil, fmt.Errorf("quota_key_model_water: ent client not configured")
 	}
 	groups, err := w.client.Group.Query().
 		Where(
@@ -1433,9 +1397,11 @@ func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, e
 	if err != nil {
 		return nil, fmt.Errorf("quota_key_model_water: list groups: %w", err)
 	}
-	seen := make(map[string]struct{}, len(selected))
-	out := make([]string, 0, len(selected))
-	for _, m := range selected {
+	entryModels := CursorStaticEntryModels()
+	targets := cursorMountTargetGroups(groups, entryModels)
+	seen := make(map[string]struct{}, len(entryModels))
+	out := make([]string, 0, len(entryModels))
+	for _, m := range entryModels {
 		km := strings.ToLower(strings.TrimSpace(m))
 		if km == "" {
 			continue
@@ -1443,9 +1409,8 @@ func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, e
 		if _, ok := seen[km]; ok {
 			continue
 		}
-		// 交集右项：被任一 active 未软删分组的白名单 Allows 命中。
 		covered := false
-		for _, g := range groups {
+		for _, g := range targets {
 			if GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows(m) {
 				covered = true
 				break
@@ -1457,40 +1422,7 @@ func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, e
 		seen[km] = struct{}{}
 		out = append(out, m)
 	}
-	// 两态分界（CUR-F17 外审 R14 回修，v3.5 §13.2「无可选 key 即停」）：
-	//   - 清单外勾选（rawSelected 非空、selected 为空）→ 配置错误：勾的全是清单外模型
-	//     （如旧官方名 gpt-4.1），管理员必须重新选择。走上面 :1395-1397 出口
-	//     （CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION），reconciler 记失败心跳。
-	//   - 清单内勾选但无分组覆盖（此处 out 为空）→ 运营空态，不是配置错误：分组覆盖是运营态
-	//     （模型/分组随时可能调整），不应记失败。直接返回空集 + nil，reconciler 正常空跑停轮。
 	return out, nil
-}
-
-// rawConfigModelIDs 返回配置中勾选的原始模型 ID（未经过实供清单门控），用于区分
-// "用户真关了" 与 "勾选了但全被实供清单剔除" 两种空集语义（R8-1：CUR-F11）。
-func (w *quotaKeyModelWater) rawConfigModelIDs(ctx context.Context) ([]string, error) {
-	if w.cfgSrc == nil {
-		return modelIDsOf(DefaultAutoEntryConfig()), nil
-	}
-	cfg, err := w.cfgSrc.GetConfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("quota_key_model_water: load auto entry config: %w", err)
-	}
-	return modelIDsOf(cfg), nil
-}
-
-// modelIDsOf 抽取配置中勾选的模型 ID（忽略空 ID），供 ListAllowedModels 区分空集语义。
-func modelIDsOf(cfg *CursorAutoEntryConfig) []string {
-	if cfg == nil {
-		return nil
-	}
-	ids := make([]string, 0, len(cfg.Models))
-	for _, m := range cfg.Models {
-		if m.ID != "" {
-			ids = append(ids, m.ID)
-		}
-	}
-	return ids
 }
 
 // WaterLevel 返回模型 M 的当前水位（候选计数）与统一阈值。

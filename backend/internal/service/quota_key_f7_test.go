@@ -27,20 +27,24 @@ import (
 // ---------------------------------------------------------------------------
 
 // qkF7MustCreateGroup 创建 active 未软删分组并设置模型白名单，返回其 ID。
+// 平台固定为 composite（P1-B2 U7：生产库无 cursor 平台分组，cursor 账号由 composite
+// 聚合组调度；挂载目标必须是模型所属平台 cursor 的目标分组，默认 anthropic 组不入选）。
 func qkF7MustCreateGroup(t *testing.T, client *ent.Client, name string, al domain.GroupModelAllowlist) int64 {
 	t.Helper()
 	ctx := context.Background()
 	g, err := client.Group.Create().
 		SetName(name).
 		SetStatus(domain.StatusActive).
+		SetPlatform(domain.PlatformComposite).
 		SetModelAllowlist(al).
 		Save(ctx)
 	require.NoError(t, err)
 	return g.ID
 }
 
-// TestCURF7_R4_1_ManualMountAlignsRealSupplyWhitelist：手动拉号挂载目标按实供模型白名单
-// 覆盖判定——含实供模型的分组入选、仅含 "cursor" 字样的分组不挂、未启用白名单的分组入选。
+// TestCURF7_R4_1_ManualMountAlignsRealSupplyWhitelist：手动拉号挂载目标按【静态实供清单 ∩
+// 模型所属平台的目标分组 ∩ 白名单实际覆盖】判定（P1-B2 U7）——含实供模型的 composite 分组
+// 入选、仅含 "cursor" 字样的分组不挂、未启用白名单（allow-all，无对应模型）的分组不挂。
 func TestCURF7_R4_1_ManualMountAlignsRealSupplyWhitelist(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -68,7 +72,7 @@ func TestCURF7_R4_1_ManualMountAlignsRealSupplyWhitelist(t *testing.T) {
 		Enabled: true, Models: []string{"cursor"},
 	})
 	createdGroupIDs = append(createdGroupIDs, idB)
-	// 分组 C：未启用白名单（接受一切）→ 应入选。
+	// 分组 C：未启用白名单（allow-all，无对应模型）→ P1-B2 起不入选（聚合/福利组形态）。
 	idC := qkF7MustCreateGroup(t, client, "f7-C-disabled", domain.GroupModelAllowlist{
 		Enabled: false, Models: nil,
 	})
@@ -86,7 +90,7 @@ func TestCURF7_R4_1_ManualMountAlignsRealSupplyWhitelist(t *testing.T) {
 		gotSet[id] = struct{}{}
 	}
 	require.Contains(t, gotSet, idA, "group with real-supply model must be mounted")
-	require.Contains(t, gotSet, idC, "group with disabled allowlist must be mounted")
+	require.NotContains(t, gotSet, idC, "allow-all group (no corresponding model) must NOT be mounted (P1-B2)")
 	require.NotContains(t, gotSet, idB, "group with only 'cursor' string and no real-supply model must NOT be mounted")
 }
 
@@ -166,21 +170,20 @@ func TestCURF7_R4_2_NullConfigReturnsInvalid(t *testing.T) {
 		"null config must return the INVALID error type; got=%v", err)
 }
 
-// TestCURF7_R4_2_ReconcilerSeesErrorNotEmpty：reconciler 视角 ListAllowedModels 在
-// null 配置下返回错误（失败心跳），而非空集成功当成功停轮。
+// TestCURF7_R4_2_ReconcilerSeesErrorNotEmpty：client 未配置时 ListAllowedModels 失败关闭
+// （不得返回空集当成功停轮）。
+//
+// 注：P1-B2 起补池左项恒为静态实供清单，不再读取入库配置，故"配置无效 → reconciler 失败心跳"
+// 这一路径随"人工勾选退出"一并消失（配置不再是补池输入）；此处保留的是 client 未配置的失败关闭。
 func TestCURF7_R4_2_ReconcilerSeesErrorNotEmpty(t *testing.T) {
-	repo := newFakeSettingRepo()
-	repo.data[CursorAutoEntryConfigSettingKey] = "null"
-	svc := NewCursorAutoEntryService(repo, newFakeQuotaKeyRepo(), testEncryptor{}, nil, nil, "")
-
-	// client 为 nil 安全：selectedEntryModels 先失败返回，ListAllowedModels 不会触及 client。
-	w := &quotaKeyModelWater{client: nil, cfgSrc: svc}
+	w := &quotaKeyModelWater{client: nil, cfgSrc: nil}
 	models, err := w.ListAllowedModels(context.Background())
-	require.Error(t, err, "reconciler must fail (heartbeat) on invalid config, not succeed with empty set")
-	require.Nil(t, models, "reconciler must not treat invalid config as an allowed empty model set")
+	require.Error(t, err, "unconfigured client must fail closed")
+	require.Nil(t, models, "unconfigured client must not return an allowed empty model set")
 }
 
-// TestCURF7_R4_2_LegalEmptySetUnchanged：用户全关（合法空集）语义不变——返回配置而非错误。
+// TestCURF7_R4_2_LegalEmptySetUnchanged：用户全关（合法空集）——GetConfig 仍返回配置而非
+// 错误；但入库模型集合不再由勾选决定，恒为静态实供清单（P1-B2）。
 func TestCURF7_R4_2_LegalEmptySetUnchanged(t *testing.T) {
 	repo := newFakeSettingRepo()
 	// 合法：显式勾选空集（所有 vendor=false、models=[]），非 null。
@@ -190,7 +193,8 @@ func TestCURF7_R4_2_LegalEmptySetUnchanged(t *testing.T) {
 	cfg, err := svc.GetConfig(context.Background())
 	require.NoError(t, err, "legal empty config must NOT error")
 	require.NotNil(t, cfg)
-	require.Empty(t, ComputeEntryModels(cfg), "legal empty config yields empty model set (unchanged semantics)")
+	require.Equal(t, CursorStaticEntryModels(), ComputeEntryModels(cfg),
+		"user-all-off must no longer empty the entry model set (P1-B2: static supply identity)")
 }
 
 // TestCURF7_R4_3_EncryptionDisabledFailsClosed：credcrypt 未启用时，cursor 拉号落库
