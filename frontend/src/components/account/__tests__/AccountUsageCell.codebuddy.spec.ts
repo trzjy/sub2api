@@ -4,10 +4,11 @@ import { flushPromises, mount } from '@vue/test-utils'
 import AccountUsageCell from '../AccountUsageCell.vue'
 import type { Account } from '@/types'
 
-// 方案 N6：CodeBuddy 母账号余额/配额走 account.Extra 快照（Card F 分包展示）。
+// 方案 N6：CodeBuddy 母账号余额/配额走 account.Extra 聚合键（CB-SUM-FE-R1：逐包明细已删除）。
 // 本 spec 钉住两件事：
 //   1) 错误键就是后端写入的 codebuddy_credit_error（§4.1 SSOT；旧错误键名已废弃）；
-//   2) 进度条 + 合计行（异单位不计入）+ 无快照空态（绝不渲染 0%）。
+//   2) 进度条 + 合计行（来自聚合键）+ 无快照空态（绝不渲染 0%）+ has_excluded 标注。
+// 逐包行已移除（基线提交 9a254a0d9），本 spec 持续钉住「包名不再渲染」负断言。
 const { getUsage } = vi.hoisted(() => ({ getUsage: vi.fn() }))
 
 vi.mock('@/api/admin', () => ({
@@ -101,20 +102,11 @@ afterEach(() => {
 })
 
 describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
-  it('有分包快照时渲染利用率、周期截止与合计行（逐包行已移除）', async () => {
+  it('有聚合快照时渲染利用率、周期截止与合计行（逐包行已移除）', async () => {
     const wrapper = mountCell(
       makeAccount({
-        codebuddy_credit_packages: [
-          {
-            id: 'a',
-            name: 'Pro 月包',
-            unit: 'credits',
-            remaining: '300.50000000',
-            total: '1000.00000000',
-            expires_at: '2026-10-01T00:00:00Z',
-            status: 0,
-          },
-        ],
+        codebuddy_credit_total_remaining: '300.50000000',
+        codebuddy_credit_total_total: '1000.00000000',
         codebuddy_credit_packages_updated_at: '2026-09-29T10:00:00Z',
         codebuddy_credit_used_percent: 30.05,
         codebuddy_credit_reset_at: '2026-10-01T00:00:00Z',
@@ -126,7 +118,7 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
     expect(bar.exists()).toBe(true)
     expect(bar.attributes('data-utilization')).toBe('30.05')
     expect(wrapper.text()).toContain('积分')
-    // 逐包行已移除：包名不再渲染（负断言）
+    // 逐包行已移除：包名不再渲染（负断言，聚合键下根本没有包名概念）
     expect(wrapper.text()).not.toContain('Pro 月包')
     // 合计行（更新时间格式随运行环境 Intl locale，宽松断言日期年份）
     expect(wrapper.text()).toContain('合计 300.50 / 1000.00')
@@ -156,17 +148,8 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
   it('探测失败时保留上一次成功快照（错误行另行追加）', async () => {
     const wrapper = mountCell(
       makeAccount({
-        codebuddy_credit_packages: [
-          {
-            id: 'a',
-            name: 'Pro 月包',
-            unit: 'credits',
-            remaining: '660.00000000',
-            total: '1000.00000000',
-            expires_at: '2026-10-01T00:00:00Z',
-            status: 0,
-          },
-        ],
+        codebuddy_credit_total_remaining: '660.00000000',
+        codebuddy_credit_total_total: '1000.00000000',
         codebuddy_credit_used_percent: 66,
         codebuddy_credit_error: '上游超时',
       }),
@@ -179,37 +162,20 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
     expect(wrapper.text()).toContain('上游超时')
   })
 
-  it('异单位分包不计入合计并标注', async () => {
+  it('has_excluded=true 时标注「部分分包未计入合计」', async () => {
     const wrapper = mountCell(
       makeAccount({
-        codebuddy_credit_packages: [
-          {
-            id: 'a',
-            name: '积分包',
-            unit: 'credits',
-            remaining: '10.00000000',
-            total: '20.00000000',
-            expires_at: '',
-            status: 0,
-          },
-          {
-            id: 'b',
-            name: '美元包',
-            unit: 'usd',
-            remaining: '5.00000000',
-            total: '9.00000000',
-            expires_at: '',
-            status: 0,
-          },
-        ],
+        codebuddy_credit_total_remaining: '10.00000000',
+        codebuddy_credit_total_total: '20.00000000',
+        codebuddy_credit_has_excluded: true,
         codebuddy_credit_used_percent: 40,
       }),
     )
     await flushPromises()
 
-    // 合计只含 credits 包：10.00 / 20.00
+    // 合计只含聚合 total：10.00 / 20.00
     expect(wrapper.text()).toContain('合计 10.00 / 20.00')
-    // 逐包行已移除：包名不再渲染（异单位包不计入合计，仅在合计行标注）
+    // 逐包行已移除：包名不再渲染
     expect(wrapper.text()).not.toContain('积分包')
     expect(wrapper.text()).not.toContain('美元包')
     expect(wrapper.text()).toContain('部分分包未计入合计')
@@ -219,17 +185,8 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
     const wrapper = mountCell(
       makeAccount(
         {
-          codebuddy_credit_packages: [
-            {
-              id: 'a',
-              name: 'Pro 月包',
-              unit: 'credits',
-              remaining: '300.50000000',
-              total: '1000.00000000',
-              expires_at: '2026-10-01T00:00:00Z',
-              status: 0,
-            },
-          ],
+          codebuddy_credit_total_remaining: '300.50000000',
+          codebuddy_credit_total_total: '1000.00000000',
           codebuddy_credit_used_percent: 30.05,
         },
         'deepseek',
