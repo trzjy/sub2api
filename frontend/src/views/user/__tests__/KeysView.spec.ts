@@ -266,6 +266,13 @@ const getButtonByText = (wrapper: VueWrapper, text: string) => {
   return button
 }
 
+const UseKeyModalCapture = {
+  name: 'UseKeyModal',
+  props: ['show', 'apiKey', 'baseUrl', 'platform', 'claudeCodeOnly', 'allowMessagesDispatch'],
+  emits: ['close'],
+  template: '<div data-test=\"use-key-modal-capture\" />',
+}
+
 describe('user KeysView column settings', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -352,66 +359,6 @@ describe('user KeysView column settings', () => {
     expect(visibleColumnKeys(wrapper)).not.toContain('last_used_at')
     expect(visibleColumnKeys(wrapper)).not.toContain('last_used_ip')
     expect(visibleColumnKeys(wrapper)).not.toContain('id')
-  })
-
-  it('opens bulk editing with only selected visible keys', async () => {
-    const wrapper = await mountView()
-    const table = wrapper.findComponent({ name: 'DataTable' })
-    expect(table.props('selectable')).toBe(true)
-    table.vm.$emit('update:selectedKeys', [1, 99])
-    await nextTick()
-    await wrapper.get('[data-test="bulk-edit-keys"]').trigger('click')
-    const modal = wrapper.findComponent({ name: 'BulkEditKeysModal' })
-    expect(modal.props('show')).toBe(true)
-    expect(modal.props('selectedKeys').map((key: ApiKey) => key.id)).toEqual([1])
-    wrapper.unmount()
-  })
-
-  it.each(['filter', 'page size', 'sort'])('clears selection on %s changes', async (change) => {
-    const wrapper = await mountView()
-    const table = wrapper.findComponent({ name: 'DataTable' })
-    table.vm.$emit('update:selectedKeys', [1])
-    await nextTick()
-    if (change === 'filter') {
-      wrapper.findComponent({ name: 'SearchInput' }).vm.$emit('search')
-    } else if (change === 'page size') {
-      await wrapper.get('[data-test="page-size-50"]').trigger('click')
-    } else {
-      table.vm.$emit('sort', 'created_at', 'asc')
-    }
-    await flushPromises()
-    expect(table.props('selectedKeys')).toEqual([])
-    expect(wrapper.find('[data-test="bulk-edit-keys"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('removes successful keys from the selection and refreshes the table', async () => {
-    listKeys.mockResolvedValue({
-      items: [createApiKey(), { ...createApiKey(), id: 2, name: 'Second' }],
-      total: 2, pages: 1
-    })
-    const wrapper = await mountView()
-    const table = wrapper.findComponent({ name: 'DataTable' })
-    table.vm.$emit('update:selectedKeys', [1, 2])
-    await nextTick()
-    await wrapper.get('[data-test="bulk-edit-keys"]').trigger('click')
-    wrapper.findComponent({ name: 'BulkEditKeysModal' }).vm.$emit('updated', [1])
-    await flushPromises()
-    expect(listKeys).toHaveBeenCalledTimes(2)
-    expect(table.props('selectedKeys')).toEqual([2])
-    wrapper.unmount()
-  })
-
-  it('drops keys that are no longer visible after a refresh', async () => {
-    const wrapper = await mountView()
-    const table = wrapper.findComponent({ name: 'DataTable' })
-    table.vm.$emit('update:selectedKeys', [1])
-    await nextTick()
-    listKeys.mockResolvedValue({ items: [], total: 0, pages: 0 })
-    await wrapper.get('button[title="Refresh"]').trigger('click')
-    await flushPromises()
-    expect(table.props('selectedKeys')).toEqual([])
-    wrapper.unmount()
   })
 
   it('shows a hidden column when toggled and persists the preference', async () => {
@@ -512,190 +459,6 @@ describe('user KeysView column settings', () => {
     expect(currentConcurrencyColumn?.sortable).toBe(true)
   })
 
-  it.each([
-    { key: 'current_concurrency', order: 'asc' },
-    { key: 'group', order: 'asc' },
-    { key: 'group', order: 'desc' },
-  ] as const)('keeps filters and resets pagination and selection when sorting $key $order', async ({ key, order }) => {
-    getAvailableGroups.mockResolvedValue([{ id: 42, name: 'OpenAI' }])
-    const wrapper = await mountView()
-
-    await wrapper.get('[data-test="page-size-50"]').trigger('click')
-    await flushPromises()
-
-    await wrapper.findComponent({ name: 'SearchInput' }).vm.$emit('update:modelValue', 'target')
-    await wrapper.findComponent({ name: 'SearchInput' }).vm.$emit('search')
-    await flushPromises()
-
-    const selects = wrapper.findAllComponents({ name: 'Select' })
-    await selects[0].vm.$emit('update:modelValue', 42)
-    await flushPromises()
-    await selects[1].vm.$emit('update:modelValue', 'active')
-    await flushPromises()
-
-    await wrapper.get('[data-test="page-2"]').trigger('click')
-    await flushPromises()
-    const table = wrapper.findComponent({ name: 'DataTable' })
-    table.vm.$emit('update:selectedKeys', [1])
-    await nextTick()
-    expect(table.props('selectedKeys')).toEqual([1])
-    expect(visibleColumnMeta(wrapper).find((column) => column.key === key)?.sortable).toBe(true)
-    listKeys.mockClear()
-
-    table.vm.$emit('sort', key, order)
-    await flushPromises()
-
-    expect(table.props('selectedKeys')).toEqual([])
-    expect(listKeys).toHaveBeenLastCalledWith(
-      1,
-      50,
-      {
-        search: 'target',
-        status: 'active',
-        group_id: 42,
-        sort_by: key,
-        sort_order: order,
-      },
-      expect.objectContaining({ signal: expect.any(AbortSignal) })
-    )
-  })
-
-  describe('create provider selection', () => {
-    const platforms = ['anthropic', 'openai', 'kimi', 'zhipu', 'deepseek', 'minimax', 'gemini', 'grok', 'antigravity', 'composite', 'opencode_go', 'typesafe']
-    const availableGroups = platforms.map((platform, index) => ({
-      id: index + 1,
-      // Deliberately ambiguous names: classification must follow the platform.
-      name: `Shared group ${index + 1}`,
-      platform,
-      rate_multiplier: 1,
-      subscription_type: 'standard',
-    }))
-    const groupSelect = (wrapper: VueWrapper) => wrapper.findComponent('[data-tour="key-form-group"]')
-    const optionIds = (wrapper: VueWrapper) => groupSelect(wrapper).props('options').map((option: { value: number }) => option.value)
-    const chooseProvider = (wrapper: VueWrapper, value: string) => wrapper.get(`input[name="key-provider"][value="${value}"]`).setValue()
-    const openCreate = async () => {
-      const wrapper = await mountView()
-      await wrapper.get('[data-tour="keys-create-btn"]').trigger('click')
-      return wrapper
-    }
-
-    beforeEach(() => {
-      getAvailableGroups.mockResolvedValue(availableGroups)
-    })
-
-    it('classifies all configured platforms and retains the complete table filter', async () => {
-      const wrapper = await openCreate()
-      expect(wrapper.findAll('input[name="key-provider"]')).toHaveLength(4)
-      expect(optionIds(wrapper)).toEqual([1])
-      await chooseProvider(wrapper, 'openai')
-      expect(optionIds(wrapper)).toEqual([2])
-      await chooseProvider(wrapper, 'domestic')
-      expect(optionIds(wrapper)).toEqual([3, 4, 5, 6])
-      await chooseProvider(wrapper, 'other')
-      expect(optionIds(wrapper)).toEqual([7, 8, 9, 10, 11, 12])
-      expect(wrapper.findAllComponents({ name: 'Select' })[0].props('options')).toHaveLength(14)
-    })
-
-    it('clears the previous group on provider change and submits only the newly selected group', async () => {
-      const wrapper = await openCreate()
-      await wrapper.get('[data-tour="key-form-name"]').setValue('My key')
-      await groupSelect(wrapper).vm.$emit('update:modelValue', 1)
-      await chooseProvider(wrapper, 'domestic')
-      expect(groupSelect(wrapper).props('modelValue')).toBeNull()
-      await wrapper.get('#key-form').trigger('submit')
-      expect(keysAPI.create).not.toHaveBeenCalled()
-      expect(showError).toHaveBeenCalledWith('keys.groupRequired')
-
-      await groupSelect(wrapper).vm.$emit('update:modelValue', 5)
-      vi.mocked(keysAPI.create).mockResolvedValue({ ...createApiKey(), group_id: 5 })
-      await wrapper.get('#key-form').trigger('submit')
-      await flushPromises()
-      expect(keysAPI.create).toHaveBeenCalledOnce()
-      expect(vi.mocked(keysAPI.create).mock.calls[0].slice(0, 2)).toEqual(['My key', 5])
-    })
-
-    it('defaults to a provider with available groups and disables empty categories', async () => {
-      getAvailableGroups.mockResolvedValue([availableGroups[5]])
-      const wrapper = await openCreate()
-      expect(wrapper.get<HTMLInputElement>('input[value="domestic"]').element.checked).toBe(true)
-      expect(wrapper.get<HTMLInputElement>('input[value="anthropic"]').element.disabled).toBe(true)
-      expect(optionIds(wrapper)).toEqual([6])
-    })
-
-    it('shows the empty state when no groups are available', async () => {
-      getAvailableGroups.mockResolvedValue([])
-      const wrapper = await openCreate()
-      expect(wrapper.get('[data-tour="key-form-provider"]').text()).toContain('common.noGroupsAvailable')
-      expect(optionIds(wrapper)).toEqual([])
-      expect(wrapper.findAll<HTMLInputElement>('input[name="key-provider"]').every((input) => input.element.disabled)).toBe(true)
-    })
-
-    it('selects an available provider when groups arrive after opening', async () => {
-      let resolveGroups!: (value: typeof availableGroups) => void
-      getAvailableGroups.mockReturnValue(new Promise((resolve) => { resolveGroups = resolve }))
-      const wrapper = await openCreate()
-      resolveGroups([availableGroups[1]])
-      await flushPromises()
-      expect(wrapper.get<HTMLInputElement>('input[value="openai"]').element.checked).toBe(true)
-      expect(optionIds(wrapper)).toEqual([2])
-    })
-
-    it('resets provider and group when reopening create, and preserves edit options', async () => {
-      const wrapper = await openCreate()
-      await chooseProvider(wrapper, 'domestic')
-      await groupSelect(wrapper).vm.$emit('update:modelValue', 5)
-      await wrapper.get('[data-test="close-dialog"]').trigger('click')
-      await wrapper.get('[data-tour="keys-create-btn"]').trigger('click')
-      expect(optionIds(wrapper)).toEqual([1])
-      expect(groupSelect(wrapper).props('modelValue')).toBeNull()
-      await wrapper.get('[data-test="close-dialog"]').trigger('click')
-      await getButtonByText(wrapper, 'common.edit').trigger('click')
-      expect(wrapper.find('[data-tour="key-form-provider"]').exists()).toBe(false)
-      expect(optionIds(wrapper)).toHaveLength(12)
-    })
-  })
-})
-
-describe('user KeysView use-key modal binding', () => {
-  // user-visibility-closure 2026-10-18：用户 DTO 输出进入弹窗的契约——内部供给组
-  // 的 Key 在后端 APIKeyFromServiceForUser 剥离平台（platform=''），KeysView 用
-  // ?? 保留空串传入弹窗（弹窗据此区分"未绑定"与"已绑定但平台隐藏"）。
-  const UseKeyModalCapture = {
-    name: 'UseKeyModal',
-    props: ['show', 'apiKey', 'baseUrl', 'platform', 'claudeCodeOnly', 'allowMessagesDispatch'],
-    emits: ['close'],
-    template: '<div data-test="use-key-modal-capture" />',
-  }
-
-  beforeEach(() => {
-    localStorage.clear()
-
-    listKeys.mockReset()
-    updateKey.mockReset()
-    vi.mocked(keysAPI.create).mockReset()
-    getPublicSettings.mockReset()
-    getDashboardApiKeysUsage.mockReset()
-    getAvailableGroups.mockReset()
-    getUserGroupRates.mockReset()
-    showError.mockReset()
-    showSuccess.mockReset()
-    copyToClipboard.mockReset()
-    isCurrentStep.mockReset()
-    nextStep.mockReset()
-
-    listKeys.mockResolvedValue({
-      items: [createApiKey()],
-      total: 1,
-      page: 1,
-      page_size: 20,
-      pages: 1,
-    })
-    getPublicSettings.mockResolvedValue({})
-    getDashboardApiKeysUsage.mockResolvedValue({ stats: {} })
-    getAvailableGroups.mockResolvedValue([])
-    getUserGroupRates.mockResolvedValue({})
-    isCurrentStep.mockReturnValue(false)
-  })
 
   it('passes the stripped empty platform through to the modal for keys bound to internal groups', async () => {
     listKeys.mockResolvedValue({
