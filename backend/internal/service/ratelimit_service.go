@@ -632,8 +632,8 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 				if err := s.accountRepo.UpdateExtra(ctx, authAccount.ID, extraUpdates); err != nil {
 					slog.Warn("antigravity_401_force_refresh_mark_failed", "account_id", authAccount.ID, "error", err)
 				} else {
-				authAccount.MergeExtra(extraUpdates)
-				slog.Info("antigravity_401_force_refresh_marked", "account_id", authAccount.ID)
+					authAccount.MergeExtra(extraUpdates)
+					slog.Info("antigravity_401_force_refresh_marked", "account_id", authAccount.ID)
 				}
 			}
 			// 失败连击阶梯（AC-A1）之前的模型键守门（AC-G2R6 must_fix 第3条主功能漏洞）：

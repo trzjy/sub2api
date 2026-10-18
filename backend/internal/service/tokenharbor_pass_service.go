@@ -1074,8 +1074,8 @@ func parseTokenHarborPassPage(text string, fetchedAt time.Time) (TokenHarborPass
 // （字段名与官方 API 逐字一致，冻结；D-QLM-006）。顶层 reset_at / plan_used_pct /
 // plan_exhausted / used_pct / exhausted，嵌套 plan.window_days。
 type tokenHarborFreeTierResponse struct {
-	ResetAt        string `json:"reset_at"`
-	Plan           struct {
+	ResetAt string `json:"reset_at"`
+	Plan    struct {
 		WindowDays int `json:"window_days"`
 	} `json:"plan"`
 	PlanUsedPct   float64 `json:"plan_used_pct"`

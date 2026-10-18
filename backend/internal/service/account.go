@@ -25,13 +25,13 @@ import (
 )
 
 type Account struct {
-	ID                      int64
-	Name                    string
-	Notes                   *string
-	Platform                string
-	Type                    string
-	Credentials             map[string]any
-	Extra                   map[string]any
+	ID          int64
+	Name        string
+	Notes       *string
+	Platform    string
+	Type        string
+	Credentials map[string]any
+	Extra       map[string]any
 	// extraMu guards concurrent access to Extra. Account.Extra is a map that is
 	// read and written from multiple goroutines (scheduler sweep, usage probes,
 	// recovery goroutines, etc.) and was the root cause of a production
