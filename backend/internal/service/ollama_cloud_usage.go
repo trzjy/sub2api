@@ -564,8 +564,9 @@ func (s *OllamaCloudUsageService) ResolveAccounts(ctx context.Context, accounts 
 	resolvedSources := make(map[string]*Account, len(sources))
 	for fingerprint, source := range sources {
 		clone := *source
-		clone.Extra = make(map[string]any, len(source.Extra))
-		maps.Copy(clone.Extra, source.Extra)
+		srcSnap := source.SnapshotExtra()
+		clone.Extra = make(map[string]any, len(srcSnap))
+		maps.Copy(clone.Extra, srcSnap)
 		resolvedSources[fingerprint] = &clone
 	}
 	for index := range siblings {
@@ -575,10 +576,12 @@ func (s *OllamaCloudUsageService) ResolveAccounts(ctx context.Context, accounts 
 		if !valid || source == nil || !sameOllamaCloudUsageSession(source, candidate) {
 			continue
 		}
-		candidateSnapshot := decodeOllamaCloudUsageSnapshot(candidate.Extra)
-		currentSnapshot := decodeOllamaCloudUsageSnapshot(source.Extra)
+		candidateSnapshot := decodeOllamaCloudUsageSnapshot(candidate.SnapshotExtra())
+		currentSnapshot := decodeOllamaCloudUsageSnapshot(source.SnapshotExtra())
 		if candidateSnapshot != nil && (currentSnapshot == nil || candidateSnapshot.LastAttemptAt.After(currentSnapshot.LastAttemptAt)) {
-			source.Extra[OllamaCloudUsageSnapshotExtraKey] = candidate.Extra[OllamaCloudUsageSnapshotExtraKey]
+			if val, ok := candidate.ExtraValue(OllamaCloudUsageSnapshotExtraKey); ok {
+				source.MergeExtra(map[string]any{OllamaCloudUsageSnapshotExtraKey: val})
+			}
 		}
 	}
 	for _, account := range eligible {
@@ -589,11 +592,16 @@ func (s *OllamaCloudUsageService) ResolveAccounts(ctx context.Context, accounts 
 }
 
 func sameOllamaCloudUsageSession(left, right *Account) bool {
-	if left == nil || right == nil || left.Extra == nil || right.Extra == nil {
+	if left == nil || right == nil {
 		return false
 	}
-	leftSession, leftOK := left.Extra[OllamaCloudUsageSessionExtraKey].(string)
-	rightSession, rightOK := right.Extra[OllamaCloudUsageSessionExtraKey].(string)
+	leftSnap := left.SnapshotExtra()
+	rightSnap := right.SnapshotExtra()
+	if leftSnap == nil || rightSnap == nil {
+		return false
+	}
+	leftSession, leftOK := leftSnap[OllamaCloudUsageSessionExtraKey].(string)
+	rightSession, rightOK := rightSnap[OllamaCloudUsageSessionExtraKey].(string)
 	return leftOK && rightOK && leftSession != "" && leftSession == rightSession
 }
 
@@ -601,21 +609,24 @@ func applyOllamaCloudUsageManagedExtra(target, source *Account) {
 	if target == nil {
 		return
 	}
-	if target.Extra == nil {
-		target.Extra = make(map[string]any)
-	}
-	for _, key := range []string{
+	// 读源账号 Extra 走快照（锁），写目标账号 Extra 走 MergeExtra/DeleteExtra（锁）。
+	srcSnap := source.SnapshotExtra()
+	keys := []string{
 		OllamaCloudUsageSessionExtraKey,
 		OllamaCloudUsageAutoRefreshExtraKey,
 		OllamaCloudUsageSnapshotExtraKey,
-	} {
-		delete(target.Extra, key)
-		if source != nil && source.Extra != nil {
-			if value, ok := source.Extra[key]; ok {
-				target.Extra[key] = value
-			}
+	}
+	toSet := make(map[string]any)
+	toDelete := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if v, ok := srcSnap[key]; ok {
+			toSet[key] = v
+		} else {
+			toDelete = append(toDelete, key)
 		}
 	}
+	target.MergeExtra(toSet)
+	target.DeleteExtra(toDelete...)
 }
 
 func (s *OllamaCloudUsageService) SaveSession(ctx context.Context, accountID int64, session string) (*OllamaCloudUsageState, error) {
@@ -757,7 +768,7 @@ func (s *OllamaCloudUsageService) RunDue(ctx context.Context) error {
 			continue
 		}
 		seenGroups[fingerprint] = struct{}{}
-		snapshot := decodeOllamaCloudUsageSnapshot(account.Extra)
+		snapshot := decodeOllamaCloudUsageSnapshot(account.SnapshotExtra())
 		// ListDue stamps Account.LastUsedAt with the api_key group MAX(last_used_at).
 		if !ollamaCloudUsageIsAutoRefreshDue(snapshot, account.LastUsedAt, now, debounce, maxWait) {
 			continue
@@ -822,7 +833,7 @@ func (s *OllamaCloudUsageService) refreshAccount(ctx context.Context, accountID 
 			return nil, ErrOllamaCloudUsageSessionRequired
 		}
 		if !requireEnabled {
-			if snapshot := decodeOllamaCloudUsageSnapshot(account.Extra); snapshot != nil && !snapshot.LastAttemptAt.IsZero() {
+			if snapshot := decodeOllamaCloudUsageSnapshot(account.SnapshotExtra()); snapshot != nil && !snapshot.LastAttemptAt.IsZero() {
 				retryAt := snapshot.LastAttemptAt.Add(ollamaCloudUsageManualRefreshInterval)
 				if now := s.currentTime(); now.Before(retryAt) {
 					remaining := retryAt.Sub(now)
@@ -851,7 +862,7 @@ func (s *OllamaCloudUsageService) refreshAccount(ctx context.Context, accountID 
 					groupLastUsed = maxOllamaCloudUsageGroupLastUsed(siblings)
 				}
 			}
-			if !ollamaCloudUsageIsAutoRefreshDue(decodeOllamaCloudUsageSnapshot(account.Extra), groupLastUsed, s.currentTime(), debounce, maxWait) {
+			if !ollamaCloudUsageIsAutoRefreshDue(decodeOllamaCloudUsageSnapshot(account.SnapshotExtra()), groupLastUsed, s.currentTime(), debounce, maxWait) {
 				return nil, nil
 			}
 		}
@@ -868,8 +879,9 @@ func (s *OllamaCloudUsageService) refreshAccount(ctx context.Context, accountID 
 }
 
 func (s *OllamaCloudUsageService) refreshLoadedAccount(ctx context.Context, account *Account, intervalMinutes int) (*OllamaCloudUsageSnapshot, error) {
+	accountsnap := account.SnapshotExtra()
 	now := s.currentTime().UTC()
-	ciphertext, _ := account.Extra[OllamaCloudUsageSessionExtraKey].(string)
+	ciphertext, _ := accountsnap[OllamaCloudUsageSessionExtraKey].(string)
 	if ciphertext == "" {
 		return nil, ErrOllamaCloudUsageSessionRequired
 	}
@@ -961,7 +973,8 @@ func (s *OllamaCloudUsageService) persistFailure(
 	retryAfterDuration time.Duration,
 	unauthorized bool,
 ) (*OllamaCloudUsageSnapshot, error) {
-	previous := decodeOllamaCloudUsageSnapshot(account.Extra)
+	accountsnap := account.SnapshotExtra()
+	previous := decodeOllamaCloudUsageSnapshot(accountsnap)
 	failureCount := 1
 	if previous != nil {
 		failureCount = previous.FailureCount + 1
@@ -1005,6 +1018,7 @@ func (s *OllamaCloudUsageService) EnrichState(state *OllamaCloudUsageState) {
 }
 
 func OllamaCloudUsageStateFromAccount(account *Account) *OllamaCloudUsageState {
+	accountsnap := account.SnapshotExtra()
 	state := &OllamaCloudUsageState{}
 	if account == nil {
 		return state
@@ -1016,7 +1030,7 @@ func OllamaCloudUsageStateFromAccount(account *Account) *OllamaCloudUsageState {
 	}
 	state.Configured = ollamaCloudUsageConfigured(account)
 	state.AutoRefreshEnabled = state.Configured && ollamaCloudUsageAutoRefreshEnabled(account)
-	state.Snapshot = decodeOllamaCloudUsageSnapshot(account.Extra)
+	state.Snapshot = decodeOllamaCloudUsageSnapshot(accountsnap)
 	return state
 }
 
@@ -1171,18 +1185,20 @@ func isAllowedOllamaCloudSessionCookie(name string) bool {
 }
 
 func ollamaCloudUsageConfigured(account *Account) bool {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return false
 	}
-	value, ok := account.Extra[OllamaCloudUsageSessionExtraKey].(string)
+	value, ok := accountsnap[OllamaCloudUsageSessionExtraKey].(string)
 	return ok && strings.TrimSpace(value) != ""
 }
 
 func ollamaCloudUsageAutoRefreshEnabled(account *Account) bool {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return false
 	}
-	enabled, ok := account.Extra[OllamaCloudUsageAutoRefreshExtraKey].(bool)
+	enabled, ok := accountsnap[OllamaCloudUsageAutoRefreshExtraKey].(bool)
 	return ok && enabled
 }
 

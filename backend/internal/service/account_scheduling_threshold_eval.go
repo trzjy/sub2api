@@ -187,6 +187,7 @@ func lookupAccountSchedulingThreshold(thresholds map[string]int, platform string
 }
 
 func openAIThresholdCandidates(account *Account, now time.Time) []*accountSchedulingThresholdCandidate {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return nil
 	}
@@ -194,31 +195,32 @@ func openAIThresholdCandidates(account *Account, now time.Time) []*accountSchedu
 		return nil
 	}
 	return []*accountSchedulingThresholdCandidate{
-		openAIThresholdCandidate(account.Extra, "5h", now),
-		openAIThresholdCandidate(account.Extra, "7d", now),
+		openAIThresholdCandidate(accountsnap, "5h", now),
+		openAIThresholdCandidate(accountsnap, "7d", now),
 	}
 }
 
 func openAICodexSnapshotIdentityTrusted(account *Account) bool {
-	if account == nil || !account.IsOpenAIOAuth() || len(account.Extra) == 0 {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || !account.IsOpenAIOAuth() || len(accountsnap) == 0 {
 		return true
 	}
 
 	if identityValuesConflict(
 		firstStringValue(account.Credentials, "email"),
-		firstStringValue(account.Extra, "email", "email_address"),
+		firstStringValue(accountsnap, "email", "email_address"),
 	) {
 		return false
 	}
 	if identityValuesConflict(
 		firstStringValue(account.Credentials, "chatgpt_account_id"),
-		firstStringValue(account.Extra, "chatgpt_account_id", "account_id"),
+		firstStringValue(accountsnap, "chatgpt_account_id", "account_id"),
 	) {
 		return false
 	}
 	if identityValuesConflict(
 		firstStringValue(account.Credentials, "workspace_id", "chatgpt_workspace_id", "organization_id", "org_id"),
-		firstStringValue(account.Extra, "workspace_id", "chatgpt_workspace_id", "organization_id", "org_id"),
+		firstStringValue(accountsnap, "workspace_id", "chatgpt_workspace_id", "organization_id", "org_id"),
 	) {
 		return false
 	}
@@ -301,29 +303,32 @@ func anthropicThresholdCandidates(account *Account) []*accountSchedulingThreshol
 		return nil
 	}
 
+	// 每账号一次快照（崩溃面：阈值评估与并发写交错）。
+	extra := account.SnapshotExtra()
 	var candidates []*accountSchedulingThresholdCandidate
-	if usedPercent := utilizationAsPercent(account.Extra["session_window_utilization"]); usedPercent > 0 {
+	if usedPercent := utilizationAsPercent(extra["session_window_utilization"]); usedPercent > 0 {
 		candidates = append(candidates, &accountSchedulingThresholdCandidate{
 			window:      "5h",
 			usedPercent: usedPercent,
 			until:       cloneTimePtr(account.SessionWindowEnd),
 		})
 	}
-	if usedPercent := utilizationAsPercent(account.Extra["passive_usage_7d_utilization"]); usedPercent > 0 {
+	if usedPercent := utilizationAsPercent(extra["passive_usage_7d_utilization"]); usedPercent > 0 {
 		candidates = append(candidates, &accountSchedulingThresholdCandidate{
 			window:      "7d",
 			usedPercent: usedPercent,
-			until:       parseSchedulingResetAt(account.Extra["passive_usage_7d_reset"]),
+			until:       parseSchedulingResetAt(extra["passive_usage_7d_reset"]),
 		})
 	}
 	return candidates
 }
 
 func anthropicFableThresholdCandidate(account *Account) *accountSchedulingThresholdCandidate {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return nil
 	}
-	usedPercent := utilizationAsPercent(account.Extra["passive_usage_7d_oi_utilization"])
+	usedPercent := utilizationAsPercent(accountsnap["passive_usage_7d_oi_utilization"])
 	if usedPercent <= 0 {
 		return nil
 	}
@@ -331,7 +336,7 @@ func anthropicFableThresholdCandidate(account *Account) *accountSchedulingThresh
 		window:      "7d_oi",
 		scope:       anthropicFableRateLimitKey,
 		usedPercent: usedPercent,
-		until:       parseSchedulingResetAt(account.Extra["passive_usage_7d_oi_reset"]),
+		until:       parseSchedulingResetAt(accountsnap["passive_usage_7d_oi_reset"]),
 	}
 }
 
@@ -349,6 +354,7 @@ func anthropicFableThresholdCandidate(account *Account) *accountSchedulingThresh
 // capped at ~25h when written). Official billing 7d/30d windows are not used
 // for auto-pause here.
 func grokThresholdCandidates(account *Account) []*accountSchedulingThresholdCandidate {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return nil
 	}
@@ -356,8 +362,8 @@ func grokThresholdCandidates(account *Account) []*accountSchedulingThresholdCand
 		{
 			window:      "quota",
 			scope:       "grok",
-			usedPercent: schedulingPercentValue(account.Extra["grok_sched_utilization"]),
-			until:       parseSchedulingResetAt(account.Extra["grok_sched_reset_at"]),
+			usedPercent: schedulingPercentValue(accountsnap["grok_sched_utilization"]),
+			until:       parseSchedulingResetAt(accountsnap["grok_sched_reset_at"]),
 		},
 	}
 }
@@ -368,18 +374,19 @@ func grokThresholdCandidates(account *Account) []*accountSchedulingThresholdCand
 // 候选为空 → 不触发阈值停调（余额型走余额检测）。与 openai 的快照驱动停调一致：
 // 仅当用量超阈值且窗口尚未重置时才停调。
 func cnProviderThresholdCandidates(account *Account, provider string) []*accountSchedulingThresholdCandidate {
-	if account == nil || len(account.Extra) == 0 {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || len(accountsnap) == 0 {
 		return nil
 	}
-	if provider == PlatformCommandCode && !commandCodeWindowsBinding(account.Extra) {
+	if provider == PlatformCommandCode && !commandCodeWindowsBinding(accountsnap) {
 		return nil
 	}
 	candidates := []*accountSchedulingThresholdCandidate{
-		cnThresholdCandidate(account.Extra, provider, "5h"),
-		cnThresholdCandidate(account.Extra, provider, "weekly"),
+		cnThresholdCandidate(accountsnap, provider, "5h"),
+		cnThresholdCandidate(accountsnap, provider, "weekly"),
 	}
 	if cnQuotaHasMonthlyWindow(provider) {
-		candidates = append(candidates, cnThresholdCandidate(account.Extra, provider, "monthly"))
+		candidates = append(candidates, cnThresholdCandidate(accountsnap, provider, "monthly"))
 	}
 	return candidates
 }
@@ -437,10 +444,11 @@ func pickLatestResetSchedulingCandidate(candidates []*accountSchedulingThreshold
 // 周期写入 account.Extra）。仅一个积分用量窗口：used_percent + 重置时间。无快照则候选为空，
 // 不触发阈值停调。
 func codeBuddyThresholdCandidates(account *Account) []*accountSchedulingThresholdCandidate {
-	if account == nil || len(account.Extra) == 0 {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || len(accountsnap) == 0 {
 		return nil
 	}
-	usedPercent, ok := account.Extra[codebuddyCreditUsedPercentKey]
+	usedPercent, ok := accountsnap[codebuddyCreditUsedPercentKey]
 	if !ok {
 		return nil
 	}
@@ -449,7 +457,7 @@ func codeBuddyThresholdCandidates(account *Account) []*accountSchedulingThreshol
 			window:      "credit",
 			scope:       PlatformCodeBuddy,
 			usedPercent: schedulingPercentValue(usedPercent),
-			until:       parseSchedulingResetAt(account.Extra[codebuddyCreditResetAtKey]),
+			until:       parseSchedulingResetAt(accountsnap[codebuddyCreditResetAtKey]),
 		},
 	}
 }

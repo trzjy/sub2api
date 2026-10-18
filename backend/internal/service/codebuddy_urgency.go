@@ -247,7 +247,7 @@ func codeBuddyUrgencySnapshotsFor(accounts []*Account, now time.Time) map[int64]
 		if acc == nil {
 			continue
 		}
-		out[acc.ID] = CodeBuddyUrgencySnapshotFromExtra(acc.Extra, now)
+		out[acc.ID] = CodeBuddyUrgencySnapshotFromExtra(acc.SnapshotExtra(), now)
 	}
 	return out
 }

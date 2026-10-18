@@ -72,10 +72,6 @@ func applyAntigravityPrivacyMode(account *Account, mode string) {
 	if account == nil || strings.TrimSpace(mode) == "" {
 		return
 	}
-	extra := make(map[string]any, len(account.Extra)+1)
-	for k, v := range account.Extra {
-		extra[k] = v
-	}
-	extra["privacy_mode"] = mode
-	account.Extra = extra
+	// 经并发安全边界写 Extra：保留其余键，仅覆盖 privacy_mode（等价于原 copy+set+reassign）
+	account.MergeExtra(map[string]any{"privacy_mode": mode})
 }

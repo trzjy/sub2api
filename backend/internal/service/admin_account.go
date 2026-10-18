@@ -396,13 +396,14 @@ func normalizeOpenAILongContextBillingExtra(platform string, extra map[string]an
 }
 
 func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *UpdateAccountInput) (map[string]any, error) {
+	accountsnap := account.SnapshotExtra()
 	normalized, err := normalizeOpenAILongContextBillingExtra(account.Platform, input.Extra)
 	if err != nil || account.Platform != PlatformOpenAI {
 		return normalized, err
 	}
 
 	_, provided := input.Extra[openAILongContextBillingEnabledKey]
-	current, hasCurrent := account.Extra[openAILongContextBillingEnabledKey].(bool)
+	current, hasCurrent := accountsnap[openAILongContextBillingEnabledKey].(bool)
 	if !provided {
 		if hasCurrent {
 			normalized[openAILongContextBillingEnabledKey] = current
@@ -703,18 +704,21 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		if !isUpstreamBillingProbeAccount(account) {
 			return nil, ErrUpstreamBillingProbeAccountInvalid
 		}
-		if account.Extra == nil {
-			account.Extra = make(map[string]any)
-		}
-		account.Extra[UpstreamBillingProbeEnabledExtraKey] = true
+		account.MergeExtra(map[string]any{UpstreamBillingProbeEnabledExtraKey: true})
 	}
-	// 预计算固定时间重置的下次重置时间
-	if account.Extra != nil {
-		if err := ValidateQuotaResetConfig(account.Extra); err != nil {
-			return nil, err
+	// 预计算固定时间重置的下次重置时间（读改写需走并发安全边界）
+	if account.SnapshotExtra() != nil {
+		var validateErr error
+		account.MutateExtra(func(extra map[string]any) {
+			if validateErr = ValidateQuotaResetConfig(extra); validateErr != nil {
+				return
+			}
+			ComputeQuotaResetAt(extra)
+			NormalizeFixedQuotaWindows(extra)
+		})
+		if validateErr != nil {
+			return nil, validateErr
 		}
-		ComputeQuotaResetAt(account.Extra)
-		NormalizeFixedQuotaWindows(account.Extra)
 	}
 	if input.ExpiresAt != nil && *input.ExpiresAt > 0 {
 		expiresAt := time.Unix(*input.ExpiresAt, 0)
@@ -1197,15 +1201,14 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, ErrUpstreamBillingProbeAccountInvalid
 		}
 	}
-	if account.Extra == nil && (requestedProbeEnabledUpdate != nil || requestedRateSyncEnabledUpdate != nil) {
-		account.Extra = make(map[string]any)
-	}
+	probeUpdates := make(map[string]any)
 	if requestedProbeEnabledUpdate != nil {
-		account.Extra[UpstreamBillingProbeEnabledExtraKey] = *requestedProbeEnabledUpdate
+		probeUpdates[UpstreamBillingProbeEnabledExtraKey] = *requestedProbeEnabledUpdate
 	}
 	if requestedRateSyncEnabledUpdate != nil {
-		account.Extra[UpstreamBillingRateSyncEnabledExtraKey] = *requestedRateSyncEnabledUpdate
+		probeUpdates[UpstreamBillingRateSyncEnabledExtraKey] = *requestedRateSyncEnabledUpdate
 	}
+	account.MergeExtra(probeUpdates)
 	// 影子代理恒继承母账号(由 propagateProxyToShadows 同步),不接受独立编辑——外审 B/P1;
 	// 否则要等母账号下次改 proxy 才被覆盖,期间影子会出现"有时继承、有时独立"的漂移。
 	if input.ProxyID != nil && !account.IsCredentialShadow() {
@@ -1217,34 +1220,25 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		account.Proxy = nil // 清除关联对象，防止 GORM Save 时根据 Proxy.ID 覆盖 ProxyID
 	}
-	if !reflect.DeepEqual(previousProbeIdentity, upstreamBillingProbeIdentity(account)) && account.Extra != nil {
-		delete(account.Extra, UpstreamBillingProbeExtraKey)
+	// 以下清理走 DeleteExtra（nil Extra 时自动 no-op，等价于原 `if account.Extra != nil` 守卫）
+	if !reflect.DeepEqual(previousProbeIdentity, upstreamBillingProbeIdentity(account)) {
+		keys := []string{UpstreamBillingProbeExtraKey}
 		if !isUpstreamBillingProbeAccount(account) {
-			delete(account.Extra, UpstreamBillingProbeEnabledExtraKey)
-			delete(account.Extra, UpstreamBillingRateSyncEnabledExtraKey)
+			keys = append(keys, UpstreamBillingProbeEnabledExtraKey, UpstreamBillingRateSyncEnabledExtraKey)
 		}
+		account.DeleteExtra(keys...)
 	}
-	if account.Extra != nil {
-		if !IsOllamaCloudUsageAccount(account) {
-			delete(account.Extra, OllamaCloudUsageSessionExtraKey)
-			delete(account.Extra, OllamaCloudUsageAutoRefreshExtraKey)
-			delete(account.Extra, OllamaCloudUsageSnapshotExtraKey)
-		} else if !reflect.DeepEqual(previousOllamaUsageIdentity, ollamaCloudUsageIdentity(account)) {
-			delete(account.Extra, OllamaCloudUsageSessionExtraKey)
-			delete(account.Extra, OllamaCloudUsageAutoRefreshExtraKey)
-			delete(account.Extra, OllamaCloudUsageSnapshotExtraKey)
-		}
+	if !IsOllamaCloudUsageAccount(account) {
+		account.DeleteExtra(OllamaCloudUsageSessionExtraKey, OllamaCloudUsageAutoRefreshExtraKey, OllamaCloudUsageSnapshotExtraKey)
+	} else if !reflect.DeepEqual(previousOllamaUsageIdentity, ollamaCloudUsageIdentity(account)) {
+		account.DeleteExtra(OllamaCloudUsageSessionExtraKey, OllamaCloudUsageAutoRefreshExtraKey, OllamaCloudUsageSnapshotExtraKey)
 	}
 	// OpenCode Go 受管键：身份改变或不再 eligible 时随本次写入清除，防止跨组污染。
 	// （代理变化只失效快照而保留开关，由 repository 合并层在锁定的 DB 行上裁决。）
-	if account.Extra != nil {
-		if !IsOpenCodeGoUsageAccount(account) {
-			delete(account.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
-			delete(account.Extra, OpenCodeGoUsageSnapshotExtraKey)
-		} else if !reflect.DeepEqual(previousOpenCodeUsageIdentity, openCodeGoUsageIdentity(account)) {
-			delete(account.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
-			delete(account.Extra, OpenCodeGoUsageSnapshotExtraKey)
-		}
+	if !IsOpenCodeGoUsageAccount(account) {
+		account.DeleteExtra(OpenCodeGoUsageAutoRefreshExtraKey, OpenCodeGoUsageSnapshotExtraKey)
+	} else if !reflect.DeepEqual(previousOpenCodeUsageIdentity, openCodeGoUsageIdentity(account)) {
+		account.DeleteExtra(OpenCodeGoUsageAutoRefreshExtraKey, OpenCodeGoUsageSnapshotExtraKey)
 	}
 	// 只在指针非 nil 时更新 Concurrency（支持设置为 0）
 	if input.Concurrency != nil {
@@ -2262,6 +2256,7 @@ func (s *adminServiceImpl) ResetAccountQuota(ctx context.Context, id int64) erro
 // EnsureOpenAIPrivacy 检查 OpenAI OAuth 账号是否已设置 privacy_mode，
 // 未设置则调用 disableOpenAITraining 并持久化到 Extra，返回设置的 mode 值。
 func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Account) string {
+	accountsnap := account.SnapshotExtra()
 	// 影子账号不持凭据，隐私设置由母账号管理，直接跳过。
 	if account.IsCredentialShadow() {
 		return ""
@@ -2272,7 +2267,7 @@ func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Acc
 	if s.privacyClientFactory == nil {
 		return ""
 	}
-	if shouldSkipOpenAIPrivacyEnsure(account.Extra) {
+	if shouldSkipOpenAIPrivacyEnsure(accountsnap) {
 		return ""
 	}
 
@@ -2331,10 +2326,7 @@ func (s *adminServiceImpl) ForceOpenAIPrivacy(ctx context.Context, account *Acco
 		logger.LegacyPrintf("service.admin", "force_update_openai_privacy_mode_failed: account_id=%d err=%v", account.ID, err)
 		return mode
 	}
-	if account.Extra == nil {
-		account.Extra = make(map[string]any)
-	}
-	account.Extra["privacy_mode"] = mode
+	account.MergeExtra(map[string]any{"privacy_mode": mode})
 	return mode
 }
 
@@ -2345,9 +2337,9 @@ func (s *adminServiceImpl) EnsureAntigravityPrivacy(ctx context.Context, account
 	if account.Platform != PlatformAntigravity || account.Type != AccountTypeOAuth {
 		return ""
 	}
-	if account.Extra != nil {
-		if existing, ok := account.Extra["privacy_mode"].(string); ok && existing == AntigravityPrivacySet {
-			return existing
+	if existing, ok := account.ExtraValue("privacy_mode"); ok {
+		if mode, ok := existing.(string); ok && mode == AntigravityPrivacySet {
+			return mode
 		}
 	}
 

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -31,6 +32,22 @@ type Account struct {
 	Type                    string
 	Credentials             map[string]any
 	Extra                   map[string]any
+	// extraMu guards concurrent access to Extra. Account.Extra is a map that is
+	// read and written from multiple goroutines (scheduler sweep, usage probes,
+	// recovery goroutines, etc.) and was the root cause of a production
+	// "concurrent map read and map write" fatal crash. All Extra access must go
+	// through SnapshotExtra / MergeExtra / ExtraValue / DeleteExtra.
+	//
+	// extraMu is stored as *sync.RWMutex held in an unsafe.Pointer so that
+	// Account remains safely copyable BY VALUE (the codebase passes Account by
+	// value in many places — slice appends, range, json.Marshal, ...). A value
+	// copy of Account shares the same underlying Extra map AND the same mutex
+	// pointer, so the lock still correctly protects the map. A value-embedded
+	// sync.RWMutex would instead trip `go vet -copylocks` on every one of those
+	// copies. The mutex is lazily initialized on first access (see extraLock),
+	// so freshly constructed Accounts need no explicit setup.
+	// nil means "not yet initialized"; never read this field directly.
+	extraMu                 unsafe.Pointer
 	ProxyID                 *int64
 	ProxyFallbackOriginID   *int64
 	ProxyFallbackOriginName *string // 仅展示用
@@ -152,10 +169,11 @@ func (a *Account) IsActive() bool {
 // test instance exercise interactive quota and connection-test controls without
 // sending fake credentials to an upstream provider.
 func (a *Account) IsSyntheticUITest() bool {
-	if a == nil || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
 		return false
 	}
-	enabled, ok := a.Extra["synthetic_ui_test"].(bool)
+	enabled, ok := asnap["synthetic_ui_test"].(bool)
 	return ok && enabled
 }
 
@@ -957,16 +975,18 @@ func (a *Account) ResolveMappedModel(requestedModel string) (mappedModel string,
 // GetOpenAICompactMode returns the compact routing mode for an OpenAI account.
 // Missing or invalid values fall back to "auto".
 func (a *Account) GetOpenAICompactMode() string {
-	if a == nil || !a.IsOpenAI() || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || !a.IsOpenAI() || asnap == nil {
 		return OpenAICompactModeAuto
 	}
-	mode, _ := a.Extra["openai_compact_mode"].(string)
+	mode, _ := asnap["openai_compact_mode"].(string)
 	return normalizeOpenAICompactMode(mode)
 }
 
 // OpenAICompactSupportKnown reports whether compact capability is known for this
 // account and, when known, whether it is supported.
 func (a *Account) OpenAICompactSupportKnown() (supported bool, known bool) {
+	asnap := a.SnapshotExtra()
 	if a == nil || !a.IsOpenAI() {
 		return false, false
 	}
@@ -978,10 +998,10 @@ func (a *Account) OpenAICompactSupportKnown() (supported bool, known bool) {
 		return false, true
 	}
 
-	if a.Extra == nil {
+	if asnap == nil {
 		return false, false
 	}
-	supported, ok := a.Extra["openai_compact_supported"].(bool)
+	supported, ok := asnap["openai_compact_supported"].(bool)
 	if !ok {
 		return false, false
 	}
@@ -1079,10 +1099,11 @@ func (a *Account) GetTypeSafeAPIKey() string {
 }
 
 func (a *Account) GetExtraString(key string) string {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return ""
 	}
-	if v, ok := a.Extra[key]; ok {
+	if v, ok := asnap[key]; ok {
 		if s, ok := v.(string); ok {
 			return s
 		}
@@ -1374,10 +1395,11 @@ func (a *Account) IsOpenAI() bool {
 }
 
 func (a *Account) IsOpenAILongContextBillingEnabled() bool {
-	if a == nil || !a.IsOpenAI() || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || !a.IsOpenAI() || asnap == nil {
 		return false
 	}
-	enabled, ok := a.Extra[openAILongContextBillingEnabledKey].(bool)
+	enabled, ok := asnap[openAILongContextBillingEnabledKey].(bool)
 	return ok && enabled
 }
 
@@ -1997,6 +2019,7 @@ func (a *Account) GetOpenAISessionID() string {
 }
 
 func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapability) bool {
+	asnap := a.SnapshotExtra()
 	if a == nil {
 		return false
 	}
@@ -2038,7 +2061,7 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 		// credentials 能力集。已探测确认不支持 /v1/responses 的 APIKey 上游
 		// 必须排除——否则会在 forward 阶段被静默降级为 Chat Completions，
 		// 无法完成生图（#4417）。未探测/OAuth 账号保留旧行为（不排除）。
-		if a.Type == AccountTypeAPIKey && !openai_compat.ShouldUseResponsesAPI(a.Extra) {
+		if a.Type == AccountTypeAPIKey && !openai_compat.ShouldUseResponsesAPI(asnap) {
 			return false
 		}
 		// 支持 Responses 的上游同样需具备 chat 能力：复用下方 chat_completions
@@ -2076,10 +2099,11 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 // remains eligible for backwards compatibility. An explicit operator
 // override takes precedence over probe data.
 func (a *Account) GrokMediaGenerationEligibility() (bool, string) {
+	asnap := a.SnapshotExtra()
 	if a == nil || !a.IsGrok() {
 		return false, "not_grok"
 	}
-	if override, ok := grokMediaEligibilityOverride(a.Extra); ok {
+	if override, ok := grokMediaEligibilityOverride(asnap); ok {
 		if override {
 			return true, "override_enabled"
 		}
@@ -2089,7 +2113,7 @@ func (a *Account) GrokMediaGenerationEligibility() (bool, string) {
 		return true, "non_oauth"
 	}
 
-	billing, err := grokBillingSnapshotFromExtra(a.Extra)
+	billing, err := grokBillingSnapshotFromExtra(asnap)
 	if err != nil || billing == nil {
 		return false, "billing_unobserved"
 	}
@@ -2233,13 +2257,14 @@ func (a *Account) IsOpenAITokenExpired() bool {
 // IsMixedSchedulingEnabled 检查 antigravity 账户是否启用混合调度
 // 启用后可参与 anthropic/gemini 分组的账户调度
 func (a *Account) IsMixedSchedulingEnabled() bool {
+	asnap := a.SnapshotExtra()
 	if a.Platform != PlatformAntigravity {
 		return false
 	}
-	if a.Extra == nil {
+	if asnap == nil {
 		return false
 	}
-	if v, ok := a.Extra["mixed_scheduling"]; ok {
+	if v, ok := asnap["mixed_scheduling"]; ok {
 		if enabled, ok := v.(bool); ok {
 			return enabled
 		}
@@ -2249,13 +2274,14 @@ func (a *Account) IsMixedSchedulingEnabled() bool {
 
 // IsOveragesEnabled 检查 Antigravity 账号是否启用 AI Credits 超量请求。
 func (a *Account) IsOveragesEnabled() bool {
+	asnap := a.SnapshotExtra()
 	if a.Platform != PlatformAntigravity {
 		return false
 	}
-	if a.Extra == nil {
+	if asnap == nil {
 		return false
 	}
-	if v, ok := a.Extra["allow_overages"]; ok {
+	if v, ok := asnap["allow_overages"]; ok {
 		if enabled, ok := v.(bool); ok {
 			return enabled
 		}
@@ -2269,13 +2295,14 @@ func (a *Account) IsOveragesEnabled() bool {
 // 兼容字段：accounts.extra.openai_oauth_passthrough（历史 OAuth 开关）。
 // 字段缺失或类型不正确时，按 false（关闭）处理。
 func (a *Account) IsOpenAIPassthroughEnabled() bool {
-	if a == nil || !a.IsOpenAI() || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || !a.IsOpenAI() || asnap == nil {
 		return false
 	}
-	if enabled, ok := a.Extra["openai_passthrough"].(bool); ok {
+	if enabled, ok := asnap["openai_passthrough"].(bool); ok {
 		return enabled
 	}
-	if enabled, ok := a.Extra["openai_oauth_passthrough"].(bool); ok {
+	if enabled, ok := asnap["openai_oauth_passthrough"].(bool); ok {
 		return enabled
 	}
 	return false
@@ -2295,23 +2322,24 @@ func (a *Account) IsOpenAIPassthroughEnabled() bool {
 // 1. 按账号类型读取分类型字段
 // 2. 分类型字段缺失时，回退兼容字段
 func (a *Account) IsOpenAIResponsesWebSocketV2Enabled() bool {
-	if a == nil || !a.IsOpenAI() || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || !a.IsOpenAI() || asnap == nil {
 		return false
 	}
 	if a.IsOpenAIOAuthLike() {
-		if enabled, ok := a.Extra["openai_oauth_responses_websockets_v2_enabled"].(bool); ok {
+		if enabled, ok := asnap["openai_oauth_responses_websockets_v2_enabled"].(bool); ok {
 			return enabled
 		}
 	}
 	if a.IsOpenAIApiKey() {
-		if enabled, ok := a.Extra["openai_apikey_responses_websockets_v2_enabled"].(bool); ok {
+		if enabled, ok := asnap["openai_apikey_responses_websockets_v2_enabled"].(bool); ok {
 			return enabled
 		}
 	}
-	if enabled, ok := a.Extra["responses_websockets_v2_enabled"].(bool); ok {
+	if enabled, ok := asnap["responses_websockets_v2_enabled"].(bool); ok {
 		return enabled
 	}
-	if enabled, ok := a.Extra["openai_ws_enabled"].(bool); ok {
+	if enabled, ok := asnap["openai_ws_enabled"].(bool); ok {
 		return enabled
 	}
 	return false
@@ -2363,16 +2391,17 @@ func normalizeOpenAIWSIngressDefaultMode(mode string) string {
 // 3. 兼容 enabled 旧字段（bool）
 // 4. defaultMode（非法时回退 ctx_pool）
 func (a *Account) ResolveOpenAIResponsesWebSocketV2Mode(defaultMode string) string {
+	asnap := a.SnapshotExtra()
 	resolvedDefault := normalizeOpenAIWSIngressDefaultMode(defaultMode)
 	if a == nil || !a.IsOpenAI() {
 		return OpenAIWSIngressModeOff
 	}
-	if a.Extra == nil {
+	if asnap == nil {
 		return resolvedDefault
 	}
 
 	resolveModeString := func(key string) (string, bool) {
-		raw, ok := a.Extra[key]
+		raw, ok := asnap[key]
 		if !ok {
 			return "", false
 		}
@@ -2387,7 +2416,7 @@ func (a *Account) ResolveOpenAIResponsesWebSocketV2Mode(defaultMode string) stri
 		return normalized, true
 	}
 	resolveBoolMode := func(key string) (string, bool) {
-		raw, ok := a.Extra[key]
+		raw, ok := asnap[key]
 		if !ok {
 			return "", false
 		}
@@ -2433,10 +2462,11 @@ func (a *Account) ResolveOpenAIResponsesWebSocketV2Mode(defaultMode string) stri
 // IsOpenAIWSForceHTTPEnabled 返回账号级"强制 HTTP"开关。
 // 字段：accounts.extra.openai_ws_force_http。
 func (a *Account) IsOpenAIWSForceHTTPEnabled() bool {
-	if a == nil || !a.IsOpenAI() || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || !a.IsOpenAI() || asnap == nil {
 		return false
 	}
-	enabled, ok := a.Extra["openai_ws_force_http"].(bool)
+	enabled, ok := asnap["openai_ws_force_http"].(bool)
 	return ok && enabled
 }
 
@@ -2449,20 +2479,22 @@ func (a *Account) IsOpenAIWSForceHTTPEnabled() bool {
 // 0.1.166 及更早版本的摊平行为。仅对 OpenAI OAuth 账号有效——API Key 走 chat
 // completions 回退桥时由桥自行摊平，Grok/Anthropic 出口有各自的适配链路。
 func (a *Account) IsOpenAIResponsesFlattenNamespacesEnabled() bool {
-	if a == nil || !a.IsOpenAI() || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || !a.IsOpenAI() || asnap == nil {
 		return false
 	}
-	enabled, ok := a.Extra["openai_responses_flatten_namespaces"].(bool)
+	enabled, ok := asnap["openai_responses_flatten_namespaces"].(bool)
 	return ok && enabled
 }
 
 // IsOpenAIWSAllowStoreRecoveryEnabled 返回账号级 store 恢复开关。
 // 字段：accounts.extra.openai_ws_allow_store_recovery。
 func (a *Account) IsOpenAIWSAllowStoreRecoveryEnabled() bool {
-	if a == nil || !a.IsOpenAI() || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || !a.IsOpenAI() || asnap == nil {
 		return false
 	}
-	enabled, ok := a.Extra["openai_ws_allow_store_recovery"].(bool)
+	enabled, ok := asnap["openai_ws_allow_store_recovery"].(bool)
 	return ok && enabled
 }
 
@@ -2475,10 +2507,11 @@ func (a *Account) IsOpenAIOAuthPassthroughEnabled() bool {
 // 字段：accounts.extra.anthropic_passthrough。
 // 字段缺失或类型不正确时，按 false（关闭）处理。
 func (a *Account) IsAnthropicAPIKeyPassthroughEnabled() bool {
-	if a == nil || a.Platform != PlatformAnthropic || a.Type != AccountTypeAPIKey || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || a.Platform != PlatformAnthropic || a.Type != AccountTypeAPIKey || asnap == nil {
 		return false
 	}
-	enabled, ok := a.Extra["anthropic_passthrough"].(bool)
+	enabled, ok := asnap["anthropic_passthrough"].(bool)
 	return ok && enabled
 }
 
@@ -2493,10 +2526,11 @@ const (
 // 三态：default（跟随渠道）/ enabled（强制开启）/ disabled（强制关闭）。
 // 兼容旧 bool 值：true→enabled, false→default（并记录 debug 日志）。
 func (a *Account) GetWebSearchEmulationMode() string {
-	if a == nil || a.Platform != PlatformAnthropic || a.Type != AccountTypeAPIKey || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || a.Platform != PlatformAnthropic || a.Type != AccountTypeAPIKey || asnap == nil {
 		return WebSearchModeDefault
 	}
-	raw := a.Extra[featureKeyWebSearchEmulation]
+	raw := asnap[featureKeyWebSearchEmulation]
 	// Tolerant: legacy bool values (pre-migration or stale writes)
 	if b, ok := raw.(bool); ok {
 		slog.Debug("legacy bool web_search_emulation value", "account_id", a.ID, "value", b)
@@ -2521,10 +2555,11 @@ func (a *Account) GetWebSearchEmulationMode() string {
 // 字段：accounts.extra.codex_cli_only。
 // 字段缺失或类型不正确时，按 false（关闭）处理。
 func (a *Account) IsCodexCLIOnlyEnabled() bool {
-	if a == nil || !a.IsOpenAIOAuth() || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || !a.IsOpenAIOAuth() || asnap == nil {
 		return false
 	}
-	enabled, ok := a.Extra["codex_cli_only"].(bool)
+	enabled, ok := asnap["codex_cli_only"].(bool)
 	return ok && enabled
 }
 
@@ -2532,10 +2567,11 @@ func (a *Account) IsCodexCLIOnlyEnabled() bool {
 // 第三方客户端（运行时与全局 app_server 开关 OR）。字段：accounts.extra.codex_cli_only_allow_app_server。
 // 仅在 codex_cli_only 已启用时有意义；字段缺失或类型不符按 false（不放行）处理。
 func (a *Account) IsCodexCLIOnlyAppServerAllowed() bool {
+	asnap := a.SnapshotExtra()
 	if !a.IsCodexCLIOnlyEnabled() {
 		return false
 	}
-	v, ok := a.Extra["codex_cli_only_allow_app_server"].(bool)
+	v, ok := asnap["codex_cli_only_allow_app_server"].(bool)
 	return ok && v
 }
 
@@ -2561,14 +2597,15 @@ func (a *Account) IsAnthropicOAuthOrSetupToken() bool {
 // 仅适用于 Anthropic OAuth/SetupToken 类型账号
 // 启用后将模拟 Claude Code (Node.js) 客户端的 TLS 握手特征
 func (a *Account) IsTLSFingerprintEnabled() bool {
+	asnap := a.SnapshotExtra()
 	// 仅支持 Anthropic OAuth/SetupToken 账号
 	if !a.IsAnthropicOAuthOrSetupToken() {
 		return false
 	}
-	if a.Extra == nil {
+	if asnap == nil {
 		return false
 	}
-	if v, ok := a.Extra["enable_tls_fingerprint"]; ok {
+	if v, ok := asnap["enable_tls_fingerprint"]; ok {
 		if enabled, ok := v.(bool); ok {
 			return enabled
 		}
@@ -2579,10 +2616,11 @@ func (a *Account) IsTLSFingerprintEnabled() bool {
 // GetTLSFingerprintProfileID 获取账号绑定的 TLS 指纹模板 ID
 // 返回 0 表示未绑定（使用内置默认 profile）
 func (a *Account) GetTLSFingerprintProfileID() int64 {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return 0
 	}
-	v, ok := a.Extra["tls_fingerprint_profile_id"]
+	v, ok := asnap["tls_fingerprint_profile_id"]
 	if !ok {
 		return 0
 	}
@@ -2604,18 +2642,19 @@ func (a *Account) GetTLSFingerprintProfileID() int64 {
 // GetUserMsgQueueMode 获取用户消息队列模式
 // "serialize" = 串行队列, "throttle" = 软性限速, "" = 未设置（使用全局配置）
 func (a *Account) GetUserMsgQueueMode() string {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return ""
 	}
 	// 优先读取新字段 user_msg_queue_mode（白名单校验，非法值视为未设置）
-	if mode, ok := a.Extra["user_msg_queue_mode"].(string); ok && mode != "" {
+	if mode, ok := asnap["user_msg_queue_mode"].(string); ok && mode != "" {
 		if mode == config.UMQModeSerialize || mode == config.UMQModeThrottle {
 			return mode
 		}
 		return "" // 非法值 fallback 到全局配置
 	}
 	// 向后兼容: user_msg_queue_enabled: true → "serialize"
-	if enabled, ok := a.Extra["user_msg_queue_enabled"].(bool); ok && enabled {
+	if enabled, ok := asnap["user_msg_queue_enabled"].(bool); ok && enabled {
 		return config.UMQModeSerialize
 	}
 	return ""
@@ -2626,13 +2665,14 @@ func (a *Account) GetUserMsgQueueMode() string {
 // 启用后将在一段时间内（15分钟）固定 metadata.user_id 中的 session ID，
 // 使上游认为请求来自同一个会话
 func (a *Account) IsSessionIDMaskingEnabled() bool {
+	asnap := a.SnapshotExtra()
 	if !a.IsAnthropicOAuthOrSetupToken() {
 		return false
 	}
-	if a.Extra == nil {
+	if asnap == nil {
 		return false
 	}
-	if v, ok := a.Extra["session_id_masking_enabled"]; ok {
+	if v, ok := asnap["session_id_masking_enabled"]; ok {
 		if enabled, ok := v.(bool); ok {
 			return enabled
 		}
@@ -2643,13 +2683,14 @@ func (a *Account) IsSessionIDMaskingEnabled() bool {
 // IsCustomBaseURLEnabled 检查是否启用自定义 base URL 中继转发
 // 仅适用于 Anthropic OAuth/SetupToken 类型账号
 func (a *Account) IsCustomBaseURLEnabled() bool {
+	asnap := a.SnapshotExtra()
 	if !a.IsAnthropicOAuthOrSetupToken() {
 		return false
 	}
-	if a.Extra == nil {
+	if asnap == nil {
 		return false
 	}
-	if v, ok := a.Extra["custom_base_url_enabled"]; ok {
+	if v, ok := asnap["custom_base_url_enabled"]; ok {
 		if enabled, ok := v.(bool); ok {
 			return enabled
 		}
@@ -2666,13 +2707,14 @@ func (a *Account) GetCustomBaseURL() string {
 // 仅适用于 Anthropic OAuth/SetupToken 类型账号
 // 启用后将所有 cache creation tokens 归入指定的 TTL 类型（5m 或 1h）
 func (a *Account) IsCacheTTLOverrideEnabled() bool {
+	asnap := a.SnapshotExtra()
 	if !a.IsAnthropicOAuthOrSetupToken() {
 		return false
 	}
-	if a.Extra == nil {
+	if asnap == nil {
 		return false
 	}
-	if v, ok := a.Extra["cache_ttl_override_enabled"]; ok {
+	if v, ok := asnap["cache_ttl_override_enabled"]; ok {
 		if enabled, ok := v.(bool); ok {
 			return enabled
 		}
@@ -2683,10 +2725,11 @@ func (a *Account) IsCacheTTLOverrideEnabled() bool {
 // GetCacheTTLOverrideTarget 获取缓存 TTL 强制替换的目标类型
 // 返回 "5m" 或 "1h"，默认 "5m"
 func (a *Account) GetCacheTTLOverrideTarget() string {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return "5m"
 	}
-	if v, ok := a.Extra["cache_ttl_override_target"]; ok {
+	if v, ok := asnap["cache_ttl_override_target"]; ok {
 		if target, ok := v.(string); ok && (target == "5m" || target == "1h") {
 			return target
 		}
@@ -2727,10 +2770,11 @@ func (a *Account) GetQuotaWeeklyUsed() float64 {
 
 // getExtraFloat64 从 Extra 中读取指定 key 的 float64 值
 func (a *Account) getExtraFloat64(key string) float64 {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return 0
 	}
-	if v, ok := a.Extra[key]; ok {
+	if v, ok := asnap[key]; ok {
 		return parseExtraFloat64(v)
 	}
 	return 0
@@ -2738,10 +2782,11 @@ func (a *Account) getExtraFloat64(key string) float64 {
 
 // getExtraTime 从 Extra 中读取 RFC3339 时间戳
 func (a *Account) getExtraTime(key string) time.Time {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return time.Time{}
 	}
-	if v, ok := a.Extra[key]; ok {
+	if v, ok := asnap[key]; ok {
 		if s, ok := v.(string); ok {
 			if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
 				return t
@@ -2756,10 +2801,11 @@ func (a *Account) getExtraTime(key string) time.Time {
 
 // getExtraBool 从 Extra 中读取指定 key 的 bool 值
 func (a *Account) getExtraBool(key string) bool {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return false
 	}
-	if v, ok := a.Extra[key]; ok {
+	if v, ok := asnap[key]; ok {
 		if b, ok := v.(bool); ok {
 			return b
 		}
@@ -2769,10 +2815,11 @@ func (a *Account) getExtraBool(key string) bool {
 
 // getExtraString 从 Extra 中读取指定 key 的字符串值
 func (a *Account) getExtraString(key string) string {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return ""
 	}
-	if v, ok := a.Extra[key]; ok {
+	if v, ok := asnap[key]; ok {
 		if s, ok := v.(string); ok {
 			return s
 		}
@@ -2790,10 +2837,11 @@ func (a *Account) getExtraStringDefault(key, defaultVal string) string {
 
 // getExtraInt 从 Extra 中读取指定 key 的 int 值
 func (a *Account) getExtraInt(key string) int {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return 0
 	}
-	if v, ok := a.Extra[key]; ok {
+	if v, ok := asnap[key]; ok {
 		return int(parseExtraFloat64(v))
 	}
 	return 0
@@ -2822,10 +2870,11 @@ func (a *Account) GetQuotaWeeklyResetMode() string {
 
 // GetQuotaWeeklyResetDay 获取固定重置的星期几（0=周日, 1=周一, ..., 6=周六），默认 1（周一）
 func (a *Account) GetQuotaWeeklyResetDay() int {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return 1
 	}
-	if _, ok := a.Extra["quota_weekly_reset_day"]; !ok {
+	if _, ok := asnap["quota_weekly_reset_day"]; !ok {
 		return 1
 	}
 	return a.getExtraInt("quota_weekly_reset_day")
@@ -3188,10 +3237,11 @@ func (a *Account) IsQuotaExceeded() bool {
 // GetWindowCostLimit 获取 5h 窗口费用阈值（美元）
 // 返回 0 表示未启用
 func (a *Account) GetWindowCostLimit() float64 {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return 0
 	}
-	if v, ok := a.Extra["window_cost_limit"]; ok {
+	if v, ok := asnap["window_cost_limit"]; ok {
 		return parseExtraFloat64(v)
 	}
 	return 0
@@ -3200,10 +3250,11 @@ func (a *Account) GetWindowCostLimit() float64 {
 // GetWindowCostStickyReserve 获取粘性会话预留额度（美元）
 // 默认值为 10
 func (a *Account) GetWindowCostStickyReserve() float64 {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return 10.0
 	}
-	if v, ok := a.Extra["window_cost_sticky_reserve"]; ok {
+	if v, ok := asnap["window_cost_sticky_reserve"]; ok {
 		val := parseExtraFloat64(v)
 		if val > 0 {
 			return val
@@ -3215,10 +3266,11 @@ func (a *Account) GetWindowCostStickyReserve() float64 {
 // GetMaxSessions 获取最大并发会话数
 // 返回 0 表示未启用
 func (a *Account) GetMaxSessions() int {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return 0
 	}
-	if v, ok := a.Extra["max_sessions"]; ok {
+	if v, ok := asnap["max_sessions"]; ok {
 		return parseExtraInt(v)
 	}
 	return 0
@@ -3227,10 +3279,11 @@ func (a *Account) GetMaxSessions() int {
 // GetSessionIdleTimeoutMinutes 获取会话空闲超时分钟数
 // 默认值为 5 分钟
 func (a *Account) GetSessionIdleTimeoutMinutes() int {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return 5
 	}
-	if v, ok := a.Extra["session_idle_timeout_minutes"]; ok {
+	if v, ok := asnap["session_idle_timeout_minutes"]; ok {
 		val := parseExtraInt(v)
 		if val > 0 {
 			return val
@@ -3242,10 +3295,11 @@ func (a *Account) GetSessionIdleTimeoutMinutes() int {
 // GetBaseRPM 获取基础 RPM 限制
 // 返回 0 表示未启用（负数视为无效配置，按 0 处理）
 func (a *Account) GetBaseRPM() int {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return 0
 	}
-	if v, ok := a.Extra["base_rpm"]; ok {
+	if v, ok := asnap["base_rpm"]; ok {
 		val := parseExtraInt(v)
 		if val > 0 {
 			return val
@@ -3257,10 +3311,11 @@ func (a *Account) GetBaseRPM() int {
 // GetRPMStrategy 获取 RPM 策略
 // "tiered" = 三区模型（默认）, "sticky_exempt" = 粘性豁免
 func (a *Account) GetRPMStrategy() string {
-	if a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
 		return "tiered"
 	}
-	if v, ok := a.Extra["rpm_strategy"]; ok {
+	if v, ok := asnap["rpm_strategy"]; ok {
 		if s, ok := v.(string); ok && s == "sticky_exempt" {
 			return "sticky_exempt"
 		}
@@ -3278,9 +3333,10 @@ func (a *Account) GetRPMStickyBuffer() int {
 // Cache-driven: buffer = concurrency + maxSessions（覆盖幽灵窗口 + 稳态会话需求）
 // floor = baseRPM / 5（向后兼容 maxSessions=0 且 concurrency=0 场景）
 func (a *Account) GetRPMStickyBufferForBase(base int) int {
+	asnap := a.SnapshotExtra()
 	// 手动 override 最高优先级
-	if a.Extra != nil {
-		if v, ok := a.Extra["rpm_sticky_buffer"]; ok {
+	if asnap != nil {
+		if v, ok := asnap["rpm_sticky_buffer"]; ok {
 			val := parseExtraInt(v)
 			if val > 0 {
 				return val

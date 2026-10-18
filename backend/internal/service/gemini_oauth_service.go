@@ -396,6 +396,7 @@ func (s *GeminiOAuthService) RefreshAccountGoogleOneTier(
 	ctx context.Context,
 	account *Account,
 ) (tierID string, extra map[string]any, credentials map[string]any, err error) {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return "", nil, nil, fmt.Errorf("account is nil")
 	}
@@ -435,7 +436,7 @@ func (s *GeminiOAuthService) RefreshAccountGoogleOneTier(
 
 	// 构建 extra 数据（保留原有 extra 字段）
 	extra = make(map[string]any)
-	for k, v := range account.Extra {
+	for k, v := range accountsnap {
 		extra[k] = v
 	}
 	if storageInfo != nil {
@@ -743,6 +744,7 @@ func isNonRetryableGeminiOAuthError(err error) bool {
 }
 
 func (s *GeminiOAuthService) RefreshAccountToken(ctx context.Context, account *Account) (*GeminiTokenInfo, error) {
+	accountsnap := account.SnapshotExtra()
 	if account.Platform != PlatformGemini || account.Type != AccountTypeOAuth {
 		return nil, fmt.Errorf("account is not a Gemini OAuth account")
 	}
@@ -844,8 +846,8 @@ func (s *GeminiOAuthService) RefreshAccountToken(ctx context.Context, account *A
 		canonicalExistingTier := canonicalGeminiTierIDForOAuthType(oauthType, existingTierID)
 		// Check if tier cache is stale (> 24 hours)
 		needsRefresh := true
-		if account.Extra != nil {
-			if updatedAtStr, ok := account.Extra["drive_tier_updated_at"].(string); ok {
+		if accountsnap != nil {
+			if updatedAtStr, ok := accountsnap["drive_tier_updated_at"].(string); ok {
 				if updatedAt, err := time.Parse(time.RFC3339, updatedAtStr); err == nil {
 					if time.Since(updatedAt) <= 24*time.Hour {
 						needsRefresh = false

@@ -94,17 +94,15 @@ func (a *Account) SetUpstreamModelMetadataSnapshot(snapshot UpstreamModelMetadat
 	if a == nil {
 		return
 	}
-	if a.Extra == nil {
-		a.Extra = make(map[string]any)
-	}
-	a.Extra[UpstreamModelMetadataExtraKey] = snapshot
+	a.MergeExtra(map[string]any{UpstreamModelMetadataExtraKey: snapshot})
 }
 
 func (a *Account) GetUpstreamModelMetadataSnapshot() *UpstreamModelMetadataSnapshot {
-	if a == nil || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
 		return nil
 	}
-	raw, ok := a.Extra[UpstreamModelMetadataExtraKey]
+	raw, ok := asnap[UpstreamModelMetadataExtraKey]
 	if !ok || raw == nil {
 		return nil
 	}

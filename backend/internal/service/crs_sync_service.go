@@ -1160,6 +1160,7 @@ func reconcileCRSUpstreamBillingProbeExtra(
 	targetCredentials map[string]any,
 	extra map[string]any,
 ) {
+	existingsnap := existing.SnapshotExtra()
 	for _, key := range []string{
 		UpstreamBillingProbeEnabledExtraKey,
 		UpstreamBillingRateSyncEnabledExtraKey,
@@ -1182,28 +1183,28 @@ func reconcileCRSUpstreamBillingProbeExtra(
 	}
 	if probeEligible {
 		probeEnabled := false
-		if enabled, ok := existing.Extra[UpstreamBillingProbeEnabledExtraKey]; ok {
+		if enabled, ok := existingsnap[UpstreamBillingProbeEnabledExtraKey]; ok {
 			extra[UpstreamBillingProbeEnabledExtraKey] = enabled
 			probeEnabled, _ = enabled.(bool)
 		}
-		if enabled, ok := existing.Extra[UpstreamBillingRateSyncEnabledExtraKey].(bool); ok {
+		if enabled, ok := existingsnap[UpstreamBillingRateSyncEnabledExtraKey].(bool); ok {
 			extra[UpstreamBillingRateSyncEnabledExtraKey] = enabled && probeEnabled
 		}
 		if reflect.DeepEqual(upstreamBillingProbeIdentity(existing), upstreamBillingProbeIdentity(target)) {
-			if snapshot, ok := existing.Extra[UpstreamBillingProbeExtraKey]; ok {
+			if snapshot, ok := existingsnap[UpstreamBillingProbeExtraKey]; ok {
 				extra[UpstreamBillingProbeExtraKey] = snapshot
 			}
 		}
 	}
 	if IsOllamaCloudUsageAccount(existing) && IsOllamaCloudUsageAccount(target) &&
 		reflect.DeepEqual(ollamaCloudUsageIdentity(existing), ollamaCloudUsageIdentity(target)) {
-		if session, ok := existing.Extra[OllamaCloudUsageSessionExtraKey]; ok {
+		if session, ok := existingsnap[OllamaCloudUsageSessionExtraKey]; ok {
 			extra[OllamaCloudUsageSessionExtraKey] = session
 		}
-		if enabled, ok := existing.Extra[OllamaCloudUsageAutoRefreshExtraKey]; ok {
+		if enabled, ok := existingsnap[OllamaCloudUsageAutoRefreshExtraKey]; ok {
 			extra[OllamaCloudUsageAutoRefreshExtraKey] = enabled
 		}
-		if snapshot, ok := existing.Extra[OllamaCloudUsageSnapshotExtraKey]; ok {
+		if snapshot, ok := existingsnap[OllamaCloudUsageSnapshotExtraKey]; ok {
 			extra[OllamaCloudUsageSnapshotExtraKey] = snapshot
 		}
 	}

@@ -580,7 +580,7 @@ func (s *CNQuotaLifecycleService) confirmExhaustedAuthoritative(ctx context.Cont
 		}
 	}
 	generation := int64(1)
-	if prev, ok := cnQuotaLifecycleStateFromExtra(latest.Extra); ok && prev != nil && prev.FreezeGeneration > 0 {
+	if prev, ok := cnQuotaLifecycleStateFromExtra(latest.SnapshotExtra()); ok && prev != nil && prev.FreezeGeneration > 0 {
 		generation = prev.FreezeGeneration + 1
 	}
 	probeDueAt, immediateConsumed := s.resolveFreezeTimeProbeDue(latest, now)
@@ -702,7 +702,7 @@ func (s *CNQuotaLifecycleService) advance402ProbeDue(ctx context.Context, accoun
 			account = fresh
 		}
 	}
-	if fresh, ok := cnQuotaLifecycleStateFromExtra(account.Extra); ok && fresh != nil {
+	if fresh, ok := cnQuotaLifecycleStateFromExtra(account.SnapshotExtra()); ok && fresh != nil {
 		st = fresh
 	}
 	if st == nil {
@@ -764,7 +764,7 @@ func (s *CNQuotaLifecycleService) OnKiraFreshBalanceObserved(ctx context.Context
 			latest = fresh
 		}
 	}
-	st, _ := cnQuotaLifecycleStateFromExtra(latest.Extra)
+	st, _ := cnQuotaLifecycleStateFromExtra(latest.SnapshotExtra())
 	if !is402AuthoritativeFrozen(latest, st) {
 		return nil // 非 402 冻结账号：不进入 402 状态机，零写入。
 	}
@@ -835,9 +835,11 @@ func (s *CNQuotaLifecycleService) RunRecoverySweep(ctx context.Context) error {
 		if account == nil || ctx.Err() != nil {
 			continue
 		}
+		// 每账号一次快照，函数内沿用，避免反复加锁拷贝（崩溃面：sweep 与并发写交错）。
+		extra := account.SnapshotExtra()
 		// F3 恢复链候选：独立处理分支，不受 cnQuotaLifecycleProviderOf 过滤影响，
 		// 不与 lifecycle 状态机混用（F3 键与 cnQuota_lifecycle 状态键互斥消费）。
-		if rec, ok := http403RecoveryFromExtra(account.Extra); ok {
+		if rec, ok := http403RecoveryFromExtra(extra); ok {
 			if s.f3Repo != nil {
 				if err := s.sweepF3RecoveryAccount(ctx, account, rec, now); err != nil && firstErr == nil {
 					firstErr = err
@@ -848,7 +850,7 @@ func (s *CNQuotaLifecycleService) RunRecoverySweep(ctx context.Context) error {
 		if cnQuotaLifecycleProviderOf(account) == "" {
 			continue
 		}
-		state, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+		state, ok := cnQuotaLifecycleStateFromExtra(extra)
 		if !ok || state.State == cnQuotaLifecycleStateRecovered {
 			// 已恢复/无状态记录：退出循环跟踪（恢复路径负责清停调，这里只兜孤儿跟踪项）。
 			s.untrack(account.ID)
@@ -885,7 +887,7 @@ func (s *CNQuotaLifecycleService) sweepCandidates(ctx context.Context, now time.
 		if account == nil {
 			continue
 		}
-		if _, ok := cnQuotaLifecycleStateFromExtra(account.Extra); !ok {
+		if _, ok := cnQuotaLifecycleStateFromExtra(account.SnapshotExtra()); !ok {
 			continue
 		}
 		seen[account.ID] = struct{}{}
@@ -1298,7 +1300,7 @@ func (s *CNQuotaLifecycleService) sweepF3RecoveryAccount(ctx context.Context, ac
 	}
 	// stale 核验（R17-F2）：键内 state_revision 与全局 sched_state_revision 失配 = 已易主
 	// → 原子清除 F3 键（只删键，不动 status/error/temp_unschedulable，状态归他链管），本轮不探测。
-	if rec.StateRevision != http403GlobalStateRevision(account.Extra) {
+	if rec.StateRevision != http403GlobalStateRevision(account.SnapshotExtra()) {
 		if _, err := s.f3Repo.RemoveHTTP403RecoveryRecord(ctx, account.ID, rec.Generation); err != nil {
 			return err
 		}
@@ -1914,7 +1916,7 @@ func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, a
 		// return）。残留的未来 recovery_at 由 sweep 读侧判定推进确认循环。
 		return
 	}
-	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	st, ok := cnQuotaLifecycleStateFromExtra(account.SnapshotExtra())
 	if !ok || st.RecoveryAt == "" {
 		return // 无既有 recovery_at 不编造（首次耗尽由确认路径写入）
 	}

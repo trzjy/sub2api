@@ -135,7 +135,8 @@ const (
 // 返回空列表表示该账号族无任何账号级额度快照（Anthropic OAuth/纯 API key/
 // Bedrock 等）⇒ §3.1 判定表放行、等同现状。
 func ResolveAccountQuotaDimensions(account *Account, now time.Time) []QuotaDimension {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return nil
 	}
 	switch {
@@ -163,6 +164,7 @@ func ResolveAccountQuotaDimensions(account *Account, now time.Time) []QuotaDimen
 //     故有/无该维度对 EvaluateAccountQuotaDimensionGate 的逐账号判定完全等价
 //     （见 TestQuotaDimensionUsageDimensionRemoved 的门中性子用例）。
 func resolveTokenHarborQuotaDimensions(account *Account, now time.Time) []QuotaDimension {
+	accountsnap := account.SnapshotExtra()
 	var dims []QuotaDimension
 	snap, ok := TokenHarborPassSnapshotFromExtra(account)
 	if ok && snap != nil {
@@ -212,7 +214,7 @@ func resolveTokenHarborQuotaDimensions(account *Account, now time.Time) []QuotaD
 	// 到期"的 model_rate_limits 条目，每条产出一个 scope=model 维度。前缀/到期语义一律经
 	// 该权威导出，本文件不复制任何字面量与到期规则（方案 §2.2 只消费不复制）。scope=model
 	// 维度不进 F6 调度门（EvaluateAccountQuotaDimensionGate 已按 scope 过滤）。
-	for _, scope := range ActiveTokenHarborFreeTierScopes(account.Extra, now) {
+	for _, scope := range ActiveTokenHarborFreeTierScopes(accountsnap, now) {
 		dims = append(dims, QuotaDimension{
 			Kind:     QuotaDimensionKindFree,
 			Scope:    QuotaDimensionScopeModel,
@@ -273,7 +275,9 @@ func resolveCodingPlanQuotaDimensions(account *Account, now time.Time) []QuotaDi
 	if provider == "" || provider == providerKira {
 		return nil
 	}
-	updated, hasUpdated := parseQuotaDimensionRFC3339(account.Extra[cnExtraKey(provider, cnExtraSuffixUsageUpdated)])
+	// 每账号一次快照，函数内沿用（崩溃面：quota 维度解析与并发写交错）。
+	extra := account.SnapshotExtra()
+	updated, hasUpdated := parseQuotaDimensionRFC3339(extra[cnExtraKey(provider, cnExtraSuffixUsageUpdated)])
 	fresh := hasUpdated && quotaDimensionSourceFresh(updated, now)
 	sourceKey := cnExtraKey(provider, cnExtraSuffixUsageUpdated)
 
@@ -284,8 +288,8 @@ func resolveCodingPlanQuotaDimensions(account *Account, now time.Time) []QuotaDi
 	}
 	var dims []QuotaDimension
 	for _, w := range windows {
-		usedRaw, hasUsed := account.Extra[cnExtraKey(provider, w.usedSuffix)]
-		_, hasReset := account.Extra[cnExtraKey(provider, w.resetSuffix)]
+		usedRaw, hasUsed := extra[cnExtraKey(provider, w.usedSuffix)]
+		_, hasReset := extra[cnExtraKey(provider, w.resetSuffix)]
 		if !hasUsed && !hasReset {
 			continue // 该窗口不存在（cnQuotaExtraUpdates 缺档写 nil 清键）
 		}
@@ -319,13 +323,15 @@ func resolveRelayPaidDimension(account *Account, now time.Time) *QuotaDimension 
 	balanceKey := cnExtraKey(platform, cnBalanceExtraSuffixBalance)
 	unlimitedKey := cnExtraKey(platform, cnBalanceExtraSuffixUnlimited)
 	planNameKey := cnExtraKey(platform, cnBalanceExtraSuffixPlanName)
-	_, hasBalance := account.Extra[balanceKey]
-	_, hasUnlimited := account.Extra[unlimitedKey]
-	_, hasPlan := account.Extra[planNameKey]
+	// 每账号一次快照（崩溃面：付费维度解析与并发写交错）。
+	extra := account.SnapshotExtra()
+	_, hasBalance := extra[balanceKey]
+	_, hasUnlimited := extra[unlimitedKey]
+	_, hasPlan := extra[planNameKey]
 	if !hasBalance && !hasUnlimited && !hasPlan {
 		return nil
 	}
-	st := ResolveBalanceState(account.Extra, platform, now)
+	st := ResolveBalanceState(extra, platform, now)
 	dim := QuotaDimension{
 		Kind:       QuotaDimensionKindPaid,
 		Scope:      QuotaDimensionScopeAccount,
@@ -335,7 +341,7 @@ func resolveRelayPaidDimension(account *Account, now time.Time) *QuotaDimension 
 		ObservedAt: st.ObservedAt,
 	}
 	if st.IsFresh() {
-		if quotaExtraBool(account.Extra[unlimitedKey]) || st.Value > 0 {
+		if quotaExtraBool(extra[unlimitedKey]) || st.Value > 0 {
 			dim.Status = QuotaDimensionRemaining
 		} else {
 			dim.Status = QuotaDimensionExhausted
@@ -457,10 +463,15 @@ type kiraQuotaUsageSnapshot struct {
 // kiraQuotaUsageSnapshotFromExtra 从账号 Extra 读取 kira_usage_snapshot 快照；
 // 键缺失/形态不符 → nil。不做探测、不造默认值。
 func kiraQuotaUsageSnapshotFromExtra(account *Account) *kiraQuotaUsageSnapshot {
-	if account == nil || account.Extra == nil {
+	if account == nil {
 		return nil
 	}
-	raw, ok := account.Extra[kiraUsageSnapshotExtraKey]
+	// 经并发安全边界读 Extra（崩溃面：kira 用量快照解析与并发写交错）。
+	extra := account.SnapshotExtra()
+	if extra == nil {
+		return nil
+	}
+	raw, ok := extra[kiraUsageSnapshotExtraKey]
 	if !ok || raw == nil {
 		return nil
 	}

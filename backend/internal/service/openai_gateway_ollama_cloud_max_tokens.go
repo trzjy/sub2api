@@ -77,10 +77,11 @@ func ollamaCloudResponsesMaxOutputTokensClamp(account *Account, upstreamModel st
 // 无该键时返回默认值；键值为数值类型（float64/int64/int/json.Number）时返回其整数
 // 值（0 或负数表示显式禁用 clamp）；其它类型回退默认值。
 func ollamaCloudMaxTokensCap(account *Account) int64 {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return ollamaCloudDefaultMaxTokensCap
 	}
-	value, ok := account.Extra[OllamaCloudMaxTokensCapExtraKey]
+	value, ok := accountsnap[OllamaCloudMaxTokensCapExtraKey]
 	if !ok {
 		return ollamaCloudDefaultMaxTokensCap
 	}

@@ -393,6 +393,9 @@ func (s *CursorAutoEntryService) ApplyEntryDefaults(ctx context.Context, tx *ent
 		return nil, fmt.Errorf("cursor_auto_entry: apply entry defaults to account %d: %w", account.ID, err)
 	}
 	// 回填内存实体，便于调用方继续复用（如挂组）。
+	// 注：此处 account 为 *ent.Account（ent ORM 实体，单次请求内新建/加载、随请求结束即弃），
+	// 并非并发收口机制所保护的 service.Account；其 Extra 为请求局部 map，不存在跨 goroutine
+	// 并发读写，故直接写属于正当保留（与 account_repo.go 等局部 DTO 同判），不套用 MergeExtra。
 	if account.Extra == nil {
 		account.Extra = map[string]any{}
 	}

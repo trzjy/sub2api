@@ -111,10 +111,11 @@ func maskVLLMFingerprintsJSON(b []byte) []byte {
 // with a nil Extra map — return false. This keeps the behavior a zero-impact
 // no-op for every other platform account.
 func IsIdentityMaskedAccount(a *Account) bool {
-	if a == nil || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
 		return false
 	}
-	v, ok := a.Extra["mask_upstream_identity"]
+	v, ok := asnap["mask_upstream_identity"]
 	if !ok {
 		return false
 	}
@@ -159,10 +160,11 @@ func IdentityRewriteAliases(mappedModel string) []string {
 // account with a nil Extra map — return false. This keeps the behavior a
 // zero-impact no-op for every other platform account.
 func IsReasoningStrippedAccount(a *Account) bool {
-	if a == nil || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
 		return false
 	}
-	v, ok := a.Extra["strip_reasoning_content"]
+	v, ok := asnap["strip_reasoning_content"]
 	if !ok {
 		return false
 	}

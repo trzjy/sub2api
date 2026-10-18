@@ -256,10 +256,11 @@ func ActiveTokenHarborFreeTierScopes(extra map[string]any, now time.Time) []stri
 }
 
 func (a *Account) modelRateLimitResetAt(scope string) *time.Time {
-	if a == nil || a.Extra == nil || scope == "" {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil || scope == "" {
 		return nil
 	}
-	rawLimits, ok := a.Extra[modelRateLimitsKey].(map[string]any)
+	rawLimits, ok := asnap[modelRateLimitsKey].(map[string]any)
 	if !ok {
 		return nil
 	}
@@ -280,10 +281,11 @@ func (a *Account) modelRateLimitResetAt(scope string) *time.Time {
 
 // modelRateLimitReason 返回指定 scope 冷却记录中的原因；没有记录时为空。
 func (a *Account) modelRateLimitReason(scope string) string {
-	if a == nil || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
 		return ""
 	}
-	rawLimits, _ := a.Extra[modelRateLimitsKey].(map[string]any)
+	rawLimits, _ := asnap[modelRateLimitsKey].(map[string]any)
 	rawLimit, _ := rawLimits[scope].(map[string]any)
 	reason, _ := rawLimit["reason"].(string)
 	return reason
@@ -293,13 +295,11 @@ func setAccountModelRateLimitSnapshot(account *Account, scope string, resetAt ti
 	if account == nil || strings.TrimSpace(scope) == "" {
 		return
 	}
-	if account.Extra == nil {
-		account.Extra = make(map[string]any)
-	}
-	limits, ok := account.Extra[modelRateLimitsKey].(map[string]any)
+	// 经并发安全边界读写 Extra：读原 model_rate_limits 子 map，局部改后整体写回。
+	v, _ := account.ExtraValue(modelRateLimitsKey)
+	limits, ok := v.(map[string]any)
 	if !ok {
 		limits = make(map[string]any)
-		account.Extra[modelRateLimitsKey] = limits
 	}
 	payload := map[string]any{
 		"rate_limited_at":     now.UTC().Format(time.RFC3339),
@@ -309,4 +309,5 @@ func setAccountModelRateLimitSnapshot(account *Account, scope string, resetAt ti
 		payload["reason"] = reason
 	}
 	limits[scope] = payload
+	account.MergeExtra(map[string]any{modelRateLimitsKey: limits})
 }

@@ -184,10 +184,11 @@ func isAccountCircuitBreakerTrip(a *Account) bool {
 // accountHasActiveModelRateLimit 复用 D2 模型级限流判定：Extra.model_rate_limits 中
 // 存在 rate_limit_reset_at 在将来的条目 → 模型级限流仍生效（no-op on channel）。
 func accountHasActiveModelRateLimit(a *Account, now time.Time) bool {
-	if a == nil || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
 		return false
 	}
-	limits, ok := a.Extra[modelRateLimitsKey].(map[string]any)
+	limits, ok := asnap[modelRateLimitsKey].(map[string]any)
 	if !ok || len(limits) == 0 {
 		return false
 	}

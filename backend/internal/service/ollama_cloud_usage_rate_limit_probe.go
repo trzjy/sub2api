@@ -221,7 +221,7 @@ func (s *OllamaCloudUsageService) runOllamaCloudUsageProbe(
 	}
 
 	window := ollamaCloudUsageManualRefreshInterval
-	accountSnapshot := decodeOllamaCloudUsageSnapshot(account.Extra)
+	accountSnapshot := decodeOllamaCloudUsageSnapshot(account.SnapshotExtra())
 	cached, hasCached := s.probeGroupResult(key)
 
 	// The most recent observation wins, so an older success never masks a newer

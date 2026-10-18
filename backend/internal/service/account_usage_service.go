@@ -375,6 +375,7 @@ func batchUsageErrorMessage(err error) string {
 }
 
 func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *Account, forceProbe bool) (*UsageInfo, error) {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return nil, fmt.Errorf("account is required")
 	}
@@ -507,7 +508,7 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 		// 6. 上游 usage API 目前不一定下发 Fable 7d 窗口；缺失时回填被动采样
 		// （7d_oi 响应头）的数据，避免主动查询后 7d F 进度条丢失。
 		if usage.SevenDayFable == nil {
-			usage.SevenDayFable = buildPassiveUsageWindow(account.Extra, "passive_usage_7d_oi_utilization", "passive_usage_7d_oi_reset")
+			usage.SevenDayFable = buildPassiveUsageWindow(accountsnap, "passive_usage_7d_oi_utilization", "passive_usage_7d_oi_reset")
 		}
 
 		s.tryClearRecoverableAccountError(ctx, account)
@@ -635,6 +636,7 @@ func (s *AccountUsageService) GetPassiveUsage(ctx context.Context, accountID int
 }
 
 func (s *AccountUsageService) getPassiveUsageForAccount(ctx context.Context, account *Account) (*UsageInfo, error) {
+	accountsnap := account.SnapshotExtra()
 	if !supportsAnthropicPassiveUsage(account) {
 		return nil, fmt.Errorf("passive usage only supported for Anthropic OAuth/SetupToken accounts")
 	}
@@ -644,7 +646,7 @@ func (s *AccountUsageService) getPassiveUsageForAccount(ctx context.Context, acc
 	info.Source = "passive"
 
 	// 设置采样时间
-	if raw, ok := account.Extra["passive_usage_sampled_at"]; ok {
+	if raw, ok := accountsnap["passive_usage_sampled_at"]; ok {
 		if str, ok := raw.(string); ok {
 			if t, err := time.Parse(time.RFC3339, str); err == nil {
 				info.UpdatedAt = &t
@@ -653,15 +655,15 @@ func (s *AccountUsageService) getPassiveUsageForAccount(ctx context.Context, acc
 	}
 
 	// 构建 7d 窗口（从被动采样数据）
-	info.SevenDay = buildPassiveUsageWindow(account.Extra, "passive_usage_7d_utilization", "passive_usage_7d_reset")
+	info.SevenDay = buildPassiveUsageWindow(accountsnap, "passive_usage_7d_utilization", "passive_usage_7d_reset")
 
 	// 构建 7d Fable 窗口（从被动采样的 7d_oi 响应头数据）
-	info.SevenDayFable = buildPassiveUsageWindow(account.Extra, "passive_usage_7d_oi_utilization", "passive_usage_7d_oi_reset")
+	info.SevenDayFable = buildPassiveUsageWindow(accountsnap, "passive_usage_7d_oi_utilization", "passive_usage_7d_oi_reset")
 
 	// 添加窗口统计
 	s.addWindowStats(ctx, account, info)
 	if account.IsSyntheticUITest() {
-		applySyntheticWindowStats(info, account.Extra)
+		applySyntheticWindowStats(info, accountsnap)
 	}
 
 	return info, nil
@@ -747,6 +749,7 @@ func (s *AccountUsageService) syncActiveToPassive(ctx context.Context, accountID
 }
 
 func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
+	accountsnap := account.SnapshotExtra()
 	now := time.Now()
 	usage := &UsageInfo{UpdatedAt: &now}
 
@@ -754,7 +757,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		return usage, nil
 	}
 
-	applyExtraToUsage(usage, account.Extra, now)
+	applyExtraToUsage(usage, accountsnap, now)
 
 	if (force || shouldRefreshOpenAICodexSnapshot(account, usage, now)) && s.shouldProbeOpenAICodexSnapshot(account.ID, now, force) {
 		if account.IsShadow() {
@@ -773,7 +776,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 						if usage.UpdatedAt == nil {
 							usage.UpdatedAt = &now
 						}
-						applyExtraToUsage(usage, account.Extra, now)
+						applyExtraToUsage(usage, accountsnap, now)
 					}
 				}
 			}
@@ -783,7 +786,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 				if usage.UpdatedAt == nil {
 					usage.UpdatedAt = &now
 				}
-				applyExtraToUsage(usage, account.Extra, now)
+				applyExtraToUsage(usage, accountsnap, now)
 			}
 		}
 	}
@@ -826,6 +829,7 @@ func shouldRefreshOpenAICodexSnapshot(account *Account, usage *UsageInfo, now ti
 }
 
 func isOpenAICodexSnapshotStale(account *Account, now time.Time) bool {
+	accountsnap := account.SnapshotExtra()
 	if account == nil || !account.IsOpenAIOAuth() {
 		return false
 	}
@@ -836,10 +840,10 @@ func isOpenAICodexSnapshotStale(account *Account, now time.Time) bool {
 	if !account.IsShadow() && !account.IsOpenAIResponsesWebSocketV2Enabled() {
 		return false
 	}
-	if account.Extra == nil {
+	if accountsnap == nil {
 		return true
 	}
-	raw, ok := account.Extra["codex_usage_updated_at"]
+	raw, ok := accountsnap["codex_usage_updated_at"]
 	if !ok {
 		return true
 	}
@@ -982,15 +986,8 @@ func extractOpenAICodexProbeUpdates(resp *http.Response) (map[string]any, error)
 }
 
 func mergeAccountExtra(account *Account, updates map[string]any) {
-	if account == nil || len(updates) == 0 {
-		return
-	}
-	if account.Extra == nil {
-		account.Extra = make(map[string]any, len(updates))
-	}
-	for k, v := range updates {
-		account.Extra[k] = v
-	}
+	// All Extra writes converge on Account.MergeExtra (mutex-guarded).
+	account.MergeExtra(updates)
 }
 
 // applyExtraToUsage rebuilds the codex 5h/7d windows in usage from the
@@ -1401,10 +1398,11 @@ func currentGrokBillingWindow(billing *xai.BillingSummary, weekly bool, now time
 }
 
 func grokBillingSnapshotNeedsRefresh(account *Account, now time.Time) bool {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return false
 	}
-	billing, err := grokBillingSnapshotFromExtra(account.Extra)
+	billing, err := grokBillingSnapshotFromExtra(accountsnap)
 	if err != nil || billing == nil || billing.Partial || len(billing.FailedWindows) > 0 {
 		return true
 	}
@@ -1879,6 +1877,7 @@ func (s *AccountUsageService) buildUsageInfo(resp *ClaudeUsageResponse, updatedA
 
 // estimateSetupTokenUsage 根据session_window推算Setup Token账号的使用量
 func (s *AccountUsageService) estimateSetupTokenUsage(account *Account) *UsageInfo {
+	accountsnap := account.SnapshotExtra()
 	info := &UsageInfo{}
 
 	// 如果有session_window信息
@@ -1891,7 +1890,7 @@ func (s *AccountUsageService) estimateSetupTokenUsage(account *Account) *UsageIn
 		// 优先使用响应头中存储的真实 utilization 值（0-1 小数，转为 0-100 百分比）
 		var utilization float64
 		var found bool
-		if stored, ok := account.Extra["session_window_utilization"]; ok {
+		if stored, ok := accountsnap["session_window_utilization"]; ok {
 			switch v := stored.(type) {
 			case float64:
 				utilization = v * 100

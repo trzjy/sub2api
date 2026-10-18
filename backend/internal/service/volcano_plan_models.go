@@ -690,10 +690,7 @@ func (s *AccountTestService) persistVolcanoManagedSnapshot(ctx context.Context, 
 	if s.accountRepo == nil {
 		return nil
 	}
-	if account.Extra == nil {
-		account.Extra = make(map[string]any)
-	}
-	account.Extra[VolcanoPlanManagedModelExtraKey] = snap
+	account.MergeExtra(map[string]any{VolcanoPlanManagedModelExtraKey: snap})
 	return s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
 		VolcanoPlanManagedModelExtraKey: snap,
 	})
@@ -745,10 +742,11 @@ func rebuildVolcanoModelMapping(account *Account, oldIdentityKeys map[string]str
 
 // GetVolcanoPlanManagedModels 读取账号 extra 中的火山订阅号系统托管模型快照。
 func (a *Account) GetVolcanoPlanManagedModels() *VolcanoPlanManagedModels {
-	if a == nil || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
 		return nil
 	}
-	raw, ok := a.Extra[VolcanoPlanManagedModelExtraKey]
+	raw, ok := asnap[VolcanoPlanManagedModelExtraKey]
 	if !ok || raw == nil {
 		return nil
 	}

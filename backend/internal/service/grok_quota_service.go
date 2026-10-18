@@ -294,7 +294,7 @@ func (s *GrokQuotaService) probeBilling(ctx context.Context, accountID int64) (*
 
 	weeklyOK := weekly.summary != nil
 	monthlyOK := monthly.summary != nil
-	previous, _ := grokBillingSnapshotFromExtra(account.Extra)
+	previous, _ := grokBillingSnapshotFromExtra(account.SnapshotExtra())
 	if !weeklyOK && !monthlyOK {
 		probeErr := mergeGrokBillingProbeErrors(weekly.status, monthly.status, weekly.err, monthly.err)
 		billing := xai.MergeBillingProbeResult(previous, nil, nil, false, false)

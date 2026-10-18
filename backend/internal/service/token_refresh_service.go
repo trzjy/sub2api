@@ -1257,10 +1257,11 @@ func (s *TokenRefreshService) clearAntigravityForceTokenRefresh(ctx context.Cont
 		)
 		return
 	}
-	if account.Extra != nil {
-		for k, v := range updates {
-			account.Extra[k] = v
-		}
+	if account.SnapshotExtra() != nil {
+		// Mirror the just-persisted DB UpdateExtra into memory. MergeExtra
+		// initializes a nil map, but the original code only mirrored when Extra
+		// was already non-nil, so keep that guard to preserve exact semantics.
+		account.MergeExtra(updates)
 	}
 	slog.Info("token_refresh.cleared_antigravity_force_refresh",
 		"account_id", account.ID,
@@ -1444,13 +1445,14 @@ func isNonRetryableRefreshError(err error) bool {
 // ensureOpenAIPrivacy 检查 OpenAI OAuth 账号是否已设置 privacy_mode，
 // 未设置则调用 disableOpenAITraining 并持久化结果到 Extra。
 func (s *TokenRefreshService) ensureOpenAIPrivacy(ctx context.Context, account *Account) {
+	accountsnap := account.SnapshotExtra()
 	if account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth {
 		return
 	}
 	if s.privacyClientFactory == nil {
 		return
 	}
-	if shouldSkipOpenAIPrivacyEnsure(account.Extra) {
+	if shouldSkipOpenAIPrivacyEnsure(accountsnap) {
 		return
 	}
 
@@ -1488,11 +1490,12 @@ func (s *TokenRefreshService) ensureOpenAIPrivacy(ctx context.Context, account *
 // 仅当 privacy_mode 已成功设置（"privacy_set"）时跳过；
 // 未设置或之前失败（"privacy_set_failed"）均会重试。
 func (s *TokenRefreshService) ensureAntigravityPrivacy(ctx context.Context, account *Account) {
+	accountsnap := account.SnapshotExtra()
 	if account.Platform != PlatformAntigravity || account.Type != AccountTypeOAuth {
 		return
 	}
-	if account.Extra != nil {
-		if mode, ok := account.Extra["privacy_mode"].(string); ok && mode == AntigravityPrivacySet {
+	if accountsnap != nil {
+		if mode, ok := accountsnap["privacy_mode"].(string); ok && mode == AntigravityPrivacySet {
 			return
 		}
 	}

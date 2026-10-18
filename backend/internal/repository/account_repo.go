@@ -287,6 +287,7 @@ func (r *accountRepository) CreateWithTx(ctx context.Context, tx *dbent.Tx, acco
 }
 
 func createAccountRecord(ctx context.Context, client *dbent.Client, account *service.Account) error {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return service.ErrAccountNilInput
 	}
@@ -305,7 +306,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 		SetCredentials(creds.storage).
 		SetCredentialsMAC(creds.mac).
 		SetNillableCredentialsAPIKeyMAC(creds.apiKeyMAC).
-		SetExtra(normalizeJSONMap(account.Extra)).
+		SetExtra(normalizeJSONMap(accountsnap)).
 		SetConcurrency(account.Concurrency).
 		SetPriority(account.Priority).
 		SetStatus(account.Status).
@@ -692,7 +693,6 @@ func (r *accountRepository) updateLockedAccount(
 	if err != nil {
 		return nil, err
 	}
-	account.Extra = extra
 
 	schedulable := account.Schedulable
 	if account.Status == service.StatusError {
@@ -792,6 +792,7 @@ func lockAndMergeAccountProbeExtra(
 	explicitProbeEnabled *bool,
 	explicitRateSyncEnabled *bool,
 ) (map[string]any, error) {
+	accountsnap := account.SnapshotExtra()
 	// 凭证一致性判断改用指纹（A3-E2）：GCM nonce 随机导致密文间不可比。
 	// mac 按明文计算；api_key 指纹与 base_url 分开传参，NULL 语义与原先
 	// JSONB 缺键比较一致。
@@ -911,7 +912,7 @@ func lockAndMergeAccountProbeExtra(
 		return nil, err
 	}
 
-	extra := copyJSONMap(normalizeJSONMap(account.Extra))
+	extra := copyJSONMap(normalizeJSONMap(accountsnap))
 	for _, key := range []string{
 		service.UpstreamBillingProbeEnabledExtraKey,
 		service.UpstreamBillingRateSyncEnabledExtraKey,
@@ -4171,29 +4172,30 @@ func (r *accountRepository) updateUpstreamBillingProbeSnapshotInTx(
 	snapshot *service.UpstreamBillingProbeSnapshot,
 	rateMultiplier *float64,
 ) error {
+	accountsnap := account.SnapshotExtra()
 	payload, err := json.Marshal(map[string]any{service.UpstreamBillingProbeExtraKey: snapshot})
 	if err != nil {
 		return err
 	}
 	var expectedSnapshot any
-	if account.Extra != nil {
-		expectedSnapshot = account.Extra[service.UpstreamBillingProbeExtraKey]
+	if accountsnap != nil {
+		expectedSnapshot = accountsnap[service.UpstreamBillingProbeExtraKey]
 	}
 	expectedSnapshotJSON, err := json.Marshal(expectedSnapshot)
 	if err != nil {
 		return err
 	}
 	var expectedEnabled any
-	if account.Extra != nil {
-		expectedEnabled = account.Extra[service.UpstreamBillingProbeEnabledExtraKey]
+	if accountsnap != nil {
+		expectedEnabled = accountsnap[service.UpstreamBillingProbeEnabledExtraKey]
 	}
 	expectedEnabledJSON, err := json.Marshal(expectedEnabled)
 	if err != nil {
 		return err
 	}
 	var expectedRateSyncEnabled any
-	if account.Extra != nil {
-		expectedRateSyncEnabled = account.Extra[service.UpstreamBillingRateSyncEnabledExtraKey]
+	if accountsnap != nil {
+		expectedRateSyncEnabled = accountsnap[service.UpstreamBillingRateSyncEnabledExtraKey]
 	}
 	expectedRateSyncEnabledJSON, err := json.Marshal(expectedRateSyncEnabled)
 	if err != nil {

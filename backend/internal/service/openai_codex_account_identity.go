@@ -53,6 +53,7 @@ func codexAccountIdentitySource(c *gin.Context, fallback *Account) *Account {
 // otherwise falls back only to a persistent fingerprint seed: local row IDs are
 // deployment-relative and must never become upstream identity.
 func codexAccountIdentityNamespace(account *Account) string {
+	accountsnap := account.SnapshotExtra()
 	if account == nil || !account.IsOpenAIOAuthLike() {
 		return ""
 	}
@@ -62,7 +63,7 @@ func codexAccountIdentityNamespace(account *Account) string {
 		}
 		return "chatgpt:" + upstreamAccountID
 	}
-	if seed, ok := codexFingerprintSeed(account.Extra); ok {
+	if seed, ok := codexFingerprintSeed(accountsnap); ok {
 		return "seed:" + seed
 	}
 	if account.Type == AccountTypeSetupToken {

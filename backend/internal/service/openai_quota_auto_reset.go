@@ -294,10 +294,10 @@ func (s *OpenAIQuotaAutoResetService) evaluateAccount(ctx context.Context, accou
 
 	now := time.Now()
 	assessment := s.assessExtra(account, config, now)
-	state := openAIAutoResetStateFromExtra(account.Extra)
+	state := openAIAutoResetStateFromExtra(account.SnapshotExtra())
 	// 达到用卡阈值本应立即查询以便用卡；但 10 分钟内已确认无卡时，重查不会改变结论，
 	// 只会让调度热路径的通知把同一账号的上游额度接口打到十几秒一次。
-	needsQuery := openAIAutoResetSnapshotStale(account.Extra, now) ||
+	needsQuery := openAIAutoResetSnapshotStale(account.SnapshotExtra(), now) ||
 		(assessment.resetReached && !openAIAutoResetNoCreditConfirmed(state, now))
 	if assessment.pauseReached && !assessment.resetReached {
 		needsQuery = needsQuery || state == nil || state.Status == OpenAIAutoResetStatusChecking || state.Status == OpenAIAutoResetStatusFailed || openAIAutoResetStateStale(state, now)
@@ -513,8 +513,9 @@ func decodeOpenAIAutoResetConsumeResult(value any) openAIAutoResetConsumeResult 
 }
 
 func (s *OpenAIQuotaAutoResetService) assessExtra(account *Account, config OpenAIAutoResetCreditConfig, now time.Time) openAIAutoResetAssessment {
-	utilization5h, _ := resolveOpenAIQuotaUtilization(account.Extra, "5h", now)
-	utilization7d, _ := resolveOpenAIQuotaUtilization(account.Extra, "7d", now)
+	accountsnap := account.SnapshotExtra()
+	utilization5h, _ := resolveOpenAIQuotaUtilization(accountsnap, "5h", now)
+	utilization7d, _ := resolveOpenAIQuotaUtilization(accountsnap, "7d", now)
 	return s.buildAssessment(account, config, utilization5h, utilization7d)
 }
 
@@ -526,6 +527,7 @@ func (s *OpenAIQuotaAutoResetService) assessUsage(usage *OpenAIQuotaUsage, accou
 }
 
 func (s *OpenAIQuotaAutoResetService) buildAssessment(account *Account, config OpenAIAutoResetCreditConfig, utilization5h, utilization7d float64) openAIAutoResetAssessment {
+	accountsnap := account.SnapshotExtra()
 	assessment := openAIAutoResetAssessment{
 		utilization5h: utilization5h,
 		utilization7d: utilization7d,
@@ -544,8 +546,8 @@ func (s *OpenAIQuotaAutoResetService) buildAssessment(account *Account, config O
 			account,
 		)
 	}
-	pauseReached5h := !resolveAccountExtraBool(account.Extra, "auto_pause_5h_disabled") && pause5h > 0 && utilization5h >= pause5h
-	pauseReached7d := !resolveAccountExtraBool(account.Extra, "auto_pause_7d_disabled") && pause7d > 0 && utilization7d >= pause7d
+	pauseReached5h := !resolveAccountExtraBool(accountsnap, "auto_pause_5h_disabled") && pause5h > 0 && utilization5h >= pause5h
+	pauseReached7d := !resolveAccountExtraBool(accountsnap, "auto_pause_7d_disabled") && pause7d > 0 && utilization7d >= pause7d
 	assessment.pauseReached = pauseReached5h || pauseReached7d || assessment.resetReached
 	if assessment.triggerWindow == "" {
 		assessment.triggerWindow = joinOpenAIAutoResetWindows(pauseReached5h, pauseReached7d)

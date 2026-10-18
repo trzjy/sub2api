@@ -74,10 +74,12 @@ func (s *AntigravityGatewayService) setCreditsExhausted(ctx context.Context, acc
 
 // clearCreditsExhausted 清除账号的 AICredits 限流 key。
 func (s *AntigravityGatewayService) clearCreditsExhausted(ctx context.Context, account *Account) {
-	if account == nil || account.ID == 0 || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || account.ID == 0 || accountsnap == nil {
 		return
 	}
-	rawLimits, ok := account.Extra[modelRateLimitsKey].(map[string]any)
+	v, ok := account.ExtraValue(modelRateLimitsKey)
+	rawLimits, ok := v.(map[string]any)
 	if !ok {
 		return
 	}
@@ -85,7 +87,7 @@ func (s *AntigravityGatewayService) clearCreditsExhausted(ctx context.Context, a
 		return
 	}
 	delete(rawLimits, creditsExhaustedKey)
-	account.Extra[modelRateLimitsKey] = rawLimits
+	account.MergeExtra(map[string]any{modelRateLimitsKey: rawLimits})
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
 		modelRateLimitsKey: rawLimits,
 	}); err != nil {

@@ -547,7 +547,7 @@ func accountHoldsHTTP403Recovery(account *Account) bool {
 	if account == nil {
 		return false
 	}
-	_, ok := http403RecoveryFromExtra(account.Extra)
+	_, ok := http403RecoveryFromExtra(account.SnapshotExtra())
 	return ok
 }
 
@@ -588,7 +588,7 @@ func (s *CNProviderBalanceCheckService) shouldSkipTokenHarborCollect(now time.Ti
 		// 损坏态（方案 §9.2，2026-10-08 用户裁定）：键存在且非 null，但不可解析为整数
 		// 或解析值 <= 0。跳过该账号本轮收集并告警；含账号 id 与键原始值形态
 		//（不打印完整原始值防日志注入超长）。
-		if raw, present := account.Extra[thProbeBackoffUntilExtraKey]; present && raw != nil {
+		if raw, present := account.ExtraValue(thProbeBackoffUntilExtraKey); present && raw != nil {
 			log.Printf("[CNBalance] th collect backoff key corrupted account=%d key=%s: raw type %T is not a positive integer, skip this round", account.ID, thProbeBackoffUntilExtraKey, raw)
 		}
 		return true
@@ -606,10 +606,11 @@ func (s *CNProviderBalanceCheckService) shouldSkipTokenHarborCollect(now time.Ti
 //     解析值 <= 0（含 int64 范围溢出等 ErrRange 情形），调用方应跳过该账号
 //     本轮收集并发告警（非未退避收集）。
 func thProbeBackoffUntilFromExtra(account *Account) (time.Time, bool, bool) {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return time.Time{}, false, false
 	}
-	raw, ok := account.Extra[thProbeBackoffUntilExtraKey]
+	raw, ok := account.ExtraValue(thProbeBackoffUntilExtraKey)
 	if !ok || raw == nil {
 		return time.Time{}, false, false
 	}
@@ -679,10 +680,11 @@ func (s *CNProviderBalanceCheckService) shouldSkipKiraCollect(now time.Time, acc
 //     解析与"值合法"）；缺失 / nil / 不可解析 / ≤0 → (零值, false)（失败关闭：视为无冷却，
 //     收集，与 TH 退避键损坏态不同——Kira 冷却由本服务自写，损坏按无冷却处理不阻断收集）。
 func kiraProbeCooldownUntilFromExtra(account *Account) (time.Time, bool) {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return time.Time{}, false
 	}
-	raw, ok := account.Extra[kiraProbeCooldownUntilExtraKey]
+	raw, ok := account.ExtraValue(kiraProbeCooldownUntilExtraKey)
 	if !ok || raw == nil {
 		return time.Time{}, false
 	}
@@ -716,10 +718,11 @@ func kiraProbeCooldownUntilFromExtra(account *Account) (time.Time, bool) {
 // kiraUsageSnapshotFetchedAt 从账号 Extra 读 kira_usage_snapshot.fetched_at
 // （RFC3339 字符串）。缺失/类型不符/解析失败返回零值（调用方据此视为"不过新"）。
 func kiraUsageSnapshotFetchedAt(account *Account) time.Time {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return time.Time{}
 	}
-	raw, ok := account.Extra[kiraUsageSnapshotExtraKey]
+	raw, ok := account.ExtraValue(kiraUsageSnapshotExtraKey)
 	if !ok || raw == nil {
 		return time.Time{}
 	}
@@ -1049,10 +1052,7 @@ func (s *CNProviderBalanceCheckService) refreshTokenHarborAccount(ctx context.Co
 		//（否则 converge 读到的仍是上一周期落库值，本轮新 reset_at 不生效）。
 		// 未注入 lifecycle 时跳过（既有行为零变化）；converge 幂等且只改窄面，
 		// 方法本身不返回错误，不加新日志层（禁区纪律）。
-		if account.Extra == nil {
-			account.Extra = map[string]any{}
-		}
-		account.Extra[TokenHarborPassSnapshotExtraKey] = passSnapshot
+		account.MergeExtra(map[string]any{TokenHarborPassSnapshotExtraKey: passSnapshot})
 		if s.quotaLifecycle != nil {
 			s.quotaLifecycle.convergeTHStockRecovery(ctx, account)
 		}

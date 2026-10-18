@@ -135,27 +135,29 @@ func ResolveBalanceState(extra map[string]any, platform string, now time.Time) B
 // Kira 账号的 platform 即其 base_url 映射的既有 platform，写键见 cn_provider_kira.go
 // cnExtraKey(account.Platform, cnBalanceExtraSuffixBalance)）。
 func ResolveKiraVNDBalanceState(account *Account, now time.Time) BalanceState {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return BalanceState{Kind: BalanceStaleOrMissing}
 	}
-	return ResolveBalanceState(account.Extra, account.Platform, now)
+	return ResolveBalanceState(accountsnap, account.Platform, now)
 }
 
 // ResolveTHWalletBalanceState TH 钱包余额三态（消费 th_balance / th_balance_updated_at
 // 既有键族，tokenharbor_pass_service.go 常量 TokenHarborWalletBalance*；C6 已入库）。
 // 本卡仅暴露解析器，不接入采集。
 func ResolveTHWalletBalanceState(account *Account, now time.Time) BalanceState {
+	accountsnap := account.SnapshotExtra()
 	if account == nil {
 		return BalanceState{Kind: BalanceStaleOrMissing}
 	}
-	if account.Extra == nil {
+	if accountsnap == nil {
 		return BalanceState{Kind: BalanceStaleOrMissing}
 	}
-	rawVal, ok := account.Extra[TokenHarborWalletBalanceExtraKey]
+	rawVal, ok := accountsnap[TokenHarborWalletBalanceExtraKey]
 	if !ok {
 		return BalanceState{Kind: BalanceStaleOrMissing}
 	}
-	rawObs, ok := account.Extra[TokenHarborWalletBalanceUpdatedAtExtraKey]
+	rawObs, ok := accountsnap[TokenHarborWalletBalanceUpdatedAtExtraKey]
 	if !ok {
 		return BalanceState{Kind: BalanceStaleOrMissing}
 	}

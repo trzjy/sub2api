@@ -52,11 +52,12 @@ func (s *GrokQuotaService) scheduleGrokObservedModelsSync(account *Account) {
 }
 
 func (s *GrokQuotaService) syncGrokObservedModels(ctx context.Context, account *Account) error {
+	accountsnap := account.SnapshotExtra()
 	if s == nil || account == nil {
 		return nil
 	}
 	// Skip if snapshot is still fresh.
-	if snap := parseGrokObservedModels(account.Extra); snap != nil {
+	if snap := parseGrokObservedModels(accountsnap); snap != nil {
 		if t, err := time.Parse(time.RFC3339, snap.FetchedAt); err == nil && time.Since(t) < grokObservedModelsTTL {
 			return nil
 		}

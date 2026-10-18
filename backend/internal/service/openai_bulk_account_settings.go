@@ -21,6 +21,9 @@ func (s bulkOpenAISettings) any() bool {
 }
 
 func normalizeBulkOpenAISettings(input *BulkUpdateAccountsInput) (bulkOpenAISettings, error) {
+	// input 为 BulkUpdateAccountsInput DTO（请求级局部对象），其 Extra 是入参反序列化出的
+	// 局部 map，并非并发收口机制保护的 service.Account.Extra；下方对 input.Extra 的直写均为
+	// DTO 就地规整，不存在跨 goroutine 并发读写，属正当保留，不套用 MergeExtra。
 	var settings bulkOpenAISettings
 	if input == nil {
 		return settings, nil

@@ -148,7 +148,7 @@ func BuildUpstreamBillingRateSnapshotItems(accounts []Account) []UpstreamBilling
 		// this projection to OpenAI would make the background refresh erase the
 		// other platforms' persisted snapshots from the table.
 		if account.Type == AccountTypeAPIKey {
-			snapshot = decodeUpstreamBillingProbeSnapshot(account.Extra)
+			snapshot = decodeUpstreamBillingProbeSnapshot(account.SnapshotExtra())
 		}
 		items = append(items, UpstreamBillingRateSnapshotItem{
 			AccountID: account.ID,
@@ -398,15 +398,15 @@ func (s *UpstreamBillingProbeService) RunDue(ctx context.Context) error {
 		if !isUpstreamBillingProbeAccount(&account) || !account.IsActive() || !upstreamBillingProbeEnabled(&account) {
 			continue
 		}
-		snapshot := decodeUpstreamBillingProbeSnapshot(account.Extra)
+		snapshot := decodeUpstreamBillingProbeSnapshot(account.SnapshotExtra())
 		if snapshot != nil && !snapshot.NextProbeAt.IsZero() && now.Before(snapshot.NextProbeAt) {
 			continue
 		}
 		due = append(due, account)
 	}
 	sort.SliceStable(due, func(i, j int) bool {
-		left := decodeUpstreamBillingProbeSnapshot(due[i].Extra)
-		right := decodeUpstreamBillingProbeSnapshot(due[j].Extra)
+		left := decodeUpstreamBillingProbeSnapshot(due[i].SnapshotExtra())
+		right := decodeUpstreamBillingProbeSnapshot(due[j].SnapshotExtra())
 		leftUnset := left == nil || left.NextProbeAt.IsZero()
 		rightUnset := right == nil || right.NextProbeAt.IsZero()
 		if leftUnset && rightUnset {
@@ -504,7 +504,7 @@ func (s *UpstreamBillingProbeService) probeAccountWithMode(ctx context.Context, 
 			if !account.IsActive() || !upstreamBillingProbeEnabled(account) {
 				return nil, nil
 			}
-			if snapshot := decodeUpstreamBillingProbeSnapshot(account.Extra); snapshot != nil &&
+			if snapshot := decodeUpstreamBillingProbeSnapshot(account.SnapshotExtra()); snapshot != nil &&
 				!snapshot.NextProbeAt.IsZero() && s.currentTime().Before(snapshot.NextProbeAt) {
 				return nil, nil
 			}
@@ -756,7 +756,8 @@ func (s *UpstreamBillingProbeService) persistProbeFailure(
 	reason string,
 	retryAfterDuration time.Duration,
 ) (*UpstreamBillingProbeSnapshot, error) {
-	previous := decodeUpstreamBillingProbeSnapshot(account.Extra)
+	accountsnap := account.SnapshotExtra()
+	previous := decodeUpstreamBillingProbeSnapshot(accountsnap)
 	failureCount := 1
 	if previous != nil {
 		failureCount = previous.FailureCount + 1
@@ -1077,10 +1078,11 @@ func upstreamBillingProbeTargetIsOfficialAPI(baseURL string) bool {
 }
 
 func upstreamBillingProbeEnabled(account *Account) bool {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return false
 	}
-	enabled, ok := account.Extra[UpstreamBillingProbeEnabledExtraKey].(bool)
+	enabled, ok := accountsnap[UpstreamBillingProbeEnabledExtraKey].(bool)
 	return ok && enabled
 }
 
@@ -1089,10 +1091,11 @@ func upstreamBillingProbeEnabled(account *Account) bool {
 // authority: the repository CAS re-checks both switches against the row it
 // updates, so a switch flipped between load and write can never sneak a rate in.
 func upstreamBillingRateSyncEnabled(account *Account) bool {
-	if account == nil || account.Extra == nil {
+	accountsnap := account.SnapshotExtra()
+	if account == nil || accountsnap == nil {
 		return false
 	}
-	enabled, ok := account.Extra[UpstreamBillingRateSyncEnabledExtraKey].(bool)
+	enabled, ok := accountsnap[UpstreamBillingRateSyncEnabledExtraKey].(bool)
 	return ok && enabled && upstreamBillingProbeEnabled(account)
 }
 

@@ -81,13 +81,14 @@ func (c *Channel) CodexImageGenerationBridgeOverride(platform string) *bool {
 // CodexImageGenerationBridgeOverride returns the account-level override for Codex
 // image_generation bridge injection. Nil means follow the channel/global policy.
 func (a *Account) CodexImageGenerationBridgeOverride() *bool {
-	if a == nil || a.Platform != PlatformOpenAI || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || a.Platform != PlatformOpenAI || asnap == nil {
 		return nil
 	}
-	if override := boolOverrideFromMap(a.Extra, featureKeyCodexImageGenerationBridge, "codex_image_generation_bridge_enabled"); override != nil {
+	if override := boolOverrideFromMap(asnap, featureKeyCodexImageGenerationBridge, "codex_image_generation_bridge_enabled"); override != nil {
 		return override
 	}
-	openaiConfig, _ := a.Extra[PlatformOpenAI].(map[string]any)
+	openaiConfig, _ := asnap[PlatformOpenAI].(map[string]any)
 	return boolOverrideFromMap(openaiConfig, featureKeyCodexImageGenerationBridge, "codex_image_generation_bridge_enabled")
 }
 
@@ -95,13 +96,14 @@ func (a *Account) CodexImageGenerationBridgeOverride() *bool {
 // client-provided Codex /responses image_generation tools. Unknown or unset
 // values default to allow to preserve existing behavior.
 func (a *Account) CodexImageGenerationExplicitToolPolicy() string {
-	if a == nil || a.Platform != PlatformOpenAI || a.Extra == nil {
+	asnap := a.SnapshotExtra()
+	if a == nil || a.Platform != PlatformOpenAI || asnap == nil {
 		return codexImageGenerationExplicitToolPolicyAllow
 	}
-	if policy, ok := stringOverrideFromMap(a.Extra, featureKeyCodexImageGenerationExplicitToolPolicy); ok {
+	if policy, ok := stringOverrideFromMap(asnap, featureKeyCodexImageGenerationExplicitToolPolicy); ok {
 		return normalizeCodexImageGenerationExplicitToolPolicy(policy)
 	}
-	openaiConfig, _ := a.Extra[PlatformOpenAI].(map[string]any)
+	openaiConfig, _ := asnap[PlatformOpenAI].(map[string]any)
 	if policy, ok := stringOverrideFromMap(openaiConfig, featureKeyCodexImageGenerationExplicitToolPolicy); ok {
 		return normalizeCodexImageGenerationExplicitToolPolicy(policy)
 	}
