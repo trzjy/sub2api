@@ -149,9 +149,6 @@ type Group struct {
 	RequireOAuthOnly  bool `json:"require_oauth_only"`
 	RequirePrivacySet bool `json:"require_privacy_set"`
 
-	// 聚合直绑开关：true=该聚合族分组候选池并入 codebuddy；false=关闭（默认）。
-	AggregateCodeBuddyEnabled bool `json:"aggregate_codebuddy_enabled"`
-
 	// RPMLimit 分组级每分钟请求数上限（0 = 不限制），设置后覆盖用户级 rpm_limit。
 	RPMLimit int `json:"rpm_limit"`
 	// Concurrency 订阅分组各自并发上限（0 = 不限制）；仅订阅类型分组生效，计费模式不看此字段。
@@ -175,6 +172,12 @@ type AdminGroup struct {
 	ForceOpenAIFast bool `json:"force_openai_fast"`
 	// FreeOpenAIFast 是管理端计费策略，用户侧分组 DTO 无需暴露。
 	FreeOpenAIFast bool `json:"free_openai_fast"`
+
+	// AggregateDirectEnabled 是聚合直绑开关（管理端配置）：true=该聚合族分组候选池
+	// 并入内部聚合上游；false=关闭（默认）。管理端专属字段——2026-10-18 用户裁定：
+	// 该字段从用户/管理共享的 Group 迁出（原名 aggregate_codebuddy_enabled 的
+	// JSON tag 字面含内部供给方名，用户响应不得出现），tag 同步改中性名。
+	AggregateDirectEnabled bool `json:"aggregate_direct_enabled"`
 
 	// 分组利润控制（五个 token 平台分组可启用；margin/buffer 为小数存储）。
 	// 仅管理员可见：这三个字段与同响应中的 rate_multiplier 相乘即可反推出
@@ -215,7 +218,7 @@ type AdminGroup struct {
 // w14 conflict-resolution fusion (second wave, B9 — funds_or_state)
 //
 // 分叉取证（blob：base 7c952af6 / ours ac76ba62 / upstream 73c02a7a）：
-// base→ours = 43 增 2 删，六处自研新增：Group.AggregateCodeBuddyEnabled、
+// base→ours = 43 增 2 删，六处自研新增：AdminGroup.AggregateDirectEnabled、
 // Group.Concurrency、AdminGroup.VisionRouting、Account.BalanceProbe、
 // Account.QuotaDimensions + AccountQuotaDimension 类型 + Account.BalanceLow、
 // AccountListItem.QuotaDimensions/BalanceLow、RedeemCode.BatchID/GroupGrants。

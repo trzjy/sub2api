@@ -129,7 +129,12 @@ func TestAccountFromServiceShallow_QuotaDimensionsFiveFamilies(t *testing.T) {
 		require.Equal(t, "free", free.Kind)
 		require.Equal(t, "account", free.Scope)
 		require.Equal(t, "remaining", free.Status)
-		require.Equal(t, "unknown", free.Servable) // §0.2 再裁定：Kira 免费维度无 servable 生产者，恒 unknown
+		// 2026-10-18 裁定修复陈旧断言：d4500d477（v0.2.15 合并线集成，2026-10-16，
+		// 晚于 5c1c27aec 的测试对齐）在 DTO 出口有意恢复 line7-v24 免费优先语义
+		// （accountQuotaKiraFreeNotServable：kira 免费 remaining + VND 耗尽 ⇒ servable=no，
+		// 见 mappers.go 出口投影注释），该语义已随生产部署。§0.2 删除的是 F6 调度门
+		// 联动，DTO 出口投影不属其效力范围。本断言对齐现行已接受出口契约。
+		require.Equal(t, "no", free.Servable)
 		require.Equal(t, "kira_usage_snapshot", free.Source)
 		require.Equal(t, usedAt, free.ObservedAt)
 
@@ -302,10 +307,10 @@ func TestAccountFromServiceShallow_BalanceProbeCapableProjection(t *testing.T) {
 	t.Run("no probe + deepseek platform -> false", func(t *testing.T) {
 		account := &service.Account{
 			ID:          9301,
-			Name:       "deepseek-payg",
-			Platform:   service.PlatformDeepseek,
-			Type:       service.AccountTypeAPIKey,
-			Status:     service.StatusActive,
+			Name:        "deepseek-payg",
+			Platform:    service.PlatformDeepseek,
+			Type:        service.AccountTypeAPIKey,
+			Status:      service.StatusActive,
 			Credentials: map[string]any{"api_key": "sk-ds"},
 			Extra:       map[string]any{},
 		}
