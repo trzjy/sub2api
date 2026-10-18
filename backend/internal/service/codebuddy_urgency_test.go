@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -48,17 +49,15 @@ func urgencyNow() time.Time {
 }
 
 // urgencyPackage 构造一个有效参与分包。expiresAtOffset 以固定基准 urgencyNow 为基准。
-func urgencyPackage(t *testing.T, id string, remaining, total string, status int64, expiresAtOffset time.Duration) CodeBuddyCreditPackage {
+func urgencyPackage(t *testing.T, id string, remaining, total string, status int64, expiresAtOffset time.Duration) CodeBuddyUrgencyPackage {
 	t.Helper()
 	return urgencyPackageAt(t, urgencyNow(), id, remaining, total, status, expiresAtOffset)
 }
 
 // urgencyPackageAt 以显式基准时间为基准构造分包（供调度接入测试按真实 time.Now 锚定）。
-func urgencyPackageAt(t *testing.T, base time.Time, id string, remaining, total string, status int64, expiresAtOffset time.Duration) CodeBuddyCreditPackage {
+func urgencyPackageAt(t *testing.T, base time.Time, id string, remaining, total string, status int64, expiresAtOffset time.Duration) CodeBuddyUrgencyPackage {
 	t.Helper()
-	return CodeBuddyCreditPackage{
-		ID:        id,
-		Name:      "pkg-" + id,
+	return CodeBuddyUrgencyPackage{
 		Unit:      codebuddyCreditCanonicalUnit,
 		Remaining: mustDecimal(t, remaining),
 		Total:     mustDecimal(t, total),
@@ -67,7 +66,7 @@ func urgencyPackageAt(t *testing.T, base time.Time, id string, remaining, total 
 	}
 }
 
-func freshSnapshot(packages ...CodeBuddyCreditPackage) codeBuddyUrgencySnapshot {
+func freshSnapshot(packages ...CodeBuddyUrgencyPackage) codeBuddyUrgencySnapshot {
 	return codeBuddyUrgencySnapshot{
 		Packages:  packages,
 		UpdatedAt: urgencyNow().Add(-1 * time.Hour),
@@ -216,13 +215,13 @@ func TestApplyCodeBuddyUrgencyBoost_WeightFormula(t *testing.T) {
 func codeBuddyPackageExtraMap(t *testing.T, remaining, total string, status int64) map[string]any {
 	t.Helper()
 	return map[string]any{
-		"id":       "p1",
-		"name":     "pkg-p1",
-		"unit":     "credits",
-		"remaining": remaining,
-		"total":     total,
+		"id":         "p1",
+		"name":       "pkg-p1",
+		"unit":       "credits",
+		"remaining":  remaining,
+		"total":      total,
 		"expires_at": urgencyNow().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-		"status":    float64(status),
+		"status":     float64(status),
 	}
 }
 
@@ -230,7 +229,7 @@ func TestCodeBuddyUrgencySnapshotFromExtra_InvalidShapeFailClosed(t *testing.T) 
 	now := urgencyNow()
 	// packages 键形态错误（非数组）→ 空集合。
 	badPkg := map[string]any{
-		codebuddyCreditPackagesKey: "not-an-array",
+		codebuddyUrgencyPackagesKey:         "not-an-array",
 		codebuddyCreditPackagesUpdatedAtKey: urgencyNow().Add(-1 * time.Hour).UTC().Format(time.RFC3339),
 	}
 	snap := CodeBuddyUrgencySnapshotFromExtra(badPkg, now)
@@ -240,7 +239,7 @@ func TestCodeBuddyUrgencySnapshotFromExtra_InvalidShapeFailClosed(t *testing.T) 
 
 	// freshness 键非法时间 → zero（不参与）。
 	badFresh := map[string]any{
-		codebuddyCreditPackagesKey:            []any{},
+		codebuddyUrgencyPackagesKey:         []any{},
 		codebuddyCreditPackagesUpdatedAtKey: "not-a-time",
 	}
 	snap2 := CodeBuddyUrgencySnapshotFromExtra(badFresh, now)
@@ -252,7 +251,7 @@ func TestCodeBuddyUrgencySnapshotFromExtra_InvalidShapeFailClosed(t *testing.T) 
 func TestCodeBuddyUrgencySnapshotFromExtra_HappyPathAnySlice(t *testing.T) {
 	now := urgencyNow()
 	extra := map[string]any{
-		codebuddyCreditPackagesKey: []any{
+		codebuddyUrgencyPackagesKey: []any{
 			codeBuddyPackageExtraMap(t, "10", "20", 0),
 		},
 		codebuddyCreditPackagesUpdatedAtKey: urgencyNow().Add(-1 * time.Hour).UTC().Format(time.RFC3339),
@@ -267,14 +266,16 @@ func TestCodeBuddyUrgencySnapshotFromExtra_HappyPathAnySlice(t *testing.T) {
 func TestCodeBuddyUrgencySnapshotFromExtra_DirectTypedSlice(t *testing.T) {
 	now := urgencyNow()
 	extra := map[string]any{
-		codebuddyCreditPackagesKey: []CodeBuddyCreditPackage{
+		codebuddyUrgencyPackagesKey: []CodeBuddyUrgencyPackage{
 			urgencyPackage(t, "typed", "10", "20", codebuddyCreditPackageStatusActive, 24*time.Hour),
 		},
 		codebuddyCreditPackagesUpdatedAtKey: urgencyNow().Add(-1 * time.Hour).UTC().Format(time.RFC3339),
 	}
 	snap := CodeBuddyUrgencySnapshotFromExtra(extra, now)
 	require.Len(t, snap.Packages, 1)
-	require.Equal(t, "typed", snap.Packages[0].ID)
+	require.Equal(t, int64(codebuddyCreditPackageStatusActive), snap.Packages[0].Status)
+	require.Equal(t, "10", snap.Packages[0].Remaining.String())
+	require.Equal(t, "20", snap.Packages[0].Total.String())
 }
 
 // TestCodeBuddyUrgencySnapshotFromExtra_NonStringDecimalDropped 验证 Extra 反序列化路径
@@ -294,26 +295,80 @@ func TestCodeBuddyUrgencySnapshotFromExtra_NonStringDecimalDropped(t *testing.T)
 	}
 	// 同一数组混入合法 string 分包与非法 float64 分包 → 只有 string 分包保留。
 	mixed := map[string]any{
-		codebuddyCreditPackagesKey: []any{
+		codebuddyUrgencyPackagesKey: []any{
 			codeBuddyPackageExtraMap(t, "3", "5", 0), // string 形态合法
-			floatPkg,                                  // float64 形态必须整条丢弃
+			floatPkg,                                 // float64 形态必须整条丢弃
 		},
 		codebuddyCreditPackagesUpdatedAtKey: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339),
 	}
 	snap := CodeBuddyUrgencySnapshotFromExtra(mixed, now)
 	require.Len(t, snap.Packages, 1, "float64 形态分包整条丢弃，仅 string 形态参与")
-	require.Equal(t, "p1", snap.Packages[0].ID)
 	require.Equal(t, "3", snap.Packages[0].Remaining.String())
 	require.Equal(t, "5", snap.Packages[0].Total.String())
+	require.Equal(t, codebuddyCreditCanonicalUnit, snap.Packages[0].Unit)
 
 	// 全量 float64 → 无参与包 → norm=0（不参与紧迫度），且不 panic。
 	onlyFloat := map[string]any{
-		codebuddyCreditPackagesKey: []any{floatPkg},
+		codebuddyUrgencyPackagesKey:         []any{floatPkg},
 		codebuddyCreditPackagesUpdatedAtKey: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339),
 	}
 	snap2 := CodeBuddyUrgencySnapshotFromExtra(onlyFloat, now)
 	require.Empty(t, snap2.Packages)
 	require.Equal(t, 0.0, ComputeCodeBuddyUrgency(snap2, now).Norm)
+}
+
+// TestCodeBuddyUrgencyPackagesRoundTrip 验证 codebuddy_urgency_packages 的写入侧过滤
+// （仅 status==0 且 expires_at 可解析进入）与读回往返对称：构造混合分包→应用与
+// queryUsageForAccount 同款过滤（IsValidCodeBuddyCreditPackage + expires_at 非空）→
+// Marshal 入 Extra（模拟 DB JSONB 反序列化为 []any）→ CodeBuddyUrgencySnapshotFromExtra
+// 读回，逐条字段一致（status=3 / 缺到期 / 未知 status 均被过滤）。
+func TestCodeBuddyUrgencyPackagesRoundTrip(t *testing.T) {
+	now := urgencyNow()
+	// 混合源分包：status=0 有效+可解析到期 / status=0 缺到期（不入）/
+	// status=3 耗尽（不入）/ 未知 status（不入）。
+	src := []CodeBuddyCreditPackage{
+		{ID: "ok", Unit: codebuddyCreditCanonicalUnit, Remaining: mustDecimal(t, "10"),
+			Total: mustDecimal(t, "20"), ExpiresAt: now.Add(24 * time.Hour).UTC().Format(time.RFC3339), Status: codebuddyCreditPackageStatusActive},
+		{ID: "no-exp", Unit: codebuddyCreditCanonicalUnit, Remaining: mustDecimal(t, "5"),
+			Total: mustDecimal(t, "30"), ExpiresAt: "", Status: codebuddyCreditPackageStatusActive},
+		{ID: "exhausted", Unit: codebuddyCreditCanonicalUnit, Remaining: mustDecimal(t, "0"),
+			Total: mustDecimal(t, "50"), ExpiresAt: now.Add(24 * time.Hour).UTC().Format(time.RFC3339), Status: codebuddyCreditPackageStatusExhausted},
+		{ID: "weird", Unit: codebuddyCreditCanonicalUnit, Remaining: mustDecimal(t, "1"),
+			Total: mustDecimal(t, "1"), ExpiresAt: now.Add(24 * time.Hour).UTC().Format(time.RFC3339), Status: 7},
+	}
+
+	// 写入侧过滤（与 queryUsageForAccount 同款）：基础谓词（仅 status==0）且 expires_at 可解析。
+	filtered := make([]CodeBuddyUrgencyPackage, 0, len(src))
+	for _, pkg := range src {
+		if !IsValidCodeBuddyCreditPackage(pkg) {
+			continue
+		}
+		if pkg.ExpiresAt == "" {
+			continue
+		}
+		filtered = append(filtered, CodeBuddyUrgencyPackage{
+			Remaining: pkg.Remaining, Total: pkg.Total, ExpiresAt: pkg.ExpiresAt,
+			Unit: pkg.Unit, Status: pkg.Status,
+		})
+	}
+	require.Len(t, filtered, 1, "仅 status==0 且 expires_at 可解析的参与 urgency 写入")
+
+	raw, err := json.Marshal(filtered)
+	require.NoError(t, err)
+	// 模拟 DB JSONB 反序列化为 map[string]any（数组→[]any）。
+	var asAny any
+	require.NoError(t, json.Unmarshal(raw, &asAny))
+	extra := map[string]any{
+		codebuddyUrgencyPackagesKey:         asAny,
+		codebuddyCreditPackagesUpdatedAtKey: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339),
+	}
+	snap := CodeBuddyUrgencySnapshotFromExtra(extra, now)
+	require.Len(t, snap.Packages, 1)
+	require.Equal(t, "10", snap.Packages[0].Remaining.String())
+	require.Equal(t, "20", snap.Packages[0].Total.String())
+	require.Equal(t, codebuddyCreditCanonicalUnit, snap.Packages[0].Unit)
+	require.Equal(t, int64(codebuddyCreditPackageStatusActive), snap.Packages[0].Status)
+	require.Equal(t, filtered[0].ExpiresAt, snap.Packages[0].ExpiresAt)
 }
 
 // --- 调度接入测试（buildOpenAIAccountLoadPlan score 乘法路径） ---
@@ -327,11 +382,11 @@ func TestCodeBuddyUrgencySnapshotFromExtra_NonStringDecimalDropped(t *testing.T)
 func openAIUrgencyTestScheduler(enable bool, k float64) *defaultOpenAIAccountScheduler {
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights = config.GatewayOpenAIWSSchedulerScoreWeights{
-		Priority: 1.0,
-		Load:     1.0,
-		Queue:    0.7,
+		Priority:  1.0,
+		Load:      1.0,
+		Queue:     0.7,
 		ErrorRate: 0.8,
-		TTFT:     0.5,
+		TTFT:      0.5,
 	}
 	cfg.Gateway.CodeBuddy.UrgencyBoostEnabled = enable
 	cfg.Gateway.CodeBuddy.UrgencyBoostK = k
@@ -342,7 +397,7 @@ func openAIUrgencyTestScheduler(enable bool, k float64) *defaultOpenAIAccountSch
 // 非参与 = 超过 168h 或 Status=3；freshness = 1h 前，满足 ≤24h）。
 func codebuddyUrgencyExtra(t *testing.T, now time.Time) map[string]any {
 	return map[string]any{
-		codebuddyCreditPackagesKey: []CodeBuddyCreditPackage{
+		codebuddyUrgencyPackagesKey: []CodeBuddyUrgencyPackage{
 			urgencyPackageAt(t, now, "near", "10", "10", codebuddyCreditPackageStatusActive, 1*time.Hour),
 			urgencyPackageAt(t, now, "far", "80", "90", codebuddyCreditPackageStatusActive, 300*time.Hour),
 			urgencyPackageAt(t, now, "dead", "5", "5", codebuddyCreditPackageStatusExhausted, 1*time.Hour),
@@ -354,7 +409,7 @@ func codebuddyUrgencyExtra(t *testing.T, now time.Time) map[string]any {
 func TestBuildOpenAIAccountLoadPlan_UrgencyBoost_CodeBuddyPlatform_HighUrgencyScoresHigher(t *testing.T) {
 	now := time.Now()
 	filtered := []*Account{
-		{ID: 1, Priority: 0, Extra: map[string]any{}}, // 无快照 → 乘数 1
+		{ID: 1, Priority: 0, Extra: map[string]any{}},              // 无快照 → 乘数 1
 		{ID: 2, Priority: 0, Extra: codebuddyUrgencyExtra(t, now)}, // 高紧迫 → norm=1 → 乘 1+k
 	}
 	req := OpenAIAccountScheduleRequest{Platform: PlatformCodeBuddy}
@@ -403,7 +458,7 @@ func TestBuildOpenAIAccountLoadPlan_UrgencyBoost_NonCodeBuddyPlatformUnaffected(
 func TestBuildOpenAIAccountLoadPlan_UrgencyBoost_StaleOrMissingSnapshotMultiplierOne(t *testing.T) {
 	now := time.Now()
 	staleExtra := map[string]any{
-		codebuddyCreditPackagesKey: []CodeBuddyCreditPackage{
+		codebuddyUrgencyPackagesKey: []CodeBuddyUrgencyPackage{
 			urgencyPackage(t, "near", "10", "10", codebuddyCreditPackageStatusActive, 1*time.Hour),
 		},
 		codebuddyCreditPackagesUpdatedAtKey: now.Add(-48 * time.Hour).UTC().Format(time.RFC3339), // >24h 陈旧

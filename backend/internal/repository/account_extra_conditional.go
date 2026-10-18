@@ -117,14 +117,20 @@ func (r *accountRepository) WriteCodeBuddyCreditSnapshot(ctx context.Context, ac
 	if r == nil || r.sql == nil {
 		return false, errors.New("codebuddy credit snapshot: sql executor not configured")
 	}
-	packagesJSON, err := json.Marshal(write.Packages)
+	urgencyJSON, err := json.Marshal(write.UrgencyPackages)
 	if err != nil {
-		return false, fmt.Errorf("codebuddy credit snapshot: marshal packages: %w", err)
+		return false, fmt.Errorf("codebuddy credit snapshot: marshal urgency packages: %w", err)
 	}
 
 	// 成功事务写入的 B4 键集合（仅这些键；其余 extra 键原样保留）。
+	// 整改③：逐包明细持久化收缩为聚合键 + urgency 专用分包键；旧
+	// 逐包明细分包数组（键名已随本单归零停用）不再写入。写入侧十进制字符串量化由
+	// service 层保证（deriveTotalsFromPackages 已返回 NUMERIC(20,8) 量化字符串）。
 	successKeys := "jsonb_build_object(" +
-		"'" + service.CodeBuddyCreditPackagesKey + "', $3::jsonb, " +
+		"'" + service.CodeBuddyUrgencyPackagesKey + "', $3::jsonb, " +
+		"'" + service.CodeBuddyCreditTotalRemainingKey + "', to_jsonb($8::text), " +
+		"'" + service.CodeBuddyCreditTotalTotalKey + "', to_jsonb($9::text), " +
+		"'" + service.CodeBuddyCreditHasExcludedKey + "', to_jsonb($10::bool), " +
 		"'" + service.CodeBuddyCreditPackagesUpdatedAtKey + "', to_jsonb($1::timestamptz), " +
 		"'" + service.CodeBuddyCreditResetAtKey + "', to_jsonb($4::timestamptz), " +
 		"'" + service.CodeBuddyCreditUsedPercentKey + "', to_jsonb($5::float8), " +
@@ -142,7 +148,7 @@ func (r *accountRepository) WriteCodeBuddyCreditSnapshot(ctx context.Context, ac
 		codebuddyTupleAcceptConditionSQL()
 
 	result, err := r.sql.ExecContext(ctx, query,
-		write.SuccessTime, write.Version, string(packagesJSON), write.ResetAt, write.UsedPercent, write.ErrorMsg, accountID,
+		write.SuccessTime, write.Version, string(urgencyJSON), write.ResetAt, write.UsedPercent, write.ErrorMsg, accountID, write.TotalRemaining, write.TotalTotal, write.HasExcluded,
 	)
 	if err != nil {
 		return false, fmt.Errorf("codebuddy credit snapshot: conditional update: %w", err)

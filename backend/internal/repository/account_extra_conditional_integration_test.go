@@ -30,15 +30,14 @@ import (
 //   字段矩阵回归：成功事务写入 packages_updated_at/reset_at/used_percent/
 //     last_attempt_at/version 全部落库（阈值候选/reset_at 消费依赖）
 
-// codeBuddyCreditPackageForTest 构造一个合法分包（unit=credits，Status=0）。
-func codeBuddyCreditPackageForTest(id, remaining, total string) service.CodeBuddyCreditPackage {
-	return service.CodeBuddyCreditPackage{
-		ID:        id,
-		Name:      "pkg-" + id,
-		Unit:      "credits",
+// codeBuddyUrgencyPackageForTest 构造一个合法 urgency 分包（五字段：unit=credits，
+// Status=0，decimal 字符串承载；与 codebuddy_urgency_packages 存储契约对称）。
+func codeBuddyUrgencyPackageForTest(remaining, total string) service.CodeBuddyUrgencyPackage {
+	return service.CodeBuddyUrgencyPackage{
 		Remaining: decimal.RequireFromString(remaining),
 		Total:     decimal.RequireFromString(total),
 		ExpiresAt: "2026-10-15T21:26:43Z",
+		Unit:      "credits",
 		Status:    0,
 	}
 }
@@ -93,7 +92,7 @@ func TestCodeBuddyCreditConditional_LateFailureAcceptedEarlyFailureRejected(t *t
 	extra, err := repo.GetByID(ctx, id)
 	require.NoError(t, err)
 	require.Equal(t, "late failure", extra.Extra[service.CodeBuddyCreditErrorKey], "错误标记必须保留新失败内容")
-	require.NotContains(t, extra.Extra, service.CodeBuddyCreditPackagesKey, "失败事务不得写入成功快照")
+	require.NotContains(t, extra.Extra, service.CodeBuddyUrgencyPackagesKey, "失败事务不得写入成功快照")
 }
 
 // --- 场景② 并发成功失败：恰一条接受（原子性/隔离性）---
@@ -127,12 +126,15 @@ func TestCodeBuddyCreditConditional_ConcurrentSuccessFailureSingleAccept(t *test
 		defer wg.Done()
 		<-start
 		successAccepted, successErr = successRepo.WriteCodeBuddyCreditSnapshot(ctx, id, service.CodeBuddyCreditSnapshotWrite{
-			SuccessTime: sameTime,
-			Version:     8,
-			Packages:    []service.CodeBuddyCreditPackage{codeBuddyCreditPackageForTest("p1", "10", "100")},
-			UsedPercent: 90,
-			ResetAt:     sameTime.Add(24 * time.Hour),
-			ErrorMsg:    "",
+			SuccessTime:     sameTime,
+			Version:         8,
+			UrgencyPackages: []service.CodeBuddyUrgencyPackage{codeBuddyUrgencyPackageForTest("10", "100")},
+			TotalRemaining:  "10",
+			TotalTotal:      "100",
+			HasExcluded:     false,
+			UsedPercent:     90,
+			ResetAt:         sameTime.Add(24 * time.Hour),
+			ErrorMsg:        "",
 		})
 	}()
 	go func() {
@@ -163,7 +165,10 @@ func TestCodeBuddyCreditConditional_ConcurrentSuccessFailureSingleAccept(t *test
 	// 最终态不变量：成功快照 + version=8（较大者）+ 无错误键（成功无 ErrorMsg）。
 	loaded, err := newAccountRepositoryWithSQL(client, integrationDB, nil).GetByID(ctx, id)
 	require.NoError(t, err)
-	require.Contains(t, loaded.Extra, service.CodeBuddyCreditPackagesKey, "成功快照必须落库")
+	require.Contains(t, loaded.Extra, service.CodeBuddyUrgencyPackagesKey, "成功快照必须落库")
+	require.Equal(t, "10", loaded.Extra[service.CodeBuddyCreditTotalRemainingKey], "聚合总量 Σremaining 必须落库（十进制字符串）")
+	require.Equal(t, "100", loaded.Extra[service.CodeBuddyCreditTotalTotalKey], "聚合总量 Σtotal 必须落库（十进制字符串）")
+	require.Equal(t, false, loaded.Extra[service.CodeBuddyCreditHasExcludedKey], "无排除项 → has_excluded=false")
 	require.Equal(t, float64(8), loaded.Extra[service.CodeBuddyCreditVersionKey], "version 必须 = 较大成功版本 8")
 	require.NotContains(t, loaded.Extra, service.CodeBuddyCreditErrorKey, "成功事务无错误时必须清除并发失败留下的错误标记")
 	require.Equal(t, sameTime.UTC(), mustParseRepoTime(t, loaded.Extra[service.CodeBuddyCreditPackagesUpdatedAtKey]), "freshness 必须 = 成功事务 success_time")
@@ -181,24 +186,30 @@ func TestCodeBuddyCreditConditional_SameTimestampHigherVersionWins(t *testing.T)
 
 	// 首个高版本成功 → 接受（首写，version 3）。
 	accepted, err := repo.WriteCodeBuddyCreditSnapshot(ctx, id, service.CodeBuddyCreditSnapshotWrite{
-		SuccessTime: ts,
-		Version:     3,
-		Packages:    []service.CodeBuddyCreditPackage{codeBuddyCreditPackageForTest("p1", "10", "100")},
-		UsedPercent: 90,
-		ResetAt:     ts.Add(24 * time.Hour),
-		ErrorMsg:    "",
+		SuccessTime:     ts,
+		Version:         3,
+		UrgencyPackages: []service.CodeBuddyUrgencyPackage{codeBuddyUrgencyPackageForTest("10", "100")},
+		TotalRemaining:  "10",
+		TotalTotal:      "100",
+		HasExcluded:     false,
+		UsedPercent:     90,
+		ResetAt:         ts.Add(24 * time.Hour),
+		ErrorMsg:        "",
 	})
 	require.NoError(t, err)
 	require.True(t, accepted)
 
 	// 同时间戳低版本成功 → 拒绝（tiebreaker 按 version 大者胜）。
 	accepted, err = repo.WriteCodeBuddyCreditSnapshot(ctx, id, service.CodeBuddyCreditSnapshotWrite{
-		SuccessTime: ts,
-		Version:     1,
-		Packages:    []service.CodeBuddyCreditPackage{codeBuddyCreditPackageForTest("p1", "20", "100")},
-		UsedPercent: 80,
-		ResetAt:     ts.Add(24 * time.Hour),
-		ErrorMsg:    "",
+		SuccessTime:     ts,
+		Version:         1,
+		UrgencyPackages: []service.CodeBuddyUrgencyPackage{codeBuddyUrgencyPackageForTest("20", "100")},
+		TotalRemaining:  "20",
+		TotalTotal:      "100",
+		HasExcluded:     false,
+		UsedPercent:     80,
+		ResetAt:         ts.Add(24 * time.Hour),
+		ErrorMsg:        "",
 	})
 	require.NoError(t, err)
 	require.False(t, accepted, "同时间戳低版本必须被拒")
@@ -247,12 +258,15 @@ func TestCodeBuddyCreditConditional_SuccessClearsError(t *testing.T) {
 	// 成功写（无解析错误，ErrorMsg=""）→ 同事务清除旧错误。
 	successTime := base.Add(time.Second)
 	accepted, err = repo.WriteCodeBuddyCreditSnapshot(ctx, id, service.CodeBuddyCreditSnapshotWrite{
-		SuccessTime: successTime,
-		Version:     2,
-		Packages:    []service.CodeBuddyCreditPackage{codeBuddyCreditPackageForTest("p1", "10", "100")},
-		UsedPercent: 90,
-		ResetAt:     successTime.Add(24 * time.Hour),
-		ErrorMsg:    "",
+		SuccessTime:     successTime,
+		Version:         2,
+		UrgencyPackages: []service.CodeBuddyUrgencyPackage{codeBuddyUrgencyPackageForTest("10", "100")},
+		TotalRemaining:  "10",
+		TotalTotal:      "100",
+		HasExcluded:     false,
+		UsedPercent:     90,
+		ResetAt:         successTime.Add(24 * time.Hour),
+		ErrorMsg:        "",
 	})
 	require.NoError(t, err)
 	require.True(t, accepted)
@@ -260,7 +274,7 @@ func TestCodeBuddyCreditConditional_SuccessClearsError(t *testing.T) {
 	extra, err = repo.GetByID(ctx, id)
 	require.NoError(t, err)
 	require.NotContains(t, extra.Extra, service.CodeBuddyCreditErrorKey, "成功事务无错误时必须清除旧错误标记")
-	require.Contains(t, extra.Extra, service.CodeBuddyCreditPackagesKey, "成功事务必须写入分包快照")
+	require.Contains(t, extra.Extra, service.CodeBuddyUrgencyPackagesKey, "成功事务必须写入分包快照")
 }
 
 // --- 场景⑤ 先发后至跨版本清除过期错误 + 交错断言 ---
@@ -293,10 +307,13 @@ func TestCodeBuddyCreditConditional_CrossVersionDoesNotRollBackAcceptedState(t *
 	// ③ 成功 @ t3 v3 无错误 → 接受并清除过期错误（先发后至）。
 	accepted, err = repo.WriteCodeBuddyCreditSnapshot(ctx, id, service.CodeBuddyCreditSnapshotWrite{
 		SuccessTime: t3, Version: 3,
-		Packages:    []service.CodeBuddyCreditPackage{codeBuddyCreditPackageForTest("p1", "10", "100")},
-		UsedPercent: 90,
-		ResetAt:     t3.Add(24 * time.Hour),
-		ErrorMsg:    "",
+		UrgencyPackages: []service.CodeBuddyUrgencyPackage{codeBuddyUrgencyPackageForTest("10", "100")},
+		TotalRemaining:  "10",
+		TotalTotal:      "100",
+		HasExcluded:     false,
+		UsedPercent:     90,
+		ResetAt:         t3.Add(24 * time.Hour),
+		ErrorMsg:        "",
 	})
 	require.NoError(t, err)
 	require.True(t, accepted)
@@ -304,10 +321,13 @@ func TestCodeBuddyCreditConditional_CrossVersionDoesNotRollBackAcceptedState(t *
 	// ④ 交错：失败已接受（E2 @ t2）后，较早成功到达（t1）→ 被拒，不回退。
 	accepted, err = repo.WriteCodeBuddyCreditSnapshot(ctx, id, service.CodeBuddyCreditSnapshotWrite{
 		SuccessTime: t1, Version: 44,
-		Packages:    []service.CodeBuddyCreditPackage{codeBuddyCreditPackageForTest("stale", "1", "1")},
-		UsedPercent: 0,
-		ResetAt:     t1.Add(time.Hour),
-		ErrorMsg:    "",
+		UrgencyPackages: []service.CodeBuddyUrgencyPackage{codeBuddyUrgencyPackageForTest("1", "1")},
+		TotalRemaining:  "1",
+		TotalTotal:      "1",
+		HasExcluded:     false,
+		UsedPercent:     0,
+		ResetAt:         t1.Add(time.Hour),
+		ErrorMsg:        "",
 	})
 	require.NoError(t, err)
 	require.False(t, accepted, "被接受的失败之后，较早成功不得回退状态")
@@ -322,7 +342,7 @@ func TestCodeBuddyCreditConditional_CrossVersionDoesNotRollBackAcceptedState(t *
 	// 终态断言：成功快照与错误清除必须保持。
 	extra, err := repo.GetByID(ctx, id)
 	require.NoError(t, err)
-	require.Contains(t, extra.Extra, service.CodeBuddyCreditPackagesKey)
+	require.Contains(t, extra.Extra, service.CodeBuddyUrgencyPackagesKey)
 	require.NotContains(t, extra.Extra, service.CodeBuddyCreditErrorKey)
 	require.Equal(t, t3.UTC(), mustParseRepoTime(t, extra.Extra[service.CodeBuddyCreditPackagesUpdatedAtKey]), "packages_updated_at 必须 = success_time")
 }
@@ -339,10 +359,13 @@ func TestCodeBuddyCreditConditional_FirstWriteSentinelR6(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	accepted, err := repo.WriteCodeBuddyCreditSnapshot(ctx, successID, service.CodeBuddyCreditSnapshotWrite{
 		SuccessTime: now, Version: 1,
-		Packages:    []service.CodeBuddyCreditPackage{codeBuddyCreditPackageForTest("p1", "10", "100")},
-		UsedPercent: 90,
-		ResetAt:     now.Add(24 * time.Hour),
-		ErrorMsg:    "",
+		UrgencyPackages: []service.CodeBuddyUrgencyPackage{codeBuddyUrgencyPackageForTest("10", "100")},
+		TotalRemaining:  "10",
+		TotalTotal:      "100",
+		HasExcluded:     false,
+		UsedPercent:     90,
+		ResetAt:         now.Add(24 * time.Hour),
+		ErrorMsg:        "",
 	})
 	require.NoError(t, err)
 	require.True(t, accepted, "首次无快照无失败记录时，首个成功必须能写入（-infinity 哨兵）")
@@ -372,13 +395,16 @@ func TestCodeBuddyCreditConditional_SuccessFieldMatrixRegression(t *testing.T) {
 	resetAt := now.Add(48 * time.Hour).Truncate(time.Microsecond)
 	accepted, err := repo.WriteCodeBuddyCreditSnapshot(ctx, id, service.CodeBuddyCreditSnapshotWrite{
 		SuccessTime: now, Version: 6,
-		Packages: []service.CodeBuddyCreditPackage{
-			codeBuddyCreditPackageForTest("p1", "10", "100"),
-			codeBuddyCreditPackageForTest("p2", "20", "200"),
+		UrgencyPackages: []service.CodeBuddyUrgencyPackage{
+			codeBuddyUrgencyPackageForTest("10", "100"),
+			codeBuddyUrgencyPackageForTest("20", "200"),
 		},
-		UsedPercent: 90,
-		ResetAt:     resetAt,
-		ErrorMsg:    "",
+		TotalRemaining: "30",
+		TotalTotal:     "300",
+		HasExcluded:    false,
+		UsedPercent:    90,
+		ResetAt:        resetAt,
+		ErrorMsg:       "",
 	})
 	require.NoError(t, err)
 	require.True(t, accepted)
@@ -388,7 +414,10 @@ func TestCodeBuddyCreditConditional_SuccessFieldMatrixRegression(t *testing.T) {
 
 	// 字段矩阵逐项（R2 #3）：分包快照 + packages_updated_at + reset_at +
 	// used_percent + last_attempt_at(=success_time) + version(=attempt_version)。
-	require.Contains(t, extra.Extra, service.CodeBuddyCreditPackagesKey)
+	require.Contains(t, extra.Extra, service.CodeBuddyUrgencyPackagesKey)
+	require.Equal(t, "30", extra.Extra[service.CodeBuddyCreditTotalRemainingKey], "聚合总量 Σremaining 必须落库（两包 10+20）")
+	require.Equal(t, "300", extra.Extra[service.CodeBuddyCreditTotalTotalKey], "聚合总量 Σtotal 必须落库（两包 100+200）")
+	require.Equal(t, false, extra.Extra[service.CodeBuddyCreditHasExcludedKey], "无排除项 → has_excluded=false")
 	require.Equal(t, now.UTC(), mustParseRepoTime(t, extra.Extra[service.CodeBuddyCreditPackagesUpdatedAtKey]), "freshness 必须 = success_time")
 	require.Equal(t, resetAt.UTC(), mustParseRepoTime(t, extra.Extra[service.CodeBuddyCreditResetAtKey]), "reset_at 语义保留（阈值候选消费）")
 	require.Equal(t, 90.0, extra.Extra[service.CodeBuddyCreditUsedPercentKey], "used_percent 必须写入（阈值候选消费）")

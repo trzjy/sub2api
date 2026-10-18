@@ -129,7 +129,7 @@ func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 	require.Len(t, repo.snapshotWrites, 1, "成功快照应走条件更新写口")
 	write := repo.snapshotWrites[0]
 	require.Equal(t, int64(7), write.Version, "version 必须 = 抓取开始取得的 attempt_version")
-	require.Len(t, write.Packages, 2, "两个分包都应进入快照")
+	require.Len(t, write.UrgencyPackages, 2, "两个 status==0 且到期可解析的分包都应进入 urgency 快照")
 	require.Equal(t, 0.0, write.UsedPercent)
 	require.False(t, write.SuccessTime.IsZero(), "成功时刻必须采样")
 	require.Equal(t, "2099-10-12T23:46:09Z", write.ResetAt.UTC().Format(time.RFC3339))

@@ -34,8 +34,18 @@ const (
 	// 旧名 codebuddy_quota_error 废弃）。存量数据迁移与读写端切换由 Card E 执行，
 	// 本卡只做常量层改名（零新增 DB 调用）。
 	codebuddyCreditErrorKey = "codebuddy_credit_error"
-	// codebuddyCreditPackagesKey 是 §4.1 分包快照数组键（存储契约）。
-	codebuddyCreditPackagesKey = "codebuddy_credit_packages"
+
+	// codebuddyCreditTotalRemainingKey 是聚合总量键（参与集合 Σremaining，十进制字符串，
+	// NUMERIC(20,8) 量化口径；整改② used_percent 与 totals 同一参与集合）。
+	codebuddyCreditTotalRemainingKey = "codebuddy_credit_total_remaining"
+	// codebuddyCreditTotalTotalKey 是聚合总量键（参与集合 Σtotal，十进制字符串）。
+	codebuddyCreditTotalTotalKey = "codebuddy_credit_total_total"
+	// codebuddyCreditHasExcludedKey 是可比性标注键（JSON 布尔：本次解析存在 unit≠credits
+	// 或 status 为未知枚举（非 0 非 3）的条目；解析失败条目走既有错误链，不计入本键）。
+	codebuddyCreditHasExcludedKey = "codebuddy_credit_has_excluded"
+	// codebuddyUrgencyPackagesKey 是紧迫度专用分包数组键（五字段：remaining/total/expires_at/
+	// unit/status），替代原分包快照数组（逐包明细持久化已收缩，urgency 仅取所需字段）。
+	codebuddyUrgencyPackagesKey = "codebuddy_urgency_packages"
 
 	// codebuddyCreditPackagesUpdatedAtKey 是分包快照的唯一 freshness 依据
 	// （§1 / §4.1：codebuddy_credit_packages_updated_at，失败绝不更新）。
@@ -50,7 +60,10 @@ const (
 
 	// 导出别名：供 repository 包条件更新实现引用（单一来源，不自创键名）。
 	// 条件更新 SQL 内只合并 B4 负责的键、保留其余 extra 内容。
-	CodeBuddyCreditPackagesKey          = codebuddyCreditPackagesKey
+	CodeBuddyCreditTotalRemainingKey    = codebuddyCreditTotalRemainingKey
+	CodeBuddyCreditTotalTotalKey        = codebuddyCreditTotalTotalKey
+	CodeBuddyCreditHasExcludedKey       = codebuddyCreditHasExcludedKey
+	CodeBuddyUrgencyPackagesKey         = codebuddyUrgencyPackagesKey
 	CodeBuddyCreditPackagesUpdatedAtKey = codebuddyCreditPackagesUpdatedAtKey
 	CodeBuddyCreditResetAtKey           = codebuddyCreditResetAtKey
 	CodeBuddyCreditUsedPercentKey       = codebuddyCreditUsedPercentKey
@@ -79,11 +92,11 @@ var codeBuddyQuotaInstance *CodeBuddyQuotaService
 
 // CodeBuddyModel 是动态模型列表中的单个模型（§2.3）。
 type CodeBuddyModel struct {
-	ID               string                `json:"id"`
-	Name             string                `json:"name"`
-	MaxInputTokens   int64                 `json:"maxInputTokens"`
-	MaxOutputTokens  int64                 `json:"maxOutputTokens"`
-	Disabled         bool                  `json:"disabled"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	MaxInputTokens  int64  `json:"maxInputTokens"`
+	MaxOutputTokens int64  `json:"maxOutputTokens"`
+	Disabled        bool   `json:"disabled"`
 	// SupportedEfforts 兼容顶层 supportedEfforts；真实报文亦可能把档位放在
 	// reasoning.supportedEfforts（见 CodeBuddyReasoningInfo），读取统一走 EffortLevels()。
 	SupportedEfforts []string                `json:"supportedEfforts"`
@@ -241,13 +254,23 @@ func (s *CodeBuddyQuotaService) queryUsageForAccount(ctx context.Context, accoun
 	// 本次解析错误结果：无错误(errEntries 为空)才清除旧错误；有错误随成功
 	// 快照同事务写入。
 	errEntriesJSON := marshalCodeBuddyPackageErrors(parseErrors)
+	// 可比性标注：解析出的包中存在 unit≠credits 或未知 status 条目即 true。
+	hasExcluded := codeBuddyCreditHasExcludedFromErrors(parseErrors)
+	// 紧迫度写入侧过滤：基础谓词（status==0、unit==credits、非负、remaining≤total）
+	// 全通过且 expires_at 可解析才进入 codebuddy_urgency_packages（五字段）。
+	urgencyPackages := codeBuddyFilterUrgencyPackages(packages)
+	// 聚合总量（整改②口径：Σremaining / Σtotal 十进制字符串，禁 float64 落存储）。
+	totalRemaining, totalTotal := deriveTotalsFromPackages(packages)
 	accepted, err := s.creditWriter.WriteCodeBuddyCreditSnapshot(ctx, account.ID, CodeBuddyCreditSnapshotWrite{
-		SuccessTime: successTime,
-		Version:     attemptVersion,
-		Packages:    packages,
-		UsedPercent: usedPercent,
-		ResetAt:     resetAt,
-		ErrorMsg:    errEntriesJSON,
+		SuccessTime:     successTime,
+		Version:         attemptVersion,
+		UrgencyPackages: urgencyPackages,
+		TotalRemaining:  totalRemaining,
+		TotalTotal:      totalTotal,
+		HasExcluded:     hasExcluded,
+		UsedPercent:     usedPercent,
+		ResetAt:         resetAt,
+		ErrorMsg:        errEntriesJSON,
 	})
 	if err != nil {
 		slog.Warn("codebuddy_quota_snapshot_failed", "account_id", account.ID, "error", err)
@@ -266,7 +289,15 @@ func (s *CodeBuddyQuotaService) queryUsageForAccount(ctx context.Context, accoun
 	result.Success = true
 	result.Persisted = true
 	result.UsedPercent = usedPercent
-	result.TotalCredit, result.UsedCredit = deriveTotalsFromPackages(packages)
+	// 聚合总量供 probe 结果展示（存储侧已用十进制字符串键，此处仅内存派生 float64 展示）。
+	if tr, perr := decimal.NewFromString(totalRemaining); perr == nil {
+		result.TotalCredit = tr.InexactFloat64()
+	}
+	if tt, terr := decimal.NewFromString(totalTotal); terr == nil {
+		// 已用 = Σtotal − Σremaining（与 used_percent 同参与集合）。
+		used := tt.Sub(decimal.RequireFromString(totalRemaining))
+		result.UsedCredit = used.InexactFloat64()
+	}
 	result.ResetAt = resetAt.UTC().Format(time.RFC3339)
 	return result, nil
 }
@@ -609,10 +640,13 @@ func codeBuddySelectResourceAccounts(accounts []gjson.Result, uid string) []gjso
 	return selected
 }
 
-// CodeBuddyCreditPackage 是 §4.1 存储契约定义的单条分包快照
-// （Extra 键 codebuddy_credit_packages 数组的元素）。
+// CodeBuddyCreditPackage 是探针响应解析出的单条分包（解析产物）。
 //
-// 字段名以权威 §4.1 为准，不得自创：id/name/unit/remaining/total/expires_at/status。
+// 整改③：逐包明细不再持久化为分包数组（旧分包明细键已停用），
+// 改由聚合键（codebuddy_credit_total_remaining/total_total）+ codebuddy_urgency_packages
+// 承载存储契约；本类型仅作为解析/推导的中间结构。
+//
+// 字段名以权威 §4.1 为准：id/name/unit/remaining/total/expires_at/status。
 // remaining/total 用 decimal 承载 NUMERIC(20,8) 口径，序列化为 JSON 字符串以避免
 // float64 在传输/前端解析阶段的精度损失。
 type CodeBuddyCreditPackage struct {
@@ -641,6 +675,36 @@ func (p CodeBuddyCreditPackage) MarshalJSON() ([]byte, error) {
 		Remaining: p.Remaining.String(),
 		Total:     p.Total.String(),
 		ExpiresAt: p.ExpiresAt,
+		Status:    p.Status,
+	})
+}
+
+// CodeBuddyUrgencyPackage 是紧迫度专用分包（存储契约 codebuddy_urgency_packages 数组
+// 的元素）。整改③：urgency 只读其所需五字段，不再持久化整条分包明细。
+//
+// remaining/total 以 decimal 承载、序列化为 JSON 字符串（与 §4.1 存储 Marshal 对称，
+// 避免 float64 精度损失）；expires_at 为 UTC RFC3339 字面量；unit 恒为 "credits"；
+// status 仅含 0（写入侧过滤已剔除非参与条目）。
+type CodeBuddyUrgencyPackage struct {
+	Remaining decimal.Decimal
+	Total     decimal.Decimal
+	ExpiresAt string // UTC RFC3339 字面量
+	Unit      string
+	Status    int64
+}
+
+func (p CodeBuddyUrgencyPackage) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Remaining string `json:"remaining"`
+		Total     string `json:"total"`
+		ExpiresAt string `json:"expires_at"`
+		Unit      string `json:"unit"`
+		Status    int64  `json:"status"`
+	}{
+		Remaining: p.Remaining.String(),
+		Total:     p.Total.String(),
+		ExpiresAt: p.ExpiresAt,
+		Unit:      p.Unit,
 		Status:    p.Status,
 	})
 }
@@ -778,6 +842,8 @@ func parseCodeBuddyCreditDecimal(raw string) (decimal.Decimal, error) {
 // IsValidCodeBuddyCreditPackage 是**基础快照有效性谓词**（唯一实现，Card D 复用）。
 // 条件 = 字段有效（单位/数值/Status 校验通过）+ 非 Status=3（耗尽/过期）。
 // 不含时间窗口/新鲜度条件（紧迫度参与性谓词由 Card D 在此基础之上叠加）。
+// 整改③：本谓词仍是 urgency 写入侧过滤（仅 Status=0 进入 codebuddy_urgency_packages）
+// 与 urgency 读链五字段复检的基础，故保留。
 func IsValidCodeBuddyCreditPackage(pkg CodeBuddyCreditPackage) bool {
 	if pkg.Unit != codebuddyCreditCanonicalUnit {
 		return false
@@ -796,13 +862,74 @@ func IsValidCodeBuddyCreditPackage(pkg CodeBuddyCreditPackage) bool {
 	return true
 }
 
-// DeriveCodeBuddyCreditUsedPercent 从参与分包（基础快照有效性谓词）推导已用比例。
+// codeBuddyCreditParticipatesInPercent 是 used_percent / totals 的**参与性谓词**（整改②）。
+// 与基础谓词的唯一差异：Status∈{0,3} 均参与——耗尽包（Status=3）纳入 used_percent
+// 与聚合总量，使"耗尽"不再被稀释为低用量。未知 Status（非 0 非 3）仍排除（且计 has_excluded）。
+// 字段有效条件（unit==credits、非负、remaining≤total）与基础谓词一致。
+func codeBuddyCreditParticipatesInPercent(pkg CodeBuddyCreditPackage) bool {
+	if pkg.Unit != codebuddyCreditCanonicalUnit {
+		return false
+	}
+	if pkg.Status != codebuddyCreditPackageStatusActive && pkg.Status != codebuddyCreditPackageStatusExhausted {
+		return false
+	}
+	if pkg.Remaining.IsNegative() || pkg.Total.IsNegative() {
+		return false
+	}
+	if pkg.Remaining.GreaterThan(pkg.Total) {
+		return false
+	}
+	return true
+}
+
+// codeBuddyFilterUrgencyPackages 是紧迫度写入侧过滤（整改③）：从解析分包集合构造
+// codebuddy_urgency_packages 写入数组。仅当分包通过基础快照有效性谓词
+// （unit==credits && status==0 && 非负 && remaining≤total，即 IsValidCodeBuddyCreditPackage）
+// 且 expires_at 非空（可解析）才入数组（五字段，decimal 字符串承载，与存储 Marshal 对称）。
+// Status=3 与未知 status 由基础谓词剔除；expires_at 缺失的分包仍进 used_percent/totals，
+// 仅不进紧迫度窗口。
+func codeBuddyFilterUrgencyPackages(packages []CodeBuddyCreditPackage) []CodeBuddyUrgencyPackage {
+	out := make([]CodeBuddyUrgencyPackage, 0, len(packages))
+	for _, pkg := range packages {
+		if !IsValidCodeBuddyCreditPackage(pkg) {
+			continue
+		}
+		if pkg.ExpiresAt == "" {
+			continue
+		}
+		out = append(out, CodeBuddyUrgencyPackage{
+			Remaining: pkg.Remaining,
+			Total:     pkg.Total,
+			ExpiresAt: pkg.ExpiresAt,
+			Unit:      pkg.Unit,
+			Status:    pkg.Status,
+		})
+	}
+	return out
+}
+
+// codeBuddyCreditHasExcludedFromErrors 从解析错误条目推导 has_excluded 标注：存在
+// unit≠credits 或 status 为未知枚举（非 0 非 3）的条目即 true（可比性标注用）。
+// 其余解析失败原因（负值/remaining>total/非法数值）不计入本键（它们仍走既有错误链）。
+// 解析失败条目不进入存储，本键仅为 UI 可比性提示，而非失败关闭信号。
+func codeBuddyCreditHasExcludedFromErrors(entries []codeBuddyCreditPackageError) bool {
+	for _, e := range entries {
+		if e.Reason == "unit_mismatch" || e.Reason == "unknown_status" {
+			return true
+		}
+	}
+	return false
+}
+
+// DeriveCodeBuddyCreditUsedPercent 从参与分包（整改②参与性谓词：unit==credits &&
+// status∈{0,3} && 非负 && remaining≤total）推导已用比例。
 // 公式钉死 = (Σtotal−Σremaining)/Σtotal×100。Σtotal=0（无有效分包）→ ok=false，
-// 表示"不写入 + 错误标记"信号（禁静默写 0 伪装满额/空额）。
+// 表示"不写入 + 错误标记"信号（禁静默写 0 伪装满额/空额）。used_percent 键（float8）
+// 读法不变，仅参与集合扩展至耗尽包。
 func DeriveCodeBuddyCreditUsedPercent(packages []CodeBuddyCreditPackage) (float64, bool) {
 	var sumTotal, sumRemaining decimal.Decimal
 	for _, pkg := range packages {
-		if !IsValidCodeBuddyCreditPackage(pkg) {
+		if !codeBuddyCreditParticipatesInPercent(pkg) {
 			continue
 		}
 		sumTotal = sumTotal.Add(pkg.Total)
@@ -917,18 +1044,21 @@ func deriveResetAtFromPackages(packages []CodeBuddyCreditPackage) time.Time {
 	return latest
 }
 
-// deriveTotalsFromPackages 从参与基础快照有效性谓词的分包推导合计
-// （旧 total/used 展示退役后仍为 probe result 提供兼容聚合值；异单位/
-// 无效分包不计入，与 used_percent 分子分母同一集合）。
-func deriveTotalsFromPackages(packages []CodeBuddyCreditPackage) (total, used float64) {
+// deriveTotalsFromPackages 从参与整改②口径（codeBuddyCreditParticipatesInPercent）
+// 的分包推导合计，返回十进制字符串对（Σremaining, Σtotal）。禁 float64 聚合落存储——
+// InexactFloat64 不得进入新键写入，故以 decimal 精确求和后 String() 量化输出
+// （NUMERIC(20,8) 口径，与 parseCodeBuddyCreditDecimal 同一精度）。
+// 与 DeriveCodeBuddyCreditUsedPercent 分子分母同一集合。
+func deriveTotalsFromPackages(packages []CodeBuddyCreditPackage) (totalRemaining, totalTotal string) {
+	var sumTotal, sumRemaining decimal.Decimal
 	for _, pkg := range packages {
-		if !IsValidCodeBuddyCreditPackage(pkg) {
+		if !codeBuddyCreditParticipatesInPercent(pkg) {
 			continue
 		}
-		total += pkg.Total.InexactFloat64()
-		used += pkg.Total.Sub(pkg.Remaining).InexactFloat64()
+		sumTotal = sumTotal.Add(pkg.Total)
+		sumRemaining = sumRemaining.Add(pkg.Remaining)
 	}
-	return total, used
+	return sumRemaining.String(), sumTotal.String()
 }
 
 // marshalCodeBuddyPackageErrors 把本次解析错误条目序列化为错误标记内容
@@ -982,9 +1112,16 @@ type CodeBuddyCreditSnapshotWrite struct {
 	SuccessTime time.Time
 	// Version 是抓取开始时取得的 attempt_version；成功提交不得另行自增。
 	Version int64
-	// Packages 是 §4.1 分包快照数组（存储契约，decimal 字符串承载）。
-	Packages []CodeBuddyCreditPackage
-	// UsedPercent 从参与分包（基础快照有效性谓词）推导。
+	// UrgencyPackages 是紧迫度写入侧过滤后的分包（五字段，仅 status==0 且 expires_at
+	// 可解析的参与条目；decimal 字符串承载，与 codebuddy_urgency_packages 存储契约对称）。
+	UrgencyPackages []CodeBuddyUrgencyPackage
+	// TotalRemaining / TotalTotal 是参与集合 Σremaining / Σtotal 的十进制字符串
+	// （NUMERIC(20,8) 量化；禁 float64 聚合落存储）。
+	TotalRemaining string
+	TotalTotal     string
+	// HasExcluded 本次解析存在 unit≠credits 或未知 status 条目（可比性标注）。
+	HasExcluded bool
+	// UsedPercent 从参与分包（整改②口径）推导。
 	UsedPercent float64
 	// ResetAt 语义保留（阈值消费依赖）；成功事务继续写。
 	ResetAt time.Time
