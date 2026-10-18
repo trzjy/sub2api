@@ -484,11 +484,10 @@ type OpenAIGatewayService struct {
 	// cursor 出站转发器（E6）。经 SetCursorForwarder 注入；为 nil 时 forwardCursor
 	// 用节点单例兜底构造（只含站点级节点信息，不含任何凭证）。
 	cursorForwarder *CursorUpstreamForwarder
-	// cursorTokenSources 按 quota_key_id 缓存 AuthService token 来源，
-	// 使 session_token 的 TTL 缓存真正生效（否则每请求换一次 token）。
-	// 键是 quota_key_id，与凭证维度一致，不会跨账号串号。
-	cursorTokenMu      sync.Mutex
-	cursorTokenSources map[int64]*cursorSessionTokenSource
+	// cursorKeyStatusLookup 是"流内拒绝后核对激活码终态"的窄依赖（P1-A2）。
+	// 经 SetCursorKeyStatusLookup 注入；未注入时走同包既有 lookup 回退，
+	// 都不可得即视为"无法确认"（失败关闭，不删号、不标账号耗尽）。
+	cursorKeyStatusLookup cursorKeyStatusLookup
 
 	openaiWSPoolOnce               sync.Once
 	openaiWSStateStoreOnce         sync.Once
@@ -613,6 +612,10 @@ func NewOpenAIGatewayService(
 		openAITokenProvider.SetAccountRuntimeBlocker(svc)
 	}
 	svc.logOpenAIWSModeBootstrap()
+	// P1-A2 契约 0.1：安装 Cursor 文本桥接的网关实例（包级安装模式，与
+	// codeBuddyQuotaInstance 同构）。CursorForwardInbound 借此复用本实例既注入的
+	// cursor forwarder / 鉴权依赖，跨卡无需持有 *OpenAIGatewayService 句柄。
+	InstallCursorBridge(svc)
 	return svc
 }
 

@@ -428,8 +428,6 @@ func TestIsCursorAllowedUpstreamPath(t *testing.T) {
 		cursorPathAvailableModels,
 		cursorPathStreamUnifiedChatWithTools,
 		cursorPathStreamUnifiedChatWithToolsSSE,
-		cursorPathGetSessionToken,
-		cursorPathCheckSessionToken,
 	}
 	for _, p := range allowed {
 		if !IsCursorAllowedUpstreamPath(p) {
@@ -442,6 +440,10 @@ func TestIsCursorAllowedUpstreamPath(t *testing.T) {
 		"/",
 		"",
 		"/aiserver.v1.AIServiceService/Unknown",
+		// P1-A2 旧链已删除（合同 §4）：AuthService 的换 token / 校验 token 两入口
+		// 不再有任何客户端，白名单也必须保持拒绝——放行它们等于给旧链留后门。
+		"/aiserver.v1.AuthService/GetSessionToken",
+		"/aiserver.v1.AuthService/CheckSessionToken",
 		// B-1 纠错：以下三条在 Cursor 3.24.12 全量资产中不存在（静态 0 命中），
 		// 放行它们等于把任意路径打到中转节点，必须保持拒绝。
 		"/aiserver.v1.AIServiceService/StreamUnifiedChatWithToolsSSE",

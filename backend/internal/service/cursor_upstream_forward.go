@@ -70,10 +70,13 @@ var (
 //
 //	⚠️ 各条的证据强度不同，**不得**整体宣称"全部活体验证过"：
 //	  - 已活体 200：AvailableModels、StreamUnifiedChatWithTools（B-1 关闭项）
-//	  - 静态确认存在、未活体探测：StreamUnifiedChatWithToolsSSE、GetSessionToken、
-//	    CheckSessionToken
+//	  - 静态确认存在、未活体探测：StreamUnifiedChatWithToolsSSE
 //	  - 不存在（已删除）：…SSEWithMcp、GenerateUnifiedCompletionWithToolsSSE、
 //	    AIServiceService/* 全部
+//
+//	P1-A2 旧链删除（合同 §4）：AuthService 的两个会话令牌端点（换 token / 校验 token）
+//	连同其常量与白名单条目一并删除——出站已改用账号已存 Bearer，进程内不再存在任何
+//	"按 key 换 session token"的客户端。
 const (
 	// cursorPathAvailableModels —— 模型列表。**活体 200**（135,922 字节 / 12 个模型）。
 	// 服务名是 AiService（不是 AIServiceService），方法名是 AvailableModels
@@ -87,13 +90,6 @@ const (
 	// cursorPathStreamUnifiedChatWithToolsSSE —— 对话的 ServerStreaming 变体，
 	// 首字段是 BidiRequestId{1 request_id}（**不是**聊天请求体）。静态确认存在。
 	cursorPathStreamUnifiedChatWithToolsSSE = "/aiserver.v1.ChatService/StreamUnifiedChatWithToolsSSE"
-
-	// cursorPathGetSessionToken —— B-13 用户级 token 换取（Unary）。
-	// 静态确认存在 + **活体已抵达其业务逻辑**（见 cursor_auth_token.go）。
-	cursorPathGetSessionToken = "/aiserver.v1.AuthService/GetSessionToken"
-
-	// cursorPathCheckSessionToken —— 缓存有效性校验（Unary）。静态确认存在。
-	cursorPathCheckSessionToken = "/aiserver.v1.AuthService/CheckSessionToken"
 )
 
 // cursorAllowedUpstreamPaths 是已取证的出站路径白名单（失败关闭用）。
@@ -101,8 +97,6 @@ var cursorAllowedUpstreamPaths = map[string]struct{}{
 	cursorPathAvailableModels:               {},
 	cursorPathStreamUnifiedChatWithTools:    {},
 	cursorPathStreamUnifiedChatWithToolsSSE: {},
-	cursorPathGetSessionToken:               {},
-	cursorPathCheckSessionToken:             {},
 }
 
 // IsCursorAllowedUpstreamPath 报告给定路径是否在已取证白名单内（E2 卡可用）。
