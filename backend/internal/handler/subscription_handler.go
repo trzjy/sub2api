@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -59,7 +60,12 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 
 	out := make([]dto.UserSubscription, 0, len(subscriptions))
 	for i := range subscriptions {
-		out = append(out, *dto.UserSubscriptionFromService(&subscriptions[i]))
+		sub := &subscriptions[i]
+		// 内部供给平台（codebuddy/muse/cursor）的订阅对用户不可见：跳过。
+		if sub.Group != nil && domain.IsInternalSupplyPlatform(sub.Group.Platform) {
+			continue
+		}
+		out = append(out, *dto.UserSubscriptionFromService(sub))
 	}
 	response.Success(c, out)
 }
@@ -81,7 +87,12 @@ func (h *SubscriptionHandler) GetActive(c *gin.Context) {
 
 	out := make([]dto.UserSubscription, 0, len(subscriptions))
 	for i := range subscriptions {
-		out = append(out, *dto.UserSubscriptionFromService(&subscriptions[i]))
+		sub := &subscriptions[i]
+		// 内部供给平台（codebuddy/muse/cursor）的订阅对用户不可见：跳过。
+		if sub.Group != nil && domain.IsInternalSupplyPlatform(sub.Group.Platform) {
+			continue
+		}
+		out = append(out, *dto.UserSubscriptionFromService(sub))
 	}
 	response.Success(c, out)
 }
@@ -105,6 +116,10 @@ func (h *SubscriptionHandler) GetProgress(c *gin.Context) {
 	result := make([]SubscriptionProgressInfo, 0, len(subscriptions))
 	for i := range subscriptions {
 		sub := &subscriptions[i]
+		// 内部供给平台（codebuddy/muse/cursor）的订阅对用户不可见：跳过。
+		if sub.Group != nil && domain.IsInternalSupplyPlatform(sub.Group.Platform) {
+			continue
+		}
 		progress, err := h.subscriptionService.GetSubscriptionProgress(c.Request.Context(), sub.ID)
 		if err != nil {
 			// Skip subscriptions with errors
@@ -139,6 +154,10 @@ func (h *SubscriptionHandler) GetSummary(c *gin.Context) {
 	items := make([]SubscriptionSummaryItem, 0, len(subscriptions))
 
 	for _, sub := range subscriptions {
+		// 内部供给平台（codebuddy/muse/cursor）的订阅对用户不可见：跳过。
+		if sub.Group != nil && domain.IsInternalSupplyPlatform(sub.Group.Platform) {
+			continue
+		}
 		item := SubscriptionSummaryItem{
 			ID:             sub.ID,
 			GroupID:        sub.GroupID,
@@ -179,7 +198,7 @@ func (h *SubscriptionHandler) GetSummary(c *gin.Context) {
 		TotalUsedUSD  float64                   `json:"total_used_usd"`
 		Subscriptions []SubscriptionSummaryItem `json:"subscriptions"`
 	}{
-		ActiveCount:   len(subscriptions),
+		ActiveCount:   len(items),
 		TotalUsedUSD:  totalUsed,
 		Subscriptions: items,
 	}

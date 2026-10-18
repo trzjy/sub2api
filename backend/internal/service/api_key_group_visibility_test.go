@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 
@@ -97,4 +98,40 @@ func TestGetUserGroupVisibilityEmptyAndErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetAvailableGroupsFiltersInternalSupplyPlatforms 验证 F1：GetAvailableGroups
+// 在结果组装循环中剔除 platform 命中 IsInternalSupplyPlatform 的分组（codebuddy/muse/
+// cursor），普通分组保留；composite 订阅分组（非内部供给平台）仍随有效订阅返回。
+func TestGetAvailableGroupsFiltersInternalSupplyPlatforms(t *testing.T) {
+	now := time.Now()
+	// 用户对 composite 订阅分组（group 100）有有效订阅；其余为公开分组。
+	subs := &visibilitySubRepo{subscriptions: []UserSubscription{
+		{UserID: 1, GroupID: 100, Status: SubscriptionStatusActive, ExpiresAt: now.Add(time.Hour)},
+	}}
+	groups := []Group{
+		{ID: 1, Name: "openai-public", Platform: "openai"},                       // 普通公开分组 -> 保留
+		{ID: 2, Name: "codebuddy-internal", Platform: "codebuddy"},               // 内部供给 -> 剔除
+		{ID: 3, Name: "muse-internal", Platform: "muse"},                         // 内部供给 -> 剔除
+		{ID: 4, Name: "cursor-internal", Platform: "cursor"},                     // 内部供给 -> 剔除
+		{ID: 100, Name: "composite-sub", Platform: "composite", SubscriptionType: "subscription"}, // 有效订阅 -> 保留
+	}
+	svc := &APIKeyService{
+		userRepo:    &visibilityUserRepo{user: &User{ID: 1}},
+		userSubRepo: subs,
+		groupRepo:   &visibilityGroupRepo{groups: groups},
+	}
+
+	got, err := svc.GetAvailableGroups(context.Background(), 1)
+	require.NoError(t, err)
+
+	gotIDs := make([]int64, 0, len(got))
+	for _, g := range got {
+		gotIDs = append(gotIDs, g.ID)
+		// 负向断言：任何内部供给平台都不应出现在结果中。
+		require.False(t, domain.IsInternalSupplyPlatform(g.Platform),
+			"internal supply platform %q must be filtered out", g.Platform)
+	}
+	// 正向断言：普通公开分组与 composite 订阅分组保留；内部供给平台全剔除。
+	require.ElementsMatch(t, []int64{1, 100}, gotIDs)
 }

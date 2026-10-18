@@ -62,6 +62,21 @@ export const COMPOSITE_TARGET_PLATFORM_OPTIONS = CONCRETE_PLATFORM_OPTIONS.filte
 )
 
 /**
+ * 内部上游供给平台（2026-10-18 用户裁定）：不出现在用户可见分组、模型广场、
+ * 可用渠道、订阅购买和订阅展示；管理端账号管理继续识别和管理。
+ * 分组创建选择器用 GROUP_PLATFORM_CREATABLE_OPTIONS 派生清单，不得新增内部供给分组入口。
+ */
+export const INTERNAL_SUPPLY_PLATFORMS: readonly string[] = ['codebuddy', 'muse', 'cursor']
+
+const isInternalSupplyPlatform = (value: string): boolean =>
+  (INTERNAL_SUPPLY_PLATFORMS as readonly string[]).includes(value)
+
+/** 分组创建选择器可用平台：全量分组平台剔除内部供给平台。 */
+export const GROUP_PLATFORM_CREATABLE_OPTIONS = GROUP_PLATFORM_OPTIONS.filter(
+  (option) => !isInternalSupplyPlatform(option.value),
+)
+
+/**
  * 模型广场展示排序：claude → gpt → kimi → glm → deepseek，其余平台排在其后。
  */
 export const PLAZA_PLATFORM_ORDER = [
@@ -75,7 +90,6 @@ export const PLAZA_PLATFORM_ORDER = [
   'grok',
   'other',
   'composite',
-  'muse',
 ] as const
 
 export function plazaPlatformOrder(platform: string): number {
