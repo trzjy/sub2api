@@ -72,11 +72,15 @@ var (
 //   - 53 / 125 / 134：HTTP 200 正常帧里的固定拒付模板（流内拒付，非传输错误）；
 //   - 54：不同 wire 模型（gpt / claude）身份对照同样走该路径。
 //
-// 其余端点的证据强度不同，**不得**整体宣称"全部活体验证过"：
-//   - 已活体 200：AvailableModels
-//   - 静态确认存在、未活体探测：GetSessionToken、CheckSessionToken
-//   - 不存在（已删除）：AIServiceService/* 全部、…SSEWithMcp、
-//     GenerateUnifiedCompletionWithToolsSSE
+//	⚠️ 各条的证据强度不同，**不得**整体宣称"全部活体验证过"：
+//	  - 已活体 200：AvailableModels、StreamUnifiedChatWithTools（B-1 关闭项）
+//	  - 静态确认存在、未活体探测：StreamUnifiedChatWithToolsSSE
+//	  - 不存在（已删除）：…SSEWithMcp、GenerateUnifiedCompletionWithToolsSSE、
+//	    AIServiceService/* 全部
+//
+//	P1-A2 旧链删除（合同 §4）：AuthService 的两个会话令牌端点（换 token / 校验 token）
+//	连同其常量与白名单条目一并删除——出站已改用账号已存 Bearer，进程内不再存在任何
+//	"按 key 换 session token"的客户端。
 const (
 	// cursorPathAvailableModels —— 模型列表。**活体 200**（135,922 字节 / 12 个模型）。
 	// 服务名是 AiService（不是 AIServiceService），方法名是 AvailableModels
@@ -92,25 +96,17 @@ const (
 	// cursorPathStreamUnifiedChatWithTools —— 旧 ChatService 对话路径常量。
 	//
 	// Deprecated: **该名字已不代表 ChatService**。P1-A1 换轨后其值指向
-	// cursorPathAgentRun，只为让尚未改完的调用点（cursor_gateway_forward.go，
-	// 属 P1-A2 改动范围）在 A2 落地前仍能编译、且**实际出站打到 AgentService/Run**。
-	// P1-A2 落地后必须删除本别名并直接使用 cursorPathAgentRun。
+	// cursorPathAgentRun，只为让 cursor_gateway_forward.go 的 forwardCursor
+	// 出站拼接点保持可编译。P1-A2 已落地（出站改用账号 Bearer），下一次
+	// 触碰 cursor_gateway_forward.go 时删除本别名并直接使用 cursorPathAgentRun。
 	cursorPathStreamUnifiedChatWithTools = cursorPathAgentRun
-
-	// cursorPathGetSessionToken —— B-13 用户级 token 换取（Unary）。
-	// 静态确认存在 + **活体已抵达其业务逻辑**（见 cursor_auth_token.go）。
-	cursorPathGetSessionToken = "/aiserver.v1.AuthService/GetSessionToken"
-
-	// cursorPathCheckSessionToken —— 缓存有效性校验（Unary）。静态确认存在。
-	cursorPathCheckSessionToken = "/aiserver.v1.AuthService/CheckSessionToken"
 )
 
 // cursorAllowedUpstreamPaths 是已取证的出站路径白名单（失败关闭用）。
 var cursorAllowedUpstreamPaths = map[string]struct{}{
 	cursorPathAvailableModels:   {},
 	cursorPathAgentRun:          {},
-	cursorPathGetSessionToken:   {},
-	cursorPathCheckSessionToken: {},
+	cursorPathStreamUnifiedChatWithTools: {}, // 别名 == cursorPathAgentRun，保持 e2e 断言兼容
 }
 
 // IsCursorAllowedUpstreamPath 报告给定路径是否在已取证白名单内（E2 卡可用）。

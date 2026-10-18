@@ -2,10 +2,12 @@
 
 package service
 
-// P1-A1 卡的 forwardCursor 端到端单测：入站 OpenAI 请求 → AgentRun 出站 → 回写 OpenAI。
+// forwardCursor 端到端单测：入站 OpenAI 请求 → 出站 Cursor 协议 → 回写 OpenAI。
 //
-// 覆盖真实链路的每一环：换 token（带缓存）→ AgentRun 请求转换 → 出站 → 响应转换
-// （含真实 usage 与流内拒付哨兵）。
+// 覆盖真实链路的每一环：账号 Bearer + 设备级 x-jg-auth → 请求转换 → 出站 → 响应转换。
+//
+// P1-A2 起出站不再有"按 key 换 session token"这一环（旧链已删，合同 §4）：用户级
+// 身份直接用选中账号已存的 access_token，故本文件的假中转不再扮演 AuthService。
 
 import (
 	"net/http"
@@ -20,7 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// cursorE2EUpstream 是同时扮演 AuthService 与 AgentService 的假中转。
+// cursorE2EUpstream 是扮演对话端点的假中转（旧链的 AuthService 角色已随
+// cursor_auth_token.go 一并删除，故此处不再提供 GetSessionToken 端点）。
 type cursorE2EUpstream struct {
 	mu sync.Mutex
 	// requests 记录出站请求（path + body）。
@@ -29,8 +32,6 @@ type cursorE2EUpstream struct {
 	chatBody []byte
 	// chatStatus 非 0 时 AgentService/Run 返回该状态码。
 	chatStatus int
-	// tokenCalls / chatCalls 计数。
-	tokenCalls int
 	chatCalls  int
 }
 
@@ -51,12 +52,6 @@ func (u *cursorE2EUpstream) handler() http.Handler {
 		u.mu.Unlock()
 
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/GetSessionToken"):
-			u.mu.Lock()
-			u.tokenCalls++
-			u.mu.Unlock()
-			w.Header().Set("Content-Type", "application/proto")
-			_, _ = w.Write(cursorAppendStringField(nil, 1, "SESSION-TOKEN-XYZ"))
 		case strings.HasSuffix(r.URL.Path, "/Run"):
 			u.mu.Lock()
 			u.chatCalls++
@@ -75,10 +70,21 @@ func (u *cursorE2EUpstream) handler() http.Handler {
 	})
 }
 
-func (u *cursorE2EUpstream) count() (token, chat int) {
+func (u *cursorE2EUpstream) count() (chat int) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.tokenCalls, u.chatCalls
+	return u.chatCalls
+}
+
+// paths 返回本次全部出站路径（用于反证"不再有换 token 调用"）。
+func (u *cursorE2EUpstream) paths() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make([]string, 0, len(u.requests))
+	for _, r := range u.requests {
+		out = append(out, r.path)
+	}
+	return out
 }
 
 func (u *cursorE2EUpstream) requestAt(i int) cursorE2ERequest {
@@ -115,12 +121,18 @@ func newCursorE2EService(t *testing.T, upstream *cursorE2EUpstream) (*OpenAIGate
 	return svc, c, w
 }
 
-// cursorE2EAccount 返回一个模型映射到 wire ID 的 cursor 账号。
+// cursorE2EAccountBearer 是账号已存的用户级会话令牌（P1-A2 出站 Bearer 的事实源）。
+const cursorE2EAccountBearer = "ACCOUNT-ACCESS-TOKEN-XYZ"
+
+// cursorE2EAccount 返回一个模型映射到 f36 wire ID 的 cursor 账号。
+//
+// 出站 Bearer 直接取账号已存 access_token：缺失即失败关闭（不换 token、不删号）。
 func cursorE2EAccount() *Account {
 	return &Account{
 		ID: 1, Platform: PlatformCursor, QuotaKeyID: qkID(7),
 		Credentials: map[string]any{
 			"model_mapping": map[string]any{"cursor-sonnet": "claude-opus-4-8-low"},
+			"access_token":  cursorE2EAccountBearer,
 		},
 	}
 }
@@ -155,17 +167,15 @@ func TestCursorProtocolEndToEnd(t *testing.T) {
 	require.Equal(t, "cursor-sonnet", res.Model)
 	require.Equal(t, "claude-opus-4-8-low", res.UpstreamModel)
 
-	tokenCalls, chatCalls := upstream.count()
-	require.Equal(t, 1, tokenCalls, "exactly one token exchange")
+	chatCalls := upstream.count()
 	require.Equal(t, 1, chatCalls)
 
-	// 出站请求顺序：先换 token，再走 AgentService/Run。
-	require.Equal(t, "/aiserver.v1.AuthService/GetSessionToken", upstream.requestAt(0).path)
-	require.Equal(t, cursorPathAgentRun, upstream.requestAt(1).path)
+	// 出站只有对话一次调用：旧链的 GetSessionToken 必须彻底消失（合同 §4）。
+	require.Equal(t, []string{cursorPathStreamUnifiedChatWithTools}, upstream.paths())
 
-	// 对话请求必须带用户级身份（Bearer session_token）与设备级身份（x-jg-auth）。
-	chatReq := upstream.requestAt(1)
-	require.Equal(t, "Bearer SESSION-TOKEN-XYZ", chatReq.header.Get("Authorization"))
+	// 对话请求必须带用户级身份（账号已存 access_token）与设备级身份（x-jg-auth）。
+	chatReq := upstream.requestAt(0)
+	require.Equal(t, "Bearer "+cursorE2EAccountBearer, chatReq.header.Get("Authorization"))
 	require.NotEmpty(t, chatReq.header.Get("x-jg-auth"), "device-level auth must still be present")
 	require.Equal(t, cursorConnectContentType, chatReq.header.Get("Content-Type"))
 
@@ -180,10 +190,27 @@ func TestCursorProtocolEndToEnd(t *testing.T) {
 	require.Contains(t, out, cursorSSEDoneSentinel)
 }
 
-// TestForwardCursorStreamUsageReachesBilling 钉死 turn_ended 的真实 usage
+// TestCursorProtocolStreamUsageReachesBilling 钉死 turn_ended 的真实 usage
 // 一路进到转发结果（计费口径），而不是被丢成 0。
 func TestCursorProtocolStreamUsageReachesBilling(t *testing.T) {
 	upstream := &cursorE2EUpstream{chatBody: cursorE2ESuccessStream(t, "OK")}
+	svc, c, _ := newCursorE2EService(t, upstream)
+
+	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	res, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, 12601, res.Usage.InputTokens)
+	require.Equal(t, 15, res.Usage.OutputTokens)
+	require.Equal(t, 128, res.Usage.CacheReadInputTokens)
+}
+
+// TestForwardCursorReusesAccountBearerAcrossCalls 覆盖多次对话复用同一账号 Bearer，
+// 且全程不产生任何换 token 调用（旧链已删，不存在"缓存到期再换一次"的行为）。
+func TestForwardCursorReusesAccountBearerAcrossCalls(t *testing.T) {
+	var chat []byte
+	chat = append(chat, cursorTextFrame(t, "ok")...)
+	chat = append(chat, cursorTestEndStream(t, `{}`)...)
+	upstream := &cursorE2EUpstream{chatBody: chat}
 	svc, c, _ := newCursorE2EService(t, upstream)
 
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -216,9 +243,15 @@ func TestCursorProtocolTokenCachedAcrossCalls(t *testing.T) {
 		_, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
 		require.NoError(t, err)
 	}
-	tokenCalls, chatCalls := upstream.count()
+	chatCalls := upstream.count()
 	require.Equal(t, 3, chatCalls)
-	require.Equal(t, 1, tokenCalls, "session token must be cached across calls (TTL 30m)")
+	for _, p := range upstream.paths() {
+		require.Equal(t, cursorPathStreamUnifiedChatWithTools, p, "出站只应有对话调用，不得再打 AuthService")
+	}
+	for i := 0; i < 3; i++ {
+		require.Equal(t, "Bearer "+cursorE2EAccountBearer, upstream.requestAt(i).header.Get("Authorization"),
+			"每次出站都必须携带本账号已存的 access_token")
+	}
 }
 
 // TestForwardCursorNonStreaming 覆盖非流式入站（合成单条 chat.completion）。
@@ -301,17 +334,12 @@ func TestCursorProtocolStreamErrorPropagates(t *testing.T) {
 	})
 }
 
-// TestForwardCursorNeverLeaksTokenInError 钉死会话 token 不进错误文案。
-func TestCursorProtocolNeverLeaksTokenInError(t *testing.T) {
-	const token = "SESSION-TOKEN-LEAK-CANARY"
+// TestForwardCursorNeverLeaksTokenInError 钉死账号 Bearer 不进错误文案。
+func TestForwardCursorNeverLeaksTokenInError(t *testing.T) {
+	const token = "ACCOUNT-TOKEN-LEAK-CANARY"
 
-	// 构造一个会把 token 回显进错误体的中转。
+	// 构造一个会把 Bearer 回显进错误体的中转（出站已是账号 access_token）。
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/GetSessionToken") {
-			w.Header().Set("Content-Type", "application/proto")
-			_, _ = w.Write(cursorAppendStringField(nil, 1, token))
-			return
-		}
 		w.WriteHeader(401)
 		_, _ = w.Write([]byte(`{"error":"Unauthorized","message":"bad token ` + token + `"}`))
 	}))
@@ -335,8 +363,10 @@ func TestCursorProtocolNeverLeaksTokenInError(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	_, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+	acc := cursorE2EAccount()
+	acc.Credentials["access_token"] = token // 出站 Bearer 即本次的泄漏金丝雀。
+	_, err := svc.forwardCursor(t.Context(), c, acc, body, "cursor-sonnet", true, time.Now())
 	require.Error(t, err)
-	require.NotContains(t, err.Error(), token, "session token must never appear in error text")
-	require.NotContains(t, w.Body.String(), token, "session token must never reach the client")
+	require.NotContains(t, err.Error(), token, "account bearer must never appear in error text")
+	require.NotContains(t, w.Body.String(), token, "account bearer must never reach the client")
 }

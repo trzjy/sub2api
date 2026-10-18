@@ -1,14 +1,36 @@
 package service
 
-// 本文件实现 cursor 平台的**鉴权材料按账号解析**与**出站分派挂载**（E2 卡，
-// 方案 docs-local/cursor-platform-fix-plan.md §2 E2）。
+// 本文件实现 cursor 平台的**出站鉴权按账号解析**与**出站分派挂载**（E2 卡接线骨架；
+// P1-A2 重写鉴权形态与流内拒绝处置）。
 //
 // E1（cursor_upstream_forward.go / cursor_upstream_nodes.go）已提供出站原语：
 // 换 host 到 shareai 号池中转节点 + 注入 x-jg-auth 鉴权头，请求体与流式帧原样透传。
-// E2 只做接线，不重复实现 E1 的任何机制。
+// 本文件只做接线，不重复实现 E1 的任何机制。
 //
-// 本卡的三条硬红线（与 E1 一致，不得放宽）：
-//  1. 鉴权材料**按账号**解析（quota_key_id → 解密激活码 → wasm provider），
+// ════════════════════════════════════════════════════════════════════════════
+// P1-A2 出站鉴权形态（方案 §15.2-1、§16.1，证据 103 / 134 / 135）：
+//
+//	Authorization: Bearer <账号已存 access_token>
+//	x-jg-auth:     wasm zk03({d: deviceId, a: 激活码})
+//
+//  1. **Standard 保留账号 authorization（已存 access_token）**，同时携带 x-jg-auth；
+//     绝不把激活码当 OAuth code 去换 session token（旧链已删，见合同 §4），
+//     绝不跨账号复用任何会话材料。
+//  2. **deviceId 与取号链同源三分支**（与 P1-B4 同判据、同结果）：
+//     ① 已持久化 device_id → 用它；② 未持久化且该码已持有账号（存量）→ 取号链同款
+//     派生值 deviceID(code)，**不生成、不落库**；③ 未持久化且无账号（新码）→
+//     DeviceIDFor 生成并持久化，全链复用。
+//  3. **无 Bearer 样本成功不构成授权**：账号凭证缺失时失败关闭并明确报错，
+//     绝不删账号对象、绝不回收 Bearer（I2 红线）。
+//
+// 流内拒绝（HTTP200 正常流帧中出现固定模板「密钥已过期或额度耗尽，请续费后使用」）
+// 一律按终态错误返回：**不得**当成功、**不得**伪造 usage；随后经 lookup 核对，
+// 仅当 lookup 确认「密钥已过期」才走既有 key 状态写入口标 expired，
+// lookup 无法确认时按上游失败返回（不删号、不标账号耗尽）。
+// ════════════════════════════════════════════════════════════════════════════
+//
+// 本卡硬红线（与 E1/E2 一致，不得放宽）：
+//  1. 鉴权材料**按账号**解析（quota_key_id → 解密激活码 + 同源 deviceId → wasm provider），
 //     绝不做成全局单例共享——不同账号的激活码不同，共享即等于把 A 号的凭证发给 B 号。
 //  2. 鉴权材料不可得 → 失败关闭，绝不发出无鉴权请求去白耗 shareai 额度。
 //  3. 绝不把 OpenAI 形状的请求体原样发往 Cursor 原生端点，也绝不降级重试到其它上游。
@@ -36,6 +58,10 @@ import (
 // 失控上游把内存吃满。超限即失败关闭（ErrCursorProtocol 之外的上限错误）。
 const cursorUpstreamStreamMaxBytes = 32 << 20
 
+// cursorCredentialAccessToken 是账号凭证里用户级会话令牌的键（号池拉号落库时写入，
+// 经既有 account_credentials 加密链保护；GetCredential 取到的是已解密明文）。
+const cursorCredentialAccessToken = "access_token"
+
 // ---------------------------------------------------------------------------
 // 节点解析器：进程级单例（缓存需要，非共享凭证）
 // ---------------------------------------------------------------------------
@@ -59,18 +85,44 @@ func cursorUpstreamNodesSingleton() *CursorUpstreamNodesResolver {
 }
 
 // ---------------------------------------------------------------------------
-// 鉴权材料：按账号解析（quota_key_id → 解密 → wasm）
+// 鉴权材料：按账号解析（quota_key_id → 解密 → 同源 deviceId → wasm）
 // ---------------------------------------------------------------------------
 
 // ErrCursorQuotaKeyUnresolved 表示账号未绑定可解析的 quota key，出站鉴权材料不可得。
 var ErrCursorQuotaKeyUnresolved = errors.New("cursor: account has no resolvable quota key (fail closed)")
 
+// ErrCursorAccountBearerMissing 表示选中账号未存 access_token（用户级凭证缺失）。
+//
+// 证据 134-no-bearer-active-key：无 Bearer 也能拿到 HTTP200 成功样本——但那是"上游
+// 未拒绝"，**不等于**本站可以拿空凭证出站。账号凭证缺失一律失败关闭并明确报错：
+// 绝不因此删账号对象、绝不回收/清空已存 Bearer（I2 红线）。
+var ErrCursorAccountBearerMissing = errors.New("cursor: account carries no access_token credential (fail closed)")
+
+// ErrCursorRelayAuthRejected 表示中转/上游以鉴权错误（401/403 或等价鉴权失败体）
+// 拒绝了本次出站请求。
+//
+// 该哨兵原先随 cursor_auth_token.go（旧 session 链）一并定义；P1-A2 删除旧链整文件后
+// 把哨兵留在转发侧——消费方（cursor_protocol_response.go 的错误分类与既有失败关闭
+// 断言）只认这个身份，语义与取值均不得变。旧链专有哨兵
+// ErrCursorSessionTokenUnavailable 则随旧链一并删除，全树无残留引用。
+var ErrCursorRelayAuthRejected = errors.New("cursor: relay rejected the request with an auth error")
+
+// ErrCursorKeyRejectedTerminal 表示上游在 HTTP200 正常流帧中回以激活码终态拒绝模板
+// （「密钥已过期或额度耗尽，请续费后使用」+ 动态后缀标识）。
+//
+// 判据与 A1 交付的哨兵 ErrCursorKeyRejectedUpstream 同源（同一固定模板、同一触发条件）；
+// 本卡在解析前对流内原始字节做同判据扫描，故不依赖 A1 侧符号即可终态返回。
+// 命中即终态错误：**不得**当成功、**不得**伪造 usage。
+var ErrCursorKeyRejectedTerminal = errors.New("cursor: upstream rejected the key inside the stream (terminal)")
+
 // cursorAccountAuthProvider 为**单个账号**提供 x-jg-auth 鉴权材料。
 //
 // 绑定该账号的 quota key ID：每次取材料时按 ID 取回 quota_keys 行、解密激活码，
-// 并按同一 ID 解析出站 deviceId（无则生成落库、之后永久复用），再交 E1 的 wasm
-// provider 合成材料。材料在 provider 内部缓存（E1 已实现），故稳态下每账号每次
-// 对话只跑一次 wasm。
+// 并按同源三分支解析 deviceId（见 cursorResolveOutboundDeviceID），再交 E1 的 wasm
+// provider 合成材料。材料在 provider 内部缓存，故稳态下每账号每次对话只跑一次 wasm。
+//
+// **只提供设备级材料**：用户级 Bearer 走 cursorResolveAccountBearer（账号维度），
+// 两者都要，缺一即失败关闭。绝不存在任何跨账号共享的会话材料。
 type cursorAccountAuthProvider struct {
 	quotaKeyID int64
 	quotaKeys  QuotaKeyRepository
@@ -116,24 +168,13 @@ func (p *cursorAccountAuthProvider) CursorUpstreamAuth(ctx context.Context) (str
 		return p.cached, nil
 	}
 
-	_, code, err := resolveCursorQuotaKeyCodeWithRepo(ctx, p.quotaKeyID, p.quotaKeys, p.enc)
+	device, code, err := cursorResolveOutboundAuthMaterial(ctx, p.quotaKeyID, p.quotaKeys, p.enc, p.deviceIDs)
 	if err != nil {
 		return "", err
 	}
 
-	// 出站 deviceId：按 quota key ID 从站点侧解析（库内没有则随机生成一份并落库，
-	// 之后永久复用）。**绝不**由激活码派生（B-10 已推翻该做法：插件语义是
-	// uuidv4() 随机生成后固化，与激活码无关；按码派生会得到与设备绑定不匹配的值）。
-	resolvedDeviceID, err := p.deviceIDs.DeviceIDFor(ctx, p.quotaKeyID)
-	if err != nil {
-		return "", fmt.Errorf("cursor: resolve device id for quota key %d: %w", p.quotaKeyID, err)
-	}
-	if strings.TrimSpace(resolvedDeviceID) == "" {
-		return "", fmt.Errorf("%w: quota key %d resolved to empty device id", ErrCursorQuotaKeyUnresolved, p.quotaKeyID)
-	}
-
 	// 复用 E1 的 wasm provider 生成 x-jg-auth：材料 = zk03({d: deviceId, a: code})。
-	material, err := NewCursorWasmAuthProvider(resolvedDeviceID, code).CursorUpstreamAuth(ctx)
+	material, err := NewCursorWasmAuthProvider(device, code).CursorUpstreamAuth(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -141,58 +182,354 @@ func (p *cursorAccountAuthProvider) CursorUpstreamAuth(ctx context.Context) (str
 	return material, nil
 }
 
-// resolveCursorAccountCode 按账号解析出解密后的激活码明文（供 AuthService 换 token）。
+// cursorResolveOutboundAuthMaterial 解析单账号出站设备级材料的两个输入（device + 激活码）。
 //
-// 与 cursorAccountAuthProvider 的材料解析同源同纪律：失败关闭、错误信息不含明文。
-func resolveCursorAccountCode(
-	ctx context.Context,
-	account *Account,
-	quotaKeys QuotaKeyRepository,
-	enc QuotaKeyEncryptor,
-) (string, error) {
-	if account == nil || account.QuotaKeyID == nil || *account.QuotaKeyID <= 0 {
-		return "", ErrCursorQuotaKeyUnresolved
-	}
-	if quotaKeys == nil || enc == nil {
-		return "", ErrCursorQuotaKeyUnresolved
-	}
-	_, code, err := resolveCursorQuotaKeyCodeWithRepo(ctx, *account.QuotaKeyID, quotaKeys, enc)
-	if err != nil {
-		return "", err
-	}
-	return code, nil
-}
-
-// resolveCursorQuotaKeyCodeWithRepo 是「quota key ID → 激活码明文」的唯一实现，
-// 被 x-jg-auth 材料解析与 AuthService 换 token 两处复用（避免二次 DB 查询与
-// 两套失败关闭口径）。
-func resolveCursorQuotaKeyCodeWithRepo(
+// 只查一次 quota_keys 行：deviceId 的持久化判定与激活码解密共用同一份行快照，避免
+// 两次读之间被并发写穿造成"读了旧 device / 新 code"的错配。
+func cursorResolveOutboundAuthMaterial(
 	ctx context.Context,
 	quotaKeyID int64,
 	quotaKeys QuotaKeyRepository,
 	enc QuotaKeyEncryptor,
-) (int64, string, error) {
+	deviceIDs CursorDeviceIDResolver,
+) (device, code string, err error) {
+	if quotaKeys == nil || enc == nil {
+		return "", "", ErrCursorQuotaKeyUnresolved
+	}
 	qk, err := quotaKeys.GetByID(ctx, quotaKeyID)
 	if err != nil {
 		// 错误信息绝不含激活码明文。
-		return 0, "", fmt.Errorf("cursor: load quota key %d: %w", quotaKeyID, err)
+		return "", "", fmt.Errorf("cursor: load quota key %d: %w", quotaKeyID, err)
 	}
+	code, err = cursorDecryptQuotaKeyCode(qk, enc)
+	if err != nil {
+		return "", "", err
+	}
+	device, err = cursorResolveOutboundDeviceID(ctx, quotaKeys, deviceIDs, qk, code)
+	if err != nil {
+		return "", "", err
+	}
+	return device, code, nil
+}
+
+// cursorDecryptQuotaKeyCode 解密 quota key 行的激活码明文（失败关闭、错误不含明文）。
+func cursorDecryptQuotaKeyCode(qk *ent.QuotaKey, enc QuotaKeyEncryptor) (string, error) {
 	if qk == nil || strings.TrimSpace(qk.CodeEncrypted) == "" {
-		return 0, "", fmt.Errorf("%w: quota key %d has no activation code", ErrCursorQuotaKeyUnresolved, quotaKeyID)
+		return "", fmt.Errorf("%w: quota key has no activation code", ErrCursorQuotaKeyUnresolved)
 	}
 	plain, err := enc.Decrypt([]byte(qk.CodeEncrypted))
 	if err != nil {
-		return 0, "", fmt.Errorf("cursor: decrypt activation code: %w", err)
+		return "", fmt.Errorf("cursor: decrypt activation code: %w", err)
 	}
 	code := strings.TrimSpace(string(plain))
 	if code == "" {
-		return 0, "", fmt.Errorf("%w: quota key %d decrypted to empty activation code", ErrCursorQuotaKeyUnresolved, quotaKeyID)
+		return "", fmt.Errorf("%w: quota key decrypted to empty activation code", ErrCursorQuotaKeyUnresolved)
 	}
-	return quotaKeyID, code, nil
+	return code, nil
 }
 
-// 编译期断言：本文件依赖 ent.QuotaKey 的 CodeEncrypted 字段（与 E1 取号链同源）。
-var _ = ent.QuotaKey{}.CodeEncrypted
+// cursorResolveOutboundDeviceID 解析出站 x-jg-auth 的 `d`（deviceId）。
+//
+// **与取号链（P1-B4）同源三分支、同结果**，故同一激活码在 refresh/activate/lookup
+// 与出站两条链上恒为同一设备身份：
+//
+//	① quota_keys.device_id 已持久化 → 用它（全链复用）；
+//	② 未持久化且该码已持有账号（存量）→ 取号链同款派生值 deviceID(code)，
+//	   **不生成、不落库、不迁移**（§16 红线：存量先核对语义，绝不自动改设备身份）；
+//	③ 未持久化且无账号（新码）→ DeviceIDFor 生成并持久化，全链复用。
+//
+// 分支②是本卡的关键修正：旧实现在出站侧无条件调用 DeviceIDFor，会给存量码**凭空
+// 生成并落库一份与取号链不同的随机 device**（证据 124：站点存量码的 device_source
+// 恒为 existing_site_pull_derived_no_persistence），造成同一码两链设备身份分裂。
+//
+// 存量判定直接复用既有仓储契约 ListAccountsByQuotaKey（与 B4 的 HasAccount 同输入同语义），
+// 不引入新的装配依赖。查询失败即失败关闭：绝不带着猜测的设备身份出站。
+func cursorResolveOutboundDeviceID(
+	ctx context.Context,
+	quotaKeys QuotaKeyRepository,
+	deviceIDs CursorDeviceIDResolver,
+	qk *ent.QuotaKey,
+	code string,
+) (string, error) {
+	if quotaKeys == nil || qk == nil {
+		return "", fmt.Errorf("%w: quota key row unavailable", ErrCursorQuotaKeyUnresolved)
+	}
+	// ① 已持久化：全链复用（含取号链，见 B4 resolveDeviceID 分支①）。
+	if qk.DeviceID != nil && strings.TrimSpace(*qk.DeviceID) != "" {
+		return strings.TrimSpace(*qk.DeviceID), nil
+	}
+	accounts, err := quotaKeys.ListAccountsByQuotaKey(ctx, qk.ID)
+	if err != nil {
+		return "", fmt.Errorf("%w: list accounts for quota key %d: %v", ErrCursorQuotaKeyUnresolved, qk.ID, err)
+	}
+	// ② 存量（已持有账号）：保持派生值，与取号链逐字同值，绝不生成新设备。
+	if len(accounts) > 0 {
+		return deviceID(code), nil
+	}
+	// ③ 新码：与取号链同一 DeviceIDFor 入口生成并持久化，保证两链同值。
+	if deviceIDs == nil {
+		return "", fmt.Errorf("%w: quota key %d has no device id resolver", ErrCursorDeviceIDUnavailable, qk.ID)
+	}
+	resolved, err := deviceIDs.DeviceIDFor(ctx, qk.ID)
+	if err != nil {
+		return "", fmt.Errorf("cursor: resolve device id for quota key %d: %w", qk.ID, err)
+	}
+	if strings.TrimSpace(resolved) == "" {
+		return "", fmt.Errorf("%w: quota key %d resolved to empty device id", ErrCursorDeviceIDUnavailable, qk.ID)
+	}
+	return resolved, nil
+}
+
+// cursorResolveAccountBearer 取选中账号的用户级 Bearer（已存 access_token 明文）。
+//
+// 失败关闭：空凭证一律报错返回，绝不回落空串、绝不删账号对象或回收凭证
+// （证据 135 结论第 2 条：无 Bearer 成功只是"上游未拒绝"，不构成本站放行依据）。
+func cursorResolveAccountBearer(account *Account) (string, error) {
+	if account == nil {
+		return "", fmt.Errorf("%w: no account", ErrCursorAccountBearerMissing)
+	}
+	token := strings.TrimSpace(account.GetCredential(cursorCredentialAccessToken))
+	if token == "" {
+		return "", fmt.Errorf("%w: account %d", ErrCursorAccountBearerMissing, account.ID)
+	}
+	return token, nil
+}
+
+// 编译期断言：本文件依赖 ent.QuotaKey 的 CodeEncrypted / DeviceID 字段（与取号链同源）。
+var (
+	_ = ent.QuotaKey{}.CodeEncrypted
+	_ = ent.QuotaKey{}.DeviceID
+)
+
+// ---------------------------------------------------------------------------
+// 流内拒绝：固定模板识别 + lookup 核对链
+// ---------------------------------------------------------------------------
+
+// cursorKeyRejectedTemplate 是上游在 HTTP200 正常流帧中回吐的激活码终态拒绝固定模板
+// （证据 125-expiry-recheck-254 / 134-current-token-expired-key 逐字样本）。
+//
+// 模板后跟动态后缀标识（形如 ` (1792327810746-28d0be39)`），故只按前缀匹配，
+// 后缀原样保留进结构化字段供排障。
+const cursorKeyRejectedTemplate = "密钥已过期或额度耗尽，请续费后使用"
+
+// cursorStreamRejection 是流内拒绝的结构化证据（对应 A1 哨兵所附的同名字段）。
+type cursorStreamRejection struct {
+	// Snippet 是原始模板片段（含动态后缀标识），排障用，绝不含任何凭证。
+	Snippet string
+	// TurnID 是模板后括号内的动态标识（证据样本：1792327810746-28d0be39），
+	// 用于把同一次拒绝与上游侧记录对齐；解析不出时为空。
+	TurnID string
+}
+
+// cursorDetectKeyRejectedUpstream 在**原始流字节**上做终态拒绝判据扫描。
+//
+// 为什么扫原始字节而不是等解析器报错：判据是"HTTP200 正常流帧中出现固定模板"，
+// 而模板以明文出现在 text 帧里——扫原始字节是判据的超集，且在解析之前即可终态返回，
+// 天然满足"不得当成功、不得伪造 usage"。A1 落地哨兵后，本判据与其等价且取道更早。
+func cursorDetectKeyRejectedUpstream(raw []byte) (cursorStreamRejection, bool) {
+	text := string(raw)
+	idx := strings.Index(text, cursorKeyRejectedTemplate)
+	if idx < 0 {
+		return cursorStreamRejection{}, false
+	}
+	end := idx + len(cursorKeyRejectedTemplate)
+	limit := end + 64
+	if limit > len(text) {
+		limit = len(text)
+	}
+	snippet := strings.TrimSpace(text[idx:limit])
+	return cursorStreamRejection{Snippet: snippet, TurnID: cursorRejectedTurnID(snippet)}, true
+}
+
+// cursorRejectedTurnID 取模板后的动态后缀标识（括号内）。
+func cursorRejectedTurnID(snippet string) string {
+	open := strings.Index(snippet, "(")
+	if open < 0 {
+		return ""
+	}
+	tail := snippet[open+1:]
+	end := strings.Index(tail, ")")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(tail[:end])
+}
+
+// cursorKeyStatus 是 lookup 对激活码终态的判定结果。
+type cursorKeyStatus int
+
+const (
+	// cursorKeyStatusUnknown 表示"无法确认"（传输失败 / 回包不可解析 / 语义不在已取证范围）。
+	// 绝不据此删号、绝不据此标账号耗尽。
+	cursorKeyStatusUnknown cursorKeyStatus = iota
+	// cursorKeyStatusActive 表示 lookup 确认码仍在用（code=0 且带 key_info）。
+	cursorKeyStatusActive
+	// cursorKeyStatusExpired 表示 lookup 确认终态（code=1 + 密钥已过期）。
+	cursorKeyStatusExpired
+)
+
+// cursorKeyStatusLookup 是"流内拒绝后核对激活码终态"的窄依赖。
+//
+// 生产实现复用既有 lookup 入口（CursorAutoEntryService 的 lookupQuota，
+// cursor_auto_entry_service.go），不新造第二条查询链；测试可注入替身。
+type cursorKeyStatusLookup interface {
+	LookupKeyStatus(ctx context.Context, quotaKeyID int64) (cursorKeyStatus, error)
+}
+
+// SetCursorKeyStatusLookup 注入激活码终态核对入口（装配/测试用）。
+//
+// 未注入时走 cursorKeyStatusLookupOrDefault 的同包回退；都取不到即视为"无法确认"。
+func (s *OpenAIGatewayService) SetCursorKeyStatusLookup(l cursorKeyStatusLookup) {
+	if s == nil {
+		return
+	}
+	s.cursorKeyStatusLookup = l
+}
+
+// cursorKeyStatusLookupOrDefault 取激活码终态核对入口。
+//
+// 回退路径说明（同包可见，不新增装配点、不改 wire_gen）：生产经 SetCursorAuthDeps
+// 注入的 deviceIDs 就是 *QuotaKeyService（wire_gen 一行注入，见该函数注释），而其
+// autoEntry 正是既有 *CursorAutoEntryService（wire 另装配的 SetAutoEntry）。故此处
+// 取回既有实例复用其 lookup 入口；任一层断裂 → 返回 nil → 按"无法确认"处理（失败关闭）。
+func (s *OpenAIGatewayService) cursorKeyStatusLookupOrDefault() cursorKeyStatusLookup {
+	if s == nil {
+		return nil
+	}
+	if s.cursorKeyStatusLookup != nil {
+		return s.cursorKeyStatusLookup
+	}
+	if s.cursorQuotaKeys == nil || s.cursorQuotaKeyEnc == nil {
+		return nil
+	}
+	qks, ok := s.cursorDeviceIDs.(*QuotaKeyService)
+	if !ok || qks == nil || qks.autoEntry == nil {
+		return nil
+	}
+	autoEntry, ok := qks.autoEntry.(*CursorAutoEntryService)
+	if !ok || autoEntry == nil {
+		return nil
+	}
+	return &cursorAutoEntryKeyStatusLookup{
+		svc:       autoEntry,
+		quotaKeys: s.cursorQuotaKeys,
+		enc:       s.cursorQuotaKeyEnc,
+		deviceIDs: s.cursorDeviceIDs,
+	}
+}
+
+// cursorAutoEntryKeyStatusLookup 以既有 lookup 入口核对激活码终态。
+//
+// 复用 CursorAutoEntryService.lookupQuota 而不是 ProbeKeyQuota：核对只需终态判定，
+// 不应附带"把配额快照写进每个账号 extra"的副作用，也不该用其随机 device-id 源
+// （证据 124：站点存量码的 lookup 设备源是取号链派生值）。
+type cursorAutoEntryKeyStatusLookup struct {
+	svc       *CursorAutoEntryService
+	quotaKeys QuotaKeyRepository
+	enc       QuotaKeyEncryptor
+	deviceIDs CursorDeviceIDResolver
+}
+
+// LookupKeyStatus 实现 cursorKeyStatusLookup。
+func (l *cursorAutoEntryKeyStatusLookup) LookupKeyStatus(ctx context.Context, quotaKeyID int64) (cursorKeyStatus, error) {
+	qk, err := l.quotaKeys.GetByID(ctx, quotaKeyID)
+	if err != nil {
+		return cursorKeyStatusUnknown, fmt.Errorf("cursor: load quota key %d: %w", quotaKeyID, err)
+	}
+	code, err := cursorDecryptQuotaKeyCode(qk, l.enc)
+	if err != nil {
+		return cursorKeyStatusUnknown, err
+	}
+	device, err := cursorResolveOutboundDeviceID(ctx, l.quotaKeys, l.deviceIDs, qk, code)
+	if err != nil {
+		return cursorKeyStatusUnknown, err
+	}
+	if _, err := l.svc.lookupQuota(ctx, code, device); err != nil {
+		// 证据 49 / 124：code=1 msg=密钥已过期 ⇒ 激活码级终态。
+		// 其余（限频措辞、未知回包、传输失败）一律"无法确认"，绝不判过期。
+		if strings.Contains(err.Error(), "密钥已过期") {
+			return cursorKeyStatusExpired, nil
+		}
+		return cursorKeyStatusUnknown, err
+	}
+	return cursorKeyStatusActive, nil
+}
+
+// cursorMarkKeyExpiredByUpstream 复用 quota_key_service.go 的既有条件写入口
+// （markKeyExpiredByUpstream）把上游确认终态的激活码标 expired。
+//
+// 口径与 sweeper 同型：仅当 DB 当前 status='active' 才写入，不覆盖 sweep 已置状态，
+// 且**不写任何由 msg 推导的日期**（expires_at 保持原值）。本卡不新增第二套写链；
+// 绝不软删账号、绝不标账号耗尽（I2 红线）——S 卡消费该状态作为调度资格。
+//
+// 入参 devices 在生产即 *QuotaKeyService（SetCursorAuthDeps 注入），故以类型断言取回
+// 既有实例；断言失败或 ent client 缺失 → 返回错误（调用方按"未确认"处理）。
+func cursorMarkKeyExpiredByUpstream(
+	ctx context.Context,
+	devices CursorDeviceIDResolver,
+	quotaKeyID int64,
+	reason error,
+) error {
+	qks, ok := devices.(*QuotaKeyService)
+	if !ok || qks == nil || qks.client == nil {
+		return fmt.Errorf("%w: quota key expiry writer unavailable", ErrCursorQuotaKeyUnresolved)
+	}
+	tx, err := qks.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("cursor: begin quota key expiry tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := qks.markKeyExpiredByUpstream(ctx, tx, quotaKeyID, reason); err != nil {
+		return fmt.Errorf("cursor: mark quota key %d expired: %w", quotaKeyID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cursor: commit quota key expiry: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// cursorHandleKeyRejected 处置"流内拒绝"：记 ops → lookup 核对 → 终态错误返回。
+//
+// 三条硬口径：
+//  1. 无论 lookup 结果如何，本函数**只返回错误**（终态），绝不返回任何 usage、
+//     绝不把该流当成功——上游这段响应里没有可计费的产出。
+//  2. 仅当 lookup 明确返回「密钥已过期」才标 expired（走既有写口）；
+//  3. lookup 无法确认（无入口 / 报错 / 非过期语义）→ 按上游失败返回，
+//     不删号、不标账号耗尽。
+func (s *OpenAIGatewayService) cursorHandleKeyRejected(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	rej cursorStreamRejection,
+	upstreamURL string,
+) error {
+	// ops 上报：只含模板片段（已脱敏：片段内不含任何凭证）。
+	s.cursorRecordUpstreamError(c, account, 0, "key_rejected", "上游流内拒绝："+rej.Snippet, upstreamURL)
+
+	terminal := fmt.Errorf("%w: %s", ErrCursorKeyRejectedTerminal, rej.Snippet)
+
+	lookup := s.cursorKeyStatusLookupOrDefault()
+	if lookup == nil || account == nil || account.QuotaKeyID == nil {
+		return terminal
+	}
+	status, err := lookup.LookupKeyStatus(ctx, *account.QuotaKeyID)
+	if err != nil || status != cursorKeyStatusExpired {
+		// 无法确认 / 未确认过期 → 上游失败返回，不删号、不标耗尽。
+		return terminal
+	}
+	reason := fmt.Errorf("cursor: upstream confirmed key expired: %s", rej.Snippet)
+	if werr := cursorMarkKeyExpiredByUpstream(ctx, s.cursorDeviceIDs, *account.QuotaKeyID, reason); werr != nil {
+		// 写失败只上报，不改变"本次请求终态失败"的结论。
+		s.cursorRecordUpstreamError(c, account, 0, "key_expired_write_failed", werr.Error(), upstreamURL)
+	}
+	return terminal
+}
 
 // ---------------------------------------------------------------------------
 // 出站分派
@@ -218,7 +555,8 @@ func isCursorAccount(account *Account) bool {
 //
 // enc 为 nil 时保持未注入态：forwardCursor 会因依赖缺失而失败关闭，绝不回落明文。
 //
-// deviceIDs 用于解析出站 deviceId（B-10）；生产装配注入 *QuotaKeyService 即可。
+// deviceIDs 用于解析出站 deviceId（同源三分支）；生产装配注入 *QuotaKeyService 即可
+// （同实例亦承担激活码终态写链，见 cursorMarkKeyExpiredByUpstream）。
 func (s *OpenAIGatewayService) SetCursorAuthDeps(quotaKeys QuotaKeyRepository, enc QuotaKeyEncryptor, deviceIDs CursorDeviceIDResolver) {
 	if s == nil {
 		return
@@ -248,13 +586,17 @@ func (s *OpenAIGatewayService) SetCursorForwarder(f *CursorUpstreamForwarder) {
 // Chat Completions 形状不兼容。落到通用路径会把 OpenAI 形状的 body 发到 Cursor 端点，
 // 必然被上游拒绝，且白耗 shareai 额度。
 //
-// E6 起本函数执行真实转发，五步（任一步失败即失败关闭，绝不降级）：
+// P1-A2 起本函数五步（任一步失败即失败关闭，绝不降级）：
 //
 //	① 模型闸门：账号 model_mapping 必须**显式命中**
-//	② 设备级鉴权：x-jg-auth = zk03({d: deviceId, a: 激活码})
-//	③ 用户级鉴权：AuthService/GetSessionToken 换 session_token（带 TTL 缓存）
+//	② 用户级鉴权：账号已存 access_token（Bearer），缺失即失败关闭
+//	③ 设备级鉴权：x-jg-auth = zk03({d: 同源 deviceId, a: 激活码})
 //	④ 请求转换：OpenAI → StreamUnifiedChatRequestWithTools（protobuf + envelope）
-//	⑤ 响应转换：envelope 帧流 → OpenAI SSE（或单条 chat.completion）
+//	⑤ 响应转换：envelope 帧流 → OpenAI SSE（或单条 chat.completion），
+//	   并先做流内拒绝判据扫描（命中即终态错误，不产出 usage）
+//
+// 对外统一走包级入口 CursorForwardInbound（cursor_bridge.go，契约 0.1）：本函数是
+// 其内部实现，不是跨卡接口。
 func (s *OpenAIGatewayService) forwardCursor(
 	ctx context.Context,
 	c *gin.Context,
@@ -263,7 +605,7 @@ func (s *OpenAIGatewayService) forwardCursor(
 	originalModel string,
 	reqStream bool,
 	startTime time.Time,
-) (*OpenAIForwardResult, error) {
+) (*ForwardResult, error) {
 	if !isCursorAccount(account) {
 		return nil, errors.New("cursor: forwardCursor requires a cursor platform account")
 	}
@@ -284,14 +626,14 @@ func (s *OpenAIGatewayService) forwardCursor(
 		return nil, ErrCursorProtocolBridgeUnavailable
 	}
 
-	// ② 设备级鉴权材料（x-jg-auth）：按账号解析，材料不可得即失败关闭。
-	authProvider, err := newCursorAccountAuthProvider(account, s.cursorQuotaKeys, s.cursorQuotaKeyEnc, s.cursorDeviceIDs)
+	// ② 用户级 Bearer（账号已存 access_token）：缺失即失败关闭，绝不空凭证出站。
+	bearer, err := cursorResolveAccountBearer(account)
 	if err != nil {
 		return nil, err
 	}
 
-	// ③ 用户级 token（B-13）：AuthService 换取，带 TTL 缓存。
-	tokenSource, err := s.cursorBuildSessionTokenSource(ctx, fwd, authProvider, account)
+	// ③ 设备级鉴权材料（x-jg-auth）：按账号解析，材料不可得即失败关闭。
+	authProvider, err := newCursorAccountAuthProvider(account, s.cursorQuotaKeys, s.cursorQuotaKeyEnc, s.cursorDeviceIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -306,11 +648,6 @@ func (s *OpenAIGatewayService) forwardCursor(
 		return nil, err
 	}
 
-	sessionToken, err := tokenSource.cursorSessionTokenWithAuth(ctx, authProvider)
-	if err != nil {
-		return nil, err
-	}
-
 	resp, err := fwd.Do(ctx, &CursorUpstreamRequest{
 		Path: cursorPathStreamUnifiedChatWithTools,
 		Body: payload,
@@ -320,9 +657,9 @@ func (s *OpenAIGatewayService) forwardCursor(
 		Headers: map[string]string{
 			"Content-Type":             cursorConnectContentType,
 			"Connect-Protocol-Version": "1",
-			// 用户级身份：AuthService 换来的 session_token（**不是** x-jg-auth 的
-			// 激活码材料）。两者是不同维度，缺一即 ERROR_UNAUTHORIZED（§1.6）。
-			"Authorization": "Bearer " + sessionToken,
+			// 用户级身份：账号已存 access_token（**不是**换来的 session token，
+			// 也不是 x-jg-auth 的激活码材料）。两个维度都要，缺一即失败关闭。
+			"Authorization": "Bearer " + bearer,
 		},
 	})
 	if err != nil {
@@ -333,13 +670,13 @@ func (s *OpenAIGatewayService) forwardCursor(
 	if resp.StatusCode != http.StatusOK {
 		upstreamBody, rerr := readCursorUpstreamBody(resp.Body, cursorAuthResponseMaxBytes)
 		if rerr != nil {
-			return nil, cursorUpstreamStatusError(resp.StatusCode, nil, sessionToken)
+			return nil, cursorUpstreamStatusError(resp.StatusCode, nil, bearer)
 		}
-		// sessionToken 作为 secret 传入：上游错误文案可能回显 Authorization 头的值，
-		// 不抹掉就会把会话 token 写进 ops 事件与客户端回传。
-		code, msg := cursorExtractUpstreamErrorSummary(upstreamBody, sessionToken)
+		// bearer 作为 secret 传入：上游错误文案可能回显 Authorization 头的值，
+		// 不抹掉就会把账号会话令牌写进 ops 事件与客户端回传。
+		code, msg := cursorExtractUpstreamErrorSummary(upstreamBody, bearer)
 		s.cursorRecordUpstreamError(c, account, resp.StatusCode, code, msg, resp.TargetURL)
-		return nil, cursorUpstreamStatusError(resp.StatusCode, upstreamBody, sessionToken)
+		return nil, cursorUpstreamStatusError(resp.StatusCode, upstreamBody, bearer)
 	}
 
 	rawBody, err := readCursorUpstreamBody(resp.Body, cursorUpstreamStreamMaxBytes)
@@ -347,10 +684,16 @@ func (s *OpenAIGatewayService) forwardCursor(
 		return nil, fmt.Errorf("cursor: read upstream stream: %w", err)
 	}
 
-	// ⑤ 响应转换。Cursor 上游只有一种形态（envelope 字节流），故流式/非流式
+	// ⑤-a 流内拒绝判据：HTTP200 正常流帧里的激活码终态模板。命中即终态失败，
+	// 绝不进入解析/计费路径（不得当成功、不得伪造 usage）。
+	if rej, rejected := cursorDetectKeyRejectedUpstream(rawBody); rejected {
+		return nil, s.cursorHandleKeyRejected(ctx, c, account, rej, resp.TargetURL)
+	}
+
+	// ⑤-b 响应转换。Cursor 上游只有一种形态（envelope 字节流），故流式/非流式
 	// 入站都由同一解析器处理：流式转 SSE，非流式合成单条 JSON。
 	if reqStream {
-		sse, perr := cursorParseStreamToSSE(rawBody, originalModel, sessionToken)
+		sse, perr := cursorParseStreamToSSE(rawBody, originalModel, bearer)
 		if perr != nil {
 			s.cursorRecordStreamError(c, account, perr, resp.TargetURL)
 			return nil, perr
@@ -363,7 +706,7 @@ func (s *OpenAIGatewayService) forwardCursor(
 		return cursorForwardResultFromStreaming(streamResult, originalModel, upstreamModel, startTime, httpResp.Header), nil
 	}
 
-	completion, perr := cursorParseStreamToCompletion(rawBody, originalModel, sessionToken)
+	completion, perr := cursorParseStreamToCompletion(rawBody, originalModel, bearer)
 	if perr != nil {
 		s.cursorRecordStreamError(c, account, perr, resp.TargetURL)
 		return nil, perr
@@ -404,29 +747,40 @@ func cursorToHTTPResponse(
 	}
 }
 
-// cursorForwardResultFromStreaming 由流式结果构造转发结果（与 codebuddy 同口径）。
+// cursorUsageToClaude 把 OpenAI 形状 usage 落到契约 0.1 的 ForwardResult.usage 字段。
+//
+// 桥接只做字段搬运，**不做任何折算、不补默认值**：用量由调用方 handler 的既有
+// RecordUsage 链计费一次，桥内绝不二次计费。
+func cursorUsageToClaude(u *OpenAIUsage) ClaudeUsage {
+	if u == nil {
+		return ClaudeUsage{}
+	}
+	return ClaudeUsage{
+		InputTokens:              u.InputTokens,
+		OutputTokens:             u.OutputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+		ImageOutputTokens:        u.ImageOutputTokens,
+	}
+}
+
+// cursorForwardResultFromStreaming 由流式结果构造契约 0.1 的转发结果。
 func cursorForwardResultFromStreaming(
 	r *openaiStreamingResult, originalModel, upstreamModel string, startTime time.Time, respHeader http.Header,
-) *OpenAIForwardResult {
+) *ForwardResult {
 	if r == nil {
-		return &OpenAIForwardResult{
+		return &ForwardResult{
 			Model: originalModel, UpstreamModel: upstreamModel, Stream: true,
 			Duration: time.Since(startTime),
 		}
 	}
-	usage := r.usage
-	if usage == nil {
-		usage = &OpenAIUsage{}
-	}
-	return &OpenAIForwardResult{
+	return &ForwardResult{
 		UpstreamHeaders:  respHeader,
-		ResponseID:       strings.TrimSpace(r.responseID),
-		Usage:            *usage,
+		RequestID:        strings.TrimSpace(r.responseID),
+		Usage:            cursorUsageToClaude(r.usage),
 		Model:            originalModel,
 		UpstreamModel:    upstreamModel,
 		Stream:           true,
-		OpenAIWSMode:     false,
-		ResponseHeaders:  respHeader.Clone(),
 		Duration:         time.Since(startTime),
 		FirstTokenMs:     r.firstTokenMs,
 		SearchCount:      r.searchCount,
@@ -435,29 +789,23 @@ func cursorForwardResultFromStreaming(
 	}
 }
 
-// cursorForwardResultFromNonStreaming 由非流式结果构造转发结果。
+// cursorForwardResultFromNonStreaming 由非流式结果构造契约 0.1 的转发结果。
 func cursorForwardResultFromNonStreaming(
 	r *openaiNonStreamingResult, originalModel, upstreamModel string, startTime time.Time, respHeader http.Header,
-) *OpenAIForwardResult {
+) *ForwardResult {
 	if r == nil {
-		return &OpenAIForwardResult{
+		return &ForwardResult{
 			Model: originalModel, UpstreamModel: upstreamModel, Stream: false,
 			Duration: time.Since(startTime),
 		}
 	}
-	usage := r.OpenAIUsage
-	if usage == nil {
-		usage = &OpenAIUsage{}
-	}
-	return &OpenAIForwardResult{
+	return &ForwardResult{
 		UpstreamHeaders:  respHeader,
-		ResponseID:       strings.TrimSpace(r.responseID),
-		Usage:            *usage,
+		RequestID:        strings.TrimSpace(r.responseID),
+		Usage:            cursorUsageToClaude(r.OpenAIUsage),
 		Model:            originalModel,
 		UpstreamModel:    upstreamModel,
 		Stream:           false,
-		OpenAIWSMode:     false,
-		ResponseHeaders:  respHeader.Clone(),
 		Duration:         time.Since(startTime),
 		SearchCount:      r.searchCount,
 		ImageCount:       r.imageCount,
@@ -474,63 +822,6 @@ func (s *OpenAIGatewayService) cursorForwarderOrDefault() *CursorUpstreamForward
 		return s.cursorForwarder
 	}
 	return NewCursorUpstreamForwarder(WithCursorUpstreamNodes(cursorUpstreamNodesSingleton()))
-}
-
-// cursorBuildSessionTokenSource 构造该账号的 AuthService token 来源。
-//
-// **按账号缓存 source**：token source 内含 session_token 缓存（TTL 30 分钟），
-// 若每次请求都 new 一个，缓存永不命中 ⇒ 每次对话都换一次 token，把上游打爆
-// （上游换 token 本身有速率限制）。缓存键是 quota_key_id，与凭证维度一致，
-// 不会跨账号串号。
-func (s *OpenAIGatewayService) cursorBuildSessionTokenSource(
-	ctx context.Context,
-	fwd *CursorUpstreamForwarder,
-	authProvider CursorUpstreamAuthProvider,
-	account *Account,
-) (*cursorSessionTokenSource, error) {
-	if account == nil || account.QuotaKeyID == nil || *account.QuotaKeyID <= 0 {
-		return nil, fmt.Errorf("%w: account has no quota key", ErrCursorSessionTokenUnavailable)
-	}
-	qkID := *account.QuotaKeyID
-
-	s.cursorTokenMu.Lock()
-	cached, ok := s.cursorTokenSources[qkID]
-	s.cursorTokenMu.Unlock()
-	if ok {
-		return cached, nil
-	}
-
-	code, err := s.cursorResolveAuthCode(ctx, account)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCursorSessionTokenUnavailable, err)
-	}
-	src, err := newCursorSessionTokenSource(fwd, authProvider, code)
-	if err != nil {
-		return nil, err
-	}
-
-	s.cursorTokenMu.Lock()
-	defer s.cursorTokenMu.Unlock()
-	// 双检：并发首建时复用先到者，避免同一账号产生多个 source（多份缓存）。
-	if existing, ok := s.cursorTokenSources[qkID]; ok {
-		return existing, nil
-	}
-	if s.cursorTokenSources == nil {
-		s.cursorTokenSources = make(map[int64]*cursorSessionTokenSource)
-	}
-	s.cursorTokenSources[qkID] = src
-	return src, nil
-}
-
-// cursorResolveAuthCode 取回该账号的激活码明文（供 AuthService 换 token）。
-//
-// 依赖缺失时失败关闭——绝不拿空 code 去换 token（上游会 501 DEPRECATED，
-// 白耗请求且拿不到任何东西）。
-func (s *OpenAIGatewayService) cursorResolveAuthCode(ctx context.Context, account *Account) (string, error) {
-	if s == nil || s.cursorQuotaKeys == nil || s.cursorQuotaKeyEnc == nil {
-		return "", ErrCursorQuotaKeyUnresolved
-	}
-	return resolveCursorAccountCode(ctx, account, s.cursorQuotaKeys, s.cursorQuotaKeyEnc)
 }
 
 // cursorRecordUpstreamError 把上游错误记入 ops 事件（不含任何凭证）。
