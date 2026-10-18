@@ -348,6 +348,30 @@ func ComputeEntryModels(cfg *CursorAutoEntryConfig) []string {
 	return out
 }
 
+// CursorAccountModelMapping 把实供清单门控后的选中模型集转换为账号级恒等模型映射
+// （credentials.model_mapping 的既有契约形态：键 = 站点请求模型名，值 = Cursor 上游
+// wire 模型名；实供清单 ID 本身即 wire 名——cursor_gateway_forward 把 ResolveMappedModel
+// 结果直接发往 Cursor 原生端点，故为恒等映射。证据链：docs-local/cursor-model-catalog-fact-20261017.md）。
+//
+// 空集（配置空选 / autoEntry 未装配）返回 nil：调用方保持无映射 → IsModelSupported 对
+// cursor 平台失败关闭（既有闸门，不放宽、不默认放行、无通配）。
+func CursorAccountModelMapping(selectedModels []string) map[string]any {
+	if len(selectedModels) == 0 {
+		return nil
+	}
+	mapping := make(map[string]any, len(selectedModels))
+	for _, id := range selectedModels {
+		if id == "" {
+			continue
+		}
+		mapping[id] = id
+	}
+	if len(mapping) == 0 {
+		return nil
+	}
+	return mapping
+}
+
 // ApplyEntryDefaults 把配置中的入库默认值与有效模型集合写入账号的列与 extra（D1 挂载点调用）。
 //
 // 仅写账号属性，不动挂组集合计算（D2-a 禁区）：

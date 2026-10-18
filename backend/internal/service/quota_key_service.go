@@ -720,6 +720,27 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		if maxInsert <= 0 {
 			return nil
 		}
+
+		// D2-a 配置单次读取（同批号一致性口径，方案审 F2 消化）：本快照同时供
+		// ①账号凭证 model_mapping 构造（下方插入循环）与 ②既有 ApplyEntryDefaults
+		// （挂组路径，替换原挂组内的第二次 GetConfig），同批账号两处同源同快照。
+		// autoEntry 未装配（nil）时跳过：账号无映射 → IsModelSupported 对 cursor 失败
+		// 关闭（既有闸门，不放宽），与 D1 既有测试/未装配场景行为一致。
+		//
+		// 读取失败 = 上游成功发号之后的本地边界失败（shareai 非幂等，号不可回滚）：
+		// 挂 ErrQuotaKeyMountFailed 哨兵使事务回滚（号不入库），触发方走既有
+		// 「非幂等边界 = 告警 + 停轮」语义，不得当作普通错误继续拉下一候选白耗额度
+		// （方案审 F1 must_fix，2026-10-18）。
+		var entryCfg *CursorAutoEntryConfig
+		var entryModelMapping map[string]any
+		if s.autoEntry != nil {
+			cfg, cerr := s.autoEntry.GetConfig(ctx)
+			if cerr != nil {
+				return fmt.Errorf("quota_key_service: load auto entry config: %w: %w", ErrQuotaKeyMountFailed, cerr)
+			}
+			entryCfg = cfg
+			entryModelMapping = CursorAccountModelMapping(ComputeEntryModels(cfg))
+		}
 		insertedIDs := make([]int64, 0, len(result.Accounts))
 		for i, ua := range result.Accounts {
 			if i >= maxInsert {
@@ -730,7 +751,21 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			// 子键（cursor 凭证为 access_token / refresh_token）以 credcrypt.Encrypt 加密（前缀
 			// enc:v1:，credcrypt.IsEncrypted 幂等），并对整份明文凭证计算 HMAC-SHA256 指纹写入
 			// credentials_mac。不新增加密机制/字段；明文绝不直落库。
-			credStorage, credMAC, cerr := prepareCursorAccountCredentials(ua.Credentials)
+			//
+			// 模型映射在加密之前并入（浅拷贝，不改上游产物）：model_mapping 非敏感键、明文存
+			// JSONB（与其他平台 admin 建号形态一致），MAC 覆盖含映射的最终明文——单次加密+
+			// 单次指纹，契约零改动。空映射集（配置空选/未装配）不写键 → cursor 账号对一切
+			// 模型失败关闭（account.go IsModelSupported 平台分支）。
+			creds := ua.Credentials
+			if entryModelMapping != nil {
+				merged := make(map[string]any, len(creds)+1)
+				for k, v := range creds {
+					merged[k] = v
+				}
+				merged["model_mapping"] = entryModelMapping
+				creds = merged
+			}
+			credStorage, credMAC, cerr := prepareCursorAccountCredentials(creds)
 			if cerr != nil {
 				insertFailErr = fmt.Errorf("prepare credentials: %w", cerr)
 				return fmt.Errorf("quota_key_service: %w", errInsertFailureRollback)
@@ -796,15 +831,8 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			// 上游成功、本地挂载失败（shareai 非幂等，上游发号不可回滚）→ 本地事务回滚
 			//（号不入库）+ 可识别错误供触发方记录"上游可能已被消耗一次"告警；不得表述为
 			//"拉号动作整体回滚"。
-			// D2-a 入库可配置：挂组前一次性读取配置快照（同批次账号共享），逐个写账号属性。
-			var entryCfg *CursorAutoEntryConfig
-			if s.autoEntry != nil {
-				cfg, cerr := s.autoEntry.GetConfig(ctx)
-				if cerr != nil {
-					return fmt.Errorf("quota_key_service: load auto entry config: %w", cerr)
-				}
-				entryCfg = cfg
-			}
+			// D2-a 入库可配置：entryCfg 已在插入前单次读取（同批号一致性口径，方案审 F2），
+			// 此处直接复用同一快照逐个写账号属性，不再二次 GetConfig。
 			for _, accID := range insertedIDs {
 				// 仅写账号属性，不动挂组集合计算（禁区）。nil 时跳过（向后兼容 D1 与未装配）。
 				if s.autoEntry != nil {
