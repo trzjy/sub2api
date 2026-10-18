@@ -1483,17 +1483,80 @@ func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, e
 	return out, nil
 }
 
-// WaterLevel 返回模型 M 的当前水位（候选计数）与统一阈值。
-// 口径（§13.1）：account.platform=cursor + 可调度 + 正常(active) + 未软删 +
-// 当前允许 M 分组（白名单 Allows(M) 的任意未软删活跃分组，不再限定 platform=cursor，
-// 裁定 1：生产无 cursor 平台分组，聚合组按白名单覆盖 cursor 模型）+ 非 temp 窗口
-// （temp_unschedulable_until 为空或早于 now）。阈值恒为 quotaKeyWaterLevelThreshold。
+// rawConfigModelIDs 返回配置中勾选的原始模型 ID（未经过实供清单门控），用于区分
+// "用户真关了" 与 "勾选了但全被实供清单剔除" 两种空集语义（R8-1：CUR-F11）。
+func (w *quotaKeyModelWater) rawConfigModelIDs(ctx context.Context) ([]string, error) {
+	if w.cfgSrc == nil {
+		return modelIDsOf(DefaultAutoEntryConfig()), nil
+	}
+	cfg, err := w.cfgSrc.GetConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("quota_key_model_water: load auto entry config: %w", err)
+	}
+	return modelIDsOf(cfg), nil
+}
+
+// modelIDsOf 抽取配置中勾选的模型 ID（忽略空 ID），供 ListAllowedModels 区分空集语义。
+func modelIDsOf(cfg *CursorAutoEntryConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(cfg.Models))
+	for _, m := range cfg.Models {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids
+}
+
+// WaterLevel 返回【cursor 可服务账号去重总量】与统一阈值（P1-D2 总量制：方案 §6.3 / §15.6
+// / §16.1）。补池水位不是"每模型 10"，而是"cursor 可服务账号总量 10"。
 //
-// 与 ListAllowedModels 同判：分组侧不再限定 platform=cursor（原 R3-2 的跨平台排除已随裁定 1
-// 撤销——cursor 账号可由非 cursor 平台分组的白名单覆盖，其水位应计入该模型）。
-func (w *quotaKeyModelWater) WaterLevel(ctx context.Context, modelM string) (int, int, error) {
+// 总量计数谓词（与 S 卡账号资格同源）：
+//   - account.platform=cursor + schedulable=true + status=active + 未软删；
+//   - 非临时窗口（temp_unschedulable_until 为空或早于 now）；
+//   - 显式挂组：至少挂在"白名单允许 cursor 实供模型"的活跃未软删分组之一（裸号不计）；
+//   - 账号级去重：同一账号被多个覆盖模型的分组命中只计一次（Count 走 HasGroupsWith
+//     的 EXISTS 子查询，不做 join 展开，故同号跨模型不会重复计数）；
+//   - 只数已入库可调度账号，不因请求占用的并发而计缺号。
+//
+// modelM 仅作为调用上下文（历史签名 / 新号挂载目标）保留，不再收窄计数：总量制下水位的
+// 比对对象是池级总量。阈值恒为常量 quotaKeyWaterLevelThreshold（=10）。
+func (w *quotaKeyModelWater) WaterLevel(ctx context.Context, _ string) (int, int, error) {
 	now := time.Now()
-	// 当前允许 M 的分组 ID 集合（同 Allows 判定；不再限定 platform=cursor，与 ListAllowedModels 对齐）。
+	// 挂组门槛：白名单允许任一 cursor 实供模型的分组（不再按单一模型 M 收窄）。
+	gids, err := w.cursorCoveringGroupIDs(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(gids) == 0 {
+		// 无任何可服务 cursor 模型的分组：总量为 0（如实反映，不虚报）。
+		return 0, quotaKeyWaterLevelThreshold, nil
+	}
+	current, err := w.client.Account.Query().
+		Where(
+			account.Platform(domain.PlatformCursor),
+			account.Schedulable(true),
+			account.Status(domain.StatusActive),
+			account.DeletedAtIsNil(),
+			account.Or(
+				account.TempUnschedulableUntilIsNil(),
+				account.TempUnschedulableUntilLT(now),
+			),
+			account.HasGroupsWith(group.IDIn(gids...)),
+		).
+		Count(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("quota_key_model_water: count total water level: %w", err)
+	}
+	return current, quotaKeyWaterLevelThreshold, nil
+}
+
+// cursorCoveringGroupIDs 返回"白名单允许任一 cursor 实供模型（CursorRealSupplyModels）"的
+// 活跃未软删分组 ID 集合，供总量水位做"显式挂组"门槛判定。
+// 白名单未启用（Enabled=false）的分组按既有 Allows 语义放行一切（含 cursor 模型），故同样入选。
+func (w *quotaKeyModelWater) cursorCoveringGroupIDs(ctx context.Context) ([]int64, error) {
 	groups, err := w.client.Group.Query().
 		Where(
 			group.Status(domain.StatusActive),
@@ -1501,34 +1564,23 @@ func (w *quotaKeyModelWater) WaterLevel(ctx context.Context, modelM string) (int
 		).
 		All(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("quota_key_model_water: list groups: %w", err)
+		return nil, fmt.Errorf("quota_key_model_water: list groups: %w", err)
+	}
+	cursorModels := make([]string, 0, len(CursorRealSupplyModels))
+	for _, m := range CursorRealSupplyModels {
+		cursorModels = append(cursorModels, m.ID)
 	}
 	gids := make([]int64, 0, len(groups))
 	for _, g := range groups {
-		if GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows(modelM) {
-			gids = append(gids, g.ID)
+		al := GroupModelAllowlistFromDomain(g.ModelAllowlist)
+		for _, m := range cursorModels {
+			if al.Allows(m) {
+				gids = append(gids, g.ID)
+				break
+			}
 		}
 	}
-	current := 0
-	if len(gids) > 0 {
-		current, err = w.client.Account.Query().
-			Where(
-				account.Platform(domain.PlatformCursor),
-				account.Schedulable(true),
-				account.Status(domain.StatusActive),
-				account.DeletedAtIsNil(),
-				account.Or(
-					account.TempUnschedulableUntilIsNil(),
-					account.TempUnschedulableUntilLT(now),
-				),
-				account.HasGroupsWith(group.IDIn(gids...)),
-			).
-			Count(ctx)
-		if err != nil {
-			return 0, 0, fmt.Errorf("quota_key_model_water: count water level: %w", err)
-		}
-	}
-	return current, quotaKeyWaterLevelThreshold, nil
+	return gids, nil
 }
 
 // isCooldownRefreshError 判定该 key 的 last_refresh_error 是否为【冷却】类错误。
@@ -1542,9 +1594,14 @@ func isCooldownRefreshError(errStr *string) bool {
 	return strings.HasPrefix(strings.TrimSpace(*errStr), ErrUpstreamCooldown.Error())
 }
 
-// ListCandidateKeys 返回模型 M 下需要补池的候选 quota_key ID：
+// ListCandidateKeys 返回池级（不按模型收窄）需要补池的候选 quota_key ID：
 // active + 非 exhausted + 未过期 + 未软删 + 有剩余容量（working < MaxAccountsPerQuotaKey）。
-// limit>0 时由实现方按需截断（差额）；模型 M 不收窄候选集——挂载语义由 PullAccountsForModel 决定目标分组。
+// limit>0 时由实现方按需截断（reconciler 传入的是总量缺口）；模型 M 不收窄候选集——
+// 挂载语义由 PullAccountsForModel 决定目标分组。
+//
+// P1-D2 总量制：缺号驱动由"cursor 可服务账号总量 < 10"触发，候选集与具体模型无关，
+// 故此处对全部有效码统一预检后返回（单码语义不变：只按 key 自身状态过滤、不做跨模型展开；
+// 每码 MaxAccountsPerQuotaKey=15 上限与非幂等保护均保持不变）。
 //
 // 裁定 3 冷却规则（last_refresh_error IS NULL 这一永久排除已删除，不得换皮重演）：
 //   - 冷却类错误（last_refresh_error 包 ErrUpstreamCooldown）且距 last_refresh_at 不足

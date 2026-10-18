@@ -1649,8 +1649,9 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 // ---------------------------------------------------------------------------
 // FIX-1 F1/F4：生产用 QuotaKeyModelWaterProvider 口径用例 + §13.3 解析哨兵用例
 //（unit 标签，连本地 quota_test 库）。
-//   - F1：WaterLevel 的 M 过滤 / temp 窗口排除；ListCandidateKeys 的候选 key 状态过滤；
-//     阈值恒为 quotaKeyWaterLevelThreshold（=10，不随模型变化）。
+//   - F1：WaterLevel 的池级去重总量（P1-D2 总量制，不按模型收窄）/ temp 窗口排除；
+//     ListCandidateKeys 的候选 key 状态过滤；阈值恒为 quotaKeyWaterLevelThreshold
+//     （=10，语义为 cursor 可服务账号总量，不随模型变化）。
 //   - F4：groupResolver 出错（上游成功之后）→ errors.Is(err, ErrQuotaKeyMountFailed)。
 // ---------------------------------------------------------------------------
 
@@ -1742,51 +1743,101 @@ func TestQuotaKeyModelWater_ListAllowedModelsPlatformScoped(t *testing.T) {
 		"model covered ONLY by a group outside the model's owning platform must NOT be enumerated (P1-B2 U7)")
 }
 
-// TestQuotaKeyModelWater_WaterLevelFiltersByModel 验证水位按模型 M 过滤：仅"白名单含 M"
-// 的分组内的候选账号计入水位（跨模型不串），且阈值恒为常量 10。
+// TestQuotaKeyModelWater_WaterLevelIsPoolTotalDedupedAcrossModels 验证 P1-D2 总量口径：
+// WaterLevel 返回【cursor 可服务账号去重总量】，不随 modelM 收窄；同一账号被多个覆盖模型
+// 的分组命中只计一次（§6.3），阈值恒为常量 10。
 //
-// 用例用 mustCreateCursorGroup 构造覆盖分组（任意平台分组均可，裁定 1 不限定 platform=cursor）。
-func TestQuotaKeyModelWater_WaterLevelFiltersByModel(t *testing.T) {
+// 用例用 mustCreateGroup 构造覆盖分组（任意平台分组均可，裁定 1 不限定 platform=cursor）；
+// 断言一律走【基线 + 增量】而非绝对计数：quota_test 是持久库，历史轮次可能遗留可服务账号，
+// 绝对计数会随运行次序漂移，增量才表达"本用例新增账号是否按总量去重计入"。
+func TestQuotaKeyModelWater_WaterLevelIsPoolTotalDedupedAcrossModels(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 	w := NewQuotaKeyModelWater(client, nil)
 
-	// 模型名全局唯一：避免持久库中上一轮遗留的同名白名单分组把遗留账号计入本轮水位。
-	modelA := fix1UniqueModel("cursor-fix1-a")
-	modelB := fix1UniqueModel("cursor-fix1-b")
-	// 持久库清理：历史轮次遗留的 c11-grp-cursor-* 组（无主、白名单各异）会把遗留账号计入
-	// 本轮水位（WaterLevel 扫全未软删活跃分组）。用例级清理只删本前缀测试自建组，
-	// 不触碰生产数据（此库仅测试使用）。前置清理在建组前执行，t.Cleanup 兜底本轮产物。
-	cleanupLegacyCursorGroups := func() {
-		_, _ = client.Group.Delete().
-			Where(entgroup.NameHasPrefix("c11-grp-cursor-")).
-			Exec(context.Background())
-	}
-	cleanupLegacyCursorGroups()
-	t.Cleanup(cleanupLegacyCursorGroups)
-	grpA := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelA}})
-	grpB := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelB}})
+	// 两个覆盖分组各自允许【不同】的 cursor 实供模型（挂组门槛：白名单允许任一 cursor 实供模型）。
+	require.GreaterOrEqual(t, len(CursorRealSupplyModels), 2, "fixture needs at least two real-supply cursor models")
+	modelA := CursorRealSupplyModels[0].ID
+	modelB := CursorRealSupplyModels[1].ID
+	require.NotEqual(t, modelA, modelB, "fixture needs two distinct real-supply cursor models")
 
-	// 各分组一条候选账号（共享一个合法归属 key，仅 FK 需要），互挂不串。
+	grpA := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelA}})
+	// 覆盖第二个实供模型的分组：用于构造"同一账号跨多个 cursor 模型命中"。
+	grpB := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelB}})
+	// 允许一切的分组（白名单未启用 → Allows 放行全部，含 cursor 实供模型）：用于构造去重边界
+	// ——同一账号再挂一个覆盖组也不得被计第二次。
+	grpAllowAll := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: false})
+	// 不覆盖任何 cursor 实供模型的分组（白名单只允许一个无关模型）：其中的账号不计入池。
+	grpNonCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{fix1UniqueModel("cursor-fix1-nocursor")},
+	})
+
 	holder := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	accA := mustCreateCursorAccount(t, client, holder.ID)
-	mustLinkAccountToGroup(t, client, accA.ID, grpA.ID)
-	accB := mustCreateCursorAccount(t, client, holder.ID)
-	mustLinkAccountToGroup(t, client, accB.ID, grpB.ID)
+	accs := make([]int64, 0, 4)
+	// R10-1（CUR-F13）：复原本用例自建分组与账号，避免残留共享库污染他用例
+	//（如 F10 全等挂载断言、F1 交集断言）。先清挂载链接，再删分组、软删账号。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		for _, gid := range []int64{grpA.ID, grpB.ID, grpAllowAll.ID, grpNonCursor.ID} {
+			_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(gid)).Exec(cctx)
+			_, _ = client.Group.Delete().Where(entgroup.IDEQ(gid)).Exec(cctx)
+		}
+		for _, aid := range accs {
+			_ = client.Account.UpdateOneID(aid).SetDeletedAt(time.Now()).Exec(cctx)
+		}
+	})
 
-	curA, thr, err := w.WaterLevel(ctx, modelA)
+	// 基线：持久库可能已有无关系的可服务账号，故以基线 + 增量断言。
+	base, thr, err := w.WaterLevel(ctx, modelA)
 	require.NoError(t, err)
 	require.Equal(t, quotaKeyWaterLevelThreshold, thr, "threshold must be constant 10")
-	require.Equal(t, 1, curA, "only account in group allowing modelA counts")
+	// 总量口径：问哪个模型结果都相同（modelM 不再收窄计数）。
+	baseB, _, err := w.WaterLevel(ctx, modelB)
+	require.NoError(t, err)
+	require.Equal(t, base, baseB, "pool total must not vary with modelM")
 
+	// ① 同号跨双模型：同时挂在允许不同模型的两个分组上 → 只计 1（§6.3 去重）。
+	accDual := mustCreateCursorAccount(t, client, holder.ID)
+	accs = append(accs, accDual.ID)
+	mustLinkAccountToGroup(t, client, accDual.ID, grpA.ID)
+	mustLinkAccountToGroup(t, client, accDual.ID, grpB.ID)
+
+	curA, _, err := w.WaterLevel(ctx, modelA)
+	require.NoError(t, err)
+	require.Equal(t, base+1, curA, "one account covered by TWO groups (different models) must count exactly once")
 	curB, _, err := w.WaterLevel(ctx, modelB)
 	require.NoError(t, err)
-	require.Equal(t, 1, curB, "only account in group allowing modelB counts")
+	require.Equal(t, base+1, curB, "per-model WaterLevel must return the same pool total")
 
-	// 无任何分组覆盖的模型 → 水位 0。
-	curUnknown, _, err := w.WaterLevel(ctx, fix1UniqueModel("cursor-fix1-unknown"))
+	// ② 去重边界：同一账号再挂一个"允许一切"的覆盖组 → 仍只计 1，不得翻番。
+	mustLinkAccountToGroup(t, client, accDual.ID, grpAllowAll.ID)
+	curAfterThirdGroup, _, err := w.WaterLevel(ctx, modelA)
 	require.NoError(t, err)
-	require.Equal(t, 0, curUnknown, "model with no covering group has water level 0")
+	require.Equal(t, base+1, curAfterThirdGroup, "same account in a third covering group must still count once")
+
+	// ③ 第二个账号只挂在 grpB → 总量 +1（累计 +2）。
+	accSecond := mustCreateCursorAccount(t, client, holder.ID)
+	accs = append(accs, accSecond.ID)
+	mustLinkAccountToGroup(t, client, accSecond.ID, grpB.ID)
+	curTwo, _, err := w.WaterLevel(ctx, modelA)
+	require.NoError(t, err)
+	require.Equal(t, base+2, curTwo, "a second distinct servable account must add exactly one to the pool total")
+
+	// ④ 不计入：裸号（未显式挂组）。
+	accBare := mustCreateCursorAccount(t, client, holder.ID)
+	accs = append(accs, accBare.ID)
+	curBare, _, err := w.WaterLevel(ctx, modelA)
+	require.NoError(t, err)
+	require.Equal(t, base+2, curBare, "bare cursor account (no group) must NOT count")
+
+	// ⑤ 不计入：只挂在"不覆盖任何 cursor 实供模型"的分组上的账号。
+	accNonCover := mustCreateCursorAccount(t, client, holder.ID)
+	accs = append(accs, accNonCover.ID)
+	mustLinkAccountToGroup(t, client, accNonCover.ID, grpNonCursor.ID)
+	curNonCover, _, err := w.WaterLevel(ctx, modelA)
+	require.NoError(t, err)
+	require.Equal(t, base+2, curNonCover, "account mounted only to a non-cursor-covering group must NOT count")
 }
 
 // TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly 验证裁定 1：水位不再限定 platform=cursor。
@@ -1847,28 +1898,40 @@ func TestQuotaKeyModelWater_WaterLevelExcludesTempWindow(t *testing.T) {
 	ctx := context.Background()
 	w := NewQuotaKeyModelWater(client, nil)
 
-	modelM := fix1UniqueModel("cursor-fix1-temp")
-	// 覆盖分组用 mustCreateCursorGroup 构造（平台不限，裁定 1）。
-	grp := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
+	// 总量口径：分组必须"允许任一 cursor 实供模型"才构成挂组门槛，愿条件是 cover 判定本身，
+	// 故这里用一个实供模型构造覆盖组（不再使用与实供清单无关的临时模型名）。
+	modelM := CursorRealSupplyModels[0].ID
+	grp := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
 
 	holder := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
 	acc := mustCreateCursorAccount(t, client, holder.ID, func(c *ent.AccountCreate) {
 		c.SetTempUnschedulableUntil(time.Now().Add(time.Hour)) // 将来 → 临时不可调度
 	})
 	mustLinkAccountToGroup(t, client, acc.ID, grp.ID)
+	// R10-1：复原（清挂载链接 → 删分组 → 软删账号），避免残留污染他用例的总量基数。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(grp.ID)).Exec(cctx)
+		_, _ = client.Group.Delete().Where(entgroup.IDEQ(grp.ID)).Exec(cctx)
+		_ = client.Account.UpdateOneID(acc.ID).SetDeletedAt(time.Now()).Exec(cctx)
+	})
+
+	// 基线：持久库可能已有无关系的可服务账号，故以"基线 + 增量"断言。
+	base, _, err := w.WaterLevel(ctx, modelM)
+	require.NoError(t, err)
 
 	cur, _, err := w.WaterLevel(ctx, modelM)
 	require.NoError(t, err)
-	require.Equal(t, 0, cur, "account in temp window (future) must be excluded from water level")
+	require.Equal(t, base, cur, "account in temp window (future) must be excluded from pool total")
 
-	// 窗口过期后重新判定 → 计入。
+	// 窗口过期后重新判定 → 计入（总量 +1，不多不少）。
 	_, err = client.Account.UpdateOneID(acc.ID).
 		SetTempUnschedulableUntil(time.Now().Add(-time.Hour)).
 		Save(ctx)
 	require.NoError(t, err)
 	cur, _, err = w.WaterLevel(ctx, modelM)
 	require.NoError(t, err)
-	require.Equal(t, 1, cur, "account past temp window must be counted in water level")
+	require.Equal(t, base+1, cur, "account past temp window must be counted exactly once in pool total")
 }
 
 // TestQuotaKeyModelWater_ListCandidateKeysFiltersByKeyState 验证候选 key 按状态过滤：

@@ -95,32 +95,60 @@ func (o *reconOpsRepo) lastSuccessCalled() bool {
 	return o.lastSucc
 }
 
-// fakeModelWater 是 QuotaKeyModelWaterProvider 的测试替身，控制枚举的模型、
-// 各模型水位、各模型候选 key，并可按模型注入错误（合同 §5：替身仅存于测试）。
+// fakeModelWater 是 QuotaKeyModelWaterProvider 的测试替身（P1-D2 总量口径）：控制枚举的
+// 模型、池级水位（cursor 可服务账号【去重总量】）与池级候选 key，并可注入错误
+// （合同 §5：替身仅存于测试）。
+//
+// 总量口径下水位与候选都不再按模型键区分 —— 同一账号跨多个覆盖模型只计一次，故替身用单个
+// level / 单个 candidates 列表表达池级状态；models 仍保留（决定新号挂组的模型上下文）。
 type fakeModelWater struct {
 	mu         sync.Mutex
 	models     []string
-	levels     map[string]int
-	candidates map[string][]int64
+	level      int
+	candidates []int64
+
+	// cooldownKeys / fullKeys 模拟提供方侧【有效码预检】（P1-D2 §6.3）：冷却窗口内的码与
+	// 无剩余容量（working>=15）的码不得进入候选集。默认空 → 不过滤，保持其它用例原语义。
+	cooldownKeys map[int64]bool
+	fullKeys     map[int64]bool
 
 	listErr  error
-	waterErr map[string]error
-	candErr  map[string]error
+	waterErr error
+	candErr  error
 
-	// 调用计数（用于断言扫描行为）。
+	// 调用计数（用于断言扫描行为与"缺口驱动的重算次数"）。
 	listCalls  int
-	waterCalls map[string]int
-	candCalls  map[string]int
+	waterCalls int
+	candCalls  int
+	// limits 记录每次 ListCandidateKeys 收到的 limit（reconciler 应传【总量缺口】）。
+	limits []int
 }
 
 func newFakeModelWater() *fakeModelWater {
-	return &fakeModelWater{
-		levels:     make(map[string]int),
-		candidates: make(map[string][]int64),
-		waterErr:   make(map[string]error),
-		candErr:    make(map[string]error),
-		waterCalls: make(map[string]int),
-		candCalls:  make(map[string]int),
+	return &fakeModelWater{}
+}
+
+// markCooldown / markFull 把指定 key 标为"冷却中" / "容量已满（working>=15）"，
+// 使其在 ListCandidateKeys 预检阶段即被排除（不进入候选集、本轮不得被拉）。
+func (f *fakeModelWater) markCooldown(ids ...int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range ids {
+		if f.cooldownKeys == nil {
+			f.cooldownKeys = make(map[int64]bool)
+		}
+		f.cooldownKeys[id] = true
+	}
+}
+
+func (f *fakeModelWater) markFull(ids ...int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range ids {
+		if f.fullKeys == nil {
+			f.fullKeys = make(map[int64]bool)
+		}
+		f.fullKeys[id] = true
 	}
 }
 
@@ -131,30 +159,76 @@ func (f *fakeModelWater) ListAllowedModels(_ context.Context) ([]string, error) 
 	return f.models, f.listErr
 }
 
-func (f *fakeModelWater) WaterLevel(_ context.Context, m string) (int, int, error) {
+func (f *fakeModelWater) WaterLevel(_ context.Context, _ string) (int, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.waterCalls[m]++
-	if err, ok := f.waterErr[m]; ok {
-		return 0, 0, err
+	f.waterCalls++
+	if f.waterErr != nil {
+		return 0, 0, f.waterErr
 	}
-	return f.levels[m], quotaKeyWaterLevelThreshold, nil
+	return f.level, quotaKeyWaterLevelThreshold, nil
 }
 
-func (f *fakeModelWater) ListCandidateKeys(_ context.Context, m string, limit int) ([]int64, error) {
+func (f *fakeModelWater) ListCandidateKeys(_ context.Context, _ string, limit int) ([]int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.candCalls[m]++
-	if err, ok := f.candErr[m]; ok {
-		return nil, err
+	f.candCalls++
+	f.limits = append(f.limits, limit)
+	if f.candErr != nil {
+		return nil, f.candErr
 	}
-	cands := f.candidates[m]
+	// 有效码预检（提供方职责）：冷却中 / 无剩余容量的码不进入候选集。
+	cands := make([]int64, 0, len(f.candidates))
+	for _, id := range f.candidates {
+		if f.cooldownKeys[id] || f.fullKeys[id] {
+			continue
+		}
+		cands = append(cands, id)
+	}
 	if limit > 0 && len(cands) > limit {
 		cands = cands[:limit]
 	}
 	out := make([]int64, len(cands))
 	copy(out, cands)
 	return out, nil
+}
+
+// addAccounts 模拟"拉号成功后实际入库并可服务"的账号增量：只有真实入库才会抬高池级水位，
+// 用于断言 reconciler 是按实际入库账号重算缺口，而不是按"选中/拉取过的 key 数"计数。
+func (f *fakeModelWater) addAccounts(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.level += n
+}
+
+// waterCallCount 返回 WaterLevel 被调用的次数（断言"每次拉号后按实际入库账号重算"）。
+func (f *fakeModelWater) waterCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.waterCalls
+}
+
+// candCallCount 返回 ListCandidateKeys 被调用的次数。
+func (f *fakeModelWater) candCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.candCalls
+}
+
+// currentLevel 返回当前池级总量（断言收尾状态）。
+func (f *fakeModelWater) currentLevel() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.level
+}
+
+// requestedLimits 返回每次 ListCandidateKeys 收到的 limit 快照（断言传入的是总量缺口）。
+func (f *fakeModelWater) requestedLimits() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]int, len(f.limits))
+	copy(out, f.limits)
+	return out
 }
 
 func (f *fakeModelWater) listCallCount() int {
@@ -175,6 +249,10 @@ type fakePuller struct {
 
 	blockOn map[int64]chan struct{}
 	onStart func(int64)
+
+	// afterPull 在每次拉号动作完成后回调（携带拉号结果），供用例模拟"成功入库后水位上涨"。
+	// 总量制断言依赖它区分【拉过了】与【真的补到了号】。
+	afterPull func(keyID int64, err error)
 }
 
 func newFakePuller() *fakePuller {
@@ -193,9 +271,29 @@ func (p *fakePuller) PullAccounts(_ context.Context, quotaKeyID int64) error {
 	p.models = append(p.models, "") // 2 参入口：不携带模型上下文
 	p.mu.Unlock()
 	if err, ok := p.errOnIDs[quotaKeyID]; ok {
+		p.invokeAfterPull(quotaKeyID, err)
 		return err
 	}
+	p.invokeAfterPull(quotaKeyID, p.defaultErr)
 	return p.defaultErr
+}
+
+// invokeAfterPull 触发 afterPull 钩子（在返回错误之前），用例可据此抬高池级水位以模拟真实入库。
+func (p *fakePuller) invokeAfterPull(quotaKeyID int64, err error) {
+	if p.afterPull != nil {
+		p.afterPull(quotaKeyID, err)
+	}
+}
+
+// autoRegisterOnSuccess 让替身拉号在【成功】时把 n 个账号计入池级水位，模拟"拉号成功且新号
+// 确实入库、可服务"。总量制编排依赖这个反馈闭环：只有真实入库才会抬高 cursor 可服务账号总量，
+// 因此用例可以用它区分【拉过了】与【真的补到了号】（禁止场景：一次都没入库却认为补满）。
+func (p *fakePuller) autoRegisterOnSuccess(mw *fakeModelWater, accountsPerPull int) {
+	p.afterPull = func(_ int64, err error) {
+		if err == nil {
+			mw.addAccounts(accountsPerPull)
+		}
+	}
 }
 
 // PullAccountsForModel 是 quotaKeyPuller 接口扩展的测试替身实现（F2：水位触发补池携带模型
@@ -213,8 +311,10 @@ func (p *fakePuller) PullAccountsForModel(_ context.Context, quotaKeyID int64, m
 	p.models = append(p.models, modelM)
 	p.mu.Unlock()
 	if err, ok := p.errOnIDs[quotaKeyID]; ok {
+		p.invokeAfterPull(quotaKeyID, err)
 		return err
 	}
+	p.invokeAfterPull(quotaKeyID, p.defaultErr)
 	return p.defaultErr
 }
 
@@ -257,8 +357,8 @@ func newTestReconciler(puller *fakePuller, ops *reconOpsRepo, provider QuotaKeyM
 func TestReconciler_WaterLevelBelow_TriggersPullByDeficit(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 7 // 低于 10 → 差额 3
-	mw.candidates["m1"] = []int64{100, 101, 102, 103, 104}
+	mw.level = 7 // 低于 10 → 差额 3
+	mw.candidates = []int64{100, 101, 102, 103, 104}
 
 	puller := newFakePuller()
 	ops := newReconOpsRepo()
@@ -276,7 +376,7 @@ func TestReconciler_WaterLevelBelow_TriggersPullByDeficit(t *testing.T) {
 			t.Fatalf("expected pulls for %v, got %v", want, ids)
 		}
 	}
-	if c := mw.candCalls["m1"]; c != 1 {
+	if c := mw.candCallCount(); c != 1 {
 		t.Fatalf("expected ListCandidateKeys called once, got %d", c)
 	}
 	// F2：补池必须携带模型 M 走 PullAccountsForModel（3 参入口），而非无模型的 2 参入口
@@ -328,8 +428,8 @@ func TestReconciler_WaterLevelTrigger_MountsPulledAccountToCoveringGroup(t *test
 
 	mw := newFakeModelWater()
 	mw.models = []string{modelM}
-	mw.levels[modelM] = 0 // 低于阈值 10 → 按差额补池
-	mw.candidates[modelM] = []int64{qk.ID}
+	mw.level = 0 // 低于阈值 10 → 按差额补池
+	mw.candidates = []int64{qk.ID}
 
 	r := NewQuotaKeyReconciler(newFakeQuotaKeyRepo(), svc, newReconOpsRepo())
 	r.SetModelWaterProvider(mw)
@@ -350,8 +450,8 @@ func TestReconciler_WaterLevelTrigger_MountsPulledAccountToCoveringGroup(t *test
 func TestReconciler_WaterLevelAbove_NoPull(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 10 // 等于阈值 → 已达水位
-	mw.candidates["m1"] = []int64{100, 101}
+	mw.level = 10 // 等于阈值 → 已达水位
+	mw.candidates = []int64{100, 101}
 
 	puller := newFakePuller()
 	ops := newReconOpsRepo()
@@ -364,14 +464,14 @@ func TestReconciler_WaterLevelAbove_NoPull(t *testing.T) {
 	}
 }
 
-// TestReconciler_WaterLevelMultipleModels_PullsByPerModelDeficit 验证多模型各自按差额独立补池。
-func TestReconciler_WaterLevelMultipleModels_PullsByPerModelDeficit(t *testing.T) {
+// TestReconciler_MultipleModels_PullsByPoolDeficitOnly 验证 P1-D2 总量口径：多模型不再各自
+// 派生缺口——补池只看"cursor 可服务账号去重总量"。两个允许模型 + 池级缺口 2 → 只补 2 次，
+// 不因"有 2 个模型"而翻倍（旧每模型 10 口径会拉 2+5=7 次）。
+func TestReconciler_MultipleModels_PullsByPoolDeficitOnly(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1", "m2"}
-	mw.levels["m1"] = 8 // 差额 2
-	mw.levels["m2"] = 5 // 差额 5
-	mw.candidates["m1"] = []int64{10, 11, 12}
-	mw.candidates["m2"] = []int64{20, 21, 22, 23, 24, 25}
+	mw.level = 8 // 池级总量 8 → 缺口 2（与模型个数无关）
+	mw.candidates = []int64{10, 11, 12, 20, 21, 22, 23, 24, 25}
 
 	puller := newFakePuller()
 	ops := newReconOpsRepo()
@@ -379,8 +479,14 @@ func TestReconciler_WaterLevelMultipleModels_PullsByPerModelDeficit(t *testing.T
 
 	r.runOnce()
 
-	if got := puller.callCount(); got != 7 {
-		t.Fatalf("expected 2+5=7 pulls, got %d", got)
+	if got := puller.callCount(); got != 2 {
+		t.Fatalf("expected 2 pulls (pool deficit=10-8), not per-model sum, got %d (%v)", got, puller.calledIDs())
+	}
+	// 挂载上下文仍须携带具体模型 M（§13.3 挂组），不得退化成无模型的裸拉号。
+	for i, m := range puller.calledModels() {
+		if m == "" {
+			t.Fatalf("pull %d must carry a model context for group mounting, got empty", i)
+		}
 	}
 }
 
@@ -388,8 +494,8 @@ func TestReconciler_WaterLevelMultipleModels_PullsByPerModelDeficit(t *testing.T
 func TestReconciler_PullErrorDoesNotAbort(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 0 // 差额 10，但候选仅 2 个
-	mw.candidates["m1"] = []int64{30, 40}
+	mw.level = 0 // 差额 10，但候选仅 2 个
+	mw.candidates = []int64{30, 40}
 
 	puller := newFakePuller()
 	puller.errOnIDs[30] = context.DeadlineExceeded // 任意错误，模拟拉号失败
@@ -411,9 +517,9 @@ func TestReconciler_PullErrorDoesNotAbort(t *testing.T) {
 // 时，reconciler 停拉并记录原因到心跳 LastResult。
 func TestReconciler_NoCandidateKeys_StopsAndRecordsReason(t *testing.T) {
 	mw := newFakeModelWater()
+	// 总量口径：models 仅作挂载上下文，水位是池级单一总量（不再按模型取 levels）。
 	mw.models = []string{"m1", "m2"}
-	mw.levels["m1"] = 12 // 达水位
-	mw.levels["m2"] = 15 // 达水位
+	mw.level = 12 // 池级总量已达水位 → 不补池
 
 	puller := newFakePuller()
 	ops := newReconOpsRepo()
@@ -497,7 +603,7 @@ func TestReconciler_ListModelsError_RecordsError(t *testing.T) {
 func TestReconciler_HeartbeatWritten(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 10 // 达水位 → 无候选，仍写一次心跳
+	mw.level = 10 // 达水位 → 无候选，仍写一次心跳
 
 	puller := newFakePuller()
 	ops := newReconOpsRepo()
@@ -659,8 +765,8 @@ func TestReconciler_StopCancels(t *testing.T) {
 func TestReconciler_NotifyAccountRemoved_OnlySetsPending(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 0 // 严重缺水位
-	mw.candidates["m1"] = []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	mw.level = 0 // 严重缺水位
+	mw.candidates = []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 
 	puller := newFakePuller()
 	ops := newReconOpsRepo()
@@ -679,8 +785,8 @@ func TestReconciler_NotifyAccountRemoved_OnlySetsPending(t *testing.T) {
 func TestReconciler_NotifyAccountRemoved_PullsOnDeficit(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 4 // 差额 6
-	mw.candidates["m1"] = []int64{100, 101, 102, 103, 104, 105, 106}
+	mw.level = 4 // 差额 6
+	mw.candidates = []int64{100, 101, 102, 103, 104, 105, 106}
 
 	puller := newFakePuller()
 	ops := newReconOpsRepo()
@@ -707,8 +813,8 @@ func TestReconciler_NotifyAccountRemoved_PullsOnDeficit(t *testing.T) {
 func TestReconciler_NotifyAccountRemoved_NoDeficitNoPull(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 10 // 达水位，无缺口
-	mw.candidates["m1"] = []int64{100}
+	mw.level = 10 // 达水位，无缺口
+	mw.candidates = []int64{100}
 
 	puller := newFakePuller()
 	ops := newReconOpsRepo()
@@ -730,8 +836,8 @@ func TestReconciler_NotifyAccountRemoved_NoDeficitNoPull(t *testing.T) {
 func TestReconciler_NotifyAccountRemoved_NoLossWhileBusy(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 5 // 差额 5
-	mw.candidates["m1"] = []int64{100}
+	mw.level = 5 // 差额 5
+	mw.candidates = []int64{100}
 
 	puller := newFakePuller()
 	release := make(chan struct{})
@@ -826,8 +932,8 @@ func TestQuotaKeyReconciler_StopLinearization_ConfirmRejectsAfterTryBegin(t *tes
 func TestQuotaKeyReconciler_StopDuringInflight_NoNewPull(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 0 // 差额 10
-	mw.candidates["m1"] = []int64{100, 101, 102}
+	mw.level = 0 // 差额 10
+	mw.candidates = []int64{100, 101, 102}
 
 	puller := newFakePuller()
 	release := make(chan struct{})
@@ -886,12 +992,12 @@ func TestQuotaKeyReconciler_NoNewPullAfterStopReturns(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		mw := newFakeModelWater()
 		mw.models = []string{"m1"}
-		mw.levels["m1"] = 0
+		mw.level = 0
 		cands := make([]int64, 0, 20)
 		for k := int64(1); k <= 20; k++ {
 			cands = append(cands, k)
 		}
-		mw.candidates["m1"] = cands
+		mw.candidates = cands
 
 		puller := newFakePuller()
 		ops := newReconOpsRepo()
@@ -919,10 +1025,9 @@ func TestQuotaKeyReconciler_MountFailedSentinel_StopsRoundAndRecordsHeartbeat(t 
 
 	mw := newFakeModelWater()
 	mw.models = []string{"m1", "m2"}
-	mw.levels["m1"] = 0
-	mw.levels["m2"] = 0
-	mw.candidates["m1"] = []int64{100, 101, 102}
-	mw.candidates["m2"] = []int64{200}
+	mw.level = 0 // 池级总量 0 → 缺口 10
+	// 候选是池级集合（不按模型分桶）：哨兵命中首个 key 后，其余候选全部不得再拉。
+	mw.candidates = []int64{100, 101, 102, 200}
 
 	puller := newFakePuller()
 	// 哨兵以包装错误形式返回（生产为 fmt.Errorf("...: %w: %w", ...)），errors.Is 可识别。
@@ -990,8 +1095,8 @@ func TestQuotaKeyReconciler_InsertFailure_StopsRoundAndRecordsHeartbeat(t *testi
 
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 0 // 低于阈值 → 两个候选都会被尝试（除非停轮）
-	mw.candidates["m1"] = []int64{key1.ID, key2.ID}
+	mw.level = 0 // 低于阈值 → 两个候选都会被尝试（除非停轮）
+	mw.candidates = []int64{key1.ID, key2.ID}
 
 	ops := newReconOpsRepo()
 	r := NewQuotaKeyReconciler(newFakeQuotaKeyRepo(), svc, ops)
@@ -1000,7 +1105,8 @@ func TestQuotaKeyReconciler_InsertFailure_StopsRoundAndRecordsHeartbeat(t *testi
 	r.runOnce()
 
 	// 停轮（直接断言上游调用）：哨兵命中后，本轮后续候选 key2 零上游调用 —— 即停轮发生在
-	// 发号之前，而非"拉了但没落库"。
+	// 发号之前，而非"拉了但没落库"。同时 calledKeys 恰好一个元素 ⇒ 失败的那个 key 本轮
+	// 也没有被重复拉 / 盲重试（§15.6 非幂等边界：沿用既有单 flight + 停轮保护）。
 	mu.Lock()
 	calledKeys := append([]int64(nil), upstreamKeys...)
 	mu.Unlock()
@@ -1033,8 +1139,8 @@ func TestQuotaKeyReconciler_InsertFailure_StopsRoundAndRecordsHeartbeat(t *testi
 func TestQuotaKeyReconciler_NotifyDuringBusy_TriggersExactlyOneExtraRound(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 5 // 低于阈值 → 每轮按差额补 1 个候选
-	mw.candidates["m1"] = []int64{100}
+	mw.level = 5 // 低于阈值 → 每轮按差额补 1 个候选
+	mw.candidates = []int64{100}
 
 	puller := newFakePuller()
 	gate := make(chan struct{}) // 无缓冲：每次 send 恰好放行一轮拉号
@@ -1090,19 +1196,24 @@ func TestQuotaKeyReconciler_NotifyDuringBusy_TriggersExactlyOneExtraRound(t *tes
 func TestQuotaKeyReconciler_HeartbeatPulledCountIsRoundLocal(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 0 // 低于阈值 → 按差额补池
-	mw.candidates["m1"] = []int64{100, 101, 102, 103, 104}
+	// 总量口径：初始池级总量 5 / 阈值 10 → 缺口 5（正好由 5 个候选补满，每个成功拉号入库 1 个号）。
+	mw.level = 5
+	mw.candidates = []int64{100, 101, 102, 103, 104}
 
 	puller := newFakePuller()
+	// 每个成功拉号真实入库 1 个可服务账号 → 补满后本轮正常收尾（写成功摘要）。
+	puller.autoRegisterOnSuccess(mw, 1)
 	ops := newReconOpsRepo()
 	r := newTestReconciler(puller, ops, mw)
 
-	// 第一轮：5 个候选全部成功 → 摘要 "reconciled 5 quota keys"。
+	// 第一轮：5 个候选全部成功并入库 → 达标停拉，摘要 "reconciled 5 quota keys"。
 	r.runOnce()
 	require.Equal(t, "reconciled 5 quota keys", ops.lastResultVal())
+	require.Equal(t, quotaKeyWaterLevelThreshold, mw.currentLevel(), "round 1 must fill the pool to the target")
 
-	// 第二轮：候选收缩到 2 个 → 摘要只含本轮的 2，不得累计成 5+2=7。
-	mw.candidates["m1"] = []int64{200, 201}
+	// 第二轮：候选收缩到 2 个（池因账号移除回落到 8）→ 摘要只含本轮的 2，不得累计成 5+2=7。
+	mw.level = 8
+	mw.candidates = []int64{200, 201}
 	r.runOnce()
 	require.Equal(t, "reconciled 2 quota keys", ops.lastResultVal(),
 		"heartbeat summary must reflect only the current round's pulls (no cross-round accumulation)")
@@ -1117,8 +1228,8 @@ func TestQuotaKeyReconciler_HeartbeatPulledCountIsRoundLocal(t *testing.T) {
 func TestQuotaKeyReconciler_NonMountFailedError_DoesNotStopRound(t *testing.T) {
 	mw := newFakeModelWater()
 	mw.models = []string{"m1"}
-	mw.levels["m1"] = 0
-	mw.candidates["m1"] = []int64{100, 101, 102}
+	mw.level = 0
+	mw.candidates = []int64{100, 101, 102}
 
 	puller := newFakePuller()
 	puller.errOnIDs[100] = errors.New("upstream boom") // 普通错误：与哨兵无 errors.Is 关系
@@ -1140,4 +1251,160 @@ func TestQuotaKeyReconciler_NonMountFailedError_DoesNotStopRound(t *testing.T) {
 	if le := ops.lastErrorVal(); le != "" {
 		t.Fatalf("non-sentinel error must not write a failure heartbeat, got LastError %q", le)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// P1-D2 总量制编排（方案 §6.3 / §15.6 / §16.1）：替身驱动，不制造真实上游耗尽。
+// 断言对象是 runOnce 的编排行为本身（缺口 → 有效码预检 → 拉号 → 按实际入库重算 → 达标停拉 /
+// 如实报告缺口），覆盖范围不含 quota_key_service.go 的真实事务链（那部分由失败 Cases 覆盖）。
+// ---------------------------------------------------------------------------
+
+// TestQuotaKeyReconciler_PoolTotalDeficit_PrecheckPullRecomputeStopsAtTarget 验证 §6.3 编排主体：
+//
+//  1. 缺口驱动：total=0 < threshold=10 → 按缺口 10 取候选（limit 必须等于总量缺口，不是固定值、
+//     也不是"每模型 10"）；
+//  2. 每次拉号后按【实际入库账号】重算总量（不是把"已选中/已拉取的 key 数"当账号增量）；
+//  3. 达标（total>=10）立即停拉：候选池里剩下的 key 一个都不再拉。
+func TestQuotaKeyReconciler_PoolTotalDeficit_PrecheckPullRecomputeStopsAtTarget(t *testing.T) {
+	mw := newFakeModelWater()
+	mw.models = []string{"m1"}
+	mw.level = 0 // 池级总量 0 → 缺口 10
+	// 候选池远多于所需：只有达标前真正被消费的那几个 key 会被拉。
+	mw.candidates = []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+
+	puller := newFakePuller()
+	// 每个成功拉号真实入库 2 个可服务账号 → 5 次拉号补齐 10。
+	// 若编排"把拉取过的 key 数当账号增量"，则会拉满 10 次才停——正是本用例要拦的回归。
+	puller.autoRegisterOnSuccess(mw, 2)
+	ops := newReconOpsRepo()
+	r := newTestReconciler(puller, ops, mw)
+
+	r.runOnce()
+
+	// ②/③：按实际入库重算并在达标时停拉 —— 只拉前 5 个 key，其余候选（6..12）零拉取。
+	require.Equal(t, []int64{1, 2, 3, 4, 5}, puller.calledIDs(),
+		"must stop pulling as soon as the pool total reaches the target (pulls counted as accounts would over-pull)")
+	require.Equal(t, quotaKeyWaterLevelThreshold, mw.currentLevel(), "pool must end at the target total")
+
+	// ①：候选请求次数参数 = 总量缺口（首次 10，非每模型固定值、非单 key 15 上限）。
+	require.Equal(t, []int{quotaKeyWaterLevelThreshold}, mw.requestedLimits(),
+		"candidate listing must be limited by the pool deficit")
+
+	// ②：重算发生在每次拉号之后（初始 1 次 + 每次拉号后 1 次 ≥ 6）。
+	require.GreaterOrEqual(t, mw.waterCallCount(), 5+1,
+		"water level must be recomputed after each pull (by newly registered accounts, not by pull attempts)")
+
+	// 收尾：一轮一次心跳，成功摘要只含本轮真实完成拉号的 key 数。
+	require.Equal(t, 1, ops.hbCalls(), "exactly one heartbeat per round")
+	require.True(t, ops.lastSuccessCalled(), "round reaching the target must record success")
+	require.Empty(t, ops.lastErrorVal(), "no failure must be recorded when the target is reached")
+	require.Equal(t, "reconciled 5 quota keys", ops.lastResultVal())
+}
+
+// TestQuotaKeyReconciler_PoolShortfallReportedHonestly 验证 §15.6 如实报告：
+// 无有效码 / 冷却 / 容量满三种分支下——不虚报补满（摘要不得出现成功拉号口径）、不生成或购买
+// 激活码（零拉取或零入库），并在心跳 LastResult 里记下总量 / 阈值 / 缺口与成因。
+func TestQuotaKeyReconciler_PoolShortfallReportedHonestly(t *testing.T) {
+	// 三个子用例共用同一套断言工具：验证缺口的如实上报口径。
+	assertShortfall := func(t *testing.T, ops *reconOpsRepo, total, wantDeficit int, cause string) {
+		t.Helper()
+		require.Equal(t, 1, ops.hbCalls(), "exactly one heartbeat per round even on shortfall")
+		require.Empty(t, ops.lastErrorVal(), "shortfall (no effective key / exhausted upstream) must not be reported as failure")
+		res := ops.lastResultVal()
+		require.Contains(t, res, "pool below target", "shortfall must be honestly recorded, got %q", res)
+		require.Contains(t, res, fmt.Sprintf("total=%d threshold=%d deficit=%d", total, quotaKeyWaterLevelThreshold, wantDeficit),
+			"shortfall must carry total/threshold/deficit, got %q", res)
+		require.Contains(t, res, cause, "shortfall must name its cause, got %q", res)
+		require.NotContains(t, res, "reconciled", "shortfall must not be reported as a successful reconcile, got %q", res)
+	}
+
+	// ① 无有效码：候选集为空（全部 exhausted/过期/软删或被本轮用尽）——零拉取、如实记缺口。
+	t.Run("no effective quota key", func(t *testing.T) {
+		mw := newFakeModelWater()
+		mw.models = []string{"m1"}
+		mw.level = 3 // 缺口 7
+		mw.candidates = nil
+
+		puller := newFakePuller()
+		ops := newReconOpsRepo()
+		r := newTestReconciler(puller, ops, mw)
+
+		r.runOnce()
+
+		require.Equal(t, 0, puller.callCount(), "no candidate key → no pull at all (must never fabricate a refill)")
+		require.Equal(t, 3, mw.currentLevel(), "pool total must stay honest (unchanged)")
+		assertShortfall(t, ops, 3, 7, "no effective quota key")
+	})
+
+	// ② 冷却：候选码仍在冷却窗口 → 提供方预检排除，同轮不得重复拉（一次也没拉）。
+	t.Run("candidate in cooldown", func(t *testing.T) {
+		mw := newFakeModelWater()
+		mw.models = []string{"m1"}
+		mw.level = 4 // 缺口 6
+		mw.candidates = []int64{501, 502}
+		// 501 在冷却窗口内 → 预检排除；502 可用但上游无号（拉号返回冷却类错误，无新号入库）。
+		mw.markCooldown(501)
+
+		puller := newFakePuller()
+		puller.errOnIDs[502] = fmt.Errorf("%w: 每5分钟内仅可刷新1次", ErrUpstreamCooldown)
+		ops := newReconOpsRepo()
+		r := newTestReconciler(puller, ops, mw)
+
+		r.runOnce()
+
+		// 冷却中的 501 零拉取；502 拉一次即如实收尾，绝不在本轮重复拉同一码。
+		require.Equal(t, []int64{502}, puller.calledIDs(),
+			"cooldown key must not be pulled this round; the remaining key must not be pulled twice")
+		require.Equal(t, 4, mw.currentLevel(), "no account registered → pool total must stay 4")
+		assertShortfall(t, ops, 4, 6, "no new servable cursor account registered")
+	})
+
+	// ③ 容量满：所有候选码 working 已达 MaxAccountsPerQuotaKey(15) → 预检排除，零拉取。
+	t.Run("all candidates at capacity", func(t *testing.T) {
+		mw := newFakeModelWater()
+		mw.models = []string{"m1"}
+		mw.level = 5 // 缺口 5
+		mw.candidates = []int64{601, 602}
+		mw.markFull(601, 602) // working >= 15：无剩余容量
+
+		puller := newFakePuller()
+		ops := newReconOpsRepo()
+		r := newTestReconciler(puller, ops, mw)
+
+		r.runOnce()
+
+		require.Equal(t, 0, puller.callCount(), "keys at capacity must not be pulled (per-key 15 cap stays)")
+		require.Equal(t, 5, mw.currentLevel(), "pool total must stay honest (unchanged)")
+		assertShortfall(t, ops, 5, 5, "no effective quota key")
+	})
+}
+
+// TestQuotaKeyReconciler_MountFailedSentinel_NoRepeatPullSameKeyThisRound 是 §15.6 非幂等停轮
+// 断言的纯替身版本：拉号链命中 ErrQuotaKeyMountFailed（上游已发号、本地入库/挂载失败）时——
+//
+//  1. 立即停轮：本轮后续候选零拉取；
+//  2. 同一 key 本轮不重复拉、不盲重试（既有单 flight / 非幂等保护，本卡不新增机制）；
+//  3. 写失败心跳：LastError 记哨兵、LastResult 记停轮原因。
+func TestQuotaKeyReconciler_MountFailedSentinel_NoRepeatPullSameKeyThisRound(t *testing.T) {
+	mw := newFakeModelWater()
+	mw.models = []string{"m1"}
+	mw.level = 0
+	mw.candidates = []int64{800, 801, 802}
+
+	puller := newFakePuller()
+	puller.errOnIDs[800] = errors.New("upstream boom")                                                         // 普通错误：不停轮
+	puller.errOnIDs[801] = fmt.Errorf("create account: %w: %w", ErrQuotaKeyMountFailed, errors.New("db down")) // 哨兵：停轮
+	ops := newReconOpsRepo()
+	r := newTestReconciler(puller, ops, mw)
+
+	r.runOnce()
+
+	// ①/②：802 零拉取，且每个 key 至多被拉一次（无重复、无盲重试）。
+	require.Equal(t, []int64{800, 801}, puller.calledIDs(),
+		"sentinel must stop the round; no candidate may be pulled twice in one round")
+	// ③：失败心跳写一次，LastError 记哨兵、LastResult 记停轮原因。
+	require.Equal(t, 1, ops.hbCalls(), "exactly one heartbeat on sentinel stop")
+	require.Contains(t, ops.lastErrorVal(), "mount failed after upstream success")
+	require.Contains(t, ops.lastResultVal(), "upstream may have been consumed")
+	require.False(t, ops.lastSuccessCalled(), "non-idempotent failure must be a failed heartbeat")
 }
