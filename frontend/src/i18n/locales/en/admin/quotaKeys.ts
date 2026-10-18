@@ -63,7 +63,8 @@ export default {
       expiresAt: 'Expires At',
       lastRefreshAt: 'Last Refreshed At',
       lastRefreshError: 'Last Error',
-      notes: 'Notes'
+      notes: 'Notes',
+      accountsQuotaHint: 'Account rows never show the quota key quota: key-level quota and account balance are two independent layers and are not copied over.'
     },
     accountsTitle: 'Attached Accounts',
     noAccounts: 'No accounts attached to this quota key',
@@ -98,8 +99,8 @@ export default {
       vendorMuse: 'Muse',
       vendorComposer: 'Composer',
       models: 'Model List (filtered by vendor)',
+      modelsSourceAuto: 'Model capabilities come from the upstream real-supply list automatically; manual entry is not supported, only select or clear.',
       priority: 'Priority',
-      rateMultiplier: 'Rate Multiplier',
       concurrency: 'Concurrency',
       concurrencyPlaceholder: 'TBD after measurement',
       save: 'Save Config',
@@ -121,7 +122,8 @@ export default {
       deviceMaxCount: 'Max Devices',
       expiredAt: 'Expires At',
       accountsWritten: 'Accounts Written',
-      error: 'Failed to probe quota'
+      error: 'Failed to probe quota',
+      keyLevelHint: 'The values above are the quota key (key-level) snapshot: total quota, expiry, devices and take-number results are key-level and do not equal any single account balance.'
     }
   }
 }

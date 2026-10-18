@@ -296,6 +296,10 @@
           </button>
 
           <div v-if="isAccountsExpanded(detail.id)" class="mt-3">
+            <!-- P1-B3 两层额度语义：账号层只展示归属与状态，绝不复制 key 级余额数值。 -->
+            <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.quotaKeys.detail.accountsQuotaHint') }}
+            </p>
             <p v-if="!detail.accounts || detail.accounts.length === 0" class="text-sm text-gray-500 dark:text-gray-400">
               {{ t('admin.quotaKeys.noAccounts') }}
             </p>
@@ -412,6 +416,11 @@
           <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.accounts_written }}</dd>
         </div>
       </dl>
+      <!-- P1-B3 两层额度语义：本弹窗整体是 key 级额度快照（总额度/期限/设备/取号结果），
+           与账号层余额分属两层，不在账号层复制展示。 -->
+      <p v-if="probeResult" class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+        {{ t('admin.quotaKeys.probe.keyLevelHint') }}
+      </p>
       <p v-else-if="probeError" class="text-sm text-red-600 dark:text-red-400">{{ probeError }}</p>
 
       <template #footer>

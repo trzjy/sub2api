@@ -252,7 +252,12 @@ const upstreamSyncPlatforms = new Set([
   'cline',
   // other 平台在后端固定按 OpenAI 兼容协议探测 GET {base_url}/models（见
   // upstream_models.go UsesOpenAIProtocolSharedBaseURL 分支），同样支持在线拉取。
-  'other'
+  'other',
+  // cursor（P1-B3 前端管理收口）：激活码站点渠道账号同样开放「同步上游模型」入口，
+  // 与后端 /admin/accounts/:id/models/sync-upstream 的探测口径一致；后端对不支持的
+  // 平台会回 UpstreamModelSyncErrorUnsupported（400 + 安全文案），前端开放入口不会
+  // 造成静默错误。
+  'cursor'
 ])
 const canSyncUpstream = computed(() => {
   if (props.accountId) {
