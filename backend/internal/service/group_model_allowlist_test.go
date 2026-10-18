@@ -154,6 +154,47 @@ func TestGroupModelAllowlistAllows(t *testing.T) {
 	})
 }
 
+func TestGroupModelAllowlistClaudeCodeLongContextModel(t *testing.T) {
+	baseModel := "deepseek-v4.1-flash"
+	allowlist := GroupModelAllowlist{Enabled: true, Models: []string{baseModel}}
+	for _, model := range []string{
+		baseModel,
+		baseModel + "[1M]",
+		baseModel + "[1m]",
+		baseModel + "[1M][1m]",
+		"claude-sonnet-4.5-thinking[1M]",
+	} {
+		t.Run(model, func(t *testing.T) {
+			cfg := allowlist
+			want := baseModel
+			if strings.HasPrefix(model, "claude-") {
+				cfg = GroupModelAllowlist{Enabled: true, Models: []string{"claude-sonnet-4.5"}}
+				want = "claude-sonnet-4.5"
+			}
+			if !cfg.Allows(model) {
+				t.Fatalf("expected %q to match %q", model, want)
+			}
+		})
+	}
+
+	if (GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-v4-pro"}}).Allows(baseModel + "[1M]") {
+		t.Fatal("long-context suffix must not allow a model outside the group allowlist")
+	}
+
+	candidates := groupModelAllowlistCandidates(baseModel + "[1M]")
+	want := map[string]bool{baseModel + "[1m]": false, baseModel: false}
+	for _, candidate := range candidates {
+		if _, ok := want[candidate]; ok {
+			want[candidate] = true
+		}
+	}
+	for candidate, found := range want {
+		if !found {
+			t.Errorf("candidate %q missing from %#v", candidate, candidates)
+		}
+	}
+}
+
 func TestGroupModelAllowlistEnabled(t *testing.T) {
 	var nilGroup *Group
 	if nilGroup.ModelAllowlistEnabled() {

@@ -153,10 +153,12 @@ func groupModelAllowlistCandidates(model string) []string {
 		candidates = append(candidates, value)
 	}
 
-	add(model)
-	add(strings.TrimPrefix(model, "models/"))
-	add(claude.NormalizeModelID(strings.TrimSuffix(model, "-thinking")))
-	add(NormalizeOpenAICompatRequestedModel(model))
+	for _, candidateModel := range []string{model, normalizeClaudeCodeLongContextModel(model)} {
+		add(candidateModel)
+		add(strings.TrimPrefix(candidateModel, "models/"))
+		add(claude.NormalizeModelID(strings.TrimSuffix(candidateModel, "-thinking")))
+		add(NormalizeOpenAICompatRequestedModel(candidateModel))
+	}
 	return candidates
 }
 

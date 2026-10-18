@@ -189,4 +189,94 @@ describe('AccountTestModal', () => {
 
     expect(wrapper.text()).toContain('已通过 /v1/chat/completions 验证')
   })
+
+  it('shows CodeBuddy probe scope without implying model completion', async () => {
+    const note = 'CodeBuddy 计量接口验证；未验证模型补全。'
+    const chunks = [
+      new TextEncoder().encode(`data: ${JSON.stringify({
+        type: 'test_start',
+        model: 'deepseek-v4.1-flash',
+        text: note
+      })}\n\n`),
+      new TextEncoder().encode('data: {"type":"test_complete","success":true}\n\n')
+    ]
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn().mockImplementation(() => Promise.resolve(
+            chunks.length > 0
+              ? { done: false, value: chunks.shift() }
+              : { done: true, value: undefined }
+          ))
+        })
+      }
+    } as any)
+
+    const wrapper = mount(AccountTestModal, {
+      props: {
+        show: true,
+        account: { ...buildAccount(), platform: 'codebuddy' }
+      },
+      global: {
+        stubs: {
+          BaseDialog: BaseDialogStub,
+          Select: SelectStub,
+          TextArea: TextAreaStub,
+          Icon: true
+        }
+      }
+    })
+
+    await flushPromises()
+    ;(wrapper.vm as any).selectedModelId = 'gpt-5.4'
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(note)
+    expect(wrapper.text()).not.toContain('admin.accounts.usingModel')
+    expect(wrapper.text()).not.toContain('admin.accounts.sendingTestMessage')
+    expect(wrapper.text()).not.toContain('admin.accounts.response')
+  })
+
+  it('preserves the generic model and message description for other platforms', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: new TextEncoder().encode('data: {"type":"test_start","model":"gpt-5.4"}\n\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: new TextEncoder().encode('data: {"type":"test_complete","success":true}\n\n')
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined })
+        })
+      }
+    } as any)
+
+    const wrapper = mount(AccountTestModal, {
+      props: { show: true, account: buildAccount() },
+      global: {
+        stubs: {
+          BaseDialog: BaseDialogStub,
+          Select: SelectStub,
+          TextArea: TextAreaStub,
+          Icon: true
+        }
+      }
+    })
+
+    await flushPromises()
+    ;(wrapper.vm as any).selectedModelId = 'gpt-5.4'
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.usingModel')
+    expect(wrapper.text()).toContain('admin.accounts.sendingTestMessage')
+    expect(wrapper.text()).toContain('admin.accounts.response')
+  })
 })

@@ -162,6 +162,48 @@ func TestGroupModelAllowlistJSONBodyAllowed(t *testing.T) {
 	}
 }
 
+func TestGroupModelAllowlistClaudeCodeLongContextModel(t *testing.T) {
+	baseModel := "deepseek-v4.1-flash"
+	for _, model := range []string{baseModel + "[1M]", baseModel + "[1m][1M]"} {
+		t.Run(model, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			router := gin.New()
+			router.Use(func(c *gin.Context) {
+				c.Set(string(ContextKeyAPIKey), allowlistAPIKey(true, baseModel))
+				c.Next()
+			})
+			router.Use(GroupModelAllowlist())
+			body := `{"model":"` + model + `","messages":[{"role":"user","content":"hi"}]}`
+			router.POST("/v1/messages", func(c *gin.Context) {
+				got, err := io.ReadAll(c.Request.Body)
+				if err != nil {
+					t.Errorf("handler reread body: %v", err)
+					c.Status(http.StatusInternalServerError)
+					return
+				}
+				if string(got) != body {
+					t.Errorf("handler body = %q, want original body %q", got, body)
+				}
+				c.Status(http.StatusOK)
+			})
+
+			w := doJSON(t, router, http.MethodPost, "/v1/messages", body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected allowed long-context request to reach handler, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+
+	router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(true, "deepseek-v4-pro"), "/v1")
+	w := doJSON(t, router, http.MethodPost, "/v1/messages", `{"model":"deepseek-v4.1-flash[1M]"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected model outside the group allowlist to return 404, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("expected denied model not to reach handler, got %v", *calls)
+	}
+}
+
 func TestGroupModelAllowlistJSONBodyDeniedOpenAIFormat(t *testing.T) {
 	router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(true, "claude-sonnet-4.5"), "/v1")
 

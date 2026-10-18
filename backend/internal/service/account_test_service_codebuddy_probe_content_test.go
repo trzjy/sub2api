@@ -143,7 +143,7 @@ func TestCodeBuddyProbe_NonEmptyZeroCodeSucceeds(t *testing.T) {
 	require.Equal(t, codeBuddyBillingMeterPath, upstream.lastReq.URL.Path)
 
 	body := rec.Body.String()
-	require.Contains(t, body, "account is healthy")
+	require.Contains(t, body, "计量接口验证通过；未验证模型补全")
 	require.Contains(t, body, `"type":"test_complete"`)
 	require.Contains(t, body, `"success":true`)
 	require.NotContains(t, body, "PARENT_TOKEN_SECRET")

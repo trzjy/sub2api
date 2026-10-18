@@ -952,6 +952,10 @@ const handleEvent = (event: {
   switch (event.type) {
     case 'test_start':
       addLine(t('admin.accounts.connectedToApi'), 'text-green-400')
+      if (event.text) {
+        addLine(event.text, 'text-gray-400')
+        break
+      }
       if (event.model) {
         addLine(t('admin.accounts.usingModel', { model: event.model }), 'text-cyan-400')
       }

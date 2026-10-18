@@ -88,6 +88,23 @@ func newCodeBuddyProbeTestService(accounts map[int64]*Account, upstream *webProb
 	return svc
 }
 
+func parseCodeBuddyProbeEventText(body, eventType string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		var event struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &event); err == nil && event.Type == eventType {
+			return event.Text
+		}
+	}
+	return ""
+}
+
 // codebuddyQuotaOKResponse 是 get-user-resource 的成功报文（仅 code=0 与最小 data，
 // 探针只判定状态码与业务信封）。
 func codebuddyQuotaOKResponse() *http.Response {
@@ -156,6 +173,11 @@ func TestAccountTestService_CodeBuddyShadowUsesCodeBuddyProbe(t *testing.T) {
 	require.NotContains(t, out, "No API key available", "影子账号不得再落到空凭证分支")
 	require.Contains(t, out, `"type":"test_complete"`)
 	require.Contains(t, out, `"success":true`)
+	require.Equal(t, "CodeBuddy 计量接口验证；未验证模型补全。", parseCodeBuddyProbeEventText(out, "test_start"))
+	require.Contains(t, parseCodeBuddyProbeEventText(out, "content"), "计量接口验证通过；未验证模型补全")
+	require.NotContains(t, out, "account is healthy")
+	require.Less(t, strings.Index(out, `"type":"test_start"`), strings.Index(out, `"type":"content"`))
+	require.Less(t, strings.Index(out, `"type":"content"`), strings.Index(out, `"type":"test_complete"`))
 	// 模型映射仍取影子自身（未被母账号替换）。
 	require.Equal(t, "deepseek-v4.1-flash", parseTestStartModel(out))
 	// 错误/成功文案绝不回显凭证值。
@@ -213,7 +235,11 @@ func TestAccountTestService_NativeCodeBuddyAccountUsesCodeBuddyProbe(t *testing.
 	require.NotNil(t, upstream.lastReq)
 	require.Equal(t, codeBuddyBillingMeterPath, upstream.lastReq.URL.Path)
 	require.Equal(t, "Bearer PARENT_TOKEN_SECRET", upstream.lastReq.Header.Get("Authorization"))
-	require.Contains(t, recorder.Body.String(), `"success":true`)
+	out := recorder.Body.String()
+	require.Contains(t, out, `"success":true`)
+	require.Equal(t, "CodeBuddy 计量接口验证；未验证模型补全。", parseCodeBuddyProbeEventText(out, "test_start"))
+	require.Contains(t, parseCodeBuddyProbeEventText(out, "content"), "计量接口验证通过；未验证模型补全")
+	require.NotContains(t, out, "account is healthy")
 }
 
 // TestAccountTestService_CodeBuddyProbeRejectedByUpstream 401/403 → 上游拒绝，

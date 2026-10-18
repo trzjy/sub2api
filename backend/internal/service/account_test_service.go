@@ -556,7 +556,11 @@ func (s *AccountTestService) testCodeBuddyAccountConnection(c *gin.Context, acco
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+	s.sendEvent(c, TestEvent{
+		Type:  "test_start",
+		Text:  "CodeBuddy 计量接口验证；未验证模型补全。",
+		Model: testModelID,
+	})
 
 	apiURL := strings.TrimRight(ep.BillingBase, "/") + codeBuddyBillingMeterPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader([]byte("{}")))
@@ -618,7 +622,7 @@ func (s *AccountTestService) testCodeBuddyAccountConnection(c *gin.Context, acco
 		return s.sendErrorAndEnd(c, fmt.Sprintf("codebuddy (%s) probe rejected by upstream (%s HTTP %d, %s)", site, codeBuddyBillingMeterPath, resp.StatusCode, reason))
 	}
 
-	s.sendEvent(c, TestEvent{Type: "content", Text: fmt.Sprintf("CodeBuddy (%s) account is healthy.", site)})
+	s.sendEvent(c, TestEvent{Type: "content", Text: fmt.Sprintf("CodeBuddy (%s) 计量接口验证通过；未验证模型补全。", site)})
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil
 }

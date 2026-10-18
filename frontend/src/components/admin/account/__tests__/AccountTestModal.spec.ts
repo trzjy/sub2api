@@ -185,6 +185,34 @@ describe('AccountTestModal', () => {
       prompt: '',
       mode: 'text'
     })
+    expect(wrapper.text()).toContain('admin.accounts.usingModel')
+    expect(wrapper.text()).toContain('admin.accounts.sendingTestMessage')
+  })
+
+  it('CodeBuddy SSE 范围说明不显示模型补全文案', async () => {
+    const note = 'CodeBuddy 计量接口验证；未验证模型补全。'
+    global.fetch = vi.fn().mockResolvedValue(createStreamResponse([
+      `data: ${JSON.stringify({ type: 'test_start', model: 'deepseek-v4.1-flash', text: note })}\n`,
+      'data: {"type":"test_complete","success":true}\n'
+    ])) as any
+
+    const wrapper = mountModal({
+      id: 109,
+      name: 'CodeBuddy Account',
+      platform: 'codebuddy',
+      type: 'oauth',
+      status: 'active'
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(note)
+    expect(wrapper.text()).not.toContain('admin.accounts.usingModel')
+    expect(wrapper.text()).not.toContain('admin.accounts.sendingTestMessage')
+    expect(wrapper.text()).not.toContain('admin.accounts.response')
   })
 
   it('OpenAI Compact 探测会携带 compact 测试模式', async () => {
