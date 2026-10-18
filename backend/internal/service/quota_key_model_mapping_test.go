@@ -163,8 +163,10 @@ func TestQuotaKeyPull_ModelMapping_ManualRefresh(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 
+	// P1-B2 U7：挂载目标必须是模型所属平台（cursor）的目标分组——生产形态为 composite 聚合组。
 	grp, err := client.Group.Create().
 		SetName(fmt.Sprintf("cursor-map-manual-%d", time.Now().UnixNano())).
+		SetPlatform(domain.PlatformComposite).
 		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-6-sol"}}).
 		Save(ctx)
 	require.NoError(t, err)
@@ -187,17 +189,20 @@ func TestQuotaKeyPull_ModelMapping_ManualRefresh(t *testing.T) {
 	require.Len(t, accs, 1)
 	stored := accs[0].Credentials
 
-	// 映射形态：恒等、只含实供清单门控后的勾选集。
+	// 映射形态（P1-B2）：恒等映射 = 静态实供清单，不再随人工勾选漂移
+	// （勾选只勾了 gpt-6-sol / claude-sonnet-5-5，映射仍为整份清单）。
 	mm, ok := stored["model_mapping"].(map[string]any)
 	require.True(t, ok, "credentials.model_mapping must be persisted as a map, got %T", stored["model_mapping"])
-	require.Equal(t, map[string]any{"gpt-6-sol": "gpt-6-sol", "claude-sonnet-5-5": "claude-sonnet-5-5"}, mm)
+	require.Equal(t, CursorAccountModelMapping(CursorStaticEntryModels()), mm,
+		"mapping must be the identity mapping of the static real-supply list")
+	require.Contains(t, mm, "gpt-6-sol")
 
 	// 上游产物不被就地污染（落库走浅拷贝，上游替身的原始 map 保持无映射键）。
 	require.NotContains(t, ua.Credentials, "model_mapping")
 
-	// 持久化重读 → 网关契约：选中命中；未勾选实供模型与官方清单名均失败关闭。
+	// 持久化重读 → 网关契约：实供模型命中；非实供（官方清单名）失败关闭。
 	requireCursorModelMappingGateway(t, cursorDecryptStoredCredentials(t, stored),
-		"gpt-6-sol", "grok-4.7", "gpt-4.1", "claude-opus-5-5")
+		"gpt-6-sol", "gpt-4.1", "claude-3-7-sonnet")
 
 	// 加密 + MAC 定向回归（MAC 覆盖含 model_mapping 的最终明文）。
 	requireCursorMappingEncryptionMAC(t, stored, accs[0].CredentialsMAC)
@@ -239,8 +244,9 @@ func TestQuotaKeyPullForModel_ModelMapping_SingleConfigSnapshot(t *testing.T) {
 	require.Len(t, accs, 1)
 	mm, ok := accs[0].Credentials["model_mapping"].(map[string]any)
 	require.True(t, ok, "auto pull must persist credentials.model_mapping")
-	require.Equal(t, map[string]any{"gpt-6-sol": "gpt-6-sol"}, mm,
-		"mapping must come from the FIRST config snapshot")
+	require.Equal(t, CursorAccountModelMapping(CursorStaticEntryModels()), mm,
+		"mapping must be the static real-supply identity mapping (P1-B2, independent of the config snapshot)")
+	require.Contains(t, mm, "gpt-6-sol")
 	require.Equal(t, 1, provider.getConfigHits,
 		"one pull must read the entry config exactly once (single snapshot for mapping + entry defaults)")
 	require.Len(t, provider.applyCfgs, 1)

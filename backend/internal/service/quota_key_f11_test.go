@@ -5,14 +5,12 @@ package service
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent/accountgroup"
 	entgroup "github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
-	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,14 +27,14 @@ import (
 //	      TestCURF1_AllowedModels_IntersectionExcludesOutside，此处不重复）。
 // ---------------------------------------------------------------------------
 
-// TestCURF11_ListAllowedModels_StaleOfficialModelTriggersConfigError 验证 R8-1 核心：
-// 旧配置残留官方模型名（gpt-4.1，不在实供清单）被 ComputeEntryModels 全剔除 → selected 空，
-// 但原始勾选非空 → 返回可识别配置错误（使 reconciler 走失败心跳），而非被记成正常空跑。
-func TestCURF11_ListAllowedModels_StaleOfficialModelTriggersConfigError(t *testing.T) {
+// TestCURF11_ListAllowedModels_StaleOfficialModelNoLongerErrors 验证 P1-B2 收敛：
+// 补池左项恒为静态实供清单，不再取"人工勾选"，故旧配置残留官方模型名（gpt-4.1，不在实供清单）
+// 不再产生 CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION 配置错误——残留勾选不再是补池输入。
+func TestCURF11_ListAllowedModels_StaleOfficialModelNoLongerErrors(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 
-	// 仅勾选官方模型名 gpt-4.1（缺省 vendor 亦可，反正不在实供清单内会被剔除）。
+	// 仅勾选官方模型名 gpt-4.1（不在实供清单）。
 	cfg := &CursorAutoEntryConfig{
 		Vendors:       map[string]bool{CursorVendorOpenAI: true},
 		Models:        []CursorModelRef{{ID: "gpt-4.1", Vendor: CursorVendorOpenAI}},
@@ -45,39 +43,34 @@ func TestCURF11_ListAllowedModels_StaleOfficialModelTriggersConfigError(t *testi
 	w := NewQuotaKeyModelWater(client, &curF1ConfigSource{cfg: cfg})
 
 	models, err := w.ListAllowedModels(ctx)
-	require.Error(t, err, "stale official-only selection must surface a config error")
-	require.Empty(t, models, "no models should be returned on config error")
-	require.Equal(t, "CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION", infraerrors.Reason(err),
-		"config error must carry the CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION reason")
-	require.Equal(t, http.StatusUnprocessableEntity, infraerrors.Code(err),
-		"config error must use 422 Unprocessable Entity")
+	require.NoError(t, err, "stale official-only selection no longer drives 补池 → must not surface a config error")
+	for _, m := range models {
+		require.NotEqual(t, "gpt-4.1", m, "official-catalog-only name must never be enumerated")
+	}
 }
 
-// TestCURF11_ListAllowedModels_StaleOfficialModelClearedAfterSave 验证 R12-2（CUR-F15）回归：
-// 旧配置残留官方模型名 gpt-4.1（不在实供清单）经前端 AutoEntryConfigModal.save() 静默清理（仅保留
-// 实供清单内 ID）后落库 → ListAllowedModels 不再报 CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION，
-// 管理员点一次保存即解除补池配置错误（空勾选回落为正常空跑，而非配置错误）。
+// TestCURF11_ListAllowedModels_ConfigSelectionIrrelevantAfterP1B2 验证 R12-2（CUR-F15）回归
+// 在 P1-B2 下的形态：无论配置残留官方名还是已清理，ListAllowedModels 都不报错，
+// 且产出同一份"静态实供清单 ∩ 目标分组覆盖"集合（配置不再是补池输入）。
 //
-// 形式说明：本测试直接读配置（curF1ConfigSource），不依赖 settings 落库；故"保存清理后的落库态"
+// 形式说明：本测试直接读配置（curF1ConfigSource），不依赖 settings 落库；"保存清理后的落库态"
 // 以"对配置做与 save() 同口径的实供清单过滤"模拟——与前端 save() 的 availIds 过滤同集
-// （CursorRealSupplyModels）。先断言原始态仍报错的基线（CUR-F11 既有行为不回归），再断言清理后不报错。
-func TestCURF11_ListAllowedModels_StaleOfficialModelClearedAfterSave(t *testing.T) {
+// （CursorRealSupplyModels）。
+func TestCURF11_ListAllowedModels_ConfigSelectionIrrelevantAfterP1B2(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 
-	// 原始配置（CUR-F11 触发错误的形态）：仅勾选官方模型名 gpt-4.1（不在实供清单）。
+	// 原始配置（残留官方模型名形态）：仅勾选 gpt-4.1（不在实供清单）。
 	rawCfg := &CursorAutoEntryConfig{
 		Vendors:       map[string]bool{CursorVendorOpenAI: true},
 		Models:        []CursorModelRef{{ID: "gpt-4.1", Vendor: CursorVendorOpenAI}},
 		EntryDefaults: CursorEntryDefaults{RateMultiplier: 1.0, Priority: 1},
 	}
 	wRaw := NewQuotaKeyModelWater(client, &curF1ConfigSource{cfg: rawCfg})
-	_, errRaw := wRaw.ListAllowedModels(ctx)
-	require.Error(t, errRaw, "stale official-only selection must still surface a config error (CUR-F11 baseline)")
-	require.Equal(t, "CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION", infraerrors.Reason(errRaw),
-		"baseline config error reason must be CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION")
+	modelsRaw, errRaw := wRaw.ListAllowedModels(ctx)
+	require.NoError(t, errRaw, "residual official-name config must not surface a config error (P1-B2)")
 
-	// R12-2：模拟 save() 清理——仅保留实供清单（CursorRealSupplyModels）内 ID，丢弃 gpt-4.1。
+	// 模拟 save() 清理——仅保留实供清单（CursorRealSupplyModels）内 ID，丢弃 gpt-4.1。
 	realSupplyIDs := make(map[string]bool, len(CursorRealSupplyModels))
 	for _, sm := range CursorRealSupplyModels {
 		realSupplyIDs[sm.ID] = true
@@ -94,9 +87,10 @@ func TestCURF11_ListAllowedModels_StaleOfficialModelClearedAfterSave(t *testing.
 		EntryDefaults: rawCfg.EntryDefaults,
 	}
 	wClean := NewQuotaKeyModelWater(client, &curF1ConfigSource{cfg: cleanedCfg})
-	models, err := wClean.ListAllowedModels(ctx)
-	require.NoError(t, err, "after save() cleanup removed stale official model, config must NOT surface config error")
-	require.Empty(t, models, "empty selection after cleanup remains a normal empty run (no regression)")
+	modelsClean, err := wClean.ListAllowedModels(ctx)
+	require.NoError(t, err, "cleaned config must not surface a config error")
+	require.Equal(t, modelsRaw, modelsClean,
+		"config selection no longer affects 补池 enumeration (static supply list drives it)")
 }
 
 // TestCURF11_ListAllowedModels_EmptySelectionIsNormal 验证 R8-1 边界：勾选为空（用户全关）
@@ -125,8 +119,10 @@ func TestCURF11_ListAllowedModels_RealSupplyWithCoverage(t *testing.T) {
 
 	w := NewQuotaKeyModelWater(client, curF1ConfigSelecting("grok-4.7"))
 
+	// P1-B2 U7：分组必须是模型所属平台（cursor）的目标分组——composite 聚合组为生产形态。
 	grp, err := client.Group.Create().
 		SetName(fmt.Sprintf("curf11-cov-%d", time.Now().UnixNano())).
+		SetPlatform(domain.PlatformComposite).
 		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"grok-4.7"}}).
 		Save(ctx)
 	require.NoError(t, err)
