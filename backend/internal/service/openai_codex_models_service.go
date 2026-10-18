@@ -1749,7 +1749,10 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 		if authToken == "" {
 			return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_MISSING", "account has no API key for the Codex models upstream")
 		}
-		normalizedBaseURL, validateErr := s.validateUpstreamBaseURL(baseURL)
+		// Codex manifest 的 base_url 属 query-合并型：客户端可能下发带
+		// ?tenant=acme 等 query 的 base_url，需与端点路径合并放行；
+		// fragment 仍由 validator 层恒拒。其余 base_url 边界仍拒绝 query。
+		normalizedBaseURL, validateErr := s.validateUpstreamBaseURLAllowQuery(baseURL)
 		if validateErr != nil {
 			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_UPSTREAM_INVALID", "invalid Codex models upstream base URL: %v", validateErr)
 		}

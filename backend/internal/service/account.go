@@ -1622,7 +1622,10 @@ func (a *Account) GetAPIProtocol() string {
 	// Responses 协议（实测 chat/completions 400 ModelProtocolUnsupported）。
 	// 掩码账号仍保留 kimi/deepseek/zhipu platform 以维持分组/调度归属，因此
 	// model_mapping 目标同样是协议事实源，不能只按 platform 判断。
-	if a.Platform == PlatformMuse || accountMapsToMuseContributor(a) {
+	// 让位规则：仅当账号无显式 api_protocol 配置时，accountMapsToMuseContributor
+	// 推断才生效；一旦管理员显式配置了 api_protocol（含自适应分协议 api_base_urls），
+	// 则尊重显式协议，不再被推断劫持。（PlatformMuse 平台账号仍固定 responses。）
+	if a.Platform == PlatformMuse || (accountMapsToMuseContributor(a) && strings.TrimSpace(a.GetCredential("api_protocol")) == "") {
 		return APIProtocolResponses
 	}
 	// 协议覆盖仅对多协议 API Key 供应商开放（国产厂商 + 上游新增聚合平台

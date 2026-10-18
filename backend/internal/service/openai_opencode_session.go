@@ -50,22 +50,21 @@ func openCodeInboundBodies(c *gin.Context) [][]byte {
 }
 
 // applyOpenCodeSessionHeader forwards the caller-owned conversation identifier
-// only to OpenCode's official API origin (isOpenCodeHostURL). The caller applies
-// this after account header overrides so a per-conversation value cannot be
-// replaced by a fixed account-wide override. muse / opencode.ai-origin accounts
-// that lack a caller session are handled separately by applyMuseSessionHeader
-// (per-request UUID injection); this helper is the trust boundary that keeps a
-// static account override from being forwarded to non-opencode origins.
+// for OpenCode accounts. OpenCode Go plan accounts always get a session
+// (a stable per-conversation ID when the client supplies one, otherwise a
+// generated UUID to satisfy the upstream MissingSessionID check); official
+// opencode.ai origins additionally accept a caller session for non-Go accounts.
+// The caller applies this after account header overrides so a per-conversation
+// value cannot be replaced by a fixed account-wide override. muse /
+// opencode.ai-origin accounts that lack a caller session are handled separately
+// by applyMuseSessionHeader (per-request UUID injection). The single gate is
+// shouldSendOpenCodeSessionHeader — there is intentionally no additional host
+// gate here, so OpenCode Go accounts keep their session on any upstream target.
 func applyOpenCodeSessionHeader(c *gin.Context, account *Account, targetURL string, headers http.Header, bodies ...[]byte) {
 	if account == nil || account.Type != AccountTypeAPIKey || headers == nil {
 		return
 	}
 	if !shouldSendOpenCodeSessionHeader(account, targetURL) {
-		return
-	}
-
-	// host 判定与 applyMuseSessionHeader 共用同一来源（isOpenCodeHostURL）。
-	if !isOpenCodeHostURL(targetURL) {
 		return
 	}
 
@@ -75,7 +74,12 @@ func applyOpenCodeSessionHeader(c *gin.Context, account *Account, targetURL stri
 	// applyMuseSessionHeader 同源（resolveOpenCodeSessionID(generate=true)），
 	// 不另造机制。此分支使本不携带入站会话的账号测试器（TestAccountConnection）
 	// 对 OpenCode Go 上游出站请求自然带上必需会话头，与正式转发链语义一致。
-	sessionID := resolveOpenCodeSessionID(c, headers, shouldGenerateOpenCodeSession(account, targetURL), bodies...)
+	// payloads 在调用方传入的 bodies 之前拼接协议转换后找回的入站 body
+	// （rememberOpenCodeInboundBody）：转换会丢弃 prompt_cache_key /
+	// metadata.user_id，拼接后这两者作为稳定会话 ID 仍能胜出，而非退化为随机
+	// UUID。
+	payloads := append(openCodeInboundBodies(c), bodies...)
+	sessionID := resolveOpenCodeSessionID(c, headers, shouldGenerateOpenCodeSession(account, targetURL), payloads...)
 	if sessionID == "" {
 		return
 	}

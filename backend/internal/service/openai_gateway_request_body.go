@@ -30,6 +30,11 @@ func (s *OpenAIGatewayService) validateUpstreamBaseURL(raw string) (string, erro
 }
 
 // validateOutboundURL 按 security.url_allowlist 策略校验网关主动连接的出站 URL。
+// 默认拒绝 query（96d761f32 语义），fragment 恒拒。需要放行 query 的调用方
+// （图片下载端点、Codex manifest query-合并型 base_url）请改用
+// validateOutboundURLAllowQuery；其余 base_url 边界（gemini/ollama/seedance/
+// count_tokens/systemone/anthropic passthrough/gateway_upstream_request 等）
+// 必须保持拒绝 query。
 func (s *OpenAIGatewayService) validateOutboundURL(raw string) (string, error) {
 	if s.cfg == nil {
 		return urlvalidator.ValidateURLFormat(raw, false)
@@ -42,6 +47,36 @@ func (s *OpenAIGatewayService) validateOutboundURL(raw string) (string, error) {
 		RequireAllowlist: true,
 		AllowPrivate:     s.cfg.Security.URLAllowlist.AllowPrivateHosts,
 	})
+}
+
+// validateOutboundURLAllowQuery 与 validateOutboundURL 同构的三分支，但全部放行
+// query（fragment 仍由校验器恒拒）。仅用于 query 合法的已构造端点 URL 与
+// query-合并型 base_url（图片下载、Codex manifest）；其余 base_url 边界仍由
+// validateOutboundURL / validateUpstreamBaseURL 拒绝 query。
+func (s *OpenAIGatewayService) validateOutboundURLAllowQuery(raw string) (string, error) {
+	if s.cfg == nil {
+		return urlvalidator.ValidateURLFormatOpts(raw, false, urlvalidator.ValidationOptions{AllowQuery: true})
+	}
+	if !s.cfg.Security.URLAllowlist.Enabled {
+		return urlvalidator.ValidateURLFormatOpts(raw, s.cfg.Security.URLAllowlist.AllowInsecureHTTP, urlvalidator.ValidationOptions{AllowQuery: true})
+	}
+	return urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{
+		AllowedHosts:     s.cfg.Security.URLAllowlist.UpstreamHosts,
+		RequireAllowlist: true,
+		AllowPrivate:     s.cfg.Security.URLAllowlist.AllowPrivateHosts,
+		AllowQuery:       true,
+	})
+}
+
+// validateUpstreamBaseURLAllowQuery 是 validateUpstreamBaseURL 的放行 query 版本，
+// 仅用于 query-合并型 base_url（Codex manifest）。fragment 拒绝经 validator 层保持；
+// 其余 base_url 边界仍必须拒绝 query，请继续使用 validateUpstreamBaseURL。
+func (s *OpenAIGatewayService) validateUpstreamBaseURLAllowQuery(raw string) (string, error) {
+	normalized, err := s.validateOutboundURLAllowQuery(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid base_url: %w", err)
+	}
+	return normalized, nil
 }
 
 // buildOpenAIResponsesURL 组装 OpenAI Responses 端点。

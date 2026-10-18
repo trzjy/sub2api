@@ -105,7 +105,10 @@ func (s *OpenAIGatewayService) fetchOpenAIImageURLBase64(ctx context.Context, ac
 	if s == nil || s.httpUpstream == nil {
 		return "", errors.New("http upstream is not configured")
 	}
-	downloadURL, err := s.validateOutboundURL(rawURL)
+	// 图片下载端点是网关已构造的出站 URL，其 url 可能携带合法的 query
+	// （如 ?sig=abc 签名），需放行 query；fragment 仍由 validator 层恒拒。
+	// 其余 base_url 边界（base_url 校验）仍拒绝 query。
+	downloadURL, err := s.validateOutboundURLAllowQuery(rawURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid image url: %w", err)
 	}

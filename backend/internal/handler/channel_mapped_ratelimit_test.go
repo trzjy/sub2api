@@ -367,6 +367,18 @@ func (r *cmOpenAIAccountRepo) ListSchedulableByPlatform(ctx context.Context, _ s
 	}
 	return out, nil
 }
+// ListModelAvailabilityCandidates 实现调度链 TierRoutingGateOpen 新依赖的接口方法
+// （openai_account_scheduler.go:2580）。按 repository 层契约（account_repo.go:2522）
+// 返回持久配置的管理态候选：fake 原样返回其持有的全部账号（X/Y 两条都可作为候选），
+// 限流排除由被测门逻辑完成，fake 不做业务过滤（platforms/groupID/includeGrouped 忽略）。
+func (r *cmOpenAIAccountRepo) ListModelAvailabilityCandidates(ctx context.Context, _ *int64, _ []string, _ bool) ([]service.Account, error) {
+	r.capture(ctx)
+	out := make([]service.Account, 0, len(r.accounts))
+	for _, a := range r.accounts {
+		out = append(out, *a)
+	}
+	return out, nil
+}
 func (r *cmOpenAIAccountRepo) GetByID(_ context.Context, id int64) (*service.Account, error) {
 	for _, a := range r.accounts {
 		if a.ID == id {

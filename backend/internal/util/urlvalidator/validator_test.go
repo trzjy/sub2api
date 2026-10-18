@@ -121,6 +121,61 @@ func TestValidateHTTPURL(t *testing.T) {
 	}
 }
 
+// TestValidateHTTPURLAllowQuery 验证 AllowQuery 门控：true 放行 query、恒拒 fragment；
+// 零值（默认）仍拒绝 query，逐位不变。
+func TestValidateHTTPURLAllowQuery(t *testing.T) {
+	// AllowQuery=true：query 合法通过，fragment 仍拒。
+	if _, err := ValidateHTTPURL("https://host/v1?token=abc", false, ValidationOptions{AllowQuery: true}); err != nil {
+		t.Fatalf("expected query to pass with AllowQuery=true, got %v", err)
+	}
+	// 空 query（ForceQuery）/ 末尾 '?' 在 AllowQuery=true 时放行。
+	if _, err := ValidateHTTPURL("https://host/v1?", false, ValidationOptions{AllowQuery: true}); err != nil {
+		t.Fatalf("expected empty query to pass with AllowQuery=true, got %v", err)
+	}
+	// fragment 不受 AllowQuery 门控，恒拒绝。
+	for _, raw := range []string{
+		"https://host/v1#frag",
+		"https://host/v1?token=abc#frag",
+		"https://host/v1#",
+		"https://host/path#frag?x=1",
+	} {
+		if _, err := ValidateHTTPURL(raw, false, ValidationOptions{AllowQuery: true}); err == nil {
+			t.Fatalf("expected fragment to be rejected regardless of AllowQuery, got %q accepted", raw)
+		}
+	}
+	// 零值：query 仍拒绝（现行为不变）。
+	if _, err := ValidateHTTPURL("https://host/v1?token=abc", false, ValidationOptions{}); err == nil {
+		t.Fatalf("expected query to be rejected with zero-value opts")
+	}
+}
+
+// TestValidateURLFormatOpts 验证 ValidateURLFormatOpts 的 AllowQuery 门控与零值委托一致。
+func TestValidateURLFormatOpts(t *testing.T) {
+	// 零值委托：与 ValidateURLFormat(..., false) 行为一致，query 拒。
+	if _, err := ValidateURLFormatOpts("https://host/v1?token=abc", false, ValidationOptions{}); err == nil {
+		t.Fatalf("expected query to be rejected with zero-value opts")
+	}
+	// 零值与 ValidateURLFormat 等价。
+	if got, err := ValidateURLFormatOpts("https://example.com/", false, ValidationOptions{}); err != nil {
+		t.Fatalf("expected https to pass with zero-value opts, got %v", err)
+	} else if got != "https://example.com" {
+		t.Fatalf("expected trailing slash removed, got %s", got)
+	}
+	// AllowQuery=true：query 通过、fragment 仍拒。
+	if _, err := ValidateURLFormatOpts("https://host/v1?token=abc", false, ValidationOptions{AllowQuery: true}); err != nil {
+		t.Fatalf("expected query to pass with AllowQuery=true, got %v", err)
+	}
+	for _, raw := range []string{
+		"https://host/v1#frag",
+		"https://host/v1#",
+		"https://host/path#frag?x=1",
+	} {
+		if _, err := ValidateURLFormatOpts(raw, false, ValidationOptions{AllowQuery: true}); err == nil {
+			t.Fatalf("expected fragment to be rejected regardless of AllowQuery, got %q accepted", raw)
+		}
+	}
+}
+
 func TestIsBlockedHost(t *testing.T) {
 	for _, host := range []string{
 		"localhost", "LOCALHOST", "foo.localhost", " 127.0.0.1 ",

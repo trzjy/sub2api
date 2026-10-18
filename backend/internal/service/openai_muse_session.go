@@ -24,10 +24,13 @@ func isOpenCodeHostURL(rawURL string) bool {
 
 // applyMuseSessionHeader 为 muse 平台账号（或 base_url 指向 OpenCode 官方 origin 的
 // 伪装账号）的上游请求注入 OpenCode Go 端点必需的 x-opencode-session 头与网关中继
-// 身份 User-Agent。其余账号零改动。
+// 身份 User-Agent。OpenCode Go 原生平台账号（PlatformOpenCodeGo）除外——其 session/UA
+// 语义由 openai_opencode_session 钩子独占（applyOpenCodeUpstreamUserAgent 收敛规范 UA、
+// applyOpenCodeSessionHeader 解析/生成会话），此处直接让位，避免 muse 的 sub2api-relay/1.0
+// UA 与随机 session 抢占其规范语义。其余账号零改动。
 //
 // 门控（OC-T1b 扩展）：platform == muse，或账号 base_url host 为 opencode.ai（任一路径）
-// 时注入；两者皆不满足则直接返回。
+// 时注入；两者皆不满足则直接返回。OpenCode Go 原生平台账号亦直接返回（见上）。
 //
 // 语义（muse-3 派发单，原样保留）：
 //   - 客户端已带 x-opencode-session 则原样保留，作为每会话稳定 ID；
@@ -35,6 +38,11 @@ func isOpenCodeHostURL(rawURL string) bool {
 //   - User-Agent 覆写为 sub2api-relay/1.0，确保上游识别为合法中继调用方。
 func applyMuseSessionHeader(c *gin.Context, account *Account, headers http.Header) {
 	if c == nil || c.Request == nil || account == nil || headers == nil {
+		return
+	}
+	// OpenCode Go 原生平台账号的 session/UA 语义由 openai_opencode_session 钩子独占，
+	// 此处让位，避免抢占规范 UA 与会话语义。
+	if account.IsOpenCodeGo() {
 		return
 	}
 	// 伪装账号（platform=kimi/deepseek/zhipu + opencode.ai base_url）与 muse 同口径注入，

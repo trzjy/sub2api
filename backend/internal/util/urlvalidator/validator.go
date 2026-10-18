@@ -15,6 +15,10 @@ type ValidationOptions struct {
 	AllowedHosts     []string
 	RequireAllowlist bool
 	AllowPrivate     bool
+	// AllowQuery 放宽 query 拒绝口径：默认 false（现行为，拒绝 query）。
+	// 仅当调用方校验的是「已构造端点 / query-合并型 URL」而非拼接基址时设 true。
+	// fragment 拒绝不受此门控，两函数恒拒绝。
+	AllowQuery bool
 }
 
 // ValidateHTTPURL validates an outbound HTTP/HTTPS URL.
@@ -27,6 +31,11 @@ type ValidationOptions struct {
 // 另外，base_url 是拼接端点的基址，调用方会在其后用 "?" 追加参数；query 与
 // fragment 都不适合作为端点拼接的基址——query 会与调用方参数拼成畸形 URL，
 // fragment 则会让追加的参数落到 fragment 里，均在校验边界直接拒绝。
+//
+// 该 query 拒绝口径仅对「拼接基址」边界成立；对于已构造端点或 query-合并型
+// URL（探测目标、图片下载、Codex manifest 的 base_url 等），query 合法，由
+// opts.AllowQuery=true 收窄为可选，零值仍拒绝（现行为逐位不变）。
+// fragment 拒绝不受 AllowQuery 门控，恒拒绝。
 //
 // 注意：DNS Rebinding 防护（解析后 IP 校验）应在实际发起请求时执行，避免 TOCTOU。
 func ValidateHTTPURL(raw string, allowInsecureHTTP bool, opts ValidationOptions) (string, error) {
@@ -60,11 +69,12 @@ func ValidateHTTPURL(raw string, allowInsecureHTTP bool, opts ValidationOptions)
 		}
 	}
 
-	if parsed.RawQuery != "" || parsed.ForceQuery {
+	if !opts.AllowQuery && (parsed.RawQuery != "" || parsed.ForceQuery) {
 		return "", fmt.Errorf("base url must not contain query string: %s", trimmed)
 	}
 	// 未转义的 '#' 恒为 fragment 分隔符；url.Parse 对 "https://host/v1#" 会丢弃
 	// 分隔符并给出空 Fragment，故直接对原始串判定，出现分隔符即拒绝。
+	// fragment 拒绝不受 AllowQuery 门控，恒拒绝。
 	if strings.Contains(trimmed, "#") {
 		return "", fmt.Errorf("base url must not contain fragment: %s", trimmed)
 	}
@@ -86,7 +96,15 @@ func ValidateHTTPURL(raw string, allowInsecureHTTP bool, opts ValidationOptions)
 //
 // 同 ValidateHTTPURL，base_url 是拼接端点的基址，不适合自带 query 或 fragment：
 // 前者会与调用方参数拼成畸形 URL，后者会让追加的参数落到 fragment 里，故在校验边界拒绝。
+// 该 query 拒绝为可选，由 ValidateURLFormatOpts 暴露；本函数委托零值 opts（现行为）。
 func ValidateURLFormat(raw string, allowInsecureHTTP bool) (string, error) {
+	return ValidateURLFormatOpts(raw, allowInsecureHTTP, ValidationOptions{})
+}
+
+// ValidateURLFormatOpts 为 ValidateURLFormat 的可选门控版本：当 opts.AllowQuery=true 时
+// 放行 query（用于已构造端点 / query-合并型 URL），否则同 ValidateURLFormat 拒绝 query。
+// fragment 拒绝不受 AllowQuery 门控，恒拒绝。
+func ValidateURLFormatOpts(raw string, allowInsecureHTTP bool, opts ValidationOptions) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", errors.New("url is required")
@@ -114,7 +132,7 @@ func ValidateURLFormat(raw string, allowInsecureHTTP bool) (string, error) {
 		}
 	}
 
-	if parsed.RawQuery != "" || parsed.ForceQuery {
+	if !opts.AllowQuery && (parsed.RawQuery != "" || parsed.ForceQuery) {
 		return "", fmt.Errorf("base url must not contain query string: %s", trimmed)
 	}
 	// 与 ValidateHTTPURL 同口径：未转义的 '#' 恒为 fragment 分隔符，出现即拒绝。

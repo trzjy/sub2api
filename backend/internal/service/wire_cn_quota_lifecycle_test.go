@@ -32,6 +32,15 @@ import (
 // 不参与恢复判定，D-QLM-007），告警经 OpsService 窄面可查（kind=quota_exhausted）。
 func TestWireCNQuotaLifecycleInjectsReactiveEntryEndToEnd(t *testing.T) {
 	account := newQuotaLifecycleTHAccount(207)
+	// 本用例夹具定时炸弹修复：共享夹具 newQuotaLifecycleTHAccount 的 reset_at 固定在
+	// quotaLifecycleBase+7d（2026-10-13 起为过去时）。自该时刻起 resolveRecoveryTime 的
+	// snap.ResetAt.After(now) 为假 → 落 unknown 占位（now+7d）≠ 期望 reset_at，属测试
+	// 时间炸弹而非生产缺陷。此处仅在本用例内把 reset_at 覆写为未来时刻，断言复用同一
+	// 未来值；共享夹具与其余 CN lifecycle 用例保持不变。
+	futureReset := time.Now().Add(7 * 24 * time.Hour).Truncate(time.Minute)
+	thSnap, ok := account.Extra[TokenHarborPassSnapshotExtraKey].(map[string]any)
+	require.True(t, ok, "th_pass_snapshot must be present in the TH account fixture")
+	thSnap["reset_at"] = futureReset.Format(time.RFC3339)
 	repo := newQuotaLifecycleFakeRepo(account)
 	opsRepo := newInMemoryAlertRepo()
 	opsService := NewOpsService(opsRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
@@ -53,7 +62,7 @@ func TestWireCNQuotaLifecycleInjectsReactiveEntryEndToEnd(t *testing.T) {
 	// 确认探针（对上游 max_tokens=1 ping，上游 402）→ 确认耗尽。
 	require.Equal(t, 1, upstream.tlsCalls, "confirmation probe must hit the upstream once")
 	// 停调到期 = 官方恢复时间（free-tier reset_at，非订阅续期日 renews_at），非滚动冷却。
-	want := quotaLifecycleBase.Add(7 * 24 * time.Hour)
+	want := futureReset
 	until, parked := repo.parkedUntil(207)
 	require.True(t, parked, "confirmed exhaustion must park via the wired state machine")
 	require.True(t, want.Equal(until), "park until must equal reset_at %s, got %s", want, until)
