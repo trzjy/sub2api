@@ -177,7 +177,7 @@ func TestGatewayRoutesGroupModelAllowlistCoversRootAliasRoutes(t *testing.T) {
 		router.ServeHTTP(w, req)
 
 		require.Equal(t, http.StatusNotFound, w.Code, "%s %s should be denied by the allowlist, got body: %s", tc.method, tc.path, w.Body.String())
-		require.Contains(t, w.Body.String(), "not available for this group", "%s %s", tc.method, tc.path)
+		require.Contains(t, w.Body.String(), "不在当前分组支持范围内", "%s %s", tc.method, tc.path)
 	}
 }
 

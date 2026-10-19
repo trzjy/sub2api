@@ -46,7 +46,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.InvalidRequestBody)
 	}
 	if strings.TrimSpace(claudeReq.Model) == "" {
-		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "Missing model")
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 	}
 
 	originalModel := claudeReq.Model
@@ -57,7 +57,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	)
 	if mappedModel == "" {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
-		return nil, s.writeClaudeError(c, http.StatusForbidden, "permission_error", fmt.Sprintf("model %s not in whitelist", claudeReq.Model))
+		return nil, s.writeClaudeError(c, http.StatusForbidden, "permission_error", fmt.Sprintf(infraerrors.ModelNotInGroup, claudeReq.Model))
 	}
 	// 应用 thinking 模式自动后缀：如果 thinking 开启且目标是 claude-sonnet-4-5，自动改为 thinking 版本
 	thinkingEnabled := claudeReq.Thinking != nil && (claudeReq.Thinking.Type == "enabled" || claudeReq.Thinking.Type == "adaptive")
@@ -66,7 +66,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 
 	// 获取 access_token
 	if s.tokenProvider == nil {
-		return nil, s.writeClaudeError(c, http.StatusBadGateway, "api_error", "Antigravity token provider not configured")
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "api_error", infraerrors.CompatTokenProviderNotConfigured)
 	}
 	accessToken, err := s.tokenProvider.GetAccessToken(ctx, account)
 	if err != nil {

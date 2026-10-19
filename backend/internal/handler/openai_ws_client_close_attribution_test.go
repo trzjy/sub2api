@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	coderws "github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
@@ -52,7 +53,7 @@ func TestOpenAIWSIngressEndedByClient_WrappedBareNormalClosureIsNotAccountFailur
 // 这一条判据根本匹配不到它。
 func TestOpenAIWSIngressEndedByClient_ClientCancelDuringTurnIsNotAccountFailure(t *testing.T) {
 	err := service.NewOpenAIWSClientCloseError(
-		coderws.StatusGoingAway, "websocket request canceled", context.Canceled)
+		coderws.StatusGoingAway, infraerrors.WSRequestCanceled, context.Canceled)
 
 	// 前提：状态码是 1001 不是 1000，旧判据必然放行到账号归因。
 	var closeErr *service.OpenAIWSClientCloseError
@@ -132,7 +133,7 @@ func TestOpenAIWSIngressEndedByClient_MatchesCloseCodeReportedInLog(t *testing.T
 		coderws.CloseError{Code: coderws.StatusNormalClosure, Reason: "client done"},
 		fmt.Errorf("ingress turn 3: %w", coderws.CloseError{Code: coderws.StatusNormalClosure}),
 		service.NewOpenAIWSClientCloseError(coderws.StatusNormalClosure, "websocket idle timeout", context.DeadlineExceeded),
-		service.NewOpenAIWSClientCloseError(coderws.StatusGoingAway, "websocket request canceled", context.Canceled),
+		service.NewOpenAIWSClientCloseError(coderws.StatusGoingAway, infraerrors.WSRequestCanceled, context.Canceled),
 		coderws.CloseError{Code: coderws.StatusAbnormalClosure, Reason: "connection reset"},
 		errors.New("upstream websocket read failed"),
 	}

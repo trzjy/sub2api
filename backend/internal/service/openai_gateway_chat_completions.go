@@ -91,7 +91,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": gin.H{
 				"type":    "forbidden_error",
-				"message": "This account only allows Codex official clients",
+				"message": infraerrors.CodexOfficialClientsOnly,
 			},
 		})
 		return nil, errors.New("codex_cli_only restriction: only codex official clients are allowed")

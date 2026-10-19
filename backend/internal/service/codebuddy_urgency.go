@@ -8,10 +8,8 @@ import (
 )
 
 // 本文件实现 §4.2 到期紧迫度调度（Card D）。纯函数部分可全场景单测；
-// 基础有效性谓词复用 codebuddy_quota_service.go 的 IsValidCodeBuddyCreditPackage
-// （写入侧过滤）与五字段复检（读链），在此叠加 168h 窗口（条件②）与 24h 新鲜度
-// （条件③）。整改③：紧迫度读链改读 codebuddy_urgency_packages（五字段），不再读
-// 已停用的逐包明细分包数组。
+// 谓词复用 Card A 的 IsValidCodeBuddyCreditPackage（基础快照有效性），在此叠加
+// 168h 窗口（条件②）与 24h 新鲜度（条件③），不复制第二份基础实现。
 
 // codebuddyCreditUrgencyWindow 是 §4.2 参与性谓词的到期窗口：now < expires_at ≤ now+168h。
 const codebuddyCreditUrgencyWindow = 168 * time.Hour
@@ -42,13 +40,12 @@ func (b codeBuddyUrgencyBoost) normalize() codeBuddyUrgencyBoost {
 }
 
 // codeBuddyUrgencySnapshot 是读自 Account.Extra 的快照输入：
-//   - Packages: 紧迫度专用分包数组（存储契约 codebuddy_urgency_packages，五字段）
+//   - Packages: 紧迫度参与集合（存储契约 codebuddy_urgency_packages，五字段）
 //   - UpdatedAt: 最后成功快照时间（codebuddy_credit_packages_updated_at，RFC3339）
 //
-// 解析失败的条目由读链解析器整条丢弃（失败关闭，不兜底）；此处仅按五字段复检再次
-// 过滤（防御）。
+// 解析失败的分包由 Card A 的校验保证剔除；此处仅按基础谓词再次过滤（防御）。
 type codeBuddyUrgencySnapshot struct {
-	Packages  []CodeBuddyUrgencyPackage
+	Packages  []CodeBuddyCreditPackage
 	UpdatedAt time.Time // zero → 无成功快照（不参与）
 }
 
@@ -64,27 +61,15 @@ type CodeBuddyUrgencyResult struct {
 	ParticipatingCount int
 }
 
-// IsCodeBuddyUrgencyEligible 是**紧迫度参与性谓词**（§1/§4.2 定义，整改③元组版）：
+// IsCodeBuddyUrgencyEligible 是**紧迫度参与性谓词**（§1/§4.2 定义）：
 // 分包须同时满足：
-//   - ① 五字段有效性复检（与写入侧过滤同一基础有效性：unit==credits && status==0 &&
-//     非负 && remaining≤total；写入侧已仅容纳 status==0，此处防御性复检）
-//   - ② now < expires_at ≤ now+168h（UTC RFC3339，写入侧已保证可解析）
+//   - ① 基础快照有效性（复用 Card A IsValidCodeBuddyCreditPackage：字段有效 + 非 Status=3）
+//   - ② now < expires_at ≤ now+168h（Asia/Shanghai 字面量已由 Card A 解析转 UTC RFC3339）
 //   - ③ 所属快照 ≤24h 新鲜（UpdatedAt 距服务器 UTC now ≤ 24h）
 //
-// 任一不满足 → 该分包不参与分子、也不参与分母 D。Status=3 不得进 urgency（写入侧过滤
-// 已剔除，复检再次拦截）。语义与旧实现逐位一致。
-func IsCodeBuddyUrgencyEligible(pkg CodeBuddyUrgencyPackage, snapshotUpdatedAt time.Time, now time.Time) bool {
-	// ① 五字段有效性复检（基础谓词：字段有效 + 非 Status=3）。
-	if pkg.Unit != codebuddyCreditCanonicalUnit {
-		return false
-	}
-	if pkg.Status != codebuddyCreditPackageStatusActive {
-		return false
-	}
-	if pkg.Remaining.IsNegative() || pkg.Total.IsNegative() {
-		return false
-	}
-	if pkg.Remaining.GreaterThan(pkg.Total) {
+// 任一不满足 → 该分包不参与分子、也不参与分母 D。
+func IsCodeBuddyUrgencyEligible(pkg CodeBuddyCreditPackage, snapshotUpdatedAt time.Time, now time.Time) bool {
+	if !IsValidCodeBuddyCreditPackage(pkg) {
 		return false
 	}
 	// ③ 新鲜度：快照时间必须存在且距今 ≤ 24h（陈旧快照按无快照处理，紧迫度归零）。
@@ -109,9 +94,8 @@ func IsCodeBuddyUrgencyEligible(pkg CodeBuddyUrgencyPackage, snapshotUpdatedAt t
 }
 
 // ComputeCodeBuddyUrgency 计算 §4.2 公式：
-//
-//	urgency = Σremaining(参与)；D = Σtotal(参与)；
-//	urgency_norm = urgency/D（D=0 → 0）截断 [0,1]。
+//   urgency = Σremaining(参与)；D = Σtotal(参与)；
+//   urgency_norm = urgency/D（D=0 → 0）截断 [0,1]。
 //
 // 参与集合 = IsCodeBuddyUrgencyEligible（分子分母同一集合）。
 func ComputeCodeBuddyUrgency(snapshot codeBuddyUrgencySnapshot, now time.Time) CodeBuddyUrgencyResult {
@@ -161,8 +145,12 @@ func ApplyCodeBuddyUrgencyBoost(candidate *Account, snapshot codeBuddyUrgencySna
 }
 
 // CodeBuddyUrgencySnapshotFromExtra 从 Account.Extra 读取 §4.2 输入快照。
-// 分包键缺失/形态错误 → 空集合（不 panic）；freshness 键缺失/非法 → zero 时间
-// （新鲜度条件判 false，紧迫度归零）。解析失败的条目按基础谓词过滤后不计入。
+// 紧迫度专用键（codebuddy_urgency_packages）缺失/形态错误 → 空集合（不 panic）；
+// freshness 键缺失/非法 → zero 时间（新鲜度条件判 false，紧迫度归零）。
+// 解析失败的条目按基础谓词过滤后不计入。
+//
+// 整改③：逐包明细键 codebuddy_credit_packages 已删除（写入侧只写聚合键 +
+// 紧迫度五字段键），此处不读旧键、不回退。
 func CodeBuddyUrgencySnapshotFromExtra(extra map[string]any, now time.Time) codeBuddyUrgencySnapshot {
 	snap := codeBuddyUrgencySnapshot{}
 	if len(extra) == 0 {
@@ -171,7 +159,7 @@ func CodeBuddyUrgencySnapshotFromExtra(extra map[string]any, now time.Time) code
 	if raw, ok := extra[codebuddyUrgencyPackagesKey]; ok && raw != nil {
 		switch v := raw.(type) {
 		case []CodeBuddyUrgencyPackage:
-			snap.Packages = v
+			snap.Packages = codeBuddyCreditPackagesFromUrgency(v)
 		case []any:
 			snap.Packages = parseCodeBuddyUrgencyPackagesFromAnySlice(v)
 		default:
@@ -188,18 +176,35 @@ func CodeBuddyUrgencySnapshotFromExtra(extra map[string]any, now time.Time) code
 	return snap
 }
 
-// parseCodeBuddyUrgencyPackagesFromAnySlice 从 Extra 反序列化的 []any（map 形态）
-// 重建紧迫度专用分包数组（codebuddy_urgency_packages，五字段）。只接受存储契约
-// 字段形态（与 CodeBuddyUrgencyPackage.MarshalJSON 对称）；字段类型不符的条目整条
-// 丢弃（失败关闭语义，不静默钳位）。
-func parseCodeBuddyUrgencyPackagesFromAnySlice(items []any) []CodeBuddyUrgencyPackage {
-	out := make([]CodeBuddyUrgencyPackage, 0, len(items))
+// codeBuddyCreditPackagesFromUrgency 把存储态紧迫度分包（五字段）还原为参与性谓词
+// 所需的解析态分包。id/name 不在紧迫度键内（写入侧已收缩为五字段），留空不影响
+// 基础谓词（只校验 unit/status/数值）。
+func codeBuddyCreditPackagesFromUrgency(items []CodeBuddyUrgencyPackage) []CodeBuddyCreditPackage {
+	out := make([]CodeBuddyCreditPackage, 0, len(items))
+	for _, item := range items {
+		out = append(out, CodeBuddyCreditPackage{
+			Unit:      item.Unit,
+			Remaining: item.Remaining,
+			Total:     item.Total,
+			ExpiresAt: item.ExpiresAt,
+			Status:    item.Status,
+		})
+	}
+	return out
+}
+
+// parseCodeBuddyUrgencyPackagesFromAnySlice 从 Extra 反序列化的 []any（map 形态）重建
+// 紧迫度参与集合。只接受 codebuddy_urgency_packages 存储契约的五字段形态
+// （unit/status/remaining/total/expires_at，与 CodeBuddyUrgencyPackage.MarshalJSON 对称）；
+// 字段类型不符的条目整条丢弃（失败关闭语义，不静默钳位）。
+func parseCodeBuddyUrgencyPackagesFromAnySlice(items []any) []CodeBuddyCreditPackage {
+	out := make([]CodeBuddyCreditPackage, 0, len(items))
 	for _, item := range items {
 		m, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		pkg, ok := codeBuddyUrgencyPackageFromExtraMap(m)
+		pkg, ok := codeBuddyCreditPackageFromUrgencyMap(m)
 		if !ok {
 			continue
 		}
@@ -208,36 +213,48 @@ func parseCodeBuddyUrgencyPackagesFromAnySlice(items []any) []CodeBuddyUrgencyPa
 	return out
 }
 
-// codeBuddyUrgencyPackageFromExtraMap 从 Extra 反序列化的 map 重建单个紧迫度分包。
-// 五字段：remaining/total（decimal 字符串）/expires_at（UTC RFC3339 字符串）/
-// unit（"credits"）/status（数值 0）。字段缺失/类型不符 → 整条丢弃（失败关闭）。
-func codeBuddyUrgencyPackageFromExtraMap(m map[string]any) (CodeBuddyUrgencyPackage, bool) {
-	var pkg CodeBuddyUrgencyPackage
-	getStr := func(key string) string {
-		if v, ok := m[key].(string); ok {
-			return v
-		}
-		return ""
+// codeBuddyCreditPackageFromUrgencyMap 从单条紧迫度分包 map 还原解析态分包。
+// unit/status/remaining/total 缺失或类型不符 → 整条丢弃；expires_at 缺失/非法留空
+// （由紧迫度窗口条件判 false，不参与分子分母）。
+func codeBuddyCreditPackageFromUrgencyMap(m map[string]any) (CodeBuddyCreditPackage, bool) {
+	unit, ok := m["unit"].(string)
+	if !ok {
+		return CodeBuddyCreditPackage{}, false
 	}
-	pkg.Unit = getStr("unit")
-	pkg.ExpiresAt = getStr("expires_at")
-	rem, ok1 := decimalFromExtraAny(m["remaining"])
-	tot, ok2 := decimalFromExtraAny(m["total"])
-	if !ok1 || !ok2 {
-		return CodeBuddyUrgencyPackage{}, false
+	status, ok := codeBuddyStatusFromExtraAny(m["status"])
+	if !ok {
+		return CodeBuddyCreditPackage{}, false
 	}
-	pkg.Remaining = rem
-	pkg.Total = tot
-	if st, ok := m["status"].(float64); ok {
-		pkg.Status = int64(st)
-	} else if st, ok := m["status"].(int64); ok {
-		pkg.Status = st
-	} else if st, ok := m["status"].(int); ok {
-		pkg.Status = int64(st)
-	} else {
-		return CodeBuddyUrgencyPackage{}, false
+	remaining, ok := decimalFromExtraAny(m["remaining"])
+	if !ok {
+		return CodeBuddyCreditPackage{}, false
 	}
-	return pkg, true
+	total, ok := decimalFromExtraAny(m["total"])
+	if !ok {
+		return CodeBuddyCreditPackage{}, false
+	}
+	expiresAt, _ := m["expires_at"].(string)
+	return CodeBuddyCreditPackage{
+		Unit:      unit,
+		Remaining: remaining,
+		Total:     total,
+		ExpiresAt: strings.TrimSpace(expiresAt),
+		Status:    status,
+	}, true
+}
+
+// codeBuddyStatusFromExtraAny 从 Extra 反序列化的 status 读取整数枚举
+// （JSON 数值统一反序列为 float64；直连构造可能为 int/int64）。非数值 → 失败关闭。
+func codeBuddyStatusFromExtraAny(v any) (int64, bool) {
+	switch st := v.(type) {
+	case float64:
+		return int64(st), true
+	case int64:
+		return st, true
+	case int:
+		return int64(st), true
+	}
+	return 0, false
 }
 
 func decimalFromExtraAny(v any) (decimal.Decimal, bool) {

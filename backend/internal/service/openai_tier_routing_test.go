@@ -13,20 +13,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestTierRoutingClassForEstimate 覆盖分层路由边界语义：估算 input ≤2000 判小
-// （含 =2000 边界），>2000 判大。
+// TestTierRoutingClassForEstimate 覆盖分层路由边界语义：估算 input ≤3000 判小
+// （含 =3000 边界），>3000 判大。
 func TestTierRoutingClassForEstimate(t *testing.T) {
 	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(0))
-	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(1999))
-	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(2000))
-	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(2001))
+	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(2999))
+	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(3000))
+	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(3001))
 	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(5000))
 }
 
 func TestTierRoutingClassForEstimateUnifiesGeneralMaskThreshold(t *testing.T) {
-	// 通用伪装线 1000 到 2000（含）仍属于小请求，口径与自建账号排除线统一。
+	// 通用伪装线 1000 到 3000（含）仍属于小请求，口径与自建账号排除线统一。
 	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(1001))
-	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(2000))
+	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(3000))
 }
 
 // TestTierRoutingEstimateInputTokens 覆盖既有估算链导出入口：合法 chat completions
@@ -291,8 +291,8 @@ func TestTierRoutingSelectAccountFaultPaths(t *testing.T) {
 
 // TestTierRoutingSelectAccountRouting 覆盖分层路由选号主语义与职责隔离（派发单 OC-T1，
 // 测试 #2 分档落池 + 测试 #4 故障路径）：
-//   - ≤2000（small）→ 仅落 qwen 伪装线池（masked 账号）；
-//   - >2000（big）→ 仅落星思池（非 masked 账号）；
+//   - ≤3000（small）→ 仅落 qwen 伪装线池（masked 账号）；
+//   - >3000（big）→ 仅落星思池（非 masked 账号）；
 //   - qwen 池整体无可用 → 小请求跨档走星思池（告警日志路径在 selectAccountWithScheduler 内）；
 //   - 双侧均无可用 → fail-closed 返回 ErrNoAvailableAccounts，无 infer-kimi 隐式落侧。
 func TestTierRoutingSelectAccountRouting(t *testing.T) {
@@ -369,8 +369,8 @@ func TestTierRoutingSelectAccountRouting(t *testing.T) {
 // TestTierRoutingSelectAccountPlatformCombinations 验证分层路由（派发单 OC-T1 泛化）在真实多平台
 // 组合下的一致性（FIX-3）：kimi-k3+PlatformKimi / deepseek-v4.1-flash+PlatformDeepseek /
 // glm-5.3-flash+PlatformZhipu，各验：
-//   - ≤2000（small）→ 仅落伪装线池（masked 账号）；
-//   - >2000（big）→ 仅落非伪装池（upstream 账号）；
+//   - ≤3000（small）→ 仅落伪装线池（masked 账号）；
+//   - >3000（big）→ 仅落非伪装池（upstream 账号）；
 //   - 伪装线整池无可用 → 小请求跨档落星思池。
 func TestTierRoutingSelectAccountPlatformCombinations(t *testing.T) {
 	groupID := int64(104001)

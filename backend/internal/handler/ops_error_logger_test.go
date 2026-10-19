@@ -1070,6 +1070,34 @@ func TestClassifyOpsAuthClientErrorsExcludedFromSLA(t *testing.T) {
 			code:    "401",
 			status:  http.StatusUnauthorized,
 		},
+		{
+			name:    "gateway api key must be bound to group (zh)",
+			errType: "api_error",
+			message: infraerrors.APIKeyGroupRequired,
+			code:    "",
+			status:  http.StatusUnauthorized,
+		},
+		{
+			name:    "gateway api key user not found (zh)",
+			errType: "api_error",
+			message: infraerrors.UserNotFoundForAPIKey,
+			code:    "",
+			status:  http.StatusUnauthorized,
+		},
+		{
+			name:    "gateway api key user inactive (zh)",
+			errType: "api_error",
+			message: infraerrors.UserAccountInactive,
+			code:    "",
+			status:  http.StatusUnauthorized,
+		},
+		{
+			name:    "gateway api key not assigned to group (zh)",
+			errType: "api_error",
+			message: infraerrors.APIKeyNotAssignedToGroup,
+			code:    "",
+			status:  http.StatusForbidden,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1360,6 +1388,78 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 			name:        "openai passthrough instructions policy block",
 			errType:     "forbidden_error",
 			message:     "OpenAI codex passthrough requires a non-empty instructions field",
+			code:        "",
+			status:      http.StatusForbidden,
+			wantErrType: "forbidden_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "gateway query api_key deprecated (zh)",
+			errType:     "api_error",
+			message:     infraerrors.APIKeyQueryParamDeprecated,
+			code:        "",
+			status:      http.StatusBadRequest,
+			wantErrType: "api_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "gateway no active subscription (zh)",
+			errType:     "api_error",
+			message:     infraerrors.NoActiveSubscriptionForGroup,
+			code:        "",
+			status:      http.StatusForbidden,
+			wantErrType: "api_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "gateway gemini group platform mismatch (zh)",
+			errType:     "api_error",
+			message:     infraerrors.GroupPlatformNotGemini,
+			code:        "",
+			status:      http.StatusBadRequest,
+			wantErrType: "api_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "gateway token counting unsupported (zh)",
+			errType:     "not_found_error",
+			message:     infraerrors.TokenCountingUnsupported,
+			code:        "",
+			status:      http.StatusNotFound,
+			wantErrType: "not_found_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "gateway model not in group whitelist (zh)",
+			errType:     "permission_error",
+			message:     "模型 claude-3-5-sonnet 不在当前分组支持范围内，请检查模型名称或联系管理员",
+			code:        "",
+			status:      http.StatusForbidden,
+			wantErrType: "permission_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "gateway codex official clients only (zh)",
+			errType:     "forbidden_error",
+			message:     infraerrors.CodexOfficialClientsOnly,
+			code:        "",
+			status:      http.StatusForbidden,
+			wantErrType: "forbidden_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "gateway openai wsv1 unsupported (zh)",
+			errType:     "invalid_request_error",
+			message:     infraerrors.WSv1Unsupported,
+			code:        "",
+			status:      http.StatusBadRequest,
+			wantErrType: "invalid_request_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "gateway codex passthrough instructions required (zh)",
+			errType:     "forbidden_error",
+			message:     infraerrors.CodexInstructionsRequired,
 			code:        "",
 			status:      http.StatusForbidden,
 			wantErrType: "forbidden_error",
@@ -2237,9 +2337,3 @@ func TestClassifyOpsIsBusinessLimitedUpstreamEnglishEarlyReturnIsInert(t *testin
 	require.Equal(t, withEnglishUpstream, withChineseUpstream,
 		"英文 upstream 早退与不触发早退的结果必须一致：该分支不是承重逻辑")
 }
-
-
-
-
-
-

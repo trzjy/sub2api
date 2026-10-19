@@ -924,6 +924,108 @@ func (s *AccountRepoSuite) TestSetRateLimitedIfLaterDoesNotShortenReset() {
 	s.Require().WithinDuration(later, *cacheRecorder.setAccounts[1].RateLimitResetAt, time.Second)
 }
 
+func (s *AccountRepoSuite) TestClearOpenAIRateLimitIfObserved() {
+	mk := func(name string, shadow bool) *service.Account {
+		acc := mustCreateAccount(s.T(), s.client, &service.Account{
+			Name:     name,
+			Platform: service.PlatformOpenAI,
+			Type:     service.AccountTypeOAuth,
+		})
+		if shadow {
+			parent := mustCreateAccount(s.T(), s.client, &service.Account{
+				Name:     name + "-parent",
+				Platform: service.PlatformOpenAI,
+				Type:     service.AccountTypeOAuth,
+			})
+			// 影子行需 quota_dimension=spark 才能携带 parent_account_id（chk 约束）。
+			_, setErr := s.client.Account.UpdateOneID(acc.ID).
+				SetQuotaDimension(service.QuotaDimensionSpark).
+				SetParentAccountID(parent.ID).
+				Save(s.ctx)
+			s.Require().NoError(setErr)
+		}
+		return acc
+	}
+
+	// 1. 匹配代际 → 清除，调度恢复。
+	account := mk("acc-oa-rl-clear", false)
+	firstReset := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, account.ID, firstReset))
+
+	before, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(before.RateLimitedAt)
+	s.Require().NotNil(before.RateLimitResetAt)
+
+	// 限流中 → 未分组调度候选排除。
+	schedBefore, err := s.repo.ListSchedulableUngroupedByPlatform(s.ctx, service.PlatformOpenAI)
+	s.Require().NoError(err)
+	for i := range schedBefore {
+		s.Require().NotEqual(account.ID, schedBefore[i].ID)
+	}
+
+	cleared, err := s.repo.ClearOpenAIRateLimitIfObserved(s.ctx, account.ID, *before.RateLimitedAt, *before.RateLimitResetAt)
+	s.Require().NoError(err)
+	s.Require().True(cleared)
+
+	after, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Nil(after.RateLimitedAt)
+	s.Require().Nil(after.RateLimitResetAt)
+
+	// 清除后 → 未分组调度候选重新纳入。
+	schedAfter, err := s.repo.ListSchedulableUngroupedByPlatform(s.ctx, service.PlatformOpenAI)
+	s.Require().NoError(err)
+	found := false
+	for i := range schedAfter {
+		if schedAfter[i].ID == account.ID {
+			found = true
+			break
+		}
+	}
+	s.Require().True(found, "cleared account must re-enter scheduler candidates")
+
+	// 2. 新 429 重填不同代际 → 旧探测清除失配、保留新限流。
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, account.ID, firstReset))
+	staleGeneration, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(staleGeneration.RateLimitedAt)
+	s.Require().NotNil(staleGeneration.RateLimitResetAt)
+
+	newReset := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, account.ID, newReset))
+
+	cleared, err = s.repo.ClearOpenAIRateLimitIfObserved(s.ctx, account.ID, *staleGeneration.RateLimitedAt, *staleGeneration.RateLimitResetAt)
+	s.Require().NoError(err)
+	s.Require().False(cleared)
+
+	got, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(got.RateLimitedAt)
+	s.Require().NotNil(got.RateLimitResetAt)
+	s.Require().WithinDuration(newReset, *got.RateLimitResetAt, time.Second)
+
+	// 3. 行被改成 API Key（非 OAuth）→ 即使两个 observed 时间戳仍匹配也不清除。
+	_, err = s.client.Account.UpdateOneID(account.ID).
+		SetType(service.AccountTypeAPIKey).
+		Save(s.ctx)
+	s.Require().NoError(err)
+	cleared, err = s.repo.ClearOpenAIRateLimitIfObserved(s.ctx, account.ID, *got.RateLimitedAt, *got.RateLimitResetAt)
+	s.Require().NoError(err)
+	s.Require().False(cleared)
+
+	// 4. Spark shadow 行即使带限流代际也不清除（谓词 parent_account_id IS NULL）。
+	shadow := mk("acc-oa-rl-shadow", true)
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, shadow.ID, firstReset))
+	shadowCur, err := s.repo.GetByID(s.ctx, shadow.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(shadowCur.RateLimitedAt)
+	s.Require().NotNil(shadowCur.RateLimitResetAt)
+	cleared, err = s.repo.ClearOpenAIRateLimitIfObserved(s.ctx, shadow.ID, *shadowCur.RateLimitedAt, *shadowCur.RateLimitResetAt)
+	s.Require().NoError(err)
+	s.Require().False(cleared)
+}
+
 func (s *AccountRepoSuite) TestClearRateLimitIfObservedProtectsRearmed429Generation() {
 	account := mustCreateAccount(s.T(), s.client, &service.Account{
 		Name:     "acc-rl-conditional-clear",

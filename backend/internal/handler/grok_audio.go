@@ -148,7 +148,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	if proxyErr != nil {
 		reqLog.Info("grok_realtime.proxy_failed", zap.Error(proxyErr))
 		if !isExpectedGrokRealtimeClose(proxyErr) {
-			_ = conn.Close(coderws.StatusInternalError, "upstream realtime websocket failed")
+			_ = conn.Close(coderws.StatusInternalError, infraerrors.UpstreamRealtimeConnFailed)
 			return
 		}
 	}

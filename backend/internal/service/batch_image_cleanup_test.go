@@ -77,7 +77,7 @@ func TestBatchImageCleanupService_DeleteOutputsForOwner(t *testing.T) {
 		require.Equal(t, "BATCH_IMAGE_PROVIDER_CLEANUP_FAILED", infraerrors.Reason(err))
 		require.NotContains(t, infraerrors.Message(err), "gs://")
 		require.Equal(t, "BATCH_IMAGE_PROVIDER_CLEANUP_FAILED", batchImageDerefString(repo.jobs["imgbatch_cleanup"].LastErrorCode))
-		require.Equal(t, "upstream provider operation failed", batchImageDerefString(repo.jobs["imgbatch_cleanup"].LastErrorMessage))
+		require.Equal(t, infraerrors.UpstreamProviderOperationFailed, batchImageDerefString(repo.jobs["imgbatch_cleanup"].LastErrorMessage))
 	})
 
 	t.Run("unsafe cleanup path is not swallowed", func(t *testing.T) {

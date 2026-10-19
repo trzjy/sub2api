@@ -43,7 +43,7 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 	// 检查平台：优先使用强制平台（/antigravity 路由），否则要求 gemini 分组
 	forcePlatform, hasForcePlatform := middleware.GetForcePlatformFromContext(c)
 	if !hasForcePlatform && effectiveAPIKeyPlatform(c, apiKey) != service.PlatformGemini {
-		googleError(c, http.StatusBadRequest, "API key group platform is not gemini")
+		googleError(c, http.StatusBadRequest, infraerrors.GroupPlatformNotGemini)
 		return
 	}
 
@@ -63,7 +63,7 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 
 	agModelIDs, err := h.geminiCompatService.AntigravityGeminiModelIDs(c.Request.Context(), apiKey.GroupID, forcePlatform != service.PlatformAntigravity)
 	if err != nil {
-		googleError(c, http.StatusServiceUnavailable, "Unable to list Antigravity models")
+		googleError(c, http.StatusServiceUnavailable, infraerrors.ModelDiscoveryUnavailable)
 		return
 	}
 	agModels := make([]gemini.Model, 0, len(agModelIDs))
@@ -227,19 +227,19 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 	// 检查平台：优先使用强制平台（/antigravity 路由），否则要求 gemini 分组
 	forcePlatform, hasForcePlatform := middleware.GetForcePlatformFromContext(c)
 	if !hasForcePlatform && effectiveAPIKeyPlatform(c, apiKey) != service.PlatformGemini {
-		googleError(c, http.StatusBadRequest, "API key group platform is not gemini")
+		googleError(c, http.StatusBadRequest, infraerrors.GroupPlatformNotGemini)
 		return
 	}
 
 	modelName := strings.TrimSpace(c.Param("model"))
 	if modelName == "" {
-		googleError(c, http.StatusBadRequest, "Missing model in URL")
+		googleError(c, http.StatusBadRequest, infraerrors.ModelMissingInURL)
 		return
 	}
 	// 模型名会被拼进上游 URL 的 path，先在入口校验片段合规性，
 	// 见 service/upstream_path_guard.go。
 	if !service.IsSafeGeminiModelPathSegment(modelName) {
-		googleError(c, http.StatusBadRequest, "Invalid model in URL")
+		googleError(c, http.StatusBadRequest, infraerrors.InvalidModelInURL)
 		return
 	}
 	if resolvedModel, ok := service.ResolvedUpstreamModelFromContext(c.Request.Context()); ok && strings.TrimSpace(resolvedModel) != "" {
@@ -303,7 +303,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	// 检查平台：优先使用强制平台（/antigravity 路由，中间件已设置 request.Context），否则要求 gemini 分组
 	if !middleware.HasForcePlatform(c) {
 		if effectiveAPIKeyPlatform(c, apiKey) != service.PlatformGemini {
-			googleError(c, http.StatusBadRequest, "API key group platform is not gemini")
+			googleError(c, http.StatusBadRequest, infraerrors.GroupPlatformNotGemini)
 			return
 		}
 	}
@@ -316,7 +316,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	// URL 里的模型名最终会被拼进上游 /v1beta/models/{model}:{action}，
 	// 先在入口校验片段合规性，见 service/upstream_path_guard.go。
 	if !service.IsSafeGeminiModelPathSegment(modelName) {
-		googleError(c, http.StatusBadRequest, "Invalid model in URL")
+		googleError(c, http.StatusBadRequest, infraerrors.InvalidModelInURL)
 		return
 	}
 	if resolvedModel, ok := service.ResolvedUpstreamModelFromContext(c.Request.Context()); ok && strings.TrimSpace(resolvedModel) != "" {
@@ -890,7 +890,7 @@ func googleConcurrencyError(c *gin.Context, err error, slotType string) {
 
 func writeUpstreamResponse(c *gin.Context, res *service.UpstreamHTTPResult) {
 	if res == nil {
-		googleError(c, http.StatusBadGateway, "Empty upstream response")
+		googleError(c, http.StatusBadGateway, infraerrors.UpstreamEmptyCompletion)
 		return
 	}
 	for k, vv := range res.Headers {

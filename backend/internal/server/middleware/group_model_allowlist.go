@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/requestmodel"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -84,7 +85,7 @@ func GroupModelAllowlist() gin.HandlerFunc {
 
 		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
 		MarkIngressRejected(c, IngressRejectModelNotAllowed)
-		groupModelAllowlistErrorWriter(c)(c, http.StatusNotFound, fmt.Sprintf("Model %q is not available for this group", blocked))
+		groupModelAllowlistErrorWriter(c)(c, http.StatusNotFound, fmt.Sprintf(infraerrors.ModelNotInGroup, blocked))
 		c.Abort()
 	}
 }
@@ -114,11 +115,11 @@ func groupModelAllowlistModelsFromBody(c *gin.Context) ([]string, bool) {
 	body, err := httputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
 		status := http.StatusBadRequest
-		message := "Failed to read request body"
+		message := infraerrors.RequestBodyReadFailed
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			status = http.StatusRequestEntityTooLarge
-			message = "Request body is too large"
+			message = infraerrors.RequestBodyTooLarge
 		}
 		c.JSON(status, gin.H{"error": gin.H{"type": "invalid_request_error", "message": message}})
 		c.Abort()

@@ -26,7 +26,7 @@ vi.mock('vue-i18n', async () => {
   const messages: Record<string, string> = {
     'admin.accounts.usageWindow.codebuddyCredit': '积分',
     'admin.accounts.usageWindow.codebuddyCreditNotProbed': '未探测',
-    'admin.accounts.usageWindow.codebuddyPackageTotalRow': '合计 {remaining} / {total}',
+    'admin.accounts.usageWindow.codebuddyPackageTotalRow': '剩余 {remaining} / 总额 {total}',
     'admin.accounts.usageWindow.codebuddyPackageUpdated': '更新于 {date}',
     'admin.accounts.usageWindow.codebuddyPackageExcludedNote': '部分分包未计入合计',
   }
@@ -121,10 +121,30 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
     // 逐包行已移除：包名不再渲染（负断言，聚合键下根本没有包名概念）
     expect(wrapper.text()).not.toContain('Pro 月包')
     // 合计行（更新时间格式随运行环境 Intl locale，宽松断言日期年份）
-    expect(wrapper.text()).toContain('合计 300.50 / 1000.00')
+    expect(wrapper.text()).toContain('剩余 300.50 / 总额 1000.00')
     expect(wrapper.text()).toContain('更新于')
     expect(wrapper.text()).toContain('2026')
     expect(wrapper.text()).not.toContain('未探测')
+  })
+
+  it('页面示例形态 600/2500/76：明确渲染「剩余 / 总额」且百分比一致', async () => {
+    const wrapper = mountCell(
+      makeAccount({
+        codebuddy_credit_total_remaining: '600.00000000',
+        codebuddy_credit_total_total: '2500.00000000',
+        codebuddy_credit_packages_updated_at: '2026-10-19T02:33:35.593+08:00',
+        codebuddy_credit_used_percent: 76,
+      }),
+    )
+    await flushPromises()
+
+    const bar = wrapper.find('[data-test="usage-progress-bar"]')
+    expect(bar.exists()).toBe(true)
+    // used_percent=76 由后端推导，进度条直接消费；(2500-600)/2500=76%
+    expect(bar.attributes('data-utilization')).toBe('76')
+    // 「剩余 / 总额」明确文案，不再有「合计」歧义
+    expect(wrapper.text()).toContain('剩余 600.00 / 总额 2500.00')
+    expect(wrapper.text()).not.toContain('合计 600.00 / 2500.00')
   })
 
   it('无快照时显示「未探测」空态且不渲染 0%', async () => {
@@ -158,7 +178,7 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
 
     expect(wrapper.find('[data-test="usage-progress-bar"]').exists()).toBe(true)
     // 合计行：660.00 / 1000.00
-    expect(wrapper.text()).toContain('合计 660.00 / 1000.00')
+    expect(wrapper.text()).toContain('剩余 660.00 / 总额 1000.00')
     expect(wrapper.text()).toContain('上游超时')
   })
 
@@ -174,7 +194,7 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
     await flushPromises()
 
     // 合计只含聚合 total：10.00 / 20.00
-    expect(wrapper.text()).toContain('合计 10.00 / 20.00')
+    expect(wrapper.text()).toContain('剩余 10.00 / 总额 20.00')
     // 逐包行已移除：包名不再渲染
     expect(wrapper.text()).not.toContain('积分包')
     expect(wrapper.text()).not.toContain('美元包')

@@ -131,7 +131,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 	if groupID == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": gin.H{
 			"type":    "invalid_request_error",
-			"message": "group required",
+			"message": infraerrors.APIKeyGroupRequired,
 		}})
 		return
 	}

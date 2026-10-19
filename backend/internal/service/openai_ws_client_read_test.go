@@ -134,7 +134,7 @@ func TestReadOpenAIWSClientMessage_ParentCancellationStillJoinsRead(t *testing.T
 	var clientClose coderws.CloseError
 	require.ErrorAs(t, err, &clientClose)
 	require.Equal(t, coderws.StatusGoingAway, clientClose.Code)
-	require.Equal(t, "websocket request canceled", clientClose.Reason)
+	require.Equal(t, infraerrors.WSRequestCanceled, clientClose.Reason)
 
 	select {
 	case <-serverResult:

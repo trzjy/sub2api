@@ -2634,6 +2634,45 @@ func (r *accountRepository) ClearRateLimitIfObserved(ctx context.Context, id int
 	return true, nil
 }
 
+// ClearOpenAIRateLimitIfObserved clears exactly the OpenAI OAuth account-level
+// rate-limit generation observed by a successful Codex quota probe. Matching
+// both timestamps prevents a stale probe success from erasing a later 429 that
+// a request wrote after the probe read the account: every new 429 writes a new
+// RateLimitedAt (time.Now, nanosecond precision) plus a new RateLimitResetAt,
+// so the CAS only matches when no re-arm generation landed between the probe's
+// read and this write. Only plain OpenAI OAuth accounts (non-shadow) are
+// eligible, mirroring the Spark shadow boundary: shadow rows never carry an
+// account-level rate limit written by the /responses 429 chain, and their
+// codex_* state is driven exclusively by QueryUsage.
+func (r *accountRepository) ClearOpenAIRateLimitIfObserved(ctx context.Context, id int64, observedLimitedAt, observedResetAt time.Time) (bool, error) {
+	updated, err := r.client.Account.Update().
+		Where(
+			dbaccount.IDEQ(id),
+			dbaccount.PlatformEQ(service.PlatformOpenAI),
+			dbaccount.TypeEQ(service.AccountTypeOAuth),
+			dbaccount.ParentAccountIDIsNil(),
+			dbaccount.RateLimitedAtEQ(observedLimitedAt),
+			dbaccount.RateLimitResetAtEQ(observedResetAt),
+		).
+		ClearRateLimitedAt().
+		ClearRateLimitResetAt().
+		Save(ctx)
+	if err != nil {
+		return false, err
+	}
+	if updated == 0 {
+		// A newer generation landed (or the row no longer matches): do not
+		// announce anything, just refresh the local scheduler snapshot.
+		r.syncSchedulerAccountSnapshot(ctx, id)
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue observed OpenAI rate-limit clear failed: account=%d err=%v", id, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return true, nil
+}
+
 // SetRateLimitedIfUnchanged atomically applies a rate-limit reset only while the
 // account still carries exactly the generation the caller observed: its
 // UpdatedAt row version, its RateLimitedAt and its RateLimitResetAt (nil means

@@ -74,8 +74,9 @@ func TestWriteCodeBuddyCreditSnapshot_SQLShapeAndKeys(t *testing.T) {
 		SuccessTime: now,
 		Version:     9,
 		UrgencyPackages: []service.CodeBuddyUrgencyPackage{{
+			Unit:      "credits",
 			Remaining: decimal.RequireFromString("10"), Total: decimal.RequireFromString("100"),
-			ExpiresAt: "2026-10-15T21:26:43Z", Unit: "credits", Status: 0,
+			ExpiresAt: "2026-10-15T21:26:43Z", Status: 0,
 		}},
 		TotalRemaining: "10",
 		TotalTotal:     "100",
@@ -92,7 +93,8 @@ func TestWriteCodeBuddyCreditSnapshot_SQLShapeAndKeys(t *testing.T) {
 	require.True(t, strings.Contains(exec.lastQuery, "SET extra ="))
 	require.True(t, strings.Contains(exec.lastQuery, "deleted_at IS NULL"))
 
-	// jsonb_build_object 只合并 B4 键，不触碰旧总量/updated_at 旧键。
+	// jsonb_build_object 只合并 B4 键（聚合键 + urgency 键 + 排序/时间戳键），
+	// 不触碰旧总量/updated_at 旧键，也不写已删除的逐包明细键。
 	for _, key := range []string{
 		service.CodeBuddyUrgencyPackagesKey,
 		service.CodeBuddyCreditTotalRemainingKey,
@@ -107,6 +109,8 @@ func TestWriteCodeBuddyCreditSnapshot_SQLShapeAndKeys(t *testing.T) {
 	} {
 		require.Contains(t, exec.lastQuery, "'"+key+"'", "B4 键 %s 必须由 jsonb_build_object 合并", key)
 	}
+	require.NotContains(t, exec.lastQuery, "'codebuddy_credit_packages'",
+		"整改③：逐包明细键不得再被写入口写入/读取")
 	for _, oldKey := range []string{
 		"codebuddy_credit_total",
 		"codebuddy_credit_used",
@@ -122,20 +126,20 @@ func TestWriteCodeBuddyCreditSnapshot_SQLShapeAndKeys(t *testing.T) {
 	require.True(t, strings.Contains(exec.lastQuery, "-infinity"))
 	require.True(t, strings.Contains(exec.lastQuery, "GREATEST"))
 
-	// 参数顺序：$1=SuccessTime, $2=Version, $3=urgencyPackages JSON, $4=ResetAt,
-	// $5=UsedPercent, $6=ErrorMsg, $7=accountID, $8=TotalRemaining, $9=TotalTotal,
-	// $10=HasExcluded。
+	// 参数顺序：$1=SuccessTime, $2=Version, $3=urgency packages JSON,
+	// $4=TotalRemaining, $5=TotalTotal, $6=HasExcluded, $7=ResetAt,
+	// $8=UsedPercent, $9=ErrorMsg, $10=accountID。
 	require.Len(t, exec.lastArgs, 10)
 	require.Equal(t, now, exec.lastArgs[0])
 	require.Equal(t, int64(9), exec.lastArgs[1])
-	require.IsType(t, "", exec.lastArgs[2], "urgencyPackages 必须以 JSON 字符串传参")
-	require.Equal(t, now.Add(time.Hour), exec.lastArgs[3])
-	require.Equal(t, 90.0, exec.lastArgs[4])
-	require.Equal(t, "", exec.lastArgs[5], "无错误时 ErrorMsg 为空 → 删除旧错误键")
-	require.Equal(t, int64(42), exec.lastArgs[6])
-	require.Equal(t, "10", exec.lastArgs[7], "TotalRemaining 以十进制字符串传参")
-	require.Equal(t, "100", exec.lastArgs[8], "TotalTotal 以十进制字符串传参")
-	require.Equal(t, false, exec.lastArgs[9], "HasExcluded 以 bool 传参")
+	require.IsType(t, "", exec.lastArgs[2], "urgency packages 必须以 JSON 字符串传参")
+	require.Equal(t, "10", exec.lastArgs[3], "Σremaining 以十进制字符串落存储（禁 float64）")
+	require.Equal(t, "100", exec.lastArgs[4], "Σtotal 以十进制字符串落存储（禁 float64）")
+	require.Equal(t, false, exec.lastArgs[5])
+	require.Equal(t, now.Add(time.Hour), exec.lastArgs[6])
+	require.Equal(t, 90.0, exec.lastArgs[7])
+	require.Equal(t, "", exec.lastArgs[8], "无错误时 ErrorMsg 为空 → 删除旧错误键")
+	require.Equal(t, int64(42), exec.lastArgs[9])
 }
 
 func TestWriteCodeBuddyCreditSnapshot_WithErrorKeepsErrorKey(t *testing.T) {
@@ -147,9 +151,9 @@ func TestWriteCodeBuddyCreditSnapshot_WithErrorKeepsErrorKey(t *testing.T) {
 		SuccessTime:     now,
 		Version:         1,
 		UrgencyPackages: nil,
-		TotalRemaining:  "",
-		TotalTotal:      "",
-		HasExcluded:     false,
+		TotalRemaining:  "0",
+		TotalTotal:      "0",
+		HasExcluded:     true,
 		UsedPercent:     0,
 		ResetAt:         now,
 		ErrorMsg:        `[{"id":"a","reason":"unit_mismatch","raw":{"unit":"tokens"}}]`,
@@ -159,8 +163,8 @@ func TestWriteCodeBuddyCreditSnapshot_WithErrorKeepsErrorKey(t *testing.T) {
 	// 有错误：不执行 `extra - 'codebuddy_credit_error'` 删除分支，错误值由
 	// jsonb_build_object 写入。
 	require.True(t, strings.Contains(exec.lastQuery, service.CodeBuddyCreditErrorKey))
-	require.True(t, strings.Contains(exec.lastQuery, "to_jsonb($6::text)"))
-	require.Equal(t, `[{"id":"a","reason":"unit_mismatch","raw":{"unit":"tokens"}}]`, exec.lastArgs[5])
+	require.True(t, strings.Contains(exec.lastQuery, "to_jsonb($9::text)"))
+	require.Equal(t, `[{"id":"a","reason":"unit_mismatch","raw":{"unit":"tokens"}}]`, exec.lastArgs[8])
 }
 
 func TestWriteCodeBuddyCreditSnapshot_RowsAffectedZeroMeansRejected(t *testing.T) {
@@ -172,9 +176,8 @@ func TestWriteCodeBuddyCreditSnapshot_RowsAffectedZeroMeansRejected(t *testing.T
 		SuccessTime:     now,
 		Version:         1,
 		UrgencyPackages: nil,
-		TotalRemaining:  "",
-		TotalTotal:      "",
-		HasExcluded:     false,
+		TotalRemaining:  "0",
+		TotalTotal:      "0",
 		UsedPercent:     0,
 		ResetAt:         now,
 	})
@@ -206,9 +209,13 @@ func TestWriteCodeBuddyCreditAttemptError_OnlyFailureKeys(t *testing.T) {
 	} {
 		require.Contains(t, writeSet, key, "失败事务必须写键 %s", key)
 	}
-	// 不得触碰成功快照/freshness/reset_at/used_percent 的**写入**。
+	// 不得触碰成功快照/freshness/reset_at/used_percent 的**写入**
+	// （含整改③聚合键与 urgency 键）。
 	for _, forbidden := range []string{
 		service.CodeBuddyUrgencyPackagesKey,
+		service.CodeBuddyCreditTotalRemainingKey,
+		service.CodeBuddyCreditTotalTotalKey,
+		service.CodeBuddyCreditHasExcludedKey,
 		service.CodeBuddyCreditPackagesUpdatedAtKey,
 		service.CodeBuddyCreditResetAtKey,
 		service.CodeBuddyCreditUsedPercentKey,

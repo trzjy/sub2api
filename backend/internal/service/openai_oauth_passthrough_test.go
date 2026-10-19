@@ -2361,7 +2361,7 @@ func TestOpenAIGatewayService_CodexCLIOnly_RejectsNonCodexClient(t *testing.T) {
 	_, err := svc.Forward(context.Background(), c, account, inputBody)
 	require.Error(t, err)
 	require.Equal(t, http.StatusForbidden, rec.Code)
-	require.Contains(t, rec.Body.String(), "Codex official clients")
+	require.Contains(t, rec.Body.String(), infraerrors.CodexOfficialClientsOnly)
 }
 
 func TestOpenAIGatewayService_CodexCLIOnly_AllowOfficialClientFamilies(t *testing.T) {

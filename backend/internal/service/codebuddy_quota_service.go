@@ -750,16 +750,23 @@ func parseCodeBuddyCreditPackages(body []byte, uid string) ([]CodeBuddyCreditPac
 
 // parseCodeBuddyCreditPackage 解析单个分包条目。ok=false 时 errorEntry 记录剔除原因
 // 与原始值（不落库，仅组装）。
+//
+// 周期字段切换（CYCLE-20261019-R3）：remaining/total 的唯一解析源 = 周期容量计数器
+// CycleCapacityRemainPrecise / CycleCapacitySizePrecise（与 reset_at 同源 CycleEndTime
+// 的周期内口径一致）。累计容量字段 CapacityRemainPrecise / CapacitySizePrecise 已停用：
+// 周期字段缺失或非法时失败关闭（整包剔除），不回退 Capacity*。
 func parseCodeBuddyCreditPackage(acc gjson.Result) (CodeBuddyCreditPackage, codeBuddyCreditPackageError, bool) {
 	id := acc.Get("AccountId").String()
 	name := acc.Get("PackageName").String()
 	unit := acc.Get("CapacityUnit").String()
 	status := acc.Get("Status").Int()
+	remainingRaw := acc.Get("CycleCapacityRemainPrecise").String()
+	totalRaw := acc.Get("CycleCapacitySizePrecise").String()
 	rawValues := map[string]string{
 		"unit":      unit,
 		"status":    strconv.FormatInt(status, 10),
-		"remaining": acc.Get("CapacityRemainPrecise").String(),
-		"total":     acc.Get("CapacitySizePrecise").String(),
+		"remaining": remainingRaw,
+		"total":     totalRaw,
 	}
 	if status != codebuddyCreditPackageStatusActive && status != codebuddyCreditPackageStatusExhausted {
 		return CodeBuddyCreditPackage{}, codeBuddyCreditPackageError{
@@ -775,7 +782,7 @@ func parseCodeBuddyCreditPackage(acc gjson.Result) (CodeBuddyCreditPackage, code
 			RawValues: rawValues,
 		}, false
 	}
-	remaining, err := parseCodeBuddyCreditDecimal(acc.Get("CapacityRemainPrecise").String())
+	remaining, err := parseCodeBuddyCreditDecimal(remainingRaw)
 	if err != nil {
 		return CodeBuddyCreditPackage{}, codeBuddyCreditPackageError{
 			ID:        id,
@@ -783,7 +790,7 @@ func parseCodeBuddyCreditPackage(acc gjson.Result) (CodeBuddyCreditPackage, code
 			RawValues: rawValues,
 		}, false
 	}
-	total, err := parseCodeBuddyCreditDecimal(acc.Get("CapacitySizePrecise").String())
+	total, err := parseCodeBuddyCreditDecimal(totalRaw)
 	if err != nil {
 		return CodeBuddyCreditPackage{}, codeBuddyCreditPackageError{
 			ID:        id,
@@ -824,8 +831,9 @@ func parseCodeBuddyCreditPackage(acc gjson.Result) (CodeBuddyCreditPackage, code
 }
 
 // parseCodeBuddyCreditDecimal 把容量字段解析为 decimal 并按 §4.1 addendum 存储口径
-// 量化到 NUMERIC(20,8)。源字段为整数 + 同名 *Precise 定点字符串变体，解析源 =
-// *Precise。仅接受 decimal 字符串单一口径（与存储契约 MarshalJSON 对称）；
+// 量化到 NUMERIC(20,8)。源字段 = 周期容量计数器 *Precise 定点字符串变体
+// （CycleCapacityRemainPrecise / CycleCapacitySizePrecise，CYCLE-20261019-R3）。
+// 仅接受 decimal 字符串单一口径（与存储契约 MarshalJSON 对称）；
 // 解析失败失败关闭，不做 float64/量化兜底。
 func parseCodeBuddyCreditDecimal(raw string) (decimal.Decimal, error) {
 	s := strings.TrimSpace(raw)

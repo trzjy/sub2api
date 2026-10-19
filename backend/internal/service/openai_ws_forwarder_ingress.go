@@ -125,7 +125,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if ingressMode == OpenAIWSIngressModeOff {
 			return NewOpenAIWSClientCloseError(
 				coderws.StatusPolicyViolation,
-				"websocket mode is disabled for this account",
+				infraerrors.WSModeDisabled,
 				nil,
 			)
 		}
@@ -158,7 +158,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		default:
 			return NewOpenAIWSClientCloseError(
 				coderws.StatusPolicyViolation,
-				"websocket mode only supports ctx_pool/passthrough/http_bridge",
+				infraerrors.WSModeBridgeUnsupported,
 				nil,
 			)
 		}
@@ -232,10 +232,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	parseClientPayload := func(turn int, raw []byte) (openAIWSClientPayload, error) {
 		trimmed := bytes.TrimSpace(raw)
 		if len(trimmed) == 0 {
-			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "empty websocket request payload", nil)
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSEmptyRequestPayload, nil)
 		}
 		if !gjson.ValidBytes(trimmed) {
-			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, errors.New("invalid json"))
 		}
 
 		values := gjson.GetManyBytes(trimmed, "type", "model", "prompt_cache_key", "previous_response_id")
@@ -246,20 +246,20 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			eventType = "response.create"
 			next, setErr := applyPayloadMutation(normalized, "type", eventType)
 			if setErr != nil {
-				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", setErr)
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, setErr)
 			}
 			normalized = next
 		case "response.create":
 		case "response.append":
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
 				coderws.StatusPolicyViolation,
-				"response.append is not supported in ws v2; use response.create with previous_response_id",
+				infraerrors.WSAppendUnsupported,
 				nil,
 			)
 		default:
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
 				coderws.StatusPolicyViolation,
-				fmt.Sprintf("unsupported websocket request type: %s", eventType),
+				fmt.Sprintf(infraerrors.WSUnsupportedRequestTypeFormat, eventType),
 				nil,
 			)
 		}
@@ -271,7 +271,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		responsesLite := isOpenAIResponsesLiteWebSocketPayload(normalized)
 		if compatibilityBody, compatibilityChanged, compatibilityErr := normalizeOpenAIResponsesWebSocketCompatibilityBody(normalized, account, responsesLite); compatibilityErr != nil {
-			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", compatibilityErr)
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, compatibilityErr)
 		} else if compatibilityChanged {
 			normalized = compatibilityBody
 		}
@@ -298,7 +298,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if originalModel == "" {
 				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
 					coderws.StatusPolicyViolation,
-					"model is required in response.create payload",
+					infraerrors.WSModelRequiredInCreate,
 					nil,
 				)
 			}
@@ -309,21 +309,21 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if previousResponseID != "" && previousResponseIDKind == OpenAIPreviousResponseIDKindMessageID {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
 				coderws.StatusPolicyViolation,
-				"previous_response_id must be a response.id (resp_*), not a message id",
+				infraerrors.PreviousResponseIDBadFormat,
 				nil,
 			)
 		}
 		if turnMetadata := strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader)); turnMetadata != "" {
 			next, setErr := applyPayloadMutation(normalized, "client_metadata."+openAIWSTurnMetadataHeader, turnMetadata)
 			if setErr != nil {
-				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", setErr)
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, setErr)
 			}
 			normalized = next
 		}
 		accountIdentitySourceRaw := append([]byte(nil), normalized...)
 		accountScopedPayload, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(normalized, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 		if scopeErr != nil {
-			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidIdentityMetadata, scopeErr)
 		}
 		if accountScoped {
 			normalized = accountScopedPayload
@@ -353,7 +353,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if codexBridgeEnabled {
 			payloadMap := make(map[string]any)
 			if err := decodeOpenAIJSONUseNumber(normalized, &payloadMap); err != nil {
-				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", err)
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, err)
 			}
 			bridgeModified := false
 			if ensureOpenAIResponsesImageGenerationTool(payloadMap) {
@@ -374,7 +374,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if bridgeModified {
 				rebuilt, marshalErr := json.Marshal(payloadMap)
 				if marshalErr != nil {
-					return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", marshalErr)
+					return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, marshalErr)
 				}
 				normalized = rebuilt
 			}
@@ -393,21 +393,21 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if modelMissing || upstreamModel != originalModel {
 			next, setErr := applyPayloadMutation(normalized, "model", upstreamModel)
 			if setErr != nil {
-				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", setErr)
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, setErr)
 			}
 			normalized = next
 		}
 		SetOpsUpstreamModel(c, upstreamModel)
 		if isCodexCLI && codexImageGenerationExplicitToolPolicy == codexImageGenerationExplicitToolPolicyStrip {
 			if stripped, changed, stripErr := stripOpenAIImageGenerationToolsFromRawPayload(normalized); stripErr != nil {
-				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", stripErr)
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, stripErr)
 			} else if changed {
 				normalized = stripped
 				logOpenAIWSModeInfo("ingress_ws_codex_image_tool_stripped_by_policy account_id=%d", account.ID)
 			}
 		}
 		if stripped, changed, stripErr := stripCodexSparkImageGenerationToolFromRawPayload(normalized, upstreamModel); stripErr != nil {
-			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", stripErr)
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, stripErr)
 		} else if changed {
 			normalized = stripped
 			logOpenAIWSModeInfo("ingress_ws_codex_spark_image_tool_stripped account_id=%d", account.ID)
@@ -441,7 +441,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		// before evaluating policy, so whitelist / filter behavior remains stable.
 		policyApplied, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, upstreamModel, normalized)
 		if policyErr != nil {
-			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", policyErr)
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.WSInvalidRequestPayload, policyErr)
 		}
 		if blocked != nil {
 			MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
@@ -498,7 +498,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			clientConn,
 			idleTimeout,
 			coderws.StatusNormalClosure,
-			"websocket idle timeout",
+			infraerrors.WSIdleTimeout,
 		)
 		if readErr != nil {
 			var closeErr *OpenAIWSClientCloseError
@@ -510,7 +510,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 			return nil, NewOpenAIWSClientCloseError(
 				coderws.StatusPolicyViolation,
-				fmt.Sprintf("unsupported websocket client message type: %s", msgType.String()),
+				fmt.Sprintf(infraerrors.WSUnsupportedClientMessageTypeFormat, msgType.String()),
 				nil,
 			)
 		}

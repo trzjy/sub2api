@@ -69,14 +69,14 @@ func (s *OpenAIGatewayService) ForwardResponsesInputTokens(
 
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
-		writeOpenAIResponsesInputTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to get access token")
+		writeOpenAIResponsesInputTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamAuthFailed)
 		return fmt.Errorf("responses input_tokens: get access token: %w", err)
 	}
 
 	upstreamBody := ReplaceModelInBody(body, prepared.UpstreamModel)
 	upstreamReq, err := s.buildInputTokensUpstreamRequest(ctx, c, account, upstreamBody, token)
 	if err != nil {
-		writeOpenAIResponsesInputTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
+		writeOpenAIResponsesInputTokensError(c, http.StatusInternalServerError, "api_error", infraerrors.UpstreamRequestBuildFailed)
 		return fmt.Errorf("responses input_tokens: build upstream request: %w", err)
 	}
 
@@ -95,7 +95,7 @@ func (s *OpenAIGatewayService) ForwardResponsesInputTokens(
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		writeOpenAIResponsesInputTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to read response")
+		writeOpenAIResponsesInputTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseReadFailed)
 		return fmt.Errorf("responses input_tokens: read upstream response: %w", err)
 	}
 
@@ -118,7 +118,7 @@ func (s *OpenAIGatewayService) ForwardResponsesInputTokens(
 
 	inputTokens := gjson.GetBytes(respBody, "input_tokens")
 	if !inputTokens.Exists() {
-		writeOpenAIResponsesInputTokensError(c, http.StatusBadGateway, "upstream_error", "Upstream response missing input_tokens")
+		writeOpenAIResponsesInputTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseMissingTokenCount)
 		return fmt.Errorf("responses input_tokens: upstream response missing input_tokens")
 	}
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
@@ -300,7 +300,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 
 	upstreamBody, err := marshalOpenAIUpstreamJSON(prepared.Request)
 	if err != nil {
-		writeAnthropicCountTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
+		writeAnthropicCountTokensError(c, http.StatusInternalServerError, "api_error", infraerrors.UpstreamRequestBuildFailed)
 		return fmt.Errorf("marshal openai input_tokens body: %w", err)
 	}
 
@@ -314,13 +314,13 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
-		writeAnthropicCountTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to get access token")
+		writeAnthropicCountTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamAuthFailed)
 		return fmt.Errorf("get access token: %w", err)
 	}
 
 	upstreamReq, err := s.buildInputTokensUpstreamRequest(ctx, c, account, upstreamBody, token)
 	if err != nil {
-		writeAnthropicCountTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
+		writeAnthropicCountTokensError(c, http.StatusInternalServerError, "api_error", infraerrors.UpstreamRequestBuildFailed)
 		return fmt.Errorf("build input_tokens request: %w", err)
 	}
 
@@ -339,7 +339,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		writeAnthropicCountTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to read response")
+		writeAnthropicCountTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseReadFailed)
 		return fmt.Errorf("read input_tokens response: %w", err)
 	}
 
@@ -355,7 +355,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 		}
 
 		if isOpenAIInputTokensUnsupported(resp.StatusCode, respBody) {
-			writeAnthropicCountTokensError(c, http.StatusNotFound, "not_found_error", "Token counting is not supported by upstream")
+			writeAnthropicCountTokensError(c, http.StatusNotFound, "not_found_error", infraerrors.TokenCountingUnsupportedByUpstream)
 			return nil
 		}
 
@@ -385,7 +385,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 
 	inputTokens := gjson.GetBytes(respBody, "input_tokens")
 	if !inputTokens.Exists() {
-		writeAnthropicCountTokensError(c, http.StatusBadGateway, "upstream_error", "Upstream response missing input_tokens")
+		writeAnthropicCountTokensError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseMissingTokenCount)
 		return fmt.Errorf("input_tokens response missing input_tokens field")
 	}
 

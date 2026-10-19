@@ -468,6 +468,29 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 		}
 	}
 
+	// deliverStreamAbortError 在响应已开始写出且客户端仍连接时，向客户端下发
+	// 一次 Anthropic SSE error 事件，避免下游只见连接中断、自行合成英文错误
+	// （Claude Code 的 "Connection lost mid-response"）。格式与 repGuardAbort
+	// 先例完全一致（event: error + 同一构造函数），且带 clientDisconnected /
+	// 响应未提交守卫：未提交路径交给上层 ensure* JSON 错误，已断开无可发送目标。
+	// 每条错误路径只调用一次，禁止重复发帧或伪造成功。
+	deliverStreamAbortError := func(code, message string) {
+		if clientDisconnected || !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+			return
+		}
+		// 若上游最后一个写出行是 data: 行且未写出事件分隔空行（inPartialEvent=
+		// true），先闭合未完成事件再下发 error 帧，避免 error 帧并入未闭合事件
+		// 被 SSE 解析器合并进同一事件（D7b 外审 must_fix）。复用既有
+		// writeStreamLine("") 闭合机制（写 "\n" + flush + 复位 inPartialEvent）。
+		if inPartialEvent {
+			writeStreamLine("")
+		}
+		sse := buildAnthropicStreamErrorCodeSSE("api_error", code, message)
+		if _, werr := io.WriteString(w, sse); werr == nil {
+			flusher.Flush()
+		}
+	}
+
 	for {
 		select {
 		case ev, ok := <-events:
@@ -477,6 +500,16 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 					flusher.Flush()
 				}
 				if !sawTerminalEvent {
+					// 取消门禁（B1）：请求 context 已取消（客户端断开 / 服务端终止）
+					// 时，不补发错误帧。与读错分支（ev.err 的 context.Canceled /
+					// DeadlineExceeded 排除）同语义：reader 返回 EOF 而非 Canceled 的
+					// 组合也须跳过投递（复用 ensureAnthropicStreamReadErrorResponse
+					// 同款检查模式）。仅跳过发帧，return 错误语义保持既有不变。
+					if c.Request != nil && c.Request.Context().Err() != nil {
+						return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
+							fmt.Errorf("stream usage incomplete: missing terminal event")
+					}
+					deliverStreamAbortError(OpenAIUpstreamStreamTruncatedCode, infraerrors.UpstreamStreamEndedEarly)
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
 						fmt.Errorf("stream usage incomplete: missing terminal event")
 				}
@@ -506,13 +539,19 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 						return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
 							s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
 					}
+					cnReadCode, _ := classifyOpenAIUpstreamStreamReadError(ev.err)
+					deliverStreamAbortError(cnReadCode, infraerrors.UpstreamFirstByteTimeoutAfterStart)
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
 						fmt.Errorf("stream read error: %w", ev.err)
 				}
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, ev.err)
+					readCode, readMsg := classifyOpenAIUpstreamStreamReadError(ev.err)
+					deliverStreamAbortError(readCode, readMsg)
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), ev.err
 				}
+				readCode, readMsg := classifyOpenAIUpstreamStreamReadError(ev.err)
+				deliverStreamAbortError(readCode, readMsg)
 				return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
 					fmt.Errorf("stream read error: %w", ev.err)
 			}
@@ -579,6 +618,13 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			if time.Since(lastRead) < streamInterval {
 				continue
 			}
+			// 终态门禁（B1）：终态事件已收到后，间隔超时不得再触发错误投递，
+			// 否则客户端在成功终态（message_stop）之后收到伪错误帧。此 continue
+			// 与下方 CN watchdog continue 同层，仅对「终态后上游停滞但连接未断」
+			// 的组合跳过超时裁决；既有的四类零发送守卫不受本单影响。
+			if sawTerminalEvent {
+				continue
+			}
 			// 旧 interval timer 不得在首字节前抢先裁决：合法配置
 			// stream_data_interval_timeout=30..59 下，interval tick 早于 60s
 			// watchdog 到期；若在此返回普通 interval timeout，会中断流且不触发
@@ -597,6 +643,16 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			if s.rateLimitService != nil {
 				s.rateLimitService.HandleStreamTimeout(ctx, account, upstreamModel)
 			}
+			// 取消门禁（B1 同款，R4 must_fix）：请求 context 已取消（客户端断开 /
+			// 服务端终止）时，即使 clientDisconnected 因无写失败未置位，间隔超时也
+			// 不得补发 error 帧——与 EOF 缺终态分支（上方 !sawTerminalEvent 分支）
+			// 复用同款检查（c.Request.Context().Err()）。仅跳过投递，return 错误与
+			// 计费语义保持既有不变。
+			if c.Request != nil && c.Request.Context().Err() != nil {
+				return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
+					fmt.Errorf("stream data interval timeout")
+			}
+			deliverStreamAbortError("upstream_timeout", infraerrors.UpstreamStreamIntervalTimeout)
 			return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
 				fmt.Errorf("stream data interval timeout")
 

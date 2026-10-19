@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -96,9 +97,42 @@ func healthyCodeBuddyQuotaAccount(id int64) *Account {
 // Card A 分包解析 + Card B 条件更新写路径：两个 Status=0 分包（500/1500）聚合，
 // used_percent=0，最晚 CycleEndTime 为 reset_at；成功事务写分包快照 + 版本号，
 // 且不再走旧 UpdateExtra 写口（updateExtra 必须保持 0）。
+// codebuddyFutureCycleEndFixture 把 fixture 中**所有** CycleEndTime 字面量统一替换为同一个
+// 明确未来的 UTC+8 字面量，返回替换后的报文与对应的 UTC reset_at 字面量（RFC3339）。
+//
+// 仅为稳定测试修复：fixture 周期结束时刻是抓包时快照，相对当前系统日期必定逐日过期
+// （其值随 fixture 版本漂移，曾为 2026-09-30 / 2026-10-13），生产 deriveResetAtFromPackages
+// 只取**未来**的最晚 CycleEndTime，过期则回退 now+24h，断言随系统日期漂移。
+// 替换按 CycleEndTime 键做通用正则匹配、不依赖任何具体取值，因此 fixture 取值变化
+// （换成 2099 或别的年份都一样）不会让 helper 自身失效。此处只改输入时刻，不触碰生产
+// reset_at 语义（仍由同一生产路径推导）；fixture 文件本身不在本卡白名单内，故在测试内替换。
+func codebuddyFutureCycleEndFixture(t *testing.T, fixture []byte) (body []byte, resetAt string) {
+	t.Helper()
+	// UTC+8 字面量：目标 UTC 时刻 + 8h，解析回同一 UTC 时刻（与 parseCodeBuddyCycleEnd 对称）。
+	target := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Second)
+	literal := target.Add(8 * time.Hour).Format("2006-01-02 15:04:05")
+
+	// 匹配 "CycleEndTime": "<任意值>"（容忍键值间空白差异），目标串整体按字面替换。
+	pattern := regexp.MustCompile(`"CycleEndTime"\s*:\s*"[^"]*"`)
+	matches := pattern.FindAll(fixture, -1)
+	require.NotEmpty(t, matches, "fixture 必须包含至少一个 CycleEndTime 字面量，抓包结构可能已变")
+	body = pattern.ReplaceAllLiteral(fixture, []byte(`"CycleEndTime": "`+literal+`"`))
+	require.Equal(t, len(matches), strings.Count(string(body), literal),
+		"fixture 的每个 CycleEndTime 都必须替换为同一未来值")
+
+	// 目标字面量经生产解析必须回到同一 UTC 时刻（之后再由生产路径取最晚未来值）。
+	parsed, ok := parseCodeBuddyCycleEnd(literal)
+	require.True(t, ok)
+	require.Equal(t, target, parsed.UTC())
+	return body, target.Format(time.RFC3339)
+}
+
 func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 	fixture, err := os.ReadFile("testdata/codebuddy_billing_get_user_resource.json")
 	require.NoError(t, err)
+	// 抓包 fixture 的 CycleEndTime 已过期（见 codebuddyFutureCycleEndFixture 说明）：
+	// 替换为明确未来值后，reset_at 仍由生产路径（最晚未来 CycleEndTime）推导。
+	fixture, wantResetAt := codebuddyFutureCycleEndFixture(t, fixture)
 
 	account := healthyCodeBuddyQuotaAccount(8801)
 	// 真实响应不含 OAuth uid（仅有 AccountId/Uin/ResourceId/BindRecords[].BindObjectId），
@@ -119,20 +153,22 @@ func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 	require.Equal(t, 0.0, result.UsedPercent, "抓包中两个资源包 CapacityUsed 均为 0")
 	require.Equal(t, 2000.0, result.TotalCredit, "500 + 1500")
 	require.Equal(t, 0.0, result.UsedCredit)
-	// 最晚 CycleEndTime = 2099-10-13 07:46:09 (UTC+8) → 2099-10-12T23:46:09Z。
-	// fixture 时间取遥远未来：deriveResetAtFromPackages 只认"未来的最晚值"，
-	// 写死2026 年近端值会随日历推移变成过期值并静默回退默认窗口（曾发生）。
-	require.Equal(t, "2099-10-12T23:46:09Z", result.ResetAt)
+	// reset_at = 最晚未来 CycleEndTime（UTC RFC3339）。
+	require.Equal(t, wantResetAt, result.ResetAt)
 
 	// Card B 唯一条件更新写口：成功快照通过 WriteCodeBuddyCreditSnapshot 落库。
 	require.Equal(t, 1, repo.nextVerCalls, "抓取开始必须取一次 attempt_version")
 	require.Len(t, repo.snapshotWrites, 1, "成功快照应走条件更新写口")
 	write := repo.snapshotWrites[0]
 	require.Equal(t, int64(7), write.Version, "version 必须 = 抓取开始取得的 attempt_version")
-	require.Len(t, write.UrgencyPackages, 2, "两个 status==0 且到期可解析的分包都应进入 urgency 快照")
+	require.Len(t, write.UrgencyPackages, 2, "两个 Status=0 分包都应进入紧迫度数组")
+	// 聚合总量键（整改②参与集合 Σremaining/Σtotal，十进制字符串，禁 float64 落存储）。
+	require.Equal(t, "2000", write.TotalRemaining)
+	require.Equal(t, "2000", write.TotalTotal)
+	require.False(t, write.HasExcluded, "无剔除条目 → has_excluded=false")
 	require.Equal(t, 0.0, write.UsedPercent)
 	require.False(t, write.SuccessTime.IsZero(), "成功时刻必须采样")
-	require.Equal(t, "2099-10-12T23:46:09Z", write.ResetAt.UTC().Format(time.RFC3339))
+	require.Equal(t, wantResetAt, write.ResetAt.UTC().Format(time.RFC3339))
 	require.Empty(t, write.ErrorMsg, "无解析错误时应清旧错误")
 	// 旧 UpdateExtra 写口零调用（写路径全量切换，禁双写口）。
 	require.Equal(t, 0, repo.updateExtra, "快照不得再走旧 UpdateExtra 写口")
@@ -142,8 +178,8 @@ func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 // 的聚合口径（sum(used)/sum(size)）与最晚 CycleEndTime 取值为重置时间。
 func TestParseCodeBuddyCreditUsage_ComputesPercentFromCapacityCounters(t *testing.T) {
 	body := []byte(`{"code":0,"data":{"Response":{"Data":{"TotalCount":2,"TotalDosage":2000,"Accounts":[
-		{"AccountId":1,"CapacitySize":500,"CapacityUsed":100,"CapacityRemain":400,"CycleEndTime":"2099-09-30 23:59:59","Status":0},
-		{"AccountId":2,"CapacitySize":1500,"CapacityUsed":300,"CapacityRemain":1200,"CycleEndTime":"2099-10-13 07:46:09","Status":0}
+		{"AccountId":1,"CapacitySize":500,"CapacityUsed":100,"CapacityRemain":400,"CycleEndTime":"2026-09-30 23:59:59","Status":0},
+		{"AccountId":2,"CapacitySize":1500,"CapacityUsed":300,"CapacityRemain":1200,"CycleEndTime":"2026-10-13 07:46:09","Status":0}
 	]}}}}`)
 
 	usage, ok := parseCodeBuddyCreditUsage(body, "unmatched-uid")
@@ -153,7 +189,7 @@ func TestParseCodeBuddyCreditUsage_ComputesPercentFromCapacityCounters(t *testin
 	require.InDelta(t, 20.0, usage.UsedPercent, 1e-9)
 	require.True(t, usage.HasResetAt)
 	// 取最晚的未来周期结束时间（聚合用量需全部资源包滚动后才归零）。
-	require.Equal(t, "2099-10-12T23:46:09Z", usage.ResetAt.UTC().Format(time.RFC3339))
+	require.Equal(t, "2026-10-12T23:46:09Z", usage.ResetAt.UTC().Format(time.RFC3339))
 }
 
 // TestParseCodeBuddyCreditUsage_PreciseStringFallback 验证整型计数器缺失时回退到

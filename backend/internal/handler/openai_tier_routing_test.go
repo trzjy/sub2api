@@ -88,7 +88,7 @@ func TestTierRoutingApplyRoutingGateErrorPassthrough(t *testing.T) {
 }
 
 // TestTierRoutingApplyRoutingTargetModelGateOpen 验证目标模型且门开启时装门返回新 ctx，
-// 并输出一行结构化日志（request_id + 估算 input + 分档 small/big）。=2000 判小的精确边界
+// 并输出一行结构化日志（request_id + 估算 input + 分档 small/big）。=3000 判小的精确边界
 // 由 TestTierRoutingClassForEstimate 在纯分档函数层确定性覆盖（派发单 OC-T1，测试 #2 + #1）。
 func TestTierRoutingApplyRoutingTargetModelGateOpen(t *testing.T) {
 	cases := []struct {
@@ -146,7 +146,7 @@ func TestTierRoutingApplyRoutingEstimateFailClosed(t *testing.T) {
 	require.Equal(t, 0, logs.Len(), "no tier log on estimate failure")
 }
 
-// repeatWords 生成约 n 个词的文本（每个词约占 1 token），用于构造 2000 附近的边界。
+// repeatWords 生成约 n 个词的文本（每个词约占 1 token），用于构造 3000 附近的边界。
 func repeatWords(n int) string {
 	const word = " word"
 	if n <= 0 {
