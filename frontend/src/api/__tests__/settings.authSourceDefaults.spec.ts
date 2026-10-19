@@ -5,16 +5,19 @@ import {
   buildAuthSourceDefaultsState,
   normalizePlatformQuotasMap,
   sanitizePlatformQuotasMap,
+  QUOTA_PLATFORM_IDS,
   type UpdateSettingsRequest,
   type DefaultPlatformQuotasMap,
 } from "@/api/admin/settings";
 import { listPlatformIds } from "@/constants/platformCatalog";
 
-/** 与后端 AllowedQuotaPlatforms 一致的全部具体平台（平台清单）。 */
-const quotaPlatforms = [
-  "anthropic", "openai", "gemini", "antigravity", "grok",
-  "kimi", "zhipu", "deepseek", "minimax", "opencode_go", "typesafe", "command_code", "cline",
-];
+/**
+ * 配额白名单的前端侧镜像（= 平台目录 16 项 + other 1 项 = 17 项），与后端
+ * service.AllowedQuotaPlatforms 同一集合。直接引用 settings.ts 导出的 QUOTA_PLATFORM_IDS，
+ * 不再在此手写第二份清单（消除此前与平台目录的漂移）。other 在平台目录里没有、但后端白名单有，
+ * 故往返必须包含它，否则保存时的整体替换语义会把 other 的配额静默清空。
+ */
+const quotaPlatforms = QUOTA_PLATFORM_IDS
 
 /** 全部平台全 null 的 map，用于断言归一化默认值 */
 const allNullQuotas: DefaultPlatformQuotasMap = Object.fromEntries(
@@ -247,7 +250,8 @@ describe("normalizePlatformQuotasMap", () => {
 
   it("无参数时返回平台清单中的全部平台全 null", () => {
     const result = normalizePlatformQuotasMap();
-    expect(listPlatformIds()).toEqual(quotaPlatforms);
+    // 配额镜像 = 平台目录 + other（other 在目录里没有、但后端白名单有），与后端保持同一集合
+    expect(quotaPlatforms).toEqual([...listPlatformIds(), "other"]);
     expect(Object.keys(result)).toEqual(quotaPlatforms);
     for (const v of Object.values(result)) {
       expect(v).toEqual({ daily: null, weekly: null, monthly: null });

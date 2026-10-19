@@ -81,10 +81,18 @@ export function sanitizeAccountSchedulingThresholdsMap(
   return normalizeAccountSchedulingThresholdsMap(input)
 }
 
+/**
+ * 配额白名单的前端侧镜像 = 平台目录（listPlatformIds，16 项）+ other（目录里没有，
+ * 但后端 service.AllowedQuotaPlatforms 有）。GET/Save 往返必须用这份镜像而非
+ * 平台目录：目录不含 other，用目录铺展会把 other 的既有配置静默丢掉（保存为整体替换语义）。
+ * 与后端 AllowedQuotaPlatforms 保持同一集合；新增平台时两侧同步。
+ */
+export const QUOTA_PLATFORM_IDS: string[] = [...listPlatformIds(), "other"]
+
 /** 归一化为全部平台 × 3 窗口（缺失填 null），供模板非空绑定 */
 export function normalizePlatformQuotasMap(input?: DefaultPlatformQuotasMap | null): DefaultPlatformQuotasMap {
   const result: DefaultPlatformQuotasMap = {}
-  for (const p of listPlatformIds()) {
+  for (const p of QUOTA_PLATFORM_IDS) {
     const src = input?.[p]
     result[p] = {
       daily:   typeof src?.daily === "number" ? src.daily : null,
@@ -99,7 +107,7 @@ export function normalizePlatformQuotasMap(input?: DefaultPlatformQuotasMap | nu
 export function sanitizePlatformQuotasMap(input?: DefaultPlatformQuotasMap | null): DefaultPlatformQuotasMap {
   const clean = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null)
   const result: DefaultPlatformQuotasMap = {}
-  for (const p of listPlatformIds()) {
+  for (const p of QUOTA_PLATFORM_IDS) {
     const src = input?.[p]
     result[p] = { daily: clean(src?.daily), weekly: clean(src?.weekly), monthly: clean(src?.monthly) }
   }
