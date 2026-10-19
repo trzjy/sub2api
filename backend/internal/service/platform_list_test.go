@@ -88,13 +88,13 @@ func legacyIsConcreteRequestPlatform(platform string) bool {
 }
 
 func TestPlatformListDerivedListsMatchLegacy(t *testing.T) {
-	// B2 真值表裁定（merge plan §2.5，ours 行为逐点复刻）：配额白名单不等于全量
-	// 平台清单——按 ours 现状锁定（other / codebuddy 显式放行；muse / opencode_go /
-	// typesafe / command_code / cline 不在配额白名单为已知漂移，不修复不补齐）。
-	oursQuotaPlatforms := []string{
-		PlatformAnthropic, PlatformOpenAI, PlatformGemini, PlatformAntigravity, PlatformGrok,
-		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformOther, PlatformMiniMax, PlatformCodeBuddy,
-	}
+	// 2026-10-19 裁定：原 B2「配额白名单按 ours 现状逐点复刻、muse/opencode_go/typesafe/
+	// command_code/cline 为已知漂移不修复不补齐」已作废。作废理由：前端按平台目录
+	// （domain.ConcretePlatformIDs()，16 项）在系统设置保存时铺满配额 map，后端白名单只认
+	// 11 项 → 任一目录平台不认识即整包 400，管理员保存任何设置字段都失败；且 GET 返回的
+	// other 每次保存被前端静默清空。现白名单改为「前端目录 ∪ other」的并集（17 项），
+	// 与后端 / ent / DB CHECK / 前端四处同集合，故此处断言同步改为 17 项并集，不得再锁 11 项。
+	oursQuotaPlatforms := append(domain.ConcretePlatformIDs(), PlatformOther)
 	require.Equal(t, oursQuotaPlatforms, AllowedQuotaPlatforms)
 	require.Equal(t, legacySchedulerSnapshotPlatforms, schedulerSnapshotPlatforms())
 	require.Equal(t, legacyCompositeMatchingPlatforms, matchingPlatforms(PlatformComposite))

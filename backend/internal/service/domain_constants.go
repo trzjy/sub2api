@@ -184,24 +184,18 @@ func UsesOpenAIProtocolSharedBaseURL(platform string) bool {
 
 // AllowedQuotaPlatforms 是允许设置 user × platform quota 的平台列表。
 //
-// 显式清单（而非 domain.ConcretePlatformIDs()）的原因：ours 现状允许 other、不允许
-// muse，平台清单驱动的 registrable 集合与之不同（other 不登记、muse 已登记）。合并
-// 裁定（B2）要求按 ours 现状逐点复刻，故此处保留显式清单，不用注册表整体派生；
-// 同样地 muse 继续缺席（已知漂移，不修复不补齐）。ent/schema/user_platform_quota.go
-// 的构建期校验与此处同源手写，新增平台需同步修改两处。
-var AllowedQuotaPlatforms = []string{
-	PlatformAnthropic,
-	PlatformOpenAI,
-	PlatformGemini,
-	PlatformAntigravity,
-	PlatformGrok,
-	PlatformKimi,
-	PlatformZhipu,
-	PlatformDeepseek,
-	PlatformOther,
-	PlatformMiniMax,
-	PlatformCodeBuddy,
-}
+// 2026-10-19 裁定：原 B2「按 ours 现状逐点复刻、漂移不修复不补齐」裁定已作废。
+// 作废理由：前端按平台目录（domain.ConcretePlatformIDs()，16 项）在系统设置保存时铺满
+// 配额 map，而后端此白名单只认 11 项 → 任一目录平台（opencode_go/typesafe/command_code/
+// cline/cursor）不认识即整包 INVALID_DEFAULT_PLATFORM_QUOTA 400，管理员在「系统设置」页点
+// 保存任何字段都失败；且 GET 返回的 other 每次保存被前端按 16 项目录遍历静默清空。
+//
+// 现改为「前端目录 ∪ other」的并集：用 domain.ConcretePlatformIDs()（单一数据源，16 项，
+// 每次 make 新切片可安全 append）派生，再显式追加 PlatformOther（目录里没有的通用上游）。
+// 共 17 项，使后端白名单 / ent 写库校验 / DB CHECK 约束 / 前端配额 map 铺展四处同集合。
+// 不再写死字面量——新平台登记进平台目录即自动进入白名单，避免把本次漂移原样留给下个新平台。
+// ent/schema/user_platform_quota.go 的构建期校验与此处同源，新增平台需同步修改两处。
+var AllowedQuotaPlatforms = append(domain.ConcretePlatformIDs(), PlatformOther)
 
 // AllowedSchedulingThresholdPlatforms 是允许设置账号自动停调阈值的平台列表。
 // openai/anthropic/grok 有原生用量窗口；kimi/zhipu/minimax 的 Coding Plan 同样暴露
