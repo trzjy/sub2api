@@ -13,7 +13,6 @@ export default {
       working: '后台聚合中…',
     },
     timeRange: '时间范围',
-    clearFilters: '重置',
     refreshingFilters: '筛选条件已变化，正在刷新矩阵、趋势和明细…',
     switchingData: '正在切换筛选数据…',
     summaryAria: '筛选范围整体汇总',
@@ -24,7 +23,6 @@ export default {
     currentUser: '当前用户',
     ranges: { '90m': '90m', '24h': '24h', '7d': '7d', '30d': '30d' },
     filters: {
-      model: '模型', allModels: '全部',
       empty: '暂无可选项', selectedCount: '{count} 项', labelValue: '{label}：{value}'
     },
     trendView: { label: '趋势视图', pulse: '色块矩阵', line: '折线图' },
@@ -54,7 +52,7 @@ export default {
       cacheRateValue: '缓存率 {value}',
     },
     table: { platformModel: '模型', rank: '排名', user: '用户' },
-    empty: { title: '没有可展示的数据', description: '尝试调整时间范围或筛选条件' },
+    empty: { title: '没有可展示的数据', description: '尝试调整时间范围' },
     bucket: { minutes: '{count} 分钟粒度', hours: '{count} 小时粒度', days: '{count} 天粒度' },
     matrix: {
       title: '可用性趋势', description: '每行是一种模型，每个色块代表一个统计区间；悬停查看明细', wheelZoom: '在色块上滚轮放大（区间变窄、色块变宽）', wheelZoomX: '在色块上滚轮放大（区间变窄、色块变宽）', dimension: '模型', emptyTitle: '当前筛选窗口没有矩阵数据', legendAria: '健康分数图例', bad: '差', good: '好', healthyLegend: '健康 (≥80)', warningLegend: '需关注 (50–79)', criticalLegend: '异常 (<50)', unknownLegend: '无流量 / 样本不足', noTraffic: '该区间无流量', noTrafficAt: '{time} · 无流量', scoreLine: '健康分 {score}', resetZoom: '重置缩放',

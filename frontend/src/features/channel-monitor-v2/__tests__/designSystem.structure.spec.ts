@@ -25,7 +25,6 @@ describe('channel-monitor-v2 design system structure', () => {
     expect(src).toContain('badge badge-warning')
     // Compact single-row toolbar
     expect(src).toContain('monitor-toolbar')
-    expect(src).toContain('clearFilters')
     expect(src).toContain('healthModeOptions')
     expect(src).toContain("'cache'")
     // Ops elevation: rounded-3xl + ring surfaces
@@ -39,9 +38,8 @@ describe('channel-monitor-v2 design system structure', () => {
     // Dense tables scroll internally
     expect(src).toMatch(/max-h-\[min\(52vh/)
     expect(src).toContain('overflow-auto')
-    // Trend view toggle (pulse matrix / line chart) + model-only dimension filter
+    // Trend view toggle (pulse matrix / line chart)
     expect(src).toContain("trendView")
-    expect(src).toContain('modelOptions')
     expect(src).toContain('MonitorTrendChart')
   })
 

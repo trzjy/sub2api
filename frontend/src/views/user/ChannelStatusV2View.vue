@@ -108,27 +108,6 @@
             </button>
           </div>
 
-          <span class="mx-0.5 hidden h-5 w-px shrink-0 bg-gray-200 dark:bg-dark-700 sm:block" aria-hidden="true"></span>
-
-          <FilterMultiSelect
-            v-model="filter.models"
-            compact
-            :label="t('channelMonitorV2.filters.model')"
-            :all-label="t('channelMonitorV2.filters.allModels')"
-            :options="modelOptions"
-          />
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm shrink-0 !px-2 !py-1 text-xs"
-            :disabled="!hasDimensionFilter"
-            :class="!hasDimensionFilter ? 'opacity-40' : ''"
-            @click="clearDimensions"
-          >
-            {{ t('channelMonitorV2.clearFilters') }}
-          </button>
-
-          <span class="mx-0.5 hidden h-5 w-px shrink-0 bg-gray-200 dark:bg-dark-700 md:block" aria-hidden="true"></span>
-
           <div
             class="tabs inline-flex shrink-0"
             role="group"
@@ -439,7 +418,6 @@ import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import FilterMultiSelect from '@/features/channel-monitor-v2/FilterMultiSelect.vue'
 import MetricCell from '@/features/channel-monitor-v2/MetricCell.vue'
 import MonitorRankBadge from '@/features/channel-monitor-v2/MonitorRankBadge.vue'
 import MonitorTrendChart from '@/features/channel-monitor-v2/MonitorTrendChart.vue'
@@ -451,7 +429,6 @@ import { isChannelMonitorThroughputHidden, isChannelMonitorUserRankingHidden } f
 import * as api from '@/api/channelMonitorV2'
 import type {
   HealthState,
-  MonitorDimensions,
   MonitorErrorRow,
   MonitorFilter,
   MonitorHealth,
@@ -516,12 +493,11 @@ const filter = ref<MonitorFilter>({
   range: parseRange(route.query.range),
   platforms: [],
   groupIds: [],
-  models: csv(route.query.model),
+  models: [],
 })
 const activeTab = ref<Tab>(parseTab(route.query.tab, showUserRanking.value))
 const healthMode = ref<HealthMode>(parseHealthMode(route.query.health_mode))
 const trendView = ref<TrendView>(parseTrendView(route.query.trend_view))
-const dimensions = ref<MonitorDimensions>({ platforms: [], groups: [], models: [] })
 const snapshot = ref<MonitorSnapshot | null>(null)
 const matrix = ref<MonitorMatrixResponse | null>(null)
 const modelRows = ref<MonitorModelRow[]>([])
@@ -535,16 +511,6 @@ let controller: AbortController | null = null
 let sequence = 0
 let autoRefreshTimer: number | null = null
 
-const hasDimensionFilter = computed(() => filter.value.models.length > 0)
-// Model filter options show the bare model name only (de-platformed view: no
-// platform / group prefix). Backend dimensions.models[].label is the model string
-// itself (channelMonitorV2ModelLabel), so item.label is already platform-free.
-const modelOptions = computed(() =>
-  (dimensions.value.models || []).map((item) => ({
-    value: item.value,
-    label: item.label,
-  }))
-)
 const activeRowsEmpty = computed(() =>
   activeTab.value === 'models'
     ? modelRows.value.length === 0
@@ -561,9 +527,6 @@ const bootstrapPercent = computed(() => {
 })
 const matrixRows = computed(() => matrix.value?.items || [])
 
-function csv(value: unknown) {
-  return typeof value === 'string' ? value.split(',').filter(Boolean) : []
-}
 function parseRange(value: unknown): MonitorRange {
   return ['90m', '24h', '7d', '30d'].includes(String(value)) ? (value as MonitorRange) : '90m'
 }
@@ -582,26 +545,12 @@ function syncQuery() {
   void router.replace({
     query: {
       range: filter.value.range,
-      model: filter.value.models.join(',') || undefined,
       health_mode: healthMode.value,
       trend_view: trendView.value === 'line' ? 'line' : undefined,
       tab: activeTab.value,
     },
   })
 }
-/** Dimensions catalog: range only — never re-filtered by platform/group/model selection. */
-async function loadDimensions(signal?: AbortSignal, id = sequence) {
-  const rangeOnly: MonitorFilter = {
-    range: filter.value.range,
-    platforms: [],
-    groupIds: [],
-    models: [],
-  }
-  const next = await api.getDimensions(rangeOnly, isAdmin.value, signal)
-  if (id !== sequence) return
-  dimensions.value = next
-}
-
 async function loadMetrics(signal?: AbortSignal, id = sequence) {
   const [nextSnapshot, nextMatrix] = await Promise.all([
     api.getSnapshot(filter.value, isAdmin.value, signal),
@@ -622,11 +571,8 @@ async function reload(silent = true) {
   refreshing.value = true
   if (!silent) loading.value = true
   try {
-    // Catalog + metrics in parallel; catalog ignores dimension filters so options never shrink.
-    await Promise.all([
-      loadDimensions(request.signal, id),
-      loadMetrics(request.signal, id),
-    ])
+    // Snapshot + matrix for the current range; auto-refresh re-runs this load.
+    await loadMetrics(request.signal, id)
   } catch (error) {
     if ((error as { name?: string }).name !== 'CanceledError') {
       appStore.showError(extractApiErrorMessage(error, t('channelMonitorV2.loadFailed')))
@@ -640,7 +586,7 @@ async function reload(silent = true) {
   }
 }
 
-/** When only range changes, still refresh dimensions; dimension filters only re-load metrics. */
+/** Range change triggers a full reload; otherwise only the metrics reload. */
 async function reloadMetricsOnly(silent = true) {
   controller?.abort()
   const request = new AbortController()
@@ -684,15 +630,6 @@ async function loadTab(signal?: AbortSignal, id = sequence) {
 }
 function setRange(value: MonitorRange) {
   filter.value.range = value
-}
-function clearDimensions() {
-  // Replace arrays so deep watch always fires and metrics reload full window.
-  filter.value = {
-    ...filter.value,
-    platforms: [],
-    groupIds: [],
-    models: [],
-  }
 }
 function scheduleAutoRefresh() {
   if (autoRefreshTimer) {
