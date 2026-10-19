@@ -130,6 +130,12 @@ func (x *Xunhupay) CreatePayment(ctx context.Context, req payment.CreatePaymentR
 	}
 	if req.IsMobile {
 		params["type"] = xunhupayWAPType
+		wapURL, wapName, err := xunhupayWAPDetails(returnURL)
+		if err != nil {
+			return nil, err
+		}
+		params["wap_url"] = wapURL
+		params["wap_name"] = wapName
 	}
 	params["hash"] = xunhupaySign(params, x.config["appSecret"])
 
@@ -317,6 +323,22 @@ func (x *Xunhupay) resolveURLs(req payment.CreatePaymentRequest) (string, string
 		returnURL = x.config["returnUrl"]
 	}
 	return notifyURL, returnURL
+}
+
+func xunhupayWAPDetails(returnURL string) (string, string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(returnURL))
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" ||
+		(strings.ToLower(parsed.Scheme) != "http" && strings.ToLower(parsed.Scheme) != "https") {
+		return "", "", fmt.Errorf("xunhupay create: invalid return_url for WAP payment: must be an absolute http/https URL")
+	}
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return "", "", fmt.Errorf("xunhupay create: invalid return_url for WAP payment: missing host")
+	}
+	if utf8.RuneCountInString(hostname) > 32 {
+		return "", "", fmt.Errorf("xunhupay create: invalid return_url for WAP payment: host exceeds 32 characters")
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + parsed.Host, hostname, nil
 }
 
 // xunhupayResponse is the shared XunhuPay API response envelope.
