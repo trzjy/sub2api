@@ -74,7 +74,7 @@ func TestChannelMonitorV2MergeCatalogThreeStates(t *testing.T) {
 
 	result := channelMonitorV2MergeCatalogMatrix(
 		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatformGroupModel,
-		catalog, groupsByID, base, probeStates, c3Now,
+		catalog, groupsByID, base, ChannelMonitorV2Filter{}, probeStates, c3Now,
 	)
 
 	require.Len(t, result.Items, 3)
@@ -123,7 +123,7 @@ func TestChannelMonitorV2MergeCatalogProbeFailedStatus(t *testing.T) {
 	}
 	result := channelMonitorV2MergeCatalogMatrix(
 		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatformGroupModel,
-		catalog, groupsByID, base, probeStates, c3Now,
+		catalog, groupsByID, base, ChannelMonitorV2Filter{}, probeStates, c3Now,
 	)
 	require.Len(t, result.Items, 3)
 	probe := findRow(result.Items, "gpt-4")
@@ -149,7 +149,7 @@ func TestChannelMonitorV2MergeCatalogProbeFreshnessExpiry(t *testing.T) {
 	}
 	result := channelMonitorV2MergeCatalogMatrix(
 		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatformGroupModel,
-		catalog, groupsByID, base, probeStates, c3Now,
+		catalog, groupsByID, base, ChannelMonitorV2Filter{}, probeStates, c3Now,
 	)
 	probe := findRow(result.Items, "gpt-4")
 	require.NotNil(t, probe)
@@ -178,7 +178,7 @@ func TestChannelMonitorV2MergeCatalogDTOMinimalContract(t *testing.T) {
 	}
 	result := channelMonitorV2MergeCatalogMatrix(
 		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatformGroupModel,
-		catalog, groupsByID, base, probeStates, c3Now,
+		catalog, groupsByID, base, ChannelMonitorV2Filter{}, probeStates, c3Now,
 	)
 	for _, row := range result.Items {
 		if row.HasData {
@@ -205,7 +205,7 @@ func TestChannelMonitorV2MergeCatalogCoarserGrainProjected(t *testing.T) {
 	base := &ChannelMonitorV2Matrix{GroupBy: ChannelMonitorV2GroupByPlatformGroup, Coverage: c3Coverage(), Items: nil}
 	result := channelMonitorV2MergeCatalogMatrix(
 		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatformGroup,
-		catalog, groupsByID, base, map[ChannelMonitorCatalogKey]*ProbeState{}, c3Now,
+		catalog, groupsByID, base, ChannelMonitorV2Filter{}, map[ChannelMonitorCatalogKey]*ProbeState{}, c3Now,
 	)
 	// All three models collapse to a single (openai, group 1) grain → one no-data row.
 	require.Len(t, result.Items, 1)

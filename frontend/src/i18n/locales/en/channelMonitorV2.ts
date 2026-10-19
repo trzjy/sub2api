@@ -13,7 +13,6 @@ export default {
       working: 'Aggregating in the background…',
     },
     timeRange: 'Time range',
-    clearFilters: 'Reset',
     refreshingFilters: 'Filters changed; refreshing matrix, trend, and details…',
     switchingData: 'Switching filtered data…',
     summaryAria: 'Selected range summary',
@@ -24,11 +23,7 @@ export default {
     currentUser: 'Current user',
     ranges: { '90m': '90m', '24h': '24h', '7d': '7d', '30d': '30d' },
     filters: {
-      platform: 'Platform', allPlatforms: 'All', group: 'Group', allGroups: 'All', model: 'Model', allModels: 'All',
       empty: 'No options', selectedCount: '{count}', labelValue: '{label}: {value}'
-    },
-    groupBy: {
-      label: 'Group by', platform: 'Platform', platformGroup: 'Platform / Group', platformModel: 'Platform / Model', platformGroupModel: 'Platform / Group / Model'
     },
     trendView: { label: 'Trend view', pulse: 'Pulse matrix', line: 'Line chart' },
     healthMode: { label: 'Health display', overall: 'Overall', success: 'Error rate', ttft: 'First token', cache: 'Cache rate' },
@@ -56,12 +51,12 @@ export default {
       durationValue: 'Duration {value}',
       cacheRateValue: 'Cache rate {value}',
     },
-    table: { platformModel: 'Platform / Model', rank: 'Rank', user: 'User' },
-    empty: { title: 'No data to display', description: 'Try changing the time range or filters' },
+    table: { platformModel: 'Model', rank: 'Rank', user: 'User' },
+    empty: { title: 'No data to display', description: 'Try changing the time range' },
     bucket: { minutes: '{count}-minute buckets', hours: '{count}-hour buckets', days: '{count}-day buckets' },
     matrix: {
-      title: 'Availability trend', description: 'Each row is a channel dimension and each block is an aggregate interval; hover for details', wheelZoom: 'Scroll over blocks to zoom in (narrower range, wider blocks)', wheelZoomX: 'Scroll over blocks to zoom in (narrower range, wider blocks)', dimension: 'Channel dimension', emptyTitle: 'No matrix data for the selected window', legendAria: 'Health score legend', bad: 'Bad', good: 'Good', healthyLegend: 'Healthy (≥80)', warningLegend: 'Watch (50–79)', criticalLegend: 'Critical (<50)', unknownLegend: 'No traffic / insufficient samples', noTraffic: 'No traffic in this interval', noTrafficAt: '{time} · no traffic', scoreLine: 'Health score {score}', resetZoom: 'Reset zoom',
-      probeSource: 'From probe (single account, not channel-wide): {status} · last probe {observed_at}'
+      title: 'Availability trend', description: 'Each row is a model and each block is an aggregate interval; hover for details', wheelZoom: 'Scroll over blocks to zoom in (narrower range, wider blocks)', wheelZoomX: 'Scroll over blocks to zoom in (narrower range, wider blocks)', dimension: 'Model', emptyTitle: 'No matrix data for the selected window', legendAria: 'Health score legend', bad: 'Bad', good: 'Good', healthyLegend: 'Healthy (≥80)', warningLegend: 'Watch (50–79)', criticalLegend: 'Critical (<50)', unknownLegend: 'No traffic / insufficient samples', noTraffic: 'No traffic in this interval', noTrafficAt: '{time} · no traffic', scoreLine: 'Health score {score}', resetZoom: 'Reset zoom',
+      probeSource: 'From probe (single account, not model-wide): {status} · last probe {observed_at}'
     },
     chart: {
       title: 'Availability trend', description: 'Smoothed trend: error rate · first token P50 · cache rate', emptyTitle: 'No trend data for the selected window', errorLegend: 'Error rate (left axis %)', cacheLegend: 'Cache rate (left axis %)', ttftLegend: 'First token P50 (right axis)', errorDataset: 'Error rate trend %', cacheDataset: 'Cache rate trend %', ttftDataset: 'First token trend P50 (ms)', percentAxis: 'Rate %', resetZoom: 'Reset zoom'

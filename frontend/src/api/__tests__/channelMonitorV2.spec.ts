@@ -18,12 +18,12 @@ describe('channel monitor V2 query serialization', () => {
     expect(query).not.toContain('%5B%5D')
   })
 
-  it('sends the matrix grouping with the shared filters', async () => {
+  it('does not send a group_by param (matrix is fixed to model grain)', async () => {
     const get = vi.spyOn(apiClient, 'get').mockResolvedValue({
-      data: { coverage: {}, group_by: 'platform_group', items: [] },
+      data: { coverage: {}, group_by: 'model', items: [] },
     })
 
-    await getMatrix({ range: '24h', platforms: ['openai'], groupIds: [7], models: [] }, 'platform_group', true)
+    await getMatrix({ range: '24h', platforms: ['openai'], groupIds: [7], models: [] }, true)
 
     expect(get).toHaveBeenCalledWith('/admin/channel-monitor-v2/matrix', expect.objectContaining({
       params: {
@@ -31,8 +31,8 @@ describe('channel monitor V2 query serialization', () => {
         platform: ['openai'],
         group_id: [7],
         model: undefined,
-        group_by: 'platform_group',
       },
     }))
+    expect(get.mock.calls[0][1].params).not.toHaveProperty('group_by')
   })
 })

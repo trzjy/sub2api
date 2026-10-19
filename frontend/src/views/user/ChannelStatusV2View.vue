@@ -108,48 +108,6 @@
             </button>
           </div>
 
-          <span class="mx-0.5 hidden h-5 w-px shrink-0 bg-gray-200 dark:bg-dark-700 sm:block" aria-hidden="true"></span>
-
-          <FilterMultiSelect
-            v-model="filter.platforms"
-            compact
-            :label="t('channelMonitorV2.filters.platform')"
-            :all-label="t('channelMonitorV2.filters.allPlatforms')"
-            :options="platformOptions"
-          />
-          <FilterMultiSelect
-            v-model="selectedGroupIds"
-            compact
-            :label="t('channelMonitorV2.filters.group')"
-            :all-label="t('channelMonitorV2.filters.allGroups')"
-            :options="groupOptions"
-          />
-          <FilterMultiSelect
-            v-model="filter.models"
-            compact
-            :label="t('channelMonitorV2.filters.model')"
-            :all-label="t('channelMonitorV2.filters.allModels')"
-            :options="modelOptions"
-          />
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm shrink-0 !px-2 !py-1 text-xs"
-            :disabled="!hasDimensionFilter"
-            :class="!hasDimensionFilter ? 'opacity-40' : ''"
-            @click="clearDimensions"
-          >
-            {{ t('channelMonitorV2.clearFilters') }}
-          </button>
-
-          <span class="mx-0.5 hidden h-5 w-px shrink-0 bg-gray-200 dark:bg-dark-700 md:block" aria-hidden="true"></span>
-
-          <Select
-            v-model="matrixGroupBy"
-            :options="matrixGroupOptions"
-            :placeholder="t('channelMonitorV2.groupBy.label')"
-            class="monitor-toolbar-select w-[7.5rem] shrink-0 sm:w-[8.5rem]"
-          />
-
           <div
             class="tabs inline-flex shrink-0"
             role="group"
@@ -269,7 +227,7 @@
         </div>
       </div>
 
-      <section class="card flex min-h-0 flex-col overflow-hidden !rounded-3xl !border-0 shadow-sm ring-1 ring-gray-900/5 dark:!bg-dark-800 dark:ring-dark-700">
+      <section class="card flex flex-col !rounded-3xl !border-0 shadow-sm ring-1 ring-gray-900/5 dark:!bg-dark-800 dark:ring-dark-700">
         <div class="border-b border-gray-100 px-5 pt-4 dark:border-dark-700 sm:px-6">
           <nav class="tabs w-full max-w-md sm:w-auto" role="tablist" :aria-label="t('channelMonitorV2.tabs.aria')">
             <button
@@ -286,7 +244,7 @@
             </button>
           </nav>
         </div>
-        <div class="min-h-0 max-h-[min(52vh,520px)] overflow-auto p-4 sm:p-5">
+        <div class="p-4 sm:p-5">
           <div v-if="activeTab === 'models'" class="table-container border-0">
             <table class="table monitor-table min-w-[720px]">
               <thead>
@@ -303,14 +261,11 @@
                 <tr
                   v-for="row in modelRows"
                   :key="`${row.platform}:${row.model}`"
-                  class="cursor-pointer"
-                  @click="drillModel(row)"
                 >
                   <td>
                     <div class="flex items-center gap-2">
                       <span :class="statusDot(row.health)" aria-hidden="true"></span>
                       <div>
-                        <span class="block text-xs text-gray-500 dark:text-dark-400">{{ row.platform }}</span>
                         <strong class="font-semibold text-gray-900 dark:text-white">
                           {{ row.model === '__other__' ? t('channelMonitorV2.otherModels') : row.model }}
                         </strong>
@@ -370,7 +325,6 @@
                     class="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:bg-dark-900/50 dark:text-dark-300"
                   >
                     <div class="mb-1 flex flex-wrap items-center gap-2">
-                      <span class="badge badge-gray !px-1.5 !py-0 text-[10px]">{{ detail.platform || '-' }}</span>
                       <span class="truncate font-medium">{{ detail.model || '-' }}</span>
                       <span v-if="detail.status_code" class="text-gray-400">{{ t('channelMonitorV2.errorDetail.http', { code: detail.status_code }) }}</span>
                       <span v-if="detail.upstream_status_code" class="text-gray-400">{{ t('channelMonitorV2.errorDetail.upstream', { code: detail.upstream_status_code }) }}</span>
@@ -464,8 +418,6 @@ import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import Select from '@/components/common/Select.vue'
-import FilterMultiSelect from '@/features/channel-monitor-v2/FilterMultiSelect.vue'
 import MetricCell from '@/features/channel-monitor-v2/MetricCell.vue'
 import MonitorRankBadge from '@/features/channel-monitor-v2/MonitorRankBadge.vue'
 import MonitorTrendChart from '@/features/channel-monitor-v2/MonitorTrendChart.vue'
@@ -477,11 +429,9 @@ import { isChannelMonitorThroughputHidden, isChannelMonitorUserRankingHidden } f
 import * as api from '@/api/channelMonitorV2'
 import type {
   HealthState,
-  MonitorDimensions,
   MonitorErrorRow,
   MonitorFilter,
   MonitorHealth,
-  MonitorMatrixGroupBy,
   MonitorMatrixResponse,
   MonitorModelRow,
   MonitorRange,
@@ -532,10 +482,6 @@ const tabs = computed(() => {
   }
   return items
 })
-const matrixGroupOptions = computed(() => [
-  { value: 'platform' as MonitorMatrixGroupBy, label: t('channelMonitorV2.groupBy.platform') },
-  { value: 'platform_model' as MonitorMatrixGroupBy, label: t('channelMonitorV2.groupBy.platformModel') },
-])
 const healthModeOptions = computed(() => [
   { value: 'overall' as HealthMode, label: t('channelMonitorV2.healthMode.overall') },
   { value: 'success' as HealthMode, label: t('channelMonitorV2.healthMode.success') },
@@ -545,15 +491,13 @@ const healthModeOptions = computed(() => [
 
 const filter = ref<MonitorFilter>({
   range: parseRange(route.query.range),
-  platforms: csv(route.query.platform),
-  groupIds: csv(route.query.group).map(Number).filter(Boolean),
-  models: csv(route.query.model),
+  platforms: [],
+  groupIds: [],
+  models: [],
 })
 const activeTab = ref<Tab>(parseTab(route.query.tab, showUserRanking.value))
-const matrixGroupBy = ref<MonitorMatrixGroupBy>(parseMatrixGroupBy(route.query.group_by))
 const healthMode = ref<HealthMode>(parseHealthMode(route.query.health_mode))
 const trendView = ref<TrendView>(parseTrendView(route.query.trend_view))
-const dimensions = ref<MonitorDimensions>({ platforms: [], groups: [], models: [] })
 const snapshot = ref<MonitorSnapshot | null>(null)
 const matrix = ref<MonitorMatrixResponse | null>(null)
 const modelRows = ref<MonitorModelRow[]>([])
@@ -567,75 +511,6 @@ let controller: AbortController | null = null
 let sequence = 0
 let autoRefreshTimer: number | null = null
 
-const hasDimensionFilter = computed(
-  () => filter.value.platforms.length + filter.value.groupIds.length + filter.value.models.length > 0
-)
-// Full platform catalog (never pruned). Groups/models cascade by selected platforms
-// so choosing a platform narrows the other pickers without collapsing platforms.
-const platformOptions = computed(() =>
-  (dimensions.value.platforms || []).map((item) => ({
-    value: item.value,
-    label: item.label,
-  }))
-)
-const selectedPlatforms = computed(() => new Set(filter.value.platforms))
-const groupOptions = computed(() =>
-  (dimensions.value.groups || [])
-    .filter(
-      (item) =>
-        selectedPlatforms.value.size === 0 ||
-        !item.platform ||
-        selectedPlatforms.value.has(item.platform),
-    )
-    .map((item) => ({
-      value: String(item.id),
-      label: item.platform ? `${item.platform} / ${item.name || `#${item.id}`}` : item.name || `#${item.id}`,
-    }))
-)
-const modelOptions = computed(() =>
-  (dimensions.value.models || [])
-    .filter(
-      (item) =>
-        selectedPlatforms.value.size === 0 ||
-        !item.platform ||
-        selectedPlatforms.value.has(item.platform),
-    )
-    .map((item) => ({
-      value: item.value,
-      label:
-        item.platform && !item.label.includes(item.platform)
-          ? `${item.platform} / ${item.label}`
-          : item.label,
-    }))
-)
-const selectedGroupIds = computed({
-  get: () => filter.value.groupIds.map(String),
-  set: (value: string[]) => {
-    filter.value.groupIds = value.map(Number).filter((id) => Number.isInteger(id) && id > 0)
-  },
-})
-// Soft-prune group/model selections that fall outside the platform cascade.
-// Do NOT wipe when options are temporarily empty (loading); only drop invalid ids.
-watch(
-  [groupOptions, modelOptions],
-  () => {
-    if (groupOptions.value.length > 0) {
-      const allowed = new Set(groupOptions.value.map((item) => item.value))
-      const next = filter.value.groupIds.filter((id) => allowed.has(String(id)))
-      if (next.length !== filter.value.groupIds.length) {
-        filter.value.groupIds = next
-      }
-    }
-    if (modelOptions.value.length > 0) {
-      const allowed = new Set(modelOptions.value.map((item) => item.value))
-      const next = filter.value.models.filter((model) => allowed.has(model))
-      if (next.length !== filter.value.models.length) {
-        filter.value.models = next
-      }
-    }
-  },
-  { flush: 'post' },
-)
 const activeRowsEmpty = computed(() =>
   activeTab.value === 'models'
     ? modelRows.value.length === 0
@@ -650,29 +525,10 @@ const bootstrapPercent = computed(() => {
   if (typeof raw !== 'number' || Number.isNaN(raw)) return 0
   return Math.min(100, Math.max(0, Math.round(raw)))
 })
-const matrixRows = computed(() => {
-  const items = matrix.value?.items || []
-  // platform_group views should only show real groups, never bare platform placeholders.
-  if (matrixGroupBy.value === 'platform_group' || matrixGroupBy.value === 'platform_group_model') {
-    return items.filter((row) => row.group_id != null && Number(row.group_id) > 0)
-  }
-  return items
-})
+const matrixRows = computed(() => matrix.value?.items || [])
 
-function csv(value: unknown) {
-  return typeof value === 'string' ? value.split(',').filter(Boolean) : []
-}
 function parseRange(value: unknown): MonitorRange {
   return ['90m', '24h', '7d', '30d'].includes(String(value)) ? (value as MonitorRange) : '90m'
-}
-function parseMatrixGroupBy(value: unknown): MonitorMatrixGroupBy {
-  const allowed: MonitorMatrixGroupBy[] = [
-    'platform',
-    'platform_model',
-  ]
-  return allowed.includes(value as MonitorMatrixGroupBy)
-    ? (value as MonitorMatrixGroupBy)
-    : 'platform_model'
 }
 function parseTab(value: unknown, allowUsers: boolean): Tab {
   const allowed: Tab[] = allowUsers ? ['models', 'errors', 'users'] : ['models', 'errors']
@@ -689,33 +545,16 @@ function syncQuery() {
   void router.replace({
     query: {
       range: filter.value.range,
-      platform: filter.value.platforms.join(',') || undefined,
-      group: filter.value.groupIds.join(',') || undefined,
-      model: filter.value.models.join(',') || undefined,
-      group_by: matrixGroupBy.value,
       health_mode: healthMode.value,
       trend_view: trendView.value === 'line' ? 'line' : undefined,
       tab: activeTab.value,
     },
   })
 }
-/** Dimensions catalog: range only — never re-filtered by platform/group/model selection. */
-async function loadDimensions(signal?: AbortSignal, id = sequence) {
-  const rangeOnly: MonitorFilter = {
-    range: filter.value.range,
-    platforms: [],
-    groupIds: [],
-    models: [],
-  }
-  const next = await api.getDimensions(rangeOnly, isAdmin.value, signal)
-  if (id !== sequence) return
-  dimensions.value = next
-}
-
 async function loadMetrics(signal?: AbortSignal, id = sequence) {
   const [nextSnapshot, nextMatrix] = await Promise.all([
     api.getSnapshot(filter.value, isAdmin.value, signal),
-    api.getMatrix(filter.value, matrixGroupBy.value, isAdmin.value, signal),
+    api.getMatrix(filter.value, isAdmin.value, signal),
   ])
   if (id !== sequence) return
   snapshot.value = nextSnapshot
@@ -732,11 +571,8 @@ async function reload(silent = true) {
   refreshing.value = true
   if (!silent) loading.value = true
   try {
-    // Catalog + metrics in parallel; catalog ignores dimension filters so options never shrink.
-    await Promise.all([
-      loadDimensions(request.signal, id),
-      loadMetrics(request.signal, id),
-    ])
+    // Snapshot + matrix for the current range; auto-refresh re-runs this load.
+    await loadMetrics(request.signal, id)
   } catch (error) {
     if ((error as { name?: string }).name !== 'CanceledError') {
       appStore.showError(extractApiErrorMessage(error, t('channelMonitorV2.loadFailed')))
@@ -750,7 +586,7 @@ async function reload(silent = true) {
   }
 }
 
-/** When only range changes, still refresh dimensions; dimension filters only re-load metrics. */
+/** Range change triggers a full reload; otherwise only the metrics reload. */
 async function reloadMetricsOnly(silent = true) {
   controller?.abort()
   const request = new AbortController()
@@ -795,15 +631,6 @@ async function loadTab(signal?: AbortSignal, id = sequence) {
 function setRange(value: MonitorRange) {
   filter.value.range = value
 }
-function clearDimensions() {
-  // Replace arrays so deep watch always fires and metrics reload full window.
-  filter.value = {
-    ...filter.value,
-    platforms: [],
-    groupIds: [],
-    models: [],
-  }
-}
 function scheduleAutoRefresh() {
   if (autoRefreshTimer) {
     window.clearInterval(autoRefreshTimer)
@@ -818,10 +645,6 @@ function scheduleAutoRefresh() {
       void reload(true)
     }
   }, Math.max(bootstrapActive.value ? 10 : 60, seconds) * 1000)
-}
-function drillModel(row: MonitorModelRow) {
-  filter.value.platforms = [row.platform]
-  filter.value.models = [row.model]
 }
 function formatRate(value: number) {
   return formatMonitorThroughput(value)
@@ -905,10 +728,6 @@ watch(
   },
   { deep: true }
 )
-watch(matrixGroupBy, () => {
-  syncQuery()
-  void reloadMetricsOnly(true)
-})
 watch(healthMode, syncQuery)
 watch(trendView, syncQuery)
 watch(activeTab, () => {

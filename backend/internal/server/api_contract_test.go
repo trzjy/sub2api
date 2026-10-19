@@ -684,26 +684,19 @@ func TestAPIContracts(t *testing.T) {
 		// 不补：全仓零生产者，且权威表第 7 条要求 funds 数值保留我方值（我方侧对应值为
 		// payment_fx_rates null + 上面那组 breaker 数值），写占位键等于伪造契约。
 		//
-		// take UPSTREAM（暂缓，跨卡依赖）—— default_platform_quotas 的 4 个新平台：
-		//   cline / command_code / opencode_go / typesafe
-		// 该键集不是字面量，由 service.AllowedQuotaPlatforms 单一枚举派生（本树 11 项、含
-		// 我方 other，见 internal/service/domain_constants.go:150；上游 13 项、不含 other）。
+		// take UPSTREAM（已收敛，2026-10-19）—— default_platform_quotas 已由
+		// service.AllowedQuotaPlatforms 单一枚举派生，现 17 项 =
+		// domain.ConcretePlatformIDs()（前端目录 16 项：anthropic/openai/gemini/antigravity/
+		// grok/kimi/zhipu/deepseek/minimax/opencode_go/typesafe/command_code/cline/codebuddy/
+		// muse/cursor）∪ other。
 		// 生产路径 setting_features.go GetDefaultPlatformQuotas 按 AllowedQuotaPlatforms 补齐
-		// 后序列化，所以本文件的 wantJSON 永远是 (b) 的下游镜像。(b) 未扩，wantJSON 就不能扩。
-		// 收敛单元与 w31 在 backend/ent/schema/user_platform_quota.go 登记的完全同源，逐字沿用：
-		//   (a) internal/domain/platforms.go —— 上游新文件，owner = B11 集成批
-		//   (b) internal/service/domain_constants.go 的 AllowedQuotaPlatforms —— owner = 该文件卡
-		//   (c) 上游 migrations/242_drop_platform_check_constraints.sql（编号须重至 271+）—— owner = migrations 卡
-		//   (d) ent/schema/user_platform_quota.go 的准入 switch（w31）—— 仅当 a/b/c 收敛后评估
-		// 收敛时的同步动作：当 (b) 扩为 15 项并集（11 + cline/command_code/opencode_go/
-		// typesafe，保留我方 other 与 codebuddy），本文件两处 wantJSON 的 default_platform_quotas
-		// 必须同步扩到 15 项；8 个新键的生产者入树时同理逐个补入。不得只改一边。
+		// 后序列化，所以本文件的 wantJSON 永远是它的下游镜像；两处 default_platform_quotas
+		// 已同步扩到 17 项（改动 #4）。
 		//
-		// 报警载体：backend/internal/server/api_contract_fusion_test.go 的
-		//   TestW27AllowedQuotaPlatformsIsOursEleven（锁 (b) 的 11 项）
-		//   TestW27UpstreamSettingsKeysAbsent（锁 8 + 2 个上游键缺席、我方 9 键在场）
-		//   TestW27OursFundsValuesLocked（锁 funds 数值为我方值，权威表第 7 条）
-		// 上述收敛发生时二者必然 FAIL —— 那是设计中的报警，不是回归；届时按本块改 wantJSON。
+		// 历史注记（已作废，不得据此再锁 11 项）：原注释声称报警载体
+		// api_contract_fusion_test.go 的 TestW27AllowedQuotaPlatformsIsOursEleven 锁 11 项，
+		// 但全树 grep 仅命中本注释自身、该文件/该测试本树不存在；原「11 项」描述已过时。
+		// B2「不修复不补齐」裁定已作废，platform_list_test.go 的断言已改写为 17 项并集。
 		{
 			name: "GET /api/v1/admin/settings",
 			setup: func(t *testing.T, deps *contractDeps) {
@@ -932,7 +925,7 @@ func TestAPIContracts(t *testing.T) {
 					"force_email_on_third_party_signup": false,
 					"default_concurrency": 5,
 					"default_balance": 1.25,
-					"default_platform_quotas": {"anthropic":{"daily":null,"weekly":null,"monthly":null},"antigravity":{"daily":null,"weekly":null,"monthly":null},"codebuddy":{"daily":null,"weekly":null,"monthly":null},"deepseek":{"daily":null,"weekly":null,"monthly":null},"gemini":{"daily":null,"weekly":null,"monthly":null},"grok":{"daily":null,"weekly":null,"monthly":null},"kimi":{"daily":null,"weekly":null,"monthly":null},"minimax":{"daily":null,"weekly":null,"monthly":null},"openai":{"daily":null,"weekly":null,"monthly":null},"other":{"daily":null,"weekly":null,"monthly":null},"zhipu":{"daily":null,"weekly":null,"monthly":null}},
+					"default_platform_quotas": {"anthropic":{"daily":null,"weekly":null,"monthly":null},"antigravity":{"daily":null,"weekly":null,"monthly":null},"cline":{"daily":null,"weekly":null,"monthly":null},"codebuddy":{"daily":null,"weekly":null,"monthly":null},"command_code":{"daily":null,"weekly":null,"monthly":null},"cursor":{"daily":null,"weekly":null,"monthly":null},"deepseek":{"daily":null,"weekly":null,"monthly":null},"gemini":{"daily":null,"weekly":null,"monthly":null},"grok":{"daily":null,"weekly":null,"monthly":null},"kimi":{"daily":null,"weekly":null,"monthly":null},"minimax":{"daily":null,"weekly":null,"monthly":null},"muse":{"daily":null,"weekly":null,"monthly":null},"openai":{"daily":null,"weekly":null,"monthly":null},"opencode_go":{"daily":null,"weekly":null,"monthly":null},"other":{"daily":null,"weekly":null,"monthly":null},"typesafe":{"daily":null,"weekly":null,"monthly":null},"zhipu":{"daily":null,"weekly":null,"monthly":null}},
 					"auth_source_default_email_platform_quotas": null,
 					"auth_source_default_github_platform_quotas": null,
 					"auth_source_default_google_platform_quotas": null,
@@ -1278,7 +1271,7 @@ func TestAPIContracts(t *testing.T) {
 					"subscription_enabled": true,
 					"table_default_page_size": 20,
 					"table_page_size_options": [10, 20, 50],
-					"default_platform_quotas": {"anthropic":{"daily":null,"weekly":null,"monthly":null},"antigravity":{"daily":null,"weekly":null,"monthly":null},"codebuddy":{"daily":null,"weekly":null,"monthly":null},"deepseek":{"daily":null,"weekly":null,"monthly":null},"gemini":{"daily":null,"weekly":null,"monthly":null},"grok":{"daily":null,"weekly":null,"monthly":null},"kimi":{"daily":null,"weekly":null,"monthly":null},"minimax":{"daily":null,"weekly":null,"monthly":null},"openai":{"daily":null,"weekly":null,"monthly":null},"other":{"daily":null,"weekly":null,"monthly":null},"zhipu":{"daily":null,"weekly":null,"monthly":null}},
+					"default_platform_quotas": {"anthropic":{"daily":null,"weekly":null,"monthly":null},"antigravity":{"daily":null,"weekly":null,"monthly":null},"cline":{"daily":null,"weekly":null,"monthly":null},"codebuddy":{"daily":null,"weekly":null,"monthly":null},"command_code":{"daily":null,"weekly":null,"monthly":null},"cursor":{"daily":null,"weekly":null,"monthly":null},"deepseek":{"daily":null,"weekly":null,"monthly":null},"gemini":{"daily":null,"weekly":null,"monthly":null},"grok":{"daily":null,"weekly":null,"monthly":null},"kimi":{"daily":null,"weekly":null,"monthly":null},"minimax":{"daily":null,"weekly":null,"monthly":null},"muse":{"daily":null,"weekly":null,"monthly":null},"openai":{"daily":null,"weekly":null,"monthly":null},"opencode_go":{"daily":null,"weekly":null,"monthly":null},"other":{"daily":null,"weekly":null,"monthly":null},"typesafe":{"daily":null,"weekly":null,"monthly":null},"zhipu":{"daily":null,"weekly":null,"monthly":null}},
 					"auth_source_default_email_platform_quotas": null,
 					"auth_source_default_github_platform_quotas": null,
 					"auth_source_default_google_platform_quotas": null,

@@ -16,7 +16,7 @@ export type HealthScoreBand =
   | 'score8'
   | 'score9'
   | 'score10'
-export type MonitorMatrixGroupBy = 'platform' | 'platform_group' | 'platform_model' | 'platform_group_model'
+export type MonitorMatrixGroupBy = 'platform' | 'platform_group' | 'platform_model' | 'platform_group_model' | 'model'
 
 export interface MonitorFilter {
   range: MonitorRange
@@ -255,8 +255,8 @@ export async function getSnapshot(filter: MonitorFilter, admin = false, signal?:
   const { data } = await apiClient.get<MonitorSnapshot>(`${base(admin)}/snapshot`, requestConfig(filter, signal))
   return data
 }
-export async function getMatrix(filter: MonitorFilter, groupBy: MonitorMatrixGroupBy, admin = false, signal?: AbortSignal) {
-  const { data } = await apiClient.get<MonitorMatrixResponse>(`${base(admin)}/matrix`, requestConfig(filter, signal, { group_by: groupBy }))
+export async function getMatrix(filter: MonitorFilter, admin = false, signal?: AbortSignal) {
+  const { data } = await apiClient.get<MonitorMatrixResponse>(`${base(admin)}/matrix`, requestConfig(filter, signal))
   return data
 }
 export async function getModels(filter: MonitorFilter, admin = false, signal?: AbortSignal) {

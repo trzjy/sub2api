@@ -28,11 +28,11 @@
       </div>
     </div>
 
-    <div class="card-body min-h-0 flex-1 !p-0">
+    <div class="card-body !p-0">
       <div
         v-if="rows.length"
         ref="scrollRef"
-        class="matrix-scroll max-h-[min(42vh,420px)] max-w-full overflow-auto rounded-2xl bg-gray-50/60 p-2 dark:bg-dark-900/30"
+        class="matrix-scroll max-w-full rounded-2xl bg-gray-50/60 p-2 dark:bg-dark-900/30"
         @wheel="onMatrixWheel"
       >
         <div class="matrix-table w-full" :style="tableStyle">
@@ -320,10 +320,15 @@ function onMatrixWheel(event: WheelEvent) {
   if (!overMatrix && !pulse) return
   // When not zoomed and user scrolls vertically outside pulse, still zoom if over matrix body.
   if (!overMatrix && !isPan) return
-  event.preventDefault()
   const ratioEl = pulse || track
   const ratio = clientXRatio(event.clientX, ratioEl)
-  zoom.value = applyWheelZoom(zoom.value, event, ratio)
+  const next = applyWheelZoom(zoom.value, event, ratio)
+  // Only swallow the wheel when the zoom state actually moved. The matrix no longer
+  // has its own scroll container, so swallowing unconditionally would trap the user
+  // on this card — page scrolling would be impossible while hovering it.
+  if (next.span === zoom.value.span && next.offset === zoom.value.offset) return
+  event.preventDefault()
+  zoom.value = next
 }
 
 function resetMatrixZoom() {
@@ -397,10 +402,8 @@ function summaryCache(row: MonitorMatrixRow): string {
 }
 
 function rowLabel(row: MonitorMatrixRow): string {
-  const parts = [row.platform]
-  if (row.group_name || row.group_id) parts.push(row.group_name || `#${row.group_id}`)
-  if (row.model) parts.push(row.model === '__other__' ? t('channelMonitorV2.otherModels') : row.model)
-  return parts.join(' / ')
+  if (row.model) return row.model === '__other__' ? t('channelMonitorV2.otherModels') : row.model
+  return ''
 }
 
 // Row-level hover title. Probe rows explain the sampled probe source and last

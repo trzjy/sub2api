@@ -43,17 +43,23 @@ func (UserPlatformQuota) Fields() []ent.Field {
 				//
 				// 刻意保留显式 switch 而不用 domain.IsConcretePlatform：平台清单
 				// （domain/platforms.go）不含 "other"，换成注册表校验会让 other 在配额写入
-				// 链路变得不可达，从而改变 ours 现状。相对注册表，此处多 other、缺上游新增的
-				// opencode_go / typesafe / command_code / cline；其中 muse 是 fork 侧既有漂移
-				// （此校验通过，但不在 service.AllowedQuotaPlatforms）。上游合并裁定要求逐
-				// 消费者复刻 ours 行为，故保持现状。
-			switch s {
-			case "anthropic", "openai", "gemini", "antigravity", "grok",
-				"kimi", "zhipu", "deepseek", "minimax", "codebuddy", "other", "muse":
-				return nil
-			default:
-				return fmt.Errorf("platform %q is not allowed", s)
-			}
+				// 链路变得不可达，从而改变 ours 现状。
+				//
+				// 2026-10-19 裁定：原 B2「逐消费者复刻 ours 行为、缺 opencode_go/typesafe/
+				// command_code/cline、muse 为已知漂移不修复不补齐」已作废。现本 switch 与
+				// service.AllowedQuotaPlatforms（= domain.ConcretePlatformIDs() ∪ other，17 项）
+				// 同集合——即 16 个目录平台（含 anthropic/openai/gemini/antigravity/grok/
+				// kimi/zhipu/deepseek/minimax/opencode_go/typesafe/command_code/cline/
+				// codebuddy/muse/cursor）加 other。muse 保留（fork 侧既有登记，不在目录但
+				// 在配额白名单）。新增平台须同步改两处。
+				switch s {
+				case "anthropic", "openai", "gemini", "antigravity", "grok",
+					"kimi", "zhipu", "deepseek", "minimax", "codebuddy", "other", "muse",
+					"opencode_go", "typesafe", "command_code", "cline", "cursor":
+					return nil
+				default:
+					return fmt.Errorf("platform %q is not allowed", s)
+				}
 			}),
 
 		// 日 / 周 / 月 USD 上限：

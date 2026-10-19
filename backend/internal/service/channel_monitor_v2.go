@@ -29,6 +29,10 @@ const (
 	ChannelMonitorV2GroupByPlatformGroup      ChannelMonitorV2GroupBy = "platform_group"
 	ChannelMonitorV2GroupByPlatformModel      ChannelMonitorV2GroupBy = "platform_model"
 	ChannelMonitorV2GroupByPlatformGroupModel ChannelMonitorV2GroupBy = "platform_group_model"
+	// ChannelMonitorV2GroupByModel collapses the same display model across all
+	// platforms and groups into a single row (C2/C6: cross-platform merge, no
+	// channel leakage). It is the new default presentation grain.
+	ChannelMonitorV2GroupByModel ChannelMonitorV2GroupBy = "model"
 )
 
 type ChannelMonitorV2PlatformConfig struct {
@@ -595,7 +599,7 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	if err != nil {
 		return nil, err
 	}
-	matrix = s.enrichMatrixWithCatalog(ctx, *cfg, groupBy, matrix)
+	matrix = s.enrichMatrixWithCatalog(ctx, *cfg, groupBy, filter, matrix)
 	if !admin && matrix != nil {
 		hideTP := s.hideThroughputForViewer(ctx, admin)
 		for i := range matrix.Items {
@@ -621,7 +625,7 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 // grain so coarser views still surface them. When the catalog cannot be derived (account
 // or group repository not injected), every traffic row is enriched as business and no
 // catalog-derived rows are added (degraded, test-friendly path).
-func (s *ChannelMonitorV2Service) enrichMatrixWithCatalog(ctx context.Context, cfg ChannelMonitorV2Config, groupBy ChannelMonitorV2GroupBy, base *ChannelMonitorV2Matrix) *ChannelMonitorV2Matrix {
+func (s *ChannelMonitorV2Service) enrichMatrixWithCatalog(ctx context.Context, cfg ChannelMonitorV2Config, groupBy ChannelMonitorV2GroupBy, filter ChannelMonitorV2Filter, base *ChannelMonitorV2Matrix) *ChannelMonitorV2Matrix {
 	if base == nil {
 		return nil
 	}
@@ -653,7 +657,7 @@ func (s *ChannelMonitorV2Service) enrichMatrixWithCatalog(ctx context.Context, c
 	if perr != nil {
 		probeStates = map[ChannelMonitorCatalogKey]*ProbeState{}
 	}
-	return channelMonitorV2MergeCatalogMatrix(cfg, groupBy, catalog, groupsByID, base, probeStates, s.now)
+	return channelMonitorV2MergeCatalogMatrix(cfg, groupBy, catalog, groupsByID, base, filter, probeStates, s.now)
 }
 
 // catalogTriples returns the distinct (platform, model, group) keys of a catalog.
@@ -681,6 +685,7 @@ func channelMonitorV2MergeCatalogMatrix(
 	catalog ChannelMonitorCatalog,
 	groupsByID map[int64]*Group,
 	base *ChannelMonitorV2Matrix,
+	filter ChannelMonitorV2Filter,
 	probeStates map[ChannelMonitorCatalogKey]*ProbeState,
 	now func() time.Time,
 ) *ChannelMonitorV2Matrix {
@@ -699,11 +704,27 @@ func channelMonitorV2MergeCatalogMatrix(
 	grainByKey := make(map[string]*grainBucket, len(catalog.Keys))
 	var grainOrder []string
 	for key := range catalog.Keys {
+		// R1-F1 must_fix: viewer group-scope gate. Catalog triples outside the
+		// viewer's AllowedGroupIDs must not surface (their model would otherwise
+		// leak into the de-platformed model grain). Admin path keeps RestrictGroups=false.
+		if filter.RestrictGroups && !channelMonitorV2GroupAllowed(filter.AllowedGroupIDs, key.GroupID) {
+			continue
+		}
+		// R1-F2 must_fix: reuse the fact-side display-model selection so a viewer
+		// who selected model A does not see an unselected no-traffic model B.
+		if !channelMonitorV2ModelSelected(filter, key.Model) {
+			continue
+		}
 		gk := channelMonitorV2RowGrainKey(groupBy, cfg, key.Platform, key.GroupID, key.Model)
 		bucket := grainByKey[gk]
 		if bucket == nil {
+			bucketPlatform := key.Platform
+			if groupBy == ChannelMonitorV2GroupByModel {
+				// C2/C6: model grain must not carry a platform (no channel leakage).
+				bucketPlatform = ""
+			}
 			bucket = &grainBucket{
-				platform: key.Platform,
+				platform: bucketPlatform,
 				groupID:  channelMonitorV2RowGroupID(groupBy, key.GroupID),
 				model:    channelMonitorV2RowModel(groupBy, cfg, key.Model),
 			}
@@ -815,6 +836,11 @@ func businessObservedAt(row *ChannelMonitorV2MatrixRow, coverage ChannelMonitorV
 // channelMonitorV2RowGrainKey projects a (platform, model, group) triple to the
 // groupBy display grain, mirroring repository.channelMonitorV2MatrixDimensionKey.
 func channelMonitorV2RowGrainKey(groupBy ChannelMonitorV2GroupBy, cfg ChannelMonitorV2Config, platform string, groupID int64, model string) string {
+	// C2/C6: model grain collapses across platform + group — key is only the
+	// display model, so same-named models on different platforms merge into one row.
+	if groupBy == ChannelMonitorV2GroupByModel {
+		return channelMonitorV2RowModel(groupBy, cfg, model)
+	}
 	key := platform
 	if groupBy == ChannelMonitorV2GroupByPlatformGroup || groupBy == ChannelMonitorV2GroupByPlatformGroupModel {
 		key += "\x00" + strconv.FormatInt(channelMonitorV2RowGroupID(groupBy, groupID), 10)
@@ -835,9 +861,13 @@ func channelMonitorV2RowGroupID(groupBy ChannelMonitorV2GroupBy, groupID int64) 
 }
 
 // channelMonitorV2RowModel returns the display model for the grain, or "" when the
-// grain does not include the model dimension. Mirrors repository display-model rules.
+// grain does not include the model dimension. For the model grain (C2/C6) it returns
+// the display model directly (empty model name folds to ChannelMonitorV2OtherModel),
+// matching repository.channelMonitorV2DisplayModel so cross-platform merge keys agree.
 func channelMonitorV2RowModel(groupBy ChannelMonitorV2GroupBy, cfg ChannelMonitorV2Config, model string) string {
-	if groupBy != ChannelMonitorV2GroupByPlatformModel && groupBy != ChannelMonitorV2GroupByPlatformGroupModel {
+	if groupBy != ChannelMonitorV2GroupByPlatformModel &&
+		groupBy != ChannelMonitorV2GroupByPlatformGroupModel &&
+		groupBy != ChannelMonitorV2GroupByModel {
 		return ""
 	}
 	m := strings.TrimSpace(model)
@@ -872,11 +902,46 @@ func derefInt64(v *int64) int64 {
 	return *v
 }
 
+// channelMonitorV2GroupAllowed reports whether groupID is within the viewer's
+// allowed set. Empty allowed set with RestrictGroups is handled by the caller
+// (catalog triples are skipped before reaching here), so a non-empty set is an
+// explicit membership test.
+func channelMonitorV2GroupAllowed(allowed []int64, groupID int64) bool {
+	for _, id := range allowed {
+		if id == groupID {
+			return true
+		}
+	}
+	return false
+}
+
+// channelMonitorV2ModelSelected mirrors repository.channelMonitorV2ModelSelected's
+// display-model selection semantics for catalog-derived (probe / no-data) rows, so
+// the same rule that filters fact traffic also filters catalog补行. The repository
+// function cannot be called from this package (service ← repository import cycle),
+// so the identical logic lives here intentionally and must be kept in sync.
+func channelMonitorV2ModelSelected(filter ChannelMonitorV2Filter, model string) bool {
+	if len(filter.Models) == 0 {
+		return true
+	}
+	display := strings.TrimSpace(model)
+	if display == "" {
+		display = ChannelMonitorV2OtherModel
+	}
+	for _, selected := range filter.Models {
+		if selected == display {
+			return true
+		}
+	}
+	return false
+}
+
 func ParseChannelMonitorV2GroupBy(value string) (ChannelMonitorV2GroupBy, error) {
 	groupBy := ChannelMonitorV2GroupBy(strings.TrimSpace(value))
 	if groupBy == "" {
-		// Default presentation: platform / group (matches operator mental model).
-		groupBy = ChannelMonitorV2GroupByPlatformGroup
+		// Default presentation is now the de-platformed model grain (C2/C6):
+		// cross-platform same-model rows merge into one row with no channel leakage.
+		groupBy = ChannelMonitorV2GroupByModel
 	}
 	if !groupBy.Valid() {
 		return "", fmt.Errorf("%w: %s", ErrChannelMonitorV2InvalidGroupBy, value)
@@ -886,7 +951,7 @@ func ParseChannelMonitorV2GroupBy(value string) (ChannelMonitorV2GroupBy, error)
 
 func (g ChannelMonitorV2GroupBy) Valid() bool {
 	switch g {
-	case ChannelMonitorV2GroupByPlatform, ChannelMonitorV2GroupByPlatformGroup, ChannelMonitorV2GroupByPlatformModel, ChannelMonitorV2GroupByPlatformGroupModel:
+	case ChannelMonitorV2GroupByPlatform, ChannelMonitorV2GroupByPlatformGroup, ChannelMonitorV2GroupByPlatformModel, ChannelMonitorV2GroupByPlatformGroupModel, ChannelMonitorV2GroupByModel:
 		return true
 	default:
 		return false

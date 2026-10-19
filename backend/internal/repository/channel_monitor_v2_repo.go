@@ -304,6 +304,16 @@ func (r *channelMonitorV2Repository) GetModels(ctx context.Context, filter servi
 	if err != nil {
 		return nil, err
 	}
+	// C10: non-admin collapses the detail table across platforms on the display
+	// model — same rule as the matrix model grain (C2/C6). Admin keeps the
+	// platform dimension intact: its Platform field and per-platform rows are
+	// preserved for troubleshooting value.
+	modelKey := func(platform, displayModel string) string {
+		if admin {
+			return platform + "\x00" + displayModel
+		}
+		return displayModel
+	}
 	accs := map[string]*metricAccumulator{}
 	for _, platform := range channelMonitorV2EnabledPlatforms(cfg) {
 		if len(filter.Platforms) > 0 && !containsString(filter.Platforms, platform) {
@@ -314,7 +324,7 @@ func (r *channelMonitorV2Repository) GetModels(ctx context.Context, filter servi
 			if model == "" {
 				continue
 			}
-			key := platform + "\x00" + model
+			key := modelKey(platform, model)
 			if accs[key] == nil {
 				accs[key] = newMetricAccumulator()
 			}
@@ -325,7 +335,7 @@ func (r *channelMonitorV2Repository) GetModels(ctx context.Context, filter servi
 			continue
 		}
 		model := channelMonitorV2DisplayModel(cfg, fact.Platform, fact.Model)
-		key := fact.Platform + "\x00" + model
+		key := modelKey(fact.Platform, model)
 		if accs[key] == nil {
 			accs[key] = newMetricAccumulator()
 		}
@@ -335,23 +345,32 @@ func (r *channelMonitorV2Repository) GetModels(ctx context.Context, filter servi
 		if !channelMonitorV2ModelSelected(filter, cfg, h.Platform, h.Model) {
 			continue
 		}
-		key := h.Platform + "\x00" + channelMonitorV2DisplayModel(cfg, h.Platform, h.Model)
+		key := modelKey(h.Platform, channelMonitorV2DisplayModel(cfg, h.Platform, h.Model))
 		if accs[key] != nil {
 			accs[key].addHistogram(h)
 		}
 	}
-	// Per platform+model ignored counts for error_rate adjustment.
-	ignoredByPM, _, err := r.loadIgnoredErrorCountsByPlatformModel(ctx, effectiveFilter, cfg)
+	// Per display-model ignored counts for error_rate adjustment. The key follows
+	// the same rule as the accumulators: platform+model for admin, bare display
+	// model for non-admin, so the ignored-error adjustment stays aligned with the
+	// merged grain (otherwise error_rate would be adjusted by the wrong key).
+	ignoredByKey, _, err := r.loadIgnoredErrorCountsByPlatformModel(ctx, effectiveFilter, cfg, admin)
 	if err != nil {
 		return nil, fmt.Errorf("load ignored error counts by platform/model: %w", err)
 	}
 	items := make([]service.ChannelMonitorV2ModelRow, 0, len(accs))
 	minutes := channelMonitorV2CoveredMinutes(filter, *coverage)
 	for key, acc := range accs {
-		parts := strings.SplitN(key, "\x00", 2)
+		var platform, model string
+		if admin {
+			parts := strings.SplitN(key, "\x00", 2)
+			platform, model = parts[0], parts[1]
+		} else {
+			model = key
+		}
 		metrics := acc.metric(minutes, admin)
-		applyIgnoredErrors(&metrics, ignoredByPM[key])
-		items = append(items, service.ChannelMonitorV2ModelRow{Platform: parts[0], Model: parts[1], Metrics: metrics, Health: service.ChannelMonitorV2HealthForWithThresholds(metrics, cfg.HealthThresholds)})
+		applyIgnoredErrors(&metrics, ignoredByKey[key])
+		items = append(items, service.ChannelMonitorV2ModelRow{Platform: platform, Model: model, Metrics: metrics, Health: service.ChannelMonitorV2HealthForWithThresholds(metrics, cfg.HealthThresholds)})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Metrics.RequestCount > items[j].Metrics.RequestCount })
 	return &service.ChannelMonitorV2List[service.ChannelMonitorV2ModelRow]{Coverage: *coverage, Items: items}, nil
@@ -482,6 +501,16 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 		}
 		result.Items = append(result.Items, row)
 	}
+	if groupBy == service.ChannelMonitorV2GroupByModel {
+		// C2/C6: at this grain platform is always blank and group fields are empty,
+		// so the merge is a pure dictionary order on model. Handle explicitly rather
+		// than relying on the platform-prefix comparator falling through to the model
+		// tie-breaker (which would only "happen to" work).
+		sort.Slice(result.Items, func(i, j int) bool {
+			return result.Items[i].Model < result.Items[j].Model
+		})
+		return result, nil
+	}
 	sort.Slice(result.Items, func(i, j int) bool {
 		a, b := result.Items[i], result.Items[j]
 		if a.Platform != b.Platform {
@@ -499,6 +528,12 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 }
 
 func channelMonitorV2MatrixDimensionKey(groupBy service.ChannelMonitorV2GroupBy, cfg service.ChannelMonitorV2Config, platform string, groupID int64, model string) channelMonitorV2MatrixKey {
+	// C2/C6: model grain collapses across platform + group — same display model on
+	// any platform lands in one key, and platform/group are blanked so they cannot
+	// carry channel identity into the de-platformed row.
+	if groupBy == service.ChannelMonitorV2GroupByModel {
+		return channelMonitorV2MatrixKey{platform: "", groupID: 0, model: channelMonitorV2DisplayModel(cfg, platform, model)}
+	}
 	key := channelMonitorV2MatrixKey{platform: platform}
 	if groupBy == service.ChannelMonitorV2GroupByPlatformGroup || groupBy == service.ChannelMonitorV2GroupByPlatformGroupModel {
 		key.groupID = groupID
@@ -511,6 +546,15 @@ func channelMonitorV2MatrixDimensionKey(groupBy service.ChannelMonitorV2GroupBy,
 
 func seedChannelMonitorV2MatrixAccumulators(filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, groupBy service.ChannelMonitorV2GroupBy, groupInfo map[int64]channelMonitorV2GroupInfo) map[channelMonitorV2MatrixKey]*channelMonitorV2MatrixAccumulator {
 	accs := map[channelMonitorV2MatrixKey]*channelMonitorV2MatrixAccumulator{}
+	// C2/C6: model grain needs no zero-traffic seeds. Every same display model on
+	// any platform collapses into one dimension key in GetMatrix (via
+	// channelMonitorV2MatrixDimensionKey), and a seed built from the raw
+	// (platform, "", 0) shape would carry the real platform into the emitted row
+	// and only be discarded later by the service-layer catalog merge — a fragile
+	// channel-leak. Real model rows are driven by facts + catalog, never by seeds.
+	if groupBy == service.ChannelMonitorV2GroupByModel {
+		return accs
+	}
 	platforms := channelMonitorV2EnabledPlatforms(cfg)
 	if len(filter.Platforms) > 0 {
 		platforms = intersectStrings(platforms, filter.Platforms)
@@ -1547,11 +1591,14 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCounts(
 	return byBucket, total, rows.Err()
 }
 
-// loadIgnoredErrorCountsByPlatformModel keys are platform + "\x00" + display model.
+// loadIgnoredErrorCountsByPlatformModel keys are platform + "\x00" + display model
+// for admin callers, and the bare display model for non-admin callers — so the key
+// matches the GetModels accumulator key under the C10 non-admin cross-platform merge.
 func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByPlatformModel(
 	ctx context.Context,
 	filter service.ChannelMonitorV2Filter,
 	cfg service.ChannelMonitorV2Config,
+	admin bool,
 ) (byPM map[string]int64, total int64, err error) {
 	byPM = map[string]int64{}
 	if len(cfg.IgnoredErrorCategories) == 0 {
@@ -1583,7 +1630,11 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByPlatformModel(
 			continue
 		}
 		display := channelMonitorV2DisplayModel(cfg, platform, model)
-		byPM[platform+"\x00"+display] += count
+		key := display
+		if admin {
+			key = platform + "\x00" + display
+		}
+		byPM[key] += count
 		total += count
 	}
 	return byPM, total, rows.Err()

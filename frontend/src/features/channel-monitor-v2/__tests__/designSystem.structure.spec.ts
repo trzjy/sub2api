@@ -25,7 +25,6 @@ describe('channel-monitor-v2 design system structure', () => {
     expect(src).toContain('badge badge-warning')
     // Compact single-row toolbar
     expect(src).toContain('monitor-toolbar')
-    expect(src).toContain('clearFilters')
     expect(src).toContain('healthModeOptions')
     expect(src).toContain("'cache'")
     // Ops elevation: rounded-3xl + ring surfaces
@@ -36,12 +35,10 @@ describe('channel-monitor-v2 design system structure', () => {
     // No page-level fixed min-width that forces viewport horizontal scroll
     expect(src).not.toMatch(/min-width:\s*980px/)
     expect(src).not.toMatch(/min-w-\[980px\]/)
-    // Dense tables scroll internally
-    expect(src).toMatch(/max-h-\[min\(52vh/)
-    expect(src).toContain('overflow-auto')
-    // Trend view toggle (pulse matrix / line chart) + default platform/group dimension
+    // 密集表格已去掉高度封顶：全量展开，不产生内层滚动条
+    expect(src).not.toMatch(/max-h-\[min\(52vh/)
+    // Trend view toggle (pulse matrix / line chart)
     expect(src).toContain("trendView")
-    expect(src).toContain("'platform_group'")
     expect(src).toContain('MonitorTrendChart')
   })
 
@@ -51,8 +48,8 @@ describe('channel-monitor-v2 design system structure', () => {
     expect(src).toContain('card-header')
     expect(src).toContain('card-body')
     expect(src).toContain('matrix-scroll')
-    expect(src).toMatch(/max-h-\[min\(42vh/)
-    expect(src).toContain('overflow-auto')
+    // 矩阵不再设高度封顶：模型全量展开，不产生内层滚动条
+    expect(src).not.toMatch(/matrix-scroll[^\n]*max-h-/)
     expect(src).toContain('pulse-tooltip')
     expect(src).toContain('rounded-3xl')
     expect(src).toContain('ring-1 ring-gray-900/5')

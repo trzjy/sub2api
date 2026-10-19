@@ -222,6 +222,7 @@ func TestXunhupayCreatePayment(t *testing.T) {
 		Amount:      "19.90",
 		PaymentType: payment.TypeWxpay,
 		Subject:     "账号充值",
+		ReturnURL:   "https://merchant.example.com/payment/result",
 		IsMobile:    true,
 	})
 	if err != nil {
@@ -248,12 +249,82 @@ func TestXunhupayCreatePayment(t *testing.T) {
 	if gotBody.Get("type") != "WAP" {
 		t.Fatalf("type = %q, want WAP for mobile", gotBody.Get("type"))
 	}
+	if gotBody.Get("wap_url") != "https://merchant.example.com" {
+		t.Fatalf("wap_url = %q, want https://merchant.example.com", gotBody.Get("wap_url"))
+	}
+	if gotBody.Get("wap_name") != "merchant.example.com" {
+		t.Fatalf("wap_name = %q, want merchant.example.com", gotBody.Get("wap_name"))
+	}
 	if gotBody.Get("notify_url") != cfg["notifyUrl"] {
 		t.Fatalf("notify_url = %q", gotBody.Get("notify_url"))
 	}
 	// Verify request signature with the app secret.
+	signedParams := formToMap(gotBody)
+	if !xunhupayVerifySign(signedParams, "test_appsecret", gotBody.Get("hash")) {
+		t.Fatal("CreatePayment request signature invalid")
+	}
+	signedParams["wap_url"] = "https://attacker.example.com"
+	if xunhupayVerifySign(signedParams, "test_appsecret", gotBody.Get("hash")) {
+		t.Fatal("CreatePayment signature must cover wap_url")
+	}
+}
+
+func TestXunhupayCreatePaymentDesktopOmitsWAPFields(t *testing.T) {
+	t.Parallel()
+	var gotBody url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotBody = r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"success","data":{"url":"https://pay.xunhupay.com/p","openid":"HPJ2024"}}`))
+	}))
+	defer srv.Close()
+
+	cfg := xunhupayTestConfig()
+	cfg["apiBase"] = srv.URL
+	p, err := NewXunhupay("inst1", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CreatePayment(t.Context(), payment.CreatePaymentRequest{
+		OrderID: "ORDER-DESKTOP", Amount: "19.90", PaymentType: payment.TypeWxpay, Subject: "账号充值",
+	}); err != nil {
+		t.Fatalf("CreatePayment: %v", err)
+	}
+	if gotBody.Get("type") != "" {
+		t.Fatalf("type = %q, want empty for desktop", gotBody.Get("type"))
+	}
+	if gotBody.Get("wap_url") != "" || gotBody.Get("wap_name") != "" {
+		t.Fatalf("desktop request must omit WAP fields: wap_url=%q wap_name=%q", gotBody.Get("wap_url"), gotBody.Get("wap_name"))
+	}
 	if !xunhupayVerifySign(formToMap(gotBody), "test_appsecret", gotBody.Get("hash")) {
 		t.Fatal("CreatePayment request signature invalid")
+	}
+}
+
+func TestXunhupayCreatePaymentMobileRejectsInvalidReturnURL(t *testing.T) {
+	t.Parallel()
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	cfg := xunhupayTestConfig()
+	cfg["apiBase"] = srv.URL
+	p, err := NewXunhupay("inst1", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.CreatePayment(t.Context(), payment.CreatePaymentRequest{
+		OrderID: "ORDER-INVALID-RETURN", Amount: "1.00", PaymentType: payment.TypeWxpay,
+		Subject: "充值", ReturnURL: "not a URL", IsMobile: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid return_url") {
+		t.Fatalf("expected invalid return_url error, got %v", err)
+	}
+	if called {
+		t.Fatal("invalid mobile return URL must fail before sending the request")
 	}
 }
 
