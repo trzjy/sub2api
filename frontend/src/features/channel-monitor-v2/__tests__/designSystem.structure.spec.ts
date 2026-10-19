@@ -39,9 +39,9 @@ describe('channel-monitor-v2 design system structure', () => {
     // Dense tables scroll internally
     expect(src).toMatch(/max-h-\[min\(52vh/)
     expect(src).toContain('overflow-auto')
-    // Trend view toggle (pulse matrix / line chart) + default platform/group dimension
+    // Trend view toggle (pulse matrix / line chart) + model-only dimension filter
     expect(src).toContain("trendView")
-    expect(src).toContain("'platform_group'")
+    expect(src).toContain('modelOptions')
     expect(src).toContain('MonitorTrendChart')
   })
 

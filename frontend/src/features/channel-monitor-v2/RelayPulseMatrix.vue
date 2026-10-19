@@ -397,10 +397,8 @@ function summaryCache(row: MonitorMatrixRow): string {
 }
 
 function rowLabel(row: MonitorMatrixRow): string {
-  const parts = [row.platform]
-  if (row.group_name || row.group_id) parts.push(row.group_name || `#${row.group_id}`)
-  if (row.model) parts.push(row.model === '__other__' ? t('channelMonitorV2.otherModels') : row.model)
-  return parts.join(' / ')
+  if (row.model) return row.model === '__other__' ? t('channelMonitorV2.otherModels') : row.model
+  return ''
 }
 
 // Row-level hover title. Probe rows explain the sampled probe source and last

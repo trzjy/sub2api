@@ -32,7 +32,7 @@ func TestChannelMonitorV2QueryListSupportsRepeatedAndCommaValues(t *testing.T) {
 func TestChannelMonitorV2GroupByQueryDefaultsAndRejectsInvalid(t *testing.T) {
 	groupBy, err := service.ParseChannelMonitorV2GroupBy("")
 	require.NoError(t, err)
-	require.Equal(t, service.ChannelMonitorV2GroupByPlatformGroup, groupBy)
+	require.Equal(t, service.ChannelMonitorV2GroupByModel, groupBy)
 	_, err = service.ParseChannelMonitorV2GroupBy("invalid")
 	require.Error(t, err)
 }

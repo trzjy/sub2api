@@ -140,7 +140,7 @@ func TestChannelMonitorV2ParseFilterDefaultsAndBuckets(t *testing.T) {
 func TestParseChannelMonitorV2GroupBy(t *testing.T) {
 	groupBy, err := ParseChannelMonitorV2GroupBy("")
 	require.NoError(t, err)
-	require.Equal(t, ChannelMonitorV2GroupByPlatformGroup, groupBy)
+	require.Equal(t, ChannelMonitorV2GroupByModel, groupBy)
 	for _, value := range []ChannelMonitorV2GroupBy{ChannelMonitorV2GroupByPlatform, ChannelMonitorV2GroupByPlatformGroup, ChannelMonitorV2GroupByPlatformModel, ChannelMonitorV2GroupByPlatformGroupModel} {
 		parsed, parseErr := ParseChannelMonitorV2GroupBy(string(value))
 		require.NoError(t, parseErr)
@@ -611,7 +611,7 @@ func TestChannelMonitorV2MergeCatalogMatrix_ProbeSource(t *testing.T) {
 	// ① 探测状态早于 30 分钟（新鲜度门已废除的回归）→ 仍展示为 probe 来源，FirstTokenMs 透传。
 	merged := channelMonitorV2MergeCatalogMatrix(
 		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatform, catalog, nil, base,
-		map[ChannelMonitorCatalogKey]*ProbeState{key: probeStale},
+		ChannelMonitorV2Filter{}, map[ChannelMonitorCatalogKey]*ProbeState{key: probeStale},
 		func() time.Time { return now },
 	)
 	require.Len(t, merged.Items, 1)
@@ -628,7 +628,7 @@ func TestChannelMonitorV2MergeCatalogMatrix_ProbeSource(t *testing.T) {
 	// ② 从未探测（无 probe_state）→ has_data=false，status/source/observed_at/first_token_ms 全 null。
 	mergedNone := channelMonitorV2MergeCatalogMatrix(
 		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatform, catalog, nil, base,
-		map[ChannelMonitorCatalogKey]*ProbeState{},
+		ChannelMonitorV2Filter{}, map[ChannelMonitorCatalogKey]*ProbeState{},
 		func() time.Time { return now },
 	)
 	require.Len(t, mergedNone.Items, 1)
@@ -647,7 +647,7 @@ func TestChannelMonitorV2MergeCatalogMatrix_ProbeSource(t *testing.T) {
 	}
 	mergedFail := channelMonitorV2MergeCatalogMatrix(
 		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatform, catalog, nil, base,
-		map[ChannelMonitorCatalogKey]*ProbeState{key: probeFail},
+		ChannelMonitorV2Filter{}, map[ChannelMonitorCatalogKey]*ProbeState{key: probeFail},
 		func() time.Time { return now },
 	)
 	require.Len(t, mergedFail.Items, 1)
@@ -656,4 +656,134 @@ func TestChannelMonitorV2MergeCatalogMatrix_ProbeSource(t *testing.T) {
 	require.Equal(t, ChannelMonitorV2StatusFailed, *mergedFail.Items[0].Status)
 	require.NotNil(t, mergedFail.Items[0].FirstTokenMs)
 	require.Equal(t, ft2, *mergedFail.Items[0].FirstTokenMs)
+}
+
+// ---------- 测试（DP-BE-001）：model 粒度合并 / 去渠道化 / R1-F1 / R1-F2 ----------
+
+// 用例 2：空模型名（__other__）跨平台合并为一行。
+func TestChannelMonitorV2MergeModelGrainOtherModelCrossPlatform(t *testing.T) {
+	now := time.Date(2026, 2, 1, 8, 0, 0, 0, time.UTC)
+	catalog := ChannelMonitorCatalog{
+		Keys: map[ChannelMonitorCatalogKey]struct{}{
+			{Platform: "openai", Model: "", GroupID: 1}:    {},
+			{Platform: "anthropic", Model: "", GroupID: 1}: {},
+		},
+	}
+	base := &ChannelMonitorV2Matrix{GroupBy: ChannelMonitorV2GroupByModel}
+	merged := channelMonitorV2MergeCatalogMatrix(
+		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByModel, catalog, nil, base,
+		ChannelMonitorV2Filter{}, map[ChannelMonitorCatalogKey]*ProbeState{},
+		func() time.Time { return now },
+	)
+	require.Len(t, merged.Items, 1, "two empty-model triples must collapse into one __other__ row")
+	row := merged.Items[0]
+	require.Equal(t, ChannelMonitorV2OtherModel, row.Model)
+	require.Empty(t, row.Platform, "model grain must not carry a platform")
+	require.Nil(t, row.GroupID)
+	require.False(t, row.HasData, "no probe → 无数据")
+}
+
+// 用例 3：probe 状态在合并 grain 上取最新（多个三元组各有 probe）。
+func TestChannelMonitorV2MergeModelGrainProbeTakesLatest(t *testing.T) {
+	now := time.Date(2026, 2, 1, 8, 0, 0, 0, time.UTC)
+	k1 := ChannelMonitorCatalogKey{Platform: "openai", Model: "gpt-4", GroupID: 1}
+	k2 := ChannelMonitorCatalogKey{Platform: "anthropic", Model: "gpt-4", GroupID: 1}
+	catalog := ChannelMonitorCatalog{Keys: map[ChannelMonitorCatalogKey]struct{}{k1: {}, k2: {}}}
+	base := &ChannelMonitorV2Matrix{GroupBy: ChannelMonitorV2GroupByModel}
+	probeStates := map[ChannelMonitorCatalogKey]*ProbeState{
+		k1: {Platform: "openai", Model: "gpt-4", GroupID: 1, LastProbeAt: now.Add(-2 * time.Hour), LastOK: true},
+		k2: {Platform: "anthropic", Model: "gpt-4", GroupID: 1, LastProbeAt: now.Add(-1 * time.Hour), LastOK: false},
+	}
+	merged := channelMonitorV2MergeCatalogMatrix(
+		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByModel, catalog, nil, base,
+		ChannelMonitorV2Filter{}, probeStates, func() time.Time { return now },
+	)
+	require.Len(t, merged.Items, 1)
+	row := merged.Items[0]
+	require.Equal(t, "gpt-4", row.Model)
+	require.True(t, row.HasData)
+	require.NotNil(t, row.Source)
+	require.Equal(t, ChannelMonitorV2SourceProbe, *row.Source)
+	// 取最新一次探测（now-1h，LastOK=false）→ status=failed，而非更早的 operational。
+	require.NotNil(t, row.Status)
+	require.Equal(t, ChannelMonitorV2StatusFailed, *row.Status)
+	require.NotNil(t, row.ObservedAt)
+	require.Equal(t, now.Add(-time.Hour).UTC(), row.ObservedAt.UTC())
+}
+
+// 用例 4（R1-F1 回归）：活跃分组不在查看者 AllowedGroupIDs 内 → 该模型不出现在用户矩阵。
+func TestChannelMonitorV2MergeModelGrainRestrictsUnauthorizedGroup(t *testing.T) {
+	now := time.Date(2026, 2, 1, 8, 0, 0, 0, time.UTC)
+	allowedKey := ChannelMonitorCatalogKey{Platform: "openai", Model: "gpt-4", GroupID: 1}
+	deniedKey := ChannelMonitorCatalogKey{Platform: "anthropic", Model: "gpt-4", GroupID: 5}
+	catalog := ChannelMonitorCatalog{Keys: map[ChannelMonitorCatalogKey]struct{}{allowedKey: {}, deniedKey: {}}}
+	base := &ChannelMonitorV2Matrix{GroupBy: ChannelMonitorV2GroupByModel}
+	// 非管理员：RestrictGroups=true + AllowedGroupIDs=[1]。group 5 不在授权范围 → 不出现。
+	filter := ChannelMonitorV2Filter{RestrictGroups: true, AllowedGroupIDs: []int64{1}}
+	merged := channelMonitorV2MergeCatalogMatrix(
+		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByModel, catalog, nil, base,
+		filter, map[ChannelMonitorCatalogKey]*ProbeState{}, func() time.Time { return now },
+	)
+	require.Len(t, merged.Items, 1, "unauthorized-group model must be excluded")
+	require.Equal(t, "gpt-4", merged.Items[0].Model)
+	require.Empty(t, merged.Items[0].Platform)
+}
+
+// 用例 5（R1-F2 回归）：请求选模型 A，目录另有无流量的模型 B → B 不出现在矩阵。
+func TestChannelMonitorV2MergeModelGrainRespectsSelectedModel(t *testing.T) {
+	now := time.Date(2026, 2, 1, 8, 0, 0, 0, time.UTC)
+	selectedKey := ChannelMonitorCatalogKey{Platform: "openai", Model: "gpt-4", GroupID: 0}
+	unselectedKey := ChannelMonitorCatalogKey{Platform: "anthropic", Model: "gpt-5", GroupID: 0}
+	catalog := ChannelMonitorCatalog{Keys: map[ChannelMonitorCatalogKey]struct{}{selectedKey: {}, unselectedKey: {}}}
+	base := &ChannelMonitorV2Matrix{GroupBy: ChannelMonitorV2GroupByModel}
+	// 用户只选了 gpt-4 → 无流量候选模型 gpt-5 不得经目录补行进矩阵。
+	filter := ChannelMonitorV2Filter{Models: []string{"gpt-4"}}
+	merged := channelMonitorV2MergeCatalogMatrix(
+		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByModel, catalog, nil, base,
+		filter, map[ChannelMonitorCatalogKey]*ProbeState{}, func() time.Time { return now },
+	)
+	require.Len(t, merged.Items, 1, "unselected no-traffic model must be excluded")
+	require.Equal(t, "gpt-4", merged.Items[0].Model)
+}
+
+// 用例 6：管理员路径不受分组范围门影响（RestrictGroups=false 时全部可见）。
+func TestChannelMonitorV2MergeModelGrainAdminSeesAllGroups(t *testing.T) {
+	now := time.Date(2026, 2, 1, 8, 0, 0, 0, time.UTC)
+	g1 := ChannelMonitorCatalogKey{Platform: "openai", Model: "gpt-4", GroupID: 1}
+	g5 := ChannelMonitorCatalogKey{Platform: "anthropic", Model: "gpt-5", GroupID: 5}
+	catalog := ChannelMonitorCatalog{Keys: map[ChannelMonitorCatalogKey]struct{}{g1: {}, g5: {}}}
+	base := &ChannelMonitorV2Matrix{GroupBy: ChannelMonitorV2GroupByModel}
+	// 管理员：RestrictGroups=false → 不做 AllowedGroupIDs 过滤，两个组的模型都可见。
+	filter := ChannelMonitorV2Filter{RestrictGroups: false}
+	merged := channelMonitorV2MergeCatalogMatrix(
+		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByModel, catalog, nil, base,
+		filter, map[ChannelMonitorCatalogKey]*ProbeState{}, func() time.Time { return now },
+	)
+	require.Len(t, merged.Items, 2, "admin must see both groups' models")
+	models := map[string]bool{}
+	for _, r := range merged.Items {
+		models[r.Model] = true
+		require.Empty(t, r.Platform)
+	}
+	require.True(t, models["gpt-4"])
+	require.True(t, models["gpt-5"])
+}
+
+// 用例 7：ParseChannelMonitorV2GroupBy 新默认值——省略参数时返回 model。
+func TestParseChannelMonitorV2GroupByDefaultsToModel(t *testing.T) {
+	groupBy, err := ParseChannelMonitorV2GroupBy("")
+	require.NoError(t, err)
+	require.Equal(t, ChannelMonitorV2GroupByModel, groupBy)
+	// 显式值仍按原样解析。
+	for _, value := range []ChannelMonitorV2GroupBy{
+		ChannelMonitorV2GroupByPlatform, ChannelMonitorV2GroupByPlatformGroup,
+		ChannelMonitorV2GroupByPlatformModel, ChannelMonitorV2GroupByPlatformGroupModel,
+		ChannelMonitorV2GroupByModel,
+	} {
+		parsed, parseErr := ParseChannelMonitorV2GroupBy(string(value))
+		require.NoError(t, parseErr)
+		require.Equal(t, value, parsed)
+	}
+	_, err = ParseChannelMonitorV2GroupBy("group")
+	require.ErrorIs(t, err, ErrChannelMonitorV2InvalidGroupBy)
 }

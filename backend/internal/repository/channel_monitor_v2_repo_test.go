@@ -605,3 +605,271 @@ func TestChannelMonitorV2GetProbeStatesEmptyKeysNoQuery(t *testing.T) {
 	require.Empty(t, states)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// ---------- 测试（DP-BE-001）：model 粒度聚合键 / 去渠道化 ----------
+
+// 维度键在 model 粒度下跨平台坍缩；平台与分组被置空，不得带出渠道标识。
+func TestChannelMonitorV2MatrixDimensionKeyModelGrainCollapsesAcrossPlatforms(t *testing.T) {
+	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{
+		{Platform: "openai", Enabled: true},
+		{Platform: "anthropic", Enabled: true},
+	}}
+	k1 := channelMonitorV2MatrixDimensionKey(service.ChannelMonitorV2GroupByModel, cfg, "openai", 0, "gpt-4")
+	k2 := channelMonitorV2MatrixDimensionKey(service.ChannelMonitorV2GroupByModel, cfg, "anthropic", 0, "gpt-4")
+	require.Equal(t, k1, k2, "same display model on different platforms must share one key")
+	require.Equal(t, channelMonitorV2MatrixKey{platform: "", groupID: 0, model: "gpt-4"}, k1)
+
+	// 空模型名回落 __other__ 且同样跨平台坍缩。
+	k3 := channelMonitorV2MatrixDimensionKey(service.ChannelMonitorV2GroupByModel, cfg, "openai", 7, "")
+	k4 := channelMonitorV2MatrixDimensionKey(service.ChannelMonitorV2GroupByModel, cfg, "anthropic", 9, "")
+	require.Equal(t, k3, k4)
+	require.Equal(t, channelMonitorV2MatrixKey{platform: "", groupID: 0, model: service.ChannelMonitorV2OtherModel}, k3)
+}
+
+// model 粒度不应产生任何种子键（避免平台标记的零流量行）。
+func TestChannelMonitorV2MatrixSeedsNothingForModelGrain(t *testing.T) {
+	filter := service.ChannelMonitorV2Filter{}
+	cfg := service.ChannelMonitorV2Config{
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: "openai", Enabled: true},
+			{Platform: "anthropic", Enabled: true},
+		},
+	}
+	accs := seedChannelMonitorV2MatrixAccumulators(filter, cfg, service.ChannelMonitorV2GroupByModel, map[int64]channelMonitorV2GroupInfo{})
+	require.Empty(t, accs)
+}
+
+// 用例 1：跨平台同名模型合并为一行，成功率为合并后重算值（非任一平台原值），且去渠道化。
+func TestChannelMonitorV2GetMatrixModelGrainMergesCrossPlatform(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(90 * time.Minute)
+	filter := service.ChannelMonitorV2Filter{Start: start, End: end, Bucket: 5 * time.Minute}
+	cfg := service.ChannelMonitorV2Config{
+		Enabled: true,
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: "openai", Enabled: true},
+			{Platform: "anthropic", Enabled: true},
+		},
+	}
+
+	// 1) watermark：data_through 覆盖到窗口末，使事实窗口有效。
+	mock.ExpectQuery("FROM channel_monitor_v2_watermarks").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"usage_coverage_start", "error_coverage_start", "data_through", "last_successful_at", "backfill_cursor",
+		}).AddRow(start, start, end, end, start))
+
+	// 2) facts：openai/gpt-4（80 成功 / 20 错误）与 anthropic/gpt-4（95 成功 / 5 错误）。
+	mock.ExpectQuery("FROM channel_monitor_v2_metrics_rollup").
+		WithArgs(start, end, pq.Array([]string{"openai", "anthropic"}), int64(300)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"bucket_start", "platform", "group_id", "name", "model",
+			"success", "errors", "upstream_affected", "upstream_attempts",
+			"input", "output", "cache_creation", "cache_read",
+			"ttft_sum", "ttft_count", "duration_sum", "duration_count",
+		}).
+			AddRow(start, "openai", int64(0), "", "gpt-4", int64(80), int64(20), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
+			AddRow(start, "anthropic", int64(0), "", "gpt-4", int64(95), int64(5), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)))
+
+	// 3) histograms：空。
+	mock.ExpectQuery("FROM channel_monitor_v2_latency_histograms_rollup").
+		WithArgs(start, end, pq.Array([]string{"openai", "anthropic"}), int64(300), int64(0)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"bucket_start", "platform", "group_id", "model", "user_id", "metric", "upper_bound_ms", "sample_count",
+		}))
+
+	matrix, err := repo.GetMatrix(context.Background(), filter, cfg, service.ChannelMonitorV2GroupByModel, false)
+	require.NoError(t, err)
+	require.Equal(t, service.ChannelMonitorV2GroupByModel, matrix.GroupBy)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	// 两平台同名模型坍缩为一行；成功率为合并值 (80+95)/(100+100)=0.875，非 0.8 或 0.95。
+	require.Len(t, matrix.Items, 1, "cross-platform same model must merge into one row")
+	row := matrix.Items[0]
+	require.Equal(t, "gpt-4", row.Model)
+	require.Empty(t, row.Platform, "model grain must not carry a platform")
+	require.Equal(t, int64(200), row.Metrics.RequestCount)
+	require.InDelta(t, 0.875, row.Metrics.SuccessRate, 0.0001)
+	require.InDelta(t, 0.125, row.Metrics.ErrorRate, 0.0001)
+}
+
+// ---------- 测试（DP-C10-001）：GetModels 模型明细表跨平台合并 ----------
+
+// 用例 1：非管理员跨平台同名模型合并为一行，成功率为合并后重算值（非任一平台原值），且去渠道化（Platform 为空）。
+func TestChannelMonitorV2GetModelsNonAdminMergesCrossPlatform(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(90 * time.Minute)
+	filter := service.ChannelMonitorV2Filter{Start: start, End: end, Bucket: 5 * time.Minute}
+	cfg := service.ChannelMonitorV2Config{
+		Enabled: true,
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: "openai", Enabled: true},
+			{Platform: "anthropic", Enabled: true},
+		},
+	}
+
+	// 1) watermark：data_through 覆盖到窗口末。
+	mock.ExpectQuery("FROM channel_monitor_v2_watermarks").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"usage_coverage_start", "error_coverage_start", "data_through", "last_successful_at", "backfill_cursor",
+		}).AddRow(start, start, end, end, start))
+
+	// 2) facts：openai/gpt-4（80 成功 / 20 错误）与 anthropic/gpt-4（95 成功 / 5 错误）。
+	mock.ExpectQuery("FROM channel_monitor_v2_metrics_rollup").
+		WithArgs(start, end, pq.Array([]string{"openai", "anthropic"}), int64(300)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"bucket_start", "platform", "group_id", "name", "model",
+			"success", "errors", "upstream_affected", "upstream_attempts",
+			"input", "output", "cache_creation", "cache_read",
+			"ttft_sum", "ttft_count", "duration_sum", "duration_count",
+		}).
+			AddRow(start, "openai", int64(0), "", "gpt-4", int64(80), int64(20), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
+			AddRow(start, "anthropic", int64(0), "", "gpt-4", int64(95), int64(5), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)))
+
+	// 3) histograms：空。
+	mock.ExpectQuery("FROM channel_monitor_v2_latency_histograms_rollup").
+		WithArgs(start, end, pq.Array([]string{"openai", "anthropic"}), int64(300), int64(0)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"bucket_start", "platform", "group_id", "model", "user_id", "metric", "upper_bound_ms", "sample_count",
+		}))
+
+	models, err := repo.GetModels(context.Background(), filter, cfg, false)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	// 两平台同名模型坍缩为一行；成功率为合并值 (80+95)/(100+100)=0.875，非 0.8 或 0.95。
+	require.Len(t, models.Items, 1, "cross-platform same model must merge into one row")
+	row := models.Items[0]
+	require.Equal(t, "gpt-4", row.Model)
+	require.Empty(t, row.Platform, "non-admin detail row must not carry a platform")
+	require.Equal(t, int64(200), row.Metrics.RequestCount)
+	require.InDelta(t, 0.875, row.Metrics.SuccessRate, 0.0001)
+	require.InDelta(t, 0.125, row.Metrics.ErrorRate, 0.0001)
+}
+
+// 用例 2（管理员路径行为不变）：管理员保留平台维度，两平台同名模型仍是两行，Platform 字段非空，
+// 成功率为各平台原值（openai=0.8, anthropic=0.95），未被合并。
+func TestChannelMonitorV2GetModelsAdminKeepsPlatformDimension(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(90 * time.Minute)
+	filter := service.ChannelMonitorV2Filter{Start: start, End: end, Bucket: 5 * time.Minute}
+	cfg := service.ChannelMonitorV2Config{
+		Enabled: true,
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: "openai", Enabled: true},
+			{Platform: "anthropic", Enabled: true},
+		},
+	}
+
+	mock.ExpectQuery("FROM channel_monitor_v2_watermarks").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"usage_coverage_start", "error_coverage_start", "data_through", "last_successful_at", "backfill_cursor",
+		}).AddRow(start, start, end, end, start))
+
+	mock.ExpectQuery("FROM channel_monitor_v2_metrics_rollup").
+		WithArgs(start, end, pq.Array([]string{"openai", "anthropic"}), int64(300)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"bucket_start", "platform", "group_id", "name", "model",
+			"success", "errors", "upstream_affected", "upstream_attempts",
+			"input", "output", "cache_creation", "cache_read",
+			"ttft_sum", "ttft_count", "duration_sum", "duration_count",
+		}).
+			AddRow(start, "openai", int64(0), "", "gpt-4", int64(80), int64(20), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
+			AddRow(start, "anthropic", int64(0), "", "gpt-4", int64(95), int64(5), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)))
+
+	mock.ExpectQuery("FROM channel_monitor_v2_latency_histograms_rollup").
+		WithArgs(start, end, pq.Array([]string{"openai", "anthropic"}), int64(300), int64(0)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"bucket_start", "platform", "group_id", "model", "user_id", "metric", "upper_bound_ms", "sample_count",
+		}))
+
+	models, err := repo.GetModels(context.Background(), filter, cfg, true)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	// 管理员路径保持平台维度：两平台同名模型两行，Platform 非空，成功率为各平台原值。
+	require.Len(t, models.Items, 2, "admin path must keep platform dimension — two rows")
+	byKey := map[string]service.ChannelMonitorV2ModelRow{}
+	for _, it := range models.Items {
+		require.NotEmpty(t, it.Platform, "admin row must keep its platform")
+		require.Equal(t, "gpt-4", it.Model)
+		byKey[it.Platform] = it
+	}
+	require.Contains(t, byKey, "openai")
+	require.Contains(t, byKey, "anthropic")
+	require.Equal(t, int64(100), byKey["openai"].Metrics.RequestCount)
+	require.InDelta(t, 0.80, byKey["openai"].Metrics.SuccessRate, 0.0001)
+	require.InDelta(t, 0.20, byKey["openai"].Metrics.ErrorRate, 0.0001)
+	require.Equal(t, int64(100), byKey["anthropic"].Metrics.RequestCount)
+	require.InDelta(t, 0.95, byKey["anthropic"].Metrics.SuccessRate, 0.0001)
+	require.InDelta(t, 0.05, byKey["anthropic"].Metrics.ErrorRate, 0.0001)
+}
+
+// 用例 3：非管理员 __other__（空模型名）跨平台合并为一行。
+func TestChannelMonitorV2GetModelsNonAdminMergesOtherModel(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(90 * time.Minute)
+	filter := service.ChannelMonitorV2Filter{Start: start, End: end, Bucket: 5 * time.Minute}
+	cfg := service.ChannelMonitorV2Config{
+		Enabled: true,
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: "openai", Enabled: true},
+			{Platform: "anthropic", Enabled: true},
+		},
+	}
+
+	mock.ExpectQuery("FROM channel_monitor_v2_watermarks").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"usage_coverage_start", "error_coverage_start", "data_through", "last_successful_at", "backfill_cursor",
+		}).AddRow(start, start, end, end, start))
+
+	// 空模型名 → 展示模型回落 __other__；两平台各一行，跨平台合并。
+	mock.ExpectQuery("FROM channel_monitor_v2_metrics_rollup").
+		WithArgs(start, end, pq.Array([]string{"openai", "anthropic"}), int64(300)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"bucket_start", "platform", "group_id", "name", "model",
+			"success", "errors", "upstream_affected", "upstream_attempts",
+			"input", "output", "cache_creation", "cache_read",
+			"ttft_sum", "ttft_count", "duration_sum", "duration_count",
+		}).
+			AddRow(start, "openai", int64(0), "", "", int64(30), int64(10), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
+			AddRow(start, "anthropic", int64(0), "", "", int64(50), int64(10), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)))
+
+	mock.ExpectQuery("FROM channel_monitor_v2_latency_histograms_rollup").
+		WithArgs(start, end, pq.Array([]string{"openai", "anthropic"}), int64(300), int64(0)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"bucket_start", "platform", "group_id", "model", "user_id", "metric", "upper_bound_ms", "sample_count",
+		}))
+
+	models, err := repo.GetModels(context.Background(), filter, cfg, false)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	// __other__ 跨平台合并为一行；成功率为合并值 (30+50)/(40+60)=0.8。
+	require.Len(t, models.Items, 1, "cross-platform __other__ must merge into one row")
+	row := models.Items[0]
+	require.Equal(t, service.ChannelMonitorV2OtherModel, row.Model)
+	require.Empty(t, row.Platform, "non-admin __other__ row must not carry a platform")
+	require.Equal(t, int64(100), row.Metrics.RequestCount)
+	require.InDelta(t, 0.80, row.Metrics.SuccessRate, 0.0001)
+	require.InDelta(t, 0.20, row.Metrics.ErrorRate, 0.0001)
+}

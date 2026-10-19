@@ -210,7 +210,7 @@ describe('RelayPulseMatrix C3 three-state', () => {
     const noDataRow = dataRows[3]
     expect(noDataRow.find('.health-no-data').exists()).toBe(true)
     expect(noDataRow.find('.state-badge').exists()).toBe(false)
-    expect(noDataRow.find('.dimension-cell').text()).toBe('openai / 默认组 / gpt-2')
+    expect(noDataRow.find('.dimension-cell').text()).toBe('gpt-2')
     expect(noDataRow.findAll('.summary-value')[1].text()).toBe('—')
 
     // Probe row hover explains the sampled source + last observation time.
