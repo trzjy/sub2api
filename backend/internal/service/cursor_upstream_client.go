@@ -47,10 +47,11 @@ var ErrUpstreamCooldown = errors.New("shareai: upstream cooldown, retry later")
 var ErrUpstreamKeyExpired = errors.New("shareai: upstream key expired or quota exhausted")
 
 // ErrUpstreamKeyBlocked 是自动链路（reconciler, manual=false）对"未知上游失败"的统一内部哨兵
-// （R13-2）。它对应"上游拒绝/结果未知"一类失败：拉号方已按既有语义把该 key 标 exhausted=true
-// （casSetExhausted，落库行为不变），但此前自动链路裸 return nil 会被 reconciler 记成成功
-// （心跳"reconciled N quota keys"把失败算成成功）。故改为透传含本哨兵的包裹错误，reconciler
-// 以 errors.Is 识别为"失败但非停轮"（记失败级日志、不加 pulled 计数、返回 false、继续下一候选）。
+// （R13-2）。它对应"上游拒绝/结果未知"一类失败：拉号方落 last_refresh_error 标记、exhausted
+// 维度不动（CUR-P1-FIX-KEY-EXHAUSTED：未知/普通上游失败不是已确认终态，不得标耗尽），但此前
+// 自动链路裸 return nil 会被 reconciler 记成成功（心跳"reconciled N quota keys"把失败算成成功）。
+// 故改为透传含本哨兵的包裹错误，reconciler 以 errors.Is 识别为"失败但非停轮"（记失败级日志、
+// 不加 pulled 计数、返回 false、继续下一候选）。
 // 注意：本哨兵区别于 ErrQuotaKeyMountFailed（上游已成功发号、本地挂载失败的非幂等边界，须停本轮）。
 var ErrUpstreamKeyBlocked = errors.New("shareai: upstream key blocked (exhausted placeholder)")
 

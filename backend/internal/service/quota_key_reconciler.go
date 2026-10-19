@@ -466,7 +466,8 @@ func (r *QuotaKeyReconciler) pullKey(ctx context.Context, keyID int64, modelM st
 		}
 		// R13-2：自动链路未知上游失败（ErrUpstreamKeyBlocked）——记失败级日志（含 key id 与
 		// 原因摘要，不落凭据）、不加 pulled 计数、返回 false（不停轮，下一候选继续；单 key 失败
-		// 不中断既有语义保持不变）。落库（casSetExhausted 已置 exhausted=true）行为零变化，心跳
+		// 不中断既有语义保持不变）。落库仅写 last_refresh_error（exhausted 不动：未知失败不得标
+		// 耗尽，CUR-P1-FIX-KEY-EXHAUSTED），心跳
 		// 摘要 reconcileResult(pulled) 只反映真实成功数，ops 侧据失败日志 + 低计数可辨。
 		if errors.Is(err, ErrUpstreamKeyBlocked) {
 			log.Printf("[QuotaKeyReconcile] WARN: quota key %d upstream pull blocked (failure counted, not success): %v", keyID, err)

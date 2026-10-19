@@ -641,16 +641,17 @@ func (r *testDBRepo) ListAccountsByQuotaKeys(ctx context.Context, ids []int64) (
 	return r.client.Account.Query().Where(account.QuotaKeyIDIn(ids...)).All(ctx)
 }
 
-// TestQuotaKeyPull_Error_SetsExhaustedCAS：任意上游错误 → exhausted=true（CAS 写），
-// 且不得插入任何账号。
-func TestQuotaKeyPull_Error_SetsExhaustedCAS(t *testing.T) {
+// TestQuotaKeyPull_Error_KeepsExhaustedFalseWritesMarker：任意（未知/普通）上游错误 →
+// 只写 last_refresh_error + last_refresh_at，exhausted 保持 false
+// （CUR-P1-FIX-KEY-EXHAUSTED，方案 §15.2/§16.1：未知失败不得推导停供），且不得插入任何账号。
+func TestQuotaKeyPull_Error_KeepsExhaustedFalseWritesMarker(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 	svc, _ := qkNewTestService(t, &fakeUpstreamClient{err: errors.New("upstream boom")})
 
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	// 自动链路（manual=false）遇未知上游错误：落库 exhausted=true 不变，但 R13-2 后不再裸
-	// return nil，而是透传含 ErrUpstreamKeyBlocked 哨兵的包裹错误（使 reconciler 如实计入失败）。
+	// 自动链路（manual=false）遇未知上游错误：不再裸 return nil，而是透传含
+	// ErrUpstreamKeyBlocked 哨兵的包裹错误（R13-2，使 reconciler 如实计入失败）。
 	err := svc.PullAccounts(ctx, qk.ID)
 	require.Error(t, err, "automatic chain must surface the blocked sentinel (R13-2)")
 	require.True(t, errors.Is(err, ErrUpstreamKeyBlocked),
@@ -658,9 +659,17 @@ func TestQuotaKeyPull_Error_SetsExhaustedCAS(t *testing.T) {
 
 	got, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
-	require.True(t, got.Exhausted, "error path must set exhausted=true")
-	require.NotNil(t, got.LastRefreshError)
+	// 核心：未知/普通上游失败不是已确认 key 级终态 ⇒ exhausted 必须保持 false（不得标"已耗尽"）。
+	require.False(t, got.Exhausted, "unknown upstream failure must NOT set exhausted=true")
+	require.NotNil(t, got.LastRefreshError, "failure marker must still be written (observability)")
 	require.Contains(t, *got.LastRefreshError, "upstream boom")
+	require.NotNil(t, got.LastRefreshAt, "failure marker must stamp last_refresh_at")
+
+	// 失败不改变停供事实：该 key 仍在候选集内（后续周期可继续尝试）。
+	w := NewQuotaKeyModelWater(client, nil)
+	cands, err := w.ListCandidateKeys(ctx, "cursor-fix-key-exhausted", 0)
+	require.NoError(t, err)
+	require.Contains(t, cands, qk.ID, "unknown failure must NOT remove the key from candidates")
 
 	// 不得插入任何账号。
 	n, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).Count(ctx)
@@ -668,30 +677,34 @@ func TestQuotaKeyPull_Error_SetsExhaustedCAS(t *testing.T) {
 	require.Equal(t, 0, n, "error path must not insert fake accounts")
 }
 
-// TestQuotaKeyCasSetExhausted_OnlyWhenActive：CAS 写仅在 status='active' 时生效，
-// 不覆盖 sweep 已置的 expired/disabled。
-func TestQuotaKeyCasSetExhausted_OnlyWhenActive(t *testing.T) {
+// TestQuotaKeyWriteUpstreamFailureMarker_OnlyWhenActive：失败标记（last_refresh_error）
+// 的 CAS 写仅在 status='active' 时生效，不覆盖 sweep 已置的 expired/disabled；
+// 且两个分支都不得改写 exhausted（未知失败不标耗尽）。
+func TestQuotaKeyWriteUpstreamFailureMarker_OnlyWhenActive(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 
 	active := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
 	tx, err := client.Tx(ctx)
 	require.NoError(t, err)
-	require.NoError(t, (&QuotaKeyService{}).casSetExhausted(ctx, tx, active.ID, errors.New("boom")))
+	require.NoError(t, (&QuotaKeyService{}).writeUpstreamFailureMarker(ctx, tx, active.ID, errors.New("boom")))
 	require.NoError(t, tx.Commit())
 	got, err := client.QuotaKey.Get(ctx, active.ID)
 	require.NoError(t, err)
-	require.True(t, got.Exhausted, "CAS must set exhausted when status=active")
+	require.NotNil(t, got.LastRefreshError, "marker must be written when status=active")
+	require.Contains(t, *got.LastRefreshError, "boom")
+	require.False(t, got.Exhausted, "unknown failure marker must NOT set exhausted")
 
-	// 模拟 sweep 已将状态改为 expired。
+	// 模拟 sweep 已将状态改为 expired：CAS 不命中 ⇒ 标记不写入。
 	expired := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusExpired)
 	tx2, err := client.Tx(ctx)
 	require.NoError(t, err)
-	require.NoError(t, (&QuotaKeyService{}).casSetExhausted(ctx, tx2, expired.ID, errors.New("boom")))
+	require.NoError(t, (&QuotaKeyService{}).writeUpstreamFailureMarker(ctx, tx2, expired.ID, errors.New("boom")))
 	require.NoError(t, tx2.Commit())
 	got2, err := client.QuotaKey.Get(ctx, expired.ID)
 	require.NoError(t, err)
-	require.False(t, got2.Exhausted, "CAS must NOT override sweep-set status")
+	require.Nil(t, got2.LastRefreshError, "CAS must NOT override sweep-set status")
+	require.False(t, got2.Exhausted, "sweep-set status must not be reclassified as exhausted")
 }
 
 // TestQuotaKeyPull_StopsAtWorkingCount15：working 账号数达到上限（>=15）即停止拉号，
@@ -1029,8 +1042,9 @@ func TestQuotaKeyPlaceholderUpstream_ReturnsErrorNotFake(t *testing.T) {
 	svc, _ := qkNewTestService(t, nil)
 
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	// 自动链路（manual=false）遇占位客户端错误：落库 exhausted=true 不变，但 R13-2 后透传
-	// 含 ErrUpstreamKeyBlocked 哨兵的包裹错误（不再裸 return nil）。
+	// 自动链路（manual=false）遇占位客户端错误：R13-2 后透传含 ErrUpstreamKeyBlocked 哨兵的
+	// 包裹错误（不再裸 return nil）；DB 侧只落失败标记，exhausted 保持 false
+	// （未知/普通失败不标耗尽，CUR-P1-FIX-KEY-EXHAUSTED）。
 	err := svc.PullAccounts(ctx, qk.ID)
 	require.Error(t, err, "automatic chain must surface the blocked sentinel (R13-2)")
 	require.True(t, errors.Is(err, ErrUpstreamKeyBlocked),
@@ -1038,7 +1052,7 @@ func TestQuotaKeyPlaceholderUpstream_ReturnsErrorNotFake(t *testing.T) {
 
 	got, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
-	require.True(t, got.Exhausted, "placeholder upstream must drive exhausted=true")
+	require.False(t, got.Exhausted, "placeholder upstream failure must NOT set exhausted=true")
 	require.NotNil(t, got.LastRefreshError)
 	require.Contains(t, *got.LastRefreshError, "not connected")
 
@@ -2048,10 +2062,10 @@ func TestQuotaKeyService_Pull_InsertFailureCarriesMountFailedSentinel(t *testing
 
 // TestQuotaKeyService_Pull_InsertFailureMarksKeyExitsCandidatesAndRecoverable 验证 R4-1：
 // pull 内 create.Save 失败（上游发号成功、本地落库失败）在返回 ErrQuotaKeyMountFailed
-// 哨兵的同时，独立事务补写 last_refresh_error + exhausted=true —— 该分支属"非限频错误"
-// （上游已成功发号、仅本地落库失败），故按裁定 3 一律以 exhausted=true 占位排除，与
-// "上游失败"的 casSetExhausted=true 同口径：
-//  1. last_refresh_error 非空且 exhausted=true（非限频错误占位排除，与上游失败同口径）；
+// 哨兵的同时，独立事务补写 last_refresh_error + exhausted=true —— 该分支属"上游已发号、
+// 仅本地落库失败"的非幂等边界（区别于 CUR-P1-FIX-KEY-EXHAUSTED 约束的"未知/普通上游失败"：
+// 后者只写标记、不动 exhausted），故仍以 exhausted=true 占位排除：
+//  1. last_refresh_error 非空且 exhausted=true（非幂等边界占位排除）；
 //  2. 该 key 被 ListCandidateKeys 的 Exhausted(false) 查询自然排出候选集 —— 后续周期
 //     不再自动消耗上游（零新字段、零新状态；替代原 last_refresh_error IS NULL 过滤）；
 //  3. 人工 ClearExhausted（既有的清除路径，清 exhausted + last_refresh_error）后 key 回到
@@ -2610,7 +2624,8 @@ func TestCURF1_CandidateKeys_NonCooldownNotReinstatedByTime(t *testing.T) {
 	w := NewQuotaKeyModelWater(client, nil)
 
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	// 非冷却错误（未知结果），且 exhausted=true（casSetExhausted 既有语义），时间很旧。
+	// 非冷却错误（未知结果）且已置 exhausted=true（本用例直接在 DB 构造该既有态：例如插入
+	// 失败标记），时间很旧。
 	nonCooldownErr := "shareai: upstream code=1 unknown result: boom"
 	_, err := client.QuotaKey.UpdateOneID(qk.ID).
 		SetExhausted(true).
@@ -2659,6 +2674,51 @@ func TestCURF1_UpstreamExpired_MarksExpiredNoDateForged(t *testing.T) {
 	require.NotNil(t, got.LastRefreshError)
 	require.Contains(t, *got.LastRefreshError, "密钥额度耗尽或已过期",
 		"last_refresh_error must preserve the original msg text")
+}
+
+// TestQuotaKeyPull_OnlyConfirmedExpiredStopsSupply：停供只认已确认 key 级终态
+// （CUR-P1-FIX-KEY-EXHAUSTED，方案 §15.2/§15.4/§16.1）：
+//   - 明确 ErrUpstreamKeyExpired ⇒ status 落 expired（不被回退为 exhausted=true 占位）、
+//     该 key 退出候选集（真正停供）；
+//   - 未知/普通上游失败 ⇒ status 保持 active、exhausted 保持 false、仍在候选集（不停供）。
+func TestQuotaKeyPull_OnlyConfirmedExpiredStopsSupply(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	w := NewQuotaKeyModelWater(client, nil)
+
+	// ① 明确过期：落 expired ⇒ 停供（退出候选）。
+	expSvc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		err: fmt.Errorf("%w: 密钥额度耗尽或已过期", ErrUpstreamKeyExpired),
+	})
+	qkExp := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	pre, err := w.ListCandidateKeys(ctx, "cursor-only-expired-stops", 0)
+	require.NoError(t, err)
+	require.Contains(t, pre, qkExp.ID, "fresh active key must be a candidate before the confirmed expiry")
+
+	require.Error(t, expSvc.PullAccountsForModel(ctx, qkExp.ID, "cursor-only-expired-stops"))
+	gotExp, err := client.QuotaKey.Get(ctx, qkExp.ID)
+	require.NoError(t, err)
+	require.Equal(t, domain.QuotaKeyStatusExpired, gotExp.Status,
+		"confirmed upstream expiry must land status=expired")
+	require.False(t, gotExp.Exhausted,
+		"confirmed expiry must NOT be degraded into the exhausted=true placeholder")
+	post, err := w.ListCandidateKeys(ctx, "cursor-only-expired-stops", 0)
+	require.NoError(t, err)
+	require.NotContains(t, post, qkExp.ID, "expired key must stop supplying (exit candidates)")
+
+	// ② 未知失败：不停供（仍在候选），且不得被标 exhausted。
+	unkSvc, _ := qkNewTestService(t, &fakeUpstreamClient{err: NewUpstreamUnknownError("upstream code=1 unknown")})
+	qkUnk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	require.Error(t, unkSvc.PullAccountsForModel(ctx, qkUnk.ID, "cursor-only-expired-stops"))
+	gotUnk, err := client.QuotaKey.Get(ctx, qkUnk.ID)
+	require.NoError(t, err)
+	require.Equal(t, domain.QuotaKeyStatusActive, gotUnk.Status,
+		"unknown upstream failure must NOT stop supply (status stays active)")
+	require.False(t, gotUnk.Exhausted, "unknown upstream failure must NOT be marked exhausted")
+	require.NotNil(t, gotUnk.LastRefreshError, "unknown failure must still record the marker")
+	post2, err := w.ListCandidateKeys(ctx, "cursor-only-expired-stops", 0)
+	require.NoError(t, err)
+	require.Contains(t, post2, qkUnk.ID, "unknown failure must NOT remove the key from candidates")
 }
 
 // TestCURF1_CredentialEncryptionOnPull（8，凭证加密）：

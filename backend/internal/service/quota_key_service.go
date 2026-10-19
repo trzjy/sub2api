@@ -127,8 +127,8 @@ var ErrQuotaKeyMountFailed = errors.New("quota key account mount failed after up
 // QUOTA_KEY_UPSTREAM 失败响应（不得用英文前缀/映射，不得显示成功）。
 //
 // 自动链路（reconciler）消费端仅以"本轮失败"记日志用（PullAccounts/PullAccountsForModel
-// 对未知结果仍走 casSetExhausted 后静默 return nil，落库行为不变）；手动链路的可见性由
-// RefreshAccounts 负责上抛此错误，handler 负责回显原文。
+// 对未知结果经 writeUpstreamFailureMarker 落 last_refresh_error 后透传 ErrUpstreamKeyBlocked，
+// exhausted 维度不动）；手动链路的可见性由 RefreshAccounts 负责上抛此错误，handler 负责回显原文。
 type UpstreamPullError struct {
 	// Kind 是内部归类（冷却 / 过期耗尽 / 未知），供 errors.Is 与 handler 区分。
 	Kind UpstreamResultKind
@@ -718,19 +718,23 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 				resultErr = pullErr
 				return nil
 			}
-			// 其余上游错误（含未知结果失败关闭）：CAS 写 exhausted=true（沿用既有语义，落库行为不变）。
+			// 其余上游错误（含未知结果失败关闭）：写 last_refresh_error + last_refresh_at（失败心跳
+			// 与排障可见性），但【不得】写 exhausted=true（CUR-P1-FIX-KEY-EXHAUSTED，方案 §15.2/§16.1）：
+			// 未知/普通上游失败不是已确认的 key 级终态，不能由"一次失败"或"拉到少量账号"推导停供，
+			// 否则管理页会把仍可用的激活码显示成"已耗尽"。停供只认已确认终态（ErrUpstreamKeyExpired →
+			// status=expired）与非幂等挂载失败（插入失败标记，见 writeInsertFailureMarker）两类事实。
 			// 手动链路（RefreshAccounts, manual=true）必须上抛带原文的错误（*UpstreamPullError），
 			// 不得静默显示"刷新成功"；自动链路（reconciler, manual=false）原先静默 return nil——但 nil
 			// 会被 reconciler 当成功（心跳"reconciled N quota keys"把失败算成成功，R13-2）。改为透传
 			// 含 ErrUpstreamKeyBlocked 哨兵的包裹错误，reconciler 据以如实计入失败（记失败日志、不加
 			// pulled、返回 false、继续下一候选），单 key 未知失败不中断其余候选的既有语义保持不变。
-			if cerr := s.casSetExhausted(ctx, tx, quotaKeyID, pullErr); cerr != nil {
-				return fmt.Errorf("quota_key_service: cas set exhausted: %w", cerr)
+			if cerr := s.writeUpstreamFailureMarker(ctx, tx, quotaKeyID, pullErr); cerr != nil {
+				return fmt.Errorf("quota_key_service: write upstream failure marker: %w", cerr)
 			}
 			if manual {
 				resultErr = newUpstreamUnknownErrorFrom(pullErr)
 			} else {
-				// R13-2：自动链路未知上游失败——casSetExhausted 已落 exhausted=true（落库行为零变化），
+				// R13-2：自动链路未知上游失败——标记已落 last_refresh_error（exhausted 维度不动），
 				// 经既有 resultErr 透传机制返回（fn 返回 nil → 末尾 resultErr 非空即透传给触发方）。
 				// 包裹 ErrUpstreamKeyBlocked 哨兵（与底层原因摘要）以便 reconciler 以 errors.Is 识别。
 				resultErr = fmt.Errorf("%w: %s", ErrUpstreamKeyBlocked, pullErr.Error())
@@ -1021,12 +1025,19 @@ func (s *QuotaKeyService) ClearExhausted(ctx context.Context, quotaKeyID int64) 
 	return nil
 }
 
-// casSetExhausted 仅在当前 status='active' 时把 exhausted 写为 true（§3.4 CAS 写）。
-// 若 sweep 已将状态改为 expired/disabled，则 0 行受影响，exhausted 不被覆盖。
-func (s *QuotaKeyService) casSetExhausted(ctx context.Context, tx *ent.Tx, quotaKeyID int64, pullErr error) error {
+// writeUpstreamFailureMarker 在【未知 / 普通上游失败】分支同事务写 last_refresh_error +
+// last_refresh_at（CAS：仅当当前 status='active' 才写入，若 sweep 已将状态改为 expired/disabled
+// 则 0 行受影响，不覆盖），供失败心跳与排障可见。
+//
+// 关键约束（CUR-P1-FIX-KEY-EXHAUSTED，方案 §15.2/§15.4/§16.1）：本分支【绝不】写 exhausted
+// （既不置 true，也不清 false）。未知/普通上游失败不是已确认的 key 级终态——停供只能依据
+// 已确认终态（ErrUpstreamKeyExpired → markKeyExpiredByUpstream 写 status=expired）或上游已
+// 发号的非幂等边界（writeInsertFailureMarker），不得由账号数、普通错误、未知错误推导耗尽。
+// 该 key 因此仍留在候选集内（ListCandidateKeys 的 Exhausted(false) 过滤不排除它），后续周期
+// 可继续尝试；上游若持续不可用，由冷却哨兵（ErrUpstreamCooldown）按限频窗口自然收敛。
+func (s *QuotaKeyService) writeUpstreamFailureMarker(ctx context.Context, tx *ent.Tx, quotaKeyID int64, pullErr error) error {
 	_, err := tx.QuotaKey.Update().
 		Where(quotakey.IDEQ(quotaKeyID), quotakey.Status(domain.QuotaKeyStatusActive)).
-		SetExhausted(true).
 		SetLastRefreshAt(time.Now()).
 		SetLastRefreshError(pullErr.Error()).
 		Save(ctx)
@@ -1043,7 +1054,7 @@ func (s *QuotaKeyService) casSetExhausted(ctx context.Context, tx *ent.Tx, quota
 // 曾在冷却响应里把 exhausted 写为 true（存量 exhausted=true + last_refresh_error 为冷却文案的
 // key1/key2 即此旧态）。本分支若只写标记不纠正 exhausted，存量 key 会永久显示"已耗尽"。故
 // 冷却分支在同事务显式 SetExhausted(false)，把冷却态与耗尽态解耦（存量纠正；既有 exhausted===false
-// 的冷却 key 不受影响，仍写 false）。沿用 casSetExhausted 的 CAS 约束：仅当当前 status='active'
+// 的冷却 key 不受影响，仍写 false）。沿用 writeUpstreamFailureMarker 的 CAS 约束：仅当当前 status='active'
 // 才写入（不覆盖 sweep 已置的禁用/过期），否则 0 行。
 //
 // 注意区分：本冷却分支写 SetExhausted(false)（冷却≠耗尽，B2）。插入失败是独立函数
@@ -1090,11 +1101,12 @@ func (s *QuotaKeyService) writeCooldownMarker(ctx context.Context, tx *ent.Tx, q
 // 语义约束（零新表/字段）：写 last_refresh_error + last_refresh_at，CAS 仅当 status='active'
 // （不覆盖 sweep 已置的禁用/过期），并顺带 SetExhausted(true)。
 //
-// 裁定 3（候选 key 冷却规则）：last_refresh_error IS NULL 这一永久排除已删除，非限频类错误
-// 一律以 exhausted=true 占位排除（与"上游失败"的 casSetExhausted=true 同口径）。插入失败标记
-// 是非限频错误（上游已成功发号、仅本地落库失败），故同样走 exhausted=true 占位——由此被
-// ListCandidateKeys 的 Exhausted(false) 查询自然排出候选集（原 LastRefreshErrorIsNil() 过滤的
-// 替代口径）。标记写失败（如 CAS 0 行 / DB 错误）由调用方降格为"仅本轮哨兵停轮"（R5-2 边界）。
+// 裁定 3（候选 key 冷却规则）：last_refresh_error IS NULL 这一永久排除已删除，不得换皮重演。
+// 插入失败标记属"上游已成功发号、仅本地落库失败"的非幂等边界（不同于 CUR-P1-FIX-KEY-EXHAUSTED
+// 所约束的"未知/普通上游失败"——后者只写标记、不动 exhausted，见 writeUpstreamFailureMarker），
+// 故仍以 exhausted=true 占位排除——由此被 ListCandidateKeys 的 Exhausted(false) 查询自然排出
+// 候选集（原 LastRefreshErrorIsNil() 过滤的替代口径）。标记写失败（如 CAS 0 行 / DB 错误）由
+// 调用方降格为"仅本轮哨兵停轮"（R5-2 边界）。
 func (s *QuotaKeyService) writeInsertFailureMarker(ctx context.Context, quotaKeyID int64, cause error) error {
 	if s.client == nil {
 		return errors.New("quota_key_service: ent client not configured")
@@ -1607,8 +1619,11 @@ func isCooldownRefreshError(errStr *string) bool {
 //   - 冷却类错误（last_refresh_error 包 ErrUpstreamCooldown）且距 last_refresh_at 不足
 //     quotaKeyCooldownWindow（5min，shareai 实测窗口）→ 跳过（仍在冷却）；
 //   - 冷却类错误但窗口已过 → 自动重新入选（不等人工 clear）；
-//   - 非冷却错误已因 exhausted=true（casSetExhausted 既有语义）被上方查询排除，
-//     其时间流逝不产生任何限频豁免（不进入冷却窗口判定）。
+//   - 非冷却错误（未知/普通上游失败）只写 last_refresh_error、不动 exhausted
+//     （CUR-P1-FIX-KEY-EXHAUSTED：未知失败不得推导停供），故该类 key 仍留在候选集内，
+//     其时间流逝不产生任何限频豁免（不进入冷却窗口判定，窗口仅认冷却类错误）；
+//     真正被上方查询排除的是两类已确认事实：status 已非 active（含上游确认过期的 expired）
+//     与插入失败标记的 exhausted=true。
 func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, limit int) ([]int64, error) {
 	now := time.Now()
 	keys, err := w.client.QuotaKey.Query().
