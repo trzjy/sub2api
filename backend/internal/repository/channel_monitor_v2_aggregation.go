@@ -9,7 +9,12 @@ import (
 
 // Platform is derived from group/account (usage_logs has no provider column on upstream schema).
 const channelMonitorV2PlatformSQL = `lower(` + usageLogEffectivePlatformExpr + `)`
-const channelMonitorV2ModelSQL = `COALESCE(NULLIF(TRIM(ul.requested_model), ''), NULLIF(TRIM(ul.model), ''), 'unknown')`
+
+// Empty model names stay empty instead of becoming a literal "unknown" model: the
+// de-platformed matrix grain folds a blank model into the shared "other models" row
+// (channelMonitorV2DisplayModel → ChannelMonitorV2OtherModel), which reads far better
+// than a fake model named "unknown".
+const channelMonitorV2ModelSQL = `COALESCE(NULLIF(TRIM(ul.requested_model), ''), NULLIF(TRIM(ul.model), ''), '')`
 
 // Tiered retention balances UI windows against storage:
 //
@@ -259,7 +264,7 @@ WITH dedup AS (
       ELSE COALESCE(NULLIF(TRIM(current_error.platform), ''), 'unknown')
     END) AS platform,
     COALESCE(current_error.group_id, 0) AS group_id,
-    COALESCE(NULLIF(TRIM(current_error.requested_model), ''), NULLIF(TRIM(current_error.model), ''), 'unknown') AS model,
+    COALESCE(NULLIF(TRIM(current_error.requested_model), ''), NULLIF(TRIM(current_error.model), ''), '') AS model,
     current_error.user_id, current_error.error_type, current_error.error_owner, COALESCE(current_error.status_code, 0) AS status_code,
     COALESCE(current_error.upstream_status_code, 0) AS upstream_status_code,
     lower(CONCAT_WS(' ', current_error.error_type, current_error.error_source, current_error.error_message, current_error.upstream_error_message, current_error.upstream_error_detail, current_error.error_body)) AS text,

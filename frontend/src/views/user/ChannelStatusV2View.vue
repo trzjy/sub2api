@@ -525,7 +525,12 @@ const bootstrapPercent = computed(() => {
   if (typeof raw !== 'number' || Number.isNaN(raw)) return 0
   return Math.min(100, Math.max(0, Math.round(raw)))
 })
-const matrixRows = computed(() => matrix.value?.items || [])
+const matrixRows = computed(() =>
+  // Rows with no real model name are aggregation noise, not a model: the backend
+  // folds a blank name into __other__, and older facts carry a literal "unknown".
+  // Neither is something a user can act on, so neither is listed.
+  (matrix.value?.items || []).filter((row) => row.model && row.model !== '__other__' && row.model !== 'unknown'),
+)
 
 function parseRange(value: unknown): MonitorRange {
   return ['90m', '24h', '7d', '30d'].includes(String(value)) ? (value as MonitorRange) : '90m'
@@ -612,7 +617,10 @@ async function loadTab(signal?: AbortSignal, id = sequence) {
   tabLoading.value = true
   try {
     if (activeTab.value === 'models') {
-      modelRows.value = (await api.getModels(filter.value, isAdmin.value, signal)).items || []
+      modelRows.value = ((await api.getModels(filter.value, isAdmin.value, signal)).items || [])
+        // Same rule as the matrix: a row with no real model name is aggregation
+        // noise (__other__ / legacy "unknown"), not a model worth listing.
+        .filter((row) => row.model && row.model !== '__other__' && row.model !== 'unknown')
     } else if (activeTab.value === 'errors') {
       errorRows.value = (await api.getErrors(filter.value, isAdmin.value, signal)).items || []
     } else if (showUserRanking.value) {
