@@ -190,6 +190,25 @@
 
     <!-- QR Code Mode -->
     <template v-else-if="showQRCode">
+      <!-- 微信内提示：微信支付不允许「从相册识别二维码完成支付」，虎皮椒当前通道
+           也不支持微信内调起支付。所以在微信内照着二维码操作必然失败，与其让用户
+           撞一次微信的安全弹窗，不如直接说明并引导到能完成的浏览器。
+           注意：这里不说「不支持微信内支付」，只说相册扫码这一条路走不通。 -->
+      <div
+        v-if="showWeChatBrowserNotice"
+        class="card border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950/30"
+        data-test="wechat-browser-notice"
+      >
+        <p class="text-sm font-medium text-amber-900 dark:text-amber-200">
+          {{ t('payment.qr.wechatBrowserTitle') }}
+        </p>
+        <p class="mt-1 text-sm text-amber-800 dark:text-amber-300">
+          {{ t('payment.qr.wechatBrowserHint') }}
+        </p>
+        <button class="btn btn-secondary mt-3 w-full" @click="handleDone">
+          {{ t('payment.qr.backToCheckout') }}
+        </button>
+      </div>
       <div class="card p-6">
         <div class="flex flex-col items-center space-y-4">
           <p class="text-lg font-semibold text-gray-900 dark:text-white">{{ scanTitle }}</p>
@@ -255,6 +274,7 @@ import { usePaymentStore } from '@/stores/payment'
 import { useAppStore } from '@/stores'
 import { paymentAPI } from '@/api/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
+import { isWeChatBrowser } from '@/utils/device'
 import { getPaymentPopupFeatures, isBuiltInAlipayMethod, isBuiltInWxpayMethod } from '@/components/payment/providerConfig'
 import { ACCOUNT_CURRENCY, currencySymbol, formatPaymentAmount, normalizePaymentCurrency } from '@/utils/money'
 import type { PaymentOrder } from '@/types/payment'
@@ -329,6 +349,12 @@ const normalizedPaymentMode = computed(() => (props.paymentMode || '').trim().to
 const usesUpstreamQrImage = computed(() =>
   normalizedPaymentMode.value === 'qrcode' || normalizedPaymentMode.value === 'native')
 
+// 微信内浏览器提示：仅对微信扫码类通道展示，且只在微信内展示。
+// 支付宝在微信内打开也能正常唤起，故排除。
+const inWeChatBrowser = ref(false)
+const showWeChatBrowserNotice = computed(() =>
+  inWeChatBrowser.value && isWxpay.value && !isAlipay.value)
+
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let countdownTimer: ReturnType<typeof setInterval> | null = null
 let verifyAttempts = 0
@@ -378,6 +404,9 @@ const scanTitle = computed(() => {
 
 const scanHint = computed(() => {
   if (isAlipay.value) return t('payment.qr.scanAlipayHint')
+  // 微信内不能从相册识别支付二维码（微信支付统一限制），这时再提示"从相册选择"
+  // 只会让用户撞一次必然失败的弹窗。
+  if (showWeChatBrowserNotice.value) return t('payment.qr.scanWxpayHint')
   // 虎皮椒当前通道不支持微信内调起支付，只能扫码收款，因此明确引导用户
   // 截图保存 → 打开微信扫一扫 → 从相册选择，而不是提示"打开微信扫描"。
   if (usesUpstreamQrImage.value) return t('payment.qr.scanWxpayAlbumHint')
@@ -549,6 +578,7 @@ function cleanup() {
 
 // Initialize on mount
 qrUrl.value = props.qrCode
+inWeChatBrowser.value = isWeChatBrowser()
 verifyAttempts = 0
 lastVerifyAt = 0
 let seconds = 30 * 60

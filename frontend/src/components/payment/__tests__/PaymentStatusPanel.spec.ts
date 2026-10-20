@@ -483,3 +483,75 @@ describe('PaymentStatusPanel', () => {
     if (originalHidden) Object.defineProperty(document, 'hidden', originalHidden)
   })
 })
+
+describe('PaymentStatusPanel WeChat in-app browser notice', () => {
+  const originalUA = window.navigator.userAgent
+  const setUA = (value: string) => {
+    Object.defineProperty(window.navigator, 'userAgent', {
+      value,
+      configurable: true,
+    })
+  }
+  const qrProps = {
+    qrCode: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+    expiresAt: '2099-01-01T12:30:00Z',
+    paymentType: 'wxpay',
+    orderType: 'balance',
+    paymentMode: 'qrcode',
+    providerKey: 'xunhupay',
+  }
+  const mountPanel = () => mount(PaymentStatusPanel, {
+    props: { orderId: 70, ...qrProps },
+    global: { stubs: { Icon: true } },
+  })
+
+  afterEach(() => setUA(originalUA))
+
+  // 微信支付不允许「从相册识别二维码完成支付」。在微信内继续提示"从相册选择"
+  // 只会让用户撞一次必然失败的弹窗，必须改为提示在浏览器打开。
+  it('warns and drops the album-scan instruction inside the WeChat browser', async () => {
+    setUA('Mozilla/5.0 (iPhone) MicroMessenger/8.0.49')
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    const notice = wrapper.find('[data-test="wechat-browser-notice"]')
+    expect(notice.exists()).toBe(true)
+    expect(wrapper.text()).toContain('payment.qr.wechatBrowserTitle')
+    // 不再出现会把用户带进死路的相册指引
+    expect(wrapper.text()).not.toContain('payment.qr.scanWxpayAlbumHint')
+  })
+
+  it('shows no notice in a normal mobile browser', async () => {
+    setUA('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/605.1')
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="wechat-browser-notice"]').exists()).toBe(false)
+    // 非微信内仍保留原有的相册扫码指引
+    expect(wrapper.text()).toContain('payment.qr.scanWxpayAlbumHint')
+  })
+
+  // 支付宝在微信内也能正常唤起支付，不应展示该提示
+  it('does not show the notice for alipay inside the WeChat browser', async () => {
+    setUA('Mozilla/5.0 (iPhone) MicroMessenger/8.0.49')
+
+    const wrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 71,
+        qrCode: 'https://openapi.alipay.com/gateway.do?x=1',
+        expiresAt: '2099-01-01T12:30:00Z',
+        paymentType: 'alipay',
+        orderType: 'balance',
+        paymentMode: 'qrcode',
+        providerKey: 'alipay',
+      },
+      global: { stubs: { Icon: true } },
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="wechat-browser-notice"]').exists()).toBe(false)
+  })
+})

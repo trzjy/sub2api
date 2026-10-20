@@ -21,6 +21,7 @@ interface DeviceDetectionEnvironment {
 const MOBILE_UA_RE = /\b(Mobi|Android|iPhone|iPod|Windows Phone|webOS|BlackBerry|IEMobile)\b/i
 const TABLET_UA_RE = /\b(iPad|Tablet)\b/i
 const IOS_UA_RE = /\b(iPhone|iPad|iPod)\b/i
+const WECHAT_UA_RE = /MicroMessenger/i
 
 function matchesQuery(
   matchMedia: DeviceDetectionEnvironment['matchMedia'],
@@ -78,4 +79,17 @@ export function isIOSDevice(): boolean {
   if (typeof navigator === 'undefined') return false
 
   return detectIOSDevice({ navigator })
+}
+
+export function detectWeChatBrowser(env: DeviceDetectionEnvironment = {}): boolean {
+  return WECHAT_UA_RE.test(env.navigator?.userAgent || '')
+}
+
+/** True when the page runs inside the WeChat in-app browser. Some payment
+ * channels cannot complete a purchase there, so callers use this to guide the
+ * user to a browser where the flow does work. */
+export function isWeChatBrowser(): boolean {
+  if (typeof navigator === 'undefined') return false
+
+  return detectWeChatBrowser({ navigator })
 }
