@@ -1256,6 +1256,27 @@ func (s *QuotaKeyService) findGroupsAllowingModel(ctx context.Context, tx *ent.T
 // P1-B2「按模型平台挂组」以此为挂载判据，取代此前"配置勾选模型 ∩ 白名单"的人工勾选口径。
 const cursorModelOwningPlatform = PlatformCursor
 
+// cursorModelPlatformByVendor 把实供清单的真实厂商映射到站点的模型所属平台（U7 挂组判据）。
+//
+// U7 原话："入库按照模型平台入库，比如 claude 模型就入库到 claude 分组去"——挂载平台取
+// 模型自身厂商，而不是账号平台。composer-2.5 归类厂商 composer 在站点没有对应平台，
+// 返回空串（不参与平台组匹配，也不因此阻断其它模型的挂载）。
+func cursorModelPlatformByVendor(vendor string) string {
+	switch vendor {
+	case CursorVendorAnthropic:
+		return PlatformAnthropic
+	case CursorVendorOpenAI:
+		return PlatformOpenAI
+	case CursorVendorGoogle:
+		return PlatformGemini
+	case CursorVendorXAI:
+		return PlatformGrok
+	case CursorVendorMuse:
+		return PlatformMuse
+	}
+	return ""
+}
+
 // cursorMountTargetGroups 是 P1-B2 U7「按模型平台挂组」的唯一判定出口（手动挂组与自动补池
 // 同源同判，避免两处口径漂移）。返回 groups 中可作为入库挂载目标的子集（保序）。
 //
@@ -1271,14 +1292,28 @@ func cursorMountTargetGroups(groups []*ent.Group, entryModels []string) []*ent.G
 	if len(entryModels) == 0 {
 		return nil
 	}
+	vendorByID := CursorRealSupplyVendorByID()
+	modelPlatforms := make(map[string]struct{}, len(entryModels))
+	for _, m := range entryModels {
+		if p := cursorModelPlatformByVendor(vendorByID[m]); p != "" {
+			modelPlatforms[p] = struct{}{}
+		}
+	}
+	if len(modelPlatforms) == 0 {
+		return nil
+	}
 	out := make([]*ent.Group, 0, len(groups))
 	for _, g := range groups {
 		if g == nil {
 			continue
 		}
 		platform := strings.TrimSpace(g.Platform)
-		if platform != cursorModelOwningPlatform && platform != PlatformComposite {
-			continue // 不是模型所属平台的目标分组
+		// 目标平台边界（U7）：模型真实厂商对应的原生平台组；cursor 专属组与 composite
+		// 聚合组沿用既有承载语义（cursor 组按账号平台承载全量实供清单）。
+		if platform != PlatformComposite && platform != PlatformCursor {
+			if _, ok := modelPlatforms[platform]; !ok {
+				continue // 不是任一实供模型所属平台的目标分组
+			}
 		}
 		al := GroupModelAllowlistFromDomain(g.ModelAllowlist)
 		if !al.Enabled {
@@ -1286,7 +1321,11 @@ func cursorMountTargetGroups(groups []*ent.Group, entryModels []string) []*ent.G
 		}
 		hit := false
 		for _, m := range entryModels {
-			if al.Allows(m) {
+			if !al.Allows(m) {
+				continue
+			}
+			// U7：只认该模型真实厂商对应的平台组；composite 聚合层按其白名单声明算目标。
+			if platform == PlatformComposite || platform == PlatformCursor || cursorModelPlatformByVendor(vendorByID[m]) == platform {
 				hit = true
 				break
 			}
