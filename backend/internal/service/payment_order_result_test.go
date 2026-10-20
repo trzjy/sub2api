@@ -93,6 +93,9 @@ func TestBuildCreateOrderResponseDefaultsToOrderCreated(t *testing.T) {
 	if resp.OutTradeNo != "sub2_42" {
 		t.Fatalf("out_trade_no = %q, want %q", resp.OutTradeNo, "sub2_42")
 	}
+	if resp.PaymentMode != "qrcode" {
+		t.Fatalf("payment_mode = %q, want qrcode", resp.PaymentMode)
+	}
 	if resp.QRCode != "weixin://wxpay/bizpayurl?pr=test" {
 		t.Fatalf("qr_code = %q, want %q", resp.QRCode, "weixin://wxpay/bizpayurl?pr=test")
 	}
@@ -608,5 +611,35 @@ func newWeChatPaymentOAuthTestService(values map[string]string) *PaymentService 
 			settingRepo:   &paymentConfigSettingRepoStub{values: values},
 			encryptionKey: []byte("0123456789abcdef0123456789abcdef"),
 		},
+	}
+}
+
+// 前端需要知道本笔订单实际落到哪个通道，才能判断 qr_code 是上游签发的
+// 二维码图片还是需要本地编码的支付串。只透传 instance 的 payment_mode 不够。
+func TestBuildCreateOrderResponsePropagatesProviderKey(t *testing.T) {
+	t.Parallel()
+
+	resp := buildCreateOrderResponse(
+		&dbent.PaymentOrder{
+			ID:         91,
+			Amount:     6,
+			ExpiresAt:  time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+			OutTradeNo: "sub2_91",
+		},
+		CreateOrderRequest{PaymentType: payment.TypeWxpay},
+		6,
+		&payment.InstanceSelection{ProviderKey: payment.TypeXunhupay, PaymentMode: "qrcode"},
+		&payment.CreatePaymentResponse{
+			TradeNo: "sub2_91",
+			QRCode:  "https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1",
+		},
+		payment.CreatePaymentResultOrderCreated,
+	)
+
+	if resp.ProviderKey != payment.TypeXunhupay {
+		t.Fatalf("provider_key = %q, want %q", resp.ProviderKey, payment.TypeXunhupay)
+	}
+	if resp.PaymentMode != "qrcode" {
+		t.Fatalf("payment_mode = %q, want qrcode", resp.PaymentMode)
 	}
 }

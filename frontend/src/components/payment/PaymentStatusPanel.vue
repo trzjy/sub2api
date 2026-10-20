@@ -56,6 +56,24 @@
       </div>
     </template>
 
+    <!-- QR image expired — NOT an order outcome: the order may still be pending
+         and payable. Offer the existing re-initiate entry, no auto retry. -->
+    <template v-else-if="outcome === 'qr_expired'">
+      <div class="card p-6">
+        <div class="flex flex-col items-center gap-4 py-4">
+          <div class="flex h-16 w-16 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
+            <svg class="h-8 w-8 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4c-.77-1.33-2.69-1.33-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z" />
+            </svg>
+          </div>
+          <p class="text-lg font-bold text-gray-900 dark:text-white">{{ t('payment.qr.qrExpired') }}</p>
+          <p class="text-center text-sm text-gray-500 dark:text-gray-400">{{ t('payment.qr.qrExpiredDesc') }}</p>
+          <button class="btn btn-primary" @click="handleReinitiate">{{ t('payment.qr.reinitiatePay') }}</button>
+          <button class="btn btn-secondary" @click="handleDone">{{ t('common.close') }}</button>
+        </div>
+      </div>
+    </template>
+
     <!-- Expired / Failed -->
     <template v-else-if="outcome === 'expired'">
       <div class="card p-6">
@@ -199,7 +217,7 @@
         </div>
       </div>
       <div class="card p-4 text-center">
-        <p class="text-sm text-gray-500 dark:text-gray-400">{{ t('payment.qr.expiresIn') }}</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">{{ usesUpstreamQrImage ? t('payment.qr.qrExpiresIn') : t('payment.qr.expiresIn') }}</p>
         <p class="mt-1 text-2xl font-bold tabular-nums text-gray-900 dark:text-white">{{ countdownDisplay }}</p>
         <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">{{ t('payment.qr.waitingPayment') }}</p>
       </div>
@@ -263,9 +281,15 @@ const props = defineProps<{
   currency?: string
   outTradeNo?: string
   mobileAlipayDeepLink?: boolean
+  /** Order creation time in ms — the evidence-backed issue time of an
+   * upstream-issued QR image. Only consulted for explicitly QR-configured
+   * channels; ignored otherwise so other channels keep their order timeout. */
+  qrIssuedAt?: number
+  paymentMode?: string
+  providerKey?: string
 }>()
 
-type PaymentOutcome = 'success' | 'cancelled' | 'expired'
+type PaymentOutcome = 'success' | 'cancelled' | 'expired' | 'qr_expired'
 
 const emit = defineEmits<{ done: []; success: []; settled: [outcome: PaymentOutcome] }>()
 
@@ -292,8 +316,18 @@ const localeCode = computed(() => {
   return undefined
 })
 
-// Terminal outcome: null = still active, 'success' | 'cancelled' | 'expired'
+// Terminal outcome: null = still active, 'success' | 'cancelled' | 'expired' | 'qr_expired'
 const outcome = ref<PaymentOutcome | null>(null)
+
+// 虎皮椒官方文档：url_qrcode 二维码有效期五分钟（"二维码有效期五分钟，PC端可将该参数
+// 展示出来进行扫码支付，不用再转二维码"）。该五分钟是【二维码本身】的时效，与网站
+// 订单超时（ORDER_TIMEOUT_MINUTES，默认 30 分钟）不是一个时钟，不能互相替代。
+// 仅当该通道被显式配置为二维码模式时才启用，因为只有此时本站才把上游签发的
+// 二维码原图交给用户；其它通道的 qrCode 由本站/上游按各自契约生成，沿用订单超时。
+const XUNHUPAY_QR_TTL_MS = 5 * 60 * 1000
+const normalizedPaymentMode = computed(() => (props.paymentMode || '').trim().toLowerCase())
+const usesUpstreamQrImage = computed(() =>
+  normalizedPaymentMode.value === 'qrcode' || normalizedPaymentMode.value === 'native')
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let countdownTimer: ReturnType<typeof setInterval> | null = null
@@ -307,9 +341,14 @@ const VERIFY_RETRY_MAX_ATTEMPTS = 6
 const isAlipay = computed(() => isBuiltInAlipayMethod(props.paymentType))
 const isWxpay = computed(() => isBuiltInWxpayMethod(props.paymentType))
 // xunhupay 的 qr_code 是虎皮椒直接返回的二维码图片 URL（https://... 302→PNG），
-// 直接 <img> 展示即可扫码支付，不能再编码。其余 provider（官方微信 Native 的
-// weixin:// 串、easypay/alipay 的支付串）必须经 QRCode.toCanvas 编码。
-const isDirectImageQR = computed(() => isWxpay.value && /^https?:\/\//i.test(qrUrl.value))
+// 官方文档明确"不用再转二维码"，直接 <img> 展示即可扫码支付。其余 provider
+// （官方微信 Native 的 weixin:// 串、easypay/alipay 的支付串）必须经 QRCode.toCanvas 编码。
+// 仅凭 HTTPS 不能判定是图片：easypay/alipay 的支付串也可能是 https 链接，把它当 <img>
+// 会渲染成裂图且无法扫码。只在显式配置为二维码模式的 xunhupay 通道上按图片渲染。
+const isDirectImageQR = computed(() =>
+  usesUpstreamQrImage.value
+  && props.providerKey === 'xunhupay'
+  && /^https?:\/\//i.test(qrUrl.value))
 const isMobileAlipayDeepLink = computed(() => props.mobileAlipayDeepLink === true && isAlipay.value && !!qrUrl.value)
 const showQRCode = computed(() => !!qrUrl.value && (!isMobileAlipayDeepLink.value || deepLinkFallbackVisible.value))
 
@@ -339,6 +378,9 @@ const scanTitle = computed(() => {
 
 const scanHint = computed(() => {
   if (isAlipay.value) return t('payment.qr.scanAlipayHint')
+  // 虎皮椒当前通道不支持微信内调起支付，只能扫码收款，因此明确引导用户
+  // 截图保存 → 打开微信扫一扫 → 从相册选择，而不是提示"打开微信扫描"。
+  if (usesUpstreamQrImage.value) return t('payment.qr.scanWxpayAlbumHint')
   if (isWxpay.value) return t('payment.qr.scanWxpayHint')
   return ''
 })
@@ -463,11 +505,19 @@ async function pollStatus() {
 
 function startCountdown(seconds: number) {
   remainingSeconds.value = Math.max(0, seconds)
-  if (remainingSeconds.value <= 0) { setOutcome('expired'); return }
+  if (remainingSeconds.value <= 0) { setQrOutcome(); return }
   countdownTimer = setInterval(() => {
     remainingSeconds.value--
-    if (remainingSeconds.value <= 0) { setOutcome('expired'); cleanup() }
+    if (remainingSeconds.value <= 0) { setQrOutcome(); cleanup() }
   }, 1000)
+}
+
+// A QR image expiring is NOT an order outcome. The order may still be payable
+// through the remaining order window, and expiry says nothing about whether
+// money arrived. Report it as its own state so the UI can offer the existing
+// re-initiate entry instead of claiming cancellation or payment failure.
+function setQrOutcome() {
+  setOutcome(usesUpstreamQrImage.value ? 'qr_expired' : 'expired')
 }
 
 async function handleCancel() {
@@ -486,6 +536,10 @@ async function handleCancel() {
 
 function handleDone() { cleanup(); emit('done') }
 
+// QR image expired: hand control back to the existing checkout entry so the
+// user explicitly re-initiates. No automatic retry, no automatic new order.
+function handleReinitiate() { cleanup(); emit('done') }
+
 function cleanup() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null }
@@ -500,6 +554,17 @@ lastVerifyAt = 0
 let seconds = 30 * 60
 if (props.expiresAt) {
   seconds = Math.floor((new Date(props.expiresAt).getTime() - Date.now()) / 1000)
+}
+// For an upstream-issued QR image, remaining time must be measured from the
+// moment the QR was issued (order creation), not from when this page mounted.
+// Recomputing "now + 5min" on every load would hand the user a fresh five
+// minutes on every refresh; anchoring to the issue time makes refresh and
+// page-restore converge on the same deadline.
+if (usesUpstreamQrImage.value) {
+  const issuedAt = Number(props.qrIssuedAt)
+  if (Number.isFinite(issuedAt) && issuedAt > 0) {
+    seconds = Math.floor((issuedAt + XUNHUPAY_QR_TTL_MS - Date.now()) / 1000)
+  }
 }
 startCountdown(seconds)
 pollTimer = setInterval(pollStatus, 3000)

@@ -892,6 +892,7 @@ export default {
         modeRedirect: 'Redirect',
         modeQRCode: 'QR Code',
         modePopup: 'Popup',
+        modeUpstream: 'Upstream default',
         validationNameRequired: 'Provider name is required',
         validationTypesRequired: 'Please select at least one supported payment type',
         validationFieldRequired: '{field} is required',

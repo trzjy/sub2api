@@ -189,6 +189,87 @@ describe('decidePaymentLaunch', () => {
     expect(decision.paymentState.qrCode).toBe('https://pay.example.com/qr/session')
   })
 
+  // 商户显式配置 payment_mode=qrcode 是对该通道收款方式的决定，手机端的
+  // 默认跳转行为不得覆盖它——否则收款能力受限的通道在手机上永远到不了二维码页。
+  it('keeps an explicit qrcode mode on mobile instead of redirecting to the hosted cashier', () => {
+    const decision = decidePaymentLaunch(createOrderResult({
+      pay_url: 'https://api.xunhupay.com/payments/wechat/index?id=1',
+      qr_code: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+      payment_mode: 'qrcode',
+      provider_key: 'xunhupay',
+    }), {
+      visibleMethod: 'wxpay',
+      orderType: 'balance',
+      isMobile: true,
+    })
+
+    expect(decision.kind).toBe('qr_waiting')
+    expect(decision.paymentState.qrCode).toBe('https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1')
+  })
+
+  it('treats the explicit native mode the same way on mobile', () => {
+    const decision = decidePaymentLaunch(createOrderResult({
+      pay_url: 'https://api.xunhupay.com/payments/wechat/index?id=1',
+      qr_code: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+      payment_mode: 'native',
+      provider_key: 'xunhupay',
+    }), {
+      visibleMethod: 'wxpay',
+      orderType: 'balance',
+      isMobile: true,
+    })
+
+    expect(decision.kind).toBe('qr_waiting')
+  })
+
+  // 微信内浏览器：即使显式二维码模式，也必须走本站二维码页，
+  // 不能被"微信内 + 有 pay_url 就跳转"这条早于模式判断的分支截走。
+  it('keeps an explicit qrcode mode inside the WeChat browser', () => {
+    const decision = decidePaymentLaunch(createOrderResult({
+      pay_url: 'https://api.xunhupay.com/payments/wechat/index?id=1',
+      qr_code: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+      payment_mode: 'qrcode',
+      provider_key: 'xunhupay',
+    }), {
+      visibleMethod: 'wxpay',
+      orderType: 'balance',
+      isMobile: true,
+      isWechatBrowser: true,
+    })
+
+    expect(decision.kind).toBe('qr_waiting')
+  })
+
+  // 渠道未配置二维码模式时，手机端仍按原样跳转上游收银台
+  it('still redirects on mobile when no QR mode is configured', () => {
+    const decision = decidePaymentLaunch(createOrderResult({
+      pay_url: 'https://api.xunhupay.com/payments/wechat/index?id=1',
+      qr_code: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+      provider_key: 'xunhupay',
+    }), {
+      visibleMethod: 'wxpay',
+      orderType: 'balance',
+      isMobile: true,
+    })
+
+    expect(decision.kind).toBe('redirect_waiting')
+  })
+
+  it('carries providerKey and paymentMode into the recovery snapshot', () => {
+    const decision = decidePaymentLaunch(createOrderResult({
+      qr_code: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+      payment_mode: 'qrcode',
+      provider_key: 'xunhupay',
+    }), {
+      visibleMethod: 'wxpay',
+      orderType: 'balance',
+      isMobile: true,
+    })
+
+    expect(decision.recovery.providerKey).toBe('xunhupay')
+    expect(decision.recovery.paymentMode).toBe('qrcode')
+  })
+
   it('returns wechat oauth launch when backend requires in-app authorization', () => {
     const decision = decidePaymentLaunch(createOrderResult({
       result_type: 'oauth_required',

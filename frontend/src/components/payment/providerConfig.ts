@@ -67,6 +67,10 @@ export const PAYMENT_MODE_POPUP = 'popup'
  * literal (case-insensitive); other values fall back to the default
  * precreate→pagepay flow. */
 export const PAYMENT_MODE_REDIRECT = 'redirect'
+/** XunhuPay-only: show the order's own upstream QR image on our own payment
+ * page instead of redirecting the phone to the hosted cashier. Both literals
+ * are accepted by `paymentFlow.decidePaymentLaunch` as "explicitly QR". */
+export const PAYMENT_MODE_NATIVE = 'native'
 
 export const PAYMENT_CURRENCY_OPTIONS: TypeOption[] = [
   { value: 'CNY', label: 'CNY' },

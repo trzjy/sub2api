@@ -322,6 +322,7 @@ import {
   PAYMENT_MODE_QRCODE,
   PAYMENT_MODE_POPUP,
   PAYMENT_MODE_REDIRECT,
+  PAYMENT_MODE_NATIVE,
   STRIPE_SDK_API_VERSION,
   getAvailableTypes,
   extractBaseUrl,
@@ -333,13 +334,14 @@ import {
  * provider's built-in default behavior". */
 function defaultPaymentMode(providerKey: string): string {
   if (providerKey === 'easypay') return PAYMENT_MODE_QRCODE
+  if (providerKey === 'xunhupay') return PAYMENT_MODE_QRCODE
   return ''
 }
 
 /** Provider keys whose admin UI exposes a payment_mode selector.
  * Other providers always send payment_mode = ''. */
 function providerSupportsPaymentMode(providerKey: string): boolean {
-  return providerKey === 'easypay' || providerKey === 'alipay'
+  return providerKey === 'easypay' || providerKey === 'alipay' || providerKey === 'xunhupay'
 }
 
 /** Allowed payment_mode values per provider. Used to coerce DB values
@@ -350,6 +352,11 @@ function isValidPaymentMode(providerKey: string, mode: string): boolean {
   }
   if (providerKey === 'alipay') {
     return mode === '' || mode === PAYMENT_MODE_REDIRECT
+  }
+  if (providerKey === 'xunhupay') {
+    // '' = 沿用上游默认（手机端跳上游收银台）；qrcode/native = 本站展示本笔订单二维码。
+    // 保留 '' 为合法值，否则管理员已保存的"上游默认"会在下次保存时被改写成 qrcode。
+    return mode === '' || mode === PAYMENT_MODE_QRCODE || mode === PAYMENT_MODE_NATIVE
   }
   return mode === ''
 }
@@ -440,6 +447,14 @@ const paymentModeOptions = computed(() => {
     return [
       { value: '', label: t('admin.settings.payment.modeQRCode') },
       { value: PAYMENT_MODE_REDIRECT, label: t('admin.settings.payment.modeRedirect') },
+    ]
+  }
+  if (form.provider_key === 'xunhupay') {
+    // 虎皮椒当前签约通道不支持微信内支付，只支持扫码收款，因此只提供二维码模式。
+    // 留空表示沿用上游默认行为（手机端跳上游收银台），二维码表示本站展示本笔订单二维码。
+    return [
+      { value: '', label: t('admin.settings.payment.modeUpstream') },
+      { value: PAYMENT_MODE_QRCODE, label: t('admin.settings.payment.modeQRCode') },
     ]
   }
   return [

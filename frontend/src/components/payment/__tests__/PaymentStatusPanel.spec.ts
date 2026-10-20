@@ -147,7 +147,8 @@ describe('PaymentStatusPanel', () => {
   })
 
   // xunhupay 的 qr_code 是虎皮椒直接返回的二维码图片 URL（https://... 302→PNG），
-  // 应直接作为 <img> src 展示，不应经 QRCode.toCanvas 二次编码（会产生多余的中间层二维码）。
+  // 官方文档明确"不用再转二维码"，应直接作为 <img> src 展示，不应经 QRCode.toCanvas
+  // 二次编码（会产生多余的中间层二维码）。
   it('renders xunhupay https qr_code as <img> directly (not via QRCode.toCanvas)', async () => {
     const wrapper = mount(PaymentStatusPanel, {
       props: {
@@ -156,6 +157,8 @@ describe('PaymentStatusPanel', () => {
         expiresAt: '2099-01-01T12:30:00Z',
         paymentType: 'wxpay',
         orderType: 'balance',
+        paymentMode: 'qrcode',
+        providerKey: 'xunhupay',
       },
       global: { stubs: { Icon: true } },
     })
@@ -167,6 +170,130 @@ describe('PaymentStatusPanel', () => {
     const img = wrapper.find('[data-test="direct-qr-img"]')
     expect(img.exists()).toBe(true)
     expect(img.attributes('src')).toContain('qrcode_v3')
+  })
+
+  // 仅凭 https 不能当作二维码图片：easypay/alipay 的支付串也可能是 https 链接，
+  // 当成 <img> 会渲染成裂图且扫不出来，必须仍走 QRCode.toCanvas 编码。
+  it('does not treat an https payment string from another channel as a QR image', async () => {
+    const wrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 59,
+        qrCode: 'https://pay.example.com/pay/abc123',
+        expiresAt: '2099-01-01T12:30:00Z',
+        paymentType: 'wxpay',
+        orderType: 'balance',
+        paymentMode: 'qrcode',
+        providerKey: 'easypay',
+      },
+      global: { stubs: { Icon: true } },
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="direct-qr-img"]').exists()).toBe(false)
+    expect(toCanvas).toHaveBeenCalledWith(
+      expect.anything(),
+      'https://pay.example.com/pay/abc123',
+      expect.anything(),
+    )
+  })
+
+  // 未配置二维码模式的通道沿用订单超时倒计时，不套用上游二维码 5 分钟时效
+  it('keeps the order-timeout countdown for channels not configured as QR mode', async () => {
+    const wrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 60,
+        qrCode: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+        expiresAt: '2099-01-01T12:30:00Z',
+        paymentType: 'wxpay',
+        orderType: 'balance',
+      },
+      global: { stubs: { Icon: true } },
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('payment.qr.qrExpiresIn')
+    expect(wrapper.find('[data-test="direct-qr-img"]').exists()).toBe(false)
+  })
+
+  // 二维码倒计时按签发时刻 +5 分钟计算，刷新/恢复不会重新获得 5 分钟
+  it('counts the QR validity down from the issuance time, not from page mount', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-20T12:00:00Z'))
+    const issuedAt = new Date('2026-10-20T12:00:00Z').getTime()
+
+    const wrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 61,
+        qrCode: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+        expiresAt: '2026-10-20T12:30:00Z',
+        paymentType: 'wxpay',
+        orderType: 'balance',
+        paymentMode: 'qrcode',
+        providerKey: 'xunhupay',
+        qrIssuedAt: issuedAt,
+      },
+      global: { stubs: { Icon: true } },
+    })
+
+    await flushPromises()
+    expect(wrapper.text()).toContain('05:00')
+
+    // 用户离开 3 分钟后再打开同一笔订单的付款页：剩余应为 2 分钟，不能回到 5 分钟
+    vi.setSystemTime(new Date('2026-10-20T12:03:00Z'))
+    const reopened = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 61,
+        qrCode: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+        expiresAt: '2026-10-20T12:30:00Z',
+        paymentType: 'wxpay',
+        orderType: 'balance',
+        paymentMode: 'qrcode',
+        providerKey: 'xunhupay',
+        qrIssuedAt: issuedAt,
+      },
+      global: { stubs: { Icon: true } },
+    })
+
+    await flushPromises()
+    expect(reopened.text()).toContain('02:00')
+
+    vi.useRealTimers()
+  })
+
+  // 二维码到期是二维码事件，不得等同于订单取消或付款失败
+  it('reports an expired QR as its own state, not as a cancelled or failed order', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-20T12:00:00Z'))
+
+    const wrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 62,
+        qrCode: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=1',
+        expiresAt: '2026-10-20T12:30:00Z',
+        paymentType: 'wxpay',
+        orderType: 'balance',
+        paymentMode: 'qrcode',
+        providerKey: 'xunhupay',
+        qrIssuedAt: new Date('2026-10-20T12:00:00Z').getTime(),
+      },
+      global: { stubs: { Icon: true } },
+    })
+
+    await flushPromises()
+    // 签发后 5 分钟，二维码到期；订单超时是 30 分钟，订单此时并未过期
+    vi.advanceTimersByTime(301 * 1000)
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('payment.qr.qrExpired')
+    expect(text).not.toContain('payment.qr.cancelled')
+    expect(text).not.toContain('payment.qr.expired')
+    // 复用既有重新发起入口，不自动重试
+    expect(text).toContain('payment.qr.reinitiatePay')
+
+    vi.useRealTimers()
   })
 
   it('actively verifies a stuck pending order and settles it when upstream confirms payment', async () => {

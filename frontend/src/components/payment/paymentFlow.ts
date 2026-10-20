@@ -48,6 +48,7 @@ export interface PaymentRecoverySnapshot {
   orderType: OrderType | ''
   paymentMode: string
   resumeToken: string
+  providerKey: string
   alipayMobilePrecreateDeepLink?: boolean
   createdAt: number
 }
@@ -168,6 +169,7 @@ export function decidePaymentLaunch(
     orderType: context.orderType,
     paymentMode: (result.payment_mode || '').trim(),
     resumeToken: result.resume_token || '',
+    providerKey: (result.provider_key || '').trim(),
     alipayMobilePrecreateDeepLink: result.alipay_mobile_precreate_deep_link === true,
   }, context.now)
 
@@ -220,11 +222,17 @@ export function decidePaymentLaunch(
   const effectiveMobile = (context.forceQRCode && !context.mobilePrecreateDeepLink && visibleMethod === 'alipay')
     ? false
     : context.isMobile
-  const prefersRedirect = normalizedPaymentMode === 'redirect'
-    || normalizedPaymentMode === 'popup'
-    || (effectiveMobile && !!baseState.payUrl)
-  const prefersQr = normalizedPaymentMode === 'qrcode'
+  // An explicitly configured QR mode is a merchant decision about how this channel
+  // collects payment. The mobile default (redirect to pay_url) must not override it,
+  // otherwise a channel whose hosted cashier cannot complete in-WeChat payment would
+  // still be redirected there and the QR would be unreachable on a phone.
+  const explicitQrMode = normalizedPaymentMode === 'qrcode'
     || normalizedPaymentMode === 'native'
+  const prefersRedirect = !explicitQrMode
+    && (normalizedPaymentMode === 'redirect'
+      || normalizedPaymentMode === 'popup'
+      || (effectiveMobile && !!baseState.payUrl))
+  const prefersQr = explicitQrMode
     || (!prefersRedirect && !!baseState.qrCode)
 
   if (visibleMethod === 'wxpay' && context.isWechatBrowser && baseState.payUrl && !baseState.qrCode) {
@@ -295,6 +303,7 @@ export function readPaymentRecoverySnapshot(
       || typeof parsed.payAmount !== 'number'
       || typeof parsed.paymentMode !== 'string'
       || typeof parsed.resumeToken !== 'string'
+      || (parsed.providerKey != null && typeof parsed.providerKey !== 'string')
       || (parsed.alipayMobilePrecreateDeepLink != null && typeof parsed.alipayMobilePrecreateDeepLink !== 'boolean')
       || typeof parsed.createdAt !== 'number'
     ) {
@@ -327,6 +336,7 @@ export function readPaymentRecoverySnapshot(
       orderType: parsed.orderType === 'subscription' ? 'subscription' : 'balance',
       paymentMode: parsed.paymentMode,
       resumeToken: parsed.resumeToken,
+      providerKey: parsed.providerKey || '',
       alipayMobilePrecreateDeepLink: parsed.alipayMobilePrecreateDeepLink === true,
       createdAt: parsed.createdAt,
     }

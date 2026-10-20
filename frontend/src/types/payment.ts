@@ -223,6 +223,7 @@ export interface CreateOrderResult {
   payment_type?: string
   out_trade_no?: string
   payment_mode?: string
+  provider_key?: string
   resume_token?: string
   alipay_mobile_precreate_deep_link?: boolean
   oauth?: WechatOAuthInfo

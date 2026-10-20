@@ -70,6 +70,7 @@ function mountDialog(options: { editing?: ProviderInstance | null } = {}) {
         { value: 'easypay', label: 'EasyPay' },
         { value: 'alipay', label: 'Alipay' },
         { value: 'wxpay', label: 'WeChat Pay' },
+        { value: 'xunhupay', label: 'XunhuPay' },
         { value: 'airwallex', label: 'Airwallex' },
       ],
       allPaymentTypes: [
@@ -117,6 +118,81 @@ describe('PaymentProviderDialog callback URLs', () => {
     const payload = wrapper.emitted('save')?.[0]?.[0] as { config: Record<string, string> }
     expect(payload.config.notifyUrl).toBe(expectedNotify + '/api/v1/payment/webhook/easypay')
     expect(payload.config.returnUrl).toBe(expectedReturn + '/payment/result')
+    wrapper.unmount()
+  })
+})
+
+describe('PaymentProviderDialog xunhupay payment mode', () => {
+  // 虎皮椒当前签约通道不支持微信内支付，管理员必须能通过管理界面把该实例
+  // 持久化为二维码模式；手工改库会在下一次管理保存时被写空。
+  it('persists payment_mode=qrcode through the normal save flow', async () => {
+    const provider = providerFactory({
+      provider_key: 'xunhupay',
+      name: 'XunhuPay',
+      config: {
+        appId: 'app-1',
+        appSecret: 'secret',
+        apiBase: 'https://api.xunhupay.com',
+        notifyUrl: 'https://example.com/api/v1/payment/webhook/xunhupay',
+        returnUrl: 'https://example.com/payment/result',
+      },
+      supported_types: ['wxpay'],
+      payment_mode: 'qrcode',
+    })
+    const wrapper = mountDialog({ editing: provider })
+    ;(wrapper.vm as unknown as { loadProvider: (provider: ProviderInstance) => void }).loadProvider(provider)
+    await nextTick()
+
+    await wrapper.find('form').trigger('submit')
+
+    const payload = wrapper.emitted('save')?.[0]?.[0] as { payment_mode: string; provider_key: string }
+    expect(payload.provider_key).toBe('xunhupay')
+    expect(payload.payment_mode).toBe('qrcode')
+    wrapper.unmount()
+  })
+
+  it('keeps an existing empty xunhupay mode as the upstream default', async () => {
+    const provider = providerFactory({
+      provider_key: 'xunhupay',
+      name: 'XunhuPay',
+      config: {
+        appId: 'app-1',
+        appSecret: 'secret',
+        apiBase: 'https://api.xunhupay.com',
+        notifyUrl: 'https://example.com/api/v1/payment/webhook/xunhupay',
+        returnUrl: 'https://example.com/payment/result',
+      },
+      supported_types: ['wxpay'],
+      payment_mode: '',
+    })
+    const wrapper = mountDialog({ editing: provider })
+    ;(wrapper.vm as unknown as { loadProvider: (provider: ProviderInstance) => void }).loadProvider(provider)
+    await nextTick()
+
+    await wrapper.find('form').trigger('submit')
+
+    const payload = wrapper.emitted('save')?.[0]?.[0] as { payment_mode: string }
+    expect(payload.payment_mode).toBe('')
+    wrapper.unmount()
+  })
+
+  // 其它通道的模式不受本次改动影响：alipay 仍只允许 ''/redirect
+  it('does not expose a QR mode option for the official alipay channel', async () => {
+    const provider = providerFactory({
+      provider_key: 'alipay',
+      name: 'Alipay',
+      config: { appId: 'app-1', privateKey: 'key', publicKey: 'pub' },
+      supported_types: ['alipay'],
+      payment_mode: '',
+    })
+    const wrapper = mountDialog({ editing: provider })
+    ;(wrapper.vm as unknown as { loadProvider: (provider: ProviderInstance) => void }).loadProvider(provider)
+    await nextTick()
+
+    await wrapper.find('form').trigger('submit')
+
+    const payload = wrapper.emitted('save')?.[0]?.[0] as { payment_mode: string }
+    expect(payload.payment_mode).toBe('')
     wrapper.unmount()
   })
 })
