@@ -452,6 +452,12 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					)
 					continue
 				}
+				// 2026-10-20：mid-stream 容量降载在 reader 已输出语义字节后只返回普通 error
+				//（不构造 failover error，上面的 failover 分支够不着），按错误语义兜底：
+				//清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+				if service.IsOpenAICapacityShedError(err) {
+					h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false

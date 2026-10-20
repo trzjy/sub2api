@@ -476,6 +476,19 @@ func (e *UpstreamFailoverError) IsOpenAICapacityShed() bool {
 	return e != nil && e.RequestScopedTransient && isOpenAIRequestScopedCapacityShed("", e.ResponseBody)
 }
 
+// IsOpenAICapacityShedError reports whether a plain (non-failover) upstream error
+// carries the provider capacity-shed signal. Mid-stream response.failed events
+// reach handlers as plain errors: the stream reader stops constructing failover
+// errors once semantic bytes were written (outputStarted), so the failover
+// branches in handlers are unreachable for exactly this case. Terminal handler
+// branches must classify the message to trigger the session penalty.
+func IsOpenAICapacityShedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isOpenAICapacityShedMessage(err.Error())
+}
+
 func marshalOpenAIUpstreamJSON(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

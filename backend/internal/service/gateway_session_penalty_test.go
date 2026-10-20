@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -102,4 +103,13 @@ func TestPenalizeSessionAccountForCapacityShed_NoOpOnNilService(t *testing.T) {
 	require.NotPanics(t, func() {
 		svc.PenalizeSessionAccountForCapacityShed(context.Background(), nil, "abc", 244)
 	})
+}
+
+// TestIsOpenAICapacityShedError covers mid-stream plain-error capacity-shed classification.
+func TestIsOpenAICapacityShedError(t *testing.T) {
+	require.True(t, IsOpenAICapacityShedError(errors.New("upstream response failed: Our servers are currently overloaded. Please try again later.")))
+	require.True(t, IsOpenAICapacityShedError(errors.New("server is overloaded")))
+	require.False(t, IsOpenAICapacityShedError(errors.New("The usage limit has been reached")))
+	require.False(t, IsOpenAICapacityShedError(errors.New("unauthorized")))
+	require.False(t, IsOpenAICapacityShedError(nil))
 }
