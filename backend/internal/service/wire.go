@@ -895,7 +895,7 @@ func ProvideQuotaKeySweeper(repo QuotaKeyRepository, opsRepo OpsRepository, entC
 // 每轮枚举允许模型 M → 比对水位 → 低于阈值按差额调 PullAccountsForModel 补池：
 // 复用 QuotaKeyService 的拉号状态机（advisory 互斥域 + ≤15 停限 + §13.3 分组挂载），
 // reconciler 不新造计数查询 / 不新造锁 / 不并行拉号。
-func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService, opsRepo OpsRepository) *QuotaKeyReconciler {
+func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService, opsRepo OpsRepository, gateway *GatewayService, channel *ChannelService, resolver *CompositeRouteResolver) *QuotaKeyReconciler {
 	svc := NewQuotaKeyReconciler(repo, puller, opsRepo)
 	// C12-v2：在既有装配点一行注入反向引用，使软删提交后（DeleteWithAccounts）能唤醒
 	// reconciler 重判水位。不新造机制、不并行拉号。
@@ -906,6 +906,12 @@ func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService,
 	if puller != nil && puller.client != nil {
 		// F1（裁定 1）：注入配置源，使 ListAllowedModels 的交集左操作数取"配置勾选模型"。
 		w := NewQuotaKeyModelWater(puller.client, puller.autoEntry)
+		// §18.4 W：注入真实路由/渠道/网关依赖，使水位走真实门（路由/端点/渠道/账号额度），
+		// 而非退化为粗交集口径。三依赖由 wire 统一装配，禁止可选依赖导致静默跳过路由。
+		// 经类型断言调用具体实现的 setter（不污染窄面接口，避免破坏既有测试替身）。
+		if mw, ok := w.(*quotaKeyModelWater); ok {
+			mw.SetRoutingDependencies(gateway, channel, resolver)
+		}
 		svc.SetModelWaterProvider(w)
 	}
 	svc.Start()

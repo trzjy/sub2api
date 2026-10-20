@@ -127,8 +127,8 @@ var ErrQuotaKeyMountFailed = errors.New("quota key account mount failed after up
 // QUOTA_KEY_UPSTREAM 失败响应（不得用英文前缀/映射，不得显示成功）。
 //
 // 自动链路（reconciler）消费端仅以"本轮失败"记日志用（PullAccounts/PullAccountsForModel
-// 对未知结果仍走 casSetExhausted 后静默 return nil，落库行为不变）；手动链路的可见性由
-// RefreshAccounts 负责上抛此错误，handler 负责回显原文。
+// 对未知结果经 writeUpstreamFailureMarker 落 last_refresh_error 后透传 ErrUpstreamKeyBlocked，
+// exhausted 维度不动）；手动链路的可见性由 RefreshAccounts 负责上抛此错误，handler 负责回显原文。
 type UpstreamPullError struct {
 	// Kind 是内部归类（冷却 / 过期耗尽 / 未知），供 errors.Is 与 handler 区分。
 	Kind UpstreamResultKind
@@ -308,6 +308,19 @@ func NewQuotaKeyService(repo QuotaKeyRepository, enc QuotaKeyEncryptor, upstream
 	s.groupResolver = s.findGroupsAllowingModel
 	s.cursorGroupResolver = s.findCursorPlatformGroups
 	s.insertFailureMarkerWriter = s.writeInsertFailureMarker
+	// P1-B4 设备同源闭环：真实拉号客户端需要反查本服务才能分流"存量派生值 / DeviceIDFor"，
+	// 构造顺序天然成环（客户端先建 → 服务后建），故在此回填本服务自身作为设备解析器
+	// （*QuotaKeyService 同时提供 DeviceIDFor 与 HasAccount）。
+	// 这样 wire / 测试无须新增装配语句，也不必改动构造函数签名；
+	// 传入的是占位或替身上游（不满足类型断言）时整段跳过，行为不变。
+	if sac, ok := upstream.(*shareAIUpstreamClient); ok {
+		sac.SetDeviceResolver(s)
+	}
+	// P1-S：cursor 调度资格门所需的激活码状态读取器（包级安装，沿
+	// codeBuddyQuotaInstance 的模式）。调度谓词是包级纯函数、拿不到 service 句柄，
+	// 故在此装配点一次性注入；未装配时资格门降级为不收紧（见
+	// cursorAccountQuotaKeyVetoReason 注释）。
+	InstallCursorQuotaKeyStateProvider(s)
 	return s
 }
 
@@ -318,6 +331,35 @@ func (s *QuotaKeyService) GetStatus(ctx context.Context, id int64) (*QuotaKeySta
 		return nil, err
 	}
 	return quotaKeyToStatus(qk), nil
+}
+
+// CursorQuotaKeyStatus 返回激活码在调度口径下的状态，供 cursor 账号的调度资格门消费
+// （P1-S §15.4-I2：key 终态只约束账号的调度资格，账号本体不动）。
+//
+// 归一化：「落盘 status=expired」与「expires_at 已到期但 sweeper 尚未落盘」是同一事实的
+// 两个时序切片，对调度而言没有区别，统一归一为 domain.QuotaKeyStatusExpired——
+// 资格门只关心"这个码是否已停供"，不该被后台落盘时序左右。
+// 其余状态（active/exhausted/disabled…）原样返回，由资格门按自身语义裁决。
+//
+// 读取失败（码不存在 / 存储故障）返回 error：调用方据此失败关闭，不静默放行。
+func (s *QuotaKeyService) CursorQuotaKeyStatus(ctx context.Context, quotaKeyID int64) (string, error) {
+	if s == nil || s.repo == nil {
+		return "", errors.New("quota_key_service: quota key repository unavailable")
+	}
+	if quotaKeyID <= 0 {
+		return "", fmt.Errorf("quota_key_service: invalid quota key id %d", quotaKeyID)
+	}
+	qk, err := s.repo.GetByID(ctx, quotaKeyID)
+	if err != nil {
+		return "", err
+	}
+	if qk == nil {
+		return "", fmt.Errorf("quota_key_service: quota key %d not found", quotaKeyID)
+	}
+	if qk.Status == domain.QuotaKeyStatusExpired || isExpired(qk) {
+		return domain.QuotaKeyStatusExpired, nil
+	}
+	return qk.Status, nil
 }
 
 // RotateCredentials 加密新激活码原文后写入 code_encrypted / code_mac / code_last4，
@@ -676,19 +718,23 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 				resultErr = pullErr
 				return nil
 			}
-			// 其余上游错误（含未知结果失败关闭）：CAS 写 exhausted=true（沿用既有语义，落库行为不变）。
+			// 其余上游错误（含未知结果失败关闭）：写 last_refresh_error + last_refresh_at（失败心跳
+			// 与排障可见性），但【不得】写 exhausted=true（CUR-P1-FIX-KEY-EXHAUSTED，方案 §15.2/§16.1）：
+			// 未知/普通上游失败不是已确认的 key 级终态，不能由"一次失败"或"拉到少量账号"推导停供，
+			// 否则管理页会把仍可用的激活码显示成"已耗尽"。停供只认已确认终态（ErrUpstreamKeyExpired →
+			// status=expired）与非幂等挂载失败（插入失败标记，见 writeInsertFailureMarker）两类事实。
 			// 手动链路（RefreshAccounts, manual=true）必须上抛带原文的错误（*UpstreamPullError），
 			// 不得静默显示"刷新成功"；自动链路（reconciler, manual=false）原先静默 return nil——但 nil
 			// 会被 reconciler 当成功（心跳"reconciled N quota keys"把失败算成成功，R13-2）。改为透传
 			// 含 ErrUpstreamKeyBlocked 哨兵的包裹错误，reconciler 据以如实计入失败（记失败日志、不加
 			// pulled、返回 false、继续下一候选），单 key 未知失败不中断其余候选的既有语义保持不变。
-			if cerr := s.casSetExhausted(ctx, tx, quotaKeyID, pullErr); cerr != nil {
-				return fmt.Errorf("quota_key_service: cas set exhausted: %w", cerr)
+			if cerr := s.writeUpstreamFailureMarker(ctx, tx, quotaKeyID, pullErr); cerr != nil {
+				return fmt.Errorf("quota_key_service: write upstream failure marker: %w", cerr)
 			}
 			if manual {
 				resultErr = newUpstreamUnknownErrorFrom(pullErr)
 			} else {
-				// R13-2：自动链路未知上游失败——casSetExhausted 已落 exhausted=true（落库行为零变化），
+				// R13-2：自动链路未知上游失败——标记已落 last_refresh_error（exhausted 维度不动），
 				// 经既有 resultErr 透传机制返回（fn 返回 nil → 末尾 resultErr 非空即透传给触发方）。
 				// 包裹 ErrUpstreamKeyBlocked 哨兵（与底层原因摘要）以便 reconciler 以 errors.Is 识别。
 				resultErr = fmt.Errorf("%w: %s", ErrUpstreamKeyBlocked, pullErr.Error())
@@ -721,9 +767,10 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			return nil
 		}
 
-		// D2-a 配置单次读取（同批号一致性口径，方案审 F2 消化）：本快照同时供
-		// ①账号凭证 model_mapping 构造（下方插入循环）与 ②既有 ApplyEntryDefaults
-		// （挂组路径，替换原挂组内的第二次 GetConfig），同批账号两处同源同快照。
+		// 配置单次读取（同批号一致性口径，方案审 F2 消化）：本快照供既有 ApplyEntryDefaults
+		// （挂组路径，替换原挂组内的第二次 GetConfig）使用；model_mapping 已改为静态清单
+		// （P1-B2：入库退出人工勾选定义能力，entry 模型 = CursorRealSupplyModels 恒等映射），
+		// 不再随配置勾选漂移——首次按静态清单写 model_mapping，后续校准由 B1 入口覆盖同一字段。
 		// autoEntry 未装配（nil）时跳过：账号无映射 → IsModelSupported 对 cursor 失败
 		// 关闭（既有闸门，不放宽），与 D1 既有测试/未装配场景行为一致。
 		//
@@ -739,7 +786,7 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 				return fmt.Errorf("quota_key_service: load auto entry config: %w: %w", ErrQuotaKeyMountFailed, cerr)
 			}
 			entryCfg = cfg
-			entryModelMapping = CursorAccountModelMapping(ComputeEntryModels(cfg))
+			entryModelMapping = CursorAccountModelMapping(CursorStaticEntryModels())
 		}
 		insertedIDs := make([]int64, 0, len(result.Accounts))
 		for i, ua := range result.Accounts {
@@ -754,8 +801,9 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			//
 			// 模型映射在加密之前并入（浅拷贝，不改上游产物）：model_mapping 非敏感键、明文存
 			// JSONB（与其他平台 admin 建号形态一致），MAC 覆盖含映射的最终明文——单次加密+
-			// 单次指纹，契约零改动。空映射集（配置空选/未装配）不写键 → cursor 账号对一切
-			// 模型失败关闭（account.go IsModelSupported 平台分支）。
+			// 单次指纹，契约零改动。映射为静态实供清单恒等映射（P1-B2），仅当 autoEntry 未装配
+			// （entryModelMapping 为 nil）时不写键 → cursor 账号对一切模型失败关闭
+			// （account.go IsModelSupported 平台分支）。
 			creds := ua.Credentials
 			if entryModelMapping != nil {
 				merged := make(map[string]any, len(creds)+1)
@@ -977,12 +1025,19 @@ func (s *QuotaKeyService) ClearExhausted(ctx context.Context, quotaKeyID int64) 
 	return nil
 }
 
-// casSetExhausted 仅在当前 status='active' 时把 exhausted 写为 true（§3.4 CAS 写）。
-// 若 sweep 已将状态改为 expired/disabled，则 0 行受影响，exhausted 不被覆盖。
-func (s *QuotaKeyService) casSetExhausted(ctx context.Context, tx *ent.Tx, quotaKeyID int64, pullErr error) error {
+// writeUpstreamFailureMarker 在【未知 / 普通上游失败】分支同事务写 last_refresh_error +
+// last_refresh_at（CAS：仅当当前 status='active' 才写入，若 sweep 已将状态改为 expired/disabled
+// 则 0 行受影响，不覆盖），供失败心跳与排障可见。
+//
+// 关键约束（CUR-P1-FIX-KEY-EXHAUSTED，方案 §15.2/§15.4/§16.1）：本分支【绝不】写 exhausted
+// （既不置 true，也不清 false）。未知/普通上游失败不是已确认的 key 级终态——停供只能依据
+// 已确认终态（ErrUpstreamKeyExpired → markKeyExpiredByUpstream 写 status=expired）或上游已
+// 发号的非幂等边界（writeInsertFailureMarker），不得由账号数、普通错误、未知错误推导耗尽。
+// 该 key 因此仍留在候选集内（ListCandidateKeys 的 Exhausted(false) 过滤不排除它），后续周期
+// 可继续尝试；上游若持续不可用，由冷却哨兵（ErrUpstreamCooldown）按限频窗口自然收敛。
+func (s *QuotaKeyService) writeUpstreamFailureMarker(ctx context.Context, tx *ent.Tx, quotaKeyID int64, pullErr error) error {
 	_, err := tx.QuotaKey.Update().
 		Where(quotakey.IDEQ(quotaKeyID), quotakey.Status(domain.QuotaKeyStatusActive)).
-		SetExhausted(true).
 		SetLastRefreshAt(time.Now()).
 		SetLastRefreshError(pullErr.Error()).
 		Save(ctx)
@@ -999,7 +1054,7 @@ func (s *QuotaKeyService) casSetExhausted(ctx context.Context, tx *ent.Tx, quota
 // 曾在冷却响应里把 exhausted 写为 true（存量 exhausted=true + last_refresh_error 为冷却文案的
 // key1/key2 即此旧态）。本分支若只写标记不纠正 exhausted，存量 key 会永久显示"已耗尽"。故
 // 冷却分支在同事务显式 SetExhausted(false)，把冷却态与耗尽态解耦（存量纠正；既有 exhausted===false
-// 的冷却 key 不受影响，仍写 false）。沿用 casSetExhausted 的 CAS 约束：仅当当前 status='active'
+// 的冷却 key 不受影响，仍写 false）。沿用 writeUpstreamFailureMarker 的 CAS 约束：仅当当前 status='active'
 // 才写入（不覆盖 sweep 已置的禁用/过期），否则 0 行。
 //
 // 注意区分：本冷却分支写 SetExhausted(false)（冷却≠耗尽，B2）。插入失败是独立函数
@@ -1046,11 +1101,12 @@ func (s *QuotaKeyService) writeCooldownMarker(ctx context.Context, tx *ent.Tx, q
 // 语义约束（零新表/字段）：写 last_refresh_error + last_refresh_at，CAS 仅当 status='active'
 // （不覆盖 sweep 已置的禁用/过期），并顺带 SetExhausted(true)。
 //
-// 裁定 3（候选 key 冷却规则）：last_refresh_error IS NULL 这一永久排除已删除，非限频类错误
-// 一律以 exhausted=true 占位排除（与"上游失败"的 casSetExhausted=true 同口径）。插入失败标记
-// 是非限频错误（上游已成功发号、仅本地落库失败），故同样走 exhausted=true 占位——由此被
-// ListCandidateKeys 的 Exhausted(false) 查询自然排出候选集（原 LastRefreshErrorIsNil() 过滤的
-// 替代口径）。标记写失败（如 CAS 0 行 / DB 错误）由调用方降格为"仅本轮哨兵停轮"（R5-2 边界）。
+// 裁定 3（候选 key 冷却规则）：last_refresh_error IS NULL 这一永久排除已删除，不得换皮重演。
+// 插入失败标记属"上游已成功发号、仅本地落库失败"的非幂等边界（不同于 CUR-P1-FIX-KEY-EXHAUSTED
+// 所约束的"未知/普通上游失败"——后者只写标记、不动 exhausted，见 writeUpstreamFailureMarker），
+// 故仍以 exhausted=true 占位排除——由此被 ListCandidateKeys 的 Exhausted(false) 查询自然排出
+// 候选集（原 LastRefreshErrorIsNil() 过滤的替代口径）。标记写失败（如 CAS 0 行 / DB 错误）由
+// 调用方降格为"仅本轮哨兵停轮"（R5-2 边界）。
 func (s *QuotaKeyService) writeInsertFailureMarker(ctx context.Context, quotaKeyID int64, cause error) error {
 	if s.client == nil {
 		return errors.New("quota_key_service: ent client not configured")
@@ -1193,46 +1249,63 @@ func (s *QuotaKeyService) findGroupsAllowingModel(ctx context.Context, tx *ent.T
 	return out, nil
 }
 
-// selectedEntryModelsOf 返回"配置勾选模型"集合（裁定 1 交集左操作数）：取配置 →
-// ComputeEntryModels（以实供清单 CursorRealSupplyModels 为门控）。cfgSrc 为 nil 时用缺省配置。
-// 与 quotaKeyModelWater.selectedEntryModels 同源（同一函数），保证手动挂组与自动补池
-// （ListAllowedModels）使用同一配置源、同一 Allows 判定口径（R7-1：CUR-F10）。
-func selectedEntryModelsOf(ctx context.Context, cfgSrc AutoEntryConfigProvider) ([]string, error) {
-	if cfgSrc == nil {
-		return ComputeEntryModels(DefaultAutoEntryConfig()), nil
+// cursorModelOwningPlatform 是 cursor 实供清单模型的【所属平台】。
+//
+// 判定依据：实供清单模型由 cursor 平台账号经 credentials.model_mapping 供给，composite 归属层
+// （resolveCompositeModelOwnership）亦按"账号平台"判定模型归属 → 清单模型恒归 cursor 平台。
+// P1-B2「按模型平台挂组」以此为挂载判据，取代此前"配置勾选模型 ∩ 白名单"的人工勾选口径。
+const cursorModelOwningPlatform = PlatformCursor
+
+// cursorMountTargetGroups 是 P1-B2 U7「按模型平台挂组」的唯一判定出口（手动挂组与自动补池
+// 同源同判，避免两处口径漂移）。返回 groups 中可作为入库挂载目标的子集（保序）。
+//
+// 入选三条件（AND）：
+//  1. 平台：分组平台必须是"模型所属平台（cursor）的目标分组"——
+//     group.platform = cursor 的专属分组，或能把请求目标平台解析到 cursor 的 composite 聚合分组
+//     （聚合组自身无原生模型，只有在其白名单实际声明了实供模型时才是该模型的目标分组）；
+//  2. 有对应模型：白名单必须启用（enabled=true）——allow-all（enabled=false，Allows 恒真）
+//     恒真判入已收敛：未启用白名单 = 无对应模型，不挂（聚合组/福利组的典型形态）；
+//  3. 覆盖：白名单对静态实供清单（CursorStaticEntryModels）至少一个模型 Allows 命中
+//     （沿用既有 Allows 的前缀/通配语义；仅含 "cursor" 字样、不含任何实供模型的组不挂）。
+func cursorMountTargetGroups(groups []*ent.Group, entryModels []string) []*ent.Group {
+	if len(entryModels) == 0 {
+		return nil
 	}
-	cfg, err := cfgSrc.GetConfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("quota_key_service: load auto entry config: %w", err)
+	out := make([]*ent.Group, 0, len(groups))
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		platform := strings.TrimSpace(g.Platform)
+		if platform != cursorModelOwningPlatform && platform != PlatformComposite {
+			continue // 不是模型所属平台的目标分组
+		}
+		al := GroupModelAllowlistFromDomain(g.ModelAllowlist)
+		if !al.Enabled {
+			continue // allow-all（无对应模型）→ 不挂
+		}
+		hit := false
+		for _, m := range entryModels {
+			if al.Allows(m) {
+				hit = true
+				break
+			}
+		}
+		if hit {
+			out = append(out, g)
+		}
 	}
-	return ComputeEntryModels(cfg), nil
+	return out
 }
 
-// selectedEntryModels 返回"配置勾选模型"集合（裁定 1 交集左操作数）：取入库配置 →
-// ComputeEntryModels（以实供清单 CursorRealSupplyModels 为门控）。与 quotaKeyModelWater
-// 同源（selectedEntryModelsOf），保证手动挂组与自动补池统一口径（R7-1：CUR-F10）。
-func (s *QuotaKeyService) selectedEntryModels(ctx context.Context) ([]string, error) {
-	return selectedEntryModelsOf(ctx, s.autoEntry)
-}
-
-// findCursorPlatformGroups 是 B1 手动挂载事实源（裁定 1 口径，2026-10-17 经 CUR-F7 R4-1
-// 收紧，2026-10-17 经 CUR-F10 R7-1 改为与 ListAllowedModels 同源）。
+// findCursorPlatformGroups 是 B1 手动挂载事实源（P1-B2 起改为「按模型平台挂组」U7 口径）。
 //
-// 手动挂载目标 = 【配置勾选模型集合】∩【分组白名单覆盖】的交集，与自动链路 ListAllowedModels
-// 同一配置源（GetConfig → ComputeEntryModels，cfgSrc=nil 用缺省配置）、同一 Allows 判定
-// （GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows）。即：
-//   - enabled=false（未启用白名单，Allows 恒真）→ 入选（接受任意模型）；
-//   - enabled=true → 对"配置勾选模型集合"任一 Allows 命中才入选。
+// 手动挂载目标 = 【静态实供清单】∩【模型所属平台（cursor）的目标分组】∩【分组白名单实际覆盖】，
+// 与自动链路 ListAllowedModels 共用 cursorMountTargetGroups（同源同判）。模型集合取自
+// CursorStaticEntryModels（静态实供清单），不再取"人工勾选"——入库退出人工勾选定义能力。
 //
-// 判据来源：裁定 1（配置勾选模型 ∩ 分组白名单）+ 与 ListAllowedModels 同源。
-// 配置只勾 grok-4.7、而某分组只覆盖 gpt-6-sol（实供但不被勾选）时，该分组不再被手动挂入
-// （配置对勾选模型不可用），避免手动拉的号落入对勾选模型不可用的组。
-//
-// 勾选集合为空（用户全关）= 无模型上下文：此时"挂到允许相应模型的现有分组"无从满足，
-// 直接零覆盖失败关闭（ErrQuotaKeyModelNoCoverage，走既有回滚路径，号不入库），与自动链路
-// 一致（勾选空时自动链路不触发）。enabled=false 的 allow-all 组仅在 selected 非空时才可能
-// 入选（此时 allow-all 确实覆盖勾选模型）；selected 为空时不再收录 allow-all 组
-// （CUR-F12 R9-3，2026-10-17）。
+// 零覆盖（无任何目标分组）= 无模型上下文：此时"挂到允许相应模型的现有分组"无从满足，
+// 直接失败关闭（ErrQuotaKeyModelNoCoverage，走既有回滚路径，号不入库）。
 func (s *QuotaKeyService) findCursorPlatformGroups(ctx context.Context, tx *ent.Tx) ([]int64, error) {
 	groups, err := tx.Group.Query().
 		Where(
@@ -1243,39 +1316,13 @@ func (s *QuotaKeyService) findCursorPlatformGroups(ctx context.Context, tx *ent.
 	if err != nil {
 		return nil, fmt.Errorf("quota_key_service: query candidate groups: %w", err)
 	}
-	// R7-1（裁定 1 + 与 ListAllowedModels 同源）：手动挂载口径改为"配置勾选模型集合"
-	// （selectedEntryModels 同源：GetConfig → ComputeEntryModels，cfgSrc=nil 用缺省配置）。
-	selected, err := s.selectedEntryModels(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("quota_key_service: load selected entry models for cursor mount: %w", err)
+	targets := cursorMountTargetGroups(groups, CursorStaticEntryModels())
+	out := make([]int64, 0, len(targets))
+	for _, g := range targets {
+		out = append(out, g.ID)
 	}
-	// R9-3（CUR-F12，2026-10-17）：勾选集合为空 = 无模型上下文，"挂到允许相应模型的现有分组"
-	// 无从满足 → 直接零覆盖失败关闭。allow-all 组（enabled=false）也不例外：其 Allows 恒真
-	// 只在"有勾选模型可被覆盖"时才有意义；勾选空时收录它会让手动拉号落入无模型上下文的裸挂，
-	// 与自动链路（勾选空不触发）语义冲突。走既有 ErrQuotaKeyModelNoCoverage 回滚路径（号不入库）。
-	if len(selected) == 0 {
+	if len(out) == 0 {
 		return nil, ErrQuotaKeyModelNoCoverage
-	}
-	out := make([]int64, 0, len(groups))
-	for _, g := range groups {
-		al := GroupModelAllowlistFromDomain(g.ModelAllowlist)
-		// enabled=false：白名单未启用，Allows 恒真 → 该组接受任意模型，cursor 可挂。
-		if !al.Enabled {
-			out = append(out, g.ID)
-			continue
-		}
-		// enabled=true：对"配置勾选模型集合"任一 Allows 命中即入选（含前缀/通配匹配）；
-		// 仅含 "cursor" 字样、不含任何【勾选】模型的组不挂（路由不出账号）。
-		hit := false
-		for _, m := range selected {
-			if al.Allows(m) {
-				hit = true
-				break
-			}
-		}
-		if hit {
-			out = append(out, g.ID)
-		}
 	}
 	return out, nil
 }
@@ -1292,6 +1339,22 @@ func (s *QuotaKeyService) mountAccountToGroups(ctx context.Context, tx *ent.Tx, 
 		}
 	}
 	return nil
+}
+
+// HasAccount 判定指定激活码是否已持有（未软删）账号。
+//
+// P1-B4 设备同源统一用其识别"存量 key"：已持久化 device_id 的码直接走同源链路，
+// 未持久化但 HasAccount==true 的码按 §16 红线保持既有派生值 deviceID(code)，不写库、不迁移；
+// 仅 HasAccount==false（新码）才经 DeviceIDFor 生成并落库 device_id。查询只读 accounts，不改写。
+func (s *QuotaKeyService) HasAccount(ctx context.Context, quotaKeyID int64) (bool, error) {
+	if s == nil || s.repo == nil {
+		return false, errors.New("quota_key_service: repo not configured")
+	}
+	accs, err := s.repo.ListAccountsByQuotaKey(ctx, quotaKeyID)
+	if err != nil {
+		return false, fmt.Errorf("quota_key_service: list accounts by quota key: %w", err)
+	}
+	return len(accs) > 0, nil
 }
 
 // quotaKeyToStatus 将 ent 实体映射为脱敏 DTO。
@@ -1367,6 +1430,25 @@ type quotaKeyModelWater struct {
 	// DefaultAutoEntryConfig（实供清单全集），与 production 未配置 cursor_auto_entry_config
 	// 时的口径一致。
 	cfgSrc AutoEntryConfigProvider
+
+	// §18.4 W 真实路由/渠道/配额依赖：生产由 wire 在 ProvideQuotaKeyReconciler 装配点注入。
+	// 三者齐备时水位走真实路由/端点/渠道/额度门；任一缺失视为装配错误，必须显式失败
+	// （禁止静默退化回粗交集口径，§18.4 第11条；共享合同 §5 禁止降级分支）。
+	gateway  *GatewayService
+	channel  *ChannelService
+	resolver *CompositeRouteResolver
+}
+
+// SetRoutingDependencies 注入 §18.4 W 所需的真实路由/渠道/网关依赖。生产装配必须提供，
+// 使水位沿用现有 resolver（显式 route → 账号精确 ownership → detector）与组级渠道、账号
+// 配额维度门；依赖缺失时水位显式失败（不退回粗交集），与 §18.4 第10/11条失败语义一致。
+func (w *quotaKeyModelWater) SetRoutingDependencies(gw *GatewayService, ch *ChannelService, res *CompositeRouteResolver) {
+	if w == nil {
+		return
+	}
+	w.gateway = gw
+	w.channel = ch
+	w.resolver = res
 }
 
 // NewQuotaKeyModelWater 构造生产用模型水位提供方（F1 装配点由 wire 注入 *ent.Client）。
@@ -1382,47 +1464,18 @@ func (w *quotaKeyModelWater) SetConfigSource(s AutoEntryConfigProvider) {
 	}
 }
 
-// selectedEntryModels 返回"配置勾选模型"集合（裁定 1 交集左操作数）：与手动挂组
-// （QuotaKeyService.findCursorPlatformGroups）同源（selectedEntryModelsOf），保证自动补池
-// 与手动挂组使用同一配置源、同一 Allows 判定口径（R7-1：CUR-F10）。
-func (w *quotaKeyModelWater) selectedEntryModels(ctx context.Context) ([]string, error) {
-	return selectedEntryModelsOf(ctx, w.cfgSrc)
-}
-
-// ListAllowedModels 枚举当前可补池的模型 M（裁定 1）：
-// 【入库配置勾选的模型】∩【现有活跃且未软删分组的模型白名单 Allows(M) 命中的模型】。
+// ListAllowedModels 枚举当前可补池的模型 M（P1-B2：按模型平台挂组口径，与手动挂组同源同判）：
+// 【静态实供清单 CursorStaticEntryModels】∩【模型所属平台（cursor）的目标分组白名单实际覆盖的模型】。
 //
-// 交集左项（配置勾选模型）取自 selectedEntryModels（ComputeEntryModels，以实供清单
-// CursorRealSupplyModels 为门控，非官方模型名快照）；交集右项取自全部 active + 未软删分组的
-// 白名单（GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows(M)）。
+// 交集左项不再取"人工勾选"（入库退出人工勾选定义能力），右项与 findCursorPlatformGroups 共用
+// cursorMountTargetGroups：只认"模型所属平台的目标分组 + 白名单启用且 Allows(M)"——allow-all
+// （无对应模型）的聚合/福利组不构成覆盖，不再让补池把号灌进对模型无声明的裸组。
 //
-// 不再限定 group.Platform(domain.PlatformCursor)：生产库无 cursor 平台分组（cursor 账号由
-// composite 聚合组调度），若只枚举 cursor 平台分组则交集恒空、reconciler 每轮空跑。模型 M
-// 只要被任一 active 未软删分组的白名单 Allows 命中即进入候选集合（禁止把其它平台分组模型
-// 盲目纳入：M 必须先在左项勾选集合内，否则不在补池范围）。
+// 空集语义（运营空态，非配置错误）：清单内模型但无目标分组覆盖 → 返回空集 + nil，reconciler
+// 正常空跑停轮（沿用 CUR-F17 外审 R14 回修的两态分界：分组覆盖是运营态，不记失败心跳）。
 func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, error) {
-	// 原始勾选集合（未经过实供清单门控）：用于区分"用户真关了"与"勾选了但全被实供清单剔除"
-	// 两种空集语义（R8-1：CUR-F11）。
-	rawSelected, err := w.rawConfigModelIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// selected 是经实供清单门控后的有效勾选模型（ComputeEntryModels）。
-	selected, err := w.selectedEntryModels(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(selected) == 0 {
-		if len(rawSelected) == 0 {
-			// 用户本来就全关 / 配置无勾选 / 缺省配置无模型 → 正常空跑（现状语义不回归）。
-			return nil, nil
-		}
-		// 勾选非空但经实供清单门控后为空：勾选模型均不在实供清单内（如 D2-a 旧配置残留的
-		// 官方模型名 gpt-4.1），属配置问题——走可识别错误使 reconciler 记失败心跳，ops 直接
-		// 可见"配置问题"，而非被记成"无允许模型"的正常空跑。
-		return nil, infraerrors.New(http.StatusUnprocessableEntity,
-			"CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION",
-			"勾选的模型均不在实供清单内（可能残留旧官方模型名），需管理员重新选择模型")
+	if w.client == nil {
+		return nil, fmt.Errorf("quota_key_model_water: ent client not configured")
 	}
 	groups, err := w.client.Group.Query().
 		Where(
@@ -1433,9 +1486,11 @@ func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, e
 	if err != nil {
 		return nil, fmt.Errorf("quota_key_model_water: list groups: %w", err)
 	}
-	seen := make(map[string]struct{}, len(selected))
-	out := make([]string, 0, len(selected))
-	for _, m := range selected {
+	entryModels := CursorStaticEntryModels()
+	targets := cursorMountTargetGroups(groups, entryModels)
+	seen := make(map[string]struct{}, len(entryModels))
+	out := make([]string, 0, len(entryModels))
+	for _, m := range entryModels {
 		km := strings.ToLower(strings.TrimSpace(m))
 		if km == "" {
 			continue
@@ -1443,9 +1498,8 @@ func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, e
 		if _, ok := seen[km]; ok {
 			continue
 		}
-		// 交集右项：被任一 active 未软删分组的白名单 Allows 命中。
 		covered := false
-		for _, g := range groups {
+		for _, g := range targets {
 			if GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows(m) {
 				covered = true
 				break
@@ -1457,12 +1511,6 @@ func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, e
 		seen[km] = struct{}{}
 		out = append(out, m)
 	}
-	// 两态分界（CUR-F17 外审 R14 回修，v3.5 §13.2「无可选 key 即停」）：
-	//   - 清单外勾选（rawSelected 非空、selected 为空）→ 配置错误：勾的全是清单外模型
-	//     （如旧官方名 gpt-4.1），管理员必须重新选择。走上面 :1395-1397 出口
-	//     （CURSOR_CONFIG_NO_REAL_SUPPLY_INTERSECTION），reconciler 记失败心跳。
-	//   - 清单内勾选但无分组覆盖（此处 out 为空）→ 运营空态，不是配置错误：分组覆盖是运营态
-	//     （模型/分组随时可能调整），不应记失败。直接返回空集 + nil，reconciler 正常空跑停轮。
 	return out, nil
 }
 
@@ -1493,52 +1541,281 @@ func modelIDsOf(cfg *CursorAutoEntryConfig) []string {
 	return ids
 }
 
-// WaterLevel 返回模型 M 的当前水位（候选计数）与统一阈值。
-// 口径（§13.1）：account.platform=cursor + 可调度 + 正常(active) + 未软删 +
-// 当前允许 M 分组（白名单 Allows(M) 的任意未软删活跃分组，不再限定 platform=cursor，
-// 裁定 1：生产无 cursor 平台分组，聚合组按白名单覆盖 cursor 模型）+ 非 temp 窗口
-// （temp_unschedulable_until 为空或早于 now）。阈值恒为 quotaKeyWaterLevelThreshold。
-//
-// 与 ListAllowedModels 同判：分组侧不再限定 platform=cursor（原 R3-2 的跨平台排除已随裁定 1
-// 撤销——cursor 账号可由非 cursor 平台分组的白名单覆盖，其水位应计入该模型）。
-func (w *quotaKeyModelWater) WaterLevel(ctx context.Context, modelM string) (int, int, error) {
-	now := time.Now()
-	// 当前允许 M 的分组 ID 集合（同 Allows 判定；不再限定 platform=cursor，与 ListAllowedModels 对齐）。
-	groups, err := w.client.Group.Query().
+// WaterLevel 返回 Cursor 可服务账号的去重总量（方案 §15.6 / §16.1）。
+// 账号可调度性和模型能力复用调度谓词，已挂组白名单必须允许账号实际支持的模型。
+// key exhausted 仅代表拉号受阻，不剥夺已有账号供给；只有已知过期停止供给。
+// modelM 不收窄池级总量；并发占用不参与计数，统一目标仍为 10。
+func (w *quotaKeyModelWater) WaterLevel(ctx context.Context, _ string) (int, int, error) {
+	accounts, err := w.client.Account.Query().
 		Where(
-			group.Status(domain.StatusActive),
-			group.DeletedAtIsNil(),
+			account.Platform(domain.PlatformCursor),
+			account.Schedulable(true),
+			account.Status(domain.StatusActive),
+			account.DeletedAtIsNil(),
 		).
+		WithGroups(func(q *ent.GroupQuery) {
+			q.Where(group.Status(domain.StatusActive), group.DeletedAtIsNil())
+		}).
+		WithQuotaKey().
 		All(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("quota_key_model_water: list groups: %w", err)
-	}
-	gids := make([]int64, 0, len(groups))
-	for _, g := range groups {
-		if GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows(modelM) {
-			gids = append(gids, g.ID)
-		}
+		return 0, 0, fmt.Errorf("quota_key_model_water: list total water level accounts: %w", err)
 	}
 	current := 0
-	if len(gids) > 0 {
-		current, err = w.client.Account.Query().
-			Where(
-				account.Platform(domain.PlatformCursor),
-				account.Schedulable(true),
-				account.Status(domain.StatusActive),
-				account.DeletedAtIsNil(),
-				account.Or(
-					account.TempUnschedulableUntilIsNil(),
-					account.TempUnschedulableUntilLT(now),
-				),
-				account.HasGroupsWith(group.IDIn(gids...)),
-			).
-			Count(ctx)
+	for _, row := range accounts {
+		// 必须走 w（已注入路由/渠道/网关依赖）的判定，而非包级 cursorAccountCountsTowardWaterLevel
+		// （后者为兼容旧单测用空结构退化为粗交集口径，不会携带生产路由依赖）。
+		eligible, err := w.countsTowardWaterLevel(ctx, row)
 		if err != nil {
-			return 0, 0, fmt.Errorf("quota_key_model_water: count water level: %w", err)
+			return 0, 0, err
+		}
+		if eligible {
+			current++
 		}
 	}
 	return current, quotaKeyWaterLevelThreshold, nil
+}
+
+// cursorAccountCountsTowardWaterLevel 保留既有包级签名作为历史取证/测试入口：它直接走
+// w（空结构，未注入路由依赖）的判定——依赖缺失时按 §18.4 第11条显式失败，不再静默退化回
+// 粗交集口径。生产路径通过 w 注入 resolver/ChannelService/GatewayService 走真实
+// 路由/端点/渠道/额度门；本入口不是生产 WaterLevel 链路的一部分。
+func cursorAccountCountsTowardWaterLevel(ctx context.Context, row *ent.Account) (bool, error) {
+	return (&quotaKeyModelWater{}).countsTowardWaterLevel(ctx, row)
+}
+
+// countsTowardWaterLevel 是 §18.4 W 的统一入口：沿用既有候选域，对每个具体候选模型 × 显式组
+// × 四个文本端点逐一复用真实路由/端点/渠道/账号额度门；任一允许则账号只计一次，全部拒绝则不计。
+// 读库/路由/渠道基础设施错误返回整次 WaterLevel 错误，不返回部分数。
+func (w *quotaKeyModelWater) countsTowardWaterLevel(ctx context.Context, row *ent.Account) (bool, error) {
+	if row == nil || row.Platform != PlatformCursor || row.DeletedAt != nil {
+		return false, nil
+	}
+	// model_mapping 不属于敏感加密子键；只投影调度谓词消费的字段，不解密/读取鉴权材料。
+	candidate := &Account{
+		Platform: row.Platform, Type: row.Type, Status: row.Status, Schedulable: row.Schedulable,
+		Credentials: row.Credentials, Extra: row.Extra, ExpiresAt: row.ExpiresAt, AutoPauseOnExpired: row.AutoPauseOnExpired,
+		OverloadUntil: row.OverloadUntil, RateLimitResetAt: row.RateLimitResetAt,
+		TempUnschedulableUntil: row.TempUnschedulableUntil, QuotaKeyID: row.QuotaKeyID,
+	}
+	if !candidate.IsSchedulable() || len(candidate.GetModelMapping()) == 0 {
+		return false, nil
+	}
+	key := row.Edges.QuotaKey
+	if key == nil || key.DeletedAt != nil {
+		return false, fmt.Errorf("quota_key_model_water: account %d quota key unavailable", row.ID)
+	}
+	if quotaKeyStatusBlocksCursorScheduling(key.Status) || isExpired(key) {
+		return false, nil
+	}
+	// key 终态门（I2）：归属激活码不可服务 → 不剥夺已有账号供给，仅排除该号。
+	if reason := cursorAccountQuotaKeyVetoReason(ctx, candidate); reason != "" {
+		return false, nil
+	}
+
+	models := w.cursorCandidateModels(candidate)
+
+	// §18.4 第11条：禁止可选依赖导致静默跳过路由。依赖齐备时走真实路由/渠道/额度门；
+	// 依赖缺失是装配错误，必须显式失败（WaterLevel 整次返回错误，reconciler 记失败心跳并
+	// 停轮，与第10条失败语义一致），不得退回粗交集（§18.2 W 行认定的计数 bug 本体——没有
+	// 路由/端点/渠道/额度门会重新把"全部文本端点显式改向 OpenAI、真实平台门已排除 Cursor"
+	// 的账号计为 1，使站点以为不缺号、实际调度不到）。共享合同 §5 亦禁止兜底/降级分支。
+	if err := w.routingDependenciesReady(); err != nil {
+		return false, err
+	}
+	return w.countsTowardWaterLevelRouted(ctx, candidate, row, models)
+}
+
+// routingDependenciesReady 报告 §18.4 W 所需的真实路由/渠道/网关依赖是否齐备。
+// 三者任一缺失即视为装配错误：水位必须显式失败，禁止静默退化回粗交集口径
+// （§18.4 第11条；共享合同 §5 禁止降级分支会掩盖真实错误）。
+// 生产装配点在 cmd/server/wire_gen.go:379（ProvideQuotaKeyReconciler 注入
+// gatewayService / channelService / compositeRouteResolver），正常装配下三者齐备。
+func (w *quotaKeyModelWater) routingDependenciesReady() error {
+	switch {
+	case w.resolver == nil:
+		return fmt.Errorf("quota_key_model_water: routing dependency not wired: resolver (*CompositeRouteResolver) is nil; production wiring at cmd/server/wire_gen.go:379")
+	case w.channel == nil:
+		return fmt.Errorf("quota_key_model_water: routing dependency not wired: channel (*ChannelService) is nil; production wiring at cmd/server/wire_gen.go:379")
+	case w.gateway == nil:
+		return fmt.Errorf("quota_key_model_water: routing dependency not wired: gateway (*GatewayService) is nil; production wiring at cmd/server/wire_gen.go:379")
+	}
+	return nil
+}
+
+// cursorCandidateModels 返回水位候选模型集：静态实供清单 + 账号 model_mapping 的精确键。
+// 精确键 = 不以 "*" 结尾（§18.4.1）——中间字面星号（如 gpt-*-high）必须保留，不能因
+// Contains("*") 误丢；通配键仍由 IsModelSupported/GetMappedModel 按既有规则匹配具体模型名。
+// 候选域沿用现有代码，不实现无限字符串求解器、不新增"未知就停补"的能力限制。
+func (w *quotaKeyModelWater) cursorCandidateModels(candidate *Account) []string {
+	seen := make(map[string]struct{}, len(CursorStaticEntryModels()))
+	out := make([]string, 0, len(CursorStaticEntryModels())+len(candidate.GetModelMapping()))
+	add := func(m string) {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			return
+		}
+		key := strings.ToLower(m)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, m)
+	}
+	for _, m := range CursorStaticEntryModels() {
+		add(m)
+	}
+	for model := range candidate.GetModelMapping() {
+		if strings.HasSuffix(model, "*") {
+			continue // 通配键：保留既有"具体模型名 + 通配映射"匹配，不进精确候选集
+		}
+		add(model)
+	}
+	return out
+}
+
+// countsTowardWaterLevelRouted §18.4 真实门：对每个具体候选模型 × 显式组 × 四个文本端点，
+// 从干净 ctx 各自解析路由，复用现有 resolver（显式 route → 账号精确 ownership → detector），
+// 再经平台/端点准入、组级渠道（返回 error 的内部读入口）、账号配额维度门。
+// 任一允许 → 账号只计一次；全部拒绝 → 不计；基础设施错误 → 整次错误（不返回部分数）。
+func (w *quotaKeyModelWater) countsTowardWaterLevelRouted(ctx context.Context, candidate *Account, row *ent.Account, models []string) (bool, error) {
+	endpoints := []string{
+		CompositeRouteEndpointChatCompletions,
+		CompositeRouteEndpointMessages,
+		CompositeRouteEndpointResponses,
+		CompositeRouteEndpointGemini,
+	}
+	for _, model := range models {
+		// 账号模型支持（候选域已含精确键；通配键经 IsModelSupported 匹配）。
+		if !candidate.IsModelSupported(model) {
+			continue
+		}
+		if _, ok := candidate.ResolveMappedModel(model); !ok {
+			// 非空账号映射目标缺失 → 真实请求无法落上游，不计。
+			continue
+		}
+		for _, g := range row.Edges.Groups {
+			if g == nil || g.DeletedAt != nil || g.Status != StatusActive {
+				continue
+			}
+			if g.Platform != PlatformCursor && g.Platform != PlatformComposite && !cursorNativeBridgePlatforms(g.Platform) {
+				continue
+			}
+			gid := g.ID
+			allowlist := GroupModelAllowlistFromDomain(g.ModelAllowlist)
+			if !allowlist.Allows(model) {
+				continue
+			}
+			for _, endpoint := range endpoints {
+				// 每个组合从干净 ctx 开始，不继承上一组合的 target/channel stamp。
+				decision, defaulted, err := w.resolveCompositeRoute(ctx, gid, model, endpoint)
+				if err != nil {
+					return false, fmt.Errorf("quota_key_model_water: resolve route (group %d, model %q, endpoint %q): %w", gid, model, endpoint, err)
+				}
+				target, reachable := effectiveTargetForEndpoint(decision, defaulted, endpoint)
+				if !reachable {
+					continue // JSON 三端点未匹配仍不可达；gemini 未匹配仍未 default
+				}
+				// 显式 route 把请求改向 Cursor 不可服务的平台（如 OpenAI）→ 该组合不计入。
+				// 仅当未显式改向（detector/ownership 或 gemini default 补 Gemini）才沿用既有准入。
+				if decision.Source == CompositeRouteSourceExplicit && !cursorServableTarget(target) {
+					continue
+				}
+				// 第8条：OpenAI 兼容 Messages 入口的组 dispatch 改写后的真实调度名，
+				// 水位与 handler 共用 ResolveOpenAIMessagesDispatchMappedModel 判定（不假造请求级 tier/body）。
+				// 其余端点真实调度名即请求模型本身。
+				effectiveModel := model
+				if endpoint == CompositeRouteEndpointMessages {
+					sg := &Group{Platform: g.Platform, MessagesDispatchModelConfig: g.MessagesDispatchModelConfig}
+					if dm := ResolveOpenAIMessagesDispatchMappedModel(sg, target, model); dm != "" {
+						effectiveModel = dm
+					}
+				}
+				if !candidate.IsModelSupported(effectiveModel) {
+					continue
+				}
+				if _, ok := candidate.ResolveMappedModel(effectiveModel); !ok {
+					continue
+				}
+				if !candidate.IsSchedulableForModelWithContext(ctx, effectiveModel) {
+					continue
+				}
+				// 组级渠道：读取失败 ≠ 无渠道，必须返回错误而非误判。
+				lk, err := w.channel.lookupGroupChannel(ctx, gid)
+				if err != nil {
+					return false, fmt.Errorf("quota_key_model_water: lookup group channel (group %d): %w", gid, err)
+				}
+				// 渠道改写/限制：按当前 billing source 消费正确的名字（§18.4.5/7）。
+				channelMapped := model
+				accountMapped := model
+				if m := candidate.GetMappedModel(model); m != "" {
+					accountMapped = m
+				}
+				restrictionModel := model
+				if lk != nil {
+					cm := resolveMapping(lk, gid, model)
+					if cm.Mapped {
+						channelMapped = cm.MappedModel
+					}
+					switch cm.BillingModelSource {
+					case BillingModelSourceRequested:
+						restrictionModel = model
+					case BillingModelSourceUpstream:
+						restrictionModel = accountMapped
+					case BillingModelSourceResponse, BillingModelSourceChannelMapped:
+						restrictionModel = channelMapped
+					default:
+						restrictionModel = channelMapped
+					}
+					if lk.channel.RestrictModels && checkRestricted(lk, gid, restrictionModel) {
+						continue
+					}
+				}
+				// 账号配额维度门：只消费 scope=account 维度，不把 key 余额复制成账号额度。
+				if EvaluateAccountQuotaDimensionGate(ResolveAccountQuotaDimensions(candidate, time.Now())) != QuotaDimensionGateAllow {
+					continue
+				}
+				// 命中任一合法组合 → 同号只计一次。
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// resolveCompositeRoute 统一解析各端点的路由；gemini 端点走薄共用方法（未匹配补 Gemini、
+// 不伪造 Matched/ownership），JSON 三端点走原 resolver.Resolve。
+func (w *quotaKeyModelWater) resolveCompositeRoute(ctx context.Context, groupID int64, model, endpoint string) (CompositeRouteDecision, bool, error) {
+	if endpoint == CompositeRouteEndpointGemini {
+		return w.resolver.ResolveGeminiWithDefault(ctx, groupID, model)
+	}
+	decision, err := w.resolver.Resolve(ctx, groupID, model, endpoint)
+	return decision, false, err
+}
+
+// effectiveTargetForEndpoint 从决策中抽取真实上游目标平台与可达性。
+// JSON 三端点：未匹配 → 不可达；gemini 端点：匹配用其 target，未匹配但 defaulted 仅补 Gemini target。
+func effectiveTargetForEndpoint(decision CompositeRouteDecision, defaulted bool, endpoint string) (string, bool) {
+	if endpoint == CompositeRouteEndpointGemini {
+		if decision.Matched {
+			return decision.TargetPlatform, true
+		}
+		if defaulted {
+			return PlatformGemini, true
+		}
+		return "", false
+	}
+	if !decision.Matched {
+		return "", false
+	}
+	return decision.TargetPlatform, true
+}
+
+// cursorServableTarget 判定显式 route 的目标平台是否 Cursor 账号可服务：
+// 仅 cursor 自身与其原生桥接平台（Anthropic/Gemini）。OpenAI/Grok/CN 等平台 Cursor 不借
+// CodeBuddy 特例越过平台门，故不算可服务（§18.4.4）。
+func cursorServableTarget(target string) bool {
+	return target == PlatformCursor || cursorNativeBridgePlatforms(target)
 }
 
 // isCooldownRefreshError 判定该 key 的 last_refresh_error 是否为【冷却】类错误。
@@ -1552,16 +1829,24 @@ func isCooldownRefreshError(errStr *string) bool {
 	return strings.HasPrefix(strings.TrimSpace(*errStr), ErrUpstreamCooldown.Error())
 }
 
-// ListCandidateKeys 返回模型 M 下需要补池的候选 quota_key ID：
+// ListCandidateKeys 返回池级（不按模型收窄）需要补池的候选 quota_key ID：
 // active + 非 exhausted + 未过期 + 未软删 + 有剩余容量（working < MaxAccountsPerQuotaKey）。
-// limit>0 时由实现方按需截断（差额）；模型 M 不收窄候选集——挂载语义由 PullAccountsForModel 决定目标分组。
+// limit>0 时由实现方按需截断（reconciler 传入的是总量缺口）；模型 M 不收窄候选集——
+// 挂载语义由 PullAccountsForModel 决定目标分组。
+//
+// P1-D2 总量制：缺号驱动由"cursor 可服务账号总量 < 10"触发，候选集与具体模型无关，
+// 故此处对全部有效码统一预检后返回（单码语义不变：只按 key 自身状态过滤、不做跨模型展开；
+// 每码 MaxAccountsPerQuotaKey=15 上限与非幂等保护均保持不变）。
 //
 // 裁定 3 冷却规则（last_refresh_error IS NULL 这一永久排除已删除，不得换皮重演）：
 //   - 冷却类错误（last_refresh_error 包 ErrUpstreamCooldown）且距 last_refresh_at 不足
 //     quotaKeyCooldownWindow（5min，shareai 实测窗口）→ 跳过（仍在冷却）；
 //   - 冷却类错误但窗口已过 → 自动重新入选（不等人工 clear）；
-//   - 非冷却错误已因 exhausted=true（casSetExhausted 既有语义）被上方查询排除，
-//     其时间流逝不产生任何限频豁免（不进入冷却窗口判定）。
+//   - 非冷却错误（未知/普通上游失败）只写 last_refresh_error、不动 exhausted
+//     （CUR-P1-FIX-KEY-EXHAUSTED：未知失败不得推导停供），故该类 key 仍留在候选集内，
+//     其时间流逝不产生任何限频豁免（不进入冷却窗口判定，窗口仅认冷却类错误）；
+//     真正被上方查询排除的是两类已确认事实：status 已非 active（含上游确认过期的 expired）
+//     与插入失败标记的 exhausted=true。
 func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, limit int) ([]int64, error) {
 	now := time.Now()
 	keys, err := w.client.QuotaKey.Query().

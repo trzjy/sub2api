@@ -100,7 +100,7 @@ func TestCursorForward_DoInjectsAuthHeaders(t *testing.T) {
 
 	body := []byte(`{"model":"cursor-small","messages":[{"role":"user","content":"hi"}]}`)
 	resp, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path: cursorPathStreamUnifiedChatWithToolsSSE,
+		Path: cursorPathAvailableModels,
 		Body: body,
 	})
 	if err != nil {
@@ -111,12 +111,12 @@ func TestCursorForward_DoInjectsAuthHeaders(t *testing.T) {
 	if got := fake.headers.Get(cursorJgAuthHeader); got != "TEST-CIPHERTEXT" {
 		t.Errorf("x-jg-auth = %q, want TEST-CIPHERTEXT", got)
 	}
-	if got := fake.headers.Get(cursorJgModelHeader); got != cursorJgModelHeaderValue {
-		t.Errorf("x-jg-model = %q, want %q", got, cursorJgModelHeaderValue)
+	if got := fake.headers.Get(cursorJgModelHeader); got != "" {
+		t.Errorf("Standard request must omit x-jg-model, got %q", got)
 	}
 	// 协议不重写：路径与请求体逐字节沿用 Cursor 原生形态。
-	if fake.path != cursorPathStreamUnifiedChatWithToolsSSE {
-		t.Errorf("path = %q, want %q", fake.path, cursorPathStreamUnifiedChatWithToolsSSE)
+	if fake.path != cursorPathAvailableModels {
+		t.Errorf("path = %q, want %q", fake.path, cursorPathAvailableModels)
 	}
 	if fake.body != string(body) {
 		t.Errorf("body mutated: %q", fake.body)
@@ -124,7 +124,7 @@ func TestCursorForward_DoInjectsAuthHeaders(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d", resp.StatusCode)
 	}
-	if !strings.HasSuffix(resp.TargetURL, cursorPathStreamUnifiedChatWithToolsSSE) {
+	if !strings.HasSuffix(resp.TargetURL, cursorPathAvailableModels) {
 		t.Errorf("TargetURL = %q", resp.TargetURL)
 	}
 }
@@ -136,7 +136,7 @@ func TestCursorForward_DoForwardsCallerHeaders(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	if _, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path: cursorPathStreamUnifiedChatWithToolsSSE,
+		Path: cursorPathAvailableModels,
 		Body: []byte(`{}`),
 		Headers: map[string]string{
 			"Authorization": "Bearer cursor-token",
@@ -164,7 +164,7 @@ func TestCursorForward_DoStreamsFramesVerbatim(t *testing.T) {
 		})
 
 	resp, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path:     cursorPathStreamUnifiedChatWithToolsSSE,
+		Path:     cursorPathAvailableModels,
 		Body:     []byte(`{}`),
 		UseHTTP2: true,
 	})
@@ -225,7 +225,7 @@ func TestCursorForward_MissingAuthProviderFailsClosed(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	_, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path: cursorPathStreamUnifiedChatWithToolsSSE,
+		Path: cursorPathAvailableModels,
 		Body: []byte(`{}`),
 	})
 	if err == nil {
@@ -254,7 +254,7 @@ func TestCursorForward_AuthFailureFailsClosed(t *testing.T) {
 				func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 			_, err := f.Do(context.Background(), &CursorUpstreamRequest{
-				Path: cursorPathStreamUnifiedChatWithToolsSSE,
+				Path: cursorPathAvailableModels,
 				Body: []byte(`{}`),
 			})
 			if err == nil {
@@ -288,7 +288,7 @@ func TestCursorForward_NeverFallsBackToCursorOfficial(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	_, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path: cursorPathStreamUnifiedChatWithToolsSSE,
+		Path: cursorPathAvailableModels,
 		Body: []byte(`{}`),
 	})
 	if err == nil {
@@ -423,13 +423,10 @@ func TestCursorWasmAuthProvider_ConcurrentSafe(t *testing.T) {
 }
 
 // 14) 路径白名单：已取证端点放行，未取证端点拒绝（含 B-1 纠错后已删除的三条）。
-func TestIsCursorAllowedUpstreamPath(t *testing.T) {
+func TestCursorUpstreamForwardAllowedPathWhitelist(t *testing.T) {
 	allowed := []string{
 		cursorPathAvailableModels,
-		cursorPathStreamUnifiedChatWithTools,
-		cursorPathStreamUnifiedChatWithToolsSSE,
-		cursorPathGetSessionToken,
-		cursorPathCheckSessionToken,
+		cursorPathAgentRun,
 	}
 	for _, p := range allowed {
 		if !IsCursorAllowedUpstreamPath(p) {
@@ -442,6 +439,13 @@ func TestIsCursorAllowedUpstreamPath(t *testing.T) {
 		"/",
 		"",
 		"/aiserver.v1.AIServiceService/Unknown",
+		// P1-A1 换轨：ChatService 的两条对话路径不再是出站路径，必须拒绝。
+		"/aiserver.v1.ChatService/StreamUnifiedChatWithTools",
+		"/aiserver.v1.ChatService/StreamUnifiedChatWithToolsSSE",
+		// P1-A2 旧链已删除（合同 §4）：AuthService 的换 token / 校验 token 两入口
+		// 不再有任何客户端，白名单也必须保持拒绝——放行它们等于给旧链留后门。
+		"/aiserver.v1.AuthService/GetSessionToken",
+		"/aiserver.v1.AuthService/CheckSessionToken",
 		// B-1 纠错：以下三条在 Cursor 3.24.12 全量资产中不存在（静态 0 命中），
 		// 放行它们等于把任意路径打到中转节点，必须保持拒绝。
 		"/aiserver.v1.AIServiceService/StreamUnifiedChatWithToolsSSE",
@@ -458,7 +462,34 @@ func TestIsCursorAllowedUpstreamPath(t *testing.T) {
 	}
 }
 
-// 15) 节点 base url 取法（E2 卡接口）：HTTP1BaseURL / HTTP2BaseURL 可用。
+// 15) 取消传播：请求上下文被取消时，出站必须立刻失败，绝不当成功返回。
+//
+// 取消的请求拿不到终态标记（turn_ended / EndStream），若把它当成功就会回写一条
+// 0 usage 的"成功"响应并误导计费，故本层必须把 ctx 错误原样抛出。
+func TestCursorUpstreamForwardCanceledContextFailsClosed(t *testing.T) {
+	f, _ := newCursorForwarderFixture(t,
+		staticCursorAuthProvider{value: "CIPHER"},
+		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 发出前即取消
+
+	resp, err := f.Do(ctx, &CursorUpstreamRequest{
+		Path: cursorPathAvailableModels,
+		Body: []byte(`{}`),
+	})
+	if err == nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		t.Fatal("want error for canceled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want context.Canceled, got %v", err)
+	}
+}
+
+// 16) 节点 base url 取法（E2 卡接口）：HTTP1BaseURL / HTTP2BaseURL 可用。
 func TestCursorForward_BaseURLAccessors(t *testing.T) {
 	f, fake := newCursorForwarderFixture(t,
 		staticCursorAuthProvider{value: "CIPHER"},

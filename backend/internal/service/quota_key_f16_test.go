@@ -15,9 +15,10 @@ import (
 
 // ---------------------------------------------------------------------------
 // R13-2（外审 R13 must_fix #2）：自动链路未知失败如实计入心跳。
-// 旧行为：pull 自动链路对未知上游错误 casSetExhausted 后 return nil → reconciler.pullKey
+// 旧行为：pull 自动链路对未知上游错误写标记后 return nil → reconciler.pullKey
 // 把 nil 当成功 pulled.Add(1) → 心跳记 "reconciled N quota keys"，失败被记成成功。
-// 新行为：自动链路透传含 ErrUpstreamKeyBlocked 哨兵的包裹错误（落库 exhausted=true 不变）；
+// 新行为：自动链路透传含 ErrUpstreamKeyBlocked 哨兵的包裹错误（落库只写失败标记，
+// exhausted 保持 false：未知失败不得标耗尽，CUR-P1-FIX-KEY-EXHAUSTED）；
 // reconciler.pullKey 识别该哨兵 → 记失败级日志、不加 pulled、返回 false（不停轮）。
 // ---------------------------------------------------------------------------
 
@@ -39,10 +40,10 @@ func TestCURF16_PullAccountsForModel_BlockedSentinel(t *testing.T) {
 	require.Contains(t, err.Error(), "upstream code=1 unknown result",
 		"underlying reason summary must be carried in the wrapped error")
 
-	// DB 落位不变：casSetExhausted 仍置 exhausted=true（与旧行为一致），且保留原文。
+	// DB 落位：失败标记保留原文；exhausted 保持 false（未知失败不是已确认终态，不得停供）。
 	got, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
-	require.True(t, got.Exhausted, "automatic unknown path must still drive exhausted=true (casSetExhausted)")
+	require.False(t, got.Exhausted, "automatic unknown path must keep exhausted=false (no inferred exhaustion)")
 	require.NotNil(t, got.LastRefreshError)
 	require.Contains(t, *got.LastRefreshError, "upstream code=1 unknown result",
 		"last_refresh_error must preserve the original msg text")
@@ -72,18 +73,16 @@ func TestCURF16_RefreshAccounts_ManualStillReturnsUpstreamPullError(t *testing.T
 
 // TestCURF16_Reconciler_BlockedSentinel_NotCountedAndContinues：reconciler 消费端——
 // 替身 puller 返回 ErrUpstreamKeyBlocked → 该 key 失败记入日志、pulled 不增、返回 false
-// （不停轮，本模型其余候选 + 其他模型继续被尝试）。
+// （不停轮，本批其余候选继续被尝试）。
 func TestCURF16_Reconciler_BlockedSentinel_NotCountedAndContinues(t *testing.T) {
 	readLog, restoreLog := captureLog(t)
 	defer restoreLog()
 
 	mw := newFakeModelWater()
 	mw.models = []string{"m1", "m2"}
-	mw.levels["m1"] = 0
-	mw.levels["m2"] = 0
-	// 两个模型、各两个候选，全部返回 Blocked 哨兵。
-	mw.candidates["m1"] = []int64{100, 101}
-	mw.candidates["m2"] = []int64{200, 201}
+	mw.level = 0 // 池级总量 0（总量口径：不按模型分别计数）
+	// 池级候选（总量口径下候选集不再按模型分桶），全部返回 Blocked 哨兵。
+	mw.candidates = []int64{100, 101, 200, 201}
 
 	puller := newFakePuller()
 	// 替身 puller 返回与真实 pull 自动链路同形的包裹错误（含 ErrUpstreamKeyBlocked 哨兵），

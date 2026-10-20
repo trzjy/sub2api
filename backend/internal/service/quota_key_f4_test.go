@@ -15,7 +15,8 @@ import (
 // ---------------------------------------------------------------------------
 // R1-1：手动刷新错误原文必须到达页面 + 未知结果不得显示成功。
 // 验证：手动链路（RefreshAccounts）返回的错误携带上游中文 msg 原文（Cooldown/Expired/Unknown）；
-// 自动链路（PullAccountsForModel）对未知结果仍走 casSetExhausted 且静默停（落库行为不变）。
+// 自动链路（PullAccountsForModel）对未知结果落失败标记（exhausted 保持 false：未知失败不得标
+// 耗尽，CUR-P1-FIX-KEY-EXHAUSTED），且不再静默成功。
 // ---------------------------------------------------------------------------
 
 func TestCURF4_RefreshAccounts_CooldownCarriesOriginalMessage(t *testing.T) {
@@ -76,7 +77,7 @@ func TestCURF4_RefreshAccounts_UnknownCarriesOriginalMessage(t *testing.T) {
 }
 
 // TestCURF4_PullAccountsForModel_UnknownSurfacesBlockedSentinel：自动链路对未知上游结果
-// 走 casSetExhausted（落库 exhausted=true 不变），但不再裸 return nil（R13-2）——改为透传
+// 走 writeUpstreamFailureMarker（落库只写标记、exhausted 保持 false），但不再裸 return nil（R13-2）——改为透传
 // 含 ErrUpstreamKeyBlocked 哨兵的包裹错误，使 reconciler 如实计入失败（不再被记成成功）。
 // 手动链路仍返回 *UpstreamPullError（F4 语义不变，见 TestCURF4_RefreshAccounts_UnknownCarriesOriginalMessage）。
 func TestCURF4_PullAccountsForModel_UnknownSurfacesBlockedSentinel(t *testing.T) {
@@ -95,10 +96,10 @@ func TestCURF4_PullAccountsForModel_UnknownSurfacesBlockedSentinel(t *testing.T)
 	require.Contains(t, err.Error(), "boom unknown",
 		"underlying reason summary must be carried in the wrapped error")
 
-	// 落库行为零变化：exhausted=true（casSetExhausted 既有语义）且保留原文。
+	// 落库：失败标记保留原文，exhausted 保持 false（未知失败不是已确认终态，不得停供）。
 	got, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
-	require.True(t, got.Exhausted, "automatic unknown path still drives exhausted=true (casSetExhausted)")
+	require.False(t, got.Exhausted, "automatic unknown path must keep exhausted=false (no inferred exhaustion)")
 	require.NotNil(t, got.LastRefreshError)
 	require.Contains(t, *got.LastRefreshError, "boom unknown",
 		"last_refresh_error must preserve the original msg text")

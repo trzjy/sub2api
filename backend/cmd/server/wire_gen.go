@@ -376,7 +376,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	// openAIGatewayService 构造之后。未注入时 forwardCursor 因依赖缺失失败关闭，
 	// 绝不回落明文。deviceId 解析器直接复用已构造的 quotaKeyService（B-10）。
 	openAIGatewayService.SetCursorAuthDeps(quotaKeyRepository, service.NewCredcryptEncryptor(), quotaKeyService)
-	quotaKeyReconciler := service.ProvideQuotaKeyReconciler(quotaKeyRepository, quotaKeyService, opsRepository)
+	quotaKeyReconciler := service.ProvideQuotaKeyReconciler(quotaKeyRepository, quotaKeyService, opsRepository, gatewayService, channelService, compositeRouteResolver)
 	// D-CURSOR-021 装配：admin 激活码端点（方案 §4.4，8 端点）。
 	// 直接复用 C7 / C9 已构造的 quotaKeySweeper 与 quotaKeyService，不再新建实例。
 	quotaKeyHandler := admin.NewQuotaKeyHandler(quotaKeyService, quotaKeySweeper, autoEntryService)

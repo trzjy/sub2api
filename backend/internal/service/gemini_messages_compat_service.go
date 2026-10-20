@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
@@ -619,6 +620,15 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 }
 
 func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
+	// Cursor（shareai 号池中转）：入站是 Anthropic Messages，出站是 Cursor 原生
+	// 协议端点，二者不兼容。必须在 Gemini 转换链之前分流——落到通用路径会把
+	// Anthropic 形状的 body 转成 Gemini 形状发往 Cursor 端点，必然被拒并白耗额度。
+	// 转换链：Anthropic → Chat Completions（apicompat）→ 契约 0.1 桥接入口
+	// CursorForwardInbound，再把桥接回写的 Chat Completions 回转成 Anthropic。
+	if isCursorAccount(account) {
+		return s.forwardCursorMessages(ctx, c, account, body)
+	}
+
 	beginUpstreamResponseModelObservation(c)
 	beginGeminiImageOutputObservation(c)
 	startTime := time.Now()
@@ -1172,6 +1182,14 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	}
 	if len(body) == 0 {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.RequestBodyEmpty)
+	}
+
+	// Cursor（shareai 号池中转）：v1beta 原生入口只有 generateContent /
+	// streamGenerateContent 两种文本动作能落到 Cursor 的 AgentRun 通道；其余
+	// 动作（countTokens 等）没有等价能力，**明确报错**而不是伪装成功。
+	// 转换链：Gemini 原生请求 → Chat Completions → 契约 0.1 桥接入口，再回转原生响应。
+	if isCursorAccount(account) {
+		return s.forwardCursorNative(ctx, c, account, originalModel, action, stream, body)
 	}
 
 	// 过滤掉 parts 为空的消息（Gemini API 不接受空 parts）
@@ -3844,5 +3862,601 @@ func (s *GeminiMessagesCompatService) extractImageInputSize(body []byte) string 
 		return strings.TrimSpace(req.GenerationConfig.ImageConfig.ImageSize)
 	}
 
+	return ""
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// P1-C2：Gemini 三出口的 Cursor 早分流
+//
+// 三个入口的入站形状不同，但出站都收敛到契约 0.1 的包级桥接入口：
+//
+//	Messages（Anthropic 形状） → apicompat 转 Chat Completions → CursorForwardInbound
+//	Chat Completions          → 原样（已是 CC 形状）            → CursorForwardInbound
+//	原生 v1beta（Gemini 形状） → 本地转 Chat Completions         → CursorForwardInbound
+//
+// 桥接会把**客户端响应按 Chat Completions 形状**写进传入的 gin.Context；三个出口
+// 中只有 Chat Completions 出口与该形状一致，Messages / 原生出口必须先把桥接输出
+// 捕获下来并按各自协议回转，否则客户端会收到错误协议的响应。
+//
+// 桥接内部一次性读完上游字节流（见 cursor_gateway_forward.go 的 readCursorUpstreamBody），
+// 因此这里的捕获不会额外引入流式延迟；usage 一律沿用桥接返回的 ForwardResult.Usage
+// （真实用量），三出口各自只把它写进协议规定的位置一次，桥内与出口层都不二次计费。
+// ════════════════════════════════════════════════════════════════════════════
+
+// cursorNativeTextActions 是 Cursor 账号在 v1beta 原生入口唯一支持的两类文本动作。
+// 其余动作（countTokens 等）没有等价能力，必须明确报错而不是伪装成功。
+var cursorNativeTextActions = map[string]bool{
+	"generateContent":       true,
+	"streamGenerateContent": true,
+}
+
+// cursorCompatCaptureWriter 捕获桥接写出的客户端响应（状态码/头/正文）。
+//
+// 捕获而非直接写真实 gin.Context，是为了让 Messages / 原生出口在拿到
+// Chat Completions 形状的输出后按各自协议回转；Chat Completions 出口不需要捕获。
+type cursorCompatCaptureWriter struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (w *cursorCompatCaptureWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *cursorCompatCaptureWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *cursorCompatCaptureWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(p)
+}
+
+// Flush 让捕获器满足 http.Flusher（桥接的流式写出断言 c.Writer 可 Flush）。
+func (w *cursorCompatCaptureWriter) Flush() {}
+
+// callCursorTextBridge 以捕获上下文调用契约 0.1 桥接入口。
+//
+// 返回桥接结果、被写出的客户端响应快照（失败时也可能有 ops/错误头）与错误。
+func callCursorTextBridge(
+	ctx context.Context,
+	account *Account,
+	ccBody []byte,
+) (*ForwardResult, *cursorCompatCaptureWriter, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	capture := &cursorCompatCaptureWriter{header: make(http.Header)}
+	bridgeCtx, _ := gin.CreateTestContext(capture)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "/internal/cursor/text", http.NoBody)
+	if err != nil {
+		return nil, capture, err
+	}
+	bridgeCtx.Request = req
+
+	res, ferr := CursorForwardInbound(ctx, bridgeCtx, account, cursorInboundOpenAIChat, ccBody)
+	if capture.status == 0 {
+		capture.status = http.StatusOK
+	}
+	return res, capture, ferr
+}
+
+// cursorCompatErrorStatus 返回桥接错误对客户端可见的状态码。
+//
+// 上游拒绝（含流内拒付哨兵）与鉴权材料缺失都属于网关侧上游失败，统一 502；
+// 入站形状/模型闸门失败也是失败关闭，但不向外区分内部细节。
+func cursorCompatErrorStatus() int {
+	return http.StatusBadGateway
+}
+
+// forwardCursorMessages 是 Messages 出口（Anthropic 形状）的 Cursor 分流。
+func (s *GeminiMessagesCompatService) forwardCursorMessages(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+) (*ForwardResult, error) {
+	var req struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "parse request: "+err.Error())
+	}
+	if strings.TrimSpace(req.Model) == "" {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "missing model")
+	}
+
+	ccBody, err := cursorAnthropicRequestToChatCompletions(body)
+	if err != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+	}
+
+	res, capture, ferr := callCursorTextBridge(ctx, account, ccBody)
+	if ferr != nil {
+		return nil, s.writeClaudeError(c, cursorCompatErrorStatus(), "upstream_error", ferr.Error())
+	}
+
+	payload, cerr := cursorChatCompletionsToAnthropic(capture.body.Bytes(), req.Model, req.Stream, res)
+	if cerr != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", cerr.Error())
+	}
+
+	if req.Stream {
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
+		c.Data(http.StatusOK, "text/event-stream", payload)
+	} else {
+		c.Data(http.StatusOK, "application/json", payload)
+	}
+	return res, nil
+}
+
+// forwardCursorNative 是 v1beta 原生出口（Gemini 形状）的 Cursor 分流。
+func (s *GeminiMessagesCompatService) forwardCursorNative(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	originalModel string,
+	action string,
+	stream bool,
+	body []byte,
+) (*ForwardResult, error) {
+	if !cursorNativeTextActions[action] {
+		// 非文本动作没有 Cursor 等价通道：明确报错，绝不伪装成功。
+		return nil, s.writeGoogleError(c, http.StatusBadRequest,
+			fmt.Sprintf("cursor: native action %q is not supported", action))
+	}
+
+	ccBody, err := cursorGeminiRequestToChatCompletions(body, originalModel, stream)
+	if err != nil {
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, err.Error())
+	}
+
+	res, capture, ferr := callCursorTextBridge(ctx, account, ccBody)
+	if ferr != nil {
+		return nil, s.writeGoogleError(c, cursorCompatErrorStatus(), ferr.Error())
+	}
+
+	payload, cerr := cursorChatCompletionsToGemini(capture.body.Bytes(), originalModel, stream, res)
+	if cerr != nil {
+		return nil, s.writeGoogleError(c, http.StatusBadGateway, cerr.Error())
+	}
+
+	if stream {
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
+		c.Data(http.StatusOK, "text/event-stream; charset=utf-8", payload)
+	} else {
+		c.Data(http.StatusOK, "application/json", payload)
+	}
+	return res, nil
+}
+
+// cursorAnthropicRequestToChatCompletions 用既有 apicompat 直接桥把 Anthropic
+// Messages 入站转成 Chat Completions（不绕 Responses 中间态）。
+func cursorAnthropicRequestToChatCompletions(body []byte) ([]byte, error) {
+	var req apicompat.AnthropicRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("cursor: parse anthropic request: %w", err)
+	}
+	cc, err := apicompat.AnthropicToChatCompletionsRequest(&req)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: convert anthropic request: %w", err)
+	}
+	out, err := json.Marshal(cc)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: marshal chat completions request: %w", err)
+	}
+	return out, nil
+}
+
+// cursorChatCompletionsToAnthropic 把桥接回写的 Chat Completions 输出转回 Anthropic
+// Messages 形状（流式/非流式）。
+func cursorChatCompletionsToAnthropic(
+	body []byte,
+	model string,
+	stream bool,
+	res *ForwardResult,
+) ([]byte, error) {
+	if stream {
+		return cursorChatCompletionsStreamToAnthropic(body, model, cursorResultUsage(res))
+	}
+	return cursorChatCompletionsResponseToAnthropic(body, model, cursorResultUsage(res))
+}
+
+func cursorResultUsage(res *ForwardResult) *ClaudeUsage {
+	if res == nil {
+		return nil
+	}
+	u := res.Usage
+	return &u
+}
+
+// cursorChatCompletionsResponseToAnthropic 非流式：chat.completion → Anthropic message。
+func cursorChatCompletionsResponseToAnthropic(body []byte, model string, usage *ClaudeUsage) ([]byte, error) {
+	var cc apicompat.ChatCompletionsResponse
+	if err := json.Unmarshal(body, &cc); err != nil {
+		return nil, fmt.Errorf("cursor: parse chat completion: %w", err)
+	}
+	resp := apicompat.ChatCompletionsResponseToAnthropic(&cc, model)
+	if usage != nil {
+		resp.Usage = cursorClaudeUsageToAnthropicUsage(*usage)
+	}
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: marshal anthropic response: %w", err)
+	}
+	return out, nil
+}
+
+// cursorChatCompletionsStreamToAnthropic 流式：CC chunk SSE → Anthropic 事件流。
+//
+// usage 在**全部 chunk 处理完之后**写入状态机，避免 Cursor 的 usage 键名
+// （input_tokens/output_tokens）被 ChatUsage 反序列化成零值后覆盖真实用量；
+// 终态由 FinalizeChatCompletionsAnthropicStream 产出 message_delta + message_stop。
+func cursorChatCompletionsStreamToAnthropic(body []byte, model string, usage *ClaudeUsage) ([]byte, error) {
+	state := apicompat.NewChatCompletionsToAnthropicStreamState(model)
+	var out bytes.Buffer
+
+	for _, payload := range cursorSSEDataPayloads(body) {
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk apicompat.ChatCompletionsChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return nil, fmt.Errorf("cursor: parse chat completion chunk: %w", err)
+		}
+		for _, evt := range apicompat.ChatCompletionsChunkToAnthropicEvents(&chunk, state) {
+			sse, err := apicompat.ResponsesAnthropicEventToSSE(evt)
+			if err != nil {
+				return nil, err
+			}
+			out.WriteString(sse)
+		}
+	}
+
+	if usage != nil {
+		state.InputTokens = usage.InputTokens
+		state.OutputTokens = usage.OutputTokens
+		state.CacheReadInputTokens = usage.CacheReadInputTokens
+		state.CacheCreationInputTokens = usage.CacheCreationInputTokens
+	}
+	for _, evt := range apicompat.FinalizeChatCompletionsAnthropicStream(state) {
+		sse, err := apicompat.ResponsesAnthropicEventToSSE(evt)
+		if err != nil {
+			return nil, err
+		}
+		out.WriteString(sse)
+	}
+	return out.Bytes(), nil
+}
+
+// cursorClaudeUsageToAnthropicUsage 逐字段搬运真实用量（不折算、不补默认值）。
+func cursorClaudeUsageToAnthropicUsage(u ClaudeUsage) apicompat.AnthropicUsage {
+	return apicompat.AnthropicUsage{
+		InputTokens:              u.InputTokens,
+		OutputTokens:             u.OutputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+	}
+}
+
+// cursorSSEDataPayloads 按 SSE 规范取出全部 data 字段（兼容 "data:" / "data: "）。
+func cursorSSEDataPayloads(body []byte) []string {
+	var payloads []string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if payload, ok := extractOpenAISSEDataLine(line); ok {
+			payloads = append(payloads, strings.TrimSpace(payload))
+		}
+	}
+	return payloads
+}
+
+// cursorGeminiPart 是原生入站 parts 元素的最小投影：只支持文本 part，
+// 其余类型（inlineData/functionCall/...）明确失败关闭。
+type cursorGeminiPart struct {
+	Text *string `json:"text"`
+}
+
+// cursorGeminiRequestToChatCompletions 把 v1beta generateContent 入站转成
+// Chat Completions 请求（Cursor AgentRun 通道只承载纯文本轮次）。
+func cursorGeminiRequestToChatCompletions(body []byte, model string, stream bool) ([]byte, error) {
+	var req struct {
+		Contents []struct {
+			Role  string            `json:"role"`
+			Parts []json.RawMessage `json:"parts"`
+		} `json:"contents"`
+		SystemInstruction *struct {
+			Parts []json.RawMessage `json:"parts"`
+		} `json:"systemInstruction"`
+		GenerationConfig struct {
+			Temperature     *float64 `json:"temperature"`
+			TopP            *float64 `json:"topP"`
+			MaxOutputTokens *int     `json:"maxOutputTokens"`
+		} `json:"generationConfig"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("cursor: parse gemini request: %w", err)
+	}
+	if strings.TrimSpace(model) == "" {
+		return nil, errors.New("cursor: missing model for native request")
+	}
+
+	messages := make([]apicompat.ChatMessage, 0, len(req.Contents)+1)
+
+	if req.SystemInstruction != nil {
+		text, err := cursorGeminiPartsText(req.SystemInstruction.Parts)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(text) != "" {
+			messages = append(messages, cursorChatTextMessage("system", text))
+		}
+	}
+
+	for _, content := range req.Contents {
+		role := strings.ToLower(strings.TrimSpace(content.Role))
+		switch role {
+		case "", "user":
+			role = "user"
+		case "model":
+			role = "assistant"
+		default:
+			return nil, fmt.Errorf("cursor: unsupported gemini role %q", content.Role)
+		}
+		text, err := cursorGeminiPartsText(content.Parts)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		messages = append(messages, cursorChatTextMessage(role, text))
+	}
+
+	if len(messages) == 0 {
+		return nil, errors.New("cursor: gemini request carries no text content")
+	}
+
+	cc := apicompat.ChatCompletionsRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   stream,
+	}
+	if req.GenerationConfig.Temperature != nil {
+		cc.Temperature = req.GenerationConfig.Temperature
+	}
+	if req.GenerationConfig.TopP != nil {
+		cc.TopP = req.GenerationConfig.TopP
+	}
+	if req.GenerationConfig.MaxOutputTokens != nil && *req.GenerationConfig.MaxOutputTokens > 0 {
+		v := *req.GenerationConfig.MaxOutputTokens
+		cc.MaxCompletionTokens = &v
+	}
+
+	out, err := json.Marshal(cc)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: marshal chat completions request: %w", err)
+	}
+	return out, nil
+}
+
+// cursorGeminiPartsText 拼接 parts 中的文本；出现非文本 part 即失败关闭。
+func cursorGeminiPartsText(parts []json.RawMessage) (string, error) {
+	var b strings.Builder
+	for _, raw := range parts {
+		var part cursorGeminiPart
+		if err := json.Unmarshal(raw, &part); err != nil {
+			return "", fmt.Errorf("cursor: parse gemini part: %w", err)
+		}
+		if part.Text == nil {
+			// 不猜 part 类型：直接把原始 part 名写进错误便于定位（不含用户内容）。
+			return "", fmt.Errorf("cursor: gemini native request only supports text parts, got %s", cursorGeminiPartKind(raw))
+		}
+		b.WriteString(*part.Text)
+	}
+	return b.String(), nil
+}
+
+// cursorGeminiPartKind 返回 part 的首个键名（仅用于错误文案，不含内容）。
+func cursorGeminiPartKind(raw json.RawMessage) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "unknown"
+	}
+	for _, key := range []string{"inlineData", "fileData", "functionCall", "functionResponse", "executableCode", "codeExecutionResult"} {
+		if _, ok := fields[key]; ok {
+			return key
+		}
+	}
+	return "unknown"
+}
+
+// cursorChatTextMessage 构造一条纯文本 Chat Completions 消息（content 为 JSON 字符串）。
+func cursorChatTextMessage(role, text string) apicompat.ChatMessage {
+	content, _ := json.Marshal(text)
+	return apicompat.ChatMessage{Role: role, Content: content}
+}
+
+// cursorChatCompletionsToGemini 把桥接回写的 Chat Completions 输出转回 Gemini 原生
+// 形状（流式/非流式）。
+func cursorChatCompletionsToGemini(
+	body []byte,
+	model string,
+	stream bool,
+	res *ForwardResult,
+) ([]byte, error) {
+	if stream {
+		return cursorChatCompletionsStreamToGemini(body, model, cursorResultUsage(res))
+	}
+	return cursorChatCompletionsResponseToGemini(body, model, cursorResultUsage(res))
+}
+
+// cursorChatCompletionsResponseToGemini 非流式：chat.completion → generateContent 响应。
+func cursorChatCompletionsResponseToGemini(body []byte, model string, usage *ClaudeUsage) ([]byte, error) {
+	var cc apicompat.ChatCompletionsResponse
+	if err := json.Unmarshal(body, &cc); err != nil {
+		return nil, fmt.Errorf("cursor: parse chat completion: %w", err)
+	}
+
+	text := ""
+	finishReason := ""
+	if len(cc.Choices) > 0 {
+		text = cursorChatMessageText(cc.Choices[0].Message.Content)
+		finishReason = cc.Choices[0].FinishReason
+	}
+
+	parts := make([]any, 0, 1)
+	if text != "" {
+		parts = append(parts, map[string]any{"text": text})
+	}
+	resp := map[string]any{
+		"candidates": []any{map[string]any{
+			"content":      map[string]any{"role": "model", "parts": parts},
+			"finishReason": cursorGeminiFinishReason(finishReason),
+			"index":        0,
+		}},
+		"modelVersion": model,
+	}
+	if cc.ID != "" {
+		resp["responseId"] = cc.ID
+	}
+	if usage != nil {
+		resp["usageMetadata"] = cursorGeminiUsageMetadata(*usage)
+	}
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: marshal gemini response: %w", err)
+	}
+	return out, nil
+}
+
+// cursorChatCompletionsStreamToGemini 流式：CC chunk SSE → Gemini SSE。
+//
+// 每个文本增量一帧；最后一个 chunk 的 finish_reason 与真实 usageMetadata 合并进
+// **终止帧**。Gemini SSE 没有 [DONE] 哨兵，正规终态就是带 finishReason 的末帧。
+func cursorChatCompletionsStreamToGemini(body []byte, model string, usage *ClaudeUsage) ([]byte, error) {
+	var out bytes.Buffer
+	finishReason := ""
+
+	for _, payload := range cursorSSEDataPayloads(body) {
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk apicompat.ChatCompletionsChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return nil, fmt.Errorf("cursor: parse chat completion chunk: %w", err)
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		choice := chunk.Choices[0]
+		if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
+			finishReason = *choice.FinishReason
+		}
+		if choice.Delta.Content == nil || *choice.Delta.Content == "" {
+			continue
+		}
+		frame := map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{
+					"role":  "model",
+					"parts": []any{map[string]any{"text": *choice.Delta.Content}},
+				},
+				"index": 0,
+			}},
+			"modelVersion": model,
+		}
+		if err := writeCursorGeminiSSEFrame(&out, frame); err != nil {
+			return nil, err
+		}
+	}
+
+	final := map[string]any{
+		"candidates": []any{map[string]any{
+			"content":      map[string]any{"role": "model", "parts": []any{}},
+			"finishReason": cursorGeminiFinishReason(finishReason),
+			"index":        0,
+		}},
+		"modelVersion": model,
+	}
+	if usage != nil {
+		final["usageMetadata"] = cursorGeminiUsageMetadata(*usage)
+	}
+	if err := writeCursorGeminiSSEFrame(&out, final); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func writeCursorGeminiSSEFrame(out *bytes.Buffer, frame map[string]any) error {
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		return fmt.Errorf("cursor: marshal gemini stream frame: %w", err)
+	}
+	out.WriteString("data: ")
+	out.Write(payload)
+	out.WriteString("\n\n")
+	return nil
+}
+
+// cursorGeminiUsageMetadata 把真实用量落到 Gemini usageMetadata 的唯一位置。
+func cursorGeminiUsageMetadata(u ClaudeUsage) map[string]any {
+	prompt := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+	candidates := u.OutputTokens
+	return map[string]any{
+		"promptTokenCount":     prompt,
+		"candidatesTokenCount": candidates,
+		"totalTokenCount":      prompt + candidates,
+	}
+}
+
+// cursorGeminiFinishReason 把 Chat Completions 的 finish_reason 映射为 Gemini 枚举。
+func cursorGeminiFinishReason(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length":
+		return "MAX_TOKENS"
+	case "content_filter":
+		return "SAFETY"
+	case "tool_calls", "function_call":
+		return "STOP"
+	default:
+		return "STOP"
+	}
+}
+
+// cursorChatMessageText 从 ChatMessage.Content 提取纯文本（字符串或纯文本 parts）。
+func cursorChatMessageText(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var parts []apicompat.ChatContentPart
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		var b strings.Builder
+		for _, part := range parts {
+			if part.Type == "text" {
+				b.WriteString(part.Text)
+			}
+		}
+		return b.String()
+	}
 	return ""
 }

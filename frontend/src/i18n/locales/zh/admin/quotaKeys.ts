@@ -63,7 +63,8 @@ export default {
       expiresAt: '过期时间',
       lastRefreshAt: '最近拉号时间',
       lastRefreshError: '最近错误',
-      notes: '备注'
+      notes: '备注',
+      accountsQuotaHint: '账号层不展示激活码额度：激活码（key 级）额度与账号余额分属两层口径，不复制展示。'
     },
     accountsTitle: '归属账号列表',
     noAccounts: '该激活码下暂无账号',
@@ -98,8 +99,8 @@ export default {
       vendorMuse: 'Muse',
       vendorComposer: 'Composer',
       models: '模型清单（按厂商过滤）',
+      modelsSourceAuto: '模型能力自动来源于上游实供清单，不支持手工录入，仅可勾选或取消。',
       priority: '优先级',
-      rateMultiplier: '速率倍率',
       concurrency: '并发',
       concurrencyPlaceholder: '实测后定',
       save: '保存配置',
@@ -121,7 +122,8 @@ export default {
       deviceMaxCount: '最大设备数',
       expiredAt: '到期时间',
       accountsWritten: '已写入账号数',
-      error: '用量查询失败'
+      error: '用量查询失败',
+      keyLevelHint: '以上为激活码（key 级）额度快照：总额度、期限、设备、取号结果均为 key 层口径，不等于单个账号余额。'
     }
   }
 }

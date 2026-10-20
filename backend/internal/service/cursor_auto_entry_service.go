@@ -18,8 +18,9 @@ import (
 
 // cursor_auto_entry_service.go 实现"入库可配置"域（派发单 D2-a）：
 //   - cursor_auto_entry_config 的 Get/Update（存 settings 表新键，JSONB 值）；
-//   - ApplyEntryDefaults：入库时把"勾选模型 ∩ 静态清单"写入 account.extra.entry_models，
-//     并把 priority/rate_multiplier/concurrency 写入 account 列；
+//   - ApplyEntryDefaults：入库时把收口后的 priority/rate_multiplier（并发沿用列默认）
+//     写入 account 列（P1-B2：entry 模型走静态清单 → credentials.model_mapping，
+//     不再写 account.extra.entry_models）；
 //   - ProbeKeyQuota：按取证结论（/root/cursor-evidence/01-protocol-doc.md）实现 lookup
 //     —— 解密复用 QuotaKeyEncryptor、DJB2 device-id、浏览器 UA，并把 key_quota_snapshot
 //     写入该 key 全部账号的 extra。
@@ -31,11 +32,17 @@ import (
 // 不经用户裁定不得更换（D2-a 禁区）。
 const CursorAutoEntryConfigSettingKey = "cursor_auto_entry_config"
 
-// CursorEntryModelsExtraKey 是 accounts.extra 中存放"该账号生效模型集合"的键。
-const CursorEntryModelsExtraKey = "entry_models"
-
 // CursorKeyQuotaSnapshotExtraKey 是 accounts.extra 中存放"key 级额度快照"的键。
 const CursorKeyQuotaSnapshotExtraKey = "key_quota_snapshot"
+
+// 入库参数收口（P1-B2 §16.1）：入库账号的三项参数固定取值，不再随配置漂移。
+//   - priority = 1：常规优先级，不做入库侧加权；
+//   - rate_multiplier = 1.0：账号成本中性，不放大/缩小计费（不批改存量非 1 的账号）；
+//   - concurrency 不写（nil）→ 沿用 account 列默认 3。
+const (
+	CursorEntryPriority       = 1
+	CursorEntryRateMultiplier = 1.0
+)
 
 // CursorAutoEntryDefaultConcurrency 是 concurrency 留空（nil）时沿用的 account 列默认值。
 // 与 ent account 的 DefaultConcurrency（=3）一致；实测前不拍默认值（D2 裁定②）。
@@ -95,11 +102,11 @@ type HTTPDoer interface {
 // AccountFieldWriter 是"写账号列/extra"的窄接口：生产实现走 ent client；测试可替身。
 // 与既有的 QuotaKeyRepository（聚焦 quota_keys 表）解耦，避免把账号写操作塞进 quota_keys 仓储。
 type AccountFieldWriter interface {
-	// ApplyEntryDefaults 持久化账号入库属性：priority/rate_multiplier 列、可选 concurrency 列，
-	// 并把 entryModels 合并写入 extra[entry_models]（不覆盖 extra 其它键）。
+	// ApplyEntryDefaults 持久化账号入库属性：priority/rate_multiplier 列、可选 concurrency 列
+	// （P1-B2 起入库参数收口为固定值，不再写 extra.entry_models——该键无生产消费者，随卡清理）。
 	// tx 非 nil 时必须在同一事务内持久化（D1 挂载路径：account 由上游刚建、尚未提交，独立 client
 	// 看不见未提交行会 NotFound；只有复用挂载事务的 tx 才能写成功）。tx 为 nil 时退化为默认 ent client。
-	ApplyEntryDefaults(ctx context.Context, tx *ent.Tx, id int64, priority int, rateMultiplier float64, concurrency *int, entryModels []string) error
+	ApplyEntryDefaults(ctx context.Context, tx *ent.Tx, id int64, priority int, rateMultiplier float64, concurrency *int) error
 	// UpdateExtraKey 把 value 合并写入指定账号 extra 的 key（读取现有 extra，合并后整体写回，不覆盖其它键）。
 	UpdateExtraKey(ctx context.Context, id int64, key string, value any) error
 }
@@ -200,9 +207,8 @@ func (s *CursorAutoEntryService) GetConfig(ctx context.Context) (*CursorAutoEntr
 		return DefaultAutoEntryConfig(), nil
 	}
 	// R4-2：顶层字面 null 必须显式报错，不得静默成零值空模型集
-	// （否则 ComputeEntryModels 返回空 → reconciler 报 "no allowed models" 当成功停轮，
-	// 把配置损坏伪装成用户清空）。(nil / "null") 两种形态都拦截，与现有
-	// INVALID 错误同型。
+	// （否则配置损坏会被当作"合法空配置"静默吞掉）。(nil / "null") 两种形态都拦截，
+	// 与现有 INVALID 错误同型。
 	if strings.TrimSpace(raw) == "null" {
 		return nil, infraerrors.New(http.StatusBadRequest, "CURSOR_AUTO_ENTRY_CONFIG_INVALID",
 			"cursor_auto_entry_config must not be null")
@@ -308,44 +314,18 @@ func (c *CursorAutoEntryConfig) Validate() string {
 	return ""
 }
 
-// ComputeEntryModels 计算"勾选模型 ∩ 实供清单"的有效模型 ID 列表（并受厂商勾选门控）。
+// ComputeEntryModels 返回入库 entry 模型集合（P1-B2：静态清单恒等，退出人工勾选门控）。
 //
-// 规则（裁定 1 / docs-local/cursor-model-catalog-fact.md）：以配置 Models 为用户勾选集合，
-// 与 CursorRealSupplyModels【实供】清单取交集（剔除任何不在实供清单中的失效/笔误/官方口径 ID），
-// 同时要求该模型所属厂商在 Vendors 中启用。返回保序、去重的模型 ID。空结果（厂商全关 /
-// 模型清空 / 勾选了上游不供的官方模型名）是合法态——账号仍入库、挂组不受影响。
+// 语义：entry 模型恒等于静态实供清单 CursorRealSupplyModels（经 CursorStaticEntryModels
+// 保序去重），既不与人工勾选 Models 取交集，也不受厂商开关 Vendors 门控——入库不再以
+// "人工勾选"定义账号能力。cfg 参数保留仅为兼容既有调用点（AutoEntryConfigProvider 契约），
+// 不参与结果产出。
 //
-// 注意：门控清单是【实供】清单（CursorRealSupplyModelIDSet），不是官方模型名快照
-// CursorModelCatalog——后者 §1 的 11 个实供模型全部不在其内（11/11 MISSING），继续用它会
-// 把本渠道所有实供模型判为非法，导致补池交集恒空、reconciler 每轮空跑。
-func ComputeEntryModels(cfg *CursorAutoEntryConfig) []string {
-	if cfg == nil {
-		return []string{}
-	}
-	// CUR-F8：以实供清单"ID → 真实归属厂商"为权威门控依据，不信配置自报 vendor。
-	// 即便配置把 gpt-6-sol 的 vendor 自报为 xai，此处仍按真实归属 openai 判开关，
-	// 自报 vendor 被冒用时无法再绕过厂商门控。ID 不在实供清单内 → 剔除（既有语义）。
-	realVendor := CursorRealSupplyVendorByID()
-	seen := make(map[string]struct{})
-	out := make([]string, 0, len(cfg.Models))
-	for _, m := range cfg.Models {
-		if m.ID == "" {
-			continue
-		}
-		real, ok := realVendor[m.ID]
-		if !ok {
-			continue // 不在实供清单：剔除
-		}
-		if !cfg.Vendors[real] {
-			continue // 真实归属厂商未勾选：门控剔除
-		}
-		if _, dup := seen[m.ID]; dup {
-			continue
-		}
-		seen[m.ID] = struct{}{}
-		out = append(out, m.ID)
-	}
-	return out
+// 由此消除两类旧缺陷（证据：docs-local/cursor-model-catalog-fact.md）：
+//   - 门控清单错用官方名快照 CursorModelCatalog：11/11 实供模型被判为非法、补池交集恒空；
+//   - 勾选态（用户全关 / 残留旧官方名）可使入库账号零模型：能力本应由上游实供决定。
+func ComputeEntryModels(_ *CursorAutoEntryConfig) []string {
+	return CursorStaticEntryModels()
 }
 
 // CursorAccountModelMapping 把实供清单门控后的选中模型集转换为账号级恒等模型映射
@@ -372,39 +352,31 @@ func CursorAccountModelMapping(selectedModels []string) map[string]any {
 	return mapping
 }
 
-// ApplyEntryDefaults 把配置中的入库默认值与有效模型集合写入账号的列与 extra（D1 挂载点调用）。
+// ApplyEntryDefaults 把收口后的入库参数写入账号的列（D1 挂载点调用）。
 //
 // 仅写账号属性，不动挂组集合计算（D2-a 禁区）：
-//   - priority → account.priority 列；rate_multiplier → account.rate_multiplier 列；
-//   - concurrency 非 nil → account.concurrency 列；为 nil → 不写该列（沿用列默认 3）；
-//   - 有效模型（ComputeEntryModels）合并写入 account.extra.entry_models（不覆盖 extra 其它键）。
+//   - priority → account.priority 列，恒为 CursorEntryPriority（=1）；
+//   - rate_multiplier → account.rate_multiplier 列，恒为 CursorEntryRateMultiplier（=1.0，
+//     账号成本中性；不批改存量非 1 的账号）；
+//   - concurrency：入库不写该列（nil）→ 沿用 account 列默认 3。
+//
+// 参数不再取自 cfg.EntryDefaults（P1-B2 收口）：cfg 保留仅为 AutoEntryConfigProvider 契约兼容。
 //
 // tx 非 nil 时（D1 挂载路径）必须传入挂载事务：account 由上游刚建、尚未提交，只有复用同一 tx
 // 才能在本事务内写成功；tx 为 nil（如独立调用场景）时退化为默认 ent client 写入已提交账号。
-func (s *CursorAutoEntryService) ApplyEntryDefaults(ctx context.Context, tx *ent.Tx, account *ent.Account, cfg *CursorAutoEntryConfig) (*ent.Account, error) {
+func (s *CursorAutoEntryService) ApplyEntryDefaults(ctx context.Context, tx *ent.Tx, account *ent.Account, _ *CursorAutoEntryConfig) (*ent.Account, error) {
 	if account == nil {
 		return nil, fmt.Errorf("cursor_auto_entry: nil account")
 	}
-	if cfg == nil {
-		cfg = DefaultAutoEntryConfig()
-	}
-	entryModels := ComputeEntryModels(cfg)
-	if err := s.writer.ApplyEntryDefaults(ctx, tx, account.ID, cfg.EntryDefaults.Priority, cfg.EntryDefaults.RateMultiplier, cfg.EntryDefaults.Concurrency, entryModels); err != nil {
+	if err := s.writer.ApplyEntryDefaults(ctx, tx, account.ID, CursorEntryPriority, CursorEntryRateMultiplier, nil); err != nil {
 		return nil, fmt.Errorf("cursor_auto_entry: apply entry defaults to account %d: %w", account.ID, err)
 	}
 	// 回填内存实体，便于调用方继续复用（如挂组）。
 	// 注：此处 account 为 *ent.Account（ent ORM 实体，单次请求内新建/加载、随请求结束即弃），
-	// 并非并发收口机制所保护的 service.Account；其 Extra 为请求局部 map，不存在跨 goroutine
-	// 并发读写，故直接写属于正当保留（与 account_repo.go 等局部 DTO 同判），不套用 MergeExtra。
-	if account.Extra == nil {
-		account.Extra = map[string]any{}
-	}
-	account.Extra[CursorEntryModelsExtraKey] = entryModels
-	account.Priority = cfg.EntryDefaults.Priority
-	account.RateMultiplier = cfg.EntryDefaults.RateMultiplier
-	if cfg.EntryDefaults.Concurrency != nil {
-		account.Concurrency = *cfg.EntryDefaults.Concurrency
-	}
+	// 并非并发收口机制所保护的 service.Account，属请求局部实体，直接写字段为正当保留。
+	account.Priority = CursorEntryPriority
+	account.RateMultiplier = CursorEntryRateMultiplier
+	// concurrency 不回填：保留列默认 3，避免以零值覆盖。
 	return account, nil
 }
 
@@ -581,21 +553,14 @@ type entAccountFieldWriter struct {
 	client *ent.Client
 }
 
-// ApplyEntryDefaults 持久化 priority/rate_multiplier 列与可选 concurrency 列，并把
-// entryModels 合并写入 extra[entry_models]（不覆盖 extra 其它键）。concurrency 为 nil 时
-// 跳过该列（沿用列默认 3）。tx 非 nil 时在同一事务内写入（D1 挂载路径，account 未提交）；
-// 否则退化为默认 ent client（用于已提交账号的独立更新）。
-func (w *entAccountFieldWriter) ApplyEntryDefaults(ctx context.Context, tx *ent.Tx, id int64, priority int, rateMultiplier float64, concurrency *int, entryModels []string) error {
+// ApplyEntryDefaults 持久化 priority/rate_multiplier 列与可选 concurrency 列
+// （P1-B2：不再写 extra.entry_models——该键无生产消费者，随卡清理）。
+// concurrency 为 nil 时跳过该列（沿用列默认 3）。tx 非 nil 时在同一事务内写入
+// （D1 挂载路径，account 未提交）；否则退化为默认 ent client（用于已提交账号的独立更新）。
+func (w *entAccountFieldWriter) ApplyEntryDefaults(ctx context.Context, tx *ent.Tx, id int64, priority int, rateMultiplier float64, concurrency *int) error {
 	if w.client == nil {
 		return fmt.Errorf("cursor_auto_entry: ent client not configured for account field writer")
 	}
-	// 合并 entry_models 到现有 extra（保留其它键），再持久化。
-	extra, err := w.readExtra(ctx, tx, id)
-	if err != nil {
-		return err
-	}
-	extra[CursorEntryModelsExtraKey] = entryModels
-
 	var builder *ent.AccountUpdateOne
 	if tx != nil {
 		builder = tx.Account.UpdateOneID(id)
@@ -606,7 +571,6 @@ func (w *entAccountFieldWriter) ApplyEntryDefaults(ctx context.Context, tx *ent.
 	if concurrency != nil {
 		builder = builder.SetConcurrency(*concurrency)
 	}
-	builder = builder.SetExtra(extra)
 	if _, err := builder.Save(ctx); err != nil {
 		return fmt.Errorf("cursor_auto_entry: persist account %d entry defaults: %w", id, err)
 	}
@@ -614,15 +578,10 @@ func (w *entAccountFieldWriter) ApplyEntryDefaults(ctx context.Context, tx *ent.
 }
 
 // readExtra 读取指定账号的 extra 并复制一份返回（避免并发修改同一 map 引用）。
-// tx 非 nil 时在事务内读取（与 ApplyEntryDefaults 同事务，可见未提交行）；否则用默认 client。
-func (w *entAccountFieldWriter) readExtra(ctx context.Context, tx *ent.Tx, id int64) (map[string]any, error) {
-	var acc *ent.Account
-	var err error
-	if tx != nil {
-		acc, err = tx.Account.Get(ctx, id)
-	} else {
-		acc, err = w.client.Account.Get(ctx, id)
-	}
+// 仅供 UpdateExtraKey（key 级额度快照合并写入）使用；tx 固定为 nil——快照写入只发生在
+// 已提交账号的独立更新路径。
+func (w *entAccountFieldWriter) readExtra(ctx context.Context, id int64) (map[string]any, error) {
+	acc, err := w.client.Account.Get(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("cursor_auto_entry: load account %d extra: %w", id, err)
 	}
@@ -642,7 +601,7 @@ func (w *entAccountFieldWriter) UpdateExtraKey(ctx context.Context, id int64, ke
 	if w.client == nil {
 		return fmt.Errorf("cursor_auto_entry: ent client not configured for account field writer")
 	}
-	extra, err := w.readExtra(ctx, nil, id)
+	extra, err := w.readExtra(ctx, id)
 	if err != nil {
 		return err
 	}

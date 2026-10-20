@@ -26,14 +26,21 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	wasmcrypto "github.com/Wei-Shaw/sub2api/internal/service/wasm"
 )
@@ -62,47 +69,49 @@ var (
 
 // 已取证的 Cursor 原生端点路径。
 //
-// **依据（2026-10-16 活体 + 静态双重实证，见证据目录
-// ~/.sub2api-acceptance/cursor-20261016-protocol/07-live-b1-closed.md §4）**：
+// **对话出站路径已于 P1-A1 从 ChatService/StreamUnifiedChatWithTools 换为
+// agent.v1.AgentService/Run**（双向 Connect 文本流）。
 //
-//	B-1 纠错前的 4 条常量里，第 1 条服务名错、另 2 条方法全盘不存在（静态 0 命中），
-//	第 4 条服务名与方法名均错。此处已整体替换为下面这组。
+// 换轨依据（/root/cursor-p1-evidence/*-current-protocol-results.json，10 份活体样本，
+// 全部 `path: /agent.v1.AgentService/Run`、status 200）：
 //
-//	⚠️ 各条的证据强度不同，**不得**整体宣称"全部活体验证过"：
-//	  - 已活体 200：AvailableModels、StreamUnifiedChatWithTools（B-1 关闭项）
-//	  - 静态确认存在、未活体探测：StreamUnifiedChatWithToolsSSE、GetSessionToken、
-//	    CheckSessionToken
-//	  - 不存在（已删除）：…SSEWithMcp、GenerateUnifiedCompletionWithToolsSSE、
-//	    AIServiceService/* 全部
+//   - 33 / 37 / 45 / 47 / 51：单轮成功文本（"OK"）+ TurnEnded 真实 usage；
+//
+//   - 63：多轮历史消费成功（"ORCHID" 证明第二轮读到了历史）；
+//
+//   - 53 / 125 / 134：HTTP 200 正常帧里的固定拒付模板（流内拒付，非传输错误）；
+//
+//   - 54：不同 wire 模型（gpt / claude）身份对照同样走该路径。
+//
+//     ⚠️ 各条的证据强度不同，**不得**整体宣称"全部活体验证过"：
+//
+//   - 已活体 200：AvailableModels、StreamUnifiedChatWithTools（B-1 关闭项）
+//
+//   - 静态确认存在、未活体探测：StreamUnifiedChatWithToolsSSE
+//
+//   - 不存在（已删除）：…SSEWithMcp、GenerateUnifiedCompletionWithToolsSSE、
+//     AIServiceService/* 全部
+//
+//     P1-A2 旧链删除（合同 §4）：AuthService 的两个会话令牌端点（换 token / 校验 token）
+//     连同其常量与白名单条目一并删除——出站已改用账号已存 Bearer，进程内不再存在任何
+//     "按 key 换 session token"的客户端。
 const (
 	// cursorPathAvailableModels —— 模型列表。**活体 200**（135,922 字节 / 12 个模型）。
 	// 服务名是 AiService（不是 AIServiceService），方法名是 AvailableModels
 	// （不是 GetAvailableModels）。
 	cursorPathAvailableModels = "/aiserver.v1.AiService/AvailableModels"
 
-	// cursorPathStreamUnifiedChatWithTools —— 对话主路径（BiDiStreaming）。
-	// **活体 200 + 业务错误**（非 404 ⇒ 路径存在，且中转不改写 path）。
-	cursorPathStreamUnifiedChatWithTools = "/aiserver.v1.ChatService/StreamUnifiedChatWithTools"
-
-	// cursorPathStreamUnifiedChatWithToolsSSE —— 对话的 ServerStreaming 变体，
-	// 首字段是 BidiRequestId{1 request_id}（**不是**聊天请求体）。静态确认存在。
-	cursorPathStreamUnifiedChatWithToolsSSE = "/aiserver.v1.ChatService/StreamUnifiedChatWithToolsSSE"
-
-	// cursorPathGetSessionToken —— B-13 用户级 token 换取（Unary）。
-	// 静态确认存在 + **活体已抵达其业务逻辑**（见 cursor_auth_token.go）。
-	cursorPathGetSessionToken = "/aiserver.v1.AuthService/GetSessionToken"
-
-	// cursorPathCheckSessionToken —— 缓存有效性校验（Unary）。静态确认存在。
-	cursorPathCheckSessionToken = "/aiserver.v1.AuthService/CheckSessionToken"
+	// cursorPathAgentRun —— 对话主路径（agent.v1.AgentService/Run，BiDiStreaming）。
+	//
+	// **P1-A1 起唯一对话出站路径**：10 份活体样本全部 200，且是唯一能同时拿到
+	// 增量文本与 TurnEnded 真实 usage 的端点。
+	cursorPathAgentRun = "/agent.v1.AgentService/Run"
 )
 
 // cursorAllowedUpstreamPaths 是已取证的出站路径白名单（失败关闭用）。
 var cursorAllowedUpstreamPaths = map[string]struct{}{
-	cursorPathAvailableModels:               {},
-	cursorPathStreamUnifiedChatWithTools:    {},
-	cursorPathStreamUnifiedChatWithToolsSSE: {},
-	cursorPathGetSessionToken:               {},
-	cursorPathCheckSessionToken:             {},
+	cursorPathAvailableModels: {},
+	cursorPathAgentRun:        {},
 }
 
 // IsCursorAllowedUpstreamPath 报告给定路径是否在已取证白名单内（E2 卡可用）。
@@ -121,10 +130,15 @@ type CursorUpstreamRequest struct {
 	Headers map[string]string
 	// UseHTTP2 为 true 时走 HTTP2Base，否则走 HTTP1Base。
 	UseHTTP2 bool
+	// Model 是上游模型名（仅用于阶段日志标识，不参与任何请求构造）。
+	//
+	// 与 §18.5 T 的最小阶段日志一致：只作为不可变标识出现在事件字段里，
+	// 绝不进入请求头/体，也不参与任何业务逻辑。
+	Model string
 
 	// AuthProvider 是**本次请求**的鉴权材料提供者，覆盖转发器上配置的默认 provider。
 	//
-	// 为什么需要覆盖：x-jg-auth 是**账号级**材料（zk03({d: deviceId, a: 激活码}），
+	// 为什么需要覆盖：x-jg-auth 是**账号级**材料（zk03({d: deviceId, a: 激活码})，
 	// 不同账号的 deviceId 与激活码都不同）。转发器是进程级共享的（节点缓存需要），
 	// 把单一材料挂在转发器上等于把 A 号的凭证发给 B 号——这正是方案
 	// §2 E1「遗留风险登记」要求用本字段解决的情形。
@@ -240,12 +254,21 @@ func (f *CursorUpstreamForwarder) Do(
 
 	nodes := f.nodes.Resolve(ctx)
 	base := nodes.HTTP1Base
-	if req.UseHTTP2 {
+	if req.UseHTTP2 || req.Path == cursorPathAgentRun {
 		base = nodes.HTTP2Base
 	}
 	target := strings.TrimRight(base, "/") + req.Path
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(req.Body))
+	var requestBody io.Reader = bytes.NewReader(req.Body)
+	var duplex *cursorAgentDuplex
+	if req.Path == cursorPathAgentRun {
+		duplex, err = newCursorAgentDuplex(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		requestBody = duplex.reader
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("cursor: build upstream request: %w", err)
 	}
@@ -257,11 +280,77 @@ func (f *CursorUpstreamForwarder) Do(
 	}
 	// 鉴权与模型标记头（wasm zk27 活体实测产物）。
 	httpReq.Header.Set(cursorJgAuthHeader, auth)
-	httpReq.Header.Set(cursorJgModelHeader, cursorJgModelHeaderValue)
+	httpReq.Header.Del(cursorJgModelHeader)
 
+	// §18.5 T 阶段日志：用标准库 httptrace 记录 DNS/connect/TLS 完成与安全错误类别。
+	// 回调只使用下方捕获的不可变标识（lg / reqID / model）与起始时间，
+	// 不跨 goroutine 读 gin.Context、不共享未加锁 map。
+	reqStart := time.Now()
+	reqID, _ := ctx.Value(ctxkey.RequestID).(string)
+	model := req.Model
+	if model == "" {
+		model = req.Path
+	}
+	lg := logger.FromContext(ctx)
+	trace := &httptrace.ClientTrace{
+		DNSStart: func(info httptrace.DNSStartInfo) {
+			cursorPhaseLogFields(lg, zapcore.DebugLevel, "dns_start", model, reqID, zap.String("host", info.Host))
+		},
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			cursorPhaseLogFields(lg, zapcore.DebugLevel, "dns_done", model, reqID, zap.String("outcome", cursorHTTPErrClass(info.Err)))
+		},
+		ConnectStart: func(_, addr string) {
+			cursorPhaseLogFields(lg, zapcore.DebugLevel, "connect_start", model, reqID, zap.String("addr", addr))
+		},
+		ConnectDone: func(_, addr string, cerr error) {
+			cursorPhaseLogFields(lg, zapcore.DebugLevel, "connect_done", model, reqID,
+				zap.String("outcome", cursorHTTPErrClass(cerr)), zap.String("addr", addr))
+		},
+		TLSHandshakeStart: func() {
+			cursorPhaseLogFields(lg, zapcore.DebugLevel, "tls_start", model, reqID)
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, terr error) {
+			cursorPhaseLogFields(lg, zapcore.DebugLevel, "tls_done", model, reqID, zap.String("outcome", cursorHTTPErrClass(terr)))
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			cursorPhaseLogFields(lg, zapcore.DebugLevel, "got_conn", model, reqID,
+				zap.Bool("reused", info.Reused),
+				zap.Bool("idle", info.WasIdle),
+				zap.Int64("idle_ms", info.IdleTime.Milliseconds()))
+		},
+		GotFirstResponseByte: func() {
+			cursorPhaseLogFields(lg, zapcore.InfoLevel, "response_headers", model, reqID,
+				zap.Int64("elapsed_ms", time.Since(reqStart).Milliseconds()))
+		},
+	}
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(ctx, trace))
+
+	cursorPhaseLogFields(lg, zapcore.InfoLevel, "http_request_start", model, reqID,
+		zap.String("path", req.Path), zap.Int64("elapsed_ms", 0))
+
+	if duplex != nil {
+		duplex.lg = lg
+		duplex.reqID = reqID
+		duplex.model = model
+		duplex.ctx = ctx
+		duplex.start(req.Body)
+	}
 	resp, err := f.httpClient.Do(httpReq)
 	if err != nil {
+		cursorPhaseLogFields(lg, zapcore.ErrorLevel, "forward_error", model, reqID,
+			zap.String("outcome", cursorHTTPErrClass(err)),
+			zap.Int64("elapsed_ms", time.Since(reqStart).Milliseconds()))
+		if duplex != nil {
+			duplex.close(err)
+		}
 		return nil, fmt.Errorf("cursor: upstream request failed: %w", err)
+	}
+	if duplex != nil {
+		if resp.StatusCode == http.StatusOK {
+			resp.Body = duplex.responseBody(resp.Body)
+		} else {
+			duplex.close(nil)
+		}
 	}
 	return &CursorUpstreamResponse{
 		StatusCode: resp.StatusCode,

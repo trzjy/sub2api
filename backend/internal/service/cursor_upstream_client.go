@@ -47,10 +47,11 @@ var ErrUpstreamCooldown = errors.New("shareai: upstream cooldown, retry later")
 var ErrUpstreamKeyExpired = errors.New("shareai: upstream key expired or quota exhausted")
 
 // ErrUpstreamKeyBlocked 是自动链路（reconciler, manual=false）对"未知上游失败"的统一内部哨兵
-// （R13-2）。它对应"上游拒绝/结果未知"一类失败：拉号方已按既有语义把该 key 标 exhausted=true
-// （casSetExhausted，落库行为不变），但此前自动链路裸 return nil 会被 reconciler 记成成功
-// （心跳"reconciled N quota keys"把失败算成成功）。故改为透传含本哨兵的包裹错误，reconciler
-// 以 errors.Is 识别为"失败但非停轮"（记失败级日志、不加 pulled 计数、返回 false、继续下一候选）。
+// （R13-2）。它对应"上游拒绝/结果未知"一类失败：拉号方落 last_refresh_error 标记、exhausted
+// 维度不动（CUR-P1-FIX-KEY-EXHAUSTED：未知/普通上游失败不是已确认终态，不得标耗尽），但此前
+// 自动链路裸 return nil 会被 reconciler 记成成功（心跳"reconciled N quota keys"把失败算成成功）。
+// 故改为透传含本哨兵的包裹错误，reconciler 以 errors.Is 识别为"失败但非停轮"（记失败级日志、
+// 不加 pulled 计数、返回 false、继续下一候选）。
 // 注意：本哨兵区别于 ErrQuotaKeyMountFailed（上游已成功发号、本地挂载失败的非幂等边界，须停本轮）。
 var ErrUpstreamKeyBlocked = errors.New("shareai: upstream key blocked (exhausted placeholder)")
 
@@ -81,12 +82,54 @@ func WithHTTPClient(hc *http.Client) ShareAIClientOption {
 	}
 }
 
+// WithDeviceResolver 注入 P1-B4 设备同源统一的窄依赖（*QuotaKeyService 满足）。
+// 生产路径无需显式调用：NewQuotaKeyService 构造时会把自己回填给真实拉号客户端；
+// 本选项供测试直接注入替身解析器。未注入时 resolveDeviceID 退化为既有 deviceID(code)。
+func WithDeviceResolver(r cursorDeviceResolver) ShareAIClientOption {
+	return func(c *shareAIUpstreamClient) {
+		c.deviceResolver = r
+	}
+}
+
+// SetDeviceResolver 在构造后回填设备解析窄依赖。
+//
+// 生产由 NewQuotaKeyService 调用（*QuotaKeyService 自身即解析器），用于打破
+// "客户端先构造 → 服务后构造"的循环依赖；测试可直接调用注入替身。
+func (c *shareAIUpstreamClient) SetDeviceResolver(r cursorDeviceResolver) {
+	if c == nil {
+		return
+	}
+	c.deviceResolver = r
+}
+
+// cursorDeviceResolver 是 P1-B4 设备同源统一所需的窄依赖（仅在 quota_keys.device_id
+// 尚未持久化时启用，用于识别"存量 key"与"新码"）。
+//
+//   - DeviceIDFor：B-10 持久化 device 入口（由 *QuotaKeyService 直接满足，沿用既有
+//     CursorDeviceIDResolver 契约）。新码经此生成并落库 device_id，全链复用。
+//   - HasAccount：判定该激活码是否已持有账号（识别"存量 key"），据此决定
+//     "保持既有派生值 deviceID(code) vs 调用 DeviceIDFor 生成持久化"。
+//
+// 生产由 NewQuotaKeyService 在构造闭环时注入 *QuotaKeyService 自身（设备同源闭环）；
+// 未注入时（测试占位 / 装配异常）上游客户端退化为既有 deviceID(code)（见 resolveDeviceID），
+// 保证旧单测不破、生产不丢设备语义。
+type cursorDeviceResolver interface {
+	DeviceIDFor(ctx context.Context, quotaKeyID int64) (string, error)
+	HasAccount(ctx context.Context, quotaKeyID int64) (bool, error)
+}
+
+// 编译期断言：生产实现 *QuotaKeyService 满足本窄接口（DeviceIDFor 来自 B-10，HasAccount 见本卡）。
+var _ cursorDeviceResolver = (*QuotaKeyService)(nil)
+
 // shareAIUpstreamClient 实现 QuotaKeyUpstreamClient：向上游 shareai 拉取账号。
 type shareAIUpstreamClient struct {
 	enc          QuotaKeyEncryptor
 	httpClient   *http.Client
 	primaryBase  string
 	fallbackBase string
+	// deviceResolver 是 P1-B4 设备同源统一的窄依赖（未持久化 device_id 时启用）。
+	// 生产装配注入 *QuotaKeyService；nil 时退化为既有 deviceID(code)。
+	deviceResolver cursorDeviceResolver
 }
 
 // NewShareAIUpstreamClient 构造真实拉号客户端。
@@ -160,7 +203,12 @@ func (c *shareAIUpstreamClient) PullBatch(ctx context.Context, qk *ent.QuotaKey)
 		return nil, fmt.Errorf("shareai: decrypt activation code: %w", err)
 	}
 	code := string(plain)
-	did := deviceID(code)
+	// P1-B4 设备同源统一：device-id 不再恒等于 deviceID(code)，改走三分支解析
+	// （已持久化 device_id → 存量派生值 → 新码 DeviceIDFor），保证取号与出站同值。
+	did, err := c.resolveDeviceID(ctx, qk, code)
+	if err != nil {
+		return nil, err
+	}
 
 	acct, expiresAt, err := c.refresh(ctx, code, did)
 	if errors.Is(err, errNoMetadata) {
@@ -177,6 +225,38 @@ func (c *shareAIUpstreamClient) PullBatch(ctx context.Context, qk *ent.QuotaKey)
 	}
 
 	return &UpstreamPullResult{Accounts: []*UpstreamAccount{acct}, ExpiresAt: expiresAt}, nil
+}
+
+// resolveDeviceID 按 P1-B4 设备同源统一解析本次取号（refresh/activate/lookup）所用的 device-id。
+//
+// 解析顺序（方案 §15.4-设备边界、§16.1）：
+//  1. quota_keys.device_id 已持久化 → 用它（lookup/refresh/activate/出站全链同值）；
+//  2. 未持久化且该码已有账号（存量）→ 保持既有派生值 deviceID(code)，不写库、不迁移
+//     （§16 红线：存量先核对语义，绝不自动改设备身份）；
+//  3. 未持久化且无账号（新码）→ DeviceIDFor 生成并持久化，全链复用。
+//
+// deviceResolver 为 nil（测试占位 / 装配异常）时退化为既有 deviceID(code)，保持旧语义且不阻断；
+// 生产装配必注入 *QuotaKeyService，故正常路径走 1/2/3。本函数不返回全局设备值，
+// 也不对存量码做解绑/重激活，各码身份独立。
+func (c *shareAIUpstreamClient) resolveDeviceID(ctx context.Context, qk *ent.QuotaKey, code string) (string, error) {
+	// ① 已持久化 device_id → 全链复用（出站侧经同一 DeviceIDFor 读取，恒同值）。
+	if qk != nil && qk.DeviceID != nil && *qk.DeviceID != "" {
+		return *qk.DeviceID, nil
+	}
+	// 未持久化：需解析器分流"存量/新码"；未注入时退化为既有派生值。
+	if c.deviceResolver == nil {
+		return deviceID(code), nil
+	}
+	// ② 存量（已有账号）→ 保持派生值，不写库、不迁移。
+	has, err := c.deviceResolver.HasAccount(ctx, qk.ID)
+	if err != nil {
+		return "", fmt.Errorf("shareai: resolve quota key account: %w", err)
+	}
+	if has {
+		return deviceID(code), nil
+	}
+	// ③ 新码（无账号）→ DeviceIDFor 生成并持久化，全链复用（含出站）。
+	return c.deviceResolver.DeviceIDFor(ctx, qk.ID)
 }
 
 // refresh 调用 /api/refresh 并解析响应。

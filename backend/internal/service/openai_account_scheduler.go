@@ -1691,6 +1691,13 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 				continue
 			}
 		}
+		// P1-S §16.1：归属激活码已过期的 cursor 账号不进入高级候选池。与其余三条链
+		// （普通/粘性/DB 复核）共用 cursorAccountQuotaKeyVetoReason 同一口径；此处
+		// 只做候选剔除，账号状态一律不动。
+		if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
+			filterStats.exclude(reason)
+			continue
+		}
 		if s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {
 			filterStats.exclude("runtime_blocked")
 			continue

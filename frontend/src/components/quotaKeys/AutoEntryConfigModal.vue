@@ -36,6 +36,11 @@
         <p class="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
           {{ t('admin.quotaKeys.autoEntry.models') }}
         </p>
+        <!-- P1-B3：模型能力改自动来源展示——清单唯一来源是后端实供清单（available_models）
+             的自动投影，不提供手工录入入口；管理员只能在自动来源清单内勾选/取消。 -->
+        <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.quotaKeys.autoEntry.modelsSourceAuto') }}
+        </p>
         <div v-if="enabledVendors.length === 0" class="text-xs text-gray-400">
           {{ t('admin.quotaKeys.na') }}
         </div>
@@ -60,30 +65,19 @@
         </div>
       </div>
 
-      <!-- 入库默认值 -->
+      <!-- 入库默认值（P1-B3）：priority 固定 1 只读、并发只读（沿用列默认）；
+           cursor 单独倍率编辑已收起——倍率不再在本弹窗暴露。 -->
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div>
           <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
             {{ t('admin.quotaKeys.autoEntry.priority') }}
           </label>
           <input
-            v-model.number="localDefaults.priority"
+            :value="localDefaults.priority"
             type="number"
-            min="1"
-            step="1"
             class="input"
-          />
-        </div>
-        <div>
-          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
-            {{ t('admin.quotaKeys.autoEntry.rateMultiplier') }}
-          </label>
-          <input
-            v-model.number="localDefaults.rateMultiplier"
-            type="number"
-            min="0.1"
-            step="0.1"
-            class="input"
+            readonly
+            disabled
           />
         </div>
         <div class="sm:col-span-2">
@@ -94,6 +88,7 @@
             type="text"
             class="input"
             :value="t('admin.quotaKeys.autoEntry.concurrencyPlaceholder')"
+            readonly
             disabled
           />
         </div>
@@ -158,6 +153,8 @@ const localVendors = ref<Record<string, boolean>>({})
 const localModels = ref<AutoEntryModelRef[]>([])
 // availableModels 是后端实供清单投影的"可选模型全集"（按厂商过滤展示的渲染源），只读。
 const availableModels = ref<AutoEntryModelRef[]>([])
+// rateMultiplier 自 P1-B3 起不再提供编辑入口（cursor 单独倍率编辑已收口）：
+// 仍从后端读取并原样回写，仅作为存量值透传——不批改历史非 1 值（后端存量不动）。
 const localDefaults = ref({ priority: 1, rateMultiplier: 1.0 })
 
 const enabledVendors = computed(() => vendorList.filter((v) => localVendors.value[v.key]))

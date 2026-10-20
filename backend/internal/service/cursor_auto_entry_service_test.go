@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,7 +34,7 @@ func TestCursorModelIDSetContainsKnown(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. ApplyEntryDefaults：勾选过滤 / 默认值写入 / entry_models 快照
+// 2. ApplyEntryDefaults：静态 entry 来源 / 入库参数收口（P1-B2）
 // ---------------------------------------------------------------------------
 
 // fakeAccountWriter 是 AccountFieldWriter 的测试替身（捕获写入调用，不连库）。
@@ -47,7 +49,6 @@ type accountApplyCall struct {
 	priority       int
 	rateMultiplier float64
 	concurrency    *int
-	entryModels    []string
 }
 
 type accountExtraCall struct {
@@ -56,10 +57,10 @@ type accountExtraCall struct {
 	value any
 }
 
-func (w *fakeAccountWriter) ApplyEntryDefaults(_ context.Context, _ *ent.Tx, id int64, priority int, rateMultiplier float64, concurrency *int, entryModels []string) error {
+func (w *fakeAccountWriter) ApplyEntryDefaults(_ context.Context, _ *ent.Tx, id int64, priority int, rateMultiplier float64, concurrency *int) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.apply = append(w.apply, accountApplyCall{id, priority, rateMultiplier, concurrency, entryModels})
+	w.apply = append(w.apply, accountApplyCall{id, priority, rateMultiplier, concurrency})
 	return nil
 }
 
@@ -72,64 +73,126 @@ func (w *fakeAccountWriter) UpdateExtraKey(_ context.Context, id int64, key stri
 
 func autoEntryPtrInt(v int) *int { return &v }
 
-func TestComputeEntryModelsIntersection(t *testing.T) {
-	// 裁定 1 / cursor-model-catalog-fact.md：门控清单是【实供】清单（CursorRealSupplyModels），
-	// 不再是官方模型名快照 CursorModelCatalog。故 fixture 改用实供模型，覆盖三分支：
-	//   - 实供 + 厂商启用 → 保留；
-	//   - 厂商禁用 → 剔除；
-	//   - 不在实供清单的失效/笔误 ID → 剔除。
-	// （旧用例以 gpt-4.1 / gpt-4o 等官方名编码了"官方清单门控"缺陷态，现已随实现修正而作废。）
-	cfg := &CursorAutoEntryConfig{
-		Vendors: map[string]bool{CursorVendorOpenAI: true, CursorVendorAnthropic: false, CursorVendorXAI: false},
-		Models: []CursorModelRef{
-			{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI},          // 实供 + 厂商启用 → 保留
-			{ID: "claude-opus-5-5", Vendor: CursorVendorAnthropic}, // 厂商禁用 → 剔除
-			{ID: "not-a-real-model", Vendor: CursorVendorOpenAI},   // 不在实供清单 → 剔除
-			{ID: "grok-4.7", Vendor: CursorVendorXAI},              // 厂商(xai)禁用 → 剔除
-		},
+// TestComputeEntryModelsIsStaticIdentity：P1-B2 核心——入库退出"人工勾选定义能力"。
+// entry 模型恒等于静态实供清单，既不与人工勾选取交集，也不受厂商开关门控；
+// 四种配置形态（全关 / 单勾 / 残留官方名 / nil）必须产出同一份静态清单。
+func TestComputeEntryModelsIsStaticIdentity(t *testing.T) {
+	static := CursorStaticEntryModels()
+	realIDs := make([]string, 0, len(CursorRealSupplyModels))
+	for _, e := range CursorRealSupplyModels {
+		if e.ID != "" {
+			realIDs = append(realIDs, e.ID)
+		}
 	}
-	got := ComputeEntryModels(cfg)
-	require.Equal(t, []string{"gpt-6-sol"}, got)
+	require.NotEmpty(t, static)
+	require.Equal(t, realIDs, static, "静态 entry 清单必须与 CursorRealSupplyModels 恒等（保序、去重、去空）")
+
+	allOff := &CursorAutoEntryConfig{
+		Vendors: map[string]bool{CursorVendorOpenAI: false, CursorVendorAnthropic: false, CursorVendorXAI: false},
+		Models:  nil,
+	}
+	oneSelected := &CursorAutoEntryConfig{
+		Vendors: map[string]bool{CursorVendorOpenAI: true},
+		Models:  []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI}},
+	}
+	staleOfficialOnly := &CursorAutoEntryConfig{
+		Vendors: map[string]bool{CursorVendorOpenAI: true},
+		// 旧配置残留官方模型名（不在实供清单）——曾使门控交集为空、入库账号零模型。
+		Models: []CursorModelRef{{ID: "gpt-4.1", Vendor: CursorVendorOpenAI}},
+	}
+	require.Equal(t, static, ComputeEntryModels(allOff), "用户全关不得再把入库账号打成零模型")
+	require.Equal(t, static, ComputeEntryModels(oneSelected), "只勾一个模型不得缩小入库模型集合")
+	require.Equal(t, static, ComputeEntryModels(staleOfficialOnly), "残留旧官方模型名不得影响入库模型集合")
+	require.Equal(t, static, ComputeEntryModels(nil), "nil 配置同样产出静态清单")
 }
 
-func TestApplyEntryDefaultsWritesColumnsAndExtra(t *testing.T) {
+// TestCursorAccountModelMappingIsIdentityOfStaticEntry：写入 credentials.model_mapping
+// 的形态必须是静态清单的恒等映射（模型名 → 自身），且不含任何非实供模型。
+func TestCursorAccountModelMappingIsIdentityOfStaticEntry(t *testing.T) {
+	static := CursorStaticEntryModels()
+	mapping := CursorAccountModelMapping(static)
+	require.Len(t, mapping, len(static))
+	for _, id := range static {
+		require.Equal(t, id, mapping[id], "恒等映射：%s 必须映射到自身", id)
+	}
+	require.NotContains(t, mapping, "gpt-4.1", "官方清单名（非实供）不得进入恒等映射")
+}
+
+// TestApplyEntryDefaultsWritesClosedParams：入库参数三值收口（P1-B2 §16.1）
+// priority=1、rate_multiplier=1.0（成本中性）、concurrency 不写列（沿用列默认 3），
+// 且不再写 extra（entry_models 无生产消费者，随卡清理）。
+func TestApplyEntryDefaultsWritesClosedParams(t *testing.T) {
 	w := &fakeAccountWriter{}
 	svc := &CursorAutoEntryService{writer: w}
 
-	cfg := &CursorAutoEntryConfig{
-		Vendors: map[string]bool{CursorVendorOpenAI: true},
-		Models:  []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI}},
-		EntryDefaults: CursorEntryDefaults{
-			Concurrency:    nil, // 沿用列默认 3
-			Priority:       1,
-			RateMultiplier: 1.0,
-		},
-	}
 	acc := &ent.Account{ID: 7}
-	updated, err := svc.ApplyEntryDefaults(context.Background(), nil, acc, cfg)
+	updated, err := svc.ApplyEntryDefaults(context.Background(), nil, acc, DefaultAutoEntryConfig())
 	require.NoError(t, err)
 	require.Len(t, w.apply, 1)
 	call := w.apply[0]
 	require.Equal(t, int64(7), call.id)
-	require.Equal(t, 1, call.priority)
-	require.Equal(t, 1.0, call.rateMultiplier)
-	require.Nil(t, call.concurrency, "concurrency=nil 时不应写该列")
-	require.Equal(t, []string{"gpt-6-sol"}, call.entryModels)
-	// 内存实体回填：extra.entry_models
-	require.Equal(t, []string{"gpt-6-sol"}, updated.Extra[CursorEntryModelsExtraKey])
+	require.Equal(t, CursorEntryPriority, call.priority)
+	require.Equal(t, 1, call.priority, "priority 必须收口为 1")
+	require.Equal(t, CursorEntryRateMultiplier, call.rateMultiplier)
+	require.Equal(t, 1.0, call.rateMultiplier, "rate_multiplier 必须收口为 1.0（账号成本中性）")
+	require.Nil(t, call.concurrency, "concurrency 不写列 → 沿用 account 列默认 3")
+	require.Empty(t, w.extra, "不得再写 extra（entry_models 已随卡清理）")
+	require.NotContains(t, updated.Extra, "entry_models", "内存实体不得回填 extra.entry_models")
+	require.Equal(t, CursorEntryPriority, updated.Priority)
+	require.Equal(t, CursorEntryRateMultiplier, updated.RateMultiplier)
 }
 
-func TestApplyEntryDefaultsExplicitConcurrency(t *testing.T) {
+// TestApplyEntryDefaultsIgnoresConfiguredParams：配置项不再参与入库参数——
+// 即便配置里写了 9 / 2.5 / 9，也必须收口为 1 / 1.0 / nil。
+func TestApplyEntryDefaultsIgnoresConfiguredParams(t *testing.T) {
 	w := &fakeAccountWriter{}
 	svc := &CursorAutoEntryService{writer: w}
 	cfg := DefaultAutoEntryConfig()
+	cfg.EntryDefaults.Priority = 9
+	cfg.EntryDefaults.RateMultiplier = 2.5
 	cfg.EntryDefaults.Concurrency = autoEntryPtrInt(9)
-	acc := &ent.Account{ID: 3}
-	_, err := svc.ApplyEntryDefaults(context.Background(), nil, acc, cfg)
+	_, err := svc.ApplyEntryDefaults(context.Background(), nil, &ent.Account{ID: 3}, cfg)
 	require.NoError(t, err)
 	require.Len(t, w.apply, 1)
-	require.NotNil(t, w.apply[0].concurrency)
-	require.Equal(t, 9, *w.apply[0].concurrency)
+	require.Equal(t, 1, w.apply[0].priority, "配置 priority=9 不得生效")
+	require.Equal(t, 1.0, w.apply[0].rateMultiplier, "配置 rate_multiplier=2.5 不得生效（成本中性）")
+	require.Nil(t, w.apply[0].concurrency, "配置 concurrency=9 不得生效（沿用列默认 3）")
+}
+
+// TestApplyEntryDefaultsPersistsClosedParams 走生产 ent 写入路径落库复核三值：
+// priority=1、rate_multiplier=1.0、concurrency 不写列 → DB 列默认 3，且 extra 无
+// entry_models 残留（Done when 3 的落库侧证据，fake writer 只覆盖调用参数）。
+func TestApplyEntryDefaultsPersistsClosedParams(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	acc, err := client.Account.Create().
+		SetName(fmt.Sprintf("p1b2-closed-params-%d", time.Now().UnixNano())).
+		SetPlatform(PlatformCursor).
+		SetType("oauth").
+		SetQuotaKeyID(qk.ID).
+		Save(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		bg := context.Background()
+		_ = client.Account.DeleteOneID(acc.ID).Exec(bg)
+		_ = client.QuotaKey.DeleteOneID(qk.ID).Exec(bg)
+	})
+
+	svc := &CursorAutoEntryService{writer: &entAccountFieldWriter{client: client}}
+	cfg := DefaultAutoEntryConfig()
+	cfg.EntryDefaults.Priority = 9
+	cfg.EntryDefaults.RateMultiplier = 2.5
+	cfg.EntryDefaults.Concurrency = autoEntryPtrInt(9)
+	_, err = svc.ApplyEntryDefaults(ctx, nil, acc, cfg)
+	require.NoError(t, err)
+
+	got, err := client.Account.Get(ctx, acc.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, got.Priority, "落库 priority 必须为 1")
+	require.InDelta(t, 1.0, got.RateMultiplier, 1e-9, "落库 rate_multiplier 必须为 1.0（成本中性）")
+	require.Equal(t, 3, got.Concurrency, "入库不写 concurrency → 落库为列默认 3")
+	require.NotContains(t, got.Extra, "entry_models", "extra 不得再有 entry_models 残留")
 }
 
 // ---------------------------------------------------------------------------
@@ -393,19 +456,21 @@ func TestCURF8_ValidateRejectsVendorSpoofing(t *testing.T) {
 	require.Contains(t, err.Error(), "belongs to vendor openai, not xai")
 }
 
-// TestCURF8_ComputeEntryModelsIgnoresSpoofedVendor：绕过 Validate 直接调 ComputeEntryModels
-// （同冒用配置）→ 该模型不得产出（门控改用清单真实归属，不信自报 vendor）。
-func TestCURF8_ComputeEntryModelsIgnoresSpoofedVendor(t *testing.T) {
-	cfg := &CursorAutoEntryConfig{
+// TestCURF8_ComputeEntryModelsUnaffectedByVendorState：P1-B2 后 ComputeEntryModels 为
+// 静态恒等，不再做厂商门控。冒用 vendor 的防线保留在 Validate（见上一条用例），
+// 入库模型集合不再受厂商开关 / 自报 vendor 影响。
+func TestCURF8_ComputeEntryModelsUnaffectedByVendorState(t *testing.T) {
+	spoofed := &CursorAutoEntryConfig{
 		Vendors: map[string]bool{CursorVendorOpenAI: false, CursorVendorXAI: true},
-		Models:  []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorXAI}},
+		Models:  []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorXAI}}, // 冒用：真实归属 openai
 	}
-	got := ComputeEntryModels(cfg)
-	require.NotContains(t, got, "gpt-6-sol", "绕过 Validate 时，冒用配置仍不得把 gpt-6-sol 纳入补池")
-	require.Empty(t, got)
+	got := ComputeEntryModels(spoofed)
+	require.Equal(t, CursorStaticEntryModels(), got, "冒用配置不得改变入库模型集合（静态恒等）")
+	require.Contains(t, got, "gpt-6-sol")
 }
 
-// TestCURF8_PositiveVendorMatch：正例。gpt-6-sol + vendor=openai + openai 开 → 保留。
+// TestCURF8_PositiveVendorMatch：正例。gpt-6-sol + vendor=openai + openai 开 →
+// UpdateConfig 通过（Validate 放行）；入库模型集合为静态清单（含 gpt-6-sol）。
 func TestCURF8_PositiveVendorMatch(t *testing.T) {
 	svc := NewCursorAutoEntryService(newFakeSettingRepo(), newFakeQuotaKeyRepo(), testEncryptor{}, nil, nil, "")
 	cfg := &CursorAutoEntryConfig{
@@ -414,20 +479,23 @@ func TestCURF8_PositiveVendorMatch(t *testing.T) {
 		EntryDefaults: CursorEntryDefaults{Priority: 1, RateMultiplier: 1.0},
 	}
 	_, err := svc.UpdateConfig(context.Background(), cfg)
-	require.NoError(t, err, "真实归属匹配且厂商启用时应保留")
-	require.Equal(t, []string{"gpt-6-sol"}, ComputeEntryModels(cfg))
+	require.NoError(t, err, "真实归属匹配且厂商启用时应放行")
+	got := ComputeEntryModels(cfg)
+	require.Contains(t, got, "gpt-6-sol")
+	require.Equal(t, CursorStaticEntryModels(), got)
 }
 
-// TestCURF8_DisabledRealVendorExcluded：清单内模型配对正确但真实归属厂商关 → 剔除（既有语义回归）。
-func TestCURF8_DisabledRealVendorExcluded(t *testing.T) {
+// TestCURF8_DisabledRealVendorNoLongerShrinksEntryModels：真实归属厂商关闭
+// 不再剔除入库模型（能力由静态实供清单决定，不由勾选决定）；Validate 仍拒绝自报厂商未勾选。
+func TestCURF8_DisabledRealVendorNoLongerShrinksEntryModels(t *testing.T) {
 	cfg := &CursorAutoEntryConfig{
 		Vendors: map[string]bool{CursorVendorOpenAI: false}, // openai 关
-		// 自报与真实一致（openai），但厂商已关 → 仍应剔除。
-		Models: []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI}},
+		Models:  []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI}},
 	}
 	got := ComputeEntryModels(cfg)
-	require.NotContains(t, got, "gpt-6-sol", "真实归属厂商关闭时该模型应被剔除")
+	require.Equal(t, CursorStaticEntryModels(), got, "厂商关闭不得缩小静态入库模型集合")
+	require.Contains(t, got, "gpt-6-sol")
 
-	// Validate 层面同样拒绝（自报厂商未勾选）。
+	// Validate 层面仍拒绝（自报厂商未勾选）——CUR-F8 冒用防线不回归。
 	require.NotEmpty(t, cfg.Validate(), "自报厂商未勾选时 Validate 必须拒绝")
 }
