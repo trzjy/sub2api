@@ -386,6 +386,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					}
 					if !cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, c.Writer.Size(), hbCommittedBaseline) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
+						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+						// 终止后须清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+						if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+							h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						}
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
 					}
@@ -393,6 +398,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 					}
 					if !failoverErr.ShouldRetryNextAccount() {
+						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+						// 终止后须清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+						if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+							h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -418,10 +428,20 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						}
 					}
 					h.gatewayService.RecordOpenAIAccountSwitch()
+					// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+					// 终止后须清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+					if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+						h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+					}
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
+						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+						// 终止后须清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+						if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+							h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
