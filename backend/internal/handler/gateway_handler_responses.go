@@ -321,6 +321,11 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				// CF524（v5）：心跳注释帧非语义写出——防线改用心跳基线例外判定，
 				// 心跳已提交时仍允许换号（无心跳时判定与现状完全一致）。
 				if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline) {
+					// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+					// 中段流失败终止后客户端以同一 session_id 立刻重试，须清粘性+LRU 降权让其落到健康账号。
+					if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+						h.openAIGatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+					}
 					h.handleResponsesFailoverExhausted(c, failoverErr, true)
 					return
 				}
@@ -329,6 +334,11 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:
+					// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+					// 跨请求必须换号——清粘性+LRU 降权让客户端立刻重试落到健康账号。
+					if fs.LastFailoverErr != nil && fs.LastFailoverErr.IsOpenAICapacityShed() {
+						h.openAIGatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+					}
 					h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 					return
 				case FailoverCanceled:

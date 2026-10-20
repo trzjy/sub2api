@@ -1621,6 +1621,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						return
 					}
 					if !cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, c.Writer.Size(), hbCommittedBaseline) {
+						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+						// 中段流失败终止后客户端以同一 session_id 立刻重试，须清粘性+LRU 降权让其落到健康账号。
+						if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+							h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						}
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleAnthropicFailoverExhausted(c, failoverErr, true)
 						return
