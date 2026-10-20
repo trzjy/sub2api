@@ -386,6 +386,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					}
 					if !cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, c.Writer.Size(), hbCommittedBaseline) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
+						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+						// 终止后须清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+						if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+							h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						}
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
 					}
@@ -393,6 +398,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 					}
 					if !failoverErr.ShouldRetryNextAccount() {
+						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+						// 终止后须清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+						if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+							h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -418,10 +428,20 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						}
 					}
 					h.gatewayService.RecordOpenAIAccountSwitch()
+					// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+					// 终止后须清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+					if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+						h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+					}
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
+						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
+						// 终止后须清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+						if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
+							h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -431,6 +451,12 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						zap.Int("switch_count", switchCount),
 					)
 					continue
+				}
+				// 2026-10-20：mid-stream 容量降载在 reader 已输出语义字节后只返回普通 error
+				//（不构造 failover error，上面的 failover 分支够不着），按错误语义兜底：
+				//清粘性+LRU 降权，客户端同会话立刻重试才能落到健康账号。
+				if service.IsOpenAICapacityShedError(err) {
+					h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
