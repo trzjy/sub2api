@@ -199,23 +199,20 @@ func openAIAccountScheduleModel(c *gin.Context, account *service.Account, forwar
 	return service.ResolveOpenAIAccountUpstreamModelForRequest(account, forwardModel, requireCompact)
 }
 
+// resolveOpenAIMessagesDispatchMappedModel 是 service.ResolveOpenAIMessagesDispatchMappedModel
+// 的薄委托（§18.4 W 第8条）：原 handler 仅负责从请求 ctx 抽取已解析的目标平台，纯计算下沉到 service
+// 与水位共用。保留 handler 原有的请求级 tier 决定与 body cache 调用顺序（不在本函数内）。
 func resolveOpenAIMessagesDispatchMappedModel(c *gin.Context, apiKey *service.APIKey, requestedModel string) string {
 	if apiKey == nil || apiKey.Group == nil {
 		return ""
 	}
-	// composite 解析到 grok/CN/OpenCode/codebuddy 目标时调度级映射不适用（Group 级映射的
-	// gpt-5.x 默认值是 openai 专属,发给这些上游必错）,模型改写交给账号级 model_mapping。
-	// 并集裁定（重基消解）：我方泛化谓词 IsMultiProtocolAPIKeyProvider 覆盖国产供应商 +
-	// OpenCode/Command Code/Cline；上游显式列 CodeBuddy（生产实证 group 109 /v1/messages
-	// 403）。两侧语义都保留——显式项在谓词覆盖下等价，无行为差异。
-	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
-		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
-			(platform == service.PlatformGrok || service.IsMultiProtocolAPIKeyProvider(platform) ||
-				platform == service.PlatformCodeBuddy) {
-			return ""
+	target := ""
+	if c != nil && c.Request != nil {
+		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
+			target = platform
 		}
 	}
-	return strings.TrimSpace(apiKey.Group.ResolveMessagesDispatchModel(requestedModel))
+	return service.ResolveOpenAIMessagesDispatchMappedModel(apiKey.Group, target, requestedModel)
 }
 
 type openAIModelBodyReplaceFunc func([]byte, string) []byte

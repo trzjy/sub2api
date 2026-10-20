@@ -150,6 +150,28 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 	return decision, nil
 }
 
+// ResolveGeminiWithDefault 是 gemini 文本端点的薄共用入口（§18.4 W 第 5 条）：复用现有
+// Resolve，若未命中任何 route/ownership/detector，则按 gemini middleware 既有语义"未匹配补
+// Gemini"——仅把 target 置为 PlatformGemini 并返回 defaulted=true，绝不伪造 Matched=true 或
+// 账号 ownership 来源（不设置 Route、不覆盖 Source）。Resolve 报错时不补全、直接传播错误。
+// middleware 与水位共用此方法，原 body 改写与 context 盖章顺序保持不变。
+func (r *CompositeRouteResolver) ResolveGeminiWithDefault(ctx context.Context, groupID int64, model string) (CompositeRouteDecision, bool, error) {
+	decision, err := r.Resolve(ctx, groupID, model, CompositeRouteEndpointGemini)
+	if err != nil {
+		return decision, false, err
+	}
+	if decision.Matched {
+		return decision, false, nil
+	}
+	// 未匹配：middleware 现有"补 Gemini"语义——只补 target，不伪造 Matched/ownership。
+	defaulted := decision
+	defaulted.TargetPlatform = PlatformGemini
+	defaulted.PublicModel = strings.TrimSpace(model)
+	defaulted.Endpoint = CompositeRouteEndpointGemini
+	defaulted.GroupID = groupID
+	return defaulted, true, nil
+}
+
 func matchCompositeRoute(routes []CompositeModelRoute, model, endpoint string) (CompositeModelRoute, bool) {
 	if len(routes) == 0 {
 		return CompositeModelRoute{}, false

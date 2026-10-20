@@ -24,6 +24,8 @@ package service
 //  3. **取消 / 终态错误不得固定为成功**：流没有终态标记即失败关闭。
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,7 +33,107 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// cursorSSEStream converts frames as they arrive; it never buffers the complete
+// model reply before exposing text. The AgentRun transport handles context/KV.
+type cursorSSEStream struct {
+	source io.ReadCloser
+	parser *cursorStreamParser
+	buffer bytes.Buffer
+	done   bool
+	errMu  sync.Mutex
+	err    error
+}
+
+func (s *cursorSSEStream) Close() error { return s.source.Close() }
+
+// terminalError may be read after the gateway's timeout path returns while its
+// scanner is still unwinding. Parser state belongs exclusively to that scanner.
+func (s *cursorSSEStream) terminalError() error {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	return s.err
+}
+
+func (s *cursorSSEStream) Read(dst []byte) (int, error) {
+	if len(dst) == 0 {
+		return 0, nil
+	}
+	for s.buffer.Len() == 0 && !s.done && s.terminalError() == nil {
+		if err := s.next(); err != nil {
+			s.errMu.Lock()
+			s.err = err
+			s.errMu.Unlock()
+		}
+	}
+	if s.buffer.Len() > 0 {
+		return s.buffer.Read(dst)
+	}
+	if err := s.terminalError(); err != nil {
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func (s *cursorSSEStream) next() error {
+	header := make([]byte, cursorEnvelopeHeaderSize)
+	if _, err := io.ReadFull(s.source, header); err != nil {
+		if err == io.EOF {
+			return ErrCursorMissingEndStream
+		}
+		return fmt.Errorf("%w: read envelope: %w", ErrCursorProtocol, err)
+	}
+	n := int(binary.BigEndian.Uint32(header[1:]))
+	if n > cursorUpstreamStreamMaxBytes {
+		return fmt.Errorf("%w: oversized envelope", ErrCursorProtocol)
+	}
+	payload := make([]byte, n)
+	if _, err := io.ReadFull(s.source, payload); err != nil {
+		return fmt.Errorf("%w: read payload: %w", ErrCursorProtocol, err)
+	}
+	frame, _, err := cursorReadEnvelopeFrame(append(header, payload...), 0)
+	if err != nil {
+		return err
+	}
+	if frame.cursorIsEndStream() {
+		code, msg, err := cursorParseEndStream(frame.Data, s.parser.secrets...)
+		if err != nil {
+			return err
+		}
+		if code != "" {
+			return fmt.Errorf("%w: %s: %s", ErrCursorUpstreamStream, code, msg)
+		}
+		s.done = true
+	} else {
+		ev, err := s.parser.cursorParseMessageFrame(frame.Data)
+		if err != nil {
+			return err
+		}
+		if ev.Kind == cursorEventText {
+			s.parser.content += ev.Text
+			if rejected := cursorMatchKeyRejected(s.parser.content); rejected != nil {
+				return rejected
+			}
+			if !s.parser.started {
+				s.buffer.WriteString(s.parser.cursorSSERoleChunk())
+				s.parser.started = true
+			}
+			s.buffer.WriteString(s.parser.cursorSSETextChunk(ev.Text))
+		}
+		s.done = s.parser.usage.Seen
+	}
+	if s.done {
+		if !s.parser.started {
+			s.buffer.WriteString(s.parser.cursorSSERoleChunk())
+			s.parser.started = true
+		}
+		s.buffer.WriteString(s.parser.cursorSSEFinishChunk())
+		s.buffer.WriteString("data: [DONE]\n\n")
+	}
+	return nil
+}
 
 // agent.v1.AgentServerMessage（32 号证据：KW）的 oneof 字段号。
 const (

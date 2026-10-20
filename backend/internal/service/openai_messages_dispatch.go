@@ -85,6 +85,24 @@ func claudeMessagesDispatchFamily(model string) string {
 	}
 }
 
+// ResolveOpenAIMessagesDispatchMappedModel 是 openai_gateway_handler 中原
+// resolveOpenAIMessagesDispatchMappedModel 的纯计算下沉（§18.4 W 第8条）：不依赖 gin.Context、
+// 不读取请求级 tier、不构造/转发 body，仅基于组平台、组 messages dispatch 配置与已解析上游目标平台
+// 决定 OpenAI 兼容 /v1/messages 入口会改写后的调度模型名（空串表示不改写）。
+// 供 handler 薄委托与水位的 Messages 端点资格判定共用，避免两处各写一份。
+func ResolveOpenAIMessagesDispatchMappedModel(g *Group, target string, requestedModel string) string {
+	if g == nil {
+		return ""
+	}
+	// composite 解析到 grok/多协议供应方/codebuddy 目标时调度级映射不适用（组级 gpt-5.x 默认值
+	// 发给这些上游必错），模型改写交给账号级 model_mapping。
+	if g.Platform == PlatformComposite &&
+		(target == PlatformGrok || IsMultiProtocolAPIKeyProvider(target) || target == PlatformCodeBuddy) {
+		return ""
+	}
+	return strings.TrimSpace(g.ResolveMessagesDispatchModel(requestedModel))
+}
+
 func (g *Group) ResolveMessagesDispatchModel(requestedModel string) string {
 	if g == nil {
 		return ""

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -659,6 +660,16 @@ func (s *SchedulerSnapshotService) handleBulkAccountEvent(ctx context.Context, p
 		default:
 			return s.rebuildByGroupIDs(ctx, rebuildGroupIDs, "account_bulk_change", seen)
 		}
+		if account.Platform == PlatformCursor {
+			affectedGroupIDs := append(append([]int64(nil), accountGroupIDs...), preloadGroupIDs...)
+			for _, groupID := range s.normalizeGroupIDs(affectedGroupIDs) {
+				for _, platform := range schedulerSnapshotPlatforms() {
+					if len(cursorSupplyPlatformsFor(&groupID, []string{platform})) > 1 {
+						addPlatformGroups(platform, []int64{groupID})
+					}
+				}
+			}
+		}
 	}
 
 	// payload 携带更新前的组；只扩散到本事件实际涉及的平台，避免平台间交叉重建。
@@ -852,6 +863,15 @@ func (s *SchedulerSnapshotService) rebuildByAccount(ctx context.Context, account
 		return nil
 	}
 	groupIDs = s.normalizeGroupIDs(groupIDs)
+	if account.Platform == PlatformCursor {
+		// Group-change payloads may identify a removed binding while the fresh
+		// account carries the remaining bindings. Both candidate pools changed.
+		for _, groupID := range s.normalizeGroupIDs(account.GroupIDs) {
+			if !slices.Contains(groupIDs, groupID) {
+				groupIDs = append(groupIDs, groupID)
+			}
+		}
+	}
 	if len(groupIDs) == 0 {
 		return nil
 	}
@@ -860,6 +880,15 @@ func (s *SchedulerSnapshotService) rebuildByAccount(ctx context.Context, account
 	if account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled() {
 		buckets = append(buckets, s.bucketsForPlatform(PlatformAnthropic, groupIDs, seen)...)
 		buckets = append(buckets, s.bucketsForPlatform(PlatformGemini, groupIDs, seen)...)
+	}
+	if account.Platform == PlatformCursor {
+		for _, groupID := range groupIDs {
+			for _, platform := range schedulerSnapshotPlatforms() {
+				if len(cursorSupplyPlatformsFor(&groupID, []string{platform})) > 1 {
+					buckets = append(buckets, s.bucketsForPlatform(platform, []int64{groupID}, seen)...)
+				}
+			}
+		}
 	}
 	return s.rebuildBuckets(ctx, buckets, reason)
 }
@@ -1531,7 +1560,7 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 	}
 
 	if useMixed {
-		platforms := []string{queryPlatform, PlatformAntigravity}
+		platforms := cursorSupplyPlatformsFor(&groupID, []string{queryPlatform, PlatformAntigravity})
 		var accounts []Account
 		var err error
 		if groupID > 0 {
@@ -1557,7 +1586,11 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 	var accounts []Account
 	var err error
 	if groupID > 0 {
-		accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, groupID, queryPlatform)
+		if platforms := cursorSupplyPlatformsFor(&groupID, []string{queryPlatform}); len(platforms) > 1 {
+			accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatforms(ctx, groupID, platforms)
+		} else {
+			accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, groupID, queryPlatform)
+		}
 	} else if s.isRunModeSimple() {
 		accounts, err = s.accountRepo.ListSchedulableByPlatform(ctx, queryPlatform)
 	} else {

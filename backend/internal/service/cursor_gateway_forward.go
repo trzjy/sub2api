@@ -50,6 +50,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // cursorUpstreamStreamMaxBytes 是对话响应体的读取上限。
@@ -134,6 +136,7 @@ type cursorAccountAuthProvider struct {
 	// 跨账号串号风险；激活码轮换会换新的 quota key 行，由账号实例自然隔离。
 	mu     sync.Mutex
 	cached string
+	device string
 }
 
 // newCursorAccountAuthProvider 为指定账号构造鉴权材料提供者。
@@ -145,7 +148,7 @@ func newCursorAccountAuthProvider(
 	quotaKeys QuotaKeyRepository,
 	enc QuotaKeyEncryptor,
 	deviceIDs CursorDeviceIDResolver,
-) (CursorUpstreamAuthProvider, error) {
+) (*cursorAccountAuthProvider, error) {
 	if account == nil || account.QuotaKeyID == nil || *account.QuotaKeyID <= 0 {
 		return nil, ErrCursorQuotaKeyUnresolved
 	}
@@ -180,6 +183,7 @@ func (p *cursorAccountAuthProvider) CursorUpstreamAuth(ctx context.Context) (str
 		return "", err
 	}
 	p.cached = material
+	p.device = device
 	return material, nil
 }
 
@@ -614,6 +618,18 @@ func (s *OpenAIGatewayService) forwardCursor(
 		return nil, errors.New("cursor: forwardCursor requires a cursor platform account")
 	}
 
+	// §18.5 T 阶段日志：选中账号即记 account_selected（沿用现有 handler 事件口径）。
+	cursorPhaseLog(ctx, zapcore.DebugLevel, "account_selected", originalModel,
+		zap.Int64("account_id", account.ID))
+	// 客户端取消贯穿整条链路：在函数返回前统一补一条 context_cancel 终态事件，
+	// 不依赖特定返回路径（httptrace/DNS/读取均可能先行报错）。
+	defer func() {
+		if ctx.Err() != nil {
+			cursorPhaseLog(ctx, zapcore.InfoLevel, "context_cancel", originalModel,
+				zap.String("outcome", cursorHTTPErrClass(ctx.Err())))
+		}
+	}()
+
 	// ① 模型闸门：cursor 无内置模型目录，模型完全来自账号 model_mapping。
 	//
 	// 这里要求 ResolveMappedModel 的 matched=true（账号映射**显式命中**该模型），而不是
@@ -624,6 +640,9 @@ func (s *OpenAIGatewayService) forwardCursor(
 	if !matched || strings.TrimSpace(upstreamModel) == "" {
 		return nil, fmt.Errorf("cursor: account %d does not map model %q (fail closed)", account.ID, originalModel)
 	}
+	// 模型闸门通过：admission_done（调度/映射准入完成，进入出站阶段）。
+	cursorPhaseLog(ctx, zapcore.DebugLevel, "admission_done", upstreamModel,
+		zap.Int64("account_id", account.ID))
 
 	fwd := s.cursorForwarderOrDefault()
 	if fwd == nil {
@@ -631,6 +650,9 @@ func (s *OpenAIGatewayService) forwardCursor(
 	}
 
 	// ② 用户级 Bearer（账号已存 access_token）：缺失即失败关闭，绝不空凭证出站。
+	// 鉴权前后各记一次事件，避免把鉴权/WASM 等待误归到"建连"阶段。
+	cursorPhaseLog(ctx, zapcore.DebugLevel, "auth_begin", upstreamModel,
+		zap.Int64("account_id", account.ID))
 	bearer, err := cursorResolveAccountBearer(account)
 	if err != nil {
 		return nil, err
@@ -652,18 +674,29 @@ func (s *OpenAIGatewayService) forwardCursor(
 		return nil, err
 	}
 
+	if _, err := authProvider.CursorUpstreamAuth(ctx); err != nil {
+		return nil, err
+	}
+	cursorPhaseLog(ctx, zapcore.DebugLevel, "auth_done", upstreamModel,
+		zap.Int64("account_id", account.ID))
+	cursorPhaseLog(ctx, zapcore.DebugLevel, "convert_done", upstreamModel)
+	cursorPhaseLog(ctx, zapcore.InfoLevel, "agent_run_begin", upstreamModel)
+
 	resp, err := fwd.Do(ctx, &CursorUpstreamRequest{
 		Path: cursorPathAgentRun,
 		Body: payload,
 		// 账号级鉴权材料：转发器是进程级共享的，材料必须逐请求携带，
 		// 否则会把 A 号的 x-jg-auth 发给 B 号（方案 §2 E1 遗留风险登记）。
 		AuthProvider: authProvider,
+		Model:        upstreamModel,
 		Headers: map[string]string{
 			"Content-Type":             cursorConnectContentType,
 			"Connect-Protocol-Version": "1",
 			// 用户级身份：账号已存 access_token（**不是**换来的 session token，
 			// 也不是 x-jg-auth 的激活码材料）。两个维度都要，缺一即失败关闭。
-			"Authorization": "Bearer " + bearer,
+			"Authorization":           "Bearer " + bearer,
+			"x-cursor-client-version": cursorClientVersion,
+			"x-cursor-checksum":       cursorClientChecksum(authProvider.device, time.Now()),
 		},
 	})
 	if err != nil {
@@ -683,43 +716,55 @@ func (s *OpenAIGatewayService) forwardCursor(
 		return nil, cursorUpstreamStatusError(resp.StatusCode, upstreamBody, bearer)
 	}
 
+	if reqStream {
+		stream := &cursorSSEStream{source: resp.Body, parser: cursorNewStreamParser(originalModel, bearer)}
+		httpResp := cursorToHTTPResponse(resp, http.StatusOK, "text/event-stream", nil)
+		httpResp.Body = stream
+		streamResult, herr := s.handleStreamingResponse(ctx, httpResp, c, account, startTime, originalModel, upstreamModel)
+		if streamErr := stream.terminalError(); streamErr != nil {
+			var rejected *CursorKeyRejectedError
+			if errors.As(streamErr, &rejected) {
+				return nil, s.cursorHandleKeyRejected(ctx, c, account, cursorStreamRejection{Snippet: rejected.Template, TurnID: rejected.TurnID}, resp.TargetURL)
+			}
+			s.cursorRecordStreamError(c, account, streamErr, resp.TargetURL)
+			return nil, streamErr
+		}
+		if herr != nil {
+			return nil, herr
+		}
+		// 流式写回完成（桥接最终 HTTP 写出）：终态成功事件。
+		cursorPhaseLog(ctx, zapcore.InfoLevel, "response_write_done", upstreamModel,
+			zap.String("outcome", "ok"), zap.Bool("stream", true))
+		return cursorForwardResultFromStreaming(streamResult, originalModel, upstreamModel, startTime, httpResp.Header), nil
+	}
+
 	rawBody, err := readCursorUpstreamBody(resp.Body, cursorUpstreamStreamMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("cursor: read upstream stream: %w", err)
 	}
-
-	// ⑤-a 流内拒绝判据：HTTP200 正常流帧里的激活码终态模板。命中即终态失败，
-	// 绝不进入解析/计费路径（不得当成功、不得伪造 usage）。
 	if rej, rejected := cursorDetectKeyRejectedUpstream(rawBody); rejected {
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "response_parse_error", upstreamModel,
+			zap.String("outcome", "key_rejected"))
 		return nil, s.cursorHandleKeyRejected(ctx, c, account, rej, resp.TargetURL)
-	}
-
-	// ⑤-b 响应转换。Cursor 上游只有一种形态（envelope 字节流），故流式/非流式
-	// 入站都由同一解析器处理：流式转 SSE，非流式合成单条 JSON。
-	if reqStream {
-		sse, perr := cursorParseStreamToSSE(rawBody, originalModel, bearer)
-		if perr != nil {
-			s.cursorRecordStreamError(c, account, perr, resp.TargetURL)
-			return nil, perr
-		}
-		httpResp := cursorToHTTPResponse(resp, http.StatusOK, "text/event-stream", sse)
-		streamResult, herr := s.handleStreamingResponse(ctx, httpResp, c, account, startTime, originalModel, upstreamModel)
-		if herr != nil {
-			return nil, herr
-		}
-		return cursorForwardResultFromStreaming(streamResult, originalModel, upstreamModel, startTime, httpResp.Header), nil
 	}
 
 	completion, perr := cursorParseStreamToCompletion(rawBody, originalModel, bearer)
 	if perr != nil {
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "response_parse_error", upstreamModel,
+			zap.String("outcome", "parse_error"))
 		s.cursorRecordStreamError(c, account, perr, resp.TargetURL)
 		return nil, perr
 	}
+	cursorPhaseLog(ctx, zapcore.InfoLevel, "response_parse_done", upstreamModel,
+		zap.String("outcome", "ok"), zap.Bool("stream", false))
 	httpResp := cursorToHTTPResponse(resp, http.StatusOK, "application/json", completion)
 	nonStreamResult, herr := s.handleNonStreamingResponse(ctx, httpResp, c, account, originalModel, upstreamModel)
 	if herr != nil {
 		return nil, herr
 	}
+	// 非流式写回完成：终态成功事件（与流式 response_write_done 同口径）。
+	cursorPhaseLog(ctx, zapcore.InfoLevel, "response_write_done", upstreamModel,
+		zap.String("outcome", "ok"), zap.Bool("stream", false))
 	return cursorForwardResultFromNonStreaming(nonStreamResult, originalModel, upstreamModel, startTime, httpResp.Header), nil
 }
 

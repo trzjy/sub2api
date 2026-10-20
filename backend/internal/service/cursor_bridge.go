@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // cursorInboundOpenAIChat 是唯一已取证的入站形状：Chat Completions JSON。
@@ -96,6 +98,9 @@ func CursorForwardInbound(
 	if strings.TrimSpace(view.Model) == "" {
 		return nil, errors.New("cursor: inbound chat request carries no model (fail closed)")
 	}
+	// §18.5 T：桥接入口（handler/调度路径）记 forward_begin，标识进入 cursor 出站阶段。
+	cursorPhaseLog(ctx, zapcore.DebugLevel, "forward_begin", view.Model,
+		zap.Int64("account_id", account.ID))
 	return svc.forwardCursor(ctx, c, account, body, view.Model, view.Stream, time.Now())
 }
 

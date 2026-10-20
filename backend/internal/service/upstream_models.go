@@ -222,9 +222,9 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		return s.syncMuseModelCatalog(ctx, account)
 	}
 
-	// cursor 平台走专属目录同步（P1-B1）：POST GetUsableModels（Unary 裸 protobuf）
-	// → 适配（server_model_name / legacy_slugs）→ 折叠同名档位项 → 原子写同一
-	// model_mapping。cursor 上游是 Cursor 原生协议端点，无 OpenAI /v1/models 可言，
+	// cursor 平台走专属目录同步（P1-B1）：POST AvailableModels（Unary 裸 protobuf）
+	// → 适配（基础 name → server_model_name）→ 原子写同一 model_mapping。
+	// cursor 上游是 Cursor 原生协议端点，无 OpenAI /v1/models 可言，
 	// 与 muse 同款前置分派、与其它平台的通用路径完全隔离。
 	if isCursorAccount(account) {
 		return s.syncCursorModelCatalog(ctx, account)
@@ -798,16 +798,16 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 		return ids, body, nil, nil
 	}
 
-	// Cursor 平台（P1-B1）：走 GetUsableModels（Unary 裸 protobuf），与
+	// Cursor 平台（P1-B1）：走 AvailableModels（Unary 裸 protobuf），与
 	// SyncUpstreamModelCatalog 的 cursor 分支同源同一份目录来源；上游是 Cursor 原生
 	// 协议端点，没有 OpenAI /v1/models 可言，落到通用路径只会拿到一段非 JSON 报文然后
 	// 报 “not valid JSON”，掩盖真实失败原因。此处只回 ID 列表（不带能力元数据 body）。
 	if isCursorAccount(account) {
-		entries, cerr := s.fetchCursorUsableModels(ctx, account)
+		entries, cerr := s.fetchCursorCatalog(ctx, account)
 		if cerr != nil {
 			return nil, nil, nil, cerr
 		}
-		adapted, aerr := adaptCursorUsableModelsOrError(entries)
+		adapted, aerr := adaptCursorCatalogModelsOrError(entries)
 		if aerr != nil {
 			return nil, nil, nil, aerr
 		}

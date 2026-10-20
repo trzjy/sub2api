@@ -135,7 +135,9 @@ func newCursorOutboundTestService(
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	ts := httptest.NewServer(upstream)
+	ts := httptest.NewUnstartedServer(upstream)
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
 	t.Cleanup(ts.Close)
 
 	nodes := NewCursorUpstreamNodesResolver(WithCursorNodesCacheTTL(time.Hour))

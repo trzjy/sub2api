@@ -45,7 +45,11 @@ func (r *batchAccountQueryRepo) ListSchedulableByGroupIDAndPlatform(_ context.Co
 }
 
 func (r *batchAccountQueryRepo) ListSchedulableByGroupIDAndPlatforms(_ context.Context, groupID int64, platforms []string) ([]Account, error) {
-	return r.run(batchAccountQueryKey{groupID: groupID, platform: platforms[0], mixed: true})
+	mixed := false
+	for _, platform := range platforms {
+		mixed = mixed || platform == PlatformAntigravity
+	}
+	return r.run(batchAccountQueryKey{groupID: groupID, platform: platforms[0], mixed: mixed})
 }
 
 func (r *batchAccountQueryRepo) ListSchedulableUngroupedByPlatform(_ context.Context, platform string) ([]Account, error) {

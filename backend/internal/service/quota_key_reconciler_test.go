@@ -114,7 +114,12 @@ type fakeModelWater struct {
 
 	listErr  error
 	waterErr error
-	candErr  error
+	// waterErrAfter>0 让 WaterLevel 在累计调用次数超过该值时返回 waterErrAfterMsg，
+	// 用于"拉后重算失败"（初始调用成功、后续重算失败）这类交错的断言，零值无影响。
+	waterErrAfter    int
+	waterErrAfterMsg string
+
+	candErr error
 
 	// 调用计数（用于断言扫描行为与"缺口驱动的重算次数"）。
 	listCalls  int
@@ -165,6 +170,13 @@ func (f *fakeModelWater) WaterLevel(_ context.Context, _ string) (int, int, erro
 	f.waterCalls++
 	if f.waterErr != nil {
 		return 0, 0, f.waterErr
+	}
+	if f.waterErrAfter > 0 && f.waterCalls > f.waterErrAfter {
+		msg := f.waterErrAfterMsg
+		if msg == "" {
+			msg = "water level recompute boom"
+		}
+		return 0, 0, errors.New(msg)
 	}
 	return f.level, quotaKeyWaterLevelThreshold, nil
 }

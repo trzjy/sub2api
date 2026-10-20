@@ -283,7 +283,7 @@ func (r *QuotaKeyReconciler) runOnce() {
 		// mountStopReason 非空表示本轮命中 F4 哨兵（ErrQuotaKeyMountFailed）：立即停止本轮
 		// 后续候选拉号，并改写失败心跳（不再走成功摘要）。
 		mountStopReason string
-		// R15-1：本轮 ErrUpstreamKeyBlocked（上游失败、key 已 exhausted 占位）计数。
+		// R15-1：本轮 ErrUpstreamKeyBlocked（上游拉号受阻）计数。
 		// 单 key 失败不停轮（既有语义），但收尾心跳必须如实记失败，不得记成功。
 		blockedCount int
 		// shortfallReason 非空表示本轮如实报告缺口与成因（见 poolShortfall）：
@@ -358,8 +358,13 @@ func (r *QuotaKeyReconciler) runOnce() {
 			// 按实际成功入库账号重算总量：达标即停拉，不把"已拉/已选中 key 数"当账号增量。
 			nowTotal, _, rerr := r.modelWater.WaterLevel(ctx, mountModel)
 			if rerr != nil {
+				// R 行（§18.4 第 10 条）：拉号后重算失败 → 池级真相读不出、"还差几个号"未知，
+				// 继续拉号等于在未知总量下白白消耗上游（shareai 拉号非幂等）。故与函数内【初始】
+				// WaterLevel 错误分支保持一致：写失败心跳并立即 return，不再触碰下一 key。
+				// 不发明第三种错误处理形态；一般 pull 错误仍按既有分类处理（blk 计数 / 继续下一候选）。
 				log.Printf("[QuotaKeyReconcile] recompute water level after quota key %d failed: %v", keyID, rerr)
-				continue
+				r.recordHeartbeat(ctx, runAt, false, rerr, "")
+				return
 			}
 			if nowTotal > batchTotal {
 				increased = true
@@ -390,10 +395,10 @@ func (r *QuotaKeyReconciler) runOnce() {
 	}
 
 	if blockedCount > 0 {
-		// R15-1：本轮发生过上游拉号失败（key 已 exhausted 占位）——心跳如实记失败，
+		// R15-1：本轮发生过上游拉号失败——心跳如实记失败，
 		// 不得记成功。不停轮语义保持：仅反映结果，不改变下一轮行为。
 		r.recordHeartbeat(ctx, runAt, false,
-			fmt.Errorf("quota_key_reconcile: %d upstream pull(s) blocked (keys moved to exhausted placeholder)", blockedCount),
+			fmt.Errorf("quota_key_reconcile: %d upstream pull(s) blocked; see quota key refresh error", blockedCount),
 			"")
 		return
 	}

@@ -1430,6 +1430,25 @@ type quotaKeyModelWater struct {
 	// DefaultAutoEntryConfig（实供清单全集），与 production 未配置 cursor_auto_entry_config
 	// 时的口径一致。
 	cfgSrc AutoEntryConfigProvider
+
+	// §18.4 W 真实路由/渠道/配额依赖：生产由 wire 在 ProvideQuotaKeyReconciler 装配点注入。
+	// 三者齐备时水位走真实路由/端点/渠道/额度门；任一缺失视为装配错误，必须显式失败
+	// （禁止静默退化回粗交集口径，§18.4 第11条；共享合同 §5 禁止降级分支）。
+	gateway  *GatewayService
+	channel  *ChannelService
+	resolver *CompositeRouteResolver
+}
+
+// SetRoutingDependencies 注入 §18.4 W 所需的真实路由/渠道/网关依赖。生产装配必须提供，
+// 使水位沿用现有 resolver（显式 route → 账号精确 ownership → detector）与组级渠道、账号
+// 配额维度门；依赖缺失时水位显式失败（不退回粗交集），与 §18.4 第10/11条失败语义一致。
+func (w *quotaKeyModelWater) SetRoutingDependencies(gw *GatewayService, ch *ChannelService, res *CompositeRouteResolver) {
+	if w == nil {
+		return
+	}
+	w.gateway = gw
+	w.channel = ch
+	w.resolver = res
 }
 
 // NewQuotaKeyModelWater 构造生产用模型水位提供方（F1 装配点由 wire 注入 *ent.Client）。
@@ -1522,77 +1541,281 @@ func modelIDsOf(cfg *CursorAutoEntryConfig) []string {
 	return ids
 }
 
-// WaterLevel 返回【cursor 可服务账号去重总量】与统一阈值（P1-D2 总量制：方案 §6.3 / §15.6
-// / §16.1）。补池水位不是"每模型 10"，而是"cursor 可服务账号总量 10"。
-//
-// 总量计数谓词（与 S 卡账号资格同源）：
-//   - account.platform=cursor + schedulable=true + status=active + 未软删；
-//   - 非临时窗口（temp_unschedulable_until 为空或早于 now）；
-//   - 显式挂组：至少挂在"白名单允许 cursor 实供模型"的活跃未软删分组之一（裸号不计）；
-//   - 账号级去重：同一账号被多个覆盖模型的分组命中只计一次（Count 走 HasGroupsWith
-//     的 EXISTS 子查询，不做 join 展开，故同号跨模型不会重复计数）；
-//   - 只数已入库可调度账号，不因请求占用的并发而计缺号。
-//
-// modelM 仅作为调用上下文（历史签名 / 新号挂载目标）保留，不再收窄计数：总量制下水位的
-// 比对对象是池级总量。阈值恒为常量 quotaKeyWaterLevelThreshold（=10）。
+// WaterLevel 返回 Cursor 可服务账号的去重总量（方案 §15.6 / §16.1）。
+// 账号可调度性和模型能力复用调度谓词，已挂组白名单必须允许账号实际支持的模型。
+// key exhausted 仅代表拉号受阻，不剥夺已有账号供给；只有已知过期停止供给。
+// modelM 不收窄池级总量；并发占用不参与计数，统一目标仍为 10。
 func (w *quotaKeyModelWater) WaterLevel(ctx context.Context, _ string) (int, int, error) {
-	now := time.Now()
-	// 挂组门槛：白名单允许任一 cursor 实供模型的分组（不再按单一模型 M 收窄）。
-	gids, err := w.cursorCoveringGroupIDs(ctx)
-	if err != nil {
-		return 0, 0, err
-	}
-	if len(gids) == 0 {
-		// 无任何可服务 cursor 模型的分组：总量为 0（如实反映，不虚报）。
-		return 0, quotaKeyWaterLevelThreshold, nil
-	}
-	current, err := w.client.Account.Query().
+	accounts, err := w.client.Account.Query().
 		Where(
 			account.Platform(domain.PlatformCursor),
 			account.Schedulable(true),
 			account.Status(domain.StatusActive),
 			account.DeletedAtIsNil(),
-			account.Or(
-				account.TempUnschedulableUntilIsNil(),
-				account.TempUnschedulableUntilLT(now),
-			),
-			account.HasGroupsWith(group.IDIn(gids...)),
 		).
-		Count(ctx)
+		WithGroups(func(q *ent.GroupQuery) {
+			q.Where(group.Status(domain.StatusActive), group.DeletedAtIsNil())
+		}).
+		WithQuotaKey().
+		All(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("quota_key_model_water: count total water level: %w", err)
+		return 0, 0, fmt.Errorf("quota_key_model_water: list total water level accounts: %w", err)
+	}
+	current := 0
+	for _, row := range accounts {
+		// 必须走 w（已注入路由/渠道/网关依赖）的判定，而非包级 cursorAccountCountsTowardWaterLevel
+		// （后者为兼容旧单测用空结构退化为粗交集口径，不会携带生产路由依赖）。
+		eligible, err := w.countsTowardWaterLevel(ctx, row)
+		if err != nil {
+			return 0, 0, err
+		}
+		if eligible {
+			current++
+		}
 	}
 	return current, quotaKeyWaterLevelThreshold, nil
 }
 
-// cursorCoveringGroupIDs 返回"白名单允许任一 cursor 实供模型（CursorRealSupplyModels）"的
-// 活跃未软删分组 ID 集合，供总量水位做"显式挂组"门槛判定。
-// 白名单未启用（Enabled=false）的分组按既有 Allows 语义放行一切（含 cursor 模型），故同样入选。
-func (w *quotaKeyModelWater) cursorCoveringGroupIDs(ctx context.Context) ([]int64, error) {
-	groups, err := w.client.Group.Query().
-		Where(
-			group.Status(domain.StatusActive),
-			group.DeletedAtIsNil(),
-		).
-		All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("quota_key_model_water: list groups: %w", err)
+// cursorAccountCountsTowardWaterLevel 保留既有包级签名作为历史取证/测试入口：它直接走
+// w（空结构，未注入路由依赖）的判定——依赖缺失时按 §18.4 第11条显式失败，不再静默退化回
+// 粗交集口径。生产路径通过 w 注入 resolver/ChannelService/GatewayService 走真实
+// 路由/端点/渠道/额度门；本入口不是生产 WaterLevel 链路的一部分。
+func cursorAccountCountsTowardWaterLevel(ctx context.Context, row *ent.Account) (bool, error) {
+	return (&quotaKeyModelWater{}).countsTowardWaterLevel(ctx, row)
+}
+
+// countsTowardWaterLevel 是 §18.4 W 的统一入口：沿用既有候选域，对每个具体候选模型 × 显式组
+// × 四个文本端点逐一复用真实路由/端点/渠道/账号额度门；任一允许则账号只计一次，全部拒绝则不计。
+// 读库/路由/渠道基础设施错误返回整次 WaterLevel 错误，不返回部分数。
+func (w *quotaKeyModelWater) countsTowardWaterLevel(ctx context.Context, row *ent.Account) (bool, error) {
+	if row == nil || row.Platform != PlatformCursor || row.DeletedAt != nil {
+		return false, nil
 	}
-	cursorModels := make([]string, 0, len(CursorRealSupplyModels))
-	for _, m := range CursorRealSupplyModels {
-		cursorModels = append(cursorModels, m.ID)
+	// model_mapping 不属于敏感加密子键；只投影调度谓词消费的字段，不解密/读取鉴权材料。
+	candidate := &Account{
+		Platform: row.Platform, Type: row.Type, Status: row.Status, Schedulable: row.Schedulable,
+		Credentials: row.Credentials, Extra: row.Extra, ExpiresAt: row.ExpiresAt, AutoPauseOnExpired: row.AutoPauseOnExpired,
+		OverloadUntil: row.OverloadUntil, RateLimitResetAt: row.RateLimitResetAt,
+		TempUnschedulableUntil: row.TempUnschedulableUntil, QuotaKeyID: row.QuotaKeyID,
 	}
-	gids := make([]int64, 0, len(groups))
-	for _, g := range groups {
-		al := GroupModelAllowlistFromDomain(g.ModelAllowlist)
-		for _, m := range cursorModels {
-			if al.Allows(m) {
-				gids = append(gids, g.ID)
-				break
+	if !candidate.IsSchedulable() || len(candidate.GetModelMapping()) == 0 {
+		return false, nil
+	}
+	key := row.Edges.QuotaKey
+	if key == nil || key.DeletedAt != nil {
+		return false, fmt.Errorf("quota_key_model_water: account %d quota key unavailable", row.ID)
+	}
+	if quotaKeyStatusBlocksCursorScheduling(key.Status) || isExpired(key) {
+		return false, nil
+	}
+	// key 终态门（I2）：归属激活码不可服务 → 不剥夺已有账号供给，仅排除该号。
+	if reason := cursorAccountQuotaKeyVetoReason(ctx, candidate); reason != "" {
+		return false, nil
+	}
+
+	models := w.cursorCandidateModels(candidate)
+
+	// §18.4 第11条：禁止可选依赖导致静默跳过路由。依赖齐备时走真实路由/渠道/额度门；
+	// 依赖缺失是装配错误，必须显式失败（WaterLevel 整次返回错误，reconciler 记失败心跳并
+	// 停轮，与第10条失败语义一致），不得退回粗交集（§18.2 W 行认定的计数 bug 本体——没有
+	// 路由/端点/渠道/额度门会重新把"全部文本端点显式改向 OpenAI、真实平台门已排除 Cursor"
+	// 的账号计为 1，使站点以为不缺号、实际调度不到）。共享合同 §5 亦禁止兜底/降级分支。
+	if err := w.routingDependenciesReady(); err != nil {
+		return false, err
+	}
+	return w.countsTowardWaterLevelRouted(ctx, candidate, row, models)
+}
+
+// routingDependenciesReady 报告 §18.4 W 所需的真实路由/渠道/网关依赖是否齐备。
+// 三者任一缺失即视为装配错误：水位必须显式失败，禁止静默退化回粗交集口径
+// （§18.4 第11条；共享合同 §5 禁止降级分支会掩盖真实错误）。
+// 生产装配点在 cmd/server/wire_gen.go:379（ProvideQuotaKeyReconciler 注入
+// gatewayService / channelService / compositeRouteResolver），正常装配下三者齐备。
+func (w *quotaKeyModelWater) routingDependenciesReady() error {
+	switch {
+	case w.resolver == nil:
+		return fmt.Errorf("quota_key_model_water: routing dependency not wired: resolver (*CompositeRouteResolver) is nil; production wiring at cmd/server/wire_gen.go:379")
+	case w.channel == nil:
+		return fmt.Errorf("quota_key_model_water: routing dependency not wired: channel (*ChannelService) is nil; production wiring at cmd/server/wire_gen.go:379")
+	case w.gateway == nil:
+		return fmt.Errorf("quota_key_model_water: routing dependency not wired: gateway (*GatewayService) is nil; production wiring at cmd/server/wire_gen.go:379")
+	}
+	return nil
+}
+
+// cursorCandidateModels 返回水位候选模型集：静态实供清单 + 账号 model_mapping 的精确键。
+// 精确键 = 不以 "*" 结尾（§18.4.1）——中间字面星号（如 gpt-*-high）必须保留，不能因
+// Contains("*") 误丢；通配键仍由 IsModelSupported/GetMappedModel 按既有规则匹配具体模型名。
+// 候选域沿用现有代码，不实现无限字符串求解器、不新增"未知就停补"的能力限制。
+func (w *quotaKeyModelWater) cursorCandidateModels(candidate *Account) []string {
+	seen := make(map[string]struct{}, len(CursorStaticEntryModels()))
+	out := make([]string, 0, len(CursorStaticEntryModels())+len(candidate.GetModelMapping()))
+	add := func(m string) {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			return
+		}
+		key := strings.ToLower(m)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, m)
+	}
+	for _, m := range CursorStaticEntryModels() {
+		add(m)
+	}
+	for model := range candidate.GetModelMapping() {
+		if strings.HasSuffix(model, "*") {
+			continue // 通配键：保留既有"具体模型名 + 通配映射"匹配，不进精确候选集
+		}
+		add(model)
+	}
+	return out
+}
+
+// countsTowardWaterLevelRouted §18.4 真实门：对每个具体候选模型 × 显式组 × 四个文本端点，
+// 从干净 ctx 各自解析路由，复用现有 resolver（显式 route → 账号精确 ownership → detector），
+// 再经平台/端点准入、组级渠道（返回 error 的内部读入口）、账号配额维度门。
+// 任一允许 → 账号只计一次；全部拒绝 → 不计；基础设施错误 → 整次错误（不返回部分数）。
+func (w *quotaKeyModelWater) countsTowardWaterLevelRouted(ctx context.Context, candidate *Account, row *ent.Account, models []string) (bool, error) {
+	endpoints := []string{
+		CompositeRouteEndpointChatCompletions,
+		CompositeRouteEndpointMessages,
+		CompositeRouteEndpointResponses,
+		CompositeRouteEndpointGemini,
+	}
+	for _, model := range models {
+		// 账号模型支持（候选域已含精确键；通配键经 IsModelSupported 匹配）。
+		if !candidate.IsModelSupported(model) {
+			continue
+		}
+		if _, ok := candidate.ResolveMappedModel(model); !ok {
+			// 非空账号映射目标缺失 → 真实请求无法落上游，不计。
+			continue
+		}
+		for _, g := range row.Edges.Groups {
+			if g == nil || g.DeletedAt != nil || g.Status != StatusActive {
+				continue
+			}
+			if g.Platform != PlatformCursor && g.Platform != PlatformComposite && !cursorNativeBridgePlatforms(g.Platform) {
+				continue
+			}
+			gid := g.ID
+			allowlist := GroupModelAllowlistFromDomain(g.ModelAllowlist)
+			if !allowlist.Allows(model) {
+				continue
+			}
+			for _, endpoint := range endpoints {
+				// 每个组合从干净 ctx 开始，不继承上一组合的 target/channel stamp。
+				decision, defaulted, err := w.resolveCompositeRoute(ctx, gid, model, endpoint)
+				if err != nil {
+					return false, fmt.Errorf("quota_key_model_water: resolve route (group %d, model %q, endpoint %q): %w", gid, model, endpoint, err)
+				}
+				target, reachable := effectiveTargetForEndpoint(decision, defaulted, endpoint)
+				if !reachable {
+					continue // JSON 三端点未匹配仍不可达；gemini 未匹配仍未 default
+				}
+				// 显式 route 把请求改向 Cursor 不可服务的平台（如 OpenAI）→ 该组合不计入。
+				// 仅当未显式改向（detector/ownership 或 gemini default 补 Gemini）才沿用既有准入。
+				if decision.Source == CompositeRouteSourceExplicit && !cursorServableTarget(target) {
+					continue
+				}
+				// 第8条：OpenAI 兼容 Messages 入口的组 dispatch 改写后的真实调度名，
+				// 水位与 handler 共用 ResolveOpenAIMessagesDispatchMappedModel 判定（不假造请求级 tier/body）。
+				// 其余端点真实调度名即请求模型本身。
+				effectiveModel := model
+				if endpoint == CompositeRouteEndpointMessages {
+					sg := &Group{Platform: g.Platform, MessagesDispatchModelConfig: g.MessagesDispatchModelConfig}
+					if dm := ResolveOpenAIMessagesDispatchMappedModel(sg, target, model); dm != "" {
+						effectiveModel = dm
+					}
+				}
+				if !candidate.IsModelSupported(effectiveModel) {
+					continue
+				}
+				if _, ok := candidate.ResolveMappedModel(effectiveModel); !ok {
+					continue
+				}
+				if !candidate.IsSchedulableForModelWithContext(ctx, effectiveModel) {
+					continue
+				}
+				// 组级渠道：读取失败 ≠ 无渠道，必须返回错误而非误判。
+				lk, err := w.channel.lookupGroupChannel(ctx, gid)
+				if err != nil {
+					return false, fmt.Errorf("quota_key_model_water: lookup group channel (group %d): %w", gid, err)
+				}
+				// 渠道改写/限制：按当前 billing source 消费正确的名字（§18.4.5/7）。
+				channelMapped := model
+				accountMapped := model
+				if m := candidate.GetMappedModel(model); m != "" {
+					accountMapped = m
+				}
+				restrictionModel := model
+				if lk != nil {
+					cm := resolveMapping(lk, gid, model)
+					if cm.Mapped {
+						channelMapped = cm.MappedModel
+					}
+					switch cm.BillingModelSource {
+					case BillingModelSourceRequested:
+						restrictionModel = model
+					case BillingModelSourceUpstream:
+						restrictionModel = accountMapped
+					case BillingModelSourceResponse, BillingModelSourceChannelMapped:
+						restrictionModel = channelMapped
+					default:
+						restrictionModel = channelMapped
+					}
+					if lk.channel.RestrictModels && checkRestricted(lk, gid, restrictionModel) {
+						continue
+					}
+				}
+				// 账号配额维度门：只消费 scope=account 维度，不把 key 余额复制成账号额度。
+				if EvaluateAccountQuotaDimensionGate(ResolveAccountQuotaDimensions(candidate, time.Now())) != QuotaDimensionGateAllow {
+					continue
+				}
+				// 命中任一合法组合 → 同号只计一次。
+				return true, nil
 			}
 		}
 	}
-	return gids, nil
+	return false, nil
+}
+
+// resolveCompositeRoute 统一解析各端点的路由；gemini 端点走薄共用方法（未匹配补 Gemini、
+// 不伪造 Matched/ownership），JSON 三端点走原 resolver.Resolve。
+func (w *quotaKeyModelWater) resolveCompositeRoute(ctx context.Context, groupID int64, model, endpoint string) (CompositeRouteDecision, bool, error) {
+	if endpoint == CompositeRouteEndpointGemini {
+		return w.resolver.ResolveGeminiWithDefault(ctx, groupID, model)
+	}
+	decision, err := w.resolver.Resolve(ctx, groupID, model, endpoint)
+	return decision, false, err
+}
+
+// effectiveTargetForEndpoint 从决策中抽取真实上游目标平台与可达性。
+// JSON 三端点：未匹配 → 不可达；gemini 端点：匹配用其 target，未匹配但 defaulted 仅补 Gemini target。
+func effectiveTargetForEndpoint(decision CompositeRouteDecision, defaulted bool, endpoint string) (string, bool) {
+	if endpoint == CompositeRouteEndpointGemini {
+		if decision.Matched {
+			return decision.TargetPlatform, true
+		}
+		if defaulted {
+			return PlatformGemini, true
+		}
+		return "", false
+	}
+	if !decision.Matched {
+		return "", false
+	}
+	return decision.TargetPlatform, true
+}
+
+// cursorServableTarget 判定显式 route 的目标平台是否 Cursor 账号可服务：
+// 仅 cursor 自身与其原生桥接平台（Anthropic/Gemini）。OpenAI/Grok/CN 等平台 Cursor 不借
+// CodeBuddy 特例越过平台门，故不算可服务（§18.4.4）。
+func cursorServableTarget(target string) bool {
+	return target == PlatformCursor || cursorNativeBridgePlatforms(target)
 }
 
 // isCooldownRefreshError 判定该 key 的 last_refresh_error 是否为【冷却】类错误。

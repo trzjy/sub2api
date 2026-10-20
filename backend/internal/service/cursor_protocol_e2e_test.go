@@ -98,7 +98,9 @@ func newCursorE2EService(t *testing.T, upstream *cursorE2EUpstream) (*OpenAIGate
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	ts := httptest.NewServer(upstream.handler())
+	ts := httptest.NewUnstartedServer(upstream.handler())
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
 	t.Cleanup(ts.Close)
 
 	nodes := NewCursorUpstreamNodesResolver(WithCursorNodesCacheTTL(time.Hour))
@@ -336,10 +338,12 @@ func TestForwardCursorNeverLeaksTokenInError(t *testing.T) {
 	const token = "ACCOUNT-TOKEN-LEAK-CANARY"
 
 	// 构造一个会把 Bearer 回显进错误体的中转（出站已是账号 access_token）。
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		_, _ = w.Write([]byte(`{"error":"Unauthorized","message":"bad token ` + token + `"}`))
 	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 
 	nodes := NewCursorUpstreamNodesResolver(WithCursorNodesCacheTTL(time.Hour))

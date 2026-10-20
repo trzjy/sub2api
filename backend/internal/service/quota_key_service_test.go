@@ -1767,22 +1767,27 @@ func TestQuotaKeyModelWater_ListAllowedModelsPlatformScoped(t *testing.T) {
 func TestQuotaKeyModelWater_WaterLevelIsPoolTotalDedupedAcrossModels(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	w := NewQuotaKeyModelWater(client, nil)
+	// D-CRT-01W-FIX2：前序 FIX 把 WaterLevel 改成依赖齐备走 routed 口径、缺依赖即 fail-closed。
+	// 原构造 NewQuotaKeyModelWater(client, nil) 不注入路由依赖会正确撞门；此处改为注入齐备依赖走
+	// routed 路径（复用 newRoutedWater + stubResolverAllCursor），断言语义（池内去重总量）不变。
+	w := newRoutedWater(t, client, stubResolverAllCursor(), stubChannelServiceNoChannel(), &GatewayService{})
 
 	// 两个覆盖分组各自允许【不同】的 cursor 实供模型（挂组门槛：白名单允许任一 cursor 实供模型）。
+	// 注：§18.4 W routed 口径对分组平台有准入过滤（cursor/composite/native-bridge），旧用例用
+	// 空平台 mustCreateGroup 在旧代码无平台过滤时也能覆盖，新代码下改用 composite 组。
 	require.GreaterOrEqual(t, len(CursorRealSupplyModels), 2, "fixture needs at least two real-supply cursor models")
 	modelA := CursorRealSupplyModels[0].ID
 	modelB := CursorRealSupplyModels[1].ID
 	require.NotEqual(t, modelA, modelB, "fixture needs two distinct real-supply cursor models")
 
-	grpA := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelA}})
+	grpA := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelA}})
 	// 覆盖第二个实供模型的分组：用于构造"同一账号跨多个 cursor 模型命中"。
-	grpB := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelB}})
+	grpB := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelB}})
 	// 允许一切的分组（白名单未启用 → Allows 放行全部，含 cursor 实供模型）：用于构造去重边界
 	// ——同一账号再挂一个覆盖组也不得被计第二次。
-	grpAllowAll := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: false})
+	grpAllowAll := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: false})
 	// 不覆盖任何 cursor 实供模型的分组（白名单只允许一个无关模型）：其中的账号不计入池。
-	grpNonCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	grpNonCursor := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{fix1UniqueModel("cursor-fix1-nocursor")},
 	})
@@ -1812,7 +1817,7 @@ func TestQuotaKeyModelWater_WaterLevelIsPoolTotalDedupedAcrossModels(t *testing.
 	require.Equal(t, base, baseB, "pool total must not vary with modelM")
 
 	// ① 同号跨双模型：同时挂在允许不同模型的两个分组上 → 只计 1（§6.3 去重）。
-	accDual := mustCreateCursorAccount(t, client, holder.ID)
+	accDual := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels())
 	accs = append(accs, accDual.ID)
 	mustLinkAccountToGroup(t, client, accDual.ID, grpA.ID)
 	mustLinkAccountToGroup(t, client, accDual.ID, grpB.ID)
@@ -1831,7 +1836,7 @@ func TestQuotaKeyModelWater_WaterLevelIsPoolTotalDedupedAcrossModels(t *testing.
 	require.Equal(t, base+1, curAfterThirdGroup, "same account in a third covering group must still count once")
 
 	// ③ 第二个账号只挂在 grpB → 总量 +1（累计 +2）。
-	accSecond := mustCreateCursorAccount(t, client, holder.ID)
+	accSecond := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels())
 	accs = append(accs, accSecond.ID)
 	mustLinkAccountToGroup(t, client, accSecond.ID, grpB.ID)
 	curTwo, _, err := w.WaterLevel(ctx, modelA)
@@ -1839,14 +1844,14 @@ func TestQuotaKeyModelWater_WaterLevelIsPoolTotalDedupedAcrossModels(t *testing.
 	require.Equal(t, base+2, curTwo, "a second distinct servable account must add exactly one to the pool total")
 
 	// ④ 不计入：裸号（未显式挂组）。
-	accBare := mustCreateCursorAccount(t, client, holder.ID)
+	accBare := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels())
 	accs = append(accs, accBare.ID)
 	curBare, _, err := w.WaterLevel(ctx, modelA)
 	require.NoError(t, err)
 	require.Equal(t, base+2, curBare, "bare cursor account (no group) must NOT count")
 
 	// ⑤ 不计入：只挂在"不覆盖任何 cursor 实供模型"的分组上的账号。
-	accNonCover := mustCreateCursorAccount(t, client, holder.ID)
+	accNonCover := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels())
 	accs = append(accs, accNonCover.ID)
 	mustLinkAccountToGroup(t, client, accNonCover.ID, grpNonCursor.ID)
 	curNonCover, _, err := w.WaterLevel(ctx, modelA)
@@ -1860,20 +1865,25 @@ func TestQuotaKeyModelWater_WaterLevelIsPoolTotalDedupedAcrossModels(t *testing.
 func TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	// 配置勾选 grok-4.7 与 gpt-6-sol（实供模型，vendor 随清单）。
-	w := NewQuotaKeyModelWater(client, curF1ConfigSelecting("grok-4.7", "gpt-6-sol"))
+	// D-CRT-01W-FIX2：注入齐备依赖走 routed 路径（复用 newRoutedWater + stubResolverAllCursor），
+	// 替换原 NewQuotaKeyModelWater(client, curF1ConfigSelecting(...))（不注入路由依赖会 fail-closed）。
+	// 断言语义（裁定 1：水位不再限定 platform=cursor）不变。配置源仅被 ListAllowedModels 消费，
+	// WaterLevel 不依赖它，故此处不再传 curF1ConfigSelecting。
+	w := newRoutedWater(t, client, stubResolverAllCursor(), stubChannelServiceNoChannel(), &GatewayService{})
 
 	// 同名实供模型：cursor 分组与非 cursor 分组白名单各覆盖一次。
 	modelM := "grok-4.7"
 	grpCursor := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
-	// mustCreateGroup 不设平台 → 默认 anthropic（非 cursor 服务分组）。
-	grpOther := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
+	// 非 cursor 平台分组（取 composite：生产现实里 cursor 账号由 composite 聚合组调度，且 §18.4 W
+	// routed 口径准入 composite 平台），验证"非 cursor 平台分组同样计入"。旧用例用空平台
+	// mustCreateGroup 在旧代码无平台过滤时也能覆盖，新代码下改用 composite 组。
+	grpOther := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
 
 	holder := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
 	// 两条同规格候选账号（schedulable / active / 未软删 / 非 temp 窗口），仅所属分组平台不同。
-	accCursor := mustCreateCursorAccount(t, client, holder.ID)
+	accCursor := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels())
 	mustLinkAccountToGroup(t, client, accCursor.ID, grpCursor.ID)
-	accOther := mustCreateCursorAccount(t, client, holder.ID)
+	accOther := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels())
 	mustLinkAccountToGroup(t, client, accOther.ID, grpOther.ID)
 
 	cur, thr, err := w.WaterLevel(ctx, modelM)
@@ -1883,20 +1893,25 @@ func TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly(t *testing.T) {
 	require.GreaterOrEqual(t, cur, 2,
 		"accounts in BOTH cursor and non-cursor covering groups count; non-cursor platform no longer excluded (裁定 1)")
 
-	// 反向对照：仅非 cursor 平台分组覆盖的实供模型，水位仍 >0（不再虚高为 0）。
+	// 反向对照：仅非 cursor 平台分组（composite）覆盖的实供模型，水位仍 >0（不再虚高为 0）。
 	modelOtherOnly := "gpt-6-sol"
-	grpOtherOnly := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelOtherOnly}})
-	accOtherOnly := mustCreateCursorAccount(t, client, holder.ID)
+	grpOtherOnly := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelOtherOnly}})
+	accOtherOnly := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels())
 	mustLinkAccountToGroup(t, client, accOtherOnly.ID, grpOtherOnly.ID)
 
-	// R10-1（CUR-F13）：复原本用例自建分组（覆盖 grok-4.7 / gpt-6-sol 的启用组），避免其残留
-	// 共享库污染他用例（如 F10 全等挂载断言、F7 零覆盖判定）。先清挂载链接再删分组。
+	// R10-1（CUR-F13）：复原本用例自建分组（覆盖 grok-4.7 / gpt-6-sol 的启用组）与自有账号，
+	// 避免其残留共享库污染他用例（如 F10 全等挂载断言、F7 零覆盖判定）。先清挂载链接、再删分组、
+	// 软删自有账号（清链接后账号变裸号，若不软删会在共享库累积；水位不数裸号，但仍应复原）。
 	leakedGroupIDs := []int64{grpCursor.ID, grpOther.ID, grpOtherOnly.ID}
+	leakedAccountIDs := []int64{accCursor.ID, accOther.ID, accOtherOnly.ID}
 	t.Cleanup(func() {
 		cctx := context.Background()
 		for _, gid := range leakedGroupIDs {
 			_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(gid)).Exec(cctx)
 			_, _ = client.Group.Delete().Where(entgroup.IDEQ(gid)).Exec(cctx)
+		}
+		for _, aid := range leakedAccountIDs {
+			_ = client.Account.UpdateOneID(aid).SetDeletedAt(time.Now()).Exec(cctx)
 		}
 	})
 
@@ -1910,15 +1925,20 @@ func TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly(t *testing.T) {
 func TestQuotaKeyModelWater_WaterLevelExcludesTempWindow(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	w := NewQuotaKeyModelWater(client, nil)
+	// D-CRT-01W-FIX2：注入齐备依赖走 routed 路径（复用 newRoutedWater + stubResolverAllCursor），
+	// 替换原 NewQuotaKeyModelWater(client, nil)（不注入路由依赖会 fail-closed）。temp 窗口排除
+	// 语义由 IsSchedulable（含 TempUnschedulableUntil 判定）在 routed 入口统一处理，断言不变。
+	w := newRoutedWater(t, client, stubResolverAllCursor(), stubChannelServiceNoChannel(), &GatewayService{})
 
 	// 总量口径：分组必须"允许任一 cursor 实供模型"才构成挂组门槛，愿条件是 cover 判定本身，
-	// 故这里用一个实供模型构造覆盖组（不再使用与实供清单无关的临时模型名）。
+	// 故这里用一个实供模型构造覆盖组（不再使用与实供清单无关的临时模型名）。§18.4 W routed 口径
+	// 对分组平台有准入过滤，旧用例用空平台 mustCreateGroup 在旧代码无平台过滤时也能覆盖，新代码
+	// 下改用 composite 组。
 	modelM := CursorRealSupplyModels[0].ID
-	grp := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
+	grp := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
 
 	holder := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	acc := mustCreateCursorAccount(t, client, holder.ID, func(c *ent.AccountCreate) {
+	acc := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels(), func(c *ent.AccountCreate) {
 		c.SetTempUnschedulableUntil(time.Now().Add(time.Hour)) // 将来 → 临时不可调度
 	})
 	mustLinkAccountToGroup(t, client, acc.ID, grp.ID)
@@ -2443,7 +2463,7 @@ func TestCURF1_AllowedModels_NoCursorGroup_RealSupplyModel(t *testing.T) {
 
 	// 挂一条账号进覆盖组，令水位可数（证明 WaterLevel 真的按白名单统计，而非空跑）。
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	acc := mustCreateCursorAccount(t, client, qk.ID)
+	acc := mustCreateCursorAccount(t, client, qk.ID, withCursorWaterModels())
 	mustLinkAccountToGroup(t, client, acc.ID, grp.ID)
 	cur, _, err = w.WaterLevel(ctx, "grok-4.7")
 	require.NoError(t, err)

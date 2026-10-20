@@ -100,7 +100,7 @@ func TestCursorForward_DoInjectsAuthHeaders(t *testing.T) {
 
 	body := []byte(`{"model":"cursor-small","messages":[{"role":"user","content":"hi"}]}`)
 	resp, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path: cursorPathAgentRun,
+		Path: cursorPathAvailableModels,
 		Body: body,
 	})
 	if err != nil {
@@ -111,12 +111,12 @@ func TestCursorForward_DoInjectsAuthHeaders(t *testing.T) {
 	if got := fake.headers.Get(cursorJgAuthHeader); got != "TEST-CIPHERTEXT" {
 		t.Errorf("x-jg-auth = %q, want TEST-CIPHERTEXT", got)
 	}
-	if got := fake.headers.Get(cursorJgModelHeader); got != cursorJgModelHeaderValue {
-		t.Errorf("x-jg-model = %q, want %q", got, cursorJgModelHeaderValue)
+	if got := fake.headers.Get(cursorJgModelHeader); got != "" {
+		t.Errorf("Standard request must omit x-jg-model, got %q", got)
 	}
 	// 协议不重写：路径与请求体逐字节沿用 Cursor 原生形态。
-	if fake.path != cursorPathAgentRun {
-		t.Errorf("path = %q, want %q", fake.path, cursorPathAgentRun)
+	if fake.path != cursorPathAvailableModels {
+		t.Errorf("path = %q, want %q", fake.path, cursorPathAvailableModels)
 	}
 	if fake.body != string(body) {
 		t.Errorf("body mutated: %q", fake.body)
@@ -124,7 +124,7 @@ func TestCursorForward_DoInjectsAuthHeaders(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d", resp.StatusCode)
 	}
-	if !strings.HasSuffix(resp.TargetURL, cursorPathAgentRun) {
+	if !strings.HasSuffix(resp.TargetURL, cursorPathAvailableModels) {
 		t.Errorf("TargetURL = %q", resp.TargetURL)
 	}
 }
@@ -136,7 +136,7 @@ func TestCursorForward_DoForwardsCallerHeaders(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	if _, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path: cursorPathAgentRun,
+		Path: cursorPathAvailableModels,
 		Body: []byte(`{}`),
 		Headers: map[string]string{
 			"Authorization": "Bearer cursor-token",
@@ -164,7 +164,7 @@ func TestCursorForward_DoStreamsFramesVerbatim(t *testing.T) {
 		})
 
 	resp, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path:     cursorPathAgentRun,
+		Path:     cursorPathAvailableModels,
 		Body:     []byte(`{}`),
 		UseHTTP2: true,
 	})
@@ -225,7 +225,7 @@ func TestCursorForward_MissingAuthProviderFailsClosed(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	_, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path: cursorPathAgentRun,
+		Path: cursorPathAvailableModels,
 		Body: []byte(`{}`),
 	})
 	if err == nil {
@@ -254,7 +254,7 @@ func TestCursorForward_AuthFailureFailsClosed(t *testing.T) {
 				func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 			_, err := f.Do(context.Background(), &CursorUpstreamRequest{
-				Path: cursorPathAgentRun,
+				Path: cursorPathAvailableModels,
 				Body: []byte(`{}`),
 			})
 			if err == nil {
@@ -288,7 +288,7 @@ func TestCursorForward_NeverFallsBackToCursorOfficial(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	_, err := f.Do(context.Background(), &CursorUpstreamRequest{
-		Path: cursorPathAgentRun,
+		Path: cursorPathAvailableModels,
 		Body: []byte(`{}`),
 	})
 	if err == nil {
@@ -475,7 +475,7 @@ func TestCursorUpstreamForwardCanceledContextFailsClosed(t *testing.T) {
 	cancel() // 发出前即取消
 
 	resp, err := f.Do(ctx, &CursorUpstreamRequest{
-		Path: cursorPathAgentRun,
+		Path: cursorPathAvailableModels,
 		Body: []byte(`{}`),
 	})
 	if err == nil {

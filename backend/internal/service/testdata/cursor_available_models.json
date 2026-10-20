@@ -1,0 +1,11072 @@
+{
+ "_comment": "Desensitized real AvailableModels response captured 2026-10-19 (evidence 11-base-catalog.bin, 48 base entries). Model names/aliases are upstream public identifiers; no account material.",
+ "source_evidence": "/home/zjy/.sub2api-acceptance/sub2api-cursor-takeover-20261019/11-base-catalog.bin",
+ "model_count": 48,
+ "models": [
+  {
+   "name": "default",
+   "client_display_name": "Auto",
+   "server_model_name": "default",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [],
+   "id_aliases": [
+    "auto"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "default",
+     "parameter_values": [],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "grok-4.7",
+   "client_display_name": "Grok 4.7",
+   "server_model_name": "grok-4.7",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "grok-4.7",
+    "grok-4.7-low",
+    "grok-4.7-low-fast",
+    "grok-4.7-medium",
+    "grok-4.7-medium-fast",
+    "grok-4.7-high",
+    "grok-4.7-high-fast",
+    "grok-4.7-xhigh",
+    "grok-4.7-xhigh-fast"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "grok-4.7-low",
+     "parameter_values": [
+      [
+       "context",
+       "256k"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "grok-4.7-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "256k"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "grok-4.7-medium",
+     "parameter_values": [
+      [
+       "context",
+       "256k"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "grok-4.7-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "256k"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "grok-4.7-high",
+     "parameter_values": [
+      [
+       "context",
+       "256k"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "grok-4.7-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "256k"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "grok-4.7-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "256k"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "grok-4.7-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "256k"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "grok-4.7-low",
+     "parameter_values": [
+      [
+       "context",
+       "500k"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "grok-4.7-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "500k"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "grok-4.7-medium",
+     "parameter_values": [
+      [
+       "context",
+       "500k"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "grok-4.7-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "500k"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "grok-4.7-high",
+     "parameter_values": [
+      [
+       "context",
+       "500k"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "grok-4.7-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "500k"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "grok-4.7-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "500k"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "grok-4.7-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "500k"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "grok-4.6",
+   "client_display_name": "Grok 4.6",
+   "server_model_name": "grok-4.6",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "cursor-grok-4.6-low",
+    "cursor-grok-4.6-low-fast",
+    "cursor-grok-4.6-medium",
+    "cursor-grok-4.6-medium-fast",
+    "cursor-grok-4.6-high",
+    "cursor-grok-4.6-high-fast",
+    "cursor-grok-4.6-xhigh",
+    "cursor-grok-4.6-xhigh-fast"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "cursor-grok-4.6-low",
+     "parameter_values": [
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.6-low-fast",
+     "parameter_values": [
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.6-medium",
+     "parameter_values": [
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.6-medium-fast",
+     "parameter_values": [
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.6-high",
+     "parameter_values": [
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.6-high-fast",
+     "parameter_values": [
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.6-xhigh",
+     "parameter_values": [
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.6-xhigh-fast",
+     "parameter_values": [
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "composer-2.5",
+   "client_display_name": "Composer 2.5",
+   "server_model_name": "composer-2.5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "composer-2.5-fast"
+   ],
+   "id_aliases": [
+    "composer-latest",
+    "composer",
+    "composer-2-5"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "composer-2.5-fast",
+     "parameter_values": [
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "composer-2.5",
+     "parameter_values": [
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "claude-opus-5-5",
+   "client_display_name": "Claude Opus 5.5",
+   "server_model_name": "claude-opus-5-5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-opus-5-5-low",
+    "claude-opus-5-5-low-fast",
+    "claude-opus-5-5-medium",
+    "claude-opus-5-5-medium-fast",
+    "claude-opus-5-5-high",
+    "claude-opus-5-5-high-fast",
+    "claude-opus-5-5-xhigh",
+    "claude-opus-5-5-xhigh-fast",
+    "claude-opus-5-5-max",
+    "claude-opus-5-5-max-fast"
+   ],
+   "id_aliases": [
+    "opus-latest",
+    "opus",
+    "opus-5.5",
+    "opus-5-5"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-opus-5-5-low",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-medium",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-high",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-max",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-5-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-opus-5",
+   "client_display_name": "Claude Opus 5",
+   "server_model_name": "claude-opus-5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-opus-5-low",
+    "claude-opus-5-low-fast",
+    "claude-opus-5-medium",
+    "claude-opus-5-medium-fast",
+    "claude-opus-5-high",
+    "claude-opus-5-high-fast",
+    "claude-opus-5-thinking-low",
+    "claude-opus-5-thinking-low-fast",
+    "claude-opus-5-thinking-medium",
+    "claude-opus-5-thinking-medium-fast",
+    "claude-opus-5-thinking-high",
+    "claude-opus-5-thinking-high-fast",
+    "claude-opus-5-thinking-xhigh",
+    "claude-opus-5-thinking-xhigh-fast",
+    "claude-opus-5-thinking-max",
+    "claude-opus-5-thinking-max-fast"
+   ],
+   "id_aliases": [
+    "opus-latest",
+    "opus",
+    "opus-5"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-opus-5-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-5-thinking-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-opus-4-8",
+   "client_display_name": "Claude Opus 4.8",
+   "server_model_name": "claude-opus-4-8",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-opus-4-8-low",
+    "claude-opus-4-8-low-fast",
+    "claude-opus-4-8-medium",
+    "claude-opus-4-8-medium-fast",
+    "claude-opus-4-8-high",
+    "claude-opus-4-8-high-fast",
+    "claude-opus-4-8-xhigh",
+    "claude-opus-4-8-xhigh-fast",
+    "claude-opus-4-8-max",
+    "claude-opus-4-8-max-fast",
+    "claude-opus-4-8-thinking-low",
+    "claude-opus-4-8-thinking-low-fast",
+    "claude-opus-4-8-thinking-medium",
+    "claude-opus-4-8-thinking-medium-fast",
+    "claude-opus-4-8-thinking-high",
+    "claude-opus-4-8-thinking-high-fast",
+    "claude-opus-4-8-thinking-xhigh",
+    "claude-opus-4-8-thinking-xhigh-fast",
+    "claude-opus-4-8-thinking-max",
+    "claude-opus-4-8-thinking-max-fast"
+   ],
+   "id_aliases": [
+    "opus-latest",
+    "opus",
+    "opus-4.8",
+    "opus-4-8"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-opus-4-8-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-8-thinking-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gpt-6-astra",
+   "client_display_name": "GPT-6 Astra",
+   "server_model_name": "gpt-6-astra",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-6-astra-none",
+    "gpt-6-astra-none-fast",
+    "gpt-6-astra-low",
+    "gpt-6-astra-low-fast",
+    "gpt-6-astra-medium",
+    "gpt-6-astra-medium-fast",
+    "gpt-6-astra-high",
+    "gpt-6-astra-high-fast",
+    "gpt-6-astra-xhigh",
+    "gpt-6-astra-xhigh-fast",
+    "gpt-6-astra-max",
+    "gpt-6-astra-max-fast"
+   ],
+   "id_aliases": [
+    "gpt-6"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-6-astra-none",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-low",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-medium",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-max",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-astra-none",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-astra-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gpt-6.1-sol",
+   "client_display_name": "GPT-6.1 Sol",
+   "server_model_name": "gpt-6.1-sol",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-6.1-sol-none",
+    "gpt-6.1-sol-none-fast",
+    "gpt-6.1-sol-low",
+    "gpt-6.1-sol-low-fast",
+    "gpt-6.1-sol-medium",
+    "gpt-6.1-sol-medium-fast",
+    "gpt-6.1-sol-high",
+    "gpt-6.1-sol-high-fast",
+    "gpt-6.1-sol-xhigh",
+    "gpt-6.1-sol-xhigh-fast",
+    "gpt-6.1-sol-max",
+    "gpt-6.1-sol-max-fast"
+   ],
+   "id_aliases": [
+    "gpt-6-1-sol",
+    "gpt-6.1"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-6.1-sol-none",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-low",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-medium",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-max",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-none",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6.1-sol-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gpt-6-sol",
+   "client_display_name": "GPT-6 Sol",
+   "server_model_name": "gpt-6-sol",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-6-sol-none",
+    "gpt-6-sol-none-fast",
+    "gpt-6-sol-low",
+    "gpt-6-sol-low-fast",
+    "gpt-6-sol-medium",
+    "gpt-6-sol-medium-fast",
+    "gpt-6-sol-high",
+    "gpt-6-sol-high-fast",
+    "gpt-6-sol-xhigh",
+    "gpt-6-sol-xhigh-fast",
+    "gpt-6-sol-max",
+    "gpt-6-sol-max-fast"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "gpt-6-sol-none",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-low",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-medium",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-max",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-sol-none",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-sol-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.6-sol",
+   "client_display_name": "GPT-5.6 Sol",
+   "server_model_name": "gpt-5.6-sol",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.6-sol-none",
+    "gpt-5.6-sol-none-fast",
+    "gpt-5.6-sol-low",
+    "gpt-5.6-sol-low-fast",
+    "gpt-5.6-sol-medium",
+    "gpt-5.6-sol-medium-fast",
+    "gpt-5.6-sol-high",
+    "gpt-5.6-sol-high-fast",
+    "gpt-5.6-sol-xhigh",
+    "gpt-5.6-sol-xhigh-fast",
+    "gpt-5.6-sol-max",
+    "gpt-5.6-sol-max-fast"
+   ],
+   "id_aliases": [
+    "gpt-latest",
+    "gpt",
+    "gpt-5-6-sol",
+    "gpt-5.6"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.6-sol-none",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-low",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-medium",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-max",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-none",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-sol-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.5",
+   "client_display_name": "GPT-5.5",
+   "server_model_name": "gpt-5.5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.5-none",
+    "gpt-5.5-none-fast",
+    "gpt-5.5-low",
+    "gpt-5.5-low-fast",
+    "gpt-5.5-medium",
+    "gpt-5.5-medium-fast",
+    "gpt-5.5-high",
+    "gpt-5.5-high-fast",
+    "gpt-5.5-extra-high",
+    "gpt-5.5-extra-high-fast"
+   ],
+   "id_aliases": [
+    "gpt-5-5"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.5-none",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-low",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-medium",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-extra-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-extra-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.5-none",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.5-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.5-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.5-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.5-extra-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-fable-5-1",
+   "client_display_name": "Claude Fable 5.1",
+   "server_model_name": "claude-fable-5-1",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-fable-5-1-low",
+    "claude-fable-5-1-medium",
+    "claude-fable-5-1-high",
+    "claude-fable-5-1-xhigh",
+    "claude-fable-5-1-max",
+    "claude-fable-5-1-thinking-low",
+    "claude-fable-5-1-thinking-medium",
+    "claude-fable-5-1-thinking-high",
+    "claude-fable-5-1-thinking-xhigh",
+    "claude-fable-5-1-thinking-max"
+   ],
+   "id_aliases": [
+    "fable-5-1"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-fable-5-1-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-1-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-fable-5",
+   "client_display_name": "Claude Fable 5",
+   "server_model_name": "claude-fable-5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-fable-5-low",
+    "claude-fable-5-medium",
+    "claude-fable-5-high",
+    "claude-fable-5-xhigh",
+    "claude-fable-5-max",
+    "claude-fable-5-thinking-low",
+    "claude-fable-5-thinking-medium",
+    "claude-fable-5-thinking-high",
+    "claude-fable-5-thinking-xhigh",
+    "claude-fable-5-thinking-max"
+   ],
+   "id_aliases": [
+    "fable",
+    "fable-5",
+    "fable-5"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-fable-5-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-fable-5-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "grok-4.5",
+   "client_display_name": "Grok 4.5",
+   "server_model_name": "grok-4.5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "cursor-grok-4.5-low",
+    "cursor-grok-4.5-low-fast",
+    "cursor-grok-4.5-medium",
+    "cursor-grok-4.5-medium-fast",
+    "cursor-grok-4.5-high",
+    "cursor-grok-4.5-high-fast",
+    "grok-4.5-medium",
+    "grok-4.5-fast-medium",
+    "grok-4.5-high",
+    "grok-4.5-fast-high",
+    "grok-4.5-xhigh",
+    "grok-4.5-fast-xhigh"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "cursor-grok-4.5-low",
+     "parameter_values": [
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.5-low-fast",
+     "parameter_values": [
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.5-medium",
+     "parameter_values": [
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.5-medium-fast",
+     "parameter_values": [
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.5-high",
+     "parameter_values": [
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "cursor-grok-4.5-high-fast",
+     "parameter_values": [
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gemini-3.8-flash",
+   "client_display_name": "Gemini 3.8 Flash",
+   "server_model_name": "gemini-3.8-flash",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gemini-3.8-flash",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-high"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "gemini-3.8-flash-low",
+     "parameter_values": [
+      [
+       "reasoning_effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gemini-3.8-flash-medium",
+     "parameter_values": [
+      [
+       "reasoning_effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gemini-3.8-flash-high",
+     "parameter_values": [
+      [
+       "reasoning_effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gemini-3.7-flash",
+   "client_display_name": "Gemini 3.7 Flash",
+   "server_model_name": "gemini-3.7-flash",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gemini-3.7-flash-low",
+    "gemini-3.7-flash-medium",
+    "gemini-3.7-flash-high"
+   ],
+   "id_aliases": [
+    "gemini-flash-latest",
+    "gemini-flash"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gemini-3.7-flash-low",
+     "parameter_values": [
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gemini-3.7-flash-medium",
+     "parameter_values": [
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gemini-3.7-flash-high",
+     "parameter_values": [
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "muse-spark-1.3",
+   "client_display_name": "Muse Spark 1.3",
+   "server_model_name": "muse-spark-1.3",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "muse-spark-1.3-minimal",
+    "muse-spark-1.3-low",
+    "muse-spark-1.3-medium",
+    "muse-spark-1.3-high",
+    "muse-spark-1.3-xhigh",
+    "muse-spark-1.3-max"
+   ],
+   "id_aliases": [
+    "muse-spark",
+    "muse"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "muse-spark-1.3-minimal",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "minimal"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-low",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-medium",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-high",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-max",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-minimal",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "minimal"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "muse-spark-1.3-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.6-terra",
+   "client_display_name": "GPT-5.6 Terra",
+   "server_model_name": "gpt-5.6-terra",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.6-terra-none",
+    "gpt-5.6-terra-none-fast",
+    "gpt-5.6-terra-low",
+    "gpt-5.6-terra-low-fast",
+    "gpt-5.6-terra-medium",
+    "gpt-5.6-terra-medium-fast",
+    "gpt-5.6-terra-high",
+    "gpt-5.6-terra-high-fast",
+    "gpt-5.6-terra-xhigh",
+    "gpt-5.6-terra-xhigh-fast",
+    "gpt-5.6-terra-max",
+    "gpt-5.6-terra-max-fast"
+   ],
+   "id_aliases": [
+    "gpt-5-6-terra"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.6-terra-none",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-low",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-medium",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-max",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-none",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-terra-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-sonnet-5-5",
+   "client_display_name": "Claude Sonnet 5.5",
+   "server_model_name": "claude-sonnet-5-5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-sonnet-5-5",
+    "claude-sonnet-5-5-low",
+    "claude-sonnet-5-5-medium",
+    "claude-sonnet-5-5-high",
+    "claude-sonnet-5-5-xhigh",
+    "claude-sonnet-5-5-max"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "claude-sonnet-5-5-low",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-5-medium",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-5-high",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-5-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-5-max",
+     "parameter_values": [
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-5-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-5-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-5-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-5-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-5-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-sonnet-5",
+   "client_display_name": "Claude Sonnet 5",
+   "server_model_name": "claude-sonnet-5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-sonnet-5-low",
+    "claude-sonnet-5-medium",
+    "claude-sonnet-5-high",
+    "claude-sonnet-5-xhigh",
+    "claude-sonnet-5-max",
+    "claude-sonnet-5-thinking-low",
+    "claude-sonnet-5-thinking-medium",
+    "claude-sonnet-5-thinking-high",
+    "claude-sonnet-5-thinking-xhigh",
+    "claude-sonnet-5-thinking-max"
+   ],
+   "id_aliases": [
+    "sonnet-latest",
+    "sonnet-5"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-sonnet-5-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-sonnet-5-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-sonnet-4-6",
+   "client_display_name": "Claude Sonnet 4.6",
+   "server_model_name": "claude-sonnet-4-6",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-4.6-sonnet-low",
+    "claude-4.6-sonnet-medium",
+    "claude-4.6-sonnet-high",
+    "claude-4.6-sonnet-max",
+    "claude-4.6-sonnet-low-thinking",
+    "claude-4.6-sonnet-medium-thinking",
+    "claude-4.6-sonnet-high-thinking",
+    "claude-4.6-sonnet-max-thinking"
+   ],
+   "id_aliases": [
+    "sonnet-latest",
+    "sonnet",
+    "sonnet-4.6",
+    "sonnet-4-6"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-4.6-sonnet-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-low-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-medium-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-high-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-max-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-low-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-medium-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-high-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-sonnet-max-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.3-codex",
+   "client_display_name": "Codex 5.3",
+   "server_model_name": "gpt-5.3-codex",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.3-codex-low",
+    "gpt-5.3-codex-low-fast",
+    "gpt-5.3-codex-fast",
+    "gpt-5.3-codex-high",
+    "gpt-5.3-codex-high-fast",
+    "gpt-5.3-codex-xhigh",
+    "gpt-5.3-codex-xhigh-fast"
+   ],
+   "id_aliases": [
+    "codex-latest",
+    "codex",
+    "codex-5.3"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.3-codex-low",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.3-codex-low-fast",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.3-codex",
+     "parameter_values": [
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.3-codex-fast",
+     "parameter_values": [
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.3-codex-high",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.3-codex-high-fast",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.3-codex-xhigh",
+     "parameter_values": [
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.3-codex-xhigh-fast",
+     "parameter_values": [
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "claude-opus-4-7",
+   "client_display_name": "Claude Opus 4.7",
+   "server_model_name": "claude-opus-4-7",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-opus-4-7-low",
+    "claude-opus-4-7-low-fast",
+    "claude-opus-4-7-medium",
+    "claude-opus-4-7-medium-fast",
+    "claude-opus-4-7-high",
+    "claude-opus-4-7-high-fast",
+    "claude-opus-4-7-xhigh",
+    "claude-opus-4-7-xhigh-fast",
+    "claude-opus-4-7-max",
+    "claude-opus-4-7-max-fast",
+    "claude-opus-4-7-thinking-low",
+    "claude-opus-4-7-thinking-low-fast",
+    "claude-opus-4-7-thinking-medium",
+    "claude-opus-4-7-thinking-medium-fast",
+    "claude-opus-4-7-thinking-high",
+    "claude-opus-4-7-thinking-high-fast",
+    "claude-opus-4-7-thinking-xhigh",
+    "claude-opus-4-7-thinking-xhigh-fast",
+    "claude-opus-4-7-thinking-max",
+    "claude-opus-4-7-thinking-max-fast"
+   ],
+   "id_aliases": [
+    "opus-4.7",
+    "opus-4-7"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-opus-4-7-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-low-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-medium-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-high-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-xhigh-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-opus-4-7-thinking-max-fast",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.4",
+   "client_display_name": "GPT-5.4",
+   "server_model_name": "gpt-5.4",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.4-none",
+    "gpt-5.4-none-fast",
+    "gpt-5.4-low",
+    "gpt-5.4-low-fast",
+    "gpt-5.4-medium",
+    "gpt-5.4-medium-fast",
+    "gpt-5.4-high",
+    "gpt-5.4-high-fast",
+    "gpt-5.4-xhigh",
+    "gpt-5.4-xhigh-fast"
+   ],
+   "id_aliases": [
+    "gpt"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.4-none",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-low",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-medium",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-none",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.4-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.4-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.4-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.4-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-opus-4-6",
+   "client_display_name": "Claude Opus 4.6",
+   "server_model_name": "claude-opus-4-6",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-4.6-opus-low",
+    "claude-4.6-opus-medium",
+    "claude-4.6-opus-high",
+    "claude-4.6-opus-max",
+    "claude-4.6-opus-low-thinking",
+    "claude-4.6-opus-medium-thinking",
+    "claude-4.6-opus-high-thinking",
+    "claude-4.6-opus-max-thinking"
+   ],
+   "id_aliases": [
+    "opus",
+    "opus-4.6",
+    "opus-4-6"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-4.6-opus-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-low-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-medium-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-high-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-max-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-low-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-medium-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-high-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-4.6-opus-max-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-opus-4-5",
+   "client_display_name": "Claude Opus 4.5",
+   "server_model_name": "claude-opus-4-5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-4.5-opus-high",
+    "claude-4.5-opus-high-thinking"
+   ],
+   "id_aliases": [
+    "opus",
+    "opus-4.5",
+    "opus-4-5"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-4.5-opus-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.5-opus-high-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.2",
+   "client_display_name": "GPT-5.2",
+   "server_model_name": "gpt-5.2",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.2-low",
+    "gpt-5.2-low-fast",
+    "gpt-5.2-fast",
+    "gpt-5.2-high",
+    "gpt-5.2-high-fast",
+    "gpt-5.2-xhigh",
+    "gpt-5.2-xhigh-fast"
+   ],
+   "id_aliases": [
+    "gpt"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.2-low",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.2-low-fast",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.2",
+     "parameter_values": [
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.2-fast",
+     "parameter_values": [
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.2-high",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.2-high-fast",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.2-xhigh",
+     "parameter_values": [
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.2-xhigh-fast",
+     "parameter_values": [
+      [
+       "reasoning",
+       "extra-high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gpt-6-luna",
+   "client_display_name": "GPT-6 Luna",
+   "server_model_name": "gpt-6-luna",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-6-luna-none",
+    "gpt-6-luna-none-fast",
+    "gpt-6-luna-low",
+    "gpt-6-luna-low-fast",
+    "gpt-6-luna-medium",
+    "gpt-6-luna-medium-fast",
+    "gpt-6-luna-high",
+    "gpt-6-luna-high-fast",
+    "gpt-6-luna-xhigh",
+    "gpt-6-luna-xhigh-fast",
+    "gpt-6-luna-max",
+    "gpt-6-luna-max-fast"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "gpt-6-luna-none",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-low",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-medium",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-max",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-6-luna-none",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-6-luna-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.6-luna",
+   "client_display_name": "GPT-5.6 Luna",
+   "server_model_name": "gpt-5.6-luna",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.6-luna-none",
+    "gpt-5.6-luna-none-fast",
+    "gpt-5.6-luna-low",
+    "gpt-5.6-luna-low-fast",
+    "gpt-5.6-luna-medium",
+    "gpt-5.6-luna-medium-fast",
+    "gpt-5.6-luna-high",
+    "gpt-5.6-luna-high-fast",
+    "gpt-5.6-luna-xhigh",
+    "gpt-5.6-luna-xhigh-fast",
+    "gpt-5.6-luna-max",
+    "gpt-5.6-luna-max-fast"
+   ],
+   "id_aliases": [
+    "gpt-5-6-luna"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.6-luna-none",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-low",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-medium",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-high",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-max",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "272k"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-none",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-none-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "none"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-low",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-low-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "low"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-medium",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-medium-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "medium"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-high",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-high-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "high"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-xhigh",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-xhigh-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "xhigh"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-max",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "false"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "gpt-5.6-luna-max-fast",
+     "parameter_values": [
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning",
+       "max"
+      ],
+      [
+       "fast",
+       "true"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "gemini-3.6-flash",
+   "client_display_name": "Gemini 3.6 Flash",
+   "server_model_name": "gemini-3.6-flash",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gemini-3.6-flash-minimal",
+    "gemini-3.6-flash-low",
+    "gemini-3.6-flash-medium",
+    "gemini-3.6-flash-high"
+   ],
+   "id_aliases": [
+    "gemini-flash-latest",
+    "gemini-flash"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gemini-3.6-flash-minimal",
+     "parameter_values": [
+      [
+       "effort",
+       "minimal"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gemini-3.6-flash-low",
+     "parameter_values": [
+      [
+       "effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gemini-3.6-flash-medium",
+     "parameter_values": [
+      [
+       "effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gemini-3.6-flash-high",
+     "parameter_values": [
+      [
+       "effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gemini-3.1-pro",
+   "client_display_name": "Gemini 3.1 Pro",
+   "server_model_name": "gemini-3.1-pro",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [],
+   "id_aliases": [
+    "gemini-latest",
+    "gemini-pro-latest",
+    "gemini",
+    "gemini-pro"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gemini-3.1-pro",
+     "parameter_values": [],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.4-mini",
+   "client_display_name": "GPT-5.4 Mini",
+   "server_model_name": "gpt-5.4-mini",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.4-mini-none",
+    "gpt-5.4-mini-low",
+    "gpt-5.4-mini-medium",
+    "gpt-5.4-mini-high",
+    "gpt-5.4-mini-xhigh"
+   ],
+   "id_aliases": [
+    "gpt-mini-latest",
+    "gpt-mini"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.4-mini-none",
+     "parameter_values": [
+      [
+       "reasoning",
+       "none"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-mini-low",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-mini-medium",
+     "parameter_values": [
+      [
+       "reasoning",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-mini-high",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-mini-xhigh",
+     "parameter_values": [
+      [
+       "reasoning",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.4-nano",
+   "client_display_name": "GPT-5.4 Nano",
+   "server_model_name": "gpt-5.4-nano",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.4-nano-none",
+    "gpt-5.4-nano-low",
+    "gpt-5.4-nano-medium",
+    "gpt-5.4-nano-high",
+    "gpt-5.4-nano-xhigh"
+   ],
+   "id_aliases": [
+    "gpt-nano-latest",
+    "gpt-nano"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.4-nano-none",
+     "parameter_values": [
+      [
+       "reasoning",
+       "none"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-nano-low",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-nano-medium",
+     "parameter_values": [
+      [
+       "reasoning",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-nano-high",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.4-nano-xhigh",
+     "parameter_values": [
+      [
+       "reasoning",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "claude-haiku-5-5",
+   "client_display_name": "Claude Haiku 5.5",
+   "server_model_name": "claude-haiku-5-5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-haiku-5-5",
+    "claude-haiku-5-5-low",
+    "claude-haiku-5-5-medium",
+    "claude-haiku-5-5-high",
+    "claude-haiku-5-5-xhigh",
+    "claude-haiku-5-5-max",
+    "claude-haiku-5-5-thinking-low",
+    "claude-haiku-5-5-thinking-medium",
+    "claude-haiku-5-5-thinking-high",
+    "claude-haiku-5-5-thinking-xhigh",
+    "claude-haiku-5-5-thinking-max"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "claude-haiku-5-5-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "300k"
+      ],
+      [
+       "reasoning_effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-low",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "low"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-medium",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "medium"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-high",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "high"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-xhigh",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "xhigh"
+      ]
+     ],
+     "is_max_mode": true
+    },
+    {
+     "legacy_slug": "claude-haiku-5-5-thinking-max",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "1m"
+      ],
+      [
+       "reasoning_effort",
+       "max"
+      ]
+     ],
+     "is_max_mode": true
+    }
+   ]
+  },
+  {
+   "name": "claude-haiku-4-5",
+   "client_display_name": "Claude Haiku 4.5",
+   "server_model_name": "claude-haiku-4-5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-4.5-haiku",
+    "claude-4.5-haiku-thinking"
+   ],
+   "id_aliases": [
+    "haiku-latest",
+    "haiku",
+    "haiku-4.5",
+    "haiku-4-5"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-4.5-haiku",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.5-haiku-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "claude-sonnet-4-5",
+   "client_display_name": "Claude Sonnet 4.5",
+   "server_model_name": "claude-sonnet-4-5",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-4.5-sonnet",
+    "claude-4.5-sonnet-thinking"
+   ],
+   "id_aliases": [
+    "sonnet",
+    "sonnet-4.5",
+    "sonnet-4-5"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-4.5-sonnet",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4.5-sonnet-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gpt-5.1",
+   "client_display_name": "GPT-5.1",
+   "server_model_name": "gpt-5.1",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gpt-5.1-low",
+    "gpt-5.1-high"
+   ],
+   "id_aliases": [
+    "gpt"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5.1-low",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.1",
+     "parameter_values": [
+      [
+       "reasoning",
+       "medium"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "gpt-5.1-high",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gemini-3-flash",
+   "client_display_name": "Gemini 3 Flash",
+   "server_model_name": "gemini-3-flash",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "gemini-3-flash"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "gemini-3-flash",
+     "parameter_values": [],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gemini-3.5-flash",
+   "client_display_name": "Gemini 3.5 Flash",
+   "server_model_name": "gemini-3.5-flash",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [],
+   "id_aliases": [
+    "gemini-flash-latest",
+    "gemini-flash"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gemini-3.5-flash",
+     "parameter_values": [],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "claude-sonnet-4",
+   "client_display_name": "Claude Sonnet 4",
+   "server_model_name": "claude-sonnet-4",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "claude-4-sonnet",
+    "claude-4-sonnet-thinking"
+   ],
+   "id_aliases": [
+    "sonnet",
+    "sonnet-4"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "claude-4-sonnet",
+     "parameter_values": [
+      [
+       "thinking",
+       "false"
+      ],
+      [
+       "context",
+       "200k"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "claude-4-sonnet-thinking",
+     "parameter_values": [
+      [
+       "thinking",
+       "true"
+      ],
+      [
+       "context",
+       "200k"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gpt-5-mini",
+   "client_display_name": "GPT-5 Mini",
+   "server_model_name": "gpt-5-mini",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [],
+   "id_aliases": [
+    "gpt-mini"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gpt-5-mini",
+     "parameter_values": [],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "gemini-2.5-flash",
+   "client_display_name": "Gemini 2.5 Flash",
+   "server_model_name": "gemini-2.5-flash",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [],
+   "id_aliases": [
+    "gemini-flash"
+   ],
+   "variants": [
+    {
+     "legacy_slug": "gemini-2.5-flash",
+     "parameter_values": [],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "kimi-k3",
+   "client_display_name": "Kimi K3",
+   "server_model_name": "kimi-k3",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "kimi-k3-low",
+    "kimi-k3-high",
+    "kimi-k3-max"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "kimi-k3-low",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "kimi-k3-high",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "kimi-k3-max",
+     "parameter_values": [
+      [
+       "reasoning",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "kimi-k2.7-code",
+   "client_display_name": "Kimi K2.7 Code",
+   "server_model_name": "kimi-k2.7-code",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "kimi-k2.7-code"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "kimi-k2.7-code",
+     "parameter_values": [],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "glm-5.2",
+   "client_display_name": "GLM 5.2",
+   "server_model_name": "glm-5.2",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "glm-5.2-high",
+    "glm-5.2-max"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "glm-5.2-high",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "glm-5.2-max",
+     "parameter_values": [
+      [
+       "reasoning",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "glm-5p3",
+   "client_display_name": "GLM 5.3",
+   "server_model_name": "glm-5p3",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "glm-5p3",
+    "glm-5p3-low",
+    "glm-5p3-high",
+    "glm-5p3-max"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "glm-5p3-low",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "glm-5p3-high",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "glm-5p3-max",
+     "parameter_values": [
+      [
+       "reasoning",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  },
+  {
+   "name": "glm-5p3-flash",
+   "client_display_name": "GLM 5.3 Flash",
+   "server_model_name": "glm-5p3-flash",
+   "supports_agent": true,
+   "supports_non_max_mode": true,
+   "only_supports_cmd_k": false,
+   "is_long_context_only": false,
+   "is_hidden": false,
+   "legacy_slugs": [
+    "glm-5p3-flash",
+    "glm-5p3-flash-low",
+    "glm-5p3-flash-high",
+    "glm-5p3-flash-max"
+   ],
+   "id_aliases": [],
+   "variants": [
+    {
+     "legacy_slug": "glm-5p3-flash-low",
+     "parameter_values": [
+      [
+       "reasoning",
+       "low"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "glm-5p3-flash-high",
+     "parameter_values": [
+      [
+       "reasoning",
+       "high"
+      ]
+     ],
+     "is_max_mode": false
+    },
+    {
+     "legacy_slug": "glm-5p3-flash-max",
+     "parameter_values": [
+      [
+       "reasoning",
+       "max"
+      ]
+     ],
+     "is_max_mode": false
+    }
+   ]
+  }
+ ]
+}
