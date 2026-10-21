@@ -638,8 +638,10 @@ func (p *cursorStreamParser) cursorLogToolCallStarted(b []byte) {
 // cursorDecodeMcpArgs 解析 exec 内层 f11（mcp_args）的 McpArgs 消息。
 //
 // 字段号（派发单 §2）：f3 tool_call_id、f5 tool_name、f2 args。
-// args 是 protobuf map<string, Value>：在 McpArgs 内编码为 repeated 字段 2，每个
-// entry = length-delimited {f1 key(string), f2 value(Value 消息)}。
+// args 是 protobuf map<string, Value>：在 McpArgs 内编码为 repeated 字段 2，每条
+// f2 字段**本身就是一条 map entry**（f1 key(string) 与 f2 value(Value 消息) 直内联，
+// 不是"f2 的列表"）。上游实拍字节 `0a0463697479 12091a074265696a696e67` 即是单条
+// entry：f1="city"、f2=Value{f3:"Beijing"}。
 // Value oneof（派发单）：f1 null / f2 number / f3 string；未知类型失败关闭。
 // 返回 (tool_call_id, tool_name, argsJSON, error)。
 func cursorDecodeMcpArgs(payload []byte) (string, string, string, error) {
@@ -649,20 +651,14 @@ func cursorDecodeMcpArgs(payload []byte) (string, string, string, error) {
 	}
 	idF, _ := cursorFindField(fields, 3)
 	nameF, _ := cursorFindField(fields, 5)
-	argsF, ok := cursorFindField(fields, 2)
-	if !ok {
-		return idF.String(), nameF.String(), "{}", nil
-	}
-	entryFields, err := cursorDecodeProtobuf(argsF.Bytes)
-	if err != nil {
-		return "", "", "", err
-	}
+	// 顶层全部 f2 字段，每条即一条 map entry（cursorFindField 只取最后一条，
+	// 这里必须逐条取——map<string,Value> 在 protobuf 里是 repeated 的 entry）。
 	obj := make(map[string]json.RawMessage)
-	for _, entry := range entryFields {
-		if entry.Number != 2 {
+	for _, f := range fields {
+		if f.Number != 2 {
 			continue
 		}
-		entryInner, e := cursorDecodeProtobuf(entry.Bytes)
+		entryInner, e := cursorDecodeProtobuf(f.Bytes)
 		if e != nil {
 			return "", "", "", e
 		}
@@ -841,7 +837,7 @@ func (p *cursorStreamParser) cursorSSEToolCallArgsChunk(index int, tc cursorTool
 	return "data: " + `{"id":"cursor-chat","object":"chat.completion.chunk","created":0,` +
 		`"model":` + cursorJSONString(p.model) + `,` +
 		`"choices":[{"index":0,"delta":{"tool_calls":[{"index":` + strconv.Itoa(index) +
-		`,"function":{"arguments":` + args + `}}]},"finish_reason":null}]}` + "\n\n"
+		`,"function":{"arguments":` + cursorJSONString(args) + `}}]},"finish_reason":null}]}` + "\n\n"
 }
 
 // cursorSSEFinishChunk 返回收尾 chunk（**带真实 usage**）。
@@ -958,7 +954,7 @@ func (p *cursorStreamParser) cursorBuildNonStreamingCompletion() []byte {
 			}
 			msg += `{"id":` + cursorJSONString(tc.ID) +
 				`,"type":"function","function":{"name":` + cursorJSONString(tc.Name) +
-				`,"arguments":` + args + `}}`
+				`,"arguments":` + cursorJSONString(args) + `}}`
 		}
 		msg += `]`
 	} else {

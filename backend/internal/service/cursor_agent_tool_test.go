@@ -98,10 +98,14 @@ type cursorToolTestMcpArgEntry struct {
 
 // cursorToolTestBuildMcpArgs 构造 McpArgs 字节（exec 内层 f11 的载荷）。
 //
-// 字段号（派发单 §2）：f3 tool_call_id、f5 tool_name、f2 args（map<string,Value>，
-// 每个 entry = {f1 key, f2 value(Value)}；Value：f1 null / f2 number / f3 string）。
+// 字段号：f3 tool_call_id、f5 tool_name、f2 args（map<string,Value>，protobuf 编码为
+// repeated 字段 2，**每条 f2 字段本身就是一条 map entry**：{f1 key, f2 value(Value)}；
+// Value：f1 null / f2 number / f3 string）。
+//
+// 线格式须与上游真实字节一致——每条 entry 直作为 McpArgs 的一个 f2，不再额外包一层 f2
+// （旧构造多包一层，与 cursorDecodeMcpArgs 解析错位同源，已在 O11-C3 修复）。
 func cursorToolTestBuildMcpArgs(tcID, toolName string, entries []cursorToolTestMcpArgEntry) []byte {
-	var args []byte
+	var mcpArgs []byte
 	for _, e := range entries {
 		var val []byte
 		switch e.kind {
@@ -118,11 +122,11 @@ func cursorToolTestBuildMcpArgs(tcID, toolName string, entries []cursorToolTestM
 		}
 		entry := cursorAppendStringField(nil, 1, e.key)
 		entry = cursorAppendBytesField(entry, 2, val)
-		args = cursorAppendBytesField(args, 2, entry)
+		// 每条 entry 直作为 McpArgs 的一个 f2 字段（map entry 直内联）。
+		mcpArgs = cursorAppendBytesField(mcpArgs, 2, entry)
 	}
-	mcpArgs := cursorAppendStringField(nil, 3, tcID)
+	mcpArgs = cursorAppendStringField(mcpArgs, 3, tcID)
 	mcpArgs = cursorAppendStringField(mcpArgs, 5, toolName)
-	mcpArgs = cursorAppendBytesField(mcpArgs, 2, args)
 	return mcpArgs
 }
 
