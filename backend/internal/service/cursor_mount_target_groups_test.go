@@ -85,6 +85,58 @@ func TestCursorMountTargetGroups_EmptyEntryModels(t *testing.T) {
 	require.Empty(t, cursorMountTargetGroups(groups, nil), "empty entry model list must yield no mount target")
 }
 
+// TestCursorMountTargetGroups_ProductionMirror 用生产真实分组白名单(2026-10-21 快照)断言挂组目标集。
+// 这是本次 U7 收敛修复的端到端判据：原实现只认 platform=cursor/composite，导致原生平台组
+// (anthropic/openai/gemini/grok) 即便白名单覆盖实供模型也挂不上，手动拉号恒报
+// ErrQuotaKeyModelNoCoverage。修复后目标集 = [34,37,82,86,114]（107 是 allow-all 被跳过，
+// 94/110 是 composite 且白名单不含实供模型故不挂）。
+func TestCursorMountTargetGroups_ProductionMirror(t *testing.T) {
+	entry := CursorStaticEntryModels()
+	require.NotEmpty(t, entry)
+
+	// 白名单取生产 2026-10-21 快照（子集，足以定边界）。
+	groups := []*ent.Group{
+		// 34 claude-max(满血) anthropic 启用 -> claude-opus-5-5/claude-fable-5.1/claude-sonnet-5-5 命中
+		cursorMountGroup(34, domain.PlatformAnthropic, domain.GroupModelAllowlist{
+			Enabled: true,
+			Models:  []string{"claude-fable-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5.1"},
+		}),
+		// 37 gpt-max 满血 openai 启用 -> gpt-6-sol/gpt-6-astra/gpt-6.1-sol/gpt-5.6-sol 命中
+		cursorMountGroup(37, domain.PlatformOpenAI, domain.GroupModelAllowlist{
+			Enabled: true,
+			Models:  []string{"gpt-5.6-sol", "gpt-6-sol", "gpt-6-astra", "gpt-6.1-sol"},
+		}),
+		// 82 GPT-特价 openai 启用 -> 同上
+		cursorMountGroup(82, domain.PlatformOpenAI, domain.GroupModelAllowlist{
+			Enabled: true,
+			Models:  []string{"gpt-5.6-sol", "gpt-6-sol", "gpt-6-astra", "gpt-6.1-sol"},
+		}),
+		// 86 Gemini 官方满血 gemini 启用 -> gemini-3.8-flash 命中
+		cursorMountGroup(86, domain.PlatformGemini, domain.GroupModelAllowlist{
+			Enabled: true,
+			Models:  []string{"gemini-3.1-pro-preview", "gemini-3.8-flash"},
+		}),
+		// 107 muse-spark muse allow-all(enabled=false) -> 不挂
+		cursorMountGroup(107, domain.PlatformMuse, domain.GroupModelAllowlist{Enabled: false, Models: []string{"muse-spark-1.3"}}),
+		// 110 聚合分组 composite 启用 但只含 deepseek/kimi/glm/space-bunny -> 不挂
+		cursorMountGroup(110, domain.PlatformComposite, domain.GroupModelAllowlist{
+			Enabled: true,
+			Models:  []string{"deepseek-v4.1-flash", "glm-5.3-flash", "kimi-k3", "space-bunny", "glm-5.3"},
+		}),
+		// 94 限时福利 composite allow-all -> 不挂
+		cursorMountGroup(94, domain.PlatformComposite, domain.GroupModelAllowlist{Enabled: false}),
+		// 114 grok-max grok 启用 -> grok-4.6/grok-4.7 命中
+		cursorMountGroup(114, domain.PlatformGrok, domain.GroupModelAllowlist{
+			Enabled: true,
+			Models:  []string{"grok-4.6", "grok-4.7"},
+		}),
+	}
+
+	got := cursorMountTargetGroups(groups, entry)
+	require.Equal(t, []int64{34, 37, 82, 86, 114}, cursorMountIDs(got),
+		"production native platform groups (anthropic/openai/gemini/grok) must carry cursor accounts per U7")
+}
+
 // TestCursorMountTargetGroups_AllowAllNeverAutoMounted 是 Done when 2 的核心反例：
 // allow-all 聚合组（Allows 恒真）恒真判入已收敛——未启用白名单 = 无对应模型，不挂。
 func TestCursorMountTargetGroups_AllowAllNeverAutoMounted(t *testing.T) {
