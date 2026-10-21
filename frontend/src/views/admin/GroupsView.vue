@@ -793,7 +793,7 @@
                 {{ t("admin.groups.modelAllowlist.hint") }}
               </p>
             </div>
-            <Toggle v-model="createModelAllowlistState.enabled" />
+            <Toggle v-model="createModelAllowlistState.enabled" data-testid="create-model-allowlist-toggle" />
           </div>
           <div
             v-if="createModelAllowlistState.enabled"
@@ -835,10 +835,16 @@
                 {{ t("admin.groups.modelAllowlist.loading") }}
               </p>
               <p
+                v-else-if="createModelAllowlistError"
+                class="text-xs text-red-500"
+              >
+                {{ t(createModelAllowlistError) }}
+              </p>
+              <p
                 v-else-if="createModelAllowlistState.items.length === 0"
                 class="text-xs text-gray-500 dark:text-gray-400"
               >
-                {{ t("admin.groups.modelAllowlist.empty") }}
+                {{ t("admin.groups.modelAllowlist.emptyCreateHint") }}
               </p>
               <div
                 v-for="(item, index) in createModelAllowlistState.items"
@@ -852,6 +858,24 @@
                 />
                 <span class="min-w-0 flex-1 break-all text-sm text-gray-700 dark:text-gray-300">
                   {{ item.id }}
+                  <span
+                    v-if="item.source === 'candidate'"
+                    class="ml-1 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+                  >
+                    {{ t("admin.groups.modelAllowlist.candidateTag") }}
+                  </span>
+                  <span
+                    v-else-if="item.source === 'saved'"
+                    class="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600 dark:bg-dark-700 dark:text-gray-300"
+                  >
+                    {{ t("admin.groups.modelAllowlist.savedTag") }}
+                  </span>
+                  <span
+                    v-else
+                    class="ml-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
+                  >
+                    {{ t("admin.groups.modelAllowlist.customTag") }}
+                  </span>
                   <span
                     v-if="item.id.includes('*')"
                     class="ml-1 rounded bg-primary-50 px-1.5 py-0.5 text-[10px] font-medium text-primary-600 dark:bg-primary-900/30 dark:text-primary-400"
@@ -2586,7 +2610,7 @@
                 {{ t("admin.groups.modelAllowlist.hint") }}
               </p>
             </div>
-            <Toggle v-model="editModelAllowlistState.enabled" />
+            <Toggle v-model="editModelAllowlistState.enabled" data-testid="edit-model-allowlist-toggle" />
           </div>
           <div
             v-if="editModelAllowlistState.enabled"
@@ -2628,6 +2652,12 @@
                 {{ t("admin.groups.modelAllowlist.loading") }}
               </p>
               <p
+                v-else-if="editModelAllowlistError"
+                class="text-xs text-red-500"
+              >
+                {{ t(editModelAllowlistError) }}
+              </p>
+              <p
                 v-else-if="editModelAllowlistState.items.length === 0"
                 class="text-xs text-gray-500 dark:text-gray-400"
               >
@@ -2645,6 +2675,24 @@
                 />
                 <span class="min-w-0 flex-1 break-all text-sm text-gray-700 dark:text-gray-300">
                   {{ item.id }}
+                  <span
+                    v-if="item.source === 'candidate'"
+                    class="ml-1 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+                  >
+                    {{ t("admin.groups.modelAllowlist.candidateTag") }}
+                  </span>
+                  <span
+                    v-else-if="item.source === 'saved'"
+                    class="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600 dark:bg-dark-700 dark:text-gray-300"
+                  >
+                    {{ t("admin.groups.modelAllowlist.savedTag") }}
+                  </span>
+                  <span
+                    v-else
+                    class="ml-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
+                  >
+                    {{ t("admin.groups.modelAllowlist.customTag") }}
+                  </span>
                   <span
                     v-if="item.id.includes('*')"
                     class="ml-1 rounded bg-primary-50 px-1.5 py-0.5 text-[10px] font-medium text-primary-600 dark:bg-primary-900/30 dark:text-primary-400"
@@ -4652,6 +4700,7 @@ import {
   moveModelAllowlistItem,
   selectAllModelAllowlistItems,
   setModelAllowlistCandidates,
+  invalidateModelAllowlistCandidates,
 } from "./groupModelAllowlist";
 import { createModelAllowlistCandidatesTracker } from "./modelAllowlistCandidates";
 import { normalizeSupportedModelScopesForPlatform } from "./groupsSupportedModelScopes";
@@ -5200,6 +5249,8 @@ const createModelAllowlistState = reactive(createInitialModelAllowlistState());
 const editModelAllowlistState = reactive(createInitialModelAllowlistState());
 const createModelAllowlistLoading = ref(false);
 const editModelAllowlistLoading = ref(false);
+const createModelAllowlistError = ref<string | null>(null);
+const editModelAllowlistError = ref<string | null>(null);
 type ReasoningEffortPolicyFieldsExpose = {
   validate: () => boolean;
   resetValidation: () => void;
@@ -5614,7 +5665,9 @@ const loadModelAllowlistCandidates = async (
   const requestID = modelAllowlistCandidatesTracker.next(request);
   const state = mode === "create" ? createModelAllowlistState : editModelAllowlistState;
   const loadingRef = mode === "create" ? createModelAllowlistLoading : editModelAllowlistLoading;
+  const errorRef = mode === "create" ? createModelAllowlistError : editModelAllowlistError;
   loadingRef.value = true;
+  errorRef.value = null;
   try {
     const models = await adminAPI.groups.getModelAllowlistCandidates(groupID, platform);
     if (!modelAllowlistCandidatesTracker.isCurrent(requestID, request)) {
@@ -5625,7 +5678,9 @@ const loadModelAllowlistCandidates = async (
     if (!modelAllowlistCandidatesTracker.isCurrent(requestID, request)) {
       return;
     }
-    console.error("Error loading group models list candidates:", error);
+    // 失败：对用户可见地呈现错误，并使旧自动候选失效，避免把旧组/旧平台数据当当前结果。
+    invalidateModelAllowlistCandidates(state);
+    errorRef.value = "admin.groups.modelAllowlist.loadError";
   } finally {
     if (modelAllowlistCandidatesTracker.isCurrent(requestID, request)) {
       loadingRef.value = false;

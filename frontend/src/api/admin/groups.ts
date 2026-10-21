@@ -104,7 +104,7 @@ export async function getById(id: number): Promise<AdminGroup> {
 
 /**
  * Get candidate models for the group model allowlist.
- * id=0 returns platform default models for create flow.
+ * 创建流程（id=0）返回空候选：候选按组内账号实际供给生成，无组/无适用账号时无实供候选。
  */
 export async function getModelAllowlistCandidates(
   id: number,

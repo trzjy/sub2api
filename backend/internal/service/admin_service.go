@@ -796,6 +796,11 @@ type adminServiceImpl struct {
 	// （admin_group.go 的 GetGroup/ListGroups/GetAllGroups/GetAllGroupsByPlatform/
 	// GetAllGroupsIncludingInactive），读错失败关闭。
 	visionRouting *VisionRoutingService
+	// groupModelCatalogReader 读取组内账号的真实上游模型目录，供分组白名单自动
+	// 候选（admin_group_model_candidates.go）。测试直接注入替身；生产由 wire 装配
+	// NewGroupModelCatalogReader；未装配时候选读取返回明确配置错误（依赖未接线 ≠
+	// 没有账号，不冒充空目录）。
+	groupModelCatalogReader GroupModelCatalogReader
 }
 
 // ChannelCacheInvalidator 失效渠道缓存。
@@ -839,6 +844,7 @@ func NewAdminService(
 	channelCacheInvalidator ChannelCacheInvalidator,
 	visionRouting *VisionRoutingService,
 	channelFreshness ChannelFreshnessRefresher,
+	groupModelCatalogReader GroupModelCatalogReader,
 ) AdminService {
 	return &adminServiceImpl{
 		cfg:                  cfg,
@@ -879,5 +885,6 @@ func NewAdminService(
 		channelCacheInvalidator: channelCacheInvalidator,
 		visionRouting:           visionRouting,
 		channelFreshness:        channelFreshness,
+		groupModelCatalogReader: groupModelCatalogReader,
 	}
 }

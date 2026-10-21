@@ -10,16 +10,9 @@ import (
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/domain"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/typesafe"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 )
 
 // Group management implementations
@@ -168,56 +161,36 @@ func (s *adminServiceImpl) validateSimpleModeGroupAccess(group *Group) error {
 	return nil
 }
 
+// GetGroupModelsListCandidates 返回分组白名单的自动候选模型公开名。
+// 候选只来自组内适用账号的真实上游目录（s.groupModelCatalogReader）+ 账号显式
+// 精确 alias + 组内已保存的精确 composite 路由公开名；各平台内置默认目录与默认
+// 映射注入都不是候选来源（docs-local/group-model-allowlist-candidates-20261021/plan.md §5.2）。
+//
+// P1：未创建组（id=0）没有已绑定账号，返回空候选而不是平台默认目录；
+// 依赖缺失（目录读取器未装配）返回明确配置错误，不当作"没有账号"。
 func (s *adminServiceImpl) GetGroupModelsListCandidates(ctx context.Context, id int64, platform string) ([]string, error) {
 	platform = strings.TrimSpace(platform)
-	if id > 0 {
-		group, err := s.groupRepo.GetByIDLite(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		if platform == "" {
-			platform = group.Platform
-		}
+	if id <= 0 {
+		return []string{}, nil
+	}
+	group, err := s.groupRepo.GetByIDLite(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 	if platform == "" {
-		platform = PlatformAnthropic
+		platform = group.Platform
 	}
-
-	candidates := defaultModelsListCandidateIDs(platform)
-	if id <= 0 || s.accountRepo == nil {
-		return candidates, nil
+	if platform == "" {
+		return []string{}, nil
 	}
-
+	if s.accountRepo == nil {
+		return nil, fmt.Errorf("account repository is not configured")
+	}
 	accounts, err := s.accountRepo.ListSchedulableByGroupID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-
-	seen := make(map[string]struct{}, len(candidates))
-	for _, model := range candidates {
-		seen[model] = struct{}{}
-	}
-	for _, acc := range accounts {
-		if platform == PlatformComposite {
-			if !isConcreteRequestPlatform(acc.Platform) {
-				continue
-			}
-		} else if acc.Platform != platform {
-			continue
-		}
-		for model := range acc.GetModelMapping() {
-			model = strings.TrimSpace(model)
-			if model == "" {
-				continue
-			}
-			if _, ok := seen[model]; ok {
-				continue
-			}
-			seen[model] = struct{}{}
-			candidates = append(candidates, model)
-		}
-	}
-	return candidates, nil
+	return s.collectGroupModelAllowlistCandidates(ctx, id, platform, accounts)
 }
 
 func (s *adminServiceImpl) ListCompositeRoutes(ctx context.Context, groupID int64) ([]CompositeModelRoute, error) {
@@ -363,78 +336,10 @@ func compositeRouteFromInput(groupID int64, input CompositeRouteInput) (*Composi
 	}, nil
 }
 
-func defaultModelsListCandidateIDs(platform string) []string {
-	// 国产 OpenAI 兼容供应商与 other 一样没有静态默认模型目录，不能落回
-	// default 分支的 Claude 列表；候选只来自账号 model_mapping / 自定义模型清单。
-	if IsCNProvider(platform) {
-		return nil
-	}
-	switch platform {
-	case PlatformOpenAI:
-		return openai.DefaultModelIDs()
-	case PlatformGemini:
-		ids := make([]string, 0, len(geminicli.DefaultModels))
-		for _, model := range geminicli.DefaultModels {
-			ids = append(ids, model.ID)
-		}
-		return ids
-	case PlatformAntigravity:
-		models := antigravity.DefaultModels()
-		ids := make([]string, 0, len(models))
-		for _, model := range models {
-			ids = append(ids, model.ID)
-		}
-		return ids
-	case PlatformGrok:
-		return xai.DefaultModelIDs()
-	case PlatformOpenCodeGo:
-		return DefaultOpenCodeGoModelIDs()
-	case PlatformTypeSafe:
-		return []string{typesafe.JevLatestModel}
-	case PlatformComposite:
-		return compositeDefaultModelsListCandidateIDs()
-	case PlatformOther:
-		// other 无平台默认模型候选：候选完全来自账号 model_mapping / 自定义模型清单。
-		return nil
-	case PlatformCursor:
-		// cursor 同 other / muse 契约：无内置模型目录，模型完全来自账号 model_mapping。
-		// 必须显式返回 nil——否则会落进 default 分支把 Claude 列表当成 cursor 的候选
-		// 模型，污染 composite 分组的可选模型清单。
-		return nil
-	default:
-		ids := make([]string, 0, len(claude.DefaultModels))
-		for _, model := range claude.DefaultModels {
-			ids = append(ids, model.ID)
-		}
-		return ids
-	}
-}
-
 func defaultAllowImageGenerationForPlatform(platform string) bool {
 	// Grok image and video generation routes share the legacy image-generation gate.
 	// Older clients send the false zero value, so Grok groups must default enabled.
 	return platform == PlatformGrok
-}
-
-func compositeDefaultModelsListCandidateIDs() []string {
-	seen := make(map[string]struct{})
-	ids := make([]string, 0)
-	for _, platform := range domain.CompositePrecedencePlatformIDs() {
-		// TypeSafe stays out of the static composite candidates (jev-latest only works
-		// through /v1/systemone); groups with TypeSafe accounts still get it from the
-		// account model mappings collected by GetGroupModelsListCandidates.
-		if platform == PlatformTypeSafe {
-			continue
-		}
-		for _, id := range defaultModelsListCandidateIDs(platform) {
-			if _, ok := seen[id]; ok {
-				continue
-			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
-		}
-	}
-	return ids
 }
 
 func canCopyAccountsFromGroupPlatform(targetPlatform, sourcePlatform string) bool {

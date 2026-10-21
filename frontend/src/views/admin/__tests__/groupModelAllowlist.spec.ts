@@ -2,20 +2,24 @@ import { describe, expect, it } from "vitest";
 
 import {
   addCustomModelAllowlistItem,
-  createModelAllowlistState,
   type ModelAllowlistAddError,
-} from "../groupModelAllowlist";
-
-import {
+  type ModelAllowlistItem,
   buildModelAllowlistConfig,
   createModelAllowlistState,
   hydrateModelAllowlistState,
+  invalidateModelAllowlistCandidates,
   invertModelAllowlistSelection,
   moveModelAllowlistItem,
   selectAllModelAllowlistItems,
   setModelAllowlistCandidates,
   toggleModelAllowlistItem,
 } from "../groupModelAllowlist";
+
+const item = (id: string, selected: boolean, source: ModelAllowlistItem["source"] = "candidate"): ModelAllowlistItem => ({
+  id,
+  selected,
+  source,
+});
 
 describe("groupModelAllowlist", () => {
   it("selects all default candidates for a new disabled config", () => {
@@ -25,9 +29,10 @@ describe("groupModelAllowlist", () => {
 
     expect(state.enabled).toBe(false);
     expect(state.items).toEqual([
-      { id: "gpt-5.5", selected: true },
-      { id: "gpt-5.4", selected: true },
+      item("gpt-5.5", true, "candidate"),
+      item("gpt-5.4", true, "candidate"),
     ]);
+    expect(state.candidates).toEqual(["gpt-5.5", "gpt-5.4"]);
   });
 
   it("keeps saved selections and marks new candidates as unselected when editing", () => {
@@ -40,24 +45,48 @@ describe("groupModelAllowlist", () => {
 
     expect(state.enabled).toBe(true);
     expect(state.items).toEqual([
-      { id: "gpt-5.5", selected: true },
-      { id: "gpt-5.4", selected: true },
-      { id: "legacy-gpt", selected: false },
+      item("gpt-5.5", true, "saved"),
+      item("gpt-5.4", true, "saved"),
+      item("legacy-gpt", false, "candidate"),
     ]);
   });
 
-  it("preserves explicitly unselected saved candidates when candidates refresh", () => {
+  it("keeps explicitly unselected candidates across a refresh (no re-selection)", () => {
     const state = createModelAllowlistState({
       enabled: true,
       models: ["gpt-5.5"],
     });
 
     setModelAllowlistCandidates(state, ["gpt-5.5", "gpt-5.4"]);
-
     expect(state.items).toEqual([
-      { id: "gpt-5.5", selected: true },
-      { id: "gpt-5.4", selected: false },
+      item("gpt-5.5", true, "saved"),
+      item("gpt-5.4", false, "candidate"),
     ]);
+
+    toggleModelAllowlistItem(state, "gpt-5.4"); // user selects it
+    expect(state.items.find((i) => i.id === "gpt-5.4")?.selected).toBe(true);
+
+    setModelAllowlistCandidates(state, ["gpt-5.5", "gpt-5.4"]); // refresh
+    expect(state.items).toEqual([
+      item("gpt-5.5", true, "saved"),
+      item("gpt-5.4", true, "candidate"),
+    ]);
+  });
+
+  it("drops stale candidate identities on refresh, keeping saved rules", () => {
+    const state = createModelAllowlistState({
+      enabled: true,
+      models: ["gpt-5.5"],
+    });
+    setModelAllowlistCandidates(state, ["gpt-5.5", "gpt-5.4"]);
+
+    // 第二次刷新：gpt-5.4 不再出现在实供候选中
+    setModelAllowlistCandidates(state, ["gpt-5.5", "gpt-5.6"]);
+    expect(state.items).toEqual([
+      item("gpt-5.5", true, "saved"),
+      item("gpt-5.6", false, "candidate"),
+    ]);
+    expect(state.items.some((i) => i.id === "gpt-5.4")).toBe(false);
   });
 
   it("builds config with selected models in current display order", () => {
@@ -108,9 +137,9 @@ describe("groupModelAllowlist", () => {
     selectAllModelAllowlistItems(state);
 
     expect(state.items).toEqual([
-      { id: "gpt-5.5", selected: true },
-      { id: "gpt-5.4", selected: true },
-      { id: "gpt-5.4-mini", selected: true },
+      item("gpt-5.5", true, "saved"),
+      item("gpt-5.4", true, "candidate"),
+      item("gpt-5.4-mini", true, "candidate"),
     ]);
   });
 
@@ -123,20 +152,77 @@ describe("groupModelAllowlist", () => {
     invertModelAllowlistSelection(state);
 
     expect(state.items).toEqual([
-      { id: "gpt-5.5", selected: false },
-      { id: "gpt-5.4", selected: true },
-      { id: "gpt-5.4-mini", selected: true },
+      item("gpt-5.5", false, "saved"),
+      item("gpt-5.4", true, "candidate"),
+      item("gpt-5.4-mini", true, "candidate"),
     ]);
+  });
+
+  it("keeps a custom entry identity when a refresh candidate shares the same id", () => {
+    // 发现 2：手工添加 X 后刷新候选含同名 X → X 仍为 custom 身份；读取失败
+    // invalidate 后 X 留存且身份不变（不被改标/不被 seen 吞并）。
+    const state = createModelAllowlistState({ enabled: true, models: ["gpt-5.5"] });
+    setModelAllowlistCandidates(state, ["gpt-5.5", "gpt-5.4"]);
+    addCustomModelAllowlistItem(state, "claude-custom");
+    expect(state.items.find((i) => i.id === "claude-custom")?.source).toBe("custom");
+
+    // 刷新：实供候选中也包含 claude-custom（同名）。
+    setModelAllowlistCandidates(state, ["gpt-5.5", "gpt-5.4", "claude-custom"]);
+    expect(state.items).toEqual([
+      item("gpt-5.5", true, "saved"),
+      item("gpt-5.4", false, "candidate"),
+      item("claude-custom", true, "custom"),
+    ]);
+    expect(state.items.find((i) => i.id === "claude-custom")?.source).toBe("custom");
+
+    // 读取失败 invalidate：旧自动候选失效，custom 条目留存且身份不变。
+    invalidateModelAllowlistCandidates(state);
+    expect(state.items.find((i) => i.id === "claude-custom")?.source).toBe("custom");
+    expect(state.items.some((i) => i.source === "candidate")).toBe(false);
+    expect(state.items.some((i) => i.id === "claude-custom")).toBe(true);
+  });
+
+  it("keeps custom entries across a candidate refresh", () => {
+    const state = createModelAllowlistState({ enabled: true, models: ["gpt-5.5"] });
+    setModelAllowlistCandidates(state, ["gpt-5.5", "gpt-5.4"]);
+    addCustomModelAllowlistItem(state, "claude-custom");
+
+    expect(state.items.some((i) => i.id === "claude-custom" && i.source === "custom")).toBe(true);
+
+    setModelAllowlistCandidates(state, ["gpt-5.5", "gpt-5.6"]); // refresh
+    expect(state.items).toEqual([
+      item("gpt-5.5", true, "saved"),
+      item("gpt-5.6", false, "candidate"),
+      item("claude-custom", true, "custom"),
+    ]);
+  });
+
+  it("invalidates auto candidates on failure but keeps saved and custom rules", () => {
+    const state = createModelAllowlistState({
+      enabled: true,
+      models: ["gpt-5.5"],
+    });
+    setModelAllowlistCandidates(state, ["gpt-5.5", "gpt-5.4"]);
+    addCustomModelAllowlistItem(state, "claude-custom");
+
+    invalidateModelAllowlistCandidates(state);
+
+    expect(state.candidates).toEqual([]);
+    expect(state.items).toEqual([
+      item("gpt-5.5", true, "saved"),
+      item("claude-custom", true, "custom"),
+    ]);
+    expect(state.items.some((i) => i.source === "candidate")).toBe(false);
   });
 });
 
 describe("addCustomModelAllowlistItem", () => {
   const state = () => createModelAllowlistState({ enabled: true, models: ["gpt-5.4"] });
 
-  it("appends a trimmed entry as selected", () => {
+  it("appends a trimmed entry as selected with custom source", () => {
     const s = state();
     expect(addCustomModelAllowlistItem(s, "  claude-sonnet-4.5  ")).toBeNull();
-    expect(s.items.at(-1)).toEqual({ id: "claude-sonnet-4.5", selected: true });
+    expect(s.items.at(-1)).toEqual({ id: "claude-sonnet-4.5", selected: true, source: "custom" });
   });
 
   it("accepts trailing wildcard entries", () => {

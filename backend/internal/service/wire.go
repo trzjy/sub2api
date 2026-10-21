@@ -1494,6 +1494,7 @@ var ProviderSet = wire.NewSet(
 	NewAccountModelCapabilityService,
 	ProvideVisionDetectService,
 	NewVisionRoutingService,
+	NewGroupModelCatalogReader,
 )
 
 // ProvideVisionDetectService 构造检测服务并接上平台侧 usage 落库（终审 P2-7：

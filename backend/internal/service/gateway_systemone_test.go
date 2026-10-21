@@ -395,8 +395,3 @@ func TestTypeSafeAccountBaseURLNeverFallsBackToAnthropic(t *testing.T) {
 	anthropic := &Account{Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "sk"}}
 	require.Equal(t, "https://api.anthropic.com", anthropic.GetBaseURL())
 }
-
-func TestTypeSafeModelsListCandidates(t *testing.T) {
-	require.Equal(t, []string{typesafe.JevLatestModel}, defaultModelsListCandidateIDs(PlatformTypeSafe))
-	require.NotContains(t, compositeDefaultModelsListCandidateIDs(), typesafe.JevLatestModel)
-}

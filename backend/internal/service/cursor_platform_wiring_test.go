@@ -98,14 +98,6 @@ func TestCursorPlatformRegisteredInDomain(t *testing.T) {
 	require.False(t, spec.CNProvider, "cursor 不是国产单一厂商")
 }
 
-// TestCursorNoStaticDefaultModels 钉死 cursor 不回落到 Claude 默认模型列表。
-// 漏加会让 composite 分组的可选模型清单被 Claude 模型污染。
-func TestCursorNoStaticDefaultModels(t *testing.T) {
-	require.Empty(t, defaultModelsListCandidateIDs(PlatformCursor))
-	// 既有 other 契约不变。
-	require.Empty(t, defaultModelsListCandidateIDs(PlatformOther))
-}
-
 // ---------------------------------------------------------------------------
 // 2. 调度可达性
 // ---------------------------------------------------------------------------
