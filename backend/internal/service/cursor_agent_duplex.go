@@ -52,9 +52,11 @@ type cursorAgentDuplex struct {
 	// 不记成功 usage。绝不通过它写 gin.Context 或共享可变状态。
 	ctx context.Context
 
-	// declaredToolNames 是本请求通过 f4（McpTools）声明的工具名（每个一条）。
-	// 由 newCursorAgentDuplex 从 AgentRun 请求体解码得到，供 mcp_state 回包枚举。
-	declaredToolNames []string
+	// declaredToolDefs 是本请求通过 f4（McpTools）声明的每条 McpToolDefinition 的
+	// **原始字节**（repeated 逐项原样保存，与请求侧 AgentRunRequest.f4 声明逐字节相同）。
+	// 由 newCursorAgentDuplex 从 AgentRun 请求体 f4 解出，供 mcp_state 回包 f5 原样回传
+	// （字节级保真，依据活体探针 T7：f5 内层即完整 McpToolDefinition 五字段，不可只回工具名）。
+	declaredToolDefs [][]byte
 	// capturedToolCalls 是本轮经 mcp_args 委托捕获的工具调用（权威信号见 §2）。
 	capturedToolCalls []cursorToolCallCapture
 	// toolCallsFinished 标记本轮已发生工具委托捕获，供响应构造方收尾参考。
@@ -79,26 +81,22 @@ func newCursorAgentDuplex(initial []byte) (*cursorAgentDuplex, error) {
 		return nil, err
 	}
 	d := &cursorAgentDuplex{blobs: make(map[string][]byte)}
-	// 从 AgentRun 请求体 f4（McpTools）解出本轮声明的工具名，供 mcp_state 回包枚举。
+	// 从 AgentRun 请求体 f4（McpTools）解出本轮声明的每条 McpToolDefinition 的**原始字节**，
+	// repeated 逐项原样保存，供 mcp_state 回包 f5 原样回传（字节级保真，依据活体探针 T7）。
 	if mcpField, ok := cursorFindField(fields, cursorFldRunMcpTools); ok && len(mcpField.Bytes) > 0 {
 		if defs, derr := cursorDecodeProtobuf(mcpField.Bytes); derr == nil {
 			for _, def := range defs {
 				if def.Number != cursorFldMcpToolsTool {
 					continue
 				}
-				defFields, e := cursorDecodeProtobuf(def.Bytes)
-				if e != nil {
+				// 保留每条 McpToolDefinition 的原始字节（不重新解析、不改字段、不过滤）。
+				// 零长条目（如 f4 为空 message）不计入，匹配"无声明工具则 f5 不追加"语义。
+				if len(def.Bytes) == 0 {
 					continue
 				}
-				name := ""
-				if n, ok := cursorFindField(defFields, cursorFldMcpToolDefName); ok {
-					name = n.String()
-				} else if n, ok := cursorFindField(defFields, cursorFldMcpToolDefToolName); ok {
-					name = n.String()
-				}
-				if name != "" {
-					d.declaredToolNames = append(d.declaredToolNames, name)
-				}
+				raw := make([]byte, len(def.Bytes))
+				copy(raw, def.Bytes)
+				d.declaredToolDefs = append(d.declaredToolDefs, raw)
 			}
 		}
 	}
@@ -291,7 +289,7 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			}
 			serr := d.send(2, resp)
 			d.logPhase(zapcore.DebugLevel, "mcp_state_reply", cursorHTTPErrClass(serr),
-				zap.Uint64("exec_id", execID), zap.Int("tools", len(d.declaredToolNames)))
+				zap.Uint64("exec_id", execID), zap.Int("tools", len(d.declaredToolDefs)))
 			return false, serr
 		case cursorFindFieldOK(parts, 11):
 			// mcp_args 委托（f11 mcp_args）：捕获工具调用，回 McpResult.error，
@@ -407,17 +405,18 @@ func (d *cursorAgentDuplex) respondContext(parts []cursorPBField, execID uint64,
 // McpStateServer = {f1 server_name:"sub2api", f2 server_identifier:"sub2api",
 // f5 tools: 每个声明工具**单独**一条 f5 length-delimited（repeated 逐项，禁止拼接成单条）}。
 //
-// 注：McpStateServer.f5 每条工具内层消息只用 f1 承载工具名（与 McpToolDefinition.f1
-// 一致）。协议证据文件（04/05/06 schema dump）在本环境缺失，字段号以派发单为准；
-// 该内层形状为最小可用推断，待活体复核。
+// 字节级保真（依据活体探针 T7）：McpStateServer.f5 每条工具内层消息**原样回传请求侧
+// AgentRunRequest.f4 的 McpToolDefinition 原始字节**（完整五字段：name / description /
+// provider_identifier / tool_name / input_schema_json），不得只回工具名、不得重新编码。
+// 无声明工具（f4 空）→ f5 不追加任何项。
 func (d *cursorAgentDuplex) cursorMcpStateReply(execID uint64, idField []byte) ([]byte, error) {
-	// McpStateServer.f5 是 repeated：每个声明工具**单独**一条 f5（内层消息 f1 = 工具名），
-	// 逐项 length-delimited 编码，**禁止**把多工具拼进同一条 f5（派发单 §2）。
+	// McpStateServer.f5 是 repeated：每个声明工具**单独**一条 f5（内层即请求 f4 的
+	// McpToolDefinition 原始字节），逐项 length-delimited 编码，**禁止**把多工具拼进同一条
+	// f5（派发单 §2）。每条 definition **原样回传**（不重新编码、不改字段、不过滤）。
 	serverMsg := cursorAppendStringField(nil, 1, cursorMcpProviderIdentifier)      // f1 server_name
 	serverMsg = cursorAppendStringField(serverMsg, 2, cursorMcpProviderIdentifier) // f2 server_identifier
-	for _, name := range d.declaredToolNames {
-		tool := cursorAppendStringField(nil, 1, name) // 内层 f1 = 工具名
-		serverMsg = cursorAppendBytesField(serverMsg, 5, tool)
+	for _, def := range d.declaredToolDefs {
+		serverMsg = cursorAppendBytesField(serverMsg, 5, def)
 	}
 	success := cursorAppendBytesField(nil, 1, serverMsg)   // McpStateSuccess.f1 servers
 	stateResult := cursorAppendBytesField(nil, 1, success) // McpStateExecResult.f1 success

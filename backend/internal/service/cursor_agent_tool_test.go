@@ -265,7 +265,7 @@ func TestCursorToolChoiceSemantics(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCursorDuplexMcpStateReply(t *testing.T) {
-	// 构造带 2 个工具声明的 AgentRun，让 duplex 解析出 declaredToolNames。
+	// 构造带 2 个工具声明的 AgentRun，让 duplex 解析出 declaredToolDefs。
 	initReq := &apicompat.ChatCompletionsRequest{
 		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 		Tools: []apicompat.ChatTool{
@@ -279,7 +279,19 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 	d, err := newCursorAgentDuplex(initBody)
 	require.NoError(t, err)
 	defer d.close(nil)
-	require.Len(t, d.declaredToolNames, 2)
+	require.Len(t, d.declaredToolDefs, 2)
+
+	// 期望：回包 f5 与请求 f4 的每条 McpToolDefinition 原始字节逐字节一致（字节级保真，依据 T7）。
+	runForExpect := cursorAgentRunOf(t, initBody)
+	mcpForExpect, ok := cursorFindField(runForExpect, cursorFldRunMcpTools)
+	require.True(t, ok)
+	mcpFieldsForExpect, e := cursorDecodeProtobuf(mcpForExpect.Bytes)
+	require.NoError(t, e)
+	defRaw := [][]byte{}
+	for _, def := range cursorAllFields(mcpFieldsForExpect, cursorFldMcpToolsTool) {
+		defRaw = append(defRaw, def.Bytes)
+	}
+	require.Len(t, defRaw, 2, "init request must carry two McpToolDefinition raw bytes")
 
 	frame := cursorToolTestExecFrame(false, nil) // f36 mcp_state（respond 吃 envelope 剥离后的 payload）
 	// 先起并发读取，再调 respond：d.send 走 io.Pipe 会阻塞直到被读，避免死锁。
@@ -318,11 +330,14 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 	require.Equal(t, "sub2api", cursorTestFieldString(serverFields, 1), "f1 server_name")
 	require.Equal(t, "sub2api", cursorTestFieldString(serverFields, 2), "f2 server_identifier")
 
-	// f5 tools：每个声明工具**单独**一条 f5（repeated 逐项，非拼接）。
+	// f5 tools：每个声明工具**单独**一条 f5（repeated 逐项，非拼接），且回包 f5 内层与
+	// 请求 f4 的 McpToolDefinition 原始字节逐字节一致（字节级保真，依据活体探针 T7）。
 	toolEntries := cursorAllFields(serverFields, 5)
-	require.Len(t, toolEntries, 2, "f5 must have one entry per declared tool")
+	require.Len(t, toolEntries, len(defRaw), "f5 must have one entry per declared tool")
 	names := map[string]bool{}
-	for _, te := range toolEntries {
+	for i, te := range toolEntries {
+		require.Equal(t, defRaw[i], te.Bytes,
+			"f5 entry %d must equal request McpToolDefinition raw bytes (byte-level fidelity)", i)
 		tf, e := cursorDecodeProtobuf(te.Bytes)
 		require.NoError(t, e)
 		names[cursorTestFieldString(tf, 1)] = true
