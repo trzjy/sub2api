@@ -100,8 +100,8 @@ export const setModelAllowlistCandidates = (
 export const invalidateModelAllowlistCandidates = (
   state: ModelAllowlistState,
 ) => {
-  state.candidates = []
-  state.items = state.items.filter(item => item.source !== 'candidate')
+  // 复用规则合并：首次读取失败时 items 尚未初始化，也必须呈现已保存规则。
+  setModelAllowlistCandidates(state, [])
 }
 
 export const toggleModelAllowlistItem = (

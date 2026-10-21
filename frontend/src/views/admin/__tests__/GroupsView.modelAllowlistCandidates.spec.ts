@@ -12,12 +12,16 @@ const {
   getUsageSummary,
   getCapacitySummary,
   getLiveCapability,
+  updateGroup,
+  showError,
 } = vi.hoisted(() => ({
   listGroups: vi.fn(),
   getModelAllowlistCandidates: vi.fn(),
   getUsageSummary: vi.fn(),
   getCapacitySummary: vi.fn(),
   getLiveCapability: vi.fn(),
+  updateGroup: vi.fn(),
+  showError: vi.fn(),
 }));
 
 vi.mock("@/api/admin", () => ({
@@ -30,7 +34,7 @@ vi.mock("@/api/admin", () => ({
       getCapacitySummary,
       getLiveCapability,
       create: vi.fn(),
-      update: vi.fn(),
+      update: updateGroup,
       delete: vi.fn(),
       duplicate: vi.fn(),
       updateSortOrder: vi.fn(),
@@ -44,7 +48,7 @@ vi.mock("@/api/admin", () => ({
 
 vi.mock("@/stores/app", () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
+    showError,
     showSuccess: vi.fn(),
   }),
 }));
@@ -194,7 +198,12 @@ const mountView = () =>
         GroupCapacityBadge: true,
         GroupRateMultipliersModal: true,
         GroupRPMOverridesModal: true,
-        ReasoningEffortPolicyFields: true,
+        ReasoningEffortPolicyFields: defineComponent({
+          setup(_, { expose }) {
+            expose({ validate: () => true, resetValidation: () => undefined });
+            return () => h("div");
+          },
+        }),
         CodexManifestAccountsField: CodexManifestAccountsFieldStub,
         PricingEntryCard: true,
         VueDraggable: true,
@@ -215,6 +224,9 @@ describe("GroupsView model allowlist candidates", () => {
     getUsageSummary.mockReset();
     getCapacitySummary.mockReset();
     getLiveCapability.mockReset();
+    updateGroup.mockReset();
+    updateGroup.mockResolvedValue(sourceGroup);
+    showError.mockClear();
 
     listGroups.mockResolvedValue({
       items: [sourceGroup],
@@ -276,6 +288,61 @@ describe("GroupsView model allowlist candidates", () => {
     // 失败不应把旧候选当作当前结果
     expect(text).not.toContain(allowlistTagKey);
     expect(text).not.toContain("gpt-5.5");
+    wrapper.unmount();
+  });
+
+  it("saves other fields with the original allowlist when the candidate load fails", async () => {
+    const savedAllowlist = { enabled: true, models: ["legacy-saved", "gpt-*"] };
+    listGroups.mockResolvedValue({
+      items: [{ ...sourceGroup, model_allowlist: savedAllowlist }],
+      total: 1, page: 1, page_size: 20, pages: 1,
+    });
+    getModelAllowlistCandidates.mockRejectedValue(new Error("catalog unavailable"));
+
+    const wrapper = mountView();
+    await flushPromises();
+    const editButton = wrapper.findAll("button")
+      .find((button) => button.text().includes("common.edit"));
+    await editButton!.trigger("click");
+    await flushPromises();
+
+    await wrapper.get('[data-tour="edit-group-form-name"]').setValue("Renamed group");
+    await wrapper.get("#edit-group-form").trigger("submit");
+    await flushPromises();
+
+    expect(updateGroup).toHaveBeenCalledWith(sourceGroup.id, expect.objectContaining({
+      name: "Renamed group",
+      model_allowlist: savedAllowlist,
+    }));
+    expect(showError).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("still rejects an enabled allowlist when the user deselects every saved rule after a catalog failure", async () => {
+    listGroups.mockResolvedValue({
+      items: [{ ...sourceGroup, model_allowlist: { enabled: true, models: ["legacy-saved"] } }],
+      total: 1, page: 1, page_size: 20, pages: 1,
+    });
+    getModelAllowlistCandidates.mockRejectedValue(new Error("catalog unavailable"));
+    const wrapper = mountView();
+    await flushPromises();
+    const editButton = wrapper.findAll("button")
+      .find((button) => button.text().includes("common.edit"));
+    await editButton!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(loadErrorKey);
+    expect(wrapper.text()).toContain("legacy-saved");
+    expect(wrapper.text()).not.toContain(allowlistTagKey);
+    const savedRuleCheckbox = wrapper.findAll('#edit-group-form input[type="checkbox"]')
+      .find((input) => input.element.parentElement?.textContent?.includes("legacy-saved"));
+    expect(savedRuleCheckbox).toBeTruthy();
+    await savedRuleCheckbox!.setValue(false);
+    await wrapper.get("#edit-group-form").trigger("submit");
+    await flushPromises();
+
+    expect(updateGroup).not.toHaveBeenCalled();
+    expect(showError).toHaveBeenCalledWith("admin.groups.modelAllowlist.emptySelectionError");
     wrapper.unmount();
   });
 

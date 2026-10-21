@@ -69,7 +69,7 @@ var platformList = []PlatformSpec{
 	// composite 路由，账号永远无桶可入。
 	// CNProvider 与 LiteLLMProvider 留空：cursor 不是国产单一厂商余额 / Coding Plan
 	// 能力体系；其模型无内置目录（模型完全来自账号 model_mapping），故不参与
-	// 定价目录模型同步——defaultModelsListCandidateIDs 对它显式返回 nil。
+	// 定价目录模型同步。
 	{ID: PlatformCursor, DisplayName: "Cursor", Gateway: PlatformGatewayOpenAI},
 }
 
