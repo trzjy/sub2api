@@ -1421,11 +1421,17 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 
 	// Filter by platform if specified. Mixed scheduling (a gemini group routing
 	// to antigravity accounts) is honoured here as well, so the advertised list
-	// stays in sync with what the request path can actually serve.
+	// stays in sync with what the request path can actually serve. Cursor 跨平台
+	// 供给账号（已显式挂组、key 终态正常）也在其桥接的原生平台列表中出现，使公开列表
+	// 与调度候选同源（scheduling-same-source）。
 	if platform != "" {
 		filtered := make([]Account, 0)
 		for _, acc := range accounts {
 			if acc.Platform == platform || mixedListingAccountAllowed(platform, &acc) {
+				filtered = append(filtered, acc)
+				continue
+			}
+			if acc.Platform == PlatformCursor && s.cursorSupplyAccountListableForPlatform(ctx, &acc, platform, groupID) {
 				filtered = append(filtered, acc)
 			}
 		}
@@ -1447,11 +1453,21 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		}
 
 		mapping := acc.GetModelMapping()
+		// Cursor 跨平台供给账号（已并入候选）的映射键即其在桥接平台上的请求侧模型名，
+		// 不受下方 mixedListingModelAllowed（仅 gemini 混排 antigravity）限制，应直接暴露
+		// 其具体映射键（与调度候选同源）。提前判定一次，避免重复调用。
+		cursorListable := acc.Platform == PlatformCursor && s.cursorSupplyAccountListableForPlatform(ctx, &acc, platform, groupID)
 		for model := range mapping {
+			// Cursor 供给账号：公开列表只暴露其 model_mapping 的"具体"请求侧键，
+			// 排除空键与通配键（"*" / "gpt-*"），避免把匹配模式当具体模型名暴露。
+			if acc.Platform == PlatformCursor && isWildcardOrEmptyModelKey(model) {
+				continue
+			}
 			// Accounts pulled in through mixed scheduling only contribute the
 			// models that belong to the listing platform (e.g. an antigravity
 			// account's claude-* mappings must not surface on a gemini group).
-			if platform != "" && acc.Platform != platform && !mixedListingModelAllowed(platform, model) {
+			// Cursor 跨平台供给账号豁免此限制（其映射键本就属于桥接平台）。
+			if !cursorListable && platform != "" && acc.Platform != platform && !mixedListingModelAllowed(platform, model) {
 				continue
 			}
 			modelSet[model] = struct{}{}

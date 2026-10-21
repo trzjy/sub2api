@@ -25,6 +25,7 @@ package service
 //   - 不新增任何非文本 action（工具/执行/多模态一律不发）。
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -74,6 +75,22 @@ const (
 	cursorFldBlobID    = 1 // bytes，32 字节 = sha256(value)
 	cursorFldBlobValue = 2 // bytes
 )
+
+// Cursor AgentRun 工具声明（McpTools / McpToolDefinition）字段号。
+//
+// 字段号**全部来自派发单显式规格**（04/05/06 号 schema dump 在本环境缺失，
+// 以派发单为准；缺失 name 或 f5 会导致上游显示 unnamed tool，五个字段都要写）。
+const (
+	cursorFldMcpToolsTool          = 1 // McpTools.f1 = repeated McpToolDefinition
+	cursorFldMcpToolDefName        = 1 // McpToolDefinition.f1 = name
+	cursorFldMcpToolDefDescription = 2 // McpToolDefinition.f2 = description
+	cursorFldMcpToolDefProvider    = 4 // McpToolDefinition.f4 = provider_identifier
+	cursorFldMcpToolDefToolName    = 5 // McpToolDefinition.f5 = tool_name
+	cursorFldMcpToolDefInputSchema = 6 // McpToolDefinition.f6 = input_schema_json
+)
+
+// cursorMcpProviderIdentifier 是本层声明 MCP 工具时固定的 provider 标识。
+const cursorMcpProviderIdentifier = "sub2api"
 
 // cursorConversationModeChat 是 ConversationMode 的取值。
 //
@@ -158,9 +175,11 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	run = cursorAppendBytesField(run, cursorFldRunAction, action)
 	run = cursorAppendBytesField(run, cursorFldRunModelDetails,
 		cursorAppendStringField(nil, cursorFldModelDetailsID, upstreamModel))
-	// mcp_tools：活体样本里是空 message 但**字段存在**（f4，长度 0）。本版不发工具，
-	// 保持同形以避免上游按"字段缺失"走另一条分支。
-	run = cursorAppendBytesField(run, cursorFldRunMcpTools, nil)
+	// mcp_tools：请求携带 tools 且 tool_choice != "none" 时，把 function 工具编码进
+	// f4（McpTools）声明给上游；否则保持空 message（f4 字段存在、长度 0，与活体样本
+	// 同形——既满足"无 tools 时零变化"的纯文本链回归保护，也保住 33/63 号黄金字节）。
+	declared := cursorResolveDeclaredTools(req)
+	run = cursorAppendBytesField(run, cursorFldRunMcpTools, cursorBuildMcpTools(declared))
 	run = cursorAppendStringField(run, cursorFldRunConversationID, conversationID)
 	for _, b := range blobs {
 		blob := cursorAppendBytesField(nil, cursorFldBlobID, b.id)
@@ -170,6 +189,87 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 
 	outer := cursorAppendBytesField(nil, cursorFldAgentRunRequest, run)
 	return cursorEncodeEnvelope(outer), conversationID, nil
+}
+
+// cursorResolveDeclaredTools 按 §21.4-2 统一语义决定本轮要声明的工具子集。
+//
+// 返回 nil 表示"不发送工具声明"（等价无 tools）。规则：
+//   - 无 tools            → nil
+//   - tool_choice 缺省/"auto" → 全部 function 工具
+//   - "none"             → nil（不声明，但历史里的 tool 消息仍按 §4 文本化）
+//   - "required"         → 全部 function 工具（模型是否真调用按实际，不伪造 finish）
+//   - {"type":"function","function":{"name":X}} → 仅声明 X；X 不在列表时回落全部
+//     （不凭空声明不存在的工具，也不静默丢掉其它已声明工具）
+//   - 其它无法识别的形状  → 回落全部声明（不失败关闭，纯文本链回归保护）
+func cursorResolveDeclaredTools(req *apicompat.ChatCompletionsRequest) []apicompat.ChatTool {
+	if len(req.Tools) == 0 {
+		return nil
+	}
+	choice := strings.TrimSpace(string(req.ToolChoice))
+	switch choice {
+	case "", `"auto"`:
+		return cursorFunctionTools(req.Tools)
+	case `"none"`:
+		return nil
+	case `"required"`:
+		return cursorFunctionTools(req.Tools)
+	}
+	// 指定函数：{"type":"function","function":{"name":"X"}}
+	var tc struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(req.ToolChoice, &tc); err == nil && tc.Type == "function" && tc.Function.Name != "" {
+		for _, t := range req.Tools {
+			if t.Function != nil && t.Function.Name == tc.Function.Name {
+				return []apicompat.ChatTool{t}
+			}
+		}
+		// 指定函数不在声明列表：回落全部，避免凭空声明/丢工具。
+		return cursorFunctionTools(req.Tools)
+	}
+	// 无法识别：回落全部声明，不失败关闭。
+	return cursorFunctionTools(req.Tools)
+}
+
+// cursorFunctionTools 过滤出 type 为 function（或空 type）的工具。
+func cursorFunctionTools(tools []apicompat.ChatTool) []apicompat.ChatTool {
+	out := make([]apicompat.ChatTool, 0, len(tools))
+	for _, t := range tools {
+		if t.Type == "" || t.Type == "function" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// cursorBuildMcpTools 把一组 function 工具编码为 AgentRunRequest.f4（McpTools）内容。
+//
+// 每个函数生成一条 McpToolDefinition（McpTools.f1 repeated），五个字段都要写：
+// f1 name / f2 description / f4 provider_identifier="sub2api" / f5 tool_name / f6
+// input_schema_json（parameters 原样 JSON 字符串，缺省补 "{}" 避免上游显示 unnamed）。
+// 返回空切片表示"无声明"（f4 保持空 message，与活体样本同形）。
+func cursorBuildMcpTools(tools []apicompat.ChatTool) []byte {
+	var mcp []byte
+	for _, t := range tools {
+		if t.Function == nil || t.Function.Name == "" {
+			continue
+		}
+		schema := string(t.Function.Parameters)
+		if strings.TrimSpace(schema) == "" || schema == "null" {
+			schema = "{}"
+		}
+		var def []byte
+		def = cursorAppendStringField(def, cursorFldMcpToolDefName, t.Function.Name)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, t.Function.Description)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, t.Function.Name)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefInputSchema, schema)
+		mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
+	}
+	return mcp
 }
 
 // cursorAgentTurn 是一条已归一化的对话轮次（角色 + 纯文本）。
@@ -218,20 +318,39 @@ func cursorHistoryBlobs(history []cursorAgentTurn) ([]cursorHistoryBlob, error) 
 		var err error
 		if turn.role == "assistant" {
 			assistantSeq++
-			value, err = json.Marshal(cursorHistoryAssistantBlob{
+			value, err = cursorMarshalBlobJSON(cursorHistoryAssistantBlob{
 				Role:    "assistant",
 				Content: []cursorHistoryAssistantTextPart{{Type: "text", Text: turn.text}},
 				// id 取**助手消息的序号**（活体样本里首条 assistant 的 id 为 "1"）。
 				ID: strconv.Itoa(assistantSeq),
 			})
 		} else {
-			value, err = json.Marshal(cursorHistoryUserBlob{Role: "user", Content: turn.text})
+			value, err = cursorMarshalBlobJSON(cursorHistoryUserBlob{Role: "user", Content: turn.text})
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%w: marshal history blob: %v", ErrCursorUnsupportedRequest, err)
 		}
 		sum := sha256.Sum256(value)
 		out = append(out, cursorHistoryBlob{id: sum[:], value: value})
+	}
+	return out, nil
+}
+
+// cursorMarshalBlobJSON 序列化历史 blob 值，**关闭 HTML 转义**（< > & 保持字面量）。
+//
+// 协议 blob 是 Cursor 会 JSON 解析的 bytes 载荷；§4 续轮文本化的
+// <tool_call>/<tool_result> 标记必须以字面量出现（而非 \u003c…），与派发单边界一致；
+// 两侧 JSON 解析功能等价，但钉字节测试要求字面量，且避免把标记变成不可读的转义序列。
+func cursorMarshalBlobJSON(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	out := buf.Bytes()
+	if len(out) > 0 && out[len(out)-1] == '\n' {
+		out = out[:len(out)-1]
 	}
 	return out, nil
 }
@@ -272,11 +391,17 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 			turns = append(turns, cursorAgentTurn{role: "user", text: text})
 			sawUser = true
 		case "assistant", "ai":
-			turns = append(turns, cursorAgentTurn{role: "assistant", text: text})
+			// assistant 可能携带 tool_calls：原 content（可空）+ 每块一个
+			// <tool_call> blob（见 §4 续轮文本化）。
+			turns = append(turns, cursorAgentTurn{role: "assistant", text: cursorAssistantText(m, text)})
 		case "tool", "function":
-			// 首版无工具通道：工具结果无处可去。**丢弃而非报错**——
-			// 请求侧本就丢弃了 tools，正常不会产生 tool 消息；出现时（客户端硬塞）
-			// 报错会打断本可用的一次纯文本对话。
+			// 工具结果 → user turn（Cursor 历史仅 user/assistant 两种落点，见 §4）。
+			// 文本化失败关闭（含非文本 part 时与多模态口径一致）。
+			tt, err := cursorToolResultText(m)
+			if err != nil {
+				return nil, err
+			}
+			turns = append(turns, cursorAgentTurn{role: "user", text: tt})
 		case "":
 			return nil, fmt.Errorf("%w: message without role", ErrCursorUnsupportedRequest)
 		default:
@@ -311,6 +436,61 @@ func cursorJoinSystem(parts []string) string {
 		b.WriteString("\n</system>")
 	}
 	return b.String()
+}
+
+// cursorAssistantText 把 assistant 消息（含可选 tool_calls）拼成一段文本。
+//
+// 续轮文本化（§4）：原 content（可空）+ 每个 tool_call 一块
+// `\n<tool_call>\n{"id":...,"name":...,"arguments":{...}}\n</tool_call>`，
+// arguments 保留原 JSON 字符串（空则补 "{}"）。
+func cursorAssistantText(m apicompat.ChatMessage, base string) string {
+	text := base
+	if len(m.ToolCalls) == 0 {
+		return text
+	}
+	var b strings.Builder
+	if text != "" {
+		b.WriteString(text)
+	}
+	for _, tc := range m.ToolCalls {
+		args := tc.Function.Arguments
+		if strings.TrimSpace(args) == "" || args == "null" {
+			args = "{}"
+		}
+		b.WriteString("\n<tool_call>\n")
+		b.WriteString(`{"id":` + cursorJSONString(tc.ID) +
+			`,"name":` + cursorJSONString(tc.Function.Name) +
+			`,"arguments":` + args + `}`)
+		b.WriteString("\n</tool_call>")
+	}
+	return b.String()
+}
+
+// cursorToolResultText 把 tool / function 角色消息文本化为一条 user turn。
+//
+// 续轮文本化（§4）：Cursor 历史仅 user/assistant 两种落点，工具结果无处可去，
+// 故包成 `<tool_result tool_call_id="..." name="...">\n<content>\n...\n</tool_result>`
+// 落为 user。content 为字符串或纯 text part 拼接；含非文本 part → 失败关闭
+// （与多模态口径一致）。
+func cursorToolResultText(m apicompat.ChatMessage) (string, error) {
+	content, err := cursorMessageText(m)
+	if err != nil {
+		return "", err
+	}
+	id := m.ToolCallID
+	name := m.Name
+	if name == "" && m.FunctionCall != nil {
+		name = m.FunctionCall.Name
+	}
+	var b strings.Builder
+	b.WriteString("<tool_result tool_call_id=")
+	b.WriteString(cursorJSONString(id))
+	b.WriteString(" name=")
+	b.WriteString(cursorJSONString(name))
+	b.WriteString(">\n<content>\n")
+	b.WriteString(content)
+	b.WriteString("\n</tool_result>")
+	return b.String(), nil
 }
 
 // cursorMessageText 从一条 OpenAI 消息取纯文本。

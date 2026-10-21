@@ -1223,6 +1223,14 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 
+	// muse 无内置模型目录：分组存在但无真实供给账号时返回真实空列表，不回落到
+	// Claude 默认目录（与调度层空映射拒绝同一契约，O57-A §5）。未挂组（ungrouped）
+	// API Key 保持既有默认回退，不受影响。
+	if groupID != nil && platform == service.PlatformMuse {
+		writeModelsList(c, platform, nil)
+		return
+	}
+
 	// Fallback to default models
 	if platform == service.PlatformOpenAI {
 		writeModelsListResponse(c, openai.DefaultModels)

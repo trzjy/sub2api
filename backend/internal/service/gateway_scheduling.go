@@ -1201,9 +1201,15 @@ func (s *GatewayService) isAccountAdmittedForPlatform(ctx context.Context, accou
 // 淘汰/放行（cursor 已在该归并表内保留原值），跨平台准入倘再放开会破坏"分组平台=
 // 账号平台"的既有契约。只有 native（Claude/Gemini）系本就没有 cursor 原生同平台供给，
 // 必须由分支 Serde 桥接，才有接纳的必要。
+// cursorNativeBridgePlatforms 判断某个原生平台是否允许以「cursor 跨平台供给」补足候选。
+// 仅扩 U7 已挂组的 openai 兼容族（grok/openai），多协议族（composite 等）不在此列。
+// 真正的准入仍由 cursorSupplyAdmittedForNativePlatform 逐条裁决（显式挂组 + 模型支持）。
 func cursorNativeBridgePlatforms(platform string) bool {
 	switch platform {
 	case PlatformAnthropic, PlatformGemini:
+		return true
+	case PlatformGrok, PlatformOpenAI:
+		// 仅开放 U7 已挂组的 openai 兼容族；多协议族（composite/muse/...）不扩。
 		return true
 	default:
 		return false
@@ -1265,6 +1271,33 @@ func (s *GatewayService) cursorSupplyAdmittedForNativePlatform(ctx context.Conte
 	// 能力匹配①：分组模型白名单。enabled=false 为未启用白名单（Allows 恒真），
 	// 此时显式挂组本身即运营意图。
 	return s.cursorGroupModelAllowed(ctx, *groupID, requestedModel)
+}
+
+// cursorSupplyAccountListableForPlatform 判定 cursor 账号是否可在原生平台的公开模型
+// 列表中暴露其 model_mapping（公开列表同源：与 cursorSupplyAdmittedForNativePlatform
+// 共用显式挂组 + key 终态 + 桥接平台三个账号级口径）。列表场景无单一请求模型，故不做
+// 逐模型校验，具体模型由下方映射键枚举决定。
+func (s *GatewayService) cursorSupplyAccountListableForPlatform(ctx context.Context, account *Account, platform string, groupID *int64) bool {
+	if account == nil || account.Platform != PlatformCursor {
+		return false
+	}
+	if !cursorNativeBridgePlatforms(platform) {
+		return false
+	}
+	if groupID == nil || *groupID <= 0 {
+		return false
+	}
+	// key 终态门（I2）：过期/不可用的码约束的是账号调度资格。
+	if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
+		return false
+	}
+	return true
+}
+
+// isWildcardOrEmptyModelKey 判断 model_mapping 的键是否为通配键（以 * 结尾，如 "*" /
+// "gpt-*"）或空键——这类键是匹配模式，不是具体请求侧模型名，不应暴露在公开列表中。
+func isWildcardOrEmptyModelKey(key string) bool {
+	return key == "" || strings.HasSuffix(key, "*")
 }
 
 // cursorGroupModelAllowed 读分组模型白名单判定是否允许该模型（Allows 的既有通配语义

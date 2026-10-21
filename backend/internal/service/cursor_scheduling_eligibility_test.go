@@ -270,9 +270,19 @@ func TestCursorSchedulableNativePlatformAdmission(t *testing.T) {
 	// ④ 模型映射是唯一出口：未声明该模型 → 不可选
 	require.False(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformAnthropic, false, "gpt-5.1", &groupID))
 
-	// ⑤ 非桥接平台（OpenAI 系）不接纳 cursor 供给：该链按平台精确匹配走，
-	//    跨平台准入只在 native 系生效。
-	require.False(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformOpenAI, false, cursorSchedTestModelAlt, &groupID))
+	// ⑤ 桥接平台扩展（O57-A §1）：U7 已挂组的 openai 兼容族（grok/openai）现接纳
+	//    cursor 跨平台供给——分组挂组 + 模型白名单允许 + 账号映射声明 → 可选；
+	//    未挂组不外溢，多协议族（composite）仍不接纳。
+	require.True(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformOpenAI, false, cursorSchedTestModelAlt, &groupID),
+		"openai 兼容族已挂组时应接纳 cursor 供给")
+	require.True(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformGrok, false, cursorSchedTestModelAlt, &groupID),
+		"grok 已挂组时应接纳 cursor 供给")
+	require.False(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformComposite, false, cursorSchedTestModelAlt, &groupID),
+		"多协议族（composite）不接纳 cursor 跨平台供给")
+	// 未挂组 → 即便平台可桥接也不外溢
+	require.False(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformOpenAI, false, cursorSchedTestModelAlt, nil))
+	// 模型不在白名单 → 不可选（即便平台可桥接）
+	require.False(t, svc.isAccountAdmittedForPlatform(otherModelCtx, &admitted, PlatformOpenAI, false, cursorSchedTestModelAlt, &groupID))
 
 	// ⑥ 同平台原生账号不受本门影响
 	native := Account{ID: 8602, Platform: PlatformAnthropic, Type: AccountTypeOAuth,
@@ -292,10 +302,12 @@ func TestCursorSchedulableNativePlatformQuerySet(t *testing.T) {
 	// 未挂组：不并入 cursor
 	require.Equal(t, []string{PlatformAnthropic},
 		cursorSupplyPlatformsFor(nil, []string{PlatformAnthropic}))
-	// OpenAI 系：cursor 已在 NormalizeOpenAICompatiblePlatform 归并表内，
-	// 走平台精确匹配，不做跨平台并入
-	require.Equal(t, []string{PlatformOpenAI},
+	// OpenAI 兼容族（O57-A §1）：已挂组的 openai 兼容族（grok/openai）现并入 cursor
+	// 跨平台供给候选（与 anthropic/gemini 同源），多协议族（composite）仍不并入。
+	require.Equal(t, []string{PlatformOpenAI, PlatformCursor},
 		cursorSupplyPlatformsFor(&groupID, []string{PlatformOpenAI}))
+	require.Equal(t, []string{PlatformGrok, PlatformCursor},
+		cursorSupplyPlatformsFor(&groupID, []string{PlatformGrok}))
 	// 入参不被就地改写
 	base := []string{PlatformGemini}
 	_ = cursorSupplyPlatformsFor(&groupID, base)

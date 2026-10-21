@@ -251,28 +251,68 @@ func indexOfSub(s, sub string) int {
 	return -1
 }
 
-// TestCursorConvertRequestDropsOutOfScopeFields 覆盖首版范围外字段被丢弃。
+// TestCursorProtocolRequestDropsOutOfScopeFields 覆盖范围外字段的处理。
+//
+// 注意：本卡（O11-B）已实现工具闭环，tools 不再"丢弃"而是翻译进 f4；tool 结果消息
+// 也不再丢弃，而是文本化为 user turn 的 <tool_result>。下方子测试已相应更新为新语义。
 func TestCursorProtocolRequestDropsOutOfScopeFields(t *testing.T) {
-	t.Run("请求侧 tools 被丢弃", func(t *testing.T) {
+	t.Run("请求侧 tools 翻译为 f4 声明（五字段齐全）", func(t *testing.T) {
 		req := &apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)},
 				{Role: "user", Content: json.RawMessage(`"again"`)}},
 			Tools: []apicompat.ChatTool{{
-				Type:     "function",
-				Function: &apicompat.ChatFunction{Name: "get_weather"},
+				Type: "function",
+				Function: &apicompat.ChatFunction{
+					Name:        "get_weather",
+					Description: "Get the weather.",
+					Parameters:  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+				},
 			}},
 		}
 		body, err := cursorConvertRequest(req, "grok-4.7")
 		require.NoError(t, err)
-		// 不得把工具名写进任何字段（mcp_tools 保持空 message）。
-		require.NotContains(t, string(body), "get_weather", "tools must be dropped, not translated")
+		// f4 必须出现且承载工具名（不再是丢弃）。
+		require.Contains(t, string(body), "get_weather", "tools must be translated into f4, not dropped")
+		run := cursorAgentRunOf(t, body)
+		mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
+		require.True(t, ok)
+		mcpFields, e := cursorDecodeProtobuf(mcp.Bytes)
+		require.NoError(t, e)
+		defs := cursorAllFields(mcpFields, cursorFldMcpToolsTool)
+		require.Len(t, defs, 1)
+		def, err := cursorDecodeProtobuf(defs[0].Bytes)
+		require.NoError(t, err)
+		require.Equal(t, "get_weather", cursorTestFieldString(def, cursorFldMcpToolDefName))
+		require.Equal(t, "get_weather", cursorTestFieldString(def, cursorFldMcpToolDefToolName))
+		require.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(def, cursorFldMcpToolDefProvider))
+		require.Equal(t, "Get the weather.", cursorTestFieldString(def, cursorFldMcpToolDefDescription))
+		require.JSONEq(t, `{"type":"object","properties":{"city":{"type":"string"}}}`,
+			cursorTestFieldString(def, cursorFldMcpToolDefInputSchema))
 	})
 
-	t.Run("tool 结果消息被丢弃而非报错", func(t *testing.T) {
+	t.Run("tool_choice=none 时不声明工具（等价无 tools）", func(t *testing.T) {
+		req := &apicompat.ChatCompletionsRequest{
+			Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+			Tools: []apicompat.ChatTool{{
+				Type:     "function",
+				Function: &apicompat.ChatFunction{Name: "get_weather"},
+			}},
+			ToolChoice: json.RawMessage(`"none"`),
+		}
+		body, err := cursorConvertRequest(req, "grok-4.7")
+		require.NoError(t, err)
+		run := cursorAgentRunOf(t, body)
+		mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
+		require.True(t, ok)
+		require.Empty(t, mcp.Bytes, "tool_choice=none must not declare tools")
+		require.NotContains(t, string(body), "get_weather")
+	})
+
+	t.Run("tool 结果消息文本化为 user turn 的 <tool_result>", func(t *testing.T) {
 		req := &apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{
 				{Role: "user", Content: json.RawMessage(`"hi"`)},
-				{Role: "tool", ToolCallID: "call_1", Content: json.RawMessage(`"result"`)},
+				{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: json.RawMessage(`"sunny"`)},
 				{Role: "assistant", Content: json.RawMessage(`"done"`)},
 				{Role: "user", Content: json.RawMessage(`"next"`)},
 			},
@@ -281,8 +321,13 @@ func TestCursorProtocolRequestDropsOutOfScopeFields(t *testing.T) {
 		require.NoError(t, err)
 		run := cursorAgentRunOf(t, body)
 		require.Equal(t, "next", cursorActionTextOf(t, run))
-		require.Len(t, cursorBlobsOf(t, run), 2)
-		require.NotContains(t, string(body), `"result"`)
+		// tool 消息成为 user turn → 进历史 blob，共 3 条历史。
+		require.Len(t, cursorBlobsOf(t, run), 3)
+		// 文本化边界必须存在（blob 是 JSON 字符串，内部引号会被 JSON 转义为 \"）。
+		require.Contains(t, string(body), "<tool_result")
+		require.Contains(t, string(body), `tool_call_id=\"call_1\"`)
+		require.Contains(t, string(body), `name=\"get_weather\"`)
+		require.Contains(t, string(body), "sunny")
 	})
 }
 

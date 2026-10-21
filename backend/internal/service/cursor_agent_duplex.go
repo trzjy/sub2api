@@ -51,6 +51,14 @@ type cursorAgentDuplex struct {
 	// 用于下游消费者中途断开时，在 Close / 读取错误分支判定 context_cancel，
 	// 不记成功 usage。绝不通过它写 gin.Context 或共享可变状态。
 	ctx context.Context
+
+	// declaredToolNames 是本请求通过 f4（McpTools）声明的工具名（每个一条）。
+	// 由 newCursorAgentDuplex 从 AgentRun 请求体解码得到，供 mcp_state 回包枚举。
+	declaredToolNames []string
+	// capturedToolCalls 是本轮经 mcp_args 委托捕获的工具调用（权威信号见 §2）。
+	capturedToolCalls []cursorToolCallCapture
+	// toolCallsFinished 标记本轮已发生工具委托捕获，供响应构造方收尾参考。
+	toolCallsFinished bool
 }
 
 func newCursorAgentDuplex(initial []byte) (*cursorAgentDuplex, error) {
@@ -71,6 +79,29 @@ func newCursorAgentDuplex(initial []byte) (*cursorAgentDuplex, error) {
 		return nil, err
 	}
 	d := &cursorAgentDuplex{blobs: make(map[string][]byte)}
+	// 从 AgentRun 请求体 f4（McpTools）解出本轮声明的工具名，供 mcp_state 回包枚举。
+	if mcpField, ok := cursorFindField(fields, cursorFldRunMcpTools); ok && len(mcpField.Bytes) > 0 {
+		if defs, derr := cursorDecodeProtobuf(mcpField.Bytes); derr == nil {
+			for _, def := range defs {
+				if def.Number != cursorFldMcpToolsTool {
+					continue
+				}
+				defFields, e := cursorDecodeProtobuf(def.Bytes)
+				if e != nil {
+					continue
+				}
+				name := ""
+				if n, ok := cursorFindField(defFields, cursorFldMcpToolDefName); ok {
+					name = n.String()
+				} else if n, ok := cursorFindField(defFields, cursorFldMcpToolDefToolName); ok {
+					name = n.String()
+				}
+				if name != "" {
+					d.declaredToolNames = append(d.declaredToolNames, name)
+				}
+			}
+		}
+	}
 	// The server may request history even when run_request already carries it as
 	// pre_fetched_blobs. Seed the same store used for later KV set/get messages.
 	for _, field := range fields {
@@ -242,29 +273,44 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if _, ok := cursorFindField(parts, 10); !ok {
+		execID := cursorVarintField(parts, 1)
+		var idField []byte
+		if id, ok := cursorFindField(parts, 15); ok {
+			idField = id.Bytes
+		}
+		switch {
+		case cursorFindFieldOK(parts, 10):
+			// 现有 context 应答（逐字不动，f10 既有处理）。
+			return d.respondContext(parts, execID, idField)
+		case cursorFindFieldOK(parts, 36):
+			// mcp_state 委托（f36 mcp_state_exec_args）：回 McpStateExecResult，
+			// 枚举本请求声明的工具（每个工具单独一条 f5，repeated 逐项编码）。
+			resp, e := d.cursorMcpStateReply(execID, idField)
+			if e != nil {
+				return false, e
+			}
+			serr := d.send(2, resp)
+			d.logPhase(zapcore.DebugLevel, "mcp_state_reply", cursorHTTPErrClass(serr),
+				zap.Uint64("exec_id", execID), zap.Int("tools", len(d.declaredToolNames)))
+			return false, serr
+		case cursorFindFieldOK(parts, 11):
+			// mcp_args 委托（f11 mcp_args）：捕获工具调用，回 McpResult.error，
+			// **不终止连接**——继续读流直到 turn_ended（usage 完整计费）。
+			tc, e := d.cursorCaptureMcpArgs(parts)
+			if e != nil {
+				return false, e
+			}
+			resp, e := d.cursorMcpArgsReply(execID, idField, tc)
+			if e != nil {
+				return false, e
+			}
+			serr := d.send(2, resp)
+			d.logPhase(zapcore.DebugLevel, "mcp_args_reply", cursorHTTPErrClass(serr),
+				zap.Uint64("exec_id", execID), zap.String("tool_name", tc.Name))
+			return false, serr
+		default:
 			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
 		}
-		// §18.5 T：context/KV 应答写入前后各记一次事件，只记消息种类（context_response）
-		// 与耗时，**绝不记任何键值**（key/value 为账号会话私有数据，严禁入日志）。
-		execID := cursorVarintField(parts, 1)
-		d.logPhase(zapcore.DebugLevel, "context_write_before", "",
-			zap.String("kind", "context_response"), zap.Uint64("exec_id", execID))
-		// ExecClientMessage.context_response.success.result.context.environment.
-		env := cursorAppendStringField(nil, 1, runtime.GOOS)
-		env = cursorAppendStringField(env, 10, "UTC")
-		ctx := cursorAppendBytesField(nil, 4, env)
-		success := cursorAppendBytesField(nil, 1, ctx)
-		result := cursorAppendBytesField(nil, 1, success)
-		response := cursorAppendVarintField(nil, 1, execID)
-		if id, ok := cursorFindField(parts, 15); ok {
-			response = cursorAppendBytesField(response, 15, id.Bytes)
-		}
-		response = cursorAppendBytesField(response, 10, result)
-		serr := d.send(2, response)
-		d.logPhase(zapcore.DebugLevel, "context_write_after", cursorHTTPErrClass(serr),
-			zap.String("kind", "context_response"), zap.Uint64("exec_id", execID))
-		return false, serr
 	}
 	if kv, ok := cursorFindField(fields, cursorFldServerKvMessage); ok {
 		parts, err := cursorDecodeProtobuf(kv.Bytes)
@@ -323,4 +369,102 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 func (d *cursorAgentDuplex) send(field int, payload []byte) error {
 	_, err := d.writer.Write(cursorEncodeEnvelope(cursorAppendBytesField(nil, field, payload)))
 	return err
+}
+
+// cursorFindFieldOK 是 cursorFindField 的 bool 便捷版（仅判断字段是否存在）。
+func cursorFindFieldOK(fields []cursorPBField, number int) bool {
+	_, ok := cursorFindField(fields, number)
+	return ok
+}
+
+// respondContext 处理 exec 内层 f10（request_context）应答（既有逻辑逐字保留）。
+func (d *cursorAgentDuplex) respondContext(parts []cursorPBField, execID uint64, idField []byte) (bool, error) {
+	// §18.5 T：context/KV 应答写入前后各记一次事件，只记消息种类（context_response）
+	// 与耗时，**绝不记任何键值**（key/value 为账号会话私有数据，严禁入日志）。
+	d.logPhase(zapcore.DebugLevel, "context_write_before", "",
+		zap.String("kind", "context_response"), zap.Uint64("exec_id", execID))
+	// ExecClientMessage.context_response.success.result.context.environment.
+	env := cursorAppendStringField(nil, 1, runtime.GOOS)
+	env = cursorAppendStringField(env, 10, "UTC")
+	ctx := cursorAppendBytesField(nil, 4, env)
+	success := cursorAppendBytesField(nil, 1, ctx)
+	result := cursorAppendBytesField(nil, 1, success)
+	response := cursorAppendVarintField(nil, 1, execID)
+	if len(idField) > 0 {
+		response = cursorAppendBytesField(response, 15, idField)
+	}
+	response = cursorAppendBytesField(response, 10, result)
+	serr := d.send(2, response)
+	d.logPhase(zapcore.DebugLevel, "context_write_after", cursorHTTPErrClass(serr),
+		zap.String("kind", "context_response"), zap.Uint64("exec_id", execID))
+	return false, serr
+}
+
+// cursorMcpStateReply 构造 mcp_state 委托的回包（AgentClientMessage.f2 ExecClientMessage）。
+//
+// 结构（派发单 §2）：ExecClientMessage = {f1 id(exec_id), f15 id(原值),
+// f36 = McpStateExecResult{f1 success = McpStateSuccess{f1 servers=[McpStateServer]}}}。
+// McpStateServer = {f1 server_name:"sub2api", f2 server_identifier:"sub2api",
+// f5 tools: 每个声明工具**单独**一条 f5 length-delimited（repeated 逐项，禁止拼接成单条）}。
+//
+// 注：McpStateServer.f5 每条工具内层消息只用 f1 承载工具名（与 McpToolDefinition.f1
+// 一致）。协议证据文件（04/05/06 schema dump）在本环境缺失，字段号以派发单为准；
+// 该内层形状为最小可用推断，待活体复核。
+func (d *cursorAgentDuplex) cursorMcpStateReply(execID uint64, idField []byte) ([]byte, error) {
+	// McpStateServer.f5 是 repeated：每个声明工具**单独**一条 f5（内层消息 f1 = 工具名），
+	// 逐项 length-delimited 编码，**禁止**把多工具拼进同一条 f5（派发单 §2）。
+	serverMsg := cursorAppendStringField(nil, 1, cursorMcpProviderIdentifier)      // f1 server_name
+	serverMsg = cursorAppendStringField(serverMsg, 2, cursorMcpProviderIdentifier) // f2 server_identifier
+	for _, name := range d.declaredToolNames {
+		tool := cursorAppendStringField(nil, 1, name) // 内层 f1 = 工具名
+		serverMsg = cursorAppendBytesField(serverMsg, 5, tool)
+	}
+	success := cursorAppendBytesField(nil, 1, serverMsg)   // McpStateSuccess.f1 servers
+	stateResult := cursorAppendBytesField(nil, 1, success) // McpStateExecResult.f1 success
+	response := cursorAppendVarintField(nil, 1, execID)
+	if len(idField) > 0 {
+		response = cursorAppendBytesField(response, 15, idField)
+	}
+	response = cursorAppendBytesField(response, 36, stateResult) // ExecClientMessage.f36
+	return response, nil
+}
+
+// cursorMcpArgsReply 构造 mcp_args 委托的回包：McpResult.error（派发单 §21.4-1）。
+//
+// 模型收到该 error 后不重试、正常 turn_ended（活体证据 T9b）。回包 = ExecClientMessage
+// {f1 id(exec_id), f15 id(原值), f11 = McpResult{f2 error = McpError{f1 error:"..."}}}。
+func (d *cursorAgentDuplex) cursorMcpArgsReply(execID uint64, idField []byte, tc cursorToolCallCapture) ([]byte, error) {
+	const msg = "Tool execution deferred: the client will submit the result in a follow-up request. Do not retry this call."
+	mcpError := cursorAppendStringField(nil, 1, msg)      // McpError.f1 error
+	mcpResult := cursorAppendBytesField(nil, 2, mcpError) // McpResult.f2 error
+	response := cursorAppendVarintField(nil, 1, execID)
+	if len(idField) > 0 {
+		response = cursorAppendBytesField(response, 15, idField)
+	}
+	response = cursorAppendBytesField(response, 11, mcpResult) // ExecClientMessage.f11
+	_ = tc
+	return response, nil
+}
+
+// cursorCaptureMcpArgs 从 exec 内层 f11（mcp_args）捕获工具调用。
+//
+// 解析 McpArgs：f3 tool_call_id、f5 tool_name、f2 args（protobuf map<string,Value>，
+// 每个 entry = {f1 key, f2 value}，Value：f1 null / f2 number / f3 string）。ArgsJSON
+// 为对象 JSON 字符串。**不终止连接**——置 toolCallsFinished 供响应构造方收尾。
+func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField) (cursorToolCallCapture, error) {
+	argsField, ok := cursorFindField(parts, 11)
+	if !ok {
+		return cursorToolCallCapture{}, fmt.Errorf("%w: mcp_args without f11", ErrCursorProtocol)
+	}
+	id, name, argsJSON, err := cursorDecodeMcpArgs(argsField.Bytes)
+	if err != nil {
+		return cursorToolCallCapture{}, err
+	}
+	tc := cursorToolCallCapture{ID: id, Name: name, ArgsJSON: argsJSON}
+	d.capturedToolCalls = append(d.capturedToolCalls, tc)
+	d.toolCallsFinished = true
+	// 结构化日志（call_id/tool_name），不记 args 明文（可能含账号会话数据）。
+	d.logPhase(zapcore.DebugLevel, "tool_call_captured", "",
+		zap.String("tool_call_id", id), zap.String("tool_name", name))
+	return tc, nil
 }

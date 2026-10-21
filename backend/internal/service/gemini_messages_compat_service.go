@@ -544,6 +544,17 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 	if err != nil {
 		return nil, fmt.Errorf("query accounts failed: %w", err)
 	}
+	// AI Studio 模型列表端点（Gemini /v1beta/models）只能由真正的 Gemini 账号服务；
+	// cursor 跨平台供给账号（即便被挂进该 gemini 分组）不承接该端点，必须从候选中剔除，
+	// 否则会被误选去请求 cursor 原生端点。
+	geminiOnly := make([]Account, 0, len(accounts))
+	for i := range accounts {
+		if accounts[i].Platform == PlatformCursor {
+			continue
+		}
+		geminiOnly = append(geminiOnly, accounts[i])
+	}
+	accounts = geminiOnly
 	if len(accounts) == 0 {
 		return nil, errors.New("no available Gemini accounts")
 	}

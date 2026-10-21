@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -128,6 +129,14 @@ func (s *cursorSSEStream) next() error {
 		if !s.parser.started {
 			s.buffer.WriteString(s.parser.cursorSSERoleChunk())
 			s.parser.started = true
+		}
+		// 工具委托捕获：在 finish 前吐 tool_calls delta（首个含 id/type/function.name，
+		// 随后一块 arguments），再发 finish_reason:"tool_calls" 的收尾 chunk。
+		if len(s.parser.capturedToolCalls) > 0 {
+			for i, tc := range s.parser.capturedToolCalls {
+				s.buffer.WriteString(s.parser.cursorSSEToolCallNameChunk(i, tc))
+				s.buffer.WriteString(s.parser.cursorSSEToolCallArgsChunk(i, tc))
+			}
 		}
 		s.buffer.WriteString(s.parser.cursorSSEFinishChunk())
 		s.buffer.WriteString("data: [DONE]\n\n")
@@ -398,6 +407,23 @@ type cursorStreamParser struct {
 	usage cursorTurnUsage
 	// rejected 命中流内拒付模板后的结构化错误（非 nil 即终态失败）。
 	rejected *CursorKeyRejectedError
+	// capturedToolCalls 是本轮经 mcp_args 委托捕获的工具调用（权威信号见派发单 §2）。
+	capturedToolCalls []cursorToolCallCapture
+	// toolCallsFinished 标记本轮已发生工具委托捕获。
+	toolCallsFinished bool
+	// toolCallStartedIDs 记录 InteractionUpdate.f2 tool_call_started 观察到的 call_id
+	// （仅结构化记录，不作为 finish 依据，见派发单 §3）。
+	toolCallStartedIDs []string
+}
+
+// cursorToolCallCapture 是一条经 mcp_args 委托捕获的工具调用。
+type cursorToolCallCapture struct {
+	// ID 是上游给的 tool_call_id（OpenAI tool_calls[].id）。
+	ID string
+	// Name 是工具名（OpenAI tool_calls[].function.name）。
+	Name string
+	// ArgsJSON 是工具参数的对象 JSON 字符串（OpenAI tool_calls[].function.arguments）。
+	ArgsJSON string
 }
 
 // cursorContent 返回拼出的完整响应文本（非流式入站用）。
@@ -484,6 +510,13 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 		sseLines = append(sseLines, p.cursorSSERoleChunk())
 		p.started = true
 	}
+	// 工具委托捕获：在 finish 前吐 tool_calls delta（流式与 cursorParseStreamToSSE 同口径）。
+	if len(p.capturedToolCalls) > 0 {
+		for i, tc := range p.capturedToolCalls {
+			sseLines = append(sseLines, p.cursorSSEToolCallNameChunk(i, tc))
+			sseLines = append(sseLines, p.cursorSSEToolCallArgsChunk(i, tc))
+		}
+	}
 	sseLines = append(sseLines, p.cursorSSEFinishChunk())
 	return sseLines, nil
 }
@@ -493,6 +526,25 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 	fields, err := cursorDecodeProtobuf(payload)
 	if err != nil {
 		return cursorStreamEvent{}, err
+	}
+	// 工具委托（exec.mcp_args，f11）：捕获为 ToolCallCaptured（权威信号，见派发单 §2）。
+	// 与 duplex 独立解码同一帧——duplex 负责回 McpResult.error，本解析器负责收尾
+	// 构造 tool_calls。两者无需共享状态（解析器自行捕获即可）。
+	if exec, ok := cursorFindField(fields, cursorFldServerExecMessage); ok {
+		execParts, e := cursorDecodeProtobuf(exec.Bytes)
+		if e != nil {
+			return cursorStreamEvent{}, e
+		}
+		if argsField, ok := cursorFindField(execParts, 11); ok {
+			id, name, argsJSON, derr := cursorDecodeMcpArgs(argsField.Bytes)
+			if derr != nil {
+				return cursorStreamEvent{}, derr
+			}
+			p.capturedToolCalls = append(p.capturedToolCalls, cursorToolCallCapture{
+				ID: id, Name: name, ArgsJSON: argsJSON,
+			})
+			p.toolCallsFinished = true
+		}
 	}
 	// 只有 interaction_update（f1）承载文本与 usage；其余分支（exec / kv /
 	// checkpoint / 计时）一律丢弃，且**不解码其内容**——例如 ttft_breakdown 可能
@@ -504,6 +556,12 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 	update, err := cursorDecodeProtobuf(f.Bytes)
 	if err != nil {
 		return cursorStreamEvent{}, err
+	}
+
+	// InteractionUpdate.f2 tool_call_started（ToolCall.f15 mcp_tool_call 分支）：
+	// 仅结构化日志，**不作为 finish 依据**（权威信号 = f11 委托）。
+	if tcStarted, ok := cursorFindField(update, 2); ok {
+		p.cursorLogToolCallStarted(tcStarted.Bytes)
 	}
 
 	if turn, ok := cursorFindField(update, cursorFldUpdateTurnEnded); ok {
@@ -556,6 +614,136 @@ func cursorVarintField(fields []cursorPBField, number int) uint64 {
 		return 0
 	}
 	return f.Varint
+}
+
+// cursorLogToolCallStarted 仅结构化记录 InteractionUpdate.f2 tool_call_started，
+// **不作为 finish 依据**（权威信号 = f11 委托）。解析器无 logger，故记录 call_id 供诊断。
+func (p *cursorStreamParser) cursorLogToolCallStarted(b []byte) {
+	// ToolCall 可能含 f15 mcp_tool_call 分支；尽力解码 call_id，失败则忽略。
+	fields, err := cursorDecodeProtobuf(b)
+	if err != nil {
+		return
+	}
+	if tc, ok := cursorFindField(fields, 15); ok {
+		inner, e := cursorDecodeProtobuf(tc.Bytes)
+		if e != nil {
+			return
+		}
+		if id, ok := cursorFindField(inner, 1); ok {
+			p.toolCallStartedIDs = append(p.toolCallStartedIDs, id.String())
+		}
+	}
+}
+
+// cursorDecodeMcpArgs 解析 exec 内层 f11（mcp_args）的 McpArgs 消息。
+//
+// 字段号（派发单 §2）：f3 tool_call_id、f5 tool_name、f2 args。
+// args 是 protobuf map<string, Value>：在 McpArgs 内编码为 repeated 字段 2，每个
+// entry = length-delimited {f1 key(string), f2 value(Value 消息)}。
+// Value oneof（派发单）：f1 null / f2 number / f3 string；未知类型失败关闭。
+// 返回 (tool_call_id, tool_name, argsJSON, error)。
+func cursorDecodeMcpArgs(payload []byte) (string, string, string, error) {
+	fields, err := cursorDecodeProtobuf(payload)
+	if err != nil {
+		return "", "", "", err
+	}
+	idF, _ := cursorFindField(fields, 3)
+	nameF, _ := cursorFindField(fields, 5)
+	argsF, ok := cursorFindField(fields, 2)
+	if !ok {
+		return idF.String(), nameF.String(), "{}", nil
+	}
+	entryFields, err := cursorDecodeProtobuf(argsF.Bytes)
+	if err != nil {
+		return "", "", "", err
+	}
+	obj := make(map[string]json.RawMessage)
+	for _, entry := range entryFields {
+		if entry.Number != 2 {
+			continue
+		}
+		entryInner, e := cursorDecodeProtobuf(entry.Bytes)
+		if e != nil {
+			return "", "", "", e
+		}
+		keyF, ok := cursorFindField(entryInner, 1)
+		if !ok {
+			continue
+		}
+		valF, ok := cursorFindField(entryInner, 2)
+		if !ok {
+			continue
+		}
+		v, e := cursorDecodeMcpValue(valF.Bytes)
+		if e != nil {
+			return "", "", "", e
+		}
+		obj[keyF.String()] = json.RawMessage(v)
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "", "", "", fmt.Errorf("%w: marshal mcp args: %v", ErrCursorProtocol, err)
+	}
+	return idF.String(), nameF.String(), string(b), nil
+}
+
+// cursorDecodeMcpValue 解析 McpArgs args 的单个 Value（局部解码，支持 null / number
+// (整数或浮点) / string；未知 wire type 失败关闭）。与全局 cursorDecodeProtobuf 不同，
+// 这里额外支持 double/float 的定长 wire（Value.f2 number 可能用 fixed64）。
+func cursorDecodeMcpValue(b []byte) (string, error) {
+	i := 0
+	for i < len(b) {
+		key, n, err := cursorConsumeVarint(b, i)
+		if err != nil {
+			return "", err
+		}
+		i = n
+		field := int(key >> 3)
+		wire := int(key & 0x7)
+		switch wire {
+		case cursorWireVarint:
+			v, n, err := cursorConsumeVarint(b, i)
+			if err != nil {
+				return "", err
+			}
+			i = n
+			if field == 2 {
+				return strconv.FormatInt(int64(v), 10), nil
+			}
+		case cursorWireBytes:
+			ln, n, err := cursorConsumeVarint(b, i)
+			if err != nil {
+				return "", err
+			}
+			i = n
+			if ln > uint64(len(b)-i) {
+				return "", fmt.Errorf("%w: mcp value overflow", ErrCursorProtocol)
+			}
+			data := b[i : i+int(ln)]
+			i += int(ln)
+			if field == 3 {
+				return cursorJSONString(string(data)), nil
+			}
+		case 5: // fixed64（double）
+			if field == 2 && i+8 <= len(b) {
+				bits := binary.LittleEndian.Uint64(b[i : i+8])
+				i += 8
+				return strconv.FormatFloat(math.Float64frombits(bits), 'g', -1, 64), nil
+			}
+			i += 8
+		case 1: // fixed32（float）
+			if field == 2 && i+4 <= len(b) {
+				bits := binary.LittleEndian.Uint32(b[i : i+4])
+				i += 4
+				return strconv.FormatFloat(float64(math.Float32frombits(bits)), 'g', -1, 32), nil
+			}
+			i += 4
+		default:
+			return "", fmt.Errorf("%w: unsupported mcp value wire %d", ErrCursorProtocol, wire)
+		}
+	}
+	// 无明确值字段（f1 null 或未设置）→ JSON null。
+	return "null", nil
 }
 
 // cursorParseEndStream 解析 EndStream 帧 payload。
@@ -635,19 +823,46 @@ func (p *cursorStreamParser) cursorSSETextChunk(text string) string {
 	return "data: " + p.cursorChunk(`"delta":{"content":`+cursorJSONString(text)+`},"finish_reason":null`) + "\n\n"
 }
 
+// cursorSSEToolCallNameChunk 返回 tool_calls 首个 delta（含 id/type/function.name）。
+func (p *cursorStreamParser) cursorSSEToolCallNameChunk(index int, tc cursorToolCallCapture) string {
+	return "data: " + `{"id":"cursor-chat","object":"chat.completion.chunk","created":0,` +
+		`"model":` + cursorJSONString(p.model) + `,` +
+		`"choices":[{"index":0,"delta":{"tool_calls":[{"index":` + strconv.Itoa(index) +
+		`,"id":` + cursorJSONString(tc.ID) + `,"type":"function","function":{"name":` +
+		cursorJSONString(tc.Name) + `,"arguments":""}}]},"finish_reason":null}]}` + "\n\n"
+}
+
+// cursorSSEToolCallArgsChunk 返回 tool_calls 的 arguments delta（一块完整 arguments）。
+func (p *cursorStreamParser) cursorSSEToolCallArgsChunk(index int, tc cursorToolCallCapture) string {
+	args := tc.ArgsJSON
+	if strings.TrimSpace(args) == "" || args == "null" {
+		args = "{}"
+	}
+	return "data: " + `{"id":"cursor-chat","object":"chat.completion.chunk","created":0,` +
+		`"model":` + cursorJSONString(p.model) + `,` +
+		`"choices":[{"index":0,"delta":{"tool_calls":[{"index":` + strconv.Itoa(index) +
+		`,"function":{"arguments":` + args + `}}]},"finish_reason":null}]}` + "\n\n"
+}
+
 // cursorSSEFinishChunk 返回收尾 chunk（**带真实 usage**）。
 //
 // usage 只可能来自 turn_ended：收到就按实测值写出（input/output/cache_read/
 // cache_write），没收到就写**显式零值**。语义是"本层没有 token 数据、计 0"，
 // 而不是"测得 0 个 token"——**绝不估算、绝不伪造**（伪造会直接污染 usage_logs
 // 的按 token 计费口径）。
+//
+// finish_reason：本轮捕获了工具委托（tool_calls）则为 "tool_calls"，否则 "stop"。
 func (p *cursorStreamParser) cursorSSEFinishChunk() string {
+	finishReason := "stop"
+	if len(p.capturedToolCalls) > 0 {
+		finishReason = "tool_calls"
+	}
 	// usage 在 **chunk 顶层**（不是 choices[0] 内）：既有 usage 提取链
 	// （parseSSEUsageBytesWithType → extractOpenAIUsageFromJSONBytes）只认顶层的
 	// `usage` 路径，塞进 choices 里会被整条丢掉、计费拿不到真实用量。
 	return "data: " + `{"id":"cursor-chat","object":"chat.completion.chunk","created":0,` +
 		`"model":` + cursorJSONString(p.model) +
-		`,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],` +
+		`,"choices":[{"index":0,"delta":{},"finish_reason":"` + finishReason + `"}],` +
 		`"usage":` + p.cursorUsageJSON() + `}` + "\n\n"
 }
 
@@ -724,11 +939,35 @@ func cursorJSONString(s string) string {
 // usage 与流式同口径：有 turn_ended 就写实测值，没有就写**显式零值**——
 // 绝非编造。零值而非省略 usage 字段是必须的：通用非流式路径要求 usage 是对象，
 // 缺失会以 `parse response: invalid json response` 拒绝整条响应。
+//
+// 本轮捕获了工具委托（tool_calls）时：assistant message 附 tool_calls 且
+// finish_reason="tool_calls"；content 为 null。否则 content=文本、finish_reason="stop"。
 func (p *cursorStreamParser) cursorBuildNonStreamingCompletion() []byte {
+	var msg string
+	finishReason := "stop"
+	if len(p.capturedToolCalls) > 0 {
+		finishReason = "tool_calls"
+		msg = `"role":"assistant","content":null,"tool_calls":[`
+		for i, tc := range p.capturedToolCalls {
+			if i > 0 {
+				msg += ","
+			}
+			args := tc.ArgsJSON
+			if strings.TrimSpace(args) == "" || args == "null" {
+				args = "{}"
+			}
+			msg += `{"id":` + cursorJSONString(tc.ID) +
+				`,"type":"function","function":{"name":` + cursorJSONString(tc.Name) +
+				`,"arguments":` + args + `}}`
+		}
+		msg += `]`
+	} else {
+		msg = `"role":"assistant","content":` + cursorJSONString(p.content)
+	}
 	out := `{"id":"cursor-chat","object":"chat.completion","created":0,` +
 		`"model":` + cursorJSONString(p.model) + `,` +
-		`"choices":[{"index":0,"message":{"role":"assistant","content":` + cursorJSONString(p.content) + `},` +
-		`"finish_reason":"stop"}],` +
+		`"choices":[{"index":0,"message":{` + msg + `},` +
+		`"finish_reason":"` + finishReason + `"}],` +
 		`"usage":` + p.cursorUsageJSON() + `}`
 	return []byte(out)
 }
