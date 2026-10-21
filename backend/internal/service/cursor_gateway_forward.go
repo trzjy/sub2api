@@ -682,7 +682,7 @@ func (s *OpenAIGatewayService) forwardCursor(
 	cursorPhaseLog(ctx, zapcore.DebugLevel, "convert_done", upstreamModel)
 	cursorPhaseLog(ctx, zapcore.InfoLevel, "agent_run_begin", upstreamModel)
 
-	resp, err := fwd.Do(ctx, &CursorUpstreamRequest{
+	fwdReq := &CursorUpstreamRequest{
 		Path: cursorPathAgentRun,
 		Body: payload,
 		// 账号级鉴权材料：转发器是进程级共享的，材料必须逐请求携带，
@@ -698,7 +698,34 @@ func (s *OpenAIGatewayService) forwardCursor(
 			"x-cursor-client-version": cursorClientVersion,
 			"x-cursor-checksum":       cursorClientChecksum(authProvider.device, time.Now()),
 		},
-	})
+	}
+
+	// ════════════════════════════════════════════════════════════════════════════
+	// O11-C1：补齐客户端上下文头（工具请求形态对齐）。
+	//
+	// 生产实测：grok-4.7 带 tools 的请求在 first_frame 后挂起无后续（request_id
+	// 74d9673a，180s 超时）；同账号同节点同 payload 字段的活体探针（17 项头）5-15s
+	// 完成工具往返。两者唯一字面差异 = 转发头——本处只发 6 项，缺客户端上下文头时
+	// 带 mcp_tools 的上游请求挂起（纯文本请求不受影响）。
+	//
+	// 下列 11 项头逐字取活体全通探针 headers()（除 x-request-id 与 x-jg-auth 已由
+	// 鉴权注入），是工具请求被上游受理的必需形态。值恒定（客户端身份/环境常量），
+	// 不依赖任何请求级上下文。既不改动既有 6 项的值、鉴权注入、payload 编码、duplex、
+	// 协议转换，也不引入请求级动态值。
+	// ════════════════════════════════════════════════════════════════════════════
+	fwdReq.Headers["x-cursor-client-type"] = "ide"
+	fwdReq.Headers["x-cursor-client-layout"] = "unifiedAgent"
+	fwdReq.Headers["x-cursor-client-os"] = "linux"
+	fwdReq.Headers["x-cursor-client-arch"] = "x64"
+	fwdReq.Headers["x-cursor-client-device-type"] = "desktop"
+	fwdReq.Headers["x-ghost-mode"] = "true"
+	fwdReq.Headers["x-new-onboarding-completed"] = "false"
+	fwdReq.Headers["x-cursor-timezone"] = "Asia/Shanghai"
+	fwdReq.Headers["x-cursor-streaming"] = "true"
+	fwdReq.Headers["x-jg-net-optimize"] = "http2"
+	fwdReq.Headers["user-agent"] = "connect-es/1.6.1"
+
+	resp, err := fwd.Do(ctx, fwdReq)
 	if err != nil {
 		return nil, err
 	}

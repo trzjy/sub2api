@@ -502,6 +502,55 @@ func TestCursorStreamRejectionUnconfirmedLeavesKeyAndAccountUntouched(t *testing
 	}
 }
 
+// TestCursorOutboundHeadersAlignToolProbe 钉死 O11-C1 修复：forwardCursor 出站头必须
+// 含活体全通探针（工具请求形态）的 11 项客户端上下文头，否则带 mcp_tools 的上游请求
+// 会挂起（生产 request_id 74d9673a：first_frame 后无后续事件，180s 超时）。
+//
+// 这 11 项头由探针 headers() 逐字对齐（除 x-request-id 与 x-jg-auth 已由鉴权注入），
+// 值恒定不依赖请求级上下文，既不改动既有 6 项的值/鉴权，也不引入动态值。
+func TestCursorOutboundHeadersAlignToolProbe(t *testing.T) {
+	// 活体全通探针的客户端上下文头（值逐字对齐，O11-C1 修法唯一清单）。
+	wantClientContextHeaders := map[string]string{
+		"x-cursor-client-type":         "ide",
+		"x-cursor-client-layout":       "unifiedAgent",
+		"x-cursor-client-os":           "linux",
+		"x-cursor-client-arch":         "x64",
+		"x-cursor-client-device-type":  "desktop",
+		"x-ghost-mode":                 "true",
+		"x-new-onboarding-completed":   "false",
+		"x-cursor-timezone":            "Asia/Shanghai",
+		"x-cursor-streaming":           "true",
+		"x-jg-net-optimize":            "http2",
+		"user-agent":                   "connect-es/1.6.1",
+	}
+
+	repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{
+		11: {ID: 11, CodeEncrypted: "ACTIVATION-CODE-ELEVEN"},
+	})
+	up := &cursorOutboundUpstream{body: cursorOKStreamBody(t)}
+	svc, c := newCursorOutboundTestService(t, up.handler(), repo, cursorTestDeviceIDs(repo))
+
+	body := []byte(`{"model":"cursor-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	_, err := svc.forwardCursor(context.Background(), c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"), body, "cursor-sonnet", false, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, 1, up.count())
+
+	captured := up.at(0).header
+	for k, want := range wantClientContextHeaders {
+		got := captured.Get(k)
+		require.Equal(t, want, got,
+			"出站头必须逐字含探针客户端上下文头 %q（工具请求形态对齐，缺则带 tools 请求挂起）", k)
+	}
+
+	// 既有 6 项的值不得被改动（鉴权注入 / 协议头恒定）。
+	require.Equal(t, "application/connect+proto", captured.Get("Content-Type"))
+	require.Equal(t, "1", captured.Get("Connect-Protocol-Version"))
+	require.Equal(t, "Bearer BEARER-ACCOUNT-A", captured.Get("Authorization"))
+	require.Equal(t, cursorClientVersion, captured.Get("x-cursor-client-version"))
+	require.NotEmpty(t, captured.Get("x-cursor-checksum"), "x-cursor-checksum 必须由设备级材料派生")
+	require.NotEmpty(t, captured.Get("x-jg-auth"), "x-jg-auth 必须仍由鉴权注入")
+}
+
 // TestCursorBridgeInboundOpenAIChatDispatchesToForwarder 钉死契约 0.1 的包级入口：
 // 未安装实例时失败关闭；入站形状不受理时失败关闭；受理后头与出站一致。
 func TestCursorBridgeInboundOpenAIChatDispatchesToForwarder(t *testing.T) {
