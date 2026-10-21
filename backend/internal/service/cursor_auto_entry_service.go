@@ -400,6 +400,14 @@ func (s *CursorAutoEntryService) ProbeKeyQuota(ctx context.Context, quotaKeyID i
 	if err != nil {
 		return nil, err
 	}
+	// lookup 成功路径：把【激活码】到期时间回写到 quota_keys.expires_at（唯一持久化事实源）。
+	// 与 refresh（B-11）共用同一 RFC3339 解析规则 parseKeyExpiresAt（同包可复用，不复制第二套解析）。
+	// 空值（上游未给出）不写——保留既有旧值，绝不伪造 / 清空任何日期。
+	if expiresAt := parseKeyExpiresAt(info.ExpiredAt); expiresAt != nil {
+		if err := s.quotaKeys.UpdateMeta(ctx, quotaKeyID, &expiresAt, nil); err != nil {
+			return nil, fmt.Errorf("cursor_auto_entry: write expires_at for key %d: %w", quotaKeyID, err)
+		}
+	}
 	snapshot := CursorKeyQuotaSnapshot{
 		Used:       info.UsedQuota,
 		Max:        info.MaxQuota,

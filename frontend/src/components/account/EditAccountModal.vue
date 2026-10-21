@@ -3224,6 +3224,7 @@
         :groups="selectableGroups"
         :platform="account?.platform"
         :mixed-scheduling="mixedScheduling"
+        :native-platforms="cursorNativePlatforms"
         data-tour="account-form-groups"
       />
 
@@ -3373,6 +3374,7 @@ import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { CURSOR_NATIVE_GROUP_PLATFORMS } from '@/constants/platforms'
 import { ACCOUNT_CURRENCY, currencySymbol } from '@/utils/money'
 import {
   OPENAI_WS_MODE_CTX_POOL,
@@ -3423,6 +3425,12 @@ const selectableGroups = computed(() => {
 // Spark 影子账号(parent_account_id 非空):代理恒继承母账号,不可独立编辑(外审 B/P1),
 // 故隐藏代理选择器。
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
+
+// cursor 账号是供给端：模型按所属原生平台进组（U7），分组选择器放行模型所属
+// 原生平台组；其他平台保持「同 platform + composite」既有规则，不放开。
+const cursorNativePlatforms = computed(() =>
+  props.account?.platform === 'cursor' ? [...CURSOR_NATIVE_GROUP_PLATFORMS] : []
+)
 
 const hideAccountLongContextBilling = computed(() => {
   return allSelectedGroupsEnableLongContextPricing(form.group_ids, props.groups)

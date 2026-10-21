@@ -67,7 +67,7 @@
           </template>
 
           <template #cell-expires_at="{ row }">
-            <span class="text-sm text-gray-500 dark:text-dark-400">{{ formatExpiresAt(row.expires_at) }}</span>
+            <span class="text-sm text-gray-500 dark:text-dark-400">{{ formatExpiresAt(row) }}</span>
           </template>
 
           <template #cell-last_refresh_error="{ row }">
@@ -245,7 +245,7 @@
             <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
               {{ t('admin.quotaKeys.detail.expiresAt') }}
             </dt>
-            <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ formatExpiresAt(detail.expires_at) }}</dd>
+            <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ formatExpiresAt(detail) }}</dd>
           </div>
           <div>
             <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
@@ -406,7 +406,7 @@
             {{ t('admin.quotaKeys.probe.expiredAt') }}
           </dt>
           <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">
-            {{ probeResult.expired_at ? formatDateTime(probeResult.expired_at) : t('admin.quotaKeys.never') }}
+            {{ probeResult.expired_at ? formatDateTime(probeResult.expired_at) : t('admin.quotaKeys.expiryUnknown') }}
           </dd>
         </div>
         <div>
@@ -533,8 +533,17 @@ function statusBadgeClass(row: QuotaKey | QuotaKeyDetail): string {
   }
 }
 
-function formatExpiresAt(value: string | null | undefined): string {
-  const r = resolveExpiryDisplay(value)
+// 到期列渲染：按整行 status + 到期值收敛语义（C-U7-B 展示收敛）。
+// - status=expired 且无时间 → "已过期"
+// - active + 有时间 → 具体日期
+// - active + 无时间 → "到期时间未知"
+// - 空串（管理员创建表单显式留空，语义为"永不过期"）仍走 never 分支
+//   注：列表/详情数据来自后端，不会是空串；never 仅保留给创建表单约定路径。
+function formatExpiresAt(row: QuotaKey | QuotaKeyDetail): string {
+  if (row.status === 'expired' && (row.expires_at === null || row.expires_at === undefined)) {
+    return t('admin.quotaKeys.status.expired')
+  }
+  const r = resolveExpiryDisplay(row.expires_at)
   if (r.status === 'unknown') return t('admin.quotaKeys.expiryUnknown')
   if (r.status === 'never') return t('admin.quotaKeys.never')
   return r.text

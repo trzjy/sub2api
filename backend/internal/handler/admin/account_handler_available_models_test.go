@@ -735,3 +735,113 @@ func TestAccountHandlerGetAvailableModels_TypeSafeOnlyReturnsJev(t *testing.T) {
 		require.Equal(t, "jev-latest", resp.Data[0].ID)
 	}
 }
+
+// TestAccountHandlerGetAvailableModels_CursorUsesOwnMapping：Cursor OAuth 账号不得落入
+// 通用 OAuth 分支返回 claude.DefaultModels——可测试模型 = 账号实际 model_mapping 的请求侧
+// 键（排序、排除通配表达式），不包装全局目录（§20.2-C）。
+func TestAccountHandlerGetAvailableModels_CursorUsesOwnMapping(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:       60,
+			Name:     "cursor-oauth",
+			Platform: service.PlatformCursor,
+			Type:     service.AccountTypeOAuth,
+			Status:   service.StatusActive,
+			Credentials: map[string]any{
+				"model_mapping": map[string]any{
+					"claude-sonnet-5-5": "claude-sonnet-5-5",
+					"muse-spark-1.3":    "muse-spark-1.3",
+					"gpt-6-sol":         "gpt-6-sol",
+				},
+			},
+		},
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/60/models", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	ids := make([]string, 0, len(resp.Data))
+	for _, m := range resp.Data {
+		ids = append(ids, m.ID)
+	}
+	// 请求侧键按排序输出，与 claude 默认目录无关。
+	require.Equal(t, []string{"claude-sonnet-5-5", "gpt-6-sol", "muse-spark-1.3"}, ids)
+	for _, id := range ids {
+		require.NotContains(t, strings.ToLower(id), "claude-3-5-sonnet", "must not fall back to claude.DefaultModels")
+	}
+}
+
+// TestAccountHandlerGetAvailableModels_CursorExcludesWildcardAndBlankKeys：通配表达式与
+// 空白键不作可测试模型返回（发往 Cursor 原生端点必被拒）。
+func TestAccountHandlerGetAvailableModels_CursorExcludesWildcardAndBlankKeys(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:       61,
+			Name:     "cursor-oauth-wildcard",
+			Platform: service.PlatformCursor,
+			Type:     service.AccountTypeOAuth,
+			Status:   service.StatusActive,
+			Credentials: map[string]any{
+				"model_mapping": map[string]any{
+					"claude-*":       "claude-*",
+					"muse-spark-1.3": "muse-spark-1.3",
+					"  ":             "blank-key",
+				},
+			},
+		},
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/61/models", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 1)
+	require.Equal(t, "muse-spark-1.3", resp.Data[0].ID)
+}
+
+// TestAccountHandlerGetAvailableModels_CursorEmptyMappingReturnsEmpty：无有效映射 → 空集
+// （下拉显示无可测试模型），绝不回落 claude.DefaultModels（与 IsModelSupported 对 cursor
+// 空映射失败关闭同契约）。
+func TestAccountHandlerGetAvailableModels_CursorEmptyMappingReturnsEmpty(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:          62,
+			Name:        "cursor-oauth-no-mapping",
+			Platform:    service.PlatformCursor,
+			Type:        service.AccountTypeOAuth,
+			Status:      service.StatusActive,
+			Credentials: map[string]any{},
+		},
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/62/models", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Empty(t, resp.Data, "cursor with no mapping must show no testable models (never claude.DefaultModels)")
+}

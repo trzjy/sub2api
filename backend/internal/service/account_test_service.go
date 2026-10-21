@@ -22,11 +22,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
@@ -468,6 +470,14 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.testOpenAIAccountConnection(c, credentialAccount, modelID, prompt, normalizeAccountTestMode(mode))
 	}
 
+	// cursor 平台：走 Cursor 原生 AgentRun 出站链（账号 Bearer + x-jg-auth，同正式转发
+	// forwardCursor 同源部件）。此前无此分支会落入下方 claude 兜底，把 Cursor 账号当
+	// Anthropic OAuth 对 api.anthropic.com 发 /v1/messages —— 出站目标与凭证形态全错
+	//（§20.2-C：不能只修测试模型列表却仍按 Anthropic OAuth 调用）。
+	if credentialAccount.Platform == PlatformCursor {
+		return s.testCursorAccountConnection(c, credentialAccount, modelID)
+	}
+
 	// 按模型分流的多模型聚合平台（OpenCode、Command Code 等）。
 	if account.routesByModel() {
 		return s.testModelRoutedAccountConnection(c, account, modelID, prompt)
@@ -698,6 +708,125 @@ func allDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// testCursorAccountConnection 对 cursor 平台账号做真实探活：请求进入 Cursor 原生
+// AgentRun 出站链（账号 Bearer + x-jg-auth，与正式转发 forwardCursor 同源部件）。
+// 此前无此分支会落入 claude 兜底，把 Cursor 账号当 Anthropic OAuth 对
+// api.anthropic.com 发 /v1/messages——出站目标与凭证形态全错（§20.2-C）。
+//
+// 模型选择与 GetAvailableModels 同口径：modelID 为空时取排序后首个映射键；请求模型必须
+// 显式命中账号 model_mapping（ResolveMappedModel matched=true），未命中失败关闭，绝不把
+// 未映射模型名发往 Cursor 原生端点白耗额度。流内出现激活码终态拒绝模板按失败返回，
+// 不冒充成功；成功判定 = AgentRun 正常文本帧解析出 completion。
+func (s *AccountTestService) testCursorAccountConnection(c *gin.Context, account *Account, modelID string) error {
+	ctx := c.Request.Context()
+	gw := s.openaiGatewayService
+	if gw == nil {
+		return s.sendErrorAndEnd(c, "cursor account test unavailable: gateway not wired")
+	}
+	fwd := gw.cursorForwarderOrDefault()
+	if fwd == nil {
+		return s.sendErrorAndEnd(c, "cursor account test unavailable: upstream forwarder not wired")
+	}
+
+	// 模型：与可测试模型列表同源（model_mapping 请求侧键，排除通配）。
+	mapping := account.GetModelMapping()
+	keys := make([]string, 0, len(mapping))
+	for requestedModel := range mapping {
+		trimmed := strings.TrimSpace(requestedModel)
+		if trimmed == "" || strings.Contains(trimmed, "*") {
+			continue
+		}
+		keys = append(keys, trimmed)
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return s.sendErrorAndEnd(c, "cursor account has no testable models (model_mapping has no concrete keys)")
+	}
+	testModelID := strings.TrimSpace(modelID)
+	if testModelID == "" {
+		testModelID = keys[0]
+	}
+	upstreamModel, matched := account.ResolveMappedModel(testModelID)
+	if !matched || strings.TrimSpace(upstreamModel) == "" {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor account does not map model %q (fail closed)", testModelID))
+	}
+
+	// 鉴权：账号 Bearer + 设备级 x-jg-auth（按账号解析，缺失即失败关闭——与正式转发同契约）。
+	bearer, err := cursorResolveAccountBearer(account)
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+	authProvider, err := newCursorAccountAuthProvider(account, gw.cursorQuotaKeys, gw.cursorQuotaKeyEnc, gw.cursorDeviceIDs)
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+
+	// 请求构造：最小 user 消息（AgentRun 已取证入口只有 user_message_action，最后一条
+	// 必须是用户消息），走与正式转发完全相同的 cursorConvertRequest 转换。
+	maxTokens := 16
+	req := &apicompat.ChatCompletionsRequest{
+		Model:     upstreamModel,
+		MaxTokens: &maxTokens,
+		Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+		},
+	}
+	payload, err := cursorConvertRequest(req, upstreamModel)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor request conversion failed: %s", err.Error()))
+	}
+
+	resp, err := fwd.Do(ctx, &CursorUpstreamRequest{
+		Path:         cursorPathAgentRun,
+		Body:         payload,
+		AuthProvider: authProvider,
+		Model:        upstreamModel,
+		Headers: map[string]string{
+			"Content-Type":             cursorConnectContentType,
+			"Connect-Protocol-Version": "1",
+			"Authorization":            "Bearer " + bearer,
+			"x-cursor-client-version":  cursorClientVersion,
+			"x-cursor-checksum":        cursorClientChecksum(authProvider.device, time.Now()),
+		},
+	})
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream request failed: %s", err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	rawBody, rerr := readCursorUpstreamBody(resp.Body, cursorUpstreamStreamMaxBytes)
+	if rerr != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream read failed: %s", rerr.Error()))
+	}
+	// 出站/响应均不回显 bearer（与 cursorExtractUpstreamErrorSummary 同脱敏口径）。
+	if resp.StatusCode != http.StatusOK {
+		code, msg := cursorExtractUpstreamErrorSummary(rawBody, bearer)
+		detail := fmt.Sprintf("cursor upstream status %d", resp.StatusCode)
+		if code != "" || msg != "" {
+			detail += fmt.Sprintf(" (%s %s)", code, msg)
+		}
+		return s.sendErrorAndEnd(c, detail)
+	}
+	if rej, rejected := cursorDetectKeyRejectedUpstream(rawBody); rejected {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor key rejected by upstream (turn %s)", rej.TurnID))
+	}
+	completion, perr := cursorParseStreamToCompletion(rawBody, testModelID, bearer)
+	if perr != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream parse failed: %s", perr.Error()))
+	}
+	if len(strings.TrimSpace(string(completion))) == 0 {
+		return s.sendErrorAndEnd(c, "cursor upstream returned no text frames")
+	}
+
+	s.sendEvent(c, TestEvent{
+		Type:  "content",
+		Model: testModelID,
+		Text:  "Cursor AgentRun probe ok",
+	})
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
 }
 
 // testModelRoutedAccountConnection probes the native endpoint for the selected

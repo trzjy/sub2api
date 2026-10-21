@@ -16,6 +16,8 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/account"
+	accountgroup "github.com/Wei-Shaw/sub2api/ent/accountgroup"
+	entgroup "github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/stretchr/testify/require"
 )
@@ -411,18 +413,27 @@ func TestReconciler_WaterLevelBelow_TriggersPullByDeficit(t *testing.T) {
 //
 // 覆盖的生产链路：wire 装配 SetModelWaterProvider → runOnce 枚举模型 → WaterLevel 判定
 // 低于阈值 → 按差额 ListCandidateKeys → pullKey → PullAccountsForModel → pull 状态机 →
-// groupResolver(findGroupsAllowingModel) → mountAccountToGroups（§13.3）。
+// cursorGroupResolver(findCursorPlatformGroups，U7) → mountAccountToGroups（§20.2-A）。
 func TestReconciler_WaterLevelTrigger_MountsPulledAccountToCoveringGroup(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 
-	// 模型名全局唯一：避免持久库中遗留的同名白名单分组把新号额外挂到旧分组。
-	modelM := fix1UniqueModel("cursor-fix1-f2")
-	grp := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
-	// 不覆盖 M 的分组：不得被挂入。
+	// U7（§20.2-A）：挂载按账号模型能力（静态实供清单）判定。grp = composite 聚合组、
+	// 白名单覆盖实供模型 gpt-6-sol → 新号挂入；modelM 仅作触发上下文（不收窄挂载）。
+	modelM := "gpt-6-sol"
+	grp := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
+	// 不覆盖任何实供模型的分组：不得被挂入。
 	other := mustCreateGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{fix1UniqueModel("cursor-fix1-f2-other")},
+	})
+	// R10-1（CUR-F13）：本用例自建分组按 ID 清理，避免覆盖实供模型的启用组污染他用例。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		for _, gid := range []int64{grp.ID, other.ID} {
+			_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(gid)).Exec(cctx)
+			_, _ = client.Group.Delete().Where(entgroup.IDEQ(gid)).Exec(cctx)
+		}
 	})
 
 	// 拉号走真实服务（上游替身发 1 个号），等价于生产装配下的 *QuotaKeyService。

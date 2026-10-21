@@ -72,10 +72,15 @@ interface Props {
   groups: (Group & { account_count?: number })[]
   platform?: GroupPlatform // Optional platform filter
   mixedScheduling?: boolean // For antigravity accounts: allow anthropic/gemini groups
+  // 额外放行的原生平台集合（可选）。仅多模型供给平台需要（当前 cursor：账号是供给端，
+  // 模型按所属原生平台进组，U7）——传入后可选中这些平台的分组；不传时保持
+  // 「同 platform + composite」的既有规则，不全局放开跨平台绑定。
+  nativePlatforms?: GroupPlatform[]
   searchable?: boolean | 'auto'
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  nativePlatforms: () => [],
   searchable: 'auto'
 })
 const emit = defineEmits<{
@@ -101,9 +106,28 @@ const filteredGroups = computed(() => {
         (g) => g.platform === 'antigravity' || g.platform === 'anthropic' || g.platform === 'gemini' || g.platform === 'composite'
       )
     } else {
-      // 默认：只能选择同 platform 的分组；composite 分组可接收任意具体平台账号
-      result = result.filter((g) => g.platform === props.platform || g.platform === 'composite')
+      // 默认：只能选择同 platform 的分组；composite 分组可接收任意具体平台账号；
+      // nativePlatforms 按调用方声明放行（多模型供给平台按模型所属原生平台选组，U7）。
+      result = result.filter(
+        (g) =>
+          g.platform === props.platform ||
+          g.platform === 'composite' ||
+          props.nativePlatforms.includes(g.platform)
+      )
     }
+  }
+  // 已绑定组恒可见：无论平台过滤结果如何，当前已选中且存在于 groups 的分组必须显示，
+  // 否则用户看不到既有绑定、无法保留或显式取消（不能因列表过滤隐式丢组）。
+  // simple mode 下 composite 的隐藏/清理是既有规则，保持不变（不补回）。
+  const visible = new Set(result.map((g) => g.id))
+  const boundButHidden = props.groups.filter(
+    (g) =>
+      props.modelValue.includes(g.id) &&
+      !visible.has(g.id) &&
+      !(authStore.isSimpleMode && g.platform === 'composite')
+  )
+  if (boundButHidden.length > 0) {
+    result = [...result, ...boundButHidden]
   }
   if (isSearchable.value && searchText.value) {
     const q = searchText.value.toLowerCase()

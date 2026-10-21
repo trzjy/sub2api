@@ -70,7 +70,15 @@ type QuotaKeyRepository interface {
 	// 判定下沉到 UPDATE 的 WHERE 条件，由 DB 原子裁决，多个并发首次请求中只有一个
 	// 能写入，其余拿到 0 行后重读赢家值，避免同一激活码分裂出两份 deviceId。
 	// 判定口径（NULL 或空串）须与 service 侧 DeviceIDFor 的读判定逐字一致。
+	// 注意：本方法走全局连接池，供"非拉号事务"路径（出站鉴权、admin 读取后写入）使用。
 	SetDeviceIDIfAbsent(ctx context.Context, id int64, deviceID string) (int, error)
+	// SetDeviceIDIfAbsentTx 与 SetDeviceIDIfAbsent 同语义，但写入在调用方已开启的事务
+	// 内完成（复用同一连接/同一行锁）。**首次拉号必须走本方法**：pull 容量事务已对
+	// quota_keys 行 FOR UPDATE 持有行锁，若在该事务内改走全局连接 SetDeviceIDIfAbsent，
+	// 会在另一连接上 UPDATE 同一行、等待本事务自身持有的锁 → 应用层自死锁
+	//（新码自动补池首写 device_id 时触发，2026-10-21 实测）。事务内条件写由 DB
+	// 原子裁决并发，语义与全局版本完全一致。
+	SetDeviceIDIfAbsentTx(ctx context.Context, tx *ent.Tx, id int64, deviceID string) (int, error)
 }
 
 // QuotaKeyUpstreamClient 抽象"向上游拉取账号"的客户端。
@@ -230,21 +238,18 @@ type QuotaKeyService struct {
 	enc      QuotaKeyEncryptor
 	upstream QuotaKeyUpstreamClient
 	client   *ent.Client
-	// groupResolver 解析"白名单含模型 M"的全部分组 ID（§13.3 挂载事实源）。
-	// 生产默认走 findGroupsAllowingModel；测试可替换以注入挂载失败等边界。
-	groupResolver func(ctx context.Context, tx *ent.Tx, modelM string) ([]int64, error)
-
-	// cursorGroupResolver 解析 B1 手动挂载目标分组 ID（B1 事实源）。用于手动入口
-	// RefreshAccounts：手动刷新不携带模型上下文，挂载目标 = 【配置勾选模型集合】∩【分组
-	// 白名单覆盖】的交集（findCursorPlatformGroups 裁定 1 口径），与自动链路 ListAllowedModels
-	// 同源同判。勾选空 → ErrQuotaKeyModelNoCoverage 失败关闭。
+	// cursorGroupResolver 解析挂载目标分组 ID（U7 挂载事实源，§20.2-A）。同时服务两个入口：
+	// 手动 RefreshAccounts 与自动补池 PullAccountsForModel（reconciler）——两者同源同判，
+	// 挂载目标 = 【静态实供清单 CursorStaticEntryModels】∩【模型所属平台的目标分组】∩【白名单
+	// 实际覆盖】（findCursorPlatformGroups → cursorMountTargetGroups U7 口径：模型真实厂商
+	// 原生平台组 ∪ cursor 专属 ∪ composite，allow-all（无对应模型）不挂）。
+	// 零目标组 → ErrQuotaKeyModelNoCoverage 失败关闭（号不入库）。
 	// 生产默认走 findCursorPlatformGroups；测试可替换以注入边界。
-	// 注意：该解析器不计模型，与 groupResolver(modelM) 是两个独立的 seam。
 	cursorGroupResolver func(ctx context.Context, tx *ent.Tx) ([]int64, error)
 
 	// insertFailureMarkerWriter 是 R5-1 插入失败后"独立事务补写 last_refresh_error 标记"
 	// 的可替换执行点（与生产默认 writeInsertFailureMarker 同签名）。测试可替换以注入
-	// 标记写失败（R5-1 b：仅本轮哨兵停轮的边界），与生产 groupResolver 同一类测试 seams。
+	// 标记写失败（R5-1 b：仅本轮哨兵停轮的边界），与生产 cursorGroupResolver 同一类测试 seams。
 	insertFailureMarkerWriter func(ctx context.Context, quotaKeyID int64, cause error) error
 
 	// reconciler 是软删后水位快路径唤醒目标（C12-v2）。通过 SetReconciler 注入（wire 装配），
@@ -305,7 +310,6 @@ func NewQuotaKeyService(repo QuotaKeyRepository, enc QuotaKeyEncryptor, upstream
 		upstream = NotConnectedUpstreamClient{}
 	}
 	s := &QuotaKeyService{repo: repo, enc: enc, upstream: upstream, client: client}
-	s.groupResolver = s.findGroupsAllowingModel
 	s.cursorGroupResolver = s.findCursorPlatformGroups
 	s.insertFailureMarkerWriter = s.writeInsertFailureMarker
 	// P1-B4 设备同源闭环：真实拉号客户端需要反查本服务才能分流"存量派生值 / DeviceIDFor"，
@@ -632,25 +636,28 @@ func (s *QuotaKeyService) PullAccounts(ctx context.Context, quotaKeyID int64) er
 	return s.pull(ctx, quotaKeyID, nil, false)
 }
 
-// PullAccountsForModel 携带模型 M 上下文的拉号入口（§13.2 触发方传入 / §13.3 挂载）。
-// 成功拉号后，新号在落库事务提交前自动挂入"白名单含 M"的全部分组；M 无覆盖则失败关闭
-// （回滚、不落裸号）。其内部复用与 PullAccounts 完全相同的 pull 状态机（同一 advisory
-// 互斥域 + 同一事务 + ≤15 强制），不另造第二拉号机制。
+// PullAccountsForModel 携带模型 M 上下文的拉号入口（§13.2 触发方传入 / §20.2-A 挂载）。
+// 成功拉号后，新号在落库事务提交前挂入 U7 目标分组（与手动 RefreshAccounts 同源同判：
+// cursorMountTargetGroups 按模型真实厂商原生平台 ∪ cursor 专属 ∪ composite，白名单启用且
+// 实际覆盖；allow-all（无对应模型）聚合/福利组不挂）；零目标组失败关闭（回滚、不落裸号）。
+// modelM 仅作为 reconciler 水位/触发上下文保留，不再收窄挂载——挂载按账号模型能力
+// （全量静态实供清单）计算（U7：模型按所属原生平台进组，§20.2-A）。
+// 其内部复用与 PullAccounts 完全相同的 pull 状态机（同一 advisory 互斥域 + 同一事务 +
+// ≤15 强制），不另造第二拉号机制。
 func (s *QuotaKeyService) PullAccountsForModel(ctx context.Context, quotaKeyID int64, modelM string) error {
-	// 挂载解析器：以 modelM 调 groupResolver，复用既有 §13.3 挂载事实源与测试 seam。
-	return s.pull(ctx, quotaKeyID, func(ctx context.Context, tx *ent.Tx) ([]int64, error) {
-		return s.groupResolver(ctx, tx, modelM)
-	}, false)
+	// 挂载解析器：自动补池与手动挂组同源同判（cursorGroupResolver，U7 唯一判定出口）。
+	_ = modelM // 模型上下文仅作触发语义保留；挂载目标按账号能力全量计算（§20.2-A）。
+	return s.pull(ctx, quotaKeyID, s.cursorGroupResolver, false)
 }
 
-// RefreshAccounts 手动触发拉号（§4.4），与 PullAccounts 共享同一 advisory 互斥域。
+// RefreshAccounts 手动触发拉号（§4.4），与 PullAccountsForModel 共享同一 advisory 互斥域。
 //
-// 与 PullAccounts 的唯一差异（B1 缺陷修复，2026-10-15）：手动入口【走挂载语义】。手动刷新
-// 不携带模型上下文，挂载目标 = 配置勾选模型 ∩ 现有活跃分组白名单的交集（findCursorPlatformGroups，
-// 与自动链路 ListAllowedModels 同源同判）。这样手动拉到的 cursor 账号会挂入白名单分组
-// （group_count>0、可用），而非落成裸号（group_count=0）。勾选空 → ErrQuotaKeyModelNoCoverage
-// 失败关闭。
-// PullAccounts(reconciler 内部) 保持 mountResolver=nil、不挂载——两入口行为差异在此显式区分。
+// 手动入口【走挂载语义】：挂载目标 = U7 目标分组（findCursorPlatformGroups →
+// cursorMountTargetGroups：模型真实厂商原生平台组 ∪ cursor 专属 ∪ composite，白名单启用且
+// 覆盖静态实供模型；allow-all 不挂）。与自动补池 PullAccountsForModel 同源同判（§20.2-A）。
+// 这样拉到的 cursor 账号会挂入目标分组（group_count>0、可用），而非落成裸号
+// （group_count=0）。零目标组 → ErrQuotaKeyModelNoCoverage 失败关闭。
+// PullAccounts(2 参，reconciler 历史内部入口) 保持 mountResolver=nil、不挂载——行为差异在此显式区分。
 func (s *QuotaKeyService) RefreshAccounts(ctx context.Context, quotaKeyID int64) error {
 	return s.pull(ctx, quotaKeyID, s.cursorGroupResolver, true)
 }
@@ -691,6 +698,28 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		}
 		if qk2.Status != domain.QuotaKeyStatusActive || isExpired(qk2) {
 			return nil
+		}
+
+		// 事务内 device_id 先行持久化（死锁修复，§20.6，2026-10-21）：
+		// PullBatch 的 resolveDeviceID 分支③（新码无账号、未持久化）会经
+		// DeviceIDFor → SetDeviceIDIfAbsent（全局连接）写入 device_id——但本容量事务
+		// 已对 quota_keys 行 FOR UPDATE 持有行锁，全局连接更新同一行会等待本事务
+		// 自身持有的锁 → 应用层自死锁（f6 实测）。此处把首次写入下沉到本事务：
+		// 若 qk2.DeviceID 为空且 HasAccount==false（新码），在本事务内生成并写
+		// device_id；PullBatch 的分支①直接读到已持久化值，不再触发全局连接写入。
+		// 语义保持：已有 device_id 原样复用、存量派生值不迁移、新码只生成一份稳定值、
+		// 并发首次由事务内条件更新（SetDeviceIDIfAbsentTx WHERE 原子裁决）保证、
+		// lookup/refresh/activate/出站继续用同一 device_id（出站经 DeviceIDFor 读同值）。
+		if qk2.DeviceID == nil || *qk2.DeviceID == "" {
+			has, hasErr := s.HasAccount(ctx, quotaKeyID)
+			if hasErr != nil {
+				return fmt.Errorf("quota_key_service: resolve account before device persist: %w", hasErr)
+			}
+			if !has {
+				if err := s.ensureDeviceIDInPullTx(ctx, tx, quotaKeyID, qk2); err != nil {
+					return err
+				}
+			}
 		}
 
 		// 发上游。
@@ -1223,39 +1252,6 @@ func credentialsHMACOfJSON(canonical []byte) string {
 	return hex.EncodeToString(sum.Sum(nil))
 }
 
-// findGroupsAllowingModel 是 §13.3 挂载事实源：返回"白名单含模型 M"的全部分组 ID。
-// 白名单事实源 = 既有分组模型白名单（domain.GroupModelAllowlist），不新造映射表；
-// 复用 service.GroupModelAllowlist.Allows 的既有通配/前缀匹配语义。仅取未软删分组。
-func (s *QuotaKeyService) findGroupsAllowingModel(ctx context.Context, tx *ent.Tx, modelM string) ([]int64, error) {
-	// R1-2：与枚举/水位（ListAllowedModels / WaterLevel）共用同一挂组门槛——
-	// 仅 active + 未软删分组参与白名单判定。判定逻辑本身（GroupModelAllowlistFromDomain
-	// 的 Allows）保持不变；仅补齐与枚举/水位对齐的过滤条件，避免 disabled/软删分组仍被
-	// 当成"含 M 的覆盖组"导致新号误挂（findCursorPlatformGroups 已有同条件，不用动）。
-	groups, err := tx.Group.Query().
-		Where(
-			group.Status(domain.StatusActive),
-			group.DeletedAtIsNil(),
-		).
-		All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("quota_key_service: query groups: %w", err)
-	}
-	out := make([]int64, 0, len(groups))
-	for _, g := range groups {
-		if GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows(modelM) {
-			out = append(out, g.ID)
-		}
-	}
-	return out, nil
-}
-
-// cursorModelOwningPlatform 是 cursor 实供清单模型的【所属平台】。
-//
-// 判定依据：实供清单模型由 cursor 平台账号经 credentials.model_mapping 供给，composite 归属层
-// （resolveCompositeModelOwnership）亦按"账号平台"判定模型归属 → 清单模型恒归 cursor 平台。
-// P1-B2「按模型平台挂组」以此为挂载判据，取代此前"配置勾选模型 ∩ 白名单"的人工勾选口径。
-const cursorModelOwningPlatform = PlatformCursor
-
 // cursorModelPlatformByVendor 把实供清单的真实厂商映射到站点的模型所属平台（U7 挂组判据）。
 //
 // U7 原话："入库按照模型平台入库，比如 claude 模型就入库到 claude 分组去"——挂载平台取
@@ -1394,6 +1390,45 @@ func (s *QuotaKeyService) HasAccount(ctx context.Context, quotaKeyID int64) (boo
 		return false, fmt.Errorf("quota_key_service: list accounts by quota key: %w", err)
 	}
 	return len(accs) > 0, nil
+}
+
+// ensureDeviceIDInPullTx 在拉号容量事务内为新码首次生成并持久化 device_id（死锁修复，
+// §20.6，2026-10-21）。只在调用方已确认：qk2.DeviceID 为空 且 HasAccount==false
+// （新码、未持久化）时调用。
+//
+// 语义与 DeviceIDFor 的首次路径逐字对齐，差异仅是写入走 tx（事务内 SetDeviceIDIfAbsentTx，
+// 复用本事务已持有的 quota_keys 行锁）而非全局连接——因此不会出现"事务持行锁 +
+// 全局连接更新同一行"的自死锁。并发首次由 DB 条件更新原子裁决（命中 1 才写，
+// 0 行表示已有并发写入），重复调用天然幂等。
+//
+// 返回的 deviceID 会就地回填到调用方持有的 qk2（内存态），使 PullBatch 的
+// resolveDeviceID 分支①直接读到已持久化值，不再触发全局连接写入。
+func (s *QuotaKeyService) ensureDeviceIDInPullTx(ctx context.Context, tx *ent.Tx, quotaKeyID int64, qk *ent.QuotaKey) error {
+	candidate, err := GenerateCursorDeviceID()
+	if err != nil {
+		return fmt.Errorf("quota_key_service: generate device id in pull tx: %w", err)
+	}
+	written, err := s.repo.SetDeviceIDIfAbsentTx(ctx, tx, quotaKeyID, candidate)
+	if err != nil {
+		return fmt.Errorf("quota_key_service: persist device id in pull tx: %w", err)
+	}
+	if written == 0 {
+		// 已有并发请求在本事务外抢先写入（条件不满足）。事务内重读拿到赢家值，
+		// 与 DeviceIDFor 的竞态分支同语义（绝不返回本请求候选值，避免两份 deviceId）。
+		settled, err := tx.QuotaKey.Get(ctx, quotaKeyID)
+		if err != nil {
+			return fmt.Errorf("quota_key_service: reload quota key after device race: %w", err)
+		}
+		if settled.DeviceID == nil || *settled.DeviceID == "" {
+			return fmt.Errorf("%w: quota key %d device id still unset after conditional write", ErrCursorDeviceIDUnavailable, quotaKeyID)
+		}
+		qk.DeviceID = settled.DeviceID
+		return nil
+	}
+	// 事务内写入成功：就地回填 qk（PullBatch 分支①读到已持久化值），由本事务提交。
+	dev := candidate
+	qk.DeviceID = &dev
+	return nil
 }
 
 // quotaKeyToStatus 将 ent 实体映射为脱敏 DTO。

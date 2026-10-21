@@ -159,3 +159,83 @@ describe('QuotaKeysView 两层额度语义（P1-B3）', () => {
     wrapper.unmount()
   })
 })
+
+// ---------------------------------------------------------------------------
+// C-U7-B 到期时间展示收敛：到期列 + 探测弹窗的语义锁死。
+// 本用例使用 t 的 mock（返回 key 本身），故断言针对 i18n key 与格式化字符串分支。
+// ---------------------------------------------------------------------------
+
+describe('QuotaKeysView 到期时间展示收敛（C-U7-B）', () => {
+  beforeEach(() => {
+    vi.mocked(adminAPI.quotaKeys.list).mockReset()
+    vi.mocked(adminAPI.quotaKeys.get).mockReset()
+    vi.mocked(adminAPI.quotaKeys.probeQuota).mockReset()
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue({
+      items: [keyRow],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    } as never)
+    vi.mocked(adminAPI.quotaKeys.get).mockResolvedValue(keyDetail as never)
+  })
+
+  it('status=expired 且无到期时间 → "已过期"', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      formatExpiresAt: (row: { status: string; expires_at: string | null }) => string
+    }
+    const out = vm.formatExpiresAt({ status: 'expired', expires_at: null })
+    expect(out).toBe('admin.quotaKeys.status.expired')
+    wrapper.unmount()
+  })
+
+  it('status=active 且无到期时间 → "到期时间未知"', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      formatExpiresAt: (row: { status: string; expires_at: string | null }) => string
+    }
+    const out = vm.formatExpiresAt({ status: 'active', expires_at: null })
+    expect(out).toBe('admin.quotaKeys.expiryUnknown')
+    wrapper.unmount()
+  })
+
+  it('status=active 且有期限 → 返回具体日期字符串（非 unknown/never key）', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      formatExpiresAt: (row: { status: string; expires_at: string | null }) => string
+    }
+    const out = vm.formatExpiresAt({ status: 'active', expires_at: '2026-12-31T00:00:00Z' })
+    expect(out).not.toBe('admin.quotaKeys.expiryUnknown')
+    expect(out).not.toBe('admin.quotaKeys.never')
+    expect(out).not.toBe('admin.quotaKeys.status.expired')
+    expect(out.length).toBeGreaterThan(0)
+    wrapper.unmount()
+  })
+
+  it('探测弹窗空值不再显示"永不过期"（改显示"到期时间未知"）', async () => {
+    vi.mocked(adminAPI.quotaKeys.probeQuota).mockResolvedValue({
+      ...keyQuota,
+      expired_at: null
+    } as never)
+
+    const wrapper = mountView()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      handleProbe: (row: typeof keyRow) => Promise<void>
+    }
+    await vm.handleProbe(keyRow)
+    await flushPromises()
+    await nextTick()
+
+    const text = wrapper.text()
+    // 空值必须映射到"到期时间未知"文案。
+    expect(text).toContain('admin.quotaKeys.expiryUnknown')
+    // 绝不再渲染"永不过期"。
+    expect(text).not.toContain('admin.quotaKeys.never')
+    wrapper.unmount()
+  })
+})

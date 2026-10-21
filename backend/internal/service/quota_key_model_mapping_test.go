@@ -219,8 +219,11 @@ func TestQuotaKeyPullForModel_ModelMapping_SingleConfigSnapshot(t *testing.T) {
 	ctx := context.Background()
 
 	modelM := "gpt-6-sol"
+	// U7（§20.2-A）：挂载目标 = 模型所属平台的目标分组（生产形态为 composite 聚合组，
+	// 白名单覆盖实供模型 gpt-6-sol）。
 	grp, err := client.Group.Create().
 		SetName(fmt.Sprintf("cursor-map-auto-%d", time.Now().UnixNano())).
+		SetPlatform(domain.PlatformComposite).
 		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}}).
 		Save(ctx)
 	require.NoError(t, err)
@@ -281,10 +284,12 @@ func TestQuotaKeyPull_NoAutoEntry_NoMappingFailClosed(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 
-	modelM := fix1UniqueModel("cursor-map-nil")
+	// U7（§20.2-A）：挂载按账号模型能力（静态实供清单）判定，用实供模型 + composite
+	// 聚合组保证挂载成功（本用例只断言"不写映射"，挂载集合与本断言无关）。
 	grp, err := client.Group.Create().
 		SetName(fmt.Sprintf("cursor-map-nil-%d", time.Now().UnixNano())).
-		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}}).
+		SetPlatform(domain.PlatformComposite).
+		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-6-sol"}}).
 		Save(ctx)
 	require.NoError(t, err)
 	t.Cleanup(func() { cleanupCursorMappingGroup(t, client, grp.ID) })
@@ -294,7 +299,7 @@ func TestQuotaKeyPull_NoAutoEntry_NoMappingFailClosed(t *testing.T) {
 	})
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
 
-	require.NoError(t, svc.PullAccountsForModel(ctx, qk.ID, modelM))
+	require.NoError(t, svc.PullAccountsForModel(ctx, qk.ID, "gpt-6-sol"))
 
 	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).All(ctx)
 	require.NoError(t, err)
@@ -302,5 +307,5 @@ func TestQuotaKeyPull_NoAutoEntry_NoMappingFailClosed(t *testing.T) {
 	_, ok := accs[0].Credentials["model_mapping"]
 	require.False(t, ok, "unwired autoEntry must not write model_mapping")
 	gw := &Account{Platform: domain.PlatformCursor, Credentials: accs[0].Credentials}
-	require.False(t, gw.IsModelSupported(modelM), "unmapped cursor account must fail closed")
+	require.False(t, gw.IsModelSupported("gpt-6-sol"), "unmapped cursor account must fail closed")
 }

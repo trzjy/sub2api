@@ -68,6 +68,25 @@ export const COMPOSITE_TARGET_PLATFORM_OPTIONS = CONCRETE_PLATFORM_OPTIONS.filte
  */
 export const INTERNAL_SUPPLY_PLATFORMS: readonly string[] = ['codebuddy', 'muse', 'cursor']
 
+/**
+ * cursor 账号可挂载的原生平台集合（U7 挂组判据的前端镜像）。
+ *
+ * cursor 是账号供给平台：账号实供模型按【模型真实厂商】进对应站点原生平台组
+ * （后端唯一判定出口 = backend/internal/service/quota_key_service.go 的
+ * cursorModelPlatformByVendor：anthropic/openai/google→gemini/xai→grok/muse；
+ * composer 无对应站点平台不参与匹配）。本清单只用于账号编辑/创建弹窗的分组
+ * 选择器放行（GroupSelector nativePlatforms），与后端输出集合同构——实供清单
+ * 变更（增删厂商）时须与后端 cursorModelPlatformByVendor 同步更新。
+ * 平台值取仓库既有 GroupPlatform 定义，不引入 vendor 字符串（xai/google 等）。
+ */
+export const CURSOR_NATIVE_GROUP_PLATFORMS: readonly GroupPlatform[] = [
+  'anthropic',
+  'openai',
+  'gemini',
+  'grok',
+  'muse'
+]
+
 const isInternalSupplyPlatform = (value: string): boolean =>
   (INTERNAL_SUPPLY_PLATFORMS as readonly string[]).includes(value)
 

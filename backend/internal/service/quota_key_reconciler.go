@@ -30,12 +30,13 @@ const (
 
 // quotaKeyPuller 是 reconciler 拉号依赖的窄面（仅为测试替身而存在，接口最小化）。
 // 直接落到 QuotaKeyService：PullAccounts（2 参，无模型上下文）/ PullAccountsForModel
-// （携带模型 M 上下文，触发 §13.3 分组挂载）。二者内部均持 advisory xact lock +
+// （携带模型 M 上下文，触发 U7 分组挂载，§20.2-A）。二者内部均持 advisory xact lock +
 // FOR UPDATE + 计数停限 + 拉号，working 满 15 即早退；reconciler 不新造计数查询/不新造锁。
 type quotaKeyPuller interface {
 	PullAccounts(ctx context.Context, quotaKeyID int64) error
 	// PullAccountsForModel 携带模型 M 上下文拉号（F2）：水位不足触发补池时由 reconciler
-	// 调用，新号在落库事务提交前挂入白名单含 M 的全部分组。
+	// 调用，新号在落库事务提交前挂入 U7 目标分组（与手动挂组同源同判；modelM 仅作
+	// 水位/触发上下文，挂载按账号模型能力全量计算，§20.2-A）。
 	PullAccountsForModel(ctx context.Context, quotaKeyID int64, modelM string) error
 }
 

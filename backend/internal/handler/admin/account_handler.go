@@ -3452,6 +3452,30 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		return
 	}
 
+	// Cursor 账号：模型完全来自账号 model_mapping（IsModelSupported 对 cursor 空映射失败
+	// 关闭，与 other/muse 同契约）。请求侧模型名 = mapping 的键；排除通配键（不把通配表达式
+	// 当可测试模型发往 Cursor 原生端点）；无有效映射返回空集——绝不回落 claude.DefaultModels
+	//（否则会把通用 Claude 目录误显示为该账号可测模型，实测误导），也绝不把全局上游目录
+	// 包装成"该账号全部模型已验活"（§20.2-C）。
+	if account.Platform == service.PlatformCursor {
+		mapping := account.GetModelMapping()
+		models := make([]claude.Model, 0, len(mapping))
+		keys := make([]string, 0, len(mapping))
+		for requestedModel := range mapping {
+			trimmed := strings.TrimSpace(requestedModel)
+			if trimmed == "" || strings.Contains(trimmed, "*") {
+				continue // 空键 / 通配表达式不作可测试模型
+			}
+			keys = append(keys, trimmed)
+		}
+		sort.Strings(keys)
+		for _, id := range keys {
+			models = append(models, claude.Model{ID: id, Type: "model", DisplayName: id})
+		}
+		response.Success(c, models)
+		return
+	}
+
 	// Handle OpenAI accounts
 	if account.IsOpenAI() {
 		// Prefer the shared, account-keyed upstream catalog. If discovery fails,

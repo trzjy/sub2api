@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	entgroup "github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/stretchr/testify/require"
 )
@@ -109,33 +110,45 @@ func TestCURF4_PullAccountsForModel_UnknownSurfacesBlockedSentinel(t *testing.T)
 // R1-2：挂组门槛与枚举/水位对齐（active + 未软删）。
 // ---------------------------------------------------------------------------
 
-func TestCURF4_FindGroupsAllowingModel_ExcludesNonActiveOrSoftDeleted(t *testing.T) {
+// TestCURF4_FindCursorPlatformGroups_ExcludesNonActiveOrSoftDeleted：挂载解析器
+// （findCursorPlatformGroups，U7 唯一判定出口）只取 active + 未软删分组；disabled/软删
+// 分组不得被当成目标组导致新号误挂（§20.2-A 后该语义由 cursorGroupResolver 承担）。
+func TestCURF4_FindCursorPlatformGroups_ExcludesNonActiveOrSoftDeleted(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	modelM := "cursor-claude-opus-4"
+	// U7（§20.2-A）：挂载按账号模型能力（静态实供清单）判定，用实供模型构造覆盖组。
+	modelM := "claude-opus-5-5"
 
-	// 分组 A：active + 白名单含 M（应入选）。
-	grpA := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// 分组 A：active + 白名单含实供模型（应入选）。
+	grpA := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{modelM},
 	})
-	// 分组 B：disabled + 白名单含 M（不应入选）。
-	grpB := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// 分组 B：disabled + 白名单含实供模型（不应入选）。
+	grpB := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{modelM},
 	})
 	require.NoError(t, client.Group.UpdateOneID(grpB.ID).SetStatus(domain.StatusDisabled).Exec(ctx))
-	// 分组 C：软删 + 白名单含 M（不应入选）。
-	grpC := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// 分组 C：软删 + 白名单含实供模型（不应入选）。
+	grpC := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{modelM},
 	})
 	require.NoError(t, client.Group.UpdateOneID(grpC.ID).SetDeletedAt(time.Now()).Exec(ctx))
 
-	// 分组 D：active 但白名单不含 M（不应入选，白名单判定不变）。
-	grpD := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// 分组 D：active 但白名单不含实供模型（不应入选，白名单判定不变）。
+	grpD := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{"other-model"},
+	})
+	// R10-1（CUR-F13）：按 ID 清理本用例自建分组，避免残留共享库污染他用例
+	//（覆盖实供模型的启用组会使零覆盖/全等断言用例失败）。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		for _, gid := range []int64{grpA.ID, grpB.ID, grpC.ID, grpD.ID} {
+			_, _ = client.Group.Delete().Where(entgroup.IDEQ(gid)).Exec(cctx)
+		}
 	})
 
 	tx, err := client.Tx(ctx)
@@ -143,7 +156,7 @@ func TestCURF4_FindGroupsAllowingModel_ExcludesNonActiveOrSoftDeleted(t *testing
 	defer tx.Rollback()
 
 	svc, _ := qkNewTestService(t, &fakeUpstreamClient{})
-	ids, err := svc.findGroupsAllowingModel(ctx, tx, modelM)
+	ids, err := svc.findCursorPlatformGroups(ctx, tx)
 	require.NoError(t, err)
 
 	require.Contains(t, ids, grpA.ID, "active+allowlist group must be in the mount set")

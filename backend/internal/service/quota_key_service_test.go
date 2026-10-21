@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -533,6 +534,21 @@ func (f *fakeQuotaKeyRepo) SetDeviceIDIfAbsent(_ context.Context, id int64, devi
 	return 1, nil
 }
 
+// SetDeviceIDIfAbsentTx 内存替身的事务内版本：与 SetDeviceIDIfAbsent 同语义同条件写。
+// 内存替身无真实事务/连接，tx 仅占位（测试不依赖事务边界），判定与 production 一致
+// （NULL 或空串才写，命中 1 / 已被并发写入则 0）。
+func (f *fakeQuotaKeyRepo) SetDeviceIDIfAbsentTx(_ context.Context, _ *ent.Tx, id int64, deviceID string) (int, error) {
+	qk, ok := f.byID[id]
+	if !ok {
+		return 0, errQuotaKeyNotFound
+	}
+	if qk.DeviceID != nil && *qk.DeviceID != "" {
+		return 0, nil
+	}
+	qk.DeviceID = &deviceID
+	return 1, nil
+}
+
 // MarkExpiredIfStillExpired 真实 DB 替身：与 production repository 同语义的条件化写入。
 func (r *testDBRepo) MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, id int64, now time.Time) (int, error) {
 	return tx.QuotaKey.Update().
@@ -548,6 +564,15 @@ func (r *testDBRepo) ListByStatus(ctx context.Context, status string) ([]*ent.Qu
 // SetDeviceIDIfAbsent 真实 DB 替身：与 production repository 同语义的条件化写入。
 func (r *testDBRepo) SetDeviceIDIfAbsent(ctx context.Context, id int64, deviceID string) (int, error) {
 	return r.client.QuotaKey.Update().
+		Where(quotakey.ID(id), quotakey.Or(quotakey.DeviceIDIsNil(), quotakey.DeviceIDEQ(""))).
+		SetDeviceID(deviceID).
+		Save(ctx)
+}
+
+// SetDeviceIDIfAbsentTx 真实 DB 替身：事务内条件化写入（与 production 同语义，
+// 复用事务连接，避免持行锁后全局连接更新同一行导致自死锁，§20.6）。
+func (r *testDBRepo) SetDeviceIDIfAbsentTx(ctx context.Context, tx *ent.Tx, id int64, deviceID string) (int, error) {
+	return tx.QuotaKey.Update().
 		Where(quotakey.ID(id), quotakey.Or(quotakey.DeviceIDIsNil(), quotakey.DeviceIDEQ(""))).
 		SetDeviceID(deviceID).
 		Save(ctx)
@@ -1330,17 +1355,21 @@ func accountGroupLinked(t *testing.T, ctx context.Context, client *ent.Client, a
 	return ok
 }
 
-// TestQuotaKeyPullForModel_MountsToCoveringGroups：新号在落库事务提交前自动挂入
-// "白名单含 M"的全部分组；不挂入非覆盖分组（§13.3）。
+// TestQuotaKeyService_PullForModel_MountsToCoveringGroups：自动补池（PullAccountsForModel）
+// 与手动挂组同源同判（§20.2-A）：新号在落库事务提交前挂入 U7 目标分组（模型真实厂商
+// 原生平台组 ∪ cursor 专属 ∪ composite，白名单启用且覆盖静态实供模型）；allow-all
+// （enabled=false，无对应模型）与非目标平台组不挂。
 func TestQuotaKeyService_PullForModel_MountsToCoveringGroups(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	modelM := "cursor-claude-opus-4"
-	grp := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// U7（§20.2-A）：挂载按账号模型能力（静态实供清单）计算，modelM 不再收窄挂载。
+	// grp：cursor 平台组、白名单启用且覆盖实供模型 claude-opus-5-5 → 挂。
+	modelM := "claude-opus-5-5"
+	grp := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{modelM},
 	})
-	// 不覆盖 M 的分组，不应被挂入。
+	// 不覆盖任何实供模型的分组，不应被挂入。
 	other := mustCreateGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{"some-other-model"},
@@ -1372,6 +1401,68 @@ func TestQuotaKeyService_PullForModel_MountsToCoveringGroups(t *testing.T) {
 	// 挂入覆盖组，不挂入非覆盖组（按成员断言，兼容持久化库的重复分组累积）。
 	require.True(t, accountGroupLinked(t, ctx, client, accID, grp.ID), "account must be linked to covering group")
 	require.False(t, accountGroupLinked(t, ctx, client, accID, other.ID), "account must NOT be linked to non-covering group")
+}
+
+// TestQuotaKeyService_Pull_NewCodeDeviceIDFirstWriteNoDeadlock：C-U7-A 死锁回归。
+//
+// 复现 f6 实测 20s 挂死场景：新码首次自动补池（PullAccountsForModel），pull 容量事务已
+// FOR UPDATE 持有 quota_keys 行锁，旧码在 PullBatch→resolveDeviceID 分支③经全局连接
+// SetDeviceIDIfAbsent 更新同一行 → 等待本事务自身持有的锁 → 应用层自死锁。
+//
+// 修复（§20.6）：pull 在 PullBatch 前把新码 device_id 下沉到本事务内条件写
+// （SetDeviceIDIfAbsentTx），resolveDeviceID 分支①直接读到已持久化值、不再触发全局连接写。
+//
+// 本测试走真实 shareAI 上游（newTestClient 构造的 *shareAIUpstreamClient 由 NewQuotaKeyService
+// 自动回填 deviceResolver=svc），故确实进入分支③死锁路径——修复前会在 25s 内部超时判定死锁，
+// 修复后在秒级完成并落库账号 + device_id（内部超时独立于 -timeout，不依赖 harness 兜底）。
+func TestQuotaKeyService_Pull_NewCodeDeviceIDFirstWriteNoDeadlock(t *testing.T) {
+	md, mail, ts, _, _, _, _, _ := loadUpstreamVector(t)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// refresh 直接返回 code=0 + 真实 metadata → 成功拉号（无需 activate）。
+		fmt.Fprintf(w, `{"code":0,"msg":"ok","data":{"metadata":%q,"mail":%q,"timestamp":%q}}`, md, mail, ts)
+	})
+	up := newTestClient(t, handler)
+	svc, client := qkNewTestService(t, up)
+	ctx := context.Background()
+
+	// U7 挂载收敛：建一个覆盖实供模型的 cursor 平台组，使补池成功落号并挂组（避免挂载失败回滚）。
+	modelM := "claude-opus-5-5"
+	grp := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{modelM},
+	})
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(grp.ID)).Exec(cctx)
+		_, _ = client.Group.Delete().Where(entgroup.IDEQ(grp.ID)).Exec(cctx)
+	})
+
+	// 新码：active、device_id 为空、无账号。
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+
+	// 内部超时：旧码（事务内改走全局连接写 device_id）会自死锁挂死，此处 25s 即判定失败，
+	// 不依赖 go test -timeout=60s 兜底（满足 Done when 2 "不依赖 -timeout 兜底"）。
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.PullAccountsForModel(ctx, qk.ID, modelM)
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "new-code first PullAccountsForModel must complete without deadlock")
+	case <-time.After(25 * time.Second):
+		t.Fatal("deadlock: new-code first PullAccountsForModel blocked >25s (in-tx device_id first-write fix missing)")
+	}
+
+	// 落库账号 + device_id 双验证。
+	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).All(ctx)
+	require.NoError(t, err)
+	require.Len(t, accs, 1, "pulled account must be persisted")
+
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.DeviceID, "device_id must be persisted by in-tx first write (deadlock fix)")
+	require.NotEqual(t, "", *got.DeviceID, "device_id must be non-empty")
 }
 
 // TestQuotaKeyPullForModel_CooldownReturnsSentinelAndWritesMarker：上游冷却返回
@@ -1431,8 +1522,8 @@ func TestQuotaKeyService_CooldownClearsStaleExhausted(t *testing.T) {
 	require.NotNil(t, got.LastRefreshAt, "cooldown must write last_refresh_at")
 }
 
-// TestQuotaKeyPullForModel_ModelNoCoverageFailClosed：M 无分组覆盖 → 失败关闭，
-// 不静默落成裸号（回滚），并以 ErrQuotaKeyModelNoCoverage 可识别（§13.3）。
+// TestQuotaKeyService_PullForModel_ModelNoCoverageFailClosed：零目标组 → 失败关闭，
+// 不静默落成裸号（回滚），并以 ErrQuotaKeyModelNoCoverage 可识别（§20.2-A U7）。
 //
 // FIX-3（增量复审 R2 F4'）：本分支位于上游发号成功之后（白名单与发号非同快照，期间可
 // 变更），上游号已消耗且不可回滚，故必须同时挂 ErrQuotaKeyMountFailed 哨兵——触发方按
@@ -1440,7 +1531,8 @@ func TestQuotaKeyService_CooldownClearsStaleExhausted(t *testing.T) {
 func TestQuotaKeyService_PullForModel_ModelNoCoverageFailClosed(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	// 存在覆盖其它模型的分组，但 M 无覆盖。
+	// U7（§20.2-A）：挂载按账号模型能力（静态实供清单）判定。本用例唯一自建分组不含任何
+	// 实供模型 → 零覆盖（共享库若被他用例遗留覆盖实供模型的启用组，会使本断言失败并暴露污染）。
 	grpOtherModel := mustCreateGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{"other-model"},
@@ -1497,7 +1589,7 @@ func TestQuotaKeyService_PullForModel_ZeroCoverageAfterUpstreamPullCarriesMountF
 	}
 	svc, _ := qkNewTestService(t, up)
 	// 注入"覆盖在发号后消失"：解析成功但返回空集（非解析错误）。
-	svc.groupResolver = func(_ context.Context, _ *ent.Tx, _ string) ([]int64, error) {
+	svc.cursorGroupResolver = func(_ context.Context, _ *ent.Tx) ([]int64, error) {
 		return []int64{}, nil
 	}
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
@@ -1532,7 +1624,7 @@ func TestQuotaKeyService_PullForModel_MountFailureRollback(t *testing.T) {
 		}},
 	})
 	// 注入挂载失败：解析返回不存在的分组 ID → AccountGroup.Save 触发 FK 违规 → 回滚。
-	svc.groupResolver = func(_ context.Context, _ *ent.Tx, _ string) ([]int64, error) {
+	svc.cursorGroupResolver = func(_ context.Context, _ *ent.Tx) ([]int64, error) {
 		return []int64{1 << 40}, nil // 不存在的 group_id，制造 FK 失败
 	}
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
@@ -1666,7 +1758,7 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 //   - F1：WaterLevel 的池级去重总量（P1-D2 总量制，不按模型收窄）/ temp 窗口排除；
 //     ListCandidateKeys 的候选 key 状态过滤；阈值恒为 quotaKeyWaterLevelThreshold
 //     （=10，语义为 cursor 可服务账号总量，不随模型变化）。
-//   - F4：groupResolver 出错（上游成功之后）→ errors.Is(err, ErrQuotaKeyMountFailed)。
+//   - F4：挂载解析器（cursorGroupResolver）出错（上游成功之后）→ errors.Is(err, ErrQuotaKeyMountFailed)。
 // ---------------------------------------------------------------------------
 
 // fix1AccSeq 为 F1 口径测试生成全局唯一账号名（quota_test 持久库下跨测试累积，避免唯一冲突）。
@@ -2005,8 +2097,8 @@ func TestQuotaKeyModelWater_ListCandidateKeysFiltersByKeyState(t *testing.T) {
 }
 
 // TestQuotaKeyService_PullForModel_ResolverErrorReturnsMountFailedSentinel 验证 §13.3 F4：
-// 上游成功之后、groupResolver 出错（解析"白名单含 M"的分组失败）→ 与挂载失败同哨兵
-// ErrQuotaKeyMountFailed 可识别返回（调用方据以记录"上游可能已被消耗一次"），且事务回滚（号不入库）。
+// 上游成功之后、挂载解析器（cursorGroupResolver）出错（解析 U7 目标分组失败）→ 与挂载失败
+// 同哨兵 ErrQuotaKeyMountFailed 可识别返回（调用方据以记录"上游可能已被消耗一次"），且事务回滚（号不入库）。
 func TestQuotaKeyService_PullForModel_ResolverErrorReturnsMountFailedSentinel(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -2015,8 +2107,8 @@ func TestQuotaKeyService_PullForModel_ResolverErrorReturnsMountFailedSentinel(t 
 			{Name: "m5", Platform: "cursor", Type: "oauth", Credentials: map[string]any{"k": "v"}},
 		}},
 	})
-	// 注入 groupResolver 错误：模拟解析覆盖分组时 DB 失败（上游已成功发号）。
-	svc.groupResolver = func(_ context.Context, _ *ent.Tx, _ string) ([]int64, error) {
+	// 注入挂载解析器错误：模拟解析 U7 目标分组时 DB 失败（上游已成功发号）。
+	svc.cursorGroupResolver = func(_ context.Context, _ *ent.Tx) ([]int64, error) {
 		return nil, errors.New("db: resolve covering groups failed")
 	}
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
@@ -2024,7 +2116,7 @@ func TestQuotaKeyService_PullForModel_ResolverErrorReturnsMountFailedSentinel(t 
 	err := svc.PullAccountsForModel(ctx, qk.ID, "cursor-model-z")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrQuotaKeyMountFailed),
-		"groupResolver error after upstream success must be recognizable via ErrQuotaKeyMountFailed")
+		"mount resolver error after upstream success must be recognizable via ErrQuotaKeyMountFailed")
 
 	// 非幂等边界：本地事务回滚，上游发号不入库。
 	n, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).Count(ctx)
@@ -2208,7 +2300,7 @@ func TestQuotaKeyService_Pull_InsertFailureMultiAccountRollsBackPartial(t *testi
 // 范围为"跨轮退出"）。
 //
 // 通过注入 insertFailureMarkerWriter 使"独立事务补标"失败，确定性触发 R5-1(b) 降级路径
-// （与生产 groupResolver 同一类测试 seams）。
+// （与生产 cursorGroupResolver 同一类测试 seams）。
 func TestQuotaKeyService_Pull_InsertFailureMarkerWriteFailsRollsBackOnlyThisRound(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -2759,10 +2851,12 @@ func TestCURF1_CredentialEncryptionOnPull(t *testing.T) {
 	defer credcrypt.Configure("", "")
 
 	modelM := fix1UniqueModel("cursor-f1-enc")
-	// active 分组允许该模型，使挂载成功、账号落库（否则零覆盖回滚、号不入库）。
+	// U7（§20.2-A）：挂载按账号模型能力（静态实供清单）判定——用实供模型 + composite
+	// 聚合组保证挂载成功（本用例只断言加密与落库，模型名本身与断言无关）。
 	encGrp, err := client.Group.Create().
 		SetName(fmt.Sprintf("c11-f1-enc-%d", time.Now().UnixNano())).
-		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}}).
+		SetPlatform(domain.PlatformComposite).
+		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-6-sol"}}).
 		Save(ctx)
 	require.NoError(t, err)
 	// R10-1（CUR-F13）：复原本用例自建分组，避免其残留共享库污染他用例。

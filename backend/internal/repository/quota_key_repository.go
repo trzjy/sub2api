@@ -132,6 +132,26 @@ func (r *quotaKeyRepository) SetDeviceIDIfAbsent(ctx context.Context, id int64, 
 		Save(ctx)
 }
 
+// SetDeviceIDIfAbsentTx 是 SetDeviceIDIfAbsent 的事务内版本：同一条件化 UPDATE，
+// 但在调用方已开启的事务（tx）上执行，复用事务的连接与行锁。
+//
+// 首次拉号必须用它：pull 容量事务已 FOR UPDATE 持有 quota_keys 行锁，此时再用
+// 全局连接 SetDeviceIDIfAbsent 更新同一行，会等待本事务自身持有的锁 → 应用层自死锁
+// （新码自动补池首写 device_id，2026-10-21 实测）。事务内条件写由 DB 原子裁决并发，
+// 命中 1 才写、0 行表示已有并发写入，语义与全局版本完全一致。
+func (r *quotaKeyRepository) SetDeviceIDIfAbsentTx(ctx context.Context, tx *ent.Tx, id int64, deviceID string) (int, error) {
+	return tx.QuotaKey.Update().
+		Where(
+			quotakey.ID(id),
+			quotakey.Or(
+				quotakey.DeviceIDIsNil(),
+				quotakey.DeviceIDEQ(""),
+			),
+		).
+		SetDeviceID(deviceID).
+		Save(ctx)
+}
+
 // ListExpired 返回 expires_at 非空且早于 now 的激活码（sweep_expired 用）。
 func (r *quotaKeyRepository) ListExpired(ctx context.Context, now time.Time) ([]*ent.QuotaKey, error) {
 	return r.client.QuotaKey.Query().

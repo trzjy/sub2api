@@ -66,6 +66,15 @@ func (r *cursorOutboundRepo) SetDeviceIDIfAbsent(ctx context.Context, id int64, 
 	return r.identityCursorQuotaKeys.SetDeviceIDIfAbsent(ctx, id, deviceID)
 }
 
+// SetDeviceIDIfAbsentTx 是 SetDeviceIDIfAbsent 的事务内版本：内存替身无真实事务，tx 仅占位。
+// 同样计入落库调用观测（deviceWrites），用于反证存量分支不生成新 device（无论走全局还是事务内入口）。
+func (r *cursorOutboundRepo) SetDeviceIDIfAbsentTx(ctx context.Context, tx *ent.Tx, id int64, deviceID string) (int, error) {
+	r.mu.Lock()
+	r.setDeviceCalls++
+	r.mu.Unlock()
+	return r.identityCursorQuotaKeys.SetDeviceIDIfAbsentTx(ctx, tx, id, deviceID)
+}
+
 func (r *cursorOutboundRepo) deviceWrites() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

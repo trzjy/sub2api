@@ -533,6 +533,51 @@ describe('EditAccountModal', () => {
     expect(account.group_ids).toEqual([1, 2])
   })
 
+  it('shows cursor-bound native groups and keeps them on save (U7 §20.2-B)', async () => {
+    const account = buildAccount()
+    account.platform = 'cursor'
+    account.type = 'oauth'
+    account.credentials = {
+      access_token: 'cursor-token',
+      model_mapping: {
+        'claude-sonnet-5-5': 'claude-sonnet-5-5',
+        'grok-4.7': 'grok-4.7',
+        'muse-spark-1.3': 'muse-spark-1.3'
+      }
+    }
+    const anthropicGroup = { id: 34, name: 'claude-max', platform: 'anthropic', status: 'active' }
+    const grokGroup = { id: 114, name: 'grok-max', platform: 'grok', status: 'active' }
+    const museGroup = { id: 107, name: 'muse-spark', platform: 'muse', status: 'active' }
+    const compositeGroup = { id: 94, name: 'welfare', platform: 'composite', status: 'active' }
+    // 已绑定 muse 原生组（历史挂载），编辑弹窗必须可见且保存时保留。
+    account.group_ids = [107]
+    account.groups = [museGroup]
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account, true)
+    await wrapper.setProps({ groups: [anthropicGroup, grokGroup, museGroup, compositeGroup] as any })
+    const selector = wrapper.get('[data-tour="account-form-groups"]')
+
+    // 已绑定组恒可见（不被平台过滤隐藏）。
+    expect(selector.text()).toContain('muse-spark')
+    // U7 放行：cursor 账号可选中模型所属原生平台组。
+    expect(selector.text()).toContain('claude-max')
+    expect(selector.text()).toContain('grok-max')
+    // simple mode 下 composite 的既有隐藏规则保持不变。
+    expect(selector.text()).not.toContain('welfare')
+
+    // 勾选原生平台组并保存：绑定保留 + 新选生效，不因过滤隐式丢组。
+    await selector.get<HTMLInputElement>('input[value="34"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    // 绑定保留（107）+ 新选原生组（34）；顺序按勾选交互产生，断言用集合语义。
+    expect(updateAccountMock.mock.calls[0]?.[1]?.group_ids).toEqual(expect.arrayContaining([34, 107]))
+    expect(updateAccountMock.mock.calls[0]?.[1]?.group_ids).toHaveLength(2)
+  })
+
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()

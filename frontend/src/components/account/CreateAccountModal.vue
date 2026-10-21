@@ -3708,6 +3708,7 @@
           :groups="groups"
           :platform="form.platform"
           :mixed-scheduling="mixedScheduling"
+          :native-platforms="cursorNativePlatforms"
           data-tour="account-form-groups"
         />
       </div>
@@ -4168,6 +4169,7 @@ import {
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { CURSOR_NATIVE_GROUP_PLATFORMS } from '@/constants/platforms'
 import { ACCOUNT_CURRENCY, currencySymbol } from '@/utils/money'
 import {
   OPENAI_WS_MODE_CTX_POOL,
@@ -4776,6 +4778,11 @@ adminAPI.settings.getWebSearchEmulationConfig().then(cfg => {
 
 loadQuotaNotifyGlobal()
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
+// cursor 账号是供给端：模型按所属原生平台进组（U7），分组选择器放行模型所属
+// 原生平台组；其他平台保持「同 platform + composite」既有规则，不放开。
+const cursorNativePlatforms = computed(() =>
+  form.platform === 'cursor' ? [...CURSOR_NATIVE_GROUP_PLATFORMS] : []
+)
 const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages
 const antigravityAccountType = ref<'oauth' | 'upstream'>('oauth') // For antigravity: oauth or upstream
 const antigravityProjectId = ref('')

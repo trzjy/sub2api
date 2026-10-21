@@ -167,7 +167,7 @@ func TestDeviceIDForReusesExisting(t *testing.T) {
 
 // TestDeviceIDForTreatsEmptyAsAbsent 空串视为未生成，重新生成并落库。
 //
-// 与 SetDeviceIDIfAbsent 的 WHERE（IS NULL OR =''）语义对齐：若读侧把空串当"已有"、
+// 与 SetDeviceIDIfAbsent 的 WHERE（IS NULL OR =”）语义对齐：若读侧把空串当"已有"、
 // 写侧却仍可写，竞态分支就会读到本请求自己刚写的值。
 func TestDeviceIDForTreatsEmptyAsAbsent(t *testing.T) {
 	empty := ""
