@@ -160,25 +160,6 @@ func (r *fakeQuotaKeyRepo) SetDeviceIDIfAbsent(_ context.Context, id int64, devi
 	return 1, nil
 }
 
-// SetDeviceIDIfAbsentTx 是 SetDeviceIDIfAbsent 的事务内版本：内存替身无真实事务，
-// tx 仅占位，条件化写入语义与 SetDeviceIDIfAbsent 同口径（NULL/空串才写返回 1）。
-func (r *fakeQuotaKeyRepo) SetDeviceIDIfAbsentTx(_ context.Context, _ *ent.Tx, id int64, deviceID string) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.updateErr != nil {
-		return 0, r.updateErr
-	}
-	qk, ok := r.keys[id]
-	if !ok {
-		return 0, &ent.NotFoundError{}
-	}
-	if qk.DeviceID != nil && *qk.DeviceID != "" {
-		return 0, nil
-	}
-	qk.DeviceID = &deviceID
-	return 1, nil
-}
-
 func (r *fakeQuotaKeyRepo) HardDelete(_ context.Context, _ *ent.Tx, id int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -692,6 +692,11 @@ async function handleProbe(row: QuotaKey) {
   try {
     const info = await adminAPI.quotaKeys.probeQuota(row.id)
     probeResult.value = info
+    // O03：probe 已把 expires_at 写库，刷新列表与已开详情以反映最新事实源。
+    await load()
+    if (detail.value && detail.value.id === row.id) {
+      detail.value = await adminAPI.quotaKeys.get(row.id)
+    }
   } catch (err: unknown) {
     probeError.value = extractApiErrorMessage(err, t('admin.quotaKeys.probe.error'))
   } finally {

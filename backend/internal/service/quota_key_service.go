@@ -71,14 +71,9 @@ type QuotaKeyRepository interface {
 	// 能写入，其余拿到 0 行后重读赢家值，避免同一激活码分裂出两份 deviceId。
 	// 判定口径（NULL 或空串）须与 service 侧 DeviceIDFor 的读判定逐字一致。
 	// 注意：本方法走全局连接池，供"非拉号事务"路径（出站鉴权、admin 读取后写入）使用。
+	// O01：首次拉号首写已前置到容量事务之外（pull 经 DeviceIDFor 走本方法，无行锁、
+	// 独立提交），故不再需要事务内版本——事务内更新同一行会等待自身持有的行锁 → 自死锁。
 	SetDeviceIDIfAbsent(ctx context.Context, id int64, deviceID string) (int, error)
-	// SetDeviceIDIfAbsentTx 与 SetDeviceIDIfAbsent 同语义，但写入在调用方已开启的事务
-	// 内完成（复用同一连接/同一行锁）。**首次拉号必须走本方法**：pull 容量事务已对
-	// quota_keys 行 FOR UPDATE 持有行锁，若在该事务内改走全局连接 SetDeviceIDIfAbsent，
-	// 会在另一连接上 UPDATE 同一行、等待本事务自身持有的锁 → 应用层自死锁
-	//（新码自动补池首写 device_id 时触发，2026-10-21 实测）。事务内条件写由 DB
-	// 原子裁决并发，语义与全局版本完全一致。
-	SetDeviceIDIfAbsentTx(ctx context.Context, tx *ent.Tx, id int64, deviceID string) (int, error)
 }
 
 // QuotaKeyUpstreamClient 抽象"向上游拉取账号"的客户端。
@@ -690,6 +685,34 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 	// insertFailErr 捕获插入循环中"首个落库失败"的底层原因（R5-1）：仅当该值非 nil 时，
 	// fn 才返回 errInsertFailureRollback 哨兵，事后由独立事务补写标记。
 	var insertFailErr error
+
+	// O01：device_id 首写前置到容量事务之外（无事务、无行锁，独立提交）。
+	// 修复「新码只生成一份稳定值」的回滚竞态：上游 PullBatch 成功后若配置读取 / 挂组解析 /
+	// 链接写入 / 提交任一失败 → 容量事务回滚 → device_id 回到 NULL，下次重试生成第二份 ID。
+	// 此处先行把 device_id 落地（独立提交），事务回滚不再波及：
+	//   - 普通读 key（无 FOR UPDATE）：读错误 → 失败关闭（不进上游请求）；
+	//   - 已非 active / 过期 → 跳过首写照旧进事务（后续路径不变）；
+	//   - device_id 为空 且 确为新码（HasAccount==false）→ DeviceIDFor（全局连接「生成+条件写」，
+	//     此刻无行锁，不会自死锁）落地一份稳定值；
+	//   - device_id 为空 但 存量有账号（HasAccount==true）→ 不写不迁移（保持既有派生值语义）。
+	qk0, preErr := s.client.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).Only(ctx)
+	if preErr != nil {
+		return fmt.Errorf("quota_key_service: pre-pull load quota key for device first-write: %w", preErr)
+	}
+	if qk0.Status == domain.QuotaKeyStatusActive && !isExpired(qk0) {
+		if qk0.DeviceID == nil || *qk0.DeviceID == "" {
+			has, hasErr := s.HasAccount(ctx, quotaKeyID)
+			if hasErr != nil {
+				return fmt.Errorf("quota_key_service: resolve account before device first-write: %w", hasErr)
+			}
+			if !has {
+				if _, derr := s.DeviceIDFor(ctx, quotaKeyID); derr != nil {
+					return fmt.Errorf("quota_key_service: device first-write before pull: %w", derr)
+				}
+			}
+		}
+	}
+
 	err := s.withQuotaKeyCapacity(ctx, quotaKeyID, func(tx *ent.Tx) error {
 		// 二次读状态（防 sweep 竞态）：重新 FOR UPDATE 确认仍为 active 且未过期。
 		qk2, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
@@ -698,28 +721,6 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		}
 		if qk2.Status != domain.QuotaKeyStatusActive || isExpired(qk2) {
 			return nil
-		}
-
-		// 事务内 device_id 先行持久化（死锁修复，§20.6，2026-10-21）：
-		// PullBatch 的 resolveDeviceID 分支③（新码无账号、未持久化）会经
-		// DeviceIDFor → SetDeviceIDIfAbsent（全局连接）写入 device_id——但本容量事务
-		// 已对 quota_keys 行 FOR UPDATE 持有行锁，全局连接更新同一行会等待本事务
-		// 自身持有的锁 → 应用层自死锁（f6 实测）。此处把首次写入下沉到本事务：
-		// 若 qk2.DeviceID 为空且 HasAccount==false（新码），在本事务内生成并写
-		// device_id；PullBatch 的分支①直接读到已持久化值，不再触发全局连接写入。
-		// 语义保持：已有 device_id 原样复用、存量派生值不迁移、新码只生成一份稳定值、
-		// 并发首次由事务内条件更新（SetDeviceIDIfAbsentTx WHERE 原子裁决）保证、
-		// lookup/refresh/activate/出站继续用同一 device_id（出站经 DeviceIDFor 读同值）。
-		if qk2.DeviceID == nil || *qk2.DeviceID == "" {
-			has, hasErr := s.HasAccount(ctx, quotaKeyID)
-			if hasErr != nil {
-				return fmt.Errorf("quota_key_service: resolve account before device persist: %w", hasErr)
-			}
-			if !has {
-				if err := s.ensureDeviceIDInPullTx(ctx, tx, quotaKeyID, qk2); err != nil {
-					return err
-				}
-			}
 		}
 
 		// 发上游。
@@ -1390,45 +1391,6 @@ func (s *QuotaKeyService) HasAccount(ctx context.Context, quotaKeyID int64) (boo
 		return false, fmt.Errorf("quota_key_service: list accounts by quota key: %w", err)
 	}
 	return len(accs) > 0, nil
-}
-
-// ensureDeviceIDInPullTx 在拉号容量事务内为新码首次生成并持久化 device_id（死锁修复，
-// §20.6，2026-10-21）。只在调用方已确认：qk2.DeviceID 为空 且 HasAccount==false
-// （新码、未持久化）时调用。
-//
-// 语义与 DeviceIDFor 的首次路径逐字对齐，差异仅是写入走 tx（事务内 SetDeviceIDIfAbsentTx，
-// 复用本事务已持有的 quota_keys 行锁）而非全局连接——因此不会出现"事务持行锁 +
-// 全局连接更新同一行"的自死锁。并发首次由 DB 条件更新原子裁决（命中 1 才写，
-// 0 行表示已有并发写入），重复调用天然幂等。
-//
-// 返回的 deviceID 会就地回填到调用方持有的 qk2（内存态），使 PullBatch 的
-// resolveDeviceID 分支①直接读到已持久化值，不再触发全局连接写入。
-func (s *QuotaKeyService) ensureDeviceIDInPullTx(ctx context.Context, tx *ent.Tx, quotaKeyID int64, qk *ent.QuotaKey) error {
-	candidate, err := GenerateCursorDeviceID()
-	if err != nil {
-		return fmt.Errorf("quota_key_service: generate device id in pull tx: %w", err)
-	}
-	written, err := s.repo.SetDeviceIDIfAbsentTx(ctx, tx, quotaKeyID, candidate)
-	if err != nil {
-		return fmt.Errorf("quota_key_service: persist device id in pull tx: %w", err)
-	}
-	if written == 0 {
-		// 已有并发请求在本事务外抢先写入（条件不满足）。事务内重读拿到赢家值，
-		// 与 DeviceIDFor 的竞态分支同语义（绝不返回本请求候选值，避免两份 deviceId）。
-		settled, err := tx.QuotaKey.Get(ctx, quotaKeyID)
-		if err != nil {
-			return fmt.Errorf("quota_key_service: reload quota key after device race: %w", err)
-		}
-		if settled.DeviceID == nil || *settled.DeviceID == "" {
-			return fmt.Errorf("%w: quota key %d device id still unset after conditional write", ErrCursorDeviceIDUnavailable, quotaKeyID)
-		}
-		qk.DeviceID = settled.DeviceID
-		return nil
-	}
-	// 事务内写入成功：就地回填 qk（PullBatch 分支①读到已持久化值），由本事务提交。
-	dev := candidate
-	qk.DeviceID = &dev
-	return nil
 }
 
 // quotaKeyToStatus 将 ent 实体映射为脱敏 DTO。

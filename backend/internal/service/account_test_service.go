@@ -816,14 +816,34 @@ func (s *AccountTestService) testCursorAccountConnection(c *gin.Context, account
 	if perr != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream parse failed: %s", perr.Error()))
 	}
-	if len(strings.TrimSpace(string(completion))) == 0 {
+
+	// completion 是 cursorBuildNonStreamingCompletion 产出的完整 chat.completion
+	// JSON（含 id/model/created/choices/usage 框架字段）。content 为空时整体 JSON
+	// 仍非空，故必须解析出真实文本而非用字符串长度判断，否则空文本会被误判成功。
+	var completionObj struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if jerr := json.Unmarshal(completion, &completionObj); jerr != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream completion decode failed: %s", jerr.Error()))
+	}
+	content := ""
+	if len(completionObj.Choices) > 0 {
+		content = completionObj.Choices[0].Message.Content
+	}
+	if strings.TrimSpace(content) == "" {
+		// 解析器允许只有正常 EndStream、无任何文本帧的空流（u7-review 07 已复现），
+		// 此处明确失败，绝不冒充成功。
 		return s.sendErrorAndEnd(c, "cursor upstream returned no text frames")
 	}
 
 	s.sendEvent(c, TestEvent{
 		Type:  "content",
 		Model: testModelID,
-		Text:  "Cursor AgentRun probe ok",
+		Text:  content,
 	})
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil

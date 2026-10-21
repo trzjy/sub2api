@@ -239,3 +239,94 @@ describe('QuotaKeysView 到期时间展示收敛（C-U7-B）', () => {
     wrapper.unmount()
   })
 })
+
+// ---------------------------------------------------------------------------
+// O03：probe 成功后自动刷新列表与已开详情（expires_at 事实源唯一 = list/get）。
+// 后端 ProbeKeyQuota 已把 expires_at 写库，前端须在 probe 成功后复用 load() 与
+// get() 重新读取，禁止拿 probe 的未解析原始字符串另建展示数据。
+// ---------------------------------------------------------------------------
+
+type O03Vm = {
+  keys: Array<{ id: number; expires_at: string | null }>
+  detail: { id: number; expires_at: string | null } | null
+  handleProbe: (row: { id: number }) => Promise<void>
+  openDetail: (row: { id: number }) => Promise<void>
+}
+
+describe('QuotaKeysView probe 成功后刷新列表与详情（O03）', () => {
+  const nullRow = { ...keyRow, expires_at: null as string | null }
+  const updatedRow = { ...keyRow, expires_at: '2027-06-01T00:00:00.000Z' }
+
+  beforeEach(() => {
+    vi.mocked(adminAPI.quotaKeys.list).mockReset()
+    vi.mocked(adminAPI.quotaKeys.get).mockReset()
+    vi.mocked(adminAPI.quotaKeys.probeQuota).mockReset()
+  })
+
+  it('初始列表 expires_at=null，probe 成功后列表自动刷新为新日期（无需手动刷新）', async () => {
+    let listCalls = 0
+    vi.mocked(adminAPI.quotaKeys.list).mockImplementation(async () => {
+      listCalls += 1
+      const item = listCalls === 1 ? nullRow : updatedRow
+      return { items: [item], total: 1, page: 1, page_size: 20, pages: 1 } as never
+    })
+    vi.mocked(adminAPI.quotaKeys.probeQuota).mockResolvedValue(keyQuota as never)
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    // 挂载即首次 load()：列表该行 expires_at 为 null。
+    const vm0 = wrapper.vm as unknown as O03Vm
+    expect(vm0.keys[0].expires_at).toBeNull()
+
+    const vm = wrapper.vm as unknown as O03Vm
+    await vm.handleProbe(nullRow)
+    await flushPromises()
+    await nextTick()
+
+    // 成功路径下 list 接口被再次调用（共 2 次）。
+    expect(adminAPI.quotaKeys.list).toHaveBeenCalledTimes(2)
+    // 行数据已更新为新日期，无需手动刷新。
+    expect(vm.keys[0].expires_at).toBe('2027-06-01T00:00:00.000Z')
+    wrapper.unmount()
+  })
+
+  it('详情弹窗打开后 probe 成功 → get 再次拉取且 detail 数据更新', async () => {
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue({
+      items: [keyRow],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    } as never)
+
+    const oldDetail = { ...keyDetail, expires_at: null as string | null }
+    const newDetail = { ...keyDetail, expires_at: '2027-06-01T00:00:00.000Z' }
+    let getCalls = 0
+    vi.mocked(adminAPI.quotaKeys.get).mockImplementation(async () => {
+      getCalls += 1
+      return (getCalls === 1 ? oldDetail : newDetail) as never
+    })
+    vi.mocked(adminAPI.quotaKeys.probeQuota).mockResolvedValue(keyQuota as never)
+
+    const wrapper = mountView()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as O03Vm
+
+    // 打开详情弹窗（第一次 get，expires_at 为 null）。
+    await vm.openDetail(keyRow)
+    await flushPromises()
+    expect(vm.detail?.expires_at).toBeNull()
+
+    // probe 成功 → handleProbe 内对当前打开行再次拉取 get。
+    await vm.handleProbe(keyRow)
+    await flushPromises()
+    await nextTick()
+
+    // get 被再次调用（共 2 次）。
+    expect(adminAPI.quotaKeys.get).toHaveBeenCalledTimes(2)
+    // detail 数据已更新为新日期。
+    expect(vm.detail?.expires_at).toBe('2027-06-01T00:00:00.000Z')
+    wrapper.unmount()
+  })
+})

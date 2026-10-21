@@ -534,21 +534,6 @@ func (f *fakeQuotaKeyRepo) SetDeviceIDIfAbsent(_ context.Context, id int64, devi
 	return 1, nil
 }
 
-// SetDeviceIDIfAbsentTx 内存替身的事务内版本：与 SetDeviceIDIfAbsent 同语义同条件写。
-// 内存替身无真实事务/连接，tx 仅占位（测试不依赖事务边界），判定与 production 一致
-// （NULL 或空串才写，命中 1 / 已被并发写入则 0）。
-func (f *fakeQuotaKeyRepo) SetDeviceIDIfAbsentTx(_ context.Context, _ *ent.Tx, id int64, deviceID string) (int, error) {
-	qk, ok := f.byID[id]
-	if !ok {
-		return 0, errQuotaKeyNotFound
-	}
-	if qk.DeviceID != nil && *qk.DeviceID != "" {
-		return 0, nil
-	}
-	qk.DeviceID = &deviceID
-	return 1, nil
-}
-
 // MarkExpiredIfStillExpired 真实 DB 替身：与 production repository 同语义的条件化写入。
 func (r *testDBRepo) MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, id int64, now time.Time) (int, error) {
 	return tx.QuotaKey.Update().
@@ -564,15 +549,6 @@ func (r *testDBRepo) ListByStatus(ctx context.Context, status string) ([]*ent.Qu
 // SetDeviceIDIfAbsent 真实 DB 替身：与 production repository 同语义的条件化写入。
 func (r *testDBRepo) SetDeviceIDIfAbsent(ctx context.Context, id int64, deviceID string) (int, error) {
 	return r.client.QuotaKey.Update().
-		Where(quotakey.ID(id), quotakey.Or(quotakey.DeviceIDIsNil(), quotakey.DeviceIDEQ(""))).
-		SetDeviceID(deviceID).
-		Save(ctx)
-}
-
-// SetDeviceIDIfAbsentTx 真实 DB 替身：事务内条件化写入（与 production 同语义，
-// 复用事务连接，避免持行锁后全局连接更新同一行导致自死锁，§20.6）。
-func (r *testDBRepo) SetDeviceIDIfAbsentTx(ctx context.Context, tx *ent.Tx, id int64, deviceID string) (int, error) {
-	return tx.QuotaKey.Update().
 		Where(quotakey.ID(id), quotakey.Or(quotakey.DeviceIDIsNil(), quotakey.DeviceIDEQ(""))).
 		SetDeviceID(deviceID).
 		Save(ctx)
@@ -1405,15 +1381,15 @@ func TestQuotaKeyService_PullForModel_MountsToCoveringGroups(t *testing.T) {
 
 // TestQuotaKeyService_Pull_NewCodeDeviceIDFirstWriteNoDeadlock：C-U7-A 死锁回归。
 //
-// 复现 f6 实测 20s 挂死场景：新码首次自动补池（PullAccountsForModel），pull 容量事务已
-// FOR UPDATE 持有 quota_keys 行锁，旧码在 PullBatch→resolveDeviceID 分支③经全局连接
-// SetDeviceIDIfAbsent 更新同一行 → 等待本事务自身持有的锁 → 应用层自死锁。
+// 复现 f6 实测 20s 挂死场景：新码首次自动补池（PullAccountsForModel），旧码在 PullBatch→
+// resolveDeviceID 分支③经全局连接 SetDeviceIDIfAbsent 更新 quota_keys 行——若此事发生在
+// 已 FOR UPDATE 持有行锁的容量事务内，会等待本事务自身持有的锁 → 应用层自死锁。
 //
-// 修复（§20.6）：pull 在 PullBatch 前把新码 device_id 下沉到本事务内条件写
-// （SetDeviceIDIfAbsentTx），resolveDeviceID 分支①直接读到已持久化值、不再触发全局连接写。
+// 修复（O01）：pull 把新码 device_id 首写前置到容量事务之外（无行锁、独立提交，经 DeviceIDFor
+// 走全局连接 SetDeviceIDIfAbsent），事务内只读到已提交的 device_id、分支①命中、不再触发全局连接写。
 //
 // 本测试走真实 shareAI 上游（newTestClient 构造的 *shareAIUpstreamClient 由 NewQuotaKeyService
-// 自动回填 deviceResolver=svc），故确实进入分支③死锁路径——修复前会在 25s 内部超时判定死锁，
+// 自动回填 deviceResolver=svc），故确实经过分支③的全局连接写路径——修复前会在 25s 内部超时判定死锁，
 // 修复后在秒级完成并落库账号 + device_id（内部超时独立于 -timeout，不依赖 harness 兜底）。
 func TestQuotaKeyService_Pull_NewCodeDeviceIDFirstWriteNoDeadlock(t *testing.T) {
 	md, mail, ts, _, _, _, _, _ := loadUpstreamVector(t)
@@ -1694,11 +1670,21 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 	})
 	// 不应挂入：composite 聚合组但白名单未启用（allow-all，无对应模型）。
 	grpAllowAll := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: false})
-	// 不应挂入：白名单覆盖实供模型，但分组平台非模型所属平台（默认 anthropic）。
-	grpOtherPlatform := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// 同厂商正例（U7 修正）：分组平台为 anthropic（groups.platform 列默认即 anthropic），
+	// 白名单覆盖 claude-sonnet-5-5——其真实厂商平台正是 anthropic，故【应挂】。
+	// 修复前误判为"不应挂入"（与 U7 相反）。
+	grpAnthropicVendor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{"claude-sonnet-5-5"},
 	})
+	// 异厂商反例（U7 修正）：分组平台为 grok，但其白名单含 claude-sonnet-5-5
+	//（anthropic 厂商）。平台不匹配模型真实厂商 → 非目标分组，【不挂】。
+	grpGrokVendor, gerr := client.Group.Create().
+		SetName(fmt.Sprintf("c11-grp-grok-%d", time.Now().UnixNano())).
+		SetPlatform(domain.PlatformGrok).
+		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"claude-sonnet-5-5"}}).
+		Save(context.Background())
+	require.NoError(t, gerr)
 	// 不应挂入：白名单启用且明确不含任何实供模型（如 DeepSeek 计量组形态）。
 	grpRejectCursor := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
@@ -1711,7 +1697,7 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 	// 的隔离段，故此处显式复原本用例数据。
 	t.Cleanup(func() {
 		ctx := context.Background()
-		for _, gid := range []int64{grpComposite.ID, grpAllowAll.ID, grpOtherPlatform.ID, grpRejectCursor.ID} {
+		for _, gid := range []int64{grpComposite.ID, grpAllowAll.ID, grpAnthropicVendor.ID, grpGrokVendor.ID, grpRejectCursor.ID} {
 			_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(gid)).Exec(ctx)
 			_, _ = client.Group.Delete().Where(entgroup.IDEQ(gid)).Exec(ctx)
 		}
@@ -1740,9 +1726,12 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 	// allow-all（白名单未启用）聚合组不挂：无对应模型。
 	require.False(t, accountGroupLinked(t, ctx, client, accID, grpAllowAll.ID),
 		"manual refresh must NOT mount to an allow-all group (no corresponding model)")
-	// 非模型所属平台的分组不挂。
-	require.False(t, accountGroupLinked(t, ctx, client, accID, grpOtherPlatform.ID),
-		"manual refresh must NOT mount to a group whose platform is not the model's owning platform")
+	// 同厂商正例（U7 修正）：anthropic 平台组覆盖 claude-sonnet-5-5（其厂商即 anthropic）→ 应挂。
+	require.True(t, accountGroupLinked(t, ctx, client, accID, grpAnthropicVendor.ID),
+		"manual refresh must mount account to the same-vendor (anthropic) group covering claude-sonnet-5-5 (U7: mount by model's real vendor platform)")
+	// 异厂商反例（U7 修正）：grok 平台组即使白名单含 claude-sonnet-5-5 也不挂（平台不匹配）。
+	require.False(t, accountGroupLinked(t, ctx, client, accID, grpGrokVendor.ID),
+		"manual refresh must NOT mount to a cross-vendor (grok) group even if its allowlist names claude-sonnet-5-5")
 	// 不挂入白名单启用且不覆盖任何实供模型的组。
 	require.False(t, accountGroupLinked(t, ctx, client, accID, grpRejectCursor.ID),
 		"manual refresh must NOT mount account to whitelist-rejecting-cursor group")
