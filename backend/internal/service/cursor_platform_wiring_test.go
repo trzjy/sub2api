@@ -221,22 +221,6 @@ func (r *identityCursorQuotaKeys) SetDeviceIDIfAbsent(_ context.Context, id int6
 	return 1, nil
 }
 
-// SetDeviceIDIfAbsentTx 是 SetDeviceIDIfAbsent 的事务内版本：内存替身无真实事务，
-// tx 仅占位，语义/条件写与 SetDeviceIDIfAbsent 完全一致（NULL 或空串才写、命中 1 / 0）。
-// 与 production 的 SetDeviceIDIfAbsentTx 同口径，保证 device 三分支②（存量不生成）的
-// 反证测试在事务内调用路径下仍走同一内存实现。
-func (r *identityCursorQuotaKeys) SetDeviceIDIfAbsentTx(_ context.Context, _ *ent.Tx, id int64, deviceID string) (int, error) {
-	qk, ok := r.byID[id]
-	if !ok {
-		return 0, errors.New("quota key not found")
-	}
-	if qk.DeviceID != nil && *qk.DeviceID != "" {
-		return 0, nil
-	}
-	qk.DeviceID = &deviceID
-	return 1, nil
-}
-
 func qkID(v int64) *int64 { return &v }
 
 // cursorTestDeviceIDs 用真实的 *QuotaKeyService 作 deviceId 解析器（B-10 生产同款路径），

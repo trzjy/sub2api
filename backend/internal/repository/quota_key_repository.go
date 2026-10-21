@@ -119,28 +119,11 @@ func (r *quotaKeyRepository) UpdateCredentials(ctx context.Context, id int64, co
 // "读侧认为已有、写侧仍可写"的错配，进而在竞态分支读到本请求自己刚写的值。
 //
 // 与 MarkExpiredIfStillExpired 同款写法：条件化写入天然幂等，重复调用第二次即 0 行。
+//
+// O01：首次拉号首写已前置到容量事务之外（pull 经 DeviceIDFor 走本方法，无行锁、独立提交），
+// 故不再提供事务内版本——事务内更新同一行会等待自身持有的行锁 → 应用层自死锁。
 func (r *quotaKeyRepository) SetDeviceIDIfAbsent(ctx context.Context, id int64, deviceID string) (int, error) {
 	return r.client.QuotaKey.Update().
-		Where(
-			quotakey.ID(id),
-			quotakey.Or(
-				quotakey.DeviceIDIsNil(),
-				quotakey.DeviceIDEQ(""),
-			),
-		).
-		SetDeviceID(deviceID).
-		Save(ctx)
-}
-
-// SetDeviceIDIfAbsentTx 是 SetDeviceIDIfAbsent 的事务内版本：同一条件化 UPDATE，
-// 但在调用方已开启的事务（tx）上执行，复用事务的连接与行锁。
-//
-// 首次拉号必须用它：pull 容量事务已 FOR UPDATE 持有 quota_keys 行锁，此时再用
-// 全局连接 SetDeviceIDIfAbsent 更新同一行，会等待本事务自身持有的锁 → 应用层自死锁
-// （新码自动补池首写 device_id，2026-10-21 实测）。事务内条件写由 DB 原子裁决并发，
-// 命中 1 才写、0 行表示已有并发写入，语义与全局版本完全一致。
-func (r *quotaKeyRepository) SetDeviceIDIfAbsentTx(ctx context.Context, tx *ent.Tx, id int64, deviceID string) (int, error) {
-	return tx.QuotaKey.Update().
 		Where(
 			quotakey.ID(id),
 			quotakey.Or(

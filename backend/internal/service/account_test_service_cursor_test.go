@@ -211,3 +211,77 @@ func TestAccountTestService_CursorRoutedThroughTestAccountConnection(t *testing.
 	require.Equal(t, "test_complete", events[len(events)-1].Type)
 	require.True(t, events[len(events)-1].Success)
 }
+
+// ⑦ 上游只返回正常 EndStream 帧、无任何文本帧 → 明确失败（O02 假成功修正）。
+// 解析器允许空流（cursor_protocol_response.go :477/:727 可达，u7-review 07 已复现），
+// 旧逻辑用 completion JSON 非空误判成功，此处必须失败关闭，绝不出现 success=true。
+func TestAccountTestService_CursorEmptyStreamFailsClosed(t *testing.T) {
+	repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{
+		11: {ID: 11, CodeEncrypted: "ACTIVATION-CODE-ELEVEN"},
+	})
+	// 仅 EndStream 帧，无任何文本帧 → 空流。
+	up := &cursorOutboundUpstream{body: cursorTestEndStream(t, `{}`)}
+	gw, _ := newCursorOutboundTestService(t, up.handler(), repo, cursorTestDeviceIDs(repo))
+
+	account := cursorAccountTestAccount(76, 11, map[string]any{"cursor-sonnet": "upstream-sonnet"}, "BEARER-CURSOR-EMPTY")
+	svc := &AccountTestService{accountRepo: &openAIAccountTestRepo{
+		mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}},
+	}}
+	svc.SetOpenAIGatewayService(gw)
+	ctx, recorder := newTestContext()
+
+	err := svc.testCursorAccountConnection(ctx, account, "cursor-sonnet")
+	require.Error(t, err, "empty upstream text must fail closed, not masquerade as success")
+	require.Contains(t, err.Error(), "no text frames")
+
+	events := cursorAccountTestEvents(t, recorder.Body.String())
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	require.Equal(t, "error", last.Type, "empty stream must emit an error event")
+	// 整个事件流中绝不允许出现 success=true 的 test_complete。
+	for _, ev := range events {
+		if ev.Type == "test_complete" {
+			require.False(t, ev.Success, "empty stream must never claim success")
+		}
+	}
+}
+
+// ⑧ 上游返回真实文本帧 → content 事件的 Text 必须是真实解析文本，而非固定文案
+// "Cursor AgentRun probe ok"（O02 假成功修正）。
+func TestAccountTestService_CursorContentEchoesRealText(t *testing.T) {
+	repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{
+		11: {ID: 11, CodeEncrypted: "ACTIVATION-CODE-ELEVEN"},
+	})
+	// 上游替身返回真实文本帧 "PING-RESULT-123"。
+	var pingStream []byte
+	pingStream = append(pingStream, cursorTextDeltaFrame(t, "PING-RESULT-123")...)
+	pingStream = append(pingStream, cursorTestEndStream(t, `{}`)...)
+	up := &cursorOutboundUpstream{body: pingStream}
+	gw, _ := newCursorOutboundTestService(t, up.handler(), repo, cursorTestDeviceIDs(repo))
+
+	account := cursorAccountTestAccount(77, 11, map[string]any{"cursor-sonnet": "upstream-sonnet"}, "BEARER-CURSOR-PING")
+	svc := &AccountTestService{accountRepo: &openAIAccountTestRepo{
+		mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}},
+	}}
+	svc.SetOpenAIGatewayService(gw)
+	ctx, recorder := newTestContext()
+
+	err := svc.testCursorAccountConnection(ctx, account, "cursor-sonnet")
+	require.NoError(t, err)
+
+	events := cursorAccountTestEvents(t, recorder.Body.String())
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	require.Equal(t, "test_complete", last.Type)
+	require.True(t, last.Success)
+
+	var content *TestEvent
+	for i := range events {
+		if events[i].Type == "content" {
+			content = &events[i]
+		}
+	}
+	require.NotNil(t, content, "probe must emit a content event")
+	require.Equal(t, "PING-RESULT-123", content.Text, "content event must carry the real parsed text, not fixed copy")
+	require.NotEqual(t, "Cursor AgentRun probe ok", content.Text, "fixed success copy must be removed")
+}
