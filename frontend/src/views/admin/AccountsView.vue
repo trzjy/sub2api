@@ -361,6 +361,18 @@
                 @account-updated="handleAccountUpdated"
                 @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
               />
+              <!-- 方案 §25.6⑥⑦ / §25.7-B：两层额度在账号页分开表达。
+                   - 上半：所属激活码额度（quota_key_usage 快照投影，带「所属激活码额度」标签，
+                     总额/已用/算术剩余/观测时间；无快照时不渲染任何数值）；
+                   - 下半：vendor_account_quota.provided=false → 只渲染「供应商账号额度未提供」
+                     注明，绝不显示伪造的供应商余额数字或百分比；
+                   账号自身本站真实已结算用量仍由上面的 AccountUsageCell / today_stats 通路负责，
+                   本块不改写它、也不拿本站用量冒充供应商余额。 -->
+              <QuotaKeyUsageCell
+                v-if="row.quota_key_usage || row.vendor_account_quota"
+                :usage="row.quota_key_usage ?? null"
+                :vendor-account-quota="row.vendor_account_quota ?? null"
+              />
               <!-- 方案 N6：影子账号没有自己的余额，只额外挂一条明确标注为「母账号」的余额指示；
                    影子自身的用量仍由上面的 AccountUsageCell 照旧渲染。 -->
               <div
@@ -602,6 +614,7 @@ import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.
 import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
+import QuotaKeyUsageCell from '@/components/quotaKeys/QuotaKeyUsageCell.vue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'

@@ -284,7 +284,7 @@ func newOpenAIResponsesHeartbeatGatewayHandler(t *testing.T, upstream service.HT
 		repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
 		service.NewBillingService(cfg, nil), nil, billingCacheSvc, upstream,
 		&service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil,
-		nil, // visionRouting
+		nil, nil, /* cursorExecution */ // visionRouting
 	)
 	h := NewOpenAIGatewayHandler(
 		gatewaySvc, nil, nil, service.NewConcurrencyService(nil), billingCacheSvc,

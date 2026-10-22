@@ -42,6 +42,18 @@ const (
 	geminiRetryMaxDelay  = 16 * time.Second
 )
 
+// ErrGeminiNoAvailableAccounts 是「本分组没有任何可服务的 Gemini 原生候选」的**明确分类**
+// （方案 §25.14-B 响应矩阵「原生候选查询失败」行）。
+//
+// 它是**确定的空集合结论**（选号方法正常完成、只是没有合格账号），必须与「读不到」
+// （账号/来源/分组数据库读取失败，形如 `query accounts failed: %w`）严格区分：
+//   - errors.Is(err, ErrGeminiNoAvailableAccounts) → 空集合，调用方按空目录处理；
+//   - 其它 error → 依赖读取失败，调用方必须失败关闭（如 503 目录读取失败），
+//     不得当成「这个分组只有 Cursor」。
+//
+// 调用方只允许用 errors.Is 判定，**禁止匹配错误字符串**。
+var ErrGeminiNoAvailableAccounts = errors.New("no available Gemini accounts")
+
 const (
 	// google.rpc.RetryInfo 的标准 @type（Vertex AI 429 响应携带，retryDelay 形如 "39s"）
 	geminiRetryInfoTypeURL = "type.googleapis.com/google.rpc.RetryInfo"
@@ -68,6 +80,9 @@ type GeminiMessagesCompatService struct {
 	antigravityGatewayService *AntigravityGatewayService
 	cfg                       *config.Config
 	responseHeaderFilter      *responseheaders.CompiledHeaderFilter
+	// cursorExecution 是 Cursor 平台唯一执行部件（§24.2-2），构造注入；为 nil 时
+	// Cursor 分支失败关闭。
+	cursorExecution *CursorExecutionService
 }
 
 func (s *GeminiMessagesCompatService) readUpstreamErrorBody(resp *http.Response) []byte {
@@ -92,6 +107,7 @@ func NewGeminiMessagesCompatService(
 	httpUpstream HTTPUpstream,
 	antigravityGatewayService *AntigravityGatewayService,
 	cfg *config.Config,
+	cursorExecution *CursorExecutionService,
 ) *GeminiMessagesCompatService {
 	return &GeminiMessagesCompatService{
 		accountRepo:               accountRepo,
@@ -102,6 +118,7 @@ func NewGeminiMessagesCompatService(
 		rateLimitService:          rateLimitService,
 		httpUpstream:              httpUpstream,
 		antigravityGatewayService: antigravityGatewayService,
+		cursorExecution:           cursorExecution,
 		cfg:                       cfg,
 		responseHeaderFilter:      compileResponseHeaderFilter(cfg),
 	}
@@ -152,9 +169,9 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 
 	if selected == nil {
 		if requestedModel != "" {
-			return nil, fmt.Errorf("no available Gemini accounts supporting model: %s", requestedModel)
+			return nil, fmt.Errorf("%w supporting model: %s", ErrGeminiNoAvailableAccounts, requestedModel)
 		}
-		return nil, errors.New("no available Gemini accounts")
+		return nil, ErrGeminiNoAvailableAccounts
 	}
 
 	// 5. 设置粘性会话绑定
@@ -556,7 +573,7 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 	}
 	accounts = geminiOnly
 	if len(accounts) == 0 {
-		return nil, errors.New("no available Gemini accounts")
+		return nil, ErrGeminiNoAvailableAccounts
 	}
 
 	rank := func(a *Account) int {
@@ -625,7 +642,7 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 	}
 
 	if selected == nil {
-		return nil, errors.New("no available Gemini accounts")
+		return nil, ErrGeminiNoAvailableAccounts
 	}
 	return s.hydrateSelectedAccount(ctx, selected)
 }
@@ -635,7 +652,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	// 协议端点，二者不兼容。必须在 Gemini 转换链之前分流——落到通用路径会把
 	// Anthropic 形状的 body 转成 Gemini 形状发往 Cursor 端点，必然被拒并白耗额度。
 	// 转换链：Anthropic → Chat Completions（apicompat）→ 契约 0.1 桥接入口
-	// CursorForwardInbound，再把桥接回写的 Chat Completions 回转成 Anthropic。
+	// 唯一执行部件，再把其回写的 Chat Completions 回转成 Anthropic。
 	if isCursorAccount(account) {
 		return s.forwardCursorMessages(ctx, c, account, body)
 	}
@@ -3881,9 +3898,9 @@ func (s *GeminiMessagesCompatService) extractImageInputSize(body []byte) string 
 //
 // 三个入口的入站形状不同，但出站都收敛到契约 0.1 的包级桥接入口：
 //
-//	Messages（Anthropic 形状） → apicompat 转 Chat Completions → CursorForwardInbound
-//	Chat Completions          → 原样（已是 CC 形状）            → CursorForwardInbound
-//	原生 v1beta（Gemini 形状） → 本地转 Chat Completions         → CursorForwardInbound
+//	Messages（Anthropic 形状） → apicompat 转 Chat Completions → 唯一执行部件
+//	Chat Completions          → 原样（已是 CC 形状）            → 唯一执行部件
+//	原生 v1beta（Gemini 形状） → 本地转 Chat Completions         → 唯一执行部件
 //
 // 桥接会把**客户端响应按 Chat Completions 形状**写进传入的 gin.Context；三个出口
 // 中只有 Chat Completions 出口与该形状一致，Messages / 原生出口必须先把桥接输出
@@ -3934,13 +3951,16 @@ func (w *cursorCompatCaptureWriter) Write(p []byte) (int, error) {
 // Flush 让捕获器满足 http.Flusher（桥接的流式写出断言 c.Writer 可 Flush）。
 func (w *cursorCompatCaptureWriter) Flush() {}
 
-// callCursorTextBridge 以捕获上下文调用契约 0.1 桥接入口。
+// callCursorTextBridge 以捕获上下文调用**唯一执行部件**（Chat 形状输出）。
 //
-// 返回桥接结果、被写出的客户端响应快照（失败时也可能有 ops/错误头）与错误。
-func callCursorTextBridge(
+// 返回执行结果、被写出的客户端响应快照（失败时也可能有 ops/错误头）与错误。
+// Gemini 两出口（Messages / 原生）先把 Chat 形状输出捕获下来再按各自协议回转；
+// 请求体在这里**解码一次**成类型化 Chat 请求（不再传 inbound 形状标识）。
+func (s *GeminiMessagesCompatService) callCursorTextBridge(
 	ctx context.Context,
 	account *Account,
 	ccBody []byte,
+	resumeProtocol CursorResumeProtocol,
 ) (*ForwardResult, *cursorCompatCaptureWriter, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -3953,11 +3973,23 @@ func callCursorTextBridge(
 	}
 	bridgeCtx.Request = req
 
-	res, ferr := CursorForwardInbound(ctx, bridgeCtx, account, cursorInboundOpenAIChat, ccBody)
+	// 续轮命名空间按**客户端协议**登记（Gemini 原生 / Messages），写出仍是 Chat 形状。
+	res, ferr := cursorExecuteChatAs(ctx, bridgeCtx, s.cursorExecution, account, ccBody,
+		cursorProtocolChat, string(resumeProtocol))
 	if capture.status == 0 {
 		capture.status = http.StatusOK
 	}
 	return res, capture, ferr
+}
+
+// forwardCursorChatCompletions 是 Chat Completions 出口的 Cursor 分流（Chat 直出）。
+func (s *GeminiMessagesCompatService) forwardCursorChatCompletions(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+) (*ForwardResult, error) {
+	return cursorExecuteChat(ctx, c, s.cursorExecution, account, body)
 }
 
 // cursorCompatErrorStatus 返回桥接错误对客户端可见的状态码。
@@ -3991,7 +4023,7 @@ func (s *GeminiMessagesCompatService) forwardCursorMessages(
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 
-	res, capture, ferr := callCursorTextBridge(ctx, account, ccBody)
+	res, capture, ferr := s.callCursorTextBridge(ctx, account, ccBody, CursorResumeProtocolMessages)
 	if ferr != nil {
 		return nil, s.writeClaudeError(c, cursorCompatErrorStatus(), "upstream_error", ferr.Error())
 	}
@@ -4033,7 +4065,7 @@ func (s *GeminiMessagesCompatService) forwardCursorNative(
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, err.Error())
 	}
 
-	res, capture, ferr := callCursorTextBridge(ctx, account, ccBody)
+	res, capture, ferr := s.callCursorTextBridge(ctx, account, ccBody, CursorResumeProtocolGemini)
 	if ferr != nil {
 		return nil, s.writeGoogleError(c, cursorCompatErrorStatus(), ferr.Error())
 	}

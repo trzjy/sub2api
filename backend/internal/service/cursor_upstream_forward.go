@@ -136,6 +136,11 @@ type CursorUpstreamRequest struct {
 	// 绝不进入请求头/体，也不参与任何业务逻辑。
 	Model string
 
+	// ToolDelegations 是本轮工具委托的**唯一**记录（§24.2-6）：双工层解码 mcp_args
+	// 后写入这里，响应解析层只读取输出，保证同一帧只解码一次。
+	// nil 时双工层使用本地记录（独立场景），不引入第二份共享状态。
+	ToolDelegations *cursorToolDelegations
+
 	// AuthProvider 是**本次请求**的鉴权材料提供者，覆盖转发器上配置的默认 provider。
 	//
 	// 为什么需要覆盖：x-jg-auth 是**账号级**材料（zk03({d: deviceId, a: 激活码})，
@@ -154,6 +159,9 @@ type CursorUpstreamResponse struct {
 	Body       io.ReadCloser
 	// TargetURL 是实际出站 URL（诊断用，不含任何凭证）。
 	TargetURL string
+	// Duplex 是本次 AgentRun 的原生双向连接持有方（读循环 + 回写 pipe）；
+	// 跨 HTTP 真实结果回写通道（W2-F）经由它把真实结果写回原 exec 关联。
+	Duplex *cursorAgentDuplex
 }
 
 // CursorUpstreamAuthProvider 提供 x-jg-auth 鉴权材料。
@@ -262,7 +270,7 @@ func (f *CursorUpstreamForwarder) Do(
 	var requestBody io.Reader = bytes.NewReader(req.Body)
 	var duplex *cursorAgentDuplex
 	if req.Path == cursorPathAgentRun {
-		duplex, err = newCursorAgentDuplex(req.Body)
+		duplex, err = newCursorAgentDuplex(req.Body, req.ToolDelegations)
 		if err != nil {
 			return nil, err
 		}
@@ -357,6 +365,7 @@ func (f *CursorUpstreamForwarder) Do(
 		Header:     resp.Header,
 		Body:       resp.Body,
 		TargetURL:  target,
+		Duplex:     duplex,
 	}, nil
 }
 

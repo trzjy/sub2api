@@ -3,6 +3,8 @@
 package ent
 
 import (
+	"encoding/json"
+	"encoding/json/jsontext"
 	"fmt"
 	"strings"
 	"time"
@@ -37,6 +39,8 @@ type QuotaKey struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	// DeviceID holds the value of the "device_id" field.
 	DeviceID *string `json:"device_id,omitempty"`
+	// UsageSnapshot holds the value of the "usage_snapshot" field.
+	UsageSnapshot jsontext.Value `json:"usage_snapshot,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
@@ -72,6 +76,8 @@ func (*QuotaKey) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case quotakey.FieldUsageSnapshot:
+			values[i] = new([]byte)
 		case quotakey.FieldExhausted:
 			values[i] = new(sql.NullBool)
 		case quotakey.FieldID:
@@ -165,6 +171,14 @@ func (_m *QuotaKey) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.DeviceID = new(string)
 				*_m.DeviceID = value.String
+			}
+		case quotakey.FieldUsageSnapshot:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field usage_snapshot", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.UsageSnapshot); err != nil {
+					return fmt.Errorf("unmarshal field usage_snapshot: %w", err)
+				}
 			}
 		case quotakey.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -265,6 +279,9 @@ func (_m *QuotaKey) String() string {
 		builder.WriteString("device_id=")
 		builder.WriteString(*v)
 	}
+	builder.WriteString(", ")
+	builder.WriteString("usage_snapshot=")
+	builder.WriteString(fmt.Sprintf("%v", _m.UsageSnapshot))
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

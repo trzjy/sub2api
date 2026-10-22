@@ -43,6 +43,13 @@
             <code class="font-mono text-sm text-gray-900 dark:text-gray-100">{{ value || t('admin.quotaKeys.na') }}</code>
           </template>
 
+          <!-- §25.6⑦ / §25.7-B：来源额度快照（供应商总额/已用/算术剩余 + 观测时间）。
+               无快照 → 不渲染任何数值；最近一次观测失败 → 保留上次成功值并标注查询失败。 -->
+          <template #cell-usage="{ row }">
+            <QuotaKeyUsageCell v-if="row.usage" :usage="row.usage" />
+            <span v-else class="text-sm text-gray-400 dark:text-gray-500">{{ t('admin.quotaKeys.na') }}</span>
+          </template>
+
           <template #cell-status="{ row }">
             <span
               class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium"
@@ -273,6 +280,13 @@
           </div>
         </dl>
 
+        <!-- §25.6⑤⑦：详情展示与列表/probe/账号页同一份已提交快照投影（只读，不发网络）。
+             无快照时只显示占位符，不补 0、不伪造「无额度」。 -->
+        <div class="rounded-lg border border-gray-200 p-2 dark:border-dark-600">
+          <QuotaKeyUsageCell v-if="detail.usage" :usage="detail.usage" />
+          <span v-else class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.quotaKeys.na') }}</span>
+        </div>
+
         <div class="border-t border-gray-200 pt-3 dark:border-dark-600">
           <button
             class="flex w-full items-center justify-between gap-2 text-left"
@@ -421,7 +435,12 @@
       <p v-if="probeResult" class="mt-3 text-xs text-gray-500 dark:text-gray-400">
         {{ t('admin.quotaKeys.probe.keyLevelHint') }}
       </p>
-      <p v-else-if="probeError" class="text-sm text-red-600 dark:text-red-400">{{ probeError }}</p>
+      <!-- §25.6⑤：probe 一并回传**已提交**快照投影（与列表/详情/账号页同源同值），
+           不是把本次 lookup 结果当已落库事实；无快照/失败按同一渲染纪律处理。 -->
+      <div v-if="probeResult?.usage" class="mt-2 border-t border-gray-200 pt-2 dark:border-dark-600">
+        <QuotaKeyUsageCell :usage="probeResult.usage" />
+      </div>
+      <p v-if="!probeResult && probeError" class="text-sm text-red-600 dark:text-red-400">{{ probeError }}</p>
 
       <template #footer>
         <div class="flex items-center justify-end">
@@ -444,7 +463,7 @@ import type {
   QuotaKeyDetail,
   CreateQuotaKeyRequest,
   UpdateQuotaKeyRequest,
-  KeyQuotaInfo
+  ProbeQuotaResponse
 } from '@/api/admin/quotaKeys'
 import type { Column } from '@/components/common/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -456,6 +475,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import TextArea from '@/components/common/TextArea.vue'
 import Icon from '@/components/icons/Icon.vue'
 import AutoEntryConfigModal from '@/components/quotaKeys/AutoEntryConfigModal.vue'
+import QuotaKeyUsageCell from '@/components/quotaKeys/QuotaKeyUsageCell.vue'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -474,7 +494,7 @@ const showSweepDialog = ref(false)
 const showConfigModal = ref(false)
 const showProbeDialog = ref(false)
 const probing = ref(false)
-const probeResult = ref<KeyQuotaInfo | null>(null)
+const probeResult = ref<ProbeQuotaResponse | null>(null)
 const probeError = ref('')
 const editing = ref<QuotaKey | null>(null)
 const deleting = ref<QuotaKey | null>(null)
@@ -496,6 +516,8 @@ const expandedAccounts = reactive(new Set<number>())
 
 const columns = computed<Column[]>(() => [
   { key: 'code_masked', label: t('admin.quotaKeys.columns.maskedCode'), sortable: false },
+  // 来源额度快照列（§25.6⑦）：列名沿用「激活码用量」口径，数值为一层（key/来源）快照。
+  { key: 'usage', label: t('admin.quotaKeys.probe.title'), sortable: false },
   { key: 'status', label: t('admin.quotaKeys.columns.status'), sortable: false },
   { key: 'exhausted', label: t('admin.quotaKeys.columns.exhausted'), sortable: false },
   { key: 'account_count', label: t('admin.quotaKeys.columns.accountCount'), sortable: false },

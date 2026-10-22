@@ -337,7 +337,7 @@ func TestCursorRequestPhaseForwardCursorPhases(t *testing.T) {
 
 	ctx, logs := cursorPhaseObserverCtx(t, "req-fwd-1")
 	body := []byte(`{"model":"cursor-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
-	_, err := svc.forwardCursor(ctx, c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"), body, "cursor-sonnet", false, time.Now())
+	_, err := executeCursorForTest(t, svc, ctx, c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"), body, "cursor-sonnet", false, time.Now())
 	require.NoError(t, err)
 
 	for _, phase := range []string{

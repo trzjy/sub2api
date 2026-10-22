@@ -71,14 +71,47 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		agModels = append(agModels, gemini.FallbackModel(id))
 	}
 	if forcePlatform == service.PlatformAntigravity {
+		// 强制 Antigravity 入口只读 AG 目录：不读 Cursor 供给、不发起 AIStudio 调用。
 		c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(agModels)})
 		return
 	}
 
+	// Cursor 附加目录（方案 §25.14-B「读取与投影」）：走 GatewayService 的窄只读入口
+	// GetCursorSupplyModelIDs，与真实调度同源（已挂组 + 桥接平台 + 来源门 + 分组白名单），
+	// 不读全局 AvailableModels、不补静态清单。
+	//
+	// 错误契约：读取失败（账号/来源/分组白名单读不到）必须失败关闭成 503 目录读取失败，
+	// 不得当成「这个分组只有 Cursor」；成功返回空表才是确定的空集合。未装配
+	// gatewayService 的退化夹具视为「本单未接入 Cursor 供给」，保持原生-only 历史分支
+	// （生产装配恒有值，该分支不参与线上判定）。
+	cursorSupplyWired := h != nil && h.gatewayService != nil
+	var cursorModels []gemini.Model
+	if cursorSupplyWired {
+		cursorModelIDs, cursorErr := h.gatewayService.GetCursorSupplyModelIDs(c.Request.Context(), apiKey.GroupID, service.PlatformGemini)
+		if cursorErr != nil {
+			googleError(c, http.StatusServiceUnavailable, infraerrors.ModelDiscoveryUnavailable)
+			return
+		}
+		cursorModels = cursorSupplyGeminiModels(cursorModelIDs)
+	}
+	// 附加目录 = AG + Cursor，按资源名规范化后去重，同名保留先出现者（原生侧优先）。
+	extraModels := mergeGeminiModelLists(agModels, cursorModels)
+	// hasCursorSupply 标记「本次确实有 Cursor 条目要合并/过滤」。它只用于收窄新行为：
+	// 没有 Cursor 补充时，原生-only 与 AG-only 的历史分支（默认目录兜底、静默透传）
+	// 一律保持原样，不借本轮扩大修改。
+	hasCursorSupply := len(cursorModels) > 0
+
 	account, err := h.geminiCompatService.SelectAccountForAIStudioEndpoints(c.Request.Context(), apiKey.GroupID)
 	if err != nil {
-		if len(agModels) > 0 {
-			c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(agModels)})
+		if len(extraModels) > 0 {
+			c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(extraModels)})
+			return
+		}
+		// 无原生候选（空组 / 全部供给被明确否决 / 全部名被组白名单过滤）：返回 200 与
+		// models: []，不补静态默认列表。只有「确定的空集合」分类才走这里；依赖读取失败
+		//（账号查询报错）仍按下方 503 失败关闭，二者不得混淆。
+		if cursorSupplyWired && errors.Is(err, service.ErrGeminiNoAvailableAccounts) {
+			c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: []gemini.Model{}})
 			return
 		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -92,23 +125,82 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		return
 	}
 	if shouldFallbackGeminiModels(res) {
+		if hasCursorSupply {
+			// 有 Cursor 补充时不得进入旧原生默认目录兜底分支：保留原生明确失败，
+			// 不拿 Cursor/静态目录冒充整份成功结果。
+			writeUpstreamResponse(c, res)
+			return
+		}
 		c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(mergeGeminiModelLists(gemini.DefaultModels(), agModels))})
 		return
 	}
-	if res.StatusCode == http.StatusOK && len(agModels) > 0 {
-		if merged, ok := appendUpstreamGeminiModels(res.Body, agModels); ok {
+	if res.StatusCode == http.StatusOK && len(extraModels) > 0 {
+		merged, ok := appendUpstreamGeminiModels(res.Body, extraModels)
+		if ok {
 			res.Body = merged
+		} else if hasCursorSupply {
+			// 原生 200 但报文无效、且确需合并：明确 502 协议错误，
+			// 不能悄悄漏 Cursor，也不能当成功空目录。
+			googleError(c, http.StatusBadGateway, infraerrors.UpstreamResponseParseFailed)
+			return
 		}
 	}
 
 	if apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
-		if filtered, dropped, ok := filterUpstreamGeminiModelsBody(res.Body, apiKey.Group.ModelAllowlist); ok && dropped {
-			// 只在确有条目被过滤时替换响应体；全命中或解析失败时保持原始响应，
-			// 统一经 writeUpstreamResponse 写出（保留全部上游响应头）。
-			res.Body = filtered
+		if filtered, dropped, ok := filterUpstreamGeminiModelsBody(res.Body, apiKey.Group.ModelAllowlist); ok {
+			if dropped {
+				// 只在确有条目被过滤时替换响应体；全命中时保持原始响应，
+				// 统一经 writeUpstreamResponse 写出（保留全部上游响应头）。
+				res.Body = filtered
+			}
+		} else if hasCursorSupply && res.StatusCode == http.StatusOK {
+			// 原生 200 但报文无效、且确需白名单过滤：明确 502，不悄悄漏过滤。
+			googleError(c, http.StatusBadGateway, infraerrors.UpstreamResponseParseFailed)
+			return
 		}
 	}
 	writeUpstreamResponse(c, res)
+}
+
+// cursorSupplyGeminiModels 把 Cursor 供给的公开模型名投影成 Gemini 目录条目。
+//
+// 公开资源名固定为 models/<公开名>（只做资源名规范化，不改名、不猜厂商、不取 mapping
+// 别名目标）；能力只声明本站适配已实现的 generateContent / streamGenerateContent，
+// 不编造 token 上限、版本、countTokens、embedding 或图像能力。
+func cursorSupplyGeminiModels(publicIDs []string) []gemini.Model {
+	if len(publicIDs) == 0 {
+		return nil
+	}
+	methods := []string{"generateContent", "streamGenerateContent"}
+	models := make([]gemini.Model, 0, len(publicIDs))
+	seen := make(map[string]struct{}, len(publicIDs))
+	for _, id := range publicIDs {
+		resourceName := geminiResourceName(id)
+		if resourceName == "" {
+			continue
+		}
+		if _, exists := seen[resourceName]; exists {
+			continue
+		}
+		seen[resourceName] = struct{}{}
+		models = append(models, gemini.Model{
+			Name:                       resourceName,
+			SupportedGenerationMethods: methods,
+		})
+	}
+	return models
+}
+
+// geminiResourceName 按 Gemini 资源名形式规范化公开模型名（models/ 前缀）。
+func geminiResourceName(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "models/") {
+		return trimmed
+	}
+	return "models/" + trimmed
 }
 
 // mergeGeminiModelLists keeps native metadata when both sources advertise a model.
@@ -373,6 +465,16 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
 	}
 	scope := resolveConcurrencyScope(c, authSubject, subscription)
+
+	// §25.2/§25.14-D：Gemini 原生出口的续轮识别同样在**用户槽/预留/选号之前**。
+	// 同名并行 functionResponse 缺 ID 在这里明确拒绝歧义（不按名字猜配对）。
+	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolGemini, body,
+		cursorResumeIdentity(apiKey, authSubject.UserID), stream, func(status int, message string) {
+			googleError(c, status, message)
+		}) {
+		return
+	}
+
 	userReleaseFunc, err := geminiConcurrency.AcquireScopedUserSlotWithWait(c, scope, authSubject.UserID, stream, &streamStarted)
 	if err != nil {
 		reqLog.Warn("gemini.user_slot_acquire_failed", zap.Error(err))
@@ -394,9 +496,11 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		return
 	}
 	// 确保请求取消时也会释放槽位，避免长连接被动中断造成泄漏
-	userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), userReleaseFunc)
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
+	// §25.4：用户槽改为**可转交**句柄（Cursor 分支交给会话持有，其它供应商语义不变）。
+	userSlot := newTransferableRelease(c.Request.Context(), "user_slot", userReleaseFunc)
+	if userSlot != nil {
+		userReleaseFunc = userSlot.Release
+		defer userSlot.Release()
 	}
 
 	// 2) billing eligibility check (after wait)
@@ -411,7 +515,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	}
 
 	// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
-	inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(modelName, body))
+	inflightHandle, err := reserveTransferableInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(modelName, body))
 	if err != nil {
 		reqLog.Info("gemini.inflight_reservation_rejected", zap.Error(err))
 		status, _, message, retryAfter := billingErrorDetails(err)
@@ -421,7 +525,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		googleError(c, status, message)
 		return
 	}
-	defer inflightRelease()
+	if inflightHandle != nil {
+		defer inflightHandle.Release()
+	}
 
 	// 3) select account (sticky session based on request body)
 	// 优先使用 Gemini CLI 的会话标识（privileged-user-id + tmp 目录哈希）
@@ -676,7 +782,11 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			}
 		}
 		// 账号槽位/等待计数需要在超时或断开时安全回收
-		accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
+		// §25.4：账号槽改用**可转交**句柄（Cursor 分支交给会话持有）。
+		accountSlot := newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
+		if accountSlot != nil {
+			accountReleaseFunc = accountSlot.Release
+		}
 
 		// 5) forward (根据平台分流)
 		var result *service.ForwardResult
@@ -685,6 +795,14 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 		}
 		sessionGroupID := derefGroupID(apiKey.GroupID)
+		// §25.4/§25.5：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额预留转交给会话，
+		// 并把本 HTTP 的计费任务交给会话唯一结算；非 Cursor 账号显式清空转交物。
+		attemptHandover := newCursorResourceHandover(
+			cursorHandoverResources(userSlot, accountSlot, inflightHandle),
+			h.submitMandatoryUsageRecordTask,
+		)
+		requestCtx = bindCursorHandoverForAttempt(requestCtx, account, attemptHandover)
+		c.Request = c.Request.WithContext(requestCtx)
 		if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
 			result, err = h.antigravityGatewayService.ForwardGemini(
 				requestCtx,

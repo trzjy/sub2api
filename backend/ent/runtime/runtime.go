@@ -2091,11 +2091,11 @@ func init() {
 	// quotakey.DeviceIDValidator is a validator for the "device_id" field. It is called by the builders before save.
 	quotakey.DeviceIDValidator = quotakeyDescDeviceID.Validators[0].(func(string) error)
 	// quotakeyDescCreatedAt is the schema descriptor for created_at field.
-	quotakeyDescCreatedAt := quotakeyFields[9].Descriptor()
+	quotakeyDescCreatedAt := quotakeyFields[10].Descriptor()
 	// quotakey.DefaultCreatedAt holds the default value on creation for the created_at field.
 	quotakey.DefaultCreatedAt = quotakeyDescCreatedAt.Default.(func() time.Time)
 	// quotakeyDescUpdatedAt is the schema descriptor for updated_at field.
-	quotakeyDescUpdatedAt := quotakeyFields[10].Descriptor()
+	quotakeyDescUpdatedAt := quotakeyFields[11].Descriptor()
 	// quotakey.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	quotakey.DefaultUpdatedAt = quotakeyDescUpdatedAt.Default.(func() time.Time)
 	// quotakey.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.

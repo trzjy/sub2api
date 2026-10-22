@@ -239,24 +239,20 @@ func (c *shareAIUpstreamClient) PullBatch(ctx context.Context, qk *ent.QuotaKey)
 // 生产装配必注入 *QuotaKeyService，故正常路径走 1/2/3。本函数不返回全局设备值，
 // 也不对存量码做解绑/重激活，各码身份独立。
 func (c *shareAIUpstreamClient) resolveDeviceID(ctx context.Context, qk *ent.QuotaKey, code string) (string, error) {
-	// ① 已持久化 device_id → 全链复用（出站侧经同一 DeviceIDFor 读取，恒同值）。
-	if qk != nil && qk.DeviceID != nil && *qk.DeviceID != "" {
-		return *qk.DeviceID, nil
-	}
-	// 未持久化：需解析器分流"存量/新码"；未注入时退化为既有派生值。
+	// deviceResolver 为 nil（测试占位 / 装配异常）时退化为既有派生值，保持旧语义且不阻断。
 	if c.deviceResolver == nil {
+		if qk != nil && qk.DeviceID != nil && *qk.DeviceID != "" {
+			return *qk.DeviceID, nil
+		}
 		return deviceID(code), nil
 	}
-	// ② 存量（已有账号）→ 保持派生值，不写库、不迁移。
-	has, err := c.deviceResolver.HasAccount(ctx, qk.ID)
+	// §25.14-C：三分支解析只有一份实现（resolveCursorDeviceIdentityWith），出站侧经
+	// QuotaKeyService 的窄面接入，分支判定与取号/Probe 完全同源。
+	identity, err := resolveCursorDeviceIdentityWith(ctx, qk, code, c.deviceResolver.HasAccount, c.deviceResolver.DeviceIDFor)
 	if err != nil {
-		return "", fmt.Errorf("shareai: resolve quota key account: %w", err)
+		return "", err
 	}
-	if has {
-		return deviceID(code), nil
-	}
-	// ③ 新码（无账号）→ DeviceIDFor 生成并持久化，全链复用（含出站）。
-	return c.deviceResolver.DeviceIDFor(ctx, qk.ID)
+	return identity.DeviceID, nil
 }
 
 // refresh 调用 /api/refresh 并解析响应。

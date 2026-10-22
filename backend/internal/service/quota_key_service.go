@@ -319,7 +319,16 @@ func NewQuotaKeyService(repo QuotaKeyRepository, enc QuotaKeyEncryptor, upstream
 	// codeBuddyQuotaInstance 的模式）。调度谓词是包级纯函数、拿不到 service 句柄，
 	// 故在此装配点一次性注入；未装配时资格门降级为不收紧（见
 	// cursorAccountQuotaKeyVetoReason 注释）。
-	InstallCursorQuotaKeyStateProvider(s)
+	//
+	// 仅在**真实装配**（带 ent client）时安装：内存替身装配（client==nil，只存在于测试）
+	// 不能冒充生产级来源状态读取器——它会用替身仓储回答真实 key 的查询并失败关闭，
+	// 把"来源状态不可读"污染到其它用例/其它路径（§25.14-C 要求该门只由真实依赖承担）。
+	if client != nil {
+		InstallCursorQuotaKeyStateProvider(s)
+		// 来源门额度快照读取器与状态读取器同源安装（同一 *QuotaKeyService 实现两个窄接口，
+		// 仍是同一来源门的一份读依赖）；内存替身装配（client==nil）不冒充生产级来源读取器。
+		InstallCursorQuotaKeyUsageSnapshotProvider(s)
+	}
 	return s
 }
 
@@ -361,24 +370,96 @@ func (s *QuotaKeyService) CursorQuotaKeyStatus(ctx context.Context, quotaKeyID i
 	return qk.Status, nil
 }
 
+// CursorQuotaKeyUsageSnapshot 返回激活码 usage_snapshot 列的原始字节，供来源门（§25.6
+// 同一来源门）判定真实来源剩余。落盘该列的写入者只有 CursorAutoEntryService 的观测入口
+// （§25.14-C 唯一写入者），本方法只读、不解析、不发起网络请求。
+//
+// quotaKeyID 无效（≤0）按"无快照"返回 (nil, nil)；读取失败（含 key 不存在）返回 error，
+// 来源门据此失败关闭。
+func (s *QuotaKeyService) CursorQuotaKeyUsageSnapshot(ctx context.Context, quotaKeyID int64) ([]byte, error) {
+	if s == nil || s.repo == nil {
+		return nil, errors.New("quota_key_service: quota key repository unavailable")
+	}
+	if quotaKeyID <= 0 {
+		return nil, nil
+	}
+	qk, err := s.repo.GetByID(ctx, quotaKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if qk == nil {
+		return nil, fmt.Errorf("quota_key_service: quota key %d not found", quotaKeyID)
+	}
+	return qk.UsageSnapshot, nil
+}
+
 // RotateCredentials 加密新激活码原文后写入 code_encrypted / code_mac / code_last4，
 // 返回脱敏后的状态。
 //
 // 不触碰 accounts 表、不发起任何上游请求、不引入 mock。MAC 复用与
 // account_credentials 同型的 HMAC-SHA256 指纹（供 uq_quota_keys_code_mac 唯一索引
 // 做 SQL 级查重），不引入新加密机制。
+//
+// §25.14-C「换码原子边界」：与 Update(code) 归入唯一凭据写方法 rotateCredentials，
+// 同一每 key 锁 + 同一事务内按新旧 MAC 决定是否清空 usage_snapshot。
 func (s *QuotaKeyService) RotateCredentials(ctx context.Context, id int64, newPlain string) (*QuotaKeyStatus, error) {
+	if err := s.rotateCredentials(ctx, id, newPlain); err != nil {
+		return nil, err
+	}
+	return s.GetStatus(ctx, id)
+}
+
+// rotateCredentials 是**唯一**的凭据写实现（RotateCredentials / Update(code) 共用）。
+//
+// 原子边界（§25.14-C）：
+//   - 持同一每 key advisory 锁 + 同一事务，锁内重读旧行比较 MAC；
+//   - 新旧 MAC 不同（换了一串 code）→ 同事务写密文/MAC/last4 并**清空 usage_snapshot**：
+//     旧来源的观测对新来源无意义，留着会让资格门拿过期事实放行；
+//   - 新旧 MAC 相同（同一来源重新加密）→ 只重加密，**不清**已有观测（观测仍然成立）；
+//   - 来源不存在/已软删 → 明确错误（不复活来源），且不写任何东西。
+//
+// 换码不触碰 device_id、账号归属、status、expires_at 及其他元数据；也不自动清 exhausted
+// 或恢复子账号（status 已 expired 的码不会因换串 code 而被重新激活）。
+func (s *QuotaKeyService) rotateCredentials(ctx context.Context, id int64, newPlain string) error {
 	enc, err := s.enc.Encrypt([]byte(newPlain))
 	if err != nil {
-		return nil, err
+		return err
+	}
+	obs, err := asObservationRepo(s.repo)
+	if err != nil {
+		return err
 	}
 	codeEncrypted := string(enc)
 	codeMAC := quotaKeyMACOfPlaintext(newPlain)
 	codeLast4 := last4Of(newPlain)
-	if err := s.repo.UpdateCredentials(ctx, id, codeEncrypted, codeMAC, codeLast4); err != nil {
-		return nil, err
+	return s.withQuotaKeyLock(ctx, id, func(tx *ent.Tx) error {
+		current, lerr := obs.GetByIDInTx(ctx, tx, id)
+		if lerr != nil {
+			// 不存在 / 已软删：明确错误，原样上抛（不复活来源、不静默成功）。
+			return lerr
+		}
+		if current == nil {
+			return fmt.Errorf("quota_key_service: quota key %d not found", id)
+		}
+		// 旧 MAC 为空（历史行 / 未落 MAC）无法证明同源，按"来源已变更"保守处理。
+		sameSource := current.CodeMAC != "" && current.CodeMAC == codeMAC
+		return obs.UpdateCredentialsAtomically(ctx, tx, id, codeEncrypted, codeMAC, codeLast4, !sameSource)
+	})
+}
+
+// withQuotaKeyLock 在"每 key advisory 互斥 + 单事务"骨架上执行 fn（观测/换码共用）。
+//
+// 未配置 ent client（内存替身装配 / 纯单元测试）时退化为直接调用 fn：此时无事务与
+// advisory 锁可用，替身仓储自身即单进程独占实现。生产构造（NewQuotaKeyService）总是带
+// ent client，不会走到该退化分支。
+func (s *QuotaKeyService) withQuotaKeyLock(ctx context.Context, quotaKeyID int64, fn func(tx *ent.Tx) error) error {
+	if s == nil {
+		return errors.New("quota_key_service: service not configured")
 	}
-	return s.GetStatus(ctx, id)
+	if s.client == nil {
+		return fn(nil)
+	}
+	return withQuotaKeyLockTx(ctx, ctx, s.client, quotaKeyID, fn)
 }
 
 // List 全量返回脱敏后的激活码状态列表（明文 code 绝不出现在返回 DTO 中）。
@@ -423,16 +504,13 @@ func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *ti
 // Update 改激活码：code 非 nil 时重加密写 credentials；expiresAt/notes 外层指针非 nil 时写元数据。
 // 元数据外层 nil 表示省略，内层 nil 表示显式清空，否则设置为给定值。
 // 返回脱敏状态。明文 code 只进不出（F1）。
+//
+// 凭据写入走与 RotateCredentials 同一个唯一方法 rotateCredentials（同一每 key 锁 + 同一
+// 事务 + 按 MAC 变化原子清快照）；元数据编辑沿现有契约另行提交，观测不得覆盖并发编辑的
+// expires_at/notes（§25.14-C 换码原子边界末段）。
 func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, expiresAt **time.Time, notes **string) (*QuotaKeyStatus, error) {
 	if code != nil {
-		enc, err := s.enc.Encrypt([]byte(*code))
-		if err != nil {
-			return nil, err
-		}
-		codeEncrypted := string(enc)
-		codeMAC := quotaKeyMACOfPlaintext(*code)
-		codeLast4 := last4Of(*code)
-		if err := s.repo.UpdateCredentials(ctx, id, codeEncrypted, codeMAC, codeLast4); err != nil {
+		if err := s.rotateCredentials(ctx, id, *code); err != nil {
 			return nil, err
 		}
 	}
@@ -519,6 +597,38 @@ func (s *QuotaKeyService) CountAccountsByQuotaKeys(ctx context.Context, ids []in
 // ErrQuotaKeyNotActive 表示激活码存在但已非 active（禁用/过期），不再承载任何账号写入。
 var ErrQuotaKeyNotActive = errors.New("quota key is not active")
 
+// quotaKeyObservationRepo 是「来源额度观测 / 换码」所需的**事务内**仓储能力（§25.14-C）。
+//
+// 单独声明、按需断言，而不是直接扩宽 QuotaKeyRepository：观测写入与换码原子清快照的
+// 消费者只有 CursorAutoEntryService 与 QuotaKeyService 两个入口，而既有的仓储窄替身
+// （出站/执行器侧的测试替身）与它们无关，不应被逼迫实现不相干的写方法。
+//
+// 生产实现 *repository.quotaKeyRepository 全量满足；未实现即失败关闭（不静默跳过写入，
+// 否则会把"没写"当"已提交事实"）。
+type quotaKeyObservationRepo interface {
+	// GetByIDInTx 在给定事务内（已持每 key 锁）重读来源行，用于"未删 + 来源身份（MAC/device）
+	// 复核"；tx 为 nil 时退化为默认连接（内存替身装配）。
+	GetByIDInTx(ctx context.Context, tx *ent.Tx, id int64) (*ent.QuotaKey, error)
+	// UpdateUsageSnapshot 在同一事务内写 usage_snapshot，并在给了合法期限时同事务更新
+	// expires_at（expiresAt 为 nil 表示上游未给出/无效 → 保留原值）。
+	UpdateUsageSnapshot(ctx context.Context, tx *ent.Tx, id int64, snapshot []byte, expiresAt **time.Time) error
+	// UpdateCredentialsAtomically 在同一事务内写凭据（密文/MAC/last4）；clearUsageSnapshot
+	// 为 true 时同事务清空 usage_snapshot（来源身份已变，旧观测对新来源无效）。
+	UpdateCredentialsAtomically(ctx context.Context, tx *ent.Tx, id int64, codeEncrypted, codeMAC, codeLast4 string, clearUsageSnapshot bool) error
+}
+
+// asObservationRepo 断言仓储是否支持观测/换码的事务内能力；不支持即失败关闭。
+func asObservationRepo(repo QuotaKeyRepository) (quotaKeyObservationRepo, error) {
+	if repo == nil {
+		return nil, errors.New("quota_key_service: quota key repository unavailable")
+	}
+	obs, ok := repo.(quotaKeyObservationRepo)
+	if !ok {
+		return nil, errors.New("quota_key_service: quota key repository does not support transactional usage observation")
+	}
+	return obs, nil
+}
+
 // ErrQuotaKeyAccountLimitReached 是"归属某激活码的 working 账号已达 ≤15 上限"的唯一
 // 容量拒绝错误（400 QUOTA_KEY_ACCOUNT_LIMIT_REACHED）。三条写路径（拉号插入 / admin
 // 建号 / admin 改绑）统一返回此错误，不再各自构造各自的计数与拒绝错误。
@@ -591,8 +701,33 @@ func (s *QuotaKeyService) withQuotaKeyCapacity(ctx context.Context, quotaKeyID i
 
 // withQuotaKeyCapacityTx 是 withQuotaKeyCapacity 的实现本体，供不持有 QuotaKeyService
 // 的写路径（admin 建号 / admin 改绑）复用同一入口、同一互斥域，不复制一份临界区。
+//
+// §25.14-C：只抽出"same-key advisory lock + 单事务"这一层公共骨架
+// （withQuotaKeyLockTx），容量入口在骨架内执行**自己的**容量校验；观测/换码入口复用
+// 同一骨架但**不**借用容量/active 门（额度刷新不因容量已满或状态变更被拒绝）。
 func withQuotaKeyCapacityTx(ctx context.Context, client *ent.Client, quotaKeyID int64, fn func(tx *ent.Tx) error) error {
-	tx, err := client.Tx(ctx)
+	return withQuotaKeyLockTx(ctx, ctx, client, quotaKeyID, func(tx *ent.Tx) error {
+		if _, err := checkQuotaKeyCapacityLocked(ctx, tx, quotaKeyID); err != nil {
+			return err
+		}
+		return fn(tx)
+	})
+}
+
+// withQuotaKeyLockTx 是"每 key advisory 互斥 + 单事务"的公共骨架（§25.6 / §25.14-C）。
+//
+// 只提供锁与事务，不内含任何容量/active/来源判定——判定由各自入口在骨架内完成。
+//
+// txCtx 与 lockCtx 分开是为了"网络取消不得带走 DB 收尾"（§25.14-C 步骤 5）：
+//   - txCtx 开启事务，必须是 context.WithoutCancel 派生的**绝对期限**上下文。事务的
+//     生命周期若挂在调用者的可取消 context 上，调用者在 lookup 途中取消会让 transaction
+//     被驱动自动回滚，刚写入的"失败观测"随之一并消失；
+//   - lockCtx 只用于锁等待重试，受调用者期限约束（调用者已取消则不启动、不空转）。
+func withQuotaKeyLockTx(txCtx, lockCtx context.Context, client *ent.Client, quotaKeyID int64, fn func(tx *ent.Tx) error) error {
+	if client == nil {
+		return errors.New("quota_key_service: ent client not configured")
+	}
+	tx, err := client.Tx(txCtx)
 	if err != nil {
 		return fmt.Errorf("quota_key_service: begin tx: %w", err)
 	}
@@ -604,10 +739,7 @@ func withQuotaKeyCapacityTx(ctx context.Context, client *ent.Client, quotaKeyID 
 	}()
 
 	// advisory xact lock：同 key 串行，异 key 不阻塞；提交/回滚时自动释放。
-	if err := acquireAdvisoryXactLock(ctx, tx, quotaKeyAdvisoryLockID(quotaKeyID)); err != nil {
-		return err
-	}
-	if _, err := checkQuotaKeyCapacityLocked(ctx, tx, quotaKeyID); err != nil {
+	if err := acquireAdvisoryXactLock(lockCtx, tx, quotaKeyAdvisoryLockID(quotaKeyID)); err != nil {
 		return err
 	}
 	if err := fn(tx); err != nil {
@@ -692,23 +824,20 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 	// 此处先行把 device_id 落地（独立提交），事务回滚不再波及：
 	//   - 普通读 key（无 FOR UPDATE）：读错误 → 失败关闭（不进上游请求）；
 	//   - 已非 active / 过期 → 跳过首写照旧进事务（后续路径不变）；
-	//   - device_id 为空 且 确为新码（HasAccount==false）→ DeviceIDFor（全局连接「生成+条件写」，
-	//     此刻无行锁，不会自死锁）落地一份稳定值；
-	//   - device_id 为空 但 存量有账号（HasAccount==true）→ 不写不迁移（保持既有派生值语义）。
+	//   - device_id 为空 → 交给三分支唯一实现 resolveCursorDeviceIdentity：
+	//     已有账号（HasAccount==true）的存量码取派生值、不写不迁移；真新码才首写
+	//     （此刻无行锁，不会自死锁）落地一份稳定值。
 	qk0, preErr := s.client.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).Only(ctx)
 	if preErr != nil {
 		return fmt.Errorf("quota_key_service: pre-pull load quota key for device first-write: %w", preErr)
 	}
 	if qk0.Status == domain.QuotaKeyStatusActive && !isExpired(qk0) {
 		if qk0.DeviceID == nil || *qk0.DeviceID == "" {
-			has, hasErr := s.HasAccount(ctx, quotaKeyID)
-			if hasErr != nil {
-				return fmt.Errorf("quota_key_service: resolve account before device first-write: %w", hasErr)
-			}
-			if !has {
-				if _, derr := s.DeviceIDFor(ctx, quotaKeyID); derr != nil {
-					return fmt.Errorf("quota_key_service: device first-write before pull: %w", derr)
-				}
+			// §25.14-C：三分支判定只有一份实现（cursorDeviceBranch），取号 / 出站 / Probe
+			// 共用。取号此处只负责"首写必须在容量事务之前"，且**不消费明文**（取号本来
+			// 就不解密；存量码走派生分支，不写库、不迁移）。
+			if _, derr := ensureCursorDeviceFirstWrite(ctx, s.repo, qk0); derr != nil {
+				return fmt.Errorf("quota_key_service: device first-write before pull: %w", derr)
 			}
 		}
 	}
@@ -1644,8 +1773,10 @@ func (w *quotaKeyModelWater) countsTowardWaterLevel(ctx context.Context, row *en
 	if quotaKeyStatusBlocksCursorScheduling(key.Status) || isExpired(key) {
 		return false, nil
 	}
-	// key 终态门（I2）：归属激活码不可服务 → 不剥夺已有账号供给，仅排除该号。
-	if reason := cursorAccountQuotaKeyVetoReason(ctx, candidate); reason != "" {
+	// key 终态门（I2）+ 真实来源剩余（§25.6 同一来源门）：来源被否决的账号不计入水位。
+	// 来源不可用（含读不到快照，fail-closed）一律不计数，与调度候选粗筛同谓词；
+	// 快照缺失等"按既有缺失规则"的情形不在此否决，账号仍计（与既有水位语义一致）。
+	if reason := cursorSupplySourceAvailabilityVetoReasonString(ctx, candidate); reason != "" {
 		return false, nil
 	}
 

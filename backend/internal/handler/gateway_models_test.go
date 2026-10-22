@@ -101,7 +101,7 @@ func newGatewayModelsHandlerForTest(repo service.AccountRepository, routeRepo ..
 		gatewayService: service.NewGatewayService(
 			repo,
 			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, resolver, nil, nil,
+			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, resolver, nil, nil, nil, /* cursorExecution */
 		),
 	}
 }

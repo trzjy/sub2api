@@ -188,24 +188,24 @@ func newTestGatewayHandler(t *testing.T, group *service.Group, accounts []*servi
 		nil, // cache (disable sticky)
 		nil, // cfg
 		schedulerSnapshot,
-		nil, // concurrencyService (disable load-aware; tryAcquire always acquired)
-		nil, // billingService
-		nil, // rateLimitService
-		nil, // billingCacheService
-		nil, // identityService
-		nil, // httpUpstream
-		nil, // deferredService
-		nil, // claudeTokenProvider
-		nil, // sessionLimitCache
-		nil, // rpmCache
-		nil, // digestStore
-		nil, // settingService
-		nil, // tlsFPProfileService
-		nil, // channelService
-		nil, // resolver
-		nil, // compositeResolver
-		nil, // balanceNotifyService
-		nil, // userPlatformQuotaRepo
+		nil,      // concurrencyService (disable load-aware; tryAcquire always acquired)
+		nil,      // billingService
+		nil,      // rateLimitService
+		nil,      // billingCacheService
+		nil,      // identityService
+		nil,      // httpUpstream
+		nil,      // deferredService
+		nil,      // claudeTokenProvider
+		nil,      // sessionLimitCache
+		nil,      // rpmCache
+		nil,      // digestStore
+		nil,      // settingService
+		nil,      // tlsFPProfileService
+		nil,      // channelService
+		nil,      // resolver
+		nil,      // compositeResolver
+		nil,      // balanceNotifyService
+		nil, nil, /* cursorExecution */ // userPlatformQuotaRepo
 	)
 
 	// RunModeSimple：跳过计费检查，避免引入 repo/cache 依赖。
@@ -216,9 +216,9 @@ func newTestGatewayHandler(t *testing.T, group *service.Group, accounts []*servi
 	concurrencyHelper := NewConcurrencyHelper(concurrencySvc, SSEPingFormatClaude, 0)
 
 	h := &GatewayHandler{
-		gatewayService:         gwSvc,
-		billingCacheService:    billingCacheSvc,
-		concurrencyHelper:      concurrencyHelper,
+		gatewayService:      gwSvc,
+		billingCacheService: billingCacheSvc,
+		concurrencyHelper:   concurrencyHelper,
 		// 这些字段对本测试不敏感，保持较小即可
 		maxAccountSwitchesGemini: 1,
 	}

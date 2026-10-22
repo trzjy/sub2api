@@ -42784,29 +42784,31 @@ func (m *ProxyMutation) ResetEdge(name string) error {
 // QuotaKeyMutation represents an operation that mutates the QuotaKey nodes in the graph.
 type QuotaKeyMutation struct {
 	config
-	op                 Op
-	typ                string
-	id                 *int64
-	deleted_at         *time.Time
-	code_encrypted     *string
-	code_mac           *string
-	code_last4         *string
-	status             *string
-	exhausted          *bool
-	last_refresh_error *string
-	last_refresh_at    *time.Time
-	expires_at         *time.Time
-	device_id          *string
-	created_at         *time.Time
-	updated_at         *time.Time
-	notes              *string
-	clearedFields      map[string]struct{}
-	accounts           map[int64]struct{}
-	removedaccounts    map[int64]struct{}
-	clearedaccounts    bool
-	done               bool
-	oldValue           func(context.Context) (*QuotaKey, error)
-	predicates         []predicate.QuotaKey
+	op                   Op
+	typ                  string
+	id                   *int64
+	deleted_at           *time.Time
+	code_encrypted       *string
+	code_mac             *string
+	code_last4           *string
+	status               *string
+	exhausted            *bool
+	last_refresh_error   *string
+	last_refresh_at      *time.Time
+	expires_at           *time.Time
+	device_id            *string
+	usage_snapshot       *jsontext.Value
+	appendusage_snapshot jsontext.Value
+	created_at           *time.Time
+	updated_at           *time.Time
+	notes                *string
+	clearedFields        map[string]struct{}
+	accounts             map[int64]struct{}
+	removedaccounts      map[int64]struct{}
+	clearedaccounts      bool
+	done                 bool
+	oldValue             func(context.Context) (*QuotaKey, error)
+	predicates           []predicate.QuotaKey
 }
 
 var _ ent.Mutation = (*QuotaKeyMutation)(nil)
@@ -43358,6 +43360,71 @@ func (m *QuotaKeyMutation) ResetDeviceID() {
 	delete(m.clearedFields, quotakey.FieldDeviceID)
 }
 
+// SetUsageSnapshot sets the "usage_snapshot" field.
+func (m *QuotaKeyMutation) SetUsageSnapshot(j jsontext.Value) {
+	m.usage_snapshot = &j
+	m.appendusage_snapshot = nil
+}
+
+// UsageSnapshot returns the value of the "usage_snapshot" field in the mutation.
+func (m *QuotaKeyMutation) UsageSnapshot() (r jsontext.Value, exists bool) {
+	v := m.usage_snapshot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUsageSnapshot returns the old "usage_snapshot" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldUsageSnapshot(ctx context.Context) (v jsontext.Value, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUsageSnapshot is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUsageSnapshot requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUsageSnapshot: %w", err)
+	}
+	return oldValue.UsageSnapshot, nil
+}
+
+// AppendUsageSnapshot adds j to the "usage_snapshot" field.
+func (m *QuotaKeyMutation) AppendUsageSnapshot(j jsontext.Value) {
+	m.appendusage_snapshot = append(m.appendusage_snapshot, j...)
+}
+
+// AppendedUsageSnapshot returns the list of values that were appended to the "usage_snapshot" field in this mutation.
+func (m *QuotaKeyMutation) AppendedUsageSnapshot() (jsontext.Value, bool) {
+	if len(m.appendusage_snapshot) == 0 {
+		return nil, false
+	}
+	return m.appendusage_snapshot, true
+}
+
+// ClearUsageSnapshot clears the value of the "usage_snapshot" field.
+func (m *QuotaKeyMutation) ClearUsageSnapshot() {
+	m.usage_snapshot = nil
+	m.appendusage_snapshot = nil
+	m.clearedFields[quotakey.FieldUsageSnapshot] = struct{}{}
+}
+
+// UsageSnapshotCleared returns if the "usage_snapshot" field was cleared in this mutation.
+func (m *QuotaKeyMutation) UsageSnapshotCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldUsageSnapshot]
+	return ok
+}
+
+// ResetUsageSnapshot resets all changes to the "usage_snapshot" field.
+func (m *QuotaKeyMutation) ResetUsageSnapshot() {
+	m.usage_snapshot = nil
+	m.appendusage_snapshot = nil
+	delete(m.clearedFields, quotakey.FieldUsageSnapshot)
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (m *QuotaKeyMutation) SetCreatedAt(t time.Time) {
 	m.created_at = &t
@@ -43567,7 +43634,7 @@ func (m *QuotaKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *QuotaKeyMutation) Fields() []string {
-	fields := make([]string, 0, 13)
+	fields := make([]string, 0, 14)
 	if m.deleted_at != nil {
 		fields = append(fields, quotakey.FieldDeletedAt)
 	}
@@ -43597,6 +43664,9 @@ func (m *QuotaKeyMutation) Fields() []string {
 	}
 	if m.device_id != nil {
 		fields = append(fields, quotakey.FieldDeviceID)
+	}
+	if m.usage_snapshot != nil {
+		fields = append(fields, quotakey.FieldUsageSnapshot)
 	}
 	if m.created_at != nil {
 		fields = append(fields, quotakey.FieldCreatedAt)
@@ -43635,6 +43705,8 @@ func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.ExpiresAt()
 	case quotakey.FieldDeviceID:
 		return m.DeviceID()
+	case quotakey.FieldUsageSnapshot:
+		return m.UsageSnapshot()
 	case quotakey.FieldCreatedAt:
 		return m.CreatedAt()
 	case quotakey.FieldUpdatedAt:
@@ -43670,6 +43742,8 @@ func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldExpiresAt(ctx)
 	case quotakey.FieldDeviceID:
 		return m.OldDeviceID(ctx)
+	case quotakey.FieldUsageSnapshot:
+		return m.OldUsageSnapshot(ctx)
 	case quotakey.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
 	case quotakey.FieldUpdatedAt:
@@ -43755,6 +43829,13 @@ func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDeviceID(v)
 		return nil
+	case quotakey.FieldUsageSnapshot:
+		v, ok := value.(jsontext.Value)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUsageSnapshot(v)
+		return nil
 	case quotakey.FieldCreatedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -43827,6 +43908,9 @@ func (m *QuotaKeyMutation) ClearedFields() []string {
 	if m.FieldCleared(quotakey.FieldDeviceID) {
 		fields = append(fields, quotakey.FieldDeviceID)
 	}
+	if m.FieldCleared(quotakey.FieldUsageSnapshot) {
+		fields = append(fields, quotakey.FieldUsageSnapshot)
+	}
 	if m.FieldCleared(quotakey.FieldNotes) {
 		fields = append(fields, quotakey.FieldNotes)
 	}
@@ -43864,6 +43948,9 @@ func (m *QuotaKeyMutation) ClearField(name string) error {
 		return nil
 	case quotakey.FieldDeviceID:
 		m.ClearDeviceID()
+		return nil
+	case quotakey.FieldUsageSnapshot:
+		m.ClearUsageSnapshot()
 		return nil
 	case quotakey.FieldNotes:
 		m.ClearNotes()
@@ -43905,6 +43992,9 @@ func (m *QuotaKeyMutation) ResetField(name string) error {
 		return nil
 	case quotakey.FieldDeviceID:
 		m.ResetDeviceID()
+		return nil
+	case quotakey.FieldUsageSnapshot:
+		m.ResetUsageSnapshot()
 		return nil
 	case quotakey.FieldCreatedAt:
 		m.ResetCreatedAt()

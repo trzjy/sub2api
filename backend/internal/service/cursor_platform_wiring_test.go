@@ -370,36 +370,33 @@ func TestCursorAuthProviderFailsClosedOnUnresolvableKey(t *testing.T) {
 // E6 起协议桥已实现，故本用例的失败关闭点前移到**依赖装配**层：
 // 未注入转发器/鉴权依赖时必须在发出任何请求前失败。
 func TestForwardCursorFailsClosed(t *testing.T) {
-	svc := NewOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{
-		1: {ID: 1, CodeEncrypted: "ACTIVATION-CODE-ONE"},
-	}}
-	svc.SetCursorAuthDeps(repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
-	// 注入一个"任何出站都拒绝"的转发器：若 forwardCursor 真发出请求，用例即失败。
-	svc.SetCursorForwarder(NewCursorUpstreamForwarder(
-		WithCursorUpstreamHTTPClient(&http.Client{Transport: &cursorRejectAllTransport{t}})))
-
 	body := []byte(`{"model":"cursor-sonnet","messages":[{"role":"user","content":"hi"}]}`)
-
-	// 账号有 model_mapping 但 deviceId 解析器缺失 → 失败关闭（绝不发出无鉴权请求）。
-	acc := &Account{
+	mapped := &Account{
 		ID: 1, Platform: PlatformCursor, QuotaKeyID: qkID(1),
 		Credentials: map[string]any{"model_mapping": map[string]any{"cursor-sonnet": "upstream-sonnet"}},
 	}
-	svc.cursorDeviceIDs = nil
-	_, err := svc.forwardCursor(context.Background(), nil, acc, body, "cursor-sonnet", false, time.Now())
-	require.Error(t, err)
 
-	// 无 model_mapping → 模型闸门先失败关闭（不得把任意模型名发往 Cursor 端点）。
-	svc.cursorDeviceIDs = cursorTestDeviceIDs(repo)
-	_, err = svc.forwardCursor(context.Background(), nil,
+	// ① 未装配执行部件 → 失败关闭（旧链的"默认转发器构造"回退已删除，§24.2-2）。
+	unwired := NewOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil /* cursorExecution */)
+	_, err := executeCursorForTest(t, unwired, context.Background(), nil, mapped, body, "cursor-sonnet", false, time.Now())
+	require.ErrorIs(t, err, ErrCursorExecutionUnavailable)
+
+	// ② 装配执行部件后：无 model_mapping → 模型闸门先失败关闭（绝不发出请求）。
+	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{
+		1: {ID: 1, CodeEncrypted: "ACTIVATION-CODE-ONE"},
+	}}
+	svc := NewOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil /* cursorExecution */)
+	svc.cursorExecution = attachCursorTestExecution(t, svc, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo),
+		NewCursorUpstreamForwarder(WithCursorUpstreamHTTPClient(&http.Client{Transport: &cursorRejectAllTransport{t}})))
+
+	_, err = executeCursorForTest(t, svc, context.Background(), nil,
 		&Account{ID: 2, Platform: PlatformCursor, QuotaKeyID: qkID(1)}, body, "whatever", false, time.Now())
-	require.Error(t, err)
-	require.NotErrorIs(t, err, ErrCursorProtocolBridgeUnavailable)
+	require.ErrorIs(t, err, ErrCursorModelNotMapped)
 
-	// 非 cursor 账号 → 拒绝。
-	_, err = svc.forwardCursor(context.Background(), nil,
+	// ③ 非 cursor 账号 → 拒绝（分派谓词先于任何出站）。
+	_, err = executeCursorForTest(t, svc, context.Background(), nil,
 		&Account{ID: 3, Platform: PlatformOpenAI}, body, "m", false, time.Now())
 	require.Error(t, err)
 }

@@ -4,12 +4,14 @@ package ent
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
@@ -208,6 +210,24 @@ func (_u *QuotaKeyUpdate) SetNillableDeviceID(v *string) *QuotaKeyUpdate {
 // ClearDeviceID clears the value of the "device_id" field.
 func (_u *QuotaKeyUpdate) ClearDeviceID() *QuotaKeyUpdate {
 	_u.mutation.ClearDeviceID()
+	return _u
+}
+
+// SetUsageSnapshot sets the "usage_snapshot" field.
+func (_u *QuotaKeyUpdate) SetUsageSnapshot(v jsontext.Value) *QuotaKeyUpdate {
+	_u.mutation.SetUsageSnapshot(v)
+	return _u
+}
+
+// AppendUsageSnapshot appends value to the "usage_snapshot" field.
+func (_u *QuotaKeyUpdate) AppendUsageSnapshot(v jsontext.Value) *QuotaKeyUpdate {
+	_u.mutation.AppendUsageSnapshot(v)
+	return _u
+}
+
+// ClearUsageSnapshot clears the value of the "usage_snapshot" field.
+func (_u *QuotaKeyUpdate) ClearUsageSnapshot() *QuotaKeyUpdate {
+	_u.mutation.ClearUsageSnapshot()
 	return _u
 }
 
@@ -417,6 +437,17 @@ func (_u *QuotaKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.DeviceIDCleared() {
 		_spec.ClearField(quotakey.FieldDeviceID, field.TypeString)
+	}
+	if value, ok := _u.mutation.UsageSnapshot(); ok {
+		_spec.SetField(quotakey.FieldUsageSnapshot, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedUsageSnapshot(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, quotakey.FieldUsageSnapshot, value)
+		})
+	}
+	if _u.mutation.UsageSnapshotCleared() {
+		_spec.ClearField(quotakey.FieldUsageSnapshot, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(quotakey.FieldUpdatedAt, field.TypeTime, value)
@@ -674,6 +705,24 @@ func (_u *QuotaKeyUpdateOne) ClearDeviceID() *QuotaKeyUpdateOne {
 	return _u
 }
 
+// SetUsageSnapshot sets the "usage_snapshot" field.
+func (_u *QuotaKeyUpdateOne) SetUsageSnapshot(v jsontext.Value) *QuotaKeyUpdateOne {
+	_u.mutation.SetUsageSnapshot(v)
+	return _u
+}
+
+// AppendUsageSnapshot appends value to the "usage_snapshot" field.
+func (_u *QuotaKeyUpdateOne) AppendUsageSnapshot(v jsontext.Value) *QuotaKeyUpdateOne {
+	_u.mutation.AppendUsageSnapshot(v)
+	return _u
+}
+
+// ClearUsageSnapshot clears the value of the "usage_snapshot" field.
+func (_u *QuotaKeyUpdateOne) ClearUsageSnapshot() *QuotaKeyUpdateOne {
+	_u.mutation.ClearUsageSnapshot()
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *QuotaKeyUpdateOne) SetUpdatedAt(v time.Time) *QuotaKeyUpdateOne {
 	_u.mutation.SetUpdatedAt(v)
@@ -910,6 +959,17 @@ func (_u *QuotaKeyUpdateOne) sqlSave(ctx context.Context) (_node *QuotaKey, err 
 	}
 	if _u.mutation.DeviceIDCleared() {
 		_spec.ClearField(quotakey.FieldDeviceID, field.TypeString)
+	}
+	if value, ok := _u.mutation.UsageSnapshot(); ok {
+		_spec.SetField(quotakey.FieldUsageSnapshot, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedUsageSnapshot(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, quotakey.FieldUsageSnapshot, value)
+		})
+	}
+	if _u.mutation.UsageSnapshotCleared() {
+		_spec.ClearField(quotakey.FieldUsageSnapshot, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(quotakey.FieldUpdatedAt, field.TypeTime, value)

@@ -270,7 +270,7 @@ func cmNewGatewayHandler(t *testing.T, group *service.Group, accounts []*service
 	gwSvc := service.NewGatewayService(
 		nil, &cmGroupRepo{group: group}, nil, nil, nil, nil, nil, nil, nil,
 		snapshot, nil, nil, nil, nil, nil, withUpstream, nil, nil, nil, nil, nil, nil,
-		nil, channelSvc, nil, nil, nil, nil,
+		nil, channelSvc, nil, nil, nil, nil, nil, /* cursorExecution */
 	)
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
@@ -280,14 +280,14 @@ func cmNewGatewayHandler(t *testing.T, group *service.Group, accounts []*service
 	// Gemini 网关经 GatewayHandler.GeminiV1BetaModels → GeminiMessagesCompatService.
 	// ForwardNative 转发到注入的 cmHTTPUpstream（捕获 model B），故需在此接入该服务。
 	geminiCompatSvc := service.NewGeminiMessagesCompatService(
-		nil, nil, nil, nil, nil, nil, withUpstream, nil, cfg,
+		nil, nil, nil, nil, nil, nil, withUpstream, nil, cfg, nil, /* cursorExecution */
 	)
 	h := &GatewayHandler{
-		gatewayService:              gwSvc,
-		billingCacheService:         billingCacheSvc,
-		concurrencyHelper:           concurrencyHelper,
-		maxAccountSwitchesGemini:    1,
-		geminiCompatService: geminiCompatSvc,
+		gatewayService:           gwSvc,
+		billingCacheService:      billingCacheSvc,
+		concurrencyHelper:        concurrencyHelper,
+		maxAccountSwitchesGemini: 1,
+		geminiCompatService:      geminiCompatSvc,
 	}
 	return h, sched
 }
@@ -367,6 +367,7 @@ func (r *cmOpenAIAccountRepo) ListSchedulableByPlatform(ctx context.Context, _ s
 	}
 	return out, nil
 }
+
 // ListModelAvailabilityCandidates 实现调度链 TierRoutingGateOpen 新依赖的接口方法
 // （openai_account_scheduler.go:2580）。按 repository 层契约（account_repo.go:2522）
 // 返回持久配置的管理态候选：fake 原样返回其持有的全部账号（X/Y 两条都可作为候选），
@@ -402,7 +403,7 @@ func cmNewOpenAIGatewayHandler(t *testing.T, group *service.Group, repo *cmOpenA
 	gatewaySvc := service.NewOpenAIGatewayService(
 		repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
 		service.NewBillingService(cfg, nil), nil, billingCacheSvc, upstream,
-		&service.DeferredService{}, nil, nil, nil, channelSvc, nil, nil, nil, nil,
+		&service.DeferredService{}, nil, nil, nil, channelSvc, nil, nil, nil, nil, nil, /* cursorExecution */
 	)
 	concurrencySvc := service.NewConcurrencyService(&concurrencyCacheMock{
 		acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },
@@ -676,7 +677,7 @@ func TestChannelMappedOpenAIWSResponsesExcludesRateLimitedAccount(t *testing.T) 
 	gatewaySvc := service.NewOpenAIGatewayService(
 		repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
 		service.NewBillingService(cfg, nil), nil, billingCacheSvc, nil,
-		&service.DeferredService{}, nil, nil, nil, channelSvc, nil, nil, nil, nil,
+		&service.DeferredService{}, nil, nil, nil, channelSvc, nil, nil, nil, nil, nil, /* cursorExecution */
 	)
 	cache := &concurrencyCacheMock{
 		acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },
@@ -762,7 +763,7 @@ func TestChannelMappedNoMappingDoesNotExcludeAccount(t *testing.T) {
 	gwSvc := service.NewGatewayService(
 		nil, &cmGroupRepo{group: group}, nil, nil, nil, nil, nil, nil, nil,
 		snapshot, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, /* cursorExecution */
 	)
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)

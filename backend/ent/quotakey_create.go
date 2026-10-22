@@ -4,6 +4,7 @@ package ent
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"time"
@@ -152,6 +153,12 @@ func (_c *QuotaKeyCreate) SetNillableDeviceID(v *string) *QuotaKeyCreate {
 	if v != nil {
 		_c.SetDeviceID(*v)
 	}
+	return _c
+}
+
+// SetUsageSnapshot sets the "usage_snapshot" field.
+func (_c *QuotaKeyCreate) SetUsageSnapshot(v jsontext.Value) *QuotaKeyCreate {
+	_c.mutation.SetUsageSnapshot(v)
 	return _c
 }
 
@@ -387,6 +394,10 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DeviceID(); ok {
 		_spec.SetField(quotakey.FieldDeviceID, field.TypeString, value)
 		_node.DeviceID = &value
+	}
+	if value, ok := _c.mutation.UsageSnapshot(); ok {
+		_spec.SetField(quotakey.FieldUsageSnapshot, field.TypeJSON, value)
+		_node.UsageSnapshot = value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(quotakey.FieldCreatedAt, field.TypeTime, value)
@@ -627,6 +638,24 @@ func (u *QuotaKeyUpsert) UpdateDeviceID() *QuotaKeyUpsert {
 // ClearDeviceID clears the value of the "device_id" field.
 func (u *QuotaKeyUpsert) ClearDeviceID() *QuotaKeyUpsert {
 	u.SetNull(quotakey.FieldDeviceID)
+	return u
+}
+
+// SetUsageSnapshot sets the "usage_snapshot" field.
+func (u *QuotaKeyUpsert) SetUsageSnapshot(v jsontext.Value) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldUsageSnapshot, v)
+	return u
+}
+
+// UpdateUsageSnapshot sets the "usage_snapshot" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdateUsageSnapshot() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldUsageSnapshot)
+	return u
+}
+
+// ClearUsageSnapshot clears the value of the "usage_snapshot" field.
+func (u *QuotaKeyUpsert) ClearUsageSnapshot() *QuotaKeyUpsert {
+	u.SetNull(quotakey.FieldUsageSnapshot)
 	return u
 }
 
@@ -891,6 +920,27 @@ func (u *QuotaKeyUpsertOne) UpdateDeviceID() *QuotaKeyUpsertOne {
 func (u *QuotaKeyUpsertOne) ClearDeviceID() *QuotaKeyUpsertOne {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.ClearDeviceID()
+	})
+}
+
+// SetUsageSnapshot sets the "usage_snapshot" field.
+func (u *QuotaKeyUpsertOne) SetUsageSnapshot(v jsontext.Value) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetUsageSnapshot(v)
+	})
+}
+
+// UpdateUsageSnapshot sets the "usage_snapshot" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdateUsageSnapshot() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateUsageSnapshot()
+	})
+}
+
+// ClearUsageSnapshot clears the value of the "usage_snapshot" field.
+func (u *QuotaKeyUpsertOne) ClearUsageSnapshot() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearUsageSnapshot()
 	})
 }
 
@@ -1326,6 +1376,27 @@ func (u *QuotaKeyUpsertBulk) UpdateDeviceID() *QuotaKeyUpsertBulk {
 func (u *QuotaKeyUpsertBulk) ClearDeviceID() *QuotaKeyUpsertBulk {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.ClearDeviceID()
+	})
+}
+
+// SetUsageSnapshot sets the "usage_snapshot" field.
+func (u *QuotaKeyUpsertBulk) SetUsageSnapshot(v jsontext.Value) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetUsageSnapshot(v)
+	})
+}
+
+// UpdateUsageSnapshot sets the "usage_snapshot" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdateUsageSnapshot() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateUsageSnapshot()
+	})
+}
+
+// ClearUsageSnapshot clears the value of the "usage_snapshot" field.
+func (u *QuotaKeyUpsertBulk) ClearUsageSnapshot() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearUsageSnapshot()
 	})
 }
 

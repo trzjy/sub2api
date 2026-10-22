@@ -144,15 +144,27 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	defer cf524StopHeartbeat()
 
 	scope := resolveConcurrencyScope(c, subject, subscription)
+
+	// §25.2/§25.14-D：续轮识别与整批接管必须发生在**用户槽/预留/选号之前**。
+	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolResponses, body,
+		cursorResumeIdentity(apiKey, subject.UserID), reqStream, func(status int, message string) {
+			h.responsesErrorResponse(c, status, "invalid_request_error", message)
+		}) {
+		return
+	}
+
 	userReleaseFunc, err := h.concurrencyHelper.AcquireScopedUserSlotWithWait(c, scope, subject.UserID, reqStream, &streamStarted)
 	if err != nil {
 		reqLog.Warn("gateway.responses.user_slot_acquire_failed", zap.Error(err))
 		h.handleConcurrencyError(c, err, scope.Kind, streamStarted)
 		return
 	}
-	userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), userReleaseFunc)
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
+	// §25.4：用户槽改为**可转交**句柄。Cursor 分支把释放所有权交给会话持有；
+	// 其它供应商仍按原 HTTP 生命周期释放（语义不变，仍只 release 一次）。
+	userSlot := newTransferableRelease(c.Request.Context(), "user_slot", userReleaseFunc)
+	if userSlot != nil {
+		userReleaseFunc = userSlot.Release
+		defer userSlot.Release()
 	}
 
 	// 2. Re-check billing
@@ -167,7 +179,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	}
 
 	// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
-	inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
+	inflightHandle, err := reserveTransferableInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
 	if err != nil {
 		reqLog.Info("gateway.responses.inflight_reservation_rejected", zap.Error(err))
 		status, code, message, retryAfter := billingErrorDetails(err)
@@ -177,7 +189,9 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		h.responsesErrorResponse(c, status, code, message)
 		return
 	}
-	defer inflightRelease()
+	if inflightHandle != nil {
+		defer inflightHandle.Release()
+	}
 
 	// Parse request for session hash
 	bodyRef := service.NewRequestBodyRef(body)
@@ -280,7 +294,11 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				reqLog.Warn("gateway.responses.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			}
 		}
-		accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
+		// §25.4：账号槽同样改为**可转交**句柄（Cursor 分支交给会话持有）。
+		accountSlot := newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
+		if accountSlot != nil {
+			accountReleaseFunc = accountSlot.Release
+		}
 
 		// 5. Forward request
 		// CF524（外审修复）：心跳基线须与 writerSizeBeforeForward 同时点捕获——判定用
@@ -294,6 +312,17 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
+		// §25.4/§25.5：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额预留转交给会话，
+		// 并把本 HTTP 的计费任务交给会话唯一结算；非 Cursor 账号不做任何转交。
+		forwardCtx := requestCtx
+		if isCursorPlatformAccount(account) {
+			handover := newCursorResourceHandover(
+				cursorHandoverResources(userSlot, accountSlot, inflightHandle),
+				h.submitMandatoryUsageRecordTask,
+			)
+			forwardCtx = bindCursorHandoverForAttempt(requestCtx, account, handover)
+			c.Request = c.Request.WithContext(forwardCtx)
+		}
 		var result *service.ForwardResult
 		setActualUpstreamEndpoint(c, "")
 		if shouldUseAntigravityCompat(account) {
@@ -305,9 +334,9 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				return
 			}
 			setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
-			result, err = h.antigravityGatewayService.ForwardAsResponses(requestCtx, c, account, forwardBody, parsedReq)
+			result, err = h.antigravityGatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
 		} else {
-			result, err = h.gatewayService.ForwardAsResponses(requestCtx, c, account, forwardBody, parsedReq)
+			result, err = h.gatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
 		}
 
 		if accountReleaseFunc != nil {

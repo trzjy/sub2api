@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -40,16 +41,27 @@ func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeyS
 	return &QuotaKeyHandler{svc: svc, sweeper: sweeper, autoEntry: autoEntry}
 }
 
+// quotaKeySummaryView 是激活码的展示投影：既有脱敏标量 + 来源额度快照投影
+// （方案 §25.6 消费闭包⑤⑥ / §25.7-B）。
+//
+// 顶层 quota_key_summaries 与列表 items 使用同一类型、同一份值：
+// 因此 quota key 列表/详情/probe 与账号页拿到的快照值天然一致（§25.8 lite/full 同值）。
+// Usage 为 nil 时按 omitempty 省略——无快照不等于 0，前端不得按 0 渲染。
+type quotaKeySummaryView struct {
+	dto.QuotaKey
+	Usage *service.QuotaKeyUsageProjection `json:"usage,omitempty"`
+}
+
 // quotaKeySummaryEnvelope 复用既有分页信封（response.PaginatedData），在顶层追加
 // quota_key_summaries（§4.4 / §4.5）。omitempty 保证无汇总时 JSON 形态与既有完全一致。
 type quotaKeySummaryEnvelope struct {
 	response.PaginatedData
-	QuotaKeySummaries []dto.QuotaKey `json:"quota_key_summaries,omitempty"`
+	QuotaKeySummaries []quotaKeySummaryView `json:"quota_key_summaries,omitempty"`
 }
 
 // respondQuotaKeySummaries 输出带顶层 quota_key_summaries 的分页响应。
 // 汇总一次性由调用方给出（杜绝 N+1：与页数、条目数无关的常数次查询）。
-func respondQuotaKeySummaries(c *gin.Context, items any, total int64, page, pageSize int, summaries []dto.QuotaKey) {
+func respondQuotaKeySummaries(c *gin.Context, items any, total int64, page, pageSize int, summaries []quotaKeySummaryView) {
 	if pageSize < 1 {
 		pageSize = 1
 	}
@@ -91,7 +103,8 @@ func maskedQuotaKey(st *service.QuotaKeyStatus) dto.QuotaKey {
 // 同源同谓词（未软删 DeletedAt==nil；working = Schedulable && Status=="active"），
 // 不在此处另写一份计数循环，也杜绝逐激活码查询的 N+1。
 func (h *QuotaKeyHandler) List(c *gin.Context) {
-	statuses, err := h.svc.List(c.Request.Context())
+	// 一次仓储查询同时取脱敏状态与额度快照投影（同一行记录解析，常量次查询、无网络探测）。
+	statuses, err := h.svc.ListWithUsageProjections(c.Request.Context())
 	if err != nil {
 		respondQuotaKeyError(c, err)
 		return
@@ -106,16 +119,16 @@ func (h *QuotaKeyHandler) List(c *gin.Context) {
 		respondQuotaKeyError(c, err)
 		return
 	}
-	items := make([]dto.QuotaKey, 0, len(statuses))
+	items := make([]quotaKeySummaryView, 0, len(statuses))
 	for _, st := range statuses {
-		item := maskedQuotaKey(st)
+		item := quotaKeySummaryView{QuotaKey: maskedQuotaKey(st), Usage: st.Usage}
 		// service 保证对每个入参 id 都给出一个条目；直接取用即 service 口径，不设零值兜底分支。
 		cnt := counts[st.ID]
 		item.AccountCount = cnt.AccountCount
 		item.WorkingCount = cnt.WorkingCount
 		items = append(items, item)
 	}
-	// items 与 quota_key_summaries 传的是同一切片，天然同批对象、计数一致。
+	// items 与 quota_key_summaries 传的是同一切片，天然同批对象、计数与快照一致。
 	respondQuotaKeySummaries(c, items, int64(len(items)), 1, len(items), items)
 }
 
@@ -183,6 +196,14 @@ func (h *QuotaKeyHandler) Get(c *gin.Context) {
 	if err != nil {
 		respondQuotaKeyError(c, err)
 		return
+	}
+	// §25.6⑤：详情与列表/probe 展示同一份**已提交**快照投影（只读，不发网络查询）。
+	// 读取失败仅降级省略该字段：不填 0、不伪造"无额度"（缺失不是 0）。
+	usage, usageErr := h.svc.QuotaKeyUsageProjectionFor(c.Request.Context(), id)
+	if usageErr != nil {
+		slog.Warn("admin_quota_key_usage_projection_failed", "quota_key_id", id, "error", usageErr)
+	} else {
+		status.Usage = usage
 	}
 	page, pageSize := response.ParsePagination(c)
 	total := int64(len(accounts))
@@ -406,8 +427,18 @@ func (h *QuotaKeyHandler) UpdateAutoEntryConfig(c *gin.Context) {
 	response.Success(c, updated)
 }
 
+// probeQuotaResponse 是 probe 响应：既有 lookup 摘要 + 同一份快照投影（§25.6⑤）。
+//
+// 嵌入既有 *service.KeyQuotaLookupInfo 保持原有 JSON 形态不变，仅新增 usage；
+// usage 取自**已提交**的 quota_keys.usage_snapshot（本单只读：快照写入者由后续单落地），
+// 因此 probe 返回与列表/详情/账号页看到的是同一个值，不存在"探测结果直接当已提交事实"。
+type probeQuotaResponse struct {
+	*service.KeyQuotaLookupInfo
+	Usage *service.QuotaKeyUsageProjection `json:"usage,omitempty"`
+}
+
 // ProbeQuota 手动触发某激活码的 key 级用量查询（lookup），并把额度快照写入其全部账号 extra。
-// 返回 key_info 摘要（状态/额度/设备/到期等）。
+// 返回 key_info 摘要（状态/额度/设备/到期等）+ 已提交快照投影。
 // POST /api/v1/admin/quota_keys/:id/probe_quota
 func (h *QuotaKeyHandler) ProbeQuota(c *gin.Context) {
 	if h.autoEntry == nil {
@@ -423,5 +454,14 @@ func (h *QuotaKeyHandler) ProbeQuota(c *gin.Context) {
 		respondQuotaKeyError(c, err)
 		return
 	}
-	response.Success(c, info)
+	body := probeQuotaResponse{KeyQuotaLookupInfo: info}
+	if h.svc != nil {
+		usage, usageErr := h.svc.QuotaKeyUsageProjectionFor(c.Request.Context(), id)
+		if usageErr != nil {
+			slog.Warn("admin_quota_key_probe_usage_projection_failed", "quota_key_id", id, "error", usageErr)
+		} else {
+			body.Usage = usage
+		}
+	}
+	response.Success(c, body)
 }

@@ -94,6 +94,40 @@ func reserveInflightBalanceCtx(
 	return service.WithInflightReservation(ctx, res), res.HandlerDone, nil
 }
 
+// reserveTransferableInflightBalance 与 reserveInflightBalance 语义相同，但把归还
+// 换成一个**可转交给 Cursor 会话**的句柄（§25.4：只延后现有 HandlerDone 至会话终结）。
+//
+// 返回值 nil 表示本次请求没有预留（开关关闭/订阅模式/Redis 故障/无法定价）：
+// 调用方必须做 nil 判断后再 defer Release。非 Cursor 路径的释放语义与
+// reserveInflightBalance 完全一致（HTTP 返回即 HandlerDone）。
+func reserveTransferableInflightBalance(
+	c *gin.Context,
+	billing *service.BillingCacheService,
+	estimator inflightReservationEstimator,
+	apiKey *service.APIKey,
+	subscription *service.UserSubscription,
+	req service.InflightEstimateRequest,
+) (*transferableInflight, error) {
+	if c == nil || c.Request == nil {
+		return nil, nil
+	}
+	httpCtx := c.Request.Context()
+	next, done, err := reserveInflightBalanceCtx(httpCtx, billing, estimator, apiKey, subscription, req)
+	if err != nil {
+		return nil, err
+	}
+	if next != httpCtx {
+		c.Request = c.Request.WithContext(next)
+	}
+	res := service.InflightReservationFromContext(next)
+	if res == nil {
+		// 没有预留时 done 是 no-op；仍交回一个空操作句柄，保持调用方代码统一。
+		_ = done
+		return nil, nil
+	}
+	return newTransferableInflight(httpCtx, res), nil
+}
+
 // grokMediaInflightEstimate 媒体生成请求的估算输入；状态/内容查询返回空模型（不预留：
 // 查询会为已生成的媒体计费，不能因余额预留而拦截用户取回已付费结果）。
 func grokMediaInflightEstimate(endpoint service.GrokMediaEndpoint, model string, info service.GrokMediaRequestInfo, body []byte) service.InflightEstimateRequest {

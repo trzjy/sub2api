@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // cursorSSEStream converts frames as they arrive; it never buffers the complete
@@ -44,8 +45,18 @@ type cursorSSEStream struct {
 	parser *cursorStreamParser
 	buffer bytes.Buffer
 	done   bool
-	errMu  sync.Mutex
-	err    error
+	// delegated 标记本轮已吐出 tool_calls + finish + [DONE] 的委托检查点（模型正等待
+	// 真实结果）；读循环据此暂停于本次 HTTP，待续轮写回结果后恢复。仅在"本批已可封口
+	// 且还有未吐出的委托"时置位，续轮恢复后不会重复吐已交付的 tool_calls。
+	delegated bool
+	// emittedCalls 是已经吐给客户端的对外委托条数（跨多轮工具批次累计）。
+	//
+	// 用它（而不是一个一次性 bool）判定"是否还有未交接的委托"：会话可能是
+	// running → waiting_tools → running 多轮循环，第二轮的新批委托必须能再次交接，
+	// 而上一轮已交付的委托绝不重播（§25.3「每次 HTTP 只输出自本次附着以来的新内容」）。
+	emittedCalls int
+	errMu        sync.Mutex
+	err          error
 }
 
 func (s *cursorSSEStream) Close() error { return s.source.Close() }
@@ -121,9 +132,30 @@ func (s *cursorSSEStream) next() error {
 				s.buffer.WriteString(s.parser.cursorSSERoleChunk())
 				s.parser.started = true
 			}
+			s.parser.markFirstToken()
 			s.buffer.WriteString(s.parser.cursorSSETextChunk(ev.Text))
 		}
 		s.done = s.parser.usage.Seen
+	}
+	// 委托检查点（§25.3）：模型在本轮 HTTP 内发出 mcp_args 委托并暂停等待真实结果
+	// （usage 尚未见到，故 s.done 原本为 false）。此时必须**主动**吐出 tool_calls +
+	// finish + [DONE] 给当前 HTTP（不再依赖旧链回 McpResult.error 诱导模型结束），并把
+	// 本轮 HTTP 标记为 delegated 以便读循环暂停、连接保持存活至续轮。
+	//
+	// 两个前置条件缺一不可：
+	//  1. 还有**未吐出的**对外委托（emittedCalls 计跨轮累计，已交付的不重播）；
+	//  2. 本批**已可封口**（listed 数等齐、每个对外 started 都已解码出完整 f11 委托）。
+	//     未齐时继续等后续帧——绝不按第一个 mcp_args 提前交接半个批次（同名并行两工具、
+	//     listed 晚到、started 与委托交错都靠这一步）。
+	handoffThisFinish := false
+	if !s.done {
+		if calls := s.parser.capturedToolCalls(); len(calls) > s.emittedCalls {
+			if err := s.parser.sealableDelegations(); err == nil {
+				s.delegated = true
+				s.done = true
+				handoffThisFinish = true
+			}
+		}
 	}
 	if s.done {
 		if !s.parser.started {
@@ -132,13 +164,20 @@ func (s *cursorSSEStream) next() error {
 		}
 		// 工具委托捕获：在 finish 前吐 tool_calls delta（首个含 id/type/function.name，
 		// 随后一块 arguments），再发 finish_reason:"tool_calls" 的收尾 chunk。
-		if len(s.parser.capturedToolCalls) > 0 {
-			for i, tc := range s.parser.capturedToolCalls {
-				s.buffer.WriteString(s.parser.cursorSSEToolCallNameChunk(i, tc))
-				s.buffer.WriteString(s.parser.cursorSSEToolCallArgsChunk(i, tc))
+		// 续轮恢复后的终态不再重复吐已交付的 tool_calls，只发 finish。
+		if calls := s.parser.capturedToolCalls(); len(calls) > s.emittedCalls {
+			for i := s.emittedCalls; i < len(calls); i++ {
+				s.buffer.WriteString(s.parser.cursorSSEToolCallNameChunk(i, calls[i]))
+				s.buffer.WriteString(s.parser.cursorSSEToolCallArgsChunk(i, calls[i]))
 			}
+			s.emittedCalls = len(calls)
+			handoffThisFinish = true
 		}
-		s.buffer.WriteString(s.parser.cursorSSEFinishChunk())
+		if handoffThisFinish {
+			s.buffer.WriteString(s.parser.cursorSSEFinishChunkWithReason("tool_calls"))
+		} else {
+			s.buffer.WriteString(s.parser.cursorSSEFinishChunk())
+		}
 		s.buffer.WriteString("data: [DONE]\n\n")
 	}
 	return nil
@@ -159,6 +198,41 @@ const (
 const (
 	cursorFldUpdateTextDelta = 1  // TextDeltaUpdate —— 增量文本
 	cursorFldUpdateTurnEnded = 14 // TurnEndedUpdate —— 终态 + usage
+
+	// cursorFldUpdateToolCallStarted 是 InteractionUpdate.tool_call_started（f2）。
+	//
+	// 依据：32 号证据 InteractionUpdate schema 逐字段 dump（no:2 name:"tool_call_started"）。
+	cursorFldUpdateToolCallStarted = 2
+	// cursorFldUpdateToolRequestsListed 是 InteractionUpdate.tool_requests_listed（f27）。
+	//
+	// 依据：32 号证据 InteractionUpdate schema 逐字段 dump（no:27
+	// name:"tool_requests_listed"）。批次封口以它为"本批总数"的唯一来源（§25.3）。
+	cursorFldUpdateToolRequestsListed = 27
+	// cursorFldUpdatePartialToolCall 是 InteractionUpdate.partial_tool_call（f7）。
+	//
+	// 依据：32 号证据 schema dump（no:7 name:"partial_tool_call"）。按 §25.3 它只承载
+	// 增量内容，**不是**完整参数、不可当作可执行委托，故本层不解码、不作为封口依据。
+	cursorFldUpdatePartialToolCall = 7
+	// cursorFldUpdateToolCallCompleted 是 InteractionUpdate.tool_call_completed（f3）。
+	cursorFldUpdateToolCallCompleted = 3
+)
+
+// agent.v1.ToolRequestsListedUpdate（design-evidence.md / 02-native-schemas.json）内：
+//
+// 内层**只有** `no:1 name:"call_count" kind:"scalar" T:13`（uint32），**没有**
+// model_call_id 字段——归属只能靠当前开放批次上下文判定（§25.3）。
+const (
+	// cursorFldToolRequestsListedCallCount 是 ToolRequestsListedUpdate.call_count（f1, uint32）。
+	cursorFldToolRequestsListedCallCount = 1
+)
+
+// agent.v1.ToolCallStartedUpdate（32 号证据 Vyt）内：
+//
+// f15 = ToolCall（mcp_tool_call 分支，活体 tool_call_started 样本携带）。
+const (
+	cursorFldToolCallStartedToolCall = 15 // ToolCall 消息
+	// cursorFldToolCallID 是 ToolCall.mcp_tool_call 内的 call_id（= OpenAI tool_calls[].id）。
+	cursorFldToolCallID = 1
 )
 
 // agent.v1.TextDeltaUpdate（32 号证据：Gyt）内：
@@ -407,14 +481,55 @@ type cursorStreamParser struct {
 	usage cursorTurnUsage
 	// rejected 命中流内拒付模板后的结构化错误（非 nil 即终态失败）。
 	rejected *CursorKeyRejectedError
-	// capturedToolCalls 是本轮经 mcp_args 委托捕获的工具调用（权威信号见派发单 §2）。
-	capturedToolCalls []cursorToolCallCapture
-	// toolCallsFinished 标记本轮已发生工具委托捕获。
-	toolCallsFinished bool
-	// toolCallStartedIDs 记录 InteractionUpdate.f2 tool_call_started 观察到的 call_id
-	// （仅结构化记录，不作为 finish 依据，见派发单 §3）。
-	toolCallStartedIDs []string
+
+	// delegations 是本轮工具委托的**唯一**记录（§24.2-6）。
+	//
+	// duplex 解码 mcp_args 后写入这里，parser 只读取并输出，不再对同一帧二次解码；
+	// 批次的 started/listed/封口判定也都在该记录内（§25.3）。
+	delegations *cursorToolDelegations
+	// firstTokenMs 是首帧文本的耗时（毫秒，自解析开始计时），供转发结果诊断。
+	firstTokenMs int
+	parseStart   time.Time
 }
+
+// attachToolDelegations 绑定本轮共享的工具委托记录。
+//
+// 绑定后本解析器**不再解码** mcp_args（解码权在 duplex 侧），只在收尾时读取结果。
+func (p *cursorStreamParser) attachToolDelegations(d *cursorToolDelegations) {
+	if p == nil {
+		return
+	}
+	p.delegations = d
+}
+
+// toolDelegations 返回本解析器使用的委托记录（未绑定时用本地记录，保证单一解码点）。
+func (p *cursorStreamParser) toolDelegations() *cursorToolDelegations {
+	if p.delegations == nil {
+		p.delegations = newLocalCursorToolDelegations()
+	}
+	return p.delegations
+}
+
+// capturedToolCalls 返回本轮对外工具调用（输出用）。
+func (p *cursorStreamParser) capturedToolCalls() []cursorToolCallCapture {
+	return p.toolDelegations().snapshot()
+}
+
+// sealableDelegations 报告"本批是否已可封口"（只读判定，不改批次状态）。
+//
+// 读循环用它决定是否到工具交接检查点：listed 数未等齐或某条对外 started 还没有完整
+// f11 委托时返回 ErrCursorBatchIncomplete，调用方据此继续等后续帧（§25.3：不按第一个
+// mcp_args 提前封口，也不按静默时间猜测结束）。
+func (p *cursorStreamParser) sealableDelegations() error {
+	return p.toolDelegations().sealable()
+}
+
+// resetTurnStart 复位"本 HTTP 已发过 role 包"的标记。
+//
+// 跨 HTTP（§25.3）：续轮附着是**新的 HTTP 响应**，必须各自从 role 包开始，不复用上一个
+// HTTP 的协议头状态；同时已交付的 tool_calls 条数由 cursorSSEStream.emittedCalls 保持，
+// 不会被重播。
+func (p *cursorStreamParser) resetTurnStart() { p.started = false }
 
 // cursorToolCallCapture 是一条经 mcp_args 委托捕获的工具调用。
 type cursorToolCallCapture struct {
@@ -424,6 +539,11 @@ type cursorToolCallCapture struct {
 	Name string
 	// ArgsJSON 是工具参数的对象 JSON 字符串（OpenAI tool_calls[].function.arguments）。
 	ArgsJSON string
+	// ExecID 是承载本委托的 ExecServerMessage.f1（回写真实结果时必须原样带回，
+	// 否则上游无法把 McpResult 关联到对应 exec）。
+	ExecID uint64
+	// IDField 是承载本委托的 ExecServerMessage.f15（原值，回写时一并带回）。
+	IDField []byte
 }
 
 // cursorContent 返回拼出的完整响应文本（非流式入站用）。
@@ -433,7 +553,18 @@ func (p *cursorStreamParser) cursorContent() string { return p.content }
 //
 // secrets 是需要从错误文案里抹掉的凭证值（如本次对话用的 session_token）。
 func cursorNewStreamParser(model string, secrets ...string) *cursorStreamParser {
-	return &cursorStreamParser{model: model, secrets: secrets}
+	return &cursorStreamParser{model: model, secrets: secrets, parseStart: time.Now()}
+}
+
+// markFirstToken 记录首帧文本耗时（只记第一次，供 ForwardResult 诊断）。
+func (p *cursorStreamParser) markFirstToken() {
+	if p == nil || p.firstTokenMs != 0 || p.parseStart.IsZero() {
+		return
+	}
+	p.firstTokenMs = int(time.Since(p.parseStart).Milliseconds())
+	if p.firstTokenMs <= 0 {
+		p.firstTokenMs = 1
+	}
 }
 
 // cursorParseStream 解析完整响应体，产出按序的 OpenAI SSE 行（**不含** `[DONE]`，
@@ -489,6 +620,7 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 			sseLines = append(sseLines, p.cursorSSERoleChunk())
 		}
 		p.content += ev.Text
+		p.markFirstToken()
 		sseLines = append(sseLines, p.cursorSSETextChunk(ev.Text))
 		// 拒付模板可能跨帧：每收到一段就在**累加结果**上匹配一次。
 		if rejected := cursorMatchKeyRejected(p.content); rejected != nil {
@@ -511,8 +643,8 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 		p.started = true
 	}
 	// 工具委托捕获：在 finish 前吐 tool_calls delta（流式与 cursorParseStreamToSSE 同口径）。
-	if len(p.capturedToolCalls) > 0 {
-		for i, tc := range p.capturedToolCalls {
+	if calls := p.capturedToolCalls(); len(calls) > 0 {
+		for i, tc := range calls {
 			sseLines = append(sseLines, p.cursorSSEToolCallNameChunk(i, tc))
 			sseLines = append(sseLines, p.cursorSSEToolCallArgsChunk(i, tc))
 		}
@@ -527,23 +659,29 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 	if err != nil {
 		return cursorStreamEvent{}, err
 	}
-	// 工具委托（exec.mcp_args，f11）：捕获为 ToolCallCaptured（权威信号，见派发单 §2）。
-	// 与 duplex 独立解码同一帧——duplex 负责回 McpResult.error，本解析器负责收尾
-	// 构造 tool_calls。两者无需共享状态（解析器自行捕获即可）。
+	// 工具委托（exec.mcp_args，f11）：§24.2-6 只解码/保存一次。
+	//
+	// 解码权归共享记录的所有者：duplex 存在时由 duplex 解码并写入（parser 只读），
+	// 无 duplex 的独立解析场景由本解析器解码并写入同一记录。两条路径共用同一份
+	// cursorToolDelegations，绝不各自保留一份列表。
 	if exec, ok := cursorFindField(fields, cursorFldServerExecMessage); ok {
 		execParts, e := cursorDecodeProtobuf(exec.Bytes)
 		if e != nil {
 			return cursorStreamEvent{}, e
 		}
 		if argsField, ok := cursorFindField(execParts, 11); ok {
-			id, name, argsJSON, derr := cursorDecodeMcpArgs(argsField.Bytes)
-			if derr != nil {
-				return cursorStreamEvent{}, derr
+			delegations := p.toolDelegations()
+			if !delegations.isShared() {
+				id, name, argsJSON, derr := cursorDecodeMcpArgs(argsField.Bytes)
+				if derr != nil {
+					return cursorStreamEvent{}, derr
+				}
+				if derr := delegations.noteDelegation("", cursorToolCallCapture{
+					ID: id, Name: name, ArgsJSON: argsJSON,
+				}); derr != nil {
+					return cursorStreamEvent{}, derr
+				}
 			}
-			p.capturedToolCalls = append(p.capturedToolCalls, cursorToolCallCapture{
-				ID: id, Name: name, ArgsJSON: argsJSON,
-			})
-			p.toolCallsFinished = true
 		}
 	}
 	// 只有 interaction_update（f1）承载文本与 usage；其余分支（exec / kv /
@@ -558,10 +696,20 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 		return cursorStreamEvent{}, err
 	}
 
-	// InteractionUpdate.f2 tool_call_started（ToolCall.f15 mcp_tool_call 分支）：
-	// 仅结构化日志，**不作为 finish 依据**（权威信号 = f11 委托）。
-	if tcStarted, ok := cursorFindField(update, 2); ok {
-		p.cursorLogToolCallStarted(tcStarted.Bytes)
+	// InteractionUpdate.f2 tool_call_started：登记到批次（§25.3 封口依据之一）。
+	//
+	// ToolCall 的 mcp_tool_call（f15）分支是**对外**委托（客户端要执行）；其余分支是
+	// 内部元工具（如 get_mcp_tools），只参与同批完整性判断，绝不交给客户端。
+	if tcStarted, ok := cursorFindField(update, cursorFldUpdateToolCallStarted); ok {
+		if err := p.noteToolCallStarted(tcStarted.Bytes); err != nil {
+			return cursorStreamEvent{}, err
+		}
+	}
+	// InteractionUpdate.f27 tool_requests_listed：本批总数声明（call_count，可先于最后一个 started）。
+	if listed, ok := cursorFindField(update, cursorFldUpdateToolRequestsListed); ok {
+		if err := p.noteToolRequestsListed(listed.Bytes); err != nil {
+			return cursorStreamEvent{}, err
+		}
 	}
 
 	if turn, ok := cursorFindField(update, cursorFldUpdateTurnEnded); ok {
@@ -616,23 +764,59 @@ func cursorVarintField(fields []cursorPBField, number int) uint64 {
 	return f.Varint
 }
 
-// cursorLogToolCallStarted 仅结构化记录 InteractionUpdate.f2 tool_call_started，
-// **不作为 finish 依据**（权威信号 = f11 委托）。解析器无 logger，故记录 call_id 供诊断。
-func (p *cursorStreamParser) cursorLogToolCallStarted(b []byte) {
-	// ToolCall 可能含 f15 mcp_tool_call 分支；尽力解码 call_id，失败则忽略。
+// noteToolCallStarted 把 InteractionUpdate.f2 tool_call_started 登记进当前批次。
+//
+// 对外/内部的区分依据：ToolCall 的 mcp_tool_call 分支（f15）才带客户端要执行的
+// call_id；不带 f15 的是内部元工具（如 get_mcp_tools），只计入同批完整性判断。
+func (p *cursorStreamParser) noteToolCallStarted(b []byte) error {
 	fields, err := cursorDecodeProtobuf(b)
 	if err != nil {
-		return
+		return err
 	}
-	if tc, ok := cursorFindField(fields, 15); ok {
-		inner, e := cursorDecodeProtobuf(tc.Bytes)
-		if e != nil {
-			return
-		}
-		if id, ok := cursorFindField(inner, 1); ok {
-			p.toolCallStartedIDs = append(p.toolCallStartedIDs, id.String())
-		}
+	delegations := p.toolDelegations()
+	toolCall, ok := cursorFindField(fields, cursorFldToolCallStartedToolCall)
+	if !ok {
+		return delegations.noteToolCallStarted("", "", false)
 	}
+	inner, err := cursorDecodeProtobuf(toolCall.Bytes)
+	if err != nil {
+		return err
+	}
+	callID := ""
+	if id, ok := cursorFindField(inner, cursorFldToolCallID); ok {
+		callID = strings.TrimSpace(id.String())
+	}
+	return delegations.noteToolCallStarted("", callID, callID != "")
+}
+
+// noteToolRequestsListed 解析 InteractionUpdate.f27 tool_requests_listed 的 call_count
+// 并交给批次记录归属（§25.3）。
+//
+// 字段号依据 design-evidence.md：ToolRequestsListedUpdate 内层**只有** f1 call_count
+// （uint32），**没有** model_call_id 字段；上游帧只携带这一个数。故本层只把
+// (call_count) 上抛，归属由 `cursorToolDelegations.noteToolRequestsListed` 按
+// "当前开放批次上下文"判定：恰好一个开放批 → 归属；≥2 个 → ErrCursorBatchAmbiguous。
+//
+// 纪律：call_count 缺失或线型不是 varint 即明确协议错误（失败关闭），不猜数值、
+// 不退回"只登记出现"的降级路径；本层不打印任何工具参数（脱敏）。
+func (p *cursorStreamParser) noteToolRequestsListed(b []byte) error {
+	fields, err := cursorDecodeProtobuf(b)
+	if err != nil {
+		return err
+	}
+	f, ok := cursorFindField(fields, cursorFldToolRequestsListedCallCount)
+	if !ok {
+		return fmt.Errorf("%w: tool_requests_listed without call_count", ErrCursorProtocol)
+	}
+	if f.Wire != cursorWireVarint {
+		return fmt.Errorf("%w: tool_requests_listed.call_count has wrong wire type", ErrCursorProtocol)
+	}
+	if f.Varint > math.MaxUint32 {
+		return fmt.Errorf("%w: tool_requests_listed.call_count overflows uint32", ErrCursorProtocol)
+	}
+	// listed 不带 ID（证据：无 model_call_id 字段）：以空归属上抛，由批次记录按
+	// "恰好一个开放批"规则归属。
+	return p.toolDelegations().noteToolRequestsListed("", int(f.Varint))
 }
 
 // cursorDecodeMcpArgs 解析 exec 内层 f11（mcp_args）的 McpArgs 消息。
@@ -850,9 +1034,17 @@ func (p *cursorStreamParser) cursorSSEToolCallArgsChunk(index int, tc cursorTool
 // finish_reason：本轮捕获了工具委托（tool_calls）则为 "tool_calls"，否则 "stop"。
 func (p *cursorStreamParser) cursorSSEFinishChunk() string {
 	finishReason := "stop"
-	if len(p.capturedToolCalls) > 0 {
+	if len(p.capturedToolCalls()) > 0 {
 		finishReason = "tool_calls"
 	}
+	return p.cursorSSEFinishChunkWithReason(finishReason)
+}
+
+// cursorSSEFinishChunkWithReason 按**显式**归因渲染收尾 chunk（**带真实 usage**）。
+//
+// 流式跨 HTTP 的交接/终态必须显式给归因：工具交接是 "tool_calls"，而续轮恢复后的真实
+// 终态即使历史批里有委托也必须是 "stop"（已交付的 tool_calls 不在本轮重播）。
+func (p *cursorStreamParser) cursorSSEFinishChunkWithReason(finishReason string) string {
 	// usage 在 **chunk 顶层**（不是 choices[0] 内）：既有 usage 提取链
 	// （parseSSEUsageBytesWithType → extractOpenAIUsageFromJSONBytes）只认顶层的
 	// `usage` 路径，塞进 choices 里会被整条丢掉、计费拿不到真实用量。
@@ -941,10 +1133,11 @@ func cursorJSONString(s string) string {
 func (p *cursorStreamParser) cursorBuildNonStreamingCompletion() []byte {
 	var msg string
 	finishReason := "stop"
-	if len(p.capturedToolCalls) > 0 {
+	calls := p.capturedToolCalls()
+	if len(calls) > 0 {
 		finishReason = "tool_calls"
 		msg = `"role":"assistant","content":null,"tool_calls":[`
-		for i, tc := range p.capturedToolCalls {
+		for i, tc := range calls {
 			if i > 0 {
 				msg += ","
 			}

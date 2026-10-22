@@ -803,6 +803,9 @@ type GatewayService struct {
 	tlsFPProfileService   *TLSFingerprintProfileService
 	balanceNotifyService  *BalanceNotifyService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
+	// cursorExecution 是 Cursor 平台唯一执行部件（§24.2-2），构造注入；为 nil 时
+	// Cursor 分支失败关闭，绝不另建默认执行链。
+	cursorExecution *CursorExecutionService
 }
 
 // NewGatewayService creates a new GatewayService
@@ -835,6 +838,7 @@ func NewGatewayService(
 	compositeResolver *CompositeRouteResolver,
 	balanceNotifyService *BalanceNotifyService,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
+	cursorExecution *CursorExecutionService,
 ) *GatewayService {
 	userGroupRateTTL := resolveUserGroupRateCacheTTL(cfg)
 	modelsListTTL := resolveModelsListCacheTTL(cfg)
@@ -872,6 +876,7 @@ func NewGatewayService(
 		compositeResolver:     compositeResolver,
 		balanceNotifyService:  balanceNotifyService,
 		userPlatformQuotaRepo: userPlatformQuotaRepo,
+		cursorExecution:       cursorExecution,
 	}
 	if compositeResolver != nil {
 		compositeResolver.SetModelOwnershipResolver(svc.resolveCompositeModelOwnership)
@@ -1394,6 +1399,35 @@ func mixedListingModelAllowed(groupPlatform, model string) bool {
 	return groupPlatform == PlatformGemini && isAntigravityGeminiModel(model)
 }
 
+// cursorSupplyPublicModelIDsFromMapping 是 Cursor 供给账号 model_mapping 键 → 公开模型名
+// 的**唯一纯投影**（方案 §25.14-B）。
+//
+// 公开目录路径（GetAvailableModels 的 Cursor 分支）与 Gemini 窄只读入口
+// （GetCursorSupplyModelIDs）共用它，不得另写第二份"Gemini 专用名单算法"。输入是只读
+// mapping 视图（键＝请求侧公开名，值＝上游模型），输出为排序后的公开名列表：
+//   - 排除空键：空串是未命名模式，不是具体请求侧模型名；
+//   - 排除通配键（"*" / "gpt-*" 等，见 isWildcardOrEmptyModelKey）：匹配模式不得被当成
+//     具体模型名对外暴露；
+//   - 不取 mapping 值：上游模型名不是本站公开名；
+//   - 不补静态清单、不做模型请求、不读账号/分组/来源：纯函数，无 ctx、无 repo、无缓存。
+func cursorSupplyPublicModelIDsFromMapping(mapping map[string]string) []string {
+	if len(mapping) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(mapping))
+	for model := range mapping {
+		if isWildcardOrEmptyModelKey(model) {
+			continue
+		}
+		ids = append(ids, model)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64, platform string) []string {
 	cacheKey := modelsListCacheKey(groupID, platform)
 	if s.modelsListCache != nil {
@@ -1457,12 +1491,18 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		// 不受下方 mixedListingModelAllowed（仅 gemini 混排 antigravity）限制，应直接暴露
 		// 其具体映射键（与调度候选同源）。提前判定一次，避免重复调用。
 		cursorListable := acc.Platform == PlatformCursor && s.cursorSupplyAccountListableForPlatform(ctx, &acc, platform, groupID)
-		for model := range mapping {
-			// Cursor 供给账号：公开列表只暴露其 model_mapping 的"具体"请求侧键，
-			// 排除空键与通配键（"*" / "gpt-*"），避免把匹配模式当具体模型名暴露。
-			if acc.Platform == PlatformCursor && isWildcardOrEmptyModelKey(model) {
-				continue
+		candidates := make([]string, 0, len(mapping))
+		if acc.Platform == PlatformCursor {
+			// 键枚举统一走唯一纯投影 cursorSupplyPublicModelIDsFromMapping：排除空键与
+			// 通配键（"*" / "gpt-*"），不取 mapping 值、不补静态清单——与窄只读入口
+			// GetCursorSupplyModelIDs 共用同一份名单算法（方案 §25.14-B）。
+			candidates = append(candidates, cursorSupplyPublicModelIDsFromMapping(mapping)...)
+		} else {
+			for model := range mapping {
+				candidates = append(candidates, model)
 			}
+		}
+		for _, model := range candidates {
 			// Accounts pulled in through mixed scheduling only contribute the
 			// models that belong to the listing platform (e.g. an antigravity
 			// account's claude-* mappings must not surface on a gemini group).
@@ -1529,6 +1569,70 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		modelsListCacheStoreTotal.Add(1)
 	}
 	return cloneStringSlice(models)
+}
+
+// GetCursorSupplyModelIDs 是 Cursor 跨平台供给的**窄只读入口**（方案 §25.14-B「读取与
+// 投影」）：返回该分组在目标桥接平台上可公开的 Cursor 具体模型名集合，供 Gemini 目录
+// 正向接入（gemini_v1beta_handler 消费侧由后续单接线）使用。
+//
+// 数据来源与真实调度同源，不另造第二套判定：
+//   - 账号：已绑定该组、现有可调度查询（accountRepo.ListSchedulableByGroupID）返回的
+//     Cursor 账号——不读全局 AvailableModels、不做全站扫描；
+//   - 账号级准入：cursorSupplyAccountGate（桥接平台 + 显式挂组 + 来源可用性 §25.6）；
+//   - 逐模型准入：既有分组模型白名单 cursorGroupModelAllowedWithError（Allows 原语义，
+//     不改名、不猜厂商）；
+//   - 名单：与已发布 /v1/models 共用的唯一纯投影
+//     cursorSupplyPublicModelIDsFromMapping（排除空键/通配键、不取 mapping 值、不补静态清单）。
+//
+// 错误契约（与"空目录"严格区分）：
+//   - 无组 ID、非已接受桥接平台、或组内无合格 Cursor 账号 → 返回 ([]string{}, nil)：
+//     这是确定的空集合，不是故障；
+//   - 账号列表读取失败、来源可用性读取失败、分组白名单读取失败 → 返回 (nil, err)：
+//     调用方必须失败关闭（如 Gemini 侧返回 503 目录读取失败），不得当空目录；
+//   - 来源明确被拒绝（如归属激活码已过期）的账号不贡献模型，也不报错。
+//
+// 不发起任何模型请求、不写缓存（Cursor 目录无缓存）、不改其它平台的目录契约。
+func (s *GatewayService) GetCursorSupplyModelIDs(ctx context.Context, groupID *int64, platform string) ([]string, error) {
+	if groupID == nil || *groupID <= 0 || !cursorNativeBridgePlatforms(platform) {
+		return []string{}, nil
+	}
+	if s == nil || s.accountRepo == nil {
+		return nil, fmt.Errorf("cursor supply: account repository unavailable for group %d", *groupID)
+	}
+
+	accounts, err := s.accountRepo.ListSchedulableByGroupID(ctx, *groupID)
+	if err != nil {
+		return nil, fmt.Errorf("cursor supply: list schedulable accounts for group %d failed: %w", *groupID, err)
+	}
+
+	modelSet := make(map[string]struct{})
+	for i := range accounts {
+		account := &accounts[i]
+		admitted, err := s.cursorSupplyAccountAdmittedWithError(ctx, account, platform, groupID)
+		if err != nil {
+			return nil, err
+		}
+		if !admitted {
+			continue
+		}
+		for _, model := range cursorSupplyPublicModelIDsFromMapping(account.GetModelMapping()) {
+			allowed, err := s.cursorGroupModelAllowedWithError(ctx, *groupID, model)
+			if err != nil {
+				return nil, fmt.Errorf("cursor supply: group %d model allowlist read failed: %w", *groupID, err)
+			}
+			if !allowed {
+				continue
+			}
+			modelSet[model] = struct{}{}
+		}
+	}
+
+	models := make([]string, 0, len(modelSet))
+	for model := range modelSet {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	return models, nil
 }
 
 func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, groupID int64, model string) (CompositeModelOwnership, error) {

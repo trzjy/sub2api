@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/server"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/service/xianguanjia"
 	"github.com/Wei-Shaw/sub2api/internal/usageriskadapter"
 
 	"github.com/google/wire"
@@ -51,6 +52,27 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 
 		// Privacy client factory for OpenAI training opt-out
 		providePrivacyClientFactory,
+
+		// 派发单 CR-D：§25.14-A 十缺项中与 Cursor 无关的八项 provider 声明。
+		// 装配函数体见 cmd/server/wire_providers.go，这里只登记生成输入侧声明。
+		// 1. service.usageRiskRetentionCleaner：由 cmd 层唯一 wrapper 取代 service 内的直接登记。
+		provideDashboardAggregationService,
+		// 4. xianguanjia.SupplySecretEncryptor：既有 service.SecretEncryptor 的结构适配。
+		provideSupplySecretEncryptor,
+		// 5. *handler.XianyuXianguanjiaPushHandler 及其 config/clientFactory/signature/idempotency/voider。
+		provideXianguanjiaSignatureVerifier,
+		provideXianguanjiaClientFactory,
+		provideXianguanjiaIdempotencyStore,
+		provideXianguanjiaRefundCardVoidService,
+		wire.Bind(new(handler.XianguanjiaRefundVoider), new(*xianguanjia.RefundCardVoidService)),
+		provideXianyuXianguanjiaPushHandler,
+		// 6. *handler.XgjSupplyHandler：保留原 SupplyConfigStore 与现行构造参数。
+		provideXgjSupplyHandler,
+		// 7. handler.XianguanjiaSupplyOrderService：绑定原 SupplyOrderService。
+		provideXianguanjiaSupplyOrderService,
+		wire.Bind(new(handler.XianguanjiaSupplyOrderService), new(*xianguanjia.SupplyOrderService)),
+		// 8. *handler.XianguanjiaSupplyHandler：原 SupplyCatalogService 及 goods source 构造。
+		provideXianguanjiaSupplyHandler,
 
 		// BuildInfo provider
 		provideServiceBuildInfo,
@@ -129,6 +151,7 @@ func provideCleanup(
 	channelMonitorRunner *service.ChannelMonitorRunner,
 	promoIntelService *service.PromoIntelService,
 	channelMonitorV2Aggregator *service.ChannelMonitorV2Aggregator,
+	channelMonitorProbeWorker *service.ChannelMonitorProbeWorker,
 	quotaFlusher *service.UserPlatformQuotaUsageFlusher,
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,

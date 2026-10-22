@@ -54,7 +54,7 @@ func TestOpenAIGatewayService_VisionCapabilityWiring(t *testing.T) {
 	provideWithCapability := func(repo *fakeCapabilityRepo) *OpenAIGatewayService {
 		capability := NewAccountModelCapabilityService(repo, nil)
 		svc := ProvideOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, nil, nil,
-			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, capability)
+			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, capability, nil)
 		t.Cleanup(func() { SetOpenAIAccountVisionCapabilityLookup(nil) }) // 复位为默认 unknown 放行
 		return svc
 	}

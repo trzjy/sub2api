@@ -12,11 +12,13 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/stretchr/testify/require"
 )
 
 // pluginHashDeviceIDVectors 是「插件源码 → node 实测」的权威向量。
@@ -63,20 +65,34 @@ func TestHashDeviceIDMatchesPluginVectors(t *testing.T) {
 	}
 }
 
-// TestHashDeviceIDDiffersFromRuneIteration 显式反证：既有 hashDeviceID（码点迭代）
-// 在 emoji 上与插件不等，故 B-10 不能直接复用它。
+// TestHashDeviceIDDiffersFromRuneIteration 显式反证：按码点迭代的朴素实现（历史 hashDeviceID
+// 的口径）在 emoji 上与插件不等，故不能用它替代 B-10 的 UTF-16 码元实现。
 //
-// 这条断言锁的是"两者确实不同"。若将来有人把既有实现也改成 UTF-16 码元迭代
-// （两者合一），本测试会失败——那时应删除本测试与新实现中重复的说明，
-// 而不是让它悄悄退化。
+// 旧 hashDeviceID 已随 W2-B1 的设备解析归一删除（随机设备生成只剩 GenerateCursorDeviceID
+// 一条路径）；本测试把"码点口径"就地写成参照实现，锁住两者确实不同——若将来有人把新实现
+// 改成码点迭代，本测试会失败。
 func TestHashDeviceIDDiffersFromRuneIteration(t *testing.T) {
 	const emoji = "\U0001F600"
 	const pluginValue = "001B0D63"
 	if got := hashDeviceIDFromUUID(emoji); got != pluginValue {
 		t.Fatalf("B-10 实现 = %s, want 插件值 %s", got, pluginValue)
 	}
-	if got := hashDeviceID(emoji); got == pluginValue {
-		t.Fatalf("既有 hashDeviceID 已与插件一致（=%s），B-10 的独立实现已成冗余，应合并", got)
+	// 码点口径参照实现（旧 hashDeviceID：for _, c := range s 累加）。
+	runeIteration := func(input string) string {
+		var h int32
+		for _, c := range input {
+			h = h*31 + int32(c)
+		}
+		var u uint32
+		if h < 0 {
+			u = uint32(-h)
+		} else {
+			u = uint32(h)
+		}
+		return fmt.Sprintf("%08X", u)
+	}
+	if got := runeIteration(emoji); got == pluginValue {
+		t.Fatalf("码点口径已与插件一致（=%s），B-10 的 UTF-16 实现已成冗余，应合并", got)
 	}
 }
 
@@ -331,4 +347,85 @@ type failingWriteRepo struct{ *fakeQuotaKeyRepo }
 
 func (r *failingWriteRepo) SetDeviceIDIfAbsent(_ context.Context, _ int64, _ string) (int, error) {
 	return 0, errors.New("db down")
+}
+
+// ---------------------------------------------------------------------------
+// W2-B1 / §25.14-C「设备解析与依赖」：三分支解析是**同一份实现**
+// （resolveCursorDeviceIdentity），取号 / 出站 / Probe 共用，行为逐条锁定。
+// ---------------------------------------------------------------------------
+
+// TestResolveCursorDeviceIdentity_PersistedBranch：已有持久 device → 直接用，不写库。
+func TestResolveCursorDeviceIdentity_PersistedBranch(t *testing.T) {
+	persisted := "6653FFCD"
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[1] = &ent.QuotaKey{ID: 1, CodeEncrypted: "enc:CODE", DeviceID: &persisted}
+
+	identity, err := resolveCursorDeviceIdentity(context.Background(), repo, repo.byID[1], "CODE")
+	require.NoError(t, err)
+	require.Equal(t, persisted, identity.DeviceID)
+	require.Equal(t, cursorDeviceSourcePersisted, identity.Source)
+	require.Equal(t, quotaKeyMACOfPlaintext("CODE"), identity.CodeMAC, "解析必须记下来源 MAC 供进锁后比对")
+	require.Equal(t, persisted, *repo.byID[1].DeviceID, "持久值不得被改写")
+}
+
+// TestResolveCursorDeviceIdentity_DerivedBranch：无持久 device 但已有账号 → 复用派生值，
+// **不写新身份**（存量语义，§16 红线）。
+func TestResolveCursorDeviceIdentity_DerivedBranch(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[1] = &ent.QuotaKey{ID: 1, CodeEncrypted: "enc:CODE"}
+	qkID := int64(1)
+	repo.accounts = []*ent.Account{{ID: 100, QuotaKeyID: &qkID}}
+
+	identity, err := resolveCursorDeviceIdentity(context.Background(), repo, repo.byID[1], "CODE")
+	require.NoError(t, err)
+	require.Equal(t, deviceID("CODE"), identity.DeviceID)
+	require.Equal(t, cursorDeviceSourceDerived, identity.Source)
+	require.Nil(t, repo.byID[1].DeviceID, "存量码不得因解析而写入新设备身份")
+}
+
+// TestResolveCursorDeviceIdentity_FirstWriteBranch：真新码 → 首写并返回持久值
+// （随机生成只允许出现在这一处）。
+func TestResolveCursorDeviceIdentity_FirstWriteBranch(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[1] = &ent.QuotaKey{ID: 1, CodeEncrypted: "enc:CODE"}
+
+	identity, err := resolveCursorDeviceIdentity(context.Background(), repo, repo.byID[1], "CODE")
+	require.NoError(t, err)
+	require.Equal(t, cursorDeviceSourceFirstWrite, identity.Source)
+	require.Regexp(t, `^[0-9A-F]{8}$`, identity.DeviceID)
+	require.NotNil(t, repo.byID[1].DeviceID)
+	require.Equal(t, identity.DeviceID, *repo.byID[1].DeviceID)
+
+	// 再次解析（同一行已是持久值）必须命中持久分支，值不变。
+	again, err := resolveCursorDeviceIdentity(context.Background(), repo, repo.byID[1], "CODE")
+	require.NoError(t, err)
+	require.Equal(t, cursorDeviceSourcePersisted, again.Source)
+	require.Equal(t, identity.DeviceID, again.DeviceID)
+}
+
+// TestCursorDeviceIdentity_SameAcrossPullOutboundAndProbe：同一来源在"出站解析"与
+// "观测入口（Probe）"上拿到的设备身份必须完全一致（三分支同源）。
+func TestCursorDeviceIdentity_SameAcrossPullOutboundAndProbe(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST"}
+	qkID := int64(42)
+	repo.accounts = []*ent.Account{{ID: 100, QuotaKeyID: &qkID}}
+
+	identity, err := resolveCursorDeviceIdentity(context.Background(), repo, repo.byID[42], "JG-CF-TEST")
+	require.NoError(t, err)
+
+	// 出站侧（shareAIUpstreamClient.resolveDeviceID）经同一份分支实现解析。
+	svc := NewQuotaKeyService(repo, testEncryptor{}, nil, nil)
+	client := &shareAIUpstreamClient{deviceResolver: svc}
+	outbound, err := client.resolveDeviceID(context.Background(), repo.byID[42], "JG-CF-TEST")
+	require.NoError(t, err)
+	require.Equal(t, identity.DeviceID, outbound, "出站与观测必须同源同值")
+
+	// 取号侧（pull 首写边界）走同一实现，存量码不写不迁移。
+	require.NoError(t, func() error {
+		_, rerr := resolveCursorDeviceIdentity(context.Background(), repo, repo.byID[42], "JG-CF-TEST")
+		return rerr
+	}())
+	require.Nil(t, repo.byID[42].DeviceID, "存量码在三条链路上都不得被写入新身份")
 }

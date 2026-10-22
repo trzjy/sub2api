@@ -405,6 +405,39 @@ func currentCursorQuotaKeyStateProvider() CursorQuotaKeyStateProvider {
 	return cursorQuotaKeyStateInstance
 }
 
+// CursorQuotaKeyUsageSnapshotProvider 是「来源门」读取激活码额度快照（usage_snapshot 列）
+// 的窄依赖（§25.6 同一来源门 / §25.14-C 观测提交生命周期）。
+//
+// 为什么是**独立接口**而非并入 CursorQuotaKeyStateProvider：本接口只被 service 包内的来源
+// 门谓词消费，handler 层的替身（gemini_cursor_supply_listing_test.go 的
+// cursorGeminiListQuotaKeyState）只实现状态读取接口；并入会强制它实现快照读取而触及禁区
+// 文件。两接口由同一 *QuotaKeyService 在构造时一并安装，仍是**同一来源门**的同一份读依赖，
+// 不构成第二套来源门实现。
+type CursorQuotaKeyUsageSnapshotProvider interface {
+	// CursorQuotaKeyUsageSnapshot 返回激活码 usage_snapshot 列的原始字节。
+	// 无法读取时返回 error——来源门据此失败关闭。quotaKeyID 无效 → 按"无快照"返回 (nil, nil)。
+	CursorQuotaKeyUsageSnapshot(ctx context.Context, quotaKeyID int64) ([]byte, error)
+}
+
+var (
+	cursorQuotaKeyUsageSnapshotMu       sync.RWMutex
+	cursorQuotaKeyUsageSnapshotInstance CursorQuotaKeyUsageSnapshotProvider
+)
+
+// InstallCursorQuotaKeyUsageSnapshotProvider 安装来源门所需的额度快照读取器
+// （装配入口：QuotaKeyService 构造函数；单测直接安装替身）。
+func InstallCursorQuotaKeyUsageSnapshotProvider(provider CursorQuotaKeyUsageSnapshotProvider) {
+	cursorQuotaKeyUsageSnapshotMu.Lock()
+	defer cursorQuotaKeyUsageSnapshotMu.Unlock()
+	cursorQuotaKeyUsageSnapshotInstance = provider
+}
+
+func currentCursorQuotaKeyUsageSnapshotProvider() CursorQuotaKeyUsageSnapshotProvider {
+	cursorQuotaKeyUsageSnapshotMu.RLock()
+	defer cursorQuotaKeyUsageSnapshotMu.RUnlock()
+	return cursorQuotaKeyUsageSnapshotInstance
+}
+
 // quotaKeyStatusBlocksCursorScheduling 判定激活码状态是否构成"停供"。
 //
 // 只有 expired（含其等价语义：expires_at 已到期但 sweeper 尚未落盘）停供。
@@ -423,13 +456,35 @@ func quotaKeyStatusBlocksCursorScheduling(status string) bool {
 // 宁可本次不选，也不把可能已停供的 cursor 号放进候选。provider 未安装（进程未装配
 // QuotaKeyService，如缩编排布的单元/集成场景）不构成"已知停供"，此时不额外收紧，
 // 与 codeBuddyQuotaInstance 为 nil 时的降级口径一致。
+//
+// 本函数是**既有调度路径**的 bool/string 兼容投影：它把"读取失败"折叠成
+// "quota_key_state_unavailable" 原因串，因而无法区分「来源明确停供」与「来源读不到」。
+// 需要该区分的调用方（§25.14-B 的窄只读入口 GetCursorSupplyModelIDs）必须走
+// cursorAccountQuotaKeyVetoReasonWithError，不得复用本包装器吞掉读取失败。
 func cursorAccountQuotaKeyVetoReason(ctx context.Context, account *Account) string {
+	reason, err := cursorAccountQuotaKeyVetoReasonWithError(ctx, account)
+	if err != nil {
+		return "quota_key_state_unavailable"
+	}
+	return reason
+}
+
+// cursorAccountQuotaKeyVetoReasonWithError 是 cursor 激活码门的**带 error 共同谓词**：
+// 与 cursorAccountQuotaKeyVetoReason 是同一份实现（后者即其兼容投影），但把"读不到"
+// 如实上抛，使调用方可以区分两种事实：
+//   - reason != "" 且 err == nil：来源明确被拒绝（例如已过期），账号不贡献供给；
+//   - err != nil：来源读取失败，调用方必须失败关闭并如实返回错误，不能当空目录。
+//
+// 不改变既有调度路径语义：未绑定激活码的账号、以及 provider 未安装时的降级口径都仍返回
+// ("", nil)；是否把"provider 未接线"本身当读取失败由调用方判定（窄只读入口按 §25.6
+// 「必须有真实 DI 依赖」失败关闭，既有调度路径保持原样）。
+func cursorAccountQuotaKeyVetoReasonWithError(ctx context.Context, account *Account) (string, error) {
 	if account == nil || account.Platform != PlatformCursor || account.QuotaKeyID == nil {
-		return ""
+		return "", nil
 	}
 	provider := currentCursorQuotaKeyStateProvider()
 	if provider == nil {
-		return ""
+		return "", nil
 	}
 	status, err := provider.CursorQuotaKeyStatus(ctx, *account.QuotaKeyID)
 	if err != nil {
@@ -438,16 +493,109 @@ func cursorAccountQuotaKeyVetoReason(ctx context.Context, account *Account) stri
 			"quota_key_id", *account.QuotaKeyID,
 			"error", err,
 		)
-		return "quota_key_state_unavailable"
+		return "", fmt.Errorf("cursor quota key %d state read failed: %w", *account.QuotaKeyID, err)
 	}
 	if quotaKeyStatusBlocksCursorScheduling(status) {
 		slog.Debug("cursor_account_quota_key_expired",
 			"account_id", account.ID,
 			"quota_key_id", *account.QuotaKeyID,
 		)
-		return "quota_key_expired"
+		return "quota_key_expired", nil
 	}
-	return ""
+	return "", nil
+}
+
+// 来源门否决原因串（与 cursorAccountQuotaKeyVetoReason 的 quota_key_expired / 兼容投影
+// quota_key_state_unavailable 同族，供调用方诊断来源被拒的具体维度）。
+const (
+	// quotaKeyUsageObservationFailed 表示最近一次已提交观测为失败（error_code 非空）：
+	// 失败关闭，不沿用保留数值放行（§25.6 / §25.14-C）。
+	quotaKeyUsageObservationFailed = "quota_key_usage_observation_failed"
+	// quotaKeyUsageStale 表示成功值 checked_at 缺失或距今超过新鲜窗口：等待
+	// reconciler / 管理员刷新，本函数直接否决（不拿陈旧数值放行）。
+	quotaKeyUsageStale = "quota_key_usage_stale"
+	// quotaKeyUsageExhausted 表示真实剩余 total-used ≤ 0：供应商额度已耗尽。
+	quotaKeyUsageExhausted = "quota_key_usage_exhausted"
+)
+
+// cursorSupplySourceUsageFreshnessWindow 是成功值 checked_at 的可接受新鲜度（§25.6：
+// 快照/成功值距今超过 5 分钟即等待刷新）。
+const cursorSupplySourceUsageFreshnessWindow = 5 * time.Minute
+
+// cursorSupplySourceUsageNow 是来源门新鲜度判定的时钟源；单测可覆盖以冻结"现在"。
+var cursorSupplySourceUsageNow = time.Now
+
+// cursorSupplySourceUsageVetoReason 是「真实来源剩余≤0」否决的**唯一**消费判断入口
+// （方案 §25.6 同一来源门 / §25.14-C 观测提交生命周期）。
+//
+// 解析一律走 ParseQuotaKeyUsageSnapshot，不自建第二份解析。五规则（否决语义，失败关闭）：
+//  1. 最近一次观测失败（error_code 非空）→ 否决（失败关闭，不使用保留数值放行）；
+//  2. 快照缺失 → 不因快照否决（按既有来源过期/缺失规则走，由调用方判 key 终态）；
+//  3. 成功值 checked_at 缺失或距今 > 5 分钟 → 否决（等待 reconciler/管理员刷新）；
+//  4. 真实剩余 total−used ≤ 0 → 否决；
+//  5. 快照解析失败 → 返回明确 error（非空 reason），由调用方失败关闭。
+//
+// 非 cursor 平台、未绑定激活码、或快照读取器未装配时按既有降级口径返回 ("", nil)（不收紧）。
+func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (string, error) {
+	if account == nil || account.Platform != PlatformCursor || account.QuotaKeyID == nil {
+		return "", nil
+	}
+	provider := currentCursorQuotaKeyUsageSnapshotProvider()
+	if provider == nil {
+		return "", nil
+	}
+	raw, err := provider.CursorQuotaKeyUsageSnapshot(ctx, *account.QuotaKeyID)
+	if err != nil {
+		// 读不到快照：失败关闭，明确上抛（不得当空目录/无否决）。
+		return "", fmt.Errorf("cursor quota key %d usage snapshot read failed: %w", *account.QuotaKeyID, err)
+	}
+	snapshot, ok := ParseQuotaKeyUsageSnapshot(raw)
+	if !ok {
+		if snapshot.ParseFailed {
+			// 规则⑤：快照解析失败 → 明确 error。
+			return "", fmt.Errorf("cursor quota key %d usage snapshot parse failed", *account.QuotaKeyID)
+		}
+		// 规则②：快照/成功值缺失 → 不因快照否决（走既有缺失规则）。
+		return "", nil
+	}
+	// 规则①：最近一次观测失败（error_code 非空）→ 否决（不沿用保留数值）。
+	if snapshot.ErrorCode != "" {
+		return quotaKeyUsageObservationFailed, nil
+	}
+	// 规则③：checked_at 缺失或距今超过新鲜窗口 → 否决。
+	now := cursorSupplySourceUsageNow()
+	if snapshot.CheckedAt == nil || now.Sub(*snapshot.CheckedAt) > cursorSupplySourceUsageFreshnessWindow {
+		return quotaKeyUsageStale, nil
+	}
+	// 规则④：真实剩余 total-used ≤ 0 → 否决。两个数值必须都存在，否则无法判定剩余，
+	// 不臆造否决（缺失≠0）。
+	if snapshot.Total != nil && snapshot.Used != nil && (*snapshot.Total-*snapshot.Used) <= 0 {
+		return quotaKeyUsageExhausted, nil
+	}
+	return "", nil
+}
+
+// cursorSupplySourceAvailabilityVetoReason 是 Cursor **来源可用性**的共同谓词（§25.6
+// 「调度与水位消费同一个来源可用性谓词」）：先按既有来源过期/缺失规则判 key 终态（含读取
+// 失败），再交给真实来源剩余的唯一入口。返回 (reason, err)——明确不可用与无法读取分开。
+func cursorSupplySourceAvailabilityVetoReason(ctx context.Context, account *Account) (string, error) {
+	reason, err := cursorAccountQuotaKeyVetoReasonWithError(ctx, account)
+	if err != nil || reason != "" {
+		return reason, err
+	}
+	return cursorSupplySourceUsageVetoReason(ctx, account)
+}
+
+// cursorSupplySourceAvailabilityVetoReasonString 是来源门在「既有调度路径」的兼容投影：
+// 把读取失败折叠成 quota_key_state_unavailable 原因串，与 cursorAccountQuotaKeyVetoReason
+// 同口径（不清空 source usage 维度）。用于普通/粘性/DB 复核链与跨平台准入的 key 门，
+// 保留"读不到即不可用"的行为，不把来源门拆成两个实现。
+func cursorSupplySourceAvailabilityVetoReasonString(ctx context.Context, account *Account) string {
+	reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, account)
+	if err != nil {
+		return "quota_key_state_unavailable"
+	}
+	return reason
 }
 
 // isOpenAICompatibleAccountEligibleForRequest 判断 OpenAI 兼容账号是否满足本次请求的调度条件。
@@ -537,10 +685,10 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	if !account.IsOpenAICompatible() {
 		return "platform_mismatch"
 	}
-	// P1-S §16.1：cursor 供给的 key 终态门。放平台判定之后、可调度性之前——
-	// 账号本体不动，只是本次不予入选。普通链（本函数）、粘性链（复check 亦走本函数）
-	// 与 DB 复核链共享同一口径；高级候选链在 selectByLoadBalance 里另行分流。
-	if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
+	// P1-S §16.1 + §25.6 同一来源门：cursor 供给的 key 终态门 + 真实来源剩余。
+	// 放平台判定之后、可调度性之前——账号本体不动，只是本次不予入选。普通链（本函数）、
+	// 粘性链（复check 亦走本函数）与 DB 复核链共享同一口径（来源可用 AND 账号可用）。
+	if reason := cursorSupplySourceAvailabilityVetoReasonString(ctx, account); reason != "" {
 		return reason
 	}
 	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {

@@ -108,12 +108,11 @@ func newCursorE2EService(t *testing.T, upstream *cursorE2EUpstream) (*OpenAIGate
 	nodes.cachedAt = time.Now()
 
 	svc := NewOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil /* cursorExecution */)
 	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{
 		7: {ID: 7, CodeEncrypted: "ACTIVATION-CODE-7"},
 	}}
-	svc.SetCursorAuthDeps(repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
-	svc.SetCursorForwarder(NewCursorUpstreamForwarder(
+	svc.cursorExecution = attachCursorTestExecution(t, svc, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo), NewCursorUpstreamForwarder(
 		WithCursorUpstreamNodes(nodes),
 		WithCursorUpstreamHTTPClient(ts.Client()),
 	))
@@ -162,7 +161,7 @@ func TestCursorProtocolEndToEnd(t *testing.T) {
 	svc, c, w := newCursorE2EService(t, upstream)
 
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	res, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+	res, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	require.True(t, res.Stream)
@@ -199,7 +198,7 @@ func TestCursorProtocolStreamUsageReachesBilling(t *testing.T) {
 	svc, c, _ := newCursorE2EService(t, upstream)
 
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	res, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+	res, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
 	require.NoError(t, err)
 	require.Equal(t, 12601, res.Usage.InputTokens)
 	require.Equal(t, 15, res.Usage.OutputTokens)
@@ -213,7 +212,7 @@ func TestForwardCursorReusesAccountBearerAcrossCalls(t *testing.T) {
 	svc, c, _ := newCursorE2EService(t, upstream)
 
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	res, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+	res, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
 	require.NoError(t, err)
 	require.Equal(t, 12601, res.Usage.InputTokens)
 	require.Equal(t, 15, res.Usage.OutputTokens)
@@ -226,7 +225,7 @@ func TestCursorProtocolNonStreamingUsageReachesBilling(t *testing.T) {
 	svc, c, _ := newCursorE2EService(t, upstream)
 
 	body := []byte(`{"model":"cursor-sonnet","messages":[{"role":"user","content":"hi"}]}`)
-	res, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", false, time.Now())
+	res, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", false, time.Now())
 	require.NoError(t, err)
 	require.Equal(t, 12601, res.Usage.InputTokens)
 	require.Equal(t, 15, res.Usage.OutputTokens)
@@ -239,7 +238,7 @@ func TestCursorProtocolTokenCachedAcrossCalls(t *testing.T) {
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 
 	for i := 0; i < 3; i++ {
-		_, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+		_, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
 		require.NoError(t, err)
 	}
 	chatCalls := upstream.count()
@@ -259,7 +258,7 @@ func TestCursorProtocolNonStreaming(t *testing.T) {
 	svc, c, w := newCursorE2EService(t, upstream)
 
 	body := []byte(`{"model":"cursor-sonnet","messages":[{"role":"user","content":"hi"}]}`)
-	res, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", false, time.Now())
+	res, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", false, time.Now())
 	require.NoError(t, err)
 	require.False(t, res.Stream)
 
@@ -282,7 +281,7 @@ func TestCursorProtocolRejectedKeyFailsClosed(t *testing.T) {
 	svc, c, w := newCursorE2EService(t, upstream)
 
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	res, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+	res, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
 	require.Error(t, err)
 	require.Nil(t, res)
 	require.ErrorIs(t, err, ErrCursorKeyRejectedUpstream)
@@ -300,7 +299,7 @@ func TestCursorProtocolUpstreamErrorPropagates(t *testing.T) {
 	svc, c, _ := newCursorE2EService(t, upstream)
 
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	res, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+	res, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
 	require.Error(t, err)
 	require.Nil(t, res)
 	require.ErrorIs(t, err, ErrCursorRelayAuthRejected)
@@ -317,7 +316,7 @@ func TestCursorProtocolStreamErrorPropagates(t *testing.T) {
 		upstream := &cursorE2EUpstream{chatBody: chat}
 		svc, c, _ := newCursorE2EService(t, upstream)
 		body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-		_, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+		_, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
 		require.ErrorIs(t, err, ErrCursorUpstreamStream)
 		require.Contains(t, err.Error(), "ERROR_UNAUTHORIZED")
 	})
@@ -328,7 +327,7 @@ func TestCursorProtocolStreamErrorPropagates(t *testing.T) {
 		upstream := &cursorE2EUpstream{chatBody: chat}
 		svc, c, _ := newCursorE2EService(t, upstream)
 		body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-		_, err := svc.forwardCursor(t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
+		_, err := executeCursorForTest(t, svc, t.Context(), c, cursorE2EAccount(), body, "cursor-sonnet", true, time.Now())
 		require.ErrorIs(t, err, ErrCursorMissingEndStream)
 	})
 }
@@ -351,12 +350,11 @@ func TestForwardCursorNeverLeaksTokenInError(t *testing.T) {
 	nodes.cachedAt = time.Now()
 
 	svc := NewOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil /* cursorExecution */)
 	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{
 		7: {ID: 7, CodeEncrypted: "ACTIVATION-CODE-7"},
 	}}
-	svc.SetCursorAuthDeps(repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
-	svc.SetCursorForwarder(NewCursorUpstreamForwarder(
+	svc.cursorExecution = attachCursorTestExecution(t, svc, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo), NewCursorUpstreamForwarder(
 		WithCursorUpstreamNodes(nodes),
 		WithCursorUpstreamHTTPClient(srv.Client()),
 	))
@@ -366,7 +364,7 @@ func TestForwardCursorNeverLeaksTokenInError(t *testing.T) {
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	acc := cursorE2EAccount()
 	acc.Credentials["access_token"] = token // 出站 Bearer 即本次的泄漏金丝雀。
-	_, err := svc.forwardCursor(t.Context(), c, acc, body, "cursor-sonnet", true, time.Now())
+	_, err := executeCursorForTest(t, svc, t.Context(), c, acc, body, "cursor-sonnet", true, time.Now())
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), token, "account bearer must never appear in error text")
 	require.NotContains(t, w.Body.String(), token, "account bearer must never reach the client")

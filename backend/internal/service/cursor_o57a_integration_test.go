@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/stretchr/testify/require"
@@ -104,21 +105,17 @@ func TestOpenAIAccountEligibilityCursorCrossPlatformSupplyO57A(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCursorSupplyForwardDispatchRoutingO57A(t *testing.T) {
-	// 模拟 CC 入口（cursorInboundOpenAIChat）把 cursor 账号交给 CursorForwardInbound：
+	// 模拟 CC 入口把 cursor 账号交给**唯一执行部件**（类型化入口）：
 	// 受理后必须由 CursorUpstreamForwarder 真正打到 cursor 原生端点（路径/请求形状）。
-	prev := cursorBridgeInstalled()
-	t.Cleanup(func() { InstallCursorBridge(prev) })
-
 	repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{
 		11: {ID: 11, CodeEncrypted: "ACTIVATION-CODE-ELEVEN"},
 	})
 	up := &cursorOutboundUpstream{body: cursorOKStreamBody(t)}
 	svc, c := newCursorOutboundTestService(t, up.handler(), repo, cursorTestDeviceIDs(repo))
-	InstallCursorBridge(svc)
 
 	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
 	body := []byte(`{"model":"cursor-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
-	res, err := CursorForwardInbound(context.Background(), c, acc, cursorInboundOpenAIChat, body)
+	res, err := executeCursorForTest(t, svc, context.Background(), c, acc, body, "cursor-sonnet", false, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	require.Equal(t, 1, up.count())

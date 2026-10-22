@@ -1431,3 +1431,158 @@ func TestQuotaKeyReconciler_MountFailedSentinel_NoRepeatPullSameKeyThisRound(t *
 	require.Contains(t, ops.lastResultVal(), "upstream may have been consumed")
 	require.False(t, ops.lastSuccessCalled(), "non-idempotent failure must be a failed heartbeat")
 }
+
+// ---------------------------------------------------------------------------
+// W2-B1 / §25.6 + §25.14-C：reconciler 同轮来源额度刷新职责
+// （用例名以 TestQuotaKeyReconcilerSourceUsage 起头，使其落在派发单白名单的
+//  -run 'TestQuotaKey|TestCursorAutoEntry|TestCursorDevice' 过滤内，可被执行者命令复现）
+//   - 位于 allowedModels / modelWater 早退之前，独立于"需要补号"；
+//   - 扫描未软删来源（含已观测耗尽），只调唯一观测入口；
+//   - Stop 后不发新请求，心跳如实记录未完成数量。
+// ---------------------------------------------------------------------------
+
+// fakeUsageObserver 是来源额度观测窄面的替身：记录被观测的来源 ID 与调用顺序。
+type fakeUsageObserver struct {
+	mu    sync.Mutex
+	ids   []int64
+	errOn map[int64]error
+	// onObserve 在每次观测前回调（用例可在此置停机/取消，模拟轮预算用尽）。
+	onObserve func(keyID int64)
+}
+
+func newFakeUsageObserver() *fakeUsageObserver {
+	return &fakeUsageObserver{errOn: make(map[int64]error)}
+}
+
+func (o *fakeUsageObserver) ProbeKeyQuota(_ context.Context, quotaKeyID int64) (*KeyQuotaLookupInfo, error) {
+	if o.onObserve != nil {
+		o.onObserve(quotaKeyID)
+	}
+	o.mu.Lock()
+	o.ids = append(o.ids, quotaKeyID)
+	o.mu.Unlock()
+	if err, ok := o.errOn[quotaKeyID]; ok {
+		return nil, err
+	}
+	return &KeyQuotaLookupInfo{}, nil
+}
+
+func (o *fakeUsageObserver) observed() []int64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]int64(nil), o.ids...)
+}
+
+// seededKeyRepo 构造带指定来源行的内存替身仓储（List 返回全部行，模拟"未软删来源"）。
+func seededKeyRepo(ids ...int64) *fakeQuotaKeyRepo {
+	repo := newFakeQuotaKeyRepo()
+	for _, id := range ids {
+		repo.byID[id] = &ent.QuotaKey{ID: id, Status: domain.QuotaKeyStatusActive, CodeEncrypted: "enc:code"}
+	}
+	return repo
+}
+
+// TestQuotaKeyReconcilerSourceUsageBeforeEarlyExit：水位提供方未接入（早退路径）时，
+// 同轮额度刷新仍必须执行，且覆盖全部来源（含已耗尽/已观测耗尽的来源）。
+func TestQuotaKeyReconcilerSourceUsageBeforeEarlyExit(t *testing.T) {
+	repo := seededKeyRepo(11, 12, 13)
+	// 12 已观测耗尽（exhausted=true）——仍必须被扫描以发现恢复。
+	repo.byID[12].Exhausted = true
+	ops := newReconOpsRepo()
+	r := NewQuotaKeyReconciler(repo, newFakePuller(), ops)
+	observer := newFakeUsageObserver()
+	r.SetUsageObserver(observer)
+
+	r.runOnce() // 未接入 modelWater → 走早退分支
+
+	got := observer.observed()
+	require.Equal(t, []int64{11, 12, 13}, got, "早退前必须按未软删来源逐个观测（含 exhausted 来源）")
+	require.Equal(t, 1, ops.hbCalls(), "每轮仍只写一次心跳")
+	require.Contains(t, ops.lastResultVal(), "source usage refresh: observed=3 failed=0 not_queried=0",
+		"心跳必须如实记录本轮观测结果")
+}
+
+// TestQuotaKeyReconcilerSourceUsageRunsBeforePull：额度刷新必须先于补号（补号前观察单独提交，
+// 再进已有容量事务），且不依赖"是否需要补号"。
+func TestQuotaKeyReconcilerSourceUsageRunsBeforePull(t *testing.T) {
+	repo := seededKeyRepo(21, 22)
+	var order []string
+	var mu sync.Mutex
+
+	puller := newFakePuller()
+	puller.afterPull = func(keyID int64, _ error) {
+		mu.Lock()
+		order = append(order, fmt.Sprintf("pull:%d", keyID))
+		mu.Unlock()
+	}
+	observer := newFakeUsageObserver()
+	observer.onObserve = func(keyID int64) {
+		mu.Lock()
+		order = append(order, fmt.Sprintf("observe:%d", keyID))
+		mu.Unlock()
+	}
+
+	mw := newFakeModelWater()
+	mw.models = []string{"m1"}
+	mw.level = 8 // 缺口 2 → 触发补号
+	mw.candidates = []int64{21, 22}
+
+	ops := newReconOpsRepo()
+	r := NewQuotaKeyReconciler(repo, puller, ops)
+	r.SetModelWaterProvider(mw)
+	r.SetUsageObserver(observer)
+
+	r.runOnce()
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, order, "本轮必须既观测又补号")
+	firstPull := -1
+	for i, step := range order {
+		if strings.HasPrefix(step, "pull:") {
+			firstPull = i
+			break
+		}
+	}
+	require.Greater(t, firstPull, 0, "补号必须发生在观测之后: %v", order)
+	for _, step := range order[:firstPull] {
+		require.True(t, strings.HasPrefix(step, "observe:"), "补号前只允许出现观测动作: %v", order)
+	}
+}
+
+// TestQuotaKeyReconcilerSourceUsageNotQueriedAfterStop：轮内停机后不再发起新
+// 请求，未查项保持原时间，心跳如实记录未完成数量。
+func TestQuotaKeyReconcilerSourceUsageNotQueriedAfterStop(t *testing.T) {
+	repo := seededKeyRepo(31, 32, 33)
+	ops := newReconOpsRepo()
+	r := NewQuotaKeyReconciler(repo, newFakePuller(), ops)
+	observer := newFakeUsageObserver()
+	// 第一次观测后立刻置停机（模拟 Stop 在轮中到达）。
+	observer.onObserve = func(keyID int64) {
+		if keyID == 31 {
+			r.stopping.Store(true)
+		}
+	}
+	r.SetUsageObserver(observer)
+
+	r.runOnce()
+
+	require.Equal(t, []int64{31}, observer.observed(), "Stop 置位后不得再发起新观测请求")
+	require.Contains(t, ops.lastResultVal(), "not_queried=2", "心跳必须如实记录未完成数量")
+}
+
+// TestQuotaKeyReconcilerSourceUsageFailureDoesNotStopRound：单个来源观测失败只影响该次观测，
+// 不中断其余来源、不改补池语义，心跳如实计入 failed。
+func TestQuotaKeyReconcilerSourceUsageFailureDoesNotStopRound(t *testing.T) {
+	repo := seededKeyRepo(41, 42)
+	ops := newReconOpsRepo()
+	r := NewQuotaKeyReconciler(repo, newFakePuller(), ops)
+	observer := newFakeUsageObserver()
+	observer.errOn[41] = errors.New("lookup blocked")
+	r.SetUsageObserver(observer)
+
+	r.runOnce()
+
+	require.Equal(t, []int64{41, 42}, observer.observed(), "单来源失败不得中断其余来源")
+	require.Contains(t, ops.lastResultVal(), "observed=1 failed=1", "心跳必须如实分开成功与失败")
+}

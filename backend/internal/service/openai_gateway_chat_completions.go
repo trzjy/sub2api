@@ -134,13 +134,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	// Cursor（shareai 号池中转）：必须在通用 OpenAI 路径之前分流，理由同
 	// OpenAIGatewayService.Forward 的 cursor 分支（出站为 Cursor 原生协议端点）。
 	// 分发口径与 Forward 保持一致的单一列表。P1-A2 起统一走契约 0.1 包级桥接入口
-	// CursorForwardInbound（出站 = 账号 Bearer + 同源 device/code 的 x-jg-auth）。
+	// 唯一执行部件（出站 = 账号 Bearer + 同源 device/code 的 x-jg-auth）。
 	if isCursorAccount(account) {
-		res, ferr := CursorForwardInbound(ctx, c, account, cursorInboundOpenAIChat, body)
-		if ferr != nil {
-			return nil, ferr
-		}
-		return cursorForwardResultToOpenAI(res), nil
+		return s.forwardCursorChatCompletionsEntry(ctx, c, account, body)
 	}
 
 	// 网页逆向平台（W3 方案任务 1）：归并后由账号级接入模式（access_mode=web）决定

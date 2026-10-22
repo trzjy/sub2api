@@ -206,14 +206,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// Cursor（shareai 号池中转）：入站是 OpenAI 形状，出站是 Cursor 原生协议端点，
 	// 二者不兼容，必须在通用 OpenAI 路径之前分流——落到通用路径会把 OpenAI 形状的
 	// body 发到 Cursor 原生端点并白耗 shareai 额度。
-	// P1-A2 起统一走契约 0.1 包级桥接入口 CursorForwardInbound（出站 = 账号 Bearer +
+	// §24.2-1 起统一走唯一执行部件的类型化入口（出站 = 账号 Bearer +
 	// 同源 device/code 的 x-jg-auth），本入口只做形状转换回 OpenAI 结果（不二次计费）。
 	if isCursorAccount(account) {
-		res, ferr := CursorForwardInbound(ctx, c, account, cursorInboundOpenAIChat, body)
-		if ferr != nil {
-			return nil, ferr
-		}
-		return cursorForwardResultToOpenAI(res), nil
+		return s.forwardCursorResponsesEntry(ctx, c, account, body)
 	}
 
 	// 网页逆向平台（W3 方案任务 1）：入站 OpenAI 协议经各自适配器转换为官方网页端

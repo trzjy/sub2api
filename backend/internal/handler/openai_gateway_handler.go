@@ -641,6 +641,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
+	// §25.2/§25.14-D：续轮识别与整批接管必须发生在**用户槽/预留/选号之前**。
+	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolResponses, body,
+		cursorResumeIdentity(apiKey, subject.UserID), reqStream, func(status int, message string) {
+			h.errorResponse(c, status, "invalid_request_error", message)
+		}) {
+		return
+	}
+
 	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, reqStream, &streamStarted, reqLog)
 	if !acquired {
 		return
@@ -662,7 +670,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 
 	// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
-	inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
+	inflightHandle, err := reserveTransferableInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
 	if err != nil {
 		reqLog.Info("openai.inflight_reservation_rejected", zap.Error(err))
 		status, code, message, retryAfter := billingErrorDetails(err)
@@ -672,7 +680,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.handleStreamingAwareError(c, status, code, message, streamStarted)
 		return
 	}
-	defer inflightRelease()
+	if inflightHandle != nil {
+		defer inflightHandle.Release()
+	}
 
 	// Generate session hash (header first; fallback to prompt_cache_key)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
@@ -885,6 +895,17 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// 从不可变的 canonical forwardBody 派生本次尝试 body 并整块剔除上游私有的加密
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
 		attemptBody := h.deriveOpenAIForwardAttemptBody(reqLog, forwardBody, account, &passthroughFailoverState)
+		// §25.4/§25.5：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额预留转交给会话，
+		// 并把本 HTTP 的计费任务交给会话唯一结算；非 Cursor 账号显式清空转交物。
+		attemptHandover := newCursorResourceHandover(
+			cursorHandoverResources(
+				transferableSlot(c, cursorSlotHandleUserKey),
+				transferableSlot(c, cursorSlotHandleAccountKey),
+				inflightHandle,
+			),
+			h.submitMandatoryUsageRecordTask,
+		)
+		c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -1376,6 +1397,14 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
+	// §25.2/§25.14-D：续轮识别与整批接管必须发生在**用户槽/预留/选号之前**。
+	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolMessages, body,
+		cursorResumeIdentity(apiKey, subject.UserID), reqStream, func(status int, message string) {
+			h.anthropicErrorResponse(c, status, "invalid_request_error", message)
+		}) {
+		return
+	}
+
 	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, reqStream, &streamStarted, reqLog)
 	if !acquired {
 		return
@@ -1395,7 +1424,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	}
 
 	// 余额模式在途预留（与计费同口径估算；计费任务扣减余额缓存后才释放）。
-	inflightDone, inflightErr := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
+	inflightHandle, inflightErr := reserveTransferableInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
 	if inflightErr != nil {
 		status, code, message, retryAfter := billingErrorDetails(inflightErr)
 		if retryAfter > 0 {
@@ -1404,7 +1433,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		h.anthropicStreamingAwareError(c, status, code, message, streamStarted)
 		return
 	}
-	defer inflightDone()
+	if inflightHandle != nil {
+		defer inflightHandle.Release()
+	}
 
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	promptCacheKey := h.gatewayService.ExtractSessionID(c, body)
@@ -1562,6 +1593,17 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 			return 0
 		}()
+		// §25.4/§25.5：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额预留转交给会话，
+		// 并把本 HTTP 的计费任务交给会话唯一结算；非 Cursor 账号显式清空转交物。
+		attemptHandover := newCursorResourceHandover(
+			cursorHandoverResources(
+				transferableSlot(c, cursorSlotHandleUserKey),
+				transferableSlot(c, cursorSlotHandleAccountKey),
+				inflightHandle,
+			),
+			h.submitMandatoryUsageRecordTask,
+		)
+		c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -2316,7 +2358,13 @@ func (h *OpenAIGatewayHandler) acquireResponsesUserSlot(
 		h.handleConcurrencyError(c, err, scope.Kind, *streamStarted)
 		return nil, false
 	}
-	return wrapReleaseOnDone(ctx, userReleaseFunc), true
+	// §25.4：用户槽用**可转交**句柄（Cursor 分支交给会话持有），同时登记到请求上。
+	userHandle := newTransferableRelease(ctx, "user_slot", userReleaseFunc)
+	if userHandle != nil {
+		trackTransferableSlot(c, cursorSlotHandleUserKey, userHandle)
+		return userHandle.Release, true
+	}
+	return nil, true
 }
 
 // openAISlotAcquireResult 是账号槽位获取的三态结果。
@@ -2543,7 +2591,11 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 				reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			}
 		}
-		return wrapReleaseOnDone(ctx, selection.ReleaseFunc), openAISlotAcquireOK
+		if handle := newTransferableRelease(ctx, "account_slot", selection.ReleaseFunc); handle != nil {
+			trackTransferableSlot(c, cursorSlotHandleAccountKey, handle)
+			return handle.Release, openAISlotAcquireOK
+		}
+		return nil, openAISlotAcquireOK
 	}
 	if selection.WaitPlan == nil {
 		markOpsRoutingCapacityLimited(c)
@@ -2578,7 +2630,11 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, groupID, sessionHash, account.ID); err != nil {
 			reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		}
-		return wrapReleaseOnDone(ctx, fastReleaseFunc), openAISlotAcquireOK
+		if handle := newTransferableRelease(ctx, "account_slot", fastReleaseFunc); handle != nil {
+			trackTransferableSlot(c, cursorSlotHandleAccountKey, handle)
+			return handle.Release, openAISlotAcquireOK
+		}
+		return nil, openAISlotAcquireOK
 	}
 
 	canWait, waitErr := h.concurrencyHelper.IncrementAccountWaitCount(ctx, account.ID, selection.WaitPlan.MaxWaiting)
@@ -2634,7 +2690,11 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, groupID, sessionHash, account.ID); err != nil {
 		reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 	}
-	return wrapReleaseOnDone(ctx, accountReleaseFunc), openAISlotAcquireOK
+	if handle := newTransferableRelease(ctx, "account_slot", accountReleaseFunc); handle != nil {
+		trackTransferableSlot(c, cursorSlotHandleAccountKey, handle)
+		return handle.Release, openAISlotAcquireOK
+	}
+	return nil, openAISlotAcquireOK
 }
 
 // ResponsesWebSocket handles OpenAI Responses API WebSocket ingress endpoint
@@ -3730,6 +3790,12 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, tas
 	if task == nil {
 		return
 	}
+	if owner := service.CursorSettlementOwnerFromContext(parent); owner != nil {
+		// §25.5：Cursor 会话已接管本 HTTP 的结算——不再为每个工具 HTTP 排一次
+		// UsageRecordTask，而是把任务交给会话唯一结算（至多执行一次）。
+		owner.AdoptSettlementTask(task)
+		return
+	}
 	task, abandon := wrapUsageRecordTaskContext(parent, task)
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); mode != service.UsageRecordSubmitModeDroppedStopped {
@@ -3770,6 +3836,12 @@ func (h *OpenAIGatewayHandler) submitOpenAIUsageRecordTask(parent context.Contex
 
 func (h *OpenAIGatewayHandler) submitMandatoryUsageRecordTask(parent context.Context, task service.UsageRecordTask) {
 	if task == nil {
+		return
+	}
+	if owner := service.CursorSettlementOwnerFromContext(parent); owner != nil {
+		// §25.5：Cursor 会话已接管本 HTTP 的结算——不再为每个工具 HTTP 排一次
+		// UsageRecordTask，而是把任务交给会话唯一结算（至多执行一次）。
+		owner.AdoptSettlementTask(task)
 		return
 	}
 	task, _ = wrapUsageRecordTaskContext(parent, task)

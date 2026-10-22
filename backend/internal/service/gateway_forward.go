@@ -94,432 +94,54 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 }
 
 // ---------------------------------------------------------------------------
-// Cursor 文本桥接（P1-C1）：Claude 组三出口的早分流
+// Cursor 出口：三协议的早分流（响应回桥实现已迁至 Cursor 适配边界）
 // ---------------------------------------------------------------------------
 //
-// 固定语义（方案 §6.1 / §15.4-I4 / §16.1）：
+// 固定语义（方案 §24.2-1 / §24.2-5 / §25.8 第 2 步）：
 //   - cursor 账号在 GatewayService 三个 Claude 出口的**最前面**分流，绝不落到
 //     Anthropic 通用路径；
-//   - 入站先由既有 apicompat 转换器归一为 Chat Completions，再走契约 0.1 的
-//     包级入口 CursorForwardInbound("openai_chat")；
-//   - 桥接返回的 *ForwardResult 沿既有 usage 字段承载真实用量，由 handler 既有
-//     RecordUsage 链计费一次；本层**不计费、不二次记 usage**；
-//   - 客户端可见响应必须回到入站协议：Messages → Anthropic SSE/JSON，
-//     Responses → Responses 事件/JSON，Chat Completions 直出。
-//
-// 桥接实现（P1-A2）会把 OpenAI 形状的响应直接写到 gin writer。为了让
-// Messages / Responses 两个出口保持各自协议，这里用一个**逐帧转换 writer**
-// 包住真实 writer：流式帧在写入的同时转换为目标协议，客户端仍实时收到
-// 增量（不整段缓冲）；非流式响应在结束时整包转换。
-
-// cursorBridgeMode 选择客户端可见响应协议，与入站出口一一对应。
-type cursorBridgeMode int
-
-const (
-	cursorBridgeModeChat cursorBridgeMode = iota
-	cursorBridgeModeAnthropic
-	cursorBridgeModeResponses
-)
-
-// cursorBridgeProtocolWriter 把桥接写出的 OpenAI 形状响应回桥为客户端协议。
-//
-// 只拦截 gin.ResponseWriter 的写入方法；其余方法透传。Header 使用独立 map，
-// 避免桥接内部的 Content-Type / SSE 头直接落到真实连接（最终由本 writer 设置）。
-type cursorBridgeProtocolWriter struct {
-	gin.ResponseWriter
-	header http.Header
-	mode   cursorBridgeMode
-	model  string
-	stream bool
-
-	// 流式：未消费的 SSE 片段 + 目标协议状态机。
-	pending   []byte
-	anthState *apicompat.ChatCompletionsToAnthropicStreamState
-	respState *apicompat.ChatCompletionsToResponsesStreamState
-	started   bool
-
-	// 非流式：整条 chat.completion JSON。
-	completion bytes.Buffer
-
-	written     int
-	status      int
-	wroteHeader bool
-}
-
-func newCursorBridgeProtocolWriter(parent gin.ResponseWriter, stream bool, mode cursorBridgeMode, model string) *cursorBridgeProtocolWriter {
-	w := &cursorBridgeProtocolWriter{
-		ResponseWriter: parent,
-		header:         make(http.Header),
-		mode:           mode,
-		model:          model,
-		stream:         stream,
-	}
-	switch mode {
-	case cursorBridgeModeAnthropic:
-		w.anthState = apicompat.NewChatCompletionsToAnthropicStreamState(model)
-	case cursorBridgeModeResponses:
-		w.respState = apicompat.NewChatCompletionsToResponsesStreamState(model)
-	}
-	return w
-}
-
-func (w *cursorBridgeProtocolWriter) Header() http.Header { return w.header }
-
-func (w *cursorBridgeProtocolWriter) WriteHeader(code int) {
-	if w.wroteHeader {
-		return
-	}
-	w.status = code
-	w.wroteHeader = true
-}
-
-func (w *cursorBridgeProtocolWriter) WriteHeaderNow() {
-	if !w.wroteHeader {
-		w.WriteHeader(http.StatusOK)
-	}
-}
-
-func (w *cursorBridgeProtocolWriter) Write(p []byte) (int, error) {
-	w.WriteHeaderNow()
-	w.written += len(p)
-	if !w.stream {
-		return w.completion.Write(p)
-	}
-	w.pending = append(w.pending, p...)
-	return len(p), w.flushFrames()
-}
-
-func (w *cursorBridgeProtocolWriter) WriteString(s string) (int, error) {
-	return w.Write([]byte(s))
-}
-
-func (w *cursorBridgeProtocolWriter) Flush() {
-	if w.stream {
-		_ = w.flushFrames()
-	}
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
-func (w *cursorBridgeProtocolWriter) Status() int {
-	if w.status == 0 {
-		return http.StatusOK
-	}
-	return w.status
-}
-
-func (w *cursorBridgeProtocolWriter) Size() int { return w.written }
-
-func (w *cursorBridgeProtocolWriter) Written() bool { return w.wroteHeader || w.written > 0 }
-
-// ensureStarted 在首次写客户端前设置目标协议的 SSE 头。
-func (w *cursorBridgeProtocolWriter) ensureStarted() {
-	if w.started {
-		return
-	}
-	w.started = true
-	h := w.ResponseWriter.Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
-	h.Set("X-Accel-Buffering", "no")
-	if rid := strings.TrimSpace(w.header.Get("x-request-id")); rid != "" {
-		h.Set("x-request-id", rid)
-	}
-}
-
-// flushFrames 消费 pending 中的完整 SSE 帧（空行分隔），逐帧回桥。
-func (w *cursorBridgeProtocolWriter) flushFrames() error {
-	for {
-		idx, sepLen := -1, 0
-		if i := bytes.Index(w.pending, []byte("\n\n")); i >= 0 {
-			idx, sepLen = i, 2
-		} else if i := bytes.Index(w.pending, []byte("\r\n\r\n")); i >= 0 {
-			idx, sepLen = i, 4
-		}
-		if idx < 0 {
-			return nil
-		}
-		frame := w.pending[:idx]
-		w.pending = w.pending[idx+sepLen:]
-		if err := w.writeSSEFrame(frame); err != nil {
-			return err
-		}
-	}
-}
-
-// writeSSEFrame 把一帧 OpenAI SSE 转换为目标协议事件并立即写给客户端。
-func (w *cursorBridgeProtocolWriter) writeSSEFrame(frame []byte) error {
-	data := cursorBridgeSSEData(frame)
-	if data == "" {
-		// 上游 keepalive / 空注释帧：已开始的目标协议流透传为空注释帧。
-		if w.started {
-			_, err := io.WriteString(w.ResponseWriter, ":\n\n")
-			return err
-		}
-		return nil
-	}
-	if data == "[DONE]" {
-		return nil
-	}
-
-	var chunk apicompat.ChatCompletionsChunk
-	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-		return fmt.Errorf("cursor: decode bridged chat chunk: %w", err)
-	}
-	chunk.Usage = cursorBridgedChatUsage([]byte(data))
-	return w.writeChunk(&chunk)
-}
-
-func (w *cursorBridgeProtocolWriter) writeChunk(chunk *apicompat.ChatCompletionsChunk) error {
-	w.ensureStarted()
-	switch w.mode {
-	case cursorBridgeModeAnthropic:
-		for _, event := range apicompat.ChatCompletionsChunkToAnthropicEvents(chunk, w.anthState) {
-			sse, err := apicompat.ResponsesAnthropicEventToSSE(event)
-			if err != nil {
-				return err
-			}
-			if _, err := io.WriteString(w.ResponseWriter, sse); err != nil {
-				return err
-			}
-		}
-	case cursorBridgeModeResponses:
-		for _, event := range apicompat.ChatCompletionsChunkToResponsesEvents(chunk, w.respState) {
-			sse, err := apicompat.ResponsesEventToSSE(event)
-			if err != nil {
-				return err
-			}
-			if _, err := io.WriteString(w.ResponseWriter, sse); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// finalize 写出目标协议的终止事件（流式）或整包响应（非流式）。
-func (w *cursorBridgeProtocolWriter) finalize() error {
-	if !w.stream {
-		return w.finalizeCompletion()
-	}
-
-	if len(w.pending) > 0 {
-		rest := w.pending
-		w.pending = nil
-		if err := w.writeSSEFrame(rest); err != nil {
-			return err
-		}
-	}
-	w.ensureStarted()
-
-	var events []string
-	switch w.mode {
-	case cursorBridgeModeAnthropic:
-		for _, event := range apicompat.FinalizeChatCompletionsAnthropicStream(w.anthState) {
-			sse, err := apicompat.ResponsesAnthropicEventToSSE(event)
-			if err != nil {
-				return err
-			}
-			events = append(events, sse)
-		}
-	case cursorBridgeModeResponses:
-		for _, event := range apicompat.FinalizeChatCompletionsResponsesStream(w.respState) {
-			sse, err := apicompat.ResponsesEventToSSE(event)
-			if err != nil {
-				return err
-			}
-			events = append(events, sse)
-		}
-	}
-	for _, sse := range events {
-		if _, err := io.WriteString(w.ResponseWriter, sse); err != nil {
-			return err
-		}
-	}
-	w.Flush()
-	return nil
-}
-
-func (w *cursorBridgeProtocolWriter) finalizeCompletion() error {
-	body := w.completion.Bytes()
-	var resp apicompat.ChatCompletionsResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return fmt.Errorf("cursor: decode bridged chat completion: %w", err)
-	}
-	resp.Usage = cursorBridgedChatUsage(body)
-
-	var out any
-	switch w.mode {
-	case cursorBridgeModeAnthropic:
-		out = apicompat.ChatCompletionsResponseToAnthropic(&resp, w.model)
-	case cursorBridgeModeResponses:
-		out = apicompat.ChatCompletionsResponseToResponses(&resp, w.model, nil, nil, false, nil)
-	default:
-		return fmt.Errorf("cursor: unsupported non-stream response mode %d", w.mode)
-	}
-	data, err := json.Marshal(out)
-	if err != nil {
-		return fmt.Errorf("cursor: marshal %d protocol response: %w", w.mode, err)
-	}
-
-	h := w.ResponseWriter.Header()
-	h.Set("Content-Type", "application/json")
-	if rid := strings.TrimSpace(w.header.Get("x-request-id")); rid != "" {
-		h.Set("x-request-id", rid)
-	}
-	w.ResponseWriter.WriteHeader(http.StatusOK)
-	_, err = w.ResponseWriter.Write(data)
-	return err
-}
-
-// cursorBridgeSSEData 从一帧 SSE 中取出 data 字段（多行按 SSE 规范拼接）。
-func cursorBridgeSSEData(frame []byte) string {
-	var b strings.Builder
-	for _, rawLine := range bytes.Split(frame, []byte("\n")) {
-		line := strings.TrimSpace(string(rawLine))
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-	}
-	return b.String()
-}
+//   - 入站先由既有 apicompat 转换器**解码一次**成 Chat Completions，再交唯一执行
+//     部件 CursorExecutionService.Execute（本层不再传 inbound 形状标识 + 原始 body）；
+//   - 客户端可见响应回到入站协议（Messages / Responses / Chat）由执行部件内的
+//     Cursor 专用 writer 统一完成：三个出口与 OpenAI 入口共用**同一**转换实现；
+//   - 执行部件返回的 *ForwardResult 沿既有 usage 字段承载真实用量，由 handler 既有
+//     RecordUsage 链计费一次；本层不计费、不二次记 usage。
 
 // forwardCursorAsAnthropicMessages 处理 /v1/messages 入站：Anthropic Messages
-// → Chat Completions → 契约 0.1 文本桥接 → Anthropic 响应。
+// → Chat Completions → 唯一执行部件（Anthropic 回桥）。
 func (s *GatewayService) forwardCursorAsAnthropicMessages(
 	ctx context.Context, c *gin.Context, account *Account, parsed *ParsedRequest,
 ) (*ForwardResult, error) {
+	if err := requireCursorExecution(s.cursorExecution); err != nil {
+		return nil, err
+	}
 	var req apicompat.AnthropicRequest
 	if err := json.Unmarshal(parsed.Body.Bytes(), &req); err != nil {
 		return nil, fmt.Errorf("cursor: parse anthropic messages request: %w", err)
 	}
-	if strings.TrimSpace(req.Model) == "" {
-		return nil, errors.New("cursor: anthropic messages request carries no model (fail closed)")
-	}
-	ccReq, err := apicompat.AnthropicToChatCompletionsRequest(&req)
-	if err != nil {
-		return nil, fmt.Errorf("cursor: convert anthropic messages to chat completions: %w", err)
-	}
-	ccBody, err := json.Marshal(ccReq)
-	if err != nil {
-		return nil, fmt.Errorf("cursor: marshal chat completions request: %w", err)
-	}
-	return s.forwardCursorAsProtocol(ctx, c, account, ccBody, req.Stream, cursorBridgeModeAnthropic, req.Model)
+	return cursorExecuteAnthropic(ctx, c, s.cursorExecution, account, &req)
 }
 
 // forwardCursorAsResponses 处理 /v1/responses 入站：Responses → Chat Completions
-// → 契约 0.1 文本桥接 → Responses 响应。
+// → 唯一执行部件（Responses 回桥，工具映射随请求带齐）。
 func (s *GatewayService) forwardCursorAsResponses(
 	ctx context.Context, c *gin.Context, account *Account, body []byte,
 ) (*ForwardResult, error) {
+	if err := requireCursorExecution(s.cursorExecution); err != nil {
+		return nil, err
+	}
 	var req apicompat.ResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("cursor: parse responses request: %w", err)
 	}
-	if strings.TrimSpace(req.Model) == "" {
-		return nil, errors.New("cursor: responses request carries no model (fail closed)")
-	}
-	ccReq, err := apicompat.ResponsesToChatCompletionsRequest(&req)
-	if err != nil {
-		return nil, fmt.Errorf("cursor: convert responses to chat completions: %w", err)
-	}
-	ccBody, err := json.Marshal(ccReq)
-	if err != nil {
-		return nil, fmt.Errorf("cursor: marshal chat completions request: %w", err)
-	}
-	return s.forwardCursorAsProtocol(ctx, c, account, ccBody, req.Stream, cursorBridgeModeResponses, req.Model)
+	return cursorExecuteResponses(ctx, c, s.cursorExecution, account, &req)
 }
 
-// forwardCursorAsProtocol 调用契约 0.1 桥接，并按 mode 把桥接输出实时回写为
-// 入站协议。
-//
-// 返回的 *ForwardResult 直接来自桥接（真实 usage）；本函数只做协议形状搬运，
-// 不写 usage、不计费。
-func (s *GatewayService) forwardCursorAsProtocol(
-	ctx context.Context,
-	c *gin.Context,
-	account *Account,
-	ccBody []byte,
-	stream bool,
-	mode cursorBridgeMode,
-	clientModel string,
+// forwardCursorAsChatCompletions 处理 /v1/chat/completions 入站（Chat 直出）。
+func (s *GatewayService) forwardCursorAsChatCompletions(
+	ctx context.Context, c *gin.Context, account *Account, body []byte,
 ) (*ForwardResult, error) {
-	if mode == cursorBridgeModeChat || c == nil {
-		return CursorForwardInbound(ctx, c, account, cursorInboundOpenAIChat, ccBody)
-	}
-
-	writer := newCursorBridgeProtocolWriter(c.Writer, stream, mode, clientModel)
-	originalWriter := c.Writer
-	c.Writer = writer
-	res, err := CursorForwardInbound(ctx, c, account, cursorInboundOpenAIChat, ccBody)
-	c.Writer = originalWriter
-	if err != nil {
-		return nil, err
-	}
-	if writer.Status() != http.StatusOK {
-		return nil, fmt.Errorf("cursor: text bridge returned status %d without error (fail closed)", writer.Status())
-	}
-	if err := writer.finalize(); err != nil {
-		return nil, err
-	}
-	return res, nil
-}
-
-// cursorBridgedChatUsage 把桥接输出的 usage 归一为 apicompat.ChatUsage。
-//
-// Cursor 产出的键名是 input_tokens / output_tokens / cache_*_input_tokens
-// （与网关内部 OpenAIUsage 口径一致）；apicompat 回桥按 OpenAI 官方的
-// prompt/completion + prompt_tokens_details 语义读取。这里做一次无损搬运：
-// prompt_tokens 取 input + cache_read + cache_creation，使回桥后的
-// Anthropic input_tokens / Responses input_tokens 与桥接 ForwardResult 完全一致。
-func cursorBridgedChatUsage(raw []byte) *apicompat.ChatUsage {
-	usage := gjson.GetBytes(raw, "usage")
-	if !usage.Exists() || !usage.IsObject() {
-		return nil
-	}
-
-	cacheRead := int(usage.Get("cache_read_input_tokens").Int())
-	cacheCreation := int(usage.Get("cache_creation_input_tokens").Int())
-	if details := usage.Get("prompt_tokens_details"); details.Exists() {
-		if v := details.Get("cached_tokens"); v.Exists() {
-			cacheRead = int(v.Int())
-		}
-		if v := details.Get("cache_creation_tokens"); v.Exists() && cacheCreation == 0 {
-			cacheCreation = int(v.Int())
-		}
-		if v := details.Get("cache_write_tokens"); v.Exists() && cacheCreation == 0 {
-			cacheCreation = int(v.Int())
-		}
-	}
-
-	prompt := int(usage.Get("prompt_tokens").Int())
-	if prompt == 0 {
-		prompt = int(usage.Get("input_tokens").Int()) + cacheRead + cacheCreation
-	}
-	completion := int(usage.Get("completion_tokens").Int())
-	if completion == 0 {
-		completion = int(usage.Get("output_tokens").Int())
-	}
-	total := int(usage.Get("total_tokens").Int())
-	if total == 0 {
-		total = prompt + completion
-	}
-
-	return &apicompat.ChatUsage{
-		PromptTokens:     prompt,
-		CompletionTokens: completion,
-		TotalTokens:      total,
-		PromptTokensDetails: &apicompat.ChatTokenDetails{
-			CachedTokens:        cacheRead,
-			CacheCreationTokens: cacheCreation,
-		},
-	}
+	return cursorExecuteChat(ctx, c, s.cursorExecution, account, body)
 }
 
 // Forward 转发请求到Claude API

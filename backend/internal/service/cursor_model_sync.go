@@ -162,12 +162,13 @@ func (s *AccountTestService) cursorModelSyncResolveSource() (cursorCatalogSource
 		return nil, newUpstreamModelSyncConfigError("Cursor model sync source is not configured", nil)
 	}
 	gateway := s.openaiGatewayService
-	if gateway == nil || gateway.cursorQuotaKeys == nil || gateway.cursorQuotaKeyEnc == nil || gateway.cursorDeviceIDs == nil {
+	if gateway == nil || gateway.cursorExecution == nil {
 		return nil, newUpstreamModelSyncConfigError(
-			"Cursor model sync requires the cursor auth dependencies (quota key repository, encryptor, device id resolver)", nil)
+			"Cursor model sync requires the cursor execution service (auth dependencies)", nil)
 	}
+	exec := gateway.cursorExecution
 	return newCursorDefaultCatalogSource(s, withCursorModelSyncAuth(func(ctx context.Context, account *Account) (CursorUpstreamAuthProvider, error) {
-		return newCursorAccountAuthProvider(account, gateway.cursorQuotaKeys, gateway.cursorQuotaKeyEnc, gateway.cursorDeviceIDs)
+		return exec.AuthProviderForAccount(account)
 	})), nil
 }
 
@@ -208,11 +209,11 @@ func newCursorDefaultCatalogSource(svc *AccountTestService, opts ...cursorModelS
 		},
 		resolveAuth: func(ctx context.Context, account *Account) (CursorUpstreamAuthProvider, error) {
 			gateway := svc.openaiGatewayService
-			if gateway == nil || gateway.cursorQuotaKeys == nil || gateway.cursorQuotaKeyEnc == nil || gateway.cursorDeviceIDs == nil {
+			if gateway == nil || gateway.cursorExecution == nil {
 				return nil, newUpstreamModelSyncConfigError(
-					"Cursor model sync requires the cursor auth dependencies (quota key repository, encryptor, device id resolver)", nil)
+					"Cursor model sync requires the cursor execution service (auth dependencies)", nil)
 			}
-			return newCursorAccountAuthProvider(account, gateway.cursorQuotaKeys, gateway.cursorQuotaKeyEnc, gateway.cursorDeviceIDs)
+			return gateway.cursorExecution.AuthProviderForAccount(account)
 		},
 	}
 	for _, o := range opts {

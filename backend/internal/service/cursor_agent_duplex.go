@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -19,6 +20,87 @@ import (
 // Client 3.24.12 L_v/P_v and live Standard probes 01-version-checksum-only
 // establish these headers. The machine identity stays scoped to the selected key.
 const cursorClientVersion = "3.24.12"
+
+// ---------------------------------------------------------------------------
+// 四层 MCP 工具结果回写编码（依据 plan §21.1-4 / §25.3）。
+//
+// 真实结果回到原 AgentRun 的 exec 关联（W2-F CursorSessionIntake 生产实现），字节级形状：
+//
+//	ExecClientMessage{f1 id(exec_id, varint), f15 id(exec_id 原值, bytes), f2 = McpResult}
+//	  McpResult{f1 success = McpSuccess | f2 error = McpError}
+//	    McpSuccess / McpError{f1 content = repeated McpToolResultContentItem, f2 structured_content}
+//	      McpToolResultContentItem{f1 text = McpTextContent}
+//	        McpTextContent{f1 text(string)}
+//
+// f2 是 ExecClientMessage 在信封里的消息类型字段（与 context_response / mcp_state 回包一致，
+// 见 respond 中 d.send(2, ...)）。McpResult.f1 成功 / f2 错误：客户端明确 is_error 的结果
+// 走 f2 保留错误语义，绝不把本机失败写成成功。structured_content 用实际类型（f2）。
+const (
+	// cursorFldClientMessage 是信封里 ExecClientMessage 的消息类型字段（=2）。
+	cursorFldClientMessage = 2
+
+	// ExecClientMessage 字段。
+	cursorFldClientMsgID     = 1  // f1 id（exec_id，varint）
+	cursorFldClientMsgExecID = 15 // f15 id（exec_id 原值，bytes）
+
+	// McpResult 字段。
+	cursorFldMcpResultSuccess = 1 // f1 success
+	cursorFldMcpResultError   = 2 // f2 error（is_error 语义）
+
+	// McpSuccess / McpError 字段。
+	cursorFldMcpSuccessContent           = 1 // f1 content（repeated McpToolResultContentItem）
+	cursorFldMcpSuccessStructuredContent = 2 // f2 structured_content（实际结构化 JSON 类型）
+
+	// McpToolResultContentItem 字段。
+	cursorFldContentItemText = 1 // f1 text（McpTextContent）
+
+	// McpTextContent 字段。
+	cursorFldTextContentText = 1 // f1 text（string）
+)
+
+// cursorEncodeMcpToolResult 把一条真实工具结果编码为 ExecClientMessage 字节。
+//
+// callID 仅用于日志/诊断（上游靠 ExecID + IDField 关联 exec 关联）；execID / idField 必须
+// 是原 mcp_args 委托捕获时带回的原值，否则上游无法把结果关联到对应 exec。is_error 走
+// McpResult.f2（错误语义），结构化 JSON 走 McpSuccess.f2（structured_content）。
+func cursorEncodeMcpToolResult(
+	execID uint64, idField []byte, callID string,
+	texts []string, structured []byte, isError bool,
+) []byte {
+	// 每条文本结果项独立成**一条** McpSuccess.f1（repeated McpToolResultContentItem）：
+	// 每个 ContentItem 各自一个 f1 tag-value，**不得**把多条编码拼进同一个 length-delimited
+	// 载荷（那样整段会被当作一个 ContentItem 解析，除最后一条外全部丢失）。
+	var payload []byte
+	if len(texts) == 0 {
+		// 空结果也保留一个空文本项，保证 ContentItem 形状完整（上游不接受缺 content）。
+		textContent := cursorAppendStringField(nil, cursorFldTextContentText, "")
+		item := cursorAppendBytesField(nil, cursorFldContentItemText, textContent)
+		payload = cursorAppendBytesField(payload, cursorFldMcpSuccessContent, item)
+	}
+	for _, t := range texts {
+		textContent := cursorAppendStringField(nil, cursorFldTextContentText, t)
+		item := cursorAppendBytesField(nil, cursorFldContentItemText, textContent)
+		payload = cursorAppendBytesField(payload, cursorFldMcpSuccessContent, item)
+	}
+	// McpSuccess / McpError{f1 content, f2 structured_content}。
+	if len(structured) > 0 {
+		payload = cursorAppendBytesField(payload, cursorFldMcpSuccessStructuredContent, structured)
+	}
+	// McpResult{f1 success} 或 {f2 error}。
+	var result []byte
+	if isError {
+		result = cursorAppendBytesField(nil, cursorFldMcpResultError, payload)
+	} else {
+		result = cursorAppendBytesField(nil, cursorFldMcpResultSuccess, payload)
+	}
+	// ExecClientMessage{f1 id, f15 id(原值), f2 McpResult}。
+	msg := cursorAppendVarintField(nil, cursorFldClientMsgID, execID)
+	if len(idField) > 0 {
+		msg = cursorAppendBytesField(msg, cursorFldClientMsgExecID, idField)
+	}
+	msg = cursorAppendBytesField(msg, cursorFldClientMessage, result)
+	return msg
+}
 
 func cursorClientChecksum(device string, now time.Time) string {
 	stamp := uint32(now.UnixMilli() / 1_000_000)
@@ -57,13 +139,20 @@ type cursorAgentDuplex struct {
 	// 由 newCursorAgentDuplex 从 AgentRun 请求体 f4 解出，供 mcp_state 回包 f5 原样回传
 	// （字节级保真，依据活体探针 T7：f5 内层即完整 McpToolDefinition 五字段，不可只回工具名）。
 	declaredToolDefs [][]byte
-	// capturedToolCalls 是本轮经 mcp_args 委托捕获的工具调用（权威信号见 §2）。
-	capturedToolCalls []cursorToolCallCapture
-	// toolCallsFinished 标记本轮已发生工具委托捕获，供响应构造方收尾参考。
-	toolCallsFinished bool
+	// delegations 是本轮工具委托的**唯一**记录（§24.2-6）：duplex 解码 mcp_args
+	// 一次并写入这里，parser 只读取输出，绝不再各自保留一份列表。
+	// 未注入时用本地记录（独立双工场景），保证任何路径都只有一个解码点。
+	delegations *cursorToolDelegations
+
+	// writeMu 串行化对原生 pipe writer 的所有写（读循环回包 + 跨 HTTP 真实结果回写
+	// 共用同一连接，禁止并发写同一 pipe —— io.Pipe 不保证并发写安全）。
+	writeMu sync.Mutex
 }
 
-func newCursorAgentDuplex(initial []byte) (*cursorAgentDuplex, error) {
+func newCursorAgentDuplex(initial []byte, delegations *cursorToolDelegations) (*cursorAgentDuplex, error) {
+	if delegations == nil {
+		delegations = newLocalCursorToolDelegations()
+	}
 	frame, _, err := cursorReadEnvelopeFrame(initial, 0)
 	if err != nil {
 		return nil, err
@@ -80,7 +169,7 @@ func newCursorAgentDuplex(initial []byte) (*cursorAgentDuplex, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &cursorAgentDuplex{blobs: make(map[string][]byte)}
+	d := &cursorAgentDuplex{blobs: make(map[string][]byte), delegations: delegations}
 	// 从 AgentRun 请求体 f4（McpTools）解出本轮声明的每条 McpToolDefinition 的**原始字节**，
 	// repeated 逐项原样保存，供 mcp_state 回包 f5 原样回传（字节级保真，依据活体探针 T7）。
 	if mcpField, ok := cursorFindField(fields, cursorFldRunMcpTools); ok && len(mcpField.Bytes) > 0 {
@@ -292,20 +381,18 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				zap.Uint64("exec_id", execID), zap.Int("tools", len(d.declaredToolDefs)))
 			return false, serr
 		case cursorFindFieldOK(parts, 11):
-			// mcp_args 委托（f11 mcp_args）：捕获工具调用，回 McpResult.error，
-			// **不终止连接**——继续读流直到 turn_ended（usage 完整计费）。
-			tc, e := d.cursorCaptureMcpArgs(parts)
+			// mcp_args 委托（f11 mcp_args）：只捕获工具调用并登记入开放批次
+			// （W2-A1 批次封口），**绝不回 McpResult.error 诱导模型结束**（§24.3 旧链已斩）。
+			// 模型在同一双向连接上等待真实 McpResult；本层在续轮把真实结果写回原 exec
+			// 关联（W2-F CursorSessionIntake 生产实现）。连接保持存活至 180s / 真实终态 /
+			// 显式终止，会话进入 waiting_tools。
+			tc, e := d.cursorCaptureMcpArgs(parts, execID, idField)
 			if e != nil {
 				return false, e
 			}
-			resp, e := d.cursorMcpArgsReply(execID, idField, tc)
-			if e != nil {
-				return false, e
-			}
-			serr := d.send(2, resp)
-			d.logPhase(zapcore.DebugLevel, "mcp_args_reply", cursorHTTPErrClass(serr),
+			d.logPhase(zapcore.DebugLevel, "mcp_args_captured", "",
 				zap.Uint64("exec_id", execID), zap.String("tool_name", tc.Name))
-			return false, serr
+			return false, nil
 		default:
 			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
 		}
@@ -365,6 +452,8 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 }
 
 func (d *cursorAgentDuplex) send(field int, payload []byte) error {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
 	_, err := d.writer.Write(cursorEncodeEnvelope(cursorAppendBytesField(nil, field, payload)))
 	return err
 }
@@ -428,29 +517,19 @@ func (d *cursorAgentDuplex) cursorMcpStateReply(execID uint64, idField []byte) (
 	return response, nil
 }
 
-// cursorMcpArgsReply 构造 mcp_args 委托的回包：McpResult.error（派发单 §21.4-1）。
-//
-// 模型收到该 error 后不重试、正常 turn_ended（活体证据 T9b）。回包 = ExecClientMessage
-// {f1 id(exec_id), f15 id(原值), f11 = McpResult{f2 error = McpError{f1 error:"..."}}}。
-func (d *cursorAgentDuplex) cursorMcpArgsReply(execID uint64, idField []byte, tc cursorToolCallCapture) ([]byte, error) {
-	const msg = "Tool execution deferred: the client will submit the result in a follow-up request. Do not retry this call."
-	mcpError := cursorAppendStringField(nil, 1, msg)      // McpError.f1 error
-	mcpResult := cursorAppendBytesField(nil, 2, mcpError) // McpResult.f2 error
-	response := cursorAppendVarintField(nil, 1, execID)
-	if len(idField) > 0 {
-		response = cursorAppendBytesField(response, 15, idField)
-	}
-	response = cursorAppendBytesField(response, 11, mcpResult) // ExecClientMessage.f11
-	_ = tc
-	return response, nil
-}
+// 旧链（§24.3）已彻底删除：本层**不再存在**任何"用 McpResult.error 诱导模型结束"的
+// 回包构造函数。工具委托由 cursorCaptureMcpArgs 写入唯一委托记录、会话进入
+// waiting_tools；真实结果在续轮经由 CursorSessionIntake 生产实现（cursorAgentRunIntake）
+// 按 §25.3 四层编码写回原 exec 关联。宁缺勿留：不保留任何"返回空回包"的占位函数，
+// 避免旧链被再次接线。
 
 // cursorCaptureMcpArgs 从 exec 内层 f11（mcp_args）捕获工具调用。
 //
 // 解析 McpArgs：f3 tool_call_id、f5 tool_name、f2 args（protobuf map<string,Value>，
 // 每个 entry = {f1 key, f2 value}，Value：f1 null / f2 number / f3 string）。ArgsJSON
-// 为对象 JSON 字符串。**不终止连接**——置 toolCallsFinished 供响应构造方收尾。
-func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField) (cursorToolCallCapture, error) {
+// 为对象 JSON 字符串。同时捕获承载本委托的 exec_id / idField（回写真实结果时原样带回）。
+// **不终止连接**——写入唯一的委托记录供续轮回写通道收尾。
+func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID uint64, idField []byte) (cursorToolCallCapture, error) {
 	argsField, ok := cursorFindField(parts, 11)
 	if !ok {
 		return cursorToolCallCapture{}, fmt.Errorf("%w: mcp_args without f11", ErrCursorProtocol)
@@ -459,9 +538,15 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField) (cursorT
 	if err != nil {
 		return cursorToolCallCapture{}, err
 	}
-	tc := cursorToolCallCapture{ID: id, Name: name, ArgsJSON: argsJSON}
-	d.capturedToolCalls = append(d.capturedToolCalls, tc)
-	d.toolCallsFinished = true
+	tc := cursorToolCallCapture{ID: id, Name: name, ArgsJSON: argsJSON, ExecID: execID, IDField: append([]byte(nil), idField...)}
+	delegations := d.delegations
+	if delegations == nil {
+		delegations = newLocalCursorToolDelegations()
+		d.delegations = delegations
+	}
+	if err := delegations.noteDelegation("", tc); err != nil {
+		return cursorToolCallCapture{}, err
+	}
 	// 结构化日志（call_id/tool_name），不记 args 明文（可能含账号会话数据）。
 	d.logPhase(zapcore.DebugLevel, "tool_call_captured", "",
 		zap.String("tool_call_id", id), zap.String("tool_name", name))

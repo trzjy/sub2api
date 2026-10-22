@@ -35,6 +35,8 @@ const (
 	FieldExpiresAt = "expires_at"
 	// FieldDeviceID holds the string denoting the device_id field in the database.
 	FieldDeviceID = "device_id"
+	// FieldUsageSnapshot holds the string denoting the usage_snapshot field in the database.
+	FieldUsageSnapshot = "usage_snapshot"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
@@ -67,6 +69,7 @@ var Columns = []string{
 	FieldLastRefreshAt,
 	FieldExpiresAt,
 	FieldDeviceID,
+	FieldUsageSnapshot,
 	FieldCreatedAt,
 	FieldUpdatedAt,
 	FieldNotes,

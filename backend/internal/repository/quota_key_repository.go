@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
@@ -11,6 +12,14 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
+
+// 编译期守卫：生产仓储必须提供"观测/换码"所需的事务内方法（service.quotaKeyObservationRepo
+// 未导出，故在实现侧以等价签名断言，签名漂移即编译失败而不是运行时才失败关闭）。
+var _ interface {
+	GetByIDInTx(ctx context.Context, tx *ent.Tx, id int64) (*ent.QuotaKey, error)
+	UpdateUsageSnapshot(ctx context.Context, tx *ent.Tx, id int64, snapshot []byte, expiresAt **time.Time) error
+	UpdateCredentialsAtomically(ctx context.Context, tx *ent.Tx, id int64, codeEncrypted, codeMAC, codeLast4 string, clearUsageSnapshot bool) error
+} = (*quotaKeyRepository)(nil)
 
 // QuotaKeyRepository 实现 service.QuotaKeyRepository，提供 quota_keys 基础 CRUD
 // （C3.1/C3.2 骨架范围），以及 C5a 扩展的 List / UpdateMeta / 按激活码列出账号
@@ -104,6 +113,57 @@ func (r *quotaKeyRepository) UpdateCredentials(ctx context.Context, id int64, co
 		SetCodeMAC(codeMAC).
 		SetCodeLast4(codeLast4).
 		Save(ctx)
+	return err
+}
+
+// GetByIDInTx 在给定事务内读取来源行（观测/换码在每 key 锁内复核时使用）。
+// tx 为 nil 时退化为默认连接（无事务装配场景）。
+func (r *quotaKeyRepository) GetByIDInTx(ctx context.Context, tx *ent.Tx, id int64) (*ent.QuotaKey, error) {
+	if tx != nil {
+		return tx.QuotaKey.Get(ctx, id)
+	}
+	return r.client.QuotaKey.Get(ctx, id)
+}
+
+// UpdateUsageSnapshot 在同一事务内写来源额度快照（usage_snapshot），并在有合法期限时
+// 同事务更新 expires_at（唯一期限列，不复制进快照）。
+//
+// expiresAt 外层指针为 nil 表示上游本次未给出可用期限 → 保留原值不动（不伪造、不清空）。
+// 失败观测与成功观测走同一条写入路径：调用方负责把"最近成功值 + 最近观测时刻/错误码"
+// 合并进 snapshot 字节里，本方法只做持久化，不解释语义。
+func (r *quotaKeyRepository) UpdateUsageSnapshot(ctx context.Context, tx *ent.Tx, id int64, snapshot []byte, expiresAt **time.Time) error {
+	var q *ent.QuotaKeyUpdateOne
+	if tx != nil {
+		q = tx.QuotaKey.UpdateOneID(id)
+	} else {
+		q = r.client.QuotaKey.UpdateOneID(id)
+	}
+	if len(snapshot) > 0 {
+		q = q.SetUsageSnapshot(jsontext.Value(snapshot))
+	}
+	if expiresAt != nil && *expiresAt != nil {
+		q = q.SetExpiresAt(**expiresAt)
+	}
+	_, err := q.Save(ctx)
+	return err
+}
+
+// UpdateCredentialsAtomically 在同一事务内写凭据；clearUsageSnapshot 为 true 时同事务清空
+// usage_snapshot（§25.14-C 换码原子边界：来源身份已变，旧观测对新来源无效）。
+//
+// 相同 MAC 的"只重加密"路径带 false：保留已提交观测，不因同一来源重加密而丢事实。
+func (r *quotaKeyRepository) UpdateCredentialsAtomically(ctx context.Context, tx *ent.Tx, id int64, codeEncrypted, codeMAC, codeLast4 string, clearUsageSnapshot bool) error {
+	var q *ent.QuotaKeyUpdateOne
+	if tx != nil {
+		q = tx.QuotaKey.UpdateOneID(id)
+	} else {
+		q = r.client.QuotaKey.UpdateOneID(id)
+	}
+	q = q.SetCodeEncrypted(codeEncrypted).SetCodeMAC(codeMAC).SetCodeLast4(codeLast4)
+	if clearUsageSnapshot {
+		q = q.ClearUsageSnapshot()
+	}
+	_, err := q.Save(ctx)
 	return err
 }
 

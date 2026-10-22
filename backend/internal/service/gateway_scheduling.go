@@ -1187,7 +1187,8 @@ func (s *GatewayService) isAccountAllowedForPlatform(account *Account, platform 
 //  3. 归属激活码未处于终态（同 OpenAI 链的 key 门）。
 func (s *GatewayService) isAccountAdmittedForPlatform(ctx context.Context, account *Account, platform string, useMixed bool, requestedModel string, groupID *int64) bool {
 	if s.isAccountAllowedForPlatform(account, platform, useMixed) {
-		if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
+		// 来源门（§25.6 同一来源门）：key 终态 + 真实来源剩余，来源可用 AND 账号可用。
+		if reason := cursorSupplySourceAvailabilityVetoReasonString(ctx, account); reason != "" {
 			return false
 		}
 		return true
@@ -1260,8 +1261,8 @@ func (s *GatewayService) cursorSupplyAdmittedForNativePlatform(ctx context.Conte
 	if requestedModel == "" {
 		return false
 	}
-	// key 终态门（I2）：过期的码约束的是账号的调度资格，账号本体不动。
-	if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
+	// key 终态门（I2）+ 真实来源剩余（§25.6 同一来源门）：来源可用 AND 账号可用。
+	if reason := cursorSupplySourceAvailabilityVetoReasonString(ctx, account); reason != "" {
 		return false
 	}
 	// 能力匹配②：模型映射是唯一出口，空映射（cursor 无内置目录）恒不可选。
@@ -1273,25 +1274,59 @@ func (s *GatewayService) cursorSupplyAdmittedForNativePlatform(ctx context.Conte
 	return s.cursorGroupModelAllowed(ctx, *groupID, requestedModel)
 }
 
+// cursorSupplyAccountGate 是 cursor 跨平台供给**账号级共同谓词**的唯一实现：桥接平台 +
+// 显式挂组 + 来源可用性（§25.6 同一来源门）。
+//
+// 返回 (reason, err) 而非 bool：reason != "" 是「明确不合格」的确定结论，err != nil 是
+// 「读不到」——两者不可折叠，否则窄只读入口只能把数据库/来源故障当成空目录。既有 bool
+// 包装器（cursorSupplyAccountListableForPlatform）是它在调度/列表路径上的兼容投影。
+func (s *GatewayService) cursorSupplyAccountGate(ctx context.Context, account *Account, platform string, groupID *int64) (string, error) {
+	if account == nil || account.Platform != PlatformCursor {
+		return "not_cursor_account", nil
+	}
+	if !cursorNativeBridgePlatforms(platform) {
+		return "platform_not_bridgeable", nil
+	}
+	// 显式挂组：无分组上下文（未挂组/undefined 分组 API Key）一律不外溢。
+	if groupID == nil || *groupID <= 0 {
+		return "group_context_missing", nil
+	}
+	// 来源可用性：key 终态（I2）在前，真实来源剩余（预留入口）在后。
+	return cursorSupplySourceAvailabilityVetoReason(ctx, account)
+}
+
 // cursorSupplyAccountListableForPlatform 判定 cursor 账号是否可在原生平台的公开模型
 // 列表中暴露其 model_mapping（公开列表同源：与 cursorSupplyAdmittedForNativePlatform
 // 共用显式挂组 + key 终态 + 桥接平台三个账号级口径）。列表场景无单一请求模型，故不做
-// 逐模型校验，具体模型由下方映射键枚举决定。
+// 逐模型校验，具体模型由映射键的纯投影决定。
+//
+// 既有调用点语义保持不变：读不到来源时按"不可列表"处理（与迁移前的
+// "quota_key_state_unavailable 原因串 → false" 完全一致）。
 func (s *GatewayService) cursorSupplyAccountListableForPlatform(ctx context.Context, account *Account, platform string, groupID *int64) bool {
-	if account == nil || account.Platform != PlatformCursor {
-		return false
+	reason, err := s.cursorSupplyAccountGate(ctx, account, platform, groupID)
+	return err == nil && reason == ""
+}
+
+// cursorSupplyAccountAdmittedWithError 是窄只读入口（GetCursorSupplyModelIDs）使用的
+// 账号级准入判定：与 cursorSupplyAccountListableForPlatform 同一共同谓词，但把「读不到」
+// 如实上抛，并对"绑定来源却没有来源读取器"失败关闭——§25.6 要求该来源门在 Cursor 生产
+// 路径必须有真实 DI 依赖，不能保留 provider 为 nil 就放行的分支。该收紧只作用于本窄入口
+// 与新增代码，既有调度/列表路径仍沿原降级口径（由后续调度单迁移）。
+func (s *GatewayService) cursorSupplyAccountAdmittedWithError(ctx context.Context, account *Account, platform string, groupID *int64) (bool, error) {
+	if account == nil {
+		return false, nil
 	}
-	if !cursorNativeBridgePlatforms(platform) {
-		return false
+	reason, err := s.cursorSupplyAccountGate(ctx, account, platform, groupID)
+	if err != nil {
+		return false, fmt.Errorf("cursor supply: account %d source availability unreadable: %w", account.ID, err)
 	}
-	if groupID == nil || *groupID <= 0 {
-		return false
+	if reason != "" {
+		return false, nil
 	}
-	// key 终态门（I2）：过期/不可用的码约束的是账号调度资格。
-	if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
-		return false
+	if account.QuotaKeyID != nil && currentCursorQuotaKeyStateProvider() == nil {
+		return false, fmt.Errorf("cursor supply: account %d binds quota key %d but quota key state provider is not wired", account.ID, *account.QuotaKeyID)
 	}
-	return true
+	return true, nil
 }
 
 // isWildcardOrEmptyModelKey 判断 model_mapping 的键是否为通配键（以 * 结尾，如 "*" /
@@ -1302,22 +1337,39 @@ func isWildcardOrEmptyModelKey(key string) bool {
 
 // cursorGroupModelAllowed 读分组模型白名单判定是否允许该模型（Allows 的既有通配语义
 // 不做任何改写）。取分组优先走 ctx（Resolver 已装载），没有 groupRepo 时失败关闭。
+//
+// 这是既有 bool 投影：组读不到即"不允许"。需要区分「组里没有这个模型」与「组读不到」的
+// 调用方（窄只读入口）必须走 cursorGroupModelAllowedWithError。
 func (s *GatewayService) cursorGroupModelAllowed(ctx context.Context, groupID int64, requestedModel string) bool {
-	if groupID <= 0 || requestedModel == "" {
+	allowed, err := s.cursorGroupModelAllowedWithError(ctx, groupID, requestedModel)
+	if err != nil {
 		return false
+	}
+	return allowed
+}
+
+// cursorGroupModelAllowedWithError 是分组模型白名单的**带 error 共同取值**：与
+// cursorGroupModelAllowed 同一实现，但把组读取失败（repo 未接线 / 回源错误 / 分组不存在）
+// 如实上抛，使窄只读入口不会把"组读不到"静默降级成"组里没有这个模型"。
+func (s *GatewayService) cursorGroupModelAllowedWithError(ctx context.Context, groupID int64, requestedModel string) (bool, error) {
+	if groupID <= 0 || requestedModel == "" {
+		return false, nil
 	}
 	group := s.groupFromContext(ctx, groupID)
 	if group == nil {
 		if s.groupRepo == nil {
-			return false
+			return false, fmt.Errorf("cursor supply: group repository unavailable for group %d", groupID)
 		}
 		resolved, err := s.resolveGroupByID(ctx, groupID)
-		if err != nil || resolved == nil {
-			return false
+		if err != nil {
+			return false, err
+		}
+		if resolved == nil {
+			return false, fmt.Errorf("cursor supply: group %d not found", groupID)
 		}
 		group = resolved
 	}
-	return group.ModelAllowlist.Allows(requestedModel)
+	return group.ModelAllowlist.Allows(requestedModel), nil
 }
 
 func (s *GatewayService) isAccountSchedulableForSelection(account *Account) bool {

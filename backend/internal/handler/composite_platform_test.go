@@ -37,7 +37,7 @@ func newCompositeGateGatewayService(t *testing.T, accounts []service.Account, re
 	repo := &compositeGateAccountRepo{accounts: accounts, err: repoErr}
 	resolver := service.NewCompositeRouteResolver(nil)
 	return service.NewGatewayService(
-		repo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, resolver, nil, nil,
+		repo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, resolver, nil, nil, nil, /* cursorExecution */
 	)
 }
 
@@ -145,8 +145,8 @@ func TestCompositeGateAllowsAccountModelMappingOwnedModel(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
 	apiKey := &service.APIKey{Group: &service.Group{ID: 7, Platform: service.PlatformComposite}}
 	svc := newCompositeGateGatewayService(t, []service.Account{{
-		ID:       1,
-		Platform: service.PlatformDeepseek,
+		ID:          1,
+		Platform:    service.PlatformDeepseek,
 		Credentials: map[string]any{"model_mapping": map[string]any{"qwen3.8-flash": "qwen3.8"}},
 	}}, nil)
 

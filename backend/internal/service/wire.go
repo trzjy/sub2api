@@ -57,6 +57,7 @@ func ProvideOpenAIGatewayService(
 	rpmCache RPMCache,
 	visionRouting *VisionRoutingService,
 	capability *AccountModelCapabilityService,
+	cursorExecution *CursorExecutionService,
 ) *OpenAIGatewayService {
 	svc := NewOpenAIGatewayService(
 		accountRepo,
@@ -82,6 +83,7 @@ func ProvideOpenAIGatewayService(
 		settingService,
 		userPlatformQuotaRepo,
 		visionRouting,
+		cursorExecution,
 	)
 	svc.rpmCache = rpmCache
 	// 终审 P1-A（派发单 Vision-S1 §3.4）：绑定账号级视觉能力查询，使调度
@@ -91,6 +93,61 @@ func ProvideOpenAIGatewayService(
 		SetOpenAIAccountVisionCapabilityLookup(capability.ModelSupportsVisionInput)
 	}
 	return svc
+}
+
+// ProvideCursorAutoEntryService 构造唯一的额度 lookup 解析/写入服务（§25.14-A 缺项 6）。
+//
+// 固定现有生产依赖与地址配置：不让 Wire 解析裸 string 或任意 HTTPDoer；httpDoer=nil
+// 表示沿用服务内部既有的 180s 超时 + 跳过 TLS 校验客户端（与取证一致），lookup 基址取
+// 既有默认值。解密器与 QuotaKeyService 同源（同一 NewCredcryptEncryptor 口径）。
+func ProvideCursorAutoEntryService(
+	settings SettingRepository,
+	quotaKeys QuotaKeyRepository,
+	enc QuotaKeyEncryptor,
+	client *dbent.Client,
+) *CursorAutoEntryService {
+	return NewCursorAutoEntryService(settings, quotaKeys, enc, client, nil, "")
+}
+
+// ProvideQuotaKeyEncryptor 提供唯一的激活码加密器（QuotaKeyService / autoEntry /
+// Cursor 执行部件共用同一实例，口径不变）。
+func ProvideQuotaKeyEncryptor() QuotaKeyEncryptor { return NewCredcryptEncryptor() }
+
+// ProvideQuotaKeyService 构造唯一的拉号/额度服务（§25.14-A 缺项 5）。
+//
+// provider 使用既有 repo、加密器、真实 ShareAI 客户端、ent 与同一个 autoEntry 实例；
+// SetAutoEntry 只在此唯一 wrapper 配置一次（不在别处重复注入）。Cursor 的旧 setter
+// 已按 §24.2 删除，此处不复活任何旧装配。
+func ProvideQuotaKeyService(
+	quotaKeys QuotaKeyRepository,
+	enc QuotaKeyEncryptor,
+	client *dbent.Client,
+	autoEntry *CursorAutoEntryService,
+) (*QuotaKeyService, error) {
+	upstream, err := NewShareAIUpstreamClient(enc)
+	if err != nil {
+		return nil, err
+	}
+	svc := NewQuotaKeyService(quotaKeys, enc, upstream, client)
+	svc.SetAutoEntry(autoEntry)
+	return svc, nil
+}
+
+// ProvideCursorExecutionService 构造 Cursor 平台的**唯一**执行部件（§24.2-2 / §24.2-3）。
+//
+// 装配顺序由依赖图保证：唯一 QuotaKeyService（同时作为 deviceId 解析器）与凭证仓储 /
+// 加密器先就绪，再构造执行部件，最后由各网关构造注入**同一实例**；
+// reconciler 只在网关之后构造，绝不反注入执行部件。
+//
+// transport 复用进程级节点解析器单例（站点级、非凭证，与旧装配同一表达式），
+// 不新增节点解析器实例，也没有"未装配时另建默认转发器"的回退分支。
+func ProvideCursorExecutionService(
+	quotaKeys QuotaKeyRepository,
+	enc QuotaKeyEncryptor,
+	deviceIDs CursorDeviceIDResolver,
+) (*CursorExecutionService, error) {
+	forwarder := NewCursorUpstreamForwarder(WithCursorUpstreamNodes(cursorUpstreamNodesSingleton()))
+	return NewCursorExecutionService(quotaKeys, enc, deviceIDs, forwarder)
 }
 
 // BuildInfo contains build information
@@ -1368,6 +1425,12 @@ var ProviderSet = wire.NewSet(
 	NewAdminService,
 	NewGatewayService,
 	ProvideOpenAIGatewayService,
+	ProvideCursorExecutionService,
+	ProvideCursorAutoEntryService,
+	ProvideQuotaKeyEncryptor,
+	ProvideQuotaKeyService,
+	// 设备解析器就是唯一的 QuotaKeyService（与取号/出站同源三分支，§25.14-A）。
+	wire.Bind(new(CursorDeviceIDResolver), new(*QuotaKeyService)),
 	ProvideImageStorageSettingService,
 	ProvideImageTaskService,
 	ProvideBatchImageModelPricingResolver,
@@ -1451,7 +1514,8 @@ var ProviderSet = wire.NewSet(
 	ProvideSubscriptionExpiryService,
 	ProvideWelfareBalanceExpiryService,
 	ProvideTimingWheelService,
-	ProvideDashboardAggregationService,
+	// 派发单 CR-D 缺项 1：usageRiskRetentionCleaner 为包内私有接口，不再直接登记；
+	// 由 cmd/server 的唯一 wrapper（provideDashboardAggregationService）调用本 provider。
 	ProvideUsageCleanupService,
 	ProvideDeferredService,
 	NewAntigravityQuotaFetcher,
@@ -1481,6 +1545,12 @@ var ProviderSet = wire.NewSet(
 	ProvidePaymentOrderExpiryService,
 	ProvideBalanceNotifyService,
 	ProvideChannelMonitorService,
+	// 派发单 CR-D 缺项 2：把现有 *ChannelMonitorService 绑定到 E39 渠道维陈旧收敛窄面，
+	// 复用同一 monitor 实例（不另构造 monitor）。
+	wire.Bind(new(ChannelFreshnessRefresher), new(*ChannelMonitorService)),
+	// 派发单 CR-D 缺项 3：登记已存在的 *FreshnessAlertService provider（D4 工作项 3），
+	// 依赖（opsService / rateLimitService / monitorService）全部取自现有实例，不复制实现。
+	ProvideFreshnessAlertService,
 	ProvideChannelMonitorRunner,
 	NewChannelMonitorQuotaFetcher,
 	ProvideChannelMonitorV2Service,

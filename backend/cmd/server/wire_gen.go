@@ -152,7 +152,18 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	compositeRouteResolver := service.NewCompositeRouteResolver(compositeModelRouteRepository)
 	notificationEmailService := service.NewNotificationEmailService(settingRepository, emailService)
 	balanceNotifyService := service.ProvideBalanceNotifyService(emailService, settingRepository, accountRepository, notificationEmailService)
-	gatewayService := service.NewGatewayService(accountRepository, groupRepository, usageLogRepository, usageBillingRepository, userRepository, userSubscriptionRepository, userGroupRateRepository, gatewayCache, configConfig, schedulerSnapshotService, concurrencyService, billingService, rateLimitService, billingCacheService, identityService, httpUpstream, deferredService, claudeTokenProvider, sessionLimitCache, rpmCache, digestSessionStore, settingService, tlsFingerprintProfileService, channelService, modelPricingResolver, compositeRouteResolver, balanceNotifyService, serviceUserPlatformQuotaRepository)
+	quotaKeyRepository := repository.NewQuotaKeyRepository(client)
+	quotaKeyEncryptor := service.ProvideQuotaKeyEncryptor()
+	cursorAutoEntryService := service.ProvideCursorAutoEntryService(settingRepository, quotaKeyRepository, quotaKeyEncryptor, client)
+	quotaKeyService, err := service.ProvideQuotaKeyService(quotaKeyRepository, quotaKeyEncryptor, client, cursorAutoEntryService)
+	if err != nil {
+		return nil, err
+	}
+	cursorExecutionService, err := service.ProvideCursorExecutionService(quotaKeyRepository, quotaKeyEncryptor, quotaKeyService)
+	if err != nil {
+		return nil, err
+	}
+	gatewayService := service.NewGatewayService(accountRepository, groupRepository, usageLogRepository, usageBillingRepository, userRepository, userSubscriptionRepository, userGroupRateRepository, gatewayCache, configConfig, schedulerSnapshotService, concurrencyService, billingService, rateLimitService, billingCacheService, identityService, httpUpstream, deferredService, claudeTokenProvider, sessionLimitCache, rpmCache, digestSessionStore, settingService, tlsFingerprintProfileService, channelService, modelPricingResolver, compositeRouteResolver, balanceNotifyService, serviceUserPlatformQuotaRepository, cursorExecutionService)
 	openAIOAuthClient := repository.NewOpenAIOAuthClient()
 	privacyClientFactory := providePrivacyClientFactory()
 	openAIOAuthService := service.ProvideOpenAIOAuthService(proxyRepository, openAIOAuthClient, privacyClientFactory)
@@ -163,12 +174,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	visionRoutingRepository := repository.NewVisionRoutingRepository(db)
 	visionRoutingGroupAccountsReader := repository.ProvideVisionRoutingGroupAccountsReader(groupRepository)
 	visionRoutingService := service.NewVisionRoutingService(visionRoutingRepository, visionRoutingGroupAccountsReader)
-	// 派发单 Vision-S1：提前构造账号级视觉能力服务，供 openAIGatewayService 接线绑定。
-	// （AccountModelCapabilityService 为 := 短声明，作用域自声明后开始，故须置于使用前。）
 	accountModelCapabilityRepository := repository.NewAccountModelCapabilityRepository(db)
 	accountModelCapabilityCache := repository.NewAccountModelCapabilityCache(redisClient)
 	accountModelCapabilityService := service.NewAccountModelCapabilityService(accountModelCapabilityRepository, accountModelCapabilityCache)
-	openAIGatewayService := service.ProvideOpenAIGatewayService(accountRepository, usageLogRepository, usageBillingRepository, userRepository, userSubscriptionRepository, userGroupRateRepository, gatewayCache, configConfig, schedulerSnapshotService, concurrencyService, billingService, rateLimitService, billingCacheService, httpUpstream, deferredService, openAITokenProvider, grokTokenProvider, modelPricingResolver, channelService, balanceNotifyService, settingService, serviceUserPlatformQuotaRepository, rpmCache, visionRoutingService, accountModelCapabilityService)
+	openAIGatewayService := service.ProvideOpenAIGatewayService(accountRepository, usageLogRepository, usageBillingRepository, userRepository, userSubscriptionRepository, userGroupRateRepository, gatewayCache, configConfig, schedulerSnapshotService, concurrencyService, billingService, rateLimitService, billingCacheService, httpUpstream, deferredService, openAITokenProvider, grokTokenProvider, modelPricingResolver, channelService, balanceNotifyService, settingService, serviceUserPlatformQuotaRepository, rpmCache, visionRoutingService, accountModelCapabilityService, cursorExecutionService)
 	geminiOAuthClient := repository.NewGeminiOAuthClient(configConfig)
 	geminiCliCodeAssistClient := repository.NewGeminiCliCodeAssistClient()
 	driveClient := repository.NewGeminiDriveClient()
@@ -178,7 +187,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	antigravityTokenProvider := service.ProvideAntigravityTokenProvider(accountRepository, geminiTokenCache, antigravityOAuthService, oAuthRefreshAPI, tempUnschedCache)
 	internal500CounterCache := repository.NewInternal500CounterCache(redisClient)
 	antigravityGatewayService := service.NewAntigravityGatewayService(accountRepository, gatewayCache, schedulerSnapshotService, antigravityTokenProvider, rateLimitService, httpUpstream, settingService, internal500CounterCache)
-	geminiMessagesCompatService := service.NewGeminiMessagesCompatService(accountRepository, groupRepository, gatewayCache, schedulerSnapshotService, geminiTokenProvider, rateLimitService, httpUpstream, antigravityGatewayService, configConfig)
+	geminiMessagesCompatService := service.NewGeminiMessagesCompatService(accountRepository, groupRepository, gatewayCache, schedulerSnapshotService, geminiTokenProvider, rateLimitService, httpUpstream, antigravityGatewayService, configConfig, cursorExecutionService)
 	opsSystemLogSink := service.ProvideOpsSystemLogSink(opsRepository)
 	authCacheInvalidationOutboxRepository := repository.NewAuthCacheInvalidationOutboxRepository(db)
 	authCacheInvalidationWorker := service.ProvideAuthCacheInvalidationWorker(authCacheInvalidationOutboxRepository, apiKeyCache, apiKeyService)
@@ -197,8 +206,6 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	announcementHandler := handler.NewAnnouncementHandler(announcementService)
 	channelMonitorRepository := repository.NewChannelMonitorRepository(client, db)
 	channelMonitorService := service.ProvideChannelMonitorService(channelMonitorRepository, secretEncryptor, settingService, accountRepository)
-	// D4：状态新鲜度陈旧告警服务（复用 OpsAlertEvent 载体），回写恢复关闭钩子与渠道评估入口。
-	freshnessAlertService := service.ProvideFreshnessAlertService(opsService, rateLimitService, channelMonitorService)
 	channelMonitorUserHandler := handler.NewChannelMonitorUserHandler(channelMonitorService, settingService)
 	channelMonitorV2Repository := repository.NewChannelMonitorV2Repository(db)
 	channelMonitorV2Service := service.ProvideChannelMonitorV2Service(channelMonitorV2Repository, settingService, accountRepository, groupRepository)
@@ -207,8 +214,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	dashboardStatsCache := repository.NewDashboardCache(redisClient, configConfig)
 	dashboardService := service.NewDashboardService(usageLogRepository, dashboardAggregationRepository, dashboardStatsCache, configConfig)
 	usageRiskRepository := repository.NewUsageRiskRepository(client, db)
-	adapter := usageriskadapter.NewRetentionCleaner(usageRiskRepository)
-	dashboardAggregationService := service.ProvideDashboardAggregationService(dashboardAggregationRepository, timingWheelService, leaderLockCache, db, configConfig, settingRepository, settingService, adapter)
+	dashboardAggregationService := provideDashboardAggregationService(dashboardAggregationRepository, timingWheelService, leaderLockCache, db, configConfig, settingRepository, settingService, usageRiskRepository)
 	dashboardHandler := admin.NewDashboardHandler(dashboardService, dashboardAggregationService)
 	adminGroupRepository := repository.NewAdminGroupRepository(client, db)
 	adminAccountRepository := repository.NewAdminAccountRepository(client, db, schedulerCache)
@@ -234,6 +240,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	usageCache := service.NewUsageCache()
 	accountUsageService := service.ProvideAccountUsageService(accountRepository, usageLogRepository, claudeUsageFetcher, geminiQuotaService, antigravityQuotaFetcher, grokQuotaFetcher, grokQuotaService, openAIQuotaService, museQuotaFetcher, usageCache, identityCache, tlsFingerprintProfileService, openAIGatewayService)
 	crsSyncService := service.NewCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig)
+	freshnessAlertService := service.ProvideFreshnessAlertService(opsService, rateLimitService, channelMonitorService)
 	accountHandler := admin.ProvideAccountHandler(configConfig, adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService, freshnessAlertService)
 	adminAnnouncementHandler := admin.NewAnnouncementHandler(announcementService)
 	dataManagementService := service.NewDataManagementService()
@@ -345,43 +352,15 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	usageRiskService := usageriskadapter.ProvideUsageRiskAnalysisService(usageRiskRepository, client, userGroupRateRepository, timingWheelService, leaderLockCache, db, settingService, auditLogService, configConfig)
 	visionDetectService := service.ProvideVisionDetectService(accountRepository, accountModelCapabilityService, usageLogRepository)
 	visionCapabilityHandler := admin.NewVisionCapabilityHandler(visionDetectService, accountModelCapabilityService)
-	xgjAdminCfgStore := xianguanjia.ProvideConfigStore(db) // D3: 闲管家 admin 配置存储（252 表，含写侧）
-	xianguanjiaCfgStore := xianguanjia.NewConfigStore(db)  // D1: 推送验签/出站 client 读侧（同一 252 表）
-	// D6e: 货源模式凭证存储——D6a 未落地，暂用内存占位；集成时替换为 D6a 的 DB 实现。
-	xgjSupplyStore := xianguanjia.NewSupplyConfigStore(db, secretEncryptor) // D6i: D6a DB 实现
-	// 上游新增：OpenCodeGo 用量服务与 Claude 重置额度服务（v0.2.15 正交追加）。
+	configStore := xianguanjia.ProvideConfigStore(db)
+	supplySecretEncryptor := provideSupplySecretEncryptor(secretEncryptor)
+	supplyConfigStore := xianguanjia.NewSupplyConfigStore(db, supplySecretEncryptor)
 	openCodeGoUsageService := service.ProvideOpenCodeGoUsageService(accountRepository, httpUpstream, settingService, leaderLockCache, db)
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	claudeResetCreditService := service.ProvideClaudeResetCreditService(accountRepository, claudeTokenProvider, proxyRepository, settingService, idempotencyCoordinator, leaderLockCache)
-	// D4i: 闲管家 admin 卡种/推仓 handler 在 handler.ProvideAdminHandlers 内构造
-	// （接线胶水由 D4i 交付：db/settingRepository 直传，factory/marker 在 handler 内组装）。
-	// D-CURSOR-017 装配：过期激活码清扫器（方案 §3.1 / §4.3，C7）。
-	quotaKeyRepository := repository.NewQuotaKeyRepository(client)
-	// D2-a 装配：入库可配置服务（settings 键值 + quota_keys 仓储 + 加密器 + 默认 lookup 客户端）。
-	// 默认 httpDoer=nil → 服务内部构建 180s 超时 + 跳过 TLS 校验的客户端（与取证一致）。
-	autoEntryService := service.NewCursorAutoEntryService(settingRepository, quotaKeyRepository, service.NewCredcryptEncryptor(), client, nil, "")
 	quotaKeySweeper := service.ProvideQuotaKeySweeper(quotaKeyRepository, opsRepository, client)
-	// D-CURSOR-018 装配：周期 reconciler（C9 补池持久源，方案 §3.1 / §6 C9）。
-	// puller 复用既有 QuotaKeyService（PullAccounts 内部 advisory 锁 + 计数停限）。
-	// D-CURSOR-038 v3 装配：真实 shareai 拉号客户端替换占位 nil。
-	// 占位类型 NotConnectedUpstreamClient 保留作测试替身，此处不再实例化。
-	shareAIUpstream, err := service.NewShareAIUpstreamClient(service.NewCredcryptEncryptor())
-	if err != nil {
-		return nil, err
-	}
-	quotaKeyService := service.NewQuotaKeyService(quotaKeyRepository, service.NewCredcryptEncryptor(), shareAIUpstream, client)
-	// D2-a：把入库可配置提供方注入 QuotaKeyService（D1 挂载点挂组前调用 ApplyEntryDefaults）。
-	quotaKeyService.SetAutoEntry(autoEntryService)
-	// E2 卡装配：cursor 出站鉴权依赖注入 OpenAIGatewayService（quota_key_id → 解密激活码
-	// + 解析出站 deviceId → x-jg-auth）。经 setter 注入而非改构造签名，故排在
-	// openAIGatewayService 构造之后。未注入时 forwardCursor 因依赖缺失失败关闭，
-	// 绝不回落明文。deviceId 解析器直接复用已构造的 quotaKeyService（B-10）。
-	openAIGatewayService.SetCursorAuthDeps(quotaKeyRepository, service.NewCredcryptEncryptor(), quotaKeyService)
-	quotaKeyReconciler := service.ProvideQuotaKeyReconciler(quotaKeyRepository, quotaKeyService, opsRepository, gatewayService, channelService, compositeRouteResolver)
-	// D-CURSOR-021 装配：admin 激活码端点（方案 §4.4，8 端点）。
-	// 直接复用 C7 / C9 已构造的 quotaKeySweeper 与 quotaKeyService，不再新建实例。
-	quotaKeyHandler := admin.NewQuotaKeyHandler(quotaKeyService, quotaKeySweeper, autoEntryService)
-	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, codeBuddyOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, promoIntelHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, xianyuAdminHandler, pricingHandler, upstreamBillingProbeService, ollamaCloudUsageService, accountBalanceProbeService, adminService, httpUpstream, configConfig, webPlatformAutoLoginService, usageRiskService, settingService, visionCapabilityHandler, visionRoutingService, client, xgjAdminCfgStore, secretEncryptor, db, settingRepository, xgjSupplyStore, openCodeGoUsageService, claudeResetCreditService, quotaKeyHandler, quotaKeyService)
+	quotaKeyHandler := admin.NewQuotaKeyHandler(quotaKeyService, quotaKeySweeper, cursorAutoEntryService)
+	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, codeBuddyOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, promoIntelHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, xianyuAdminHandler, pricingHandler, upstreamBillingProbeService, ollamaCloudUsageService, accountBalanceProbeService, adminService, httpUpstream, configConfig, webPlatformAutoLoginService, usageRiskService, settingService, visionCapabilityHandler, visionRoutingService, client, configStore, secretEncryptor, db, settingRepository, supplyConfigStore, openCodeGoUsageService, claudeResetCreditService, quotaKeyHandler, quotaKeyService)
 	usageRecordWorkerPool := service.NewUsageRecordWorkerPool(configConfig)
 	userMsgQueueCache := repository.NewUserMsgQueueCache(redisClient)
 	userMessageQueueService := service.ProvideUserMessageQueueService(userMsgQueueCache, rpmCache, configConfig)
@@ -415,31 +394,18 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	batchImageCleanupService := service.ProvideBatchImageCleanupService(batchImageRepository, accountRepository, configConfig)
 	batchImageHandler := handler.ProvideBatchImageHandler(batchImagePublicService, batchImageDownloadService, batchImageCleanupService, openAIGatewayHandler)
 	xianyuDeliveryHandler := handler.NewXianyuDeliveryHandler(xianyuDeliveryService, configConfig)
-	xianguanjiaSig := handler.NewXianguanjiaSignatureVerifier(xianguanjiaCfgStore, secretEncryptor)
-	xianguanjiaIdemStore := xianguanjia.NewPushIdempotencyStore(db)
-	// D2 资金闭环：kam/list 出站工厂（动态读 252 配置+解密）+ 按 card_no 精准作废仓库
-	// + 既有 claim 追回锚点（used 码防双扣）。
-	xianguanjiaClientFactory := xianguanjia.NewClientFactory(xianguanjiaCfgStore, secretEncryptor.Decrypt)
-	xianguanjiaCodeVoidRepo := xianguanjia.NewCodeCardVoidRepository(db)
-	xianguanjiaVoider := xianguanjia.NewRefundCardVoidService(xianguanjiaClientFactory, xianguanjiaCodeVoidRepo, xianyuDeliveryService)
-	xianguanjiaPushHandler := handler.NewXianyuXianguanjiaPushHandler(
-		xianguanjiaVoider,
-		xianguanjiaIdemStore,
-		xianguanjiaSig,
-		xianguanjiaClientFactory,
-	)
-	// D6e: 货源模式公开接口 handler（7 端点；D6c/D6d 落地后替换内部业务逻辑）。
-	xianguanjiaSupplyCatalogSvc := xianguanjia.NewSupplyCatalogService(xgjSupplyStore, xianguanjia.NewSupplyGoodsSource(db)) // D6i: D6c 目录服务
-	xianguanjiaSupplyCatalogHandler := handler.NewXianguanjiaSupplyHandler(xianguanjiaSupplyCatalogSvc)                      // D6i: D6c 目录 handler
-	xgjSupplyHandler := handler.NewXgjSupplyHandler(xgjSupplyStore, "")
-	xianguanjiaSupplyOrderSvc := xianguanjia.NewSupplyOrderService(
-		xianguanjia.NewSupplyOrderStore(db), xianguanjia.NewSupplyCardGenerator(db), xianguanjia.NewSupplyCardPool(db), xianguanjia.NewSupplyGoodsSource(db), nil,
-		xianguanjia.NewSupplyRefundStore(client, redeemService), // D6G: 退款追回（ent 单事务）
-		redeemService) // D6G: 提交后缓存失效（同一 redeemService 实例）
-	xianguanjiaSupplyOrderHandler := handler.NewXianguanjiaSupplyOrderHandler(xianguanjiaSupplyOrderSvc)
+	clientFactory := provideXianguanjiaClientFactory(configStore, secretEncryptor)
+	refundCardVoidService := provideXianguanjiaRefundCardVoidService(db, clientFactory, xianyuDeliveryService)
+	xianguanjiaIdempotencyStore := provideXianguanjiaIdempotencyStore(db)
+	xianguanjiaSignatureVerifier := provideXianguanjiaSignatureVerifier(configStore, secretEncryptor)
+	xianyuXianguanjiaPushHandler := provideXianyuXianguanjiaPushHandler(refundCardVoidService, xianguanjiaIdempotencyStore, xianguanjiaSignatureVerifier, clientFactory)
+	xgjSupplyHandler := provideXgjSupplyHandler(supplyConfigStore)
+	supplyOrderService := provideXianguanjiaSupplyOrderService(db, client, redeemService)
+	xianguanjiaSupplyOrderHandler := handler.NewXianguanjiaSupplyOrderHandler(supplyOrderService)
+	xianguanjiaSupplyHandler := provideXianguanjiaSupplyHandler(supplyConfigStore, db)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)
 	openAIQuotaAutoResetService := service.ProvideOpenAIQuotaAutoResetService(accountRepository, openAIQuotaService, rateLimitService, idempotencyCoordinator, auditLogService, settingService, leaderLockCache)
-	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, channelMonitorV2Handler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, passkeyHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, modelPlazaHandler, asyncImageHandler, batchImageHandler, xianyuDeliveryHandler, xianguanjiaPushHandler, xgjSupplyHandler, xianguanjiaSupplyOrderHandler, xianguanjiaSupplyCatalogHandler, idempotencyCoordinator, idempotencyCleanupService, openAIQuotaAutoResetService)
+	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, channelMonitorV2Handler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, passkeyHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, modelPlazaHandler, asyncImageHandler, batchImageHandler, xianyuDeliveryHandler, xianyuXianguanjiaPushHandler, xgjSupplyHandler, xianguanjiaSupplyOrderHandler, xianguanjiaSupplyHandler, idempotencyCoordinator, idempotencyCleanupService, openAIQuotaAutoResetService)
 	jwtAuthMiddleware := middleware.NewJWTAuthMiddleware(authService, userService, settingService, auditLogService)
 	optionalJWTAuthMiddleware := middleware.NewOptionalJWTAuthMiddleware(authService, userService, settingService, auditLogService)
 	adminAuthMiddleware := middleware.NewAdminAuthMiddleware(authService, userService, settingService, auditLogService)
@@ -455,8 +421,6 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	opsScheduledReportService := service.ProvideOpsScheduledReportService(opsService, userService, emailService, redisClient, configConfig)
 	opsIngressRejectAggregator := service.ProvideOpsIngressRejectAggregator(opsRepository, opsService)
 	accountExpiryService := service.ProvideAccountExpiryService(accountRepository)
-	// D-QL-006 收口装配：TH/Kira 额度耗尽状态机（5 分钟恢复确认 ticker + 告警 +
-	// 快照刷新），并回注响应式 402/429 入口（rateLimitService.SetCNQuotaLifecycle）。
 	cnQuotaLifecycleService := service.ProvideCNQuotaLifecycleService(accountRepository, httpUpstream, configConfig, opsService, cnProviderQuotaService, rateLimitService)
 	cnProviderBalanceCheckService := service.ProvideCNProviderBalanceCheckService(accountRepository, cnProviderBalanceService, cnProviderQuotaService, rateLimitService, httpUpstream, proxyRepository, configConfig, channelMonitorService, cnQuotaLifecycleService)
 	codeBuddyQuotaService := service.ProvideCodeBuddyQuotaService(accountRepository, proxyRepository, httpUpstream, configConfig)
@@ -478,8 +442,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianyuAlertService := service.ProvideXianyuAlertService(xianyuControlService, xianyuSettingStore, notificationEmailService)
 	xianyuSyncService := service.ProvideXianyuSyncService(xianyuControlService, xianyuWorkerService, xianyuAlertService, db, settingService)
 	xianyuReconcileService := service.ProvideXianyuReconcileService(xianyuControlService, xianyuWorkerService, xianyuDeliveryStateUpdater, xianyuDeliveryRepository, xianyuWorkerDeliveryRepository, xianyuControlRepository, redeemCodeRepository, xianyuSettingStore, xianyuAlertService)
-	// D-CURSOR-017 装配：Cursor 账号保留期清理（C10）。
 	cursorAccountRetentionService := service.ProvideCursorAccountRetentionService(usageCleanupRepository, db, settingService, opsRepository)
+	quotaKeyReconciler := service.ProvideQuotaKeyReconciler(quotaKeyRepository, quotaKeyService, opsRepository, gatewayService, channelService, compositeRouteResolver)
 	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, channelMonitorProbeWorker, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openCodeGoUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager, cnQuotaLifecycleService, quotaKeySweeper, cursorAccountRetentionService, quotaKeyReconciler)
 	application := &Application{
 		Server:        httpServer,
@@ -853,12 +817,6 @@ func provideCleanup(
 			{"ChannelMonitorV2Aggregator", func() error {
 				if channelMonitorV2Aggregator != nil {
 					channelMonitorV2Aggregator.Stop()
-				}
-				return nil
-			}},
-			{"ChannelMonitorProbeWorker", func() error {
-				if channelMonitorProbeWorker != nil {
-					channelMonitorProbeWorker.Stop()
 				}
 				return nil
 			}},

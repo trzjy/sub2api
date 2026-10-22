@@ -38,11 +38,11 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	defer func() { cf524ResolveGuardOutcome(c, ctx, fwdErr) }()
 	startTime := time.Now()
 
-	// Cursor 账号前置分流：入站已是 Chat Completions 形状，直接走契约 0.1
-	// 文本桥接（出站为 Cursor 原生协议，不能落到 Anthropic 通用路径）。
-	// 返回的 *ForwardResult 由 handler 既有 RecordUsage 链计费一次，桥内不二次计费。
+	// Cursor 账号前置分流：入站已是 Chat Completions 形状，**解码一次**成类型化
+	// 请求后交唯一执行部件（出站为 Cursor 原生协议，不能落到 Anthropic 通用路径）。
+	// 返回的 *ForwardResult 由 handler 既有 RecordUsage 链计费一次，执行层不二次计费。
 	if isCursorAccount(account) {
-		return CursorForwardInbound(ctx, c, account, cursorInboundOpenAIChat, body)
+		return s.forwardCursorAsChatCompletions(ctx, c, account, body)
 	}
 
 	// 1. Parse Chat Completions request

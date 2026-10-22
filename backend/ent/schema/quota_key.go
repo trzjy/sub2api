@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -108,6 +109,28 @@ func (QuotaKey) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			MaxLen(8),
+		// usage_snapshot：来源（供应商 lookup）额度的最近观测快照（JSONB，可空）。
+		//
+		// 唯一事实源（方案 §25.6 两层额度 / §25.14-C「唯一状态表示」）：来源额度是
+		// 供应商给的合并 total/used，不是本站账单余额；本列是它在 quota_keys 上的唯一
+		// 落点，不允许借 notes、settings 或账号 extra.key_quota_snapshot 承载归属。
+		//
+		// 快照内容口径（只登记存储形态，写入逻辑不在本单）：
+		//   - 最近一次**成功**观测：total、used、status_code、checked_at；
+		//   - 最近一次观测的 attempted_at 与 error_code（成功时 error_code 为空/缺失）；
+		//   - 查询失败不写 0、不抹掉最近成功数值：无成功值时数值字段**缺失**而非 0，
+		//     因此本列刻意保持 JSON 形态、不拆成整数列——Go 零值无法区分"真实 0"
+		//     与"未观测"，拆列会制造假事实。
+		//   - 期限仍只写既有 expires_at，不复制进快照；exhausted / last_refresh_error 是
+		//     拉号维度事实，与来源额度不可互相覆盖。
+		//
+		// 本列为纯存储结构：写入者唯一是 CursorAutoEntryService 的观测方法，请求侧只读快照
+		// （消费方接线见后续单）。NULL = 尚未观测；向前兼容：旧镜像读到 NULL 不受影响，
+		// 不从账号旧快照导入为新鲜事实。
+		// （ent 的 JSON 字段本身即可空：Optional + nil 值落库为 SQL NULL，故不叠 Nillable。）
+		field.JSON("usage_snapshot", json.RawMessage{}).
+			Optional().
+			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
 		// created_at：创建时间（immutable）。
 		field.Time("created_at").
 			Default(time.Now).

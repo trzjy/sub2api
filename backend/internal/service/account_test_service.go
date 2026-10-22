@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
@@ -725,9 +724,11 @@ func (s *AccountTestService) testCursorAccountConnection(c *gin.Context, account
 	if gw == nil {
 		return s.sendErrorAndEnd(c, "cursor account test unavailable: gateway not wired")
 	}
-	fwd := gw.cursorForwarderOrDefault()
-	if fwd == nil {
-		return s.sendErrorAndEnd(c, "cursor account test unavailable: upstream forwarder not wired")
+	// §24.2-9：探测与正式转发**共用同一执行部件**（唯一 transport / 鉴权 / 转换），
+	// 不再由本服务另行组装鉴权头与请求。
+	exec := gw.cursorExecution
+	if err := requireCursorExecution(exec); err != nil {
+		return s.sendErrorAndEnd(c, "cursor account test unavailable: execution service not wired")
 	}
 
 	// 模型：与可测试模型列表同源（model_mapping 请求侧键，排除通配）。
@@ -753,97 +754,26 @@ func (s *AccountTestService) testCursorAccountConnection(c *gin.Context, account
 		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor account does not map model %q (fail closed)", testModelID))
 	}
 
-	// 鉴权：账号 Bearer + 设备级 x-jg-auth（按账号解析，缺失即失败关闭——与正式转发同契约）。
-	bearer, err := cursorResolveAccountBearer(account)
+	status, detail, text, err := exec.ProbeAgentRun(ctx, account, upstreamModel)
 	if err != nil {
-		return s.sendErrorAndEnd(c, err.Error())
+		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream parse failed: %s", err.Error()))
 	}
-	authProvider, err := newCursorAccountAuthProvider(account, gw.cursorQuotaKeys, gw.cursorQuotaKeyEnc, gw.cursorDeviceIDs)
-	if err != nil {
-		return s.sendErrorAndEnd(c, err.Error())
-	}
-
-	// 请求构造：最小 user 消息（AgentRun 已取证入口只有 user_message_action，最后一条
-	// 必须是用户消息），走与正式转发完全相同的 cursorConvertRequest 转换。
-	maxTokens := 16
-	req := &apicompat.ChatCompletionsRequest{
-		Model:     upstreamModel,
-		MaxTokens: &maxTokens,
-		Messages: []apicompat.ChatMessage{
-			{Role: "user", Content: json.RawMessage(`"hi"`)},
-		},
-	}
-	payload, err := cursorConvertRequest(req, upstreamModel)
-	if err != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor request conversion failed: %s", err.Error()))
-	}
-
-	resp, err := fwd.Do(ctx, &CursorUpstreamRequest{
-		Path:         cursorPathAgentRun,
-		Body:         payload,
-		AuthProvider: authProvider,
-		Model:        upstreamModel,
-		Headers: map[string]string{
-			"Content-Type":             cursorConnectContentType,
-			"Connect-Protocol-Version": "1",
-			"Authorization":            "Bearer " + bearer,
-			"x-cursor-client-version":  cursorClientVersion,
-			"x-cursor-checksum":        cursorClientChecksum(authProvider.device, time.Now()),
-		},
-	})
-	if err != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream request failed: %s", err.Error()))
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	rawBody, rerr := readCursorUpstreamBody(resp.Body, cursorUpstreamStreamMaxBytes)
-	if rerr != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream read failed: %s", rerr.Error()))
-	}
-	// 出站/响应均不回显 bearer（与 cursorExtractUpstreamErrorSummary 同脱敏口径）。
-	if resp.StatusCode != http.StatusOK {
-		code, msg := cursorExtractUpstreamErrorSummary(rawBody, bearer)
-		detail := fmt.Sprintf("cursor upstream status %d", resp.StatusCode)
-		if code != "" || msg != "" {
-			detail += fmt.Sprintf(" (%s %s)", code, msg)
-		}
+	if detail != "" {
 		return s.sendErrorAndEnd(c, detail)
 	}
-	if rej, rejected := cursorDetectKeyRejectedUpstream(rawBody); rejected {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor key rejected by upstream (turn %s)", rej.TurnID))
+	if status != http.StatusOK {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream status %d", status))
 	}
-	completion, perr := cursorParseStreamToCompletion(rawBody, testModelID, bearer)
-	if perr != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream parse failed: %s", perr.Error()))
-	}
-
-	// completion 是 cursorBuildNonStreamingCompletion 产出的完整 chat.completion
-	// JSON（含 id/model/created/choices/usage 框架字段）。content 为空时整体 JSON
-	// 仍非空，故必须解析出真实文本而非用字符串长度判断，否则空文本会被误判成功。
-	var completionObj struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if jerr := json.Unmarshal(completion, &completionObj); jerr != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("cursor upstream completion decode failed: %s", jerr.Error()))
-	}
-	content := ""
-	if len(completionObj.Choices) > 0 {
-		content = completionObj.Choices[0].Message.Content
-	}
-	if strings.TrimSpace(content) == "" {
-		// 解析器允许只有正常 EndStream、无任何文本帧的空流（u7-review 07 已复现），
-		// 此处明确失败，绝不冒充成功。
+	// 成功判定 = 真实文本帧（非空文本）：解析器允许只有 EndStream、无文本帧的空流，
+	// 此处明确失败，绝不冒充成功。
+	if strings.TrimSpace(text) == "" {
 		return s.sendErrorAndEnd(c, "cursor upstream returned no text frames")
 	}
 
 	s.sendEvent(c, TestEvent{
 		Type:  "content",
 		Model: testModelID,
-		Text:  content,
+		Text:  text,
 	})
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil

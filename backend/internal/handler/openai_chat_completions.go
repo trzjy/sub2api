@@ -132,6 +132,14 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
+	// §25.2/§25.14-D：续轮识别与整批接管必须发生在**用户槽/预留/选号之前**。
+	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolChat, body,
+		cursorResumeIdentity(apiKey, subject.UserID), reqStream, func(status int, message string) {
+			h.errorResponse(c, status, "invalid_request_error", message)
+		}) {
+		return
+	}
+
 	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, reqStream, &streamStarted, reqLog)
 	if !acquired {
 		return
@@ -151,7 +159,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 
 	// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
-	inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
+	inflightHandle, err := reserveTransferableInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
 	if err != nil {
 		reqLog.Info("openai_chat_completions.inflight_reservation_rejected", zap.Error(err))
 		status, code, message, retryAfter := billingErrorDetails(err)
@@ -161,7 +169,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		h.handleStreamingAwareError(c, status, code, message, streamStarted)
 		return
 	}
-	defer inflightRelease()
+	if inflightHandle != nil {
+		defer inflightHandle.Release()
+	}
 
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	promptCacheKey := h.gatewayService.ExtractSessionID(c, body)
@@ -300,6 +310,17 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		if hbAtForwardStart != nil {
 			hbCommittedBaseline = int(hbAtForwardStart.CommittedBytes())
 		}
+		// §25.4/§25.5：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额预留转交给会话，
+		// 并把本 HTTP 的计费任务交给会话唯一结算；非 Cursor 账号显式清空转交物。
+		attemptHandover := newCursorResourceHandover(
+			cursorHandoverResources(
+				transferableSlot(c, cursorSlotHandleUserKey),
+				transferableSlot(c, cursorSlotHandleAccountKey),
+				inflightHandle,
+			),
+			h.submitMandatoryUsageRecordTask,
+		)
+		c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {

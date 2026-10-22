@@ -18,6 +18,7 @@
  */
 
 import { apiClient } from '../client'
+import type { QuotaKeyUsageProjection } from '@/types'
 
 /** 激活码脱敏视图（与后端 QuotaKeyStatus / dto.QuotaKey 对齐）。 */
 export interface QuotaKey {
@@ -40,6 +41,10 @@ export interface QuotaKey {
   notes?: string | null
   created_at?: string
   updated_at?: string
+  // 来源额度快照投影（方案 §25.6 消费闭包⑤ / §25.7-B）。
+  // 口径：quota_keys.usage_snapshot 的**已提交**值，列表/详情/probe 与账号行同源同值。
+  // 无快照时省略（不是 0）；查询失败时 total/used 是上次成功值，须带时间并标注失败。
+  usage?: QuotaKeyUsageProjection
 }
 
 /** 激活码下的账号项（脱敏标量，仅展示用）。 */
@@ -174,6 +179,16 @@ export interface KeyQuotaInfo {
   accounts_written: number
 }
 
+/**
+ * 用量查询（probe_quota）响应：既有 key_info 摘要 + 来源额度快照投影（方案 §25.6⑤）。
+ *
+ * usage 取自**已提交**的 quota_keys.usage_snapshot，与列表/详情/账号行同源同值；
+ * 无快照时省略（不是 0），不得把 probe 的未落库结果当已提交事实展示。
+ */
+export interface ProbeQuotaResponse extends KeyQuotaInfo {
+  usage?: QuotaKeyUsageProjection
+}
+
 /** 读取 cursor 入库可配置（厂商勾选 + 模型清单 + 入库参数）。 */
 export async function getAutoEntryConfig(): Promise<AutoEntryConfig> {
   const { data } = await apiClient.get<AutoEntryConfig>('/admin/quota_keys/auto_entry_config')
@@ -186,9 +201,9 @@ export async function updateAutoEntryConfig(payload: AutoEntryConfig): Promise<A
   return data
 }
 
-/** 手动触发某激活码的 key 级用量查询（lookup），写额度快照到其全部账号。 */
-export async function probeQuota(id: number): Promise<KeyQuotaInfo> {
-  const { data } = await apiClient.post<KeyQuotaInfo>(`/admin/quota_keys/${id}/probe_quota`)
+/** 手动触发某激活码的 key 级用量查询（lookup），返回既有摘要 + 已提交额度快照投影。 */
+export async function probeQuota(id: number): Promise<ProbeQuotaResponse> {
+  const { data } = await apiClient.post<ProbeQuotaResponse>(`/admin/quota_keys/${id}/probe_quota`)
   return data
 }
 

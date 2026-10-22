@@ -7,10 +7,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +58,14 @@ type fakeQuotaKeyRepo struct {
 	nextID           int64
 	updateCredsCalls int
 	updateMetaCalls  int
+
+	// 观测/换码事务面（W2-B1）的观测点：
+	// updateSnapshotCalls 记录同事务快照写入次数（无论成功）；
+	// failSnapshotWrite 注入"存储失败"（§25.14-C 步骤 5：不得报成功）；
+	// clearSnapshotCalls 记录凭据写入时清空快照的次数（异 MAC 才清）。
+	updateSnapshotCalls int
+	failSnapshotWrite   bool
+	clearSnapshotCalls  int
 }
 
 func newFakeQuotaKeyRepo() *fakeQuotaKeyRepo {
@@ -128,6 +138,49 @@ func (f *fakeQuotaKeyRepo) UpdateCredentials(_ context.Context, id int64, codeEn
 	return nil
 }
 
+// GetByIDInTx 内存替身：无真实事务，恒按内存行返回（tx 参数忽略）。
+func (f *fakeQuotaKeyRepo) GetByIDInTx(_ context.Context, _ *ent.Tx, id int64) (*ent.QuotaKey, error) {
+	qk, ok := f.byID[id]
+	if !ok {
+		return nil, errQuotaKeyNotFound
+	}
+	return qk, nil
+}
+
+// UpdateUsageSnapshot 内存替身：写 usage_snapshot，合法期限同事务写 expires_at（nil 保留原值）。
+func (f *fakeQuotaKeyRepo) UpdateUsageSnapshot(_ context.Context, _ *ent.Tx, id int64, snapshot []byte, expiresAt **time.Time) error {
+	f.updateSnapshotCalls++
+	qk, ok := f.byID[id]
+	if !ok {
+		return errQuotaKeyNotFound
+	}
+	if f.failSnapshotWrite {
+		return errors.New("injected usage snapshot write failure")
+	}
+	qk.UsageSnapshot = append([]byte(nil), snapshot...)
+	if expiresAt != nil && *expiresAt != nil {
+		qk.ExpiresAt = *expiresAt
+	}
+	return nil
+}
+
+// UpdateCredentialsAtomically 内存替身：写凭据；clearUsageSnapshot=true 时清空快照。
+func (f *fakeQuotaKeyRepo) UpdateCredentialsAtomically(_ context.Context, _ *ent.Tx, id int64, codeEncrypted, codeMAC, codeLast4 string, clearUsageSnapshot bool) error {
+	f.updateCredsCalls++
+	qk, ok := f.byID[id]
+	if !ok {
+		return errQuotaKeyNotFound
+	}
+	qk.CodeEncrypted = codeEncrypted
+	qk.CodeMAC = codeMAC
+	qk.CodeLast4 = codeLast4
+	if clearUsageSnapshot {
+		f.clearSnapshotCalls++
+		qk.UsageSnapshot = nil
+	}
+	return nil
+}
+
 func (f *fakeQuotaKeyRepo) ListExpired(_ context.Context, now time.Time) ([]*ent.QuotaKey, error) {
 	var out []*ent.QuotaKey
 	for _, qk := range f.byID {
@@ -169,12 +222,14 @@ func (f *fakeQuotaKeyRepo) ListEligibleForRefresh(_ context.Context) ([]*ent.Quo
 	return nil, nil
 }
 
-// C5a 扩展方法（内存替身）。
+// C5a 扩展方法（内存替身）。List 按 ID 升序返回：真实仓储是稳定有序的查询结果，
+// 替身若按 map 迭代返回会让"逐来源扫描"类断言随实现抖动（reconciler 同轮刷新用例依赖顺序）。
 func (f *fakeQuotaKeyRepo) List(_ context.Context) ([]*ent.QuotaKey, error) {
-	var out []*ent.QuotaKey
+	out := make([]*ent.QuotaKey, 0, len(f.byID))
 	for _, qk := range f.byID {
 		out = append(out, qk)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
@@ -230,6 +285,7 @@ func (e *quotaKeyNotFoundError) Error() string { return "quota key not found" }
 
 // TestQuotaKeyGetStatus_MasksCodeValue 验证 DTO 的 code_masked 为掩码、不含明文。
 func TestQuotaKeyGetStatus_MasksCodeValue(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
 	repo := newFakeQuotaKeyRepo()
 	repo.byID[1] = &ent.QuotaKey{
 		ID:            1,
@@ -254,6 +310,7 @@ func TestQuotaKeyGetStatus_MasksCodeValue(t *testing.T) {
 // TestQuotaKeyGetStatus_NeverReturnsPlaintext 验证即便 DB 存了明文（测试替身），
 // DTO 任何字段都不得出现明文。
 func TestQuotaKeyGetStatus_NeverReturnsPlaintext(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
 	plain := "CURSOR-ACTIVATION-CODE-9F3A-1234"
 	repo := newFakeQuotaKeyRepo()
 	// 故意把密文字段直接写成明文，模拟数据库误存明文的最坏情况。
@@ -283,8 +340,22 @@ func TestQuotaKeyGetStatus_NeverReturnsPlaintext(t *testing.T) {
 	}
 }
 
+// preserveCursorQuotaKeyStateProvider 在用例构造 fake-backed QuotaKeyService 前后保存/恢复
+// 包级 CursorQuotaKeyStateProvider。
+//
+// 为什么必须恢复：NewQuotaKeyService 会把自身安装成包级调度资格门的状态读取器（生产装配
+// 副作用）。若用例用内存替身仓储构造服务且不恢复，同包后续的**真实 DB** 用例（水位计数 /
+// 资格门）会读到替身仓储，读不到自己的激活码 → 失败关闭 → 计数变 0。这是用例间的全局
+// 状态污染，不是业务缺陷；恢复后顺序无关。
+func preserveCursorQuotaKeyStateProvider(t *testing.T) {
+	t.Helper()
+	prev := currentCursorQuotaKeyStateProvider()
+	t.Cleanup(func() { InstallCursorQuotaKeyStateProvider(prev) })
+}
+
 // TestQuotaKeyRotateCredentials_RoundTrip 验证 Encrypt → 存储 → 读取 → Decrypt 一致。
 func TestQuotaKeyRotateCredentials_RoundTrip(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
 	plain := "CURSOR-ACTIVATION-CODE-9F3A-1234"
 	repo := newFakeQuotaKeyRepo()
 	repo.byID[1] = &ent.QuotaKey{ID: 1, Status: "active"}
@@ -512,6 +583,48 @@ func (r *testDBRepo) HardDelete(ctx context.Context, tx *ent.Tx, id int64) error
 func (r *testDBRepo) UpdateCredentials(ctx context.Context, id int64, codeEncrypted, codeMAC, codeLast4 string) error {
 	_, err := r.client.QuotaKey.UpdateOneID(id).
 		SetCodeEncrypted(codeEncrypted).SetCodeMAC(codeMAC).SetCodeLast4(codeLast4).Save(ctx)
+	return err
+}
+
+// GetByIDInTx 真实事务内读取（观测/换码在每 key 锁内复核来源身份用）。
+func (r *testDBRepo) GetByIDInTx(ctx context.Context, tx *ent.Tx, id int64) (*ent.QuotaKey, error) {
+	if tx != nil {
+		return tx.QuotaKey.Get(ctx, id)
+	}
+	return r.client.QuotaKey.Get(ctx, id)
+}
+
+// UpdateUsageSnapshot 真实事务内写 usage_snapshot（+ 可选 expires_at）。
+func (r *testDBRepo) UpdateUsageSnapshot(ctx context.Context, tx *ent.Tx, id int64, snapshot []byte, expiresAt **time.Time) error {
+	var q *ent.QuotaKeyUpdateOne
+	if tx != nil {
+		q = tx.QuotaKey.UpdateOneID(id)
+	} else {
+		q = r.client.QuotaKey.UpdateOneID(id)
+	}
+	if len(snapshot) > 0 {
+		q = q.SetUsageSnapshot(jsontext.Value(snapshot))
+	}
+	if expiresAt != nil && *expiresAt != nil {
+		q = q.SetExpiresAt(**expiresAt)
+	}
+	_, err := q.Save(ctx)
+	return err
+}
+
+// UpdateCredentialsAtomically 真实事务内写凭据并（异 MAC 时）同事务清空快照。
+func (r *testDBRepo) UpdateCredentialsAtomically(ctx context.Context, tx *ent.Tx, id int64, codeEncrypted, codeMAC, codeLast4 string, clearUsageSnapshot bool) error {
+	var q *ent.QuotaKeyUpdateOne
+	if tx != nil {
+		q = tx.QuotaKey.UpdateOneID(id)
+	} else {
+		q = r.client.QuotaKey.UpdateOneID(id)
+	}
+	q = q.SetCodeEncrypted(codeEncrypted).SetCodeMAC(codeMAC).SetCodeLast4(codeLast4)
+	if clearUsageSnapshot {
+		q = q.ClearUsageSnapshot()
+	}
+	_, err := q.Save(ctx)
 	return err
 }
 
@@ -2889,3 +3002,110 @@ func TestCURF1_CredentialEncryptionOnPull(t *testing.T) {
 	require.NotEqual(t, "PLAIN_REFRESH_TOKEN", rt, "refresh_token must not be stored as plaintext")
 	require.NotEmpty(t, accs[0].CredentialsMAC, "credentials_mac must be non-empty")
 }
+
+// ---------------------------------------------------------------------------
+// W2-B1 / §25.14-C「换码原子边界」：RotateCredentials 与 Update(code) 归入唯一凭据写方法，
+// 同一每 key 锁 + 同一事务内按新旧 MAC 决定是否清空 usage_snapshot。
+// （以上用例走内存替身仓储，验证"决策 + 写入"语义；真实事务/锁语义见 DB 用例。）
+// ---------------------------------------------------------------------------
+
+// mustSeedSnapshotKey 构造一个带已提交快照的激活码行（旧来源观测：total=400/used=86）。
+func mustSeedSnapshotKey(repo *fakeQuotaKeyRepo, id int64, code string) {
+	repo.byID[id] = &ent.QuotaKey{
+		ID:            id,
+		Status:        domain.QuotaKeyStatusActive,
+		CodeEncrypted: "enc:" + code,
+		CodeMAC:       quotaKeyMACOfPlaintext(code),
+		UsageSnapshot: []byte(`{"total":400,"used":86,"status_code":200,` +
+			`"checked_at":"2026-10-01T08:00:00Z","attempted_at":"2026-10-01T08:00:00Z","error_code":""}`),
+	}
+}
+
+// TestQuotaKeyRotateCredentials_ChangedSourceClearsSnapshot：换了一串 code ⇒ 同事务清空
+// usage_snapshot（旧来源观测对新来源无效）。
+func TestQuotaKeyRotateCredentials_ChangedSourceClearsSnapshot(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	repo := newFakeQuotaKeyRepo()
+	mustSeedSnapshotKey(repo, 1, "JG-OLD-CODE")
+	svc := NewQuotaKeyService(repo, testEncryptor{}, nil, nil)
+
+	_, err := svc.RotateCredentials(context.Background(), 1, "JG-NEW-CODE")
+	require.NoError(t, err)
+
+	got := repo.byID[1]
+	require.Equal(t, 1, repo.clearSnapshotCalls, "异 MAC 必须清一次快照")
+	require.Nil(t, got.UsageSnapshot, "换码后旧来源快照必须被原子清空")
+	require.Equal(t, quotaKeyMACOfPlaintext("JG-NEW-CODE"), got.CodeMAC)
+	require.Equal(t, "CODE", got.CodeLast4)
+	require.Equal(t, "enc:JG-NEW-CODE", got.CodeEncrypted)
+}
+
+// TestQuotaKeyRotateCredentials_SameSourceKeepsSnapshot：同一串 code 重新加密 ⇒ 只重加密，
+// 不清已有观测（来源身份没变，观测仍然成立）。
+func TestQuotaKeyRotateCredentials_SameSourceKeepsSnapshot(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	repo := newFakeQuotaKeyRepo()
+	mustSeedSnapshotKey(repo, 1, "JG-SAME-CODE")
+	before := []byte(repo.byID[1].UsageSnapshot)
+	svc := NewQuotaKeyService(repo, testEncryptor{}, nil, nil)
+
+	_, err := svc.RotateCredentials(context.Background(), 1, "JG-SAME-CODE")
+	require.NoError(t, err)
+
+	require.Zero(t, repo.clearSnapshotCalls, "同 MAC 不得清空快照")
+	require.Equal(t, before, []byte(repo.byID[1].UsageSnapshot), "同源重加密必须保留已有观测")
+}
+
+// TestQuotaKeyUpdateCode_UsesSameAtomicCredentialWrite：admin Update(code) 与
+// RotateCredentials 走同一实现（异 MAC 同样清快照、同 MAC 同样保留）。
+func TestQuotaKeyUpdateCode_UsesSameAtomicCredentialWrite(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	repo := newFakeQuotaKeyRepo()
+	mustSeedSnapshotKey(repo, 7, "JG-OLD-CODE")
+	svc := NewQuotaKeyService(repo, testEncryptor{}, nil, nil)
+
+	newCode := "JG-NEW-CODE"
+	_, err := svc.Update(context.Background(), 7, &newCode, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, repo.clearSnapshotCalls, "Update(code) 必须与 RotateCredentials 同一边界")
+	require.Nil(t, repo.byID[7].UsageSnapshot)
+
+	// 同一 code 再提交一次：不清快照。
+	mustSeedSnapshotKey(repo, 7, "JG-NEW-CODE")
+	before := []byte(repo.byID[7].UsageSnapshot)
+	_, err = svc.Update(context.Background(), 7, &newCode, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, repo.clearSnapshotCalls, "同 MAC 不得再清快照")
+	require.Equal(t, before, []byte(repo.byID[7].UsageSnapshot))
+}
+
+// TestQuotaKeyUpdateMeta_DoesNotTouchSnapshot：仅编辑元数据不得触碰凭据或观测。
+func TestQuotaKeyUpdateMeta_DoesNotTouchSnapshot(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	repo := newFakeQuotaKeyRepo()
+	mustSeedSnapshotKey(repo, 9, "JG-CODE")
+	before := []byte(repo.byID[9].UsageSnapshot)
+	svc := NewQuotaKeyService(repo, testEncryptor{}, nil, nil)
+
+	expires := time.Date(2030, 5, 1, 0, 0, 0, 0, time.UTC)
+	expPtr := &expires
+	_, err := svc.Update(context.Background(), 9, nil, &expPtr, nil)
+	require.NoError(t, err)
+	require.Zero(t, repo.clearSnapshotCalls)
+	require.Zero(t, repo.updateCredsCalls, "无 code 时不得写凭据")
+	require.Equal(t, before, []byte(repo.byID[9].UsageSnapshot), "元数据编辑不得覆盖观测")
+}
+
+// TestQuotaKeyRotateCredentials_MissingKeyIsExplicit：来源不存在 ⇒ 明确错误，不复活来源。
+func TestQuotaKeyRotateCredentials_MissingKeyIsExplicit(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	repo := newFakeQuotaKeyRepo()
+	svc := NewQuotaKeyService(repo, testEncryptor{}, nil, nil)
+	_, err := svc.RotateCredentials(context.Background(), 404, "JG-X")
+	require.Error(t, err)
+	require.Zero(t, repo.updateCredsCalls, "不存在的来源不得写入凭据")
+}
+
+// compile-time guard：内存替身仓储满足观测/换码所需的事务内能力（否则观测会失败关闭）。
+var _ quotaKeyObservationRepo = (*fakeQuotaKeyRepo)(nil)
+var _ quotaKeyObservationRepo = (*testDBRepo)(nil)

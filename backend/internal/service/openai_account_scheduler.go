@@ -1691,10 +1691,11 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 				continue
 			}
 		}
-		// P1-S §16.1：归属激活码已过期的 cursor 账号不进入高级候选池。与其余三条链
-		// （普通/粘性/DB 复核）共用 cursorAccountQuotaKeyVetoReason 同一口径；此处
-		// 只做候选剔除，账号状态一律不动。
-		if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
+		// P1-S §16.1 + §25.6 同一来源门：归属激活码过期或真实来源剩余不足的 cursor 账号
+		// 不进入高级候选池。与其余三条链共用 cursorSupplySourceAvailabilityVetoReasonString
+		// 同一口径（key 终态 + 真实来源剩余，来源可用 AND 账号可用）；此处只做候选剔除，
+		// 账号状态一律不动。
+		if reason := cursorSupplySourceAvailabilityVetoReasonString(ctx, account); reason != "" {
 			filterStats.exclude(reason)
 			continue
 		}

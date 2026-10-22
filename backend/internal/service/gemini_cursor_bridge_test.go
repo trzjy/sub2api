@@ -24,13 +24,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newGeminiCursorTestFixture 装配 cursor 上游替身 + 已安装桥接的网关实例。
+// newGeminiCursorTestFixture 装配 cursor 上游替身 + 唯一执行部件已注入的 Gemini 服务。
+//
+// §24.2-2：Gemini 出口不再依赖包级桥接安装，而是构造注入同一个 CursorExecutionService。
 func newGeminiCursorTestFixture(t *testing.T, chatBody []byte) (*GeminiMessagesCompatService, *cursorE2EUpstream, *ginContextRecorder) {
 	t.Helper()
 	upstream := &cursorE2EUpstream{chatBody: chatBody}
-	// newCursorE2EService 会构造 OpenAIGatewayService 并在构造末尾安装包级桥接。
-	_, c, w := newCursorE2EService(t, upstream)
-	return &GeminiMessagesCompatService{}, upstream, &ginContextRecorder{c: c, w: w}
+	gateway, c, w := newCursorE2EService(t, upstream)
+	return &GeminiMessagesCompatService{cursorExecution: gateway.cursorExecution}, upstream, &ginContextRecorder{c: c, w: w}
 }
 
 // ginContextRecorder 把 gin 上下文与响应记录器绑在一起，读断言更直接。

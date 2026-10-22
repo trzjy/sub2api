@@ -131,7 +131,7 @@ func TestCursorAgentDuplexRejectsUnknownExecutionAndBlob(t *testing.T) {
 		"unknown_blob": cursorAppendBytesField(nil, 4, cursorAppendBytesField(nil, 2, cursorAppendStringField(nil, 1, "missing"))),
 	} {
 		t.Run(name, func(t *testing.T) {
-			d, err := newCursorAgentDuplex(cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil)))
+			d, err := newCursorAgentDuplex(cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil)), nil)
 			require.NoError(t, err)
 			defer d.close(nil)
 			_, err = d.respond(payload)

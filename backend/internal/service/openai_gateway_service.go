@@ -476,18 +476,10 @@ type OpenAIGatewayService struct {
 	rpmCache              RPMCache // 账号级 RPM 计数（当前用于 CodeBuddy 平台默认 RPM 限流）
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
-	// cursor 出站鉴权依赖（quota_keys 仓储 + 激活码解密器 + deviceId 解析器），
-	// 仅 forwardCursor 消费。经 SetCursorAuthDeps 注入而非改构造签名——理由见该方法注释。
-	cursorQuotaKeys   QuotaKeyRepository
-	cursorQuotaKeyEnc QuotaKeyEncryptor
-	cursorDeviceIDs   CursorDeviceIDResolver
-	// cursor 出站转发器（E6）。经 SetCursorForwarder 注入；为 nil 时 forwardCursor
-	// 用节点单例兜底构造（只含站点级节点信息，不含任何凭证）。
-	cursorForwarder *CursorUpstreamForwarder
-	// cursorKeyStatusLookup 是"流内拒绝后核对激活码终态"的窄依赖（P1-A2）。
-	// 经 SetCursorKeyStatusLookup 注入；未注入时走同包既有 lookup 回退，
-	// 都不可得即视为"无法确认"（失败关闭，不删号、不标账号耗尽）。
-	cursorKeyStatusLookup cursorKeyStatusLookup
+	// cursorExecution 是 Cursor 平台**唯一**执行部件（§24.2-2）：鉴权、模型映射、
+	// AgentRun 执行、工具批次与会话状态都在该实例内。构造注入，为 nil 时 Cursor 分支
+	// 失败关闭——绝不另建默认转发器或包级实例构成平行执行链。
+	cursorExecution *CursorExecutionService
 
 	openaiWSPoolOnce               sync.Once
 	openaiWSStateStoreOnce         sync.Once
@@ -557,6 +549,7 @@ func NewOpenAIGatewayService(
 	settingService *SettingService,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
 	visionRouting *VisionRoutingService,
+	cursorExecution *CursorExecutionService,
 ) *OpenAIGatewayService {
 	// enforceCodexIdentityHeaders 是 HTTP / 透传 / WS / 探针 等出站路径共用的纯函数收口点，
 	// 拿不到配置，故在此发布进程级开关快照。配置取反义，零值即「强制统一出口开启」。
@@ -596,6 +589,7 @@ func NewOpenAIGatewayService(
 		settingService:        settingService,
 		userPlatformQuotaRepo: userPlatformQuotaRepo,
 		visionRouting:         visionRouting,
+		cursorExecution:       cursorExecution,
 		liveAttestation:       liveattestation.NewProvider(),
 		liveAttestationCipher: newLiveAttestationCipher(cfg),
 		responseHeaderFilter:  compileResponseHeaderFilter(cfg),
@@ -612,10 +606,6 @@ func NewOpenAIGatewayService(
 		openAITokenProvider.SetAccountRuntimeBlocker(svc)
 	}
 	svc.logOpenAIWSModeBootstrap()
-	// P1-A2 契约 0.1：安装 Cursor 文本桥接的网关实例（包级安装模式，与
-	// codeBuddyQuotaInstance 同构）。CursorForwardInbound 借此复用本实例既注入的
-	// cursor forwarder / 鉴权依赖，跨卡无需持有 *OpenAIGatewayService 句柄。
-	InstallCursorBridge(svc)
 	return svc
 }
 

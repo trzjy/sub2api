@@ -280,7 +280,7 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 	initBody, err := cursorConvertRequest(initReq, "grok-4.7")
 	require.NoError(t, err)
 
-	d, err := newCursorAgentDuplex(initBody)
+	d, err := newCursorAgentDuplex(initBody, nil)
 	require.NoError(t, err)
 	defer d.close(nil)
 	require.Len(t, d.declaredToolDefs, 2)
@@ -382,7 +382,7 @@ func TestCursorDecodeMcpArgsMap(t *testing.T) {
 }
 
 func TestCursorDuplexMcpArgsReply(t *testing.T) {
-	d, err := newCursorAgentDuplex(cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil)))
+	d, err := newCursorAgentDuplex(cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil)), nil)
 	require.NoError(t, err)
 	defer d.close(nil)
 
@@ -394,7 +394,7 @@ func TestCursorDuplexMcpArgsReply(t *testing.T) {
 	done, err := d.respond(frame)
 	require.NoError(t, err)
 	require.False(t, done, "mcp_args reply must not terminate the connection")
-	require.True(t, d.toolCallsFinished)
+	require.Len(t, d.delegations.snapshot(), 1, "duplex 侧委托记录必须恰好一条（唯一解码点）")
 
 	rep := <-replyCh
 	require.NoError(t, rep.err)
@@ -542,7 +542,7 @@ func TestCursorBillingAfterToolDeferral(t *testing.T) {
 	require.True(t, p.usage.Seen)
 	require.Equal(t, 123, p.usage.Input)
 	require.Equal(t, 4, p.usage.Output)
-	require.True(t, p.toolCallsFinished)
+	require.Len(t, p.capturedToolCalls(), 1, "parser 侧读取同一份委托记录，恰好一条")
 }
 
 // ---------------------------------------------------------------------------

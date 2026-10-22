@@ -66,6 +66,12 @@ type InflightReservation struct {
 	closeOnce   sync.Once
 	stopRenew   chan struct{}
 	renewDone   chan struct{}
+
+	// lifecycleMu 保护 deferred/handlerReturned 两个生命周期标记（Cursor 跨 HTTP 会话，
+	// 方案 §25.4：只把现有 HandlerDone 延后到会话终结，不新增第二套预留）。
+	lifecycleMu     sync.Mutex
+	deferred        bool
+	handlerReturned bool
 }
 
 // Amount 预留金额。
@@ -96,10 +102,81 @@ func (r *InflightReservation) Acquire() func() {
 }
 
 // HandlerDone handler 结束：停止续期并归还 handler 引用（幂等）。
+//
+// 已由 HoldPastHTTP 延后归还会话时本方法是空操作：归还时机唯一，归会话 finalizer。
 func (r *InflightReservation) HandlerDone() {
 	if r == nil {
 		return
 	}
+	r.lifecycleMu.Lock()
+	deferred := r.deferred
+	r.lifecycleMu.Unlock()
+	if deferred {
+		return
+	}
+	r.handlerDone()
+}
+
+// HoldPastHTTP 把 handler 引用的归还时机延后到会话终结（§25.4）。
+//
+// 只延后**现有** HandlerDone 的时机：不新增引用、不新增预留、不复制续期。
+// 返回 false 表示预留已经 HandlerDone / Release（引用已归零）——此时不得再 Acquire
+// 假装保住续期，调用方必须按交接失败处理。
+func (r *InflightReservation) HoldPastHTTP() bool {
+	if r == nil {
+		return false
+	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if r.handlerReturned || r.deferred {
+		return false
+	}
+	if r.refs.Load() <= 0 {
+		return false
+	}
+	r.deferred = true
+	return true
+}
+
+// SessionDone 会话终结时归还 handler 引用（幂等）。
+//
+// 必须在唯一结算提交之后调用（§25.5：不得在缓存扣减前先释放预留）。
+// 未 HoldPastHTTP 的常规 HTTP 路径调用它是空操作。
+func (r *InflightReservation) SessionDone() {
+	if r == nil {
+		return
+	}
+	r.lifecycleMu.Lock()
+	deferred := r.deferred
+	r.lifecycleMu.Unlock()
+	if !deferred {
+		return
+	}
+	r.handlerDone()
+}
+
+// HeldPastHTTP 报告是否处于"延后到会话终结归还"状态（诊断/测试用）。
+func (r *InflightReservation) HeldPastHTTP() bool {
+	if r == nil {
+		return false
+	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	return r.deferred && !r.handlerReturned
+}
+
+// handlerDone 是 HandlerDone/SessionDone 的唯一实现（幂等，引用只归还一次）。
+func (r *InflightReservation) handlerDone() {
+	if r == nil {
+		return
+	}
+	r.lifecycleMu.Lock()
+	if r.handlerReturned {
+		r.lifecycleMu.Unlock()
+		return
+	}
+	r.handlerReturned = true
+	r.lifecycleMu.Unlock()
 	r.stopOnce.Do(func() {
 		r.stopRenewal()
 		r.decRef()

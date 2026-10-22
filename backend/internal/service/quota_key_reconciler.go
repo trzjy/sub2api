@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/ent"
 )
 
 const (
@@ -38,6 +41,15 @@ type quotaKeyPuller interface {
 	// 调用，新号在落库事务提交前挂入 U7 目标分组（与手动挂组同源同判；modelM 仅作
 	// 水位/触发上下文，挂载按账号模型能力全量计算，§20.2-A）。
 	PullAccountsForModel(ctx context.Context, quotaKeyID int64, modelM string) error
+}
+
+// quotaKeyUsageObserver 是**来源额度观测**的窄面（§25.6 消费闭包①）。
+//
+// 唯一实现是 *CursorAutoEntryService.ProbeKeyQuota：解密、设备准备、每 key 锁事务、
+// lookup、同事务写 usage_snapshot/expires_at、提交都封在它内部。reconciler 只调用它，
+// 不持有第二套 lookup 客户端/解析器，也不自己写快照列。
+type quotaKeyUsageObserver interface {
+	ProbeKeyQuota(ctx context.Context, quotaKeyID int64) (*KeyQuotaLookupInfo, error)
 }
 
 // QuotaKeyModelWaterProvider 是 C10 水位 reconciler 依赖的"补池水位"窄面
@@ -95,6 +107,10 @@ type QuotaKeyReconciler struct {
 	modelWater QuotaKeyModelWaterProvider
 	interval   time.Duration
 
+	// usageObserver 是来源额度观测的窄面（§25.6 / §25.14-C）：nil 时本轮不刷新来源额度
+	// （只影响观测职责，不影响既有补池行为）。
+	usageObserver quotaKeyUsageObserver
+
 	// coalescer 提供单 flight + pending wakeup：同一 key 在拉号中再次被请求时合并，
 	// 拉号结束后若有 pending 则补拉一次。
 	coalescer *pullCoalescer
@@ -142,6 +158,15 @@ func (r *QuotaKeyReconciler) SetModelWaterProvider(p QuotaKeyModelWaterProvider)
 		return
 	}
 	r.modelWater = p
+}
+
+// SetUsageObserver 注入来源额度观测窄面（§25.6 消费闭包①）。
+// 生产由 wire 在既有装配点注入 *CursorAutoEntryService；nil 时本轮跳过额度刷新。
+func (r *QuotaKeyReconciler) SetUsageObserver(o quotaKeyUsageObserver) {
+	if r == nil {
+		return
+	}
+	r.usageObserver = o
 }
 
 // NotifyAccountRemoved 是 a/b/c 软删提交后的水位快路径唤醒点（C12-v2，收编进 reconciler）。
@@ -262,21 +287,31 @@ func (r *QuotaKeyReconciler) runOnce() {
 	// 不跨轮累计（累计会让后续每轮的摘要都虚高为本轮 + 历史轮次之和）。
 	r.pulled.Store(0)
 
+	// §25.6 / §25.14-C：同一轮的**来源额度刷新**必须先于 allowedModels / 水位等早退，
+	// 且独立于"是否需要补号"——来源已观测耗尽时池子不需要补号，但余额仍要被观测才能发现
+	// 恢复。刷新只沿既有观测入口（CursorAutoEntryService.ProbeKeyQuota），不新增 cron、
+	// 不通过 activate/refresh 取号来查余额、不写账号状态。
+	sourceUsage := ""
+	if r.usageObserver != nil {
+		usageRefresh := r.refreshSourceUsage(ctx)
+		sourceUsage = usageRefresh.summary(true)
+	}
+
 	// 提供方未接入（C11 接线前）：本轮无候选，停拉并记录原因。
 	if r.modelWater == nil {
-		r.recordHeartbeat(ctx, runAt, true, nil, "model water provider not configured; no candidate keys")
+		r.recordHeartbeat(ctx, runAt, true, nil, "model water provider not configured; no candidate keys", sourceUsage)
 		return
 	}
 
 	models, err := r.modelWater.ListAllowedModels(ctx)
 	if err != nil {
 		log.Printf("[QuotaKeyReconcile] list allowed models failed: %v", err)
-		r.recordHeartbeat(ctx, runAt, false, err, "")
+		r.recordHeartbeat(ctx, runAt, false, err, "", sourceUsage)
 		return
 	}
 	if len(models) == 0 {
 		// 无允许模型：无候选 key，停拉并记录原因。
-		r.recordHeartbeat(ctx, runAt, true, nil, "no allowed models; no candidate keys")
+		r.recordHeartbeat(ctx, runAt, true, nil, "no allowed models; no candidate keys", sourceUsage)
 		return
 	}
 
@@ -311,7 +346,7 @@ func (r *QuotaKeyReconciler) runOnce() {
 		total, threshold, werr := r.modelWater.WaterLevel(ctx, mountModel)
 		if werr != nil {
 			log.Printf("[QuotaKeyReconcile] water level failed: %v", werr)
-			r.recordHeartbeat(ctx, runAt, false, werr, "")
+			r.recordHeartbeat(ctx, runAt, false, werr, "", sourceUsage)
 			return
 		}
 		deficit := threshold - total
@@ -321,7 +356,7 @@ func (r *QuotaKeyReconciler) runOnce() {
 		candidates, cerr := r.modelWater.ListCandidateKeys(ctx, mountModel, deficit)
 		if cerr != nil {
 			log.Printf("[QuotaKeyReconcile] list candidate keys failed: %v", cerr)
-			r.recordHeartbeat(ctx, runAt, false, cerr, "")
+			r.recordHeartbeat(ctx, runAt, false, cerr, "", sourceUsage)
 			return
 		}
 		// 本轮未尝试过的候选（冷却/容量满/已尝试的码由提供方或 attempted 排除）。
@@ -364,7 +399,7 @@ func (r *QuotaKeyReconciler) runOnce() {
 				// WaterLevel 错误分支保持一致：写失败心跳并立即 return，不再触碰下一 key。
 				// 不发明第三种错误处理形态；一般 pull 错误仍按既有分类处理（blk 计数 / 继续下一候选）。
 				log.Printf("[QuotaKeyReconcile] recompute water level after quota key %d failed: %v", keyID, rerr)
-				r.recordHeartbeat(ctx, runAt, false, rerr, "")
+				r.recordHeartbeat(ctx, runAt, false, rerr, "", sourceUsage)
 				return
 			}
 			if nowTotal > batchTotal {
@@ -391,7 +426,7 @@ func (r *QuotaKeyReconciler) runOnce() {
 	// F4：哨兵停轮 —— 写失败心跳并在 LastResult 记录原因（告警日志已在 pullKey 内打出）。
 	if mountStopReason != "" {
 		r.recordHeartbeat(ctx, runAt, false,
-			fmt.Errorf("quota_key_reconcile: %w", ErrQuotaKeyMountFailed), mountStopReason)
+			fmt.Errorf("quota_key_reconcile: %w", ErrQuotaKeyMountFailed), mountStopReason, sourceUsage)
 		return
 	}
 
@@ -400,20 +435,20 @@ func (r *QuotaKeyReconciler) runOnce() {
 		// 不得记成功。不停轮语义保持：仅反映结果，不改变下一轮行为。
 		r.recordHeartbeat(ctx, runAt, false,
 			fmt.Errorf("quota_key_reconcile: %d upstream pull(s) blocked; see quota key refresh error", blockedCount),
-			"")
+			"", sourceUsage)
 		return
 	}
 	if shortfallReason != "" {
 		// 如实报告：本轮仍有缺口 —— 记录总量/阈值/缺口与成因，不虚报补满、不生成或购买激活码。
-		r.recordHeartbeat(ctx, runAt, true, nil, shortfallReason)
+		r.recordHeartbeat(ctx, runAt, true, nil, shortfallReason, sourceUsage)
 		return
 	}
 	if candidateCount == 0 {
 		// 无候选 key：停止补池并记录原因（可能是池级总量已达水位，或候选 key 不可补）。
-		r.recordHeartbeat(ctx, runAt, true, nil, "no candidate keys for any allowed model")
+		r.recordHeartbeat(ctx, runAt, true, nil, "no candidate keys for any allowed model", sourceUsage)
 		return
 	}
-	r.recordHeartbeat(ctx, runAt, true, nil, "")
+	r.recordHeartbeat(ctx, runAt, true, nil, "", sourceUsage)
 }
 
 // poolShortfall 生成本轮水位缺口的如实摘要（total/threshold/deficit + 成因），用于心跳
@@ -421,6 +456,82 @@ func (r *QuotaKeyReconciler) runOnce() {
 func poolShortfall(total, threshold, deficit int, cause string) string {
 	return fmt.Sprintf("pool below target: servable cursor accounts total=%d threshold=%d deficit=%d unresolved; %s",
 		total, threshold, deficit, cause)
+}
+
+// sourceUsageRefresh 是一轮"来源额度刷新"的如实计数（只用于心跳，不参与补池判定）。
+type sourceUsageRefresh struct {
+	// Attempted 是本轮实际发起观测的来源数。
+	Attempted int
+	// Succeeded / Failed 是观测成功/失败（失败观测可能已按 §25.14-C 提交）的来源数。
+	Succeeded int
+	Failed    int
+	// NotQueried 是本轮**未**发起观测的来源数（30 秒轮预算耗尽或已 Stop）。
+	// 这些来源保持原 attempted_at/数值不变（不写 0、不刷新时间戳）。
+	NotQueried int
+	// ListFailed 表示本轮枚举来源失败（此时不发起任何观测）。
+	ListFailed bool
+}
+
+// summary 生成心跳可读摘要；未配置观测口时不产生任何文字（心跳保持既有形态）。
+func (s sourceUsageRefresh) summary(configured bool) string {
+	if !configured {
+		return ""
+	}
+	if s.ListFailed {
+		return "source usage refresh: list quota keys failed; no observation issued this round"
+	}
+	return fmt.Sprintf("source usage refresh: observed=%d failed=%d not_queried=%d",
+		s.Succeeded, s.Failed, s.NotQueried)
+}
+
+// refreshSourceUsage 在同一轮内按"未软删的 Cursor 来源"逐个发起额度观测（§25.6 / §25.14-C）。
+//
+// 严格边界：
+//   - 扫描全部未软删来源（含已观测耗尽 / exhausted 的来源），以便发现恢复；
+//     不加 active/exhausted 过滤——那正是"耗尽后永不复查"的缺陷；
+//   - 只调用唯一观测入口；查询失败只影响该次观测（失败观测由该入口自己按契约提交）；
+//   - 受本轮 ctx（30 秒）约束；Stop 置位后不再发起新请求，未发起项如实计入 NotQueried；
+//   - 不改账号状态、不写 exhausted / last_refresh_error、不发 scheduler outbox 事件。
+func (r *QuotaKeyReconciler) refreshSourceUsage(ctx context.Context) sourceUsageRefresh {
+	var out sourceUsageRefresh
+	if r == nil || r.usageObserver == nil || r.repo == nil {
+		return out
+	}
+	keys, err := r.repo.List(ctx)
+	if err != nil {
+		log.Printf("[QuotaKeyReconcile] list quota keys for source usage refresh failed: %v", err)
+		out.ListFailed = true
+		return out
+	}
+	for idx, qk := range keys {
+		if qk == nil {
+			continue
+		}
+		if r.isStopping() || ctx.Err() != nil {
+			// 轮预算用尽 / 停机：不再发新请求，未查项保持原时间，如实记录未完成数量。
+			out.NotQueried += countRefreshableSources(keys[idx:])
+			return out
+		}
+		out.Attempted++
+		if _, perr := r.usageObserver.ProbeKeyQuota(ctx, qk.ID); perr != nil {
+			out.Failed++
+			log.Printf("[QuotaKeyReconcile] source usage refresh for quota key %d failed: %v", qk.ID, perr)
+			continue
+		}
+		out.Succeeded++
+	}
+	return out
+}
+
+// countRefreshableSources 统计剩余待观测的来源数量（跳过 nil 项），供心跳如实记未完成数。
+func countRefreshableSources(keys []*ent.QuotaKey) int {
+	n := 0
+	for _, qk := range keys {
+		if qk != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // pullKey 对单个 quota key 触发拉号，叠加单 flight + pending wakeup + double-checked exit。
@@ -490,7 +601,9 @@ func (r *QuotaKeyReconciler) pullKey(ctx context.Context, keyID int64, modelM st
 // reason 非空时作为 LastResult 记录（用于"无候选 key 停拉"、F4 哨兵停轮等可观测原因）；
 // 否则（成功且无原因）用 reconcileResult(pulled) 做成功摘要。
 // 失败心跳同样写入 LastResult（若有原因），使停轮原因在 ops 侧直接可见。
-func (r *QuotaKeyReconciler) recordHeartbeat(ctx context.Context, runAt time.Time, success bool, reconcileErr error, reason string) {
+// sourceUsage 是本轮来源额度刷新的如实摘要（未配置观测口时为空），成功/失败轮次都记录，
+// 使"本轮有多少来源没来得及观测"在 ops 侧可见，不以心跳掩盖未完成数量。
+func (r *QuotaKeyReconciler) recordHeartbeat(ctx context.Context, runAt time.Time, success bool, reconcileErr error, reason string, sourceUsage string) {
 	if r == nil || r.opsRepo == nil {
 		return
 	}
@@ -512,12 +625,13 @@ func (r *QuotaKeyReconciler) recordHeartbeat(ctx context.Context, runAt time.Tim
 		} else {
 			result = reconcileResult(int(r.pulled.Load()))
 		}
+		result = joinHeartbeatParts(result, sourceUsage)
 		rs := truncateString(result, 2048)
 		input.LastResult = &rs
 	} else {
 		// F4：失败轮次也记录原因（哨兵停轮等），便于 ops 侧直接看到停轮原因。
-		if reason != "" {
-			rs := truncateString(reason, 2048)
+		if result := joinHeartbeatParts(reason, sourceUsage); result != "" {
+			rs := truncateString(result, 2048)
 			input.LastResult = &rs
 		}
 		if reconcileErr != nil {
@@ -528,6 +642,18 @@ func (r *QuotaKeyReconciler) recordHeartbeat(ctx context.Context, runAt time.Tim
 		}
 	}
 	_ = r.opsRepo.UpsertJobHeartbeat(hbCtx, input)
+}
+
+// joinHeartbeatParts 用 "; " 拼接心跳摘要片段，跳过空片段（未配置观测口时保持既有形态）。
+func joinHeartbeatParts(parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, "; ")
 }
 
 // reconcileResult 生成心跳 LastResult 的可读摘要（有候选 key 且成功补池时）。

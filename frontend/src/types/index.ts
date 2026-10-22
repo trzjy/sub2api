@@ -1407,6 +1407,51 @@ export interface Account {
   // 仅 cursor 平台账号必填；非 cursor / 未归属时为 null/省略。
   quota_key_id?: number | null
   quota_key_label?: string | null
+
+  // 两层额度的账号页两维（方案 §25.6 消费闭包⑥⑦ / §25.7-B）：
+  // - quota_key_usage：「所属激活码额度」快照投影（供应商按激活码合并的额度，
+  //   不是本站账单余额、也不是账号自身余额）；无已提交快照时省略/为 null，**不是 0**；
+  // - vendor_account_quota：供应商**账号级**真实余额未提供（provided 恒 false + 注明），
+  //   刻意没有任何余额/百分比字段，界面不得伪造或拿上面的数字冒充。
+  // 账号自身本站已结算用量仍走既有 today_stats / usage 通路，本两维不改写它。
+  quota_key_usage?: QuotaKeyUsageProjection | null
+  vendor_account_quota?: VendorAccountQuotaView | null
+}
+
+/**
+ * 来源（激活码）额度快照的展示投影。
+ *
+ * 与后端 `service.QuotaKeyUsageProjection`（quota_key_usage_snapshot_dto.go）逐字对应：
+ * - 数值字段可缺失（omitempty）：缺失表示「无最近一次成功观测」，**不是真实 0**，
+ *   前端不得补零、不得渲染百分比进度条；
+ * - `remaining` 是算术剩余（total − used），仅当两者都存在；
+ * - `error_code` 非空 / `query_failed=true` 表示最近一次观测失败，此时 total/used 是
+ *   **上次成功值**，必须连同 checked_at 一起展示并标注查询失败；
+ * - `has_snapshot` 表示该激活码是否已有快照记录（含只有失败观测的情形）。
+ */
+export interface QuotaKeyUsageProjection {
+  scope: string
+  label: string
+  total?: number
+  used?: number
+  remaining?: number
+  status_code?: number
+  checked_at?: string
+  attempted_at?: string
+  error_code?: string
+  has_snapshot: boolean
+  query_failed: boolean
+}
+
+/**
+ * 供应商账号级额度的展示口径（§25.7-B）。
+ *
+ * 上游没有可核验的账号级真实余额，因此本结构**只有**「未提供」这一事实：
+ * 没有任何余额数值或百分比字段——缺失不是 0，接口层面就杜绝伪造。
+ */
+export interface VendorAccountQuotaView {
+  provided: boolean
+  note: string
 }
 
 // The admin account list may return this compact shape when lite=1. Detail

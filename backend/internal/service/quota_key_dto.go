@@ -13,6 +13,13 @@ type QuotaKeyStatus struct {
 	LastRefreshError string     `json:"last_refresh_error,omitempty"`
 	CodeValueMasked  string     `json:"code_masked"` // 仅末4位掩码，禁明文
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+
+	// Usage 是来源额度快照的展示投影（方案 §25.6 消费闭包⑤ / §25.7-B）。
+	//
+	// 只读：来自 quota_keys.usage_snapshot 已提交值，解析/投影唯一实现在
+	// quota_key_usage_snapshot_dto.go；无快照时为 nil（省略字段），**绝不落成 0**。
+	// Create/Update 等不读快照的返回路径保持 nil，JSON 形态与接入前一致。
+	Usage *QuotaKeyUsageProjection `json:"usage,omitempty"`
 }
 
 // CreateQuotaKeyInput 是 QuotaKeyRepository.Create 的入参。

@@ -142,7 +142,7 @@ func TestNewGatewayServiceWiresCompositeModelOwnershipResolver(t *testing.T) {
 		nil,
 		resolver,
 		nil,
-		nil,
+		nil, nil, /* cursorExecution */
 	)
 	require.Same(t, resolver, svc.compositeResolver)
 

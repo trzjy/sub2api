@@ -28,6 +28,8 @@ import (
 	"errors"
 	"fmt"
 	"unicode/utf16"
+
+	"github.com/Wei-Shaw/sub2api/ent"
 )
 
 // ErrCursorDeviceIDUnavailable 表示无法为激活码解析出可用的 deviceId（失败关闭）。
@@ -117,11 +119,28 @@ func GenerateCursorDeviceID() (string, error) {
 //
 // deviceId 落库后**永久复用**：这是插件语义（固化到 ~/.cursor_free_data），
 // 也是上游能把同一份设备标识视为同一客户端的前提，故本方法在已有值时绝不重算。
+//
+// §25.14-C「设备解析与依赖」：本方法保持原契约（"无值就首写一份"），实现委托给同包的
+// 低层本体 cursorDeviceIDFirstWrite；上层的三分支解析（持久值 → 存量派生 → 真新码首写）
+// 见 cursorDeviceIdentityOf，不得把三分支语义塞回本方法。
 func (s *QuotaKeyService) DeviceIDFor(ctx context.Context, quotaKeyID int64) (string, error) {
 	if s == nil || s.repo == nil {
 		return "", fmt.Errorf("%w: quota key service not configured", ErrCursorDeviceIDUnavailable)
 	}
-	qk, err := s.repo.GetByID(ctx, quotaKeyID)
+	return cursorDeviceIDFirstWrite(ctx, s.repo, quotaKeyID)
+}
+
+// cursorDeviceIDFirstWrite 是"首写 + 重读赢家值"的**低层本体**（接收 repo，不依赖
+// QuotaKeyService，避免 AutoEntry 反向依赖服务造成 DI 环）。
+//
+// 只有"真新码"才允许走到这里（随机生成只出现在这一处）；存量码走派生值、已有持久
+// device 直接用，都不进入本函数。首写发生在每 key 的 advisory/行锁事务**之前**，
+// 保留 O01 修复（事务回滚不会丢掉已提交的设备身份）。
+func cursorDeviceIDFirstWrite(ctx context.Context, repo QuotaKeyRepository, quotaKeyID int64) (string, error) {
+	if repo == nil {
+		return "", fmt.Errorf("%w: quota key repository not configured", ErrCursorDeviceIDUnavailable)
+	}
+	qk, err := repo.GetByID(ctx, quotaKeyID)
 	if err != nil {
 		// 双 %w：既保留底层原因（可判具体错误），也归入"鉴权材料不可得"这一
 		// 失败关闭语义（出站侧只需认这个哨兵）。
@@ -141,7 +160,7 @@ func (s *QuotaKeyService) DeviceIDFor(ctx context.Context, quotaKeyID int64) (st
 	if err != nil {
 		return "", err
 	}
-	written, err := s.repo.SetDeviceIDIfAbsent(ctx, quotaKeyID, candidate)
+	written, err := repo.SetDeviceIDIfAbsent(ctx, quotaKeyID, candidate)
 	if err != nil {
 		return "", fmt.Errorf("cursor: persist device id for quota key %d: %w", quotaKeyID, err)
 	}
@@ -151,7 +170,7 @@ func (s *QuotaKeyService) DeviceIDFor(ctx context.Context, quotaKeyID int64) (st
 
 	// 0 行 = 已有并发请求抢先写入（条件不满足）。重读取赢家的值，
 	// 绝不返回本请求的候选值（那会造成同一激活码出现两份 deviceId）。
-	settled, err := s.repo.GetByID(ctx, quotaKeyID)
+	settled, err := repo.GetByID(ctx, quotaKeyID)
 	if err != nil {
 		return "", fmt.Errorf("%w: re-read quota key %d after device id race: %v", ErrCursorDeviceIDUnavailable, quotaKeyID, err)
 	}
@@ -161,4 +180,154 @@ func (s *QuotaKeyService) DeviceIDFor(ctx context.Context, quotaKeyID int64) (st
 		return "", fmt.Errorf("%w: quota key %d device id still unset after conditional write", ErrCursorDeviceIDUnavailable, quotaKeyID)
 	}
 	return *settled.DeviceID, nil
+}
+
+// ---------------------------------------------------------------------------
+// §25.14-C「设备解析与依赖」：三分支来源设备身份解析的**唯一实现**。
+//
+// 取号（pull 首写边界）、出站（cursor_upstream_client.resolveDeviceID）与
+// Probe（CursorAutoEntryService 观测入口）共用本函数，不得各自再写一份分支：
+//
+//	① 已有持久 device_id → 直接复用（全链同值，不写库）；
+//	② 无持久 device 但该码已有账号（存量）→ 复用原 deviceID(code)，**不写新身份**、
+//	   不迁移（§16 红线：绝不自动改存量设备身份）；
+//	③ 真新码（无设备、无账号）→ 沿既有 SetDeviceIDIfAbsent 条件首写、重读赢家值
+//	   （随机生成只出现在这里）。
+//
+// 解析同时记下来源 MAC 指纹：调用方进锁（每 key advisory/行锁事务）后重读来源，
+// MAC 不一致即"来源已被换码"，必须明确冲突并**零 lookup**，不拿旧明文继续观察。
+// ---------------------------------------------------------------------------
+
+// cursorDeviceSource 标识本次设备身份的来源分支（只用于日志/断言，不落库）。
+type cursorDeviceSource string
+
+const (
+	// cursorDeviceSourcePersisted：库内已有持久 device_id（稳态路径）。
+	cursorDeviceSourcePersisted cursorDeviceSource = "persisted"
+	// cursorDeviceSourceDerived：存量码的确定性派生值 deviceID(code)，不写库。
+	cursorDeviceSourceDerived cursorDeviceSource = "derived"
+	// cursorDeviceSourceFirstWrite：真新码的首写路径（随机生成 + 条件写 + 重读赢家）。
+	cursorDeviceSourceFirstWrite cursorDeviceSource = "first-write"
+)
+
+// cursorDeviceIdentity 是一次设备解析的结果。
+type cursorDeviceIdentity struct {
+	// DeviceID 是本次解析出的设备身份（取号/出站/lookup 全链同值）。
+	DeviceID string
+	// Source 是命中的分支（persisted / derived / first-write）。
+	Source cursorDeviceSource
+	// CodeMAC 是**解析时刻**来源凭据的 MAC 指纹；调用方进锁后重读来源并比对，
+	// 不一致即换码冲突（零 lookup）。空串表示调用方未提供明文，不参与比对。
+	CodeMAC string
+}
+
+// resolveCursorDeviceIdentity 是三分支解析的唯一入口（repo 版本）。
+//
+// code 为该来源的**明文**激活码：分支②的派生值需要它，分支③不需要（首写与明文无关）。
+// 调用方必须传入明文；未解密成功不得进入本函数（否则分支②会拿到错误派生值）。
+func resolveCursorDeviceIdentity(ctx context.Context, repo QuotaKeyRepository, qk *ent.QuotaKey, code string) (cursorDeviceIdentity, error) {
+	if repo == nil {
+		return cursorDeviceIdentity{}, fmt.Errorf("%w: quota key repository not configured", ErrCursorDeviceIDUnavailable)
+	}
+	return resolveCursorDeviceIdentityWith(ctx, qk, code,
+		repositoryHasAccount(repo),
+		func(ctx context.Context, id int64) (string, error) {
+			return cursorDeviceIDFirstWrite(ctx, repo, id)
+		},
+	)
+}
+
+// resolveCursorDeviceIdentityWith 是三分支解析的本体：只依赖"是否已有账号"与
+// "首写"两个窄回调，因此 QuotaKeyService 的窄面（出站客户端持有的 deviceResolver）
+// 与 QuotaKeyRepository 都能接入同一份分支逻辑，不再各自复制一遍。
+func resolveCursorDeviceIdentityWith(
+	ctx context.Context,
+	qk *ent.QuotaKey,
+	code string,
+	hasAccount func(context.Context, int64) (bool, error),
+	firstWrite func(context.Context, int64) (string, error),
+) (cursorDeviceIdentity, error) {
+	branch, err := cursorDeviceBranch(ctx, qk, hasAccount)
+	if err != nil {
+		return cursorDeviceIdentity{}, err
+	}
+	identity := cursorDeviceIdentity{Source: branch, CodeMAC: quotaKeyMACOfPlaintext(code)}
+	switch branch {
+	case cursorDeviceSourcePersisted:
+		// ① 已持久化 device_id → 全链复用（出站侧读同一列，恒同值）。
+		identity.DeviceID = *qk.DeviceID
+		return identity, nil
+	case cursorDeviceSourceDerived:
+		// ② 存量（已有账号）→ 保持既有派生值，不写库、不迁移。
+		identity.DeviceID = deviceID(code)
+		return identity, nil
+	default:
+		// ③ 真新码（无账号）→ 首写 + 重读赢家值（随机生成只在此分支）。
+		if firstWrite == nil {
+			return cursorDeviceIdentity{}, fmt.Errorf("%w: device first-write dependency not configured", ErrCursorDeviceIDUnavailable)
+		}
+		generated, ferr := firstWrite(ctx, qk.ID)
+		if ferr != nil {
+			return cursorDeviceIdentity{}, ferr
+		}
+		identity.DeviceID = generated
+		return identity, nil
+	}
+}
+
+// cursorDeviceBranch 是三分支**判定**的唯一实现（① 持久值 / ② 存量派生 / ③ 真新码首写）。
+//
+// 把它单独抽出来，是为了让不持有明文的调用方（取号链的设备首写边界：取号本来就不解密）
+// 也能复用同一份判定，而不是各写一遍 if/else。
+func cursorDeviceBranch(ctx context.Context, qk *ent.QuotaKey, hasAccount func(context.Context, int64) (bool, error)) (cursorDeviceSource, error) {
+	if qk == nil {
+		return "", fmt.Errorf("%w: quota key not loaded", ErrCursorDeviceIDUnavailable)
+	}
+	if qk.DeviceID != nil && *qk.DeviceID != "" {
+		return cursorDeviceSourcePersisted, nil
+	}
+	if hasAccount == nil {
+		return "", fmt.Errorf("%w: device resolution dependencies not configured", ErrCursorDeviceIDUnavailable)
+	}
+	has, err := hasAccount(ctx, qk.ID)
+	if err != nil {
+		return "", fmt.Errorf("shareai: resolve quota key account: %w", err)
+	}
+	if has {
+		return cursorDeviceSourceDerived, nil
+	}
+	return cursorDeviceSourceFirstWrite, nil
+}
+
+// repositoryHasAccount 把"归属账号存在性"适配成分支判定的窄回调（与
+// QuotaKeyService.HasAccount 同口径：一次归属账号查询，只读）。
+func repositoryHasAccount(repo QuotaKeyRepository) func(context.Context, int64) (bool, error) {
+	return func(ctx context.Context, quotaKeyID int64) (bool, error) {
+		accs, err := repo.ListAccountsByQuotaKey(ctx, quotaKeyID)
+		if err != nil {
+			return false, err
+		}
+		return len(accs) > 0, nil
+	}
+}
+
+// ensureCursorDeviceFirstWrite 是**取号链**的设备边界：与观测/出站共用同一分支判定，
+// 但不需要明文（取号本就不解密），只在真新码分支执行首写。
+//
+// 返回命中的分支（调用方可记录），不做任何"存量改身份"动作。
+func ensureCursorDeviceFirstWrite(ctx context.Context, repo QuotaKeyRepository, qk *ent.QuotaKey) (cursorDeviceSource, error) {
+	if repo == nil {
+		return "", fmt.Errorf("%w: quota key repository not configured", ErrCursorDeviceIDUnavailable)
+	}
+	branch, err := cursorDeviceBranch(ctx, qk, repositoryHasAccount(repo))
+	if err != nil {
+		return "", err
+	}
+	if branch != cursorDeviceSourceFirstWrite {
+		return branch, nil
+	}
+	if _, err := cursorDeviceIDFirstWrite(ctx, repo, qk.ID); err != nil {
+		return branch, err
+	}
+	return branch, nil
 }

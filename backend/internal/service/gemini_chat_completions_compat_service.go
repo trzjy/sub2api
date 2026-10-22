@@ -33,7 +33,7 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 	// 原生协议端点。必须在 Gemini 转换链之前分流——落到通用路径会先把入站转成
 	// Gemini 形状再发往不支持 Gemini 协议的上游，必然被拒并白耗额度。
 	if isCursorAccount(account) {
-		res, ferr := CursorForwardInbound(ctx, c, account, cursorInboundOpenAIChat, body)
+		res, ferr := s.forwardCursorChatCompletions(ctx, c, account, body)
 		if ferr != nil {
 			// 出口先把错误按 Chat Completions 形状写出，避免 handler 回落到
 			// 与入站协议无关的通用错误体；Cursor 路径不参与换号重试。

@@ -244,6 +244,14 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	// 获取订阅信息（可能为nil）- 提前获取用于后续检查
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 
+	// §25.2/§25.14-D：续轮识别与整批接管必须发生在**用户槽/预留/选号之前**。
+	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolMessages, body,
+		cursorResumeIdentity(apiKey, subject.UserID), reqStream, func(status int, message string) {
+			h.errorResponse(c, status, "invalid_request_error", message)
+		}) {
+		return
+	}
+
 	// CF524 G2b 入口安装点：认证/鉴权完成后、并发槽位等待与账号选择前，创建请求级
 	// 不可变预算快照（含入口单调时间）并安装请求级心跳 owner；出口必然 Stop。
 	cf524StopHeartbeat := h.cf524InstallUpstreamBudgetAndHeartbeat(c, cf524Entry, reqStream)
@@ -258,9 +266,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 	// 在请求结束或 Context 取消时确保释放槽位，避免客户端断开造成泄漏
-	userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), userReleaseFunc)
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
+	// §25.4：用户槽改为**可转交**句柄（Cursor 分支交给会话持有，其它供应商语义不变）。
+	userSlot := newTransferableRelease(c.Request.Context(), "user_slot", userReleaseFunc)
+	if userSlot != nil {
+		userReleaseFunc = userSlot.Release
+		defer userSlot.Release()
 	}
 
 	// 2. 【新增】Wait后二次检查余额/订阅
@@ -275,7 +285,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	}
 
 	// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
-	inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
+	inflightHandle, err := reserveTransferableInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
 	if err != nil {
 		reqLog.Info("gateway.inflight_reservation_rejected", zap.Error(err))
 		status, code, message, retryAfter := billingErrorDetails(err)
@@ -285,7 +295,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		h.handleStreamingAwareError(c, status, code, message, streamStarted)
 		return
 	}
-	defer inflightRelease()
+	if inflightHandle != nil {
+		defer inflightHandle.Release()
+	}
 
 	// 设置请求所属分组 ID（用于渠道级功能判断，如 WebSearch 模拟）
 	parsedReq.GroupID = apiKey.GroupID
@@ -489,7 +501,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 			// 账号槽位/等待计数需要在超时或断开时安全回收
-			accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
+			// §25.4：账号槽改用**可转交**句柄（Cursor 分支交给会话持有）。
+			accountSlot := newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
+			if accountSlot != nil {
+				accountReleaseFunc = accountSlot.Release
+			}
 
 			// 转发请求 - 根据账号平台分流
 			var result *service.ForwardResult
@@ -506,6 +522,14 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			if hbOwner, ok := service.UpstreamHeartbeatFromContext(requestCtx); ok && hbOwner != nil {
 				hbCommittedBaseline = int(hbOwner.CommittedBytes())
 			}
+			// §25.4/§25.5：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额预留转交给会话，
+			// 并把本 HTTP 的计费任务交给会话唯一结算；非 Cursor 账号显式清空转交物。
+			attemptHandover := newCursorResourceHandover(
+				cursorHandoverResources(userSlot, accountSlot, inflightHandle),
+				h.submitMandatoryUsageRecordTask,
+			)
+			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
+			requestCtx = c.Request.Context()
 			if account.Platform == service.PlatformAntigravity {
 				result, err = h.antigravityGatewayService.ForwardGemini(
 					requestCtx,
@@ -845,7 +869,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 			// 账号槽位/等待计数需要在超时或断开时安全回收
-			accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
+			// §25.4：账号槽改用**可转交**句柄（Cursor 分支交给会话持有）。
+			accountSlot := newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
+			if accountSlot != nil {
+				accountReleaseFunc = accountSlot.Release
+			}
 
 			// ===== 用户消息串行队列 START =====
 			var queueRelease func()
@@ -932,6 +960,13 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			if hbOwner, ok := service.UpstreamHeartbeatFromContext(requestCtx); ok && hbOwner != nil {
 				hbCommittedBaseline = int(hbOwner.CommittedBytes())
 			}
+			// §25.4/§25.5：同型转交（Anthropic/Messages 出口）。
+			attemptHandover := newCursorResourceHandover(
+				cursorHandoverResources(userSlot, accountSlot, inflightHandle),
+				h.submitMandatoryUsageRecordTask,
+			)
+			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
+			requestCtx = c.Request.Context()
 			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
 			} else {
@@ -2760,6 +2795,12 @@ func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task serv
 	if task == nil {
 		return
 	}
+	if owner := service.CursorSettlementOwnerFromContext(parent); owner != nil {
+		// §25.5：Cursor 会话已接管本 HTTP 的结算——不再为每个工具 HTTP 排一次
+		// UsageRecordTask，而是把任务交给会话唯一结算（至多执行一次）。
+		owner.AdoptSettlementTask(task)
+		return
+	}
 	task, abandon := wrapUsageRecordTaskContext(parent, task)
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); mode != service.UsageRecordSubmitModeDroppedStopped {
@@ -2791,6 +2832,12 @@ func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task serv
 // submitMandatoryUsageRecordTask never silently drops billing work on pool overflow.
 func (h *GatewayHandler) submitMandatoryUsageRecordTask(parent context.Context, task service.UsageRecordTask) {
 	if task == nil {
+		return
+	}
+	if owner := service.CursorSettlementOwnerFromContext(parent); owner != nil {
+		// §25.5：Cursor 会话已接管本 HTTP 的结算——不再为每个工具 HTTP 排一次
+		// UsageRecordTask，而是把任务交给会话唯一结算（至多执行一次）。
+		owner.AdoptSettlementTask(task)
 		return
 	}
 	task, _ = wrapUsageRecordTaskContext(parent, task)

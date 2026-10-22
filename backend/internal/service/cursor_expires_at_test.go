@@ -15,8 +15,9 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// 到期时间事实源回写与展示收敛（C-U7-B）：lookup / refresh → quota_keys.expires_at。
-// quota_keys.expires_at 是唯一持久化事实源；空值不写（保留旧值），不伪造 / 清空。
+// 到期时间事实源回写与展示收敛（C-U7-B / W2-B1）：lookup / refresh → quota_keys.expires_at。
+// quota_keys.expires_at 是唯一持久化事实源（快照内不复制期限）；空值不写（保留旧值），
+// 不伪造 / 清空。观测侧期限写入与 usage_snapshot 同事务（§25.14-C 步骤 4）。
 // （parseKeyExpiresAt 的解析规则单测见 cursor_upstream_client_test.go:TestParseKeyExpiresAt，
 //  同包复用、共用同一 RFC3339 解析，本卡不复制第二套测试。）
 // ---------------------------------------------------------------------------
@@ -39,8 +40,6 @@ func TestCursorExpiresAt_ProbeWritesBack(t *testing.T) {
 	repo.accounts = []*ent.Account{{ID: 100, QuotaKeyID: &qkID}}
 
 	svc := NewCursorAutoEntryService(newFakeSettingRepo(), repo, testEncryptor{}, nil, &http.Client{Timeout: 5 * time.Second}, srv.URL)
-	svc.SetWriter(&fakeAccountWriter{})
-	svc.SetDeviceIDGen(func() string { return "6653FFCD" })
 
 	_, err := svc.ProbeKeyQuota(context.Background(), 42)
 	require.NoError(t, err)
@@ -68,8 +67,6 @@ func TestCursorExpiresAt_ProbeEmptyKeepsOld(t *testing.T) {
 	repo.accounts = []*ent.Account{{ID: 100, QuotaKeyID: &qkID}}
 
 	svc := NewCursorAutoEntryService(newFakeSettingRepo(), repo, testEncryptor{}, nil, &http.Client{Timeout: 5 * time.Second}, srv.URL)
-	svc.SetWriter(&fakeAccountWriter{})
-	svc.SetDeviceIDGen(func() string { return "6653FFCD" })
 
 	_, err := svc.ProbeKeyQuota(context.Background(), 42)
 	require.NoError(t, err)
@@ -95,8 +92,6 @@ func TestCursorExpiresAt_ProbeEmptyNoOldStaysNil(t *testing.T) {
 	repo.accounts = []*ent.Account{{ID: 100, QuotaKeyID: &qkID}}
 
 	svc := NewCursorAutoEntryService(newFakeSettingRepo(), repo, testEncryptor{}, nil, &http.Client{Timeout: 5 * time.Second}, srv.URL)
-	svc.SetWriter(&fakeAccountWriter{})
-	svc.SetDeviceIDGen(func() string { return "6653FFCD" })
 
 	_, err := svc.ProbeKeyQuota(context.Background(), 42)
 	require.NoError(t, err)

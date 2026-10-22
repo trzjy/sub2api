@@ -284,6 +284,9 @@ type CheckMixedChannelRequest struct {
 // AccountWithConcurrency extends Account with real-time concurrency info
 type AccountWithConcurrency struct {
 	*dto.Account
+	// quotaKeyUsageFields 携带「所属激活码额度」与「供应商账号额度未提供」两维投影
+	// （§25.6⑥ / §25.7-B）；与 lite 行结构同名字段、同值（§25.8 lite/full 同值）。
+	quotaKeyUsageFields
 	simpleMode         bool                         `json:"-"`
 	CurrentConcurrency int                          `json:"current_concurrency"`
 	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
@@ -299,6 +302,8 @@ type AccountWithConcurrency struct {
 // so groups/account_groups never appear in the list payload.
 type AccountListItemWithConcurrency struct {
 	*dto.AccountListItem
+	// quotaKeyUsageFields 与 full 行同名字段、同一份批量投影值（§25.8 lite/full 同值）。
+	quotaKeyUsageFields
 	CurrentConcurrency int                          `json:"current_concurrency"`
 	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
 	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
@@ -723,12 +728,13 @@ func (h *AccountHandler) listAccountSchedulerScoreFilterPool(
 	return accounts
 }
 
-// loadQuotaKeySummaries 一次性取出本页涉及的激活码汇总：id → 脱敏 summary。
+// loadQuotaKeySummaries 一次性取出本页涉及的激活码汇总：id → 脱敏 summary + 额度快照投影。
 //
 // 只在存在任意 quota_key_id 时才查询，且无论本页多少账号都只调用一次
-// QuotaKeyService.List（常量次查询，杜绝 N+1）。查询失败按降级处理：
+// QuotaKeyService.ListWithUsageProjections（常量次查询，杜绝 N+1；不逐行网络查询、
+// 不复制整份 key 聚合——方案 §25.6 消费闭包⑥）。查询失败按降级处理：
 // 仅缺失这两个展示字段，不影响账号列表主数据（§4.4 展示层增强，非主链路）。
-func (h *AccountHandler) loadQuotaKeySummaries(ctx context.Context, quotaKeyIDs []int64) map[int64]dto.QuotaKey {
+func (h *AccountHandler) loadQuotaKeySummaries(ctx context.Context, quotaKeyIDs []int64) map[int64]quotaKeySummaryView {
 	if h == nil || h.quotaKeyService == nil || len(quotaKeyIDs) == 0 {
 		return nil
 	}
@@ -736,12 +742,12 @@ func (h *AccountHandler) loadQuotaKeySummaries(ctx context.Context, quotaKeyIDs 
 	for _, id := range quotaKeyIDs {
 		wanted[id] = struct{}{}
 	}
-	statuses, err := h.quotaKeyService.List(ctx)
+	statuses, err := h.quotaKeyService.ListWithUsageProjections(ctx)
 	if err != nil {
 		slog.Warn("admin_account_quota_key_summaries_failed", "error", err)
 		return nil
 	}
-	out := make(map[int64]dto.QuotaKey, len(statuses))
+	out := make(map[int64]quotaKeySummaryView, len(statuses))
 	for _, st := range statuses {
 		if st == nil {
 			continue
@@ -749,11 +755,15 @@ func (h *AccountHandler) loadQuotaKeySummaries(ctx context.Context, quotaKeyIDs 
 		if _, ok := wanted[st.ID]; !ok {
 			continue
 		}
-		out[st.ID] = dto.QuotaKey{
-			ID:         st.ID,
-			CodeMasked: st.CodeValueMasked,
-			Status:     st.Status,
-			Exhausted:  st.Exhausted,
+		out[st.ID] = quotaKeySummaryView{
+			QuotaKey: dto.QuotaKey{
+				ID:         st.ID,
+				CodeMasked: st.CodeValueMasked,
+				Status:     st.Status,
+				Exhausted:  st.Exhausted,
+			},
+			// 与 quota key 列表/详情/probe 同一份投影值（§25.8 lite/full 同值）。
+			Usage: st.Usage,
 		}
 	}
 	return out
@@ -761,7 +771,7 @@ func (h *AccountHandler) loadQuotaKeySummaries(ctx context.Context, quotaKeyIDs 
 
 // applyQuotaKeyLabel 回填单个账号 DTO 的 quota_key_id / quota_key_label（F7：
 // 账号项只带两个脱敏标量，绝不内嵌 QuotaKey 聚合对象）。
-func applyQuotaKeyLabel(acc *dto.Account, quotaKeyID *int64, summaries map[int64]dto.QuotaKey) {
+func applyQuotaKeyLabel(acc *dto.Account, quotaKeyID *int64, summaries map[int64]quotaKeySummaryView) {
 	if acc == nil || quotaKeyID == nil {
 		return
 	}
@@ -774,9 +784,48 @@ func applyQuotaKeyLabel(acc *dto.Account, quotaKeyID *int64, summaries map[int64
 	acc.QuotaKeyLabel = &label
 }
 
+// quotaKeyUsageFields 是账号行上的额度展示投影（§25.6⑥ / §25.7-B）。
+//
+// 两层额度在账号页必须分开表达：
+//   - QuotaKeyUsage：**所属激活码额度**（供应商按激活码合并的额度，带 scope/label 标签），
+//     值来自上面那次批量 summary，不逐行查询；
+//   - VendorAccountQuota：供应商**账号级**真实余额未提供（provided 恒 false + 注明），
+//     明确不出现余额数值或百分比，也不拿激活码剩余冒充账号余额。
+//
+// 账号自身维度仍走既有 usage/quota_dimensions 通路（本站真实已结算用量），本结构不改写它。
+type quotaKeyUsageFields struct {
+	QuotaKeyUsage      *service.QuotaKeyUsageProjection `json:"quota_key_usage,omitempty"`
+	VendorAccountQuota *vendorAccountQuotaView          `json:"vendor_account_quota,omitempty"`
+}
+
+// vendorAccountQuotaView 是 §25.7-B 展示口径的类型化表达：只有"未提供"这一事实，
+// 刻意没有任何余额/百分比字段——缺失不是 0，接口层面就不给伪造留位置。
+type vendorAccountQuotaView struct {
+	Provided bool   `json:"provided"`
+	Note     string `json:"note"`
+}
+
+// applyQuotaKeyUsageFields 按批量 summary 投影把额度字段写入账号行。
+//
+// 无归属激活码（非 Cursor 账号）时不写任何字段：其它厂商/账号自身快照的展示不受影响。
+// 有归属但服务层取不到该 summary（降级/失败）时只写"供应商账号额度未提供"注明，
+// 绝不补 0 或百分比。
+func applyQuotaKeyUsageFields(target *quotaKeyUsageFields, quotaKeyID *int64, summaries map[int64]quotaKeySummaryView) {
+	if target == nil || quotaKeyID == nil {
+		return
+	}
+	target.VendorAccountQuota = &vendorAccountQuotaView{
+		Provided: false,
+		Note:     service.VendorAccountQuotaUnavailableNote,
+	}
+	if summary, ok := summaries[*quotaKeyID]; ok && summary.Usage != nil {
+		target.QuotaKeyUsage = summary.Usage
+	}
+}
+
 // quotaKeySummariesOrdered 按给定的激活码 ID 顺序输出汇总（稳定顺序：便于 ETag 与快照对比）。
-func quotaKeySummariesOrdered(quotaKeyIDs []int64, summaries map[int64]dto.QuotaKey) []dto.QuotaKey {
-	out := make([]dto.QuotaKey, 0, len(quotaKeyIDs))
+func quotaKeySummariesOrdered(quotaKeyIDs []int64, summaries map[int64]quotaKeySummaryView) []quotaKeySummaryView {
+	out := make([]quotaKeySummaryView, 0, len(quotaKeyIDs))
 	for _, id := range quotaKeyIDs {
 		if summary, ok := summaries[id]; ok {
 			out = append(out, summary)
@@ -981,12 +1030,17 @@ func (h *AccountHandler) List(c *gin.Context) {
 		}
 		// 回填脱敏标量 quota_key_id / quota_key_label（F7：不内嵌 QuotaKey 聚合）。
 		applyQuotaKeyLabel(accountResponse, acc.QuotaKeyID, quotaKeysByID)
+		// 同一批 summary 投影额度两维（所属激活码额度 + 供应商账号额度未提供），
+		// 每行只查内存 map，绝不逐行查询/复制整份 key 聚合（§25.6⑥）。
+		var usageFields quotaKeyUsageFields
+		applyQuotaKeyUsageFields(&usageFields, acc.QuotaKeyID, quotaKeysByID)
 		item := AccountWithConcurrency{
-			Account:            accountResponse,
-			simpleMode:         h.isSimpleMode(),
-			CurrentConcurrency: concurrencyCounts[acc.ID],
-			SchedulerScore:     schedulerScores[acc.ID],
-			SchedulerScores:    schedulerGroupScores[acc.ID],
+			Account:             accountResponse,
+			quotaKeyUsageFields: usageFields,
+			simpleMode:          h.isSimpleMode(),
+			CurrentConcurrency:  concurrencyCounts[acc.ID],
+			SchedulerScore:      schedulerScores[acc.ID],
+			SchedulerScores:     schedulerGroupScores[acc.ID],
 		}
 
 		// 添加窗口费用（仅当启用时）
@@ -1020,13 +1074,14 @@ func (h *AccountHandler) List(c *gin.Context) {
 		for i := range result {
 			item := result[i]
 			compact[i] = AccountListItemWithConcurrency{
-				AccountListItem:    dto.AccountListItemFromAccount(item.Account),
-				CurrentConcurrency: item.CurrentConcurrency,
-				SchedulerScore:     item.SchedulerScore,
-				SchedulerScores:    item.SchedulerScores,
-				CurrentWindowCost:  item.CurrentWindowCost,
-				ActiveSessions:     item.ActiveSessions,
-				CurrentRPM:         item.CurrentRPM,
+				AccountListItem:     dto.AccountListItemFromAccount(item.Account),
+				quotaKeyUsageFields: item.quotaKeyUsageFields,
+				CurrentConcurrency:  item.CurrentConcurrency,
+				SchedulerScore:      item.SchedulerScore,
+				SchedulerScores:     item.SchedulerScores,
+				CurrentWindowCost:   item.CurrentWindowCost,
+				ActiveSessions:      item.ActiveSessions,
+				CurrentRPM:          item.CurrentRPM,
 			}
 		}
 		etag := buildAccountsListETag(compact, total, page, pageSize, platform, accountType, status, search, true)
@@ -1140,9 +1195,12 @@ func (h *AccountHandler) GetByID(c *gin.Context) {
 	}
 
 	accountResponse := h.buildAccountResponseWithRuntime(c.Request.Context(), account)
-	// §4.4：详情项同样回填 quota_key_id / quota_key_label（脱敏标量，F7）。
+	// §4.4：详情项同样回填 quota_key_id / quota_key_label（脱敏标量，F7），
+	// 并按同一批量 summary 投影额度两维（与列表 lite/full 同值）。
 	if qkID := account.QuotaKeyID; qkID != nil {
-		applyQuotaKeyLabel(accountResponse.Account, qkID, h.loadQuotaKeySummaries(c.Request.Context(), []int64{*qkID}))
+		summaries := h.loadQuotaKeySummaries(c.Request.Context(), []int64{*qkID})
+		applyQuotaKeyLabel(accountResponse.Account, qkID, summaries)
+		applyQuotaKeyUsageFields(&accountResponse.quotaKeyUsageFields, qkID, summaries)
 	}
 	response.Success(c, accountResponse)
 }

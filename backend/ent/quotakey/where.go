@@ -710,6 +710,16 @@ func DeviceIDContainsFold(v string) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldContainsFold(FieldDeviceID, v))
 }
 
+// UsageSnapshotIsNil applies the IsNil predicate on the "usage_snapshot" field.
+func UsageSnapshotIsNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldIsNull(FieldUsageSnapshot))
+}
+
+// UsageSnapshotNotNil applies the NotNil predicate on the "usage_snapshot" field.
+func UsageSnapshotNotNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNotNull(FieldUsageSnapshot))
+}
+
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.
 func CreatedAtEQ(v time.Time) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldEQ(FieldCreatedAt, v))

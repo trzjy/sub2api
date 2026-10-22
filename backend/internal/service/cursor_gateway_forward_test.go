@@ -18,24 +18,18 @@ package service
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
-	"github.com/Wei-Shaw/sub2api/ent/enttest"
-	"github.com/Wei-Shaw/sub2api/internal/domain"
 	wasmcrypto "github.com/Wei-Shaw/sub2api/internal/service/wasm"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 	_ "modernc.org/sqlite"
 )
 
@@ -145,12 +139,12 @@ func newCursorOutboundTestService(
 	nodes.cachedAt = time.Now()
 
 	svc := NewOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	svc.SetCursorAuthDeps(repo, NewCursorTestEncryptor(), deviceIDs)
-	svc.SetCursorForwarder(NewCursorUpstreamForwarder(
-		WithCursorUpstreamNodes(nodes),
-		WithCursorUpstreamHTTPClient(ts.Client()),
-	))
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil /* cursorExecution */)
+	svc.cursorExecution = attachCursorTestExecution(t, svc, repo, NewCursorTestEncryptor(), deviceIDs,
+		NewCursorUpstreamForwarder(
+			WithCursorUpstreamNodes(nodes),
+			WithCursorUpstreamHTTPClient(ts.Client()),
+		))
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -208,10 +202,10 @@ func TestCursorOutboundHeadersCarryPerAccountBearerAndDeviceAuth(t *testing.T) {
 	body := []byte(`{"model":"cursor-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
 	ctx := context.Background()
 
-	resA, err := svc.forwardCursor(ctx, c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"), body, "cursor-sonnet", false, time.Now())
+	resA, err := executeCursorForTest(t, svc, ctx, c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"), body, "cursor-sonnet", false, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, resA)
-	resB, err := svc.forwardCursor(ctx, c, cursorOutboundAccount(2, 22, "BEARER-ACCOUNT-B"), body, "cursor-sonnet", false, time.Now())
+	resB, err := executeCursorForTest(t, svc, ctx, c, cursorOutboundAccount(2, 22, "BEARER-ACCOUNT-B"), body, "cursor-sonnet", false, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, resB)
 
@@ -240,7 +234,7 @@ func TestCursorOutboundHeadersCarryPerAccountBearerAndDeviceAuth(t *testing.T) {
 	require.NotContains(t, jgA, decB.A, "A 号出站绝不能携带 B 号的激活码")
 
 	// 同一账号重复出站：Bearer 恒定（账号已存凭证），不产生第二次换 token。
-	_, err = svc.forwardCursor(ctx, c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"), body, "cursor-sonnet", false, time.Now())
+	_, err = executeCursorForTest(t, svc, ctx, c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"), body, "cursor-sonnet", false, time.Now())
 	require.NoError(t, err)
 	require.Equal(t, "Bearer BEARER-ACCOUNT-A", up.at(2).header.Get("Authorization"))
 	require.Equal(t, 3, up.count())
@@ -261,7 +255,7 @@ func TestCursorOutboundFailsClosedWithoutAccountBearer(t *testing.T) {
 	acc := cursorOutboundAccount(1, 11, "")
 	delete(acc.Credentials, "access_token")
 
-	_, err := svc.forwardCursor(context.Background(), c, acc, body, "cursor-sonnet", false, time.Now())
+	_, err := executeCursorForTest(t, svc, context.Background(), c, acc, body, "cursor-sonnet", false, time.Now())
 	require.ErrorIs(t, err, ErrCursorAccountBearerMissing)
 	require.Zero(t, up.count(), "凭证缺失必须在发出任何出站请求之前失败关闭")
 }
@@ -332,20 +326,8 @@ func TestCursorOutboundDeviceIDMatchesPullChainThreeBranches(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Done when 4：流内拒绝 → lookup 核对链
+// 流内拒绝：终态错误，不核对、不写来源状态
 // ---------------------------------------------------------------------------
-
-// cursorStubKeyStatusLookup 是激活码终态核对的测试替身。
-type cursorStubKeyStatusLookup struct {
-	status cursorKeyStatus
-	err    error
-	calls  int
-}
-
-func (l *cursorStubKeyStatusLookup) LookupKeyStatus(context.Context, int64) (cursorKeyStatus, error) {
-	l.calls++
-	return l.status, l.err
-}
 
 // cursorRejectedStreamBody 构造一条 HTTP200 但流内含终态拒绝模板的响应。
 //
@@ -360,146 +342,31 @@ func cursorRejectedStreamBody(t *testing.T) []byte {
 	return out
 }
 
-// newCursorKeyRejectedTestService 装配"流内拒绝"场景所需的服务与真实 DB（sqlite）。
-//
-// 用真实 DB 的理由：确认过期分支的写链（cursorMarkKeyExpiredByUpstream →
-// QuotaKeyService.markKeyExpiredByUpstream）走 ent 条件更新，桩掉就测不到
-// "仅当 status=active 才写"这条口径。
-func newCursorKeyRejectedTestService(
-	t *testing.T,
-	upstream http.Handler,
-	lookup cursorKeyStatusLookup,
-) (*OpenAIGatewayService, *gin.Context, *ent.Client, int64) {
-	t.Helper()
-	ctx := context.Background()
-
-	db, err := sql.Open("sqlite", "file:cursor_key_rejected?mode=memory&cache=shared&_fk=1")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec("PRAGMA foreign_keys = ON")
-	require.NoError(t, err)
-	drv := entsql.OpenDB(dialect.SQLite, db)
-	client := enttest.NewClient(t, enttest.WithOptions(ent.Driver(drv)))
-	t.Cleanup(func() { _ = client.Close() })
-
-	qk, err := client.QuotaKey.Create().
-		SetCodeEncrypted("enc:v1:test").
-		SetStatus(domain.QuotaKeyStatusActive).
-		Save(ctx)
-	require.NoError(t, err)
-	_, err = client.Account.Create().
-		SetName("cursor-acc-rejected").
-		SetPlatform(PlatformCursor).
-		SetType("oauth").
-		SetCredentials(map[string]any{"access_token": "BEARER-ACCOUNT-A"}).
-		SetQuotaKeyID(qk.ID).
-		Save(ctx)
-	require.NoError(t, err)
-
-	svc, c := newCursorOutboundTestService(t, upstream, nil, nil)
-	repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{
-		qk.ID: {ID: qk.ID, CodeEncrypted: "ACTIVATION-CODE-REJECTED"},
-	})
-	svc.SetCursorAuthDeps(repo, NewCursorTestEncryptor(),
-		NewQuotaKeyService(repo, NewCursorTestEncryptor(), nil, client))
-	svc.SetCursorKeyStatusLookup(lookup)
-	return svc, c, client, qk.ID
-}
-
 // TestCursorStreamRejectionIsTerminalNeverSuccess 钉死流内拒绝不得当成功、不得产出 usage。
 //
-// 判据：HTTP200 正常流帧中出现固定模板「密钥已过期或额度耗尽，请续费后使用」。
-// 命中即终态错误——本用例同时反证"不得伪造 usage"（返回 res 必为 nil）。
+// 按 §25.14-C：流内固定拒绝**只**返回明确上游错误并记录安全阶段，不再发起流内
+// lookup 核对，也不再修改来源期限/状态（那些只归唯一 lookup 观测入口）。
 func TestCursorStreamRejectionIsTerminalNeverSuccess(t *testing.T) {
 	up := &cursorOutboundUpstream{body: cursorRejectedStreamBody(t)}
-	svc, c, client, qkID := newCursorKeyRejectedTestService(t, up.handler(), &cursorStubKeyStatusLookup{})
+	repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{
+		11: {ID: 11, CodeEncrypted: "ACTIVATION-CODE-ELEVEN"},
+	})
+	svc, c := newCursorOutboundTestService(t, up.handler(), repo, cursorTestDeviceIDs(repo))
 
-	acc := cursorOutboundAccount(1, qkID, "BEARER-ACCOUNT-A")
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
 	body := []byte(`{"model":"cursor-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
 
-	res, err := svc.forwardCursor(context.Background(), c, acc, body, "cursor-sonnet", false, time.Now())
+	res, err := executeCursorForTest(t, svc, context.Background(), c, acc, body, "cursor-sonnet", false, time.Now())
 	require.Error(t, err)
 	require.Nil(t, res, "流内拒绝绝不能返回可计费结果（不得当成功、不得伪造 usage）")
 	require.ErrorIs(t, err, ErrCursorKeyRejectedTerminal)
 	require.Contains(t, err.Error(), cursorKeyRejectedTemplate)
-
-	// 未注入确认入口（替身返回零值 status=unknown）时不得写 key 状态。
-	row, gerr := client.QuotaKey.Get(context.Background(), qkID)
-	require.NoError(t, gerr)
-	require.NotEqual(t, domain.QuotaKeyStatusExpired, row.Status,
-		"未经 lookup 确认绝不得标过期")
 
 	// 模板识别本身：结构化片段含动态后缀标识，用于与上游侧记录对齐。
 	rej, ok := cursorDetectKeyRejectedUpstream(cursorRejectedStreamBody(t))
 	require.True(t, ok)
 	require.Equal(t, "1792327810746-28d0be39", rej.TurnID)
 	require.Contains(t, rej.Snippet, cursorKeyRejectedTemplate)
-}
-
-// TestCursorStreamRejectionConfirmedExpiredMarksKeyExpired 覆盖"lookup 确认过期"分支：
-// 走既有 key 状态写入口把激活码标 expired，供 S 卡消费调度资格。
-//
-// 同时钉死两条红线：本次请求仍是终态失败（不因标过期就变成成功）；绝不软删账号。
-func TestCursorStreamRejectionConfirmedExpiredMarksKeyExpired(t *testing.T) {
-	up := &cursorOutboundUpstream{body: cursorRejectedStreamBody(t)}
-	lookup := &cursorStubKeyStatusLookup{status: cursorKeyStatusExpired}
-	svc, c, client, qkID := newCursorKeyRejectedTestService(t, up.handler(), lookup)
-	ctx := context.Background()
-
-	acc := cursorOutboundAccount(1, qkID, "BEARER-ACCOUNT-A")
-	body := []byte(`{"model":"cursor-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
-
-	res, err := svc.forwardCursor(ctx, c, acc, body, "cursor-sonnet", false, time.Now())
-	require.Error(t, err)
-	require.Nil(t, res, "确认过期后本次请求仍是终态失败，不得转成成功")
-	require.ErrorIs(t, err, ErrCursorKeyRejectedTerminal)
-	require.Equal(t, 1, lookup.calls, "流内拒绝必须走 lookup 核对")
-
-	row, gerr := client.QuotaKey.Get(ctx, qkID)
-	require.NoError(t, gerr)
-	require.Equal(t, domain.QuotaKeyStatusExpired, row.Status,
-		"lookup 确认「密钥已过期」→ 走既有写口标 expired")
-	require.False(t, row.Exhausted, "标过期不得顺带改 exhausted 维度（与 sweeper 同口径）")
-
-	// I2 红线：绝不软删账号、绝不标账号耗尽。
-	accounts, aerr := client.Account.Query().Where().All(ctx)
-	require.NoError(t, aerr)
-	require.Len(t, accounts, 1)
-	require.Nil(t, accounts[0].DeletedAt, "绝不软删账号")
-}
-
-// TestCursorStreamRejectionUnconfirmedLeavesKeyAndAccountUntouched 覆盖"无法确认"分支：
-// lookup 报错 / 回包语义不在已取证范围 / 确认码仍在使用 → 一律按上游失败返回，
-// 不删号、不标账号耗尽、不标 key 过期。
-func TestCursorStreamRejectionUnconfirmedLeavesKeyAndAccountUntouched(t *testing.T) {
-	for name, lookup := range map[string]*cursorStubKeyStatusLookup{
-		"lookup_error": {status: cursorKeyStatusUnknown, err: context.DeadlineExceeded},
-		"key_active":   {status: cursorKeyStatusActive},
-	} {
-		t.Run(name, func(t *testing.T) {
-			up := &cursorOutboundUpstream{body: cursorRejectedStreamBody(t)}
-			svc, c, client, qkID := newCursorKeyRejectedTestService(t, up.handler(), lookup)
-			ctx := context.Background()
-
-			acc := cursorOutboundAccount(1, qkID, "BEARER-ACCOUNT-A")
-			body := []byte(`{"model":"cursor-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
-
-			res, ferr := svc.forwardCursor(ctx, c, acc, body, "cursor-sonnet", false, time.Now())
-			require.Error(t, ferr)
-			require.Nil(t, res, "无法确认时按上游失败返回，绝不当成功")
-			require.ErrorIs(t, ferr, ErrCursorKeyRejectedTerminal)
-
-			row, gerr := client.QuotaKey.Get(ctx, qkID)
-			require.NoError(t, gerr)
-			require.Equal(t, domain.QuotaKeyStatusActive, row.Status,
-				"lookup 无法确认过期 → 绝不标 key 过期")
-
-			accounts, aerr := client.Account.Query().Where().All(ctx)
-			require.NoError(t, aerr)
-			require.Len(t, accounts, 1)
-			require.Nil(t, accounts[0].DeletedAt, "绝不软删账号")
-		})
-	}
 }
 
 // TestCursorOutboundHeadersAlignToolProbe 钉死 O11-C1 修复：forwardCursor 出站头必须
@@ -511,17 +378,17 @@ func TestCursorStreamRejectionUnconfirmedLeavesKeyAndAccountUntouched(t *testing
 func TestCursorOutboundHeadersAlignToolProbe(t *testing.T) {
 	// 活体全通探针的客户端上下文头（值逐字对齐，O11-C1 修法唯一清单）。
 	wantClientContextHeaders := map[string]string{
-		"x-cursor-client-type":         "ide",
-		"x-cursor-client-layout":       "unifiedAgent",
-		"x-cursor-client-os":           "linux",
-		"x-cursor-client-arch":         "x64",
-		"x-cursor-client-device-type":  "desktop",
-		"x-ghost-mode":                 "true",
-		"x-new-onboarding-completed":   "false",
-		"x-cursor-timezone":            "Asia/Shanghai",
-		"x-cursor-streaming":           "true",
-		"x-jg-net-optimize":            "http2",
-		"user-agent":                   "connect-es/1.6.1",
+		"x-cursor-client-type":        "ide",
+		"x-cursor-client-layout":      "unifiedAgent",
+		"x-cursor-client-os":          "linux",
+		"x-cursor-client-arch":        "x64",
+		"x-cursor-client-device-type": "desktop",
+		"x-ghost-mode":                "true",
+		"x-new-onboarding-completed":  "false",
+		"x-cursor-timezone":           "Asia/Shanghai",
+		"x-cursor-streaming":          "true",
+		"x-jg-net-optimize":           "http2",
+		"user-agent":                  "connect-es/1.6.1",
 	}
 
 	repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{
@@ -531,7 +398,7 @@ func TestCursorOutboundHeadersAlignToolProbe(t *testing.T) {
 	svc, c := newCursorOutboundTestService(t, up.handler(), repo, cursorTestDeviceIDs(repo))
 
 	body := []byte(`{"model":"cursor-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
-	_, err := svc.forwardCursor(context.Background(), c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"), body, "cursor-sonnet", false, time.Now())
+	_, err := executeCursorForTest(t, svc, context.Background(), c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"), body, "cursor-sonnet", false, time.Now())
 	require.NoError(t, err)
 	require.Equal(t, 1, up.count())
 
@@ -549,45 +416,4 @@ func TestCursorOutboundHeadersAlignToolProbe(t *testing.T) {
 	require.Equal(t, cursorClientVersion, captured.Get("x-cursor-client-version"))
 	require.NotEmpty(t, captured.Get("x-cursor-checksum"), "x-cursor-checksum 必须由设备级材料派生")
 	require.NotEmpty(t, captured.Get("x-jg-auth"), "x-jg-auth 必须仍由鉴权注入")
-}
-
-// TestCursorBridgeInboundOpenAIChatDispatchesToForwarder 钉死契约 0.1 的包级入口：
-// 未安装实例时失败关闭；入站形状不受理时失败关闭；受理后头与出站一致。
-func TestCursorBridgeInboundOpenAIChatDispatchesToForwarder(t *testing.T) {
-	prev := cursorBridgeInstalled()
-	t.Cleanup(func() { InstallCursorBridge(prev) })
-
-	// 未安装 → 失败关闭（绝不静默降级到通用 OpenAI 路径）。
-	InstallCursorBridge(nil)
-	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
-	_, err := CursorForwardInbound(context.Background(), nil, acc, cursorInboundOpenAIChat,
-		[]byte(`{"model":"cursor-sonnet","messages":[{"role":"user","content":"hi"}]}`))
-	require.ErrorIs(t, err, ErrCursorBridgeNotInstalled)
-
-	// 形状不受理 → 失败关闭（不让未转换的形状直达 Cursor 原生端点）。
-	_, err = CursorForwardInbound(context.Background(), nil, acc, "openai_responses", []byte(`{}`))
-	require.ErrorIs(t, err, ErrCursorBridgeInboundUnsupported)
-
-	// 受理：走真实出站，头与 forwardCursor 完全一致（不二次计费，usage 由调用方记）。
-	repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{
-		11: {ID: 11, CodeEncrypted: "ACTIVATION-CODE-ELEVEN"},
-	})
-	up := &cursorOutboundUpstream{body: cursorOKStreamBody(t)}
-	svc, c := newCursorOutboundTestService(t, up.handler(), repo, cursorTestDeviceIDs(repo))
-	InstallCursorBridge(svc)
-
-	body := []byte(`{"model":"cursor-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
-	res, err := CursorForwardInbound(context.Background(), c, acc, cursorInboundOpenAIChat, body)
-	require.NoError(t, err)
-	require.NotNil(t, res)
-	require.Equal(t, 1, up.count())
-	require.Equal(t, "Bearer BEARER-ACCOUNT-A", up.at(0).header.Get("Authorization"))
-	require.NotEmpty(t, up.at(0).header.Get("x-jg-auth"))
-	require.Equal(t, cursorPathAgentRun, up.at(0).path)
-
-	// 桥接只做字段搬运：usage 逐字段直搬，绝不折算、绝不补默认值。
-	out := cursorForwardResultToOpenAI(res)
-	require.Equal(t, res.Usage.InputTokens, out.Usage.InputTokens)
-	require.Equal(t, res.Usage.OutputTokens, out.Usage.OutputTokens)
-	require.Equal(t, strings.TrimSpace(res.RequestID), out.ResponseID)
 }
