@@ -952,14 +952,17 @@ func ProvideQuotaKeySweeper(repo QuotaKeyRepository, opsRepo OpsRepository, entC
 // 每轮枚举允许模型 M → 比对水位 → 低于阈值按差额调 PullAccountsForModel 补池：
 // 复用 QuotaKeyService 的拉号状态机（advisory 互斥域 + ≤15 停限 + §13.3 分组挂载），
 // reconciler 不新造计数查询 / 不新造锁 / 不并行拉号。
-func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService, opsRepo OpsRepository, gateway *GatewayService, channel *ChannelService, resolver *CompositeRouteResolver) *QuotaKeyReconciler {
+func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService, autoEntry *CursorAutoEntryService, opsRepo OpsRepository, gateway *GatewayService, channel *ChannelService, resolver *CompositeRouteResolver) *QuotaKeyReconciler {
 	svc := NewQuotaKeyReconciler(repo, puller, opsRepo)
 	// C12-v2：在既有装配点一行注入反向引用，使软删提交后（DeleteWithAccounts）能唤醒
 	// reconciler 重判水位。不新造机制、不并行拉号。
 	puller.SetReconciler(svc)
+	// §25.19 第2项：注入来源额度观测窄面（须在 Start() 之前，否则首轮恒跳过余额刷新）。
+	svc.SetUsageObserver(autoEntry)
 	// F1：注入生产用模型水位提供方（C11 接入点），使 reconciler 枚举模型→比对水位→
 	// 按差额触发 PullAccountsForModel 补池。ent client 直接取拉号服务已装配的实例，
-	// 不新增装配入参、不新造机制（装配点保持既有 3 参签名，wire_gen 无需改动）。
+	// 不新增装配入参、不新造机制；但为接入来源额度观测（§25.19 第2项），本函数已新增
+	// autoEntry 入参，需重新 go generate 生成 wire_gen。
 	if puller != nil && puller.client != nil {
 		// F1（裁定 1）：注入配置源，使 ListAllowedModels 的交集左操作数取"配置勾选模型"。
 		w := NewQuotaKeyModelWater(puller.client, puller.autoEntry)
