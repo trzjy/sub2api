@@ -198,6 +198,10 @@ func (r *identityCursorQuotaKeys) MarkExpiredIfStillExpired(context.Context, *en
 	return 0, nil
 }
 
+func (r *identityCursorQuotaKeys) SoftDeleteCursorAccountsByExpiredQuotaKey(context.Context, *ent.Tx, int64, time.Time) ([]int64, error) {
+	return nil, nil
+}
+
 // SetDeviceIDIfAbsent 模拟 DB 的条件化写入（WHERE device_id IS NULL OR =”），
 // 语义与 production repository / service 读判定三者一致：NULL 或空串才写入并返回
 // 受影响行数 1；已有非空值则不覆盖、返回 0（由 DeviceIDFor 重读赢家值）。

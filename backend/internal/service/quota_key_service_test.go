@@ -66,6 +66,14 @@ type fakeQuotaKeyRepo struct {
 	updateSnapshotCalls int
 	failSnapshotWrite   bool
 	clearSnapshotCalls  int
+
+	// SoftDeleteCursorAccountsByExpiredQuotaKey 的观测点（仅满足接口 + 行为断言）：
+	// cursorDeleteCalls 记录调用次数；cursorDeleteKeyIDs 记录每次传入的 quotaKeyID；
+	// cursorDeleteErr 非 nil 时直接返回该错误；否则返回 cursorDeletedIDs。
+	cursorDeletedIDs   []int64
+	cursorDeleteErr    error
+	cursorDeleteCalls  int
+	cursorDeleteKeyIDs []int64
 }
 
 func newFakeQuotaKeyRepo() *fakeQuotaKeyRepo {
@@ -212,6 +220,18 @@ func (f *fakeQuotaKeyRepo) SoftDeleteAccountsByQuotaKey(_ context.Context, _ *en
 
 func (f *fakeQuotaKeyRepo) EnqueueAccountChangedOutbox(_ context.Context, _ *ent.Tx, _ []int64) error {
 	return nil
+}
+
+// SoftDeleteCursorAccountsByExpiredQuotaKey 内存替身：记录调用次数与 key ID，
+// cursorDeleteErr 非 nil 时返回该错误，否则返回预设的 cursorDeletedIDs。
+// 不参与"到期判定 / 平台过滤"的行为断言（见 testDBRepo 与 production repository）。
+func (f *fakeQuotaKeyRepo) SoftDeleteCursorAccountsByExpiredQuotaKey(_ context.Context, _ *ent.Tx, quotaKeyID int64, _ time.Time) ([]int64, error) {
+	f.cursorDeleteCalls++
+	f.cursorDeleteKeyIDs = append(f.cursorDeleteKeyIDs, quotaKeyID)
+	if f.cursorDeleteErr != nil {
+		return nil, f.cursorDeleteErr
+	}
+	return f.cursorDeletedIDs, nil
 }
 
 func (f *fakeQuotaKeyRepo) SoftDelete(_ context.Context, _ *ent.Tx, _ int64) error {
@@ -687,6 +707,48 @@ func (r *testDBRepo) SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.T
 		SetDeletedAt(time.Now()).
 		Save(ctx)
 	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// SoftDeleteCursorAccountsByExpiredQuotaKey 真实 DB 替身：与 production repository
+// 同语义——tx 必填；ForUpdate 行锁复核"当前仍到期"；仅取 platform='cursor' 且未软删
+// 的账号 ID；条件 SetDeletedAt 同口径；返回实际被软删 ID。tx 为 nil 时失败关闭。
+func (r *testDBRepo) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64, now time.Time) ([]int64, error) {
+	if tx == nil {
+		return nil, errors.New("testDBRepo: SoftDeleteCursorAccountsByExpiredQuotaKey requires the caller's transaction")
+	}
+	qk, err := tx.QuotaKey.Query().
+		Where(quotakey.IDEQ(quotaKeyID)).
+		ForUpdate().
+		Only(ctx)
+	if ent.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !(qk.Status == domain.QuotaKeyStatusExpired && qk.ExpiresAt != nil && qk.ExpiresAt.Before(now)) {
+		return nil, nil
+	}
+	ids, err := tx.Account.Query().
+		Where(
+			account.QuotaKeyID(quotaKeyID),
+			account.PlatformEQ(domain.PlatformCursor),
+			account.DeletedAtIsNil(),
+		).
+		IDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if _, err := tx.Account.Update().
+		Where(account.IDIn(ids...), account.DeletedAtIsNil()).
+		SetDeletedAt(now).
+		Save(ctx); err != nil {
 		return nil, err
 	}
 	return ids, nil

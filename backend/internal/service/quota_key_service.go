@@ -63,6 +63,13 @@ type QuotaKeyRepository interface {
 	// （D-CURSOR-034），不再是本契约的方法——计数口径只此一处，写入路径无处可自带谓词。
 	SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) ([]int64, error)
 	EnqueueAccountChangedOutbox(ctx context.Context, tx *ent.Tx, accountIDs []int64) error
+	// SoftDeleteCursorAccountsByExpiredQuotaKey 在调用方已开启的事务内，对「数据库当前仍到期」的
+	// 激活码（status='expired' AND expires_at IS NOT NULL AND expires_at < now）软删其
+	// platform='cursor' 且未软删的账号，返回本次实际被软删的账号 ID（供调用方在同一事务内写
+	// scheduler outbox）。激活码条件不满足 / 行不存在 / 已软删 → 返回空集合，不改任何账号行。
+	// 与人工删除口径（SoftDeleteAccountsByQuotaKey，覆盖全部平台）严格区分：本方法只覆盖 cursor，
+	// 只由「到期」触发；不物理删除、不触碰 usage_logs；tx 必填（nil 时失败关闭）。
+	SoftDeleteCursorAccountsByExpiredQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64, now time.Time) ([]int64, error)
 	SoftDelete(ctx context.Context, tx *ent.Tx, id int64) error
 	ListEligibleForRefresh(ctx context.Context) ([]*ent.QuotaKey, error)
 	// MarkExpiredIfStillExpired 在事务内将激活码标记为 expired，但仅当数据库当前行

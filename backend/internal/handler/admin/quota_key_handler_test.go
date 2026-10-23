@@ -322,6 +322,10 @@ func (r *fakeQuotaKeyRepo) SoftDelete(_ context.Context, _ *ent.Tx, id int64) er
 	return nil
 }
 
+func (r *fakeQuotaKeyRepo) SoftDeleteCursorAccountsByExpiredQuotaKey(_ context.Context, _ *ent.Tx, _ int64, _ time.Time) ([]int64, error) {
+	return nil, nil
+}
+
 func (r *fakeQuotaKeyRepo) ListEligibleForRefresh(_ context.Context) ([]*ent.QuotaKey, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
