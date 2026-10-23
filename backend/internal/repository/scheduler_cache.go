@@ -888,10 +888,13 @@ func buildSchedulerMetadataAccount(account service.Account) service.Account {
 		SessionWindowStatus:     account.SessionWindowStatus,
 		ParentAccountID:         account.ParentAccountID,
 		QuotaDimension:          account.QuotaDimension,
-		AccountGroups:           filterSchedulerAccountGroups(account.AccountGroups),
-		GroupIDs:                filterSchedulerGroupIDs(account.GroupIDs, account.AccountGroups),
-		Credentials:             filterSchedulerCredentials(account.Credentials),
-		Extra:                   filterSchedulerExtra(accountsnap),
+		// QuotaKeyID 是 Cursor 共同来源门判定输入：读到 nil 即判 quota_key_source_unbound
+		// 否决候选，导致池里有可用账号却整体被排除（HTTP 503）。漏复制会让 meta 里该字段变 null。
+		QuotaKeyID:    account.QuotaKeyID,
+		AccountGroups: filterSchedulerAccountGroups(account.AccountGroups),
+		GroupIDs:      filterSchedulerGroupIDs(account.GroupIDs, account.AccountGroups),
+		Credentials:   filterSchedulerCredentials(account.Credentials),
+		Extra:         filterSchedulerExtra(accountsnap),
 	}
 }
 
