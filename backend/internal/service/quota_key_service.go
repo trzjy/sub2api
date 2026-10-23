@@ -46,7 +46,13 @@ type QuotaKeyRepository interface {
 	ListByStatus(ctx context.Context, status string) ([]*ent.QuotaKey, error)
 	// C5a 扩展（D-CURSOR-020）：admin CRUD 读/写支撑方法。
 	List(ctx context.Context) ([]*ent.QuotaKey, error)
-	UpdateMeta(ctx context.Context, id int64, expiresAt **time.Time, notes **string) error
+	// UpdateMeta 在**调用方已开启的事务内**更新请求中显式出现的 expires_at / notes，
+	// 不触碰 code / status。外层指针 nil 表示省略，内层指针 nil 表示显式清空，否则设置为给定值。
+	//
+	// tx 必填：生产元数据写入只在管理员编辑的同 key 事务（withQuotaKeyLockTx）内发生，
+	// 不得绕回默认 client 走锁外独立提交——否则管理员的日期编辑可越过来源观测的同 key 串行边界
+	// （§25.14-C / §25.17.6）。仓储实现在 tx 为 nil 时失败关闭，不退化为锁外写。
+	UpdateMeta(ctx context.Context, tx *ent.Tx, id int64, expiresAt **time.Time, notes **string) error
 	ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error)
 	// ListAccountsByQuotaKeys 批量返回归属给定激活码的账号（一次 QuotaKeyIDIn 查询），
 	// 供 List 端点按 quota_key_id 分组聚合计数，避免逐激活码查询退化为 N+1。
@@ -420,6 +426,10 @@ func (s *QuotaKeyService) RotateCredentials(ctx context.Context, id int64, newPl
 //
 // 换码不触碰 device_id、账号归属、status、expires_at 及其他元数据；也不自动清 exhausted
 // 或恢复子账号（status 已 expired 的码不会因换串 code 而被重新激活）。
+// rotateCredentials 是**唯一**的凭据写实现的加锁入口（RotateCredentials / Update(code) 共用）。
+//
+// 加密在锁外完成（同 key 事务只包住"重读 + 比 MAC + 写凭据"），锁内写本体是
+// writeCredentialsLocked —— Update 的同 key 事务直接复用它，不嵌套再取同 key 锁。
 func (s *QuotaKeyService) rotateCredentials(ctx context.Context, id int64, newPlain string) error {
 	enc, err := s.enc.Encrypt([]byte(newPlain))
 	if err != nil {
@@ -429,9 +439,6 @@ func (s *QuotaKeyService) rotateCredentials(ctx context.Context, id int64, newPl
 	if err != nil {
 		return err
 	}
-	codeEncrypted := string(enc)
-	codeMAC := quotaKeyMACOfPlaintext(newPlain)
-	codeLast4 := last4Of(newPlain)
 	return s.withQuotaKeyLock(ctx, id, func(tx *ent.Tx) error {
 		current, lerr := obs.GetByIDInTx(ctx, tx, id)
 		if lerr != nil {
@@ -441,10 +448,18 @@ func (s *QuotaKeyService) rotateCredentials(ctx context.Context, id int64, newPl
 		if current == nil {
 			return fmt.Errorf("quota_key_service: quota key %d not found", id)
 		}
-		// 旧 MAC 为空（历史行 / 未落 MAC）无法证明同源，按"来源已变更"保守处理。
-		sameSource := current.CodeMAC != "" && current.CodeMAC == codeMAC
-		return obs.UpdateCredentialsAtomically(ctx, tx, id, codeEncrypted, codeMAC, codeLast4, !sameSource)
+		return writeCredentialsLocked(ctx, obs, tx, id, current, string(enc), quotaKeyMACOfPlaintext(newPlain), last4Of(newPlain))
 	})
+}
+
+// writeCredentialsLocked 是**唯一**的锁内凭据写本体：按 MAC 决定是否清空快照。
+//
+// 调用方必须已持有该 key 的 advisory 锁、已在同一事务内重读过来源行，并把该行传进来
+// （current）；本方法不再取锁、也不再重读，故 Update 的同 key 事务不会读两次同一行。
+func writeCredentialsLocked(ctx context.Context, obs quotaKeyObservationRepo, tx *ent.Tx, id int64, current *ent.QuotaKey, codeEncrypted, codeMAC, codeLast4 string) error {
+	// 旧 MAC 为空（历史行 / 未落 MAC）无法证明同源，按"来源已变更"保守处理。
+	sameSource := current.CodeMAC != "" && current.CodeMAC == codeMAC
+	return obs.UpdateCredentialsAtomically(ctx, tx, id, codeEncrypted, codeMAC, codeLast4, !sameSource)
 }
 
 // withQuotaKeyLock 在"每 key advisory 互斥 + 单事务"骨架上执行 fn（观测/换码共用）。
@@ -505,17 +520,54 @@ func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *ti
 // 元数据外层 nil 表示省略，内层 nil 表示显式清空，否则设置为给定值。
 // 返回脱敏状态。明文 code 只进不出（F1）。
 //
-// 凭据写入走与 RotateCredentials 同一个唯一方法 rotateCredentials（同一每 key 锁 + 同一
-// 事务 + 按 MAC 变化原子清快照）；元数据编辑沿现有契约另行提交，观测不得覆盖并发编辑的
-// expires_at/notes（§25.14-C 换码原子边界末段）。
+// §25.17.6：code 与元数据收进**一次**既有 withQuotaKeyLockTx 事务——锁内重读未删除行、
+// 按 MAC 执行原凭据/快照操作、按本请求字段存在性写 expires_at/notes，任一步失败整笔回滚。
+// 此前 rotate 的锁内提交与 UpdateMeta 的锁外默认 client 提交是分离的两笔，管理员的日期编辑
+// 可以在 Probe 持锁等待 lookup 期间提交，再被 Probe 的旧观测结果覆盖。
+// 凭据写本体复用 writeCredentialsLocked（同 key 锁内），不再嵌套取同 key 锁。
 func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, expiresAt **time.Time, notes **string) (*QuotaKeyStatus, error) {
-	if code != nil {
-		if err := s.rotateCredentials(ctx, id, *code); err != nil {
-			return nil, err
-		}
+	obs, err := asObservationRepo(s.repo)
+	if err != nil {
+		return nil, err
 	}
-	if expiresAt != nil || notes != nil {
-		if err := s.repo.UpdateMeta(ctx, id, expiresAt, notes); err != nil {
+	// 加密在锁外完成：同 key 事务只包住重读、MAC 比对与写入。
+	var codeEncrypted, codeMAC, codeLast4 string
+	if code != nil {
+		enc, eerr := s.enc.Encrypt([]byte(*code))
+		if eerr != nil {
+			return nil, eerr
+		}
+		codeEncrypted = string(enc)
+		codeMAC = quotaKeyMACOfPlaintext(*code)
+		codeLast4 = last4Of(*code)
+	}
+	if code != nil || expiresAt != nil || notes != nil {
+		lockCtx := ctx
+		if lockCtx == nil {
+			lockCtx = context.Background()
+		}
+		err = s.withQuotaKeyLock(lockCtx, id, func(tx *ent.Tx) error {
+			// 锁内重读未删除行：来源已不存在/已软删时不复活、不写任何东西。
+			current, rerr := obs.GetByIDInTx(lockCtx, tx, id)
+			if rerr != nil {
+				return rerr
+			}
+			if current == nil {
+				return fmt.Errorf("quota_key_service: quota key %d not found", id)
+			}
+			if code != nil {
+				if werr := writeCredentialsLocked(lockCtx, obs, tx, id, current, codeEncrypted, codeMAC, codeLast4); werr != nil {
+					return werr
+				}
+			}
+			if expiresAt != nil || notes != nil {
+				if werr := s.repo.UpdateMeta(lockCtx, tx, id, expiresAt, notes); werr != nil {
+					return werr
+				}
+			}
+			return nil
+		})
+		if err != nil {
 			return nil, err
 		}
 	}

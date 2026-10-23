@@ -965,6 +965,33 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				cursorHandoverResources(userSlot, accountSlot, inflightHandle),
 				h.submitMandatoryUsageRecordTask,
 			)
+			// §25.17.5 A06：Cursor 分支在**首次 Execute 与资源转交之前**构造不可变计费参数
+			// 快照并注册唯一结算钩子——会话终结时把终态真实 *ForwardResult 交给它构造原
+			// RecordUsage 输入并调用原 mandatory usage worker，至多一次。非 Cursor 账号不注册。
+			if isCursorPlatformAccount(account) {
+				attemptHandover.RegisterCursorSettlement(h.cursorSettlementFunc(cursorSettlementSnapshot{
+					apiKey:             currentAPIKey,
+					user:               currentAPIKey.User,
+					account:            account,
+					subscription:       currentSubscription,
+					pricingAt:          pricingAt,
+					quotaPlatform:      service.QuotaPlatform(c.Request.Context(), currentAPIKey),
+					inboundEndpoint:    GetInboundEndpoint(c),
+					upstreamEndpoint:   GetUpstreamEndpoint(c, account.Platform),
+					userAgent:          c.GetHeader("User-Agent"),
+					ipAddress:          ip.GetClientIP(c),
+					sessionID:          service.ExtractClientSessionID(c),
+					requestPayloadHash: service.HashUsageRequestPayload(attemptParsedReq.Body.Bytes()),
+					forceCacheBilling:  fs.ForceCacheBilling,
+					channelMapping:     channelMapping,
+					requestedModel:     clientRequestedModel(c, reqModel),
+					normalizedEffort:   service.NormalizeClaudeOutputEffort(attemptParsedReq.OutputEffort),
+					thinking:           attemptParsedReq.ThinkingEnabled,
+					userID:             subject.UserID,
+					groupID:            currentAPIKey.GroupID,
+					reqModel:           reqModel,
+				}, h.submitMandatoryUsageRecordTask))
+			}
 			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 			requestCtx = c.Request.Context()
 			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
@@ -1156,7 +1183,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				// 避免上游已产生消耗的请求完全漏记（#5148）。failover 错误恒定 result=nil，
 				// 不会走到这里重复计费。
 				if result != nil {
-					submitForwardUsage(result)
+					// §25.17.5 A06：Cursor 分支的唯一结算由会话终态经已注册闭包驱动，
+					// 首次 HTTP 返回不得再另排一次账；非 Cursor 保持原部分结果入账。
+					if !isCursorPlatformAccount(account) {
+						submitForwardUsage(result)
+					}
 					// 上游已接受并计量本次会话（流中断），会话槽保持既有语义
 					upstreamServedSession = true
 				}
@@ -1183,7 +1214,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 
-			submitForwardUsage(result)
+			// §25.17.5 A06：Cursor 分支的唯一结算由会话终态经已注册闭包驱动，
+			// 首次/最终 HTTP 返回不得再另排一次账；非 Cursor 保持原提交路径。
+			if !isCursorPlatformAccount(account) {
+				submitForwardUsage(result)
+			}
 			// 转发成功，会话槽保持既有空闲超时语义
 			upstreamServedSession = true
 			return
@@ -2795,12 +2830,6 @@ func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task serv
 	if task == nil {
 		return
 	}
-	if owner := service.CursorSettlementOwnerFromContext(parent); owner != nil {
-		// §25.5：Cursor 会话已接管本 HTTP 的结算——不再为每个工具 HTTP 排一次
-		// UsageRecordTask，而是把任务交给会话唯一结算（至多执行一次）。
-		owner.AdoptSettlementTask(task)
-		return
-	}
 	task, abandon := wrapUsageRecordTaskContext(parent, task)
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); mode != service.UsageRecordSubmitModeDroppedStopped {
@@ -2829,15 +2858,94 @@ func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task serv
 	task(ctx)
 }
 
+// cursorSettlementSnapshot 保存 Cursor 分支在**首次 Execute 与资源转交之前**捕获的
+// 不可变计费参数（§25.17.5 A06）。全部以值捕获：user/API key/组/订阅/账号、pricingAt、
+// quotaPlatform、原请求 hash、UA/IP、入站/出站端点、会话标识、渠道映射与请求模型、
+// 推理档位——不闭包 gin.Context、旧 writer 或原正文。
+type cursorSettlementSnapshot struct {
+	apiKey             *service.APIKey
+	user               *service.User
+	account            *service.Account
+	subscription       *service.UserSubscription
+	pricingAt          time.Time
+	quotaPlatform      string
+	inboundEndpoint    string
+	upstreamEndpoint   string
+	userAgent          string
+	ipAddress          string
+	sessionID          string
+	requestPayloadHash string
+	forceCacheBilling  bool
+	channelMapping     service.ChannelMappingResult
+	requestedModel     string
+	normalizedEffort   *string
+	thinking           bool
+	// 审计日志字段
+	userID   int64
+	groupID  *int64
+	reqModel string
+}
+
+// cursorSettlementFunc 构造 Cursor 分支的**唯一结算输入**闭包（§25.17.5 A06）。
+//
+// 收到会话终态真实 *ForwardResult 后，用注册时捕获的不可变快照构造原 RecordUsage 输入，
+// 并交给 submit（生产侧即原 mandatory usage worker）提交——缺完整 usage 的不提交判定由
+// helper/执行服务侧完成，这里只透传。会话终结时由 finalizer 经 settle 至多调用一次。
+func (h *GatewayHandler) cursorSettlementFunc(snap cursorSettlementSnapshot, submit cursorSettlementSubmitter) CursorSettlementFunc {
+	return func(ctx context.Context, final *service.ForwardResult) {
+		if final == nil {
+			return
+		}
+		// 与 submitForwardUsage 对称的推理档位填充：终态未带时用请求侧捕获值补齐。
+		stampForwardRequestedReasoningEffort(final, snap.normalizedEffort)
+		if final.ReasoningEffort == nil {
+			final.ReasoningEffort = snap.normalizedEffort
+		}
+		if final.ReasoningEffort == nil && snap.thinking {
+			protocolModel := final.UpstreamModel
+			if protocolModel == "" {
+				protocolModel = final.Model
+			}
+			final.ReasoningEffort = service.DefaultEffortForThinkingEnabled(protocolModel)
+		}
+		if submit == nil {
+			return
+		}
+		submit(ctx, func(ctx context.Context) {
+			if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
+				Result:             final,
+				QuotaPlatform:      snap.quotaPlatform,
+				APIKey:             snap.apiKey,
+				User:               snap.user,
+				Account:            snap.account,
+				Subscription:       snap.subscription,
+				PricingAt:          snap.pricingAt,
+				InboundEndpoint:    snap.inboundEndpoint,
+				UpstreamEndpoint:   snap.upstreamEndpoint,
+				UserAgent:          snap.userAgent,
+				IPAddress:          snap.ipAddress,
+				SessionID:          snap.sessionID,
+				RequestPayloadHash: snap.requestPayloadHash,
+				ForceCacheBilling:  snap.forceCacheBilling,
+				APIKeyService:      h.apiKeyService,
+				ChannelUsageFields: snap.channelMapping.ToUsageFields(snap.requestedModel, final.UpstreamModel),
+			}); err != nil {
+				logger.L().With(
+					zap.String("component", "handler.gateway.messages"),
+					zap.Int64("user_id", snap.userID),
+					zap.Int64("api_key_id", snap.apiKey.ID),
+					zap.Any("group_id", snap.groupID),
+					zap.String("model", snap.reqModel),
+					zap.Int64("account_id", snap.account.ID),
+				).Error("gateway.record_usage_failed", zap.Error(err))
+			}
+		})
+	}
+}
+
 // submitMandatoryUsageRecordTask never silently drops billing work on pool overflow.
 func (h *GatewayHandler) submitMandatoryUsageRecordTask(parent context.Context, task service.UsageRecordTask) {
 	if task == nil {
-		return
-	}
-	if owner := service.CursorSettlementOwnerFromContext(parent); owner != nil {
-		// §25.5：Cursor 会话已接管本 HTTP 的结算——不再为每个工具 HTTP 排一次
-		// UsageRecordTask，而是把任务交给会话唯一结算（至多执行一次）。
-		owner.AdoptSettlementTask(task)
 		return
 	}
 	task, _ = wrapUsageRecordTaskContext(parent, task)

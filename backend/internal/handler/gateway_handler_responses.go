@@ -312,14 +312,35 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
-		// §25.4/§25.5：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额预留转交给会话，
-		// 并把本 HTTP 的计费任务交给会话唯一结算；非 Cursor 账号不做任何转交。
+		// §25.4/§25.5/§25.17.5(A06)：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额
+		// 预留转交给会话，并在**首次 Execute 与资源转交之前**以不可变值快照构造本 HTTP
+		// 的唯一结算钩子（不闭包 gin.Context、旧 writer 或原正文）注册到转交物。会话
+		// 终结时 helper 把终态真实 *ForwardResult 交给该钩子，由原 mandatory usage
+		// worker 构造原 RecordUsage 输入并提交、至多一次；非 Cursor 账号不做任何转交、
+		// 不注册结算。
 		forwardCtx := requestCtx
 		if isCursorPlatformAccount(account) {
 			handover := newCursorResourceHandover(
 				cursorHandoverResources(userSlot, accountSlot, inflightHandle),
 				h.submitMandatoryUsageRecordTask,
 			)
+			handover.RegisterCursorSettlement(h.buildResponsesCursorSettlement(responsesCursorSettlementSnapshot{
+				log:              reqLog,
+				apiKey:           apiKey,
+				user:             apiKey.User,
+				account:          account,
+				subscription:     subscription,
+				pricingAt:        pricingAt,
+				quotaPlatform:    service.QuotaPlatform(requestCtx, apiKey),
+				requestHash:      service.HashUsageRequestPayload(body),
+				userAgent:        c.GetHeader("User-Agent"),
+				clientIP:         ip.GetClientIP(c),
+				inboundEndpoint:  GetInboundEndpoint(c),
+				upstreamEndpoint: GetUpstreamEndpoint(c, account.Platform),
+				sessionID:        service.ExtractClientSessionID(c),
+				requestedModel:   clientRequestedModel(c, reqModel),
+				channelMapping:   channelMapping,
+			}))
 			forwardCtx = bindCursorHandoverForAttempt(requestCtx, account, handover)
 			c.Request = c.Request.WithContext(forwardCtx)
 		}
@@ -390,6 +411,12 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		}
 
 		// 6. Record usage
+		if isCursorPlatformAccount(account) {
+			// §25.17.5(A06)：Cursor 的计费已由首次 Execute 之前注册的唯一结算钩子在
+			// 会话终结时提交（终态真实 usage、至多一次），本 HTTP 返回后**不得再为
+			// Cursor 另排一次账**——既无晚绑定改投，也不重复提交 UsageRecordTask。
+			return
+		}
 		userAgent := c.GetHeader("User-Agent")
 		clientIP := ip.GetClientIP(c)
 		requestPayloadHash := service.HashUsageRequestPayload(body)
@@ -473,4 +500,77 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 		return
 	}
 	h.responsesErrorResponse(c, status, code, message)
+}
+
+// responsesCursorSettlementSnapshot 是 /v1/responses Cursor 分支的唯一结算参数快照
+// （§25.17.5 A06）。
+//
+// 在**首次 Execute 与资源转交之前**构造：user/API key/组/订阅/账号、pricingAt、
+// quotaPlatform、原请求 hash、UA/IP 及请求侧审计参数全部以不可变值捕获，不闭包
+// gin.Context、旧 writer 或原请求正文。指针字段取 Execute 前已稳定解析的引用对象
+// （其后不再被改写），结算闭包只读这些快照值。
+type responsesCursorSettlementSnapshot struct {
+	log              *zap.Logger
+	apiKey           *service.APIKey
+	user             *service.User
+	account          *service.Account
+	subscription     *service.UserSubscription
+	pricingAt        time.Time
+	quotaPlatform    string
+	requestHash      string
+	userAgent        string
+	clientIP         string
+	inboundEndpoint  string
+	upstreamEndpoint string
+	sessionID        string
+	requestedModel   string
+	channelMapping   service.ChannelMappingResult
+}
+
+// recordUsageInput 用快照 + 会话终态结果构造原 RecordUsage 输入。
+//
+// APIKeyService 由调用方（结算闭包）填充：它来自 handler 的长期依赖，不属于请求级
+// 快照。渠道字段用快照中的客户端请求模型与终态的真实 UpstreamModel 计算。
+func (s responsesCursorSettlementSnapshot) recordUsageInput(final *service.ForwardResult) *service.RecordUsageInput {
+	return &service.RecordUsageInput{
+		Result:             final,
+		QuotaPlatform:      s.quotaPlatform,
+		APIKey:             s.apiKey,
+		User:               s.user,
+		Account:            s.account,
+		Subscription:       s.subscription,
+		PricingAt:          s.pricingAt,
+		InboundEndpoint:    s.inboundEndpoint,
+		UpstreamEndpoint:   s.upstreamEndpoint,
+		UserAgent:          s.userAgent,
+		IPAddress:          s.clientIP,
+		SessionID:          s.sessionID,
+		RequestPayloadHash: s.requestHash,
+		ChannelUsageFields: s.channelMapping.ToUsageFields(s.requestedModel, final.UpstreamModel),
+	}
+}
+
+// buildResponsesCursorSettlement 构造 /v1/responses Cursor 分支的唯一结算闭包。
+//
+// 会话终结时被 helper settle 以终态真实 *ForwardResult 调用（完整 usage 的判定已在
+// helper/执行服务侧完成，缺完整 usage 时本闭包不会被调用，这里只透传）：用快照构造
+// 原 RecordUsage 输入并调用原 mandatory usage worker 提交。生命周期内至多执行一次，
+// 终态结果为空时只记录诊断日志、不造零输入。
+func (h *GatewayHandler) buildResponsesCursorSettlement(snapshot responsesCursorSettlementSnapshot) CursorSettlementFunc {
+	return func(ctx context.Context, final *service.ForwardResult) {
+		if final == nil {
+			snapshot.log.Warn("gateway.responses.cursor_settlement_nil_result")
+			return
+		}
+		input := snapshot.recordUsageInput(final)
+		input.APIKeyService = h.apiKeyService
+		h.submitMandatoryUsageRecordTask(ctx, func(taskCtx context.Context) {
+			if err := h.gatewayService.RecordUsage(taskCtx, input); err != nil {
+				snapshot.log.Error("gateway.responses.record_usage_failed",
+					zap.Int64("account_id", snapshot.account.ID),
+					zap.Error(err),
+				)
+			}
+		})
+	}
 }

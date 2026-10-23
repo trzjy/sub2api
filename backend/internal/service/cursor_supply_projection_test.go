@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -74,6 +75,19 @@ func (s *cursorSupplyProjGroupRepoStub) GetByIDLite(_ context.Context, _ int64) 
 	return nil, nil
 }
 
+// cursorSupplyProjFreezeNow 冻结来源门的新鲜度时钟（快照 checked_at 判定用），
+// 与主区已合入来源门用例（gateway_scheduling_admission_test.go a04nSchedFreezeNow）
+// 同一安装模式：合法快照 + 新鲜 checked_at + 剩余>0 + t.Cleanup 还原，避免污染同包
+// 其它用例（包级单例是共享状态）。
+func cursorSupplyProjFreezeNow(t *testing.T) time.Time {
+	t.Helper()
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	prev := cursorSupplySourceUsageNow
+	cursorSupplySourceUsageNow = func() time.Time { return now }
+	t.Cleanup(func() { cursorSupplySourceUsageNow = prev })
+	return now
+}
+
 // TestCursorSupplyPublicModelIDsFromMapping 钉死纯投影的四条边界：空键与通配键不出现、
 // mapping 值不当公开名、结果排序稳定、空映射返回空。
 func TestCursorSupplyPublicModelIDsFromMapping(t *testing.T) {
@@ -107,9 +121,16 @@ func TestCursorSupplyPublicModelIDsFromMapping(t *testing.T) {
 // 都排除空键/通配键，说明两处调用点共用同一个投影函数而非各写一份算法。
 func TestCursorSupplyProjectionSharedByListModelsAndNarrowEntry(t *testing.T) {
 	keyID := int64(9701)
-	installCursorQuotaKeyStateForTest(t, cursorQuotaKeyStateStub{statuses: map[int64]string{
-		keyID: domain.QuotaKeyStatusActive,
-	}})
+	now := cursorSupplyProjFreezeNow(t)
+	freshCheckedAt := now.Add(-time.Minute).Format(time.RFC3339)
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{
+			keyID: domain.QuotaKeyStatusActive,
+		},
+		snapshots: map[int64][]byte{keyID: []byte(
+			`{"total":400,"used":86,"status_code":200,"checked_at":"` + freshCheckedAt + `","error_code":""}`,
+		)},
+	})
 
 	account := cursorSupplyProjAccount(8101, &keyID, map[string]any{
 		"":                       "upstream-empty",
@@ -135,9 +156,16 @@ func TestCursorSupplyProjectionSharedByListModelsAndNarrowEntry(t *testing.T) {
 // （排序稳定），无错误。
 func TestCursorSupplyNarrowEntryCursorOnlyGroup(t *testing.T) {
 	activeKey := int64(9711)
-	installCursorQuotaKeyStateForTest(t, cursorQuotaKeyStateStub{statuses: map[int64]string{
-		activeKey: domain.QuotaKeyStatusActive,
-	}})
+	now := cursorSupplyProjFreezeNow(t)
+	freshCheckedAt := now.Add(-time.Minute).Format(time.RFC3339)
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{
+			activeKey: domain.QuotaKeyStatusActive,
+		},
+		snapshots: map[int64][]byte{activeKey: []byte(
+			`{"total":400,"used":86,"status_code":200,"checked_at":"` + freshCheckedAt + `","error_code":""}`,
+		)},
+	})
 
 	groupID := cursorSupplyProjGroupID
 	repo := &modelsListAccountRepoStub{byGroup: map[int64][]Account{
@@ -161,9 +189,16 @@ func TestCursorSupplyNarrowEntryCursorOnlyGroup(t *testing.T) {
 // Cursor 账号的映射键子集（其它平台账号的模型不混入），并继续受组白名单约束。
 func TestCursorSupplyNarrowEntryMixedGroupSubset(t *testing.T) {
 	activeKey := int64(9721)
-	installCursorQuotaKeyStateForTest(t, cursorQuotaKeyStateStub{statuses: map[int64]string{
-		activeKey: domain.QuotaKeyStatusActive,
-	}})
+	now := cursorSupplyProjFreezeNow(t)
+	freshCheckedAt := now.Add(-time.Minute).Format(time.RFC3339)
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{
+			activeKey: domain.QuotaKeyStatusActive,
+		},
+		snapshots: map[int64][]byte{activeKey: []byte(
+			`{"total":400,"used":86,"status_code":200,"checked_at":"` + freshCheckedAt + `","error_code":""}`,
+		)},
+	})
 
 	groupID := cursorSupplyProjGroupID
 	anthropicAccount := Account{

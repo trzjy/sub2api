@@ -60,6 +60,9 @@ var (
 
 // TestQuotaKeyRepository_UpdateMeta：UpdateMeta 仅改 expires_at / notes，
 // 不碰 code_encrypted / code_mac / code_last4 / status。
+//
+// tx 必填（A07/§25.17.6）：元数据写入只允许发生在调用方的同 key 事务内，
+// 生产路径不得退回默认 client 走锁外独立提交。这里逐段真实开事务并 commit。
 func TestQuotaKeyRepository_UpdateMeta(t *testing.T) {
 	client := quotaKeyRepositoryTestClient(t)
 	ctx := context.Background()
@@ -75,12 +78,18 @@ func TestQuotaKeyRepository_UpdateMeta(t *testing.T) {
 	require.NoError(t, err)
 	createdID := qk.ID
 
+	// tx 为 nil 时失败关闭：不存在"锁外也能写"的旁路。
+	require.Error(t, repo.UpdateMeta(ctx, nil, createdID, nil, nil),
+		"UpdateMeta must fail closed without the caller's transaction")
+
 	// 执行 UpdateMeta：改 expires_at / notes，不动 code / status。
 	expiresAt := time.Now().Add(48 * time.Hour)
 	notes := "updated note " + uid
 	expiresAtValue := &expiresAt
 	notesValue := &notes
-	require.NoError(t, repo.UpdateMeta(ctx, createdID, &expiresAtValue, &notesValue))
+	runInTx(t, client, func(tx *ent.Tx) error {
+		return repo.UpdateMeta(ctx, tx, createdID, &expiresAtValue, &notesValue)
+	})
 
 	// 读回，验证元数据生效。
 	got, err := client.QuotaKey.Get(ctx, createdID)
@@ -98,7 +107,9 @@ func TestQuotaKeyRepository_UpdateMeta(t *testing.T) {
 	// expires_at / notes 仅传其一时的分支：只改 notes。
 	notes2 := "only notes " + uid
 	notes2Value := &notes2
-	require.NoError(t, repo.UpdateMeta(ctx, createdID, nil, &notes2Value))
+	runInTx(t, client, func(tx *ent.Tx) error {
+		return repo.UpdateMeta(ctx, tx, createdID, nil, &notes2Value)
+	})
 	got2, err := client.QuotaKey.Get(ctx, createdID)
 	require.NoError(t, err)
 	require.NotNil(t, got2.Notes)
@@ -109,7 +120,9 @@ func TestQuotaKeyRepository_UpdateMeta(t *testing.T) {
 	// 显式 null 清空两个可空字段。
 	var clearExpiresAt *time.Time
 	var clearNotes *string
-	require.NoError(t, repo.UpdateMeta(ctx, createdID, &clearExpiresAt, &clearNotes))
+	runInTx(t, client, func(tx *ent.Tx) error {
+		return repo.UpdateMeta(ctx, tx, createdID, &clearExpiresAt, &clearNotes)
+	})
 	got3, err := client.QuotaKey.Get(ctx, createdID)
 	require.NoError(t, err)
 	require.Nil(t, got3.ExpiresAt)
@@ -118,4 +131,13 @@ func TestQuotaKeyRepository_UpdateMeta(t *testing.T) {
 	// 清理（软删口径：删除由 SoftDeleteMixin 拦截为置 deleted_at，行保留）。
 	err = client.QuotaKey.DeleteOneID(createdID).Exec(ctx)
 	require.NoError(t, err)
+}
+
+// runInTx 在真实事务内执行 fn 并提交（失败即 t.Fatal）。
+func runInTx(t *testing.T, client *ent.Client, fn func(tx *ent.Tx) error) {
+	t.Helper()
+	tx, err := client.Tx(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, fn(tx))
+	require.NoError(t, tx.Commit())
 }

@@ -312,14 +312,31 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		// §25.4/§25.5：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额预留转交给会话，
 		// 并把本 HTTP 的计费任务交给会话唯一结算；非 Cursor 账号显式清空转交物。
+		// §25.17.5 A06：晚绑定链已删除——构造不再接收 worker 提交函数（helper 保留该
+		// 参数仅为不动其它 6 处 handler 构造调用点），结算输入只来自下方注册的
+		// CursorSettlementFunc，不得再据旧参数另排账务任务。
 		attemptHandover := newCursorResourceHandover(
 			cursorHandoverResources(
 				transferableSlot(c, cursorSlotHandleUserKey),
 				transferableSlot(c, cursorSlotHandleAccountKey),
 				inflightHandle,
 			),
-			h.submitMandatoryUsageRecordTask,
+			nil,
 		)
+		// §25.17.5 A06：首次 Execute 与资源转交之前注册**唯一结算**——不可变值快照
+		// （user/API key/组/订阅/账号、pricingAt、quotaPlatform、原请求 hash、UA/IP 及
+		// 请求侧审计参数，值捕获，不闭包 gin.Context/旧 writer/原正文）。会话终结时由
+		// helper settle 把终态真实 *ForwardResult 交回；缺完整 usage 不提交的判定在
+		// helper/执行服务侧完成，这里只构造原 RecordUsage 输入并调用原 mandatory
+		// usage worker（至多一次）。
+		if isCursorPlatformAccount(account) {
+			snapshot := captureOpenAIChatCursorSettlement(
+				c, apiKey, account, subscription, channelMapping, reqModel, pricingAt, body,
+			)
+			attemptHandover.RegisterCursorSettlement(func(ctx context.Context, final *service.ForwardResult) {
+				submitOpenAIChatCursorSettlement(h, snapshot, ctx, final)
+			})
+		}
 		c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
@@ -348,7 +365,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		// #5148 对齐：错误返回携带的部分 result（流中断前上游已计量的 usage）照常
 		// 入账；failover 错误恒定 result=nil，不会重复计费。
 		submitChatUsage := func(res *service.OpenAIForwardResult) {
-			if res == nil {
+			// §25.17.5 A06：Cursor 分支不再调用——本 HTTP 的计费任务已由会话唯一结算
+			// 承载（上方注册的 CursorSettlementFunc 收到终态真实 usage 后至多提交一次），
+			// 原"Execute 返回后捕获 result 的晚绑定链"已删除；首/最终 HTTP 返回后不得
+			// 再为 Cursor 另排一次账。非 Cursor 路径保持原样（含 #5148 部分 result 入账）。
+			if res == nil || isCursorPlatformAccount(account) {
 				return
 			}
 			stampOpenAIRequestedReasoningEffort(res, c)
@@ -532,4 +553,149 @@ func resolveOpenAIUpstreamEndpoint(c *gin.Context, account *service.Account, res
 		return EndpointChatCompletions
 	}
 	return GetUpstreamEndpoint(c, account.Platform)
+}
+
+// cursorChatSettlementSnapshot 是 Cursor 账号分支唯一结算的**不可变值快照**（§25.17.5 A06）。
+//
+// 在首次 Execute 与资源转交之前捕获：user/API key/组/订阅/账号、pricingAt、
+// quotaPlatform、原请求 hash、UA/IP、inbound/upstream endpoint、会话标识及请求侧审计
+// 参数全部以值落到结构体，闭包不再引用 gin.Context、旧 writer 或原正文。
+type cursorChatSettlementSnapshot struct {
+	apiKey                   *service.APIKey
+	user                     *service.User
+	account                  *service.Account
+	subscription             *service.UserSubscription
+	pricingAt                time.Time
+	quotaPlatform            string
+	requestPayloadHash       string // 原请求 hash（HashUsageRequestPayload(body)）
+	userAgent                string
+	clientIP                 string
+	inboundEndpoint          string
+	upstreamEndpoint         string // 实际出站信息：终态 ForwardResult 无端点字段，快照 c 上值
+	sessionID                string
+	cyberBlocked             bool
+	requestedPublicModel     string  // 渠道归因用的客户端请求模型名
+	requestedReasoningEffort *string // 审计参数：stampOpenAIRequestedReasoningEffort 的等价值
+	channelMapping           service.ChannelMappingResult
+	reqModel                 string // 日志用
+}
+
+// captureOpenAIChatCursorSettlement 捕获唯一结算所需的不可变值快照。
+//
+// 只在此处（HTTP 生命周期内）读取 gin.Context，之后结算闭包只接受该快照与终态
+// *ForwardResult。upstreamEndpoint 用 nil result 求 c 上实际出站端点：Cursor 终态
+// ForwardResult 不携带 UpstreamEndpoint 字段，其结算值等价于快照时刻的 c 探测值。
+func captureOpenAIChatCursorSettlement(
+	c *gin.Context,
+	apiKey *service.APIKey,
+	account *service.Account,
+	subscription *service.UserSubscription,
+	channelMapping service.ChannelMappingResult,
+	reqModel string,
+	pricingAt time.Time,
+	body []byte,
+) *cursorChatSettlementSnapshot {
+	return &cursorChatSettlementSnapshot{
+		apiKey:                   apiKey,
+		user:                     apiKey.User,
+		account:                  account,
+		subscription:             subscription,
+		pricingAt:                pricingAt,
+		quotaPlatform:            service.QuotaPlatform(c.Request.Context(), apiKey),
+		requestPayloadHash:       service.HashUsageRequestPayload(body),
+		userAgent:                c.GetHeader("User-Agent"),
+		clientIP:                 ip.GetClientIP(c),
+		inboundEndpoint:          GetInboundEndpoint(c),
+		upstreamEndpoint:         resolveOpenAIUpstreamEndpoint(c, account, nil),
+		sessionID:                service.ExtractClientSessionID(c),
+		cyberBlocked:             service.GetOpsCyberPolicy(c) != nil,
+		requestedPublicModel:     clientRequestedModel(c, reqModel),
+		requestedReasoningEffort: service.RequestedReasoningEffortFromContext(c.Request.Context()),
+		channelMapping:           channelMapping,
+		reqModel:                 reqModel,
+	}
+}
+
+// submitOpenAIChatCursorSettlement 由 helper settle 在会话终结时调用（至多一次）。
+//
+// §25.17.5 A06：收到终态真实 *ForwardResult 后构造原 RecordUsage 输入，调用原
+// mandatory usage worker 提交。缺完整真实 usage 时不提交的判定在 helper/执行服务侧
+// 已完成（helper 只在 UsageComplete 且终态结果非 nil 才调用本函数），闭包只透传终态：
+// 最终模型/真实 usage/时长取自终态，实际出站信息与审计参数来自不可变快照。
+func submitOpenAIChatCursorSettlement(
+	h *OpenAIGatewayHandler,
+	snap *cursorChatSettlementSnapshot,
+	ctx context.Context,
+	final *service.ForwardResult,
+) {
+	if snap == nil || h == nil || final == nil || snap.apiKey == nil {
+		return
+	}
+	result := cursorChatFinalToOpenAIResult(final)
+	if result.RequestedReasoningEffort == nil {
+		result.RequestedReasoningEffort = snap.requestedReasoningEffort
+	}
+	h.submitMandatoryUsageRecordTask(ctx, func(recordCtx context.Context) {
+		if err := h.gatewayService.RecordUsage(recordCtx, &service.OpenAIRecordUsageInput{
+			Result:             result,
+			APIKey:             snap.apiKey,
+			User:               snap.user,
+			Account:            snap.account,
+			Subscription:       snap.subscription,
+			InboundEndpoint:    snap.inboundEndpoint,
+			UpstreamEndpoint:   snap.upstreamEndpoint,
+			UserAgent:          snap.userAgent,
+			IPAddress:          snap.clientIP,
+			SessionID:          snap.sessionID,
+			RequestPayloadHash: snap.requestPayloadHash,
+			APIKeyService:      h.apiKeyService,
+			QuotaPlatform:      snap.quotaPlatform,
+			PricingAt:          snap.pricingAt,
+			CyberBlocked:       snap.cyberBlocked,
+			ChannelUsageFields: snap.channelMapping.ToUsageFields(snap.requestedPublicModel, final.UpstreamModel),
+		}); err != nil {
+			logger.L().With(
+				zap.String("component", "handler.openai_gateway.chat_completions"),
+				zap.Int64("user_id", snap.user.ID),
+				zap.Int64("api_key_id", snap.apiKey.ID),
+				zap.Any("group_id", snap.apiKey.GroupID),
+				zap.String("model", snap.reqModel),
+				zap.Int64("account_id", snap.account.ID),
+			).Error("openai_chat_completions.record_usage_failed", zap.Error(err))
+		}
+	})
+}
+
+// cursorChatFinalToOpenAIResult 把 Cursor 会话终态 ForwardResult 搬进 OpenAI 网关的
+// 结果形状（与 service 侧 cursorForwardResultToOpenAI 同口径：usage 逐字段真实映射，
+// 零折算、不补默认值，**不在此计费**）。
+func cursorChatFinalToOpenAIResult(final *service.ForwardResult) *service.OpenAIForwardResult {
+	if final == nil {
+		return nil
+	}
+	out := &service.OpenAIForwardResult{
+		ResponseID:      final.RequestID,
+		UpstreamHeaders: final.UpstreamHeaders,
+		Usage: service.OpenAIUsage{
+			InputTokens:              final.Usage.InputTokens,
+			OutputTokens:             final.Usage.OutputTokens,
+			CacheCreationInputTokens: final.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     final.Usage.CacheReadInputTokens,
+			ImageOutputTokens:        final.Usage.ImageOutputTokens,
+		},
+		Model:            final.Model,
+		UpstreamModel:    final.UpstreamModel,
+		Stream:           final.Stream,
+		Duration:         final.Duration,
+		FirstTokenMs:     final.FirstTokenMs,
+		ClientDisconnect: final.ClientDisconnect,
+		ImageCount:       final.ImageCount,
+		ImageOutputSizes: final.ImageOutputSizes,
+		SearchCount:      final.SearchCount,
+		AudioUsage:       final.AudioUsage,
+	}
+	if final.UpstreamHeaders != nil {
+		out.ResponseHeaders = final.UpstreamHeaders.Clone()
+	}
+	return out
 }

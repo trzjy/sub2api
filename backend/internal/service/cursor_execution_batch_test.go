@@ -184,12 +184,12 @@ func TestCursorSessionStoreStopClearsAll(t *testing.T) {
 	require.Zero(t, store.sessionCount())
 	require.Zero(t, store.indexCount(), "Stop 必须清空 CR-B 索引的全部条目")
 
-	// Stop 之后新会话不落表（不会留下可续轮状态），但当前请求仍可完成。
+	// §25.17.7 A09：Stop 之后 sessions.start 明确不可用（零 AgentRun），返回 nil，
+	// 不落表、不留可续轮状态（已在 finishCursorSession / 兜底全清中移除）。
 	late := store.start(cursorSessionSpec{protocol: cursorProtocolChat})
-	require.NotNil(t, late)
+	require.Nil(t, late, "Stop 之后 sessions.start 必须明确不可用（零 AgentRun）")
 	require.Zero(t, store.sessionCount())
 	// 已收口的会话不得在统一索引里留下游离条目。
-	require.Error(t, store.registerToolCall(late.id, "mc-late", "call_late"))
 	require.Zero(t, store.indexCount())
 }
 

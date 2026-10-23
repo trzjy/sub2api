@@ -15,6 +15,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -211,7 +212,7 @@ func (r *fakeQuotaKeyRepo) List(_ context.Context) ([]*ent.QuotaKey, error) {
 	return r.snapshot(), nil
 }
 
-func (r *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, id int64, expiresAt **time.Time, notes **string) error {
+func (r *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, _ *ent.Tx, id int64, expiresAt **time.Time, notes **string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.updateErr != nil {
@@ -226,6 +227,45 @@ func (r *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, id int64, expiresAt **t
 	}
 	if notes != nil {
 		qk.Notes = *notes
+	}
+	return nil
+}
+
+// GetByIDInTx / UpdateCredentialsAtomically / UpdateUsageSnapshot 是「观测 / 换码 / 管理员编辑」
+// 同 key 事务所需的仓储能力（service.quotaKeyObservationRepo）。管理员编辑自 A07 起也在
+// 同 key 事务内执行，故本替身必须满足该窄接口，否则编辑入口会失败关闭。
+func (r *fakeQuotaKeyRepo) GetByIDInTx(ctx context.Context, _ *ent.Tx, id int64) (*ent.QuotaKey, error) {
+	return r.GetByID(ctx, id)
+}
+
+func (r *fakeQuotaKeyRepo) UpdateCredentialsAtomically(_ context.Context, _ *ent.Tx, id int64, codeEncrypted, codeMAC, codeLast4 string, clearUsageSnapshot bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	qk, ok := r.keys[id]
+	if !ok {
+		return &ent.NotFoundError{}
+	}
+	qk.CodeEncrypted = codeEncrypted
+	qk.CodeMAC = codeMAC
+	qk.CodeLast4 = codeLast4
+	if clearUsageSnapshot {
+		qk.UsageSnapshot = nil
+	}
+	return nil
+}
+
+func (r *fakeQuotaKeyRepo) UpdateUsageSnapshot(_ context.Context, _ *ent.Tx, id int64, snapshot []byte, expiresAt **time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	qk, ok := r.keys[id]
+	if !ok {
+		return &ent.NotFoundError{}
+	}
+	if len(snapshot) > 0 {
+		qk.UsageSnapshot = jsontext.Value(snapshot)
+	}
+	if expiresAt != nil && *expiresAt != nil {
+		qk.ExpiresAt = *expiresAt
 	}
 	return nil
 }

@@ -3,10 +3,13 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -215,4 +218,83 @@ func TestShouldFallbackGeminiModel_DelegatesScopeFallback(t *testing.T) {
 		Body:       []byte("insufficient authentication scopes"),
 	}
 	require.True(t, shouldFallbackGeminiModel("gemini-future-model", res))
+}
+
+// TestCursorGeminiSettlementFuncTerminalOnce 覆盖 §25.17.5 A06：gemini v1beta 出口 Cursor
+// 分支在首次 Execute 与资源转交之前注册的唯一结算闭包，收到**终态真实*ForwardResult** 时
+// 把原 RecordUsage 任务提交给原 mandatory usage worker 且**至多一次**；缺完整真实 usage
+// 时（判定在 helper/执行服务侧）不得提交任何账务任务。
+func TestCursorGeminiSettlementFuncTerminalOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(3)
+	apiKey := &service.APIKey{ID: 7, User: &service.User{ID: 9}, GroupID: &groupID}
+	account := &service.Account{ID: 11, Platform: service.PlatformCursor}
+	subscription := &service.UserSubscription{ID: 21}
+
+	var submitted atomic.Int32
+	settle := (&GatewayHandler{}).geminiCursorSettlementFunc(geminiCursorSettlementParams{
+		apiKey:             apiKey,
+		user:               apiKey.User,
+		account:            account,
+		subscription:       subscription,
+		pricingAt:          time.Now(),
+		quotaPlatform:      service.QuotaPlatform(context.Background(), apiKey),
+		inboundEndpoint:    "/v1beta/models/gemini-2.5-pro:generateContent",
+		upstreamEndpoint:   "/v1beta/models/gemini-2.5-pro:generateContent",
+		userAgent:          "gemini-cli-test",
+		ipAddress:          "127.0.0.1",
+		sessionID:          "sess-gemini-1",
+		requestPayloadHash: "hash-gemini-1",
+		forceCacheBilling:  false,
+		channelMapping:     service.ChannelMappingResult{},
+		requestedModel:     "gemini-2.5-pro",
+		userID:             9,
+		groupID:            apiKey.GroupID,
+		reqModel:           "gemini-2.5-pro",
+	}, func(context.Context, service.UsageRecordTask) { submitted.Add(1) })
+
+	handover := newCursorResourceHandover(nil, nil)
+	handover.RegisterCursorSettlement(settle)
+	require.NotNil(t, handover.SettlementFunc(), "注册后 finalizer 侧访问器必须能取出同一钩子")
+
+	// 终态真实结果（含真实 usage）恰好到达一次 → 原 mandatory usage worker 恰好提交一次。
+	final := &service.ForwardResult{
+		RequestID:     "req-gemini-1",
+		Model:         "gemini-2.5-pro",
+		UpstreamModel: "cursor-gemini-2.5-pro",
+		Usage:         service.ClaudeUsage{InputTokens: 11, OutputTokens: 22, CacheReadInputTokens: 3, CacheCreationInputTokens: 4},
+	}
+	terminal := service.CursorSettlementEvent{
+		SessionID:       "sess-gemini-1",
+		BillingEventID:  "cursor_session:sess-gemini-1",
+		Result:          final,
+		UsageComplete:   true,
+		InflightRelease: func() {},
+	}
+	handover.Settlement()(context.Background(), terminal)
+	require.EqualValues(t, 1, submitted.Load(), "回调收到终态且只排一次")
+	require.True(t, handover.Settled())
+	require.NoError(t, handover.SettlementError(), "完整 usage + 已注册 = 装配正常")
+
+	// 重复终结（Stop 与结果回传竞争）不得重复排账。
+	handover.Settlement()(context.Background(), terminal)
+	require.EqualValues(t, 1, submitted.Load(), "重复终结不得重复排账")
+
+	// 缺完整真实 usage：闭包只透传、不自行判定，也不得被调用。
+	incomplete := newCursorResourceHandover(nil, nil)
+	incomplete.RegisterCursorSettlement(settle)
+	incomplete.Settlement()(context.Background(), service.CursorSettlementEvent{
+		SessionID:      "sess-gemini-2",
+		BillingEventID: "cursor_session:sess-gemini-2",
+		Result:         final,
+		UsageComplete:  false,
+	})
+	require.EqualValues(t, 1, submitted.Load(), "缺完整真实 usage 不得结算")
+	require.True(t, incomplete.Finalized(), "未取得完整 usage 也已终结（不再等待补交）")
+	require.False(t, incomplete.Settled(), "未结算：不写零 usage 假成功账")
+
+	// nil 终态：防御性返回，不提交账务任务、不 panic。
+	settle(context.Background(), nil)
+	require.EqualValues(t, 1, submitted.Load(), "nil 终态不得提交账务任务")
 }

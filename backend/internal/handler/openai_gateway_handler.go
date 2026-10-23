@@ -903,8 +903,33 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				transferableSlot(c, cursorSlotHandleAccountKey),
 				inflightHandle,
 			),
-			h.submitMandatoryUsageRecordTask,
+			// §25.17.5 A06：结算输入只来自 RegisterCursorSettlement 注册的钩子，
+			// 不再经 legacy submitter 另排账务任务（helper 侧已忽略该参数）。
+			nil,
 		)
+		// §25.17.5 A06：Cursor 账号在**首次 Execute 与资源转交之前**注册唯一结算——
+		// 快照全部为不可变值捕获（user/API key/组/订阅/账号、pricingAt、quotaPlatform、
+		// 原请求 hash、UA/IP 与请求侧审计参数），闭包不引用 gin.Context/旧 writer/原正文。
+		if isCursorPlatformAccount(account) {
+			h.registerCursorSettlementForAttempt(
+				attemptHandover,
+				apiKey,
+				account,
+				subscription,
+				channelMapping,
+				clientRequestedModel(c, reqModel),
+				c.GetHeader("User-Agent"),
+				ip.GetClientIP(c),
+				GetInboundEndpoint(c),
+				resolveOpenAIUpstreamEndpoint(c, account, nil),
+				service.HashUsageRequestPayload(body),
+				service.QuotaPlatform(c.Request.Context(), apiKey),
+				service.ExtractClientSessionID(c),
+				pricingAt,
+				service.GetOpsCyberPolicy(c) != nil,
+				nativeV2,
+			)
+		}
 		c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
@@ -933,6 +958,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// 入账；failover 错误恒定 result=nil，不会重复计费。
 		submitResponsesUsage := func(res *service.OpenAIForwardResult) {
 			if res == nil {
+				return
+			}
+			// §25.17.5 A06：Cursor 会话已接管本 HTTP 的唯一结算——首次/最终 HTTP 返回后
+			// 不得再为 Cursor 另排一次账务任务；真实用量由注册的 CursorSettlementFunc
+			// 在会话终结时经原 mandatory usage worker 提交且至多一次。
+			if isCursorPlatformAccount(account) {
 				return
 			}
 			stampOpenAIRequestedReasoningEffort(res, c)
@@ -1601,8 +1632,33 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				transferableSlot(c, cursorSlotHandleAccountKey),
 				inflightHandle,
 			),
-			h.submitMandatoryUsageRecordTask,
+			// §25.17.5 A06：结算输入只来自 RegisterCursorSettlement 注册的钩子，
+			// 不再经 legacy submitter 另排账务任务（helper 侧已忽略该参数）。
+			nil,
 		)
+		// §25.17.5 A06：Cursor 账号在**首次 Execute 与资源转交之前**注册唯一结算——
+		// 快照全部为不可变值捕获（user/API key/组/订阅/账号、pricingAt、quotaPlatform、
+		// 原请求 hash、UA/IP 与请求侧审计参数），闭包不引用 gin.Context/旧 writer/原正文。
+		if isCursorPlatformAccount(account) {
+			h.registerCursorSettlementForAttempt(
+				attemptHandover,
+				apiKey,
+				account,
+				subscription,
+				channelMappingMsg,
+				clientRequestedModel(c, reqModel),
+				c.GetHeader("User-Agent"),
+				ip.GetClientIP(c),
+				GetInboundEndpoint(c),
+				resolveOpenAIUpstreamEndpoint(c, account, nil),
+				service.HashUsageRequestPayload(body),
+				service.QuotaPlatform(c.Request.Context(), apiKey),
+				service.ExtractClientSessionID(c),
+				pricingAt,
+				service.GetOpsCyberPolicy(c) != nil,
+				false, // Messages 链未装配 NativeCompactionV2（既有 RecordUsage 输入即如此）。
+			)
+		}
 		c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
@@ -1632,6 +1688,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		// 网关同名修复）。failover 错误恒定 result=nil，不会重复计费。
 		submitMessagesUsage := func(res *service.OpenAIForwardResult) {
 			if res == nil {
+				return
+			}
+			// §25.17.5 A06：Cursor 会话已接管本 HTTP 的唯一结算——首次/最终 HTTP 返回后
+			// 不得再为 Cursor 另排一次账务任务；真实用量由注册的 CursorSettlementFunc
+			// 在会话终结时经原 mandatory usage worker 提交且至多一次。
+			if isCursorPlatformAccount(account) {
 				return
 			}
 			stampOpenAIRequestedReasoningEffort(res, c)
@@ -3786,14 +3848,110 @@ func getContextInt64(c *gin.Context, key string) (int64, bool) {
 	}
 }
 
-func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, task service.UsageRecordTask) {
-	if task == nil {
+// openAICursorFinalResult 把 Cursor 会话终态的真实 *ForwardResult 搬进 OpenAI 网关的结果形状，
+// 供唯一结算闭包构造原 RecordUsage 输入（§25.17.5 A06）。字段映射与
+// service.cursorForwardResultToOpenAI 逐字一致：真实用量零折算、不补默认值，绝不在此计费。
+func openAICursorFinalResult(final *service.ForwardResult) *service.OpenAIForwardResult {
+	if final == nil {
+		return nil
+	}
+	out := &service.OpenAIForwardResult{
+		ResponseID:       final.RequestID,
+		UpstreamHeaders:  final.UpstreamHeaders,
+		Usage:            openAICursorClaudeUsageToOpenAI(final.Usage),
+		Model:            final.Model,
+		UpstreamModel:    final.UpstreamModel,
+		Stream:           final.Stream,
+		Duration:         final.Duration,
+		FirstTokenMs:     final.FirstTokenMs,
+		ClientDisconnect: final.ClientDisconnect,
+		ImageCount:       final.ImageCount,
+		ImageOutputSizes: final.ImageOutputSizes,
+		SearchCount:      final.SearchCount,
+		AudioUsage:       final.AudioUsage,
+	}
+	if final.UpstreamHeaders != nil {
+		out.ResponseHeaders = final.UpstreamHeaders.Clone()
+	}
+	return out
+}
+
+// openAICursorClaudeUsageToOpenAI 把桥接 usage 逐字段映射回 OpenAI usage（真实用量，零折算）。
+func openAICursorClaudeUsageToOpenAI(u service.ClaudeUsage) service.OpenAIUsage {
+	return service.OpenAIUsage{
+		InputTokens:              u.InputTokens,
+		OutputTokens:             u.OutputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+		ImageOutputTokens:        u.ImageOutputTokens,
+	}
+}
+
+// registerCursorSettlementForAttempt 在**首次 Execute 与资源转交之前**为本次 Cursor 账号尝试
+// 登记唯一结算钩子（§25.17.5 A06）。
+//
+// 快照全部为不可变值捕获：user/API key/组/订阅/账号、pricingAt、quotaPlatform、原请求 hash、
+// UA/IP 与请求侧审计参数。闭包不引用 gin.Context、旧 writer 或原正文；收到会话终态的真实
+// *ForwardResult 后只构造原 RecordUsage 输入并调用原 mandatory usage worker 提交（至多一次）。
+// 缺完整真实 usage 的判定由 helper/settle 完整性检查在前完成，此处只透传。
+func (h *OpenAIGatewayHandler) registerCursorSettlementForAttempt(
+	handover *cursorResourceHandover,
+	apiKey *service.APIKey,
+	account *service.Account,
+	subscription *service.UserSubscription,
+	channelMapping service.ChannelMappingResult,
+	clientModel string,
+	userAgent, clientIP, inboundEndpoint, upstreamEndpoint, requestPayloadHash, quotaPlatform, sessionID string,
+	pricingAt time.Time,
+	cyberBlocked bool,
+	nativeCompactionV2 bool,
+) {
+	if handover == nil {
 		return
 	}
-	if owner := service.CursorSettlementOwnerFromContext(parent); owner != nil {
-		// §25.5：Cursor 会话已接管本 HTTP 的结算——不再为每个工具 HTTP 排一次
-		// UsageRecordTask，而是把任务交给会话唯一结算（至多执行一次）。
-		owner.AdoptSettlementTask(task)
+	user := apiKey.User
+	apiKeyService := h.apiKeyService
+	handover.RegisterCursorSettlement(func(ctx context.Context, final *service.ForwardResult) {
+		result := openAICursorFinalResult(final)
+		if result == nil {
+			return
+		}
+		input := &service.OpenAIRecordUsageInput{
+			Result:             result,
+			APIKey:             apiKey,
+			User:               user,
+			Account:            account,
+			Subscription:       subscription,
+			InboundEndpoint:    inboundEndpoint,
+			UpstreamEndpoint:   upstreamEndpoint,
+			UserAgent:          userAgent,
+			IPAddress:          clientIP,
+			RequestPayloadHash: requestPayloadHash,
+			APIKeyService:      apiKeyService,
+			QuotaPlatform:      quotaPlatform,
+			SessionID:          sessionID,
+			ChannelUsageFields: channelMapping.ToUsageFields(clientModel, result.UpstreamModel),
+			PricingAt:          pricingAt,
+			CyberBlocked:       cyberBlocked,
+			NativeCompactionV2: nativeCompactionV2,
+		}
+		h.submitMandatoryUsageRecordTask(ctx, func(taskCtx context.Context) {
+			if err := h.gatewayService.RecordUsage(taskCtx, input); err != nil {
+				logger.L().With(
+					zap.String("component", "handler.openai_gateway.cursor_settlement"),
+					zap.Int64("user_id", apiKey.UserID),
+					zap.Int64("api_key_id", apiKey.ID),
+					zap.Any("group_id", apiKey.GroupID),
+					zap.String("model", result.Model),
+					zap.Int64("account_id", account.ID),
+				).Error("openai.cursor_settlement_record_usage_failed", zap.Error(err))
+			}
+		})
+	})
+}
+
+func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, task service.UsageRecordTask) {
+	if task == nil {
 		return
 	}
 	task, abandon := wrapUsageRecordTaskContext(parent, task)
@@ -3836,12 +3994,6 @@ func (h *OpenAIGatewayHandler) submitOpenAIUsageRecordTask(parent context.Contex
 
 func (h *OpenAIGatewayHandler) submitMandatoryUsageRecordTask(parent context.Context, task service.UsageRecordTask) {
 	if task == nil {
-		return
-	}
-	if owner := service.CursorSettlementOwnerFromContext(parent); owner != nil {
-		// §25.5：Cursor 会话已接管本 HTTP 的结算——不再为每个工具 HTTP 排一次
-		// UsageRecordTask，而是把任务交给会话唯一结算（至多执行一次）。
-		owner.AdoptSettlementTask(task)
 		return
 	}
 	task, _ = wrapUsageRecordTaskContext(parent, task)

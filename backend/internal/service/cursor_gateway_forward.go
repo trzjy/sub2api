@@ -121,6 +121,26 @@ type cursorAccountAuthProvider struct {
 	mu     sync.Mutex
 	cached string
 	device string
+	// fingerprint 是**生成 cached 那一次**来源行/解密结果给出的内部指纹
+	// （§25.17.3「A05首次来源指纹」）。与 cached 同一次赋值，绝不是事后另读一次
+	// MAC 反推，故换码夹在生成头与建会话之间时不会把旧头标成新 MAC。
+	//
+	// 只在进程内传递：绝不进日志、DTO、工具 ID 或任何对外文本。
+	fingerprint cursorSourceFingerprint
+}
+
+// cursorSourceFingerprint 是首次 x-jg-auth 生成时固定的**内部**来源指纹。
+//
+// QuotaKeyID 与 CodeMAC 取自生成该鉴权材料的**同一次** quota_keys 行快照与同一次
+// 解密明文：CodeMAC 复用取号链的同一 HMAC（quotaKeyMACOfPlaintext），绝不重算另一份。
+type cursorSourceFingerprint struct {
+	QuotaKeyID int64
+	CodeMAC    string
+}
+
+// valid 判定该指纹是否可作为"同源"的可靠依据：两个字段都必须来自真实来源行。
+func (f cursorSourceFingerprint) valid() bool {
+	return f.QuotaKeyID > 0 && strings.TrimSpace(f.CodeMAC) != ""
 }
 
 // newCursorAccountAuthProvider 为指定账号构造鉴权材料提供者。
@@ -153,7 +173,7 @@ func (p *cursorAccountAuthProvider) CursorUpstreamAuth(ctx context.Context) (str
 		return p.cached, nil
 	}
 
-	device, code, err := cursorResolveOutboundAuthMaterial(ctx, p.quotaKeyID, p.quotaKeys, p.enc, p.deviceIDs)
+	device, code, fp, err := cursorResolveOutboundAuthMaterial(ctx, p.quotaKeyID, p.quotaKeys, p.enc, p.deviceIDs)
 	if err != nil {
 		return "", err
 	}
@@ -165,38 +185,71 @@ func (p *cursorAccountAuthProvider) CursorUpstreamAuth(ctx context.Context) (str
 	}
 	p.cached = material
 	p.device = device
+	// 与 cached 同一次赋值：指纹来自生成该头的那一次来源行/解密结果。
+	p.fingerprint = fp
 	return material, nil
 }
 
-// cursorResolveOutboundAuthMaterial 解析单账号出站设备级材料的两个输入（device + 激活码）。
+// SourceFingerprint 返回生成当前 x-jg-auth 那一次固定的内部来源指纹。
 //
-// 只查一次 quota_keys 行：deviceId 的持久化判定与激活码解密共用同一份行快照，避免
-// 两次读之间被并发写穿造成"读了旧 device / 新 code"的错配。
+// 材料尚未生成（未调用过 CursorUpstreamAuth）或指纹不可靠时返回 (零值, false)：
+// 调用方据此**明确失败**，绝不以空值代表"同源"。
+func (p *cursorAccountAuthProvider) SourceFingerprint() (cursorSourceFingerprint, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cached == "" || !p.fingerprint.valid() {
+		return cursorSourceFingerprint{}, false
+	}
+	return p.fingerprint, true
+}
+
+// cursorResolveOutboundAuthMaterial 解析单账号出站设备级材料的两个输入（device + 激活码），
+// 并**从同一次来源行/解密结果**带出内部来源指纹（§25.17.3「A05首次来源指纹」）。
+//
+// 只查一次 quota_keys 行：deviceId 的持久化判定、激活码解密与指纹三者共用同一份行快照，
+// 避免两次读之间被并发写穿造成"读了旧 device / 新 code"的错配，也不允许事后另读一次
+// MAC 反推已生成的头。
 func cursorResolveOutboundAuthMaterial(
 	ctx context.Context,
 	quotaKeyID int64,
 	quotaKeys QuotaKeyRepository,
 	enc QuotaKeyEncryptor,
 	deviceIDs CursorDeviceIDResolver,
-) (device, code string, err error) {
+) (device, code string, fp cursorSourceFingerprint, err error) {
 	if quotaKeys == nil || enc == nil {
-		return "", "", ErrCursorQuotaKeyUnresolved
+		return "", "", cursorSourceFingerprint{}, ErrCursorQuotaKeyUnresolved
 	}
 	qk, err := quotaKeys.GetByID(ctx, quotaKeyID)
 	if err != nil {
 		// 错误信息绝不含激活码明文。
-		return "", "", fmt.Errorf("cursor: load quota key %d: %w", quotaKeyID, err)
+		return "", "", cursorSourceFingerprint{}, fmt.Errorf("cursor: load quota key %d: %w", quotaKeyID, err)
 	}
 	code, err = cursorDecryptQuotaKeyCode(qk, enc)
 	if err != nil {
-		return "", "", err
+		return "", "", cursorSourceFingerprint{}, err
 	}
-	device, err = cursorResolveOutboundDeviceID(ctx, quotaKeys, deviceIDs, qk, code)
+	identity, err := cursorResolveOutboundDeviceIdentity(ctx, quotaKeys, deviceIDs, qk, code)
 	if err != nil {
-		return "", "", err
+		return "", "", cursorSourceFingerprint{}, err
 	}
-	return device, code, nil
+	// identity.CodeMAC 是解析时刻由**同一份明文**经取号链同一 HMAC 算出的指纹，
+	// 与上面这台设备即将据以生成的头同源，故可直接固定进会话 spec。
+	keyID := quotaKeyID
+	if qk != nil && qk.ID > 0 {
+		keyID = qk.ID
+	}
+	fp = cursorSourceFingerprint{QuotaKeyID: keyID, CodeMAC: identity.CodeMAC}
+	if !fp.valid() {
+		return "", "", cursorSourceFingerprint{}, fmt.Errorf(
+			"%w: source fingerprint unavailable for quota key %d", ErrCursorSourceFingerprintUnavailable, quotaKeyID)
+	}
+	return identity.DeviceID, code, fp, nil
 }
+
+// ErrCursorSourceFingerprintUnavailable 表示拿不到可靠的首次来源指纹（QuotaKeyID/MAC）。
+//
+// 失败关闭：调用方不得以空值代表"与本次鉴权同源"，也不得为此另建鉴权器或另读一次来源。
+var ErrCursorSourceFingerprintUnavailable = errors.New("cursor: reliable source fingerprint unavailable (fail closed)")
 
 // cursorDecryptQuotaKeyCode 解密 quota key 行的激活码明文（失败关闭、错误不含明文）。
 func cursorDecryptQuotaKeyCode(qk *ent.QuotaKey, enc QuotaKeyEncryptor) (string, error) {
@@ -231,20 +284,36 @@ func cursorResolveOutboundDeviceID(
 	qk *ent.QuotaKey,
 	code string,
 ) (string, error) {
+	identity, err := cursorResolveOutboundDeviceIdentity(ctx, quotaKeys, deviceIDs, qk, code)
+	if err != nil {
+		return "", err
+	}
+	return identity.DeviceID, nil
+}
+
+// cursorResolveOutboundDeviceIdentity 是上面三分支解析的本体：额外带出解析时刻的
+// CodeMAC（同一次明文经取号链同一 HMAC），供首次来源指纹固定使用。
+func cursorResolveOutboundDeviceIdentity(
+	ctx context.Context,
+	quotaKeys QuotaKeyRepository,
+	deviceIDs CursorDeviceIDResolver,
+	qk *ent.QuotaKey,
+	code string,
+) (cursorDeviceIdentity, error) {
 	if quotaKeys == nil || qk == nil {
-		return "", fmt.Errorf("%w: quota key row unavailable", ErrCursorQuotaKeyUnresolved)
+		return cursorDeviceIdentity{}, fmt.Errorf("%w: quota key row unavailable", ErrCursorQuotaKeyUnresolved)
 	}
 	// 三分支逐字等价地委托给唯一的 resolveCursorDeviceIdentity（① 持久值 / ② 存量派生
 	// / ③ 真新码首写），出站语义不变。deviceIDs 仅留作签名兼容位，实际首写改由
 	// resolveCursorDeviceIdentity 经 repo 同入口完成。
 	identity, err := resolveCursorDeviceIdentity(ctx, quotaKeys, qk, code)
 	if err != nil {
-		return "", err
+		return cursorDeviceIdentity{}, err
 	}
 	if strings.TrimSpace(identity.DeviceID) == "" {
-		return "", fmt.Errorf("%w: quota key %d resolved to empty device id", ErrCursorDeviceIDUnavailable, qk.ID)
+		return cursorDeviceIdentity{}, fmt.Errorf("%w: quota key %d resolved to empty device id", ErrCursorDeviceIDUnavailable, qk.ID)
 	}
-	return identity.DeviceID, nil
+	return identity, nil
 }
 
 // cursorResolveAccountBearer 取选中账号的用户级 Bearer（已存 access_token 明文）。

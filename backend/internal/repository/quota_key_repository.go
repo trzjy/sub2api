@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json/jsontext"
+	"errors"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
@@ -19,6 +20,7 @@ var _ interface {
 	GetByIDInTx(ctx context.Context, tx *ent.Tx, id int64) (*ent.QuotaKey, error)
 	UpdateUsageSnapshot(ctx context.Context, tx *ent.Tx, id int64, snapshot []byte, expiresAt **time.Time) error
 	UpdateCredentialsAtomically(ctx context.Context, tx *ent.Tx, id int64, codeEncrypted, codeMAC, codeLast4 string, clearUsageSnapshot bool) error
+	UpdateMeta(ctx context.Context, tx *ent.Tx, id int64, expiresAt **time.Time, notes **string) error
 } = (*quotaKeyRepository)(nil)
 
 // QuotaKeyRepository 实现 service.QuotaKeyRepository，提供 quota_keys 基础 CRUD
@@ -328,10 +330,18 @@ func (r *quotaKeyRepository) List(ctx context.Context) ([]*ent.QuotaKey, error) 
 	return r.client.QuotaKey.Query().All(ctx)
 }
 
-// UpdateMeta 仅更新请求中显式出现的 expires_at / notes 元数据字段，不触碰 code / status。
-// 外层指针 nil 表示省略，内层指针 nil 表示显式清空，否则设置为给定值。
-func (r *quotaKeyRepository) UpdateMeta(ctx context.Context, id int64, expiresAt **time.Time, notes **string) error {
-	q := r.client.QuotaKey.UpdateOneID(id)
+// UpdateMeta 在调用方已开启的事务内更新请求中显式出现的 expires_at / notes 元数据字段，
+// 不触碰 code / status。外层指针 nil 表示省略，内层指针 nil 表示显式清空，否则设置为给定值。
+//
+// tx 必填（§25.17.6）：管理员的到期日期编辑必须与来源观测共用同 key advisory 锁 + 同一事务。
+// 若此处退回默认 client 走锁外独立提交，管理员的日期就能在 Probe 持锁等待 lookup 期间提交，
+// 随后被 Probe 的旧观测结果覆盖——这正是本轮修复的 A07 缺陷。tx 为 nil 时失败关闭，
+// 不提供"锁外也能写"的旁路。
+func (r *quotaKeyRepository) UpdateMeta(ctx context.Context, tx *ent.Tx, id int64, expiresAt **time.Time, notes **string) error {
+	if tx == nil {
+		return errors.New("quota_key_repository: UpdateMeta requires the caller's transaction")
+	}
+	q := tx.QuotaKey.UpdateOneID(id)
 	if expiresAt != nil {
 		if *expiresAt == nil {
 			q = q.ClearExpiresAt()

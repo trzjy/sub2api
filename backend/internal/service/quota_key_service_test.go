@@ -233,7 +233,7 @@ func (f *fakeQuotaKeyRepo) List(_ context.Context) ([]*ent.QuotaKey, error) {
 	return out, nil
 }
 
-func (f *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, id int64, expiresAt **time.Time, notes **string) error {
+func (f *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, _ *ent.Tx, id int64, expiresAt **time.Time, notes **string) error {
 	f.updateMetaCalls++
 	qk, ok := f.byID[id]
 	if !ok {
@@ -721,8 +721,13 @@ func (r *testDBRepo) List(ctx context.Context) ([]*ent.QuotaKey, error) {
 	return r.client.QuotaKey.Query().All(ctx)
 }
 
-func (r *testDBRepo) UpdateMeta(ctx context.Context, id int64, expiresAt **time.Time, notes **string) error {
-	q := r.client.QuotaKey.UpdateOneID(id)
+// UpdateMeta 与生产仓储同签名：tx 必填，nil 时失败关闭——不给"锁外也能写"的旁路，
+// 否则测试替身会掩盖 §25.17.6 的同 key 事务边界。
+func (r *testDBRepo) UpdateMeta(ctx context.Context, tx *ent.Tx, id int64, expiresAt **time.Time, notes **string) error {
+	if tx == nil {
+		return errors.New("testDBRepo: UpdateMeta requires the caller's transaction")
+	}
+	q := tx.QuotaKey.UpdateOneID(id)
 	if expiresAt != nil {
 		if *expiresAt == nil {
 			q = q.ClearExpiresAt()

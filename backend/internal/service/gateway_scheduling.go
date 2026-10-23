@@ -1187,8 +1187,16 @@ func (s *GatewayService) isAccountAllowedForPlatform(account *Account, platform 
 //  3. 归属激活码未处于终态（同 OpenAI 链的 key 门）。
 func (s *GatewayService) isAccountAdmittedForPlatform(ctx context.Context, account *Account, platform string, useMixed bool, requestedModel string, groupID *int64) bool {
 	if s.isAccountAllowedForPlatform(account, platform, useMixed) {
-		// 来源门（§25.6 同一来源门）：key 终态 + 真实来源剩余，来源可用 AND 账号可用。
-		if reason := cursorSupplySourceAvailabilityVetoReasonString(ctx, account); reason != "" {
+		// 来源门（§25.6 同一来源门，直接消费共同门）：key 终态 + 真实来源剩余，
+		// 来源可用 AND 账号可用。gate 本体由来源门维护方给出，签名不变，此处只消费。
+		reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, account)
+		if err != nil {
+			// 读取失败：按"读不到即不可用"处理——明确拒绝（失败关闭），不静默放行，
+			// 也不在此处提前 503（沿用本文件既有 bool 门的错误语义）。
+			return false
+		}
+		if reason != "" {
+			// 来源明确被拒（码终态 / 额度耗尽 / 观测失败 / 快照陈旧）→ 本次不入选。
 			return false
 		}
 		return true
@@ -1261,8 +1269,16 @@ func (s *GatewayService) cursorSupplyAdmittedForNativePlatform(ctx context.Conte
 	if requestedModel == "" {
 		return false
 	}
-	// key 终态门（I2）+ 真实来源剩余（§25.6 同一来源门）：来源可用 AND 账号可用。
-	if reason := cursorSupplySourceAvailabilityVetoReasonString(ctx, account); reason != "" {
+	// key 终态门（I2）+ 真实来源剩余（§25.6 同一来源门，直接消费共同门）：
+	// 来源可用 AND 账号可用。gate 本体由来源门维护方给出，签名不变，此处只消费。
+	reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, account)
+	if err != nil {
+		// 读取失败：按"读不到即不可用"处理——明确拒绝（失败关闭），不静默放行，
+		// 也不在此处提前 503（沿用本文件既有 bool 门的错误语义）。
+		return false
+	}
+	if reason != "" {
+		// 来源明确被拒（码终态 / 额度耗尽 / 观测失败 / 快照陈旧）→ 本次不入选。
 		return false
 	}
 	// 能力匹配②：模型映射是唯一出口，空映射（cursor 无内置目录）恒不可选。

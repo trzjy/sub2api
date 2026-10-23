@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -154,9 +156,16 @@ func (u *cursorGeminiListUpstream) Do(req *http.Request, _ string, _ int64, _ in
 }
 
 // cursorGeminiListQuotaKeyState 是来源状态读取替身（合同：替身仅存于测试）。
+//
+// A04-G 之后「来源门」由**同一份**读依赖的两个窄接口共同支撑：激活码状态
+// （CursorQuotaKeyStateProvider）与额度快照（CursorQuotaKeyUsageSnapshotProvider）。
+// 只实现前者会让绑定激活码的账号因"快照依赖未装配"被失败关闭，因此本替身同时实现两者。
 type cursorGeminiListQuotaKeyState struct {
 	statuses map[int64]string
 	err      error
+
+	snapshots   map[int64][]byte
+	snapshotErr error
 }
 
 func (s cursorGeminiListQuotaKeyState) CursorQuotaKeyStatus(_ context.Context, quotaKeyID int64) (string, error) {
@@ -170,11 +179,68 @@ func (s cursorGeminiListQuotaKeyState) CursorQuotaKeyStatus(_ context.Context, q
 	return status, nil
 }
 
+func (s cursorGeminiListQuotaKeyState) CursorQuotaKeyUsageSnapshot(_ context.Context, quotaKeyID int64) ([]byte, error) {
+	if s.snapshotErr != nil {
+		return nil, s.snapshotErr
+	}
+	snapshot, ok := s.snapshots[quotaKeyID]
+	if !ok {
+		return nil, errors.New("quota key usage snapshot not found")
+	}
+	return snapshot, nil
+}
+
 // installCursorGeminiQuotaKeyState 安装来源状态替身并在结束时还原为未安装（包级单例）。
 func installCursorGeminiQuotaKeyState(t *testing.T, provider service.CursorQuotaKeyStateProvider) {
 	t.Helper()
 	service.InstallCursorQuotaKeyStateProvider(provider)
 	t.Cleanup(func() { service.InstallCursorQuotaKeyStateProvider(nil) })
+}
+
+// installCursorGeminiQuotaKeySource 同时安装来源门的两个窄读取器（激活码状态 + 额度快照），
+// 并在结束时把两者都还原为未安装（包级单例）。
+func installCursorGeminiQuotaKeySource(t *testing.T, source cursorGeminiListQuotaKeyState) {
+	t.Helper()
+	service.InstallCursorQuotaKeyStateProvider(source)
+	service.InstallCursorQuotaKeyUsageSnapshotProvider(source)
+	t.Cleanup(func() {
+		service.InstallCursorQuotaKeyStateProvider(nil)
+		service.InstallCursorQuotaKeyUsageSnapshotProvider(nil)
+	})
+}
+
+// cursorGeminiSourceKeyID 为夹具账号派生稳定的归属激活码 ID。来源门要求 cursor 账号绑定
+// 有效归属码（nil / ≤0 判为 quota_key_source_unbound 并明确拒绝），因此凡"应可调度"的
+// 夹具账号都必须绑定一个由本函数生成的码。
+func cursorGeminiSourceKeyID(accountID int64) int64 { return 900000 + accountID }
+
+// cursorGeminiFreshUsageSnapshot 构造一份新鲜的成功额度快照：checked_at 取当前时刻
+// （来源门新鲜窗口为 5 分钟），total-used > 0 表示真实仍有剩余。
+func cursorGeminiFreshUsageSnapshot(total, used int) []byte {
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	return []byte(fmt.Sprintf(
+		`{"total":%d,"used":%d,"status_code":200,"checked_at":"%s","error_code":""}`,
+		total, used, checkedAt,
+	))
+}
+
+// installCursorGeminiHealthySource 给一批夹具账号装齐来源门的合法依赖（激活码 active +
+// 新鲜未耗尽快照），返回 accountID → quotaKeyID 映射，供夹具把账号绑定到自己的归属码。
+func installCursorGeminiHealthySource(t *testing.T, accountIDs ...int64) map[int64]int64 {
+	t.Helper()
+	source := cursorGeminiListQuotaKeyState{
+		statuses:  make(map[int64]string, len(accountIDs)),
+		snapshots: make(map[int64][]byte, len(accountIDs)),
+	}
+	keys := make(map[int64]int64, len(accountIDs))
+	for _, accountID := range accountIDs {
+		keyID := cursorGeminiSourceKeyID(accountID)
+		keys[accountID] = keyID
+		source.statuses[keyID] = domain.QuotaKeyStatusActive
+		source.snapshots[keyID] = cursorGeminiFreshUsageSnapshot(400, 86)
+	}
+	installCursorGeminiQuotaKeySource(t, source)
+	return keys
 }
 
 // cursorGeminiListGroup 构造已装载的分组（白名单为 nil 表示未启用分组白名单）。
@@ -312,9 +378,11 @@ func cursorGeminiModelNames(t *testing.T, rec *httptest.ResponseRecorder) []stri
 // 且 Gemini OAuth/AIStudio GET 调用数为 0。
 func TestCursorGeminiListModelsCursorOnlyGroup(t *testing.T) {
 	group := cursorGeminiListGroup(nil, "")
+	// A04-G：账号需绑定合法来源（激活码 active + 新鲜未耗尽快照）才可调度并贡献目录。
+	keys := installCursorGeminiHealthySource(t, 9301)
 	repo := &cursorGeminiListRepo{byGroup: map[int64][]service.Account{
 		group.ID: {
-			cursorGeminiCursorAccount(9301, []int64{group.ID}, nil, map[string]any{
+			cursorGeminiCursorAccount(9301, []int64{group.ID}, ptrInt64(keys[9301]), map[string]any{
 				cursorGeminiListModelA: "upstream-a",
 				cursorGeminiListModelB: "upstream-b",
 			}),
@@ -359,11 +427,12 @@ func TestCursorGeminiListModelsMixedGroupMergesNative(t *testing.T) {
 	// 组白名单只放行这三个公开名，使 AG 账号隐含的默认 passthrough 条目被业务过滤掉，
 	// 断言因此可以精确到「原生 + AG + Cursor」三条。
 	group := cursorGeminiListGroup([]string{"gemini-native", "gemini-ag-custom", cursorGeminiListModelB}, "")
+	keys := installCursorGeminiHealthySource(t, 9312)
 	repo := &cursorGeminiListRepo{byGroup: map[int64][]service.Account{
 		group.ID: {
 			cursorGeminiNativeAccount(9311),
 			cursorGeminiAntigravityAccount(9313, map[string]any{"gemini-ag-custom": "gemini-ag-custom"}),
-			cursorGeminiCursorAccount(9312, []int64{group.ID}, nil, map[string]any{
+			cursorGeminiCursorAccount(9312, []int64{group.ID}, ptrInt64(keys[9312]), map[string]any{
 				cursorGeminiListModelB: "upstream-b",
 				// 与原生同名：公开资源名都为 models/gemini-native，必须只出现一份且保留原生元数据。
 				"gemini-native": "upstream-native",
@@ -468,10 +537,11 @@ func TestCursorGeminiListModelsFilteredToEmptyReturnsEmptyModels(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			group := cursorGeminiListGroup(tc.allowlist, "")
+			keys := installCursorGeminiHealthySource(t, 9332)
 			repo := &cursorGeminiListRepo{byGroup: map[int64][]service.Account{
 				group.ID: {
 					cursorGeminiNativeAccount(9331),
-					cursorGeminiCursorAccount(9332, []int64{group.ID}, nil, map[string]any{
+					cursorGeminiCursorAccount(9332, []int64{group.ID}, ptrInt64(keys[9332]), map[string]any{
 						// 公开名 cursor-haiku 通过白名单；映射值（上游别名目标）不在白名单里，
 						// 绝不能被当成公开名暴露。
 						cursorGeminiListModelA: "only-this-model",
@@ -510,10 +580,11 @@ func TestCursorGeminiListModelsFilteredToEmptyReturnsEmptyModels(t *testing.T) {
 // 查询失败返回 503 目录读取失败，不把数据库故障当成「这个分组只有 Cursor」。
 func TestCursorGeminiListModelsNativeCandidateQueryFailureReturns503(t *testing.T) {
 	group := cursorGeminiListGroup(nil, "")
+	keys := installCursorGeminiHealthySource(t, 9341)
 	repo := &cursorGeminiListRepo{
 		byGroup: map[int64][]service.Account{
 			group.ID: {
-				cursorGeminiCursorAccount(9341, []int64{group.ID}, nil, map[string]any{
+				cursorGeminiCursorAccount(9341, []int64{group.ID}, ptrInt64(keys[9341]), map[string]any{
 					cursorGeminiListModelA: "upstream-a",
 				}),
 			},
@@ -578,10 +649,12 @@ func TestCursorGeminiListModelsCursorSupplyReadFailureReturns503(t *testing.T) {
 		},
 		{
 			name: "分组白名单读取失败",
-			setup: func(_ *testing.T, group *service.Group) (*cursorGeminiListRepo, service.GroupRepository) {
+			setup: func(t *testing.T, group *service.Group) (*cursorGeminiListRepo, service.GroupRepository) {
+				// 来源门必须放行，否则账号在读到组白名单之前就被剔除，本行会退化成"空目录"。
+				keys := installCursorGeminiHealthySource(t, 9353)
 				return &cursorGeminiListRepo{byGroup: map[int64][]service.Account{
 					group.ID: {
-						cursorGeminiCursorAccount(9353, []int64{group.ID}, nil, map[string]any{
+						cursorGeminiCursorAccount(9353, []int64{group.ID}, ptrInt64(keys[9353]), map[string]any{
 							cursorGeminiListModelA: "upstream-a",
 						}),
 					},
@@ -638,10 +711,11 @@ func TestCursorGeminiListModelsNativeFailureKeepsNativeError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			group := cursorGeminiListGroup(nil, "")
+			keys := installCursorGeminiHealthySource(t, 9362)
 			repo := &cursorGeminiListRepo{byGroup: map[int64][]service.Account{
 				group.ID: {
 					cursorGeminiNativeAccount(9361),
-					cursorGeminiCursorAccount(9362, []int64{group.ID}, nil, map[string]any{
+					cursorGeminiCursorAccount(9362, []int64{group.ID}, ptrInt64(keys[9362]), map[string]any{
 						cursorGeminiListModelA: "upstream-a",
 					}),
 				},
@@ -705,10 +779,11 @@ func TestCursorGeminiListModelsInvalidNativeBodyReturns502(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			group := cursorGeminiListGroup(tc.allowlist, "")
+			keys := installCursorGeminiHealthySource(t, 9382)
 			repo := &cursorGeminiListRepo{byGroup: map[int64][]service.Account{
 				group.ID: {
 					cursorGeminiNativeAccount(9381),
-					cursorGeminiCursorAccount(9382, []int64{group.ID}, nil, map[string]any{
+					cursorGeminiCursorAccount(9382, []int64{group.ID}, ptrInt64(keys[9382]), map[string]any{
 						cursorGeminiListModelA: "upstream-a",
 					}),
 				},
@@ -766,9 +841,10 @@ func TestCursorGeminiListModelsForcedAntigravitySkipsCursor(t *testing.T) {
 func TestCursorGeminiListModelsProjectionBoundaries(t *testing.T) {
 	group := cursorGeminiListGroup(nil, "")
 	otherGroupID := int64(9399)
+	keys := installCursorGeminiHealthySource(t, 9401, 9402)
 	repo := &cursorGeminiListRepo{byGroup: map[int64][]service.Account{
 		group.ID: {
-			cursorGeminiCursorAccount(9401, []int64{group.ID}, nil, map[string]any{
+			cursorGeminiCursorAccount(9401, []int64{group.ID}, ptrInt64(keys[9401]), map[string]any{
 				"":                     "upstream-empty",
 				"*":                    "upstream-star",
 				"gpt-*":                "upstream-wildcard",
@@ -778,7 +854,7 @@ func TestCursorGeminiListModelsProjectionBoundaries(t *testing.T) {
 		},
 		// 另一个分组的 Cursor 账号：本组目录不得出现它的任何能力。
 		otherGroupID: {
-			cursorGeminiCursorAccount(9402, []int64{otherGroupID}, nil, map[string]any{
+			cursorGeminiCursorAccount(9402, []int64{otherGroupID}, ptrInt64(keys[9402]), map[string]any{
 				"leaked-from-other-group": "upstream-leak",
 			}),
 		},
@@ -801,21 +877,33 @@ func TestCursorGeminiListModelsProjectionBoundaries(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestCursorGeminiListModelsSourceStateClassification 钉死来源门的三种事实：耗尽不是停供
-// （仍贡献目录）、未绑定来源照常贡献、绑定来源但读取失败失败关闭（已在 503 用例覆盖）。
+// （仍贡献目录）、合法来源照常贡献、绑定来源但读取失败失败关闭（已在 503 用例覆盖）。
+//
+// A04-G 变更点：来源门对「无有效归属激活码」一律明确拒绝（quota_key_source_unbound），
+// 因此原本"未绑定来源照常贡献"的夹具改为绑定一个合法来源——本用例验证的仍是"只有
+// 码终态（expired）才停供，耗尽与可用来源都继续贡献目录"。
 func TestCursorGeminiListModelsSourceStateClassification(t *testing.T) {
 	group := cursorGeminiListGroup(nil, "")
 	exhaustedKey := int64(9701)
-	installCursorGeminiQuotaKeyState(t, cursorGeminiListQuotaKeyState{statuses: map[int64]string{
-		exhaustedKey: domain.QuotaKeyStatusExhausted,
-	}})
+	activeKey := cursorGeminiSourceKeyID(9412)
+	installCursorGeminiQuotaKeySource(t, cursorGeminiListQuotaKeyState{
+		statuses: map[int64]string{
+			exhaustedKey: domain.QuotaKeyStatusExhausted,
+			activeKey:    domain.QuotaKeyStatusActive,
+		},
+		snapshots: map[int64][]byte{
+			exhaustedKey: cursorGeminiFreshUsageSnapshot(400, 86),
+			activeKey:    cursorGeminiFreshUsageSnapshot(400, 86),
+		},
+	})
 	repo := &cursorGeminiListRepo{byGroup: map[int64][]service.Account{
 		group.ID: {
 			// 激活码耗尽（拉号失败占位，不是供给终态）：账号仍贡献目录。
 			cursorGeminiCursorAccount(9411, []int64{group.ID}, &exhaustedKey, map[string]any{
 				cursorGeminiListModelA: "upstream-a",
 			}),
-			// 未绑定来源：不构成来源否决。
-			cursorGeminiCursorAccount(9412, []int64{group.ID}, nil, map[string]any{
+			// 合法可用来源：不构成来源否决。
+			cursorGeminiCursorAccount(9412, []int64{group.ID}, &activeKey, map[string]any{
 				cursorGeminiListModelB: "upstream-b",
 			}),
 		},
@@ -829,5 +917,5 @@ func TestCursorGeminiListModelsSourceStateClassification(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Equal(t, []string{"models/" + cursorGeminiListModelA, "models/" + cursorGeminiListModelB},
 		cursorGeminiModelNames(t, rec),
-		"激活码耗尽/未绑定来源都不是停供，二者都应贡献目录")
+		"激活码耗尽/合法可用来源都不是停供，二者都应贡献目录")
 }
