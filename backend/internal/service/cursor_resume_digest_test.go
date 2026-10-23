@@ -328,7 +328,9 @@ func TestCursorResumeResponsesPreviousResponseIDOmittedHistory(t *testing.T) {
 	require.Equal(t, 1, fixture.intake.callCount())
 }
 
-// TestCursorResumeResponsesUnknownPreviousResponseID 覆盖清单第 4 条：未知 ID 明确拒绝。
+// TestCursorResumeResponsesUnknownPreviousResponseID 覆盖清单第 4 条：
+// 携带 previous_response_id 未命中索引、但本批 call_1 命中（混合关联）→ 明确 400 拒绝，
+// 不得复用全未知哨兵（§25.17.4：任一 ID 命中则整批必须一致，previous_response_id 不匹配即 400）。
 func TestCursorResumeResponsesUnknownPreviousResponseID(t *testing.T) {
 	fixture := newCursorResumeFixture(t, CursorResumeProtocolResponses, []byte(cursorResumeTestResponsesFirst), "cursor-test-model",
 		[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "mc-1", "resp_1")
@@ -340,7 +342,8 @@ func TestCursorResumeResponsesUnknownPreviousResponseID(t *testing.T) {
 }`))
 	require.NoError(t, err)
 	_, identifyErr := fixture.svc.IdentifyResume(probe)
-	require.ErrorIs(t, identifyErr, ErrCursorResumeUnknownAssociation)
+	require.ErrorIs(t, identifyErr, ErrCursorResumeStaleBatch,
+		"previous_response_id 未命中但 call_1 命中属混合关联，必须明确 400 而非全未知哨兵")
 	status, _ := CursorResumeHTTPStatus(identifyErr)
 	require.Equal(t, http.StatusBadRequest, status)
 	require.Equal(t, 0, fixture.intake.callCount())
@@ -454,7 +457,9 @@ func TestCursorResumeUnknownCallID(t *testing.T) {
 	require.Nil(t, ticket)
 	require.Equal(t, 0, fixture.intake.callCount())
 
-	// 已登记 ID 与未登记 ID 混在同一批：整批明确 400（不部分消费）。
+	// 已登记 ID 与未登记 ID 混在同一批：整批明确 400（不部分消费），
+	// 严格区分于全未知哨兵（§25.17.4 行 4：混合关联不得复用 ErrCursorResumeUnknownAssociation，
+	// 否则会让混合续轮逃到普通/非 Cursor 供应方）。
 	mixedProbe, probeErr := CursorProbeResumeRequest(CursorResumeProtocolChat, []byte(`{
   "model": "cursor-test-model",
   "messages": [
@@ -469,7 +474,8 @@ func TestCursorResumeUnknownCallID(t *testing.T) {
 }`))
 	require.NoError(t, probeErr)
 	_, mixedErr := fixture.svc.IdentifyResume(mixedProbe)
-	require.ErrorIs(t, mixedErr, ErrCursorResumeUnknownAssociation)
+	require.ErrorIs(t, mixedErr, ErrCursorResumeUnknownCallID,
+		"已命中+夹未知属混合关联，必须走 unknown_call_id 而非全未知哨兵")
 	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, mixedErr))
 	require.Equal(t, 0, fixture.intake.callCount())
 }
@@ -1141,4 +1147,157 @@ func TestCursorResumeResponsesUnpairedOutputRejected(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, mixedErr))
 	require.Zero(t, svc.sessions.sessionCount())
 	require.Zero(t, svc.sessions.indexCount())
+}
+
+// ---------------------------------------------------------------------------
+// T-8：交付侧 / 续轮侧摘要对称性（R5-1 缺陷的直接反例）
+// ---------------------------------------------------------------------------
+//
+// 缺陷形态：交付侧登记 assistant 文本项时用**固定空文本**，而续轮侧按客户端回传的
+// 正文重算前缀摘要 —— 同一逻辑内容两侧摘要必然不同，探针单独绿而全链路必然红。
+//
+// 反例断言（不依赖 HTTP/上游）：给定"已交付一批 + 客户端原样回传"，交付侧会话摘要必须
+// 与续轮重算的前缀摘要**逐项相等**（四个协议各一条）。
+
+// TestCursorDeliveredHistoryMatchesResumePrefix 锁死"交付侧 == 续轮前缀侧"摘要契约。
+func TestCursorDeliveredHistoryMatchesResumePrefix(t *testing.T) {
+	type testCase struct {
+		name      string
+		protocol  CursorResumeProtocol
+		firstBody string
+		// assistantText 是本次交付实际产出的 assistant 正文（续轮请求会原样回传）。
+		assistantText string
+		// resumeBody 按 assistantText 生成续轮请求体（含本批结果尾部）。
+		resumeBody func(text string) string
+		calls      []cursorToolCallCapture
+	}
+
+	weatherArgs := `{"city":"hz"}`
+	chatResume := func(text string) string {
+		return `{
+  "model": "cursor-test-model",
+  "messages": [
+    {"role": "user", "content": "weather please"},
+    {"role": "assistant", "content": "` + text + `", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "` + `{\"city\": \"hz\"}` + `"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+  ],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+}`
+	}
+	messagesResume := func(text string) string {
+		return `{
+  "model": "cursor-test-model",
+  "max_tokens": 64,
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "weather please"}]},
+    {"role": "assistant", "content": [{"type": "text", "text": "` + text + `"}, {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": ` + weatherArgs + `}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "sunny"}]}]}
+  ],
+  "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]
+}`
+	}
+	responsesResume := func(text string) string {
+		return `{
+  "model": "cursor-test-model",
+  "instructions": "be brief",
+  "input": [
+    {"type": "message", "role": "user", "content": "weather please"},
+    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "` + text + `"}]},
+    {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "` + `{\"city\": \"hz\"}` + `"},
+    {"type": "function_call_output", "call_id": "call_1", "output": "sunny"}
+  ],
+  "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+}`
+	}
+	geminiFirst := `{
+  "model": "cursor-test-model",
+  "contents": [{"role": "user", "parts": [{"text": "weather please"}]}],
+  "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {"type": "object"}}]}]
+}`
+	geminiResume := func(text string) string {
+		return `{
+  "model": "cursor-test-model",
+  "contents": [
+    {"role": "user", "parts": [{"text": "weather please"}]},
+    {"role": "model", "parts": [{"text": "` + text + `"}, {"functionCall": {"id": "call_1", "name": "get_weather", "args": ` + weatherArgs + `}}]},
+    {"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "get_weather", "response": {"result": "sunny"}}}]}
+  ],
+  "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {"type": "object"}}]}]
+}`
+	}
+
+	cases := []testCase{
+		{
+			name: "chat", protocol: CursorResumeProtocolChat,
+			firstBody: cursorResumeTestChatFirst, assistantText: "checking the weather",
+			resumeBody: chatResume,
+			calls:      []cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: weatherArgs}},
+		},
+		{
+			name: "messages", protocol: CursorResumeProtocolMessages,
+			firstBody: cursorResumeTestMessagesFirst, assistantText: "checking the weather",
+			resumeBody: messagesResume,
+			calls:      []cursorToolCallCapture{{ID: "toolu_1", Name: "get_weather", ArgsJSON: weatherArgs}},
+		},
+		{
+			name: "responses", protocol: CursorResumeProtocolResponses,
+			firstBody: cursorResumeTestResponsesFirst, assistantText: "checking the weather",
+			resumeBody: responsesResume,
+			calls:      []cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: weatherArgs}},
+		},
+		{
+			name: "gemini", protocol: CursorResumeProtocolGemini,
+			firstBody: geminiFirst, assistantText: "checking the weather",
+			resumeBody: geminiResume,
+			calls:      []cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: weatherArgs}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 交付侧：首 HTTP 计划 + 按**实际正文**并入本批 assistant 输出（生产同一函数）。
+			svc := &CursorExecutionService{sessions: newCursorSessionStore()}
+			record := svc.sessions.start(cursorSessionSpec{
+				protocol:       cursorResumeWriterProtocol(tc.protocol),
+				requestedModel: "cursor-test-model",
+				upstreamModel:  "cursor-upstream-cursor-test-model",
+				accountID:      42,
+				quotaKeyID:     7,
+				indexProtocol:  string(tc.protocol),
+				identity:       cursorResumeTestIdentity,
+			})
+			svc.sessions.attachOwner(record, svc)
+			record.recordPlan(cursorResumeTestIdentity,
+				cursorResumePlanForTest(t, tc.protocol, []byte(tc.firstBody), "cursor-test-model"))
+
+			delegations := newLocalCursorToolDelegations()
+			batch := &cursorToolBatch{modelCallID: "mc-1", sealed: true}
+			for _, call := range tc.calls {
+				batch.delegations = append(batch.delegations, call)
+				batch.started = append(batch.started, call.ID)
+			}
+			delegations.mu.Lock()
+			delegations.all = append(delegations.all, batch)
+			delegations.mu.Unlock()
+
+			callIDs := make([]string, 0, len(tc.calls))
+			for _, call := range tc.calls {
+				callIDs = append(callIDs, call.ID)
+			}
+			require.NoError(t, appendCursorBatchAssistantHistory(
+				record.historyDigest, tc.protocol, tc.assistantText, callIDs, delegations))
+
+			// 续轮侧：客户端原样回传（正文 + 工具调用 + 本批结果）→ 前缀摘要须与交付侧相等。
+			plan := cursorResumePlanForTest(t, tc.protocol, []byte(tc.resumeBody(tc.assistantText)), "cursor-test-model")
+			require.Equal(t, record.historyDigest.ItemCount(), plan.history.ItemCount(),
+				"交付侧与续轮前缀的逻辑项数必须一致（%s）", tc.name)
+			require.True(t, record.historyDigest.Equal(plan.history),
+				"交付侧摘要必须等于续轮前缀摘要（同一逻辑内容两侧必然一致；%s）", tc.name)
+
+			// 反例：正文不同就必须不同（证明上面的相等不是"都退化成空文本"）。
+			other := cursorResumePlanForTest(t, tc.protocol, []byte(tc.resumeBody("different text")), "cursor-test-model")
+			require.False(t, record.historyDigest.Equal(other.history),
+				"正文不同时摘要必须不同（两侧都真的纳入了正文；%s）", tc.name)
+		})
+	}
 }

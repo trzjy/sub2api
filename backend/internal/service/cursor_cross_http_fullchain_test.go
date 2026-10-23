@@ -69,11 +69,16 @@ func fcToolRequestsListed(count uint64) []byte {
 	return cursorAppendBytesField(nil, cursorFldServerInteractionUpdate, update)
 }
 
-// fcTurnEnded 构造 interaction_update{14 turn_ended{input/output/cache_read}}。
-func fcTurnEnded(in, out, cacheRead uint64) []byte {
+// fcTurnEnded 构造 interaction_update{14 turn_ended{input/output/cache_read/cache_write}}。
+//
+// 四计费字段 f1–f4 全部显式编码（§25.17.5 A06①：proto optional 存在性与"真实 0"
+// 是两回事，cache_write=0 也必须出现在 wire 上，缺失会被 R1 完整性判定视为不完整
+// 而拒绝结算）。故 f4 即便为 0 也照常写入（非 0 值同样由编码产出）。
+func fcTurnEnded(in, out, cacheRead, cacheWrite uint64) []byte {
 	usage := cursorAppendVarintField(nil, cursorFldTurnEndedInputTokens, in)
 	usage = cursorAppendVarintField(usage, cursorFldTurnEndedOutputTokens, out)
 	usage = cursorAppendVarintField(usage, cursorFldTurnEndedCacheReadTokens, cacheRead)
+	usage = cursorAppendVarintField(usage, cursorFldTurnEndedCacheWriteTokens, cacheWrite)
 	update := cursorAppendBytesField(nil, cursorFldUpdateTurnEnded, usage)
 	return cursorAppendBytesField(nil, cursorFldServerInteractionUpdate, update)
 }
@@ -117,8 +122,8 @@ type cursorFullChainScript struct {
 	calls []cursorFullChainCall
 	// afterText 是收到真实结果后模型续跑产出的文本。
 	afterText string
-	// usage 是 turn_ended 的真实用量（input / output / cacheRead）。
-	usage [3]uint64
+	// usage 是 turn_ended 的真实用量（input / output / cacheRead / cacheWrite）。
+	usage [4]uint64
 	// hangAfterPhase1 为 true 时上游交付批次后就挂着（用于 deadline / 断连场景）。
 	hangAfterPhase1 bool
 	// textOnly 为 true 时 phase1 只吐文本（不交付工具批），用于"附着期间断连"：
@@ -248,7 +253,7 @@ func (u *cursorFullChainUpstream) batchFrames(calls []cursorFullChainCall, leadT
 func (u *cursorFullChainUpstream) phase2() []byte {
 	return append(joinFrames(
 		fcTextDelta(u.script.afterText),
-		fcTurnEnded(u.script.usage[0], u.script.usage[1], u.script.usage[2]),
+		fcTurnEnded(u.script.usage[0], u.script.usage[1], u.script.usage[2], u.script.usage[3]),
 	), fcEndStream()...)
 }
 
@@ -415,7 +420,7 @@ func cursorFullChainResumeBody(calls []cursorFullChainCall, results map[string]s
   "stream": true,
   "messages": [
     {"role": "user", "content": "weather please"},
-    {"role": "assistant", "content": "", "tool_calls": [` + strings.Join(toolCalls, ",") + `]},
+    {"role": "assistant", "content": "checking the weather", "tool_calls": [` + strings.Join(toolCalls, ",") + `]},
     ` + strings.Join(toolMsgs, ",\n    ") + `
   ],
   "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
@@ -544,7 +549,7 @@ func TestCursorCrossHTTPFullChainSingleTool(t *testing.T) {
 	upstream := newCursorFullChainUpstream(cursorFullChainScript{
 		calls:     calls,
 		afterText: "Hangzhou is sunny, 25C",
-		usage:     [3]uint64{12601, 15, 128},
+		usage:     [4]uint64{12601, 15, 128, 0},
 	})
 	svc := newCursorFullChainService(t, upstream)
 
@@ -649,7 +654,7 @@ func TestCursorCrossHTTPFullChainParallelSameName(t *testing.T) {
 	upstream := newCursorFullChainUpstream(cursorFullChainScript{
 		calls:     calls,
 		afterText: "Hangzhou sunny, Shanghai rainy",
-		usage:     [3]uint64{900, 40, 12},
+		usage:     [4]uint64{900, 40, 12, 0},
 	})
 	svc := newCursorFullChainService(t, upstream)
 
@@ -707,7 +712,7 @@ func TestCursorCrossHTTPFullChainToolFailureText(t *testing.T) {
 	upstream := newCursorFullChainUpstream(cursorFullChainScript{
 		calls:     calls,
 		afterText: "工具失败，改为文字说明",
-		usage:     [3]uint64{500, 20, 0},
+		usage:     [4]uint64{500, 20, 0, 0},
 	})
 	svc := newCursorFullChainService(t, upstream)
 	settlement := &cursorFullChainSettlement{}
@@ -955,7 +960,7 @@ func newCursorResumeGateFixture(t *testing.T) *cursorResumeGateFixture {
 	upstream := newCursorFullChainUpstream(cursorFullChainScript{
 		calls:     calls,
 		afterText: "Hangzhou is sunny, 25C",
-		usage:     [3]uint64{12601, 15, 128},
+		usage:     [4]uint64{12601, 15, 128, 0},
 	})
 	svc := newCursorFullChainService(t, upstream)
 	quotaKeys, ok := svc.quotaKeys.(*identityCursorQuotaKeys)
@@ -1151,8 +1156,12 @@ func TestCursorResumeGateDeniedAfterCompleteUsageSettlesOnce(t *testing.T) {
 		t.Run(entry, func(t *testing.T) {
 			f := newCursorResumeGateFixture(t)
 			// 等价于本会话此前已经收到过真实 turn_ended：四个计费字段齐全。
+			// 四个计费字段逐一 Seen（R1 Seen 语义）：F1InputSeen..F4CacheWriteSeen
+			// 全置位，否则 billingFieldsComplete 判不完整、结算入口不记 complete（红线：
+			// proto optional 缺失一律按"无完整 usage"处理，不结算、不写零账假成功）。
 			f.record.noteTurnUsage(cursorTurnUsage{
 				Seen: true, Input: 12601, Output: 15, CacheRead: 128, EndedAtMS: 1700000000000,
+				F1InputSeen: true, F2OutputSeen: true, F3CacheReadSeen: true, F4CacheWriteSeen: true,
 			}, "turn_ended")
 
 			account := cursorResumeGateEligibleAccount()

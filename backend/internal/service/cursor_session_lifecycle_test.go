@@ -312,7 +312,12 @@ func TestCursorCrossHTTPTwoTurnsSettleOnce(t *testing.T) {
 	// 这里继续续轮，验证"同一会话只结算一次"。
 	detach2, err := record.attachHTTP(context.Background())
 	require.NoError(t, err)
-	record.noteTurnUsage(cursorTurnUsage{Seen: true, Input: 100, Output: 40, CacheRead: 8, EndedAtMS: 1000}, "stream_write_done")
+	// 真实完整 usage：四个计费字段逐一出现（存在性），含 real-zero 的 cache_write。
+	record.noteTurnUsage(cursorTurnUsage{
+		Seen:  true,
+		Input: 100, Output: 40, CacheRead: 8, CacheWrite: 0, EndedAtMS: 1000,
+		F1InputSeen: true, F2OutputSeen: true, F3CacheReadSeen: true, F4CacheWriteSeen: true,
+	}, "stream_write_done")
 	detach2()
 	require.EqualValues(t, 0, userSlot.releases.Load(), "HTTP2 返回后槽位仍归会话持有（未终结）")
 
@@ -335,6 +340,8 @@ func TestCursorSessionSettlementEmptyTurnEndedNoFakeSuccess(t *testing.T) {
 		missing string
 	}{
 		{name: "从未收到 turn_ended", usage: cursorTurnUsage{}, missing: "turn_ended_missing"},
+		// 空 turn_ended 帧：收到帧（Seen=true）但四个计费字段一个都没出现，
+		// 现行实现返回 turn_ended_fields_missing（语义不变：不完整=零提交）。
 		{name: "空 turn_ended 帧", usage: cursorTurnUsage{Seen: true}, missing: "turn_ended_fields_missing"},
 	}
 	for _, tc := range cases {
@@ -382,8 +389,13 @@ func TestCursorSessionSettlementRealZeroDistinguished(t *testing.T) {
 	record.settlement = func(_ context.Context, ev CursorSettlementEvent) { complete.Store(ev.UsageComplete) }
 	record.mu.Unlock()
 
-	// 输出为 0（真实 0）但输入与结束时刻存在：完整真实 usage。
-	record.noteTurnUsage(cursorTurnUsage{Seen: true, Input: 9, Output: 0, EndedAtMS: 123}, "stream_write_done")
+	// 输出为 0（真实 0）、cache_read/cache_write 也为 0（真实 0），四个字段逐一出现：
+	// 完整真实 usage，不得被当成字段缺失。
+	record.noteTurnUsage(cursorTurnUsage{
+		Seen:  true,
+		Input: 9, Output: 0, CacheRead: 0, CacheWrite: 0, EndedAtMS: 123,
+		F1InputSeen: true, F2OutputSeen: true, F3CacheReadSeen: true, F4CacheWriteSeen: true,
+	}, "stream_write_done")
 	svc.finishCursorSession(record, "completed")
 	require.True(t, complete.Load(), "真实 0 的计数字段不得被当成字段缺失")
 }

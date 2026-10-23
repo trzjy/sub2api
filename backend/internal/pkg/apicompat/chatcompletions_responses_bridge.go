@@ -2302,10 +2302,15 @@ func (state *ChatCompletionsToResponsesStreamState) chatOutput() []ResponsesOutp
 		if strings.TrimSpace(arguments) == "" {
 			arguments = "{}"
 		}
+		// §25.17.2「实际 ID」：completed 输出数组必须复用流式阶段已分配的同一个条目 ID
+		// （state.ToolItemIDs[i]），不得为同一 call 在 added/done 与 completed 里各生成一份
+		// 新 ID（否则同一 HTTP 内同一工具条目出现两个 ID）。流式未分配时回退生成，保证非
+		// 流式转换路径不受影响。
+		itemID := nonEmpty(state.ToolItemIDs[i], generateItemID())
 		if state.toolIsCustom[i] {
 			outputs = append(outputs, ResponsesOutput{
 				Type:   "custom_tool_call",
-				ID:     generateItemID(),
+				ID:     itemID,
 				CallID: toolCall.ID,
 				Name:   customNameForStreamTool(state, toolCall.Function.Name),
 				Input:  extractCustomToolCallInput(arguments),
@@ -2316,7 +2321,7 @@ func (state *ChatCompletionsToResponsesStreamState) chatOutput() []ResponsesOutp
 		if state.toolIsToolSearch[i] {
 			outputs = append(outputs, ResponsesOutput{
 				Type:      "tool_search_call",
-				ID:        generateItemID(),
+				ID:        itemID,
 				CallID:    toolCall.ID,
 				Arguments: arguments,
 				Status:    "completed",
@@ -2329,7 +2334,7 @@ func (state *ChatCompletionsToResponsesStreamState) chatOutput() []ResponsesOutp
 		}
 		outputs = append(outputs, ResponsesOutput{
 			Type:      "function_call",
-			ID:        generateItemID(),
+			ID:        itemID,
 			CallID:    toolCall.ID,
 			Name:      name,
 			Namespace: namespace,

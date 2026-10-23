@@ -306,7 +306,7 @@ func TestCursorResumeSwitchesStreamToNonStream(t *testing.T) {
 	upstream := newCursorFullChainUpstream(cursorFullChainScript{
 		calls:     calls,
 		afterText: "Hangzhou is sunny",
-		usage:     [3]uint64{120, 7, 3},
+		usage:     [4]uint64{120, 7, 3, 0},
 	})
 	svc := newCursorFullChainService(t, upstream)
 	settlement := &cursorFullChainSettlement{}
@@ -347,6 +347,39 @@ func TestCursorGeminiToolDeclarationSurvivesNativeAdapter(t *testing.T) {
 	mode, _, err := cursorGeminiToolChoiceMode(body)
 	require.NoError(t, err)
 	require.Equal(t, "auto", mode)
+}
+
+// TestReauditGeminiAllowedSubsetReachesActualToolDeclaration 是验收报告 R4 的反例转绿探针。
+//
+// 反例：声明 allowed_tool + forbidden_tool 两个工具，ANY 仅允许前者；修正前实际转换仍携带
+// 两个工具及 required，禁止本轮使用的工具被暴露给模型。修正后实际转换 JSON 必须只含被允许的
+// 声明子集，且 tool_choice 保持 required 语义。
+func TestReauditGeminiAllowedSubsetReachesActualToolDeclaration(t *testing.T) {
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"use a tool"}]}],` +
+		`"tools":[{"functionDeclarations":[` +
+		`{"name":"allowed_tool","description":"allowed","parameters":{"type":"object"}},` +
+		`{"name":"forbidden_tool","description":"forbidden","parameters":{"type":"object"}}` +
+		`]}],` +
+		`"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["allowed_tool"]}}}`)
+
+	cc, err := cursorGeminiRequestToChatCompletions(body, "cursor-sonnet", true)
+	require.NoError(t, err, "ANY+allowedFunctionNames 必须是合法出站请求")
+
+	var req apicompat.ChatCompletionsRequest
+	require.NoError(t, json.Unmarshal(cc, &req), "转换结果必须是合法 Chat 请求: %s", cc)
+
+	// 实际转换 JSON 断言（不只校验名称存在）：只含被允许的声明子集。
+	require.Len(t, req.Tools, 1, "ANY+allowedFunctionNames 必须只暴露允许子集，禁止带 forbidden_tool")
+	require.Equal(t, "allowed_tool", req.Tools[0].Function.Name)
+	require.JSONEq(t, `"required"`, string(req.ToolChoice), "ANY 单名/子集仍保持 required 语义")
+
+	// 反向确认 forbidden_tool 不在实际上游声明里。
+	require.NotContains(t, string(cc), "forbidden_tool", "禁止使用的工具不得进入实际上游声明")
+
+	// 模式/允许集合语义经出站前校验通过（零 400）。
+	mode, _, err := cursorGeminiToolChoiceMode(body)
+	require.NoError(t, err)
+	require.Equal(t, "required", mode)
 }
 
 func TestCursorGeminiToolConfigAndFunctionPartsMapping(t *testing.T) {
