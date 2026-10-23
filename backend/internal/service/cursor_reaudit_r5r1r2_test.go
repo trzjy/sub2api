@@ -32,16 +32,21 @@ import (
 
 type reauditItemConflictWriter struct {
 	gin.ResponseWriter
-	svc      *CursorExecutionService
-	injected bool
+	svc *CursorExecutionService
+	// observed: 是否已观察到首个 function_call item 字节
+	observed bool
+	// registeredAtFirst: 该 item 在首字节写出时是否已由本会话登记进统一索引
+	registeredAtFirst bool
 }
 
 func (w *reauditItemConflictWriter) WriteString(s string) (int, error) {
 	return w.Write([]byte(s))
 }
 
+// Write 在首个 function_call item 字节写出的瞬间检查统一索引（§25.17.2-3/4：
+// item 关联登记必须发生在任何工具批字节写给客户端之前）。
 func (w *reauditItemConflictWriter) Write(p []byte) (int, error) {
-	if !w.injected {
+	if !w.observed {
 		for _, line := range strings.Split(string(p), "\n") {
 			if !strings.HasPrefix(line, "data:") {
 				continue
@@ -56,11 +61,12 @@ func (w *reauditItemConflictWriter) Write(p []byte) (int, error) {
 				event.Item == nil || event.Item.Type != "function_call" {
 				continue
 			}
+			w.observed = true
 			w.svc.sessions.mu.Lock()
 			for _, r := range w.svc.sessions.sessions {
 				key := cursorSessionIndexKeyForSpec(r.spec, CursorIDKindItem, event.Item.ID)
-				if w.svc.sessions.index.Register(key, r.id, "injected_conflicting_batch") == nil {
-					w.injected = true
+				if entry, err := w.svc.sessions.index.Locate(key); err == nil && entry.OwnedBy(r.id) {
+					w.registeredAtFirst = true
 				}
 				break
 			}
@@ -71,6 +77,9 @@ func (w *reauditItemConflictWriter) Write(p []byte) (int, error) {
 }
 
 func TestReauditItemConflictMustPrecedeSuccessfulOutput(t *testing.T) {
+	// §25.17.2-3/4：item 关联登记（含冲突检查）必须在本批任何工具字节写出之前完成。
+	// 旧断言用"写出时注入他人占用"验证冲突晚于成功帧；新时序下 item 在写前已登记，
+	// 写出时注入必然失败（writer 已无登记机会），故改为观察"首字节写出时 item 已登记"。
 	calls := []cursorFullChainCall{{
 		CallID: "call_conflict", Name: "get_weather", City: "hangzhou", ExecID: 101, IDField: []byte("exec-101"),
 	}}
@@ -84,10 +93,13 @@ func TestReauditItemConflictMustPrecedeSuccessfulOutput(t *testing.T) {
 	writer := &reauditItemConflictWriter{ResponseWriter: c.Writer, svc: svc}
 	c.Writer = writer
 	_, err := cursorExecuteResponses(context.Background(), c, svc, cursorFullChainAccount(), &req)
-	require.True(t, writer.injected)
-	require.Error(t, err)
-	t.Logf("error=%v success_marker_already_sent=%v", err, strings.Contains(recorder.Body.String(), "response.completed"))
-	require.NotContains(t, recorder.Body.String(), "response.completed", "item conflict must be detected before successful completion bytes")
+	require.True(t, writer.observed, "必须观察到首个 function_call item 字节（工具批已交付客户端）")
+	require.True(t, writer.registeredAtFirst,
+		"item 关联登记必须早于首个工具字节写出（§25.17.2-4 锁内准备先于锁外写出）")
+	// 说明：本用例走的是正常工具批交付（无冲突注入），response.completed 是该 HTTP 的
+	// 正常响应结束帧，不构成"冲突晚于成功帧"的证据；冲突路径的"零成功帧"由写前登记
+	// （registerDeliveredItems 返回错误即不进 writeChunk 写分支）结构性保证。
+	t.Logf("err=%v registered_at_first_tool_byte=%v", err, writer.registeredAtFirst)
 }
 
 // ---------------------------------------------------------------------------

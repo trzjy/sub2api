@@ -578,7 +578,7 @@ func (s *CursorExecutionService) executeHTTP(
 	// 本 HTTP 的 chunk 一律使用该 HTTP 的实际响应 ID（不是固定常量）。
 	parser.attachOutputIDSource(session.output.responseID)
 
-	writer, restore, werr := s.beginResponseWriter(c, req, resp, responseID)
+	writer, restore, werr := s.beginResponseWriter(c, req, resp, responseID, session)
 	if werr != nil {
 		return nil, werr
 	}
@@ -617,10 +617,12 @@ func (s *CursorExecutionService) cursorDrainAttachedOutput(
 				// 委托检查点必须带着已准备好的批：缺失说明准备阶段未完成，绝不当作交付成功。
 				return nil, fmt.Errorf("%w: delegation checkpoint without prepared batch", ErrCursorBatchIncomplete)
 			}
-			// 写出成功字节**之前**先完成条目 ID 关联与冲突检查（§25.17.2-3）：一旦冲突即返回
-			// 原错误，绝不写出终止帧（response.completed），实现"零成功字节"。条目 ID 取自本
-			// HTTP 已实际写出的内容（aggregated 字节，与 writer.collectedItemIDs 同源但更可靠：
-			// 不依赖 writer 是否被包装、也不区分流式/非流式）。
+			// 任何工具批字节写给 HTTP **之前**完成条目 ID 关联与冲突检查（§25.17.2-3/4，
+			// 探针"首个工具字节写出前索引已登记"）：Responses 流式路径由协议 writer 在本批
+			// 转换后、写 SSE 前先登记，这里为幂等兜底与 nonstream 聚合写出前的登记。一旦冲突
+			// 即返回原错误，绝不写出终止帧（response.completed），实现"零成功字节"。条目 ID
+			// 取自本 HTTP 已实际写出的内容（aggregated 字节，与 writer.collectedItemIDs 同源
+			// 但更可靠：不依赖 writer 是否被包装、也不区分流式/非流式）。
 			if err := s.commitDeliveredBatchItems(session, ev.prepared, cursorCollectDeliveredItemIDs(writer, aggregated.Bytes())); err != nil {
 				return nil, err
 			}
@@ -813,7 +815,7 @@ func cursorAggregateSSEToCompletion(body []byte) ([]byte, error) {
 // 包住真实 writer，并把既有 Header 换成独立 map（避免桥接内部头直接落连接）。
 // 返回 restore 供调用方在写出后恢复 c.Writer。
 func (s *CursorExecutionService) beginResponseWriter(
-	c *gin.Context, req *CursorExecutionRequest, resp *CursorUpstreamResponse, responseID string,
+	c *gin.Context, req *CursorExecutionRequest, resp *CursorUpstreamResponse, responseID string, session *cursorSessionRecord,
 ) (io.Writer, func(), error) {
 	if c == nil {
 		return nil, nil, fmt.Errorf("%w: response writer unavailable", ErrCursorProtocolBridgeUnavailable)
@@ -829,7 +831,7 @@ func (s *CursorExecutionService) beginResponseWriter(
 		return c.Writer, nil, nil
 	}
 	original := c.Writer
-	converted := newCursorProtocolWriter(original, req.Stream, req.Protocol, req.Model, req.Tools, responseID)
+	converted := newCursorProtocolWriter(original, req.Stream, req.Protocol, req.Model, req.Tools, responseID, s, session)
 	c.Writer = converted
 	restore := func() { c.Writer = original }
 	return converted, restore, nil
@@ -1764,6 +1766,11 @@ type cursorProtocolWriter struct {
 	responseID string
 	// terminal 表示本次 finalize 对应真实终态（而不是工具批交付检查点）。
 	terminal bool
+	// svc 与 session 供本 writer 在把工具批字节写给 HTTP **之前**完成 item
+	// Register+冲突检查（§25.17.2-3/4：锁内准备 → 锁外写完整批 → 锁内提交 delivered）。
+	// 任何工具批字节到达客户端之前，本批工具结果条目 ID 必须已登记进统一索引。
+	svc     *CursorExecutionService
+	session *cursorSessionRecord
 
 	// 流式：未消费的 SSE 片段 + 目标协议状态机。
 	pending   []byte
@@ -1843,6 +1850,21 @@ func (w *cursorProtocolWriter) collectedItemIDs() []string {
 	return append([]string(nil), w.itemIDs...)
 }
 
+// registerDeliveredItems 在本 HTTP 把工具批字节写给客户端**之前**完成已收集 item ID 的
+// 统一索引登记与冲突检查（§25.17.2-3/4）。只对 Responses 出口（有 item ID 收集）有作用；
+// 同一批已在先前 chunk 写前登记过的 ID 由 registerItemIDBatch 幂等跳过。冲突即返回原
+// 错误：调用方（writeChunk）据此在任何含该 item 的 SSE 帧写出之前终止。
+func (w *cursorProtocolWriter) registerDeliveredItems() error {
+	if w == nil || w.svc == nil || w.session == nil {
+		return nil
+	}
+	ids := w.collectedItemIDs()
+	if len(ids) == 0 {
+		return nil
+	}
+	return w.svc.registerLiveItemIDs(w.session, ids)
+}
+
 // cursorGeminiStreamCall 是 Gemini 流式出口累加的一条 functionCall。
 type cursorGeminiStreamCall struct {
 	ID   string
@@ -1864,6 +1886,8 @@ func newCursorProtocolWriter(
 	model string,
 	tools cursorResponsesToolMeta,
 	responseID string,
+	svc *CursorExecutionService,
+	session *cursorSessionRecord,
 ) *cursorProtocolWriter {
 	w := &cursorProtocolWriter{
 		ResponseWriter: parent,
@@ -1873,6 +1897,8 @@ func newCursorProtocolWriter(
 		stream:         stream,
 		tools:          tools,
 		responseID:     strings.TrimSpace(responseID),
+		svc:            svc,
+		session:        session,
 	}
 	switch mode {
 	case cursorProtocolAnthropic:
@@ -2025,6 +2051,12 @@ func (w *cursorProtocolWriter) writeChunk(chunk *apicompat.ChatCompletionsChunk)
 		events := apicompat.ChatCompletionsChunkToResponsesEvents(chunk, w.respState)
 		// 实际交付的条目 ID 在写出之前就从本批事件里取：写出失败不会留下"未交付却登记"的 ID。
 		w.noteResponsesEventsItemIDs(events)
+		// §25.17.2-3/4：任何工具批字节写给客户端之前，先（服务锁内）完成 item Register
+		// 与冲突检查。本批实际 item ID 已由上面的转换确定；冲突时返回原错误，绝不把含该
+		// item 的任一 SSE 帧写给客户端（零成功字节），符合探针"首个工具字节写出前索引已登记"。
+		if err := w.registerDeliveredItems(); err != nil {
+			return err
+		}
 		for _, event := range events {
 			sse, err := apicompat.ResponsesEventToSSE(event)
 			if err != nil {
@@ -3479,20 +3511,17 @@ func CursorSettlementDurableRequestID(billingEventID string) string {
 	return resolveUsageBillingRequestID(WithCursorSessionBillingEventID(context.Background(), billingEventID), "")
 }
 
-// cursorUsageCompleteness 判定是否取得了"完整的真实 usage"（§25.5）。
+// cursorUsageCompleteness 判定是否取得了"完整的真实 usage"（§25.5 / §25.17.5 A06）。
 //
-// 只有原生 TurnEnded 出现过（Seen）**且**承载了至少一个真实计数字段或结束时刻时，
-// 才认为拿到了完整真实 usage。空 TurnEnded 帧（字段全缺）在当前 CR-B 解析层与
-// "真实 0"折叠成同一组 0，故本层以"全部为 0 且无结束时刻"判定为字段缺失：
+// 判定完全委托给解析层存在性：billingFieldsComplete() 要求四个计费字段
+// （input / output / cache_read / cache_write）逐一出现且合法——四项全 0 也是
+// 真实完整用量，绝不因"非零总和"或结束时间戳反推存在性。缺任一字段即不完整：
 // 不结算、不估算扣费、不写零 usage 假成功。
-//
-// 字段级存在性（缺失 vs 真实 0）需要 CR-B 解析层提供，本单不改其解析逻辑，
-// 已登记为域外待办。
 func cursorUsageCompleteness(u cursorTurnUsage) (bool, string) {
 	if !u.Seen {
 		return false, "turn_ended_missing"
 	}
-	if u.Input == 0 && u.Output == 0 && u.CacheRead == 0 && u.CacheWrite == 0 && u.EndedAtMS == 0 {
+	if !u.billingFieldsComplete() {
 		return false, "turn_ended_fields_missing"
 	}
 	return true, ""
@@ -5701,8 +5730,10 @@ func (s *CursorExecutionService) ResumeCursorSession(
 	record := ticket.session
 
 	// ① 身份 / 账号 / 协议 / 模型：任一不符即失败关闭（不泄露是否存在别人的会话）。
-	if !ticket.Identity.compatibleWith(in.Identity) {
-		return nil, newCursorResumeError(http.StatusForbidden, "identity_mismatch", ErrCursorResumeIdentityMismatch)
+	// 身份核验去重：已前移到两个 ServeCursorResume（R2 先身份后资格），此处复用同一
+	// helper 保持直接调用层的既有入参保护，不重复实现第二套身份判定。
+	if denial := cursorResumeIdentityDenial(ticket, in.Identity); denial != nil {
+		return nil, denial
 	}
 	if account == nil || !isCursorAccount(account) {
 		return nil, newCursorResumeError(http.StatusBadRequest, "account_unavailable", ErrCursorResumeStaleBatch)
@@ -5833,7 +5864,7 @@ func (s *CursorExecutionService) ResumeCursorSession(
 			ToolChoiceName: toolName,
 		}
 		responseID := record.output.responseID()
-		writer, restore, werr := s.beginResponseWriter(c, drainReq, nil, responseID)
+		writer, restore, werr := s.beginResponseWriter(c, drainReq, nil, responseID, record)
 		if werr != nil {
 			s.finishCursorSession(record, "resume_writer_failed")
 			return nil, werr
@@ -6531,10 +6562,11 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 // 若 finalizer 已在锁内胜出，则**不得**再提交 waiting_tools：返回明确终止错误，
 // 不追加成功帧、不恢复会话。
 //
-// 条目 ID 冲突检查（commitDeliveredBatchItems）必须在写出任何成功字节**之前**完成
-// （见 cursorDrainAttachedOutput 的 isDeleg 分支）：一旦冲突，函数返回原错误、绝不写
-// 终止帧、不落 waiting_tools，保证失败即零成功字节（§25.17.2-3）。本方法只做"写后
-// 提交 delivered 状态"，不再重复条目 ID 登记/JSON 解码/ID 生成。
+// 条目 ID 冲突检查（commitDeliveredBatchItems）必须在写出任何成功字节**之前**完成：
+// Responses 流式路径由 cursorProtocolWriter.writeChunk 在本批转换后、写 SSE 前先登记
+// （主）；此处是同一检查的幂等兜底与 nonstream 聚合写出前的登记。一旦冲突，返回原
+// 错误、绝不写终止帧、不落 waiting_tools，保证失败即零成功字节（§25.17.2-3）。本方法
+// 只做"写后提交 delivered 状态"，不再重复条目 ID 的 JSON 解码/ID 生成。
 func (s *CursorExecutionService) commitDeliveredBatch(
 	record *cursorSessionRecord, prepared *cursorPreparedBatch, itemIDs []string,
 ) error {
@@ -6546,6 +6578,10 @@ func (s *CursorExecutionService) commitDeliveredBatch(
 
 // commitDeliveredBatchItems 把本 HTTP 实际交付的 Responses 工具结果条目 ID 与 call/response
 // 用同一个 Register、同一把索引登记（键含 item 种类），并在写成功字节前完成冲突检查。
+//
+// 幂等语义：本 HTTP 的流式写出路径已在 cursorProtocolWriter.writeChunk 转换后、写 SSE 前
+// 完成同一批 item 的登记（§25.17.2-3/4 锁内准备），此处对同一 session 同一批重复出现的
+// 条目直接跳过，不把自己重复登记误判为其它会话的冲突；他人/他批占用仍视为冲突返回。
 //
 // 任一条冲突即返回错误（调用方据此在写出终止帧之前终止，实现"零成功字节"）。finalizer
 // 清会话时随 DeleteSession 全清。无实际条目 ID（非 Responses 出口 / 空）时本步骤为空操作。
@@ -6560,17 +6596,59 @@ func (s *CursorExecutionService) commitDeliveredBatchItems(
 	if record.finishing || record.state == cursorSessionClosed {
 		return fmt.Errorf("%w: session finalized before item association", ErrCursorResumeNotWaiting)
 	}
+	return s.registerItemIDBatch(record, prepared.batchID, itemIDs)
+}
+
+// registerItemIDBatch 在 **调用方已持 record.mu** 时把本批工具结果条目 ID 登记进统一索引
+// 并完成冲突检查。同一 session 同一批已登记的条目跳过；其它 session / 其它批占用即冲突。
+func (s *CursorExecutionService) registerItemIDBatch(
+	record *cursorSessionRecord, batchID string, itemIDs []string,
+) error {
 	for _, itemID := range itemIDs {
 		id := strings.TrimSpace(itemID)
 		if id == "" {
 			continue
 		}
 		key := cursorSessionIndexKeyForSpec(record.spec, CursorIDKindItem, id)
-		if err := s.sessions.index.Register(key, record.id, prepared.batchID); err != nil {
+		if entry, err := s.sessions.index.Locate(key); err == nil {
+			if entry.OwnedBy(record.id) && entry.SameBatch(batchID) {
+				continue
+			}
+			return fmt.Errorf("%w: key=%s (existing session=%s batch=%s)",
+				ErrCursorSessionIndexConflict, key.String(), entry.SessionID, entry.BatchID)
+		}
+		if err := s.sessions.index.Register(key, record.id, batchID); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// registerLiveItemIDs 在本 HTTP 把**任何工具批字节写给客户端之前**（服务锁内）完成
+// Responses 工具结果条目 ID 的登记与冲突检查（§25.17.2-3/4 锁内准备）。
+//
+// 供 cursorProtocolWriter.writeChunk 在转换出本批实际 item ID 后、写 SSE 之前调用：
+// 一旦冲突即返回原错误，绝不把含该 item 的任一 SSE 帧写给客户端。batchID 取自本会话
+// 已准备未交付的批（prepareDeliveredBatch 在发布工具批字节前已设置 session.pending）。
+func (s *CursorExecutionService) registerLiveItemIDs(
+	record *cursorSessionRecord, itemIDs []string,
+) error {
+	if s == nil || record == nil {
+		return nil
+	}
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	if record.finishing || record.state == cursorSessionClosed {
+		return fmt.Errorf("%w: session finalized before item association", ErrCursorResumeNotWaiting)
+	}
+	batchID := ""
+	if record.pending != nil {
+		batchID = strings.TrimSpace(record.pending.batchID)
+	}
+	if batchID == "" {
+		return fmt.Errorf("%w: item association without prepared batch", ErrCursorBatchIncomplete)
+	}
+	return s.registerItemIDBatch(record, batchID, itemIDs)
 }
 
 // commitDeliveredBatchState 在**完整写出成功**之后提交正式历史与 waiting_tools 状态。
@@ -6858,8 +6936,15 @@ func (s *GatewayService) ServeCursorResume(
 	if err != nil {
 		return nil, fmt.Errorf("cursor: load resume account: %w", err)
 	}
+	// R2「先身份后资格」：在取回原账号后、任何会终结会话的资格处理之前证明请求所有权。
+	// 外来身份（不同 user / key / 组）直接 403 identity_mismatch，零会话副作用——不得在
+	// 身份核验前命中账号不合格分支（那条路径沿原 finalizer 终结原主人会话）。
+	if denial := cursorResumeIdentityDenial(ticket, in.Identity); denial != nil {
+		return nil, denial
+	}
 	// §25.17.3「A05续轮顺序」：定位到已登记会话并取回**本次读取**的原账号后、写工具
 	// 结果之前做唯一只读资格核验；拒绝即零工具结果写入，沿原 finalizer 终结旧会话。
+	// 此处的原主人账号不合格终结语义保留不变（身份已证明归属原主人）。
 	if guardErr := s.cursorExecution.guardResumeEligibility(ctx, ticket, account); guardErr != nil {
 		return nil, guardErr
 	}
@@ -6888,12 +6973,30 @@ func (s *OpenAIGatewayService) ServeCursorResume(
 	if err != nil {
 		return nil, fmt.Errorf("cursor: load resume account: %w", err)
 	}
+	// R2「先身份后资格」：与 GatewayService 同一顺序——先证明请求所有权（外来身份 403、
+	// 零会话副作用），再执行可终结会话的资格核验（两个入口只有一处实现，不另建平行链）。
+	if denial := cursorResumeIdentityDenial(ticket, in.Identity); denial != nil {
+		return nil, denial
+	}
 	// §25.17.3「A05续轮顺序」：与 GatewayService 同一核验、同一终结语义（两个入口只有
 	// 一处实现，不另建平行链）。
 	if guardErr := s.cursorExecution.guardResumeEligibility(ctx, ticket, account); guardErr != nil {
 		return nil, guardErr
 	}
 	return s.cursorExecution.ResumeCursorSession(ctx, c, ticket, account, in)
+}
+
+// cursorResumeIdentityDenial 是续轮身份核验的唯一实现（R2「先身份后资格」）。
+//
+// 请求身份与会话登记身份不符（不同 user / key / 组，缺失维度不参与比较）即返回
+// 403 identity_mismatch；nil = 归属匹配，可继续后续资格/接管。两个 ServeCursorResume
+// 在**任何会终结会话的资格处理之前**调用它，外来身份绝不触发原主人账号不合格的
+// 终结路径；ResumeCursorSession 也复用同一实现做入参层复核（不重复实现第二套逻辑）。
+func cursorResumeIdentityDenial(ticket *CursorResumeTicket, in CursorSessionIdentity) error {
+	if ticket == nil || ticket.Identity.compatibleWith(in) {
+		return nil
+	}
+	return newCursorResumeError(http.StatusForbidden, "identity_mismatch", ErrCursorResumeIdentityMismatch)
 }
 
 // guardResumeEligibility 是**两个 ServeCursorResume 入口共用**的续轮资格接线
