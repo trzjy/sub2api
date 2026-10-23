@@ -15,6 +15,8 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // cursorTestFieldString 便捷取某字段号的字符串值（字段缺失返回空串）。
@@ -93,7 +95,7 @@ func cursorTestBlobContent(t *testing.T, blob [2][]byte) string {
 // cursorToolTestMcpArgEntry 是一个 mcp_args 的参数条目（key + 值）。
 type cursorToolTestMcpArgEntry struct {
 	key  string
-	kind string // "string" | "number" | "null"
+	kind string // "string" | "number" | "null" | "bool"
 	val  string
 }
 
@@ -101,7 +103,9 @@ type cursorToolTestMcpArgEntry struct {
 //
 // 字段号：f3 tool_call_id、f5 tool_name、f2 args（map<string,Value>，protobuf 编码为
 // repeated 字段 2，**每条 f2 字段本身就是一条 map entry**：{f1 key, f2 value(Value)}；
-// Value：f1 null / f2 number / f3 string）。
+// Value 六支：f1 null / f2 number(double) / f3 string / f4 bool / f5 Struct / f6 ListValue。
+// 全部 Value 一律用官方 protobuf 编码器（proto.Marshal(structpb.New*Value)）生成，线格式
+// 与上游真实字节一致。
 //
 // 线格式须与上游真实字节一致——每条 entry 直作为 McpArgs 的一个 f2，不再额外包一层 f2
 // （旧构造多包一层，与 cursorDecodeMcpArgs 解析错位同源，已在 O11-C3 修复）。
@@ -113,13 +117,29 @@ func cursorToolTestBuildMcpArgs(tcID, toolName string, entries []cursorToolTestM
 		case "string":
 			val = cursorAppendStringField(nil, 3, e.val)
 		case "number":
-			v, err := strconv.ParseInt(e.val, 10, 64)
+			// 官方编码：number_value 是 double，固定 64 位（wire 1）。旧构造写 varint
+			// 不是合法的 number_value 编码，会被新解码（proto.Unmarshal）当作未知字段丢弃。
+			f, err := strconv.ParseFloat(e.val, 64)
 			if err != nil {
 				panic("bad number value: " + e.val)
 			}
-			val = cursorAppendVarintField(nil, 2, uint64(v))
+			val, err = proto.Marshal(structpb.NewNumberValue(f))
+			if err != nil {
+				panic("marshal number value: " + err.Error())
+			}
 		case "null":
-			val = nil
+			// 合法 NullValue：f1 varint 0。旧构造写空字节是"kind 未设置"，会被新解码
+			// 失败关闭（ErrCursorProtocol），而非 JSON null。
+			val = cursorAppendVarintField(nil, 1, 0)
+		case "bool":
+			b, err := strconv.ParseBool(e.val)
+			if err != nil {
+				panic("bad bool value: " + e.val)
+			}
+			val, err = proto.Marshal(structpb.NewBoolValue(b))
+			if err != nil {
+				panic("marshal bool value: " + err.Error())
+			}
 		}
 		entry := cursorAppendStringField(nil, 1, e.key)
 		entry = cursorAppendBytesField(entry, 2, val)
