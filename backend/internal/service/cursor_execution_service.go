@@ -617,15 +617,22 @@ func (s *CursorExecutionService) cursorDrainAttachedOutput(
 				// 委托检查点必须带着已准备好的批：缺失说明准备阶段未完成，绝不当作交付成功。
 				return nil, fmt.Errorf("%w: delegation checkpoint without prepared batch", ErrCursorBatchIncomplete)
 			}
+			// 写出成功字节**之前**先完成条目 ID 关联与冲突检查（§25.17.2-3）：一旦冲突即返回
+			// 原错误，绝不写出终止帧（response.completed），实现"零成功字节"。条目 ID 取自本
+			// HTTP 已实际写出的内容（aggregated 字节，与 writer.collectedItemIDs 同源但更可靠：
+			// 不依赖 writer 是否被包装、也不区分流式/非流式）。
+			if err := s.commitDeliveredBatchItems(session, ev.prepared, cursorCollectDeliveredItemIDs(writer, aggregated.Bytes())); err != nil {
+				return nil, err
+			}
 			// 写出本 HTTP 的协议结束标记（完整批已在此前的数据帧里完整写出）。
 			if err := s.finishHTTPOutput(writer, req, &aggregated, false); err != nil {
 				return nil, err
 			}
 			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_write_done", req.Model,
 				zap.String("outcome", "ok"), zap.Bool("stream", req.Stream))
-			// 交付确认：只有完整写出成功后才在服务锁内提交 waiting_tools（§25.17.2-4）。
-			// 条目 ID 取自本 HTTP 实际写出的内容（Responses 出口；其它协议为空）。
-			if err := s.commitDeliveredBatch(session, ev.prepared, cursorWriterItemIDs(writer)); err != nil {
+			// 交付确认：只有完整写出成功后才在服务锁内提交 waiting_tools（§25.17.2-4）；
+			// 条目 ID 已在写前登记，此处只推进状态。
+			if err := s.commitDeliveredBatchState(session, ev.prepared); err != nil {
 				return nil, err
 			}
 			return s.cursorSessionStreamResult(session, req), nil
@@ -646,6 +653,10 @@ func (s *CursorExecutionService) cursorDrainAttachedOutput(
 			if err := cursorWriteAll(writer, ev.data); err != nil {
 				return nil, err
 			}
+			// 同时把已写出的 SSE 字节收进 aggregated：作为本 HTTP 实际交付内容，供检查点
+			// 解析真实 tool item ID（与 writer.collectedItemIDs 同源，但不依赖 writer 是否被
+			// 包装；非流式本来就用 aggregated）。见 cursorCollectToolItemIDs。
+			aggregated.Write(ev.data)
 			if f, ok := writer.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -987,7 +998,45 @@ func (s *CursorExecutionService) cursorDeliverBatchCheckpoint(
 	if err := cursorEnforceToolChoiceOnOutput(opts.toolChoiceMode, opts.toolChoiceName, parser.capturedToolCalls()); err != nil {
 		return nil, err
 	}
-	return s.prepareDeliveredBatch(session, cursorResumeProtocolOfSpec(session.spec), opts.model, delegations, parser.chunkID())
+	// 本批 assistant 正文取**实际交付文本**（不是固定空文本）：续轮侧按客户端回传的
+	// assistant 正文重算前缀摘要，交付侧必须登记同一段正文，否则两侧必然不对称。
+	// 基线只在准备成功后推进（见 prepareDeliveredBatch），失败不得吞掉未交付的正文。
+	text := session.batchAssistantText(parser.content)
+	prepared, err := s.prepareDeliveredBatch(session, cursorResumeProtocolOfSpec(session.spec), opts.model,
+		text, delegations, parser.chunkID())
+	if err != nil {
+		return nil, err
+	}
+	session.advanceBatchAssistantText(parser.content)
+	return prepared, nil
+}
+
+// batchAssistantText 返回**本批**实际交付的 assistant 正文（只读，不推进基线）。
+//
+// 摘要对称性（§25.14-D）：续轮把客户端回传的 assistant 正文规范化进历史前缀，交付侧就
+// 必须把本 HTTP 实际写出的那段正文按同一表示登记，否则同一逻辑内容两侧摘要不同。
+// 基线按会话累计：上一批交付之后、下一批交付之前产生的正文只属于下一批，绝不回填。
+func (r *cursorSessionRecord) batchAssistantText(content string) string {
+	if r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	base := r.assistantTextBase
+	r.mu.Unlock()
+	if base < 0 || base > len(content) {
+		return content
+	}
+	return content[base:]
+}
+
+// advanceBatchAssistantText 在批次准备成功后把交付基线推进到当前正文末尾。
+func (r *cursorSessionRecord) advanceBatchAssistantText(content string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.assistantTextBase = len(content)
+	r.mu.Unlock()
 }
 
 // cursorContentWhileWaitingTools 判断本批字节是否构成"waiting_tools 期间的新模型正文"。
@@ -2578,6 +2627,10 @@ type cursorSessionRecord struct {
 	attached       bool
 	// owner 是会话表的唯一所有者（finalizer/结算入口），只在取消回调里使用。
 	owner *CursorExecutionService
+	// unavailable 标记会话在"建表后、绑定 owner 前"被 Stop 作废（§25.17.7 A09 登记空隙）。
+	// 此时 Stop 已对无 owner 游离记录标记失效；attachHTTP 必须明确拒绝，避免 Stop 之后仍
+	// 可被附着执行（零 AgentRun、零游离状态）。只删表会留下可被 attach 的游离记录（返回 nil）。
+	unavailable bool
 
 	// ---- §25.14-D 摘要校验与续轮接管（全部字段在 mu 下读写）----
 
@@ -2592,6 +2645,9 @@ type cursorSessionRecord struct {
 	// instructionsDeclared 表示首轮是否声明了非空 instructions/instructions 等价物。
 	// §25.14-D：首轮非空 + 续轮省略 = 明确入参错误（不偷偷继承）。
 	instructionsDeclared bool
+	// assistantTextBase 是本会话已并入历史摘要的 assistant 正文长度偏移。
+	// 交付侧按它切出"本批实际交付正文"，与续轮前缀摘要保持同一表示（摘要对称）。
+	assistantTextBase int
 	// pending 是**当前交付批次**（等待客户端真实结果）；同一时刻至多一个。
 	pending *cursorPendingBatch
 	// intake 是真实结果回写通道（由原生双工持有方安装）；nil 表示通道未接通，
@@ -2819,9 +2875,17 @@ func (s *cursorSessionStore) stop() {
 	for _, record := range s.sessions {
 		records = append(records, record)
 		// 仅收集有 owner 会话的完成信号：只有它们会走原 finalizer 并关闭 finalizeDone。
-		// 无 owner 的会话（测试/异常残留）不会被终结，等待其信号永远不关闭，绝不能阻塞。
+		// 无 owner 的会话（start 与 attachOwner 之间的窗口 / 测试残留）不会被终结，等待其
+		// 信号永远不关闭，绝不能阻塞——改为标记失效，attachHTTP 据此明确拒绝。
 		if record.owner != nil {
 			signals = append(signals, record.finalizeSignal())
+		} else {
+			// §25.17.7 A09 登记空隙：start 与 attachOwner 两步之间被 Stop 的游离记录必须标记
+			// 失效，否则 Stop 清表后它仍可被 attachHTTP 附着执行。标记后 attachHTTP 返回错误，
+			// Execute 据此在模型出站 / AgentRun 之前失败关闭（零 AgentRun、零游离状态）。
+			record.mu.Lock()
+			record.unavailable = true
+			record.mu.Unlock()
 		}
 	}
 	s.mu.Unlock()
@@ -2849,36 +2913,19 @@ func (s *cursorSessionStore) stop() {
 // Stop 本身不会无限挂住；超时按未完成如实记录，不把未完成当成功。
 const cursorStopFinalizeWaitTimeout = 10 * time.Second
 
-// waitCursorSessionFinalizers 在锁外等待各会话的完成信号（有界）。
+// waitCursorSessionFinalizers 在锁外等待各会话的完成信号（不设 10 秒上限）。
+//
+// §25.17.7 A09：对**已有 finalizer 在进行**的会话，Stop 必须等待其 finalizeDone 完成信号
+// （任务提交 + 资源归还）完成后再返回，不设 10 秒上限——等待期间不持会话表锁。finalizeDone
+// 由唯一 finalizer 在结算提交、槽位归还与索引清理结束后关闭；若 finalizer 受阻（如上游结算
+// 阻塞），Stop 如实阻塞，绝不把"未完成"包装成成功（"清表即返回"的旧实现会漏掉结算）。
+// 180 秒模型期限会强制触发终结并最终关闭 finalizeDone，因此等待有界于模型期限，不会无限挂起。
 func waitCursorSessionFinalizers(signals []<-chan struct{}) {
-	pending := 0
 	for _, sig := range signals {
 		if sig == nil {
 			continue
 		}
-		select {
-		case <-sig:
-		default:
-			pending++
-		}
-	}
-	if pending == 0 {
-		return
-	}
-	timeout := time.NewTimer(cursorStopFinalizeWaitTimeout)
-	defer timeout.Stop()
-	for _, sig := range signals {
-		if sig == nil {
-			continue
-		}
-		select {
-		case <-sig:
-		case <-timeout.C:
-			cursorPhaseLog(context.Background(), zapcore.WarnLevel, "session_stop_finalize_timeout", "",
-				zap.Int("unfinished", pending),
-				zap.Duration("waited", cursorStopFinalizeWaitTimeout))
-			return
-		}
+		<-sig
 	}
 }
 
@@ -3554,6 +3601,10 @@ func (r *cursorSessionRecord) attachHTTP(httpCtx context.Context) (func(), error
 		return func() {}, nil
 	}
 	r.mu.Lock()
+	if r.unavailable {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("%w: session %q was stopped before activation", ErrCursorSessionAttachConflict, r.id)
+	}
 	if r.state == cursorSessionClosed || r.finishing {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("%w: session %q is finalizing", ErrCursorSessionAttachConflict, r.id)
@@ -3936,6 +3987,11 @@ var (
 	// ErrCursorResumeUnknownAssociation 表示提交的结果 ID 没有任何已登记关联
 	// （含重启后的孤儿续轮）：明确 400，不猜最近会话、不留墓碑表。
 	ErrCursorResumeUnknownAssociation = errors.New("cursor: no registered association for the submitted ids")
+	// ErrCursorResumeUnknownCallID 表示续轮批里**已命中部分有效关联但混入未登记 call ID**
+	// （混合关联）。它与 ErrCursorResumeUnknownAssociation（全未知）严格区分：混合关联直接
+	// 400 拒绝，**绝不**复用全未知哨兵——那一类只交原路由判定供应方，会让混合续轮逃到普通/
+	// 非 Cursor 供应方。全未知（locatedCount==0）才保留 ErrCursorResumeUnknownAssociation。
+	ErrCursorResumeUnknownCallID = errors.New("cursor: mixed association with unknown tool call id")
 	// ErrCursorResumeMixedSessions 表示提交的 ID 分属不同会话（跨会话混批）。
 	ErrCursorResumeMixedSessions = errors.New("cursor: submitted ids belong to different sessions")
 	// ErrCursorResumeDuplicateResults 表示同一批里出现重复结果 ID。
@@ -5474,13 +5530,18 @@ func (s *CursorExecutionService) IdentifyResume(probe *CursorResumeProbe) (*Curs
 			fmt.Errorf("%w: %q", ErrCursorResumeDuplicateResults, duplicateCallID))
 	}
 	if unknownCallID != "" {
-		return nil, newCursorResumeError(http.StatusBadRequest, "unknown_association",
-			fmt.Errorf("%w: call id %q", ErrCursorResumeUnknownAssociation, unknownCallID))
+		// §25.17.4（A08）行 4：已命中至少一个有效关联，但混入未登记的 call ID —— 这是
+		// "混合关联"，**不是**全未知。不得复用 ErrCursorResumeUnknownAssociation（那一类只
+		// 交原路由判定供应方，会让混合续轮逃到普通/非 Cursor 供应方）。直接 400 拒绝，错误
+		// 分类与全未知哨兵严格区分开。
+		return nil, newCursorResumeError(http.StatusBadRequest, "unknown_call_id",
+			fmt.Errorf("%w: call id %q", ErrCursorResumeUnknownCallID, unknownCallID))
 	}
 	if prevID != "" && prevRecord == nil && locatedCount > 0 {
-		// 结果 ID 是本服务的会话，但 previous_response_id 不是：明确拒绝，不猜。
+		// 结果 ID 命中本服务会话，但 previous_response_id 不是当前批：混合关联，明确 400 拒绝，
+		// 不猜、不复用全未知哨兵（与上面同口径，错误分类区分开）。
 		return nil, newCursorResumeError(http.StatusBadRequest, "unknown_previous_response_id",
-			fmt.Errorf("%w: previous_response_id", ErrCursorResumeUnknownAssociation))
+			fmt.Errorf("%w: previous_response_id", ErrCursorResumeStaleBatch))
 	}
 	if ticketSession == nil {
 		return nil, nil
@@ -6394,6 +6455,7 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 	record *cursorSessionRecord,
 	protocol CursorResumeProtocol,
 	model string,
+	assistantText string,
 	delegations *cursorToolDelegations,
 	responseID string,
 ) (*cursorPreparedBatch, error) {
@@ -6440,7 +6502,7 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 	var history *CursorHistoryDigest
 	if live.historyDigest != nil {
 		history = live.historyDigest.Clone()
-		if err := appendCursorBatchAssistantHistory(history, protocol, current.CallIDs, delegations); err != nil {
+		if err := appendCursorBatchAssistantHistory(history, protocol, assistantText, current.CallIDs, delegations); err != nil {
 			return nil, err
 		}
 	}
@@ -6469,9 +6531,25 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 // 若 finalizer 已在锁内胜出，则**不得**再提交 waiting_tools：返回明确终止错误，
 // 不追加成功帧、不恢复会话。
 //
-// itemIDs 是本 HTTP 实际交付的 Responses 工具结果条目 ID：与 call/response 登记同一条
-// 路径写进**同一**统一索引（键含 item 种类），finalizer 清会话时随 DeleteSession 全清。
+// 条目 ID 冲突检查（commitDeliveredBatchItems）必须在写出任何成功字节**之前**完成
+// （见 cursorDrainAttachedOutput 的 isDeleg 分支）：一旦冲突，函数返回原错误、绝不写
+// 终止帧、不落 waiting_tools，保证失败即零成功字节（§25.17.2-3）。本方法只做"写后
+// 提交 delivered 状态"，不再重复条目 ID 登记/JSON 解码/ID 生成。
 func (s *CursorExecutionService) commitDeliveredBatch(
+	record *cursorSessionRecord, prepared *cursorPreparedBatch, itemIDs []string,
+) error {
+	if err := s.commitDeliveredBatchItems(record, prepared, itemIDs); err != nil {
+		return err
+	}
+	return s.commitDeliveredBatchState(record, prepared)
+}
+
+// commitDeliveredBatchItems 把本 HTTP 实际交付的 Responses 工具结果条目 ID 与 call/response
+// 用同一个 Register、同一把索引登记（键含 item 种类），并在写成功字节前完成冲突检查。
+//
+// 任一条冲突即返回错误（调用方据此在写出终止帧之前终止，实现"零成功字节"）。finalizer
+// 清会话时随 DeleteSession 全清。无实际条目 ID（非 Responses 出口 / 空）时本步骤为空操作。
+func (s *CursorExecutionService) commitDeliveredBatchItems(
 	record *cursorSessionRecord, prepared *cursorPreparedBatch, itemIDs []string,
 ) error {
 	if s == nil || record == nil || prepared == nil {
@@ -6480,9 +6558,8 @@ func (s *CursorExecutionService) commitDeliveredBatch(
 	record.mu.Lock()
 	defer record.mu.Unlock()
 	if record.finishing || record.state == cursorSessionClosed {
-		return fmt.Errorf("%w: session finalized before batch commit", ErrCursorResumeNotWaiting)
+		return fmt.Errorf("%w: session finalized before item association", ErrCursorResumeNotWaiting)
 	}
-	// 条目 ID 与 call/response 用同一个 Register、同一把索引：不建第二索引、不另立种类。
 	for _, itemID := range itemIDs {
 		id := strings.TrimSpace(itemID)
 		if id == "" {
@@ -6492,6 +6569,23 @@ func (s *CursorExecutionService) commitDeliveredBatch(
 		if err := s.sessions.index.Register(key, record.id, prepared.batchID); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// commitDeliveredBatchState 在**完整写出成功**之后提交正式历史与 waiting_tools 状态。
+//
+// 只做已准备摘要替换与状态推进，不再次登记条目 ID（已在 commitDeliveredBatchItems 完成）。
+func (s *CursorExecutionService) commitDeliveredBatchState(
+	record *cursorSessionRecord, prepared *cursorPreparedBatch,
+) error {
+	if s == nil || record == nil || prepared == nil {
+		return nil
+	}
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	if record.finishing || record.state == cursorSessionClosed {
+		return fmt.Errorf("%w: session finalized before batch commit", ErrCursorResumeNotWaiting)
 	}
 	if prepared.history != nil {
 		record.historyDigest = prepared.history
@@ -6529,7 +6623,7 @@ func (s *CursorExecutionService) recordDeliveredBatch(
 	if s == nil || record == nil || req == nil {
 		return nil
 	}
-	prepared, err := s.prepareDeliveredBatch(record, cursorResumeProtocolOfRequest(req), req.Model, delegations, responseID)
+	prepared, err := s.prepareDeliveredBatch(record, cursorResumeProtocolOfRequest(req), req.Model, "", delegations, responseID)
 	if err != nil {
 		return err
 	}
@@ -6538,11 +6632,19 @@ func (s *CursorExecutionService) recordDeliveredBatch(
 
 // appendCursorBatchAssistantHistory 把本批已交付的 assistant 输出并入**给定摘要**。
 //
-// 只追加实际交付的逻辑输出（类型/工具名/参数/公开 ID）。调用方传入的通常是克隆，
-// 提交前的失败不会污染正式历史。
+// assistantText 是本批**实际交付**的正文（见 cursorSessionRecord.batchAssistantText）。
+// 它必须与续轮前缀摘要对同一逻辑内容的规范化完全同源，否则同一逻辑内容两侧摘要不同：
+//
+//	Chat      → chat.assistant.text（每条 assistant 消息一次，空正文同样登记）
+//	Messages  → messages.assistant.text（仅非空；无文本块的消息不产生文本项）
+//	Responses → responses.message.assistant（仅非空；无 message 条目不产生文本项）
+//	Gemini    → gemini.model.text（仅非空；无文本 part 不产生文本项）
+//
+// 调用方传入的通常是克隆，提交前的失败不会污染正式历史。
 func appendCursorBatchAssistantHistory(
 	history *CursorHistoryDigest,
 	protocol CursorResumeProtocol,
+	assistantText string,
 	callIDs []string,
 	delegations *cursorToolDelegations,
 ) error {
@@ -6550,7 +6652,17 @@ func appendCursorBatchAssistantHistory(
 		return nil
 	}
 	captures := delegations.snapshot()
-	firstCall := true
+	// 正文先于工具项：续轮规范化对一条 assistant 消息也是"文本项 → tool_call 项"。
+	// Chat 例外仍按每条消息一次登记（含空正文），与 cursorPlanFromChat 逐项对齐。
+	if protocol == CursorResumeProtocolChat {
+		if err := history.AppendText("chat.assistant.text", assistantText); err != nil {
+			return err
+		}
+	} else {
+		if err := appendCursorBatchAssistantText(history, protocol, assistantText); err != nil {
+			return err
+		}
+	}
 	for _, call := range callIDs {
 		var name, args string
 		for _, candidate := range captures {
@@ -6564,22 +6676,21 @@ func appendCursorBatchAssistantHistory(
 			if err != nil {
 				return err
 			}
-			// assistant 的空 content 与省略统一为空文本：**每条 assistant 消息**一次文本项，
-			// 其后按顺序追加该消息的 tool_call 项（与 Chat 历史规范化逐项对齐）。
-			if firstCall {
-				if err := history.AppendText("chat.assistant.text", ""); err != nil {
-					return err
-				}
-				firstCall = false
-			}
 			if err := history.AppendItem("chat.assistant.tool_call", canonical); err != nil {
 				return err
 			}
 		case CursorResumeProtocolMessages:
+			// 与 cursorAnthropicBlockItem 的 tool_use 规范化同源：先按 JSON 规范化参数，
+			// JSON 无法解析时原文按字节参与（custom 文本输入不改写）。两侧必须同源，
+			// 否则键序/空白差异会让同一逻辑调用在交付侧与续轮侧算出不同摘要。
+			canonicalArgs, argsErr := cursorCanonicalToolArgs(args)
+			if argsErr != nil {
+				canonicalArgs = CursorCanonicalText(args)
+			}
 			payload := map[string]json.RawMessage{
 				"id":    mustCursorJSON(call),
 				"name":  mustCursorJSON(name),
-				"input": CursorCanonicalText(args),
+				"input": canonicalArgs,
 			}
 			if err := history.AppendItem("messages.assistant.tool_use", mustCursorJSONValue(payload)); err != nil {
 				return err
@@ -6605,6 +6716,28 @@ func appendCursorBatchAssistantHistory(
 	return nil
 }
 
+// appendCursorBatchAssistantText 按协议把非空 assistant 正文并入历史链。
+//
+// 只有非空才登记：续轮规范化在这些协议里不会为"没有文本块的消息/条目"产生文本项，
+// 无条件登记空文本会造出反向不对称（交付侧多一项）。
+func appendCursorBatchAssistantText(history *CursorHistoryDigest, protocol CursorResumeProtocol, text string) error {
+	if text == "" {
+		return nil
+	}
+	itemType := ""
+	switch protocol {
+	case CursorResumeProtocolMessages:
+		itemType = "messages.assistant.text"
+	case CursorResumeProtocolResponses:
+		itemType = "responses.message.assistant"
+	case CursorResumeProtocolGemini:
+		itemType = "gemini.model.text"
+	default:
+		return nil
+	}
+	return history.AppendText(itemType, text)
+}
+
 // cursorWriterResponseID 取回桥 writer 实际交付的响应 ID（本 HTTP 的唯一输出 ID）。
 func cursorWriterResponseID(w io.Writer) string {
 	converted, ok := w.(*cursorProtocolWriter)
@@ -6614,13 +6747,78 @@ func cursorWriterResponseID(w io.Writer) string {
 	return strings.TrimSpace(converted.responseID)
 }
 
-// cursorWriterItemIDs 取回桥 writer **实际交付**的工具结果条目 ID（非 Responses 出口为空）。
-func cursorWriterItemIDs(w io.Writer) []string {
-	converted, ok := w.(*cursorProtocolWriter)
-	if !ok || converted == nil {
-		return nil
+// cursorCollectToolItemIDs 从本 HTTP 实际写出**的 SSE 字节里取"承载对外工具结果"的条目 ID。
+//
+// 覆盖非流式整包聚合场景：流式由协议 writer 直接登记（见 cursorCollectDeliveredItemIDs），
+// 这里解析实际交付字节，作为非流式/被包装 writer 的兜底来源。
+// 这保证 item 关联 Register+冲突检查在成功结束帧（response.completed）之前取到**真实** item
+// ID，满足 §25.17.2-4「首个工具条目字节发出前完成关联登记」的反例（冲突返回时零成功字节）。
+func cursorCollectToolItemIDs(sse []byte) []string {
+	seen := make(map[string]struct{})
+	var ids []string
+	for _, line := range strings.Split(string(sse), "\n") {
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var ev struct {
+			Item *struct {
+				ID   string `json:"id"`
+				Type string `json:"type"`
+			} `json:"item"`
+		}
+		if json.Unmarshal([]byte(payload), &ev) != nil || ev.Item == nil {
+			continue
+		}
+		if _, ok := responsesToolItemTypes[strings.ToLower(strings.TrimSpace(ev.Item.Type))]; !ok {
+			continue
+		}
+		id := strings.TrimSpace(ev.Item.ID)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
 	}
-	return converted.collectedItemIDs()
+	return ids
+}
+
+// cursorCollectDeliveredItemIDs 汇合本 HTTP 实际交付的工具结果条目 ID：
+//
+//   - 流式：协议 writer 在写出 Responses 事件时通过 noteToolItemID 已登记（collectedItemIDs）；
+//   - 非流式 / writer 被包装：从本 HTTP 实际写出字节（aggregated）解析兜底。
+//
+// 两者取并集去重，保证无论协议 writer 是否被外层 wrapper 包裹、无论流式还是非流式，
+// item 关联 Register+冲突检查都能在成功结束帧之前取到真实 item ID（§25.17.2-4）。
+func cursorCollectDeliveredItemIDs(w io.Writer, aggregated []byte) []string {
+	seen := make(map[string]struct{})
+	var ids []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if pw, ok := w.(*cursorProtocolWriter); ok {
+		for _, id := range pw.collectedItemIDs() {
+			add(id)
+		}
+	}
+	for _, id := range cursorCollectToolItemIDs(aggregated) {
+		add(id)
+	}
+	return ids
 }
 
 // ---------------------------------------------------------------------------

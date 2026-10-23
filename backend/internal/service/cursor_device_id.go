@@ -52,8 +52,8 @@ var _ CursorDeviceIDResolver = (*QuotaKeyService)(nil)
 
 // hashDeviceIDFromUUID 逐字复刻插件 hashDeviceId（deobfuscated.js:8070-8077）。
 //
-// 与历史实现（cursor_auto_entry_service.go 旧 hashDeviceID，已随 §25.14-C 删除）的差异**不止一处**，
-// 历史实现对非 ASCII 输入与插件不等价，故独立实现并单测锁定：
+// 与仓库既有 hashDeviceID（cursor_auto_entry_service.go:452）的差异**不止一处**，
+// 既有实现对非 ASCII 输入与插件不等价，故本卡独立实现并单测锁定：
 //
 //  1. 迭代单位：插件 s.charCodeAt(i) 遍历 **UTF-16 码元**；既有实现 `for _, c := range`
 //     遍历 **Unicode 码点**。ASCII 下两者一致，但 BMP 外字符（如 emoji，UTF-16 为代理对

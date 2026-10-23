@@ -4227,6 +4227,23 @@ func cursorGeminiRequestToChatCompletions(body []byte, model string, stream bool
 	if err != nil {
 		return nil, err
 	}
+	// ANY 模式显式 allowedFunctionNames → 实际转换只暴露**允许子集**（§25.17.2 Gemini 段）。
+	// 声明中未被允许的工具不得进入上游；AUTO/NONE 与非显式 ANY 保持现有全量语义。
+	if allowed := cursorGeminiAllowedFunctionNames(body); len(allowed) > 0 {
+		set := make(map[string]struct{}, len(allowed))
+		for _, name := range allowed {
+			set[strings.TrimSpace(name)] = struct{}{}
+		}
+		subset := make([]apicompat.ChatTool, 0, len(tools))
+		for _, tool := range tools {
+			if tool.Function != nil {
+				if _, ok := set[strings.TrimSpace(tool.Function.Name)]; ok {
+					subset = append(subset, tool)
+				}
+			}
+		}
+		tools = subset
+	}
 	cc.Tools = tools
 	// 工具选择：模式与允许集合在适配边界校验（未知模式/未声明名称 → 400，未出站）。
 	if len(bytes.TrimSpace(req.ToolConfig)) > 0 {
@@ -4249,6 +4266,37 @@ func cursorGeminiRequestToChatCompletions(body []byte, model string, stream bool
 		return nil, fmt.Errorf("cursor: marshal chat completions request: %w", err)
 	}
 	return out, nil
+}
+
+// cursorGeminiAllowedFunctionNames 从 toolConfig.functionCallingConfig 提取 ANY 模式下的
+// 允许函数名子集。仅当 mode 为 ANY 且显式给出非空 allowedFunctionNames 时返回该子集；
+// 其余情况返回 nil（交由现有全量语义）。声明合法性由 cursorGeminiToolChoiceMode 在出站前
+// 校验，此处只负责按已接受的约束裁剪实际转换产物，不新增选择器或放宽一致性。
+func cursorGeminiAllowedFunctionNames(body []byte) []string {
+	var doc struct {
+		ToolConfig *struct {
+			FunctionCallingConfig *struct {
+				Mode                 string   `json:"mode"`
+				AllowedFunctionNames []string `json:"allowedFunctionNames"`
+			} `json:"functionCallingConfig"`
+		} `json:"toolConfig"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil
+	}
+	if doc.ToolConfig == nil || doc.ToolConfig.FunctionCallingConfig == nil {
+		return nil
+	}
+	if strings.ToUpper(strings.TrimSpace(doc.ToolConfig.FunctionCallingConfig.Mode)) != "ANY" {
+		return nil
+	}
+	allowed := make([]string, 0, len(doc.ToolConfig.FunctionCallingConfig.AllowedFunctionNames))
+	for _, raw := range doc.ToolConfig.FunctionCallingConfig.AllowedFunctionNames {
+		if name := strings.TrimSpace(raw); name != "" {
+			allowed = append(allowed, name)
+		}
+	}
+	return allowed
 }
 
 // cursorGeminiToolsToChatTools 把 functionDeclarations 转成 Chat tools（逐字段保真）。
