@@ -36,6 +36,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // cursorSSEStream converts frames as they arrive; it never buffers the complete
@@ -1009,7 +1013,9 @@ func (p *cursorStreamParser) noteToolRequestsListed(b []byte) error {
 // f2 字段**本身就是一条 map entry**（f1 key(string) 与 f2 value(Value 消息) 直内联，
 // 不是"f2 的列表"）。上游实拍字节 `0a0463697479 12091a074265696a696e67` 即是单条
 // entry：f1="city"、f2=Value{f3:"Beijing"}。
-// Value oneof（派发单）：f1 null / f2 number / f3 string；未知类型失败关闭。
+// Value oneof（派发单 §2）：f1 null / f2 number(double) / f3 string / f4 bool /
+// f5 Struct / f6 ListValue；六种分支都按 google.protobuf.Value 标准语义解码。
+// 非有限数值（NaN/±Inf）与未设置 kind 一律失败关闭（见 cursorDecodeMcpValue）。
 // 返回 (tool_call_id, tool_name, argsJSON, error)。
 func cursorDecodeMcpArgs(payload []byte) (string, string, string, error) {
 	fields, err := cursorDecodeProtobuf(payload)
@@ -1050,63 +1056,70 @@ func cursorDecodeMcpArgs(payload []byte) (string, string, string, error) {
 	return idF.String(), nameF.String(), string(b), nil
 }
 
-// cursorDecodeMcpValue 解析 McpArgs args 的单个 Value（局部解码，支持 null / number
-// (整数或浮点) / string；未知 wire type 失败关闭）。与全局 cursorDecodeProtobuf 不同，
-// 这里额外支持 double/float 的定长 wire（Value.f2 number 可能用 fixed64）。
+// cursorDecodeMcpValue 解析 McpArgs args 的单个 Value。
+//
+// 改用仓库已有的 protobuf 标准库（google.golang.org/protobuf）解码，不再手写 wire
+// 循环：proto.Unmarshal → structpb.Value →（kind 未设置 / 非有限数值校验）→
+// protojson.Marshal → json.Compact（去除 protojson 的随机空格）。任何错误路径都返回
+// ErrCursorProtocol 且返回空串——绝不把畸形/未设置 kind 补成 JSON null，也绝不把
+// NaN/±Inf 当成字符串写入。
+//
+// Value oneof（派发单 §2）：f1 null / f2 number(double) / f3 string / f4 bool /
+// f5 Struct / f6 ListValue，六种分支都按 google.protobuf.Value 标准语义解码。
 func cursorDecodeMcpValue(b []byte) (string, error) {
-	i := 0
-	for i < len(b) {
-		key, n, err := cursorConsumeVarint(b, i)
-		if err != nil {
-			return "", err
+	value := &structpb.Value{}
+	if err := proto.Unmarshal(b, value); err != nil {
+		return "", fmt.Errorf("%w: unmarshal mcp value: %v", ErrCursorProtocol, err)
+	}
+	// kind 未设置（等价于 WhichOneof("kind")==nil）与"合法 null（Value_NullValue）"
+	// 不是一回事：前者说明这条 Value 没有写任何 oneof 分支，必须明确失败，绝不允许
+	// 落到 JSON null（那样会静默吞掉畸形/未设置的参数）。
+	if value.Kind == nil {
+		return "", fmt.Errorf("%w: mcp value has no kind set", ErrCursorProtocol)
+	}
+	// 非有限数值必须明确失败：protojson 会把 NaN/±Inf 写成字符串 "NaN"/"Infinity"，
+	// 等于把数字静默改成字符串（与手写循环把数字读错的同类错误）。任意深度（嵌套
+	// Struct 字段、ListValue 元素）都要检查。
+	if err := cursorCheckFiniteValue(value); err != nil {
+		return "", err
+	}
+	out, err := protojson.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("%w: marshal mcp value: %v", ErrCursorProtocol, err)
+	}
+	// protojson 对单行输出在逗号后随机插空格（detrand），同一输入会产出不同字节；
+	// 序列化后必须用 json.Compact 归一经压缩结果再返回（只去除无语义空白，不改语义）。
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, out); err != nil {
+		return "", fmt.Errorf("%w: compact mcp value: %v", ErrCursorProtocol, err)
+	}
+	return buf.String(), nil
+}
+
+// cursorCheckFiniteValue 递归校验 structpb.Value 内的全部数值是否为有限值。
+//
+// NumberValue 为 NaN/±Inf、或任意嵌套层级（StructValue 的字段、ListValue 的元素）
+// 含非有限数值，均返回 ErrCursorProtocol。
+func cursorCheckFiniteValue(v *structpb.Value) error {
+	switch k := v.Kind.(type) {
+	case *structpb.Value_NumberValue:
+		if math.IsNaN(k.NumberValue) || math.IsInf(k.NumberValue, 0) {
+			return fmt.Errorf("%w: mcp value number is not finite", ErrCursorProtocol)
 		}
-		i = n
-		field := int(key >> 3)
-		wire := int(key & 0x7)
-		switch wire {
-		case cursorWireVarint:
-			v, n, err := cursorConsumeVarint(b, i)
-			if err != nil {
-				return "", err
+	case *structpb.Value_StructValue:
+		for _, fv := range k.StructValue.GetFields() {
+			if err := cursorCheckFiniteValue(fv); err != nil {
+				return err
 			}
-			i = n
-			if field == 2 {
-				return strconv.FormatInt(int64(v), 10), nil
+		}
+	case *structpb.Value_ListValue:
+		for _, ev := range k.ListValue.GetValues() {
+			if err := cursorCheckFiniteValue(ev); err != nil {
+				return err
 			}
-		case cursorWireBytes:
-			ln, n, err := cursorConsumeVarint(b, i)
-			if err != nil {
-				return "", err
-			}
-			i = n
-			if ln > uint64(len(b)-i) {
-				return "", fmt.Errorf("%w: mcp value overflow", ErrCursorProtocol)
-			}
-			data := b[i : i+int(ln)]
-			i += int(ln)
-			if field == 3 {
-				return cursorJSONString(string(data)), nil
-			}
-		case 5: // fixed64（double）
-			if field == 2 && i+8 <= len(b) {
-				bits := binary.LittleEndian.Uint64(b[i : i+8])
-				i += 8
-				return strconv.FormatFloat(math.Float64frombits(bits), 'g', -1, 64), nil
-			}
-			i += 8
-		case 1: // fixed32（float）
-			if field == 2 && i+4 <= len(b) {
-				bits := binary.LittleEndian.Uint32(b[i : i+4])
-				i += 4
-				return strconv.FormatFloat(float64(math.Float32frombits(bits)), 'g', -1, 32), nil
-			}
-			i += 4
-		default:
-			return "", fmt.Errorf("%w: unsupported mcp value wire %d", ErrCursorProtocol, wire)
 		}
 	}
-	// 无明确值字段（f1 null 或未设置）→ JSON null。
-	return "null", nil
+	return nil
 }
 
 // cursorParseEndStream 解析 EndStream 帧 payload。
