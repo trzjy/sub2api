@@ -713,30 +713,24 @@ func (r *testDBRepo) SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.T
 }
 
 // SoftDeleteCursorAccountsByExpiredQuotaKey 真实 DB 替身：与 production repository
-// 同语义——tx 必填；ForUpdate 行锁复核"当前仍到期"；仅取 platform='cursor' 且未软删
-// 的账号 ID；条件 SetDeletedAt 同口径；返回实际被软删 ID。tx 为 nil 时失败关闭。
+// 同语义——tx 必填；到期复核下沉为条件谓词（HasQuotaKeyWith），SELECT 与 UPDATE
+// 携带同一谓词、判定与写入同一条语句；仅取 platform='cursor' 且未软删的账号 ID；
+// affected == 0 时返回空集合。tx 为 nil 时失败关闭。
 func (r *testDBRepo) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64, now time.Time) ([]int64, error) {
 	if tx == nil {
 		return nil, errors.New("testDBRepo: SoftDeleteCursorAccountsByExpiredQuotaKey requires the caller's transaction")
 	}
-	qk, err := tx.QuotaKey.Query().
-		Where(quotakey.IDEQ(quotaKeyID)).
-		ForUpdate().
-		Only(ctx)
-	if ent.IsNotFound(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !(qk.Status == domain.QuotaKeyStatusExpired && qk.ExpiresAt != nil && qk.ExpiresAt.Before(now)) {
-		return nil, nil
-	}
+	expiredKey := account.HasQuotaKeyWith(
+		quotakey.Status(domain.QuotaKeyStatusExpired),
+		quotakey.ExpiresAtNotNil(),
+		quotakey.ExpiresAtLT(now),
+	)
 	ids, err := tx.Account.Query().
 		Where(
 			account.QuotaKeyID(quotaKeyID),
 			account.PlatformEQ(domain.PlatformCursor),
 			account.DeletedAtIsNil(),
+			expiredKey,
 		).
 		IDs(ctx)
 	if err != nil {
@@ -745,11 +739,15 @@ func (r *testDBRepo) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx context.Conte
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	if _, err := tx.Account.Update().
-		Where(account.IDIn(ids...), account.DeletedAtIsNil()).
+	affected, err := tx.Account.Update().
+		Where(account.IDIn(ids...), account.DeletedAtIsNil(), expiredKey).
 		SetDeletedAt(now).
-		Save(ctx); err != nil {
+		Save(ctx)
+	if err != nil {
 		return nil, err
+	}
+	if affected == 0 {
+		return nil, nil
 	}
 	return ids, nil
 }

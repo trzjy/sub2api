@@ -254,7 +254,7 @@ func (r *quotaKeyRepository) SoftDeleteAccountsByQuotaKey(ctx context.Context, t
 	return ids, nil
 }
 
-// SoftDeleteCursorAccountsByExpiredQuotaKey 仅当激活码"当前已到期"时，在调用方事务内
+// SoftDeleteCursorAccountsByExpiredQuotaKey 仅当激活码"当前仍到期"时，在调用方事务内
 // 软删该激活码下所有 cursor 平台账号（置 accounts.deleted_at），返回本次实际被软删的账号 ID。
 //
 // 与人工删除 SoftDeleteAccountsByQuotaKey 的严格区分（语义不得混淆）：
@@ -265,40 +265,36 @@ func (r *quotaKeyRepository) SoftDeleteAccountsByQuotaKey(ctx context.Context, t
 //   - 只置 accounts.deleted_at：不物理删除账号、不触碰 usage_logs、不软删 quota_keys。
 //   - 严禁用 account_expire_in 替代 expires_at 判定到期（到期判定只认 quota_keys.expires_at）。
 //
-// 实现顺序（不得调换）：
-//  1. tx 必填：退化到默认 client 会绕开调用方事务与行锁，故直接失败关闭。
-//  2. 行锁复核：ForUpdate 锁住 quota_keys 当前行，再由 Go 侧判 status/expires_at；
-//     并发 UpdateMeta（UpdateOneID 需行锁）在本事务提交前无法改写 expires_at/status，
-//     消除"先 SELECT 后判"的 TOCTOU。
-//  3. 取候选 ID：仅 platform='cursor' 且未软删的账号。
-//  4. 条件更新：WHERE 仍带 DeletedAtIsNil()，与取候选同口径。
-//  5. 返回第 3 步的候选 ID（更新成功与否由 Save 错误原样返回决定）。
+// 实现要点（判定与写入同一条语句，不存在"先读后写"的 TOCTOU）：
+//  1. tx 必填：退化到默认 client 会绕开调用方事务，故直接失败关闭。
+//  2. 到期复核不再用行锁（ForUpdate）+ Go 侧比较，而是下沉为条件谓词 expiredKey：
+//     断言账号所属激活码"当前仍到期"（status='expired' AND expires_at IS NOT NULL
+//     AND expires_at < now），以 EXISTS 子查询交由数据库在语句执行时按当前已提交状态裁决。
+//  3. 取候选 ID：SELECT 的 WHERE 即携带 expiredKey 谓词，仅 platform='cursor'、未软删
+//     且所属激活码仍到期的账号入选。
+//  4. 条件更新：UPDATE 的 WHERE 同样携带 expiredKey 谓词——到期判定与 deleted_at 写入
+//     在同一条语句内原子完成；并保留 DeletedAtIsNil()，与取候选同口径。
+//  5. 返回实际被软删 ID：affected == 0（竞态下候选已先被并发事务软删）时返回空集合，
+//     避免误导调用方为本次未删的账号触发 outbox。
 func (r *quotaKeyRepository) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64, now time.Time) ([]int64, error) {
 	if tx == nil {
 		return nil, errors.New("quota_key_repository: SoftDeleteCursorAccountsByExpiredQuotaKey requires the caller's transaction")
 	}
 
-	// 行锁复核：锁住当前行后由 Go 侧判"当前已到期"，避免 TOCTOU。
-	qk, err := tx.QuotaKey.Query().
-		Where(quotakey.IDEQ(quotaKeyID)).
-		ForUpdate().
-		Only(ctx)
-	if ent.IsNotFound(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !(qk.Status == domain.QuotaKeyStatusExpired && qk.ExpiresAt != nil && qk.ExpiresAt.Before(now)) {
-		return nil, nil
-	}
+	// 谓词：账号所属激活码"当前仍到期"。
+	expiredKey := account.HasQuotaKeyWith(
+		quotakey.Status(domain.QuotaKeyStatusExpired),
+		quotakey.ExpiresAtNotNil(),
+		quotakey.ExpiresAtLT(now),
+	)
 
-	// 取候选 ID：仅 cursor 平台且未软删。
+	// 取候选 ID：仅 cursor 平台、未软删且所属激活码仍到期的账号。
 	ids, err := tx.Account.Query().
 		Where(
 			account.QuotaKeyID(quotaKeyID),
 			account.PlatformEQ(domain.PlatformCursor),
 			account.DeletedAtIsNil(),
+			expiredKey,
 		).
 		IDs(ctx)
 	if err != nil {
@@ -308,15 +304,20 @@ func (r *quotaKeyRepository) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx conte
 		return nil, nil
 	}
 
-	// 条件更新：仅对取到的候选且仍未软删的行置 deleted_at。
-	if _, err := tx.Account.Update().
+	// 条件更新：判定与更新同一条语句，WHERE 带同一到期谓词与未软删口径。
+	affected, err := tx.Account.Update().
 		Where(
 			account.IDIn(ids...),
 			account.DeletedAtIsNil(),
+			expiredKey,
 		).
 		SetDeletedAt(now).
-		Save(ctx); err != nil {
+		Save(ctx)
+	if err != nil {
 		return nil, err
+	}
+	if affected == 0 {
+		return nil, nil
 	}
 	return ids, nil
 }
