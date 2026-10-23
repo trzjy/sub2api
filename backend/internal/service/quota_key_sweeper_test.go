@@ -13,7 +13,8 @@ import (
 )
 
 // recordingQuotaKeyRepo 在 fakeQuotaKeyRepo 之上记录被调用的方法名，
-// 用于断言清扫过程只触碰 quota_keys 操作、绝不触碰 accounts 相关调用。
+// 用于断言清扫过程只触碰允许的仓储方法：ListExpired + 条件化标 expired +
+// cursor 账号软删与 outbox 入口，不得调用其它含 "Account" 的方法。
 type recordingQuotaKeyRepo struct {
 	*fakeQuotaKeyRepo
 	mu    sync.Mutex
@@ -43,6 +44,16 @@ func (r *recordingQuotaKeyRepo) UpdateStatusFields(ctx context.Context, tx *ent.
 func (r *recordingQuotaKeyRepo) MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, id int64, now time.Time) (int, error) {
 	r.record("MarkExpiredIfStillExpired")
 	return r.fakeQuotaKeyRepo.MarkExpiredIfStillExpired(ctx, tx, id, now)
+}
+
+func (r *recordingQuotaKeyRepo) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64, now time.Time) ([]int64, error) {
+	r.record("SoftDeleteCursorAccountsByExpiredQuotaKey")
+	return r.fakeQuotaKeyRepo.SoftDeleteCursorAccountsByExpiredQuotaKey(ctx, tx, quotaKeyID, now)
+}
+
+func (r *recordingQuotaKeyRepo) EnqueueAccountChangedOutbox(ctx context.Context, tx *ent.Tx, accountIDs []int64) error {
+	r.record("EnqueueAccountChangedOutbox")
+	return r.fakeQuotaKeyRepo.EnqueueAccountChangedOutbox(ctx, tx, accountIDs)
 }
 
 func (r *recordingQuotaKeyRepo) calledMethods() []string {
@@ -132,7 +143,10 @@ func TestQuotaKeySweep_NotExpiredUntouched(t *testing.T) {
 	}
 }
 
-// TestQuotaKeySweep_AlreadyExpiredSkipped 验证已是 expired 的跳过（幂等，不重复写库）。
+// TestQuotaKeySweep_AlreadyExpiredSkipped 验证已是 expired 的 key 不再标 expired
+// （幂等，不重复写库）：不触发 MarkExpiredIfStillExpired 与 UpdateStatusFields。
+// 注意（EXP-B）：已 expired 的 key 允许账号补删（sweepOnce 对 expired 分支继续调用
+// 到期账号软删），本用例的 fake 返回空集合，故无 outbox、不产生额外写入。
 func TestQuotaKeySweep_AlreadyExpiredSkipped(t *testing.T) {
 	repo := newRecordingQuotaKeyRepo()
 	repo.byID[1] = &ent.QuotaKey{
@@ -186,31 +200,55 @@ func TestQuotaKeySweep_ExhaustedExpiredPreservesExhausted(t *testing.T) {
 	}
 }
 
-// TestQuotaKeySweep_NoAccountCalls 验证清扫全程不触碰 accounts 表：
-// 仅允许 ListExpired + UpdateStatusFields，且任何被调用方法名都不含 "Account"。
-func TestQuotaKeySweep_NoAccountCalls(t *testing.T) {
+// TestQuotaKeySweep_OnlyCursorAccountDeleteCalls 验证清扫过程只触碰允许的仓储方法
+// （EXP-B 接线后的新边界）：
+//   - 允许被调用的方法集合恰为 {ListExpired, MarkExpiredIfStillExpired,
+//     SoftDeleteCursorAccountsByExpiredQuotaKey, EnqueueAccountChangedOutbox}；
+//   - 除 SoftDeleteCursorAccountsByExpiredQuotaKey / EnqueueAccountChangedOutbox 外，
+//     不得出现其它含 "Account" 的方法；
+//   - 未到期 key、expires_at=NULL key、非 active/expired 状态 key 不得触发账号删除调用。
+func TestQuotaKeySweep_OnlyCursorAccountDeleteCalls(t *testing.T) {
 	repo := newRecordingQuotaKeyRepo()
-	// 混合：1 个到期 active、2 个未到期、1 个已 expired。
+	// 混合：1 个到期 active（应标 expired + 补删）、1 个未到期 active、
+	// 1 个到期 exhausted（非 active/expired，跳过）、1 个已 expired（只补删）、
+	// 1 个 expires_at=NULL active（不在到期集合）。
 	now := time.Now()
 	repo.byID[1] = &ent.QuotaKey{ID: 1, Status: "active", ExpiresAt: timePtr(now.Add(-time.Hour))}
 	repo.byID[2] = &ent.QuotaKey{ID: 2, Status: "active", ExpiresAt: timePtr(now.Add(time.Hour))}
-	repo.byID[3] = &ent.QuotaKey{ID: 3, Status: "exhausted", ExpiresAt: timePtr(now.Add(time.Hour))}
+	repo.byID[3] = &ent.QuotaKey{ID: 3, Status: "exhausted", ExpiresAt: timePtr(now.Add(-time.Hour))}
 	repo.byID[4] = &ent.QuotaKey{ID: 4, Status: "expired", ExpiresAt: timePtr(now.Add(-time.Hour))}
+	repo.byID[5] = &ent.QuotaKey{ID: 5, Status: "active", ExpiresAt: nil}
 
 	svc := newSweepTestSvc(repo)
 	if _, err := svc.sweepOnce(context.Background(), &ent.Tx{}); err != nil {
 		t.Fatalf("sweepOnce returned error: %v", err)
 	}
 
+	allowed := map[string]bool{
+		"ListExpired":                               true,
+		"MarkExpiredIfStillExpired":                 true,
+		"SoftDeleteCursorAccountsByExpiredQuotaKey": true,
+		"EnqueueAccountChangedOutbox":               true,
+	}
 	for _, c := range repo.calledMethods() {
-		if strings.Contains(c, "Account") {
-			t.Fatalf("sweep touched account-related method %q", c)
-		}
-		if c != "ListExpired" && c != "UpdateStatusFields" && c != "MarkExpiredIfStillExpired" {
+		if !allowed[c] {
 			t.Fatalf("sweep called unexpected method %q", c)
 		}
+		if strings.Contains(c, "Account") && c != "SoftDeleteCursorAccountsByExpiredQuotaKey" && c != "EnqueueAccountChangedOutbox" {
+			t.Fatalf("sweep touched account-related method %q", c)
+		}
 	}
-	// 仅 1 个到期 active 应被改写。
+	// 未到期 / expires_at=NULL / 非 active/expired 状态的 key 不得触发账号删除调用：
+	// 仅 key1（active 到期）与 key4（历史 expired）进入账号删除分派。
+	if len(repo.cursorDeleteKeyIDs) != 2 {
+		t.Fatalf("expected exactly 2 account-delete dispatches, got %d (%v)", len(repo.cursorDeleteKeyIDs), repo.cursorDeleteKeyIDs)
+	}
+	for _, id := range repo.cursorDeleteKeyIDs {
+		if id != 1 && id != 4 {
+			t.Fatalf("key %d must not trigger account deletion (keys 2/3/5 are out of scope)", id)
+		}
+	}
+	// 仅 1 个到期 active 应被改写为 expired。
 	if repo.byID[1].Status != "expired" {
 		t.Fatalf("expected key 1 marked expired, got %q", repo.byID[1].Status)
 	}
