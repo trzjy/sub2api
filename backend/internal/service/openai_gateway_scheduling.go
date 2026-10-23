@@ -476,8 +476,9 @@ func cursorAccountQuotaKeyVetoReason(ctx context.Context, account *Account) stri
 //   - err != nil：来源读取失败，调用方必须失败关闭并如实返回错误，不能当空目录。
 //
 // 不改变既有调度路径语义：未绑定激活码的账号、以及 provider 未安装时的降级口径都仍返回
-// ("", nil)；是否把"provider 未接线"本身当读取失败由调用方判定（窄只读入口按 §25.6
-// 「必须有真实 DI 依赖」失败关闭，既有调度路径保持原样）。
+// ("", nil)——本函数只是 key 状态这一维的投影。"未绑定来源 / 依赖未装配"是否放行由上层
+// 唯一来源门 cursorSupplySourceAvailabilityVetoReason 统一裁决（§25.17.3：两者都不得放行），
+// 不再由各消费方各自加严。
 func cursorAccountQuotaKeyVetoReasonWithError(ctx context.Context, account *Account) (string, error) {
 	if account == nil || account.Platform != PlatformCursor || account.QuotaKeyID == nil {
 		return "", nil
@@ -516,6 +517,15 @@ const (
 	quotaKeyUsageStale = "quota_key_usage_stale"
 	// quotaKeyUsageExhausted 表示真实剩余 total-used ≤ 0：供应商额度已耗尽。
 	quotaKeyUsageExhausted = "quota_key_usage_exhausted"
+	// quotaKeySourceUnbound 表示 cursor 账号没有有效归属激活码（nil / ≤0）：来源不可判定，
+	// 即来源不可用，来源门一律否决（§25.17.3「Cursor 无有效 QuotaKeyID 不得放行」）。
+	quotaKeySourceUnbound = "quota_key_source_unbound"
+	// quotaKeyUsageUnobserved 表示来源行存在但尚无任何已提交观测（NULL / 空快照 / 全字段
+	// 缺失）：无法证明仍有剩余额度，失败关闭（缺失 ≠ 0）。
+	quotaKeyUsageUnobserved = "quota_key_usage_unobserved"
+	// quotaKeyUsageIncomplete 表示快照缺 total 或 used 任一：剩余额度不可计算，失败关闭。
+	// 真实 0 不是缺失——total=0/used=0 走 quotaKeyUsageExhausted，不得记作本原因。
+	quotaKeyUsageIncomplete = "quota_key_usage_incomplete"
 )
 
 // cursorSupplySourceUsageFreshnessWindow 是成功值 checked_at 的可接受新鲜度（§25.6：
@@ -525,60 +535,94 @@ const cursorSupplySourceUsageFreshnessWindow = 5 * time.Minute
 // cursorSupplySourceUsageNow 是来源门新鲜度判定的时钟源；单测可覆盖以冻结"现在"。
 var cursorSupplySourceUsageNow = time.Now
 
-// cursorSupplySourceUsageVetoReason 是「真实来源剩余≤0」否决的**唯一**消费判断入口
-// （方案 §25.6 同一来源门 / §25.14-C 观测提交生命周期）。
+// cursorSupplySourceUsageVetoReason 是「真实来源剩余」维度的**唯一**消费判断入口
+// （方案 §25.6 同一来源门 / §25.17.3 来源门五规则）。
 //
-// 解析一律走 ParseQuotaKeyUsageSnapshot，不自建第二份解析。五规则（否决语义，失败关闭）：
-//  1. 最近一次观测失败（error_code 非空）→ 否决（失败关闭，不使用保留数值放行）；
-//  2. 快照缺失 → 不因快照否决（按既有来源过期/缺失规则走，由调用方判 key 终态）；
-//  3. 成功值 checked_at 缺失或距今 > 5 分钟 → 否决（等待 reconciler/管理员刷新）；
-//  4. 真实剩余 total−used ≤ 0 → 否决；
-//  5. 快照解析失败 → 返回明确 error（非空 reason），由调用方失败关闭。
+// 解析一律走 ParseQuotaKeyUsageSnapshot，不自建第二份解析。语义是**失败关闭**：来源侧只要
+// 不能证明"有可用剩余"，本次就不放行。逐条：
+//  1. 无有效归属激活码（QuotaKeyID 为 nil 或 ≤0）→ 否决（来源不可判定即不可用）；
+//  2. 快照读取依赖未装配 → 明确 error（装配错误，不得当作"无否决"放行）；
+//  3. 快照读取失败（含来源不存在/已删）→ 明确 error；
+//  4. 快照解析失败 → 明确 error；
+//  5. NULL / 空快照 / 全字段缺失（从未观测）→ 否决（缺失 ≠ 0，不臆造剩余）；
+//  6. 最近一次观测失败（error_code 非空）→ 否决（失败关闭，不使用保留数值放行）；
+//  7. 成功值 checked_at 缺失或距今 > 5 分钟 → 否决（等待 reconciler/管理员刷新）；
+//  8. total 或 used 任一缺失 → 否决（剩余额度不可计算）；
+//  9. 真实剩余 total−used ≤ 0 → 否决（真实 0 保持为 0：total=0 不等于字段缺失）。
 //
-// 非 cursor 平台、未绑定激活码、或快照读取器未装配时按既有降级口径返回 ("", nil)（不收紧）。
+// 非 cursor 平台恒返回 ("", nil)（无 Cursor 否决）。本函数不区分"窄目录入口"与"普通调度"：
+// 两种消费方看到完全相同的结论，调用方只能投影 bool/string，不得另加放行条件。
 func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (string, error) {
-	if account == nil || account.Platform != PlatformCursor || account.QuotaKeyID == nil {
+	if account == nil || account.Platform != PlatformCursor {
 		return "", nil
 	}
+	// 规则①：无有效归属激活码——来源不可判定即不可用。
+	if account.QuotaKeyID == nil || *account.QuotaKeyID <= 0 {
+		return quotaKeySourceUnbound, nil
+	}
+	quotaKeyID := *account.QuotaKeyID
 	provider := currentCursorQuotaKeyUsageSnapshotProvider()
 	if provider == nil {
-		return "", nil
+		// 规则②：依赖未装配是装配错误，必须显式上抛（不保留"provider 为 nil 就放行"的降级）。
+		return "", fmt.Errorf("cursor quota key %d usage snapshot provider is not wired", quotaKeyID)
 	}
-	raw, err := provider.CursorQuotaKeyUsageSnapshot(ctx, *account.QuotaKeyID)
+	raw, err := provider.CursorQuotaKeyUsageSnapshot(ctx, quotaKeyID)
 	if err != nil {
-		// 读不到快照：失败关闭，明确上抛（不得当空目录/无否决）。
-		return "", fmt.Errorf("cursor quota key %d usage snapshot read failed: %w", *account.QuotaKeyID, err)
+		// 规则③：读不到快照（含来源不存在/已删）→ 失败关闭，如实上抛。
+		return "", fmt.Errorf("cursor quota key %d usage snapshot read failed: %w", quotaKeyID, err)
 	}
 	snapshot, ok := ParseQuotaKeyUsageSnapshot(raw)
 	if !ok {
 		if snapshot.ParseFailed {
-			// 规则⑤：快照解析失败 → 明确 error。
-			return "", fmt.Errorf("cursor quota key %d usage snapshot parse failed", *account.QuotaKeyID)
+			// 规则④：快照解析失败 → 明确 error。
+			return "", fmt.Errorf("cursor quota key %d usage snapshot parse failed", quotaKeyID)
 		}
-		// 规则②：快照/成功值缺失 → 不因快照否决（走既有缺失规则）。
-		return "", nil
+		// 规则⑤：NULL/空快照（从未观测）→ 否决。
+		return quotaKeyUsageUnobserved, nil
 	}
-	// 规则①：最近一次观测失败（error_code 非空）→ 否决（不沿用保留数值）。
+	// 规则⑥：最近一次观测失败（error_code 非空）→ 否决（不沿用保留数值）。
 	if snapshot.ErrorCode != "" {
 		return quotaKeyUsageObservationFailed, nil
 	}
-	// 规则③：checked_at 缺失或距今超过新鲜窗口 → 否决。
+	// 规则⑦：checked_at 缺失或距今超过新鲜窗口 → 否决。
 	now := cursorSupplySourceUsageNow()
 	if snapshot.CheckedAt == nil || now.Sub(*snapshot.CheckedAt) > cursorSupplySourceUsageFreshnessWindow {
 		return quotaKeyUsageStale, nil
 	}
-	// 规则④：真实剩余 total-used ≤ 0 → 否决。两个数值必须都存在，否则无法判定剩余，
-	// 不臆造否决（缺失≠0）。
-	if snapshot.Total != nil && snapshot.Used != nil && (*snapshot.Total-*snapshot.Used) <= 0 {
+	// 规则⑧：total 或 used 任一缺失 → 否决（缺失 ≠ 0，不臆造剩余）。
+	if snapshot.Total == nil || snapshot.Used == nil {
+		return quotaKeyUsageIncomplete, nil
+	}
+	// 规则⑨：真实剩余 total-used ≤ 0 → 否决。
+	if (*snapshot.Total - *snapshot.Used) <= 0 {
 		return quotaKeyUsageExhausted, nil
 	}
 	return "", nil
 }
 
-// cursorSupplySourceAvailabilityVetoReason 是 Cursor **来源可用性**的共同谓词（§25.6
-// 「调度与水位消费同一个来源可用性谓词」）：先按既有来源过期/缺失规则判 key 终态（含读取
-// 失败），再交给真实来源剩余的唯一入口。返回 (reason, err)——明确不可用与无法读取分开。
+// cursorSupplySourceAvailabilityVetoReason 是 Cursor **来源可用性**的**唯一**共同谓词
+// （§25.6「调度与水位消费同一个来源可用性谓词」 / §25.17.3「A04 唯一修改点」）：先按既有
+// 账号侧口径确认归属来源有效且依赖齐备，再判 key 终态（含读取失败），最后交给真实来源剩余
+// 的唯一入口。返回 (reason, err)——明确不可用与无法读取分开：
+//   - reason != "" 且 err == nil：合法但不可用（无有效归属码 / 快照缺失 / 观测失败 / 陈旧 /
+//     字段不完整 / 已耗尽 / key 终态过期）；
+//   - err != nil：依赖未装配或读取/解析失败，调用方必须失败关闭并如实上抛，不能当空目录。
+//
+// 该门对所有消费方（调度粗筛、粘性/DB 复核、水位、公开目录、续轮）语义一致：bool/string
+// 包装器（cursorSupplySourceAvailabilityVetoReasonString 等）只能投影，不能另加放行条件，
+// 也不再需要"窄目录入口单独加严、普通调度仍放行"的双轨——加严部分已并入本门本体。
 func cursorSupplySourceAvailabilityVetoReason(ctx context.Context, account *Account) (string, error) {
+	if account == nil || account.Platform != PlatformCursor {
+		return "", nil
+	}
+	// 无有效归属激活码：来源不可判定即不可用（与 usage 子谓词同一结论，先于依赖检查，
+	// 以便"未绑定来源"永远给出确定 reason 而不是被误报成装配错误）。
+	if account.QuotaKeyID == nil || *account.QuotaKeyID <= 0 {
+		return quotaKeySourceUnbound, nil
+	}
+	if currentCursorQuotaKeyStateProvider() == nil {
+		return "", fmt.Errorf("cursor quota key %d state provider is not wired", *account.QuotaKeyID)
+	}
 	reason, err := cursorAccountQuotaKeyVetoReasonWithError(ctx, account)
 	if err != nil || reason != "" {
 		return reason, err
@@ -589,7 +633,10 @@ func cursorSupplySourceAvailabilityVetoReason(ctx context.Context, account *Acco
 // cursorSupplySourceAvailabilityVetoReasonString 是来源门在「既有调度路径」的兼容投影：
 // 把读取失败折叠成 quota_key_state_unavailable 原因串，与 cursorAccountQuotaKeyVetoReason
 // 同口径（不清空 source usage 维度）。用于普通/粘性/DB 复核链与跨平台准入的 key 门，
-// 保留"读不到即不可用"的行为，不把来源门拆成两个实现。
+// 保留"读不到即不可用"的行为。
+//
+// 它只做投影：判定结论完全来自 cursorSupplySourceAvailabilityVetoReason，不另加放行条件，
+// 也不再有任何"普通调度比窄目录入口宽"的差异（§25.17.3 双轨已删除）。
 func cursorSupplySourceAvailabilityVetoReasonString(ctx context.Context, account *Account) string {
 	reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, account)
 	if err != nil {

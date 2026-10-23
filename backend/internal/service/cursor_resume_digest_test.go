@@ -14,6 +14,12 @@ package service
 //  7. 并行结果容器差异/同名无 ID/重复/缺失/并发消费；
 //  8. finalizer 全索引清零。
 //
+// §25.17.4（A08）追加：
+//  9. 四协议「全未知结果 / 仅未知 previous_response_id / 重启后原 ID」在 Cursor 准入边界
+//     400（Identify 可区分哨兵 + Execute 准入断言），AgentRun 与结果写入计数均 0；
+//     Responses 完整 input 回放（尾部结果的 function_call 同在一个正文里）例外——那是
+//     「历史中已完成工具对」，按原普通请求继续。
+//
 // 纯内存组件测试：无 DB、无网络；真实结果写入通道用替身 intake。
 
 import (
@@ -23,6 +29,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
@@ -422,12 +429,11 @@ func mustCursorResumeStatus(t *testing.T, err error) int {
 
 // TestCursorResumeUnknownCallID 覆盖清单第 4 条：未知（含重启孤儿）ID 的处理口径。
 //
-// 本单的实现口径（已登记在报告"域外/偏差"一节）：续轮识别发生在**账号选择之前**，
-// 此时无法判定该 ID 是否来自另一个供应商的同形字段（OpenAI 也有 function_call_output /
-// previous_response_id）。因此"全部 ID 都未登记"时必须按原契约继续普通新请求（CR-C 回归
-// 测试要求 Cursor 账号的未知 ID 仍走新 AgentRun），而**只要有任一 ID 命中本服务会话**，
-// 整批就按新口径处理：未知/混批/重复/旧批一律 400。重启后的孤儿续轮同理落入"未登记"，
-// 明确不会重放、不换号、不猜最近会话。
+// §25.17.4（A08）钉死：请求**明确声称续轮**（携带本批工具结果或 previous_response_id），
+// 但全部 ID 都未登记 → Identify 返回可区分哨兵 ErrCursorResumeUnknownAssociation（400），
+// **不得**再被当作普通新请求开新 AgentRun。该可区分哨兵交给 helper 只按供应方判定：
+// 非 Cursor 原样转发；进入 Cursor 执行分支由 Execute 准入断言在模型出站/建 session/转交
+// 资源之前拒绝。已命中但夹入未知/跨会话/旧批/重复 ID 仍沿既有 400/409 拒绝。
 func TestCursorResumeUnknownCallID(t *testing.T) {
 	fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
 		[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "mc-1", "")
@@ -442,8 +448,10 @@ func TestCursorResumeUnknownCallID(t *testing.T) {
 }`))
 	require.NoError(t, err)
 	ticket, identifyErr := fixture.svc.IdentifyResume(probe)
-	require.NoError(t, identifyErr)
-	require.Nil(t, ticket, "未登记 ID 不得被猜成本服务的续轮")
+	require.ErrorIs(t, identifyErr, ErrCursorResumeUnknownAssociation,
+		"全部 ID 未命中（含重启孤儿）必须返回可区分哨兵，不得当作普通新请求")
+	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, identifyErr))
+	require.Nil(t, ticket)
 	require.Equal(t, 0, fixture.intake.callCount())
 
 	// 已登记 ID 与未登记 ID 混在同一批：整批明确 400（不部分消费）。
@@ -875,4 +883,262 @@ func TestCursorResumeIntakeUnavailableFailsClosed(t *testing.T) {
 	fixture.record.mu.Unlock()
 	require.Equal(t, cursorSessionWaitingTools, state)
 	require.False(t, consumed)
+}
+
+// ---------------------------------------------------------------------------
+// §25.17.4（A08）：Execute 续轮准入断言——声明续轮却无有效接管 → 出站前 400
+// ---------------------------------------------------------------------------
+
+// TestCursorResumeExecuteAdmissionAllUnknownResults 覆盖：请求携带本批工具结果（全部未知，
+// 含重启孤儿），进入 Cursor 执行分支时必须在模型出站/建 session/转交资源之前 400，
+// AgentRun=0 且零结果写入。
+func TestCursorResumeExecuteAdmissionAllUnknownResults(t *testing.T) {
+	svc := &CursorExecutionService{sessions: newCursorSessionStore()}
+	probe, err := CursorProbeResumeRequest(CursorResumeProtocolChat, []byte(cursorResumeTestChatResume))
+	require.NoError(t, err)
+	require.True(t, probe.ClaimsContinuation(), "请求必须明确声称续轮")
+
+	// 同一探针计划进入新建 Execute 入口（等价于 helper 未接管、原路由选中 Cursor 分支）。
+	plan := cursorResumePlanForTest(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatResume), "cursor-test-model")
+	require.True(t, plan.claimsContinuation(), "转换不得抹掉续轮标记")
+
+	var ccReq apicompat.ChatCompletionsRequest
+	require.NoError(t, json.Unmarshal([]byte(cursorResumeTestChatResume), &ccReq))
+	_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
+		Chat:     &ccReq,
+		Model:    "cursor-test-model",
+		Protocol: cursorProtocolChat,
+		Identity: cursorResumeTestIdentity,
+		Plan:     plan,
+	})
+	require.ErrorIs(t, execErr, ErrCursorResumeUnknownAssociation,
+		"声明续轮却无有效接管必须返回失效关联哨兵")
+	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, execErr))
+	require.Zero(t, svc.sessions.sessionCount(), "不得创建 session/AgentRun")
+	require.Zero(t, svc.sessions.indexCount(), "不得登记任何索引")
+}
+
+// TestCursorResumeExecuteAdmissionOnlyPreviousResponseID 覆盖：仅 previous_response_id 未知
+// 的续轮同样在 Execute 准入边界 400（重启孤儿）。
+func TestCursorResumeExecuteAdmissionOnlyPreviousResponseID(t *testing.T) {
+	svc := &CursorExecutionService{sessions: newCursorSessionStore()}
+	const body = `{
+  "model": "cursor-test-model",
+  "instructions": "be brief",
+  "previous_response_id": "resp_unknown",
+  "input": [{"type": "function_call_output", "call_id": "call_1", "output": "sunny"}],
+  "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+}`
+	probe, err := CursorProbeResumeRequest(CursorResumeProtocolResponses, []byte(body))
+	require.NoError(t, err)
+	require.True(t, probe.ClaimsContinuation(), "previous_response_id 即显式续轮声明")
+
+	plan := cursorResumePlanForTest(t, CursorResumeProtocolResponses, []byte(body), "cursor-test-model")
+	require.True(t, plan.claimsContinuation(), "转换不得抹掉 previous_response_id 标记")
+
+	var req apicompat.ResponsesRequest
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+	ccReq, convErr := apicompat.ResponsesToChatCompletionsRequest(&req)
+	require.NoError(t, convErr)
+	_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
+		Chat:     ccReq,
+		Model:    "cursor-test-model",
+		Protocol: cursorProtocolResponses,
+		Identity: cursorResumeTestIdentity,
+		Plan:     plan,
+	})
+	require.ErrorIs(t, execErr, ErrCursorResumeUnknownAssociation)
+	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, execErr))
+	require.Zero(t, svc.sessions.sessionCount(), "不得创建 session/AgentRun")
+	require.Zero(t, svc.sessions.indexCount(), "不得登记任何索引")
+}
+
+// TestCursorResumeExecuteAdmissionPlainRequestAllowed 覆盖：**不含**本批工具结果和
+// previous_response_id 的原普通请求不受准入断言影响（历史中已完成工具对不构成本批续轮）。
+func TestCursorResumeExecuteAdmissionPlainRequestAllowed(t *testing.T) {
+	svc := &CursorExecutionService{sessions: newCursorSessionStore(), now: time.Now}
+	probe, err := CursorProbeResumeRequest(CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst))
+	require.NoError(t, err)
+	require.False(t, probe.ClaimsContinuation(), "普通请求不声明续轮")
+
+	plan := cursorResumePlanForTest(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model")
+	require.False(t, plan.claimsContinuation(), "普通请求的计划也不携带续轮标记")
+
+	var ccReq apicompat.ChatCompletionsRequest
+	require.NoError(t, json.Unmarshal([]byte(cursorResumeTestChatFirst), &ccReq))
+	// 没有 forwarder 装配 → 走到出站阶段前的失败是装配错误，而不是未知关联拒绝。
+	_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
+		Chat:     &ccReq,
+		Model:    "cursor-test-model",
+		Protocol: cursorProtocolChat,
+		Identity: cursorResumeTestIdentity,
+		Plan:     plan,
+	})
+	require.Error(t, execErr, "普通请求不被准入断言拒绝，但会因依赖未装配失败关闭")
+	require.False(t, errors.Is(execErr, ErrCursorResumeUnknownAssociation),
+		"普通请求不得被误判成未知关联")
+}
+
+// cursorResumeUnknownAssociationBody 返回「明确声称续轮但全部 ID 未命中」的原始请求体。
+//
+// 四协议各自用它自己的续轮表示携带本批工具结果（Responses 用**省略历史**的仅结果形状：
+// 只有 function_call_output，正文里没有对应 function_call，因此不构成"历史中已完成工具对"）。
+func cursorResumeUnknownAssociationBody(t *testing.T, protocol CursorResumeProtocol) []byte {
+	t.Helper()
+	switch protocol {
+	case CursorResumeProtocolChat:
+		return []byte(cursorResumeTestChatResume)
+	case CursorResumeProtocolMessages:
+		return []byte(cursorResumeTestMessagesResume)
+	case CursorResumeProtocolResponses:
+		return []byte(`{
+  "model": "cursor-test-model",
+  "instructions": "be brief",
+  "input": [{"type": "function_call_output", "call_id": "call_1", "output": "sunny"}],
+  "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+}`)
+	case CursorResumeProtocolGemini:
+		return []byte(`{
+  "contents": [
+    {"role": "user", "parts": [{"text": "weather please"}]},
+    {"role": "model", "parts": [{"functionCall": {"id": "call_1", "name": "get_weather", "args": {"city": "hz"}}}]},
+    {"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "get_weather", "response": {"result": "sunny"}}}]}
+  ],
+  "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {"type": "object"}}]}]
+}`)
+	default:
+		t.Fatalf("unsupported test protocol %q", protocol)
+		return nil
+	}
+}
+
+// TestCursorResumeRestartOrphanAllProtocolsRejected 覆盖 §25.17.4「必须证明」的
+// 「各 Cursor 协议的全未知结果（含重启后原 ID）均 400，AgentRun 与结果写入计数均 0」：
+// 用**空的会话表**模拟重启后孤儿——原样重发各协议的续轮体，Identify 必须返回可区分哨兵，
+// 即便被原路由送进新建 Execute 入口，也必须在模型出站/建 session/转交资源之前 400。
+func TestCursorResumeRestartOrphanAllProtocolsRejected(t *testing.T) {
+	protocols := []CursorResumeProtocol{
+		CursorResumeProtocolChat,
+		CursorResumeProtocolMessages,
+		CursorResumeProtocolResponses,
+		CursorResumeProtocolGemini,
+	}
+	for _, protocol := range protocols {
+		t.Run(string(protocol), func(t *testing.T) {
+			svc := &CursorExecutionService{sessions: newCursorSessionStore(), now: time.Now}
+			body := cursorResumeUnknownAssociationBody(t, protocol)
+
+			probe, err := CursorProbeResumeRequest(protocol, body)
+			require.NoError(t, err)
+			require.True(t, probe.ClaimsContinuation(), "请求必须明确声称续轮")
+
+			ticket, identifyErr := svc.IdentifyResume(probe)
+			require.Nil(t, ticket, "全部 ID 未命中时不得给出接管目标")
+			require.ErrorIs(t, identifyErr, ErrCursorResumeUnknownAssociation,
+				"重启后原 ID 必须是可区分的未知关联，不得当作普通新请求")
+			require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, identifyErr))
+			require.Zero(t, svc.sessions.sessionCount())
+			require.Zero(t, svc.sessions.indexCount())
+
+			// 同一探针计划进入新建 Execute（等价于 helper 未接管 + 原路由选中 Cursor 分支）。
+			plan := cursorResumePlanForTest(t, protocol, body, "cursor-test-model")
+			require.True(t, plan.claimsContinuation(), "转换不得抹掉续轮标记")
+			require.False(t, plan.resultsReplayHistory(), "省略历史的仅结果形状不是回放")
+
+			var ccReq apicompat.ChatCompletionsRequest
+			require.NoError(t, json.Unmarshal([]byte(cursorResumeTestChatFirst), &ccReq))
+			_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
+				Chat:     &ccReq,
+				Model:    "cursor-test-model",
+				Protocol: cursorResumeWriterProtocol(protocol),
+				Identity: cursorResumeTestIdentity,
+				Plan:     plan,
+			})
+			require.ErrorIs(t, execErr, ErrCursorResumeUnknownAssociation,
+				"声明续轮却无有效接管必须在 Cursor 准入边界 400")
+			require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, execErr))
+			require.Zero(t, svc.sessions.sessionCount(), "不得创建 session/AgentRun")
+			require.Zero(t, svc.sessions.indexCount(), "不得登记任何索引")
+		})
+	}
+}
+
+// TestCursorResumeResponsesReplayHistoryIsOrdinaryRequest 覆盖 §25.17.4 行 1：
+// 「历史中已完成工具对不单独构成本批续轮」——Responses 完整 input 回放里，尾部结果的
+// function_call 也出现在同一正文中，客户端自带完整两端，不构成对本站待完成关联的声明，
+// 因此按原普通请求继续（不判死、不接管），且不会被 Execute 准入断言误判成未知关联。
+func TestCursorResumeResponsesReplayHistoryIsOrdinaryRequest(t *testing.T) {
+	svc := &CursorExecutionService{sessions: newCursorSessionStore(), now: time.Now}
+	body := []byte(cursorResumeTestResponsesResume)
+
+	probe, err := CursorProbeResumeRequest(CursorResumeProtocolResponses, body)
+	require.NoError(t, err)
+	require.True(t, probe.ClaimsContinuation(), "尾部结果仍然构成续轮候选")
+
+	plan := cursorResumePlanForTest(t, CursorResumeProtocolResponses, body, "cursor-test-model")
+	require.True(t, plan.claimsContinuation())
+	require.True(t, plan.resultsReplayHistory(),
+		"结果 ID 的 function_call 就在同一正文里 = 历史中已完成工具对")
+
+	ticket, identifyErr := svc.IdentifyResume(probe)
+	require.NoError(t, identifyErr, "已完成工具对的回放不是未知关联")
+	require.Nil(t, ticket, "没有已登记会话时不得接管")
+
+	var req apicompat.ResponsesRequest
+	require.NoError(t, json.Unmarshal(body, &req))
+	ccReq, convErr := apicompat.ResponsesToChatCompletionsRequest(&req)
+	require.NoError(t, convErr)
+	// 没有 forwarder/鉴权依赖 → 走到出站前的装配错误；关键是**不是**未知关联拒绝。
+	_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
+		Chat:     ccReq,
+		Model:    "cursor-test-model",
+		Protocol: cursorProtocolResponses,
+		Identity: cursorResumeTestIdentity,
+		Plan:     plan,
+	})
+	require.Error(t, execErr)
+	require.False(t, errors.Is(execErr, ErrCursorResumeUnknownAssociation),
+		"已完成工具对的回放不得被当成未知关联")
+}
+
+// TestCursorResumeResponsesUnpairedOutputRejected 钉住上面的例外边界：正文里**没有**对应
+// function_call 的仅结果形状（重启孤儿 / 别家供应商的 ID）仍必须 400，不能借"回放"逃逸。
+func TestCursorResumeResponsesUnpairedOutputRejected(t *testing.T) {
+	svc := &CursorExecutionService{sessions: newCursorSessionStore(), now: time.Now}
+	body := []byte(`{
+  "model": "cursor-test-model",
+  "instructions": "be brief",
+  "input": [{"type": "function_call_output", "call_id": "call_orphan", "output": "sunny"}],
+  "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+}`)
+	plan := cursorResumePlanForTest(t, CursorResumeProtocolResponses, body, "cursor-test-model")
+	require.True(t, plan.claimsContinuation())
+	require.False(t, plan.resultsReplayHistory(), "正文没有对应 function_call → 不是回放")
+
+	probe, err := CursorProbeResumeRequest(CursorResumeProtocolResponses, body)
+	require.NoError(t, err)
+	_, identifyErr := svc.IdentifyResume(probe)
+	require.ErrorIs(t, identifyErr, ErrCursorResumeUnknownAssociation)
+	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, identifyErr))
+
+	// 混入"正文已声明的调用"也没用：另一条未配对结果仍然说明这是本站无法核验的关联。
+	body = []byte(`{
+  "model": "cursor-test-model",
+  "instructions": "be brief",
+  "input": [
+    {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\": \"hz\"}"},
+    {"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
+    {"type": "function_call_output", "call_id": "call_orphan", "output": "rainy"}
+  ],
+  "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+}`)
+	mixedPlan := cursorResumePlanForTest(t, CursorResumeProtocolResponses, body, "cursor-test-model")
+	require.False(t, mixedPlan.resultsReplayHistory(), "只要有一条结果未配对就不是回放")
+	mixedProbe, probeErr := CursorProbeResumeRequest(CursorResumeProtocolResponses, body)
+	require.NoError(t, probeErr)
+	_, mixedErr := svc.IdentifyResume(mixedProbe)
+	require.ErrorIs(t, mixedErr, ErrCursorResumeUnknownAssociation)
+	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, mixedErr))
+	require.Zero(t, svc.sessions.sessionCount())
+	require.Zero(t, svc.sessions.indexCount())
 }

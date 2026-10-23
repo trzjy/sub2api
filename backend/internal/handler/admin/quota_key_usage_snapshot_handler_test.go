@@ -11,18 +11,27 @@ package admin
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"encoding/json/jsontext"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -148,8 +157,77 @@ func TestQuotaKeyHandler_Get_NoSnapshotOmitsUsage(t *testing.T) {
 // probe
 // ---------------------------------------------------------------------------
 
+// newProbePostgresClient 返回连接**隔离 PostgreSQL** 的 ent client（懒初始化，幂等建表）。
+//
+// A07 测试装配修复（§25.17.6）：本用例此前自建 SQLite，却调用生产同 key advisory 事务
+// （pg_try_advisory_xact_lock），必然报no such function并返回 500。advisory 事务语义
+// 只能由真实 PostgreSQL 证明，故这里改用与生产同型的真实隔离库；生产代码不为 SQLite
+// 增加任何兜底分支。
+//
+// DSN 取 QUOTA_TEST_DSN（默认既有 quota_test 库）；本轮执行指向本轮隔离库，
+// 建库/清库只在该隔离库内进行，绝不使用生产库。
+func newProbePostgresClient(t *testing.T) *ent.Client {
+	t.Helper()
+	probeTestOnce.Do(func() {
+		dsn := os.Getenv("QUOTA_TEST_DSN")
+		if dsn == "" {
+			dsn = "postgres://quota_test:quota_test_pw@127.0.0.1:5432/quota_test?sslmode=disable"
+		}
+		db, err := sql.Open("postgres", dsn)
+		if err != nil {
+			probeTestInitErr = fmt.Errorf("open sql: %w", err)
+			return
+		}
+		if err := db.Ping(); err != nil {
+			_ = db.Close()
+			probeTestInitErr = fmt.Errorf("ping probe test db (set QUOTA_TEST_DSN to an isolated PostgreSQL): %w", err)
+			return
+		}
+		drv := entsql.OpenDB(dialect.Postgres, db)
+		client := ent.NewClient(ent.Driver(drv))
+		if err := client.Schema.Create(context.Background()); err != nil {
+			_ = db.Close()
+			probeTestInitErr = fmt.Errorf("schema create: %w", err)
+			return
+		}
+		probeTestClient = client
+	})
+	if probeTestInitErr != nil {
+		t.Fatalf("probe test PostgreSQL init failed: %v", probeTestInitErr)
+	}
+	return probeTestClient
+}
+
+var (
+	probeTestOnce    sync.Once
+	probeTestClient  *ent.Client
+	probeTestInitErr error
+)
+
+// newProbeQuotaKey 在隔离库里建一条本轮唯一的激活码。
+//
+// code 必须逐次唯一：quota_keys 的删除口径是软删（行保留），而 uq_quota_keys_code_mac
+// 是库级唯一索引——用固定 code 的用例在第二次运行时会撞唯一约束。故code 带上运行标识。
+// 这不影响被测语义（Probe 只按 MAC 复核来源身份，与 code 具体值无关）。
+func newProbeQuotaKey(t *testing.T, svc *service.QuotaKeyService, client *ent.Client, tag string) *service.QuotaKeyStatus {
+	t.Helper()
+	code := fmt.Sprintf("JG-CF-PROBE-%s-%d", tag, time.Now().UnixNano())
+	status, err := svc.Create(context.Background(), code, nil, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// 软删以免污染其它用例；唯一索引冲突由上面的逐次唯一 code 规避。
+		_ = client.QuotaKey.DeleteOneID(status.ID).Exec(context.Background())
+	})
+	return status
+}
+
 // TestQuotaKeyHandler_Probe_UsageProjectionFromCommittedSnapshot 钉死 probe 返回带投影，
-// 且投影取自**已提交**快照列（本单只读：probe 不把 lookup 结果冒充已提交事实）。
+// 且投影取自**已提交**快照列。
+//
+// A07 装配修复后，本用例在真实隔离 PostgreSQL 上跑完整链路：httptest lookup 返回
+// 400/37 → Probe 在同 key advisory 事务内写 usage_snapshot 并 commit → HTTP 投影必须
+// 等于**数据库已提交的新快照**（400/37），而不是 lookup 之前的旧值、也不是内存里
+// 尚未提交的值。commit 失败时 HTTP 不得 200。
 func TestQuotaKeyHandler_Probe_UsageProjectionFromCommittedSnapshot(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"key_info":{` +
@@ -160,7 +238,8 @@ func TestQuotaKeyHandler_Probe_UsageProjectionFromCommittedSnapshot(t *testing.T
 	defer srv.Close()
 
 	gin.SetMode(gin.TestMode)
-	client := newSQLiteEntClient(t)
+	client := newProbePostgresClient(t)
+	ctx := context.Background()
 	settingRepo := repository.NewSettingRepository(client)
 	quotaKeyRepo := repository.NewQuotaKeyRepository(client)
 	autoEntry := service.NewCursorAutoEntryService(settingRepo, quotaKeyRepo, service.NewCredcryptEncryptor(), client, &http.Client{Timeout: 5 * time.Second}, srv.URL)
@@ -171,18 +250,21 @@ func TestQuotaKeyHandler_Probe_UsageProjectionFromCommittedSnapshot(t *testing.T
 	qk := router.Group("/api/v1/admin/quota_keys")
 	qk.POST("/:id/probe_quota", handler.ProbeQuota)
 
-	ctx := context.Background()
-	status, err := svc.Create(ctx, "JG-CF-PROBE-SNAPSHOT", nil, nil)
-	require.NoError(t, err)
-
-	// 预置"已提交"快照（写入者由后续单落地，本单只读）。
-	_, err = client.QuotaKey.UpdateOneID(status.ID).
+	// 预置"旧的已提交快照"（400/86）：probe 的新观测必须真实落库并覆盖它。
+	status := newProbeQuotaKey(t, svc, client, "SNAPSHOT")
+	_, err := client.QuotaKey.UpdateOneID(status.ID).
 		SetUsageSnapshot(jsontext.Value(handlerSnapshotSuccess)).
 		Save(ctx)
 	require.NoError(t, err)
 
 	rec := doQuotaKeyJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/"+itoa(status.ID)+"/probe_quota", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 数据库里已提交的新快照 = 本次 lookup 的 400/37（不再是预置的 400/86）。
+	committed, err := client.QuotaKey.Get(ctx, status.ID)
+	require.NoError(t, err)
+	require.NotContains(t, string(committed.UsageSnapshot), `"used":86`,
+		"Probe 必须在真实 PostgreSQL 上覆盖旧快照")
 
 	var payload struct {
 		Data struct {
@@ -201,21 +283,108 @@ func TestQuotaKeyHandler_Probe_UsageProjectionFromCommittedSnapshot(t *testing.T
 	// 既有 probe 摘要字段形态不变。
 	require.Equal(t, 400, payload.Data.Max)
 	require.Equal(t, 37, payload.Data.Used)
-	// 新增投影来自已提交快照（400/86），不是本次 lookup 的 400/37。
+	// 投影必须等于数据库已提交的新快照，而不是预置旧值。
 	require.NotNil(t, payload.Data.Usage, "probe 响应必须带 usage 投影")
 	require.NotNil(t, payload.Data.Usage.Total)
 	require.Equal(t, 400, *payload.Data.Usage.Total)
 	require.NotNil(t, payload.Data.Usage.Used)
-	require.Equal(t, 86, *payload.Data.Usage.Used)
+	require.Equal(t, 37, *payload.Data.Usage.Used, "HTTP 投影必须等于数据库已提交的新快照")
 	require.NotNil(t, payload.Data.Usage.Remaining)
-	require.Equal(t, 314, *payload.Data.Usage.Remaining)
+	require.Equal(t, 363, *payload.Data.Usage.Remaining)
 	require.Equal(t, service.QuotaKeyUsageLabel, payload.Data.Usage.Label)
 	require.False(t, payload.Data.Usage.Failed)
 
-	// 只读验证：probe 未改写已提交快照列（写入者归后续单）。
+	// 断言链直接读已提交列，而不是只信HTTP 自述。
+	committedDoc, ok := service.ParseQuotaKeyUsageSnapshot(committed.UsageSnapshot)
+	require.True(t, ok, "已提交快照必须可解析")
+	require.NotNil(t, committedDoc.Used)
+	require.Equal(t, 37, *committedDoc.Used)
+	require.Equal(t, *committedDoc.Used, *payload.Data.Usage.Used)
+}
+
+// TestQuotaKeyHandler_Probe_CommitFailureMustNotReturnOK 钉死 commit 失败时 HTTP 不得 200，
+// 且不得把 lookup 的内存值当成已提交事实（数据库仍是旧快照）。
+//
+// 故障注入点在同 key 事务的 commit：用一个包装仓储让事务提交失败（真实 PostgreSQL 拒绝
+// 该提交），从而证明 Probe 只有在快照真正落库后才报告成功。
+func TestQuotaKeyHandler_Probe_CommitFailureMustNotReturnOK(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"key_info":{` +
+			`"group":"Pro","key_status_code":1,"quota_key_max_quota":400,` +
+			`"quota_key_used_quota":37,"device_count":1,"device_max_count":3,` +
+			`"mode":1,"expired_at":"2026-12-31T00:00:00Z"}}}`))
+	}))
+	defer srv.Close()
+
+	gin.SetMode(gin.TestMode)
+	client := newProbePostgresClient(t)
+	ctx := context.Background()
+	settingRepo := repository.NewSettingRepository(client)
+	baseRepo := repository.NewQuotaKeyRepository(client)
+	autoEntry := service.NewCursorAutoEntryService(settingRepo, baseRepo, service.NewCredcryptEncryptor(), client, &http.Client{Timeout: 5 * time.Second}, srv.URL)
+	svc := service.NewQuotaKeyService(baseRepo, service.NewCredcryptEncryptor(), nil, client)
+	handler := NewQuotaKeyHandler(svc, nil, autoEntry)
+
+	router := gin.New()
+	qk := router.Group("/api/v1/admin/quota_keys")
+	qk.POST("/:id/probe_quota", handler.ProbeQuota)
+
+	status := newProbeQuotaKey(t, svc, client, "COMMITFAIL")
+	_, err := client.QuotaKey.UpdateOneID(status.ID).
+		SetUsageSnapshot(jsontext.Value(handlerSnapshotSuccess)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 注入点：让观测写入本身失败（等价于该事务无法提交）。用只读副本仓储替身，
+	// 其 UpdateUsageSnapshot 明确报错 —— 事务随之回滚，commit 从未发生。
+	failingRepo := &commitFailingQuotaKeyRepo{QuotaKeyRepository: baseRepo}
+	failingAutoEntry := service.NewCursorAutoEntryService(settingRepo, failingRepo, service.NewCredcryptEncryptor(), client, &http.Client{Timeout: 5 * time.Second}, srv.URL)
+	failingHandler := NewQuotaKeyHandler(svc, nil, failingAutoEntry)
+	failingRouter := gin.New()
+	failingRouter.POST("/api/v1/admin/quota_keys/:id/probe_quota", failingHandler.ProbeQuota)
+
+	rec := doQuotaKeyJSON(failingRouter, http.MethodPost, "/api/v1/admin/quota_keys/"+itoa(status.ID)+"/probe_quota", "")
+	require.NotEqual(t, http.StatusOK, rec.Code, "快照未提交时 probe 不得返回 200")
+
+	// 数据库仍是旧快照：lookup 的 400/37 没有被当成已提交事实。
 	row, err := client.QuotaKey.Get(ctx, status.ID)
 	require.NoError(t, err)
 	require.JSONEq(t, handlerSnapshotSuccess, string(row.UsageSnapshot))
+}
+
+// commitFailingQuotaKeyRepo 让观测快照写入失败，其余能力沿用真实仓储（真实 PostgreSQL）。
+//
+// 注入点必须**留在真实同 key 事务内**：嵌入真实仓储保证它仍满足 service 的观测窄接口
+// （否则 ProbeKeyQuota 会在 asObservationRepo 处失败关闭，测到的就不是 commit 语义）。
+// 写入失败使该事务整体回滚、commit 从不发生——这正是"快照未提交"的可观测等价形态：
+// HTTP 不得 200，且数据库仍是旧快照。
+type commitFailingQuotaKeyRepo struct {
+	service.QuotaKeyRepository
+}
+
+// quotaKeyTxRepo 是 service 侧的观测窄接口形状（方法集与 service 的窄接口逐字一致）。
+// 这里在测试内重声明一次，用于把嵌入的真实仓储断言成事务能力并逐个转发。
+type quotaKeyTxRepo interface {
+	GetByIDInTx(ctx context.Context, tx *ent.Tx, id int64) (*ent.QuotaKey, error)
+	UpdateUsageSnapshot(ctx context.Context, tx *ent.Tx, id int64, snapshot []byte, expiresAt **time.Time) error
+	UpdateCredentialsAtomically(ctx context.Context, tx *ent.Tx, id int64, codeEncrypted, codeMAC, codeLast4 string, clearUsageSnapshot bool) error
+}
+
+func (r *commitFailingQuotaKeyRepo) txDelegate() quotaKeyTxRepo {
+	return r.QuotaKeyRepository.(quotaKeyTxRepo)
+}
+
+func (r *commitFailingQuotaKeyRepo) GetByIDInTx(ctx context.Context, tx *ent.Tx, id int64) (*ent.QuotaKey, error) {
+	return r.txDelegate().GetByIDInTx(ctx, tx, id)
+}
+
+func (r *commitFailingQuotaKeyRepo) UpdateCredentialsAtomically(ctx context.Context, tx *ent.Tx, id int64, codeEncrypted, codeMAC, codeLast4 string, clearUsageSnapshot bool) error {
+	return r.txDelegate().UpdateCredentialsAtomically(ctx, tx, id, codeEncrypted, codeMAC, codeLast4, clearUsageSnapshot)
+}
+
+// UpdateUsageSnapshot 是唯一注入点：观测快照写失败 → 事务整体回滚 → commit 从不发生。
+func (r *commitFailingQuotaKeyRepo) UpdateUsageSnapshot(context.Context, *ent.Tx, int64, []byte, **time.Time) error {
+	return errors.New("injected failure: usage snapshot transaction cannot commit")
 }
 
 // ---------------------------------------------------------------------------

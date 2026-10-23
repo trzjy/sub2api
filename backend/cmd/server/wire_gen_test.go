@@ -113,6 +113,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // quotaLifecycle
 		nil, // quotaKeySweeper (D-CURSOR-017)
 		nil, // cursorAccountRetention (D-CURSOR-017)
+		nil, // cursorExecution（A09：同一执行器实例接入 cleanup）
 		nil, // quotaKeyReconciler (D-CURSOR-018)
 	)
 

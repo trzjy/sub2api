@@ -166,6 +166,8 @@ func provideCleanup(
 	quotaLifecycle *service.CNQuotaLifecycleService,
 	quotaKeySweeper *service.QuotaKeySweeper,
 	cursorAccountRetention *service.CursorAccountRetentionService,
+	// cursorExecution 是**同一实例**（Wire 单例）：网关与 cleanup 共用，绝不另建第二个执行器。
+	cursorExecution *service.CursorExecutionService,
 	quotaKeyReconciler *service.QuotaKeyReconciler,
 ) func() {
 	return func() {
@@ -177,8 +179,28 @@ func provideCleanup(
 			fn   func() error
 		}
 
-		// 应用层清理步骤可并行执行，基础设施资源（Redis/Ent）最后按顺序关闭。
-		parallelSteps := []cleanupStep{
+		// §25.17.7 A09：停止必须覆盖会话与计费依赖，顺序固定且串行：
+		//   ① CursorExecutionService.Stop（现存 session 走原 finalizer；标 stopped、停止新建/续接）
+		//   ② 其它既有后台生产者（ProbeWorker / reconciler 等）
+		//   ③ UsageRecordWorkerPool.Stop（排空已提交任务）
+		//   ④ 计费依赖/投影消费者（BillingCache / Subscription / Pricing / CustomModelPricing /
+		//      UserPlatformQuotaUsageFlusher）
+		//   ⑤ 最后关闭 Redis / Ent
+		// ③ 不得与 ④ 并行：任务排空必须发生在依赖关闭之前。
+		// 只把有实际依赖的既有 Stop 从并行组移到对应顺序组，不重排无关服务。
+
+		// ① 会话层最先同步停止（唯一执行部件，同一实例）。
+		sessionSteps := []cleanupStep{
+			{"CursorExecutionService", func() error {
+				if cursorExecution != nil {
+					cursorExecution.Stop()
+				}
+				return nil
+			}},
+		}
+
+		// ② 其它后台生产者（组内并行；不含账务消费者与计费依赖）。
+		producerSteps := []cleanupStep{
 			{"XianyuSyncService", func() error {
 				if xianyuSync != nil {
 					xianyuSync.Stop()
@@ -365,32 +387,8 @@ func provideCleanup(
 				subscriptionExpiry.Stop()
 				return nil
 			}},
-			{"SubscriptionService", func() error {
-				if subscriptionService != nil {
-					subscriptionService.Stop()
-				}
-				return nil
-			}},
-			{"PricingService", func() error {
-				pricing.Stop()
-				return nil
-			}},
-			{"CustomModelPricingService", func() error {
-				customModelPricingService.Stop()
-				return nil
-			}},
 			{"EmailQueueService", func() error {
 				emailQueue.Stop()
-				return nil
-			}},
-			{"BillingCacheService", func() error {
-				billingCache.Stop()
-				return nil
-			}},
-			{"UsageRecordWorkerPool", func() error {
-				if usageRecordWorkerPool != nil {
-					usageRecordWorkerPool.Stop()
-				}
 				return nil
 			}},
 			{"OAuthService", func() error {
@@ -445,15 +443,17 @@ func provideCleanup(
 				}
 				return nil
 			}},
-			{"ChannelMonitorRunner", func() error {
-				if channelMonitorRunner != nil {
-					channelMonitorRunner.Stop()
+			// §25.17.7 A09：ProbeWorker 的原唯一构造处（ProvideChannelMonitorProbeWorker）
+			// Start 一次，这里对应 Stop 一次。
+			{"ChannelMonitorProbeWorker", func() error {
+				if channelMonitorProbeWorker != nil {
+					channelMonitorProbeWorker.Stop()
 				}
 				return nil
 			}},
-			{"UserPlatformQuotaUsageFlusher", func() error {
-				if quotaFlusher != nil {
-					quotaFlusher.Stop()
+			{"ChannelMonitorRunner", func() error {
+				if channelMonitorRunner != nil {
+					channelMonitorRunner.Stop()
 				}
 				return nil
 			}},
@@ -496,6 +496,50 @@ func provideCleanup(
 			{"QuotaKeyReconciler", func() error {
 				if quotaKeyReconciler != nil {
 					quotaKeyReconciler.Stop()
+				}
+				return nil
+			}},
+		}
+
+		// ③ 账务队列排空：现有 worker 的 Stop 即 StopAndWait（等已提交任务执行完）。
+		drainSteps := []cleanupStep{
+			{"UsageRecordWorkerPool", func() error {
+				if usageRecordWorkerPool != nil {
+					usageRecordWorkerPool.Stop()
+				}
+				return nil
+			}},
+		}
+
+		// ④ 计费依赖/投影消费者：必须在 ③ 排空之后关闭（③④不并行）。
+		billingSteps := []cleanupStep{
+			{"UserPlatformQuotaUsageFlusher", func() error {
+				if quotaFlusher != nil {
+					quotaFlusher.Stop()
+				}
+				return nil
+			}},
+			{"BillingCacheService", func() error {
+				if billingCache != nil {
+					billingCache.Stop()
+				}
+				return nil
+			}},
+			{"SubscriptionService", func() error {
+				if subscriptionService != nil {
+					subscriptionService.Stop()
+				}
+				return nil
+			}},
+			{"PricingService", func() error {
+				if pricing != nil {
+					pricing.Stop()
+				}
+				return nil
+			}},
+			{"CustomModelPricingService", func() error {
+				if customModelPricingService != nil {
+					customModelPricingService.Stop()
 				}
 				return nil
 			}},
@@ -544,7 +588,11 @@ func provideCleanup(
 			}
 		}
 
-		runParallel(parallelSteps)
+		// §25.17.7 A09 固定顺序：①会话层 → ②其它生产者 → ③账务排空 → ④计费依赖 → ⑤Redis/Ent。
+		runSequential(sessionSteps)
+		runParallel(producerSteps)
+		runSequential(drainSteps)
+		runSequential(billingSteps)
 		runSequential(infraSteps)
 
 		// Check if context timed out

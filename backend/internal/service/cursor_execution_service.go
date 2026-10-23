@@ -31,6 +31,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +63,11 @@ const (
 	cursorProtocolAnthropic
 	// cursorProtocolResponses 表示入站为 /v1/responses：响应回桥为 Responses。
 	cursorProtocolResponses
+	// cursorProtocolGemini 表示入站为 Gemini v1beta 原生形状：响应由 Gemini codec 写出。
+	//
+	// §25.17.2「Gemini 与 Messages 落点」：原生出口必须由**同一执行器的 Gemini writer**
+	// 逐帧写出，不再先转 Chat 摘要、捕获整包再回放。
+	cursorProtocolGemini
 )
 
 // cursorResponsesToolMeta 是 Responses 回桥所需的工具元数据（§24.2-5）。
@@ -113,6 +119,13 @@ var ErrCursorModelNotMapped = errors.New("cursor: account does not map the reque
 // 未知 choice、具名选择指向未声明的工具、约束无法落地，都返回该错误且**未出站**；
 // 绝不通过"指令要求模型配合"或"扩大工具集"来伪造满足。
 var ErrCursorToolChoiceInvalid = errors.New("cursor: tool choice cannot be satisfied (fail closed)")
+
+// ErrCursorContentWhileWaitingTools 表示会话在 waiting_tools 期间收到**新的模型正文**。
+//
+// §25.17.2-1 末段：原生阶段契约是"交付完整工具批 → 暂停 → 收到真实结果才继续"。等待期间
+// 模型不得再产出正文；出现正文即违反阶段契约，按显式协议失败处理（不重放、不缓存、
+// 不把这段正文交给任何客户端）。
+var ErrCursorContentWhileWaitingTools = errors.New("cursor: model emitted new content while waiting for tool results (fail closed)")
 
 // CursorExecutionRequest 是 Cursor 执行入口的**类型化**请求。
 //
@@ -202,9 +215,13 @@ func (s *CursorExecutionService) AuthProviderForAccount(account *Account) (Curso
 	return newCursorAccountAuthProvider(account, s.quotaKeys, s.enc, s.deviceIDs)
 }
 
-// Stop 关闭会话表并清空全部关联（DI cleanup 调用一次）。
+// Stop 关闭会话表并清空全部关联（DI cleanup 调用一次；重复调用不重复结算/释放）。
+//
+// §25.17.7 A09：现存会话走**同一个 finalizer**，Stop 随后在会话锁外等待每个会话的
+// finalizeDone——即等唯一胜者完成结算提交、资源归还与索引清理；Stop 返回后新请求拿不到
+// 会话（sessions.start 明确不可用，零 AgentRun），孤儿续轮关联也已失效。
 func (s *CursorExecutionService) Stop() {
-	if s == nil {
+	if s == nil || s.sessions == nil {
 		return
 	}
 	s.sessions.stop()
@@ -234,6 +251,23 @@ func (s *CursorExecutionService) Execute(
 	if req == nil || req.Chat == nil {
 		return nil, fmt.Errorf("%w: typed chat completions request missing", ErrCursorUnsupportedRequest)
 	}
+
+	// §25.17.4（A08）行 5：Cursor 执行分支的准入断言——所有类型化 adapter 与 Execute 入口
+	// 共用这一条。请求**在原协议层已声明续轮**（携带本批工具结果或 previous_response_id，
+	// 见 cursorContextPlan.claimsContinuation，取自原协议 probe/plan，转换不得抹掉该标记），
+	// 却没有任何有效接管（合法续轮由 ServeCursorResume 处理，绝不再次调用新建 Execute），
+	// 因此凡是"声明续轮却到达新建入口"（含重启后孤儿）必须在模型出站、建 session/AgentRun
+	// 和转交资源之前明确 400 失效关联；不换号重试、不回退其它供应商、不重执行工具。
+	//
+	// 行 1 的例外（resultsReplayHistory）：Responses 完整 input 回放里，尾部结果的
+	// function_call 也出现在同一正文中 —— 那是客户端自带完整两端的已完成工具对，不构成
+	// 续轮声明，按原普通请求继续。判定只取本 HTTP 请求数据，不新增持久化表/墓碑/ID 前缀，
+	// 也不猜最近会话。
+	if req.Plan.claimsContinuation() && !req.Plan.resultsReplayHistory() {
+		return nil, newCursorResumeError(http.StatusBadRequest, "unknown_association",
+			ErrCursorResumeUnknownAssociation)
+	}
+
 	startTime := req.StartTime
 	if startTime.IsZero() {
 		startTime = s.now()
@@ -291,6 +325,12 @@ func (s *CursorExecutionService) Execute(
 	if _, err := authProvider.CursorUpstreamAuth(ctx); err != nil {
 		return nil, err
 	}
+	// §25.17.3「A05首次来源指纹」：指纹随材料一同传出，取的是**本次生成头那一次**的
+	// 来源行与解密结果。拿不到可靠指纹即失败关闭，绝不以空值登记进会话。
+	sourceFP, ok := authProvider.SourceFingerprint()
+	if !ok {
+		return nil, fmt.Errorf("%w: account %d", ErrCursorSourceFingerprintUnavailable, account.ID)
+	}
 	cursorPhaseLog(ctx, zapcore.DebugLevel, "auth_done", upstreamModel,
 		zap.Int64("account_id", account.ID))
 	cursorPhaseLog(ctx, zapcore.DebugLevel, "convert_done", upstreamModel)
@@ -298,18 +338,33 @@ func (s *CursorExecutionService) Execute(
 
 	// 会话登记：状态所有者、统一索引、批次判定与 §25.4/§25.5 生命周期都在本服务内。
 	session := s.sessions.start(cursorSessionSpec{
-		protocol:       req.Protocol,
-		requestedModel: originalModel,
-		upstreamModel:  upstreamModel,
-		accountID:      account.ID,
-		quotaKeyID:     cursorAccountQuotaKeyID(account),
-		indexProtocol:  strings.TrimSpace(req.IndexProtocol),
-		identity:       req.Identity,
+		protocol:         req.Protocol,
+		requestedModel:   originalModel,
+		upstreamModel:    upstreamModel,
+		accountID:        account.ID,
+		quotaKeyID:       cursorAccountQuotaKeyID(account),
+		sourceQuotaKeyID: sourceFP.QuotaKeyID,
+		sourceCodeMAC:    sourceFP.CodeMAC,
+		indexProtocol:    strings.TrimSpace(req.IndexProtocol),
+		identity:         req.Identity,
 	})
 	s.sessions.attachOwner(session, s)
+	// §25.17.7 A09：Stop 之后不再登记新会话，调用方拿到 nil 即"明确不可用"——
+	// 必须在模型出站/AgentRun 之前失败关闭（零 AgentRun、零游离会话状态）。
+	if session == nil {
+		return nil, fmt.Errorf("%w: cursor execution service is stopped", ErrCursorExecutionUnavailable)
+	}
 	// §25.14-D：首 HTTP 把有效输入历史逐项摘要入会话（config_digest + history_digest +
 	// 逻辑项数），供续轮重算前缀摘要对比。只落摘要状态，不落正文。
 	session.recordPlan(req.Identity, req.Plan)
+	// 本 HTTP 的逐请求选项（stream / tool_choice 不跨 HTTP 累积，§25.17.2-2）。
+	session.setHTTPOptions(cursorHTTPOptions{
+		stream:         req.Stream,
+		model:          originalModel,
+		toolChoiceMode: req.ToolChoiceMode,
+		toolChoiceName: req.ToolChoiceName,
+	})
+	session.setLogContext(ctx)
 
 	// §25.4：180 秒总期限从**首次 AgentRun 发起**计算；跨 HTTP 与工具执行共用，
 	// 续轮不重置。日志分别记 deadline、来源与剩余，不打印正文/凭据。
@@ -323,16 +378,25 @@ func (s *CursorExecutionService) Execute(
 	// 会话运行 context 与 HTTP context 取消**解耦**：正常 handler 返回触发的取消不能
 	// 误杀已完成交接的会话；附着期间的真实断连由 attachHTTP 的取消回调判定。
 	//
-	// 跨 HTTP（§25.4 / W2-F）：本 HTTP 返回**不得**取消会话运行 ctx。流式路径上该 ctx
-	// 是原生 AgentRun 连接的存活依据（既是出站请求 ctx，也是 180 秒期限的作用点），
-	// 取消权在 registStreamClose 之后交给 finalizer（streamClose）；本 HTTP 仅在尚未
-	// 交接时（错误早退/非流式）自行取消，避免泄漏一个永不取消的 ctx。
+	// 跨 HTTP（§25.4 / W2-F / §25.17.2-2）：本 HTTP 返回**不得**取消会话运行 ctx。该 ctx
+	// 是原生 AgentRun 连接的存活依据（既是出站请求 ctx，也是 180 秒期限的作用点），取消权
+	// 在 registStreamClose 之后交给 finalizer（streamClose）。stream 与 nonstream 同口径：
+	// 只要读循环仍在且会话未被收口（本 HTTP 在完整工具批检查点返回），就把 ctx 交给
+	// finalizer；否则（错误早退 / 单 HTTP 完成）自行取消，避免泄漏一个永不取消的 ctx。
 	sessionCtx, cancelSession := session.sessionContext(ctx)
 	sessionCtxHandedOver := false
 	defer func() {
-		if !sessionCtxHandedOver {
-			cancelSession()
+		if sessionCtxHandedOver {
+			return
 		}
+		session.mu.Lock()
+		alive := !session.pumpEnded &&
+			session.state != cursorSessionClosed && session.state != cursorSessionFinalizing
+		session.mu.Unlock()
+		if alive {
+			return
+		}
+		cancelSession()
 	}()
 	// §25.4：180 秒到期即终结，**不依赖传输层是否及时把取消回报给读循环**。
 	//
@@ -382,10 +446,13 @@ func (s *CursorExecutionService) Execute(
 		}
 		session.mu.Lock()
 		pumpEnded := session.pumpEnded
+		state := session.state
 		session.mu.Unlock()
-		if pumpEnded || !req.Stream {
-			// 读循环已结束（正常单 HTTP 完成）或本 HTTP 独占会话（非流式：本层已把整条
-			// 流读完并取得真实 usage）→ 由本返回点收尾（finalizer 幂等，不双写）。
+		// §25.17.2-2：stream 与 nonstream 同口径——只要读循环仍在（pumpEnded=false）且会话
+		// 处于运行/等待工具（本次 HTTP 在完整工具批检查点交付后返回），会话就跨 HTTP 存活，
+		// finalizer 由 pump 在真实终态/传输错误/180s 到期时独占。只有读循环已结束或会话已被
+		// finalizer 收口时，才由本返回点收尾（幂等，不双写）。
+		if pumpEnded || state == cursorSessionClosed {
 			s.finishCursorSession(session, "completed")
 			return
 		}
@@ -408,9 +475,9 @@ func (s *CursorExecutionService) Execute(
 	}
 	// finalizer 的②关闭原生流：与下方的按需 defer 幂等共存，只保证"取消读写"这一步至多一次。
 	//
-	// 流式路径上**本 HTTP 返回不关闭原生流**（会话跨 HTTP 存活，真实结果仍要写回该连接）：
-	// body 与会话运行 ctx 的所有权在此交给 finalizer，由它独占关闭；非流式路径仍由本 HTTP
-	// 读完即关（下方 streaming 判定）。
+	// §25.17.2-2：stream 与 nonstream 同口径——本 HTTP 返回**不关闭原生流**（会话跨 HTTP
+	// 存活时真实结果仍要写回该连接），body 与会话运行 ctx 的所有权在此交给 finalizer；
+	// 只有会话已被收口（单 HTTP 完成 / 失败早退）时才由本 HTTP 关闭。
 	session.mu.Lock()
 	session.streamClose = func() {
 		_ = resp.Body.Close()
@@ -418,9 +485,17 @@ func (s *CursorExecutionService) Execute(
 	}
 	session.mu.Unlock()
 	sessionCtxHandedOver = req.Stream
-	if !req.Stream {
-		defer func() { _ = resp.Body.Close() }()
-	}
+	defer func() {
+		session.mu.Lock()
+		alive := !session.pumpEnded &&
+			session.state != cursorSessionClosed && session.state != cursorSessionFinalizing
+		session.mu.Unlock()
+		if alive {
+			// 跨 HTTP 存活：原生流归 finalizer 独占关闭（不在此提前断开）。
+			return
+		}
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		upstreamBody, rerr := readCursorUpstreamBody(resp.Body, cursorAuthResponseMaxBytes)
@@ -433,10 +508,9 @@ func (s *CursorExecutionService) Execute(
 		return nil, cursorUpstreamStatusError(resp.StatusCode, upstreamBody, bearer)
 	}
 
-	if req.Stream {
-		return s.executeStreaming(ctx, c, account, req, resp, bearer, originalModel, upstreamModel, startTime, delegations, session)
-	}
-	return s.executeNonStreaming(ctx, c, account, req, resp, bearer, originalModel, upstreamModel, startTime, delegations, session)
+	// stream / nonstream 走**同一条**读循环与同一个交付边界，只有本 HTTP 的写出方式不同
+	// （§25.17.2-2：两条链不在各自路径里分裂）。
+	return s.executeHTTP(ctx, c, account, req, resp, bearer, originalModel, upstreamModel, startTime, delegations, session)
 }
 
 // cursorSessionTerminalReason 把执行错误归类为会话终态原因（日志安全字段）。
@@ -455,12 +529,17 @@ func cursorSessionTerminalReason(err error) string {
 	}
 }
 
-// executeStreaming 把 Cursor 原生 AgentRun 响应经背景读循环扇出给当前附着的 HTTP。
+// executeHTTP 是**每会话同一条读循环 + 每 HTTP 一个协议 writer**的唯一执行实现
+// （§25.17.2：stream 独立 pump / nonstream read-all 两条链在此收敛）。
 //
-// 单 HTTP 读循环（pump）独占 resp.Body 读取并解析为客户端协议字节；本方法只附着并消费输出
-// 帧（自本次附着以来）。捕获 mcp_args 委托时 pump 吐出 tool_calls+finish+[DONE] 并把本轮 HTTP
-// 标记为委托检查点返回（连接保持存活跨 HTTP）；正常终态/turn_ended 时 drain 至 end 事件返回。
-func (s *CursorExecutionService) executeStreaming(
+// 职责划分：
+//   - 原生读循环（pump，每会话唯一）只产出增量文本、完整工具批与真实终态/错误；
+//   - 本函数只负责**当前 HTTP**：安装 intake、附着输出消费者、准备 writer 与输出标识，
+//     然后把自本次附着以来的事件按本 HTTP 的 stream/nonstream 选项写出并交付确认。
+//
+// 顺序纪律（§25.17.2-1）：真实 intake、输出消费者、writer 与响应 ID 必须在开读之前装好，
+// 首帧不会落在未附着窗口；nonstream 不提前提交 200 头（见 beginResponseWriter）。
+func (s *CursorExecutionService) executeHTTP(
 	ctx context.Context,
 	c *gin.Context,
 	account *Account,
@@ -471,19 +550,35 @@ func (s *CursorExecutionService) executeStreaming(
 	delegations *cursorToolDelegations,
 	session *cursorSessionRecord,
 ) (*ForwardResult, error) {
-	// 装配跨 HTTP 真实结果回写通道（CursorSessionIntake 生产实现）：绑定原生双工 writer。
+	// ① 跨 HTTP 真实结果回写通道（CursorSessionIntake 生产实现）：绑定原生双工 writer。
 	session.output = newCursorSessionOutput()
 	if resp.Duplex != nil {
 		session.agentRunDuplex = resp.Duplex
-		_ = s.installIntake(session.id, &cursorAgentRunIntake{
+		if err := s.installIntake(session.id, &cursorAgentRunIntake{
 			svc:         s,
 			session:     session,
 			duplex:      resp.Duplex,
 			delegations: delegations,
-		})
+		}); err != nil {
+			return nil, err
+		}
 	}
 
-	writer, restore, werr := s.beginResponseWriter(c, req, resp)
+	// ② 本 HTTP 的输出标识与消费者：先附着（拿到唯一响应 ID），再开读。
+	ch, detach := session.output.attach()
+	if ch == nil {
+		s.finishCursorSession(session, "attach_failed")
+		return nil, fmt.Errorf("%w: cannot attach session output", ErrCursorExecutionUnavailable)
+	}
+	defer detach()
+	responseID := session.output.responseID()
+
+	parser := cursorNewStreamParser(originalModel, bearer)
+	parser.attachToolDelegations(delegations)
+	// 本 HTTP 的 chunk 一律使用该 HTTP 的实际响应 ID（不是固定常量）。
+	parser.attachOutputIDSource(session.output.responseID)
+
+	writer, restore, werr := s.beginResponseWriter(c, req, resp, responseID)
 	if werr != nil {
 		return nil, werr
 	}
@@ -491,125 +586,215 @@ func (s *CursorExecutionService) executeStreaming(
 		defer restore()
 	}
 
-	parser := cursorNewStreamParser(originalModel, bearer)
-	parser.attachToolDelegations(delegations)
-
-	// 启动每会话唯一的背景读循环（独占 resp.Body 读取）。
+	// ③ 启动每会话唯一的背景读循环（独占 resp.Body 读取；跨 HTTP 存活）。
 	go s.runCursorAgentRunPump(session, resp, req, parser, session.output)
 
-	// 当前 HTTP 附着并消费自本次附着以来的输出帧。
-	ch, detach := session.output.attach()
-	if ch == nil {
-		s.finishCursorSession(session, "attach_failed")
-		return nil, fmt.Errorf("%w: cannot attach session output", ErrCursorExecutionUnavailable)
-	}
-	defer detach()
-
 	cursorPhaseLog(ctx, zapcore.InfoLevel, "response_write_begin", upstreamModel,
-		zap.String("outcome", "ok"), zap.Bool("stream", true))
+		zap.String("outcome", "ok"), zap.Bool("stream", req.Stream))
 	return s.cursorDrainAttachedOutput(ch, writer, req, session)
 }
 
-// cursorDrainAttachedOutput 消费附着输出通道的帧并写出到客户端 writer。
+// cursorDrainAttachedOutput 消费附着输出通道的帧并按**本 HTTP 选项**写出。
 //
-// 收到 isDeleg（委托检查点）即收尾返回（会话存活跨 HTTP）；收到 isEnd（真实终态）即收尾返回
-// （携带真实 usage）；收到数据帧即写出并 Flush。
+// stream：逐帧写出并 Flush；nonstream：只累计本 HTTP 的输出，收尾时聚合成一个合法 JSON。
+// 委托检查点（isDeleg）与真实终态（isEnd）都收尾返回；区别只在终结语义：
+//   - isDeleg：交付工具批成功 → 写出协议结束标记 → 服务锁内提交 pending.delivered；
+//   - isEnd：真实终态。**携带错误时走唯一失败链**：不写成功终结标记、不 finalize。
 func (s *CursorExecutionService) cursorDrainAttachedOutput(
 	ch chan *cursorOutputEvent,
 	writer io.Writer,
 	req *CursorExecutionRequest,
 	session *cursorSessionRecord,
 ) (*ForwardResult, error) {
+	var aggregated bytes.Buffer
 	for {
 		ev, ok := <-ch
 		if !ok {
 			return nil, fmt.Errorf("%w: session output detached", ErrCursorExecutionUnavailable)
 		}
 		if ev.isDeleg {
-			_ = s.finalizeResponseWriter(writer, req)
-			return s.cursorSessionStreamResult(session, req), nil
-		}
-		if ev.isEnd {
-			_ = s.finalizeResponseWriter(writer, req)
-			if ev.err != nil && ev.err != io.EOF {
-				return nil, ev.err
+			if ev.prepared == nil {
+				// 委托检查点必须带着已准备好的批：缺失说明准备阶段未完成，绝不当作交付成功。
+				return nil, fmt.Errorf("%w: delegation checkpoint without prepared batch", ErrCursorBatchIncomplete)
+			}
+			// 写出本 HTTP 的协议结束标记（完整批已在此前的数据帧里完整写出）。
+			if err := s.finishHTTPOutput(writer, req, &aggregated, false); err != nil {
+				return nil, err
+			}
+			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_write_done", req.Model,
+				zap.String("outcome", "ok"), zap.Bool("stream", req.Stream))
+			// 交付确认：只有完整写出成功后才在服务锁内提交 waiting_tools（§25.17.2-4）。
+			// 条目 ID 取自本 HTTP 实际写出的内容（Responses 出口；其它协议为空）。
+			if err := s.commitDeliveredBatch(session, ev.prepared, cursorWriterItemIDs(writer)); err != nil {
+				return nil, err
 			}
 			return s.cursorSessionStreamResult(session, req), nil
 		}
-		if _, werr := writer.Write(ev.data); werr != nil {
-			return nil, werr
+		if ev.isEnd {
+			if ev.err != nil && !errors.Is(ev.err, io.EOF) {
+				// 失败链：连接上的成功信号到此为止，绝不再写终结成功标记、也不提交批次。
+				return nil, ev.err
+			}
+			if err := s.finishHTTPOutput(writer, req, &aggregated, true); err != nil {
+				return nil, err
+			}
+			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_write_done", req.Model,
+				zap.String("outcome", "ok"), zap.Bool("stream", req.Stream))
+			return s.cursorSessionStreamResult(session, req), nil
 		}
-		if f, ok := writer.(http.Flusher); ok {
-			f.Flush()
+		if req.Stream {
+			if err := cursorWriteAll(writer, ev.data); err != nil {
+				return nil, err
+			}
+			if f, ok := writer.(http.Flusher); ok {
+				f.Flush()
+			}
+			continue
 		}
+		aggregated.Write(ev.data)
 	}
 }
 
-// executeNonStreaming 读取完整流后按入站协议一次性写出。
-func (s *CursorExecutionService) executeNonStreaming(
-	ctx context.Context,
-	c *gin.Context,
-	account *Account,
-	req *CursorExecutionRequest,
-	resp *CursorUpstreamResponse,
-	bearer, originalModel, upstreamModel string,
-	startTime time.Time,
-	delegations *cursorToolDelegations,
-	session *cursorSessionRecord,
-) (*ForwardResult, error) {
-	rawBody, err := readCursorUpstreamBody(resp.Body, cursorUpstreamStreamMaxBytes)
+// finishHTTPOutput 收尾本 HTTP 的写出。
+//
+// stream：写出目标协议的终止事件；nonstream：把本 HTTP 累计的增量聚合成**一个**合法
+// 响应 JSON 后整包写出（聚合器随本 HTTP 结束释放，不把全会话内容重播给下一 HTTP）。
+func (s *CursorExecutionService) finishHTTPOutput(w io.Writer, req *CursorExecutionRequest, aggregated *bytes.Buffer, terminal bool) error {
+	if req.Stream {
+		return s.finalizeResponseWriter(w, req, terminal)
+	}
+	completion, err := cursorAggregateSSEToCompletion(aggregated.Bytes())
 	if err != nil {
-		return nil, fmt.Errorf("cursor: read upstream stream: %w", err)
+		return err
 	}
-	if rej, rejected := cursorDetectKeyRejectedUpstream(rawBody); rejected {
-		cursorPhaseLog(ctx, zapcore.WarnLevel, "response_parse_error", upstreamModel,
-			zap.String("outcome", "key_rejected"))
-		return nil, cursorHandleKeyRejected(ctx, c, account, rej, resp.TargetURL)
+	if err := cursorWriteAll(w, completion); err != nil {
+		return err
 	}
-	parser := cursorNewStreamParser(originalModel, bearer)
-	parser.attachToolDelegations(delegations)
-	if _, perr := parser.cursorParseStream(rawBody); perr != nil {
-		cursorPhaseLog(ctx, zapcore.WarnLevel, "response_parse_error", upstreamModel,
-			zap.String("outcome", "parse_error"))
-		cursorRecordStreamError(c, account, perr, resp.TargetURL)
-		return nil, perr
-	}
-	if err := cursorSealSessionBatch(delegations); err != nil {
-		return nil, err
-	}
-	// §25.14-D：本 HTTP 的工具选择约束在真实输出处校验。
-	if err := cursorEnforceToolChoiceOnOutput(req.ToolChoiceMode, req.ToolChoiceName, parser.capturedToolCalls()); err != nil {
-		return nil, err
-	}
-	// 真实终态 usage 只由原生 TurnEnded 提供；finalizer 以此为唯一结算输入。
-	session.noteTurnUsage(parser.usage, "non_stream_parse_done")
-	cursorPhaseLog(ctx, zapcore.InfoLevel, "response_parse_done", upstreamModel,
-		zap.String("outcome", "ok"), zap.Bool("stream", false))
-
-	writer, restore, werr := s.beginResponseWriter(c, req, resp)
-	if werr != nil {
-		return nil, werr
-	}
-	if _, werr := writer.Write(parser.cursorBuildNonStreamingCompletion()); werr != nil {
-		if restore != nil {
-			restore()
-		}
-		return nil, werr
-	}
-	if restore != nil {
-		restore()
-	}
-	if err := s.finalizeResponseWriter(writer, req); err != nil {
-		return nil, err
-	}
-	// §25.3/§25.14-D：整包完整写出后才登记待完成批。
-	if err := s.recordDeliveredBatch(session, req, delegations, cursorWriterResponseID(writer)); err != nil {
-		return nil, err
-	}
-	cursorPhaseLog(ctx, zapcore.InfoLevel, "response_write_done", upstreamModel,
-		zap.String("outcome", "ok"), zap.Bool("stream", false))
-	return s.nonStreamResult(parser, resp, originalModel, upstreamModel, startTime), nil
+	return s.finalizeResponseWriter(w, req, terminal)
 }
+
+// cursorWriteAll 写完整块并把短写显式归为 io.ErrShortWrite（§25.17.2-6）。
+func cursorWriteAll(w io.Writer, p []byte) error {
+	if w == nil {
+		return fmt.Errorf("%w: response writer unavailable", ErrCursorProtocolBridgeUnavailable)
+	}
+	n, err := w.Write(p)
+	if err != nil {
+		return err
+	}
+	if n != len(p) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+// cursorAggregateSSEToCompletion 把本 HTTP 的 Chat 形状增量聚合成一条 chat.completion JSON。
+//
+// 只用**本 HTTP 实际写出的字节**（同一 writer 语义），因此不会把上一 HTTP 的正文或已交付
+// 工具批重播；id 取本 HTTP 实际响应 ID（chunk 内已由解析器写入）。
+func cursorAggregateSSEToCompletion(body []byte) ([]byte, error) {
+	id, model := "", ""
+	content := strings.Builder{}
+	type callAcc struct {
+		id, name, args string
+	}
+	calls := make([]*callAcc, 0, 2)
+	finishReason := "stop"
+	var usage json.RawMessage
+
+	for _, payload := range cursorSSEDataPayloads(body) {
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk apicompat.ChatCompletionsChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return nil, fmt.Errorf("cursor: decode bridged chat chunk: %w", err)
+		}
+		if chunk.ID != "" {
+			id = chunk.ID
+		}
+		if chunk.Model != "" {
+			model = chunk.Model
+		}
+		if raw := gjson.Get(payload, "usage"); raw.Exists() {
+			usage = json.RawMessage(raw.Raw)
+		}
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content != nil {
+				content.WriteString(*choice.Delta.Content)
+			}
+			for _, tc := range choice.Delta.ToolCalls {
+				index := 0
+				if tc.Index != nil {
+					index = *tc.Index
+				}
+				for len(calls) <= index {
+					calls = append(calls, &callAcc{})
+				}
+				if tc.ID != "" {
+					calls[index].id = tc.ID
+				}
+				if tc.Function.Name != "" {
+					calls[index].name = tc.Function.Name
+				}
+				calls[index].args += tc.Function.Arguments
+			}
+			if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
+				finishReason = *choice.FinishReason
+			}
+		}
+	}
+	if id == "" {
+		return nil, fmt.Errorf("%w: aggregated completion without response id", ErrCursorProtocolBridgeUnavailable)
+	}
+
+	message := map[string]any{"role": "assistant"}
+	if len(calls) == 0 {
+		message["content"] = content.String()
+	} else {
+		message["content"] = nil
+		rendered := make([]any, 0, len(calls))
+		for _, call := range calls {
+			args := strings.TrimSpace(call.args)
+			if args == "" {
+				args = "{}"
+			}
+			rendered = append(rendered, map[string]any{
+				"id":   call.id,
+				"type": "function",
+				"function": map[string]any{
+					"name":      call.name,
+					"arguments": args,
+				},
+			})
+		}
+		message["tool_calls"] = rendered
+	}
+	completion := map[string]any{
+		"id":      id,
+		"object":  "chat.completion",
+		"created": 0,
+		"model":   model,
+		"choices": []any{map[string]any{
+			"index":         0,
+			"message":       message,
+			"finish_reason": finishReason,
+		}},
+	}
+	if len(usage) > 0 {
+		completion["usage"] = usage
+	}
+	out, err := json.Marshal(completion)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: marshal aggregated completion: %w", err)
+	}
+	return out, nil
+}
+
+// 说明：旧的 executeNonStreaming（先 readCursorUpstreamBody 读完整个上游流再解析、再交付）
+// 已按 §25.17.2 / A03 补查删除——它在完整工具批处不能提前交付，模型只能等一个永远不会
+// 到达的结果，跨 HTTP 交接无从发生。nonstream 现在与 stream 共用同一条读循环与同一个
+// 工具批检查点，只在写出方式上聚合本 HTTP 的输出（见 cursorDrainAttachedOutput）。
 
 // beginResponseWriter 按入站协议准备写出目标。
 //
@@ -617,7 +802,7 @@ func (s *CursorExecutionService) executeNonStreaming(
 // 包住真实 writer，并把既有 Header 换成独立 map（避免桥接内部头直接落连接）。
 // 返回 restore 供调用方在写出后恢复 c.Writer。
 func (s *CursorExecutionService) beginResponseWriter(
-	c *gin.Context, req *CursorExecutionRequest, resp *CursorUpstreamResponse,
+	c *gin.Context, req *CursorExecutionRequest, resp *CursorUpstreamResponse, responseID string,
 ) (io.Writer, func(), error) {
 	if c == nil {
 		return nil, nil, fmt.Errorf("%w: response writer unavailable", ErrCursorProtocolBridgeUnavailable)
@@ -626,19 +811,24 @@ func (s *CursorExecutionService) beginResponseWriter(
 		if req.Stream {
 			applyCursorStreamHeaders(c, resp)
 		} else {
-			applyCursorJSONHeaders(c, resp)
+			// §25.17.2-1：nonstream 不提前提交 200 头，待完整 JSON 可交付才写（首个 Write
+			// 由 gin 自动提交）。这样写失败仍能沿错误出口给出真实状态。
+			applyCursorJSONHeadersDeferred(c, resp)
 		}
 		return c.Writer, nil, nil
 	}
 	original := c.Writer
-	converted := newCursorProtocolWriter(original, req.Stream, req.Protocol, req.Model, req.Tools)
+	converted := newCursorProtocolWriter(original, req.Stream, req.Protocol, req.Model, req.Tools, responseID)
 	c.Writer = converted
 	restore := func() { c.Writer = original }
 	return converted, restore, nil
 }
 
 // finalizeResponseWriter 收尾写出（目标协议终止事件 / 非流式整包转换）。
-func (s *CursorExecutionService) finalizeResponseWriter(w io.Writer, req *CursorExecutionRequest) error {
+//
+// terminal 表示本 HTTP 已到达真实终态（turn_ended / 正常结束）；false 表示工具批交付
+// 检查点。Gemini 出口据此只在真实终态写 usageMetadata（中间不造最终 token）。
+func (s *CursorExecutionService) finalizeResponseWriter(w io.Writer, req *CursorExecutionRequest, terminal bool) error {
 	if req.Protocol == cursorProtocolChat {
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
@@ -649,6 +839,7 @@ func (s *CursorExecutionService) finalizeResponseWriter(w io.Writer, req *Cursor
 	if !ok {
 		return fmt.Errorf("%w: unexpected response writer", ErrCursorProtocolBridgeUnavailable)
 	}
+	converted.terminal = terminal
 	if converted.Status() != http.StatusOK && converted.Written() {
 		return fmt.Errorf("cursor: response writer status %d without error (fail closed)", converted.Status())
 	}
@@ -671,8 +862,17 @@ func applyCursorStreamHeaders(c *gin.Context, resp *CursorUpstreamResponse) {
 	c.Writer.WriteHeader(http.StatusOK)
 }
 
-// applyCursorJSONHeaders 设置 Chat 直出的非流式 JSON 头（不透传上游头）。
+// applyCursorJSONHeaders 设置 Chat 直出的非流式 JSON 头并提交 200 状态。
 func applyCursorJSONHeaders(c *gin.Context, resp *CursorUpstreamResponse) {
+	applyCursorJSONHeadersDeferred(c, resp)
+	c.Writer.WriteHeader(http.StatusOK)
+}
+
+// applyCursorJSONHeadersDeferred 只设置非流式 JSON 头，**不**提交状态码（§25.17.2-1）。
+//
+// 头在写出前设置好，但 200 由首个真实 Write 提交：完整 JSON 不能交付时仍可在错误出口
+// 给出真实状态，不会出现"先 200 再失败"的假成功。
+func applyCursorJSONHeadersDeferred(c *gin.Context, resp *CursorUpstreamResponse) {
 	h := c.Writer.Header()
 	h.Set("Content-Type", "application/json")
 	h.Del("Content-Length")
@@ -681,7 +881,6 @@ func applyCursorJSONHeaders(c *gin.Context, resp *CursorUpstreamResponse) {
 			h.Set("x-request-id", rid)
 		}
 	}
-	c.Writer.WriteHeader(http.StatusOK)
 }
 
 // copyCursorStream 把解析器产出的 SSE 字节流原样搬到目标 writer 并逐块 Flush。
@@ -771,28 +970,59 @@ func (s *CursorExecutionService) cursorSessionStreamResult(session *cursorSessio
 	}
 }
 
-// cursorFinalizeDeliveredBatch 在委托检查点把"已完整产出"的工具批次封口并登记为待完成批
-// （§25.3 / §25.14-D）：封口 + 工具选择约束校验 + 写统一索引 + 进入 waiting_tools。
+// cursorDeliverBatchCheckpoint 在委托检查点做**所有可失败准备**（§25.17.2-3/4）。
 //
-// 任一环节失败即失败关闭（finalizer），绝不把半成品当已交付。
-func (s *CursorExecutionService) cursorFinalizeDeliveredBatch(
-	session *cursorSessionRecord, req *CursorExecutionRequest, parser *cursorStreamParser,
-) {
+// 顺序：封批（listed 等齐 + 每条对外委托有完整 f11）→ 本 HTTP tool_choice 校验 →
+// 构造实际输出项及其 ID → 在摘要克隆上计算完整输出增量 → 服务锁内一次检查整批
+// call/response/item 冲突并把它们写进同一索引，同时把 pending 置为 delivered=false。
+// 任一步失败即返回错误：调用方**不得**发布工具批字节，也不得发任何成功结束标记。
+func (s *CursorExecutionService) cursorDeliverBatchCheckpoint(
+	session *cursorSessionRecord, parser *cursorStreamParser,
+) (*cursorPreparedBatch, error) {
 	delegations := parser.toolDelegations()
-	if serr := cursorSealSessionBatch(delegations); serr != nil {
-		s.finishCursorSession(session, "batch_seal_failed")
-		return
+	if err := cursorSealSessionBatch(delegations); err != nil {
+		return nil, err
 	}
-	if err := cursorEnforceToolChoiceOnOutput(req.ToolChoiceMode, req.ToolChoiceName, parser.capturedToolCalls()); err != nil {
-		s.finishCursorSession(session, "tool_choice_violation")
-		return
+	opts := session.httpOptions()
+	if err := cursorEnforceToolChoiceOnOutput(opts.toolChoiceMode, opts.toolChoiceName, parser.capturedToolCalls()); err != nil {
+		return nil, err
 	}
-	// responseID 仅 Responses 协议需要；流式跨 HTTP 续轮在 Responses 出口场景下由调用方
-	// 另行注入，这里以空值走 Chat/Anthropic 口径（不阻断跨 HTTP 主链路验证）。
-	if err := s.recordDeliveredBatch(session, req, delegations, ""); err != nil {
-		s.finishCursorSession(session, "batch_record_failed")
-		return
+	return s.prepareDeliveredBatch(session, cursorResumeProtocolOfSpec(session.spec), opts.model, delegations, parser.chunkID())
+}
+
+// cursorContentWhileWaitingTools 判断本批字节是否构成"waiting_tools 期间的新模型正文"。
+//
+// 判定只看两件事，不新增状态机：
+//  1. 会话当前阶段：只有 waiting_tools 期间才算违约（running 是本 HTTP 正常输出阶段）；
+//  2. 本批字节里是否有**正文增量**：控制帧（finish/[DONE]）、用量帧与错误帧都不算正文，
+//     因此"交付工具批本身的收尾帧"与"真实终态的 usage"不会被误判。
+func cursorContentWhileWaitingTools(session *cursorSessionRecord, chunk []byte) bool {
+	if session == nil || len(chunk) == 0 {
+		return false
 	}
+	session.mu.Lock()
+	waiting := session.state == cursorSessionWaitingTools
+	session.mu.Unlock()
+	if !waiting {
+		return false
+	}
+	return cursorChunkCarriesModelContent(chunk)
+}
+
+// cursorChunkCarriesModelContent 判断一段客户端协议字节是否携带模型正文增量。
+//
+// 只认 choices[].delta.content 非空：role 头帧、tool_calls 增帧、finish 帧、usage 帧
+// 都不含正文，不能算作"新模型正文"。
+func cursorChunkCarriesModelContent(chunk []byte) bool {
+	for _, payload := range cursorSSEDataPayloads(chunk) {
+		if payload == "" || payload == cursorSSEDoneSentinel {
+			continue
+		}
+		if content := gjson.Get(payload, "choices.0.delta.content"); content.Exists() && content.String() != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // runCursorAgentRunPump 是每会话唯一的背景读循环（§25.3「每会话一个读循环」）。
@@ -814,10 +1044,33 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 	}()
 	stream := &cursorSSEStream{source: resp.Body, parser: parser}
 	buf := make([]byte, 32*1024)
+	// prepared 是本轮检查点已完成的待提交批（在**发布含工具批的字节之前**准备好）。
+	var prepared *cursorPreparedBatch
 	for {
 		n, rerr := stream.Read(buf)
 		if n > 0 {
+			// §25.17.2-3：含工具批的字节发布之前先完成全部可失败准备（封批/约束/索引冲突）。
+			// 失败时不发布该批字节（客户端永远收不到"正常的工具结束帧"），沿失败链退出。
+			if stream.delegated && prepared == nil {
+				batch, derr := s.cursorDeliverBatchCheckpoint(session, parser)
+				if derr != nil {
+					session.noteStage("batch_delivery_failed")
+					output.end(derr)
+					s.finishCursorSession(session, cursorPumpTerminalReason(derr))
+					return
+				}
+				prepared = batch
+			}
 			chunk := append([]byte(nil), buf[:n]...)
+			// §25.17.2-1 末段：waiting_tools 期间不得再出现模型正文。出现即阶段契约违约，
+			// 沿唯一错误出口明确协议失败（不发布该正文、不缓存、不重放）。
+			if cursorContentWhileWaitingTools(session, chunk) {
+				protocolErr := fmt.Errorf("%w: session %q", ErrCursorContentWhileWaitingTools, session.id)
+				session.noteStage("content_while_waiting_tools")
+				output.end(protocolErr)
+				s.finishCursorSession(session, "content_while_waiting_tools")
+				return
+			}
 			output.publish(&cursorOutputEvent{data: chunk})
 		}
 		if rerr != nil {
@@ -828,15 +1081,19 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 				stream.delegated = false
 				stream.done = false
 				parser.resetTurnStart()
-				// 记录已交付批次（封口 + 写索引 + waiting_tools），必须在暂停前完成。
-				s.cursorFinalizeDeliveredBatch(session, req, parser)
-				// 向附着 HTTP 投递委托检查点事件，使其收尾返回（会话存活跨 HTTP）。
-				output.publish(&cursorOutputEvent{isDeleg: true})
+				// 向附着 HTTP 投递委托检查点事件（携带已准备的批）：drain 写完协议结束标记后
+				// 才在服务锁内提交 waiting_tools（写完整写入 = 交付确认）。
+				output.publish(&cursorOutputEvent{isDeleg: true, prepared: prepared})
+				prepared = nil
 				continue
 			}
 			// 真实终态：turn_ended / 传输错误 / 180s 到期 / 客户端断连。记录 usage 并关闭
 			// 会话（finalizer）。usage 只可能来自真实 turn_ended：没见到就不结算、不写零值。
 			session.noteTurnUsage(parser.usage, "pump_terminal")
+			// 本 HTTP 的原生读取到此结束（stream 与 nonstream 同一条读循环）。
+			opts := session.httpOptions()
+			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_parse_done", opts.model,
+				zap.String("outcome", "ok"), zap.Bool("stream", opts.stream))
 			// cursorSessionStreamResult 内部会取 session.mu 读取最终 usage，不得在持锁时调用
 			// （Go 互斥锁不可重入，否则本读循环自死锁，永远无法投递 isEnd，附着 HTTP 永久阻塞）。
 			finalResult := s.cursorSessionStreamResult(session, req)
@@ -1089,6 +1346,62 @@ func cursorExecuteAnthropic(
 		Stream:         req.Stream,
 		StartTime:      time.Now(),
 		Protocol:       cursorProtocolAnthropic,
+		Identity:       CursorSessionIdentityFromContext(ctx),
+		Plan:           plan,
+		ToolChoiceMode: mode,
+		ToolChoiceName: name,
+	})
+}
+
+// cursorExecuteGeminiNative 是 Gemini v1beta 原生出口的**类型化**入口（§25.17.2）。
+//
+// 顺序固定：先从**原始 Gemini 请求**生成上下文计划与工具语义（tools.functionDeclarations、
+// toolConfig.functionCallingConfig 模式），再转执行所需形状，最后交同一执行器的 Gemini
+// writer 逐帧写出。工具选择无法表达时在这里就明确 400，零 AgentRun。
+func cursorExecuteGeminiNative(
+	ctx context.Context,
+	c *gin.Context,
+	exec *CursorExecutionService,
+	account *Account,
+	originalModel string,
+	stream bool,
+	body []byte,
+) (*ForwardResult, error) {
+	if err := requireCursorExecution(exec); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(originalModel) == "" {
+		return nil, fmt.Errorf("%w: native request carries no model", ErrCursorUnsupportedRequest)
+	}
+	// ① 原始请求 → 计划（含工具名与 toolConfig 摘要）。
+	plan, planErr := cursorPlanFromGemini(body, originalModel)
+	if planErr != nil {
+		return nil, planErr
+	}
+	// ② 工具选择语义映射（未知模式/未声明名称在此 400，未出站）。
+	mode, name, choiceErr := cursorGeminiToolChoiceMode(body)
+	if choiceErr != nil {
+		return nil, choiceErr
+	}
+	// ③ 转执行所需形状（工具声明/调用/结果的真实进入转换，不只进摘要）。
+	ccBody, convErr := cursorGeminiRequestToChatCompletions(body, originalModel, stream)
+	if convErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCursorUnsupportedRequest, convErr)
+	}
+	var chat apicompat.ChatCompletionsRequest
+	if err := json.Unmarshal(ccBody, &chat); err != nil {
+		return nil, fmt.Errorf("cursor: decode converted gemini request: %w", err)
+	}
+	if err := cursorValidateToolChoice(&chat); err != nil {
+		return nil, err
+	}
+	return exec.Execute(ctx, c, account, &CursorExecutionRequest{
+		Chat:           &chat,
+		Model:          originalModel,
+		Stream:         stream,
+		StartTime:      time.Now(),
+		Protocol:       cursorProtocolGemini,
+		IndexProtocol:  string(CursorResumeProtocolGemini),
 		Identity:       CursorSessionIdentityFromContext(ctx),
 		Plan:           plan,
 		ToolChoiceMode: mode,
@@ -1398,19 +1711,94 @@ type cursorProtocolWriter struct {
 	model  string
 	stream bool
 	tools  cursorResponsesToolMeta
+	// responseID 是本 HTTP 的唯一输出响应 ID（§25.17.2「实际 ID」）。
+	responseID string
+	// terminal 表示本次 finalize 对应真实终态（而不是工具批交付检查点）。
+	terminal bool
 
 	// 流式：未消费的 SSE 片段 + 目标协议状态机。
 	pending   []byte
 	anthState *apicompat.ChatCompletionsToAnthropicStreamState
 	respState *apicompat.ChatCompletionsToResponsesStreamState
 	started   bool
+	// Gemini 出口的流式工具增量累加（按 index），在终结帧一次性写出 functionCall parts。
+	geminiCalls []cursorGeminiStreamCall
+	// geminiUsage 是本 HTTP 终止 chunk 携带的真实 usage（仅真实终态写 usageMetadata）。
+	geminiUsage *apicompat.ChatUsage
 
 	// 非流式：整条 chat.completion JSON。
 	completion bytes.Buffer
 
+	// itemIDs 是本 HTTP **实际交付**的 Responses 工具结果条目 ID（按出现顺序去重）。
+	//
+	// §25.17.2「实际ID」：item ID 只从实际写出的内容取——流式取已发出的 output_item
+	// 事件、非流式取自**实际构建**的响应对象（不读 stream respState、不另生成一份）。
+	// drain 在写出成功后把它们交给 commitDeliveredBatch 登记进同一索引。
+	itemIDs []string
+	// itemIDSeen 是 itemIDs 的去重集合（同一 item 会出现在 added/done 两个事件里）。
+	itemIDSeen map[string]struct{}
+
 	written     int
 	status      int
 	wroteHeader bool
+}
+
+// responsesToolItemTypes 是"承载对外工具结果"的 Responses 输出项类型。
+//
+// 只有这类条目的 ID 需要登记：客户端下一轮把它作为 input 条目回传（item id 锚点），
+// message/reasoning 等正文项不是工具结果锚点。
+var responsesToolItemTypes = map[string]struct{}{
+	"function_call":    {},
+	"custom_tool_call": {},
+	"tool_search_call": {},
+	"local_shell_call": {},
+	"mcp_call":         {},
+}
+
+// noteToolItemID 记录一条实际交付的工具结果条目 ID（重复出现只记一次）。
+func (w *cursorProtocolWriter) noteToolItemID(itemType, id string) {
+	if w == nil {
+		return
+	}
+	if _, ok := responsesToolItemTypes[strings.ToLower(strings.TrimSpace(itemType))]; !ok {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	if w.itemIDSeen == nil {
+		w.itemIDSeen = make(map[string]struct{})
+	}
+	if _, dup := w.itemIDSeen[id]; dup {
+		return
+	}
+	w.itemIDSeen[id] = struct{}{}
+	w.itemIDs = append(w.itemIDs, id)
+}
+
+// noteResponsesEventsItemIDs 从**实际发出**的 Responses 事件里取工具结果条目 ID。
+func (w *cursorProtocolWriter) noteResponsesEventsItemIDs(events []apicompat.ResponsesStreamEvent) {
+	for _, event := range events {
+		if event.Item != nil {
+			w.noteToolItemID(event.Item.Type, event.Item.ID)
+		}
+	}
+}
+
+// collectedItemIDs 返回本 HTTP 实际交付的工具结果条目 ID 快照。
+func (w *cursorProtocolWriter) collectedItemIDs() []string {
+	if w == nil || len(w.itemIDs) == 0 {
+		return nil
+	}
+	return append([]string(nil), w.itemIDs...)
+}
+
+// cursorGeminiStreamCall 是 Gemini 流式出口累加的一条 functionCall。
+type cursorGeminiStreamCall struct {
+	ID   string
+	Name string
+	Args strings.Builder
 }
 
 // newCursorProtocolWriter 构造回桥 writer，并把工具元数据交给 Responses 状态机。
@@ -1418,12 +1806,15 @@ type cursorProtocolWriter struct {
 // §24.2-5：流式 state 与非流式转换**必须**带着 EffectiveResponsesTools 派生的
 // CustomToolNames / FunctionToolNames / NamespaceToolNames / HasToolSearchTool，
 // 不得再传 nil/nil/false/nil（那会丢 Codex 的 custom / namespace 工具类型）。
+// responseID 是本 HTTP 的唯一输出响应 ID：目标协议状态机的初始 ID 也取它，
+// 使 response.created/completed 与非流式 response.id 与实际交付一致。
 func newCursorProtocolWriter(
 	parent gin.ResponseWriter,
 	stream bool,
 	mode cursorProtocol,
 	model string,
 	tools cursorResponsesToolMeta,
+	responseID string,
 ) *cursorProtocolWriter {
 	w := &cursorProtocolWriter{
 		ResponseWriter: parent,
@@ -1432,12 +1823,19 @@ func newCursorProtocolWriter(
 		model:          model,
 		stream:         stream,
 		tools:          tools,
+		responseID:     strings.TrimSpace(responseID),
 	}
 	switch mode {
 	case cursorProtocolAnthropic:
 		w.anthState = apicompat.NewChatCompletionsToAnthropicStreamState(model)
+		if w.responseID != "" {
+			w.anthState.ResponseID = w.responseID
+		}
 	case cursorProtocolResponses:
 		w.respState = cursorResponsesStreamState(model, tools)
+		if w.responseID != "" {
+			w.respState.ResponseID = w.responseID
+		}
 	}
 	return w
 }
@@ -1575,7 +1973,10 @@ func (w *cursorProtocolWriter) writeChunk(chunk *apicompat.ChatCompletionsChunk)
 			}
 		}
 	case cursorProtocolResponses:
-		for _, event := range apicompat.ChatCompletionsChunkToResponsesEvents(chunk, w.respState) {
+		events := apicompat.ChatCompletionsChunkToResponsesEvents(chunk, w.respState)
+		// 实际交付的条目 ID 在写出之前就从本批事件里取：写出失败不会留下"未交付却登记"的 ID。
+		w.noteResponsesEventsItemIDs(events)
+		for _, event := range events {
 			sse, err := apicompat.ResponsesEventToSSE(event)
 			if err != nil {
 				return err
@@ -1584,8 +1985,194 @@ func (w *cursorProtocolWriter) writeChunk(chunk *apicompat.ChatCompletionsChunk)
 				return err
 			}
 		}
+	case cursorProtocolGemini:
+		return w.writeGeminiChunk(chunk)
 	}
 	return nil
+}
+
+// writeGeminiChunk 把一条 Chat 增量写成 Gemini SSE 帧（每个可输出增量一帧并立即 Flush）。
+//
+// 工具增量按 index 累加，在终结帧一次性写成 functionCall parts（保留原 call ID/名称/args）。
+func (w *cursorProtocolWriter) writeGeminiChunk(chunk *apicompat.ChatCompletionsChunk) error {
+	w.ensureStarted()
+	if chunk != nil && chunk.Usage != nil {
+		w.geminiUsage = chunk.Usage
+	}
+	if chunk == nil || len(chunk.Choices) == 0 {
+		return nil
+	}
+	choice := chunk.Choices[0]
+	for _, tc := range choice.Delta.ToolCalls {
+		index := 0
+		if tc.Index != nil {
+			index = *tc.Index
+		}
+		for len(w.geminiCalls) <= index {
+			w.geminiCalls = append(w.geminiCalls, cursorGeminiStreamCall{})
+		}
+		if tc.ID != "" {
+			w.geminiCalls[index].ID = tc.ID
+		}
+		if tc.Function.Name != "" {
+			w.geminiCalls[index].Name = tc.Function.Name
+		}
+		w.geminiCalls[index].Args.WriteString(tc.Function.Arguments)
+	}
+	if choice.Delta.Content == nil || *choice.Delta.Content == "" {
+		return nil
+	}
+	if err := w.writeGeminiFrame(map[string]any{
+		"candidates": []any{map[string]any{
+			"content": map[string]any{
+				"role":  "model",
+				"parts": []any{map[string]any{"text": *choice.Delta.Content}},
+			},
+			"index": 0,
+		}},
+		"modelVersion": w.model,
+	}); err != nil {
+		return err
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
+// writeGeminiFrame 写出一帧 Gemini SSE data 帧。
+func (w *cursorProtocolWriter) writeGeminiFrame(frame map[string]any) error {
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		return fmt.Errorf("cursor: marshal gemini stream frame: %w", err)
+	}
+	if _, err := io.WriteString(w.ResponseWriter, "data: "); err != nil {
+		return err
+	}
+	if err := cursorWriteAll(w.ResponseWriter, payload); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w.ResponseWriter, "\n\n")
+	return err
+}
+
+// finalizeGeminiStream 写出 Gemini 流式的收尾（functionCall parts + 带 finishReason 的末帧）。
+//
+// usageMetadata 只在**真实终态**写（工具批交付检查点不写，避免中间造最终 token）。
+func (w *cursorProtocolWriter) finalizeGeminiStream() error {
+	for _, call := range w.geminiCalls {
+		args := strings.TrimSpace(call.Args.String())
+		if args == "" {
+			args = "{}"
+		}
+		functionCall := map[string]any{
+			"name": call.Name,
+			"args": json.RawMessage(args),
+		}
+		if call.ID != "" {
+			functionCall["id"] = call.ID
+		}
+		if err := w.writeGeminiFrame(map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{
+					"role":  "model",
+					"parts": []any{map[string]any{"functionCall": functionCall}},
+				},
+				"index": 0,
+			}},
+			"modelVersion": w.model,
+		}); err != nil {
+			return err
+		}
+	}
+	w.geminiCalls = nil
+	final := map[string]any{
+		"candidates": []any{map[string]any{
+			"content":      map[string]any{"role": "model", "parts": []any{}},
+			"finishReason": "STOP",
+			"index":        0,
+		}},
+		"modelVersion": w.model,
+	}
+	if w.terminal && w.geminiUsage != nil {
+		final["usageMetadata"] = cursorGeminiUsageMetadataFromChat(*w.geminiUsage)
+	}
+	if err := w.writeGeminiFrame(final); err != nil {
+		return err
+	}
+	w.Flush()
+	return nil
+}
+
+// finalizeGeminiCompletion 把整条 chat.completion 转成 Gemini generateContent 响应。
+func (w *cursorProtocolWriter) finalizeGeminiCompletion() error {
+	body := w.completion.Bytes()
+	var resp apicompat.ChatCompletionsResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return fmt.Errorf("cursor: decode bridged chat completion: %w", err)
+	}
+	parts := make([]any, 0, 2)
+	finishReason := ""
+	if len(resp.Choices) > 0 {
+		choice := resp.Choices[0]
+		finishReason = choice.FinishReason
+		if text := cursorChatMessageText(choice.Message.Content); text != "" {
+			parts = append(parts, map[string]any{"text": text})
+		}
+		for _, call := range choice.Message.ToolCalls {
+			args := strings.TrimSpace(call.Function.Arguments)
+			if args == "" {
+				args = "{}"
+			}
+			functionCall := map[string]any{
+				"name": call.Function.Name,
+				"args": json.RawMessage(args),
+			}
+			if call.ID != "" {
+				functionCall["id"] = call.ID
+			}
+			parts = append(parts, map[string]any{"functionCall": functionCall})
+		}
+	}
+	out := map[string]any{
+		"candidates": []any{map[string]any{
+			"content":      map[string]any{"role": "model", "parts": parts},
+			"finishReason": cursorGeminiFinishReason(finishReason),
+			"index":        0,
+		}},
+		"modelVersion": w.model,
+	}
+	if resp.ID != "" {
+		out["responseId"] = resp.ID
+	}
+	if usage := cursorBridgedChatUsage(body); usage != nil {
+		out["usageMetadata"] = cursorGeminiUsageMetadataFromChat(*usage)
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		return fmt.Errorf("cursor: marshal gemini response: %w", err)
+	}
+	h := w.ResponseWriter.Header()
+	h.Set("Content-Type", "application/json")
+	if rid := strings.TrimSpace(w.header.Get("x-request-id")); rid != "" {
+		h.Set("x-request-id", rid)
+	}
+	w.ResponseWriter.WriteHeader(http.StatusOK)
+	return cursorWriteAll(w.ResponseWriter, data)
+}
+
+// cursorGeminiUsageMetadataFromChat 把真实 Chat usage 落到 Gemini usageMetadata 唯一位置。
+func cursorGeminiUsageMetadataFromChat(u apicompat.ChatUsage) map[string]any {
+	total := u.TotalTokens
+	if total == 0 {
+		total = u.PromptTokens + u.CompletionTokens
+	}
+	return map[string]any{
+		"promptTokenCount":     u.PromptTokens,
+		"candidatesTokenCount": u.CompletionTokens,
+		"totalTokenCount":      total,
+	}
 }
 
 // finalize 写出目标协议的终止事件（流式）或整包响应（非流式）。
@@ -1614,13 +2201,17 @@ func (w *cursorProtocolWriter) finalize() error {
 			events = append(events, sse)
 		}
 	case cursorProtocolResponses:
-		for _, event := range apicompat.FinalizeChatCompletionsResponsesStream(w.respState) {
+		respEvents := apicompat.FinalizeChatCompletionsResponsesStream(w.respState)
+		w.noteResponsesEventsItemIDs(respEvents)
+		for _, event := range respEvents {
 			sse, err := apicompat.ResponsesEventToSSE(event)
 			if err != nil {
 				return err
 			}
 			events = append(events, sse)
 		}
+	case cursorProtocolGemini:
+		return w.finalizeGeminiStream()
 	}
 	for _, sse := range events {
 		if _, err := io.WriteString(w.ResponseWriter, sse); err != nil {
@@ -1645,10 +2236,20 @@ func (w *cursorProtocolWriter) finalizeCompletion() error {
 		out = apicompat.ChatCompletionsResponseToAnthropic(&resp, w.model)
 	case cursorProtocolResponses:
 		// 工具映射必须传齐（§24.2-5），否则 custom/namespace 工具类型丢失。
-		out = apicompat.ChatCompletionsResponseToResponses(
+		built := apicompat.ChatCompletionsResponseToResponses(
 			&resp, w.model,
 			w.tools.customTools, w.tools.functionTools, w.tools.toolSearch, w.tools.namespaceTools,
 		)
+		// §25.17.2「实际ID」：非流式 item ID 从**实际构建的响应对象**取（不读 stream
+		// respState，也不另生成一份），保证索引里登记的就是客户端真的收到的那个 ID。
+		if built != nil {
+			for _, item := range built.Output {
+				w.noteToolItemID(item.Type, item.ID)
+			}
+		}
+		out = built
+	case cursorProtocolGemini:
+		return w.finalizeGeminiCompletion()
 	default:
 		return fmt.Errorf("cursor: unsupported non-stream response protocol %d", w.mode)
 	}
@@ -1764,6 +2365,29 @@ type cursorSessionSpec struct {
 	// identity 是会话唯一身份（user / API key / 认证组）；续轮从会话唯一记录读取，
 	// 不复制到索引（§25.14-D「最小表示」）。
 	identity CursorSessionIdentity
+
+	// ---- §25.17.3「A05首次来源指纹」：两个内部字段，进程内专用 ----
+	//
+	// sourceQuotaKeyID / sourceCodeMAC 取自**首次生成 x-jg-auth 那一次**的来源行与解密
+	// 结果（经 cursorAccountAuthProvider 随材料一同传出），不是生成头之后另读一次来源
+	// 反推。故换码夹在"生成 auth"与"建 session"之间时，本会话仍固定着旧头的指纹。
+	//
+	// 绝不进日志、DTO、工具 ID 或任何对外文本；后续资料读取拿不到可靠指纹时必须明确
+	// 失败，不以空值代表同源（见 cursorSessionSourceFingerprint 的失败关闭）。
+	sourceQuotaKeyID int64
+	sourceCodeMAC    string
+}
+
+// cursorSessionSourceFingerprint 取会话固定的首次来源指纹。
+//
+// 指纹不可靠（未固定，或任一字段缺失）即返回明确错误：调用方**不得**以空值代表
+// "与首次鉴权同源"，也不得退化为只看 QuotaKeyID 的弱比较。
+func cursorSessionSourceFingerprint(spec cursorSessionSpec) (cursorSourceFingerprint, error) {
+	fp := cursorSourceFingerprint{QuotaKeyID: spec.sourceQuotaKeyID, CodeMAC: spec.sourceCodeMAC}
+	if !fp.valid() {
+		return cursorSourceFingerprint{}, fmt.Errorf("%w: session has no fixed source fingerprint", ErrCursorSourceFingerprintUnavailable)
+	}
+	return fp, nil
 }
 
 // cursorSessionRecord 是一条进程内会话记录。
@@ -1780,6 +2404,8 @@ type cursorOutputEvent struct {
 	isDeleg bool
 	isEnd   bool
 	err     error
+	// prepared 是委托检查点已完成的服务锁内准备（交付确认后由 drain 提交）。
+	prepared *cursorPreparedBatch
 }
 
 // cursorSessionOutput 是每会话上游帧扇出：背景读循环把"模型输出事件"推入，当前附着的
@@ -1793,6 +2419,11 @@ type cursorSessionOutput struct {
 	closeCh  chan struct{}
 	attached bool
 	ended    bool
+	// respID 是**当前附着 HTTP** 的输出响应 ID（§25.17.2「实际 ID」）。
+	//
+	// 每个 HTTP 一份唯一 ID：该 HTTP 的所有 chunk、response.created/completed 与非流式
+	// response.id 共用它；不同会话、不同 HTTP 绝不复用（每次附着重新生成）。
+	respID string
 }
 
 // newCursorSessionOutput 构造一条空的扇出器（尚未有 HTTP 附着）。
@@ -1814,6 +2445,8 @@ func (o *cursorSessionOutput) attach() (chan *cursorOutputEvent, func()) {
 	o.ch = ch
 	o.closeCh = closeCh
 	o.attached = true
+	// 每次附着生成一份新的输出响应 ID：不同 HTTP/会话绝不复用（§25.17.2 实际 ID）。
+	o.respID = cursorNewUUID()
 	o.mu.Unlock()
 	detach := func() {
 		o.mu.Lock()
@@ -1822,6 +2455,7 @@ func (o *cursorSessionOutput) attach() (chan *cursorOutputEvent, func()) {
 			return
 		}
 		o.attached = false
+		o.respID = ""
 		ch := o.ch
 		closeCh := o.closeCh
 		o.ch = nil
@@ -1835,6 +2469,16 @@ func (o *cursorSessionOutput) attach() (chan *cursorOutputEvent, func()) {
 		}()
 	}
 	return ch, detach
+}
+
+// responseID 返回当前附着 HTTP 的输出响应 ID（无附着时为空）。
+func (o *cursorSessionOutput) responseID() string {
+	if o == nil {
+		return ""
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.respID
 }
 
 // publish 把一条输出事件推给当前附着的 HTTP（无附着时丢弃正文，仅元数据）。
@@ -1917,6 +2561,16 @@ type cursorSessionRecord struct {
 	// finishing 标记 finalizer 的唯一胜者已确定；steps 是终结守卫（每项至多一次）。
 	finishing bool
 	steps     cursorFinalizerSteps
+	// finalizeDone 是**会话建立即初始化**的一次性完成 channel（§25.17.7 A09）。
+	//
+	// 只有 finalizer 的唯一胜者在"任务提交 / 资源归还 / 索引清理"全部结束后关闭它；
+	// 重复终结者（finishing 已置位的后来者）不关闭。Stop 在会话锁**外**等待该信号，
+	// 因为 finishing=true 只表示胜者已确定，不表示结算已提交、槽位已归还。
+	//
+	// 该字段在 start 时固定，之后不再替换，故读取它本身不需要持 mu。
+	finalizeDone chan struct{}
+	// finalizeOnce 保证 finalizeDone 至多关闭一次（重复终结者不关闭）。
+	finalizeOnce sync.Once
 	// streamClose 关闭原生流/取消读写（finalizer 调用至多一次）。
 	streamClose func()
 	// httpAttachStop 停止当前 HTTP 附着期取消回调；attached 表示是否有 HTTP 附着。
@@ -1954,6 +2608,67 @@ type cursorSessionRecord struct {
 	pumpDone chan struct{}
 	// resumeCount 是本会话已接纳的续轮次数（日志/诊断安全字段）。
 	resumeCount int
+	// httpOpt 是**当前 HTTP** 的逐请求选项（stream / model / tool_choice）。
+	//
+	// §25.17.2-2：续轮不沿用首轮 req.Stream / tool_choice / writer；每次附着都按本 HTTP
+	// 重新设置。pump 在做批次可失败准备时读它（不能读首 HTTP 的 req）。
+	httpOpt cursorHTTPOptions
+	// logCtx 是**仅供阶段日志**使用的请求 ctx（读取 observer / request_id）。
+	//
+	// 不闭包 gin.Context、不用于任何取消或业务写入；pump/交付边界的阶段事件必须与
+	// 本 HTTP 的观测上下文同源，否则阶段日志会落到 background 而丢失。
+	logCtx context.Context
+}
+
+// setLogContext 登记阶段日志用的请求 ctx（不参与取消语义）。
+func (r *cursorSessionRecord) setLogContext(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.logCtx = ctx
+	r.mu.Unlock()
+}
+
+// phaseContext 返回该会话阶段日志使用的 ctx。
+func (r *cursorSessionRecord) phaseContext() context.Context {
+	if r == nil {
+		return context.Background()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.logCtx != nil {
+		return r.logCtx
+	}
+	return context.Background()
+}
+
+// cursorHTTPOptions 是本 HTTP 的逐请求选项（不跨 HTTP 累积）。
+type cursorHTTPOptions struct {
+	stream         bool
+	model          string
+	toolChoiceMode string
+	toolChoiceName string
+}
+
+// setHTTPOptions 登记本 HTTP 的选项（附着时由 Execute / Resume 各自设置）。
+func (r *cursorSessionRecord) setHTTPOptions(o cursorHTTPOptions) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.httpOpt = o
+	r.mu.Unlock()
+}
+
+// httpOptions 返回本 HTTP 的选项快照。
+func (r *cursorSessionRecord) httpOptions() cursorHTTPOptions {
+	if r == nil {
+		return cursorHTTPOptions{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.httpOpt
 }
 
 // cursorPendingBatch 是当前已交付、等待真实结果的工具批次（§25.3 / §25.14-D）。
@@ -2025,17 +2740,44 @@ func (s *cursorSessionStore) start(spec cursorSessionSpec) *cursorSessionRecord 
 		toolCallIDs:    make(map[string]struct{}),
 		createdAt:      now,
 		billingEventID: "",
+		// §25.17.7 A09：完成信号随会话建立即初始化，供 Stop 在锁外等待唯一 finalizer。
+		finalizeDone: make(chan struct{}),
 	}
 	record.billingEventID = CursorSessionBillingEventID(record.id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
-		// Stop 之后不再接受新会话：返回一条游离记录（不会被索引），调用方仍可完成
-		// 本次请求，但不会留下可续轮的会话状态。
-		return record
+		// §25.17.7 A09：Stop 之后**不再**返回可继续执行的游离记录——调用方拿到的必须是
+		// 明确的"不可用"，从而在模型出站/AgentRun 之前终止（零 AgentRun、零游离状态）。
+		return nil
 	}
 	s.sessions[record.id] = record
 	return record
+}
+
+// finalizeSignal 返回 finalizer 完成信号（会话建立即初始化；nil 记录返回 nil）。
+func (r *cursorSessionRecord) finalizeSignal() <-chan struct{} {
+	if r == nil {
+		return nil
+	}
+	return r.finalizeDone
+}
+
+// closeFinalizeDone 关闭完成信号：**只允许 finalizer 的唯一胜者**在结算提交、资源归还与
+// 索引清理结束后调用（§25.17.7 A09）。
+//
+// 幂等（once）：重复终结者即便走到这里也不会重复关闭、不会重复结算/释放。
+func (r *cursorSessionRecord) closeFinalizeDone() {
+	if r == nil {
+		return
+	}
+	r.finalizeOnce.Do(func() {
+		ch := r.finalizeDone
+		if ch == nil {
+			return
+		}
+		close(ch)
+	})
 }
 
 // attachOwner 绑定会话表的唯一所有者（finalizer/结算入口；取消回调使用）。
@@ -2065,12 +2807,22 @@ func (s *cursorSessionStore) close(id string) {
 //
 // 服务 Stop 是 §25.4 的终止原因之一：每个存活会话都走**同一个 finalizer**（不另写清理链），
 // 因为终结守卫与结算守卫保证每项最多一次。不持会话表锁执行终结（终结内部会重新入表）。
+//
+// §25.17.7 A09：终结之后**在锁外等待**每个会话的 finalizeDone，确保已在进行的唯一
+// finalizer 完成结算提交 / 资源归还 / 索引清理后才返回——绝不以 finishing=true 当完成。
+// 等待有界且如实记录未完成的会话数（不以超时日志包装成成功）；重复 Stop 不重复结算或释放。
 func (s *cursorSessionStore) stop() {
 	s.mu.Lock()
 	s.stopped = true
 	records := make([]*cursorSessionRecord, 0, len(s.sessions))
+	signals := make([]<-chan struct{}, 0, len(s.sessions))
 	for _, record := range s.sessions {
 		records = append(records, record)
+		// 仅收集有 owner 会话的完成信号：只有它们会走原 finalizer 并关闭 finalizeDone。
+		// 无 owner 的会话（测试/异常残留）不会被终结，等待其信号永远不关闭，绝不能阻塞。
+		if record.owner != nil {
+			signals = append(signals, record.finalizeSignal())
+		}
 	}
 	s.mu.Unlock()
 	for _, record := range records {
@@ -2078,6 +2830,8 @@ func (s *cursorSessionStore) stop() {
 			record.owner.finishCursorSession(record, "service_stop")
 		}
 	}
+	// 锁外等待完成信号：finalizer 可能包含网络/计费提交，绝不能持会话表锁等待。
+	waitCursorSessionFinalizers(signals)
 	// 兜底：清掉没有 owner 的残留（正常路径已由 finalizer 逐条 close）。
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2086,6 +2840,45 @@ func (s *cursorSessionStore) stop() {
 	for id := range s.sessions {
 		s.index.DeleteSession(id)
 		delete(s.sessions, id)
+	}
+}
+
+// cursorStopFinalizeWaitTimeout 是 Stop 等待唯一 finalizer 完成的**上限**。
+//
+// 它不修改任何既有停止参数（main 的 HTTP Shutdown/defer app.Cleanup 预算不变），只保证
+// Stop 本身不会无限挂住；超时按未完成如实记录，不把未完成当成功。
+const cursorStopFinalizeWaitTimeout = 10 * time.Second
+
+// waitCursorSessionFinalizers 在锁外等待各会话的完成信号（有界）。
+func waitCursorSessionFinalizers(signals []<-chan struct{}) {
+	pending := 0
+	for _, sig := range signals {
+		if sig == nil {
+			continue
+		}
+		select {
+		case <-sig:
+		default:
+			pending++
+		}
+	}
+	if pending == 0 {
+		return
+	}
+	timeout := time.NewTimer(cursorStopFinalizeWaitTimeout)
+	defer timeout.Stop()
+	for _, sig := range signals {
+		if sig == nil {
+			continue
+		}
+		select {
+		case <-sig:
+		case <-timeout.C:
+			cursorPhaseLog(context.Background(), zapcore.WarnLevel, "session_stop_finalize_timeout", "",
+				zap.Int("unfinished", pending),
+				zap.Duration("waited", cursorStopFinalizeWaitTimeout))
+			return
+		}
 	}
 }
 
@@ -2187,6 +2980,8 @@ func cursorProtocolIndexName(p cursorProtocol) string {
 		return "messages"
 	case cursorProtocolResponses:
 		return "responses"
+	case cursorProtocolGemini:
+		return "gemini"
 	default:
 		// 未知枚举返回空串：交给 CR-B 的键校验失败关闭，不猜协议、不静默归类。
 		return ""
@@ -2975,6 +3770,11 @@ func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord
 			zap.String("session_id", record.id),
 			zap.String("terminal_reason", reason))
 	}
+
+	// ⑧ 唯一胜者在这里关闭完成信号（§25.17.7 A09）：结算提交、资源归还与索引清理都已做完。
+	// 重复终结者在 ①之前就返回，故不会关闭它；Stop 依此在锁外判断"确实完成"而不是
+	// "finishing=true"。
+	record.closeFinalizeDone()
 }
 
 // settleCursorSession 提交**唯一结算**（至多一次，网络/计费在锁外）。
@@ -3218,6 +4018,179 @@ func CursorResumeHTTPStatus(err error) (int, string) {
 }
 
 // ---------------------------------------------------------------------------
+// 续轮资格核验（§25.17.3「A05续轮顺序」）
+// ---------------------------------------------------------------------------
+
+// CursorResumeDenial 是续轮资格核验的唯一结果类型：nil = 资格通过；非 nil = 拒绝。
+//
+// 它是续轮错误链**同一个类型**的命名投影（type alias），不新增第二套错误分类：
+// 调用方既可直接读 Status/Reason，也可把它当 error 交给既有 finalizer，或经
+// CursorResumeHTTPStatus 取回 (status, reason)。
+type CursorResumeDenial = CursorResumeError
+
+// 续轮资格核验的失败关闭哨兵（与 CursorResumeDenial 同族；状态码由拒绝本身携带）。
+var (
+	// ErrCursorResumeAccountIneligible 表示原账号本体已不能承接本次续轮
+	// （停用/临停/到期/模型级临停/退出原分组/平台不符）：403，零工具结果写入。
+	ErrCursorResumeAccountIneligible = errors.New("cursor: original account is no longer eligible for this continuation")
+	// ErrCursorResumeSourceBlocked 表示归属来源被 A04 共同来源门明确否决
+	// （过期/观测失败/超时/耗尽）：403，账号本体不动，只是本次不予续轮。
+	ErrCursorResumeSourceBlocked = errors.New("cursor: activation source is not available for this continuation")
+	// ErrCursorResumeSourceChanged 表示原账号的激活码绑定或激活码本身已改变
+	// （改绑定/换码）：400 失效关联，不换号、不重建 AgentRun。
+	ErrCursorResumeSourceChanged = errors.New("cursor: original activation source changed (association invalid)")
+	// ErrCursorResumeSourceUnavailable 表示资格核验所需来源读取/解密失败：503。
+	// 这是"读不到"，不是"明确不合格"，不得折叠成 400/403 结论。
+	ErrCursorResumeSourceUnavailable = errors.New("cursor: activation source read failed (fail closed)")
+)
+
+// verifyResumeEligibility 是续轮资格的**唯一只读核验**（§25.17.3「A05续轮顺序」）。
+//
+// 判定顺序固定（账号本体 → 组关系/平台 → 现有调度门 → 来源指纹 → A04 共同来源门 →
+// 重新映射），任一步不合格即返回非 nil 拒绝；本函数**只判定**，不写任何状态：旧会话
+// 的终结与资源释放仍由调用方沿既有 finalizer 语义处理。
+//
+//	① 原账号存在未删除且仍是 cursor 账号（403）
+//	② 请求平台准入：本会话协议所属原生平台仍须允许 cursor 供给（403）
+//	③ 当前组关系：本次读取的账号仍挂在原会话所属分组（403）
+//	④ 现有调度门 Account.IsSchedulableForModelWithContext：停用/临停/到期/模型级临停（403）
+//	⑤ 当前 QuotaKeyID 必须等于首次来源 QuotaKeyID（400，改绑定/换码）
+//	⑥ 读该来源并比较首次 MAC（不等 400；读取/解密失败 503）
+//	⑦ A04 共同来源门（明确不可用 403；读不到 503），与调度/水位/目录同一实现
+//	⑧ 重新映射所得 upstreamModel 必须等于会话初始 upstreamModel（400）
+//
+// 绝不调用选号器、排队器、并发 Acquire 或余额预留：旧会话仍占着槽，不能用"并发已满"
+// 否决自己仍占槽的合法续轮；也不重新计费、不重建 AgentRun。服务锁内只取 spec 快照，
+// 来源/DB 读取全在锁外（§25.17.3「核验和DB读取在服务锁外」）。这里只承诺本次读取
+// 时点的资格，不虚构跨数据库与原生写入的分布式原子性。
+func (s *CursorExecutionService) verifyResumeEligibility(
+	ctx context.Context,
+	sess *cursorSessionRecord,
+	account *Account,
+) *CursorResumeDenial {
+	if s == nil {
+		return newCursorResumeError(http.StatusServiceUnavailable, "execution_unavailable", ErrCursorExecutionUnavailable)
+	}
+	if sess == nil {
+		return newCursorResumeError(http.StatusBadRequest, "invalid_ticket", ErrCursorResumeUnknownAssociation)
+	}
+	sess.mu.Lock()
+	spec := sess.spec
+	sess.mu.Unlock()
+
+	// ① 原账号：存在未删除 + 仍是 cursor 账号（软删账号由账号读取本身拒绝）。
+	if !isCursorAccount(account) {
+		return newCursorResumeError(http.StatusForbidden, "account_unavailable", ErrCursorResumeAccountIneligible)
+	}
+	// ② 请求平台准入：只复用既有平台纯谓词，不按模型名猜归属。
+	if platform := cursorResumeRequestPlatform(spec); platform == "" || !cursorNativeBridgePlatforms(platform) {
+		return newCursorResumeError(http.StatusForbidden, "platform_not_admitted", ErrCursorResumeAccountIneligible)
+	}
+	// ③ 当前组关系：以**本次读取**的账号组为准，不用首 HTTP 缓存的 ctx 组关系替代。
+	if groupID := spec.identity.GroupID; groupID > 0 && !cursorAccountInGroupID(account, groupID) {
+		return newCursorResumeError(http.StatusForbidden, "group_not_allowed", ErrCursorResumeAccountIneligible)
+	}
+	// ④ 现有调度门（停用/临停/到期/模型级临停）：复用既有判定，不另写一套。
+	if !account.IsSchedulableForModelWithContext(ctx, spec.requestedModel) {
+		reason := "not_schedulable"
+		if account.IsSchedulable() {
+			// 账号本体可调度、仅该模型被熔断：与调度链同一原因串（model_rate_limited）。
+			reason = "model_rate_limited"
+		}
+		return newCursorResumeError(http.StatusForbidden, reason, ErrCursorResumeAccountIneligible)
+	}
+	// ⑤ 首次来源指纹必须可靠：缺失即失效关联，绝不以空值代表"与首次鉴权同源"。
+	sourceFP, fpErr := cursorSessionSourceFingerprint(spec)
+	if fpErr != nil {
+		return newCursorResumeError(http.StatusBadRequest, "source_fingerprint_unavailable", fpErr)
+	}
+	// ⑥ 当前绑定必须仍是那一个来源（改绑定/换码 = 失效关联，不换号重试）。
+	if currentKeyID := cursorAccountQuotaKeyID(account); currentKeyID != sourceFP.QuotaKeyID {
+		return newCursorResumeError(http.StatusBadRequest, "source_changed", ErrCursorResumeSourceChanged)
+	}
+	// ⑦ 读该来源并比较首次 MAC（同一解密 + 取号链同一 HMAC，不另算一份指纹）。
+	codeMAC, macErr := s.resumeSourceCodeMAC(ctx, sourceFP.QuotaKeyID)
+	if macErr != nil {
+		return newCursorResumeError(http.StatusServiceUnavailable, "source_unavailable", macErr)
+	}
+	if subtle.ConstantTimeCompare([]byte(codeMAC), []byte(sourceFP.CodeMAC)) != 1 {
+		return newCursorResumeError(http.StatusBadRequest, "source_changed", ErrCursorResumeSourceChanged)
+	}
+	// ⑧ A04 共同来源门：与调度/粘性/DB 复核/水位/公开目录同一实现（不另加放行条件）。
+	veto, vetoErr := cursorSupplySourceAvailabilityVetoReason(ctx, account)
+	if vetoErr != nil {
+		return newCursorResumeError(http.StatusServiceUnavailable, "source_unavailable", vetoErr)
+	}
+	if veto != "" {
+		return newCursorResumeError(http.StatusForbidden, veto, ErrCursorResumeSourceBlocked)
+	}
+	// ⑨ 重新映射：目标必须与会话初始 upstreamModel 一致（改 mapping 即 400，不换号）。
+	upstreamModel, matched := account.ResolveMappedModel(spec.requestedModel)
+	if !matched || strings.TrimSpace(upstreamModel) != strings.TrimSpace(spec.upstreamModel) {
+		return newCursorResumeError(http.StatusBadRequest, "model_mapping_changed", ErrCursorResumeConfigChanged)
+	}
+	return nil
+}
+
+// resumeSourceCodeMAC 读取指定来源行并返回其激活码的 MAC（取号链同一 HMAC）。
+//
+// 只读：不生成鉴权材料、不解析/落库 deviceId（那是出站鉴权路径的职责），故资格核验
+// 不带任何写副作用。读取或解密失败如实上抛（调用方映射为 503），绝不返回空指纹。
+func (s *CursorExecutionService) resumeSourceCodeMAC(ctx context.Context, quotaKeyID int64) (string, error) {
+	if s == nil || s.quotaKeys == nil || s.enc == nil {
+		return "", fmt.Errorf("%w: quota key repository/encryptor is not wired", ErrCursorResumeSourceUnavailable)
+	}
+	qk, err := s.quotaKeys.GetByID(ctx, quotaKeyID)
+	if err != nil {
+		return "", fmt.Errorf("%w: load quota key %d: %v", ErrCursorResumeSourceUnavailable, quotaKeyID, err)
+	}
+	code, err := cursorDecryptQuotaKeyCode(qk, s.enc)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrCursorResumeSourceUnavailable, err)
+	}
+	return quotaKeyMACOfPlaintext(code), nil
+}
+
+// cursorResumeRequestPlatform 把会话的续轮协议命名空间折算成**请求侧原生平台**。
+//
+// 只服务于资格核验的平台准入（§25.17.3）：无法折算（未知协议）返回空串，调用方据此
+// 明确 403，不猜平台、不把未知协议的会话当作可续轮。
+func cursorResumeRequestPlatform(spec cursorSessionSpec) string {
+	switch cursorResumeProtocolOfSpec(spec) {
+	case CursorResumeProtocolChat, CursorResumeProtocolResponses:
+		return PlatformOpenAI
+	case CursorResumeProtocolMessages:
+		return PlatformAnthropic
+	case CursorResumeProtocolGemini:
+		return PlatformGemini
+	default:
+		return ""
+	}
+}
+
+// cursorAccountInGroupID 判定**本次读取**的账号当前是否仍挂在给定分组。
+//
+// 与既有 isAccountInGroup 同源同义：只看账号本次读取带出的组关系（AccountGroups，
+// 及同一次读取派生的 GroupIDs），绝不用首 HTTP 缓存的 ctx 组关系替代；本谓词不新增
+// 组读取依赖（分组模型白名单读取留在既有窄只读入口/Serve 侧）。
+func cursorAccountInGroupID(account *Account, groupID int64) bool {
+	if account == nil || groupID <= 0 {
+		return false
+	}
+	for _, ag := range account.AccountGroups {
+		if ag.GroupID == groupID {
+			return true
+		}
+	}
+	for _, id := range account.GroupIDs {
+		if id == groupID {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
 // 上下文项与摘要计划（§25.14-D「最小表示 / 摘要算法」）
 // ---------------------------------------------------------------------------
 
@@ -3262,6 +4235,62 @@ type cursorContextPlan struct {
 	delivered []cursorContextItem
 	// instructions 记录本次是否声明了非空 instructions（Responses 用）。
 	instructions bool
+	// responsesTools 是本次请求实际声明的 Responses 工具元数据（custom / function /
+	// namespace / tool_search）。
+	//
+	// §24.2-5 / §25.14-D：续轮的写出侧必须用**本 HTTP 重新声明**的同一套映射（续轮要求
+	// 工具声明集合与首轮一致），否则 custom_tool_call / namespace / tool_search_call 会被
+	// 降级成普通 function_call —— 元数据跨 HTTP 丢失。
+	responsesTools cursorResponsesToolMeta
+	// previousResponseID 是 Responses 的显式续接声明（其它协议为空），取自原协议，
+	// 供 Execute 的续轮准入断言判定"是否声明续轮"（§25.17.4 A08）。
+	previousResponseID string
+	// historyCallIDs 是本请求正文**历史前缀里已声明**的工具调用 ID（Responses 完整
+	// input 回放用；其它协议为空）。
+	//
+	// §25.17.4 行 1「历史中已完成工具对不单独构成本批续轮」：当尾部结果 ID 的
+	// function_call 条目也在同一正文中时，这是一个**客户端自带完整两端**的已完成工具对，
+	// 不是在向本站声明某条待完成关联（见 resultsReplayHistory）。
+	historyCallIDs map[string]struct{}
+}
+
+// claimsContinuation 判定本次请求是否**在原协议层声明了续轮**（携带本批工具结果或
+// previous_response_id）。标记来自原协议 probe/plan，转换到执行形状后不得抹掉。
+//
+// §25.17.4（A08）行 1：**不含**本批工具结果和 previous_response_id 才是原普通请求；
+// 历史中已完成工具对不单独构成本批续轮——因此这里只看本批结果/显式 previous_response_id。
+func (p *cursorContextPlan) claimsContinuation() bool {
+	if p == nil {
+		return false
+	}
+	return len(p.results) > 0 || strings.TrimSpace(p.previousResponseID) != ""
+}
+
+// resultsReplayHistory 判定本次携带的工具结果是否**全部属于正文内已完成的工具对**
+// （§25.17.4 行 1：历史中已完成工具对不单独构成本批续轮）。
+//
+// 判定就三条，全部取自本 HTTP 请求体，不新增持久化表/墓碑/ID 前缀/最近会话猜测：
+//   - 有显式 previous_response_id → 不是回放（那是明确的关联声明，必须核验）；
+//   - 没有本批结果 → 不是回放（普通请求）；
+//   - 每个结果 ID 的 function_call 条目也出现在同一正文的历史前缀里 → 客户端自带完整
+//     两端的已完成工具对，不构成对本站待完成关联的声明。
+//
+// 反例（因此仍然会被拒绝）：只有 function_call_output 而正文里没有对应 function_call
+// （含重启后孤儿、别家供应商的 ID），或夹带正文未声明的 ID —— 那是真的在声明一条本站
+// 无法核验的关联。
+func (p *cursorContextPlan) resultsReplayHistory() bool {
+	if p == nil || len(p.results) == 0 || len(p.historyCallIDs) == 0 {
+		return false
+	}
+	if strings.TrimSpace(p.previousResponseID) != "" {
+		return false
+	}
+	for _, result := range p.results {
+		if _, ok := p.historyCallIDs[strings.TrimSpace(result.CallID)]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // cursorConfigBuilder 把固定生成配置逐项并入链式摘要。
@@ -3891,6 +4920,15 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		return nil, err
 	}
 	plan := &cursorContextPlan{config: builder.digest(), history: NewCursorHistoryDigest()}
+	// 工具元数据与本请求的声明同源：续轮写出侧据此还原 custom / namespace / tool_search。
+	toolMeta, metaErr := cursorToolMetaFromResponses(req)
+	if metaErr != nil {
+		return nil, metaErr
+	}
+	plan.responsesTools = toolMeta
+	// §25.17.4（A08）：显式 previous_response_id 是本协议层的续轮声明，必须随计划带到执行
+	// 入口（转换不得抹掉该标记）。
+	plan.previousResponseID = strings.TrimSpace(req.PreviousResponseID)
 	plan.instructions = strings.TrimSpace(req.Instructions) != ""
 	if err := plan.config.AppendText("config.instructions", req.Instructions); err != nil {
 		return nil, err
@@ -3965,6 +5003,14 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		plan.results = append(plan.results, CursorToolResult{CallID: callID, Text: []string{item.Output}})
 	}
 	for _, item := range items[:start] {
+		if callID := cursorResponsesItemCallID(item); callID != "" {
+			// §25.17.4 行 1：该调用的声明就在同一正文里 → 与之配对的尾部 output 属于
+			// 「历史中已完成工具对」，不构成对本站待完成关联的声明。
+			if plan.historyCallIDs == nil {
+				plan.historyCallIDs = make(map[string]struct{}, 4)
+			}
+			plan.historyCallIDs[callID] = struct{}{}
+		}
 		digestItem, ierr := cursorResponsesItemItem(item)
 		if ierr != nil {
 			return nil, ierr
@@ -3974,6 +5020,20 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		}
 	}
 	return plan, nil
+}
+
+// cursorResponsesItemCallID 取「客户端工具调用」条目的 call_id（非调用条目返回空）。
+//
+// 只认工具调用类条目（function_call / custom_tool_call / local_shell_call /
+// tool_search_call / mcp_call / image_generation_call）；output 类条目是结果侧，
+// 由 cursorResponsesItemIsOutput 判定，不在此列。
+func cursorResponsesItemCallID(item apicompat.ResponsesInputItem) string {
+	switch strings.ToLower(strings.TrimSpace(item.Type)) {
+	case "function_call", "custom_tool_call", "local_shell_call", "tool_search_call",
+		"mcp_call", "image_generation_call":
+		return strings.TrimSpace(item.CallID)
+	}
+	return ""
 }
 
 // cursorGeminiContent 是 Gemini 原生 contents 条目的最小类型化表示。
@@ -4030,6 +5090,9 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 		Contents          []cursorGeminiContent `json:"contents"`
 		GenerationConfig  json.RawMessage       `json:"generationConfig"`
 		Tools             json.RawMessage       `json:"tools"`
+		// ToolConfig 进入固定配置摘要：工具选择模式/允许集合是生成配置的一部分，
+		// 续轮改变它必须被摘要比较识别（不能只进响应转换）。
+		ToolConfig json.RawMessage `json:"toolConfig"`
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, fmt.Errorf("%w: empty gemini request", ErrCursorResumeUnsupportedContent)
@@ -4057,6 +5120,9 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 		}
 	}
 	if err := builder.json("config.generation", doc.GenerationConfig); err != nil {
+		return nil, err
+	}
+	if err := builder.json("config.tool_config", doc.ToolConfig); err != nil {
 		return nil, err
 	}
 	tools := make([]string, 0, 8)
@@ -4305,9 +5371,15 @@ type CursorResumeTicket struct {
 
 // IdentifyResume 用统一索引把探针定位到唯一会话与唯一待完成批次。
 //
-// 失败关闭语义（§25.2 / §25.14-D）：
-//   - 提交的 ID 全部未登记（含重启后孤儿）→ **(nil, nil)**：无法在账号选择前判定归属，
-//     按原契约继续普通新请求；绝不猜最近会话、不建墓碑表、也不把别人的请求当成续轮；
+// 失败关闭语义（§25.2 / §25.14-D / §25.17.4 A08）：
+//   - 请求**明确声称续轮**（携带本批工具结果或 previous_response_id）但提交的 ID
+//     **全部未登记**（含重启后孤儿）→ **(nil, ErrCursorResumeUnknownAssociation)**：
+//     可区分的「未知关联」哨兵。helper 只把这一类交回原路由判定供应方（非 Cursor 沿原契约
+//     转发，不抢管不改请求体）；进入 Cursor 执行分支时由 Execute 的同一准入断言在模型
+//     出站/建 session/转交资源之前 400。绝不猜最近会话、不建墓碑表、不换号重试；
+//   - 例外只有一种（行 1「历史中已完成工具对不单独构成本批续轮」）：尾部结果 ID 的
+//     function_call 条目也在同一正文里（Responses 完整 input 回放，见
+//     cursorContextPlan.resultsReplayHistory）→ **(nil, nil)** 原普通请求；
 //   - 只要**有任一 ID** 命中本服务的会话，则整批必须一致：分属不同会话（跨会话混批）、
 //     重复 ID、旧批/旧 response、与 previous_response_id 不一致 → 明确 400。
 //
@@ -4381,8 +5453,21 @@ func (s *CursorExecutionService) IdentifyResume(probe *CursorResumeProbe) (*Curs
 		ticketSession = record
 	}
 	if locatedCount == 0 && prevRecord == nil {
-		// 没有任何已登记关联：既不是本服务的续轮，也不该在这里判死。
-		return nil, nil
+		// §25.17.4（A08）行 3：请求**明确声称续轮**（本批工具结果或 previous_response_id，
+		// 上面已确认 ClaimsContinuation 为真），但全部 ID 都未命中统一索引（含重启后的孤儿）。
+		// Identify 返回可区分的「未知关联」哨兵，不返回 (nil,nil)：
+		//   - helper 只把这一类交回原路由判定供应方（非 Cursor 照原契约转发，不抢管）；
+		//   - 进入 Cursor 执行分支时由 Execute 的续轮准入断言在模型出站/建 session/转交资源
+		//     之前返回 400（见 Execute 顶部同一断言）。
+		// 这样「全未知 → 开新 AgentRun」不再发生，也不猜最近会话、不换号、不重执行工具。
+		//
+		// 行 1 的例外：尾部结果的 function_call 也在同一正文里（Responses 完整 input 回放，
+		// 客户端自带完整两端的已完成工具对）不构成对本站待完成关联的声明 → 原普通请求。
+		if probe.Plan.resultsReplayHistory() {
+			return nil, nil
+		}
+		return nil, newCursorResumeError(http.StatusBadRequest, "unknown_association",
+			ErrCursorResumeUnknownAssociation)
 	}
 	if duplicateCallID != "" {
 		return nil, newCursorResumeError(http.StatusBadRequest, "duplicate_result_id",
@@ -4649,16 +5734,53 @@ func (s *CursorExecutionService) ResumeCursorSession(
 	}
 	defer detach()
 
-	// 续轮 drain（跨 HTTP 存活会话）：先附着输出通道，确保真实结果写回后恢复的输出帧
-	// 自本 HTTP 附着起被完整捕获（不丢失首帧），再串行写回真实结果。无真实 pump
-	// （测试 stub / 已终态会话 / c 为空）时 ch 为 nil，走既有返回契约，不破坏 W2-E。
+	// 本 HTTP 的逐请求选项（§25.17.2-2：续轮用本 HTTP 的 stream / tool_choice，
+	// 不沿用首轮值；工具还原映射来自本会话已接受配置，不在 drainReq 里丢成空值）。
+	toolMode, toolName, choiceErr := cursorResumeToolChoice(ticket.Protocol, in.Body)
+	if choiceErr != nil {
+		return nil, choiceErr
+	}
+	record.setHTTPOptions(cursorHTTPOptions{
+		stream:         in.Stream,
+		model:          ticket.Model,
+		toolChoiceMode: toolMode,
+		toolChoiceName: toolName,
+	})
+	record.setLogContext(ctx)
+
+	// 续轮 drain（跨 HTTP 存活会话）：**先**附着输出通道并准备好本 HTTP 的 writer 与输出
+	// 标识，**再**写真实工具结果（§25.17.2-1：附着/writer 未就绪绝不写真实结果，避免
+	// 首帧落在未附着窗口或写出时才失败）。无真实 pump（测试 stub / 已终态会话 / c 为空）
+	// 时 ch 为 nil，走既有返回契约，不破坏 W2-E。
 	var drainCh chan *cursorOutputEvent
 	var drainDetach func()
+	var drainReq *CursorExecutionRequest
+	var drainWriter io.Writer
 	if record.output != nil && c != nil {
 		drainCh, drainDetach = record.output.attach()
 	}
 	if drainCh != nil {
 		defer drainDetach()
+		drainReq = &CursorExecutionRequest{
+			Protocol: record.spec.protocol,
+			Stream:   in.Stream,
+			Model:    ticket.Model,
+			// 工具还原映射取本 HTTP 重新声明的同一套工具（续轮必须与首轮声明集合一致，
+			// 见 cursorToolSetEqual）：漏传会让 custom/namespace/tool_search 跨 HTTP 丢失。
+			Tools:          plan.responsesTools,
+			ToolChoiceMode: toolMode,
+			ToolChoiceName: toolName,
+		}
+		responseID := record.output.responseID()
+		writer, restore, werr := s.beginResponseWriter(c, drainReq, nil, responseID)
+		if werr != nil {
+			s.finishCursorSession(record, "resume_writer_failed")
+			return nil, werr
+		}
+		if restore != nil {
+			defer restore()
+		}
+		drainWriter = writer
 	}
 
 	// ④ 锁外串行写真实结果（整批一次；失败即终止，不回滚到可重放）。
@@ -4684,19 +5806,7 @@ func (s *CursorExecutionService) ResumeCursorSession(
 
 	if drainCh != nil {
 		// 真实跨 HTTP 会话：把恢复后的输出帧写出给当前 HTTP（自本附着起），直到真实终态。
-		drainReq := &CursorExecutionRequest{
-			Protocol: record.spec.protocol,
-			Stream:   in.Stream,
-			Model:    ticket.Model,
-		}
-		writer, restore, werr := s.beginResponseWriter(c, drainReq, nil)
-		if werr != nil {
-			return nil, werr
-		}
-		if restore != nil {
-			defer restore()
-		}
-		return s.cursorDrainAttachedOutput(drainCh, writer, drainReq, record)
+		return s.cursorDrainAttachedOutput(drainCh, drainWriter, drainReq, record)
 	}
 
 	return &ForwardResult{
@@ -4891,6 +6001,141 @@ func cursorToolChoiceMode(raw json.RawMessage) (string, string, error) {
 	return "named", name, nil
 }
 
+// cursorResumeToolChoice 取本续轮 HTTP 的工具选择（模式 + 具名），用于本 HTTP 的输出约束。
+//
+// §25.17.2-2：续轮的 tool_choice 只能来自本 HTTP，不能沿用首轮；工具还原映射来自会话
+// 已接受配置，不在这里丢成空值。
+func cursorResumeToolChoice(protocol CursorResumeProtocol, body []byte) (string, string, error) {
+	switch protocol {
+	case CursorResumeProtocolChat:
+		var req apicompat.ChatCompletionsRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return "", "", newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", ErrCursorResumeUnsupportedContent)
+		}
+		mode, name, err := cursorToolChoiceMode(req.ToolChoice)
+		if err != nil {
+			return "", "", newCursorResumeError(http.StatusBadRequest, "tool_choice_invalid", err)
+		}
+		return mode, name, nil
+	case CursorResumeProtocolMessages:
+		var req apicompat.AnthropicRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return "", "", newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", ErrCursorResumeUnsupportedContent)
+		}
+		mode, name, err := cursorToolChoiceMode(req.ToolChoice)
+		if err != nil {
+			return "", "", newCursorResumeError(http.StatusBadRequest, "tool_choice_invalid", err)
+		}
+		return mode, name, nil
+	case CursorResumeProtocolResponses:
+		var req apicompat.ResponsesRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return "", "", newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", ErrCursorResumeUnsupportedContent)
+		}
+		mode, name, err := cursorToolChoiceMode(req.ToolChoice)
+		if err != nil {
+			return "", "", newCursorResumeError(http.StatusBadRequest, "tool_choice_invalid", err)
+		}
+		return mode, name, nil
+	case CursorResumeProtocolGemini:
+		mode, name, err := cursorGeminiToolChoiceMode(body)
+		if err != nil {
+			return "", "", newCursorResumeError(http.StatusBadRequest, "tool_choice_invalid", err)
+		}
+		return mode, name, nil
+	default:
+		return "", "", newCursorResumeError(http.StatusBadRequest, "unknown_protocol", ErrCursorResumeUnsupportedContent)
+	}
+}
+
+// cursorGeminiToolChoiceMode 把 toolConfig.functionCallingConfig 映射为本站既有工具选择语义。
+//
+// AUTO → auto、NONE → none、ANY → required；allowedFunctionNames 必须全部在声明集合内
+// （不凭名字扩大工具集），单名仍保持 required。未知模式/未声明名称明确 400（零 AgentRun）。
+func cursorGeminiToolChoiceMode(body []byte) (string, string, error) {
+	var doc struct {
+		Tools      json.RawMessage `json:"tools"`
+		ToolConfig *struct {
+			FunctionCallingConfig *struct {
+				Mode                 string   `json:"mode"`
+				AllowedFunctionNames []string `json:"allowedFunctionNames"`
+			} `json:"functionCallingConfig"`
+		} `json:"toolConfig"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return "", "", fmt.Errorf("%w: undecodable gemini toolConfig", ErrCursorToolChoiceInvalid)
+	}
+	if doc.ToolConfig == nil || doc.ToolConfig.FunctionCallingConfig == nil {
+		return "", "", nil
+	}
+	cfg := doc.ToolConfig.FunctionCallingConfig
+	declared := cursorGeminiDeclaredToolNames(doc.Tools)
+	declaredSet := make(map[string]struct{}, len(declared))
+	for _, name := range declared {
+		declaredSet[name] = struct{}{}
+	}
+	allowed := make([]string, 0, len(cfg.AllowedFunctionNames))
+	for _, raw := range cfg.AllowedFunctionNames {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if _, ok := declaredSet[name]; !ok {
+			return "", "", fmt.Errorf("%w: gemini allowedFunctionNames %q is not declared", ErrCursorToolChoiceInvalid, name)
+		}
+		allowed = append(allowed, name)
+	}
+	switch strings.ToUpper(strings.TrimSpace(cfg.Mode)) {
+	case "", "MODE_UNSPECIFIED":
+		if len(allowed) > 0 {
+			return "", "", fmt.Errorf("%w: gemini allowedFunctionNames without ANY mode", ErrCursorToolChoiceInvalid)
+		}
+		return "", "", nil
+	case "AUTO":
+		if len(allowed) > 0 {
+			return "", "", fmt.Errorf("%w: gemini allowedFunctionNames requires ANY", ErrCursorToolChoiceInvalid)
+		}
+		return "auto", "", nil
+	case "NONE":
+		if len(allowed) > 0 {
+			return "", "", fmt.Errorf("%w: gemini allowedFunctionNames with NONE has no meaning", ErrCursorToolChoiceInvalid)
+		}
+		return "none", "", nil
+	case "ANY":
+		if len(declared) == 0 {
+			return "", "", fmt.Errorf("%w: gemini ANY without declarations", ErrCursorToolChoiceInvalid)
+		}
+		// 单名 allowedFunctionNames 仍是 required（本站语义里 required 允许模型在该子集内选择）。
+		return "required", "", nil
+	default:
+		return "", "", fmt.Errorf("%w: unknown gemini functionCallingConfig mode %q", ErrCursorToolChoiceInvalid, cfg.Mode)
+	}
+}
+
+// cursorGeminiDeclaredToolNames 返回 tools[].functionDeclarations[].name（保持声明顺序）。
+func cursorGeminiDeclaredToolNames(raw json.RawMessage) []string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	var declarations []struct {
+		FunctionDeclarations []struct {
+			Name string `json:"name"`
+		} `json:"functionDeclarations"`
+	}
+	if err := json.Unmarshal(raw, &declarations); err != nil {
+		return nil
+	}
+	names := make([]string, 0, 4)
+	for _, entry := range declarations {
+		for _, decl := range entry.FunctionDeclarations {
+			if name := strings.TrimSpace(decl.Name); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
 // cursorValidateToolChoiceForSession 按会话已暴露工具集合做**逐 HTTP** 校验。
 //
 // 规则（§25.14-D）：
@@ -4995,6 +6240,12 @@ func cursorEnforceToolChoiceOnOutput(mode, name string, calls []cursorToolCallCa
 	case "required":
 		if len(calls) == 0 {
 			return fmt.Errorf("%w: required tool_choice was not satisfied by the real output", ErrCursorToolChoiceInvalid)
+		}
+	case "none":
+		// tool_choice=none 表示本轮不得调用工具：真实输出出现任何工具调用即协议失败，
+		// 绝不当成功交付（§25.17.2-3：可失败检查必须在发出工具成功批之前完成）。
+		if len(calls) > 0 {
+			return fmt.Errorf("%w: tool_choice none but the output carries %d tool call(s)", ErrCursorToolChoiceInvalid, len(calls))
 		}
 	case "named":
 		for _, call := range calls {
@@ -5124,9 +6375,151 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 	return nil
 }
 
-// recordDeliveredBatch 把**已完整写出**的工具批次登记为待完成批（§25.3 / §25.14-D）。
+// cursorPreparedBatch 是"已准备但未确认交付"的工具批（§25.17.2-4）。
 //
-// 只有整批内容完整写出才进入 waiting_tools；部分写出由 §25.4 终止，不记成已交付。
+// 准备阶段只做：整批 ID 冲突检查 + 写同一索引 + 在摘要**克隆**上算好本批增量 +
+// 把 pending 置为 delivered=false。正式历史与 waiting_tools 状态只在写出成功后提交。
+type cursorPreparedBatch struct {
+	batchID    string
+	responseID string
+	callIDs    []string
+	// history 是已应用本批增量的历史摘要克隆（提交时才替换会话正式摘要）。
+	history *CursorHistoryDigest
+}
+
+// prepareDeliveredBatch 在服务锁内完成整批可失败准备（仍 running、delivered=false）。
+//
+// 一旦失败，本 session 的全部关联由原 finalizer 清除；不会留下"半个批"。
+func (s *CursorExecutionService) prepareDeliveredBatch(
+	record *cursorSessionRecord,
+	protocol CursorResumeProtocol,
+	model string,
+	delegations *cursorToolDelegations,
+	responseID string,
+) (*cursorPreparedBatch, error) {
+	if s == nil || record == nil || delegations == nil {
+		return nil, fmt.Errorf("%w: batch prepare without session", ErrCursorSessionIndexInvalidKey)
+	}
+	batches := delegations.sealedBatchSummaries()
+	if len(batches) == 0 {
+		return nil, fmt.Errorf("%w: delegated checkpoint without sealed batch", ErrCursorBatchIncomplete)
+	}
+	current := batches[len(batches)-1]
+	batchID := strings.TrimSpace(current.ModelCallID)
+	if batchID == "" {
+		batchID = cursorSessionLevelBatchID
+	}
+	responseID = strings.TrimSpace(responseID)
+
+	// 与 beginResumeTakeover 同一锁序（会话表锁 → 会话锁）：不引入第二把锁。
+	s.sessions.mu.Lock()
+	defer s.sessions.mu.Unlock()
+	live, ok := s.sessions.sessions[record.id]
+	if !ok {
+		return nil, fmt.Errorf("%w: session %q is not active", ErrCursorSessionIndexInvalidKey, record.id)
+	}
+	live.mu.Lock()
+	defer live.mu.Unlock()
+	if live.finishing || live.state == cursorSessionClosed {
+		return nil, fmt.Errorf("%w: session finished before batch delivery", ErrCursorResumeNotWaiting)
+	}
+	// 整批一次检查并登记：任何一条冲突即整批失败（不半登记、不覆盖已有归属）。
+	for _, callID := range current.CallIDs {
+		key := cursorSessionIndexKeyForSpec(live.spec, CursorIDKindCall, callID)
+		if err := s.sessions.index.Register(key, live.id, batchID); err != nil {
+			return nil, err
+		}
+	}
+	if responseID != "" {
+		key := cursorSessionIndexKeyForSpec(live.spec, CursorIDKindResponse, responseID)
+		if err := s.sessions.index.Register(key, live.id, batchID); err != nil {
+			return nil, err
+		}
+	}
+	// 摘要增量只在克隆上计算：提交前正式历史不推进。
+	var history *CursorHistoryDigest
+	if live.historyDigest != nil {
+		history = live.historyDigest.Clone()
+		if err := appendCursorBatchAssistantHistory(history, protocol, current.CallIDs, delegations); err != nil {
+			return nil, err
+		}
+	}
+	prepared := &cursorPreparedBatch{
+		batchID:    batchID,
+		responseID: responseID,
+		callIDs:    append([]string(nil), current.CallIDs...),
+		history:    history,
+	}
+	// 交付中：只能被识别为"已准备未交付"，不能据此接管或写结果（delivered=false）。
+	live.pending = &cursorPendingBatch{
+		batchID:    batchID,
+		responseID: responseID,
+		callIDs:    prepared.callIDs,
+	}
+	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_batch_prepared", model,
+		zap.String("session_id", live.id),
+		zap.String("batch_id", batchID),
+		zap.Int("call_count", len(prepared.callIDs)),
+		zap.Bool("has_response_id", responseID != ""))
+	return prepared, nil
+}
+
+// commitDeliveredBatch 在写出成功后（服务锁内）提交已交付批（§25.17.2-4/5）。
+//
+// 若 finalizer 已在锁内胜出，则**不得**再提交 waiting_tools：返回明确终止错误，
+// 不追加成功帧、不恢复会话。
+//
+// itemIDs 是本 HTTP 实际交付的 Responses 工具结果条目 ID：与 call/response 登记同一条
+// 路径写进**同一**统一索引（键含 item 种类），finalizer 清会话时随 DeleteSession 全清。
+func (s *CursorExecutionService) commitDeliveredBatch(
+	record *cursorSessionRecord, prepared *cursorPreparedBatch, itemIDs []string,
+) error {
+	if s == nil || record == nil || prepared == nil {
+		return nil
+	}
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	if record.finishing || record.state == cursorSessionClosed {
+		return fmt.Errorf("%w: session finalized before batch commit", ErrCursorResumeNotWaiting)
+	}
+	// 条目 ID 与 call/response 用同一个 Register、同一把索引：不建第二索引、不另立种类。
+	for _, itemID := range itemIDs {
+		id := strings.TrimSpace(itemID)
+		if id == "" {
+			continue
+		}
+		key := cursorSessionIndexKeyForSpec(record.spec, CursorIDKindItem, id)
+		if err := s.sessions.index.Register(key, record.id, prepared.batchID); err != nil {
+			return err
+		}
+	}
+	if prepared.history != nil {
+		record.historyDigest = prepared.history
+	}
+	if record.pending != nil && record.pending.batchID == prepared.batchID &&
+		len(record.pending.callIDs) == len(prepared.callIDs) {
+		record.pending.delivered = true
+	} else {
+		record.pending = &cursorPendingBatch{
+			batchID:    prepared.batchID,
+			responseID: prepared.responseID,
+			callIDs:    append([]string(nil), prepared.callIDs...),
+			delivered:  true,
+		}
+	}
+	record.state = cursorSessionWaitingTools
+	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_batch_delivered", record.spec.requestedModel,
+		zap.String("session_id", record.id),
+		zap.String("batch_id", prepared.batchID),
+		zap.Int("call_count", len(prepared.callIDs)),
+		zap.Bool("has_response_id", prepared.responseID != ""))
+	return nil
+}
+
+// recordDeliveredBatch 是"准备 + 提交"的同步组合（供无独立写出边界的调用方使用）。
+//
+// 该入口没有独立的写出边界，因此没有"实际写出内容"可取：只登记 call/response，
+// 不伪造条目 ID（条目 ID 只能来自真实交付，§25.17.2「实际ID」）。
 func (s *CursorExecutionService) recordDeliveredBatch(
 	record *cursorSessionRecord,
 	req *CursorExecutionRequest,
@@ -5136,102 +6529,98 @@ func (s *CursorExecutionService) recordDeliveredBatch(
 	if s == nil || record == nil || req == nil {
 		return nil
 	}
-	batches := delegations.sealedBatchSummaries()
-	if len(batches) == 0 {
+	prepared, err := s.prepareDeliveredBatch(record, cursorResumeProtocolOfRequest(req), req.Model, delegations, responseID)
+	if err != nil {
+		return err
+	}
+	return s.commitDeliveredBatch(record, prepared, nil)
+}
+
+// appendCursorBatchAssistantHistory 把本批已交付的 assistant 输出并入**给定摘要**。
+//
+// 只追加实际交付的逻辑输出（类型/工具名/参数/公开 ID）。调用方传入的通常是克隆，
+// 提交前的失败不会污染正式历史。
+func appendCursorBatchAssistantHistory(
+	history *CursorHistoryDigest,
+	protocol CursorResumeProtocol,
+	callIDs []string,
+	delegations *cursorToolDelegations,
+) error {
+	if history == nil {
 		return nil
 	}
-	current := batches[len(batches)-1]
-	batchID := strings.TrimSpace(current.ModelCallID)
-	if batchID == "" {
-		batchID = cursorSessionLevelBatchID
-	}
-	for _, callID := range current.CallIDs {
-		if err := s.sessions.registerSessionID(record.id, batchID, CursorIDKindCall, callID); err != nil {
-			return err
-		}
-	}
-	if strings.TrimSpace(responseID) != "" {
-		if err := s.sessions.registerSessionID(record.id, batchID, CursorIDKindResponse, strings.TrimSpace(responseID)); err != nil {
-			return err
-		}
-	}
-	// 已交付的 assistant 输出并入历史：只追加**实际交付的逻辑输出**（类型/工具名/参数/公开 ID）。
-	record.mu.Lock()
-	if record.historyDigest != nil {
-		firstCall := true
-		for _, call := range current.CallIDs {
-			var name, args string
-			for _, candidate := range delegations.snapshot() {
-				if candidate.ID == call {
-					name, args = candidate.Name, candidate.ArgsJSON
-				}
+	captures := delegations.snapshot()
+	firstCall := true
+	for _, call := range callIDs {
+		var name, args string
+		for _, candidate := range captures {
+			if candidate.ID == call {
+				name, args = candidate.Name, candidate.ArgsJSON
 			}
-			switch cursorResumeProtocolOfRequest(req) {
-			case CursorResumeProtocolChat:
-				canonical, err := cursorToolCallCanonical(call, name, args)
-				if err != nil {
-					record.mu.Unlock()
+		}
+		switch protocol {
+		case CursorResumeProtocolChat:
+			canonical, err := cursorToolCallCanonical(call, name, args)
+			if err != nil {
+				return err
+			}
+			// assistant 的空 content 与省略统一为空文本：**每条 assistant 消息**一次文本项，
+			// 其后按顺序追加该消息的 tool_call 项（与 Chat 历史规范化逐项对齐）。
+			if firstCall {
+				if err := history.AppendText("chat.assistant.text", ""); err != nil {
 					return err
 				}
-				// assistant 的空 content 与省略统一为空文本：**每条 assistant 消息**一次文本项，
-				// 其后按顺序追加该消息的 tool_call 项（与 Chat 历史规范化逐项对齐）。
-				if firstCall {
-					if err := record.historyDigest.AppendText("chat.assistant.text", ""); err != nil {
-						record.mu.Unlock()
-						return err
-					}
-					firstCall = false
-				}
-				if err := record.historyDigest.AppendItem("chat.assistant.tool_call", canonical); err != nil {
-					record.mu.Unlock()
-					return err
-				}
-			case CursorResumeProtocolMessages:
-				payload := map[string]json.RawMessage{
-					"id":    mustCursorJSON(call),
-					"name":  mustCursorJSON(name),
-					"input": CursorCanonicalText(args),
-				}
-				if err := record.historyDigest.AppendItem("messages.assistant.tool_use", mustCursorJSONValue(payload)); err != nil {
-					record.mu.Unlock()
-					return err
-				}
-			case CursorResumeProtocolResponses:
-				canonical, err := cursorToolCallCanonical(call, name, args)
-				if err != nil {
-					record.mu.Unlock()
-					return err
-				}
-				if err := record.historyDigest.AppendItem("responses.function_call", canonical); err != nil {
-					record.mu.Unlock()
-					return err
-				}
+				firstCall = false
+			}
+			if err := history.AppendItem("chat.assistant.tool_call", canonical); err != nil {
+				return err
+			}
+		case CursorResumeProtocolMessages:
+			payload := map[string]json.RawMessage{
+				"id":    mustCursorJSON(call),
+				"name":  mustCursorJSON(name),
+				"input": CursorCanonicalText(args),
+			}
+			if err := history.AppendItem("messages.assistant.tool_use", mustCursorJSONValue(payload)); err != nil {
+				return err
+			}
+		case CursorResumeProtocolResponses:
+			canonical, err := cursorToolCallCanonical(call, name, args)
+			if err != nil {
+				return err
+			}
+			if err := history.AppendItem("responses.function_call", canonical); err != nil {
+				return err
+			}
+		case CursorResumeProtocolGemini:
+			canonical, err := cursorToolCallCanonical(call, name, args)
+			if err != nil {
+				return err
+			}
+			if err := history.AppendItem("gemini.model.function_call", canonical); err != nil {
+				return err
 			}
 		}
 	}
-	record.pending = &cursorPendingBatch{
-		batchID:    batchID,
-		responseID: strings.TrimSpace(responseID),
-		callIDs:    append([]string(nil), current.CallIDs...),
-		delivered:  true,
-	}
-	record.state = cursorSessionWaitingTools
-	record.mu.Unlock()
-	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_batch_delivered", req.Model,
-		zap.String("session_id", record.id),
-		zap.String("batch_id", batchID),
-		zap.Int("call_count", len(current.CallIDs)),
-		zap.Bool("has_response_id", strings.TrimSpace(responseID) != ""))
 	return nil
 }
 
-// cursorWriterResponseID 取 Responses 回桥 writer 真实写出的 response ID（其它协议为空）。
+// cursorWriterResponseID 取回桥 writer 实际交付的响应 ID（本 HTTP 的唯一输出 ID）。
 func cursorWriterResponseID(w io.Writer) string {
 	converted, ok := w.(*cursorProtocolWriter)
-	if !ok || converted == nil || converted.respState == nil {
+	if !ok || converted == nil {
 		return ""
 	}
-	return strings.TrimSpace(converted.respState.ResponseID)
+	return strings.TrimSpace(converted.responseID)
+}
+
+// cursorWriterItemIDs 取回桥 writer **实际交付**的工具结果条目 ID（非 Responses 出口为空）。
+func cursorWriterItemIDs(w io.Writer) []string {
+	converted, ok := w.(*cursorProtocolWriter)
+	if !ok || converted == nil {
+		return nil
+	}
+	return converted.collectedItemIDs()
 }
 
 // ---------------------------------------------------------------------------
@@ -5271,6 +6660,11 @@ func (s *GatewayService) ServeCursorResume(
 	if err != nil {
 		return nil, fmt.Errorf("cursor: load resume account: %w", err)
 	}
+	// §25.17.3「A05续轮顺序」：定位到已登记会话并取回**本次读取**的原账号后、写工具
+	// 结果之前做唯一只读资格核验；拒绝即零工具结果写入，沿原 finalizer 终结旧会话。
+	if guardErr := s.cursorExecution.guardResumeEligibility(ctx, ticket, account); guardErr != nil {
+		return nil, guardErr
+	}
 	return s.cursorExecution.ResumeCursorSession(ctx, c, ticket, account, in)
 }
 
@@ -5296,7 +6690,44 @@ func (s *OpenAIGatewayService) ServeCursorResume(
 	if err != nil {
 		return nil, fmt.Errorf("cursor: load resume account: %w", err)
 	}
+	// §25.17.3「A05续轮顺序」：与 GatewayService 同一核验、同一终结语义（两个入口只有
+	// 一处实现，不另建平行链）。
+	if guardErr := s.cursorExecution.guardResumeEligibility(ctx, ticket, account); guardErr != nil {
+		return nil, guardErr
+	}
 	return s.cursorExecution.ResumeCursorSession(ctx, c, ticket, account, in)
+}
+
+// guardResumeEligibility 是**两个 ServeCursorResume 入口共用**的续轮资格接线
+// （§25.17.3「A05续轮顺序」）。
+//
+// 位置固定在"已定位登记会话（ticket.session）+ 已取回本次读取的原账号"之后、
+// "写工具结果"之前：核验本身在**服务锁外**（只读，不选号、不排队、不并发 Acquire、
+// 不预留、不重计费），正式接管仍在既有服务锁内由 beginResumeTakeover 重查 state/batch。
+//
+// 拒绝即**零工具结果写入**：不进入接管、不写真实结果；旧会话一律沿**原 finalizer**
+// 终结（唯一结算规则、预留归还、槽位释放与索引清理全部仍由 finishCursorSession 承担，
+// 本函数不新增任何兜底或平行收尾）。拒绝本身沿既有续轮错误链返回，调用方用
+// CursorResumeHTTPStatus 取回 403/400/503 与安全 reason。
+func (s *CursorExecutionService) guardResumeEligibility(
+	ctx context.Context, ticket *CursorResumeTicket, account *Account,
+) error {
+	if s == nil || ticket == nil || ticket.session == nil || account == nil {
+		// 未定位到已登记会话/账号：交由 ResumeCursorSession 的既有入参错误链判定，
+		// 本接线不重复、不替换那一层结论。
+		return nil
+	}
+	denial := s.verifyResumeEligibility(ctx, ticket.session, account)
+	if denial == nil {
+		return nil
+	}
+	cursorPhaseLog(ctx, zapcore.InfoLevel, "session_resume_denied", ticket.Model,
+		zap.String("session_id", ticket.SessionID),
+		zap.String("batch_id", ticket.BatchID),
+		zap.Int("status", denial.Status),
+		zap.String("deny_reason", denial.Reason))
+	s.finishCursorSession(ticket.session, "resume_denied_"+denial.Reason)
+	return denial
 }
 
 // ---------------------------------------------------------------------------
@@ -5343,6 +6774,8 @@ func cursorResumeProtocolOfRequest(req *CursorExecutionRequest) CursorResumeProt
 		return CursorResumeProtocolMessages
 	case cursorProtocolResponses:
 		return CursorResumeProtocolResponses
+	case cursorProtocolGemini:
+		return CursorResumeProtocolGemini
 	default:
 		return ""
 	}
@@ -5360,6 +6793,8 @@ func cursorResumeProtocolOfSpec(spec cursorSessionSpec) CursorResumeProtocol {
 		return CursorResumeProtocolMessages
 	case cursorProtocolResponses:
 		return CursorResumeProtocolResponses
+	case cursorProtocolGemini:
+		return CursorResumeProtocolGemini
 	default:
 		return ""
 	}

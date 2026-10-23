@@ -20,6 +20,8 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +32,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -121,6 +124,20 @@ type cursorFullChainScript struct {
 	// textOnly 为 true 时 phase1 只吐文本（不交付工具批），用于"附着期间断连"：
 	// 首 HTTP 会一直挂在 drain 上（保持附着），直到客户端断连。
 	textOnly bool
+	// secondBatch 是**续轮恢复后**交付的第二批工具调用（非空时不再产出终态文本）。
+	//
+	// 用于证明"工具元数据跨 HTTP 保留"：第一批交付 → 客户端回写真实结果 → 模型在第二个
+	// HTTP 里再交付同类型的调用；第二个 HTTP 的写出侧必须仍能还原 custom / namespace /
+	// tool_search 类型（否则会降级成普通 function_call）。
+	secondBatch []cursorFullChainCall
+	// injectAfterBatchText 是**不等真实结果**就产出的正文（违反原生阶段契约的注入）。
+	//
+	// 非空时在交付首批后（见 injectAfterBatchReady）吐一段正文增量，再按 hangAfterPhase1
+	// 挂着：读循环必须在 waiting_tools 期间把它判为显式协议失败。
+	injectAfterBatchText string
+	// injectAfterBatchReady 就绪后才注入（测试在观察到 waiting_tools 后关闭它），
+	// 避免注入早于交付确认而把用例变成时间竞态。
+	injectAfterBatchReady <-chan struct{}
 }
 
 // cursorFullChainUpstream 扮演 AgentRun 端点。
@@ -164,6 +181,16 @@ func (u *cursorFullChainUpstream) handler() http.Handler {
 		go u.readClientStream(r.Body)
 
 		u.writeStream(w, flusher, u.phase1())
+		if u.script.injectAfterBatchText != "" {
+			if u.script.injectAfterBatchReady != nil {
+				select {
+				case <-u.script.injectAfterBatchReady:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			u.writeStream(w, flusher, joinFrames(fcTextDelta(u.script.injectAfterBatchText)))
+		}
 		if u.script.hangAfterPhase1 {
 			// 交付批次后挂着：不放终态，靠会话 ctx 的 180s 期限 / 客户端断连收尾。
 			<-r.Context().Done()
@@ -174,6 +201,12 @@ func (u *cursorFullChainUpstream) handler() http.Handler {
 		case <-r.Context().Done():
 			return
 		case <-time.After(10 * time.Second):
+			return
+		}
+		if len(u.script.secondBatch) > 0 {
+			// 续轮的第二批：交付后挂着（等下一轮真实结果，或由测试收尾）。
+			u.writeStream(w, flusher, u.batchFrames(u.script.secondBatch, ""))
+			<-r.Context().Done()
 			return
 		}
 		u.writeStream(w, flusher, u.phase2())
@@ -188,13 +221,21 @@ func (u *cursorFullChainUpstream) phase1() []byte {
 	if u.script.textOnly {
 		return joinFrames(fcTextDelta("thinking"))
 	}
+	return u.batchFrames(u.script.calls, "checking the weather")
+}
+
+// batchFrames 构造一个完整工具批（started×N → listed(N) → f11 委托×N），leadText 非空时
+// 先吐一段文本增量。第二批与首批走同一构造，避免两套帧语义。
+func (u *cursorFullChainUpstream) batchFrames(calls []cursorFullChainCall, leadText string) []byte {
 	var payloads [][]byte
-	payloads = append(payloads, fcTextDelta("checking the weather"))
-	for _, call := range u.script.calls {
+	if leadText != "" {
+		payloads = append(payloads, fcTextDelta(leadText))
+	}
+	for _, call := range calls {
 		payloads = append(payloads, fcToolStarted(call.CallID))
 	}
-	payloads = append(payloads, fcToolRequestsListed(uint64(len(u.script.calls))))
-	for _, call := range u.script.calls {
+	payloads = append(payloads, fcToolRequestsListed(uint64(len(calls))))
+	for _, call := range calls {
 		args := cursorToolTestBuildMcpArgs(call.CallID, call.Name, []cursorToolTestMcpArgEntry{
 			{key: "city", kind: "string", val: call.City},
 		})
@@ -542,8 +583,10 @@ func TestCursorCrossHTTPFullChainSingleTool(t *testing.T) {
 	require.EqualValues(t, 0, accountSlot.releases.Load())
 
 	// 旧链反证：此刻上游只收到初始 AgentRun 请求，**没有任何** McpResult 回包。
+	// 上游读取 goroutine 与 HTTP 返回并发，故用 Eventually 等待其解析完首帧（避免负载下误判）。
+	require.Eventually(t, func() bool { return upstream.clientFirstField() == cursorFldAgentRunRequest },
+		5*time.Second, 5*time.Millisecond, "首帧必须是 AgentRun 请求")
 	require.Empty(t, upstream.writebackPayloads(), "mcp_args 委托阶段不得回任何 McpResult（旧链已斩）")
-	require.Equal(t, cursorFldAgentRunRequest, upstream.clientFirstField())
 
 	// ---- HTTP2：续轮写回真实结果 → 模型续跑 → turn_ended → 唯一结算 ----
 	w2, result2, err2 := resumeSession(t, svc, cursorFullChainResumeBody(calls, map[string]string{
@@ -583,11 +626,15 @@ func TestCursorCrossHTTPFullChainSingleTool(t *testing.T) {
 	require.EqualValues(t, 1, userSlot.releases.Load(), "finalizer 释放用户槽一次")
 	require.EqualValues(t, 1, accountSlot.releases.Load(), "finalizer 释放账号槽一次")
 
-	record.mu.Lock()
-	state2 := record.state
-	record.mu.Unlock()
-	require.Equal(t, cursorSessionClosed, state2)
-	require.Zero(t, svc.sessions.indexCount(), "finalizer 必须清理全部索引关联")
+	// pump 在投递终态事件后才执行 finalizer 的收尾（结算/释放/清索引），二者并发：
+	// 用 Eventually 等待唯一 finalizer 走完，避免负载下把"正在收尾"误判成"未终结"。
+	require.Eventually(t, func() bool {
+		record.mu.Lock()
+		defer record.mu.Unlock()
+		return record.state == cursorSessionClosed
+	}, 5*time.Second, 5*time.Millisecond, "续轮真实终态后会话必须被唯一 finalizer 收口")
+	require.Eventually(t, func() bool { return svc.sessions.indexCount() == 0 },
+		5*time.Second, 5*time.Millisecond, "finalizer 必须清理全部索引关联")
 }
 
 // ===========================================================================
@@ -737,12 +784,13 @@ func TestCursorCrossHTTPFullChainDeadlineTerminates(t *testing.T) {
 	require.Empty(t, upstream.writebackPayloads(), "期间没有任何真实结果被写回（零重放）")
 
 	// 终结后不得再续轮（无重连重放路径）：统一索引已清空，这批 ID 不再命中任何会话，
-	// 探针只能得到 nil（按普通新请求处理），绝不会被猜成"最近会话"而重放。
+	// 探针拿到可区分的「未知关联」哨兵（A08 失败关闭语义），绝不会被猜成"最近会话"而重放。
 	probe, perr := CursorProbeResumeRequest(CursorResumeProtocolChat,
 		[]byte(cursorFullChainResumeBody(calls, map[string]string{"call_1": "sunny"})))
 	require.NoError(t, perr)
 	ticket, terr := svc.IdentifyResume(probe)
-	require.NoError(t, terr)
+	require.ErrorIs(t, terr, ErrCursorResumeUnknownAssociation,
+		"终止态后提交的结果 ID 全部未登记 → 必须返回可区分的未知关联哨兵")
 	require.Nil(t, ticket, "会话终结后同一批结果不得再定位到续轮目标（零重放）")
 	require.Equal(t, 1, upstream.runCount(), "终结后不得出现第二次 AgentRun（无重连）")
 }
@@ -806,4 +854,329 @@ func TestCursorCrossHTTPFullChainAttachDisconnectTerminates(t *testing.T) {
 	require.Zero(t, upstream.runCount()-1, "断连后不得重连重放（只有首 HTTP 一次 AgentRun）")
 	require.Empty(t, upstream.writebackPayloads(), "断连后不得写回任何结果（零重放）")
 	_ = atomic.Int32{}
+}
+
+// ===========================================================================
+// 6. §25.17.3「A05续轮顺序」（S2b-2）：两个 ServeCursorResume 入口接资格核验
+// ===========================================================================
+//
+// 本段只钉接线语义，不重测资格判定本身（判定由 verifyResumeEligibility 的定向测试覆盖）：
+//
+//	① 两个生产入口（GatewayService / OpenAIGatewayService 的 ServeCursorResume）都在
+//	   "定位到已登记会话 + 取回本次读取的原账号"之后、写工具结果之前做同一处核验；
+//	② 拒绝按类返回（403/400/503），**零工具结果写入**，旧会话沿**原 finalizer** 终结
+//	   （唯一结算规则、槽位释放与索引清理都来自 finishCursorSession，无平行收尾）；
+//	③ 并发 1 且旧会话仍占槽的合法续轮必须成功，且**零新 Acquire**（不换号、不重建
+//	   AgentRun、不重计费）。
+
+// cursorResumeGateAccountRepo 是两入口"本次读取的原账号"的唯一替身：只覆盖 GetByID，
+// 其余方法沿用接口（嵌入即满足 AccountRepository，绝不另造第二套账号读取链）。
+type cursorResumeGateAccountRepo struct {
+	AccountRepository
+	account *Account
+}
+
+func (r *cursorResumeGateAccountRepo) GetByID(context.Context, int64) (*Account, error) {
+	if r.account == nil {
+		return nil, errors.New("account not found")
+	}
+	return r.account, nil
+}
+
+// cursorResumeGateEligibleAccount 构造"本次读取"的原账号：cursor 平台、可用、并发 1、
+// 仍挂在会话身份所属分组、绑定来源 7 且模型映射未变（资格应通过）。
+func cursorResumeGateEligibleAccount() *Account {
+	account := cursorFullChainAccount()
+	account.Status = StatusActive
+	account.Schedulable = true
+	account.Concurrency = 1
+	account.AccountGroups = []AccountGroup{{
+		AccountID: account.ID,
+		GroupID:   cursorFullChainIdentity.GroupID,
+	}}
+	account.GroupIDs = []int64{cursorFullChainIdentity.GroupID}
+	return account
+}
+
+// installCursorResumeGateSource 安装来源读取器：状态 active + 新鲜额度快照，A04 共同
+// 来源门放行（读取器与生产同一窄接口，不另加放行条件）。
+func installCursorResumeGateSource(t *testing.T) {
+	t.Helper()
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{7: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{7: []byte(fmt.Sprintf(
+			`{"total":400,"used":86,"status_code":200,"checked_at":%q,"error_code":""}`,
+			time.Now().Add(-time.Minute).Format(time.RFC3339),
+		))},
+	})
+}
+
+// cursorResumeGateEntryNames 是本段必须逐一遍历的两个生产入口。
+var cursorResumeGateEntryNames = []string{"gateway_service", "openai_gateway_service"}
+
+// cursorResumeGateServe 返回指定生产入口的 ServeCursorResume（同一执行部件 + 同一份
+// "本次读取"账号），用于证明两个入口都接了同一处核验。
+func cursorResumeGateServe(
+	t *testing.T, name string, svc *CursorExecutionService, repo AccountRepository,
+) func(context.Context, *gin.Context, *CursorResumeTicket, CursorResumeServeInput) (*ForwardResult, error) {
+	t.Helper()
+	switch name {
+	case "gateway_service":
+		return (&GatewayService{cursorExecution: svc, accountRepo: repo}).ServeCursorResume
+	case "openai_gateway_service":
+		return (&OpenAIGatewayService{cursorExecution: svc, accountRepo: repo}).ServeCursorResume
+	default:
+		t.Fatalf("unknown resume entry %q", name)
+		return nil
+	}
+}
+
+// cursorResumeGateFixture 是一次"首 HTTP 已交付工具批、会话跨 HTTP 存活"的完整夹具。
+type cursorResumeGateFixture struct {
+	svc         *CursorExecutionService
+	quotaKeys   *identityCursorQuotaKeys
+	upstream    *cursorFullChainUpstream
+	record      *cursorSessionRecord
+	settlement  *cursorFullChainSettlement
+	userSlot    *cursorTestResource
+	accountSlot *cursorTestResource
+	body        string
+	probe       *CursorResumeProbe
+}
+
+// newCursorResumeGateFixture 走真实首 HTTP（真实 Execute + 假上游 + 真实原生双工）。
+func newCursorResumeGateFixture(t *testing.T) *cursorResumeGateFixture {
+	t.Helper()
+	installCursorResumeGateSource(t)
+
+	calls := []cursorFullChainCall{{
+		CallID: "call_1", Name: "get_weather", City: "hangzhou", ExecID: 101, IDField: []byte("exec-101"),
+	}}
+	upstream := newCursorFullChainUpstream(cursorFullChainScript{
+		calls:     calls,
+		afterText: "Hangzhou is sunny, 25C",
+		usage:     [3]uint64{12601, 15, 128},
+	})
+	svc := newCursorFullChainService(t, upstream)
+	quotaKeys, ok := svc.quotaKeys.(*identityCursorQuotaKeys)
+	require.True(t, ok, "夹具必须能触达来源行（换码用例需要）")
+
+	settlement := &cursorFullChainSettlement{}
+	userSlot := newCursorTestResource("user_slot")
+	accountSlot := newCursorTestResource("account_slot")
+	handover := &cursorTestHandover{
+		resources:  []CursorTransferableResource{userSlot, accountSlot},
+		settlement: settlement.hook,
+	}
+
+	_, _, err := runFirstHTTP(t.Context(), svc, handover)
+	require.NoError(t, err, "首 HTTP 交付工具批后必须正常返回（不 finalize）")
+
+	record := onlySession(t, svc)
+	record.mu.Lock()
+	state := record.state
+	record.mu.Unlock()
+	require.Equal(t, cursorSessionWaitingTools, state, "交付批后会话必须进入 waiting_tools 并跨 HTTP 存活")
+	require.Eventually(t, func() bool { return upstream.clientFirstField() == cursorFldAgentRunRequest },
+		5*time.Second, 5*time.Millisecond, "首帧必须是 AgentRun 请求")
+	require.Empty(t, upstream.writebackPayloads(), "首 HTTP 阶段不得有任何结果写入")
+	require.EqualValues(t, 1, userSlot.transfers.Load(), "首 HTTP 把用户槽转交给会话一次")
+	require.EqualValues(t, 1, accountSlot.transfers.Load(), "首 HTTP 把账号槽转交给会话一次")
+
+	body := cursorFullChainResumeBody(calls, map[string]string{"call_1": "sunny, 25C"})
+	probe, probeErr := CursorProbeResumeRequest(CursorResumeProtocolChat, []byte(body))
+	require.NoError(t, probeErr)
+
+	return &cursorResumeGateFixture{
+		svc:         svc,
+		quotaKeys:   quotaKeys,
+		upstream:    upstream,
+		record:      record,
+		settlement:  settlement,
+		userSlot:    userSlot,
+		accountSlot: accountSlot,
+		body:        body,
+		probe:       probe,
+	}
+}
+
+// ticket 用真实探针定位唯一待完成批（两入口的调用前提）。
+func (f *cursorResumeGateFixture) ticket(t *testing.T) *CursorResumeTicket {
+	t.Helper()
+	ticket, err := f.svc.IdentifyResume(f.probe)
+	require.NoError(t, err)
+	require.NotNil(t, ticket, "续轮必须定位到唯一待完成批")
+	return ticket
+}
+
+// serve 经指定生产入口发起续轮（入口自己读账号 → 资格核验 → 唯一执行入口）。
+func (f *cursorResumeGateFixture) serve(
+	t *testing.T, entry string, account *Account,
+) (*httptest.ResponseRecorder, *ForwardResult, error) {
+	t.Helper()
+	serve := cursorResumeGateServe(t, entry, f.svc, &cursorResumeGateAccountRepo{account: account})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	result, err := serve(context.Background(), c, f.ticket(t), CursorResumeServeInput{
+		Body:     []byte(f.body),
+		Stream:   true,
+		Identity: cursorFullChainIdentity,
+	})
+	return w, result, err
+}
+
+// requireCursorResumeGateDenied 断言一次拒绝的完整语义：按类返回、零工具结果写入、
+// 不换号不重建 AgentRun、不新占槽，旧会话沿原 finalizer 终结。
+func requireCursorResumeGateDenied(
+	t *testing.T, f *cursorResumeGateFixture, w *httptest.ResponseRecorder,
+	result *ForwardResult, serveErr error, wantStatus int, wantReason string, wantSentinel error,
+) {
+	t.Helper()
+	require.Error(t, serveErr)
+	require.Nil(t, result, "拒绝不得返回成功结果")
+	status, reason := CursorResumeHTTPStatus(serveErr)
+	require.Equal(t, wantStatus, status, "拒绝必须按类返回既有状态码")
+	require.Equal(t, wantReason, reason, "拒绝原因串必须是稳定枚举")
+	require.ErrorIs(t, serveErr, wantSentinel)
+	require.Zero(t, w.Body.Len(), "服务入口不写响应体（由 handler 按状态码拒付）")
+
+	// 零工具结果写入：上游一条 McpResult 都没收到，也没有新建 AgentRun。
+	require.Empty(t, f.upstream.writebackPayloads(), "拒绝后必须零工具结果写入")
+	require.Equal(t, 1, f.upstream.runCount(), "拒绝不得新建 AgentRun（不换号、不重执行）")
+
+	// 旧会话沿原 finalizer 终结：终态 + 索引清理 + 两槽各释放一次。
+	require.Eventually(t, func() bool {
+		f.record.mu.Lock()
+		defer f.record.mu.Unlock()
+		return f.record.state == cursorSessionClosed
+	}, 5*time.Second, 5*time.Millisecond, "拒绝后旧会话必须沿原 finalizer 终结")
+	require.Eventually(t, func() bool { return f.svc.sessions.indexCount() == 0 },
+		5*time.Second, 5*time.Millisecond, "finalizer 必须清理全部索引关联")
+	require.EqualValues(t, 1, f.userSlot.releases.Load(), "用户槽释放一次")
+	require.EqualValues(t, 1, f.accountSlot.releases.Load(), "账号槽释放一次")
+	require.EqualValues(t, 1, f.userSlot.transfers.Load(), "拒绝不得新占/重转交槽位")
+	require.EqualValues(t, 1, f.accountSlot.transfers.Load())
+
+	// 唯一结算规则的投影：本会话没有完整真实 usage → 只记录中断原因，不估算扣费。
+	calls, complete := f.settlement.snapshot()
+	require.Equal(t, 1, calls, "终结必须走唯一结算入口且只走一次")
+	require.Zero(t, complete, "无完整真实 usage 时不得计费")
+}
+
+// 覆盖 ① ②：disabled 账号续轮 → 403 + 零写入 + 会话清理（两个入口逐一验证）。
+func TestCursorResumeGateDeniedDisabledAccountZeroWrite(t *testing.T) {
+	for _, entry := range cursorResumeGateEntryNames {
+		t.Run(entry, func(t *testing.T) {
+			f := newCursorResumeGateFixture(t)
+			account := cursorResumeGateEligibleAccount()
+			account.Status = StatusDisabled
+
+			w, result, serveErr := f.serve(t, entry, account)
+			requireCursorResumeGateDenied(t, f, w, result, serveErr,
+				http.StatusForbidden, "not_schedulable", ErrCursorResumeAccountIneligible)
+
+			// 会话已被清理：同一批结果**不得**再被重新定位（不重放、不留墓碑）。
+			// A08 失败关闭语义：这批 ID 已全部不在统一索引（含重启后孤儿），探针拿到的是
+			// **可区分的「未知关联」哨兵**（不是 (nil, nil)）：helper 只把这一类交回原路由
+			// 判定供应方，进入 Cursor 分支则在出站前 400——不猜最近会话、不接管、不重放。
+			ticket, identifyErr := f.svc.IdentifyResume(f.probe)
+			require.ErrorIs(t, identifyErr, ErrCursorResumeUnknownAssociation,
+				"终结后的批必须按未知关联失败关闭，不得静默当作未命中")
+			identifyStatus, _ := CursorResumeHTTPStatus(identifyErr)
+			require.Equal(t, http.StatusBadRequest, identifyStatus, "未知关联按既有契约 400 拒绝")
+			require.Nil(t, ticket, "终结后的批不得再被定位")
+			require.Zero(t, f.svc.sessions.indexCount(), "终结后不得残留任何索引关联")
+		})
+	}
+}
+
+// 覆盖 ① ②：换码（来源行 ID 不变、激活码明文已变）→ 400 失效关联 + 零写入。
+func TestCursorResumeGateDeniedRotatedSourceCode(t *testing.T) {
+	for _, entry := range cursorResumeGateEntryNames {
+		t.Run(entry, func(t *testing.T) {
+			f := newCursorResumeGateFixture(t)
+			// 换码：会话固定的是首次鉴权那一次的来源 MAC，这里把同一行的明文换成另一串。
+			f.quotaKeys.byID[7].CodeEncrypted = "ACTIVATION-CODE-ROTATED"
+
+			w, result, serveErr := f.serve(t, entry, cursorResumeGateEligibleAccount())
+			requireCursorResumeGateDenied(t, f, w, result, serveErr,
+				http.StatusBadRequest, "source_changed", ErrCursorResumeSourceChanged)
+		})
+	}
+}
+
+// 覆盖 ③：并发 1 且旧会话仍占槽的合法续轮必须成功，且零新 Acquire / 零重建 AgentRun /
+// 唯一结算一次（核对"资格核验不选号、不排队、不并发 Acquire"）。
+func TestCursorResumeGateAllowsEligibleResumeSingleConcurrency(t *testing.T) {
+	for _, entry := range cursorResumeGateEntryNames {
+		t.Run(entry, func(t *testing.T) {
+			f := newCursorResumeGateFixture(t)
+			account := cursorResumeGateEligibleAccount()
+			require.Equal(t, 1, account.Concurrency, "账号并发上限为 1，旧会话仍占着这个槽")
+
+			w, result, serveErr := f.serve(t, entry, account)
+			require.NoError(t, serveErr, "旧会话仍占槽不得否决自己仍占槽的合法续轮")
+			require.NotNil(t, result)
+
+			// 真实回写 + 模型续跑的真实文本：链路仍是唯一执行路径。
+			require.Len(t, f.upstream.writebackPayloads(), 1, "合法续轮必须恰好写回一条真实结果")
+			require.Contains(t, w.Body.String(), "Hangzhou is sunny, 25C", "续轮必须收到模型续跑的真实文本")
+			require.Equal(t, 1, f.upstream.runCount(), "续轮不得新建 AgentRun")
+
+			// 零新 Acquire：槽位只在首 HTTP 转交一次，续轮全程不再转交/新占。
+			require.EqualValues(t, 1, f.userSlot.transfers.Load(), "续轮零新 Acquire（用户槽）")
+			require.EqualValues(t, 1, f.accountSlot.transfers.Load(), "续轮零新 Acquire（账号槽）")
+
+			calls, complete := f.settlement.snapshot()
+			require.Equal(t, 1, calls, "整条链路只允许一次结算事件")
+			require.Equal(t, 1, complete, "必须带完整真实 usage 结算一次")
+			require.Eventually(t, func() bool {
+				f.record.mu.Lock()
+				defer f.record.mu.Unlock()
+				return f.record.state == cursorSessionClosed
+			}, 5*time.Second, 5*time.Millisecond, "续轮真实终态后会话必须被唯一 finalizer 收口")
+			require.EqualValues(t, 1, f.userSlot.releases.Load(), "finalizer 释放用户槽一次")
+			require.EqualValues(t, 1, f.accountSlot.releases.Load(), "finalizer 释放账号槽一次")
+		})
+	}
+}
+
+// 覆盖 ②：拒绝时旧会话**已有完整真实 usage** —— 仍按唯一结算规则结算一次后再终结
+// （残留检查：核验接线不得绕开或重复既有结算路径）。
+//
+// usage 只经会话既有入口 noteTurnUsage 注入（与解析器收到 turn_ended 后走的是同一条
+// 记账入口），不新造第二条结算入口。
+func TestCursorResumeGateDeniedAfterCompleteUsageSettlesOnce(t *testing.T) {
+	for _, entry := range cursorResumeGateEntryNames {
+		t.Run(entry, func(t *testing.T) {
+			f := newCursorResumeGateFixture(t)
+			// 等价于本会话此前已经收到过真实 turn_ended：四个计费字段齐全。
+			f.record.noteTurnUsage(cursorTurnUsage{
+				Seen: true, Input: 12601, Output: 15, CacheRead: 128, EndedAtMS: 1700000000000,
+			}, "turn_ended")
+
+			account := cursorResumeGateEligibleAccount()
+			account.Status = StatusDisabled
+
+			w, result, serveErr := f.serve(t, entry, account)
+			require.Error(t, serveErr)
+			require.Nil(t, result)
+			status, _ := CursorResumeHTTPStatus(serveErr)
+			require.Equal(t, http.StatusForbidden, status)
+			require.Zero(t, w.Body.Len())
+			require.Empty(t, f.upstream.writebackPayloads(), "拒绝后必须零工具结果写入")
+			require.Equal(t, 1, f.upstream.runCount(), "拒绝不得新建 AgentRun")
+
+			require.Eventually(t, func() bool {
+				f.record.mu.Lock()
+				defer f.record.mu.Unlock()
+				return f.record.state == cursorSessionClosed
+			}, 5*time.Second, 5*time.Millisecond, "结算后必须终结旧会话")
+			calls, complete := f.settlement.snapshot()
+			require.Equal(t, 1, calls, "完整真实 usage 只允许结算一次")
+			require.Equal(t, 1, complete, "完整真实 usage 必须按唯一结算规则结算")
+			require.EqualValues(t, 1, f.userSlot.releases.Load(), "用户槽释放一次")
+			require.EqualValues(t, 1, f.accountSlot.releases.Load(), "账号槽释放一次")
+		})
+	}
 }

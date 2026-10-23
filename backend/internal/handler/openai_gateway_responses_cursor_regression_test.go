@@ -12,9 +12,11 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -86,6 +88,16 @@ func (r cursorResponsesRegressionAccountRepo) ListSchedulableByPlatform(_ contex
 }
 
 func (r cursorResponsesRegressionAccountRepo) ListSchedulableUngroupedByPlatform(_ context.Context, _ string) ([]service.Account, error) {
+	return append([]service.Account(nil), r.accounts...), nil
+}
+
+// ListModelAvailabilityCandidates 供「选号失败 → classifyNoAccountError →
+// DiagnoseModelAvailabilityForPlatform」诊断链复用同一份账号视图。
+//
+// 该方法此前只由内嵌的 service.AccountRepository 接口提升而来，接口为 nil 时提升方法会在
+// 调用瞬间 panic（nil 接口解引用），把真实失败掩盖成 responses_panic_recovered。此处显式实现，
+// 让诊断读到本夹具的账号事实，失败以断言形式暴露而不是 panic。
+func (r cursorResponsesRegressionAccountRepo) ListModelAvailabilityCandidates(_ context.Context, _ *int64, _ []string, _ bool) ([]service.Account, error) {
 	return append([]service.Account(nil), r.accounts...), nil
 }
 
@@ -225,6 +237,36 @@ func (cursorResponsesRegressionDeviceIDs) DeviceIDFor(context.Context, int64) (s
 	return "regression-device-id", nil
 }
 
+// cursorResponsesRegressionQuotaKeySource 是来源门（A04-G）两个窄读取器的替身：
+// 归属激活码状态 + 额度快照。
+//
+// A04-G 之后「绑定激活码的 cursor 账号」必须能读到「码未终态 + 快照新鲜且真实剩余 > 0」
+// 才进候选池，否则被明确剔除（fixture 未装读取器时表现为 pool=1 / ineligible=1）。
+// 本替身给出的正是"来源可用"这一合法事实，使准入结论回到账号/协议适配本身。
+type cursorResponsesRegressionQuotaKeySource struct{}
+
+func (cursorResponsesRegressionQuotaKeySource) CursorQuotaKeyStatus(context.Context, int64) (string, error) {
+	return domain.QuotaKeyStatusActive, nil
+}
+
+func (cursorResponsesRegressionQuotaKeySource) CursorQuotaKeyUsageSnapshot(context.Context, int64) ([]byte, error) {
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	return []byte(`{"total":400,"used":86,"status_code":200,"checked_at":"` + checkedAt + `","error_code":""}`), nil
+}
+
+// installCursorResponsesRegressionSourceGate 装配来源门的两个读取器，并在用例结束时
+// 还原为未安装（包级单例，避免污染同包其它用例）。
+func installCursorResponsesRegressionSourceGate(t *testing.T) {
+	t.Helper()
+	source := cursorResponsesRegressionQuotaKeySource{}
+	service.InstallCursorQuotaKeyStateProvider(source)
+	service.InstallCursorQuotaKeyUsageSnapshotProvider(source)
+	t.Cleanup(func() {
+		service.InstallCursorQuotaKeyStateProvider(nil)
+		service.InstallCursorQuotaKeyUsageSnapshotProvider(nil)
+	})
+}
+
 // newCursorResponsesRegressionFixture 装配 handler（真实网关 + 真实协议转换 + 唯一执行部件）。
 func newCursorResponsesRegressionFixture(t *testing.T) (*OpenAIGatewayHandler, *cursorResponsesRegressionHTTPUpstream, *cursorResponsesRegressionAgentTransport) {
 	t.Helper()
@@ -253,6 +295,10 @@ func newCursorResponsesRegressionFixture(t *testing.T) (*OpenAIGatewayHandler, *
 	upstream := &cursorResponsesRegressionHTTPUpstream{}
 	transport := &cursorResponsesRegressionAgentTransport{}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
+
+	// A04-G 来源门：本账号绑定了归属激活码（QuotaKeyID），来源门要求「码状态 + 新鲜额度
+	// 快照」两个读取器齐备且证明仍有剩余，账号才有资格进入候选池。
+	installCursorResponsesRegressionSourceGate(t)
 
 	// 唯一执行部件（§24.2-2 直接 DI）：鉴权依赖为替身，transport 为假出站。
 	nodes := service.NewCursorUpstreamNodesResolver(

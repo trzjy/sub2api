@@ -318,15 +318,58 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		// §25.4/§25.5：Cursor 账号把本 HTTP 已获取的用户槽/账号槽/余额预留转交给会话，
 		// 并把本 HTTP 的计费任务交给会话唯一结算；非 Cursor 账号不做任何转交。
+		var result *service.ForwardResult
+		setActualUpstreamEndpoint(c, "")
 		if isCursorPlatformAccount(account) {
+			// §25.17.5 A06：在首次 Execute 与资源转交之前，值捕获不可变计费参数快照并注册
+			// 唯一结算闭包——不闭包 gin.Context/旧 writer/原正文；会话终结时由 settle 把
+			// 终态真实 *ForwardResult 交给闭包，闭包只构造原 RecordUsage 输入并调用原
+			// mandatory usage worker（缺完整 usage 的不提交判定已在 helper/执行服务侧完成）。
+			userAgent := c.GetHeader("User-Agent")
+			clientIP := ip.GetClientIP(c)
+			requestPayloadHash := service.HashUsageRequestPayload(body)
+			inboundEndpoint := GetInboundEndpoint(c)
+			upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
+			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
+			sessionID := service.ExtractClientSessionID(c)
+			requestedModel := clientRequestedModel(c, reqModel)
+			requestedEffort := service.RequestedReasoningEffortFromContext(c.Request.Context())
 			handover := newCursorResourceHandover(
 				cursorHandoverResources(userSlot, accountSlot, inflightHandle),
 				h.submitMandatoryUsageRecordTask,
 			)
+			handover.RegisterCursorSettlement(func(ctx context.Context, final *service.ForwardResult) {
+				if final == nil {
+					return
+				}
+				stampForwardRequestedReasoningEffort(final, requestedEffort)
+				h.submitMandatoryUsageRecordTask(ctx, func(ctx context.Context) {
+					if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
+						Result:             final,
+						QuotaPlatform:      quotaPlatform,
+						APIKey:             apiKey,
+						User:               apiKey.User,
+						Account:            account,
+						Subscription:       subscription,
+						PricingAt:          pricingAt,
+						InboundEndpoint:    inboundEndpoint,
+						UpstreamEndpoint:   upstreamEndpoint,
+						UserAgent:          userAgent,
+						IPAddress:          clientIP,
+						RequestPayloadHash: requestPayloadHash,
+						APIKeyService:      h.apiKeyService,
+						SessionID:          sessionID,
+						ChannelUsageFields: channelMapping.ToUsageFields(requestedModel, final.UpstreamModel),
+					}); err != nil {
+						reqLog.Error("gateway.cc.record_usage_failed",
+							zap.Int64("account_id", account.ID),
+							zap.Error(err),
+						)
+					}
+				})
+			})
 			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, handover))
 		}
-		var result *service.ForwardResult
-		setActualUpstreamEndpoint(c, "")
 		if account.Platform == service.PlatformGemini {
 			if h.geminiCompatService == nil {
 				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
@@ -400,39 +443,43 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 
 		// 6. Record usage
-		userAgent := c.GetHeader("User-Agent")
-		clientIP := ip.GetClientIP(c)
-		requestPayloadHash := service.HashUsageRequestPayload(body)
-		inboundEndpoint := GetInboundEndpoint(c)
-		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
+		// §25.17.5 A06：Cursor 的唯一结算已在上方注册到会话，首次/最终 HTTP 返回后不得再
+		// 为 Cursor 另排一次账；非 Cursor 保持原有计费提交路径。
+		if !isCursorPlatformAccount(account) {
+			userAgent := c.GetHeader("User-Agent")
+			clientIP := ip.GetClientIP(c)
+			requestPayloadHash := service.HashUsageRequestPayload(body)
+			inboundEndpoint := GetInboundEndpoint(c)
+			upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
 
-		quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
-		sessionID := service.ExtractClientSessionID(c)
-		stampForwardRequestedReasoningEffort(result, service.RequestedReasoningEffortFromContext(c.Request.Context()))
-		h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
-			if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
-				Result:             result,
-				QuotaPlatform:      quotaPlatform,
-				APIKey:             apiKey,
-				User:               apiKey.User,
-				Account:            account,
-				Subscription:       subscription,
-				PricingAt:          pricingAt,
-				InboundEndpoint:    inboundEndpoint,
-				UpstreamEndpoint:   upstreamEndpoint,
-				UserAgent:          userAgent,
-				IPAddress:          clientIP,
-				RequestPayloadHash: requestPayloadHash,
-				APIKeyService:      h.apiKeyService,
-				SessionID:          sessionID,
-				ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, result.UpstreamModel),
-			}); err != nil {
-				reqLog.Error("gateway.cc.record_usage_failed",
-					zap.Int64("account_id", account.ID),
-					zap.Error(err),
-				)
-			}
-		})
+			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
+			sessionID := service.ExtractClientSessionID(c)
+			stampForwardRequestedReasoningEffort(result, service.RequestedReasoningEffortFromContext(c.Request.Context()))
+			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
+				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
+					Result:             result,
+					QuotaPlatform:      quotaPlatform,
+					APIKey:             apiKey,
+					User:               apiKey.User,
+					Account:            account,
+					Subscription:       subscription,
+					PricingAt:          pricingAt,
+					InboundEndpoint:    inboundEndpoint,
+					UpstreamEndpoint:   upstreamEndpoint,
+					UserAgent:          userAgent,
+					IPAddress:          clientIP,
+					RequestPayloadHash: requestPayloadHash,
+					APIKeyService:      h.apiKeyService,
+					SessionID:          sessionID,
+					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, result.UpstreamModel),
+				}); err != nil {
+					reqLog.Error("gateway.cc.record_usage_failed",
+						zap.Int64("account_id", account.ID),
+						zap.Error(err),
+					)
+				}
+			})
+		}
 		return
 	}
 }

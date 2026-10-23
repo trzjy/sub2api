@@ -444,7 +444,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianyuReconcileService := service.ProvideXianyuReconcileService(xianyuControlService, xianyuWorkerService, xianyuDeliveryStateUpdater, xianyuDeliveryRepository, xianyuWorkerDeliveryRepository, xianyuControlRepository, redeemCodeRepository, xianyuSettingStore, xianyuAlertService)
 	cursorAccountRetentionService := service.ProvideCursorAccountRetentionService(usageCleanupRepository, db, settingService, opsRepository)
 	quotaKeyReconciler := service.ProvideQuotaKeyReconciler(quotaKeyRepository, quotaKeyService, opsRepository, gatewayService, channelService, compositeRouteResolver)
-	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, channelMonitorProbeWorker, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openCodeGoUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager, cnQuotaLifecycleService, quotaKeySweeper, cursorAccountRetentionService, quotaKeyReconciler)
+	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, channelMonitorProbeWorker, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openCodeGoUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager, cnQuotaLifecycleService, quotaKeySweeper, cursorAccountRetentionService, cursorExecutionService, quotaKeyReconciler)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
@@ -542,6 +542,8 @@ func provideCleanup(
 	quotaLifecycle *service.CNQuotaLifecycleService,
 	quotaKeySweeper *service.QuotaKeySweeper,
 	cursorAccountRetention *service.CursorAccountRetentionService,
+
+	cursorExecution *service.CursorExecutionService,
 	quotaKeyReconciler *service.QuotaKeyReconciler,
 ) func() {
 	return func() {
@@ -553,7 +555,16 @@ func provideCleanup(
 			fn   func() error
 		}
 
-		parallelSteps := []cleanupStep{
+		sessionSteps := []cleanupStep{
+			{"CursorExecutionService", func() error {
+				if cursorExecution != nil {
+					cursorExecution.Stop()
+				}
+				return nil
+			}},
+		}
+
+		producerSteps := []cleanupStep{
 			{"XianyuSyncService", func() error {
 				if xianyuSync != nil {
 					xianyuSync.Stop()
@@ -740,32 +751,8 @@ func provideCleanup(
 				subscriptionExpiry.Stop()
 				return nil
 			}},
-			{"SubscriptionService", func() error {
-				if subscriptionService != nil {
-					subscriptionService.Stop()
-				}
-				return nil
-			}},
-			{"PricingService", func() error {
-				pricing.Stop()
-				return nil
-			}},
-			{"CustomModelPricingService", func() error {
-				customModelPricingService.Stop()
-				return nil
-			}},
 			{"EmailQueueService", func() error {
 				emailQueue.Stop()
-				return nil
-			}},
-			{"BillingCacheService", func() error {
-				billingCache.Stop()
-				return nil
-			}},
-			{"UsageRecordWorkerPool", func() error {
-				if usageRecordWorkerPool != nil {
-					usageRecordWorkerPool.Stop()
-				}
 				return nil
 			}},
 			{"OAuthService", func() error {
@@ -820,15 +807,16 @@ func provideCleanup(
 				}
 				return nil
 			}},
-			{"ChannelMonitorRunner", func() error {
-				if channelMonitorRunner != nil {
-					channelMonitorRunner.Stop()
+
+			{"ChannelMonitorProbeWorker", func() error {
+				if channelMonitorProbeWorker != nil {
+					channelMonitorProbeWorker.Stop()
 				}
 				return nil
 			}},
-			{"UserPlatformQuotaUsageFlusher", func() error {
-				if quotaFlusher != nil {
-					quotaFlusher.Stop()
+			{"ChannelMonitorRunner", func() error {
+				if channelMonitorRunner != nil {
+					channelMonitorRunner.Stop()
 				}
 				return nil
 			}},
@@ -871,6 +859,48 @@ func provideCleanup(
 			{"QuotaKeyReconciler", func() error {
 				if quotaKeyReconciler != nil {
 					quotaKeyReconciler.Stop()
+				}
+				return nil
+			}},
+		}
+
+		drainSteps := []cleanupStep{
+			{"UsageRecordWorkerPool", func() error {
+				if usageRecordWorkerPool != nil {
+					usageRecordWorkerPool.Stop()
+				}
+				return nil
+			}},
+		}
+
+		billingSteps := []cleanupStep{
+			{"UserPlatformQuotaUsageFlusher", func() error {
+				if quotaFlusher != nil {
+					quotaFlusher.Stop()
+				}
+				return nil
+			}},
+			{"BillingCacheService", func() error {
+				if billingCache != nil {
+					billingCache.Stop()
+				}
+				return nil
+			}},
+			{"SubscriptionService", func() error {
+				if subscriptionService != nil {
+					subscriptionService.Stop()
+				}
+				return nil
+			}},
+			{"PricingService", func() error {
+				if pricing != nil {
+					pricing.Stop()
+				}
+				return nil
+			}},
+			{"CustomModelPricingService", func() error {
+				if customModelPricingService != nil {
+					customModelPricingService.Stop()
 				}
 				return nil
 			}},
@@ -919,7 +949,10 @@ func provideCleanup(
 			}
 		}
 
-		runParallel(parallelSteps)
+		runSequential(sessionSteps)
+		runParallel(producerSteps)
+		runSequential(drainSteps)
+		runSequential(billingSteps)
 		runSequential(infraSteps)
 
 		select {

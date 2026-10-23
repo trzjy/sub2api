@@ -168,7 +168,7 @@ func (r *identityCursorQuotaKeys) Create(context.Context, CreateQuotaKeyInput) (
 	return nil, nil
 }
 
-func (r *identityCursorQuotaKeys) UpdateMeta(context.Context, int64, **time.Time, **string) error {
+func (r *identityCursorQuotaKeys) UpdateMeta(context.Context, *ent.Tx, int64, **time.Time, **string) error {
 	return nil
 }
 

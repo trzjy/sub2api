@@ -44,6 +44,23 @@ func (r schedulerTestOpenAIAccountRepo) ListSchedulableByGroupIDAndPlatform(ctx 
 	return result, nil
 }
 
+// ListSchedulableByGroupIDAndPlatforms 是多平台版本的分组选号查询（快照服务实际调用它）。
+//
+// 桩必须显式实现：AccountRepository 是嵌入的接口，未实现时调用会落到 nil 接口而 panic
+// （全量包被中止）。这里只按平台过滤，不猜分组归属（分组语义由 GroupAware 变体承担）。
+func (r schedulerTestOpenAIAccountRepo) ListSchedulableByGroupIDAndPlatforms(ctx context.Context, groupID int64, platforms []string) ([]Account, error) {
+	var result []Account
+	for _, acc := range r.accounts {
+		for _, platform := range platforms {
+			if acc.Platform == platform {
+				result = append(result, acc)
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 func (r schedulerTestOpenAIAccountRepo) ListSchedulableByGroupID(ctx context.Context, groupID int64) ([]Account, error) {
 	return append([]Account(nil), r.accounts...), nil
 }
@@ -71,6 +88,22 @@ func (r schedulerGroupAwareOpenAIAccountRepo) ListSchedulableByGroupIDAndPlatfor
 	for _, acc := range r.accounts {
 		if acc.Platform == platform && openAIStickyAccountMatchesGroup(&acc, &groupID) {
 			result = append(result, acc)
+		}
+	}
+	return result, nil
+}
+
+func (r schedulerGroupAwareOpenAIAccountRepo) ListSchedulableByGroupIDAndPlatforms(ctx context.Context, groupID int64, platforms []string) ([]Account, error) {
+	var result []Account
+	for _, acc := range r.accounts {
+		if !openAIStickyAccountMatchesGroup(&acc, &groupID) {
+			continue
+		}
+		for _, platform := range platforms {
+			if acc.Platform == platform {
+				result = append(result, acc)
+				break
+			}
 		}
 	}
 	return result, nil

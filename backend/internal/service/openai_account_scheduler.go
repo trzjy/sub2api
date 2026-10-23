@@ -1695,8 +1695,19 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		// 不进入高级候选池。与其余三条链共用 cursorSupplySourceAvailabilityVetoReasonString
 		// 同一口径（key 终态 + 真实来源剩余，来源可用 AND 账号可用）；此处只做候选剔除，
 		// 账号状态一律不动。
-		if reason := cursorSupplySourceAvailabilityVetoReasonString(ctx, account); reason != "" {
-			filterStats.exclude(reason)
+		//
+		// error 路径显式失败关闭：读取来源状态/额度快照出错时，来源门只能给出 error 而拿不到
+		// 判定结论（cursorSupplySourceAvailabilityVetoReasonString 会把它折叠成
+		// quota_key_state_unavailable）。此处显式接住该 error 并按同一原因串剔除候选——
+		// 既不静默当"无否决"放行（可能已停供的号不得进池），也不让单个账号的读取故障
+		// 整轮选号失败。排除原因串与其余三条链保持一致，账号状态依旧一律不动。
+		sourceReason, sourceErr := cursorSupplySourceAvailabilityVetoReason(ctx, account)
+		if sourceErr != nil {
+			filterStats.exclude("quota_key_state_unavailable")
+			continue
+		}
+		if sourceReason != "" {
+			filterStats.exclude(sourceReason)
 			continue
 		}
 		if s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {

@@ -176,7 +176,8 @@ func (s *cursorSSEStream) next() error {
 		if handoffThisFinish {
 			s.buffer.WriteString(s.parser.cursorSSEFinishChunkWithReason("tool_calls"))
 		} else {
-			s.buffer.WriteString(s.parser.cursorSSEFinishChunk())
+			// 显式归因：续轮终态即使历史批里有委托也必须是 "stop"（已交付的不重播）。
+			s.buffer.WriteString(s.parser.cursorSSEFinishChunkWithReason("stop"))
 		}
 		s.buffer.WriteString("data: [DONE]\n\n")
 	}
@@ -438,10 +439,22 @@ const (
 )
 
 // cursorTurnUsage 是 turn_ended 帧携带的真实用量（usage 的唯一来源）。
+//
+// §25.17.5 A06①：proto optional 的**存在性**必须逐字段保留——"字段缺失"与
+// "真实 0"是两种不同事实，不得折叠成同一组 0（27/28 活体原件四项全部显式出现，
+// 含 cache_write=0，故缺失绝不等于 0）。故每个计数字段配一个 Seen 标志：
+//
+//	Seen=true  → 该字段在 wire 上出现且通过校验（wire 类型正确、数值非负、
+//	              可安全转入现有整数类型）；
+//	Seen=false → 该字段未出现（其数值无意义，不得当 0 参与结算判定）。
+//
+// 判定见 billingFieldsComplete（结算必需的四个计费字段）。
 type cursorTurnUsage struct {
-	// Seen 表示是否收到过 turn_ended 帧。
+	// Seen 表示是否收到过 turn_ended 帧（**帧级**存在性，与逐字段存在性分开：
+	// 帧出现过不等于四个计费字段都出现过）。
 	Seen bool
 	// Input / Output / CacheRead / CacheWrite 直接对应 TurnEndedUpdate 的 f1..f4。
+	// 取值只在对应 Seen=true 时有意义。
 	Input      int
 	Output     int
 	CacheRead  int
@@ -452,6 +465,101 @@ type cursorTurnUsage struct {
 	Reasoning int
 	// EndedAtMS 是 f6（上游轮次结束时间戳）。
 	EndedAtMS uint64
+
+	// 逐字段存在性（proto optional presence，见上）。
+	F1InputSeen      bool
+	F2OutputSeen     bool
+	F3CacheReadSeen  bool
+	F4CacheWriteSeen bool
+	F5ReasoningSeen  bool
+	F6EndedAtSeen    bool
+}
+
+// billingFieldsComplete 判定本份真实用量是否具备结算必需的四个计费字段
+// （f1 input / f2 output / f3 cache_read / f4 cache_write）。
+//
+// 四个字段**逐一出现**（存在性）且取值合法即成立：四项全 0 也是真实完整用量。
+// 缺任一字段 → 不完整。**绝不用"非零总和"或结束时间戳反推存在性**——
+// proto optional 不等于本站可以补 0，缺失一律按"无完整 usage"处理。
+func (u cursorTurnUsage) billingFieldsComplete() bool {
+	if !u.F1InputSeen || !u.F2OutputSeen || !u.F3CacheReadSeen || !u.F4CacheWriteSeen {
+		return false
+	}
+	// 合法性：计费字段取值必须非负（解析层已拒绝负数与越界值，故解析产出的
+	// 用量恒合法；此处再对直接构造的用法做同口径判定）。
+	return u.Input >= 0 && u.Output >= 0 && u.CacheRead >= 0 && u.CacheWrite >= 0
+}
+
+// cursorDecodeTurnUsage 严格解码一层 TurnEndedUpdate 字段（f1–f6），逐字段保留
+// proto optional **存在性**（§25.17.5 A06①）。
+//
+// Seen 为 true 的三重条件：字段在 wire 上出现 + wire 类型正确（varint）+ 取值可
+// 安全转入该字段现有的整数类型（token 计数为非负 int，结束时间为 uint64）。
+// 任一已出现字段不合法（错误 wire / 负数 / 越界）都是**解析失败**，绝不为该字段
+// 补 0 继续——给损坏值补 0 会让结算把"没拿到用量"当成"真实 0"。
+func cursorDecodeTurnUsage(fields []cursorPBField) (cursorTurnUsage, error) {
+	var (
+		u   = cursorTurnUsage{Seen: true}
+		err error
+	)
+	if u.Input, u.F1InputSeen, err = cursorTurnTokenField(fields, cursorFldTurnEndedInputTokens); err != nil {
+		return cursorTurnUsage{}, err
+	}
+	if u.Output, u.F2OutputSeen, err = cursorTurnTokenField(fields, cursorFldTurnEndedOutputTokens); err != nil {
+		return cursorTurnUsage{}, err
+	}
+	if u.CacheRead, u.F3CacheReadSeen, err = cursorTurnTokenField(fields, cursorFldTurnEndedCacheReadTokens); err != nil {
+		return cursorTurnUsage{}, err
+	}
+	if u.CacheWrite, u.F4CacheWriteSeen, err = cursorTurnTokenField(fields, cursorFldTurnEndedCacheWriteTokens); err != nil {
+		return cursorTurnUsage{}, err
+	}
+	// f5 reasoning 只作诊断（不并入 output、不作结算必填），存在性同样如实保留。
+	if u.Reasoning, u.F5ReasoningSeen, err = cursorTurnTokenField(fields, cursorFldTurnEndedReasoningTokens); err != nil {
+		return cursorTurnUsage{}, err
+	}
+	// f6 结束时间不是 token 完整性的必填项，但出现时仍须是合法 varint。
+	if u.EndedAtMS, u.F6EndedAtSeen, err = cursorTurnEndedAtField(fields, cursorFldTurnEndedEndedAtMS); err != nil {
+		return cursorTurnUsage{}, err
+	}
+	return u, nil
+}
+
+// cursorTurnTokenField 读取一个 token 计数字段（f1–f5），返回取值与是否出现。
+//
+// 缺失 → (0, false, nil)：缺失不置 Seen，取值无意义（proto optional ≠ 本站可补 0）。
+// 出现则必须 wire=varint 且能安全转为非负 int：proto int64 的负数按 10 字节
+// varint（补码）编码，落到 uint64 上即 ≥ 1<<63，超出 int 范围，一律按解析失败。
+func cursorTurnTokenField(fields []cursorPBField, number int) (int, bool, error) {
+	f, ok := cursorFindField(fields, number)
+	if !ok {
+		return 0, false, nil
+	}
+	if f.Wire != cursorWireVarint {
+		return 0, false, fmt.Errorf(
+			"%w: turn_ended field %d has wire type %d, want varint", ErrCursorProtocol, number, f.Wire)
+	}
+	if f.Varint > uint64(math.MaxInt) {
+		return 0, false, fmt.Errorf(
+			"%w: turn_ended field %d value %d is not a non-negative int", ErrCursorProtocol, number, f.Varint)
+	}
+	return int(f.Varint), true, nil
+}
+
+// cursorTurnEndedAtField 读取 f6 结束时间戳（uint64），返回取值与是否出现。
+//
+// 缺失 → (0, false, nil)。出现则必须 wire=varint；uint64 全域都可安全承载，
+// 故除 wire 外不做取值裁剪（时间戳不参与 token 完整性与计费公式）。
+func cursorTurnEndedAtField(fields []cursorPBField, number int) (uint64, bool, error) {
+	f, ok := cursorFindField(fields, number)
+	if !ok {
+		return 0, false, nil
+	}
+	if f.Wire != cursorWireVarint {
+		return 0, false, fmt.Errorf(
+			"%w: turn_ended field %d has wire type %d, want varint", ErrCursorProtocol, number, f.Wire)
+	}
+	return f.Varint, true, nil
 }
 
 // cursorOpenAIUsage 把 turn_ended 用量映射成计费口径的 OpenAIUsage。
@@ -490,6 +598,80 @@ type cursorStreamParser struct {
 	// firstTokenMs 是首帧文本的耗时（毫秒，自解析开始计时），供转发结果诊断。
 	firstTokenMs int
 	parseStart   time.Time
+
+	// ---- §25.17.2「实际 ID」与「每 HTTP 只输出自本次附着以来的内容」----
+
+	// idSource 返回**当前 HTTP**的输出响应 ID（由会话扇出器在附着时提供）。
+	//
+	// 每个 HTTP 一份唯一响应 ID：本 HTTP 的全部 chunk、response.created/completed 与
+	// 非流式 response.id 共用它；未附着（无 HTTP 消费者）时用本解析器自己的 fallback。
+	// 绝不使用固定常量或上游 request_id。
+	idSource func() string
+	// fallbackID 是未提供 idSource 时（独立解析场景）本解析器自用的唯一 ID。
+	fallbackID string
+	// httpTextBase / httpCallBase 是本 HTTP 附着的起点（content 偏移 / 已捕获调用条数）。
+	//
+	// 只用于**非流式**当前 HTTP 的聚合：续轮的第二个 HTTP 不能把上一 HTTP 的正文/调用
+	// 再输出一遍（§25.17.2「聚合器在交接后释放，不重播」）。
+	httpTextBase int
+	httpCallBase int
+}
+
+// attachOutputIDSource 绑定"当前 HTTP 输出响应 ID"的读取源（§25.17.2 实际 ID）。
+func (p *cursorStreamParser) attachOutputIDSource(src func() string) {
+	if p == nil {
+		return
+	}
+	p.idSource = src
+}
+
+// beginHTTPTurn 标记一个新 HTTP 附着的起点（内容偏移 + 已捕获调用条数）。
+func (p *cursorStreamParser) beginHTTPTurn() {
+	if p == nil {
+		return
+	}
+	p.httpTextBase = len(p.content)
+	p.httpCallBase = len(p.capturedToolCalls())
+	p.started = false
+}
+
+// chunkID 返回本 HTTP 实际输出响应 ID（所有 chunk / 非流式 id 共用同一值）。
+func (p *cursorStreamParser) chunkID() string {
+	if p == nil {
+		return ""
+	}
+	if p.idSource != nil {
+		if id := strings.TrimSpace(p.idSource()); id != "" {
+			return id
+		}
+	}
+	if strings.TrimSpace(p.fallbackID) == "" {
+		p.fallbackID = cursorNewUUID()
+	}
+	return p.fallbackID
+}
+
+// httpContent 返回**本 HTTP** 产生的文本（非流式聚合用；不重播上一 HTTP 正文）。
+func (p *cursorStreamParser) httpContent() string {
+	if p == nil {
+		return ""
+	}
+	if p.httpTextBase <= 0 {
+		return p.content
+	}
+	if p.httpTextBase >= len(p.content) {
+		return ""
+	}
+	return p.content[p.httpTextBase:]
+}
+
+// httpToolCalls 返回**本 HTTP**捕获的对外工具调用（不重播已交付批次）。
+func (p *cursorStreamParser) httpToolCalls() []cursorToolCallCapture {
+	calls := p.capturedToolCalls()
+	if p == nil || p.httpCallBase <= 0 || p.httpCallBase >= len(calls) {
+		return calls
+	}
+	return calls[p.httpCallBase:]
 }
 
 // attachToolDelegations 绑定本轮共享的工具委托记录。
@@ -717,15 +899,13 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 		if err != nil {
 			return cursorStreamEvent{}, err
 		}
-		p.usage = cursorTurnUsage{
-			Seen:       true,
-			Input:      cursorIntField(turnFields, cursorFldTurnEndedInputTokens),
-			Output:     cursorIntField(turnFields, cursorFldTurnEndedOutputTokens),
-			CacheRead:  cursorIntField(turnFields, cursorFldTurnEndedCacheReadTokens),
-			CacheWrite: cursorIntField(turnFields, cursorFldTurnEndedCacheWriteTokens),
-			Reasoning:  cursorIntField(turnFields, cursorFldTurnEndedReasoningTokens),
-			EndedAtMS:  cursorVarintField(turnFields, cursorFldTurnEndedEndedAtMS),
+		// §25.17.5 A06①：存在性逐字段保留（缺失 / 真实 0 / 非法各不相同），
+		// 非法值由解码器按解析失败上报，绝不悄悄当 0 写进 usage。
+		usage, err := cursorDecodeTurnUsage(turnFields)
+		if err != nil {
+			return cursorStreamEvent{}, err
 		}
+		p.usage = usage
 		return cursorStreamEvent{Kind: cursorEventSkip}, nil
 	}
 
@@ -747,6 +927,9 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 }
 
 // cursorIntField 取 varint 字段的 int 值（字段缺失时为 0）。
+//
+// ⚠️ **不得用于 usage 字段**：它把"缺失"与"错误 wire"都折成 0，正是 §25.17.5 A06①
+// 要消除的折叠。turn_ended 的 f1–f6 一律走 cursorDecodeTurnUsage（保留存在性 + 校验）。
 func cursorIntField(fields []cursorPBField, number int) int {
 	f, ok := cursorFindField(fields, number)
 	if !ok || f.Wire != cursorWireVarint {
@@ -1003,9 +1186,16 @@ func (p *cursorStreamParser) cursorSSETextChunk(text string) string {
 	return "data: " + p.cursorChunk(`"delta":{"content":`+cursorJSONString(text)+`},"finish_reason":null`) + "\n\n"
 }
 
+// cursorChunkIDJSON 渲染本 HTTP 实际输出响应 ID 的 JSON 字符串字面量。
+//
+// §25.17.2「实际 ID」：同一 HTTP 的所有 chunk 必须共用同一个响应 ID，且不能是固定
+// 常量（旧的固定 chat 常量会经共享回桥泄入 Responses 回包，导致 previous_response_id
+// 永远无法续接）。
+func (p *cursorStreamParser) cursorChunkIDJSON() string { return cursorJSONString(p.chunkID()) }
+
 // cursorSSEToolCallNameChunk 返回 tool_calls 首个 delta（含 id/type/function.name）。
 func (p *cursorStreamParser) cursorSSEToolCallNameChunk(index int, tc cursorToolCallCapture) string {
-	return "data: " + `{"id":"cursor-chat","object":"chat.completion.chunk","created":0,` +
+	return "data: " + `{"id":` + p.cursorChunkIDJSON() + `,"object":"chat.completion.chunk","created":0,` +
 		`"model":` + cursorJSONString(p.model) + `,` +
 		`"choices":[{"index":0,"delta":{"tool_calls":[{"index":` + strconv.Itoa(index) +
 		`,"id":` + cursorJSONString(tc.ID) + `,"type":"function","function":{"name":` +
@@ -1018,7 +1208,7 @@ func (p *cursorStreamParser) cursorSSEToolCallArgsChunk(index int, tc cursorTool
 	if strings.TrimSpace(args) == "" || args == "null" {
 		args = "{}"
 	}
-	return "data: " + `{"id":"cursor-chat","object":"chat.completion.chunk","created":0,` +
+	return "data: " + `{"id":` + p.cursorChunkIDJSON() + `,"object":"chat.completion.chunk","created":0,` +
 		`"model":` + cursorJSONString(p.model) + `,` +
 		`"choices":[{"index":0,"delta":{"tool_calls":[{"index":` + strconv.Itoa(index) +
 		`,"function":{"arguments":` + cursorJSONString(args) + `}}]},"finish_reason":null}]}` + "\n\n"
@@ -1048,7 +1238,7 @@ func (p *cursorStreamParser) cursorSSEFinishChunkWithReason(finishReason string)
 	// usage 在 **chunk 顶层**（不是 choices[0] 内）：既有 usage 提取链
 	// （parseSSEUsageBytesWithType → extractOpenAIUsageFromJSONBytes）只认顶层的
 	// `usage` 路径，塞进 choices 里会被整条丢掉、计费拿不到真实用量。
-	return "data: " + `{"id":"cursor-chat","object":"chat.completion.chunk","created":0,` +
+	return "data: " + `{"id":` + p.cursorChunkIDJSON() + `,"object":"chat.completion.chunk","created":0,` +
 		`"model":` + cursorJSONString(p.model) +
 		`,"choices":[{"index":0,"delta":{},"finish_reason":"` + finishReason + `"}],` +
 		`"usage":` + p.cursorUsageJSON() + `}` + "\n\n"
@@ -1071,7 +1261,7 @@ func (p *cursorStreamParser) cursorUsageJSON() string {
 
 // cursorChunk 渲染一条 chat.completion.chunk 的 JSON 本体（不含 `data: ` 前缀）。
 func (p *cursorStreamParser) cursorChunk(choices string) string {
-	return `{"id":"cursor-chat","object":"chat.completion.chunk","created":0,` +
+	return `{"id":` + p.cursorChunkIDJSON() + `,"object":"chat.completion.chunk","created":0,` +
 		`"model":` + cursorJSONString(p.model) + `,"choices":[{"index":0,` + choices + `}]}`
 }
 
@@ -1133,7 +1323,8 @@ func cursorJSONString(s string) string {
 func (p *cursorStreamParser) cursorBuildNonStreamingCompletion() []byte {
 	var msg string
 	finishReason := "stop"
-	calls := p.capturedToolCalls()
+	// 只聚合**本 HTTP** 捕获的调用与正文：续轮第二个 HTTP 不重播上一批（§25.17.2）。
+	calls := p.httpToolCalls()
 	if len(calls) > 0 {
 		finishReason = "tool_calls"
 		msg = `"role":"assistant","content":null,"tool_calls":[`
@@ -1151,9 +1342,9 @@ func (p *cursorStreamParser) cursorBuildNonStreamingCompletion() []byte {
 		}
 		msg += `]`
 	} else {
-		msg = `"role":"assistant","content":` + cursorJSONString(p.content)
+		msg = `"role":"assistant","content":` + cursorJSONString(p.httpContent())
 	}
-	out := `{"id":"cursor-chat","object":"chat.completion","created":0,` +
+	out := `{"id":` + p.cursorChunkIDJSON() + `,"object":"chat.completion","created":0,` +
 		`"model":` + cursorJSONString(p.model) + `,` +
 		`"choices":[{"index":0,"message":{` + msg + `},` +
 		`"finish_reason":"` + finishReason + `"}],` +

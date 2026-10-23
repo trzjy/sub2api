@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
@@ -381,7 +382,7 @@ func TestCursorDecodeMcpArgsMap(t *testing.T) {
 	})
 }
 
-func TestCursorDuplexMcpArgsReply(t *testing.T) {
+func TestCursorDuplexMcpArgsCapturedNotAnswered(t *testing.T) {
 	d, err := newCursorAgentDuplex(cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil)), nil)
 	require.NoError(t, err)
 	defer d.close(nil)
@@ -389,34 +390,26 @@ func TestCursorDuplexMcpArgsReply(t *testing.T) {
 	args := cursorToolTestBuildMcpArgs("call_99", "get_weather", []cursorToolTestMcpArgEntry{
 		{key: "city", kind: "string", val: "Shanghai"}})
 	frame := cursorToolTestExecFrame(true, args) // f11 mcp_args（respond 吃 envelope 剥离后的 payload）
-	// 先起并发读取，再调 respond：d.send 走 io.Pipe 会阻塞直到被读，避免死锁。
-	replyCh := cursorDuplexReadReplyAsync(d)
+
 	done, err := d.respond(frame)
 	require.NoError(t, err)
-	require.False(t, done, "mcp_args reply must not terminate the connection")
-	require.Len(t, d.delegations.snapshot(), 1, "duplex 侧委托记录必须恰好一条（唯一解码点）")
+	require.False(t, done, "mcp_args 委托不得终结双向连接")
+	// 唯一解码点：duplex 侧恰好记一条委托，参数逐字保留。
+	snapshot := d.delegations.snapshot()
+	require.Len(t, snapshot, 1, "duplex 侧委托记录必须恰好一条（唯一解码点）")
+	require.Equal(t, "call_99", snapshot[0].ID)
+	require.Equal(t, "get_weather", snapshot[0].Name)
+	require.Equal(t, `{"city":"Shanghai"}`, snapshot[0].ArgsJSON)
 
-	rep := <-replyCh
-	require.NoError(t, rep.err)
-	reply := rep.b
-	outer, err := cursorDecodeProtobuf(reply)
-	require.NoError(t, err)
-	exec, ok := cursorFindField(outer, 2)
-	require.True(t, ok)
-	execFields, err := cursorDecodeProtobuf(exec.Bytes)
-	require.NoError(t, err)
-	require.Equal(t, uint64(7), cursorVarintField(execFields, 1))
-	require.Equal(t, "exec-id", cursorTestFieldString(execFields, 15))
-	// f11 = McpResult → f2 error → f1 error 文案。
-	result, ok := cursorFindField(execFields, 11)
-	require.True(t, ok, "reply must carry f11 McpResult")
-	resultFields, err := cursorDecodeProtobuf(result.Bytes)
-	require.NoError(t, err)
-	mcpErr, ok := cursorFindField(resultFields, 2)
-	require.True(t, ok, "McpResult must carry f2 error")
-	errFields, err := cursorDecodeProtobuf(mcpErr.Bytes)
-	require.NoError(t, err)
-	require.Contains(t, cursorTestFieldString(errFields, 1), "Tool execution deferred")
+	// 零回包（§24.3 旧链已斩）：委托阶段**绝不**回 McpResult（尤其不得回
+	// McpResult.error 诱导模型结束）。真实结果只能在续轮经由 CursorSessionIntake
+	// 写回原 exec 关联，故此刻上行通道必须没有任何字节。
+	replyCh := cursorDuplexReadReplyAsync(d)
+	select {
+	case rep := <-replyCh:
+		t.Fatalf("mcp_args 委托阶段不得回任何 McpResult（旧链已斩），却收到 %d 字节: %q", len(rep.b), string(rep.b))
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
 // ---------------------------------------------------------------------------

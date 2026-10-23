@@ -13,10 +13,12 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 const gatewayStreamHeartbeatBytesKey = "gateway_stream_heartbeat_bytes"
@@ -838,20 +840,42 @@ func (h *transferableInflight) CursorInflightReservation() *service.InflightRese
 	return h.res
 }
 
+// CursorSettlementFunc 是 Cursor 分支的**唯一结算输入构造钩子**（§25.17.5 A06）。
+//
+// 语义：收到会话终态的真实 ForwardResult 后，用**注册时绑定的不可变值快照**
+// （user/API key/组/订阅/账号、pricingAt、quotaPlatform、原请求 hash、UA/IP 及请求侧
+// 审计参数）构造原 RecordUsage 输入，并调用原 mandatory usage worker 提交。
+//
+// 它不是"提前提交账务任务"：只在会话终结时被调用且至多一次；不闭包 gin.Context、
+// 不回读旧 writer 或原正文。缺完整真实 usage 时不会被调用（settle 的完整性判定在前）。
+type CursorSettlementFunc func(ctx context.Context, final *service.ForwardResult)
+
+// 结算装配错误：取得完整真实 usage 却缺必需装配属**明确错误**，
+// 不得按"无 hook 跳过"假结算，也不得写零 usage 成功账（§25.17.5 A06）。
+var (
+	// errCursorSettlementNotRegistered 表示会话终结时尚未注册结算钩子
+	// （违反"首次 Execute 与资源转交之前注册"的时机约束）。
+	errCursorSettlementNotRegistered = errors.New("handler: cursor settlement func not registered before session finalize")
+	// errCursorSettlementMissingResult 表示终态完整但没有真实 ForwardResult 可交给结算。
+	errCursorSettlementMissingResult = errors.New("handler: cursor settlement carries no terminal ForwardResult")
+	// errCursorSettlementLateRegister 表示会话已终结后才注册（终态只发生一次，无法再结算）。
+	errCursorSettlementLateRegister = errors.New("handler: cursor settlement registered after session finalize")
+)
+
 // cursorResourceHandover 是 Cursor 分支把本 HTTP 资源与**唯一结算**交给会话的载体。
 //
-// 各 handler 用它识别"交接中/已由 session 结算"：不再为每个工具 HTTP 排一次
-// UsageRecordTask，而是把该任务登记给会话唯一结算（至多执行一次）。
+// 结算输入不再是"Execute 返回后补交的 UsageRecordTask"（该晚绑定链已删除），而是注册在
+// 本载体上的 CursorSettlementFunc：handler 在**首次 Execute 与资源转交之前**注册，
+// 会话终结时 settle 把终态真实 *ForwardResult 交给它，至多一次（§25.17.5 A06）。
 type cursorResourceHandover struct {
-	resources  []service.CursorTransferableResource
-	submitTask func(context.Context, service.UsageRecordTask)
+	resources []service.CursorTransferableResource
 
 	mu        sync.Mutex
 	finalized bool
-	complete  bool
-	eventID   string
-	task      service.UsageRecordTask
 	settled   bool
+	// settlement 是注册的唯一结算钩子；settleErr 记录装配错误（晚注册/缺注册/缺终态结果）。
+	settlement CursorSettlementFunc
+	settleErr  error
 	// settleCtx / releaseInflight 由会话终结时接纳：结算提交之后才归还在途预留引用，
 	// 保证"不得在缓存扣减前先释放预留"（§25.5）。
 	settleCtx       context.Context
@@ -874,28 +898,47 @@ func (h *cursorResourceHandover) Settlement() service.CursorSessionSettlement {
 	return h.settle
 }
 
-// AdoptSettlementTask 实现 service.CursorSettlementOwner。
-func (h *cursorResourceHandover) AdoptSettlementTask(task service.UsageRecordTask) {
-	if h == nil || task == nil {
+// RegisterCursorSettlement 登记本 HTTP 的唯一结算钩子（幂等语义：**替换**）。
+//
+// 注册时机约束（必须遵守，否则结算不会被触发）：
+//   - 在**首次 Execute 之前**注册——会话终结发生在 Execute 生命周期内，终结后注册无效；
+//   - 在**资源转交之前**注册——转交后资源归会话，结算随之由会话终结驱动；
+//   - 同一尝试内重复注册按"最后一次显式装配生效"替换，不静默保留旧钩子（重复装配是
+//     handler 侧 bug，替换语义没有额外状态机，也不会让旧快照意外计费）。
+//
+// 会话已终结（settle 已接纳终态）后再注册一律**拒绝**并记录装配错误——终态只发生一次，
+// 此时注册无法再结算，不能假装成功。
+func (h *cursorResourceHandover) RegisterCursorSettlement(fn CursorSettlementFunc) {
+	if h == nil || fn == nil {
 		return
 	}
 	h.mu.Lock()
-	if !h.finalized {
-		h.task = task
-		h.mu.Unlock()
+	defer h.mu.Unlock()
+	if h.finalized {
+		h.settleErr = errCursorSettlementLateRegister
 		return
 	}
-	complete, eventID := h.complete, h.eventID
-	if complete && eventID != "" {
-		// 会话已终结且接纳了完整真实 usage：登记后立即结算（至多一次）。
-		h.task = task
-		h.mu.Unlock()
-		h.runSettlement()
-		return
+	h.settlement = fn
+}
+
+// SettlementFunc 取出已注册的结算钩子（finalizer 侧访问器；未注册返回 nil）。
+func (h *cursorResourceHandover) SettlementFunc() CursorSettlementFunc {
+	if h == nil {
+		return nil
 	}
-	h.mu.Unlock()
-	// 会话未结算：归还预留引用（幂等），避免留下无人归还的预留。
-	h.releaseOnNoSettlement()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.settlement
+}
+
+// SettlementError 报告结算装配错误（晚注册/缺注册/缺终态结果；nil = 装配正常）。
+func (h *cursorResourceHandover) SettlementError() error {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.settleErr
 }
 
 // releaseOnNoSettlement 在会话未结算时归还预留引用（幂等）。
@@ -912,7 +955,7 @@ func (h *cursorResourceHandover) releaseOnNoSettlement() {
 	}
 }
 
-// Settled 报告本 HTTP 的计费是否已由会话结算（handler 据此跳过自己的计费任务）。
+// Settled 报告唯一结算是否已提交（诊断/测试用）。
 func (h *cursorResourceHandover) Settled() bool {
 	if h == nil {
 		return false
@@ -932,7 +975,12 @@ func (h *cursorResourceHandover) Finalized() bool {
 	return h.finalized
 }
 
-// settle 是会话唯一结算回调：只记录被接纳的终态，实际提交至多一次。
+// settle 是会话唯一结算回调：接纳终态后至多提交一次。
+//
+// 唯一账务输入（§25.17.5 A06）：完整性判定通过后，把**终态真实 *ForwardResult** 交给
+// 注册的 CursorSettlementFunc，由它构造原 RecordUsage 输入并调用原 mandatory usage worker。
+// 缺完整真实 usage 一律不提交（不写零 usage 假成功）；完整 usage 却缺必需装配属明确
+// 装配错误（记录并大声报错），不按"无 hook 跳过"假结算。
 func (h *cursorResourceHandover) settle(ctx context.Context, ev service.CursorSettlementEvent) {
 	if h == nil {
 		return
@@ -943,40 +991,39 @@ func (h *cursorResourceHandover) settle(ctx context.Context, ev service.CursorSe
 		return
 	}
 	h.finalized = true
-	h.complete = ev.UsageComplete
-	h.eventID = ev.BillingEventID
 	// 结算 ctx 必须携带**会话级不可变账单事件 ID**：即使调用方忘了绑定，这里也强制绑定，
 	// 保证 durable 键永远是会话级而不是某个 HTTP 的 request_id（§25.5）。
 	h.settleCtx = service.WithCursorSessionBillingEventID(ctx, ev.BillingEventID)
 	h.releaseInflight = ev.InflightRelease
-	pending := h.task
+	fn := h.settlement
 	h.mu.Unlock()
 	if !ev.UsageComplete {
 		// 未取得完整真实 usage：不结算、不写零 usage 假成功；预留引用在这里归还。
 		h.releaseOnNoSettlement()
 		return
 	}
-	if pending == nil {
-		// 本 HTTP 的计费任务尚未登记（handler 计费块在 Execute 返回之后才执行）：
-		// 等 AdoptSettlementTask 到达时再提交，至多一次。
+	if ev.Result == nil {
+		h.failSettlement(ev.BillingEventID, errCursorSettlementMissingResult)
 		return
 	}
-	h.runSettlement()
+	if fn == nil {
+		h.failSettlement(ev.BillingEventID, errCursorSettlementNotRegistered)
+		return
+	}
+	h.runSettlement(fn, ev.Result)
 }
 
-// runSettlement 至多提交一次计费任务。
+// runSettlement 至多提交一次唯一结算输入。
 //
 // 结算 ctx 由会话终结时交给本载体：它带**会话级不可变账单事件 ID**与在途预留句柄，
-// 所以提交（Acquire 交接）发生在归还预留之前，扣减语义与既有计费链一致。
-func (h *cursorResourceHandover) runSettlement() {
+// 所以提交（Acquire 交接）发生在归还预留引用之前，扣减语义与既有计费链一致。
+func (h *cursorResourceHandover) runSettlement(fn CursorSettlementFunc, final *service.ForwardResult) {
 	h.mu.Lock()
-	if h.settled || h.task == nil || h.submitTask == nil {
+	if h.settled || fn == nil || final == nil {
 		h.mu.Unlock()
 		return
 	}
 	h.settled = true
-	task := h.task
-	submit := h.submitTask
 	ctx := h.settleCtx
 	release := h.releaseInflight
 	h.releaseInflight = nil
@@ -985,21 +1032,53 @@ func (h *cursorResourceHandover) runSettlement() {
 		ctx = context.Background()
 	}
 	// 结算 ctx 继承会话级 durable 键与预留句柄，但不继承 HTTP 取消（会话已终结）。
-	submit(context.WithoutCancel(ctx), task)
+	fn(context.WithoutCancel(ctx), final)
 	if release != nil {
 		release()
 	}
 }
 
-// cursorSettlementSubmitter 是计费任务提交函数签名（复用既有 worker 池）。
+// failSettlement 报告"完整 usage 但装配不全"的明确错误，并归还预留引用（幂等）。
+//
+// 这里不提交、不写零 usage 账：装配错误必须可见（日志 + SettlementError 可查），
+// 但不能留下无人归还的预留。
+func (h *cursorResourceHandover) failSettlement(eventID string, reason error) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.settleErr = reason
+	release := h.releaseInflight
+	h.releaseInflight = nil
+	h.mu.Unlock()
+	logger.L().With(
+		zap.String("component", "handler.cursor.settlement"),
+		zap.String("billing_event_id", eventID),
+		zap.Error(reason),
+	).Error("cursor.settlement_assembly_error")
+	if release != nil {
+		release()
+	}
+}
+
+// cursorSettlementSubmitter 是既有的计费任务提交函数签名（复用既有 worker 池）。
+//
+// §25.17.5 A06 已删除 UsageRecordTask 晚绑定链（结算改由 CursorSettlementFunc 承载），
+// 该类型只为保持 7 处既有 handler 构造调用点的形态而保留；handler 微卡迁移时随构造参数
+// 一并移除，不得再据此另排账务任务。
 type cursorSettlementSubmitter func(context.Context, service.UsageRecordTask)
 
 // newCursorResourceHandover 构造 Cursor 分支的转交物。
+//
+// 第二个参数（既有 worker 池提交函数）不参与任何结算：结算输入只来自
+// RegisterCursorSettlement 注册的 CursorSettlementFunc。参数保留仅为不越界改动
+// 7 处 handler 构造调用点（本单禁区）。
 func newCursorResourceHandover(
 	resources []service.CursorTransferableResource,
-	submit cursorSettlementSubmitter,
+	legacySubmit cursorSettlementSubmitter,
 ) *cursorResourceHandover {
-	return &cursorResourceHandover{resources: resources, submitTask: submit}
+	_ = legacySubmit
+	return &cursorResourceHandover{resources: resources}
 }
 
 // bindCursorHandoverForAttempt 为**本次账号尝试**绑定 Cursor 转交物。
@@ -1090,9 +1169,26 @@ func cursorResumeIdentity(apiKey *service.APIKey, userID int64) service.CursorSe
 	return identity
 }
 
+// cursorResumeClaimsUnknownAssociation 判定 Identify 的失败是否属于「未知关联」这一类。
+//
+// §25.17.4（A08）钉死的分类：前置探针在**选号之前**不知道这些 ID 属于哪个供应商，
+// 所以这里只认执行服务给出的可区分哨兵 service.ErrCursorResumeUnknownAssociation
+// （语义 = 请求明确声称续轮，但全部 ID 都未命中本站登记关联，含重启后的孤儿）。
+//
+//   - 命中：**不得**在全站范围直接 400（会把其它供应商的 function_call_output /
+//     previous_response_id 误杀），交回原路由按供应方判定——选到非 Cursor 沿该供应方
+//     原契约原样转发；进入 Cursor 执行分支时由 Cursor 准入断言（执行服务侧的
+//     「声明续轮却无有效接管」）在模型出站/建 session/转交资源之前以 400 失效关联拒绝，
+//     本 HTTP 已临时获取的槽位/预留沿原 defer 释放。
+//   - 未命中：普通解析失败、执行部件未装配、混批/跨会话/旧批/重复/身份不符等其它识别
+//     错误一律不吞，继续沿既有 CursorResumeHTTPStatus 错误契约处理。
+func cursorResumeClaimsUnknownAssociation(err error) bool {
+	return err != nil && errors.Is(err, service.ErrCursorResumeUnknownAssociation)
+}
+
 // serveCursorResumeIfRequested 在**用户槽/账号槽/预留/选号之前**识别续轮并整批接管。
 //
-// 顺序固定（§25.14-D「整批接管顺序」）：
+// 顺序固定（§25.14-D「整批接管顺序」，§25.17.4 决定「未知关联只在 Cursor 边界拒绝」）：
 //
 //	正常鉴权（已由 handler 完成） → 解析最后待完成批及结果 ID → 统一索引定位 →
 //	身份/来源/账号校验（ServeCursorResume 内） → 配置/前缀摘要/本批结果完整校验 →
@@ -1101,6 +1197,8 @@ func cursorResumeIdentity(apiKey *service.APIKey, userID int64) service.CursorSe
 // 返回值语义：
 //   - true：已写出响应（续轮被接纳，或明确了 400/403/409/503 拒绝），调用方必须 return；
 //   - false：本次不是可识别的续轮，按普通新请求继续（会话身份已挂到 ctx）。
+//     其中「明确声称续轮但全部 ID 未命中」也走这一支：不在此处判死、不改请求体、
+//     不接管任何资源，由原路由决定供应方（见 cursorResumeClaimsUnknownAssociation）。
 //
 // 校验失败零上游写入；不换号、不重选、不猜最近会话。
 func serveCursorResumeIfRequested(
@@ -1134,6 +1232,16 @@ func serveCursorResumeIfRequested(
 	}
 	ticket, identifyErr := gw.IdentifyCursorResume(probe)
 	if identifyErr != nil {
+		if cursorResumeClaimsUnknownAssociation(identifyErr) {
+			// §25.17.4 行 3/4/5：明确声称续轮但全部 ID 未命中。
+			// 选号前无法判定供应方，**只把这一类**交原路由按供应方判定：
+			//   - 选到非 Cursor：沿该供应方原契约原样转发，Cursor 不抢管、不改请求体；
+			//   - 进入 Cursor 执行分支：由 Cursor 准入断言在模型出站/建 session/转交资源
+			//     之前返回 400 失效关联（已临时获取的资源沿原 HTTP defer 释放）。
+			// 所以这里既不 reject（否则误杀别的供应商），也不接管（serveCalls 恒 0），
+			// 更不改写 body；请求 ctx 上已挂好会话身份，供首 HTTP 建会话时记录。
+			return false
+		}
 		status, reason := service.CursorResumeHTTPStatus(identifyErr)
 		if status == 0 {
 			// 非续轮错误（例如执行部件未装配）：不在资源获取前判死，交回普通路径按其
@@ -1144,7 +1252,10 @@ func serveCursorResumeIfRequested(
 		return true
 	}
 	if ticket == nil {
-		// 没有登记任何关联（含重启后孤儿不命中）：按普通新请求继续。
+		// 没有定位到唯一会话与待完成批：不接管、不建 Cursor 会话，按原路径继续。
+		// 「明确声称续轮却全部未命中」的正常形态由 Identify 以
+		// service.ErrCursorResumeUnknownAssociation 返回（见上分支）；这里只覆盖未声明
+		// 续轮/未定位的退化结果，语义相同且绝不猜最近会话。
 		return false
 	}
 	if _, serveErr := gw.ServeCursorResume(ctx, c, ticket, service.CursorResumeServeInput{
