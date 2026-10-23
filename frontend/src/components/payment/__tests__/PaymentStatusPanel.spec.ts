@@ -172,6 +172,31 @@ describe('PaymentStatusPanel', () => {
     expect(img.attributes('src')).toContain('qrcode_v3')
   })
 
+  // 原图直出与 payment_mode 配置无关：即便通道未配置二维码模式（paymentMode 为空），
+  // 只要 provider 是 xunhupay 且 qr_code 为 https 链接，仍需按 <img> 原样展示，
+  // 禁止 QRCode.toCanvas 二次编码（否则 PC 端会复发"打开虎皮椒网页"死路）。
+  it('renders xunhupay https qr_code as <img> directly even when paymentMode is empty', async () => {
+    const wrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 591,
+        qrCode: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=20307171935&nonce_str=abc&time=123&appid=201906187599&hash=def',
+        expiresAt: '2099-01-01T12:30:00Z',
+        paymentType: 'wxpay',
+        orderType: 'balance',
+        providerKey: 'xunhupay',
+      },
+      global: { stubs: { Icon: true } },
+    })
+
+    await flushPromises()
+
+    // 配置为空时仍按 <img> 直出，不走 QRCode.toCanvas 重编码
+    expect(toCanvas).not.toHaveBeenCalled()
+    const img = wrapper.find('[data-test="direct-qr-img"]')
+    expect(img.exists()).toBe(true)
+    expect(img.attributes('src')).toContain('qrcode_v3')
+  })
+
   // 仅凭 https 不能当作二维码图片：easypay/alipay 的支付串也可能是 https 链接，
   // 当成 <img> 会渲染成裂图且扫不出来，必须仍走 QRCode.toCanvas 编码。
   it('does not treat an https payment string from another channel as a QR image', async () => {

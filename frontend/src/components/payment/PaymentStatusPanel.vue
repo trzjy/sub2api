@@ -366,14 +366,15 @@ const VERIFY_RETRY_MAX_ATTEMPTS = 6
 
 const isAlipay = computed(() => isBuiltInAlipayMethod(props.paymentType))
 const isWxpay = computed(() => isBuiltInWxpayMethod(props.paymentType))
-// xunhupay 的 qr_code 是虎皮椒直接返回的二维码图片 URL（https://... 302→PNG），
-// 官方文档明确"不用再转二维码"，直接 <img> 展示即可扫码支付。其余 provider
-// （官方微信 Native 的 weixin:// 串、easypay/alipay 的支付串）必须经 QRCode.toCanvas 编码。
-// 仅凭 HTTPS 不能判定是图片：easypay/alipay 的支付串也可能是 https 链接，把它当 <img>
-// 会渲染成裂图且无法扫码。只在显式配置为二维码模式的 xunhupay 通道上按图片渲染。
+// xunhupay 的 qr_code 是虎皮椒收银台/二维码页 URL（实测 content-type 为 text/html 网页，
+// 内嵌或重定向到二维码图，并非直接返回 PNG 字节流）。它只能由原样 <img> 直接展示，
+// 由浏览器自行加载该页内的二维码图——绝不能经 QRCode.toCanvas 二次编码，否则用户扫出的
+// 是"打开虎皮椒网页"的死路。此判定与通道的 payment_mode 配置无关：无论何种模式，
+// 只要 provider 是 xunhupay 且 qr_code 为 https 链接，一律按 <img> 原图直出。
+// 仅凭 HTTPS 仍不能当作通用二维码图片：easypay/alipay 的支付串也可能是 https 链接，
+// 当成 <img> 会渲染成裂图且扫不出来，必须仍走 QRCode.toCanvas 编码。
 const isDirectImageQR = computed(() =>
-  usesUpstreamQrImage.value
-  && props.providerKey === 'xunhupay'
+  props.providerKey === 'xunhupay'
   && /^https?:\/\//i.test(qrUrl.value))
 const isMobileAlipayDeepLink = computed(() => props.mobileAlipayDeepLink === true && isAlipay.value && !!qrUrl.value)
 const showQRCode = computed(() => !!qrUrl.value && (!isMobileAlipayDeepLink.value || deepLinkFallbackVisible.value))
