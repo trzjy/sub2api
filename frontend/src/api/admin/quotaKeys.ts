@@ -59,9 +59,13 @@ export interface QuotaKeyAccount {
   status: string
 }
 
-/** 激活码详情：脱敏视图 + 其下账号列表。 */
+/** 激活码详情：脱敏视图 + 其下账号分页。 */
 export interface QuotaKeyDetail extends QuotaKey {
   accounts: QuotaKeyAccount[]
+  /** 账号总数（未软删、不分页）。与 account_count 同源，供分页控件用。 */
+  total: number
+  page: number
+  page_size: number
 }
 
 /** 创建激活码请求（仅此处一次性接收明文 code，前端不持久化）。 */
@@ -102,9 +106,20 @@ export async function create(payload: CreateQuotaKeyRequest): Promise<QuotaKey> 
   return data
 }
 
-/** 获取单个激活码及其下账号列表。 */
-export async function get(id: number): Promise<QuotaKeyDetail> {
-  const { data } = await apiClient.get<QuotaKeyDetail>(`/admin/quota_keys/${id}`)
+/**
+ * 获取单个激活码及其下账号列表（账号列表分页）。
+ *
+ * 后端详情端点支持 page / page_size（response.ParsePagination），默认 page=1、page_size=20；
+ * 响应回带 total / page / page_size 供分页控件使用。不传参时保持既有行为。
+ */
+export async function get(
+  id: number,
+  page: number = 1,
+  pageSize: number = 20
+): Promise<QuotaKeyDetail> {
+  const { data } = await apiClient.get<QuotaKeyDetail>(`/admin/quota_keys/${id}`, {
+    params: { page, page_size: pageSize }
+  })
   return data
 }
 

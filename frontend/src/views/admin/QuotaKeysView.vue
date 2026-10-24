@@ -332,6 +332,15 @@
                 <span class="shrink-0 text-xs text-gray-500 dark:text-gray-400">{{ account.status }}</span>
               </li>
             </ul>
+            <Pagination
+              v-if="detail.total > detailPageSize"
+              class="mt-2"
+              :page="detailPage"
+              :total="detail.total"
+              :page-size="detailPageSize"
+              :show-page-size-selector="false"
+              @update:page="handleDetailPageChange"
+            />
           </div>
         </div>
       </div>
@@ -476,6 +485,7 @@ import TextArea from '@/components/common/TextArea.vue'
 import Icon from '@/components/icons/Icon.vue'
 import AutoEntryConfigModal from '@/components/quotaKeys/AutoEntryConfigModal.vue'
 import QuotaKeyUsageCell from '@/components/quotaKeys/QuotaKeyUsageCell.vue'
+import Pagination from '@/components/common/Pagination.vue'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -499,6 +509,9 @@ const probeError = ref('')
 const editing = ref<QuotaKey | null>(null)
 const deleting = ref<QuotaKey | null>(null)
 const detail = ref<QuotaKeyDetail | null>(null)
+// 详情弹窗账号列表分页状态（后端默认 page_size=20；翻页时重新拉取详情）
+const detailPage = ref(1)
+const detailPageSize = ref(20)
 const formError = ref('')
 
 const form = reactive({
@@ -666,11 +679,25 @@ async function submitForm() {
 async function openDetail(row: QuotaKey) {
   showDetailDialog.value = true
   detail.value = null
+  detailPage.value = 1
   try {
-    detail.value = await adminAPI.quotaKeys.get(row.id)
+    detail.value = await adminAPI.quotaKeys.get(row.id, detailPage.value, detailPageSize.value)
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.detailLoadError')))
     showDetailDialog.value = false
+  }
+}
+
+// 详情弹窗翻页：保持弹窗打开，仅重拉当前激活码的该页账号。
+async function handleDetailPageChange(nextPage: number) {
+  if (!detail.value) return
+  const id = detail.value.id
+  try {
+    const next = await adminAPI.quotaKeys.get(id, nextPage, detailPageSize.value)
+    detail.value = next
+    detailPage.value = nextPage
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.detailLoadError')))
   }
 }
 
@@ -716,7 +743,7 @@ async function handleProbe(row: QuotaKey) {
     // O03：probe 已把 expires_at 写库，刷新列表与已开详情以反映最新事实源。
     await load()
     if (detail.value && detail.value.id === row.id) {
-      detail.value = await adminAPI.quotaKeys.get(row.id)
+      detail.value = await adminAPI.quotaKeys.get(row.id, detailPage.value, detailPageSize.value)
     }
   } catch (err: unknown) {
     probeError.value = extractApiErrorMessage(err, t('admin.quotaKeys.probe.error'))

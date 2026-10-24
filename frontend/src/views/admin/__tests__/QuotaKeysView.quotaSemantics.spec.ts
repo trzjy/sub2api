@@ -383,3 +383,72 @@ describe('QuotaKeysView 详情账号折叠标题用真实总数（HDR-1）', () 
     wrapper.unmount()
   })
 })
+
+// ---------------------------------------------------------------------------
+// PG2：详情弹窗账号列表补分页控件后，翻页须按新 page 重新拉取详情，
+// 且保持弹窗打开（不关弹窗）。
+// ---------------------------------------------------------------------------
+
+describe('QuotaKeysView 详情账号翻页（PG2）', () => {
+  const page1Detail = {
+    ...keyRow,
+    account_count: 25,
+    total: 25,
+    page: 1,
+    page_size: 20,
+    accounts: [
+      { id: 11, name: 'cursor-acc-1', platform: 'cursor', status: 'active' },
+      { id: 12, name: 'cursor-acc-2', platform: 'cursor', status: 'inactive' }
+    ]
+  }
+  const page2Detail = {
+    ...keyRow,
+    account_count: 25,
+    total: 25,
+    page: 2,
+    page_size: 20,
+    accounts: [{ id: 13, name: 'cursor-acc-3', platform: 'cursor', status: 'active' }]
+  }
+
+  beforeEach(() => {
+    vi.mocked(adminAPI.quotaKeys.list).mockReset()
+    vi.mocked(adminAPI.quotaKeys.get).mockReset()
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue({
+      items: [keyRow],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    } as never)
+    vi.mocked(adminAPI.quotaKeys.get).mockImplementation(
+      (async (id: number, page: number) => {
+        return (page === 2 ? page2Detail : page1Detail) as never
+      }) as never
+    )
+  })
+
+  it('详情账号翻页：第 2 页按新 page 拉取，弹窗保持打开', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const vm = wrapper.vm as unknown as {
+      detail: { id: number; page: number } | null
+      showDetailDialog: boolean
+      openDetail: (row: typeof keyRow) => Promise<void>
+      handleDetailPageChange: (nextPage: number) => Promise<void>
+    }
+
+    await vm.openDetail(keyRow)
+    await flushPromises()
+    await vm.handleDetailPageChange(2)
+    await flushPromises()
+
+    // 翻到第 2 页须以新 page 重新拉取详情。
+    expect(adminAPI.quotaKeys.get).toHaveBeenLastCalledWith(keyRow.id, 2, 20)
+    // 详情回带 page=2。
+    expect(vm.detail?.page).toBe(2)
+    // 翻页不关闭弹窗。
+    expect(vm.showDetailDialog).toBe(true)
+    wrapper.unmount()
+  })
+})
