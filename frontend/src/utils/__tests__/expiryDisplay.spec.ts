@@ -21,6 +21,7 @@ describe('resolveExpiryDisplay', () => {
     const r = resolveExpiryDisplay('2026-01-02T03:04:05Z')
     expect(r.status).toBe('date')
     if (r.status === 'date') {
+      expect(typeof r.text).toBe('string')
       expect(r.text).not.toBe('')
       expect(r.text).not.toBe('到期时间未知')
       expect(r.text).not.toBe('永不过期')
