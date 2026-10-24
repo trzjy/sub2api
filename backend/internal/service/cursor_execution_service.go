@@ -5862,7 +5862,7 @@ func (s *CursorExecutionService) ResumeCursorSession(
 			zap.Bool("history_omitted", historyOmitted),
 			zap.Bool("response_id_present", strings.TrimSpace(ticket.ResponseID) != ""),
 			zap.String("session_id", record.id),
-			zap.Int("state", int(state)),
+			zap.String("state", string(state)),
 			zap.Int("delivered_calls", len(ticket.CallIDs)))
 		return nil, newCursorResumeError(http.StatusBadRequest, "history_mismatch", ErrCursorResumeHistoryMismatch)
 	}
