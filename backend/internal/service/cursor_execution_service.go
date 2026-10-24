@@ -5853,17 +5853,6 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		if record.batchConsumed() {
 			return nil, newCursorResumeError(http.StatusConflict, "already_consumed", ErrCursorResumeAlreadyConsumed)
 		}
-		// TEMP-DIAG（一次性定位用，定位后立即移除）：只打印摘要指纹与计数，不含任何正文/参数。
-		cursorPhaseLog(ctx, zapcore.InfoLevel, "resume_history_mismatch_diag", spec.requestedModel,
-			zap.Int("stored_items", storedHistory.ItemCount()),
-			zap.Int("plan_items", plan.history.ItemCount()),
-			zap.String("stored_head", storedHistory.HexString()[:8]),
-			zap.String("plan_head", plan.history.HexString()[:8]),
-			zap.Bool("history_omitted", historyOmitted),
-			zap.Bool("response_id_present", strings.TrimSpace(ticket.ResponseID) != ""),
-			zap.String("session_id", record.id),
-			zap.String("state", string(state)),
-			zap.Int("delivered_calls", len(ticket.CallIDs)))
 		return nil, newCursorResumeError(http.StatusBadRequest, "history_mismatch", ErrCursorResumeHistoryMismatch)
 	}
 	if err := cursorValidateResumeResults(ticket.CallIDs, plan.results); err != nil {
