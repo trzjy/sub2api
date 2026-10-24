@@ -337,7 +337,7 @@ func cursorFullChainMcpResultPayload(data []byte) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	if !cursorFindFieldOK(execFields, cursorFldClientMessage) {
+	if !cursorFindFieldOK(execFields, cursorFldClientMsgMcpResult) {
 		return nil, false
 	}
 	return append([]byte(nil), exec.Bytes...), true

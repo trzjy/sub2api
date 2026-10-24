@@ -110,7 +110,7 @@ type cursorWritebackDecoded struct {
 
 // decodeWritebackExec 把一条 **ExecClientMessage 载荷**（envelope.Data）按 §25.3 四层编码解码。
 //
-// 字节级层次：ExecClientMessage{f1 exec_id, f15 id, f2 McpResult}
+// 字节级层次：ExecClientMessage{f1 exec_id, f15 id, f11 McpResult}
 //
 //	→ McpResult{f1 success | f2 error}
 //	→ McpSuccess/Error{f1 content(repeated ContentItem), f2 structured_content}
@@ -123,8 +123,8 @@ func decodeWritebackExec(t *testing.T, execPayload []byte) cursorWritebackDecode
 	if id, ok := cursorFindField(fields, cursorFldClientMsgExecID); ok {
 		out.idField = append([]byte(nil), id.Bytes...)
 	}
-	mcpResult, ok := cursorFindField(fields, cursorFldClientMessage)
-	require.True(t, ok, "ExecClientMessage 必须携带 f2 = McpResult")
+	mcpResult, ok := cursorFindField(fields, cursorFldClientMsgMcpResult)
+	require.True(t, ok, "ExecClientMessage 必须携带 f11 = McpResult")
 
 	mcpFields, err := cursorDecodeProtobuf(mcpResult.Bytes)
 	require.NoError(t, err)
@@ -161,7 +161,7 @@ func decodeWritebackExec(t *testing.T, execPayload []byte) cursorWritebackDecode
 // decodeWritebackStream 把一段回写字节流全部解码（同名并行两工具会写多条）。
 //
 // 采集到的字节是**信封流**：Envelope.Data = {f2 = ExecClientMessage}（d.send(2, msg) 的形态），
-// ExecClientMessage 内层 f2 才是 McpResult。故这里先剥信封那一层，再按四层解码。
+// ExecClientMessage 内层 f11 才是 McpResult。故这里先剥信封那一层，再按四层解码。
 func decodeWritebackStream(t *testing.T, wire []byte) []cursorWritebackDecoded {
 	t.Helper()
 	var out []cursorWritebackDecoded
@@ -175,7 +175,7 @@ func decodeWritebackStream(t *testing.T, wire []byte) []cursorWritebackDecoded {
 
 // TestCursorWritebackFourLayerEncoding 固定 §25.3 四层编码字节形状（成功 / is_error / 结构化）。
 //
-// 这是证据 26/27 修正后编码的真实落点：ExecClientMessage{f1 id, f15 id, f2 McpResult}、
+// 这是证据 26/27 修正后编码的真实落点：ExecClientMessage{f1 id, f15 id, f11 McpResult}、
 // McpResult.f1 成功 / f2 错误、McpSuccess.f2 走 structured_content 实际类型。
 func TestCursorWritebackFourLayerEncoding(t *testing.T) {
 	// 成功 + 文本 + 结构化。

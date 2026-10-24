@@ -22,22 +22,38 @@ import (
 const cursorClientVersion = "3.24.12"
 
 // ---------------------------------------------------------------------------
-// 四层 MCP 工具结果回写编码（依据 plan §21.1-4 / §25.3）。
+// 四层 MCP 工具结果回写编码（依据 plan §21.1-4 / §25.3；本单 B4 修正内层字段号）。
 //
 // 真实结果回到原 AgentRun 的 exec 关联（W2-F CursorSessionIntake 生产实现），字节级形状：
 //
-//	ExecClientMessage{f1 id(exec_id, varint), f15 id(exec_id 原值, bytes), f2 = McpResult}
+//	ExecClientMessage{f1 id(exec_id, varint), f15 id(exec_id 原值, bytes), f11 = McpResult}
 //	  McpResult{f1 success = McpSuccess | f2 error = McpError}
 //	    McpSuccess / McpError{f1 content = repeated McpToolResultContentItem, f2 structured_content}
 //	      McpToolResultContentItem{f1 text = McpTextContent}
 //	        McpTextContent{f1 text(string)}
 //
-// f2 是 ExecClientMessage 在信封里的消息类型字段（与 context_response / mcp_state 回包一致，
-// 见 respond 中 d.send(2, ...)）。McpResult.f1 成功 / f2 错误：客户端明确 is_error 的结果
-// 走 f2 保留错误语义，绝不把本机失败写成成功。structured_content 用实际类型（f2）。
+// 字段号双轨、绝对不可混用（本单 B4 证据）：
+//   - cursorFldClientMessage (=2) 是**信封**里 ExecClientMessage 的消息类型字段
+//     （与 context_response / mcp_state 回包一致，见 respond 中 d.send(2, ...)）；
+//     本层以 it.duplex.send(cursorFldClientMessage, frame) 包裹 ExecClientMessage，外层恒为 2。
+//   - cursorFldClientMsgMcpResult (=11) 才是 ExecClientMessage **内层**承载 McpResult 的字段号，
+//     与 ExecServerMessage.f11 mcp_args 对称。生产实证（group 34 / claude-sonnet-5-5）：
+//     内层若误用 2，上游不认该回包、模型停在等结果状态直到 180s deadline_exceeded / turn_ended_missing；
+//     用 11 时，重构前实现（5e2dd5d08 cursorMcpArgsReply：f11 McpResult）与活体探针
+//     （~/.sub2api-acceptance/sub2api-cursor-targeted-20261024/02-native-tools.cjs：fld(11,mcpResult)）
+//     均能让上游在同一连接继续并正常 turn_ended。故内层 McpResult 必须为 11，绝非 2。
+//
+// McpResult.f1 成功 / f2 错误：客户端明确 is_error 的结果走 f2 保留错误语义，绝不把本机失败
+// 写成成功。structured_content 用实际类型（f2）。
 const (
-	// cursorFldClientMessage 是信封里 ExecClientMessage 的消息类型字段（=2）。
+	// cursorFldClientMessage 是**信封**里 ExecClientMessage 的消息类型字段（=2）。
+	// 仅用于 it.duplex.send 包裹外层；不得用于 ExecClientMessage 内层承载 McpResult（见 B4）。
 	cursorFldClientMessage = 2
+
+	// cursorFldClientMsgMcpResult 是 ExecClientMessage **内层**承载 McpResult 的字段号（=11）。
+	// 与 ExecServerMessage.f11 mcp_args 对称。本单 B4 修正：此前误用 cursorFldClientMessage(=2)
+	// 作内层，导致上游不认回包、模型等到 180s deadline_exceeded；证据：重构前实现与活体探针均用 11。
+	cursorFldClientMsgMcpResult = 11
 
 	// ExecClientMessage 字段。
 	cursorFldClientMsgID     = 1  // f1 id（exec_id，varint）
@@ -93,12 +109,13 @@ func cursorEncodeMcpToolResult(
 	} else {
 		result = cursorAppendBytesField(nil, cursorFldMcpResultSuccess, payload)
 	}
-	// ExecClientMessage{f1 id, f15 id(原值), f2 McpResult}。
+	// ExecClientMessage{f1 id, f15 id(原值), f11 McpResult}：内层 McpResult 必须用 f11，
+	// 绝非信封字段 cursorFldClientMessage(=2)（B4 修正；证据见常量块）。
 	msg := cursorAppendVarintField(nil, cursorFldClientMsgID, execID)
 	if len(idField) > 0 {
 		msg = cursorAppendBytesField(msg, cursorFldClientMsgExecID, idField)
 	}
-	msg = cursorAppendBytesField(msg, cursorFldClientMessage, result)
+	msg = cursorAppendBytesField(msg, cursorFldClientMsgMcpResult, result)
 	return msg
 }
 
