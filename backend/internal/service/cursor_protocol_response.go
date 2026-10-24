@@ -233,27 +233,22 @@ const (
 
 // agent.v1.ToolCallStartedUpdate（活体 tool_call_started 真实帧）字段号：
 //
-//   - f1  call_id（string）—— 真实帧的对外委托 ID（= OpenAI tool_calls[].id）；
-//     旧合成帧（既有测试）把 call_id 放在 ToolCall.f1（即 started.f15 内层 f1），
-//     字段号同为 1，故本层两种布局都认。
+//   - f1  call_id（string）—— 对外委托 ID（= OpenAI tool_calls[].id）；
 //   - f2  ToolCall 消息 —— 承载 mcp_tool_call / get_mcp_tools 分支；
 //   - f3  model_call_id（string）—— 本批归属键（真实帧才有）；
 //   - ToolCall 内层 f15 = mcp_tool_call（**对外**委托）；f44 = get_mcp_tools（**内部**
 //     元工具，只参与同批完整性判断，绝不交给客户端）。
 //
-// 注：cursorFldToolCallStartedToolCall（f15）与 cursorFldToolCallID（f1）字段号与真实
-// 帧一致，也继续被既有测试的合成帧复用，故保留不删（派发单 B1 §4.4 的"若变为未使用
-// 则删除"条件不成立）。
+// 仅认真实帧布局（派发单 B1b：旧合成帧布局已随 fcToolStarted 一并归零，双模兼容分支删除）。
 const (
-	// cursorFldToolCallID 是 call_id 字段号（f1）：真实帧在 started.f1，旧合成帧在
-	// ToolCall.f1（started.f15 内层），字段号一致。
+	// cursorFldToolCallID 是 call_id 字段号（f1）：真实帧在 started.f1。
 	cursorFldToolCallID = 1
 	// cursorFldToolCallStartedToolCallMsg 是 started.f2（ToolCall 消息）。
 	cursorFldToolCallStartedToolCallMsg = 2
 	// cursorFldToolCallStartedModelCallID 是 started.f3（model_call_id）。
 	cursorFldToolCallStartedModelCallID = 3
-	// cursorFldToolCallStartedToolCall 是 **字段号 15**：真实帧里是 ToolCall 内层的
-	// mcp_tool_call 分支（对外）；旧合成帧里被复用为"started.f15 即 ToolCall 消息"。
+	// cursorFldToolCallStartedToolCall 是 **字段号 15**：ToolCall 内层的 mcp_tool_call
+	// 分支（对外）。解析器据此判定 external=true。
 	cursorFldToolCallStartedToolCall = 15
 	// cursorFldToolCallGetMcpTools 是 ToolCall 内层的 get_mcp_tools 分支（f44，内部元工具）。
 	cursorFldToolCallGetMcpTools = 44
@@ -992,7 +987,7 @@ func cursorVarintField(fields []cursorPBField, number int) uint64 {
 
 // noteToolCallStarted 把 InteractionUpdate.f2 tool_call_started 登记进当前批次。
 //
-// 真实帧结构（活体取证，派发单 B1 事实依据）：
+// 真实帧结构（活体取证，派发单 B1 事实依据；B1b 起为唯一被认布局）：
 //
 //	started.f1 (string) call_id        —— 对外委托 ID
 //	started.f2 (msg)    ToolCall
@@ -1000,9 +995,9 @@ func cursorVarintField(fields []cursorPBField, number int) uint64 {
 //	   f44 (msg) get_mcp_tools  → 内部元工具（只参与同批完整性）
 //	started.f3 (string) model_call_id  —— 本批归属键
 //
-// 解析：call_id←started.f1、model_call_id←started.f3、external←ToolCall 含 f15。
-// 旧合成帧（既有测试）把 call_id 放在 ToolCall.f1（started.f15 内层）、且把 ToolCall
-// 整体放在 started.f15，字段号同为 1/15，故本层两种布局都兼容（不改动既有测试）。
+// 解析：call_id←started.f1、model_call_id←started.f3、external←ToolCall 含 f15（且不含 f44）。
+// 旧合成帧布局（call_id 在 ToolCall.f1、ToolCall 整体在 started.f15）的双模兼容分支已删除
+// （派发单 B1b）：解析器只认真实帧。
 //
 // 成功路径顺带维护本地归属计数（lastModelCallID / batchCounts / 消费 pendingListed），
 // 这些**只用于 listed 归属判定**，不参与封口、不影响任何输出字节（派发单 B1 §4.2）。
@@ -1013,27 +1008,20 @@ func (p *cursorStreamParser) noteToolCallStarted(b []byte) error {
 	}
 	delegations := p.toolDelegations()
 
-	// call_id：真实帧在 started.f1；旧合成帧在 ToolCall.f1（started.f15 内层 f1）。
+	// call_id：真实帧在 started.f1。
 	callID := ""
 	if f, ok := cursorFindField(fields, cursorFldToolCallID); ok {
 		callID = strings.TrimSpace(f.String())
-	} else if tc, ok := cursorFindField(fields, cursorFldToolCallStartedToolCall); ok {
-		if inner, e := cursorDecodeProtobuf(tc.Bytes); e == nil {
-			if id, ok := cursorFindField(inner, cursorFldToolCallID); ok {
-				callID = strings.TrimSpace(id.String())
-			}
-		}
 	}
 
-	// model_call_id：真实帧在 started.f3；旧合成帧无此字段 → 空。
+	// model_call_id：真实帧在 started.f3。
 	modelCallID := ""
 	if f, ok := cursorFindField(fields, cursorFldToolCallStartedModelCallID); ok {
 		modelCallID = strings.TrimSpace(f.String())
 	}
 
 	// external：真实帧看 started.f2（ToolCall 消息）内层是否含 f15（mcp_tool_call）；
-	// 含 f44（get_mcp_tools）或其它分支即内部。旧合成帧把 ToolCall 直接放在
-	// started.f15 → 视为对外委托。started.f2 缺失按内部。
+	// 含 f44（get_mcp_tools）或其它分支即内部。started.f2 缺失按内部。
 	external := false
 	if tc, ok := cursorFindField(fields, cursorFldToolCallStartedToolCallMsg); ok {
 		if inner, e := cursorDecodeProtobuf(tc.Bytes); e == nil {
@@ -1041,8 +1029,6 @@ func (p *cursorStreamParser) noteToolCallStarted(b []byte) error {
 			_, hasGetMcp := cursorFindField(inner, cursorFldToolCallGetMcpTools)  // f44
 			external = hasMcp && !hasGetMcp
 		}
-	} else if _, ok := cursorFindField(fields, cursorFldToolCallStartedToolCall); ok {
-		external = true
 	}
 
 	if err := delegations.noteToolCallStarted(modelCallID, callID, external && callID != ""); err != nil {

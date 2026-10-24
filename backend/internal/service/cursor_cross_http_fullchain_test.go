@@ -49,11 +49,15 @@ func fcTextDelta(text string) []byte {
 	return cursorAppendBytesField(nil, cursorFldServerInteractionUpdate, update)
 }
 
-// fcToolStarted 构造 interaction_update{2 tool_call_started{15 ToolCall{1 call_id}}}。
+// fcToolStarted 构造真实 tool_call_started 帧（活体取证布局，派发单 B1b 起为唯一布局）：
 //
-// 字段形状取解析器契约（cursorStreamParser.noteToolCallStarted）：f2 内层 f15 是 ToolCall
-// 的 mcp_tool_call 分支，其 f1 为客户端要执行的 call_id；不带 f15 的视为内部元工具
-// （get_mcp_tools 等），只参与同批完整性判断。端到端必须走**对外分支**，否则批次里
+//	started.f1 (string) call_id        —— 对外委托 ID
+//	started.f2 (msg)    ToolCall
+//	   f15 (msg) mcp_tool_call   → 对外（external=true）
+//	started.f3 (string) model_call_id  —— 本批归属键
+//
+// 不再使用旧合成帧布局（ToolCall 放在 started.f15、call_id 放在 ToolCall.f1）；解析器
+// （noteToolCallStarted）自 B1b 起只认真实帧布局。端到端必须走**对外分支**，否则批次里
 // 根本没有可交付的调用。
 //
 // modelCallID 是 started.f3（真实帧归属键）。续轮（secondBatch）必须用**不同于首轮**的
@@ -62,11 +66,13 @@ func fcTextDelta(text string) []byte {
 // 恒为 false（B2 以 listed 为准封口会失败关闭）。真实续轮本就是新的 AgentRun 代，model_call_id
 // 自然不同，故夹具如实区分。
 func fcToolStarted(callID, modelCallID string) []byte {
-	toolCall := cursorAppendStringField(nil, cursorFldToolCallID, callID)
-	started := cursorAppendBytesField(nil, cursorFldToolCallStartedToolCall, toolCall)
-	// 真实帧的 started.f3 携带 model_call_id（派发单 §3）：缺它会导致解析侧把
-	// tool_requests_listed 挂起而不归属批次，使 listedSeen 恒为 false。B2 以 listed 为准
-	// 封口，故此处补上，使 listed 能正确归属（与真实帧一致）。
+	// mcp_tool_call 消息（ToolCall.f15 内层）：f3 为其 call_id 字段（与真实帧一致）。
+	mcpCall := cursorAppendStringField(nil, 3, callID)
+	// ToolCall 消息：f15 = mcp_tool_call（对外分支）。
+	toolCall := cursorAppendBytesField(nil, cursorFldToolCallStartedToolCall, mcpCall)
+	// started 消息：f1=call_id、f2=ToolCall、f3=model_call_id（真实帧三元组）。
+	started := cursorAppendStringField(nil, cursorFldToolCallID, callID)
+	started = cursorAppendBytesField(started, cursorFldToolCallStartedToolCallMsg, toolCall)
 	started = cursorAppendStringField(started, cursorFldToolCallStartedModelCallID, modelCallID)
 	update := cursorAppendBytesField(nil, cursorFldUpdateToolCallStarted, started)
 	return cursorAppendBytesField(nil, cursorFldServerInteractionUpdate, update)
