@@ -10,6 +10,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/accountgroup"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
+	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
@@ -270,12 +271,15 @@ func (r *quotaKeyRepository) SoftDeleteAccountsByQuotaKey(ctx context.Context, t
 //  2. 到期复核不再用行锁（ForUpdate）+ Go 侧比较，而是下沉为条件谓词 expiredKey：
 //     断言账号所属激活码"当前仍到期"（status='expired' AND expires_at IS NOT NULL
 //     AND expires_at < now），以 EXISTS 子查询交由数据库在语句执行时按当前已提交状态裁决。
-//  3. 取候选 ID：SELECT 的 WHERE 即携带 expiredKey 谓词，仅 platform='cursor'、未软删
-//     且所属激活码仍到期的账号入选。
-//  4. 条件更新：UPDATE 的 WHERE 同样携带 expiredKey 谓词——到期判定与 deleted_at 写入
-//     在同一条语句内原子完成；并保留 DeletedAtIsNil()，与取候选同口径。
-//  5. 返回实际被软删 ID：affected == 0（竞态下候选已先被并发事务软删）时返回空集合，
-//     避免误导调用方为本次未删的账号触发 outbox。
+//  3. 单条 UPDATE 裁决：UPDATE 的 WHERE 同时含 quota_key_id / platform='cursor' /
+//     deleted_at IS NULL / expiredKey 到期谓词——到期判定与 deleted_at 写入在同一条
+//     语句内由数据库原子完成；不存在先读候选再写的中间窗口，候选集变化也不会误删。
+//  4. 无候选 SELECT：不再预取候选 ID 再条件更新，affected == 0（竞态下候选已先被
+//     并发事务软删，或激活码已不再到期）时返回空集合。
+//  5. 回读精确上报：上报集合必须恰好等于本次 UPDATE 实际影响的行——回读 WHERE
+//     限定 quota_key_id / platform='cursor' / deleted_at 精确等于本次注入的 now，
+//     与其它调用、其它时间点的软删互不相交；回读必须用 mixins.SkipSoftDelete 绕过
+//     SoftDeleteMixin 的 deleted_at IS NULL 自动过滤，否则读不到本次刚软删的行。
 func (r *quotaKeyRepository) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64, now time.Time) ([]int64, error) {
 	if tx == nil {
 		return nil, errors.New("quota_key_repository: SoftDeleteCursorAccountsByExpiredQuotaKey requires the caller's transaction")
@@ -288,26 +292,12 @@ func (r *quotaKeyRepository) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx conte
 		quotakey.ExpiresAtLT(now),
 	)
 
-	// 取候选 ID：仅 cursor 平台、未软删且所属激活码仍到期的账号。
-	ids, err := tx.Account.Query().
+	// 单条语句完成「到期判定 + 软删」：WHERE 同时含 quota_key_id / platform='cursor' /
+	// deleted_at IS NULL / 所属激活码仍到期（EXISTS 子查询谓词），由数据库原子裁决。
+	affected, err := tx.Account.Update().
 		Where(
 			account.QuotaKeyID(quotaKeyID),
 			account.PlatformEQ(domain.PlatformCursor),
-			account.DeletedAtIsNil(),
-			expiredKey,
-		).
-		IDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	// 条件更新：判定与更新同一条语句，WHERE 带同一到期谓词与未软删口径。
-	affected, err := tx.Account.Update().
-		Where(
-			account.IDIn(ids...),
 			account.DeletedAtIsNil(),
 			expiredKey,
 		).
@@ -318,6 +308,19 @@ func (r *quotaKeyRepository) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx conte
 	}
 	if affected == 0 {
 		return nil, nil
+	}
+
+	// 精确上报：回读本次实际被软删的行（deleted_at 精确等于本次注入的 now），
+	// 必须绕过 SoftDeleteMixin 的 deleted_at IS NULL 过滤。
+	ids, err := tx.Account.Query().
+		Where(
+			account.QuotaKeyID(quotaKeyID),
+			account.PlatformEQ(domain.PlatformCursor),
+			account.DeletedAtEQ(now),
+		).
+		IDs(mixins.SkipSoftDelete(ctx))
+	if err != nil {
+		return nil, err
 	}
 	return ids, nil
 }

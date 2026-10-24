@@ -421,6 +421,56 @@ func TestSoftDeleteCursorAccountsByExpiredQuotaKey_IdempotentSecondCall(t *testi
 	require.Equal(t, afterFirst.Unix(), afterSecond.Unix(), "deleted_at must be unchanged by the second call")
 }
 
+// TestSoftDeleteCursorAccountsByExpiredQuotaKey_ExcludesAlreadyDeletedAccounts：
+// 已软删的 cursor 账号（deleted_at 为另一时间戳）不会被本次调用改写或重复上报；
+// 返回集合恰好是本次实际被软删的另外 2 个 ID。
+func TestSoftDeleteCursorAccountsByExpiredQuotaKey_ExcludesAlreadyDeletedAccounts(t *testing.T) {
+	client := quotaKeyRepositoryTestClient(t)
+	ctx := context.Background()
+	qkr := qkrRepo(t, client)
+
+	now := time.Now()
+	// 已软删账号使用"另一个时间戳"，确保与本次注入的 now 可区分。
+	alreadyDeletedAt := now.Add(-time.Hour)
+	qk := qkrCreateQuotaKey(t, client, domain.QuotaKeyStatusExpired, timePtr(now.Add(-2*time.Hour)))
+	a1 := qkrCreateAccount(t, client, qk.ID, domain.PlatformCursor)
+	a2 := qkrCreateAccount(t, client, qk.ID, domain.PlatformCursor)
+	a3 := qkrCreateAccount(t, client, qk.ID, domain.PlatformCursor)
+	// 手工把 a3 置为已软删（绕过 SoftDeleteMixin 的删除钩子，直接 UPDATE deleted_at）。
+	_, err := client.Account.UpdateOneID(a3.ID).SetDeletedAt(alreadyDeletedAt).Save(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = client.Account.Delete().Where(account.IDIn(a1.ID, a2.ID, a3.ID)).Exec(ctx)
+		_ = client.QuotaKey.DeleteOneID(qk.ID).Exec(ctx)
+	})
+
+	var got []int64
+	runInTx(t, client, func(tx *ent.Tx) error {
+		var err error
+		got, err = qkr.SoftDeleteCursorAccountsByExpiredQuotaKey(ctx, tx, qk.ID, now)
+		return err
+	})
+
+	require.ElementsMatch(t, []int64{a1.ID, a2.ID}, got, "returned IDs must be exactly the accounts soft-deleted by this call")
+	// a1 / a2 本次被软删，deleted_at 为本次注入的 now。
+	require.NotNil(t, qkrScanDeletedAt(t, client, a1.ID))
+	require.NotNil(t, qkrScanDeletedAt(t, client, a2.ID))
+	// a3 早已软删：本次调用不得改写其 deleted_at。
+	gotDeleted := qkrScanDeletedAt(t, client, a3.ID)
+	require.NotNil(t, gotDeleted, "a3 must remain soft-deleted")
+	require.Equal(t, alreadyDeletedAt.Unix(), gotDeleted.Unix(), "already-deleted account's deleted_at must NOT be rewritten")
+
+	// 同一事务内 EnqueueAccountChangedOutbox 后，outbox 中只出现本次实际删除的 2 个 ID。
+	qkrEnsureSchedulerOutbox(t, client)
+	_, err = client.ExecContext(ctx, "DELETE FROM scheduler_outbox")
+	require.NoError(t, err)
+	runInTx(t, client, func(tx *ent.Tx) error {
+		return qkr.EnqueueAccountChangedOutbox(ctx, tx, got)
+	})
+	outboxIDs := qkrOutboxAccountIDs(t, client, qkrEventAccountChanged)
+	require.ElementsMatch(t, []int64{a1.ID, a2.ID}, outboxIDs, "outbox must only contain IDs actually soft-deleted by this call")
+}
+
 // TestSoftDeleteCursorAccountsByExpiredQuotaKey_OtherQuotaKeyUntouched：
 // 另一激活码下的 cursor 账号不被删除。
 func TestSoftDeleteCursorAccountsByExpiredQuotaKey_OtherQuotaKeyUntouched(t *testing.T) {
