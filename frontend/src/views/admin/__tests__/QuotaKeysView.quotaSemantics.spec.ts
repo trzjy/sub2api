@@ -330,3 +330,56 @@ describe('QuotaKeysView probe 成功后刷新列表与详情（O03）', () => {
     wrapper.unmount()
   })
 })
+
+// ---------------------------------------------------------------------------
+// HDR-1：详情账号折叠标题须用 account_count（真实总数），而非分页长度。
+// 缺陷：原标题用 detail.accounts?.length（后端默认 page_size=20 的分页长度），
+// 当账号数 > 20 时与字段区的 account_count 矛盾。本用例用「accounts 仅 2 条、
+// account_count=35」模拟分页截断，锁死标题数字来自 account_count。
+// ---------------------------------------------------------------------------
+
+describe('QuotaKeysView 详情账号折叠标题用真实总数（HDR-1）', () => {
+  const hdrDetail = {
+    ...keyRow,
+    account_count: 35,
+    accounts: [
+      { id: 11, name: 'cursor-acc-1', platform: 'cursor', status: 'active' },
+      { id: 12, name: 'cursor-acc-2', platform: 'cursor', status: 'inactive' }
+    ]
+  }
+
+  beforeEach(() => {
+    vi.mocked(adminAPI.quotaKeys.list).mockReset()
+    vi.mocked(adminAPI.quotaKeys.get).mockReset()
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue({
+      items: [keyRow],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    } as never)
+    vi.mocked(adminAPI.quotaKeys.get).mockResolvedValue(hdrDetail as never)
+  })
+
+  it('详情账号折叠标题用 account_count（真实总数），不用分页长度', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const vm = wrapper.vm as unknown as {
+      openDetail: (row: typeof keyRow) => Promise<void>
+      toggleAccounts: (id: number) => void
+    }
+    await vm.openDetail(keyRow)
+    await flushPromises()
+    await nextTick()
+    vm.toggleAccounts(7)
+    await nextTick()
+
+    const text = wrapper.text()
+    // 标题渲染形如 admin.quotaKeys.accountsTitle（35）：须包含真实总数。
+    expect(text).toContain('35')
+    // 绝不包含分页长度（2）。
+    expect(text).not.toContain('（2）')
+    wrapper.unmount()
+  })
+})

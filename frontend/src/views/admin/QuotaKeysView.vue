@@ -294,7 +294,7 @@
             @click="toggleAccounts(detail.id)"
           >
             <span class="text-sm font-medium text-gray-900 dark:text-white">
-              {{ t('admin.quotaKeys.accountsTitle') }}（{{ detail.accounts?.length ?? 0 }}）
+              {{ t('admin.quotaKeys.accountsTitle') }}（{{ detail.account_count ?? 0 }}）
             </span>
             <span class="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
               {{
