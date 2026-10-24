@@ -713,44 +713,47 @@ func (r *testDBRepo) SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.T
 }
 
 // SoftDeleteCursorAccountsByExpiredQuotaKey 真实 DB 替身：与 production repository
-// 同机制——tx 必填；单条 UPDATE 同时携带到期谓词（HasQuotaKeyWith）/ quota_key_id /
-// platform='cursor' / deleted_at IS NULL，到期判定与 deleted_at 写入由数据库原子裁决；
-// affected == 0 时返回空集合；否则按 deleted_at 精确等于本次 now 回读实际被软删的行
-// （用 SkipSoftDelete 绕过软删过滤），返回集合恰好等于本次 UPDATE 影响的行。
+// 同机制——tx 必填；单条 `UPDATE ... RETURNING id`，到期判定下沉为 EXISTS 子查询
+// （status='expired' AND expires_at IS NOT NULL AND expires_at < now），与 quota_key_id /
+// platform='cursor' / deleted_at IS NULL 过滤在同一条语句内由数据库原子裁决；
+// RETURNING 直接返回本次实际受影响行，无回读、无候选 SELECT、无方言分支。
 // tx 为 nil 时失败关闭。
 func (r *testDBRepo) SoftDeleteCursorAccountsByExpiredQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64, now time.Time) ([]int64, error) {
 	if tx == nil {
 		return nil, errors.New("testDBRepo: SoftDeleteCursorAccountsByExpiredQuotaKey requires the caller's transaction")
 	}
-	expiredKey := account.HasQuotaKeyWith(
-		quotakey.Status(domain.QuotaKeyStatusExpired),
-		quotakey.ExpiresAtNotNil(),
-		quotakey.ExpiresAtLT(now),
-	)
-	affected, err := tx.Account.Update().
-		Where(
-			account.QuotaKeyID(quotaKeyID),
-			account.PlatformEQ(domain.PlatformCursor),
-			account.DeletedAtIsNil(),
-			expiredKey,
-		).
-		SetDeletedAt(now).
-		Save(ctx)
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE accounts
+		   SET deleted_at = $1
+		 WHERE quota_key_id = $2
+		   AND platform = 'cursor'
+		   AND deleted_at IS NULL
+		   AND EXISTS (
+		       SELECT 1 FROM quota_keys q
+		        WHERE q.id = accounts.quota_key_id
+		          AND q.deleted_at IS NULL
+		          AND q.status = 'expired'
+		          AND q.expires_at IS NOT NULL
+		          AND q.expires_at < $1
+		   )
+		RETURNING id`, now, quotaKeyID)
 	if err != nil {
 		return nil, err
 	}
-	if affected == 0 {
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
 		return nil, nil
-	}
-	ids, err := tx.Account.Query().
-		Where(
-			account.QuotaKeyID(quotaKeyID),
-			account.PlatformEQ(domain.PlatformCursor),
-			account.DeletedAtEQ(now),
-		).
-		IDs(mixins.SkipSoftDelete(ctx))
-	if err != nil {
-		return nil, err
 	}
 	return ids, nil
 }
