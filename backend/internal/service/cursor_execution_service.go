@@ -3163,8 +3163,18 @@ func (d *cursorToolDelegations) batchFor(modelCallID string) (*cursorToolBatch, 
 }
 
 // batchForDelegation 按 call_id 归批：遍历未封口批次，找出 started 列表含该 call_id
-// 的批次；恰好命中 1 个则返回它；命中 0 个或 ≥2 个，或 call_id 为空，则回退到
-// batchFor("")（沿用其唯一性 / 歧义失败关闭语义，不新增"取最近一批"猜测）。
+// 的批次；恰好命中 1 个则返回它。
+//
+// F3 整改（外审 must_fix）：call_id 命中 0 个时**不得**再无条件回退 batchFor("")——
+// 否则一条没有对应 started 的委派会被并入某个已声明 started 的开放批，进而通过封口、
+// 向客户端交出超出 listed 声明的调用。因此：
+//   - call_id 为空 → 仍走 batchFor("")（既有行为不变，委托专属批 / writeback 路径依赖）；
+//   - call_id 命中 0 个、且**没有任何**开放批携带 started → 仍回退 batchFor("")
+//     （委托专属批，如 writeback 路径，委派先于 started 到达或根本没有 started）；
+//   - call_id 命中 0 个、但存在携带 started 的开放批 → 该委派无对应 started，失败关闭；
+//   - call_id 命中 ≥2 个 → 归批歧义，失败关闭。
+//
+// 绝不按"最近一批"猜测归属。
 //
 // 必须在已持有 d.mu 的调用上下文里使用（与 batchFor 同约定，不自行加锁）。B2 之前
 // noteDelegation 拿不到 model_call_id，只能靠 call_id 与 started 硬链接归批。
@@ -3174,9 +3184,16 @@ func (d *cursorToolDelegations) batchForDelegation(callID string) (*cursorToolBa
 	}
 	var matched *cursorToolBatch
 	matchedCount := 0
+	// openWithStarted 统计携带 started 的开放批数量，用于区分"无匹配"的两种语义：
+	// 有 started 的开放批存在却不命中 → 孤儿委派（F3，失败关闭）；
+	// 全部开放批都没有 started → 委托专属批，允许回退 batchFor("")。
+	openWithStarted := 0
 	for _, batch := range d.all {
 		if batch.sealed {
 			continue
+		}
+		if len(batch.started) > 0 {
+			openWithStarted++
 		}
 		for _, id := range batch.started {
 			if id == callID {
@@ -3189,9 +3206,24 @@ func (d *cursorToolDelegations) batchForDelegation(callID string) (*cursorToolBa
 	if matchedCount == 1 {
 		return matched, nil
 	}
-	// 0 命中或多命中：回退到 batchFor("")，沿用唯一性 / 歧义失败关闭语义，
-	// 绝不按"最近一批"猜测。
-	return d.batchFor("")
+	if matchedCount >= 2 {
+		// 多命中：归批歧义，失败关闭（沿用 batchFor("") 的歧义语义，绝不按"最近一批"猜）。
+		return nil, fmt.Errorf("%w: delegation call_id %q matches %d open batches' started (ambiguous attribution)",
+			ErrCursorBatchAmbiguous, callID, matchedCount)
+	}
+	// matchedCount == 0：call_id 未命中任何开放批的 started。
+	if openWithStarted == 0 {
+		// 没有任何开放批携带 started（委托专属批 / 空批，如 writeback 路径）→ 回退 batchFor("")。
+		return d.batchFor("")
+	}
+	if openWithStarted == 1 {
+		// 恰好一个开放批携带 started，但该 call_id 不在其中 → 孤儿委派，绝不能并入已声明 started 的批次。
+		return nil, fmt.Errorf("%w: delegation call_id %q has no matching tool_call_started in the open batch (orphan delegation beyond listed)",
+			ErrCursorBatchIncomplete, callID)
+	}
+	// ≥2 个开放批都携带 started 却不命中 → 归批歧义，失败关闭（沿用 batchFor("") 歧义语义）。
+	return nil, fmt.Errorf("%w: delegation call_id %q matches no started across %d open batches (ambiguous attribution)",
+		ErrCursorBatchAmbiguous, callID, openWithStarted)
 }
 
 // noteToolRequestsListed 登记一次 tool_requests_listed（InteractionUpdate.f27）的 call_count。
@@ -3332,6 +3364,30 @@ func (d *cursorToolDelegations) checkSealableLocked() error {
 			if _, ok := delegated[callID]; !ok {
 				return fmt.Errorf("%w: batch %q call %q has no complete mcp_args delegation",
 					ErrCursorBatchIncomplete, batch.modelCallID, callID)
+			}
+		}
+		// F3 整改（外审 must_fix）：反向检查——每条已登记委托都必须有对应的 started，
+		// 否则该批交付集合会超出 listed 声明的调用。仅做 started→delegation 单向检查会让
+		// "started(a)+delegation(b)+delegation(a)" 通过封口并交出 b（b 无对应 started）。
+		//
+		// 守卫：仅当本批存在对外 started 时才做反向检查。纯委托批（started 为空、如 writeback
+		// 路径或仅含内部元工具）没有可对照的对外 started，不做该检查以避免误杀合法交付。
+		if len(batch.started) > 0 {
+			for _, tc := range batch.delegations {
+				if tc.ID == "" {
+					continue
+				}
+				found := false
+				for _, id := range batch.started {
+					if id == tc.ID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("%w: batch %q delegation %q has no matching tool_call_started (delivery set exceeds listed)",
+						ErrCursorBatchIncomplete, batch.modelCallID, tc.ID)
+				}
 			}
 		}
 		// 未收到 listed 不得交接（证据来源见函数注释）。
@@ -6554,6 +6610,16 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 	}
 	responseID = strings.TrimSpace(responseID)
 
+	// F2 整改（外审 must_fix）：交付集合 = 登记集合。对外输出可能包含多个已封口批的调用
+	// （全量输出、全批封口），若只登记最后一批的 call_id，先交付的那批 call_id 未登记，
+	// 续轮回传时会报未知关联。故把所有尚未交付的已封口批的 call_id 一并登记到同一
+	// batchID（取最后一批的 ModelCallID），pending.callIDs 取各批并集。
+	// 不得引入"分批登记 / 多次 pending / 二次索引"等新机制。
+	var deliveredCallIDs []string
+	for _, b := range batches {
+		deliveredCallIDs = append(deliveredCallIDs, b.CallIDs...)
+	}
+
 	// 与 beginResumeTakeover 同一锁序（会话表锁 → 会话锁）：不引入第二把锁。
 	s.sessions.mu.Lock()
 	defer s.sessions.mu.Unlock()
@@ -6566,9 +6632,16 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 	if live.finishing || live.state == cursorSessionClosed {
 		return nil, fmt.Errorf("%w: session finished before batch delivery", ErrCursorResumeNotWaiting)
 	}
-	// 整批一次检查并登记：任何一条冲突即整批失败（不半登记、不覆盖已有归属）。
-	for _, callID := range current.CallIDs {
+	// 整批一次检查并登记：任何一条"真正"冲突即整批失败（不半登记、不覆盖已有归属）。
+	// F2 整改：本次交付可能包含多个已封口批，所有尚未交付批的 call_id 一并登记到同一
+	// batchID。续轮多 HTTP 分批发货时，历史批的 call_id 已在首轮登记过，属于同一会话的
+	// 已交付批直接跳过（否则会与自身历史登记冲突）；跨会话的冲突仍如实返回错误。
+	for _, callID := range deliveredCallIDs {
 		key := cursorSessionIndexKeyForSpec(live.spec, CursorIDKindCall, callID)
+		if existing, le := s.sessions.index.Locate(key); le == nil && existing.SessionID == live.id {
+			// 同会话已登记：历史已交付批，跳过重复登记。
+			continue
+		}
 		if err := s.sessions.index.Register(key, live.id, batchID); err != nil {
 			return nil, err
 		}
@@ -6579,7 +6652,7 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 			return nil, err
 		}
 	}
-	// 摘要增量只在克隆上计算：提交前正式历史不推进。
+	// 摘要增量只在克隆上计算：提交前正式历史不推进（沿用最后一批 call_id 语义）。
 	var history *CursorHistoryDigest
 	if live.historyDigest != nil {
 		history = live.historyDigest.Clone()
@@ -6590,7 +6663,7 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 	prepared := &cursorPreparedBatch{
 		batchID:    batchID,
 		responseID: responseID,
-		callIDs:    append([]string(nil), current.CallIDs...),
+		callIDs:    deliveredCallIDs,
 		history:    history,
 	}
 	// 交付中：只能被识别为"已准备未交付"，不能据此接管或写结果（delivered=false）。

@@ -158,6 +158,14 @@ func (s *cursorSSEStream) next() error {
 				s.delegated = true
 				s.done = true
 				handoffThisFinish = true
+				// 代际复位（外审 F1）：本次 HTTP 已向下游交接工具委托并暂停，后续帧
+				// 属于新一代 model call（真实续轮是新的 AgentRun 代），旧批归属计数
+				// （尤其是 listedSeen）**不得跨代沿用**——否则同 model_call_id 的续轮
+				// 会在 noteToolRequestsListed 看到 listedSeen==true 且计数已齐，把新
+				// listed 挂起为 pending → 新批永远拿不到 listed → 封口谓词永不通过 →
+				// 180s 挂死。只清解析器本地归属计数，不碰 cursorToolDelegations（封口
+				// 记录按代维护、续轮开新批，见 TestCursorBatchSealedBatchNotReused）。
+				s.parser.resetBatchGeneration()
 			}
 		}
 	}
@@ -750,6 +758,27 @@ func (p *cursorStreamParser) sealableDelegations() error {
 // HTTP 的协议头状态；同时已交付的 tool_calls 条数由 cursorSSEStream.emittedCalls 保持，
 // 不会被重播。
 func (p *cursorStreamParser) resetTurnStart() { p.started = false }
+
+// resetBatchGeneration 在开始新一代 model call 前清空解析器的"批次代际归属计数"。
+//
+// 触发点：cursorSSEStream.next() 的工具交接检查点（s.delegated=true 且 s.done=true）。
+// 本次 HTTP 已向下游交接了工具委托并暂停，后续帧属于新一代 model call（真实续轮是新的
+// AgentRun 代），旧批的归属计数（尤其是 listedSeen）**不得跨代沿用**——
+// 否则同 model_call_id 的续轮会在 noteToolRequestsListed 里看到 listedSeen==true 且
+// started+internal>=count，把新 listed 挂起为 pending → 新批永远拿不到 listed →
+// checkSealableLocked 永不通过 → 180s 挂死（外审 F1）。
+//
+// 纪律：只清解析器本地归属计数，不碰 cursorToolDelegations（封口记录由该结构按代维护，
+// 续轮会开新批，见 TestCursorBatchSealedBatchNotReused）；不新增计时/兜底机制；同一 HTTP
+// 段内出现第二个 model_call_id 的批（未交接）时绝不复位（仅在交接检查点复位，D2）。
+func (p *cursorStreamParser) resetBatchGeneration() {
+	if p == nil {
+		return
+	}
+	p.batchCounts = nil
+	p.pendingListed = nil
+	p.lastModelCallID = ""
+}
 
 // cursorToolCallCapture 是一条经 mcp_args 委托捕获的工具调用。
 type cursorToolCallCapture struct {
