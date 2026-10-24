@@ -210,7 +210,7 @@ describe('QuotaKeysView 到期时间展示收敛（C-U7-B）', () => {
     }
     const out = vm.formatExpiresAt({ status: 'active', expires_at: '2026-12-31T00:00:00Z' })
     expect(out).not.toBe('admin.quotaKeys.expiryUnknown')
-    expect(out).not.toBe('admin.quotaKeys.never')
+    expect(out.length).toBeGreaterThan(0)
     expect(out).not.toBe('admin.quotaKeys.status.expired')
     expect(out.length).toBeGreaterThan(0)
     wrapper.unmount()
@@ -235,7 +235,7 @@ describe('QuotaKeysView 到期时间展示收敛（C-U7-B）', () => {
     // 空值必须映射到"到期时间未知"文案。
     expect(text).toContain('admin.quotaKeys.expiryUnknown')
     // 绝不再渲染"永不过期"。
-    expect(text).not.toContain('admin.quotaKeys.never')
+    expect(text).not.toContain('永不过期')
     wrapper.unmount()
   })
 })

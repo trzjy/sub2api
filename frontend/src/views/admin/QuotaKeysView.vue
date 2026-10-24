@@ -558,16 +558,15 @@ function statusBadgeClass(row: QuotaKey | QuotaKeyDetail): string {
 // 到期列渲染：按整行 status + 到期值收敛语义（C-U7-B 展示收敛）。
 // - status=expired 且无时间 → "已过期"
 // - active + 有时间 → 具体日期
-// - active + 无时间 → "到期时间未知"
-// - 空串（管理员创建表单显式留空，语义为"永不过期"）仍走 never 分支
-//   注：列表/详情数据来自后端，不会是空串；never 仅保留给创建表单约定路径。
+// - active + 无时间（含空串） → "到期时间未知"
+//   注：激活码不存在永不过期形态，上游给的码必然带期限；后端对 NULL 也只是
+//   "无期限约束"，不是业务承诺。原 never 分支（空串 ⇒ 永不过期）已删除。
 function formatExpiresAt(row: QuotaKey | QuotaKeyDetail): string {
   if (row.status === 'expired' && (row.expires_at === null || row.expires_at === undefined)) {
     return t('admin.quotaKeys.status.expired')
   }
   const r = resolveExpiryDisplay(row.expires_at)
   if (r.status === 'unknown') return t('admin.quotaKeys.expiryUnknown')
-  if (r.status === 'never') return t('admin.quotaKeys.never')
   return r.text
 }
 

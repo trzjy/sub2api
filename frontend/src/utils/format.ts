@@ -148,25 +148,26 @@ export function formatDateTime(
 /**
  * 激活码到期时间的展示解析（纯函数，便于单测，不持有 i18n）。
  *
- * 语义（CUR-F2 裁定 4）：
- * - null/undefined：上游未给出到期时间（该码尚未成功拉号 / key_info.expired_at 为空）
- *   ⇒ 视为"到期时间未知"，**不等于**"永不过期"。由调用方映射为 i18n 文案。
- * - 空串：管理员创建表单显式留空 ⇒ "永不过期"语义（创建表单约定，路径不同，不改）。
+ * 语义（CUR-F2 裁定 4，2026-10-24 收敛）：
+ * - null/undefined：尚未从上游获取到到期时间（该码 lookup 未成功 / key_info.expired_at 为空）
+ *   ⇒ "到期时间未知"。**不等于**"永不过期"——激活码不存在永不过期形态，
+ *   上游给的码必然带期限；后端对 NULL 也只是"无期限约束"，不是业务承诺。
  * - 其它：返回格式化的日期串。
+ *
+ * 注：原 `never` 分支（空串 ⇒ "永不过期"）已删除。该分支不可达——后端
+ * `expires_at` 是 `*time.Time` + omitempty，JSON 只可能给 RFC3339 串或省略字段，
+ * 永不会给空串；"NULL=永不过期"是代理有效期的语义（repository/proxy_repo.go:428），
+ * 被误抄到激活码域。
  */
 export type ExpiryDisplay =
   | { status: 'unknown' }
-  | { status: 'never' }
   | { status: 'date'; text: string }
 
 export function resolveExpiryDisplay(
   value: string | null | undefined
 ): ExpiryDisplay {
-  if (value === null || value === undefined) {
+  if (value === null || value === undefined || value.trim() === '') {
     return { status: 'unknown' }
-  }
-  if (value.trim() === '') {
-    return { status: 'never' }
   }
   return { status: 'date', text: formatDateTime(value) }
 }
