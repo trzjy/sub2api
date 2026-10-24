@@ -39,39 +39,3 @@ func TestAccountListItemQuotaKeySerialization(t *testing.T) {
 	require.NotContains(t, string(plainData), "quota_key_id", "omit quota_key_id when nil")
 	require.NotContains(t, string(plainData), "quota_key_label", "omit quota_key_label when nil")
 }
-
-// TestAccountListResponseQuotaKeySummaries 锁定列表顶层响应（v3.3 §4.5 / C2）：
-// 顶层 quota_key_summaries 在 cursor 账号存在时填充，缺省省略（omitempty）。
-func TestAccountListResponseQuotaKeySummaries(t *testing.T) {
-	qkID := int64(99)
-	label := "XXXX-****-****-1234"
-	resp := &AccountListResponse{
-		Items: []AccountListItem{
-			{ID: 1, Name: "cursor-acc", Platform: "cursor", Type: "apikey", QuotaKeyID: &qkID, QuotaKeyLabel: &label},
-		},
-		Total:    1,
-		Page:     1,
-		PageSize: 20,
-		QuotaKeySummaries: []QuotaKey{
-			{ID: qkID, CodeMasked: label, Status: "active", Exhausted: false},
-		},
-	}
-
-	data, err := json.Marshal(resp)
-	require.NoError(t, err)
-	body := string(data)
-	require.Contains(t, body, `"quota_key_summaries":`, "top-level list response must carry quota_key_summaries")
-	require.Contains(t, body, `"code_masked":"XXXX-****-****-1234"`, "summary carries masked code only")
-	require.Contains(t, body, `"items":`, "top-level list response preserves items")
-
-	// 无 cursor 账号时顶层汇总省略
-	empty := &AccountListResponse{
-		Items:    []AccountListItem{{ID: 2, Name: "openai-acc", Platform: "openai", Type: "apikey"}},
-		Total:    1,
-		Page:     1,
-		PageSize: 20,
-	}
-	emptyData, err := json.Marshal(empty)
-	require.NoError(t, err)
-	require.NotContains(t, string(emptyData), "quota_key_summaries", "omit quota_key_summaries when empty")
-}

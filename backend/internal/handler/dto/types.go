@@ -554,7 +554,7 @@ type AccountListItem struct {
 //   - 绝不返回激活码原文（code_encrypted）；仅暴露脱敏标签 code_masked。
 //   - 账号列表项（AccountListItem）禁止内嵌本聚合对象，仅暴露 QuotaKeyID /
 //     QuotaKeyLabel 两个脱敏标量（见上）。
-//   - 顶层列表响应（AccountListResponse.QuotaKeySummaries）在 cursor 平台账号
+//   - 顶层列表响应（quota_key_summaries）在 cursor 平台账号
 //     存在时才填充本汇总数组，供前端下拉/校验归属关系。
 //
 // 这是 C2 的 DTO 投影骨架；完整字段由 C5 的 QuotaKey DTO 契约最终定型，本结构
@@ -573,21 +573,6 @@ type QuotaKey struct {
 	LastRefreshAt    *time.Time `json:"last_refresh_at,omitempty"`
 	LastRefreshError string     `json:"last_refresh_error,omitempty"`
 	Notes            *string    `json:"notes,omitempty"`
-}
-
-// AccountListResponse 是管理员账号列表的顶层响应 DTO（v3.3 §4.5 / C2）。
-//
-// 在分页信封之上追加 cursor 激活码汇总（QuotaKeySummaries）：仅当本页存在
-// cursor 平台账号时填充，供前端展示归属关系；其余平台省略（omitempty）。
-// 既有的分页字段（total/page/page_size/items）与 response.PaginatedData 对齐。
-//
-// 注：C2 仅定义该 DTO 契约，实际填充由 C5 handler 完成（C2 禁区：不碰路由注册）。
-type AccountListResponse struct {
-	Items             []AccountListItem `json:"items"`
-	Total             int64             `json:"total"`
-	Page              int               `json:"page"`
-	PageSize          int               `json:"page_size"`
-	QuotaKeySummaries []QuotaKey        `json:"quota_key_summaries,omitempty"`
 }
 
 type AccountGroup struct {

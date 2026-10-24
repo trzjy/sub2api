@@ -39,22 +39,24 @@ export interface QuotaKey {
   account_count?: number
   working_count?: number
   notes?: string | null
-  created_at?: string
-  updated_at?: string
   // 来源额度快照投影（方案 §25.6 消费闭包⑤ / §25.7-B）。
   // 口径：quota_keys.usage_snapshot 的**已提交**值，列表/详情/probe 与账号行同源同值。
   // 无快照时省略（不是 0）；查询失败时 total/used 是上次成功值，须带时间并标注失败。
   usage?: QuotaKeyUsageProjection
 }
 
-/** 激活码下的账号项（脱敏标量，仅展示用）。 */
+/**
+ * 激活码下的账号项（脱敏标量，仅展示用）。
+ *
+ * 字段 = 后端 `handler/admin.quotaKeyAccountItem` 实际返回 ∩ 视图实际读取：
+ * id / name / platform / status。后端仍会多返 type 与 created_at，但视图不消费，
+ * 故不在此声明（前端只声明真正依赖的字段，避免再次凭印象手抄出幻影字段）。
+ */
 export interface QuotaKeyAccount {
   id: number
   name: string
   platform: string
   status: string
-  quota_key_id?: number | null
-  quota_key_label?: string | null
 }
 
 /** 激活码详情：脱敏视图 + 其下账号列表。 */
