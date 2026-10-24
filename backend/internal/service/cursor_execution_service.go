@@ -29,6 +29,8 @@ package service
 //     原始 choice 之前）校验，未知 choice / 缺失具名工具返回明确入参错误且未出站。
 
 import (
+	"os"
+	"crypto/sha256"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -4504,6 +4506,12 @@ func cursorCanonicalToolArgs(args string) ([]byte, error) {
 
 // cursorToolCallCanonical 生成一条工具调用项的 canonical JSON。
 func cursorToolCallCanonical(id, name, args string) ([]byte, error) {
+	// TEMP-DIAG：打印三部分长度与指纹（无正文），定位后移除。
+	{
+		ih, nh, ah := sha256.Sum256([]byte(id)), sha256.Sum256([]byte(name)), sha256.Sum256([]byte(args))
+		fmt.Fprintf(os.Stderr, "CANONDIAG id_len=%d name_len=%d args_len=%d id_sha=%x name_sha=%x args_sha=%x\n",
+			len(id), len(name), len(args), ih[:4], nh[:4], ah[:4])
+	}
 	canonicalArgs, err := cursorCanonicalToolArgs(args)
 	if err != nil {
 		return nil, err
