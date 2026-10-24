@@ -16,6 +16,7 @@ package service
 // math/big、sort、bytes、strings、io）。
 
 import (
+	"os"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -147,6 +148,11 @@ func (d *CursorHistoryDigest) AppendItem(itemType string, canonical []byte) erro
 	}
 	if err := ValidateCursorDigestItemType(itemType); err != nil {
 		return err
+	}
+	// TEMP-DIAG：逐项打印类型/长度/载荷指纹前 4 字节（无正文），定位后移除。
+	{
+		sum := sha256.Sum256(canonical)
+		fmt.Fprintf(os.Stderr, "DIGESTDIAG type=%s len=%d sha=%x\n", itemType, len(canonical), sum[:4])
 	}
 	if !d.initialized {
 		d.state = cursorDigestH0
