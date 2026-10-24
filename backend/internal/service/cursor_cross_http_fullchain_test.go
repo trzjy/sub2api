@@ -55,9 +55,19 @@ func fcTextDelta(text string) []byte {
 // 的 mcp_tool_call 分支，其 f1 为客户端要执行的 call_id；不带 f15 的视为内部元工具
 // （get_mcp_tools 等），只参与同批完整性判断。端到端必须走**对外分支**，否则批次里
 // 根本没有可交付的调用。
-func fcToolStarted(callID string) []byte {
+//
+// modelCallID 是 started.f3（真实帧归属键）。续轮（secondBatch）必须用**不同于首轮**的
+// model_call_id（如 "mc-2"）：解析侧按 model_call_id 维护 batchCounts.listedSeen，若续轮
+// 复用 "mc-1"，gen-1 已 listedSeen=true 会使 gen-2 的 listed 被挂起丢失，进而 listedSeen
+// 恒为 false（B2 以 listed 为准封口会失败关闭）。真实续轮本就是新的 AgentRun 代，model_call_id
+// 自然不同，故夹具如实区分。
+func fcToolStarted(callID, modelCallID string) []byte {
 	toolCall := cursorAppendStringField(nil, cursorFldToolCallID, callID)
 	started := cursorAppendBytesField(nil, cursorFldToolCallStartedToolCall, toolCall)
+	// 真实帧的 started.f3 携带 model_call_id（派发单 §3）：缺它会导致解析侧把
+	// tool_requests_listed 挂起而不归属批次，使 listedSeen 恒为 false。B2 以 listed 为准
+	// 封口，故此处补上，使 listed 能正确归属（与真实帧一致）。
+	started = cursorAppendStringField(started, cursorFldToolCallStartedModelCallID, modelCallID)
 	update := cursorAppendBytesField(nil, cursorFldUpdateToolCallStarted, started)
 	return cursorAppendBytesField(nil, cursorFldServerInteractionUpdate, update)
 }
@@ -210,7 +220,7 @@ func (u *cursorFullChainUpstream) handler() http.Handler {
 		}
 		if len(u.script.secondBatch) > 0 {
 			// 续轮的第二批：交付后挂着（等下一轮真实结果，或由测试收尾）。
-			u.writeStream(w, flusher, u.batchFrames(u.script.secondBatch, ""))
+			u.writeStream(w, flusher, u.batchFrames(u.script.secondBatch, "", "mc-2"))
 			<-r.Context().Done()
 			return
 		}
@@ -226,18 +236,19 @@ func (u *cursorFullChainUpstream) phase1() []byte {
 	if u.script.textOnly {
 		return joinFrames(fcTextDelta("thinking"))
 	}
-	return u.batchFrames(u.script.calls, "checking the weather")
+	return u.batchFrames(u.script.calls, "checking the weather", "mc-1")
 }
 
 // batchFrames 构造一个完整工具批（started×N → listed(N) → f11 委托×N），leadText 非空时
-// 先吐一段文本增量。第二批与首批走同一构造，避免两套帧语义。
-func (u *cursorFullChainUpstream) batchFrames(calls []cursorFullChainCall, leadText string) []byte {
+// 先吐一段文本增量。第二批与首批走同一构造，避免两套帧语义；modelCallID 是 started.f3
+// 归属键，续轮必须用不同于首轮的 ID（详见 fcToolStarted 注释）。
+func (u *cursorFullChainUpstream) batchFrames(calls []cursorFullChainCall, leadText, modelCallID string) []byte {
 	var payloads [][]byte
 	if leadText != "" {
 		payloads = append(payloads, fcTextDelta(leadText))
 	}
 	for _, call := range calls {
-		payloads = append(payloads, fcToolStarted(call.CallID))
+		payloads = append(payloads, fcToolStarted(call.CallID, modelCallID))
 	}
 	payloads = append(payloads, fcToolRequestsListed(uint64(len(calls))))
 	for _, call := range calls {

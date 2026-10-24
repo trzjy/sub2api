@@ -138,7 +138,9 @@ func TestCursorBatchSealedBatchNotReused(t *testing.T) {
 	require.NoError(t, d.noteDelegation("mc-1", cursorBatchDelegation("call_1", "get_weather")))
 	require.NoError(t, d.seal())
 
-	// 同 model_call_id 的第二代：listed 必须重新声明，未声明时不做数量判定。
+	// 同 model_call_id 的第二代：listed 必须重新声明（B2：未收到 listed 不得交接，
+	// 否则按 fail-closed 处理）；旧批的 count 绝不跨代复用（证据 29 的"最近 count"陷阱）。
+	require.NoError(t, d.noteToolRequestsListed("mc-1", 1))
 	require.NoError(t, d.noteToolCallStarted("mc-1", "call_2", true))
 	require.NoError(t, d.noteDelegation("mc-1", cursorBatchDelegation("call_2", "get_weather")))
 	require.NoError(t, d.seal())

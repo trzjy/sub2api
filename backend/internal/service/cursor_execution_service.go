@@ -3162,6 +3162,38 @@ func (d *cursorToolDelegations) batchFor(modelCallID string) (*cursorToolBatch, 
 	}
 }
 
+// batchForDelegation 按 call_id 归批：遍历未封口批次，找出 started 列表含该 call_id
+// 的批次；恰好命中 1 个则返回它；命中 0 个或 ≥2 个，或 call_id 为空，则回退到
+// batchFor("")（沿用其唯一性 / 歧义失败关闭语义，不新增"取最近一批"猜测）。
+//
+// 必须在已持有 d.mu 的调用上下文里使用（与 batchFor 同约定，不自行加锁）。B2 之前
+// noteDelegation 拿不到 model_call_id，只能靠 call_id 与 started 硬链接归批。
+func (d *cursorToolDelegations) batchForDelegation(callID string) (*cursorToolBatch, error) {
+	if strings.TrimSpace(callID) == "" {
+		return d.batchFor("")
+	}
+	var matched *cursorToolBatch
+	matchedCount := 0
+	for _, batch := range d.all {
+		if batch.sealed {
+			continue
+		}
+		for _, id := range batch.started {
+			if id == callID {
+				matched = batch
+				matchedCount++
+				break
+			}
+		}
+	}
+	if matchedCount == 1 {
+		return matched, nil
+	}
+	// 0 命中或多命中：回退到 batchFor("")，沿用唯一性 / 歧义失败关闭语义，
+	// 绝不按"最近一批"猜测。
+	return d.batchFor("")
+}
+
 // noteToolRequestsListed 登记一次 tool_requests_listed（InteractionUpdate.f27）的 call_count。
 //
 // 字段依据（design-evidence.md / 02-native-schemas.json）：ToolRequestsListedUpdate 内层
@@ -3220,6 +3252,12 @@ func (d *cursorToolDelegations) noteToolCallStarted(modelCallID, callID string, 
 }
 
 // noteDelegation 登记一条已解码的 f11 委托（**唯一**解码点，由 duplex 调用）。
+//
+// B2：归批以 call_id 为准——f11 委托携带 tool_call_id（与 tool_call_started 的
+// call_id 同值），而 noteDelegation 拿不到 model_call_id，因此改用 batchForDelegation
+// 按 call_id 在 started 列表里硬链接归批。modelCallID 形参保留以维持调用点签名不变
+// （duplex / parser 仍传 ""），不再用于归批。其余逻辑、重复 ID 失败关闭、空 ID 校验
+// 全部保持不变。
 func (d *cursorToolDelegations) noteDelegation(modelCallID string, tc cursorToolCallCapture) error {
 	if d == nil {
 		return nil
@@ -3229,7 +3267,7 @@ func (d *cursorToolDelegations) noteDelegation(modelCallID string, tc cursorTool
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	batch, err := d.batchFor(modelCallID)
+	batch, err := d.batchForDelegation(tc.ID)
 	if err != nil {
 		return err
 	}
@@ -3272,18 +3310,20 @@ func (d *cursorToolDelegations) sealable() error {
 }
 
 // checkSealableLocked 在持锁状态下逐批判定封口条件（调用方必须已持 d.mu）。
+//
+// 封口以 listed 为准（B2）：未收到 tool_requests_listed 的批次一律不得交接——
+// 真实帧序列里 listed(N) 不晚于该批最后一个 tool_call_started，委派可能早于 listed
+// 到达；若缺 listed 就允许交接，会在集齐前提前收口（三工具场景只交出 1 条，实测证据
+// A3），其余工具丢失。因此无 listed 必须按 fail-closed 处理。
+//
+// 判定顺序：先查每条对外 started 是否都有完整 f11 委托（保留既有逻辑），再查 listed
+// 是否已见到，最后按总数集合判定；不按到达顺序或静默时间猜测结束。
 func (d *cursorToolDelegations) checkSealableLocked() error {
 	for _, batch := range d.all {
 		if batch.sealed {
 			continue
 		}
-		if batch.listedSeen {
-			total := len(batch.started) + batch.internalStarted
-			if total != batch.listed {
-				return fmt.Errorf("%w: batch %q started=%d internal=%d listed=%d",
-					ErrCursorBatchIncomplete, batch.modelCallID, len(batch.started), batch.internalStarted, batch.listed)
-			}
-		}
+		// 每条对外 started 都必须有完整 mcp_args 委托（既有逻辑保留）。
 		delegated := make(map[string]struct{}, len(batch.delegations))
 		for _, tc := range batch.delegations {
 			delegated[tc.ID] = struct{}{}
@@ -3293,6 +3333,16 @@ func (d *cursorToolDelegations) checkSealableLocked() error {
 				return fmt.Errorf("%w: batch %q call %q has no complete mcp_args delegation",
 					ErrCursorBatchIncomplete, batch.modelCallID, callID)
 			}
+		}
+		// 未收到 listed 不得交接（证据来源见函数注释）。
+		if !batch.listedSeen {
+			return fmt.Errorf("%w: batch %q started=%d internal=%d listed=absent",
+				ErrCursorBatchIncomplete, batch.modelCallID, len(batch.started), batch.internalStarted)
+		}
+		total := len(batch.started) + batch.internalStarted
+		if total != batch.listed {
+			return fmt.Errorf("%w: batch %q started=%d internal=%d listed=%d",
+				ErrCursorBatchIncomplete, batch.modelCallID, len(batch.started), batch.internalStarted, batch.listed)
 		}
 	}
 	return nil
