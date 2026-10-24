@@ -231,13 +231,32 @@ const (
 	cursorFldToolRequestsListedCallCount = 1
 )
 
-// agent.v1.ToolCallStartedUpdate（32 号证据 Vyt）内：
+// agent.v1.ToolCallStartedUpdate（活体 tool_call_started 真实帧）字段号：
 //
-// f15 = ToolCall（mcp_tool_call 分支，活体 tool_call_started 样本携带）。
+//   - f1  call_id（string）—— 真实帧的对外委托 ID（= OpenAI tool_calls[].id）；
+//     旧合成帧（既有测试）把 call_id 放在 ToolCall.f1（即 started.f15 内层 f1），
+//     字段号同为 1，故本层两种布局都认。
+//   - f2  ToolCall 消息 —— 承载 mcp_tool_call / get_mcp_tools 分支；
+//   - f3  model_call_id（string）—— 本批归属键（真实帧才有）；
+//   - ToolCall 内层 f15 = mcp_tool_call（**对外**委托）；f44 = get_mcp_tools（**内部**
+//     元工具，只参与同批完整性判断，绝不交给客户端）。
+//
+// 注：cursorFldToolCallStartedToolCall（f15）与 cursorFldToolCallID（f1）字段号与真实
+// 帧一致，也继续被既有测试的合成帧复用，故保留不删（派发单 B1 §4.4 的"若变为未使用
+// 则删除"条件不成立）。
 const (
-	cursorFldToolCallStartedToolCall = 15 // ToolCall 消息
-	// cursorFldToolCallID 是 ToolCall.mcp_tool_call 内的 call_id（= OpenAI tool_calls[].id）。
+	// cursorFldToolCallID 是 call_id 字段号（f1）：真实帧在 started.f1，旧合成帧在
+	// ToolCall.f1（started.f15 内层），字段号一致。
 	cursorFldToolCallID = 1
+	// cursorFldToolCallStartedToolCallMsg 是 started.f2（ToolCall 消息）。
+	cursorFldToolCallStartedToolCallMsg = 2
+	// cursorFldToolCallStartedModelCallID 是 started.f3（model_call_id）。
+	cursorFldToolCallStartedModelCallID = 3
+	// cursorFldToolCallStartedToolCall 是 **字段号 15**：真实帧里是 ToolCall 内层的
+	// mcp_tool_call 分支（对外）；旧合成帧里被复用为"started.f15 即 ToolCall 消息"。
+	cursorFldToolCallStartedToolCall = 15
+	// cursorFldToolCallGetMcpTools 是 ToolCall 内层的 get_mcp_tools 分支（f44，内部元工具）。
+	cursorFldToolCallGetMcpTools = 44
 )
 
 // agent.v1.TextDeltaUpdate（32 号证据：Gyt）内：
@@ -619,6 +638,26 @@ type cursorStreamParser struct {
 	// 再输出一遍（§25.17.2「聚合器在交接后释放，不重播」）。
 	httpTextBase int
 	httpCallBase int
+
+	// ---- §25.3 listed 归属判定用的本地计数（仅用于归属，不参与封口/输出）----
+	//
+	// lastModelCallID 是最近一次 tool_call_started 的 model_call_id（真实帧才有；
+	// 空串表示尚无 started 上下文，或合成帧未携带 f3）。
+	lastModelCallID string
+	// pendingListed 是"已收 listed 但暂无法归属"的挂起计数：无 started 上下文时挂起，
+	// 由下一个 started 消费并归属到新批（派发单 B1 §4.3）。
+	pendingListed *int
+	// batchCounts 按 model_call_id 记录每批的 started/internal 计数与 listedSeen，
+	// 仅用于 listed 归属判定（4.3 的"该批 !listedSeen 或 started+internal < count"）。
+	batchCounts map[string]*cursorListedCounts
+}
+
+// cursorListedCounts 是单个 model_call_id 批次的本地归属计数（parser 私有，
+// 仅用于 listed 归属判定，**不进入** cursorToolDelegations 的封口/输出逻辑）。
+type cursorListedCounts struct {
+	started    int  // 对外 started 数
+	internal   int  // 内部元工具 started 数
+	listedSeen bool // 本批是否已归属过 listed
 }
 
 // attachOutputIDSource 绑定"当前 HTTP 输出响应 ID"的读取源（§25.17.2 实际 ID）。
@@ -953,39 +992,104 @@ func cursorVarintField(fields []cursorPBField, number int) uint64 {
 
 // noteToolCallStarted 把 InteractionUpdate.f2 tool_call_started 登记进当前批次。
 //
-// 对外/内部的区分依据：ToolCall 的 mcp_tool_call 分支（f15）才带客户端要执行的
-// call_id；不带 f15 的是内部元工具（如 get_mcp_tools），只计入同批完整性判断。
+// 真实帧结构（活体取证，派发单 B1 事实依据）：
+//
+//	started.f1 (string) call_id        —— 对外委托 ID
+//	started.f2 (msg)    ToolCall
+//	   f15 (msg) mcp_tool_call   → 对外（客户端要执行）
+//	   f44 (msg) get_mcp_tools  → 内部元工具（只参与同批完整性）
+//	started.f3 (string) model_call_id  —— 本批归属键
+//
+// 解析：call_id←started.f1、model_call_id←started.f3、external←ToolCall 含 f15。
+// 旧合成帧（既有测试）把 call_id 放在 ToolCall.f1（started.f15 内层）、且把 ToolCall
+// 整体放在 started.f15，字段号同为 1/15，故本层两种布局都兼容（不改动既有测试）。
+//
+// 成功路径顺带维护本地归属计数（lastModelCallID / batchCounts / 消费 pendingListed），
+// 这些**只用于 listed 归属判定**，不参与封口、不影响任何输出字节（派发单 B1 §4.2）。
 func (p *cursorStreamParser) noteToolCallStarted(b []byte) error {
 	fields, err := cursorDecodeProtobuf(b)
 	if err != nil {
 		return err
 	}
 	delegations := p.toolDelegations()
-	toolCall, ok := cursorFindField(fields, cursorFldToolCallStartedToolCall)
-	if !ok {
-		return delegations.noteToolCallStarted("", "", false)
+
+	// call_id：真实帧在 started.f1；旧合成帧在 ToolCall.f1（started.f15 内层 f1）。
+	callID := ""
+	if f, ok := cursorFindField(fields, cursorFldToolCallID); ok {
+		callID = strings.TrimSpace(f.String())
+	} else if tc, ok := cursorFindField(fields, cursorFldToolCallStartedToolCall); ok {
+		if inner, e := cursorDecodeProtobuf(tc.Bytes); e == nil {
+			if id, ok := cursorFindField(inner, cursorFldToolCallID); ok {
+				callID = strings.TrimSpace(id.String())
+			}
+		}
 	}
-	inner, err := cursorDecodeProtobuf(toolCall.Bytes)
-	if err != nil {
+
+	// model_call_id：真实帧在 started.f3；旧合成帧无此字段 → 空。
+	modelCallID := ""
+	if f, ok := cursorFindField(fields, cursorFldToolCallStartedModelCallID); ok {
+		modelCallID = strings.TrimSpace(f.String())
+	}
+
+	// external：真实帧看 started.f2（ToolCall 消息）内层是否含 f15（mcp_tool_call）；
+	// 含 f44（get_mcp_tools）或其它分支即内部。旧合成帧把 ToolCall 直接放在
+	// started.f15 → 视为对外委托。started.f2 缺失按内部。
+	external := false
+	if tc, ok := cursorFindField(fields, cursorFldToolCallStartedToolCallMsg); ok {
+		if inner, e := cursorDecodeProtobuf(tc.Bytes); e == nil {
+			_, hasMcp := cursorFindField(inner, cursorFldToolCallStartedToolCall) // f15
+			_, hasGetMcp := cursorFindField(inner, cursorFldToolCallGetMcpTools)  // f44
+			external = hasMcp && !hasGetMcp
+		}
+	} else if _, ok := cursorFindField(fields, cursorFldToolCallStartedToolCall); ok {
+		external = true
+	}
+
+	if err := delegations.noteToolCallStarted(modelCallID, callID, external && callID != ""); err != nil {
 		return err
 	}
-	callID := ""
-	if id, ok := cursorFindField(inner, cursorFldToolCallID); ok {
-		callID = strings.TrimSpace(id.String())
+
+	// ---- 本地归属计数维护（仅 listed 归属用）----
+	p.lastModelCallID = modelCallID
+	if p.batchCounts == nil {
+		p.batchCounts = make(map[string]*cursorListedCounts)
 	}
-	return delegations.noteToolCallStarted("", callID, callID != "")
+	bc := p.batchCounts[modelCallID]
+	if bc == nil {
+		bc = &cursorListedCounts{}
+		p.batchCounts[modelCallID] = bc
+	}
+	if external && callID != "" {
+		bc.started++
+	} else {
+		bc.internal++
+	}
+	// 消费挂起的 listed（先于本 started 到达），归属到当前新批。
+	if p.pendingListed != nil {
+		if e := p.toolDelegations().noteToolRequestsListed(modelCallID, *p.pendingListed); e != nil {
+			return e
+		}
+		bc.listedSeen = true
+		p.pendingListed = nil
+	}
+	return nil
 }
 
 // noteToolRequestsListed 解析 InteractionUpdate.f27 tool_requests_listed 的 call_count
-// 并交给批次记录归属（§25.3）。
+// 并按上下文归属到批次（§25.3 / 派发单 B1 §4.3）。
 //
 // 字段号依据 design-evidence.md：ToolRequestsListedUpdate 内层**只有** f1 call_count
-// （uint32），**没有** model_call_id 字段；上游帧只携带这一个数。故本层只把
-// (call_count) 上抛，归属由 `cursorToolDelegations.noteToolRequestsListed` 按
-// "当前开放批次上下文"判定：恰好一个开放批 → 归属；≥2 个 → ErrCursorBatchAmbiguous。
+// （uint32），**没有** model_call_id 字段——归属只能靠当前开放批上下文判定。
 //
-// 纪律：call_count 缺失或线型不是 varint 即明确协议错误（失败关闭），不猜数值、
-// 不退回"只登记出现"的降级路径；本层不打印任何工具参数（脱敏）。
+// 归属规则（listed 无 ID，按上下文；未匹配则挂起给下一个 started 新批）：
+//   - lastModelCallID != "" 且该批 `!listedSeen || started+internal < count`
+//     → 归属当前批（delegations.noteToolRequestsListed(lastModelCallID, count)），
+//     并标记该批 listedSeen=true；
+//   - 否则（当前批已 listed 且计数已齐，或根本无 started 上下文）→ 挂起为 pendingListed，
+//     返回 nil：**不建批、不报歧义、不失败**。
+//
+// 纪律：call_count 缺失 / wire 非 varint / 超 uint32 三种情况全部失败关闭（保留原有
+// 三处校验），不猜数值、不退回"只登记出现"的降级路径；本层不打印任何工具参数（脱敏）。
 func (p *cursorStreamParser) noteToolRequestsListed(b []byte) error {
 	fields, err := cursorDecodeProtobuf(b)
 	if err != nil {
@@ -1001,9 +1105,30 @@ func (p *cursorStreamParser) noteToolRequestsListed(b []byte) error {
 	if f.Varint > math.MaxUint32 {
 		return fmt.Errorf("%w: tool_requests_listed.call_count overflows uint32", ErrCursorProtocol)
 	}
-	// listed 不带 ID（证据：无 model_call_id 字段）：以空归属上抛，由批次记录按
-	// "恰好一个开放批"规则归属。
-	return p.toolDelegations().noteToolRequestsListed("", int(f.Varint))
+	count := int(f.Varint)
+
+	// 归属：listed 无 model_call_id。有最近 started 且该批尚未 listed、或本批已收
+	// started 数 < count（尚未收齐，仍归当前批）→ 归属当前批；其余挂起 pending。
+	if p.lastModelCallID != "" {
+		if p.batchCounts == nil {
+			p.batchCounts = make(map[string]*cursorListedCounts)
+		}
+		bc := p.batchCounts[p.lastModelCallID]
+		if bc == nil {
+			bc = &cursorListedCounts{}
+			p.batchCounts[p.lastModelCallID] = bc
+		}
+		if !bc.listedSeen || bc.started+bc.internal < count {
+			if e := p.toolDelegations().noteToolRequestsListed(p.lastModelCallID, count); e != nil {
+				return e
+			}
+			bc.listedSeen = true
+			return nil
+		}
+	}
+	// 无 started 上下文，或当前批已 listed 且计数已齐：挂起，不建批、不报歧义、不失败。
+	p.pendingListed = &count
+	return nil
 }
 
 // cursorDecodeMcpArgs 解析 exec 内层 f11（mcp_args）的 McpArgs 消息。
