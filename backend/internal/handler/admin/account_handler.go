@@ -756,14 +756,10 @@ func (h *AccountHandler) loadQuotaKeySummaries(ctx context.Context, quotaKeyIDs 
 			continue
 		}
 		out[st.ID] = quotaKeySummaryView{
-			QuotaKey: dto.QuotaKey{
-				ID:         st.ID,
-				CodeMasked: st.CodeValueMasked,
-				Status:     st.Status,
-				Exhausted:  st.Exhausted,
-			},
-			// 与 quota key 列表/详情/probe 同一份投影值（§25.8 lite/full 同值）。
-			Usage: st.Usage,
+			// 与 quota key 列表/详情/probe 同一份投影值（§25.8 lite/full 同值）：
+			// 字段投影唯一实现在 maskedQuotaKey，此处不得再复制字段子集。
+			QuotaKey: maskedQuotaKey(st),
+			Usage:    st.Usage,
 		}
 	}
 	return out

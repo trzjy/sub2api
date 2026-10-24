@@ -26,11 +26,11 @@ export interface QuotaKey {
   status: string
   exhausted: boolean
   code_masked: string
-  // 契约口径（P1-B3 对齐后端，不新增字段）：
-  // - 列表端点（dto.QuotaKey）只返 id / code_masked / status / exhausted /
-  //   account_count / working_count，expires_at / last_refresh_* 为空。
-  // - 详情端点额外内嵌 QuotaKeyStatus，才带 last_refresh_at / last_refresh_error /
-  //   expires_at（QuotaKeyDetail 沿用本类型）。
+  // 契约口径：列表端点（dto.QuotaKey）与详情端点（内嵌 QuotaKeyStatus）返回同一份
+  // 行级元数据——expires_at / last_refresh_at / last_refresh_error / notes 两端都有值，
+  // 不存在"列表缺字段、详情才有"的差异。字段投影在服务层与 handler 各只有一处实现
+  // （service.QuotaKeyStatus → maskedQuotaKey → dto.QuotaKey），任何端点都不得再内联
+  // 复制字段子集，否则列表会静默丢字段（历史上的"到期时间未知"就是这么来的）。
   last_refresh_at: string | null
   last_refresh_error: string | null
   expires_at: string | null

@@ -1107,3 +1107,106 @@ func TestAccountGetByID_QuotaKeyLabel(t *testing.T) {
 	require.Equal(t, int64(11), *payload.Data.QuotaKeyID)
 	require.Equal(t, "XXXX-****-****-4321", payload.Data.QuotaKeyLabel)
 }
+
+// TestQuotaKeyHandler_List_CarriesRowMetadata 锁定列表项携带行级元数据：
+// maskedQuotaKey 投影补全后，列表 items 与顶层 quota_key_summaries 必须同源带出
+// expires_at / last_refresh_at / last_refresh_error / notes（与详情端点同值），
+// 供前端编辑弹窗用列表行回填而不再静默清空备注。
+func TestQuotaKeyHandler_List_CarriesRowMetadata(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	qk := repo.seed(1, "1234", "active", false)
+	expiresAt := time.Date(2026, time.November, 23, 16, 56, 50, 0, time.UTC)
+	refreshedAt := time.Date(2026, time.November, 22, 9, 30, 0, 0, time.UTC)
+	errText := "shareai: upstream cooldown, retry later"
+	notes := "周卡（用户于 2026-10-20 提供）"
+	qk.ExpiresAt = &expiresAt
+	qk.LastRefreshAt = &refreshedAt
+	qk.LastRefreshError = &errText
+	qk.Notes = &notes
+	router := setupQuotaKeyRouter(newQuotaKeyService(repo, nil), nil)
+
+	rec := doQuotaKeyJSON(router, http.MethodGet, "/api/v1/admin/quota_keys", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	requireNoPlaintext(t, rec.Body.String())
+
+	type rowMetadata struct {
+		ID               int64      `json:"id"`
+		ExpiresAt        *time.Time `json:"expires_at"`
+		LastRefreshAt    *time.Time `json:"last_refresh_at"`
+		LastRefreshError string     `json:"last_refresh_error"`
+		Notes            *string    `json:"notes"`
+	}
+	var payload struct {
+		Data struct {
+			Items             []rowMetadata `json:"items"`
+			QuotaKeySummaries []rowMetadata `json:"quota_key_summaries"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Len(t, payload.Data.Items, 1)
+	require.Len(t, payload.Data.QuotaKeySummaries, 1)
+
+	// 两处同源同值：列表项与顶层汇总带出同一份行级元数据。
+	item := payload.Data.Items[0]
+	summary := payload.Data.QuotaKeySummaries[0]
+	require.Equal(t, expiresAt, *item.ExpiresAt)
+	require.Equal(t, expiresAt, *summary.ExpiresAt)
+	require.Equal(t, refreshedAt, *item.LastRefreshAt)
+	require.Equal(t, refreshedAt, *summary.LastRefreshAt)
+	require.Equal(t, errText, item.LastRefreshError)
+	require.Equal(t, errText, summary.LastRefreshError)
+	require.Equal(t, notes, *item.Notes)
+	require.Equal(t, notes, *summary.Notes)
+	// F1：响应体绝不含激活码原文。
+	require.NotContains(t, rec.Body.String(), testQuotaKeyPlain)
+}
+
+// TestAccountList_QuotaKeySummaries_CarryRowMetadata 锁定账号列表顶层 quota_key_summaries
+// 与激活码列表项字段集一致：loadQuotaKeySummaries 复用 maskedQuotaKey 后，行级元数据
+// （expires_at / last_refresh_at / last_refresh_error / notes）必须与列表项同源带出。
+func TestAccountList_QuotaKeySummaries_CarryRowMetadata(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	qk := repo.seed(11, "4321", "active", false)
+	expiresAt := time.Date(2026, time.November, 23, 16, 56, 50, 0, time.UTC)
+	refreshedAt := time.Date(2026, time.November, 22, 9, 30, 0, 0, time.UTC)
+	errText := "shareai: upstream cooldown, retry later"
+	notes := "周卡（用户于 2026-10-20 提供）"
+	qk.ExpiresAt = &expiresAt
+	qk.LastRefreshAt = &refreshedAt
+	qk.LastRefreshError = &errText
+	qk.Notes = &notes
+
+	adminSvc := newStubAdminService()
+	adminSvc.accounts = seedAccountPage(2, 11, 11)
+	router := setupAccountQuotaKeyRouter(adminSvc, newQuotaKeyService(repo, nil))
+
+	rec := doQuotaKeyJSON(router, http.MethodGet, "/api/v1/admin/accounts?page=1&page_size=20", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	requireNoPlaintext(t, rec.Body.String())
+
+	type rowMetadata struct {
+		ID               int64      `json:"id"`
+		ExpiresAt        *time.Time `json:"expires_at"`
+		LastRefreshAt    *time.Time `json:"last_refresh_at"`
+		LastRefreshError string     `json:"last_refresh_error"`
+		Notes            *string    `json:"notes"`
+	}
+	var payload struct {
+		Code int `json:"code"`
+		Data struct {
+			QuotaKeySummaries []rowMetadata `json:"quota_key_summaries"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, 0, payload.Code)
+	require.Len(t, payload.Data.QuotaKeySummaries, 1)
+
+	summary := payload.Data.QuotaKeySummaries[0]
+	require.Equal(t, int64(11), summary.ID)
+	require.Equal(t, expiresAt, *summary.ExpiresAt)
+	require.Equal(t, refreshedAt, *summary.LastRefreshAt)
+	require.Equal(t, errText, summary.LastRefreshError)
+	require.Equal(t, notes, *summary.Notes)
+	// F1：响应体绝不含激活码原文。
+	require.NotContains(t, rec.Body.String(), testQuotaKeyPlain)
+}

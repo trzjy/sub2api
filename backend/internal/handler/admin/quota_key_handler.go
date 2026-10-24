@@ -81,17 +81,29 @@ func respondQuotaKeySummaries(c *gin.Context, items any, total int64, page, page
 	})
 }
 
-// maskedQuotaKey 把 service 层脱敏状态投影成只含安全子集的展示对象（绝不含原文）。
+// maskedQuotaKey 是 service 状态 → dto.QuotaKey 的**唯一**投影点：
+// 投影"行级完整展示元数据 + 脱敏激活码"（ID / code_masked / status / exhausted /
+// expires_at / last_refresh_at / last_refresh_error / notes）。
 //
-// 纯投影：不接收计数、也不查询数据。计数由调用方（List）在拿到服务层口径的聚合结果后
-// 覆盖到返回对象上，故 Create / Update 等复用点行为不变（其计数保持零值，omitempty 下
-// JSON 形态与接入计数前完全一致）。
+// 列表（List）、详情（Get）与账号页顶层汇总（quota_key_summaries）共用同一份投影，
+// 保证各端点拿到同一行记录的同批值；**禁止**任何调用点再内联复制字段子集
+// （多轨投影正是本轮列表缺 expires_at/last_refresh_at/last_refresh_error/notes、
+// 编辑弹窗回填把备注静默清空的展示漂移根因）。
+//
+// 绝不含激活码原文（F1），仅回放 code_value_masked。
+// 纯投影：不接收计数、也不查询数据。account_count/working_count 由调用方（List）
+// 在拿到服务层口径的聚合结果后覆盖到返回对象上，故 Create / Update 等复用点行为
+// 不变（其计数保持零值，omitempty 下 JSON 形态与接入计数前完全一致）。
 func maskedQuotaKey(st *service.QuotaKeyStatus) dto.QuotaKey {
 	return dto.QuotaKey{
-		ID:         st.ID,
-		CodeMasked: st.CodeValueMasked,
-		Status:     st.Status,
-		Exhausted:  st.Exhausted,
+		ID:               st.ID,
+		CodeMasked:       st.CodeValueMasked,
+		Status:           st.Status,
+		Exhausted:        st.Exhausted,
+		ExpiresAt:        st.ExpiresAt,
+		LastRefreshAt:    st.LastRefreshAt,
+		LastRefreshError: st.LastRefreshError,
+		Notes:            st.Notes,
 	}
 }
 

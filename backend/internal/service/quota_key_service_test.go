@@ -3180,3 +3180,51 @@ func TestQuotaKeyRotateCredentials_MissingKeyIsExplicit(t *testing.T) {
 // compile-time guard：内存替身仓储满足观测/换码所需的事务内能力（否则观测会失败关闭）。
 var _ quotaKeyObservationRepo = (*fakeQuotaKeyRepo)(nil)
 var _ quotaKeyObservationRepo = (*testDBRepo)(nil)
+
+// TestQuotaKeyGetStatus_CarriesNotes 验证状态映射把管理员备注带出来：
+// 1) 实体 Notes 非空 → dto.Notes 非 nil 且逐字相等；
+// 2) 实体 Notes 为 nil → dto.Notes 为 nil（不得落成空串）；
+// 3) 备注内容不得串入 CodeValueMasked。
+func TestQuotaKeyGetStatus_CarriesNotes(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	repo := newFakeQuotaKeyRepo()
+	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, nil)
+
+	// 场景一：实体 Notes 非空 → 非 nil 且逐字相等，且不串入 code_masked。
+	notes := "周卡（用户于 2026-10-20 提供）"
+	repo.byID[1] = &ent.QuotaKey{
+		ID:            1,
+		CodeEncrypted: "enc:v1:someciphertext",
+		CodeLast4:     "1234",
+		Status:        "active",
+		Notes:         &notes,
+	}
+	dto, err := svc.GetStatus(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("GetStatus returned error: %v", err)
+	}
+	if dto.Notes == nil {
+		t.Fatalf("expected dto.Notes to be non-nil, got nil")
+	}
+	if *dto.Notes != notes {
+		t.Fatalf("unexpected notes: got %q, want %q", *dto.Notes, notes)
+	}
+	if strings.Contains(dto.CodeValueMasked, notes) {
+		t.Fatalf("notes leaked into code_masked: %q", dto.CodeValueMasked)
+	}
+
+	// 场景二：实体 Notes 为 nil → dto.Notes 必须为 nil。
+	repo.byID[2] = &ent.QuotaKey{
+		ID:            2,
+		CodeEncrypted: "enc:v1:otherciphertext",
+		CodeLast4:     "abcd",
+		Status:        "active",
+	}
+	dto, err = svc.GetStatus(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("GetStatus returned error: %v", err)
+	}
+	if dto.Notes != nil {
+		t.Fatalf("expected dto.Notes to be nil, got %q", *dto.Notes)
+	}
+}

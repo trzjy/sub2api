@@ -1595,6 +1595,7 @@ func quotaKeyToStatus(qk *ent.QuotaKey) *QuotaKeyStatus {
 		LastRefreshError: lastErr,
 		CodeValueMasked:  maskCodeValue(qk.CodeLast4),
 		ExpiresAt:        qk.ExpiresAt,
+		Notes:            qk.Notes,
 	}
 }
 

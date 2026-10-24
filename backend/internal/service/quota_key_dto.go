@@ -13,6 +13,10 @@ type QuotaKeyStatus struct {
 	LastRefreshError string     `json:"last_refresh_error,omitempty"`
 	CodeValueMasked  string     `json:"code_masked"` // 仅末4位掩码，禁明文
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	// Notes 是管理员填写的备注（quota_keys.notes）。属于同一行记录的非敏感元数据，
+	// 与 expires_at 一并由 service 状态对象携带，使列表/详情/编辑回填读同一份投影，
+	// 不再各自挑字段（多轨投影导致的展示漂移修复）。
+	Notes *string `json:"notes,omitempty"`
 
 	// Usage 是来源额度快照的展示投影（方案 §25.6 消费闭包⑤ / §25.7-B）。
 	//

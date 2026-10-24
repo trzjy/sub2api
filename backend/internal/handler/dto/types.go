@@ -566,6 +566,13 @@ type QuotaKey struct {
 	Exhausted    bool   `json:"exhausted,omitempty"`
 	AccountCount int64  `json:"account_count,omitempty"`
 	WorkingCount int64  `json:"working_count,omitempty"`
+
+	// 行级元数据（与详情端点内嵌的 service.QuotaKeyStatus 同名同值）。
+	// 列表/详情/账号页汇总读同一份 service 投影，禁止各端点各自挑字段。
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	LastRefreshAt    *time.Time `json:"last_refresh_at,omitempty"`
+	LastRefreshError string     `json:"last_refresh_error,omitempty"`
+	Notes            *string    `json:"notes,omitempty"`
 }
 
 // AccountListResponse 是管理员账号列表的顶层响应 DTO（v3.3 §4.5 / C2）。
