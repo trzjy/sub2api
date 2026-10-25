@@ -29,12 +29,12 @@ import (
 
 func TestCursorSupplyNativeBridgePlatformsO57A(t *testing.T) {
 	// 正向：原生 Claude/Gemini + O57-A 新增的 openai 兼容族（grok/openai）
-	for _, p := range []string{PlatformAnthropic, PlatformGemini, PlatformGrok, PlatformOpenAI} {
+	for _, p := range []string{PlatformAnthropic, PlatformGemini, PlatformGrok, PlatformOpenAI, PlatformMuse} {
 		require.True(t, cursorNativeBridgePlatforms(p), "桥接平台 %q 必须为 true", p)
 	}
 	// 负向：多协议族与无内置目录平台不得接纳 cursor 跨平台供给
 	for _, p := range []string{
-		PlatformComposite, PlatformMuse, PlatformCodeBuddy,
+		PlatformComposite, PlatformCodeBuddy,
 		PlatformOther, PlatformTypeSafe, PlatformCursor,
 	} {
 		require.False(t, cursorNativeBridgePlatforms(p), "平台 %q 不得为桥接平台", p)
