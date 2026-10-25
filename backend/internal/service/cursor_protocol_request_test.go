@@ -285,8 +285,7 @@ func TestCursorProtocolRequestDropsOutOfScopeFields(t *testing.T) {
 		require.Equal(t, "get_weather", cursorTestFieldString(def, cursorFldMcpToolDefName))
 		require.Equal(t, "get_weather", cursorTestFieldString(def, cursorFldMcpToolDefToolName))
 		require.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(def, cursorFldMcpToolDefProvider))
-		require.Equal(t, "Get the weather. "+cursorToolSchemaHardeningSuffix,
-			cursorTestFieldString(def, cursorFldMcpToolDefDescription))
+		require.Equal(t, "Get the weather.", cursorTestFieldString(def, cursorFldMcpToolDefDescription))
 		require.JSONEq(t, `{"type":"object","properties":{"city":{"type":"string"}}}`,
 			cursorTestFieldString(def, cursorFldMcpToolDefInputSchema))
 	})
