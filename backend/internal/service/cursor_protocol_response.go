@@ -61,6 +61,18 @@ type cursorSSEStream struct {
 	emittedCalls int
 	errMu        sync.Mutex
 	err          error
+
+	// lastSealErr 缓存最近一次"交接判定处" sealableDelegations() 返回的非 nil 错误
+	// （封口失败的具体原因：缺 listed / 计数不等 / 某 started 无完整 f11 委托等）。
+	//
+	// 交接判定**不改变任何控制流**：仍不交接、不 dountil、不提前结束。next() 在交接
+	// 检查点把 sealableDelegations() 的非 nil 错误**记录**到这里，供终态可观测性使用——
+	// 上层原本在 180s 到期时只能看到 deadline_exceeded，无法从日志区分"缺 listed / 计数
+	// 不等 / 某 started 无委派"（外审建议 S1）。
+	//
+	// 语义：每帧覆盖为最新值即可，无需历史队列；交接成功（sealable 通过）时清空。
+	// 与 err/errMu 复用同一把锁。
+	lastSealErr error
 }
 
 func (s *cursorSSEStream) Close() error { return s.source.Close() }
@@ -71,6 +83,24 @@ func (s *cursorSSEStream) terminalError() error {
 	s.errMu.Lock()
 	defer s.errMu.Unlock()
 	return s.err
+}
+
+// lastSealErrReason 返回最近一次"交接判定处"封口失败的原因（线程安全；nil 表示无/已清空）。
+//
+// 见 lastSealErr 字段注释：它缓存 sealableDelegations() 在交接检查点返回的非 nil 错误，
+// 供外审建议 S1 的终态可观测性使用。与 err/errMu 复用同一把锁。
+func (s *cursorSSEStream) lastSealErrReason() error {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	return s.lastSealErr
+}
+
+// setLastSealErr 记录（或清空）最近一次封口失败原因：每帧覆盖为最新值，传入 nil 表示
+// 本次交接判定通过、阻塞原因已消除。与 err/errMu 复用同一把锁。
+func (s *cursorSSEStream) setLastSealErr(err error) {
+	s.errMu.Lock()
+	s.lastSealErr = err
+	s.errMu.Unlock()
 }
 
 func (s *cursorSSEStream) Read(dst []byte) (int, error) {
@@ -154,7 +184,9 @@ func (s *cursorSSEStream) next() error {
 	handoffThisFinish := false
 	if !s.done {
 		if calls := s.parser.capturedToolCalls(); len(calls) > s.emittedCalls {
-			if err := s.parser.sealableDelegations(); err == nil {
+			if sealErr := s.parser.sealableDelegations(); sealErr == nil {
+				// 交接成功：清空封口失败原因（每帧覆盖语义，成功即无阻塞）。
+				s.setLastSealErr(nil)
 				s.delegated = true
 				s.done = true
 				handoffThisFinish = true
@@ -166,6 +198,13 @@ func (s *cursorSSEStream) next() error {
 				// 180s 挂死。只清解析器本地归属计数，不碰 cursorToolDelegations（封口
 				// 记录按代维护、续轮开新批，见 TestCursorBatchSealedBatchNotReused）。
 				s.parser.resetBatchGeneration()
+			} else {
+				// 交接判定处 sealable 失败：仅记录原因、不改变任何控制流——仍不交接、不
+				// dountil、不提前结束，继续等后续帧。外审建议 S1：原本此处把错误直接丢弃，
+				// 上层在 180s 到期时只能看到 deadline_exceeded，无法从日志区分"缺 listed /
+				// 计数不等 / 某 started 无完整 f11 委托"。原因缓存到 lastSealErr，由终态日志
+				// 以安全字段（如 seal_blocked_reason）写出（只含错误类别与计数，不含正文）。
+				s.setLastSealErr(sealErr)
 			}
 		}
 	}

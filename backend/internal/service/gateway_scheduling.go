@@ -1211,14 +1211,16 @@ func (s *GatewayService) isAccountAdmittedForPlatform(ctx context.Context, accou
 // 账号平台"的既有契约。只有 native（Claude/Gemini）系本就没有 cursor 原生同平台供给，
 // 必须由分支 Serde 桥接，才有接纳的必要。
 // cursorNativeBridgePlatforms 判断某个原生平台是否允许以「cursor 跨平台供给」补足候选。
-// 仅扩 U7 已挂组的 openai 兼容族（grok/openai），多协议族（composite 等）不在此列。
+// 扩 U7 已挂组的 openai 兼容族（grok/openai）与 muse（用户裁定 2026-10-25 纳入桥接）；
+// 多协议族（composite 等）仍不在此列。
 // 真正的准入仍由 cursorSupplyAdmittedForNativePlatform 逐条裁决（显式挂组 + 模型支持）。
 func cursorNativeBridgePlatforms(platform string) bool {
 	switch platform {
 	case PlatformAnthropic, PlatformGemini:
 		return true
-	case PlatformGrok, PlatformOpenAI:
-		// 仅开放 U7 已挂组的 openai 兼容族；多协议族（composite/muse/...）不扩。
+	case PlatformGrok, PlatformOpenAI, PlatformMuse:
+		// 开放 U7 已挂组的 openai 兼容族 + muse（用户裁定 2026-10-25 纳入桥接）；
+		// 多协议族（composite 等）仍不扩。
 		return true
 	default:
 		return false
