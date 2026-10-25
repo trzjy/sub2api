@@ -1142,9 +1142,26 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 			// 会话（finalizer）。usage 只可能来自真实 turn_ended：没见到就不结算、不写零值。
 			session.noteTurnUsage(parser.usage, "pump_terminal")
 			// 本 HTTP 的原生读取到此结束（stream 与 nonstream 同一条读循环）。
+			// 外审建议 S1：把"最近一次封口失败原因"落到终态日志安全字段 seal_blocked_reason，
+			// 供事故复盘区分"缺 listed / 计数不等 / 某 started 无委派"。原因已在 next() 的
+			// 交接判定处记录（每帧覆盖、成功即清空），此处只搬运、不改控制流；无值则空串不输出。
+			sealReason := stream.lastSealErrReason()
+			session.mu.Lock()
+			if sealReason != nil {
+				session.sealBlockedReason = sealReason.Error()
+			}
+			session.mu.Unlock()
+
 			opts := session.httpOptions()
+			parseDoneFields := []zap.Field{
+				zap.String("outcome", "ok"),
+				zap.Bool("stream", opts.stream),
+			}
+			if sealReason != nil {
+				parseDoneFields = append(parseDoneFields, zap.String("seal_blocked_reason", sealReason.Error()))
+			}
 			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_parse_done", opts.model,
-				zap.String("outcome", "ok"), zap.Bool("stream", opts.stream))
+				parseDoneFields...)
 			// cursorSessionStreamResult 内部会取 session.mu 读取最终 usage，不得在持锁时调用
 			// （Go 互斥锁不可重入，否则本读循环自死锁，永远无法投递 isEnd，附着 HTTP 永久阻塞）。
 			finalResult := s.cursorSessionStreamResult(session, req)
@@ -2639,6 +2656,12 @@ type cursorSessionRecord struct {
 	// outcome / interruptReason 是终态记载（日志安全字段，不含正文/凭据）。
 	outcome         string
 	interruptReason string
+	// sealBlockedReason 缓存读循环终态时"最近一次封口失败原因"（外审建议 S1 的终态
+	// 可观测性）：由 runCursorAgentRunPump 在终止分支从 stream.lastSealErrReason()
+	// 搬运而来（无则空串）。settleCursorSession 在 session_settle_skipped 时随同一安
+	// 全字段写出，便于事故复盘区分"缺 listed / 计数不等 / 某 started 无委派"。
+	// 纯观测数据，不改变任何控制流、不引入配置/新机制。
+	sealBlockedReason string
 	// finishing 标记 finalizer 的唯一胜者已确定；steps 是终结守卫（每项至多一次）。
 	finishing bool
 	steps     cursorFinalizerSteps
@@ -4012,12 +4035,20 @@ func (s *CursorExecutionService) settleCursorSession(record *cursorSessionRecord
 	if !complete {
 		// 未取得完整真实 usage：不估算扣费、不写零 usage 假成功，只记录中断原因与
 		// 最后协议阶段后释放资源（§25.5）。
-		cursorPhaseLog(context.Background(), zapcore.WarnLevel, "session_settle_skipped", record.spec.requestedModel,
+		// 外审建议 S1：未封口即终止（usage_missing: turn_ended_missing 等）时带上同一
+		// 安全字段 seal_blocked_reason，便于事故复盘区分封口阻塞类别（无则空串不输出）。
+		skipFields := []zap.Field{
 			zap.String("session_id", sessionID),
 			zap.String("billing_event_id", eventID),
 			zap.String("terminal_reason", reason),
 			zap.String("usage_missing", missing),
-			zap.String("last_protocol_stage", stage))
+			zap.String("last_protocol_stage", stage),
+		}
+		if record.sealBlockedReason != "" {
+			skipFields = append(skipFields, zap.String("seal_blocked_reason", record.sealBlockedReason))
+		}
+		cursorPhaseLog(context.Background(), zapcore.WarnLevel, "session_settle_skipped", record.spec.requestedModel,
+			skipFields...)
 		if hook != nil {
 			hook(settleCtx, ev)
 		}
