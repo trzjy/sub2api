@@ -123,6 +123,10 @@ export default {
       accountsWritten: '已写入账号数',
       error: '用量查询失败',
       keyLevelHint: '以上为激活码（key 级）额度快照：总额度、期限、设备、取号结果均为 key 层口径，不等于单个账号余额。'
+    },
+    errorText: {
+      refreshLimitedHours: '刷新次数达上限（{count}次），约 {hours} 小时后重置。',
+      refreshLimitedMinutes: '刷新次数达上限（{count}次），约 {minutes} 分钟后重置。'
     }
   }
 }

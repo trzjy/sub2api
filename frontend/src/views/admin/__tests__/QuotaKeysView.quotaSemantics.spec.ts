@@ -70,7 +70,19 @@ vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
     ...actual,
-    useI18n: () => ({ t: (key: string) => key })
+    // 其他 key 仍回显 key 本身（保持既有用例断言不变）；
+    // 仅 QKERR-C 接入的 errorText 两个 key 返回中文，便于回归断言可见文本。
+    useI18n: () => ({
+      t: (key: string, params?: Record<string, unknown>) => {
+        if (key === 'admin.quotaKeys.errorText.refreshLimitedHours') {
+          return `刷新次数达上限（${params?.count}次），约 ${params?.hours} 小时后重置。`
+        }
+        if (key === 'admin.quotaKeys.errorText.refreshLimitedMinutes') {
+          return `刷新次数达上限（${params?.count}次），约 ${params?.minutes} 分钟后重置。`
+        }
+        return key
+      }
+    })
   }
 })
 
@@ -449,6 +461,131 @@ describe('QuotaKeysView 详情账号翻页（PG2）', () => {
     expect(vm.detail?.page).toBe(2)
     // 翻页不关闭弹窗。
     expect(vm.showDetailDialog).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// QKERR-C：最近错误展示格式化接入。
+// 列表单元格与详情弹窗共用 formatQuotaKeyError（经组件方法 formatLastRefreshError），
+// 剥离内部 shareai 英文前缀，刷新上限消息压缩为「刷新次数达上限…约 N 小时/分钟后重置」；
+// 真实 unknown-result 形态文本不得再在可见文本/tooltip 出现 shareai 前缀。
+// ---------------------------------------------------------------------------
+
+describe('QuotaKeysView 最近错误展示格式化（QKERR-C）', () => {
+  // 真实形态：上游刷新上限消息被 shareai 错误链前缀包裹。
+  const unknownResultRaw =
+    'shareai: upstream code=1 unknown result: 当日刷新次数达到上限(5次)，将在每日8:00重置，还需7小时0分钟'
+
+  // DataTable 默认被整桩（true），列表单元格模板不渲染；此处用最小桩渲染
+  // cell-last_refresh_error 槽，以验证「列表显示」真实文本。
+  function mountViewWithListErrorCell() {
+    return mount(QuotaKeysView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          TablePageLayout: {
+            template: '<div><slot name="filters" /><slot name="table" /></div>'
+          },
+          DataTable: {
+            props: ['columns', 'data', 'loading'],
+            template: `<div>
+              <template v-for="(row, i) in data" :key="i">
+                <slot name="cell-last_refresh_error" :row="row" />
+              </template>
+              <slot name="empty" />
+            </div>`
+          },
+          ConfirmDialog: true,
+          EmptyState: true,
+          TextArea: true,
+          Icon: true,
+          AutoEntryConfigModal: true,
+          BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' }
+        }
+      }
+    })
+  }
+
+  const errorRow = { ...keyRow, last_refresh_error: unknownResultRaw }
+
+  beforeEach(() => {
+    vi.mocked(adminAPI.quotaKeys.list).mockReset()
+    vi.mocked(adminAPI.quotaKeys.get).mockReset()
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue({
+      items: [errorRow],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    } as never)
+    vi.mocked(adminAPI.quotaKeys.get).mockResolvedValue({
+      ...keyDetail,
+      last_refresh_error: unknownResultRaw
+    } as never)
+  })
+
+  it('列表单元格：真实 unknown-result 文本剥离 shareai 前缀并压缩为刷新上限短句', async () => {
+    const wrapper = mountViewWithListErrorCell()
+    await flushPromises()
+
+    const vm = wrapper.vm as unknown as {
+      formatLastRefreshError: (raw: string | null) => string
+    }
+    // 经组件方法（列表单元格使用同一函数）格式化。
+    const out = vm.formatLastRefreshError(unknownResultRaw)
+    expect(out).not.toContain('shareai: upstream code=1 unknown result:')
+    expect(out).toContain('刷新次数达上限')
+    expect(out).toContain('约')
+    expect(out).toContain('小时后')
+
+    // 列表单元格实际渲染文本同样不含前缀、含中文短句。
+    const listText = wrapper.text()
+    expect(listText).not.toContain('shareai: upstream code=1 unknown result:')
+    expect(listText).toContain('刷新次数达上限')
+    expect(listText).toContain('约')
+    expect(listText).toContain('小时后')
+    wrapper.unmount()
+  })
+
+  it('详情弹窗：最近错误同样剥离前缀并压缩', async () => {
+    const wrapper = mountViewWithListErrorCell()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      openDetail: (row: typeof errorRow) => Promise<void>
+    }
+    await vm.openDetail(errorRow)
+    await flushPromises()
+    await nextTick()
+
+    const detailText = wrapper.text()
+    expect(detailText).not.toContain('shareai: upstream code=1 unknown result:')
+    expect(detailText).toContain('刷新次数达上限')
+    expect(detailText).toContain('约')
+    expect(detailText).toContain('小时后')
+    wrapper.unmount()
+  })
+
+  it('空值：列表方法返回空串，详情回退 na 文案', async () => {
+    const wrapper = mountViewWithListErrorCell()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      formatLastRefreshError: (raw: string | null) => string
+      openDetail: (row: typeof keyRow) => Promise<void>
+    }
+    // 列表方法对空值 / 空白返回空串（由模板回退 na）。
+    expect(vm.formatLastRefreshError(null)).toBe('')
+    expect(vm.formatLastRefreshError('   ')).toBe('')
+
+    // 详情空值回退 na。
+    vi.mocked(adminAPI.quotaKeys.get).mockResolvedValue({
+      ...keyDetail,
+      last_refresh_error: null
+    } as never)
+    await vm.openDetail(keyRow)
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.text()).toContain('admin.quotaKeys.na')
     wrapper.unmount()
   })
 })

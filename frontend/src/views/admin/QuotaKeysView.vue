@@ -81,9 +81,9 @@
             <span
               v-if="row.last_refresh_error"
               class="text-xs text-red-600 dark:text-red-400"
-              :title="row.last_refresh_error"
+              :title="formatLastRefreshError(row.last_refresh_error)"
             >
-              {{ row.last_refresh_error }}
+              {{ formatLastRefreshError(row.last_refresh_error) }}
             </span>
             <span v-else class="text-sm text-gray-400 dark:text-gray-500">{{ t('admin.quotaKeys.na') }}</span>
           </template>
@@ -267,7 +267,7 @@
               {{ t('admin.quotaKeys.detail.lastRefreshError') }}
             </dt>
             <dd class="mt-0.5 break-all text-sm text-red-600 dark:text-red-400">
-              {{ detail.last_refresh_error || t('admin.quotaKeys.na') }}
+              {{ formatLastRefreshError(detail.last_refresh_error) || t('admin.quotaKeys.na') }}
             </dd>
           </div>
           <div class="sm:col-span-2">
@@ -466,6 +466,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { formatDateTime, resolveExpiryDisplay } from '@/utils/format'
+import { formatQuotaKeyError } from '@/utils/quotaKeyError'
 import { adminAPI } from '@/api/admin'
 import type {
   QuotaKey,
@@ -581,6 +582,13 @@ function formatExpiresAt(row: QuotaKey | QuotaKeyDetail): string {
   const r = resolveExpiryDisplay(row.expires_at)
   if (r.status === 'unknown') return t('admin.quotaKeys.expiryUnknown')
   return r.text
+}
+
+// QKERR-C：最近错误展示层格式化（剥离内部 shareai 前缀 + 刷新上限压缩为短句）。
+// 列表单元格与详情弹窗共用同一函数，确保无第二套文本解析；
+// 空值/空白返回空串，由调用处回退到 na 文案。
+function formatLastRefreshError(raw: string | null | undefined): string {
+  return formatQuotaKeyError(raw, t)
 }
 
 function isAccountsExpanded(id: number): boolean {

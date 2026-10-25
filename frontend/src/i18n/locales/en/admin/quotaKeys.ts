@@ -123,6 +123,10 @@ export default {
       accountsWritten: 'Accounts Written',
       error: 'Failed to probe quota',
       keyLevelHint: 'The values above are the quota key (key-level) snapshot: total quota, expiry, devices and take-number results are key-level and do not equal any single account balance.'
+    },
+    errorText: {
+      refreshLimitedHours: 'Refresh limit reached ({count} times); resets in about {hours} hours.',
+      refreshLimitedMinutes: 'Refresh limit reached ({count} times); resets in about {minutes} minutes.'
     }
   }
 }
