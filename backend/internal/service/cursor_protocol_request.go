@@ -92,6 +92,14 @@ const (
 // cursorMcpProviderIdentifier 是本层声明 MCP 工具时固定的 provider 标识。
 const cursorMcpProviderIdentifier = "sub2api"
 
+// cursorToolSchemaHardeningSuffix 是出站工具描述的固定加固后缀（B10 卡）。
+//
+// 实测对照（同模型同 schema，各 3 次）：tool_choice=auto + 默认描述时，Cursor 上游对
+// claude 系模型会把数组参数偶发写成 {"item":[...]}（数字退化为字符串），3/3 出现；
+// 描述显式写明结构约束后 0/3。该后缀只追加在**发给上游**的
+// McpToolDefinition.description（f2）里，不触碰入站请求与任何回给客户端的内容。
+const cursorToolSchemaHardeningSuffix = "参数必须严格遵循下方 JSON Schema：数组必须是 JSON 数组（不是对象、不是字符串化的数组），数字必须是 JSON 数字（不是字符串），对象的键与类型必须与 schema 一致。"
+
 // cursorConversationModeChat 是 ConversationMode 的取值。
 //
 // 33 / 63 两份活体请求样本里，ConversationStateStructure.mode 与 UserMessage.mode
@@ -261,9 +269,17 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool) []byte {
 		if strings.TrimSpace(schema) == "" || schema == "null" {
 			schema = "{}"
 		}
+		// 描述加固（B10 卡）：只在出站 description 上追加固定后缀，不改写
+		// t.Function.Description 本身（入站对象零副作用）。
+		desc := t.Function.Description
+		if strings.TrimSpace(desc) == "" {
+			desc = cursorToolSchemaHardeningSuffix
+		} else {
+			desc = desc + " " + cursorToolSchemaHardeningSuffix
+		}
 		var def []byte
 		def = cursorAppendStringField(def, cursorFldMcpToolDefName, t.Function.Name)
-		def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, t.Function.Description)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, desc)
 		def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
 		def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, t.Function.Name)
 		def = cursorAppendStringField(def, cursorFldMcpToolDefInputSchema, schema)
