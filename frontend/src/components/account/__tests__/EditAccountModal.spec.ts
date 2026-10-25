@@ -1975,6 +1975,79 @@ describe('EditAccountModal', () => {
       'antigravity_project_id'
     )
   })
+
+  it('preserves balance_probe.count_unit when saving an apikey account with balance probe enabled', async () => {
+    // 生产场景（FIX-BALANCE-PROBE-COUNT-UNIT）：账户级余额探测已配置 count_unit，
+    // 但编辑弹窗不暴露该子键。直接保存不应把 count_unit 静默抹掉，否则后端对称校验
+    // （access_token 与 count_unit 须同时存在）会失败关闭。
+    const account = buildAccount()
+    account.credentials = {
+      ...account.credentials,
+      balance_probe: {
+        enabled: true,
+        url: 'https://balance.example.com/v1/usage',
+        bearer_auth: true,
+        count_unit: 5000
+      }
+    }
+    // 顶层 balance_probe_access_token 已被后端脱敏为 credentials_status（不在 credentials 内）
+    account.credentials_status = { has_api_key: true, has_balance_probe_access_token: true }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    // 直接保存，不修改任何余额探测字段
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const probe = updateAccountMock.mock.calls[0]?.[1]?.credentials?.balance_probe
+    expect(probe).toBeDefined()
+    // 未编辑到的子键原样保留（回归点：修复前此处为 undefined）
+    expect(probe?.count_unit).toBe(5000)
+    // 弹窗负责的三个键按弹窗值写入
+    expect(probe?.enabled).toBe(true)
+    expect(probe?.url).toBe('https://balance.example.com/v1/usage')
+    expect(probe?.bearer_auth).toBe(true)
+  })
+
+  it('removes balance_probe when the balance probe switch is turned off', async () => {
+    // 用户主动关闭余额探测开关 = 清除配置：不应保留 enable 分支写入的键，也不应保留既有子键。
+    const account = buildAccount()
+    account.credentials = {
+      ...account.credentials,
+      balance_probe: {
+        enabled: true,
+        url: 'https://balance.example.com/v1/usage',
+        bearer_auth: true,
+        count_unit: 5000
+      }
+    }
+    account.credentials_status = { has_api_key: true }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    // 用户关闭余额探测开关：标签文本为 i18n key（vue-i18n 被 mock），
+    // 开关按钮与标签是兄弟节点，从标签父节点定位按钮后点击。
+    const titleLabel = wrapper.findAll('label').find(
+      (l) => l.text() === 'admin.accounts.balanceProbe.title'
+    )!
+    // 标签位于内层 div，开关按钮是外层 flex 容器的直接子节点（兄弟关系），故上溯两级再取 button。
+    const toggle = titleLabel.element.parentElement?.parentElement?.querySelector('button') as
+      | HTMLButtonElement
+      | undefined
+    expect(toggle).toBeTruthy()
+    await toggle!.click()
+    await flushPromises()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).not.toHaveProperty('balance_probe')
+  })
 })
 
 describe('EditAccountModal OpenAI 自动使用重置卡', () => {

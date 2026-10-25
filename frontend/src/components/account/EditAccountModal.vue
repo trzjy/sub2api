@@ -5576,7 +5576,10 @@ const handleSubmit = async () => {
       }
 
       if (balanceProbeEnabled.value) {
+        // 在既有 balance_probe 之上合并，保留弹窗未编辑的子键（如 count_unit），
+        // 而非用字面量整体覆盖导致子键被静默抹掉。
         newCredentials.balance_probe = {
+          ...(currentCredentials.balance_probe as Record<string, unknown> | undefined),
           enabled: true,
           url: balanceProbeURL.value.trim(),
           bearer_auth: balanceProbeBearerAuth.value
