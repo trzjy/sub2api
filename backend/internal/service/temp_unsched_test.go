@@ -3,6 +3,7 @@
 package service
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -10,6 +11,20 @@ import (
 )
 
 // ============ 临时限流单元测试 ============
+
+func TestTempUnschedIndefiniteUntilIsJSONSafeAfterTimezoneConversion(t *testing.T) {
+	for _, loc := range []*time.Location{
+		time.FixedZone("UTC+14", 14*60*60),
+		time.FixedZone("UTC+08", 8*60*60),
+		time.UTC,
+		time.FixedZone("UTC-12", -12*60*60),
+	} {
+		converted := tempUnschedIndefiniteUntil.In(loc)
+		require.LessOrEqual(t, converted.Year(), 9999, loc.String())
+		_, err := json.Marshal(&converted)
+		require.NoError(t, err, loc.String())
+	}
+}
 
 // TestMatchTempUnschedKeyword 测试关键词匹配函数
 func TestMatchTempUnschedKeyword(t *testing.T) {

@@ -42,7 +42,8 @@ type TempUnschedState struct {
 //
 // 该值同时充当代际令牌（ClearTempUnschedulableIfGeneration /
 // BumpTempUnschedulableReasonIfGeneration 的等值比较对象），因其恒定不变，条件清除稳定命中。
-var tempUnschedIndefiniteUntil = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+// Keep the sentinel safely inside JSON's year range after database timezone conversion.
+var tempUnschedIndefiniteUntil = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
 
 // TempUnschedCache 临时不可调度缓存接口
 type TempUnschedCache interface {
