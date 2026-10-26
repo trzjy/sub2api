@@ -403,7 +403,16 @@ func TestCursorDecodeMcpArgsMap(t *testing.T) {
 }
 
 func TestCursorDuplexMcpArgsCapturedNotAnswered(t *testing.T) {
-	d, err := newCursorAgentDuplex(cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil)), nil)
+	initReq := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools: []apicompat.ChatTool{{Type: "function", Function: &apicompat.ChatFunction{
+			Name:       "get_weather",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+		}}},
+	}
+	initBody, err := cursorConvertRequest(initReq, "grok-4.7")
+	require.NoError(t, err)
+	d, err := newCursorAgentDuplex(initBody, nil)
 	require.NoError(t, err)
 	defer d.close(nil)
 

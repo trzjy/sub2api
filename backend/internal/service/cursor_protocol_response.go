@@ -37,6 +37,11 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -660,6 +665,16 @@ type cursorStreamParser struct {
 	// duplex 解码 mcp_args 后写入这里，parser 只读取并输出，不再对同一帧二次解码；
 	// 批次的 started/listed/封口判定也都在该记录内（§25.3）。
 	delegations *cursorToolDelegations
+
+	// declaredToolDefs 是本请求 f4（McpTools）的每条 McpToolDefinition 原始字节，
+	// 由 attachToolSchemas 注入（来源必须是请求体 f4 原始字节，与 duplex 路径同源）。
+	// 供独立解析路径（非 duplex）按 tool_name 取回 input_schema 做 schema 还原；
+	// 为空表示本路径拿不到 f4 原始字节 → 装配缺陷，失败关闭。
+	declaredToolDefs [][]byte
+
+	// lg 是解析器阶段事件的结构化 logger（不可变、并发安全）。可为 nil，
+	// 底层落盘函数会在 nil 时回退到全局 logger。
+	lg *zap.Logger
 	// firstTokenMs 是首帧文本的耗时（毫秒，自解析开始计时），供转发结果诊断。
 	firstTokenMs int
 	parseStart   time.Time
@@ -841,7 +856,27 @@ func (p *cursorStreamParser) cursorContent() string { return p.content }
 //
 // secrets 是需要从错误文案里抹掉的凭证值（如本次对话用的 session_token）。
 func cursorNewStreamParser(model string, secrets ...string) *cursorStreamParser {
-	return &cursorStreamParser{model: model, secrets: secrets, parseStart: time.Now()}
+	return &cursorStreamParser{
+		model:      model,
+		secrets:    secrets,
+		lg:         logger.L(),
+		parseStart: time.Now(),
+	}
+}
+
+// attachToolSchemas 注入本请求 f4 原始字节（每条 McpToolDefinition 原始字节），
+// 供独立解析路径（非 duplex）按 tool_name 取回 input_schema 做 schema 还原。
+// 来源必须是请求体 f4 原始字节（与 duplex 路径同源），不得改用 req.Tools 重新序列化。
+func (p *cursorStreamParser) attachToolSchemas(defs [][]byte) {
+	if p == nil {
+		return
+	}
+	p.declaredToolDefs = defs
+}
+
+// logPhase 是解析器阶段事件的统一落盘入口（logger 不可变、并发安全，直接落盘）。
+func (p *cursorStreamParser) logPhase(lvl zapcore.Level, phase, outcome string, extra ...zap.Field) {
+	cursorPhaseLogFields(p.lg, lvl, phase, p.model, "", extra...)
 }
 
 // markFirstToken 记录首帧文本耗时（只记第一次，供 ForwardResult 诊断）。
@@ -964,8 +999,19 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 				if derr != nil {
 					return cursorStreamEvent{}, derr
 				}
+				// 按 schema 还原（r15 方案 §3）：schema 来源必须是 f4 原始字节。
+				retyped, rerr := cursorRetypeArgsByToolDefs(id, name, argsJSON, p.declaredToolDefs,
+					func(reason cursorRetypeErrReason) {
+						p.logPhase(zapcore.WarnLevel, "mcp_args_retype_failed", "",
+							zap.String("retype_error", string(reason)),
+							zap.String("tool_name", name),
+							zap.String("call_id", id))
+					})
+				if rerr != nil {
+					return cursorStreamEvent{}, rerr
+				}
 				if derr := delegations.noteDelegation("", cursorToolCallCapture{
-					ID: id, Name: name, ArgsJSON: argsJSON,
+					ID: id, Name: name, ArgsJSON: retyped,
 				}); derr != nil {
 					return cursorStreamEvent{}, derr
 				}
@@ -1273,6 +1319,341 @@ func cursorDecodeMcpValue(b []byte) (string, error) {
 		return "", fmt.Errorf("%w: compact mcp value: %v", ErrCursorProtocol, err)
 	}
 	return buf.String(), nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cursor McpArgs 按 schema 还原（派发单 r15 方案 §3）
+//
+// 核心原则：只判定"该位置的声明类型是不是 array"。不实现 JSON Schema 语义引擎，
+// 不做 conforms 全量校验，不解析 anyOf/oneOf/$ref/allOf。任一不可判定 → 失败关闭。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// cursorRetypeErrReason 是 retype 失败关闭的结构化原因枚举（与方案 §3.5 一一对应）。
+type cursorRetypeErrReason string
+
+const (
+	cursorRetypeSchemaInvalid          cursorRetypeErrReason = "schema_invalid"
+	cursorRetypeSchemaAbsent           cursorRetypeErrReason = "schema_absent"
+	cursorRetypeSchemaUnresolvable     cursorRetypeErrReason = "schema_unresolvable"
+	cursorRetypeProjectionUnresolvable cursorRetypeErrReason = "projection_unresolvable"
+	cursorRetypeItemsNotAllowed        cursorRetypeErrReason = "items_not_allowed"
+	cursorRetypeItemsSubSchemaInvalid  cursorRetypeErrReason = "items_sub_schema_invalid"
+	cursorRetypeAdditionalPropPresent  cursorRetypeErrReason = "additional_property_present"
+	cursorRetypeObjectTypeMismatch     cursorRetypeErrReason = "object_type_mismatch"
+	cursorRetypeNumericOutOfRange      cursorRetypeErrReason = "numeric_out_of_range"
+)
+
+// cursorRetypeError 是 retype 失败关闭的结构化错误：Unwrap 到 ErrCursorProtocol，
+// 不含参数明文；Reason 暴露 §3.5 枚举值（供错误返回点日志与安全分类）。
+type cursorRetypeError struct {
+	reason cursorRetypeErrReason
+}
+
+func (e *cursorRetypeError) Error() string                 { return "cursor mcp_args retype: " + string(e.reason) }
+func (e *cursorRetypeError) Unwrap() error                 { return ErrCursorProtocol }
+func (e *cursorRetypeError) Reason() cursorRetypeErrReason { return e.reason }
+
+func cursorRetypeErrorf(reason cursorRetypeErrReason) error {
+	return &cursorRetypeError{reason: reason}
+}
+
+// cursorToolSchemaIndex 从 f4（McpTools）的每条 McpToolDefinition 原始字节解出
+// f5 tool_name → f6 input_schema_json。来源必须是请求体 f4 原始字节（经
+// cursorBuildMcpTools 实际发出的字节），不得改用 req.Tools 重新序列化。
+func cursorToolSchemaIndex(defs [][]byte) map[string][]byte {
+	idx := make(map[string][]byte, len(defs))
+	for _, raw := range defs {
+		fields, err := cursorDecodeProtobuf(raw)
+		if err != nil {
+			continue
+		}
+		var name, schema string
+		for _, f := range fields {
+			switch f.Number {
+			case cursorFldMcpToolDefToolName:
+				name = f.String()
+			case cursorFldMcpToolDefInputSchema:
+				schema = f.String()
+			}
+		}
+		if name != "" && schema != "" {
+			idx[name] = []byte(schema)
+		}
+	}
+	return idx
+}
+
+// isJSONNumberLiteral 按 RFC 8259 数字语法做词法校验（不含解析）。
+// 拒绝 JSON 之外的写法（"0x1p2"、"NaN"、"Inf"、前导零 "01"、"1."、省略指数的 "1e" 等）。
+func isJSONNumberLiteral(s string) bool {
+	n := len(s)
+	if n == 0 {
+		return false
+	}
+	i := 0
+	if s[i] == '-' {
+		i++
+		if i == n {
+			return false
+		}
+	}
+	switch {
+	case s[i] == '0':
+		i++
+	case s[i] >= '1' && s[i] <= '9':
+		i++
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	default:
+		return false
+	}
+	if i < n && s[i] == '.' {
+		i++
+		if i == n || s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	}
+	if i < n && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < n && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		if i == n || s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	}
+	return i == n
+}
+
+// cursorRetypeMcpArgs 把 argsJSON（对象 JSON）按 schemaJSON（工具 input_schema）做
+// 类型驱动的最小结构变换。根对象整体走 OBJECT 分支（复用 retypeValue）。
+// 任一不可判定 → 返回 ErrCursorProtocol 包裹的结构化原因。
+func cursorRetypeMcpArgs(argsJSON, schemaJSON []byte) ([]byte, error) {
+	var args any
+	if err := json.Unmarshal(argsJSON, &args); err != nil {
+		return nil, fmt.Errorf("%w: parse mcp args: %v", ErrCursorProtocol, err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(schemaJSON, &root); err != nil {
+		return nil, fmt.Errorf("%w: parse tool schema: %v", ErrCursorProtocol, err)
+	}
+	if root == nil {
+		return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
+	}
+	// 根对象必须声明为 object 类型，否则无结构可投影（§3.3 形态校验）。
+	// type 缺省（如空 schema "{}"）→ 无 type 声明，不存在 array 投影，原样返回。
+	if rawType, ok := root["type"]; ok {
+		t, ok := rawType.(string)
+		if !ok || t != "object" {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+	}
+	out, err := retypeValue(args, root)
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("%w: marshal retyped mcp args: %v", ErrCursorProtocol, err)
+	}
+	return b, nil
+}
+
+// cursorRetypeArgsByToolDefs 按 f4 原始字节集合为某个工具调用还原 ArgsJSON：
+// 先按 tool_name 取回 input_schema，再走 cursorRetypeMcpArgs；
+// 失败关闭（返回 ErrCursorProtocol，不含参数明文），并在 onFail 回调里记结构化日志。
+// 双工路径与独立解析路径共用本函数，保证两路径行为一致（§B 两路径一致）。
+func cursorRetypeArgsByToolDefs(id, name, argsJSON string, defs [][]byte, onFail func(reason cursorRetypeErrReason)) (string, error) {
+	idx := cursorToolSchemaIndex(defs)
+	schemaJSON, ok := idx[name]
+	if !ok {
+		if onFail != nil {
+			onFail(cursorRetypeSchemaAbsent)
+		}
+		return "", cursorRetypeErrorf(cursorRetypeSchemaAbsent)
+	}
+	retyped, err := cursorRetypeMcpArgs([]byte(argsJSON), schemaJSON)
+	if err != nil {
+		reason := cursorRetypeErrReason("unknown")
+		var re *cursorRetypeError
+		if errors.As(err, &re) {
+			reason = re.reason
+		}
+		if onFail != nil {
+			onFail(reason)
+		}
+		return "", err
+	}
+	return string(retyped), nil
+}
+
+// retypeValue 递归地按 schema 还原单个 value（方案 §3.3 算法）。
+func retypeValue(value any, schema map[string]any) (any, error) {
+	// 0. schema 形态
+	if schema == nil {
+		return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
+	}
+	if _, ok := schema["$ref"]; ok {
+		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+	}
+	for _, k := range []string{"anyOf", "oneOf", "allOf"} {
+		if _, ok := schema[k]; ok {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+	}
+	rawTypeVal, ok := schema["type"]
+	if !ok {
+		return value, nil // 无 type 声明 → 不存在 array 投影，原样
+	}
+	rawType, ok := rawTypeVal.(string)
+	if !ok {
+		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable) // type 为数组等
+	}
+	switch rawType {
+	case "string", "null":
+		return value, nil
+	case "array":
+		return retypeArray(value, schema)
+	case "object":
+		return retypeObject(value, schema)
+	case "number", "integer", "boolean":
+		return retypeScalar(value, rawType)
+	default:
+		return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
+	}
+}
+
+func retypeArray(value any, schema map[string]any) (any, error) {
+	var seq []any
+	switch v := value.(type) {
+	case []any:
+		seq = v
+	case map[string]any:
+		if len(v) == 1 {
+			if itemVal, ok := v["item"]; ok {
+				if iv, ok := itemVal.([]any); ok {
+					seq = iv
+				} else {
+					seq = []any{itemVal}
+				}
+			}
+		}
+	}
+	if seq == nil {
+		// 既不是 list 也不是单键 {item} → 失败关闭（不是透传）。
+		return nil, cursorRetypeErrorf(cursorRetypeProjectionUnresolvable)
+	}
+	itemsVal, hasItems := schema["items"]
+	if !hasItems {
+		return seq, nil // 元素原样
+	}
+	switch items := itemsVal.(type) {
+	case bool:
+		if items {
+			return seq, nil // items:true → 元素原样
+		}
+		// items:false
+		if len(seq) == 0 {
+			return []any{}, nil
+		}
+		return nil, cursorRetypeErrorf(cursorRetypeItemsNotAllowed)
+	case map[string]any:
+		out := make([]any, len(seq))
+		for i, e := range seq {
+			r, err := retypeValue(e, items)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = r
+		}
+		return out, nil
+	default:
+		return nil, cursorRetypeErrorf(cursorRetypeItemsSubSchemaInvalid)
+	}
+}
+
+func retypeObject(value any, schema map[string]any) (any, error) {
+	v, ok := value.(map[string]any)
+	if !ok {
+		return nil, cursorRetypeErrorf(cursorRetypeObjectTypeMismatch)
+	}
+	propsVal, _ := schema["properties"]
+	props, _ := propsVal.(map[string]any)
+	apVal, hasAP := schema["additionalProperties"]
+	var apSchema map[string]any
+	apFalse := false
+	if hasAP {
+		switch ap := apVal.(type) {
+		case map[string]any:
+			apSchema = ap
+		case bool:
+			if !ap {
+				apFalse = true
+			}
+		}
+	}
+	out := make(map[string]any, len(v))
+	for k, vv := range v {
+		if p, ok := props[k]; ok {
+			sub, ok := p.(map[string]any)
+			if !ok {
+				// 属性 schema 不是对象（null/字面量）→ 不可作为投影依据。
+				return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
+			}
+			r, err := retypeValue(vv, sub)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = r
+			continue
+		}
+		switch {
+		case apSchema != nil:
+			r, err := retypeValue(vv, apSchema)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = r
+		case apFalse:
+			return nil, cursorRetypeErrorf(cursorRetypeAdditionalPropPresent)
+		default: // additionalProperties 缺失或 true：原样保留
+			out[k] = vv
+		}
+	}
+	return out, nil
+}
+
+func retypeScalar(value any, rawType string) (any, error) {
+	s, ok := value.(string)
+	if !ok {
+		return value, nil // 已是数字/布尔 → 原样
+	}
+	if rawType == "boolean" {
+		switch s {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		default:
+			return s, nil // 非布尔字面量保持原样（不报错、不改写）
+		}
+	}
+	// number / integer：先词法校验，再转 float64；溢出/非有限 → 失败关闭。
+	if !isJSONNumberLiteral(s) {
+		return s, nil // 词法不合法（如 "abc"）→ 原样保留（可能本来就是字符串值）
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return nil, cursorRetypeErrorf(cursorRetypeNumericOutOfRange)
+	}
+	return f, nil
 }
 
 // cursorCheckFiniteValue 递归校验 structpb.Value 内的全部数值是否为有限值。

@@ -555,7 +555,18 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 	if err != nil {
 		return cursorToolCallCapture{}, err
 	}
-	tc := cursorToolCallCapture{ID: id, Name: name, ArgsJSON: argsJSON, ExecID: execID, IDField: append([]byte(nil), idField...)}
+	// 按 schema 还原（r15 方案 §3）：schema 来源必须是 f4 原始字节（d.declaredToolDefs）。
+	retyped, rerr := cursorRetypeArgsByToolDefs(id, name, argsJSON, d.declaredToolDefs,
+		func(reason cursorRetypeErrReason) {
+			d.logPhase(zapcore.WarnLevel, "mcp_args_retype_failed", "",
+				zap.String("retype_error", string(reason)),
+				zap.String("tool_name", name),
+				zap.String("call_id", id))
+		})
+	if rerr != nil {
+		return cursorToolCallCapture{}, rerr
+	}
+	tc := cursorToolCallCapture{ID: id, Name: name, ArgsJSON: retyped, ExecID: execID, IDField: append([]byte(nil), idField...)}
 	delegations := d.delegations
 	if delegations == nil {
 		delegations = newLocalCursorToolDelegations()

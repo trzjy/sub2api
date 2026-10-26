@@ -575,6 +575,9 @@ func (s *CursorExecutionService) executeHTTP(
 
 	parser := cursorNewStreamParser(originalModel, bearer)
 	parser.attachToolDelegations(delegations)
+	if resp.Duplex != nil {
+		parser.attachToolSchemas(resp.Duplex.declaredToolDefs)
+	}
 	// 本 HTTP 的 chunk 一律使用该 HTTP 的实际响应 ID（不是固定常量）。
 	parser.attachOutputIDSource(session.output.responseID)
 
