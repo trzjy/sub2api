@@ -20,11 +20,24 @@ import (
 
 // openAICNFirstByteTimeout 是显式 CN 清单平台（kimi/deepseek/zhipu/minimax，
 // 与派发单 1 的 isCNFamilyFastpathAccount 同一清单）出站请求的整体首包超时阈值。
-// 用户裁定 1：60 秒（数据调研：60s 误杀 4%，30s 误杀 27%）。
+//
+// 用户裁定 2（2026-10-26）：60 秒 -> 300 秒，「大请求本来就慢，就让用户慢慢等」。
+// 原 60 秒的调研口径是全体请求（"60s 误杀 4%，30s 误杀 27%"），未单列大请求。
+// 生产实测（2026-10-26 24h，usage_logs，9 个 deepseek/kimi 上游账号）：
+// 1,164 个请求耗时超过 60 秒但成功（60-90s 780 条、90-120s 209 条、
+// 120-180s 104 条、>180s 71 条），最长一条 576 秒；这些请求平均 input
+// 2.6w~3.4w tokens、平均 body 39w~69w 字节 —— 即"本来就慢的大请求"被误杀。
+// 300 秒与网关 HTTP 层 defaultResponseHeaderTimeout（300s）同级，
+// 覆盖 180 秒内的全部误杀。
 //
 // 计时边界（方案文档 P2）：起点 = 出站请求发出；终点 = 上游响应 body 首字节。
 // 仅收到响应头不停止计时；首包到达后流式传输不受影响（不设整体读超时）。
-const openAICNFirstByteTimeout = 60 * time.Second
+//
+// 注意：本阈值与 HTTP 层 ResponseHeaderTimeout 不是同一层 ——
+// OpenAI 兼容链路的 HTTP 层响应头超时为 0（不设限，http_upstream.go
+// HTTPUpstreamProfileOpenAI 分支），本常量管的是「响应头已到、正文首字节未到」
+// 这一段，与 HTTP 层无重叠。
+const openAICNFirstByteTimeout = 300 * time.Second
 
 // openAICNHeaderTimeout 是"等待上游响应头"这一段的独立阈值（30 秒）。
 //
@@ -623,6 +636,16 @@ func (s *OpenAIGatewayService) failoverOpenAICNFirstByteTimeout(ctx context.Cont
 		ResponseBody:      openAICNFirstByteTimeoutFailoverBody,
 		ResponseHeaders:   http.Header{},
 		NextAccountAction: NextAccountRetry,
+		// 请求级：首包超时标记的是「本次请求在上游侧等太久」（大请求 prefill 慢、
+		// 上游当时排队或连接慢），不是账号本身坏了。生产实测 2026-10-26：
+		// 同类失败占账号级熔断触发的 93.4%（502 已于同日排除出名单，熔断触发里
+		// 只剩 504 与 429）；且这类超时 828 次里 495 次换个号即恢复 —— 换号有用
+		// 正说明不是账号故障。若计入熔断会摘掉健康账号（含唯一能承载百万级
+		// token 的 137 星思云站）→ account_select_failed(pool=N, excluded=N)
+		// → 客户端 503「该分组暂无可用账号」。
+		// 仍走上方 handleOpenAIAccountUpstreamError(504) 的既有瞬态冷却链：
+		// 该链负责让账号歇一会儿，与熔断的调度层摘除是两条独立路径。
+		Scope: GatewayFailureScopeRequest,
 	}
 }
 

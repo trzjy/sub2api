@@ -745,11 +745,41 @@ func TestOpenAICNFirstByteTimeout_FailoverCoolsAccountAndRequestsNextAccount(t *
 	require.Equal(t, http.StatusGatewayTimeout, foErr.StatusCode)
 	require.Equal(t, NextAccountRetry, foErr.NextAccountAction, "超时错误必须映射为 NextAccountRetry 供 failover 循环消费")
 	require.False(t, errors.Is(foErr, context.Canceled), "failover 错误不得表现为 context.Canceled")
+	// 请求级：首包超时标记的是本次请求在上游等太久，不是账号故障。
+	// 该 Scope 使 classifyOpenAIAPIKeyHealthFailure 把它排除出账号级熔断
+	//（生产实证 2026-10-26：这类超时占熔断触发 93.4%，且 828 次里 495 次
+	//  换号即恢复；计入熔断会摘掉健康账号 -> 池空 -> 客户端 503）。
+	require.Equal(t, GatewayFailureScopeRequest, foErr.Scope, "首包超时必须标记为请求级，不进账号级熔断")
 
 	// 二次超时 → streak=2 → model transient 冷却生效（派发单 1 已开放的冷却入口）。
 	_ = svc.failoverOpenAICNFirstByteTimeout(context.Background(), account, model)
 	require.True(t, svc.isOpenAIAccountModelRuntimeBlocked(account, model), "超时账号必须落入模型级瞬态冷却")
 	require.False(t, svc.peekOpenAIAccountRuntimeBlock(account).blocked, "首包超时不走账号级 runtime block（与既有 5xx 瞬态冷却语义一致）")
+}
+
+// TestOpenAICNFirstByteTimeout_ThresholdIs300Seconds pins the 2026-10-26 ruling:
+// 60s -> 300s. Production evidence: 1,164 requests slower than 60s succeeded
+// (780 in 60-90s, 209 in 90-120s, 104 in 120-180s, 71 above 180s; longest 576s),
+// with average input 26k-34k tokens and average body 390k-690k bytes -- the
+// "big requests are simply slow" class the user asked not to kill.
+func TestOpenAICNFirstByteTimeout_ThresholdIs300Seconds(t *testing.T) {
+	require.Equal(t, 300*time.Second, openAICNFirstByteTimeout,
+		"CN 首包超时应为 300 秒（大请求本来就慢，让用户慢慢等）")
+}
+
+// TestOpenAICNFirstByteTimeout_NotCountedByAccountHealthBreaker pins that a CN
+// first-byte timeout must NOT be counted toward the account-level health breaker:
+// the account may be healthy while this one request waited too long upstream.
+func TestOpenAICNFirstByteTimeout_NotCountedByAccountHealthBreaker(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := cnKimiAccount()
+
+	foErr := svc.failoverOpenAICNFirstByteTimeout(context.Background(), account, "kimi-k3")
+	require.NotNil(t, foErr)
+
+	_, _, eligible := classifyOpenAIAPIKeyHealthFailure(foErr)
+	require.False(t, eligible,
+		"首包超时不得计入账号级熔断（它标记的是请求侧等待过久，不是账号故障）")
 }
 
 func TestOpenAICNFirstByteTimeout_StreamFailoverSkipsAfterHeadersCommitted(t *testing.T) {
