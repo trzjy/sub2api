@@ -3062,6 +3062,10 @@ func (r *accountRepository) BumpTempUnschedulableReasonIfGeneration(ctx context.
 // ListTempUnschedulableAccounts returns accounts currently inside a temp-unschedulable
 // cooldown, ordered by soonest expiry and capped at limit. It powers the optional
 // health-breaker probe-based recovery sweep.
+//
+// 只返回 schedulable=true 的账号：schedulable=false 是管理员显式关闭调度，
+// 语义是"不参与调度"而非"等待恢复"，探测它没有意义，且会在管理员关闭期间
+// 反复发无谓的上游请求。
 func (r *accountRepository) ListTempUnschedulableAccounts(ctx context.Context, now time.Time, limit int) ([]*service.Account, error) {
 	if limit <= 0 {
 		limit = 200
@@ -3070,6 +3074,7 @@ func (r *accountRepository) ListTempUnschedulableAccounts(ctx context.Context, n
 		Where(
 			dbaccount.TempUnschedulableUntilNotNil(),
 			dbaccount.TempUnschedulableUntilGT(now),
+			dbaccount.SchedulableEQ(true),
 			dbaccount.DeletedAtIsNil(),
 		).
 		Order(dbent.Asc(dbaccount.FieldTempUnschedulableUntil)).

@@ -29,7 +29,7 @@ import (
 func TestProbeIntervalFromSettings_Configured15(t *testing.T) {
 	ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
 		Enabled: true,
-		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 15, MaxAttempts: 100},
+		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 15},
 	})
 	got, err := ss.GetOpenAIAPIKeyHealthBreakerSettings(context.Background())
 	require.NoError(t, err)
@@ -42,7 +42,7 @@ func TestProbeIntervalFromSettings_Configured15(t *testing.T) {
 func TestProbeIntervalFromSettings_BelowMinClampedTo15(t *testing.T) {
 	ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
 		Enabled: true,
-		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 10, MaxAttempts: 100},
+		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 10},
 	})
 	got, err := ss.GetOpenAIAPIKeyHealthBreakerSettings(context.Background())
 	require.NoError(t, err)
@@ -73,16 +73,11 @@ func TestProbeIntervalFromSettings_ReadErrorDefaultsTo15(t *testing.T) {
 		"读取失败应回落默认 15s")
 }
 
-// --- 补探上限 3→50 ---
+// --- 补探节奏：无轮数上限（C1 删除探测次数上限）---
 
-// 常量本身须为 50（AC-C1：旧 3）。
-func TestProbeIntervalRetryBurstDefaultIs50(t *testing.T) {
-	require.Equal(t, 50, accountHealthProbeRetryBurst, "AC-C1：补探上限 3→50")
-}
-
-// 默认补探上限 50：单账号首探失败后续补 50 轮（受 max_attempts=100 双重约束未触发），
-// 共 1 首探 + 50 补探 = 51 次探测 / 51 次 attempt 簿记。
-func TestProbeIntervalRetryBurstRunsUpTo50(t *testing.T) {
+// 补探没有轮数上限：首探失败后按短间隔持续补探，越过历史 50 轮上限仍在进行，
+// 只有 ctx 取消（或 Stop）能中断。
+func TestProbeIntervalRetryBurstHasNoRoundCeiling(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
 	cand := parkedBreakerAccount(7, 0)
@@ -90,19 +85,26 @@ func TestProbeIntervalRetryBurstRunsUpTo50(t *testing.T) {
 		accounts:   map[int64]*Account{7: cand},
 		candidates: []*Account{cand},
 	}
-	p := newProbeService(t, true, 100, rl, repo) // 不覆盖 retryBurst → 默认 50
+	p := newProbeService(t, true, rl, repo)
 	p.retryInterval = time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var calls int32
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) {
-		atomic.AddInt32(&calls, 1)
+		// 累计 60 次探测后取消：验证补探越过历史 50 轮上限仍在进行。
+		if atomic.AddInt32(&calls, 1) >= 60 {
+			cancel()
+		}
 		return false, nil
 	})
 
-	p.RunOnce(context.Background())
-	p.wg.Wait() // 等待异步补探完成（AC-C1）
+	p.RunOnce(ctx)
+	p.wg.Wait() // 等待异步补探按 ctx 取消收敛（AC-C1）
 
-	require.Equal(t, int32(51), atomic.LoadInt32(&calls), "默认补探上限 50：1 首探 + 50 补探")
-	require.Equal(t, 51, repo.bumpTempIfReasonCalls, "每轮补探各簿记一次 attempt")
+	require.GreaterOrEqual(t, atomic.LoadInt32(&calls), int32(60),
+		"补探不得在 50 轮后停止（C1 删除轮数上限）")
+	require.Equal(t, int(atomic.LoadInt32(&calls)), repo.bumpTempIfReasonCalls, "每轮探测各簿记一次 attempt")
+	require.Zero(t, repo.clearTempIfReasonCalls, "全部失败不得解除停调")
 }
 
 // --- 补探异步化（r6 阻塞1 验收）：补探占用 >15s 时 sweep 不被阻塞 ---
@@ -117,7 +119,7 @@ func TestProbeIntervalRetryBurstAsyncDoesNotBlockSweep(t *testing.T) {
 		accounts:   map[int64]*Account{7: cand},
 		candidates: []*Account{cand},
 	}
-	p := newProbeService(t, true, 100, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.retryInterval = time.Millisecond
 	var calls int32
 	// 首探（第 1 次调用）快速失败；补探（后续调用）阻塞直到 ctx 取消，模拟 >15s 的补探占用。
@@ -168,10 +170,9 @@ func TestProbeIntervalRetryInFlightSkipsEnqueue(t *testing.T) {
 		accounts:   map[int64]*Account{7: cand},
 		candidates: []*Account{cand},
 	}
-	p := newProbeService(t, true, 100, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return false, nil }) // 失败快返回
 	p.retryInterval = time.Millisecond
-	p.retryBurst = 1
 
 	// 模拟该账号已有补探在途（上一轮 sweep 发起、尚未完成）。
 	require.True(t, p.markRetryInFlight(7))

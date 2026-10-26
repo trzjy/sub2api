@@ -21,11 +21,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +52,9 @@ type codeBuddyProbeUpstreamStub struct {
 
 	mu      sync.Mutex
 	records []codeBuddyProbeRequestRecord
+	// onRequest 在记录每次请求后回调（服务端请求计数）。C1 起补探无轮数上限，失败场景
+	// 只有取消 ctx 才能让补探循环收敛，用服务端收到的请求数划定边界最确定。
+	onRequest func(requests int)
 }
 
 func newCodeBuddyProbeUpstreamStub(t *testing.T, status int, sseBody string) *codeBuddyProbeUpstreamStub {
@@ -64,7 +69,12 @@ func newCodeBuddyProbeUpstreamStub(t *testing.T, status int, sseBody string) *co
 			Header: r.Header.Clone(),
 			Body:   body,
 		})
+		hook := stub.onRequest
+		requests := len(stub.records)
 		stub.mu.Unlock()
+		if hook != nil {
+			hook(requests)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, stub.sseBody)
@@ -73,6 +83,18 @@ func newCodeBuddyProbeUpstreamStub(t *testing.T, status int, sseBody string) *co
 	stub.serverURL = strings.TrimPrefix(server.URL, "http://")
 	stub.client = server.Client()
 	return stub
+}
+
+// cancelAfterRequests 让桩在累计收到 n 次探测请求后取消 ctx：与 setFastProbeRetry 搭配，
+// 使「永久失败」场景的无上限补探按 ctx.Done 收敛，探测次数因此可确定断言。
+func (s *codeBuddyProbeUpstreamStub) cancelAfterRequests(n int, cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onRequest = func(requests int) {
+		if requests >= n {
+			cancel()
+		}
+	}
 }
 
 func (s *codeBuddyProbeUpstreamStub) Do(req *http.Request, proxyURL string, accountID int64, concurrency int) (*http.Response, error) {
@@ -129,7 +151,7 @@ func newProbeServiceWithUpstream(t *testing.T, upstream HTTPUpstream, rl *RateLi
 	t.Helper()
 	settings := &OpenAIAPIKeyHealthBreakerSettings{
 		Enabled: true,
-		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 30, MaxAttempts: 10},
+		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 30},
 	}
 	ss, _ := newSettingService(t, settings)
 	return NewAccountHealthRecoveryProbeService(repo, upstream, &config.Config{}, rl, ss, nil)
@@ -148,12 +170,14 @@ func TestCodeBuddyShadowProbeDispatchesMinimalStreamChat(t *testing.T) {
 	}
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, codeBuddyProbeValidSSE)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
+	setFastProbeRetry(p)
 
-	// PRC-02：一次真实探测成功即走既有 ClearTempUnschedulable 恢复路径，无 attempt 记账。
+	// C1：连续 2 次真实探测成功才恢复；首成功后异步补探在同一 sweep 内补齐第二次。
 	p.RunOnce(context.Background())
+	p.wg.Wait()
 
 	require.Equal(t, 1, repo.clearTempIfReasonCalls)
-	require.Equal(t, 0, repo.bumpTempIfReasonCalls, "成功恢复路径不再回写 consecutive_successes")
+	require.Equal(t, 1, repo.bumpTempIfReasonCalls, "首成功后回写连续成功计数，第二次成功才清除")
 
 	// httptest 上游校验请求形状。
 	rec := upstream.lastRecord(t)
@@ -196,11 +220,14 @@ func TestCodeBuddyShadowProbeSSEErrorFrameKeepsParked(t *testing.T) {
 		"event: error\ndata: {\"error\":{\"type\":\"upstream_error\",\"message\":\"boom\"}}\n\n"
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, errorSSE)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
-	// PRC-02：首探失败后本轮补探 1 次（毫秒级节奏），共 2 次 attempt 记账。
 	setFastProbeRetry(p)
+	// 永久失败：第 2 次探测后取消 ctx 划定补探边界（C1 补探无轮数上限）。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream.cancelAfterRequests(2, cancel)
 
-	p.RunOnce(context.Background())
-	p.wg.Wait() // 等待异步补探完成（AC-C1）
+	p.RunOnce(ctx)
+	p.wg.Wait() // 等待异步补探按 ctx 取消收敛（AC-C1）
 
 	require.Zero(t, repo.clearTempIfReasonCalls, "错误帧必须判探测失败，不得恢复停调")
 	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "失败后 attempt 计数 +1（首探 + 1 次补探）")
@@ -223,12 +250,15 @@ func TestCodeBuddyShadowProbeTruncatedStreamKeepsParked(t *testing.T) {
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, truncatedSSE)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 	setFastProbeRetry(p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream.cancelAfterRequests(2, cancel)
 
-	p.RunOnce(context.Background())
-	p.wg.Wait() // 等待异步补探完成（AC-C1）
+	p.RunOnce(ctx)
+	p.wg.Wait() // 等待异步补探按 ctx 取消收敛（AC-C1）
 
 	require.Zero(t, repo.clearTempIfReasonCalls, "缺 [DONE] 终止帧必须判探测失败")
-	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "首探 + 1 次补探（PRC-02）")
+	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "首探 + 1 次补探")
 }
 
 func TestCodeBuddyShadowProbeNon2xxKeepsParked(t *testing.T) {
@@ -243,12 +273,15 @@ func TestCodeBuddyShadowProbeNon2xxKeepsParked(t *testing.T) {
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusTooManyRequests, codeBuddyProbeValidSSE)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 	setFastProbeRetry(p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream.cancelAfterRequests(2, cancel)
 
-	p.RunOnce(context.Background())
-	p.wg.Wait() // 等待异步补探完成（AC-C1）
+	p.RunOnce(ctx)
+	p.wg.Wait() // 等待异步补探按 ctx 取消收敛（AC-C1）
 
 	require.Zero(t, repo.clearTempIfReasonCalls, "非 2xx 不得恢复停调")
-	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "首探 + 1 次补探（PRC-02）")
+	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "首探 + 1 次补探")
 }
 
 // --- T4：四条件成功判定的纯函数表驱动钉（含业务错误信封形态） ---
@@ -280,9 +313,42 @@ func TestEvaluateCodeBuddyShadowProbeResponse(t *testing.T) {
 	}
 }
 
-// --- T4 回归：非 CodeBuddy 账号探测路径不变（仍走 /models） ---
+// --- T4 回归：非 CodeBuddy 账号探测路径为真实数据面（C1 不再探 /models） ---
 
-func TestProbeAPIKeyAccountKeepsModelsProbePath(t *testing.T) {
+// C1：apikey 账号不再探 GET /v1/models（中转站 /models 由轻量前端直接返回，不共用
+// chat/responses 数据面链路），改为按账号真实协议 POST 数据面请求并按响应体判定。
+func TestProbeAPIKeyAccountUsesDataPlane(t *testing.T) {
+	rlRepo := &probeRateLimitRepo{}
+	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
+	cand := parkedBreakerAccount(7, 0)
+	cand.Credentials = map[string]any{"api_key": "sk-probe-test"}
+	// 探测确认不支持 Responses 的账号 → 数据面走 chat/completions（CC 直转路径）。
+	cand.Extra = map[string]any{openai_compat.ExtraKeyResponsesSupported: false}
+	repo := &probeRepoMock{
+		accounts:   map[int64]*Account{7: cand},
+		candidates: []*Account{cand},
+	}
+	// 数据面成功体：合法 JSON、无 error 信封、含 choices 数组。
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK,
+		`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`)
+	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
+	setFastProbeRetry(p)
+
+	// C1：连续 2 次数据面成功才恢复（首成功后由异步补探补齐第二次）。
+	p.RunOnce(context.Background())
+	p.wg.Wait()
+
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "apikey 账号数据面探测连续成功必须恢复")
+	rec := upstream.lastRecord(t)
+	require.Equal(t, http.MethodPost, rec.Method, "数据面探测必须是 POST 真实请求，而非 GET /models")
+	require.Equal(t, "/v1/chat/completions", rec.Path, "不支持 Responses 的账号必须打真实 chat/completions 数据面端点")
+	require.NotEqual(t, "/v1/models", rec.Path, "不得再探 /models（不共用数据面链路）")
+	require.Equal(t, "Bearer sk-probe-test", rec.Header.Get("Authorization"), "数据面探测用账号自身凭据")
+}
+
+// C1：未探测 Responses 能力的账号沿用转发链默认（Responses）→ 数据面探测打 /v1/responses，
+// 成功判定要求响应体为合法 JSON、无 error 信封且含 id/object。
+func TestProbeAPIKeyAccountDataPlaneResponsesByDefault(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
 	cand := parkedBreakerAccount(7, 0)
@@ -291,16 +357,17 @@ func TestProbeAPIKeyAccountKeepsModelsProbePath(t *testing.T) {
 		accounts:   map[int64]*Account{7: cand},
 		candidates: []*Account{cand},
 	}
-	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, "{\"object\":\"list\",\"data\":[]}")
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, `{"id":"resp-1","object":"response","status":"completed"}`)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
+	setFastProbeRetry(p)
 
-	// PRC-02：语义不变指「成功仍会恢复、且仍走 /models 探测」，只是不再需要第二轮确认。
 	p.RunOnce(context.Background())
+	p.wg.Wait()
 
-	require.Equal(t, 1, repo.clearTempIfReasonCalls, "apikey 账号 2xx /models 探测成功语义不变")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "Responses 数据面探测连续成功必须恢复")
 	rec := upstream.lastRecord(t)
-	require.Equal(t, http.MethodGet, rec.Method)
-	require.Equal(t, "/v1/models", rec.Path, "非 CodeBuddy 账号仍走既有 /models 探测")
+	require.Equal(t, http.MethodPost, rec.Method)
+	require.Equal(t, "/v1/responses", rec.Path, "未探测能力的账号默认走 Responses 数据面（与转发链同源）")
 }
 
 // --- T5：pool_mode_401_escalation marker 探测放行 + 恢复出口重置 ---
@@ -335,11 +402,13 @@ func TestProbePool401MarkerRecoveryResetsPoolWindowState(t *testing.T) {
 		accounts:   map[int64]*Account{accID: cand},
 		candidates: []*Account{cand},
 	}
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
+	setFastProbeRetry(p)
 
-	// marker 放行 + 首次探测成功（PRC-02）→ 清除。
+	// marker 放行 + 连续 2 次探测成功（C1）→ 清除。
 	p.RunOnce(context.Background())
+	p.wg.Wait()
 
 	// marker 放行：探测成功 → ClearTempUnschedulable 生效。
 	require.Equal(t, 1, repo.clearTempIfReasonCalls)
@@ -378,18 +447,24 @@ func TestProbePool401MarkerAccountIsSelected(t *testing.T) {
 		accounts:   map[int64]*Account{126: cand},
 		candidates: []*Account{cand},
 	}
-	p := newProbeService(t, true, 10, rl, repo)
-	overrideCalls := 0
+	p := newProbeService(t, true, rl, repo)
+	var overrideCalls int32
+	setFastProbeRetry(p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) {
-		overrideCalls++
+		// 永久失败：第 2 次探测后取消 ctx，划定无上限补探的测试边界。
+		if atomic.AddInt32(&overrideCalls, 1) >= 2 {
+			cancel()
+		}
 		return false, nil
 	})
-	setFastProbeRetry(p)
 
-	p.RunOnce(context.Background())
-	p.wg.Wait() // 等待异步补探完成（AC-C1）
+	p.RunOnce(ctx)
+	p.wg.Wait() // 等待异步补探按 ctx 取消收敛（AC-C1）
 
-	require.Equal(t, 2, overrideCalls, "池 401 升级停调必须被探测选号认领（首探 + 1 次补探）")
+	require.Equal(t, int32(2), atomic.LoadInt32(&overrideCalls),
+		"池 401 升级停调必须被探测选号认领（首探 + 1 次补探）")
 	require.Zero(t, repo.clearTempIfReasonCalls)
 }
 
@@ -402,17 +477,20 @@ func TestProbeHealthBreakerMarkerKeepsPoolWindowStateUntouched(t *testing.T) {
 
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
+	acc := parkedBreakerAccount(accID, 0)
 	repo := &probeRepoMock{
-		accounts:   map[int64]*Account{accID: parkedBreakerAccount(accID, 0)},
-		candidates: []*Account{parkedBreakerAccount(accID, 0)},
+		accounts:   map[int64]*Account{accID: acc},
+		candidates: []*Account{acc},
 	}
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
+	setFastProbeRetry(p)
 
 	pool401Windows.record(accID, time.Now())
 
-	// PRC-02：首次探测成功即恢复，marker 分派语义不变。
+	// C1：连续 2 次探测成功才恢复，marker 分派语义不变。
 	p.RunOnce(context.Background())
+	p.wg.Wait()
 
 	require.Equal(t, 1, repo.clearTempIfReasonCalls, "健康熔断 marker 恢复行为不变")
 	pool401Windows.mu.Lock()

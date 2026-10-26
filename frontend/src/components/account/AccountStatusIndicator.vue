@@ -340,8 +340,25 @@ const overloadCountdown = computed(() => {
   return formatCountdownWithSuffix(props.account.overload_until)
 })
 
+// 熔断型停调（health breaker）的 reason 是 JSON，matched_keyword 为固定标记。
+// 这类停调无自动到期时间，恢复由后端探测确认驱动，因此不能显示 until 时间。
+const isProbeDrivenTempUnschedulable = computed(() => {
+  const reason = props.account.temp_unschedulable_reason
+  if (!reason || !reason.trim().startsWith('{')) return false
+  try {
+    const state = JSON.parse(reason) as { matched_keyword?: string }
+    return state?.matched_keyword === 'openai_apikey_health_breaker'
+  } catch {
+    return false
+  }
+})
+
 const tempUnschedRecoveryText = computed(() => {
-  if (!isTempUnschedulable.value || !props.account.temp_unschedulable_until) return ''
+  if (!isTempUnschedulable.value) return ''
+  if (isProbeDrivenTempUnschedulable.value) {
+    return t('admin.accounts.status.tempUnschedulableProbing')
+  }
+  if (!props.account.temp_unschedulable_until) return ''
   return t('admin.accounts.status.tempUnschedulableUntil', {
     time: formatDateTime(props.account.temp_unschedulable_until)
   })

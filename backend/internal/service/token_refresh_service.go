@@ -1159,6 +1159,23 @@ func (s *TokenRefreshService) retryBackoff(accountID int64, attempt int) time.Du
 	return min(backoff, maxTokenRefreshRetryBackoff)
 }
 
+// isOAuth401RecoverableTempUnschedReason 判定停调是否属于"token 刷新即可恢复"的
+// OAuth 401 类。这类停调由 ratelimit_service 的 OAuth 401 分支写入，语义是"等 token
+// 刷新窗口"，因此刷新成功后清除它是正确行为；其余原因（健康熔断、配额暂停、余额不足、
+// 调度阈值等）各有独立恢复链，不得被本路径清除。
+func isOAuth401RecoverableTempUnschedReason(reason string) bool {
+	trimmed := strings.TrimSpace(reason)
+	if trimmed == "" {
+		return false
+	}
+	// 结构化 reason：MatchedKeyword 为 oauth401RecoverableMarker 即属本类。
+	if state, ok := parseHealthBreakerState(trimmed); ok && state != nil {
+		return state.MatchedKeyword == oauth401RecoverableMarker
+	}
+	// 纯文本形态兜底：历史/varied 写入形态以 "OAuth 401:" 开头。
+	return strings.HasPrefix(trimmed, "OAuth 401:")
+}
+
 // postRefreshActions 刷新成功后的后续动作（清除错误状态、缓存失效、调度器同步等）
 func (s *TokenRefreshService) postRefreshActions(ctx context.Context, account *Account) {
 	s.clearAntigravityForceTokenRefresh(ctx, account, "success")
@@ -1177,8 +1194,12 @@ func (s *TokenRefreshService) postRefreshActions(ctx context.Context, account *A
 			s.notifyAccountSchedulingBlockCleared(account.ID)
 		}
 	}
-	// 刷新成功后清除临时不可调度状态（处理 OAuth 401 恢复场景）
-	if account.TempUnschedulableUntil != nil && time.Now().Before(*account.TempUnschedulableUntil) {
+	// 刷新成功后清除临时不可调度状态。仅清 OAuth 401 类停调：其它原因（健康熔断、
+	// 配额暂停、余额不足、调度阈值等）各有自己的恢复链，不得被 token 刷新绕过——
+	// 尤其是健康熔断，其恢复必须由恢复探针的连续实测成功确认。
+	if account.TempUnschedulableUntil != nil &&
+		time.Now().Before(*account.TempUnschedulableUntil) &&
+		isOAuth401RecoverableTempUnschedReason(account.TempUnschedulableReason) {
 		if clearErr := s.accountRepo.ClearTempUnschedulable(ctx, account.ID); clearErr != nil {
 			slog.Warn("token_refresh.clear_temp_unschedulable_failed",
 				"account_id", account.ID,

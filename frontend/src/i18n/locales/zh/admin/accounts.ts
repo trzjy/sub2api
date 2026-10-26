@@ -697,7 +697,8 @@ export default {
         creditsExhaustedUntil: 'AI Credits 已用尽，预计 {time} 恢复',
         overloadedUntil: '负载过重，重置时间：{time}',
         viewTempUnschedDetails: '查看临时不可调度详情',
-        tempUnschedulableUntil: '预计 {time} 恢复'
+        tempUnschedulableUntil: '预计 {time} 恢复',
+        tempUnschedulableProbing: '探测中，确认恢复后自动恢复调度'
       },
       tempUnschedulable: {
         title: '临时不可调度',

@@ -21,10 +21,28 @@ type TempUnschedState struct {
 	Tier int `json:"tier,omitempty"`
 	// ProbeAttempts counts probe-based recovery attempts made while blocked.
 	ProbeAttempts int `json:"probe_attempts,omitempty"`
+	// Model 是触发本次停调的上游模型名（经账号 model_mapping 归一后的出站名）。
+	// 恢复探针据此探测真实故障面，而不是笼统探测平台默认模型。空值表示记录方
+	// 未提供，探针回落平台默认测试模型。
+	Model string `json:"model,omitempty"`
 	// ConsecutiveSuccesses 探针恢复链的连续成功轮次计数（探针 service 专属读写，
 	// 首轮 success 置 1，第二轮 success 执行恢复并随停调清除消失；失败重置为 0）。
 	ConsecutiveSuccesses int `json:"consecutive_successes,omitempty"`
 }
+
+// tempUnschedIndefiniteUntil 是"无限期停调"的哨兵截止时间：熔断型停调写入该值，
+// 语义为"无自动过期，等恢复探针确认可用后才解除"。
+//
+// 为什么用远端时间而不是 NULL：temp_unschedulable_until = NULL 在全部读取点都表示
+// "无停调"（IsSchedulable / tempUnschedulablePredicate / ListTempUnschedulableAccounts），
+// 写 NULL 等于立刻恢复可调度，与语义相反。
+//
+// 为什么不用较长有限值（如 now+7d）：任何有限值都会在某刻自动恢复，违背"探到恢复为止"，
+// 且会让长期故障账号在无任何一次成功探测的情况下被重新投放。
+//
+// 该值同时充当代际令牌（ClearTempUnschedulableIfGeneration /
+// BumpTempUnschedulableReasonIfGeneration 的等值比较对象），因其恒定不变，条件清除稳定命中。
+var tempUnschedIndefiniteUntil = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
 // TempUnschedCache 临时不可调度缓存接口
 type TempUnschedCache interface {

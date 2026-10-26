@@ -90,7 +90,6 @@ func TestSettingHandler_HealthBreaker_PutGetRoundTrip(t *testing.T) {
 			"probe": map[string]any{
 				"enabled":          false,
 				"interval_seconds": 60,
-				"max_attempts":     10,
 			},
 		},
 	}
@@ -133,5 +132,4 @@ func TestSettingHandler_HealthBreaker_PutGetRoundTrip(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, false, probe["enabled"])
 	require.Equal(t, float64(60), probe["interval_seconds"])
-	require.Equal(t, float64(10), probe["max_attempts"])
 }

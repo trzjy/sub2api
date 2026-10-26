@@ -26,17 +26,17 @@ import (
 func TestProbeRetryInFlightNotLeakedAfterRecovery(t *testing.T) {
 	const acct int64 = 7
 	var calls int32
-	// 首探失败、补探成功（第 2 次全局调用即成功）。
-	p, repo, _ := newProbeRetryHarness(t, 10, func(_ context.Context, _ *Account) (bool, error) {
+	// 首探失败，之后补探连续成功两次（第 2、3 次全局调用）→ C1 连续成功阈值达标恢复。
+	p, repo, _ := newProbeRetryHarness(t, func(_ context.Context, _ *Account) (bool, error) {
 		return atomic.AddInt32(&calls, 1) >= 2, nil
 	})
 
-	// 第一轮 sweep：首探失败 → 入队补探 → 补探成功恢复（账号退出补探队列）。
+	// 第一轮 sweep：首探失败 → 入队补探 → 补探连续成功达标恢复（账号退出补探队列）。
 	p.RunOnce(context.Background())
 	p.wg.Wait()
 
-	require.Equal(t, int32(2), atomic.LoadInt32(&calls), "第一轮应 1 次首探 + 1 次补探")
-	require.Equal(t, 1, repo.clearTempIfReasonCalls, "第一轮补探成功必须恢复")
+	require.Equal(t, int32(3), atomic.LoadInt32(&calls), "第一轮应 1 次失败首探 + 2 次成功补探")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "第一轮补探达标必须恢复")
 
 	// must_fix 核心断言：恢复（退出队列）后账号的 in-flight 标记必须被 defer 清理，
 	// 不得泄漏。旧实现遍历被重赋值的 pending（此时为空），标记永不清。
@@ -55,10 +55,10 @@ func TestProbeRetryInFlightNotLeakedAfterRecovery(t *testing.T) {
 	p.wg.Wait()
 
 	// 若标记泄漏，第二轮会在 isRetryInFlight 处整账号跳过（0 次探测）；修复后必须
-	// 重新首探(1) + 补探(1) = 2 次探测。
-	require.Equal(t, int32(2), atomic.LoadInt32(&calls),
-		"第二轮 sweep 必须重新首探(1)+补探(1)该账号；残留 in-flight 标记会令其被跳过、0 次探测")
-	require.Equal(t, 2, repo.clearTempIfReasonCalls, "第二轮补探成功必须再次恢复")
+	// 重新首探(1) + 补探(2) = 3 次探测。
+	require.Equal(t, int32(3), atomic.LoadInt32(&calls),
+		"第二轮 sweep 必须重新首探(1)+补探(2)该账号；残留 in-flight 标记会令其被跳过、0 次探测")
+	require.Equal(t, 2, repo.clearTempIfReasonCalls, "第二轮补探达标必须再次恢复")
 	// 第二轮结束后标记同样必须被清理（不泄漏）。
 	require.False(t, p.isRetryInFlight(acct), "第二轮恢复后标记仍须被清理")
 }

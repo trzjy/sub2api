@@ -484,7 +484,6 @@ func openAIAPIKeyHealthBreakerSettingsToDTO(s *service.OpenAIAPIKeyHealthBreaker
 		out.Probe = &dto.OpenAIAPIKeyHealthBreakerProbeSettings{
 			Enabled:         s.Probe.Enabled,
 			IntervalSeconds: s.Probe.IntervalSeconds,
-			MaxAttempts:     s.Probe.MaxAttempts,
 		}
 	}
 	return out
@@ -511,7 +510,6 @@ func openAIAPIKeyHealthBreakerSettingsFromDTO(s *dto.OpenAIAPIKeyHealthBreakerSe
 		out.Probe = &service.OpenAIAPIKeyHealthBreakerProbeSettings{
 			Enabled:         s.Probe.Enabled,
 			IntervalSeconds: s.Probe.IntervalSeconds,
-			MaxAttempts:     s.Probe.MaxAttempts,
 		}
 	}
 	return out

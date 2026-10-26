@@ -41,9 +41,9 @@ func TestE27ProbeAccount_CommitFailureKeepsParked(t *testing.T) {
 	defer stop()
 
 	svc := &AccountHealthRecoveryProbeService{
-		rateLimit:      rl,
-		accountRepo:    repo,
-		frozenBounds:   make(map[string]int),
+		rateLimit:    rl,
+		accountRepo:  repo,
+		frozenBounds: make(map[string]int),
 		probeOverride: func(_ context.Context, _ *Account) (bool, error) {
 			return true, nil // 探测成功
 		},
@@ -51,7 +51,7 @@ func TestE27ProbeAccount_CommitFailureKeepsParked(t *testing.T) {
 	// 预置账号级冻结上界，断言提交失败时不被清除。
 	svc.freezeCandidateBound(acct, "", 3)
 
-	svc.probeAccount(context.Background(), acc, 3)
+	svc.probeAccount(context.Background(), acc)
 
 	// 恢复写入（ClearTempUnschedulable）未被调用 → 账号仍 parked。
 	require.Equal(t, 0, repo.clearTempUnschedCalls, "提交失败不得清除 temp-unschedulable（保持 parked）")
@@ -89,16 +89,16 @@ func TestE27ProbeAccount_NonSuccessCommitFailureContinuesBookkeeping(t *testing.
 	defer stop()
 
 	svc := &AccountHealthRecoveryProbeService{
-		rateLimit:      rl,
-		accountRepo:    repo,
-		frozenBounds:   make(map[string]int),
+		rateLimit:    rl,
+		accountRepo:  repo,
+		frozenBounds: make(map[string]int),
 		probeOverride: func(_ context.Context, _ *Account) (bool, error) {
 			return false, nil // 探测失败（非降级）
 		},
 	}
 	svc.freezeCandidateBound(acct, "", 3)
 
-	svc.probeAccount(context.Background(), acc, 3)
+	svc.probeAccount(context.Background(), acc)
 
 	// 失败路径不得清除状态（恢复写入未调用、账号级冻结上界仍在）。
 	require.Equal(t, 0, repo.clearTempUnschedCalls, "非成功路径不得清除 temp-unschedulable")

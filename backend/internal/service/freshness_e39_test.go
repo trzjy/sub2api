@@ -109,8 +109,9 @@ func TestRecoveryProbe_ChannelFreshnessOnRecover(t *testing.T) {
 	refresher := &e39ChannelFreshnessRefresher{}
 	p.SetChannelFreshnessRefresher(refresher)
 
-	// PRC-02：首次探测成功即走清除路径；渠道收敛挂在清除轮，故整段恰触发 1 次。
-	p.probeAccount(context.Background(), shadow, 10)
+	// C1：连续 2 次真实探测成功才走清除路径；渠道收敛挂在清除轮，故整段恰触发 1 次。
+	p.probeAccount(context.Background(), shadow)
+	p.probeAccount(context.Background(), shadow)
 
 	require.Equal(t, 1, repo.clearTempIfReasonCalls, "E39：探测恢复必须清停调")
 	require.Equal(t, []int64{130}, refresher.calls, "E39：恢复成功后触发渠道收敛")
@@ -131,8 +132,9 @@ func TestRecoveryProbe_ChannelFreshnessFailureKeepsRecovery(t *testing.T) {
 	refresher := &e39ChannelFreshnessRefresher{err: errors.New("freshness boom")}
 	p.SetChannelFreshnessRefresher(refresher)
 
-	// PRC-02：首次探测成功即达清除，清除轮的渠道收敛返回错误不得回滚恢复结论。
-	p.probeAccount(context.Background(), shadow, 10)
+	// C1：连续 2 次成功才达清除，清除轮的渠道收敛返回错误不得回滚恢复结论。
+	p.probeAccount(context.Background(), shadow)
+	p.probeAccount(context.Background(), shadow)
 
 	require.Equal(t, 1, repo.clearTempIfReasonCalls, "E39：收敛失败不得改写恢复成功结论")
 	require.Equal(t, []int64{130}, refresher.calls)

@@ -615,7 +615,6 @@ const (
 type OpenAIAPIKeyHealthBreakerProbeSettings struct {
 	Enabled         bool `json:"enabled"`
 	IntervalSeconds int  `json:"interval_seconds"`
-	MaxAttempts     int  `json:"max_attempts"`
 }
 
 // OpenAIAPIKeyHealthBreakerSettings controls cross-instance failure counting for
@@ -668,7 +667,6 @@ func DefaultOpenAIAPIKeyHealthBreakerSettings() *OpenAIAPIKeyHealthBreakerSettin
 		Probe: &OpenAIAPIKeyHealthBreakerProbeSettings{
 			Enabled:         true,
 			IntervalSeconds: 60,
-			MaxAttempts:     10,
 		},
 	}
 }

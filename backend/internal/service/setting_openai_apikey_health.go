@@ -52,8 +52,6 @@ const (
 	openAIAPIKeyHealthWarningRatioMax  = 0.99
 	openAIAPIKeyHealthProbeIntervalMin = 15
 	openAIAPIKeyHealthProbeIntervalMax = 600
-	openAIAPIKeyHealthProbeAttemptsMin = 1
-	openAIAPIKeyHealthProbeAttemptsMax = 100
 )
 
 // normalizeOpenAIAPIKeyHealthBreakerSettings fills in missing fields with defaults
@@ -129,11 +127,6 @@ func normalizeOpenAIAPIKeyHealthBreakerSettings(settings *OpenAIAPIKeyHealthBrea
 		result.Probe.IntervalSeconds = openAIAPIKeyHealthProbeIntervalMin
 	} else if result.Probe.IntervalSeconds > openAIAPIKeyHealthProbeIntervalMax {
 		result.Probe.IntervalSeconds = openAIAPIKeyHealthProbeIntervalMax
-	}
-	if result.Probe.MaxAttempts < openAIAPIKeyHealthProbeAttemptsMin {
-		result.Probe.MaxAttempts = openAIAPIKeyHealthProbeAttemptsMin
-	} else if result.Probe.MaxAttempts > openAIAPIKeyHealthProbeAttemptsMax {
-		result.Probe.MaxAttempts = openAIAPIKeyHealthProbeAttemptsMax
 	}
 
 	return &result

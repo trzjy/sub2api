@@ -25,7 +25,7 @@ import (
 func TestHealthProbeStop_ConcurrentTwiceNoPanic(t *testing.T) {
 	rl := NewRateLimitService(&probeRateLimitRepo{}, nil, &config.Config{}, nil, nil)
 	repo := &probeRepoMock{}
-	p := newProbeService(t, true, 100, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.retryInterval = time.Millisecond
 
 	p.Start(context.Background())
@@ -60,7 +60,7 @@ func TestHealthProbeStop_ConcurrentTwiceNoPanic(t *testing.T) {
 func TestHealthProbeStop_MainLoopExitsAfterStop(t *testing.T) {
 	rl := NewRateLimitService(&probeRateLimitRepo{}, nil, &config.Config{}, nil, nil)
 	repo := &probeRepoMock{}
-	p := newProbeService(t, true, 100, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.retryInterval = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())

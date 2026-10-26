@@ -152,13 +152,21 @@ func classifyOpenAIAPIKeyHealthFailure(err error) (int, []byte, bool) {
 //
 //   - L1 watch:   count >= watch threshold    -> structured log only (no scheduling impact)
 //   - L2 warning: count >= warning threshold  -> structured log + ops alert
-//   - L3 trip:    count >= failure threshold  -> SetTempUnschedulable + cooldown (existing behavior)
+//   - L3 trip:    count >= failure threshold  -> SetTempUnschedulable until the recovery probe confirms health
 //
 // Tier transitions are debounced in Redis: each tier escalates at most once per
 // window, and the tier only ever rises within a window. A nil/disabled settings,
 // an out-of-scope account, or an ineligible error makes this a no-op, identical to
 // the prior behavior when the breaker was disabled.
-func (s *RateLimitService) ObserveOpenAIAPIKeyHealthFailure(ctx context.Context, account *Account, upstreamErr error) bool {
+//
+// model is optional (variadic) so existing callers keep compiling; when supplied it
+// is recorded into TempUnschedState.Model so the recovery probe can re-verify the
+// actual failing model instead of the platform default.
+func (s *RateLimitService) ObserveOpenAIAPIKeyHealthFailure(ctx context.Context, account *Account, upstreamErr error, model ...string) bool {
+	tripModel := ""
+	if len(model) > 0 {
+		tripModel = strings.TrimSpace(model[0])
+	}
 	if s == nil || s.openAIAPIKeyHealth == nil || s.settingService == nil || s.accountRepo == nil || account == nil {
 		return false
 	}
@@ -210,30 +218,23 @@ func (s *RateLimitService) ObserveOpenAIAPIKeyHealthFailure(ctx context.Context,
 		s.recordHealthWarningAlert(ctx, account, statusCode, result.Count, warningThreshold, settings.WindowMinutes)
 	}
 
-	// L3 trip: open the circuit (existing behavior preserved).
+	// L3 trip: open the circuit until the recovery probe verifies the account.
 	if result.TrippedTrip {
-		return s.tripAccountForHealth(ctx, account, statusCode, responseBody, result.Count, settings)
+		return s.tripAccountForHealth(ctx, account, statusCode, responseBody, result.Count, tripModel, settings)
 	}
 	return false
 }
 
-// healthBreakerTripCooldown429 caps the L3 trip cooldown for 429 trips. An RPM
-// limit (e.g. "requests-per-minute limit exceeded") resets within a minute, so
-// parking the account for the full 5xx-oriented CooldownMinutes idles it several
-// minutes past recovery; the recovery probe still shortens any overshoot further.
-const healthBreakerTripCooldown429 = time.Minute
-
 // tripAccountForHealth applies the L3 trip: persist temp-unschedulable, block
-// scheduling in-process, and keep the cache in sync. It mirrors the pre-tiering
-// behavior exactly for the trip path, except that 429 trips use the short
-// healthBreakerTripCooldown429 cooldown instead of the configured minutes.
-func (s *RateLimitService) tripAccountForHealth(ctx context.Context, account *Account, statusCode int, responseBody []byte, count int64, settings *OpenAIAPIKeyHealthBreakerSettings) bool {
+// scheduling in-process, and keep the cache in sync. The block has no finite
+// cooldown: it stays in force until the recovery probe observes a confirmed
+// successful call.
+func (s *RateLimitService) tripAccountForHealth(ctx context.Context, account *Account, statusCode int, responseBody []byte, count int64, model string, settings *OpenAIAPIKeyHealthBreakerSettings) bool {
 	now := time.Now()
-	cooldown := time.Duration(settings.CooldownMinutes) * time.Minute
-	if statusCode == http.StatusTooManyRequests && cooldown > healthBreakerTripCooldown429 {
-		cooldown = healthBreakerTripCooldown429
-	}
-	until := now.Add(cooldown)
+	// 熔断型停调不设有限冷却时长：写入无限期哨兵，由恢复探针连续实测成功后才解除。
+	// 时间自动过期会让故障账号在零次成功探测的情况下被重新投放（生产实证：60 秒冷却
+	// 被探针 3-14 秒撤销，两者叠加使熔断失效）。
+	until := tempUnschedIndefiniteUntil
 	state := &TempUnschedState{
 		UntilUnix:            until.Unix(),
 		TriggeredAtUnix:      now.Unix(),
@@ -245,6 +246,7 @@ func (s *RateLimitService) tripAccountForHealth(ctx context.Context, account *Ac
 		TriggerThreshold:     settings.FailureThreshold,
 		TriggerWindowMinutes: settings.WindowMinutes,
 		Tier:                 HealthBreakerTierTrip,
+		Model:                strings.TrimSpace(model),
 	}
 	reasonBytes, _ := json.Marshal(state)
 	reason := string(reasonBytes)
@@ -274,7 +276,7 @@ func (s *RateLimitService) tripAccountForHealth(ctx context.Context, account *Ac
 		zap.Int64("failure_count", count),
 		zap.Int("failure_threshold", settings.FailureThreshold),
 		zap.Int("window_minutes", settings.WindowMinutes),
-		zap.Duration("cooldown", cooldown),
+		zap.String("model", state.Model),
 		zap.Int("upstream_status", statusCode),
 		zap.Time("until", until),
 	)

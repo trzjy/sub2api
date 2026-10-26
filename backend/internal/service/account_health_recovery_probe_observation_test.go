@@ -503,7 +503,7 @@ func TestRunOnce_BreakerPhaseOnly(t *testing.T) {
 
 	settings := OpenAIAPIKeyHealthBreakerSettings{
 		Enabled: true,
-		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 30, MaxAttempts: 3},
+		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 30},
 	}
 	raw, err := json.Marshal(settings)
 	require.NoError(t, err)
@@ -519,26 +519,30 @@ func TestRunOnce_BreakerPhaseOnly(t *testing.T) {
 	var breakerProbes int64
 	var probedMu sync.Mutex
 	var probedAccountIDs []int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 探测次数断言用的固定边界：累计 4 次探测后取消 ctx。C1 起补探无轮数上限，
+	// 永久失败场景只能靠 ctx 取消划定边界（否则会按 retryInterval 一直重探）。
+	const probeBudget = 4
 	svc := &AccountHealthRecoveryProbeService{
 		frozenBounds:   make(map[string]int),
 		rateLimit:      rl,
 		accountRepo:    repo,
 		settingService: ss,
 		probeOverride: func(_ context.Context, acc *Account) (bool, error) {
-			atomic.AddInt64(&breakerProbes, 1)
+			if atomic.AddInt64(&breakerProbes, 1) >= probeBudget {
+				cancel()
+			}
 			probedMu.Lock()
 			probedAccountIDs = append(probedAccountIDs, acc.ID)
 			probedMu.Unlock()
 			return false, nil
 		},
 	}
-	// 补探节奏注入：默认常量为 5s/50 次（AC-C1：旧 3），单测改为毫秒级（与
-	// newProbeRetryHarness 同款）。不注入则本用例真实等待 50×5s。
+	// 补探节奏注入：默认常量为 5s，单测改为毫秒级（与 newProbeRetryHarness 同款）。
 	svc.retryInterval = time.Millisecond
-	const retryBurst = 3
-	svc.retryBurst = retryBurst
 
-	svc.RunOnce(context.Background())
+	svc.RunOnce(ctx)
 	svc.wg.Wait() // 等待异步补探完成（AC-C1），使探测次数断言确定
 
 	// 断言分两个维度，「相位数量」与「每相位探测次数」不可混为一谈：
@@ -546,11 +550,11 @@ func TestRunOnce_BreakerPhaseOnly(t *testing.T) {
 	//    判据是探测作用域——每次探测的入参账号都必须是熔断候选账号 1，
 	//    不得出现任何模型级候选账号的探测。
 	//  - 每相位探测次数：账号级相位对每个候选先首探 1 次，首探失败再于同一轮
-	//    内按短间隔补探，单轮补探上限 retryBurst 次（4e4b27d57 起的设计意图：
-	//    「首探失败后不再空等一个完整轮次」）。故总探测数 = 1 + retryBurst，
-	//    而非旧断言的 1——后者是把「唯一相位」误当成「每相位仅探测一次」。
-	require.Equal(t, int64(1+retryBurst), atomic.LoadInt64(&breakerProbes),
-		"熔断相位探测次数应为 1 次首探 + retryBurst 次补探（唯一相位 ≠ 每相位只探一次）")
+	//    内按短间隔补探（C1 起无轮数上限，仅受 ctx/Stop 中断）。故总探测数 =
+	//    1 次首探 + 补探次数，而非旧断言的 1——后者是把「唯一相位」误当成
+	//    「每相位仅探测一次」。
+	require.Equal(t, int64(probeBudget), atomic.LoadInt64(&breakerProbes),
+		"熔断相位探测次数应为 1 次首探 + 补探（唯一相位 ≠ 每相位只探一次）")
 	probedMu.Lock()
 	defer probedMu.Unlock()
 	for _, id := range probedAccountIDs {

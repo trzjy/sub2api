@@ -15,7 +15,10 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -25,16 +28,25 @@ import (
 const accountHealthProbeCandidateLimit = 200
 
 // 补探（retry burst）默认节奏：首探失败后不再空等一个完整轮次（默认 15s）才再试，
-// 而是在本轮 sweep 内按短间隔连补（默认上限 50 次，AC-C1：3→50，受
-// settings.probe.max_attempts 双重约束，生产配置 100）若干次，把恢复时长从「冷却到期」
-// （cooldown 分钟级）拉回秒级；双重上限（本轮补探次数 + settings.probe.max_attempts）
-// 避免探测风暴。补探自 AC-C1 起异步执行（独立 goroutine，纳入 Start 的 wg），
-// 同账号补探由 accountHealthProbeRetryBurst（in-flight）去重，防止重叠。
+// 而是在本轮 sweep 内按短间隔连补，把恢复时长从「冷却到期」（cooldown 分钟级）拉回
+// 秒级。补探自 AC-C1 起异步执行（独立 goroutine，纳入 Start 的 wg），同账号补探由
+// retryInFlight（in-flight）去重，防止重叠。
+//
+// 补探不设轮数上限（C1 删除探测次数上限）：每个账号探测成功并完成恢复后从 pending
+// 移除、失败则保留继续探，循环天然收敛；退出条件只有 pending 空、ctx 取消或 Stop 信号。
 const (
 	// accountHealthProbeRetryInterval 首探失败后的补探间隔（秒级，AC-C1 不动）。
 	accountHealthProbeRetryInterval = 5 * time.Second
-	// accountHealthProbeRetryBurst 单轮 sweep 内每个失败账号的最大补探次数（AC-C1：3→50）。
-	accountHealthProbeRetryBurst = 50
+	// accountHealthProbeDataPlaneTimeout 单次数据面探测超时。取 45s：上游正常时
+	// max_tokens=1 的请求在数秒内返回；故障时快速失败，不必等满客户端链路时长。
+	accountHealthProbeDataPlaneTimeout = 45 * time.Second
+	// accountHealthProbeDataPlaneMaxBodyBytes 探测响应读取上限，防止异常大响应。
+	accountHealthProbeDataPlaneMaxBodyBytes = 256 << 10
+	// probeRecoverySuccessThreshold 连续多少次真实探测成功才解除熔断。
+	// 取 2：生产数据（14 天/8 账号/7177 次失败）显示熔断后连续 1 次成功的中位耗时
+	// 仅 0.8 分钟，无法区分"真恢复"与"偶然一次成功"；连续 2 次中位 1.9 分钟，
+	// 既能挡住抖动又不过度拖延恢复。
+	probeRecoverySuccessThreshold = 2
 )
 
 // probeRecoverableMarkers 列出可被探测恢复的停调标记词（TempUnschedState.MatchedKeyword）：
@@ -70,10 +82,10 @@ type accountHealthProbeRepository interface {
 
 // AccountHealthRecoveryProbeService implements the optional Phase C probe-based
 // recovery. While an account is inside the health-breaker cooldown, it periodically
-// sends a cheap, real upstream request (preferring /models, else a minimal
-// completion). A successful probe clears the temp-unschedulable state early; a
-// failing probe keeps the account parked until either the cooldown expires or
-// maxAttempts is reached (then it falls back to expiry-based recovery).
+// sends a minimal real data-plane request (the same protocol/model/proxy/TLS path the
+// forwarding chain uses) and requires probeRecoverySuccessThreshold consecutive
+// successes before clearing the temp-unschedulable state early. A failing probe keeps
+// the account parked until the cooldown expires; probing itself has no attempt ceiling.
 //
 // The probe is opt-in: Start() is a no-op unless the admin explicitly enables
 // settings.probe.enabled. SSRF protection is enforced via cnValidateProbeURL before
@@ -104,11 +116,9 @@ type AccountHealthRecoveryProbeService struct {
 	// probeOverride, when set, replaces the real upstream probe (used by tests).
 	probeOverride func(ctx context.Context, account *Account) (ok bool, err error)
 
-	// retryInterval / retryBurst 覆盖补探节奏（仅测试注入，避免单测真实等待
-	// accountHealthProbeRetryInterval）；零值经 probeRetryInterval/probeRetryBurst
-	// 回落到默认常量。
+	// retryInterval 覆盖补探间隔（仅测试注入，避免单测真实等待
+	// accountHealthProbeRetryInterval）；零值经 probeRetryInterval 回落到默认常量。
 	retryInterval time.Duration
-	retryBurst    int
 
 	// frozenMu / frozenBounds 保存每个 (account,scope) 进入调度时冻结的候选总数
 	//（C，上限公式）。冻结值经 RateLimitService.freshnessBoundsProvider 供三维新鲜度
@@ -275,10 +285,6 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 	if err != nil || settings == nil || settings.Probe == nil {
 		return
 	}
-	maxAttempts := settings.Probe.MaxAttempts
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
 
 	now := time.Now()
 
@@ -297,13 +303,12 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 		// pendingUntils 记录每个入队补探账号在「入队时」读到的 temp_unschedulable_until
 		// （完整 time.Time，全精度），作为后续条件清除/attempt 回写的不可变代际令牌
 		// （AC-G2R5 must_fix / AC-G2R6 子秒精度）：用 until 作令牌后，同一次停调内
-		// bumpProbeAttempts 只改 reason 不改 until，补探成功时令牌恒命中；他因接管（写更晚
+		// 状态回写只改 reason 不改 until，补探成功时令牌恒命中；他因接管（写更晚
 		// until）必令令牌失配、保留新停调。补探 goroutine 每次回读的是最新 until，若探测期间
 		// until 被他人改写，用最新 until 作令牌会误清新停调；故条件清除/attempt 回写一律用
 		// 入队时读到的令牌。
 		pendingUntils := make(map[int64]time.Time)
 		retryInterval := p.probeRetryInterval()
-		retryBurst := p.probeRetryBurst()
 		for _, acc := range candidates {
 			if !p.isHealthBreakerTrip(acc, now) {
 				continue
@@ -315,7 +320,6 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 			if p.isRetryInFlight(acc.ID) {
 				logger.L().Info("openai.apikey_health_probe_retry_inflight_skip_sweep",
 					zap.Int64("account_id", acc.ID),
-					zap.Int("retry_burst", retryBurst),
 				)
 				continue
 			}
@@ -328,7 +332,7 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 			// clearCandidateBound（probeAccount 恢复路径 :365）负责清除，"首冻结
 			// 不覆盖"语义保持。
 			p.freezeCandidateBound(acc.ID, "", 1)
-			if stillParked := p.probeAccount(ctx, acc, maxAttempts); stillParked {
+			if stillParked := p.probeAccount(ctx, acc); stillParked {
 				// 账号级 in-flight 去重（AC-C1 异步化后必需）：首探失败后才标记该账号
 				// 补探在途并入队；markRetryInFlight 返回 false（理论上方已先查
 				// isRetryInFlight，此处不会发生）仅作防御性跳过，避免同账号补探重叠。
@@ -338,12 +342,10 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 					logger.L().Info("openai.apikey_health_probe_retry_scheduled",
 						zap.Int64("account_id", acc.ID),
 						zap.Duration("retry_interval", retryInterval),
-						zap.Int("retry_burst", retryBurst),
 					)
 				} else {
 					logger.L().Info("openai.apikey_health_probe_retry_inflight_skip",
 						zap.Int64("account_id", acc.ID),
-						zap.Int("retry_burst", retryBurst),
 					)
 				}
 			}
@@ -377,7 +379,7 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 				p.startMu.Unlock()
 				go func(stopCh chan struct{}) {
 					defer p.wg.Done()
-					p.runProbeRetryBurst(ctx, pendingRetry, pendingUntils, maxAttempts, stopCh)
+					p.runProbeRetryBurst(ctx, pendingRetry, pendingUntils, stopCh)
 				}(stopCh)
 			}
 		}
@@ -427,16 +429,15 @@ func parseHealthBreakerState(reason string) (*TempUnschedState, bool) {
 	return &state, true
 }
 
-// probeAccount 探测一次并尝试恢复；代际令牌取探测开始时读到的 until
-// （acc.TempUnschedulableUntil，全精度 time.Time）。保留三参签名以兼容既有直接调用方；补探异步
-// 路径需传入其入队时读到的 until，故走 probeAccountWithReason。
+// probeAccount 探测一次并尝试计入恢复；代际令牌取探测开始时读到的 until
+// （acc.TempUnschedulableUntil，全精度 time.Time）。补探异步路径需传入其入队时读到的
+// until，故走 probeAccountWithReason。
 //
-// 返回值 stillParked 报告本次尝试后账号是否仍处于停调且未达 max_attempts 上限
-// （即是否值得短间隔补探）：真实探测成功并完成恢复提交、或已到达尝试上限时返回 false。
-// 「首次真实探测成功即解除停调」——不再要求连续两轮成功（旧 consecutive_successes
-// 二次确认已移除）：恢复判据回到「一次真实探测成功」，把恢复时长从冷却到期拉回秒级。
-func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, acc *Account, maxAttempts int) (stillParked bool) {
-	return p.probeAccountWithReason(ctx, acc, maxAttempts, tempUnschedUntil(acc))
+// 返回值 stillParked 报告本次尝试后账号是否仍处于停调、值得短间隔继续补探：真实探测
+// 成功但连续成功次数未达 probeRecoverySuccessThreshold（计数已回写、账号保持停调）、
+// 探测失败或降级时返回 true；完成恢复提交或代际被接管时返回 false。
+func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, acc *Account) (stillParked bool) {
+	return p.probeAccountWithReason(ctx, acc, tempUnschedUntil(acc))
 }
 
 // tempUnschedUntil 返回账号当前 temp_unschedulable_until 的完整 time.Time（代际令牌，
@@ -454,19 +455,14 @@ func tempUnschedUntil(acc *Account) time.Time {
 // 而非每次回读的最新 until——若探测期间 until 被他人改写（新停调接管，必写更晚 until），回读的
 // 最新 until 已不同，用其作令牌会误清新停调；用入队令牌则条件清除命中失配、rows==0、保留新停调
 // （见 ClearTempUnschedulableIfGeneration）。
-func (p *AccountHealthRecoveryProbeService) probeAccountWithReason(ctx context.Context, acc *Account, maxAttempts int, expectedUntil time.Time) (stillParked bool) {
+//
+// 连续成功判定（C1）：单次真实探测成功不足以解除熔断——生产数据里熔断后「连续 1 次成功」的
+// 中位耗时仅 0.8 分钟，无法区分真恢复与偶然抖动。成功一次即把 ConsecutiveSuccesses 计数回写
+// （账号保持停调），达到 probeRecoverySuccessThreshold 才走条件清除恢复；任一失败/降级把计数
+// 归零。计数落 TempUnschedState.ConsecutiveSuccesses，随停调状态一起在重启后存活。
+func (p *AccountHealthRecoveryProbeService) probeAccountWithReason(ctx context.Context, acc *Account, expectedUntil time.Time) (stillParked bool) {
 	state, ok := parseHealthBreakerState(acc.TempUnschedulableReason)
 	if !ok || state == nil {
-		return false
-	}
-	attempts := state.ProbeAttempts + 1
-	if attempts > maxAttempts {
-		// Reached the attempt ceiling: give up probing and let the cooldown expire.
-		logger.L().Info("openai.apikey_health_probe_gave_up",
-			zap.Int64("account_id", acc.ID),
-			zap.Int("attempt", attempts),
-			zap.Int("max_attempts", maxAttempts),
-		)
 		return false
 	}
 
@@ -476,24 +472,26 @@ func (p *AccountHealthRecoveryProbeService) probeAccountWithReason(ctx context.C
 	// #2：观测提交失败透传（与 E19 口径一致：提交确认成功才允许清理状态）。
 	obsErr := p.recordAccountLevelObservation(ctx, acc.ID, ok, err)
 	if err != nil {
-		// Degraded platform (no safe/cheap endpoint): stop probing, fall back to expiry.
+		// 降级（无可构造的安全探测面）：不做恢复判定，只簿记后保持停调，等冷却到期。
 		logger.L().Warn("openai.apikey_health_probe_degraded",
 			zap.Int64("account_id", acc.ID),
 			zap.Error(err),
 		)
 		// E49：探测错误分支下，账号级权威观测未写入同样需结构化暴露
 		//（与 err==nil 路径的 openai.apikey_health_probe_commit_failed 同口径），
-		// 否则该观测提交失败不可观测。不改状态迁移：degraded Warn、bumpProbeAttempts、
-		// return、parked/失败关闭语义全部不变。
+		// 否则该观测提交失败不可观测。
 		if obsErr != nil {
 			logger.L().Warn("openai.apikey_health_probe_commit_failed",
 				zap.Int64("account_id", acc.ID),
 				zap.Error(obsErr),
 			)
 		}
-		// attempt 回写加代际守卫（AC-G2R6 must_fix）：用入队令牌回写，若代际已被接管
+		// 降级不等于恢复：连续成功计数归零后回写，账号保持停调等冷却到期。
+		state.ProbeAttempts++
+		state.ConsecutiveSuccesses = 0
+		// 回写加代际守卫（AC-G2R6 must_fix）：用入队令牌回写，若代际已被接管
 		//（rows==0）则终止本轮补探（它在清的停调已不属于本代），记 Info。
-		if !p.bumpProbeAttempts(ctx, acc.ID, maxAttempts, expectedUntil) {
+		if !p.persistProbeState(ctx, acc.ID, expectedUntil, state) {
 			logger.L().Info("probe attempt bump skipped: temp-unsched generation taken over (degraded)",
 				zap.Int64("account_id", acc.ID),
 				zap.Time("expected_until", expectedUntil),
@@ -519,6 +517,24 @@ func (p *AccountHealthRecoveryProbeService) probeAccountWithReason(ctx context.C
 			logger.L().Warn("openai.apikey_health_probe_commit_failed",
 				zap.Int64("account_id", acc.ID),
 				zap.Error(obsErr))
+			return true
+		}
+		state.ConsecutiveSuccesses++
+		if state.ConsecutiveSuccesses < probeRecoverySuccessThreshold {
+			// 未达阈值：回写计数、账号保持停调，交由补探继续累计连续成功次数。
+			state.ProbeAttempts++
+			if !p.persistProbeState(ctx, acc.ID, expectedUntil, state) {
+				logger.L().Info("probe success count skipped: temp-unsched generation taken over",
+					zap.Int64("account_id", acc.ID),
+					zap.Time("expected_until", expectedUntil),
+				)
+				return false
+			}
+			logger.L().Info("openai.apikey_health_probe_success_pending",
+				zap.Int64("account_id", acc.ID),
+				zap.Int("consecutive_successes", state.ConsecutiveSuccesses),
+				zap.Int("threshold", probeRecoverySuccessThreshold),
+			)
 			return true
 		}
 		// AC-G2R4 第 5 轮 must_fix / AC-G2R6 子秒精度：清除所有权——探测成功提交恢复时
@@ -563,15 +579,18 @@ func (p *AccountHealthRecoveryProbeService) probeAccountWithReason(ctx context.C
 		p.clearCandidateBound(acc.ID, "")
 		logger.L().Info("openai.apikey_health_probe_recovered",
 			zap.Int64("account_id", acc.ID),
-			zap.Int("attempt", attempts),
+			zap.Int("attempt", state.ProbeAttempts+1),
+			zap.Int("consecutive_successes", state.ConsecutiveSuccesses),
 		)
 		return false
 	}
 
-	// Probe failed: attempt 回写加代际守卫（AC-G2R6 must_fix）。代际失配（已被接管，
-	// rows==0）→ 终止本轮补探（它在清的停调已不属于本代），记 Info 并不再补探该账号。
-	bumped := p.bumpProbeAttempts(ctx, acc.ID, attempts, expectedUntil)
-	if !bumped {
+	// Probe failed: 连续成功计数归零 + attempt 计数递增后回写（加代际守卫，AC-G2R6
+	// must_fix）。代际失配（已被接管，rows==0）→ 终止本轮补探（它在清的停调已不属于本代），
+	// 记 Info 并不再补探该账号。
+	state.ProbeAttempts++
+	state.ConsecutiveSuccesses = 0
+	if !p.persistProbeState(ctx, acc.ID, expectedUntil, state) {
 		logger.L().Info("probe attempt bump skipped: temp-unsched generation taken over",
 			zap.Int64("account_id", acc.ID),
 			zap.Time("expected_until", expectedUntil),
@@ -580,46 +599,34 @@ func (p *AccountHealthRecoveryProbeService) probeAccountWithReason(ctx context.C
 	}
 	logger.L().Info("openai.apikey_health_probe_failed",
 		zap.Int64("account_id", acc.ID),
-		zap.Int("attempt", attempts),
-		zap.Int("max_attempts", maxAttempts),
+		zap.Int("attempt", state.ProbeAttempts),
 	)
 	return true
 }
 
-// bumpProbeAttempts rewrites the temp-unschedulable reason to record the new attempt
-// count, guarded by the generation token (AC-G2R6 must_fix). It returns true when the
-// write-back succeeded (the block still belongs to this generation) and false when the
-// generation was taken over by another writer (rows==0: temp_unschedulable_until no
-// longer matches expectedUntil), in which case the caller should stop retrying this
-// account for the current round. A store failure only skips this cycle's bookkeeping
-// and is reported as true so a transient DB error does not prematurely abort probing.
-func (p *AccountHealthRecoveryProbeService) bumpProbeAttempts(ctx context.Context, accountID int64, attempts int, expectedUntil time.Time) bool {
-	if p.accountRepo == nil {
+// persistProbeState 把更新后的探针状态序列化回写 temp_unschedulable_reason，并保持
+// 代际守卫生效（AC-G2R6 must_fix）：仅当 until 仍等于入队令牌且仍处有效停调窗口时才改写
+// reason。返回 true 表示回写成功（停调仍属本代），false 表示代际已被他因接管（rows==0，
+// 必写更晚 until），调用方据此终止本轮补探、保留接管者 reason。
+//
+// 它是探针唯一的 reason 写入口：ProbeAttempts（排障用的调用次数记录）与
+// ConsecutiveSuccesses（连续成功计数）都经它落库，不再有独立的 attempt 专用写函数。
+func (p *AccountHealthRecoveryProbeService) persistProbeState(ctx context.Context, accountID int64, expectedUntil time.Time, state *TempUnschedState) bool {
+	if p == nil || p.accountRepo == nil || state == nil {
 		return false
 	}
-	acc, err := p.accountRepo.GetByID(ctx, accountID)
-	if err != nil || acc == nil {
-		return false
-	}
-	state, ok := parseHealthBreakerState(acc.TempUnschedulableReason)
-	if !ok || state == nil {
-		return false
-	}
-	state.ProbeAttempts = attempts
 	updated, mErr := json.Marshal(state)
 	if mErr != nil {
 		return false
 	}
-	// attempt 回写加代际守卫（AC-G2R6 must_fix）：仅当 until 仍等于入队令牌且仍处有效
-	// 停调窗口时才改写 reason。代际失配（已被他因接管，必写更晚 until）→ 返回 false，
-	// 调用方据此终止本轮补探、保留接管者 reason；DB 写入失败按 best-effort 处理、返回 true
-	//（不因瞬时 DB 错误误杀补探）。
-	bumped, bErr := p.accountRepo.BumpTempUnschedulableReasonIfGeneration(ctx, accountID, expectedUntil, string(updated))
+	persisted, bErr := p.accountRepo.BumpTempUnschedulableReasonIfGeneration(ctx, accountID, expectedUntil, string(updated))
 	if bErr != nil {
+		// DB 写入失败按 best-effort 处理：不因瞬时 DB 错误误杀补探。
 		logger.L().Debug("openai.apikey_health_probe_attempt_update_failed",
 			zap.Int64("account_id", accountID), zap.Error(bErr))
+		return true
 	}
-	return bumped
+	return persisted
 }
 
 // probeRetryInterval 返回补探间隔：未显式注入（零值）时回落到默认常量。
@@ -628,14 +635,6 @@ func (p *AccountHealthRecoveryProbeService) probeRetryInterval() time.Duration {
 		return p.retryInterval
 	}
 	return accountHealthProbeRetryInterval
-}
-
-// probeRetryBurst 返回单轮 sweep 内每个失败账号的最大补探次数：零值回落到默认常量。
-func (p *AccountHealthRecoveryProbeService) probeRetryBurst() int {
-	if p != nil && p.retryBurst > 0 {
-		return p.retryBurst
-	}
-	return accountHealthProbeRetryBurst
 }
 
 // probeIntervalFromSettings 解析探测 sweep 间隔（AC-C1：旧默认 60s → 15s）。
@@ -697,26 +696,27 @@ func (p *AccountHealthRecoveryProbeService) clearRetryInFlight(id int64) {
 	delete(p.retryInFlight, id)
 }
 
-// runProbeRetryBurst 对本轮首探失败的账号按短间隔补探（AC-C1 起由 RunOnce 在独立
-// goroutine 异步调用，纳入 wg；不阻塞主 sweep），直到某个账号探测成功（由 probeAccount
-// 内部完成解除停调）、账号不再处于停调（已被他实例恢复或冷却到期）、达到本轮补探次数
-// 上限（默认 50，受 settings.probe.max_attempts 双重约束，生产配置 100），或触及
-// settings.probe.max_attempts（由 probeAccount 判定 gave_up）。补探与主循环共用同一
-// probeAccount 路径与 max_attempts 簿记，故补探不会绕过真实探测成功这一恢复前提，
-// 也不会无限重试。退出时清除各账号的补探 in-flight 标记（accountHealthProbeRetryBurst
+// runProbeRetryBurst 对本轮首探失败的账号按短间隔持续补探（AC-C1 起由 RunOnce 在独立
+// goroutine 异步调用，纳入 wg；不阻塞主 sweep），直到 pending 清空：某账号完成恢复提交
+// （由 probeAccount 内部清除停调）、账号不再处于可探测停调态（已被他实例恢复或冷却到期）、
+// 或代际被接管（探测链已不属于本代）。探测次数没有上限（C1 删除 settings.probe.max_attempts
+// 上限）——成功靠连续 probeRecoverySuccessThreshold 次真实探测累计，账号恢复后自然退出队列，
+// 循环据此收敛；唯一的强退条件为 ctx 取消或 Stop 信号。
+//
+// 恢复前提不因去掉上限而放松：补探与首探共用同一 probeAccount 路径，仍须真实数据面探测
+// 成功且连续成功计数达标才清除停调。退出时清除各账号的补探 in-flight 标记（retryInFlight
 // 去重），允许后续 sweep 重新纳入补探。untils 为各账号「入队时」读到的
-// temp_unschedulable_until（完整 time.Time，全精度，不可变代际令牌），供条件清除/attempt
+// temp_unschedulable_until（完整 time.Time，全精度，不可变代际令牌），供条件清除/状态
 // 回写使用（见 probeAccountWithReason / ClearTempUnschedulableIfGeneration /
 // BumpTempUnschedulableReasonIfGeneration）。
-func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Context, pending []*Account, untils map[int64]time.Time, maxAttempts int, stopCh chan struct{}) {
+func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Context, pending []*Account, untils map[int64]time.Time, stopCh chan struct{}) {
 	if p == nil || p.accountRepo == nil || len(pending) == 0 {
 		return
 	}
-	// 入队时固定原始账号集合快照，供 defer 清理使用：pending 在每轮补探后被重赋值为
-	// 仅含仍需补探账号的 next（:602-633），补探成功/达上限/回读后不再停调/回读失败的账号
-	// 退出队列后若仍按 pending 清理则标记永不清，后续 sweep 在 :264-278 凭 in-flight 标记
-	// 永久跳过该账号、永不再对其探测。改为遍历入队时固定的原始集合，确保所有被标记
-	// in-flight 的账号最终都能被清理。
+	// 入队时固定原始账号集合快照，供 defer 清理使用：pending 每轮被重赋值为仅含仍需补探
+	// 账号的 next，恢复/回读后不再停调/回读失败的账号退出队列后若仍按 pending 清理则标记
+	// 永不清，后续 sweep 凭 in-flight 标记永久跳过该账号、永不再对其探测。改为遍历入队时
+	// 固定的原始集合，确保所有被标记 in-flight 的账号最终都能被清理。
 	enqueued := make([]*Account, len(pending))
 	copy(enqueued, pending)
 	// 退出时清除本轮补探账号的 in-flight 标记，避免同账号补探去重误伤后续 sweep。
@@ -726,8 +726,7 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 		}
 	}()
 	interval := p.probeRetryInterval()
-	burst := p.probeRetryBurst()
-	for round := 1; round <= burst && len(pending) > 0; round++ {
+	for round := 1; len(pending) > 0; round++ {
 		if !p.sleepBeforeProbeRetry(ctx, stopCh, interval) {
 			return
 		}
@@ -737,7 +736,7 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 				return
 			}
 			// 回读最新账号：补探前必须确认账号仍处于可探测停调态（他实例可能已恢复，
-			// 冷却也可能已到期），且要拿到最新的 ProbeAttempts 计数（max_attempts 判据）。
+			// 冷却也可能已到期），且要拿到最新的连续成功计数。
 			fresh, err := p.accountRepo.GetByID(ctx, acc.ID)
 			if err != nil || fresh == nil {
 				continue
@@ -745,7 +744,7 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 			if !p.isHealthBreakerTrip(fresh, time.Now()) {
 				continue
 			}
-			// 补探序号与 probeAccount 内的 attempts 同口径（本次尝试后的累计次数），
+			// 补探序号与 probeAccount 内的 attempt 同口径（本次尝试后的累计次数），
 			// 便于按 account_id+attempt 串联「首探→补探→恢复」日志链（事故复盘时
 			// 恢复时长抖动需逐次定位）；解析失败退回 round+1，仅影响日志不阻塞补探。
 			attempt := round + 1
@@ -766,18 +765,11 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 			if u, ok := untils[acc.ID]; ok {
 				expectedUntil = u
 			}
-			if p.probeAccountWithReason(ctx, fresh, maxAttempts, expectedUntil) {
+			if p.probeAccountWithReason(ctx, fresh, expectedUntil) {
 				next = append(next, fresh)
 			}
 		}
 		pending = next
-	}
-	if len(pending) > 0 {
-		logger.L().Info("openai.apikey_health_probe_retry_burst_exhausted",
-			zap.Int("accounts", len(pending)),
-			zap.Int("rounds", burst),
-			zap.Duration("interval", interval),
-		)
 	}
 }
 
@@ -808,36 +800,101 @@ func (p *AccountHealthRecoveryProbeService) runProbe(ctx context.Context, acc *A
 	return p.probeUpstream(ctx, acc)
 }
 
-// probeUpstream sends a cheap real upstream request through the account's own
-// forwarding path. It prefers the zero-cost /models endpoint; if that cannot be
-// constructed safely (e.g. a platform without a /models surface) it returns an error
-// so the caller degrades to expiry-based recovery rather than spamming probes.
-//
-// Limitation: for some transit/proxy sites the /models endpoint is served by a
-// lightweight front-end that does NOT exercise the heavy chat upstream. There a 2xx
-// from /models can be green even while chat completions are still failing, so a
-// successful probe would clear the block prematurely. This is mitigated by the
-// probe being opt-in (default off); operators of such sites should keep probe
-// disabled and rely on expiry-based recovery, or only enable it where /models and
-// chat share the same upstream path.
+// probeUpstream 按账号归属分派探测：CodeBuddy（影子或直绑）走专用探测分发器，
+// 其余 OpenAI 协议族账号走真实数据面探测（probeUpstreamDataPlane）。
 func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, acc *Account) (bool, error) {
 	if p.httpUpstream == nil || p.cfg == nil {
 		return false, errors.New("probe transport not configured")
 	}
-	// AC-B1：CodeBuddy 平台账号（影子或直绑）没有 /models 面——buildOpenAIAPIKeyModelsRequest
-	// 要求 type==apikey，oauth 账号构建必失败降级到期恢复——改派 CodeBuddy 探测分发器
-	//（影子走既有 chat 探测、直绑走新增 billing-meter 探测）。判定用
+	// AC-B1：CodeBuddy 平台账号（影子或直绑）有专用探测面——改派 CodeBuddy 探测分发器
+	//（影子走既有 chat 探测、直绑走 billing-meter 探测）。判定用
 	// isCodeBuddyPlatformAccount（直绑 platform=codebuddy）|| isCodeBuddyShadowAccount
 	//（存量影子），二者均复用既有函数，不得新写判定（方案 §三 卡 B）。
 	if isCodeBuddyPlatformAccount(acc) || isCodeBuddyShadowAccount(acc) {
 		return p.probeCodeBuddyUpstream(ctx, acc)
 	}
-	validateBaseURL := func(raw string) (string, error) {
-		return cnValidateProbeURL(p.cfg, raw)
+	return p.probeUpstreamDataPlane(ctx, acc)
+}
+
+// probeUpstreamDataPlane 按账号真实协议发一次最小真实请求。
+//
+// 为什么不再探 /v1/models：中转站的 /models 由轻量前端直接返回模型清单，不与
+// chat/responses 数据面共用链路；上游数据面全挂时 /models 仍可 2xx，会误判健康。
+// 本函数复刻真实转发链的协议选择、模型映射、代理、TLS 指纹与会话头，探的就是故障面本身。
+func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlane(ctx context.Context, acc *Account) (bool, error) {
+	if acc == nil {
+		return false, errors.New("probe account is nil")
 	}
-	req, err := buildOpenAIAPIKeyModelsRequest(ctx, acc, validateBaseURL)
+	apiKey := strings.TrimSpace(acc.GetOpenAIProtocolAPIKey())
+	if apiKey == "" {
+		// 无可用凭据属配置错误，降级到到期恢复（既有 degraded 语义），不伪造失败。
+		return false, errors.New("probe account has no api key")
+	}
+	// 探测模型：优先用熔断时记录的触发模型（TempUnschedState.Model），
+	// 空则回落平台默认测试模型，再空回落 openai.DefaultTestModel。
+	model := p.probeModelForAccount(acc)
+	if model == "" {
+		return false, errors.New("probe account has no model to probe")
+	}
+	upstreamModel := resolveOpenAIAccountUpstreamModelForRequest(acc, model, false)
+	if strings.TrimSpace(upstreamModel) == "" {
+		upstreamModel = model
+	}
+
+	baseURL := acc.GetOpenAIBaseURL()
+	if strings.TrimSpace(baseURL) == "" {
+		if acc.Platform == PlatformOther {
+			return false, errors.New("probe account (platform other) has no base_url")
+		}
+		baseURL = "https://api.openai.com"
+	}
+	normalizedBase, err := cnValidateProbeURL(p.cfg, baseURL)
+	if err != nil {
+		return false, fmt.Errorf("invalid probe base url: %w", err)
+	}
+
+	useResponses := openai_compat.ShouldUseResponsesAPI(acc.SnapshotExtra())
+	var targetURL string
+	var payload []byte
+	if useResponses {
+		targetURL = openAIResponsesURLForBase(acc.Platform, normalizedBase)
+		payload, err = json.Marshal(map[string]any{
+			"model":             upstreamModel,
+			"input":             "hi",
+			"max_output_tokens": 16,
+			"stream":            false,
+		})
+	} else {
+		targetURL = openAIChatCompletionsURLForBase(normalizedBase)
+		payload, err = json.Marshal(map[string]any{
+			"model":      upstreamModel,
+			"messages":   []map[string]any{{"role": "user", "content": "hi"}},
+			"max_tokens": 1,
+			"stream":     false,
+		})
+	}
+	if err != nil {
+		return false, fmt.Errorf("build probe payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(payload))
 	if err != nil {
 		return false, fmt.Errorf("build probe request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	// 账号级 header 覆写：与真实转发最终头同源
+	acc.ApplyHeaderOverrides(req.Header)
+	// 伪装账号（OpenCode Go 端点）必需会话头。探测无入站 gin.Context，
+	// resolveOpenCodeSessionID 走 generate 分支生成 UUID；body 参与解析以复用
+	// prompt_cache_key 等稳定会话键。
+	applyOpenCodeSessionHeader(nil, acc, targetURL, req.Header, payload)
+	// muse 系 / OpenCode 官方主机需要网关中继 UA（与转发链同源）
+	if acc.Platform == PlatformMuse || isOpenCodeHostURL(strings.TrimSpace(acc.GetCredential("base_url"))) {
+		req.Header.Set("User-Agent", museRelayUserAgent)
+	}
+	if !useResponses {
+		req.Header.Set("Accept", "application/json")
 	}
 
 	proxyURL := ""
@@ -849,22 +906,60 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 		tlsProfile = p.tlsFPProfileService.ResolveTLSProfile(acc)
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, accountHealthProbeDataPlaneTimeout)
 	defer cancel()
 	resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
 	if err != nil {
+		// 传输失败与既有 /models 探测同语义：上游不可达即不健康，保持停调（非降级）。
 		return false, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// A 2xx (including 200 from /models) confirms the account is healthy again.
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
-		return true, nil
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
+	return evaluateProbeDataPlaneResponse(resp.StatusCode, raw, useResponses), nil
+}
+
+// probeModelForAccount 取探测模型：熔断 state 记录的 Model 优先，其次平台默认测试模型，
+// 最后 openai.DefaultTestModel。空模型无法构造真实请求，调用方按降级处理。
+func (p *AccountHealthRecoveryProbeService) probeModelForAccount(acc *Account) string {
+	if acc == nil {
+		return ""
 	}
-	// Drain to reuse the connection, then treat any non-2xx as an unhealthy probe.
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
-	return false, nil
+	if state, ok := parseHealthBreakerState(acc.TempUnschedulableReason); ok && state != nil {
+		if m := strings.TrimSpace(state.Model); m != "" {
+			return m
+		}
+	}
+	if m := strings.TrimSpace(acc.providerDefaultTestModel()); m != "" {
+		return m
+	}
+	return strings.TrimSpace(openai.DefaultTestModel)
+}
+
+// evaluateProbeDataPlaneResponse 判定一次真实数据面探测是否成功。
+// 成功需同时满足：HTTP 2xx、响应体是合法 JSON、且不携带 error 信封。
+// 只有 2xx 不够——部分中转站会用 200 + {"error":{...}} 表达业务失败。
+func evaluateProbeDataPlaneResponse(statusCode int, body []byte, useResponses bool) bool {
+	if statusCode < 200 || statusCode >= 300 {
+		return false
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		// 空体无法证明数据面可用，失败关闭。
+		return false
+	}
+	if !gjson.ValidBytes(trimmed) {
+		return false
+	}
+	if gjson.GetBytes(trimmed, "error").Exists() {
+		return false
+	}
+	if useResponses {
+		// Responses 成功体至少含 id 或 object 之一。
+		return gjson.GetBytes(trimmed, "id").Exists() || gjson.GetBytes(trimmed, "object").Exists()
+	}
+	// Chat Completions 成功体含 choices 数组。
+	return gjson.GetBytes(trimmed, "choices").IsArray()
 }
 
 // ---------------------------------------------------------------------------

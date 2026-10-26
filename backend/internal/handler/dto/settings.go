@@ -556,11 +556,11 @@ type OpenAIFastPolicySettings struct {
 }
 
 // OpenAIAPIKeyHealthBreakerProbeSettings DTO mirrors the probe sub-config of the
-// account health circuit breaker.
+// account health circuit breaker. 探测无次数上限：不健康的账号会一直被探测直到
+// 实测恢复，因此没有 max_attempts 配置项。
 type OpenAIAPIKeyHealthBreakerProbeSettings struct {
 	Enabled         bool `json:"enabled"`
 	IntervalSeconds int  `json:"interval_seconds"`
-	MaxAttempts     int  `json:"max_attempts"`
 }
 
 // OpenAIAPIKeyHealthBreakerSettings DTO mirrors the API-key health circuit breaker

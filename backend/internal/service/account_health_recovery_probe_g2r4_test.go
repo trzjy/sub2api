@@ -33,7 +33,7 @@ func TestHealthProbeStopBlocksConcurrentStart(t *testing.T) {
 	// 用 newProbeService 取得带真实 settingService 的服务（使后续真实 Start 可读配置、启动循环）。
 	repo := &probeRepoMock{accounts: map[int64]*Account{}, candidates: nil}
 	rl := NewRateLimitService(&probeRateLimitRepo{}, nil, &config.Config{}, nil, nil)
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 
 	// 模拟「服务已启动」：持有非空 stopCh（与 Start 守卫同口径），不启动真实循环。
 	p.startMu.Lock()
@@ -107,8 +107,9 @@ func TestHealthProbeStopBlocksConcurrentStart(t *testing.T) {
 // 「probe skipped clear: temp-unsched generation taken over」。
 func TestHealthProbeConditionalClearSkipsWhenUntilTakenOver(t *testing.T) {
 	const acct int64 = 7
-	// 账号当前 until（探测开始时读到的代际令牌）。
-	acc := parkedBreakerAccount(acct, 0)
+	// 账号当前 until（探测开始时读到的代际令牌）；连续成功计数预置到阈值-1，
+	// 使本次成功即达恢复阈值、真正走到条件清除（C1 恢复判据 = 连续 2 次成功）。
+	acc := parkedBreakerAccountWithState(acct, 0, probeRecoverySuccessThreshold-1, "")
 	originalUntil := acc.TempUnschedulableUntil.Unix()
 	// 模拟 DB 中该账号的 until 已被他人改写为更晚值（新停调接管）。
 	repo := &probeRepoMock{
@@ -117,13 +118,13 @@ func TestHealthProbeConditionalClearSkipsWhenUntilTakenOver(t *testing.T) {
 		storedUntils: map[int64]int64{acct: originalUntil + 100},
 	}
 	rl := NewRateLimitService(&probeRateLimitRepo{}, nil, &config.Config{}, nil, nil)
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
 
 	sink, stop := captureStructuredLog(t)
 	defer stop()
 
-	stillParked := p.probeAccount(context.Background(), acc, 10)
+	stillParked := p.probeAccount(context.Background(), acc)
 
 	// 条件清除被调用一次（尝试），但因代际失配未清除（命中失配、零写入）。
 	require.Equal(t, 1, repo.clearTempIfReasonCalls, "条件清除必须被调用（尝试）")
@@ -136,26 +137,27 @@ func TestHealthProbeConditionalClearSkipsWhenUntilTakenOver(t *testing.T) {
 // （代际令牌命中）→ 条件清除 rows>0、返回 true，账号恢复（stillParked=false）。
 func TestHealthProbeConditionalClearRecoversWhenUntilUnchanged(t *testing.T) {
 	const acct int64 = 7
-	acc := parkedBreakerAccount(acct, 0)
+	// 连续成功计数预置到阈值-1：本次成功即达恢复阈值，直接走条件清除（C1）。
+	acc := parkedBreakerAccountWithState(acct, 0, probeRecoverySuccessThreshold-1, "")
 	// 不设置 storedUntils：缺省取账号当前 until，代际令牌命中。
 	repo := &probeRepoMock{
 		accounts:   map[int64]*Account{acct: acc},
 		candidates: []*Account{acc},
 	}
 	rl := NewRateLimitService(&probeRateLimitRepo{}, nil, &config.Config{}, nil, nil)
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
 
-	stillParked := p.probeAccount(context.Background(), acc, 10)
+	stillParked := p.probeAccount(context.Background(), acc)
 
 	require.Equal(t, 1, repo.clearTempIfReasonCalls, "条件清除必须被调用并命中")
 	require.False(t, stillParked, "until 未变时探测成功必须恢复（清除停调）")
 }
 
-// 用例 A（AC-G2R5 第 6 轮 must_fix1 回归）：首探失败 → bumpProbeAttempts 改写 reason（写入新
-// attempt 计数）→ 补探成功 → 仍按入队时读到的 until 代际令牌清除成功。证明 G2R4 的 reason
-// 代际缺陷（bump 持续改写 reason 导致补探令牌失配清不掉）已被 until 代际令牌根治：同一次停调内
-// bump 只改 reason 不改 until，补探令牌恒命中。
+// 用例 A（AC-G2R5 第 6 轮 must_fix1 回归）：首探失败 → 状态回写改写 reason（写入新
+// attempt 计数）→ 补探连续成功达标 → 仍按入队时读到的 until 代际令牌清除成功。证明 G2R4 的
+// reason 代际缺陷（回写持续改写 reason 导致补探令牌失配清不掉）已被 until 代际令牌根治：
+// 同一次停调内状态回写只改 reason 不改 until，补探令牌恒命中。
 func TestG2R5_GenerationTokenSurvivesReasonBump(t *testing.T) {
 	const acct int64 = 7
 	acc := parkedBreakerAccount(acct, 0)
@@ -164,27 +166,28 @@ func TestG2R5_GenerationTokenSurvivesReasonBump(t *testing.T) {
 		candidates: []*Account{acc},
 	}
 	rl := NewRateLimitService(&probeRateLimitRepo{}, nil, &config.Config{}, nil, nil)
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	setFastProbeRetry(p) // 补探节奏注入毫秒级，单测不真实等待
 
-	// 探测：首探失败、补探（第 2 次调用）成功——验证 until 代际令牌跨 reason 改写仍命中。
+	// 探测：首探失败，之后补探连续成功（第 2、3 次调用）——验证 until 代际令牌跨 reason
+	// 改写（失败回写 attempt 计数、成功回写连续成功计数）仍命中。
 	var attempts int32
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) {
 		n := atomic.AddInt32(&attempts, 1)
-		return n > 1, nil // 首探失败，补探成功
+		return n > 1, nil // 首探失败，后续补探成功
 	})
 
-	// 经由 RunOnce 完整路径：首探（失败、bump reason）→ 异步补探（成功、按 until 清除）。
+	// 经由 RunOnce 完整路径：首探（失败、回写 reason）→ 异步补探（连续 2 次成功、按 until 清除）。
 	p.RunOnce(context.Background())
 	p.wg.Wait() // 等待异步补探完成，使清除断言确定
 
-	require.Equal(t, int32(2), atomic.LoadInt32(&attempts), "应发生一次首探 + 一次补探")
-	// bumpProbeAttempts 在首探失败后改写 reason（写入 ProbeAttempts=1），证明 reason 确实变了。
+	require.Equal(t, int32(3), atomic.LoadInt32(&attempts), "应为 1 次失败首探 + 2 次成功补探（C1 连续成功阈值）")
+	// 首探失败后状态回写改写 reason（ProbeAttempts 累计），证明 reason 确实变了。
 	st, ok := parseHealthBreakerState(acc.TempUnschedulableReason)
-	require.True(t, ok, "bump 后 reason 仍应是合法 breaker 状态")
-	require.Equal(t, 1, st.ProbeAttempts, "首探失败后 bumpProbeAttempts 必须改写 reason（写入 attempt 计数）")
-	// 尽管 reason 被改写，补探仍按入队时读到的 until 代际令牌命中清除。
-	require.Equal(t, 1, repo.clearTempIfReasonCalls, "补探成功必须按 until 代际令牌清除停调（G2R4 缺陷已根治）")
+	require.True(t, ok, "状态回写后 reason 仍应是合法 breaker 状态")
+	require.Equal(t, 2, st.ProbeAttempts, "失败回写 + 首次成功回写各累计一次 attempt")
+	// 尽管 reason 被反复改写，补探仍按入队时读到的 until 代际令牌命中清除。
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "补探达标必须按 until 代际令牌清除停调（G2R4 缺陷已根治）")
 	require.False(t, p.isRetryInFlight(acct), "补探结束后 in-flight 标记必须被清理")
 }
 
@@ -202,7 +205,7 @@ func TestG2R5_GenerationMismatchPreservesNewPause(t *testing.T) {
 		storedUntils: map[int64]int64{acct: originalUntil + 100},
 	}
 	rl := NewRateLimitService(&probeRateLimitRepo{}, nil, &config.Config{}, nil, nil)
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	setFastProbeRetry(p)
 
 	var attempts int32
@@ -235,7 +238,7 @@ func TestG2R5_StopInProgressRetryNotEnqueued(t *testing.T) {
 		candidates: []*Account{acc},
 	}
 	rl := NewRateLimitService(&probeRateLimitRepo{}, nil, &config.Config{}, nil, nil)
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	setFastProbeRetry(p)
 
 	// 首探恒定失败：确保 sweep 标记 in-flight 并入队补探候选。

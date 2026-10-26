@@ -3153,7 +3153,9 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 			// 否则恢复后同一 epoch 内再次 401 不再跨越边沿，账号失去保护。
 			resetPool401State(accountID)
 		} else if len(observedErr) > 0 && observedErr[0] != nil {
-			healthTripped = s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, observedErr[0])
+			// 把本次失败的模型贯通到熔断状态：恢复探针据此探测真实故障面，
+			// 而不是笼统探平台默认模型（空模型时探针自行回落默认值）。
+			healthTripped = s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, observedErr[0], model)
 		}
 	}
 	if success {
@@ -3179,11 +3181,12 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 
 // ObserveOpenAIAccountHealthFailure records failures that cannot reach the
 // scheduler-result path, for example after semantic response bytes were sent.
-func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Context, account *Account, observedErr error) bool {
+// model 可选：提供时贯通到熔断状态，供恢复探针探测真实故障面。
+func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Context, account *Account, observedErr error, model ...string) bool {
 	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil {
 		return false
 	}
-	return s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)
+	return s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr, model...)
 }
 
 func (s *OpenAIGatewayService) RecordOpenAIAccountSwitch() {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,7 +244,7 @@ func TestNormalizeOpenAIAPIKeyHealthBreakerSettings(t *testing.T) {
 			ScopePlatforms:   []string{"openai", "", "openai", "deepseek"},
 			WatchRatio:       0.001,
 			WarningRatio:     0.95,
-			Probe:            &OpenAIAPIKeyHealthBreakerProbeSettings{IntervalSeconds: 9999, MaxAttempts: 999},
+			Probe:            &OpenAIAPIKeyHealthBreakerProbeSettings{IntervalSeconds: 9999},
 		})
 		require.Equal(t, 1, got.WindowMinutes)
 		require.Equal(t, 1, got.FailureThreshold)
@@ -252,7 +253,6 @@ func TestNormalizeOpenAIAPIKeyHealthBreakerSettings(t *testing.T) {
 		require.InDelta(t, 0.01, got.WatchRatio, 1e-9) // clamped up to min
 		require.InDelta(t, 0.95, got.WarningRatio, 1e-9)
 		require.Equal(t, 600, got.Probe.IntervalSeconds) // clamped to max
-		require.Equal(t, 100, got.Probe.MaxAttempts)     // clamped to max
 	})
 
 	t.Run("warning must stay above watch", func(t *testing.T) {
@@ -269,7 +269,6 @@ func TestNormalizeOpenAIAPIKeyHealthBreakerSettings(t *testing.T) {
 		require.NotNil(t, got.Probe)
 		require.False(t, got.Probe.Enabled)
 		require.Equal(t, 15, got.Probe.IntervalSeconds)
-		require.Equal(t, 1, got.Probe.MaxAttempts)
 	})
 }
 
@@ -286,7 +285,7 @@ func TestGetSetSettingsRoundTrip(t *testing.T) {
 		IncludeGrok:      true,
 		WatchRatio:       0.3,
 		WarningRatio:     0.6,
-		Probe:            &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 120, MaxAttempts: 5},
+		Probe:            &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 120},
 	}
 	require.NoError(t, ss.SetOpenAIAPIKeyHealthBreakerSettings(context.Background(), input))
 
@@ -304,7 +303,6 @@ func TestGetSetSettingsRoundTrip(t *testing.T) {
 	require.NotNil(t, got.Probe)
 	require.True(t, got.Probe.Enabled)
 	require.Equal(t, 120, got.Probe.IntervalSeconds)
-	require.Equal(t, 5, got.Probe.MaxAttempts)
 }
 
 func TestGetSettingsBackwardCompatOldJSON(t *testing.T) {
@@ -482,10 +480,11 @@ func TestHealthBreakerTripPersistsAndBlocks(t *testing.T) {
 	require.Equal(t, openAIAPIKeyHealthBreakerReason, state.MatchedKeyword)
 }
 
-// TestHealthBreakerTrip429UsesShortCooldown pins the per-minute-RPM semantics:
-// a 429 trip parks the account for ~1 minute instead of the full 5xx-oriented
-// CooldownMinutes, while a 5xx trip keeps the configured cooldown.
-func TestHealthBreakerTrip429UsesShortCooldown(t *testing.T) {
+// TestHealthBreakerTripWritesIndefiniteUntil pins the probe-driven recovery
+// semantics: a trip (429 or 5xx alike) writes the indefinite sentinel until
+// instead of a finite cooldown, so the account stays parked until the recovery
+// probe confirms availability with consecutive real data-plane successes.
+func TestHealthBreakerTripWritesIndefiniteUntil(t *testing.T) {
 	newTripSvc := func() *RateLimitService {
 		ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
 			Enabled: true, WindowMinutes: 1, FailureThreshold: 3, CooldownMinutes: 5,
@@ -500,21 +499,21 @@ func TestHealthBreakerTrip429UsesShortCooldown(t *testing.T) {
 		return svc
 	}
 
-	svc429 := newTripSvc()
-	account429 := healthAccount(domain.PlatformDeepseek)
-	require.True(t, svc429.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account429, &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests}))
-	require.NotNil(t, account429.TempUnschedulableUntil)
-	cooldown429 := time.Until(*account429.TempUnschedulableUntil)
-	require.Greater(t, cooldown429, 30*time.Second)
-	require.LessOrEqual(t, cooldown429, 70*time.Second)
-
-	svc5xx := newTripSvc()
-	account5xx := healthAccount(domain.PlatformDeepseek)
-	require.True(t, svc5xx.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account5xx, &UpstreamFailoverError{StatusCode: http.StatusBadGateway}))
-	require.NotNil(t, account5xx.TempUnschedulableUntil)
-	cooldown5xx := time.Until(*account5xx.TempUnschedulableUntil)
-	require.Greater(t, cooldown5xx, 4*time.Minute)
-	require.LessOrEqual(t, cooldown5xx, 6*time.Minute)
+	for _, tc := range []struct {
+		name       string
+		statusCode int
+	}{
+		{"429", http.StatusTooManyRequests},
+		{"502", http.StatusBadGateway},
+	} {
+		svc := newTripSvc()
+		account := healthAccount(domain.PlatformDeepseek)
+		require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, &UpstreamFailoverError{StatusCode: tc.statusCode}), tc.name)
+		require.NotNil(t, account.TempUnschedulableUntil, tc.name)
+		require.True(t, account.TempUnschedulableUntil.Equal(tempUnschedIndefiniteUntil),
+			"%s trip must write the indefinite sentinel until, got %v", tc.name, account.TempUnschedulableUntil)
+		require.Greater(t, time.Until(*account.TempUnschedulableUntil), 100*365*24*time.Hour, tc.name)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -663,42 +662,84 @@ func parkedBreakerAccount(id int64, probeAttempts int) *Account {
 	}
 }
 
-// setFastProbeRetry 注入毫秒级补探节奏（PRC-02）。默认补探间隔
-// accountHealthProbeRetryInterval=5s、本轮上限 accountHealthProbeRetryBurst=50
-// （AC-C1：旧 3），单测不得真实等待；burst=1 使「首探 + 1 次补探」的 attempt 计数可确定断言。
-func setFastProbeRetry(p *AccountHealthRecoveryProbeService) {
-	p.retryInterval = time.Millisecond
-	p.retryBurst = 1
+// parkedBreakerAccountWithState 构造被健康熔断停调的账号，可显式指定连续成功计数
+// （C1 起恢复判据为连续 probeRecoverySuccessThreshold 次成功，需要把计数预置到阈值-1
+// 才能一轮内确定性到达清除路径）与触发模型。
+func parkedBreakerAccountWithState(id int64, probeAttempts int, consecutiveSuccesses int, model string) *Account {
+	until := time.Now().Add(5 * time.Minute)
+	state := TempUnschedState{
+		UntilUnix:            until.Unix(),
+		MatchedKeyword:       openAIAPIKeyHealthBreakerReason,
+		Tier:                 HealthBreakerTierTrip,
+		ProbeAttempts:        probeAttempts,
+		ConsecutiveSuccesses: consecutiveSuccesses,
+		Model:                model,
+	}
+	reason, _ := json.Marshal(state)
+	return &Account{
+		ID:                      id,
+		Platform:                domain.PlatformOpenAI,
+		Type:                    AccountTypeAPIKey,
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: string(reason),
+	}
 }
 
-func newProbeService(t *testing.T, probeEnabled bool, maxAttempts int, rl *RateLimitService, repo *probeRepoMock) *AccountHealthRecoveryProbeService {
+// setFastProbeRetry 注入毫秒级补探节奏（C1：补探已无轮数上限与 attempt 上限）。
+// 默认补探间隔 accountHealthProbeRetryInterval=5s，单测不得真实等待：配合
+// p.wg.Wait()，一次 RunOnce 内即可连续补探直到恢复（或按 ctx 取消边界收敛）。
+func setFastProbeRetry(p *AccountHealthRecoveryProbeService) {
+	p.retryInterval = time.Millisecond
+}
+
+func newProbeService(t *testing.T, probeEnabled bool, rl *RateLimitService, repo *probeRepoMock) *AccountHealthRecoveryProbeService {
 	t.Helper()
 	settings := &OpenAIAPIKeyHealthBreakerSettings{
 		Enabled: true,
-		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: probeEnabled, IntervalSeconds: 30, MaxAttempts: maxAttempts},
+		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: probeEnabled, IntervalSeconds: 30},
 	}
 	ss, _ := newSettingService(t, settings)
 	p := NewAccountHealthRecoveryProbeService(repo, nil, &config.Config{}, rl, ss, nil)
 	return p
 }
 
-// 恢复判定语义（PRC-02）：一次真实探测成功即清除停调（旧「连续两轮成功」二次确认
-// 已移除），故单轮 RunOnce 即完成提前恢复，不必等到停调到期。
-func TestProbeRecoverySuccessClearsOnFirstRound(t *testing.T) {
+// probeThenCancel 构造「累计探测 after 次后取消 ctx」的探测 override（C1）：补探已无
+// 轮数上限与 attempt 上限，永久失败/降级场景只有取消 ctx 才能让补探循环收敛，否则会按
+// retryInterval 一直重探。返回的计数指针供断言探测次数。
+func probeThenCancel(cancel context.CancelFunc, after int32, ok bool, err error) (func(context.Context, *Account) (bool, error), *int32) {
+	var calls int32
+	return func(_ context.Context, _ *Account) (bool, error) {
+		if atomic.AddInt32(&calls, 1) >= after {
+			cancel()
+		}
+		return ok, err
+	}, &calls
+}
+
+// 恢复判定语义（C1）：单次真实探测成功不足以解除熔断——需连续
+// probeRecoverySuccessThreshold 次成功。首成功仅回写计数并保持停调，第二次成功才清除。
+func TestProbeRecoveryRequiresConsecutiveSuccesses(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
+	acc := parkedBreakerAccount(7, 0)
 	repo := &probeRepoMock{
-		accounts:   map[int64]*Account{7: parkedBreakerAccount(7, 0)},
-		candidates: []*Account{parkedBreakerAccount(7, 0)},
+		accounts:   map[int64]*Account{7: acc},
+		candidates: []*Account{acc},
 	}
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
 
-	p.RunOnce(context.Background())
+	// 第 1 次成功：连续成功计数 1（未达阈值）→ 停调保留，仍需继续探测。
+	require.True(t, p.probeAccount(context.Background(), acc), "单次成功不得解除熔断，必须继续补探")
+	require.Zero(t, repo.clearTempIfReasonCalls, "未达连续成功阈值不得清除停调")
+	require.Equal(t, 1, repo.bumpTempIfReasonCalls, "首次成功必须回写连续成功计数")
+	st, ok := parseHealthBreakerState(acc.TempUnschedulableReason)
+	require.True(t, ok)
+	require.Equal(t, 1, st.ConsecutiveSuccesses, "首次成功必须把连续成功计数写为 1")
 
-	// 单轮 success 即清除停调（recovered early），且不再回写 consecutive_successes。
-	require.Equal(t, 1, repo.clearTempIfReasonCalls)
-	require.Equal(t, 0, repo.bumpTempIfReasonCalls)
+	// 第 2 次成功：计数达阈值 → 条件清除恢复。
+	require.False(t, p.probeAccount(context.Background(), acc), "连续成功达标后应完成恢复，不再待补探")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "连续 2 次成功必须清除停调")
 }
 
 func TestProbeFailureStaysParkedAndBumpsAttempts(t *testing.T) {
@@ -709,20 +750,25 @@ func TestProbeFailureStaysParkedAndBumpsAttempts(t *testing.T) {
 		accounts:   map[int64]*Account{7: cand},
 		candidates: []*Account{cand},
 	}
-	p := newProbeService(t, true, 10, rl, repo)
-	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return false, nil })
-	// PRC-02：首探失败后本轮补探 1 次（毫秒级节奏），共 2 次 attempt 记账。
+	p := newProbeService(t, true, rl, repo)
 	setFastProbeRetry(p)
+	// 永久失败：探测 2 次（首探 + 1 次补探）后取消 ctx 使补探循环收敛（C1 无轮数上限）。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	override, calls := probeThenCancel(cancel, 2, false, nil)
+	p.SetProbeOverride(override)
 
-	p.RunOnce(context.Background())
+	p.RunOnce(ctx)
 	p.wg.Wait() // 等待异步补探完成，使 attempt 记账断言确定（AC-C1 异步化）
 
+	require.Equal(t, int32(2), atomic.LoadInt32(calls), "应为 1 次首探 + 1 次补探")
 	require.Zero(t, repo.clearTempIfReasonCalls)    // not recovered
 	require.Equal(t, 2, repo.bumpTempIfReasonCalls) // attempt counter bumped（首探 + 1 次补探）
 
 	var state TempUnschedState
 	require.NoError(t, json.Unmarshal([]byte(cand.TempUnschedulableReason), &state))
 	require.Equal(t, 2, state.ProbeAttempts)
+	require.Zero(t, state.ConsecutiveSuccesses, "失败必须把连续成功计数归零")
 }
 
 func TestProbeDegradedPlatformFallsBackToExpiry(t *testing.T) {
@@ -733,15 +779,19 @@ func TestProbeDegradedPlatformFallsBackToExpiry(t *testing.T) {
 		accounts:   map[int64]*Account{7: cand},
 		candidates: []*Account{cand},
 	}
-	p := newProbeService(t, true, 10, rl, repo)
-	// A degraded platform returns an error: the probe must not spam, it bumps the
-	// attempt counter and lets the cooldown expire.
-	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return false, errors.New("no safe endpoint") })
+	p := newProbeService(t, true, rl, repo)
 	setFastProbeRetry(p)
+	// A degraded platform returns an error: 降级不等于恢复，仅簿记一次后等冷却到期；
+	// 取消 ctx 划定补探边界（永久降级场景补探本身无轮数上限）。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	override, calls := probeThenCancel(cancel, 1, false, errors.New("no safe endpoint"))
+	p.SetProbeOverride(override)
 
-	p.RunOnce(context.Background())
-	p.wg.Wait() // 等待异步补探（降级路径首探后 gave_up，无二次 bump）完成，避免 goroutine 泄漏
+	p.RunOnce(ctx)
+	p.wg.Wait() // 等待异步补探退出（ctx 已取消），避免 goroutine 泄漏
 
+	require.Equal(t, int32(1), atomic.LoadInt32(calls))
 	require.Zero(t, repo.clearTempIfReasonCalls)
 	require.Equal(t, 1, repo.bumpTempIfReasonCalls)
 }
@@ -762,10 +812,11 @@ func TestProbeSwitchTogglesAtRuntimeWithoutRestart(t *testing.T) {
 
 	ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
 		Enabled: true,
-		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: false, IntervalSeconds: 30, MaxAttempts: 10},
+		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: false, IntervalSeconds: 30},
 	})
 	p := NewAccountHealthRecoveryProbeService(repo, nil, &config.Config{}, rl, ss, nil)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
+	setFastProbeRetry(p)
 
 	// Disabled at start: the running loop never touches the candidate.
 	p.RunOnce(context.Background())
@@ -774,36 +825,42 @@ func TestProbeSwitchTogglesAtRuntimeWithoutRestart(t *testing.T) {
 	// Flip the switch ON through the setting service (simulates an admin toggle).
 	require.NoError(t, ss.SetOpenAIAPIKeyHealthBreakerSettings(context.Background(), &OpenAIAPIKeyHealthBreakerSettings{
 		Enabled: true,
-		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 30, MaxAttempts: 10},
+		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 30},
 	}))
 
 	// Same service instance, no restart: the next tick now performs the sweep.
-	// PRC-02：一次真实探测成功即清除，故开关生效后的第一个 tick 即完成恢复。
+	// C1：需连续 2 次真实探测成功才恢复，首探成功后由异步补探在同一 sweep 内补齐第二次。
 	p.RunOnce(context.Background())
+	p.wg.Wait()
 	require.Equal(t, 1, repo.clearTempIfReasonCalls, "enabling the probe must take effect on the running loop")
 }
 
-func TestProbeGivesUpAfterMaxAttempts(t *testing.T) {
+// C1：探测次数不再有上限——ProbeAttempts 是纯排障计数，不得作为放弃阈值/探测门禁。
+func TestProbeHasNoAttemptCeiling(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
-	cand := parkedBreakerAccount(7, 10) // already at max
+	cand := parkedBreakerAccount(7, 1000)
 	repo := &probeRepoMock{
 		accounts:   map[int64]*Account{7: cand},
 		candidates: []*Account{cand},
 	}
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 
-	overrideCalls := 0
-	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) {
-		overrideCalls++
-		return false, nil
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	override, calls := probeThenCancel(cancel, 1, false, nil)
+	p.SetProbeOverride(override)
 
-	p.RunOnce(context.Background())
+	p.RunOnce(ctx)
+	p.wg.Wait()
 
-	require.Zero(t, overrideCalls)               // never probed
-	require.Zero(t, repo.clearTempIfReasonCalls) // not recovered
-	require.Zero(t, repo.bumpTempIfReasonCalls)  // no further bookkeeping
+	require.Equal(t, int32(1), atomic.LoadInt32(calls), "历史 attempt 计数再高也必须继续探测（无次数上限）")
+	require.Equal(t, 1, repo.bumpTempIfReasonCalls, "探测后仅按次累计 attempt 计数")
+
+	var state TempUnschedState
+	require.NoError(t, json.Unmarshal([]byte(cand.TempUnschedulableReason), &state))
+	require.Equal(t, 1001, state.ProbeAttempts, "ProbeAttempts 仅作排障累计，不再有放弃语义")
+	require.Zero(t, repo.clearTempIfReasonCalls)
 }
 
 func TestProbeSkipsNonBreakerBlocks(t *testing.T) {
@@ -818,7 +875,7 @@ func TestProbeSkipsNonBreakerBlocks(t *testing.T) {
 		accounts:   map[int64]*Account{8: cand},
 		candidates: []*Account{cand},
 	}
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	overrideCalls := 0
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) {
 		overrideCalls++
@@ -838,7 +895,7 @@ func TestProbeDisabledIsNoOp(t *testing.T) {
 		accounts:   map[int64]*Account{7: parkedBreakerAccount(7, 0)},
 		candidates: []*Account{parkedBreakerAccount(7, 0)},
 	}
-	p := newProbeService(t, false, 10, rl, repo) // probe disabled
+	p := newProbeService(t, false, rl, repo) // probe disabled
 	overrideCalls := 0
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) {
 		overrideCalls++

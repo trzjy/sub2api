@@ -13,6 +13,7 @@ package service
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,20 +23,29 @@ import (
 
 // RunOnce 账号级相位冻结账号级上界（探测失败路径，账号保持 parked）。
 func TestHealthRecoveryRunOnceFreezesAccountLevelFreshnessUpperBound(t *testing.T) {
+	acc := parkedBreakerAccount(7, 0)
 	repo := &probeRepoMock{
-		accounts:   map[int64]*Account{7: parkedBreakerAccount(7, 0)},
-		candidates: []*Account{parkedBreakerAccount(7, 0)},
+		accounts:   map[int64]*Account{7: acc},
+		candidates: []*Account{acc},
 	}
 	// probeEnabled=true、探测 override 返回 false（失败路径：账号保持 parked，
 	// 冻结值不被 clearCandidateBound 清除）。rateLimit 传 nil（观测记录窄面自带
 	// nil 守卫，与冻结上界无关联）。
-	p := newProbeService(t, true, 10, nil, repo)
-	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return false, nil })
-	// 失败路径会触发短间隔补探（默认 5s×3），单测注入毫秒级节奏避免真实等待。
+	p := newProbeService(t, true, nil, repo)
+	// 永久失败 + 补探无轮数上限（C1）：以 ctx 取消划定补探边界，单测注入毫秒级节奏。
 	p.retryInterval = time.Millisecond
-	p.retryBurst = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls int32
+	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) {
+		if atomic.AddInt32(&calls, 1) >= 2 {
+			cancel()
+		}
+		return false, nil
+	})
 
-	p.RunOnce(context.Background())
+	p.RunOnce(ctx)
+	p.wg.Wait()
 
 	total, frozen := p.frozenCandidateBoundOK(7, "")
 	require.True(t, frozen, "RunOnce 账号级相位必须冻结账号级（modelKey=\"\"）候选总数")
@@ -46,11 +56,12 @@ func TestHealthRecoveryRunOnceFreezesAccountLevelFreshnessUpperBound(t *testing.
 
 // RunOnce 未进入账号级相位（probe 开关关闭）时不得冻结（门禁语义）。
 func TestHealthRecoveryRunOnceProbeDisabledDoesNotFreezeFreshnessUpperBound(t *testing.T) {
+	acc := parkedBreakerAccount(7, 0)
 	repo := &probeRepoMock{
-		accounts:   map[int64]*Account{7: parkedBreakerAccount(7, 0)},
-		candidates: []*Account{parkedBreakerAccount(7, 0)},
+		accounts:   map[int64]*Account{7: acc},
+		candidates: []*Account{acc},
 	}
-	p := newProbeService(t, false, 10, nil, repo)
+	p := newProbeService(t, false, nil, repo)
 
 	p.RunOnce(context.Background())
 
@@ -59,22 +70,26 @@ func TestHealthRecoveryRunOnceProbeDisabledDoesNotFreezeFreshnessUpperBound(t *t
 	require.Equal(t, time.Duration(0), p.AccountFreshnessUpperBound(7, ""))
 }
 
-// 恢复路径（探测成功 → ClearTempUnschedulable 成功 → clearCandidateBound）后
+// 恢复路径（探测连续成功达标 → ClearTempUnschedulable 成功 → clearCandidateBound）后
 // 回到未冻结态：AccountFreshnessUpperBound == 0，下一轮进入调度重新冻结。
 func TestHealthRecoveryProbeRecoveryClearsFrozenFreshnessUpperBound(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
+	acc := parkedBreakerAccount(7, 0)
 	repo := &probeRepoMock{
-		accounts:   map[int64]*Account{7: parkedBreakerAccount(7, 0)},
-		candidates: []*Account{parkedBreakerAccount(7, 0)},
+		accounts:   map[int64]*Account{7: acc},
+		candidates: []*Account{acc},
 	}
-	p := newProbeService(t, true, 10, rl, repo)
+	p := newProbeService(t, true, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
+	setFastProbeRetry(p)
 
-	// PRC-02：首次（单轮）探测成功即清除停调并 clearCandidateBound。
+	// C1：首次成功仅计数并保持停调，异步补探在同一 sweep 内补齐第二次成功 → 清除停调
+	// 并 clearCandidateBound。
 	p.RunOnce(context.Background())
+	p.wg.Wait()
 
-	require.Equal(t, 1, repo.clearTempIfReasonCalls, "恢复路径应清除 temp-unschedulable")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "连续 2 次成功后应清除 temp-unschedulable")
 	_, frozen := p.frozenCandidateBoundOK(7, "")
 	require.False(t, frozen, "恢复成功后账号级冻结上界必须被清除（回到未冻结态）")
 	require.Equal(t, time.Duration(0), p.AccountFreshnessUpperBound(7, ""),

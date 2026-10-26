@@ -63,11 +63,13 @@ func TestCodeBuddyDirectProbeUsesBillingMeterNotModels(t *testing.T) {
 	}
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, `{"code":0}`)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
+	setFastProbeRetry(p)
 
+	// C1：连续 2 次 2xx 成功才恢复（首次成功后由异步补探补齐第二次）。
 	p.RunOnce(context.Background())
+	p.wg.Wait()
 
-	// 2xx billing 响应 → 恢复（清除停调）。
-	require.Equal(t, 1, repo.clearTempIfReasonCalls, "直绑 billing 探测 2xx 必须恢复停调")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "直绑 billing 探测连续 2xx 必须恢复停调")
 	rec := upstream.lastRecord(t)
 	require.Equal(t, http.MethodPost, rec.Method)
 	require.Equal(t, codeBuddyBillingMeterPath, rec.Path, "直绑必须走 billing-meter 端点，而非 chat 或 /models")
@@ -94,12 +96,16 @@ func TestCodeBuddyDirectProbe401KeepsParked(t *testing.T) {
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusUnauthorized, `{"code":40101}`)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 	setFastProbeRetry(p)
+	// 永久失败：第 2 次探测请求后取消 ctx 划定补探边界（C1 补探无轮数上限）。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream.cancelAfterRequests(2, cancel)
 
-	p.RunOnce(context.Background())
-	p.wg.Wait() // 等待异步补探完成（AC-C1），使 attempt 计数断言确定
+	p.RunOnce(ctx)
+	p.wg.Wait() // 等待异步补探按 ctx 取消收敛（AC-C1）
 
 	require.Zero(t, repo.clearTempIfReasonCalls, "直绑 billing 探测 401 不得恢复停调")
-	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "失败后 attempt 计数 +1（首探 + 1 次补探，PRC-02，代际守卫 BumpTempUnschedulableReasonIfGeneration）")
+	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "失败后 attempt 计数 +1（首探 + 1 次补探，代际守卫 BumpTempUnschedulableReasonIfGeneration）")
 }
 
 // TestCodeBuddyShadowProbePathNoRegression 影子账号经 probeUpstream 后仍走 chat 探测
@@ -115,10 +121,13 @@ func TestCodeBuddyShadowProbePathNoRegression(t *testing.T) {
 	}
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, codeBuddyProbeValidSSE)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
+	setFastProbeRetry(p)
 
+	// C1：连续 2 次成功才恢复（首次成功后由异步补探补齐第二次）。
 	p.RunOnce(context.Background())
+	p.wg.Wait()
 
-	require.Equal(t, 1, repo.clearTempIfReasonCalls, "影子 chat 探测成功仍恢复停调")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "影子 chat 探测连续成功仍恢复停调")
 	rec := upstream.lastRecord(t)
 	require.Equal(t, "/v2/chat/completions", rec.Path, "影子必须仍走 chat 探测（不回归到 billing meter）")
 	require.Equal(t, "Bearer PARENT_TOKEN_SECRET", rec.Header.Get("Authorization"), "影子仍解析母账号凭据")
@@ -190,13 +199,16 @@ func TestCodeBuddyDirectProbe2xxBodyFailureKeepsParked(t *testing.T) {
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, `{"code":40101,"message":"unauthorized"}`)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 	setFastProbeRetry(p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream.cancelAfterRequests(2, cancel)
 
-	p.RunOnce(context.Background())
-	p.wg.Wait() // 等待异步补探完成（AC-C1）
+	p.RunOnce(ctx)
+	p.wg.Wait() // 等待异步补探按 ctx 取消收敛（AC-C1）
 
 	require.Zero(t, repo.clearTempIfReasonCalls, "直绑 2xx 但 body 业务失败不得恢复停调（AC-G2R-1）")
-	// 首探 + 至少 1 次补探均因 body 失败而 parked（证明探测确实执行且失败关闭）。
-	require.GreaterOrEqual(t, repo.bumpTempIfReasonCalls, 2, "2xx+body 失败应仍走失败簿记（首探 + 补探）")
+	// 首探 + 1 次补探均因 body 失败而 parked（证明探测确实执行且失败关闭）。
+	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "2xx+body 失败应仍走失败簿记（首探 + 补探）")
 }
 
 // TestCodeBuddyDirectProbe2xxEmptyBodyKeepsParked 直绑 billing-meter 探测收到 HTTP 200
@@ -212,12 +224,15 @@ func TestCodeBuddyDirectProbe2xxEmptyBodyKeepsParked(t *testing.T) {
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, "")
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 	setFastProbeRetry(p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream.cancelAfterRequests(2, cancel)
 
-	p.RunOnce(context.Background())
+	p.RunOnce(ctx)
 	p.wg.Wait()
 
 	require.Zero(t, repo.clearTempIfReasonCalls, "直绑 2xx 空 body 不得恢复停调（AC-G2R-1）")
-	require.GreaterOrEqual(t, repo.bumpTempIfReasonCalls, 2, "空 body 应仍走失败簿记")
+	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "空 body 应仍走失败簿记")
 }
 
 // TestCodeBuddyProbeInFlightSkipsSweep 同账号补探在途时（上一轮异步补探仍未完成），
@@ -265,7 +280,6 @@ func TestCodeBuddyProbeStopDuringRetrySleepNoHang(t *testing.T) {
 
 	// 长补探间隔：让补探 goroutine 进入睡眠，便于在 sleep 期间调用 Stop。
 	p.retryInterval = time.Second
-	p.retryBurst = 1
 
 	// 模拟服务已启动（Stop 需要非 nil 的 stopCh 才会 close + wg.Wait）。
 	p.startMu.Lock()
