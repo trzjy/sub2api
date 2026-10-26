@@ -130,8 +130,17 @@ type opsBusinessCurve struct {
 var (
 	// Error rate in percent: 1% or less is perfect, 10% is the tail's shoulder.
 	opsErrRateCurve = opsBusinessCurve{good: 1.0, bad: 10.0, floorScore: 30.0, zero: 50.0}
-	// TTFT p99 in milliseconds: 1s or less is perfect, 3s is the tail's shoulder.
-	opsTTFTCurve = opsBusinessCurve{good: 1000.0, bad: 3000.0, floorScore: 30.0, zero: 15000.0}
+	// TTFT p99 in milliseconds: 3s or less is perfect, 10s is the tail's shoulder.
+	//
+	// 2026-10-27 调整（原值 good=1000 / bad=3000 / zero=15000）：
+	// 本站是缓存密集型长上下文业务，TTFT 主要等于上游预填充时间而非本站处理耗时
+	// （生产实测 1h 窗：TTFT 占总耗时 68.4% = 17951ms / 26246ms；TTFT 分位
+	// P50=14684 / P90=34610 / P95=44308 / P99=69042ms；同一类请求在自建额度
+	// 通道 TTFT 仅 1.2~3.6s，付费上游 14~24s）。
+	// 原 zero=15000 让 P99 直接归零 -> 业务分仅 10.5 -> 健康分被压到 63，
+	// 把「上游算力慢」误报成「本站不健康」。新阈值让 P99 落在 ramp 段得非零分，
+	// 而真正的劣化（TTFT 超 2 分钟）仍归零。
+	opsTTFTCurve = opsBusinessCurve{good: 3000.0, bad: 10000.0, floorScore: 30.0, zero: 120000.0}
 )
 
 // opsBusinessSubScore evaluates v against curve, returning a 0-100 sub-score.

@@ -16,6 +16,55 @@ func TestComputeDashboardHealthScore_IdleReturns100(t *testing.T) {
 	require.Equal(t, 100, score)
 }
 
+// TestOpsTTFTCurve_NewThresholds pins the 2026-10-27 TTFT curve adjustment
+// (good=3000 / bad=10000 / zero=120000):
+//
+// 本站是缓存密集型长上下文业务，TTFT 主要等于上游预填充时间（生产实测 1h 窗：
+// TTFT 占总耗时 68.4%；分位 P50=14684 / P90=34610 / P95=44308 / P99=69042ms）。
+// 旧曲线 zero=15000 让 P99 直接归零，业务分仅 10.5，把「上游算力慢」误报成
+// 「本站不健康」。新阈值下：
+//   - 0ms 仍是满分（TTFT 不是问题）；
+//   - 69042ms（生产实测 P99）落在 ramp 段 -> 非零分，反映「慢但未失控」；
+//   - 200000ms（真正的劣化）仍然归零，保留告警能力。
+func TestOpsTTFTCurve_NewThresholds(t *testing.T) {
+	t.Parallel()
+
+	ttftScore := func(p99ms int64) float64 {
+		return opsBusinessSubScore(float64(p99ms), opsTTFTCurve)
+	}
+
+	require.Equal(t, 100.0, ttftScore(0), "TTFT 0ms 应为满分")
+	require.Equal(t, 100.0, ttftScore(3000), "TTFT 正好 good=3000 应为满分")
+
+	// 生产实测 P99：落在 ramp 段（bad=10000）-> 非零但明显低于满分。
+	p99 := ttftScore(69042)
+	require.Greater(t, p99, 0.0, "生产实测 P99 69042ms 不得再归零")
+	require.Less(t, p99, 100.0, "生产实测 P99 不应满分（上游确实慢）")
+
+	// 真正的劣化：超过 zero=120000 归零，保留告警能力。
+	require.Equal(t, 0.0, ttftScore(120000), "TTFT 达 zero 阈值应归零")
+	require.Equal(t, 0.0, ttftScore(200000), "TTFT 严重劣化应归零")
+
+	// 旧阈值下的 P99=69042 必须已被新曲线救回（原 zero=15000 会归零）。
+	require.NotEqual(t, 0.0, p99, "旧曲线归零的行为不应保留")
+}
+
+// TestOpsTTFTCurve_BusinessScoreNotZeroAtProductionP99 pins the end-to-end effect:
+// 生产实测 P99=69042ms 时业务分不再是 10.5（近乎归零），而是可区分的中间值。
+func TestOpsTTFTCurve_BusinessScoreNotZeroAtProductionP99(t *testing.T) {
+	t.Parallel()
+
+	ov := &OpsDashboardOverview{
+		SLA:               0.99,
+		ErrorRate:         0,
+		UpstreamErrorRate: 0,
+		TTFT:              OpsPercentiles{P99: intPtr(69042)},
+	}
+	score := computeBusinessHealth(ov)
+	require.Greater(t, score, 30.0, "生产实测 P99 下业务分不应塌到接近 0")
+	require.Less(t, score, 100.0, "业务分仍应反映上游偏慢")
+}
+
 func TestComputeDashboardHealthScore_DegradesOnBadSignals(t *testing.T) {
 	t.Parallel()
 
@@ -305,8 +354,8 @@ func TestComputeBusinessHealth(t *testing.T) {
 			wantMax: 85,
 		},
 		{
-			// 2000ms sits in the ramp segment (good=1000ms, bad=3000ms):
-			// ttftScore=65, so business = 100*0.5 + 65*0.5 = 82.5.
+			// 2000ms 在 good=3000ms 之内 -> ttftScore=100，business = 100。
+			// （旧曲线 good=1000/bad=3000 时此处为 ramp 段 65 分，改曲线后已更新。）
 			name: "TTFT boundary 2s",
 			overview: &OpsDashboardOverview{
 				SLA:               0.99,
@@ -314,8 +363,8 @@ func TestComputeBusinessHealth(t *testing.T) {
 				UpstreamErrorRate: 0,
 				TTFT:              OpsPercentiles{P99: intPtr(2000)},
 			},
-			wantMin: 82,
-			wantMax: 83,
+			wantMin: 100,
+			wantMax: 100,
 		},
 		{
 			name: "upstream error dominates",

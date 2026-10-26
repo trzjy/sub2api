@@ -165,6 +165,14 @@ const (
 	UpstreamExpired
 	// UpstreamUnknown 未知结果（失败关闭，不得判冷却/过期）。
 	UpstreamUnknown
+	// UpstreamDailyRefreshLimit 每日刷新次数用尽（可预期节流，次日重置后自动恢复）。
+	//
+	// 与 UpstreamCooldown 的区别在恢复窗口：冷却是分钟级，每日上限是天级
+	// （shareai 每 key 每日 5 次，8:00 重置）。两者都不改变 exhausted 维度
+	// （都不是已确认终态），但都不应被自动链路记为「任务失败」——
+	// 生产实证 2026-10-27：quota_key_reconcile 周期 5 分钟必然撞上该上限，
+	// 此前落 UpstreamUnknown 导致 ops jobScore 长期被扣并掩盖真故障。
+	UpstreamDailyRefreshLimit
 )
 
 // Message 返回上游中文 msg 原文（或明确失败描述），handler 须逐字回显到响应 message。
@@ -189,6 +197,8 @@ func (e *UpstreamPullError) Is(target error) bool {
 		return errors.Is(target, ErrUpstreamCooldown)
 	case UpstreamExpired:
 		return errors.Is(target, ErrUpstreamKeyExpired)
+	case UpstreamDailyRefreshLimit:
+		return errors.Is(target, ErrUpstreamDailyRefreshLimit)
 	}
 	return false
 }
@@ -201,6 +211,40 @@ func NewUpstreamCooldownError(message string) error {
 
 func NewUpstreamExpiredError(message string) error {
 	return &UpstreamPullError{Kind: UpstreamExpired, message: message, cause: fmt.Errorf("%w: %s", ErrUpstreamKeyExpired, message)}
+}
+
+// newUpstreamDailyRefreshLimitError 构造「当日刷新次数用尽」错误（可预期节流）。
+// 走冷却标记路径（writeCooldownMarker），exhausted 维度不动 —— 每日节流不是终态。
+func newUpstreamDailyRefreshLimitError(message string) error {
+	return &UpstreamPullError{Kind: UpstreamDailyRefreshLimit, message: message, cause: fmt.Errorf("%w: %s", ErrUpstreamDailyRefreshLimit, message)}
+}
+
+// isUpstreamDailyRefreshLimitMessage 判定上游 msg 是否表达「当日刷新次数已达上限」。
+//
+// 只匹配肯定措辞，杜绝否定句误判（如「未达到刷新次数上限」不是节流）。
+// 覆盖上游已知措辞：刷新次数达到上限 / 刷新次数上限 / 每日刷新次数 / 当日刷新次数 /
+// 今日刷新次数 + 达到上限/已达上限/用尽 的组合。
+// 绝不据 msg 反推或伪造任何日期或重置时刻。
+func isUpstreamDailyRefreshLimitMessage(m string) bool {
+	if m == "" {
+		return false
+	}
+	// 否定句保护：出现否定词即不判节流。
+	for _, neg := range []string{"未达到", "未达", "没有达到", "未用尽", "未超"} {
+		if strings.Contains(m, neg) {
+			return false
+		}
+	}
+	// 计数/额度语境 + 达到上限语义，两者同时命中才算每日刷新上限。
+	hasCount := strings.Contains(m, "刷新次数") || strings.Contains(m, "刷新额度") ||
+		strings.Contains(m, "当日刷新") || strings.Contains(m, "今日刷新") ||
+		strings.Contains(m, "每日刷新")
+	if !hasCount {
+		return false
+	}
+	return strings.Contains(m, "达到上限") || strings.Contains(m, "已达上限") ||
+		strings.Contains(m, "用尽") || strings.Contains(m, "超出") ||
+		strings.Contains(m, "上限")
 }
 
 func NewUpstreamUnknownError(message string) error {
@@ -918,6 +962,20 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			// 唯独豁免 exhausted；返回 nil 使事务提交标记，哨兵由 resultErr 透传。
 			// R1-1：resultErr 保留携带上游中文 msg 原文的归类错误（不再用裸哨兵丢失 msg）。
 			if errors.Is(pullErr, ErrUpstreamCooldown) {
+				if werr := s.writeCooldownMarker(ctx, tx, quotaKeyID, pullErr); werr != nil {
+					return fmt.Errorf("quota_key_service: write cooldown marker: %w", werr)
+				}
+				resultErr = pullErr
+				return nil
+			}
+			// 「当日刷新次数已达上限」是可预期节流（上游每 key 每日 N 次配额用尽，
+			// 次日重置后自动恢复），不是 key 级终态也不是链路故障：
+			//   - 走冷却标记路径（同事务写 last_refresh_error + last_refresh_at，豁免 exhausted），
+			//     与短窗冷却同型 —— exhausted 维度不动（每日节流不是已确认终态）；
+			//   - 不落未知失败路径，避免自动链路把它记成任务失败（生产实证 2026-10-27：
+			//     quota_key_reconcile 周期 5 分钟必然撞上每日上限，
+			//     此前落 UpstreamUnknown 导致 ops jobScore 长期被扣并掩盖真故障）。
+			if errors.Is(pullErr, ErrUpstreamDailyRefreshLimit) {
 				if werr := s.writeCooldownMarker(ctx, tx, quotaKeyID, pullErr); werr != nil {
 					return fmt.Errorf("quota_key_service: write cooldown marker: %w", werr)
 				}

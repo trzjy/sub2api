@@ -322,6 +322,10 @@ func (r *QuotaKeyReconciler) runOnce() {
 		// R15-1：本轮 ErrUpstreamKeyBlocked（上游拉号受阻）计数。
 		// 单 key 失败不停轮（既有语义），但收尾心跳必须如实记失败，不得记成功。
 		blockedCount int
+		// dailyLimitCount：本轮撞上「当日刷新次数已达上限」的 key 数（可预期节流）。
+		// 与 blockedCount 严格分开：前者是上游每日配额用尽（次日重置后自动恢复，
+		// 不算任务故障），后者是真拉号失败。两者都不得混入对方的判定分支。
+		dailyLimitCount int
 		// shortfallReason 非空表示本轮如实报告缺口与成因（见 poolShortfall）：
 		// 无有效码 / 冷却 / 容量满 / 选中码未实际增号 —— 不虚报补满。
 		shortfallReason string
@@ -382,7 +386,7 @@ func (r *QuotaKeyReconciler) runOnce() {
 			}
 			attempted[keyID] = true
 			// 携带 mountModel 上下文拉号（F2：触发 §13.3 分组挂载，而非落成裸号）。
-			mf, blk := r.pullKey(ctx, keyID, mountModel)
+			mf, blk, dailyLimit := r.pullKey(ctx, keyID, mountModel)
 			if mf {
 				// F4 哨兵：停止本轮后续候选拉号（含同一批的其余 key），不重试该 key。
 				mountStopReason = fmt.Sprintf("stopped: upstream may have been consumed (mount failed) for quota key %d", keyID)
@@ -390,6 +394,9 @@ func (r *QuotaKeyReconciler) runOnce() {
 			}
 			if blk {
 				blockedCount++
+			}
+			if dailyLimit {
+				dailyLimitCount++
 			}
 			// 按实际成功入库账号重算总量：达标即停拉，不把"已拉/已选中 key 数"当账号增量。
 			nowTotal, _, rerr := r.modelWater.WaterLevel(ctx, mountModel)
@@ -436,6 +443,19 @@ func (r *QuotaKeyReconciler) runOnce() {
 		r.recordHeartbeat(ctx, runAt, false,
 			fmt.Errorf("quota_key_reconcile: %d upstream pull(s) blocked; see quota key refresh error", blockedCount),
 			"", sourceUsage)
+		return
+	}
+	if dailyLimitCount > 0 {
+		// 「当日刷新次数已达上限」是可预期节流（上游每 key 每日 N 次配额用尽，
+		// 次日重置后自动恢复），不是任务故障：
+		//   - 心跳记成功 + LastResult 如实写明节流条数与「次日重置」，
+		//     不让 ops jobScore 因可预期的上游配额节流被扣分；
+		//   - 真实拉号失败（blockedCount>0）仍走上面的失败分支，语义不变。
+		// 生产实证 2026-10-27：quota_key_reconcile 周期 5 分钟必然撞上该上限，
+		// 此前归入真失败导致 ops 面板 jobScore 长期被扣、并掩盖真正的任务故障。
+		r.recordHeartbeat(ctx, runAt, true, nil,
+			fmt.Sprintf("daily refresh limit reached for %d quota key(s); resets next day", dailyLimitCount),
+			sourceUsage)
 		return
 	}
 	if shortfallReason != "" {
@@ -545,24 +565,34 @@ func countRefreshableSources(keys []*ent.QuotaKey) int {
 // ErrQuotaKeyMountFailed（上游已发号成功、本地挂载/落库失败 —— shareai 拉号非幂等，
 // 上游该次配额可能已被消耗），调用方（runOnce）据此停止本轮后续候选拉号并写失败心跳。
 // 其余错误返回 false，由调用方按既有语义（记日志、继续下一个候选）处理。
-func (r *QuotaKeyReconciler) pullKey(ctx context.Context, keyID int64, modelM string) (mountFailed bool, blocked bool) {
+// pullKey 对单个 quota key 发起拉号。
+//
+// 返回三元组：
+//   - mountFailed：上游成功但本地挂载失败（非幂等边界），须停本轮；
+//   - blocked：真·上游拉号受阻（未知失败），须记任务失败；
+//   - dailyLimit：撞上「当日刷新次数已达上限」（可预期节流），不记任务失败。
+//
+// 三者严格区分：每日节流不是账号/链路故障（次日重置后自动恢复）。
+func (r *QuotaKeyReconciler) pullKey(ctx context.Context, keyID int64, modelM string) (mountFailed bool, blocked bool, dailyLimit bool) {
 	// 单 flight：若同 key 已在拉号，合并为 pending wakeup 后直接返回。
 	if !r.coalescer.tryBegin(keyID) {
-		return false, false
+		return false, false, false
 	}
 	// double-checked exit / F3：发起真实拉号前在 coalescer 同一 c.mu 临界区内做最终确认，
 	// 与 Stop() 的停机置位可线性化——Stop 置位后绝不新发起（已发起的在途者等待其结束）。
 	if !r.coalescer.confirmBegin(keyID) {
 		r.coalescer.end(keyID)
-		return false, false
+		return false, false, false
 	}
 	defer func() {
 		// pending wakeup：若拉号期间又有同 key 请求，结束后补拉一次（补拉本身同样受门禁）。
 		if r.coalescer.end(keyID) {
-			if mf, blk := r.pullKey(ctx, keyID, modelM); mf {
+			if mf, blk, dl := r.pullKey(ctx, keyID, modelM); mf {
 				mountFailed = true
 			} else if blk {
 				blocked = true
+			} else if dl {
+				dailyLimit = true
 			}
 		}
 	}()
@@ -579,7 +609,15 @@ func (r *QuotaKeyReconciler) pullKey(ctx context.Context, keyID int64, modelM st
 		// 只带 quota_key_id 与语义原因，不落任何凭据/账号内容。
 		if errors.Is(err, ErrQuotaKeyMountFailed) {
 			log.Printf("[QuotaKeyReconcile] WARN: quota key %d mount failed after upstream success; upstream may have been consumed once (non-idempotent, no retry this round): %v", keyID, err)
-			return true, false
+			return true, false, false
+		}
+		// 「当日刷新次数已达上限」：可预期节流（上游每 key 每日 N 次配额用尽，
+		// 次日重置后自动恢复），不是 key 级终态也不是链路故障。
+		// 与 ErrUpstreamKeyBlocked（真失败）严格分开：本项不记任务失败心跳，
+		// 也不把 key 标 exhausted（该维度由 writeCooldownMarker 保持不动）。
+		if errors.Is(err, ErrUpstreamDailyRefreshLimit) {
+			log.Printf("[QuotaKeyReconcile] INFO: quota key %d hit upstream daily refresh limit (resets next day, not a failure): %v", keyID, err)
+			return false, false, true
 		}
 		// R13-2：自动链路未知上游失败（ErrUpstreamKeyBlocked）——记失败级日志（含 key id 与
 		// 原因摘要，不落凭据）、不加 pulled 计数、返回 false（不停轮，下一候选继续；单 key 失败
@@ -588,13 +626,13 @@ func (r *QuotaKeyReconciler) pullKey(ctx context.Context, keyID int64, modelM st
 		// 摘要 reconcileResult(pulled) 只反映真实成功数，ops 侧据失败日志 + 低计数可辨。
 		if errors.Is(err, ErrUpstreamKeyBlocked) {
 			log.Printf("[QuotaKeyReconcile] WARN: quota key %d upstream pull blocked (failure counted, not success): %v", keyID, err)
-			return false, true
+			return false, true, false
 		}
 		log.Printf("[QuotaKeyReconcile] pull accounts for quota key %d failed: %v", keyID, err)
-		return false, false
+		return false, false, false
 	}
 	r.pulled.Add(1)
-	return false, false
+	return false, false, false
 }
 
 // recordHeartbeat 写一次 job 心跳（照 quota_key_sweeper.recordHeartbeat 同型）。

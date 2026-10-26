@@ -46,6 +46,22 @@ var ErrUpstreamCooldown = errors.New("shareai: upstream cooldown, retry later")
 // 不进入候选、不自动恢复。错误链保留上游 msg 原文供排障，但绝不据 msg 反推或伪造任何日期。
 var ErrUpstreamKeyExpired = errors.New("shareai: upstream key expired or quota exhausted")
 
+// ErrUpstreamDailyRefreshLimit 是上游确认「当日刷新次数已达上限」一类【可预期节流】的可识别哨兵。
+//
+// 与 ErrUpstreamCooldown（5min 窗口冷却）、ErrUpstreamKeyExpired（激活码级终态）严格区分：
+//   - 冷却：短窗口限频，窗口过后自动恢复；
+//   - 每日刷新上限：上游按「每日 N 次」计额度，用尽后需等次日重置才恢复，窗口是「天」而非分钟；
+//   - 终态过期：激活码本身失效，不自动恢复。
+//
+// 生产实证（2026-10-27）：shareai 上游对每个 key 每日只允许刷新 5 次，8:00 重置。
+// quota_key_reconcile 的周期是 5 分钟（每小时 12 次），必然在当天第 5 次后撞上该上限。
+// 该错误此前落 UpstreamUnknown（真失败哨兵），导致 reconciler 持续记任务失败心跳，
+// ops 面板 jobScore 被扣、且掩盖了真正的任务故障。
+//
+// 语义与 exhausted 维度无关：exhausted 不动（每日节流不是已确认终态，不得标耗尽）。
+// 错误链保留上游 msg 原文供排障，但绝不据 msg 反推或伪造任何日期。
+var ErrUpstreamDailyRefreshLimit = errors.New("shareai: upstream daily refresh limit reached, resets next day")
+
 // ErrUpstreamKeyBlocked 是自动链路（reconciler, manual=false）对"未知上游失败"的统一内部哨兵
 // （R13-2）。它对应"上游拒绝/结果未知"一类失败：拉号方落 last_refresh_error 标记、exhausted
 // 维度不动（CUR-P1-FIX-KEY-EXHAUSTED：未知/普通上游失败不是已确认终态，不得标耗尽），但此前
@@ -352,6 +368,14 @@ func classifyUpstreamError(msg string) error {
 	// 过期/耗尽：仅肯定终态措辞（已过期 / 额度耗尽 / 已耗尽）。
 	if strings.Contains(m, "已过期") || strings.Contains(m, "额度耗尽") || strings.Contains(m, "已耗尽") {
 		return NewUpstreamExpiredError(raw)
+	}
+	// 每日刷新次数用尽：可预期节流（窗口为「天」，次日重置后自动恢复）。
+	// 与短窗限频（仅可刷新 / 限频 / 冷却）分开归类 —— 二者的恢复窗口不同，
+	// 且每日上限是上游硬配额（shareai 每 key 每日 5 次，8:00 重置），
+	// 撞上它不代表账号或链路故障，不应记为任务失败。
+	// 判据仍为「肯定措辞」匹配，不含否定句，且绝不据 msg 反推或伪造任何日期。
+	if isUpstreamDailyRefreshLimitMessage(m) {
+		return newUpstreamDailyRefreshLimitError(raw)
 	}
 	// 限频：仅明确限频语义（仅可刷新 / 限频 / 冷却）。
 	if strings.Contains(m, "仅可刷新") || strings.Contains(m, "限频") || strings.Contains(m, "冷却") {
