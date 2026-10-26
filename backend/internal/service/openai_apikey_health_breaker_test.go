@@ -135,7 +135,18 @@ func TestClassifyOpenAIAPIKeyHealthFailureExclusions(t *testing.T) {
 		err      error
 		eligible bool
 	}{
-		{name: "account attributed 502", err: &UpstreamFailoverError{StatusCode: http.StatusBadGateway}, eligible: true},
+		// 502 不计入账号级熔断：生产实证其来源为 context window 误报 +
+		// 网关把上游 504/首包超时映射成的 502，均非账号故障。详见
+		// classifyOpenAIAPIKeyHealthFailure 的注释。
+		{name: "502 excluded from breaker", err: &UpstreamFailoverError{StatusCode: http.StatusBadGateway}, eligible: false},
+		{name: "502 with context window body excluded", err: &UpstreamFailoverError{
+			StatusCode:   http.StatusBadGateway,
+			ResponseBody: []byte(`{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","type":"api_error"},"type":"error"}`),
+		}, eligible: false},
+		{name: "504 still eligible", err: &UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout}, eligible: true},
+		{name: "503 still eligible", err: &UpstreamFailoverError{StatusCode: http.StatusServiceUnavailable}, eligible: true},
+		{name: "500 still eligible", err: &UpstreamFailoverError{StatusCode: http.StatusInternalServerError}, eligible: true},
+		{name: "429 still eligible", err: &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests}, eligible: true},
 		{name: "request scoped capacity", err: &UpstreamFailoverError{StatusCode: 529, RequestScopedTransient: true}},
 		{name: "provider scoped overload", err: &UpstreamFailoverError{StatusCode: 529, Scope: GatewayFailureScopeProvider}},
 		{name: "dedicated same account retry", err: &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true}},
@@ -376,7 +387,8 @@ func TestThreeTierEscalationBreakerReactions(t *testing.T) {
 	ops := &healthOpsRepoStub{}
 	svc := newRateLimitWithStubCache(t, cache, ss, ops)
 	account := healthAccount(domain.PlatformOpenAI)
-	bad := &UpstreamFailoverError{StatusCode: http.StatusBadGateway}
+	// 502 已按裁定排除出熔断名单，此处用 504（仍在名单内的上游慢故障）驱动分层升级。
+	bad := &UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout}
 
 	// attempt 1 -> L1 watch only
 	cache.recordResult = OpenAIAPIKeyHealthRecordResult{Count: 1, TrippedWatch: true}
@@ -428,8 +440,9 @@ func TestObserveSuccessDoesNotClearWindow(t *testing.T) {
 	svc := newRateLimitWithStubCache(t, cache, ss, nil)
 
 	// A single failure seeds the rolling window (1 recorded failure).
+	// 504 是仍在熔断名单内的上游慢故障（502 已按裁定排除）。
 	cache.recordResult = OpenAIAPIKeyHealthRecordResult{Count: 1}
-	svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), healthAccount(domain.PlatformOpenAI), &UpstreamFailoverError{StatusCode: http.StatusBadGateway})
+	svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), healthAccount(domain.PlatformOpenAI), &UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout})
 	require.Equal(t, 1, cache.recordCalls)
 
 	// A successful schedule is a NO-OP: it must NOT reset the window and must NOT
@@ -441,11 +454,47 @@ func TestObserveSuccessDoesNotClearWindow(t *testing.T) {
 	// Further failures keep accumulating on top of the prior failure rather than
 	// starting fresh, so the breaker can still trip.
 	cache.recordResult = OpenAIAPIKeyHealthRecordResult{Count: 2}
-	svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), healthAccount(domain.PlatformOpenAI), &UpstreamFailoverError{StatusCode: http.StatusBadGateway})
+	svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), healthAccount(domain.PlatformOpenAI), &UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout})
 	require.Equal(t, 2, cache.recordCalls)
 
 	cache.recordResult = OpenAIAPIKeyHealthRecordResult{Count: 3, TrippedTrip: true}
-	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), healthAccount(domain.PlatformOpenAI), &UpstreamFailoverError{StatusCode: http.StatusBadGateway}))
+	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), healthAccount(domain.PlatformOpenAI), &UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout}))
+}
+
+// TestHealthBreakerIgnores502 pins the 2026-10-26 ruling: 502 is NOT counted
+// toward the account-level health breaker. Production evidence showed the 502
+// stream mixes request-shaped false positives ("Your input exceeds the context
+// window of this model", only on goaichat accounts 239/330/335) with the
+// gateway's own mapping of upstream 504 / first-byte timeouts into a 502 --
+// neither is an account-health signal. Counting them tripped the breaker on
+// healthy accounts (including 137, the only one able to serve million-token
+// contexts), emptied the candidate pool and surfaced 503 to users.
+func TestHealthBreakerIgnores502(t *testing.T) {
+	ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
+		Enabled: true, WindowMinutes: 1, FailureThreshold: 3, CooldownMinutes: 5,
+	})
+	cache := &healthCacheStub{recordResult: OpenAIAPIKeyHealthRecordResult{TrippedTrip: true}}
+	repo := &healthAccountRepoStub{}
+	blocker := &healthRuntimeBlocker{}
+	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
+	svc.SetSettingService(ss)
+	svc.SetOpenAIAPIKeyHealthCache(cache)
+	svc.SetAccountRuntimeBlocker(blocker)
+	account := healthAccount(domain.PlatformDeepseek)
+
+	require.False(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account,
+		&UpstreamFailoverError{StatusCode: http.StatusBadGateway}))
+	require.Zero(t, cache.recordCalls, "502 must not enter the rolling failure window")
+	require.Zero(t, repo.setTempCalls, "502 must not park the account")
+	require.Zero(t, blocker.blockCalls, "502 must not block scheduling")
+	require.Nil(t, account.TempUnschedulableUntil)
+
+	// The context-window false positive in particular must be ignored.
+	ctxWinBody := []byte("{\"error\":{\"message\":\"Your input exceeds the context window of this model. Please adjust your input and try again.\",\"type\":\"api_error\"},\"type\":\"error\"}")
+	require.False(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account,
+		&UpstreamFailoverError{StatusCode: http.StatusBadGateway, ResponseBody: ctxWinBody}))
+	require.Zero(t, cache.recordCalls)
+	require.Zero(t, repo.setTempCalls)
 }
 
 // ---------------------------------------------------------------------------
@@ -465,7 +514,7 @@ func TestHealthBreakerTripPersistsAndBlocks(t *testing.T) {
 	svc.SetAccountRuntimeBlocker(blocker)
 	account := healthAccount(domain.PlatformOpenAI)
 
-	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, &UpstreamFailoverError{StatusCode: http.StatusBadGateway}))
+	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, &UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout}))
 
 	require.Equal(t, 1, cache.recordCalls)
 	require.Equal(t, 1, cache.setCalls) // temp_unsched cache write
@@ -504,7 +553,7 @@ func TestHealthBreakerTripWritesIndefiniteUntil(t *testing.T) {
 		statusCode int
 	}{
 		{"429", http.StatusTooManyRequests},
-		{"502", http.StatusBadGateway},
+		{"504", http.StatusGatewayTimeout},
 	} {
 		svc := newTripSvc()
 		account := healthAccount(domain.PlatformDeepseek)

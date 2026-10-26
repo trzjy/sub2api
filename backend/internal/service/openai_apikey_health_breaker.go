@@ -132,7 +132,24 @@ func classifyOpenAIAPIKeyHealthFailure(err error) (int, []byte, bool) {
 			failoverErr.Scope == GatewayFailureScopeProvider {
 			return failoverErr.StatusCode, failoverErr.ResponseBody, false
 		}
-		if failoverErr.StatusCode == http.StatusTooManyRequests || failoverErr.StatusCode >= http.StatusInternalServerError {
+		// 502 不计入账号级熔断。
+		//
+		// 生产实证（2026-10-26，24h ops_error_logs + 容器日志 breaker_tripped）：
+		// 熔断的 502 来源混杂两类，都不是账号故障：
+		//  1) 上游真 502 且 error_owner=provider，其中 44 条是 context window 误报
+		//     （"Your input exceeds the context window of this model"），只出现在
+		//     goaichat 三号 239/330/335；同 UA 同体量在其他上游成功过，隐含 token
+		//     远低于上游 100 万窗口 —— 是请求形态触发的误报。
+		//  2) 网关把上游 504 / 首包超时映射成 502 下游（upstream_status_code 为空
+		//     或 504），上游真实状态码本就不是 502。
+		// 计入熔断的后果：摘掉健康账号（含唯一能扛百万 token 的 137 星思云站）
+		// → account_select_failed(pool=N, excluded=N) → 客户端 503
+		// 「该分组暂无可用账号」24h 共 1103 条。
+		//
+		// 504 / 503 / 429 / 500 仍是账号慢与挂的主要信号，保持计入不变。
+		if failoverErr.StatusCode == http.StatusTooManyRequests ||
+			(failoverErr.StatusCode >= http.StatusInternalServerError &&
+				failoverErr.StatusCode != http.StatusBadGateway) {
 			return failoverErr.StatusCode, failoverErr.ResponseBody, true
 		}
 		return failoverErr.StatusCode, failoverErr.ResponseBody, false
