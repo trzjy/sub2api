@@ -412,17 +412,20 @@ func cursorParseShellResult(r CursorToolResult) (stdout, stderr string, exitCode
 
 // cursorShellCwdFromArgs 从 shell 委托的 ArgsJSON 取出 workdir（回写 exit 帧的 cwd）。
 func cursorShellCwdFromArgs(argsJSON string) string {
+	// 真实客户端的 exit 事件总是携带当前工作目录（coreExecutor.getCwd）；
+	// 空 cwd 会让上游无法定位执行结果（实测回写后 178s 无 TurnEnded）。
+	const defaultCwd = "/"
 	if argsJSON == "" {
-		return ""
+		return defaultCwd
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &m); err != nil {
-		return ""
+		return defaultCwd
 	}
-	if wd, ok := m["workdir"].(string); ok {
+	if wd, ok := m["workdir"].(string); ok && wd != "" {
 		return wd
 	}
-	return ""
+	return defaultCwd
 }
 
 // cursorEncodeShellToolResult 把一条 shell 工具结果编码为**一或多个** ExecClientMessage 帧
