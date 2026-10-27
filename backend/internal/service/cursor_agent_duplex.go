@@ -83,6 +83,9 @@ const (
 	cursorFldShellStreamStderr = 2 // f2 stderr{data}
 	cursorFldShellStreamExit   = 3 // f3 exit{code(int32), cwd(str)}
 	cursorFldShellStreamStart  = 4 // f4 start{sandbox_policy}：客户端回执的执行开始帧。
+	// cursorSandboxTypeInsecureNone 是 agent.v1 沙箱类型枚举的 INSECURE_NONE 取值
+	// （客户端 Lj() 默认策略）。仅在请求未携带 requested_sandbox_policy 时回填 start。
+	cursorSandboxTypeInsecureNone = 1
 
 	// ShellStreamStdout / ShellStreamStderr 内层字段。
 	cursorFldShellStreamData = 1 // f1 data（string）
@@ -454,6 +457,12 @@ func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr s
 	var startInner []byte
 	if len(sandboxPolicy) > 0 {
 		startInner = cursorAppendBytesField(startInner, 1, sandboxPolicy)
+	} else {
+		// 请求未携带 requested_sandbox_policy 时，按客户端默认策略回填 INSECURE_NONE
+		// （agent-host 的 Lj() 默认构造 SandboxPolicy{type: INSECURE_NONE}）。
+		// 空 start 会被上游视为策略未知而不推进（实测 175s 无 TurnEnded）。
+		policy := cursorAppendVarintField(nil, 1, uint64(cursorSandboxTypeInsecureNone))
+		startInner = cursorAppendBytesField(startInner, 1, policy)
 	}
 	frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStart, startInner)))
 	if stderr != "" {
