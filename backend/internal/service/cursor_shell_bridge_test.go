@@ -270,3 +270,101 @@ func TestCursorShellBridgeMixedBatchSealable(t *testing.T) {
 	require.Equal(t, "", kinds["mcp_call"], "mcp 委托 Kind 必须为空（字节级行为不变）")
 	require.Equal(t, "shell", kinds["shell_call"], "shell 委托 Kind 必须为 shell")
 }
+
+// 9. f14 先到 → 不报错、进入 pending；随后 started 到达 → 委托出现在该 started 所在批、pending 清空
+func TestCursorShellBridgeF14FirstThenStarted(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "shell", cursorShellTestSchemaArray)}
+	// f14 先到：无任何 started 已登记。
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	sub := cursorShellTestBuildShellArgs(t, "ls -la", "/work", "call_shell_1", "list files")
+	parts := cursorShellTestBuildExecParts(t, 7, []byte("exec-orig-7"), sub)
+
+	tc, err := d.cursorCaptureShellArgs(parts, 7, []byte("exec-orig-7"))
+	require.NoError(t, err, "f14 先到：不得报错、不得失败关闭")
+	require.Equal(t, "call_shell_1", tc.ID)
+	// 进入 pending，不建批、不进 snapshot。
+	require.Len(t, d.delegations.pending, 1, "f14 先到必须进入 pending")
+	require.Contains(t, d.delegations.pending, "call_shell_1")
+	require.Empty(t, d.delegations.snapshot(), "pending 委托不得出现在批次快照里")
+
+	// started 随后到达：同一把锁内并入该 started 所在批。
+	require.NoError(t, d.delegations.noteToolCallStarted("", "call_shell_1", true))
+	require.Empty(t, d.delegations.pending, "started 到达后 pending 必须清空")
+
+	// 委托出现在该 started 所在批（snapshot 命中，Kind=shell）。
+	snap := d.delegations.snapshot()
+	require.Len(t, snap, 1)
+	require.Equal(t, "call_shell_1", snap[0].ID)
+	require.Equal(t, "shell", snap[0].Kind)
+
+	// 补 listed=1 → 批次可封口（验证完整链路：f14 先到也能正确收口）。
+	require.NoError(t, d.delegations.noteToolRequestsListed("", 1))
+	require.NoError(t, d.delegations.sealable(), "started 到达并入后批次必须可封口")
+}
+
+// 10. started 先到 → 原有路径仍通过（不进 pending、直接入批）
+func TestCursorShellBridgeStartedFirstOrder(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "shell", cursorShellTestSchemaArray)}
+	// started 已先登记（生产另一种顺序）。
+	d := cursorShellTestNewDuplex(t, defs, "call_shell_1")
+
+	sub := cursorShellTestBuildShellArgs(t, "ls -la", "/work", "call_shell_1", "list files")
+	parts := cursorShellTestBuildExecParts(t, 7, []byte("exec-orig-7"), sub)
+
+	tc, err := d.cursorCaptureShellArgs(parts, 7, []byte("exec-orig-7"))
+	require.NoError(t, err, "started 先到：原有路径必须仍通过")
+	require.Empty(t, d.delegations.pending, "started 先到：不进 pending")
+	require.Len(t, d.delegations.snapshot(), 1)
+	require.Equal(t, "call_shell_1", tc.ID)
+	require.Equal(t, "shell", snapKind(t, d.delegations, "call_shell_1"))
+}
+
+// snapKind 是测试辅助：从快照取某 ID 委托的 Kind。
+func snapKind(t *testing.T, d *cursorToolDelegations, id string) string {
+	t.Helper()
+	for _, c := range d.snapshot() {
+		if c.ID == id {
+			return c.Kind
+		}
+	}
+	return "<missing>"
+}
+
+// 11. pending 未配对时封口被拒，reason=shell_pending_unmatched
+func TestCursorShellBridgePendingUnmatchedSealRejected(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "shell", cursorShellTestSchemaArray)}
+	// f14 先到，无任何 started。
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	sub := cursorShellTestBuildShellArgs(t, "ls -la", "", "call_shell_1", "desc")
+	parts := cursorShellTestBuildExecParts(t, 7, []byte("exec-7"), sub)
+	_, err := d.cursorCaptureShellArgs(parts, 7, []byte("exec-7"))
+	require.NoError(t, err, "f14 先到：进入 pending，不报错")
+	require.Len(t, d.delegations.pending, 1)
+
+	// 即便其它信号到位，pending 未配对也阻止封口，reason=shell_pending_unmatched。
+	require.NoError(t, d.delegations.noteToolRequestsListed("", 1))
+	sealErr := d.delegations.sealable()
+	require.Error(t, sealErr, "pending 未配对必须封口被拒")
+	require.ErrorIs(t, sealErr, ErrCursorBatchIncomplete)
+	require.Contains(t, sealErr.Error(), "shell_pending_unmatched", "失败原因必须为 shell_pending_unmatched")
+}
+
+// 12. mcp 委托路径回归：Kind=="" 走 noteDelegation，逐字节不变、不进 pending
+func TestCursorShellBridgeMcpPathUnaffected(t *testing.T) {
+	d := newLocalCursorToolDelegations()
+	require.NoError(t, d.noteToolCallStarted("mc", "mcp_call", true))
+	require.NoError(t, d.noteToolRequestsListed("mc", 1))
+
+	// mcp 委托（Kind 空）直接 noteDelegation，不进 shell pending。
+	mcpCap := cursorToolCallCapture{ID: "mcp_call", Name: "get_weather", ArgsJSON: `{"city":"x"}`}
+	require.NoError(t, d.noteDelegation("", mcpCap))
+	require.Empty(t, d.pending, "mcp 委托不得进入 shell pending")
+
+	// mcp 路径封口语义不变（字节级行为不变，无 pending 干扰）。
+	require.NoError(t, d.sealable(), "mcp 委托路径封口语义不变")
+	snap := d.snapshot()
+	require.Len(t, snap, 1)
+	require.Equal(t, "", snap[0].Kind, "mcp 委托 Kind 必须仍为空（字节级行为不变）")
+}

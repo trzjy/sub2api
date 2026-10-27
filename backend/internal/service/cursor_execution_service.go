@@ -3138,6 +3138,10 @@ type cursorToolDelegations struct {
 	mu   sync.Mutex
 	all  []*cursorToolBatch
 	open map[string]*cursorToolBatch
+	// pending 仅容纳 Kind=="shell" 的委托：f14 先于其 tool_call_started 到达时挂起于此，
+	// 待 started 到达并入该 started 所在批（见 noteShellDelegation / noteToolCallStarted）。
+	// mcp 路径（Kind==""）绝不写入此处，行为逐字节不变。
+	pending map[string]cursorToolCallCapture
 	// shared 表示本记录由 duplex 拥有解码权（parser 不再解码同一帧）。
 	shared bool
 }
@@ -3299,13 +3303,37 @@ func (d *cursorToolDelegations) noteToolCallStarted(modelCallID, callID string, 
 		batch.internalStarted++
 		return nil
 	}
+	alreadyStarted := false
 	for _, existing := range batch.started {
 		if existing == callID {
 			// 同一 call_id 重复 started：不重复计数（幂等）。
-			return nil
+			alreadyStarted = true
+			break
 		}
 	}
-	batch.started = append(batch.started, callID)
+	if !alreadyStarted {
+		batch.started = append(batch.started, callID)
+	}
+	// f14 先到的 shell 委托：started 到达时把 pending 中同 call_id 的委托并入本批
+	// （同一把锁内完成，避免竞态）。批已封口属内部不一致 → 明确错误。
+	if len(d.pending) > 0 {
+		if tc, ok := d.pending[callID]; ok {
+			delete(d.pending, callID)
+			if batch.sealed {
+				return fmt.Errorf("%w: started %q arrived but its pending shell delegation target batch already sealed", ErrCursorBatchIncomplete, callID)
+			}
+			found := false
+			for _, ex := range batch.delegations {
+				if ex.ID == tc.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				batch.delegations = append(batch.delegations, tc)
+			}
+		}
+	}
 	return nil
 }
 
@@ -3325,6 +3353,12 @@ func (d *cursorToolDelegations) noteDelegation(modelCallID string, tc cursorTool
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.noteDelegationLocked(tc)
+}
+
+// noteDelegationLocked 在已持有 d.mu 的前提下登记一条已解码的 f11 委托（与 noteDelegation
+// 同语义，但抽出以便 noteShellDelegation 在持锁分支复用，避免重复加锁）。
+func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) error {
 	batch, err := d.batchForDelegation(tc.ID)
 	if err != nil {
 		return err
@@ -3337,6 +3371,58 @@ func (d *cursorToolDelegations) noteDelegation(modelCallID string, tc cursorTool
 	}
 	batch.delegations = append(batch.delegations, tc)
 	return nil
+}
+
+// noteShellDelegation 登记一条 Kind=="shell" 的 f14 委托，支持 f14 先于或后于
+// tool_call_started 到达两种顺序（生产实证 2026-10-28 真机两种都出现）。
+//
+// 语义（硬约束 #2 的放宽，支持 f14 先到）：
+//   - 已存在同 call_id 的 started（任意未封口批）→ 直接 noteDelegationLocked 入该批
+//     （started 先到 原行为不变）；
+//   - 不存在任何携带 started 的开放批（f14 先到，started 尚未到达）→ 存入 pending 并返回
+//     nil（不建批、不报错、不失败关闭），等待 started 到达时并入其所在批；
+//   - 存在携带 started 的开放批但该 call_id 不在其中（孤儿 shell 委托，无对应 started）
+//     → 失败关闭（沿用原 orphan 语义，绝不并入已声明 started 的批次让其假封口）。
+//
+// pending 仅容纳 shell 委托；mcp 路径（Kind==""）仍走 noteDelegation，字节级行为不变。
+func (d *cursorToolDelegations) noteShellDelegation(callID string, tc cursorToolCallCapture) error {
+	if d == nil {
+		return nil
+	}
+	if strings.TrimSpace(callID) == "" {
+		return fmt.Errorf("%w: shell delegation without tool_call_id", ErrCursorProtocol)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// 已存在同 call_id 的 started（任意未封口批）→ 直接入该批。
+	for _, batch := range d.all {
+		if batch.sealed {
+			continue
+		}
+		for _, id := range batch.started {
+			if id == callID {
+				return d.noteDelegationLocked(tc)
+			}
+		}
+	}
+	// 不存在匹配 started：区分"无任何开放批携带 started"（f14 先到，等待 started）
+	// 与"有 started 但不匹配"（孤儿委托）两种语义。
+	openWithStarted := 0
+	for _, batch := range d.all {
+		if !batch.sealed && len(batch.started) > 0 {
+			openWithStarted++
+		}
+	}
+	if openWithStarted == 0 {
+		// f14 先到：挂起，等待 started 到达后并入其所在批。
+		if d.pending == nil {
+			d.pending = make(map[string]cursorToolCallCapture)
+		}
+		d.pending[callID] = tc
+		return nil
+	}
+	// 孤儿 shell 委托：存在已声明 started 的开放批但不含本 call_id，失败关闭。
+	return fmt.Errorf("%w: shell tool_call_id %q has no matching tool_call_started in open batch (orphan shell delegation)", ErrCursorProtocol, callID)
 }
 
 // snapshot 返回按到达顺序的全部委托（parser 输出 tool_calls 用）。
@@ -3377,6 +3463,12 @@ func (d *cursorToolDelegations) sealable() error {
 // 判定顺序：先查每条对外 started 是否都有完整 f11 委托（保留既有逻辑），再查 listed
 // 是否已见到，最后按总数集合判定；不按到达顺序或静默时间猜测结束。
 func (d *cursorToolDelegations) checkSealableLocked() error {
+	// f14 先到且始终未配对的 shell 委托：封口不成立，记录原因 shell_pending_unmatched。
+	// 沿用 lastSealErr 机制（sealable → 读循环 setLastSealErr）→ 终态日志可见；且绝不新建
+	// 无 started 批次让其假封口。读循环继续等后续帧直至 180s 超时收尾（明确失败关闭，不静默丢弃）。
+	if len(d.pending) > 0 {
+		return fmt.Errorf("%w: pending shell delegation(s) never matched a tool_call_started (shell_pending_unmatched): %d pending", ErrCursorBatchIncomplete, len(d.pending))
+	}
 	for _, batch := range d.all {
 		if batch.sealed {
 			continue
@@ -3911,6 +4003,15 @@ func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord
 	deadline := record.deadline
 	deadlineSource := record.deadlineSource
 	record.mu.Unlock()
+
+	// shell 桥接终态可观测性：若会话结束/超时仍有未配对的 shell 委托（f14 先到但 started
+	// 始终未到达），记 WARN——仅含 pending call_id 数量，绝不记命令内容（§ shell 桥接）。
+	if record.delegations != nil && len(record.delegations.pending) > 0 {
+		cursorPhaseLog(context.Background(), zapcore.WarnLevel, "session_finalize_shell_pending_unmatched", record.spec.requestedModel,
+			zap.String("session_id", record.id),
+			zap.Int("pending_shell_count", len(record.delegations.pending)),
+			zap.String("terminal_reason", reason))
+	}
 
 	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_finalize_begin", record.spec.requestedModel,
 		zap.String("session_id", record.id),

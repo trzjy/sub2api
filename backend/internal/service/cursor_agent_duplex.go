@@ -309,33 +309,13 @@ func cursorSchemaHasProperty(schemaJSON []byte, prop string) bool {
 	return has
 }
 
-// cursorDelegationsHasStartedCallID 报告某 call_id 是否已登记为某开放批次的对外 started。
-//
-// 硬约束 #2：f14 的 ShellArgs.tool_call_id 必须等于某个已登记录入的 tool_call_started 的
-// call_id，否则失败关闭。§4 取证确认 started 先 f14 到达，故此处能在开放批里查到。
-// 同一 package 内可直接读 d.all / batch.started（未导出字段可见）。
-func cursorDelegationsHasStartedCallID(d *cursorToolDelegations, callID string) bool {
-	if d == nil {
-		return false
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, batch := range d.all {
-		for _, id := range batch.started {
-			if id == callID {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // cursorCaptureShellArgs 是 ExecServerMessage.f14（ShellArgs）委托捕获入口（duplex 侧）。
 //
-// 流程（硬约束 #1-#4）：解析 ShellArgs → command 为空失败关闭 → tool_call_id 必须对应已
-// 登记 started（否则失败关闭）→ 选择 shell 类工具并按 schema 转换参数（找不到工具失败关闭）
-// → 构造 capture{Kind:"shell"} 走既有 noteDelegation 接入封口（复用 mcp 委托的批次谓词，
-// 因 §4 实证 started/listed 已先到）。成功返回 capture，失败返回 ErrCursorProtocol。
+// 流程（硬约束 #1-#4）：解析 ShellArgs → command 为空失败关闭 → 选择 shell 类工具并按 schema
+// 转换参数（找不到工具失败关闭）→ 构造 capture{Kind:"shell"} 走 noteShellDelegation 接入封口。
+// 与旧版不同，noteShellDelegation 支持 f14 先于或后于 tool_call_started 到达两种顺序：started
+// 先到则直接入批；f14 先到则挂起 pending，started 到达时并入（不建无 started 批次、不假封口）。
+// 成功返回 capture，失败返回 ErrCursorProtocol。
 func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID uint64, idField []byte) (cursorToolCallCapture, error) {
 	sh, ok := cursorFindField(parts, 14)
 	if !ok {
@@ -352,11 +332,6 @@ func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID
 	// 硬约束 #4：command 为空 → 失败关闭。
 	if args.Command == "" {
 		return cursorToolCallCapture{}, fmt.Errorf("%w: shell command empty", ErrCursorProtocol)
-	}
-	// 硬约束 #2：tool_call_id 必须等于某已登记 started 的 call_id，否则失败关闭
-	// （不得新建批次、不得当作新调用）。
-	if !cursorDelegationsHasStartedCallID(d.delegations, args.ToolCallID) {
-		return cursorToolCallCapture{}, fmt.Errorf("%w: shell tool_call_id %q has no matching tool_call_started (orphan shell delegation)", ErrCursorProtocol, args.ToolCallID)
 	}
 	name, argsJSON, berr := cursorBuildShellDelegation(d.declaredToolDefs, args)
 	if berr != nil {
@@ -375,7 +350,8 @@ func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID
 		delegations = newLocalCursorToolDelegations()
 		d.delegations = delegations
 	}
-	if err := delegations.noteDelegation("", tc); err != nil {
+	// noteShellDelegation 支持两种到达顺序：started 先到直接入批；f14 先到挂起 pending。
+	if err := delegations.noteShellDelegation(args.ToolCallID, tc); err != nil {
 		return cursorToolCallCapture{}, err
 	}
 	return tc, nil
