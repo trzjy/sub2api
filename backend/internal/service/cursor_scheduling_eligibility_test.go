@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -62,6 +63,16 @@ func installCursorQuotaKeyStateForTest(t *testing.T, provider CursorQuotaKeyStat
 	})
 }
 
+// cursorSchedFreshUsageSnapshot 返回 A04-G 来源门认可的合法额度快照：真实剩余 > 0，
+// 且 checked_at 新鲜。来源门只接受 cursorSupplySourceUsageFreshnessWindow（5 分钟）内的
+// 成功值，超窗一律判 quota_key_usage_stale 否决，故这里贴着实时钟取"一分钟前"。
+func cursorSchedFreshUsageSnapshot() []byte {
+	return []byte(fmt.Sprintf(
+		`{"total":400,"used":86,"status_code":200,"checked_at":%q,"error_code":""}`,
+		time.Now().Add(-time.Minute).Format(time.RFC3339),
+	))
+}
+
 // cursorSchedTestAccount 构造一个可参与 cursor 调度的账号（显式挂组 + 声明模型映射）。
 func cursorSchedTestAccount(id int64, quotaKeyID *int64, model string) Account {
 	return Account{
@@ -98,10 +109,16 @@ func TestOpenAIAccountEligibilityCursorKeyExpiredSameAcrossChains(t *testing.T) 
 	activeKey := int64(9101)
 	expiredKey := int64(9102)
 
-	installCursorQuotaKeyStateForTest(t, cursorQuotaKeyStateStub{statuses: map[int64]string{
-		activeKey:  domain.QuotaKeyStatusActive,
-		expiredKey: domain.QuotaKeyStatusExpired,
-	}})
+	// A04-G 后的生产装配成对安装「状态 + 用量快照」两个窄读取器（quota_key_service.go:387-390），
+	// 任一缺装即被来源门判为装配错误 → 折叠成 quota_key_state_unavailable 失败关闭。
+	// 因此 active key 必须同时具备合法新鲜快照（expired key 在状态门即短路，快照不会被读取）。
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{
+			activeKey:  domain.QuotaKeyStatusActive,
+			expiredKey: domain.QuotaKeyStatusExpired,
+		},
+		snapshots: map[int64][]byte{activeKey: cursorSchedFreshUsageSnapshot()},
+	})
 
 	active := cursorSchedTestAccount(8101, &activeKey, cursorSchedTestModel)
 	expired := cursorSchedTestAccount(8102, &expiredKey, cursorSchedTestModel)
@@ -138,10 +155,15 @@ func TestCursorSchedulingAdvancedPoolExcludesExpiredKey(t *testing.T) {
 	activeKey := int64(9201)
 	expiredKey := int64(9202)
 
-	installCursorQuotaKeyStateForTest(t, cursorQuotaKeyStateStub{statuses: map[int64]string{
-		activeKey:  domain.QuotaKeyStatusActive,
-		expiredKey: domain.QuotaKeyStatusExpired,
-	}})
+	// 同上：active key 需装齐用量快照依赖，否则来源门先因装配错误否决，
+	// 候选池里的账号根本走不到"是否过期"的判定。
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{
+			activeKey:  domain.QuotaKeyStatusActive,
+			expiredKey: domain.QuotaKeyStatusExpired,
+		},
+		snapshots: map[int64][]byte{activeKey: cursorSchedFreshUsageSnapshot()},
+	})
 
 	req := OpenAIAccountScheduleRequest{
 		GroupID:        &groupID,
@@ -171,10 +193,14 @@ func TestCursorSchedulingStickyChainExcludesExpiredKey(t *testing.T) {
 	activeKey := int64(9301)
 	expiredKey := int64(9302)
 
-	installCursorQuotaKeyStateForTest(t, cursorQuotaKeyStateStub{statuses: map[int64]string{
-		activeKey:  domain.QuotaKeyStatusActive,
-		expiredKey: domain.QuotaKeyStatusExpired,
-	}})
+	// 同上：粘性命中后仍要过来源门，active key 必须装齐用量快照依赖。
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{
+			activeKey:  domain.QuotaKeyStatusActive,
+			expiredKey: domain.QuotaKeyStatusExpired,
+		},
+		snapshots: map[int64][]byte{activeKey: cursorSchedFreshUsageSnapshot()},
+	})
 
 	active := cursorSchedTestAccount(8301, &activeKey, cursorSchedTestModel)
 	expired := cursorSchedTestAccount(8302, &expiredKey, cursorSchedTestModel)
@@ -213,16 +239,31 @@ func TestCursorSchedulingUnavailableKeyStateFailsClosed(t *testing.T) {
 		ctx, &account, PlatformCursor, cursorSchedTestModel, false, ""))
 }
 
-// TestCursorSchedulingNoProviderInstalledDoesNotTighten 钉死降级口径：进程未装配激活码
-// 状态提供者时，本门不额外收紧（与 codeBuddyQuotaInstance 为 nil 时的降级一致）。
+// TestCursorSchedulingNoProviderInstalledDoesNotTighten 的用例名沿用历史（原断言
+// 「未装配不收紧」已被 A04-G 严格门废弃），本用例现钉死新契约的失败关闭行为。
+//
+// 依据：commit c50b0edf8 把 cursorSupplySourceAvailabilityVetoReason 改为「状态 provider
+// 或用量快照 provider 任一未装配 → 返回 error」，各调度链再经
+// cursorSupplySourceAvailabilityVetoReasonString 把该 error 折叠成
+// quota_key_state_unavailable（失败关闭）。生产装配总是成对安装两个 provider
+// （quota_key_service.go:387-390），所以"未装配"只可能是装配错误，不得当作"无否决"放行。
 func TestCursorSchedulingNoProviderInstalledDoesNotTighten(t *testing.T) {
 	ctx := context.Background()
-	installCursorQuotaKeyStateForTest(t, nil)
+	clearCursorQuotaKeySourceProvidersForTest(t)
 
 	keyID := int64(9501)
 	account := cursorSchedTestAccount(8501, &keyID, cursorSchedTestModel)
-	require.Empty(t, cursorAccountQuotaKeyVetoReason(ctx, &account))
-	require.Empty(t, openAICompatibleAccountEligibilityFailureReasonBeforeProfit(
+
+	// 共同来源门本体：依赖未装配是装配错误，必须如实上抛而不是静默放行。
+	reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, &account)
+	require.Error(t, err, "两个窄读取器都未装配时必须失败关闭")
+	require.Contains(t, err.Error(), "state provider is not wired")
+	require.Empty(t, reason)
+
+	// 既有调度路径的兼容投影：error 折叠成 quota_key_state_unavailable。
+	require.Equal(t, "quota_key_state_unavailable",
+		cursorSupplySourceAvailabilityVetoReasonString(ctx, &account))
+	require.Equal(t, "quota_key_state_unavailable", openAICompatibleAccountEligibilityFailureReasonBeforeProfit(
 		ctx, &account, PlatformCursor, cursorSchedTestModel, false, ""))
 }
 
@@ -247,9 +288,11 @@ func TestCursorSchedulableNativePlatformAdmission(t *testing.T) {
 	groupID := cursorSchedTestGroupID
 	svc := &GatewayService{}
 	activeKey := int64(9601)
-	installCursorQuotaKeyStateForTest(t, cursorQuotaKeyStateStub{statuses: map[int64]string{
-		activeKey: domain.QuotaKeyStatusActive,
-	}})
+	// 跨平台准入在挂组/白名单判定后仍消费来源门，故必须装齐状态 + 用量快照两个窄读取器。
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses:  map[int64]string{activeKey: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{activeKey: cursorSchedFreshUsageSnapshot()},
+	})
 
 	allowAll := cursorSchedTestNativeGroup(t, PlatformAnthropic, []string{cursorSchedTestModelAlt})
 	admitted := cursorSchedTestAccount(8601, &activeKey, cursorSchedTestModelAlt)

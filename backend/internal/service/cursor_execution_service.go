@@ -2347,6 +2347,12 @@ func (w *cursorProtocolWriter) finalizeCompletion() error {
 			for _, item := range built.Output {
 				w.noteToolItemID(item.Type, item.ID)
 			}
+			// §25.17.2-3/4：非流式 item ID 已从实际构建的响应对象 note 完毕，写出 200 之前
+			// 先（服务锁内）完成统一索引登记与冲突检查；冲突时返回原错误，绝不写出成功响应体
+			// （零成功字节）。与流式路径 writeChunk 的 registerDeliveredItems 同语义、幂等跳过同批。
+			if err := w.registerDeliveredItems(); err != nil {
+				return err
+			}
 		}
 		out = built
 	case cursorProtocolGemini:

@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 )
@@ -1987,6 +1988,9 @@ func (w *quotaKeyModelWater) countsTowardWaterLevelRouted(ctx context.Context, c
 				continue
 			}
 			gid := g.ID
+			// 准入判定（isAccountAdmittedForPlatform）的组门优先从 ctxkey.Group 取组；水位链路
+			// 本身已持有该组行，按 handler 注入"认证时刻分组"的同一口径写入上下文，无需回源。
+			admissionCtx := context.WithValue(ctx, ctxkey.Group, waterLevelAdmissionGroup(g))
 			allowlist := GroupModelAllowlistFromDomain(g.ModelAllowlist)
 			if !allowlist.Allows(model) {
 				continue
@@ -2001,9 +2005,13 @@ func (w *quotaKeyModelWater) countsTowardWaterLevelRouted(ctx context.Context, c
 				if !reachable {
 					continue // JSON 三端点未匹配仍不可达；gemini 未匹配仍未 default
 				}
-				// 显式 route 把请求改向 Cursor 不可服务的平台（如 OpenAI）→ 该组合不计入。
-				// 仅当未显式改向（detector/ownership 或 gemini default 补 Gemini）才沿用既有准入。
-				if decision.Source == CompositeRouteSourceExplicit && !cursorServableTarget(target) {
+				// 显式 route 把请求改向某平台后，该组合是否计入完全消费调度器的唯一准入判定
+				// （isAccountAdmittedForPlatform：平台门 + cursor 跨平台桥接 + 来源门 + 分组白名单），
+				// 不再另写"cursor 可服务目标"的第二份规则——两份实现必然分叉。
+				// 本门只施加于显式改向组合：未显式改向（detector/ownership 命中、gemini default）
+				// 沿用既有准入，不扩围。
+				if decision.Source == CompositeRouteSourceExplicit &&
+					!w.gateway.isAccountAdmittedForPlatform(admissionCtx, candidate, target, false, model, &gid) {
 					continue
 				}
 				// 第8条：OpenAI 兼容 Messages 入口的组 dispatch 改写后的真实调度名，
@@ -2096,11 +2104,20 @@ func effectiveTargetForEndpoint(decision CompositeRouteDecision, defaulted bool,
 	return decision.TargetPlatform, true
 }
 
-// cursorServableTarget 判定显式 route 的目标平台是否 Cursor 账号可服务：
-// 仅 cursor 自身与其原生桥接平台（Anthropic/Gemini）。OpenAI/Grok/CN 等平台 Cursor 不借
-// CodeBuddy 特例越过平台门，故不算可服务（§18.4.4）。
-func cursorServableTarget(target string) bool {
-	return target == PlatformCursor || cursorNativeBridgePlatforms(target)
+// waterLevelAdmissionGroup 把水位链路已持有的 ent 分组投影成准入判定读取的分组上下文
+// （ctxkey.Group）。字段与 IsGroupContextValid 的要求同源：ID/Platform/Status 必填，
+// Hydrated 表示该组来自可信存储（此处即数据库行读取结果），分组模型白名单走既有转换。
+func waterLevelAdmissionGroup(g *ent.Group) *Group {
+	if g == nil {
+		return nil
+	}
+	return &Group{
+		ID:             g.ID,
+		Platform:       g.Platform,
+		Status:         g.Status,
+		Hydrated:       true,
+		ModelAllowlist: GroupModelAllowlistFromDomain(g.ModelAllowlist),
+	}
 }
 
 // isCooldownRefreshError 判定该 key 的 last_refresh_error 是否为【冷却】类错误。

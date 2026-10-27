@@ -15,9 +15,11 @@ package service
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,10 +42,32 @@ func cursorSealDiagStartedFrame(t *testing.T, callID, modelCallID string) []byte
 	return cursorAppendBytesField(nil, cursorFldServerInteractionUpdate, update)
 }
 
+// cursorSealDiagDeclaredToolDefs 取与帧内 tool_name 对应的**原始 f4 tool definition
+// 字节**，供独立解析路径 attachToolSchemas 注入。
+//
+// 来源与 duplex 同源：复用 cursorTestDeclaredToolDefs（内部走 cursorConvertRequest，取
+// 请求体里实际发出的 f4），不复制第二套编码器；也不放宽 schema_absent——本路径若拿不到
+// 原始 f4 字节，f11 mcp_args 的 schema 还原必须继续失败关闭。
+func cursorSealDiagDeclaredToolDefs(t *testing.T) [][]byte {
+	t.Helper()
+	return cursorTestDeclaredToolDefs(t, &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools: []apicompat.ChatTool{{Type: "function", Function: &apicompat.ChatFunction{
+			Name: "get_weather", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+	})
+}
+
 // cursorSealDiagBuildStream 用给定**原始消息帧**序列构造一个 cursorSSEStream：
 // next() 按 envelope（5 字节头 + payload）读取，故每条消息帧都先包一层 cursorAgentFrame。
-func cursorSealDiagBuildStream(frames []byte) *cursorSSEStream {
-	return &cursorSSEStream{source: io.NopCloser(bytes.NewReader(frames)), parser: cursorNewStreamParser("m")}
+//
+// 独立解析路径（非 duplex）必须挂载本请求的 f4 原始字节：否则携带 f11 mcp_args 的 exec
+// 帧按 tool_name 取不到 input_schema，schema 还原以 schema_absent 失败关闭，next() 直接
+// 返回协议错误，交接判定处的 sealable 分支（本文件要验证的对象）根本不会被走到。
+func cursorSealDiagBuildStream(t *testing.T, frames []byte) *cursorSSEStream {
+	t.Helper()
+	parser := cursorNewStreamParser("m")
+	parser.attachToolSchemas(cursorSealDiagDeclaredToolDefs(t))
+	return &cursorSSEStream{source: io.NopCloser(bytes.NewReader(frames)), parser: parser}
 }
 
 // cursorSealDiagEnvelope 把一条原始消息帧封装为 next() 期望的 envelope（flags=0 + 长度）。
@@ -62,7 +86,7 @@ func TestCursorSealDiagRecordsFailureReasonWhenListedMissing(t *testing.T) {
 	frames = append(frames, cursorSealDiagEnvelope(cursorSealDiagStartedFrame(t, "call_a", "mc1"))...)
 	frames = append(frames, cursorSealDiagEnvelope(cursorToolTestExecFrame(true, argsA))...)
 
-	s := cursorSealDiagBuildStream(frames)
+	s := cursorSealDiagBuildStream(t, frames)
 	// 处理 started 帧（无新委托，sealable 不触发）。
 	require.NoError(t, s.next())
 	// 处理 exec(mcp_args) 帧：此时 capturedToolCalls>emittedCalls → sealable 触发，
@@ -88,7 +112,7 @@ func TestCursorSealDiagClearsReasonOnSuccessfulHandoff(t *testing.T) {
 	frames = append(frames, cursorSealDiagEnvelope(cursorToolTestExecFrame(true, argsA))...)    // 有委派、缺 listed
 	frames = append(frames, cursorSealDiagEnvelope(cursorTestToolRequestsListedFrame(t, 1))...) // 补 listed=1 → 可封口
 
-	s := cursorSealDiagBuildStream(frames)
+	s := cursorSealDiagBuildStream(t, frames)
 	require.NoError(t, s.next())
 	require.NoError(t, s.next())
 	// 补 listed 帧：sealable 通过 → 交接发生、lastSealErr 清空。

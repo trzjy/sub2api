@@ -88,6 +88,28 @@ func stubChannelServiceOpen(groupID int64) *ChannelService {
 	})
 }
 
+// installRoutedWaterSourceForTest 为单个 key 一次装齐 A04-G 来源门依赖（状态 provider +
+// 新鲜额度快照 provider）。
+//
+// countsTowardWaterLevel 在路由/渠道门之前先过 cursorSupplySourceAvailabilityVetoReasonString；
+// 该门在「状态 provider 或快照 provider 任一未装配」时返回 error，被折叠成
+// quota_key_state_unavailable 直接不计入水位。本文件的用例检验对象是路由/渠道/依赖缺失，
+// 不是来源门，因此必须装齐来源读取器，否则断言会被来源门否决而不是被用例本来的门否决。
+func installRoutedWaterSourceForTest(t *testing.T, keyID int64) {
+	t.Helper()
+	now := time.Now()
+	prevNow := cursorSupplySourceUsageNow
+	cursorSupplySourceUsageNow = func() time.Time { return now }
+	t.Cleanup(func() { cursorSupplySourceUsageNow = prevNow })
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{keyID: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{keyID: []byte(fmt.Sprintf(
+			`{"total":400,"used":86,"status_code":200,"checked_at":%q,"error_code":""}`,
+			now.Add(-time.Minute).Format(time.RFC3339),
+		))},
+	})
+}
+
 // stubResolverAllCursor 返回对任意 (group, model) 都把所有权判定为 Cursor 的 resolver，
 // 使水位 routed 口径对所有可调度模型放行（等价"依赖齐备且全部可路由到 Cursor"，测试用）。
 func stubResolverAllCursor() *CompositeRouteResolver {
@@ -213,14 +235,22 @@ func TestResolveMappingBillingSourcePlumbed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 集成（真实 DB）：配置 A —— composite 组所有文本端点显式改向 OpenAI → 水位 0。
+// 集成（真实 DB）：配置 A —— composite 组所有文本端点显式改向 OpenAI → 水位 1。
+//
+// 期望值修正（原为 0，写于 2026-10-20）：2026-10-21 起 OpenAI 兼容族已纳入 cursor 跨平台桥接
+// （cursorNativeBridgePlatforms 含 PlatformOpenAI），"显式改向 OpenAI = cursor 不可服务"的
+// 前提已消失。调度器会把这类请求派给映射了该模型的 cursor 账号，水位必须与之一致；
+// 同口径正例见 cursor_o57a_integration_test.go 用例 (b)
+// （openai 平台请求 + 映射该模型的 cursor 账号 → 准入通过，reason 为空）。
 // ---------------------------------------------------------------------------
 
-func TestCursorWaterLevelConfigARoutesToOpenAIExcluded(t *testing.T) {
+func TestCursorWaterLevelConfigAOpenAIExplicitTargetAdmitsCursorBridge(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 	model := "grok-4.7"
 	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 来源门（A04-G）先于路由/渠道/依赖门判定：装齐来源读取器，使断言回到本用例的检验对象。
+	installRoutedWaterSourceForTest(t, key.ID)
 	g := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{model}})
 	routes := []CompositeModelRoute{
 		{ID: 1, GroupID: g.ID, PublicModel: model, MatchType: CompositeRouteMatchExact, Enabled: true, Endpoint: CompositeRouteEndpointChatCompletions, TargetPlatform: PlatformOpenAI},
@@ -240,7 +270,7 @@ func TestCursorWaterLevelConfigARoutesToOpenAIExcluded(t *testing.T) {
 	current, threshold, err := w.WaterLevel(ctx, model)
 	require.NoError(t, err)
 	require.Equal(t, 10, threshold)
-	require.Equal(t, 0, current, "配置A: 真实路由已把文本端点改向 OpenAI，Cursor 账号不应计入水位")
+	require.Equal(t, 1, current, "配置A: 文本端点显式改向 OpenAI 后 cursor 仍可服务（桥接白名单已含 openai），应计入水位")
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +282,8 @@ func TestCursorWaterLevelChannelLookupErrorFailsWhole(t *testing.T) {
 	ctx := context.Background()
 	model := "grok-4.7"
 	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 来源门（A04-G）先于路由/渠道/依赖门判定：装齐来源读取器，使断言回到本用例的检验对象。
+	installRoutedWaterSourceForTest(t, key.ID)
 	g := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{model}})
 	routes := []CompositeModelRoute{
 		{ID: 1, GroupID: g.ID, PublicModel: model, MatchType: CompositeRouteMatchExact, Enabled: true, Endpoint: CompositeRouteEndpointChatCompletions, TargetPlatform: PlatformCursor},
@@ -280,6 +312,8 @@ func TestCursorWaterLevelGeminiUnmatchedDefaultsToGemini(t *testing.T) {
 	ctx := context.Background()
 	model := "zzz-unknown-9" // detector 不识别 → 路由/ownership/detector 均不命中
 	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 来源门（A04-G）先于路由/渠道/依赖门判定：装齐来源读取器，使断言回到本用例的检验对象。
+	installRoutedWaterSourceForTest(t, key.ID)
 	g := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{model}})
 	resolver := NewCompositeRouteResolver(compositeRouteRepoStub{routes: []CompositeModelRoute{}})
 	w := newRoutedWater(t, client, resolver, stubChannelServiceNoChannel(), &GatewayService{})
@@ -306,6 +340,8 @@ func TestCursorWaterLevelCursorRoutedEndpointCounts(t *testing.T) {
 	ctx := context.Background()
 	model := "grok-4.7"
 	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 来源门（A04-G）先于路由/渠道/依赖门判定：装齐来源读取器，使断言回到本用例的检验对象。
+	installRoutedWaterSourceForTest(t, key.ID)
 	g := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{model}})
 	routes := []CompositeModelRoute{
 		{ID: 1, GroupID: g.ID, PublicModel: model, MatchType: CompositeRouteMatchExact, Enabled: true, Endpoint: CompositeRouteEndpointChatCompletions, TargetPlatform: PlatformCursor},
@@ -333,6 +369,8 @@ func TestCursorWaterLevelSameAccountDedupedAcrossGroups(t *testing.T) {
 	ctx := context.Background()
 	model := "grok-4.7"
 	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 来源门（A04-G）先于路由/渠道/依赖门判定：装齐来源读取器，使断言回到本用例的检验对象。
+	installRoutedWaterSourceForTest(t, key.ID)
 	g1 := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{model}})
 	g2 := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{model}})
 	routes := []CompositeModelRoute{
@@ -362,6 +400,8 @@ func TestCursorWaterLevelOtherPlatformNotExpanded(t *testing.T) {
 	ctx := context.Background()
 	model := "grok-4.7"
 	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 来源门（A04-G）先于路由/渠道/依赖门判定：装齐来源读取器，使断言回到本用例的检验对象。
+	installRoutedWaterSourceForTest(t, key.ID)
 	g := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{model}})
 	routes := []CompositeModelRoute{
 		{ID: 1, GroupID: g.ID, PublicModel: model, MatchType: CompositeRouteMatchExact, Enabled: true, Endpoint: CompositeRouteEndpointChatCompletions, TargetPlatform: PlatformCursor},
@@ -400,6 +440,8 @@ func TestCursorWaterLevelChannelRestrictsModelExcluded(t *testing.T) {
 	ctx := context.Background()
 	model := "grok-4.7"
 	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 来源门（A04-G）先于路由/渠道/依赖门判定：装齐来源读取器，使断言回到本用例的检验对象。
+	installRoutedWaterSourceForTest(t, key.ID)
 	g := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{model}})
 	routes := []CompositeModelRoute{
 		{ID: 1, GroupID: g.ID, PublicModel: model, MatchType: CompositeRouteMatchExact, Enabled: true, Endpoint: CompositeRouteEndpointChatCompletions, TargetPlatform: PlatformCursor},
@@ -436,6 +478,8 @@ func TestCursorWaterLevelMissingRoutingDepsFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	model := "grok-4.7"
 	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 来源门（A04-G）先于路由/渠道/依赖门判定：装齐来源读取器，使断言回到本用例的检验对象。
+	installRoutedWaterSourceForTest(t, key.ID)
 	g := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{model}})
 	// 该账号 + 组 + 白名单若走粗交集口径会不计为 1（组白名单允许 model、账号支持 model、
 	// 账号可调度）—— 正是 §18.2 W 行认定的计数 bug 本体，依赖缺失时绝不可退回。

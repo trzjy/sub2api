@@ -4,10 +4,12 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 
@@ -72,29 +74,38 @@ func TestCursorSupplyQuerySetGrokOpenAIO57A(t *testing.T) {
 func TestOpenAIAccountEligibilityCursorCrossPlatformSupplyO57A(t *testing.T) {
 	ctx := context.WithValue(context.Background(), openAIGroupPrivacyRequirementContextKey{},
 		openAIGroupPrivacyRequirement{groupID: cursorSchedTestGroupID, required: false})
-	// 不收紧 key 终态门（provider 未安装视为不额外收紧），聚焦调度门本身。
-	installCursorQuotaKeyStateForTest(t, nil)
+	// A04-G 严格门之后，调度准入前必然先过来源门（cursorSupplySourceAvailabilityVetoReason）：
+	// 状态读取器与额度快照读取器**任一未装配**即装配错误（折叠成 quota_key_state_unavailable），
+	// 无有效归属码即 quota_key_source_unbound。本用例聚焦"平台 + 模型映射"这一维，故按生产
+	// 装配形态同时装齐两个读取器，并给候选绑定一个 active 且快照新鲜的可用来源。
+	quotaKeyID := int64(9101)
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{quotaKeyID: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{quotaKeyID: []byte(fmt.Sprintf(
+			`{"total":400,"used":86,"status_code":200,"checked_at":%q,"error_code":""}`,
+			time.Now().UTC().Format(time.RFC3339)))},
+	})
 
 	// (a) grok 分组请求 grok-4.6：映射声明了 grok-4.6 的 cursor 候选应被准入（空原因）
-	grokCursor := cursorSchedTestAccount(9101, nil, "grok-4.6")
+	grokCursor := cursorSchedTestAccount(9101, &quotaKeyID, "grok-4.6")
 	require.Empty(t, openAICompatibleAccountEligibilityFailureReasonBeforeProfit(
 		ctx, &grokCursor, PlatformGrok, "grok-4.6", false, ""),
 		"grok 分组请求 grok-4.6 应接纳映射了该模型的 cursor 候选")
 
 	// (b) openai 分组请求 gpt-6-sol：映射声明了 gpt-6-sol 的 cursor 候选应被准入
-	openaiCursor := cursorSchedTestAccount(9102, nil, "gpt-6-sol")
+	openaiCursor := cursorSchedTestAccount(9102, &quotaKeyID, "gpt-6-sol")
 	require.Empty(t, openAICompatibleAccountEligibilityFailureReasonBeforeProfit(
 		ctx, &openaiCursor, PlatformOpenAI, "gpt-6-sol", false, ""),
 		"openai 分组请求 gpt-6-sol 应接纳映射了该模型的 cursor 候选")
 
 	// (c) 映射未声明请求模型：cursor 候选被拒，且原因是 model_mismatch 而非 platform_mismatch
-	noModelCursor := cursorSchedTestAccount(9103, nil, "grok-4.6")
+	noModelCursor := cursorSchedTestAccount(9103, &quotaKeyID, "grok-4.6")
 	require.Equal(t, "model_mismatch", openAICompatibleAccountEligibilityFailureReasonBeforeProfit(
 		ctx, &noModelCursor, PlatformGrok, "gpt-6-sol", false, ""),
 		"映射未声明请求模型的 cursor 候选应给 model_mismatch（与调度准入口径一致）")
 
 	// (d) 非桥接平台（composite）上的 cursor 账号仍按 platform_mismatch 拒绝
-	compositeCursor := cursorSchedTestAccount(9104, nil, "grok-4.6")
+	compositeCursor := cursorSchedTestAccount(9104, &quotaKeyID, "grok-4.6")
 	require.Equal(t, "platform_mismatch", openAICompatibleAccountEligibilityFailureReasonBeforeProfit(
 		ctx, &compositeCursor, PlatformComposite, "grok-4.6", false, ""),
 		"多协议族（composite）不接受 cursor 跨平台供给，应给 platform_mismatch")
@@ -132,6 +143,17 @@ func TestCursorSupplyForwardDispatchRoutingO57A(t *testing.T) {
 // 同源——cursor 跨平台供给账号的具体映射键出现，而通配键（"*"）与空键不得暴露为具体模型名。
 func TestAvailableModelsCursorSupplySameSourceO57A(t *testing.T) {
 	groupID := int64(109)
+	// A04-G 之后公开列表与调度共用同一来源门（cursorSupplyAccountGate →
+	// cursorSupplySourceAvailabilityVetoReason）：只有绑定有效归属码、状态 active 且额度快照
+	// 新鲜有剩余的 cursor 账号才"可列表"。此处按生产装配形态装齐两个读取器并给定可用来源，
+	// 使本用例继续检验"列表与调度同源"这一维（映射键投影），而不是被来源门整体否决。
+	quotaKeyID := int64(7002)
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{quotaKeyID: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{quotaKeyID: []byte(fmt.Sprintf(
+			`{"total":400,"used":86,"status_code":200,"checked_at":%q,"error_code":""}`,
+			time.Now().UTC().Format(time.RFC3339)))},
+	})
 	openaiAcc := Account{
 		ID:          7001,
 		Platform:    PlatformOpenAI,
@@ -146,7 +168,7 @@ func TestAvailableModelsCursorSupplySameSourceO57A(t *testing.T) {
 		Type:        AccountTypeAPIKey,
 		Status:      StatusActive,
 		Schedulable: true,
-		// 无 QuotaKeyID：列表场景 key 终态门放行
+		QuotaKeyID:  &quotaKeyID,
 		Credentials: map[string]any{"model_mapping": map[string]any{
 			"gpt-6-sol": "upstream-6-sol",
 			"*":         "upstream-wild",  // 通配键：不得作为具体模型名暴露
