@@ -701,6 +701,21 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		// DIAG(临时)：InteractionUpdate 帧号 + started.call_id，确认 shell 场景是否有 started。
+		dnums := make([]int, 0, len(parts))
+		for _, dp := range parts {
+			dnums = append(dnums, dp.Number)
+		}
+		startedID := ""
+		if st, ok := cursorFindField(parts, 2); ok {
+			if sf, e := cursorDecodeProtobuf(st.Bytes); e == nil {
+				if v, ok := cursorFindField(sf, 1); ok {
+					startedID = v.String()
+				}
+			}
+		}
+		d.logPhase(zapcore.WarnLevel, "cursor_update_seq", "",
+			zap.Ints("fields", dnums), zap.String("started_call_id", startedID))
 		_, ended := cursorFindField(parts, cursorFldUpdateTurnEnded)
 		if ended {
 			// 正常终态：上游 InteractionUpdate 携带 TurnEnded（含真实 usage）。
@@ -755,7 +770,7 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			if e != nil {
 				return false, e
 			}
-			d.logPhase(zapcore.DebugLevel, "shell_args_delegated", "",
+			d.logPhase(zapcore.WarnLevel, "shell_args_delegated", "",
 				zap.Uint64("exec_id", execID), zap.String("tool_call_id", tc.ID),
 				zap.String("tool_name", tc.Name), zap.Int("args_len", len(tc.ArgsJSON)))
 			return false, nil
