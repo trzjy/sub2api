@@ -466,8 +466,10 @@ func TestCursorRetypeArgsByToolDefs(t *testing.T) {
 	require.Equal(t, cursorRetypeErrReason(""), failedReason, "成功路径不应触发 onFail")
 	require.JSONEq(t, `{"city":"Beijing","temp":21.5}`, got)
 
-	// 失败：schema 不可解（type 数组）→ onFail 触发且原因正确。
-	badDef := cursorTestBuildToolDef(t, "bad", `{"type":"object","properties":{"a":{"type":["string"]}}}`)
+	// 失败：schema 不可解（type 数组为真正多态）→ onFail 触发且原因正确。
+	// 注：原输入 {"type":["string"]} 在归一化语义下等价于 type:"string"（必须成功），
+	// 前提失效；按执行期裁定改为真正多态的 {"type":["string","number"]}，断言不变。
+	badDef := cursorTestBuildToolDef(t, "bad", `{"type":"object","properties":{"a":{"type":["string","number"]}}}`)
 	_, err = cursorRetypeArgsByToolDefs("call_2", "bad", `{"a":1}`, [][]byte{badDef}, func(r cursorRetypeErrReason) {
 		failedReason = r
 	})

@@ -32,6 +32,8 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1357,6 +1359,477 @@ func cursorRetypeErrorf(reason cursorRetypeErrReason) error {
 	return &cursorRetypeError{reason: reason}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cursor schema 组合/引用写法归一化（方案 cursor-schema-composition-plan.md §3）
+//
+// 核心原则：在**不引入猜测**的前提下，把 $ref / allOf / anyOf / oneOf / type 数组
+// 等合法 JSON Schema 组合写法**确定性**归一化为等价的内联 schema（输出只含
+// type/properties/required/items/additionalProperties 五键），再交给既有 retype
+// 逻辑。归一化后仍无法判定唯一类型的（真正多态等），保持 schema_unresolvable
+// 失败关闭；不得把不可判定情形改成"原样透传"。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// cursorSchemaNormalizeMaxDepth 是归一化的递归深度上限（方案 §3 规则 1）。
+// 超限即 schema_unresolvable——防御病态深嵌套（含 $ref 展开链）。
+const cursorSchemaNormalizeMaxDepth = 16
+
+// cursorNormalizeSchema 把一个 schema 节点确定性归一化为只含
+// type/properties/required/items/additionalProperties 的内联形态（方案 §3）。
+//
+//   - node 是当前节点；root 是整份 schema 文档（本地 $ref 的解析起点，可含 $defs
+//     等任意键，但只有五键会进入输出）；
+//   - seen 是**当前 $ref 展开栈**上的 JSON Pointer 路径集合（循环检测）：递归进入
+//     被引用节点前加入、返回后移除——同一目标被菱形引用（两个属性各引用一次）合法，
+//     只有栈上未退出的自引用才算循环；
+//   - depth 为递归深度，上限 cursorSchemaNormalizeMaxDepth。
+//
+// 失败一律 cursorRetypeSchemaUnresolvable（方案 §7：新增失败原因复用该枚举）。
+func cursorNormalizeSchema(node map[string]any, root map[string]any, seen map[string]bool, depth int) (map[string]any, error) {
+	if node == nil {
+		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+	}
+	if depth > cursorSchemaNormalizeMaxDepth {
+		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+	}
+
+	// $ref（规则 2）：只接受本地 "#" 前缀引用，按 RFC 6901 JSON Pointer 解析
+	//（支持 ~1 → '/'、~0 → '~' 转义）。远程引用 / 解析失败 / 循环 → schema_unresolvable。
+	// 兄弟约束键与 $ref 并存属语义不可判定（静默丢兄弟约束等于放行）→ 失败关闭。
+	if _, hasRef := node["$ref"]; hasRef {
+		for _, k := range []string{"type", "properties", "required", "items", "additionalProperties"} {
+			if _, exists := node[k]; exists {
+				return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+			}
+		}
+		ref, ok := node["$ref"].(string)
+		if !ok || !strings.HasPrefix(ref, "#") {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+		ptr := ref[1:]
+		if seen[ptr] {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+		target, ok := cursorResolveSchemaPointer(root, ptr)
+		if !ok {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+		seen[ptr] = true
+		defer delete(seen, ptr)
+		return cursorNormalizeSchema(target, root, seen, depth+1)
+	}
+
+	// allOf（规则 3）：逐分支归一化后合并。外层自身的（非组合）约束一并参与
+	// 合并——AND 语义，防止静默丢弃外层约束（如 additionalProperties:false）。
+	// 与 anyOf/oneOf 并存 → 不可判定。
+	if _, hasAllOf := node["allOf"]; hasAllOf {
+		if _, has := node["anyOf"]; has {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+		if _, has := node["oneOf"]; has {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+		branches, err := cursorNormalizeBranchList(node["allOf"], root, seen, depth)
+		if err != nil {
+			return nil, err
+		}
+		outer, err := cursorNormalizeSchemaShape(node, root, seen, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return cursorMergeSchemaBranches(append(branches, outer))
+	}
+
+	// anyOf / oneOf（规则 4）：先过滤 {"type":"null"} 分支（nullable 形态）；
+	// 剩 1 个用它；全部同 type 合并；否则 schema_unresolvable。两键并存 → 不可判定。
+	for _, key := range []string{"anyOf", "oneOf"} {
+		if _, has := node[key]; !has {
+			continue
+		}
+		other := "oneOf"
+		if key == "oneOf" {
+			other = "anyOf"
+		}
+		if _, has := node[other]; has {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+		list, ok := node[key].([]any)
+		if !ok {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+		branches, err := cursorNormalizeBranchList(node[key], root, seen, depth)
+		if err != nil {
+			return nil, err
+		}
+		kept := make([]map[string]any, 0, len(branches))
+		for _, b := range branches {
+			if t, _ := b["type"].(string); t == "null" {
+				continue // nullable 形态：{"type":"null"} 分支过滤
+			}
+			kept = append(kept, b)
+		}
+		var result map[string]any
+		switch {
+		case len(kept) == 1:
+			result = kept[0]
+		case len(kept) > 1:
+			result, err = cursorMergeSameTypeBranches(kept)
+			if err != nil {
+				return nil, err
+			}
+		default:
+			// 过滤后为空：原列表非空 → 全部被 null 过滤，不可判定；原列表为空 → 无约束。
+			if len(list) > 0 {
+				return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+			}
+			result = map[string]any{}
+		}
+		// 与外层自身约束 AND 合并（防静默丢弃外层约束）。
+		outer, err := cursorNormalizeSchemaShape(node, root, seen, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return cursorMergeSchemaBranches([]map[string]any{outer, result})
+	}
+
+	// 无组合关键字：type 收敛（规则 5）+ 五键收集（规则 6）。
+	return cursorNormalizeSchemaShape(node, root, seen, depth)
+}
+
+// cursorNormalizeBranchList 归一化组合关键字的分支列表（allOf/anyOf/oneOf 的值）；
+// 列表非数组、分支非对象 → 不可判定。
+func cursorNormalizeBranchList(raw any, root map[string]any, seen map[string]bool, depth int) ([]map[string]any, error) {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+	}
+	branches := make([]map[string]any, 0, len(list))
+	for _, b := range list {
+		bm, ok := b.(map[string]any)
+		if !ok {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+		n, err := cursorNormalizeSchema(bm, root, seen, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		branches = append(branches, n)
+	}
+	return branches, nil
+}
+
+// cursorMergeSameTypeBranches 合并 anyOf/oneOf 过滤 null 后、归一化后 type 相同的
+// 多个分支（方案 §3 规则 4）：
+//   - object：同 allOf 的合并规则（cursorMergeSchemaBranches）；
+//   - array：items 全等价才保留，否则省略 items（元素原样，不做投影）；
+//   - 其它类型：值无需结构投影（retype 对 string/number/integer/boolean 只做标量
+//     字面量还原，其余约束与还原无关），收敛为 {"type": t}。
+func cursorMergeSameTypeBranches(branches []map[string]any) (map[string]any, error) {
+	t0, _ := branches[0]["type"].(string)
+	for _, b := range branches[1:] {
+		if t, _ := b["type"].(string); t != t0 {
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+	}
+	switch t0 {
+	case "array":
+		out := map[string]any{"type": "array"}
+		items0, hasItems := branches[0]["items"]
+		if !hasItems {
+			return out, nil
+		}
+		for _, b := range branches[1:] {
+			if !reflect.DeepEqual(items0, b["items"]) {
+				return out, nil // items 不全等价 → 省略，元素原样
+			}
+		}
+		out["items"] = items0
+		return out, nil
+	case "object", "":
+		// object：同 allOf 规则合并；全部分支无 type（必无 properties）时合并
+		// 结果同样无 type（retype 原样放行，与现状一致）。
+		return cursorMergeSchemaBranches(branches)
+	default:
+		return map[string]any{"type": t0}, nil
+	}
+}
+
+// cursorMergeSchemaBranches 按 allOf 语义（AND）合并已归一化的分支（方案 §3 规则 3）。
+//
+//	type 非空值必须唯一（缺失视为无声明）；properties 取并集且同名属性须归一化
+//	结果深等价；required 取并集（按字典序输出，保证确定性）；items 两侧都有时
+//	须深等价、单侧有取单侧；additionalProperties 取更严（false > schema 对象
+//	（多个须深等价）> true/缺失 → 省略，retype 对 true 与缺失行为等价）。
+func cursorMergeSchemaBranches(branches []map[string]any) (map[string]any, error) {
+	unresolvable := cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+	out := map[string]any{}
+
+	var typeVal string
+	haveType := false
+	for _, b := range branches {
+		tv, exists := b["type"]
+		if !exists {
+			continue
+		}
+		t, ok := tv.(string)
+		if !ok {
+			return nil, unresolvable
+		}
+		if haveType && t != typeVal {
+			return nil, unresolvable
+		}
+		typeVal, haveType = t, true
+	}
+	if haveType {
+		out["type"] = typeVal
+	}
+
+	haveProps := false
+	props := map[string]any{}
+	for _, b := range branches {
+		pv, exists := b["properties"]
+		if !exists {
+			continue
+		}
+		pm, ok := pv.(map[string]any)
+		if !ok {
+			return nil, unresolvable
+		}
+		haveProps = true
+		for k, v := range pm {
+			if prev, dup := props[k]; dup {
+				if !reflect.DeepEqual(prev, v) {
+					return nil, unresolvable
+				}
+				continue
+			}
+			props[k] = v
+		}
+	}
+	if haveProps {
+		out["properties"] = props
+	}
+
+	var reqs []string
+	reqSeen := map[string]bool{}
+	for _, b := range branches {
+		rv, exists := b["required"]
+		if !exists {
+			continue
+		}
+		ra, ok := rv.([]any)
+		if !ok {
+			return nil, unresolvable
+		}
+		for _, e := range ra {
+			s, ok := e.(string)
+			if !ok {
+				return nil, unresolvable
+			}
+			if reqSeen[s] {
+				continue
+			}
+			reqSeen[s] = true
+			reqs = append(reqs, s)
+		}
+	}
+	if len(reqs) > 0 {
+		sort.Strings(reqs)
+		reqOut := make([]any, len(reqs))
+		for i, s := range reqs {
+			reqOut[i] = s
+		}
+		out["required"] = reqOut
+	}
+
+	var items any
+	haveItems := false
+	for _, b := range branches {
+		iv, exists := b["items"]
+		if !exists {
+			continue
+		}
+		if haveItems {
+			if !reflect.DeepEqual(items, iv) {
+				return nil, unresolvable
+			}
+			continue
+		}
+		items, haveItems = iv, true
+	}
+	if haveItems {
+		out["items"] = items
+	}
+
+	var apSchema map[string]any
+	haveAP := false
+	apFalse := false
+	for _, b := range branches {
+		av, exists := b["additionalProperties"]
+		if !exists {
+			continue
+		}
+		switch ap := av.(type) {
+		case bool:
+			if !ap {
+				apFalse = true
+			}
+		case map[string]any:
+			if haveAP {
+				if !reflect.DeepEqual(apSchema, ap) {
+					return nil, unresolvable
+				}
+				continue
+			}
+			apSchema, haveAP = ap, true
+		default:
+			return nil, unresolvable
+		}
+	}
+	switch {
+	case apFalse:
+		out["additionalProperties"] = false
+	case haveAP:
+		out["additionalProperties"] = apSchema
+	}
+
+	return out, nil
+}
+
+// cursorNormalizeSchemaShape 处理无 $ref/allOf/anyOf/oneOf 组合关键字的节点：
+// type 收敛（规则 5）与五键收集（规则 6）。畸形子节点（如 properties 的值不是
+// schema 对象、items 非对象非布尔）**原样透传**——归一化不抢答 retype 的既有
+// 失败码（schema_invalid / items_sub_schema_invalid 等），保证直接走
+// cursorRetypeMcpArgs 与经索引归一化两条路径失败行为一致。
+func cursorNormalizeSchemaShape(node map[string]any, root map[string]any, seen map[string]bool, depth int) (map[string]any, error) {
+	out := map[string]any{}
+	var typeStr string
+	haveType := false
+	switch tv := node["type"].(type) {
+	case string:
+		typeStr, haveType = tv, true
+	case []any:
+		// type 数组（规则 5）：去掉 "null"；剩 1 个 → 作为 type；剩 0 → 视为纯 null
+		//（原样、无投影）；>1（真正多态）→ schema_unresolvable。
+		var nonNull []string
+		for _, e := range tv {
+			s, ok := e.(string)
+			if !ok {
+				return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+			}
+			if s == "null" {
+				continue
+			}
+			nonNull = append(nonNull, s)
+		}
+		switch len(nonNull) {
+		case 1:
+			typeStr, haveType = nonNull[0], true
+		case 0:
+			typeStr, haveType = "null", true
+		default:
+			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+		}
+	case nil:
+		// 无 type 但有 properties → 按 object 处理（规则 6）。
+		if pm, ok := node["properties"].(map[string]any); ok && pm != nil {
+			typeStr, haveType = "object", true
+		}
+	default:
+		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+	}
+	if haveType {
+		out["type"] = typeStr
+	}
+	// 纯 null：无投影语义（retype 对 "null" 原样返回），其余键与投影无关。
+	if haveType && typeStr == "null" {
+		return out, nil
+	}
+
+	// properties：子 schema 递归归一化；非对象形态原样透传（保 retype 既有失败码）。
+	if pm, ok := node["properties"].(map[string]any); ok && pm != nil {
+		nprops := make(map[string]any, len(pm))
+		for k, v := range pm {
+			if vm, ok := v.(map[string]any); ok {
+				nv, err := cursorNormalizeSchema(vm, root, seen, depth+1)
+				if err != nil {
+					return nil, err
+				}
+				nprops[k] = nv
+				continue
+			}
+			nprops[k] = v
+		}
+		out["properties"] = nprops
+	} else if pv, exists := node["properties"]; exists && pv != nil {
+		out["properties"] = pv
+	}
+
+	// required：原样保留（retype 不消费 required；仅组合合并阶段才校验/并集）。
+	if rv, exists := node["required"]; exists && rv != nil {
+		out["required"] = rv
+	}
+
+	// items：布尔原样；对象递归归一化；其它形态原样透传（retype 报 items_sub_schema_invalid）。
+	if iv, exists := node["items"]; exists && iv != nil {
+		switch items := iv.(type) {
+		case bool:
+			out["items"] = items
+		case map[string]any:
+			nv, err := cursorNormalizeSchema(items, root, seen, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out["items"] = nv
+		default:
+			out["items"] = iv
+		}
+	}
+
+	// additionalProperties：布尔原样；对象递归归一化；其它形态原样透传（retypeObject 忽略）。
+	if av, exists := node["additionalProperties"]; exists && av != nil {
+		switch ap := av.(type) {
+		case bool:
+			out["additionalProperties"] = ap
+		case map[string]any:
+			nv, err := cursorNormalizeSchema(ap, root, seen, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out["additionalProperties"] = nv
+		default:
+			out["additionalProperties"] = av
+		}
+	}
+	return out, nil
+}
+
+// cursorResolveSchemaPointer 按 RFC 6901 JSON Pointer 从 root 解析本地 $ref 目标
+// （支持 ~1 → '/'、~0 → '~' 转义）。只下钻对象键——$ref 目标必须是 schema 对象，
+// 数组索引不支持 → 解析失败失败关闭。空指针解析为 root 本身。
+func cursorResolveSchemaPointer(root map[string]any, ptr string) (map[string]any, bool) {
+	cur := root
+	if ptr == "" {
+		return cur, true
+	}
+	if !strings.HasPrefix(ptr, "/") {
+		return nil, false
+	}
+	for _, tok := range strings.Split(ptr[1:], "/") {
+		tok = strings.ReplaceAll(tok, "~1", "/")
+		tok = strings.ReplaceAll(tok, "~0", "~")
+		next, ok := cur[tok]
+		if !ok {
+			return nil, false
+		}
+		nm, ok := next.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur = nm
+	}
+	return cur, true
+}
+
 // cursorToolSchemaIndex 从 f4（McpTools）的每条 McpToolDefinition 原始字节解出
 // f5 tool_name → input_schema JSON。来源必须是请求体 f4 原始字节（经
 // cursorBuildMcpTools 实际发出的字节），不得改用 req.Tools 重新序列化。
@@ -1364,6 +1837,12 @@ func cursorRetypeErrorf(reason cursorRetypeErrReason) error {
 // input_schema 的还原优先走 f3（google.protobuf.Value）：经 proto.Unmarshal 解回
 // structpb.Value，再 protojson.Marshal + 归一化还原为 JSON。**仅为历史夹具兼容**
 // 才回落读 f6（旧 input_schema_json 字符串）；新生产构造只写 f3，不写 f6。
+//
+// 入索引前每条 schema 先做确定性归一化（方案 §4：$ref/allOf/anyOf/oneOf/type 数组
+// 展开为等价内联形态）。归一化失败**不静默丢弃**、**不回退原 schema 放行**：记
+// schema_normalize_failed（只含 tool_name 与 reason，不含 schema 内容），在索引中
+// 放 nil 哨兵——该工具后续在 cursorRetypeArgsByToolDefs 按既有 schema_unresolvable
+// 失败关闭。
 func cursorToolSchemaIndex(defs [][]byte) map[string][]byte {
 	idx := make(map[string][]byte, len(defs))
 	for _, raw := range defs {
@@ -1389,14 +1868,45 @@ func cursorToolSchemaIndex(defs [][]byte) map[string][]byte {
 		}
 		// 优先 f3（google.protobuf.Value），历史夹具无 f3 才回落 f6。
 		if schema, ok := cursorSchemaFromF3(f3Val); ok {
-			idx[name] = schema
+			idx[name] = cursorNormalizeIndexedSchema(name, schema)
 			continue
 		}
 		if f6Legacy != "" {
-			idx[name] = []byte(f6Legacy)
+			idx[name] = cursorNormalizeIndexedSchema(name, []byte(f6Legacy))
 		}
 	}
 	return idx
+}
+
+// cursorNormalizeIndexedSchema 对入索引的 schema 做确定性归一化（方案 §4）。
+// 归一化失败（含 schema 非 JSON 对象）记 schema_normalize_failed 事件并返回
+// nil 哨兵：该工具后续按既有 schema_unresolvable 失败关闭。
+func cursorNormalizeIndexedSchema(toolName string, schemaJSON []byte) []byte {
+	var root map[string]any
+	if err := json.Unmarshal(schemaJSON, &root); err != nil || root == nil {
+		cursorLogSchemaNormalizeFailed(toolName)
+		return nil
+	}
+	normalized, err := cursorNormalizeSchema(root, root, make(map[string]bool), 0)
+	if err != nil {
+		cursorLogSchemaNormalizeFailed(toolName)
+		return nil
+	}
+	out, err := json.Marshal(normalized)
+	if err != nil {
+		cursorLogSchemaNormalizeFailed(toolName)
+		return nil
+	}
+	return out
+}
+
+// cursorLogSchemaNormalizeFailed 记 schema_normalize_failed 事件（方案 §4）：
+// 只含 tool_name 与 reason，不含 schema 内容（schema 携带工具业务语义，与既有
+// mcp_args_retype_failed 的脱敏口径一致）。
+func cursorLogSchemaNormalizeFailed(toolName string) {
+	logger.L().Warn("schema_normalize_failed",
+		zap.String("tool_name", toolName),
+		zap.String("reason", string(cursorRetypeSchemaUnresolvable)))
 }
 
 // cursorSchemaFromF3 把 f3（google.protobuf.Value）的 protobuf 字节还原为规范 JSON。
@@ -1516,6 +2026,14 @@ func cursorRetypeArgsByToolDefs(id, name, argsJSON string, defs [][]byte, onFail
 			onFail(cursorRetypeSchemaAbsent)
 		}
 		return "", cursorRetypeErrorf(cursorRetypeSchemaAbsent)
+	}
+	// 归一化失败哨兵（nil）：该工具 schema 含不可归一化的组合/引用写法，按既有
+	// schema_unresolvable 失败关闭（方案 §4），不回退原 schema 放行、不静默丢弃。
+	if schemaJSON == nil {
+		if onFail != nil {
+			onFail(cursorRetypeSchemaUnresolvable)
+		}
+		return "", cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
 	}
 	retyped, err := cursorRetypeMcpArgs([]byte(argsJSON), schemaJSON)
 	if err != nil {
