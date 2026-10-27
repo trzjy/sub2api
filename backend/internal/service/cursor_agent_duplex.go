@@ -478,6 +478,9 @@ func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr s
 	if cwd != "" {
 		exitInner = cursorAppendStringField(exitInner, cursorFldShellStreamExitCwd, cwd)
 	}
+	// local_execution_time_ms（f6）：真实客户端的 exit 事件总是携带该值；
+	// 缺失时上游可能无法判定执行已结束（实测无该字段时 177s 无 TurnEnded）。
+	exitInner = cursorAppendVarintField(exitInner, 6, 0)
 	frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamExit, exitInner)))
 	return frames
 }
