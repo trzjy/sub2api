@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -1224,4 +1225,71 @@ func TestRelayProbeTargetURLZhipuExplicitURLEligible(t *testing.T) {
 	require.Equal(t, CNBalanceKindBalance, result.Kind)
 	require.Len(t, repo.extraWrites, 1)
 	require.Equal(t, CNBalanceKindBalance, repo.extraWrites[0]["zhipu_balance_kind"])
+}
+
+// ---- 后端 JSON 契约：subscription_expired 的线上 JSON 键名 ↔ 前端读取键 ----
+
+// TestCNProviderBalanceResult_SubscriptionExpiredJSONContract 锁死「线上 JSON 键名 ↔ 前端
+// 读取键」的契约，并锁死「其它账号的 JSON 里不出现该键」这一最强保证：
+//
+//  1. 到期态：marshal 一个 SubscriptionExpired=true 的 DTO，线上 JSON 键名必须是逐字一致的
+//     "subscription_expired"，且不得再出现上一批已删除的旧错误码
+//     CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE（该码删除后若 JSON 仍残留，前端会静默
+//     走不到到期状态分支）。
+//  2. 非到期态（正常余额成功 Success=true，以及普通失败 Success=false 但
+//     SubscriptionExpired=false）：JSON 必须不出现 subscription_expired 子串。这正是用户
+//     「不要影响其他账号查询」的最强保证——其它账号的 JSON 里没有该键，前端不会误走到到期
+//     状态分支而退回报错行。
+//  3. 前端契约键名一致：把到期态 marshal 出的 JSON 解析回 map，断言键 subscription_expired
+//     存在且值为 bool（锁定它不是字符串、不是数字）。
+//
+// 注意：本用例只新增，不改动既有 TestCNProviderBalanceService_* 用例的任何断言。
+func TestCNProviderBalanceResult_SubscriptionExpiredJSONContract(t *testing.T) {
+	// 1. 到期态：线上 JSON 键名必须逐字为 subscription_expired。
+	expired := CNProviderBalanceResult{
+		Provider:            "kimi",
+		Success:             false,
+		SubscriptionExpired: true,
+		Error:               `Upstream subscription "kimi订阅" expired or unavailable`,
+	}
+	expiredJSON, err := json.Marshal(expired)
+	require.NoError(t, err)
+	require.Contains(t, string(expiredJSON), `"subscription_expired":true`,
+		"到期态的线上 JSON 键名必须是逐字一致的 subscription_expired")
+	// 旧错误码已随上一批删除，绝不可在 JSON 中残留。
+	require.NotContains(t, string(expiredJSON), "CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE",
+		"旧错误码已删除，JSON 中不得残留该旧码")
+
+	// 3. 前端契约键名一致：解析回 map，锁定键存在且类型为 bool（非字符串、非数字）。
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(expiredJSON, &m))
+	val, exists := m["subscription_expired"]
+	require.True(t, exists, "前端读取键 subscription_expired 必须存在")
+	_, isBool := val.(bool)
+	require.True(t, isBool, "subscription_expired 必须是 bool，不能是字符串/数字")
+
+	// 2. 非到期态（正常余额成功）：JSON 不得出现 subscription_expired 键。
+	//    这是「不影响其它账号查询」的核心保证：其它账号的 JSON 里不出现该键，前端不会
+	//    误走到到期状态分支。
+	normal := CNProviderBalanceResult{
+		Provider: "deepseek",
+		Success:  true,
+		Balance:  7.5,
+		Currency: "CNY",
+	}
+	normalJSON, err := json.Marshal(normal)
+	require.NoError(t, err)
+	require.NotContains(t, string(normalJSON), "subscription_expired",
+		"正常余额成功的 JSON 不得出现 subscription_expired 键")
+
+	// 2b. 非到期态（普通失败，非订阅到期）：JSON 也不得出现 subscription_expired 键。
+	plainFail := CNProviderBalanceResult{
+		Provider: "deepseek",
+		Success:  false,
+		Error:    "some probe failure unrelated to subscription",
+	}
+	plainFailJSON, err := json.Marshal(plainFail)
+	require.NoError(t, err)
+	require.NotContains(t, string(plainFailJSON), "subscription_expired",
+		"普通失败（非订阅到期）的 JSON 不得出现 subscription_expired 键")
 }
