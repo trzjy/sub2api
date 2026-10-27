@@ -271,7 +271,8 @@ func TestCursorShellBridgeMixedBatchSealable(t *testing.T) {
 	require.Equal(t, "shell", kinds["shell_call"], "shell 委托 Kind 必须为 shell")
 }
 
-// 9. f14 先到 → 不报错、进入 pending；随后 started 到达 → 委托出现在该 started 所在批、pending 清空
+//  9. f14 先到（无 started）→ 建 shellOnly 专属批并立即可封口（不挂 pending、不等 started/listed）；
+//     随后 started 到达 → 委托并入该 started 批（回到原路径按原谓词封口）。
 func TestCursorShellBridgeF14FirstThenStarted(t *testing.T) {
 	defs := [][]byte{cursorTestBuildToolDef(t, "shell", cursorShellTestSchemaArray)}
 	// f14 先到：无任何 started 已登记。
@@ -281,26 +282,45 @@ func TestCursorShellBridgeF14FirstThenStarted(t *testing.T) {
 	parts := cursorShellTestBuildExecParts(t, 7, []byte("exec-orig-7"), sub)
 
 	tc, err := d.cursorCaptureShellArgs(parts, 7, []byte("exec-orig-7"))
-	require.NoError(t, err, "f14 先到：不得报错、不得失败关闭")
+	require.NoError(t, err, "f14 先到（无 started）：不得报错、不得失败关闭")
 	require.Equal(t, "call_shell_1", tc.ID)
-	// 进入 pending，不建批、不进 snapshot。
-	require.Len(t, d.delegations.pending, 1, "f14 先到必须进入 pending")
-	require.Contains(t, d.delegations.pending, "call_shell_1")
-	require.Empty(t, d.delegations.snapshot(), "pending 委托不得出现在批次快照里")
 
-	// started 随后到达：同一把锁内并入该 started 所在批。
-	require.NoError(t, d.delegations.noteToolCallStarted("", "call_shell_1", true))
-	require.Empty(t, d.delegations.pending, "started 到达后 pending 必须清空")
-
-	// 委托出现在该 started 所在批（snapshot 命中，Kind=shell）。
+	// 进入 shellOnly 专属批：snapshot 含该委托，且没有长期 pending。
+	require.Equal(t, 1, cursorShellTestShellOnlyBatchCount(t, d.delegations), "f14 先到必须建立 shellOnly 专属批")
 	snap := d.delegations.snapshot()
+	require.Len(t, snap, 1, "shellOnly 批必须含该委托")
+	require.Equal(t, "call_shell_1", snap[0].ID)
+	require.Equal(t, "shell", snap[0].Kind)
+	// shellOnly 批 ≥1 委托即立即可封口，无需 started/listed（区别于常规批挂起）。
+	require.NoError(t, d.delegations.sealable(), "shellOnly 批 ≥1 委托必须立即可封口（不等 started/listed）")
+
+	// started 随后到达：同 call_id 的 shellOnly 委托并入该 started 批，shellOnly 批移除。
+	require.NoError(t, d.delegations.noteToolCallStarted("", "call_shell_1", true))
+	require.Equal(t, 0, cursorShellTestShellOnlyBatchCount(t, d.delegations), "started 到达后 shellOnly 批必须并入并移除")
+
+	// 委托出现在该 started 所在批（snapshot 命中，Kind=shell），且不再有独立 shellOnly 批。
+	snap = d.delegations.snapshot()
 	require.Len(t, snap, 1)
 	require.Equal(t, "call_shell_1", snap[0].ID)
 	require.Equal(t, "shell", snap[0].Kind)
 
-	// 补 listed=1 → 批次可封口（验证完整链路：f14 先到也能正确收口）。
+	// 补 listed=1 → 该 started 批按原谓词可封口（验证完整链路：f14 先到也能正确收口）。
 	require.NoError(t, d.delegations.noteToolRequestsListed("", 1))
 	require.NoError(t, d.delegations.sealable(), "started 到达并入后批次必须可封口")
+}
+
+// cursorShellTestShellOnlyBatchCount 是测试辅助：统计未封口的 shellOnly 批数量。
+func cursorShellTestShellOnlyBatchCount(t *testing.T, d *cursorToolDelegations) int {
+	t.Helper()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, b := range d.all {
+		if !b.sealed && b.shellOnly {
+			n++
+		}
+	}
+	return n
 }
 
 // 10. started 先到 → 原有路径仍通过（不进 pending、直接入批）
@@ -314,7 +334,7 @@ func TestCursorShellBridgeStartedFirstOrder(t *testing.T) {
 
 	tc, err := d.cursorCaptureShellArgs(parts, 7, []byte("exec-orig-7"))
 	require.NoError(t, err, "started 先到：原有路径必须仍通过")
-	require.Empty(t, d.delegations.pending, "started 先到：不进 pending")
+	require.Equal(t, 0, cursorShellTestShellOnlyBatchCount(t, d.delegations), "started 先到：不建 shellOnly 批（走原路径）")
 	require.Len(t, d.delegations.snapshot(), 1)
 	require.Equal(t, "call_shell_1", tc.ID)
 	require.Equal(t, "shell", snapKind(t, d.delegations, "call_shell_1"))
@@ -331,36 +351,93 @@ func snapKind(t *testing.T, d *cursorToolDelegations, id string) string {
 	return "<missing>"
 }
 
-// 11. pending 未配对时封口被拒，reason=shell_pending_unmatched
-func TestCursorShellBridgePendingUnmatchedSealRejected(t *testing.T) {
+// 11. 连续两个 f14（无 started）→ 各自建立独立 shellOnly 批、各自立即可封口、互不吞并。
+func TestCursorShellBridgeTwoF14Independent(t *testing.T) {
 	defs := [][]byte{cursorTestBuildToolDef(t, "shell", cursorShellTestSchemaArray)}
-	// f14 先到，无任何 started。
+	// 两个 f14 都先到，无任何 started 已登记。
 	d := cursorShellTestNewDuplex(t, defs, "")
 
+	// 第一个 f14（call_a）。
+	subA := cursorShellTestBuildShellArgs(t, "ls -la", "/work", "call_a", "list a")
+	partsA := cursorShellTestBuildExecParts(t, 7, []byte("exec-a"), subA)
+	tcA, err := d.cursorCaptureShellArgs(partsA, 7, []byte("exec-a"))
+	require.NoError(t, err, "第一个 f14 必须成功")
+	require.Equal(t, "call_a", tcA.ID)
+
+	// 第二个 f14（call_b）：前批已因交付而 sealed 才会新建；此处尚未 seal，故同 call_id
+	// 不会重复建批——用不同 call_id 模拟两条独立 shell 执行请求。
+	subB := cursorShellTestBuildShellArgs(t, "pwd", "/work", "call_b", "list b")
+	partsB := cursorShellTestBuildExecParts(t, 8, []byte("exec-b"), subB)
+	tcB, err := d.cursorCaptureShellArgs(partsB, 8, []byte("exec-b"))
+	require.NoError(t, err, "第二个 f14 必须成功")
+	require.Equal(t, "call_b", tcB.ID)
+
+	// 两个独立 shellOnly 批，各自含一条委托，互不吞并。
+	require.Equal(t, 2, cursorShellTestShellOnlyBatchCount(t, d.delegations), "两个 f14 必须各自建立独立 shellOnly 批")
+	snap := d.delegations.snapshot()
+	require.Len(t, snap, 2, "snapshot 必须含两条委托，互不吞并")
+	kinds := map[string]string{}
+	for _, c := range snap {
+		kinds[c.ID] = c.Kind
+	}
+	require.Equal(t, "shell", kinds["call_a"])
+	require.Equal(t, "shell", kinds["call_b"])
+	// 各自立即可封口（无需 started/listed）。
+	require.NoError(t, d.delegations.sealable(), "两条 shellOnly 批分别 ≥1 委托，必须立即可封口")
+
+	// 模拟交付：seal 逐批封口（shellOnly 与常规批隔离，不影响彼此）。
+	require.NoError(t, d.delegations.seal(), "两条 shellOnly 批必须可整体封口交付")
+}
+
+// 12. shellOnly 批不得把后续 mcp 委托吞进已封口/独立批（mcp 与 shell 隔离）。
+func TestCursorShellBridgeShellOnlyNotSwallowMcp(t *testing.T) {
+	defs := [][]byte{
+		cursorTestBuildToolDef(t, "shell", cursorShellTestSchemaArray),
+		cursorTestBuildToolDef(t, "get_weather", `{"type":"object","properties":{"city":{"type":"string"}}}`),
+	}
+	// 先有一个 shellOnly 批（f14 先到，无 started）。
+	d := cursorShellTestNewDuplex(t, defs, "")
 	sub := cursorShellTestBuildShellArgs(t, "ls -la", "", "call_shell_1", "desc")
 	parts := cursorShellTestBuildExecParts(t, 7, []byte("exec-7"), sub)
 	_, err := d.cursorCaptureShellArgs(parts, 7, []byte("exec-7"))
-	require.NoError(t, err, "f14 先到：进入 pending，不报错")
-	require.Len(t, d.delegations.pending, 1)
+	require.NoError(t, err, "shell f14 先到必须成功")
+	require.Equal(t, 1, cursorShellTestShellOnlyBatchCount(t, d.delegations), "必须先有一个 shellOnly 批")
+	// shellOnly 批单独出现时立即可封口（无 mcp 竞争批时独立交付，不等 started/listed）。
+	require.NoError(t, d.delegations.sealable(), "仅 shellOnly 批时立即可封口（独立交付）")
 
-	// 即便其它信号到位，pending 未配对也阻止封口，reason=shell_pending_unmatched。
-	require.NoError(t, d.delegations.noteToolRequestsListed("", 1))
-	sealErr := d.delegations.sealable()
-	require.Error(t, sealErr, "pending 未配对必须封口被拒")
-	require.ErrorIs(t, sealErr, ErrCursorBatchIncomplete)
-	require.Contains(t, sealErr.Error(), "shell_pending_unmatched", "失败原因必须为 shell_pending_unmatched")
+	// 随后到达一条 mcp 委托（Kind 空，call_mcp），走 noteDelegation 原路径。
+	mcpCap := cursorToolCallCapture{ID: "call_mcp", Name: "get_weather", ArgsJSON: `{"city":"x"}`}
+	require.NoError(t, d.delegations.noteDelegation("", mcpCap), "mcp 委托必须走原路径")
+	require.Equal(t, 1, cursorShellTestShellOnlyBatchCount(t, d.delegations), "mcp 委托不得被吞进 shellOnly 批（批数不变）")
+
+	// mcp 委托在独立批（"" key），不在任何 shellOnly 批内。
+	snap := d.delegations.snapshot()
+	require.Len(t, snap, 2, "snapshot 必须含 shell + mcp 两条委托")
+	kinds := map[string]string{}
+	for _, c := range snap {
+		kinds[c.ID] = c.Kind
+	}
+	require.Equal(t, "shell", kinds["call_shell_1"], "shell 委托仍在 shellOnly 批")
+	require.Equal(t, "", kinds["call_mcp"], "mcp 委托 Kind 必须为空（字节级行为不变）")
+	// mcp 委托不属于任何 shellOnly 批：以 open 映射核验。
+	d.delegations.mu.Lock()
+	_, mcpInShellOnly := d.delegations.open["call_mcp"]
+	d.delegations.mu.Unlock()
+	require.False(t, mcpInShellOnly, "mcp 委托不得落在 shellOnly 批的 key 上")
+	// 二者隔离：shellOnly 批仍是独立的一批，未被 mcp 合并且未被 mcp 阻断其自身封口判定输入。
+	require.Equal(t, 2, len(d.delegations.all), "必须存在两个独立批（shellOnly + mcp），互不吞并")
 }
 
-// 12. mcp 委托路径回归：Kind=="" 走 noteDelegation，逐字节不变、不进 pending
+// 12. mcp 委托路径回归：Kind=="" 走 noteDelegation，逐字节不变、不建 shellOnly 批
 func TestCursorShellBridgeMcpPathUnaffected(t *testing.T) {
 	d := newLocalCursorToolDelegations()
 	require.NoError(t, d.noteToolCallStarted("mc", "mcp_call", true))
 	require.NoError(t, d.noteToolRequestsListed("mc", 1))
 
-	// mcp 委托（Kind 空）直接 noteDelegation，不进 shell pending。
+	// mcp 委托（Kind 空）直接 noteDelegation，不建/不落入 shellOnly 批。
 	mcpCap := cursorToolCallCapture{ID: "mcp_call", Name: "get_weather", ArgsJSON: `{"city":"x"}`}
 	require.NoError(t, d.noteDelegation("", mcpCap))
-	require.Empty(t, d.pending, "mcp 委托不得进入 shell pending")
+	require.Equal(t, 0, cursorShellTestShellOnlyBatchCount(t, d), "mcp 委托不得建立/落入 shellOnly 批")
 
 	// mcp 路径封口语义不变（字节级行为不变，无 pending 干扰）。
 	require.NoError(t, d.sealable(), "mcp 委托路径封口语义不变")

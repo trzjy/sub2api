@@ -313,8 +313,8 @@ func cursorSchemaHasProperty(schemaJSON []byte, prop string) bool {
 //
 // 流程（硬约束 #1-#4）：解析 ShellArgs → command 为空失败关闭 → 选择 shell 类工具并按 schema
 // 转换参数（找不到工具失败关闭）→ 构造 capture{Kind:"shell"} 走 noteShellDelegation 接入封口。
-// 与旧版不同，noteShellDelegation 支持 f14 先于或后于 tool_call_started 到达两种顺序：started
-// 先到则直接入批；f14 先到则挂起 pending，started 到达时并入（不建无 started 批次、不假封口）。
+// noteShellDelegation 不再依赖 started/listed 作为封口前置：有同 call_id 的 started 批则按原
+// 路径入批；否则建立 shellOnly 专属批立即可封口交付（不挂 pending、不等待 started/listed）。
 // 成功返回 capture，失败返回 ErrCursorProtocol。
 func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID uint64, idField []byte) (cursorToolCallCapture, error) {
 	sh, ok := cursorFindField(parts, 14)
@@ -350,7 +350,8 @@ func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID
 		delegations = newLocalCursorToolDelegations()
 		d.delegations = delegations
 	}
-	// noteShellDelegation 支持两种到达顺序：started 先到直接入批；f14 先到挂起 pending。
+	// noteShellDelegation：有同 call_id 的 started 批则入该批（原路径）；否则建 shellOnly
+	// 专属批立即可封口交付（不挂 pending、不等 started/listed）。
 	if err := delegations.noteShellDelegation(args.ToolCallID, tc); err != nil {
 		return cursorToolCallCapture{}, err
 	}
@@ -763,8 +764,9 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			return false, nil
 		case cursorFindFieldOK(parts, 14):
 			// Cursor 原生 shell 委托（ExecServerMessage.f14 = ShellArgs）：解析 → 校验 →
-			// 构造 capture{Kind:"shell"} → noteDelegation，复用既有封口（started/listed 已先到，
-			// 见方案 §4）。失败（command 空 / tool_call_id 无对应 started / 无可用 shell 工具 /
+			// 构造 capture{Kind:"shell"} → noteShellDelegation。有同 call_id 的 started 批则
+			// 按原路径入批；否则建 shellOnly 专属批立即可封口交付（不等 started/listed）。
+			// 失败（command 空 / 孤儿 tool_call_id 无对应 started / 无可用 shell 工具 /
 			// required 缺字段）一律 ErrCursorProtocol 失败关闭，绝不当作新调用或兜底 "shell"。
 			tc, e := d.cursorCaptureShellArgs(parts, execID, idField)
 			if e != nil {
