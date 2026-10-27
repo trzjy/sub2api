@@ -164,6 +164,10 @@ type cursorShellArgs struct {
 	Description      string
 	IsBackground     bool
 	SkipApproval     bool
+	// SandboxPolicy 是 ShellArgs.f9（requested_sandbox_policy）的原始字节。
+	// 回写 ShellStream.f4 start 时必须原样回显（真实客户端的 start 事件携带该策略）；
+	// 实测空 start 会让上游不推进（回写后 178s 无 TurnEnded）。
+	SandboxPolicy []byte
 }
 
 // cursorParseShellArgs 把 f14 内层子字段解出为 cursorShellArgs（逐字段，失败关闭）。
@@ -187,6 +191,9 @@ func cursorParseShellArgs(sub []cursorPBField) (cursorShellArgs, error) {
 	}
 	if sa, ok := cursorFindField(sub, 12); ok && sa.Wire == cursorWireVarint {
 		a.SkipApproval = sa.Varint != 0
+	}
+	if sp, ok := cursorFindField(sub, 9); ok && len(sp.Bytes) > 0 {
+		a.SandboxPolicy = append([]byte(nil), sp.Bytes...)
 	}
 	for _, f := range sub {
 		if f.Number == 5 {
@@ -338,12 +345,13 @@ func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID
 		return cursorToolCallCapture{}, berr
 	}
 	tc := cursorToolCallCapture{
-		ID:       args.ToolCallID,
-		Name:     name,
-		ArgsJSON: argsJSON,
-		ExecID:   execID,
-		IDField:  append([]byte(nil), idField...),
-		Kind:     "shell",
+		ID:            args.ToolCallID,
+		Name:          name,
+		ArgsJSON:      argsJSON,
+		ExecID:        execID,
+		IDField:       append([]byte(nil), idField...),
+		Kind:          "shell",
+		SandboxPolicy: args.SandboxPolicy,
 	}
 	delegations := d.delegations
 	if delegations == nil {
@@ -427,7 +435,7 @@ func cursorShellCwdFromArgs(argsJSON string) string {
 // 外层每帧统一 {f1 exec_id(varint), f15 IDField(bytes), f14 ShellStream}。
 //
 // §5 待验项：首版**不**发 ShellStream.f4 start（真机往返验证后再决定是否补 start 再验）——
-func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr string, exitCode int, cwd string) [][]byte {
+func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr string, exitCode int, cwd string, sandboxPolicy []byte) [][]byte {
 	// outer 把一段 ShellStream 包成完整 ExecClientMessage（f1 exec_id + f15 id + f14 ShellStream）。
 	outer := func(shellStream []byte) []byte {
 		msg := cursorAppendVarintField(nil, cursorFldClientMsgID, execID)
@@ -438,9 +446,13 @@ func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr s
 		return msg
 	}
 	var frames [][]byte
-	// start 帧（ShellStream.f4）：告知上游该 shell 执行已开始。真实帧取证显示客户端
-	// 先发 start 再发 stdout/exit；不发 start 时上游不会推进（实测回写后 180s 无 TurnEnded）。
-	frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStart, nil)))
+	// start 帧（ShellStream.f4）：告知上游该 shell 执行已开始，并回显请求里的 sandbox_policy
+	// （ShellArgs.f9）。实测空 start 时上游不推进（回写后 178s 无 TurnEnded）。
+	var startInner []byte
+	if len(sandboxPolicy) > 0 {
+		startInner = cursorAppendBytesField(startInner, 1, sandboxPolicy)
+	}
+	frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStart, startInner)))
 	if stderr != "" {
 		inner := cursorAppendStringField(nil, cursorFldShellStreamData, stderr)
 		frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStderr, inner)))

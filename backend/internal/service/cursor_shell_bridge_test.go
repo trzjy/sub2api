@@ -132,7 +132,7 @@ func TestCursorShellBridgeMismatchedCallID(t *testing.T) {
 // 5. 回写字节：stdout/exit 的字段号与嵌套层级正确（逐字节断言）
 func TestCursorShellBridgeWritebackBytes(t *testing.T) {
 	// stderr 非空 → 帧序 [stderr, stdout, exit]；外层统一 f1 exec_id + f15 id + f14 ShellStream。
-	frames := cursorEncodeShellToolResult(7, []byte("exec-7"), "OUT", "ERR", 2, "/cwd")
+	frames := cursorEncodeShellToolResult(7, []byte("exec-7"), "OUT", "ERR", 2, "/cwd", nil)
 	require.Len(t, frames, 4, "start+stderr+stdout+exit 共 4 帧")
 
 	// 帧 0：start（f14 ShellStream{f4 ShellStreamStart{}}）——告知上游执行已开始。
@@ -188,7 +188,7 @@ func TestCursorShellBridgeWritebackBytes(t *testing.T) {
 	require.Equal(t, "/cwd", exitCwd.String(), "exit.cwd 必须位于 f2")
 
 	// 无 stderr 时为 [start, stdout, exit] 三帧，start 在前、stdout 次之。
-	frames2 := cursorEncodeShellToolResult(3, nil, "only", "", 0, "")
+	frames2 := cursorEncodeShellToolResult(3, nil, "only", "", 0, "", nil)
 	require.Len(t, frames2, 3, "无 stderr 时是 start+stdout+exit")
 	o2, _ := cursorDecodeProtobuf(frames2[1])
 	s2, ok := cursorFindField(o2, cursorFldClientMsgShellStream)

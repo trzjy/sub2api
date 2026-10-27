@@ -854,6 +854,8 @@ type cursorToolCallCapture struct {
 	// 走 ShellStream（f14）编码（见 cursor_agent_duplex.go 的 cursorEncodeShellToolResult）。
 	// 该字段只影响回写编码，委托捕获与封口逻辑对两种 Kind 一视同仁。
 	Kind string
+	// SandboxPolicy 是 shell 委托 ShellArgs.f9 的原始字节，回写 start 帧时原样回显。
+	SandboxPolicy []byte
 }
 
 // cursorContent 返回拼出的完整响应文本（非流式入站用）。
