@@ -374,6 +374,15 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 		}
 		d.logPhase(zapcore.WarnLevel, "cursor_interaction_fields", "",
 			zap.Ints("fields", unums), zap.Ints("lens", ulens))
+		// DIAG(临时)：started 的 call_id（与 f14 ShellArgs.tool_call_id 比对）。
+		if started, ok := cursorFindField(parts, 2); ok {
+			if sf, e := cursorDecodeProtobuf(started.Bytes); e == nil {
+				if v, ok := cursorFindField(sf, 1); ok {
+					d.logPhase(zapcore.WarnLevel, "cursor_started_probe", "",
+						zap.String("call_id", v.String()))
+				}
+			}
+		}
 		_, ended := cursorFindField(parts, cursorFldUpdateTurnEnded)
 		if ended {
 			// 正常终态：上游 InteractionUpdate 携带 TurnEnded（含真实 usage）。
@@ -444,11 +453,36 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			if len(head) > 60 {
 				head = head[:60]
 			}
+			shellSchema := ""
+			for _, def := range d.declaredToolDefs {
+				df, e := cursorDecodeProtobuf(def)
+				if e != nil {
+					continue
+				}
+				var dn string
+				var raw []byte
+				for _, x := range df {
+					if x.Number == cursorFldMcpToolDefToolName {
+						dn = x.String()
+					}
+					if x.Number == cursorFldMcpToolDefInputSchemaValue {
+						raw = x.Bytes
+					}
+				}
+				if dn == "shell" {
+					if s, ok := cursorSchemaFromF3(raw); ok {
+						shellSchema = string(s)
+						if len(shellSchema) > 300 {
+							shellSchema = shellSchema[:300]
+						}
+					}
+				}
+			}
 			d.logPhase(zapcore.WarnLevel, "cursor_shell_args_probe", "",
 				zap.String("tool_call_id", tcid), zap.Int("command_len", len(cmd)),
 				zap.String("command_head", head), zap.Int("workdir_len", len(wd)),
 				zap.Int("description_len", len(desc)), zap.Uint64("timeout", timeout),
-				zap.Strings("declared_tools", names))
+				zap.Strings("declared_tools", names), zap.String("shell_schema", shellSchema))
 			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
 		default:
 			// DIAG(临时)：记录未支持的 ExecMessage 子字段号与长度，用于定位上游执行形态。
