@@ -647,7 +647,8 @@ export default {
           CN_BALANCE_NO_ENDPOINT: '该账号所在平台没有可用的余额查询端点',
           CN_BALANCE_URL_REJECTED: '余额探测地址不在允许范围内，请检查探测地址配置',
           CN_BALANCE_INVALID_PLATFORM: '该账号不是国产供应商账号，不支持余额探测',
-          CN_BALANCE_ACCOUNT_NOT_FOUND: '账号不存在或已被删除'
+          CN_BALANCE_ACCOUNT_NOT_FOUND: '账号不存在或已被删除',
+          CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE: '上游订阅已到期或不可用，无法查询余额；请到上游续费或更换账号'
         }
       },
       types: {

@@ -649,4 +649,89 @@ describe('CNProviderBalanceCell', () => {
     expect(wrapper.text()).toContain('CN_BALANCE_REQUEST_BUILD_FAILED')
     expect(wrapper.text()).not.toContain('本地化:')
   })
+
+  // ===== 派发单 balance-ui-errmap：探测返回 success=false 路径的错误码本地化 =====
+  // 后端「上游订阅失效」分支填 error_code=CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE
+  // （字面量与卡 A 后端改动严格一致）。命中白名单 → 走本地化文案，原始英文不再出现在正文。
+
+  it('maps success=false error_code CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE to localized copy (no raw English in body)', async () => {
+    queryBalance.mockResolvedValue({
+      success: false,
+      error_code: 'CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE',
+      error: 'Upstream subscription "X" expired or unavailable (missing remaining)'
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    // 命中映射 → 本地化文案
+    expect(wrapper.text()).toContain('本地化:CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE')
+    // 原始英文正文不渲染（仅挂在 title 上）
+    expect(wrapper.text()).not.toContain('Upstream subscription')
+    expect(wrapper.text()).not.toContain('missing remaining')
+    // 快照余额保留
+    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
+  })
+
+  // 无 error_code → 回退链不变：原样显示 result.error 原文。
+  it('falls back to the raw result.error when success=false has no error_code', async () => {
+    queryBalance.mockResolvedValue({
+      success: false,
+      error: '某种未编碼的错误'
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('某种未编碼的错误')
+    expect(wrapper.text()).not.toContain('本地化:')
+  })
+
+  // 白名单闸门：error_code 不在表内 → 不允许拿任意码拼 i18n key，回退原文。
+  it('whitelist gate: an unmapped error_code falls back to the raw result.error', async () => {
+    queryBalance.mockResolvedValue({
+      success: false,
+      error_code: '不在白名单里的码',
+      error: '原文'
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('原文')
+    expect(wrapper.text()).not.toContain('本地化:')
+  })
+
+  // ===== 卡 B2 回归锁：异常路径（queryBalance reject）错误行 title 不能丢失 =====
+  // 卡 B 把 :title 从 error 改为 errorTitle 后，catch 分支只设 error.value、未设
+  // errorTitle.value → title 变空，hover 看不到完整原文。本用例锁死：
+  // ① 正文为截断文本（含 "..." 结尾，与 truncatedError 一致）；
+  // ② title 非空且含完整原文（含末尾 FULL_TAIL_MARKER），可 hover 看全文。
+  it('queryBalance reject (exception path): body truncated but title keeps full error text', async () => {
+    // 模拟后端原文被 truncate 到 80 字符仍远超阈值的长英文错误，结尾放唯一标记。
+    const longError =
+      'upstream request failed: ' + 'x'.repeat(70) + ' FULL_TAIL_MARKER'
+    queryBalance.mockRejectedValue({ message: longError })
+
+    // 注意：不设 expires_at，避免订阅有效期 span 也带 title 干扰错误行选择器。
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    // 错误行是模板里唯一带 truncate 类的 div（且 v-if="error"）。
+    const errDiv = wrapper.get('div.truncate')
+
+    // ① 正文为截断后的文本（含 "..." 结尾），与既有 truncatedError 行为一致。
+    expect(errDiv.text()).toMatch(/\.\.\.$/)
+    expect(errDiv.text()).not.toContain('FULL_TAIL_MARKER')
+
+    // ② title 非空且包含完整原文（含末尾 FULL_TAIL_MARKER），可 hover 看全文。
+    const title = errDiv.attributes('title')
+    expect(title).toBeTruthy()
+    expect(title).toContain('FULL_TAIL_MARKER')
+    expect(title).toBe(longError)
+  })
 })

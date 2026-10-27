@@ -417,6 +417,91 @@ func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionKeepsSnapshot(
 	require.Empty(t, repo.extraWrites, "expired subscription must not overwrite last good snapshot")
 }
 
+// 上游订阅失效分支错误码化：上游 200 + body 含 planName、无 remaining 时，
+// ErrorCode 置 CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE，Success=false，
+// Error 仍含 "expired"，且**不落库 extra**（保留上次好快照）。
+func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionErrorCode(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"mode":"unrestricted","isValid":true,"planName":"kimi订阅 ","unit":"USD"}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.Equal(t, CNBalanceErrUpstreamSubscriptionUnavailable, result.ErrorCode)
+	require.Contains(t, result.Error, "expired")
+	require.Contains(t, result.Error, "kimi订阅")
+	require.Empty(t, repo.extraWrites, "expired subscription must not overwrite last good snapshot")
+}
+
+// 成功路径（上游返回 remaining）：ErrorCode 必须为空串（不误伤正常余额口径）。
+func TestCNProviderBalanceService_RelayOverrideSuccessHasEmptyErrorCode(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"remaining":12.5,"unit":"USD","isValid":true,"planName":"DeepSeek订阅"}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Empty(t, result.ErrorCode)
+}
+
+// one-api 形状（body 含 data.unlimited_quota=true）：ErrorCode 必须为空串。
+func TestCNProviderBalanceService_RelayOverrideOneApiUnlimitedHasEmptyErrorCode(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled":     true,
+		"url":         "https://inferaiapi.example.com/api/usage/token",
+		"bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"code":true,"data":{"unlimited_quota":true,"total_available":1,"total_used":0,"expires_at":0,"name":"长期 代理春风","object":"token_usage"}}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Empty(t, result.ErrorCode)
+}
+
+// 无 planName 的 missing remaining 分支：ErrorCode 必须为空串（仍走原文回退）。
+func TestCNProviderBalanceService_RelayOverrideMissingRemainingNoPlanEmptyErrorCode(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"mode":"unrestricted","isValid":true,"unit":"USD"}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.Empty(t, result.ErrorCode)
+	require.Contains(t, result.Error, "Invalid balance response: missing remaining")
+	require.Empty(t, repo.extraWrites)
+}
+
 // one-api/New API 系中转 token 配额形状（2026-10-08 星思云站生产实测）：
 // data.unlimited_quota=true 视为订阅制不限量，Unlimited 落库、PlanName 落令牌名，
 // 同时 total_available=剩余次数（1）落数字快照供前端『剩余 N』展示。

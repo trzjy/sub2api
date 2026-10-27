@@ -101,7 +101,7 @@
       </button>
     </div>
 
-    <div v-if="error" class="truncate text-[10px] text-red-600 dark:text-red-400" :title="error">
+    <div v-if="error" class="truncate text-[10px] text-red-600 dark:text-red-400" :title="errorTitle || error">
       {{ truncatedError }}
     </div>
   </div>
@@ -164,6 +164,9 @@ const visible = computed(() => {
 
 const loading = ref(false)
 const error = ref<string | null>(null)
+// 错误行的 title 兜底：命中本地化映射时，原始 result.error 仍挂到 title 上，
+// 避免把原始报错整段丢掉（运营可 hover 看上游原文）。
+const errorTitle = ref<string>('')
 const data = ref<CNProviderBalanceResult | null>(null)
 
 const extraKey = (suffix: string) => `${props.account.platform}_${suffix}`
@@ -407,7 +410,9 @@ const PROBE_ERROR_CODES = [
   'CN_BALANCE_NO_ENDPOINT',
   'CN_BALANCE_URL_REJECTED',
   'CN_BALANCE_INVALID_PLATFORM',
-  'CN_BALANCE_ACCOUNT_NOT_FOUND'
+  'CN_BALANCE_ACCOUNT_NOT_FOUND',
+  // 上游订阅已到期/不可用：余额查不到，需运营去上游续费/换账号（本地化出口见 handleProbe）。
+  'CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE'
 ] as const
 
 // 错误码取数：后端错误信封把稳定码放在 reason（response 包 Response.Reason），拦截器
@@ -454,13 +459,24 @@ const handleProbe = async () => {
   if (loading.value) return
   loading.value = true
   error.value = null
+  errorTitle.value = ''
   try {
     const result = await adminAPI.cnProviders.queryBalance(props.account.id)
     // 失败时保留快照展示（仅显示错误行），成功才覆盖。
     if (result.success) {
       data.value = result
     } else {
-      error.value = result.error || t('common.error')
+      // 探测返回 success=false：先看 error_code 是否命中白名单（同时充当 i18n key 注入闸），
+      // 命中则走本地化文案；未命中维持现状（result.error 原文）。原始 result.error 始终保留
+      // 到 errorTitle 作为 title 兜底，不整段丢弃。
+      const code = result.error_code
+      if (code && (PROBE_ERROR_CODES as readonly string[]).includes(code)) {
+        errorTitle.value = result.error || ''
+        error.value = t(`admin.accounts.cnProviders.probeErrors.${code}`)
+      } else {
+        errorTitle.value = result.error || ''
+        error.value = result.error || t('common.error')
+      }
     }
   } catch (e) {
     error.value = extractErrorMessage(e)
@@ -474,6 +490,7 @@ watch(
   () => {
     data.value = null
     error.value = null
+    errorTitle.value = ''
     loading.value = false
   }
 )

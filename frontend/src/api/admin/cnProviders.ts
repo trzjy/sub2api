@@ -144,6 +144,13 @@ export interface CNProviderBalanceResult {
   fetched_at: number
   persisted: boolean
   error?: string
+  /**
+   * 可归类的失败类别码，对齐后端 CNProviderBalanceResult.ErrorCode。
+   * 仅在「可归类失败类别」上有值（如上游订阅失效分支填
+   * CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE）；成功路径与其它失败分支为缺省（空串，
+   * JSON 里不出现该键）。
+   */
+  error_code?: string
 }
 
 /** 查询 Coding Plan 滚动窗口用量（5h + weekly）。 */

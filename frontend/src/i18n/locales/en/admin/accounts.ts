@@ -413,7 +413,8 @@ export default {
           CN_BALANCE_NO_ENDPOINT: 'This account platform has no balance query endpoint',
           CN_BALANCE_URL_REJECTED: 'The balance probe URL is not allowed, please check the probe URL configuration',
           CN_BALANCE_INVALID_PLATFORM: 'This account is not a CN provider account, balance probing is unsupported',
-          CN_BALANCE_ACCOUNT_NOT_FOUND: 'Account does not exist or has been deleted'
+          CN_BALANCE_ACCOUNT_NOT_FOUND: 'Account does not exist or has been deleted',
+          CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE: 'The upstream subscription has expired or is unavailable, balance cannot be queried; please renew or change the account on the upstream provider'
         }
       },
       types: {
