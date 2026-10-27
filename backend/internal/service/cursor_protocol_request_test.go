@@ -286,8 +286,9 @@ func TestCursorProtocolRequestDropsOutOfScopeFields(t *testing.T) {
 		require.Equal(t, "get_weather", cursorTestFieldString(def, cursorFldMcpToolDefToolName))
 		require.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(def, cursorFldMcpToolDefProvider))
 		require.Equal(t, "Get the weather.", cursorTestFieldString(def, cursorFldMcpToolDefDescription))
+		// input_schema 走 f3（google.protobuf.Value）：还原为 JSON 后与原始 schema 相等。
 		require.JSONEq(t, `{"type":"object","properties":{"city":{"type":"string"}}}`,
-			cursorTestFieldString(def, cursorFldMcpToolDefInputSchema))
+			cursorTestRestoreF3Schema(t, def))
 	})
 
 	t.Run("tool_choice=none 时不声明工具（等价无 tools）", func(t *testing.T) {

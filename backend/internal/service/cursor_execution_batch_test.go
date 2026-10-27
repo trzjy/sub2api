@@ -220,11 +220,20 @@ func cursorTestToolRequestsListedFrame(t *testing.T, count uint64) []byte {
 }
 
 // cursorTestParseToolStream 用**本地**委托记录解析整段流并返回该记录（唯一解码点在 parser）。
+//
+// 独立 parser 路径不经由 duplex，必须显式挂载请求 f4 原始字节，否则
+// cursorRetypeArgsByToolDefs 取不到 get_weather 的 input_schema → schema_absent 失败关闭。
+// 这里复用现有编码器 cursorTestBuildToolDef 构造 get_weather 原始 f4 definition（与生产
+// cursorBuildMcpTools 同形），不加新编码、不放宽 schema_absent。
 func cursorTestParseToolStream(t *testing.T, body []byte) *cursorToolDelegations {
 	t.Helper()
 	delegations := newLocalCursorToolDelegations()
 	parser := cursorNewStreamParser("m")
 	parser.attachToolDelegations(delegations)
+	parser.attachToolSchemas([][]byte{
+		cursorTestBuildToolDef(t, "get_weather",
+			`{"type":"object","properties":{"city":{"type":"string"}}}`),
+	})
 	_, err := parser.cursorParseStream(body)
 	require.NoError(t, err)
 	return delegations

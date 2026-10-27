@@ -35,6 +35,9 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // Cursor AgentRun 协议字段号（全部来自已取证 schema，**不得臆造**）。
@@ -86,7 +89,14 @@ const (
 	cursorFldMcpToolDefDescription = 2 // McpToolDefinition.f2 = description
 	cursorFldMcpToolDefProvider    = 4 // McpToolDefinition.f4 = provider_identifier
 	cursorFldMcpToolDefToolName    = 5 // McpToolDefinition.f5 = tool_name
-	cursorFldMcpToolDefInputSchema = 6 // McpToolDefinition.f6 = input_schema_json
+	// cursorFldMcpToolDefInputSchemaValue 是 McpToolDefinition.f3：input_schema 以
+	// google.protobuf.Value 承载（AgentRun 真实出站同形）。新生产构造**只写 f3**，
+	// 不再写 f6 字符串。
+	cursorFldMcpToolDefInputSchemaValue = 3
+	// cursorFldMcpToolDefInputSchemaLegacy 是旧字段 f6（input_schema_json 字符串）。
+	// 仅供 cursorToolSchemaIndex 解析既有历史夹具（按 f6 编码的字节）时回落读取；
+	// 新生产路径不写 f6。
+	cursorFldMcpToolDefInputSchemaLegacy = 6
 )
 
 // cursorMcpProviderIdentifier 是本层声明 MCP 工具时固定的 provider 标识。
@@ -179,7 +189,11 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// f4（McpTools）声明给上游；否则保持空 message（f4 字段存在、长度 0，与活体样本
 	// 同形——既满足"无 tools 时零变化"的纯文本链回归保护，也保住 33/63 号黄金字节）。
 	declared := cursorResolveDeclaredTools(req)
-	run = cursorAppendBytesField(run, cursorFldRunMcpTools, cursorBuildMcpTools(declared))
+	mcpTools, err := cursorBuildMcpTools(declared)
+	if err != nil {
+		return nil, "", err
+	}
+	run = cursorAppendBytesField(run, cursorFldRunMcpTools, mcpTools)
 	run = cursorAppendStringField(run, cursorFldRunConversationID, conversationID)
 	for _, b := range blobs {
 		blob := cursorAppendBytesField(nil, cursorFldBlobID, b.id)
@@ -248,10 +262,12 @@ func cursorFunctionTools(tools []apicompat.ChatTool) []apicompat.ChatTool {
 // cursorBuildMcpTools 把一组 function 工具编码为 AgentRunRequest.f4（McpTools）内容。
 //
 // 每个函数生成一条 McpToolDefinition（McpTools.f1 repeated），五个字段都要写：
-// f1 name / f2 description / f4 provider_identifier="sub2api" / f5 tool_name / f6
-// input_schema_json（parameters 原样 JSON 字符串，缺省补 "{}" 避免上游显示 unnamed）。
+// f1 name / f2 description / f4 provider_identifier="sub2api" / f5 tool_name /
+// f3 input_schema（google.protobuf.Value，由 function.parameters 的 JSON 经
+// structpb + proto.Marshal 编码，与 AgentRun 真实出站同形；schema 缺失补空 Struct，
+// 非法 JSON 失败关闭，绝不静默丢工具）。
 // 返回空切片表示"无声明"（f4 保持空 message，与活体样本同形）。
-func cursorBuildMcpTools(tools []apicompat.ChatTool) []byte {
+func cursorBuildMcpTools(tools []apicompat.ChatTool) ([]byte, error) {
 	var mcp []byte
 	for _, t := range tools {
 		if t.Function == nil || t.Function.Name == "" {
@@ -261,15 +277,27 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool) []byte {
 		if strings.TrimSpace(schema) == "" || schema == "null" {
 			schema = "{}"
 		}
+		// schema 必须是合法 JSON 对象，才能编码进 google.protobuf.Value；
+		// 非法则**失败关闭**（不静默丢工具、不猜宽松 fallback）。
+		value := &structpb.Value{}
+		if err := protojson.Unmarshal([]byte(schema), value); err != nil {
+			return nil, fmt.Errorf(
+				"%w: tool %q: invalid input_schema JSON: %v", ErrCursorUnsupportedRequest, t.Function.Name, err)
+		}
+		valBytes, err := proto.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"%w: tool %q: marshal input_schema Value: %v", ErrCursorUnsupportedRequest, t.Function.Name, err)
+		}
 		var def []byte
 		def = cursorAppendStringField(def, cursorFldMcpToolDefName, t.Function.Name)
 		def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, t.Function.Description)
 		def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
 		def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, t.Function.Name)
-		def = cursorAppendStringField(def, cursorFldMcpToolDefInputSchema, schema)
+		def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, valBytes)
 		mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
 	}
-	return mcp
+	return mcp, nil
 }
 
 // cursorAgentTurn 是一条已归一化的对话轮次（角色 + 纯文本）。

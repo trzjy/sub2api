@@ -14,20 +14,26 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // cursorTestBuildToolDef 构造一条 McpToolDefinition 原始字节（f1 名 / f2 description /
-// f4 provider / f5 tool_name / f6 input_schema），与 cursorBuildMcpTools 同形，
-// 仅用于测试夹具（不重新序列化 req.Tools）。
+// f4 provider / f5 tool_name / f3 input_schema(google.protobuf.Value)），与
+// cursorBuildMcpTools 生产构造同形（仅用于测试夹具，不重新序列化 req.Tools）。
 func cursorTestBuildToolDef(t *testing.T, toolName, schema string) []byte {
 	t.Helper()
+	v := &structpb.Value{}
+	require.NoError(t, protojson.Unmarshal([]byte(schema), v))
+	b, err := proto.Marshal(v)
+	require.NoError(t, err)
 	var def []byte
 	def = cursorAppendStringField(def, cursorFldMcpToolDefName, toolName)
 	def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, "desc-"+toolName)
 	def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
 	def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, toolName)
-	def = cursorAppendStringField(def, cursorFldMcpToolDefInputSchema, schema)
+	def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, b)
 	return def
 }
 
@@ -37,6 +43,17 @@ func TestCursorToolSchemaIndex(t *testing.T) {
 		cursorTestBuildToolDef(t, "get_weather", `{"type":"object","properties":{"city":{"type":"string"}}}`),
 		cursorTestBuildToolDef(t, "calc", `{"type":"object","properties":{"a":{"type":"array","items":{"type":"number"}}}}`),
 	}
+
+	// 字节级断言：每条 def 必须有 f3、无 f6（新生产构造只写 f3，不写 f6）。
+	for _, raw := range defs {
+		fields, err := cursorDecodeProtobuf(raw)
+		require.NoError(t, err)
+		_, hasF3 := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
+		require.True(t, hasF3, "McpToolDefinition must carry f3 input_schema Value")
+		_, hasF6 := cursorFindField(fields, cursorFldMcpToolDefInputSchemaLegacy)
+		require.False(t, hasF6, "McpToolDefinition must NOT carry legacy f6 in production construction")
+	}
+
 	idx := cursorToolSchemaIndex(defs)
 	require.Len(t, idx, 2)
 	require.JSONEq(t, `{"type":"object","properties":{"city":{"type":"string"}}}`, string(idx["get_weather"]))
@@ -45,6 +62,20 @@ func TestCursorToolSchemaIndex(t *testing.T) {
 	// 工具名不在声明集 → 取不到。
 	_, ok := idx["nope"]
 	require.False(t, ok)
+}
+
+// TestCursorToolSchemaIndexLegacyF6Fallback 验证历史夹具（仅写 f6 字符串、无 f3）仍能被
+// 还原——保证 schema index 的既有 f6 历史兼容不被破坏（新生产构造不写 f6，仅回落读取）。
+func TestCursorToolSchemaIndexLegacyF6Fallback(t *testing.T) {
+	var def []byte
+	def = cursorAppendStringField(def, cursorFldMcpToolDefName, "legacy_tool")
+	def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, "legacy_tool")
+	def = cursorAppendStringField(def, cursorFldMcpToolDefInputSchemaLegacy,
+		`{"type":"object","properties":{"q":{"type":"string"}}}`)
+
+	idx := cursorToolSchemaIndex([][]byte{def})
+	require.Len(t, idx, 1)
+	require.JSONEq(t, `{"type":"object","properties":{"q":{"type":"string"}}}`, string(idx["legacy_tool"]))
 }
 
 // TestCursorRetypeScalars 数值/布尔还原（probe19 实测：解析即等价于正确路径 double）。

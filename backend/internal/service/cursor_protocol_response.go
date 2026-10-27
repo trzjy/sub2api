@@ -1358,8 +1358,12 @@ func cursorRetypeErrorf(reason cursorRetypeErrReason) error {
 }
 
 // cursorToolSchemaIndex 从 f4（McpTools）的每条 McpToolDefinition 原始字节解出
-// f5 tool_name → f6 input_schema_json。来源必须是请求体 f4 原始字节（经
+// f5 tool_name → input_schema JSON。来源必须是请求体 f4 原始字节（经
 // cursorBuildMcpTools 实际发出的字节），不得改用 req.Tools 重新序列化。
+//
+// input_schema 的还原优先走 f3（google.protobuf.Value）：经 proto.Unmarshal 解回
+// structpb.Value，再 protojson.Marshal + 归一化还原为 JSON。**仅为历史夹具兼容**
+// 才回落读 f6（旧 input_schema_json 字符串）；新生产构造只写 f3，不写 f6。
 func cursorToolSchemaIndex(defs [][]byte) map[string][]byte {
 	idx := make(map[string][]byte, len(defs))
 	for _, raw := range defs {
@@ -1367,20 +1371,54 @@ func cursorToolSchemaIndex(defs [][]byte) map[string][]byte {
 		if err != nil {
 			continue
 		}
-		var name, schema string
+		var name string
+		var f3Val []byte
+		var f6Legacy string
 		for _, f := range fields {
 			switch f.Number {
 			case cursorFldMcpToolDefToolName:
 				name = f.String()
-			case cursorFldMcpToolDefInputSchema:
-				schema = f.String()
+			case cursorFldMcpToolDefInputSchemaValue:
+				f3Val = f.Bytes
+			case cursorFldMcpToolDefInputSchemaLegacy:
+				f6Legacy = f.String()
 			}
 		}
-		if name != "" && schema != "" {
-			idx[name] = []byte(schema)
+		if name == "" {
+			continue
+		}
+		// 优先 f3（google.protobuf.Value），历史夹具无 f3 才回落 f6。
+		if schema, ok := cursorSchemaFromF3(f3Val); ok {
+			idx[name] = schema
+			continue
+		}
+		if f6Legacy != "" {
+			idx[name] = []byte(f6Legacy)
 		}
 	}
 	return idx
+}
+
+// cursorSchemaFromF3 把 f3（google.protobuf.Value）的 protobuf 字节还原为规范 JSON。
+// 还原失败（非法 Value / protojson 异常 / 不可压缩）返回 (nil, false)，交由调用方
+// 回落读取历史 f6 兜底。
+func cursorSchemaFromF3(b []byte) ([]byte, bool) {
+	if len(b) == 0 {
+		return nil, false
+	}
+	v := &structpb.Value{}
+	if err := proto.Unmarshal(b, v); err != nil {
+		return nil, false
+	}
+	out, err := protojson.Marshal(v)
+	if err != nil {
+		return nil, false
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, out); err != nil {
+		return nil, false
+	}
+	return buf.Bytes(), true
 }
 
 // isJSONNumberLiteral 按 RFC 8259 数字语法做词法校验（不含解析）。

@@ -7,6 +7,7 @@ package service
 // 断言以字节级回读为主（不只断言"不报错"），确保字段号与嵌套层级真的写对了。
 
 import (
+	"bytes"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -26,6 +28,23 @@ func cursorTestFieldString(fields []cursorPBField, n int) string {
 		return ""
 	}
 	return f.String()
+}
+
+// cursorTestRestoreF3Schema 把解码后的 McpToolDefinition 字段里 f3（google.protobuf.Value）
+// 还原为规范 JSON 字符串，并断言 f3 存在、f6 不存在（字节级：新生产构造只写 f3）。
+func cursorTestRestoreF3Schema(t *testing.T, fields []cursorPBField) string {
+	t.Helper()
+	f3, ok := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
+	require.True(t, ok, "f3 input_schema Value must be present")
+	_, hasF6 := cursorFindField(fields, cursorFldMcpToolDefInputSchemaLegacy)
+	require.False(t, hasF6, "f6 must NOT be written in production construction")
+	v := &structpb.Value{}
+	require.NoError(t, proto.Unmarshal(f3.Bytes, v))
+	out, err := protojson.Marshal(v)
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	require.NoError(t, json.Compact(&buf, out))
+	return buf.String()
 }
 
 // cursorDuplexReadReplyAsync 启动一个并发读取 goroutine 并返回结果通道。
@@ -180,6 +199,27 @@ func cursorToolTestStreamBody(frames ...[]byte) []byte {
 	return buf
 }
 
+// cursorTestDeclaredToolDefs 从声明了工具的请求体里解出 f4 每条 McpToolDefinition 原始字节
+// （与 duplex 路径同源：经 cursorConvertRequest 实际发出的 f4），供独立解析路径
+// attachToolSchemas 注入，使 parser 能按 tool_name 取回 input_schema 做 retype。
+// 不放宽 schema_absent：来源必须是真实 f4 原始字节，不得改用 req.Tools 重新序列化。
+func cursorTestDeclaredToolDefs(t *testing.T, req *apicompat.ChatCompletionsRequest) [][]byte {
+	t.Helper()
+	body, err := cursorConvertRequest(req, "grok-4.7")
+	require.NoError(t, err)
+	run := cursorAgentRunOf(t, body)
+	mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
+	require.True(t, ok, "f4 (McpTools) must be present")
+	require.NotEmpty(t, mcp.Bytes)
+	mcpFields, e := cursorDecodeProtobuf(mcp.Bytes)
+	require.NoError(t, e)
+	defs := [][]byte{}
+	for _, def := range cursorAllFields(mcpFields, cursorFldMcpToolsTool) {
+		defs = append(defs, def.Bytes)
+	}
+	return defs
+}
+
 // ---------------------------------------------------------------------------
 // 1. 声明编码：tools[2] → f4 存在、McpToolDefinition 五字段齐、repeated 逐项
 // ---------------------------------------------------------------------------
@@ -219,8 +259,9 @@ func TestCursorToolDeclarationEncoding(t *testing.T) {
 		require.Equal(t, name, cursorTestFieldString(fields, cursorFldMcpToolDefToolName), "f5 tool_name must equal f1 name")
 		require.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(fields, cursorFldMcpToolDefProvider))
 		require.NotEmpty(t, cursorTestFieldString(fields, cursorFldMcpToolDefDescription))
+		// input_schema 走 f3（google.protobuf.Value）：还原为 JSON 后与原 schema 相等。
 		require.JSONEq(t, []string{`{"type":"object"}`, `{"type":"object","x":1}`}[i],
-			cursorTestFieldString(fields, cursorFldMcpToolDefInputSchema))
+			cursorTestRestoreF3Schema(t, fields))
 	}
 }
 
@@ -453,9 +494,21 @@ func TestCursorFinishReasonWithToolCall(t *testing.T) {
 		cursorToolTestTurnEndedFrame(10, 5),
 	)
 
+	// 独立解析路径（非 duplex）必须注入本请求 f4 原始字节，否则按 tool_name 取回
+	// input_schema 失败 → schema_absent 失败关闭（§B 两路径一致，不放宽）。来源与
+	// duplex 同源：声明同名的 get_weather 工具，取其 cursorConvertRequest 实际发出的 f4。
+	defs := cursorTestDeclaredToolDefs(t, &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools: []apicompat.ChatTool{{Type: "function", Function: &apicompat.ChatFunction{
+			Name: "get_weather", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+	})
+
 	// 非流式：tool_calls 字段 + finish_reason=tool_calls。
-	completion, err := cursorParseStreamToCompletion(body, "grok-4.7")
+	p := cursorNewStreamParser("grok-4.7")
+	p.attachToolSchemas(defs)
+	_, err := p.cursorParseStream(body)
 	require.NoError(t, err)
+	completion := p.cursorBuildNonStreamingCompletion()
 	require.Contains(t, string(completion), `"finish_reason":"tool_calls"`)
 	require.Contains(t, string(completion), `"tool_calls":`)
 	require.Contains(t, string(completion), `"name":"get_weather"`)
@@ -465,8 +518,15 @@ func TestCursorFinishReasonWithToolCall(t *testing.T) {
 	require.Contains(t, string(completion), `"output_tokens":5`)
 
 	// 流式：SSE 含 tool_calls delta 与 finish_reason=tool_calls。
-	sse, err := cursorParseStreamToSSE(body, "grok-4.7")
+	p2 := cursorNewStreamParser("grok-4.7")
+	p2.attachToolSchemas(defs)
+	lines, err := p2.cursorParseStream(body)
 	require.NoError(t, err)
+	var sse []byte
+	for _, l := range lines {
+		sse = append(sse, l...)
+	}
+	sse = append(sse, cursorSSEDoneSentinel...)
 	require.Contains(t, string(sse), `"finish_reason":"tool_calls"`)
 	require.Contains(t, string(sse), `"tool_calls":`)
 	require.Contains(t, string(sse), `"name":"get_weather"`)
