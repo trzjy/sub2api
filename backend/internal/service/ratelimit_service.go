@@ -428,8 +428,9 @@ func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Accoun
 	}
 	if account.IsPoolMode() {
 		// 池模式只跳过默认账号状态处理；管理员显式配置的临时不可调度规则仍应生效。
-		// 401 保留现有认证错误语义，避免改变重复 401 的升级行为。
-		if statusCode != http.StatusUnauthorized && s.tryTempUnschedulable(ctx, account, statusCode, responseBody) {
+		// 401 只在非凭据级且命中显式模型级规则时由规则处理，其余保留现有认证错误语义。
+		if tempUnschedRulesApply(account, statusCode, responseBody, tempUnschedulableModel(ctx, nil)) &&
+			s.tryTempUnschedulable(ctx, account, statusCode, responseBody) {
 			return ErrorPolicyTempUnscheduled
 		}
 		return ErrorPolicySkipped
@@ -455,9 +456,10 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 	customErrorCodesEnabled := account.IsCustomErrorCodesEnabled()
 
 	// 池模式默认不标记本地账号状态；但管理员显式配置的临时不可调度规则优先。
-	// 401 保留现有认证错误语义，不在这里改变池模式的认证处理。
+	// 401 只在非凭据级且命中显式模型级规则时由规则处理，其余保留池模式现有的认证处理。
 	if account.IsPoolMode() && !customErrorCodesEnabled {
-		if statusCode != http.StatusUnauthorized && s.tryTempUnschedulable(ctx, account, statusCode, responseBody) {
+		if tempUnschedRulesApply(account, statusCode, responseBody, tempUnschedulableModel(ctx, nil)) &&
+			s.tryTempUnschedulable(ctx, account, statusCode, responseBody) {
 			return true
 		}
 		// 池模式 401 升级处置（codebuddy-shadow-429 方案 §3 T5）：单次 401 仍不罚账号
@@ -509,9 +511,9 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		}
 	}
 
-	// 先尝试临时不可调度规则（401除外）
+	// 先尝试临时不可调度规则（401 仅限非凭据级且命中显式模型级规则）
 	// 如果匹配成功，直接返回，不执行后续禁用逻辑
-	if statusCode != 401 {
+	if tempUnschedRulesApply(account, statusCode, responseBody, tempUnschedulableModel(ctx, requestedModel)) {
 		if s.tryTempUnschedulable(ctx, account, statusCode, responseBody, firstRequestedModel(requestedModel)) {
 			return true
 		}
@@ -1169,9 +1171,6 @@ func buildForbiddenErrorMessage(prefix string, upstreamMsg string, responseBody 
 	return prefix + fallback
 }
 
-// handle403 处理 403 Forbidden 错误
-// Antigravity 平台区分 validation/violation/generic 三种类型，均 SetError 永久禁用；
-// 其他平台保持原有 SetError 行为。
 // isCNCoolingEligible 报告账号是否走国产供应商（CN）余额/额度/403/429 冷却链。
 // web 接入模式账号（access_mode=web）虽属官方平台，但无 API 余额/额度概念，
 // 不得被吸入 CN 冷却链（方案 §6 红线，单测钉住）。
@@ -1179,7 +1178,20 @@ func isCNCoolingEligible(account *Account) bool {
 	return account != nil && account.IsCNProvider() && !account.IsWebAccessMode()
 }
 
+// handle403 处理 403 Forbidden 错误
+// Antigravity 平台区分 validation/violation/generic 三种类型，均 SetError 永久禁用；
+// Cloudflare 1010 是请求/边缘级拦截，不应视为账号级故障；其他平台保持既有行为。
 func (s *RateLimitService) handle403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte) (shouldDisable bool) {
+	if isCloudflareBotBlockResponse(responseBody) {
+		slog.Warn(
+			"403_cloudflare_bot_block_skips_account_penalty",
+			"account_id", account.ID,
+			"platform", account.Platform,
+			"upstream_message", upstreamMsg,
+		)
+		return false
+	}
+
 	if account.Platform == PlatformAntigravity {
 		return s.handleAntigravity403(ctx, account, upstreamMsg, responseBody)
 	}
@@ -1392,7 +1404,60 @@ func (s *RateLimitService) writeF3ThreeStrikeEntry(ctx context.Context, account 
 // request/edge-level failure and must not consume the account 403 strike budget.
 func isCloudflareBotBlockResponse(body []byte) bool {
 	normalized := strings.ToLower(strings.TrimSpace(string(body)))
+	var payload any
+	if json.Unmarshal(body, &payload) == nil {
+		return containsCloudflareBotBlockCode(payload)
+	}
 	return strings.Contains(normalized, "error code: 1010")
+}
+
+func containsCloudflareBotBlockCode(value any) bool {
+	switch node := value.(type) {
+	case map[string]any:
+		cloudflareError := false
+		for key, child := range node {
+			if strings.EqualFold(key, "cloudflare_error") {
+				if is, ok := child.(bool); ok && is {
+					cloudflareError = true
+				}
+			}
+		}
+		for key, child := range node {
+			if strings.EqualFold(key, "error_name") {
+				if name, ok := child.(string); ok && strings.EqualFold(strings.TrimSpace(name), "browser_signature_banned") {
+					return true
+				}
+			}
+			if cloudflareError && (strings.EqualFold(key, "code") || strings.EqualFold(key, "error_code")) {
+				if isCloudflareBotBlockCode(child) {
+					return true
+				}
+			}
+			if containsCloudflareBotBlockCode(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range node {
+			if containsCloudflareBotBlockCode(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isCloudflareBotBlockCode(value any) bool {
+	switch code := value.(type) {
+	case float64:
+		return code == 1010
+	case json.Number:
+		return code == "1010"
+	case string:
+		return strings.TrimSpace(code) == "1010"
+	default:
+		return false
+	}
 }
 
 // handleAntigravity403 处理 Antigravity 平台的 403 错误
@@ -2982,6 +3047,62 @@ func firstRequestedModel(requestedModel []string) string {
 	return strings.TrimSpace(requestedModel[0])
 }
 
+// tempUnschedRulesApply 决定本次错误是否交给临时不可调度规则处理。
+// 401 默认留给认证错误处理；只有首条命中规则按模型级生效时，才由规则只冷却该模型。
+func tempUnschedRulesApply(account *Account, statusCode int, responseBody []byte, modelKey string) bool {
+	if statusCode != http.StatusUnauthorized {
+		return true
+	}
+	matches := matchTempUnschedulableRules(account, statusCode, responseBody)
+	return len(matches) > 0 && tempUnschedHitUsesModelScope(account, matches[0].rule, modelKey, statusCode, responseBody)
+}
+
+// tempUnschedHitUsesModelScope 决定一次命中是否按模型级冷却：凭据级 401 始终按账号处理，
+// 其余由规则作用范围决定。
+func tempUnschedHitUsesModelScope(account *Account, rule TempUnschedulableRule, modelKey string, statusCode int, responseBody []byte) bool {
+	if statusCode == http.StatusUnauthorized && unauthorizedRequiresCredentialHandling(account, responseBody) {
+		return false
+	}
+	return tempUnschedRuleUsesModelScope(rule, modelKey, statusCode)
+}
+
+// unauthorizedRequiresCredentialHandling 识别凭据级 401：OAuth 账号与 Spark 影子
+// （失效缓存、刷新窗口、缺 refresh_token 停用），以及 OpenAI 明确的凭据失效
+// （token_invalidated / token_revoked、{"detail":"Unauthorized"}）。
+func unauthorizedRequiresCredentialHandling(account *Account, responseBody []byte) bool {
+	if account == nil {
+		return false
+	}
+	if account.Type == AccountTypeOAuth || account.IsShadow() {
+		return true
+	}
+	if account.Platform != PlatformOpenAI {
+		return false
+	}
+	switch extractUpstreamErrorCode(responseBody) {
+	case "token_invalidated", "token_revoked":
+		return true
+	}
+	return gjson.GetBytes(responseBody, "detail").String() == "Unauthorized"
+}
+
+// tempUnschedRuleUsesModelScope 决定一次命中按模型级冷却还是账号级暂停。
+// 显式 scope 完全由规则决定；scope 为空时模型已知且非 401 走模型级。
+// 模型未知时无法隔离，一律账号级。
+func tempUnschedRuleUsesModelScope(rule TempUnschedulableRule, modelKey string, statusCode int) bool {
+	if strings.TrimSpace(modelKey) == "" {
+		return false
+	}
+	switch rule.Scope {
+	case TempUnschedScopeAccount:
+		return false
+	case TempUnschedScopeModel:
+		return true
+	default:
+		return statusCode != http.StatusUnauthorized
+	}
+}
+
 type tempUnschedulableModelContextKey struct{}
 
 func withTempUnschedulableModel(ctx context.Context, requestedModel []string) context.Context {
@@ -3046,10 +3167,17 @@ func (s *RateLimitService) tryTempUnschedulable(ctx context.Context, account *Ac
 	if !account.IsTempUnschedulableEnabled() {
 		return false
 	}
+	matches := matchTempUnschedulableRules(account, statusCode, responseBody)
+	if len(matches) == 0 {
+		return false
+	}
+	modelKey := tempUnschedulableModel(ctx, requestedModel)
 	// 401 首次命中可临时不可调度（给 token 刷新窗口）；
 	// 若历史上已因 401 进入过临时不可调度，则本次应升级为 error（返回 false 交由默认错误逻辑处理）。
 	// Antigravity 跳过：其 401 由 applyErrorPolicy 的 temp_unschedulable_rules 自行控制，无需升级逻辑。
-	if statusCode == http.StatusUnauthorized && account.Platform != PlatformAntigravity {
+	// 模型级命中只冷却模型、不写账号级状态，不参与升级。
+	if statusCode == http.StatusUnauthorized && account.Platform != PlatformAntigravity &&
+		!tempUnschedHitUsesModelScope(account, matches[0].rule, modelKey, statusCode, responseBody) {
 		reason := account.TempUnschedulableReason
 		// 缓存可能没有 reason，从 DB 回退读取
 		if reason == "" {
@@ -3063,8 +3191,8 @@ func (s *RateLimitService) tryTempUnschedulable(ctx context.Context, account *Ac
 			return false
 		}
 	}
-	for _, match := range matchTempUnschedulableRules(account, statusCode, responseBody) {
-		if s.triggerTempUnschedulable(ctx, account, match.rule, match.ruleIndex, statusCode, match.matchedKeyword, responseBody, tempUnschedulableModel(ctx, requestedModel)) {
+	for _, match := range matches {
+		if s.triggerTempUnschedulable(ctx, account, match.rule, match.ruleIndex, statusCode, match.matchedKeyword, responseBody, modelKey) {
 			return true
 		}
 	}
@@ -3114,6 +3242,8 @@ func (s *RateLimitService) triggerTempUnschedulable(ctx context.Context, account
 
 	now := time.Now()
 	until := now.Add(time.Duration(rule.DurationMinutes) * time.Minute)
+	modelKey := firstRequestedModel(requestedModel)
+	modelScoped := tempUnschedHitUsesModelScope(account, rule, modelKey, statusCode, responseBody)
 
 	state := &TempUnschedState{
 		UntilUnix:       until.Unix(),
@@ -3122,6 +3252,11 @@ func (s *RateLimitService) triggerTempUnschedulable(ctx context.Context, account
 		MatchedKeyword:  matchedKeyword,
 		RuleIndex:       ruleIndex,
 		ErrorMessage:    truncateTempUnschedMessage(responseBody, tempUnschedMessageMaxBytes),
+		Scope:           TempUnschedScopeAccount,
+	}
+	if modelScoped {
+		state.Scope = TempUnschedScopeModel
+		state.Model = modelKey
 	}
 
 	reason := ""
@@ -3132,18 +3267,16 @@ func (s *RateLimitService) triggerTempUnschedulable(ctx context.Context, account
 		reason = strings.TrimSpace(state.ErrorMessage)
 	}
 
-	// Persist known-model failures under the model key so the scheduler excludes
-	// only this (account, model) pair. Authentication and model-unknown failures
-	// retain the legacy account-wide temporary-unschedulable behavior below.
-	modelKey := firstRequestedModel(requestedModel)
-	if modelKey != "" && statusCode != http.StatusUnauthorized {
+	// Persist model-scoped hits under the model key so the scheduler excludes
+	// only this (account, model) pair; every other hit pauses the whole account below.
+	if modelScoped {
 		if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, modelKey, until, reason); err != nil {
 			slog.Warn("temp_unsched_model_rate_limit_set_failed", "account_id", account.ID, "model", modelKey, "error", err)
 			// The rule matched, so fail over the current request even if persistence
 			// failed; never widen a model-scoped failure into an account-wide block.
 			return true
 		}
-		slog.Info("account_model_temp_unschedulable", "account_id", account.ID, "model", modelKey, "until", until, "rule_index", ruleIndex, "status_code", statusCode)
+		slog.Info("account_model_temp_unschedulable", "account_id", account.ID, "model", modelKey, "until", until, "rule_index", ruleIndex, "rule_scope", rule.Scope, "status_code", statusCode)
 		return true
 	}
 
@@ -3159,7 +3292,7 @@ func (s *RateLimitService) triggerTempUnschedulable(ctx context.Context, account
 		}
 	}
 
-	slog.Info("account_temp_unschedulable", "account_id", account.ID, "until", until, "rule_index", ruleIndex, "status_code", statusCode)
+	slog.Info("account_temp_unschedulable", "account_id", account.ID, "until", until, "rule_index", ruleIndex, "rule_scope", rule.Scope, "status_code", statusCode)
 	return true
 }
 

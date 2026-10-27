@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -96,7 +97,7 @@ func (a *Account) modelRateLimitKeysForRequest(ctx context.Context, requestedMod
 	keys := []string{modelKey}
 	switch a.Platform {
 	case PlatformAntigravity:
-		if isAntigravityGeminiModel(modelKey) && modelKey != antigravityGeminiModelRateLimitKey {
+		if isAntigravityGeminiModel(modelKey) && !isAntigravityGeminiImageModel(modelKey) && modelKey != antigravityGeminiModelRateLimitKey {
 			keys = append(keys, antigravityGeminiModelRateLimitKey)
 		}
 	case PlatformOpenAI:
@@ -190,10 +191,15 @@ func antigravityModelRateLimitKeys(model string) []string {
 		return nil
 	}
 	keys := []string{model}
-	if isAntigravityGeminiModel(model) && model != antigravityGeminiModelRateLimitKey {
+	if isAntigravityGeminiModel(model) && !isAntigravityGeminiImageModel(model) && model != antigravityGeminiModelRateLimitKey {
 		keys = append(keys, antigravityGeminiModelRateLimitKey)
 	}
 	return keys
+}
+
+func isAntigravityGeminiImageModel(model string) bool {
+	normalized := normalizeAntigravityModelName(model)
+	return strings.HasPrefix(normalized, "gemini-") && strings.Contains(normalized, "-image")
 }
 
 // ActiveTokenHarborFreeTierScopes 是 TokenHarbor 免费档模型级限流候选判定的**权威导出
@@ -291,16 +297,20 @@ func (a *Account) modelRateLimitReason(scope string) string {
 	return reason
 }
 
+// setAccountModelRateLimitSnapshot 把模型级限流写进本账号对象的 Extra 快照。
+// 写时复制：Extra 与其中的 model_rate_limits 可能与调度快照母本及其它副本共享，
+// 这里只读取旧 map，写入新复制的 map 后替换 account.Extra，不修改任何已有 map。
 func setAccountModelRateLimitSnapshot(account *Account, scope string, resetAt time.Time, reason string, now time.Time) {
 	if account == nil || strings.TrimSpace(scope) == "" {
 		return
 	}
-	// 经并发安全边界读写 Extra：读原 model_rate_limits 子 map，局部改后整体写回。
+	// 写时复制：Extra 与其中的 model_rate_limits 可能与调度快照母本及其它副本共享，
+	// 这里只读取旧 map，写入新复制的 map 后整体替换，不修改任何已有 map。
+	// 读取走 ExtraValue（持锁），写入走 MergeExtra（唯一允许的并发写入口）。
 	v, _ := account.ExtraValue(modelRateLimitsKey)
-	limits, ok := v.(map[string]any)
-	if !ok {
-		limits = make(map[string]any)
-	}
+	oldLimits, _ := v.(map[string]any)
+	limits := make(map[string]any, len(oldLimits)+1)
+	maps.Copy(limits, oldLimits)
 	payload := map[string]any{
 		"rate_limited_at":     now.UTC().Format(time.RFC3339),
 		"rate_limit_reset_at": resetAt.UTC().Format(time.RFC3339),

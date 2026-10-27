@@ -147,8 +147,19 @@ func stripInternalSupplyPlatform(g *Group) {
 // Group 对象本身保留：分组 ID/名称、group_id 绑定状态与计费/能力字段原样，
 // 使用说明、协议能力判断与分组切换语义不受影响。
 func APIKeyFromServiceForUser(k *service.APIKey) *APIKey {
+	return APIKeyFromServiceForUserLocalized(k, "")
+}
+
+// APIKeyFromServiceForUserLocalized 在用户侧映射基础上按请求首选语言本地化分组名称/
+// 描述。两套语义（剥离内部供给平台身份 + 本地化）必须在同一出口串联，否则任一出口
+// 漏调都会造成平台身份泄漏或译文表泄漏给用户。
+func APIKeyFromServiceForUserLocalized(k *service.APIKey, acceptLanguage string) *APIKey {
 	out := APIKeyFromService(k)
-	if out == nil || out.Group == nil {
+	if out == nil {
+		return out
+	}
+	out.Localized(acceptLanguage)
+	if out.Group == nil {
 		return out
 	}
 	stripInternalSupplyPlatform(out.Group)
@@ -214,6 +225,7 @@ func groupFromServiceBase(g *service.Group) Group {
 		ID:                              g.ID,
 		Name:                            g.Name,
 		Description:                     g.Description,
+		I18n:                            g.I18n,
 		Platform:                        g.Platform,
 		RateMultiplier:                  g.RateMultiplier,
 		IsExclusive:                     g.IsExclusive,
@@ -390,8 +402,8 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		}
 	}
 
-	// 提取账号配额限制（apikey / bedrock 类型有效）
-	if a.IsAPIKeyOrBedrock() {
+	// 提取账号配额限制（apikey / bedrock / service_account 类型有效）
+	if a.SupportsAccountQuota() {
 		if limit := a.GetQuotaLimit(); limit > 0 {
 			out.QuotaLimit = &limit
 			used := a.GetQuotaUsed()

@@ -535,9 +535,12 @@ async function pollStatus() {
 
 function startCountdown(seconds: number) {
   remainingSeconds.value = Math.max(0, seconds)
+  // 以绝对截止时刻计时（避免标签页后台定时器节流导致的倒计时漂移）；
+  // 过期态按是否走上游二维码图区分 qr_expired / expired（保留本仓库语义）。
+  const deadline = Date.now() + remainingSeconds.value * 1000
   if (remainingSeconds.value <= 0) { setQrOutcome(); return }
   countdownTimer = setInterval(() => {
-    remainingSeconds.value--
+    remainingSeconds.value = Math.max(0, Math.floor((deadline - Date.now()) / 1000))
     if (remainingSeconds.value <= 0) { setQrOutcome(); cleanup() }
   }, 1000)
 }

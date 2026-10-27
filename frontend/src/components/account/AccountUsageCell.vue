@@ -533,6 +533,7 @@
         </span>
         <!-- Help icon -->
         <span
+          v-if="showGeminiQuotaPolicy"
           class="group relative cursor-help"
         >
           <svg
@@ -597,6 +598,29 @@
           <div class="h-3 w-8 animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
           <div class="h-3 w-12 animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
         </div>
+        <!-- Vertex 设置了配额上限：显示配额进度条 -->
+        <template v-if="isGeminiVertex">
+          <UsageProgressBar
+            v-if="quotaDailyBar"
+            label="1d"
+            :utilization="quotaDailyBar.utilization"
+            :resets-at="quotaDailyBar.resetsAt"
+            color="indigo"
+          />
+          <UsageProgressBar
+            v-if="quotaWeeklyBar"
+            label="7d"
+            :utilization="quotaWeeklyBar.utilization"
+            :resets-at="quotaWeeklyBar.resetsAt"
+            color="emerald"
+          />
+          <UsageProgressBar
+            v-if="quotaTotalBar"
+            label="total"
+            :utilization="quotaTotalBar.utilization"
+            color="purple"
+          />
+        </template>
         <div v-if="loading" class="space-y-1">
           <div class="flex items-center gap-1">
             <div class="h-3 w-[32px] animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
@@ -623,7 +647,7 @@
           </p>
         </div>
         <!-- AI Studio Client OAuth: show unlimited flow (no usage tracking) -->
-        <div v-else class="text-xs text-gray-400">
+        <div v-else-if="!showGeminiTodayStats" class="text-xs text-gray-400">
           {{ t('admin.accounts.gemini.rateLimit.unlimited') }}
         </div>
       </div>
@@ -673,8 +697,8 @@
         </div>
         <div v-else class="text-xs text-gray-400">-</div>
       </template>
-      <!-- Gemini API Key accounts: show quota info -->
-      <AccountQuotaInfo v-else-if="account.platform === 'gemini'" :account="account" />
+      <!-- Gemini API Key accounts: show quota info（第三方上游 API Key 无模拟配额，走下方面板） -->
+      <AccountQuotaInfo v-else-if="account.platform === 'gemini' && !isGeminiThirdPartyApiKey" :account="account" />
     <!-- Key/Bedrock accounts: show today stats + optional quota bars -->
     <div v-else class="space-y-1">
       <OllamaCloudUsageCell
@@ -816,6 +840,8 @@ import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber, formatDateOnly } from '@/utils/format'
 import { parseCodeBuddyCredit, parseCodeBuddyCreditError } from '@/utils/codebuddyCredit'
+import { isOfficialGeminiBaseUrl } from '@/utils/geminiExplicitCache'
+import { supportsAccountQuota } from '@/utils/accountQuota'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
@@ -829,7 +855,8 @@ import {
   cnBalanceCellVisible as cnBalanceCellVisibleFn,
   resolveAccountBaseURL,
   isVolcanoBaseURL,
-  isTokenHarborAccount
+  isTokenHarborAccount,
+  isMultiProtocolApiKeyPlatform
 } from './credentialsBuilder'
 // w37 conflict-resolution fusion (second wave, B10 — funds_or_state / semantic_conflict)
 // 冲突注记：[COMPILE] 我方可见性函数改三参，上游改单参 account，同一 computed 互斥（见 U8）。
@@ -1007,6 +1034,17 @@ let desktopViewportMediaQuery: MediaQueryList | null = null
 let desktopViewportListener: ((event: MediaQueryListEvent) => void) | null = null
 let visibilityObserver: IntersectionObserver | null = null
 
+// Gemini 第三方上游 API Key：没有 AI Studio 等级与本地模拟配额
+const isGeminiThirdPartyApiKey = computed(() => {
+  if (props.account.platform !== 'gemini' || props.account.type !== 'apikey') return false
+  const creds = props.account.credentials as GeminiCredentials | undefined
+  return !isOfficialGeminiBaseUrl(creds?.base_url)
+})
+
+const isGeminiVertex = computed(() => {
+  return props.account.platform === 'gemini' && props.account.type === 'service_account'
+})
+
 // Show usage windows for OAuth and Setup Token accounts
 // 网页接入模式账号（平台归并 PR-3：官方 CN 平台 + credentials["access_mode"]="web"）：
 // 专用展示分支。
@@ -1021,7 +1059,8 @@ const hasOpenCodeGoUsageProbe = computed(() =>
 
 const showUsageWindows = computed(() => {
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
-  if (props.account.platform === 'gemini') return true
+  // 第三方上游 API Key 没有模拟配额，按普通 Key 账号展示今日统计与额度进度条。
+  if (props.account.platform === 'gemini') return !isGeminiThirdPartyApiKey.value
   // 网页接入模式（W6）：免费额度无标准查询接口，不做探测；但账号参与调度，
   // 展示本地今日用量统计（web 专用分支，见下方 non-OAuth 分支）。
   if (isWebAccessModeAccount.value) {
@@ -1035,10 +1074,7 @@ const showUsageWindows = computed(() => {
   // 由 CNProviderQuotaCell / CNProviderBalanceCell 自行探测与展示。火山方舟订阅号
   // 按 base_url 识别（与 platform 解耦，账号仍存为 deepseek 平台）。
   if (
-    props.account.platform === 'kimi' ||
-    props.account.platform === 'zhipu' ||
-    props.account.platform === 'deepseek' ||
-    props.account.platform === 'minimax' ||
+    isMultiProtocolApiKeyPlatform(props.account.platform) ||
     isVolcanoAccount.value
   ) {
     return true
@@ -1056,7 +1092,7 @@ const shouldFetchUsage = computed(() => {
     return props.account.type === 'oauth' || props.account.type === 'setup-token'
   }
   if (props.account.platform === 'gemini') {
-    return true
+    return !isGeminiThirdPartyApiKey.value && !isGeminiVertex.value
   }
   if (props.account.platform === 'antigravity') {
     return props.account.type === 'oauth'
@@ -1121,8 +1157,9 @@ const isKiraAccount = computed(() => accountBaseURL.value.toLowerCase().includes
 
 const isBatchManaged = computed(() => typeof props.requestBatchedUsage === 'function')
 
+// Vertex 没有本地模拟配额，用量窗口展示今日统计
 const showGeminiTodayStats = computed(() => {
-  return props.account.platform === 'gemini' && props.account.type === 'service_account'
+  return isGeminiVertex.value
 })
 
 const geminiUsageAvailable = computed(() => {
@@ -1298,6 +1335,10 @@ const geminiOAuthType = computed(() => {
   return (creds?.oauth_type || '').trim() || null
 })
 
+const showGeminiQuotaPolicy = computed(() => {
+  return !isGeminiVertex.value
+})
+
 // Gemini 是否为 Code Assist OAuth
 const isGeminiCodeAssist = computed(() => {
   if (props.account.platform !== 'gemini') return false
@@ -1305,9 +1346,10 @@ const isGeminiCodeAssist = computed(() => {
   return creds?.oauth_type === 'code_assist' || (!creds?.oauth_type && !!creds?.project_id)
 })
 
-const geminiChannelShort = computed((): 'ai studio' | 'gcp' | 'google one' | 'client' | null => {
+const geminiChannelShort = computed((): 'ai studio' | 'vertex' | 'gcp' | 'google one' | 'client' | null => {
   if (props.account.platform !== 'gemini') return null
 
+  if (isGeminiVertex.value) return 'vertex'
   // API Key accounts are AI Studio.
   if (props.account.type === 'apikey') return 'ai studio'
 
@@ -1321,6 +1363,7 @@ const geminiChannelShort = computed((): 'ai studio' | 'gcp' | 'google one' | 'cl
 
 const geminiUserLevel = computed((): string | null => {
   if (props.account.platform !== 'gemini') return null
+  if (isGeminiVertex.value) return null
 
   const tier = (geminiTier.value || '').toString().trim()
   const tierLower = tier.toLowerCase()
@@ -1378,7 +1421,7 @@ const geminiTierClass = computed(() => {
   const channel = geminiChannelShort.value
   const level = geminiUserLevel.value
 
-  if (channel === 'client' || channel === 'ai studio') {
+  if (channel === 'client' || channel === 'ai studio' || channel === 'vertex') {
     return 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300'
   }
 
@@ -1912,7 +1955,7 @@ const makeQuotaBar = (
 }
 
 const hasApiKeyQuota = computed(() => {
-  if (props.account.type !== 'apikey' && props.account.type !== 'bedrock') return false
+  if (!supportsAccountQuota(props.account.type)) return false
   return (
     (props.account.quota_daily_limit ?? 0) > 0 ||
     (props.account.quota_weekly_limit ?? 0) > 0 ||

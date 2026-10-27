@@ -1151,10 +1151,22 @@ func selfHostedAccountIDs(accounts []Account) map[int64]struct{} {
 	return excluded
 }
 
-// IsSingleAntigravityAccountGroup 检查指定分组是否只有一个 antigravity 平台的可调度账号。
-// 用于 Handler 层在首次请求时提前设置 SingleAccountRetry context，
-// 避免单账号分组收到 503 时错误地设置模型限流标记导致后续请求连续快速失败。
-func (s *GatewayService) IsSingleAntigravityAccountGroup(ctx context.Context, groupID *int64) bool {
+// WithSingleAntigravityAccountGroupProbe 为请求挂载「分组是否只有一个 antigravity 可调度账号」的延迟判定。
+// 只有 antigravity 账号遇到 503 或模型限流预检查时才会查询；其他平台的请求不读取该判定。
+func (s *GatewayService) WithSingleAntigravityAccountGroupProbe(ctx context.Context, groupID *int64) context.Context {
+	var probeGroupID *int64
+	if groupID != nil {
+		id := *groupID
+		probeGroupID = &id
+	}
+	return WithSingleAccountRetryProbe(ctx, func(probeCtx context.Context) bool {
+		return s.isSingleAntigravityAccountGroup(probeCtx, probeGroupID)
+	})
+}
+
+// isSingleAntigravityAccountGroup 检查指定分组是否只有一个 antigravity 平台的可调度账号。
+// 单账号分组收到 503 时原地重试而不设置模型限流，避免后续请求连续快速失败。
+func (s *GatewayService) isSingleAntigravityAccountGroup(ctx context.Context, groupID *int64) bool {
 	accounts, _, err := s.listSchedulableAccounts(ctx, groupID, PlatformAntigravity, true)
 	if err != nil {
 		return false
@@ -1553,13 +1565,13 @@ func (s *GatewayService) withWindowCostPrefetch(ctx context.Context, accounts []
 }
 
 // isAccountSchedulableForQuota 检查账号是否在配额限制内
-// 适用于配置了 quota_limit 的 apikey 和 bedrock 类型账号
+// isAccountSchedulableForQuota 检查账号是否在配额限制内
+// 适用于支持账号配额的 apikey / bedrock / service_account 类型账号。
 //
-// F6 扩展（方案 §3.1）：保留既有 apikey/bedrock 配额分支（语义不变），在其放行
-// 侧追加账号级额度维度门。无额度快照账号维度列表为空 → 放行，逐字节等同现状
-// （Anthropic OAuth/纯 API key/Bedrock 等）。
+// F6 扩展（方案 §3.1）：保留既有配额分支（语义不变），在其放行侧追加账号级额度
+// 维度门。无额度快照账号维度列表为空 → 放行，逐字节等同现状。
 func (s *GatewayService) isAccountSchedulableForQuota(account *Account) bool {
-	if account.IsAPIKeyOrBedrock() && account.IsQuotaExceeded() {
+	if account.SupportsAccountQuota() && account.IsQuotaExceeded() {
 		return false
 	}
 	return s.isAccountSchedulableForQuotaDimensions(account)

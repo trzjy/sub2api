@@ -124,10 +124,14 @@ func classifyNoAccountError(
 
 	result := diag.DiagnoseModelAvailabilityForPlatform(ctx, apiKey.GroupID, routingModel, platform)
 	if result.HasAccountsInPool && !result.HasModelSupport {
+		message := fmt.Sprintf(infraerrors.ModelNotInGroup, displayModel)
+		if result.HasRetiredSubscriptionModel {
+			message = fmt.Sprintf(infraerrors.ModelRetiredSubscription, displayModel)
+		}
 		return noAccountErrorClassification{
 			Status:        http.StatusNotFound,
 			ErrType:       "model_not_found",
-			Message:       fmt.Sprintf(infraerrors.ModelNotInGroup, displayModel),
+			Message:       message,
 			ModelNotFound: true,
 		}
 	}

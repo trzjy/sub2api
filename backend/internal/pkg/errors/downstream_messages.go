@@ -62,6 +62,10 @@ const (
 
 	// 请求侧/配置边界（调用方用模型名做 Sprintf）。
 	ModelNotInGroup = "模型 %s 不在当前分组支持范围内，请检查模型名称或联系管理员"
+	// ModelRetiredSubscription 为 GPT-5.5 等已从 Codex（ChatGPT 登录方式）退役的模型在
+	// 分组内有账号但无模型支持时的专属文案（上游 v0.2.18 引入 HasRetiredSubscriptionModel
+	// 判定；本仓库按二期中文化口径落中文）。责任归属=上游渠道策略退役，动作=换模型或换上游。
+	ModelRetiredSubscription = "模型 %s 已从 Codex（ChatGPT 登录方式）上游退役，请改用可用的替代模型，或配置支持该模型的 API Key 上游"
 
 	// WebSearchFailed 为网络搜索后端（grok native search 等）全链路失败后的下游占位文案，
 	// 替代原先直接拼接上游 err.Error() 的内部错误明细（裁项 2 全仓排查发现的一处泄漏）。

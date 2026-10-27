@@ -21,9 +21,11 @@ type TempUnschedState struct {
 	Tier int `json:"tier,omitempty"`
 	// ProbeAttempts counts probe-based recovery attempts made while blocked.
 	ProbeAttempts int `json:"probe_attempts,omitempty"`
+	// Scope 隔离粒度：account / model（上游 v0.2.18 引入）
+	Scope string `json:"scope,omitempty"`
 	// Model 是触发本次停调的上游模型名（经账号 model_mapping 归一后的出站名）。
 	// 恢复探针据此探测真实故障面，而不是笼统探测平台默认模型。空值表示记录方
-	// 未提供，探针回落平台默认测试模型。
+	// 未提供，探针回落平台默认测试模型。模型级冷却时该字段同时是被冷却的模型键。
 	Model string `json:"model,omitempty"`
 	// ConsecutiveSuccesses 探针恢复链的连续成功轮次计数（探针 service 专属读写，
 	// 首轮 success 置 1，第二轮 success 执行恢复并随停调清除消失；失败重置为 0）。

@@ -2169,8 +2169,10 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	}
 	// 聚合分组请求下的 codebuddy 账号由逐模型目录闸门接管模型校验
 	// （先 GetMappedModel 映射为上游名再与目录精确比较），跳过客户端名白名单检查，
-	// 避免别名场景被误杀（§2.1-1）。其余账号仍走既有 IsModelSupported。
-	if req.RequestedModel != "" && !codeBuddyAggregatedCatalogGated(account, req) && !account.IsModelSupported(req.RequestedModel) {
+	// 避免别名场景被误杀（§2.1-1）。其余账号走上游 v0.2.18 的统一判定
+	// supportsOpenAIRequestModel（含退役模型与 compact 映射解析）。
+	if req.RequestedModel != "" && !codeBuddyAggregatedCatalogGated(account, req) &&
+		!supportsOpenAIRequestModel(account, req.RequestedModel, req.RequireCompact) {
 		return false, "model_not_supported"
 	}
 	if req.GroupID != nil && s != nil && s.service != nil &&
