@@ -82,7 +82,7 @@ const (
 	cursorFldShellStreamStdout = 1 // f1 stdout{data}
 	cursorFldShellStreamStderr = 2 // f2 stderr{data}
 	cursorFldShellStreamExit   = 3 // f3 exit{code(int32), cwd(str)}
-	// cursorFldShellStreamStart = 4 // f4 start{sandbox_policy} —— §5 待验项：首版不发 start。
+	cursorFldShellStreamStart  = 4 // f4 start{sandbox_policy}：客户端回执的执行开始帧。
 
 	// ShellStreamStdout / ShellStreamStderr 内层字段。
 	cursorFldShellStreamData = 1 // f1 data（string）
@@ -427,7 +427,6 @@ func cursorShellCwdFromArgs(argsJSON string) string {
 // 外层每帧统一 {f1 exec_id(varint), f15 IDField(bytes), f14 ShellStream}。
 //
 // §5 待验项：首版**不**发 ShellStream.f4 start（真机往返验证后再决定是否补 start 再验）——
-// 此处的 cursorFldShellStreamStart 常量已被注释、本函数刻意不发 start，待 §5 第一项验证。
 func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr string, exitCode int, cwd string) [][]byte {
 	// outer 把一段 ShellStream 包成完整 ExecClientMessage（f1 exec_id + f15 id + f14 ShellStream）。
 	outer := func(shellStream []byte) []byte {
@@ -439,6 +438,9 @@ func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr s
 		return msg
 	}
 	var frames [][]byte
+	// start 帧（ShellStream.f4）：告知上游该 shell 执行已开始。真实帧取证显示客户端
+	// 先发 start 再发 stdout/exit；不发 start 时上游不会推进（实测回写后 180s 无 TurnEnded）。
+	frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStart, nil)))
 	if stderr != "" {
 		inner := cursorAppendStringField(nil, cursorFldShellStreamData, stderr)
 		frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStderr, inner)))

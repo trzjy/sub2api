@@ -133,10 +133,19 @@ func TestCursorShellBridgeMismatchedCallID(t *testing.T) {
 func TestCursorShellBridgeWritebackBytes(t *testing.T) {
 	// stderr 非空 → 帧序 [stderr, stdout, exit]；外层统一 f1 exec_id + f15 id + f14 ShellStream。
 	frames := cursorEncodeShellToolResult(7, []byte("exec-7"), "OUT", "ERR", 2, "/cwd")
-	require.Len(t, frames, 3, "stderr+stdout+exit 共 3 帧")
+	require.Len(t, frames, 4, "start+stderr+stdout+exit 共 4 帧")
 
-	// 帧 0：stderr（f14 ShellStream{f2 ShellStreamStderr{f1 data}}）
-	outer, err := cursorDecodeProtobuf(frames[0])
+	// 帧 0：start（f14 ShellStream{f4 ShellStreamStart{}}）——告知上游执行已开始。
+	startOuter, err := cursorDecodeProtobuf(frames[0])
+	require.NoError(t, err)
+	startSS, ok := cursorFindField(startOuter, cursorFldClientMsgShellStream)
+	require.True(t, ok)
+	startInner, _ := cursorDecodeProtobuf(startSS.Bytes)
+	_, hasStart := cursorFindField(startInner, cursorFldShellStreamStart)
+	require.True(t, hasStart, "首帧必须是 f4 start")
+
+	// 帧 1：stderr（f14 ShellStream{f2 ShellStreamStderr{f1 data}}）
+	outer, err := cursorDecodeProtobuf(frames[1])
 	require.NoError(t, err)
 	require.EqualValues(t, 7, cursorVarintField(outer, cursorFldClientMsgID))
 	idf, ok := cursorFindField(outer, cursorFldClientMsgExecID)
@@ -153,8 +162,8 @@ func TestCursorShellBridgeWritebackBytes(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "ERR", dataF.String())
 
-	// 帧 1：stdout（f14 ShellStream{f1 ShellStreamStdout{f1 data}}）
-	outer, _ = cursorDecodeProtobuf(frames[1])
+	// 帧 2：stdout（f14 ShellStream{f1 ShellStreamStdout{f1 data}}）
+	outer, _ = cursorDecodeProtobuf(frames[2])
 	ss, ok = cursorFindField(outer, cursorFldClientMsgShellStream)
 	require.True(t, ok)
 	ssf, _ = cursorDecodeProtobuf(ss.Bytes)
@@ -165,8 +174,8 @@ func TestCursorShellBridgeWritebackBytes(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "OUT", dataF.String())
 
-	// 帧 2：exit（f14 ShellStream{f3 ShellStreamExit{f1 code, f2 cwd}}）
-	outer, _ = cursorDecodeProtobuf(frames[2])
+	// 帧 3：exit（f14 ShellStream{f3 ShellStreamExit{f1 code, f2 cwd}}）
+	outer, _ = cursorDecodeProtobuf(frames[3])
 	ss, ok = cursorFindField(outer, cursorFldClientMsgShellStream)
 	require.True(t, ok)
 	ssf, _ = cursorDecodeProtobuf(ss.Bytes)
@@ -178,10 +187,10 @@ func TestCursorShellBridgeWritebackBytes(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "/cwd", exitCwd.String(), "exit.cwd 必须位于 f2")
 
-	// 无 stderr 时只剩 [stdout, exit] 两帧，且 stdout 在前。
+	// 无 stderr 时为 [start, stdout, exit] 三帧，start 在前、stdout 次之。
 	frames2 := cursorEncodeShellToolResult(3, nil, "only", "", 0, "")
-	require.Len(t, frames2, 2, "无 stderr 时只有 stdout+exit")
-	o2, _ := cursorDecodeProtobuf(frames2[0])
+	require.Len(t, frames2, 3, "无 stderr 时是 start+stdout+exit")
+	o2, _ := cursorDecodeProtobuf(frames2[1])
 	s2, ok := cursorFindField(o2, cursorFldClientMsgShellStream)
 	require.True(t, ok)
 	s2f, _ := cursorDecodeProtobuf(s2.Bytes)
@@ -189,7 +198,7 @@ func TestCursorShellBridgeWritebackBytes(t *testing.T) {
 	require.True(t, hasStdout, "首帧必须是 stdout")
 	_, hasStderr := cursorFindField(s2f, cursorFldShellStreamStderr)
 	require.False(t, hasStderr)
-	o3, _ := cursorDecodeProtobuf(frames2[1])
+	o3, _ := cursorDecodeProtobuf(frames2[2])
 	s3, ok := cursorFindField(o3, cursorFldClientMsgShellStream)
 	require.True(t, ok)
 	s3f, _ := cursorDecodeProtobuf(s3.Bytes)
