@@ -773,7 +773,8 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			}
 			d.logPhase(zapcore.InfoLevel, "shell_args_delegated", "",
 				zap.Uint64("exec_id", execID), zap.String("tool_call_id", tc.ID),
-				zap.String("tool_name", tc.Name), zap.Int("args_len", len(tc.ArgsJSON)))
+				zap.String("tool_name", tc.Name), zap.Int("args_len", len(tc.ArgsJSON)),
+				zap.Int("sandbox_policy_len", len(tc.SandboxPolicy)))
 			return false, nil
 		default:
 			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)

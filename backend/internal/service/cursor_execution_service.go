@@ -6729,7 +6729,13 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 		if cap.Kind == "shell" {
 			stdout, stderr, exitCode := cursorParseShellResult(r)
 			cwd := cursorShellCwdFromArgs(cap.ArgsJSON)
-			for _, frame := range cursorEncodeShellToolResult(cap.ExecID, cap.IDField, stdout, stderr, exitCode, cwd, cap.SandboxPolicy) {
+			shellFrames := cursorEncodeShellToolResult(cap.ExecID, cap.IDField, stdout, stderr, exitCode, cwd, cap.SandboxPolicy)
+			it.duplex.logPhase(zapcore.InfoLevel, "shell_result_writeback", "",
+				zap.String("call_id", cap.ID), zap.Int("frames", len(shellFrames)),
+				zap.Int("stdout_len", len(stdout)), zap.Int("stderr_len", len(stderr)),
+				zap.Int("exit_code", exitCode), zap.Int("cwd_len", len(cwd)),
+				zap.Int("sandbox_policy_len", len(cap.SandboxPolicy)))
+			for _, frame := range shellFrames {
 				if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
 					// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
 					it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
