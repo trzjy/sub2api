@@ -411,6 +411,17 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				zap.Uint64("exec_id", execID), zap.String("tool_name", tc.Name))
 			return false, nil
 		default:
+			// DIAG(临时)：记录未支持的 ExecMessage 子字段号与长度，用于定位上游执行形态。
+			// 只记字段号与字节长度，不记内容；取证完成后回退。
+			nums := make([]int, 0, len(parts))
+			lens := make([]int, 0, len(parts))
+			for _, p := range parts {
+				nums = append(nums, p.Number)
+				lens = append(lens, len(p.Bytes))
+			}
+			d.logPhase(zapcore.WarnLevel, "cursor_exec_unsupported_fields", "",
+				zap.Ints("field_numbers", nums), zap.Ints("field_lens", lens),
+				zap.Uint64("exec_id", execID), zap.Int("part_count", len(parts)))
 			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
 		}
 	}
