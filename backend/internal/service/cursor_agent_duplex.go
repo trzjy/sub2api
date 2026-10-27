@@ -365,6 +365,15 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		// DIAG(临时)：记录 InteractionUpdate 子字段号与长度，判定 started/listed 是否陪伴 shell 委托。
+		unums := make([]int, 0, len(parts))
+		ulens := make([]int, 0, len(parts))
+		for _, up := range parts {
+			unums = append(unums, up.Number)
+			ulens = append(ulens, len(up.Bytes))
+		}
+		d.logPhase(zapcore.WarnLevel, "cursor_interaction_fields", "",
+			zap.Ints("fields", unums), zap.Ints("lens", ulens))
 		_, ended := cursorFindField(parts, cursorFldUpdateTurnEnded)
 		if ended {
 			// 正常终态：上游 InteractionUpdate 携带 TurnEnded（含真实 usage）。
@@ -410,6 +419,37 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			d.logPhase(zapcore.DebugLevel, "mcp_args_captured", "",
 				zap.Uint64("exec_id", execID), zap.String("tool_name", tc.Name))
 			return false, nil
+		case cursorFindFieldOK(parts, 14):
+			// DIAG(临时)：解析 ShellArgs 关键字段 + 本请求声明工具名，判定工具名/schema 映射。
+			sh, _ := cursorFindField(parts, 14)
+			sub, derr := cursorDecodeProtobuf(sh.Bytes)
+			var cmd, wd, tcid, desc string
+			var timeout uint64
+			if derr == nil {
+				strField := func(f []cursorPBField, n int) string {
+					if v, ok := cursorFindField(f, n); ok {
+						return v.String()
+					}
+					return ""
+				}
+				cmd, wd, tcid = strField(sub, 1), strField(sub, 2), strField(sub, 4)
+				desc = strField(sub, 15)
+				timeout = cursorVarintField(sub, 3)
+			}
+			names := make([]string, 0, 8)
+			for k := range cursorToolSchemaIndex(d.declaredToolDefs) {
+				names = append(names, k)
+			}
+			head := cmd
+			if len(head) > 60 {
+				head = head[:60]
+			}
+			d.logPhase(zapcore.WarnLevel, "cursor_shell_args_probe", "",
+				zap.String("tool_call_id", tcid), zap.Int("command_len", len(cmd)),
+				zap.String("command_head", head), zap.Int("workdir_len", len(wd)),
+				zap.Int("description_len", len(desc)), zap.Uint64("timeout", timeout),
+				zap.Strings("declared_tools", names))
+			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
 		default:
 			// DIAG(临时)：记录未支持的 ExecMessage 子字段号与长度，用于定位上游执行形态。
 			// 只记字段号与字节长度，不记内容；取证完成后回退。
