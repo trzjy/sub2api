@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +74,22 @@ const (
 
 	// McpTextContent 字段。
 	cursorFldTextContentText = 1 // f1 text（string）
+
+	// ExecClientMessage.f14 = ShellStream（原生 shell 委托回写通道，区别于 mcp 的 f11 McpResult）。
+	cursorFldClientMsgShellStream = 14
+
+	// ShellStream oneof 事件字段号（依据 plan §1 / §2.2）。
+	cursorFldShellStreamStdout = 1 // f1 stdout{data}
+	cursorFldShellStreamStderr = 2 // f2 stderr{data}
+	cursorFldShellStreamExit   = 3 // f3 exit{code(int32), cwd(str)}
+	// cursorFldShellStreamStart = 4 // f4 start{sandbox_policy} —— §5 待验项：首版不发 start。
+
+	// ShellStreamStdout / ShellStreamStderr 内层字段。
+	cursorFldShellStreamData = 1 // f1 data（string）
+
+	// ShellStreamExit 内层字段。
+	cursorFldShellStreamExitCode = 1 // f1 code（int32，按 varint 编码）
+	cursorFldShellStreamExitCwd  = 2 // f2 cwd（string）
 )
 
 // cursorEncodeMcpToolResult 把一条真实工具结果编码为 ExecClientMessage 字节。
@@ -117,6 +135,348 @@ func cursorEncodeMcpToolResult(
 	}
 	msg = cursorAppendBytesField(msg, cursorFldClientMsgMcpResult, result)
 	return msg
+}
+
+// ---------------------------------------------------------------------------
+// Cursor 原生 shell 执行桥接（ExecServerMessage.f14 → 下游 tool_call → 回写 ShellStream）。
+//
+// 依据方案 cursor-native-shell-bridge-plan.md（§2 / §2.2 / §4 / §5）：真实客户端声明
+// shell 类工具后，上游改用 f14 原生 shell 通道，回写走 ShellStream（f14），与 mcp 的
+// f11 McpResult 是两条互不相同的通道。本组函数为 shell 委托的解码、工具名/schema 选择、
+// 参数按目标 schema 转换、以及续轮回写编码。mcp 路径（cursorEncodeMcpToolResult）与此
+// 完全独立、字节级行为不变。
+// ---------------------------------------------------------------------------
+
+// cursorShellArgs 是 ExecServerMessage.f14（ShellArgs）的解出结构（字段号见 plan §1）。
+//
+// f1 command(str) / f2 working_directory(str) / f3 timeout(int32) / f4 tool_call_id(str) /
+// f5 simple_commands(repeated str) / f11 is_background(bool) / f12 skip_approval(bool) /
+// f15 description(str)。本桥接只消费 command / working_directory / tool_call_id / description，
+// 其余子字段（simple_commands / is_background / skip_approval / timeout 等）首版忽略；
+// 未知 exec 子字段（2/3/4/5/7/8/9/16/17/18/20+ 等）由 respond 的 default 分支失败关闭，
+// 本次只做 f14。
+type cursorShellArgs struct {
+	Command          string
+	WorkingDirectory string
+	Timeout          int
+	ToolCallID       string
+	SimpleCommands   []string
+	Description      string
+	IsBackground     bool
+	SkipApproval     bool
+}
+
+// cursorParseShellArgs 把 f14 内层子字段解出为 cursorShellArgs（逐字段，失败关闭）。
+func cursorParseShellArgs(sub []cursorPBField) (cursorShellArgs, error) {
+	var a cursorShellArgs
+	if cmd, ok := cursorFindField(sub, 1); ok {
+		a.Command = cmd.String()
+	}
+	if wd, ok := cursorFindField(sub, 2); ok {
+		a.WorkingDirectory = wd.String()
+	}
+	a.Timeout = int(cursorVarintField(sub, 3))
+	if tcid, ok := cursorFindField(sub, 4); ok {
+		a.ToolCallID = tcid.String()
+	}
+	if desc, ok := cursorFindField(sub, 15); ok {
+		a.Description = desc.String()
+	}
+	if bg, ok := cursorFindField(sub, 11); ok && bg.Wire == cursorWireVarint {
+		a.IsBackground = bg.Varint != 0
+	}
+	if sa, ok := cursorFindField(sub, 12); ok && sa.Wire == cursorWireVarint {
+		a.SkipApproval = sa.Varint != 0
+	}
+	for _, f := range sub {
+		if f.Number == 5 {
+			a.SimpleCommands = append(a.SimpleCommands, f.String())
+		}
+	}
+	return a, nil
+}
+
+// cursorShellToolPriority 是工具名选择优先级（plan §4 / 硬约束 #1）：
+// shell → bash → exec_command → run_command → terminal，且其 input_schema.properties
+// 必须含 command；找不到 → 调用方按 ErrCursorProtocol 失败关闭（不许用 "shell" 兜底）。
+var cursorShellToolPriority = []string{"shell", "bash", "exec_command", "run_command", "terminal"}
+
+// cursorBuildShellDelegation 从本请求 f4 声明集中选择 shell 类工具，并按其 input_schema
+// 把 ShellArgs 转换为下游 tool_call 的 ArgsJSON（对象 JSON，与 mcp 同形）。
+//
+// 转换规则（硬约束 #3）：
+//   - command 目标是 array → ["bash","-lc",<ShellArgs.command>]；目标是 string → 原字符串；
+//   - workdir → schema 中实际存在的属性名（working_directory / workdir / cwd 取第一个出现的），
+//     ShellArgs.working_directory 为空则省略；
+//   - 目标 schema 的 required 字段无法由本桥接填充 → ErrCursorProtocol 失败关闭。
+//
+// 找不到可用 shell 类工具 → ErrCursorProtocol 失败关闭（不自造工具名、不用 "shell" 兜底）。
+func cursorBuildShellDelegation(defs [][]byte, args cursorShellArgs) (string, string, error) {
+	idx := cursorToolSchemaIndex(defs)
+	var chosen string
+	var schemaJSON []byte
+	for _, name := range cursorShellToolPriority {
+		sj, ok := idx[name]
+		if !ok || sj == nil {
+			continue
+		}
+		if !cursorSchemaHasProperty(sj, "command") {
+			continue
+		}
+		chosen = name
+		schemaJSON = sj
+		break
+	}
+	if chosen == "" {
+		return "", "", fmt.Errorf("%w: no shell-like tool (shell/bash/exec_command/run_command/terminal) with command property declared", ErrCursorProtocol)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
+		return "", "", fmt.Errorf("%w: parse shell tool schema: %v", ErrCursorProtocol, err)
+	}
+	props, _ := schema["properties"].(map[string]any)
+
+	// command 是否 array（决定转换形状）。
+	commandIsArray := false
+	if props != nil {
+		if cp, ok := props["command"].(map[string]any); ok {
+			if ct, _ := cp["type"].(string); ct == "array" {
+				commandIsArray = true
+			}
+		}
+	}
+
+	obj := map[string]any{}
+	if commandIsArray {
+		obj["command"] = []any{"bash", "-lc", args.Command}
+	} else {
+		obj["command"] = args.Command
+	}
+
+	// workdir 属性名：schema 中实际存在的第一个（working_directory / workdir / cwd）。
+	workdirProp := ""
+	if props != nil {
+		for _, cand := range []string{"working_directory", "workdir", "cwd"} {
+			if _, ok := props[cand]; ok {
+				workdirProp = cand
+				break
+			}
+		}
+	}
+	if workdirProp != "" && args.WorkingDirectory != "" {
+		obj[workdirProp] = args.WorkingDirectory
+	}
+
+	// required 校验：凡本桥接无法填充的 required 字段 → 失败关闭。
+	if reqRaw, ok := schema["required"].([]any); ok {
+		for _, r := range reqRaw {
+			req, ok := r.(string)
+			if !ok {
+				continue
+			}
+			switch req {
+			case "command":
+				// command 已填充，恒满足。
+			case workdirProp:
+				if args.WorkingDirectory == "" {
+					return "", "", fmt.Errorf("%w: shell tool requires %q but ShellArgs.working_directory empty", ErrCursorProtocol, workdirProp)
+				}
+			default:
+				return "", "", fmt.Errorf("%w: shell tool requires field %q which cannot be filled by native shell bridge", ErrCursorProtocol, req)
+			}
+		}
+	}
+
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: marshal shell args: %v", ErrCursorProtocol, err)
+	}
+	return chosen, string(b), nil
+}
+
+// cursorSchemaHasProperty 报告归一化后的 schema JSON 是否声明了给定属性名（properties 内）。
+func cursorSchemaHasProperty(schemaJSON []byte, prop string) bool {
+	var schema map[string]any
+	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
+		return false
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, has := props[prop]
+	return has
+}
+
+// cursorDelegationsHasStartedCallID 报告某 call_id 是否已登记为某开放批次的对外 started。
+//
+// 硬约束 #2：f14 的 ShellArgs.tool_call_id 必须等于某个已登记录入的 tool_call_started 的
+// call_id，否则失败关闭。§4 取证确认 started 先 f14 到达，故此处能在开放批里查到。
+// 同一 package 内可直接读 d.all / batch.started（未导出字段可见）。
+func cursorDelegationsHasStartedCallID(d *cursorToolDelegations, callID string) bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, batch := range d.all {
+		for _, id := range batch.started {
+			if id == callID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cursorCaptureShellArgs 是 ExecServerMessage.f14（ShellArgs）委托捕获入口（duplex 侧）。
+//
+// 流程（硬约束 #1-#4）：解析 ShellArgs → command 为空失败关闭 → tool_call_id 必须对应已
+// 登记 started（否则失败关闭）→ 选择 shell 类工具并按 schema 转换参数（找不到工具失败关闭）
+// → 构造 capture{Kind:"shell"} 走既有 noteDelegation 接入封口（复用 mcp 委托的批次谓词，
+// 因 §4 实证 started/listed 已先到）。成功返回 capture，失败返回 ErrCursorProtocol。
+func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID uint64, idField []byte) (cursorToolCallCapture, error) {
+	sh, ok := cursorFindField(parts, 14)
+	if !ok {
+		return cursorToolCallCapture{}, fmt.Errorf("%w: shell stream args without f14", ErrCursorProtocol)
+	}
+	sub, derr := cursorDecodeProtobuf(sh.Bytes)
+	if derr != nil {
+		return cursorToolCallCapture{}, derr
+	}
+	args, err := cursorParseShellArgs(sub)
+	if err != nil {
+		return cursorToolCallCapture{}, err
+	}
+	// 硬约束 #4：command 为空 → 失败关闭。
+	if args.Command == "" {
+		return cursorToolCallCapture{}, fmt.Errorf("%w: shell command empty", ErrCursorProtocol)
+	}
+	// 硬约束 #2：tool_call_id 必须等于某已登记 started 的 call_id，否则失败关闭
+	// （不得新建批次、不得当作新调用）。
+	if !cursorDelegationsHasStartedCallID(d.delegations, args.ToolCallID) {
+		return cursorToolCallCapture{}, fmt.Errorf("%w: shell tool_call_id %q has no matching tool_call_started (orphan shell delegation)", ErrCursorProtocol, args.ToolCallID)
+	}
+	name, argsJSON, berr := cursorBuildShellDelegation(d.declaredToolDefs, args)
+	if berr != nil {
+		return cursorToolCallCapture{}, berr
+	}
+	tc := cursorToolCallCapture{
+		ID:       args.ToolCallID,
+		Name:     name,
+		ArgsJSON: argsJSON,
+		ExecID:   execID,
+		IDField:  append([]byte(nil), idField...),
+		Kind:     "shell",
+	}
+	delegations := d.delegations
+	if delegations == nil {
+		delegations = newLocalCursorToolDelegations()
+		d.delegations = delegations
+	}
+	if err := delegations.noteDelegation("", tc); err != nil {
+		return cursorToolCallCapture{}, err
+	}
+	return tc, nil
+}
+
+// cursorParseShellResult 解析客户端 tool result 为 shell 的 stdout/stderr/exit_code。
+//
+// 规则（plan §2.2 / 实现要点 4）：结果 JSON 含 stdout/stderr/exit_code 任一字段 → 取字段值；
+// 否则整段文本作 stdout，exit_code=0（is_error 时 1）。is_error 语义原样保留。
+func cursorParseShellResult(r CursorToolResult) (stdout, stderr string, exitCode int) {
+	text := strings.Join(r.Text, "")
+	if len(r.Structured) > 0 {
+		text = string(r.Structured)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &m); err == nil {
+		_, hasOut := m["stdout"]
+		_, hasErr := m["stderr"]
+		_, hasExit := m["exit_code"]
+		if hasOut || hasErr || hasExit {
+			if v, ok := m["stdout"]; ok {
+				var s string
+				if json.Unmarshal(v, &s) == nil {
+					stdout = s
+				}
+			}
+			if v, ok := m["stderr"]; ok {
+				var s string
+				if json.Unmarshal(v, &s) == nil {
+					stderr = s
+				}
+			}
+			if v, ok := m["exit_code"]; ok {
+				var n int
+				if json.Unmarshal(v, &n) == nil {
+					exitCode = n
+				}
+			}
+			return
+		}
+	}
+	// 纯文本：整段作 stdout。
+	stdout = text
+	if r.IsError {
+		exitCode = 1
+	}
+	return
+}
+
+// cursorShellCwdFromArgs 从 shell 委托的 ArgsJSON 取出 workdir（回写 exit 帧的 cwd）。
+func cursorShellCwdFromArgs(argsJSON string) string {
+	if argsJSON == "" {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &m); err != nil {
+		return ""
+	}
+	if wd, ok := m["workdir"].(string); ok {
+		return wd
+	}
+	return ""
+}
+
+// cursorEncodeShellToolResult 把一条 shell 工具结果编码为**一或多个** ExecClientMessage 帧
+// （ShellStream 形态，区别于 mcp 的 f11 McpResult）。帧序（plan §2.2 / 实现要点 3）：
+//
+//	stderr 非空 → 先发 f14 ShellStream{f2 ShellStreamStderr{f1 data}}；
+//	随后 f14 ShellStream{f1 ShellStreamStdout{f1 data}}（stdout）；
+//	最后 f14 ShellStream{f3 ShellStreamExit{f1 code(int32), f2 cwd(str)}}（始终发送）。
+//
+// 外层每帧统一 {f1 exec_id(varint), f15 IDField(bytes), f14 ShellStream}。
+//
+// §5 待验项：首版**不**发 ShellStream.f4 start（真机往返验证后再决定是否补 start 再验）——
+// 此处的 cursorFldShellStreamStart 常量已被注释、本函数刻意不发 start，待 §5 第一项验证。
+func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr string, exitCode int, cwd string) [][]byte {
+	// outer 把一段 ShellStream 包成完整 ExecClientMessage（f1 exec_id + f15 id + f14 ShellStream）。
+	outer := func(shellStream []byte) []byte {
+		msg := cursorAppendVarintField(nil, cursorFldClientMsgID, execID)
+		if len(idField) > 0 {
+			msg = cursorAppendBytesField(msg, cursorFldClientMsgExecID, idField)
+		}
+		msg = cursorAppendBytesField(msg, cursorFldClientMsgShellStream, shellStream)
+		return msg
+	}
+	var frames [][]byte
+	if stderr != "" {
+		inner := cursorAppendStringField(nil, cursorFldShellStreamData, stderr)
+		frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStderr, inner)))
+	}
+	if stdout != "" {
+		inner := cursorAppendStringField(nil, cursorFldShellStreamData, stdout)
+		frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStdout, inner)))
+	}
+	// exit 帧（始终发送）。code 按 protobuf int32 编码（uint32 两位补码 → varint）。
+	exitInner := cursorAppendVarintField(nil, cursorFldShellStreamExitCode, uint64(uint32(exitCode)))
+	if cwd != "" {
+		exitInner = cursorAppendStringField(exitInner, cursorFldShellStreamExitCwd, cwd)
+	}
+	frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamExit, exitInner)))
+	return frames
 }
 
 func cursorClientChecksum(device string, now time.Time) string {
@@ -365,24 +725,6 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		// DIAG(临时)：记录 InteractionUpdate 子字段号与长度，判定 started/listed 是否陪伴 shell 委托。
-		unums := make([]int, 0, len(parts))
-		ulens := make([]int, 0, len(parts))
-		for _, up := range parts {
-			unums = append(unums, up.Number)
-			ulens = append(ulens, len(up.Bytes))
-		}
-		d.logPhase(zapcore.WarnLevel, "cursor_interaction_fields", "",
-			zap.Ints("fields", unums), zap.Ints("lens", ulens))
-		// DIAG(临时)：started 的 call_id（与 f14 ShellArgs.tool_call_id 比对）。
-		if started, ok := cursorFindField(parts, 2); ok {
-			if sf, e := cursorDecodeProtobuf(started.Bytes); e == nil {
-				if v, ok := cursorFindField(sf, 1); ok {
-					d.logPhase(zapcore.WarnLevel, "cursor_started_probe", "",
-						zap.String("call_id", v.String()))
-				}
-			}
-		}
 		_, ended := cursorFindField(parts, cursorFldUpdateTurnEnded)
 		if ended {
 			// 正常终态：上游 InteractionUpdate 携带 TurnEnded（含真实 usage）。
@@ -429,73 +771,19 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				zap.Uint64("exec_id", execID), zap.String("tool_name", tc.Name))
 			return false, nil
 		case cursorFindFieldOK(parts, 14):
-			// DIAG(临时)：解析 ShellArgs 关键字段 + 本请求声明工具名，判定工具名/schema 映射。
-			sh, _ := cursorFindField(parts, 14)
-			sub, derr := cursorDecodeProtobuf(sh.Bytes)
-			var cmd, wd, tcid, desc string
-			var timeout uint64
-			if derr == nil {
-				strField := func(f []cursorPBField, n int) string {
-					if v, ok := cursorFindField(f, n); ok {
-						return v.String()
-					}
-					return ""
-				}
-				cmd, wd, tcid = strField(sub, 1), strField(sub, 2), strField(sub, 4)
-				desc = strField(sub, 15)
-				timeout = cursorVarintField(sub, 3)
+			// Cursor 原生 shell 委托（ExecServerMessage.f14 = ShellArgs）：解析 → 校验 →
+			// 构造 capture{Kind:"shell"} → noteDelegation，复用既有封口（started/listed 已先到，
+			// 见方案 §4）。失败（command 空 / tool_call_id 无对应 started / 无可用 shell 工具 /
+			// required 缺字段）一律 ErrCursorProtocol 失败关闭，绝不当作新调用或兜底 "shell"。
+			tc, e := d.cursorCaptureShellArgs(parts, execID, idField)
+			if e != nil {
+				return false, e
 			}
-			names := make([]string, 0, 8)
-			for k := range cursorToolSchemaIndex(d.declaredToolDefs) {
-				names = append(names, k)
-			}
-			head := cmd
-			if len(head) > 60 {
-				head = head[:60]
-			}
-			shellSchema := ""
-			for _, def := range d.declaredToolDefs {
-				df, e := cursorDecodeProtobuf(def)
-				if e != nil {
-					continue
-				}
-				var dn string
-				var raw []byte
-				for _, x := range df {
-					if x.Number == cursorFldMcpToolDefToolName {
-						dn = x.String()
-					}
-					if x.Number == cursorFldMcpToolDefInputSchemaValue {
-						raw = x.Bytes
-					}
-				}
-				if dn == "shell" {
-					if s, ok := cursorSchemaFromF3(raw); ok {
-						shellSchema = string(s)
-						if len(shellSchema) > 300 {
-							shellSchema = shellSchema[:300]
-						}
-					}
-				}
-			}
-			d.logPhase(zapcore.WarnLevel, "cursor_shell_args_probe", "",
-				zap.String("tool_call_id", tcid), zap.Int("command_len", len(cmd)),
-				zap.String("command_head", head), zap.Int("workdir_len", len(wd)),
-				zap.Int("description_len", len(desc)), zap.Uint64("timeout", timeout),
-				zap.Strings("declared_tools", names), zap.String("shell_schema", shellSchema))
-			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
+			d.logPhase(zapcore.DebugLevel, "shell_args_delegated", "",
+				zap.Uint64("exec_id", execID), zap.String("tool_call_id", tc.ID),
+				zap.String("tool_name", tc.Name), zap.Int("args_len", len(tc.ArgsJSON)))
+			return false, nil
 		default:
-			// DIAG(临时)：记录未支持的 ExecMessage 子字段号与长度，用于定位上游执行形态。
-			// 只记字段号与字节长度，不记内容；取证完成后回退。
-			nums := make([]int, 0, len(parts))
-			lens := make([]int, 0, len(parts))
-			for _, p := range parts {
-				nums = append(nums, p.Number)
-				lens = append(lens, len(p.Bytes))
-			}
-			d.logPhase(zapcore.WarnLevel, "cursor_exec_unsupported_fields", "",
-				zap.Ints("field_numbers", nums), zap.Ints("field_lens", lens),
-				zap.Uint64("exec_id", execID), zap.Int("part_count", len(parts)))
 			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
 		}
 	}

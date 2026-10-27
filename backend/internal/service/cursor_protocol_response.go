@@ -849,6 +849,11 @@ type cursorToolCallCapture struct {
 	ExecID uint64
 	// IDField 是承载本委托的 ExecServerMessage.f15（原值，回写时一并带回）。
 	IDField []byte
+	// Kind 区分委托的回写通道：空 (= "") 表示 mcp（f11 McpResult，既有路径，
+	// 字节级行为不变）；"shell" 表示 ExecServerMessage.f14 原生 shell 委托，续轮回写
+	// 走 ShellStream（f14）编码（见 cursor_agent_duplex.go 的 cursorEncodeShellToolResult）。
+	// 该字段只影响回写编码，委托捕获与封口逻辑对两种 Kind 一视同仁。
+	Kind string
 }
 
 // cursorContent 返回拼出的完整响应文本（非流式入站用）。

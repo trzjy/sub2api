@@ -6596,6 +6596,21 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 			it.svc.finishCursorSession(it.session, "resume_unknown_call")
 			return fmt.Errorf("%w: call id %q", ErrCursorResumeUnknownAssociation, r.CallID)
 		}
+		// 原生 shell 委托（Kind=="shell"）走 ShellStream（f14）回写，与 mcp 的 f11 McpResult
+		// 是两条互不相同的通道；mcp 路径字节级行为不变（实现要点 5 / 硬约束 5）。
+		if cap.Kind == "shell" {
+			stdout, stderr, exitCode := cursorParseShellResult(r)
+			cwd := cursorShellCwdFromArgs(cap.ArgsJSON)
+			for _, frame := range cursorEncodeShellToolResult(cap.ExecID, cap.IDField, stdout, stderr, exitCode, cwd) {
+				if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
+					// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
+					it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
+					return fmt.Errorf("cursor: deliver shell tool result transport failure: %w", err)
+				}
+				it.session.noteStage("resume_result_written")
+			}
+			continue
+		}
 		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, r.CallID, r.Text, r.Structured, r.IsError)
 		if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
 			// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
