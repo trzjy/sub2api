@@ -400,6 +400,11 @@ export default {
         staleMinutes: '{minutes} minutes',
         staleHours: '{hours} hours',
         staleDays: '{days} days',
+        // Upstream subscription expired state (account state, not a probe failure):
+        // shown as a status label (not a red error row) when backend subscription_expired=true.
+        subscriptionExpired: 'Subscription expired',
+        subscriptionExpiredTitle: 'The upstream subscription has expired or is unavailable, so the balance cannot be queried. Renew the upstream subscription or replace the account.',
+        expiresAtExpired: 'Expired {date}',
         // Localized balance-probe error map (dispatch balance-ui-errmap): only
         // "configuration/account" codes that the user can act on live here; a hit
         // replaces the backend English message, a miss falls back to the existing
@@ -413,8 +418,7 @@ export default {
           CN_BALANCE_NO_ENDPOINT: 'This account platform has no balance query endpoint',
           CN_BALANCE_URL_REJECTED: 'The balance probe URL is not allowed, please check the probe URL configuration',
           CN_BALANCE_INVALID_PLATFORM: 'This account is not a CN provider account, balance probing is unsupported',
-          CN_BALANCE_ACCOUNT_NOT_FOUND: 'Account does not exist or has been deleted',
-          CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE: 'The upstream subscription has expired or is unavailable, balance cannot be queried; please renew or change the account on the upstream provider'
+          CN_BALANCE_ACCOUNT_NOT_FOUND: 'Account does not exist or has been deleted'
         }
       },
       types: {

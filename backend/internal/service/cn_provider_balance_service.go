@@ -63,11 +63,6 @@ const (
 	CNBalanceKindBalance      = "balance"
 )
 
-// CNBalanceErrUpstreamSubscriptionUnavailable 表示「上游订阅已到期/不可用，
-// 上游 /v1/usage 不再返回 remaining」。此时上游侧无任何余额数值可取，
-// 仅报告可识别原因并保留上次好快照，禁止编造数字、禁止换端点伪造数值。
-const CNBalanceErrUpstreamSubscriptionUnavailable = "CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE"
-
 // CNProviderBalanceEntry 是单一币种的余额明细。
 type CNProviderBalanceEntry struct {
 	Currency string  `json:"currency"`
@@ -110,10 +105,14 @@ type CNProviderBalanceResult struct {
 	StatusCode int                       `json:"status_code,omitempty"`
 	FetchedAt  int64                     `json:"fetched_at"`
 	Persisted  bool                      `json:"persisted"`
-	// ErrorCode 可机读的错误码：仅在「可归类的失败类别」上置位，供管理端做本地化
-	// 映射。缺省空串时 JSON 里不出现该键（omitempty）。
-	ErrorCode string `json:"error_code,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// SubscriptionExpired 表示「上游订阅已到期/不可用」这一**账号状态**（不是探测故障）：
+	// 当订阅型分组 + 上游用户无活跃订阅时，上游 /v1/usage 返回 HTTP 200 但省略
+	// remaining/subscription 键，探测本身没坏，坏的是「这个账号在上游的额度没了」——
+	// 这是账号的确定性状态（要续费/换号），不是探测故障（HTTP 200、响应结构正常）。
+	// 此时确实取不到余额数字（Success=false），但需要管理端展示为状态而非报错；
+	// 其它分支恒为 false，JSON 里因 omitempty 不出现该键。
+	SubscriptionExpired bool `json:"subscription_expired,omitempty"`
+	Error               string `json:"error,omitempty"`
 }
 
 // CNProviderBalanceService 探测 Kimi / DeepSeek payg 账号的账户余额。
@@ -606,10 +605,12 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 		// 未注入 context）。此时保留上次快照（含到期时间，前端标红展示），
 		// 仅报告可识别的原因，不覆盖历史余额快照。
 		if plan := strings.TrimSpace(gjson.GetBytes(bodyBytes, "planName").String()); plan != "" {
-			// 可归类的失败类别：置位机读错误码供管理端本地化映射；
-			// 保留既有英文 Error 文本（含上游分组名 + "expired"）保持向后兼容。
-			result.ErrorCode = CNBalanceErrUpstreamSubscriptionUnavailable
-			result.Error = fmt.Sprintf("Upstream subscription %q expired or unavailable (missing remaining)", plan)
+			// 上游订阅已到期/不可用：这是账号的确定性状态（需续费/换号），
+			// 不是探测故障（探测本身 HTTP 200、响应结构正常）。此时确实取不到
+			// 余额数字（Success=false），管理端应展示为状态而非报错；保留上次好
+			// 快照（含到期时间），不覆盖历史余额、不编造数字、不换端点伪造数值。
+			result.SubscriptionExpired = true
+			result.Error = fmt.Sprintf("Upstream subscription %q expired or unavailable", plan)
 			return result, nil
 		}
 		result.Error = "Invalid balance response: missing remaining"

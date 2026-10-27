@@ -417,10 +417,10 @@ func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionKeepsSnapshot(
 	require.Empty(t, repo.extraWrites, "expired subscription must not overwrite last good snapshot")
 }
 
-// 上游订阅失效分支错误码化：上游 200 + body 含 planName、无 remaining 时，
-// ErrorCode 置 CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE，Success=false，
-// Error 仍含 "expired"，且**不落库 extra**（保留上次好快照）。
-func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionErrorCode(t *testing.T) {
+// 上游订阅失效分支状态字段化：上游 200 + body 含 planName、无 remaining 时，
+// SubscriptionExpired=true、Success=false，Error 含 "expired" 且含上游分组名
+// （不再含 "missing remaining"），且**不落库 extra**（保留上次好快照）。
+func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionStatus(t *testing.T) {
 	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
 		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
 	})}
@@ -435,13 +435,14 @@ func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionErrorCode(t *t
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.Success)
-	require.Equal(t, CNBalanceErrUpstreamSubscriptionUnavailable, result.ErrorCode)
+	require.True(t, result.SubscriptionExpired)
 	require.Contains(t, result.Error, "expired")
 	require.Contains(t, result.Error, "kimi订阅")
+	require.NotContains(t, result.Error, "missing remaining")
 	require.Empty(t, repo.extraWrites, "expired subscription must not overwrite last good snapshot")
 }
 
-// 成功路径（上游返回 remaining）：ErrorCode 必须为空串（不误伤正常余额口径）。
+// 成功路径（上游返回 remaining）：SubscriptionExpired 必须恒为 false（不误伤正常余额口径）。
 func TestCNProviderBalanceService_RelayOverrideSuccessHasEmptyErrorCode(t *testing.T) {
 	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
 		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
@@ -457,10 +458,10 @@ func TestCNProviderBalanceService_RelayOverrideSuccessHasEmptyErrorCode(t *testi
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, result.Success)
-	require.Empty(t, result.ErrorCode)
+	require.False(t, result.SubscriptionExpired)
 }
 
-// one-api 形状（body 含 data.unlimited_quota=true）：ErrorCode 必须为空串。
+// one-api 形状（body 含 data.unlimited_quota=true）：SubscriptionExpired 必须恒为 false。
 func TestCNProviderBalanceService_RelayOverrideOneApiUnlimitedHasEmptyErrorCode(t *testing.T) {
 	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
 		"enabled":     true,
@@ -478,10 +479,11 @@ func TestCNProviderBalanceService_RelayOverrideOneApiUnlimitedHasEmptyErrorCode(
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, result.Success)
-	require.Empty(t, result.ErrorCode)
+	require.False(t, result.SubscriptionExpired)
 }
 
-// 无 planName 的 missing remaining 分支：ErrorCode 必须为空串（仍走原文回退）。
+// 无 planName 的 missing remaining 分支：SubscriptionExpired 必须恒为 false
+// （仍走原文回退，Error 文本保持 "Invalid balance response: missing remaining"）。
 func TestCNProviderBalanceService_RelayOverrideMissingRemainingNoPlanEmptyErrorCode(t *testing.T) {
 	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
 		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
@@ -497,7 +499,7 @@ func TestCNProviderBalanceService_RelayOverrideMissingRemainingNoPlanEmptyErrorC
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.Success)
-	require.Empty(t, result.ErrorCode)
+	require.False(t, result.SubscriptionExpired)
 	require.Contains(t, result.Error, "Invalid balance response: missing remaining")
 	require.Empty(t, repo.extraWrites)
 }

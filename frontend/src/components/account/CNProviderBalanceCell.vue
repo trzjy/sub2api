@@ -58,6 +58,18 @@
       >
         {{ t('admin.accounts.cnProviders.balanceLow') }}
       </span>
+
+      <!-- 上游订阅已到期状态标签：命中后端 subscription_expired=true 时显示（账号状态，
+           不是探测故障，故用状态视觉而非红色报错行）。title 含本地化提示 + 英文原文，
+           hover 才可见。 -->
+      <span
+        v-if="subscriptionExpired"
+        data-test="cn-provider-balance-expired"
+        class="inline-flex items-center rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+        :title="subscriptionExpiredTitle"
+      >
+        {{ t('admin.accounts.cnProviders.subscriptionExpired') }}
+      </span>
     </div>
 
     <!-- 次卡进度条（kind==='count_pack' 且有分母）：已用/总量按百分比展示。
@@ -168,6 +180,10 @@ const error = ref<string | null>(null)
 // 避免把原始报错整段丢掉（运营可 hover 看上游原文）。
 const errorTitle = ref<string>('')
 const data = ref<CNProviderBalanceResult | null>(null)
+
+// 上游订阅已到期状态标记：命中后端 subscription_expired=true 时置位。这是账号状态
+// （上游额度没了，要去续费/换号），不是探测故障，故渲染状态标签而非红色报错行。
+const subscriptionExpired = ref<boolean>(false)
 
 const extraKey = (suffix: string) => `${props.account.platform}_${suffix}`
 
@@ -306,6 +322,9 @@ const expiresLabel = computed(() => {
   const d = expiresAt.value
   const mm = String(d.getMonth() + 1).padStart(2, '0')
   const dd = String(d.getDate()).padStart(2, '0')
+  if (d.getTime() < Date.now()) {
+    return t('admin.accounts.cnProviders.expiresAtExpired', { date: `${mm}-${dd}` })
+  }
   return t('admin.accounts.cnProviders.expiresAt', { date: `${mm}-${dd}` })
 })
 const expiresSoon = computed(() => {
@@ -313,6 +332,14 @@ const expiresSoon = computed(() => {
   return expiresAt.value.getTime() - Date.now() <= 3 * 24 * 60 * 60 * 1000
 })
 const expiresTitle = computed(() => expiresAt.value?.toLocaleString() ?? '')
+
+// 到期状态标签的 title：本地化提示 + 原始英文报错（errorTitle，运维 hover 才可见，
+// 便于查上游原文细节）。
+const subscriptionExpiredTitle = computed(() => {
+  const localized = t('admin.accounts.cnProviders.subscriptionExpiredTitle')
+  const detail = errorTitle.value || ''
+  return detail ? `${localized}\n${detail}` : localized
+})
 
 // 订阅月用量：探测结果优先，其次落库快照（<platform>_balance_monthly_used）。
 const snapshotMonthlyUsage = computed(() => {
@@ -410,9 +437,7 @@ const PROBE_ERROR_CODES = [
   'CN_BALANCE_NO_ENDPOINT',
   'CN_BALANCE_URL_REJECTED',
   'CN_BALANCE_INVALID_PLATFORM',
-  'CN_BALANCE_ACCOUNT_NOT_FOUND',
-  // 上游订阅已到期/不可用：余额查不到，需运营去上游续费/换账号（本地化出口见 handleProbe）。
-  'CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE'
+  'CN_BALANCE_ACCOUNT_NOT_FOUND'
 ] as const
 
 // 错误码取数：后端错误信封把稳定码放在 reason（response 包 Response.Reason），拦截器
@@ -460,23 +485,23 @@ const handleProbe = async () => {
   loading.value = true
   error.value = null
   errorTitle.value = ''
+  subscriptionExpired.value = false
   try {
     const result = await adminAPI.cnProviders.queryBalance(props.account.id)
     // 失败时保留快照展示（仅显示错误行），成功才覆盖。
     if (result.success) {
       data.value = result
+    } else if (result.subscription_expired === true) {
+      // 「上游订阅已到期」是账号状态（上游额度没了，要去续费/换号），不是探测故障：
+      // 不渲染红色报错行，改为状态标签「订阅已到期」。原始 result.error（英文原文）仅挂到
+      // title 上，便于运维 hover 查上游细节。
+      subscriptionExpired.value = true
+      errorTitle.value = result.error || ''
     } else {
-      // 探测返回 success=false：先看 error_code 是否命中白名单（同时充当 i18n key 注入闸），
-      // 命中则走本地化文案；未命中维持现状（result.error 原文）。原始 result.error 始终保留
-      // 到 errorTitle 作为 title 兜底，不整段丢弃。
-      const code = result.error_code
-      if (code && (PROBE_ERROR_CODES as readonly string[]).includes(code)) {
-        errorTitle.value = result.error || ''
-        error.value = t(`admin.accounts.cnProviders.probeErrors.${code}`)
-      } else {
-        errorTitle.value = result.error || ''
-        error.value = result.error || t('common.error')
-      }
+      // 其它失败分支：维持现状（红色报错行 + result.error 原文）。原始 result.error 始终
+      // 保留到 errorTitle 作为 title 兜底，不整段丢弃。
+      errorTitle.value = result.error || ''
+      error.value = result.error || t('common.error')
     }
   } catch (e) {
     error.value = extractErrorMessage(e)
@@ -491,6 +516,7 @@ watch(
     data.value = null
     error.value = null
     errorTitle.value = ''
+    subscriptionExpired.value = false
     loading.value = false
   }
 )

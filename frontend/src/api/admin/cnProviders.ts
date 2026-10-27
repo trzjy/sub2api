@@ -145,12 +145,12 @@ export interface CNProviderBalanceResult {
   persisted: boolean
   error?: string
   /**
-   * 可归类的失败类别码，对齐后端 CNProviderBalanceResult.ErrorCode。
-   * 仅在「可归类失败类别」上有值（如上游订阅失效分支填
-   * CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE）；成功路径与其它失败分支为缺省（空串，
-   * JSON 里不出现该键）。
+   * 上游订阅已到期状态标记，对齐后端 SubscriptionExpired（Go: SubscriptionExpired bool,
+   * json:"subscription_expired,omitempty"）。仅在「上游订阅已到期」这一账号状态上有值
+   * （true）；其余成功 / 失败分支缺省（JSON 里不出现该键）。命中时前端渲染「订阅已到期」
+   * 状态标签而非红色报错行（这是账号状态，不是探测故障）。
    */
-  error_code?: string
+  subscription_expired?: boolean
 }
 
 /** 查询 Coding Plan 滚动窗口用量（5h + weekly）。 */

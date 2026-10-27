@@ -635,6 +635,11 @@ export default {
         staleMinutes: '{minutes} 分钟',
         staleHours: '{hours} 小时',
         staleDays: '{days} 天',
+        // 上游订阅已到期状态（账号状态，非探测故障）：命中后端 subscription_expired=true
+        // 时显示状态标签而非红色报错行。
+        subscriptionExpired: '订阅已到期',
+        subscriptionExpiredTitle: '上游订阅已到期或不可用，无法查询余额；请到上游续费或更换账号',
+        expiresAtExpired: '已到期 {date}',
         // 余额探测错误码本地化映射（派发单 balance-ui-errmap）：仅收录「配置/账号类」
         // 用户可行动的码；命中则替换后端英文 message，未命中/无码回退既有渲染。
         // 瞬时/上游类（REQUEST_FAILED / REQUEST_BUILD_FAILED / PROBE_RESULT_INVALID /
@@ -647,8 +652,7 @@ export default {
           CN_BALANCE_NO_ENDPOINT: '该账号所在平台没有可用的余额查询端点',
           CN_BALANCE_URL_REJECTED: '余额探测地址不在允许范围内，请检查探测地址配置',
           CN_BALANCE_INVALID_PLATFORM: '该账号不是国产供应商账号，不支持余额探测',
-          CN_BALANCE_ACCOUNT_NOT_FOUND: '账号不存在或已被删除',
-          CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE: '上游订阅已到期或不可用，无法查询余额；请到上游续费或更换账号'
+          CN_BALANCE_ACCOUNT_NOT_FOUND: '账号不存在或已被删除'
         }
       },
       types: {

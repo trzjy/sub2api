@@ -650,32 +650,37 @@ describe('CNProviderBalanceCell', () => {
     expect(wrapper.text()).not.toContain('本地化:')
   })
 
-  // ===== 派发单 balance-ui-errmap：探测返回 success=false 路径的错误码本地化 =====
-  // 后端「上游订阅失效」分支填 error_code=CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE
-  // （字面量与卡 A 后端改动严格一致）。命中白名单 → 走本地化文案，原始英文不再出现在正文。
+  // ===== 卡 B2：上游订阅已到期 → 状态标签而非红色报错行 =====
+  // 后端「上游订阅已到期」分支：success=false 且 subscription_expired=true，
+  // error 为英文原文（运维 hover 才看）。命中后渲染状态标签「订阅已到期」，不显示红色报错行。
 
-  it('maps success=false error_code CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE to localized copy (no raw English in body)', async () => {
+  it('subscription_expired=true renders the status label, not a red error row (raw English only in title)', async () => {
     queryBalance.mockResolvedValue({
       success: false,
-      error_code: 'CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE',
-      error: 'Upstream subscription "X" expired or unavailable (missing remaining)'
+      subscription_expired: true,
+      error: 'Upstream subscription "X" expired or unavailable'
     })
 
     const wrapper = mount(CNProviderBalanceCell, { props: { account } })
     await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
     await flushPromises()
 
-    // 命中映射 → 本地化文案
-    expect(wrapper.text()).toContain('本地化:CN_BALANCE_UPSTREAM_SUBSCRIPTION_UNAVAILABLE')
-    // 原始英文正文不渲染（仅挂在 title 上）
+    // 状态标签出现，文案为 i18n key 本身（mock 直返 key）。
+    const label = wrapper.get('[data-test="cn-provider-balance-expired"]')
+    expect(label.text()).toContain('admin.accounts.cnProviders.subscriptionExpired')
+    // 原始英文报错正文不渲染为可见文本（仅挂在 title 上）。
     expect(wrapper.text()).not.toContain('Upstream subscription')
-    expect(wrapper.text()).not.toContain('missing remaining')
-    // 快照余额保留
+    // 红色报错行（v-if="error" 的 div.truncate）不出现。
+    expect(wrapper.find('div.truncate').exists()).toBe(false)
+    // title 里能找到英文原文（便于运维 hover 查详情）。
+    const title = label.attributes('title') || ''
+    expect(title).toContain('Upstream subscription "X" expired or unavailable')
+    // 快照余额保留。
     expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
   })
 
-  // 无 error_code → 回退链不变：原样显示 result.error 原文。
-  it('falls back to the raw result.error when success=false has no error_code', async () => {
+  // 无 subscription_expired → 维持现状：红色报错行 + result.error 原文，无状态标签。
+  it('success=false without subscription_expired still shows the raw error row', async () => {
     queryBalance.mockResolvedValue({
       success: false,
       error: '某种未编碼的错误'
@@ -685,15 +690,17 @@ describe('CNProviderBalanceCell', () => {
     await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('某种未编碼的错误')
-    expect(wrapper.text()).not.toContain('本地化:')
+    // 仍是红色报错行，显示原始英文。
+    expect(wrapper.get('div.truncate').text()).toContain('某种未编碼的错误')
+    // 不出现状态标签。
+    expect(wrapper.find('[data-test="cn-provider-balance-expired"]').exists()).toBe(false)
   })
 
-  // 白名单闸门：error_code 不在表内 → 不允许拿任意码拼 i18n key，回退原文。
-  it('whitelist gate: an unmapped error_code falls back to the raw result.error', async () => {
+  // subscription_expired=false → 不命中状态分支，仍显示报错行原文，无状态标签。
+  it('success=false with subscription_expired=false shows the error row (no status label)', async () => {
     queryBalance.mockResolvedValue({
       success: false,
-      error_code: '不在白名单里的码',
+      subscription_expired: false,
       error: '原文'
     })
 
@@ -701,8 +708,59 @@ describe('CNProviderBalanceCell', () => {
     await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('原文')
-    expect(wrapper.text()).not.toContain('本地化:')
+    expect(wrapper.get('div.truncate').text()).toContain('原文')
+    expect(wrapper.find('[data-test="cn-provider-balance-expired"]').exists()).toBe(false)
+  })
+
+  // 探测成功 → 状态标签不出现。
+  it('successful probe does NOT render the expired status label', async () => {
+    queryBalance.mockResolvedValue({
+      success: true,
+      balance: 9.9,
+      currency: 'CNY',
+      available: true,
+      provider: 'kimi',
+      fetched_at: 1,
+      persisted: true
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="cn-provider-balance-expired"]').exists()).toBe(false)
+    // 成功路径不渲染红色报错行。
+    expect(wrapper.find('div.truncate').exists()).toBe(false)
+  })
+
+  // 切换 account.id（watch）→ 状态标签清空，不得残留。
+  it('switches account.id clears the expired status label', async () => {
+    queryBalance
+      .mockResolvedValueOnce({
+        success: false,
+        subscription_expired: true,
+        error: 'Upstream subscription "X" expired or unavailable'
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        balance: 9.9,
+        currency: 'CNY',
+        available: true,
+        provider: 'kimi',
+        fetched_at: 1,
+        persisted: true
+      })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="cn-provider-balance-expired"]').exists()).toBe(true)
+
+    // 切换到一个不同的账号（id 变化触发 watch）。
+    await wrapper.setProps({ account: { ...account, id: 99 } })
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="cn-provider-balance-expired"]').exists()).toBe(false)
   })
 
   // ===== 卡 B2 回归锁：异常路径（queryBalance reject）错误行 title 不能丢失 =====
