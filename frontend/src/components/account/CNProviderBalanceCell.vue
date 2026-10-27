@@ -31,9 +31,12 @@
         {{ t('admin.accounts.cnProviders.remainingCount', { count: remainingCountLabel }) }}
       </span>
 
-      <!-- 订阅有效期（同程序中转 /v1/usage 探测透传的上游 expires_at） -->
+      <!-- 订阅有效期（同程序中转 /v1/usage 探测透传的上游 expires_at）。
+           命中「订阅已到期」状态标签时不再渲染该日期标签：避免与琥珀标签语义互斥
+           （未来日期显示「至 MM-DD」= 说没到期）或重复表达（已过期显示「已到期 MM-DD」）。
+           非到期状态完全不变（含已过期时的红色「已到期 MM-DD」）。 -->
       <span
-        v-if="expiresLabel"
+        v-if="expiresLabel && !subscriptionExpired"
         data-test="cn-provider-balance-expires"
         class="text-[10px] leading-4"
         :class="expiresSoon ? 'font-medium text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'"

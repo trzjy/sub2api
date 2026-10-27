@@ -733,6 +733,76 @@ describe('CNProviderBalanceCell', () => {
     expect(wrapper.find('div.truncate').exists()).toBe(false)
   })
 
+  // ===== 卡 B3：消除「订阅已到期」标签与到期日期文案同屏矛盾 =====
+  // 命中「订阅已到期」（subscription_expired=true）且快照里是未来 expires_at 时，
+  // 到期日期标签（cn-provider-balance-expires）必须消失，仅保留琥珀状态标签，
+  // 避免「日期说没到期、徽标说已到期」的语义互斥。
+
+  it('subscription_expired=true with a FUTURE expires_at hides the expiry-date label (no contradiction)', async () => {
+    const futureISO = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() // 未来 RFC3339
+    const expiredAccount = {
+      ...account,
+      extra: {
+        kimi_balance: 12.5,
+        kimi_balance_currency: 'CNY',
+        kimi_balance_expires_at: futureISO
+      }
+    } as Account
+
+    queryBalance.mockResolvedValue({
+      success: false,
+      subscription_expired: true,
+      error: 'Upstream subscription expired'
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: expiredAccount } })
+    // 命中前（快照仍是未来日期）→ 到期标签应暂存在；点击探测命中状态后才消失。
+    expect(wrapper.find('[data-test="cn-provider-balance-expires"]').exists()).toBe(true)
+
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    // 状态标签出现（i18n key 本身，mock 直返 key）。
+    const label = wrapper.get('[data-test="cn-provider-balance-expired"]')
+    expect(label.text()).toContain('admin.accounts.cnProviders.subscriptionExpired')
+    // 到期日期标签元素消失（不与琥珀标签矛盾/重复）。
+    expect(wrapper.find('[data-test="cn-provider-balance-expires"]').exists()).toBe(false)
+    // 快照余额保留。
+    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
+  })
+
+  // 对照用例：非到期状态（subscription_expired 缺省）+ 未来 expires_at → 到期日期标签
+  // 必须仍然存在，锁定「非到期时不受影响」。
+  it('non-expired state keeps the FUTURE expiry-date label present (B3 invariance)', async () => {
+    const futureISO = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    const futureAccount = {
+      ...account,
+      extra: {
+        kimi_balance: 12.5,
+        kimi_balance_currency: 'CNY',
+        kimi_balance_expires_at: futureISO
+      }
+    } as Account
+
+    queryBalance.mockResolvedValue({
+      success: false,
+      error: '未订阅相关错误（非到期）'
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: futureAccount } })
+    expect(wrapper.find('[data-test="cn-provider-balance-expires"]').exists()).toBe(true)
+
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    // 非到期：到期日期标签仍然存在，且文案为未来到期标签（mock 直返 key）。
+    const expires = wrapper.find('[data-test="cn-provider-balance-expires"]')
+    expect(expires.exists()).toBe(true)
+    expect(expires.text()).toContain('admin.accounts.cnProviders.expiresAt')
+    // 不出现「订阅已到期」状态标签。
+    expect(wrapper.find('[data-test="cn-provider-balance-expired"]').exists()).toBe(false)
+  })
+
   // 切换 account.id（watch）→ 状态标签清空，不得残留。
   it('switches account.id clears the expired status label', async () => {
     queryBalance
