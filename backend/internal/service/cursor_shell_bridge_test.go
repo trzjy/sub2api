@@ -454,3 +454,34 @@ func TestCursorShellBridgeMcpPathUnaffected(t *testing.T) {
 	require.Len(t, snap, 1)
 	require.Equal(t, "", snap[0].Kind, "mcp 委托 Kind 必须仍为空（字节级行为不变）")
 }
+
+// 13. exec 终止控制帧（AgentClientMessage.f5 stream_close）编码器：字节级相等 + 反向解码 + 常量值守卫
+func TestCursorShellBridgeStreamCloseFrame(t *testing.T) {
+	// 逐字节相等：execID=7 → 0x0a 0x02 0x08 0x07
+	require.Equal(t, []byte{0x0a, 0x02, 0x08, 0x07}, cursorEncodeExecStreamClose(7),
+		"execID=7 的终止控制帧字节必须等于 {0x0a,0x02,0x08,0x07}")
+	// execID=300（varint 两字节 0xAC 0x02）→ 0x0a 0x03 0x08 0xAC 0x02
+	require.Equal(t, []byte{0x0a, 0x03, 0x08, 0xAC, 0x02}, cursorEncodeExecStreamClose(300),
+		"execID=300 的终止控制帧字节必须等于 {0x0a,0x03,0x08,0xAC,0x02}")
+
+	// 反向按字段解码：外层 cursorDecodeProtobuf → cursorFindField(payload, cursorFldControlStreamClose)
+	// 存在且 Number == 1；其内层 cursorFindField(..., cursorFldStreamCloseID) 的 varint 等于传入 execID。
+	for _, execID := range []uint64{7, 300} {
+		payload := cursorEncodeExecStreamClose(execID)
+		fields, err := cursorDecodeProtobuf(payload)
+		require.NoError(t, err)
+		ctrl, ok := cursorFindField(fields, cursorFldControlStreamClose)
+		require.True(t, ok, "外层必须含 f1 stream_close")
+		require.Equal(t, 1, ctrl.Number, "stream_close 字段号必须为 1")
+		innerFields, err := cursorDecodeProtobuf(ctrl.Bytes)
+		require.NoError(t, err)
+		idF, ok := cursorFindField(innerFields, cursorFldStreamCloseID)
+		require.True(t, ok, "内层必须含 f1 id")
+		require.EqualValues(t, execID, idF.Varint, "内层 id 的 varint 必须等于传入 execID")
+	}
+
+	// 三个常量的值断言（防止后续被误改）。
+	require.Equal(t, 5, cursorFldClientControlMessage, "cursorFldClientControlMessage 必须为 5")
+	require.Equal(t, 1, cursorFldControlStreamClose, "cursorFldControlStreamClose 必须为 1")
+	require.Equal(t, 1, cursorFldStreamCloseID, "cursorFldStreamCloseID 必须为 1")
+}

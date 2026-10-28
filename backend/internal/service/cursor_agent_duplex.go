@@ -78,6 +78,13 @@ const (
 	// ExecClientMessage.f14 = ShellStream（原生 shell 委托回写通道，区别于 mcp 的 f11 McpResult）。
 	cursorFldClientMsgShellStream = 14
 
+	// cursorFldClientControlMessage 是信封 AgentClientMessage.f5（exec_client_control_message）。
+	cursorFldClientControlMessage = 5
+	// ExecClientControlMessage.f1 = stream_close（f2 throw / f3 heartbeat）。
+	cursorFldControlStreamClose = 1
+	// ExecClientStreamClose.f1 = id（uint32，varint）。
+	cursorFldStreamCloseID = 1
+
 	// ShellStream oneof 事件字段号（依据 plan §1 / §2.2）。
 	cursorFldShellStreamStdout = 1 // f1 stdout{data}
 	cursorFldShellStreamStderr = 2 // f2 stderr{data}
@@ -87,8 +94,9 @@ const (
 	// （客户端 Lj() 默认策略）。仅在请求未携带 requested_sandbox_policy 时回填 start。
 	cursorSandboxTypeInsecureNone = 1
 	// cursorShellBridgeEnabled 控制 f14 原生 shell 桥接是否启用。
-	// 交付段已验证；回写段（ShellStream 结果回传）在真机上不推进，未解决前保持 false。
-	cursorShellBridgeEnabled = false
+	// 交付段已验证；回写段已补 exec 终止控制帧（AgentClientMessage.f5 stream_close），
+	// 开关打开用于真机 T1/T2 往返验证。
+	cursorShellBridgeEnabled = true
 
 	// ShellStreamStdout / ShellStreamStderr 内层字段。
 	cursorFldShellStreamData = 1 // f1 data（string）
@@ -508,6 +516,16 @@ func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr s
 	return frames
 }
 
+// cursorEncodeExecStreamClose 把一个 exec 的终止控制帧编码为 ExecClientControlMessage 载荷。
+// 真实客户端在每条 ExecServerMessage 的结果流写完后都会补发
+// ExecClientControlMessage{f1 stream_close{f1 id=exec_id}}；缺该帧时上游认为 exec 仍未结束，
+// 事件流（ShellStream）不会被收尾（McpResult 是单条自包含结果，故 mcp 路径不需要该帧）。
+// 字节形：0x0a <len> { 0x08 <varint execID> }；外层由调用方以 AgentClientMessage.f5 包裹。
+func cursorEncodeExecStreamClose(execID uint64) []byte {
+	inner := cursorAppendVarintField(nil, cursorFldStreamCloseID, execID)
+	return cursorAppendBytesField(nil, cursorFldControlStreamClose, inner)
+}
+
 func cursorClientChecksum(device string, now time.Time) string {
 	stamp := uint32(now.UnixMilli() / 1_000_000)
 	// JavaScript shifts use a 32-bit operand and mask the shift count to five bits.
@@ -884,6 +902,11 @@ func (d *cursorAgentDuplex) send(field int, payload []byte) error {
 	defer d.writeMu.Unlock()
 	_, err := d.writer.Write(cursorEncodeEnvelope(cursorAppendBytesField(nil, field, payload)))
 	return err
+}
+
+// sendExecStreamClose 把 exec 终止控制帧写入当前 AgentRun（AgentClientMessage.f5）。
+func (d *cursorAgentDuplex) sendExecStreamClose(execID uint64) error {
+	return d.send(cursorFldClientControlMessage, cursorEncodeExecStreamClose(execID))
 }
 
 // cursorFindFieldOK 是 cursorFindField 的 bool 便捷版（仅判断字段是否存在）。

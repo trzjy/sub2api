@@ -6749,6 +6749,16 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 				}
 				it.session.noteStage("resume_result_written")
 			}
+			// exec 终止控制帧（AgentClientMessage.f5 ExecClientControlMessage.stream_close{id}）：
+			// 真实客户端在结果流写完后必发；缺失时上游认为 shell exec 仍未结束，
+			// ShellStream 不会被收尾（mcp 的 McpResult 是单条自包含结果，无需该帧，故不改 mcp 路径）。
+			if err := it.duplex.sendExecStreamClose(cap.ExecID); err != nil {
+				// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
+				it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
+				return fmt.Errorf("cursor: deliver shell stream close transport failure: %w", err)
+			}
+			it.duplex.logPhase(zapcore.InfoLevel, "shell_stream_close_sent", "",
+				zap.String("call_id", cap.ID), zap.Uint64("exec_id", cap.ExecID))
 			continue
 		}
 		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, r.CallID, r.Text, r.Structured, r.IsError)
