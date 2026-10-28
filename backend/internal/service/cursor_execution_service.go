@@ -2766,6 +2766,16 @@ type cursorSessionRecord struct {
 	assistantTextBase int
 	// pending 是**当前交付批次**（等待客户端真实结果）；同一时刻至多一个。
 	pending *cursorPendingBatch
+	// deliveredBatchSeq 是**已确认交付**到的最大批次序号（cursorToolBatch.seq，初始 0）。
+	//
+	// 这是"是不是新批"的唯一会话侧判据：只有 seq > deliveredBatchSeq 的已封口批才算
+	// 本次 HTTP 的新交付集合。绝不用 call_id / 索引已登记来过滤——真实客户端会跨轮
+	// 复用同一个 tool_call_id（生产实测同一会话内 read/write 共用同一 ID），按 ID 过滤
+	// 会把本轮新批整体吞掉，交付批为空 → 上游收不到结果 → stream_error。
+	//
+	// 只在 commitDeliveredBatchState（写出完成后）随 delivered=true 一起推进；准备失败
+	// 绝不推进，未交付的批下一轮仍算新批。
+	deliveredBatchSeq uint64
 	// intake 是真实结果回写通道（由原生双工持有方安装）；nil 表示通道未接通，
 	// 续轮必须失败关闭且零上游写入（绝不伪造成功）。
 	intake CursorSessionIntake
@@ -3173,6 +3183,11 @@ var (
 // cursorToolBatch 是一个工具批次：同一 model_call_id 的委托集合。
 type cursorToolBatch struct {
 	modelCallID string
+	// seq 是**本会话内单调递增**的批次序号（由 cursorToolDelegations.newBatchLocked 从 1
+	// 开始分配，永不重复、永不复用）。它是"是不是新批"的**唯一**判据：
+	// 真实客户端会跨轮复用同一个 tool_call_id（生产实测同一会话内 read 与 write 共用
+	// call-3466d322-...），因此 call_id 不能用来判定新批，只有 seq 免疫 ID 复用。
+	seq uint64
 	// listed 是 tool_requests_listed.call_count（ToolRequestsListedUpdate 内层 f1，uint32）；
 	// listedSeen=false 表示本批未声明总数。
 	listed     int
@@ -3206,6 +3221,9 @@ type cursorToolDelegations struct {
 	mu   sync.Mutex
 	all  []*cursorToolBatch
 	open map[string]*cursorToolBatch
+	// nextSeq 是下一个待分配的批次序号；只有 newBatchLocked 在持有 d.mu 时推进它，
+	// 保证 seq 在**本会话内**严格单调递增、从 1 开始、永不复用（免疫 call_id 跨轮复用）。
+	nextSeq uint64
 	// shared 表示本记录由 duplex 拥有解码权（parser 不再解码同一帧）。
 	shared bool
 }
@@ -3226,15 +3244,30 @@ func newLocalCursorToolDelegations() *cursorToolDelegations {
 // isShared 报告本记录的解码权是否在 duplex 侧。
 func (d *cursorToolDelegations) isShared() bool { return d != nil && d.shared }
 
+// newBatchLocked 是**唯一**的建批点：分配本会话内单调递增的 seq 并把批次登记进
+// d.all（调用方必须已持 d.mu，且负责把批次放进对应的 d.open key）。
+//
+// 纪律：禁止在别处写 &cursorToolBatch{...} 直接建批——绕过这里会让批次没有 seq，
+// 续轮"是否新批"的判定就退回按 call_id 猜（真实客户端跨轮复用 call_id，会吞掉新批）。
+func (d *cursorToolDelegations) newBatchLocked(modelCallID string, shellOnly bool) *cursorToolBatch {
+	d.nextSeq++
+	batch := &cursorToolBatch{
+		modelCallID: modelCallID,
+		shellOnly:   shellOnly,
+		seq:         d.nextSeq,
+	}
+	d.all = append(d.all, batch)
+	return batch
+}
+
 // batchFor 取/建当前开放批次；modelCallID 为空时要求开放批次唯一（否则含糊失败）。
 func (d *cursorToolDelegations) batchFor(modelCallID string) (*cursorToolBatch, error) {
 	if modelCallID != "" {
 		if batch, ok := d.open[modelCallID]; ok && !batch.sealed {
 			return batch, nil
 		}
-		batch := &cursorToolBatch{modelCallID: modelCallID}
+		batch := d.newBatchLocked(modelCallID, false)
 		d.open[modelCallID] = batch
-		d.all = append(d.all, batch)
 		return batch, nil
 	}
 	var candidates []*cursorToolBatch
@@ -3252,9 +3285,8 @@ func (d *cursorToolDelegations) batchFor(modelCallID string) (*cursorToolBatch, 
 	}
 	switch len(candidates) {
 	case 0:
-		batch := &cursorToolBatch{}
+		batch := d.newBatchLocked("", false)
 		d.open[""] = batch
-		d.all = append(d.all, batch)
 		return batch, nil
 	case 1:
 		return candidates[0], nil
@@ -3519,9 +3551,8 @@ func (d *cursorToolDelegations) noteStandaloneDelegation(kind, callID string, tc
 			existing.delegations = append(existing.delegations, tc)
 			return nil
 		}
-		batch := &cursorToolBatch{shellOnly: true}
+		batch := d.newBatchLocked("", true)
 		d.open[callID] = batch
-		d.all = append(d.all, batch)
 		batch.delegations = append(batch.delegations, tc)
 		return nil
 	}
@@ -6698,10 +6729,14 @@ func cursorEnforceToolChoiceOnOutput(mode, name string, calls []cursorToolCallCa
 // cursorDeliveredBatchSummary 是一个已封口批次的可登记快照。
 type cursorDeliveredBatchSummary struct {
 	ModelCallID string
+	Seq         uint64
 	CallIDs     []string
 }
 
-// sealedBatchSummaries 返回已封口批次的 (model_call_id, 对外调用 ID 顺序) 快照。
+// sealedBatchSummaries 返回已封口批次的 (seq, model_call_id, 对外调用 ID 顺序) 快照。
+//
+// seq 为 0 的批次（只可能来自绕过 newBatchLocked 的测试夹具）在此按同一计数器补发：
+// 生产路径的批次一律由 newBatchLocked 分配，不产生补齐分支。
 func (d *cursorToolDelegations) sealedBatchSummaries() []cursorDeliveredBatchSummary {
 	if d == nil {
 		return nil
@@ -6713,7 +6748,11 @@ func (d *cursorToolDelegations) sealedBatchSummaries() []cursorDeliveredBatchSum
 		if batch == nil || !batch.sealed {
 			continue
 		}
-		summary := cursorDeliveredBatchSummary{ModelCallID: batch.modelCallID}
+		if batch.seq == 0 {
+			d.nextSeq++
+			batch.seq = d.nextSeq
+		}
+		summary := cursorDeliveredBatchSummary{ModelCallID: batch.modelCallID, Seq: batch.seq}
 		for _, capture := range batch.delegations {
 			if capture.ID == "" {
 				continue
@@ -6887,11 +6926,19 @@ type cursorPreparedBatch struct {
 	batchID    string
 	responseID string
 	callIDs    []string
+	// deliveredSeq 是本次交付批中**最大**的 cursorToolBatch.seq，提交时推进会话的
+	// deliveredBatchSeq（准备阶段不推进）。
+	deliveredSeq uint64
 	// history 是已应用本批增量的历史摘要克隆（提交时才替换会话正式摘要）。
 	history *CursorHistoryDigest
 }
 
 // prepareDeliveredBatch 在服务锁内完成整批可失败准备（仍 running、delivered=false）。
+//
+// "本次交付哪些调用"**只按批次序号 seq 判定**，不看 call_id、也不看索引是否已登记：
+// 真实客户端跨轮复用同一个 tool_call_id（生产实测同一会话内 read 与 write 共用
+// call-3466d322-...），按 ID 过滤会把新批整体吞掉（交付批为空 → 上游收不到结果 →
+// stream_error）。seq 由 newBatchLocked 单调分配，免疫 ID 复用。
 //
 // 一旦失败，本 session 的全部关联由原 finalizer 清除；不会留下"半个批"。
 func (s *CursorExecutionService) prepareDeliveredBatch(
@@ -6916,19 +6963,6 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 	}
 	responseID = strings.TrimSpace(responseID)
 
-	// F2 整改（外审 must_fix）：交付集合 = 登记集合。对外输出可能包含多个已封口批的调用
-	// （全量输出、全批封口），若只登记最后一批的 call_id，先交付的那批 call_id 未登记，
-	// 续轮回传时会报未知关联。
-	//
-	// 但"本批待收结果集合"必须只含**本次 HTTP 真正写出的新调用**：已封口批会跨轮保留在
-	// d.all 里，历史轮已交付并已被消费的批若仍算进来，客户端只回传本轮新调用时，
-	// cursorValidateResumeResults 会因 len(seen) != len(delivered) 判 missing_results。
-	// 故此处先按会话索引过滤：本会话已登记（= 已交付过）的 call_id 不属于本批。
-	var sealedCallIDs []string
-	for _, b := range batches {
-		sealedCallIDs = append(sealedCallIDs, b.CallIDs...)
-	}
-
 	// 与 beginResumeTakeover 同一锁序（会话表锁 → 会话锁）：不引入第二把锁。
 	s.sessions.mu.Lock()
 	defer s.sessions.mu.Unlock()
@@ -6941,24 +6975,50 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 	if live.finishing || live.state == cursorSessionClosed {
 		return nil, fmt.Errorf("%w: session finished before batch delivery", ErrCursorResumeNotWaiting)
 	}
-	// 整批一次检查并登记：任何一条"真正"冲突即整批失败（不半登记、不覆盖已有归属）。
-	// F2 整改：本次交付可能包含多个已封口批，所有尚未交付批的 call_id 一并登记到同一
-	// batchID。续轮多 HTTP 分批发货时，历史批的 call_id 已在首轮登记过，属于同一会话的
-	// 已交付批直接跳过（否则会与自身历史登记冲突）；跨会话的冲突仍如实返回错误。
-	//
-	// deliveredCallIDs 只收"本会话尚未登记"的新调用 = 本次 HTTP 真正交付给客户端的新增
-	// 调用集合，与 pending.callIDs 同源，供 cursorValidateResumeResults 精确比对。
+	// 本次 HTTP 真正交付给客户端的新增调用 = seq 大于已交付水位的已封口批的 call_id 并集。
+	// 已封口批会跨轮保留在 d.all 里，历史轮已交付的批 seq <= deliveredBatchSeq，自然排除；
+	// 同一 call_id 在新批中复用时因为批的 seq 是新的，仍会被正确计入（不被吞）。
+	// 按 ID 去重（保序）：同一 call_id 若同时出现在两个新批里，客户端只可能回传一条结果，
+	// pending.callIDs 必须与之一一对应，否则 cursorValidateResumeResults 会误判 missing_results。
 	var deliveredCallIDs []string
-	for _, callID := range sealedCallIDs {
-		key := cursorSessionIndexKeyForSpec(live.spec, CursorIDKindCall, callID)
-		if existing, le := s.sessions.index.Locate(key); le == nil && existing.SessionID == live.id {
-			// 同会话已登记：历史已交付批，跳过重复登记，也不计入本批待收集合。
+	seenCallIDs := make(map[string]struct{})
+	var deliveredSeq uint64
+	for _, b := range batches {
+		if b.Seq <= live.deliveredBatchSeq {
 			continue
 		}
-		if err := s.sessions.index.Register(key, live.id, batchID); err != nil {
-			return nil, err
+		for _, callID := range b.CallIDs {
+			if _, dup := seenCallIDs[callID]; dup {
+				continue
+			}
+			seenCallIDs[callID] = struct{}{}
+			deliveredCallIDs = append(deliveredCallIDs, callID)
 		}
-		deliveredCallIDs = append(deliveredCallIDs, callID)
+		if b.Seq > deliveredSeq {
+			deliveredSeq = b.Seq
+		}
+	}
+	// 没有任何新封口批 → 绝不构造空 pending（空批交付 = 上游收不到结果 → stream_error）。
+	// 明确失败，让上层走失败链。
+	if len(deliveredCallIDs) == 0 {
+		return nil, fmt.Errorf("%w: batch checkpoint without new sealed batch", ErrCursorBatchIncomplete)
+	}
+
+	// F2 整改（外审 must_fix）：交付集合 = 登记集合。索引登记仍对**全部**已封口批的
+	// call_id 做（不是只对新批）：对外输出可能包含多个已封口批的调用，全部登记才能保证
+	// 续轮回传时能定位。同会话已登记（= 历史批或同 ID 复用）直接跳过以保持幂等；跨会话
+	// 占用仍如实返回冲突错误。
+	for _, b := range batches {
+		for _, callID := range b.CallIDs {
+			key := cursorSessionIndexKeyForSpec(live.spec, CursorIDKindCall, callID)
+			if existing, le := s.sessions.index.Locate(key); le == nil && existing.SessionID == live.id {
+				// 同会话已登记：幂等跳过（本批仍按 seq 计入 deliveredCallIDs，见上）。
+				continue
+			}
+			if err := s.sessions.index.Register(key, live.id, batchID); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if responseID != "" {
 		key := cursorSessionIndexKeyForSpec(live.spec, CursorIDKindResponse, responseID)
@@ -6975,10 +7035,11 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 		}
 	}
 	prepared := &cursorPreparedBatch{
-		batchID:    batchID,
-		responseID: responseID,
-		callIDs:    deliveredCallIDs,
-		history:    history,
+		batchID:      batchID,
+		responseID:   responseID,
+		callIDs:      deliveredCallIDs,
+		deliveredSeq: deliveredSeq,
+		history:      history,
 	}
 	// 交付中：只能被识别为"已准备未交付"，不能据此接管或写结果（delivered=false）。
 	live.pending = &cursorPendingBatch{
@@ -7091,6 +7152,8 @@ func (s *CursorExecutionService) registerLiveItemIDs(
 // commitDeliveredBatchState 在**完整写出成功**之后提交正式历史与 waiting_tools 状态。
 //
 // 只做已准备摘要替换与状态推进，不再次登记条目 ID（已在 commitDeliveredBatchItems 完成）。
+// 批次序号水位 deliveredBatchSeq 也在**这里**随 delivered=true 一起推进：准备失败或写出
+// 失败都不得推进，否则未真正交付的批会被永久跳过。
 func (s *CursorExecutionService) commitDeliveredBatchState(
 	record *cursorSessionRecord, prepared *cursorPreparedBatch,
 ) error {
@@ -7104,6 +7167,9 @@ func (s *CursorExecutionService) commitDeliveredBatchState(
 	}
 	if prepared.history != nil {
 		record.historyDigest = prepared.history
+	}
+	if prepared.deliveredSeq > record.deliveredBatchSeq {
+		record.deliveredBatchSeq = prepared.deliveredSeq
 	}
 	if record.pending != nil && record.pending.batchID == prepared.batchID &&
 		len(record.pending.callIDs) == len(prepared.callIDs) {
