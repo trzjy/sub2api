@@ -768,7 +768,15 @@ func cursorAggregateSSEToCompletion(body []byte) ([]byte, error) {
 	if len(calls) == 0 {
 		message["content"] = content.String()
 	} else {
-		message["content"] = nil
+		// 有 tool_calls 时**不得丢正文**：客户端实际收到的 assistant 正文必须原样交付。
+		// 交付侧历史摘要（cursorDeliverBatchCheckpoint → batchAssistantText）登记的正是这段
+		// 正文；此处丢字会让 Messages / Responses 客户端回传的项数与交付侧不一致，续轮永久
+		// 400 history_mismatch。正文为空（无前言）时保持 null，与 OpenAI 惯例一致。
+		if text := content.String(); text != "" {
+			message["content"] = text
+		} else {
+			message["content"] = nil
+		}
 		rendered := make([]any, 0, len(calls))
 		for _, call := range calls {
 			args := strings.TrimSpace(call.args)
