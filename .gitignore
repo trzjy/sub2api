@@ -167,7 +167,8 @@ docs/screenshots/*
 .serena/
 .codex/
 /.codebuddy/
-/.omc/
+# omc 审查产物：任意层级都要忽略（根目录与 backend/.omc/ 等子目录）
+.omc/
 frontend/coverage/
 aicodex
 output/
