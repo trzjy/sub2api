@@ -469,9 +469,29 @@ func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr s
 		inner := cursorAppendStringField(nil, cursorFldShellStreamData, stderr)
 		frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStderr, inner)))
 	}
+	// stdout 按 512 字节分片：真实客户端按读取缓冲增量发送 stdout
+	// （emitToolCallDelta 逐块），单帧超长可能被上游丢弃/不推进。
 	if stdout != "" {
-		inner := cursorAppendStringField(nil, cursorFldShellStreamData, stdout)
-		frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStdout, inner)))
+		const chunk = 512
+		for i := 0; i < len(stdout); i += chunk {
+			end := i + chunk
+			if end > len(stdout) {
+				end = len(stdout)
+			}
+			// 避免在 UTF-8 多字节字符中间切断。
+			for end < len(stdout) && end > i && (stdout[end]&0xC0) == 0x80 {
+				end--
+			}
+			if end == i {
+				end = len(stdout)
+			}
+			inner := cursorAppendStringField(nil, cursorFldShellStreamData, stdout[i:end])
+			frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStdout, inner)))
+			if end >= len(stdout) {
+				break
+			}
+			i = end - chunk
+		}
 	}
 	// exit 帧（始终发送）。code 按 protobuf int32 编码（uint32 两位补码 → varint）。
 	exitInner := cursorAppendVarintField(nil, cursorFldShellStreamExitCode, uint64(uint32(exitCode)))
