@@ -829,8 +829,26 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				zap.String("tool_name", tc.Name), zap.Int("args_len", len(tc.ArgsJSON)),
 				zap.Int("sandbox_policy_len", len(tc.SandboxPolicy)))
 			return false, nil
+		case cursorNativeFsExecFieldOK(parts):
+			// Cursor 原生文件工具委托（ExecServerMessage.f3 write / f4 delete / f5 grep /
+			// f7 read / f8 ls）：解析 Args → 按声明 schema 选下游同名工具并转参数（找不到失败关闭）
+			// → 构造 capture{Kind:read|ls|grep|write|delete} → noteNativeFsDelegation。封口沿用
+			// shell 的"独立批立即可封口"路径（不等 started/listed）。失败一律失败关闭，
+			// 绝不自造工具名或伪造执行结果。
+			//
+			// 放在 f10/f36/f11/f14 之后：既有四条的优先级与字节级行为完全不变。
+			field, _ := cursorNativeFsExecField(parts)
+			tc, e := d.cursorCaptureNativeFsArgs(parts, field, execID, idField)
+			if e != nil {
+				return false, e
+			}
+			d.logPhase(zapcore.InfoLevel, "native_fs_args_delegated", "",
+				zap.Uint64("exec_id", execID), zap.String("tool_call_id", tc.ID),
+				zap.String("kind", tc.Kind), zap.String("tool_name", tc.Name),
+				zap.Int("field", field), zap.Int("args_len", len(tc.ArgsJSON)))
+			return false, nil
 		default:
-			// 未处理的 exec 子字段：先按字段号取证再失败关闭。
+			// 未处理的 exec 子字段：先按字段号取证，再区分"纯元数据"与"真未知执行"。
 			//
 			// 只记字段号（不记内容）：真实客户端（CodeBuddy / Claude Code / Codex）会发起
 			// 我们尚未实现的 exec 类型，没有这个字段号就只能盲猜。安全字段 = exec 内层
@@ -840,6 +858,20 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				nums = append(nums, f.Number)
 			}
 			sort.Ints(nums)
+			if cursorExecImplementedSubfieldOK(parts) {
+				// 已实现的 exec 子字段本应被上方 switch 命中；落到这里说明分支顺序被破坏，
+				// 属内部逻辑错误，保持失败关闭（绝不静默忽略真实执行请求）。
+				d.logPhase(zapcore.ErrorLevel, "exec_dispatch_internal_error", "",
+					zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
+				return false, fmt.Errorf("%w: AgentRun exec dispatch ordering broken", ErrCursorProtocol)
+			}
+			if cursorExecMetadataOnly(parts) {
+				// 纯元数据伴随消息（f1/f15/f19/f55/f57/f39/f45）：不承载执行指令，
+				// 忽略即可，连接保持、不失败（生产 [1,15,19,55] / [1,15,57] 即此类）。
+				d.logPhase(zapcore.DebugLevel, "exec_metadata_only", "",
+					zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
+				return false, nil
+			}
 			d.logPhase(zapcore.WarnLevel, "exec_unsupported_fields", "",
 				zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
 			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
@@ -915,6 +947,73 @@ func (d *cursorAgentDuplex) sendExecStreamClose(execID uint64) error {
 func cursorFindFieldOK(fields []cursorPBField, number int) bool {
 	_, ok := cursorFindField(fields, number)
 	return ok
+}
+
+// ---------------------------------------------------------------------------
+// ExecServerMessage 元数据字段白名单
+//
+// 依据生产日志 phase=exec_unsupported_fields field_numbers=[1,7,15,19,55] 与 bundle 原文：
+//
+//	ExecServerMessage:
+//	  f1  id                              (varint)
+//	  f15 exec_id                         (string)
+//	  f57 machine_id                      (string, opt)
+//	  f19 span_context                    (SpanContext, opt)
+//	  f55 accept_hook_additional_contexts (bool, opt)
+//
+// agent-host 的 createExecInstance 每条 exec 都恒定构造 spanContext 与
+// acceptHookAdditionalContexts（值可能 undefined，但字段常在）。因此存在
+// "只有元数据、没有任何 exec 子字段"的消息（如 [1,15,19,55] / [1,15,57]）。
+// 这类消息不承载执行指令，忽略即可，不得失败关闭整条会话。
+// ---------------------------------------------------------------------------
+const (
+	cursorFldExecMetaID          = 1  // f1  id
+	cursorFldExecMetaExecID      = 15 // f15 exec_id
+	cursorFldExecMetaSpanContext = 19 // f19 span_context
+	cursorFldExecMetaAcceptHook  = 55 // f55 accept_hook_additional_contexts
+	cursorFldExecMetaMachineID   = 57 // f57 machine_id
+
+	// ExecClientMessage 侧出现过的元数据（ExecServerMessage 侧同样只作元数据忽略）：
+	cursorFldExecMetaLocalExecTimeMs = 39 // f39 local_execution_time_ms
+	cursorFldExecMetaHookAddlContext = 45 // f45 hook_additional_contexts
+)
+
+// cursorExecMetadataFieldOK 判断单个字段号是否属于可忽略的 exec 元数据白名单。
+// **只有**白名单内的字段可被忽略；白名单外的未知字段一律失败关闭。
+func cursorExecMetadataFieldOK(number int) bool {
+	switch number {
+	case cursorFldExecMetaID, cursorFldExecMetaExecID, cursorFldExecMetaMachineID,
+		cursorFldExecMetaSpanContext, cursorFldExecMetaAcceptHook,
+		cursorFldExecMetaLocalExecTimeMs, cursorFldExecMetaHookAddlContext:
+		return true
+	default:
+		return false
+	}
+}
+
+// cursorExecMetadataOnly 判断 ExecServerMessage 是否"只含元数据"（非空且全部字段在白名单内）。
+func cursorExecMetadataOnly(parts []cursorPBField) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	for _, f := range parts {
+		if !cursorExecMetadataFieldOK(f.Number) {
+			return false
+		}
+	}
+	return true
+}
+
+// cursorExecImplementedSubfieldOK 判断是否出现任一已实现的 exec 子字段
+// （f10 context / f36 mcp_state / f11 mcp_args / f14 shell / f3-f8 原生文件工具）。
+// switch 已在 default 之前命中这些字段，故 default 中为 true 属内部逻辑错误。
+func cursorExecImplementedSubfieldOK(parts []cursorPBField) bool {
+	for _, n := range []int{10, 36, 11, 14} {
+		if cursorFindFieldOK(parts, n) {
+			return true
+		}
+	}
+	return cursorNativeFsExecFieldOK(parts)
 }
 
 // respondContext 处理 exec 内层 f10（request_context）应答（既有逻辑逐字保留）。

@@ -3467,11 +3467,25 @@ func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) e
 // 已 sealed（交付后）各自新建独立 shellOnly 批并各自封口交付（每条 shell 执行请求独立交付，
 // 不做聚合）。shellOnly 批 key 为 call_id，与 mcp 的 "" 开放批隔离，互不吞并。
 func (d *cursorToolDelegations) noteShellDelegation(callID string, tc cursorToolCallCapture) error {
+	return d.noteStandaloneDelegation(cursorToolKindShell, callID, tc)
+}
+
+// noteNativeFsDelegation 登记一条原生文件工具委托（ExecServerMessage.f3/f4/f5/f7/f8，
+// Kind ∈ read/ls/grep/write/delete）。封口语义与 noteShellDelegation 完全一致：这些原生
+// exec 同样可能在无 tool_call_started 的情况下到达，故同样以"独立批立即可封口"交付。
+// 批标记沿用 shellOnly（= 独立原生 exec 批，仅以"有 ≥1 条委托"为封口条件）。
+func (d *cursorToolDelegations) noteNativeFsDelegation(kind, callID string, tc cursorToolCallCapture) error {
+	return d.noteStandaloneDelegation(kind, callID, tc)
+}
+
+// noteStandaloneDelegation 是 noteShellDelegation / noteNativeFsDelegation 的共用实现；
+// kind 只用于错误文案（区分是哪条原生通道失败关闭），不改变任何封口判定。
+func (d *cursorToolDelegations) noteStandaloneDelegation(kind, callID string, tc cursorToolCallCapture) error {
 	if d == nil {
 		return nil
 	}
 	if strings.TrimSpace(callID) == "" {
-		return fmt.Errorf("%w: shell delegation without tool_call_id", ErrCursorProtocol)
+		return fmt.Errorf("%w: %s delegation without tool_call_id", ErrCursorProtocol, kind)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -3511,9 +3525,9 @@ func (d *cursorToolDelegations) noteShellDelegation(callID string, tc cursorTool
 		batch.delegations = append(batch.delegations, tc)
 		return nil
 	}
-	// 3. 存在携带 started 的开放批但不含本 call_id（孤儿 shell 委托）→ 失败关闭，
+	// 3. 存在携带 started 的开放批但不含本 call_id（孤儿原生委托）→ 失败关闭，
 	//    绝不并入已声明 started 的批次（防假封口 / 超出 listed 交付），也不挂 pending。
-	return fmt.Errorf("%w: shell tool_call_id %q has no matching tool_call_started in open batch (orphan shell delegation)", ErrCursorProtocol, callID)
+	return fmt.Errorf("%w: %s tool_call_id %q has no matching tool_call_started in open batch (orphan %s delegation)", ErrCursorProtocol, kind, callID, kind)
 }
 
 // snapshot 返回按到达顺序的全部委托（parser 输出 tool_calls 用）。
@@ -6812,6 +6826,46 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 			}
 			it.duplex.logPhase(zapcore.InfoLevel, "shell_stream_close_sent", "",
 				zap.String("call_id", cap.ID), zap.Uint64("exec_id", cap.ExecID))
+			continue
+		}
+		// 原生文件工具委托（Kind ∈ read/ls/grep/write/delete）：回写对应 ExecClientMessage
+		// result 帧（f3/f4/f5/f7/f8），随后同样补 exec 终止控制帧。与 mcp/shell 三条通道
+		// 互不混用，mcp 路径字节级行为不变（实现要点 5 / 硬约束 5）。
+		if cap.Kind != "" {
+			fsFrames, ferr := cursorEncodeNativeFsResult(cap, r)
+			if ferr != nil {
+				// 未知 Kind：失败关闭，绝不写零帧冒充成功。
+				it.svc.finishCursorSession(it.session, "resume_unknown_native_kind")
+				return ferr
+			}
+			it.duplex.logPhase(zapcore.InfoLevel, "native_fs_result_writeback", "",
+				zap.String("call_id", cap.ID), zap.String("kind", cap.Kind),
+				zap.Int("frames", len(fsFrames)), zap.Int("text_len", len(cursorNativeFsResultText(r))),
+				zap.Bool("is_error", r.IsError))
+			if cap.Kind == cursorToolKindGrep {
+				// BLOCKED 取证点：dump 缺 GrepResult.workspace_results 内层形状，当前只能把
+				// grep 的原始输出走 f2 error{f1 error} 降级回传（信息不丢，语义降级）。
+				// 该警告必须出现，避免"grep 永远报错"被误判为客户端故障。
+				it.duplex.logPhase(zapcore.WarnLevel, "native_fs_grep_degraded", "blocked_schema",
+					zap.String("call_id", cap.ID),
+					zap.String("reason", "grep workspace_results message shape missing from bundle dump"))
+			}
+			for _, frame := range fsFrames {
+				if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
+					// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
+					it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
+					return fmt.Errorf("cursor: deliver native fs tool result transport failure: %w", err)
+				}
+				it.session.noteStage("resume_result_written")
+			}
+			// exec 终止控制帧（与 shell 相同）：真实客户端每条 exec 结果流写完都补发
+			// stream_close，缺失时上游认为该 exec 仍未结束、不收尾。
+			if err := it.duplex.sendExecStreamClose(cap.ExecID); err != nil {
+				it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
+				return fmt.Errorf("cursor: deliver native fs stream close transport failure: %w", err)
+			}
+			it.duplex.logPhase(zapcore.InfoLevel, "native_fs_stream_close_sent", "",
+				zap.String("call_id", cap.ID), zap.String("kind", cap.Kind), zap.Uint64("exec_id", cap.ExecID))
 			continue
 		}
 		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, r.CallID, r.Text, r.Structured, r.IsError)
