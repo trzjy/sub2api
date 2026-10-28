@@ -93,10 +93,6 @@ const (
 	// cursorSandboxTypeInsecureNone 是 agent.v1 沙箱类型枚举的 INSECURE_NONE 取值
 	// （客户端 Lj() 默认策略）。仅在请求未携带 requested_sandbox_policy 时回填 start。
 	cursorSandboxTypeInsecureNone = 1
-	// cursorShellBridgeEnabled 控制 f14 原生 shell 桥接是否启用。
-	// 交付段已验证；回写段已补 exec 终止控制帧（AgentClientMessage.f5 stream_close），
-	// 开关打开用于真机 T1/T2 往返验证。
-	cursorShellBridgeEnabled = true
 
 	// ShellStreamStdout / ShellStreamStderr 内层字段。
 	cursorFldShellStreamData = 1 // f1 data（string）
@@ -818,13 +814,6 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				zap.Uint64("exec_id", execID), zap.String("tool_name", tc.Name))
 			return false, nil
 		case cursorFindFieldOK(parts, 14):
-			// 开关：shell 桥接的「交付段」已验证可用，但「回写段」在真机上不推进
-			// （客户端结果写回 ShellStream 后上游 177s 无 TurnEnded，5 种假设已排除）。
-			// 在拿到真实客户端回执帧前保持关闭，按原行为快速失败，避免客户端卡到 180s 超时。
-			// 打开前必须完成 T2 回写验证。
-			if !cursorShellBridgeEnabled {
-				return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
-			}
 			// Cursor 原生 shell 委托（ExecServerMessage.f14 = ShellArgs）：解析 → 校验 →
 			// 构造 capture{Kind:"shell"} → noteShellDelegation。有同 call_id 的 started 批则
 			// 按原路径入批；否则建 shellOnly 专属批立即可封口交付（不等 started/listed）。
