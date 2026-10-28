@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -37,11 +38,32 @@ func wiredWaterAllCursor() *quotaKeyModelWater {
 }
 
 func TestCursorWaterLevelEligibilityMatchesKnownSchedulingGates(t *testing.T) {
-	past, future := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
+	const qkID int64 = 1
+	// A04-G 来源门（§25.6 / §25.17.3）在 client != nil 时同时安装状态 provider 与用量快照
+	// provider；二者任一未装配即失败关闭（countsTowardWaterLevel 折叠成
+	// quota_key_state_unavailable 而不计入水位）。故此夹具必须一次装齐两个 provider，
+	// 且快照 checked_at 落在新鲜窗口内，否则本用例的"可服务"断言会被来源门否决。
+	now := time.Now()
+	prevNow := cursorSupplySourceUsageNow
+	cursorSupplySourceUsageNow = func() time.Time { return now }
+	t.Cleanup(func() { cursorSupplySourceUsageNow = prevNow })
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{qkID: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{qkID: []byte(fmt.Sprintf(
+			`{"total":400,"used":86,"status_code":200,"checked_at":%q,"error_code":""}`,
+			now.Add(-time.Minute).Format(time.RFC3339),
+		))},
+	})
+
+	past, future := now.Add(-time.Hour), now.Add(time.Hour)
 	newAccount := func() *ent.Account {
+		keyID := qkID
 		return &ent.Account{
 			ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth,
 			Status: StatusActive, Schedulable: true, AutoPauseOnExpired: true,
+			// 来源门按账号配额来源绑定（quota_key_id 列）判定归属；只给 Edges.QuotaKey
+			// 会让 candidate.QuotaKeyID 为空 → quota_key_source_unbound 否决。
+			QuotaKeyID:  &keyID,
 			Credentials: map[string]any{"model_mapping": map[string]any{"grok-4.7": "grok-4.7"}},
 			Edges: ent.AccountEdges{
 				QuotaKey: &ent.QuotaKey{ID: 1, Status: domain.QuotaKeyStatusActive},
@@ -75,7 +97,10 @@ func TestCursorWaterLevelEligibilityMatchesKnownSchedulingGates(t *testing.T) {
 		{"anthropic bridge", func(a *ent.Account) { a.Edges.Groups[0].Platform = PlatformAnthropic }, true},
 		{"gemini bridge", func(a *ent.Account) { a.Edges.Groups[0].Platform = PlatformGemini }, true},
 		{"preserve composite boundary", func(a *ent.Account) { a.Edges.Groups[0].Platform = PlatformComposite }, true},
-		{"openai platform mismatch", func(a *ent.Account) { a.Edges.Groups[0].Platform = PlatformOpenAI }, false},
+		// B 类断言修正：O57-A §6.1 把 openai 兼容族纳入 cursor 跨平台桥接白名单
+		// （cursorNativeBridgePlatforms，gateway_scheduling.go:1217-1228；同口径正例见
+		// cursor_o57a_integration_test.go:33），故"组平台为 openai"不再等于平台不匹配。
+		{"openai bridge", func(a *ent.Account) { a.Edges.Groups[0].Platform = PlatformOpenAI }, true},
 		{"inactive group", func(a *ent.Account) { a.Edges.Groups[0].Status = "disabled" }, false},
 		{"deleted group", func(a *ent.Account) { a.Edges.Groups[0].DeletedAt = &past }, false},
 		{"expired account", func(a *ent.Account) { a.ExpiresAt = &past }, false},

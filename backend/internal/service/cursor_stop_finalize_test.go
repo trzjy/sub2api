@@ -94,7 +94,19 @@ func newCursorStopFixture(t *testing.T, completeUsage bool) *cursorStopFixture {
 	record.mu.Unlock()
 
 	if completeUsage {
-		record.noteTurnUsage(cursorTurnUsage{Seen: true, Input: 120, Output: 45, CacheRead: 7, EndedAtMS: 999}, "pump_terminal")
+		// A06（c50b0edf8）把"完整真实 usage"改为逐字段存在性判定：billingFieldsComplete
+		// 要求 F1–F4 四项 Seen 全为 true，仅给取值不给标志会被判 turn_ended_fields_missing。
+		record.noteTurnUsage(cursorTurnUsage{
+			Seen:             true,
+			Input:            120,
+			Output:           45,
+			CacheRead:        7,
+			EndedAtMS:        999,
+			F1InputSeen:      true,
+			F2OutputSeen:     true,
+			F3CacheReadSeen:  true,
+			F4CacheWriteSeen: true,
+		}, "pump_terminal")
 	} else {
 		record.noteTurnUsage(cursorTurnUsage{Seen: true}, "pump_terminal")
 	}
@@ -414,7 +426,17 @@ func TestCursorStopRealUsageLandsOnceThroughUsageRecordQueue(t *testing.T) {
 			record.mu.Unlock()
 
 			if tc.complete {
-				record.noteTurnUsage(cursorTurnUsage{Seen: true, Input: 11, Output: 22, EndedAtMS: 5}, "pump_terminal")
+				// 同 A06 逐字段存在性：四字段 Seen 全 true 才算完整真实用量。
+				record.noteTurnUsage(cursorTurnUsage{
+					Seen:             true,
+					Input:            11,
+					Output:           22,
+					EndedAtMS:        5,
+					F1InputSeen:      true,
+					F2OutputSeen:     true,
+					F3CacheReadSeen:  true,
+					F4CacheWriteSeen: true,
+				}, "pump_terminal")
 			} else {
 				record.noteTurnUsage(cursorTurnUsage{Seen: true}, "pump_terminal")
 			}

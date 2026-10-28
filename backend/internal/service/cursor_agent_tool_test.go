@@ -618,7 +618,19 @@ func TestCursorBillingAfterToolDeferral(t *testing.T) {
 		cursorToolTestExecFrame(true, args),
 		cursorToolTestTurnEndedFrame(123, 4),
 	)
+	// 独立解析路径（非 duplex）必须注入本请求 f4 原始字节：parser 按 tool_name 取回
+	// input_schema 做 retype，缺失即 schema_absent 失败关闭（不放宽）。来源与 duplex
+	// 同源：声明同名的 get_weather 工具，取其 cursorConvertRequest 实际发出的 f4。
+	defs := cursorTestDeclaredToolDefs(t, &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools: []apicompat.ChatTool{{Type: "function", Function: &apicompat.ChatFunction{
+			Name:       "get_weather",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+		}}},
+	})
+
 	p := cursorNewStreamParser("grok-4.7")
+	p.attachToolSchemas(defs)
 	_, err := p.cursorParseStream(body)
 	require.NoError(t, err)
 	require.True(t, p.usage.Seen)

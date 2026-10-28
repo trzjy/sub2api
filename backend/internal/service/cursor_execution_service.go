@@ -2347,6 +2347,12 @@ func (w *cursorProtocolWriter) finalizeCompletion() error {
 			for _, item := range built.Output {
 				w.noteToolItemID(item.Type, item.ID)
 			}
+			// §25.17.2-3/4：非流式 item ID 已从实际构建的响应对象 note 完毕，写出 200 之前
+			// 先（服务锁内）完成统一索引登记与冲突检查；冲突时返回原错误，绝不写出成功响应体
+			// （零成功字节）。与流式路径 writeChunk 的 registerDeliveredItems 同语义、幂等跳过同批。
+			if err := w.registerDeliveredItems(); err != nil {
+				return err
+			}
 		}
 		out = built
 	case cursorProtocolGemini:
@@ -3126,6 +3132,11 @@ type cursorToolBatch struct {
 	// delegations 是本批已解码的 f11 委托。
 	delegations []cursorToolCallCapture
 	sealed      bool
+	// shellOnly 标记本批为 shell 专属批：由无 started/listed 的 f14（ExecServerMessage.f14）
+	// 建立，仅以"已有 ≥1 条 shell 委托"为封口条件，独立交付，绝不等待 tool_call_started /
+	// tool_requests_listed（解决生产实测 f14 先于/无 started 到达时挂死 180s 的问题）。
+	// 与 mcp 批次（shellOnly=false）字节级封口语义完全隔离。
+	shellOnly bool
 }
 
 // cursorToolDelegations 是一次 AgentRun 内工具委托的**唯一**记录。
@@ -3134,6 +3145,11 @@ type cursorToolBatch struct {
 // §25.3：批次按 tool_call_started.model_call_id + tool_requests_listed.call_count 封口；
 // 已封口的批次保留在 all 中（供本轮输出），同 model_call_id 的新信号开新批，
 // 绝不把上一批的 count 跨代复用（证据 29 陷阱）。
+//
+// shell 委托（f14）不再使用"等待 started 的 pending 挂起"路径：f14 到达且当前没有携带
+// started 的开放批时，直接建立 shellOnly 专属批并立即可封口（见 noteShellDelegation /
+// checkSealableLocked），从而根除无 started 形态下挂死 180s 的故障。mcp 委托（Kind==""）
+// 字节级封口语义完全不变。
 type cursorToolDelegations struct {
 	mu   sync.Mutex
 	all  []*cursorToolBatch
@@ -3171,9 +3187,16 @@ func (d *cursorToolDelegations) batchFor(modelCallID string) (*cursorToolBatch, 
 	}
 	var candidates []*cursorToolBatch
 	for _, batch := range d.all {
-		if !batch.sealed {
-			candidates = append(candidates, batch)
+		if batch.sealed {
+			continue
 		}
+		// shellOnly 专属批不参与"无归属信号"的归并：mcp 委托（Kind==""）/ started / listed
+		// 等无归属信号绝不并入已存在的 shellOnly 批，避免把 mcp 委托吞进 shellOnly 批
+		// （shellOnly 批独立交付后已 sealed；此处再保险，未封口的 shellOnly 批也不被误并）。
+		if batch.shellOnly {
+			continue
+		}
+		candidates = append(candidates, batch)
 	}
 	switch len(candidates) {
 	case 0:
@@ -3299,13 +3322,45 @@ func (d *cursorToolDelegations) noteToolCallStarted(modelCallID, callID string, 
 		batch.internalStarted++
 		return nil
 	}
+	alreadyStarted := false
 	for _, existing := range batch.started {
 		if existing == callID {
 			// 同一 call_id 重复 started：不重复计数（幂等）。
-			return nil
+			alreadyStarted = true
+			break
 		}
 	}
-	batch.started = append(batch.started, callID)
+	if !alreadyStarted {
+		batch.started = append(batch.started, callID)
+	}
+	// f14 先到、started 后到的 shell 委托：started 到达时把同 call_id 的 shellOnly 专属批
+	// 委托并入本 started 批（同一把锁内完成，避免竞态），随后移除该 shellOnly 批，使该
+	// 委托回到原批路径按原谓词封口（不再有独立的 shellOnly 批悬挂）。批已封口属内部
+	// 不一致 → 明确错误。shellOnly 批与 mcp 的 "" 开放批 key 隔离，不会误并。
+	if shell, ok := d.open[callID]; ok && !shell.sealed && shell.shellOnly {
+		if batch.sealed {
+			return fmt.Errorf("%w: started %q arrived but its shellOnly delegation target batch already sealed", ErrCursorBatchIncomplete, callID)
+		}
+		for _, tc := range shell.delegations {
+			found := false
+			for _, ex := range batch.delegations {
+				if ex.ID == tc.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				batch.delegations = append(batch.delegations, tc)
+			}
+		}
+		delete(d.open, callID)
+		for i, b := range d.all {
+			if b == shell {
+				d.all = append(d.all[:i], d.all[i+1:]...)
+				break
+			}
+		}
+	}
 	return nil
 }
 
@@ -3325,6 +3380,12 @@ func (d *cursorToolDelegations) noteDelegation(modelCallID string, tc cursorTool
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.noteDelegationLocked(tc)
+}
+
+// noteDelegationLocked 在已持有 d.mu 的前提下登记一条已解码的 f11 委托（与 noteDelegation
+// 同语义，但抽出以便 noteShellDelegation 在持锁分支复用，避免重复加锁）。
+func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) error {
 	batch, err := d.batchForDelegation(tc.ID)
 	if err != nil {
 		return err
@@ -3337,6 +3398,70 @@ func (d *cursorToolDelegations) noteDelegation(modelCallID string, tc cursorTool
 	}
 	batch.delegations = append(batch.delegations, tc)
 	return nil
+}
+
+// noteShellDelegation 登记一条 Kind=="shell" 的 f14 委托（ExecServerMessage.f14）。
+//
+// 依据生产实测 2026-10-28（f14 到达时可能无 tool_call_started，仅 InteractionUpdate 心跳），
+// 本函数不再依赖 started/listed 作为封口前置。三种形态：
+//   - 已存在同 call_id 的未封口 started 批 → 原路径 noteDelegationLocked 入该批（按原谓词封口）；
+//   - 当前没有任何携带 started 的开放批（f14 先到 / 真机仅心跳无 started）→ 建立 shell 专属
+//     批（shellOnly，key 为 call_id），把委托加入并立即可封口（≥1 条 shell 委托即封口，
+//     不等 started/listed），独立交付，绝不挂 pending；
+//   - 存在携带 started 的开放批但该 call_id 不在其中（孤儿 shell 委托，无对应 started）
+//     → 失败关闭（沿用原 orphan 语义，绝不并入已声明 started 的批次让其假封口）。
+//
+// 多个 f14 顺序到达：首个无匹配 started → 建 shellOnly 批并立即封口交付；后续 f14 因前批
+// 已 sealed（交付后）各自新建独立 shellOnly 批并各自封口交付（每条 shell 执行请求独立交付，
+// 不做聚合）。shellOnly 批 key 为 call_id，与 mcp 的 "" 开放批隔离，互不吞并。
+func (d *cursorToolDelegations) noteShellDelegation(callID string, tc cursorToolCallCapture) error {
+	if d == nil {
+		return nil
+	}
+	if strings.TrimSpace(callID) == "" {
+		return fmt.Errorf("%w: shell delegation without tool_call_id", ErrCursorProtocol)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// 1. 已存在同 call_id 的未封口 started 批 → 原路径入该批（按原谓词封口）。
+	for _, batch := range d.all {
+		if batch.sealed {
+			continue
+		}
+		for _, id := range batch.started {
+			if id == callID {
+				return d.noteDelegationLocked(tc)
+			}
+		}
+	}
+	// 2. 不存在任何携带 started 的开放批（f14 先到 / 真机仅心跳无 started）→ 建 shellOnly 批。
+	openWithStarted := 0
+	for _, batch := range d.all {
+		if !batch.sealed && len(batch.started) > 0 {
+			openWithStarted++
+		}
+	}
+	if openWithStarted == 0 {
+		// 同 call_id 已有未封口 shellOnly 批（罕见复用）→ 并入；否则新建并登记到
+		// d.open[callID]（与 mcp 的 "" key 隔离，避免互相吞并）。
+		if existing, ok := d.open[callID]; ok && !existing.sealed && existing.shellOnly {
+			for _, ex := range existing.delegations {
+				if ex.ID == tc.ID {
+					return nil
+				}
+			}
+			existing.delegations = append(existing.delegations, tc)
+			return nil
+		}
+		batch := &cursorToolBatch{shellOnly: true}
+		d.open[callID] = batch
+		d.all = append(d.all, batch)
+		batch.delegations = append(batch.delegations, tc)
+		return nil
+	}
+	// 3. 存在携带 started 的开放批但不含本 call_id（孤儿 shell 委托）→ 失败关闭，
+	//    绝不并入已声明 started 的批次（防假封口 / 超出 listed 交付），也不挂 pending。
+	return fmt.Errorf("%w: shell tool_call_id %q has no matching tool_call_started in open batch (orphan shell delegation)", ErrCursorProtocol, callID)
 }
 
 // snapshot 返回按到达顺序的全部委托（parser 输出 tool_calls 用）。
@@ -3379,6 +3504,15 @@ func (d *cursorToolDelegations) sealable() error {
 func (d *cursorToolDelegations) checkSealableLocked() error {
 	for _, batch := range d.all {
 		if batch.sealed {
+			continue
+		}
+		// shellOnly 批：仅以"已有 ≥1 条 shell 委托"为封口条件，无视 started / listed 计数
+		// （解决 f14 先于/无 started 到达时挂死 180s 的生产故障；每条 shell 执行请求独立交付）。
+		// 该批 key 为 call_id，与 mcp 批次完全隔离，不改变 mcp 委托的封口谓词与交付时序。
+		if batch.shellOnly {
+			if len(batch.delegations) < 1 {
+				return fmt.Errorf("%w: shellOnly batch %q has no shell delegation", ErrCursorBatchIncomplete, batch.modelCallID)
+			}
 			continue
 		}
 		// 每条对外 started 都必须有完整 mcp_args 委托（既有逻辑保留）。
@@ -6595,6 +6729,27 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 			// 提交的结果 ID 无任何已登记关联：失败关闭、零上游写入（不伪造）。
 			it.svc.finishCursorSession(it.session, "resume_unknown_call")
 			return fmt.Errorf("%w: call id %q", ErrCursorResumeUnknownAssociation, r.CallID)
+		}
+		// 原生 shell 委托（Kind=="shell"）走 ShellStream（f14）回写，与 mcp 的 f11 McpResult
+		// 是两条互不相同的通道；mcp 路径字节级行为不变（实现要点 5 / 硬约束 5）。
+		if cap.Kind == "shell" {
+			stdout, stderr, exitCode := cursorParseShellResult(r)
+			cwd := cursorShellCwdFromArgs(cap.ArgsJSON)
+			shellFrames := cursorEncodeShellToolResult(cap.ExecID, cap.IDField, stdout, stderr, exitCode, cwd, cap.SandboxPolicy)
+			it.duplex.logPhase(zapcore.InfoLevel, "shell_result_writeback", "",
+				zap.String("call_id", cap.ID), zap.Int("frames", len(shellFrames)),
+				zap.Int("stdout_len", len(stdout)), zap.Int("stderr_len", len(stderr)),
+				zap.Int("exit_code", exitCode), zap.Int("cwd_len", len(cwd)),
+				zap.Int("sandbox_policy_len", len(cap.SandboxPolicy)))
+			for _, frame := range shellFrames {
+				if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
+					// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
+					it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
+					return fmt.Errorf("cursor: deliver shell tool result transport failure: %w", err)
+				}
+				it.session.noteStage("resume_result_written")
+			}
+			continue
 		}
 		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, r.CallID, r.Text, r.Structured, r.IsError)
 		if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {

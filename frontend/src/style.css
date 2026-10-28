@@ -65,6 +65,40 @@
     @apply bg-primary-500/20 text-primary-900 dark:text-primary-100;
   }
 
+  /* 插件 base 重置会给所有文本类输入框加边框与内边距。项目里不用 .input 的内联输入框
+     （外层容器自带边框与内边距）会被撑出双框，这里复位非 .input 控件的边框与内边距；
+     背景保留插件默认，与安装前浏览器一致。工具类在 utilities 层仍可覆盖。 */
+  input:where([type='text']):where(:not(.input)),
+  input:where(:not([type])):where(:not(.input)),
+  input:where([type='email']):where(:not(.input)),
+  input:where([type='url']):where(:not(.input)),
+  input:where([type='password']):where(:not(.input)),
+  input:where([type='number']):where(:not(.input)),
+  input:where([type='search']):where(:not(.input)),
+  input:where([type='tel']):where(:not(.input)),
+  textarea:where(:not(.input)) {
+    border-width: 0;
+    padding: 0;
+  }
+
+  /* 插件 base 重置对 date/time 类输入设 appearance:none，会隐藏浏览器原生的
+     日历/时钟按钮并改变控件高度。这些控件依赖原生选择器，恢复自动外观 */
+  input:where([type='date']),
+  input:where([type='datetime-local']),
+  input:where([type='month']),
+  input:where([type='week']),
+  input:where([type='time']) {
+    appearance: auto;
+  }
+
+  input:where([type='date'])::-webkit-datetime-edit,
+  input:where([type='datetime-local'])::-webkit-datetime-edit,
+  input:where([type='month'])::-webkit-datetime-edit,
+  input:where([type='week'])::-webkit-datetime-edit,
+  input:where([type='time'])::-webkit-datetime-edit {
+    padding-top: 1px;
+    padding-bottom: 1px;
+  }
 
 }
 
@@ -175,12 +209,52 @@
     @apply disabled:cursor-not-allowed disabled:bg-gray-100 dark:disabled:bg-dark-900;
   }
 
+  /* @tailwindcss/forms 默认勾选色是 blue-600，改为项目主色；用 :where() 保持零特异性，
+     让已有的 text-* 工具类仍能覆盖单个控件 */
+  input:where([type='checkbox']),
+  input:where([type='radio']) {
+    color: theme('colors.primary.600');
+  }
+
+  /* 插件用 appearance:none 换取统一外观后，浏览器原生的 disabled 灰化渲染失效，
+     需显式还原"不可用"观感 */
+  input:where([type='checkbox']):disabled,
+  input:where([type='radio']):disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  /* @tailwindcss/forms base 策略：checkbox/radio 明暗主题兜底；
+     用 :where() 保持零特异性，让 dark:* 工具类仍能覆盖单控件 */
+  :where(.dark) input:where([type='checkbox']),
+  :where(.dark) input:where([type='radio']) {
+    background-color: theme('colors.dark.800');
+    border-color: theme('colors.dark.500');
+  }
+
+  :where(.dark) input:where([type='checkbox']):checked,
+  :where(.dark) input:where([type='radio']):checked {
+    background-color: currentColor;
+    border-color: transparent;
+  }
+
   .dark .input[type='date'],
   .dark .input[type='time'],
   .dark .input[type='datetime-local'],
   .dark .input[type='month'],
   .dark .input[type='week'] {
     color-scheme: dark;
+  }
+
+  /* @tailwindcss/forms 给 select 加了自绘箭头，需为其预留右侧空间 */
+  select.input {
+    padding-right: 2.5rem;
+  }
+
+  /* 不用 .input 的 select 会被 px-3 工具类把右侧内边距打回 0.75rem，插件自绘箭头被文字压住。
+     :not(.input) 特异性 (0,1,1) 高于工具类 (0,1,0)，可稳定胜出 */
+  select:not(.input) {
+    padding-right: 2.5rem;
   }
 
   .input-error {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -199,12 +200,24 @@ func TestCursorDuplex(t *testing.T) {
 		{key: "flag", kind: "bool", val: "true"},
 	})
 
+	// 本请求真实声明的工具：f4 原始字节的唯一来源（cursorConvertRequest 实际发出的字节），
+	// duplex 与独立 parser 共用同一份，绝不另起编码器、绝不用 req.Tools 重新序列化。
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools: []apicompat.ChatTool{{Type: "function", Function: &apicompat.ChatFunction{
+			Name: "get_weather",
+			Parameters: json.RawMessage(`{"type":"object","properties":{` +
+				`"city":{"type":"string"},"days":{"type":"number"},"flag":{"type":"boolean"}}}`),
+		}}},
+	}
+	initBody, err := cursorConvertRequest(req, "grok-4.7")
+	require.NoError(t, err)
+
 	// 真实 duplex：共享记录由 duplex 拥有解码权（parser 不再二次解码）。
-	d, err := newCursorAgentDuplex(
-		cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil)),
-		newCursorToolDelegations())
+	d, err := newCursorAgentDuplex(initBody, newCursorToolDelegations())
 	require.NoError(t, err)
 	defer d.close(nil)
+	require.Len(t, d.declaredToolDefs, 1, "AgentRun 请求 f4 必须携带 get_weather 的原始 McpToolDefinition")
 
 	frame := cursorToolTestExecFrame(true, args) // f11 mcp_args，respond 吃剥离 envelope 的 payload
 	done, err := d.respond(frame)
@@ -224,13 +237,24 @@ func TestCursorDuplex(t *testing.T) {
 	)
 	p := cursorNewStreamParser("grok-4.7")
 	p.attachToolDelegations(d.delegations)
+	// 与生产装配一致（cursor_execution_service.go:577-580）：独立解析路径挂载同一份 f4 原始字节。
+	p.attachToolSchemas(d.declaredToolDefs)
 	_, err = p.cursorParseStream(body)
 	require.NoError(t, err)
 	require.Equal(t, snapshot, p.capturedToolCalls(), "parser 未二次解码，应与共享记录逐字一致")
 
 	// SSE 取 tool_calls[].function.arguments，解析后同型同值、id/name 正确。
-	sse, err := cursorParseStreamToSSE(body, "grok-4.7")
+	// cursorParseStreamToSSE 内部自建 parser、无法注入 f4；这里按同一装配显式建独立 parser
+	//（挂载同一份 f4 原始字节）并逐行拼 SSE + [DONE] 哨兵，输出口径与 cursorParseStreamToSSE 相同。
+	sp := cursorNewStreamParser("grok-4.7")
+	sp.attachToolSchemas(d.declaredToolDefs)
+	lines, err := sp.cursorParseStream(body)
 	require.NoError(t, err)
+	var sse []byte
+	for _, l := range lines {
+		sse = append(sse, l...)
+	}
+	sse = append(sse, cursorSSEDoneSentinel...)
 	tcID, tcName, tcArgs := cursorTestExtractToolCallFromSSE(t, sse)
 	require.Equal(t, "call_42", tcID)
 	require.Equal(t, "get_weather", tcName)
