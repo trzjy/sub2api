@@ -102,12 +102,21 @@ const (
 // cursorMcpProviderIdentifier 是本层声明 MCP 工具时固定的 provider 标识。
 const cursorMcpProviderIdentifier = "sub2api"
 
-// cursorConversationModeChat 是 ConversationMode 的取值。
+// cursorConversationModeAgent 是 ConversationMode 的取值（= agent.v1.AgentMode）。
 //
-// 33 / 63 两份活体请求样本里，ConversationStateStructure.mode 与 UserMessage.mode
-// **恒为 2**，且该组合被上游接受并返回真实文本，故此处按取证值原样写 2；
-// 未取证的其它枚举值一律不猜。
-const cursorConversationModeChat = 2
+// 依据：Cursor 安装包 `workbench.desktop.main.js` 里 agent.v1.AgentMode 的完整枚举 dump：
+//
+//	no:0 AGENT_MODE_UNSPECIFIED / no:1 AGENT_MODE_AGENT / no:2 AGENT_MODE_ASK /
+//	no:3 AGENT_MODE_PLAN / no:4 AGENT_MODE_DEBUG / no:5 AGENT_MODE_TRIAGE /
+//	no:7 AGENT_MODE_MULTITASK / no:8 AGENT_MODE_CUSTOM
+//
+// ConversationStateStructure.f10 mode 与 UserMessage.f4 mode 都引用该枚举。
+//
+// 历史：早期按 33/63 号纯文本活体样本取值为 2（= ASK）。ASK 是只读问答模式，
+// 上游会明确拒绝非只读工具（shell / 写文件），模型返回 "I'm in Ask mode, so I can't …"。
+// 纯文本与只读函数工具在 ASK 下可用，所以当时样本看不出差异；一旦要跑真实编程任务
+// （读文件→改文件→执行）就必然失败。故改为 1（AGENT），与工具执行语义一致。
+const cursorConversationModeAgent = 1
 
 // ErrCursorUnsupportedRequest 表示入站形状落在首版范围外（失败关闭，不静默降级）。
 var ErrCursorUnsupportedRequest = errors.New("cursor: request shape not supported in v1 (fail closed)")
@@ -162,7 +171,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	//
 	// 证据 63：conversation_state = {mode:2, root_prompt_messages_json:[blobId…]}，
 	// 每个 blobId 32 字节 = sha256(blobValue)，blobValue 由 pre_fetched_blobs 携带。
-	state := cursorAppendVarintField(nil, cursorFldStateMode, cursorConversationModeChat)
+	state := cursorAppendVarintField(nil, cursorFldStateMode, cursorConversationModeAgent)
 	blobs, err := cursorHistoryBlobs(history)
 	if err != nil {
 		return nil, "", err
@@ -174,7 +183,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// 2) action.user_message_action.user_message：当前这一轮的提问。
 	userMessage := cursorAppendStringField(nil, cursorFldUserMsgText, last.text)
 	userMessage = cursorAppendStringField(userMessage, cursorFldUserMsgMessageID, messageID)
-	userMessage = cursorAppendVarintField(userMessage, cursorFldUserMsgMode, cursorConversationModeChat)
+	userMessage = cursorAppendVarintField(userMessage, cursorFldUserMsgMode, cursorConversationModeAgent)
 	userMsgAction := cursorAppendBytesField(nil, cursorFldUserMsgActionMessage, userMessage)
 	action := cursorAppendBytesField(nil, cursorFldActionUserMessage, userMsgAction)
 
