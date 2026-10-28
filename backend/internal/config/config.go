@@ -1045,9 +1045,14 @@ type GatewayConfig struct {
 
 	// UpstreamFirstByteGuardSeconds 通用首字节护栏（CF524 D1）：等待上游响应头
 	// 的最长窗口（秒）。超过该窗口仍未收到响应头即触发 failover/错误响应。
-	// 只接受 [30,90]，无禁用路径（0 与越界一律失败关闭，不回退无护栏旧行为）。
-	// 默认 90：非流式总预算 guard+25s=115s 留足换号+写回余量，且任何合法值
-	// 都在 Cloudflare ~125s 墙内收敛（详见 docs-local/cf524-upstream-hang-mitigation-plan.md）。
+	// 只接受 [30,120]，无禁用路径（0 与越界一律失败关闭，不回退无护栏旧行为）。
+	// 默认 120：非流式总预算 guard+25s=145s、流式带心跳 2*guard+10s=250s，
+	// 留足换号+写回余量，且均低于 nginx proxy_read_timeout/send_timeout=300s
+	// 与 HTTP 层 defaultResponseHeaderTimeout=300s。
+	// 当前部署 corealgos.com 为灰云直连源站（DNS 解析到生产机自身 IP、响应头无
+	// cf-ray、nginx 无 cf-connecting-ip），Cloudflare ~125s 墙不适用于本链路；
+	// 若将来启用 CF 橙云代理，须重新评估此上限。
+	// 详见 docs-local/cf524-upstream-hang-mitigation-plan.md。
 	UpstreamFirstByteGuardSeconds int `mapstructure:"upstream_first_byte_guard_seconds"`
 	// UpstreamHeartbeatDelaySeconds 流式心跳保活延迟（CF524 D2，秒）：
 	// 客户端为流式且上游响应头等待超过该延迟时，开始周期性写 keep-alive 注释帧，
@@ -1372,13 +1377,13 @@ func (c GatewayCodeBuddyConfig) Validate() error {
 
 // Validate 校验 CF524 两个配置键（整体校验为热加载唯一提交边界）：
 // 任一非法一律整体返回错误，由调用方（启动/热加载）整体拒绝候选配置、零部分生效。
-//   - UpstreamFirstByteGuardSeconds：只接受 [30,90]，0 与越界均失败关闭，无禁用路径。
+//   - UpstreamFirstByteGuardSeconds：只接受 [30,120]，0 与越界均失败关闭，无禁用路径。
 //   - UpstreamHeartbeatDelaySeconds：0=禁用（纯优化可关闭），或只接受 [5,60]。
 //   - 交叉校验：heartbeat 启用（>0）时必须严格小于 guard，否则拒绝启动
 //     （guard 先触发会使非零心跳永不生效，与"0=禁用"语义矛盾）。
 func (g GatewayConfig) Validate() error {
-	if g.UpstreamFirstByteGuardSeconds < 30 || g.UpstreamFirstByteGuardSeconds > 90 {
-		return fmt.Errorf("gateway.upstream_first_byte_guard_seconds must be between 30 and 90 (got %d)", g.UpstreamFirstByteGuardSeconds)
+	if g.UpstreamFirstByteGuardSeconds < 30 || g.UpstreamFirstByteGuardSeconds > 120 {
+		return fmt.Errorf("gateway.upstream_first_byte_guard_seconds must be between 30 and 120 (got %d)", g.UpstreamFirstByteGuardSeconds)
 	}
 	if g.UpstreamHeartbeatDelaySeconds != 0 && (g.UpstreamHeartbeatDelaySeconds < 5 || g.UpstreamHeartbeatDelaySeconds > 60) {
 		return fmt.Errorf("gateway.upstream_heartbeat_delay_seconds must be 0 (disabled) or between 5 and 60 (got %d)", g.UpstreamHeartbeatDelaySeconds)
@@ -2688,7 +2693,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 0)
 	// CF524 D1/D2：首字节护栏与流式心跳保活（未配置时默认值生效）。
-	viper.SetDefault("gateway.upstream_first_byte_guard_seconds", 90)
+	viper.SetDefault("gateway.upstream_first_byte_guard_seconds", 120)
 	viper.SetDefault("gateway.upstream_heartbeat_delay_seconds", 15)
 	viper.SetDefault("gateway.log_upstream_error_body", true)
 	viper.SetDefault("gateway.log_upstream_error_body_max_bytes", 2048)

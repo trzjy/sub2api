@@ -238,10 +238,14 @@ gateway:
   # Grok 文本 Responses 首字节超时时间（秒，0=禁用；默认 120）
   grok_response_header_timeout: 120
   # [CF524 D1] 通用首字节护栏：等待上游响应头的最长窗口（秒）。
-  # 超过该窗口仍未收到响应头即触发 failover/错误响应，避免 Cloudflare ~125s 墙掐断（524）。
-  # 只接受 30–90，0 与越界一律失败关闭（无禁用路径、不回退无护栏旧行为）。
-  # 默认 90：非流式总预算 guard+25s=115s 留足换号+写回余量，且任何合法值都在 CF 墙内收敛。
-  upstream_first_byte_guard_seconds: 90
+  # 超过该窗口仍未收到响应头即触发 failover/错误响应。
+  # 只接受 30–120，0 与越界一律失败关闭（无禁用路径、不回退无护栏旧行为）。
+  # 默认 120：非流式总预算 guard+25s=145s、流式带心跳 2*guard+10s=250s，均低于 nginx
+  # proxy_read_timeout/send_timeout=300s 与 HTTP 层 defaultResponseHeaderTimeout=300s。
+  # 当前部署 corealgos.com 为灰云直连源站（DNS 解析到生产机自身 IP、响应头无 cf-ray、
+  # nginx 无 cf-connecting-ip），Cloudflare ~125s 墙不适用于本链路；若将来启用 CF 橙云代理，
+  # 须重新评估此上限。
+  upstream_first_byte_guard_seconds: 120
   # [CF524 D2] 流式心跳保活延迟（秒）：流式客户端且上游响应头等待超过该延迟时，
   # 开始周期写 keep-alive 注释帧，防止响应头到达前被 CF 掐断。
   # 0=禁用（纯优化可关闭，与护栏的不可禁用区分）；非 0 时只接受 5–60。

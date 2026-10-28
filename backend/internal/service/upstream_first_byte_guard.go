@@ -46,7 +46,7 @@ type upstreamFirstByteGuard struct {
 // 上游请求并等待响应头；窗口耗尽时 reqCtx 被取消以中断 header 等待。body 读取
 // 必须使用 guard.BodyContext()（== parentCtx），绝不传入 reqCtx。
 //
-// window<=0 视为非法最小值（不允许禁用/零值路径，与配置 [30,90] 失败关闭一致），
+// window<=0 视为非法最小值（不允许禁用/零值路径，与配置 [30,120] 失败关闭一致），
 // 退化为极小窗口——由调用方保证传入合法窗口。
 func newUpstreamFirstByteGuard(parentCtx context.Context, window time.Duration) (*upstreamFirstByteGuard, context.Context) {
 	if window <= 0 {
