@@ -223,10 +223,18 @@ func (s *cursorSSEStream) next() error {
 		// 工具委托捕获：在 finish 前吐 tool_calls delta（首个含 id/type/function.name，
 		// 随后一块 arguments），再发 finish_reason:"tool_calls" 的收尾 chunk。
 		// 续轮恢复后的终态不再重复吐已交付的 tool_calls，只发 finish。
+		//
+		// 序号纪律：tool_calls[].index 必须**按本 HTTP 从 0 重排**，不得沿用全局累计
+		// 序号（emittedCalls）。每个 HTTP 响应是客户端眼中的一条独立 assistant 消息，
+		// 序号是"本条消息内第几个工具调用"。若续轮沿用全局序号（第 2 个调用发 index=1
+		// 而本 HTTP 没有 index=0），非流式聚合会为 index 0 补一条空壳调用，客户端收到
+		// `{id:"",name:"",arguments:"{}"}` 的幽灵工具调用——既无法回传结果，又会让续轮
+		// 摘要与交付侧不一致（history_mismatch）。
 		if calls := s.parser.capturedToolCalls(); len(calls) > s.emittedCalls {
 			for i := s.emittedCalls; i < len(calls); i++ {
-				s.buffer.WriteString(s.parser.cursorSSEToolCallNameChunk(i, calls[i]))
-				s.buffer.WriteString(s.parser.cursorSSEToolCallArgsChunk(i, calls[i]))
+				localIndex := i - s.emittedCalls
+				s.buffer.WriteString(s.parser.cursorSSEToolCallNameChunk(localIndex, calls[i]))
+				s.buffer.WriteString(s.parser.cursorSSEToolCallArgsChunk(localIndex, calls[i]))
 			}
 			s.emittedCalls = len(calls)
 			handoffThisFinish = true
