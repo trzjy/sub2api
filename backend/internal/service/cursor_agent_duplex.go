@@ -764,6 +764,16 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// 诊断（临时）：记录每条 AgentServerMessage 的顶层字段号，用于钉死"回写结果后上游发了
+	// 什么导致 stream_error"。只记字段号，不记任何业务内容。
+	if len(fields) > 0 {
+		top := make([]int, 0, len(fields))
+		for _, f := range fields {
+			top = append(top, f.Number)
+		}
+		sort.Ints(top)
+		d.logPhase(zapcore.InfoLevel, "server_msg_fields", "", zap.Ints("fields", top))
+	}
 	if update, ok := cursorFindField(fields, cursorFldServerInteractionUpdate); ok {
 		parts, err := cursorDecodeProtobuf(update.Bytes)
 		if err != nil {
