@@ -13,6 +13,7 @@ package service
 
 import (
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -484,4 +485,47 @@ func TestCursorShellBridgeStreamCloseFrame(t *testing.T) {
 	require.Equal(t, 5, cursorFldClientControlMessage, "cursorFldClientControlMessage 必须为 5")
 	require.Equal(t, 1, cursorFldControlStreamClose, "cursorFldControlStreamClose 必须为 1")
 	require.Equal(t, 1, cursorFldStreamCloseID, "cursorFldStreamCloseID 必须为 1")
+}
+
+// 14. sendExecStreamClose 经 d.send(5, …) 生成的外层 AgentClientMessage 信封字段号回归断言。
+//
+// 历史上本项目曾因"内层误用信封字段号"发生过 180s 挂死，故外层字段号必须有确定性断言：
+// 必须写出且仅写出一帧 envelope；其 Data 必须是 AgentClientMessage.f5 控制消息（绝非 f2 ExecClientMessage）；
+// 内层必须是 ExecClientControlMessage.f1 stream_close，且不夹带 f2 throw / f3 heartbeat；id 必须正确回传；
+// 整段字节逐字节相等（最硬的守卫）。
+func TestCursorShellBridgeSendStreamCloseEnvelope(t *testing.T) {
+	pr, pw := io.Pipe()
+	d := newWritebackDuplex(pr, pw, newCursorToolDelegations())
+	stop := captureDuplex(t, d)
+	require.NoError(t, d.sendExecStreamClose(7))
+	wire := stop()
+
+	// a. wire 恰好是一帧 envelope。
+	frame, next, err := cursorReadEnvelopeFrame(wire, 0)
+	require.NoError(t, err)
+	require.Equal(t, len(wire), next, "只应写出一帧")
+
+	// b. 外层字段号必须是 5（AgentClientMessage.f5 控制消息），绝非 f2 ExecClientMessage。
+	payload, _ := cursorDecodeProtobuf(frame.Data)
+	f5, ok := cursorFindField(payload, 5)
+	require.True(t, ok, "外层必须是 f5 AgentClientMessage 控制消息")
+	_, hasF2 := cursorFindField(payload, 2)
+	require.False(t, hasF2, "外层必须是 f5 控制消息，绝非 f2 ExecClientMessage")
+
+	// c. 内层必须是 f1 stream_close；且不得夹带 f2 throw / f3 heartbeat 等误用信封字段。
+	ctrl, _ := cursorDecodeProtobuf(f5.Bytes)
+	sc, ok := cursorFindField(ctrl, 1)
+	require.True(t, ok, "ExecClientControlMessage.f1 = stream_close")
+	_, hasThrow := cursorFindField(ctrl, 2)
+	require.False(t, hasThrow, "不得夹带 f2 throw")
+	_, hasHb := cursorFindField(ctrl, 3)
+	require.False(t, hasHb, "不得夹带 f3 heartbeat")
+
+	// d. id 回传正确。
+	closeInner, _ := cursorDecodeProtobuf(sc.Bytes)
+	require.EqualValues(t, 7, cursorVarintField(closeInner, 1))
+
+	// e. 整段字节逐字节相等（最硬的守卫）。
+	require.Equal(t, []byte{0x2a, 0x04, 0x0a, 0x02, 0x08, 0x07}, frame.Data)
+	require.Equal(t, byte(0), frame.Flags, "envelope flags 必须为 0（不压缩）")
 }
