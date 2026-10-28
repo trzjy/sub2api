@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -829,6 +830,18 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				zap.Int("sandbox_policy_len", len(tc.SandboxPolicy)))
 			return false, nil
 		default:
+			// 未处理的 exec 子字段：先按字段号取证再失败关闭。
+			//
+			// 只记字段号（不记内容）：真实客户端（CodeBuddy / Claude Code / Codex）会发起
+			// 我们尚未实现的 exec 类型，没有这个字段号就只能盲猜。安全字段 = exec 内层
+			// 全部 field number 与 wire type，不含任何业务数据。
+			nums := make([]int, 0, len(parts))
+			for _, f := range parts {
+				nums = append(nums, f.Number)
+			}
+			sort.Ints(nums)
+			d.logPhase(zapcore.WarnLevel, "exec_unsupported_fields", "",
+				zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
 			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
 		}
 	}
