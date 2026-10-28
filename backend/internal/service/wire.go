@@ -92,6 +92,12 @@ func ProvideOpenAIGatewayService(
 	if capability != nil {
 		SetOpenAIAccountVisionCapabilityLookup(capability.ModelSupportsVisionInput)
 	}
+	// Cursor 供给此前从不写 HTTP 续轮归属，导致 /v1/responses 带 previous_response_id 必然 400。
+	// 构造顺序决定只能反注入：执行部件先建、网关后建并持其引用，此处把网关的登记实现挂回执行部件
+	// （与 QuotaKeyService.SetAutoEntry 同型：唯一 wrapper 里一次性设置，不在别处重复注入）。
+	if cursorExecution != nil {
+		cursorExecution.SetHTTPResponseOwnerBinder(svc.BindHTTPResponseOwnerFromContext)
+	}
 	return svc
 }
 

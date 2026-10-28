@@ -169,6 +169,10 @@ type CursorExecutionService struct {
 	forwarder *CursorUpstreamForwarder
 	sessions  *cursorSessionStore
 	now       func() time.Time
+	// httpResponseOwnerBinder 是 HTTP 续轮归属登记回调（由装配层注入 OpenAIGatewayService 的实现）。
+	// Cursor 供给此前从不写 owner 绑定，导致 /v1/responses 带 previous_response_id 续轮必然 400。
+	// 未注入（nil）时跳过登记，行为与本卡之前完全一致；登记失败只记 warn，绝不影响请求。
+	httpResponseOwnerBinder func(c *gin.Context, responseID string) error
 }
 
 // NewCursorExecutionService 构造唯一执行部件。
@@ -225,6 +229,30 @@ func (s *CursorExecutionService) Stop() {
 		return
 	}
 	s.sessions.stop()
+}
+
+// SetHTTPResponseOwnerBinder 注入 HTTP 续轮归属登记回调（装配层在网关构造后一次性设置）。
+func (s *CursorExecutionService) SetHTTPResponseOwnerBinder(fn func(*gin.Context, string) error) {
+	if s == nil {
+		return
+	}
+	s.httpResponseOwnerBinder = fn
+}
+
+// bindHTTPResponseOwner 是登记回调的唯一调用点：未注入 / c 为 nil / responseID 为空时静默返回；
+// 登记失败只记 warn（与 openai 侧 bindHTTPResponseAccount 的失败语义一致），绝不改变请求结果。
+func (s *CursorExecutionService) bindHTTPResponseOwner(c *gin.Context, responseID string) {
+	if s == nil || s.httpResponseOwnerBinder == nil || c == nil || strings.TrimSpace(responseID) == "" {
+		return
+	}
+	if err := s.httpResponseOwnerBinder(c, responseID); err != nil {
+		truncated := responseID
+		if len(truncated) > 64 {
+			truncated = truncated[:64]
+		}
+		cursorPhaseLog(c.Request.Context(), zapcore.WarnLevel, "openai.http_bind_response_owner_failed_cursor", "",
+			zap.String("response_id", truncated))
+	}
 }
 
 // Execute 是 Cursor 出站与响应回写的唯一实现。
@@ -572,6 +600,8 @@ func (s *CursorExecutionService) executeHTTP(
 	}
 	defer detach()
 	responseID := session.output.responseID()
+
+	s.bindHTTPResponseOwner(c, responseID)
 
 	parser := cursorNewStreamParser(originalModel, bearer)
 	parser.attachToolDelegations(delegations)
@@ -6146,6 +6176,7 @@ func (s *CursorExecutionService) ResumeCursorSession(
 			ToolChoiceName: toolName,
 		}
 		responseID := record.output.responseID()
+		s.bindHTTPResponseOwner(c, responseID)
 		writer, restore, werr := s.beginResponseWriter(c, drainReq, nil, responseID, record)
 		if werr != nil {
 			s.finishCursorSession(record, "resume_writer_failed")

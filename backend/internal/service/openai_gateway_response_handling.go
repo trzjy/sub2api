@@ -1636,6 +1636,38 @@ func (s *OpenAIGatewayService) BindOpenAIHTTPResponseOwner(
 	)
 }
 
+// BindHTTPResponseOwnerFromContext 登记本 response 的 HTTP 续轮归属，供 Cursor 执行部件在
+// 生成 response.id 后调用（Cursor 供给此前从不写该绑定，导致 previous_response_id 续轮必然 400）。
+// 分组 id 取 gin ctx 的既有解析结果，owner 取 Responses handler 写入的 openAIHTTPResponseOwner；
+// 任一缺失时静默返回 nil（非 Responses 路径/无 owner 的请求不写绑定）。重复调用幂等（同值覆盖）。
+func (s *OpenAIGatewayService) BindHTTPResponseOwnerFromContext(c *gin.Context, responseID string) error {
+	if s == nil || c == nil || strings.TrimSpace(responseID) == "" {
+		return nil
+	}
+	groupID := getOpenAIGroupIDFromContext(c)
+	if groupID <= 0 {
+		return nil
+	}
+	rawOwner, ok := c.Get(openAIHTTPResponseOwnerContextKey)
+	if !ok {
+		return nil
+	}
+	owner, ok := rawOwner.(openAIHTTPResponseOwner)
+	if !ok {
+		return nil
+	}
+	if owner.userID <= 0 || owner.apiKeyID <= 0 {
+		return nil
+	}
+	return s.BindOpenAIHTTPResponseOwner(
+		context.WithoutCancel(c.Request.Context()),
+		groupID,
+		responseID,
+		owner.userID,
+		owner.apiKeyID,
+	)
+}
+
 func (s *OpenAIGatewayService) bindHTTPResponseAccount(ctx context.Context, c *gin.Context, account *Account, responseID string) {
 	if s == nil || account == nil || account.ID <= 0 {
 		return
