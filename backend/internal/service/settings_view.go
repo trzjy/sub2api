@@ -644,7 +644,7 @@ type OpenAIAPIKeyHealthBreakerSettings struct {
 }
 
 // DefaultAccountHealthBreakerScopePlatforms is the default platform coverage:
-// the six OpenAI-compatible platforms. grok is intentionally excluded.
+// the OpenAI-compatible platforms and direct CodeBuddy. grok is intentionally excluded.
 var DefaultAccountHealthBreakerScopePlatforms = []string{
 	PlatformOpenAI,
 	PlatformDeepseek,
@@ -652,6 +652,7 @@ var DefaultAccountHealthBreakerScopePlatforms = []string{
 	PlatformZhipu,
 	PlatformMiniMax,
 	PlatformOther,
+	PlatformCodeBuddy,
 }
 
 func DefaultOpenAIAPIKeyHealthBreakerSettings() *OpenAIAPIKeyHealthBreakerSettings {

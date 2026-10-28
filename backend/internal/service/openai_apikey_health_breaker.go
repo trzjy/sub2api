@@ -30,22 +30,23 @@ const (
 // the breaker scope, even if a future refactor starts invoking the observers on a
 // shared failure path. grok is handled separately via IncludeGrok.
 var healthBreakerSupportedPlatforms = map[string]struct{}{
-	PlatformOpenAI:   {},
-	PlatformDeepseek: {},
-	PlatformKimi:     {},
-	PlatformZhipu:    {},
-	PlatformMiniMax:  {},
-	PlatformOther:    {},
+	PlatformOpenAI:    {},
+	PlatformDeepseek:  {},
+	PlatformKimi:      {},
+	PlatformZhipu:     {},
+	PlatformMiniMax:   {},
+	PlatformOther:     {},
+	PlatformCodeBuddy: {},
 }
 
 // isOpenAIAPIKeyHealthBreakerAccount reports whether the breaker may attribute
 // failures to this account. Coverage:
-//   - API-key accounts qualify, plus CodeBuddy shadow accounts (OAuth shadows
-//     with quota_dimension=codebuddy); all other OAuth / PAT / Bedrock accounts
-//     are still excluded, so e.g. OpenAI Spark shadow semantics are untouched.
+//   - API-key accounts qualify, plus CodeBuddy direct OAuth and shadow accounts
+//     (OAuth shadows with quota_dimension=codebuddy); all other OAuth / PAT /
+//     Bedrock accounts are excluded, including OpenAI Spark shadows.
 //   - Platform must be an explicitly supported OpenAI-compatible platform (see
 //     healthBreakerSupportedPlatforms) AND be listed in settings.ScopePlatforms
-//     (default: openai/deepseek/kimi/zhipu/minimax/other). Unknown platforms are
+//     (default: openai/deepseek/kimi/zhipu/minimax/other/codebuddy). Unknown platforms are
 //     rejected by the allowlist and can never match.
 //   - grok is excluded unless settings.IncludeGrok is set.
 //   - The legacy pool_mode restriction is intentionally removed: the breaker now
@@ -54,16 +55,11 @@ func isOpenAIAPIKeyHealthBreakerAccount(account *Account, settings *OpenAIAPIKey
 	if account == nil {
 		return false
 	}
-	// Admit CodeBuddy shadows alongside API-key accounts (plan §3 T1 of
-	// codebuddy-shadow-429-cooldown-recovery): their 429 failures previously
-	// escaped both cooldown and breaker visibility entirely. Reuse the package
-	// SSOT predicate isCodeBuddyShadowAccount (codebuddy_gateway_forward.go) —
-	// do not duplicate it. Dependency: only after T3 lands do CodeBuddy failures
-	// carry the UpstreamFailoverError wrapper that classifyOpenAIAPIKeyHealthFailure
-	// can count; the two ship in the same release. All later gates (platform
-	// allowlist, ScopePlatforms, IncludeGrok) apply unchanged — a CodeBuddy
-	// shadow on platform=deepseek is already inside the default scope.
-	if account.Type != AccountTypeAPIKey && !isCodeBuddyShadowAccount(account) {
+	// CodeBuddy direct and shadow accounts share the existing breaker. Keep all
+	// other OAuth/PAT accounts excluded from this API-key breaker.
+	if account.Type != AccountTypeAPIKey &&
+		!(account.Type == AccountTypeOAuth && isCodeBuddyPlatformAccount(account)) &&
+		!isCodeBuddyShadowAccount(account) {
 		return false
 	}
 	if settings == nil {

@@ -119,6 +119,22 @@ func healthAccount(platform string) *Account {
 	return &Account{ID: 42, Platform: platform, Type: AccountTypeAPIKey}
 }
 
+func TestHealthBreakerAdmitsCodeBuddyDirectOAuth(t *testing.T) {
+	settings := DefaultOpenAIAPIKeyHealthBreakerSettings()
+	settings.Enabled = true
+	settings.ScopePlatforms = []string{PlatformCodeBuddy}
+	account := &Account{ID: 43, Platform: PlatformCodeBuddy, Type: AccountTypeOAuth}
+
+	require.True(t, isOpenAIAPIKeyHealthBreakerAccount(account, settings))
+	account.Type = AccountTypeBedrock
+	require.False(t, isOpenAIAPIKeyHealthBreakerAccount(account, settings))
+	account.Type = AccountTypeOAuth
+	settings.ScopePlatforms = []string{PlatformOpenAI}
+	require.False(t, isOpenAIAPIKeyHealthBreakerAccount(account, settings), "显式 scope 排除时不得偷偷扩大覆盖")
+	account.Platform = PlatformOpenAI
+	require.False(t, isOpenAIAPIKeyHealthBreakerAccount(account, settings), "其它平台 OAuth 仍然排除")
+}
+
 func newSettingService(t *testing.T, settings *OpenAIAPIKeyHealthBreakerSettings) (*SettingService, *healthSettingRepo) {
 	t.Helper()
 	repo := &healthSettingRepo{value: mustJSON(t, settings)}

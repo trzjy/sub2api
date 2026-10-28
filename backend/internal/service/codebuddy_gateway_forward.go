@@ -609,7 +609,7 @@ func (s *OpenAIGatewayService) sendCodeBuddyChatUpstreamAsCC(
 		}
 		resp, err = s.doOpenAIUpstreamNoWatchdog(upstreamReq, proxyURL, account)
 		if err != nil {
-			return nil, err
+			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false, upstreamModel)
 		}
 		if resp.StatusCode < 400 {
 			return resp, nil

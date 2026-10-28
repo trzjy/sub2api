@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -235,6 +236,24 @@ func TestSendCodeBuddyChatUpstreamAsCC_IdentityUsesPersonaAfterAuditRetry(t *tes
 		require.Contains(t, string(outbound), "You are the scheduled Kimi persona.", "attempt %d must use the scheduled persona prompt", i+1)
 		require.NotContains(t, string(outbound), "You are the credential parent.", "attempt %d must not use the credential parent's prompt", i+1)
 	}
+}
+
+func TestSendCodeBuddyChatUpstreamAsCC_TransportFailureReturnsFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"hy3","messages":[{"role":"user","content":"hi"}]}`)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	upstream := &httpUpstreamRecorder{err: errors.New("http2: client connection lost")}
+	svc := &OpenAIGatewayService{
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}}},
+		httpUpstream: upstream,
+	}
+	resp, err := svc.sendCodeBuddyChatUpstreamAsCC(context.Background(), c,
+		healthyCodeBuddyGatewayTestAccount(7706, "access-token"), body, "hy3")
+	require.Nil(t, resp)
+	var failover *UpstreamFailoverError
+	require.ErrorAs(t, err, &failover)
+	require.Equal(t, http.StatusBadGateway, failover.StatusCode)
 }
 
 // TestRedactCodeBuddyUpstreamErrorBody 钉住 A2 脱敏规则：已知 uid/nickname/enterprise_id

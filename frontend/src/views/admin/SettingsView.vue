@@ -9733,7 +9733,7 @@ const healthBreakerForm = reactive<OpenAIAPIKeyHealthBreakerSettings>({
   window_minutes: 5,
   failure_threshold: 4,
   cooldown_minutes: 5,
-  scope_platforms: ["openai", "deepseek", "kimi", "zhipu", "minimax", "other"],
+  scope_platforms: ["openai", "deepseek", "kimi", "zhipu", "minimax", "other", "codebuddy"],
   include_grok: false,
   watch_ratio: 0.4,
   warning_ratio: 0.7,
@@ -9751,6 +9751,7 @@ const healthBreakerPlatformOptions = [
   { value: "zhipu", label: "ZhiPu" },
   { value: "minimax", label: "MiniMax" },
   { value: "other", label: "Other (OpenAI-compatible)" },
+  { value: "codebuddy", label: "CodeBuddy" },
 ];
 
 function onHealthBreakerScopeToggle(platform: string, checked: boolean) {
