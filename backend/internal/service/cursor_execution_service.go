@@ -6864,12 +6864,15 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 
 	// F2 整改（外审 must_fix）：交付集合 = 登记集合。对外输出可能包含多个已封口批的调用
 	// （全量输出、全批封口），若只登记最后一批的 call_id，先交付的那批 call_id 未登记，
-	// 续轮回传时会报未知关联。故把所有尚未交付的已封口批的 call_id 一并登记到同一
-	// batchID（取最后一批的 ModelCallID），pending.callIDs 取各批并集。
-	// 不得引入"分批登记 / 多次 pending / 二次索引"等新机制。
-	var deliveredCallIDs []string
+	// 续轮回传时会报未知关联。
+	//
+	// 但"本批待收结果集合"必须只含**本次 HTTP 真正写出的新调用**：已封口批会跨轮保留在
+	// d.all 里，历史轮已交付并已被消费的批若仍算进来，客户端只回传本轮新调用时，
+	// cursorValidateResumeResults 会因 len(seen) != len(delivered) 判 missing_results。
+	// 故此处先按会话索引过滤：本会话已登记（= 已交付过）的 call_id 不属于本批。
+	var sealedCallIDs []string
 	for _, b := range batches {
-		deliveredCallIDs = append(deliveredCallIDs, b.CallIDs...)
+		sealedCallIDs = append(sealedCallIDs, b.CallIDs...)
 	}
 
 	// 与 beginResumeTakeover 同一锁序（会话表锁 → 会话锁）：不引入第二把锁。
@@ -6888,15 +6891,20 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 	// F2 整改：本次交付可能包含多个已封口批，所有尚未交付批的 call_id 一并登记到同一
 	// batchID。续轮多 HTTP 分批发货时，历史批的 call_id 已在首轮登记过，属于同一会话的
 	// 已交付批直接跳过（否则会与自身历史登记冲突）；跨会话的冲突仍如实返回错误。
-	for _, callID := range deliveredCallIDs {
+	//
+	// deliveredCallIDs 只收"本会话尚未登记"的新调用 = 本次 HTTP 真正交付给客户端的新增
+	// 调用集合，与 pending.callIDs 同源，供 cursorValidateResumeResults 精确比对。
+	var deliveredCallIDs []string
+	for _, callID := range sealedCallIDs {
 		key := cursorSessionIndexKeyForSpec(live.spec, CursorIDKindCall, callID)
 		if existing, le := s.sessions.index.Locate(key); le == nil && existing.SessionID == live.id {
-			// 同会话已登记：历史已交付批，跳过重复登记。
+			// 同会话已登记：历史已交付批，跳过重复登记，也不计入本批待收集合。
 			continue
 		}
 		if err := s.sessions.index.Register(key, live.id, batchID); err != nil {
 			return nil, err
 		}
+		deliveredCallIDs = append(deliveredCallIDs, callID)
 	}
 	if responseID != "" {
 		key := cursorSessionIndexKeyForSpec(live.spec, CursorIDKindResponse, responseID)
