@@ -1644,28 +1644,70 @@ func (s *OpenAIGatewayService) BindHTTPResponseOwnerFromContext(c *gin.Context, 
 	if s == nil || c == nil || strings.TrimSpace(responseID) == "" {
 		return nil
 	}
+	if c.Request == nil {
+		// 导出函数被复用时 c.Request 可能为 nil；在解引用取 ctx 前早退，
+		// 避免 panic。返回值语义不变（nil）。
+		logger.L().Debug(
+			"openai.http_bind_response_owner_skipped",
+			zap.String("reason", "request_missing"),
+		)
+		return nil
+	}
 	groupID := getOpenAIGroupIDFromContext(c)
 	if groupID <= 0 {
+		// 非 Responses 路径或缺乏分组解析结果：静默跳过，仍不写绑定。
+		logger.L().Debug(
+			"openai.http_bind_response_owner_skipped",
+			zap.String("reason", "group_missing"),
+		)
 		return nil
 	}
 	rawOwner, ok := c.Get(openAIHTTPResponseOwnerContextKey)
 	if !ok {
+		// 无 owner 的请求（如非 Cursor 供给）：静默跳过。
+		logger.L().Debug(
+			"openai.http_bind_response_owner_skipped",
+			zap.String("reason", "owner_missing"),
+		)
 		return nil
 	}
 	owner, ok := rawOwner.(openAIHTTPResponseOwner)
 	if !ok {
+		// 类型断言失败：静默跳过，避免下游 panic。
+		logger.L().Debug(
+			"openai.http_bind_response_owner_skipped",
+			zap.String("reason", "owner_missing"),
+		)
 		return nil
 	}
 	if owner.userID <= 0 || owner.apiKeyID <= 0 {
+		// owner 字段非法：静默跳过，仍不写绑定。
+		logger.L().Debug(
+			"openai.http_bind_response_owner_skipped",
+			zap.String("reason", "owner_invalid"),
+		)
 		return nil
 	}
-	return s.BindOpenAIHTTPResponseOwner(
+	if err := s.BindOpenAIHTTPResponseOwner(
 		context.WithoutCancel(c.Request.Context()),
 		groupID,
 		responseID,
 		owner.userID,
 		owner.apiKeyID,
-	)
+	); err != nil {
+		// 调用方仍会记一条 cursor 侧日志；此处先记一条 gateway 侧失败日志，
+		// 两处互补，不合并。字段仅含 id 与截断后的 response_id，不含 token/凭证/body。
+		logger.L().Warn(
+			"openai.http_bind_response_owner_failed",
+			zap.Int64("group_id", groupID),
+			zap.Int64("user_id", owner.userID),
+			zap.Int64("api_key_id", owner.apiKeyID),
+			zap.String("response_id", truncateString(responseID, 64)),
+			zap.Error(err),
+		)
+		return err
+	}
+	return nil
 }
 
 func (s *OpenAIGatewayService) bindHTTPResponseAccount(ctx context.Context, c *gin.Context, account *Account, responseID string) {

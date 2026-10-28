@@ -242,7 +242,21 @@ func (s *CursorExecutionService) SetHTTPResponseOwnerBinder(fn func(*gin.Context
 // bindHTTPResponseOwner 是登记回调的唯一调用点：未注入 / c 为 nil / responseID 为空时静默返回；
 // 登记失败只记 warn（与 openai 侧 bindHTTPResponseAccount 的失败语义一致），绝不改变请求结果。
 func (s *CursorExecutionService) bindHTTPResponseOwner(c *gin.Context, responseID string) {
-	if s == nil || s.httpResponseOwnerBinder == nil || c == nil || strings.TrimSpace(responseID) == "" {
+	// 非 Responses 路径（未注入 binder / c 为 nil）静默早退——那是正常情形。
+	if s == nil || s.httpResponseOwnerBinder == nil || c == nil {
+		return
+	}
+	// binder 已注入，但 responseID 为空：登记会无声失效，记一条 warn 以区分"未登记"。
+	if strings.TrimSpace(responseID) == "" {
+		var ctx context.Context
+		if c.Request != nil {
+			ctx = c.Request.Context()
+		} else {
+			ctx = context.Background()
+		}
+		cursorPhaseLog(ctx, zapcore.WarnLevel,
+			"openai.http_bind_response_owner_skipped", "",
+			zap.String("reason", "empty_response_id"))
 		return
 	}
 	if err := s.httpResponseOwnerBinder(c, responseID); err != nil {
