@@ -4,6 +4,7 @@ package service
 
 import (
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -143,20 +144,31 @@ func TestBindHTTPResponseOwnerFromContext(t *testing.T) {
 		})
 	})
 
-	// 3) group missing：正常 test context 但不设分组，group 解析为 0 后静默跳过。
+	// 3) group missing：携带有效 Request 但 ctx 不设分组，group 解析为 0 后静默跳过。
+	//    必须有真实 Request 才能越过 line 1647 的 request_missing 早退点，进而命中
+	//    line 1657 的 groupID<=0（group_missing）早退点。
 	t.Run("group missing", func(t *testing.T) {
 		s := &OpenAIGatewayService{}
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = req
 		require.NotPanics(t, func() {
 			require.NoError(t, s.BindHTTPResponseOwnerFromContext(c, "resp-1"))
 		})
 	})
 
-	// 4) owner missing：设置分组但未 SetOpenAIHTTPResponseOwner，静默跳过。
+	// 4) owner missing：携带有效 Request 并先写入非 0 分组，但不 SetOpenAIHTTPResponseOwner，
+	//    静默跳过。分组写入采用生产同源写法：getOpenAIGroupIDFromContext 直接读取
+	//    c.Get("api_key") 的 *APIKey.GroupID（即认证中间件注入的分组键与类型），故此处用同一
+	//    key 与类型写入分组；如此可越过 line 1647 / line 1657 两个早退点，命中 line 1666 的
+	//    owner 缺失（owner_missing）早退点。
 	t.Run("owner missing", func(t *testing.T) {
 		s := &OpenAIGatewayService{}
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = req
 		grp := int64(42)
+		// 生产同源分组写入：与 getOpenAIGroupIDFromContext 读取路径完全一致（key="api_key"，*APIKey）。
 		c.Set("api_key", &APIKey{GroupID: &grp})
 		require.NotPanics(t, func() {
 			require.NoError(t, s.BindHTTPResponseOwnerFromContext(c, "resp-1"))
