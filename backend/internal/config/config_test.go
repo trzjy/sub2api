@@ -264,11 +264,15 @@ func TestGatewayConfigValidateHotReloadAtomic(t *testing.T) {
 
 	t.Run("cross-check failure rejected, old values preserved", func(t *testing.T) {
 		candidate := live
-		candidate.UpstreamHeartbeatDelaySeconds = 120 // 启用但 == guard，交叉校验失败
+		// 用 60/60（heartbeat==guard 且都在合法区间）才真正打到交叉校验分支；
+		// 取 120 会先被 heartbeat>60 的区间检查拒掉，到不了交叉校验。
+		candidate.UpstreamFirstByteGuardSeconds = 60
+		candidate.UpstreamHeartbeatDelaySeconds = 60 // 启用但 == guard，交叉校验失败
 		require.Error(t, candidate.Validate())
 		require.Equal(t, 120, live.UpstreamFirstByteGuardSeconds)
 		require.Equal(t, 15, live.UpstreamHeartbeatDelaySeconds)
-		require.Equal(t, 120, candidate.UpstreamHeartbeatDelaySeconds)
+		require.Equal(t, 60, candidate.UpstreamFirstByteGuardSeconds)
+		require.Equal(t, 60, candidate.UpstreamHeartbeatDelaySeconds)
 	})
 }
 

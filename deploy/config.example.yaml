@@ -243,11 +243,11 @@ gateway:
   # 默认 120：非流式总预算 guard+25s=145s、流式带心跳 2*guard+10s=250s，均低于 nginx
   # proxy_read_timeout/send_timeout=300s 与 HTTP 层 defaultResponseHeaderTimeout=300s。
   # 当前部署 corealgos.com 为灰云直连源站（DNS 解析到生产机自身 IP、响应头无 cf-ray、
-  # nginx 无 cf-connecting-ip），Cloudflare ~125s 墙不适用于本链路；若将来启用 CF 橙云代理，
-  # 须重新评估此上限。
+  # nginx 无 cf-connecting-ip），Cloudflare ~125s 墙不适用于本链路。但上界 120 距该墙仅约
+  # 5s、流式预算 250s 约为其 2 倍：带 CF 橙云前沿的部署不得沿用此默认，须按自身边缘墙重算。
   upstream_first_byte_guard_seconds: 120
   # [CF524 D2] 流式心跳保活延迟（秒）：流式客户端且上游响应头等待超过该延迟时，
-  # 开始周期写 keep-alive 注释帧，防止响应头到达前被 CF 掐断。
+  # 开始周期写 keep-alive 注释帧，防止响应头到达前被 CF 掐断（仅带 CF 前沿的部署必需）。
   # 0=禁用（纯优化可关闭，与护栏的不可禁用区分）；非 0 时只接受 5–60。
   # 约束：启用时（>0）必须 < upstream_first_byte_guard_seconds（否则 guard 先触发，心跳永不生效）。
   # 默认 15。

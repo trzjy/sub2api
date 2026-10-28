@@ -1050,13 +1050,15 @@ type GatewayConfig struct {
 	// 留足换号+写回余量，且均低于 nginx proxy_read_timeout/send_timeout=300s
 	// 与 HTTP 层 defaultResponseHeaderTimeout=300s。
 	// 当前部署 corealgos.com 为灰云直连源站（DNS 解析到生产机自身 IP、响应头无
-	// cf-ray、nginx 无 cf-connecting-ip），Cloudflare ~125s 墙不适用于本链路；
-	// 若将来启用 CF 橙云代理，须重新评估此上限。
-	// 详见 docs-local/cf524-upstream-hang-mitigation-plan.md。
+	// cf-ray、nginx 无 cf-connecting-ip），Cloudflare ~125s 墙不适用于本链路。
+	// 但上界 120 距该墙仅约 5s、流式预算 250s 约为其 2 倍：任何带 CF 橙云前沿的
+	// 部署都不得沿用此默认，须先按自身边缘墙重算。
+	// 详见 docs-local/first-byte-guard-120s-plan.md（方案文档不在仓内）。
 	UpstreamFirstByteGuardSeconds int `mapstructure:"upstream_first_byte_guard_seconds"`
 	// UpstreamHeartbeatDelaySeconds 流式心跳保活延迟（CF524 D2，秒）：
 	// 客户端为流式且上游响应头等待超过该延迟时，开始周期性写 keep-alive 注释帧，
-	// 防止 Cloudflare 在响应头到达前掐断（524）。
+	// 防止 Cloudflare 在响应头到达前掐断（524）。仅对带 CF 前沿的部署是必需的；
+	// 直连源站（当前部署）时它只影响客户端可见的首帧时机。
 	// 0=禁用（纯优化可关闭，与护栏的不可禁用区分）；非 0 时只接受 [5,60]。
 	// 且启用时必须 < UpstreamFirstByteGuardSeconds（否则 guard 先触发，心跳永不生效）。
 	// 默认 15。
