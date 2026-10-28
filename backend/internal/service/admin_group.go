@@ -377,6 +377,27 @@ func defaultModelsListCandidateIDs(platform string) []string {
 	}
 }
 
+func compositeDefaultModelsListCandidateIDs() []string {
+	seen := make(map[string]struct{})
+	ids := make([]string, 0)
+	for _, platform := range domain.CompositePrecedencePlatformIDs() {
+		// TypeSafe stays out of the static composite candidates (jev-latest only works
+		// through /v1/systemone); groups with TypeSafe accounts still get it from the
+		// account model mappings collected by GetGroupModelsListCandidates.
+		if platform == PlatformTypeSafe {
+			continue
+		}
+		for _, id := range defaultModelsListCandidateIDs(platform) {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // DefaultAllowImageGenerationForPlatform reports whether new groups on the platform allow
 // image generation. CreateGroup ORs the requested value with it, so a false in the create
 // request does not turn it off. Composite defaults disabled because the same switch also

@@ -297,6 +297,7 @@ func TestCursorGeminiSettlementFuncTerminalOnce(t *testing.T) {
 	// nil 终态：防御性返回，不提交账务任务、不 panic。
 	settle(context.Background(), nil)
 	require.EqualValues(t, 1, submitted.Load(), "nil 终态不得提交账务任务")
+}
 
 // --- 上游 v0.2.18 新增：composite 分组路由到 antigravity 的 v1beta 模型接口用例 ---
 func TestGeminiV1BetaGetModel_CompositeAntigravityRoute(t *testing.T) {

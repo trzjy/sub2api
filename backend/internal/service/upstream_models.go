@@ -777,7 +777,7 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 	}
 
 	if account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
-		models, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account)
+		models, _, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account)
 		return models, nil, nil, err
 	}
 
@@ -835,7 +835,7 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 
 	if account.IsGemini() && account.IsVertexServiceAccount() {
 		models, err := s.fetchVertexGeminiUpstreamModels(ctx, account)
-		return models, nil, err
+		return models, nil, nil, err
 	}
 
 	req, err := s.buildUpstreamModelsRequest(ctx, account)

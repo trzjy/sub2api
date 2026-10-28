@@ -70,6 +70,7 @@ func TestForwardCountTokensRejectsForeignOAuthAsUnsupported(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, w.Code)
+}
 
 // TestBuildCustomRelayURL 锁定 A3 收敛：path 由版本感知原语拼接后，再追加 beta=true 与
 // 可选 proxy 查询参数。base 自带版本段时不得出现 /v1/v1 双段，proxy query 追加语义不变。

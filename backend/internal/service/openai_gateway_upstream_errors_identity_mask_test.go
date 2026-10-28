@@ -208,7 +208,7 @@ func TestMaskedAccountError_BuildResponseFailedSSE_NoLeak(t *testing.T) {
 	if msg == "" {
 		msg = infraerrors.UpstreamRequestFailed
 	}
-	out := buildOpenAIResponseFailedSSE("resp_1", "gpt-4", nil, msg)
+	out := buildOpenAIResponseFailedSSE("resp_1", "gpt-4", 0, nil, msg)
 	assert.NotContains(t, out, "qwen3.8-flash")
 	assert.NotContains(t, out, "tokenharbor")
 	assert.Contains(t, out, "response.failed")
@@ -216,7 +216,7 @@ func TestMaskedAccountError_BuildResponseFailedSSE_NoLeak(t *testing.T) {
 	// With a nil source, the fallback (already-scrubbed) message is used and a
 	// would-be upstream payload is never echoed — this is the production path for
 	// masked accounts.
-	out2 := buildOpenAIResponseFailedSSE("resp_2", "gpt-4", nil, "the requested model unavailable")
+	out2 := buildOpenAIResponseFailedSSE("resp_2", "gpt-4", 0, nil, "the requested model unavailable")
 	assert.NotContains(t, out2, "qwen3.8-flash")
 	assert.Contains(t, out2, "the requested model unavailable")
 }

@@ -55,7 +55,7 @@ func TestGeminiV1BetaModelsEndpoints_VertexServiceAccountOnlyGroup(t *testing.T)
 	}}}}}
 	upstream := &geminiMixedModelsUpstream{status: http.StatusOK, body: `{"publisherModels":[{"name":"publishers/google/models/gemini-3.8-flash"}]}`}
 	tokenProvider := service.NewGeminiTokenProvider(nil, geminiVertexModelsTokenCache{}, nil)
-	h := &GatewayHandler{geminiCompatService: service.NewGeminiMessagesCompatService(repo, nil, nil, nil, tokenProvider, nil, upstream, nil, &config.Config{})}
+	h := &GatewayHandler{geminiCompatService: service.NewGeminiMessagesCompatService(repo, nil, nil, nil, tokenProvider, nil, upstream, nil, &config.Config{}, nil)}
 	apiKey := &service.APIKey{GroupID: &groupID, Group: &service.Group{ID: groupID, Platform: service.PlatformGemini}}
 
 	t.Run("list", func(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 // operations follow the same lock order: groups, then settings.
 func (r *settingRepository) SetContentModerationConfig(ctx context.Context, value string, groupIDs []int64) error {
 	tx, err := r.client.Tx(ctx)
-	if err != nil && !errors.Is(err, ent.ErrTxStarted) {
+	if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
 		return err
 	}
 	client := r.client

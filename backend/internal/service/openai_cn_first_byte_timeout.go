@@ -700,7 +700,7 @@ func (s *OpenAIGatewayService) abortResponsesNativeStreamAfterHeaders(
 	err error,
 ) (*OpenAIForwardResult, error) {
 	if c != nil && c.Writer != nil {
-		sse := buildOpenAIResponseFailedSSE("", "", []byte("{}"), infraerrors.UpstreamFirstByteTimeoutAfterStart)
+		sse := buildOpenAIResponseFailedSSE("", "", 0, []byte("{}"), infraerrors.UpstreamFirstByteTimeoutAfterStart)
 		if _, werr := fmt.Fprint(c.Writer, sse); werr == nil {
 			if fl, ok := c.Writer.(http.Flusher); ok {
 				fl.Flush()

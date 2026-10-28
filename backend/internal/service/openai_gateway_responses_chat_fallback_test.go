@@ -557,7 +557,8 @@ func TestForwardResponsesViaRawChatCompletions_ConvertsEligibleNonstreamToStream
 	}}
 	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
 
-	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	startTime := time.Now()
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body, startTime)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -600,7 +601,8 @@ func TestForwardResponsesViaRawChatCompletions_NonEligibleAccountKeepsBufferedPa
 	// 非资格账号：PlatformOpenAI（谓词不含），即便开关开启也保持既有缓冲分支。
 	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
 
-	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, rawChatCompletionsTestAccount(), body)
+	startTime := time.Now()
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, rawChatCompletionsTestAccount(), body, startTime)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, gjson.GetBytes(upstream.lastBody, "stream").Bool(), "非资格账号不得改写上游 stream 标志")
@@ -627,7 +629,8 @@ func TestForwardResponsesViaRawChatCompletions_StreamingKeepsStreamBranch(t *tes
 	}}
 	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
 
-	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	startTime := time.Now()
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body, startTime)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, result.Stream, "clientStream=true 必须走既有流式分支")
@@ -653,7 +656,8 @@ func TestForwardResponsesViaRawChatCompletions_MissingDoneSentinelFailsClosed(t 
 	}}
 	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
 
-	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	startTime := time.Now()
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body, startTime)
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.Equal(t, http.StatusBadGateway, rec.Code)
@@ -684,7 +688,8 @@ func TestForwardResponsesViaRawChatCompletions_MissingUsageFailsClosed(t *testin
 	}}
 	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
 
-	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	startTime := time.Now()
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body, startTime)
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.Equal(t, http.StatusBadGateway, rec.Code)
@@ -709,7 +714,8 @@ func TestForwardResponsesViaRawChatCompletions_CNFirstByteTimeoutFailsOver(t *te
 	}}
 	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
 
-	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	startTime := time.Now()
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body, startTime)
 	require.Error(t, err)
 	require.Nil(t, result)
 	var fo *UpstreamFailoverError
@@ -737,7 +743,8 @@ func TestForwardResponsesViaRawChatCompletions_NoHeartbeatOwnerOnConvertedNonstr
 	}}
 	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
 
-	_, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	startTime := time.Now()
+	_, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body, startTime)
 	require.NoError(t, err)
 
 	_, ok := UpstreamHeartbeatFromContext(upstream.lastReq.Context())
