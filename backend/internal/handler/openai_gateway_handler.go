@@ -5142,9 +5142,10 @@ func summarizeWSCloseErrorForLog(err error) (string, string) {
 // 仅当请求侧模型名精确匹配其中一项（判定 SSOT）才进入分层路由评估。
 // 这些模型各自存在「伪装线池（mask_upstream_identity）」候选，门控语义见下。
 var tierRoutingTargetModels = map[string]struct{}{
-	"kimi-k3":             {},
-	"deepseek-v4.1-flash": {},
-	"glm-5.3-flash":       {},
+	"kimi-k3":                  {},
+	"deepseek-v4.1-flash":      {},
+	"deepseek-v4.1-flash-1017": {},
+	"glm-5.3-flash":            {},
 }
 
 // isTierRoutingTargetModel 判定请求模型是否属于分层路由目标集合（请求侧模型名精确匹配）。

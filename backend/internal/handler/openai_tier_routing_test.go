@@ -37,6 +37,15 @@ type gateFunc func(model string) (bool, error)
 func openGate(model string) (bool, error)   { return true, nil }
 func closedGate(model string) (bool, error) { return false, nil }
 
+// TestTierRoutingTargetModelsAliasCoverage 锁定目标集合的别名覆盖：
+// deepseek-v4.1-flash-1017 是 deepseek-v4.1-flash 的分组对外别名（上游映射为 hy3），
+// 两者必须同等参与分层路由；漏登记会让该别名的请求永远进不了伪装线池（小档供给白配）。
+func TestTierRoutingTargetModelsAliasCoverage(t *testing.T) {
+	require.True(t, isTierRoutingTargetModel("deepseek-v4.1-flash-1017"), "1017 alias must be a routing target")
+	require.True(t, isTierRoutingTargetModel("deepseek-v4.1-flash"), "canonical deepseek flash must stay a routing target")
+	require.False(t, isTierRoutingTargetModel("deepseek-v4-pro"), "unrelated model must stay out of the target set")
+}
+
 // TestTierRoutingApplyRoutingNonTargetModelPassthrough 验证「同平台非目标模型」零装门零行为
 // 变化（派发单 OC-T1，测试 #2）：即使平台命中（kimi），只要请求模型不在目标集合，直接返回
 // 原 baseCtx，不输出分层路由日志，亦不依赖门控结果。
@@ -55,7 +64,7 @@ func TestTierRoutingApplyRoutingNonTargetModelPassthrough(t *testing.T) {
 // TestTierRoutingApplyRoutingGateClosedPassthrough 验证目标模型但动态门控关闭时零装门
 // （派发单 OC-T1，动态门三态 ①②）：返回原 baseCtx，不输出分层路由日志。
 func TestTierRoutingApplyRoutingGateClosedPassthrough(t *testing.T) {
-	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "glm-5.3-flash"} {
+	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "glm-5.3-flash"} {
 		c, reqLog, logs := newTierRoutingTestCtx(t, "req-closed-"+model)
 		body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hello world"}]}`)
 		out, err := applyTierRouting(c, c.Request.Context(), reqLog, model, model,
@@ -75,7 +84,7 @@ func baseCtxUnchanged(c *gin.Context, out context.Context) bool {
 // 记录（沿用既有 reqLog 体系，不新增机制）。
 func TestTierRoutingApplyRoutingGateErrorPassthrough(t *testing.T) {
 	errGate := func(string) (bool, error) { return false, errors.New("gate query boom") }
-	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "glm-5.3-flash"} {
+	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "glm-5.3-flash"} {
 		c, reqLog, logs := newTierRoutingTestCtx(t, "req-gateerr-"+model)
 		body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hello world"}]}`)
 		out, err := applyTierRouting(c, c.Request.Context(), reqLog, model, model,
@@ -100,7 +109,7 @@ func TestTierRoutingApplyRoutingTargetModelGateOpen(t *testing.T) {
 		{"small_above_old_threshold", repeatWords(1500), "small"},
 		{"big_above", repeatWords(2500), "big"},
 	}
-	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "glm-5.3-flash"} {
+	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "glm-5.3-flash"} {
 		for _, tc := range cases {
 			c, reqLog, logs := newTierRoutingTestCtx(t, "req-valid-"+model+"-"+tc.name)
 			body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"` + tc.content + `"}]}`)
