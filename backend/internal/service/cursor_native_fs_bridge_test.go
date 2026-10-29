@@ -161,6 +161,72 @@ func TestCursorNativeFSCaptureLs(t *testing.T) {
 	require.JSONEq(t, `{"path":"/repo","ignore":["node_modules",".git"]}`, tc.ArgsJSON)
 }
 
+// ① 仅声明 LS（属性名 path）→ 捕获成功，Name=="LS"，ArgsJSON 含对应 path 属性。
+func TestCursorNativeFSCaptureLsOnlyUpperLS(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "LS", cursorNativeFsTestLsSchema)}
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	sub := cursorAppendStringField(nil, 1, "/repo")
+	sub = cursorAppendStringField(sub, 2, "node_modules")
+	sub = cursorAppendStringField(sub, 3, "call_ls_ls")
+	parts := cursorNativeFsTestExecParts(t, 172, nil, cursorFldServerMsgLsArgs, sub)
+
+	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgLsArgs, 172, nil)
+	require.NoError(t, err)
+	require.Equal(t, cursorToolKindLs, tc.Kind)
+	require.Equal(t, "LS", tc.Name, "仅声明 LS 时必须选中 LS")
+	require.JSONEq(t, `{"path":"/repo","ignore":["node_modules"]}`, tc.ArgsJSON)
+}
+
+// ①' 仅声明 LS（属性名 file_path，刻意与 path 不同）→ 仍按 schema 映射，Name=="LS"，ArgsJSON 含 file_path。
+func TestCursorNativeFSCaptureLsOnlyUpperLSFilePathProp(t *testing.T) {
+	lsFileSchema := `{"type":"object","properties":{"file_path":{"type":"string"}}}`
+	defs := [][]byte{cursorTestBuildToolDef(t, "LS", lsFileSchema)}
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	sub := cursorAppendStringField(nil, 1, "/repo")
+	sub = cursorAppendStringField(sub, 3, "call_ls_ls2")
+	parts := cursorNativeFsTestExecParts(t, 173, nil, cursorFldServerMsgLsArgs, sub)
+
+	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgLsArgs, 173, nil)
+	require.NoError(t, err)
+	require.Equal(t, "LS", tc.Name)
+	require.JSONEq(t, `{"file_path":"/repo"}`, tc.ArgsJSON)
+}
+
+// ② 同时声明 ls 与 LS → 选 ls（加名不夺位，优先级次序保持 ls 在前）。
+func TestCursorNativeFSCaptureLsLowerWinsOverUpper(t *testing.T) {
+	defs := [][]byte{
+		cursorTestBuildToolDef(t, "LS", cursorNativeFsTestLsSchema),
+		cursorTestBuildToolDef(t, "ls", cursorNativeFsTestLsSchema),
+	}
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	sub := cursorAppendStringField(nil, 1, "/repo")
+	sub = cursorAppendStringField(sub, 3, "call_ls_both")
+	parts := cursorNativeFsTestExecParts(t, 174, nil, cursorFldServerMsgLsArgs, sub)
+
+	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgLsArgs, 174, nil)
+	require.NoError(t, err)
+	require.Equal(t, "ls", tc.Name, "ls 仍优先于新加的 LS")
+	require.JSONEq(t, `{"path":"/repo"}`, tc.ArgsJSON)
+}
+
+// ③ 声明 LS 但 schema 不含任何 path 类属性 → 仍失败关闭（既有 "no ls-like tool" 文案）。
+func TestCursorNativeFSCaptureLsUpperWithoutPathPropFailsClosed(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "LS",
+		`{"type":"object","properties":{"city":{"type":"string"}}}`)}
+
+	d := cursorShellTestNewDuplex(t, defs, "")
+	sub := cursorAppendStringField(nil, 1, "/repo")
+	sub = cursorAppendStringField(sub, 3, "call_ls_no_path")
+	parts := cursorNativeFsTestExecParts(t, 175, nil, cursorFldServerMsgLsArgs, sub)
+
+	_, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgLsArgs, 175, nil)
+	require.ErrorIs(t, err, ErrCursorProtocol)
+	require.ErrorContains(t, err, "no ls-like tool", "无 path 类属性的 LS 必须失败关闭，沿用既有文案")
+}
+
 func TestCursorNativeFSCaptureGrep(t *testing.T) {
 	defs := [][]byte{cursorTestBuildToolDef(t, "grep", cursorNativeFsTestGrepSchema)}
 	d := cursorShellTestNewDuplex(t, defs, "")

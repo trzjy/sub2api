@@ -215,9 +215,14 @@ func cursorParseShellArgs(sub []cursorPBField) (cursorShellArgs, error) {
 }
 
 // cursorShellToolPriority 是工具名选择优先级（plan §4 / 硬约束 #1）：
-// shell → bash → exec_command → run_command → terminal，且其 input_schema.properties
+// shell → bash → Bash → exec_command → run_command → terminal，且其 input_schema.properties
 // 必须含 command；找不到 → 调用方按 ErrCursorProtocol 失败关闭（不许用 "shell" 兜底）。
-var cursorShellToolPriority = []string{"shell", "bash", "exec_command", "run_command", "terminal"}
+//
+// 2026-10-29 BASH-ALIAS：真实客户端（CodeBuddy CLI / Claude Code CLI，UA CLI/2.178.1
+// CodeBuddy/2.178.1）声明的 shell 工具名为大写 "Bash"（input_schema.properties.command
+// 为 string，required=["command"]）。原名单仅有小写 "bash"，精确匹配失败 → ErrCursorProtocol
+// → 整条 HTTP 502。故在小写 "bash" 之后插入大写 "Bash"（shell 仍最高优先；既有小写名次序不变）。
+var cursorShellToolPriority = []string{"shell", "bash", "Bash", "exec_command", "run_command", "terminal"}
 
 // cursorBuildShellDelegation 从本请求 f4 声明集中选择 shell 类工具，并按其 input_schema
 // 把 ShellArgs 转换为下游 tool_call 的 ArgsJSON（对象 JSON，与 mcp 同形）。

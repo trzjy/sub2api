@@ -529,3 +529,62 @@ func TestCursorShellBridgeSendStreamCloseEnvelope(t *testing.T) {
 	require.Equal(t, []byte{0x2a, 0x04, 0x0a, 0x02, 0x08, 0x07}, frame.Data)
 	require.Equal(t, byte(0), frame.Flags, "envelope flags 必须为 0（不压缩）")
 }
+
+// ---------------------------------------------------------------------------
+// BASH-ALIAS（2026-10-29）：真实客户端（CodeBuddy CLI / Claude Code CLI，UA
+// CLI/2.178.1 CodeBuddy/2.178.1）声明的 shell 工具名为大写 "Bash"（input_schema
+// properties.command 为 string，required=["command"]）。原名单仅有小写 "bash"，
+// 精确匹配失败 → ErrCursorProtocol → 整条 HTTP 502。本组验证名单增项后的行为。
+// ---------------------------------------------------------------------------
+
+//  15. 仅声明 Bash（command=string）→ 捕获成功，Name=="Bash"，
+//     ArgsJSON=="{\"command\":\"<原命令>\"}"（string 原样、无 workdir 省略）。
+func TestCursorShellBridgeBashUppercaseSelection(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "Bash", `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)}
+	d := cursorShellTestNewDuplex(t, defs, "call_bash_1")
+
+	sub := cursorShellTestBuildShellArgs(t, "echo hello", "", "call_bash_1", "run echo")
+	parts := cursorShellTestBuildExecParts(t, 13, []byte("exec-13"), sub)
+
+	tc, err := d.cursorCaptureShellArgs(parts, 13, []byte("exec-13"))
+	require.NoError(t, err, "仅声明 Bash 必须成功委托（大小写敏感匹配名单新增项）")
+	require.Equal(t, "Bash", tc.Name, "工具名须按优先级选中 Bash（大写）")
+	// command 目标是 string → 原字符串；schema 无 workdir 属性 → 省略。
+	require.Equal(t, `{"command":"echo hello"}`, tc.ArgsJSON, "ArgsJSON 必须为原样 string command、无 workdir")
+	require.Equal(t, "call_bash_1", tc.ID)
+	require.Equal(t, "shell", tc.Kind)
+	require.EqualValues(t, 13, tc.ExecID)
+	require.Equal(t, []byte("exec-13"), tc.IDField)
+}
+
+// 16. 同时声明 bash 与 Bash → 选 bash（加名不夺位：小写优先于大写，优先级次序不变）。
+func TestCursorShellBridgeBashLowerWinsOverUpper(t *testing.T) {
+	defs := [][]byte{
+		cursorTestBuildToolDef(t, "bash", `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+		cursorTestBuildToolDef(t, "Bash", `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+	}
+	d := cursorShellTestNewDuplex(t, defs, "call_bash_1")
+
+	sub := cursorShellTestBuildShellArgs(t, "echo hi", "", "call_bash_1", "run echo")
+	parts := cursorShellTestBuildExecParts(t, 14, []byte("exec-14"), sub)
+
+	tc, err := d.cursorCaptureShellArgs(parts, 14, []byte("exec-14"))
+	require.NoError(t, err, "同时声明 bash 与 Bash 必须成功委托")
+	require.Equal(t, "bash", tc.Name, "小写 bash 仍优先于大写 Bash（加名不夺位）")
+	require.Equal(t, `{"command":"echo hi"}`, tc.ArgsJSON)
+}
+
+// 17. 声明 Bash 但 properties 无 command → 仍失败关闭，错误含既有 "no shell-like tool" 文案。
+func TestCursorShellBridgeBashNoCommandPropertyFailClosed(t *testing.T) {
+	// properties 无 command（只有 cmd），故即便名为 Bash 也不被选中 → 名单空 → 失败关闭。
+	defs := [][]byte{cursorTestBuildToolDef(t, "Bash", `{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}`)}
+	d := cursorShellTestNewDuplex(t, defs, "call_bash_1")
+
+	sub := cursorShellTestBuildShellArgs(t, "echo hi", "", "call_bash_1", "run echo")
+	parts := cursorShellTestBuildExecParts(t, 15, []byte("exec-15"), sub)
+
+	_, err := d.cursorCaptureShellArgs(parts, 15, []byte("exec-15"))
+	require.Error(t, err, "Bash 声明但无 command property 必须失败关闭（schema 校验不变）")
+	require.True(t, errors.Is(err, ErrCursorProtocol), "失败必须落到 ErrCursorProtocol")
+	require.Contains(t, err.Error(), "no shell-like tool", "错误须含既有 'no shell-like tool' 文案")
+}

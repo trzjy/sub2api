@@ -381,7 +381,7 @@ var cursorNativeFsKinds = map[string]cursorNativeFsKindSpec{
 		keyProps: cursorNativeFsPathProps,
 	},
 	cursorToolKindLs: {
-		priority: []string{"ls", "list_dir", "List"},
+		priority: []string{"ls", "LS", "list_dir", "List"},
 		keyProps: cursorNativeFsPathProps,
 	},
 	cursorToolKindGrep: {
