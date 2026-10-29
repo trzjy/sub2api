@@ -729,8 +729,14 @@ func (b *cursorAgentResponseBody) Read(p []byte) (int, error) {
 	if _, err := io.ReadFull(b.source, payload); err != nil {
 		return 0, err
 	}
+	// 无法解码的帧：这是"读到一半终止"的最常见来源之一（上游新增/变更字段布局），
+	// 此前该错误直接冒泡到读循环、在终态日志里只剩 terminal_reason=stream_error，
+	// 无从判断是"帧解不开"还是"exec 不认"。这里先按安全类别落一条，再原样返回。
 	frame, _, err := cursorReadEnvelopeFrame(append(header, payload...), 0)
 	if err != nil {
+		b.duplex.logPhase(zapcore.WarnLevel, "frame_decode_failed", cursorStreamErrClass(err),
+			zap.String("error_class", cursorStreamErrClass(err)),
+			zap.Int("payload_bytes", len(payload)))
 		return 0, err
 	}
 	if frame.cursorIsEndStream() {
@@ -743,6 +749,12 @@ func (b *cursorAgentResponseBody) Read(p []byte) (int, error) {
 		b.firstSeen = true
 		b.done, err = b.duplex.respond(frame.Data)
 		if err != nil {
+			// 帧已解码但处理失败（exec 分支不认 / KV 缺失 / 子消息解不开 / 内部状态）。
+			// 只落安全枚举 + 该帧的顶层字段号：字段号是协议结构，不含任何业务内容，
+			// 而它正是区分"真未知执行类型"与"已实现分支的内部错误"的唯一依据。
+			b.duplex.logPhase(zapcore.WarnLevel, "frame_handle_failed", cursorStreamErrClass(err),
+				zap.String("error_class", cursorStreamErrClass(err)),
+				zap.Ints("fields", frameTopFieldNumbers(payload)))
 			return 0, err
 		}
 		if isFirst {
@@ -766,14 +778,6 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 	}
 	// 诊断（临时）：记录每条 AgentServerMessage 的顶层字段号，用于钉死"回写结果后上游发了
 	// 什么导致 stream_error"。只记字段号，不记任何业务内容。
-	if len(fields) > 0 {
-		top := make([]int, 0, len(fields))
-		for _, f := range fields {
-			top = append(top, f.Number)
-		}
-		sort.Ints(top)
-		d.logPhase(zapcore.InfoLevel, "server_msg_fields", "", zap.Ints("fields", top))
-	}
 	if update, ok := cursorFindField(fields, cursorFldServerInteractionUpdate); ok {
 		parts, err := cursorDecodeProtobuf(update.Bytes)
 		if err != nil {
@@ -957,6 +961,23 @@ func (d *cursorAgentDuplex) sendExecStreamClose(execID uint64) error {
 func cursorFindFieldOK(fields []cursorPBField, number int) bool {
 	_, ok := cursorFindField(fields, number)
 	return ok
+}
+
+// frameTopFieldNumbers 返回一条 AgentServerMessage 的顶层字段号（升序）。
+//
+// 纯协议结构信息：不含字段值、不含正文，可安全落日志；解码失败返回 nil
+// （调用方此时不会再拿它判定业务语义）。
+func frameTopFieldNumbers(payload []byte) []int {
+	fields, err := cursorDecodeProtobuf(payload)
+	if err != nil || len(fields) == 0 {
+		return nil
+	}
+	nums := make([]int, 0, len(fields))
+	for _, f := range fields {
+		nums = append(nums, f.Number)
+	}
+	sort.Ints(nums)
+	return nums
 }
 
 // ---------------------------------------------------------------------------

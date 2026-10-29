@@ -1208,8 +1208,15 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 			session.mu.Unlock()
 
 			opts := session.httpOptions()
+			// outcome 必须如实反映终态：此前无条件写 "ok"，导致所有"读到一半终止"的
+			// 会话在复盘时都显示成功解析，真因只能靠猜。这里给出稳定安全类别（正常
+			// turn_ended 收尾仍记 "ok"，与既有语义一致），原始错误文案仍不落盘。
+			termOutcome := "ok"
+			if !errors.Is(rerr, io.EOF) {
+				termOutcome = cursorStreamErrClass(rerr)
+			}
 			parseDoneFields := []zap.Field{
-				zap.String("outcome", "ok"),
+				zap.String("outcome", termOutcome),
 				zap.Bool("stream", opts.stream),
 			}
 			if sealReason != nil {
