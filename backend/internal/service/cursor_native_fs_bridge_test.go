@@ -107,6 +107,48 @@ func cursorNativeFsTestIntake(t *testing.T, caps ...cursorToolCallCapture) (*cur
 	return record, record.intake.(*cursorAgentRunIntake), captureDuplex(t, d)
 }
 
+// cursorNativeFsTestRejectDuplex 构造带真实 pipe writer 的双工，用于"工具缺席回失败帧"路径：
+// 捕获侧会经 d.send 把失败 Result 帧 + stream_close 写入 writer，由 stop() 回收字节。
+func cursorNativeFsTestRejectDuplex(t *testing.T, defs [][]byte) (*cursorAgentDuplex, func() []byte) {
+	t.Helper()
+	pr, pw := io.Pipe()
+	d := &cursorAgentDuplex{
+		reader:           pr,
+		writer:           pw,
+		delegations:      newLocalCursorToolDelegations(),
+		declaredToolDefs: defs,
+		lg:               zap.NewNop(),
+	}
+	return d, captureDuplex(t, d)
+}
+
+// cursorNativeFsTestCollectResults 从回写帧集合中筛出原生文件 result 帧（含 ExecClientMessage f1），
+// 跳过 stream_close 等控制帧（无 f1）。返回每条 result 的解码视图。
+func cursorNativeFsTestCollectResults(t *testing.T, frames [][]cursorPBField) []cursorNativeFsTestResult {
+	t.Helper()
+	var out []cursorNativeFsTestResult
+	for _, fields := range frames {
+		if _, ok := cursorFindField(fields, cursorFldClientMsgID); !ok {
+			continue // 控制帧（stream_close 等）无 ExecClientMessage f1
+		}
+		r := cursorNativeFsTestResult{execID: cursorVarintField(fields, cursorFldClientMsgID)}
+		if id, ok := cursorFindField(fields, cursorFldClientMsgExecID); ok {
+			r.idField = append([]byte(nil), id.Bytes...)
+		}
+		for _, n := range []int{cursorFldClientMsgWriteResult, cursorFldClientMsgDeleteResult,
+			cursorFldClientMsgGrepResult, cursorFldClientMsgReadResult, cursorFldClientMsgLsResult} {
+			if f, ok := cursorFindField(fields, n); ok {
+				r.field = n
+				inner, err := cursorDecodeProtobuf(f.Bytes)
+				require.NoError(t, err)
+				r.oneof = inner
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // 各 Kind 的下游工具 schema（属性名刻意与原生 Args 不同，验证按 schema 改名映射）。
 const (
 	cursorNativeFsTestReadSchema  = `{"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"number"},"limit":{"type":"number"}},"required":["file_path"]}`
@@ -298,17 +340,29 @@ func TestCursorNativeFSCaptureDelete(t *testing.T) {
 // 2. 捕获失败关闭路径
 // ---------------------------------------------------------------------------
 
-// 声明集里没有对应工具 → 失败关闭（绝不回落到自造工具名）。
+// 声明集里没有对应工具（工具彻底缺席）→ 回失败帧 + 空 capture，不再 ErrCursorProtocol 整请求失败。
 func TestCursorNativeFSCaptureNoMatchingTool(t *testing.T) {
 	defs := [][]byte{cursorTestBuildToolDef(t, "get_weather", `{"type":"object","properties":{"city":{"type":"string"}}}`)}
-	d := cursorShellTestNewDuplex(t, defs, "")
+	d, stop := cursorNativeFsTestRejectDuplex(t, defs)
 	sub := cursorAppendStringField(nil, 1, "/repo/main.go")
 	sub = cursorAppendStringField(sub, 2, "call_read_x")
 	parts := cursorNativeFsTestExecParts(t, 77, nil, cursorFldServerMsgReadArgs, sub)
 
-	_, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgReadArgs, 77, nil)
-	require.ErrorIs(t, err, ErrCursorProtocol, "无 read 类工具必须失败关闭")
-	require.Empty(t, d.delegations.snapshot(), "失败关闭时不得登记任何委托")
+	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgReadArgs, 77, nil)
+	require.NoError(t, err, "工具彻底缺席必须回失败帧而非 ErrCursorProtocol 整请求失败")
+	require.Equal(t, cursorToolCallCapture{}, tc, "工具缺席返回空 capture")
+	require.Empty(t, d.delegations.snapshot(), "工具缺席不得登记任何委托")
+	frames := cursorNativeFsTestSplit(t, stop())
+	res := cursorNativeFsTestCollectResults(t, frames)
+	require.Len(t, res, 1, "只写一条失败 Result 帧")
+	require.Equal(t, cursorFldClientMsgReadResult, res[0].field)
+	require.EqualValues(t, 77, res[0].execID)
+	errFrame, ok := cursorFindField(res[0].oneof, cursorFldReadResultError)
+	require.True(t, ok, "失败结果必须走 f2 error")
+	inner, ierr := cursorDecodeProtobuf(errFrame.Bytes)
+	require.NoError(t, ierr)
+	require.Contains(t, string(cursorFindFieldBytes(t, inner, cursorFldReadErrorError)),
+		"client has no read tool declared")
 }
 
 // 工具名匹配但 schema 不含关键属性（path）→ 失败关闭。
@@ -346,6 +400,84 @@ func TestCursorNativeFSCaptureRequiredUnfillable(t *testing.T) {
 
 	_, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgWriteArgs, 80, nil)
 	require.ErrorIs(t, err, ErrCursorProtocol)
+}
+
+// ---------------------------------------------------------------------------
+// 2b. 工具彻底缺席（REJ-FS）：哨兵 → 回失败 Result 帧 + 空 capture，不再整请求 502
+// ---------------------------------------------------------------------------
+
+// ① 声明集为空 + f7 read → nil 错误、空 capture，写出 ExecClientMessage{f7 ReadResult{f2 error}}，
+// error 文本含 "client has no read tool declared"。
+func TestCursorNativeFSRejectReadNoTool(t *testing.T) {
+	d, stop := cursorNativeFsTestRejectDuplex(t, [][]byte{})
+	sub := cursorAppendStringField(nil, 1, "/repo/main.go")
+	sub = cursorAppendStringField(sub, 2, "call_read_1")
+	parts := cursorNativeFsTestExecParts(t, 71, []byte("exec-71"), cursorFldServerMsgReadArgs, sub)
+
+	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgReadArgs, 71, []byte("exec-71"))
+	require.NoError(t, err, "工具缺席必须回失败帧而非报错")
+	require.Equal(t, cursorToolCallCapture{}, tc, "工具缺席返回空 capture")
+	require.Empty(t, d.delegations.snapshot(), "工具缺席不得登记委托")
+	frames := cursorNativeFsTestSplit(t, stop())
+	res := cursorNativeFsTestCollectResults(t, frames)
+	require.Len(t, res, 1, "只写一条失败 Result 帧")
+	require.Equal(t, cursorFldClientMsgReadResult, res[0].field, "read 缺席必须走 f7")
+	require.EqualValues(t, 71, res[0].execID)
+	require.Equal(t, []byte("exec-71"), res[0].idField)
+	errFrame, ok := cursorFindField(res[0].oneof, cursorFldReadResultError)
+	require.True(t, ok, "失败结果必须走 f2 error")
+	inner, ierr := cursorDecodeProtobuf(errFrame.Bytes)
+	require.NoError(t, ierr)
+	require.Equal(t, "/repo/main.go", string(cursorFindFieldBytes(t, inner, cursorFldReadErrorPath)))
+	require.Contains(t, string(cursorFindFieldBytes(t, inner, cursorFldReadErrorError)),
+		"client has no read tool declared")
+}
+
+// ② f8 ls 无 LS/ls 工具 → 同样回 LsResult 失败帧（error 文本含 "client has no ls tool declared"）。
+func TestCursorNativeFSRejectLsNoTool(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "get_weather", `{"type":"object","properties":{"city":{"type":"string"}}}`)}
+	d, stop := cursorNativeFsTestRejectDuplex(t, defs)
+	sub := cursorAppendStringField(nil, 1, "/repo")
+	sub = cursorAppendStringField(sub, 3, "call_ls_1")
+	parts := cursorNativeFsTestExecParts(t, 72, nil, cursorFldServerMsgLsArgs, sub)
+
+	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgLsArgs, 72, nil)
+	require.NoError(t, err, "ls 工具缺席必须回失败帧而非报错")
+	require.Equal(t, cursorToolCallCapture{}, tc, "工具缺席返回空 capture")
+	require.Empty(t, d.delegations.snapshot(), "工具缺席不得登记委托")
+	frames := cursorNativeFsTestSplit(t, stop())
+	res := cursorNativeFsTestCollectResults(t, frames)
+	require.Len(t, res, 1, "只写一条失败 Result 帧")
+	require.Equal(t, cursorFldClientMsgLsResult, res[0].field, "ls 缺席必须走 f8")
+	require.EqualValues(t, 72, res[0].execID)
+	errFrame, ok := cursorFindField(res[0].oneof, cursorFldLsResultError)
+	require.True(t, ok, "失败结果必须走 f2 error")
+	inner, ierr := cursorDecodeProtobuf(errFrame.Bytes)
+	require.NoError(t, ierr)
+	require.Equal(t, "/repo", string(cursorFindFieldBytes(t, inner, cursorFldLsErrorPath)))
+	require.Contains(t, string(cursorFindFieldBytes(t, inner, cursorFldLsErrorError)),
+		"client has no ls tool declared")
+}
+
+// ③ respond() 工具缺席分支：空 capture 且无错误 → 记 native_fs_rejected_no_tool（仅 exec_id/kind），
+// return false, nil，连接继续（不 502）。
+func TestCursorNativeFSRespondRejectNoTool(t *testing.T) {
+	d, stop := cursorNativeFsTestRejectDuplex(t, [][]byte{})
+	execMsg := cursorAppendVarintField(nil, 1, 55)
+	execMsg = cursorAppendBytesField(execMsg, 15, []byte("exec-55"))
+	sub := cursorAppendStringField(nil, 1, "/repo/a.go")
+	sub = cursorAppendStringField(sub, 2, "call_r")
+	execMsg = cursorAppendBytesField(execMsg, cursorFldServerMsgReadArgs, sub)
+	payload := cursorAppendBytesField(nil, cursorFldServerExecMessage, execMsg)
+
+	done, err := d.respond(payload)
+	require.NoError(t, err, "工具缺席时 respond 不得报错（不再 502）")
+	require.False(t, done)
+	require.Empty(t, d.delegations.snapshot(), "工具缺席不得登记委托")
+	frames := cursorNativeFsTestSplit(t, stop())
+	res := cursorNativeFsTestCollectResults(t, frames)
+	require.Len(t, res, 1, "必须写出一条失败 Result 帧")
+	require.Equal(t, cursorFldClientMsgReadResult, res[0].field)
 }
 
 // tool_call_id 为空 → 失败关闭（与 shell 同语义）。

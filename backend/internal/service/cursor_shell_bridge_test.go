@@ -100,18 +100,79 @@ func TestCursorShellBridgeEmptyCommand(t *testing.T) {
 	require.True(t, errors.Is(err, ErrCursorProtocol), "失败必须落到 ErrCursorProtocol")
 }
 
-// 3. 未声明 shell 类工具 → 失败关闭（不许用 "shell" 兜底）
+// 3. 未声明 shell 类工具 → 拒绝（非失败关闭）：只声明 get_weather（非 shell 类，properties 无
+// command），无 shell/bash/... 工具 → 回写拒绝帧、返回空 capture、不整轮 502（REJ-SHELL）。
+// assertShellRejectionWire 校验 shell 拒绝路径写出了"1 条 rejected 数据帧 + 1 条 stream_close
+// 控制帧"（外审 B2/S2：拒绝只发 f5 rejected，exec 流终止由控制帧完成，不再发无 start 的 exit）。
+// splitWritebackEnvelopes 只回交数据帧，故这里单独扫描原始 wire 找控制帧。
+func assertShellRejectionWire(t *testing.T, wire []byte) {
+	t.Helper()
+	frames := splitWritebackEnvelopes(t, wire)
+	require.Len(t, frames, 1, "拒绝只写 1 条数据帧（rejected）；stream_close 是控制帧，由 splitWritebackEnvelopes 跳过")
+	outer0, _ := cursorDecodeProtobuf(frames[0])
+	ss0, ok := cursorFindField(outer0, cursorFldClientMsgShellStream)
+	require.True(t, ok)
+	ssf0, _ := cursorDecodeProtobuf(ss0.Bytes)
+	_, hasRej := cursorFindField(ssf0, cursorFldShellStreamRejected)
+	require.True(t, hasRej, "数据帧 f14 必须含 f5 rejected")
+
+	var sawClose bool
+	off := 0
+	for off < len(wire) {
+		env, next, e := cursorReadEnvelopeFrame(wire, off)
+		require.NoError(t, e)
+		outer, de := cursorDecodeProtobuf(env.Data)
+		require.NoError(t, de)
+		if _, ok := cursorFindField(outer, cursorFldClientControlMessage); ok {
+			sawClose = true
+			break
+		}
+		off = next
+	}
+	require.True(t, sawClose, "拒绝后必须补 stream_close 控制帧")
+}
+
 func TestCursorShellBridgeNoShellTool(t *testing.T) {
 	// 只声明 get_weather（非 shell 类，且 properties 无 command），无 shell/bash/... 工具。
 	defs := [][]byte{cursorTestBuildToolDef(t, "get_weather", `{"type":"object","properties":{"city":{"type":"string"}}}`)}
-	d := cursorShellTestNewDuplex(t, defs, "call_x")
+	d := cursorShellTestNewDuplex(t, defs, "")
+	pr, pw := io.Pipe()
+	wd := newWritebackDuplex(pr, pw, d.delegations)
+	wd.declaredToolDefs = d.declaredToolDefs
+	stop := captureDuplex(t, wd)
 
 	sub := cursorShellTestBuildShellArgs(t, "ls -la", "", "call_x", "desc")
 	parts := cursorShellTestBuildExecParts(t, 9, []byte("exec-9"), sub)
 
-	_, err := d.cursorCaptureShellArgs(parts, 9, []byte("exec-9"))
-	require.Error(t, err, "无可用 shell 类工具必须失败关闭")
-	require.True(t, errors.Is(err, ErrCursorProtocol), "失败必须落到 ErrCursorProtocol（不许 shell 兜底）")
+	tc, err := wd.cursorCaptureShellArgs(parts, 9, []byte("exec-9"))
+	require.NoError(t, err, "无可用 shell 类工具必须拒绝（非失败关闭、不许 shell 兜底）")
+	require.Equal(t, cursorToolCallCapture{}, tc, "拒绝必须返回空 capture")
+	wire := stop()
+
+	frames := splitWritebackEnvelopes(t, wire)
+	require.Len(t, frames, 1, "拒绝只写 1 条数据帧（rejected）；stream_close 是控制帧，由 splitWritebackEnvelopes 跳过")
+	outer0, _ := cursorDecodeProtobuf(frames[0])
+	ss0, ok := cursorFindField(outer0, cursorFldClientMsgShellStream)
+	require.True(t, ok)
+	ssf0, _ := cursorDecodeProtobuf(ss0.Bytes)
+	_, hasRej := cursorFindField(ssf0, cursorFldShellStreamRejected)
+	require.True(t, hasRej, "数据帧 f14 必须含 f5 rejected")
+
+	// 外审 B2：拒绝后必须补一条 ExecClientControlMessage.stream_close 控制帧终止 exec 流。
+	var sawClose bool
+	off := 0
+	for off < len(wire) {
+		env, next, e := cursorReadEnvelopeFrame(wire, off)
+		require.NoError(t, e)
+		outer, de := cursorDecodeProtobuf(env.Data)
+		require.NoError(t, de)
+		if _, ok := cursorFindField(outer, cursorFldClientControlMessage); ok {
+			sawClose = true
+			break
+		}
+		off = next
+	}
+	require.True(t, sawClose, "拒绝后必须补 stream_close 控制帧")
 }
 
 // 4. tool_call_id 与 started 不匹配 → 失败关闭（不得新建批次、不得当作新调用）
@@ -574,17 +635,123 @@ func TestCursorShellBridgeBashLowerWinsOverUpper(t *testing.T) {
 	require.Equal(t, `{"command":"echo hi"}`, tc.ArgsJSON)
 }
 
-// 17. 声明 Bash 但 properties 无 command → 仍失败关闭，错误含既有 "no shell-like tool" 文案。
-func TestCursorShellBridgeBashNoCommandPropertyFailClosed(t *testing.T) {
-	// properties 无 command（只有 cmd），故即便名为 Bash 也不被选中 → 名单空 → 失败关闭。
+// 17. 声明 Bash 但 properties 无 command → 拒绝（非失败关闭）：找不到带 command 属性的
+// shell 类工具，回写拒绝帧、返回空 capture、不整轮 502（REJ-SHELL ②）。
+func TestCursorShellBridgeBashNoCommandPropertyReject(t *testing.T) {
+	// properties 无 command（只有 cmd），故即便名为 Bash 也不被选中 → 名单空 → 拒绝帧。
 	defs := [][]byte{cursorTestBuildToolDef(t, "Bash", `{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}`)}
-	d := cursorShellTestNewDuplex(t, defs, "call_bash_1")
+	d := cursorShellTestNewDuplex(t, defs, "")
+	pr, pw := io.Pipe()
+	wd := newWritebackDuplex(pr, pw, d.delegations)
+	wd.declaredToolDefs = d.declaredToolDefs
+	stop := captureDuplex(t, wd)
 
 	sub := cursorShellTestBuildShellArgs(t, "echo hi", "", "call_bash_1", "run echo")
 	parts := cursorShellTestBuildExecParts(t, 15, []byte("exec-15"), sub)
 
-	_, err := d.cursorCaptureShellArgs(parts, 15, []byte("exec-15"))
-	require.Error(t, err, "Bash 声明但无 command property 必须失败关闭（schema 校验不变）")
+	tc, err := wd.cursorCaptureShellArgs(parts, 15, []byte("exec-15"))
+	require.NoError(t, err, "Bash 声明但无 command property 必须拒绝（非失败关闭）")
+	require.Equal(t, cursorToolCallCapture{}, tc, "拒绝必须返回空 capture")
+	wire := stop()
+
+	// 写出 2 帧拒绝帧（f5 rejected + f3 exit{code=126}）。
+	assertShellRejectionWire(t, wire)
+}
+
+// ---------------------------------------------------------------------------
+// REJ-SHELL：f14 无对应下游工具时回拒绝帧（不再整请求 502）。
+// ---------------------------------------------------------------------------
+
+// ① 声明集为空 + f14 → 返回 nil 错误、空 capture，且写出 2 帧（外层 f2，内层 f1=exec_id、
+// f15=idField，f14 第一帧含 f5 rejected、第二帧 f14>f3>f1=126）。
+func TestCursorShellBridgeRejectEmptyDeclared(t *testing.T) {
+	d := cursorShellTestNewDuplex(t, nil, "")
+	pr, pw := io.Pipe()
+	wd := newWritebackDuplex(pr, pw, d.delegations)
+	wd.declaredToolDefs = d.declaredToolDefs
+	stop := captureDuplex(t, wd)
+
+	sub := cursorShellTestBuildShellArgs(t, "ls -la", "", "call_x", "desc")
+	parts := cursorShellTestBuildExecParts(t, 9, []byte("exec-9"), sub)
+
+	tc, err := wd.cursorCaptureShellArgs(parts, 9, []byte("exec-9"))
+	require.NoError(t, err, "声明集为空必须回写拒绝帧、不得失败关闭（不整轮 502）")
+	require.Equal(t, cursorToolCallCapture{}, tc, "拒绝必须返回空 capture")
+	wire := stop()
+
+	assertShellRejectionWire(t, wire)
+	// 帧外层：f1=exec_id、f15=idField 原值回传（拒绝帧沿用既有 ExecClientMessage 编码）。
+	outer0, _ := cursorDecodeProtobuf(splitWritebackEnvelopes(t, wire)[0])
+	require.EqualValues(t, 9, cursorVarintField(outer0, cursorFldClientMsgID))
+	idf, ok := cursorFindField(outer0, cursorFldClientMsgExecID)
+	require.True(t, ok)
+	require.Equal(t, []byte("exec-9"), idf.Bytes)
+}
+
+// ③ command 为空 → 仍 ErrCursorProtocol（保持失败关闭，断言 errors.Is）。
+func TestCursorShellBridgeFailClosedEmptyCommandReject(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "shell", cursorShellTestSchemaArray)}
+	d := cursorShellTestNewDuplex(t, defs, "call_shell_1")
+	pr, pw := io.Pipe()
+	wd := newWritebackDuplex(pr, pw, d.delegations)
+	wd.declaredToolDefs = d.declaredToolDefs
+	stop := captureDuplex(t, wd)
+
+	// command 空：必须在 command 校验处失败关闭，且**不**写任何拒绝帧。
+	sub := cursorShellTestBuildShellArgs(t, "", "/work", "call_shell_1", "list files")
+	parts := cursorShellTestBuildExecParts(t, 7, []byte("exec-orig-7"), sub)
+
+	_, err := wd.cursorCaptureShellArgs(parts, 7, []byte("exec-orig-7"))
+	require.Error(t, err, "command 空必须失败关闭")
 	require.True(t, errors.Is(err, ErrCursorProtocol), "失败必须落到 ErrCursorProtocol")
-	require.Contains(t, err.Error(), "no shell-like tool", "错误须含既有 'no shell-like tool' 文案")
+	wire := stop()
+	require.Empty(t, wire, "command 空不得写任何回写帧（保持失败关闭）")
+}
+
+// ④ 声明 Bash 正常 → 委托成功、不写拒绝帧（既有用例回归；无 command 工具时才是拒绝）。
+func TestCursorShellBridgeBashNormalNoRejectFrame(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "Bash", `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)}
+	d := cursorShellTestNewDuplex(t, defs, "call_bash_1")
+	pr, pw := io.Pipe()
+	wd := newWritebackDuplex(pr, pw, d.delegations)
+	wd.declaredToolDefs = d.declaredToolDefs
+	stop := captureDuplex(t, wd)
+
+	sub := cursorShellTestBuildShellArgs(t, "echo hello", "", "call_bash_1", "run echo")
+	parts := cursorShellTestBuildExecParts(t, 13, []byte("exec-13"), sub)
+
+	tc, err := wd.cursorCaptureShellArgs(parts, 13, []byte("exec-13"))
+	require.NoError(t, err, "声明 Bash 正常必须成功委托")
+	require.Equal(t, "Bash", tc.Name)
+	require.Equal(t, "shell", tc.Kind)
+	// 成功委托路径**不**回写拒绝帧（结果回写在续轮交付侧完成）。
+	wire := stop()
+	require.Empty(t, wire, "正常委托不得写任何拒绝帧")
+}
+
+// 外审 B1 回归：被拒绝的调用若已在本批 started 里，必须登记为"本地已拒绝"，
+// 否则 checkSealableLocked 永远等不到委托 → 批不封口 → 180s 挂死。
+func TestCursorShellBridgeRejectKeepsBatchSealable(t *testing.T) {
+	// 声明集只含非 shell 工具：shell 调用会被拒绝（而非失败关闭）。
+	defs := [][]byte{cursorTestBuildToolDef(t, "get_weather", `{"type":"object","properties":{"city":{"type":"string"}}}`)}
+	d := cursorShellTestNewDuplex(t, defs, "")
+	// 登记一个已 started、已 listed 的批，其中 call_bash_b1 将被拒绝。
+	require.NoError(t, d.delegations.noteToolCallStarted("", "call_bash_b1", true))
+	require.NoError(t, d.delegations.noteToolRequestsListed("", 1))
+
+	pr, pw := io.Pipe()
+	wd := newWritebackDuplex(pr, pw, d.delegations)
+	wd.declaredToolDefs = d.declaredToolDefs
+	stop := captureDuplex(t, wd)
+
+	sub := cursorShellTestBuildShellArgs(t, "echo hi", "", "call_bash_b1", "run echo")
+	parts := cursorShellTestBuildExecParts(t, 31, []byte("exec-31"), sub)
+
+	tc, err := wd.cursorCaptureShellArgs(parts, 31, []byte("exec-31"))
+	require.NoError(t, err, "工具缺席必须走拒绝路径而不是失败关闭")
+	require.Equal(t, cursorToolCallCapture{}, tc, "拒绝路径不得产生委托")
+	_ = stop()
+
+	require.NoError(t, d.delegations.sealable(),
+		"被拒绝的 started 调用必须计入已满足，批次仍可封口（否则 180s 挂死）")
 }

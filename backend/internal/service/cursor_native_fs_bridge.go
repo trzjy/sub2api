@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -51,6 +52,12 @@ const (
 	cursorToolKindWrite  = "write"
 	cursorToolKindDelete = "delete"
 )
+
+// ErrCursorNativeFsToolAbsent 是专用哨兵：原生文件工具的"候选名单（priority）全部不匹配、
+// 客户端未声明该 kind 对应工具"这一种情况返回它。与 ErrCursorProtocol（schema 解析失败、
+// required 无法填充、unknown kind 等真正的协议失败关闭）区分开 —— 工具缺席不是协议错误，
+// 而是"客户端本来就不可用"，应当回一条失败的 Result 帧让流继续，而非整请求 502。
+var ErrCursorNativeFsToolAbsent = errors.New("cursor: native fs tool not declared by client")
 
 // result oneof 内层字段号（ReadResult / WriteResult / LsResult / GrepResult / DeleteResult）。
 const (
@@ -409,11 +416,16 @@ func cursorBuildNativeFsDelegation(defs [][]byte, kind string, params []cursorNa
 	idx := cursorToolSchemaIndex(defs)
 	var chosen string
 	var schemaJSON []byte
+	// hasName 记录是否有候选工具名（不论其 schema 是否含关键属性）出现在声明集中：用于区分
+	// "工具彻底缺席"（无任何候选名 → 专用哨兵，回失败帧）与"工具名声明了但 schema 缺关键属性"
+	// （无法填充关键参数 → 仍是协议层失败关闭，不自造工具名）。
+	hasName := false
 	for _, name := range spec.priority {
 		sj, ok := idx[name]
 		if !ok || len(sj) == 0 {
 			continue
 		}
+		hasName = true
 		if !cursorSchemaHasAnyProperty(sj, spec.keyProps) {
 			continue
 		}
@@ -422,8 +434,15 @@ func cursorBuildNativeFsDelegation(defs [][]byte, kind string, params []cursorNa
 		break
 	}
 	if chosen == "" {
-		return "", "", fmt.Errorf("%w: no %s-like tool (%s) with %s property declared",
-			ErrCursorProtocol, kind, strings.Join(spec.priority, "/"), strings.Join(spec.keyProps, "/"))
+		if hasName {
+			// 工具名声明了但 schema 缺关键属性：无法填充关键参数 → 失败关闭（协议层，非工具缺席），
+			// 沿用既有 ErrCursorProtocol 文案，绝不自造工具名。
+			return "", "", fmt.Errorf("%w: no %s-like tool (%s) with %s property declared",
+				ErrCursorProtocol, kind, strings.Join(spec.priority, "/"), strings.Join(spec.keyProps, "/"))
+		}
+		// 候选名单全部不匹配（工具彻底缺席，而非协议错误）：返回专用哨兵，由捕获侧回失败帧。
+		return "", "", fmt.Errorf("%w: no %s-like tool (%s) declared",
+			ErrCursorNativeFsToolAbsent, kind, strings.Join(spec.priority, "/"))
 	}
 
 	var schema map[string]any
@@ -511,6 +530,24 @@ func cursorNativeFsExecField(parts []cursorPBField) (int, bool) {
 func cursorNativeFsExecFieldOK(parts []cursorPBField) bool {
 	_, ok := cursorNativeFsExecField(parts)
 	return ok
+}
+
+// cursorNativeFsKindFromField 把承载原生文件工具入参的字段号映射回委托 Kind
+// （read/ls/grep/write/delete）。非受支持字段号 → 空串（不应用于拒绝分支）。
+func cursorNativeFsKindFromField(field int) string {
+	switch field {
+	case cursorFldServerMsgReadArgs:
+		return cursorToolKindRead
+	case cursorFldServerMsgLsArgs:
+		return cursorToolKindLs
+	case cursorFldServerMsgGrepArgs:
+		return cursorToolKindGrep
+	case cursorFldServerMsgWriteArgs:
+		return cursorToolKindWrite
+	case cursorFldServerMsgDeleteArgs:
+		return cursorToolKindDelete
+	}
+	return ""
 }
 
 // cursorCaptureNativeFsArgs 是 ExecServerMessage.f3/f4/f5/f7/f8 的统一捕获入口。
@@ -611,6 +648,15 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 
 	name, argsJSON, berr := cursorBuildNativeFsDelegation(d.declaredToolDefs, kind, params)
 	if berr != nil {
+		// 工具缺席（专用哨兵）：不失败关闭、不发委托，改回一条失败 Result 帧让流继续。
+		// 其余错误（schema 解析失败 / required 无法填充 / unknown kind）仍按协议错误失败关闭。
+		if errors.Is(berr, ErrCursorNativeFsToolAbsent) {
+			// 外审 B1：该 call_id 可能已在本批 started 里，登记"本地已拒绝"让封口谓词跳过它。
+			if d.delegations != nil {
+				d.delegations.noteRejectedCall(callID)
+			}
+			return d.cursorRejectNativeFsNoTool(execID, idField, kind, params)
+		}
 		return cursorToolCallCapture{}, berr
 	}
 	tc := cursorToolCallCapture{
@@ -630,6 +676,61 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 		return cursorToolCallCapture{}, err
 	}
 	return tc, nil
+}
+
+// cursorRejectNativeFsNoTool 处理"客户端未声明该 kind 对应工具"这一专用哨兵：
+// 不发委托、不建批，直接写出该 kind 对应的失败 Result 帧（error 文本固定
+// "client has no <kind> tool declared"），并补 stream_close 让 exec 流正常终止，
+// 避免整请求 502。返回空 capture 与 nil 错误（工具缺席不是失败关闭，连接继续）。
+//
+// cap 携带 ExecID / IDField / Kind / ArgsJSON：ArgsJSON 用已解析参数序列化（无属性时给 "{}"），
+// 仅供失败帧回填路径/模式。不登记任何委托，故续轮不会有 orphan 回写。
+func (d *cursorAgentDuplex) cursorRejectNativeFsNoTool(execID uint64, idField []byte, kind string, params []cursorNativeFsParam) (cursorToolCallCapture, error) {
+	argsJSON := cursorNativeFsParamsToJSON(params)
+	text := fmt.Sprintf("client has no %s tool declared", kind)
+
+	var field int
+	var result []byte
+	switch kind {
+	case cursorToolKindRead:
+		field, result = cursorFldClientMsgReadResult, cursorEncodeReadResult(argsJSON, text, true)
+	case cursorToolKindWrite:
+		field, result = cursorFldClientMsgWriteResult, cursorEncodeWriteResult(argsJSON, text, true)
+	case cursorToolKindDelete:
+		field, result = cursorFldClientMsgDeleteResult, cursorEncodeDeleteResult(argsJSON, text, true)
+	case cursorToolKindLs:
+		field, result = cursorFldClientMsgLsResult, cursorEncodeLsResult(argsJSON, text, true)
+	case cursorToolKindGrep:
+		field, result = cursorFldClientMsgGrepResult, cursorEncodeGrepResult(argsJSON, text, true)
+	default:
+		// 不应到达：kind 必来自受支持的五个字段号之一。
+		return cursorToolCallCapture{}, fmt.Errorf("%w: cannot reject unknown native fs kind %q", ErrCursorProtocol, kind)
+	}
+	frame := cursorEncodeExecClientResultFrame(execID, idField, field, result)
+	if serr := d.send(cursorFldClientMessage, frame); serr != nil {
+		return cursorToolCallCapture{}, serr
+	}
+	if serr := d.sendExecStreamClose(execID); serr != nil {
+		return cursorToolCallCapture{}, serr
+	}
+	return cursorToolCallCapture{}, nil
+}
+
+// cursorNativeFsParamsToJSON 把已解析的原生参数序列化为对象 JSON（按候选属性名取第一个）。
+// 无参数（例如 grep 的 pattern 缺失已被上游失败关闭，正常不会为空）时回退 "{}"。
+func cursorNativeFsParamsToJSON(params []cursorNativeFsParam) string {
+	obj := map[string]any{}
+	for _, p := range params {
+		if len(p.candidates) == 0 {
+			continue
+		}
+		obj[p.candidates[0]] = p.value
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 // ---------------------------------------------------------------------------

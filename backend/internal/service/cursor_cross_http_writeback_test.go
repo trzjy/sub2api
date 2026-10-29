@@ -91,10 +91,16 @@ func splitWritebackEnvelopes(t *testing.T, wire []byte) [][]byte {
 		// 剥掉 send 包裹的外层 bytes_field(2, ExecClientMessage) 标签。
 		outer, derr := cursorDecodeProtobuf(frame.Data)
 		require.NoError(t, derr, "envelope payload 必须是合法 protobuf")
-		ecm, ok := cursorFindField(outer, cursorFldClientMessage)
-		require.True(t, ok, "envelope payload 必须是 bytes_field(2, ExecClientMessage)")
-		out = append(out, ecm.Bytes)
+	ecm, ok := cursorFindField(outer, cursorFldClientMessage)
+	if !ok {
+		// 控制帧（如 ExecClientControlMessage.f5 stream_close）不承载 ExecClientMessage：
+		// 拒绝/原生文件回写路径会在结果帧之后补一条 stream_close 终止 exec 流，本辅助函数只回交
+		// ExecClientMessage，控制帧按设计跳过（与 cursor_native_fs_bridge_test.go 同口径）。
 		off = next
+		continue
+	}
+	out = append(out, ecm.Bytes)
+	off = next
 	}
 	return out
 }
