@@ -216,6 +216,11 @@ func (s *cursorSSEStream) next() error {
 		}
 	}
 	if s.done {
+		// 交付侧 id 重写（派发单 CALLID）：在写出**任何** tool_calls 字节之前决定出站 id。
+		// 失败即返回错误（本 HTTP 不交出带 id 的工具批），绝不发原 id 冒充新调用。
+		if err := s.parser.assignToolCallWireIDs(); err != nil {
+			return err
+		}
 		if !s.parser.started {
 			s.buffer.WriteString(s.parser.cursorSSERoleChunk())
 			s.parser.started = true
@@ -807,6 +812,18 @@ func (p *cursorStreamParser) capturedToolCalls() []cursorToolCallCapture {
 	return p.toolDelegations().snapshot()
 }
 
+// assignToolCallWireIDs 在**任何 tool_calls 字节写出之前**为待交付委托决定出站 id。
+//
+// 交付侧 id 重写（派发单 CALLID）：上游会在同一会话内复用同一个 tool_call_id，
+// 客户端按 id 去重会丢弃第二条调用 → 上游等不到结果 → stream_error。本方法把"已交付过
+// 的原 id"换成全新的唯一 id（幂等，已决定的委托不二次改写），并登记 新id→原id 映射。
+func (p *cursorStreamParser) assignToolCallWireIDs() error {
+	if p == nil {
+		return nil
+	}
+	return p.toolDelegations().assignWireIDs()
+}
+
 // sealableDelegations 报告"本批是否已可封口"（只读判定，不改批次状态）。
 //
 // 读循环用它决定是否到工具交接检查点：listed 数未等齐或某条对外 started 还没有完整
@@ -862,8 +879,30 @@ type cursorToolCallCapture struct {
 	// 走 ShellStream（f14）编码（见 cursor_agent_duplex.go 的 cursorEncodeShellToolResult）。
 	// 该字段只影响回写编码，委托捕获与封口逻辑对两种 Kind 一视同仁。
 	Kind string
+	// WireID 是**发给客户端的** tool_call id（OpenAI tool_calls[].id）。
+	//
+	// 上游会在同一会话内对不同工具复用同一个 tool_call_id（生产实测 read 与 write 共用
+	// call-3466d322-...）。OpenAI 协议里 tool_call id 是一次性唯一锚点，客户端按 ID 去重/
+	// 覆盖，复用会让第二条调用被客户端丢弃（不执行、不写回 → 上游等不到结果 → stream_error）。
+	// 因此交付侧在"该原 ID 本会话内已交付过（含同批重复）"时必须换一个全新唯一 id，
+	// 并把映射（新 id → 原 id）记进 cursorToolDelegations.idRewrite，供续轮反查。
+	//
+	// 语义纪律：对外输出（SSE / 非流式）一律用 wireID()（为空回退 ID）；上游写回始终用
+	// ID + ExecID（原值），绝不把改写后的 id 回写给上游。
+	WireID string
 	// SandboxPolicy 是 shell 委托 ShellArgs.f9 的原始字节，回写 start 帧时原样回显。
 	SandboxPolicy []byte
+}
+
+// wireID 返回发给客户端的 tool_call id：有交付侧改写值时用改写值，否则沿用上游原值。
+//
+// 唯一的对外 id 出口：所有 SSE / 非流式渲染都必须走它，绝不直接读 c.ID
+// （直接读会把上游复用的 id 原样发给客户端，触发客户端按 ID 去重丢弃调用）。
+func (c cursorToolCallCapture) wireID() string {
+	if c.WireID != "" {
+		return c.WireID
+	}
+	return c.ID
 }
 
 // cursorContent 返回拼出的完整响应文本（非流式入站用）。
@@ -984,6 +1023,11 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 	}
 	// 工具委托捕获：在 finish 前吐 tool_calls delta（流式与 cursorParseStreamToSSE 同口径）。
 	if calls := p.capturedToolCalls(); len(calls) > 0 {
+		// 交付侧 id 重写：本地解析路径（无 duplex 的共享记录）同样必须先决定出站 id。
+		if err := p.assignToolCallWireIDs(); err != nil {
+			return nil, err
+		}
+		calls = p.capturedToolCalls()
 		for i, tc := range calls {
 			sseLines = append(sseLines, p.cursorSSEToolCallNameChunk(i, tc))
 			sseLines = append(sseLines, p.cursorSSEToolCallArgsChunk(i, tc))
@@ -2342,7 +2386,7 @@ func (p *cursorStreamParser) cursorSSEToolCallNameChunk(index int, tc cursorTool
 	return "data: " + `{"id":` + p.cursorChunkIDJSON() + `,"object":"chat.completion.chunk","created":0,` +
 		`"model":` + cursorJSONString(p.model) + `,` +
 		`"choices":[{"index":0,"delta":{"tool_calls":[{"index":` + strconv.Itoa(index) +
-		`,"id":` + cursorJSONString(tc.ID) + `,"type":"function","function":{"name":` +
+		`,"id":` + cursorJSONString(tc.wireID()) + `,"type":"function","function":{"name":` +
 		cursorJSONString(tc.Name) + `,"arguments":""}}]},"finish_reason":null}]}` + "\n\n"
 }
 
@@ -2468,6 +2512,8 @@ func (p *cursorStreamParser) cursorBuildNonStreamingCompletion() []byte {
 	var msg string
 	finishReason := "stop"
 	// 只聚合**本 HTTP** 捕获的调用与正文：续轮第二个 HTTP 不重播上一批（§25.17.2）。
+	// 出站 id 由调用方在渲染前通过 assignToolCallWireIDs 决定（见 cursorParseStream 与
+	// cursorParseStreamToCompletion）；这里只按 wireID() 渲染。
 	calls := p.httpToolCalls()
 	if len(calls) > 0 {
 		finishReason = "tool_calls"
@@ -2480,7 +2526,7 @@ func (p *cursorStreamParser) cursorBuildNonStreamingCompletion() []byte {
 			if strings.TrimSpace(args) == "" || args == "null" {
 				args = "{}"
 			}
-			msg += `{"id":` + cursorJSONString(tc.ID) +
+			msg += `{"id":` + cursorJSONString(tc.wireID()) +
 				`,"type":"function","function":{"name":` + cursorJSONString(tc.Name) +
 				`,"arguments":` + cursorJSONString(args) + `}}`
 		}
@@ -2521,6 +2567,11 @@ func cursorParseStreamToSSE(body []byte, model string, secrets ...string) ([]byt
 func cursorParseStreamToCompletion(body []byte, model string, secrets ...string) ([]byte, error) {
 	p := cursorNewStreamParser(model, secrets...)
 	if _, err := p.cursorParseStream(body); err != nil {
+		return nil, err
+	}
+	// 交付侧 id 重写：非流式整包渲染前先决定每个调用的出站 id；失败即整包失败关闭
+	// （绝不把上游复用的原 id 原样交给客户端）。
+	if err := p.assignToolCallWireIDs(); err != nil {
 		return nil, err
 	}
 	return p.cursorBuildNonStreamingCompletion(), nil

@@ -114,11 +114,18 @@ func TestCursorBatchSeqReusedCallIDNotSwallowed(t *testing.T) {
 
 	second, err := f.prepare(t)
 	require.NoError(t, err, "同 call_id 的第二批不得被判为'已登记的历史批'而吞掉")
-	require.Equal(t, []string{callID}, second.callIDs,
-		"第二批的 call_id 必须计入 deliveredCallIDs（修复前这里是空的，导致 stream_error）")
+	// 该原 id 第一轮已交付过 → 第二轮必须换一个**新的**出站 id（客户端按 id 去重，
+	// 复用同一 id 会丢弃第二条调用）。这一条同时证明新批没被吞：集合非空且长度恰为 1。
+	require.Len(t, second.callIDs, 1, "第二批的 call_id 必须计入 deliveredCallIDs（修复前这里是空的，导致 stream_error）")
+	require.NotEqual(t, callID, second.callIDs[0], "复用原 id 的第二批必须被改写为新的出站 id")
+	// 新 id 必须能反查回原来的上游原 id（续轮回写依赖这条映射）；
+	// 同时证明"历史批不重复计入"：集合里没有别的 id（第一轮的批不会二次出现）。
+	original, ok := f.delegations.upstreamCallID(second.callIDs[0])
+	require.True(t, ok, "改写后的新 id 必须能在本会话内反查到上游原 id")
+	require.Equal(t, callID, original, "新 id 反查必须回到被复用的那个原 id")
 	require.Equal(t, uint64(2), second.deliveredSeq, "第二批 seq 必须为 2")
 	require.NotNil(t, f.record.pending, "第二批必须产生 pending（等待 write 结果）")
-	require.Equal(t, []string{callID}, f.record.pending.callIDs)
+	require.Equal(t, second.callIDs, f.record.pending.callIDs)
 	require.False(t, f.record.pending.delivered, "准备阶段只能是已准备未交付")
 
 	f.commit(t, second)
@@ -182,11 +189,17 @@ func TestCursorBatchSeqMultipleNewBatchesDeliveredAtOnce(t *testing.T) {
 	require.ErrorIs(t, err, ErrCursorBatchIncomplete)
 
 	// 之后又有一批（复用 call-A 的 ID）→ 只交付这一批，不重复历史批。
+	// 该原 id 已在 seq=1..3 那批交付过 → 新批必须换新出站 id，且能反查回 call-A。
 	f.noteNativeFsBatch(t, cursorToolKindDelete, "call-A")
 	require.NoError(t, f.delegations.seal())
 	next, err := f.prepare(t)
 	require.NoError(t, err)
-	require.Equal(t, []string{"call-A"}, next.callIDs, "只交付 seq=4 的新批，历史批不得重复计入")
+	require.Len(t, next.callIDs, 1, "只交付 seq=4 的新批，历史批不得重复计入（长度必须恰为 1）")
+	require.NotEqual(t, "call-A", next.callIDs[0],
+		"复用原 id 的新批必须被改写为新的出站 id（客户端按 id 去重）")
+	original, ok := f.delegations.upstreamCallID(next.callIDs[0])
+	require.True(t, ok, "改写后的新 id 必须能反查到上游原 id")
+	require.Equal(t, "call-A", original, "新 id 必须反查回被复用的 call-A，而不是历史批里的别的 id")
 	require.Equal(t, uint64(4), next.deliveredSeq)
 }
 

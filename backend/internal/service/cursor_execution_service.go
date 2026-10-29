@@ -3107,6 +3107,71 @@ func (s *cursorSessionStore) lookupSessionByProtocolName(protocol string, kind C
 	return s.sessions[entry.SessionID]
 }
 
+// resolveCallID 把客户端回传的 call id 解析为**索引里登记的键 + 归属会话**。
+//
+// 顺序（派发单 CALLID 要求）：先按原值查索引；未命中时，若该值是本会话的改写后 id
+// （idRewrite 命中），用其**上游原 id** 再查一次（原 id 是早先那批交付时登记的键）。
+// 两者都未命中返回 nil —— 调用方据此判 unknown（失败关闭，不猜、不跨批复用）。
+//
+// 说明：改写 id 只可能属于本进程内的某个活跃会话，因此回退按"原值 → 原 id"在**该会话
+// 自己的** idRewrite 里查是安全的（不同会话的改写值互不可见）。
+func (s *cursorSessionStore) resolveCallID(protocol string, clientID string) (*cursorSessionRecord, string) {
+	if s == nil || clientID == "" || protocol == "" {
+		return nil, ""
+	}
+	if record := s.lookupSessionByProtocolName(protocol, CursorIDKindCall, clientID); record != nil {
+		return record, clientID
+	}
+	// 未命中：把 clientID 当"改写后的 id"反查上游原 id。
+	record := s.lookupSessionOwningWireID(clientID)
+	if record == nil {
+		return nil, ""
+	}
+	record.mu.Lock()
+	original, ok := record.delegations.upstreamCallIDLocked(clientID)
+	record.mu.Unlock()
+	if !ok {
+		return nil, ""
+	}
+	// 归位后的原 id 必须仍在索引里登记（早先那批交付时登记过）；否则说明关联已清理，
+	// 按未命中处理（不凭 idRewrite 凭空造出关联）。
+	if found := s.lookupSessionByProtocolName(protocol, CursorIDKindCall, original); found == nil {
+		return nil, ""
+	}
+	return record, original
+}
+
+// lookupSessionOwningWireID 找出 idRewrite 里登记了 wireID 的会话（只在本进程活跃会话内查）。
+//
+// 改写映射是会话私有的（cursorToolDelegations 随会话释放），因此这里只做一次受锁的表遍历，
+// 不建第二份全局索引。
+func (s *cursorSessionStore) lookupSessionOwningWireID(wireID string) *cursorSessionRecord {
+	if s == nil || wireID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	records := make([]*cursorSessionRecord, 0, len(s.sessions))
+	for _, record := range s.sessions {
+		records = append(records, record)
+	}
+	s.mu.Unlock()
+	for _, record := range records {
+		record.mu.Lock()
+		delegations := record.delegations
+		record.mu.Unlock()
+		if delegations == nil {
+			continue
+		}
+		delegations.mu.Lock()
+		_, ok := delegations.idRewrite[wireID]
+		delegations.mu.Unlock()
+		if ok {
+			return record
+		}
+	}
+	return nil
+}
+
 // sessionCount 返回当前会话数（测试与诊断用）。
 func (s *cursorSessionStore) sessionCount() int {
 	s.mu.Lock()
@@ -3204,6 +3269,14 @@ type cursorToolBatch struct {
 	// tool_requests_listed（解决生产实测 f14 先于/无 started 到达时挂死 180s 的问题）。
 	// 与 mcp 批次（shellOnly=false）字节级封口语义完全隔离。
 	shellOnly bool
+	// wireDecided 是本批**已决定出站 id** 的委托数（batch.delegations 的前缀长度，由
+	// assignWireIDsLocked 处理完整批后推进；delegations 只追加、不重排，因此前缀稳定）。
+	//
+	// 必须按批记录已决定的数量，而不能靠"WireID 非空"判定：首次交付的委托**不写** WireID
+	// （capture 字节保持上游原样，出站 id 由 wireID() 回退到 ID），若只看 WireID，第二次
+	// 调用（渲染路径与交付准备路径各一次）会把首次交付的 id 误判为"未决定"而改写成新 id，
+	// 与已写出的字节不一致。
+	wireDecided int
 }
 
 // cursorToolDelegations 是一次 AgentRun 内工具委托的**唯一**记录。
@@ -3224,6 +3297,18 @@ type cursorToolDelegations struct {
 	// nextSeq 是下一个待分配的批次序号；只有 newBatchLocked 在持有 d.mu 时推进它，
 	// 保证 seq 在**本会话内**严格单调递增、从 1 开始、永不复用（免疫 call_id 跨轮复用）。
 	nextSeq uint64
+	// deliveredIDs 是**本会话内已交付给客户端**的原 id 集合（键为上游原 ID）。
+	//
+	// 生命周期：只在 prepareDeliveredBatch 交付前写入（assignWireIDsLocked），会话终结
+	// （finalizer 清会话 ⇒ 本记录随会话释放）即整体消亡；绝不跨会话复用。
+	// 判据：同一原 ID 第二次及以后交付时，客户端按 ID 去重会丢弃该调用，必须改写 id。
+	deliveredIDs map[string]struct{}
+	// idRewrite 是**新 id → 上游原 id** 的映射（客户端可见 id 反查上游锚点）。
+	//
+	// 生命周期：与 deliveredIDs 同步（同一处写入、同一处释放）。查询点只有两个：
+	// IdentifyResume 的索引未命中回退，以及续轮结果写回前的 ID 归位。绝不清理单条映射
+	// ——同一原 ID 可能被上游反复复用，历史映射必须一直可反查。
+	idRewrite map[string]string
 	// shared 表示本记录由 duplex 拥有解码权（parser 不再解码同一帧）。
 	shared bool
 }
@@ -3231,14 +3316,20 @@ type cursorToolDelegations struct {
 // newCursorToolDelegations 构造由 duplex 解码、parser 读取的共享记录。
 func newCursorToolDelegations() *cursorToolDelegations {
 	return &cursorToolDelegations{
-		open:   make(map[string]*cursorToolBatch),
-		shared: true,
+		open:         make(map[string]*cursorToolBatch),
+		deliveredIDs: make(map[string]struct{}),
+		idRewrite:    make(map[string]string),
+		shared:       true,
 	}
 }
 
 // newLocalCursorToolDelegations 构造由 parser 自己解码的本地记录（无 duplex 的场景）。
 func newLocalCursorToolDelegations() *cursorToolDelegations {
-	return &cursorToolDelegations{open: make(map[string]*cursorToolBatch)}
+	return &cursorToolDelegations{
+		open:         make(map[string]*cursorToolBatch),
+		deliveredIDs: make(map[string]struct{}),
+		idRewrite:    make(map[string]string),
+	}
 }
 
 // isShared 报告本记录的解码权是否在 duplex 侧。
@@ -3573,6 +3664,149 @@ func (d *cursorToolDelegations) snapshot() []cursorToolCallCapture {
 		out = append(out, batch.delegations...)
 	}
 	return out
+}
+
+// cursorWireIDPrefix 是交付侧改写后的 tool_call id 前缀（形状仍是 OpenAI 的 call_*）。
+const cursorWireIDPrefix = "call_"
+
+// cursorWireIDMaxAttempts 是生成改写 id 时允许的最大重试次数。
+//
+// 冲突概率来自 uuid 撞上"本会话已交付过的 id"，实际可忽略；但仍必须重试而不是直接
+// 失败（极低概率撞车不该让整批交付失败），也不能无限重试（uuid 源异常时必须失败关闭）。
+const cursorWireIDMaxAttempts = 8
+
+// assignWireIDs 为全部尚未决定出站 id 的委托决定 WireID（**交付前**调用，幂等）。
+//
+// 触发条件（唯一的改写判据）：该 capture 的**上游原 id** 在本会话内已经交付过
+// （deliveredIDs 命中，含同批多批一起交付时的重复）。未交付过 → **不写 WireID**（capture
+// 字节保持不变，出站 id 由 wireID() 回退到 ID）；已交付过 → WireID = "call_" + uuid，
+// 并记录 idRewrite[wire] = 上游原 id。
+//
+// 顺序纪律：按 d.all（批次到达顺序）+ 批内委托顺序遍历，与 snapshot() 的渲染顺序**一致**。
+// 因此"渲染顺序里的第一次出现"总是拿到原 id，后续同 id 出现才被改写——这保证第一批发给
+// 客户端的 id 与上游原 id 相同（续轮/日志口径不变），只有重复出现的那次才换新 id。
+//
+// 幂等：已有 WireID 的委托直接跳过（同一批可能先被渲染路径赋值、再被 prepareDeliveredBatch
+// 复核），绝不二次改写（二次改写给客户端的 id 会与已写出的字节不一致）。
+func (d *cursorToolDelegations) assignWireIDs() error {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.assignWireIDsLocked()
+}
+
+// assignWireIDsLocked 是 assignWireIDs 的持锁实现（调用方必须已持 d.mu）。
+func (d *cursorToolDelegations) assignWireIDsLocked() error {
+	if d.deliveredIDs == nil {
+		d.deliveredIDs = make(map[string]struct{}, len(d.all))
+	}
+	if d.idRewrite == nil {
+		d.idRewrite = make(map[string]string, len(d.all))
+	}
+	for _, batch := range d.all {
+		if batch == nil {
+			continue
+		}
+		// 只处理尚未决定出站 id 的委托（delegations 只追加，前 wireDecided 条已决定）。
+		for i := batch.wireDecided; i < len(batch.delegations); i++ {
+			tc := &batch.delegations[i]
+			if tc.ID == "" {
+				continue
+			}
+			if _, delivered := d.deliveredIDs[tc.ID]; !delivered {
+				// 首次交付该 id：**不写 WireID**，capture 字节保持上游原样（出站 id 由
+				// wireID() 回退到 ID）。只登记已交付，供下次复用同一原 id 时触发改写。
+				d.deliveredIDs[tc.ID] = struct{}{}
+				continue
+			}
+			wire, err := d.newWireIDLocked()
+			if err != nil {
+				return err
+			}
+			tc.WireID = wire
+			d.idRewrite[wire] = tc.ID
+			d.deliveredIDs[wire] = struct{}{}
+		}
+		batch.wireDecided = len(batch.delegations)
+	}
+	return nil
+}
+
+// newWireIDLocked 生成一个**本会话内绝未出现过**的新 tool_call id（调用方必须已持 d.mu）。
+//
+// 冲突判定覆盖三类已占用值：已交付 id（deliveredIDs，含原 id 与历次改写值）、改写映射的
+// 键、以及所有已知上游原 id（尚未交付的批也必须避开——否则那条原 id 在它自己交付时会被
+// 误判为"已交付过"而被迫改写）。撞车即重新生成，绝不因极低概率冲突让整批交付失败。
+func (d *cursorToolDelegations) newWireIDLocked() (string, error) {
+	for attempt := 0; attempt < cursorWireIDMaxAttempts; attempt++ {
+		candidate := cursorWireIDPrefix + cursorNewUUID()
+		if candidate == cursorWireIDPrefix {
+			continue
+		}
+		if _, clash := d.deliveredIDs[candidate]; clash {
+			continue
+		}
+		if _, clash := d.idRewrite[candidate]; clash {
+			continue
+		}
+		if d.upstreamIDKnownLocked(candidate) {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("%w: failed to allocate a unique wire tool_call_id after %d attempts",
+		ErrCursorProtocol, cursorWireIDMaxAttempts)
+}
+
+// upstreamIDKnownLocked 报告 candidate 是否是某个委托的上游原 id（调用方必须已持 d.mu）。
+func (d *cursorToolDelegations) upstreamIDKnownLocked(candidate string) bool {
+	for _, batch := range d.all {
+		if batch == nil {
+			continue
+		}
+		for _, tc := range batch.delegations {
+			if tc.ID == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// upstreamCallID 把**客户端可见 id**（WireID）反查回上游原 id（写回上游时使用）。
+//
+// 反查失败返回 ok=false：调用方必须失败关闭（不猜、不复用别的批）。未改写的委托
+// WireID == ID，因此这里也直接覆盖"未改写过"的常规路径。
+func (d *cursorToolDelegations) upstreamCallID(wireID string) (string, bool) {
+	if d == nil || wireID == "" {
+		return "", false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.upstreamCallIDLocked(wireID)
+}
+
+// upstreamCallIDLocked 是 upstreamCallID 的持锁实现（调用方必须已持 d.mu）。
+func (d *cursorToolDelegations) upstreamCallIDLocked(wireID string) (string, bool) {
+	if d == nil {
+		return "", false
+	}
+	if original, ok := d.idRewrite[wireID]; ok {
+		return original, true
+	}
+	for _, batch := range d.all {
+		if batch == nil {
+			continue
+		}
+		for _, tc := range batch.delegations {
+			if tc.WireID == wireID || (tc.WireID == "" && tc.ID == wireID) {
+				return tc.ID, true
+			}
+		}
+	}
+	return "", false
 }
 
 // sealable 是 seal 的**只读**版本：判定全部未封口批次当前是否已可封口（不改状态）。
@@ -5894,7 +6128,10 @@ func (s *CursorExecutionService) IdentifyResume(probe *CursorResumeProbe) (*Curs
 			continue
 		}
 		seen[callID] = struct{}{}
-		record := s.sessions.lookupSessionByProtocolName(protocol, CursorIDKindCall, callID)
+		// 交付侧 id 重写（派发单 CALLID）：索引键登记的就是**发给客户端**的 id，因此先按
+		// 原值查索引即可命中。未命中时再把它当作改写后的 id 反查上游原 id 重查一次（历史
+		// 映射兜底）；两次都未命中才算 unknown（失败关闭，不猜、不跨批复用）。
+		record, _ := s.sessions.resolveCallID(protocol, callID)
 		if record == nil {
 			if unknownCallID == "" {
 				unknownCallID = callID
@@ -6754,10 +6991,11 @@ func (d *cursorToolDelegations) sealedBatchSummaries() []cursorDeliveredBatchSum
 		}
 		summary := cursorDeliveredBatchSummary{ModelCallID: batch.modelCallID, Seq: batch.seq}
 		for _, capture := range batch.delegations {
-			if capture.ID == "" {
+			wire := capture.wireID()
+			if wire == "" {
 				continue
 			}
-			summary.CallIDs = append(summary.CallIDs, capture.ID)
+			summary.CallIDs = append(summary.CallIDs, wire)
 		}
 		if len(summary.CallIDs) == 0 {
 			continue
@@ -6824,11 +7062,22 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 	for _, r := range results {
 		var cap cursorToolCallCapture
 		found := false
+		// 先按上游原 id 匹配（续轮已在 IdentifyResume/结果归位时把客户端 id 换回原 id）；
+		// 再按客户端可见 id（WireID）兜底——绝不因为交付侧改写而把一条合法结果判成未知。
 		for _, c := range caps {
 			if c.ID == r.CallID {
 				cap = c
 				found = true
 				break
+			}
+		}
+		if !found {
+			for _, c := range caps {
+				if c.wireID() == r.CallID {
+					cap = c
+					found = true
+					break
+				}
 			}
 		}
 		if !found {
@@ -6907,7 +7156,9 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 				zap.String("call_id", cap.ID), zap.String("kind", cap.Kind), zap.Uint64("exec_id", cap.ExecID))
 			continue
 		}
-		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, r.CallID, r.Text, r.Structured, r.IsError)
+		// callID 只用于日志/诊断（上游靠 ExecID + IDField 关联 exec）；这里用**上游原 id**，
+		// 不用客户端回传的可见 id，避免日志与上游锚点口径不一致。
+		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, cap.ID, r.Text, r.Structured, r.IsError)
 		if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
 			// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
 			it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
@@ -6951,6 +7202,13 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 ) (*cursorPreparedBatch, error) {
 	if s == nil || record == nil || delegations == nil {
 		return nil, fmt.Errorf("%w: batch prepare without session", ErrCursorSessionIndexInvalidKey)
+	}
+	// 交付侧 id 重写（派发单 CALLID）：在**索引登记之前**为每个将要交付的 capture 决定
+	// 出站 id。已被交付过的原 id → 换全新唯一 id 并记录 新id→原id；未交付过 → 沿用原值。
+	// 必须在这里（而不是渲染时）完成：索引登记、pending.callIDs、摘要增量三处都要用同一个
+	// 出站 id，且客户端只可能回传它。失败（id 源异常）→ 整批交付失败关闭，零成功字节。
+	if err := delegations.assignWireIDs(); err != nil {
+		return nil, err
 	}
 	batches := delegations.sealedBatchSummaries()
 	if len(batches) == 0 {
@@ -7245,9 +7503,12 @@ func appendCursorBatchAssistantHistory(
 		}
 	}
 	for _, call := range callIDs {
+		// callIDs 是**发给客户端**的 id（WireID）。摘要必须按客户端可见 id 登记：续轮
+		// 客户端回传的 assistant 消息里 tool_calls[].id 就是这个值，两侧必须同源，否则
+		// 同一逻辑调用在交付侧与续轮侧会算出不同摘要（history_mismatch）。
 		var name, args string
 		for _, candidate := range captures {
-			if candidate.ID == call {
+			if candidate.wireID() == call {
 				name, args = candidate.Name, candidate.ArgsJSON
 			}
 		}
