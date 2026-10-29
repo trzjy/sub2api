@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -721,10 +722,42 @@ func cursorNativeFsResultPayload(cap cursorToolCallCapture, r CursorToolResult) 
 	}
 }
 
+// cursorReadLineNumberPrefixRe 匹配下游 Read 工具回包里的展示行号前缀：可选前导空白 + 数字 + "→"。
+var cursorReadLineNumberPrefixRe = regexp.MustCompile(`^\s*[0-9]+\x{2192}`)
+
+// cursorStripReadLineNumberPrefixes 剥掉客户端 Read 回包里的展示行号前缀，还原文件原文。
+//
+// CodeBuddy / Claude Code 的 Read 工具回的是**展示文本**（"   1→def add(a, b):"），而 Cursor 原生
+// ReadSuccess.content 的语义是**文件原文**。原样透传会让模型以为文件里真有行号，写回时把行号
+// 写进文件（真机验收已复现 calc.py 被污染）。
+//
+// 只剥 `^\s*\d+→` 形态的前缀，非匹配行原样保留（真实文件可能本来就有别的格式）。若整段
+// **零命中**，说明客户端回的就是原文，直接原样返回（字节不变，绝不改动真实内容）——这是
+// "宁可不改也不误伤" 的判据：没有任何展示行号的证据时不做任何猜测性改写。
+func cursorStripReadLineNumberPrefixes(text string) string {
+	if text == "" || !strings.Contains(text, "\u2192") {
+		return text
+	}
+	lines := strings.SplitAfter(text, "\n")
+	out := make([]string, 0, len(lines))
+	hit := false
+	for _, line := range lines {
+		if loc := cursorReadLineNumberPrefixRe.FindStringIndex(line); loc != nil {
+			hit = true
+			line = line[loc[1]:]
+		}
+		out = append(out, line)
+	}
+	if !hit {
+		return text
+	}
+	return strings.Join(out, "")
+}
+
 // cursorEncodeReadResult 编码 ReadResult{f1 success | f2 error}。
 //
-// 成功：f1 path（回填委托路径）、f2 content（客户端返回的正文）、f3 total_lines、
-// f4 file_size（= 正文字节数）。失败：f2 error{f1 path, f2 error}。
+// 成功：f1 path（回填委托路径）、f2 content（客户端返回的正文，已剥展示行号）、f3 total_lines、
+// f4 file_size（= 剥行号后正文的字节数）。失败：f2 error{f1 path, f2 error}。
 func cursorEncodeReadResult(argsJSON, text string, failed bool) []byte {
 	path := cursorNativeFsArgString(argsJSON, cursorNativeFsPathProps...)
 	if failed {
@@ -732,12 +765,13 @@ func cursorEncodeReadResult(argsJSON, text string, failed bool) []byte {
 		inner = cursorAppendStringField(inner, cursorFldReadErrorError, text)
 		return cursorAppendBytesField(nil, cursorFldReadResultError, inner)
 	}
+	content := cursorStripReadLineNumberPrefixes(text)
 	success := cursorAppendStringField(nil, cursorFldReadSuccessPath, path)
 	// content 是 oneof output 的成员：空内容也必须显式出现（proto3 oneof 的 presence 语义），
 	// 否则客户端可能认为 ReadSuccess 没有任何 output 而解析失败。
-	success = cursorAppendBytesField(success, cursorFldReadSuccessContent, []byte(text))
-	success = cursorAppendVarintField(success, cursorFldReadSuccessTotalLines, uint64(cursorCountLines(text)))
-	success = cursorAppendVarintField(success, cursorFldReadSuccessFileSize, uint64(len(text)))
+	success = cursorAppendBytesField(success, cursorFldReadSuccessContent, []byte(content))
+	success = cursorAppendVarintField(success, cursorFldReadSuccessTotalLines, uint64(cursorCountLines(content)))
+	success = cursorAppendVarintField(success, cursorFldReadSuccessFileSize, uint64(len(content)))
 	return cursorAppendBytesField(nil, cursorFldReadResultSuccess, success)
 }
 

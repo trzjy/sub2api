@@ -363,6 +363,70 @@ func TestCursorNativeFSWritebackReadSuccess(t *testing.T) {
 	require.EqualValues(t, 91, cursorVarintField(scInner, cursorFldStreamCloseID))
 }
 
+// cursorNativeFsTestDecodeReadSuccess 走真实回写路径（DeliverToolResults），解出 ReadSuccess 内层字段。
+func cursorNativeFsTestDecodeReadSuccess(t *testing.T, text string) (content []byte, lines, size uint64) {
+	t.Helper()
+	record, _, stop := cursorNativeFsTestIntake(t, cursorToolCallCapture{
+		ID: "call_r", Name: "read_file", ArgsJSON: `{"file_path":"/repo/main.go"}`,
+		ExecID: 96, Kind: cursorToolKindRead,
+	})
+	require.NoError(t, record.intake.DeliverToolResults(context.Background(), record.id,
+		cursorSessionLevelBatchID, []CursorToolResult{{CallID: "call_r", Text: []string{text}}}))
+	res := cursorNativeFsTestDecodeResult(t, cursorNativeFsTestSplit(t, stop())[0])
+	require.Equal(t, cursorFldClientMsgReadResult, res.field)
+	success, ok := cursorFindField(res.oneof, cursorFldReadResultSuccess)
+	require.True(t, ok, "必须走 f1 success")
+	inner, err := cursorDecodeProtobuf(success.Bytes)
+	require.NoError(t, err)
+	return cursorFindFieldBytes(t, inner, cursorFldReadSuccessContent),
+		cursorVarintField(inner, cursorFldReadSuccessTotalLines),
+		cursorVarintField(inner, cursorFldReadSuccessFileSize)
+}
+
+// ① 带行号展示格式 → content 剥成原文，total_lines / file_size 按原文算。
+func TestCursorNativeFSWritebackReadStripsLineNumberGutter(t *testing.T) {
+	display := "   1→def f():\n   2→    return 1\n   3→\n"
+	want := "def f():\n    return 1\n\n"
+	content, lines, size := cursorNativeFsTestDecodeReadSuccess(t, display)
+	require.Equal(t, want, string(content), "展示行号必须剥掉，content 是文件原文")
+	require.EqualValues(t, 3, lines, "行数按剥离后的原文算")
+	require.EqualValues(t, len(want), size, "file_size 按剥离后的原文字节数算")
+}
+
+// ② 无行号前缀的原文 → 原样保留（字节不变，零命中不剥离）。
+func TestCursorNativeFSWritebackReadKeepsPlainContent(t *testing.T) {
+	plain := "package main\n\nfunc main() {}\n"
+	content, lines, size := cursorNativeFsTestDecodeReadSuccess(t, plain)
+	require.Equal(t, plain, string(content), "零命中时必须字节不变")
+	require.EqualValues(t, 3, lines)
+	require.EqualValues(t, len(plain), size)
+}
+
+// ③ 混合：部分行有行号前缀、部分没有 → 只剥匹配行。
+func TestCursorNativeFSWritebackReadStripsMixedLines(t *testing.T) {
+	mixed := "   1→a := 1\nraw line\n  12→b := 2\n"
+	want := "a := 1\nraw line\nb := 2\n"
+	content, lines, size := cursorNativeFsTestDecodeReadSuccess(t, mixed)
+	require.Equal(t, want, string(content), "只剥匹配行，非匹配行原样保留")
+	require.EqualValues(t, 3, lines)
+	require.EqualValues(t, len(want), size)
+}
+
+// ④ 行号前缀形态变体：1→ / "  12→" / " 123→" 都能剥（可选前导空白 + 数字 + U+2192）。
+func TestCursorNativeFSWritebackReadStripsLineNumberVariants(t *testing.T) {
+	for _, tc := range []struct{ name, display, want string }{
+		{"no_padding", "1→x\n", "x\n"},
+		{"two_spaces", "  12→y\n", "y\n"},
+		{"one_space", " 123→z\n", "z\n"},
+		{"tab", "\t7→tabbed\n", "tabbed\n"},
+		{"no_trailing_newline", "42→last", "last"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, cursorStripReadLineNumberPrefixes(tc.display))
+		})
+	}
+}
+
 func TestCursorNativeFSWritebackReadError(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
