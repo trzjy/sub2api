@@ -135,6 +135,66 @@ type CodeBuddyQuotaProbeResult struct {
 	Error       string  `json:"error,omitempty"`
 }
 
+// CodeBuddyQuotaServiceInstance 返回进程内唯一配额服务实例（未装配时为 nil）。
+// 与 codeBuddyQuotaInstance 同源，供 handler 侧「刷新余额」等只读消费者复用，避免
+// 为了一个查询动作改动 ProvideAdminHandlers 参数列表与 wire_gen。
+func CodeBuddyQuotaServiceInstance() *CodeBuddyQuotaService {
+	return codeBuddyQuotaInstance
+}
+
+// CodeBuddyCreditProbeFromExtra 把 extra 里的积分聚合快照还原为探测结果形态，
+// 供「非 force」的余额查询直接复用上次成功快照（不触上游）。
+// 聚合键 codebuddy_credit_total_remaining / total_total 同时缺失时返回 nil（= 无快照，
+// 前端走未探测空态，不造 0）。
+func CodeBuddyCreditProbeFromExtra(extra map[string]any) *CodeBuddyQuotaProbeResult {
+	if len(extra) == 0 {
+		return nil
+	}
+	remaining, okRemaining := codeBuddyExtraNumber(extra[codebuddyCreditTotalRemainingKey])
+	total, okTotal := codeBuddyExtraNumber(extra[codebuddyCreditTotalTotalKey])
+	if !okRemaining && !okTotal {
+		return nil
+	}
+	result := &CodeBuddyQuotaProbeResult{Success: true}
+	result.TotalCredit = total
+	result.UsedCredit = total - remaining
+	if v, ok := codeBuddyExtraNumber(extra[codebuddyCreditUsedPercentKey]); ok {
+		result.UsedPercent = v
+	}
+	if s, ok := extra[codebuddyCreditResetAtKey].(string); ok {
+		result.ResetAt = s
+	}
+	if s, ok := extra[codebuddyCreditPackagesUpdatedAtKey].(string); ok {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			result.FetchedAt = t.Unix()
+		}
+	}
+	return result
+}
+
+// codeBuddyExtraNumber 兼容 jsonb 解出的三种形态（十进制字符串 / float64 / json.Number）。
+func codeBuddyExtraNumber(raw any) (float64, bool) {
+	switch v := raw.(type) {
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	case float64:
+		return v, true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	}
+	return 0, false
+}
+
 // CodeBuddyQuotaService 周期探测 CodeBuddy 积分额度、执行每日签到、拉取动态模型列表。
 // 计费响应字段以真实抓包为准（PR3 计划 §7.1）：解析做容错——按候选字段名扫描数值百分比，
 // 缺失字段不写假值。

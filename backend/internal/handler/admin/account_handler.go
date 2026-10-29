@@ -3036,6 +3036,38 @@ func (h *OAuthHandler) SetupTokenCookieAuth(c *gin.Context) {
 }
 
 // GetUsage handles getting account usage information
+// codeBuddyCreditUsage 构造 CodeBuddy 账号的余额查询结果。
+//   - force=true：调 CodeBuddyQuotaService.QueryUsage 实时探测（内部落 extra 快照）；
+//   - 否则：从 extra 聚合键还原上次成功快照，不触上游。
+//
+// 探测失败以 UsageInfo.Error 降级返回（HTTP 200），与 Anthropic 链的降级口径一致，
+// 不再把上游 401 直接抛成 500。
+func (h *AccountHandler) codeBuddyCreditUsage(ctx context.Context, account *service.Account, force bool) *service.UsageInfo {
+	now := time.Now()
+	usage := &service.UsageInfo{Source: "passive", UpdatedAt: &now}
+	quota := service.CodeBuddyQuotaServiceInstance()
+	if quota == nil {
+		usage.Error = "codebuddy quota service is not configured"
+		return usage
+	}
+	if !force {
+		usage.CodeBuddyCredit = service.CodeBuddyCreditProbeFromExtra(account.Extra)
+		return usage
+	}
+	usage.Source = "active"
+	result, err := quota.QueryUsage(ctx, account.ID)
+	if err != nil {
+		usage.Error = err.Error()
+		return usage
+	}
+	usage.CodeBuddyCredit = result
+	if result.FetchedAt > 0 {
+		fetchedAt := time.Unix(result.FetchedAt, 0)
+		usage.UpdatedAt = &fetchedAt
+	}
+	return usage
+}
+
 // GET /api/v1/admin/accounts/:id/usage?source=passive|active&force=true
 func (h *AccountHandler) GetUsage(c *gin.Context) {
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -3084,6 +3116,14 @@ func (h *AccountHandler) GetUsage(c *gin.Context) {
 				UpdatedAt:    &result.FetchedAt,
 				BalanceProbe: result,
 			}
+		}
+	}
+	if usage == nil {
+		// CodeBuddy：余额走自家 billing 探针，不能落到 Anthropic OAuth 用量链
+		// （该平台无 /api/oauth/usage，固定 401，此前「刷新余额」必 500）。
+		if acc, accErr := h.adminService.GetAccount(c.Request.Context(), accountID); accErr == nil &&
+			acc.Platform == service.PlatformCodeBuddy && acc.Type == service.AccountTypeOAuth {
+			usage = h.codeBuddyCreditUsage(c.Request.Context(), acc, force)
 		}
 	}
 	if usage == nil {

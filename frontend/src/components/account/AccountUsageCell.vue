@@ -1884,6 +1884,16 @@ const loadActiveUsage = async () => {
   activeQueryLoading.value = true
   try {
     usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
+    // CodeBuddy 的额度快照由后端探针写入 account.extra（卡片按 extra 渲染），
+    // usage 返回体只承载探测结果本身；刷新后重取一次账号详情把新快照推回列表行。
+    if (props.account.platform === 'codebuddy') {
+      try {
+        const fresh = await adminAPI.accounts.getById(props.account.id)
+        emit('account-updated', fresh)
+      } catch (refreshError) {
+        console.error('Failed to refresh codebuddy credit snapshot:', refreshError)
+      }
+    }
   } catch (e: any) {
     console.error('Failed to load active usage:', e)
   } finally {

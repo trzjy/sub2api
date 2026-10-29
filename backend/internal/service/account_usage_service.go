@@ -270,6 +270,12 @@ type UsageInfo struct {
 	// Muse 三窗口额度（OpenCode Go 上游 Meta Muse Spark Contributor）。
 	// 含暂停判定与调度冷却恢复时间，由 MuseQuotaFetcher 填充。
 	MuseUsage *MuseUsageInfo `json:"muse_usage,omitempty"`
+
+	// CodeBuddyCredit 是 CodeBuddy 积分额度探测结果（管理端「刷新余额」直读）。
+	// force=true 时走 CodeBuddyQuotaService.QueryUsage 实时探测并落 extra 快照；
+	// 非 force 时由 extra 聚合键构造（无快照则省略）。此前该平台无分支，落到
+	// Anthropic OAuth 用量链，固定 401（codebuddy 无 /api/oauth/usage）。
+	CodeBuddyCredit *CodeBuddyQuotaProbeResult `json:"codebuddy_credit,omitempty"`
 }
 
 // ClaudeUsageWindow Anthropic /api/oauth/usage 返回的单个用量窗口
