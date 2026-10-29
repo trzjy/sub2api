@@ -167,7 +167,7 @@ func buildGatewayConfig(guard, hb int) GatewayConfig {
 	}
 }
 
-// TestGatewayConfigValidateGuardBoundaries 校验 guard 只接受 [30,120]，
+// TestGatewayConfigValidateGuardBoundaries 校验 guard 只接受 [30,140]，
 // 0 与越界一律失败关闭（无禁用路径）。heartbeat 固定为合法值 15。
 func TestGatewayConfigValidateGuardBoundaries(t *testing.T) {
 	cases := []struct {
@@ -178,8 +178,9 @@ func TestGatewayConfigValidateGuardBoundaries(t *testing.T) {
 		{29, false},
 		{30, true},
 		{91, true},
-		{120, true},
-		{121, false},
+		{139, true},
+		{140, true},
+		{141, false},
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("guard=%d", c.guard), func(t *testing.T) {
@@ -194,7 +195,7 @@ func TestGatewayConfigValidateGuardBoundaries(t *testing.T) {
 }
 
 // TestGatewayConfigValidateHeartbeatBoundaries 校验 heartbeat 接受 0（禁用）
-// 或 [5,60]；其余拒绝。guard 固定为合法值 120。
+// 或 [5,60]；其余拒绝。guard 固定为合法值 140。
 func TestGatewayConfigValidateHeartbeatBoundaries(t *testing.T) {
 	cases := []struct {
 		hb   int
@@ -208,7 +209,7 @@ func TestGatewayConfigValidateHeartbeatBoundaries(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("heartbeat=%d", c.hb), func(t *testing.T) {
-			err := buildGatewayConfig(120, c.hb).Validate()
+			err := buildGatewayConfig(140, c.hb).Validate()
 			if c.want {
 				require.NoError(t, err)
 			} else {
@@ -223,12 +224,12 @@ func TestGatewayConfigValidateCrossCheck(t *testing.T) {
 	t.Run("guard=30+heartbeat=60 rejected", func(t *testing.T) {
 		require.Error(t, buildGatewayConfig(30, 60).Validate())
 	})
-	t.Run("guard=120+heartbeat=15 accepted", func(t *testing.T) {
-		require.NoError(t, buildGatewayConfig(120, 15).Validate())
+	t.Run("guard=140+heartbeat=15 accepted", func(t *testing.T) {
+		require.NoError(t, buildGatewayConfig(140, 15).Validate())
 	})
 	t.Run("heartbeat=0 any valid guard accepted", func(t *testing.T) {
 		require.NoError(t, buildGatewayConfig(30, 0).Validate())
-		require.NoError(t, buildGatewayConfig(120, 0).Validate())
+		require.NoError(t, buildGatewayConfig(140, 0).Validate())
 	})
 	t.Run("equal boundary rejected", func(t *testing.T) {
 		// heartbeat==guard 视为未严格小于，拒绝（guard 先触发）。
@@ -240,24 +241,24 @@ func TestGatewayConfigValidateCrossCheck(t *testing.T) {
 // 提交边界。三种非法候选（非法 guard / 非法 heartbeat / 交叉校验失败）各自断言
 // Validate 返回错误，且"生效中"的旧配置两键均维持旧值、零部分生效。
 func TestGatewayConfigValidateHotReloadAtomic(t *testing.T) {
-	live := buildGatewayConfig(120, 15) // 当前生效配置（旧值）
+	live := buildGatewayConfig(140, 15) // 当前生效配置（旧值）
 
 	t.Run("invalid guard rejected, old values preserved", func(t *testing.T) {
 		candidate := live
-		candidate.UpstreamFirstByteGuardSeconds = 121 // 非法候选
+		candidate.UpstreamFirstByteGuardSeconds = 141 // 非法候选
 		require.Error(t, candidate.Validate())
 		// 旧值未被触碰（部分生效被阻止）
-		require.Equal(t, 120, live.UpstreamFirstByteGuardSeconds)
+		require.Equal(t, 140, live.UpstreamFirstByteGuardSeconds)
 		require.Equal(t, 15, live.UpstreamHeartbeatDelaySeconds)
 		// 候选自身仅持有非法值，未被回写至 live
-		require.Equal(t, 121, candidate.UpstreamFirstByteGuardSeconds)
+		require.Equal(t, 141, candidate.UpstreamFirstByteGuardSeconds)
 	})
 
 	t.Run("invalid heartbeat rejected, old values preserved", func(t *testing.T) {
 		candidate := live
 		candidate.UpstreamHeartbeatDelaySeconds = 61 // 非法候选
 		require.Error(t, candidate.Validate())
-		require.Equal(t, 120, live.UpstreamFirstByteGuardSeconds)
+		require.Equal(t, 140, live.UpstreamFirstByteGuardSeconds)
 		require.Equal(t, 15, live.UpstreamHeartbeatDelaySeconds)
 		require.Equal(t, 61, candidate.UpstreamHeartbeatDelaySeconds)
 	})
@@ -265,23 +266,23 @@ func TestGatewayConfigValidateHotReloadAtomic(t *testing.T) {
 	t.Run("cross-check failure rejected, old values preserved", func(t *testing.T) {
 		candidate := live
 		// 用 60/60（heartbeat==guard 且都在合法区间）才真正打到交叉校验分支；
-		// 取 120 会先被 heartbeat>60 的区间检查拒掉，到不了交叉校验。
+		// 取 140 会先被 heartbeat>60 的区间检查拒掉，到不了交叉校验。
 		candidate.UpstreamFirstByteGuardSeconds = 60
 		candidate.UpstreamHeartbeatDelaySeconds = 60 // 启用但 == guard，交叉校验失败
 		require.Error(t, candidate.Validate())
-		require.Equal(t, 120, live.UpstreamFirstByteGuardSeconds)
+		require.Equal(t, 140, live.UpstreamFirstByteGuardSeconds)
 		require.Equal(t, 15, live.UpstreamHeartbeatDelaySeconds)
 		require.Equal(t, 60, candidate.UpstreamFirstByteGuardSeconds)
 		require.Equal(t, 60, candidate.UpstreamHeartbeatDelaySeconds)
 	})
 }
 
-// TestLoadCF524Defaults 校验空配置（未显式设置）下两键分别取默认值 120 / 15。
+// TestLoadCF524Defaults 校验空配置（未显式设置）下两键分别取默认值 140 / 15。
 func TestLoadCF524Defaults(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	cfg, err := Load()
 	require.NoError(t, err)
-	require.Equal(t, 120, cfg.Gateway.UpstreamFirstByteGuardSeconds)
+	require.Equal(t, 140, cfg.Gateway.UpstreamFirstByteGuardSeconds)
 	require.Equal(t, 15, cfg.Gateway.UpstreamHeartbeatDelaySeconds)
 }
 

@@ -4113,6 +4113,25 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	}
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
+
+	// M1-c：首字节护栏超时耗尽（请求级总预算 250s 到点、网关自己合成 504）时使用
+	// 专属的、可区分的 type/code 与不含类取消触发词的中文文案，避免客户端把"流正常结束
+	// + 零语义输出"判定为 empty response output from model / 类取消，界面误显"用户已取消"
+	// （方案文档 §1.4）。错误体由 service 层 M1-a 产出，其 type 即
+	// service.UpstreamFirstByteTimeoutType；文案一律引用既有 SSOT 常量，不另写裸字符串。
+	if statusCode == http.StatusGatewayTimeout && strings.Contains(string(responseBody), `"`+service.UpstreamFirstByteTimeoutType+`"`) {
+		errType := service.UpstreamFirstByteTimeoutType
+		// 流已开始（响应头已 200）写流内 SSE error 帧；未开始返回 JSON 错误体。
+		// 二者均引用既有 SSOT 常量，保持既有帧形状与失败关闭语义不变。
+		message := infraerrors.UpstreamFirstByteTimeoutStreamFrame
+		if !streamStarted {
+			message = infraerrors.UpstreamFirstByteTimeoutJSON
+		}
+		service.SetOpsUpstreamError(c, statusCode, message, "")
+		h.handleStreamingAwareErrorWithCode(c, statusCode, errType, errType, message, streamStarted, false)
+		return
+	}
+
 	// QK-S2: a masked account must not receive an upstream-derived message. Skip
 	// the body-derived branches (model-not-found-400 passthrough and the
 	// errorPassthrough MatchRule) and fall through to the fixed platform-standard

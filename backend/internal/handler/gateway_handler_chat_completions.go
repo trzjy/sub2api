@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -522,6 +523,23 @@ func (h *GatewayHandler) chatCompletionsErrorResponse(c *gin.Context, status int
 // handleCCFailoverExhausted writes a failover-exhausted error in CC format.
 func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *service.UpstreamFailoverError, streamStarted bool) {
 	if streamStarted {
+		// 流已开始（心跳已提交 SSE 200）：预算耗尽不得静默 EOF，必须写出协议合规的
+		// 流内错误帧，使客户端识别为错误而非"用户主动取消"（方案文档 §1.4）。
+		// 文案与 type 取自 SSOT（M1-a / M1-e），不含 abort/cancel 类触发词，且携带可区分
+		// 错误类型，使客户端落到「任务被中断」/「服务端错误兜底」分支，而非 userCancelled 回落。
+		// 帧形状与 flush 方式沿用 handleStreamingAwareErrorWithCode 既有实现，不写
+		// content/delta 字段，避免污染 assistant 内容。
+		service.MarkOpsStreamError(c, service.UpstreamFirstByteTimeoutType, infraerrors.UpstreamFirstByteTimeoutStreamFrame, http.StatusGatewayTimeout)
+		if flusher, ok := c.Writer.(http.Flusher); ok {
+			// 与 handleStreamingAwareErrorWithCode 同型：SSE 错误帧固定 schema，直拼避免 Marshal。
+			errorEvent := `data: {"type":"error","error":{"type":` +
+				strconv.Quote(service.UpstreamFirstByteTimeoutType) +
+				`,"message":` + strconv.Quote(infraerrors.UpstreamFirstByteTimeoutStreamFrame) + `}}` + "\n\n"
+			if _, err := fmt.Fprint(c.Writer, errorEvent); err != nil {
+				_ = c.Error(err)
+			}
+			flusher.Flush()
+		}
 		return
 	}
 	if lastErr != nil {

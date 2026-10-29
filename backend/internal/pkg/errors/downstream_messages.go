@@ -310,7 +310,22 @@ const (
 	UpstreamStreamInterrupted          = "上游响应流中断，请稍后重试"
 	UpstreamFirstByteTimeout           = "上游首字节超时，请稍后重试"
 	UpstreamFirstByteTimeoutAfterStart = "上游首字节超时，流已中断，请稍后重试"
-	ImageStreamDisconnectedEarly       = "图片生成完成前流已中断，请稍后重试"
+
+	// 上游首字节超时（请求级总预算耗尽、网关合成 504）客户端可见文案 SSOT。
+	// 背景（方案文档 §1.4）：网关 250s 请求级总预算耗尽时向上游合成 504，客户端若拿到
+	// "流正常结束 + 零语义输出"会被判定为 empty response output from model -> 类取消，
+	// 界面误显"用户已取消"。本族常量刻意不含 aborted / cancelled / canceled /
+	// "operation was aborted" 等客户端 isCancelledLikeErrorMessage 触发词，且不说
+	// "请求被取消/被中止"，使客户端落到 interrupted / serviceErrorFallback 分支而非
+	// userCancelled 回落。handler 层两处（流未开始 JSON 错误体、流已开始流内错误帧）
+	// 统一引用此处，禁止再各自硬编码文案字符串。
+	// UpstreamFirstByteTimeoutJSON：流尚未开始时返回给客户端的 JSON 错误体文案。
+	UpstreamFirstByteTimeoutJSON = "上游未在时限内返回，请稍后重试"
+	// UpstreamFirstByteTimeoutStreamFrame：流已开始时写入客户端的流内错误帧文案。
+	// 明确表达"这次请求未完成"，不得表达成"请求被取消/被中止"。
+	UpstreamFirstByteTimeoutStreamFrame = "上游在时限内未返回首字节，这次请求未完成"
+
+	ImageStreamDisconnectedEarly = "图片生成完成前流已中断，请稍后重试"
 
 	// 异步图片任务/批量结果（错误 JSON/轮询返回/ZIP errors.json；泛化不提 provider/账号池架构）。
 	ImageTaskStorageUnavailable = "图片任务存储不可用，请稍后重试"

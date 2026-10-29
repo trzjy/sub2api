@@ -5,8 +5,29 @@ import (
 	"time"
 )
 
+// UpstreamFirstByteTimeoutType 是首字节护栏超时的错误类型标识（SSOT）。
+//
+// 其它卡（M1-b/c/d）在错误帧里携带该 type/code，使客户端能落到「任务被中断」
+// （assistantMessage.interrupted）或「服务端错误兜底」（serviceErrorFallback）分支，
+// 而不是 userCancelled 回落（方案文档 §1.4）。
+const UpstreamFirstByteTimeoutType = "upstream_first_byte_timeout"
+
+// UpstreamFirstByteTimeoutMessage 是首字节护栏超时（流尚未产出语义字节）时的
+// 客户端可见文案（SSOT）。表达「上游未在时限内返回」，面向终端用户、可读，且不含任何
+// 类取消触发词（abort / cancel 等，方案文档 §1.4 的 isCancelledLikeErrorMessage）。
+const UpstreamFirstByteTimeoutMessage = "上游未在时限内返回首字节，请求尚未完成"
+
+// UpstreamFirstByteTimeoutStreamStartedMessage 是流已开启（streamStarted=true）时的
+// 客户端可见错误帧文案（SSOT）。表达「上游未在时限内返回、本次请求未能完成」，而不是
+// 「请求被取消/被中止」，避免客户端落到 userCancelled 分支（方案文档 §1.4）。
+const UpstreamFirstByteTimeoutStreamStartedMessage = "上游未在时限内返回首字节，本次请求未能完成，请稍后重试"
+
 // upstreamFirstByteTimeoutBody 是护栏触发 failover 后的客户端可见错误体。
-var upstreamFirstByteTimeoutBody = []byte(`{"error":{"type":"upstream_first_byte_timeout","message":"upstream produced no response headers before the deadline"}}`)
+//
+// 语义结构保持 {"error":{"type":...,"message":...}}；type 取自 UpstreamFirstByteTimeoutType，
+// message 取自 UpstreamFirstByteTimeoutMessage（中文、不含类取消触发词）。本错误体的文案
+// 升级为本机制的 SSOT，供其它卡引用（方案文档 §1.2 / §1.4）。
+var upstreamFirstByteTimeoutBody = []byte(`{"error":{"type":"` + UpstreamFirstByteTimeoutType + `","message":"` + UpstreamFirstByteTimeoutMessage + `"}}`)
 
 // upstreamFirstByteMinViableWindow 是换号最小可行窗口（v5 更正，零新计数器）。
 // 剩余预算 ≥ 该阈值才允许换号；低于则视为预算耗尽，交由既有 FailoverExhausted

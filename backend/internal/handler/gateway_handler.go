@@ -31,6 +31,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -2073,6 +2074,21 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 	if service.IsOpenAISilentRefusalErrorBody(responseBody) {
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")
 		h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage(), streamStarted)
+		return
+	}
+
+	// 首字节护栏超时（网关合成 504）是本案重点关注类失败：必须向客户端写出携带可区分
+	// type 且不含类取消触发词的流内错误帧/JSON 错误体，避免被客户端翻译成「用户已取消」
+	// （方案文档 §1.4）。该失败由 newUpstreamFirstByteTimeoutError 合成，响应体 error.type
+	// 恒为 service.UpstreamFirstByteTimeoutType，据此识别并换用 M1 文案 SSOT。
+	if gjson.GetBytes(responseBody, "error.type").String() == service.UpstreamFirstByteTimeoutType {
+		// 状态码沿用既有 504→502 失败关闭映射，仅替换可区分 type 与 M1 文案，不改变关闭语义。
+		status, _, _ := h.mapUpstreamError(statusCode)
+		fbMessage := pkgerrors.UpstreamFirstByteTimeoutJSON
+		if streamStarted {
+			fbMessage = pkgerrors.UpstreamFirstByteTimeoutStreamFrame
+		}
+		h.handleStreamingAwareError(c, status, service.UpstreamFirstByteTimeoutType, fbMessage, streamStarted)
 		return
 	}
 
