@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -93,6 +94,47 @@ func cursorHTTPErrClass(err error) string {
 		return "connection_error"
 	}
 	return "upstream_error"
+}
+
+// cursorStreamErrClass 把读循环终态错误归到**稳定安全类别**，只输出枚举值，
+// 绝不回显原始错误文案（错误链里可能带上游 EndStream 的 message 原文）。
+//
+// 与 cursorHTTPErrClass 的分工：后者是传输层分类（httptrace / 网络），本函数覆盖
+// 协议层与业务层哨兵——这两类是 cursor 会话"读到一半终止"的真正来源，此前在
+// response_parse_done 上被统一写成 outcome=ok，导致事故复盘只能看到
+// terminal_reason=stream_error，无法区分是"上游 EndStream 报错""缺 EndStream"
+// "exec 消息不认""批次封口失败"还是"结果回写后上游不再推进"。
+//
+// 归类顺序固定（先具体后一般），新增哨兵时必须在此登记，否则退化为 protocol_other。
+func cursorStreamErrClass(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	switch {
+	case errors.Is(err, io.EOF):
+		return "eof"
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "context_deadline"
+	case errors.Is(err, ErrCursorKeyRejectedUpstream):
+		return "key_rejected"
+	case errors.Is(err, ErrCursorUpstreamStream):
+		return "upstream_end_stream_error"
+	case errors.Is(err, ErrCursorMissingEndStream):
+		return "missing_end_stream"
+	case errors.Is(err, ErrCursorUnsupportedRequest):
+		return "unsupported_execution"
+	case errors.Is(err, ErrCursorContentWhileWaitingTools):
+		return "content_while_waiting_tools"
+	case errors.Is(err, ErrCursorBatchIncomplete):
+		return "batch_incomplete"
+	case errors.Is(err, ErrCursorBatchAmbiguous):
+		return "batch_ambiguous"
+	case errors.Is(err, ErrCursorProtocol):
+		return "protocol_frame"
+	}
+	return "protocol_other"
 }
 
 // cursorErrContainsAny 是大小写不敏感的多关键字匹配（仅用于错误安全归类，不输出文本）。
