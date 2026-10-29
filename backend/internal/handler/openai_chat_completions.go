@@ -19,6 +19,20 @@ import (
 	"go.uber.org/zap"
 )
 
+// syncStreamStartedIfResponseCommitted 在 failover 耗尽前把 streamStarted 与
+// 「响应是否已提交」对齐：心跳组件已提交 SSE 200（c.Writer.Written() 为 true）而并发
+// 槽位等待（acquireResponsesAccountSlot）尚未将其置为 true 时，置 streamStarted 为 true。
+//
+// 这是 F2-a 的唯一改动，不触及 failover 判定 / 换号 / 账号选择 / 计费相关逻辑。
+// 调用点：本文件 failover 耗尽分支（h.handleFailoverExhausted 调用之前）。这样所有依赖
+// streamStarted 的分支（如 handleStreamingAwareError 的流内/非流式分流）一并正确——不是
+// 只修护栏一处。同文件既有先例见 openai_gateway_handler.go 的 c.Writer.Written() 同步写法。
+func syncStreamStartedIfResponseCommitted(c *gin.Context, streamStarted *bool) {
+	if c.Writer.Written() {
+		*streamStarted = true
+	}
+}
+
 // ChatCompletions handles OpenAI Chat Completions API requests.
 // POST /v1/chat/completions
 func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
@@ -260,6 +274,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			} else {
 				if lastFailoverErr != nil {
+					// F2-b：与下方耗尽分支同型——响应已提交时先对齐 streamStarted，
+					// 否则会把 JSON 错误体塞进已开的 SSE 流。
+					syncStreamStartedIfResponseCommitted(c, &streamStarted)
 					h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
 					h.handleStreamingAwareError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed, streamStarted)
@@ -445,6 +462,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
 							h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 						}
+						// F2-a：failover 耗尽前把 streamStarted 与「响应是否已提交」对齐。
+						// 心跳已提交 SSE 200 而 streamStarted 仍为 false 时置 true，确保写入
+						// 流内 SSE error 帧而非塞进已开 SSE 流的 JSON 体。
+						syncStreamStartedIfResponseCommitted(c, &streamStarted)
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -484,6 +505,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						if failoverErr != nil && failoverErr.IsOpenAICapacityShed() {
 							h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 						}
+						// F2-b：与上方 !ShouldRetryNextAccount() 分支同型——响应已提交时必须先对齐
+						// streamStarted，否则耗尽写回会把 JSON 错误体塞进已开的 SSE 流。
+						syncStreamStartedIfResponseCommitted(c, &streamStarted)
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}

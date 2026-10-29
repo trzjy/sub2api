@@ -4121,14 +4121,20 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	// service.UpstreamFirstByteTimeoutType；文案一律引用既有 SSOT 常量，不另写裸字符串。
 	if statusCode == http.StatusGatewayTimeout && strings.Contains(string(responseBody), `"`+service.UpstreamFirstByteTimeoutType+`"`) {
 		errType := service.UpstreamFirstByteTimeoutType
-		// 流已开始（响应头已 200）写流内 SSE error 帧；未开始返回 JSON 错误体。
-		// 二者均引用既有 SSOT 常量，保持既有帧形状与失败关闭语义不变。
+		// 流是否已开始应以「响应是否已提交」为准，而非仅看传入的 streamStarted：
+		// 心跳组件提交 SSE 200 后并不会同步 streamStarted（方案文档 §2 根因），
+		// 在 chat/completions 路径上它恒为 false，导致本应写流内帧却走了非流式分支，
+		// 把 JSON 错误体塞进已开的 SSE 流。故判定合并：调用方已知流已开始（streamStarted）
+		// 或响应已物理提交（c.Writer.Written()，本文件既有先例 1054/1950/1964/4321 等）
+		// 或 service.IsResponseCommitted(c)（service 包既有 helper）任一为真即视为流已开始，
+		// 引用既有 SSOT 常量，保持既有帧形状与失败关闭语义不变。
+		committed := streamStarted || c.Writer.Written() || service.IsResponseCommitted(c)
 		message := infraerrors.UpstreamFirstByteTimeoutStreamFrame
-		if !streamStarted {
+		if !committed {
 			message = infraerrors.UpstreamFirstByteTimeoutJSON
 		}
 		service.SetOpsUpstreamError(c, statusCode, message, "")
-		h.handleStreamingAwareErrorWithCode(c, statusCode, errType, errType, message, streamStarted, false)
+		h.handleStreamingAwareErrorWithCode(c, statusCode, errType, errType, message, committed, false)
 		return
 	}
 

@@ -128,6 +128,77 @@ func TestM1cFirstByteTimeout_NonStreamingEmitsJSON(t *testing.T) {
 		"流未开始时应引用 JSON 错误体专属 SSOT 文案")
 }
 
+// TestM1cFirstByteTimeout_CommittedButFlagFalse_StillStreamFrame 覆盖首轮遗漏的
+// 真实组合（方案文档 §3 F3）：心跳已提交 SSE 200（响应已提交，c.Writer.Written() 为真），
+// 但传入的 streamStarted 仍为 false——这正是 chat/completions 路径上首轮失效的现场。
+// 断言此时耗尽写出的是流内 SSE error 帧（含 data: 前缀、含可区分 type），而非纯 JSON 体，
+// 且文案不含类取消触发词、引用流内帧专属 SSOT。
+func TestM1cFirstByteTimeout_CommittedButFlagFalse_StillStreamFrame(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct {
+		name string
+		// commit 在调用前让响应"已提交"：心跳组件提交 SSE 200 的两种等价形态。
+		commit func(w *httptest.ResponseRecorder, c *gin.Context)
+	}{
+		{
+			name: "响应已 WriteHeader(200)",
+			commit: func(w *httptest.ResponseRecorder, c *gin.Context) {
+				// gin 的 c.Writer.Written() 在 WriteHeader 后不一定置位（取决于实现），
+				// 真实心跳通过 writeSSEHeader 写字节使 Written() 为真；此处用 WriteHeaderNow
+				// 显式提交响应头，等价于"响应头已 200 提交"。
+				c.Writer.WriteHeaderNow()
+			},
+		},
+		{
+			name: "响应已写过字节",
+			commit: func(w *httptest.ResponseRecorder, c *gin.Context) {
+				_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+			// 关键：心跳已提交响应，但上游并发槽位并未将 streamStarted 置 true。
+			tc.commit(w, c)
+
+			h := &OpenAIGatewayHandler{}
+			h.handleFailoverExhausted(c, m1cFirstByteTimeoutFailover(), false)
+
+			body := w.Body.String()
+
+			// 必须是流内 SSE error 帧，而非纯 JSON 错误体（c.JSON 形态会以 {"error" 开头，
+			// 且无 event:/data: 行）。已提交的响应可能已在流中写过 keep-alive 注释等字节，
+			// 故用 Contains 而非 HasPrefix 判定帧存在。
+			assert.Contains(t, body, "event: error", "响应已提交时须写流内 SSE error 帧，实际响应: %q", body)
+			assert.Contains(t, body, "data: ", "流内帧须带 data: 前缀")
+			// 反例：不得是一行纯 JSON 错误体（这正是首轮失效的产物，会以 {"error" 开头）。
+			assert.False(t, strings.HasPrefix(strings.TrimSpace(body), "{\"error\""),
+				"已提交响应不得再写纯 JSON 错误体，应写流内 SSE 帧，实际: %q", body)
+
+			parsed := extractSSEErrorFrame(t, body)
+			errorObj, ok := parsed["error"].(map[string]any)
+			require.True(t, ok, "错误帧应含 error 对象，实际: %v", parsed)
+
+			assert.Equal(t, service.UpstreamFirstByteTimeoutType, errorObj["type"],
+				"已提交响应下错误帧 type 必须是可区分的首字节超时类型")
+			assert.Equal(t, service.UpstreamFirstByteTimeoutType, errorObj["code"],
+				"已提交响应下错误帧 code 必须与 type 一致")
+			msg, _ := errorObj["message"].(string)
+			require.NotEmpty(t, msg)
+			assertNoCancellationLikeWords(t, msg)
+			// 已提交响应应使用流内错误帧专属文案 SSOT，而非 JSON 文案。
+			assert.Equal(t, errors.UpstreamFirstByteTimeoutStreamFrame, msg,
+				"已提交响应时应引用流内错误帧专属 SSOT 文案")
+		})
+	}
+}
+
 // TestM1cNonGuardErrorsUntouched 覆盖验收点 (c)：非护栏超时类错误（401/429）未被本次改动
 // 污染为护栏超时 type，仍走原映射（upstream_error / rate_limit_error + 既有文案）。
 func TestM1cNonGuardErrorsUntouched(t *testing.T) {
