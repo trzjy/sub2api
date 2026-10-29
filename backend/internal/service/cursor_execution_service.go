@@ -173,6 +173,23 @@ type CursorExecutionService struct {
 	// Cursor 供给此前从不写 owner 绑定，导致 /v1/responses 带 previous_response_id 续轮必然 400。
 	// 未注入（nil）时跳过登记，行为与本卡之前完全一致；登记失败只记 warn，绝不影响请求。
 	httpResponseOwnerBinder func(c *gin.Context, responseID string) error
+	// accountExhaustedHandler 是"账号额度耗尽/限流"回调（RL-STOP 派发单）。
+	//
+	// cursor 账号是"用完即丢"的一次性额度：上游一旦限流/额度耗尽，该账号必须立刻停止调度
+	// （schedulable=false），不能靠重试自愈；同一请求应换到别的账号继续。本回调由装配层注入，
+	// 负责把账号置为不可调度。未注入（nil）时安全 no-op，行为与本卡之前完全一致。
+	accountExhaustedHandler func(ctx context.Context, accountID int64, reason string)
+}
+
+// SetAccountExhaustedHandler 注入"账号额度耗尽/限流"回调（与 SetHTTPResponseOwnerBinder 同型）。
+//
+// 未注入时安全 no-op（已通过 nil 守卫）。回调报错（含 panic）只记 Warn，绝不改变
+// Execute 返回的错误类型与换号语义。
+func (s *CursorExecutionService) SetAccountExhaustedHandler(fn func(ctx context.Context, accountID int64, reason string)) {
+	if s == nil {
+		return
+	}
+	s.accountExhaustedHandler = fn
 }
 
 // NewCursorExecutionService 构造唯一执行部件。
@@ -407,6 +424,54 @@ func (s *CursorExecutionService) Execute(
 		toolChoiceName: req.ToolChoiceName,
 	})
 	session.setLogContext(ctx)
+
+	// RL-STOP：在所有错误出口统一分类一次（限流/额度耗尽 → 停号 + 换号）。
+	//
+	// 上游把账号限流等终态业务错误放在 EndStream 的 error 里（code
+	// ERROR_PRO_USER_RATE_LIMIT_EXCEEDED）。本 defer 是唯一的分类点：无论错误来自 forwarder.Do
+	// 还是 pump（executeHTTP 内部），都经 cursorUpstreamStreamErrorCode 取出 code 判定；
+	// 非该 code 的错误一律 no-op，不改变任何既有行为与判定。动作 A（停号回调）无论是否已向
+	// 客户端发布正文字节都调用一次；动作 B（替换为可换号 *UpstreamFailoverError）仅当本 HTTP
+	// 尚未发布任何正文字节、且会话从未交付过工具批（外审 B3：防止续轮/ mid-stream 误换号）时执行。
+	defer func() {
+		if err == nil {
+			return
+		}
+		code, ok := cursorUpstreamStreamErrorCode(err)
+		if !ok || code != "ERROR_PRO_USER_RATE_LIMIT_EXCEEDED" {
+			return
+		}
+		// 限流路径：Info 级一条（含 account_id 与 code），正常路径不额外写日志。
+		cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_exhausted", originalModel,
+			zap.Int64("account_id", account.ID), zap.String("code", code))
+		// 动作 A：无论是否已发布正文字节，停号回调只调用一次；回调报错（含 panic）只记 Warn，
+		// 绝不改变返回的错误类型与换号语义。
+		if s.accountExhaustedHandler != nil {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_exhausted_handler_panic", originalModel,
+							zap.Int64("account_id", account.ID), zap.Any("panic", r))
+					}
+				}()
+				s.accountExhaustedHandler(ctx, account.ID, "cursor upstream quota exhausted (rate limited)")
+			}()
+		}
+		// 动作 B（外审 B3 加固）：仅当本 HTTP 尚未发布正文字节，且会话从未交付过工具批
+		// （deliveredBatchSeq==0，即非续轮/非 mid-stream）时，才替换为可换号 failover，让既有
+		// handler 换号重试；否则错误原样返回，禁止 mid-stream 换号（锁定项 3）。
+		if !session.bodyPublished && session.deliveredBatchSeq == 0 {
+			err = &UpstreamFailoverError{
+				StatusCode:        429,
+				Stage:             GatewayFailureStage("upstream"),
+				Scope:             GatewayFailureScopeAccount,
+				Reason:            GatewayFailureReason("cursor_quota_exhausted"),
+				NextAccountAction: NextAccountRetry,
+				ClientStatusCode:  429,
+				ClientMessage:     "cursor 账号额度耗尽，已停止调度",
+			}
+		}
+	}()
 
 	// §25.4：180 秒总期限从**首次 AgentRun 发起**计算；跨 HTTP 与工具执行共用，
 	// 续轮不重置。日志分别记 deadline、来源与剩余，不打印正文/凭据。
@@ -1178,6 +1243,10 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 				return
 			}
 			output.publish(&cursorOutputEvent{data: chunk})
+			// RL-STOP：首次发布正文字节即置位，供限流路径判定是否允许换号。
+			session.mu.Lock()
+			session.bodyPublished = true
+			session.mu.Unlock()
 		}
 		if rerr != nil {
 			if stream.delegated {
@@ -2699,6 +2768,11 @@ type cursorSessionRecord struct {
 	// Execute 返回时据此判定会话是否仍存活跨 HTTP：未结束则不触发 finalize。
 	pumpEnded bool
 
+	// bodyPublished 标记本 HTTP 是否已向客户端发布过任何正文字节（RL-STOP）。
+	// 在 pump 首次 publish 正文数据时置位；用于限流路径判定是否允许换号——
+	// 已发布字节则禁止 mid-stream 换号，错误原样返回。
+	bodyPublished bool
+
 	// ---- §25.4 并发槽 / 预留 / 180 秒 / 终止清理（全部字段在 mu 下读写）----
 
 	// createdAt 是会话建立时刻；billingEventID 是**服务端生成、会话级不可变**的
@@ -3271,6 +3345,11 @@ type cursorToolBatch struct {
 	// delegations 是本批已解码的 f11 委托。
 	delegations []cursorToolCallCapture
 	sealed      bool
+	// rejected 是本批**本地已拒绝**的对外 call_id（客户端没有对应工具：shell/f14、原生文件
+	// exec 等）。这类调用不会有委托，但上游的 started/listed 计数仍然包含它；若不在此登记，
+	// checkSealableLocked 的"每条 started 都要有委托"会永假 → 批不封口 → 180s 挂死
+	// （外审 B1）。登记后封口谓词跳过它们，交付集合里也不含它们（它们从未写入 delegations）。
+	rejected map[string]struct{}
 	// shellOnly 标记本批为 shell 专属批：由无 started/listed 的 f14（ExecServerMessage.f14）
 	// 建立，仅以"已有 ≥1 条 shell 委托"为封口条件，独立交付，绝不等待 tool_call_started /
 	// tool_requests_listed（解决生产实测 f14 先于/无 started 到达时挂死 180s 的问题）。
@@ -3596,6 +3675,33 @@ func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) e
 // 多个 f14 顺序到达：首个无匹配 started → 建 shellOnly 批并立即封口交付；后续 f14 因前批
 // 已 sealed（交付后）各自新建独立 shellOnly 批并各自封口交付（每条 shell 执行请求独立交付，
 // 不做聚合）。shellOnly 批 key 为 call_id，与 mcp 的 "" 开放批隔离，互不吞并。
+// noteRejectedCall 登记"客户端无对应工具、本地已拒绝执行"的对外 call_id（外审 B1）。
+//
+// 只标记已 started 且未封口的批；没有匹配批时安全 no-op（无批场景本来就不需要封口）。
+// 不改 delegations、不改交付集合、不改计数字段：封口语义仍以 listed 为准。
+func (d *cursorToolDelegations) noteRejectedCall(callID string) {
+	if d == nil || callID == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, batch := range d.all {
+		if batch.sealed {
+			continue
+		}
+		for _, id := range batch.started {
+			if id != callID {
+				continue
+			}
+			if batch.rejected == nil {
+				batch.rejected = make(map[string]struct{}, 1)
+			}
+			batch.rejected[callID] = struct{}{}
+			return
+		}
+	}
+}
+
 func (d *cursorToolDelegations) noteShellDelegation(callID string, tc cursorToolCallCapture) error {
 	return d.noteStandaloneDelegation(cursorToolKindShell, callID, tc)
 }
@@ -3860,6 +3966,10 @@ func (d *cursorToolDelegations) checkSealableLocked() error {
 		}
 		for _, callID := range batch.started {
 			if _, ok := delegated[callID]; !ok {
+				// 外审 B1：本地已拒绝（客户端无对应工具）的调用不会有委托，封口时按已满足处理。
+				if _, rej := batch.rejected[callID]; rej {
+					continue
+				}
 				return fmt.Errorf("%w: batch %q call %q has no complete mcp_args delegation",
 					ErrCursorBatchIncomplete, batch.modelCallID, callID)
 			}

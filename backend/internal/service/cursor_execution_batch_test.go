@@ -20,8 +20,14 @@ package service
 // 全部是纯内存组件测试：无 DB、无网络、无 DB 事务。
 
 import (
+	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -330,4 +336,180 @@ func TestCursorBatchListedWithoutCallCountFailsClosed(t *testing.T) {
 	_, err := parser.cursorParseStream(body)
 	require.ErrorIs(t, err, ErrCursorProtocol, "缺 call_count 必须失败关闭")
 	require.Contains(t, err.Error(), "call_count")
+}
+
+// ---------------------------------------------------------------------------
+// RL-STOP：cursor 上游限流/额度耗尽 → 账号停止调度（schedulable=false）+ 本请求换号
+//
+// cursor 账号是"用完即丢"的一次性额度：上游一旦返回限流/额度耗尽（EndStream code
+// ERROR_PRO_USER_RATE_LIMIT_EXCEEDED），该账号必须立刻停止调度，不能靠重试自愈；同一请求
+// 应换到别的账号继续，全部耗尽才把 429 回给客户端。下游 handler 按 *UpstreamFailoverError
+// 的 ShouldRetryNextAccount() 决定换号还是耗尽。
+//
+// 复用的测试替身（同包 unit 构建）：cursorOutboundUpstream / newCursorOutboundTestService /
+// cursorOutboundAccount / executeCursorForTest / cursorTestDeviceIDs（cursor_gateway_forward_test.go）、
+// cursorTextDeltaFrame / cursorTestEndStream（cursor_protocol_response_test.go）。
+// ---------------------------------------------------------------------------
+
+const (
+	cursorRLStopRateLimitCode = "ERROR_PRO_USER_RATE_LIMIT_EXCEEDED"
+	cursorRLStopOtherCode     = "ERROR_INTERNAL"
+)
+
+// cursorRLStopEndStreamPayload 构造 EndStream 的错误载荷（复刻 RL-CODE 派发单的 code 位置：
+// details[].debug.error）。
+func cursorRLStopEndStreamPayload(code string) string {
+	return `{"error":{"code":"unauthenticated","message":"rate limited",` +
+		`"details":[{"type":"aiserver.v1.ErrorDetails","debug":{"error":"` + code + `",` +
+		`"details":{"title":"","detail":"rate limited"}}}]}}`
+}
+
+// cursorRLStopStreamBody 构造一条以 EndStream 错误收尾的 Cursor 响应流。
+//
+// withBody=true 时先发一帧文本正文（pump 首次 publish 正文即置位 bodyPublished），
+// 用于验证"已发布字节禁止 mid-stream 换号"。
+func cursorRLStopStreamBody(t *testing.T, code string, withBody bool) []byte {
+	t.Helper()
+	var out []byte
+	if withBody {
+		out = append(out, cursorTextDeltaFrame(t, "Hi")...)
+	}
+	out = append(out, cursorTestEndStream(t, cursorRLStopEndStreamPayload(code))...)
+	return out
+}
+
+// cursorRLStopHandlerCall 记录停号回调的调用次数与最近一次 accountID（并发安全）。
+type cursorRLStopHandlerCall struct {
+	mu        sync.Mutex
+	calls     int
+	accountID int64
+	reason    string
+}
+
+func (c *cursorRLStopHandlerCall) fn(ctx context.Context, accountID int64, reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	c.accountID = accountID
+	c.reason = reason
+}
+
+func (c *cursorRLStopHandlerCall) snapshot() (int, int64, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls, c.accountID, c.reason
+}
+
+// newCursorRLStopService 装配指向假中转、并带一个 cursor 账号的执行部件。
+func newCursorRLStopService(t *testing.T, upstreamBody []byte) (*OpenAIGatewayService, *gin.Context) {
+	t.Helper()
+	repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{
+		11: {ID: 11, CodeEncrypted: "ACTIVATION-CODE-ELEVEN"},
+	})
+	up := &cursorOutboundUpstream{body: upstreamBody}
+	return newCursorOutboundTestService(t, up.handler(), repo, cursorTestDeviceIDs(repo))
+}
+
+func cursorRLStopRequestBody(stream bool) []byte {
+	return []byte(`{"model":"cursor-sonnet","stream":` + boolToJSON(stream) +
+		`,"messages":[{"role":"user","content":"hi"}]}`)
+}
+
+func boolToJSON(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// TestCursorExecuteRateLimitNoBodySwitchesAccount 覆盖 RL-STOP ①：EndStream rate-limit 错误 +
+// 未发布字节 → Execute 返回 *UpstreamFailoverError（429 / Reason / ClientStatusCode 固定值 /
+// ShouldRetryNextAccount()=true），停号回调恰好被调用 1 次且 accountID 正确。
+func TestCursorExecuteRateLimitNoBodySwitchesAccount(t *testing.T) {
+	svc, c := newCursorRLStopService(t, cursorRLStopStreamBody(t, cursorRLStopRateLimitCode, false))
+
+	var calls cursorRLStopHandlerCall
+	svc.cursorExecution.SetAccountExhaustedHandler(calls.fn)
+
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+	res, err := executeCursorForTest(t, svc, context.Background(), c, acc,
+		cursorRLStopRequestBody(true), "cursor-sonnet", true, time.Now())
+	require.Error(t, err)
+	require.Nil(t, res, "限流未发布字节不得返回可计费结果")
+
+	var fe *UpstreamFailoverError
+	require.ErrorAs(t, err, &fe, "限流未发布字节必须替换为可换号 failover")
+	require.Equal(t, 429, fe.StatusCode)
+	require.Equal(t, GatewayFailureReason("cursor_quota_exhausted"), fe.Reason)
+	require.Equal(t, 429, fe.ClientStatusCode)
+	require.Equal(t, GatewayFailureScopeAccount, fe.Scope)
+	require.True(t, fe.ShouldRetryNextAccount(), "未耗尽必须允许换号（NextAccountRetry）")
+
+	n, aid, reason := calls.snapshot()
+	require.Equal(t, 1, n, "停号回调必须恰好调用 1 次")
+	require.Equal(t, int64(1), aid, "回调 accountID 必须等于本请求账号")
+	require.Equal(t, "cursor upstream quota exhausted (rate limited)", reason)
+}
+
+// TestCursorExecuteRateLimitWithBodyKeepsOriginalError 覆盖 RL-STOP ②：同一限流错误但已发布
+// 字节 → 停号回调仍调用 1 次，返回原 ErrCursorUpstreamStream（errors.As 不命中 failover，
+// 即禁止 mid-stream 换号）。
+func TestCursorExecuteRateLimitWithBodyKeepsOriginalError(t *testing.T) {
+	svc, c := newCursorRLStopService(t, cursorRLStopStreamBody(t, cursorRLStopRateLimitCode, true))
+
+	var calls cursorRLStopHandlerCall
+	svc.cursorExecution.SetAccountExhaustedHandler(calls.fn)
+
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+	res, err := executeCursorForTest(t, svc, context.Background(), c, acc,
+		cursorRLStopRequestBody(true), "cursor-sonnet", true, time.Now())
+	require.Error(t, err)
+	require.Nil(t, res)
+
+	require.ErrorIs(t, err, ErrCursorUpstreamStream, "已发布字节必须原样返回上游错误")
+	var fe *UpstreamFailoverError
+	require.False(t, errors.As(err, &fe), "已发布字节不得替换成 failover（禁止 mid-stream 换号）")
+
+	n, _, _ := calls.snapshot()
+	require.Equal(t, 1, n, "已发布字节时停号回调仍须调用 1 次")
+}
+
+// TestCursorExecuteOtherErrorCodeDoesNotSwitchAccount 覆盖 RL-STOP ③：其它 code（ERROR_INTERNAL）
+// → 回调不调用、错误原样（不替换成 failover、仍可被 ErrCursorUpstreamStream 识别）。
+func TestCursorExecuteOtherErrorCodeDoesNotSwitchAccount(t *testing.T) {
+	svc, c := newCursorRLStopService(t, cursorRLStopStreamBody(t, cursorRLStopOtherCode, false))
+
+	var calls cursorRLStopHandlerCall
+	svc.cursorExecution.SetAccountExhaustedHandler(calls.fn)
+
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+	res, err := executeCursorForTest(t, svc, context.Background(), c, acc,
+		cursorRLStopRequestBody(true), "cursor-sonnet", true, time.Now())
+	require.Error(t, err)
+	require.Nil(t, res)
+
+	n, _, _ := calls.snapshot()
+	require.Zero(t, n, "非限流 code 不得调用停号回调")
+
+	var fe *UpstreamFailoverError
+	require.False(t, errors.As(err, &fe), "非限流 code 不得替换成 failover")
+	require.ErrorIs(t, err, ErrCursorUpstreamStream, "非限流 code 原样返回上游错误")
+}
+
+// TestCursorExecuteRateLimitNilHandlerNoPanic 覆盖 RL-STOP ④：未注入回调（nil）→ 不 panic、
+// 行为同①的错误替换（仍返回 *UpstreamFailoverError）。
+func TestCursorExecuteRateLimitNilHandlerNoPanic(t *testing.T) {
+	svc, c := newCursorRLStopService(t, cursorRLStopStreamBody(t, cursorRLStopRateLimitCode, false))
+	// 不注入回调：保持 nil，验证安全 no-op。
+
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+	res, err := executeCursorForTest(t, svc, context.Background(), c, acc,
+		cursorRLStopRequestBody(true), "cursor-sonnet", true, time.Now())
+	require.Error(t, err)
+	require.Nil(t, res)
+
+	var fe *UpstreamFailoverError
+	require.ErrorAs(t, err, &fe, "未注入回调时仍须替换为可换号 failover")
+	require.Equal(t, 429, fe.StatusCode)
+	require.Equal(t, GatewayFailureReason("cursor_quota_exhausted"), fe.Reason)
 }

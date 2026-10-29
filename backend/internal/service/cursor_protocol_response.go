@@ -156,7 +156,7 @@ func (s *cursorSSEStream) next() error {
 			return err
 		}
 		if code != "" {
-			return fmt.Errorf("%w: %s: %s", ErrCursorUpstreamStream, code, msg)
+			return &cursorUpstreamStreamError{Code: code, Message: msg}
 		}
 		s.done = true
 	} else {
@@ -350,6 +350,32 @@ var (
 	// 命中即**终态错误**：不得当模型成功、不得伪造 usage。
 	ErrCursorKeyRejectedUpstream = errors.New("cursor: upstream rejected the key (expired or quota exhausted)")
 )
+
+// cursorUpstreamStreamError 是 ErrCursorUpstreamStream 的结构化载体，携带上游 EndStream 的
+// 业务错误 code 与脱敏 message，供调用方（如 RL-STOP 限流停号）精确判定错误类别。
+// 通过 Unwrap 保持与 ErrCursorUpstreamStream 的 errors.Is 兼容（cursorStreamErrClass 等既有判定不受影响）。
+type cursorUpstreamStreamError struct {
+	// Code 是上游 EndStream.error.details[].debug.error（如 ERROR_PRO_USER_RATE_LIMIT_EXCEEDED）。
+	Code string
+	// Message 是上游回吐的脱敏 message（不回显原始文案）。
+	Message string
+}
+
+func (e *cursorUpstreamStreamError) Error() string {
+	return "cursor: upstream stream reported an error: " + e.Code + ": " + e.Message
+}
+
+func (e *cursorUpstreamStreamError) Unwrap() error { return ErrCursorUpstreamStream }
+
+// cursorUpstreamStreamErrorCode 从上游流终态错误中提取业务错误 code。
+// 非 ErrCursorUpstreamStream 错误返回 ("", false)。供 RL-STOP 限流停号判定使用。
+func cursorUpstreamStreamErrorCode(err error) (string, bool) {
+	var e *cursorUpstreamStreamError
+	if errors.As(err, &e) {
+		return e.Code, true
+	}
+	return "", false
+}
 
 // cursorUpstreamRejectTemplate 是上游回吐的**固定**拒付模板（不含动态后缀）。
 //
@@ -975,7 +1001,7 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 				return nil, err
 			}
 			if code != "" {
-				return nil, fmt.Errorf("%w: %s: %s", ErrCursorUpstreamStream, code, msg)
+				return nil, &cursorUpstreamStreamError{Code: code, Message: msg}
 			}
 			// **不 break**：EndStream 之后若还有任何帧都是协议违例（客户端文案
 			// `received extra message after EndStreamResponse`），必须继续解析才能

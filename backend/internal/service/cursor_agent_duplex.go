@@ -91,6 +91,10 @@ const (
 	cursorFldShellStreamStderr = 2 // f2 stderr{data}
 	cursorFldShellStreamExit   = 3 // f3 exit{code(int32), cwd(str)}
 	cursorFldShellStreamStart  = 4 // f4 start{sandbox_policy}：客户端回执的执行开始帧。
+	// cursorFldShellStreamRejected 是 ShellStream.f5（rejected）：本请求声明集中找不到
+	// 任何带 command 属性的 shell 类工具时回写的拒绝事件。区别于 stdout/stderr/exit/start，
+	// 且**不**走 ErrCursorProtocol 失败关闭——一个不可服务的执行请求不应拖垮整轮（生产 16:03 两次 502 实证）。
+	cursorFldShellStreamRejected = 5
 	// cursorSandboxTypeInsecureNone 是 agent.v1 沙箱类型枚举的 INSECURE_NONE 取值
 	// （客户端 Lj() 默认策略）。仅在请求未携带 requested_sandbox_policy 时回填 start。
 	cursorSandboxTypeInsecureNone = 1
@@ -102,6 +106,14 @@ const (
 	cursorFldShellStreamExitCode = 1 // f1 code（int32，按 varint 编码）
 	cursorFldShellStreamExitCwd  = 2 // f2 cwd（string）
 )
+
+// errCursorShellToolAbsent 是"本请求声明集（f4）中找不到任何带 command 属性的 shell 类工具"
+// 这一**专用**情况的哨兵错误，与通用协议失败 ErrCursorProtocol 区分开（后者保留给 schema
+// 解析失败 / required 字段无法填充等真正的失败关闭场景）。捕获到该哨兵时，shell 桥接改为
+// 回写拒绝帧而非整轮失败关闭（ErrCursorProtocol → 整条 HTTP 502），避免一个不可服务的执行
+// 请求拖垮整轮（生产 16:03 两次 502 实证：上游原生 shell 与请求 f4 声明无关，客户端未声明
+// shell 类工具时不应让整轮失败）。
+var errCursorShellToolAbsent = errors.New("cursor: no shell-like tool with command property declared")
 
 // cursorEncodeMcpToolResult 把一条真实工具结果编码为 ExecClientMessage 字节。
 //
@@ -251,7 +263,10 @@ func cursorBuildShellDelegation(defs [][]byte, args cursorShellArgs) (string, st
 		break
 	}
 	if chosen == "" {
-		return "", "", fmt.Errorf("%w: no shell-like tool (shell/bash/exec_command/run_command/terminal) with command property declared", ErrCursorProtocol)
+		// 专用哨兵：声明集中找不到带 command 属性的 shell 类工具。与其它失败（schema
+		// 解析失败 / required 无法填充，仍走 ErrCursorProtocol 失败关闭）区分开，使捕获方能
+		// 改为回写拒绝帧而非整轮 502。错误文案保留 "no shell-like tool" 以便既有诊断断言。
+		return "", "", fmt.Errorf("%w: no shell-like tool (shell/bash/exec_command/run_command/terminal) with command property declared", errCursorShellToolAbsent)
 	}
 
 	var schema map[string]any
@@ -334,11 +349,15 @@ func cursorSchemaHasProperty(schemaJSON []byte, prop string) bool {
 
 // cursorCaptureShellArgs 是 ExecServerMessage.f14（ShellArgs）委托捕获入口（duplex 侧）。
 //
-// 流程（硬约束 #1-#4）：解析 ShellArgs → command 为空失败关闭 → 选择 shell 类工具并按 schema
-// 转换参数（找不到工具失败关闭）→ 构造 capture{Kind:"shell"} 走 noteShellDelegation 接入封口。
+// 流程：解析 ShellArgs → command 为空失败关闭 → 选择 shell 类工具并按 schema 转换参数
+// （schema 解析失败 / required 无法填充 → ErrCursorProtocol 失败关闭）→ 构造
+// capture{Kind:"shell"} 走 noteShellDelegation 接入封口。
 // noteShellDelegation 不再依赖 started/listed 作为封口前置：有同 call_id 的 started 批则按原
 // 路径入批；否则建立 shellOnly 专属批立即可封口交付（不挂 pending、不等待 started/listed）。
-// 成功返回 capture，失败返回 ErrCursorProtocol。
+// 成功返回 capture；失败返回 ErrCursorProtocol（command 空 / f14 缺失 / schema 解析失败 /
+// required 缺字段）。特例：声明集中"找不到带 command 属性的 shell 类工具"返回专用哨兵
+// errCursorShellToolAbsent → 捕获方改为回写拒绝帧（f14 ShellStream{f5 rejected}+f3 exit{code=126}）
+// 并返回空 capture（不整轮 502，不失败关闭）。
 func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID uint64, idField []byte) (cursorToolCallCapture, error) {
 	sh, ok := cursorFindField(parts, 14)
 	if !ok {
@@ -358,6 +377,27 @@ func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID
 	}
 	name, argsJSON, berr := cursorBuildShellDelegation(d.declaredToolDefs, args)
 	if berr != nil {
+		// 专用哨兵：声明集中找不到带 command 属性的 shell 类工具。改为回写拒绝帧并
+		// 返回空 capture，流继续（不失败关闭、不整轮 502）。其余失败（schema 解析失败 /
+		// required 无法填充 / command 为空等）仍按 ErrCursorProtocol 失败关闭，不在此分支。
+		if errors.Is(berr, errCursorShellToolAbsent) {
+			// 外审 B1：该 call_id 可能已在本批 started 里，登记"本地已拒绝"让封口谓词跳过它，
+			// 否则本次拒绝会让批永远等不到委托 → 180s 挂死。
+			if d.delegations != nil {
+				d.delegations.noteRejectedCall(args.ToolCallID)
+			}
+			frames := cursorEncodeShellRejection(execID, idField)
+			for _, fr := range frames {
+				if serr := d.send(cursorFldClientMessage, fr); serr != nil {
+					return cursorToolCallCapture{}, serr
+				}
+			}
+			// 外审 B2：拒绝后必须补 exec 终止控制帧，否则上游可能不推进（历史 177s 挂死形态）。
+			if serr := d.sendExecStreamClose(execID); serr != nil {
+				return cursorToolCallCapture{}, serr
+			}
+			return cursorToolCallCapture{}, nil
+		}
 		return cursorToolCallCapture{}, berr
 	}
 	tc := cursorToolCallCapture{
@@ -516,6 +556,28 @@ func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr s
 	exitInner = cursorAppendVarintField(exitInner, 6, 0)
 	frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamExit, exitInner)))
 	return frames
+}
+
+// cursorEncodeShellRejection 在"声明集中找不到任何带 command 属性的 shell 类工具"时回写
+// 拒绝帧（不失败关闭、不整轮 502）。两帧字节形（依据派发单 REJ-SHELL §要求 2）：
+//
+//	帧 1：ExecClientMessage{f1 id(exec_id, varint), f15 id(exec_id 原值, bytes), f14 ShellStream{f5 rejected}}；
+//	帧 2：同 exec 的 f14 ShellStream{f3 exit{f1 code=126}}（沿用既有 exit 编码，code=126 表 command 不可执行）。
+//
+// 外层每帧统一 {f1 exec_id + f15 id + f14 ShellStream}，与正常结果回写同形、走同一 send 通道；
+// 仅当 write 失败时由调用方按传输错误返回。exit 帧按 cursorEncodeShellToolResult 的既有编码
+// 习惯补 f6 local_execution_time_ms=0，保证上游正常收尾（实测缺该字段会 177s 无 TurnEnded）。
+func cursorEncodeShellRejection(execID uint64, idField []byte) [][]byte {
+	// 外审 B2/S2：拒绝只发一条 f14 ShellStream{f5 rejected} 数据帧；exec 流的真正终止由调用方
+	// 补 ExecClientControlMessage.stream_close 控制帧完成（与 REJ-FS 原生文件拒绝同形），不再发
+	// 未经观测的"无 start 的 exit"序列（风险高于只发 rejected）。
+	msg := cursorAppendVarintField(nil, cursorFldClientMsgID, execID)
+	if len(idField) > 0 {
+		msg = cursorAppendBytesField(msg, cursorFldClientMsgExecID, idField)
+	}
+	msg = cursorAppendBytesField(msg, cursorFldClientMsgShellStream,
+		cursorAppendBytesField(nil, cursorFldShellStreamRejected, nil))
+	return [][]byte{msg}
 }
 
 // cursorEncodeExecStreamClose 把一个 exec 的终止控制帧编码为 ExecClientControlMessage 载荷。
@@ -837,11 +899,21 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			// Cursor 原生 shell 委托（ExecServerMessage.f14 = ShellArgs）：解析 → 校验 →
 			// 构造 capture{Kind:"shell"} → noteShellDelegation。有同 call_id 的 started 批则
 			// 按原路径入批；否则建 shellOnly 专属批立即可封口交付（不等 started/listed）。
-			// 失败（command 空 / 孤儿 tool_call_id 无对应 started / 无可用 shell 工具 /
-			// required 缺字段）一律 ErrCursorProtocol 失败关闭，绝不当作新调用或兜底 "shell"。
+			// 失败关闭（ErrCursorProtocol，不整轮 502）：command 空 / 孤儿 tool_call_id 无对应
+			// started / required 缺字段 / schema 解析失败。注意"声明集中无带 command 属性的 shell
+			// 类工具"**不再**失败关闭——改为回写拒绝帧（见 cursorCaptureShellArgs 的哨兵分支），
+			// 流继续、不整轮 502。
 			tc, e := d.cursorCaptureShellArgs(parts, execID, idField)
 			if e != nil {
 				return false, e
+			}
+			if tc.Name == "" {
+				// 无可用 shell 工具 → 已回写拒绝帧（f14 ShellStream{f5 rejected} + f3 exit{code=126}），
+				// 返回空 capture（Name 为空）；流继续（不整轮 502，不失败关闭）。成功委托的 Name
+				// 恒非空，故 Name=="" 可可靠区分拒绝与成功。
+				d.logPhase(zapcore.DebugLevel, "shell_rejected_no_tool", "",
+					zap.Uint64("exec_id", execID))
+				return false, nil
 			}
 			d.logPhase(zapcore.InfoLevel, "shell_args_delegated", "",
 				zap.Uint64("exec_id", execID), zap.String("tool_call_id", tc.ID),
@@ -860,6 +932,14 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			tc, e := d.cursorCaptureNativeFsArgs(parts, field, execID, idField)
 			if e != nil {
 				return false, e
+			}
+			if tc.Kind == "" {
+				// 工具缺席：捕获侧已写出失败 Result 帧（含 stream_close），连接继续。
+				// 不登记委托、不落到 default 失败关闭。
+				d.logPhase(zapcore.InfoLevel, "native_fs_rejected_no_tool", "",
+					zap.Uint64("exec_id", execID),
+					zap.String("kind", cursorNativeFsKindFromField(field)))
+				return false, nil
 			}
 			d.logPhase(zapcore.InfoLevel, "native_fs_args_delegated", "",
 				zap.Uint64("exec_id", execID), zap.String("tool_call_id", tc.ID),
