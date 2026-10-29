@@ -361,3 +361,72 @@ func TestM1cNonGuardErrorsUntouched(t *testing.T) {
 		})
 	}
 }
+
+// TestFirstByteTimeoutExitToHandlerFrame_EndToEnd 贯通锁定「护栏超时 → 客户端可见帧」整条链路。
+//
+// 这是 M1(8d5b95886) / F1F2(74caf4670) / G1(77adae3b8) 三轮修复全部缺失的那一环：
+// 前三轮的单测分别覆盖了「handler 判定」与「语义标记」，但没有任何一条用例跨越
+// 传输层出口——而出口恰恰会把 Reason 与可区分 type 重新包装掉（生产实证：
+// 客户端始终收到通用 upstream_error + 502）。因此三轮单测全绿、生产三次都未生效。
+//
+// 错误形态与传输层出口「原样透传」后的错误同型：
+// StatusCode=504（网关合成）+ Reason 语义标记 + CN 形态错误体（type=upstream_error）。
+// 出口本身的行为由 service 层的 TestHandleOpenAIUpstreamTransportError_* 用例锁定
+// （service → handler 存在包循环，无法在同一包内贯通）。
+//
+// 反证：把 handler 侧判定改回字符串匹配 → 本用例必须 FAIL。
+func TestFirstByteTimeoutExitToHandlerFrame_EndToEnd(t *testing.T) {
+	exitErr := &service.UpstreamFailoverError{
+		StatusCode:        http.StatusGatewayTimeout,
+		Reason:            service.GatewayFirstByteTimeoutReason,
+		ResponseBody:      []byte(`{"error":{"type":"upstream_error","message":"上游首字节超时，请稍后重试"}}`),
+		NextAccountAction: service.NextAccountStop,
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	// 模拟心跳已提交 SSE 200（响应已开），streamStarted 仍为 false —— 生产真实组合。
+	_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+
+	(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, exitErr, false)
+
+	body := rec.Body.String()
+	require.NotEmpty(t, body, "耗尽时必须写回内容，不得静默 EOF")
+
+	// 必须是流内 SSE error 帧，且带可区分类型。
+	require.Contains(t, body, "data:",
+		"必须写出流内 SSE error 帧（含 data: 前缀），实际: %q", body)
+	require.Contains(t, body, service.UpstreamFirstByteTimeoutType,
+		"流内帧必须携带可区分的类型标识 %q，实际: %q", service.UpstreamFirstByteTimeoutType, body)
+	require.NotContains(t, body, `"type":"upstream_error"`,
+		"流内帧不得使用通用 upstream_error 类型（否则客户端会误显「用户已取消」），实际: %q", body)
+
+	// 文案不得含客户端 isCancelledLikeErrorMessage 的触发词。
+	msg := extractFirstByteTimeoutMessage(body)
+	for _, w := range m1cForbiddenSubstrings {
+		require.NotContains(t, strings.ToLower(msg), w,
+			"流内帧文案不得含类取消触发词 %q（否则客户端会误显「用户已取消」）", w)
+	}
+}
+
+// extractFirstByteTimeoutMessage 从 SSE 响应体里取出错误帧的 message 字段。
+func extractFirstByteTimeoutMessage(body string) string {
+	idx := strings.Index(body, "data: ")
+	if idx < 0 {
+		return body
+	}
+	raw := strings.TrimSpace(body[idx+len("data: "):])
+	if end := strings.Index(raw, "\n"); end >= 0 {
+		raw = raw[:end]
+	}
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return ""
+	}
+	return parsed.Error.Message
+}

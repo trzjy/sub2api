@@ -156,6 +156,16 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 		return s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
 	}
 
+	// 已是 failover 错误（如通用首字节护栏超时 newUpstreamFirstByteTimeoutError，
+	// 带 Reason 与可区分 type）→ 原样返回，**不得重新包装**：
+	// 重新包装会抹平 Reason 与 ResponseBody 里的可区分 type，
+	// 使下游 handler 永远无法识别首字节超时（生产实证：M1/F1F2/G1 三轮修复全部因此失效）。
+	// 先例：同文件的 PluginTransportError(RequestSent) 已是同样的「原样返回」处理。
+	var existingFailover *UpstreamFailoverError
+	if errors.As(err, &existingFailover) {
+		return err
+	}
+
 	// Transport attempt reached the network path; count as Ollama Cloud / OpenCode Go activity.
 	if s != nil {
 		scheduleOllamaCloudUsageActivity(s.deferredService, account)
