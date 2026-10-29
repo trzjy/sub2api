@@ -1417,3 +1417,121 @@ func TestCursorNativeFSCaptureGrepWhitespacePatternFailsClosed(t *testing.T) {
 	require.ErrorIs(t, err, ErrCursorProtocol, "纯空白 pattern 必须失败关闭（含纯空白判空）")
 	require.ErrorContains(t, err, "grep args key field empty")
 }
+
+// ---------------------------------------------------------------------------
+// 13. CGG-05 回归：grep 漂移判据补齐（第 3 轮外审 two must_fix）
+// ---------------------------------------------------------------------------
+
+// TestCursorNativeFSGrepCountDigitTailContentFailsClosed：count 模式 + "a.go:3:123\n"
+// （content 形态且命中内容全数字）原本会被按「最后一个 ':' 切分」误判成 {file:"a.go:3", count:123}
+// 并以 success 回写，把格式漂移谎报成命中。补齐判据后路径部分含非盘符冒号即判漂移，必须失败关闭。
+func TestCursorNativeFSGrepCountDigitTailContentFailsClosed(t *testing.T) {
+	res := cursorEncodeGrepResult(`{"pattern":"TODO","path":"/repo","output_mode":"count"}`,
+		"a.go:3:123\n", false)
+	oneof, err := cursorDecodeProtobuf(res)
+	require.NoError(t, err)
+	_, hasSuccess := cursorFindField(oneof, cursorFldGrepResultSuccess)
+	require.False(t, hasSuccess, "数字尾 content 形态必须失败关闭，不得写 f1 success")
+	errField, ok := cursorFindField(oneof, cursorFldGrepResultError)
+	require.True(t, ok, "必须走 f2 error")
+	errInner, err := cursorDecodeProtobuf(errField.Bytes)
+	require.NoError(t, err)
+	msg := string(cursorFindFieldBytes(t, errInner, cursorFldGrepErrorError))
+	require.Contains(t, msg, "fail closed", "错误文本需点明这是失败关闭而非兜底")
+}
+
+// TestCursorNativeFSGrepFilesContentFormFailsClosed：files_with_matches 模式 + "a.go:3:hit\n"
+// （行内含非盘符冒号，本质是 content 形态文本）原本会被逐行当文件名编码成功返回。补齐判据后该行
+// 计为漂移，整段失败关闭。
+func TestCursorNativeFSGrepFilesContentFormFailsClosed(t *testing.T) {
+	res := cursorEncodeGrepResult(`{"pattern":"TODO","path":"/repo","output_mode":"files_with_matches"}`,
+		"a.go:3:hit\n", false)
+	oneof, err := cursorDecodeProtobuf(res)
+	require.NoError(t, err)
+	_, hasSuccess := cursorFindField(oneof, cursorFldGrepResultSuccess)
+	require.False(t, hasSuccess, "content 形态行必须失败关闭，不得写 f1 success")
+	errField, ok := cursorFindField(oneof, cursorFldGrepResultError)
+	require.True(t, ok, "必须走 f2 error")
+	errInner, err := cursorDecodeProtobuf(errField.Bytes)
+	require.NoError(t, err)
+	msg := string(cursorFindFieldBytes(t, errInner, cursorFldGrepErrorError))
+	require.Contains(t, msg, "fail closed", "错误文本需点明这是失败关闭而非兜底")
+}
+
+// TestCursorNativeFSGrepFilesDriveLetterPathKept：files_with_matches 模式 + "C:\\repo\\a.go\n"
+// （Windows 盘符前缀路径，冒号是合法的盘符冒号）必须识别为纯路径、成功回写，files 恰含该行、
+// total_files==1。验证判据对盘符路径放行而非误判漂移。
+func TestCursorNativeFSGrepFilesDriveLetterPathKept(t *testing.T) {
+	res := cursorEncodeGrepResult(`{"pattern":"TODO","path":"/repo","output_mode":"files_with_matches"}`,
+		"C:\\repo\\a.go\n", false)
+	oneof, err := cursorDecodeProtobuf(res)
+	require.NoError(t, err)
+	_, hasErr := cursorFindField(oneof, cursorFldGrepResultError)
+	require.False(t, hasErr, "盘符路径必须成功回写，不得失败关闭")
+	successField, ok := cursorFindField(oneof, cursorFldGrepResultSuccess)
+	require.True(t, ok, "必须走 f1 success")
+	success, err := cursorDecodeProtobuf(successField.Bytes)
+	require.NoError(t, err)
+	entryField, ok := cursorFindField(success, cursorFldGrepSuccessWorkspaceResults)
+	require.True(t, ok, "GrepSuccess 必须携带 f4 workspace_results")
+	entry, err := cursorDecodeProtobuf(entryField.Bytes)
+	require.NoError(t, err)
+	valueField, ok := cursorFindField(entry, cursorFldGrepWorkspaceValue)
+	require.True(t, ok, "map entry 必须携带 f2 value")
+	union, err := cursorDecodeProtobuf(valueField.Bytes)
+	require.NoError(t, err)
+	filesField, ok := cursorFindField(union, cursorFldGrepUnionFiles)
+	require.True(t, ok, "files_with_matches 必须走 f2 files")
+	filesInner, err := cursorDecodeProtobuf(filesField.Bytes)
+	require.NoError(t, err)
+	var files []string
+	for _, f := range filesInner {
+		if f.Number == 1 {
+			files = append(files, string(f.Bytes))
+		}
+	}
+	require.Equal(t, []string{"C:\\repo\\a.go"}, files, "files 恰为单行盘符路径")
+	require.EqualValues(t, 1, cursorVarintField(filesInner, 2), "total_files==1")
+}
+
+// TestCursorNativeFSGrepCountDriveLetterPathParsed：count 模式 + "C:\\repo\\a.go:12\n"
+// （Windows 盘符前缀路径 + 合法计数）必须识别为 <file>:<count> 形态、成功解析，counts 一条
+// {C:\repo\a.go, 12}，total_files==1、total_matches==12。验证判据对盘符路径放行而非误判漂移。
+func TestCursorNativeFSGrepCountDriveLetterPathParsed(t *testing.T) {
+	res := cursorEncodeGrepResult(`{"pattern":"TODO","path":"/repo","output_mode":"count"}`,
+		"C:\\repo\\a.go:12\n", false)
+	oneof, err := cursorDecodeProtobuf(res)
+	require.NoError(t, err)
+	_, hasErr := cursorFindField(oneof, cursorFldGrepResultError)
+	require.False(t, hasErr, "盘符路径必须成功解析，不得失败关闭")
+	successField, ok := cursorFindField(oneof, cursorFldGrepResultSuccess)
+	require.True(t, ok, "必须走 f1 success")
+	success, err := cursorDecodeProtobuf(successField.Bytes)
+	require.NoError(t, err)
+	entryField, ok := cursorFindField(success, cursorFldGrepSuccessWorkspaceResults)
+	require.True(t, ok, "GrepSuccess 必须携带 f4 workspace_results")
+	entry, err := cursorDecodeProtobuf(entryField.Bytes)
+	require.NoError(t, err)
+	valueField, ok := cursorFindField(entry, cursorFldGrepWorkspaceValue)
+	require.True(t, ok, "map entry 必须携带 f2 value")
+	union, err := cursorDecodeProtobuf(valueField.Bytes)
+	require.NoError(t, err)
+	countsField, ok := cursorFindField(union, cursorFldGrepUnionCount)
+	require.True(t, ok, "count 必须走 f1 count")
+	countsInner, err := cursorDecodeProtobuf(countsField.Bytes)
+	require.NoError(t, err)
+	var files []string
+	var counts []int64
+	for _, f := range countsInner {
+		if f.Number == 1 {
+			fc, ferr := cursorDecodeProtobuf(f.Bytes)
+			require.NoError(t, ferr)
+			files = append(files, string(cursorFindFieldBytes(t, fc, 1)))
+			counts = append(counts, int64(cursorVarintField(fc, 2)))
+		}
+	}
+	require.Equal(t, []string{"C:\\repo\\a.go"}, files)
+	require.Equal(t, []int64{12}, counts, "一条 {C:\\repo\\a.go, 12}")
+	require.EqualValues(t, 1, cursorVarintField(countsInner, 2), "total_files==1")
+	require.EqualValues(t, 12, cursorVarintField(countsInner, 3), "total_matches==12")
+}

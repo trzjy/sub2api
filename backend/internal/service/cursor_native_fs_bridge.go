@@ -1007,14 +1007,30 @@ func cursorEncodeGrepResult(argsJSON, text string, failed bool) []byte {
 	var union []byte
 	switch outputMode {
 	case "files_with_matches":
-		union = cursorEncodeGrepFilesResult(text)
+		filesInner, drift := cursorEncodeGrepFilesResult(text)
+		// 失败关闭（非兜底）：files_with_matches 形态里出现了非纯路径行（行内含非盘符冒号，
+		// 典型是下游回了 content 形态文本）。一旦有漂移行，整段不可信，必须如实报错而非把
+		// 格式漂移谎报成命中文件清单。
+		if drift > 0 {
+			errInner := cursorAppendStringField(nil, cursorFldGrepErrorError,
+				"cursor: grep files output is not a plain path list (fail closed)")
+			return cursorAppendBytesField(nil, cursorFldGrepResultError, errInner)
+		}
+		union = filesInner
 	case "count":
-		countInner, parsed := cursorEncodeGrepCountResult(text)
+		countInner, parsed, drift := cursorEncodeGrepCountResult(text)
 		// 失败关闭（非兜底）：count 模式下游回了一段非空但**不是** <file>:<count> 形态的文本
 		// （典型为工具能力不匹配，回了 content 形态）。此时若仍回 success，会把"格式漂移"
 		// 谎报成"零命中"，下游据此以为什么都没匹配到——这是失败关闭问题，必须如实报错。
-		// 判据：解析条数为 0 且原文非空。"非空"排除了"真的零命中"这一合法 success 情形；
-		// 一旦解析到 ≥1 条（哪怕剩余若干行被跳过），仍按现状回 success。
+		// 判据分两路：
+		//   - 漂移数 > 0：出现非 <file>:<count> 形态行（路径含非盘符冒号或右侧非纯数字）；
+		//   - 漂移数 == 0 但解析条数为 0 且原文非空：整段都不是 <file>:<count> 形态
+		//     （"非空"排除"真的零命中"这一合法 success 情形；一旦解析到 ≥1 条仍按现状回 success）。
+		if drift > 0 {
+			errInner := cursorAppendStringField(nil, cursorFldGrepErrorError,
+				"cursor: grep count output is not <file>:<count> form (fail closed)")
+			return cursorAppendBytesField(nil, cursorFldGrepResultError, errInner)
+		}
 		if parsed == 0 && strings.TrimSpace(text) != "" {
 			errInner := cursorAppendStringField(nil, cursorFldGrepErrorError,
 				"cursor: grep count output is not <file>:<count> form (fail closed)")
@@ -1043,12 +1059,24 @@ func cursorEncodeGrepResult(argsJSON, text string, failed bool) []byte {
 // 文本逐行（TrimSpace 后去尾随 \r、跳过空行）作为 GrepFilesResult.f1 files（repeated），
 // f2 total_files = 条数，f3 client_truncated / f4 ripgrep_truncated 均写 0（客户端未提供截断信息，
 // 不臆造）。字段号复用 GrepUnionResult 的 cursorFldGrepUnionFiles 常量，GrepFilesResult 内层用字面量。
-func cursorEncodeGrepFilesResult(text string) []byte {
+//
+// 第二个返回值是**被判定为漂移的非空行数**（而非扫描总行数），专供上层失败关闭判定：
+// 凡行内含非盘符冒号（cursorGrepColonsArePathOnly 为假，典型是下游回的是 content 形态文本而非
+// 纯路径清单）即计入漂移数，且该行不写入 files。任一非空行被判为漂移 → 上层据此整段失败关闭，
+// 绝不把格式漂移谎报为命中文件清单。该计数**不改变任何输出字节**——同步内 GrepFilesResult 的编码
+// 与改动前逐字节一致。
+func cursorEncodeGrepFilesResult(text string) ([]byte, int) {
 	var inner []byte
 	var total int
+	drift := 0
 	for _, raw := range strings.Split(text, "\n") {
 		line := strings.TrimSuffix(strings.TrimSpace(raw), "\r")
 		if line == "" {
+			continue
+		}
+		// 非纯路径（行内含非盘符冒号）→ 计入漂移、不写入 files，由上层整段失败关闭。
+		if !cursorGrepColonsArePathOnly(line) {
+			drift++
 			continue
 		}
 		inner = cursorAppendBytesField(inner, 1, []byte(line))
@@ -1057,21 +1085,24 @@ func cursorEncodeGrepFilesResult(text string) []byte {
 	inner = cursorAppendVarintField(inner, 2, uint64(total))
 	inner = cursorAppendVarintField(inner, 3, 0)
 	inner = cursorAppendVarintField(inner, 4, 0)
-	return cursorAppendBytesField(nil, cursorFldGrepUnionFiles, inner)
+	return cursorAppendBytesField(nil, cursorFldGrepUnionFiles, inner), drift
 }
 
 // cursorEncodeGrepCountResult 编码 count 形态下的 GrepUnionResult.f1 count：
-// 逐行以**最后一个** ':' 切出 <file>:<count>，右侧必须全为十进制数字（否则跳过该行，不臆造计数）；
-// 每条作为 GrepFileCount（f1 file / f2 count）写入 GrepCountResult.f1 counts（repeated），
-// f2 total_files = 文件条数，f3 total_matches = 计数之和，f4/f5 截断位写 0。
+// 逐行以**最后一个** ':' 切出 <file>:<count>，路径部分只允许盘符冒号（出现其它冒号即判为漂移
+// 并失败关闭），右侧必须全为十进制数字（否则该行计入漂移数）；每条作为 GrepFileCount（f1 file /
+// f2 count）写入 GrepCountResult.f1 counts（repeated），f2 total_files = 文件条数，f3 total_matches
+// = 计数之和，f4/f5 截断位写 0。
 //
-// 第二个返回值 parsed 是**实际解析到的条目数**（而非扫描总行数），专供上层失败关闭判定：
-// 当 count 模式整段文本都不是 <file>:<count> 形态时 parsed==0，上层据此走失败帧而非把格式
-// 漂移谎报为零命中。该计数**不改变任何输出字节**——同行内 GrepCountResult 的编码与改动前逐字节一致。
-func cursorEncodeGrepCountResult(text string) ([]byte, int) {
+// 返回值三个：(inner 字节, parsed 实际解析条目数, drift 被判为漂移的非空行数)，均为专供上层失败关闭
+// 判定之用：parsed 为 0 且原文非空、或 drift > 0 时，说明整段并不是 <file>:<count> 形态（典型是下游
+// 回了 content 形态），上层据此走失败帧而非把格式漂移谎报为零命中。两者都**不改变任何输出字节**——
+// 同行内 GrepCountResult 的编码与改动前逐字节一致。
+func cursorEncodeGrepCountResult(text string) ([]byte, int, int) {
 	var inner []byte
 	var totalFiles, totalMatches int64
 	parsed := 0
+	drift := 0
 	for _, raw := range strings.Split(text, "\n") {
 		line := strings.TrimSuffix(strings.TrimSpace(raw), "\r")
 		if line == "" {
@@ -1079,12 +1110,15 @@ func cursorEncodeGrepCountResult(text string) ([]byte, int) {
 		}
 		idx := strings.LastIndexByte(line, ':')
 		if idx <= 0 {
+			// 没有 ':' 或冒号在最前面：保持现状的跳过语义，既不计入漂移也不计数。
+			continue
+		}
+		// 路径部分含非盘符冒号（如 "a.go:3:123" 的第二个冒号）或右侧非纯数字 → 判为漂移。
+		if !cursorGrepColonsArePathOnly(line[:idx]) || !cursorAllDecimal(line[idx+1:]) {
+			drift++
 			continue
 		}
 		file, numStr := line[:idx], line[idx+1:]
-		if file == "" || !cursorAllDecimal(numStr) {
-			continue
-		}
 		count, perr := strconv.ParseInt(numStr, 10, 64)
 		if perr != nil {
 			continue
@@ -1101,7 +1135,7 @@ func cursorEncodeGrepCountResult(text string) ([]byte, int) {
 	inner = cursorAppendVarintField(inner, 3, uint64(totalMatches))
 	inner = cursorAppendVarintField(inner, 4, 0)
 	inner = cursorAppendVarintField(inner, 5, 0)
-	return cursorAppendBytesField(nil, cursorFldGrepUnionCount, inner), parsed
+	return cursorAppendBytesField(nil, cursorFldGrepUnionCount, inner), parsed, drift
 }
 
 // cursorAllDecimal 报告 s 是否全为十进制数字（空串返回 false）。用于 count 右侧计数合法性判断。
@@ -1115,6 +1149,33 @@ func cursorAllDecimal(s string) bool {
 		}
 	}
 	return true
+}
+
+// cursorGrepColonsArePathOnly 报告 s 中的 ':' 是否只可能来自 Windows 盘符前缀（形如 "C:"）。
+// 规则：没有 ':' → true；恰有一个 ':' 且位于下标 1、下标 0 为 ASCII 字母 → true；其余 → false。
+// 供 grep 编码侧判断"这一行到底是不是纯路径"——路径里若出现非盘符冒号（例如 "a.go:3:hit" 的
+// 行号/内容冒号），说明下游回的是 content 形态文本而不是纯路径清单，应当判为漂移并失败关闭。
+func cursorGrepColonsArePathOnly(s string) bool {
+	colon := -1
+	count := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == ':' {
+			if colon < 0 {
+				colon = i
+			}
+			count++
+		}
+	}
+	if count == 0 {
+		return true
+	}
+	if count == 1 && colon == 1 {
+		c := s[0]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+			return true
+		}
+	}
+	return false
 }
 
 // cursorGrepContentMatch 是一条命中（或无法解析）行的解析结果。
