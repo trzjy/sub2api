@@ -648,10 +648,8 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 		return cursorToolCallCapture{}, fmt.Errorf("%w: unsupported native fs exec field f%d", ErrCursorProtocol, field)
 	}
 
-	// 关键参数为空 → 失败关闭（shell 的 command 空同语义）：不发起无路径/无模式的下游调用。
-	// 判空收窄为"真正空串"（呼应 P3 第一条"仅 glob 判空收窄"）：空格/纯空白的 pattern（grep）
-	// 视为有效检索条件，既不被覆写成 "."，也不在此处被当成空 key 失败关闭。
-	if path == "" {
+	// 关键参数为空（含纯空白）→ 失败关闭（shell 的 command 空同语义）：不发起无路径/无模式的下游调用。
+	if strings.TrimSpace(path) == "" {
 		return cursorToolCallCapture{}, fmt.Errorf("%w: %s args key field empty", ErrCursorProtocol, kind)
 	}
 

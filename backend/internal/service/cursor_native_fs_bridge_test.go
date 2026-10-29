@@ -1401,9 +1401,10 @@ func TestCursorNativeFSGrepCountEmptyOutputStaysSuccess(t *testing.T) {
 	}
 }
 
-// TestCursorNativeFSCaptureGrepWhitespacePatternKept：锁定 P3 第一条「仅 glob 判空收窄」语义——
-// grep_args 的 pattern(f1) 为单个空格 " " 时，空白 pattern 不再被覆写成 "."（只有真正空串才 fallback）。
-func TestCursorNativeFSCaptureGrepWhitespacePatternKept(t *testing.T) {
+// TestCursorNativeFSCaptureGrepWhitespacePatternFailsClosed：锁回 CGG-04 收回全局判空放宽后的语义——
+// grep_args 的 pattern(f1) 为单个空格 " " 时，纯空白 pattern 在共用「关键参数为空（含纯空白）→ 失败关闭」
+// 判据处被失败关闭（与本次改动前一致），不得被放行到下游委托；只有真正空串 + 有效 glob 才走 fallback。
+func TestCursorNativeFSCaptureGrepWhitespacePatternFailsClosed(t *testing.T) {
 	defs := [][]byte{cursorTestBuildToolDef(t, "grep", cursorNativeFsTestGrepSchema)}
 	d := cursorShellTestNewDuplex(t, defs, "")
 
@@ -1412,10 +1413,7 @@ func TestCursorNativeFSCaptureGrepWhitespacePatternKept(t *testing.T) {
 	sub = cursorAppendStringField(sub, 14, "call_grep_ws")
 	parts := cursorNativeFsTestExecParts(t, 122, nil, cursorFldServerMsgGrepArgs, sub)
 
-	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgGrepArgs, 122, nil)
-	require.NoError(t, err, "空白 pattern 不触发 fallback，须捕获成功")
-	require.Equal(t, cursorToolKindGrep, tc.Kind)
-	require.Equal(t, " ", cursorNativeFsArgString(tc.ArgsJSON, cursorNativeFsPatternProps...),
-		"空白 pattern 必须原样保留，不得被覆写成 \".\"")
-	require.Equal(t, "**/*.go", cursorNativeFsArgString(tc.ArgsJSON, cursorNativeFsGlobProps...))
+	_, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgGrepArgs, 122, nil)
+	require.ErrorIs(t, err, ErrCursorProtocol, "纯空白 pattern 必须失败关闭（含纯空白判空）")
+	require.ErrorContains(t, err, "grep args key field empty")
 }
