@@ -1040,13 +1040,38 @@ func TestCursorNativeFSGrepOutputModeDefaults(t *testing.T) {
 	_, hasPath := cursorFindField(g.success, cursorFldGrepSuccessPath)
 	require.False(t, hasPath, "空 path 不写字段（proto3 默认值省略）")
 
-	// 显式 output_mode 原样透传。
+	// 显式 output_mode 原样透传；files_with_matches 走 f2 files 分支（不再走 f3 content）。
 	res = cursorEncodeGrepResult(`{"pattern":"TODO","path":"/repo","output_mode":"files_with_matches"}`, "a.go", false)
 	oneof, err = cursorDecodeProtobuf(res)
 	require.NoError(t, err)
-	g = cursorNativeFsTestDecodeGrep(t, oneof)
+	successField, ok := cursorFindField(oneof, cursorFldGrepResultSuccess)
+	require.True(t, ok, "成功结果必须走 f1 success")
+	success, err := cursorDecodeProtobuf(successField.Bytes)
+	require.NoError(t, err)
 	require.Equal(t, "files_with_matches",
-		string(cursorFindFieldBytes(t, g.success, cursorFldGrepSuccessOutputMode)))
+		string(cursorFindFieldBytes(t, success, cursorFldGrepSuccessOutputMode)))
+	entryField, ok := cursorFindField(success, cursorFldGrepSuccessWorkspaceResults)
+	require.True(t, ok, "GrepSuccess 必须携带 f4 workspace_results")
+	entry, err := cursorDecodeProtobuf(entryField.Bytes)
+	require.NoError(t, err)
+	valueField, ok := cursorFindField(entry, cursorFldGrepWorkspaceValue)
+	require.True(t, ok, "map entry 必须携带 f2 value")
+	union, err := cursorDecodeProtobuf(valueField.Bytes)
+	require.NoError(t, err)
+	_, hasContent := cursorFindField(union, cursorFldGrepUnionContent)
+	require.False(t, hasContent, "files_with_matches 不得走 f3 content")
+	filesField, ok := cursorFindField(union, cursorFldGrepUnionFiles)
+	require.True(t, ok, "files_with_matches 必须走 f2 files")
+	filesInner, err := cursorDecodeProtobuf(filesField.Bytes)
+	require.NoError(t, err)
+	var files []string
+	for _, f := range filesInner {
+		if f.Number == 1 {
+			files = append(files, string(f.Bytes))
+		}
+	}
+	require.Equal(t, []string{"a.go"}, files, "files 恰为单行 a.go")
+	require.EqualValues(t, 1, cursorVarintField(filesInner, 2), "total_files==1")
 
 	// 空输出：f1 success 仍存在（不是 f2 error），content 无 matches / totals。
 	res = cursorEncodeGrepResult(`{"pattern":"TODO","path":"/repo"}`, "", false)
@@ -1203,4 +1228,123 @@ func cursorFindFieldBytes(t *testing.T, fields []cursorPBField, number int) []by
 	f, ok := cursorFindField(fields, number)
 	require.True(t, ok, "必须存在字段 %d", number)
 	return f.Bytes
+}
+
+// ---------------------------------------------------------------------------
+// 11. 定向：仅 glob 形态捕获 + 按 output_mode 选择 union 分支（CGG-01）
+// ---------------------------------------------------------------------------
+
+// TestCursorNativeFSCaptureGrepGlobOnly：grep_args 只有 f3 glob、f4 output_mode、f14 call id，
+// 无 f1 pattern → 捕获成功且下游委托的 pattern 置 "."（与客户端 empty-pattern-fallback 同语义）。
+func TestCursorNativeFSCaptureGrepGlobOnly(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "grep", cursorNativeFsTestGrepSchema)}
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	sub := cursorAppendStringField(nil, 3, "**/*.go")
+	sub = cursorAppendStringField(sub, 4, "files_with_matches")
+	sub = cursorAppendStringField(sub, 14, "call_grep_glob")
+	parts := cursorNativeFsTestExecParts(t, 120, nil, cursorFldServerMsgGrepArgs, sub)
+
+	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgGrepArgs, 120, nil)
+	require.NoError(t, err, "仅 glob 形态必须捕获成功，不得失败关闭")
+	require.Equal(t, cursorToolKindGrep, tc.Kind)
+	require.Equal(t, ".", cursorNativeFsArgString(tc.ArgsJSON, cursorNativeFsPatternProps...), "pattern 缺省时置 \".\"")
+	require.Equal(t, "**/*.go", cursorNativeFsArgString(tc.ArgsJSON, cursorNativeFsGlobProps...))
+	require.Equal(t, "files_with_matches", cursorNativeFsArgString(tc.ArgsJSON, cursorNativeFsOutputProps...))
+}
+
+// TestCursorNativeFSCaptureGrepEmptyPatternAndGlobFailsClosed：pattern 与 glob 同时缺 → 失败关闭，
+// 文案沿用既有 "grep args key field empty"（与改动前行为一致）。
+func TestCursorNativeFSCaptureGrepEmptyPatternAndGlobFailsClosed(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "grep", cursorNativeFsTestGrepSchema)}
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	sub := cursorAppendStringField(nil, 14, "call_grep_empty") // 只有 call id，无 f1/f3
+	parts := cursorNativeFsTestExecParts(t, 121, nil, cursorFldServerMsgGrepArgs, sub)
+
+	_, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgGrepArgs, 121, nil)
+	require.ErrorIs(t, err, ErrCursorProtocol)
+	require.ErrorContains(t, err, "grep args key field empty")
+}
+
+// TestCursorNativeFSGrepUnionByOutputMode：直接调 cursorEncodeGrepResult 再逐层解帧，
+// 验证按 output_mode 选择 union 的 oneof 分支（files_with_matches → f2 files；count → f1 count；
+// content/空 → f3 content 逐字节不变）。
+func TestCursorNativeFSGrepUnionByOutputMode(t *testing.T) {
+	cursorDecodeUnion := func(t *testing.T, res []byte) []cursorPBField {
+		t.Helper()
+		oneof, err := cursorDecodeProtobuf(res)
+		require.NoError(t, err)
+		successField, ok := cursorFindField(oneof, cursorFldGrepResultSuccess)
+		require.True(t, ok, "成功结果必须走 f1 success")
+		success, err := cursorDecodeProtobuf(successField.Bytes)
+		require.NoError(t, err)
+		entryField, ok := cursorFindField(success, cursorFldGrepSuccessWorkspaceResults)
+		require.True(t, ok, "GrepSuccess 必须携带 f4 workspace_results")
+		entry, err := cursorDecodeProtobuf(entryField.Bytes)
+		require.NoError(t, err)
+		valueField, ok := cursorFindField(entry, cursorFldGrepWorkspaceValue)
+		require.True(t, ok, "map entry 必须携带 f2 value")
+		union, err := cursorDecodeProtobuf(valueField.Bytes)
+		require.NoError(t, err)
+		return union
+	}
+
+	t.Run("files_with_matches", func(t *testing.T) {
+		res := cursorEncodeGrepResult(`{"pattern":".","path":"/repo","output_mode":"files_with_matches"}`,
+			"a.go\nb.go\n", false)
+		union := cursorDecodeUnion(t, res)
+		_, hasContent := cursorFindField(union, cursorFldGrepUnionContent)
+		require.False(t, hasContent, "files_with_matches 不得出现 f3 content")
+
+		filesField, ok := cursorFindField(union, cursorFldGrepUnionFiles)
+		require.True(t, ok, "files_with_matches 必须走 f2 files")
+		filesInner, err := cursorDecodeProtobuf(filesField.Bytes)
+		require.NoError(t, err)
+		var files []string
+		for _, f := range filesInner {
+			if f.Number == 1 {
+				files = append(files, string(f.Bytes))
+			}
+		}
+		require.Equal(t, []string{"a.go", "b.go"}, files, "files 恰为两行")
+		require.EqualValues(t, 2, cursorVarintField(filesInner, 2), "total_files==2")
+	})
+
+	t.Run("count", func(t *testing.T) {
+		res := cursorEncodeGrepResult(`{"pattern":".","path":"/repo","output_mode":"count"}`,
+			"a.go:3\nb.go:5\n", false)
+		union := cursorDecodeUnion(t, res)
+		_, hasContent := cursorFindField(union, cursorFldGrepUnionContent)
+		require.False(t, hasContent, "count 不得出现 f3 content")
+
+		countsField, ok := cursorFindField(union, cursorFldGrepUnionCount)
+		require.True(t, ok, "count 必须走 f1 count")
+		countsInner, err := cursorDecodeProtobuf(countsField.Bytes)
+		require.NoError(t, err)
+		var files []string
+		var counts []int64
+		for _, f := range countsInner {
+			if f.Number == 1 {
+				fc, ferr := cursorDecodeProtobuf(f.Bytes)
+				require.NoError(t, ferr)
+				files = append(files, string(cursorFindFieldBytes(t, fc, 1)))
+				counts = append(counts, int64(cursorVarintField(fc, 2)))
+			}
+		}
+		require.Equal(t, []string{"a.go", "b.go"}, files)
+		require.Equal(t, []int64{3, 5}, counts, "两条 {a.go,3}、{b.go,5}")
+		require.EqualValues(t, 2, cursorVarintField(countsInner, 2), "total_files==2")
+		require.EqualValues(t, 8, cursorVarintField(countsInner, 3), "total_matches==8")
+	})
+
+	t.Run("content", func(t *testing.T) {
+		res := cursorEncodeGrepResult(`{"pattern":"x","path":"/repo","output_mode":"content"}`,
+			"a.go:3:hit", false)
+		oneof, err := cursorDecodeProtobuf(res)
+		require.NoError(t, err)
+		g := cursorNativeFsTestDecodeGrep(t, oneof)
+		require.EqualValues(t, 1, cursorVarintField(g.content, cursorFldGrepContentTotalLines))
+		require.EqualValues(t, 1, cursorVarintField(g.content, cursorFldGrepContentTotalMatchedLines))
+	})
 }

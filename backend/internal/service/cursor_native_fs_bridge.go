@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -587,6 +588,12 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 		}
 	case cursorFldServerMsgGrepArgs:
 		a := cursorParseGrepArgs(sub)
+		// 客户端 empty-pattern fallback 语义：仅 glob（无 pattern）的检索以 "." 重新执行同一 grep
+		// （安装包 main.js 的 empty-pattern-fallback）。只有 output_mode 与 glob 共同决定这是一次
+		// "按 glob 找文件"的检索，此时把委托给下游的 pattern 置 "." 而非失败关闭；不改 a.OutputMode / a.Glob 透传。
+		if strings.TrimSpace(a.Pattern) == "" && strings.TrimSpace(a.Glob) != "" {
+			a.Pattern = "."
+		}
 		kind, callID, path = cursorToolKindGrep, a.ToolCallID, a.Pattern
 		params = append(params, cursorNativeFsParam{candidates: cursorNativeFsPatternProps, value: a.Pattern})
 		if a.Path != "" {
@@ -994,9 +1001,18 @@ func cursorEncodeGrepResult(argsJSON, text string, failed bool) []byte {
 	if outputMode == "" {
 		outputMode = "content"
 	}
-	content := cursorParseGrepContent(text)
 
-	union := cursorAppendBytesField(nil, cursorFldGrepUnionContent, content)
+	// 按 output_mode 选择 GrepUnionResult 的 oneof 分支（客户端按 mode 取不同字段）：
+	//   files_with_matches → f2 files、count → f1 count、content/空/未知 → f3 content（逐字节行为不变）。
+	var union []byte
+	switch outputMode {
+	case "files_with_matches":
+		union = cursorEncodeGrepFilesResult(text)
+	case "count":
+		union = cursorEncodeGrepCountResult(text)
+	default:
+		union = cursorAppendBytesField(nil, cursorFldGrepUnionContent, cursorParseGrepContent(text))
+	}
 
 	workspace := path
 	if strings.TrimSpace(workspace) == "" {
@@ -1010,6 +1026,78 @@ func cursorEncodeGrepResult(argsJSON, text string, failed bool) []byte {
 	success = cursorAppendStringField(success, cursorFldGrepSuccessOutputMode, outputMode)
 	success = cursorAppendBytesField(success, cursorFldGrepSuccessWorkspaceResults, entry)
 	return cursorAppendBytesField(nil, cursorFldGrepResultSuccess, success)
+}
+
+// cursorEncodeGrepFilesResult 编码 files_with_matches 形态下的 GrepUnionResult.f2 files：
+// 文本逐行（TrimSpace 后去尾随 \r、跳过空行）作为 GrepFilesResult.f1 files（repeated），
+// f2 total_files = 条数，f3 client_truncated / f4 ripgrep_truncated 均写 0（客户端未提供截断信息，
+// 不臆造）。字段号复用 GrepUnionResult 的 cursorFldGrepUnionFiles 常量，GrepFilesResult 内层用字面量。
+func cursorEncodeGrepFilesResult(text string) []byte {
+	var inner []byte
+	var total int
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSuffix(strings.TrimSpace(raw), "\r")
+		if line == "" {
+			continue
+		}
+		inner = cursorAppendBytesField(inner, 1, []byte(line))
+		total++
+	}
+	inner = cursorAppendVarintField(inner, 2, uint64(total))
+	inner = cursorAppendVarintField(inner, 3, 0)
+	inner = cursorAppendVarintField(inner, 4, 0)
+	return cursorAppendBytesField(nil, cursorFldGrepUnionFiles, inner)
+}
+
+// cursorEncodeGrepCountResult 编码 count 形态下的 GrepUnionResult.f1 count：
+// 逐行以**最后一个** ':' 切出 <file>:<count>，右侧必须全为十进制数字（否则跳过该行，不臆造计数）；
+// 每条作为 GrepFileCount（f1 file / f2 count）写入 GrepCountResult.f1 counts（repeated），
+// f2 total_files = 文件条数，f3 total_matches = 计数之和，f4/f5 截断位写 0。
+func cursorEncodeGrepCountResult(text string) []byte {
+	var inner []byte
+	var totalFiles, totalMatches int64
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSuffix(strings.TrimSpace(raw), "\r")
+		if line == "" {
+			continue
+		}
+		idx := strings.LastIndexByte(line, ':')
+		if idx <= 0 {
+			continue
+		}
+		file, numStr := line[:idx], line[idx+1:]
+		if file == "" || !cursorAllDecimal(numStr) {
+			continue
+		}
+		count, perr := strconv.ParseInt(numStr, 10, 64)
+		if perr != nil {
+			continue
+		}
+		var fc []byte
+		fc = cursorAppendBytesField(fc, 1, []byte(file))
+		fc = cursorAppendVarintField(fc, 2, uint64(count))
+		inner = cursorAppendBytesField(inner, 1, fc)
+		totalFiles++
+		totalMatches += count
+	}
+	inner = cursorAppendVarintField(inner, 2, uint64(totalFiles))
+	inner = cursorAppendVarintField(inner, 3, uint64(totalMatches))
+	inner = cursorAppendVarintField(inner, 4, 0)
+	inner = cursorAppendVarintField(inner, 5, 0)
+	return cursorAppendBytesField(nil, cursorFldGrepUnionCount, inner)
+}
+
+// cursorAllDecimal 报告 s 是否全为十进制数字（空串返回 false）。用于 count 右侧计数合法性判断。
+func cursorAllDecimal(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // cursorGrepContentMatch 是一条命中（或无法解析）行的解析结果。
