@@ -1348,3 +1348,74 @@ func TestCursorNativeFSGrepUnionByOutputMode(t *testing.T) {
 		require.EqualValues(t, 1, cursorVarintField(g.content, cursorFldGrepContentTotalMatchedLines))
 	})
 }
+
+// ---------------------------------------------------------------------------
+// 12. CGG-03 回归：count 形态零解析不许假装零命中 + P3 第一条空白 pattern 语义
+// ---------------------------------------------------------------------------
+
+// TestCursorNativeFSGrepCountUnparsableFailsClosed：count 模式下下游回了 content 形态文本
+// （右侧非纯数字，工具能力不匹配）→ 失败关闭，不得把格式漂移谎报为零命中（CGG-03 改动 A）。
+func TestCursorNativeFSGrepCountUnparsableFailsClosed(t *testing.T) {
+	res := cursorEncodeGrepResult(`{"pattern":"TODO","path":"/repo","output_mode":"count"}`,
+		"a.go:3:hit one\nb.go:9:hit two\n", false)
+	oneof, err := cursorDecodeProtobuf(res)
+	require.NoError(t, err)
+	_, hasSuccess := cursorFindField(oneof, cursorFldGrepResultSuccess)
+	require.False(t, hasSuccess, "失败关闭不得写 f1 success（oneof 只能一支）")
+	errField, ok := cursorFindField(oneof, cursorFldGrepResultError)
+	require.True(t, ok, "必须走 f2 error")
+	errInner, err := cursorDecodeProtobuf(errField.Bytes)
+	require.NoError(t, err)
+	msg := string(cursorFindFieldBytes(t, errInner, cursorFldGrepErrorError))
+	// 子串断言而非精确匹配整句：避免与改动 A 的固定措辞强绑（语义标记即可）。
+	require.Contains(t, msg, "fail closed", "错误文本需点明这是失败关闭而非兜底")
+}
+
+// TestCursorNativeFSGrepCountEmptyOutputStaysSuccess：count 模式空/全空白输出 → 真零命中，
+// 仍走 f1 success（不是 error）；GrepUnionResult.f1 count 存在且 total_files/total_matches 皆 0。
+func TestCursorNativeFSGrepCountEmptyOutputStaysSuccess(t *testing.T) {
+	for _, text := range []string{"", "  \n\t\n"} {
+		res := cursorEncodeGrepResult(`{"pattern":"TODO","path":"/repo","output_mode":"count"}`, text, false)
+		oneof, err := cursorDecodeProtobuf(res)
+		require.NoError(t, err)
+		_, hasErr := cursorFindField(oneof, cursorFldGrepResultError)
+		require.False(t, hasErr, "空/全空白输出不得失败关闭，必须是真零命中 success")
+		successField, ok := cursorFindField(oneof, cursorFldGrepResultSuccess)
+		require.True(t, ok, "必须走 f1 success")
+		success, err := cursorDecodeProtobuf(successField.Bytes)
+		require.NoError(t, err)
+		entryField, ok := cursorFindField(success, cursorFldGrepSuccessWorkspaceResults)
+		require.True(t, ok, "GrepSuccess 必须携带 f4 workspace_results")
+		entry, err := cursorDecodeProtobuf(entryField.Bytes)
+		require.NoError(t, err)
+		valueField, ok := cursorFindField(entry, cursorFldGrepWorkspaceValue)
+		require.True(t, ok, "map entry 必须携带 f2 value")
+		union, err := cursorDecodeProtobuf(valueField.Bytes)
+		require.NoError(t, err)
+		countsField, ok := cursorFindField(union, cursorFldGrepUnionCount)
+		require.True(t, ok, "count 模式 GrepUnionResult 必须走 f1 count")
+		countsInner, err := cursorDecodeProtobuf(countsField.Bytes)
+		require.NoError(t, err)
+		require.EqualValues(t, 0, cursorVarintField(countsInner, 2), "total_files==0")
+		require.EqualValues(t, 0, cursorVarintField(countsInner, 3), "total_matches==0")
+	}
+}
+
+// TestCursorNativeFSCaptureGrepWhitespacePatternKept：锁定 P3 第一条「仅 glob 判空收窄」语义——
+// grep_args 的 pattern(f1) 为单个空格 " " 时，空白 pattern 不再被覆写成 "."（只有真正空串才 fallback）。
+func TestCursorNativeFSCaptureGrepWhitespacePatternKept(t *testing.T) {
+	defs := [][]byte{cursorTestBuildToolDef(t, "grep", cursorNativeFsTestGrepSchema)}
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	sub := cursorAppendStringField(nil, 1, " ")
+	sub = cursorAppendStringField(sub, 3, "**/*.go")
+	sub = cursorAppendStringField(sub, 14, "call_grep_ws")
+	parts := cursorNativeFsTestExecParts(t, 122, nil, cursorFldServerMsgGrepArgs, sub)
+
+	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgGrepArgs, 122, nil)
+	require.NoError(t, err, "空白 pattern 不触发 fallback，须捕获成功")
+	require.Equal(t, cursorToolKindGrep, tc.Kind)
+	require.Equal(t, " ", cursorNativeFsArgString(tc.ArgsJSON, cursorNativeFsPatternProps...),
+		"空白 pattern 必须原样保留，不得被覆写成 \".\"")
+	require.Equal(t, "**/*.go", cursorNativeFsArgString(tc.ArgsJSON, cursorNativeFsGlobProps...))
+}

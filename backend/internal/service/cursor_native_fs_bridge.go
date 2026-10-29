@@ -649,7 +649,9 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 	}
 
 	// 关键参数为空 → 失败关闭（shell 的 command 空同语义）：不发起无路径/无模式的下游调用。
-	if strings.TrimSpace(path) == "" {
+	// 判空收窄为"真正空串"（呼应 P3 第一条"仅 glob 判空收窄"）：空格/纯空白的 pattern（grep）
+	// 视为有效检索条件，既不被覆写成 "."，也不在此处被当成空 key 失败关闭。
+	if path == "" {
 		return cursorToolCallCapture{}, fmt.Errorf("%w: %s args key field empty", ErrCursorProtocol, kind)
 	}
 
@@ -1009,7 +1011,18 @@ func cursorEncodeGrepResult(argsJSON, text string, failed bool) []byte {
 	case "files_with_matches":
 		union = cursorEncodeGrepFilesResult(text)
 	case "count":
-		union = cursorEncodeGrepCountResult(text)
+		countInner, parsed := cursorEncodeGrepCountResult(text)
+		// 失败关闭（非兜底）：count 模式下游回了一段非空但**不是** <file>:<count> 形态的文本
+		// （典型为工具能力不匹配，回了 content 形态）。此时若仍回 success，会把"格式漂移"
+		// 谎报成"零命中"，下游据此以为什么都没匹配到——这是失败关闭问题，必须如实报错。
+		// 判据：解析条数为 0 且原文非空。"非空"排除了"真的零命中"这一合法 success 情形；
+		// 一旦解析到 ≥1 条（哪怕剩余若干行被跳过），仍按现状回 success。
+		if parsed == 0 && strings.TrimSpace(text) != "" {
+			errInner := cursorAppendStringField(nil, cursorFldGrepErrorError,
+				"cursor: grep count output is not <file>:<count> form (fail closed)")
+			return cursorAppendBytesField(nil, cursorFldGrepResultError, errInner)
+		}
+		union = countInner
 	default:
 		union = cursorAppendBytesField(nil, cursorFldGrepUnionContent, cursorParseGrepContent(text))
 	}
@@ -1053,9 +1066,14 @@ func cursorEncodeGrepFilesResult(text string) []byte {
 // 逐行以**最后一个** ':' 切出 <file>:<count>，右侧必须全为十进制数字（否则跳过该行，不臆造计数）；
 // 每条作为 GrepFileCount（f1 file / f2 count）写入 GrepCountResult.f1 counts（repeated），
 // f2 total_files = 文件条数，f3 total_matches = 计数之和，f4/f5 截断位写 0。
-func cursorEncodeGrepCountResult(text string) []byte {
+//
+// 第二个返回值 parsed 是**实际解析到的条目数**（而非扫描总行数），专供上层失败关闭判定：
+// 当 count 模式整段文本都不是 <file>:<count> 形态时 parsed==0，上层据此走失败帧而非把格式
+// 漂移谎报为零命中。该计数**不改变任何输出字节**——同行内 GrepCountResult 的编码与改动前逐字节一致。
+func cursorEncodeGrepCountResult(text string) ([]byte, int) {
 	var inner []byte
 	var totalFiles, totalMatches int64
+	parsed := 0
 	for _, raw := range strings.Split(text, "\n") {
 		line := strings.TrimSuffix(strings.TrimSpace(raw), "\r")
 		if line == "" {
@@ -1079,12 +1097,13 @@ func cursorEncodeGrepCountResult(text string) []byte {
 		inner = cursorAppendBytesField(inner, 1, fc)
 		totalFiles++
 		totalMatches += count
+		parsed++
 	}
 	inner = cursorAppendVarintField(inner, 2, uint64(totalFiles))
 	inner = cursorAppendVarintField(inner, 3, uint64(totalMatches))
 	inner = cursorAppendVarintField(inner, 4, 0)
 	inner = cursorAppendVarintField(inner, 5, 0)
-	return cursorAppendBytesField(nil, cursorFldGrepUnionCount, inner)
+	return cursorAppendBytesField(nil, cursorFldGrepUnionCount, inner), parsed
 }
 
 // cursorAllDecimal 报告 s 是否全为十进制数字（空串返回 false）。用于 count 右侧计数合法性判断。
