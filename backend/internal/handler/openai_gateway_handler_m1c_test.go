@@ -43,6 +43,9 @@ func assertNoCancellationLikeWords(t *testing.T, s string) {
 
 // m1cFirstByteTimeoutFailover 构造首字节护栏超时耗尽错误（与 service 层 M1-a 产出的
 // 错误体同构：StatusCode=504，错误体 type=service.UpstreamFirstByteTimeoutType）。
+// 注意：G1-c 判定已改为按 Reason 语义标记，真实首字节超时错误（service 层 M1-a/M1-b 产出）
+// 都会设置 Reason == service.GatewayFirstByteTimeoutReason，故此处构造也须带上该 Reason，
+// 否则不会被识别为首字节超时、落到通用映射。
 func m1cFirstByteTimeoutFailover() *service.UpstreamFailoverError {
 	body := []byte(fmt.Sprintf(
 		`{"error":{"type":"%s","message":"%s"}}`,
@@ -52,6 +55,7 @@ func m1cFirstByteTimeoutFailover() *service.UpstreamFailoverError {
 	return &service.UpstreamFailoverError{
 		StatusCode:   http.StatusGatewayTimeout,
 		ResponseBody: body,
+		Reason:       service.GatewayFirstByteTimeoutReason,
 	}
 }
 
@@ -197,6 +201,105 @@ func TestM1cFirstByteTimeout_CommittedButFlagFalse_StillStreamFrame(t *testing.T
 				"已提交响应时应引用流内错误帧专属 SSOT 文案")
 		})
 	}
+}
+
+// m1cCNFirstByteTimeoutFailover 构造 CN 家族路径的首字节超时错误（客户走的正是一条）：
+// StatusCode=504，错误体 type=upstream_error（CN 家族产出，与通用护栏不同），
+// 但 Reason == service.GatewayFirstByteTimeoutReason（G1-a/G1-b 在造此错误时设置该语义标记）。
+// 这是历史漏网现场：旧判定靠字符串匹配错误体，因 type=upstream_error 永不命中；
+// 新判定靠 Reason 语义标记，应能命中并写回可区分 type 的流内帧。
+func m1cCNFirstByteTimeoutFailover() *service.UpstreamFailoverError {
+	body := []byte(`{"error":{"type":"upstream_error","message":"上游首字节超时，请稍后重试"}}`)
+	return &service.UpstreamFailoverError{
+		StatusCode:   http.StatusGatewayTimeout,
+		ResponseBody: body,
+		Reason:       service.GatewayFirstByteTimeoutReason,
+	}
+}
+
+// m1cTrapEmptyReasonFailover 构造**陷阱**：StatusCode=504、Reason 为空（未作语义标记），
+// 但 ResponseBody 字符串里恰好含有 `"upstream_first_byte_timeout"` 字样（被引号包裹）。
+// 旧判定靠字符串匹配会误命中此特征串，把它当作首字节超时；
+// 新判定靠 Reason 语义标记，因 Reason 为空必须**不**命中，落到通用 504 映射（upstream_error）。
+// 此用例是本卡核心验收点：证明判定已从字符串匹配改为语义标记。
+func m1cTrapEmptyReasonFailover() *service.UpstreamFailoverError {
+	quoted := `"` + service.UpstreamFirstByteTimeoutType + `"`
+	body := []byte(fmt.Sprintf(`{"error":{"type":"upstream_error","message":"上游首字节超时特征串 %s 命中"}}`, quoted))
+	return &service.UpstreamFailoverError{
+		StatusCode:   http.StatusGatewayTimeout,
+		ResponseBody: body,
+		// Reason 故意留空，模拟"错误体恰好带特征串但语义未标记"的现场。
+		Reason: "",
+	}
+}
+
+// TestM1cCNFirstByteTimeout_StreamingEmitsDistinguishableFrame 覆盖 CN 路径形态（客户现场）：
+// StatusCode=504、ResponseBody type=upstream_error、但 Reason==gateway_first_byte_timeout。
+// 断言写回的是流内 SSE error 帧（含 data: 前缀）且带 service.UpstreamFirstByteTimeoutType，
+// 不是通用 upstream_error 文案。
+func TestM1cCNFirstByteTimeout_StreamingEmitsDistinguishableFrame(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	h := &OpenAIGatewayHandler{}
+	h.handleFailoverExhausted(c, m1cCNFirstByteTimeoutFailover(), true)
+
+	body := w.Body.String()
+
+	// 必须是流内 SSE error 帧（含 data: 前缀），而非纯 JSON 错误体。
+	assert.Contains(t, body, "event: error", "CN 路径须写流内 SSE error 帧，实际响应: %q", body)
+	assert.Contains(t, body, "data: ", "流内帧须带 data: 前缀")
+
+	parsed := extractSSEErrorFrame(t, body)
+	errorObj, ok := parsed["error"].(map[string]any)
+	require.True(t, ok, "错误帧应含 error 对象，实际: %v", parsed)
+
+	// 关键：CN 路径（错误体 type=upstream_error）也必须被识别为首字节超时，写出可区分 type。
+	assert.Equal(t, service.UpstreamFirstByteTimeoutType, errorObj["type"],
+		"CN 路径（错误体 type=upstream_error）也必须写回可区分的首字节超时 type，而非通用 upstream_error")
+	assert.Equal(t, service.UpstreamFirstByteTimeoutType, errorObj["code"],
+		"CN 路径错误帧 code 必须与可区分 type 一致")
+	// 反向断言：不得仍是通用 upstream_error 文案（漏网现场的产物）。
+	assert.NotEqual(t, "upstream_error", errorObj["type"],
+		"CN 路径不得落回通用 upstream_error type")
+
+	msg, _ := errorObj["message"].(string)
+	require.NotEmpty(t, msg, "错误帧必须携带 message")
+	assertNoCancellationLikeWords(t, msg)
+	assert.Equal(t, errors.UpstreamFirstByteTimeoutStreamFrame, msg,
+		"流已开始时应引用流内错误帧专属 SSOT 文案")
+}
+
+// TestM1cTrapEmptyReason_NotTreatedAsFirstByteTimeout 覆盖核心验收陷阱（证明判定已从字符串
+// 匹配改为语义标记）：StatusCode=504、Reason 为空，但 ResponseBody 恰好含
+// "upstream_first_byte_timeout" 特征串。断言它**不得**被当作首字节超时——必须落回通用 504
+// 映射（type==upstream_error），而非可区分的 service.UpstreamFirstByteTimeoutType。
+func TestM1cTrapEmptyReason_NotTreatedAsFirstByteTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	h := &OpenAIGatewayHandler{}
+	h.handleFailoverExhausted(c, m1cTrapEmptyReasonFailover(), true)
+
+	body := w.Body.String()
+
+	// 仍会走通用映射写出 SSE error 帧（event: error），只是 type 是通用的 upstream_error。
+	assert.Contains(t, body, "event: error", "陷阱用例仍应写出 SSE error 帧，实际响应: %q", body)
+
+	parsed := extractSSEErrorFrame(t, body)
+	errorObj, ok := parsed["error"].(map[string]any)
+	require.True(t, ok, "错误帧应含 error 对象，实际: %v", parsed)
+
+	gotType, _ := errorObj["type"].(string)
+	// 核心断言：因 Reason 为空，绝不命中首字节超时分支，落回通用 504 映射。
+	assert.NotEqual(t, service.UpstreamFirstByteTimeoutType, gotType,
+		"Reason 为空的特征串陷阱不得被当作首字节超时（证明判定已改语义标记）")
+	assert.Equal(t, "upstream_error", gotType,
+		"陷阱用例（Reason 空）应落回通用 504 映射 type=upstream_error")
 }
 
 // TestM1cNonGuardErrorsUntouched 覆盖验收点 (c)：非护栏超时类错误（401/429）未被本次改动

@@ -157,7 +157,7 @@ type httpUpstreamFreshConn interface {
 }
 
 // openAICNFirstByteTimeoutFailoverBody 是超时触发 failover 后的客户端可见错误体。
-var openAICNFirstByteTimeoutFailoverBody = []byte(`{"error":{"type":"upstream_error","message":"` + infraerrors.UpstreamFirstByteTimeout + `"}`)
+var openAICNFirstByteTimeoutFailoverBody = []byte(`{"error":{"type":"upstream_first_byte_timeout","message":"` + infraerrors.UpstreamFirstByteTimeout + `"}`)
 
 // isOpenAICNFirstByteTimeout 报告 err 是否为网关内部 CN 首包超时（可穿过包装）。
 func isOpenAICNFirstByteTimeout(err error) bool {
@@ -636,6 +636,11 @@ func (s *OpenAIGatewayService) failoverOpenAICNFirstByteTimeout(ctx context.Cont
 		ResponseBody:      openAICNFirstByteTimeoutFailoverBody,
 		ResponseHeaders:   http.Header{},
 		NextAccountAction: NextAccountRetry,
+		// 首字节/首包超时语义标记：让 handler 按 Reason 而非错误体字符串识别
+		// 本路径（CN 家族 kimi/deepseek/zhipu/minimax）的首字节超时（方案文档 §2/§3-G1）。
+		// 常量 GatewayFirstByteTimeoutReason 由同包 upstream_first_byte_error.go 提供，
+		// 本文件不重复定义。
+		Reason: GatewayFirstByteTimeoutReason,
 		// 请求级：首包超时标记的是「本次请求在上游侧等太久」（大请求 prefill 慢、
 		// 上游当时排队或连接慢），不是账号本身坏了。生产实测 2026-10-26：
 		// 同类失败占账号级熔断触发的 93.4%（502 已于同日排除出名单，熔断触发里

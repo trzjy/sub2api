@@ -12,6 +12,11 @@ import (
 // 而不是 userCancelled 回落（方案文档 §1.4）。
 const UpstreamFirstByteTimeoutType = "upstream_first_byte_timeout"
 
+// GatewayFirstByteTimeoutReason 标记「本次失败是首字节/首包超时」——
+// 用语义标记而非错误体字符串匹配，让 handler 在**任何**造该错误的路径上
+// 都能识别（通用护栏、CN 家族首包超时等），不再依赖 ResponseBody 里的 type 字符串。
+const GatewayFirstByteTimeoutReason GatewayFailureReason = "gateway_first_byte_timeout"
+
 // UpstreamFirstByteTimeoutMessage 是首字节护栏超时（流尚未产出语义字节）时的
 // 客户端可见文案（SSOT）。表达「上游未在时限内返回」，面向终端用户、可读，且不含任何
 // 类取消触发词（abort / cancel 等，方案文档 §1.4 的 isCancelledLikeErrorMessage）。
@@ -58,5 +63,6 @@ func newUpstreamFirstByteTimeoutError(remaining time.Duration) *UpstreamFailover
 		ResponseHeaders:          http.Header{},
 		SafeToFailoverAfterWrite: true,
 		NextAccountAction:        action,
+		Reason:                   GatewayFirstByteTimeoutReason,
 	}
 }

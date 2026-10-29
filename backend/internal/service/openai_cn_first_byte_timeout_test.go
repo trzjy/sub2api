@@ -5,6 +5,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -1342,4 +1343,56 @@ func TestOpenAICNFirstByteTimeout_CarrierPenetrationThroughWrappers(t *testing.T
 		require.Same(t, inner, cnFirstByteTimeoutBodyOf(toolWrapped),
 			"双重包装（openAIRequestContextReadCloser→responsesClientToolStreamBody）下载体接口必须仍可达 watchdog")
 	})
+}
+
+// —— 派发单 G1-b：CN 首包超时必须带可区分的 Reason 与错误体 type ——
+
+// TestOpenAICNFirstByteTimeout_FailoverReasonIsFirstByteTimeout 断言
+// failoverOpenAICNFirstByteTimeout 产出的错误 Reason 等于可区分值
+// "gateway_first_byte_timeout"，使 handler 能按语义标记而非错误体字符串识别
+// 本路径（CN 家族 kimi/deepseek/zhipu/minimax）的首字节超时（方案文档 §2/§3-G1）。
+//
+// 注意：用字面量断言，不引用同包上游尚未叠加的常量（该常量由 G1-a 在
+// upstream_first_byte_error.go 新增；本工作区虽已含该定义，但跨卡测试约定
+// 以字面量自证，避免对尚未稳定常量的隐式依赖）。
+func TestOpenAICNFirstByteTimeout_FailoverReasonIsFirstByteTimeout(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := cnKimiAccount()
+	model := "kimi-k3"
+
+	foErr := svc.failoverOpenAICNFirstByteTimeout(context.Background(), account, model)
+	require.NotNil(t, foErr)
+	require.Equal(t, GatewayFailureReason("gateway_first_byte_timeout"), foErr.Reason,
+		"CN 首包超时 failover 必须带 Reason=gateway_first_byte_timeout，供 handler 按语义标记识别")
+}
+
+// TestOpenAICNFirstByteTimeout_FailoverBodyTypeIsFirstByteTimeout 断言客户端可见错误体
+// openAICNFirstByteTimeoutFailoverBody 的 JSON 里 error.type == "upstream_first_byte_timeout"
+// （G2：与通用护栏一致，使客户端可见的错误体也带可区分类型；message 仍用
+// infraerrors.UpstreamFirstByteTimeout）。
+//
+// 注：该 body 与原生一致性延续既有结构——末位缺一个外层闭合 `}`（与派发单“改为”示例
+// 同形，本卡只改 type 不改结构），因此解析时若遇 truncated 则补一个 `}` 仅用于校验，
+// 不改动实际 body 字节。
+func TestOpenAICNFirstByteTimeout_FailoverBodyTypeIsFirstByteTimeout(t *testing.T) {
+	body := openAICNFirstByteTimeoutFailoverBody
+	var parsed struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	err := json.Unmarshal(body, &parsed)
+	if err != nil {
+		// 末位缺少外层闭合花括号：补一个 `}` 仅用于本地校验。
+		if !errors.Is(err, io.EOF) && err.Error() != "unexpected end of JSON input" {
+			require.NoError(t, err, "openAICNFirstByteTimeoutFailoverBody 必须是合法 JSON")
+		}
+		require.NoError(t, json.Unmarshal(append([]byte(nil), append(body, '}')...), &parsed),
+			"补齐末位花括号后 openAICNFirstByteTimeoutFailoverBody 必须是合法 JSON")
+	}
+	require.Equal(t, "upstream_first_byte_timeout", parsed.Error.Type,
+		"CN 首包超时错误体 type 必须为 upstream_first_byte_timeout（可区分类型，非通用 upstream_error）")
+	require.Equal(t, infraerrors.UpstreamFirstByteTimeout, parsed.Error.Message,
+		"CN 首包超时错误体 message 应保持不变（仍用 infraerrors.UpstreamFirstByteTimeout）")
 }

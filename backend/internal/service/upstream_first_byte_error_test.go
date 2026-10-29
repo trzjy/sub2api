@@ -86,6 +86,33 @@ func TestUpstreamFirstByteTimeoutErrorRetryBranch(t *testing.T) {
 	require.False(t, zero.ShouldRetryNextAccount(), "remaining 0 must be exhausted")
 }
 
+// (d) 派发单 G1-a：newUpstreamFirstByteTimeoutError 产出的错误
+// Reason 必须为 GatewayFirstByteTimeoutReason（语义标记，替代错误体字符串匹配）。
+func TestNewUpstreamFirstByteTimeoutErrorReasonSet(t *testing.T) {
+	// 覆盖换号分支（剩余充足）与耗尽分支（剩余不足）两种构造。
+	cases := []time.Duration{
+		30 * time.Second,
+		5 * time.Second,
+		4*time.Second + 999*time.Millisecond,
+		0,
+	}
+	for _, remaining := range cases {
+		err := newUpstreamFirstByteTimeoutError(remaining)
+		require.NotNil(t, err)
+		require.Equal(t, GatewayFirstByteTimeoutReason, err.Reason,
+			"newUpstreamFirstByteTimeoutError(remaining=%s) 的 Reason 必须为 GatewayFirstByteTimeoutReason", remaining)
+	}
+}
+
+// (d) 派发单 G1-a：Reason 常量的字符串值必须恰为 "gateway_first_byte_timeout"，
+// 且该常量与 G1-b / G1-c 的依赖逐字一致（名字与值都不得改动）。
+func TestGatewayFirstByteTimeoutReasonValue(t *testing.T) {
+	require.Equal(t, GatewayFailureReason("gateway_first_byte_timeout"), GatewayFirstByteTimeoutReason,
+		"GatewayFirstByteTimeoutReason 的字符串值必须恰为 gateway_first_byte_timeout")
+	require.Equal(t, "gateway_first_byte_timeout", string(GatewayFirstByteTimeoutReason),
+		"GatewayFirstByteTimeoutReason 必须可原样比对为 gateway_first_byte_timeout")
+}
+
 // (c) 显式断言派发单要求的四个行为点（remaining 边界 / StatusCode / SafeToFailover）。
 func TestNewUpstreamFirstByteTimeoutErrorBehaviorUnchanged(t *testing.T) {
 	// 剩余 >= 最小可行窗口(5s) -> NextAccountRetry。

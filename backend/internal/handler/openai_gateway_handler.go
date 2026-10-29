@@ -4117,9 +4117,16 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	// M1-c：首字节护栏超时耗尽（请求级总预算 250s 到点、网关自己合成 504）时使用
 	// 专属的、可区分的 type/code 与不含类取消触发词的中文文案，避免客户端把"流正常结束
 	// + 零语义输出"判定为 empty response output from model / 类取消，界面误显"用户已取消"
-	// （方案文档 §1.4）。错误体由 service 层 M1-a 产出，其 type 即
-	// service.UpstreamFirstByteTimeoutType；文案一律引用既有 SSOT 常量，不另写裸字符串。
-	if statusCode == http.StatusGatewayTimeout && strings.Contains(string(responseBody), `"`+service.UpstreamFirstByteTimeoutType+`"`) {
+	// （方案文档 §1.4）。
+	// 判定改为**语义标记**而非字符串匹配错误体：造首字节超时错误的路径不止一条（通用护栏
+	// 产出 type=upstream_first_byte_timeout，而 CN 家族 kimi/deepseek/zhipu/minimax 产出
+	// type=upstream_error，客户走的正是一条），靠字符串匹配响应体会漏掉 CN 路径。故按
+	// failoverErr.Reason == service.GatewayFirstByteTimeoutReason 判定（该常量由 G1-a 在
+	// service 包新增，handler 包只引用不重复定义）；同时保留 StatusCode==504 作为辅助条件，
+	// 两者同时满足才走专门分支，避免把其它 504 误判为首字节超时。文案引用既有 SSOT 常量。
+	if failoverErr != nil &&
+		failoverErr.Reason == service.GatewayFirstByteTimeoutReason &&
+		statusCode == http.StatusGatewayTimeout {
 		errType := service.UpstreamFirstByteTimeoutType
 		// 流是否已开始应以「响应是否已提交」为准，而非仅看传入的 streamStarted：
 		// 心跳组件提交 SSE 200 后并不会同步 streamStarted（方案文档 §2 根因），
