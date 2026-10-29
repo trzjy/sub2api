@@ -285,7 +285,14 @@ type ResponsesInputItem struct {
 	CallID    string `json:"call_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
+	// Namespace 是 namespace 子工具的归属命名空间（codex 按 namespace+name 路由该调用）。
+	// 与 Arguments 互不参与对方的计算。
+	Namespace string `json:"namespace,omitempty"`
 	ID        string `json:"id,omitempty"`
+
+	// type=custom_tool_call（custom/freeform 工具，input 为自由文本，不是 JSON 参数）。
+	// 与 Arguments 互不参与对方的计算：出现 arguments 与 input 时各取各的、互不覆盖。
+	Input string `json:"input,omitempty"`
 
 	// type=function_call_output
 	Output    string `json:"output,omitempty"`
@@ -296,13 +303,29 @@ func (i *ResponsesInputItem) UnmarshalJSON(data []byte) error {
 	type alias ResponsesInputItem
 	var wire struct {
 		*alias
-		Output json.RawMessage `json:"output"`
+		Output    json.RawMessage `json:"output"`
+		Arguments json.RawMessage `json:"arguments"`
 	}
 
 	*i = ResponsesInputItem{}
 	wire.alias = (*alias)(i)
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
+	}
+
+	// arguments 同时支持字符串与对象/数组两种形态（与 ResponsesOutput 处理
+	// tool_search_call 的写法同源）：字符串形态按原样写入；对象/数组形态保留为
+	// 原始 JSON 文本，不报错。Input 字段由结构体直接承接 input，互不覆盖 Arguments。
+	if len(wire.Arguments) > 0 {
+		trimmed := bytes.TrimSpace(wire.Arguments)
+		if !bytes.Equal(trimmed, []byte("null")) {
+			var argString string
+			if err := json.Unmarshal(trimmed, &argString); err == nil {
+				i.Arguments = argString
+			} else {
+				i.Arguments = string(trimmed)
+			}
+		}
 	}
 
 	output := bytes.TrimSpace(wire.Output)
