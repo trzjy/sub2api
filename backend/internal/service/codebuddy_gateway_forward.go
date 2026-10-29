@@ -75,6 +75,11 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 	if strings.TrimSpace(upstreamModel) == "" {
 		upstreamModel = originalModel
 	}
+	// mapping 命中且与请求名不同时，出站 body 的 model 必须一并改写为上游模型名。
+	// 上游只认自身目录里的模型（CodeBuddy CN 目录无 deepseek-v4.1-flash-1017 这类
+	// 分组别名），body 原样带别名会被上游以 400 code=11102 拒绝（2026-10-29 生产实证：
+	// glm-5.3-flash 与上游同名故 200，1017 别名 400）。响应侧仍按 originalModel 回写。
+	body = codeBuddyOutboundBody(body, originalModel, upstreamModel)
 
 	opts := CodeBuddyRewriteOptions{
 		Sanitize:         s.codeBuddySanitizeEnabled(),

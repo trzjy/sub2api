@@ -57,6 +57,15 @@ var codeBuddyDefaultSanitizePatterns = []CodeBuddySanitizePattern{
 // PrepareCodeBuddyBody 按 §2.5 顺序执行改写规则（含 Phase 0 校准新增的
 // 「首条消息必须为 system」，D6），返回改写后的请求体。
 // 任何单条规则失败时返回错误（不部分改写），保证调用方可安全替换出站 body。
+// codeBuddyOutboundBody 把出站请求体的 model 字段改写为上游模型名（mapping 命中时）。
+// 未命中映射（upstreamModel 为空或与请求名相同）时原样返回，保证历史账号零行为变化。
+func codeBuddyOutboundBody(body []byte, originalModel, upstreamModel string) []byte {
+	if strings.TrimSpace(upstreamModel) == "" || upstreamModel == originalModel {
+		return body
+	}
+	return ReplaceModelInBody(body, upstreamModel)
+}
+
 func PrepareCodeBuddyBody(src []byte, opts CodeBuddyRewriteOptions) ([]byte, error) {
 	if !json.Valid(src) {
 		return nil, errCodeBuddyBadBody
