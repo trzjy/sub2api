@@ -591,7 +591,7 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 		// 客户端 empty-pattern fallback 语义：仅 glob（无 pattern）的检索以 "." 重新执行同一 grep
 		// （安装包 main.js 的 empty-pattern-fallback）。只有 output_mode 与 glob 共同决定这是一次
 		// "按 glob 找文件"的检索，此时把委托给下游的 pattern 置 "." 而非失败关闭；不改 a.OutputMode / a.Glob 透传。
-		if strings.TrimSpace(a.Pattern) == "" && strings.TrimSpace(a.Glob) != "" {
+		if a.Pattern == "" && strings.TrimSpace(a.Glob) != "" {
 			a.Pattern = "."
 		}
 		kind, callID, path = cursorToolKindGrep, a.ToolCallID, a.Pattern
