@@ -494,6 +494,34 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 			in:   "https://host/a@b",
 			want: strPtr("host/a@b"),
 		},
+		{
+			// 缺陷 2：协议相对的 userinfo（无 scheme）必须被剥离。
+			name: "protocol relative with userinfo",
+			in:   "//user:pass@host/x",
+			want: strPtr("host/x"),
+		},
+		{
+			// 缺陷 2：裸 userinfo（无任何 scheme）必须被剥离。
+			name: "bare userinfo",
+			in:   "user:pass@host",
+			want: strPtr("host"),
+		},
+		{
+			// 缺陷 1：长度 ≤120 但含非法字节的输入，输出必须是合法 UTF-8。
+			name: "short invalid utf8 made valid",
+			in:   "host/\xff\xfe",
+			check: func(t *testing.T, out string) {
+				require.True(t, utf8.ValidString(out),
+					"output must be valid UTF-8 even for short inputs with invalid bytes, got %q", out)
+				require.Equal(t, "host/", out, "invalid bytes must be dropped, leaving only the valid prefix")
+			},
+		},
+		{
+			// path 中的 '@' 必须保留（已有断言的二次确认，不放开既有行为）。
+			name: "path at preserved",
+			in:   "https://host/a@b",
+			want: strPtr("host/a@b"),
+		},
 	}
 
 	for _, tc := range tests {

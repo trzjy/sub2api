@@ -804,7 +804,7 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 }
 
 // cursorSafeURLForLog 只取 URL 的 host+path（去掉 scheme、userinfo、query/fragment），
-// 并截断 ≤120 字符，避免把签名参数、凭据等敏感信息写进日志/错误信息。
+// 并截断 ≤120 字节，避免把签名参数、凭据等敏感信息写进日志/错误信息。
 //
 // 关键不变量：所有偏移计算与切片都基于同一段字符串 u（每步就地更新 u），
 // 绝不用原串 u 上的偏移去切已缩短的 redacted，否则会越界 panic。
@@ -819,29 +819,39 @@ func cursorSafeURLForLog(u string) string {
 	if i := strings.IndexByte(u, '#'); i >= 0 {
 		u = u[:i]
 	}
-	// 3. 去掉 scheme:// 前缀。
+	// 3. 去掉 scheme:// 前缀（若存在；无 scheme 时下面第 4 步仍会剥 userinfo）。
 	if i := strings.Index(u, "://"); i >= 0 {
 		u = u[i+len("://"):]
-		// 4. 剥离 userinfo（scheme://user:pass@host 里的 user:pass@）。
-		//    仅当 '@' 出现在第一个 '/'（path 起点）之前才算 authority 内的 userinfo，
-		//    避免误删 path 中合法的 '@'。
-		//    按 RFC 3986：userinfo 以 authority 内**最后一个** '@' 结束
-		//    （Go net/url 的 parseAuthority 同样如此），故取最后一个 '@'，
-		//    避免密码片段本身含 '@'（如 "user:p@ss@host"）时把 "ss" 残留在日志里。
-		if slash := strings.IndexByte(u, '/'); slash < 0 {
-			// 无 path：整串即 authority，取最后一个 '@'。
-			if at := strings.LastIndexByte(u, '@'); at >= 0 {
-				u = u[at+1:]
-			}
-		} else {
-			// 有 path：只在 authority 子串（slash 之前）里取最后一个 '@'。
-			if at := strings.LastIndexByte(u[:slash], '@'); at >= 0 {
-				u = u[at+1:]
-			}
+	}
+	// 4. 剥离 userinfo：与 scheme 解耦，**无论是否有 scheme 都按 authority 边界处理**。
+	//    - 先去掉开头连续的 '/'，覆盖 "//user:pass@host/path" 这类协议相对/裸形态；
+	//    - authority = 第一个 '/' 之前的子串（无 '/' 则整串即 authority）；
+	//    - 在 authority 内取**最后一个** '@'，剥掉它及之前的内容，
+	//      使裸 "user:pass@host" 这类凭据也被剥离（与函数自述"只取 host+path"一致）。
+	//    - path 中的 '@'（出现在第一个 '/' 之后，如 "https://host/a@b"）不当 userinfo，
+	//      保持原样。
+	//    按 RFC 3986：userinfo 以 authority 内**最后一个** '@' 结束
+	//    （Go net/url 的 parseAuthority 同样如此），故取最后一个 '@'，
+	//    避免密码片段本身含 '@'（如 "user:p@ss@host"）时把 "ss" 残留在日志里。
+	u = strings.TrimLeft(u, "/")
+	if slash := strings.IndexByte(u, '/'); slash < 0 {
+		// 无 path：整串即 authority，取最后一个 '@'。
+		if at := strings.LastIndexByte(u, '@'); at >= 0 {
+			u = u[at+1:]
+		}
+	} else {
+		// 有 path：只在 authority 子串（slash 之前）里取最后一个 '@'。
+		if at := strings.LastIndexByte(u[:slash], '@'); at >= 0 {
+			u = u[at+1:]
 		}
 	}
 
-	// 5. 截断 ≤ maxLen，并回退到合法 UTF-8 边界，绝不切断多字节字符。
+	// 5. 截断前先统一成合法 UTF-8（外审 F3）：长度本就 ≤120 但含非法字节的输入
+	//    （如 data URI 里带二进制）也会原样返回非法 UTF-8，这里丢弃非法字节，
+	//    绝不把非法字节写进日志/错误串。
+	u = strings.ToValidUTF8(u, "")
+	// 6. 截断 ≤ maxLen 字节（实现本就按字节计），并回退到合法 UTF-8 边界，
+	//    绝不切断多字节字符。
 	if len(u) > maxLen {
 		u = u[:maxLen]
 		for !utf8.ValidString(u) {
