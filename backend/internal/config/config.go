@@ -119,6 +119,20 @@ type Config struct {
 	// Probe 是 C2 无流量渠道抽样探测调度器的配置段（派发单 C2）。
 	// 默认 Enabled=false（零探测；worker 启动但每轮空转），MaxPerTick 默认 2。
 	Probe ProbeConfig `mapstructure:"probe"`
+	// Standby 是主力渠道自适应备用切换的配置段（第 3 片接线）。
+	Standby StandbyConfig `mapstructure:"standby"`
+}
+
+// StandbyConfig 控制主力渠道延迟/故障自适应备用切换（第 3 片）。
+//   - Enabled：总开关，默认 true。false 时控制器完全不启动（注册表保持空表 =
+//     全部 closed），可用 STANDBY_ENABLED=false 紧急止血。
+//   - PollIntervalSeconds：控制器轮询间隔（秒），默认 30；<=0 时用服务层默认值。
+//
+// 时区复用全局 Config.Timezone（默认 Asia/Shanghai），不另设字段：hour-of-day
+// 分桶必须与 usage_logs 的本地时段口径一致。
+type StandbyConfig struct {
+	Enabled             bool `mapstructure:"enabled"`
+	PollIntervalSeconds int  `mapstructure:"poll_interval_seconds"`
 }
 
 // ProbeConfig 控制无流量渠道抽样直连探测调度器（派发单 C2）。
@@ -2916,6 +2930,11 @@ func setDefaults() {
 	// Subscription Maintenance (bounded queue + worker pool)
 	viper.SetDefault("subscription_maintenance.worker_count", 2)
 	viper.SetDefault("subscription_maintenance.queue_size", 1024)
+
+	// Standby（主力渠道自适应备用切换，第 3 片）：默认启用、30s 轮询。
+	// STANDBY_ENABLED=false 可紧急关闭；关闭后控制器不启动，注册表保持空表。
+	viper.SetDefault("standby.enabled", true)
+	viper.SetDefault("standby.poll_interval_seconds", 30)
 
 	setEnvReachableDefaults()
 }

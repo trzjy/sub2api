@@ -94,6 +94,21 @@ func NewStandbyController(
 	}
 }
 
+// NewProcessStandbyController 构造控制器，并把它的注册表挂成进程级单例（第 3 片装配）。
+//
+// 调度层只读 DefaultStandbyRegistry()（见 standbyRoutingOpen），控制器必须写同一实例，
+// 否则选号层永远读到空表、备用开启也不会前置任何账号。setDefaultStandbyRegistry 只在
+// 服务包内可见，故由本构造函数收口；注册表只存活在本进程内，重启即空表 = 全部 closed。
+func NewProcessStandbyController(
+	evaluator StandbyEvaluator,
+	covered StandbyCoveredModelSource,
+	opts StandbyControllerOptions,
+) *StandbyController {
+	registry := NewStandbyRegistry()
+	setDefaultStandbyRegistry(registry)
+	return NewStandbyController(evaluator, covered, registry, opts)
+}
+
 // Registry 返回控制器写入的注册表，供调度层只读消费。
 func (c *StandbyController) Registry() *StandbyRegistry {
 	if c == nil {

@@ -30,7 +30,10 @@ type Application struct {
 	Server        *http.Server
 	PromptAudit   *securityaudit.PromptService
 	PluginManager *service.PluginManager
-	Cleanup       func()
+	// Standby 是主力渠道自适应备用切换控制器（第 3 片）。配置关闭或装配失败时为
+	// nil（禁用 standby，注册表保持空表 = 全部 closed），main 只做 nil 判断。
+	Standby *service.StandbyController
+	Cleanup func()
 }
 
 func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
@@ -74,6 +77,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		// 8. *handler.XianguanjiaSupplyHandler：原 SupplyCatalogService 及 goods source 构造。
 		provideXianguanjiaSupplyHandler,
 
+		// 主力渠道自适应备用切换控制器（第 3 片）：装配函数体见 wire_providers.go，
+		// 关闭开关或装配失败时返回 nil（禁用 standby），不阻断启动。
+		provideStandbyController,
+
 		// BuildInfo provider
 		provideServiceBuildInfo,
 		providePluginHostInfo,
@@ -82,7 +89,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "PluginManager", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "PluginManager", "Standby", "Cleanup"),
 	)
 	return nil, nil
 }

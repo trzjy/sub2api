@@ -416,6 +416,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	stepUpAuthMiddleware := middleware.NewStepUpAuthMiddleware(totpService, userService, settingService)
 	engine := server.ProvideRouter(configConfig, handlers, jwtAuthMiddleware, optionalJWTAuthMiddleware, adminAuthMiddleware, apiKeyAuthMiddleware, auditLogMiddleware, stepUpAuthMiddleware, apiKeyService, subscriptionService, opsService, settingService, compositeRouteResolver, redisClient)
 	httpServer := server.ProvideHTTPServer(configConfig, engine)
+	standbyController := provideStandbyController(configConfig, db)
 	opsMetricsCollector := service.ProvideOpsMetricsCollector(opsRepository, settingRepository, accountRepository, concurrencyService, db, redisClient, configConfig)
 	opsAggregationService := service.ProvideOpsAggregationService(opsRepository, settingRepository, db, redisClient, configConfig)
 	opsAlertEvaluatorService := service.ProvideOpsAlertEvaluatorService(opsService, opsRepository, emailService, redisClient, configConfig, proxyRepository)
@@ -451,6 +452,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		Server:        httpServer,
 		PromptAudit:   promptService,
 		PluginManager: pluginManager,
+		Standby:       standbyController,
 		Cleanup:       v2,
 	}
 	return application, nil
@@ -462,7 +464,10 @@ type Application struct {
 	Server        *http.Server
 	PromptAudit   *securityaudit.PromptService
 	PluginManager *service.PluginManager
-	Cleanup       func()
+	// Standby 是主力渠道自适应备用切换控制器（第 3 片）。配置关闭或装配失败时为
+	// nil（禁用 standby，注册表保持空表 = 全部 closed），main 只做 nil 判断。
+	Standby *service.StandbyController
+	Cleanup func()
 }
 
 func providePrivacyClientFactory() service.PrivacyClientFactory {
