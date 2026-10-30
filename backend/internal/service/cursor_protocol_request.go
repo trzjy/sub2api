@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/google/uuid"
@@ -802,22 +803,41 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 	return cursorTurnImage{data: data, mimeType: mime}, nil
 }
 
-// cursorSafeURLForLog 只取 URL 的 host+path（去掉 query/fragment），并截断 ≤120 字符，
-// 避免把签名参数等敏感信息写进日志/错误信息。
+// cursorSafeURLForLog 只取 URL 的 host+path（去掉 scheme、userinfo、query/fragment），
+// 并截断 ≤120 字符，避免把签名参数、凭据等敏感信息写进日志/错误信息。
+//
+// 关键不变量：所有偏移计算与切片都基于同一段字符串 u（每步就地更新 u），
+// 绝不用原串 u 上的偏移去切已缩短的 redacted，否则会越界 panic。
 func cursorSafeURLForLog(u string) string {
 	const maxLen = 120
-	redacted := u
+
+	// 1. 去掉 query（含 '?' 及其之后）。
 	if i := strings.IndexByte(u, '?'); i >= 0 {
-		redacted = u[:i]
+		u = u[:i]
 	}
-	if i := strings.IndexByte(redacted, '#'); i >= 0 {
-		redacted = redacted[:i]
+	// 2. 去掉 fragment（含 '#' 及其之后）。
+	if i := strings.IndexByte(u, '#'); i >= 0 {
+		u = u[:i]
 	}
+	// 3. 去掉 scheme:// 前缀。
 	if i := strings.Index(u, "://"); i >= 0 {
-		redacted = redacted[i+len("://"):]
+		u = u[i+len("://"):]
+		// 4. 剥离 userinfo（scheme://user:pass@host 里的 user:pass@），
+		//    仅当 '@' 出现在第一个 '/'（path 起点）之前才算 userinfo，
+		//    避免误删 path 中合法的 '@'。
+		if at := strings.IndexByte(u, '@'); at >= 0 {
+			if slash := strings.IndexByte(u, '/'); slash < 0 || at < slash {
+				u = u[at+1:]
+			}
+		}
 	}
-	if len(redacted) > maxLen {
-		redacted = redacted[:maxLen]
+
+	// 5. 截断 ≤ maxLen，并回退到合法 UTF-8 边界，绝不切断多字节字符。
+	if len(u) > maxLen {
+		u = u[:maxLen]
+		for !utf8.ValidString(u) {
+			u = u[:len(u)-1]
+		}
 	}
-	return redacted
+	return u
 }

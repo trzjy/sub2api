@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
@@ -417,6 +418,90 @@ func TestCursorToolMessageImageFailsClosed(t *testing.T) {
 	_, err := cursorConvertRequest(req, "grok-4.7")
 	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
 	require.Contains(t, err.Error(), "tool")
+}
+
+// ---------------------------------------------------------------------------
+// IMG-04：修 cursorSafeURLForLog 越界 panic 的回归用例
+// ---------------------------------------------------------------------------
+
+// TestCursorSafeURLForLogNoPanic 锁死 IMG-04 must_fix：畸形/任意 URL 都不得 panic，
+// 且输出符合预期（不含凭据、不含 query、合法 UTF-8、≤120）。
+func TestCursorSafeURLForLogNoPanic(t *testing.T) {
+	// 构造一段 ≥200 字符（rune）的超长 URL，用于验证截断与多字节边界。
+	longURL := "https://user:pass@例え.jp/" + strings.Repeat("路径/", 200)
+	require.GreaterOrEqual(t, len([]rune(longURL)), 200, "longURL must be at least 200 runes")
+
+	tests := []struct {
+		name       string
+		in         string
+		want       string   // 期望精确输出；空字符串表示仅校验约束，不比对精确值
+		noContains []string // 输出不得包含的子串
+		check      func(t *testing.T, out string)
+	}{
+		{
+			name: "query before scheme",
+			in:   "a?b://c",
+			// 去掉 query 后只剩 "a"，不再有 "://"，原样返回 "a"。
+			want: "a",
+		},
+		{
+			name: "only scheme marker",
+			in:   "?://",
+			// query 在 0，整串被清空。
+			want: "",
+		},
+		{
+			name:       "userinfo and query stripped",
+			in:         "https://user:pass@host/x?a=1",
+			want:       "host/x",
+			noContains: []string{"user:pass", "a=1"},
+		},
+		{
+			name: "multibyte host stays valid utf8",
+			in:   "https://例え.jp/路径?a=1",
+			want: "例え.jp/路径",
+			check: func(t *testing.T, out string) {
+				require.True(t, utf8.ValidString(out), "output must be valid UTF-8, got %q", out)
+			},
+		},
+		{
+			name: "empty input",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "long input truncated and valid",
+			in:   longURL,
+			check: func(t *testing.T, out string) {
+				require.LessOrEqual(t, len(out), 120, "length must be ≤120, got %d", len(out))
+				require.True(t, utf8.ValidString(out), "truncated output must be valid UTF-8, got %q", out)
+				require.NotContains(t, out, "user:pass", "credentials must not leak into log")
+			},
+		},
+		{
+			name: "not a url returned as-is",
+			in:   "not-a-url",
+			want: "not-a-url",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out string
+			require.NotPanics(t, func() {
+				out = cursorSafeURLForLog(tc.in)
+			}, "cursorSafeURLForLog must never panic")
+			if tc.want != "" {
+				require.Equal(t, tc.want, out)
+			}
+			for _, s := range tc.noContains {
+				require.NotContains(t, out, s)
+			}
+			if tc.check != nil {
+				tc.check(t, out)
+			}
+		})
+	}
 }
 
 // goldenCursorPlainTextAgentRunHex 是纯文本请求出站字节的冻结黄金值（十六进制）。
