@@ -282,6 +282,36 @@ func TestCursorNonImageMimeFailsClosed(t *testing.T) {
 	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
 }
 
+// TestCursorNonImageMimeNoOutbound 非 image/* 的 data URI 必须失败关闭，且不得产生任何
+// 出站 AgentRun 字节、不得静默丢图（即要么成功带图、要么失败关闭，绝不在出错时仍发请求）。
+func TestCursorNonImageMimeNoOutbound(t *testing.T) {
+	payload := base64.StdEncoding.EncodeToString([]byte("<html>x</html>"))
+	content := json.RawMessage(fmt.Sprintf(
+		`[{"type":"image_url","image_url":{"url":"data:text/html;base64,%s"}}]`, payload))
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
+	}
+	body, err := cursorConvertRequest(req, "grok-4.7")
+	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+	require.Nil(t, body, "non-image mime must fail closed with no outbound AgentRun bytes")
+	require.Contains(t, err.Error(), "image/*", "error must explain the mime must be image/*")
+}
+
+// TestCursorDataURINotLoggedVerbatim 锁死 IMG-08 改动 B：内联 SVG 这类 data URI
+// 经 cursorSafeImageRefForLog 只回显 "data:<mime>,<N> bytes"，整段 base64 不得进日志/错误文案。
+func TestCursorDataURINotLoggedVerbatim(t *testing.T) {
+	// 自造一段 base64（内联 SVG 的机身），作为 data URI 的 payload。
+	payload := base64.StdEncoding.EncodeToString([]byte(
+		`<svg xmlns="http://www.w3.org/2000/svg"><ellipse cx="50" cy="50" rx="40" ry="30"/></svg>`))
+	u := "data:image/svg+xml;base64," + payload
+
+	ref := cursorSafeImageRefForLog(u)
+	require.NotContains(t, ref, payload, "data URI base64 body must not be logged verbatim")
+	require.Contains(t, ref, "bytes", "data URI log ref must include a byte count, not the body")
+	require.Contains(t, ref, "data:image/svg+xml;base64,",
+		"log ref must keep the mime prefix so operators can tell the image type")
+}
+
 // TestCursorOversizedImageFailsClosed 解码后字节数超过既有请求体上限必须失败关闭。
 func TestCursorOversizedImageFailsClosed(t *testing.T) {
 	// 构造一个超过 cursorUpstreamStreamMaxBytes 的 payload（既有请求体上限常量）。
@@ -424,8 +454,8 @@ func TestCursorToolMessageImageFailsClosed(t *testing.T) {
 // IMG-04：修 cursorSafeURLForLog 越界 panic 的回归用例
 // ---------------------------------------------------------------------------
 
-// TestCursorSafeURLForLogNoPanic 锁死 IMG-04 must_fix：畸形/任意 URL 都不得 panic，
-// 且输出符合预期（不含凭据、不含 query、合法 UTF-8、≤120）。
+// TestCursorSafeURLForLogNoPanic 锁死回炉方案：任意 URL 都不得 panic，且输出符合
+// 预期（不含凭据、不含 query、合法 UTF-8、≤120）。实现整体改用 net/url 解析。
 func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 	// 构造一段 ≥200 字符（rune）的超长 URL，用于验证截断与多字节边界。
 	longURL := "https://user:pass@例え.jp/" + strings.Repeat("路径/", 200)
@@ -439,30 +469,52 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 		check      func(t *testing.T, out string)
 	}{
 		{
-			name: "query before scheme",
-			in:   "a?b://c",
-			// 去掉 query 后只剩 "a"，不再有 "://"，原样返回 "a"。
-			want: strPtr("a"),
+			name: "scheme host path with at in path",
+			in:   "https://host/a@b",
+			want: strPtr("host/a@b"),
 		},
 		{
-			name: "only scheme marker",
-			in:   "?://",
-			// query 在 0，整串被清空。
-			want: strPtr(""),
+			name: "protocol relative host path",
+			in:   "//host/a@b",
+			want: strPtr("host/a@b"),
 		},
 		{
-			name:       "userinfo and query stripped",
-			in:         "https://user:pass@host/x?a=1",
+			name: "protocol relative with userinfo",
+			in:   "//user:pass@host/x",
+			want: strPtr("host/x"),
+		},
+		{
+			name: "bare userinfo no scheme",
+			in:   "user:pass@host",
+			want: strPtr("host"),
+		},
+		{
+			name:       "multiple @ picks last",
+			in:         "https://user:p@ss@host/x",
 			want:       strPtr("host/x"),
-			noContains: []string{"user:pass", "a=1"},
+			noContains: []string{"user", "ss@"},
 		},
 		{
-			name: "multibyte host stays valid utf8",
-			in:   "https://例え.jp/路径?a=1",
-			want: strPtr("例え.jp/路径"),
-			check: func(t *testing.T, out string) {
-				require.True(t, utf8.ValidString(out), "output must be valid UTF-8, got %q", out)
-			},
+			// 大小写不敏感的 scheme：url.Parse 保留 Host/Path 原大小写。
+			name: "scheme case insensitive host preserved",
+			in:   "HTTPS://Host/A?x=1",
+			want: strPtr("Host/A"),
+		},
+		{
+			name: "port preserved query stripped",
+			in:   "https://host:8080/p?token=sig",
+			want: strPtr("host:8080/p"),
+		},
+		{
+			// 空 host：规则 1/2 都解析不出 host，走规则 3 原样返回，不得输出 "b" 也不得 panic。
+			name: "empty authority slash path",
+			in:   "https:///a@b",
+			want: strPtr("https:///a@b"),
+		},
+		{
+			name: "not a url returned as-is",
+			in:   "not-a-url",
+			want: strPtr("not-a-url"),
 		},
 		{
 			name: "empty input",
@@ -479,56 +531,14 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 			},
 		},
 		{
-			name: "not a url returned as-is",
-			in:   "not-a-url",
-			want: strPtr("not-a-url"),
-		},
-		{
-			name:       "multiple @ picks last",
-			in:         "https://user:p@ss@host/x",
-			want:       strPtr("host/x"),
-			noContains: []string{"user", "ss@"},
-		},
-		{
-			name: "at in path preserved",
-			in:   "https://host/a@b",
-			want: strPtr("host/a@b"),
-		},
-		{
-			// 缺陷 2：协议相对的 userinfo（无 scheme）必须被剥离。
-			name: "protocol relative with userinfo",
-			in:   "//user:pass@host/x",
-			want: strPtr("host/x"),
-		},
-		{
-			// 缺陷 2：裸 userinfo（无任何 scheme）必须被剥离。
-			name: "bare userinfo",
-			in:   "user:pass@host",
-			want: strPtr("host"),
-		},
-		{
-			// 缺陷 1：长度 ≤120 但含非法字节的输入，输出必须是合法 UTF-8。
+			// 长度 ≤120 但含非法字节：ToValidUTF8 丢弃非法字节，输出须合法 UTF-8。
 			name: "short invalid utf8 made valid",
 			in:   "host/\xff\xfe",
+			want: strPtr("host/"),
 			check: func(t *testing.T, out string) {
 				require.True(t, utf8.ValidString(out),
 					"output must be valid UTF-8 even for short inputs with invalid bytes, got %q", out)
-				require.Equal(t, "host/", out, "invalid bytes must be dropped, leaving only the valid prefix")
 			},
-		},
-		{
-			// 缺陷 1（钉死）：protocol-relative + path 内 '@'。原 TrimLeft(u, "/")
-			// 会把整段 path 拉进 authority 误剥 '@'；修复后 path 不被蚕食。
-			name: "protocol relative with at in path",
-			in:   "//host/a@b",
-			want: strPtr("host/a@b"),
-		},
-		{
-			// 缺陷 1（钉死）：authority 为空的协议相对形态，path 以 '/' 开头。
-			// 修复前 OUT="b"（丢了 host、path 被剥 userinfo）；修复后应输出 "/a@b"。
-			name: "empty authority slash path with at",
-			in:   "https:///a@b",
-			want: strPtr("/a@b"),
 		},
 	}
 

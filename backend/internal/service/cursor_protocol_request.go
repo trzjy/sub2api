@@ -31,7 +31,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -737,9 +737,10 @@ func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 	const prefix = "data:"
 	if !strings.HasPrefix(u, prefix) {
-		// 远程 URL：错误信息只回显 host+path（截断、不带 query），防签名参数进日志。
+		// 远程 URL：错误信息只回显安全引用（host+path 或 data:<mime>,<N> bytes），
+		// 防签名参数 / 凭据 / 内联二进制进日志。
 		return cursorTurnImage{}, fmt.Errorf(
-			"%w: remote image url is not supported (%s); send an inline data: URI instead", ErrCursorUnsupportedRequest, cursorSafeURLForLog(u))
+			"%w: remote image url is not supported (%s); send an inline data: URI instead", ErrCursorUnsupportedRequest, cursorSafeImageRefForLog(u))
 	}
 	rest := u[len(prefix):]
 	comma := strings.IndexByte(rest, ',')
@@ -804,79 +805,56 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 	return cursorTurnImage{data: data, mimeType: mime}, nil
 }
 
-// cursorSafeURLForLog 只取 URL 的 host+path（去掉 scheme、userinfo、query/fragment），
-// 并截断 ≤120 字节，避免把签名参数、凭据等敏感信息写进日志/错误信息。
+// cursorSafeImageRefForLog 把图片引用安全地回显到日志/错误信息，避免泄露敏感内容。
 //
-// 关键不变量：所有偏移计算与切片都基于同一段字符串 u（每步就地更新 u），
-// 绝不用原串 u 上的偏移去切已缩短的 redacted，否则会越界 panic。
-//
-// 注意：第 5 步的 strings.ToValidUTF8(u, "") 会**丢弃**成段非法 UTF-8 字节
-// （如 "host/\xff\xfe" → "host/"），因此输出长度 ≤ 输入长度，
-// 且输出不再与原始 URL 字节对齐（不做字节偏移对齐）。
-// cursorSchemeRE 匹配合法 scheme 形态（RFC 3986 §3.1）：以字母开头，之后是
-// 字母/数字/+/./-。仅当 "://" 之前的部分匹配该形态时才视为可剥离的 scheme，
-// 避免内联 SVG data URI 等把内嵌的 "http://" 误当成 scheme 剥掉、丢失
-// "data:image/svg+xml" 前缀（外审第 4 轮缺陷 2）。不用硬编码前缀列表。
-var cursorSchemeRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
+//   - 远程 URL（http/https 等）→ 走 cursorSafeURLForLog（只留 host+path 并截断）；
+//   - data URI → 只回显 "data:<mime>,<N> bytes"（N = 逗号后 payload 的字符数），
+//     绝不把整段 base64 / 内联 SVG 写进日志。cursorSafeURLForLog 对 data URI 解析不出
+//     host 会原样返回，故这里单独分支处理。
+func cursorSafeImageRefForLog(u string) string {
+	const prefix = "data:"
+	if strings.HasPrefix(u, prefix) {
+		rest := u[len(prefix):]
+		if comma := strings.IndexByte(rest, ','); comma >= 0 {
+			return fmt.Sprintf("data:%s,%d bytes", rest[:comma], len(rest[comma+1:]))
+		}
+		return "data:?"
+	}
+	return cursorSafeURLForLog(u)
+}
 
+// cursorSafeURLForLog 只取 URL 的 host+path（去掉 scheme、userinfo、query、fragment），
+// 并做长度截断，避免把签名参数、凭据等敏感信息写进日志/错误信息。
+//
+// 实现改用 net/url 解析（不再手工切字符串）：userinfo / query / fragment 由解析器负责，
+// 保留 port（属于 host 语义）。无法解析出 host 的输入原样返回（无 host 语义可提取）。
+// 非法 UTF-8 字节会被丢弃，因此输出长度 ≤ 输入长度，不做字节偏移对齐。
 func cursorSafeURLForLog(u string) string {
+	// 规则 1：能解析出 host 的输入（http/https/ftp 等带 scheme 的合法 URL），
+	// 直接取 host + path；userinfo / query / fragment 已被解析器剥离，port 保留。
+	if parsed, err := url.Parse(u); err == nil && parsed.Host != "" {
+		return cursorSafeURLTruncate(parsed.Host + parsed.Path)
+	}
+	// 规则 2：无 scheme 形态（如 "//host/path"、"user:pass@host"）→ 补上 "//"
+	// 让解析器按 authority 处理，剥离 userinfo 后取 host + path。
+	if parsed, err := url.Parse("//" + strings.TrimPrefix(u, "//")); err == nil && parsed.Host != "" {
+		return cursorSafeURLTruncate(parsed.Host + parsed.Path)
+	}
+	// 规则 3：解析不出 host（data URI、空 host 的 "https:///a@b"、普通文本等）
+	// 原样返回——无 host 语义可提取，也不应 panic。
+	return cursorSafeURLTruncate(u)
+}
+
+// cursorSafeURLTruncate 统一把结果清洗为合法 UTF-8，并按 ≤120 字节截断、回退到合法
+// UTF-8 边界，绝不切断多字节字符，也绝不把非法字节写进日志/错误串。
+func cursorSafeURLTruncate(result string) string {
 	const maxLen = 120
-
-	// 1. 去掉 query（含 '?' 及其之后）。
-	if i := strings.IndexByte(u, '?'); i >= 0 {
-		u = u[:i]
-	}
-	// 2. 去掉 fragment（含 '#' 及其之后）。
-	if i := strings.IndexByte(u, '#'); i >= 0 {
-		u = u[:i]
-	}
-	// 3. 去掉 scheme:// 前缀（若存在）。仅当 "://" 之前的部分是合法 scheme 形态
-	//    （字母开头，后接字母/数字/+/./-）才剥离，避免内联 SVG data URI
-	//    "data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\">" 里的内嵌
-	//    "http://" 被误剥、丢掉 "data:image/svg+xml" 前缀（外审第 4 轮缺陷 2）。
-	//    无合法 scheme 时落到第 4 步按 authority 边界处理。
-	if i := strings.Index(u, "://"); i >= 0 {
-		if cursorSchemeRE.MatchString(u[:i]) {
-			u = u[i+len("://"):]
+	result = strings.ToValidUTF8(result, "")
+	if len(result) > maxLen {
+		result = result[:maxLen]
+		for !utf8.ValidString(result) {
+			result = result[:len(result)-1]
 		}
 	}
-	// 4. 剥离 userinfo：与 scheme 解耦，**无论是否有 scheme 都按 authority 边界处理**。
-	//    - 仅剥掉协议相对标记的 "//"（不蚕食 path 自身开头的 '/')，
-	//      使 "https:///a@b" 这类 authority 为空、path 以 '/' 开头的情况
-	//      path 内容不被拉进 authority、path 内的 '@' 不被误当 userinfo
-	//      （外审第 4 轮缺陷 1：原 TrimLeft(u, "/") 会把整段 path 当 authority）；
-	//    - authority = 第一个 '/' 之前的子串（无 '/' 则整串即 authority）；
-	//    - 在 authority 内取**最后一个** '@'，剥掉它及之前的内容，
-	//      使裸 "user:pass@host" 这类凭据也被剥离（与函数自述"只取 host+path"一致）。
-	//    - path 中的 '@'（出现在第一个 '/' 之后，如 "https://host/a@b"）不当 userinfo，
-	//      保持原样。
-	//    按 RFC 3986：userinfo 以 authority 内**最后一个** '@' 结束
-	//    （Go net/url 的 parseAuthority 同样如此），故取最后一个 '@'，
-	//    避免密码片段本身含 '@'（如 "user:p@ss@host"）时把 "ss" 残留在日志里。
-	u = strings.TrimPrefix(u, "//")
-	if slash := strings.IndexByte(u, '/'); slash < 0 {
-		// 无 path：整串即 authority，取最后一个 '@'。
-		if at := strings.LastIndexByte(u, '@'); at >= 0 {
-			u = u[at+1:]
-		}
-	} else {
-		// 有 path：只在 authority 子串（slash 之前）里取最后一个 '@'。
-		if at := strings.LastIndexByte(u[:slash], '@'); at >= 0 {
-			u = u[at+1:]
-		}
-	}
-
-	// 5. 截断前先统一成合法 UTF-8（外审 F3）：长度本就 ≤120 但含非法字节的输入
-	//    （如 data URI 里带二进制）也会原样返回非法 UTF-8，这里丢弃非法字节，
-	//    绝不把非法字节写进日志/错误串。
-	u = strings.ToValidUTF8(u, "")
-	// 6. 截断 ≤ maxLen 字节（实现本就按字节计），并回退到合法 UTF-8 边界，
-	//    绝不切断多字节字符。
-	if len(u) > maxLen {
-		u = u[:maxLen]
-		for !utf8.ValidString(u) {
-			u = u[:len(u)-1]
-		}
-	}
-	return u
+	return result
 }
