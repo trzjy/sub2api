@@ -806,14 +806,6 @@ func openAIAccountEligibleForTierPool(ctx context.Context, account *Account) boo
 	}
 }
 
-// codeBuddyTierPlatformMismatchAllowed 判定 CodeBuddy 账号能否在聚合分组内跨平台承接请求。
-// 准入条件 = 聚合平台族 + 分组聚合开关 + 账号已绑定该分组 + 模型映射（与高级调度器的
-// codeBuddyPlatformMismatchAllowed 同口径），并叠加档位约束：
-//   - 伪装号（mask_upstream_identity=true）只允许小档（masked 池）；未装门（pool=""）或大档
-//     一律拒绝，保证 HY3 伪装线不扛大上下文（§2 风险线口径，2026-10-07 用户裁定）。
-//   - 真实线号（mask_upstream_identity=false）允许大档与未装门时跨平台承接——2026-10-30
-//     用户裁定：真实线必须能兜大请求。出站模型映射仍由 forwardCodeBuddy 的 GetMappedModel +
-//     codeBuddyOutboundBody 负责，与本准入无关。
 func codeBuddyTierPlatformMismatchAllowed(account *Account, platform string, requestedModel string, groupID int64, group *Group, tierPool string) bool {
 	if account == nil || group == nil || groupID <= 0 || account.Platform != PlatformCodeBuddy || !account.IsOpenAICompatible() {
 		return false
@@ -822,12 +814,7 @@ func codeBuddyTierPlatformMismatchAllowed(account *Account, platform string, req
 	if !isCodeBuddyAggregatedPlatform(platform) || group.ID != groupID || NormalizeOpenAICompatiblePlatform(group.Platform) != platform || !group.AggregateCodeBuddyEnabled {
 		return false
 	}
-	// 伪装号（mask_upstream_identity=true）只允许在小档（masked 池）承接：未装门（pool=""）
-	// 或大档时一律拒绝——HY3 伪装线不扛大上下文（§2 风险线口径，2026-10-07 用户裁定）。
-	if IsIdentityMaskedAccount(account) && tierPool != tierRoutingPoolMasked {
-		return false
-	}
-	if !openAIStickyAccountMatchesGroup(account, &groupID) {
+	if tierPool != tierRoutingPoolMasked || !IsIdentityMaskedAccount(account) || !openAIStickyAccountMatchesGroup(account, &groupID) {
 		return false
 	}
 	return requestedModel != "" && account.IsModelSupported(requestedModel)
