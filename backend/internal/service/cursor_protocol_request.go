@@ -614,6 +614,12 @@ func cursorToolResultText(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 	if err != nil {
 		return "", nil, err
 	}
+	if len(images) > 0 {
+		// tool 结果无图片落点：协议里 tool result 不能承载当前轮/历史图片，
+		// 避免把工具产物当成用户上传的图写进 selected_context 或历史 blob。失败关闭。
+		return "", nil, fmt.Errorf(
+			"%w: tool message must not contain images (no image landing for tool results in protocol)", ErrCursorUnsupportedRequest)
+	}
 	id := m.ToolCallID
 	name := m.Name
 	if name == "" && m.FunctionCall != nil {
@@ -635,7 +641,8 @@ func cursorToolResultText(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 // 失败关闭口径（与首版"不静默丢图"一致）：
 //   - content 是字符串 → text 原样，images 空；
 //   - content 是 parts 数组：
-//   - type=="text" → 拼进 text（空 text 跳过，不再报错）；
+//   - 先扫描是否含 image_url：无图走基线（非 text / 空白 text 一律失败关闭，文案不变），
+//     锁定「纯文本逐字节不变」；含图才允许空白 text 静默跳过；
 //   - type=="image_url" → 解析 ImageURL.URL：
 //   - `data:<mime>;base64,<payload>` → 解 base64 存 data，mime 取头部；
 //     头部缺失 / 非 base64 / 解失败 → 失败关闭（文案说明需要 data URI）；
@@ -657,17 +664,40 @@ func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 		return s, nil, nil
 	}
 	if raw[0] == '[' {
-		// content-parts：text 拼文本，image_url 解出图片；非文本/非图 part 失败关闭。
+		// content-parts：先扫描是否含 image_url。
+		//   - 无图 → 完全走基线逻辑：非 text 或空白 text 一律失败关闭（文案不变），
+		//     以锁定「纯文本逐字节不变」；
+		//   - 含图 → text 拼接（空白 text 静默跳过）、image_url 解码、其它 type 失败关闭。
 		var parts []apicompat.ChatContentPart
 		if err := json.Unmarshal([]byte(raw), &parts); err != nil {
 			return "", nil, fmt.Errorf("%w: message content is not a valid parts array: %v", ErrCursorUnsupportedRequest, err)
 		}
+		hasImage := false
+		for _, p := range parts {
+			if p.Type == "image_url" {
+				hasImage = true
+				break
+			}
+		}
+		if !hasImage {
+			// 基线逻辑：非 text 或空白 text 一律失败关闭，行为与改动前逐字节一致。
+			var b strings.Builder
+			for _, p := range parts {
+				if p.Type != "text" || strings.TrimSpace(p.Text) == "" {
+					return "", nil, fmt.Errorf(
+						"%w: multi-modal content (part type %q) is not supported by cursor protocol", ErrCursorUnsupportedRequest, p.Type)
+				}
+				b.WriteString(p.Text)
+			}
+			return b.String(), nil, nil
+		}
+		// 含图：text 拼接（空白跳过）、image_url 解码、其它 type 失败关闭。
 		var b strings.Builder
 		images := make([]cursorTurnImage, 0, len(parts))
 		for _, p := range parts {
 			switch p.Type {
 			case "text":
-				// 空 text 跳过（不再报错），非空拼进文本。
+				// 空白 text 跳过（仅含图时才允许，避免改变纯文本路径行为）。
 				if strings.TrimSpace(p.Text) == "" {
 					continue
 				}
@@ -696,14 +726,18 @@ func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 
 // cursorDecodeImageURL 解析 image_url 的 URL 为 cursorTurnImage。
 //
-// 仅接受 data URI（`data:<mime>;base64,<payload>`）；远程 URL（http/https 等）
-// 一律失败关闭（本层不服务端抓取远程图片）。头部缺失 / 非 base64 / base64 解失败
-// 也失败关闭，文案说明需要 data URI。
+// 仅接受 data URI（`data:<mime>;base64,<payload>`，或带额外参数如
+// `data:image/svg+xml;charset=utf-8;base64,<payload>`）；远程 URL（http/https 等）
+// 一律失败关闭（本层不服务端抓取远程图片）。新增护栏：
+//   - MIME 必须 image/ 前缀（防 data:text/html 等透传）；
+//   - base64 解码前剔除空白，依次尝试 StdEncoding → URLEncoding（URL-safe 字母表）；
+//   - 解码后字节数超过既有请求体上限（cursorUpstreamStreamMaxBytes）失败关闭。
 func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 	const prefix = "data:"
 	if !strings.HasPrefix(u, prefix) {
+		// 远程 URL：错误信息只回显 host+path（截断、不带 query），防签名参数进日志。
 		return cursorTurnImage{}, fmt.Errorf(
-			"%w: remote image url is not supported (%q); send an inline data: URI instead", ErrCursorUnsupportedRequest, u)
+			"%w: remote image url is not supported (%s); send an inline data: URI instead", ErrCursorUnsupportedRequest, cursorSafeURLForLog(u))
 	}
 	rest := u[len(prefix):]
 	comma := strings.IndexByte(rest, ',')
@@ -714,24 +748,44 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 	meta := rest[:comma]
 	payload := rest[comma+1:]
 
-	semi := strings.IndexByte(meta, ';')
-	if semi < 0 {
-		// 缺 ";base64" 标识 → 非 base64 → 失败关闭。
-		return cursorTurnImage{}, fmt.Errorf(
-			"%w: image data URI must be data:<mime>;base64,<payload>", ErrCursorUnsupportedRequest)
+	// 按 ';' 拆参数，遍历找 base64 标记；其余参数（如 charset）仅作为 mime 说明。
+	// 例：data:image/svg+xml;charset=utf-8;base64,… 必须能过。
+	params := strings.Split(meta, ";")
+	mime := strings.TrimSpace(params[0])
+	isBase64 := false
+	for _, p := range params[1:] {
+		if strings.EqualFold(strings.TrimSpace(p), "base64") {
+			isBase64 = true
+		}
 	}
-	mime := meta[:semi]
-	enc := strings.ToLower(meta[semi+1:])
-	if enc != "base64" {
+	if !isBase64 {
 		return cursorTurnImage{}, fmt.Errorf(
 			"%w: image data URI must use base64 encoding", ErrCursorUnsupportedRequest)
 	}
-	if strings.TrimSpace(mime) == "" {
+	if mime == "" {
 		// 头部缺失 mime → 失败关闭。
 		return cursorTurnImage{}, fmt.Errorf(
 			"%w: image data URI missing mime type", ErrCursorUnsupportedRequest)
 	}
-	data, err := base64.StdEncoding.DecodeString(payload)
+	// MIME 必须是 image/ 前缀（否则 data:text/html 等会被透传，危险）。
+	if !strings.HasPrefix(mime, "image/") {
+		return cursorTurnImage{}, fmt.Errorf(
+			"%w: image data URI mime type must be image/* (got %q)", ErrCursorUnsupportedRequest, mime)
+	}
+
+	// base64 健壮性：解码前剔除空白字符（换行/空格/制表/回车），依次尝试
+	// StdEncoding → URLEncoding（-/_ 字母表）。仍失败才失败关闭。
+	cleaned := strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\n', '\r':
+			return -1
+		}
+		return r
+	}, payload)
+	data, err := base64.StdEncoding.DecodeString(cleaned)
+	if err != nil {
+		data, err = base64.URLEncoding.DecodeString(cleaned)
+	}
 	if err != nil {
 		return cursorTurnImage{}, fmt.Errorf(
 			"%w: image data URI payload is not valid base64: %v", ErrCursorUnsupportedRequest, err)
@@ -740,5 +794,30 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 		return cursorTurnImage{}, fmt.Errorf(
 			"%w: image data URI payload is empty", ErrCursorUnsupportedRequest)
 	}
+	// 体积护栏：解码后字节数超过既有请求体上限 → 失败关闭（复用既有常量，不新增阈值）。
+	if len(data) > cursorUpstreamStreamMaxBytes {
+		return cursorTurnImage{}, fmt.Errorf(
+			"%w: image data URI payload exceeds request body size limit (%d bytes)", ErrCursorUnsupportedRequest, cursorUpstreamStreamMaxBytes)
+	}
 	return cursorTurnImage{data: data, mimeType: mime}, nil
+}
+
+// cursorSafeURLForLog 只取 URL 的 host+path（去掉 query/fragment），并截断 ≤120 字符，
+// 避免把签名参数等敏感信息写进日志/错误信息。
+func cursorSafeURLForLog(u string) string {
+	const maxLen = 120
+	redacted := u
+	if i := strings.IndexByte(u, '?'); i >= 0 {
+		redacted = u[:i]
+	}
+	if i := strings.IndexByte(redacted, '#'); i >= 0 {
+		redacted = redacted[:i]
+	}
+	if i := strings.Index(u, "://"); i >= 0 {
+		redacted = redacted[i+len("://"):]
+	}
+	if len(redacted) > maxLen {
+		redacted = redacted[:maxLen]
+	}
+	return redacted
 }

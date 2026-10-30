@@ -11,9 +11,12 @@ package service
 //   - 远程 URL / file part 仍失败关闭。
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -212,4 +215,233 @@ func TestCursorFilePartStillFailsClosed(t *testing.T) {
 	}
 	_, err := cursorConvertRequest(req, "grok-4.7")
 	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+}
+
+// ---------------------------------------------------------------------------
+// IMG-03：外审 must_fix + 健壮性/归属修正的回归用例
+// ---------------------------------------------------------------------------
+
+// TestCursorBlankTextPartWithoutImageFailsClosed 锁死必修项：无图时空白 text part
+// 必须失败关闭（不能静默跳过改成"Helloworld"），纯文本路径行为回到基线。
+func TestCursorBlankTextPartWithoutImageFailsClosed(t *testing.T) {
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(
+			`[{"type":"text","text":"a"},{"type":"text","text":" "},{"type":"text","text":"b"}]`)}},
+	}
+	_, err := cursorConvertRequest(req, "grok-4.7")
+	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+}
+
+// TestCursorBlankTextPartWithImageAllowed 含图时空白 text part 静默跳过，其余拼接。
+func TestCursorBlankTextPartWithImageAllowed(t *testing.T) {
+	pngBytes, err := base64.StdEncoding.DecodeString(cursorTestPNGDataURI)
+	require.NoError(t, err)
+	content := json.RawMessage(fmt.Sprintf(
+		`[{"type":"text","text":"a"},{"type":"text","text":" "},{"type":"text","text":"b"},`+
+			`{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, cursorTestPNGDataURI))
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
+	}
+	body, err := cursorConvertRequest(req, "grok-4.7")
+	require.NoError(t, err)
+
+	run := cursorAgentRunOf(t, body)
+	msgFields := cursorUserMessageFieldsOf(t, run)
+
+	text, ok := cursorFindField(msgFields, cursorFldUserMsgText)
+	require.True(t, ok)
+	require.Equal(t, "ab", text.String(), "blank text part must be skipped, others concatenated")
+
+	selCtxField, ok := cursorFindField(msgFields, cursorFldUserMsgSelectedContext)
+	require.True(t, ok, "selected_context (f3) must be present when current turn has images")
+	selCtxFields, err := cursorDecodeProtobuf(selCtxField.Bytes)
+	require.NoError(t, err)
+	selImages := cursorAllFields(selCtxFields, cursorFldSelectedContextImages)
+	require.Len(t, selImages, 1)
+	imgFields, err := cursorDecodeProtobuf(selImages[0].Bytes)
+	require.NoError(t, err)
+	dataField, ok := cursorFindField(imgFields, cursorFldSelectedImageData)
+	require.True(t, ok)
+	require.Equal(t, pngBytes, dataField.Bytes, "SelectedImage.f8 must equal the original image bytes")
+	mimeField, ok := cursorFindField(imgFields, cursorFldSelectedImageMimeType)
+	require.True(t, ok)
+	require.Equal(t, "image/png", mimeField.String())
+}
+
+// TestCursorNonImageMimeFailsClosed 非 image/ 的 mime（如 data:text/html）必须失败关闭，
+// 防 html 等被透传进 selected_context。
+func TestCursorNonImageMimeFailsClosed(t *testing.T) {
+	payload := base64.StdEncoding.EncodeToString([]byte("<html>hi</html>"))
+	content := json.RawMessage(fmt.Sprintf(
+		`[{"type":"image_url","image_url":{"url":"data:text/html;base64,%s"}}]`, payload))
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
+	}
+	_, err := cursorConvertRequest(req, "grok-4.7")
+	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+}
+
+// TestCursorOversizedImageFailsClosed 解码后字节数超过既有请求体上限必须失败关闭。
+func TestCursorOversizedImageFailsClosed(t *testing.T) {
+	// 构造一个超过 cursorUpstreamStreamMaxBytes 的 payload（既有请求体上限常量）。
+	big := make([]byte, cursorUpstreamStreamMaxBytes+1)
+	for i := range big {
+		big[i] = 0xAB
+	}
+	payload := base64.StdEncoding.EncodeToString(big)
+	content := json.RawMessage(fmt.Sprintf(
+		`[{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, payload))
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
+	}
+	_, err := cursorConvertRequest(req, "grok-4.7")
+	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+	require.Contains(t, err.Error(), "exceeds request body size limit")
+}
+
+// TestCursorBase64WithLineBreaksDecodes payload 含换行（76 列包装）时必须能解出。
+func TestCursorBase64WithLineBreaksDecodes(t *testing.T) {
+	pngBytes, err := base64.StdEncoding.DecodeString(cursorTestPNGDataURI)
+	require.NoError(t, err)
+	// 每 76 列加一个换行（标准 PEM 包装）。
+	raw := base64.StdEncoding.EncodeToString(pngBytes)
+	var wrapped strings.Builder
+	for i := 0; i < len(raw); i += 76 {
+		end := i + 76
+		if end > len(raw) {
+			end = len(raw)
+		}
+		wrapped.WriteString(raw[i:end])
+		wrapped.WriteByte('\n')
+	}
+	payload := wrapped.String()
+	require.Contains(t, payload, "\n", "test setup must include line breaks")
+	// JSON 字符串里换行必须转义；解析后 url 内含真实换行，由 cursorDecodeImageURL 的解码前剔除逻辑处理。
+	jsonPayload := strings.ReplaceAll(payload, "\n", "\\n")
+	content := json.RawMessage(fmt.Sprintf(
+		`[{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, jsonPayload))
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
+	}
+	body, err := cursorConvertRequest(req, "grok-4.7")
+	require.NoError(t, err)
+
+	run := cursorAgentRunOf(t, body)
+	msgFields := cursorUserMessageFieldsOf(t, run)
+	selCtxField, ok := cursorFindField(msgFields, cursorFldUserMsgSelectedContext)
+	require.True(t, ok)
+	selCtxFields, err := cursorDecodeProtobuf(selCtxField.Bytes)
+	require.NoError(t, err)
+	selImages := cursorAllFields(selCtxFields, cursorFldSelectedContextImages)
+	require.Len(t, selImages, 1)
+	imgFields, err := cursorDecodeProtobuf(selImages[0].Bytes)
+	require.NoError(t, err)
+	dataField, ok := cursorFindField(imgFields, cursorFldSelectedImageData)
+	require.True(t, ok)
+	require.Equal(t, pngBytes, dataField.Bytes)
+}
+
+// TestCursorBase64URLSafeDecodes URL-safe 字母表（-/_）必须能解出。
+func TestCursorBase64URLSafeDecodes(t *testing.T) {
+	pngBytes, err := base64.StdEncoding.DecodeString(cursorTestPNGDataURI)
+	require.NoError(t, err)
+	payload := base64.URLEncoding.EncodeToString(pngBytes)
+	require.NotContains(t, payload, "+")
+	require.NotContains(t, payload, "/")
+	content := json.RawMessage(fmt.Sprintf(
+		`[{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, payload))
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
+	}
+	body, err := cursorConvertRequest(req, "grok-4.7")
+	require.NoError(t, err)
+
+	run := cursorAgentRunOf(t, body)
+	msgFields := cursorUserMessageFieldsOf(t, run)
+	selCtxField, ok := cursorFindField(msgFields, cursorFldUserMsgSelectedContext)
+	require.True(t, ok)
+	selCtxFields, err := cursorDecodeProtobuf(selCtxField.Bytes)
+	require.NoError(t, err)
+	selImages := cursorAllFields(selCtxFields, cursorFldSelectedContextImages)
+	require.Len(t, selImages, 1)
+	imgFields, err := cursorDecodeProtobuf(selImages[0].Bytes)
+	require.NoError(t, err)
+	dataField, ok := cursorFindField(imgFields, cursorFldSelectedImageData)
+	require.True(t, ok)
+	require.Equal(t, pngBytes, dataField.Bytes)
+}
+
+// TestCursorDataURIWithCharsetParamDecodes 带 charset 参数的 data URI
+// （data:image/svg+xml;charset=utf-8;base64,…）必须能过。
+func TestCursorDataURIWithCharsetParamDecodes(t *testing.T) {
+	pngBytes, err := base64.StdEncoding.DecodeString(cursorTestPNGDataURI)
+	require.NoError(t, err)
+	content := json.RawMessage(fmt.Sprintf(
+		`[{"type":"image_url","image_url":{"url":"data:image/svg+xml;charset=utf-8;base64,%s"}}]`, cursorTestPNGDataURI))
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
+	}
+	body, err := cursorConvertRequest(req, "grok-4.7")
+	require.NoError(t, err)
+
+	run := cursorAgentRunOf(t, body)
+	msgFields := cursorUserMessageFieldsOf(t, run)
+	selCtxField, ok := cursorFindField(msgFields, cursorFldUserMsgSelectedContext)
+	require.True(t, ok)
+	selCtxFields, err := cursorDecodeProtobuf(selCtxField.Bytes)
+	require.NoError(t, err)
+	selImages := cursorAllFields(selCtxFields, cursorFldSelectedContextImages)
+	require.Len(t, selImages, 1)
+	imgFields, err := cursorDecodeProtobuf(selImages[0].Bytes)
+	require.NoError(t, err)
+	dataField, ok := cursorFindField(imgFields, cursorFldSelectedImageData)
+	require.True(t, ok)
+	require.Equal(t, pngBytes, dataField.Bytes)
+	mimeField, ok := cursorFindField(imgFields, cursorFldSelectedImageMimeType)
+	require.True(t, ok)
+	require.Equal(t, "image/svg+xml", mimeField.String())
+}
+
+// TestCursorToolMessageImageFailsClosed tool/function 轮若含图片必须失败关闭：
+// 协议里 tool 结果无图片落点，避免把工具产物当成用户上传的图写进 selected_context。
+func TestCursorToolMessageImageFailsClosed(t *testing.T) {
+	content := json.RawMessage(fmt.Sprintf(
+		`[{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, cursorTestPNGDataURI))
+	req := &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+			{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: content},
+			{Role: "user", Content: json.RawMessage(`"next"`)},
+		},
+	}
+	_, err := cursorConvertRequest(req, "grok-4.7")
+	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+	require.Contains(t, err.Error(), "tool")
+}
+
+// goldenCursorPlainTextAgentRunHex 是纯文本请求出站字节的冻结黄金值（十六进制）。
+//
+// 固定 UUID 来源（conv-fixed-pt / msg-fixed-pt）下，纯文本请求的整段 AgentRun
+// 出站字节必须与此逐字节相等。纯文本路径本轮任何改动都不得让它变化
+// （锁死「纯文本逐字节不变」）。由 TestCursorDumpGoldenTmp 在改动前生成。
+const goldenCursorPlainTextAgentRunHex = "00000001420abf020a4650010a20af4a000f139976ef7fd08bf5f05d5477c3643ab14225814cc70020ff262989170a2041b0ba5a1d50f98ef26cc1b234744e9566c9a9d85d4e32387dfdfec86f7f1bdc121e0a1c0a1a0a08616e6420332b333f120c6d73672d66697865642d707420011a0a0a0867726f6b2d342e3722002a0d636f6e762d66697865642d70748a014c0a20af4a000f139976ef7fd08bf5f05d5477c3643ab14225814cc70020ff2629891712287b22726f6c65223a2275736572222c22636f6e74656e74223a227768617420697320322b323f227d8a01680a2041b0ba5a1d50f98ef26cc1b234744e9566c9a9d85d4e32387dfdfec86f7f1bdc12447b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2234227d5d2c226964223a2231227d"
+
+// TestCursorPlainTextAgentRunGoldenBytes 黄金字节回归：纯文本请求的整段出站字节
+// 与冻结 golden 逐字节相等。
+func TestCursorPlainTextAgentRunGoldenBytes(t *testing.T) {
+	golden, err := hex.DecodeString(goldenCursorPlainTextAgentRunHex)
+	require.NoError(t, err)
+	cursorWithFixedUUID(t, "conv-fixed-pt", "msg-fixed-pt")
+	req := &apicompat.ChatCompletionsRequest{
+		Model: "gpt-4o",
+		Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"what is 2+2?"`)},
+			{Role: "assistant", Content: json.RawMessage(`"4"`)},
+			{Role: "user", Content: json.RawMessage(`"and 3+3?"`)},
+		},
+	}
+	body, err := cursorConvertRequest(req, "grok-4.7")
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(golden, body),
+		"pure-text AgentRun bytes must be byte-identical to the frozen golden; got %x", body)
 }
