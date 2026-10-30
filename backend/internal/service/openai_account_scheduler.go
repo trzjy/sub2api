@@ -857,6 +857,11 @@ func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccount(accountID int6
 	return "", errorRate, ttft, false
 }
 
+// openAISchedulingStandbyPromotedBonus 是备用开启时给 codebuddy 备用账号的固定顶分：
+// 远高于任何权重组合（权重组上限为个位数量级），保证其进入 top-K 并在加权序列中显著领先。
+// 仅参与排序计算，不写回 account.Priority，也不影响候选池构成（白名单与档位判定另行负责）。
+const openAISchedulingStandbyPromotedBonus = 1e6
+
 type openAIAccountCandidateScore struct {
 	account   *Account
 	loadInfo  *AccountLoadInfo
@@ -1255,6 +1260,12 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 			if req.StickyAccountID > 0 && item.account.ID == req.StickyAccountID {
 				item.score += weights.SessionSticky
 			}
+		}
+		// L15：备用开启时该模型的 codebuddy 备用账号加固定顶分，与 legacy 排序闭包的
+		// "置于首位"同语义（不改 Priority 字段、不写库）。集合与 L14 同源；未命中集合的
+		// 账号 score 逐位不变。
+		if standbyRoutingAccountPromoted(item.account, req.RequestedModel) {
+			item.score += openAISchedulingStandbyPromotedBonus
 		}
 		// §4.2：codebuddy 平台 + 启用 + K>0 时才走乘法路径。
 		// 乘数恒 ≥1（norm∈[0,1]），无快照/快照陈旧/无参与分包 → norm=0 → 乘 1。
@@ -2219,11 +2230,14 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 		masked := IsIdentityMaskedAccount(account)
 		switch req.TierRoutingPool {
 		case tierRoutingPoolMasked:
+			// 小档仍只收伪装线，备用开启不改变 masked 池成员（L14'/F3）。
 			if !masked {
 				return false, "kimi_tier_pool_excluded"
 			}
 		case tierRoutingPoolUpstream:
-			if masked {
+			// L14'：备用开启时，本模型下的 codebuddy 账号跳过池归属判定，按 upstream
+			// 候选参与；其余准入条件与关闭态完全一致。
+			if masked && !standbyRoutingAccountPromoted(account, req.RequestedModel) {
 				return false, "kimi_tier_pool_excluded"
 			}
 		}

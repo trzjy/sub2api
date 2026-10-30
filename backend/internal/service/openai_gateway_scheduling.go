@@ -696,7 +696,7 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 			return "account_model_not_owned"
 		}
 	}
-	if !openAIAccountEligibleForTierPool(ctx, account) {
+	if !openAIAccountEligibleForTierPool(ctx, account, requestedModel) {
 		return "tier_pool_mismatch"
 	}
 	if account.Platform != platform {
@@ -790,7 +790,7 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	return ""
 }
 
-func openAIAccountEligibleForTierPool(ctx context.Context, account *Account) bool {
+func openAIAccountEligibleForTierPool(ctx context.Context, account *Account, requestedModel string) bool {
 	pool := tierRoutingPoolFromContext(ctx)
 	if pool == "" {
 		return true
@@ -798,9 +798,15 @@ func openAIAccountEligibleForTierPool(ctx context.Context, account *Account) boo
 	masked := IsIdentityMaskedAccount(account)
 	switch pool {
 	case tierRoutingPoolMasked:
+		// 小档仍只收伪装线：备用开启也不把非伪装号抬进 masked 池（L15/F3）。
 		return masked
 	case tierRoutingPoolUpstream:
-		return !masked
+		if !masked {
+			return true
+		}
+		// L14：备用开启时，本模型下的 codebuddy 账号跳过 masked/upstream 池归属判定，
+		// 按 upstream 候选参与（其余准入条件一律不变）。未开启时行为与现状逐位一致。
+		return standbyRoutingAccountPromoted(account, requestedModel)
 	default:
 		return true
 	}
@@ -1945,6 +1951,12 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 
 		sort.SliceStable(available, func(i, j int) bool {
 			a, b := available[i], available[j]
+			// L15：备用开启时该模型的 codebuddy 备用账号置于候选首位，优先于任何
+			// priority 比较（不改 Priority 字段、不写库）。未命中或 closed 时两者同为
+			// false，回落到原比较链，排序逐位不变。
+			if pa, pb := standbyRoutingAccountPromoted(a.account, requestedModel), standbyRoutingAccountPromoted(b.account, requestedModel); pa != pb {
+				return pa
+			}
 			if a.account.Priority != b.account.Priority {
 				return a.account.Priority < b.account.Priority
 			}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -92,4 +93,52 @@ func (r *StandbyRegistry) set(model string, st StandbyStatus) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.statuses[model] = st
+}
+
+// processStandbyRegistry 是进程级单例（生产单容器单副本，方案 §2.2）。
+// 控制器启动时经 DefaultStandbyRegistry() 拿到同一实例如入参，选号层只读。
+// 调度层不得把注册表塞进 ctx 或改 handler 签名：读取统一走 standbyRoutingOpen。
+var processStandbyRegistry atomic.Pointer[StandbyRegistry]
+
+func init() {
+	processStandbyRegistry.Store(NewStandbyRegistry())
+}
+
+// DefaultStandbyRegistry 返回进程级注册表实例；启动装配（控制器）与调度层共用它。
+// 初始化后永不为 nil，直接读取即可。
+func DefaultStandbyRegistry() *StandbyRegistry {
+	return processStandbyRegistry.Load()
+}
+
+// setDefaultStandbyRegistry 替换进程级实例（启动装配与测试用）；nil 退化为空表，
+// 语义等同"全部 closed"。
+func setDefaultStandbyRegistry(registry *StandbyRegistry) {
+	if registry == nil {
+		registry = NewStandbyRegistry()
+	}
+	processStandbyRegistry.Store(registry)
+}
+
+// standbyRoutingOpen 报告该模型是否处于备用开启态；未登记即 closed。
+func standbyRoutingOpen(model string) bool {
+	if model == "" {
+		return false
+	}
+	return DefaultStandbyRegistry().IsOpen(model)
+}
+
+// standbyRoutingAccountPromoted 是执行层唯一判定：该账号是否属于"备用集合"，
+// 即 L14 档位豁免与 L15 置顶共同作用的那批账号。
+//
+// 条件（方案 §11 F3）：调度期平台为 codebuddy 族的账号 ∩ 账号 model_mapping 含该模型
+// ∩ 该模型的 standby 状态为 open。非 codebuddy 账号、未命中模型的账号一律 false，
+// 排序与准入不变。
+func standbyRoutingAccountPromoted(account *Account, requestedModel string) bool {
+	if account == nil || requestedModel == "" || account.Platform != PlatformCodeBuddy {
+		return false
+	}
+	if !explicitModelMappingClaims(*account, requestedModel) {
+		return false
+	}
+	return standbyRoutingOpen(requestedModel)
 }
