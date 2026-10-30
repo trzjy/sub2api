@@ -820,7 +820,14 @@ func codeBuddyTierPlatformMismatchAllowed(account *Account, platform string, req
 	if !isCodeBuddyAggregatedPlatform(platform) || group.ID != groupID || NormalizeOpenAICompatiblePlatform(group.Platform) != platform || !group.AggregateCodeBuddyEnabled {
 		return false
 	}
-	if tierPool != tierRoutingPoolMasked || !IsIdentityMaskedAccount(account) || !openAIStickyAccountMatchesGroup(account, &groupID) {
+	if !openAIStickyAccountMatchesGroup(account, &groupID) {
+		return false
+	}
+	// L14 收口：备用开启时，该模型下的 codebuddy 备用账号跳过档位/伪装要求，按 upstream
+	// 候选参与跨平台承接（含门关闭、pool 为空的分组）。未开启或未命中本模型时保持现状：
+	// 仅 masked 池内的伪装账号可跨平台。
+	if !standbyRoutingAccountPromoted(account, requestedModel) &&
+		(tierPool != tierRoutingPoolMasked || !IsIdentityMaskedAccount(account)) {
 		return false
 	}
 	return requestedModel != "" && account.IsModelSupported(requestedModel)
