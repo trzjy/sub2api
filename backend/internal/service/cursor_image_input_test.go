@@ -517,10 +517,18 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 			},
 		},
 		{
-			// path 中的 '@' 必须保留（已有断言的二次确认，不放开既有行为）。
-			name: "path at preserved",
-			in:   "https://host/a@b",
+			// 缺陷 1（钉死）：protocol-relative + path 内 '@'。原 TrimLeft(u, "/")
+			// 会把整段 path 拉进 authority 误剥 '@'；修复后 path 不被蚕食。
+			name: "protocol relative with at in path",
+			in:   "//host/a@b",
 			want: strPtr("host/a@b"),
+		},
+		{
+			// 缺陷 1（钉死）：authority 为空的协议相对形态，path 以 '/' 开头。
+			// 修复前 OUT="b"（丢了 host、path 被剥 userinfo）；修复后应输出 "/a@b"。
+			name: "empty authority slash path with at",
+			in:   "https:///a@b",
+			want: strPtr("/a@b"),
 		},
 	}
 

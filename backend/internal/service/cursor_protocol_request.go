@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -808,6 +809,16 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 //
 // 关键不变量：所有偏移计算与切片都基于同一段字符串 u（每步就地更新 u），
 // 绝不用原串 u 上的偏移去切已缩短的 redacted，否则会越界 panic。
+//
+// 注意：第 5 步的 strings.ToValidUTF8(u, "") 会**丢弃**成段非法 UTF-8 字节
+// （如 "host/\xff\xfe" → "host/"），因此输出长度 ≤ 输入长度，
+// 且输出不再与原始 URL 字节对齐（不做字节偏移对齐）。
+// cursorSchemeRE 匹配合法 scheme 形态（RFC 3986 §3.1）：以字母开头，之后是
+// 字母/数字/+/./-。仅当 "://" 之前的部分匹配该形态时才视为可剥离的 scheme，
+// 避免内联 SVG data URI 等把内嵌的 "http://" 误当成 scheme 剥掉、丢失
+// "data:image/svg+xml" 前缀（外审第 4 轮缺陷 2）。不用硬编码前缀列表。
+var cursorSchemeRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
+
 func cursorSafeURLForLog(u string) string {
 	const maxLen = 120
 
@@ -819,12 +830,21 @@ func cursorSafeURLForLog(u string) string {
 	if i := strings.IndexByte(u, '#'); i >= 0 {
 		u = u[:i]
 	}
-	// 3. 去掉 scheme:// 前缀（若存在；无 scheme 时下面第 4 步仍会剥 userinfo）。
+	// 3. 去掉 scheme:// 前缀（若存在）。仅当 "://" 之前的部分是合法 scheme 形态
+	//    （字母开头，后接字母/数字/+/./-）才剥离，避免内联 SVG data URI
+	//    "data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\">" 里的内嵌
+	//    "http://" 被误剥、丢掉 "data:image/svg+xml" 前缀（外审第 4 轮缺陷 2）。
+	//    无合法 scheme 时落到第 4 步按 authority 边界处理。
 	if i := strings.Index(u, "://"); i >= 0 {
-		u = u[i+len("://"):]
+		if cursorSchemeRE.MatchString(u[:i]) {
+			u = u[i+len("://"):]
+		}
 	}
 	// 4. 剥离 userinfo：与 scheme 解耦，**无论是否有 scheme 都按 authority 边界处理**。
-	//    - 先去掉开头连续的 '/'，覆盖 "//user:pass@host/path" 这类协议相对/裸形态；
+	//    - 仅剥掉协议相对标记的 "//"（不蚕食 path 自身开头的 '/')，
+	//      使 "https:///a@b" 这类 authority 为空、path 以 '/' 开头的情况
+	//      path 内容不被拉进 authority、path 内的 '@' 不被误当 userinfo
+	//      （外审第 4 轮缺陷 1：原 TrimLeft(u, "/") 会把整段 path 当 authority）；
 	//    - authority = 第一个 '/' 之前的子串（无 '/' 则整串即 authority）；
 	//    - 在 authority 内取**最后一个** '@'，剥掉它及之前的内容，
 	//      使裸 "user:pass@host" 这类凭据也被剥离（与函数自述"只取 host+path"一致）。
@@ -833,7 +853,7 @@ func cursorSafeURLForLog(u string) string {
 	//    按 RFC 3986：userinfo 以 authority 内**最后一个** '@' 结束
 	//    （Go net/url 的 parseAuthority 同样如此），故取最后一个 '@'，
 	//    避免密码片段本身含 '@'（如 "user:p@ss@host"）时把 "ss" 残留在日志里。
-	u = strings.TrimLeft(u, "/")
+	u = strings.TrimPrefix(u, "//")
 	if slash := strings.IndexByte(u, '/'); slash < 0 {
 		// 无 path：整串即 authority，取最后一个 '@'。
 		if at := strings.LastIndexByte(u, '@'); at >= 0 {
