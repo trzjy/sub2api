@@ -41,7 +41,20 @@ type StandbyControllerOptions struct {
 	Now func() time.Time
 	// Logger 日志器，nil 用 slog.Default()。
 	Logger *slog.Logger
+	// ForceOpenModels 是人工强制开启的模型键清单（第 3b 片）：命中者跳过采集与
+	// 状态机，直接置 open，reason=force_open。
+	ForceOpenModels []string
+	// ForceClosedModels 是人工强制关闭的模型键清单：命中者跳过采集与状态机，
+	// 直接置 closed，reason=force_closed。与 ForceOpenModels 同时命中时本表优先。
+	ForceClosedModels []string
 }
+
+// 强制表的审计原因；与自动判定的 reason（如 ttft_p50_above_enter）一起出现在
+// 注册表与 standby_transition 日志里，便于事后区分是人工还是自动置位。
+const (
+	StandbyForceReasonOpen   = "force_open"
+	StandbyForceReasonClosed = "force_closed"
+)
 
 // StandbyController 周期性把判定结果落到 StandbyRegistry。
 type StandbyController struct {
@@ -57,6 +70,10 @@ type StandbyController struct {
 	machines map[string]*StandbyStateMachine
 	// warned 保证"模型名无法推导平台"每个进程只告警一次，避免 30s 刷屏。
 	warned map[string]struct{}
+	// forceOpen / forceClosed 是人工强制表（第 3b 片）的集合形式，构造时定型：
+	// env 在一个进程生命周期内不变，运行期不需要重读。
+	forceOpen   map[string]struct{}
+	forceClosed map[string]struct{}
 
 	stopCh   chan struct{}
 	stopping bool
@@ -83,15 +100,37 @@ func NewStandbyController(
 		registry = NewStandbyRegistry()
 	}
 	return &StandbyController{
-		evaluator: evaluator,
-		covered:   covered,
-		registry:  registry,
-		interval:  opts.Interval,
-		now:       opts.Now,
-		logger:    opts.Logger,
-		machines:  make(map[string]*StandbyStateMachine, 8),
-		warned:    make(map[string]struct{}, 8),
+		evaluator:   evaluator,
+		covered:     covered,
+		registry:    registry,
+		interval:    opts.Interval,
+		now:         opts.Now,
+		logger:      opts.Logger,
+		machines:    make(map[string]*StandbyStateMachine, 8),
+		warned:      make(map[string]struct{}, 8),
+		forceOpen:   standbyForceSet(opts.ForceOpenModels),
+		forceClosed: standbyForceSet(opts.ForceClosedModels),
 	}
+}
+
+// standbyForceSet 把配置里的模型键清单转成集合：去空白、丢空串。
+// 不做通配符展开——强制表按模型键精确匹配，与注册表 key 同口径。
+func standbyForceSet(models []string) map[string]struct{} {
+	if len(models) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		set[model] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
 }
 
 // NewProcessStandbyController 构造控制器，并把它的注册表挂成进程级单例（第 3 片装配）。
@@ -173,7 +212,10 @@ func (c *StandbyController) Stop() {
 	c.mu.Unlock()
 }
 
-// RunOnce 执行一轮完整评估。覆盖清单查询失败即整轮作废（不迁移任何模型）；
+// RunOnce 执行一轮完整评估。
+//
+// 覆盖清单查询失败即自动判定整轮作废（不迁移任何模型）；但人工强制表（第 3b 片）
+// 不依赖任何信号与数据库，仍照常置位——止血开关不能因为查库失败而失效。
 // 单模型采集失败由采集器判 Inconclusive，同样不迁移。
 func (c *StandbyController) RunOnce(ctx context.Context) {
 	if c == nil || c.evaluator == nil || c.covered == nil {
@@ -182,12 +224,33 @@ func (c *StandbyController) RunOnce(ctx context.Context) {
 	models, err := c.covered.ListCoveredModels(ctx)
 	if err != nil {
 		c.logger.Warn("standby_covered_models_failed", "error", err)
-		return
+		models = nil
 	}
 	now := c.now()
-	for _, model := range models {
+	// 强制表里的模型即使不在覆盖清单内也要生效（运维可以直接点名一个模型止血），
+	// 因此本轮待处理集合 = 覆盖清单 ∪ 两张强制表。
+	seen := make(map[string]struct{}, len(models)+len(c.forceOpen)+len(c.forceClosed))
+	for _, model := range c.roundModels(models) {
+		model = strings.TrimSpace(model)
+		if _, dup := seen[model]; dup {
+			continue
+		}
+		seen[model] = struct{}{}
 		c.evaluateModel(ctx, model, now)
 	}
+}
+
+// roundModels 返回本轮待评估的模型键：覆盖清单在前（保持原顺序），强制表在后。
+func (c *StandbyController) roundModels(covered []string) []string {
+	models := make([]string, 0, len(covered)+len(c.forceOpen)+len(c.forceClosed))
+	models = append(models, covered...)
+	for model := range c.forceOpen {
+		models = append(models, model)
+	}
+	for model := range c.forceClosed {
+		models = append(models, model)
+	}
+	return models
 }
 
 // evaluateModel 评估单个模型并推进其状态机。
@@ -200,6 +263,12 @@ func (c *StandbyController) evaluateModel(ctx context.Context, model string, now
 	platform, ok := StandbyPlatformForModel(model)
 	if !ok {
 		c.warnUnknownModel(model)
+		return
+	}
+
+	// 人工强制表优先于采集与状态机：命中即定态，本轮不采集、不推进状态机。
+	if phase, reason, ok := c.forcedPhase(model); ok {
+		c.applyForced(model, platform, phase, reason, now)
 		return
 	}
 
@@ -243,6 +312,87 @@ func (c *StandbyController) evaluateModel(ctx context.Context, model string, now
 			"current_p50_ms", status.CurrentP50Ms,
 		)
 	}
+}
+
+// forcedPhase 报告该模型是否被人工强制表命中，并给出目标相位与审计原因。
+// 两张表同时命中时 force_closed 优先（止血优先），并每进程告警一次。
+func (c *StandbyController) forcedPhase(model string) (StandbyPhase, string, bool) {
+	_, closed := c.forceClosed[model]
+	_, open := c.forceOpen[model]
+	switch {
+	case closed && open:
+		c.warnForceConflict(model)
+		return StandbyPhaseClosed, StandbyForceReasonClosed, true
+	case closed:
+		return StandbyPhaseClosed, StandbyForceReasonClosed, true
+	case open:
+		return StandbyPhaseOpen, StandbyForceReasonOpen, true
+	default:
+		return StandbyPhaseClosed, "", false
+	}
+}
+
+// applyForced 把人工强制结果写进注册表；只有相位/原因变化时才打迁移日志，
+// 避免每轮（默认 30s）刷屏。强制路径不采集，Verdict 固定 Inconclusive（判定未发生）。
+func (c *StandbyController) applyForced(model, platform string, phase StandbyPhase, reason string, now time.Time) {
+	prev, hasPrev := c.registry.Status(model)
+	status := StandbyStatus{
+		Platform:    platform,
+		Open:        phase == StandbyPhaseOpen,
+		Verdict:     StandbyVerdictInconclusive,
+		Reason:      reason,
+		EvaluatedAt: now,
+	}
+	changed := !hasPrev || prev.Open != status.Open || prev.Reason != reason
+	switch {
+	case !changed:
+		status.Since = prev.Since
+		status.OpenedAt = prev.OpenedAt
+	case status.Open:
+		// 刚被强制开启：Since 与 OpenedAt 都记本次置位时刻。
+		status.Since = now
+		status.OpenedAt = now
+	default:
+		status.Since = now
+	}
+
+	c.registry.set(model, status)
+
+	if !changed {
+		return
+	}
+	from := StandbyPhaseClosed
+	if hasPrev && prev.Open {
+		from = StandbyPhaseOpen
+	}
+	c.logger.Info("standby_transition",
+		"model", model,
+		"platform", platform,
+		"from", from.String(),
+		"to", phase.String(),
+		"verdict", status.Verdict.String(),
+		"reason", reason,
+		"forced", true,
+	)
+}
+
+// warnForceConflict 保证同一模型的"两张强制表同时命中"每进程只告警一次。
+func (c *StandbyController) warnForceConflict(model string) {
+	key := "force_conflict:" + model
+	c.mu.Lock()
+	_, seen := c.warned[key]
+	if !seen {
+		c.warned[key] = struct{}{}
+	}
+	c.mu.Unlock()
+	if seen {
+		return
+	}
+	c.logger.Warn("standby_force_conflict",
+		"model", model,
+		"chosen", StandbyForceReasonClosed,
+		"ignored", StandbyForceReasonOpen,
+	)
 }
 
 // machineFor 返回（必要时创建）该模型的状态机。确认时长复用第 1 片常量。

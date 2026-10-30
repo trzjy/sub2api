@@ -177,10 +177,15 @@ func provideStandbyController(cfg *config.Config, db *sql.DB) *service.StandbyCo
 	covered := repository.NewStandbyCoveredRepository(db)
 	collector := service.NewStandbyHealthCollector(healthSource, service.StandbyCollectTimeout, location)
 	controller := service.NewProcessStandbyController(collector, covered, service.StandbyControllerOptions{
-		Interval: interval,
+		Interval:          interval,
+		ForceOpenModels:   cfg.Standby.ForceOpenModels,
+		ForceClosedModels: cfg.Standby.ForceClosedModels,
 	})
 
-	slog.Info("standby_controller_enabled", "interval", interval.String(), "timezone", tz)
+	slog.Info("standby_controller_enabled", "interval", interval.String(), "timezone", tz,
+		"force_open_models", cfg.Standby.ForceOpenModels,
+		"force_closed_models", cfg.Standby.ForceClosedModels,
+	)
 	return controller
 }
 

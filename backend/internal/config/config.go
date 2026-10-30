@@ -127,12 +127,19 @@ type Config struct {
 //   - Enabled：总开关，默认 true。false 时控制器完全不启动（注册表保持空表 =
 //     全部 closed），可用 STANDBY_ENABLED=false 紧急止血。
 //   - PollIntervalSeconds：控制器轮询间隔（秒），默认 30；<=0 时用服务层默认值。
+//   - ForceOpenModels / ForceClosedModels：人工强制表（第 3b 片）。命中的模型跳过
+//     采集与自动判定，直接置位；同一模型同时命中两张表时 ForceClosedModels 优先
+//     （止血优先）。环境变量 STANDBY_FORCE_OPEN_MODELS / STANDBY_FORCE_CLOSED_MODELS，
+//     逗号分隔。表只在本进程内生效：进程重启（去掉 env）即空表，自动判定从
+//     closed 重新开始。
 //
 // 时区复用全局 Config.Timezone（默认 Asia/Shanghai），不另设字段：hour-of-day
 // 分桶必须与 usage_logs 的本地时段口径一致。
 type StandbyConfig struct {
-	Enabled             bool `mapstructure:"enabled"`
-	PollIntervalSeconds int  `mapstructure:"poll_interval_seconds"`
+	Enabled             bool     `mapstructure:"enabled"`
+	PollIntervalSeconds int      `mapstructure:"poll_interval_seconds"`
+	ForceOpenModels     []string `mapstructure:"force_open_models"`
+	ForceClosedModels   []string `mapstructure:"force_closed_models"`
 }
 
 // ProbeConfig 控制无流量渠道抽样直连探测调度器（派发单 C2）。
@@ -2113,6 +2120,13 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if forwardedClientIPHeadersEnvConfigured {
 		cfg.Security.ForwardedClientIPHeaders = normalizeStringSlice(strings.Split(forwardedClientIPHeadersEnv, ","))
 	}
+	// standby 人工强制表（第 3b 片）：env 是逗号分隔字符串，必须自己切分。
+	if raw, ok := os.LookupEnv("STANDBY_FORCE_OPEN_MODELS"); ok {
+		cfg.Standby.ForceOpenModels = normalizeStringSlice(strings.Split(raw, ","))
+	}
+	if raw, ok := os.LookupEnv("STANDBY_FORCE_CLOSED_MODELS"); ok {
+		cfg.Standby.ForceClosedModels = normalizeStringSlice(strings.Split(raw, ","))
+	}
 	cfg.Server.TrustedProxiesConfigured = trustedProxiesConfigured
 	if cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs == 0 {
 		cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs = 15000
@@ -2935,6 +2949,13 @@ func setDefaults() {
 	// STANDBY_ENABLED=false 可紧急关闭；关闭后控制器不启动，注册表保持空表。
 	viper.SetDefault("standby.enabled", true)
 	viper.SetDefault("standby.poll_interval_seconds", 30)
+	// 人工强制表（第 3b 片）：默认空表 = 全部走自动判定。
+	viper.SetDefault("standby.force_open_models", []string{})
+	viper.SetDefault("standby.force_closed_models", []string{})
+	// 逗号分隔的列表无法由 viper 的弱类型解码正确拆分（会被当成单个元素），
+	// 故显式绑定 env，并在 Load 里按 "," 切分覆盖（与 server.trusted_proxies 同法）。
+	_ = viper.BindEnv("standby.force_open_models", "STANDBY_FORCE_OPEN_MODELS")
+	_ = viper.BindEnv("standby.force_closed_models", "STANDBY_FORCE_CLOSED_MODELS")
 
 	setEnvReachableDefaults()
 }

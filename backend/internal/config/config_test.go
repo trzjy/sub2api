@@ -402,6 +402,26 @@ func TestLoadRejectsInvalidForwardedClientIPHeader(t *testing.T) {
 	require.ErrorContains(t, err, "security.forwarded_client_ip_headers")
 }
 
+func TestLoadStandbyForceModelsFromEnvironment(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("STANDBY_FORCE_OPEN_MODELS", "deepseek-v4-pro, kimi-k3")
+	t.Setenv("STANDBY_FORCE_CLOSED_MODELS", "glm-5.3")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, []string{"deepseek-v4-pro", "kimi-k3"}, cfg.Standby.ForceOpenModels)
+	require.Equal(t, []string{"glm-5.3"}, cfg.Standby.ForceClosedModels)
+}
+
+func TestLoadStandbyForceModelsDefaultEmpty(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.Standby.ForceOpenModels)
+	require.Empty(t, cfg.Standby.ForceClosedModels)
+}
+
 func TestLoadExplicitEmptyTrustedProxiesEnablesConfiguredMode(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	viper.Set("server.trusted_proxies", []string{})

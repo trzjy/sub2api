@@ -3,10 +3,12 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -326,4 +328,150 @@ func TestStandbyController_StartStop(t *testing.T) {
 
 	ctrl.Stop()
 	ctrl.Stop() // 重复停止安全
+}
+
+// 第 3b 片：人工强制表。构造带强制表的控制器（日志可注入）。
+func newStandbyForcedController(
+	t *testing.T,
+	eval StandbyEvaluator,
+	covered StandbyCoveredModelSource,
+	clock *fakeStandbyClock,
+	forceOpen, forceClosed []string,
+	logger *slog.Logger,
+) (*StandbyController, *StandbyRegistry) {
+	t.Helper()
+	if logger == nil {
+		logger = newStandbyTestLogger()
+	}
+	registry := NewStandbyRegistry()
+	ctrl := NewStandbyController(eval, covered, registry, StandbyControllerOptions{
+		Interval:          time.Minute,
+		Now:               clock.Now,
+		Logger:            logger,
+		ForceOpenModels:   forceOpen,
+		ForceClosedModels: forceClosed,
+	})
+	return ctrl, registry
+}
+
+// force_open 在健康信号下仍保持 open（健康信号在自动判定里永远不会开启）。
+func TestStandbyController_ForceOpenIgnoresHealthySignals(t *testing.T) {
+	start := time.Date(2026, 10, 30, 10, 0, 0, 0, time.UTC)
+	clock := &fakeStandbyClock{now: start}
+	eval := newFakeStandbyEvaluator()
+	eval.setVerdict("deepseek-v4-pro", StandbyVerdictHealthy)
+	eval.inputs["deepseek-v4-pro"] = healthyTTFTInput("deepseek-v4-pro")
+	covered := &fakeStandbyCovered{models: []string{"deepseek-v4-pro"}}
+	ctrl, registry := newStandbyForcedController(t, eval, covered, clock, []string{"deepseek-v4-pro"}, nil, nil)
+
+	for i := 0; i < 10; i++ {
+		ctrl.RunOnce(context.Background())
+		clock.Advance(10 * time.Minute)
+	}
+
+	require.True(t, registry.IsOpen("deepseek-v4-pro"), "force_open 必须无视健康信号保持开启")
+	status, ok := registry.Status("deepseek-v4-pro")
+	require.True(t, ok)
+	require.Equal(t, StandbyForceReasonOpen, status.Reason)
+	require.Equal(t, "deepseek", status.Platform)
+	require.Equal(t, start, status.OpenedAt, "强制开启时刻只在首次置位时记录")
+	require.Empty(t, eval.callsSnapshot(), "命中强制表不得采集")
+}
+
+// force_closed 在退化信号下仍保持 closed。
+func TestStandbyController_ForceClosedIgnoresDegradedSignals(t *testing.T) {
+	clock := &fakeStandbyClock{now: time.Date(2026, 10, 30, 11, 0, 0, 0, time.UTC)}
+	eval := newFakeStandbyEvaluator()
+	eval.setVerdict("kimi-k3", StandbyVerdictDegraded)
+	eval.inputs["kimi-k3"] = degradedTTFTInput("kimi-k3")
+	covered := &fakeStandbyCovered{models: []string{"kimi-k3"}}
+	ctrl, registry := newStandbyForcedController(t, eval, covered, clock, nil, []string{"kimi-k3"}, nil)
+
+	for i := 0; i < 10; i++ {
+		ctrl.RunOnce(context.Background())
+		clock.Advance(10 * time.Minute)
+	}
+
+	require.False(t, registry.IsOpen("kimi-k3"), "force_closed 必须无视退化信号保持关闭")
+	status, ok := registry.Status("kimi-k3")
+	require.True(t, ok)
+	require.Equal(t, StandbyForceReasonClosed, status.Reason)
+	require.True(t, status.OpenedAt.IsZero())
+	require.Empty(t, eval.callsSnapshot(), "命中强制表不得采集")
+}
+
+// 两张表同时命中同一模型：force_closed 优先。
+func TestStandbyController_ForceClosedWinsOverForceOpen(t *testing.T) {
+	clock := &fakeStandbyClock{now: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)}
+	eval := newFakeStandbyEvaluator()
+	covered := &fakeStandbyCovered{models: []string{"glm-5.3"}}
+	ctrl, registry := newStandbyForcedController(t, eval, covered, clock,
+		[]string{"glm-5.3"}, []string{"glm-5.3"}, nil)
+
+	ctrl.RunOnce(context.Background())
+
+	require.False(t, registry.IsOpen("glm-5.3"))
+	status, ok := registry.Status("glm-5.3")
+	require.True(t, ok)
+	require.Equal(t, StandbyForceReasonClosed, status.Reason)
+}
+
+// 未命中强制表的模型仍走自动判定（回归护栏）。
+func TestStandbyController_UnforcedModelStillAutoEvaluates(t *testing.T) {
+	clock := &fakeStandbyClock{now: time.Date(2026, 10, 30, 13, 0, 0, 0, time.UTC)}
+	eval := newFakeStandbyEvaluator()
+	eval.setVerdict("kimi-k3", StandbyVerdictDegraded)
+	eval.inputs["kimi-k3"] = degradedTTFTInput("kimi-k3")
+	covered := &fakeStandbyCovered{models: []string{"kimi-k3", "deepseek-v4-pro"}}
+	ctrl, registry := newStandbyForcedController(t, eval, covered, clock, []string{"deepseek-v4-pro"}, nil, nil)
+
+	ctrl.RunOnce(context.Background())
+	require.True(t, registry.IsOpen("deepseek-v4-pro"))
+	require.False(t, registry.IsOpen("kimi-k3"), "自动判定仍需 5 分钟确认")
+
+	clock.Advance(StandbyConfirmDuration)
+	ctrl.RunOnce(context.Background())
+	require.True(t, registry.IsOpen("kimi-k3"), "未命中强制表的模型必须继续自动开启")
+
+	calls := eval.callsSnapshot()
+	require.Len(t, calls, 2)
+	for _, call := range calls {
+		require.Equal(t, "kimi-k3", call.model, "只有未强制的模型才会被采集")
+	}
+}
+
+// 强制表里的模型即使不在覆盖清单里也生效（运维可直接点名止血）。
+func TestStandbyController_ForcedModelOutsideCoveredList(t *testing.T) {
+	clock := &fakeStandbyClock{now: time.Date(2026, 10, 30, 14, 0, 0, 0, time.UTC)}
+	eval := newFakeStandbyEvaluator()
+	covered := &fakeStandbyCovered{models: []string{"kimi-k3"}}
+	ctrl, registry := newStandbyForcedController(t, eval, covered, clock,
+		[]string{"glm-5.3"}, []string{"deepseek-v4-pro"}, nil)
+
+	ctrl.RunOnce(context.Background())
+
+	require.True(t, registry.IsOpen("glm-5.3"))
+	require.False(t, registry.IsOpen("deepseek-v4-pro"))
+	status, ok := registry.Status("deepseek-v4-pro")
+	require.True(t, ok)
+	require.Equal(t, "deepseek", status.Platform)
+	require.Equal(t, StandbyForceReasonClosed, status.Reason)
+}
+
+// 迁移日志只在状态变化时写：连续多轮强制态不应刷屏。
+func TestStandbyController_ForceTransitionLoggedOnce(t *testing.T) {
+	clock := &fakeStandbyClock{now: time.Date(2026, 10, 30, 15, 0, 0, 0, time.UTC)}
+	eval := newFakeStandbyEvaluator()
+	covered := &fakeStandbyCovered{models: []string{"deepseek-v4-pro"}}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	ctrl, _ := newStandbyForcedController(t, eval, covered, clock,
+		[]string{"deepseek-v4-pro"}, nil, logger)
+
+	for i := 0; i < 5; i++ {
+		ctrl.RunOnce(context.Background())
+		clock.Advance(time.Minute)
+	}
+
+	require.Equal(t, 1, strings.Count(buf.String(), "standby_transition"), "只有首次置位才写迁移日志")
 }
