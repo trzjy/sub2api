@@ -169,6 +169,21 @@ func (s *cursorSSEStream) next() error {
 			if rejected := cursorMatchKeyRejected(s.parser.content); rejected != nil {
 				return rejected
 			}
+			// 正文内联 tool call：上游没走结构化委托帧，把调用写进了正文。
+			// 流式下无法先收齐再归一而不破坏流式语义，故在此失败关闭——
+			// 让客户端收到明确错误，而不是拿到一段不可执行的正文。
+			//
+			// 短路：正文里没有开标记就不必调解析器（长正文避免 O(n²)）。
+			if strings.Contains(s.parser.content, cursorInlineToolCallOpen) {
+				if _, _, recognized := cursorParseInlineToolCalls(s.parser.content); recognized {
+					// 先落 phase 事件（流式侧归一不了 → 只有拒绝事件），再返回错误。
+					s.parser.logPhase(zapcore.WarnLevel, cursorPhaseInlineToolCallRejected, "",
+						cursorInlineToolCallRejectedFields(
+							cursorInlineToolCallShapeOf(s.parser.content),
+							cursorInlineRejectReasonStreamHit)...)
+					return fmt.Errorf("%w: inline tool call present in stream", ErrCursorProtocol)
+				}
+			}
 			if !s.parser.started {
 				s.buffer.WriteString(s.parser.cursorSSERoleChunk())
 				s.parser.started = true

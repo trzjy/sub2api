@@ -817,7 +817,7 @@ func cursorWriteAll(w io.Writer, p []byte) error {
 //
 // 只用**本 HTTP 实际写出的字节**（同一 writer 语义），因此不会把上一 HTTP 的正文或已交付
 // 工具批重播；id 取本 HTTP 实际响应 ID（chunk 内已由解析器写入）。
-func cursorAggregateSSEToCompletion(body []byte) ([]byte, error) {
+func cursorAggregateSSEToCompletion(sseBody []byte) ([]byte, error) {
 	id, model := "", ""
 	content := strings.Builder{}
 	type callAcc struct {
@@ -827,7 +827,7 @@ func cursorAggregateSSEToCompletion(body []byte) ([]byte, error) {
 	finishReason := "stop"
 	var usage json.RawMessage
 
-	for _, payload := range cursorSSEDataPayloads(body) {
+	for _, payload := range cursorSSEDataPayloads(sseBody) {
 		if payload == "" || payload == "[DONE]" {
 			continue
 		}
@@ -873,15 +873,30 @@ func cursorAggregateSSEToCompletion(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: aggregated completion without response id", ErrCursorProtocolBridgeUnavailable)
 	}
 
+	body := content.String()
+	inline, rest, recognized := cursorParseInlineToolCalls(body)
+	if recognized && len(inline) == 0 {
+		// 识别到内联形态但解析不出参数 → 失败关闭：不得把原文透传成正文
+		// （静默透传正是本缺陷的成因：客户端拿不到 tool_calls，工具静默不执行）。
+		return nil, fmt.Errorf("%w: inline tool call present but unparsable", ErrCursorProtocolBridgeUnavailable)
+	}
+	if len(calls) == 0 && len(inline) > 0 {
+		// 结构化委托优先：仅在无结构化调用时用内联形态补位。
+		for _, tc := range inline {
+			calls = append(calls, &callAcc{id: tc.ID, name: tc.Name, args: tc.Arguments})
+		}
+		body = rest
+	}
+
 	message := map[string]any{"role": "assistant"}
 	if len(calls) == 0 {
-		message["content"] = content.String()
+		message["content"] = body
 	} else {
 		// 有 tool_calls 时**不得丢正文**：客户端实际收到的 assistant 正文必须原样交付。
 		// 交付侧历史摘要（cursorDeliverBatchCheckpoint → batchAssistantText）登记的正是这段
 		// 正文；此处丢字会让 Messages / Responses 客户端回传的项数与交付侧不一致，续轮永久
 		// 400 history_mismatch。正文为空（无前言）时保持 null，与 OpenAI 惯例一致。
-		if text := content.String(); text != "" {
+		if text := body; text != "" {
 			message["content"] = text
 		} else {
 			message["content"] = nil

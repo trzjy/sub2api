@@ -494,11 +494,11 @@ func cursorAssistantText(m apicompat.ChatMessage, base string) string {
 		if strings.TrimSpace(args) == "" || args == "null" {
 			args = "{}"
 		}
-		b.WriteString("\n<tool_call>\n")
+		b.WriteString("\n" + cursorInlineToolCallOpen + "\n")
 		b.WriteString(`{"id":` + cursorJSONString(tc.ID) +
 			`,"name":` + cursorJSONString(tc.Function.Name) +
 			`,"arguments":` + args + `}`)
-		b.WriteString("\n</tool_call>")
+		b.WriteString("\n" + cursorInlineToolCallClose)
 	}
 	return b.String()
 }

@@ -474,3 +474,136 @@ func TestCursorProtocolRequestReturnsConversationID(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, convID, got.String())
 }
+
+// TestCursorProtocolRequestAssistantTextInlineToolCall 钉死请求侧文本化的标记形态。
+//
+// 背景（TC-03）：corealgos 经 Cursor 协议出站时，客户端发来的 assistant 历史
+// （含 tool_calls）会被文本化后作为 agent turn 文本发给上游。文本化产出的形态与
+// 「上游偶发吐在正文里的内联 tool call」形态**同形** → 上游学去这个输出形态 →
+// 产出正文 blob 而不是结构化委托帧 → 站点解析不出结构化 tool_calls → 工具不执行。
+//
+// 本卡把请求侧文本化用的标记**收口到与响应侧同一处**（cursorInlineToolCallOpen /
+// cursorInlineToolCallClose，即 TC-01R2 导出的裸字节常量），断掉「喂 A、学 A、
+// 吐 A」的回路。
+//
+// **核心护栏是「逐字一致」**：上游按字节解析续轮历史，标记或换行动一个字节都会
+// 让续轮历史不匹配。故这里的期望值用**码点转义**拼出（源码里没有位置可以藏进
+// 零宽字符，字节一旦写错必然对不上）。
+const (
+	// tc03ProdOpen / tc03ProdClose 是按生产实测码点表重建的标记字节：
+	//
+	//	开标记 = U+003C + "tool_call" + U+003E
+	//	闭标记 = U+003C + U+002F + "tool_call" + U+003E
+	tc03ProdOpen  = "\x3ctool_call\x3e"
+	tc03ProdClose = "\x3c/tool_call\x3e"
+)
+
+// TestCursorProtocolRequestAssistantTextInlineToolCall 覆盖请求侧文本化的四点语义。
+func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
+	t.Run("逐字一致：单条 tool_call 的输出与预期字面量逐字相等", func(t *testing.T) {
+		msg := apicompat.ChatMessage{
+			Role:    "assistant",
+			Content: json.RawMessage(`"let me check"`),
+			ToolCalls: []apicompat.ChatToolCall{{
+				ID:   "call_1",
+				Type: "function",
+				Function: apicompat.ChatFunctionCall{
+					Name:      "get_weather",
+					Arguments: `{"city":"Beijing"}`,
+				},
+			}},
+		}
+		got := cursorAssistantText(msg, "let me check")
+		want := "let me check" + "\n" +
+			tc03ProdOpen + "\n" +
+			`{"id":"call_1","name":"get_weather","arguments":{"city":"Beijing"}}` + "\n" +
+			tc03ProdClose
+		require.Equal(t, want, got, "request-side text must stay byte-for-byte identical")
+	})
+
+	t.Run("逐字一致：多条 tool_call 按序拼接", func(t *testing.T) {
+		msg := apicompat.ChatMessage{
+			Role:    "assistant",
+			Content: json.RawMessage(`"y"`),
+			ToolCalls: []apicompat.ChatToolCall{
+				{ID: "call_a", Type: "function", Function: apicompat.ChatFunctionCall{
+					Name: "a", Arguments: `{"k":1}`}},
+				{ID: "call_b", Type: "function", Function: apicompat.ChatFunctionCall{
+					Name: "b", Arguments: `{}`}},
+			},
+		}
+		got := cursorAssistantText(msg, "y")
+		want := "y" + "\n" +
+			tc03ProdOpen + "\n" +
+			`{"id":"call_a","name":"a","arguments":{"k":1}}` + "\n" +
+			tc03ProdClose + "\n" +
+			tc03ProdOpen + "\n" +
+			`{"id":"call_b","name":"b","arguments":{}}` + "\n" +
+			tc03ProdClose
+		require.Equal(t, want, got, "each tool_call must render one blob, in order")
+	})
+
+	t.Run("空参兜底：arguments 为空补 {}", func(t *testing.T) {
+		msg := apicompat.ChatMessage{
+			Role:    "assistant",
+			Content: json.RawMessage(`"x"`),
+			ToolCalls: []apicompat.ChatToolCall{{
+				ID:   "call_e",
+				Type: "function",
+				Function: apicompat.ChatFunctionCall{
+					Name:      "noop",
+					Arguments: "",
+				},
+			}},
+		}
+		got := cursorAssistantText(msg, "x")
+		require.Contains(t, got, `"arguments":{}`, "empty arguments must fall back to {}")
+		want := "x" + "\n" +
+			tc03ProdOpen + "\n" +
+			`{"id":"call_e","name":"noop","arguments":{}}` + "\n" +
+			tc03ProdClose
+		require.Equal(t, want, got)
+	})
+
+	t.Run("正文在前：blob 紧跟原 content 之后", func(t *testing.T) {
+		msg := apicompat.ChatMessage{
+			Role:    "assistant",
+			Content: json.RawMessage(`"let me check"`),
+			ToolCalls: []apicompat.ChatToolCall{{
+				ID:   "call_1",
+				Type: "function",
+				Function: apicompat.ChatFunctionCall{
+					Name:      "get_weather",
+					Arguments: `{"city":"Beijing"}`,
+				},
+			}},
+		}
+		got := cursorAssistantText(msg, "let me check")
+		require.True(t, len(got) > len("let me check"), "output must carry the blob")
+		require.Equal(t, "let me check", got[:len("let me check")],
+			"original content must come first, unchanged")
+		require.Equal(t, "\n"+tc03ProdOpen, got[len("let me check"):len("let me check")+len("\n"+tc03ProdOpen)],
+			"blob must follow the content immediately")
+		require.Less(t, indexOfSub(got, "let me check"), indexOfSub(got, tc03ProdOpen),
+			"content must precede the blob")
+	})
+
+	t.Run("无 tool_calls：只输出原 content，不产生 blob（回归）", func(t *testing.T) {
+		msg := apicompat.ChatMessage{Role: "assistant", Content: json.RawMessage(`"plain"`)}
+		got := cursorAssistantText(msg, "plain")
+		require.Equal(t, "plain", got, "no tool_calls means no blob at all")
+		require.NotContains(t, got, tc03ProdOpen, "no blob marker must be emitted")
+	})
+
+	t.Run("标记与响应侧同源：共享常量即生产实测码点（裸字节）", func(t *testing.T) {
+		require.Equal(t, tc03ProdOpen, cursorInlineToolCallOpen,
+			"request side must reuse the same open marker as the response side")
+		require.Equal(t, tc03ProdClose, cursorInlineToolCallClose,
+			"request side must reuse the same close marker as the response side")
+		// 字节护栏：标记里不得混入零宽字符（TC-01 的原始缺陷）。
+		require.NotContains(t, cursorInlineToolCallOpen, "\u200b",
+			"open marker must be bare bytes (no U+200B)")
+		require.NotContains(t, cursorInlineToolCallClose, "\u200b",
+			"close marker must be bare bytes (no U+200B)")
+	})
+}
