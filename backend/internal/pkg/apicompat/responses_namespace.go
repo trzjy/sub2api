@@ -61,7 +61,7 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 			if name == "" {
 				continue
 			}
-			flat := flattenNamespaceToolName(namespace, name)
+			flat := FlattenNamespaceToolName(namespace, name)
 			entry := ResponsesNamespaceName{Namespace: namespace, Name: name}
 			if topLevel[flat] {
 				return nil, false, fmt.Errorf("namespace tool %q/%q flattens to %q which conflicts with a top-level tool of the same name; this upstream cannot disambiguate them, rename one of the tools", namespace, name, flat)
@@ -95,7 +95,7 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 				continue
 			}
 			name := strings.TrimSpace(stringValue(child["name"]))
-			flat := flattenNamespaceToolName(namespace, name)
+			flat := FlattenNamespaceToolName(namespace, name)
 			if name == "" || seen[flat] {
 				continue
 			}
@@ -174,7 +174,7 @@ func rewriteNamespaceQualifiedCall(item map[string]any, names map[string]Respons
 	if namespace == "" || name == "" {
 		return false
 	}
-	flat := flattenNamespaceToolName(namespace, name)
+	flat := FlattenNamespaceToolName(namespace, name)
 	entry, ok := names[flat]
 	if !ok || entry.Namespace != namespace || entry.Name != name {
 		return false

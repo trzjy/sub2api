@@ -590,10 +590,15 @@ func responsesBodyWithTools(stream bool) string {
 }
 
 // responsesContinuationBody 组装续轮请求体：previous_response_id + 本批真实结果 + 同一套工具声明。
-func responsesContinuationBody(previousResponseID string, callIDs []string) string {
-	outputs := make([]string, 0, len(callIDs))
-	for _, callID := range callIDs {
-		outputs = append(outputs, `{"type":"function_call_output","call_id":"`+callID+`","output":"done"}`)
+//
+// items 每项携带 call_id 与其**真实结果类型**：真实 Codex 对 custom 工具回
+// custom_tool_call_output、对 tool_search 回 tool_search_output，只有 namespace 子工具（仍是
+// function_call 语义）才回 function_call_output。调用方必须按每种调用的真实类型传入，不能一律
+// 发 function_call_output（那样会掩盖跨类型伪装，见 §7 校验矩阵）。
+func responsesContinuationBody(previousResponseID string, items []struct{ CallID, ResultType string }) string {
+	outputs := make([]string, 0, len(items))
+	for _, it := range items {
+		outputs = append(outputs, `{"type":"`+it.ResultType+`","call_id":"`+it.CallID+`","output":"done"}`)
 	}
 	return `{"model":"cursor-sonnet","stream":false,"previous_response_id":"` + previousResponseID +
 		`","input":[` + strings.Join(outputs, ",") + `],"tools":` + cursorResponsesClientToolsJSON + `}`
@@ -632,7 +637,11 @@ func TestCursorResponsesToolMetadataSurvivesContinuation(t *testing.T) {
 	require.NotEmpty(t, previousResponseID)
 
 	// ---- HTTP2：续轮（previous_response_id + 本批真实结果）再交付一批同类调用 ----
-	continuation := responsesContinuationBody(previousResponseID, []string{"call_custom_1", "call_ns_1", "call_search_1"})
+	continuation := responsesContinuationBody(previousResponseID, []struct{ CallID, ResultType string }{
+		{CallID: "call_custom_1", ResultType: "custom_tool_call_output"},
+		{CallID: "call_ns_1", ResultType: "function_call_output"},
+		{CallID: "call_search_1", ResultType: "tool_search_output"},
+	})
 	probe, probeErr := CursorProbeResumeRequest(CursorResumeProtocolResponses, []byte(continuation))
 	require.NoError(t, probeErr)
 	ticket, ticketErr := svc.IdentifyResume(probe)

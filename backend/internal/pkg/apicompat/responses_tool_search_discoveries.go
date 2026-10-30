@@ -258,7 +258,7 @@ func responsesNamespaceToolDiscovery(tool map[string]any) (map[string]any, []res
 		if !ok {
 			continue
 		}
-		flat := flattenNamespaceToolName(namespace, direct.name)
+		flat := FlattenNamespaceToolName(namespace, direct.name)
 		identities = append(identities, responsesNamespaceToolCandidate{
 			flat:  flat,
 			child: childCopy,

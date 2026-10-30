@@ -568,13 +568,13 @@ func TestResponsesToolsParsing_StringToolBecomesCustom(t *testing.T) {
 }
 
 func TestFlattenNamespaceToolName_CapsAt64WithHashSuffix(t *testing.T) {
-	assert.Equal(t, "gmail__send", flattenNamespaceToolName("gmail", "send"))
+	assert.Equal(t, "gmail__send", FlattenNamespaceToolName("gmail", "send"))
 
-	long := flattenNamespaceToolName("very_long_namespace_prefix_for_testing_purposes", "and_a_rather_long_tool_name_too")
+	long := FlattenNamespaceToolName("very_long_namespace_prefix_for_testing_purposes", "and_a_rather_long_tool_name_too")
 	assert.LessOrEqual(t, len(long), 64)
 	assert.Contains(t, long, "__")
 	// 同输入结果稳定
-	assert.Equal(t, long, flattenNamespaceToolName("very_long_namespace_prefix_for_testing_purposes", "and_a_rather_long_tool_name_too"))
+	assert.Equal(t, long, FlattenNamespaceToolName("very_long_namespace_prefix_for_testing_purposes", "and_a_rather_long_tool_name_too"))
 }
 
 func TestResponsesInputToChatMessages_ToolSearchCallHistory(t *testing.T) {
@@ -788,7 +788,7 @@ func TestNamespaceToolNames_MapsFlattenedNames(t *testing.T) {
 		Tools: []ResponsesTool{{Type: "function", Name: longChild}},
 	}})
 	assert.Equal(t, NamespacedToolName{Namespace: longNS, Name: longChild},
-		m2[flattenNamespaceToolName(longNS, longChild)])
+		m2[FlattenNamespaceToolName(longNS, longChild)])
 
 	assert.Nil(t, NamespaceToolNames(nil))
 }

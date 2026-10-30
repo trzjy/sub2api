@@ -297,6 +297,11 @@ type ResponsesInputItem struct {
 	// type=function_call_output
 	Output    string `json:"output,omitempty"`
 	outputRaw json.RawMessage
+
+	// type=tool_search_output：较新的客户端把发现结果放在顶层 tools[] 而非 output
+	// 字段（与 chatcompletions_responses_bridge 的规范化同源）。保留该内容，避免
+	// tools-only 结果被摘要成空字符串。
+	Tools json.RawMessage `json:"tools,omitempty"`
 }
 
 func (i *ResponsesInputItem) UnmarshalJSON(data []byte) error {

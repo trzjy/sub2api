@@ -2764,6 +2764,17 @@ type cursorSessionRecord struct {
 	// toolCallIDs 是已登记的对外工具调用 ID（供续轮关联与重复提交拒绝）。
 	toolCallIDs map[string]struct{}
 
+	// deliveredToolCalls 是本会话**已交付**的 Responses 工具调用项语义（wireID → 语义）。
+	//
+	// 续轮登记结果（appendCursorDeliveredResultsToHistory）与历史登记
+	// （appendCursorBatchAssistantHistory 的 Responses 分支）都按此选结果/历史条目类型；
+	// finalizer 随会话清理。只存类型与名字，不存正文/参数（§25.14-D 最小表示）。
+	// 键是发给客户端的 wireID（与客户端回传的 call_id 同源）。
+	deliveredToolCalls map[string]cursorDeliveredToolCall
+	// responsesTools 是首轮声明的 Responses 工具元数据（custom / function / namespace /
+	// tool_search）；历史登记据此把交付侧捕获还原为正确的实际类型，不另造判定。
+	responsesTools cursorResponsesToolMeta
+
 	// pumpEnded 标记背景读循环（每会话一个读循环）是否已结束（终态/传输错误/180s）。
 	// Execute 返回时据此判定会话是否仍存活跨 HTTP：未结束则不触发 finalize。
 	pumpEnded bool
@@ -2881,6 +2892,131 @@ type cursorSessionRecord struct {
 	// 不闭包 gin.Context、不用于任何取消或业务写入；pump/交付边界的阶段事件必须与
 	// 本 HTTP 的观测上下文同源，否则阶段日志会落到 background 而丢失。
 	logCtx context.Context
+}
+
+// cursorDeliveredToolCall 是一条**已交付**的 Responses 工具调用项的语义（不含正文/参数）。
+//
+// 只记录协议层"这是什么类型的调用、叫什么名字"，供历史登记与结果条目类型选择复用，
+// 保证交付侧登记与续轮回传解析读同一套语义（§25.14-D「实际 ID」）。
+type cursorDeliveredToolCall struct {
+	Kind      string // "function_call" | "custom_tool_call" | "tool_search_call"
+	Name      string // 客户端可见名（namespace 子工具为裸名）
+	Namespace string // 仅 namespace 子工具非空
+}
+
+// cursorResponsesToolCallHistoryCanonical 把一条已交付的 Responses 工具调用项规范化为
+// 历史项 canonical 字节。交付侧登记与续轮回传解析必须调用同一函数，保证两侧摘要逐字节
+// 相等（§25.17.2「实际 ID」）。
+//
+// 分不清 kind 的调用 → 失败关闭 ErrCursorResumeUnsupportedContent（绝不回落到 function_call）。
+func cursorResponsesToolCallHistoryCanonical(kind, callID, name, namespace, payload string) ([]byte, error) {
+	switch kind {
+	case "function_call":
+		// 普通 function_call 的 arguments 必须是合法 JSON：键序/空白差异视为同值（经
+		// cursorCanonicalToolArgs 规范化）；非法/截断 JSON 属于不支持内容，**失败关闭**
+		// （绝不把非法 JSON 包成字符串继续摘要，否则会污染历史与续轮前缀比对）。
+		canonicalArgs, argsErr := cursorCanonicalToolArgs(payload)
+		if argsErr != nil {
+			return nil, fmt.Errorf("%w: function_call arguments not valid JSON: %v", ErrCursorResumeUnsupportedContent, argsErr)
+		}
+		m := map[string]json.RawMessage{
+			"call_id":   mustCursorJSON(callID),
+			"name":      mustCursorJSON(name),
+			"arguments": canonicalArgs,
+		}
+		if ns := strings.TrimSpace(namespace); ns != "" {
+			m["namespace"] = mustCursorJSON(ns)
+		}
+		return CursorCanonicalJSON(mustCursorJSONValue(m))
+	case "custom_tool_call":
+		// input 是 custom/freeform 工具的文本输入：原样保留为 JSON 字符串字面量
+		// （mustCursorJSON 当字符串编码，不把裸字节塞进 json.RawMessage 导致 marshal 失败）。
+		m := map[string]json.RawMessage{
+			"call_id": mustCursorJSON(callID),
+			"name":    mustCursorJSON(name),
+			"input":   mustCursorJSON(payload),
+		}
+		return CursorCanonicalJSON(mustCursorJSONValue(m))
+	case "tool_search_call":
+		// arguments 走 JSON 规范化；非合法 JSON 时按文本参与。
+		canonicalArgs, argsErr := cursorCanonicalToolArgs(payload)
+		if argsErr != nil {
+			// 非合法 JSON：当字符串编码为合法 JSON 值。
+			canonicalArgs = mustCursorJSON(payload)
+		}
+		m := map[string]json.RawMessage{
+			"call_id":   mustCursorJSON(callID),
+			"arguments": canonicalArgs,
+		}
+		return CursorCanonicalJSON(mustCursorJSONValue(m))
+	default:
+		return nil, fmt.Errorf("%w: responses tool kind %q", ErrCursorResumeUnsupportedContent, kind)
+	}
+}
+
+// cursorResponsesToolResultCanonical 把一条 Responses 工具结果项规范化为历史项 canonical 字节。
+//
+// 与 cursorResponsesToolCallHistoryCanonical 同源：交付侧登记与续轮回传解析都经本函数，
+// 保证前缀摘要与续轮登记逐字节相等。result 类型（function_call_output / custom_tool_call_output
+// / tool_search_output）由调用方按 kind 选定后作为 itemType 传入。
+func cursorResponsesToolResultCanonical(callID, output string) ([]byte, error) {
+	m := map[string]json.RawMessage{
+		"call_id": mustCursorJSON(callID),
+		"output":  mustCursorJSON(output),
+	}
+	return CursorCanonicalJSON(mustCursorJSONValue(m))
+}
+
+// cursorResponsesDeliveredToolCall 从**实际交付捕获**与首轮工具元数据派生该调用的语义。
+//
+// 复用 apicompat 在回桥侧判定类型的同一组输入（customTools / functionTools /
+// namespaceTools / toolSearch 与摊平名映射），不另造判定：与 announceChatToolItem 的
+// 类型/名字/namespace 决策完全同源。tool_search 代理名与 apicompat 同源（"tool_search"）。
+func cursorResponsesDeliveredToolCall(name string, meta cursorResponsesToolMeta) cursorDeliveredToolCall {
+	// custom：customToolCallName 返回 (裸 custom 名, true) 时该调用为 custom_tool_call。
+	if customName, ok := cursorCustomToolCallName(name, meta); ok {
+		return cursorDeliveredToolCall{Kind: "custom_tool_call", Name: customName}
+	}
+	// tool_search：声明了 tool_search 服务端工具且名为代理名。
+	if meta.toolSearch && name == "tool_search" {
+		return cursorDeliveredToolCall{Kind: "tool_search_call", Name: name}
+	}
+	// namespace 子工具：摊平名命中 namespace 映射 → 还原为裸子工具名 + namespace。
+	if ns, ok := meta.namespaceTools[name]; ok {
+		return cursorDeliveredToolCall{Kind: "function_call", Name: ns.Name, Namespace: ns.Namespace}
+	}
+	// 普通 function_call：未命中任何已声明 custom / tool_search / namespace 子工具的名字，
+	// 按 apicompat 既有回落视为普通 function_call（与 announceChatToolItem 类型决策逐字同源）。
+	// 交付侧与登记侧必须同源，故此处**不失败关闭**——若在此拒绝，会出现"交付=function_call、
+	// 登记=报错"的不一致并触发 502。未声明工具调用的拒付由客户端 / 既有链路处理，不在本层。
+	return cursorDeliveredToolCall{Kind: "function_call", Name: name}
+}
+
+// cursorCustomToolCallName 与 apicompat.customToolCallName 同源：判定给定摊平名是否为
+// custom 工具并还原其裸名。此处复制决策以保持服务包内可用（不修改 apicompat）。
+func cursorCustomToolCallName(name string, meta cursorResponsesToolMeta) (string, bool) {
+	if meta.functionTools[name] {
+		return "", false
+	}
+	if meta.customTools[name] {
+		return name, true
+	}
+	if _, ok := meta.namespaceTools[name]; ok {
+		return "", false
+	}
+	match := ""
+	for customName := range meta.customTools {
+		for _, namespaceTool := range meta.namespaceTools {
+			if apicompat.FlattenNamespaceToolName(namespaceTool.Namespace, customName) != name {
+				continue
+			}
+			if match != "" && match != customName {
+				return "", false
+			}
+			match = customName
+		}
+	}
+	return match, match != ""
 }
 
 // setLogContext 登记阶段日志用的请求 ctx（不参与取消语义）。
@@ -3380,6 +3516,10 @@ type cursorToolDelegations struct {
 	mu   sync.Mutex
 	all  []*cursorToolBatch
 	open map[string]*cursorToolBatch
+	// responsesTools 是首轮声明的 Responses 工具元数据（custom / function / namespace /
+	// tool_search）。prepareDeliveredBatch 在交付准备时写入本对象，供历史登记按实际交付
+	// 语义分类（与 apicompat 回桥同源判定）。仅交付侧读，不参与续轮回传解析。
+	responsesTools cursorResponsesToolMeta
 	// nextSeq 是下一个待分配的批次序号；只有 newBatchLocked 在持有 d.mu 时推进它，
 	// 保证 seq 在**本会话内**严格单调递增、从 1 开始、永不复用（免疫 call_id 跨轮复用）。
 	nextSeq uint64
@@ -5018,6 +5158,10 @@ type CursorToolResult struct {
 	Text       []string
 	Structured []byte
 	IsError    bool
+	// ResultType 是客户端在续轮 input 中给出的结果项类型（仅 Responses 协议有意义，
+	// 如 function_call_output / custom_tool_call_output / tool_search_output）。用于校验
+	// 回传结果类型是否与已交付工具调用的实际语义（kind）一致（§25.14-D「实际 ID」）。
+	ResultType string
 }
 
 // CursorSessionIntake 是真实工具结果回写通道（由原生双工持有方安装）。
@@ -5647,6 +5791,21 @@ func cursorResponsesItemIsOutput(item apicompat.ResponsesInputItem) bool {
 	return false
 }
 
+// cursorResponsesItemResultOutput 取工具结果条目的可摘要输出文本。
+//
+// tool_search_output 可能只有顶层 tools（无 output 字段）：复用 apicompat 的 tool_search
+// 输出规范化方式（chatcompletions_responses_bridge 对 tools-only 回退到 tools 内容），绝不把
+// tools-only 结果摘要成空字符串。普通结果直接取 item.Output。
+func cursorResponsesItemResultOutput(item apicompat.ResponsesInputItem) string {
+	if strings.TrimSpace(item.Output) != "" {
+		return item.Output
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Type), "tool_search_output") && len(bytes.TrimSpace(item.Tools)) > 0 {
+		return string(item.Tools)
+	}
+	return item.Output
+}
+
 // cursorResponsesItemItem 把单个 input 条目规范化为历史项（保留语义字段）。
 func cursorResponsesItemItem(item apicompat.ResponsesInputItem) (cursorContextItem, error) {
 	itemType := strings.ToLower(strings.TrimSpace(item.Type))
@@ -5659,19 +5818,36 @@ func cursorResponsesItemItem(item apicompat.ResponsesInputItem) (cursorContextIt
 		role := strings.ToLower(strings.TrimSpace(item.Role))
 		return cursorContextItem{itemType: "responses.message." + role, canonical: CursorCanonicalText(text)}, nil
 	case "function_call":
-		canonical, err := cursorToolCallCanonical(item.CallID, item.Name, item.Arguments)
+		// 与交付侧登记（appendCursorBatchAssistantHistory 的 Responses 分支）同源：
+		// 同一套 canonical，保证两侧摘要逐字节相等（§25.17.2「实际 ID」）。
+		canonical, err := cursorResponsesToolCallHistoryCanonical("function_call", item.CallID, item.Name, item.Namespace, item.Arguments)
 		if err != nil {
 			return cursorContextItem{}, err
 		}
 		return cursorContextItem{itemType: "responses.function_call", canonical: canonical}, nil
 	case "custom_tool_call":
-		payload := map[string]json.RawMessage{
-			"call_id": mustCursorJSON(item.CallID),
-			"name":    mustCursorJSON(item.Name),
-			// custom 文本输入不当 JSON 强行改写。
-			"input": mustCursorJSON(item.Arguments),
+		// custom 用 item.Input（自由文本），不再用 item.Arguments；namespace 用 item.Namespace。
+		canonical, err := cursorResponsesToolCallHistoryCanonical("custom_tool_call", item.CallID, item.Name, item.Namespace, item.Input)
+		if err != nil {
+			return cursorContextItem{}, err
 		}
-		return cursorContextItem{itemType: "responses.custom_tool_call", canonical: mustCursorJSONValue(payload)}, nil
+		return cursorContextItem{itemType: "responses.custom_tool_call", canonical: canonical}, nil
+	case "tool_search_call":
+		// arguments 对象原文经 CursorCanonicalJSON 规范化；非合法 JSON 时按文本参与。
+		canonical, err := cursorResponsesToolCallHistoryCanonical("tool_search_call", item.CallID, item.Name, item.Namespace, item.Arguments)
+		if err != nil {
+			return cursorContextItem{}, err
+		}
+		return cursorContextItem{itemType: "responses.tool_search_call", canonical: canonical}, nil
+	case "function_call_output", "custom_tool_call_output", "tool_search_output":
+		// 结果条目：与交付侧历史登记同源（appendCursorDeliveredResultsToHistory）。
+		// 只含 call_id / output，保证续轮前缀与结果登记逐字节相等。tool_search_output
+		// 的 tools-only 结果回退到 tools 内容，避免空摘要。
+		canonical, err := cursorResponsesToolResultCanonical(item.CallID, cursorResponsesItemResultOutput(item))
+		if err != nil {
+			return cursorContextItem{}, err
+		}
+		return cursorContextItem{itemType: "responses." + itemType, canonical: canonical}, nil
 	case "reasoning":
 		payload := map[string]json.RawMessage{
 			"encrypted_content": mustCursorJSON(item.EncryptedContent),
@@ -5807,7 +5983,7 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		if callID == "" {
 			return nil, fmt.Errorf("%w: responses tool output without call_id", ErrCursorResumeAmbiguousResults)
 		}
-		plan.results = append(plan.results, CursorToolResult{CallID: callID, Text: []string{item.Output}})
+		plan.results = append(plan.results, CursorToolResult{CallID: callID, Text: []string{cursorResponsesItemResultOutput(item)}, ResultType: item.Type})
 	}
 	for _, item := range items[:start] {
 		if callID := cursorResponsesItemCallID(item); callID != "" {
@@ -6536,6 +6712,23 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		}
 		return nil, err
 	}
+	// 续轮回传的结果项类型必须与已交付工具调用的实际语义（kind）一致：
+	// function_call_output ↔ function_call、custom_tool_call_output ↔ custom_tool_call、
+	// tool_search_output ↔ tool_search_call。否则即"交付 custom 却回传 function_call_output"
+	// 之类的跨类型篡改，必须失败关闭（绝不回落、绝不放宽 history_mismatch）。
+	//
+	// 省略历史（previous_response_id 路径）同样执行本校验（§7 校验矩阵）：省略历史只跳过
+	// **摘要比对**（storedHistory 等价重放），但**不豁免** call_id 归属与结果类型校验——
+	// 客户端仍可能把 custom/tool_search 的结果伪装成 function_call_output。本校验在 intake
+	// 写入（DeliverToolResults）之前执行，保证零上游写入。
+	if ticket.Protocol == CursorResumeProtocolResponses {
+		if err := cursorValidateResponsesResultKinds(record, plan.results); err != nil {
+			if record.batchConsumed() {
+				return nil, newCursorResumeError(http.StatusConflict, "already_consumed", ErrCursorResumeAlreadyConsumed)
+			}
+			return nil, err
+		}
+	}
 	if err := cursorValidateToolChoiceForSession(ticket.Protocol, in.Body, exposed); err != nil {
 		return nil, err
 	}
@@ -6610,7 +6803,7 @@ func (s *CursorExecutionService) ResumeCursorSession(
 	}
 	record.noteStage("resume_write_done")
 	record.mu.Lock()
-	if err := appendCursorDeliveredResultsToHistory(record.historyDigest, ticket.Protocol, plan.results); err != nil {
+	if err := appendCursorDeliveredResultsToHistory(record.historyDigest, ticket.Protocol, plan.results, record); err != nil {
 		record.mu.Unlock()
 		s.finishCursorSession(record, "resume_history_failed")
 		return nil, fmt.Errorf("cursor: append continuation history: %w", err)
@@ -6697,6 +6890,55 @@ func cursorValidateResumeResults(delivered []string, results []CursorToolResult)
 	return nil
 }
 
+// cursorResponsesResultTypeKind 把 Responses 结果项类型映射回其对应工具调用的 kind。
+//
+// function_call_output ↔ function_call、custom_tool_call_output ↔ custom_tool_call、
+// tool_search_output ↔ tool_search_call。未知/不支持的结果类型返回空串（由调用方按
+// 失败关闭处理）。
+func cursorResponsesResultTypeKind(t string) string {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "function_call_output":
+		return "function_call"
+	case "custom_tool_call_output":
+		return "custom_tool_call"
+	case "tool_search_output":
+		return "tool_search_call"
+	default:
+		return ""
+	}
+}
+
+// cursorValidateResponsesResultKinds 校验续轮回传的每个结果项类型是否与已交付工具调用
+// 的实际语义（kind）一致（§25.14-D「实际 ID」）。
+//
+// 结果项类型在交付侧由 appendCursorDeliveredResultsToHistory 按 kind 选定；续轮回传时
+// 客户端给出结果项类型，两者必须同源。不一致（如交付 custom 却回传 function_call_output）
+// 即视为跨类型篡改，失败关闭 ErrCursorResumeUnsupportedContent，绝不回落到 function_call。
+// 仅在 Intake 写入之前调用，保证校验未通过时零上游写入。
+//
+// 未登记即失败关闭：无论是整个会话缺少已交付工具上下文，还是某个 call_id 没有交付记录，
+// 都直接失败关闭（绝不跳过）。这样校验总在写上游之前发生，避免「上游已写入、随后才报错」
+// 的不可回滚状态；deliveredToolCalls 的填充本就覆盖流式与非流式两条交付路径，无需跳过。
+func cursorValidateResponsesResultKinds(record *cursorSessionRecord, results []CursorToolResult) error {
+	if record == nil || record.deliveredToolCalls == nil {
+		return newCursorResumeError(http.StatusBadRequest, "result_type_mismatch",
+			fmt.Errorf("%w: responses result without delivered tool call context", ErrCursorResumeUnsupportedContent))
+	}
+	for _, result := range results {
+		dt, ok := record.deliveredToolCalls[strings.TrimSpace(result.CallID)]
+		if !ok || dt.Kind == "" {
+			return newCursorResumeError(http.StatusBadRequest, "result_type_mismatch",
+				fmt.Errorf("%w: result call_id %q has no delivered tool call", ErrCursorResumeUnsupportedContent, result.CallID))
+		}
+		wantKind := cursorResponsesResultTypeKind(result.ResultType)
+		if wantKind == "" || wantKind != dt.Kind {
+			return newCursorResumeError(http.StatusBadRequest, "result_type_mismatch",
+				fmt.Errorf("%w: result type %q does not match delivered tool call kind %q", ErrCursorResumeUnsupportedContent, result.ResultType, dt.Kind))
+		}
+	}
+	return nil
+}
+
 // cursorToolSetEqual 判断两个工具名集合是否一致（顺序不参与比较，集合变化即不同）。
 func cursorToolSetEqual(a, b []string) bool {
 	setA := make(map[string]struct{}, len(a))
@@ -6721,7 +6963,7 @@ func cursorToolSetEqual(a, b []string) bool {
 // appendCursorDeliveredResultsToHistory 把本次接纳的真实结果推进已交付历史。
 //
 // 表示与各协议历史规范化**同源**（下次续轮重算前缀才能与这里对齐）。
-func appendCursorDeliveredResultsToHistory(d *CursorHistoryDigest, protocol CursorResumeProtocol, results []CursorToolResult) error {
+func appendCursorDeliveredResultsToHistory(d *CursorHistoryDigest, protocol CursorResumeProtocol, results []CursorToolResult, record *cursorSessionRecord) error {
 	if d == nil {
 		return nil
 	}
@@ -6741,8 +6983,29 @@ func appendCursorDeliveredResultsToHistory(d *CursorHistoryDigest, protocol Curs
 				return err
 			}
 		case CursorResumeProtocolResponses:
+			// 结果条目类型必须按**已交付调用的实际语义**选定（§25.14-D「实际 ID」）：
+			// function_call → function_call_output、custom_tool_call → custom_tool_call_output、
+			// tool_search_call → tool_search_output。查不到 kind → 失败关闭（绝不回落）。
+			if record == nil || record.deliveredToolCalls == nil {
+				return fmt.Errorf("%w: responses result without delivered tool call context", ErrCursorResumeUnsupportedContent)
+			}
+			dt, ok := record.deliveredToolCalls[strings.TrimSpace(result.CallID)]
+			if !ok || dt.Kind == "" {
+				return fmt.Errorf("%w: result call_id %q has no delivered tool call", ErrCursorResumeUnsupportedContent, result.CallID)
+			}
+			var resultType string
+			switch dt.Kind {
+			case "function_call":
+				resultType = "function_call_output"
+			case "custom_tool_call":
+				resultType = "custom_tool_call_output"
+			case "tool_search_call":
+				resultType = "tool_search_output"
+			default:
+				return fmt.Errorf("%w: result call_id %q delivered kind %q not supported", ErrCursorResumeUnsupportedContent, result.CallID, dt.Kind)
+			}
 			item := apicompat.ResponsesInputItem{
-				Type:   "function_call_output",
+				Type:   resultType,
 				CallID: result.CallID,
 				Output: strings.Join(result.Text, ""),
 			}
@@ -7136,6 +7399,9 @@ func (r *cursorSessionRecord) recordPlan(identity CursorSessionIdentity, plan *c
 	if plan.history != nil {
 		r.historyDigest = plan.history.Clone()
 	}
+	// 首轮工具元数据（custom / function / namespace / tool_search）随计划写入会话：
+	// 续轮交付准备时据此把实际交付捕获还原为正确的工具类型（与 apicompat 回桥同源判定）。
+	r.responsesTools = plan.responsesTools
 	r.exposedTools = append([]string(nil), plan.tools...)
 	r.instructionsDeclared = plan.instructions
 }
@@ -7403,11 +7669,35 @@ func (s *CursorExecutionService) prepareDeliveredBatch(
 	}
 	// 摘要增量只在克隆上计算：提交前正式历史不推进（沿用最后一批 call_id 语义）。
 	var history *CursorHistoryDigest
+	// 把首轮工具元数据交给 delegations，供 appendCursorBatchAssistantHistory 的 Responses
+	// 分支按实际交付语义分类（与 apicompat 回桥同源判定）。
+	delegations.responsesTools = live.responsesTools
 	if live.historyDigest != nil {
 		history = live.historyDigest.Clone()
 		if err := appendCursorBatchAssistantHistory(history, protocol, assistantText, current.CallIDs, delegations); err != nil {
 			return nil, err
 		}
+	}
+	// 登记本批已交付调用的实际语义（kind/name/namespace）：续轮结果条目类型选择
+	// （appendCursorDeliveredResultsToHistory）与历史摘要同源复用，避免两侧摘要不一致。
+	captures := delegations.snapshot()
+	// 按**实际交付集合**（deliveredCallIDs，覆盖全部已封口批）逐个登记语义，而不只登记
+	// 末批 current.CallIDs：续轮回传时每个已交付 call_id 都必须能查到 kind（否则
+	// appendCursorDeliveredResultsToHistory 会判 result kind missing）。批次序号/幂等语义
+	// 已在上方 deliveredCallIDs 去重与索引登记处保证，本循环只负责填充语义映射。
+	for _, call := range deliveredCallIDs {
+		var name string
+		for _, c := range captures {
+			if c.wireID() == call {
+				name = c.Name
+				break
+			}
+		}
+		dt := cursorResponsesDeliveredToolCall(name, live.responsesTools)
+		if live.deliveredToolCalls == nil {
+			live.deliveredToolCalls = make(map[string]cursorDeliveredToolCall)
+		}
+		live.deliveredToolCalls[call] = dt
 	}
 	prepared := &cursorPreparedBatch{
 		batchID:      batchID,
@@ -7655,11 +7945,16 @@ func appendCursorBatchAssistantHistory(
 				return err
 			}
 		case CursorResumeProtocolResponses:
-			canonical, err := cursorToolCallCanonical(call, name, args)
+			// 按本批实际交付项的语义分类登记（§25.14-D「实际 ID」）：function_call /
+			// custom_tool_call / tool_search_call 用同一套 canonical，与续轮回传解析
+			// （cursorResponsesItemItem）同源，保证两侧摘要逐字节相等。语义从实际交付
+			// 捕获 + 首轮工具元数据派生（apicompat 同源判定），与 writer 写出侧一致。
+			dt := cursorResponsesDeliveredToolCall(name, delegations.responsesTools)
+			canonical, err := cursorResponsesToolCallHistoryCanonical(dt.Kind, call, dt.Name, dt.Namespace, args)
 			if err != nil {
 				return err
 			}
-			if err := history.AppendItem("responses.function_call", canonical); err != nil {
+			if err := history.AppendItem("responses."+dt.Kind, canonical); err != nil {
 				return err
 			}
 		case CursorResumeProtocolGemini:

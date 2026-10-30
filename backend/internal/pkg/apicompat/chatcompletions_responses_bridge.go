@@ -213,7 +213,7 @@ type NamespacedToolName struct {
 // NamespaceToolNames 收集 Responses 请求中 namespace 子工具的摊平名 →（namespace,
 // 子工具名）映射。chat 桥回程时需据此把模型对摊平工具的调用还原为带 namespace 字段
 // 的 function_call 项：codex 按 namespace+name 路由，平铺名会被判为 unsupported
-// call；摊平名超长时带截断哈希（见 flattenNamespaceToolName），无法按字符串切分还原。
+// call；摊平名超长时带截断哈希（见 FlattenNamespaceToolName），无法按字符串切分还原。
 // 摊平名撞名的请求已在转换阶段被显式拒绝（见 namespaceChildrenToChatTools），
 // 此处映射不存在歧义。
 func NamespaceToolNames(tools []ResponsesTool) map[string]NamespacedToolName {
@@ -233,7 +233,7 @@ func NamespaceToolNames(tools []ResponsesTool) map[string]NamespacedToolName {
 			if out == nil {
 				out = make(map[string]NamespacedToolName)
 			}
-			out[flattenNamespaceToolName(tool.Name, child.Name)] = NamespacedToolName{
+			out[FlattenNamespaceToolName(tool.Name, child.Name)] = NamespacedToolName{
 				Namespace: tool.Name,
 				Name:      child.Name,
 			}
@@ -260,7 +260,7 @@ func customToolCallName(name string, customTools, functionTools map[string]bool,
 	match := ""
 	for customName := range customTools {
 		for _, namespaceTool := range namespaceTools {
-			if flattenNamespaceToolName(namespaceTool.Namespace, customName) != name {
+			if FlattenNamespaceToolName(namespaceTool.Namespace, customName) != name {
 				continue
 			}
 			if match != "" && match != customName {
@@ -504,7 +504,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			// namespace 子工具的历史调用带 namespace 字段，需与请求方向的摊平
 			// 命名（namespaceChildrenToChatTools）保持一致。
 			if ns := rawString(item["namespace"]); ns != "" {
-				name = flattenNamespaceToolName(ns, name)
+				name = FlattenNamespaceToolName(ns, name)
 			}
 			toolCall := ChatToolCall{
 				ID:   callID,
@@ -1307,7 +1307,7 @@ func namespaceChildrenToChatTools(tool ResponsesTool, topLevel map[string]bool, 
 		if child.Type != "function" || child.Name == "" {
 			continue
 		}
-		flat := flattenNamespaceToolName(tool.Name, child.Name)
+		flat := FlattenNamespaceToolName(tool.Name, child.Name)
 		entry := NamespacedToolName{Namespace: tool.Name, Name: child.Name}
 		if topLevel[flat] {
 			return nil, fmt.Errorf("namespace tool %q/%q flattens to %q which conflicts with a top-level tool of the same name; this upstream cannot disambiguate them, rename one of the tools", tool.Name, child.Name, flat)
@@ -1335,9 +1335,9 @@ func namespaceChildrenToChatTools(tool ResponsesTool, topLevel map[string]bool, 
 // chatToolNameMaxLen 是 Chat Completions function 工具名的通用长度上限。
 const chatToolNameMaxLen = 64
 
-// flattenNamespaceToolName 生成 namespace 子工具的摊平名；超长时截断并追加
+// FlattenNamespaceToolName 生成 namespace 子工具的摊平名；超长时截断并追加
 // sha256 短哈希保证唯一性。
-func flattenNamespaceToolName(namespace, name string) string {
+func FlattenNamespaceToolName(namespace, name string) string {
 	full := namespace + "__" + name
 	if len(full) <= chatToolNameMaxLen {
 		return full
