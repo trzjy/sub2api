@@ -27,6 +27,7 @@ package service
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,9 +68,17 @@ const (
 	cursorFldUserMsgActionMessage = 1 // UserMessage
 
 	// UserMessage（I1）内：
-	cursorFldUserMsgText      = 1 // string
-	cursorFldUserMsgMessageID = 2 // string
-	cursorFldUserMsgMode      = 4 // enum ConversationMode
+	cursorFldUserMsgText            = 1 // string
+	cursorFldUserMsgMessageID       = 2 // string
+	cursorFldUserMsgMode            = 4 // enum ConversationMode
+	cursorFldUserMsgSelectedContext = 3 // SelectedContext（当前轮图片落点）
+
+	// SelectedContext（UserMessage.f3）与 SelectedImage 字段号（全部来自已取证
+	// schema：agent.v1.SelectedContext.f1 = selected_images repeated SelectedImage；
+	// SelectedImage.f8 = data bytes / f7 = mime_type）。
+	cursorFldSelectedContextImages = 1 // repeated SelectedImage
+	cursorFldSelectedImageData     = 8 // bytes（原始图片字节，由 data URI 解出）
+	cursorFldSelectedImageMimeType = 7 // string
 
 	// ModelDetails（ode）内：
 	cursorFldModelDetailsID = 1 // string，**必须填 wire ID**（活体填展示名会被拒）
@@ -184,6 +193,18 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	userMessage := cursorAppendStringField(nil, cursorFldUserMsgText, last.text)
 	userMessage = cursorAppendStringField(userMessage, cursorFldUserMsgMessageID, messageID)
 	userMessage = cursorAppendVarintField(userMessage, cursorFldUserMsgMode, cursorConversationModeAgent)
+	// 当前轮图片（若有）→ UserMessage.f3 selected_context（SelectedContext）。
+	// 空 images 时不写 f3，保持纯文本路径出站字节逐字节不变。
+	if len(last.images) > 0 {
+		var selCtx []byte
+		for _, img := range last.images {
+			var selImg []byte
+			selImg = cursorAppendBytesField(selImg, cursorFldSelectedImageData, img.data)
+			selImg = cursorAppendStringField(selImg, cursorFldSelectedImageMimeType, img.mimeType)
+			selCtx = cursorAppendBytesField(selCtx, cursorFldSelectedContextImages, selImg)
+		}
+		userMessage = cursorAppendBytesField(userMessage, cursorFldUserMsgSelectedContext, selCtx)
+	}
 	userMsgAction := cursorAppendBytesField(nil, cursorFldUserMsgActionMessage, userMessage)
 	action := cursorAppendBytesField(nil, cursorFldActionUserMessage, userMsgAction)
 
@@ -309,12 +330,23 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool) ([]byte, error) {
 	return mcp, nil
 }
 
-// cursorAgentTurn 是一条已归一化的对话轮次（角色 + 纯文本）。
+// cursorTurnImage 是一张已解出原始字节的图片（来自 content-part 的 data URI）。
+type cursorTurnImage struct {
+	data     []byte // 原始图片字节（由 data:<mime>;base64,<payload> 解出）
+	mimeType string // 如 "image/png"
+}
+
+// cursorAgentTurn 是一条已归一化的对话轮次（角色 + 纯文本 + 可选图片）。
 type cursorAgentTurn struct {
 	// role 只有两种取值："user" / "assistant"（AgentRun 的历史 blob 只有这两种
 	// role 落点，见 62-kv-value-shapes.json 的活体值形状）。
 	role string
 	text string
+	// images 是当前轮携带的图片（user/assistant/tool 均可能带图）。图片落点：
+	//   - 当前轮（最后一轮，必为 user 角色）→ UserMessage.selected_context；
+	//   - 历史轮 user → history blob 的 content 数组（改动 D）。
+	// 纯文本轮 images 为空；system/developer 含图则失败关闭（无落点）。
+	images []cursorTurnImage
 }
 
 // cursorHistoryBlob 是一条历史消息的 KV 载荷（内容寻址）。
@@ -346,6 +378,49 @@ type cursorHistoryAssistantTextPart struct {
 	Text string `json:"text"`
 }
 
+// cursorHistoryUserRichBlob 是带图用户侧历史消息的值形状（按需，仅当该轮含图时
+// 才用，保持纯文本路径的字节稳定——见 cursorHistoryBlobs）。
+//
+// content 改为数组：text 项（text 非空时）在前，其后按 images 顺序排 image 项，
+// 与客户端 coreMessage 序列化方言同形（type 互斥，camelCase 的 mimeType）：
+//
+//	[{"type":"text","text":"…"},{"type":"image","data":"<base64>","mimeType":"image/png"}]
+type cursorHistoryUserRichBlob struct {
+	Role    string                      `json:"role"`
+	Content []cursorHistoryUserRichPart `json:"content"`
+}
+
+// cursorHistoryUserRichPart 是 rich blob content 数组里的一项：用 type 字段区分
+// text / image（与客户端核心 schema 及既有 assistant blob 同方言）。text 项携带
+// Text，image 项携带 Data（base64）+ MimeType（camelCase，不是 mime_type）。
+type cursorHistoryUserRichPart struct {
+	Type     string `json:"type"`               // "text" | "image"
+	Text     string `json:"text,omitempty"`     // type=text
+	Data     string `json:"data,omitempty"`     // type=image（base64）
+	MimeType string `json:"mimeType,omitempty"` // type=image（camelCase，不是 mime_type）
+}
+
+// cursorHistoryUserRichBlobOf 把带图 user turn 组装成 rich blob：先写（文本非空时的）
+// text 项，再按序写 image 项。结构与客户端 coreMessage 序列化方言一致
+// （type 互斥，mimeType 用 camelCase）。
+func cursorHistoryUserRichBlobOf(turn cursorAgentTurn) cursorHistoryUserRichBlob {
+	blob := cursorHistoryUserRichBlob{Role: "user"}
+	if turn.text != "" {
+		blob.Content = append(blob.Content, cursorHistoryUserRichPart{
+			Type: "text",
+			Text: turn.text,
+		})
+	}
+	for _, img := range turn.images {
+		blob.Content = append(blob.Content, cursorHistoryUserRichPart{
+			Type:     "image",
+			Data:     base64.StdEncoding.EncodeToString(img.data),
+			MimeType: img.mimeType,
+		})
+	}
+	return blob
+}
+
 // cursorHistoryBlobs 把历史轮次序列化为内容寻址的 KV 载荷（保序）。
 func cursorHistoryBlobs(history []cursorAgentTurn) ([]cursorHistoryBlob, error) {
 	out := make([]cursorHistoryBlob, 0, len(history))
@@ -354,6 +429,13 @@ func cursorHistoryBlobs(history []cursorAgentTurn) ([]cursorHistoryBlob, error) 
 		var value []byte
 		var err error
 		if turn.role == "assistant" {
+			// assistant 历史侧无 image 落点（agent.v1.ConversationHistoryAssistantContent
+			// 仅 text / reasoning / redacted_reasoning / tool_call）。带图是协议不支持
+			// 的形状，**失败关闭**而非静默丢图（踩项目红线）。
+			if len(turn.images) > 0 {
+				return nil, fmt.Errorf(
+					"%w: assistant message must not contain images (no image landing in conversation history)", ErrCursorUnsupportedRequest)
+			}
 			assistantSeq++
 			value, err = cursorMarshalBlobJSON(cursorHistoryAssistantBlob{
 				Role:    "assistant",
@@ -361,6 +443,9 @@ func cursorHistoryBlobs(history []cursorAgentTurn) ([]cursorHistoryBlob, error) 
 				// id 取**助手消息的序号**（活体样本里首条 assistant 的 id 为 "1"）。
 				ID: strconv.Itoa(assistantSeq),
 			})
+		} else if len(turn.images) > 0 {
+			// 带图 user 轮 → rich blob（content 数组），纯文本路径永不到这。
+			value, err = cursorMarshalBlobJSON(cursorHistoryUserRichBlobOf(turn))
 		} else {
 			value, err = cursorMarshalBlobJSON(cursorHistoryUserBlob{Role: "user", Content: turn.text})
 		}
@@ -410,12 +495,17 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 	sawUser := false
 
 	for _, m := range msgs {
-		text, err := cursorMessageText(m)
+		text, images, err := cursorMessageContent(m)
 		if err != nil {
 			return nil, err
 		}
 		switch strings.ToLower(strings.TrimSpace(m.Role)) {
 		case "system", "developer":
+			// system/developer 无图片落点：含图则失败关闭（不静默丢图、也不乱放）。
+			if len(images) > 0 {
+				return nil, fmt.Errorf(
+					"%w: system/developer message must not contain images (no image landing in protocol)", ErrCursorUnsupportedRequest)
+			}
 			if text != "" {
 				systemParts = append(systemParts, text)
 			}
@@ -425,20 +515,29 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 				text = cursorJoinSystem(systemParts) + text
 				systemParts = nil
 			}
-			turns = append(turns, cursorAgentTurn{role: "user", text: text})
+			turns = append(turns, cursorAgentTurn{role: "user", text: text, images: images})
 			sawUser = true
 		case "assistant", "ai":
+			// 图片落点仅在 user 侧：assistant 历史 blob 没有任何 image 字段
+			// （agent.v1.ConversationHistoryAssistantContent 只含
+			// text / reasoning / redacted_reasoning / tool_call）。带图属协议不支持
+			// 的形状，**失败关闭**而非静默丢图（踩项目红线），尽早在此报出。
+			if len(images) > 0 {
+				return nil, fmt.Errorf(
+					"%w: assistant message must not contain images (no image landing in conversation history)", ErrCursorUnsupportedRequest)
+			}
 			// assistant 可能携带 tool_calls：原 content（可空）+ 每块一个
 			// <tool_call> blob（见 §4 续轮文本化）。
-			turns = append(turns, cursorAgentTurn{role: "assistant", text: cursorAssistantText(m, text)})
+			turns = append(turns, cursorAgentTurn{role: "assistant", text: cursorAssistantText(m, text), images: images})
 		case "tool", "function":
 			// 工具结果 → user turn（Cursor 历史仅 user/assistant 两种落点，见 §4）。
-			// 文本化失败关闭（含非文本 part 时与多模态口径一致）。
-			tt, err := cursorToolResultText(m)
+			// 文本化失败关闭（含非文本 part 时与多模态口径一致）；图片挂到该
+			// user turn 上（若有，走 history rich blob）。
+			tt, tImages, err := cursorToolResultText(m)
 			if err != nil {
 				return nil, err
 			}
-			turns = append(turns, cursorAgentTurn{role: "user", text: tt})
+			turns = append(turns, cursorAgentTurn{role: "user", text: tt, images: tImages})
 		case "":
 			return nil, fmt.Errorf("%w: message without role", ErrCursorUnsupportedRequest)
 		default:
@@ -507,12 +606,13 @@ func cursorAssistantText(m apicompat.ChatMessage, base string) string {
 //
 // 续轮文本化（§4）：Cursor 历史仅 user/assistant 两种落点，工具结果无处可去，
 // 故包成 `<tool_result tool_call_id="..." name="...">\n<content>\n...\n</tool_result>`
-// 落为 user。content 为字符串或纯 text part 拼接；含非文本 part → 失败关闭
-// （与多模态口径一致）。
-func cursorToolResultText(m apicompat.ChatMessage) (string, error) {
-	content, err := cursorMessageText(m)
+// 落为 user。content 为字符串或纯 text part 拼接；含非文本 part 时按新口径：
+// image_url（data URI）解出图片、远程 URL / file / 未知 → 失败关闭
+// （与多模态口径一致）。图片随 user turn 一并返回，供 history rich blob 使用。
+func cursorToolResultText(m apicompat.ChatMessage) (string, []cursorTurnImage, error) {
+	content, images, err := cursorMessageContent(m)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	id := m.ToolCallID
 	name := m.Name
@@ -527,42 +627,118 @@ func cursorToolResultText(m apicompat.ChatMessage) (string, error) {
 	b.WriteString(">\n<content>\n")
 	b.WriteString(content)
 	b.WriteString("\n</tool_result>")
-	return b.String(), nil
+	return b.String(), images, nil
 }
 
-// cursorMessageText 从一条 OpenAI 消息取纯文本。
+// cursorMessageContent 从一条 OpenAI 消息取（文本 + 图片）。
 //
-// 失败关闭：content 是数组（content-parts）且含非文本 part 时报错，**不静默丢弃图片**——
-// 静默丢图会让模型在缺图的情况下自信作答，比报错有害得多。
-func cursorMessageText(m apicompat.ChatMessage) (string, error) {
+// 失败关闭口径（与首版"不静默丢图"一致）：
+//   - content 是字符串 → text 原样，images 空；
+//   - content 是 parts 数组：
+//   - type=="text" → 拼进 text（空 text 跳过，不再报错）；
+//   - type=="image_url" → 解析 ImageURL.URL：
+//   - `data:<mime>;base64,<payload>` → 解 base64 存 data，mime 取头部；
+//     头部缺失 / 非 base64 / 解失败 → 失败关闭（文案说明需要 data URI）；
+//   - 其它形态（http/https 等远程 URL）→ 失败关闭，文案明确
+//     "remote image url is not supported"（本层不服务端抓取远程图片）；
+//   - 其它 type（file / 未知）→ 仍失败关闭（沿用现有文案）。
+//   - content 是数字 / 布尔 / 对象 → 仍失败关闭。
+func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, error) {
 	raw := strings.TrimSpace(string(m.Content))
 	if raw == "" || raw == "null" {
 		// 兼容 content 缺省与显式 null；tool_calls 型消息正文为空是合法的。
-		return "", nil
+		return "", nil, nil
 	}
 	if raw[0] == '"' {
 		var s string
 		if err := json.Unmarshal([]byte(raw), &s); err != nil {
-			return "", fmt.Errorf("%w: message content is not a string: %v", ErrCursorUnsupportedRequest, err)
+			return "", nil, fmt.Errorf("%w: message content is not a string: %v", ErrCursorUnsupportedRequest, err)
 		}
-		return s, nil
+		return s, nil, nil
 	}
 	if raw[0] == '[' {
-		// 尝试判定是否"纯文本 parts"——只有 text part 时可安全降级为字符串。
+		// content-parts：text 拼文本，image_url 解出图片；非文本/非图 part 失败关闭。
 		var parts []apicompat.ChatContentPart
 		if err := json.Unmarshal([]byte(raw), &parts); err != nil {
-			return "", fmt.Errorf("%w: message content is not a valid parts array: %v", ErrCursorUnsupportedRequest, err)
+			return "", nil, fmt.Errorf("%w: message content is not a valid parts array: %v", ErrCursorUnsupportedRequest, err)
 		}
 		var b strings.Builder
+		images := make([]cursorTurnImage, 0, len(parts))
 		for _, p := range parts {
-			if p.Type != "text" || strings.TrimSpace(p.Text) == "" {
-				return "", fmt.Errorf(
+			switch p.Type {
+			case "text":
+				// 空 text 跳过（不再报错），非空拼进文本。
+				if strings.TrimSpace(p.Text) == "" {
+					continue
+				}
+				b.WriteString(p.Text)
+			case "image_url":
+				if p.ImageURL == nil {
+					return "", nil, fmt.Errorf(
+						"%w: image_url part missing url", ErrCursorUnsupportedRequest)
+				}
+				img, err := cursorDecodeImageURL(p.ImageURL.URL)
+				if err != nil {
+					return "", nil, err
+				}
+				images = append(images, img)
+			default:
+				// file / 未知 type → 失败关闭（沿用现有文案）。
+				return "", nil, fmt.Errorf(
 					"%w: multi-modal content (part type %q) is not supported by cursor protocol", ErrCursorUnsupportedRequest, p.Type)
 			}
-			b.WriteString(p.Text)
 		}
-		return b.String(), nil
+		return b.String(), images, nil
 	}
 	// 数字 / 布尔 / 对象等：Cursor 侧只接受 string，失败关闭。
-	return "", fmt.Errorf("%w: message content must be a string or content-parts array", ErrCursorUnsupportedRequest)
+	return "", nil, fmt.Errorf("%w: message content must be a string or content-parts array", ErrCursorUnsupportedRequest)
+}
+
+// cursorDecodeImageURL 解析 image_url 的 URL 为 cursorTurnImage。
+//
+// 仅接受 data URI（`data:<mime>;base64,<payload>`）；远程 URL（http/https 等）
+// 一律失败关闭（本层不服务端抓取远程图片）。头部缺失 / 非 base64 / base64 解失败
+// 也失败关闭，文案说明需要 data URI。
+func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
+	const prefix = "data:"
+	if !strings.HasPrefix(u, prefix) {
+		return cursorTurnImage{}, fmt.Errorf(
+			"%w: remote image url is not supported (%q); send an inline data: URI instead", ErrCursorUnsupportedRequest, u)
+	}
+	rest := u[len(prefix):]
+	comma := strings.IndexByte(rest, ',')
+	if comma < 0 {
+		return cursorTurnImage{}, fmt.Errorf(
+			"%w: image data URI must be data:<mime>;base64,<payload>", ErrCursorUnsupportedRequest)
+	}
+	meta := rest[:comma]
+	payload := rest[comma+1:]
+
+	semi := strings.IndexByte(meta, ';')
+	if semi < 0 {
+		// 缺 ";base64" 标识 → 非 base64 → 失败关闭。
+		return cursorTurnImage{}, fmt.Errorf(
+			"%w: image data URI must be data:<mime>;base64,<payload>", ErrCursorUnsupportedRequest)
+	}
+	mime := meta[:semi]
+	enc := strings.ToLower(meta[semi+1:])
+	if enc != "base64" {
+		return cursorTurnImage{}, fmt.Errorf(
+			"%w: image data URI must use base64 encoding", ErrCursorUnsupportedRequest)
+	}
+	if strings.TrimSpace(mime) == "" {
+		// 头部缺失 mime → 失败关闭。
+		return cursorTurnImage{}, fmt.Errorf(
+			"%w: image data URI missing mime type", ErrCursorUnsupportedRequest)
+	}
+	data, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return cursorTurnImage{}, fmt.Errorf(
+			"%w: image data URI payload is not valid base64: %v", ErrCursorUnsupportedRequest, err)
+	}
+	if len(data) == 0 {
+		return cursorTurnImage{}, fmt.Errorf(
+			"%w: image data URI payload is empty", ErrCursorUnsupportedRequest)
+	}
+	return cursorTurnImage{data: data, mimeType: mime}, nil
 }
