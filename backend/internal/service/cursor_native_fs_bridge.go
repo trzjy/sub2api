@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 // Cursor 原生文件工具桥接（ExecServerMessage.f3/f4/f5/f7/f8 → 下游 tool_call → 回写对应 Result）。
@@ -685,6 +687,65 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 	return tc, nil
 }
 
+// cursorDeclaredToolNameMaxLen 是 declared_tool_names 单条工具名截断长度（防超长名撑爆日志）。
+const cursorDeclaredToolNameMaxLen = 64
+
+// cursorDeclaredToolNameMaxCount 是 declared_tool_names 字段的工具名总数上限（防声明集过大撑爆日志）。
+const cursorDeclaredToolNameMaxCount = 64
+
+// cursorToolDefName 从单条 McpToolDefinition 原始字节解出工具名：优先 f5 tool_name，回落 f1 name。
+// 只取名字，**不**读取 description / input_schema / 参数值等任何内容。解码失败或两者皆空返回空串。
+func cursorToolDefName(raw []byte) string {
+	fields, err := cursorDecodeProtobuf(raw)
+	if err != nil {
+		return ""
+	}
+	var f1, f5 string
+	for _, f := range fields {
+		switch f.Number {
+		case cursorFldMcpToolDefName:
+			f1 = f.String()
+		case cursorFldMcpToolDefToolName:
+			f5 = f.String()
+		}
+	}
+	if f5 != "" {
+		return f5
+	}
+	return f1
+}
+
+// declaredToolNames 从本请求 f4 声明集（declaredToolDefs）解析出全部工具名（有序、去重）。
+//
+// 只读、无副作用、不缓存；每条声明集只取名字（f5 回落 f1），**不**读取 description / schema /
+// 参数值。单条名超 cursorDeclaredToolNameMaxLen 截断，总数不超过 cursorDeclaredToolNameMaxCount
+// （超出丢弃，避免日志膨胀）。供 NSFS-01 只读观测：定位生产"客户端到底声明了哪些工具名"这一未决疑问。
+func (d *cursorAgentDuplex) declaredToolNames() []string {
+	if len(d.declaredToolDefs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(d.declaredToolDefs))
+	out := make([]string, 0, len(d.declaredToolDefs))
+	for _, raw := range d.declaredToolDefs {
+		name := cursorToolDefName(raw)
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		if r := []rune(name); len(r) > cursorDeclaredToolNameMaxLen {
+			name = string(r[:cursorDeclaredToolNameMaxLen])
+		}
+		out = append(out, name)
+		if len(out) >= cursorDeclaredToolNameMaxCount {
+			break
+		}
+	}
+	return out
+}
+
 // cursorRejectNativeFsNoTool 处理"客户端未声明该 kind 对应工具"这一专用哨兵：
 // 不发委托、不建批，直接写出该 kind 对应的失败 Result 帧（error 文本固定
 // "client has no <kind> tool declared"），并补 stream_close 让 exec 流正常终止，
@@ -693,6 +754,16 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 // cap 携带 ExecID / IDField / Kind / ArgsJSON：ArgsJSON 用已解析参数序列化（无属性时给 "{}"），
 // 仅供失败帧回填路径/模式。不登记任何委托，故续轮不会有 orphan 回写。
 func (d *cursorAgentDuplex) cursorRejectNativeFsNoTool(execID uint64, idField []byte, kind string, params []cursorNativeFsParam) (cursorToolCallCapture, error) {
+	// NSFS-01 只读观测：把本请求声明的全部工具名（有序、去重、截断封顶）随拒绝帧一并记录，
+	// 供定位生产"客户端到底声明了哪些工具名"这一未决疑问。只读观测，绝不改变返回值 / 失败帧 /
+	// 封口判定，也绝不记录 description / schema / 参数值。
+	declared := d.declaredToolNames()
+	d.logPhase(zap.InfoLevel, "native_fs_reject_declared_tool_names", "",
+		zap.Uint64("exec_id", execID),
+		zap.String("kind", kind),
+		zap.String("declared_tool_names", strings.Join(declared, ",")),
+		zap.Int("declared_tool_name_count", len(declared)))
+
 	argsJSON := cursorNativeFsParamsToJSON(params)
 	text := fmt.Sprintf("client has no %s tool declared", kind)
 
