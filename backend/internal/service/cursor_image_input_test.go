@@ -434,7 +434,7 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 	tests := []struct {
 		name       string
 		in         string
-		want       string   // 期望精确输出；空字符串表示仅校验约束，不比对精确值
+		want       *string  // 期望精确输出；用 strPtr("") 表示期望空串；省略（nil）表示仅校验约束不比对精确值
 		noContains []string // 输出不得包含的子串
 		check      func(t *testing.T, out string)
 	}{
@@ -442,24 +442,24 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 			name: "query before scheme",
 			in:   "a?b://c",
 			// 去掉 query 后只剩 "a"，不再有 "://"，原样返回 "a"。
-			want: "a",
+			want: strPtr("a"),
 		},
 		{
 			name: "only scheme marker",
 			in:   "?://",
 			// query 在 0，整串被清空。
-			want: "",
+			want: strPtr(""),
 		},
 		{
 			name:       "userinfo and query stripped",
 			in:         "https://user:pass@host/x?a=1",
-			want:       "host/x",
+			want:       strPtr("host/x"),
 			noContains: []string{"user:pass", "a=1"},
 		},
 		{
 			name: "multibyte host stays valid utf8",
 			in:   "https://例え.jp/路径?a=1",
-			want: "例え.jp/路径",
+			want: strPtr("例え.jp/路径"),
 			check: func(t *testing.T, out string) {
 				require.True(t, utf8.ValidString(out), "output must be valid UTF-8, got %q", out)
 			},
@@ -467,7 +467,7 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 		{
 			name: "empty input",
 			in:   "",
-			want: "",
+			want: strPtr(""),
 		},
 		{
 			name: "long input truncated and valid",
@@ -481,7 +481,18 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 		{
 			name: "not a url returned as-is",
 			in:   "not-a-url",
-			want: "not-a-url",
+			want: strPtr("not-a-url"),
+		},
+		{
+			name:       "multiple @ picks last",
+			in:         "https://user:p@ss@host/x",
+			want:       strPtr("host/x"),
+			noContains: []string{"user", "ss@"},
+		},
+		{
+			name: "at in path preserved",
+			in:   "https://host/a@b",
+			want: strPtr("host/a@b"),
 		},
 	}
 
@@ -491,8 +502,8 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 			require.NotPanics(t, func() {
 				out = cursorSafeURLForLog(tc.in)
 			}, "cursorSafeURLForLog must never panic")
-			if tc.want != "" {
-				require.Equal(t, tc.want, out)
+			if tc.want != nil {
+				require.Equal(t, *tc.want, out)
 			}
 			for _, s := range tc.noContains {
 				require.NotContains(t, out, s)

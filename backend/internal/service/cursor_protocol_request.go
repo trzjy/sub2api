@@ -822,11 +822,20 @@ func cursorSafeURLForLog(u string) string {
 	// 3. 去掉 scheme:// 前缀。
 	if i := strings.Index(u, "://"); i >= 0 {
 		u = u[i+len("://"):]
-		// 4. 剥离 userinfo（scheme://user:pass@host 里的 user:pass@），
-		//    仅当 '@' 出现在第一个 '/'（path 起点）之前才算 userinfo，
+		// 4. 剥离 userinfo（scheme://user:pass@host 里的 user:pass@）。
+		//    仅当 '@' 出现在第一个 '/'（path 起点）之前才算 authority 内的 userinfo，
 		//    避免误删 path 中合法的 '@'。
-		if at := strings.IndexByte(u, '@'); at >= 0 {
-			if slash := strings.IndexByte(u, '/'); slash < 0 || at < slash {
+		//    按 RFC 3986：userinfo 以 authority 内**最后一个** '@' 结束
+		//    （Go net/url 的 parseAuthority 同样如此），故取最后一个 '@'，
+		//    避免密码片段本身含 '@'（如 "user:p@ss@host"）时把 "ss" 残留在日志里。
+		if slash := strings.IndexByte(u, '/'); slash < 0 {
+			// 无 path：整串即 authority，取最后一个 '@'。
+			if at := strings.LastIndexByte(u, '@'); at >= 0 {
+				u = u[at+1:]
+			}
+		} else {
+			// 有 path：只在 authority 子串（slash 之前）里取最后一个 '@'。
+			if at := strings.LastIndexByte(u[:slash], '@'); at >= 0 {
 				u = u[at+1:]
 			}
 		}
