@@ -138,7 +138,7 @@ func provideXianguanjiaSupplyOrderService(
 //
 // 这里一次装配四个部件，因为它们共享同一份运行时上下文（DB、时区、间隔）：
 //   - repository.NewStandbyHealthRepository → service.StandbyHealthSource（只读查询）
-//   - repository.NewStandbyCoveredRepository → service.StandbyCoveredModelSource
+//   - service.NewStandbyCoveredModelSource（第 3c 片：固定单一请求侧模型清单，不查库）
 //   - service.NewStandbyHealthCollector（按全局时区做 hour-of-day 分桶）
 //   - service.NewProcessStandbyController（注册表挂成进程级单例，调度层读同一实例）
 //
@@ -174,7 +174,7 @@ func provideStandbyController(cfg *config.Config, db *sql.DB) *service.StandbyCo
 	}
 
 	healthSource := repository.NewStandbyHealthRepository(db)
-	covered := repository.NewStandbyCoveredRepository(db)
+	covered := service.NewStandbyCoveredModelSource()
 	collector := service.NewStandbyHealthCollector(healthSource, service.StandbyCollectTimeout, location)
 	controller := service.NewProcessStandbyController(collector, covered, service.StandbyControllerOptions{
 		Interval:          interval,
@@ -183,6 +183,7 @@ func provideStandbyController(cfg *config.Config, db *sql.DB) *service.StandbyCo
 	})
 
 	slog.Info("standby_controller_enabled", "interval", interval.String(), "timezone", tz,
+		"covered_models", service.StandbyCoveredModelList(),
 		"force_open_models", cfg.Standby.ForceOpenModels,
 		"force_closed_models", cfg.Standby.ForceClosedModels,
 	)

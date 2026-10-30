@@ -12,9 +12,12 @@ import (
 
 // 主力渠道延迟/故障自适应备用切换 · 控制器（第 2a 片）。
 //
-// 职责：周期性遍历"覆盖的模型"（来自生产库只读查询的 codebuddy 账号
-// model_mapping 键），对每个模型跑一次采集 + 唯一判定函数，把结果推给状态机，
-// 迁移发生时写注册表并打结构化日志。
+// 职责：周期性遍历"覆盖的模型"，对每个模型跑一次采集 + 唯一判定函数，把结果推给
+// 状态机，迁移发生时写注册表并打结构化日志。
+//
+// 覆盖范围自第 3c 片起收敛为固定清单（StandbyCoveredModelList）：判定键是请求侧
+// 模型名，不再按分组反查 codebuddy 账号 model_mapping 的键——那条路会把 kimi/glm
+// 一并卷进来，而它们不启用本开关。
 //
 // 本文件不接线调度：不改选号、不改账号、不写库。调度行为零变化。
 
@@ -28,9 +31,33 @@ type StandbyEvaluator interface {
 }
 
 // StandbyCoveredModelSource 提供"需要评估的模型"清单（只读）。
-// 生产实现见 repository.NewStandbyCoveredRepository。
+// 生产实现见 NewStandbyCoveredModelSource。
 type StandbyCoveredModelSource interface {
 	ListCoveredModels(ctx context.Context) ([]string, error)
+}
+
+// StandbyCoveredModelDeepSeekFlash 是覆盖清单里唯一的模型键（第 3c 片收敛）。
+//
+// 这是请求侧模型名：信号按 usage_logs.model 同口径统计，上游实际请求的
+// deepseek-v4.1-flash 由账号 credentials.model_mapping 映射，不在本清单里出现。
+const StandbyCoveredModelDeepSeekFlash = "deepseek-v4.1-flash-1017"
+
+// StandbyCoveredModelList 返回固定覆盖清单（每次返回新切片，调用方可安全改写）。
+// 后续要扩模型只改这里；kimi/glm 不启用本开关，不得加入。
+func StandbyCoveredModelList() []string {
+	return []string{StandbyCoveredModelDeepSeekFlash}
+}
+
+// standbyFixedCoveredModels 是生产用覆盖来源：固定清单，不查库。
+type standbyFixedCoveredModels struct{}
+
+func (standbyFixedCoveredModels) ListCoveredModels(context.Context) ([]string, error) {
+	return StandbyCoveredModelList(), nil
+}
+
+// NewStandbyCoveredModelSource 返回生产用覆盖模型来源。
+func NewStandbyCoveredModelSource() StandbyCoveredModelSource {
+	return standbyFixedCoveredModels{}
 }
 
 // StandbyControllerOptions 是控制器可选项；零值即生产默认。

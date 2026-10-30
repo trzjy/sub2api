@@ -475,3 +475,54 @@ func TestStandbyController_ForceTransitionLoggedOnce(t *testing.T) {
 
 	require.Equal(t, 1, strings.Count(buf.String(), "standby_transition"), "只有首次置位才写迁移日志")
 }
+
+// 第 3c 片：覆盖模型收敛为单一请求侧模型 deepseek-v4.1-flash-1017。
+// 回归护栏：kimi/glm 不启用本开关，不得再出现在覆盖清单里（它们在生产样本不足，
+// 恒 Inconclusive，属无效噪音）。
+func TestStandbyCoveredModelList_OnlyDeepSeekFlash1017(t *testing.T) {
+	require.Equal(t, []string{"deepseek-v4.1-flash-1017"}, StandbyCoveredModelList())
+	require.Equal(t, "deepseek-v4.1-flash-1017", StandbyCoveredModelDeepSeekFlash)
+
+	for _, model := range StandbyCoveredModelList() {
+		require.NotContains(t, strings.ToLower(model), "kimi")
+		require.NotContains(t, strings.ToLower(model), "glm")
+	}
+	// 上游实际请求的模型名不进入覆盖清单：判定键只认请求侧名。
+	require.NotContains(t, StandbyCoveredModelList(), "deepseek-v4.1-flash")
+}
+
+// 生产来源下的完整一轮：只评估一次唯一模型，平台推导为 deepseek；
+// 多轮也不扩散到 kimi/glm（覆盖清单已不再由分组反推）。
+func TestStandbyController_FixedSourceEvaluatesOnlyDeepSeekFlash1017(t *testing.T) {
+	clock := &fakeStandbyClock{now: time.Date(2026, 10, 31, 3, 0, 0, 0, time.UTC)}
+	eval := newFakeStandbyEvaluator()
+	registry := NewStandbyRegistry()
+	ctrl := NewStandbyController(eval, NewStandbyCoveredModelSource(), registry, StandbyControllerOptions{
+		Interval: time.Minute,
+		Now:      clock.Now,
+		Logger:   newStandbyTestLogger(),
+	})
+
+	ctrl.RunOnce(context.Background())
+
+	calls := eval.callsSnapshot()
+	require.Len(t, calls, 1, "每轮只能评估一个模型")
+	require.Equal(t, standbyEvalCall{model: "deepseek-v4.1-flash-1017", platform: "deepseek"}, calls[0])
+
+	snapshot := registry.Snapshot()
+	require.Len(t, snapshot, 1)
+	_, ok := snapshot["deepseek-v4.1-flash-1017"]
+	require.True(t, ok)
+	for _, absent := range []string{"kimi-k3", "glm-5.3-flash", "deepseek-v4.1-flash"} {
+		_, ok := snapshot[absent]
+		require.Falsef(t, ok, "覆盖清单外的模型不得被评估: %q", absent)
+	}
+
+	// 第二轮仍在同一模型上评估，不新增任何模型。
+	clock.Advance(time.Minute)
+	ctrl.RunOnce(context.Background())
+	calls = eval.callsSnapshot()
+	require.Len(t, calls, 2)
+	require.Equal(t, "deepseek-v4.1-flash-1017", calls[1].model)
+	require.Len(t, registry.Snapshot(), 1)
+}

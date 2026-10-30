@@ -83,7 +83,11 @@ func TestStandbyController_StartStopIdempotent(t *testing.T) {
 		controller.Start(ctx)
 		controller.Stop()
 	})
-	// 采集整轮失败（sqlmock 无期望调用）不得迁移状态：仍是空表 = 全部 closed。
-	require.False(t, service.DefaultStandbyRegistry().IsOpen("deepseek-v4-pro"))
-	require.Empty(t, service.DefaultStandbyRegistry().Snapshot())
+	// 采集整轮失败（sqlmock 无期望调用）不得迁移状态：固定覆盖清单里的唯一模型
+	// 仍是 closed（第 3c 片起覆盖范围不再查库，注册表只会有这一个键）。
+	snapshot := service.DefaultStandbyRegistry().Snapshot()
+	require.Len(t, snapshot, 1)
+	status, ok := snapshot[service.StandbyCoveredModelDeepSeekFlash]
+	require.True(t, ok)
+	require.False(t, status.Open)
 }
