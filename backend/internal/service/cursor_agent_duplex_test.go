@@ -127,7 +127,14 @@ func TestCursorAgentDuplexContextKVAndTurnEnd(t *testing.T) {
 
 func TestCursorAgentDuplexRejectsUnknownExecutionAndBlob(t *testing.T) {
 	for name, payload := range map[string][]byte{
-		"tool":         cursorAppendBytesField(nil, 2, cursorAppendBytesField(nil, 3, nil)),
+		// "unknown_exec"：一条真正未知、且不在本轮 11 类原生 exec 裁定里的执行字段
+		// （f17 list_mcp_resources_exec_args）。f17 不属于 {2,3,4,5,7,8,9,14,16,20,23}
+		// 任一，也不是元数据白名单字段（f1/f15/f19/f55/f57），故走到 respond 的 default
+		// 分支按未实现 exec 失败关闭，仍应返回 error——保留「未知执行 → 失败关闭」的断言意图。
+		// 注：原 "tool" 用例用的 f3 write_args 现已归入 11 类原生 exec 拒绝路径（拒绝而非失败
+		// 关闭），不再是「未知执行」，故改用 f17 作为未知执行载体。
+		"unknown_exec": cursorExecUnknownFieldPayload(),
+		// "unknown_blob"：f4 KV 缺 blob（f2 get 但无对应 blob），语义未变，仍应失败关闭。
 		"unknown_blob": cursorAppendBytesField(nil, 4, cursorAppendBytesField(nil, 2, cursorAppendStringField(nil, 1, "missing"))),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -138,6 +145,16 @@ func TestCursorAgentDuplexRejectsUnknownExecutionAndBlob(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// cursorExecUnknownFieldPayload 构造一条携带真正未知执行字段（f17）的 AgentServerMessage，
+// 用于验证「未知 exec → 失败关闭」语义。f17 不在本轮 11 类原生 exec 拒绝字段集合内，
+// 也不在 ExecServerMessage 元数据白名单内，因此必然走到 respond 的 default 失败关闭分支。
+func cursorExecUnknownFieldPayload() []byte {
+	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 1)
+	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-1"))
+	execMsg = cursorAppendBytesField(execMsg, 17, []byte("list-mcp-resources-args"))
+	return cursorAppendBytesField(nil, cursorFldServerExecMessage, execMsg)
 }
 
 // Exercise the actual request builder and HTTP/2 exchange: history sent in f17
