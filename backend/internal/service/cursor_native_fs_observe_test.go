@@ -7,8 +7,8 @@ package service
 // declared_tool_name_count）。本卡只观测、不改匹配规则、不改失败帧 / 封口 / 返回值。
 //
 // 覆盖：
-//   ① TestCursorNativeFsRejectLogsDeclaredNames：构造声明集 ["Bash","Read","Grep"]，触发工具缺席
-//      路径，断言拒绝日志字段含全部三个名字（用 zap observer 捕获）。
+//   ① TestCursorNativeFsRejectLogsDeclaredNames：构造声明集 ["Read","Grep"]（无 Bash / 无 shell），
+//      触发工具缺席路径，断言拒绝日志字段含全部两个名字（用 zap observer 捕获）。
 //   ② TestCursorDeclaredToolNamesParsing：直接测 declaredToolNames() helper——3 条声明返回
 //      ["Bash","Read","Grep"]、空声明集返回空切片、重复名去重、顺序保持。
 
@@ -52,20 +52,19 @@ func cursorNativeFsObserveNamesFromContext(t *testing.T, e observer.LoggedEntry)
 
 // TestCursorNativeFsRejectLogsDeclaredNames：触发"工具缺席"路径并断言拒绝日志带齐声明工具名。
 //
-// 注意：声明集含 "Read" 与 "Grep"——若用 read / grep 委托，这两个名字会命中各自候选名单
-// （read: Read；grep: Grep）但因 schema 缺关键属性而落到 ErrCursorProtocol（非缺席哨兵），
-// 不会进入 cursorRejectNativeFsNoTool。故这里用 write 委托：write 候选
-// （write_file/Write/write）在声明集中全无，必然走 ErrCursorNativeFsToolAbsent → 拒绝处理器，
-// 从而观测到声明集里含 "Read" 的真实声明名。断言目标仍为卡片指定的三名字 ["Bash","Read","Grep"]。
+// 注意：声明集只含 "Read" 与 "Grep"（无 Bash / 无 shell）。在 NSFS-03「逐 kind 回退」落地后，
+// 若声明集里还带着 Bash，write 委托会回退到 Bash 而非走缺席拒绝帧，本观测用例就再也触发不了
+// Absent 路径。故此处刻意去掉 Bash（只留 Read + Grep），使 write 委托既无 write 类候选、也无
+// 任何可用 shell → 命中 ErrCursorNativeFsToolAbsent → 拒绝处理器，仍能观测到声明集里含的
+// "Read" / "Grep" 真实声明名。断言目标改为两名字 ["Read","Grep"]、计数 2。
 func TestCursorNativeFsRejectLogsDeclaredNames(t *testing.T) {
 	defs := [][]byte{
-		cursorTestBuildToolDef(t, "Bash", `{"type":"object","properties":{"command":{"type":"string"}}}`),
 		cursorTestBuildToolDef(t, "Read", `{"type":"object","properties":{"path":{"type":"string"}}}`),
 		cursorTestBuildToolDef(t, "Grep", `{"type":"object","properties":{"pattern":{"type":"string"}}}`),
 	}
 	d, logs, stop := cursorNativeFsTestObserveDuplex(t, defs)
 
-	// write 委托：path / file_text / tool_call_id 齐，但声明集无 write 类候选 → 工具缺席。
+	// write 委托：path / file_text / tool_call_id 齐，但声明集无 write 类候选且无 shell → 工具缺席。
 	sub := cursorAppendStringField(nil, 1, "/repo/a.txt")
 	sub = cursorAppendStringField(sub, 2, "hello-content")
 	sub = cursorAppendStringField(sub, 3, "call_w_1")
@@ -80,8 +79,8 @@ func TestCursorNativeFsRejectLogsDeclaredNames(t *testing.T) {
 	require.Len(t, entries, 1, "必须记一条携带 declared_tool_names 的拒绝观测日志")
 
 	names := cursorNativeFsObserveNamesFromContext(t, entries[0])
-	require.ElementsMatch(t, []string{"Bash", "Read", "Grep"},
-		names, "拒绝观测日志必须含声明集全部三个工具名")
+	require.ElementsMatch(t, []string{"Read", "Grep"},
+		names, "拒绝观测日志必须含声明集全部工具名（无 shell 的声明集）")
 
 	// 计数从 Context 取（zap.Int 的值在 f.Integer，ContextMap 不回显）。
 	var count int
@@ -90,7 +89,7 @@ func TestCursorNativeFsRejectLogsDeclaredNames(t *testing.T) {
 			count = int(f.Integer)
 		}
 	}
-	require.Equal(t, 3, count, "工具名计数必须等于声明集大小")
+	require.Equal(t, 2, count, "工具名计数必须等于声明集大小")
 }
 
 // TestCursorDeclaredToolNamesParsing：直接测 declaredToolNames() helper 的解析 / 去重 / 顺序 / 空集。

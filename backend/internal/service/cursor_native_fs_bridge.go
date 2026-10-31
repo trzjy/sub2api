@@ -406,41 +406,19 @@ var cursorNativeFsKinds = map[string]cursorNativeFsKindSpec{
 	},
 }
 
-// cursorNativeFsAllCandidateNames 是五种原生文件工具的全部候选工具名（按 priority 展开）。
-// 仅用于判定"客户端是否声明了任何原生文件工具"，作为 shell 回退的总开关（见下文说明）。
-var cursorNativeFsAllCandidateNames = func() []string {
-	names := make([]string, 0, 16)
-	for _, spec := range cursorNativeFsKinds {
-		names = append(names, spec.priority...)
-	}
-	return names
-}()
-
-// cursorClientDeclaresNativeFsTool 报告声明集索引里是否含任意一种原生文件工具的候选名。
-//
-// NSFS-02 回退总开关：只有当"客户端完全没有声明任何原生文件工具"（生产实测的 shell-only 场景：
-// declared_tool_names="shell,apply_patch,update_plan"）时才允许把原生委托转译成 shell 命令。
-// 若客户端已声明了某些原生文件工具（哪怕缺某一个 kind），缺失的 kind 保持既有 Absent 拒绝帧，
-// 绝不偷偷转译给 shell——否则会改变"客户端声明了部分原生工具但缺某 kind"的既有拒绝语义，并破坏
-// 既有观测测试。这是与"逐 kind 回退"等价的、更保守且符合生产根因的实现。
-func cursorClientDeclaresNativeFsTool(idx map[string][]byte) bool {
-	for _, name := range cursorNativeFsAllCandidateNames {
-		if _, ok := idx[name]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // cursorBuildNativeFsDelegation 从本请求 f4 声明集中按 kind 选择下游工具，并按其 input_schema
 // 把原生 Args 转成 ArgsJSON（对象 JSON，与 mcp/shell 同形）。
 //
-// 三路判定（顺序固定，NSFS-02）：
-//  1. 有原生同名工具（现有逻辑）→ 原样返回，resultArgsJSON 留空（回写沿用 ArgsJSON，字节不变）；
-//  2. 没有原生工具，且客户端未声明任何原生文件工具（即 shell-only 场景），但有可用 shell 类工具
-//     （复用 cursorShellToolPriority 与 cursorSchemaHasProperty(sj, "command") 的既有判定）→
-//     返回 shell 工具名 + shell 命令参数，并让 resultArgsJSON 设为原生参数 JSON（供回写取 path/pattern）；
-//  3. 都没有 → 仍返回 ErrCursorNativeFsToolAbsent（既有拒绝帧路径，行为不变）。
+// 三路判定（顺序固定，NSFS-03 逐 kind 回退）：
+//  1. 有原生同名工具（现有逻辑，最高优先）→ 原样返回，resultArgsJSON 留空（回写沿用 ArgsJSON，字节不变）；
+//  2. 本 kind 无原生工具（chosen==""），且候选名单里确实没有该 kind 的工具名（hasName==false，
+//     即客户端根本没声明本 kind 的原生工具）→ 若声明集里有可用 shell 类工具（复用
+//     cursorShellToolPriority 与 cursorSchemaHasProperty(sj, "command") 的既有判定）→ 返回 shell
+//     工具名 + shell 命令参数，并让 resultArgsJSON 设为原生参数 JSON（供回写取 path/pattern）；
+//     这样每个 kind 各自决定是否回退，Claude Code 声明 Read/Write/Bash 却无 ls/grep 的 ls/grep 委托
+//     即可回退到 Bash，而缺失 kind 又没有任何 shell 可退时仍走拒绝帧。
+//  3. 都没有（chosen=="" 且（hasName==true 走到 ErrCursorProtocol 失败关闭，或 hasName==false 且
+//     shell 也不可用））→ 仍返回 ErrCursorNativeFsToolAbsent（既有拒绝帧路径，行为不变）。
 func cursorBuildNativeFsDelegation(defs [][]byte, kind string, params []cursorNativeFsParam) (toolName, argsJSON, resultArgsJSON string, err error) {
 	spec, ok := cursorNativeFsKinds[kind]
 	if !ok {
@@ -501,10 +479,11 @@ func cursorBuildNativeFsDelegation(defs [][]byte, kind string, params []cursorNa
 		return chosen, string(b), "", nil
 	}
 
-	// 路径 2：本 kind 无原生工具 → 仅当"客户端完全没有声明任何原生文件工具"时才回退到 shell
-	//（即生产实测的 shell-only 场景）。若客户端已声明了某些原生文件工具但缺本 kind，保持既有
-	// Absent 拒绝帧（不把缺失的 kind 偷偷转译给 shell，改变既有拒绝语义）。
-	if !cursorClientDeclaresNativeFsTool(idx) {
+	// 路径 2：本 kind 无原生工具 → 只要该 kind 的候选名单里确实没有对应工具名（hasName==false，
+	// 即客户端根本没声明本 kind 的原生工具），就尝试回退到 shell（逐 kind 回退，NSFS-03）。
+	// 若候选名单里有该 kind 的工具名（hasName==true，但 schema 缺关键属性 → 既有 ErrCursorProtocol
+	// 失败关闭），或 shell 也不可用，则落到路径 3 仍走 Absent 拒绝帧，绝不改变既有拒绝语义。
+	if !hasName {
 		if shellName, shellSchema := cursorPickShellTool(idx); shellName != "" {
 			cmd, cerr := cursorNativeFsShellCommand(kind, params)
 			if cerr != nil {

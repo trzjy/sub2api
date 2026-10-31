@@ -130,13 +130,13 @@ func TestCursorNativeFsShellFallbackWrite(t *testing.T) {
 func TestCursorNativeFsShellFallbackUnavailable(t *testing.T) {
 	defs := [][]byte{cursorTestBuildToolDef(t, "get_weather",
 		`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`)}
-	idx := cursorToolSchemaIndex(defs)
-	// 既无原生 read 候选、也无 shell 类工具 → cursorBuildNativeFsDelegation 必须返回
-	// ErrCursorNativeFsToolAbsent（既有拒绝帧路径不变；捕获侧据此发拒绝帧、返回空 capture + nil 错误）。
+	// 既无原生 read 候选、也无 shell 类工具（get_weather 既非 read 候选也非 shell 工具）
+	// → cursorBuildNativeFsDelegation 必须返回 ErrCursorNativeFsToolAbsent（既有拒绝帧路径不变；
+	// 捕获侧据此发拒绝帧、返回空 capture + nil 错误）。这是 NSFS-03「逐 kind 回退」的边界：本 kind
+	// 候选名单里没有工具名（hasName==false），但 shell 也不可用 → 仍走 Absent，绝不回退。
 	_, _, _, err := cursorBuildNativeFsDelegation(defs, cursorToolKindRead,
 		[]cursorNativeFsParam{{candidates: cursorNativeFsPathProps, value: "/tmp/a.txt"}})
 	require.ErrorIs(t, err, ErrCursorNativeFsToolAbsent, "无原生工具且无 shell 必须返回 Absent 哨兵")
-	require.False(t, cursorClientDeclaresNativeFsTool(idx), "前置：get_weather 不是原生文件工具")
 }
 
 // TestCursorNativeFsNativeToolPreferred：同时声明 read_file 与 shell 时，必须选 read_file
@@ -268,4 +268,110 @@ func TestCursorNativeFsShellFallbackCommandDump(t *testing.T) {
 	}())
 	t.Logf("DELETE: %s", delCmd)
 	require.Contains(t, delCmd, "rm -f -- '/tmp/x'")
+}
+
+// TestCursorNativeFsPerKindFallbackWithMixedDeclarations：模拟 Claude Code 场景——声明
+// Read(path) + Write(file_path/content) + Bash(command)，但无 ls / grep 候选。验证「逐 kind 回退」
+// （NSFS-03）：read / write 命中原生工具（绝不回退），ls / grep 各自回退到 Bash。四种委托的
+// Name 与命令全文用 t.Logf 打印，供完工报告贴出。
+func TestCursorNativeFsPerKindFallbackWithMixedDeclarations(t *testing.T) {
+	defs := [][]byte{
+		cursorTestBuildToolDef(t, "Read", `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
+		cursorTestBuildToolDef(t, "Write", `{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"]}`),
+		cursorTestBuildToolDef(t, "Bash", `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+	}
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	// read 委托 → 必须选原生 Read（不回退）。
+	readSub := cursorAppendStringField(nil, 1, "/repo/a.txt")
+	readSub = cursorAppendStringField(readSub, 2, "call_read_1")
+	readTC, rerr := d.cursorCaptureNativeFsArgs(
+		cursorNativeFsTestExecParts(t, 201, nil, cursorFldServerMsgReadArgs, readSub),
+		cursorFldServerMsgReadArgs, 201, nil)
+	require.NoError(t, rerr)
+	require.Equal(t, cursorToolKindRead, readTC.Kind)
+	require.Equal(t, "Read", readTC.Name, "read 必须选原生 Read，不回退")
+	require.Equal(t, "", readTC.ResultArgsJSON, "走原生工具时 ResultArgsJSON 必须为空")
+	t.Logf("READ  : Name=%s ArgsJSON=%s", readTC.Name, readTC.ArgsJSON)
+
+	// ls 委托 → 无原生 ls 候选，必须回退到 Bash，命令 ls -la -- '<path>'。
+	lsSub := cursorAppendStringField(nil, 1, "/repo")
+	lsSub = cursorAppendStringField(lsSub, 3, "call_ls_1")
+	lsTC, lerr := d.cursorCaptureNativeFsArgs(
+		cursorNativeFsTestExecParts(t, 202, nil, cursorFldServerMsgLsArgs, lsSub),
+		cursorFldServerMsgLsArgs, 202, nil)
+	require.NoError(t, lerr)
+	require.Equal(t, cursorToolKindLs, lsTC.Kind)
+	require.Equal(t, "Bash", lsTC.Name, "ls 无原生工具必须回退到 Bash")
+	lsCmd := shellFallbackCommandFromCapture(t, lsTC)
+	require.Contains(t, lsCmd, "ls -la -- '/repo'", "ls 回退命令必须是 ls -la")
+	require.NotEqual(t, "", lsTC.ResultArgsJSON, "回退时 ResultArgsJSON 携带原生 path 供回写")
+	t.Logf("LS    : Name=%s Cmd=%s", lsTC.Name, lsCmd)
+
+	// grep 委托 → 无原生 grep 候选，必须回退到 Bash，命令含 grep -r。
+	grepSub := cursorAppendStringField(nil, 1, "TODO")
+	grepSub = cursorAppendStringField(grepSub, 2, "/repo")
+	grepSub = cursorAppendStringField(grepSub, 14, "call_grep_1")
+	grepTC, gerr := d.cursorCaptureNativeFsArgs(
+		cursorNativeFsTestExecParts(t, 203, nil, cursorFldServerMsgGrepArgs, grepSub),
+		cursorFldServerMsgGrepArgs, 203, nil)
+	require.NoError(t, gerr)
+	require.Equal(t, cursorToolKindGrep, grepTC.Kind)
+	require.Equal(t, "Bash", grepTC.Name, "grep 无原生工具必须回退到 Bash")
+	grepCmd := shellFallbackCommandFromCapture(t, grepTC)
+	require.Contains(t, grepCmd, "grep -r", "grep 回退命令必须含 grep -r")
+	require.NotEqual(t, "", grepTC.ResultArgsJSON, "回退时 ResultArgsJSON 携带原生 pattern/path 供回写")
+	t.Logf("GREP  : Name=%s Cmd=%s", grepTC.Name, grepCmd)
+
+	// write 委托 → 必须选原生 Write（不回退）。
+	writeSub := cursorAppendStringField(nil, 1, "/repo/a.txt")
+	writeSub = cursorAppendStringField(writeSub, 2, "hello")
+	writeSub = cursorAppendStringField(writeSub, 3, "call_write_1")
+	writeTC, werr := d.cursorCaptureNativeFsArgs(
+		cursorNativeFsTestExecParts(t, 204, nil, cursorFldServerMsgWriteArgs, writeSub),
+		cursorFldServerMsgWriteArgs, 204, nil)
+	require.NoError(t, werr)
+	require.Equal(t, cursorToolKindWrite, writeTC.Kind)
+	require.Equal(t, "Write", writeTC.Name, "write 必须选原生 Write，不回退")
+	require.Equal(t, "", writeTC.ResultArgsJSON, "走原生工具时 ResultArgsJSON 必须为空")
+	t.Logf("WRITE : Name=%s ArgsJSON=%s", writeTC.Name, writeTC.ArgsJSON)
+}
+
+// TestCursorNativeFsPerKindFallbackNoShellStillRejects：声明只有 Read（无 Bash / 无 shell），
+// ls 委托 → 仍走 ErrCursorNativeFsToolAbsent（无 shell 可退）。这是 NSFS-03 边界：本 kind 候选
+// 名单里没有工具名（hasName==false），但 shell 也不可用 → 保持既有 Absent 拒绝帧，绝不臆造。
+func TestCursorNativeFsPerKindFallbackNoShellStillRejects(t *testing.T) {
+	defs := [][]byte{
+		cursorTestBuildToolDef(t, "Read", `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
+	}
+	// 用带 pipe writer 的 duplex（拒绝路径会 send 失败帧 + stream_close，必须 drain 防止 nil writer panic）。
+	d, _, stop := cursorNativeFsTestObserveDuplex(t, defs)
+	defer func() { _ = stop() }()
+
+	lsSub := cursorAppendStringField(nil, 1, "/repo")
+	lsSub = cursorAppendStringField(lsSub, 3, "call_ls_1")
+	tc, err := d.cursorCaptureNativeFsArgs(
+		cursorNativeFsTestExecParts(t, 205, nil, cursorFldServerMsgLsArgs, lsSub),
+		cursorFldServerMsgLsArgs, 205, nil)
+	require.NoError(t, err, "工具缺席必须回失败帧而非整请求报错")
+	require.Equal(t, cursorToolCallCapture{}, tc, "无 shell 可退时 ls 委托必须走 Absent 拒绝帧（空 capture）")
+}
+
+// TestCursorNativeFsOriginalPriorityUnaffected：原生工具优先顺序不受影响（NSFS-03 不得改 priority）。
+// 声明 read_file + shell，read 委托 → 选 read_file、ResultArgsJSON 为空（回写字节不变）。
+func TestCursorNativeFsOriginalPriorityUnaffected(t *testing.T) {
+	defs := [][]byte{
+		cursorTestBuildToolDef(t, "read_file", cursorNativeFsTestReadSchema),
+		cursorTestBuildToolDef(t, "shell", cursorShellFallbackSchema),
+	}
+	d := cursorShellTestNewDuplex(t, defs, "")
+
+	sub := cursorAppendStringField(nil, 1, "/tmp/a.txt")
+	sub = cursorAppendStringField(sub, 2, "call_read_1")
+	parts := cursorNativeFsTestExecParts(t, 206, nil, cursorFldServerMsgReadArgs, sub)
+
+	tc, err := d.cursorCaptureNativeFsArgs(parts, cursorFldServerMsgReadArgs, 206, nil)
+	require.NoError(t, err)
+	require.Equal(t, "read_file", tc.Name, "原生工具（read_file）必须优先于 shell 回退")
+	require.Equal(t, "", tc.ResultArgsJSON, "回写字节不变（ResultArgsJSON 为空）")
 }
