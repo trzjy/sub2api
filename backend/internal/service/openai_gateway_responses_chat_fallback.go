@@ -184,7 +184,7 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsResponses(
 	}
 	// 上游被强制流式后 Content-Type=text/event-stream，经 WriteFilteredHeaders
 	// 透传会污染非流式响应，forceJSON=true 覆盖回 application/json。
-	return s.writeChatCompletionsAsResponsesResult(c, resp, ccResp, usage, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, true)
+	return s.writeChatCompletionsAsResponsesResult(c, account, resp, ccResp, usage, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, true)
 }
 
 // writeChatCompletionsAsResponsesResult 是 buffer 与 converted 两个非流式分支共用的
@@ -194,6 +194,7 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsResponses(
 // buffer 分支上游为原生 JSON，置 false 保持行为零变化。
 func (s *OpenAIGatewayService) writeChatCompletionsAsResponsesResult(
 	c *gin.Context,
+	account *Account,
 	resp *http.Response,
 	ccResp *apicompat.ChatCompletionsResponse,
 	usage OpenAIUsage,
@@ -210,6 +211,16 @@ func (s *OpenAIGatewayService) writeChatCompletionsAsResponsesResult(
 	forceJSON bool,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
+	// L3 思考层剥离：开启 strip_reasoning_content 的账号，在 CC→Responses 转换前
+	// 就地清空上游 reasoning 明文，使客户端可见响应不含上游思考明文（可能复述上游
+	// 模型家族名）。剥离后转换结果里不再有 reasoning item，下方缓存自然为空——
+	// 该缓存按 reasoning item id 索引、仅当客户端回传同 id 的 reasoning item 时才被
+	// 查用（见 chatcompletions_responses_bridge.go buildChatMessagesFromItems 的
+	// ReasoningContentByID 回退分支），客户端看不到 reasoning item 就不会回传，故
+	// 无需保留剥离前的明文。
+	if IsReasoningStrippedAccount(account) {
+		stripCCResponseReasoning(ccResp)
+	}
 	responsesResp := apicompat.ChatCompletionsResponseToResponses(ccResp, originalModel, customTools, functionTools, toolSearch, namespaceTools)
 	s.cacheReasoningItemsFromOutput(responsesResp.Output)
 
@@ -262,7 +273,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 		}
 		return nil, err
 	}
-	return s.writeChatCompletionsAsResponsesResult(c, resp, ccResp, usage, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, false)
+	return s.writeChatCompletionsAsResponsesResult(c, account, resp, ccResp, usage, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, false)
 }
 
 func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
@@ -319,6 +330,14 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	}
 
 	scan := s.scanCCStream(c, resp, "openai responses chat fallback", requestID, startTime, func(chunk *apicompat.ChatCompletionsChunk) {
+		// L3 思考层剥离：开启 strip_reasoning_content 的账号，在 CC chunk→Responses
+		// 事件转换前就地清空上游 reasoning 明文。下游 ensureChatReasoningItem 仅在
+		// 收到非空 reasoning delta 时开启 reasoning item，剥离后不会产生 reasoning
+		// item 事件；客户端看不到 reasoning item 也就不会回传其 id，故下方缓存（按
+		// item id 索引）自然为空，无需保留剥离前的明文。
+		if IsReasoningStrippedAccount(account) {
+			stripCCChunkReasoning(chunk)
+		}
 		events := apicompat.ChatCompletionsChunkToResponsesEvents(chunk, state)
 		s.cacheReasoningItemsFromEvents(events)
 		writeEvents(events)

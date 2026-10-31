@@ -266,21 +266,37 @@ func (s *OpenAIGatewayService) writeChatCompletionsAsAnthropicResult(
 	forceJSON bool,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
-	anthropicResp := apicompat.ChatCompletionsResponseToAnthropic(ccResp, originalModel)
 
-	// 写侧：把本轮 reasoning 明文按 tool_call id 写入既有 GatewayCache，供后续
-	// 轮次客户端不回传 thinking 时回注。仅记日志，不影响转发。
+	// 写侧：先取本轮 reasoning 明文（剥离前原始明文）到局部变量，供 tool 轮缓存回注。
+	// 必须在剥离之前取：剥离会清空 ccResp 的 reasoning 字段，而 tool 轮缓存要的是
+	// 原始明文——客户端下一轮不回传 thinking 时靠它回注（见 injectCachedMessagesReasoning）。
+	var preStripReasoning string
 	if ccResp != nil && len(ccResp.Choices) > 0 {
 		msg := ccResp.Choices[0].Message
-		reasoning := msg.ReasoningContent
-		if reasoning == "" {
-			reasoning = msg.Reasoning
+		preStripReasoning = msg.ReasoningContent
+		if preStripReasoning == "" {
+			preStripReasoning = msg.Reasoning
 		}
+	}
+
+	// 读侧（L3 reasoning 剥离）：开启 strip_reasoning_content 的掩码账号，先剥离
+	// CC 结构体的 reasoning 明文，再做 CC→Anthropic 转换，使客户端可见响应不含
+	// 上游思考明文（思考明文可能复述上游模型家族名，泄漏伪装）。
+	if IsReasoningStrippedAccount(account) {
+		stripCCResponseReasoning(ccResp)
+	}
+
+	anthropicResp := apicompat.ChatCompletionsResponseToAnthropic(ccResp, originalModel)
+
+	// 写侧：把本轮 reasoning 明文（剥离前的原始明文）按 tool_call id 写入既有
+	// GatewayCache，供后续轮次客户端不回传 thinking 时回注。仅记日志，不影响转发。
+	if preStripReasoning != "" && ccResp != nil && len(ccResp.Choices) > 0 {
+		msg := ccResp.Choices[0].Message
 		toolCallIDs := make([]string, 0, len(msg.ToolCalls))
 		for _, call := range msg.ToolCalls {
 			toolCallIDs = append(toolCallIDs, call.ID)
 		}
-		s.cacheMessagesToolCallReasoning(account, upstreamModel, reasoning, toolCallIDs)
+		s.cacheMessagesToolCallReasoning(account, upstreamModel, preStripReasoning, toolCallIDs)
 	}
 
 	if s.responseHeaderFilter != nil {
@@ -411,6 +427,25 @@ func (col *messagesToolTurnCollector) observe(events []apicompat.AnthropicStream
 		if evt.Type == "content_block_start" && evt.ContentBlock != nil &&
 			evt.ContentBlock.Type == "tool_use" && evt.ContentBlock.ID != "" {
 			col.toolCallIDs = append(col.toolCallIDs, evt.ContentBlock.ID)
+		}
+	}
+}
+
+// observeChunkReasoning 从原始 CC chunk 的 delta 里抽取 reasoning 明文（剥离前）。
+// 流式路径在剥离 chunk 之前调用它，确保 tool 轮缓存拿到的是原始明文，而不是被
+// 剥离后丢失的空值。ReasoningContent 优先，缺失时回退 Reasoning（两者均为 *string）。
+func (col *messagesToolTurnCollector) observeChunkReasoning(chunk *apicompat.ChatCompletionsChunk) {
+	if chunk == nil {
+		return
+	}
+	for i := range chunk.Choices {
+		d := chunk.Choices[i].Delta
+		if d.ReasoningContent != nil && *d.ReasoningContent != "" {
+			col.reasoning.WriteString(*d.ReasoningContent)
+			continue
+		}
+		if d.Reasoning != nil && *d.Reasoning != "" {
+			col.reasoning.WriteString(*d.Reasoning)
 		}
 	}
 }
@@ -575,6 +610,14 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	// 与 responses 兄弟不同：客户端断开后仍继续做事件转换（喂 anthropicState），
 	// 仅跳过写出，保证 finalize 阶段的 usage 汇总不受断开影响。
 	emitChunk := func(chunk *apicompat.ChatCompletionsChunk) {
+		// 写侧采集（剥离前）：从原始 chunk 的 delta 取 reasoning 明文写进 collector，
+		// 确保 tool 轮缓存回注的是原始明文，而非剥离后丢失的空值。
+		turnCollector.observeChunkReasoning(chunk)
+		// 读侧（L3 reasoning 剥离）：开启 strip_reasoning_content 的掩码账号，先
+		// 剥离 chunk 的 reasoning 明文，再转换，使客户端可见事件流不含 thinking。
+		if IsReasoningStrippedAccount(account) {
+			stripCCChunkReasoning(chunk)
+		}
 		// CC chunk → Anthropic events (direct, single state machine)
 		anthropicEvents := apicompat.ChatCompletionsChunkToAnthropicEvents(chunk, anthropicState)
 		// 采集先于断开判定：断连后仍在 drain 上游流，此处缓存是后续轮次回注的唯一来源。
