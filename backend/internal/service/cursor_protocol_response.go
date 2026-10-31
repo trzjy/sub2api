@@ -915,11 +915,6 @@ type cursorToolCallCapture struct {
 	ExecID uint64
 	// IDField 是承载本委托的 ExecServerMessage.f15（原值，回写时一并带回）。
 	IDField []byte
-	// Kind 区分委托的回写通道：空 (= "") 表示 mcp（f11 McpResult，既有路径，
-	// 字节级行为不变）；"shell" 表示 ExecServerMessage.f14 原生 shell 委托，续轮回写
-	// 走 ShellStream（f14）编码（见 cursor_agent_duplex.go 的 cursorEncodeShellToolResult）。
-	// 该字段只影响回写编码，委托捕获与封口逻辑对两种 Kind 一视同仁。
-	Kind string
 	// WireID 是**发给客户端的** tool_call id（OpenAI tool_calls[].id）。
 	//
 	// 上游会在同一会话内对不同工具复用同一个 tool_call_id（生产实测 read 与 write 共用
@@ -931,14 +926,6 @@ type cursorToolCallCapture struct {
 	// 语义纪律：对外输出（SSE / 非流式）一律用 wireID()（为空回退 ID）；上游写回始终用
 	// ID + ExecID（原值），绝不把改写后的 id 回写给上游。
 	WireID string
-	// SandboxPolicy 是 shell 委托 ShellArgs.f9 的原始字节，回写 start 帧时原样回显。
-	SandboxPolicy []byte
-	// ResultArgsJSON 是**回写原生结果帧时**用于取 path/pattern/output_mode 的参数 JSON。
-	//
-	// 仅当委托被转译为 shell 命令时非空（此时 ArgsJSON 是 {"command":...}，不含 path/pattern）；
-	// 为空时回写沿用 ArgsJSON（既有行为不变）。见 NSFS-02：原生工具缺席但客户端声明了 shell
-	// 类工具时，把原生文件工具委托转译成 shell 命令交给客户端，结果仍按原生通道回写上游。
-	ResultArgsJSON string
 }
 
 // wireID 返回发给客户端的 tool_call id：有交付侧改写值时用改写值，否则沿用上游原值。

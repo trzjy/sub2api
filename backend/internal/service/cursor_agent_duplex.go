@@ -90,10 +90,6 @@ const (
 	cursorFldShellStreamStderr = 2 // f2 stderr{data}
 	cursorFldShellStreamExit   = 3 // f3 exit{code(int32), cwd(str)}
 	cursorFldShellStreamStart  = 4 // f4 start{sandbox_policy}：客户端回执的执行开始帧。
-	// cursorFldShellStreamRejected 是 ShellStream.f5（rejected）：本请求声明集中找不到
-	// 任何带 command 属性的 shell 类工具时回写的拒绝事件。区别于 stdout/stderr/exit/start，
-	// 且**不**走 ErrCursorProtocol 失败关闭——一个不可服务的执行请求不应拖垮整轮（生产 16:03 两次 502 实证）。
-	cursorFldShellStreamRejected = 5
 	// cursorSandboxTypeInsecureNone 是 agent.v1 沙箱类型枚举的 INSECURE_NONE 取值
 	// （客户端 Lj() 默认策略）。仅在请求未携带 requested_sandbox_policy 时回填 start。
 	cursorSandboxTypeInsecureNone = 1
@@ -105,14 +101,6 @@ const (
 	cursorFldShellStreamExitCode = 1 // f1 code（int32，按 varint 编码）
 	cursorFldShellStreamExitCwd  = 2 // f2 cwd（string）
 )
-
-// errCursorShellToolAbsent 是"本请求声明集（f4）中找不到任何带 command 属性的 shell 类工具"
-// 这一**专用**情况的哨兵错误，与通用协议失败 ErrCursorProtocol 区分开（后者保留给 schema
-// 解析失败 / required 字段无法填充等真正的失败关闭场景）。捕获到该哨兵时，shell 桥接改为
-// 回写拒绝帧而非整轮失败关闭（ErrCursorProtocol → 整条 HTTP 502），避免一个不可服务的执行
-// 请求拖垮整轮（生产 16:03 两次 502 实证：上游原生 shell 与请求 f4 声明无关，客户端未声明
-// shell 类工具时不应让整轮失败）。
-var errCursorShellToolAbsent = errors.New("cursor: no shell-like tool with command property declared")
 
 // cursorEncodeMcpToolResult 把一条真实工具结果编码为 ExecClientMessage 字节。
 //
@@ -168,258 +156,6 @@ func cursorEncodeMcpToolResult(
 // 参数按目标 schema 转换、以及续轮回写编码。mcp 路径（cursorEncodeMcpToolResult）与此
 // 完全独立、字节级行为不变。
 // ---------------------------------------------------------------------------
-
-// cursorShellArgs 是 ExecServerMessage.f14（ShellArgs）的解出结构（字段号见 plan §1）。
-//
-// f1 command(str) / f2 working_directory(str) / f3 timeout(int32) / f4 tool_call_id(str) /
-// f5 simple_commands(repeated str) / f11 is_background(bool) / f12 skip_approval(bool) /
-// f15 description(str)。本桥接只消费 command / working_directory / tool_call_id / description，
-// 其余子字段（simple_commands / is_background / skip_approval / timeout 等）首版忽略；
-// 未知 exec 子字段（2/3/4/5/7/8/9/16/17/18/20+ 等）由 respond 的 default 分支失败关闭，
-// 本次只做 f14。
-type cursorShellArgs struct {
-	Command          string
-	WorkingDirectory string
-	Timeout          int
-	ToolCallID       string
-	SimpleCommands   []string
-	Description      string
-	IsBackground     bool
-	SkipApproval     bool
-	// SandboxPolicy 是 ShellArgs.f9（requested_sandbox_policy）的原始字节。
-	// 回写 ShellStream.f4 start 时必须原样回显（真实客户端的 start 事件携带该策略）；
-	// 实测空 start 会让上游不推进（回写后 178s 无 TurnEnded）。
-	SandboxPolicy []byte
-}
-
-// cursorParseShellArgs 把 f14 内层子字段解出为 cursorShellArgs（逐字段，失败关闭）。
-func cursorParseShellArgs(sub []cursorPBField) (cursorShellArgs, error) {
-	var a cursorShellArgs
-	if cmd, ok := cursorFindField(sub, 1); ok {
-		a.Command = cmd.String()
-	}
-	if wd, ok := cursorFindField(sub, 2); ok {
-		a.WorkingDirectory = wd.String()
-	}
-	a.Timeout = int(cursorVarintField(sub, 3))
-	if tcid, ok := cursorFindField(sub, 4); ok {
-		a.ToolCallID = tcid.String()
-	}
-	if desc, ok := cursorFindField(sub, 15); ok {
-		a.Description = desc.String()
-	}
-	if bg, ok := cursorFindField(sub, 11); ok && bg.Wire == cursorWireVarint {
-		a.IsBackground = bg.Varint != 0
-	}
-	if sa, ok := cursorFindField(sub, 12); ok && sa.Wire == cursorWireVarint {
-		a.SkipApproval = sa.Varint != 0
-	}
-	if sp, ok := cursorFindField(sub, 9); ok && len(sp.Bytes) > 0 {
-		a.SandboxPolicy = append([]byte(nil), sp.Bytes...)
-	}
-	for _, f := range sub {
-		if f.Number == 5 {
-			a.SimpleCommands = append(a.SimpleCommands, f.String())
-		}
-	}
-	return a, nil
-}
-
-// cursorShellToolPriority 是工具名选择优先级（plan §4 / 硬约束 #1）：
-// shell → bash → Bash → exec_command → run_command → terminal，且其 input_schema.properties
-// 必须含 command；找不到 → 调用方按 ErrCursorProtocol 失败关闭（不许用 "shell" 兜底）。
-//
-// 2026-10-29 BASH-ALIAS：真实客户端（CodeBuddy CLI / Claude Code CLI，UA CLI/2.178.1
-// CodeBuddy/2.178.1）声明的 shell 工具名为大写 "Bash"（input_schema.properties.command
-// 为 string，required=["command"]）。原名单仅有小写 "bash"，精确匹配失败 → ErrCursorProtocol
-// → 整条 HTTP 502。故在小写 "bash" 之后插入大写 "Bash"（shell 仍最高优先；既有小写名次序不变）。
-var cursorShellToolPriority = []string{"shell", "bash", "Bash", "exec_command", "run_command", "terminal"}
-
-// cursorBuildShellDelegation 从本请求 f4 声明集中选择 shell 类工具，并按其 input_schema
-// 把 ShellArgs 转换为下游 tool_call 的 ArgsJSON（对象 JSON，与 mcp 同形）。
-//
-// 转换规则（硬约束 #3）：
-//   - command 目标是 array → ["bash","-lc",<ShellArgs.command>]；目标是 string → 原字符串；
-//   - workdir → schema 中实际存在的属性名（working_directory / workdir / cwd 取第一个出现的），
-//     ShellArgs.working_directory 为空则省略；
-//   - 目标 schema 的 required 字段无法由本桥接填充 → ErrCursorProtocol 失败关闭。
-//
-// 找不到可用 shell 类工具 → ErrCursorProtocol 失败关闭（不自造工具名、不用 "shell" 兜底）。
-func cursorBuildShellDelegation(defs [][]byte, args cursorShellArgs) (string, string, error) {
-	idx := cursorToolSchemaIndex(defs)
-	var chosen string
-	var schemaJSON []byte
-	for _, name := range cursorShellToolPriority {
-		sj, ok := idx[name]
-		if !ok || sj == nil {
-			continue
-		}
-		if !cursorSchemaHasProperty(sj, "command") {
-			continue
-		}
-		chosen = name
-		schemaJSON = sj
-		break
-	}
-	if chosen == "" {
-		// 专用哨兵：声明集中找不到带 command 属性的 shell 类工具。与其它失败（schema
-		// 解析失败 / required 无法填充，仍走 ErrCursorProtocol 失败关闭）区分开，使捕获方能
-		// 改为回写拒绝帧而非整轮 502。错误文案保留 "no shell-like tool" 以便既有诊断断言。
-		return "", "", fmt.Errorf("%w: no shell-like tool (shell/bash/exec_command/run_command/terminal) with command property declared", errCursorShellToolAbsent)
-	}
-
-	var schema map[string]any
-	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
-		return "", "", fmt.Errorf("%w: parse shell tool schema: %v", ErrCursorProtocol, err)
-	}
-	props, _ := schema["properties"].(map[string]any)
-
-	// command 是否 array（决定转换形状）。
-	commandIsArray := false
-	if props != nil {
-		if cp, ok := props["command"].(map[string]any); ok {
-			if ct, _ := cp["type"].(string); ct == "array" {
-				commandIsArray = true
-			}
-		}
-	}
-
-	obj := map[string]any{}
-	if commandIsArray {
-		obj["command"] = []any{"bash", "-lc", args.Command}
-	} else {
-		obj["command"] = args.Command
-	}
-
-	// workdir 属性名：schema 中实际存在的第一个（working_directory / workdir / cwd）。
-	workdirProp := ""
-	if props != nil {
-		for _, cand := range []string{"working_directory", "workdir", "cwd"} {
-			if _, ok := props[cand]; ok {
-				workdirProp = cand
-				break
-			}
-		}
-	}
-	if workdirProp != "" && args.WorkingDirectory != "" {
-		obj[workdirProp] = args.WorkingDirectory
-	}
-
-	// required 校验：凡本桥接无法填充的 required 字段 → 失败关闭。
-	if reqRaw, ok := schema["required"].([]any); ok {
-		for _, r := range reqRaw {
-			req, ok := r.(string)
-			if !ok {
-				continue
-			}
-			switch req {
-			case "command":
-				// command 已填充，恒满足。
-			case workdirProp:
-				if args.WorkingDirectory == "" {
-					return "", "", fmt.Errorf("%w: shell tool requires %q but ShellArgs.working_directory empty", ErrCursorProtocol, workdirProp)
-				}
-			default:
-				return "", "", fmt.Errorf("%w: shell tool requires field %q which cannot be filled by native shell bridge", ErrCursorProtocol, req)
-			}
-		}
-	}
-
-	b, err := json.Marshal(obj)
-	if err != nil {
-		return "", "", fmt.Errorf("%w: marshal shell args: %v", ErrCursorProtocol, err)
-	}
-	return chosen, string(b), nil
-}
-
-// cursorSchemaHasProperty 报告归一化后的 schema JSON 是否声明了给定属性名（properties 内）。
-func cursorSchemaHasProperty(schemaJSON []byte, prop string) bool {
-	var schema map[string]any
-	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
-		return false
-	}
-	props, ok := schema["properties"].(map[string]any)
-	if !ok {
-		return false
-	}
-	_, has := props[prop]
-	return has
-}
-
-// cursorCaptureShellArgs 是 ExecServerMessage.f14（ShellArgs）委托捕获入口（duplex 侧）。
-//
-// 流程：解析 ShellArgs → command 为空失败关闭 → 选择 shell 类工具并按 schema 转换参数
-// （schema 解析失败 / required 无法填充 → ErrCursorProtocol 失败关闭）→ 构造
-// capture{Kind:"shell"} 走 noteShellDelegation 接入封口。
-// noteShellDelegation 不再依赖 started/listed 作为封口前置：有同 call_id 的 started 批则按原
-// 路径入批；否则建立 shellOnly 专属批立即可封口交付（不挂 pending、不等待 started/listed）。
-// 成功返回 capture；失败返回 ErrCursorProtocol（command 空 / f14 缺失 / schema 解析失败 /
-// required 缺字段）。特例：声明集中"找不到带 command 属性的 shell 类工具"返回专用哨兵
-// errCursorShellToolAbsent → 捕获方改为回写拒绝帧（f14 ShellStream{f5 rejected}+f3 exit{code=126}）
-// 并返回空 capture（不整轮 502，不失败关闭）。
-func (d *cursorAgentDuplex) cursorCaptureShellArgs(parts []cursorPBField, execID uint64, idField []byte) (cursorToolCallCapture, error) {
-	sh, ok := cursorFindField(parts, 14)
-	if !ok {
-		return cursorToolCallCapture{}, fmt.Errorf("%w: shell stream args without f14", ErrCursorProtocol)
-	}
-	sub, derr := cursorDecodeProtobuf(sh.Bytes)
-	if derr != nil {
-		return cursorToolCallCapture{}, derr
-	}
-	args, err := cursorParseShellArgs(sub)
-	if err != nil {
-		return cursorToolCallCapture{}, err
-	}
-	// 硬约束 #4：command 为空 → 失败关闭。
-	if args.Command == "" {
-		return cursorToolCallCapture{}, fmt.Errorf("%w: shell command empty", ErrCursorProtocol)
-	}
-	name, argsJSON, berr := cursorBuildShellDelegation(d.declaredToolDefs, args)
-	if berr != nil {
-		// 专用哨兵：声明集中找不到带 command 属性的 shell 类工具。改为回写拒绝帧并
-		// 返回空 capture，流继续（不失败关闭、不整轮 502）。其余失败（schema 解析失败 /
-		// required 无法填充 / command 为空等）仍按 ErrCursorProtocol 失败关闭，不在此分支。
-		if errors.Is(berr, errCursorShellToolAbsent) {
-			// 外审 B1：该 call_id 可能已在本批 started 里，登记"本地已拒绝"让封口谓词跳过它，
-			// 否则本次拒绝会让批永远等不到委托 → 180s 挂死。
-			if d.delegations != nil {
-				d.delegations.noteRejectedCall(args.ToolCallID)
-			}
-			frames := cursorEncodeShellRejection(execID, idField)
-			for _, fr := range frames {
-				if serr := d.send(cursorFldClientMessage, fr); serr != nil {
-					return cursorToolCallCapture{}, serr
-				}
-			}
-			// 外审 B2：拒绝后必须补 exec 终止控制帧，否则上游可能不推进（历史 177s 挂死形态）。
-			if serr := d.sendExecStreamClose(execID); serr != nil {
-				return cursorToolCallCapture{}, serr
-			}
-			return cursorToolCallCapture{}, nil
-		}
-		return cursorToolCallCapture{}, berr
-	}
-	tc := cursorToolCallCapture{
-		ID:            args.ToolCallID,
-		Name:          name,
-		ArgsJSON:      argsJSON,
-		ExecID:        execID,
-		IDField:       append([]byte(nil), idField...),
-		Kind:          "shell",
-		SandboxPolicy: args.SandboxPolicy,
-	}
-	delegations := d.delegations
-	if delegations == nil {
-		delegations = newLocalCursorToolDelegations()
-		d.delegations = delegations
-	}
-	// noteShellDelegation：有同 call_id 的 started 批则入该批（原路径）；否则建 shellOnly
-	// 专属批立即可封口交付（不挂 pending、不等 started/listed）。
-	if err := delegations.noteShellDelegation(args.ToolCallID, tc); err != nil {
-		return cursorToolCallCapture{}, err
-	}
-	return tc, nil
-}
 
 // cursorParseShellResult 解析客户端 tool result 为 shell 的 stdout/stderr/exit_code。
 //
@@ -557,28 +293,6 @@ func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr s
 	return frames
 }
 
-// cursorEncodeShellRejection 在"声明集中找不到任何带 command 属性的 shell 类工具"时回写
-// 拒绝帧（不失败关闭、不整轮 502）。两帧字节形（依据派发单 REJ-SHELL §要求 2）：
-//
-//	帧 1：ExecClientMessage{f1 id(exec_id, varint), f15 id(exec_id 原值, bytes), f14 ShellStream{f5 rejected}}；
-//	帧 2：同 exec 的 f14 ShellStream{f3 exit{f1 code=126}}（沿用既有 exit 编码，code=126 表 command 不可执行）。
-//
-// 外层每帧统一 {f1 exec_id + f15 id + f14 ShellStream}，与正常结果回写同形、走同一 send 通道；
-// 仅当 write 失败时由调用方按传输错误返回。exit 帧按 cursorEncodeShellToolResult 的既有编码
-// 习惯补 f6 local_execution_time_ms=0，保证上游正常收尾（实测缺该字段会 177s 无 TurnEnded）。
-func cursorEncodeShellRejection(execID uint64, idField []byte) [][]byte {
-	// 外审 B2/S2：拒绝只发一条 f14 ShellStream{f5 rejected} 数据帧；exec 流的真正终止由调用方
-	// 补 ExecClientControlMessage.stream_close 控制帧完成（与 REJ-FS 原生文件拒绝同形），不再发
-	// 未经观测的"无 start 的 exit"序列（风险高于只发 rejected）。
-	msg := cursorAppendVarintField(nil, cursorFldClientMsgID, execID)
-	if len(idField) > 0 {
-		msg = cursorAppendBytesField(msg, cursorFldClientMsgExecID, idField)
-	}
-	msg = cursorAppendBytesField(msg, cursorFldClientMsgShellStream,
-		cursorAppendBytesField(nil, cursorFldShellStreamRejected, nil))
-	return [][]byte{msg}
-}
-
 // cursorEncodeExecStreamClose 把一个 exec 的终止控制帧编码为 ExecClientControlMessage 载荷。
 // 真实客户端在每条 ExecServerMessage 的结果流写完后都会补发
 // ExecClientControlMessage{f1 stream_close{f1 id=exec_id}}；缺该帧时上游认为 exec 仍未结束，
@@ -700,6 +414,28 @@ func newCursorAgentDuplex(initial []byte, delegations *cursorToolDelegations) (*
 	r, w := io.Pipe()
 	d.reader, d.writer = r, w
 	return d, nil
+}
+
+// declaredToolNames 从 declaredToolDefs 提取每条工具定义的工具名，用于拒绝消息和日志。
+// 返回按声明顺序排列的工具名切片；解析失败的条目跳过（不中断提取）。
+func (d *cursorAgentDuplex) declaredToolNames() []string {
+	if len(d.declaredToolDefs) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(d.declaredToolDefs))
+	for _, raw := range d.declaredToolDefs {
+		fields, err := cursorDecodeProtobuf(raw)
+		if err != nil {
+			continue
+		}
+		for _, f := range fields {
+			if f.Number == cursorFldMcpToolDefToolName {
+				names = append(names, f.String())
+				break
+			}
+		}
+	}
+	return names
 }
 
 func (d *cursorAgentDuplex) start(initial []byte) {

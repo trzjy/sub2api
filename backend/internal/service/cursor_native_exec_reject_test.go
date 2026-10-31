@@ -18,11 +18,14 @@ package service
 // 不再引用实现里的 cursorFldNativeReject* 常量，避免"测实现常量 == 实现常量"的自证循环。
 
 import (
+	"io"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // ---------------------------------------------------------------------------
@@ -407,4 +410,73 @@ func TestCursorNativeExecRejectDecodeFailureFailClose(t *testing.T) {
 		_, ok := cursorFindField(fr, cursorFldClientMsgID)
 		require.False(t, ok, "解码失败时不得写出结果帧")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 测试 helper（原样恢复自 2ed46fd23 删除的 cursor_native_fs_bridge_test.go /
+// cursor_native_fs_observe_test.go）
+// ---------------------------------------------------------------------------
+
+// cursorNativeFsTestObserveDuplex 构造带 observer logger 的 duplex（与 cursorNativeFsTestRejectDuplex
+// 同形，但 logger 落到 observer 以便断言拒绝日志），并返回 drain 用的 stop()。
+func cursorNativeFsTestObserveDuplex(t *testing.T, defs [][]byte) (*cursorAgentDuplex, *observer.ObservedLogs, func() []byte) {
+	t.Helper()
+	pr, pw := io.Pipe()
+	core, logs := observer.New(zap.DebugLevel)
+	d := &cursorAgentDuplex{
+		reader:           pr,
+		writer:           pw,
+		delegations:      newLocalCursorToolDelegations(),
+		declaredToolDefs: defs,
+		lg:               zap.New(core),
+	}
+	return d, logs, captureDuplex(t, d)
+}
+
+// cursorNativeFsObserveNamesFromContext 从一条观测日志里取出 declared_tool_names 字段。
+// 生产侧以逗号拼接的 string 写入（工具名均为不含逗号的标识符），测试侧按逗号拆回。
+func cursorNativeFsObserveNamesFromContext(t *testing.T, e observer.LoggedEntry) []string {
+	t.Helper()
+	raw, ok := e.ContextMap()["declared_tool_names"].(string)
+	require.True(t, ok, "declared_tool_names 必须是字符串字段")
+	if raw == "" {
+		return []string{}
+	}
+	return strings.Split(raw, ",")
+}
+
+// cursorNativeFsTestExecParts 构造 ExecServerMessage 内层 parts：f1 exec_id + f15 id + 指定
+// 原生文件工具字段。
+func cursorNativeFsTestExecParts(t *testing.T, execID uint64, idField []byte, field int, sub []byte) []cursorPBField {
+	t.Helper()
+	var parts []cursorPBField
+	parts = append(parts, cursorPBField{Number: 1, Wire: cursorWireVarint, Varint: execID})
+	if len(idField) > 0 {
+		parts = append(parts, cursorPBField{Number: 15, Wire: cursorWireBytes, Bytes: idField})
+	}
+	parts = append(parts, cursorPBField{Number: field, Wire: cursorWireBytes, Bytes: sub})
+	return parts
+}
+
+// cursorNativeFsTestSplit 把回写字节流切成逐条 envelope 的字段：ExecClientMessage（外层 f2）
+// 解包成内层字段交回；stream_close 走 f5 控制消息，按原字段交回。
+func cursorNativeFsTestSplit(t *testing.T, wire []byte) [][]cursorPBField {
+	t.Helper()
+	var out [][]cursorPBField
+	off := 0
+	for off < len(wire) {
+		frame, next, err := cursorReadEnvelopeFrame(wire, off)
+		require.NoError(t, err, "回写字节必须是合法 envelope 流")
+		fields, derr := cursorDecodeProtobuf(frame.Data)
+		require.NoError(t, derr)
+		if ecm, ok := cursorFindField(fields, cursorFldClientMessage); ok {
+			inner, ierr := cursorDecodeProtobuf(ecm.Bytes)
+			require.NoError(t, ierr)
+			out = append(out, inner)
+		} else {
+			out = append(out, fields)
+		}
+		off = next
+	}
+	return out
 }
