@@ -156,6 +156,23 @@ func cursorAppendVarintField(b []byte, field int, v uint64) []byte {
 	return cursorAppendVarint(b, v)
 }
 
+// cursorEncodeExecClientResultFrame 构造一个 ExecClientMessage 结果帧（通用编码助手）。
+//
+// 参数：
+//   - execID: 外层 f1 id（varint）
+//   - idField: 原始 f15 exec_id（bytes，可选；有才写）
+//   - field: 结果字段号（f2/f3/f4/f5/f7/f8/f9/f14/f16/f20/f23）
+//   - result: 结果字段的 bytes payload（已序列化的结果对象）
+//
+// 返回：完整的 ExecClientMessage 帧（已包含 f1/f15/结果字段，但未追加 stream_close）。
+func cursorEncodeExecClientResultFrame(execID uint64, idField []byte, field int, result []byte) []byte {
+	msg := cursorAppendVarintField(nil, cursorFldClientMsgID, execID)
+	if len(idField) > 0 {
+		msg = cursorAppendBytesField(msg, cursorFldClientMsgExecID, idField)
+	}
+	return cursorAppendBytesField(msg, field, result)
+}
+
 // ---------------------------------------------------------------------------
 // protobuf 解码
 // ---------------------------------------------------------------------------
