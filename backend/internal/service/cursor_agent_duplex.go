@@ -6,12 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -75,31 +73,12 @@ const (
 	// McpTextContent 字段。
 	cursorFldTextContentText = 1 // f1 text（string）
 
-	// ExecClientMessage.f14 = ShellStream（原生 shell 委托回写通道，区别于 mcp 的 f11 McpResult）。
-	cursorFldClientMsgShellStream = 14
-
 	// cursorFldClientControlMessage 是信封 AgentClientMessage.f5（exec_client_control_message）。
 	cursorFldClientControlMessage = 5
 	// ExecClientControlMessage.f1 = stream_close（f2 throw / f3 heartbeat）。
 	cursorFldControlStreamClose = 1
 	// ExecClientStreamClose.f1 = id（uint32，varint）。
 	cursorFldStreamCloseID = 1
-
-	// ShellStream oneof 事件字段号（依据 plan §1 / §2.2）。
-	cursorFldShellStreamStdout = 1 // f1 stdout{data}
-	cursorFldShellStreamStderr = 2 // f2 stderr{data}
-	cursorFldShellStreamExit   = 3 // f3 exit{code(int32), cwd(str)}
-	cursorFldShellStreamStart  = 4 // f4 start{sandbox_policy}：客户端回执的执行开始帧。
-	// cursorSandboxTypeInsecureNone 是 agent.v1 沙箱类型枚举的 INSECURE_NONE 取值
-	// （客户端 Lj() 默认策略）。仅在请求未携带 requested_sandbox_policy 时回填 start。
-	cursorSandboxTypeInsecureNone = 1
-
-	// ShellStreamStdout / ShellStreamStderr 内层字段。
-	cursorFldShellStreamData = 1 // f1 data（string）
-
-	// ShellStreamExit 内层字段。
-	cursorFldShellStreamExitCode = 1 // f1 code（int32，按 varint 编码）
-	cursorFldShellStreamExitCwd  = 2 // f2 cwd（string）
 )
 
 // cursorEncodeMcpToolResult 把一条真实工具结果编码为 ExecClientMessage 字节。
@@ -145,152 +124,6 @@ func cursorEncodeMcpToolResult(
 	}
 	msg = cursorAppendBytesField(msg, cursorFldClientMsgMcpResult, result)
 	return msg
-}
-
-// ---------------------------------------------------------------------------
-// Cursor 原生 shell 执行桥接（ExecServerMessage.f14 → 下游 tool_call → 回写 ShellStream）。
-//
-// 依据方案 cursor-native-shell-bridge-plan.md（§2 / §2.2 / §4 / §5）：真实客户端声明
-// shell 类工具后，上游改用 f14 原生 shell 通道，回写走 ShellStream（f14），与 mcp 的
-// f11 McpResult 是两条互不相同的通道。本组函数为 shell 委托的解码、工具名/schema 选择、
-// 参数按目标 schema 转换、以及续轮回写编码。mcp 路径（cursorEncodeMcpToolResult）与此
-// 完全独立、字节级行为不变。
-// ---------------------------------------------------------------------------
-
-// cursorParseShellResult 解析客户端 tool result 为 shell 的 stdout/stderr/exit_code。
-//
-// 规则（plan §2.2 / 实现要点 4）：结果 JSON 含 stdout/stderr/exit_code 任一字段 → 取字段值；
-// 否则整段文本作 stdout，exit_code=0（is_error 时 1）。is_error 语义原样保留。
-func cursorParseShellResult(r CursorToolResult) (stdout, stderr string, exitCode int) {
-	text := strings.Join(r.Text, "")
-	if len(r.Structured) > 0 {
-		text = string(r.Structured)
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(text), &m); err == nil {
-		_, hasOut := m["stdout"]
-		_, hasErr := m["stderr"]
-		_, hasExit := m["exit_code"]
-		if hasOut || hasErr || hasExit {
-			if v, ok := m["stdout"]; ok {
-				var s string
-				if json.Unmarshal(v, &s) == nil {
-					stdout = s
-				}
-			}
-			if v, ok := m["stderr"]; ok {
-				var s string
-				if json.Unmarshal(v, &s) == nil {
-					stderr = s
-				}
-			}
-			if v, ok := m["exit_code"]; ok {
-				var n int
-				if json.Unmarshal(v, &n) == nil {
-					exitCode = n
-				}
-			}
-			return
-		}
-	}
-	// 纯文本：整段作 stdout。
-	stdout = text
-	if r.IsError {
-		exitCode = 1
-	}
-	return
-}
-
-// cursorShellCwdFromArgs 从 shell 委托的 ArgsJSON 取出 workdir（回写 exit 帧的 cwd）。
-func cursorShellCwdFromArgs(argsJSON string) string {
-	// 真实客户端的 exit 事件总是携带当前工作目录（coreExecutor.getCwd）；
-	// 空 cwd 会让上游无法定位执行结果（实测回写后 178s 无 TurnEnded）。
-	const defaultCwd = "/"
-	if argsJSON == "" {
-		return defaultCwd
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(argsJSON), &m); err != nil {
-		return defaultCwd
-	}
-	if wd, ok := m["workdir"].(string); ok && wd != "" {
-		return wd
-	}
-	return defaultCwd
-}
-
-// cursorEncodeShellToolResult 把一条 shell 工具结果编码为**一或多个** ExecClientMessage 帧
-// （ShellStream 形态，区别于 mcp 的 f11 McpResult）。帧序（plan §2.2 / 实现要点 3）：
-//
-//	stderr 非空 → 先发 f14 ShellStream{f2 ShellStreamStderr{f1 data}}；
-//	随后 f14 ShellStream{f1 ShellStreamStdout{f1 data}}（stdout）；
-//	最后 f14 ShellStream{f3 ShellStreamExit{f1 code(int32), f2 cwd(str)}}（始终发送）。
-//
-// 外层每帧统一 {f1 exec_id(varint), f15 IDField(bytes), f14 ShellStream}。
-//
-// §5 待验项：首版**不**发 ShellStream.f4 start（真机往返验证后再决定是否补 start 再验）——
-func cursorEncodeShellToolResult(execID uint64, idField []byte, stdout, stderr string, exitCode int, cwd string, sandboxPolicy []byte) [][]byte {
-	// outer 把一段 ShellStream 包成完整 ExecClientMessage（f1 exec_id + f15 id + f14 ShellStream）。
-	outer := func(shellStream []byte) []byte {
-		msg := cursorAppendVarintField(nil, cursorFldClientMsgID, execID)
-		if len(idField) > 0 {
-			msg = cursorAppendBytesField(msg, cursorFldClientMsgExecID, idField)
-		}
-		msg = cursorAppendBytesField(msg, cursorFldClientMsgShellStream, shellStream)
-		return msg
-	}
-	var frames [][]byte
-	// start 帧（ShellStream.f4）：告知上游该 shell 执行已开始，并回显请求里的 sandbox_policy
-	// （ShellArgs.f9）。实测空 start 时上游不推进（回写后 178s 无 TurnEnded）。
-	var startInner []byte
-	if len(sandboxPolicy) > 0 {
-		startInner = cursorAppendBytesField(startInner, 1, sandboxPolicy)
-	} else {
-		// 请求未携带 requested_sandbox_policy 时，按客户端默认策略回填 INSECURE_NONE
-		// （agent-host 的 Lj() 默认构造 SandboxPolicy{type: INSECURE_NONE}）。
-		// 空 start 会被上游视为策略未知而不推进（实测 175s 无 TurnEnded）。
-		policy := cursorAppendVarintField(nil, 1, uint64(cursorSandboxTypeInsecureNone))
-		startInner = cursorAppendBytesField(startInner, 1, policy)
-	}
-	frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStart, startInner)))
-	if stderr != "" {
-		inner := cursorAppendStringField(nil, cursorFldShellStreamData, stderr)
-		frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStderr, inner)))
-	}
-	// stdout 按 512 字节分片：真实客户端按读取缓冲增量发送 stdout
-	// （emitToolCallDelta 逐块），单帧超长可能被上游丢弃/不推进。
-	if stdout != "" {
-		const chunk = 512
-		for i := 0; i < len(stdout); i += chunk {
-			end := i + chunk
-			if end > len(stdout) {
-				end = len(stdout)
-			}
-			// 避免在 UTF-8 多字节字符中间切断。
-			for end < len(stdout) && end > i && (stdout[end]&0xC0) == 0x80 {
-				end--
-			}
-			if end == i {
-				end = len(stdout)
-			}
-			inner := cursorAppendStringField(nil, cursorFldShellStreamData, stdout[i:end])
-			frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamStdout, inner)))
-			if end >= len(stdout) {
-				break
-			}
-			i = end - chunk
-		}
-	}
-	// exit 帧（始终发送）。code 按 protobuf int32 编码（uint32 两位补码 → varint）。
-	exitInner := cursorAppendVarintField(nil, cursorFldShellStreamExitCode, uint64(uint32(exitCode)))
-	if cwd != "" {
-		exitInner = cursorAppendStringField(exitInner, cursorFldShellStreamExitCwd, cwd)
-	}
-	// local_execution_time_ms（f6）：真实客户端的 exit 事件总是携带该值；
-	// 缺失时上游可能无法判定执行已结束（实测无该字段时 177s 无 TurnEnded）。
-	exitInner = cursorAppendVarintField(exitInner, 6, 0)
-	frames = append(frames, outer(cursorAppendBytesField(nil, cursorFldShellStreamExit, exitInner)))
-	return frames
 }
 
 // cursorEncodeExecStreamClose 把一个 exec 的终止控制帧编码为 ExecClientControlMessage 载荷。

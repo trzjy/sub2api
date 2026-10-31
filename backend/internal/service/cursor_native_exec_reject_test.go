@@ -381,7 +381,7 @@ func TestCursorRejectNativeExecWritesFramesAndLogs(t *testing.T) {
 	entries := logs.FilterField(zap.String("phase", "native_exec_rejected")).All()
 	require.Len(t, entries, 2, "必须记两条 native_exec_rejected 日志（每个字段一条）")
 	for _, e := range entries {
-		names := cursorNativeFsObserveNamesFromContext(t, e)
+		names := cursorRejectTestDeclaredNames(t, e)
 		require.Contains(t, names, "Bash", "即使声明了同名工具也要拒绝，且日志必须含声明名")
 		require.Contains(t, names, "read_file", "即使声明了同名工具也要拒绝，且日志必须含声明名")
 		tcid, ok := e.ContextMap()["tool_call_id"].(string)
@@ -433,9 +433,9 @@ func cursorNativeFsTestObserveDuplex(t *testing.T, defs [][]byte) (*cursorAgentD
 	return d, logs, captureDuplex(t, d)
 }
 
-// cursorNativeFsObserveNamesFromContext 从一条观测日志里取出 declared_tool_names 字段。
+// cursorRejectTestDeclaredNames 从一条观测日志里取出 declared_tool_names 字段。
 // 生产侧以逗号拼接的 string 写入（工具名均为不含逗号的标识符），测试侧按逗号拆回。
-func cursorNativeFsObserveNamesFromContext(t *testing.T, e observer.LoggedEntry) []string {
+func cursorRejectTestDeclaredNames(t *testing.T, e observer.LoggedEntry) []string {
 	t.Helper()
 	raw, ok := e.ContextMap()["declared_tool_names"].(string)
 	require.True(t, ok, "declared_tool_names 必须是字符串字段")
