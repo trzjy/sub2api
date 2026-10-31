@@ -129,6 +129,8 @@ CLAUDE.md
 scripts
 !backend/scripts/
 !backend/scripts/resolve-version.sh
+!skills/sub2api-api-atlas/scripts/
+!skills/sub2api-api-atlas/scripts/**
 !deploy-config/scripts/
 !deploy-config/scripts/**
 .code-review-state
