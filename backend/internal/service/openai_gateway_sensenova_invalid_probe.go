@@ -81,6 +81,8 @@ func sensenovaRequestShape(body []byte) map[string]any {
 	})
 	shape["top_keys"] = topKeys
 
+	// 复合值（对象/数组）可能携带 json_schema 定义或用户文本，指纹里只记类型，
+	// 原文只允许出现在 0700 目录的落盘文件中。
 	params := map[string]any{}
 	for _, key := range []string{
 		"model", "stream", "max_tokens", "max_completion_tokens", "temperature", "top_p",
@@ -88,7 +90,14 @@ func sensenovaRequestShape(body []byte) map[string]any {
 		"response_format", "thinking", "enable_thinking",
 	} {
 		if result := gjson.GetBytes(body, key); result.Exists() {
-			params[key] = result.Value()
+			switch {
+			case result.IsObject():
+				params[key] = "object"
+			case result.IsArray():
+				params[key] = "array"
+			default:
+				params[key] = result.Value()
+			}
 		}
 	}
 	shape["params"] = params
@@ -216,6 +225,12 @@ func captureSensenovaInvalidRequest(accountID int64, path string, requestBody, r
 
 	dir := filepath.Join(sensenovaInvalidCaptureBaseDir(), sensenovaInvalidCaptureDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		logger.L().Warn("sensenova.inference_request_invalid.capture_failed", zap.Error(err))
+		return ""
+	}
+	// MkdirAll 对已存在的目录不会收紧权限，目录若事先以宽权限建成就一直保持，
+	// 故显式收紧，保证原文只落在 0700 目录里。
+	if err := os.Chmod(dir, 0o700); err != nil {
 		logger.L().Warn("sensenova.inference_request_invalid.capture_failed", zap.Error(err))
 		return ""
 	}

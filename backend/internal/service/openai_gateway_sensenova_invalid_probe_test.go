@@ -230,6 +230,60 @@ func TestSensenovaRequestShape(t *testing.T) {
 	}
 }
 
+// TestObserveSensenovaInvalidRequestCaptureTightensDirPerm 覆盖目录事先以宽权限建成的场景：
+// MkdirAll 不会收紧已有目录的权限，必须靠显式 Chmod 兜住。
+func TestObserveSensenovaInvalidRequestCaptureTightensDirPerm(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	sensenovaInvalidResetCaptureCount(t)
+
+	// 手工造一个 0755 的宽权限目录（在 umask 影响前先 Chmod 保证生效）。
+	dir := filepath.Join(sensenovaInvalidCaptureBaseDir(), sensenovaInvalidCaptureDir)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+
+	requestBody := []byte(`{"model":"SenseNova-V6","messages":[{"role":"user","content":"hello"}]}`)
+	responseBody := []byte(`{"error":{"message":"inference request is invalid"}}`)
+	observeSensenovaInvalidRequest(sensenovaTestAccount(PlatformDeepseek, 801), "/v1/chat/completions", 400, requestBody, responseBody)
+
+	entries := sensenovaInvalidCaptureFiles(t)
+	require.Len(t, entries, 1)
+
+	dirInfo, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm())
+}
+
+// TestSensenovaRequestShapeMasksCompoundParams 校验 params 中的复合值只记类型，
+// 避免 json_schema 定义、工具名等文本随指纹进入日志。
+func TestSensenovaRequestShapeMasksCompoundParams(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"model": "SenseNova-V6",
+		"temperature": 0.5,
+		"response_format": {"type":"json_schema","json_schema":{"name":"SECRET_SCHEMA","schema":{"description":"SECRET_TEXT"}}},
+		"tool_choice": {"type":"function","function":{"name":"Bash"}},
+		"thinking": {"type":"enabled","budget_tokens":10},
+		"messages": [{"role":"user","content":"hello"}]
+	}`)
+
+	shape := sensenovaRequestShape(body)
+
+	params, ok := shape["params"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "object", params["response_format"])
+	require.Equal(t, "object", params["tool_choice"])
+	require.Equal(t, "object", params["thinking"])
+	// 标量不受影响，仍保留数值原值。
+	require.EqualValues(t, 0.5, params["temperature"])
+
+	encoded, err := json.Marshal(shape)
+	require.NoError(t, err)
+	for _, leaked := range []string{"SECRET_SCHEMA", "SECRET_TEXT", "budget_tokens", "json_schema"} {
+		require.NotContains(t, string(encoded), leaked)
+	}
+}
+
 func TestSensenovaRequestShapeInvalidJSON(t *testing.T) {
 	t.Parallel()
 
