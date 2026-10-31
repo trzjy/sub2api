@@ -121,6 +121,7 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	// is intentionally skipped: Anthropic Messages bodies carry no service_tier,
 	// so the converted Chat Completions body never contains one and the policy
 	// would always be a no-op on this path.
+	chatBody = clampSensenovaUpstreamMaxTokens(account, chatBody)
 
 	logger.L().Debug("openai messages: forwarding via raw chat completions",
 		zap.Int64("account_id", account.ID),

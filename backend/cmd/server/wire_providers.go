@@ -21,9 +21,6 @@ package main
 
 import (
 	"database/sql"
-	"log/slog"
-	"strings"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -132,62 +129,6 @@ func provideXianguanjiaSupplyOrderService(
 		xianguanjia.NewSupplyRefundStore(client, redeemService),
 		redeemService,
 	)
-}
-
-// provideStandbyController 是主力渠道自适应备用切换控制器的唯一装配点（第 3 片）。
-//
-// 这里一次装配四个部件，因为它们共享同一份运行时上下文（DB、时区、间隔）：
-//   - repository.NewStandbyHealthRepository → service.StandbyHealthSource（只读查询）
-//   - service.NewStandbyCoveredModelSource（第 3c 片：固定单一请求侧模型清单，不查库）
-//   - service.NewStandbyHealthCollector（按全局时区做 hour-of-day 分桶）
-//   - service.NewProcessStandbyController（注册表挂成进程级单例，调度层读同一实例）
-//
-// **失败开放点（全片唯一一处，故意为之）**：开关关闭，或任一构造依赖不成立时，
-// 返回 nil 并只记 error 日志，绝不阻断主服务启动。失败方向是"禁用 standby"——
-// 控制器不启动、不写注册表，进程级注册表保持空表 = 所有模型 closed，
-// 调度层 standbyRoutingOpen 恒为 false，行为与未接入时逐位一致。
-// 允许失败开放的边界：备用切换是延迟劣化时的加速手段，不是请求主链路；
-// 缺它只会退化为现状，不会造成请求失败，而阻断启动会放大成整站不可用。
-func provideStandbyController(cfg *config.Config, db *sql.DB) *service.StandbyController {
-	if cfg == nil || db == nil {
-		slog.Error("standby_controller_disabled", "reason", "nil config or nil database")
-		return nil
-	}
-	if !cfg.Standby.Enabled {
-		slog.Info("standby_controller_disabled", "reason", "standby.enabled=false")
-		return nil
-	}
-
-	tz := strings.TrimSpace(cfg.Timezone)
-	if tz == "" {
-		tz = "Asia/Shanghai"
-	}
-	location, err := time.LoadLocation(tz)
-	if err != nil {
-		slog.Error("standby_controller_disabled", "reason", "invalid timezone", "timezone", tz, "error", err)
-		return nil
-	}
-
-	interval := time.Duration(cfg.Standby.PollIntervalSeconds) * time.Second
-	if interval <= 0 {
-		interval = service.StandbyDefaultPollInterval
-	}
-
-	healthSource := repository.NewStandbyHealthRepository(db)
-	covered := service.NewStandbyCoveredModelSource()
-	collector := service.NewStandbyHealthCollector(healthSource, service.StandbyCollectTimeout, location)
-	controller := service.NewProcessStandbyController(collector, covered, service.StandbyControllerOptions{
-		Interval:          interval,
-		ForceOpenModels:   cfg.Standby.ForceOpenModels,
-		ForceClosedModels: cfg.Standby.ForceClosedModels,
-	})
-
-	slog.Info("standby_controller_enabled", "interval", interval.String(), "timezone", tz,
-		"covered_models", service.StandbyCoveredModelList(),
-		"force_open_models", cfg.Standby.ForceOpenModels,
-		"force_closed_models", cfg.Standby.ForceClosedModels,
-	)
-	return controller
 }
 
 // provideXianguanjiaSupplyHandler 装配货源目录 handler（缺项 8）。

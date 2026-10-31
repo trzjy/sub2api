@@ -168,13 +168,6 @@ func runMainServer() {
 		}
 	}
 
-	// 主力渠道自适应备用切换控制器（第 3 片）：配置关闭或装配失败时 app.Standby 为
-	// nil（禁用 standby，进程级注册表保持空表 = 全部 closed），这里只负责启动。
-	standbyCtx, stopStandby := context.WithCancel(context.Background())
-	if app.Standby != nil {
-		app.Standby.Start(standbyCtx)
-	}
-
 	// 启动服务器
 	go func() {
 		if err := app.Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -196,13 +189,6 @@ func runMainServer() {
 
 	if err := app.Server.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
-	}
-
-	// 控制器每轮都要查库，必须先停再让 defer app.Cleanup() 关闭 DB/Redis：
-	// 先取消 ctx 让在途评估立即返回，再等轮询循环退出（Stop 幂等）。
-	stopStandby()
-	if app.Standby != nil {
-		app.Standby.Stop()
 	}
 
 	log.Println("Server exited")
