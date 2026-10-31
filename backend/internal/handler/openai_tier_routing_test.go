@@ -43,14 +43,27 @@ func closedGate(model string) (bool, error) { return false, nil }
 func TestTierRoutingTargetModelsAliasCoverage(t *testing.T) {
 	require.True(t, isTierRoutingTargetModel("deepseek-v4.1-flash-1017"), "1017 alias must be a routing target")
 	require.True(t, isTierRoutingTargetModel("deepseek-v4.1-flash"), "canonical deepseek flash must stay a routing target")
-	require.False(t, isTierRoutingTargetModel("deepseek-v4-pro"), "unrelated model must stay out of the target set")
+	require.False(t, isTierRoutingTargetModel("deepseek-v3-2-volc"), "unsold model must stay out of the target set")
+}
+
+// TestTierRoutingTargetModelsFamilyCoverage 锁定 2026-11-01 裁定：deepseek/kimi/glm 订阅组
+// allowlist 在售模型全部进入分层路由评估；大小写按 allowlist 精确匹配。
+func TestTierRoutingTargetModelsFamilyCoverage(t *testing.T) {
+	for _, model := range []string{
+		"kimi-k3", "kimi-k3.1", "kimi-k3.1-pro", "kimi-k2.7-code",
+		"deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "deepseek-v4-pro", "deepseek-v4-pro-0813",
+		"glm-5.3-flash", "glm-5.3",
+	} {
+		require.True(t, isTierRoutingTargetModel(model), "family model must be a routing target: %s", model)
+	}
+	require.False(t, isTierRoutingTargetModel("Kimi-K3.1"), "target match is case-sensitive")
 }
 
 // TestTierRoutingApplyRoutingNonTargetModelPassthrough 验证「同平台非目标模型」零装门零行为
 // 变化（派发单 OC-T1，测试 #2）：即使平台命中（kimi），只要请求模型不在目标集合，直接返回
 // 原 baseCtx，不输出分层路由日志，亦不依赖门控结果。
 func TestTierRoutingApplyRoutingNonTargetModelPassthrough(t *testing.T) {
-	for _, model := range []string{"kimi-k2", "glm-5.3", "deepseek-v4-pro", "gpt-5.1"} {
+	for _, model := range []string{"kimi-k2", "glm-4.7", "deepseek-v3-2-volc", "gpt-5.1"} {
 		c, reqLog, logs := newTierRoutingTestCtx(t, "req-nontarget-"+model)
 		baseCtx := context.Background()
 		out, err := applyTierRouting(c, baseCtx, reqLog, model, model,

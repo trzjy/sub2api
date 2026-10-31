@@ -5173,11 +5173,18 @@ func summarizeWSCloseErrorForLog(err error) (string, string) {
 // tierRoutingTargetModels 是分层路由泛化（派发单 OC-T1）的精确目标模型集合：
 // 仅当请求侧模型名精确匹配其中一项（判定 SSOT）才进入分层路由评估。
 // 这些模型各自存在「伪装线池（mask_upstream_identity）」候选，门控语义见下。
+// 2026-11-01 用户裁定：伪装号覆盖 deepseek/kimi/glm 家族在售全部模型（以订阅组 allowlist 为准）。
 var tierRoutingTargetModels = map[string]struct{}{
 	"kimi-k3":                  {},
+	"kimi-k3.1":                {},
+	"kimi-k3.1-pro":            {},
+	"kimi-k2.7-code":           {},
 	"deepseek-v4.1-flash":      {},
 	"deepseek-v4.1-flash-1017": {},
+	"deepseek-v4-pro":          {},
+	"deepseek-v4-pro-0813":     {},
 	"glm-5.3-flash":            {},
+	"glm-5.3":                  {},
 }
 
 // isTierRoutingTargetModel 判定请求模型是否属于分层路由目标集合（请求侧模型名精确匹配）。
