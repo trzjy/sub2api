@@ -157,6 +157,8 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	// 4. Handle error responses
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
+		// 临时取证：sensenova 400 inference request is invalid，取证结束后删除
+		observeSensenovaInvalidRequest(account, "messages_chat_fallback", resp.StatusCode, chatBody, respBody)
 		if isCodeBuddyPlatformAccount(account) || isCodeBuddyShadowAccount(account) {
 			// 与 /v1/chat/completions 路径一致的 CodeBuddy 错误副作用（余额/会话/模型冷却），
 			// 内部完成分类 + 脱敏 + 回写 resp.Body；响应本身仍以 Anthropic 格式回传。

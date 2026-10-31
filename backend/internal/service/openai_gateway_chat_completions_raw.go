@@ -240,6 +240,8 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	// 7. Handle error response with failover
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
+		// 临时取证：sensenova 400 inference request is invalid，取证结束后删除
+		observeSensenovaInvalidRequest(account, "chat_completions_raw", resp.StatusCode, upstreamBody, respBody)
 		if account.Platform == PlatformGrok {
 			kind := "http_error"
 			if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
