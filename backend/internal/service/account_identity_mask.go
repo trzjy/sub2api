@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -130,6 +131,40 @@ func IsIdentityMaskedAccount(a *Account) bool {
 	}
 }
 
+// responseIdentityMaskKey 是「响应侧身份净化」账号级开关（extra 键名）。
+// 与 mask_upstream_identity 的区别：mask_upstream_identity 同时是分层路由小档池的准入标记，
+// 开启它会改变账号的档位归属；本开关只驱动响应侧净化（模型回写 / 错误体净化 / 指纹剥离），
+// 不参与任何调度或分层判定。
+const responseIdentityMaskKey = "response_identity_mask"
+
+// IsResponseIdentityMaskedAccount 报告该账号是否需要响应侧身份净化。
+// 语义 = mask_upstream_identity（旧开关，保持既有账号行为不变）|| extra.response_identity_mask（新开关）。
+// 读取口径与 IsIdentityMaskedAccount 一致：SnapshotExtra 快照读取；bool 与 "true"/"1" 字符串均视为真；
+// 缺键 / 空值 / 非 bool 非上述字符串 / nil 账号 / nil Extra 一律为 false。
+func IsResponseIdentityMaskedAccount(a *Account) bool {
+	// 先复用旧开关结果，保持既有账号行为不变，且不得改写 IsIdentityMaskedAccount 本身。
+	if IsIdentityMaskedAccount(a) {
+		return true
+	}
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
+		return false
+	}
+	v, ok := asnap[responseIdentityMaskKey]
+	if !ok {
+		return false
+	}
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		// 与 IsIdentityMaskedAccount 一致：宽容解析 "true" / "1"。
+		return b == "true" || b == "1"
+	default:
+		return false
+	}
+}
+
 // IdentityRewriteAliases returns the set of upstream model name variants that a
 // masked account should treat as matching the mapped (upstream-sent) model when
 // rewriting the echoed model back to the client-requested name.
@@ -178,34 +213,111 @@ func IsReasoningStrippedAccount(a *Account) bool {
 	}
 }
 
-// StripReasoningFromSSELine removes the reasoning_content field from a single
-// OpenAI Chat Completions SSE data payload line
-// (choices.0.delta.reasoning_content). Lines without a reasoning_content field
-// are returned unchanged. Parse/delete failures fall back to the original line
-// so the write path never drops a chunk on a malformed payload.
+// stripReasoningChoiceKey 计算 choices 数组元素的访问键：
+// 优先用该元素自身的 index 字段值（必须是数值）；index 缺失或非数值时回退数组下标 pos。
+// 这样既能尊重上游在 choice 上标注的 index，也能在 index 缺失时退化为位置访问。
+func stripReasoningChoiceKey(choice gjson.Result, pos int) string {
+	idx := choice.Get("index")
+	if idx.Exists() && idx.Type == gjson.Number {
+		return strconv.FormatInt(idx.Int(), 10)
+	}
+	return strconv.Itoa(pos)
+}
+
+// StripReasoningFromSSELine removes the reasoning_content and reasoning fields
+// from the delta of every choice in a single OpenAI Chat Completions SSE data
+// payload line. SenseNova (and other upstreams) may emit the thinking field as
+// either "reasoning_content" or "reasoning"; this strips both so the upstream
+// identity/competitor terms hidden in the thinking text never reach the client.
+//
+// Each choice is addressed by its own index field when present, falling back to
+// the array position otherwise. Lines without any reasoning/reasoning_content
+// field are returned byte-for-byte unchanged (zero-allocation fast path).
+// Parse/delete failures fall back to the original line so the write path never
+// drops a chunk on a malformed payload.
 func StripReasoningFromSSELine(line string) string {
-	if !gjson.Get(line, "choices.0.delta.reasoning_content").Exists() {
+	// 零分配快路径：不含 reasoning 子串直接原样返回（reasoning_content / reasoning 均含该子串）。
+	if !strings.Contains(line, "reasoning") {
 		return line
 	}
-	out, err := sjson.Delete(line, "choices.0.delta.reasoning_content")
-	if err != nil {
+	if !gjson.Get(line, "choices").Exists() {
 		return line
 	}
+	// 先探测是否存在待删字段，无任何目标字段时原样返回，避免无谓重序列化。
+	hasTarget := false
+	gjson.Get(line, "choices").ForEach(func(_, choice gjson.Result) bool {
+		if choice.Get("delta.reasoning_content").Exists() || choice.Get("delta.reasoning").Exists() {
+			hasTarget = true
+			return false
+		}
+		return true
+	})
+	if !hasTarget {
+		return line
+	}
+	out := line
+	pos := 0
+	gjson.Get(line, "choices").ForEach(func(_, choice gjson.Result) bool {
+		key := stripReasoningChoiceKey(choice, pos)
+		for _, sub := range []string{"reasoning_content", "reasoning"} {
+			path := "choices." + key + ".delta." + sub
+			if !gjson.Get(out, path).Exists() {
+				continue
+			}
+			n, err := sjson.Delete(out, path)
+			if err != nil {
+				// 解析/删除失败回退原值，绝不丢行、绝不 panic。
+				return false
+			}
+			out = n
+		}
+		pos++
+		return true
+	})
 	return out
 }
 
-// StripReasoningFromResponseBody removes the reasoning_content field from an
-// OpenAI Chat Completions JSON response body
-// (choices.0.message.reasoning_content). Bodies without a reasoning_content
-// field are returned unchanged. Parse/delete failures fall back to the original
-// body.
+// StripReasoningFromResponseBody removes the reasoning_content and reasoning
+// fields from the message of every choice in an OpenAI Chat Completions JSON
+// response body. See StripReasoningFromSSELine for the field-name and indexing
+// rationale. Bodies without any reasoning/reasoning_content field are returned
+// byte-for-byte unchanged. Parse/delete failures fall back to the original body.
 func StripReasoningFromResponseBody(body []byte) []byte {
-	if !gjson.GetBytes(body, "choices.0.message.reasoning_content").Exists() {
+	// 零分配快路径：不含 reasoning 子串直接原样返回。
+	if !bytes.Contains(body, []byte("reasoning")) {
 		return body
 	}
-	out, err := sjson.DeleteBytes(body, "choices.0.message.reasoning_content")
-	if err != nil {
+	if !gjson.GetBytes(body, "choices").Exists() {
 		return body
 	}
+	hasTarget := false
+	gjson.GetBytes(body, "choices").ForEach(func(_, choice gjson.Result) bool {
+		if choice.Get("message.reasoning_content").Exists() || choice.Get("message.reasoning").Exists() {
+			hasTarget = true
+			return false
+		}
+		return true
+	})
+	if !hasTarget {
+		return body
+	}
+	out := body
+	pos := 0
+	gjson.GetBytes(body, "choices").ForEach(func(_, choice gjson.Result) bool {
+		key := stripReasoningChoiceKey(choice, pos)
+		for _, sub := range []string{"reasoning_content", "reasoning"} {
+			path := "choices." + key + ".message." + sub
+			if !gjson.GetBytes(out, path).Exists() {
+				continue
+			}
+			n, err := sjson.DeleteBytes(out, path)
+			if err != nil {
+				return false
+			}
+			out = n
+		}
+		pos++
+		return true
+	})
 	return out
 }

@@ -121,7 +121,7 @@ func isClientCanceledTransportError(ctx context.Context, err error) bool {
 // 该分支不会命中）。
 func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Context, c *gin.Context, account *Account, err error, passthrough bool, upstreamModel string) error {
 	if c != nil {
-		c.Set(MaskedAccountFailoverKey, account != nil && IsIdentityMaskedAccount(account))
+		c.Set(MaskedAccountFailoverKey, account != nil && IsResponseIdentityMaskedAccount(account))
 	}
 	// Client disconnected before the upstream could exhibit a fault: the request
 	// context itself is canceled, so do not record an Ops upstream error event.

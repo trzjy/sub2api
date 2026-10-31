@@ -343,7 +343,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 
 	needModelReplace := originalModel != mappedModel
 	// 掩码账号判定按当前尝试的账号取（failover 换号不沿用上次尝试的标志）。
-	maskedAccount := account != nil && IsIdentityMaskedAccount(account)
+	maskedAccount := account != nil && IsResponseIdentityMaskedAccount(account)
 	// QK-S2: stash the masked-identity flag for the failover final-write
 	// closure; set per-attempt so it reflects the account that produced the
 	// current error.
@@ -1898,14 +1898,14 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	if originalModel != mappedModel {
 		// 掩码账号按别名集回写（含去后缀别名），非掩码账号保持既有的
 		// fromModel 精确匹配语义零变化。
-		if IsIdentityMaskedAccount(account) {
+		if IsResponseIdentityMaskedAccount(account) {
 			body = s.replaceModelInResponseBody(body, mappedModel, originalModel, IdentityRewriteAliases(mappedModel)...)
 		} else {
 			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
 		}
 	}
 	// 掩码账号：抹除 vLLM 指纹（system_fingerprint / reasoning 字段）。
-	if IsIdentityMaskedAccount(account) {
+	if IsResponseIdentityMaskedAccount(account) {
 		body = maskVLLMFingerprints(body)
 	}
 	body, err = restoreGrokResponsesClientToolPayload(c, body)
@@ -1979,7 +1979,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		}
 		// QK-S2: scrub the client-visible terminal failure message for masked
 		// accounts so no upstream model identity or tokenharbor trace leaks.
-		if account != nil && IsIdentityMaskedAccount(account) {
+		if account != nil && IsResponseIdentityMaskedAccount(account) {
 			if safe := MaskUpstreamErrorMessageForClient(account, msg); safe != "" {
 				msg = safe
 			} else {
@@ -2015,7 +2015,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		body = finalResponse
 		if originalModel != mappedModel {
 			// 掩码账号按别名集回写，非掩码账号仅精确匹配。
-			if IsIdentityMaskedAccount(account) {
+			if IsResponseIdentityMaskedAccount(account) {
 				body = s.replaceModelInResponseBody(body, mappedModel, originalModel, IdentityRewriteAliases(mappedModel)...)
 			} else {
 				body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
@@ -2040,7 +2040,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 	} else {
 		if originalModel != mappedModel {
 			// 掩码账号按别名集回写，非掩码账号仅精确匹配。
-			if IsIdentityMaskedAccount(account) {
+			if IsResponseIdentityMaskedAccount(account) {
 				bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel, IdentityRewriteAliases(mappedModel)...)
 			} else {
 				bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel)
@@ -2050,7 +2050,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 	}
 
 	// 掩码账号：抹除 vLLM 指纹（system_fingerprint / reasoning 字段）。
-	if IsIdentityMaskedAccount(account) {
+	if IsResponseIdentityMaskedAccount(account) {
 		body = maskVLLMFingerprints(body)
 	}
 
@@ -2241,7 +2241,7 @@ func sanitizeOpenAIResponseFailedEventForClient(payload []byte, eventType string
 // rewritten twice. Returns nil when no rewrite was performed (non-masked account,
 // invalid JSON, or no error message field present).
 func maskStreamingFailedErrorMessageForClient(account *Account, payload []byte) []byte {
-	if account == nil || !IsIdentityMaskedAccount(account) || len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if account == nil || !IsResponseIdentityMaskedAccount(account) || len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return nil
 	}
 	updated := payload

@@ -103,7 +103,7 @@ func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
 	upstreamModel string,
 ) *UpstreamFailoverError {
 	if c != nil {
-		c.Set(MaskedAccountFailoverKey, account != nil && IsIdentityMaskedAccount(account))
+		c.Set(MaskedAccountFailoverKey, account != nil && IsResponseIdentityMaskedAccount(account))
 	}
 	shouldFailover := s.shouldFailoverOpenAIUpstreamResponse(account, resp.StatusCode, upstreamMsg, respBody)
 	tempUnscheduled := false

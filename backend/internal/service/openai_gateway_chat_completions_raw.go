@@ -527,7 +527,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 // 时触发。闸门刻意保持最小：观察/计费链（observer.ObserveOpenAI）看到的仍是
 // 原始上游回显，此处只改客户端可见的写出行；非掩码账号字节行为零变化。
 func rawChatCompletionsMaskGate(account *Account, originalModel, upstreamModel string) bool {
-	return IsIdentityMaskedAccount(account) && originalModel != "" && upstreamModel != "" && originalModel != upstreamModel
+	return IsResponseIdentityMaskedAccount(account) && originalModel != "" && upstreamModel != "" && originalModel != upstreamModel
 }
 
 // ensureOpenAIChatStreamUsage 确保 raw Chat Completions 流式请求会让上游返回 usage。

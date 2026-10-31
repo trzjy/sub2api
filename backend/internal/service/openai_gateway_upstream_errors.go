@@ -710,7 +710,7 @@ func upstreamIdentityLeaks(account *Account, msg string) bool {
 // it fails closed to an empty string so the caller can substitute a fixed
 // platform-standard message.
 func MaskUpstreamErrorMessageForClient(account *Account, upstreamMsg string) string {
-	if account == nil || !IsIdentityMaskedAccount(account) {
+	if account == nil || !IsResponseIdentityMaskedAccount(account) {
 		return upstreamMsg
 	}
 	msg := strings.TrimSpace(upstreamMsg)
@@ -732,7 +732,7 @@ func MaskUpstreamErrorMessageForClient(account *Account, upstreamMsg string) str
 // account, falling back to fallback when the masked-account message cannot be
 // safely normalized. Non-masked accounts always get upstreamMsg unchanged.
 func ClientSafeUpstreamErrorMessage(account *Account, upstreamMsg, fallback string) string {
-	if account == nil || !IsIdentityMaskedAccount(account) {
+	if account == nil || !IsResponseIdentityMaskedAccount(account) {
 		return upstreamMsg
 	}
 	if m := MaskUpstreamErrorMessageForClient(account, upstreamMsg); m != "" {
@@ -794,7 +794,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	// accounts (including genuine kimi accounts) — byte-for-byte unchanged.
 	// Also stash the masked-identity flag for the failover final-write closure;
 	// set per-attempt so it always reflects the account that produced this error.
-	masked := IsIdentityMaskedAccount(account)
+	masked := IsResponseIdentityMaskedAccount(account)
 	c.Set(MaskedAccountFailoverKey, masked)
 	clientMsg := ClientSafeUpstreamErrorMessage(account, upstreamMsg, infraerrors.UpstreamRequestFailed)
 	upstreamDetail := ""
@@ -855,7 +855,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		// QK-S2: a masked account must not receive an upstream-derived message.
 		// Scrub it; if it cannot be safely normalized, skip the passthrough and
 		// fall through to the fixed platform-standard handling below.
-		if account != nil && IsIdentityMaskedAccount(account) {
+		if account != nil && IsResponseIdentityMaskedAccount(account) {
 			if safe := MaskUpstreamErrorMessageForClient(account, errMsg); safe != "" {
 				errMsg = safe
 			} else {
@@ -954,7 +954,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	// 回真实状态码 + invalid_request_error + 真实 message；/v1/images 还额外透传
 	// code/param。原生 Responses 是唯一漏掉的一条。
 	if isOpenAIDeterministicClientError(resp.StatusCode) {
-		if account != nil && IsIdentityMaskedAccount(account) {
+		if account != nil && IsResponseIdentityMaskedAccount(account) {
 			// QK-S2: never echo upstream body fields (error.type/code/param may
 			// carry the upstream model identity); write a generic client error.
 			msg := clientMsg
@@ -1075,7 +1075,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 	// QK-S2: client-safe variant. No-op for non-masked accounts. Stash the
 	// masked-identity flag for the failover final-write closure (per-attempt).
-	c.Set(MaskedAccountFailoverKey, IsIdentityMaskedAccount(account))
+	c.Set(MaskedAccountFailoverKey, IsResponseIdentityMaskedAccount(account))
 	clientMsg := ClientSafeUpstreamErrorMessage(account, upstreamMsg, infraerrors.UpstreamRequestFailed)
 
 	upstreamDetail := ""
@@ -1095,7 +1095,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	); matched {
 		// QK-S2: scrub the passthrough message for masked accounts; if it cannot
 		// be safely normalized, skip the passthrough and fall through.
-		if account != nil && IsIdentityMaskedAccount(account) {
+		if account != nil && IsResponseIdentityMaskedAccount(account) {
 			if safe := MaskUpstreamErrorMessageForClient(account, errMsg); safe != "" {
 				errMsg = safe
 			} else {
