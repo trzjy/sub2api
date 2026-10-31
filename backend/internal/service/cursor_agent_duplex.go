@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -867,9 +866,13 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 		if id, ok := cursorFindField(parts, 15); ok {
 			idField = id.Bytes
 		}
+		// 本轮裁定派发顺序（严格）：f10 → f36 → f11 → 11 类原生拒绝 → 已证 metadata → fail-close。
+		// 命中即处理，不再往下走。原生 exec 一律拒绝（不执行服务器工具、不按工具名配对、
+		// 不 FS→shell、不做 shell fallback）；只允许客户端声明的 f11 mcp_args 执行。
+		nativeField, hasNative := cursorNativeExecRejectField(parts)
 		switch {
 		case cursorFindFieldOK(parts, 10):
-			// 现有 context 应答（逐字不动，f10 既有处理）。
+			// 现有 context 应答（f10 既有处理，但不再伪造服务器环境，见 respondContext）。
 			return d.respondContext(parts, execID, idField)
 		case cursorFindFieldOK(parts, 36):
 			// mcp_state 委托（f36 mcp_state_exec_args）：回 McpStateExecResult，
@@ -895,56 +898,15 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			d.logPhase(zapcore.DebugLevel, "mcp_args_captured", "",
 				zap.Uint64("exec_id", execID), zap.String("tool_name", tc.Name))
 			return false, nil
-		case cursorFindFieldOK(parts, 14):
-			// Cursor 原生 shell 委托（ExecServerMessage.f14 = ShellArgs）：解析 → 校验 →
-			// 构造 capture{Kind:"shell"} → noteShellDelegation。有同 call_id 的 started 批则
-			// 按原路径入批；否则建 shellOnly 专属批立即可封口交付（不等 started/listed）。
-			// 失败关闭（ErrCursorProtocol，不整轮 502）：command 空 / 孤儿 tool_call_id 无对应
-			// started / required 缺字段 / schema 解析失败。注意"声明集中无带 command 属性的 shell
-			// 类工具"**不再**失败关闭——改为回写拒绝帧（见 cursorCaptureShellArgs 的哨兵分支），
-			// 流继续、不整轮 502。
-			tc, e := d.cursorCaptureShellArgs(parts, execID, idField)
-			if e != nil {
-				return false, e
+		case hasNative:
+			// 11 类原生 exec 字段（f2 shell / f3 write / f4 delete / f5 grep / f7 read /
+			// f8 ls / f9 diagnostics / f14 shell_stream / f16 background_shell_spawn /
+			// f20 fetch / f23 write_shell_stdin）：按本轮裁定一律按协议拒绝形状回写，
+			// 不执行服务器工具、不按工具名配对、不 FS→shell、不做 shell fallback。
+			// 拒绝入口在 cursor_native_exec_reject.go（由别的卡负责接线与修正），本卡只调用。
+			if err := d.cursorRejectNativeExec(parts, nativeField, execID, idField); err != nil {
+				return false, err
 			}
-			if tc.Name == "" {
-				// 无可用 shell 工具 → 已回写拒绝帧（f14 ShellStream{f5 rejected} + f3 exit{code=126}），
-				// 返回空 capture（Name 为空）；流继续（不整轮 502，不失败关闭）。成功委托的 Name
-				// 恒非空，故 Name=="" 可可靠区分拒绝与成功。
-				d.logPhase(zapcore.DebugLevel, "shell_rejected_no_tool", "",
-					zap.Uint64("exec_id", execID))
-				return false, nil
-			}
-			d.logPhase(zapcore.InfoLevel, "shell_args_delegated", "",
-				zap.Uint64("exec_id", execID), zap.String("tool_call_id", tc.ID),
-				zap.String("tool_name", tc.Name), zap.Int("args_len", len(tc.ArgsJSON)),
-				zap.Int("sandbox_policy_len", len(tc.SandboxPolicy)))
-			return false, nil
-		case cursorNativeFsExecFieldOK(parts):
-			// Cursor 原生文件工具委托（ExecServerMessage.f3 write / f4 delete / f5 grep /
-			// f7 read / f8 ls）：解析 Args → 按声明 schema 选下游同名工具并转参数（找不到失败关闭）
-			// → 构造 capture{Kind:read|ls|grep|write|delete} → noteNativeFsDelegation。封口沿用
-			// shell 的"独立批立即可封口"路径（不等 started/listed）。失败一律失败关闭，
-			// 绝不自造工具名或伪造执行结果。
-			//
-			// 放在 f10/f36/f11/f14 之后：既有四条的优先级与字节级行为完全不变。
-			field, _ := cursorNativeFsExecField(parts)
-			tc, e := d.cursorCaptureNativeFsArgs(parts, field, execID, idField)
-			if e != nil {
-				return false, e
-			}
-			if tc.Kind == "" {
-				// 工具缺席：捕获侧已写出失败 Result 帧（含 stream_close），连接继续。
-				// 不登记委托、不落到 default 失败关闭。
-				d.logPhase(zapcore.InfoLevel, "native_fs_rejected_no_tool", "",
-					zap.Uint64("exec_id", execID),
-					zap.String("kind", cursorNativeFsKindFromField(field)))
-				return false, nil
-			}
-			d.logPhase(zapcore.InfoLevel, "native_fs_args_delegated", "",
-				zap.Uint64("exec_id", execID), zap.String("tool_call_id", tc.ID),
-				zap.String("kind", tc.Kind), zap.String("tool_name", tc.Name),
-				zap.Int("field", field), zap.Int("args_len", len(tc.ArgsJSON)))
 			return false, nil
 		default:
 			// 未处理的 exec 子字段：先按字段号取证，再区分"纯元数据"与"真未知执行"。
@@ -965,7 +927,7 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				return false, fmt.Errorf("%w: AgentRun exec dispatch ordering broken", ErrCursorProtocol)
 			}
 			if cursorExecMetadataOnly(parts) {
-				// 纯元数据伴随消息（f1/f15/f19/f55/f57/f39/f45）：不承载执行指令，
+				// 纯元数据伴随消息（仅服务端方向已证字段 f1/f15/f19/f55/f57）：不承载执行指令，
 				// 忽略即可，连接保持、不失败（生产 [1,15,19,55] / [1,15,57] 即此类）。
 				d.logPhase(zapcore.DebugLevel, "exec_metadata_only", "",
 					zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
@@ -1083,15 +1045,13 @@ func frameTopFieldNumbers(payload []byte) []int {
 // 这类消息不承载执行指令，忽略即可，不得失败关闭整条会话。
 // ---------------------------------------------------------------------------
 const (
+	// 服务端方向已证 metadata 字段（唯一可忽略的 exec 元数据白名单；客户端方向字段如
+	// f39/f45 不在此列，未实现必须走 unsupported fail-close，不得被当作 metadata 忽略）。
 	cursorFldExecMetaID          = 1  // f1  id
 	cursorFldExecMetaExecID      = 15 // f15 exec_id
 	cursorFldExecMetaSpanContext = 19 // f19 span_context
 	cursorFldExecMetaAcceptHook  = 55 // f55 accept_hook_additional_contexts
 	cursorFldExecMetaMachineID   = 57 // f57 machine_id
-
-	// ExecClientMessage 侧出现过的元数据（ExecServerMessage 侧同样只作元数据忽略）：
-	cursorFldExecMetaLocalExecTimeMs = 39 // f39 local_execution_time_ms
-	cursorFldExecMetaHookAddlContext = 45 // f45 hook_additional_contexts
 )
 
 // cursorExecMetadataFieldOK 判断单个字段号是否属于可忽略的 exec 元数据白名单。
@@ -1099,8 +1059,7 @@ const (
 func cursorExecMetadataFieldOK(number int) bool {
 	switch number {
 	case cursorFldExecMetaID, cursorFldExecMetaExecID, cursorFldExecMetaMachineID,
-		cursorFldExecMetaSpanContext, cursorFldExecMetaAcceptHook,
-		cursorFldExecMetaLocalExecTimeMs, cursorFldExecMetaHookAddlContext:
+		cursorFldExecMetaSpanContext, cursorFldExecMetaAcceptHook:
 		return true
 	default:
 		return false
@@ -1120,16 +1079,22 @@ func cursorExecMetadataOnly(parts []cursorPBField) bool {
 	return true
 }
 
+// cursorNativeExecRejectFieldOK 判断 ExecServerMessage 是否承载 11 类已裁定原生 exec 字段之一。
+func cursorNativeExecRejectFieldOK(parts []cursorPBField) bool {
+	_, ok := cursorNativeExecRejectField(parts)
+	return ok
+}
+
 // cursorExecImplementedSubfieldOK 判断是否出现任一已实现的 exec 子字段
-// （f10 context / f36 mcp_state / f11 mcp_args / f14 shell / f3-f8 原生文件工具）。
+// （f10 context / f36 mcp_state / f11 mcp_args / 11 类原生拒绝字段）。
 // switch 已在 default 之前命中这些字段，故 default 中为 true 属内部逻辑错误。
 func cursorExecImplementedSubfieldOK(parts []cursorPBField) bool {
-	for _, n := range []int{10, 36, 11, 14} {
+	for _, n := range []int{10, 36, 11} {
 		if cursorFindFieldOK(parts, n) {
 			return true
 		}
 	}
-	return cursorNativeFsExecFieldOK(parts)
+	return cursorNativeExecRejectFieldOK(parts)
 }
 
 // respondContext 处理 exec 内层 f10（request_context）应答（既有逻辑逐字保留）。
@@ -1138,10 +1103,9 @@ func (d *cursorAgentDuplex) respondContext(parts []cursorPBField, execID uint64,
 	// 与耗时，**绝不记任何键值**（key/value 为账号会话私有数据，严禁入日志）。
 	d.logPhase(zapcore.DebugLevel, "context_write_before", "",
 		zap.String("kind", "context_response"), zap.Uint64("exec_id", execID))
-	// ExecClientMessage.context_response.success.result.context.environment.
-	env := cursorAppendStringField(nil, 1, runtime.GOOS)
-	env = cursorAppendStringField(env, 10, "UTC")
-	ctx := cursorAppendBytesField(nil, 4, env)
+	// 不伪造客户端环境：未取得真实客户端环境时省略 context.environment，绝不回填服务器
+	// GOOS / 时区 "UTC"（方案裁定：不能把服务器自身环境当客户端环境）。只保留字节外壳结构。
+	ctx := cursorAppendBytesField(nil, 4, nil) // f4 environment 省略
 	success := cursorAppendBytesField(nil, 1, ctx)
 	result := cursorAppendBytesField(nil, 1, success)
 	response := cursorAppendVarintField(nil, 1, execID)
