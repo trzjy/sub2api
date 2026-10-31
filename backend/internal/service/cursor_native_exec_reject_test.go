@@ -386,3 +386,25 @@ func TestCursorRejectNativeExecWritesFramesAndLogs(t *testing.T) {
 		require.NotEmpty(t, tcid, "tool_call_id 必须等于构造时写入的值（非空）")
 	}
 }
+
+// TestCursorNativeExecRejectDecodeFailureFailClose：protobuf 解码失败必须失败关闭（返回错误），
+// 且不得写出任何结果帧 / stream_close（只有真正的解码失败才终止该 exec，参数不完整不算）。
+func TestCursorNativeExecRejectDecodeFailureFailClose(t *testing.T) {
+	defs := [][]byte{
+		cursorTestBuildToolDef(t, "Bash", `{"type":"object","properties":{"command":{"type":"string"}}}`),
+	}
+	d, _, stop := cursorNativeFsTestObserveDuplex(t, defs)
+
+	// 截断的 varint（单个 0x80 是不完整 varint）→ 解码失败。
+	bad := []byte{0x80}
+	parts := cursorNativeFsTestExecParts(t, 2, []byte("exec-2"), 2, bad)
+	err := d.cursorRejectNativeExec(parts, 2, 2, []byte("exec-2"))
+	require.Error(t, err, "protobuf 解码失败必须失败关闭（返回错误）")
+
+	wire := stop()
+	frames := cursorNativeFsTestSplit(t, wire)
+	for _, fr := range frames {
+		_, ok := cursorFindField(fr, cursorFldClientMsgID)
+		require.False(t, ok, "解码失败时不得写出结果帧")
+	}
+}
