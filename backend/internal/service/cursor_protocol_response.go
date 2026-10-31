@@ -933,6 +933,12 @@ type cursorToolCallCapture struct {
 	WireID string
 	// SandboxPolicy 是 shell 委托 ShellArgs.f9 的原始字节，回写 start 帧时原样回显。
 	SandboxPolicy []byte
+	// ResultArgsJSON 是**回写原生结果帧时**用于取 path/pattern/output_mode 的参数 JSON。
+	//
+	// 仅当委托被转译为 shell 命令时非空（此时 ArgsJSON 是 {"command":...}，不含 path/pattern）；
+	// 为空时回写沿用 ArgsJSON（既有行为不变）。见 NSFS-02：原生工具缺席但客户端声明了 shell
+	// 类工具时，把原生文件工具委托转译成 shell 命令交给客户端，结果仍按原生通道回写上游。
+	ResultArgsJSON string
 }
 
 // wireID 返回发给客户端的 tool_call id：有交付侧改写值时用改写值，否则沿用上游原值。

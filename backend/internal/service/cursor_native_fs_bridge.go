@@ -1,9 +1,11 @@
 package service
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -404,17 +406,45 @@ var cursorNativeFsKinds = map[string]cursorNativeFsKindSpec{
 	},
 }
 
+// cursorNativeFsAllCandidateNames 是五种原生文件工具的全部候选工具名（按 priority 展开）。
+// 仅用于判定"客户端是否声明了任何原生文件工具"，作为 shell 回退的总开关（见下文说明）。
+var cursorNativeFsAllCandidateNames = func() []string {
+	names := make([]string, 0, 16)
+	for _, spec := range cursorNativeFsKinds {
+		names = append(names, spec.priority...)
+	}
+	return names
+}()
+
+// cursorClientDeclaresNativeFsTool 报告声明集索引里是否含任意一种原生文件工具的候选名。
+//
+// NSFS-02 回退总开关：只有当"客户端完全没有声明任何原生文件工具"（生产实测的 shell-only 场景：
+// declared_tool_names="shell,apply_patch,update_plan"）时才允许把原生委托转译成 shell 命令。
+// 若客户端已声明了某些原生文件工具（哪怕缺某一个 kind），缺失的 kind 保持既有 Absent 拒绝帧，
+// 绝不偷偷转译给 shell——否则会改变"客户端声明了部分原生工具但缺某 kind"的既有拒绝语义，并破坏
+// 既有观测测试。这是与"逐 kind 回退"等价的、更保守且符合生产根因的实现。
+func cursorClientDeclaresNativeFsTool(idx map[string][]byte) bool {
+	for _, name := range cursorNativeFsAllCandidateNames {
+		if _, ok := idx[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // cursorBuildNativeFsDelegation 从本请求 f4 声明集中按 kind 选择下游工具，并按其 input_schema
 // 把原生 Args 转成 ArgsJSON（对象 JSON，与 mcp/shell 同形）。
 //
-// 规则（与 cursorBuildShellDelegation 同构）：
-//   - 只填目标 schema properties 里实际存在的属性名（候选取第一个命中的）；
-//   - 目标 schema 的 required 字段无法由本桥接填充 → ErrCursorProtocol 失败关闭；
-//   - 找不到 kind 对应的工具 → ErrCursorProtocol 失败关闭（不自造工具名）。
-func cursorBuildNativeFsDelegation(defs [][]byte, kind string, params []cursorNativeFsParam) (string, string, error) {
+// 三路判定（顺序固定，NSFS-02）：
+//  1. 有原生同名工具（现有逻辑）→ 原样返回，resultArgsJSON 留空（回写沿用 ArgsJSON，字节不变）；
+//  2. 没有原生工具，且客户端未声明任何原生文件工具（即 shell-only 场景），但有可用 shell 类工具
+//     （复用 cursorShellToolPriority 与 cursorSchemaHasProperty(sj, "command") 的既有判定）→
+//     返回 shell 工具名 + shell 命令参数，并让 resultArgsJSON 设为原生参数 JSON（供回写取 path/pattern）；
+//  3. 都没有 → 仍返回 ErrCursorNativeFsToolAbsent（既有拒绝帧路径，行为不变）。
+func cursorBuildNativeFsDelegation(defs [][]byte, kind string, params []cursorNativeFsParam) (toolName, argsJSON, resultArgsJSON string, err error) {
 	spec, ok := cursorNativeFsKinds[kind]
 	if !ok {
-		return "", "", fmt.Errorf("%w: unknown native fs kind %q", ErrCursorProtocol, kind)
+		return "", "", "", fmt.Errorf("%w: unknown native fs kind %q", ErrCursorProtocol, kind)
 	}
 	idx := cursorToolSchemaIndex(defs)
 	var chosen string
@@ -436,49 +466,213 @@ func cursorBuildNativeFsDelegation(defs [][]byte, kind string, params []cursorNa
 		schemaJSON = sj
 		break
 	}
-	if chosen == "" {
-		if hasName {
-			// 工具名声明了但 schema 缺关键属性：无法填充关键参数 → 失败关闭（协议层，非工具缺席），
-			// 沿用既有 ErrCursorProtocol 文案，绝不自造工具名。
-			return "", "", fmt.Errorf("%w: no %s-like tool (%s) with %s property declared",
-				ErrCursorProtocol, kind, strings.Join(spec.priority, "/"), strings.Join(spec.keyProps, "/"))
+	if chosen != "" {
+		// 路径 1：有原生同名工具 → 原样返回，resultArgsJSON 留空（回写沿用 ArgsJSON，字节不变）。
+		var schema map[string]any
+		if err := json.Unmarshal(schemaJSON, &schema); err != nil {
+			return "", "", "", fmt.Errorf("%w: parse %s tool schema: %v", ErrCursorProtocol, kind, err)
 		}
-		// 候选名单全部不匹配（工具彻底缺席，而非协议错误）：返回专用哨兵，由捕获侧回失败帧。
-		return "", "", fmt.Errorf("%w: no %s-like tool (%s) declared",
-			ErrCursorNativeFsToolAbsent, kind, strings.Join(spec.priority, "/"))
-	}
-
-	var schema map[string]any
-	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
-		return "", "", fmt.Errorf("%w: parse %s tool schema: %v", ErrCursorProtocol, kind, err)
-	}
-	props, _ := schema["properties"].(map[string]any)
-	obj := map[string]any{}
-	for _, p := range params {
-		prop := cursorFirstSchemaProp(props, p.candidates)
-		if prop == "" {
-			continue
-		}
-		obj[prop] = p.value
-	}
-	// required 校验：凡本桥接无法填充的 required 字段 → 失败关闭（不猜默认值）。
-	if reqRaw, ok := schema["required"].([]any); ok {
-		for _, r := range reqRaw {
-			req, ok := r.(string)
-			if !ok {
+		props, _ := schema["properties"].(map[string]any)
+		obj := map[string]any{}
+		for _, p := range params {
+			prop := cursorFirstSchemaProp(props, p.candidates)
+			if prop == "" {
 				continue
 			}
-			if _, filled := obj[req]; !filled {
-				return "", "", fmt.Errorf("%w: %s tool %q requires field %q which native %s args cannot fill",
-					ErrCursorProtocol, kind, chosen, req, kind)
+			obj[prop] = p.value
+		}
+		// required 校验：凡本桥接无法填充的 required 字段 → 失败关闭（不猜默认值）。
+		if reqRaw, ok := schema["required"].([]any); ok {
+			for _, r := range reqRaw {
+				req, ok := r.(string)
+				if !ok {
+					continue
+				}
+				if _, filled := obj[req]; !filled {
+					return "", "", "", fmt.Errorf("%w: %s tool %q requires field %q which native %s args cannot fill",
+						ErrCursorProtocol, kind, chosen, req, kind)
+				}
+			}
+		}
+		b, err := json.Marshal(obj)
+		if err != nil {
+			return "", "", "", fmt.Errorf("%w: marshal %s args: %v", ErrCursorProtocol, kind, err)
+		}
+		return chosen, string(b), "", nil
+	}
+
+	// 路径 2：本 kind 无原生工具 → 仅当"客户端完全没有声明任何原生文件工具"时才回退到 shell
+	//（即生产实测的 shell-only 场景）。若客户端已声明了某些原生文件工具但缺本 kind，保持既有
+	// Absent 拒绝帧（不把缺失的 kind 偷偷转译给 shell，改变既有拒绝语义）。
+	if !cursorClientDeclaresNativeFsTool(idx) {
+		if shellName, shellSchema := cursorPickShellTool(idx); shellName != "" {
+			cmd, cerr := cursorNativeFsShellCommand(kind, params)
+			if cerr != nil {
+				return "", "", "", cerr
+			}
+			obj := map[string]any{"command": cmd}
+			// 与 cursorBuildShellDelegation 同口径：command 为 array 类型时包成 ["bash","-lc",<cmd>]
+			// （command 恒有值，required 校验恒过）。
+			if sp, ok := shellSchema["properties"].(map[string]any); ok {
+				if cp, ok := sp["command"].(map[string]any); ok {
+					if ct, _ := cp["type"].(string); ct == "array" {
+						obj["command"] = []any{"bash", "-lc", cmd}
+					}
+				}
+			}
+			b, merr := json.Marshal(obj)
+			if merr != nil {
+				return "", "", "", fmt.Errorf("%w: marshal shell fallback args: %v", ErrCursorProtocol, merr)
+			}
+			return shellName, string(b), cursorNativeFsParamsToJSON(params), nil
+		}
+	}
+
+	// 路径 3：都没有 → 仍返回 ErrCursorNativeFsToolAbsent（既有拒绝帧路径，行为不变）。
+	if hasName {
+		// 工具名声明了但 schema 缺关键属性：无法填充关键参数 → 失败关闭（协议层，非工具缺席），
+		// 沿用既有 ErrCursorProtocol 文案，绝不自造工具名。
+		return "", "", "", fmt.Errorf("%w: no %s-like tool (%s) with %s property declared",
+			ErrCursorProtocol, kind, strings.Join(spec.priority, "/"), strings.Join(spec.keyProps, "/"))
+	}
+	// 候选名单全部不匹配（工具彻底缺席，而非协议错误）：返回专用哨兵，由捕获侧回失败帧。
+	return "", "", "", fmt.Errorf("%w: no %s-like tool (%s) declared",
+		ErrCursorNativeFsToolAbsent, kind, strings.Join(spec.priority, "/"))
+}
+
+// cursorPickShellTool 从 schema 索引里选第一个可用的 shell 类工具（复用 cursorShellToolPriority
+// 与 cursorSchemaHasProperty(sj, "command") 的既有判定）。无则 ("", nil)。
+func cursorPickShellTool(idx map[string][]byte) (string, map[string]any) {
+	for _, name := range cursorShellToolPriority {
+		sj, ok := idx[name]
+		if !ok || sj == nil {
+			continue
+		}
+		if !cursorSchemaHasProperty(sj, "command") {
+			continue
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(sj, &schema); err != nil {
+			continue
+		}
+		return name, schema
+	}
+	return "", nil
+}
+
+// cursorShellQuote 用单引号包裹并把内部 ' 转成 '\”，POSIX sh 下安全。
+func cursorShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// cursorNativeFsShellParam 取 params 中属于给定候选属性组的值（按各 param 的候选项首名匹配）；
+// 无则 (nil, false)。供 shell 回退时从已解析参数里取 path/pattern/content 等。
+func cursorNativeFsShellParam(params []cursorNativeFsParam, candidates []string) (any, bool) {
+	for _, p := range params {
+		if len(p.candidates) == 0 {
+			continue
+		}
+		for _, c := range candidates {
+			if p.candidates[0] == c {
+				return p.value, true
 			}
 		}
 	}
-	b, err := json.Marshal(obj)
-	if err != nil {
-		return "", "", fmt.Errorf("%w: marshal %s args: %v", ErrCursorProtocol, kind, err)
+	return nil, false
+}
+
+// cursorNativeFsShellParamString 是 cursorNativeFsShellParam 的 string 便捷形态（缺省空串）。
+func cursorNativeFsShellParamString(params []cursorNativeFsParam, candidates []string) string {
+	v, ok := cursorNativeFsShellParam(params, candidates)
+	if !ok {
+		return ""
 	}
-	return chosen, string(b), nil
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprint(v)
+}
+
+// cursorNativeFsShellParamInt 是 cursorNativeFsShellParam 的 int64 便捷形态（缺省 0）。
+func cursorNativeFsShellParamInt(params []cursorNativeFsParam, candidates []string) (int64, bool) {
+	v, ok := cursorNativeFsShellParam(params, candidates)
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case float64:
+		return int64(n), true
+	}
+	return 0, false
+}
+
+// cursorNativeFsShellCommand 把原生文件工具委托翻译为一条 shell 命令。
+//
+// 路径/模式一律用单引号转义（' → '\”）；内容类（write）用 base64 传递，绝不做字符串拼接转义。
+// 这是 NSFS-02 的安全边界：当客户端只声明了 shell 类工具、没有原生 read/write/ls/grep/delete
+// 时，把上游下发的原生 exec（f3/f4/f5/f7/f8）转译成 shell 命令交给客户端执行，结果仍按原生
+// 通道回写上游。
+func cursorNativeFsShellCommand(kind string, params []cursorNativeFsParam) (string, error) {
+	switch kind {
+	case cursorToolKindRead:
+		p := cursorNativeFsShellParamString(params, cursorNativeFsPathProps)
+		off, hasOff := cursorNativeFsShellParamInt(params, cursorNativeFsOffsetProps)
+		lim, hasLim := cursorNativeFsShellParamInt(params, cursorNativeFsLimitProps)
+		if hasOff || hasLim {
+			start := off + 1
+			end := off + lim
+			return fmt.Sprintf("sed -n %s,%sp -- %s",
+				cursorShellQuote(strconv.FormatInt(start, 10)),
+				cursorShellQuote(strconv.FormatInt(end, 10)),
+				cursorShellQuote(p)), nil
+		}
+		return fmt.Sprintf("cat -- %s", cursorShellQuote(p)), nil
+	case cursorToolKindLs:
+		p := cursorNativeFsShellParamString(params, cursorNativeFsPathProps)
+		return fmt.Sprintf("ls -la -- %s", cursorShellQuote(p)), nil
+	case cursorToolKindGrep:
+		pattern := cursorNativeFsShellParamString(params, cursorNativeFsPatternProps)
+		p := cursorNativeFsShellParamString(params, cursorNativeFsPathProps)
+		outputMode := cursorNativeFsShellParamString(params, cursorNativeFsOutputProps)
+		glob := cursorNativeFsShellParamString(params, cursorNativeFsGlobProps)
+		flag := "-rn"
+		switch outputMode {
+		case "files_with_matches":
+			flag = "-rl"
+		case "count":
+			flag = "-rc"
+		case "content":
+			flag = "-rn"
+		default:
+			flag = "-rn"
+		}
+		if p == "" {
+			p = "."
+		}
+		cmd := fmt.Sprintf("grep %s -- %s %s", flag, cursorShellQuote(pattern), cursorShellQuote(p))
+		if glob != "" {
+			cmd += fmt.Sprintf(" --include=%s", cursorShellQuote(glob))
+		}
+		return cmd, nil
+	case cursorToolKindWrite:
+		p := cursorNativeFsShellParamString(params, cursorNativeFsPathProps)
+		content := cursorNativeFsShellParamString(params, cursorNativeFsContentProps)
+		dir := path.Dir(p)
+		b64 := base64.StdEncoding.EncodeToString([]byte(content))
+		// 先 mkdir 再写；base64 只含 [A-Za-z0-9+/=] 字符，单引号包裹绝对安全，绝不做字符串拼接转义。
+		return fmt.Sprintf("mkdir -p -- %s && printf %%s %s | base64 -d > -- %s",
+			cursorShellQuote(dir), cursorShellQuote(b64), cursorShellQuote(p)), nil
+	case cursorToolKindDelete:
+		p := cursorNativeFsShellParamString(params, cursorNativeFsPathProps)
+		return fmt.Sprintf("rm -f -- %s", cursorShellQuote(p)), nil
+	}
+	return "", fmt.Errorf("%w: cannot build shell command for native fs kind %q", ErrCursorProtocol, kind)
 }
 
 // cursorFirstSchemaProp 返回 properties 中第一个存在的候选属性名（都没有 → 空串）。
@@ -655,7 +849,7 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 		return cursorToolCallCapture{}, fmt.Errorf("%w: %s args key field empty", ErrCursorProtocol, kind)
 	}
 
-	name, argsJSON, berr := cursorBuildNativeFsDelegation(d.declaredToolDefs, kind, params)
+	name, argsJSON, resultArgsJSON, berr := cursorBuildNativeFsDelegation(d.declaredToolDefs, kind, params)
 	if berr != nil {
 		// 工具缺席（专用哨兵）：不失败关闭、不发委托，改回一条失败 Result 帧让流继续。
 		// 其余错误（schema 解析失败 / required 无法填充 / unknown kind）仍按协议错误失败关闭。
@@ -669,12 +863,20 @@ func (d *cursorAgentDuplex) cursorCaptureNativeFsArgs(parts []cursorPBField, fie
 		return cursorToolCallCapture{}, berr
 	}
 	tc := cursorToolCallCapture{
-		ID:       callID,
-		Name:     name,
-		ArgsJSON: argsJSON,
-		ExecID:   execID,
-		IDField:  append([]byte(nil), idField...),
-		Kind:     kind,
+		ID:             callID,
+		Name:           name,
+		ArgsJSON:       argsJSON,
+		ExecID:         execID,
+		IDField:        append([]byte(nil), idField...),
+		Kind:           kind,
+		ResultArgsJSON: resultArgsJSON,
+	}
+	// NSFS-02 观测：走了 shell 回退（resultArgsJSON 非空）时额外记一条日志（只记命令长度，
+	// 不记命令正文——命令里可能含文件内容）。
+	if resultArgsJSON != "" {
+		d.logPhase(zap.InfoLevel, "native_fs_shell_fallback", "",
+			zap.String("kind", kind), zap.String("tool_name", name),
+			zap.String("call_id", callID), zap.Int("cmd_len", len(argsJSON)))
 	}
 	delegations := d.delegations
 	if delegations == nil {
@@ -881,21 +1083,35 @@ func cursorEncodeNativeFsResult(cap cursorToolCallCapture, r CursorToolResult) (
 	return [][]byte{cursorEncodeExecClientResultFrame(cap.ExecID, cap.IDField, field, result)}, nil
 }
 
+// cursorNativeFsResultArgs 返回回写原生结果帧时用于取 path/pattern/output_mode 的参数 JSON。
+//
+// NSFS-02：走了 shell 回退时 ArgsJSON 是 {"command":...}（不含 path/pattern），必须用
+// ResultArgsJSON（原生参数 JSON）；走原生工具时 ResultArgsJSON 为空，沿用 ArgsJSON（字节不变）。
+// 绝不在 shell 回退时改成回写 ShellResult——上游下发的是原生 exec，回写必须是同一 exec 的原生
+// Result 帧，否则上游会一直等。
+func cursorNativeFsResultArgs(cap cursorToolCallCapture) string {
+	if cap.ResultArgsJSON != "" {
+		return cap.ResultArgsJSON
+	}
+	return cap.ArgsJSON
+}
+
 // cursorNativeFsResultPayload 返回 (ExecClientMessage 字段号, result 载荷)。
 func cursorNativeFsResultPayload(cap cursorToolCallCapture, r CursorToolResult) (int, []byte, error) {
 	text := cursorNativeFsResultText(r)
 	failed := cursorNativeFsResultFailed(r, text)
+	args := cursorNativeFsResultArgs(cap)
 	switch cap.Kind {
 	case cursorToolKindRead:
-		return cursorFldClientMsgReadResult, cursorEncodeReadResult(cap.ArgsJSON, text, failed), nil
+		return cursorFldClientMsgReadResult, cursorEncodeReadResult(args, text, failed), nil
 	case cursorToolKindWrite:
-		return cursorFldClientMsgWriteResult, cursorEncodeWriteResult(cap.ArgsJSON, text, failed), nil
+		return cursorFldClientMsgWriteResult, cursorEncodeWriteResult(args, text, failed), nil
 	case cursorToolKindDelete:
-		return cursorFldClientMsgDeleteResult, cursorEncodeDeleteResult(cap.ArgsJSON, text, failed), nil
+		return cursorFldClientMsgDeleteResult, cursorEncodeDeleteResult(args, text, failed), nil
 	case cursorToolKindLs:
-		return cursorFldClientMsgLsResult, cursorEncodeLsResult(cap.ArgsJSON, text, failed), nil
+		return cursorFldClientMsgLsResult, cursorEncodeLsResult(args, text, failed), nil
 	case cursorToolKindGrep:
-		return cursorFldClientMsgGrepResult, cursorEncodeGrepResult(cap.ArgsJSON, text, failed), nil
+		return cursorFldClientMsgGrepResult, cursorEncodeGrepResult(args, text, failed), nil
 	default:
 		return 0, nil, fmt.Errorf("%w: unknown native fs delegation kind %q", ErrCursorProtocol, cap.Kind)
 	}
