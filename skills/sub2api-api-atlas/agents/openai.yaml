@@ -1,0 +1,7 @@
+interface:
+  display_name: "Sub2API API Atlas"
+  short_description: "Look up Sub2API routes, auth, and write payloads"
+  default_prompt: "Use $sub2api-api-atlas to locate a Sub2API endpoint, check its auth domain, or read the request body semantics before writing data."
+
+policy:
+  allow_implicit_invocation: true
