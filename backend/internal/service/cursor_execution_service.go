@@ -3516,6 +3516,17 @@ type cursorToolBatch struct {
 	wireDecided int
 }
 
+// cursorRejectionTombstone 是会话级"本地已拒绝"墓碑：拒绝先到、started 后到时，
+// 让本地拒绝在 started 到达前也不丢。registeredAt 用于过期判定——登记时刻距今超过
+// 本会话 180s 总期限即视为协议停滞，失败关闭（绝不静默忽略）。
+type cursorRejectionTombstone struct {
+	registeredAt time.Time
+}
+
+// cursorRejectionTombstoneTTL 是墓碑的最大存活期，等于本会话 180s 总期限。
+// 设成 var（而非 const）仅为单测可临时收紧以构造过期场景，生产语义恒为 180s。
+var cursorRejectionTombstoneTTL = 180 * time.Second
+
 // cursorToolDelegations 是一次 AgentRun 内工具委托的**唯一**记录。
 //
 // §24.2-6：duplex 解码 mcp_args 一次并写入这里，parser 只读取，不再二次解码。
@@ -3552,24 +3563,33 @@ type cursorToolDelegations struct {
 	idRewrite map[string]string
 	// shared 表示本记录由 duplex 拥有解码权（parser 不再解码同一帧）。
 	shared bool
+	// rejectionTombstones 是会话级"本地已拒绝"墓碑集合：键=对外 call_id，值=登记时刻。
+	// 解决"拒绝先到、started 后到"的竞态：noteRejectedCall 无条件登记墓碑，待
+	// tool_call_started 到达时由 noteToolCallStarted 在持锁下原子消费（消费即删，
+	// 不跨批/跨会话复用），把该 call 记入所属批的 rejected 集合，于是封口谓词跳过它。
+	// 本集合随本会话的 delegations 一起释放，绝不跨会话复用；登记/消费都在同一把
+	// d.mu 下完成，不留竞态窗口。
+	rejectionTombstones map[string]cursorRejectionTombstone
 }
 
 // newCursorToolDelegations 构造由 duplex 解码、parser 读取的共享记录。
 func newCursorToolDelegations() *cursorToolDelegations {
 	return &cursorToolDelegations{
-		open:         make(map[string]*cursorToolBatch),
-		deliveredIDs: make(map[string]struct{}),
-		idRewrite:    make(map[string]string),
-		shared:       true,
+		open:                make(map[string]*cursorToolBatch),
+		deliveredIDs:        make(map[string]struct{}),
+		idRewrite:           make(map[string]string),
+		shared:              true,
+		rejectionTombstones: make(map[string]cursorRejectionTombstone),
 	}
 }
 
 // newLocalCursorToolDelegations 构造由 parser 自己解码的本地记录（无 duplex 的场景）。
 func newLocalCursorToolDelegations() *cursorToolDelegations {
 	return &cursorToolDelegations{
-		open:         make(map[string]*cursorToolBatch),
-		deliveredIDs: make(map[string]struct{}),
-		idRewrite:    make(map[string]string),
+		open:                make(map[string]*cursorToolBatch),
+		deliveredIDs:        make(map[string]struct{}),
+		idRewrite:           make(map[string]string),
+		rejectionTombstones: make(map[string]cursorRejectionTombstone),
 	}
 }
 
@@ -3731,6 +3751,29 @@ func (d *cursorToolDelegations) noteToolCallStarted(modelCallID, callID string, 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	batch, err := d.batchFor(modelCallID)
+	// 墓碑消费必须在同一把锁内、在任何提前 return 之前完成：拒绝先到、started 后到时，
+	// 这里把它原子消费（删即消费，不跨批/跨会话复用）并记入所属批 rejected；过期或无法
+	// 归属则失败关闭（错误含 call_id），绝不静默忽略。
+	if ts, ok := d.rejectionTombstones[callID]; ok {
+		delete(d.rejectionTombstones, callID)
+		if time.Since(ts.registeredAt) > cursorRejectionTombstoneTTL {
+			return fmt.Errorf("%w: rejection tombstone for call_id %q expired (registered %s)",
+				ErrCursorBatchIncomplete, callID, ts.registeredAt.Format(time.RFC3339))
+		}
+		if err != nil {
+			// batchFor 无法把 started 归到唯一开放批（如多个无 ID 开放批）→ 墓碑无法归属。
+			return fmt.Errorf("%w: rejection tombstone for call_id %q arrived but cannot be attributed to any batch (%s)",
+				ErrCursorBatchAmbiguous, callID, modelCallID)
+		}
+		if batch.sealed {
+			return fmt.Errorf("%w: rejection tombstone for call_id %q belongs to an already-sealed batch (unattributable)",
+				ErrCursorBatchIncomplete, callID)
+		}
+		if batch.rejected == nil {
+			batch.rejected = make(map[string]struct{}, 1)
+		}
+		batch.rejected[callID] = struct{}{}
+	}
 	if err != nil {
 		return err
 	}
@@ -3832,7 +3875,13 @@ func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) e
 // 不做聚合）。shellOnly 批 key 为 call_id，与 mcp 的 "" 开放批隔离，互不吞并。
 // noteRejectedCall 登记"客户端无对应工具、本地已拒绝执行"的对外 call_id（外审 B1）。
 //
-// 只标记已 started 且未封口的批；没有匹配批时安全 no-op（无批场景本来就不需要封口）。
+// 先**无条件登记会话级墓碑**（无论当前是否已有 started 的批）——这是"拒绝先到、
+// started 后到"竞态的根因修复点：旧实现只在已 started 的批里标记，拒绝先到时落空，
+// 该批永远封不了口 → 180s 总期限挂死。墓碑随后由 noteToolCallStarted 在持锁下原子
+// 消费（消费即删，不跨批/跨会话复用），把该 call 记入所属批的 rejected 集合。
+//
+// 若该 call_id 此刻已出现在某个未封口批的 started 列表里（"started 先到、拒绝后到"），
+// 就地标记该批的 rejected 集合（保留既有 batch.rejected 结构与用法，不另起炉灶）。
 // 不改 delegations、不改交付集合、不改计数字段：封口语义仍以 listed 为准。
 func (d *cursorToolDelegations) noteRejectedCall(callID string) {
 	if d == nil || callID == "" {
@@ -3840,6 +3889,12 @@ func (d *cursorToolDelegations) noteRejectedCall(callID string) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// 1. 无条件登记墓碑（无论当前有没有已 started 的批都要登记）。
+	if d.rejectionTombstones == nil {
+		d.rejectionTombstones = make(map[string]cursorRejectionTombstone)
+	}
+	d.rejectionTombstones[callID] = cursorRejectionTombstone{registeredAt: time.Now()}
+	// 2. 若该 call_id 已出现在某个未封口批的 started 列表里，就地标记该批 rejected。
 	for _, batch := range d.all {
 		if batch.sealed {
 			continue
@@ -7482,6 +7537,77 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 			// 提交的结果 ID 无任何已登记关联：失败关闭、零上游写入（不伪造）。
 			it.svc.finishCursorSession(it.session, "resume_unknown_call")
 			return fmt.Errorf("%w: call id %q", ErrCursorResumeUnknownAssociation, r.CallID)
+		}
+		// 原生 shell 委托（Kind=="shell"）走 ShellStream（f14）回写，与 mcp 的 f11 McpResult
+		// 是两条互不相同的通道；mcp 路径字节级行为不变（实现要点 5 / 硬约束 5）。
+		if cap.Kind == "shell" {
+			stdout, stderr, exitCode := cursorParseShellResult(r)
+			cwd := cursorShellCwdFromArgs(cap.ArgsJSON)
+			shellFrames := cursorEncodeShellToolResult(cap.ExecID, cap.IDField, stdout, stderr, exitCode, cwd, cap.SandboxPolicy)
+			it.duplex.logPhase(zapcore.InfoLevel, "shell_result_writeback", "",
+				zap.String("call_id", cap.ID), zap.Int("frames", len(shellFrames)),
+				zap.Int("stdout_len", len(stdout)), zap.Int("stderr_len", len(stderr)),
+				zap.Int("exit_code", exitCode), zap.Int("cwd_len", len(cwd)),
+				zap.Int("sandbox_policy_len", len(cap.SandboxPolicy)))
+			for _, frame := range shellFrames {
+				if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
+					// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
+					it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
+					return fmt.Errorf("cursor: deliver shell tool result transport failure: %w", err)
+				}
+				it.session.noteStage("resume_result_written")
+			}
+			// exec 终止控制帧（AgentClientMessage.f5 ExecClientControlMessage.stream_close{id}）：
+			// 真实客户端在结果流写完后必发；缺失时上游认为 shell exec 仍未结束，
+			// ShellStream 不会被收尾（mcp 的 McpResult 是单条自包含结果，无需该帧，故不改 mcp 路径）。
+			if err := it.duplex.sendExecStreamClose(cap.ExecID); err != nil {
+				// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
+				it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
+				return fmt.Errorf("cursor: deliver shell stream close transport failure: %w", err)
+			}
+			it.duplex.logPhase(zapcore.InfoLevel, "shell_stream_close_sent", "",
+				zap.String("call_id", cap.ID), zap.Uint64("exec_id", cap.ExecID))
+			continue
+		}
+		// 原生文件工具委托（Kind ∈ read/ls/grep/write/delete）：回写对应 ExecClientMessage
+		// result 帧（f3/f4/f5/f7/f8），随后同样补 exec 终止控制帧。与 mcp/shell 三条通道
+		// 互不混用，mcp 路径字节级行为不变（实现要点 5 / 硬约束 5）。
+		if cap.Kind != "" {
+			fsFrames, ferr := cursorEncodeNativeFsResult(cap, r)
+			if ferr != nil {
+				// 未知 Kind：失败关闭，绝不写零帧冒充成功。
+				it.svc.finishCursorSession(it.session, "resume_unknown_native_kind")
+				return ferr
+			}
+			it.duplex.logPhase(zapcore.InfoLevel, "native_fs_result_writeback", "",
+				zap.String("call_id", cap.ID), zap.String("kind", cap.Kind),
+				zap.Int("frames", len(fsFrames)), zap.Int("text_len", len(cursorNativeFsResultText(r))),
+				zap.Bool("is_error", r.IsError))
+			if cap.Kind == cursorToolKindGrep {
+				// BLOCKED 取证点：dump 缺 GrepResult.workspace_results 内层形状，当前只能把
+				// grep 的原始输出走 f2 error{f1 error} 降级回传（信息不丢，语义降级）。
+				// 该警告必须出现，避免"grep 永远报错"被误判为客户端故障。
+				it.duplex.logPhase(zapcore.WarnLevel, "native_fs_grep_degraded", "blocked_schema",
+					zap.String("call_id", cap.ID),
+					zap.String("reason", "grep workspace_results message shape missing from bundle dump"))
+			}
+			for _, frame := range fsFrames {
+				if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
+					// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
+					it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
+					return fmt.Errorf("cursor: deliver native fs tool result transport failure: %w", err)
+				}
+				it.session.noteStage("resume_result_written")
+			}
+			// exec 终止控制帧（与 shell 相同）：真实客户端每条 exec 结果流写完都补发
+			// stream_close，缺失时上游认为该 exec 仍未结束、不收尾。
+			if err := it.duplex.sendExecStreamClose(cap.ExecID); err != nil {
+				it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
+				return fmt.Errorf("cursor: deliver native fs stream close transport failure: %w", err)
+			}
+			it.duplex.logPhase(zapcore.InfoLevel, "native_fs_stream_close_sent", "",
+				zap.String("call_id", cap.ID), zap.String("kind", cap.Kind), zap.Uint64("exec_id", cap.ExecID))
+			continue
 		}
 		// callID 只用于日志/诊断（上游靠 ExecID + IDField 关联 exec）；这里用**上游原 id**，
 		// 不用客户端回传的可见 id，避免日志与上游锚点口径不一致。
