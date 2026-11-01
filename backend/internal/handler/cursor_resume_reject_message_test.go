@@ -64,7 +64,7 @@ func TestServeCursorResumeRejectMessageIdentifyStage(t *testing.T) {
 	}
 	reject := &captureReject{}
 	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
-		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn())
+		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn(), "")
 
 	require.True(t, handled)
 	require.True(t, reject.called)
@@ -83,7 +83,7 @@ func TestServeCursorResumeRejectMessageServeFallback(t *testing.T) {
 	}
 	reject := &captureReject{}
 	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
-		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn())
+		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn(), "")
 
 	require.True(t, handled)
 	require.True(t, reject.called)
@@ -104,7 +104,7 @@ func TestServeCursorResumeRejectMessageServeTypedError(t *testing.T) {
 	}
 	reject := &captureReject{}
 	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
-		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn())
+		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn(), "")
 
 	require.True(t, handled)
 	require.Equal(t, http.StatusForbidden, reject.status)
