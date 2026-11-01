@@ -3816,13 +3816,15 @@ func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) e
 
 // noteRejectedCall 登记"客户端无对应工具、本地已拒绝执行"的对外 call_id（外审 B1）。
 //
-// 先**无条件登记会话级墓碑**（无论当前是否已有 started 的批）——这是"拒绝先到、
-// started 后到"竞态的根因修复点：旧实现只在已 started 的批里标记，拒绝先到时落空，
-// 该批永远封不了口 → 180s 总期限挂死。墓碑随后由 noteToolCallStarted 在持锁下原子
-// 消费（消费即删，不跨批/跨会话复用），把该 call 记入所属批的 rejected 集合。
+// 分两步：
+//  1. 若该 call_id 此刻已出现在某个未封口批的 started 列表里（"started 先到、拒绝后到"），
+//     就地标记该批的 rejected 集合并返回，**不登记墓碑**——否则墓碑残留，同会话后续批
+//     复用同一 call_id 时会被 noteToolCallStarted 消费，把新的真实调用误当成本地拒绝。
+//  2. 遍历后仍未命中（"拒绝先到、started 后到"），才登记会话级墓碑：旧实现只在已
+//     started 的批里标记，拒绝先到时落空，该批永远封不了口 → 180s 总期限挂死。墓碑随后
+//     由 noteToolCallStarted 在持锁下原子消费（消费即删，不跨批/跨会话复用），把该 call
+//     记入所属批的 rejected 集合。
 //
-// 若该 call_id 此刻已出现在某个未封口批的 started 列表里（"started 先到、拒绝后到"），
-// 就地标记该批的 rejected 集合（保留既有 batch.rejected 结构与用法，不另起炉灶）。
 // 不改 delegations、不改交付集合、不改计数字段：封口语义仍以 listed 为准。
 func (d *cursorToolDelegations) noteRejectedCall(callID string) {
 	if d == nil || callID == "" {
@@ -3830,12 +3832,7 @@ func (d *cursorToolDelegations) noteRejectedCall(callID string) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	// 1. 无条件登记墓碑（无论当前有没有已 started 的批都要登记）。
-	if d.rejectionTombstones == nil {
-		d.rejectionTombstones = make(map[string]cursorRejectionTombstone)
-	}
-	d.rejectionTombstones[callID] = cursorRejectionTombstone{registeredAt: time.Now()}
-	// 2. 若该 call_id 已出现在某个未封口批的 started 列表里，就地标记该批 rejected。
+	// 1. 若该 call_id 已出现在某个未封口批的 started 列表里，就地标记该批 rejected，不写墓碑。
 	for _, batch := range d.all {
 		if batch.sealed {
 			continue
@@ -3851,6 +3848,11 @@ func (d *cursorToolDelegations) noteRejectedCall(callID string) {
 			return
 		}
 	}
+	// 2. 未命中任何未封口批的 started：登记墓碑，留待 started 到达时消费。
+	if d.rejectionTombstones == nil {
+		d.rejectionTombstones = make(map[string]cursorRejectionTombstone)
+	}
+	d.rejectionTombstones[callID] = cursorRejectionTombstone{registeredAt: time.Now()}
 }
 
 // snapshot 返回按到达顺序的全部委托（parser 输出 tool_calls 用）。

@@ -6,7 +6,7 @@ package service
 //
 // 根因：原 noteRejectedCall 只扫描「当前已 started 的批」做标记。拒绝先到、started
 // 后到时标记落空 → 该批永远封不了口 → 180s 总期限挂死。本卡在 cursorToolDelegations
-// 上加会话级墓碑：noteRejectedCall 无条件登记，noteToolCallStarted 在持锁下原子消费
+// 上加会话级墓碑：noteRejectedCall 未命中已 started 批时登记，noteToolCallStarted 在持锁下原子消费
 // （消费即删，不跨批/跨会话复用），把 call 记入所属批的 rejected 集合，于是封口谓词
 // 跳过它。
 //
@@ -50,9 +50,29 @@ func TestCursorRejectionTombstoneStartBeforeReject(t *testing.T) {
 	require.NoError(t, d.noteToolRequestsListed("mc-1", 1))
 	// started 先到。
 	require.NoError(t, d.noteToolCallStarted("mc-1", "call_rej", true))
-	// 拒绝后到：此时 call_rej 已在 started 列表，就地标记 rejected（同时登记墓碑）。
+	// 拒绝后到：此时 call_rej 已在 started 列表，就地标记 rejected（不登记墓碑）。
 	d.noteRejectedCall("call_rej")
 	require.NoError(t, d.seal(), "started先到+拒绝后到：该批必须能封口")
+}
+
+// TestCursorRejectionTombstoneStartedFirstLeavesNoTombstone 覆盖外审 r1b P1：
+// started 先到、拒绝后到时，拒绝已就地记入所属批 rejected，不得再留会话级墓碑；
+// 否则同会话后续批复用同一 call_id 时会消费旧墓碑，把新的真实调用误当成本地拒绝。
+func TestCursorRejectionTombstoneStartedFirstLeavesNoTombstone(t *testing.T) {
+	d := newCursorToolDelegations()
+
+	// 批 1：started 先到、拒绝后到，随后封口成功。
+	require.NoError(t, d.noteToolRequestsListed("mc-1", 1))
+	require.NoError(t, d.noteToolCallStarted("mc-1", "call_x", true))
+	d.noteRejectedCall("call_x")
+	require.NoError(t, d.seal())
+	require.NotContains(t, d.rejectionTombstones, "call_x",
+		"started 先到时拒绝已就地标记，不得残留墓碑")
+
+	// 批 2：同会话复用同一 call_id 的真实调用，不得被当成本地拒绝。
+	require.NoError(t, d.noteToolRequestsListed("mc-2", 1))
+	require.NoError(t, d.noteToolCallStarted("mc-2", "call_x", true))
+	require.Error(t, d.seal(), "批 2 缺 f11 委托且未被拒绝，必须封口失败")
 }
 
 // TestCursorRejectionTombstoneNoCrossSession 覆盖「墓碑不跨会话复用」：
