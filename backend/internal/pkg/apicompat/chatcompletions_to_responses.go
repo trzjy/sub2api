@@ -202,7 +202,7 @@ func chatMessageToResponsesItems(m ChatMessage) ([]ResponsesInputItem, error) {
 	case "function":
 		return chatFunctionToResponses(m)
 	default:
-		return chatUserToResponses(m)
+		return nil, fmt.Errorf("unsupported chat completion message role %q", m.Role)
 	}
 }
 

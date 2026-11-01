@@ -188,12 +188,25 @@ func isAnthropicBillingHeaderText(text string) bool {
 // or more Responses API input items.
 func anthropicMsgToResponsesItems(m AnthropicMessage) ([]ResponsesInputItem, error) {
 	switch m.Role {
+	case "system":
+		parts, err := parseAnthropicSystemContentParts(m.Content)
+		if err != nil {
+			return nil, err
+		}
+		if len(parts) == 0 {
+			return nil, nil
+		}
+		content, err := json.Marshal(parts)
+		if err != nil {
+			return nil, err
+		}
+		return []ResponsesInputItem{{Type: "message", Role: m.Role, Content: content}}, nil
 	case "user":
 		return anthropicUserToResponses(m.Content)
 	case "assistant":
 		return anthropicAssistantToResponses(m.Content)
 	default:
-		return anthropicUserToResponses(m.Content)
+		return nil, fmt.Errorf("unsupported anthropic message role %q", m.Role)
 	}
 }
 
