@@ -129,6 +129,7 @@ var cursorCodeMessages = [][2]string{
 	{CursorReqInvalidToolSchemaCode, CursorReqInvalidToolSchema},
 	{CursorExecModelMappingInvalidCode, CursorExecModelMappingInvalid},
 	{CursorExecInternalErrorCode, CursorExecInternalError},
+	{CursorExecModelUnavailableCode, CursorExecModelUnavailable},
 }
 
 func TestCursorResumeReasonCode_PlanTable(t *testing.T) {
@@ -183,5 +184,5 @@ func TestCursorCodeMessages_UniqueAndClean(t *testing.T) {
 			require.NotContainsf(t, msg, reason, "%s 文案含 reason 原文 %q", code, reason)
 		}
 	}
-	require.Len(t, seenCode, 24)
+	require.Len(t, seenCode, 25)
 }

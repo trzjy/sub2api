@@ -478,6 +478,11 @@ const (
 	// 触发条件（500）：内部调用方不变量破坏（nil 请求 / typed 请求缺失 / marshal history blob 失败）
 	CursorExecInternalErrorCode = "CUR-EXEC-08"
 	CursorExecInternalError     = "服务内部错误，请稍后重试或联系管理员"
+
+	// 触发条件（502）：上游正文注入「当前模型暂不可用，请发送 继续 或新开对话 (ts-hex)」
+	// （哨兵=ErrCursorUpstreamModelUnavailable，换号重试不成立或已用尽时）
+	CursorExecModelUnavailableCode = "CUR-EXEC-09"
+	CursorExecModelUnavailable     = "上游模型暂时不可用，请重试或换用其他模型"
 )
 
 // CursorResumeReasonCode 把 newCursorResumeError 的 reason 映射到 §2.2 续轮码表；

@@ -166,8 +166,8 @@ func (s *cursorSSEStream) next() error {
 		}
 		if ev.Kind == cursorEventText {
 			s.parser.content += ev.Text
-			if rejected := cursorMatchKeyRejected(s.parser.content); rejected != nil {
-				return rejected
+			if err := cursorMatchKeyRejected(s.parser.content); err != nil {
+				return err
 			}
 			// 正文内联 tool call：上游没走结构化委托帧，把调用写进了正文。
 			// 流式下无法先收齐再归一而不破坏流式语义，故在此失败关闭——
@@ -364,6 +364,13 @@ var (
 	// 134-current-token-expired-key，三份样本的模板完全一致，仅后缀轮次标识不同）。
 	// 命中即**终态错误**：不得当模型成功、不得伪造 usage。
 	ErrCursorKeyRejectedUpstream = errors.New("cursor: upstream rejected the key (expired or quota exhausted)")
+
+	// ErrCursorUpstreamModelUnavailable 是**流内模型暂不可用哨兵**（方案 §2.4）。
+	//
+	// 触发条件：正文累计内容出现固定模板「当前模型暂不可用，请发送 继续 或新开对话」。
+	// 与拒付区分：拒付是账号额度问题（要停号），本错误是上游临时故障（不停号）。
+	// 命中即终态错误：不得当模型成功、不得伪造 usage。
+	ErrCursorUpstreamModelUnavailable = errors.New("cursor: upstream model temporarily unavailable")
 )
 
 // cursorUpstreamStreamError 是 ErrCursorUpstreamStream 的结构化载体，携带上游 EndStream 的
@@ -424,23 +431,66 @@ func (e *CursorKeyRejectedError) Error() string {
 // Unwrap 让 errors.Is(err, ErrCursorKeyRejectedUpstream) 成立（契约 0.2）。
 func (e *CursorKeyRejectedError) Unwrap() error { return ErrCursorKeyRejectedUpstream }
 
-// cursorMatchKeyRejected 在一段文本里匹配固定拒付模板，命中即返回结构化错误。
-func cursorMatchKeyRejected(text string) *CursorKeyRejectedError {
-	idx := strings.Index(text, cursorUpstreamRejectTemplate)
-	if idx < 0 {
-		return nil
+// cursorUpstreamModelUnavailableTemplate 是上游注入的**固定**"模型暂不可用"模板（不含动态后缀）。
+//
+// 来源证据：55-toolerr-r5-turn5.raw、sub2api-cursor-inline-toolcall-20261030 外审第 8 次
+// （10-30、11-01 两次，均为长会话第 3 轮以后）。上游以普通 TextDelta 下发、无
+// is_server_notice 位，随后正常 turn_ended，故只能按正文模板识别。完整形如
+// `[当前模型暂不可用，请发送 继续 或新开对话 (1793521393111-0d01dd7b)]`。
+const cursorUpstreamModelUnavailableTemplate = "当前模型暂不可用，请发送 继续 或新开对话"
+
+// CursorModelUnavailableError 是 ErrCursorUpstreamModelUnavailable 的结构化载体（方案 §2.4）。
+type CursorModelUnavailableError struct {
+	// Template 是命中的原始模板片段（含动态后缀），原样留存，不改写。
+	Template string
+	// TurnID 是模板后缀里上游给的轮次标识；上游未带后缀时为空串。
+	TurnID string
+}
+
+// Error 实现 error。
+func (e *CursorModelUnavailableError) Error() string {
+	if e == nil {
+		return "<nil>"
 	}
-	fragment := text[idx:]
+	if e.TurnID != "" {
+		return "cursor: upstream model temporarily unavailable (turn " + e.TurnID + "): " + e.Template
+	}
+	return "cursor: upstream model temporarily unavailable: " + e.Template
+}
+
+// Unwrap 让 errors.Is(err, ErrCursorUpstreamModelUnavailable) 成立。
+func (e *CursorModelUnavailableError) Unwrap() error { return ErrCursorUpstreamModelUnavailable }
+
+// cursorMatchKeyRejected 在一段文本里匹配上游固定注入模板，命中即返回结构化错误，未命中返回 nil。
+//
+// 按序匹配：先拒付模板（*CursorKeyRejectedError），再模型暂不可用模板
+// （*CursorModelUnavailableError）。
+func cursorMatchKeyRejected(text string) error {
+	if fragment, turnID, ok := cursorMatchInjectedTemplate(text, cursorUpstreamRejectTemplate); ok {
+		return &CursorKeyRejectedError{Template: fragment, TurnID: turnID}
+	}
+	if fragment, turnID, ok := cursorMatchInjectedTemplate(text, cursorUpstreamModelUnavailableTemplate); ok {
+		return &CursorModelUnavailableError{Template: fragment, TurnID: turnID}
+	}
+	return nil
+}
+
+// cursorMatchInjectedTemplate 定位固定模板，截取到换行为止的片段，并解析括号内的轮次标识。
+func cursorMatchInjectedTemplate(text, template string) (fragment, turnID string, ok bool) {
+	idx := strings.Index(text, template)
+	if idx < 0 {
+		return "", "", false
+	}
+	fragment = text[idx:]
 	if nl := strings.IndexByte(fragment, '\n'); nl >= 0 {
 		fragment = fragment[:nl]
 	}
-	turnID := ""
 	if open := strings.IndexByte(fragment, '('); open >= 0 {
 		if close := strings.IndexByte(fragment[open:], ')'); close > 0 {
 			turnID = strings.TrimSpace(fragment[open+1 : open+close])
 		}
 	}
-	return &CursorKeyRejectedError{Template: strings.TrimSpace(fragment), TurnID: turnID}
+	return strings.TrimSpace(fragment), turnID, true
 }
 
 // cursorConnectContentType 是 Connect RPC 二进制 protobuf 的请求内容类型。
@@ -713,8 +763,8 @@ type cursorStreamParser struct {
 	content string
 	// usage 是 turn_ended 给出的真实用量（未收到则 Seen=false，各项为 0）。
 	usage cursorTurnUsage
-	// rejected 命中流内拒付模板后的结构化错误（非 nil 即终态失败）。
-	rejected *CursorKeyRejectedError
+	// rejected 命中流内注入模板（拒付 / 模型暂不可用）后的结构化错误（非 nil 即终态失败）。
+	rejected error
 
 	// delegations 是本轮工具委托的**唯一**记录（§24.2-6）。
 	//
@@ -1036,8 +1086,8 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 		p.markFirstToken()
 		sseLines = append(sseLines, p.cursorSSETextChunk(ev.Text))
 		// 拒付模板可能跨帧：每收到一段就在**累加结果**上匹配一次。
-		if rejected := cursorMatchKeyRejected(p.content); rejected != nil {
-			p.rejected = rejected
+		if err := cursorMatchKeyRejected(p.content); err != nil {
+			p.rejected = err
 		}
 	}
 
