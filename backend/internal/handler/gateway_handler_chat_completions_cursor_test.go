@@ -23,12 +23,14 @@ func TestGeminiChatCompletionsPlatformAdmission(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tt := range []struct {
 		name, platform, errorType, message string
+		status                             int
 	}{
 		// Missing Cursor credentials deliberately fail at the existing forwarder;
 		// reaching that error proves the handler did not discard the selected account.
-		{"cursor reaches forwarder", service.PlatformCursor, "upstream_error", infraerrors.UpstreamRequestFailed},
-		{"gemini reaches compat service", service.PlatformGemini, "upstream_error", infraerrors.CompatServiceNotConfigured},
-		{"other mixed supply remains excluded", service.PlatformAntigravity, "server_error", infraerrors.AllAccountsExhausted},
+		// Since §2.2.2, a missing execution service maps to 503 CUR-RES-10.
+		{"cursor reaches forwarder", service.PlatformCursor, "upstream_error", infraerrors.CursorUserMessage(infraerrors.CursorResServiceUnavailableCode, infraerrors.CursorResServiceUnavailable, ""), http.StatusServiceUnavailable},
+		{"gemini reaches compat service", service.PlatformGemini, "upstream_error", infraerrors.CompatServiceNotConfigured, http.StatusBadGateway},
+		{"other mixed supply remains excluded", service.PlatformAntigravity, "server_error", infraerrors.AllAccountsExhausted, http.StatusBadGateway},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			groupID := int64(9410)
@@ -59,7 +61,7 @@ func TestGeminiChatCompletionsPlatformAdmission(t *testing.T) {
 			selected, ok := c.Get(opsAccountIDKey)
 			require.True(t, ok, "test must reach account selection")
 			require.Equal(t, account.ID, selected)
-			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+			require.Equal(t, tt.status, rec.Code, rec.Body.String())
 			var response struct {
 				Error struct {
 					Type    string `json:"type"`
