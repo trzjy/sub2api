@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	pkgerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -522,7 +523,9 @@ func TestServeCursorResumeEligibilityDenialReturnsByClass(t *testing.T) {
 			require.True(t, handled, "资格拒绝必须由续轮分支终止请求，不得落回普通路径")
 			require.True(t, reject.called)
 			require.Equal(t, tc.status, reject.status, "拒绝必须按类返回")
-			require.Equal(t, tc.reason, reject.msg, "reason 必须是执行服务给出的稳定枚举，不按文案改写")
+			wantCode, wantMsg := pkgerrors.CursorResumeReasonCode(tc.reason)
+			require.Equal(t, pkgerrors.CursorUserMessage(wantCode, wantMsg, ""), reject.msg,
+				"reason 必须是执行服务给出的稳定枚举，不按文案改写")
 			require.Equal(t, 1, gw.serveCalls, "拒绝是终止性的：不得二次接管/重试")
 			require.False(t, c.Writer.Written(), "本层不再写任何响应")
 		})

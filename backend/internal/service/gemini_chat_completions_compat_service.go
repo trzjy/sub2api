@@ -37,7 +37,7 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 		if ferr != nil {
 			// 出口先把错误按 Chat Completions 形状写出，避免 handler 回落到
 			// 与入站协议无关的通用错误体；Cursor 路径不参与换号重试。
-			return nil, s.writeChatCompletionsError(c, cursorCompatErrorStatus(), "upstream_error", ferr.Error())
+			return nil, s.writeCursorChatCompletionsError(c, account, ferr)
 		}
 		return res, nil
 	}
@@ -967,6 +967,23 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		errMsg = upstreamMsg
 	}
 	return s.writeChatCompletionsError(c, statusCode, errType, errMsg)
+}
+
+// writeCursorChatCompletionsError 把 Cursor 执行错误写成 Chat Completions 形状的客户端错误。
+//
+// Cursor 账号且 CursorUserFacingError 命中时按其状态码 + 中文提示写回；响应已提交或已写出
+// 时不走新逻辑（不在已提交响应后重写状态码），沿原写法收尾。
+func (s *GeminiMessagesCompatService) writeCursorChatCompletionsError(c *gin.Context, account *Account, err error) error {
+	if !IsResponseCommitted(c) && !c.Writer.Written() {
+		if status, msg, ok := cursorCompatUserError(c, account, err); ok {
+			errType := "upstream_error"
+			if status >= 400 && status < 500 {
+				errType = "invalid_request_error"
+			}
+			return s.writeChatCompletionsError(c, status, errType, msg)
+		}
+	}
+	return s.writeChatCompletionsError(c, cursorCompatErrorStatus(), "upstream_error", err.Error())
 }
 
 func (s *GeminiMessagesCompatService) writeChatCompletionsError(c *gin.Context, status int, errType, message string) error {

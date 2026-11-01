@@ -441,7 +441,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			upstreamErrorAlreadyCommunicated := gatewayForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 			wroteFallback := false
 			if !upstreamErrorAlreadyCommunicated {
-				wroteFallback = h.ensureForwardErrorResponse(c, streamStarted)
+				wroteFallback = h.writeResponsesForwardErrorResponse(c, reqLog, account, err, streamStarted)
 			}
 			reqLog.Error("gateway.responses.forward_failed",
 				zap.Int64("account_id", account.ID),
@@ -466,6 +466,39 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		submitForwardUsage(result)
 		return
 	}
+}
+
+// writeResponsesForwardErrorResponse 在 Forward 返回非 failover 错误、且尚未向客户端写出错误时补写错误响应。
+//
+// Cursor 账号且 service.CursorUserFacingError 命中时，按其状态码 + 中文提示写回（方案 §2.2.2、§2.3 M3）；
+// 4xx 用 invalid_request_error，其余沿用原出口的 upstream_error。前置判定与 ensureForwardErrorResponse 一致：
+// 客户端已断开不写、响应已提交不写、Writer 已写过则只写流内错误帧（不重写状态码）。
+// 非 Cursor 账号或未命中映射时走原 ensureForwardErrorResponse（502 兜底）。
+func (h *GatewayHandler) writeResponsesForwardErrorResponse(c *gin.Context, reqLog *zap.Logger, account *service.Account, err error, streamStarted bool) bool {
+	if !isCursorPlatformAccount(account) || c == nil || c.Writer == nil || c.Request == nil {
+		return h.ensureForwardErrorResponse(c, streamStarted)
+	}
+	status, code, message, ok := service.CursorUserFacingError(c.Request.Context(), err)
+	if !ok {
+		return h.ensureForwardErrorResponse(c, streamStarted)
+	}
+	if errors.Is(c.Request.Context().Err(), context.Canceled) {
+		failoverClientGone(c)
+		return false
+	}
+	if service.IsResponseCommitted(c) {
+		return false
+	}
+	if c.Writer.Written() {
+		streamStarted = true
+	}
+	errType := "upstream_error"
+	if status >= 400 && status < 500 {
+		errType = "invalid_request_error"
+	}
+	reqLog.Warn("cursor_user_error", zap.String("error_code", code), zap.Int("status", status))
+	h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+	return true
 }
 
 // responsesErrorResponse writes an error in OpenAI Responses API format.

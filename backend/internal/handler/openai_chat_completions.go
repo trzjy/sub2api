@@ -528,7 +528,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false
 				if !upstreamErrorAlreadyCommunicated {
-					wroteFallback = h.ensureOpenAIStreamReadErrorResponse(c, err, streamStarted)
+					wroteFallback = h.writeOpenAIChatCursorUserError(c, reqLog, account, err, streamStarted)
+					if !wroteFallback {
+						wroteFallback = h.ensureOpenAIStreamReadErrorResponse(c, err, streamStarted)
+					}
 					if !wroteFallback {
 						wroteFallback = h.ensureForwardErrorResponse(c, streamStarted)
 					}
@@ -722,4 +725,34 @@ func cursorChatFinalToOpenAIResult(final *service.ForwardResult) *service.OpenAI
 		out.ResponseHeaders = final.UpstreamHeaders.Clone()
 	}
 	return out
+}
+
+// writeOpenAIChatCursorUserError 在 Cursor 账号的 Execute 错误上按 service.CursorUserFacingError
+// 写回中文提示与对应状态码（方案 §2.3 M3）；返回 false 表示未处理，调用方走原兜底路径。
+// 客户端已断开或响应已提交时不处理，交回原兜底按原规则收尾；
+// Writer 已写过（ping 已 flush）时只发流内错误帧，不改状态码。
+func (h *OpenAIGatewayHandler) writeOpenAIChatCursorUserError(c *gin.Context, reqLog *zap.Logger, account *service.Account, err error, streamStarted bool) bool {
+	if !isCursorPlatformAccount(account) || c == nil || c.Writer == nil || c.Request == nil {
+		return false
+	}
+	if errors.Is(c.Request.Context().Err(), context.Canceled) || service.IsResponseCommitted(c) {
+		return false
+	}
+	status, code, message, ok := service.CursorUserFacingError(c.Request.Context(), err)
+	if !ok {
+		return false
+	}
+	reqLog.Warn("cursor_user_error",
+		zap.String("error_code", code),
+		zap.Int("status", status),
+	)
+	errType := "upstream_error"
+	if status >= 400 && status < 500 {
+		errType = "invalid_request_error"
+	}
+	if c.Writer.Written() {
+		streamStarted = true
+	}
+	h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+	return true
 }

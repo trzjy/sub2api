@@ -43,6 +43,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
@@ -308,7 +309,7 @@ func (s *CursorExecutionService) Execute(
 		return nil, errors.New("cursor: execution requires a cursor platform account")
 	}
 	if req == nil || req.Chat == nil {
-		return nil, fmt.Errorf("%w: typed chat completions request missing", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "typed chat completions request missing")
 	}
 
 	// §25.17.4（A08）行 5：Cursor 执行分支的准入断言——所有类型化 adapter 与 Execute 入口
@@ -336,7 +337,7 @@ func (s *CursorExecutionService) Execute(
 		originalModel = strings.TrimSpace(req.Chat.Model)
 	}
 	if originalModel == "" {
-		return nil, fmt.Errorf("%w: request carries no model", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "request carries no model")
 	}
 
 	// §18.5 T 阶段日志：进入出站阶段。
@@ -433,42 +434,65 @@ func (s *CursorExecutionService) Execute(
 	// 非该 code 的错误一律 no-op，不改变任何既有行为与判定。动作 A（停号回调）无论是否已向
 	// 客户端发布正文字节都调用一次；动作 B（替换为可换号 *UpstreamFailoverError）仅当本 HTTP
 	// 尚未发布任何正文字节、且会话从未交付过工具批（外审 B3：防止续轮/ mid-stream 误换号）时执行。
+	//
+	// 模型暂不可用（方案 §2.4）：同一分类点、与限流平行判断。上游临时故障，不是账号问题，
+	// 不调停号回调；换号判据与限流动作 B 相同，否则原样返回（由 CursorUserFacingError
+	// 映射 CUR-EXEC-09）。
 	defer func() {
 		if err == nil {
 			return
 		}
-		code, ok := cursorUpstreamStreamErrorCode(err)
-		if !ok || code != "ERROR_PRO_USER_RATE_LIMIT_EXCEEDED" {
+		if code, ok := cursorUpstreamStreamErrorCode(err); ok && code == "ERROR_PRO_USER_RATE_LIMIT_EXCEEDED" {
+			// 限流路径：Info 级一条（含 account_id 与 code），正常路径不额外写日志。
+			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_exhausted", originalModel,
+				zap.Int64("account_id", account.ID), zap.String("code", code))
+			// 动作 A：无论是否已发布正文字节，停号回调只调用一次；回调报错（含 panic）只记 Warn，
+			// 绝不改变返回的错误类型与换号语义。
+			if s.accountExhaustedHandler != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_exhausted_handler_panic", originalModel,
+								zap.Int64("account_id", account.ID), zap.Any("panic", r))
+						}
+					}()
+					s.accountExhaustedHandler(ctx, account.ID, "cursor upstream quota exhausted (rate limited)")
+				}()
+			}
+			// 动作 B（外审 B3 加固）：仅当本 HTTP 尚未发布正文字节，且会话从未交付过工具批
+			// （deliveredBatchSeq==0，即非续轮/非 mid-stream）时，才替换为可换号 failover，让既有
+			// handler 换号重试；否则错误原样返回，禁止 mid-stream 换号（锁定项 3）。
+			if !session.bodyPublished && session.deliveredBatchSeq == 0 {
+				err = &UpstreamFailoverError{
+					StatusCode:        429,
+					Stage:             GatewayFailureStage("upstream"),
+					Scope:             GatewayFailureScopeAccount,
+					Reason:            GatewayFailureReason("cursor_quota_exhausted"),
+					NextAccountAction: NextAccountRetry,
+					ClientStatusCode:  429,
+					ClientMessage:     "cursor 账号额度耗尽，已停止调度",
+				}
+			}
 			return
 		}
-		// 限流路径：Info 级一条（含 account_id 与 code），正常路径不额外写日志。
-		cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_exhausted", originalModel,
-			zap.Int64("account_id", account.ID), zap.String("code", code))
-		// 动作 A：无论是否已发布正文字节，停号回调只调用一次；回调报错（含 panic）只记 Warn，
-		// 绝不改变返回的错误类型与换号语义。
-		if s.accountExhaustedHandler != nil {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_exhausted_handler_panic", originalModel,
-							zap.Int64("account_id", account.ID), zap.Any("panic", r))
-					}
-				}()
-				s.accountExhaustedHandler(ctx, account.ID, "cursor upstream quota exhausted (rate limited)")
-			}()
+		var mu *CursorModelUnavailableError
+		if !errors.As(err, &mu) {
+			return
 		}
-		// 动作 B（外审 B3 加固）：仅当本 HTTP 尚未发布正文字节，且会话从未交付过工具批
-		// （deliveredBatchSeq==0，即非续轮/非 mid-stream）时，才替换为可换号 failover，让既有
-		// handler 换号重试；否则错误原样返回，禁止 mid-stream 换号（锁定项 3）。
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_upstream_model_unavailable", originalModel,
+			zap.String("turn_id", mu.TurnID),
+			zap.Int64("account_id", account.ID),
+			zap.Bool("body_published", session.bodyPublished),
+			zap.Int("delivered_batches", int(session.deliveredBatchSeq)))
 		if !session.bodyPublished && session.deliveredBatchSeq == 0 {
 			err = &UpstreamFailoverError{
-				StatusCode:        429,
+				StatusCode:        503,
 				Stage:             GatewayFailureStage("upstream"),
 				Scope:             GatewayFailureScopeAccount,
-				Reason:            GatewayFailureReason("cursor_quota_exhausted"),
+				Reason:            GatewayFailureReason("cursor_model_unavailable"),
 				NextAccountAction: NextAccountRetry,
-				ClientStatusCode:  429,
-				ClientMessage:     "cursor 账号额度耗尽，已停止调度",
+				ClientStatusCode:  503,
+				ClientMessage:     infraerrors.CursorExecModelUnavailable,
 			}
 		}
 	}()
@@ -1447,7 +1471,7 @@ func cursorExecuteChatAs(
 	}
 	model := strings.TrimSpace(ccReq.Model)
 	if model == "" {
-		return nil, fmt.Errorf("%w: chat completions request carries no model", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "chat completions request carries no model")
 	}
 	plan, planErr := cursorPlanFromChat(&ccReq, model)
 	if planErr != nil {
@@ -1487,10 +1511,10 @@ func cursorExecuteResponses(
 		return nil, err
 	}
 	if req == nil {
-		return nil, fmt.Errorf("%w: nil responses request", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil responses request")
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		return nil, fmt.Errorf("%w: responses request carries no model", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "responses request carries no model")
 	}
 	if err := cursorValidateResponsesToolChoice(req); err != nil {
 		return nil, err
@@ -1537,10 +1561,10 @@ func cursorExecuteAnthropic(
 		return nil, err
 	}
 	if req == nil {
-		return nil, fmt.Errorf("%w: nil anthropic request", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil anthropic request")
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		return nil, fmt.Errorf("%w: anthropic messages request carries no model", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "anthropic messages request carries no model")
 	}
 	plan, planErr := cursorPlanFromMessages(req, req.Model)
 	if planErr != nil {
@@ -1585,7 +1609,7 @@ func cursorExecuteGeminiNative(
 		return nil, err
 	}
 	if strings.TrimSpace(originalModel) == "" {
-		return nil, fmt.Errorf("%w: native request carries no model", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "native request carries no model")
 	}
 	// ① 原始请求 → 计划（含工具名与 toolConfig 摘要）。
 	plan, planErr := cursorPlanFromGemini(body, originalModel)
@@ -1600,7 +1624,7 @@ func cursorExecuteGeminiNative(
 	// ③ 转执行所需形状（工具声明/调用/结果的真实进入转换，不只进摘要）。
 	ccBody, convErr := cursorGeminiRequestToChatCompletions(body, originalModel, stream)
 	if convErr != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCursorUnsupportedRequest, convErr)
+		return nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "%v", convErr)
 	}
 	var chat apicompat.ChatCompletionsRequest
 	if err := json.Unmarshal(ccBody, &chat); err != nil {
@@ -1853,7 +1877,7 @@ func (s *CursorExecutionService) ProbeAgentRun(
 		return 0, "", "", errors.New("cursor: probe requires a cursor platform account")
 	}
 	if strings.TrimSpace(upstreamModel) == "" {
-		return 0, "", "", fmt.Errorf("%w: empty upstream model", ErrCursorUnsupportedRequest)
+		return 0, "", "", newCursorRequestError(infraerrors.CursorExecModelMappingInvalidCode, http.StatusInternalServerError, "empty upstream model")
 	}
 	bearer, err := cursorResolveAccountBearer(account)
 	if err != nil {
@@ -2776,6 +2800,9 @@ type cursorSessionRecord struct {
 	mu          sync.Mutex
 	state       cursorSessionState
 	delegations *cursorToolDelegations
+	// waitingIdleTimer 是 waiting_tools 空闲计时器（方案 §2.5）：进入 waiting_tools 时启动，
+	// 续轮接管或进入 finalizing 时停止并置 nil。只在 record.mu 下读写。
+	waitingIdleTimer *time.Timer
 	// toolCallIDs 是已登记的对外工具调用 ID（供续轮关联与重复提交拒绝）。
 	toolCallIDs map[string]struct{}
 
@@ -3501,11 +3528,6 @@ type cursorToolBatch struct {
 	// checkSealableLocked 的"每条 started 都要有委托"会永假 → 批不封口 → 180s 挂死
 	// （外审 B1）。登记后封口谓词跳过它们，交付集合里也不含它们（它们从未写入 delegations）。
 	rejected map[string]struct{}
-	// shellOnly 标记本批为 shell 专属批：由无 started/listed 的 f14（ExecServerMessage.f14）
-	// 建立，仅以"已有 ≥1 条 shell 委托"为封口条件，独立交付，绝不等待 tool_call_started /
-	// tool_requests_listed（解决生产实测 f14 先于/无 started 到达时挂死 180s 的问题）。
-	// 与 mcp 批次（shellOnly=false）字节级封口语义完全隔离。
-	shellOnly bool
 	// wireDecided 是本批**已决定出站 id** 的委托数（batch.delegations 的前缀长度，由
 	// assignWireIDsLocked 处理完整批后推进；delegations 只追加、不重排，因此前缀稳定）。
 	//
@@ -3516,17 +3538,28 @@ type cursorToolBatch struct {
 	wireDecided int
 }
 
+// cursorRejectionTombstone 是会话级"本地已拒绝"墓碑：拒绝先到、started 后到时，
+// 让本地拒绝在 started 到达前也不丢。registeredAt 用于过期判定——登记时刻距今超过
+// 本会话 180s 总期限即视为协议停滞，失败关闭（绝不静默忽略）。
+type cursorRejectionTombstone struct {
+	registeredAt time.Time
+}
+
+// cursorRejectionTombstoneTTL 是墓碑的最大存活期，等于本会话 180s 总期限。
+// 设成 var（而非 const）仅为单测可临时收紧以构造过期场景，生产语义恒为 180s。
+var cursorRejectionTombstoneTTL = 180 * time.Second
+
+// cursorWaitingToolsIdleTimeout 是会话停在 waiting_tools（已交付工具批、等客户端续轮）的
+// 最长空闲期（方案 §2.5）：到期仍未续轮即走唯一 finalizer 提前释放槽与预留，与 180s 总期限
+// 取先到者。设成 var（而非 const）仅为单测可临时收紧，生产语义恒为 120s。
+var cursorWaitingToolsIdleTimeout = 120 * time.Second
+
 // cursorToolDelegations 是一次 AgentRun 内工具委托的**唯一**记录。
 //
 // §24.2-6：duplex 解码 mcp_args 一次并写入这里，parser 只读取，不再二次解码。
 // §25.3：批次按 tool_call_started.model_call_id + tool_requests_listed.call_count 封口；
 // 已封口的批次保留在 all 中（供本轮输出），同 model_call_id 的新信号开新批，
 // 绝不把上一批的 count 跨代复用（证据 29 陷阱）。
-//
-// shell 委托（f14）不再使用"等待 started 的 pending 挂起"路径：f14 到达且当前没有携带
-// started 的开放批时，直接建立 shellOnly 专属批并立即可封口（见 noteShellDelegation /
-// checkSealableLocked），从而根除无 started 形态下挂死 180s 的故障。mcp 委托（Kind==""）
-// 字节级封口语义完全不变。
 type cursorToolDelegations struct {
 	mu   sync.Mutex
 	all  []*cursorToolBatch
@@ -3552,24 +3585,33 @@ type cursorToolDelegations struct {
 	idRewrite map[string]string
 	// shared 表示本记录由 duplex 拥有解码权（parser 不再解码同一帧）。
 	shared bool
+	// rejectionTombstones 是会话级"本地已拒绝"墓碑集合：键=对外 call_id，值=登记时刻。
+	// 解决"拒绝先到、started 后到"的竞态：noteRejectedCall 无条件登记墓碑，待
+	// tool_call_started 到达时由 noteToolCallStarted 在持锁下原子消费（消费即删，
+	// 不跨批/跨会话复用），把该 call 记入所属批的 rejected 集合，于是封口谓词跳过它。
+	// 本集合随本会话的 delegations 一起释放，绝不跨会话复用；登记/消费都在同一把
+	// d.mu 下完成，不留竞态窗口。
+	rejectionTombstones map[string]cursorRejectionTombstone
 }
 
 // newCursorToolDelegations 构造由 duplex 解码、parser 读取的共享记录。
 func newCursorToolDelegations() *cursorToolDelegations {
 	return &cursorToolDelegations{
-		open:         make(map[string]*cursorToolBatch),
-		deliveredIDs: make(map[string]struct{}),
-		idRewrite:    make(map[string]string),
-		shared:       true,
+		open:                make(map[string]*cursorToolBatch),
+		deliveredIDs:        make(map[string]struct{}),
+		idRewrite:           make(map[string]string),
+		shared:              true,
+		rejectionTombstones: make(map[string]cursorRejectionTombstone),
 	}
 }
 
 // newLocalCursorToolDelegations 构造由 parser 自己解码的本地记录（无 duplex 的场景）。
 func newLocalCursorToolDelegations() *cursorToolDelegations {
 	return &cursorToolDelegations{
-		open:         make(map[string]*cursorToolBatch),
-		deliveredIDs: make(map[string]struct{}),
-		idRewrite:    make(map[string]string),
+		open:                make(map[string]*cursorToolBatch),
+		deliveredIDs:        make(map[string]struct{}),
+		idRewrite:           make(map[string]string),
+		rejectionTombstones: make(map[string]cursorRejectionTombstone),
 	}
 }
 
@@ -3581,11 +3623,10 @@ func (d *cursorToolDelegations) isShared() bool { return d != nil && d.shared }
 //
 // 纪律：禁止在别处写 &cursorToolBatch{...} 直接建批——绕过这里会让批次没有 seq，
 // 续轮"是否新批"的判定就退回按 call_id 猜（真实客户端跨轮复用 call_id，会吞掉新批）。
-func (d *cursorToolDelegations) newBatchLocked(modelCallID string, shellOnly bool) *cursorToolBatch {
+func (d *cursorToolDelegations) newBatchLocked(modelCallID string) *cursorToolBatch {
 	d.nextSeq++
 	batch := &cursorToolBatch{
 		modelCallID: modelCallID,
-		shellOnly:   shellOnly,
 		seq:         d.nextSeq,
 	}
 	d.all = append(d.all, batch)
@@ -3598,7 +3639,7 @@ func (d *cursorToolDelegations) batchFor(modelCallID string) (*cursorToolBatch, 
 		if batch, ok := d.open[modelCallID]; ok && !batch.sealed {
 			return batch, nil
 		}
-		batch := d.newBatchLocked(modelCallID, false)
+		batch := d.newBatchLocked(modelCallID)
 		d.open[modelCallID] = batch
 		return batch, nil
 	}
@@ -3607,17 +3648,11 @@ func (d *cursorToolDelegations) batchFor(modelCallID string) (*cursorToolBatch, 
 		if batch.sealed {
 			continue
 		}
-		// shellOnly 专属批不参与"无归属信号"的归并：mcp 委托（Kind==""）/ started / listed
-		// 等无归属信号绝不并入已存在的 shellOnly 批，避免把 mcp 委托吞进 shellOnly 批
-		// （shellOnly 批独立交付后已 sealed；此处再保险，未封口的 shellOnly 批也不被误并）。
-		if batch.shellOnly {
-			continue
-		}
 		candidates = append(candidates, batch)
 	}
 	switch len(candidates) {
 	case 0:
-		batch := d.newBatchLocked("", false)
+		batch := d.newBatchLocked("")
 		d.open[""] = batch
 		return batch, nil
 	case 1:
@@ -3731,6 +3766,29 @@ func (d *cursorToolDelegations) noteToolCallStarted(modelCallID, callID string, 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	batch, err := d.batchFor(modelCallID)
+	// 墓碑消费必须在同一把锁内、在任何提前 return 之前完成：拒绝先到、started 后到时，
+	// 这里把它原子消费（删即消费，不跨批/跨会话复用）并记入所属批 rejected；过期或无法
+	// 归属则失败关闭（错误含 call_id），绝不静默忽略。
+	if ts, ok := d.rejectionTombstones[callID]; ok {
+		delete(d.rejectionTombstones, callID)
+		if time.Since(ts.registeredAt) > cursorRejectionTombstoneTTL {
+			return fmt.Errorf("%w: rejection tombstone for call_id %q expired (registered %s)",
+				ErrCursorBatchIncomplete, callID, ts.registeredAt.Format(time.RFC3339))
+		}
+		if err != nil {
+			// batchFor 无法把 started 归到唯一开放批（如多个无 ID 开放批）→ 墓碑无法归属。
+			return fmt.Errorf("%w: rejection tombstone for call_id %q arrived but cannot be attributed to any batch (%s)",
+				ErrCursorBatchAmbiguous, callID, modelCallID)
+		}
+		if batch.sealed {
+			return fmt.Errorf("%w: rejection tombstone for call_id %q belongs to an already-sealed batch (unattributable)",
+				ErrCursorBatchIncomplete, callID)
+		}
+		if batch.rejected == nil {
+			batch.rejected = make(map[string]struct{}, 1)
+		}
+		batch.rejected[callID] = struct{}{}
+	}
 	if err != nil {
 		return err
 	}
@@ -3748,34 +3806,6 @@ func (d *cursorToolDelegations) noteToolCallStarted(modelCallID, callID string, 
 	}
 	if !alreadyStarted {
 		batch.started = append(batch.started, callID)
-	}
-	// f14 先到、started 后到的 shell 委托：started 到达时把同 call_id 的 shellOnly 专属批
-	// 委托并入本 started 批（同一把锁内完成，避免竞态），随后移除该 shellOnly 批，使该
-	// 委托回到原批路径按原谓词封口（不再有独立的 shellOnly 批悬挂）。批已封口属内部
-	// 不一致 → 明确错误。shellOnly 批与 mcp 的 "" 开放批 key 隔离，不会误并。
-	if shell, ok := d.open[callID]; ok && !shell.sealed && shell.shellOnly {
-		if batch.sealed {
-			return fmt.Errorf("%w: started %q arrived but its shellOnly delegation target batch already sealed", ErrCursorBatchIncomplete, callID)
-		}
-		for _, tc := range shell.delegations {
-			found := false
-			for _, ex := range batch.delegations {
-				if ex.ID == tc.ID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				batch.delegations = append(batch.delegations, tc)
-			}
-		}
-		delete(d.open, callID)
-		for i, b := range d.all {
-			if b == shell {
-				d.all = append(d.all[:i], d.all[i+1:]...)
-				break
-			}
-		}
 	}
 	return nil
 }
@@ -3800,7 +3830,7 @@ func (d *cursorToolDelegations) noteDelegation(modelCallID string, tc cursorTool
 }
 
 // noteDelegationLocked 在已持有 d.mu 的前提下登记一条已解码的 f11 委托（与 noteDelegation
-// 同语义，但抽出以便 noteShellDelegation 在持锁分支复用，避免重复加锁）。
+// 同语义，供持锁路径复用，避免重复加锁）。
 func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) error {
 	batch, err := d.batchForDelegation(tc.ID)
 	if err != nil {
@@ -3816,23 +3846,17 @@ func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) e
 	return nil
 }
 
-// noteShellDelegation 登记一条 Kind=="shell" 的 f14 委托（ExecServerMessage.f14）。
-//
-// 依据生产实测 2026-10-28（f14 到达时可能无 tool_call_started，仅 InteractionUpdate 心跳），
-// 本函数不再依赖 started/listed 作为封口前置。三种形态：
-//   - 已存在同 call_id 的未封口 started 批 → 原路径 noteDelegationLocked 入该批（按原谓词封口）；
-//   - 当前没有任何携带 started 的开放批（f14 先到 / 真机仅心跳无 started）→ 建立 shell 专属
-//     批（shellOnly，key 为 call_id），把委托加入并立即可封口（≥1 条 shell 委托即封口，
-//     不等 started/listed），独立交付，绝不挂 pending；
-//   - 存在携带 started 的开放批但该 call_id 不在其中（孤儿 shell 委托，无对应 started）
-//     → 失败关闭（沿用原 orphan 语义，绝不并入已声明 started 的批次让其假封口）。
-//
-// 多个 f14 顺序到达：首个无匹配 started → 建 shellOnly 批并立即封口交付；后续 f14 因前批
-// 已 sealed（交付后）各自新建独立 shellOnly 批并各自封口交付（每条 shell 执行请求独立交付，
-// 不做聚合）。shellOnly 批 key 为 call_id，与 mcp 的 "" 开放批隔离，互不吞并。
 // noteRejectedCall 登记"客户端无对应工具、本地已拒绝执行"的对外 call_id（外审 B1）。
 //
-// 只标记已 started 且未封口的批；没有匹配批时安全 no-op（无批场景本来就不需要封口）。
+// 分两步：
+//  1. 若该 call_id 此刻已出现在某个未封口批的 started 列表里（"started 先到、拒绝后到"），
+//     就地标记该批的 rejected 集合并返回，**不登记墓碑**——否则墓碑残留，同会话后续批
+//     复用同一 call_id 时会被 noteToolCallStarted 消费，把新的真实调用误当成本地拒绝。
+//  2. 遍历后仍未命中（"拒绝先到、started 后到"），才登记会话级墓碑：旧实现只在已
+//     started 的批里标记，拒绝先到时落空，该批永远封不了口 → 180s 总期限挂死。墓碑随后
+//     由 noteToolCallStarted 在持锁下原子消费（消费即删，不跨批/跨会话复用），把该 call
+//     记入所属批的 rejected 集合。
+//
 // 不改 delegations、不改交付集合、不改计数字段：封口语义仍以 listed 为准。
 func (d *cursorToolDelegations) noteRejectedCall(callID string) {
 	if d == nil || callID == "" {
@@ -3840,6 +3864,7 @@ func (d *cursorToolDelegations) noteRejectedCall(callID string) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// 1. 若该 call_id 已出现在某个未封口批的 started 列表里，就地标记该批 rejected，不写墓碑。
 	for _, batch := range d.all {
 		if batch.sealed {
 			continue
@@ -3855,69 +3880,11 @@ func (d *cursorToolDelegations) noteRejectedCall(callID string) {
 			return
 		}
 	}
-}
-
-func (d *cursorToolDelegations) noteShellDelegation(callID string, tc cursorToolCallCapture) error {
-	return d.noteStandaloneDelegation(cursorToolKindShell, callID, tc)
-}
-
-// noteNativeFsDelegation 登记一条原生文件工具委托（ExecServerMessage.f3/f4/f5/f7/f8，
-// Kind ∈ read/ls/grep/write/delete）。封口语义与 noteShellDelegation 完全一致：这些原生
-// exec 同样可能在无 tool_call_started 的情况下到达，故同样以"独立批立即可封口"交付。
-// 批标记沿用 shellOnly（= 独立原生 exec 批，仅以"有 ≥1 条委托"为封口条件）。
-func (d *cursorToolDelegations) noteNativeFsDelegation(kind, callID string, tc cursorToolCallCapture) error {
-	return d.noteStandaloneDelegation(kind, callID, tc)
-}
-
-// noteStandaloneDelegation 是 noteShellDelegation / noteNativeFsDelegation 的共用实现；
-// kind 只用于错误文案（区分是哪条原生通道失败关闭），不改变任何封口判定。
-func (d *cursorToolDelegations) noteStandaloneDelegation(kind, callID string, tc cursorToolCallCapture) error {
-	if d == nil {
-		return nil
+	// 2. 未命中任何未封口批的 started：登记墓碑，留待 started 到达时消费。
+	if d.rejectionTombstones == nil {
+		d.rejectionTombstones = make(map[string]cursorRejectionTombstone)
 	}
-	if strings.TrimSpace(callID) == "" {
-		return fmt.Errorf("%w: %s delegation without tool_call_id", ErrCursorProtocol, kind)
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	// 1. 已存在同 call_id 的未封口 started 批 → 原路径入该批（按原谓词封口）。
-	for _, batch := range d.all {
-		if batch.sealed {
-			continue
-		}
-		for _, id := range batch.started {
-			if id == callID {
-				return d.noteDelegationLocked(tc)
-			}
-		}
-	}
-	// 2. 不存在任何携带 started 的开放批（f14 先到 / 真机仅心跳无 started）→ 建 shellOnly 批。
-	openWithStarted := 0
-	for _, batch := range d.all {
-		if !batch.sealed && len(batch.started) > 0 {
-			openWithStarted++
-		}
-	}
-	if openWithStarted == 0 {
-		// 同 call_id 已有未封口 shellOnly 批（罕见复用）→ 并入；否则新建并登记到
-		// d.open[callID]（与 mcp 的 "" key 隔离，避免互相吞并）。
-		if existing, ok := d.open[callID]; ok && !existing.sealed && existing.shellOnly {
-			for _, ex := range existing.delegations {
-				if ex.ID == tc.ID {
-					return nil
-				}
-			}
-			existing.delegations = append(existing.delegations, tc)
-			return nil
-		}
-		batch := d.newBatchLocked("", true)
-		d.open[callID] = batch
-		batch.delegations = append(batch.delegations, tc)
-		return nil
-	}
-	// 3. 存在携带 started 的开放批但不含本 call_id（孤儿原生委托）→ 失败关闭，
-	//    绝不并入已声明 started 的批次（防假封口 / 超出 listed 交付），也不挂 pending。
-	return fmt.Errorf("%w: %s tool_call_id %q has no matching tool_call_started in open batch (orphan %s delegation)", ErrCursorProtocol, kind, callID, kind)
+	d.rejectionTombstones[callID] = cursorRejectionTombstone{registeredAt: time.Now()}
 }
 
 // snapshot 返回按到达顺序的全部委托（parser 输出 tool_calls 用）。
@@ -4103,15 +4070,6 @@ func (d *cursorToolDelegations) sealable() error {
 func (d *cursorToolDelegations) checkSealableLocked() error {
 	for _, batch := range d.all {
 		if batch.sealed {
-			continue
-		}
-		// shellOnly 批：仅以"已有 ≥1 条 shell 委托"为封口条件，无视 started / listed 计数
-		// （解决 f14 先于/无 started 到达时挂死 180s 的生产故障；每条 shell 执行请求独立交付）。
-		// 该批 key 为 call_id，与 mcp 批次完全隔离，不改变 mcp 委托的封口谓词与交付时序。
-		if batch.shellOnly {
-			if len(batch.delegations) < 1 {
-				return fmt.Errorf("%w: shellOnly batch %q has no shell delegation", ErrCursorBatchIncomplete, batch.modelCallID)
-			}
 			continue
 		}
 		// 每条对外 started 都必须有完整 mcp_args 委托（既有逻辑保留）。
@@ -4629,8 +4587,16 @@ func (s *CursorExecutionService) adoptHandover(ctx context.Context, record *curs
 // 网络/计费操作全部在锁外；终结守卫保证每项最多一次；竞争（取消、deadline、服务 Stop、
 // 正常返回）以**第一个进入 finalizer 的终态**为唯一胜者，不双写、不重复释放。
 func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord, reason string) {
+	s.finishCursorSessionIf(record, reason, nil)
+}
+
+// finishCursorSessionIf 是带前置条件的唯一 finalizer 入口：precond 与"置 finishing"在同一把
+// record.mu 下完成，判定与转换原子（方案 §2.5：到点复核仍为同批未消费的 waiting_tools 才终结）。
+// precond 在持 record.mu 时调用：precond 只读 record 字段，不得加锁、不得阻塞。
+// 返回 true 表示本调用成为唯一胜者并走完 finalizer；precond 不成立或已有胜者时返回 false。
+func (s *CursorExecutionService) finishCursorSessionIf(record *cursorSessionRecord, reason string, precond func() bool) bool {
 	if s == nil || record == nil {
-		return
+		return false
 	}
 	record.mu.Lock()
 	if record.finishing {
@@ -4640,10 +4606,15 @@ func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord
 			zap.String("session_id", record.id),
 			zap.String("terminal_reason", reason),
 			zap.String("accepted_reason", accepted))
-		return
+		return false
+	}
+	if precond != nil && !precond() {
+		record.mu.Unlock()
+		return false
 	}
 	record.finishing = true
 	record.state = cursorSessionFinalizing
+	record.stopWaitingIdleTimerLocked()
 	record.interruptReason = reason
 	deadline := record.deadline
 	deadlineSource := record.deadlineSource
@@ -4724,6 +4695,7 @@ func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord
 	// 重复终结者在 ①之前就返回，故不会关闭它；Stop 依此在锁外判断"确实完成"而不是
 	// "finishing=true"。
 	record.closeFinalizeDone()
+	return true
 }
 
 // settleCursorSession 提交**唯一结算**（至多一次，网络/计费在锁外）。
@@ -5421,7 +5393,7 @@ func cursorChatToolItem(tool apicompat.ChatTool) (cursorContextItem, string, err
 //   - 本批结果：**尾部连续**的 role=tool 消息，按 tool_call_id 匹配（不按工具名）。
 func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*cursorContextPlan, error) {
 	if req == nil {
-		return nil, fmt.Errorf("%w: nil chat request", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil chat request")
 	}
 	builder := newCursorConfigBuilder()
 	if err := builder.text("config.model", model); err != nil {
@@ -5628,7 +5600,7 @@ func cursorAnthropicBlockItem(role string, block apicompat.AnthropicContentBlock
 //   - 文本与 is_error 原样保留，不把新增用户文字吞进结果。
 func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cursorContextPlan, error) {
 	if req == nil {
-		return nil, fmt.Errorf("%w: nil anthropic request", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil anthropic request")
 	}
 	builder := newCursorConfigBuilder()
 	if err := builder.text("config.model", model); err != nil {
@@ -5911,7 +5883,7 @@ func cursorDigestTypeToken(raw string) string {
 //   - instructions 不继承：首轮非空、续轮省略 => 明确入参错误（由 Resume 判定）。
 func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cursorContextPlan, error) {
 	if req == nil {
-		return nil, fmt.Errorf("%w: nil responses request", ErrCursorUnsupportedRequest)
+		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil responses request")
 	}
 	builder := newCursorConfigBuilder()
 	if err := builder.text("config.model", model); err != nil {
@@ -6604,6 +6576,7 @@ func (s *cursorSessionStore) beginResumeTakeover(
 	}
 	record.pending.consumed = true
 	record.state = cursorSessionRunning
+	record.stopWaitingIdleTimerLocked()
 	record.resumeCount++
 	record.attached = true
 	if httpCtx != nil {
@@ -7483,84 +7456,13 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 			it.svc.finishCursorSession(it.session, "resume_unknown_call")
 			return fmt.Errorf("%w: call id %q", ErrCursorResumeUnknownAssociation, r.CallID)
 		}
-		// 原生 shell 委托（Kind=="shell"）走 ShellStream（f14）回写，与 mcp 的 f11 McpResult
-		// 是两条互不相同的通道；mcp 路径字节级行为不变（实现要点 5 / 硬约束 5）。
-		if cap.Kind == "shell" {
-			stdout, stderr, exitCode := cursorParseShellResult(r)
-			cwd := cursorShellCwdFromArgs(cap.ArgsJSON)
-			shellFrames := cursorEncodeShellToolResult(cap.ExecID, cap.IDField, stdout, stderr, exitCode, cwd, cap.SandboxPolicy)
-			it.duplex.logPhase(zapcore.InfoLevel, "shell_result_writeback", "",
-				zap.String("call_id", cap.ID), zap.Int("frames", len(shellFrames)),
-				zap.Int("stdout_len", len(stdout)), zap.Int("stderr_len", len(stderr)),
-				zap.Int("exit_code", exitCode), zap.Int("cwd_len", len(cwd)),
-				zap.Int("sandbox_policy_len", len(cap.SandboxPolicy)))
-			for _, frame := range shellFrames {
-				if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
-					// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
-					it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
-					return fmt.Errorf("cursor: deliver shell tool result transport failure: %w", err)
-				}
-				it.session.noteStage("resume_result_written")
-			}
-			// exec 终止控制帧（AgentClientMessage.f5 ExecClientControlMessage.stream_close{id}）：
-			// 真实客户端在结果流写完后必发；缺失时上游认为 shell exec 仍未结束，
-			// ShellStream 不会被收尾（mcp 的 McpResult 是单条自包含结果，无需该帧，故不改 mcp 路径）。
-			if err := it.duplex.sendExecStreamClose(cap.ExecID); err != nil {
-				// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
-				it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
-				return fmt.Errorf("cursor: deliver shell stream close transport failure: %w", err)
-			}
-			it.duplex.logPhase(zapcore.InfoLevel, "shell_stream_close_sent", "",
-				zap.String("call_id", cap.ID), zap.Uint64("exec_id", cap.ExecID))
-			continue
-		}
-		// 原生文件工具委托（Kind ∈ read/ls/grep/write/delete）：回写对应 ExecClientMessage
-		// result 帧（f3/f4/f5/f7/f8），随后同样补 exec 终止控制帧。与 mcp/shell 三条通道
-		// 互不混用，mcp 路径字节级行为不变（实现要点 5 / 硬约束 5）。
-		if cap.Kind != "" {
-			fsFrames, ferr := cursorEncodeNativeFsResult(cap, r)
-			if ferr != nil {
-				// 未知 Kind：失败关闭，绝不写零帧冒充成功。
-				it.svc.finishCursorSession(it.session, "resume_unknown_native_kind")
-				return ferr
-			}
-			it.duplex.logPhase(zapcore.InfoLevel, "native_fs_result_writeback", "",
-				zap.String("call_id", cap.ID), zap.String("kind", cap.Kind),
-				zap.Int("frames", len(fsFrames)), zap.Int("text_len", len(cursorNativeFsResultText(r))),
-				zap.Bool("is_error", r.IsError))
-			if cap.Kind == cursorToolKindGrep {
-				// BLOCKED 取证点：dump 缺 GrepResult.workspace_results 内层形状，当前只能把
-				// grep 的原始输出走 f2 error{f1 error} 降级回传（信息不丢，语义降级）。
-				// 该警告必须出现，避免"grep 永远报错"被误判为客户端故障。
-				it.duplex.logPhase(zapcore.WarnLevel, "native_fs_grep_degraded", "blocked_schema",
-					zap.String("call_id", cap.ID),
-					zap.String("reason", "grep workspace_results message shape missing from bundle dump"))
-			}
-			for _, frame := range fsFrames {
-				if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
-					// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
-					it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
-					return fmt.Errorf("cursor: deliver native fs tool result transport failure: %w", err)
-				}
-				it.session.noteStage("resume_result_written")
-			}
-			// exec 终止控制帧（与 shell 相同）：真实客户端每条 exec 结果流写完都补发
-			// stream_close，缺失时上游认为该 exec 仍未结束、不收尾。
-			if err := it.duplex.sendExecStreamClose(cap.ExecID); err != nil {
-				it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
-				return fmt.Errorf("cursor: deliver native fs stream close transport failure: %w", err)
-			}
-			it.duplex.logPhase(zapcore.InfoLevel, "native_fs_stream_close_sent", "",
-				zap.String("call_id", cap.ID), zap.String("kind", cap.Kind), zap.Uint64("exec_id", cap.ExecID))
-			continue
-		}
 		// callID 只用于日志/诊断（上游靠 ExecID + IDField 关联 exec）；这里用**上游原 id**，
 		// 不用客户端回传的可见 id，避免日志与上游锚点口径不一致。
 		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, cap.ID, r.Text, r.Structured, r.IsError)
 		if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
 			// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
 			it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
-			return fmt.Errorf("cursor: deliver tool result transport failure: %w", err)
+			return newCursorRequestError(infraerrors.CursorExecResultWriteFailedCode, http.StatusBadGateway, "deliver tool result transport failure: %v", err)
 		}
 		it.session.noteStage("resume_result_written")
 	}
@@ -7863,12 +7765,50 @@ func (s *CursorExecutionService) commitDeliveredBatchState(
 		}
 	}
 	record.state = cursorSessionWaitingTools
+	record.stopWaitingIdleTimerLocked()
+	idleBatchID := record.pending.batchID
+	record.waitingIdleTimer = time.AfterFunc(cursorWaitingToolsIdleTimeout, func() {
+		s.onWaitingToolsIdle(record, idleBatchID)
+	})
 	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_batch_delivered", record.spec.requestedModel,
 		zap.String("session_id", record.id),
 		zap.String("batch_id", prepared.batchID),
 		zap.Int("call_count", len(prepared.callIDs)),
 		zap.Bool("has_response_id", prepared.responseID != ""))
 	return nil
+}
+
+// stopWaitingIdleTimerLocked 停止并清空 waiting_tools 空闲计时器（调用方持 r.mu）。
+func (r *cursorSessionRecord) stopWaitingIdleTimerLocked() {
+	if r.waitingIdleTimer != nil {
+		r.waitingIdleTimer.Stop()
+		r.waitingIdleTimer = nil
+	}
+}
+
+// onWaitingToolsIdle 是 waiting_tools 空闲计时器到期回调（方案 §2.5）。
+//
+// 只认"仍在 waiting_tools、当前未消费的同一批"：计时器 Stop 与到期存在竞争，过期回调
+// 在这里按状态与批次复核后一律 no-op。复核与"置 finishing"在 finishCursorSessionIf 内同锁
+// 完成，续轮接管（beginResumeTakeover）与空闲终结只会有一个胜者；计时器清理由 finalizer
+// 内的 stopWaitingIdleTimerLocked 负责。
+func (s *CursorExecutionService) onWaitingToolsIdle(record *cursorSessionRecord, batchID string) {
+	if s == nil || record == nil {
+		return
+	}
+	// 期限在进入 finalizer 前读出：finalizer 关闭完成信号后不再读包级变量。
+	idleTimeout := cursorWaitingToolsIdleTimeout
+	ok := s.finishCursorSessionIf(record, "waiting_tools_idle", func() bool {
+		return record.state == cursorSessionWaitingTools && record.pending != nil &&
+			record.pending.batchID == batchID && !record.pending.consumed
+	})
+	if !ok {
+		return
+	}
+	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_waiting_tools_idle", record.spec.requestedModel,
+		zap.String("session_id", record.id),
+		zap.String("batch_id", batchID),
+		zap.Duration("idle_timeout", idleTimeout))
 }
 
 // recordDeliveredBatch 是"准备 + 提交"的同步组合（供无独立写出边界的调用方使用）。

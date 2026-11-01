@@ -396,8 +396,8 @@ func cursorHandleKeyRejected(
 	upstreamURL string,
 ) error {
 	cursorRecordUpstreamError(c, account, 0, "key_rejected", "上游流内拒绝："+rej.Snippet, upstreamURL)
-	if terminal := cursorMatchKeyRejected(rej.Snippet); terminal != nil {
-		return terminal
+	if err := cursorMatchKeyRejected(rej.Snippet); err != nil {
+		return err
 	}
 	return &CursorKeyRejectedError{Template: rej.Snippet}
 }

@@ -32,6 +32,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
 )
 
 const geminiStickySessionTTL = time.Hour
@@ -4242,9 +4243,16 @@ func cursorCompatErrorStatus() int {
 //
 // 已经开始写流（响应已提交）时不再重新写状态码/第二份 JSON 错误：沿原错误出口返回，
 // 由上层按连接不可写处理（§25.17.2-6「开始流后不重写 HTTP 状态」）。
-func (s *GeminiMessagesCompatService) writeCursorMessagesError(c *gin.Context, err error) error {
+func (s *GeminiMessagesCompatService) writeCursorMessagesError(c *gin.Context, account *Account, err error) error {
 	if IsResponseCommitted(c) {
 		return err
+	}
+	if status, msg, ok := cursorCompatUserError(c, account, err); ok {
+		errType := "api_error"
+		if status >= 400 && status < 500 {
+			errType = "invalid_request_error"
+		}
+		return s.writeClaudeError(c, status, errType, msg)
 	}
 	if status, reason := CursorResumeHTTPStatus(err); status != 0 {
 		return s.writeClaudeError(c, status, cursorMessagesErrorType(reason), err.Error())
@@ -4253,14 +4261,37 @@ func (s *GeminiMessagesCompatService) writeCursorMessagesError(c *gin.Context, e
 }
 
 // writeCursorGoogleError 把执行错误写成 Gemini 原生形状的客户端错误（同样的提交纪律）。
-func (s *GeminiMessagesCompatService) writeCursorGoogleError(c *gin.Context, err error) error {
+func (s *GeminiMessagesCompatService) writeCursorGoogleError(c *gin.Context, account *Account, err error) error {
 	if IsResponseCommitted(c) {
 		return err
+	}
+	if status, msg, ok := cursorCompatUserError(c, account, err); ok {
+		return s.writeGoogleError(c, status, msg)
 	}
 	if status, _ := CursorResumeHTTPStatus(err); status != 0 {
 		return s.writeGoogleError(c, status, err.Error())
 	}
 	return s.writeGoogleError(c, cursorCompatErrorStatus(), err.Error())
+}
+
+// cursorCompatUserError 在 Cursor 账号上按 CursorUserFacingError 取面向用户的状态码与中文提示
+// （方案 §2.2.2、§2.3 M3），命中时记 Warn cursor_user_error（只记错误码、状态与分类，不记原文）。
+// ok=false（非 Cursor 账号或非 Cursor 链路错误）时调用方走原路径。
+func cursorCompatUserError(c *gin.Context, account *Account, err error) (status int, message string, ok bool) {
+	if !isCursorAccount(account) || c == nil || c.Request == nil {
+		return 0, "", false
+	}
+	ctx := c.Request.Context()
+	status, code, message, ok := CursorUserFacingError(ctx, err)
+	if !ok {
+		return 0, "", false
+	}
+	logger.FromContext(ctx).Warn("cursor_user_error",
+		zap.String("error_code", code),
+		zap.Int("status", status),
+		zap.String("error_class", cursorStreamErrClass(err)),
+	)
+	return status, message, true
 }
 
 // cursorMessagesErrorType 把续轮拒绝原因映射为 Anthropic 错误类别。
@@ -4301,7 +4332,7 @@ func (s *GeminiMessagesCompatService) forwardCursorMessages(
 	}
 	res, ferr := cursorExecuteAnthropic(ctx, c, s.cursorExecution, account, &req)
 	if ferr != nil {
-		return nil, s.writeCursorMessagesError(c, ferr)
+		return nil, s.writeCursorMessagesError(c, account, ferr)
 	}
 	return res, nil
 }
@@ -4326,7 +4357,7 @@ func (s *GeminiMessagesCompatService) forwardCursorNative(
 	}
 	res, ferr := cursorExecuteGeminiNative(ctx, c, s.cursorExecution, account, originalModel, stream, body)
 	if ferr != nil {
-		return nil, s.writeCursorGoogleError(c, ferr)
+		return nil, s.writeCursorGoogleError(c, account, ferr)
 	}
 	return res, nil
 }

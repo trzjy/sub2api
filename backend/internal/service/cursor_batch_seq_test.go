@@ -13,6 +13,10 @@ package service
 //  4. deliveredBatchSeq 只在 commit 成功后才推进（准备成功但未提交不推进；提交失败不推进）。
 //
 // 全部为纯内存组件测试：无 DB、无网络。
+//
+// 本轮裁定：Cursor 原生 exec 一律拒绝，只允许客户端声明的 MCP 工具（f11 mcp_args）执行。
+// 因此本文件所有用例都走**单一 MCP 回写通道**（f11 mcp 委托 + listed/started 封口），
+// 不再有任何原生 fs / shell 委托通道或 Kind 分流。
 
 import (
 	"testing"
@@ -69,15 +73,21 @@ func (f *cursorBatchSeqFixture) deliveredSeq() uint64 {
 	return f.record.deliveredBatchSeq
 }
 
-// noteNativeFsBatch 用原生文件工具通道建一个独立批（shellOnly，≥1 条委托即可封口），
-// 与生产故障现场一致（read/write 走 ExecServerMessage 的独立批）。
-func (f *cursorBatchSeqFixture) noteNativeFsBatch(t *testing.T, kind, callID string) {
+// noteMcpBatch 用 f11 mcp 委托通道建一个独立批（走 listed/started/noteDelegation 标准
+// 封口路径），与生产"只允许客户端声明的 MCP 工具执行"的裁定一致。
+//
+// modelCallID 用于把本条委托归属到具体批次（同一 call_id 跨批复用时必须传不同的
+// modelCallID，使其落入 seq 不同的新批，而非并入旧批）；toolName 是被委托的 MCP 工具名。
+// 封口以 listed 为准：必须先见到 tool_requests_listed 才能封口，否则 fail-closed。
+func (f *cursorBatchSeqFixture) noteMcpBatch(t *testing.T, modelCallID, callID, toolName string) {
 	t.Helper()
-	require.NoError(t, f.delegations.noteNativeFsDelegation(kind, callID,
-		cursorToolCallCapture{ID: callID, Kind: kind, Name: kind, ArgsJSON: `{"path":"/tmp/a"}`}))
+	require.NoError(t, f.delegations.noteToolRequestsListed(modelCallID, 1))
+	require.NoError(t, f.delegations.noteToolCallStarted(modelCallID, callID, true))
+	require.NoError(t, f.delegations.noteDelegation(modelCallID,
+		cursorBatchDelegation(callID, toolName)))
 }
 
-// nextBatchSeqs 返回当前全部已封口批的 seq（断言 seq 单调分配用）。
+// sealedSeqs 返回当前全部已封口批的 seq（断言 seq 单调分配用）。
 func (f *cursorBatchSeqFixture) sealedSeqs() []uint64 {
 	var out []uint64
 	f.delegations.mu.Lock()
@@ -96,19 +106,19 @@ func TestCursorBatchSeqReusedCallIDNotSwallowed(t *testing.T) {
 	f := newCursorBatchSeqFixture(t)
 	const callID = "call-3466d322-d84c-4b2c-98a3-08ef52318bbe"
 
-	// 第一轮：read 批交付并提交。
-	f.noteNativeFsBatch(t, cursorToolKindRead, callID)
+	// 第一轮：mcp 委托（get_weather 语义等价）交付并提交。
+	f.noteMcpBatch(t, "mc-r1", callID, "get_weather")
 	require.NoError(t, f.delegations.seal())
 	first, err := f.prepare(t)
 	require.NoError(t, err)
-	require.Equal(t, []string{callID}, first.callIDs, "第一轮必须交付 read 调用")
+	require.Equal(t, []string{callID}, first.callIDs, "第一轮必须交付该调用")
 	require.Equal(t, uint64(1), first.deliveredSeq, "第一轮交付的是 seq=1 的批")
 	f.commit(t, first)
 	require.Equal(t, uint64(1), f.deliveredSeq())
 	require.NotNil(t, f.record.pending)
 
-	// 第二轮：write 批复用同一个 call_id（真实客户端行为）。
-	f.noteNativeFsBatch(t, cursorToolKindWrite, callID)
+	// 第二轮：另一条 mcp 工具（read 语义等价）复用同一个 call_id（真实客户端行为）。
+	f.noteMcpBatch(t, "mc-r2", callID, "read")
 	require.NoError(t, f.delegations.seal())
 	require.Equal(t, []uint64{1, 2}, f.sealedSeqs(), "复用 call_id 的新批必须是 seq=2 的新批")
 
@@ -124,7 +134,7 @@ func TestCursorBatchSeqReusedCallIDNotSwallowed(t *testing.T) {
 	require.True(t, ok, "改写后的新 id 必须能在本会话内反查到上游原 id")
 	require.Equal(t, callID, original, "新 id 反查必须回到被复用的那个原 id")
 	require.Equal(t, uint64(2), second.deliveredSeq, "第二批 seq 必须为 2")
-	require.NotNil(t, f.record.pending, "第二批必须产生 pending（等待 write 结果）")
+	require.NotNil(t, f.record.pending, "第二批必须产生 pending（等待结果）")
 	require.Equal(t, second.callIDs, f.record.pending.callIDs)
 	require.False(t, f.record.pending.delivered, "准备阶段只能是已准备未交付")
 
@@ -138,7 +148,7 @@ func TestCursorBatchSeqNoNewBatchFailsWithoutEmptyPending(t *testing.T) {
 	f := newCursorBatchSeqFixture(t)
 	const callID = "call-no-new-batch"
 
-	f.noteNativeFsBatch(t, cursorToolKindRead, callID)
+	f.noteMcpBatch(t, "mc-1", callID, "get_weather")
 	require.NoError(t, f.delegations.seal())
 	first, err := f.prepare(t)
 	require.NoError(t, err)
@@ -170,9 +180,9 @@ func TestCursorBatchSeqNoNewBatchFailsWithoutEmptyPending(t *testing.T) {
 func TestCursorBatchSeqMultipleNewBatchesDeliveredAtOnce(t *testing.T) {
 	f := newCursorBatchSeqFixture(t)
 
-	f.noteNativeFsBatch(t, cursorToolKindRead, "call-A")
-	f.noteNativeFsBatch(t, cursorToolKindWrite, "call-B")
-	f.noteNativeFsBatch(t, cursorToolKindGrep, "call-C")
+	f.noteMcpBatch(t, "mc-A", "call-A", "read")
+	f.noteMcpBatch(t, "mc-B", "call-B", "write")
+	f.noteMcpBatch(t, "mc-C", "call-C", "grep")
 	require.NoError(t, f.delegations.seal())
 	require.Equal(t, []uint64{1, 2, 3}, f.sealedSeqs())
 
@@ -190,7 +200,7 @@ func TestCursorBatchSeqMultipleNewBatchesDeliveredAtOnce(t *testing.T) {
 
 	// 之后又有一批（复用 call-A 的 ID）→ 只交付这一批，不重复历史批。
 	// 该原 id 已在 seq=1..3 那批交付过 → 新批必须换新出站 id，且能反查回 call-A。
-	f.noteNativeFsBatch(t, cursorToolKindDelete, "call-A")
+	f.noteMcpBatch(t, "mc-D", "call-A", "delete")
 	require.NoError(t, f.delegations.seal())
 	next, err := f.prepare(t)
 	require.NoError(t, err)
@@ -210,7 +220,7 @@ func TestCursorBatchSeqDeliveredWatermarkAdvancesOnlyOnCommit(t *testing.T) {
 	const callID = "call-watermark"
 
 	// 准备成功但尚未提交 → 水位必须仍为 0。
-	f.noteNativeFsBatch(t, cursorToolKindRead, callID)
+	f.noteMcpBatch(t, "mc-1", callID, "get_weather")
 	require.NoError(t, f.delegations.seal())
 	prepared, err := f.prepare(t)
 	require.NoError(t, err)
@@ -233,18 +243,21 @@ func TestCursorBatchSeqDeliveredWatermarkAdvancesOnlyOnCommit(t *testing.T) {
 }
 
 // TestCursorBatchSeqAllocatedMonotonically 覆盖"seq 由 newBatchLocked 单调分配"这一
-// 修复前提：三处建批点（batchFor 具名 / batchFor 匿名 / noteStandaloneDelegation）共用
-// 同一个计数器，从 1 开始、不重复、不复用。
+// 修复前提：单一 MCP 回写通道下，三处 mcp 建批点共用同一个计数器，从 1 开始、不重复、
+// 不复用（不再有原生 fs / shell 的独立批通道，也不再有 Kind 分流）。
 func TestCursorBatchSeqAllocatedMonotonically(t *testing.T) {
 	d := newCursorToolDelegations()
 
+	// 具名 mcp 批（model_call_id 走 listed/started 归属）。
 	require.NoError(t, d.noteToolRequestsListed("mc-1", 1))
 	require.NoError(t, d.noteToolCallStarted("mc-1", "call_1", true))
 	require.NoError(t, d.noteDelegation("mc-1", cursorBatchDelegation("call_1", "get_weather")))
 	require.NoError(t, d.seal())
 
-	require.NoError(t, d.noteNativeFsDelegation(cursorToolKindRead, "call_2",
-		cursorToolCallCapture{ID: "call_2", Kind: cursorToolKindRead, Name: "read"}))
+	// 第二条具名 mcp 批（同一计数器，仍是 mcp 委托路径）。
+	require.NoError(t, d.noteToolRequestsListed("mc-2", 1))
+	require.NoError(t, d.noteToolCallStarted("mc-2", "call_2", true))
+	require.NoError(t, d.noteDelegation("mc-2", cursorBatchDelegation("call_2", "get_weather")))
 	require.NoError(t, d.seal())
 
 	// 无 model_call_id 的匿名批（batchFor("") 新建分支）。
@@ -259,5 +272,5 @@ func TestCursorBatchSeqAllocatedMonotonically(t *testing.T) {
 		seqs = append(seqs, b.seq)
 	}
 	d.mu.Unlock()
-	require.Equal(t, []uint64{1, 2, 3}, seqs, "三处建批点必须共用同一计数器，seq 从 1 单调递增")
+	require.Equal(t, []uint64{1, 2, 3}, seqs, "三处 mcp 建批点必须共用同一计数器，seq 从 1 单调递增")
 }

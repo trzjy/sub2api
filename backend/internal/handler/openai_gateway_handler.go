@@ -1142,7 +1142,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false
 				if !upstreamErrorAlreadyCommunicated {
-					wroteFallback = h.ensureOpenAIStreamReadErrorResponse(c, err, streamStarted)
+					wroteFallback = h.writeOpenAIResponsesCursorUserError(c, reqLog, account, err, streamStarted)
+					if !wroteFallback {
+						wroteFallback = h.ensureOpenAIStreamReadErrorResponse(c, err, streamStarted)
+					}
 					if !wroteFallback {
 						wroteFallback = h.ensureForwardErrorResponse(c, streamStarted)
 					}
@@ -1837,8 +1840,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, result), false, nil, err)
-				wroteFallback := false
-				if code, message, ok := service.OpenAIUpstreamStreamReadErrorDetails(err); ok {
+				wroteFallback := h.writeOpenAIMessagesCursorUserError(c, reqLog, account, err, streamStarted)
+				if code, message, ok := service.OpenAIUpstreamStreamReadErrorDetails(err); ok && !wroteFallback {
 					wroteFallback = h.ensureAnthropicStreamReadErrorResponse(c, code, message, streamStarted)
 				}
 				if !wroteFallback {
@@ -1951,6 +1954,60 @@ func (h *OpenAIGatewayHandler) ensureAnthropicErrorResponse(c *gin.Context, stre
 		return false
 	}
 	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed, streamStarted)
+	return true
+}
+
+// openAICursorUserError 判定 Cursor 账号的 Execute 错误是否按 service.CursorUserFacingError 写回
+// 中文提示（方案 §2.2.2、§2.3 M3）。ok=false 时调用方走原兜底路径：非 Cursor 账号、未命中映射、
+// 客户端已断开、响应已提交都不处理。Writer 已写过（ping 已 flush）时 streamStarted 置 true，
+// 只发流内错误帧，不重写状态码。命中时写一条 cursor_user_error Warn（不记原文）。
+func openAICursorUserError(c *gin.Context, reqLog *zap.Logger, account *service.Account, err error, streamStarted bool) (status int, message string, stream bool, ok bool) {
+	if !isCursorPlatformAccount(account) || c == nil || c.Writer == nil || c.Request == nil {
+		return 0, "", streamStarted, false
+	}
+	if errors.Is(c.Request.Context().Err(), context.Canceled) || service.IsResponseCommitted(c) {
+		return 0, "", streamStarted, false
+	}
+	status, code, message, ok := service.CursorUserFacingError(c.Request.Context(), err)
+	if !ok {
+		return 0, "", streamStarted, false
+	}
+	if c.Writer.Written() {
+		streamStarted = true
+	}
+	if reqLog != nil {
+		reqLog.Warn("cursor_user_error", zap.String("error_code", code), zap.Int("status", status))
+	}
+	return status, message, streamStarted, true
+}
+
+// writeOpenAIResponsesCursorUserError 是 /v1/responses 出口的 Cursor 分支：4xx 用 invalid_request_error，
+// 其余沿用原出口的 upstream_error；流内错误由 handleStreamingAwareError 写 response.failed 终止事件。
+func (h *OpenAIGatewayHandler) writeOpenAIResponsesCursorUserError(c *gin.Context, reqLog *zap.Logger, account *service.Account, err error, streamStarted bool) bool {
+	status, message, streamStarted, ok := openAICursorUserError(c, reqLog, account, err, streamStarted)
+	if !ok {
+		return false
+	}
+	errType := "upstream_error"
+	if status >= 400 && status < 500 {
+		errType = "invalid_request_error"
+	}
+	h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+	return true
+}
+
+// writeOpenAIMessagesCursorUserError 是 /v1/messages（Anthropic 形状）出口的 Cursor 分支：
+// 4xx 用 invalid_request_error，其余沿用原出口的 api_error（与 Anthropic 错误类型一致）。
+func (h *OpenAIGatewayHandler) writeOpenAIMessagesCursorUserError(c *gin.Context, reqLog *zap.Logger, account *service.Account, err error, streamStarted bool) bool {
+	status, message, streamStarted, ok := openAICursorUserError(c, reqLog, account, err, streamStarted)
+	if !ok {
+		return false
+	}
+	errType := "api_error"
+	if status >= 400 && status < 500 {
+		errType = "invalid_request_error"
+	}
+	h.anthropicStreamingAwareError(c, status, errType, message, streamStarted)
 	return true
 }
 
