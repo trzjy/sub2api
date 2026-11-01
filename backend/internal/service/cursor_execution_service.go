@@ -1475,6 +1475,9 @@ func cursorExecuteChatAs(
 	}
 	plan, planErr := cursorPlanFromChat(&ccReq, model)
 	if planErr != nil {
+		if errors.Is(planErr, ErrCursorResumeUnsupportedContent) {
+			return nil, newCursorResumeError(http.StatusBadRequest, "unsupported_content", planErr)
+		}
 		return nil, planErr
 	}
 	mode, name, modeErr := cursorToolChoiceMode(ccReq.ToolChoice)
@@ -1525,6 +1528,9 @@ func cursorExecuteResponses(
 	}
 	plan, planErr := cursorPlanFromResponses(req, req.Model)
 	if planErr != nil {
+		if errors.Is(planErr, ErrCursorResumeUnsupportedContent) {
+			return nil, newCursorResumeError(http.StatusBadRequest, "unsupported_content", planErr)
+		}
 		return nil, planErr
 	}
 	mode, name, modeErr := cursorToolChoiceMode(req.ToolChoice)
@@ -1568,6 +1574,9 @@ func cursorExecuteAnthropic(
 	}
 	plan, planErr := cursorPlanFromMessages(req, req.Model)
 	if planErr != nil {
+		if errors.Is(planErr, ErrCursorResumeUnsupportedContent) {
+			return nil, newCursorResumeError(http.StatusBadRequest, "unsupported_content", planErr)
+		}
 		return nil, planErr
 	}
 	mode, name, modeErr := cursorToolChoiceMode(req.ToolChoice)
@@ -1614,6 +1623,9 @@ func cursorExecuteGeminiNative(
 	// ① 原始请求 → 计划（含工具名与 toolConfig 摘要）。
 	plan, planErr := cursorPlanFromGemini(body, originalModel)
 	if planErr != nil {
+		if errors.Is(planErr, ErrCursorResumeUnsupportedContent) {
+			return nil, newCursorResumeError(http.StatusBadRequest, "unsupported_content", planErr)
+		}
 		return nil, planErr
 	}
 	// ② 工具选择语义映射（未知模式/未声明名称在此 400，未出站）。
