@@ -75,6 +75,8 @@ const (
 
 	// cursorFldClientControlMessage 是信封 AgentClientMessage.f5（exec_client_control_message）。
 	cursorFldClientControlMessage = 5
+	// cursorFldClientInteractionResponse 是信封 AgentClientMessage.f6 InteractionResponse。
+	cursorFldClientInteractionResponse = 6
 	// ExecClientControlMessage.f1 = stream_close（f2 throw / f3 heartbeat）。
 	cursorFldControlStreamClose = 1
 	// ExecClientStreamClose.f1 = id（uint32，varint）。
@@ -507,6 +509,9 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
 		}
 	}
+	if q, ok := cursorFindField(fields, cursorFldServerInteractionQuery); ok {
+		return d.respondInteractionQuery(q.Bytes)
+	}
 	if kv, ok := cursorFindField(fields, cursorFldServerKvMessage); ok {
 		parts, err := cursorDecodeProtobuf(kv.Bytes)
 		if err != nil {
@@ -566,6 +571,155 @@ func (d *cursorAgentDuplex) send(field int, payload []byte) error {
 	defer d.writeMu.Unlock()
 	_, err := d.writer.Write(cursorEncodeEnvelope(cursorAppendBytesField(nil, field, payload)))
 	return err
+}
+
+// agent.v1.InteractionQuery / InteractionResponse 字段号（证据 39b，Cursor 官方客户端 bundle）。
+// 询问 oneof query 与应答 oneof result 同号。
+const (
+	cursorFldInteractionID = 1 // InteractionQuery.f1 / InteractionResponse.f1 id（uint32）
+
+	cursorFldInteractionWebSearch    = 2  // f2 web_search_request_query / web_search_request_response
+	cursorFldInteractionAskQuestion  = 3  // f3 ask_question_interaction_query / ask_question_interaction_response
+	cursorFldInteractionSwitchMode   = 4  // f4 switch_mode_request_query / switch_mode_request_response
+	cursorFldInteractionCreatePlan   = 7  // f7 create_plan_request_query / create_plan_request_response
+	cursorFldInteractionSetupVM      = 8  // f8 setup_vm_environment_args / setup_vm_environment_result
+	cursorFldInteractionWebFetch     = 9  // f9 web_fetch_request_query / web_fetch_request_response
+	cursorFldInteractionPrManagement = 10 // f10 pr_management_request_query / pr_management_result
+	cursorFldInteractionMcpAuth      = 11 // f11 mcp_auth_request_query / mcp_auth_request_response
+	cursorFldInteractionReplaceEnv   = 13 // f13 replace_env_args / replace_env_result
+	cursorFldInteractionConnectScm   = 14 // f14 connect_scm_request_query / connect_scm_request_response
+
+	// McpAuthRequestQuery.f1 args → McpAuthArgs.f1 server_identifier
+	cursorFldInteractionMcpAuthQueryArgs    = 1
+	cursorFldInteractionMcpAuthArgsServerID = 1
+	// WebSearch/WebFetch/SwitchMode/McpAuth/ConnectScm RequestResponse.f1 approved / f2 rejected
+	cursorFldInteractionRespApproved = 1
+	cursorFldInteractionRespRejected = 2
+	// 上述各 *.Rejected.f1 reason
+	cursorFldInteractionRejectedReason = 1
+	// SetupVmEnvironmentResult.f1 success
+	cursorFldInteractionSetupVMSuccess = 1
+	// AskQuestionInteractionResponse.f1 result → AskQuestionResult.f3 rejected → AskQuestionRejected.f1 reason
+	cursorFldInteractionAskQuestionResult   = 1
+	cursorFldInteractionAskQuestionRejected = 3
+	cursorFldInteractionAskQuestionReason   = 1
+	// CreatePlanRequestResponse.f1 result → CreatePlanResult.f2 error → CreatePlanError.f1 error
+	cursorFldInteractionCreatePlanResult = 1
+	cursorFldInteractionCreatePlanError  = 2
+	cursorFldInteractionCreatePlanErrMsg = 1
+	// PrManagementResult.f2 error → PrManagementError.f1 error
+	cursorFldInteractionPrManagementError  = 2
+	cursorFldInteractionPrManagementErrMsg = 1
+	// ReplaceEnvResult.f2 failure → ReplaceEnvFailure{f1 error_message, f2 setup_logs}
+	cursorFldInteractionReplaceEnvFailure      = 2
+	cursorFldInteractionReplaceEnvErrorMessage = 1
+	cursorFldInteractionReplaceEnvSetupLogs    = 2
+)
+
+// respondInteractionQuery 按方案 §1.2 应答表回写 InteractionResponse（AgentClientMessage.f6）。
+// 不支持的询问（f12 generate_image / 未知字段 / 缺 oneof）失败关闭，不写帧。
+// 日志只记 query_id / query_field / answer，不记 args 正文。
+func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error) {
+	fields, err := cursorDecodeProtobuf(payload)
+	if err != nil {
+		return false, err
+	}
+	id := cursorVarintField(fields, cursorFldInteractionID)
+	// oneof query：取 f1 以外的字段，按 protobuf oneof 语义 last-one-wins。
+	var query cursorPBField
+	for _, f := range fields {
+		if f.Number != cursorFldInteractionID {
+			query = f
+		}
+	}
+	field := query.Number
+	unsupported := func() (bool, error) {
+		d.logPhase(zapcore.WarnLevel, "interaction_query_unsupported", "",
+			zap.Uint64("query_id", id), zap.Int("query_field", field))
+		return false, fmt.Errorf("%w: AgentRun interaction query field %d not supported", ErrCursorUnsupportedRequest, field)
+	}
+	switch field {
+	case cursorFldInteractionWebSearch, cursorFldInteractionAskQuestion, cursorFldInteractionSwitchMode,
+		cursorFldInteractionCreatePlan, cursorFldInteractionSetupVM, cursorFldInteractionWebFetch,
+		cursorFldInteractionPrManagement, cursorFldInteractionMcpAuth, cursorFldInteractionReplaceEnv,
+		cursorFldInteractionConnectScm:
+	default:
+		return unsupported()
+	}
+	if query.Wire != cursorWireBytes {
+		return false, fmt.Errorf("%w: interaction query field %d is not a message", ErrCursorProtocol, field)
+	}
+	sub, err := cursorDecodeProtobuf(query.Bytes)
+	if err != nil {
+		return false, err
+	}
+
+	approved := func() []byte { return cursorAppendBytesField(nil, cursorFldInteractionRespApproved, nil) }
+	rejected := func(reason string) []byte {
+		return cursorAppendBytesField(nil, cursorFldInteractionRespRejected,
+			cursorAppendStringField(nil, cursorFldInteractionRejectedReason, reason))
+	}
+	var result []byte
+	var answer string
+	switch field {
+	case cursorFldInteractionWebSearch, cursorFldInteractionWebFetch:
+		result, answer = approved(), "approved"
+	case cursorFldInteractionMcpAuth:
+		var serverID string
+		if args, ok := cursorFindField(sub, cursorFldInteractionMcpAuthQueryArgs); ok {
+			argFields, aerr := cursorDecodeProtobuf(args.Bytes)
+			if aerr != nil {
+				return false, aerr
+			}
+			if sid, ok := cursorFindField(argFields, cursorFldInteractionMcpAuthArgsServerID); ok {
+				serverID = sid.String()
+			}
+		}
+		if serverID == cursorMcpProviderIdentifier {
+			result, answer = approved(), "approved"
+		} else {
+			result, answer = rejected(fmt.Sprintf("MCP server '%s' not found", serverID)), "rejected"
+		}
+	case cursorFldInteractionSetupVM:
+		result = cursorAppendBytesField(nil, cursorFldInteractionSetupVMSuccess, nil)
+		answer = "success"
+	case cursorFldInteractionAskQuestion:
+		reason := cursorAppendStringField(nil, cursorFldInteractionAskQuestionReason,
+			"No interactive user is available in this environment. Ask the user directly in your reply text.")
+		res := cursorAppendBytesField(nil, cursorFldInteractionAskQuestionRejected, reason)
+		result = cursorAppendBytesField(nil, cursorFldInteractionAskQuestionResult, res)
+		answer = "rejected"
+	case cursorFldInteractionSwitchMode:
+		result = rejected("Mode switching is not supported in this environment. Continue in the current agent mode.")
+		answer = "rejected"
+	case cursorFldInteractionCreatePlan:
+		msg := cursorAppendStringField(nil, cursorFldInteractionCreatePlanErrMsg,
+			"Plan files cannot be created in this environment. List the plan directly in your reply.")
+		res := cursorAppendBytesField(nil, cursorFldInteractionCreatePlanError, msg)
+		result = cursorAppendBytesField(nil, cursorFldInteractionCreatePlanResult, res)
+		answer = "error"
+	case cursorFldInteractionPrManagement:
+		msg := cursorAppendStringField(nil, cursorFldInteractionPrManagementErrMsg,
+			"PR management is only available in cloud agents")
+		result = cursorAppendBytesField(nil, cursorFldInteractionPrManagementError, msg)
+		answer = "error"
+	case cursorFldInteractionReplaceEnv:
+		failure := cursorAppendStringField(nil, cursorFldInteractionReplaceEnvErrorMessage,
+			"Environment replacement is not supported in the IDE client")
+		failure = cursorAppendStringField(failure, cursorFldInteractionReplaceEnvSetupLogs, "")
+		result = cursorAppendBytesField(nil, cursorFldInteractionReplaceEnvFailure, failure)
+		answer = "failure"
+	case cursorFldInteractionConnectScm:
+		result = rejected("Connecting source control is not available in this environment")
+		answer = "rejected"
+	}
+
+	resp := cursorAppendVarintField(nil, cursorFldInteractionID, id)
+	resp = cursorAppendBytesField(resp, field, result)
+	serr := d.send(cursorFldClientInteractionResponse, resp)
+	d.logPhase(zapcore.InfoLevel, "interaction_query_answered", cursorHTTPErrClass(serr),
+		zap.Uint64("query_id", id), zap.Int("query_field", field), zap.String("answer", answer))
+	return false, serr
 }
 
 // sendExecStreamClose 把 exec 终止控制帧写入当前 AgentRun（AgentClientMessage.f5）。

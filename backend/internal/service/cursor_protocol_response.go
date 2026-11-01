@@ -277,7 +277,7 @@ const (
 	cursorFldServerCheckpoint        = 3 // ConversationStateStructure —— 丢弃
 	cursorFldServerKvMessage         = 4 // KvServerMessage —— 丢弃（单向 POST 无法应答 KV 问答）
 	cursorFldServerExecControl       = 5 // ExecServerControlMessage —— 丢弃
-	cursorFldServerInteractionQuery  = 7 // InteractionQuery —— 丢弃
+	cursorFldServerInteractionQuery  = 7 // InteractionQuery —— 由 duplex 应答，见 respondInteractionQuery
 	cursorFldServerTTFTBreakdown     = 8 // TtftBreakdown —— 丢弃（可能含定长字段，故**不解码**其内容）
 )
 
