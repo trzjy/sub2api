@@ -1585,7 +1585,7 @@ func cursorExecuteAnthropic(
 	}
 	ccReq, err := apicompat.AnthropicToChatCompletionsRequest(req)
 	if err != nil {
-		return nil, fmt.Errorf("cursor: convert anthropic messages to chat completions: %w", err)
+		return nil, fmt.Errorf("cursor: convert anthropic messages request: %w", err)
 	}
 	return exec.Execute(ctx, c, account, &CursorExecutionRequest{
 		Chat:           ccReq,
@@ -1623,9 +1623,6 @@ func cursorExecuteGeminiNative(
 	// ① 原始请求 → 计划（含工具名与 toolConfig 摘要）。
 	plan, planErr := cursorPlanFromGemini(body, originalModel)
 	if planErr != nil {
-		if errors.Is(planErr, ErrCursorResumeUnsupportedContent) {
-			return nil, newCursorResumeError(http.StatusBadRequest, "unsupported_content", planErr)
-		}
 		return nil, planErr
 	}
 	// ② 工具选择语义映射（未知模式/未声明名称在此 400，未出站）。
@@ -5383,6 +5380,22 @@ func cursorChatContentText(raw json.RawMessage) (string, error) {
 	return "", fmt.Errorf("%w: undecodable chat content", ErrCursorResumeUnsupportedContent)
 }
 
+// cursorValidateChatPlanContent applies the same Cursor landing constraint to
+// continuation plans as the first-request converter: only user messages may
+// carry images, because Cursor conversation history has no assistant/system/
+// tool image slot.  This keeps a continuation from becoming valid merely
+// because its digest parser accepted a richer Chat wire shape.
+func cursorValidateChatPlanContent(role string, msg apicompat.ChatMessage) error {
+	_, images, err := cursorMessageContent(msg)
+	if err != nil {
+		return err
+	}
+	if len(images) > 0 && role != "user" {
+		return fmt.Errorf("%w: chat %s message contains image content", ErrCursorResumeUnsupportedContent, role)
+	}
+	return nil
+}
+
 // cursorChatToolItem 生成一条工具声明项（顺序保留，不改写 schema）。
 func cursorChatToolItem(tool apicompat.ChatTool) (cursorContextItem, string, error) {
 	encoded, err := json.Marshal(tool)
@@ -5468,9 +5481,15 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 		start--
 	}
 	for _, msg := range req.Messages[start:] {
+		if err := cursorValidateChatPlanContent(strings.ToLower(strings.TrimSpace(msg.Role)), msg); err != nil {
+			return nil, err
+		}
+		if len(msg.ToolCalls) > 0 || msg.FunctionCall != nil {
+			return nil, fmt.Errorf("%w: chat tool result carries assistant-only call fields", ErrCursorResumeUnsupportedContent)
+		}
 		callID := strings.TrimSpace(msg.ToolCallID)
 		if callID == "" {
-			return nil, fmt.Errorf("%w: chat tool result without tool_call_id", ErrCursorResumeAmbiguousResults)
+			return nil, fmt.Errorf("%w: chat %s result without tool_call_id", ErrCursorResumeUnsupportedContent, strings.ToLower(strings.TrimSpace(msg.Role)))
 		}
 		text, err := cursorChatContentText(msg.Content)
 		if err != nil {
@@ -5493,6 +5512,15 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 		case "user", "assistant", "tool", "function":
 		default:
 			return nil, fmt.Errorf("%w: chat role %q", ErrCursorResumeUnsupportedContent, msg.Role)
+		}
+		if role != "assistant" && len(msg.ToolCalls) > 0 {
+			return nil, fmt.Errorf("%w: chat tool_calls on role %q", ErrCursorResumeUnsupportedContent, msg.Role)
+		}
+		if msg.FunctionCall != nil {
+			return nil, fmt.Errorf("%w: legacy chat function_call is not supported by cursor continuation", ErrCursorResumeUnsupportedContent)
+		}
+		if err := cursorValidateChatPlanContent(role, msg); err != nil {
+			return nil, err
 		}
 		text, err := cursorChatContentText(msg.Content)
 		if err != nil {
@@ -5739,7 +5767,7 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 	}
 	for _, msg := range req.Messages[:start] {
 		role := strings.ToLower(strings.TrimSpace(msg.Role))
-		if role != "user" && role != "assistant" {
+		if role != "user" && role != "assistant" && role != "system" {
 			return nil, fmt.Errorf("%w: messages role %q", ErrCursorResumeUnsupportedContent, msg.Role)
 		}
 		blocks, berr := cursorAnthropicBlocks(msg.Content)
@@ -5747,9 +5775,18 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 			return nil, berr
 		}
 		for _, block := range blocks {
+			if role == "system" && block.Type != "text" && block.Type != "" {
+				return nil, fmt.Errorf("%w: system message block %q", ErrCursorResumeUnsupportedContent, block.Type)
+			}
 			item, ierr := cursorAnthropicBlockItem(role, block)
 			if ierr != nil {
 				return nil, ierr
+			}
+			if role == "system" {
+				if err := plan.config.AppendItem(item.itemType, item.canonical); err != nil {
+					return nil, err
+				}
+				continue
 			}
 			if err := plan.history.AppendItem(item.itemType, item.canonical); err != nil {
 				return nil, err
@@ -5783,8 +5820,7 @@ func cursorResponsesInputItems(raw json.RawMessage) ([]apicompat.ResponsesInputI
 // cursorResponsesItemIsOutput 判断条目是否为客户端工具结果（本批候选）。
 func cursorResponsesItemIsOutput(item apicompat.ResponsesInputItem) bool {
 	switch strings.ToLower(strings.TrimSpace(item.Type)) {
-	case "function_call_output", "custom_tool_call_output", "local_shell_call_output",
-		"mcp_call_output", "tool_search_output", "image_generation_call_output":
+	case "function_call_output", "custom_tool_call_output", "tool_search_output":
 		return true
 	}
 	return false
@@ -5810,11 +5846,16 @@ func cursorResponsesItemItem(item apicompat.ResponsesInputItem) (cursorContextIt
 	itemType := strings.ToLower(strings.TrimSpace(item.Type))
 	switch itemType {
 	case "", "message":
+		role := strings.ToLower(strings.TrimSpace(item.Role))
+		switch role {
+		case "user", "assistant", "system", "developer":
+		default:
+			return cursorContextItem{}, fmt.Errorf("%w: responses message role %q", ErrCursorResumeUnsupportedContent, item.Role)
+		}
 		text, err := cursorChatContentText(item.Content)
 		if err != nil {
 			return cursorContextItem{}, err
 		}
-		role := strings.ToLower(strings.TrimSpace(item.Role))
 		return cursorContextItem{itemType: "responses.message." + role, canonical: CursorCanonicalText(text)}, nil
 	case "function_call":
 		// 与交付侧登记（appendCursorBatchAssistantHistory 的 Responses 分支）同源：
@@ -5860,29 +5901,8 @@ func cursorResponsesItemItem(item apicompat.ResponsesInputItem) (cursorContextIt
 		}
 		return cursorContextItem{itemType: "responses.reasoning", canonical: mustCursorJSONValue(payload)}, nil
 	default:
-		encoded, err := json.Marshal(item)
-		if err != nil {
-			return cursorContextItem{}, fmt.Errorf("%w: responses item %q", ErrCursorResumeUnsupportedContent, item.Type)
-		}
-		return cursorContextItem{itemType: "responses.item." + cursorDigestTypeToken(itemType), canonical: encoded}, nil
+		return cursorContextItem{}, fmt.Errorf("%w: responses item %q", ErrCursorResumeUnsupportedContent, item.Type)
 	}
-}
-
-// cursorDigestTypeToken 把任意类型名收敛为合法摘要类型片段（只允许安全字符集）。
-func cursorDigestTypeToken(raw string) string {
-	if raw == "" {
-		return "unknown"
-	}
-	out := make([]byte, 0, len(raw))
-	for i := 0; i < len(raw); i++ {
-		c := raw[i]
-		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
-		if !ok {
-			c = '_'
-		}
-		out = append(out, c)
-	}
-	return string(out)
 }
 
 // cursorPlanFromResponses 按 §25.14-D「Responses」表示生成上下文计划。
@@ -6011,8 +6031,7 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 // 由 cursorResponsesItemIsOutput 判定，不在此列。
 func cursorResponsesItemCallID(item apicompat.ResponsesInputItem) string {
 	switch strings.ToLower(strings.TrimSpace(item.Type)) {
-	case "function_call", "custom_tool_call", "local_shell_call", "tool_search_call",
-		"mcp_call", "image_generation_call":
+	case "function_call", "custom_tool_call", "tool_search_call":
 		return strings.TrimSpace(item.CallID)
 	}
 	return ""
