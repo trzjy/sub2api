@@ -758,6 +758,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if maskedAccount && strings.HasPrefix(line, "data: ") {
 				jsonPart := strings.TrimPrefix(line, "data: ")
 				mb := maskVLLMFingerprints([]byte(jsonPart))
+				// L3 思考层剥离：maskVLLMFingerprints 只把 vLLM 的 reasoning 折叠成
+				// reasoning_content（不删除），思考明文会原样透给客户端。开启
+				// strip_reasoning_content 的账号在此删除 reasoning / reasoning_content，
+				// 使客户端可见响应不含上游思考明文（可能复述上游模型家族名）。
+				// 与 /v1/messages、/v1/responses 双转换路径的剥离同源同闸门。
+				if IsReasoningStrippedAccount(account) {
+					mb = []byte(StripReasoningFromSSELine(string(mb)))
+				}
 				line = "data: " + string(mb)
 				dataBytes = mb
 				data = string(mb)

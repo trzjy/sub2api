@@ -610,12 +610,18 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	// 与 responses 兄弟不同：客户端断开后仍继续做事件转换（喂 anthropicState），
 	// 仅跳过写出，保证 finalize 阶段的 usage 汇总不受断开影响。
 	emitChunk := func(chunk *apicompat.ChatCompletionsChunk) {
-		// 写侧采集（剥离前）：从原始 chunk 的 delta 取 reasoning 明文写进 collector，
-		// 确保 tool 轮缓存回注的是原始明文，而非剥离后丢失的空值。
-		turnCollector.observeChunkReasoning(chunk)
 		// 读侧（L3 reasoning 剥离）：开启 strip_reasoning_content 的掩码账号，先
 		// 剥离 chunk 的 reasoning 明文，再转换，使客户端可见事件流不含 thinking。
+		//
+		// 剥离会清空 delta 里的 reasoning 字段，转换后的事件不再带 thinking_delta，
+		// observe 采不到明文 ⇒ 必须在剥离前从原始 chunk 采集一次（写侧缓存要的是
+		// 剥离前的原始明文，供 tool 轮回注）。
+		//
+		// 仅在剥离分支走 observeChunkReasoning：不剥离时 observe(anthropicEvents) 已能
+		// 采到 thinking_delta，两条路径同时采会把同一段明文写两遍（tool 轮回注的
+		// reasoning 明文翻倍）。
 		if IsReasoningStrippedAccount(account) {
+			turnCollector.observeChunkReasoning(chunk)
 			stripCCChunkReasoning(chunk)
 		}
 		// CC chunk → Anthropic events (direct, single state machine)
