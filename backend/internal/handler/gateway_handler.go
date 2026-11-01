@@ -1159,7 +1159,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				upstreamErrorAlreadyCommunicated := gatewayForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false
 				if !upstreamErrorAlreadyCommunicated {
-					wroteFallback = h.ensureForwardErrorResponse(c, streamStarted)
+					wroteFallback = h.writeCCCursorUserError(c, reqLog, account, err, streamStarted)
+					if !wroteFallback {
+						wroteFallback = h.ensureForwardErrorResponse(c, streamStarted)
+					}
 				}
 				forwardFailedFields := []zap.Field{
 					zap.Int64("account_id", account.ID),
