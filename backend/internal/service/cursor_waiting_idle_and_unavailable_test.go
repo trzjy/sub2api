@@ -164,3 +164,120 @@ func TestCursorWaitingIdleStaleBatchCallbackNoop(t *testing.T) {
 	require.Nil(t, f.record.waitingIdleTimer, "进入 finalizing 必须停掉并清空空闲计时器")
 	f.record.mu.Unlock()
 }
+
+// D8：续轮接管已发生（beginResumeTakeover 的效果：state=running、pending.consumed=true）后
+// 才到期的空闲回调，必须在 finalizer 同锁复核中被挡下，不得误杀刚接管的会话。
+func TestCursorWaitingIdleAfterTakeoverDoesNotFinish(t *testing.T) {
+	setWaitingIdleTimeoutForTest(t, time.Hour)
+	f := newCursorBatchSeqFixture(t)
+	prepared := deliverOneBatch(t, f)
+
+	f.record.mu.Lock()
+	f.record.state = cursorSessionRunning
+	f.record.pending.consumed = true
+	f.record.mu.Unlock()
+
+	f.svc.onWaitingToolsIdle(f.record, prepared.batchID)
+	f.record.mu.Lock()
+	require.False(t, f.record.finishing, "已被接管的会话不得进入 finalizing")
+	require.Equal(t, cursorSessionRunning, f.record.state)
+	f.record.mu.Unlock()
+
+	f.svc.finishCursorSession(f.record, "test_cleanup")
+}
+
+// D8：precond 在持 record.mu 时判定；不成立则不置 finishing、不改状态、不停计时器、返回 false。
+func TestCursorWaitingIdleFinishIfPrecondFalseNoop(t *testing.T) {
+	setWaitingIdleTimeoutForTest(t, time.Hour)
+	f := newCursorBatchSeqFixture(t)
+	deliverOneBatch(t, f)
+
+	called := false
+	ok := f.svc.finishCursorSessionIf(f.record, "waiting_tools_idle", func() bool {
+		called = true
+		return false
+	})
+	require.True(t, called)
+	require.False(t, ok)
+	f.record.mu.Lock()
+	require.False(t, f.record.finishing)
+	require.Equal(t, cursorSessionWaitingTools, f.record.state)
+	require.NotNil(t, f.record.waitingIdleTimer, "precond 不成立不得动计时器")
+	f.record.mu.Unlock()
+
+	require.True(t, f.svc.finishCursorSessionIf(f.record, "test_cleanup", nil))
+}
+
+// D8：precond=true 正常终结；已有胜者时再调返回 false 且不调 precond。
+func TestCursorWaitingIdleFinishIfPrecondTrueFinishes(t *testing.T) {
+	setWaitingIdleTimeoutForTest(t, time.Hour)
+	f := newCursorBatchSeqFixture(t)
+	deliverOneBatch(t, f)
+
+	ok := f.svc.finishCursorSessionIf(f.record, "waiting_tools_idle", func() bool { return true })
+	require.True(t, ok)
+	select {
+	case <-f.record.finalizeSignal():
+	default:
+		t.Fatal("胜者返回时 finalizer 必须已完成")
+	}
+	finishing, reason := cursorRecordFinishInfo(f.record)
+	require.True(t, finishing)
+	require.Equal(t, "waiting_tools_idle", reason)
+	f.record.mu.Lock()
+	require.Equal(t, cursorSessionClosed, f.record.state)
+	require.Nil(t, f.record.waitingIdleTimer)
+	f.record.mu.Unlock()
+
+	called := false
+	require.False(t, f.svc.finishCursorSessionIf(f.record, "dup", func() bool { called = true; return true }))
+	require.False(t, called, "已有胜者时不应再判定 precond")
+	_, reason = cursorRecordFinishInfo(f.record)
+	require.Equal(t, "waiting_tools_idle", reason)
+}
+
+// D8：空闲回调与续轮接管并发，每轮只能有一个胜者（-race 下跑）。
+func TestCursorWaitingIdleTakeoverRaceSingleWinner(t *testing.T) {
+	setWaitingIdleTimeoutForTest(t, time.Hour)
+	for i := 0; i < 200; i++ {
+		f := newCursorBatchSeqFixture(t)
+		prepared := deliverOneBatch(t, f)
+		ticket := &CursorResumeTicket{
+			SessionID: f.record.id,
+			BatchID:   prepared.batchID,
+			CallIDs:   prepared.callIDs,
+		}
+
+		start := make(chan struct{})
+		done := make(chan struct{}, 2)
+		var detach func()
+		var takeoverErr error
+		go func() {
+			<-start
+			f.svc.onWaitingToolsIdle(f.record, prepared.batchID)
+			done <- struct{}{}
+		}()
+		go func() {
+			<-start
+			detach, takeoverErr = f.svc.sessions.beginResumeTakeover(ticket, nil)
+			done <- struct{}{}
+		}()
+		close(start)
+		<-done
+		<-done
+
+		f.record.mu.Lock()
+		finishing, state := f.record.finishing, f.record.state
+		f.record.mu.Unlock()
+		if takeoverErr == nil {
+			require.False(t, finishing, "第 %d 轮：接管胜出后不得再被空闲终结", i)
+			require.Equal(t, cursorSessionRunning, state, "第 %d 轮", i)
+			detach()
+			f.svc.finishCursorSession(f.record, "test_cleanup")
+		} else {
+			require.True(t, finishing, "第 %d 轮：接管失败则空闲终结必须是胜者", i)
+			_, reason := cursorRecordFinishInfo(f.record)
+			require.Equal(t, "waiting_tools_idle", reason, "第 %d 轮", i)
+		}
+	}
+}

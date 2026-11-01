@@ -4587,8 +4587,16 @@ func (s *CursorExecutionService) adoptHandover(ctx context.Context, record *curs
 // 网络/计费操作全部在锁外；终结守卫保证每项最多一次；竞争（取消、deadline、服务 Stop、
 // 正常返回）以**第一个进入 finalizer 的终态**为唯一胜者，不双写、不重复释放。
 func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord, reason string) {
+	s.finishCursorSessionIf(record, reason, nil)
+}
+
+// finishCursorSessionIf 是带前置条件的唯一 finalizer 入口：precond 与"置 finishing"在同一把
+// record.mu 下完成，判定与转换原子（方案 §2.5：到点复核仍为同批未消费的 waiting_tools 才终结）。
+// precond 在持 record.mu 时调用：precond 只读 record 字段，不得加锁、不得阻塞。
+// 返回 true 表示本调用成为唯一胜者并走完 finalizer；precond 不成立或已有胜者时返回 false。
+func (s *CursorExecutionService) finishCursorSessionIf(record *cursorSessionRecord, reason string, precond func() bool) bool {
 	if s == nil || record == nil {
-		return
+		return false
 	}
 	record.mu.Lock()
 	if record.finishing {
@@ -4598,7 +4606,11 @@ func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord
 			zap.String("session_id", record.id),
 			zap.String("terminal_reason", reason),
 			zap.String("accepted_reason", accepted))
-		return
+		return false
+	}
+	if precond != nil && !precond() {
+		record.mu.Unlock()
+		return false
 	}
 	record.finishing = true
 	record.state = cursorSessionFinalizing
@@ -4683,6 +4695,7 @@ func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord
 	// 重复终结者在 ①之前就返回，故不会关闭它；Stop 依此在锁外判断"确实完成"而不是
 	// "finishing=true"。
 	record.closeFinalizeDone()
+	return true
 }
 
 // settleCursorSession 提交**唯一结算**（至多一次，网络/计费在锁外）。
@@ -7776,27 +7789,26 @@ func (r *cursorSessionRecord) stopWaitingIdleTimerLocked() {
 // onWaitingToolsIdle 是 waiting_tools 空闲计时器到期回调（方案 §2.5）。
 //
 // 只认"仍在 waiting_tools、当前未消费的同一批"：计时器 Stop 与到期存在竞争，过期回调
-// 在这里按状态与批次复核后一律 no-op。命中则锁外走唯一 finalizer（finishCursorSession
-// 自己加锁）。
+// 在这里按状态与批次复核后一律 no-op。复核与"置 finishing"在 finishCursorSessionIf 内同锁
+// 完成，续轮接管（beginResumeTakeover）与空闲终结只会有一个胜者；计时器清理由 finalizer
+// 内的 stopWaitingIdleTimerLocked 负责。
 func (s *CursorExecutionService) onWaitingToolsIdle(record *cursorSessionRecord, batchID string) {
 	if s == nil || record == nil {
 		return
 	}
-	record.mu.Lock()
-	idle := record.state == cursorSessionWaitingTools && record.pending != nil &&
-		record.pending.batchID == batchID && !record.pending.consumed
-	if idle {
-		record.waitingIdleTimer = nil
-	}
-	record.mu.Unlock()
-	if !idle {
+	// 期限在进入 finalizer 前读出：finalizer 关闭完成信号后不再读包级变量。
+	idleTimeout := cursorWaitingToolsIdleTimeout
+	ok := s.finishCursorSessionIf(record, "waiting_tools_idle", func() bool {
+		return record.state == cursorSessionWaitingTools && record.pending != nil &&
+			record.pending.batchID == batchID && !record.pending.consumed
+	})
+	if !ok {
 		return
 	}
 	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_waiting_tools_idle", record.spec.requestedModel,
 		zap.String("session_id", record.id),
 		zap.String("batch_id", batchID),
-		zap.Duration("idle_timeout", cursorWaitingToolsIdleTimeout))
-	s.finishCursorSession(record, "waiting_tools_idle")
+		zap.Duration("idle_timeout", idleTimeout))
 }
 
 // recordDeliveredBatch 是"准备 + 提交"的同步组合（供无独立写出边界的调用方使用）。
