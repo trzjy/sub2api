@@ -434,42 +434,65 @@ func (s *CursorExecutionService) Execute(
 	// 非该 code 的错误一律 no-op，不改变任何既有行为与判定。动作 A（停号回调）无论是否已向
 	// 客户端发布正文字节都调用一次；动作 B（替换为可换号 *UpstreamFailoverError）仅当本 HTTP
 	// 尚未发布任何正文字节、且会话从未交付过工具批（外审 B3：防止续轮/ mid-stream 误换号）时执行。
+	//
+	// 模型暂不可用（方案 §2.4）：同一分类点、与限流平行判断。上游临时故障，不是账号问题，
+	// 不调停号回调；换号判据与限流动作 B 相同，否则原样返回（由 CursorUserFacingError
+	// 映射 CUR-EXEC-09）。
 	defer func() {
 		if err == nil {
 			return
 		}
-		code, ok := cursorUpstreamStreamErrorCode(err)
-		if !ok || code != "ERROR_PRO_USER_RATE_LIMIT_EXCEEDED" {
+		if code, ok := cursorUpstreamStreamErrorCode(err); ok && code == "ERROR_PRO_USER_RATE_LIMIT_EXCEEDED" {
+			// 限流路径：Info 级一条（含 account_id 与 code），正常路径不额外写日志。
+			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_exhausted", originalModel,
+				zap.Int64("account_id", account.ID), zap.String("code", code))
+			// 动作 A：无论是否已发布正文字节，停号回调只调用一次；回调报错（含 panic）只记 Warn，
+			// 绝不改变返回的错误类型与换号语义。
+			if s.accountExhaustedHandler != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_exhausted_handler_panic", originalModel,
+								zap.Int64("account_id", account.ID), zap.Any("panic", r))
+						}
+					}()
+					s.accountExhaustedHandler(ctx, account.ID, "cursor upstream quota exhausted (rate limited)")
+				}()
+			}
+			// 动作 B（外审 B3 加固）：仅当本 HTTP 尚未发布正文字节，且会话从未交付过工具批
+			// （deliveredBatchSeq==0，即非续轮/非 mid-stream）时，才替换为可换号 failover，让既有
+			// handler 换号重试；否则错误原样返回，禁止 mid-stream 换号（锁定项 3）。
+			if !session.bodyPublished && session.deliveredBatchSeq == 0 {
+				err = &UpstreamFailoverError{
+					StatusCode:        429,
+					Stage:             GatewayFailureStage("upstream"),
+					Scope:             GatewayFailureScopeAccount,
+					Reason:            GatewayFailureReason("cursor_quota_exhausted"),
+					NextAccountAction: NextAccountRetry,
+					ClientStatusCode:  429,
+					ClientMessage:     "cursor 账号额度耗尽，已停止调度",
+				}
+			}
 			return
 		}
-		// 限流路径：Info 级一条（含 account_id 与 code），正常路径不额外写日志。
-		cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_exhausted", originalModel,
-			zap.Int64("account_id", account.ID), zap.String("code", code))
-		// 动作 A：无论是否已发布正文字节，停号回调只调用一次；回调报错（含 panic）只记 Warn，
-		// 绝不改变返回的错误类型与换号语义。
-		if s.accountExhaustedHandler != nil {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_exhausted_handler_panic", originalModel,
-							zap.Int64("account_id", account.ID), zap.Any("panic", r))
-					}
-				}()
-				s.accountExhaustedHandler(ctx, account.ID, "cursor upstream quota exhausted (rate limited)")
-			}()
+		var mu *CursorModelUnavailableError
+		if !errors.As(err, &mu) {
+			return
 		}
-		// 动作 B（外审 B3 加固）：仅当本 HTTP 尚未发布正文字节，且会话从未交付过工具批
-		// （deliveredBatchSeq==0，即非续轮/非 mid-stream）时，才替换为可换号 failover，让既有
-		// handler 换号重试；否则错误原样返回，禁止 mid-stream 换号（锁定项 3）。
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_upstream_model_unavailable", originalModel,
+			zap.String("turn_id", mu.TurnID),
+			zap.Int64("account_id", account.ID),
+			zap.Bool("body_published", session.bodyPublished),
+			zap.Int("delivered_batches", int(session.deliveredBatchSeq)))
 		if !session.bodyPublished && session.deliveredBatchSeq == 0 {
 			err = &UpstreamFailoverError{
-				StatusCode:        429,
+				StatusCode:        503,
 				Stage:             GatewayFailureStage("upstream"),
 				Scope:             GatewayFailureScopeAccount,
-				Reason:            GatewayFailureReason("cursor_quota_exhausted"),
+				Reason:            GatewayFailureReason("cursor_model_unavailable"),
 				NextAccountAction: NextAccountRetry,
-				ClientStatusCode:  429,
-				ClientMessage:     "cursor 账号额度耗尽，已停止调度",
+				ClientStatusCode:  503,
+				ClientMessage:     infraerrors.CursorExecModelUnavailable,
 			}
 		}
 	}()
@@ -2777,6 +2800,9 @@ type cursorSessionRecord struct {
 	mu          sync.Mutex
 	state       cursorSessionState
 	delegations *cursorToolDelegations
+	// waitingIdleTimer 是 waiting_tools 空闲计时器（方案 §2.5）：进入 waiting_tools 时启动，
+	// 续轮接管或进入 finalizing 时停止并置 nil。只在 record.mu 下读写。
+	waitingIdleTimer *time.Timer
 	// toolCallIDs 是已登记的对外工具调用 ID（供续轮关联与重复提交拒绝）。
 	toolCallIDs map[string]struct{}
 
@@ -3522,6 +3548,11 @@ type cursorRejectionTombstone struct {
 // cursorRejectionTombstoneTTL 是墓碑的最大存活期，等于本会话 180s 总期限。
 // 设成 var（而非 const）仅为单测可临时收紧以构造过期场景，生产语义恒为 180s。
 var cursorRejectionTombstoneTTL = 180 * time.Second
+
+// cursorWaitingToolsIdleTimeout 是会话停在 waiting_tools（已交付工具批、等客户端续轮）的
+// 最长空闲期（方案 §2.5）：到期仍未续轮即走唯一 finalizer 提前释放槽与预留，与 180s 总期限
+// 取先到者。设成 var（而非 const）仅为单测可临时收紧，生产语义恒为 120s。
+var cursorWaitingToolsIdleTimeout = 120 * time.Second
 
 // cursorToolDelegations 是一次 AgentRun 内工具委托的**唯一**记录。
 //
@@ -4571,6 +4602,7 @@ func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord
 	}
 	record.finishing = true
 	record.state = cursorSessionFinalizing
+	record.stopWaitingIdleTimerLocked()
 	record.interruptReason = reason
 	deadline := record.deadline
 	deadlineSource := record.deadlineSource
@@ -6531,6 +6563,7 @@ func (s *cursorSessionStore) beginResumeTakeover(
 	}
 	record.pending.consumed = true
 	record.state = cursorSessionRunning
+	record.stopWaitingIdleTimerLocked()
 	record.resumeCount++
 	record.attached = true
 	if httpCtx != nil {
@@ -7719,12 +7752,51 @@ func (s *CursorExecutionService) commitDeliveredBatchState(
 		}
 	}
 	record.state = cursorSessionWaitingTools
+	record.stopWaitingIdleTimerLocked()
+	idleBatchID := record.pending.batchID
+	record.waitingIdleTimer = time.AfterFunc(cursorWaitingToolsIdleTimeout, func() {
+		s.onWaitingToolsIdle(record, idleBatchID)
+	})
 	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_batch_delivered", record.spec.requestedModel,
 		zap.String("session_id", record.id),
 		zap.String("batch_id", prepared.batchID),
 		zap.Int("call_count", len(prepared.callIDs)),
 		zap.Bool("has_response_id", prepared.responseID != ""))
 	return nil
+}
+
+// stopWaitingIdleTimerLocked 停止并清空 waiting_tools 空闲计时器（调用方持 r.mu）。
+func (r *cursorSessionRecord) stopWaitingIdleTimerLocked() {
+	if r.waitingIdleTimer != nil {
+		r.waitingIdleTimer.Stop()
+		r.waitingIdleTimer = nil
+	}
+}
+
+// onWaitingToolsIdle 是 waiting_tools 空闲计时器到期回调（方案 §2.5）。
+//
+// 只认"仍在 waiting_tools、当前未消费的同一批"：计时器 Stop 与到期存在竞争，过期回调
+// 在这里按状态与批次复核后一律 no-op。命中则锁外走唯一 finalizer（finishCursorSession
+// 自己加锁）。
+func (s *CursorExecutionService) onWaitingToolsIdle(record *cursorSessionRecord, batchID string) {
+	if s == nil || record == nil {
+		return
+	}
+	record.mu.Lock()
+	idle := record.state == cursorSessionWaitingTools && record.pending != nil &&
+		record.pending.batchID == batchID && !record.pending.consumed
+	if idle {
+		record.waitingIdleTimer = nil
+	}
+	record.mu.Unlock()
+	if !idle {
+		return
+	}
+	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_waiting_tools_idle", record.spec.requestedModel,
+		zap.String("session_id", record.id),
+		zap.String("batch_id", batchID),
+		zap.Duration("idle_timeout", cursorWaitingToolsIdleTimeout))
+	s.finishCursorSession(record, "waiting_tools_idle")
 }
 
 // recordDeliveredBatch 是"准备 + 提交"的同步组合（供无独立写出边界的调用方使用）。
