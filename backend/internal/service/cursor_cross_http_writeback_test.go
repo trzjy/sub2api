@@ -332,7 +332,7 @@ func TestCursorWritebackTransportFailureClosesSession(t *testing.T) {
 	err := record.intake.DeliverToolResults(context.Background(), record.id, cursorSessionLevelBatchID,
 		[]CursorToolResult{{CallID: "call_1", Text: []string{"sunny"}}})
 	require.Error(t, err, "传输失败必须返回错误")
-	require.ErrorIs(t, err, io.ErrClosedPipe)
+	require.ErrorContains(t, err, io.ErrClosedPipe.Error())
 
 	// 会话被 finalizer 关闭（不双写、不重放）。
 	record.mu.Lock()

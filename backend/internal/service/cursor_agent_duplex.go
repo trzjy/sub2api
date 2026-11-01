@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -506,7 +508,7 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			}
 			d.logPhase(zapcore.WarnLevel, "exec_unsupported_fields", "",
 				zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
-			return false, fmt.Errorf("%w: AgentRun requested unsupported execution", ErrCursorUnsupportedRequest)
+			return false, newCursorRequestError(infraerrors.CursorExecUnsupportedCode, http.StatusBadGateway, "AgentRun requested unsupported execution")
 		}
 	}
 	if q, ok := cursorFindField(fields, cursorFldServerInteractionQuery); ok {
@@ -636,7 +638,7 @@ func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error
 	unsupported := func() (bool, error) {
 		d.logPhase(zapcore.WarnLevel, "interaction_query_unsupported", "",
 			zap.Uint64("query_id", id), zap.Int("query_field", field))
-		return false, fmt.Errorf("%w: AgentRun interaction query field %d not supported", ErrCursorUnsupportedRequest, field)
+		return false, newCursorRequestError(infraerrors.CursorExecUnsupportedCode, http.StatusBadGateway, "AgentRun interaction query field %d not supported", field)
 	}
 	switch field {
 	case cursorFldInteractionWebSearch, cursorFldInteractionAskQuestion, cursorFldInteractionSwitchMode,

@@ -31,12 +31,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -151,10 +153,10 @@ func cursorConvertRequest(req *apicompat.ChatCompletionsRequest, upstreamModel s
 // 流内事件（含 P1-A1 的拒付哨兵）关联回具体请求。
 func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel string) ([]byte, string, error) {
 	if req == nil {
-		return nil, "", fmt.Errorf("%w: nil request", ErrCursorUnsupportedRequest)
+		return nil, "", newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil request")
 	}
 	if strings.TrimSpace(upstreamModel) == "" {
-		return nil, "", fmt.Errorf("%w: empty upstream model", ErrCursorUnsupportedRequest)
+		return nil, "", newCursorRequestError(infraerrors.CursorExecModelMappingInvalidCode, http.StatusInternalServerError, "empty upstream model")
 	}
 
 	turns, err := cursorConvertMessages(req.Messages)
@@ -162,7 +164,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 		return nil, "", err
 	}
 	if len(turns) == 0 {
-		return nil, "", fmt.Errorf("%w: no convertible messages", ErrCursorUnsupportedRequest)
+		return nil, "", newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "no convertible messages")
 	}
 
 	// AgentRun 的已取证入口只有 user_message_action：最后一轮必须是用户消息，
@@ -171,7 +173,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// （那会把模型续写当成用户指令，语义彻底错乱）。
 	last := turns[len(turns)-1]
 	if last.role != "user" {
-		return nil, "", fmt.Errorf("%w: conversation must end with a user message", ErrCursorUnsupportedRequest)
+		return nil, "", newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "conversation must end with a user message")
 	}
 	history := turns[:len(turns)-1]
 
@@ -313,13 +315,13 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool) ([]byte, error) {
 		// 非法则**失败关闭**（不静默丢工具、不猜宽松 fallback）。
 		value := &structpb.Value{}
 		if err := protojson.Unmarshal([]byte(schema), value); err != nil {
-			return nil, fmt.Errorf(
-				"%w: tool %q: invalid input_schema JSON: %v", ErrCursorUnsupportedRequest, t.Function.Name, err)
+			return nil, newCursorRequestError(infraerrors.CursorReqInvalidToolSchemaCode, http.StatusBadRequest,
+				"tool %q: invalid input_schema JSON: %v", t.Function.Name, err)
 		}
 		valBytes, err := proto.Marshal(value)
 		if err != nil {
-			return nil, fmt.Errorf(
-				"%w: tool %q: marshal input_schema Value: %v", ErrCursorUnsupportedRequest, t.Function.Name, err)
+			return nil, newCursorRequestError(infraerrors.CursorReqInvalidToolSchemaCode, http.StatusBadRequest,
+				"tool %q: marshal input_schema Value: %v", t.Function.Name, err)
 		}
 		var def []byte
 		def = cursorAppendStringField(def, cursorFldMcpToolDefName, t.Function.Name)
@@ -435,8 +437,8 @@ func cursorHistoryBlobs(history []cursorAgentTurn) ([]cursorHistoryBlob, error) 
 			// 仅 text / reasoning / redacted_reasoning / tool_call）。带图是协议不支持
 			// 的形状，**失败关闭**而非静默丢图（踩项目红线）。
 			if len(turn.images) > 0 {
-				return nil, fmt.Errorf(
-					"%w: assistant message must not contain images (no image landing in conversation history)", ErrCursorUnsupportedRequest)
+				return nil, newCursorRequestError(infraerrors.CursorReqImageOutsideUserCode, http.StatusBadRequest,
+					"assistant message must not contain images (no image landing in conversation history)")
 			}
 			assistantSeq++
 			value, err = cursorMarshalBlobJSON(cursorHistoryAssistantBlob{
@@ -452,7 +454,7 @@ func cursorHistoryBlobs(history []cursorAgentTurn) ([]cursorHistoryBlob, error) 
 			value, err = cursorMarshalBlobJSON(cursorHistoryUserBlob{Role: "user", Content: turn.text})
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%w: marshal history blob: %v", ErrCursorUnsupportedRequest, err)
+			return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "marshal history blob: %v", err)
 		}
 		sum := sha256.Sum256(value)
 		out = append(out, cursorHistoryBlob{id: sum[:], value: value})
@@ -505,8 +507,8 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 		case "system", "developer":
 			// system/developer 无图片落点：含图则失败关闭（不静默丢图、也不乱放）。
 			if len(images) > 0 {
-				return nil, fmt.Errorf(
-					"%w: system/developer message must not contain images (no image landing in protocol)", ErrCursorUnsupportedRequest)
+				return nil, newCursorRequestError(infraerrors.CursorReqImageOutsideUserCode, http.StatusBadRequest,
+					"system/developer message must not contain images (no image landing in protocol)")
 			}
 			if text != "" {
 				systemParts = append(systemParts, text)
@@ -525,8 +527,8 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 			// text / reasoning / redacted_reasoning / tool_call）。带图属协议不支持
 			// 的形状，**失败关闭**而非静默丢图（踩项目红线），尽早在此报出。
 			if len(images) > 0 {
-				return nil, fmt.Errorf(
-					"%w: assistant message must not contain images (no image landing in conversation history)", ErrCursorUnsupportedRequest)
+				return nil, newCursorRequestError(infraerrors.CursorReqImageOutsideUserCode, http.StatusBadRequest,
+					"assistant message must not contain images (no image landing in conversation history)")
 			}
 			// assistant 可能携带 tool_calls：原 content（可空）+ 每块一个
 			// <tool_call> blob（见 §4 续轮文本化）。
@@ -541,10 +543,10 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 			}
 			turns = append(turns, cursorAgentTurn{role: "user", text: tt, images: tImages})
 		case "":
-			return nil, fmt.Errorf("%w: message without role", ErrCursorUnsupportedRequest)
+			return nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "message without role")
 		default:
 			// 未知角色：按 user 处理会把 assistant 语义搞错，宁可失败关闭。
-			return nil, fmt.Errorf("%w: unsupported role %q", ErrCursorUnsupportedRequest, m.Role)
+			return nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "unsupported role %q", m.Role)
 		}
 	}
 
@@ -619,8 +621,8 @@ func cursorToolResultText(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 	if len(images) > 0 {
 		// tool 结果无图片落点：协议里 tool result 不能承载当前轮/历史图片，
 		// 避免把工具产物当成用户上传的图写进 selected_context 或历史 blob。失败关闭。
-		return "", nil, fmt.Errorf(
-			"%w: tool message must not contain images (no image landing for tool results in protocol)", ErrCursorUnsupportedRequest)
+		return "", nil, newCursorRequestError(infraerrors.CursorReqImageOutsideUserCode, http.StatusBadRequest,
+			"tool message must not contain images (no image landing for tool results in protocol)")
 	}
 	id := m.ToolCallID
 	name := m.Name
@@ -661,7 +663,7 @@ func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 	if raw[0] == '"' {
 		var s string
 		if err := json.Unmarshal([]byte(raw), &s); err != nil {
-			return "", nil, fmt.Errorf("%w: message content is not a string: %v", ErrCursorUnsupportedRequest, err)
+			return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "message content is not a string: %v", err)
 		}
 		return s, nil, nil
 	}
@@ -672,7 +674,7 @@ func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 		//   - 含图 → text 拼接（空白 text 静默跳过）、image_url 解码、其它 type 失败关闭。
 		var parts []apicompat.ChatContentPart
 		if err := json.Unmarshal([]byte(raw), &parts); err != nil {
-			return "", nil, fmt.Errorf("%w: message content is not a valid parts array: %v", ErrCursorUnsupportedRequest, err)
+			return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "message content is not a valid parts array: %v", err)
 		}
 		hasImage := false
 		for _, p := range parts {
@@ -686,8 +688,8 @@ func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 			var b strings.Builder
 			for _, p := range parts {
 				if p.Type != "text" || strings.TrimSpace(p.Text) == "" {
-					return "", nil, fmt.Errorf(
-						"%w: multi-modal content (part type %q) is not supported by cursor protocol", ErrCursorUnsupportedRequest, p.Type)
+					return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest,
+						"multi-modal content (part type %q) is not supported by cursor protocol", p.Type)
 				}
 				b.WriteString(p.Text)
 			}
@@ -706,8 +708,8 @@ func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 				b.WriteString(p.Text)
 			case "image_url":
 				if p.ImageURL == nil {
-					return "", nil, fmt.Errorf(
-						"%w: image_url part missing url", ErrCursorUnsupportedRequest)
+					return "", nil, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
+						"image_url part missing url")
 				}
 				img, err := cursorDecodeImageURL(p.ImageURL.URL)
 				if err != nil {
@@ -716,14 +718,14 @@ func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 				images = append(images, img)
 			default:
 				// file / 未知 type → 失败关闭（沿用现有文案）。
-				return "", nil, fmt.Errorf(
-					"%w: multi-modal content (part type %q) is not supported by cursor protocol", ErrCursorUnsupportedRequest, p.Type)
+				return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest,
+					"multi-modal content (part type %q) is not supported by cursor protocol", p.Type)
 			}
 		}
 		return b.String(), images, nil
 	}
 	// 数字 / 布尔 / 对象等：Cursor 侧只接受 string，失败关闭。
-	return "", nil, fmt.Errorf("%w: message content must be a string or content-parts array", ErrCursorUnsupportedRequest)
+	return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "message content must be a string or content-parts array")
 }
 
 // cursorDecodeImageURL 解析 image_url 的 URL 为 cursorTurnImage。
@@ -739,14 +741,14 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 	if !strings.HasPrefix(u, prefix) {
 		// 远程 URL：错误信息只回显安全引用（host+path 或 data:<mime>,<N> bytes），
 		// 防签名参数 / 凭据 / 内联二进制进日志。
-		return cursorTurnImage{}, fmt.Errorf(
-			"%w: remote image url is not supported (%s); send an inline data: URI instead", ErrCursorUnsupportedRequest, cursorSafeImageRefForLog(u))
+		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
+			"remote image url is not supported (%s); send an inline data: URI instead", cursorSafeImageRefForLog(u))
 	}
 	rest := u[len(prefix):]
 	comma := strings.IndexByte(rest, ',')
 	if comma < 0 {
-		return cursorTurnImage{}, fmt.Errorf(
-			"%w: image data URI must be data:<mime>;base64,<payload>", ErrCursorUnsupportedRequest)
+		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
+			"image data URI must be data:<mime>;base64,<payload>")
 	}
 	meta := rest[:comma]
 	payload := rest[comma+1:]
@@ -762,18 +764,18 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 		}
 	}
 	if !isBase64 {
-		return cursorTurnImage{}, fmt.Errorf(
-			"%w: image data URI must use base64 encoding", ErrCursorUnsupportedRequest)
+		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
+			"image data URI must use base64 encoding")
 	}
 	if mime == "" {
 		// 头部缺失 mime → 失败关闭。
-		return cursorTurnImage{}, fmt.Errorf(
-			"%w: image data URI missing mime type", ErrCursorUnsupportedRequest)
+		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
+			"image data URI missing mime type")
 	}
 	// MIME 必须是 image/ 前缀（否则 data:text/html 等会被透传，危险）。
 	if !strings.HasPrefix(mime, "image/") {
-		return cursorTurnImage{}, fmt.Errorf(
-			"%w: image data URI mime type must be image/* (got %q)", ErrCursorUnsupportedRequest, mime)
+		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
+			"image data URI mime type must be image/* (got %q)", mime)
 	}
 
 	// base64 健壮性：解码前剔除空白字符（换行/空格/制表/回车），依次尝试
@@ -790,17 +792,17 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 		data, err = base64.URLEncoding.DecodeString(cleaned)
 	}
 	if err != nil {
-		return cursorTurnImage{}, fmt.Errorf(
-			"%w: image data URI payload is not valid base64: %v", ErrCursorUnsupportedRequest, err)
+		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
+			"image data URI payload is not valid base64: %v", err)
 	}
 	if len(data) == 0 {
-		return cursorTurnImage{}, fmt.Errorf(
-			"%w: image data URI payload is empty", ErrCursorUnsupportedRequest)
+		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
+			"image data URI payload is empty")
 	}
 	// 体积护栏：解码后字节数超过既有请求体上限 → 失败关闭（复用既有常量，不新增阈值）。
 	if len(data) > cursorUpstreamStreamMaxBytes {
-		return cursorTurnImage{}, fmt.Errorf(
-			"%w: image data URI payload exceeds request body size limit (%d bytes)", ErrCursorUnsupportedRequest, cursorUpstreamStreamMaxBytes)
+		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
+			"image data URI payload exceeds request body size limit (%d bytes)", cursorUpstreamStreamMaxBytes)
 	}
 	return cursorTurnImage{data: data, mimeType: mime}, nil
 }
