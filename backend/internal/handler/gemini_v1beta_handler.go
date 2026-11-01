@@ -495,10 +495,11 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 	// §25.2/§25.14-D：Gemini 原生出口的续轮识别同样在**用户槽/预留/选号之前**。
 	// 同名并行 functionResponse 缺 ID 在这里明确拒绝歧义（不按名字猜配对）。
+	// Gemini 原生协议模型在 URL 路径，请求体无 "model" 字段，必须传入 modelName。
 	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolGemini, body,
 		cursorResumeIdentity(apiKey, authSubject.UserID), stream, func(status int, message string) {
 			googleError(c, status, message)
-		}) {
+		}, modelName) {
 		return
 	}
 

@@ -6526,6 +6526,7 @@ type CursorResumeServeInput struct {
 	Body     []byte
 	Stream   bool
 	Identity CursorSessionIdentity
+	Model    string // 可选：URL 路径模型（Gemini 原生协议用），其它协议留空从 Body 解析
 }
 
 // beginResumeTakeover 在**同一服务锁**内判定唯一胜者并标记当前批接管。
@@ -6663,7 +6664,7 @@ func (s *CursorExecutionService) ResumeCursorSession(
 	}
 
 	// ② 配置 / 前缀摘要 / 本批结果完整校验（锁外；失败零上游写入、不改状态）。
-	bodyModel, modelErr := cursorRequestModel(ticket.Protocol, in.Body)
+	bodyModel, modelErr := cursorRequestModel(ticket.Protocol, in.Body, in.Model)
 	if modelErr != nil {
 		return nil, newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", modelErr)
 	}
@@ -8233,7 +8234,11 @@ func cursorResumeProtocolOfSpec(spec cursorSessionSpec) CursorResumeProtocol {
 }
 
 // cursorRequestModel 取续轮请求声明的客户端可见模型名（空 = 未声明）。
-func cursorRequestModel(protocol CursorResumeProtocol, body []byte) (string, error) {
+func cursorRequestModel(protocol CursorResumeProtocol, body []byte, inputModel string) (string, error) {
+	// 优先使用传入的 URL 模型（Gemini 原生协议），否则从请求体解析。
+	if strings.TrimSpace(inputModel) != "" {
+		return strings.TrimSpace(inputModel), nil
+	}
 	switch protocol {
 	case CursorResumeProtocolChat:
 		var req apicompat.ChatCompletionsRequest

@@ -645,7 +645,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolResponses, body,
 		cursorResumeIdentity(apiKey, subject.UserID), reqStream, func(status int, message string) {
 			h.errorResponse(c, status, "invalid_request_error", message)
-		}) {
+		}, "") {
 		return
 	}
 
@@ -1435,7 +1435,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolMessages, body,
 		cursorResumeIdentity(apiKey, subject.UserID), reqStream, func(status int, message string) {
 			h.anthropicErrorResponse(c, status, "invalid_request_error", message)
-		}) {
+		}, "") {
 		return
 	}
 

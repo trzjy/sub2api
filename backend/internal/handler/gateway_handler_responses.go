@@ -153,7 +153,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolResponses, body,
 		cursorResumeIdentity(apiKey, subject.UserID), reqStream, func(status int, message string) {
 			h.responsesErrorResponse(c, status, "invalid_request_error", message)
-		}) {
+		}, "") {
 		return
 	}
 

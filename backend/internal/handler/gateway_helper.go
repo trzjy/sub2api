@@ -1201,6 +1201,7 @@ func cursorResumeClaimsUnknownAssociation(err error) bool {
 //     不接管任何资源，由原路由决定供应方（见 cursorResumeClaimsUnknownAssociation）。
 //
 // 校验失败零上游写入；不换号、不重选、不猜最近会话。
+// model 参数可选：Gemini 原生协议传 URL 路径模型（请求体无 "model" 字段），其它协议传空从请求体解析。
 func serveCursorResumeIfRequested(
 	c *gin.Context,
 	gw service.CursorResumeGateway,
@@ -1209,6 +1210,7 @@ func serveCursorResumeIfRequested(
 	identity service.CursorSessionIdentity,
 	stream bool,
 	reject func(status int, message string),
+	model string,
 ) bool {
 	if c == nil || c.Request == nil || reject == nil {
 		return false
@@ -1262,6 +1264,7 @@ func serveCursorResumeIfRequested(
 		Body:     body,
 		Stream:   stream,
 		Identity: identity,
+		Model:    model,
 	}); serveErr != nil {
 		status, reason := service.CursorResumeHTTPStatus(serveErr)
 		if status == 0 {

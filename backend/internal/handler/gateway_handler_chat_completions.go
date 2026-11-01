@@ -149,7 +149,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	if serveCursorResumeIfRequested(c, h.gatewayService, service.CursorResumeProtocolChat, body,
 		cursorResumeIdentity(apiKey, subject.UserID), reqStream, func(status int, message string) {
 			h.chatCompletionsErrorResponse(c, status, "invalid_request_error", message)
-		}) {
+		}, "") {
 		return
 	}
 

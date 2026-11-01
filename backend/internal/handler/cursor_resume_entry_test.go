@@ -105,7 +105,7 @@ func TestServeCursorResumePlainRequestPassesThrough(t *testing.T) {
 	reject := &captureReject{}
 	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
 		[]byte(`{"model": "m", "messages": [{"role": "user", "content": "hi"}]}`),
-		service.CursorSessionIdentity{UserID: 1}, false, reject.fn())
+		service.CursorSessionIdentity{UserID: 1}, false, reject.fn(), "")
 	require.False(t, handled, "普通请求必须继续走原路径")
 	require.False(t, reject.called)
 	require.Zero(t, gw.identifyCalls, "无结果 ID 时不进入索引定位")
@@ -129,7 +129,7 @@ func TestServeCursorResumeRejectedBeforeResources(t *testing.T) {
 	}
 	reject := &captureReject{}
 	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
-		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn())
+		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn(), "")
 	require.True(t, handled, "识别失败必须由续轮分支终止请求")
 	require.True(t, reject.called)
 	require.Equal(t, http.StatusBadRequest, reject.status)
@@ -142,7 +142,7 @@ func TestServeCursorResumeServedBySession(t *testing.T) {
 	gw := &cursorResumeFakeGateway{ticket: &service.CursorResumeTicket{SessionID: "s-1", Model: "cursor-test-model"}}
 	reject := &captureReject{}
 	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
-		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, true, reject.fn())
+		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, true, reject.fn(), "")
 	require.True(t, handled)
 	require.False(t, reject.called)
 	require.Equal(t, 1, gw.identifyCalls)
@@ -158,7 +158,7 @@ func TestServeCursorResumeIntakeUnavailable(t *testing.T) {
 	}
 	reject := &captureReject{}
 	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
-		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn())
+		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn(), "")
 	require.True(t, handled)
 	require.True(t, reject.called)
 	require.Equal(t, http.StatusServiceUnavailable, reject.status)
@@ -254,7 +254,7 @@ func TestServeCursorResumeUnknownAssociationHandedToRouting(t *testing.T) {
 	reject := &captureReject{}
 
 	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat, body,
-		service.CursorSessionIdentity{UserID: 7, APIKeyID: 9}, false, reject.fn())
+		service.CursorSessionIdentity{UserID: 7, APIKeyID: 9}, false, reject.fn(), "")
 
 	require.False(t, handled, "未知关联不得在选号前判死：必须交回原路由按供应方判定")
 	require.False(t, reject.called, "不得为全站写 400（其它供应商的续接请求会被误杀）")
@@ -288,7 +288,7 @@ func TestServeCursorResumeUnknownAssociationKeepsHTTPOwnedResources(t *testing.T
 	gw := &cursorResumeFakeGateway{identifyErr: cursorResumeUnclaimedAssociationErr()}
 	reject := &captureReject{}
 	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
-		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn())
+		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn(), "")
 
 	require.False(t, handled)
 	require.False(t, reject.called)
@@ -359,7 +359,7 @@ func TestServeCursorResumeUnknownAssociationCursorBoundary(t *testing.T) {
 			gw := &cursorResumeFakeGateway{identifyErr: cursorResumeUnclaimedAssociationErr()}
 			reject := &captureReject{}
 			handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
-				[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn())
+				[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn(), "")
 			require.False(t, handled)
 			require.False(t, reject.called, "helper 不替任何供应方判死")
 			require.Zero(t, gw.serveCalls)
@@ -440,7 +440,7 @@ func TestServeCursorResumeOtherIdentifyErrorsNotSwallowed(t *testing.T) {
 			gw := &cursorResumeFakeGateway{identifyErr: tc.identifyErr}
 			reject := &captureReject{}
 			handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
-				[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn())
+				[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1}, false, reject.fn(), "")
 			require.Zero(t, gw.serveCalls, "识别失败不得进入接管/写入")
 			if tc.wantDefer {
 				require.False(t, handled, "非续轮错误交回普通路径按其原契约失败关闭")
@@ -518,7 +518,7 @@ func TestServeCursorResumeEligibilityDenialReturnsByClass(t *testing.T) {
 			reject := &captureReject{}
 			handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
 				[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1},
-				false, reject.fn())
+				false, reject.fn(), "")
 
 			require.True(t, handled, "资格拒绝必须由续轮分支终止请求，不得落回普通路径")
 			require.True(t, reject.called)
