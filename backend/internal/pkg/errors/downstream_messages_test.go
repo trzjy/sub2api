@@ -122,6 +122,13 @@ var cursorCodeMessages = [][2]string{
 	{CursorExecBatchIncompleteCode, CursorExecBatchIncomplete},
 	{CursorExecResultWriteFailedCode, CursorExecResultWriteFailed},
 	{CursorExecUpstreamAuthFailedCode, CursorExecUpstreamAuthFailed},
+	{CursorReqMissingModelCode, CursorReqMissingModel},
+	{CursorReqInvalidImageCode, CursorReqInvalidImage},
+	{CursorReqImageOutsideUserCode, CursorReqImageOutsideUser},
+	{CursorReqUnsupportedMessageCode, CursorReqUnsupportedMessage},
+	{CursorReqInvalidToolSchemaCode, CursorReqInvalidToolSchema},
+	{CursorExecModelMappingInvalidCode, CursorExecModelMappingInvalid},
+	{CursorExecInternalErrorCode, CursorExecInternalError},
 }
 
 func TestCursorResumeReasonCode_PlanTable(t *testing.T) {
@@ -170,11 +177,11 @@ func TestCursorCodeMessages_UniqueAndClean(t *testing.T) {
 		code, msg := pair[0], pair[1]
 		require.Falsef(t, seenCode[code], "错误码重复：%s", code)
 		seenCode[code] = true
-		require.Truef(t, strings.HasPrefix(code, "CUR-RES-") || strings.HasPrefix(code, "CUR-EXEC-"), "错误码格式：%s", code)
+		require.Truef(t, strings.HasPrefix(code, "CUR-RES-") || strings.HasPrefix(code, "CUR-EXEC-") || strings.HasPrefix(code, "CUR-REQ-"), "错误码格式：%s", code)
 		require.NotContainsf(t, msg, "{", "%s 文案含占位符：%q", code, msg)
 		for _, reason := range reasons {
 			require.NotContainsf(t, msg, reason, "%s 文案含 reason 原文 %q", code, reason)
 		}
 	}
-	require.Len(t, seenCode, 17)
+	require.Len(t, seenCode, 24)
 }

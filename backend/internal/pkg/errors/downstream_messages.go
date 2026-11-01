@@ -446,6 +446,38 @@ const (
 	// 触发条件：哨兵=ErrCursorKeyRejectedUpstream / ErrCursorRelayAuthRejected / ErrCursorAuthMaterialUnavailable
 	CursorExecUpstreamAuthFailedCode = "CUR-EXEC-06"
 	CursorExecUpstreamAuthFailed     = "上游渠道认证失败，请联系管理员"
+
+	// ----- §2.2.1 请求类错误码（在 newCursorRequestError 产生点标码）-----
+
+	// 触发条件（400）：请求缺少模型名（chat completions / responses / anthropic messages / 原生请求 carries no model）
+	CursorReqMissingModelCode = "CUR-REQ-01"
+	CursorReqMissingModel     = "请求缺少模型名，请在请求中填写 model 后重试"
+
+	// 触发条件（400）：图片 data URI 格式/大小/远程链接不合规（缺 url、远程链接、非 data:<mime>;base64、
+	// 缺 mime 或非 image/*、base64 无效、payload 为空、超过请求体大小限制）
+	CursorReqInvalidImageCode = "CUR-REQ-02"
+	CursorReqInvalidImage     = "图片格式不正确（仅支持 base64 内嵌的 data URI 图片，不支持远程链接，且不能为空或超过大小限制），请修改后重试"
+
+	// 触发条件（400）：system/developer、assistant、tool 消息里带了图片
+	CursorReqImageOutsideUserCode = "CUR-REQ-03"
+	CursorReqImageOutsideUser     = "图片只能放在用户消息中（系统、助手和工具消息里不能带图片），请修改后重试"
+
+	// 触发条件（400）：消息结构不被支持（无可转换消息、最后一条不是用户消息、缺 role 或未知 role、
+	// content 非字符串/非合法 parts 数组、不支持的多模态 part 类型、Gemini 原生转换失败）
+	CursorReqUnsupportedMessageCode = "CUR-REQ-04"
+	CursorReqUnsupportedMessage     = "请求的消息格式不被支持（消息角色、内容格式不正确，或最后一条不是用户消息），请检查客户端后重试"
+
+	// 触发条件（400）：工具 input_schema JSON 无效或无法编码
+	CursorReqInvalidToolSchemaCode = "CUR-REQ-05"
+	CursorReqInvalidToolSchema     = "工具参数定义（input_schema）无效，请检查客户端声明的工具后重试"
+
+	// 触发条件（500）：分组模型映射后上游模型为空（empty upstream model，含探针入口）
+	CursorExecModelMappingInvalidCode = "CUR-EXEC-07"
+	CursorExecModelMappingInvalid     = "该分组的模型映射配置有误，请联系管理员"
+
+	// 触发条件（500）：内部调用方不变量破坏（nil 请求 / typed 请求缺失 / marshal history blob 失败）
+	CursorExecInternalErrorCode = "CUR-EXEC-08"
+	CursorExecInternalError     = "服务内部错误，请稍后重试或联系管理员"
 )
 
 // CursorResumeReasonCode 把 newCursorResumeError 的 reason 映射到 §2.2 续轮码表；
