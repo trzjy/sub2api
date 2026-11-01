@@ -62,6 +62,11 @@ func TestCursorUserFacingError_Table(t *testing.T) {
 			http.StatusBadGateway, infraerrors.CursorExecUpstreamAuthFailedCode, infraerrors.CursorExecUpstreamAuthFailed},
 		{"4_bearer_missing_wrapped", fmt.Errorf("x: %w", ErrCursorAccountBearerMissing),
 			http.StatusBadGateway, infraerrors.CursorExecUpstreamAuthFailedCode, infraerrors.CursorExecUpstreamAuthFailed},
+		// 4a. 上游模型暂不可用
+		{"4a_model_unavailable_struct", &CursorModelUnavailableError{TurnID: "1-a"},
+			http.StatusBadGateway, infraerrors.CursorExecModelUnavailableCode, infraerrors.CursorExecModelUnavailable},
+		{"4a_model_unavailable_wrapped", fmt.Errorf("x: %w", ErrCursorUpstreamModelUnavailable),
+			http.StatusBadGateway, infraerrors.CursorExecModelUnavailableCode, infraerrors.CursorExecModelUnavailable},
 		// 5. 批次
 		{"5_batch_incomplete", ErrCursorBatchIncomplete,
 			http.StatusBadGateway, infraerrors.CursorExecBatchIncompleteCode, infraerrors.CursorExecBatchIncomplete},
@@ -134,6 +139,19 @@ func TestCursorUserFacingError_OrderRequestErrorBeforeProtocol(t *testing.T) {
 	status, code, _, ok := CursorUserFacingError(cursorUserFacingTestCtx(), err)
 	if !ok || status != http.StatusBadRequest || code != infraerrors.CursorReqUnsupportedMessageCode {
 		t.Fatalf("got (%d, %s, %v), want rule 2 hit (400, %s)", status, code, ok, infraerrors.CursorReqUnsupportedMessageCode)
+	}
+}
+
+// 第 4 条认证类在 4a 模型不可用之前：同时满足时必须仍是 CUR-EXEC-06，不被新 case 截走。
+func TestCursorUserFacingError_OrderAuthBeforeModelUnavailable(t *testing.T) {
+	for _, err := range []error{
+		ErrCursorKeyRejectedUpstream,
+		errors.Join(ErrCursorKeyRejectedUpstream, ErrCursorUpstreamModelUnavailable),
+	} {
+		status, code, _, ok := CursorUserFacingError(cursorUserFacingTestCtx(), err)
+		if !ok || status != http.StatusBadGateway || code != infraerrors.CursorExecUpstreamAuthFailedCode {
+			t.Fatalf("err=%v got (%d, %s, %v), want (502, %s)", err, status, code, ok, infraerrors.CursorExecUpstreamAuthFailedCode)
+		}
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 //  2. *CursorRequestError → 其 Code / Status。
 //  3. context.DeadlineExceeded → CUR-EXEC-01，504。
 //  4. 上游认证类哨兵 → CUR-EXEC-06，502。
+//     4a. ErrCursorUpstreamModelUnavailable（含 *CursorModelUnavailableError）→ CUR-EXEC-09，502（方案 §2.4）。
 //  5. 批次封口类哨兵 → CUR-EXEC-04，502。
 //  6. 工具结果写回传输失败：不在此单独判定。产生点（DeliverToolResults）由卡 S2b 改为
 //     newCursorRequestError(CUR-EXEC-05, 502, …)，由第 2 条命中。
@@ -53,6 +54,8 @@ func CursorUserFacingError(ctx context.Context, err error) (status int, code, me
 		errors.Is(err, ErrCursorQuotaKeyUnresolved),
 		errors.Is(err, ErrCursorAccountBearerMissing):
 		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecUpstreamAuthFailedCode, infraerrors.CursorExecUpstreamAuthFailed
+	case errors.Is(err, ErrCursorUpstreamModelUnavailable):
+		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecModelUnavailableCode, infraerrors.CursorExecModelUnavailable
 	case errors.Is(err, ErrCursorBatchIncomplete), errors.Is(err, ErrCursorBatchAmbiguous):
 		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecBatchIncompleteCode, infraerrors.CursorExecBatchIncomplete
 	case errors.Is(err, ErrCursorProtocol),
