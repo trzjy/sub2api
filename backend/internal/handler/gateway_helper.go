@@ -1221,7 +1221,7 @@ func serveCursorResumeIfRequested(
 	probe, probeErr := service.CursorProbeResumeRequest(protocol, body)
 	if probeErr != nil {
 		if status, reason := service.CursorResumeHTTPStatus(probeErr); status != 0 {
-			reject(status, reason)
+			reject(status, cursorResumeRejectMessage(c, "probe", status, reason))
 			return true
 		}
 		// 探针解码失败不改既有解析错误链：交给普通路径按原语义处理。
@@ -1248,7 +1248,7 @@ func serveCursorResumeIfRequested(
 			// 原契约失败关闭，避免把无关请求改成续轮错误。
 			return false
 		}
-		reject(status, reason)
+		reject(status, cursorResumeRejectMessage(c, "identify", status, reason))
 		return true
 	}
 	if ticket == nil {
@@ -1267,8 +1267,23 @@ func serveCursorResumeIfRequested(
 		if status == 0 {
 			status, reason = http.StatusBadGateway, "resume_failed"
 		}
-		reject(status, reason)
+		reject(status, cursorResumeRejectMessage(c, "serve", status, reason))
 		return true
 	}
 	return true
+}
+
+// cursorResumeRejectMessage 把续轮拒绝的内部 reason 渲染成面向用户的中文提示
+// （§2.1/§2.3 M2：带错误码与请求号），并落一条定位日志；不记录请求正文。
+// stage 取 probe / identify / serve，标明拒绝发生在哪一步。
+func cursorResumeRejectMessage(c *gin.Context, stage string, status int, reason string) string {
+	code, msg := infraerrors.CursorResumeReasonCode(reason)
+	requestID, _ := c.Request.Context().Value(ctxkey.RequestID).(string)
+	logger.FromContext(c.Request.Context()).Warn("cursor_resume_rejected",
+		zap.String("error_code", code),
+		zap.String("reason", reason),
+		zap.Int("status", status),
+		zap.String("stage", stage),
+	)
+	return infraerrors.CursorUserMessage(code, msg, requestID)
 }
