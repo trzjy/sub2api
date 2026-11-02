@@ -29,7 +29,13 @@ func TestCursorMessagesPlanPreservesOfficialSystemMessage(t *testing.T) {
 	withoutSystem.Messages = withoutSystem.Messages[1:]
 	baseline, err := cursorPlanFromMessages(&withoutSystem, req.Model)
 	require.NoError(t, err)
-	require.NotEqual(t, baseline.config.HexString(), plan.config.HexString(), "system message belongs to fixed config")
+	// system 正文属**软组**（configSystem）：它进固定配置摘要、不进用户历史，但续轮对软组
+	// 只留痕不拒绝（见 ResumeCursorSession 的分组说明）。硬组（模型 + 工具声明/schema）在
+	// 这一对请求里完全相同——这正是"改 system 不再把正常续轮拒成 CUR-RES-04"的依据。
+	require.NotEqual(t, baseline.configSystem.HexString(), plan.configSystem.HexString(),
+		"system message belongs to the soft config group")
+	require.Equal(t, baseline.config.HexString(), plan.config.HexString(),
+		"system message must not enter the hard config group")
 	require.Equal(t, baseline.history.HexString(), plan.history.HexString(), "system message must not enter user history")
 }
 

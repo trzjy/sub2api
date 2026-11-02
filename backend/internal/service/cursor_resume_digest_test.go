@@ -32,7 +32,10 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // cursorTestIntake 是真实结果回写通道的替身（记录调用次数与批次）。
@@ -181,12 +184,20 @@ func (f *cursorResumeFixture) resume(
 	t *testing.T, protocol CursorResumeProtocol, body []byte, stream bool,
 ) (*ForwardResult, error) {
 	t.Helper()
+	return f.resumeCtx(t, context.Background(), protocol, body, stream)
+}
+
+// resumeCtx 与 resume 相同，但由调用方提供 ctx（用于把结构化日志收进 observer）。
+func (f *cursorResumeFixture) resumeCtx(
+	t *testing.T, ctx context.Context, protocol CursorResumeProtocol, body []byte, stream bool,
+) (*ForwardResult, error) {
+	t.Helper()
 	probe, err := CursorProbeResumeRequest(protocol, body)
 	require.NoError(t, err)
 	ticket, err := f.svc.IdentifyResume(probe)
 	require.NoError(t, err)
 	require.NotNil(t, ticket, "探针必须定位到唯一待完成批")
-	return f.svc.ResumeCursorSession(context.Background(), nil, ticket, cursorResumeTestAccount(), CursorResumeServeInput{
+	return f.svc.ResumeCursorSession(ctx, nil, ticket, cursorResumeTestAccount(), CursorResumeServeInput{
 		Body:     body,
 		Stream:   stream,
 		Identity: f.identity,
@@ -520,25 +531,17 @@ func TestCursorResumeBigIntegerPrecision(t *testing.T) {
 	require.Equal(t, 0, fixture.intake.callCount())
 }
 
-// TestCursorResumeConfigChangesRejected 覆盖清单第 3 条：改配置各项零上游写入拒绝。
+// TestCursorResumeConfigChangesRejected 覆盖清单第 3 条：改**硬组**配置（模型 / 工具声明
+// 与 schema）各项零上游写入拒绝。
+//
+// 硬组是"还是不是同一次生成"的判据：模型换了、工具集合或 schema 换了，上游 wire 契约与
+// 工具模式都变了，必须拒绝。system 文本与采样参数属软组，见
+// TestCursorResumeSoftConfigDriftAccepted（只留痕不拒绝）。
 func TestCursorResumeConfigChangesRejected(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
 	}{
-		{
-			name: "system_changed",
-			body: `{
-  "model": "cursor-test-model",
-  "messages": [
-    {"role": "system", "content": "you are terse"},
-    {"role": "user", "content": "weather please"},
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
-    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
-  ],
-  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
-}`,
-		},
 		{
 			name: "model_changed",
 			body: `{
@@ -564,19 +567,6 @@ func TestCursorResumeConfigChangesRejected(t *testing.T) {
 }`,
 		},
 		{
-			name: "reasoning_config_changed",
-			body: `{
-  "model": "cursor-test-model",
-  "reasoning_effort": "high",
-  "messages": [
-    {"role": "user", "content": "weather please"},
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
-    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
-  ],
-  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
-}`,
-		},
-		{
 			name: "tools_expanded",
 			body: `{
   "model": "cursor-test-model",
@@ -597,11 +587,156 @@ func TestCursorResumeConfigChangesRejected(t *testing.T) {
 			fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
 				[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "mc-1", "")
 			_, err := fixture.resume(t, CursorResumeProtocolChat, []byte(tc.body), false)
-			require.Error(t, err, "改固定生成配置必须拒绝")
+			require.Error(t, err, "改硬组配置必须拒绝")
 			require.Equal(t, 0, fixture.intake.callCount(), "拒绝必须零上游写入")
 			require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, err))
 		})
 	}
+}
+
+// TestCursorResumeSoftConfigDriftAccepted 覆盖"软组漂移只留痕不拒绝"。
+//
+// 这两项都是客户端每轮**重新拼装**的字节：system 里带环境快照/工具说明，重试时
+// reasoning/thinking 字段会丢。把整链哈希当准入闸门，就会把正常续轮拒成 CUR-RES-04
+// （线上实证：客户端截断流后重试，system 与 thinking 双双与首轮不同）。
+// 准入闸门只能是硬组（模型 + 工具声明/schema），这已由上一个用例覆盖。
+func TestCursorResumeSoftConfigDriftAccepted(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "system_changed",
+			body: `{
+  "model": "cursor-test-model",
+  "messages": [
+    {"role": "system", "content": "you are terse"},
+    {"role": "user", "content": "weather please"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+  ],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+}`,
+		},
+		{
+			name: "reasoning_config_changed",
+			body: `{
+  "model": "cursor-test-model",
+  "reasoning_effort": "high",
+  "messages": [
+    {"role": "user", "content": "weather please"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+  ],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+}`,
+		},
+		{
+			name: "sampling_changed",
+			body: `{
+  "model": "cursor-test-model",
+  "temperature": 0.9,
+  "max_tokens": 4096,
+  "messages": [
+    {"role": "user", "content": "weather please"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+  ],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
+				[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "mc-1", "")
+			_, err := fixture.resume(t, CursorResumeProtocolChat, []byte(tc.body), false)
+			require.NoError(t, err, "软组漂移不得拒绝续轮")
+			require.Equal(t, 1, fixture.intake.callCount(), "软组漂移必须正常写回本批结果")
+		})
+	}
+}
+
+// cursorPhaseEntries 从 observer 里挑出指定 phase 的 cursor 阶段事件
+// （cursorPhaseLog 的统一 message 是 "cursor_phase_event"，事件名在 phase 字段里）。
+func cursorPhaseEntries(logs *observer.ObservedLogs, phase string) []observer.LoggedEntry {
+	out := make([]observer.LoggedEntry, 0, 4)
+	for _, entry := range logs.All() {
+		if got, _ := entry.ContextMap()["phase"].(string); got == phase {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// TestCursorResumeConfigDriftLogged 是软组/硬组的**可观测性**取证：两组都必须落日志。
+//
+// 没有这两个事件，线上看到 CUR-RES-04 只能看到一个 config_changed，无法回答"到底哪一组
+// 变了、是 system 还是 thinking"——那正是上一轮排查走弯路的直接原因。这里用 observer 把
+// 事件收进内存并逐字段断言（字段只含分组名/项数/摘要前缀，不含任何正文）。
+func TestCursorResumeConfigDriftLogged(t *testing.T) {
+	t.Run("soft_drift_logged_and_accepted", func(t *testing.T) {
+		core, logs := observer.New(zap.DebugLevel)
+		ctx := logger.IntoContext(context.Background(), zap.New(core))
+
+		fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
+			[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "mc-1", "")
+		body := `{
+  "model": "cursor-test-model",
+  "reasoning_effort": "high",
+  "messages": [
+    {"role": "system", "content": "you are terse"},
+    {"role": "user", "content": "weather please"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+  ],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+}`
+		_, err := fixture.resumeCtx(t, ctx, CursorResumeProtocolChat, []byte(body), false)
+		require.NoError(t, err, "软组漂移必须放行")
+		require.Equal(t, 1, fixture.intake.callCount())
+
+		entries := cursorPhaseEntries(logs, "resume_config_drift")
+		require.Len(t, entries, 1, "软组漂移必须落 resume_config_drift")
+		fields := entries[0].ContextMap()
+		groups, _ := fields["drift_groups"].([]any)
+		require.NotEmpty(t, groups, "必须写明是哪一组漂移")
+		require.Contains(t, fields, "system_digest_stored")
+		require.Contains(t, fields, "system_digest_request")
+		require.NotEmpty(t, fields["session_id"])
+		// 安全字段：不得把正文/参数写进日志。
+		for key := range fields {
+			require.NotContains(t, []string{"system", "content", "body", "args"}, key)
+		}
+	})
+
+	t.Run("hard_mismatch_logged_and_rejected", func(t *testing.T) {
+		core, logs := observer.New(zap.DebugLevel)
+		ctx := logger.IntoContext(context.Background(), zap.New(core))
+
+		fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
+			[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "mc-1", "")
+		body := `{
+  "model": "cursor-test-model",
+  "messages": [
+    {"role": "user", "content": "weather please"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+  ],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]
+}`
+		_, err := fixture.resumeCtx(t, ctx, CursorResumeProtocolChat, []byte(body), false)
+		require.ErrorIs(t, err, ErrCursorResumeConfigChanged)
+		require.Equal(t, 0, fixture.intake.callCount(), "硬组不一致必须零上游写入")
+
+		entries := cursorPhaseEntries(logs, "resume_config_hard_mismatch")
+		require.Len(t, entries, 1, "硬组不一致必须落 resume_config_hard_mismatch")
+		fields := entries[0].ContextMap()
+		require.Contains(t, fields, "hard_digest_stored")
+		require.Contains(t, fields, "hard_digest_request")
+		require.Equal(t, int64(1), fields["tool_count_stored"])
+		require.Equal(t, int64(1), fields["tool_count_request"])
+	})
 }
 
 // TestCursorResumeBodyChangedRejected 覆盖清单第 3 条：改正文拒绝。

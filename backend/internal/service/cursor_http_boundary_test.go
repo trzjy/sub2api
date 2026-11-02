@@ -604,16 +604,31 @@ func responsesContinuationBody(previousResponseID string, items []struct{ CallID
 		`","input":[` + strings.Join(outputs, ",") + `],"tools":` + cursorResponsesClientToolsJSON + `}`
 }
 
+// cursorResponsesCustomToolArgs 是 custom 工具（apply_patch）的合法参数。
+//
+// 与 apicompat.customToolInputSchema 同形：chat 桥上 custom 工具被降级成 required:["input"]
+// 的 function，模型的调用必须是 {"input": ...}。缺 input 即"参数残缺"，还原侧按
+// CUR-EXEC-10 拒绝——夹具必须喂合法出参，否则测的是另一条（故意残缺的）路径。
+func cursorResponsesCustomToolArgs() []cursorToolTestMcpArgEntry {
+	return []cursorToolTestMcpArgEntry{{key: "input", kind: "string", val: "*** Begin Patch\n*** End Patch"}}
+}
+
+// cursorResponsesToolSearchArgs 是 tool_search 代理工具的合法参数（required:["query"]，
+// 与 apicompat.toolSearchProxySchema 同形）。
+func cursorResponsesToolSearchArgs() []cursorToolTestMcpArgEntry {
+	return []cursorToolTestMcpArgEntry{{key: "query", kind: "string", val: "patch"}}
+}
+
 func TestCursorResponsesToolMetadataSurvivesContinuation(t *testing.T) {
 	firstBatch := []cursorFullChainCall{
-		{CallID: "call_custom_1", Name: "apply_patch", City: "hz", ExecID: 181, IDField: []byte("exec-181")},
+		{CallID: "call_custom_1", Name: "apply_patch", City: "hz", Args: cursorResponsesCustomToolArgs(), ExecID: 181, IDField: []byte("exec-181")},
 		{CallID: "call_ns_1", Name: "fs__read", City: "hz", ExecID: 182, IDField: []byte("exec-182")},
-		{CallID: "call_search_1", Name: "tool_search", City: "hz", ExecID: 183, IDField: []byte("exec-183")},
+		{CallID: "call_search_1", Name: "tool_search", City: "hz", Args: cursorResponsesToolSearchArgs(), ExecID: 183, IDField: []byte("exec-183")},
 	}
 	secondBatch := []cursorFullChainCall{
-		{CallID: "call_custom_2", Name: "apply_patch", City: "hz", ExecID: 191, IDField: []byte("exec-191")},
+		{CallID: "call_custom_2", Name: "apply_patch", City: "hz", Args: cursorResponsesCustomToolArgs(), ExecID: 191, IDField: []byte("exec-191")},
 		{CallID: "call_ns_2", Name: "fs__read", City: "hz", ExecID: 192, IDField: []byte("exec-192")},
-		{CallID: "call_search_2", Name: "tool_search", City: "hz", ExecID: 193, IDField: []byte("exec-193")},
+		{CallID: "call_search_2", Name: "tool_search", City: "hz", Args: cursorResponsesToolSearchArgs(), ExecID: 193, IDField: []byte("exec-193")},
 	}
 	svc := newCursorFullChainService(t, newCursorFullChainUpstream(cursorFullChainScript{
 		calls:       firstBatch,

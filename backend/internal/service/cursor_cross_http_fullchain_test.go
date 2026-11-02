@@ -125,9 +125,17 @@ func joinFrames(payloads ...[]byte) []byte {
 
 // cursorFullChainCall 描述一个由模型委托、由客户端真实执行的工具调用。
 type cursorFullChainCall struct {
-	CallID  string
-	Name    string
-	City    string
+	CallID string
+	Name   string
+	City   string
+	// Args 是本次调用在 f11 里的**完整参数**（按工具声明等价的键值）。
+	//
+	// 缺省（nil）时用 {"city": <City>}。需要按工具 schema 出参时必须显式给：自 11-03 起
+	// 还原侧消费 schema.required，缺必填即按"上游参数残缺"拒绝（CUR-EXEC-10）。custom 工具
+	// 在 chat 桥上是 {"input": ...}（见 apicompat.customToolInputSchema），tool_search 代理
+	// 是 {"query": ...}（见 apicompat.toolSearchProxySchema）——夹具必须与声明同形，否则测的
+	// 只是"故意喂残缺参数"的失败路径。
+	Args    []cursorToolTestMcpArgEntry
 	ExecID  uint64
 	IDField []byte
 }
@@ -258,9 +266,11 @@ func (u *cursorFullChainUpstream) batchFrames(calls []cursorFullChainCall, leadT
 	}
 	payloads = append(payloads, fcToolRequestsListed(uint64(len(calls))))
 	for _, call := range calls {
-		args := cursorToolTestBuildMcpArgs(call.CallID, call.Name, []cursorToolTestMcpArgEntry{
-			{key: "city", kind: "string", val: call.City},
-		})
+		entries := call.Args
+		if len(entries) == 0 {
+			entries = []cursorToolTestMcpArgEntry{{key: "city", kind: "string", val: call.City}}
+		}
+		args := cursorToolTestBuildMcpArgs(call.CallID, call.Name, entries)
 		payloads = append(payloads, fcExecMcpArgs(call.ExecID, call.IDField, args))
 	}
 	return joinFrames(payloads...)

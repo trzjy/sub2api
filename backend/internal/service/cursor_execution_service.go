@@ -2895,11 +2895,15 @@ type cursorSessionRecord struct {
 
 	// ---- §25.14-D 摘要校验与续轮接管（全部字段在 mu 下读写）----
 
-	// configDigest 是固定生成配置的摘要（模型/system/工具/schema/推理配置等）；
+	// configDigest 是**硬组**配置摘要（模型 + 工具声明/schema）；续轮不一致即拒绝。
+	// configSystemDigest / configSamplingDigest 是**软组**摘要（system 文本 / 采样参数）：
+	// 续轮只比对留痕（resume_config_drift），不拒绝——见 ResumeCursorSession 的判定说明。
 	// historyDigest 是**已交付**输入历史的链式摘要，logicalItems 即其逻辑项数。
-	// 两者都按 CR-B 引擎生成：本层只提供 canonical 项，不改引擎语义。
-	configDigest  *CursorHistoryDigest
-	historyDigest *CursorHistoryDigest
+	// 全部按 CR-B 引擎生成：本层只提供 canonical 项，不改引擎语义。
+	configDigest         *CursorHistoryDigest
+	configSystemDigest   *CursorHistoryDigest
+	configSamplingDigest *CursorHistoryDigest
+	historyDigest        *CursorHistoryDigest
 	// exposedTools 是本会话已暴露给客户端的工具名（保持声明顺序），
 	// 供 tool_choice 逐 HTTP 校验"暴露集合是否一致"。
 	exposedTools []string
@@ -5100,8 +5104,17 @@ type CursorSessionIntake interface {
 
 // cursorContextPlan 是一次请求的上下文计划。
 type cursorContextPlan struct {
-	// config 是固定生成配置的链式摘要（§25.14-D「配置与省略规则」）。
+	// config 是**硬组**配置的链式摘要（§25.14-D「配置与省略规则」）：模型 + 工具声明/
+	// schema。续轮这一组不一致即拒绝（同一次生成的上游 wire 契约已变）。
 	config *CursorHistoryDigest
+	// configSystem 是 system / instructions 文本的摘要；configSampling 是采样参数
+	// （temperature / top_p / max_tokens / thinking / reasoning / generation 等）的摘要。
+	//
+	// 这两组是**软组**：客户端每轮重新拼装正文与参数，环境快照、工具说明、重试丢字段
+	// 都会让它们变化。因此续轮只比对留痕（resume_config_drift），不拒绝——它们存在的
+	// 意义是让"CUR-RES-04 到底哪一项变了"可观测，而不是当准入闸门。
+	configSystem   *CursorHistoryDigest
+	configSampling *CursorHistoryDigest
 	// history 是**重复前缀**（已交付历史）的链式摘要；本批新结果不在其中。
 	history *CursorHistoryDigest
 	// tools 是本次声明的工具名（保持声明顺序）。
@@ -5170,64 +5183,115 @@ func (p *cursorContextPlan) resultsReplayHistory() bool {
 	return true
 }
 
-// cursorConfigBuilder 把固定生成配置逐项并入链式摘要。
+// cursorConfigGroup 是配置摘要的分组。续轮对三组的准入策略不同（见 ResumeCursorSession）：
+// 整链一串哈希只能给出一个 config_changed，既分不清到底哪一组变了，也没法对风险完全
+// 不同的两组用同一把尺子。
+type cursorConfigGroup int
+
+const (
+	// cursorConfigHard 是决定"还是不是同一次生成"的硬配置：模型 + 工具声明/schema。
+	// 它一变，续轮的上游 wire 契约就不同了，必须拒绝。
+	cursorConfigHard cursorConfigGroup = iota
+	// cursorConfigSystem 是 system / instructions 文本：客户端每轮重新拼装（环境快照、
+	// 工具说明都会变），只留痕不拒绝。
+	cursorConfigSystem
+	// cursorConfigSampling 是采样参数（temperature / top_p / max_tokens / thinking 等）：
+	// 客户端重试时常丢字段，只留痕不拒绝。
+	cursorConfigSampling
+)
+
+// cursorConfigBuilder 把固定生成配置逐项并入**分组**链式摘要。
 type cursorConfigBuilder struct {
-	d *CursorHistoryDigest
+	hard     *CursorHistoryDigest
+	system   *CursorHistoryDigest
+	sampling *CursorHistoryDigest
+	group    cursorConfigGroup
 }
 
 func newCursorConfigBuilder() *cursorConfigBuilder {
-	return &cursorConfigBuilder{d: NewCursorHistoryDigest()}
+	return &cursorConfigBuilder{
+		hard:     NewCursorHistoryDigest(),
+		system:   NewCursorHistoryDigest(),
+		sampling: NewCursorHistoryDigest(),
+	}
+}
+
+// in 切换后续配置项归入的组。
+func (b *cursorConfigBuilder) in(group cursorConfigGroup) { b.group = group }
+
+// target 返回当前组链。
+func (b *cursorConfigBuilder) target() *CursorHistoryDigest {
+	switch b.group {
+	case cursorConfigSystem:
+		return b.system
+	case cursorConfigSampling:
+		return b.sampling
+	default:
+		return b.hard
+	}
+}
+
+// item 记录一个已序列化的配置项（工具声明等）。
+func (b *cursorConfigBuilder) item(itemType string, canonical []byte) error {
+	return b.target().AppendItem(itemType, canonical)
 }
 
 // text 记录一个文本配置项。
 func (b *cursorConfigBuilder) text(itemType, value string) error {
-	return b.d.AppendText(itemType, value)
+	return b.target().AppendText(itemType, value)
 }
 
 // presence 记录"字段是否声明 + 声明值"（省略与显式值不自行折叠）。
 func (b *cursorConfigBuilder) presence(itemType string, raw json.RawMessage) error {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
-		return b.d.AppendText(itemType, "absent")
+		return b.target().AppendText(itemType, "absent")
 	}
-	return b.d.AppendItem(itemType, append([]byte("present:"), trimmed...))
+	return b.target().AppendItem(itemType, append([]byte("present:"), trimmed...))
 }
 
 // floatPresence 记录 *float64 配置项（nil = 未声明）。
 func (b *cursorConfigBuilder) floatPresence(itemType string, v *float64) error {
 	if v == nil {
-		return b.d.AppendText(itemType, "absent")
+		return b.target().AppendText(itemType, "absent")
 	}
-	return b.d.AppendText(itemType, fmt.Sprintf("present:%v", *v))
+	return b.target().AppendText(itemType, fmt.Sprintf("present:%v", *v))
 }
 
 // intPresence 记录 *int 配置项（nil = 未声明）。
 func (b *cursorConfigBuilder) intPresence(itemType string, v *int) error {
 	if v == nil {
-		return b.d.AppendText(itemType, "absent")
+		return b.target().AppendText(itemType, "absent")
 	}
-	return b.d.AppendText(itemType, fmt.Sprintf("present:%d", *v))
+	return b.target().AppendText(itemType, fmt.Sprintf("present:%d", *v))
 }
 
 // boolPresence 记录 *bool 配置项（nil = 未声明）。
 func (b *cursorConfigBuilder) boolPresence(itemType string, v *bool) error {
 	if v == nil {
-		return b.d.AppendText(itemType, "absent")
+		return b.target().AppendText(itemType, "absent")
 	}
-	return b.d.AppendText(itemType, fmt.Sprintf("present:%t", *v))
+	return b.target().AppendText(itemType, fmt.Sprintf("present:%t", *v))
 }
 
 // json 记录一个 JSON 配置项（空输入按"未声明"记录，不做等价折叠）。
 func (b *cursorConfigBuilder) json(itemType string, raw []byte) error {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return b.d.AppendText(itemType, "absent")
+		return b.target().AppendText(itemType, "absent")
 	}
-	return b.d.AppendJSON(itemType, trimmed)
+	return b.target().AppendJSON(itemType, trimmed)
 }
 
-// digest 返回配置摘要。
-func (b *cursorConfigBuilder) digest() *CursorHistoryDigest { return b.d }
+// plan 把三条组链挂到计划上（builder 原地追加，之后无需再次赋值）。
+func (b *cursorConfigBuilder) plan() *cursorContextPlan {
+	return &cursorContextPlan{
+		config:         b.hard,
+		configSystem:   b.system,
+		configSampling: b.sampling,
+		history:        NewCursorHistoryDigest(),
+	}
+}
 
 // appendCursorContextItems 把一组项按顺序并入历史链。
 func appendCursorContextItems(d *CursorHistoryDigest, items []cursorContextItem) error {
@@ -5354,19 +5418,21 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 	if err := builder.text("config.model", model); err != nil {
 		return nil, err
 	}
+	builder.in(cursorConfigSystem)
 	if err := builder.text("config.instructions", req.Instructions); err != nil {
 		return nil, err
 	}
-	plan := &cursorContextPlan{config: builder.digest(), history: NewCursorHistoryDigest()}
+	plan := builder.plan()
 	plan.instructions = strings.TrimSpace(req.Instructions) != ""
 
+	builder.in(cursorConfigHard)
 	tools := make([]string, 0, len(req.Tools))
 	for _, tool := range req.Tools {
 		item, name, err := cursorChatToolItem(tool)
 		if err != nil {
 			return nil, err
 		}
-		if err := plan.config.AppendItem(item.itemType, item.canonical); err != nil {
+		if err := builder.item(item.itemType, item.canonical); err != nil {
 			return nil, err
 		}
 		if name != "" {
@@ -5374,6 +5440,7 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 		}
 	}
 	plan.tools = tools
+	builder.in(cursorConfigSampling)
 	if err := builder.json("config.response_format", req.ResponseFormat); err != nil {
 		return nil, err
 	}
@@ -5398,8 +5465,6 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 	if err := builder.json("config.stop", req.Stop); err != nil {
 		return nil, err
 	}
-	// 配置项在工具声明之后继续并入同一链（顺序固定，两端同源）。
-	plan.config = builder.digest()
 
 	// 尾部连续工具结果 = 本批结果。
 	start := len(req.Messages)
@@ -5435,7 +5500,8 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 			if err != nil {
 				return nil, err
 			}
-			if err := plan.config.AppendText("config.system", text); err != nil {
+			builder.in(cursorConfigSystem)
+			if err := builder.text("config.system", text); err != nil {
 				return nil, err
 			}
 			continue
@@ -5576,27 +5642,29 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 	if err := builder.text("config.model", model); err != nil {
 		return nil, err
 	}
-	plan := &cursorContextPlan{config: builder.digest(), history: NewCursorHistoryDigest()}
+	plan := builder.plan()
 	systemBlocks, err := cursorAnthropicBlocks(req.System)
 	if err != nil {
 		return nil, err
 	}
+	builder.in(cursorConfigSystem)
 	for _, block := range systemBlocks {
 		item, err := cursorAnthropicBlockItem("system", block)
 		if err != nil {
 			return nil, err
 		}
-		if err := plan.config.AppendItem(item.itemType, item.canonical); err != nil {
+		if err := builder.item(item.itemType, item.canonical); err != nil {
 			return nil, err
 		}
 	}
+	builder.in(cursorConfigHard)
 	tools := make([]string, 0, len(req.Tools))
 	for _, tool := range req.Tools {
 		encoded, err := json.Marshal(tool)
 		if err != nil {
 			return nil, fmt.Errorf("%w: messages tool marshal", ErrCursorResumeUnsupportedContent)
 		}
-		if err := plan.config.AppendItem("config.tool", encoded); err != nil {
+		if err := builder.item("config.tool", encoded); err != nil {
 			return nil, err
 		}
 		if name := strings.TrimSpace(tool.Name); name != "" {
@@ -5604,6 +5672,7 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 		}
 	}
 	plan.tools = tools
+	builder.in(cursorConfigSampling)
 	if err := builder.floatPresence("config.temperature", req.Temperature); err != nil {
 		return nil, err
 	}
@@ -5618,7 +5687,7 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 		if err != nil {
 			return nil, fmt.Errorf("%w: messages thinking config", ErrCursorResumeUnsupportedContent)
 		}
-		if err := plan.config.AppendItem("config.thinking", encoded); err != nil {
+		if err := builder.item("config.thinking", encoded); err != nil {
 			return nil, err
 		}
 	} else if err := builder.text("config.thinking", "absent"); err != nil {
@@ -5629,13 +5698,12 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 		if err != nil {
 			return nil, fmt.Errorf("%w: messages output config", ErrCursorResumeUnsupportedContent)
 		}
-		if err := plan.config.AppendItem("config.output", encoded); err != nil {
+		if err := builder.item("config.output", encoded); err != nil {
 			return nil, err
 		}
 	} else if err := builder.text("config.output", "absent"); err != nil {
 		return nil, err
 	}
-	plan.config = builder.digest()
 
 	// 尾部连续的"全部为 tool_result 的 user 消息" = 本批结果容器（单/多容器统一规范化）。
 	start := len(req.Messages)
@@ -5713,7 +5781,7 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 				return nil, ierr
 			}
 			if role == "system" {
-				if err := plan.config.AppendItem(item.itemType, item.canonical); err != nil {
+				if err := plan.configSystem.AppendItem(item.itemType, item.canonical); err != nil {
 					return nil, err
 				}
 				continue
@@ -5851,7 +5919,7 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 	if err := builder.text("config.model", model); err != nil {
 		return nil, err
 	}
-	plan := &cursorContextPlan{config: builder.digest(), history: NewCursorHistoryDigest()}
+	plan := builder.plan()
 	// 工具元数据与本请求的声明同源：续轮写出侧据此还原 custom / namespace / tool_search。
 	toolMeta, metaErr := cursorToolMetaFromResponses(req)
 	if metaErr != nil {
@@ -5862,16 +5930,18 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 	// 入口（转换不得抹掉该标记）。
 	plan.previousResponseID = strings.TrimSpace(req.PreviousResponseID)
 	plan.instructions = strings.TrimSpace(req.Instructions) != ""
-	if err := plan.config.AppendText("config.instructions", req.Instructions); err != nil {
+	builder.in(cursorConfigSystem)
+	if err := builder.text("config.instructions", req.Instructions); err != nil {
 		return nil, err
 	}
+	builder.in(cursorConfigHard)
 	tools := make([]string, 0, len(req.Tools))
 	for _, tool := range req.Tools {
 		encoded, err := json.Marshal(tool)
 		if err != nil {
 			return nil, fmt.Errorf("%w: responses tool marshal", ErrCursorResumeUnsupportedContent)
 		}
-		if err := plan.config.AppendItem("config.tool", encoded); err != nil {
+		if err := builder.item("config.tool", encoded); err != nil {
 			return nil, err
 		}
 		if name := strings.TrimSpace(tool.Name); name != "" {
@@ -5879,6 +5949,7 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		}
 	}
 	plan.tools = tools
+	builder.in(cursorConfigSampling)
 	if err := builder.intPresence("config.max_output_tokens", req.MaxOutputTokens); err != nil {
 		return nil, err
 	}
@@ -5896,7 +5967,7 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		if err != nil {
 			return nil, fmt.Errorf("%w: responses reasoning config", ErrCursorResumeUnsupportedContent)
 		}
-		if err := plan.config.AppendItem("config.reasoning", encoded); err != nil {
+		if err := builder.item("config.reasoning", encoded); err != nil {
 			return nil, err
 		}
 	} else if err := builder.text("config.reasoning", "absent"); err != nil {
@@ -5907,13 +5978,12 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		if err != nil {
 			return nil, fmt.Errorf("%w: responses text config", ErrCursorResumeUnsupportedContent)
 		}
-		if err := plan.config.AppendItem("config.text", encoded); err != nil {
+		if err := builder.item("config.text", encoded); err != nil {
 			return nil, err
 		}
 	} else if err := builder.text("config.text", "absent"); err != nil {
 		return nil, err
 	}
-	plan.config = builder.digest()
 
 	items, err := cursorResponsesInputItems(req.Input)
 	if err != nil {
@@ -6035,7 +6105,8 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 	if err := builder.text("config.model", model); err != nil {
 		return nil, err
 	}
-	plan := &cursorContextPlan{config: builder.digest(), history: NewCursorHistoryDigest()}
+	plan := builder.plan()
+	builder.in(cursorConfigSystem)
 	if len(bytes.TrimSpace(doc.SystemInstruction)) > 0 {
 		var sys struct {
 			Parts []map[string]json.RawMessage `json:"parts"`
@@ -6043,13 +6114,14 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 		if err := json.Unmarshal(doc.SystemInstruction, &sys); err == nil {
 			for _, part := range sys.Parts {
 				if text, ok := cursorGeminiPartText(part); ok {
-					if err := plan.config.AppendText("config.system", text); err != nil {
+					if err := builder.text("config.system", text); err != nil {
 						return nil, err
 					}
 				}
 			}
 		}
 	}
+	builder.in(cursorConfigSampling)
 	if err := builder.json("config.generation", doc.GenerationConfig); err != nil {
 		return nil, err
 	}
@@ -6057,8 +6129,9 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 		return nil, err
 	}
 	tools := make([]string, 0, 8)
+	builder.in(cursorConfigHard)
 	if len(bytes.TrimSpace(doc.Tools)) > 0 {
-		if err := plan.config.AppendJSON("config.tools", doc.Tools); err != nil {
+		if err := builder.json("config.tools", doc.Tools); err != nil {
 			return nil, err
 		}
 		var declarations []struct {
@@ -6077,7 +6150,6 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 		}
 	}
 	plan.tools = tools
-	plan.config = builder.digest()
 
 	// 尾部连续"全部为 functionResponse 的 content" = 本批结果容器。
 	start := len(doc.Contents)
@@ -6598,6 +6670,8 @@ func (s *CursorExecutionService) ResumeCursorSession(
 	// 摘要快照必须在锁内取（并发续轮时胜者会推进历史链）：比较的是**快照**，
 	// 不是可被并发改写的活指针。
 	storedConfig := record.configDigest.Clone()
+	storedSystem := record.configSystemDigest.Clone()
+	storedSampling := record.configSamplingDigest.Clone()
 	storedHistory := record.historyDigest.Clone()
 	exposed := append([]string(nil), record.exposedTools...)
 	instructionsDeclared := record.instructionsDeclared
@@ -6640,8 +6714,17 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		return nil, newCursorResumeError(http.StatusBadRequest, "instructions_withdrawn", ErrCursorResumeInstructionsWithdrawn)
 	}
 	if storedConfig != nil && !storedConfig.Equal(plan.config) {
+		// 硬组（模型 + 工具声明/schema）变了就是**另一次生成**：上游 wire 契约、工具模式、
+		// 计费口径都不再是同一件事，必须拒绝。拒绝前先落痕，把"究竟是哪一组、哪一项"
+		// 钉在日志里（此前这里只有一个 config_changed，线上无法区分根因）。
+		cursorLogResumeConfigHardMismatch(ctx, record, storedConfig, exposed, plan)
 		return nil, newCursorResumeError(http.StatusBadRequest, "config_changed", ErrCursorResumeConfigChanged)
 	}
+	// 软组（system 文本 / 采样参数）**只留痕不拒绝**：这两组是客户端每轮重新拼出来的
+	// 字节——system 里带环境快照、工具说明会变，重试时 thinking/温度字段会丢。逐字节比对
+	// 必然把正常续轮拒成 CUR-RES-04，而它想挡的"篡改"已由下面的结果校验（编号归属 +
+	// 完整性）挡住。留着当闸门等于拿大量正常用户的失败去拦一个不存在的威胁。
+	cursorLogResumeConfigDrift(ctx, record, storedSystem, storedSampling, plan)
 	if !cursorToolSetEqual(exposed, plan.tools) {
 		return nil, newCursorResumeError(http.StatusBadRequest, "tool_set_changed", ErrCursorResumeToolSetChanged)
 	}
@@ -6775,6 +6858,83 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		Stream:        in.Stream,
 		Duration:      time.Since(started),
 	}, nil
+}
+
+// cursorDigestPrefix 返回摘要的前 12 位十六进制（只用于日志比对，不参与任何判定）。
+func cursorDigestPrefix(d *CursorHistoryDigest) string {
+	if d == nil {
+		return ""
+	}
+	hex := d.HexString()
+	if len(hex) > 12 {
+		return hex[:12]
+	}
+	return hex
+}
+
+// cursorLogResumeConfigHardMismatch 记录续轮**硬组**（模型 + 工具声明/schema）不一致。
+//
+// 硬组不一致会拒绝续轮（config_changed），但只看这个错误码无法知道到底是模型换了还是
+// 工具 schema 换了——线上排查只能猜。这里把两组各自的项数与摘要前缀钉进日志：只写
+// 计数与前缀，不含任何工具正文/参数值（安全字段，不可反推内容）。
+func cursorLogResumeConfigHardMismatch(
+	ctx context.Context,
+	record *cursorSessionRecord,
+	stored *CursorHistoryDigest,
+	exposed []string,
+	plan *cursorContextPlan,
+) {
+	if record == nil || plan == nil {
+		return
+	}
+	cursorPhaseLog(ctx, zapcore.WarnLevel, "resume_config_hard_mismatch", record.spec.requestedModel,
+		zap.String("session_id", record.id),
+		zap.Int("hard_items_stored", stored.ItemCount()),
+		zap.Int("hard_items_request", plan.config.ItemCount()),
+		zap.String("hard_digest_stored", cursorDigestPrefix(stored)),
+		zap.String("hard_digest_request", cursorDigestPrefix(plan.config)),
+		zap.Int("tool_count_stored", len(exposed)),
+		zap.Int("tool_count_request", len(plan.tools)))
+}
+
+// cursorLogResumeConfigDrift 记录续轮**软组**配置漂移（system 文本 / 采样参数）。
+//
+// 这两组不影响续轮准入（见 ResumeCursorSession 的判定说明），但它们是"CUR-RES-04
+// 到底哪一项变了"的唯一可观测证据：此前整链哈希比较只能给出一个 config_changed，
+// 无法区分客户端改了 system、还是重试时丢了 thinking。日志只写分组名、项数与摘要
+// 前缀，不含任何正文/参数值（安全字段，不可反推内容）。
+func cursorLogResumeConfigDrift(
+	ctx context.Context,
+	record *cursorSessionRecord,
+	storedSystem, storedSampling *CursorHistoryDigest,
+	plan *cursorContextPlan,
+) {
+	if record == nil || plan == nil {
+		return
+	}
+	fields := []zap.Field{zap.String("session_id", record.id)}
+	groups := make([]string, 0, 2)
+	if storedSystem != nil && plan.configSystem != nil && !storedSystem.Equal(plan.configSystem) {
+		groups = append(groups, "system")
+		fields = append(fields,
+			zap.Int("system_items_stored", storedSystem.ItemCount()),
+			zap.Int("system_items_request", plan.configSystem.ItemCount()),
+			zap.String("system_digest_stored", cursorDigestPrefix(storedSystem)),
+			zap.String("system_digest_request", cursorDigestPrefix(plan.configSystem)))
+	}
+	if storedSampling != nil && plan.configSampling != nil && !storedSampling.Equal(plan.configSampling) {
+		groups = append(groups, "sampling")
+		fields = append(fields,
+			zap.Int("sampling_items_stored", storedSampling.ItemCount()),
+			zap.Int("sampling_items_request", plan.configSampling.ItemCount()),
+			zap.String("sampling_digest_stored", cursorDigestPrefix(storedSampling)),
+			zap.String("sampling_digest_request", cursorDigestPrefix(plan.configSampling)))
+	}
+	if len(groups) == 0 {
+		return
+	}
+	fields = append(fields, zap.Strings("drift_groups", groups))
+	cursorPhaseLog(ctx, zapcore.WarnLevel, "resume_config_drift", record.spec.requestedModel, fields...)
 }
 
 // cursorResumePlan 按协议重算续轮上下文计划（解码一次，不留正文）。
@@ -7344,7 +7504,9 @@ func (r *cursorSessionRecord) recordPlan(identity CursorSessionIdentity, plan *c
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.identity = identity
-	r.configDigest = plan.config
+	r.configDigest = plan.config.Clone()
+	r.configSystemDigest = plan.configSystem.Clone()
+	r.configSamplingDigest = plan.configSampling.Clone()
 	if plan.history != nil {
 		r.historyDigest = plan.history.Clone()
 	}
