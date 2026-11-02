@@ -1392,17 +1392,45 @@ func (s *GatewayService) DoGrokNativeResponsesJSON(ctx context.Context, account 
 	return respBytes, nil
 }
 
-// mixedListingAccountAllowed mirrors the mixed-scheduling rule in
-// GeminiMessagesCompatService.listSchedulableAccountsOnce: a gemini group may be
-// served by antigravity accounts, so model listing must consider them too.
+// mixedListingAccountAllowed 判定账号能否作为「跨平台聚合供给账号」进入某平台的
+// 候选/模型列表：所有聚合平台账号（antigravity / cursor / codebuddy / muse /
+// opencode_go / command_code / cline / other）都可以为任意具体平台分组提供候选，
+// 具体是否展示某个模型由 mixedListingModelAllowed（按模型家族匹配）负责。
+//
+// 该判定不再依赖 mixed_scheduling 开关：候选展示是管理端静态配置口径，不应受
+// 运行时调度开关控制（混合调度已自动启用，无需手动开启）。
 func mixedListingAccountAllowed(groupPlatform string, account *Account) bool {
-	return groupPlatform == PlatformGemini && account.IsMixedSchedulingEnabled()
+	return isAggregatePlatformAccount(account.Platform)
 }
 
-// mixedListingModelAllowed limits what a mixed-scheduling account may advertise
-// on the group's platform: only gemini-* wire IDs are meaningful on a gemini group.
+// isAggregatePlatformAccount 判定账号平台是否为多模型家族聚合平台。
+// 聚合平台账号的 model_mapping 可包含多个家族的模型，能为多个平台分组提供候选。
+func isAggregatePlatformAccount(platform string) bool {
+	switch platform {
+	case PlatformAntigravity,
+		PlatformCursor,
+		PlatformCodeBuddy,
+		PlatformMuse,
+		PlatformOpenCodeGo,
+		PlatformCommandCode,
+		PlatformCline,
+		PlatformOther:
+		return true
+	default:
+		return false
+	}
+}
+
+// mixedListingModelAllowed 判定聚合平台账号能否在分组平台上展示该模型：
+// 用 DetectModelPlatform 检测模型家族，只有家族与分组平台一致时才展示。
+// 无法识别家族的模型失败关闭（不展示）——自定义/未知厂商模型无法保证可调度。
 func mixedListingModelAllowed(groupPlatform, model string) bool {
-	return groupPlatform == PlatformGemini && isAntigravityGeminiModel(model)
+	detectedPlatform, ok := DetectModelPlatform(model)
+	if !ok {
+		// 无法检测家族的模型不进入候选（fail closed）。
+		return false
+	}
+	return detectedPlatform == groupPlatform
 }
 
 // cursorSupplyPublicModelIDsFromMapping 是 Cursor 供给账号 model_mapping 键 → 公开模型名
