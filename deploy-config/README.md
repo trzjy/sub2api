@@ -29,23 +29,20 @@
 
 ## 更新流程
 
-**应用代码升级**：见 `sub2api-ops.md` 第 5 节（服务器端构建 `sub2api:<commit>-w` 镜像并切换 `SUB2API_IMAGE_TAG`）。
+**应用代码升级**：见 `sub2api-ops.md` 第 5 节。部署动作只在生产服务器 SSH 会话中执行；本地只推送 `origin/main`，禁止本地运行任何部署脚本或容器命令。
 
 **仅部署配置变更**（compose / nginx / 本目录文档）：
 
 ```bash
-# 本地
+# 本地仅提交并推送，不执行部署脚本或容器命令
 cd /mnt/data/sub2api
 git add deploy-config && git commit -m "..." && git push origin main
 
-# 服务器
-ssh yiyutu-server
-cd /opt/sub2api && git fetch origin && git reset --hard origin/main
-docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d   # 应用配置
-nginx -t && systemctl reload nginx                                               # 若改 nginx
+# 生产服务器（唯一部署边界）
+ssh yiyutu-server '/opt/sub2api/deploy/deploy.sh origin/main'
 ```
 
-> 注意：`git reset --hard origin/main` 会把服务器工作区对齐远端——服务器上的源码工作区只作部署/构建源使用，不要在上面做本地编辑。
+> 注意：服务器脚本会先 `git fetch origin`，再检出并构建 `origin/main`，最后执行全项目 Compose 重建和后置健康断言。不要在本地执行 `deploy.sh`，也不要用手工 `docker compose up` 绕过唯一入口。
 
 ## 首次部署（从 fork 拉取）
 

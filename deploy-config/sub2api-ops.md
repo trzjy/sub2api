@@ -217,9 +217,24 @@ docker exec sub2api-redis redis-cli ping   # 期望 PONG
 
 ---
 
-## 5. 升级流程（服务器端构建镜像）
+## 5. 升级流程（只在生产服务器执行）
 
-> 生产镜像在 `yiyutu-server` 本地构建（不推 registry），以 `<提交短哈希>-w` 打标签，compose 经 `.env` 的 `SUB2API_IMAGE_TAG` 引用。**发布前先在本地把要发布的提交推到 `origin main`**。
+> 本地工作站只负责提交、定向验证和推送 `origin/main`。**禁止在本地执行
+> `./deploy/deploy.sh`、`deploy.sh --check`、`deploy-to-server.sh` 或任何本地容器部署命令。**
+> 预检、服务器端构建、Compose 重建和健康检查全部由生产服务器 SSH 会话完成。
+
+唯一执行命令：
+
+```bash
+# 本地仅推送，不执行部署
+git push origin main
+
+# 生产服务器（唯一部署边界；脚本内部会先 fetch origin）
+ssh yiyutu-server '/opt/sub2api/deploy/deploy.sh origin/main'
+```
+
+以下命令仅说明服务器脚本内部流程，禁止从本地复制执行，也禁止拆开后绕过
+`/opt/sub2api/deploy/deploy.sh` 手工部署：
 
 ```bash
 # 本地：提交并推送（前置）
