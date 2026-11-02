@@ -144,6 +144,10 @@ func TestSchedulerCursorSnapshotAccountEventsRebuildOldAndCurrentGroups(t *testi
 				nativeGroups, cursorGroups = []int64{11}, []int64{0, 11}
 			}
 			wantBuckets := append(schedulerBucketsForTest(nativeGroups, PlatformAnthropic, PlatformGemini), schedulerBucketsForTest(cursorGroups, PlatformCursor)...)
+			// cursor 是聚合供应源：账号绑定变动不只波及 anthropic/gemini，还会波及所有
+			// 「可桥接平台」的快照桶（grok / openai / muse，见 cursorNativeBridgePlatforms），
+			// 因为 cursor 账号能承接这些原生平台的请求。桥接清单扩缩时这里要同步。
+			wantBuckets = append(wantBuckets, schedulerBucketsForTest(nativeGroups, PlatformGrok, PlatformOpenAI, PlatformMuse)...)
 			require.ElementsMatch(t, wantBuckets, cache.capturedBuckets(), "each affected bucket must be rebuilt exactly once")
 			for _, platform := range []string{PlatformAnthropic, PlatformGemini} {
 				for _, mode := range []string{SchedulerModeSingle, SchedulerModeForced, SchedulerModeMixed} {
