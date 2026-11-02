@@ -21,10 +21,11 @@ func testConfig() *config.Config {
 
 // mockAccountRepoForPlatform 单平台测试用的 mock
 type mockAccountRepoForPlatform struct {
-	accounts         []Account
-	accountsByID     map[int64]*Account
-	listPlatformFunc func(ctx context.Context, platform string) ([]Account, error)
-	getByIDCalls     int
+	accounts          []Account
+	accountsByID      map[int64]*Account
+	listPlatformFunc  func(ctx context.Context, platform string) ([]Account, error)
+	listPlatformsFunc func(ctx context.Context, platforms []string) ([]Account, error)
+	getByIDCalls      int
 }
 
 // ListTempUnschedulableAccounts 是健康探测恢复候选接口的 no-op 桩
@@ -152,6 +153,11 @@ func (m *mockAccountRepoForPlatform) ListSchedulableByGroupID(ctx context.Contex
 	return nil, nil
 }
 func (m *mockAccountRepoForPlatform) ListSchedulableByPlatforms(ctx context.Context, platforms []string) ([]Account, error) {
+	// 多平台查询钩子：cursor 桥接放开后，openai 等可桥接平台的桶改走多平台查询
+	// （见 cursorSupplyPlatformsFor），只设 listPlatformFunc 的用例会永远等不到 DB 返回。
+	if m.listPlatformsFunc != nil {
+		return m.listPlatformsFunc(ctx, platforms)
+	}
 	var result []Account
 	platformSet := make(map[string]bool)
 	for _, p := range platforms {

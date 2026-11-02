@@ -202,7 +202,9 @@ func TestSchedulerRebuildRetireAfterDBLoadFencesPublish(t *testing.T) {
 		<-releaseSet
 	}
 	repo := &mockAccountRepoForPlatform{
-		listPlatformFunc: func(context.Context, string) ([]Account, error) {
+		// openai 属可桥接平台：桶查询会带上 cursor 走多平台入口（ListSchedulableByGroupIDAndPlatforms），
+		// 故 DB 返回钩子必须挂多平台方法，只挂单平台会让本用例永远等不到返回。
+		listPlatformsFunc: func(context.Context, []string) ([]Account, error) {
 			close(dbReturned)
 			return []Account{{ID: 6201, Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true}}, nil
 		},
