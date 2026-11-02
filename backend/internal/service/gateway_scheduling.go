@@ -1040,9 +1040,23 @@ func (s *GatewayService) listSchedulableAccounts(ctx context.Context, groupID *i
 		}
 		return accounts, useMixed, err
 	}
-	useMixed := (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
+	useMixed := !hasForcePlatform
 	if useMixed {
-		platforms := cursorSupplyPlatformsFor(groupID, []string{platform, PlatformAntigravity})
+		// 聚合平台账号可承接任意原生平台请求：查询时一并取回原生平台 + 所有聚合平台账号，
+		// 后续由 isAccountAdmittedForPlatform 和模型家族检测逐条裁决。
+		aggregatePlatforms := []string{
+			PlatformAntigravity,
+			PlatformCursor,
+			PlatformCodeBuddy,
+			PlatformMuse,
+			PlatformOpenCodeGo,
+			PlatformCommandCode,
+			PlatformCline,
+			PlatformOther,
+		}
+		basePlatforms := append([]string{platform}, aggregatePlatforms...)
+		platforms := cursorSupplyPlatformsFor(groupID, basePlatforms)
+
 		var accounts []Account
 		var err error
 		if groupID != nil {
@@ -1059,11 +1073,10 @@ func (s *GatewayService) listSchedulableAccounts(ctx context.Context, groupID *i
 				"error", err)
 			return nil, useMixed, err
 		}
+		// 聚合平台账号默认启用混合调度，不依赖 mixed_scheduling 开关（该开关已废弃）。
+		// 入选与否由模型家族检测（DetectModelPlatform）和账号 model_mapping 决定。
 		filtered := make([]Account, 0, len(accounts))
 		for _, acc := range accounts {
-			if acc.Platform == PlatformAntigravity && !acc.IsMixedSchedulingEnabled() {
-				continue
-			}
 			filtered = append(filtered, acc)
 		}
 		slog.Debug("account_scheduling_list_mixed",
@@ -1182,7 +1195,8 @@ func (s *GatewayService) isAccountAllowedForPlatform(account *Account, platform 
 		if account.Platform == platform {
 			return true
 		}
-		return account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()
+		// 所有聚合平台账号都可承接任意原生平台请求（不再依赖 mixed_scheduling 开关）
+		return isAggregatePlatformAccount(account.Platform)
 	}
 	return account.Platform == platform
 }
