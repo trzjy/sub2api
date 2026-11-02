@@ -14,7 +14,7 @@ import (
 func TestCursorThinkStrip_FullSegment(t *testing.T) {
 	p := cursorNewStreamParser("claude-sonnet-5-5")
 	got := p.filterThinkDelta("<think>\n推理内容\n</think>\n\n正文答案")
-	require.Equal(t, "\n\n正文答案", got)
+	require.Equal(t, "正文答案", got, "剥离后残留的前导空行也必须在首段去掉")
 	require.False(t, p.inThink)
 	require.Empty(t, p.flushThinkTail())
 	require.Contains(t, p.rawContent, "<think>", "原始文本必须保留，供拒付模板匹配")
@@ -28,7 +28,7 @@ func TestCursorThinkStrip_CrossFrame(t *testing.T) {
 		out.WriteString(p.filterThinkDelta(chunk))
 	}
 	out.WriteString(p.flushThinkTail())
-	require.Equal(t, "\n\nOK", out.String())
+	require.Equal(t, "OK", out.String())
 	require.False(t, p.inThink)
 }
 

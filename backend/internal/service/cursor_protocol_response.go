@@ -785,6 +785,9 @@ type cursorStreamParser struct {
 	inThink  bool
 	// thinkFlushed 保证收尾时尾段只吐出一次。
 	thinkFlushed bool
+	// trimmedLeading 表示已交付过第一段可见正文：剥离 <think> 后残留的换行只在
+	// 首段被去掉（正文开头的空行是剥离副产物，不该让客户端看到两行空白）。
+	trimmedLeading bool
 	// usage 是 turn_ended 给出的真实用量（未收到则 Seen=false，各项为 0）。
 	usage cursorTurnUsage
 	// rejected 命中流内注入模板（拒付 / 模型暂不可用）后的结构化错误（非 nil 即终态失败）。
@@ -1041,7 +1044,7 @@ func (p *cursorStreamParser) filterThinkDelta(delta string) string {
 			idx := strings.Index(p.thinkRaw, cursorThinkCloseTag)
 			if idx < 0 {
 				p.thinkRaw = trailingPartialTag(p.thinkRaw, cursorThinkCloseTag)
-				return out.String()
+				return p.finalizeVisible(out.String())
 			}
 			p.thinkRaw = p.thinkRaw[idx+len(cursorThinkCloseTag):]
 			p.inThink = false
@@ -1057,8 +1060,23 @@ func (p *cursorStreamParser) filterThinkDelta(delta string) string {
 		keep := trailingPartialTag(p.thinkRaw, cursorThinkOpenTag)
 		out.WriteString(p.thinkRaw[:len(p.thinkRaw)-len(keep)])
 		p.thinkRaw = keep
-		return out.String()
+		return p.finalizeVisible(out.String())
 	}
+}
+
+// finalizeVisible 归一本次可交付文本：剥离 <think> 后残留的前导空白只在**首段**
+// 去掉——否则客户端会先看到两行空行（活体：剥离 "<think>…</think>\n\n3293" 后
+// 正文变成 "\n\n3293"）。纯空白的首段直接丢弃。
+func (p *cursorStreamParser) finalizeVisible(raw string) string {
+	if raw == "" || p.trimmedLeading {
+		return raw
+	}
+	trimmed := strings.TrimLeft(raw, "\r\n\t ")
+	if trimmed == "" {
+		return ""
+	}
+	p.trimmedLeading = true
+	return trimmed
 }
 
 // flushThinkTail 在流收尾时吐出缓冲尾段：处于推理段内的残留一律丢弃（未闭合的
@@ -1072,7 +1090,7 @@ func (p *cursorStreamParser) flushThinkTail() string {
 		p.thinkRaw = ""
 		return ""
 	}
-	tail := p.thinkRaw
+	tail := p.finalizeVisible(p.thinkRaw)
 	p.thinkRaw = ""
 	return tail
 }
