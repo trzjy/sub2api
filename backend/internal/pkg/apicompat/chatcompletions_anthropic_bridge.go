@@ -158,10 +158,26 @@ func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage, re
 // assistant tool_use blocks become tool_calls on the assistant message.
 func anthropicMsgToChatMessages(m AnthropicMessage, requestHasTools bool) ([]ChatMessage, error) {
 	switch m.Role {
+	case "system":
+		parts, err := parseAnthropicSystemContentParts(m.Content)
+		if err != nil {
+			return nil, err
+		}
+		text := joinResponsesContentPartText(parts)
+		if text == "" {
+			return nil, nil
+		}
+		content, err := json.Marshal(text)
+		if err != nil {
+			return nil, err
+		}
+		return []ChatMessage{{Role: "system", Content: content}}, nil
 	case "assistant":
 		return anthropicAssistantToChatMessages(m.Content, requestHasTools)
-	default: // "user" and any unknown role
+	case "user":
 		return anthropicUserToChatMessages(m.Content)
+	default:
+		return nil, fmt.Errorf("unsupported anthropic message role %q", m.Role)
 	}
 }
 

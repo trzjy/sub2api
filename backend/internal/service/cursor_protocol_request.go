@@ -522,6 +522,10 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 			turns = append(turns, cursorAgentTurn{role: "user", text: text, images: images})
 			sawUser = true
 		case "assistant", "ai":
+			if m.FunctionCall != nil {
+				return nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest,
+					"legacy assistant function_call is not supported by cursor protocol")
+			}
 			// 图片落点仅在 user 侧：assistant 历史 blob 没有任何 image 字段
 			// （agent.v1.ConversationHistoryAssistantContent 只含
 			// text / reasoning / redacted_reasoning / tool_call）。带图属协议不支持
@@ -626,6 +630,10 @@ func cursorToolResultText(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 	}
 	id := m.ToolCallID
 	name := m.Name
+	if strings.EqualFold(strings.TrimSpace(m.Role), "function") && strings.TrimSpace(id) == "" {
+		return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest,
+			"legacy function message has no tool_call_id and cannot be associated with a Cursor tool call")
+	}
 	if name == "" && m.FunctionCall != nil {
 		name = m.FunctionCall.Name
 	}

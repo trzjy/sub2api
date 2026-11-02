@@ -76,6 +76,34 @@ func TestAnthropicToChatCompletionsRequest_SystemPrompt(t *testing.T) {
 	require.Equal(t, `"You are helpful"`, string(out.Messages[0].Content))
 }
 
+func TestAnthropicToChatCompletionsRequest_SystemMessageRolePreserved(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 100,
+		Messages: []AnthropicMessage{
+			{Role: "system", Content: json.RawMessage(`"Follow the repository instructions."`)},
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+		},
+	}
+
+	out, err := AnthropicToChatCompletionsRequest(req)
+	require.NoError(t, err)
+	require.Len(t, out.Messages, 2)
+	require.Equal(t, "system", out.Messages[0].Role)
+	require.JSONEq(t, `"Follow the repository instructions."`, string(out.Messages[0].Content))
+}
+
+func TestAnthropicToChatCompletionsRequest_UnknownRoleRejected(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 100,
+		Messages:  []AnthropicMessage{{Role: "developer", Content: json.RawMessage(`"do not demote me"`)}},
+	}
+
+	_, err := AnthropicToChatCompletionsRequest(req)
+	require.Error(t, err)
+}
+
 func TestAnthropicToChatCompletionsRequest_ToolUseInAssistant(t *testing.T) {
 	req := &AnthropicRequest{
 		Model:     "claude-sonnet-4-20250514",

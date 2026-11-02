@@ -41,6 +41,35 @@ func TestAnthropicToResponses_BasicText(t *testing.T) {
 	assert.Equal(t, "Hello", parts[0].Text)
 }
 
+func TestAnthropicToResponses_SystemMessageRolePreserved(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "gpt-5.2",
+		MaxTokens: 100,
+		Messages: []AnthropicMessage{
+			{Role: "system", Content: json.RawMessage(`"Follow the repository instructions."`)},
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+		},
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+	var items []ResponsesInputItem
+	require.NoError(t, json.Unmarshal(resp.Input, &items))
+	require.Len(t, items, 2)
+	require.Equal(t, "system", items[0].Role)
+}
+
+func TestAnthropicToResponses_UnknownRoleRejected(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "gpt-5.2",
+		MaxTokens: 100,
+		Messages:  []AnthropicMessage{{Role: "developer", Content: json.RawMessage(`"do not demote me"`)}},
+	}
+
+	_, err := AnthropicToResponses(req)
+	require.Error(t, err)
+}
+
 func TestAnthropicToResponses_SystemPrompt(t *testing.T) {
 	t.Run("string", func(t *testing.T) {
 		req := &AnthropicRequest{
