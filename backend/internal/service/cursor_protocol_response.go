@@ -165,8 +165,11 @@ func (s *cursorSSEStream) next() error {
 			return err
 		}
 		if ev.Kind == cursorEventText {
+			// content 只收可见正文（对外交付），rawContent 收原始文本：上游注入的
+			// 拒付 / 模型暂不可用模板与内联 tool call 都按原始文本判定，剥离 think
+			// 不能改变这些终态判定的灵敏度。
 			s.parser.content += ev.Text
-			if err := cursorMatchKeyRejected(s.parser.content); err != nil {
+			if err := cursorMatchKeyRejected(s.parser.rawContent); err != nil {
 				return err
 			}
 			// 正文内联 tool call：上游没走结构化委托帧，把调用写进了正文。
@@ -174,12 +177,12 @@ func (s *cursorSSEStream) next() error {
 			// 让客户端收到明确错误，而不是拿到一段不可执行的正文。
 			//
 			// 短路：正文里没有开标记就不必调解析器（长正文避免 O(n²)）。
-			if strings.Contains(s.parser.content, cursorInlineToolCallOpen) {
-				if _, _, recognized := cursorParseInlineToolCalls(s.parser.content); recognized {
+			if strings.Contains(s.parser.rawContent, cursorInlineToolCallOpen) {
+				if _, _, recognized := cursorParseInlineToolCalls(s.parser.rawContent); recognized {
 					// 先落 phase 事件（流式侧归一不了 → 只有拒绝事件），再返回错误。
 					s.parser.logPhase(zapcore.WarnLevel, cursorPhaseInlineToolCallRejected, "",
 						cursorInlineToolCallRejectedFields(
-							cursorInlineToolCallShapeOf(s.parser.content),
+							cursorInlineToolCallShapeOf(s.parser.rawContent),
 							cursorInlineRejectReasonStreamHit)...)
 					return fmt.Errorf("%w: inline tool call present in stream", ErrCursorProtocol)
 				}
@@ -231,6 +234,16 @@ func (s *cursorSSEStream) next() error {
 		}
 	}
 	if s.done {
+		// 收尾尾段：<think> 剥离的跨帧缓冲在这里吐完（段内残留一律丢弃）。
+		// 必须在 finish 之前写出，否则正文末尾几个字符会丢。
+		if tail := s.parser.flushThinkTail(); tail != "" {
+			if !s.parser.started {
+				s.buffer.WriteString(s.parser.cursorSSERoleChunk())
+				s.parser.started = true
+			}
+			s.parser.markFirstToken()
+			s.buffer.WriteString(s.parser.cursorSSETextChunk(tail))
+		}
 		// 交付侧 id 重写（派发单 CALLID）：在写出**任何** tool_calls 字节之前决定出站 id。
 		// 失败即返回错误（本 HTTP 不交出带 id 的工具批），绝不发原 id 冒充新调用。
 		if err := s.parser.assignToolCallWireIDs(); err != nil {
@@ -759,8 +772,19 @@ type cursorStreamParser struct {
 	started bool
 	// endStreamSeen 表示是否已收到 EndStream 帧（收到后禁止再收消息帧）。
 	endStreamSeen bool
-	// content 是累加后的当前完整文本（TextDeltaUpdate 是**增量**，见下）。
+	// content 是累加后的当前完整**可见**文本（TextDeltaUpdate 是**增量**，见下）。
+	// 上游把推理内联进正文（<think>…</think>），故 content 只累加剥离后的正文：
+	// 它同时是 httpText() 对外交付与内联 tool call 形状判定的依据。
 	content string
+	// rawContent 是累加后的原始文本（含 <think> 段），只用于上游注入模板匹配
+	// （拒付 / 模型暂不可用）：那类模板可能出现在 think 段之后，用可见文本判定会漏。
+	rawContent string
+	// thinkRaw / inThink 是 <think> 段剥离的跨帧状态：thinkRaw 缓冲可能是标签
+	// 前缀的尾段，inThink 表示当前处于推理段内（段内文本一律不对外输出）。
+	thinkRaw string
+	inThink  bool
+	// thinkFlushed 保证收尾时尾段只吐出一次。
+	thinkFlushed bool
 	// usage 是 turn_ended 给出的真实用量（未收到则 Seen=false，各项为 0）。
 	usage cursorTurnUsage
 	// rejected 命中流内注入模板（拒付 / 模型暂不可用）后的结构化错误（非 nil 即终态失败）。
@@ -992,6 +1016,81 @@ func (c cursorToolCallCapture) wireID() string {
 // cursorContent 返回拼出的完整响应文本（非流式入站用）。
 func (p *cursorStreamParser) cursorContent() string { return p.content }
 
+// 上游把推理内联进正文时使用的标签（活体样本：
+// "<think>\n…\n</think>\n\n正文"）。它属于上游 wire 事实，不是本站协议词表。
+const (
+	cursorThinkOpenTag  = "<think>"
+	cursorThinkCloseTag = "</think>"
+)
+
+// filterThinkDelta 从增量正文里剥离上游内联的 <think>…</think> 推理段，返回本帧
+// **可以对外输出**的可见文本（可能为空）。
+//
+// 剥离是出口纪律：推理段不属于正文，直接透传会让客户端打印出 <> 与整段内部推理
+// （11-03 实测 6/6 非流式响应都带该段）。跨帧切分（"<thi" + "nk>"）由 thinkRaw
+// 缓冲 + trailingPartialTag 兜住，绝不把半个标签吐出去。
+func (p *cursorStreamParser) filterThinkDelta(delta string) string {
+	if delta == "" {
+		return ""
+	}
+	p.rawContent += delta
+	p.thinkRaw += delta
+	var out strings.Builder
+	for {
+		if p.inThink {
+			idx := strings.Index(p.thinkRaw, cursorThinkCloseTag)
+			if idx < 0 {
+				p.thinkRaw = trailingPartialTag(p.thinkRaw, cursorThinkCloseTag)
+				return out.String()
+			}
+			p.thinkRaw = p.thinkRaw[idx+len(cursorThinkCloseTag):]
+			p.inThink = false
+			continue
+		}
+		idx := strings.Index(p.thinkRaw, cursorThinkOpenTag)
+		if idx >= 0 {
+			out.WriteString(p.thinkRaw[:idx])
+			p.thinkRaw = p.thinkRaw[idx+len(cursorThinkOpenTag):]
+			p.inThink = true
+			continue
+		}
+		keep := trailingPartialTag(p.thinkRaw, cursorThinkOpenTag)
+		out.WriteString(p.thinkRaw[:len(p.thinkRaw)-len(keep)])
+		p.thinkRaw = keep
+		return out.String()
+	}
+}
+
+// flushThinkTail 在流收尾时吐出缓冲尾段：处于推理段内的残留一律丢弃（未闭合的
+// 推理不是正文），段外残留（如结尾恰好是 "<thi"）如实交付。只吐一次。
+func (p *cursorStreamParser) flushThinkTail() string {
+	if p.thinkFlushed {
+		return ""
+	}
+	p.thinkFlushed = true
+	if p.inThink {
+		p.thinkRaw = ""
+		return ""
+	}
+	tail := p.thinkRaw
+	p.thinkRaw = ""
+	return tail
+}
+
+// trailingPartialTag 返回 s 末尾"可能是 tag 不完整前缀"的那一段（跨帧缓冲用）。
+func trailingPartialTag(s, tag string) string {
+	max := len(tag) - 1
+	if max > len(s) {
+		max = len(s)
+	}
+	for n := max; n > 0; n-- {
+		if strings.HasSuffix(s, tag[:n]) {
+			return s[len(s)-n:]
+		}
+	}
+	return ""
+}
+
 // cursorNewStreamParser 构造解析器（model 为空时 chunk 内 model 字段留空）。
 //
 // secrets 是需要从错误文案里抹掉的凭证值（如本次对话用的 session_token）。
@@ -1086,7 +1185,8 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 		p.markFirstToken()
 		sseLines = append(sseLines, p.cursorSSETextChunk(ev.Text))
 		// 拒付模板可能跨帧：每收到一段就在**累加结果**上匹配一次。
-		if err := cursorMatchKeyRejected(p.content); err != nil {
+		// 判定用原始文本（含 <think> 段），与流式侧同口径。
+		if err := cursorMatchKeyRejected(p.rawContent); err != nil {
 			p.rejected = err
 		}
 	}
@@ -1104,6 +1204,16 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 		// 全 skip 帧：仍要发出 role 包，让客户端拿到合法空流。
 		sseLines = append(sseLines, p.cursorSSERoleChunk())
 		p.started = true
+	}
+	// 收尾尾段：<think> 剥离的跨帧缓冲在这里吐完（段内残留一律丢弃）。
+	if tail := p.flushThinkTail(); tail != "" {
+		if !p.started {
+			sseLines = append(sseLines, p.cursorSSERoleChunk())
+			p.started = true
+		}
+		p.markFirstToken()
+		p.content += tail
+		sseLines = append(sseLines, p.cursorSSETextChunk(tail))
 	}
 	// 工具委托捕获：在 finish 前吐 tool_calls delta（流式与 cursorParseStreamToSSE 同口径）。
 	if calls := p.capturedToolCalls(); len(calls) > 0 {
@@ -1153,7 +1263,17 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 							zap.String("call_id", id))
 					})
 				if rerr != nil {
-					return cursorStreamEvent{}, rerr
+					// 重打失败**不再断流**：fail-closed 会把一次参数形状不合直接升级成
+					// 502 + 会话终结（11-03 03:42 活体：Write 带 additional property →
+					// mcp_args_retype_failed → frame_handle_failed → CUR-RES-99/502，
+					// 随后 6 次工具结果回填全被 CUR-RES-01 拒绝）。
+					//
+					// 降级口径：按上游原始参数交付，由客户端自行决定接受或报错；
+					// 失败原因仍以 mcp_args_retype_failed(warn) + 本事件的降级标记留痕。
+					p.logPhase(zapcore.WarnLevel, "mcp_args_retype_fallback", "",
+						zap.String("tool_name", name),
+						zap.String("call_id", id))
+					retyped = argsJSON
 				}
 				if derr := delegations.noteDelegation("", cursorToolCallCapture{
 					ID: id, Name: name, ArgsJSON: retyped,
@@ -1220,7 +1340,14 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 	}
 	// 增量语义依据：更新类型名即 text_**delta**_update（32 号证据 Gyt），且
 	// InteractionUpdate 另有独立的 summary / thinking_delta 承担"中间态/全量"语义。
-	return cursorStreamEvent{Kind: cursorEventText, Text: text}, nil
+	//
+	// 出口纪律：上游把推理内联进正文（<think>…</think>），此处统一剥离——本帧剥完
+	// 没有可见文本时返回 skip（空 delta 不得产出空 content block）。
+	visible := p.filterThinkDelta(text)
+	if visible == "" {
+		return cursorStreamEvent{Kind: cursorEventSkip}, nil
+	}
+	return cursorStreamEvent{Kind: cursorEventText, Text: visible}, nil
 }
 
 // cursorIntField 取 varint 字段的 int 值（字段缺失时为 0）。

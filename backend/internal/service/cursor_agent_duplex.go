@@ -904,7 +904,12 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 				zap.String("call_id", id))
 		})
 	if rerr != nil {
-		return cursorToolCallCapture{}, rerr
+		// 与 parser 侧同口径：重打失败不断流，降级交付上游原始参数。
+		// fail-closed 会把一次参数形状不合升级成 502 + 会话终结（见 parser 侧注释）。
+		d.logPhase(zapcore.WarnLevel, "mcp_args_retype_fallback", "",
+			zap.String("tool_name", name),
+			zap.String("call_id", id))
+		retyped = argsJSON
 	}
 	tc := cursorToolCallCapture{ID: id, Name: name, ArgsJSON: retyped, ExecID: execID, IDField: append([]byte(nil), idField...)}
 	delegations := d.delegations
