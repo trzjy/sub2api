@@ -42,6 +42,11 @@ type cnQuotaLifecycleHandover interface {
 // cnQuotaProbeConcurrency 周期任务并发探测额度账号的并发度。
 const cnQuotaProbeConcurrency = 4
 
+// cnBalanceStartupFirstRunDelay 进程启动后首轮补采的延迟（见 Start 注释）。
+// 取 30s：既要让启动补采落在迁移/连接池预热之后，又要远小于 10 分钟的巡检间隔，
+// 使「重启 → 首轮」的空窗不至于逼近 15 分钟的新鲜度门。
+const cnBalanceStartupFirstRunDelay = 30 * time.Second
+
 // CNProviderBalanceCheckService 周期性探测国产供应商账号：
 //   - payg（按量付费）：探测余额刷新快照；不再因「余额低于阈值」停调（2026-10-08 用户裁定）。
 //     历史遗留的 cn_balance_low 前缀停调在探测成功时无条件清除（存量清零），不以余额健康为前提；
@@ -65,9 +70,12 @@ type CNProviderBalanceCheckService struct {
 	proxyRepo      ProxyRepository
 	cfg            *config.Config
 	interval       time.Duration
-	stopCh         chan struct{}
-	stopOnce       sync.Once
-	wg             sync.WaitGroup
+	// startupFirstRunDelay 启动后首轮补采延迟（默认 cnBalanceStartupFirstRunDelay；
+	// 仅测试注入 0/极短值以验证首采发生在首个 interval 之前）。
+	startupFirstRunDelay time.Duration
+	stopCh               chan struct{}
+	stopOnce             sync.Once
+	wg                   sync.WaitGroup
 	// channelFreshness 是 E39 渠道维陈旧收敛窄面（可选注入）。账号余额恢复成功后触发
 	// 关联渠道陈旧收敛；未注入时不收敛。
 	channelFreshness ChannelFreshnessRefresher
@@ -159,10 +167,25 @@ func (s *CNProviderBalanceCheckService) Start() {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+
+		// 启动补采：进程重启后先做一轮快照刷新，再进入周期 tick。
+		//
+		// 为什么必须有这一轮（2026-11-03 生产实证）：余额/额度快照的新鲜度门是 15 分钟
+		// （cnQuotaBalanceFreshnessThresholdMinutes），巡检间隔是 10 分钟。若首轮探测
+		// 推迟整整一个 interval，「重启 → 首轮」这段窗口里全部账号的快照都必然越过
+		// 新鲜度门 → 维度状态翻 unknown → 管理端余额单元格按单轨口径隐藏金额、只显示
+		// 「未知」。每次部署都会重启进程，本仓库部署频繁时该窗口几乎不间断出现，
+		// 表现为「所有账号余额一起变成未知」，而数据其实一会儿就回来了。
+		//
+		// 延迟 cnBalanceStartupFirstRunDelay 而不是立刻执行，保留原设计意图：不与进程
+		// 启动峰（迁移、连接池预热、首波请求）重叠。
+		if !s.waitStartupFirstRun(s.startupFirstRunDelayOrDefault()) {
+			return
+		}
+		s.runOnce()
+
 		ticker := time.NewTicker(s.interval)
 		defer ticker.Stop()
-
-		// 启动后先等待一个周期再首次探测，避免与进程启动峰重叠。
 		for {
 			select {
 			case <-ticker.C:
@@ -172,6 +195,36 @@ func (s *CNProviderBalanceCheckService) Start() {
 			}
 		}
 	}()
+}
+
+// waitStartupFirstRun 等待启动补采延迟；返回 false 表示等待期间已收到停止信号
+// （此时调用方应直接返回，不得再跑探测）。
+func (s *CNProviderBalanceCheckService) waitStartupFirstRun(delay time.Duration) bool {
+	if delay <= 0 {
+		select {
+		case <-s.stopCh:
+			return false
+		default:
+			return true
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-s.stopCh:
+		return false
+	}
+}
+
+// startupFirstRunDelayOrDefault 返回启动补采延迟；未显式设置（含测试直接构造结构体
+// 的零值）时取默认值。
+func (s *CNProviderBalanceCheckService) startupFirstRunDelayOrDefault() time.Duration {
+	if s.startupFirstRunDelay > 0 {
+		return s.startupFirstRunDelay
+	}
+	return cnBalanceStartupFirstRunDelay
 }
 
 func (s *CNProviderBalanceCheckService) Stop() {
