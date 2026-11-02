@@ -60,6 +60,15 @@ var (
 	// 这是一条被取消或截断的流，**不复用「流正常结束」路径**，直接失败关闭：
 	// 它拿不到真实 usage，按成功收尾就等于回写一条 0 usage 的成功响应并误导计费。
 	ErrCursorMissingEndStream = errors.New("cursor: missing EndStreamResponse (protocol error)")
+
+	// ErrCursorArgsIncomplete 表示上游交来的工具调用**参数不完整**（按客户端声明的
+	// input_schema 缺少 required 必填字段，活体样本：Bash 的 args 为空对象）。
+	//
+	// 为什么不降级交付：客户端拿到缺必填的调用会本地 InputValidationError，把错误当
+	// 工具结果回填，续轮又会撞上配置/结果校验（11-03 04:45 活体：Bash input={} →
+	// 客户端 "command expected as string but provided as unknown" → 回填 → CUR-RES-04）。
+	// 残缺参数不是"形状差异"，是上游这一帧真的没带全，必须在本层拦住按上游失败处理。
+	ErrCursorArgsIncomplete = errors.New("cursor: tool call args missing required fields (upstream incomplete)")
 )
 
 // cursorEnvelopeFrame 是一帧 envelope 的解析结果。

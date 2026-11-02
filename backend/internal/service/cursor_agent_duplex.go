@@ -896,15 +896,26 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 		return cursorToolCallCapture{}, err
 	}
 	// 按 schema 还原（r15 方案 §3）：schema 来源必须是 f4 原始字节（d.declaredToolDefs）。
+	var failReason cursorRetypeErrReason
 	retyped, rerr := cursorRetypeArgsByToolDefs(id, name, argsJSON, d.declaredToolDefs,
 		func(reason cursorRetypeErrReason) {
+			failReason = reason
 			d.logPhase(zapcore.WarnLevel, "mcp_args_retype_failed", "",
 				zap.String("retype_error", string(reason)),
 				zap.String("tool_name", name),
 				zap.String("call_id", id))
 		})
 	if rerr != nil {
-		// 与 parser 侧同口径：重打失败不断流，降级交付上游原始参数。
+		if !cursorRetypeDegradable(failReason) {
+			// 参数残缺（缺必填）：与 parser 侧同口径，绝不降级交付残调用。
+			d.logPhase(zapcore.ErrorLevel, "mcp_args_incomplete_rejected", "",
+				zap.String("retype_error", string(failReason)),
+				zap.String("tool_name", name),
+				zap.String("call_id", id))
+			return cursorToolCallCapture{}, fmt.Errorf("%w: tool %q args incomplete (%s)",
+				ErrCursorArgsIncomplete, name, failReason)
+		}
+		// 与 parser 侧同口径：形状差异类重打失败不断流，降级交付上游原始参数。
 		// fail-closed 会把一次参数形状不合升级成 502 + 会话终结（见 parser 侧注释）。
 		d.logPhase(zapcore.WarnLevel, "mcp_args_retype_fallback", "",
 			zap.String("tool_name", name),

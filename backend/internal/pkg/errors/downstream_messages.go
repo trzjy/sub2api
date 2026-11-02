@@ -483,6 +483,12 @@ const (
 	// （哨兵=ErrCursorUpstreamModelUnavailable，换号重试不成立或已用尽时）
 	CursorExecModelUnavailableCode = "CUR-EXEC-09"
 	CursorExecModelUnavailable     = "上游模型暂时不可用，请重试或换用其他模型"
+
+	// 触发条件（502）：上游交来的工具调用参数不完整（按客户端声明的 input_schema
+	// 缺少 required 必填字段，如 Bash 只给空对象）。哨兵=ErrCursorArgsIncomplete。
+	// 本层拦截后按上游失败终止本轮，绝不把残缺调用交付给客户端。
+	CursorExecArgsIncompleteCode = "CUR-EXEC-10"
+	CursorExecArgsIncomplete     = "模型返回的工具参数不完整，本轮已终止，请重试"
 )
 
 // CursorResumeReasonCode 把 newCursorResumeError 的 reason 映射到 §2.2 续轮码表；

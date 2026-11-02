@@ -1273,21 +1273,34 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 					return cursorStreamEvent{}, derr
 				}
 				// 按 schema 还原（r15 方案 §3）：schema 来源必须是 f4 原始字节。
+				var failReason cursorRetypeErrReason
 				retyped, rerr := cursorRetypeArgsByToolDefs(id, name, argsJSON, p.declaredToolDefs,
 					func(reason cursorRetypeErrReason) {
+						failReason = reason
 						p.logPhase(zapcore.WarnLevel, "mcp_args_retype_failed", "",
 							zap.String("retype_error", string(reason)),
 							zap.String("tool_name", name),
 							zap.String("call_id", id))
 					})
 				if rerr != nil {
+					if !cursorRetypeDegradable(failReason) {
+						// 参数残缺（缺必填）：绝不降级交付。交给客户端只会变成
+						// InputValidationError + 回填被拒，把一次上游残缺放大成两轮失败。
+						p.logPhase(zapcore.ErrorLevel, "mcp_args_incomplete_rejected", "",
+							zap.String("retype_error", string(failReason)),
+							zap.String("tool_name", name),
+							zap.String("call_id", id))
+						return cursorStreamEvent{}, fmt.Errorf("%w: tool %q args incomplete (%s)",
+							ErrCursorArgsIncomplete, name, failReason)
+					}
 					// 重打失败**不再断流**：fail-closed 会把一次参数形状不合直接升级成
 					// 502 + 会话终结（11-03 03:42 活体：Write 带 additional property →
 					// mcp_args_retype_failed → frame_handle_failed → CUR-RES-99/502，
 					// 随后 6 次工具结果回填全被 CUR-RES-01 拒绝）。
 					//
-					// 降级口径：按上游原始参数交付，由客户端自行决定接受或报错；
-					// 失败原因仍以 mcp_args_retype_failed(warn) + 本事件的降级标记留痕。
+					// 降级口径（仅限形状差异，见 cursorRetypeDegradable）：按上游原始参数
+					// 交付，由客户端自行决定接受或报错；失败原因仍以
+					// mcp_args_retype_failed(warn) + 本事件的降级标记留痕。
 					p.logPhase(zapcore.WarnLevel, "mcp_args_retype_fallback", "",
 						zap.String("tool_name", name),
 						zap.String("call_id", id))
@@ -1631,7 +1644,32 @@ const (
 	cursorRetypeAdditionalPropPresent  cursorRetypeErrReason = "additional_property_present"
 	cursorRetypeObjectTypeMismatch     cursorRetypeErrReason = "object_type_mismatch"
 	cursorRetypeNumericOutOfRange      cursorRetypeErrReason = "numeric_out_of_range"
+	// cursorRetypeMissingRequired 表示还原结果缺 schema 声明的必填字段（参数不完整）。
+	// 与上面几类"形状差异"不同：这类**不可降级交付**，见 cursorRetypeDegradable。
+	cursorRetypeMissingRequired cursorRetypeErrReason = "missing_required"
 )
+
+// cursorRetypeDegradable 报告某类 retype 失败是否允许"降级交付上游原始参数"。
+//
+// 只有**形状差异**类可以降级：客户端 schema 声明 additionalProperties:false 而上游
+// 多给字段、或类型标记与值不一致——这类参数本身是完整的，客户端能自行判定取舍
+// （11-03 03:42 活体：Write 带额外字段，降级后客户端正常执行）。
+//
+// 缺必填字段（missing_required）与 schema 侧不可解析一律**不可降级**：那时上游给的
+// 就是一个残缺调用，交给客户端只会变成 InputValidationError + 续轮被拒，把一次上游
+// 残缺放大成两轮失败（11-03 04:45 活体：Bash args={} → CUR-RES-04）。此时必须按
+// 上游失败终止本轮，由客户端重试。
+func cursorRetypeDegradable(reason cursorRetypeErrReason) bool {
+	switch reason {
+	case cursorRetypeAdditionalPropPresent,
+		cursorRetypeObjectTypeMismatch,
+		cursorRetypeNumericOutOfRange,
+		cursorRetypeItemsNotAllowed:
+		return true
+	default:
+		return false
+	}
+}
 
 // cursorRetypeError 是 retype 失败关闭的结构化错误：Unwrap 到 ErrCursorProtocol，
 // 不含参数明文；Reason 暴露 §3.5 枚举值（供错误返回点日志与安全分类）。
@@ -2471,7 +2509,48 @@ func retypeObject(value any, schema map[string]any) (any, error) {
 			out[k] = vv
 		}
 	}
+	// required 消费（11-03 修复）：schema 里声明的必填字段必须在还原结果中出现。
+	//
+	// 旧实现把 required 原样保留却从不消费，等于对"参数是否完整"完全没有门禁：
+	// 上游只发一个空 args（活体 11-03 04:45 的 Bash input={}）也照样重打成功，
+	// 我们便把空壳调用交付给客户端。必填缺失 → missing_required，由调用点按
+	// cursorRetypeDegradable 判定为不可降级，改走上游失败。
+	if err := cursorCheckRetypeRequired(out, schema); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// cursorCheckRetypeRequired 校验还原结果是否齐备 schema.required 声明的字段。
+//
+// 只做"存在性"判定（含显式 null），不做值域判定：值是否合法由客户端按同一 schema
+// 复核，本层只负责不让**残缺**调用流出。
+func cursorCheckRetypeRequired(out map[string]any, schema map[string]any) error {
+	rv, exists := schema["required"]
+	if !exists || rv == nil {
+		return nil
+	}
+	switch reqList := rv.(type) {
+	case []any:
+		for _, item := range reqList {
+			name, ok := item.(string)
+			if !ok {
+				return cursorRetypeErrorf(cursorRetypeSchemaInvalid)
+			}
+			if _, present := out[name]; !present {
+				return cursorRetypeErrorf(cursorRetypeMissingRequired)
+			}
+		}
+	case []string:
+		for _, name := range reqList {
+			if _, present := out[name]; !present {
+				return cursorRetypeErrorf(cursorRetypeMissingRequired)
+			}
+		}
+	default:
+		return cursorRetypeErrorf(cursorRetypeSchemaInvalid)
+	}
+	return nil
 }
 
 func retypeScalar(value any, rawType string) (any, error) {

@@ -21,6 +21,7 @@ import (
 //  4. 上游认证类哨兵 → CUR-EXEC-06，502。
 //     4a. ErrCursorUpstreamModelUnavailable（含 *CursorModelUnavailableError）→ CUR-EXEC-09，502（方案 §2.4）。
 //  5. 批次封口类哨兵 → CUR-EXEC-04，502。
+//     5a. ErrCursorArgsIncomplete（上游工具参数缺 required 必填）→ CUR-EXEC-10，502。
 //  6. 工具结果写回传输失败：不在此单独判定。产生点（DeliverToolResults）由卡 S2b 改为
 //     newCursorRequestError(CUR-EXEC-05, 502, …)，由第 2 条命中。
 //  7. 上游协议类哨兵 → CUR-EXEC-03，502。
@@ -58,6 +59,9 @@ func CursorUserFacingError(ctx context.Context, err error) (status int, code, me
 		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecModelUnavailableCode, infraerrors.CursorExecModelUnavailable
 	case errors.Is(err, ErrCursorBatchIncomplete), errors.Is(err, ErrCursorBatchAmbiguous):
 		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecBatchIncompleteCode, infraerrors.CursorExecBatchIncomplete
+	case errors.Is(err, ErrCursorArgsIncomplete):
+		// 上游交来残缺参数（缺 required 必填）：按上游失败终止，绝不降级交付残调用。
+		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecArgsIncompleteCode, infraerrors.CursorExecArgsIncomplete
 	case errors.Is(err, ErrCursorProtocol),
 		errors.Is(err, ErrCursorMissingEndStream),
 		errors.Is(err, ErrCursorUpstreamStream):
