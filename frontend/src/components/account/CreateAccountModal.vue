@@ -3866,7 +3866,7 @@
           :groups="groups"
           :platform="form.platform"
           :mixed-scheduling="mixedScheduling"
-          :native-platforms="cursorNativePlatforms"
+          :native-platforms="form.platform === 'antigravity' ? antigravitySupportedPlatforms : cursorNativePlatforms"
           data-tour="account-form-groups"
         />
       </div>
@@ -4280,7 +4280,8 @@ import type {
   OpenAICompactMode,
   OpenAIResponsesMode,
   OpenAIEndpointCapability,
-  TempUnschedulableScope
+  TempUnschedulableScope,
+  GroupPlatform
 } from '@/types'
 import type { CodeBuddySite, CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -4948,6 +4949,62 @@ const mixedScheduling = ref(false) // For antigravity accounts: enable mixed sch
 const cursorNativePlatforms = computed(() =>
   form.platform === 'cursor' ? [...CURSOR_NATIVE_GROUP_PLATFORMS] : []
 )
+
+// antigravity 账号是聚合平台：从表单中的 model_mapping 自动识别支持的原生平台，
+// 分组选择器据此展示对应平台的分组（anthropic、gemini、openai、grok 等）。
+const antigravitySupportedPlatforms = computed<GroupPlatform[]>(() => {
+  if (form.platform !== 'antigravity') return []
+
+  // 创建流程中，从表单的 antigravityModelMappings 或 antigravityWhitelistModels 提取模型
+  let modelNames: string[] = []
+
+  if (antigravityModelRestrictionMode.value === 'mapping' && antigravityModelMappings.value.length > 0) {
+    // 从 mapping 模式提取模型名称
+    modelNames = antigravityModelMappings.value.map(m => m.from)
+  } else if (antigravityModelRestrictionMode.value === 'whitelist' && antigravityWhitelistModels.value.length > 0) {
+    // 从 whitelist 模式提取模型名称
+    modelNames = antigravityWhitelistModels.value
+  }
+
+  if (modelNames.length === 0) return []
+
+  const platforms = new Set<GroupPlatform>()
+
+  // 解析模型名称，识别所属平台
+  for (const modelName of modelNames) {
+    const lowerModel = modelName.toLowerCase()
+
+    // Anthropic 系列：claude、fable、opus、sonnet、haiku
+    if (
+      lowerModel.includes('claude') ||
+      lowerModel.includes('fable') ||
+      lowerModel.includes('opus') ||
+      lowerModel.includes('sonnet') ||
+      lowerModel.includes('haiku')
+    ) {
+      platforms.add('anthropic')
+    }
+    // Gemini 系列：gemini、argon
+    else if (lowerModel.includes('gemini') || lowerModel.includes('argon')) {
+      platforms.add('gemini')
+    }
+    // OpenAI 系列：gpt、o1、o3
+    else if (
+      lowerModel.includes('gpt') ||
+      lowerModel.includes('o1-') ||
+      lowerModel.includes('o3-')
+    ) {
+      platforms.add('openai')
+    }
+    // Grok 系列
+    else if (lowerModel.includes('grok')) {
+      platforms.add('grok')
+    }
+  }
+
+  return Array.from(platforms)
+})
+
 const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages
 const antigravityAccountType = ref<'oauth' | 'upstream'>('oauth') // For antigravity: oauth or upstream
 const antigravityProjectId = ref('')

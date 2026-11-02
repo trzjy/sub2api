@@ -3326,7 +3326,7 @@
         :groups="selectableGroups"
         :platform="account?.platform"
         :mixed-scheduling="mixedScheduling"
-        :native-platforms="cursorNativePlatforms"
+        :native-platforms="account?.platform === 'antigravity' ? antigravitySupportedPlatforms : cursorNativePlatforms"
         data-tour="account-form-groups"
       />
 
@@ -3404,7 +3404,8 @@ import type {
   GrokMediaEligibilityState,
   OpenCodeGoUsageState,
   OpenCodeGoUsageWindow,
-  TempUnschedulableScope
+  TempUnschedulableScope,
+  GroupPlatform
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -3540,6 +3541,54 @@ const isSparkShadow = computed(() => props.account?.parent_account_id != null)
 const cursorNativePlatforms = computed(() =>
   props.account?.platform === 'cursor' ? [...CURSOR_NATIVE_GROUP_PLATFORMS] : []
 )
+
+// antigravity 账号是聚合平台：从账号 model_mapping 中解析实际支持的模型，
+// 自动识别这些模型所属的原生平台（anthropic、gemini、openai、grok 等），
+// 分组选择器据此展示对应平台的分组。
+const antigravitySupportedPlatforms = computed<GroupPlatform[]>(() => {
+  if (props.account?.platform !== 'antigravity') return []
+
+  // 编辑流程中，从账号现有的 credentials.model_mapping 提取模型名称
+  const modelMapping = props.account?.credentials?.model_mapping as Record<string, string> | undefined
+  if (!modelMapping || Object.keys(modelMapping).length === 0) return []
+
+  const platforms = new Set<GroupPlatform>()
+
+  // model_mapping 的 key 是模型名称
+  for (const modelName of Object.keys(modelMapping)) {
+    const lowerModel = modelName.toLowerCase()
+
+    // Anthropic 系列：claude、fable、opus、sonnet、haiku
+    if (
+      lowerModel.includes('claude') ||
+      lowerModel.includes('fable') ||
+      lowerModel.includes('opus') ||
+      lowerModel.includes('sonnet') ||
+      lowerModel.includes('haiku')
+    ) {
+      platforms.add('anthropic')
+    }
+    // Gemini 系列：gemini、argon
+    else if (lowerModel.includes('gemini') || lowerModel.includes('argon')) {
+      platforms.add('gemini')
+    }
+    // OpenAI 系列：gpt、o1、o3
+    else if (
+      lowerModel.includes('gpt') ||
+      lowerModel.includes('o1-') ||
+      lowerModel.includes('o3-')
+    ) {
+      platforms.add('openai')
+    }
+    // Grok 系列
+    else if (lowerModel.includes('grok')) {
+      platforms.add('grok')
+    }
+  }
+
+  return Array.from(platforms)
+})
+
 
 const hideAccountLongContextBilling = computed(() => {
   return allSelectedGroupsEnableLongContextPricing(form.group_ids, props.groups)
