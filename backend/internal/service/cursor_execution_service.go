@@ -475,7 +475,35 @@ func (s *CursorExecutionService) Execute(
 			}
 			return
 		}
+		// 上游对本账号回吐「非业务码」的终态错误（Connect 传输码：internal / unknown /
+		// unavailable 等，典型报文 internal: Cannot read properties of undefined (reading
+		// 'toString')）：这表示该账号当下无法服务，不是请求侧问题，因此不能把 502 直接
+		// 甩给用户。与限流/模型不可用同一分类点、同一换号判据（未发布正文 && 未交付工具批），
+		// 替换为可换号错误，由既有 failover 循环换到本组下一个 cursor 账号；本组 cursor 池
+		// 轮询完后由既有选号器继续走组内备用渠道（anthropic 等）。
+		// 业务码（ERROR_ 前缀，如 ERROR_PRO_USER_RATE_LIMIT_EXCEEDED / ERROR_BAD_MODEL_NAME）
+		// 各自有专门语义，绝不在此吞掉。
 		var mu *CursorModelUnavailableError
+		if code, ok := cursorUpstreamStreamErrorCode(err); ok &&
+			!isCursorBusinessErrorCode(code) && !errors.As(err, &mu) {
+			cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_upstream_account_failure", originalModel,
+				zap.String("code", code),
+				zap.Int64("account_id", account.ID),
+				zap.Bool("body_published", session.bodyPublished),
+				zap.Int("delivered_batches", int(session.deliveredBatchSeq)))
+			if !session.bodyPublished && session.deliveredBatchSeq == 0 {
+				err = &UpstreamFailoverError{
+					StatusCode:        http.StatusBadGateway,
+					Stage:             GatewayFailureStage("upstream"),
+					Scope:             GatewayFailureScopeAccount,
+					Reason:            CursorUpstreamAccountFailureReason,
+					NextAccountAction: NextAccountRetry,
+					ClientStatusCode:  http.StatusBadGateway,
+					ClientMessage:     infraerrors.CursorExecUpstreamProtocol,
+				}
+			}
+			return
+		}
 		if !errors.As(err, &mu) {
 			return
 		}

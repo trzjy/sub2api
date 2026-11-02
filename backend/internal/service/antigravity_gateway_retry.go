@@ -824,6 +824,27 @@ func tempUnscheduleEmptyResponse(ctx context.Context, repo AccountRepository, ac
 	}
 }
 
+// cursorUpstreamFailureCooldown 是 cursor 上游账号级故障的停调时长。
+//
+// 取 5 分钟：cursor 侧这类故障（上游回吐 Connect code=internal 之类的终态错误）实测
+// 是分钟级自愈的抖动，5 分钟足以跨过抖动窗口；同时远小于把账号永久摘掉的代价。
+// 冷却到期账号自动回池——首笔真实请求即探测：正常则继续服务，仍报错则再次命中
+// TempUnscheduleRetryableError 继续冷却，形成「冷却→探测→再冷却」闭环，
+// 不需要另建探测状态机（复用的是全平台同一个停调原语）。
+const cursorUpstreamFailureCooldown = 5 * time.Minute
+
+// tempUnscheduleCursorUpstreamFailure 对 cursor 上游账号级故障触发 5 分钟临时停调，
+// 让本次请求立刻换到本组下一个 cursor 账号，避免用户连续吃到同一账号的 502。
+func tempUnscheduleCursorUpstreamFailure(ctx context.Context, repo AccountRepository, accountID int64, logPrefix string) {
+	until := time.Now().Add(cursorUpstreamFailureCooldown)
+	reason := "cursor upstream account failure (auto temp-unschedule 5m)"
+	if err := repo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
+		log.Printf("%s temp_unschedule_failed account=%d error=%v", logPrefix, accountID, err)
+	} else {
+		log.Printf("%s temp_unscheduled account=%d until=%v reason=%q", logPrefix, accountID, until.Format("15:04:05"), reason)
+	}
+}
+
 // sleepAntigravityBackoffWithContext 带 context 取消检查的退避等待
 // 返回 true 表示正常完成等待，false 表示 context 已取消
 func sleepAntigravityBackoffWithContext(ctx context.Context, attempt int) bool {

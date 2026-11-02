@@ -750,15 +750,32 @@ type sseStreamErrorEventError struct {
 
 func (e *sseStreamErrorEventError) Error() string { return "have error in stream" }
 
-// TempUnscheduleRetryableError 对 RetryableOnSameAccount 类型的 failover 错误触发临时封禁。
+// TempUnscheduleRetryableError 对需要冷却的 failover 错误触发临时停调。
 // 由 handler 层在同账号重试全部用尽、切换账号时调用。
+//
+// 两类入口共用本函数（同一停调原语、同一写入路径）：
+//   - RetryableOnSameAccount 且同账号重试用尽的错误，按状态码选冷却策略；
+//   - cursor 账号级上游故障（CursorUpstreamAccountFailureReason）：不做同账号重试，
+//     一次即冷却 5 分钟。
 func (s *GatewayService) TempUnscheduleRetryableError(ctx context.Context, accountID int64, failoverErr *UpstreamFailoverError) {
-	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
+	if failoverErr == nil {
 		return
 	}
 	// 请求级瞬时故障与账号健康无关：封禁只会把与故障无关的账号一并摘掉，
 	// 而故障因素（客户端身份、模型容量）在下一个账号上完全相同。
 	if failoverErr.RequestScopedTransient {
+		return
+	}
+	// cursor 账号级上游故障（上游回吐非业务码终态错误，如 Connect code=internal）：
+	// 一次即停号冷却，**不走**同账号重试——重试只会让用户再等一整个上游超时，
+	// 而错的是账号不是请求。冷却到期后账号自动回到候选池；若仍然抽风，下一次
+	// 真实请求会再次命中本分支继续冷却，等价于「冷却→探测→再冷却」的循环，
+	// 不需要引入新的探测状态机。
+	if failoverErr.Reason == CursorUpstreamAccountFailureReason {
+		tempUnscheduleCursorUpstreamFailure(ctx, s.accountRepo, accountID, "[handler]")
+		return
+	}
+	if !failoverErr.RetryableOnSameAccount {
 		return
 	}
 	// 根据状态码选择封禁策略

@@ -222,8 +222,10 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverContinue
 	}
 
-	// 同账号重试用尽，执行临时封禁
-	if failoverErr.RetryableOnSameAccount {
+	// 同账号重试用尽，执行临时封禁。
+	// cursor 账号级上游故障明确**不**参与同账号重试（重试只会再等一整个上游超时），
+	// 但同样需要停号冷却，故在此一并覆盖，仍走同一个 TempUnscheduleRetryableError 入口。
+	if failoverErr.RetryableOnSameAccount || failoverErr.Reason == service.CursorUpstreamAccountFailureReason {
 		gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
 	}
 

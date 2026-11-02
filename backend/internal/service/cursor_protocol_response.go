@@ -412,6 +412,21 @@ func cursorUpstreamStreamErrorCode(err error) (string, bool) {
 	return "", false
 }
 
+// CursorUpstreamAccountFailureReason 标识「cursor 上游对本账号返回非业务码终态错误」的
+// 换号原因。handler 侧据此对账号做临时停调冷却（见 GatewayService.TempUnscheduleRetryableError），
+// 与其他平台的换号原因共用同一分类点与同一停号原语，不另建通道。
+const CursorUpstreamAccountFailureReason = GatewayFailureReason("cursor_upstream_account_failure")
+
+// isCursorBusinessErrorCode 判定上游终态错误 code 是否为**业务码**（`ERROR_` 前缀，例如
+// ERROR_PRO_USER_RATE_LIMIT_EXCEEDED / ERROR_BAD_MODEL_NAME / ERROR_UNAUTHORIZED）。
+//
+// 业务码各自有专门语义与用户文案，必须由调用方单独处理；其余形态是 Connect 传输码
+// （internal / unknown / unavailable / deadline_exceeded …），表示上游/账号当下不可服务，
+// 属账号级故障，走换号 + 冷却。空串按传输码处理（cursorParseEndStream 会归一为 unknown）。
+func isCursorBusinessErrorCode(code string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(code)), "ERROR_")
+}
+
 // cursorUpstreamRejectTemplate 是上游回吐的**固定**拒付模板（不含动态后缀）。
 //
 // 动态后缀形如 ` (1792310906551-b924f5ef)`：毫秒时间戳 + 十六进制轮次标识，
