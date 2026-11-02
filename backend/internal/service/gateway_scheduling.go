@@ -3024,8 +3024,10 @@ func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Contex
 		if strings.TrimSpace(requestedModel) == "" {
 			return true
 		}
+		// 标准化模型名：移除 Claude Code [1M]/[1m] 上下文后缀
+		normalizedModel := normalizeClaudeCodeLongContextModel(requestedModel)
 		// 使用与转发阶段一致的映射逻辑：自定义映射优先 → 默认映射兜底
-		mapped := mapAntigravityModel(account, requestedModel)
+		mapped := mapAntigravityModel(account, normalizedModel)
 		if mapped == "" {
 			return false
 		}
@@ -3048,7 +3050,9 @@ func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedMo
 		if strings.TrimSpace(requestedModel) == "" {
 			return true
 		}
-		return mapAntigravityModel(account, requestedModel) != ""
+		// 标准化模型名：移除 Claude Code [1M]/[1m] 上下文后缀
+		normalizedModel := normalizeClaudeCodeLongContextModel(requestedModel)
+		return mapAntigravityModel(account, normalizedModel) != ""
 	}
 	if account.IsBedrock() {
 		_, ok := ResolveBedrockModelID(account, requestedModel)
