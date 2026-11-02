@@ -7,7 +7,7 @@ package service
 // 缺陷：解析器的 batchCounts（按 model_call_id 记录 started/internal/listedSeen）与
 // pendingListed / lastModelCallID 从不随批次代际复位。续轮里同一 model_call_id 的新一代
 // 在 noteToolRequestsListed 时看到 listedSeen==true 且 started+internal>=count，会把新
-// listed 挂起为 pending → 新批永远拿不到 listed → checkSealableLocked 永不通过 → 180s 挂死。
+// listed 挂起为 pending → 新批永远拿不到 listed → checkSealableLocked 永不通过 → 请求无法完成。
 //
 // 改法：在 cursorSSEStream.next() 的工具交接检查点（s.delegated=true 且 s.done=true）对解析器
 // 调用 resetBatchGeneration()，清空 batchCounts / pendingListed / lastModelCallID。后续帧属新一代

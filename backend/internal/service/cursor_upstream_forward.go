@@ -53,9 +53,6 @@ const (
 	cursorJgModelHeader = "x-jg-model"
 	// cursorJgModelHeaderValue 是 x-jg-model 的取值（isMaster=true 时）。
 	cursorJgModelHeaderValue = "1"
-
-	// cursorUpstreamDefaultTimeout 是出站请求默认超时（与取号客户端同量级）。
-	cursorUpstreamDefaultTimeout = 180 * time.Second
 )
 
 // cursor 出站失败关闭错误（调用方可 errors.Is 识别）。
@@ -216,7 +213,7 @@ type CursorUpstreamForwarder struct {
 func NewCursorUpstreamForwarder(opts ...CursorUpstreamOption) *CursorUpstreamForwarder {
 	f := &CursorUpstreamForwarder{
 		nodes:      NewCursorUpstreamNodesResolver(),
-		httpClient: &http.Client{Timeout: cursorUpstreamDefaultTimeout},
+		httpClient: &http.Client{},
 	}
 	for _, o := range opts {
 		o(f)

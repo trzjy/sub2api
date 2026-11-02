@@ -5,7 +5,7 @@ package service
 // 派发单 B8（外审建议 S1）：交接未齐时把封口失败原因保留到终态可观测性，而不是
 // 在 next() 的交接判定处把 sealableDelegations() 的错误直接丢弃。
 //
-// 根因：只收到 listed 缺失/计数不等等具体原因时，上层在 180s 到期只能看到
+// 根因：只收到 listed 缺失/计数不等等具体原因时，上层只能看到
 // deadline_exceeded，无法从日志区分"缺 listed / 计数不等 / 某 started 无委派"。
 //
 // 本文件只验证 D1：cursorSSEStream 在交接判定处把 sealable 失败原因**记录**到

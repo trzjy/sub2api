@@ -371,7 +371,7 @@ func TestCursorStreamRejectionIsTerminalNeverSuccess(t *testing.T) {
 
 // TestCursorOutboundHeadersAlignToolProbe 钉死 O11-C1 修复：forwardCursor 出站头必须
 // 含活体全通探针（工具请求形态）的 11 项客户端上下文头，否则带 mcp_tools 的上游请求
-// 会挂起（生产 request_id 74d9673a：first_frame 后无后续事件，180s 超时）。
+// 会挂起（生产 request_id 74d9673a：first_frame 后无后续事件）。
 //
 // 这 11 项头由探针 headers() 逐字对齐（除 x-request-id 与 x-jg-auth 已由鉴权注入），
 // 值恒定不依赖请求级上下文，既不改动既有 6 项的值/鉴权，也不引入动态值。

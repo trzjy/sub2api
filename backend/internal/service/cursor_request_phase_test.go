@@ -2,7 +2,7 @@
 
 package service
 
-// §18.5 T 阶段日志的定向测试（httptest + 短 context / 延迟 handler 驱动，不 sleep 180 秒）。
+// §18.5 T 阶段日志的定向测试（httptest + 短 context / 延迟 handler 驱动，不依赖真实网络超时）。
 //
 // 覆盖：
 //   - headers 前等待 → begin 阶段事件（http_request_start / got_conn）先于 response_headers 出现；

@@ -13,7 +13,7 @@ package service
 //	        → CursorSessionIntake 生产实现把真实结果按 §25.3 四层编码写回原 exec 关联
 //	        → 上游收到真实结果后继续跑 → turn_ended 真实 usage → finalizer 唯一结算
 //
-// 覆盖派发单要求：单工具两 HTTP 全链、同名并行两工具、唯一结算断言、180s 到期终结、
+// 覆盖派发单要求：单工具两 HTTP 全链、同名并行两工具、唯一结算断言、长工具等待与断连终结、
 // 附着期间断连终结。旧链语义（文本补历史 / 伪 McpError / half-close 冒充）在这里是
 // **反证**：一旦回退到"收到 mcp_args 就回 McpResult.error 或直接收尾"，下列断言立刻红。
 
@@ -140,7 +140,7 @@ type cursorFullChainScript struct {
 	afterText string
 	// usage 是 turn_ended 的真实用量（input / output / cacheRead / cacheWrite）。
 	usage [4]uint64
-	// hangAfterPhase1 为 true 时上游交付批次后就挂着（用于 deadline / 断连场景）。
+	// hangAfterPhase1 为 true 时上游交付批次后就挂着（用于长工具等待 / 断连场景）。
 	hangAfterPhase1 bool
 	// textOnly 为 true 时 phase1 只吐文本（不交付工具批），用于"附着期间断连"：
 	// 首 HTTP 会一直挂在 drain 上（保持附着），直到客户端断连。
@@ -213,7 +213,7 @@ func (u *cursorFullChainUpstream) handler() http.Handler {
 			u.writeStream(w, flusher, joinFrames(fcTextDelta(u.script.injectAfterBatchText)))
 		}
 		if u.script.hangAfterPhase1 {
-			// 交付批次后挂着：不放终态，靠会话 ctx 的 180s 期限 / 客户端断连收尾。
+			// 交付批次后挂着：不放终态，只应由真实终态或客户端断连收尾。
 			<-r.Context().Done()
 			return
 		}
@@ -752,69 +752,6 @@ func TestCursorCrossHTTPFullChainToolFailureText(t *testing.T) {
 	calls0, complete0 := settlement.snapshot()
 	require.Equal(t, 1, calls0)
 	require.Equal(t, 1, complete0)
-}
-
-// ===========================================================================
-// 4. 180s 到期终结（用被压缩的时钟走真实期限路径）
-// ===========================================================================
-
-func TestCursorCrossHTTPFullChainDeadlineTerminates(t *testing.T) {
-	calls := []cursorFullChainCall{{CallID: "call_1", Name: "get_weather", City: "hangzhou", ExecID: 401, IDField: []byte("exec-401")}}
-	upstream := newCursorFullChainUpstream(cursorFullChainScript{
-		calls:           calls,
-		hangAfterPhase1: true, // 交付批后永不放终态：只能由期限终结
-	})
-	svc := newCursorFullChainService(t, upstream)
-	// 压缩时钟：首次 AgentRun 发起时固定在 600ms 后到期。期限语义不变（仍是"单一
-	// 180s 总预算、跨 HTTP 共用、续轮不重置"），只把 180s 换算成可测的时长。
-	base := time.Now()
-	svc.now = func() time.Time { return base.Add(-cursorAgentRunTotalBudget + 600*time.Millisecond) }
-
-	settlement := &cursorFullChainSettlement{}
-	userSlot := newCursorTestResource("user_slot")
-	handover := &cursorTestHandover{
-		resources:  []CursorTransferableResource{userSlot},
-		settlement: settlement.hook,
-	}
-
-	_, _, err1 := runFirstHTTP(t.Context(), svc, handover)
-	require.NoError(t, err1, "首 HTTP 必须在期限内正常返回（交付工具批）")
-
-	record := onlySession(t, svc)
-	require.False(t, record.Deadline().IsZero(), "首次 AgentRun 必须固定期限")
-
-	// 等真实期限到达：读循环的传输被会话 ctx 取消 → finalizer 终结会话。
-	require.Eventually(t, func() bool {
-		record.mu.Lock()
-		defer record.mu.Unlock()
-		return record.state == cursorSessionClosed
-	}, 10*time.Second, 10*time.Millisecond, "到期必须终结会话（不无限保活）")
-
-	// 未取得真实 usage：不估算、不写零、不结算假成功（只登记中断，不扣费）。
-	calls0, complete0 := settlement.snapshot()
-	require.Zero(t, complete0, "未收到 turn_ended 绝不能结算（不伪造 usage）")
-	require.LessOrEqual(t, calls0, 1, "至多一次中断登记，不重复结算")
-	if calls0 == 1 {
-		settlement.mu.Lock()
-		ev := settlement.events[0]
-		settlement.mu.Unlock()
-		require.False(t, ev.UsageComplete, "到期终结不得超过一次真实 usage 结算")
-		require.NotEmpty(t, ev.UsageMissingReason, "必须如实记录未取得 usage 的原因")
-	}
-	require.EqualValues(t, 1, userSlot.releases.Load(), "终结时资源必须释放一次")
-	require.Zero(t, svc.sessions.indexCount(), "终结后索引清零")
-	require.Empty(t, upstream.writebackPayloads(), "期间没有任何真实结果被写回（零重放）")
-
-	// 终结后不得再续轮（无重连重放路径）：统一索引已清空，这批 ID 不再命中任何会话，
-	// 探针拿到可区分的「未知关联」哨兵（A08 失败关闭语义），绝不会被猜成"最近会话"而重放。
-	probe, perr := CursorProbeResumeRequest(CursorResumeProtocolChat,
-		[]byte(cursorFullChainResumeBody(calls, map[string]string{"call_1": "sunny"})))
-	require.NoError(t, perr)
-	ticket, terr := svc.IdentifyResume(probe)
-	require.ErrorIs(t, terr, ErrCursorResumeUnknownAssociation,
-		"终止态后提交的结果 ID 全部未登记 → 必须返回可区分的未知关联哨兵")
-	require.Nil(t, ticket, "会话终结后同一批结果不得再定位到续轮目标（零重放）")
-	require.Equal(t, 1, upstream.runCount(), "终结后不得出现第二次 AgentRun（无重连）")
 }
 
 // ===========================================================================

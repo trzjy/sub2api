@@ -136,7 +136,7 @@ type CursorAutoEntryService struct {
 
 // NewCursorAutoEntryService 构造入库可配置服务。
 // settings/quotaKeys/enc/client 为既有依赖；httpDoer 为 nil 时构建默认客户端
-// （180s 超时 + 跳过 TLS 校验，与取证通用 HTTP 行为一致）；lookupBaseURL 为 "" 时用默认基址。
+// （单次 lookup 请求超时 + 跳过 TLS 校验，与取证通用 HTTP 行为一致）；lookupBaseURL 为 "" 时用默认基址。
 func NewCursorAutoEntryService(settings SettingRepository, quotaKeys QuotaKeyRepository, enc QuotaKeyEncryptor, client *ent.Client, httpDoer HTTPDoer, lookupBaseURL string) *CursorAutoEntryService {
 	if httpDoer == nil {
 		httpDoer = &http.Client{
@@ -392,8 +392,7 @@ func (s *CursorAutoEntryService) ApplyEntryDefaults(ctx context.Context, tx *ent
 // ---------------------------------------------------------------------------
 
 const (
-	// cursorLookupHTTPBudget 是单次 lookup 的既有 180 秒上限。网络 deadline 取"调用者剩余
-	// 时间与 180 秒的较小者"：由调用者 context 派生，天然先到先停，不是每层各给 180 秒。
+	// cursorLookupHTTPBudget 是单次 lookup 的网络请求上限。网络 deadline 取调用者剩余时间与该 lookup 请求上限的较小者：由调用者 context 派生，天然先到先停。
 	cursorLookupHTTPBudget = 180 * time.Second
 	// cursorObservationCommitBudget 是网络结束/取消后的 DB 收尾预算（§25.14-C 步骤 5）：
 	// 只用它写入与提交，不重发网络、不无限保活、不启脱离生命周期的后台 goroutine。
@@ -414,7 +413,7 @@ var (
 // 六步顺序（§25.14-C）：
 //  1. 进入时检查调用者未取消；读取来源、解密、完成设备准备（三分支唯一实现，首写在锁外）；
 //  2. 用既有每 key 锁开启观测事务，持锁后重读来源未删、来源身份（MAC/设备）与解析结果一致；
-//  3. 持锁执行唯一 lookup（网络 context 继承调用者取消，deadline 取剩余与 180s 较小者）；
+//  3. 持锁执行唯一 lookup（网络 context 继承调用者取消，deadline 取剩余与 lookup 请求上限的较小者）；
 //  4. 上游结果与存储结果分开：成功写数值/时间并清 error；失败写 attempted_at/error_code 并
 //     保留最近成功值，**回调写完失败观测后返回 nil 使事务提交，提交后才向调用者返回 lookupErr**；
 //  5. 事务生命周期 context 与网络 context 分开（WithoutCancel + 网络预算 + 5 秒收尾），

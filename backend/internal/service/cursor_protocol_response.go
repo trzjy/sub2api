@@ -74,7 +74,7 @@ type cursorSSEStream struct {
 	//
 	// 交接判定**不改变任何控制流**：仍不交接、不 dountil、不提前结束。next() 在交接
 	// 检查点把 sealableDelegations() 的非 nil 错误**记录**到这里，供终态可观测性使用——
-	// 上层原本在 180s 到期时只能看到 deadline_exceeded，无法从日志区分"缺 listed / 计数
+	// 上层原本只能看到 deadline_exceeded，无法从日志区分"缺 listed / 计数
 	// 不等 / 某 started 无委派"（外审建议 S1）。
 	//
 	// 语义：每帧覆盖为最新值即可，无需历史队列；交接成功（sealable 通过）时清空。
@@ -217,13 +217,13 @@ func (s *cursorSSEStream) next() error {
 				// （尤其是 listedSeen）**不得跨代沿用**——否则同 model_call_id 的续轮
 				// 会在 noteToolRequestsListed 看到 listedSeen==true 且计数已齐，把新
 				// listed 挂起为 pending → 新批永远拿不到 listed → 封口谓词永不通过 →
-				// 180s 挂死。只清解析器本地归属计数，不碰 cursorToolDelegations（封口
+				// 挂死。只清解析器本地归属计数，不碰 cursorToolDelegations（封口
 				// 记录按代维护、续轮开新批，见 TestCursorBatchSealedBatchNotReused）。
 				s.parser.resetBatchGeneration()
 			} else {
 				// 交接判定处 sealable 失败：仅记录原因、不改变任何控制流——仍不交接、不
 				// dountil、不提前结束，继续等后续帧。外审建议 S1：原本此处把错误直接丢弃，
-				// 上层在 180s 到期时只能看到 deadline_exceeded，无法从日志区分"缺 listed /
+				// 上层只能看到 deadline_exceeded，无法从日志区分"缺 listed /
 				// 计数不等 / 某 started 无完整 f11 委托"。原因缓存到 lastSealErr，由终态日志
 				// 以安全字段（如 seal_blocked_reason）写出（只含错误类别与计数，不含正文）。
 				s.setLastSealErr(sealErr)
@@ -938,7 +938,7 @@ func (p *cursorStreamParser) resetTurnStart() { p.started = false }
 // AgentRun 代），旧批的归属计数（尤其是 listedSeen）**不得跨代沿用**——
 // 否则同 model_call_id 的续轮会在 noteToolRequestsListed 里看到 listedSeen==true 且
 // started+internal>=count，把新 listed 挂起为 pending → 新批永远拿不到 listed →
-// checkSealableLocked 永不通过 → 180s 挂死（外审 F1）。
+// checkSealableLocked 永不通过 → 请求无法完成（外审 F1）。
 //
 // 纪律：只清解析器本地归属计数，不碰 cursorToolDelegations（封口记录由该结构按代维护，
 // 续轮会开新批，见 TestCursorBatchSealedBatchNotReused）；不新增计时/兜底机制；同一 HTTP

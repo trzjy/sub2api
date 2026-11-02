@@ -40,7 +40,7 @@ const cursorClientVersion = "3.24.12"
 //     本层以 it.duplex.send(cursorFldClientMessage, frame) 包裹 ExecClientMessage，外层恒为 2。
 //   - cursorFldClientMsgMcpResult (=11) 才是 ExecClientMessage **内层**承载 McpResult 的字段号，
 //     与 ExecServerMessage.f11 mcp_args 对称。生产实证（group 34 / claude-sonnet-5-5）：
-//     内层若误用 2，上游不认该回包、模型停在等结果状态直到 180s deadline_exceeded / turn_ended_missing；
+//     内层若误用 2，上游不认该回包，模型会一直等待工具结果；
 //     用 11 时，重构前实现（5e2dd5d08 cursorMcpArgsReply：f11 McpResult）与活体探针
 //     （~/.sub2api-acceptance/sub2api-cursor-targeted-20261024/02-native-tools.cjs：fld(11,mcpResult)）
 //     均能让上游在同一连接继续并正常 turn_ended。故内层 McpResult 必须为 11，绝非 2。
@@ -54,7 +54,7 @@ const (
 
 	// cursorFldClientMsgMcpResult 是 ExecClientMessage **内层**承载 McpResult 的字段号（=11）。
 	// 与 ExecServerMessage.f11 mcp_args 对称。本单 B4 修正：此前误用 cursorFldClientMessage(=2)
-	// 作内层，导致上游不认回包、模型等到 180s deadline_exceeded；证据：重构前实现与活体探针均用 11。
+	// 作内层，导致上游不认回包、模型一直等待结果；证据：重构前实现与活体探针均用 11。
 	cursorFldClientMsgMcpResult = 11
 
 	// ExecClientMessage 字段。
@@ -462,7 +462,7 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			// mcp_args 委托（f11 mcp_args）：只捕获工具调用并登记入开放批次
 			// （W2-A1 批次封口），**绝不回 McpResult.error 诱导模型结束**（§24.3 旧链已斩）。
 			// 模型在同一双向连接上等待真实 McpResult；本层在续轮把真实结果写回原 exec
-			// 关联（W2-F CursorSessionIntake 生产实现）。连接保持存活至 180s / 真实终态 /
+			// 关联（W2-F CursorSessionIntake 生产实现）。连接保持存活至真实终态 /
 			// 显式终止，会话进入 waiting_tools。
 			tc, e := d.cursorCaptureMcpArgs(parts, execID, idField)
 			if e != nil {

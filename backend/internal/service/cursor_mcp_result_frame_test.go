@@ -6,7 +6,7 @@ package service
 // 已从误用的信封字段（2）修正为内层 McpResult 字段（11）。
 //
 // 生产实证（group 34 / claude-sonnet-5-5）：内层若误用 2，上游不认该回包、模型停在等结果
-// 状态直到 180s deadline_exceeded / turn_ended_missing；用 11 时，重构前实现
+// 状态直到上游终态；用 11 时，重构前实现
 // （5e2dd5d08 cursorMcpArgsReply：f11 McpResult）与活体探针
 // （sub2api-cursor-targeted-20261024/02-native-tools.cjs：fld(11,mcpResult)）均能让上游在同一
 // 连接继续并正常 turn_ended。

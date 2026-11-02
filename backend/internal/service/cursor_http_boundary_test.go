@@ -214,7 +214,7 @@ func TestCursorNonStreamFirstHTTPDeliversToolBatchBeforeTerminal(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("nonstream 首 HTTP 必须在完整工具批处返回，不得等到模型终态/180s")
+		t.Fatal("nonstream 首 HTTP 必须在完整工具批处返回，不得等到模型终态")
 	}
 	require.NoError(t, err)
 	var out map[string]any

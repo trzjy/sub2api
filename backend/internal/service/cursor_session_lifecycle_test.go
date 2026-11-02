@@ -12,7 +12,7 @@ package service
 //  5. 同事件重复 Apply 只扣一次：会话级不可变 durable 键可重放幂等；
 //  6. 空 TurnEnded / 字段缺失不假成功：未取得完整真实 usage 时不结算、不写零；
 //  7. 写出中断终止：附着期取消即结束会话；
-//  8. 等待结果过期：deadline 到期后会话终结且不重算 usage；
+//  8. 会话只由真实终态、取消或明确传输错误结束；不由适配层总期限截断；
 //  9. 进程 Stop 孤儿续轮明确失效；
 // 10. 记账提交失败如实报错后仍释放资源（finalizer 每项至多一次）。
 //
@@ -105,6 +105,18 @@ func TestCursorSessionBillingEventIDSessionScopedImmutable(t *testing.T) {
 	}
 }
 
+// TestCursorSessionContextHasNoAdapterDeadline protects the protocol boundary:
+// Anthropic Messages and OpenAI multi-turn clients may wait for tools between
+// HTTP turns, so the adapter must not invent a session-wide wall-clock cutoff.
+func TestCursorSessionContextHasNoAdapterDeadline(t *testing.T) {
+	svc := newCursorLifecycleTestService()
+	record := startCursorLifecycleTestSession(t, svc)
+	ctx, cancel := record.sessionContext(context.Background())
+	defer cancel()
+	_, hasDeadline := ctx.Deadline()
+	require.False(t, hasDeadline)
+}
+
 // TestCursorSessionSettlementDurableKeyStablePerSession 覆盖 §25.5：
 // 同一会话的 durable 结算键可重放幂等，不同会话互不合并。
 func TestCursorSessionSettlementDurableKeyStablePerSession(t *testing.T) {
@@ -119,28 +131,6 @@ func TestCursorSessionSettlementDurableKeyStablePerSession(t *testing.T) {
 	require.Equal(t, keyA1, keyA2, "同一会话重复结算必须落到同一个 durable 键（幂等）")
 	require.NotEqual(t, keyA1, keyB, "不同原生会话不得被合并成一笔账")
 	require.NotContains(t, keyA1, "local:", "会话账单事件 ID 不得退化成 HTTP 请求级 ID")
-}
-
-// TestCursorSessionDeadlineArmedOnceAcrossHTTP 覆盖 §25.4：
-// 180 秒总期限从首次 AgentRun 发起计算，续轮不重置。
-func TestCursorSessionDeadlineArmedOnceAcrossHTTP(t *testing.T) {
-	svc := newCursorLifecycleTestService()
-	record := startCursorLifecycleTestSession(t, svc)
-
-	first := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
-	deadline, source, remaining := record.armAgentRunDeadline(first)
-	require.Equal(t, first.Add(cursorAgentRunTotalBudget), deadline)
-	require.Equal(t, cursorDeadlineSourceFirstAgentRun, source)
-	require.Equal(t, cursorAgentRunTotalBudget, remaining)
-
-	// 第二个 HTTP（续轮）在 60 秒后才发起 AgentRun：deadline 必须原样保留。
-	second := first.Add(60 * time.Second)
-	deadline2, source2, remaining2 := record.armAgentRunDeadline(second)
-	require.Equal(t, deadline, deadline2, "续轮不得重置 180 秒总期限")
-	require.Equal(t, source, source2)
-	require.Equal(t, 120*time.Second, remaining2, "剩余预算必须扣掉已消耗的 60 秒")
-
-	require.Equal(t, cursorAgentRunTotalBudget, 180*time.Second)
 }
 
 // TestCursorSessionAttachConflictDuplicateContinuation 覆盖 §25.4：
@@ -470,26 +460,6 @@ func TestCursorSessionSettlementFailureStillReleasesOnce(t *testing.T) {
 
 	require.NotNil(t, settlementErr.Load(), "记账失败须被调用方如实记录")
 	require.EqualValues(t, 1, slot.releases.Load(), "结算失败不得导致重复释放或漏释放")
-}
-
-// TestCursorSessionDeadlineExceededReason 覆盖异常矩阵"等待结果过期"：
-// deadline 是终态原因之一，终结后不再重置期限。
-func TestCursorSessionDeadlineExceededReason(t *testing.T) {
-	require.Equal(t, "deadline_exceeded", cursorSessionTerminalReason(context.DeadlineExceeded))
-	require.Equal(t, "cancelled", cursorSessionTerminalReason(context.Canceled))
-	require.Equal(t, "completed", cursorSessionTerminalReason(nil))
-	require.Equal(t, "failed", cursorSessionTerminalReason(errors.New("boom")))
-
-	svc := newCursorLifecycleTestService()
-	record := startCursorLifecycleTestSession(t, svc)
-	deadline, _, _ := record.armAgentRunDeadline(time.Now())
-	svc.finishCursorSession(record, cursorSessionTerminalReason(context.DeadlineExceeded))
-
-	record.mu.Lock()
-	outcome := record.outcome
-	record.mu.Unlock()
-	require.Equal(t, "deadline_exceeded", outcome)
-	require.Equal(t, deadline, record.Deadline(), "终结不得改写已固定的 deadline")
 }
 
 // TestCursorInflightHoldPastHTTPDefersHandlerDone 覆盖 §25.4/§25.5：

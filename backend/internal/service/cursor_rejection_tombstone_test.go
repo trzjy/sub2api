@@ -5,7 +5,7 @@ package service
 // 本文件定向覆盖「会话级 rejection tombstone」（派发单 CURSOR-B2）。
 //
 // 根因：原 noteRejectedCall 只扫描「当前已 started 的批」做标记。拒绝先到、started
-// 后到时标记落空 → 该批永远封不了口 → 180s 总期限挂死。本卡在 cursorToolDelegations
+// 后到时标记落空 → 该批永远封不了口。本卡在 cursorToolDelegations
 // 上加会话级墓碑：noteRejectedCall 未命中已 started 批时登记，noteToolCallStarted 在持锁下原子消费
 // （消费即删，不跨批/跨会话复用），把 call 记入所属批的 rejected 集合，于是封口谓词
 // 跳过它。
@@ -15,7 +15,6 @@ package service
 //  2. started 先到 → 拒绝后到：同样能封口；
 //  3. 墓碑不跨会话复用：新会话同一 call_id 不命中旧会话墓碑；
 //  4. 墓碑不跨批复用：同一 call_id 被一个批消费后，另一个批不得再消费；
-//  5. 过期墓碑 → 失败关闭（错误含 call_id）；
 //  6. 无法归属的墓碑（无 model_call_id + 多开放批）→ 失败关闭（错误含 call_id）。
 //
 // 全部纯内存组件测试：无 DB、无网络。直接驱动 delegations 方法构造场景，不依赖其它卡
@@ -23,7 +22,6 @@ package service
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -112,26 +110,6 @@ func TestCursorRejectionTombstoneNoCrossBatch(t *testing.T) {
 	require.ErrorIs(t, err, ErrCursorBatchIncomplete,
 		"墓碑已被批1消费，批2 不得再命中：批2 必须失败关闭")
 	require.Contains(t, err.Error(), "call_rej")
-}
-
-// TestCursorRejectionTombstoneExpiredFailsClosed 覆盖「过期墓碑 → 失败关闭」：
-// 墓碑登记时刻距今超过本会话 180s 总期限即失败关闭（错误含 call_id），绝不静默忽略。
-//
-// 通过临时把 TTL 收紧到 1ns 构造过期（生产语义恒为 180s），避免 180s 真睡。
-func TestCursorRejectionTombstoneExpiredFailsClosed(t *testing.T) {
-	orig := cursorRejectionTombstoneTTL
-	cursorRejectionTombstoneTTL = time.Nanosecond
-	defer func() { cursorRejectionTombstoneTTL = orig }()
-
-	d := newCursorToolDelegations()
-	d.noteRejectedCall("call_rej") // 登记墓碑
-	require.NoError(t, d.noteToolRequestsListed("mc-1", 1))
-	// 两次调用之间必然流逝 > 1ns，墓碑即过期。
-	err := d.noteToolCallStarted("mc-1", "call_rej", true)
-	require.ErrorIs(t, err, ErrCursorBatchIncomplete,
-		"过期墓碑在 started 到达时必须失败关闭")
-	require.Contains(t, err.Error(), "call_rej", "错误信息必须能看出 call_id")
-	require.Contains(t, err.Error(), "expired", "错误信息必须标明过期")
 }
 
 // TestCursorRejectionTombstoneUnattributableFailsClosed 覆盖「无法归属的墓碑 → 失败关闭」：

@@ -497,20 +497,11 @@ func (s *CursorExecutionService) Execute(
 		}
 	}()
 
-	// §25.4：180 秒总期限从**首次 AgentRun 发起**计算；跨 HTTP 与工具执行共用，
-	// 续轮不重置。日志分别记 deadline、来源与剩余，不打印正文/凭据。
-	deadline, deadlineSource, remaining := session.armAgentRunDeadline(s.now())
-	cursorPhaseLog(ctx, zapcore.InfoLevel, "agent_run_deadline", upstreamModel,
-		zap.String("session_id", session.id),
-		zap.Time("deadline", deadline),
-		zap.String("deadline_source", deadlineSource),
-		zap.Duration("deadline_remaining", remaining))
-
 	// 会话运行 context 与 HTTP context 取消**解耦**：正常 handler 返回触发的取消不能
 	// 误杀已完成交接的会话；附着期间的真实断连由 attachHTTP 的取消回调判定。
 	//
 	// 跨 HTTP（§25.4 / W2-F / §25.17.2-2）：本 HTTP 返回**不得**取消会话运行 ctx。该 ctx
-	// 是原生 AgentRun 连接的存活依据（既是出站请求 ctx，也是 180 秒期限的作用点），取消权
+	// 是原生 AgentRun 连接的存活依据，取消权
 	// 在 registStreamClose 之后交给 finalizer（streamClose）。stream 与 nonstream 同口径：
 	// 只要读循环仍在且会话未被收口（本 HTTP 在完整工具批检查点返回），就把 ctx 交给
 	// finalizer；否则（错误早退 / 单 HTTP 完成）自行取消，避免泄漏一个永不取消的 ctx。
@@ -529,16 +520,6 @@ func (s *CursorExecutionService) Execute(
 		}
 		cancelSession()
 	}()
-	// §25.4：180 秒到期即终结，**不依赖传输层是否及时把取消回报给读循环**。
-	//
-	// 期限仍是同一个（首次 AgentRun 发起时固定的绝对时刻，续轮不重置）：这里只是把
-	// "到点终结"落到唯一 finalizer 上。其它取消原因（客户端断连由 attachHTTP 回调判定、
-	// finalizer 自己的 streamClose 取消、服务 Stop）不在此抢跑，避免与既有唯一胜者竞争。
-	_ = context.AfterFunc(sessionCtx, func() {
-		if errors.Is(sessionCtx.Err(), context.DeadlineExceeded) {
-			s.finishCursorSession(session, "deadline_exceeded")
-		}
-	})
 	detachHTTP, attachErr := session.attachHTTP(ctx)
 	if attachErr != nil {
 		session.noteStage("attach_conflict")
@@ -563,7 +544,7 @@ func (s *CursorExecutionService) Execute(
 	//
 	// 跨 HTTP 语义（§25.4 / W2-F）：首批 HTTP 交付工具批次后**正常返回**不触发会话
 	// finalize——此时 pump 未结束（模型正等待续轮真实结果），会话跨 HTTP 存活，finalizer
-	// 由 pump 在真实终态 / 传输错误 / 180s 到期时独占。仅当本次 Execute 以错误返回、或 pump
+	// 由 pump 在真实终态 / 传输错误时独占。仅当本次 Execute 以错误返回、或 pump
 	// 已结束（正常单 HTTP 完成）时才在此收尾（idempotent，不双写）。
 	defer func() {
 		if result != nil {
@@ -581,7 +562,7 @@ func (s *CursorExecutionService) Execute(
 		session.mu.Unlock()
 		// §25.17.2-2：stream 与 nonstream 同口径——只要读循环仍在（pumpEnded=false）且会话
 		// 处于运行/等待工具（本次 HTTP 在完整工具批检查点交付后返回），会话就跨 HTTP 存活，
-		// finalizer 由 pump 在真实终态/传输错误/180s 到期时独占。只有读循环已结束或会话已被
+		// finalizer 由 pump 在真实终态/传输错误时独占。只有读循环已结束或会话已被
 		// finalizer 收口时，才由本返回点收尾（幂等，不双写）。
 		if pumpEnded || state == cursorSessionClosed {
 			s.finishCursorSession(session, "completed")
@@ -646,7 +627,7 @@ func (s *CursorExecutionService) Execute(
 
 // cursorSessionTerminalReason 把执行错误归类为会话终态原因（日志安全字段）。
 //
-// 只有真实断连/客户端取消/deadline/服务 Stop 才结束会话；正常返回是 completed。
+// 只有真实断连/客户端取消/外部 deadline/服务 Stop 才结束会话；正常返回是 completed。
 func cursorSessionTerminalReason(err error) string {
 	switch {
 	case err == nil:
@@ -1239,7 +1220,7 @@ func cursorChunkCarriesModelContent(chunk []byte) bool {
 //
 // 读取原生 AgentRun 响应，解析为客户端协议字节并扇出给当前附着的 HTTP；捕获 mcp_args 委托时
 // 吐出 tool_calls + finish + [DONE]（委托检查点）并暂停等待续轮；收到 turn_ended / 传输错误 /
-// 180s 到期时终态并关闭会话（finalizer，W2-D2）。写路径串行（duplex.writeMu 保护）。
+// 终态时关闭会话（finalizer，W2-D2）。写路径串行（duplex.writeMu 保护）。
 func (s *CursorExecutionService) runCursorAgentRunPump(
 	session *cursorSessionRecord,
 	resp *CursorUpstreamResponse,
@@ -1301,7 +1282,7 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 				prepared = nil
 				continue
 			}
-			// 真实终态：turn_ended / 传输错误 / 180s 到期 / 客户端断连。记录 usage 并关闭
+			// 真实终态：turn_ended / 传输错误 / 客户端断连。记录 usage 并关闭
 			// 会话（finalizer）。usage 只可能来自真实 turn_ended：没见到就不结算、不写零值。
 			session.noteTurnUsage(parser.usage, "pump_terminal")
 			// 本 HTTP 的原生读取到此结束（stream 与 nonstream 同一条读循环）。
@@ -1347,7 +1328,7 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 
 // cursorPumpTerminalReason 把读循环终态错误归类为会话终态原因（日志安全字段）。
 //
-// 与 cursorSessionTerminalReason 同一口径：只区分正常完成 / 180s 到期 / 客户端断连 /
+// 与 cursorSessionTerminalReason 同一口径：只区分正常完成 / 客户端断连 /
 // 其它传输错误，绝不把错误文案（可能含账号信息）写进日志或结算事件。
 func cursorPumpTerminalReason(err error) string {
 	switch {
@@ -2812,9 +2793,6 @@ type cursorSessionRecord struct {
 	mu          sync.Mutex
 	state       cursorSessionState
 	delegations *cursorToolDelegations
-	// waitingIdleTimer 是 waiting_tools 空闲计时器（方案 §2.5）：进入 waiting_tools 时启动，
-	// 续轮接管或进入 finalizing 时停止并置 nil。只在 record.mu 下读写。
-	waitingIdleTimer *time.Timer
 	// toolCallIDs 是已登记的对外工具调用 ID（供续轮关联与重复提交拒绝）。
 	toolCallIDs map[string]struct{}
 
@@ -2829,7 +2807,7 @@ type cursorSessionRecord struct {
 	// tool_search）；历史登记据此把交付侧捕获还原为正确的实际类型，不另造判定。
 	responsesTools cursorResponsesToolMeta
 
-	// pumpEnded 标记背景读循环（每会话一个读循环）是否已结束（终态/传输错误/180s）。
+	// pumpEnded 标记背景读循环（每会话一个读循环）是否已结束（终态/传输错误）。
 	// Execute 返回时据此判定会话是否仍存活跨 HTTP：未结束则不触发 finalize。
 	pumpEnded bool
 
@@ -2838,16 +2816,12 @@ type cursorSessionRecord struct {
 	// 已发布字节则禁止 mid-stream 换号，错误原样返回。
 	bodyPublished bool
 
-	// ---- §25.4 并发槽 / 预留 / 180 秒 / 终止清理（全部字段在 mu 下读写）----
+	// ---- §25.4 并发槽 / 预留 / 终止清理（全部字段在 mu 下读写）----
 
 	// createdAt 是会话建立时刻；billingEventID 是**服务端生成、会话级不可变**的
 	// 账单事件 ID（§25.5），建会话时固定，任何 HTTP request_id 都不得替代它。
 	createdAt      time.Time
 	billingEventID string
-	// deadline 是 180 秒总期限的绝对时刻；在首次 AgentRun 发起时固定，续轮**不重置**。
-	deadline       time.Time
-	deadlineSource string
-	agentRunAt     time.Time
 	// resources 是本会话持有的可转交资源句柄（用户槽、账号槽、余额预留）；
 	// 只有 finalizer 或交接失败回退路径会释放它们，且各自幂等。
 	resources []CursorTransferableResource
@@ -2932,7 +2906,7 @@ type cursorSessionRecord struct {
 	// output 是每会话上游帧扇出：背景读循环把"模型输出事件"推入，当前附着的 HTTP 消费者
 	// 按"自本次附着以来"的序列号拉取；无附着时只保留元数据（不存正文）。
 	output *cursorSessionOutput
-	// pumpDone 在背景读循环结束时关闭（终态/传输错误/180s 到期），用于通知附着 HTTP 收尾。
+	// pumpDone 在背景读循环结束时关闭（终态/传输错误），用于通知附着 HTTP 收尾。
 	pumpDone chan struct{}
 	// resumeCount 是本会话已接纳的续轮次数（日志/诊断安全字段）。
 	resumeCount int
@@ -3316,7 +3290,7 @@ const cursorStopFinalizeWaitTimeout = 10 * time.Second
 // （任务提交 + 资源归还）完成后再返回，不设 10 秒上限——等待期间不持会话表锁。finalizeDone
 // 由唯一 finalizer 在结算提交、槽位归还与索引清理结束后关闭；若 finalizer 受阻（如上游结算
 // 阻塞），Stop 如实阻塞，绝不把"未完成"包装成成功（"清表即返回"的旧实现会漏掉结算）。
-// 180 秒模型期限会强制触发终结并最终关闭 finalizeDone，因此等待有界于模型期限，不会无限挂起。
+// finalizeDone 在终结完成后关闭；Stop 等待该信号以确保结算与资源归还完成。
 func waitCursorSessionFinalizers(signals []<-chan struct{}) {
 	for _, sig := range signals {
 		if sig == nil {
@@ -3537,7 +3511,7 @@ type cursorToolBatch struct {
 	sealed      bool
 	// rejected 是本批**本地已拒绝**的对外 call_id（客户端没有对应工具：shell/f14、原生文件
 	// exec 等）。这类调用不会有委托，但上游的 started/listed 计数仍然包含它；若不在此登记，
-	// checkSealableLocked 的"每条 started 都要有委托"会永假 → 批不封口 → 180s 挂死
+	// checkSealableLocked 的"每条 started 都要有委托"会永假 → 批不封口
 	// （外审 B1）。登记后封口谓词跳过它们，交付集合里也不含它们（它们从未写入 delegations）。
 	rejected map[string]struct{}
 	// wireDecided 是本批**已决定出站 id** 的委托数（batch.delegations 的前缀长度，由
@@ -3551,20 +3525,8 @@ type cursorToolBatch struct {
 }
 
 // cursorRejectionTombstone 是会话级"本地已拒绝"墓碑：拒绝先到、started 后到时，
-// 让本地拒绝在 started 到达前也不丢。registeredAt 用于过期判定——登记时刻距今超过
-// 本会话 180s 总期限即视为协议停滞，失败关闭（绝不静默忽略）。
-type cursorRejectionTombstone struct {
-	registeredAt time.Time
-}
-
-// cursorRejectionTombstoneTTL 是墓碑的最大存活期，等于本会话 180s 总期限。
-// 设成 var（而非 const）仅为单测可临时收紧以构造过期场景，生产语义恒为 180s。
-var cursorRejectionTombstoneTTL = 180 * time.Second
-
-// cursorWaitingToolsIdleTimeout 是会话停在 waiting_tools（已交付工具批、等客户端续轮）的
-// 最长空闲期（方案 §2.5）：到期仍未续轮即走唯一 finalizer 提前释放槽与预留，与 180s 总期限
-// 取先到者。设成 var（而非 const）仅为单测可临时收紧，生产语义恒为 120s。
-var cursorWaitingToolsIdleTimeout = 120 * time.Second
+// 让本地拒绝在 started 到达前也不丢；它在 started 到达时原子消费。
+type cursorRejectionTombstone struct{}
 
 // cursorToolDelegations 是一次 AgentRun 内工具委托的**唯一**记录。
 //
@@ -3779,14 +3741,10 @@ func (d *cursorToolDelegations) noteToolCallStarted(modelCallID, callID string, 
 	defer d.mu.Unlock()
 	batch, err := d.batchFor(modelCallID)
 	// 墓碑消费必须在同一把锁内、在任何提前 return 之前完成：拒绝先到、started 后到时，
-	// 这里把它原子消费（删即消费，不跨批/跨会话复用）并记入所属批 rejected；过期或无法
+	// 这里把它原子消费（删即消费，不跨批/跨会话复用）并记入所属批 rejected；无法
 	// 归属则失败关闭（错误含 call_id），绝不静默忽略。
-	if ts, ok := d.rejectionTombstones[callID]; ok {
+	if _, ok := d.rejectionTombstones[callID]; ok {
 		delete(d.rejectionTombstones, callID)
-		if time.Since(ts.registeredAt) > cursorRejectionTombstoneTTL {
-			return fmt.Errorf("%w: rejection tombstone for call_id %q expired (registered %s)",
-				ErrCursorBatchIncomplete, callID, ts.registeredAt.Format(time.RFC3339))
-		}
 		if err != nil {
 			// batchFor 无法把 started 归到唯一开放批（如多个无 ID 开放批）→ 墓碑无法归属。
 			return fmt.Errorf("%w: rejection tombstone for call_id %q arrived but cannot be attributed to any batch (%s)",
@@ -3865,7 +3823,7 @@ func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) e
 //     就地标记该批的 rejected 集合并返回，**不登记墓碑**——否则墓碑残留，同会话后续批
 //     复用同一 call_id 时会被 noteToolCallStarted 消费，把新的真实调用误当成本地拒绝。
 //  2. 遍历后仍未命中（"拒绝先到、started 后到"），才登记会话级墓碑：旧实现只在已
-//     started 的批里标记，拒绝先到时落空，该批永远封不了口 → 180s 总期限挂死。墓碑随后
+//     started 的批里标记，拒绝先到时落空，该批永远封不了口。墓碑随后
 //     由 noteToolCallStarted 在持锁下原子消费（消费即删，不跨批/跨会话复用），把该 call
 //     记入所属批的 rejected 集合。
 //
@@ -3896,7 +3854,7 @@ func (d *cursorToolDelegations) noteRejectedCall(callID string) {
 	if d.rejectionTombstones == nil {
 		d.rejectionTombstones = make(map[string]cursorRejectionTombstone)
 	}
-	d.rejectionTombstones[callID] = cursorRejectionTombstone{registeredAt: time.Now()}
+	d.rejectionTombstones[callID] = cursorRejectionTombstone{}
 }
 
 // snapshot 返回按到达顺序的全部委托（parser 输出 tool_calls 用）。
@@ -4169,18 +4127,8 @@ func cursorSealSessionBatch(delegations *cursorToolDelegations) error {
 }
 
 // ---------------------------------------------------------------------------
-// §25.4 / §25.5 会话生命周期：可转交句柄、180 秒总期限、唯一 finalizer、唯一结算
+// §25.4 / §25.5 会话生命周期：可转交句柄、唯一 finalizer、唯一结算
 // ---------------------------------------------------------------------------
-
-// cursorAgentRunTotalBudget 是上游 **180 秒总期限**（§25.4）。
-//
-// 它是既有出站契约 cursorUpstreamDefaultTimeout 的**具体作用点**：从首次 AgentRun
-// 发起计算，跨 HTTP 与工具执行共用同一份预算，续轮不重置。本层不另设 120 秒、
-// 工具等待窗口或无限保活；尚未发起 AgentRun 的鉴权/排队时限不在此改写。
-const cursorAgentRunTotalBudget = cursorUpstreamDefaultTimeout
-
-// cursorDeadlineSourceFirstAgentRun 是 deadline 来源标记（日志安全字段）。
-const cursorDeadlineSourceFirstAgentRun = "first_agent_run"
 
 // 会话生命周期错误。全部失败关闭：不猜归属、不交失效句柄、不重复结算。
 var (
@@ -4409,55 +4357,15 @@ func (r *cursorSessionRecord) SessionID() string {
 	return r.id
 }
 
-// Deadline 返回 180 秒总期限的绝对时刻（零值表示尚未发起 AgentRun）。
-func (r *cursorSessionRecord) Deadline() time.Time {
-	if r == nil {
-		return time.Time{}
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.deadline
-}
-
-// armAgentRunDeadline 在首次 AgentRun 发起时固定 180 秒总期限。
-//
-// **续轮不重置**：已固定的 deadline 原样返回，绝不因为新的 HTTP 附着而顺延
-// （§25.4：跨 HTTP 和工具执行共用这 180 秒）。
-func (r *cursorSessionRecord) armAgentRunDeadline(now time.Time) (deadline time.Time, source string, remaining time.Duration) {
-	if r == nil {
-		return time.Time{}, "", 0
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.deadline.IsZero() {
-		r.agentRunAt = now
-		r.deadline = now.Add(cursorAgentRunTotalBudget)
-		r.deadlineSource = cursorDeadlineSourceFirstAgentRun
-	}
-	remaining = time.Until(r.deadline)
-	if r.deadlineSource != "" {
-		remaining = r.deadline.Sub(now)
-	}
-	return r.deadline, r.deadlineSource, remaining
-}
-
 // sessionContext 由 HTTP context 派生出会话运行 context。
-//
-// 与 HTTP context 取消**解耦**（context.WithoutCancel）：正常 handler 返回触发的
-// context 取消不能误杀已完成交接的会话；HTTP 附着期间的真实断连由 attachHTTP 的
-// 取消回调判定（见 onHTTPAttachCancel）。deadline 取会话固定的 180 秒总期限。
+// 正常 handler 返回触发的取消不能误杀已完成交接的会话；HTTP 附着期间的真实断连
+// 由 attachHTTP 的取消回调判定。适配层不凭空增加会话总期限。
 func (r *cursorSessionRecord) sessionContext(httpCtx context.Context) (context.Context, context.CancelFunc) {
 	base := context.WithoutCancel(httpCtx)
 	if base == nil {
 		base = context.Background()
 	}
-	r.mu.Lock()
-	deadline := r.deadline
-	r.mu.Unlock()
-	if deadline.IsZero() {
-		return context.WithCancel(base)
-	}
-	return context.WithDeadline(base, deadline)
+	return context.WithCancel(base)
 }
 
 // attachHTTP 把本 HTTP 注册为会话的当前附着端，返回幂等的 detach。
@@ -4596,7 +4504,7 @@ func (s *CursorExecutionService) adoptHandover(ctx context.Context, record *curs
 //
 // 固定顺序：停止接新结果 → 关闭原生流/取消读写 → 已获完整真实 usage 则提交唯一结算
 // → 归还/转交原预留 → 释放两槽 → 移除该 session 全部索引关联 → closed。
-// 网络/计费操作全部在锁外；终结守卫保证每项最多一次；竞争（取消、deadline、服务 Stop、
+// 网络/计费操作全部在锁外；终结守卫保证每项最多一次；竞争（取消、外部 deadline、服务 Stop、
 // 正常返回）以**第一个进入 finalizer 的终态**为唯一胜者，不双写、不重复释放。
 func (s *CursorExecutionService) finishCursorSession(record *cursorSessionRecord, reason string) {
 	s.finishCursorSessionIf(record, reason, nil)
@@ -4626,18 +4534,12 @@ func (s *CursorExecutionService) finishCursorSessionIf(record *cursorSessionReco
 	}
 	record.finishing = true
 	record.state = cursorSessionFinalizing
-	record.stopWaitingIdleTimerLocked()
 	record.interruptReason = reason
-	deadline := record.deadline
-	deadlineSource := record.deadlineSource
 	record.mu.Unlock()
 
 	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_finalize_begin", record.spec.requestedModel,
 		zap.String("session_id", record.id),
-		zap.String("terminal_reason", reason),
-		zap.Time("deadline", deadline),
-		zap.String("deadline_source", deadlineSource),
-		zap.Duration("deadline_remaining", time.Until(deadline)))
+		zap.String("terminal_reason", reason))
 
 	// ① 停止接新结果：拒绝新的工具调用登记与新的 HTTP 附着。
 	if record.beginStep(&record.steps.intakeStopped) {
@@ -6589,7 +6491,6 @@ func (s *cursorSessionStore) beginResumeTakeover(
 	}
 	record.pending.consumed = true
 	record.state = cursorSessionRunning
-	record.stopWaitingIdleTimerLocked()
 	record.resumeCount++
 	record.attached = true
 	if httpCtx != nil {
@@ -7778,50 +7679,12 @@ func (s *CursorExecutionService) commitDeliveredBatchState(
 		}
 	}
 	record.state = cursorSessionWaitingTools
-	record.stopWaitingIdleTimerLocked()
-	idleBatchID := record.pending.batchID
-	record.waitingIdleTimer = time.AfterFunc(cursorWaitingToolsIdleTimeout, func() {
-		s.onWaitingToolsIdle(record, idleBatchID)
-	})
 	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_batch_delivered", record.spec.requestedModel,
 		zap.String("session_id", record.id),
 		zap.String("batch_id", prepared.batchID),
 		zap.Int("call_count", len(prepared.callIDs)),
 		zap.Bool("has_response_id", prepared.responseID != ""))
 	return nil
-}
-
-// stopWaitingIdleTimerLocked 停止并清空 waiting_tools 空闲计时器（调用方持 r.mu）。
-func (r *cursorSessionRecord) stopWaitingIdleTimerLocked() {
-	if r.waitingIdleTimer != nil {
-		r.waitingIdleTimer.Stop()
-		r.waitingIdleTimer = nil
-	}
-}
-
-// onWaitingToolsIdle 是 waiting_tools 空闲计时器到期回调（方案 §2.5）。
-//
-// 只认"仍在 waiting_tools、当前未消费的同一批"：计时器 Stop 与到期存在竞争，过期回调
-// 在这里按状态与批次复核后一律 no-op。复核与"置 finishing"在 finishCursorSessionIf 内同锁
-// 完成，续轮接管（beginResumeTakeover）与空闲终结只会有一个胜者；计时器清理由 finalizer
-// 内的 stopWaitingIdleTimerLocked 负责。
-func (s *CursorExecutionService) onWaitingToolsIdle(record *cursorSessionRecord, batchID string) {
-	if s == nil || record == nil {
-		return
-	}
-	// 期限在进入 finalizer 前读出：finalizer 关闭完成信号后不再读包级变量。
-	idleTimeout := cursorWaitingToolsIdleTimeout
-	ok := s.finishCursorSessionIf(record, "waiting_tools_idle", func() bool {
-		return record.state == cursorSessionWaitingTools && record.pending != nil &&
-			record.pending.batchID == batchID && !record.pending.consumed
-	})
-	if !ok {
-		return
-	}
-	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_waiting_tools_idle", record.spec.requestedModel,
-		zap.String("session_id", record.id),
-		zap.String("batch_id", batchID),
-		zap.Duration("idle_timeout", idleTimeout))
 }
 
 // recordDeliveredBatch 是"准备 + 提交"的同步组合（供无独立写出边界的调用方使用）。
