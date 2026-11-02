@@ -3,6 +3,7 @@ package apicompat
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -499,8 +500,12 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
 	text := chatMessageContentText(message.Content)
 	// DeepSeek reasoning-only fallback: when there is no text and no tool calls,
 	// surface the reasoning content as visible text so the turn isn't empty.
-	if text == "" && strings.TrimSpace(reasoning) != "" && len(message.ToolCalls) == 0 {
-		text = reasoning
+	//
+	// 但绝不能把 reasoning 原样当正文（11-03 活体）：上游把推理内联成
+	// "<thinking>(reasoning not retained)</thinking>" 时，客户端会把它当正文打印出来。
+	// 占位串与推理标签都是网关内部产物，必须先清洗再交付。
+	if text == "" && len(message.ToolCalls) == 0 {
+		text = sanitizeReasoningForVisibleText(reasoning)
 	}
 	if text != "" || len(message.ToolCalls) == 0 {
 		blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: text})
@@ -520,6 +525,31 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
 	}
 
 	return blocks
+}
+
+// reasoningVisiblePlaceholder 是网关在 DeepSeek thinking 轮次缺 reasoning 时注入的
+// 缺失标记（见 service.messagesReasoningPlaceholder）。它只允许出现在发往上游的
+// 请求体里，绝不能作为可见正文交付给客户端。
+const reasoningVisiblePlaceholder = "(reasoning not retained)"
+
+// reasoningTagPattern 匹配上游内联进正文的推理标签段（<think> / <thinking> 两种写法）。
+var reasoningTagPattern = regexp.MustCompile(`(?is)<think(?:ing)?>.*?</think(?:ing)?>`)
+
+// strayReasoningTagPattern 兜底清掉未成对的孤立标签。
+var strayReasoningTagPattern = regexp.MustCompile(`(?is)</?think(?:ing)?>`)
+
+// sanitizeReasoningForVisibleText 清洗"准备当正文输出"的 reasoning：
+// 去掉网关占位串、剥离推理标签段与孤立标签、trim 空白。
+// 清洗后为空表示这一轮没有可交付正文（调用方应保持空文本，而不是回退原始 reasoning）。
+func sanitizeReasoningForVisibleText(reasoning string) string {
+	if strings.TrimSpace(reasoning) == "" {
+		return ""
+	}
+	s := reasoning
+	s = strings.ReplaceAll(s, reasoningVisiblePlaceholder, "")
+	s = reasoningTagPattern.ReplaceAllString(s, "")
+	s = strayReasoningTagPattern.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
 }
 
 // chatFinishReasonToAnthropicStopReason maps Chat Completions finish_reason to
