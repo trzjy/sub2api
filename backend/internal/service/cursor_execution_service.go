@@ -6770,6 +6770,7 @@ func (s *CursorExecutionService) ResumeCursorSession(
 			zap.String("history_skeleton_request", cursorDigestSkeletonPrefix(plan.history)),
 			zap.String("history_item_types_stored", storedHistory.TraceString()),
 			zap.String("history_item_types_request", plan.history.TraceString()),
+			zap.String("history_first_divergence", storedHistory.FirstDivergence(plan.history)),
 			zap.String("protocol", string(ticket.Protocol)))
 		return nil, newCursorResumeError(http.StatusBadRequest, "history_mismatch", ErrCursorResumeHistoryMismatch)
 	}

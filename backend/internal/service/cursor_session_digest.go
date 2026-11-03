@@ -18,6 +18,7 @@ package service
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -76,6 +77,11 @@ type CursorHistoryDigest struct {
 	// history_mismatch 过去只有计数与哈希前缀，无法区分是正文项、工具项还是结果项错位。
 	// 有上限（cursorDigestTraceLimit），超出即截断并标记，绝不无限增长。
 	trace []string
+	// traceHash 与 trace 逐项对齐：存每项 canonical 的**前 4 字节哈希**。
+	// 用途是"两侧哪一项最先不同"——项类型相同、项数相同但链值不同时（生产已实测到：
+	// responses 的 custom_tool_call），只有逐项对位哈希才能指出差异落在第几项。
+	// 只存哈希前缀，不可反推任何正文/参数，可安全进日志。
+	traceHash []uint32
 }
 
 // cursorDigestTraceLimit 是项类型轨迹的最大保留条数（超出后只追加一个省略标记）。
@@ -93,6 +99,7 @@ const cursorDigestTraceLimit = 96
 //   - 续轮侧 cursorAnthropicBlockItem / cursorResponsesItemItem 却会为客户端回传的
 //     thinking 块 / reasoning 条目产出 messages.assistant.thinking、responses.reasoning
 //     —— 客户端回传就多一项，不回传就少一项。
+//
 // 把这几类摘到骨架链之外，才谈得上"同一逻辑会话"。Anthropic 语义下 thinking 块还带
 // signature、客户端重放时常常整段丢弃（不丢会 400），本就更不该参与准入比对。
 //
@@ -126,6 +133,7 @@ func (d *CursorHistoryDigest) reset() {
 	d.skeletonState = cursorDigestH0
 	d.skeletonItems = 0
 	d.trace = nil
+	d.traceHash = nil
 }
 
 // ItemCount 返回已进入历史链的逻辑项数。
@@ -210,6 +218,9 @@ func (d *CursorHistoryDigest) Clone() *CursorHistoryDigest {
 	if len(d.trace) > 0 {
 		c.trace = append([]string(nil), d.trace...)
 	}
+	if len(d.traceHash) > 0 {
+		c.traceHash = append([]uint32(nil), d.traceHash...)
+	}
 	return c
 }
 
@@ -230,6 +241,45 @@ func (d *CursorHistoryDigest) TraceString() string {
 		return ""
 	}
 	return strings.Join(d.trace, ",")
+}
+
+// FirstDivergence 比较两侧项类型/逐项内容指纹，返回**第一个不同项的序号、两侧类型与
+// 该位置的指纹前缀**；完全一致返回空串。
+//
+// 用途：生产实测到"项数相同、项类型序列也相同、但链值不同"的形态（responses 的
+// custom_tool_call）。只靠总计数与总哈希无法判断差异落在第几项，只能靠本函数。
+// 输出只含序号、类型名（固定枚举）与 8 位十六进制指纹，**不含任何正文/参数**，
+// 可作为日志安全字段。
+func (d *CursorHistoryDigest) FirstDivergence(other *CursorHistoryDigest) string {
+	if d == nil || other == nil {
+		return ""
+	}
+	maxLen := len(d.trace)
+	if len(other.trace) > maxLen {
+		maxLen = len(other.trace)
+	}
+	for i := 0; i < maxLen; i++ {
+		var aType, bType string
+		var aHash, bHash uint32
+		hasA := i < len(d.trace)
+		hasB := i < len(other.trace)
+		if hasA {
+			aType = d.trace[i]
+		}
+		if hasB {
+			bType = other.trace[i]
+		}
+		if hasA && i < len(d.traceHash) {
+			aHash = d.traceHash[i]
+		}
+		if hasB && i < len(other.traceHash) {
+			bHash = other.traceHash[i]
+		}
+		if !hasA || !hasB || aType != bType || aHash != bHash {
+			return fmt.Sprintf("idx=%d stored=%s(%08x) request=%s(%08x)", i, aType, aHash, bType, bHash)
+		}
+	}
+	return ""
 }
 
 // ValidateCursorDigestItemType 校验项类型是否是可安全拼入链的类型命名空间字节串。
@@ -304,6 +354,10 @@ func (d *CursorHistoryDigest) AppendItem(itemType string, canonical []byte) erro
 	}
 	if len(d.trace) < cursorDigestTraceLimit {
 		d.trace = append(d.trace, itemType)
+		// 逐项内容指纹：canonical 的 SHA256 前 4 字节。只用于"第几项开始不同"的对位，
+		// 不含任何明文，进日志安全。
+		sum := sha256.Sum256(canonical)
+		d.traceHash = append(d.traceHash, binary.BigEndian.Uint32(sum[:4]))
 	} else if len(d.trace) == cursorDigestTraceLimit {
 		d.trace = append(d.trace, "...")
 	}

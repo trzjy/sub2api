@@ -804,3 +804,47 @@ func TestCursorSessionDigestSkeleton(t *testing.T) {
 		}
 	})
 }
+
+// TestCursorSessionDigestFirstDivergence 校验"第几项开始不同"的定位能力。
+//
+// 生产实测到 responses/custom_tool_call 的形态：两侧项数相同、项类型序列也相同，
+// 但链值不同（内容差异）。只有逐项对位指纹才能指出差异落在哪一项。
+func TestCursorSessionDigestFirstDivergence(t *testing.T) {
+	build := func(toolInput string) *CursorHistoryDigest {
+		d := NewCursorHistoryDigest()
+		require.NoError(t, d.AppendText("responses.message.user", "run the task"))
+		require.NoError(t, d.AppendText("responses.custom_tool_call", `{"call_id":"call_1","name":"exec","input":`+toolInput+`}`))
+		return d
+	}
+
+	t.Run("完全一致返回空串", func(t *testing.T) {
+		a, b := build(`"text(42)"`), build(`"text(42)"`)
+		require.True(t, a.SkeletonEqual(b))
+		require.Empty(t, a.FirstDivergence(b))
+	})
+
+	t.Run("项数项类型相同但内容不同_定位到该项", func(t *testing.T) {
+		a, b := build(`"text(42)"`), build(`"text(999)"`)
+		require.False(t, a.SkeletonEqual(b), "内容不同必须骨架不等")
+		div := a.FirstDivergence(b)
+		require.NotEmpty(t, div)
+		require.Contains(t, div, "idx=1")
+		require.Contains(t, div, "responses.custom_tool_call")
+	})
+
+	t.Run("缺项定位到缺失位置", func(t *testing.T) {
+		a := NewCursorHistoryDigest()
+		require.NoError(t, a.AppendText("responses.message.user", "hi"))
+		require.NoError(t, a.AppendText("responses.function_call", `{"call_id":"c1"}`))
+		b := NewCursorHistoryDigest()
+		require.NoError(t, b.AppendText("responses.message.user", "hi"))
+		div := a.FirstDivergence(b)
+		require.Contains(t, div, "idx=1")
+	})
+
+	t.Run("指纹不含明文", func(t *testing.T) {
+		a, b := build(`"secret-payload-xyz"`), build(`"other"`)
+		div := a.FirstDivergence(b)
+		require.NotContains(t, div, "secret-payload-xyz")
+	})
+}
