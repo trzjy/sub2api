@@ -609,6 +609,19 @@ func NewOpenAIGatewayService(
 	return svc
 }
 
+// tempUnscheduleCursorAccountExhausted 是 CursorExecutionService 的账号额度耗尽回调实现
+// （由 wire 在唯一组装点 ProvideOpenAIGatewayService 注入）。
+//
+// 语义：cursor 账号是"用完即丢"的一次性额度，上游一旦限流/当日额度耗尽，该账号必须
+// 立刻停止调度，不能靠重试自愈；同一请求应换到别的账号继续。这里复用全平台同一个
+// 停调原语（SetTempUnschedulable），冷却到期账号自动回到候选池，不引入新状态机。
+func (s *OpenAIGatewayService) tempUnscheduleCursorAccountExhausted(ctx context.Context, accountID int64, reason string) {
+	if s == nil || s.accountRepo == nil || accountID <= 0 {
+		return
+	}
+	tempUnscheduleCursorQuotaExhausted(ctx, s.accountRepo, accountID, "[cursor-exec:"+reason+"]")
+}
+
 // ResolveChannelMapping 解析渠道级模型映射（代理到 ChannelService）
 func (s *OpenAIGatewayService) ResolveChannelMapping(ctx context.Context, groupID int64, model string) ChannelMappingResult {
 	if s.channelService == nil {

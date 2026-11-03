@@ -775,6 +775,14 @@ func (s *GatewayService) TempUnscheduleRetryableError(ctx context.Context, accou
 		tempUnscheduleCursorUpstreamFailure(ctx, s.accountRepo, accountID, "[handler]")
 		return
 	}
+	// cursor 账号「当日额度耗尽」（时长卡每日用量上限）：账号级终态，同属一次即停号。
+	// 上游已明确拒绝该账号，重试/重选它只会继续撞墙；若不停号，耗尽账号会一直留在
+	// 候选池被反复选中，而池内其他仍有额度的账号反而轮询不到。
+	// 冷却到期自动回池：上游次日 8 点重置后正常服务，未重置则再次命中本分支继续冷却。
+	if IsCursorQuotaExhaustedReason(failoverErr.Reason) {
+		tempUnscheduleCursorQuotaExhausted(ctx, s.accountRepo, accountID, "[handler]")
+		return
+	}
 	if !failoverErr.RetryableOnSameAccount {
 		return
 	}

@@ -225,7 +225,16 @@ func (s *FailoverState) HandleFailoverError(
 	// 同账号重试用尽，执行临时封禁。
 	// cursor 账号级上游故障明确**不**参与同账号重试（重试只会再等一整个上游超时），
 	// 但同样需要停号冷却，故在此一并覆盖，仍走同一个 TempUnscheduleRetryableError 入口。
-	if failoverErr.RetryableOnSameAccount || failoverErr.Reason == service.CursorUpstreamAccountFailureReason {
+	//
+	// cursor 账号的「当日额度耗尽」（Reason=cursor_quota_exhausted）同属账号级终态：
+	// 时长卡每日用量上限按账号计，上游已明确拒绝，重试/重选该账号只会继续撞墙。
+	// 若不停号，耗尽账号会一直留在候选池里被反复选中（用户可见症状：
+	// 请求持续打到同一批已耗尽账号、池里别的有额度账号却没被轮询到）。
+	// 故与 CursorUpstreamAccountFailureReason 同列，共用同一停号原语（冷却到期自动回池，
+	// 若上游已重置则正常服务、仍未重置则再次命中本分支继续冷却）。
+	if failoverErr.RetryableOnSameAccount ||
+		failoverErr.Reason == service.CursorUpstreamAccountFailureReason ||
+		service.IsCursorQuotaExhaustedReason(failoverErr.Reason) {
 		gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
 	}
 

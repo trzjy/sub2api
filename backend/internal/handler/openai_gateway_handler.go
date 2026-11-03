@@ -4168,7 +4168,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleStreamingAwareError(c, status, "server_error", failoverErr.ClientMessage, streamStarted)
 		return
 	}
-	if failoverErr.Reason == "cursor_quota_exhausted" && strings.TrimSpace(failoverErr.ClientMessage) != "" {
+	if failoverErr.Reason == service.CursorQuotaExhaustedReason && strings.TrimSpace(failoverErr.ClientMessage) != "" {
 		status := failoverErr.ClientStatusCode
 		if status <= 0 {
 			status = http.StatusTooManyRequests

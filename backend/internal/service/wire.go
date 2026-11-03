@@ -97,6 +97,13 @@ func ProvideOpenAIGatewayService(
 	// （与 QuotaKeyService.SetAutoEntry 同型：唯一 wrapper 里一次性设置，不在别处重复注入）。
 	if cursorExecution != nil {
 		cursorExecution.SetHTTPResponseOwnerBinder(svc.BindHTTPResponseOwnerFromContext)
+		// 账号额度耗尽回调此前在生产从未装配（全仓仅测试调用），导致 cursor 账号
+		// 撞到当日额度上限后只换号不停号、一直留在候选池被反复选中（用户可见症状：
+		// 请求持续打到同一批耗尽账号，池里仍有额度的账号反而轮询不到）。
+		// 此处注入唯一的停调原语：直接把账号置为临时不可调度，冷却到期自动回池。
+		// 与换号链的 IsCursorQuotaExhaustedReason 分支是"双保险"——前者在 Execute
+		// 当场停号（同请求内即生效），后者覆盖 handler 侧换号时的统一停号入口。
+		cursorExecution.SetAccountExhaustedHandler(svc.tempUnscheduleCursorAccountExhausted)
 	}
 	return svc
 }

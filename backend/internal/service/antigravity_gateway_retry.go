@@ -845,6 +845,37 @@ func tempUnscheduleCursorUpstreamFailure(ctx context.Context, repo AccountReposi
 	}
 }
 
+// CursorQuotaExhaustedReason 是 cursor 账号「当日额度耗尽」的换号原因串
+// （CursorExecutionService 在流内命中「今日额度已用完」模板或 EndStream 限流码时写入）。
+const CursorQuotaExhaustedReason = GatewayFailureReason("cursor_quota_exhausted")
+
+// IsCursorQuotaExhaustedReason 判定换号原因是否为 cursor 账号当日额度耗尽。
+// 该原因属账号级终态（时长卡每日用量上限按账号计），必须停号，不能只换号。
+func IsCursorQuotaExhaustedReason(reason GatewayFailureReason) bool {
+	return reason == CursorQuotaExhaustedReason
+}
+
+// cursorQuotaExhaustedCooldown 是 cursor 账号当日额度耗尽后的停调时长。
+//
+// 取 20 分钟：此非瞬时抖动，而是上游按账号计的当日上限；单次请求的换号循环内
+// 该账号必须被彻底摘出候选池，否则同一请求会把整池扫完再回来重撞。
+// 取 20 分钟而非"到次日 8 点"：保持与既有停调原语同型的定长冷却（不引入跨日
+// 定时器/新状态机），到期自动回池探测——上游已重置则恢复服务，未重置则下一次
+// 真实请求再次命中本分支继续冷却，形成「冷却→探测→再冷却」闭环。
+const cursorQuotaExhaustedCooldown = 20 * time.Minute
+
+// tempUnscheduleCursorQuotaExhausted 对 cursor 账号当日额度耗尽触发临时停调，
+// 让该账号立刻退出候选池，本轮请求改由池内其他仍有额度的账号承接。
+func tempUnscheduleCursorQuotaExhausted(ctx context.Context, repo AccountRepository, accountID int64, logPrefix string) {
+	until := time.Now().Add(cursorQuotaExhaustedCooldown)
+	reason := "cursor account daily quota exhausted (auto temp-unschedule 20m)"
+	if err := repo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
+		log.Printf("%s temp_unschedule_failed account=%d error=%v", logPrefix, accountID, err)
+	} else {
+		log.Printf("%s temp_unscheduled account=%d until=%v reason=%q", logPrefix, accountID, until.Format("15:04:05"), reason)
+	}
+}
+
 // sleepAntigravityBackoffWithContext 带 context 取消检查的退避等待
 // 返回 true 表示正常完成等待，false 表示 context 已取消
 func sleepAntigravityBackoffWithContext(ctx context.Context, attempt int) bool {
