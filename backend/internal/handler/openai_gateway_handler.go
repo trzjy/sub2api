@@ -1936,6 +1936,20 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		h.anthropicStreamingAwareError(c, status, "api_error", message, streamStarted)
 		return
 	}
+	if failoverErr != nil && failoverErr.IsOpenAIUpstreamSafetyRejection() {
+		// 与 handleFailoverExhausted 同口径：审核拒绝耗尽时说上游不可用，不说是请求错。
+		status := failoverErr.ClientStatusCode
+		if status <= 0 {
+			status = http.StatusBadGateway
+		}
+		message := strings.TrimSpace(failoverErr.ClientMessage)
+		if message == "" {
+			message = infraerrors.UpstreamUnavailable
+		}
+		service.SetOpsUpstreamError(c, status, message, "")
+		h.anthropicStreamingAwareError(c, status, "api_error", message, streamStarted)
+		return
+	}
 	if failoverErr != nil && failoverErr.IsOpenAICapacityShed() && strings.TrimSpace(failoverErr.ClientMessage) != "" {
 		status := failoverErr.ClientStatusCode
 		if status <= 0 {
@@ -4132,6 +4146,21 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 			service.OpenAIRequestBodyTooLargeClientMessage,
 			streamStarted,
 		)
+		return
+	}
+	if failoverErr.IsOpenAIUpstreamSafetyRejection() {
+		// 全部候选账号都被上游审核拒绝：这是上游侧不可用，不是客户端请求错误，
+		// 不能把 400 invalid_request 甩给客户端让它误以为是自己的参数问题。
+		status := failoverErr.ClientStatusCode
+		if status <= 0 {
+			status = http.StatusBadGateway
+		}
+		message := strings.TrimSpace(failoverErr.ClientMessage)
+		if message == "" {
+			message = infraerrors.UpstreamUnavailable
+		}
+		service.SetOpsUpstreamError(c, status, message, "")
+		h.handleStreamingAwareError(c, status, "api_error", message, streamStarted)
 		return
 	}
 	if failoverErr.Reason == service.OpenAIHTTPContinuationUnsupportedReason {

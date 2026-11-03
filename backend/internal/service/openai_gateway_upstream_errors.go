@@ -340,10 +340,57 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(account *Acc
 		isOpenAICompatibleModelNotFound400(upstreamBody) {
 		return true
 	}
+	// 上游侧内容/规模审核拒绝必须换号：请求本身合法，同一条请求换账号多数能过
+	// （2026-11-03 生产实证：商汤 token.sensenova.cn 对长上下文返回
+	// 400 {"error":{"code":"9","message":"safety check failed","type":"failed_precondition_error"}}，
+	// 同请求连发 6 次 5 败 1 成，且长请求命中率约八成、短请求全过）。
+	// 这类拒绝是账号/上游侧状态，透传 400 只会让客户端对着同一面墙反复重试。
+	if isOpenAIUpstreamSafetyRejection(statusCode, upstreamMsg, upstreamBody) {
+		return true
+	}
 	if s.shouldFailoverUpstreamError(statusCode) {
 		return true
 	}
 	return isOpenAITransientProcessingError(statusCode, upstreamMsg, upstreamBody)
+}
+
+// openAIUpstreamSafetyRejectionReason 标记「上游对请求做了安全审核并拒绝」的 400。
+// 与客户端参数错误区分：它由账号/上游审核档位决定，换号可能通过，因此按账号级
+// 故障处理——不停号、不原地重试，只换下一个账号。
+const openAIUpstreamSafetyRejectionReason = GatewayFailureReason("openai_upstream_safety_rejection")
+
+// isOpenAIUpstreamSafetyRejection 识别上游 400 中的安全审核拒绝。
+// 只认固定话术 "safety check failed" 与商汤的结构化组合（code=9 +
+// type=failed_precondition_error），不从自由文本里猜词，避免把上游回显的请求
+// 内容误判成审核拒绝、把真正的客户端参数错误也拿去换号重试。
+func isOpenAIUpstreamSafetyRejection(statusCode int, upstreamMsg string, upstreamBody []byte) bool {
+	if statusCode != http.StatusBadRequest {
+		return false
+	}
+	const safetyCheckFailed = "safety check failed"
+	containsSafety := func(text string) bool {
+		return strings.Contains(strings.ToLower(text), safetyCheckFailed)
+	}
+	if containsSafety(upstreamMsg) {
+		return true
+	}
+	if len(upstreamBody) == 0 {
+		return false
+	}
+	// 结构化字段优先：只读错误消息本身，不扫整包，避免回显的请求内容命中。
+	for _, path := range []string{"error.message", "response.error.message", "message"} {
+		if containsSafety(gjson.GetBytes(upstreamBody, path).String()) {
+			return true
+		}
+	}
+	// 非 JSON 的纯文本错误体才扫全文（与 isOpenAIContextWindowError 同口径）。
+	if !gjson.ValidBytes(upstreamBody) && containsSafety(string(upstreamBody)) {
+		return true
+	}
+	// 文案被上游改写时的结构化兜底。
+	code := strings.TrimSpace(extractUpstreamErrorCode(upstreamBody))
+	kind := strings.ToLower(strings.TrimSpace(gjson.GetBytes(upstreamBody, "error.type").String()))
+	return code == "9" && strings.Contains(kind, "failed_precondition")
 }
 
 func isOpenAICompatibleModelNotFound400(respBody []byte) bool {
@@ -408,6 +455,18 @@ func newOpenAIUpstreamFailoverError(
 		failoverErr.NextAccountAction = NextAccountRetry
 		failoverErr.ClientStatusCode = http.StatusRequestEntityTooLarge
 		failoverErr.ClientMessage = OpenAIRequestBodyTooLargeClientMessage
+	}
+	if isOpenAIUpstreamSafetyRejection(statusCode, upstreamMsg, responseBody) {
+		// 审核拒绝与「这次请求打到哪个账号」绑定：不停号（账号本身还能服务八成请求，
+		// 停了会直接把主力容量摘空）、不原地重试（同一账号只会再撞一次同一面墙），
+		// 只换下一个账号；耗尽时按上游不可用告知客户端，不误导成「你的请求写错了」。
+		failoverErr.RetryableOnSameAccount = false
+		failoverErr.RequestScopedTransient = false
+		failoverErr.Scope = GatewayFailureScopeAccount
+		failoverErr.Reason = openAIUpstreamSafetyRejectionReason
+		failoverErr.NextAccountAction = NextAccountRetry
+		failoverErr.ClientStatusCode = http.StatusBadGateway
+		failoverErr.ClientMessage = infraerrors.UpstreamUnavailable
 	}
 	if isOpenAIHTTPUpstreamAccessStateError(statusCode, upstreamMsg, responseBody) {
 		failoverErr.RetryableOnSameAccount = false
@@ -530,6 +589,14 @@ func openAICapacityShedClientMessage(upstreamMsg string, body []byte) string {
 // same request even though the selected account rejected its serialized size.
 func (e *UpstreamFailoverError) IsOpenAIRequestBodyTooLarge() bool {
 	return e != nil && e.Reason == openAIRequestBodyTooLargeReason
+}
+
+// IsOpenAIUpstreamSafetyRejection reports whether the selected upstream rejected
+// the request by its own content/scale screening (converted into account
+// failover by isOpenAIUpstreamSafetyRejection). Exhausted-failover handlers use
+// it to answer "upstream unavailable" instead of echoing a misleading 400.
+func (e *UpstreamFailoverError) IsOpenAIUpstreamSafetyRejection() bool {
+	return e != nil && e.Reason == openAIUpstreamSafetyRejectionReason
 }
 
 // IsOpenAICapacityShed reports whether typed client fields were derived from a
