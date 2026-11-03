@@ -195,9 +195,12 @@ type CursorExecutionService struct {
 // **同一个**唯一 finalizer 收尾（reason=waiting_tools_idle），结算口径不变：没有
 // TurnEnded 就照旧 session_settle_skipped，不伪造 usage。
 //
-// 取值 120 秒来自用户 2026-11-01 裁定 B（"等待时长取 120 秒"）。它与 180 秒总期限是
-// 两个独立条件、取先到者；后续到达的续轮按既有 session_finished 拒绝（CUR-RES-03）。
-const cursorWaitingToolsIdleTimeout = 120 * time.Second
+// 取值 10 分钟：方案 §2.5 原定 120 秒（用户 2026-11-01 裁定 B），2026-11-04 用户复
+// 改为 10 分钟——120 秒会误杀「客户端正在跑长工具（大编译/长测试）」的正常会话，把续轮
+// 打成 CUR-RES-03。10 分钟仍小于 Redis 侧 concurrency_slot_ttl（30 分钟），泄漏窗口
+// 从 30 分钟压到 10 分钟。它与 180 秒总期限是两个独立条件、取先到者；后续到达的续轮按
+// 既有 session_finished 拒绝（CUR-RES-03）。
+const cursorWaitingToolsIdleTimeout = 10 * time.Minute
 
 // SetAccountExhaustedHandler 注入"账号额度耗尽/限流"回调（与 SetHTTPResponseOwnerBinder 同型）。
 //
