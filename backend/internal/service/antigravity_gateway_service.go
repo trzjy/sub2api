@@ -352,9 +352,10 @@ type TestConnectionImage struct {
 
 // TestConnectionResult 测试连接结果
 type TestConnectionResult struct {
-	Text        string                // 响应文本
-	Images      []TestConnectionImage // 响应图片（图片生成模型）
-	MappedModel string                // 实际使用的模型
+	Text            string                // 响应文本
+	Images          []TestConnectionImage // 响应图片（图片生成模型）
+	MappedModel     string                // 实际使用的模型
+	InboundProtocol string                // 测试所走的入站协议: "claude" 或 "gemini-native"
 }
 
 func shouldUseAntigravityGeminiTestRequest(_, mappedModel string) bool {
@@ -392,11 +393,16 @@ func (s *AntigravityGatewayService) TestConnectionWithPrompt(ctx context.Context
 	}
 
 	// 构建请求体
+	// 非图片模型（含 gemini 映射模型）在 /v1/messages 下统一走 Claude 入站转换链路，
+	// 以复刻用户真实调用；仅图片生成模型保留原生 gemini 构造。
 	var requestBody []byte
-	if shouldUseAntigravityGeminiTestRequest(modelID, mappedModel) {
+	var inboundProtocol string
+	if isImageGenerationModel(mappedModel) {
+		inboundProtocol = "gemini-native"
 		requestBody, err = s.buildGeminiTestRequestWithPrompt(projectID, mappedModel, prompt)
 	} else {
-		requestBody, err = s.buildClaudeTestRequest(projectID, mappedModel)
+		inboundProtocol = "claude"
+		requestBody, err = s.buildClaudeTestRequest(ctx, projectID, mappedModel)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("构建请求失败: %w", err)
@@ -450,8 +456,21 @@ func (s *AntigravityGatewayService) TestConnectionWithPrompt(ctx context.Context
 		return nil, fmt.Errorf("API 返回 %d: %s", result.resp.StatusCode, string(respBody))
 	}
 
+	text, images, err := validateTestConnectionResponse(respBody)
+	if err != nil {
+		return nil, err
+	}
+	return &TestConnectionResult{Text: text, Images: images, MappedModel: mappedModel, InboundProtocol: inboundProtocol}, nil
+}
+
+// validateTestConnectionResponse 校验上游 SSE 响应是否包含有效内容。
+// 上游返回 200 但解析不出任何文本/图片时判失败（空响应拦截）。
+func validateTestConnectionResponse(respBody []byte) (string, []TestConnectionImage, error) {
 	text, images := extractContentFromSSEResponse(respBody)
-	return &TestConnectionResult{Text: text, Images: images, MappedModel: mappedModel}, nil
+	if strings.TrimSpace(text) == "" && len(images) == 0 {
+		return "", nil, fmt.Errorf("上游返回 200 但未提取到任何有效文本或图片内容 (响应为空)")
+	}
+	return text, images, nil
 }
 
 // testConnectionHandleError 是 TestConnection 使用的轻量 handleError 回调。
@@ -467,60 +486,35 @@ func testConnectionHandleError(
 	return nil
 }
 
-// buildGeminiTestRequestWithPrompt 构建 Gemini 格式测试请求
-// 文本模型使用最小 token 消耗：输入 "." + maxOutputTokens: 1；图片模型使用图片生成配置
+// buildGeminiTestRequestWithPrompt 构建 Gemini 原生格式测试请求（图片生成模型专用）。
+//
+// 自 AG-TEST-02 起，非图片模型不再走此构造，而是走 buildClaudeTestRequest 进入真实
+// Claude 入站转换链路（TransformClaudeToGeminiWithOptions），以复刻用户真实调用的
+// /v1/messages 链路。本方法仅服务 isImageGenerationModel 命中的模型，因其不使用 Claude
+// 入站协议，需保留原生 Gemini 图片生成配置（responseModalities 含 IMAGE）。
 func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, model, prompt string) ([]byte, error) {
-	if isImageGenerationModel(model) {
-		imagePrompt := strings.TrimSpace(prompt)
-		if imagePrompt == "" {
-			imagePrompt = defaultGeminiImageTestPrompt
-		}
-		payload := map[string]any{
-			"contents": []map[string]any{
-				{
-					"role": "user",
-					"parts": []map[string]any{
-						{"text": imagePrompt},
-					},
-				},
-			},
-			"systemInstruction": map[string]any{
-				"parts": []map[string]any{
-					{"text": antigravity.GetDefaultIdentityPatch()},
-				},
-			},
-			"generationConfig": map[string]any{
-				"responseModalities": []string{"TEXT", "IMAGE"},
-				"imageConfig": map[string]any{
-					"aspectRatio": "1:1",
-				},
-			},
-		}
-		payloadBytes, _ := json.Marshal(payload)
-		return s.wrapV1InternalRequest(projectID, model, payloadBytes)
+	imagePrompt := strings.TrimSpace(prompt)
+	if imagePrompt == "" {
+		imagePrompt = defaultGeminiImageTestPrompt
 	}
-
 	payload := map[string]any{
 		"contents": []map[string]any{
 			{
 				"role": "user",
 				"parts": []map[string]any{
-					{"text": "."},
+					{"text": imagePrompt},
 				},
 			},
 		},
-		// Antigravity 上游要求必须包含身份提示词
 		"systemInstruction": map[string]any{
 			"parts": []map[string]any{
 				{"text": antigravity.GetDefaultIdentityPatch()},
 			},
 		},
 		"generationConfig": map[string]any{
-			"maxOutputTokens": 1,
-		},
-		"toolConfig": map[string]any{
-			"functionCallingConfig": map[string]any{
-				"mode": "VALIDATED",
+			"responseModalities": []string{"TEXT", "IMAGE"},
+			"imageConfig": map[string]any{
+				"aspectRatio": "1:1",
 			},
 		},
 	}
@@ -528,9 +522,10 @@ func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, 
 	return s.wrapV1InternalRequest(projectID, model, payloadBytes)
 }
 
-// buildClaudeTestRequest 构建 Claude 格式测试请求并转换为 Gemini 格式
-// 使用最小 token 消耗：输入 "." + MaxTokens: 1
-func (s *AntigravityGatewayService) buildClaudeTestRequest(projectID, mappedModel string) ([]byte, error) {
+// buildClaudeTestRequest 构建 Claude 格式测试请求并转换为 Gemini 格式（真实入站链路）。
+// 与真实 Forward（antigravity_gateway_claude.go）保持一致：必须注入 TransformOptions
+// 且 EnableIdentityPatch=true（Antigravity 上游必需）。使用最小 token 消耗：输入 "." + MaxTokens: 1。
+func (s *AntigravityGatewayService) buildClaudeTestRequest(ctx context.Context, projectID, mappedModel string) ([]byte, error) {
 	claudeReq := &antigravity.ClaudeRequest{
 		Model: mappedModel,
 		Messages: []antigravity.ClaudeMessage{
@@ -542,7 +537,9 @@ func (s *AntigravityGatewayService) buildClaudeTestRequest(projectID, mappedMode
 		MaxTokens: 1,
 		Stream:    false,
 	}
-	return antigravity.TransformClaudeToGemini(claudeReq, projectID, mappedModel)
+	transformOpts := s.getClaudeTransformOptions(ctx)
+	transformOpts.EnableIdentityPatch = true
+	return antigravity.TransformClaudeToGeminiWithOptions(claudeReq, projectID, mappedModel, transformOpts)
 }
 
 func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Context) antigravity.TransformOptions {

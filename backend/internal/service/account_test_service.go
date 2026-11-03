@@ -3288,6 +3288,20 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 // routeAntigravityTest 路由 Antigravity 账号的测试请求。
 // APIKey 类型走原生协议（与 gateway_handler 路由一致），OAuth/Upstream 走 CRS 中转。
 func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Account, modelID string, prompt string) error {
+	ctx := c.Request.Context()
+
+	// 调度资格预检（仅 Antigravity 平台执行）：发送真实测试前先按调度器真实规则
+	// 评估账号是否能在分组调度中被选中。算不过直接失败并说明原因，不允许假装成功。
+	// 仅针对 Antigravity 启用，可避免误伤其他平台（grok/cursor/codebuddy/openai/
+	// claude/gemini/muse 等）既有单测夹具（这些夹具通常不显式声明 Schedulable: true）。
+	warnings, blockReason := evaluateAccountTestSchedulingGate(ctx, account, modelID)
+	for _, w := range warnings {
+		s.sendEvent(c, TestEvent{Type: "status", Text: w})
+	}
+	if blockReason != "" {
+		return s.sendErrorAndEnd(c, blockReason)
+	}
+
 	if account.Type == AccountTypeAPIKey {
 		if strings.HasPrefix(modelID, "gemini-") {
 			return s.testGeminiAccountConnection(c, account, modelID, prompt)
@@ -3322,6 +3336,13 @@ func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, ac
 	result, err := s.antigravityGatewayService.TestConnectionWithPrompt(ctx, account, testModelID, prompt)
 	if err != nil {
 		return s.sendErrorAndEnd(c, err.Error())
+	}
+
+	if result.InboundProtocol != "" {
+		s.sendEvent(c, TestEvent{
+			Type: "status",
+			Text: fmt.Sprintf("入站链路: %s | 映射模型: %s", result.InboundProtocol, result.MappedModel),
+		})
 	}
 
 	// 发送响应内容
