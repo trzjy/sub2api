@@ -1095,11 +1095,13 @@ func TestCursorResumeIntakeUnavailableFailsClosed(t *testing.T) {
 // §25.17.4（A08）：Execute 续轮准入断言——声明续轮却无有效接管 → 出站前 400
 // ---------------------------------------------------------------------------
 
-// TestCursorResumeExecuteAdmissionAllUnknownResults 覆盖：请求携带本批工具结果（全部未知，
-// 含重启孤儿），进入 Cursor 执行分支时必须在模型出站/建 session/转交资源之前 400，
-// AgentRun=0 且零结果写入。
+// TestCursorResumeExecuteAdmissionAllUnknownResults 覆盖 2026-11-04 新裁定：
+// chat 请求携带本批工具结果（全部未知，含重启孤儿）且正文携带完整历史 → Execute 准入
+// **放行重建**（P2），不再返回 unknown_association；后续因依赖未装配而失败关闭。
+//
+// 历史不完整的同类请求（Responses 仅 previous_response_id）仍维持 400，见下一个用例。
 func TestCursorResumeExecuteAdmissionAllUnknownResults(t *testing.T) {
-	svc := &CursorExecutionService{sessions: newCursorSessionStore()}
+	svc := &CursorExecutionService{sessions: newCursorSessionStore(), now: time.Now}
 	probe, err := CursorProbeResumeRequest(CursorResumeProtocolChat, []byte(cursorResumeTestChatResume))
 	require.NoError(t, err)
 	require.True(t, probe.ClaimsContinuation(), "请求必须明确声称续轮")
@@ -1107,6 +1109,7 @@ func TestCursorResumeExecuteAdmissionAllUnknownResults(t *testing.T) {
 	// 同一探针计划进入新建 Execute 入口（等价于 helper 未接管、原路由选中 Cursor 分支）。
 	plan := cursorResumePlanForTest(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatResume), "cursor-test-model")
 	require.True(t, plan.claimsContinuation(), "转换不得抹掉续轮标记")
+	require.True(t, plan.historySupportsRebuild(), "chat 正文即完整历史，允许孤儿重建")
 
 	var ccReq apicompat.ChatCompletionsRequest
 	require.NoError(t, json.Unmarshal([]byte(cursorResumeTestChatResume), &ccReq))
@@ -1117,11 +1120,9 @@ func TestCursorResumeExecuteAdmissionAllUnknownResults(t *testing.T) {
 		Identity: cursorResumeTestIdentity,
 		Plan:     plan,
 	})
-	require.ErrorIs(t, execErr, ErrCursorResumeUnknownAssociation,
-		"声明续轮却无有效接管必须返回失效关联哨兵")
-	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, execErr))
-	require.Zero(t, svc.sessions.sessionCount(), "不得创建 session/AgentRun")
-	require.Zero(t, svc.sessions.indexCount(), "不得登记任何索引")
+	require.Error(t, execErr, "依赖未装配 → 准入放行后按原链路失败关闭")
+	require.False(t, errors.Is(execErr, ErrCursorResumeUnknownAssociation),
+		"完整历史的孤儿续轮必须放行重建，不得再 400 unknown_association")
 }
 
 // TestCursorResumeExecuteAdmissionOnlyPreviousResponseID 覆盖：仅 previous_response_id 未知
@@ -1185,17 +1186,33 @@ func TestCursorResumeExecuteAdmissionPlainRequestAllowed(t *testing.T) {
 		"普通请求不得被误判成未知关联")
 }
 
-// cursorResumeUnknownAssociationBody 返回「明确声称续轮但全部 ID 未命中」的原始请求体。
+// cursorResumeUnknownAssociationBody 返回「明确声称续轮但全部 ID 未命中**且历史不完整**」
+// 的原始请求体（2026-11-04 起：完整历史会按重建/普通请求放行，不再属于本用例）。
 //
-// 四协议各自用它自己的续轮表示携带本批工具结果（Responses 用**省略历史**的仅结果形状：
-// 只有 function_call_output，正文里没有对应 function_call，因此不构成"历史中已完成工具对"）。
+// 四协议统一用"只有结果、没有对应调用"的孤儿形状：正文里没有 assistant tool_calls /
+// tool_use / functionCall，也没有 function_call，因此 historyComplete=false，必须 400。
 func cursorResumeUnknownAssociationBody(t *testing.T, protocol CursorResumeProtocol) []byte {
 	t.Helper()
 	switch protocol {
 	case CursorResumeProtocolChat:
-		return []byte(cursorResumeTestChatResume)
+		return []byte(`{
+  "model": "cursor-test-model",
+  "messages": [
+    {"role": "user", "content": "weather please"},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+  ],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+}`)
 	case CursorResumeProtocolMessages:
-		return []byte(cursorResumeTestMessagesResume)
+		return []byte(`{
+  "model": "cursor-test-model",
+  "max_tokens": 64,
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "weather please"}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "sunny"}]}]}
+  ],
+  "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]
+}`)
 	case CursorResumeProtocolResponses:
 		return []byte(`{
   "model": "cursor-test-model",
@@ -1207,7 +1224,6 @@ func cursorResumeUnknownAssociationBody(t *testing.T, protocol CursorResumeProto
 		return []byte(`{
   "contents": [
     {"role": "user", "parts": [{"text": "weather please"}]},
-    {"role": "model", "parts": [{"functionCall": {"id": "call_1", "name": "get_weather", "args": {"city": "hz"}}}]},
     {"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "get_weather", "response": {"result": "sunny"}}}]}
   ],
   "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {"type": "object"}}]}]
@@ -1218,10 +1234,10 @@ func cursorResumeUnknownAssociationBody(t *testing.T, protocol CursorResumeProto
 	}
 }
 
-// TestCursorResumeRestartOrphanAllProtocolsRejected 覆盖 §25.17.4「必须证明」的
-// 「各 Cursor 协议的全未知结果（含重启后原 ID）均 400，AgentRun 与结果写入计数均 0」：
-// 用**空的会话表**模拟重启后孤儿——原样重发各协议的续轮体，Identify 必须返回可区分哨兵，
-// 即便被原路由送进新建 Execute 入口，也必须在模型出站/建 session/转交资源之前 400。
+// TestCursorResumeRestartOrphanAllProtocolsRejected 覆盖 §25.17.4 与 2026-11-04 新裁定的
+// 交界：「各 Cursor 协议的全未知结果（含重启后原 ID）且**历史不完整**」在 Identify 层必须
+// 是可区分的 unknown_association，进入新建 Execute 入口后仍必须 400，AgentRun 与结果
+// 写入计数均 0。正文携带完整历史的孤儿续轮则在准入层放行重建（见下一个用例）。
 func TestCursorResumeRestartOrphanAllProtocolsRejected(t *testing.T) {
 	protocols := []CursorResumeProtocol{
 		CursorResumeProtocolChat,
@@ -1261,7 +1277,7 @@ func TestCursorResumeRestartOrphanAllProtocolsRejected(t *testing.T) {
 				Plan:     plan,
 			})
 			require.ErrorIs(t, execErr, ErrCursorResumeUnknownAssociation,
-				"声明续轮却无有效接管必须在 Cursor 准入边界 400")
+				"历史不完整的孤儿续轮不得重建，必须在准入边界 400")
 			require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, execErr))
 			require.Zero(t, svc.sessions.sessionCount(), "不得创建 session/AgentRun")
 			require.Zero(t, svc.sessions.indexCount(), "不得登记任何索引")

@@ -332,20 +332,43 @@ func (s *CursorExecutionService) Execute(
 		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "typed chat completions request missing")
 	}
 
-	// §25.17.4（A08）行 5：Cursor 执行分支的准入断言——所有类型化 adapter 与 Execute 入口
-	// 共用这一条。请求**在原协议层已声明续轮**（携带本批工具结果或 previous_response_id，
-	// 见 cursorContextPlan.claimsContinuation，取自原协议 probe/plan，转换不得抹掉该标记），
-	// 却没有任何有效接管（合法续轮由 ServeCursorResume 处理，绝不再次调用新建 Execute），
-	// 因此凡是"声明续轮却到达新建入口"（含重启后孤儿）必须在模型出站、建 session/AgentRun
-	// 和转交资源之前明确 400 失效关联；不换号重试、不回退其它供应商、不重执行工具。
+	// §25.17.4（A08）行 5 的准入断言在 2026-11-04 被用户裁定部分改写
+	// （docs-local/cursor-resume-quota-rebuild-failover-plan-20261104.md §2.4-3）：
+	// Cursor 执行分支的准入断言——请求**在原协议层已声明续轮**（携带本批工具结果或
+	// previous_response_id，见 cursorContextPlan.claimsContinuation），却没有任何有效接管。
+	//
+	// 原 A08 裁定"凡声明续轮却到达新建入口一律 400、不换号"已被替代：
+	//   - 续轮中途额度耗尽后由 handler 在请求 ctx 挂 CursorRebuildInfo → 这是**有意重建**，
+	//     不返回 400，按新建 AgentRun 继续（死亡会话已由 finalizer 终结、不结算）；
+	//   - 客户端在会话已死后原样重试（unknown_association，无 ctx 标记）→ 只要正文携带
+	//     完整历史（historySupportsRebuild）同样放行重建，避免把站点侧会话死亡暴露给用户；
+	//   - 历史不完整（典型：Responses 只有 previous_response_id）→ 维持原 400 失效关联，
+	//     绝不凭残缺正文重建（会丢上下文）。
 	//
 	// 行 1 的例外（resultsReplayHistory）：Responses 完整 input 回放里，尾部结果的
 	// function_call 也出现在同一正文中 —— 那是客户端自带完整两端的已完成工具对，不构成
 	// 续轮声明，按原普通请求继续。判定只取本 HTTP 请求数据，不新增持久化表/墓碑/ID 前缀，
 	// 也不猜最近会话。
 	if req.Plan.claimsContinuation() && !req.Plan.resultsReplayHistory() {
-		return nil, newCursorResumeError(http.StatusBadRequest, "unknown_association",
-			ErrCursorResumeUnknownAssociation)
+		rebuildInfo, rebuildRequested := CursorRebuildFromContext(ctx)
+		historyComplete := req.Plan.historySupportsRebuild()
+		if !rebuildRequested && !historyComplete {
+			return nil, newCursorResumeError(http.StatusBadRequest, "unknown_association",
+				ErrCursorResumeUnknownAssociation)
+		}
+		// 日志只记枚举/ID：正文与上游原文一律不落盘。
+		protocol := string(cursorResumeProtocolOfRequest(req))
+		if rebuildRequested {
+			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_session_rebuild", strings.TrimSpace(req.Model),
+				zap.Int64("dead_account_id", rebuildInfo.DeadAccountID),
+				zap.String("reason", string(rebuildInfo.Reason)),
+				zap.String("protocol", protocol),
+				zap.Bool("history_complete", historyComplete))
+		} else {
+			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_session_rebuild_orphan", strings.TrimSpace(req.Model),
+				zap.String("protocol", protocol),
+				zap.Bool("history_complete", historyComplete))
+		}
 	}
 
 	startTime := req.StartTime
@@ -788,7 +811,7 @@ func (s *CursorExecutionService) executeHTTP(
 
 	cursorPhaseLog(ctx, zapcore.InfoLevel, "response_write_begin", upstreamModel,
 		zap.String("outcome", "ok"), zap.Bool("stream", req.Stream))
-	return s.cursorDrainAttachedOutput(ch, writer, req, session)
+	return s.cursorDrainAttachedOutput(ch, writer, req, session, false)
 }
 
 // cursorDrainAttachedOutput 消费附着输出通道的帧并按**本 HTTP 选项**写出。
@@ -797,13 +820,21 @@ func (s *CursorExecutionService) executeHTTP(
 // 委托检查点（isDeleg）与真实终态（isEnd）都收尾返回；区别只在终结语义：
 //   - isDeleg：交付工具批成功 → 写出协议结束标记 → 服务锁内提交 pending.delivered；
 //   - isEnd：真实终态。**携带错误时走唯一失败链**：不写成功终结标记、不 finalize。
+//
+// resumeRebuild=true 时（仅续轮 serve 路径）在失败终态上追加"能否换号重建"的分类：
+// 只有**本 HTTP 尚未写出任何语义字节**且错误属账号级终态，才包装成
+// *CursorResumeRebuildError；一旦写出过字节就保持原错误（锁定项 3：禁止流拼接腐化）。
 func (s *CursorExecutionService) cursorDrainAttachedOutput(
 	ch chan *cursorOutputEvent,
 	writer io.Writer,
 	req *CursorExecutionRequest,
 	session *cursorSessionRecord,
+	resumeRebuild bool,
 ) (*ForwardResult, error) {
 	var aggregated bytes.Buffer
+	// publishedThisHTTP 是**本 HTTP**（不是整个会话）的写出标记：首次成功写出数据帧后置位。
+	// 续轮跨 HTTP 存活，session.bodyPublished 反映的是会话历史，不能用来判定本 HTTP。
+	publishedThisHTTP := false
 	for {
 		ev, ok := <-ch
 		if !ok {
@@ -839,6 +870,11 @@ func (s *CursorExecutionService) cursorDrainAttachedOutput(
 		if ev.isEnd {
 			if ev.err != nil && !errors.Is(ev.err, io.EOF) {
 				// 失败链：连接上的成功信号到此为止，绝不再写终结成功标记、也不提交批次。
+				if resumeRebuild {
+					if rebuildErr := s.cursorResumeRebuildError(session, ev.err, publishedThisHTTP); rebuildErr != nil {
+						return nil, rebuildErr
+					}
+				}
 				return nil, ev.err
 			}
 			if err := s.finishHTTPOutput(session.phaseContext(), writer, req, &aggregated, true); err != nil {
@@ -852,6 +888,8 @@ func (s *CursorExecutionService) cursorDrainAttachedOutput(
 			if err := cursorWriteAll(writer, ev.data); err != nil {
 				return nil, err
 			}
+			// 写出成功即置位：此后任何失败都不得再换号重建（锁定项 3）。
+			publishedThisHTTP = true
 			// 同时把已写出的 SSE 字节收进 aggregated：作为本 HTTP 实际交付内容，供检查点
 			// 解析真实 tool item ID（与 writer.collectedItemIDs 同源，但不依赖 writer 是否被
 			// 包装；非流式本来就用 aggregated）。见 cursorCollectToolItemIDs。
@@ -863,6 +901,89 @@ func (s *CursorExecutionService) cursorDrainAttachedOutput(
 		}
 		aggregated.Write(ev.data)
 	}
+}
+
+// cursorResumeRebuildError 把续轮 serve 的失败终态分类为"可换号重建"哨兵
+// （2026-11-04 方案 §2.4-1）。
+//
+// 仅当以下条件全部成立时返回非 nil：
+//   - 本 HTTP 尚未向客户端写出任何语义字节（publishedThisHTTP=false）；
+//   - 错误属账号级终态：流内当日额度耗尽模板、上游拒付模板、非业务码的上游终态错误。
+//
+// 拒付/额度同时触发同一个停号回调（§2.4-5：与 Execute 共用一处回调，不新建通道）；
+// 非业务码上游故障不停号（与 Execute 的同名分类保持一致，只换号冷却）。
+// 其余错误（协议/请求/已发布字节）一律返回 nil，调用方原样返回，禁止 mid-stream 换号。
+func (s *CursorExecutionService) cursorResumeRebuildError(
+	session *cursorSessionRecord,
+	err error,
+	publishedThisHTTP bool,
+) *CursorResumeRebuildError {
+	if session == nil || err == nil {
+		return nil
+	}
+	var (
+		reason     GatewayFailureReason
+		stopReason string
+		matched    bool
+	)
+	var quotaErr *CursorQuotaExhaustedError
+	var keyErr *CursorKeyRejectedError
+	switch {
+	case errors.As(err, &quotaErr):
+		reason = CursorQuotaExhaustedReason
+		stopReason = "cursor upstream account daily quota exhausted (resume)"
+		matched = true
+	case errors.As(err, &keyErr):
+		reason = CursorUpstreamAccountFailureReason
+		stopReason = "cursor upstream rejected the key (resume)"
+		matched = true
+	default:
+		if code, ok := cursorUpstreamStreamErrorCode(err); ok && !isCursorBusinessErrorCode(code) {
+			// 与 Execute 的非业务码分支同语义：账号当下无法服务，换号 + 冷却，不停号。
+			reason = CursorUpstreamAccountFailureReason
+			matched = true
+		}
+	}
+	if !matched {
+		return nil
+	}
+
+	session.mu.Lock()
+	accountID := session.spec.accountID
+	requestedModel := session.spec.requestedModel
+	session.mu.Unlock()
+	// 停号补漏（P1）：续轮路径此前完全绕过 Execute 的 defer，账号 357 在额度耗尽后
+	// 仍被粘性会话选中。这里复用同一个回调，调用一次；**与是否已发布字节无关**
+	// （账号确实 exhausted，必须停），回调 panic 只记 Warn。
+	if stopReason != "" {
+		s.notifyAccountExhausted(session.phaseContext(), accountID, stopReason)
+	}
+	// 已发布字节 → 仍原样返回错误（锁定项 3：禁止流拼接腐化），只是不再重建。
+	if publishedThisHTTP {
+		return nil
+	}
+	cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "cursor_resume_rebuild_allowed",
+		requestedModel,
+		zap.Int64("account_id", accountID),
+		zap.String("reason", string(reason)),
+		zap.String("error_class", cursorStreamErrClass(err)))
+	return &CursorResumeRebuildError{DeadAccountID: accountID, Reason: reason, Err: err}
+}
+
+// notifyAccountExhausted 调用装配层注入的停号回调（未注入时 no-op）。
+//
+// 回调 panic 只记录 Warn：停号是旁路副作用，任何异常都不得改变主链路的失败分类。
+func (s *CursorExecutionService) notifyAccountExhausted(ctx context.Context, accountID int64, reason string) {
+	if s == nil || s.accountExhaustedHandler == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_exhausted_handler_panic", "",
+				zap.Int64("account_id", accountID), zap.Any("panic", r))
+		}
+	}()
+	s.accountExhaustedHandler(ctx, accountID, reason)
 }
 
 // finishHTTPOutput 收尾本 HTTP 的写出。
@@ -5008,6 +5129,78 @@ func newCursorResumeError(status int, reason string, err error) *CursorResumeErr
 	return &CursorResumeError{Status: status, Reason: reason, Err: err}
 }
 
+// CursorResumeRebuildError 表示续轮 serve 命中**账号级终态**（当日额度耗尽 / 上游拒付 /
+// 非业务码的上游终态错误），且本 HTTP 尚未向客户端写出任何语义字节——可以终结旧会话后，
+// 在**同一个 HTTP 请求内**换号、以请求正文的完整历史新建 AgentRun 继续服务
+// （2026-11-04 方案 §2.3 / §2.4-1）。
+//
+// 它不是用户错误：CursorResumeHTTPStatus 不为其产出状态码；handler 侧只把它当作
+// "继续走普通执行路径"的信号，并在请求 ctx 上挂 CursorRebuildInfo。
+// Unwrap 保留原错误，既有 errors.Is / 日志分类不受影响。
+type CursorResumeRebuildError struct {
+	// DeadAccountID 是本次死亡会话所用的账号 ID（只用于日志与排除/重绑，不含凭据）。
+	DeadAccountID int64
+	// Reason 是换号原因（与既有 GatewayFailureReason 同一枚举，不新增通道）。
+	Reason GatewayFailureReason
+	// Err 是原始上游/协议错误（供 errors.Is 复核）。
+	Err error
+}
+
+// Error 实现 error。
+func (e *CursorResumeRebuildError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Err == nil {
+		return "cursor: resume can be rebuilt on another account"
+	}
+	return "cursor: resume can be rebuilt on another account: " + e.Err.Error()
+}
+
+// Unwrap 暴露原始错误，支持 errors.Is / errors.As。
+func (e *CursorResumeRebuildError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// CursorRebuildInfo 是请求 ctx 上"续轮中途失败 → 换号重建"的决定（2026-11-04 方案 §2.4-2）。
+//
+// 只承载日志/重绑所需的稳定标识，不含请求正文或上游原文。
+type CursorRebuildInfo struct {
+	// DeadAccountID 是已终结会话所用的账号 ID。
+	DeadAccountID int64
+	// Reason 是换号原因。
+	Reason GatewayFailureReason
+}
+
+// WithCursorRebuild 把"续轮换号重建"决定挂到请求 ctx。
+func WithCursorRebuild(ctx context.Context, info CursorRebuildInfo) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	return context.WithValue(ctx, ctxkey.CursorRebuild, info)
+}
+
+// CursorRebuildFromContext 读取续轮换号重建决定（缺失返回 ok=false）。
+func CursorRebuildFromContext(ctx context.Context) (CursorRebuildInfo, bool) {
+	if ctx == nil {
+		return CursorRebuildInfo{}, false
+	}
+	info, ok := ctx.Value(ctxkey.CursorRebuild).(CursorRebuildInfo)
+	return info, ok
+}
+
+// CursorRebuildRequested 判定本请求是否已决定"续轮换号重建"。
+//
+// handler 的 sticky 绑定用它作为强制重绑判据：死亡账号的旧绑定必须被新账号覆盖，
+// 否则下一次请求会被粘性会话又钉回已停用的账号。
+func CursorRebuildRequested(ctx context.Context) bool {
+	_, ok := CursorRebuildFromContext(ctx)
+	return ok
+}
+
 // CursorResumeHTTPStatus 返回续轮错误应使用的 HTTP 状态与安全 reason。
 //
 // 非续轮错误返回 (0, "")：调用方按既有上游错误链处理。
@@ -5271,6 +5464,16 @@ type cursorContextPlan struct {
 	// function_call 条目也在同一正文中时，这是一个**客户端自带完整两端**的已完成工具对，
 	// 不是在向本站声明某条待完成关联（见 resultsReplayHistory）。
 	historyCallIDs map[string]struct{}
+	// historyComplete 标记本次请求正文是否携带**可独立重建 AgentRun 的完整历史**
+	// （2026-11-04 续轮额度耗尽换号重建方案 §2.3）。
+	//
+	// 判定口径只读本 HTTP 请求体、不改请求体：本批每条结果的 call ID 都必须在正文
+	// **历史前缀**里找到对应调用（chat/messages/gemini 的 assistant tool_calls /
+	// tool_use / functionCall，Responses 的 function_call）。只有结果没有对应调用的
+	// 孤儿形状（含 Responses 只有 previous_response_id）→ false，禁止重建（会丢上下文）。
+	//
+	// 该标记只用于"死亡会话能否重建"的准入，不参与任何摘要校验。
+	historyComplete bool
 }
 
 // claimsContinuation 判定本次请求是否**在原协议层声明了续轮**（携带本批工具结果或
@@ -5310,6 +5513,15 @@ func (p *cursorContextPlan) resultsReplayHistory() bool {
 		}
 	}
 	return true
+}
+
+// historySupportsRebuild 返回本次请求正文是否足以独立重建一个新 AgentRun
+// （2026-11-04 方案 §2.3「重建 ≠ 猜会话」）。
+//
+// 只读历史标记，不查最近会话、不复用死亡会话状态；false 时任何重建请求都必须
+// 维持原有失败关闭（不与"省略历史"路径混用）。
+func (p *cursorContextPlan) historySupportsRebuild() bool {
+	return p != nil && p.historyComplete
 }
 
 // cursorConfigGroup 是配置摘要的分组。续轮对三组的准入策略不同（见 ResumeCursorSession）：
@@ -5621,6 +5833,10 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 		}
 		plan.results = append(plan.results, CursorToolResult{CallID: callID, Text: []string{text}})
 	}
+	// historyCalls 只服务"正文是否携带完整历史"的判定；**不写入** plan.historyCallIDs
+	// （后者是 Responses 的 resultsReplayHistory 专用口径，其它协议填空避免改变既有
+	// "声明续轮"判定）。
+	historyCalls := make(map[string]struct{}, 4)
 	for _, msg := range req.Messages[:start] {
 		role := strings.ToLower(strings.TrimSpace(msg.Role))
 		switch role {
@@ -5673,8 +5889,14 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 			if err := plan.history.AppendItem("chat.assistant.tool_call", canonical); err != nil {
 				return nil, err
 			}
+			// 历史前缀里真实出现的调用 ID：本批结果能在此找到对应调用，才证明正文携带
+			// 完整历史（重建只把历史当上下文，不重执行工具）。
+			if id := strings.TrimSpace(call.ID); id != "" {
+				historyCalls[id] = struct{}{}
+			}
 		}
 	}
+	plan.historyComplete = cursorHistoryComplete(plan.results, historyCalls)
 	return plan, nil
 }
 
@@ -5967,6 +6189,9 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 			})
 		}
 	}
+	// historyCalls 只服务"正文是否携带完整历史"的判定；不写入 plan.historyCallIDs
+	// （后者仅供 Responses 的 resultsReplayHistory 使用）。
+	historyCalls := make(map[string]struct{}, 4)
 	for _, msg := range req.Messages[:start] {
 		role := strings.ToLower(strings.TrimSpace(msg.Role))
 		if role != "user" && role != "assistant" && role != "system" {
@@ -5993,8 +6218,15 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 			if err := plan.history.AppendItem(item.itemType, item.canonical); err != nil {
 				return nil, err
 			}
+			// 历史前缀里真实出现的 tool_use ID：本批 tool_result 能配对才证明历史完整。
+			if block.Type == "tool_use" {
+				if id := strings.TrimSpace(block.ID); id != "" {
+					historyCalls[id] = struct{}{}
+				}
+			}
 		}
 	}
+	plan.historyComplete = cursorHistoryComplete(plan.results, historyCalls)
 	return plan, nil
 }
 
@@ -6225,7 +6457,32 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 			return nil, err
 		}
 	}
+	// Responses 的"完整历史"必须能自证：本批每个结果 ID 的调用条目都出现在**同一正文**
+	// 的历史前缀里（成对 function_call + function_call_output）。只有 previous_response_id
+	// 而无历史时 false —— 重建会丢上下文，必须维持原失败关闭（方案 §2.3 / V6）。
+	plan.historyComplete = cursorHistoryComplete(plan.results, plan.historyCallIDs)
 	return plan, nil
+}
+
+// cursorHistoryComplete 判定请求正文是否携带可独立重建的完整历史。
+//
+// 判据只读本次请求体：本批每条结果的 call ID 都必须能在正文历史前缀里找到对应调用。
+// 四协议共用这一条（不只 Responses）：只有结果、没有对应调用的"孤儿 tool_result"
+// 同样是历史不完整，不得凭它重建（方案 §2.3「重建 ≠ 猜会话」）。
+func cursorHistoryComplete(results []CursorToolResult, historyCallIDs map[string]struct{}) bool {
+	if len(results) == 0 {
+		// 普通请求：没有待重建的本批结果，标记不参与任何判定。
+		return true
+	}
+	if len(historyCallIDs) == 0 {
+		return false
+	}
+	for _, result := range results {
+		if _, ok := historyCallIDs[strings.TrimSpace(result.CallID)]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // cursorResponsesItemCallID 取「客户端工具调用」条目的 call_id（非调用条目返回空）。
@@ -6401,6 +6658,9 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 			plan.results = append(plan.results, CursorToolResult{CallID: id, Text: []string{string(part["functionResponse"])}})
 		}
 	}
+	// historyCalls 只服务"正文是否携带完整历史"的判定；不写入 plan.historyCallIDs
+	// （后者仅供 Responses 的 resultsReplayHistory 使用）。
+	historyCalls := make(map[string]struct{}, 4)
 	for _, content := range doc.Contents[:start] {
 		role := strings.ToLower(strings.TrimSpace(content.Role))
 		if role == "" {
@@ -6427,6 +6687,10 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 				if err := plan.history.AppendItem("gemini."+role+".function_call", canonical); err != nil {
 					return nil, err
 				}
+				// 历史前缀里真实出现的调用 ID：本批 functionResponse 能配对才证明历史完整。
+				if strings.TrimSpace(id) != "" {
+					historyCalls[strings.TrimSpace(id)] = struct{}{}
+				}
 				continue
 			}
 			if id, name, payload, ok := cursorGeminiPartTool(part, "functionResponse"); ok {
@@ -6448,6 +6712,7 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 			}
 		}
 	}
+	plan.historyComplete = cursorHistoryComplete(plan.results, historyCalls)
 	return plan, nil
 }
 
@@ -7103,7 +7368,9 @@ func (s *CursorExecutionService) ResumeCursorSession(
 
 	if drainCh != nil {
 		// 真实跨 HTTP 会话：把恢复后的输出帧写出给当前 HTTP（自本附着起），直到真实终态。
-		return s.cursorDrainAttachedOutput(drainCh, drainWriter, drainReq, record)
+		// 只有正文携带可独立重建的完整历史时才允许把账号级失败包装成换号重建哨兵；
+		// 历史不完整（Responses 只有 previous_response_id）保持原失败关闭（方案 §2.3 / V6）。
+		return s.cursorDrainAttachedOutput(drainCh, drainWriter, drainReq, record, plan.historySupportsRebuild())
 	}
 
 	return &ForwardResult{

@@ -87,4 +87,9 @@ const (
 	// （modelRateLimitKeysForRequest）追加为额外判定 key 的常量。
 	// 采用与仓库其他 context key 一致的 ctxkey.Key 常量实现，避免私有的 struct{} key。
 	ChannelMappedModel Key = "ctx_channel_mapped_model"
+
+	// CursorRebuild 标记本次请求已决定"续轮中途失败 → 同一 HTTP 内换号重建 AgentRun"。
+	// 值由 service.CursorRebuildInfo 定义（service 包读取），handler 只在续轮入口命中
+	// 可重建哨兵时写入；Execute 准入断言据此跳过 CUR-RES-01 的 400，sticky 绑定据此强制重绑。
+	CursorRebuild Key = "ctx_cursor_rebuild"
 )

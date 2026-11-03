@@ -146,6 +146,11 @@ type cursorFullChainScript struct {
 	calls []cursorFullChainCall
 	// afterText 是收到真实结果后模型续跑产出的文本。
 	afterText string
+	// afterLeadText 在 afterText 之前先吐一段正常正文。
+	//
+	// 用于"已发布字节后账号级失败"场景：首段正文会真正写给客户端（本 HTTP 已发布），
+	// 之后 afterText 命中额度/拒付模板时必须保持原错误、禁止重建（锁定项 3）。
+	afterLeadText string
 	// usage 是 turn_ended 的真实用量（input / output / cacheRead / cacheWrite）。
 	usage [4]uint64
 	// hangAfterPhase1 为 true 时上游交付批次后就挂着（用于长工具等待 / 断连场景）。
@@ -278,10 +283,14 @@ func (u *cursorFullChainUpstream) batchFrames(calls []cursorFullChainCall, leadT
 
 // phase2 是模型收到真实结果后的续跑：文本 + 真实 usage + 正常终态。
 func (u *cursorFullChainUpstream) phase2() []byte {
-	return append(joinFrames(
+	payloads := make([][]byte, 0, 3)
+	if u.script.afterLeadText != "" {
+		payloads = append(payloads, fcTextDelta(u.script.afterLeadText))
+	}
+	payloads = append(payloads,
 		fcTextDelta(u.script.afterText),
-		fcTurnEnded(u.script.usage[0], u.script.usage[1], u.script.usage[2], u.script.usage[3]),
-	), fcEndStream()...)
+		fcTurnEnded(u.script.usage[0], u.script.usage[1], u.script.usage[2], u.script.usage[3]))
+	return append(joinFrames(payloads...), fcEndStream()...)
 }
 
 // writeStream 把已带 envelope 的字节整体写出并 Flush（逐帧可读，客户端不会等到流结束）。

@@ -1216,8 +1216,10 @@ func cursorResumeClaimsUnknownAssociation(err error) bool {
 //   - false：本次不是可识别的续轮，按普通新请求继续（会话身份已挂到 ctx）。
 //     其中「明确声称续轮但全部 ID 未命中」也走这一支：不在此处判死、不改请求体、
 //     不接管任何资源，由原路由决定供应方（见 cursorResumeClaimsUnknownAssociation）。
+//     2026-11-04 起，「续轮中途命中账号级终态但本 HTTP 未发布字节」同样返回 false，
+//     并在 ctx 挂 service.CursorRebuildInfo：调用方继续原路径，由 Execute 换号重建。
 //
-// 校验失败零上游写入；不换号、不重选、不猜最近会话。
+// 校验失败零上游写入；除上述重建分支外不换号、不重选、不猜最近会话。
 // model 参数可选：Gemini 原生协议传 URL 路径模型（请求体无 "model" 字段），其它协议传空从请求体解析。
 func serveCursorResumeIfRequested(
 	c *gin.Context,
@@ -1283,6 +1285,25 @@ func serveCursorResumeIfRequested(
 		Identity: identity,
 		Model:    model,
 	}); serveErr != nil {
+		// 2026-11-04 裁定（方案 §2.4-2）：续轮 serve 在**本 HTTP 尚未发布任何字节**时命中
+		// 账号级终态（额度耗尽/拒付/非业务码上游故障）不再 reject。旧会话已由 finalizer 终结
+		// （不结算），这里只在请求 ctx 挂"换号重建"决定并返回 false，让 7 个调用点继续走
+		// 原普通路径：选号 → Execute 以本请求正文的完整历史新建 AgentRun。
+		// 不写任何错误响应、不改请求体、不猜最近会话。
+		var rebuildErr *service.CursorResumeRebuildError
+		if errors.As(serveErr, &rebuildErr) {
+			ctx = service.WithCursorRebuild(ctx, service.CursorRebuildInfo{
+				DeadAccountID: rebuildErr.DeadAccountID,
+				Reason:        rebuildErr.Reason,
+			})
+			c.Request = c.Request.WithContext(ctx)
+			logger.FromContext(ctx).Info("cursor_resume_rebuild_requested",
+				zap.Int64("dead_account_id", rebuildErr.DeadAccountID),
+				zap.String("reason", string(rebuildErr.Reason)),
+				zap.String("protocol", string(protocol)),
+			)
+			return false
+		}
 		status, reason := service.CursorResumeHTTPStatus(serveErr)
 		if status == 0 {
 			status, reason = http.StatusBadGateway, "resume_failed"

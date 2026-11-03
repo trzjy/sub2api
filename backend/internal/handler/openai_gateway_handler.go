@@ -4175,6 +4175,16 @@ func (h *OpenAIGatewayHandler) handleConcurrencyError(c *gin.Context, err error,
 }
 
 func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
+	// 2026-11-04 方案 §2.4-7：Cursor 续轮换号重建期间池子真耗尽（全部候选账号额度耗尽/
+	// 拒付）→ 统一中文终态 CUR-RES-11，绝不把 unknown_association 或上游原文暴露给用户。
+	// 其它平台的换号耗尽路径保持原样（仅按 Reason 命中 Cursor 语义时生效）。
+	if failoverErr != nil && service.IsCursorQuotaExhaustedReason(failoverErr.Reason) {
+		message := cursorPoolExhaustedMessage(c)
+		service.SetOpsUpstreamError(c, http.StatusServiceUnavailable, message, "")
+		h.handleStreamingAwareErrorWithCode(c, http.StatusServiceUnavailable, "server_error",
+			infraerrors.CursorResPoolExhaustedCode, message, streamStarted, false)
+		return
+	}
 	// QK-S2 source-binding: the masked-identity flag is stashed on the gin
 	// Context by the service for the account that produced the current failover
 	// error (handleErrorResponse / handleCompatErrorResponse / streaming). This

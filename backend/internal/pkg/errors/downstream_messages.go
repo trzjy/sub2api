@@ -419,6 +419,12 @@ const (
 	CursorResServiceUnavailableCode = "CUR-RES-10"
 	CursorResServiceUnavailable     = "服务暂时不可用，请稍后重试"
 
+	// 触发条件：续轮换号重建期间，本请求内所有候选账号都因额度耗尽/拒付被排除
+	// （reason=account_pool_exhausted）。这是池子容量问题，不是用户请求问题；
+	// 绝不把上游原文或 unknown_association 暴露给用户。HTTP 状态沿用换号耗尽既有语义（503）。
+	CursorResPoolExhaustedCode = "CUR-RES-11"
+	CursorResPoolExhausted     = "账号池暂无可用的额度，请稍后重试"
+
 	// 触发条件：其它未映射 reason（含 handler 兜底 resume_failed、空串）
 	CursorResUnknownCode = "CUR-RES-99"
 	CursorResUnknown     = "工具续轮处理失败，请重新发起请求"
@@ -529,6 +535,8 @@ func CursorResumeReasonCode(reason string) (code, message string) {
 		return CursorResIdentityMismatchCode, CursorResIdentityMismatch
 	case "execution_unavailable", "intake_unavailable", "source_unavailable":
 		return CursorResServiceUnavailableCode, CursorResServiceUnavailable
+	case "account_pool_exhausted":
+		return CursorResPoolExhaustedCode, CursorResPoolExhausted
 	default:
 		return CursorResUnknownCode, CursorResUnknown
 	}

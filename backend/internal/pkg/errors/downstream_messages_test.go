@@ -101,6 +101,7 @@ var cursorResumeReasonTable = map[string][]string{
 		"quota_key_usage_unobserved", "quota_key_usage_observation_failed", "quota_key_usage_stale", "quota_key_usage_incomplete", "quota_key_usage_exhausted"},
 	"CUR-RES-09": {"identity_mismatch"},
 	"CUR-RES-10": {"execution_unavailable", "intake_unavailable", "source_unavailable"},
+	"CUR-RES-11": {"account_pool_exhausted"},
 }
 
 // cursorCodeMessages 列出 Cursor 段全部码与中文常量对。
@@ -115,6 +116,7 @@ var cursorCodeMessages = [][2]string{
 	{CursorResAccountUnavailableCode, CursorResAccountUnavailable},
 	{CursorResIdentityMismatchCode, CursorResIdentityMismatch},
 	{CursorResServiceUnavailableCode, CursorResServiceUnavailable},
+	{CursorResPoolExhaustedCode, CursorResPoolExhausted},
 	{CursorResUnknownCode, CursorResUnknown},
 	{CursorExecDeadlineExceededCode, CursorExecDeadlineExceeded},
 	{CursorExecUnsupportedCode, CursorExecUnsupported},
@@ -143,7 +145,7 @@ func TestCursorResumeReasonCode_PlanTable(t *testing.T) {
 			require.NotEmptyf(t, msg, "reason %q", reason)
 		}
 	}
-	require.Equal(t, 51, total)
+	require.Equal(t, 52, total)
 }
 
 func TestCursorResumeReasonCode_Fallback(t *testing.T) {
@@ -184,5 +186,5 @@ func TestCursorCodeMessages_UniqueAndClean(t *testing.T) {
 			require.NotContainsf(t, msg, reason, "%s 文案含 reason 原文 %q", code, reason)
 		}
 	}
-	require.Len(t, seenCode, 25)
+	require.Len(t, seenCode, 26)
 }

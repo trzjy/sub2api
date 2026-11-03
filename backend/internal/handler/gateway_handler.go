@@ -1212,7 +1212,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// - 选中账号与粘性账号一致：刷新 TTL
 			// - 粘性账号因负载/RPM 被跳过、选中了其他账号：不覆盖原绑定，
 			//   下次请求粘性账号恢复后仍可命中
-			if sessionKey != "" && (sessionBoundAccountID == 0 || sessionBoundAccountID == account.ID) {
+			// - 续轮换号重建（2026-11-04 方案 §2.4-6）：必须**强制**把绑定改到新账号，
+			//   否则下一次请求会被粘性会话又钉回已停用/额度耗尽的死亡账号。
+			if sessionKey != "" && shouldRebindStickyAfterForward(sessionBoundAccountID, account.ID,
+				service.CursorRebuildRequested(c.Request.Context())) {
 				if err := h.gatewayService.BindStickySession(c.Request.Context(), currentAPIKey.GroupID, sessionKey, account.ID); err != nil {
 					reqLog.Warn("gateway.bind_sticky_session_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				}
@@ -2071,7 +2074,39 @@ func (h *GatewayHandler) handleConcurrencyError(c *gin.Context, err error, slotT
 	h.handleStreamingAwareErrorWithCode(c, status, errType, code, message, streamStarted)
 }
 
+// shouldRebindStickyAfterForward 判定转发成功后是否允许覆盖粘性绑定。
+//
+// 原判据只允许"无绑定"或"绑定账号 == 本次账号"；续轮换号重建时本次账号恰好是
+// **替代账号**，必须强制覆盖，否则下一次请求又回到死亡账号（方案 §2.4-6）。
+func shouldRebindStickyAfterForward(sessionBoundAccountID, accountID int64, rebuild bool) bool {
+	return sessionBoundAccountID == 0 || sessionBoundAccountID == accountID || rebuild
+}
+
+// cursorPoolExhaustedMessage 渲染"账号池暂无可用的额度"中文终态（CUR-RES-11）。
+//
+// 续轮换号重建期间，本请求内所有候选账号都可能因额度耗尽/拒付被排除。此时绝不能把
+// unknown_association 或上游原文暴露给用户（2026-11-04 方案 §2.4-7）。
+func cursorPoolExhaustedMessage(c *gin.Context) string {
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	requestID, _ := ctx.Value(ctxkey.RequestID).(string)
+	logger.FromContext(ctx).Warn("cursor_resume_pool_exhausted",
+		zap.String("error_code", pkgerrors.CursorResPoolExhaustedCode))
+	return pkgerrors.CursorUserMessage(pkgerrors.CursorResPoolExhaustedCode,
+		pkgerrors.CursorResPoolExhausted, requestID)
+}
+
 func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, platform string, streamStarted bool) {
+	if failoverErr != nil && service.IsCursorQuotaExhaustedReason(failoverErr.Reason) {
+		// 池子真耗尽（全是额度耗尽/拒付账号）：给中文终态，不暴露上游原文/内部 reason。
+		message := cursorPoolExhaustedMessage(c)
+		service.SetOpsUpstreamError(c, http.StatusServiceUnavailable, message, "")
+		h.handleStreamingAwareErrorWithCode(c, http.StatusServiceUnavailable, "api_error",
+			pkgerrors.CursorResPoolExhaustedCode, message, streamStarted)
+		return
+	}
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
 	if service.IsOpenAISilentRefusalErrorBody(responseBody) {

@@ -531,3 +531,40 @@ func TestServeCursorResumeEligibilityDenialReturnsByClass(t *testing.T) {
 		})
 	}
 }
+
+// TestServeCursorResumeRebuildSentinelDoesNotReject 覆盖 2026-11-04 新裁定：
+// 续轮 serve 返回可换号重建哨兵时，handler 不得 reject、不得写错误响应；
+// 只返回 false 并在请求 ctx 挂 CursorRebuildInfo，让调用方继续原路径重建 AgentRun。
+func TestServeCursorResumeRebuildSentinelDoesNotReject(t *testing.T) {
+	c := newCursorResumeTestContext(t)
+	gw := &cursorResumeFakeGateway{
+		ticket: &service.CursorResumeTicket{SessionID: "s-1", Model: "cursor-test-model"},
+		serveErr: &service.CursorResumeRebuildError{
+			DeadAccountID: 42,
+			Reason:        service.CursorQuotaExhaustedReason,
+			Err:           service.ErrCursorQuotaExhaustedInStream,
+		},
+	}
+	reject := &captureReject{}
+	handled := serveCursorResumeIfRequested(c, gw, service.CursorResumeProtocolChat,
+		[]byte(cursorResumeHandlerChatContinuation), service.CursorSessionIdentity{UserID: 1},
+		false, reject.fn(), "")
+
+	require.False(t, handled, "可重建哨兵必须交回普通执行路径，而不是由续轮分支终止")
+	require.False(t, reject.called, "不得向用户写错误响应")
+	require.False(t, c.Writer.Written(), "本层不写任何响应")
+	info, ok := service.CursorRebuildFromContext(c.Request.Context())
+	require.True(t, ok, "请求 ctx 必须挂上重建标记")
+	require.Equal(t, int64(42), info.DeadAccountID)
+	require.Equal(t, service.CursorQuotaExhaustedReason, info.Reason)
+}
+
+// TestShouldRebindStickyAfterForward 覆盖重建后的 sticky 强制重绑判据：
+// 原逻辑只在"无绑定或绑定账号 == 本次账号"时重绑；重建成功时本次账号是替代账号，
+// 必须强制覆盖，否则下一次请求会被粘性会话钉回死亡账号。
+func TestShouldRebindStickyAfterForward(t *testing.T) {
+	require.True(t, shouldRebindStickyAfterForward(0, 8, false), "首次请求创建绑定")
+	require.True(t, shouldRebindStickyAfterForward(7, 7, false), "同一账号刷新 TTL")
+	require.False(t, shouldRebindStickyAfterForward(7, 8, false), "负载换号不得覆盖原绑定")
+	require.True(t, shouldRebindStickyAfterForward(7, 8, true), "续轮重建必须强制重绑")
+}

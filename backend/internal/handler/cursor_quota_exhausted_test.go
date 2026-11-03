@@ -7,13 +7,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
 // TestCursorQuotaExhaustedChatCompletions verifies that cursor_quota_exhausted
-// returns the dedicated client message in Chat Completions protocol.
+// returns CUR-RES-11 (Chinese pool-exhausted terminal message) in Chat Completions protocol.
 func TestCursorQuotaExhaustedChatCompletions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -29,8 +30,8 @@ func TestCursorQuotaExhaustedChatCompletions(t *testing.T) {
 
 	(&GatewayHandler{}).handleCCFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "cursor 账号额度耗尽，已停止调度")
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 	require.Contains(t, recorder.Body.String(), `"type":"server_error"`)
 }
 
@@ -51,12 +52,12 @@ func TestCursorQuotaExhaustedChatCompletionsDefaultsTo429(t *testing.T) {
 
 	(&GatewayHandler{}).handleCCFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "cursor 账号额度耗尽，已停止调度")
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 }
 
 // TestCursorQuotaExhaustedResponses verifies that cursor_quota_exhausted
-// returns the dedicated client message in Responses protocol.
+// returns CUR-RES-11 in Responses protocol.
 func TestCursorQuotaExhaustedResponses(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -72,8 +73,8 @@ func TestCursorQuotaExhaustedResponses(t *testing.T) {
 
 	(&GatewayHandler{}).handleResponsesFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "cursor 账号额度耗尽，已停止调度")
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 	require.Contains(t, recorder.Body.String(), `"code":"server_error"`)
 }
 
@@ -94,12 +95,12 @@ func TestCursorQuotaExhaustedResponsesDefaultsTo429(t *testing.T) {
 
 	(&GatewayHandler{}).handleResponsesFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "cursor 账号额度耗尽，已停止调度")
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 }
 
 // TestCursorQuotaExhaustedOpenAIGateway verifies that cursor_quota_exhausted
-// returns the dedicated client message in OpenAI Gateway Messages protocol.
+// returns CUR-RES-11 in OpenAI Gateway Messages protocol.
 func TestCursorQuotaExhaustedOpenAIGateway(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -115,8 +116,8 @@ func TestCursorQuotaExhaustedOpenAIGateway(t *testing.T) {
 
 	(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "cursor 账号额度耗尽，已停止调度")
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 	require.Contains(t, recorder.Body.String(), `"type":"server_error"`)
 }
 
@@ -137,12 +138,12 @@ func TestCursorQuotaExhaustedOpenAIGatewayDefaultsTo429(t *testing.T) {
 
 	(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "cursor 账号额度耗尽，已停止调度")
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 }
 
 // TestCursorQuotaExhaustedResponsesStreaming verifies that cursor_quota_exhausted
-// is properly handled when streaming has started in Responses protocol.
+// emits CUR-RES-11 when streaming has started in Responses protocol.
 func TestCursorQuotaExhaustedResponsesStreaming(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -158,12 +159,12 @@ func TestCursorQuotaExhaustedResponsesStreaming(t *testing.T) {
 
 	(&GatewayHandler{}).handleResponsesFailoverExhausted(c, failoverErr, true)
 
-	require.Contains(t, recorder.Body.String(), "cursor 账号额度耗尽，已停止调度")
+	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 	require.Contains(t, recorder.Body.String(), "event: response.failed")
 }
 
 // TestCursorQuotaExhaustedOpenAIGatewayStreaming verifies that cursor_quota_exhausted
-// is properly handled when streaming has started in OpenAI Gateway protocol.
+// emits CUR-RES-11 when streaming has started in OpenAI Gateway protocol.
 func TestCursorQuotaExhaustedOpenAIGatewayStreaming(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -180,6 +181,6 @@ func TestCursorQuotaExhaustedOpenAIGatewayStreaming(t *testing.T) {
 
 	(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, failoverErr, true)
 
-	require.Contains(t, recorder.Body.String(), "cursor 账号额度耗尽，已停止调度")
+	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 	require.Contains(t, recorder.Body.String(), `"type":"server_error"`)
 }

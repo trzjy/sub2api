@@ -549,6 +549,14 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 	if lastErr != nil {
 		copyFailoverRetryAfter(c, lastErr.ResponseHeaders)
 	}
+	// 2026-11-04 方案 §2.4-7：Cursor 账号池真耗尽（全是额度耗尽/拒付账号）统一中文终态
+	// CUR-RES-11，不再透出上游原文或内部 reason。
+	if lastErr != nil && service.IsCursorQuotaExhaustedReason(lastErr.Reason) {
+		message := cursorPoolExhaustedMessage(c)
+		service.SetOpsUpstreamError(c, http.StatusServiceUnavailable, message, "")
+		h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "server_error", message)
+		return
+	}
 	if lastErr != nil && lastErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(lastErr)
 		h.chatCompletionsErrorResponse(c, status, "server_error", message)
