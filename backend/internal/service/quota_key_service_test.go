@@ -607,6 +607,21 @@ func (r *testDBRepo) Create(ctx context.Context, in CreateQuotaKeyInput) (*ent.Q
 	return q.Save(ctx)
 }
 
+// UpdatePriority 与 production repository 同语义：同一事务内改写激活码优先级，
+// 并把该码名下未软删账号的 accounts.priority 同步为该值。
+//
+// 补位说明：QuotaKeyRepository 新增该方法后替身未同步，会让 unit tag 下整包编译
+// 失败（存量断裂，2026-11-03 修）。
+func (r *testDBRepo) UpdatePriority(ctx context.Context, tx *ent.Tx, id int64, priority int) (int, error) {
+	if _, err := tx.QuotaKey.UpdateOneID(id).SetPriority(priority).Save(ctx); err != nil {
+		return 0, err
+	}
+	return tx.Account.Update().
+		Where(account.QuotaKeyID(id), account.DeletedAtIsNil()).
+		SetPriority(priority).
+		Save(ctx)
+}
+
 func (r *testDBRepo) UpdateStatusFields(ctx context.Context, tx *ent.Tx, id int64, status string, exhausted bool, lastError *string, lastRefreshAt *time.Time) error {
 	q := tx.QuotaKey.UpdateOneID(id).SetStatus(status).SetExhausted(exhausted)
 	if lastError != nil {

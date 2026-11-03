@@ -202,6 +202,13 @@ func (r *identityCursorQuotaKeys) SoftDeleteCursorAccountsByExpiredQuotaKey(cont
 	return nil, nil
 }
 
+// UpdatePriority 是 QuotaKeyRepository 接口的补位实现：本文件涉及的出站 / device
+// 用例都不改写激活码优先级，返回 0 行即可（接口新增该方法后 mock 未同步，会让
+// unit tag 下整包编译失败）。
+func (r *identityCursorQuotaKeys) UpdatePriority(context.Context, *ent.Tx, int64, int) (int, error) {
+	return 0, nil
+}
+
 // SetDeviceIDIfAbsent 模拟 DB 的条件化写入（WHERE device_id IS NULL OR =”），
 // 语义与 production repository / service 读判定三者一致：NULL 或空串才写入并返回
 // 受影响行数 1；已有非空值则不覆盖、返回 0（由 DeviceIDFor 重读赢家值）。

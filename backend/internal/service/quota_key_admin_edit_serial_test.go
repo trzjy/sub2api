@@ -243,7 +243,7 @@ func TestQuotaKeyService_UpdateCodeAndMetaSingleTransaction_NoPartialCommit(t *t
 	newCode := uniqCode(t, "CHANGED")
 	d := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 	dArg := &d
-	_, err = svc.Update(ctx, missingID, &newCode, &dArg, nil)
+	_, err = svc.Update(ctx, missingID, &newCode, &dArg, nil, nil)
 	require.Error(t, err, "不存在的来源必须失败")
 
 	// 真正被创建的那一行不得有任何部分提交。
@@ -289,7 +289,7 @@ func TestQuotaKeyService_UpdateSameMACKeepsSnapshotDifferentMACClears(t *testing
 	// 异 MAC：清空快照。
 	rotated, _ := mk("SRC1", snap)
 	rotatedTo := uniqCode(t, "SRC2")
-	_, err := svc.Update(ctx, rotated.ID, &rotatedTo, nil, nil)
+	_, err := svc.Update(ctx, rotated.ID, &rotatedTo, nil, nil, nil)
 	require.NoError(t, err)
 	row, err := client.QuotaKey.Get(ctx, rotated.ID)
 	require.NoError(t, err)
@@ -299,7 +299,7 @@ func TestQuotaKeyService_UpdateSameMACKeepsSnapshotDifferentMACClears(t *testing
 	// 同 MAC：明文必须与建行时**逐字相同**（MAC 只对明文负责），故复用建行码。
 	kept, keptCode := mk("SRC3", snap)
 	sameCode := keptCode
-	_, err = svc.Update(ctx, kept.ID, &sameCode, nil, nil)
+	_, err = svc.Update(ctx, kept.ID, &sameCode, nil, nil, nil)
 	require.NoError(t, err)
 	row, err = client.QuotaKey.Get(ctx, kept.ID)
 	require.NoError(t, err)
@@ -337,7 +337,7 @@ func TestQuotaKeyService_AdminEditDifferentKeyDoesNotBlock(t *testing.T) {
 	bArg := &b
 	otherDone := make(chan error, 1)
 	go func() {
-		_, uerr := f.svc.Update(ctx, other.ID, nil, &bArg, nil)
+		_, uerr := f.svc.Update(ctx, other.ID, nil, &bArg, nil, nil)
 		otherDone <- uerr
 	}()
 
