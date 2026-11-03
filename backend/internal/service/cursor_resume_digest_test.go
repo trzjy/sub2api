@@ -1501,3 +1501,91 @@ func TestCursorDeliveredHistoryMatchesResumePrefix(t *testing.T) {
 		})
 	}
 }
+
+// TestCursorResumePrunedAssistantProseAccepted 是**生产 history_mismatch off-by-one**
+// （stored 17 / request 16，恒差 1，全部 messages 协议）的回归用例。
+//
+// 交付侧登记了本批实际写出的 assistant 正文（"checking the weather"），而客户端在
+// tool_use 轮按 Anthropic 语义**省略了 text 块**（只回传 tool_use + tool_result）。
+// 修复前这必然被拒成 CUR-RES-04 history_mismatch；修复后按骨架口径放行，并落
+// resume_history_prose_pruned 留痕。
+func TestCursorResumePrunedAssistantProseAccepted(t *testing.T) {
+	newFixture := func(t *testing.T) *cursorResumeFixture {
+		t.Helper()
+		svc := &CursorExecutionService{sessions: newCursorSessionStore()}
+		record := svc.sessions.start(cursorSessionSpec{
+			protocol:       cursorResumeWriterProtocol(CursorResumeProtocolMessages),
+			requestedModel: "cursor-test-model",
+			upstreamModel:  "cursor-upstream-cursor-test-model",
+			accountID:      42,
+			quotaKeyID:     7,
+			indexProtocol:  string(CursorResumeProtocolMessages),
+			identity:       cursorResumeTestIdentity,
+		})
+		svc.sessions.attachOwner(record, svc)
+		record.recordPlan(cursorResumeTestIdentity,
+			cursorResumePlanForTest(t, CursorResumeProtocolMessages, []byte(cursorResumeTestMessagesFirst), "cursor-test-model"))
+
+		delegations := newLocalCursorToolDelegations()
+		batch := &cursorToolBatch{modelCallID: "mc-1", sealed: true}
+		batch.delegations = append(batch.delegations, cursorToolCallCapture{ID: "toolu_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`})
+		batch.started = append(batch.started, "toolu_1")
+		delegations.mu.Lock()
+		delegations.all = append(delegations.all, batch)
+		delegations.mu.Unlock()
+
+		// 关键：按生产同一路径交付，且**带正文**（这正是修复前造成 17 vs 16 的那一项）。
+		prepared, err := svc.prepareDeliveredBatch(record, CursorResumeProtocolMessages, "cursor-test-model",
+			"checking the weather", delegations, "")
+		require.NoError(t, err)
+		require.NoError(t, svc.commitDeliveredBatch(record, prepared, nil))
+
+		intake := &cursorTestIntake{}
+		require.NoError(t, svc.installIntake(record.SessionID(), intake))
+		return &cursorResumeFixture{svc: svc, record: record, intake: intake,
+			identity: cursorResumeTestIdentity, batchID: "mc-1"}
+	}
+
+	t.Run("客户端省略assistant正文仍接纳", func(t *testing.T) {
+		core, logs := observer.New(zap.DebugLevel)
+		ctx := logger.IntoContext(context.Background(), zap.New(core))
+		fixture := newFixture(t)
+
+		fixture.record.mu.Lock()
+		storedItems := fixture.record.historyDigest.ItemCount()
+		fixture.record.mu.Unlock()
+
+		// cursorResumeTestMessagesResume 的 assistant 消息只有 tool_use，没有 text 块。
+		_, err := fixture.resumeCtx(t, ctx, CursorResumeProtocolMessages, []byte(cursorResumeTestMessagesResume), false)
+		require.NoError(t, err, "客户端裁剪 assistant 正文是合法历史管理行为，不得拒轮")
+		require.Equal(t, 1, fixture.intake.callCount(), "必须整批写入上游一次")
+
+		// 修复前那一项确实在存量里（证明用例真的复现了 off-by-one 的形态）。
+		plan := cursorResumePlanForTest(t, CursorResumeProtocolMessages, []byte(cursorResumeTestMessagesResume), "cursor-test-model")
+		require.Equal(t, storedItems, plan.history.ItemCount()+1, "存量比请求恒多 1 项（正文项），与原缺陷同形")
+
+		entries := cursorPhaseEntries(logs, "resume_history_prose_pruned")
+		require.Len(t, entries, 1, "正文裁剪必须留可统计的痕迹")
+		fields := entries[0].ContextMap()
+		require.Equal(t, int64(1), fields["prose_items_pruned"])
+		require.Equal(t, string(CursorResumeProtocolMessages), fields["protocol"])
+	})
+
+	t.Run("正文裁剪但工具参数被改仍拒绝", func(t *testing.T) {
+		fixture := newFixture(t)
+		// 同样省略正文，但把 tool_use 的 input 改掉 —— 这是真正的篡改，必须失败关闭。
+		const tamperedArgs = `{
+  "model": "cursor-test-model",
+  "max_tokens": 64,
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "weather please"}]},
+    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "sh"}}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "sunny"}]}]}
+  ],
+  "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]
+}`
+		_, err := fixture.resume(t, CursorResumeProtocolMessages, []byte(tamperedArgs), false)
+		require.ErrorIs(t, err, ErrCursorResumeHistoryMismatch, "改动工具参数必须仍然拒绝（防篡改强度不降）")
+		require.Equal(t, 0, fixture.intake.callCount())
+	})
+}

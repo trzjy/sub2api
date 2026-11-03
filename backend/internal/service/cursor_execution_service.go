@@ -6742,25 +6742,48 @@ func (s *CursorExecutionService) ResumeCursorSession(
 	// previous_response_id 精确指向当前批时可**仅携带本批结果**省略历史；
 	// 一旦提供重复历史就必须整段匹配（不把任意短前缀当完整历史）。
 	historyOmitted := strings.TrimSpace(ticket.ResponseID) != "" && plan.history.ItemCount() == 0
-	if !historyOmitted && storedHistory != nil && !storedHistory.Equal(plan.history) {
+	// 准入比对用**骨架口径**（SkeletonEqual）：客户端在上传历史时裁剪/省略 assistant
+	// 可见正文是合法行为（tool_use 轮本来就可以没有 text 块），拿正文逐字节比会把正常
+	// 续轮恒定拒成 CUR-RES-04（生产实测 stored 17 / request 16，恒差 1）。正文之外的一切
+	// ——用户输入、tool_use 的 id/name/args、tool_result 内容、reasoning、system、项序 ——
+	// 仍然逐字节强校验，防篡改强度不降。
+	if !historyOmitted && storedHistory != nil && !storedHistory.SkeletonEqual(plan.history) {
 		// 并发窗口：胜者可能刚推进了历史并消费了本批 —— 后者必须是 409 而不是入参错误。
 		if record.batchConsumed() {
 			return nil, newCursorResumeError(http.StatusConflict, "already_consumed", ErrCursorResumeAlreadyConsumed)
 		}
-		// history_mismatch 是线上 CUR-RES-04 的**最大来源**，而旧实现只回一个 reason，
+		// history_mismatch 是线上 CUR-RES-04 的**老**最大来源，旧实现只回一个 reason，
 		// 完全没有办法回答"是客户端少发了历史、多发了一条、还是我们登记错了"。这里落
-		// 两侧项数与摘要前缀（纯计数/哈希前缀，不含任何正文），足以判断方向：
-		//   stored > request → 客户端截断了历史；
-		//   stored < request → 客户端多带了条目（常见于重试时把失败轮也拼进去）；
-		//   项数相同但哈希不同 → 同数量不同内容（重排/改字/换序列化）。
+		// 两侧项数（全链 + 骨架）、摘要前缀与项类型轨迹，足以一眼定位到具体是哪一项错位：
+		//   骨架项数不等 → 结构性差异（少了/多了一条非正文项）；
+		//   骨架项数相同但链值不同 → 同数量不同内容（重排/改字/换 id）；
+		//   仅全链项数不等而骨架一致 → 那只是正文裁剪，不该走到这里（见下一条）。
 		cursorPhaseLog(ctx, zapcore.WarnLevel, "resume_history_mismatch", spec.requestedModel,
 			zap.String("session_id", record.id),
 			zap.Int("history_items_stored", storedHistory.ItemCount()),
 			zap.Int("history_items_request", plan.history.ItemCount()),
+			zap.Int("history_skeleton_items_stored", storedHistory.SkeletonItemCount()),
+			zap.Int("history_skeleton_items_request", plan.history.SkeletonItemCount()),
 			zap.String("history_digest_stored", cursorDigestPrefix(storedHistory)),
 			zap.String("history_digest_request", cursorDigestPrefix(plan.history)),
+			zap.String("history_skeleton_stored", cursorDigestSkeletonPrefix(storedHistory)),
+			zap.String("history_skeleton_request", cursorDigestSkeletonPrefix(plan.history)),
+			zap.String("history_item_types_stored", storedHistory.TraceString()),
+			zap.String("history_item_types_request", plan.history.TraceString()),
 			zap.String("protocol", string(ticket.Protocol)))
 		return nil, newCursorResumeError(http.StatusBadRequest, "history_mismatch", ErrCursorResumeHistoryMismatch)
+	}
+	// 骨架一致、但全链不一致 = 客户端裁剪/省略了 assistant 可见正文。这是**正常**行为，
+	// 必须放行；同时留一条可统计的痕迹，让"正文裁剪到底有多普遍"在线上可观测，
+	// 也为本修复提供生产侧取证（修复前同样流量会落成 history_mismatch 拒轮）。
+	if !historyOmitted && storedHistory != nil && !storedHistory.Equal(plan.history) &&
+		storedHistory.SkeletonEqual(plan.history) {
+		cursorPhaseLog(ctx, zapcore.InfoLevel, "resume_history_prose_pruned", spec.requestedModel,
+			zap.String("session_id", record.id),
+			zap.Int("history_items_stored", storedHistory.ItemCount()),
+			zap.Int("history_items_request", plan.history.ItemCount()),
+			zap.Int("prose_items_pruned", storedHistory.ItemCount()-plan.history.ItemCount()),
+			zap.String("protocol", string(ticket.Protocol)))
 	}
 	if err := cursorValidateResumeResults(ticket.CallIDs, plan.results); err != nil {
 		if record.batchConsumed() {
@@ -6890,6 +6913,18 @@ func cursorDigestPrefix(d *CursorHistoryDigest) string {
 		return ""
 	}
 	hex := d.HexString()
+	if len(hex) > 12 {
+		return hex[:12]
+	}
+	return hex
+}
+
+// cursorDigestSkeletonPrefix 返回**骨架链**摘要的前 12 位十六进制（只用于日志）。
+func cursorDigestSkeletonPrefix(d *CursorHistoryDigest) string {
+	if d == nil {
+		return ""
+	}
+	hex := d.SkeletonHexString()
 	if len(hex) > 12 {
 		return hex[:12]
 	}

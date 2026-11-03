@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // cursorDigestManualChain 用与实现无关的手写步骤复算链式公式，用于反证实现真的按公式算。
@@ -687,4 +689,118 @@ func TestCursorSessionDigestCloneAndEqual(t *testing.T) {
 	if d.Sum() == NewCursorHistoryDigest().Sum() {
 		t.Fatal("含一项的历史不应等于空历史")
 	}
+}
+
+// TestCursorSessionDigestSkeleton 校验骨架链（正文无关口径）的语义。
+//
+// 背景（生产实测）：Messages 续轮 stored=17 / request=16，恒差 1，根因是交付侧登记了
+// assistant 正文项，而客户端在 tool_use 轮按 Anthropic 语义省略了 text 块。骨架链把
+// "客户端可裁剪的 assistant 正文"摘掉后比对，其余一切仍逐字节强校验。
+func TestCursorSessionDigestSkeleton(t *testing.T) {
+	// 交付侧：用户输入 + assistant 正文 + tool_use + 结果，全登记。
+	delivered := NewCursorHistoryDigest()
+	require.NoError(t, delivered.AppendText("messages.user.text", "weather please"))
+	require.NoError(t, delivered.AppendText("messages.assistant.text", "checking the weather"))
+	require.NoError(t, delivered.AppendText("messages.assistant.tool_use", `{"id":"toolu_1"}`))
+	require.NoError(t, delivered.AppendText("messages.tool_result", `{"tool_use_id":"toolu_1"}`))
+
+	// 续轮侧：客户端原样回传，但**省略**了 assistant 的 text 块（只保留 tool_use）。
+	resumed := NewCursorHistoryDigest()
+	require.NoError(t, resumed.AppendText("messages.user.text", "weather please"))
+	require.NoError(t, resumed.AppendText("messages.assistant.tool_use", `{"id":"toolu_1"}`))
+	require.NoError(t, resumed.AppendText("messages.tool_result", `{"tool_use_id":"toolu_1"}`))
+
+	t.Run("全文链不相等_骨架一致", func(t *testing.T) {
+		require.False(t, delivered.Equal(resumed), "全链必须因正文裁剪而不相等（这正是旧的误拒来源）")
+		require.True(t, delivered.SkeletonEqual(resumed), "正文裁剪必须不影响骨架口径")
+		require.Equal(t, 4, delivered.ItemCount())
+		require.Equal(t, 3, delivered.SkeletonItemCount())
+		require.Equal(t, 3, resumed.SkeletonItemCount())
+	})
+
+	t.Run("正文内容改动不影响骨架", func(t *testing.T) {
+		other := NewCursorHistoryDigest()
+		require.NoError(t, other.AppendText("messages.user.text", "weather please"))
+		require.NoError(t, other.AppendText("messages.assistant.text", "完全不同的一段前言"))
+		require.NoError(t, other.AppendText("messages.assistant.tool_use", `{"id":"toolu_1"}`))
+		require.NoError(t, other.AppendText("messages.tool_result", `{"tool_use_id":"toolu_1"}`))
+		require.True(t, delivered.SkeletonEqual(other), "改自己的正文不构成篡改")
+	})
+
+	// 反例组：正文之外的任何一项变化都必须让骨架不相等（防篡改强度不降）。
+	substitutions := []struct {
+		name string
+		item string
+		want string
+	}{
+		{"用户输入改写", "messages.user.text", "weather please (rewritten)"},
+		{"tool_use id 改写", "messages.assistant.tool_use", `{"id":"toolu_2"}`},
+		{"tool_use 参数改写", "messages.assistant.tool_use", `{"id":"toolu_1","input":{"city":"sh"}}`},
+		{"tool_result 内容改写", "messages.tool_result", `{"tool_use_id":"toolu_1","content":"rainy"}`},
+	}
+	for _, sub := range substitutions {
+		t.Run("篡改必拒_"+sub.name, func(t *testing.T) {
+			// 重建：在目标项位置写入篡改值，其余项保持与交付侧一致。
+			rebuilt := NewCursorHistoryDigest()
+			for _, step := range []struct{ item, text string }{
+				{"messages.user.text", "weather please"},
+				{"messages.assistant.text", "checking the weather"},
+				{"messages.assistant.tool_use", `{"id":"toolu_1"}`},
+				{"messages.tool_result", `{"tool_use_id":"toolu_1"}`},
+			} {
+				if step.item == sub.item {
+					require.NoError(t, rebuilt.AppendText(step.item, sub.want))
+					continue
+				}
+				require.NoError(t, rebuilt.AppendText(step.item, step.text))
+			}
+			require.False(t, delivered.SkeletonEqual(rebuilt), "正文之外的内容改动必须被骨架口径拒绝")
+		})
+	}
+
+	t.Run("结构性增删必拒", func(t *testing.T) {
+		// 少一条 tool_result（客户端截断历史）。
+		truncated := NewCursorHistoryDigest()
+		require.NoError(t, truncated.AppendText("messages.user.text", "weather please"))
+		require.NoError(t, truncated.AppendText("messages.assistant.tool_use", `{"id":"toolu_1"}`))
+		require.False(t, delivered.SkeletonEqual(truncated), "少一条非正文项必须拒绝")
+
+		// 多一条用户输入（客户端把失败轮也拼进来）。
+		extra := NewCursorHistoryDigest()
+		require.NoError(t, extra.AppendText("messages.user.text", "weather please"))
+		require.NoError(t, extra.AppendText("messages.user.text", "another question"))
+		require.NoError(t, extra.AppendText("messages.assistant.tool_use", `{"id":"toolu_1"}`))
+		require.NoError(t, extra.AppendText("messages.tool_result", `{"tool_use_id":"toolu_1"}`))
+		require.False(t, delivered.SkeletonEqual(extra), "多一条非正文项必须拒绝")
+	})
+
+	t.Run("Clone 保留骨架状态", func(t *testing.T) {
+		clone := delivered.Clone()
+		require.True(t, clone.SkeletonEqual(delivered))
+		require.Equal(t, delivered.SkeletonItemCount(), clone.SkeletonItemCount())
+		require.NoError(t, clone.AppendText("messages.user.text", "more"))
+		require.False(t, clone.SkeletonEqual(delivered), "推进后的克隆不应再等于原骨架")
+	})
+
+	t.Run("可裁剪项被正确识别", func(t *testing.T) {
+		for _, itemType := range []string{
+			"chat.assistant.text",
+			"messages.assistant.text",
+			"messages.assistant.thinking",
+			"responses.message.assistant",
+			"responses.reasoning",
+			"gemini.model.text",
+		} {
+			require.True(t, cursorDigestPrunableItemType(itemType), "%s 应属可裁剪项", itemType)
+		}
+		for _, itemType := range []string{
+			"chat.user", "chat.assistant.tool_call", "chat.tool_result",
+			"messages.user.text", "messages.assistant.tool_use", "messages.tool_result",
+			"responses.function_call", "responses.function_call_output", "responses.custom_tool_call",
+			"responses.message.user",
+			"gemini.model.function_call", "gemini.user.text", "config.model",
+		} {
+			require.False(t, cursorDigestPrunableItemType(itemType), "%s 不得被视为可裁剪项（防篡改主体）", itemType)
+		}
+	})
 }

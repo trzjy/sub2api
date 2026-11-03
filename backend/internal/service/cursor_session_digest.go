@@ -56,6 +56,59 @@ type CursorHistoryDigest struct {
 	state       [sha256.Size]byte
 	initialized bool
 	items       int
+	// skeletonState / skeletonItems 是**骨架链**：与主链走同一个 Hn 公式、同样的项序，
+	// 只跳过"客户端可裁剪的 assistant 正文"项（见 cursorDigestPrunableItemType）。
+	//
+	// 为什么需要第二条链：交付侧登记的是"我们**实际写出**的正文"，续轮侧只能看到"客户端
+	// **回传**的正文"。这两个集合天然不必相等——
+	//   - Anthropic Messages 语义下 tool_use 轮的 assistant text 块允许省略（模型只发工具
+	//     时没有 text 块），客户端按自己的历史管理策略裁剪或整条丢弃都是合法行为；
+	//   - Responses / Gemini 同形（message / text part 可缺）。
+	// 主链因此会在**正常**请求上恒定差 1 项并拒成 CUR-RES-04（生产实测 17 vs 16）。
+	//
+	// 骨架链把"正文"这一层摘掉后比对：正文之外的一切（用户输入、tool_use 的 id/name/args、
+	// tool_result 的内容、reasoning、项序、项数）仍然是逐字节强校验，防篡改强度不降；正文
+	// 本身归客户端所有，改它等于改客户端自己的历史，不是本站要拦的威胁。
+	skeletonState [sha256.Size]byte
+	skeletonItems int
+	// trace 是**仅用于排查**的项类型序列（按并入顺序）。它不参与链值，也不进入任何
+	// 对客户端的输出；存在只为回答"两侧到底哪一项不同"这个线上问题：
+	// history_mismatch 过去只有计数与哈希前缀，无法区分是正文项、工具项还是结果项错位。
+	// 有上限（cursorDigestTraceLimit），超出即截断并标记，绝不无限增长。
+	trace []string
+}
+
+// cursorDigestTraceLimit 是项类型轨迹的最大保留条数（超出后只追加一个省略标记）。
+const cursorDigestTraceLimit = 96
+
+// cursorDigestPrunableItemType 判定某个历史项是否属于"客户端可裁剪的 assistant 侧产物"。
+//
+// 只认四种协议里 **assistant/model 自己产出、客户端按自己的历史策略可保留可丢弃** 的项：
+//   - 可见正文（text / output_text / text part）；
+//   - 推理段（Anthropic thinking / redacted_thinking、Responses reasoning 条目）。
+//
+// 判定依据是"我们**从不**在交付侧登记它"，因此两侧必然不对称：
+//   - 交付侧 appendCursorBatchAssistantHistory 只登记正文 + 工具调用项，从不登记 thinking /
+//     reasoning（那本来就只在模型可见层，不属于我们写出的可见输出）；
+//   - 续轮侧 cursorAnthropicBlockItem / cursorResponsesItemItem 却会为客户端回传的
+//     thinking 块 / reasoning 条目产出 messages.assistant.thinking、responses.reasoning
+//     —— 客户端回传就多一项，不回传就少一项。
+// 把这几类摘到骨架链之外，才谈得上"同一逻辑会话"。Anthropic 语义下 thinking 块还带
+// signature、客户端重放时常常整段丢弃（不丢会 400），本就更不该参与准入比对。
+//
+// 明确**不**包含：用户输入、tool_use/function_call（含参数）、tool_result/output、
+// system 文本 —— 这些是防篡改的主体，必须留在骨架链里逐字节校验。
+func cursorDigestPrunableItemType(itemType string) bool {
+	switch itemType {
+	case "chat.assistant.text",
+		"messages.assistant.text",
+		"messages.assistant.thinking",
+		"responses.message.assistant",
+		"responses.reasoning",
+		"gemini.model.text":
+		return true
+	}
+	return false
 }
 
 // NewCursorHistoryDigest 返回位于固定起点 H0 的空历史摘要。
@@ -70,6 +123,9 @@ func (d *CursorHistoryDigest) reset() {
 	d.state = cursorDigestH0
 	d.initialized = true
 	d.items = 0
+	d.skeletonState = cursorDigestH0
+	d.skeletonItems = 0
+	d.trace = nil
 }
 
 // ItemCount 返回已进入历史链的逻辑项数。
@@ -105,13 +161,75 @@ func (d *CursorHistoryDigest) Equal(other *CursorHistoryDigest) bool {
 	return d.ItemCount() == other.ItemCount() && d.Sum() == other.Sum()
 }
 
+// SkeletonItemCount 返回骨架链的逻辑项数（不含客户端可裁剪的 assistant 正文项）。
+func (d *CursorHistoryDigest) SkeletonItemCount() int {
+	if d == nil {
+		return 0
+	}
+	return d.skeletonItems
+}
+
+// SkeletonSum 返回骨架链摘要（Hn）。
+func (d *CursorHistoryDigest) SkeletonSum() [sha256.Size]byte {
+	if d == nil || !d.initialized {
+		return cursorDigestH0
+	}
+	return d.skeletonState
+}
+
+// SkeletonHexString 返回骨架链摘要的十六进制（仅用于日志）。
+func (d *CursorHistoryDigest) SkeletonHexString() string {
+	sum := d.SkeletonSum()
+	return hex.EncodeToString(sum[:])
+}
+
+// SkeletonEqual 比较两个摘要的**骨架**（正文无关）部分：项数与链值都必须相等。
+//
+// 这是续轮历史比对的**准入口径**（见 cursorDigestPrunableItemType 的说明）：assistant
+// 可见正文允许客户端在上传历史时裁剪/省略，因此它不参与准入；正文之外的每一项（用户
+// 输入、工具调用 id/name/args、工具结果、reasoning、system、项序）仍逐字节强校验。
+func (d *CursorHistoryDigest) SkeletonEqual(other *CursorHistoryDigest) bool {
+	if d == nil || other == nil {
+		return d == other
+	}
+	return d.SkeletonItemCount() == other.SkeletonItemCount() && d.SkeletonSum() == other.SkeletonSum()
+}
+
 // Clone 返回当前状态的深拷贝，便于在不推进原链的前提下试算前缀摘要。
 func (d *CursorHistoryDigest) Clone() *CursorHistoryDigest {
 	if d == nil {
 		return nil
 	}
-	c := &CursorHistoryDigest{state: d.Sum(), initialized: true, items: d.ItemCount()}
+	c := &CursorHistoryDigest{
+		state:         d.Sum(),
+		initialized:   true,
+		items:         d.ItemCount(),
+		skeletonState: d.SkeletonSum(),
+		skeletonItems: d.SkeletonItemCount(),
+	}
+	if len(d.trace) > 0 {
+		c.trace = append([]string(nil), d.trace...)
+	}
 	return c
+}
+
+// Trace 返回项类型序列的副本（仅用于日志排查；不含任何正文）。
+func (d *CursorHistoryDigest) Trace() []string {
+	if d == nil || len(d.trace) == 0 {
+		return nil
+	}
+	return append([]string(nil), d.trace...)
+}
+
+// TraceString 把项类型序列拼成一行（逗号分隔），空轨迹返回空串。
+//
+// 只输出项类型名（如 messages.assistant.text / messages.assistant.tool_use），
+// 类型名本身是固定枚举，不含用户内容，可作为日志安全字段。
+func (d *CursorHistoryDigest) TraceString() string {
+	if d == nil || len(d.trace) == 0 {
+		return ""
+	}
+	return strings.Join(d.trace, ",")
 }
 
 // ValidateCursorDigestItemType 校验项类型是否是可安全拼入链的类型命名空间字节串。
@@ -150,8 +268,10 @@ func (d *CursorHistoryDigest) AppendItem(itemType string, canonical []byte) erro
 	}
 	if !d.initialized {
 		d.state = cursorDigestH0
+		d.skeletonState = cursorDigestH0
 		d.initialized = true
 		d.items = 0
+		d.skeletonItems = 0
 	}
 	var length [cursorDigestLengthWidth]byte
 	n := uint64(len(canonical))
@@ -168,6 +288,25 @@ func (d *CursorHistoryDigest) AppendItem(itemType string, canonical []byte) erro
 	copy(next[:], h.Sum(nil))
 	d.state = next
 	d.items++
+	// 骨架链：同一公式、同一 length 编码，但**跳过**客户端可裁剪的 assistant 正文项。
+	// 被跳过的项既不推进骨架链、也不计入骨架项数，因此"客户端删掉一段正文"在骨架
+	// 口径下不可见，而"删掉/改写一个 tool_use 或一条结果"仍然必然不相等。
+	if !cursorDigestPrunableItemType(itemType) {
+		sh := sha256.New()
+		sh.Write(d.skeletonState[:])
+		sh.Write([]byte(itemType))
+		sh.Write(length[:])
+		sh.Write(canonical)
+		var snext [sha256.Size]byte
+		copy(snext[:], sh.Sum(nil))
+		d.skeletonState = snext
+		d.skeletonItems++
+	}
+	if len(d.trace) < cursorDigestTraceLimit {
+		d.trace = append(d.trace, itemType)
+	} else if len(d.trace) == cursorDigestTraceLimit {
+		d.trace = append(d.trace, "...")
+	}
 	return nil
 }
 
