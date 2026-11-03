@@ -33,6 +33,8 @@ export default {
     priorityPlaceholder: 'Lower value = higher priority, default 1',
     priorityHint: 'Lower value = higher priority, same scale as account priority. Accounts pulled by this key inherit it (daily-quota keys take a small value, monthly-total keys take a large value as fallback).',
     priorityInvalid: 'Priority must be an integer greater than or equal to 1',
+    prioritySaved: 'Priority set to {priority}; {count} account(s) under this key synced',
+    prioritySaveError: 'Failed to update priority',
     notes: 'Notes',
     notesPlaceholder: 'Optional notes',
     expiryUnknown: 'Expiry time unknown',

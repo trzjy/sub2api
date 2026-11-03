@@ -33,6 +33,8 @@ export default {
     priorityPlaceholder: '数值越小越优先，默认 1',
     priorityHint: '数值越小越优先，与账号优先级同一口径；该码名下账号的优先级跟随此值（日限额激活码取小值优先消耗，月总限额激活码取大值兜底）',
     priorityInvalid: '优先级必须是大于等于 1 的整数',
+    prioritySaved: '优先级已改为 {priority}，名下 {count} 个账号已同步',
+    prioritySaveError: '更新优先级失败',
     notes: '备注',
     notesPlaceholder: '可选备注',
     expiryUnknown: '到期时间未知',

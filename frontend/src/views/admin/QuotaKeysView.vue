@@ -65,10 +65,16 @@
             </span>
           </template>
 
+          <!-- 优先级：复用号池（账号管理）同一套优先级编辑控件 PriorityStepper，
+               悬停出现 [−]/[+]，点数字可就地输入。改动经后端同一事务同步到该码
+               名下所有未删除账号（用户裁定 2026-11-03）。 -->
           <template #cell-priority="{ row }">
-            <span class="text-sm tabular-nums text-gray-900 dark:text-gray-100" :title="t('admin.quotaKeys.priorityHint')">
-              {{ row.priority ?? 1 }}
-            </span>
+            <PriorityStepper
+              test-id="quota-key-priority"
+              :value="row.priority ?? 1"
+              :save="(next: number) => savePriority(row, next)"
+              @error="(err: unknown) => appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.prioritySaveError')))"
+            />
           </template>
 
           <template #cell-account_count="{ row }">
@@ -509,6 +515,7 @@ import Icon from '@/components/icons/Icon.vue'
 import AutoEntryConfigModal from '@/components/quotaKeys/AutoEntryConfigModal.vue'
 import QuotaKeyUsageCell from '@/components/quotaKeys/QuotaKeyUsageCell.vue'
 import Pagination from '@/components/common/Pagination.vue'
+import PriorityStepper from '@/components/common/PriorityStepper.vue'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -741,6 +748,18 @@ async function handleDetailPageChange(nextPage: number) {
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.detailLoadError')))
   }
+}
+
+// --- 优先级编辑 -----------------------------------------------------------
+// 交互由公共组件 PriorityStepper 提供（与号池账号优先级同一实现），这里只负责落库：
+// 只发 priority 一个字段，后端在同一事务内把该码名下未删除账号的 priority 一并改写。
+async function savePriority(row: QuotaKey, next: number) {
+  const updated = await adminAPI.quotaKeys.update(row.id, { priority: next })
+  const synced = updated?.account_count ?? row.account_count ?? 0
+  appStore.showSuccess(
+    t('admin.quotaKeys.prioritySaved', { priority: next, count: synced })
+  )
+  await load()
 }
 
 async function handleRefresh(row: QuotaKey) {
