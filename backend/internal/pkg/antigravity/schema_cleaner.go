@@ -426,7 +426,8 @@ func cleanJSONSchemaRecursive(value any) any {
 			}
 		}
 
-		// 9. Enum 值强制转字符串
+		// 9. Enum 值强制转字符串（注意：这一步可能把 type 改写成 string，
+		// 所以 items 的合法性校验必须放在它之后，见函数出口处的第 10 步）
 		if enumVals, ok := schemaMap["enum"].([]any); ok {
 			hasNonString := false
 			for i, val := range enumVals {
@@ -442,6 +443,22 @@ func cleanJSONSchemaRecursive(value any) any {
 			// If we mandated string values, we must ensure type is string
 			if hasNonString {
 				schemaMap["type"] = "string"
+			}
+		}
+
+		// 10. [CRITICAL] items 只允许出现在 type == ARRAY 的节点上
+		// Gemini 的 Schema.items 是带谓词约束的字段（$type == Type.ARRAY），
+		// 一旦出现在 object / string 节点上，整个请求会被 400 拒掉：
+		//   GenerateContentRequest.tools[0].function_declarations[N].parameters
+		//     .properties[xxx].items.items: field predicate failed: $type == Type.ARRAY
+		// 这个组合在真实流量里会自然产生：上游客户端（Claude Code / MCP）给的
+		// tool schema 里，同一个节点可能同时带 properties 和 items（anyOf 合并后
+		// 残留 items、或 enum 非字符串被强制改成 string），前面的类型推断会把 type
+		// 定为 object / string，items 却留了下来。
+		// 必须放在所有会改写 type 的步骤（含上面第 9 步的 enum 强制 string）之后。
+		if _, hasItems := schemaMap["items"]; hasItems {
+			if t, _ := schemaMap["type"].(string); !strings.EqualFold(t, "array") {
+				delete(schemaMap, "items")
 			}
 		}
 	}

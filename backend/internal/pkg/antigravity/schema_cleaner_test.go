@@ -240,3 +240,70 @@ func TestCleanJSONSchema_EmptyPrefixItems(t *testing.T) {
 	require.True(t, ok, "empty_tuple.items must be an object")
 	assert.Equal(t, "string", emptyTupleItems["type"])
 }
+
+// Gemini 的 Schema.items 带谓词约束（$type == Type.ARRAY），出现在非 array 节点上
+// 会让整个请求 400，报错形如：
+//
+//	...parameters.properties[functions].items.items: field predicate failed: $type == Type.ARRAY
+//
+// 生产上 Claude Code 的真实 tool schema 就会触发（对象节点同时带 properties 和 items）。
+func TestCleanJSONSchema_DropsItemsOnNonArrayNodes(t *testing.T) {
+	input := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			// 复刻线上报错路径：properties.functions 是 object 却带 items，
+			// 且它的 items 本身也带 items。
+			"functions": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+				},
+				"items": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "string",
+					},
+				},
+			},
+			// 合法数组必须保留 items
+			"tags": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "string"},
+			},
+		},
+	}
+
+	cleaned := CleanJSONSchema(input)
+	require.NotNil(t, cleaned)
+
+	props, ok := cleaned["properties"].(map[string]any)
+	require.True(t, ok)
+
+	functions, ok := props["functions"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", functions["type"])
+	_, hasItems := functions["items"]
+	assert.False(t, hasItems, "object 节点的 items 必须被删除，否则上游 400")
+
+	tags, ok := props["tags"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "array", tags["type"])
+	tagsItems, ok := tags["items"].(map[string]any)
+	require.True(t, ok, "array 节点的 items 必须保留")
+	assert.Equal(t, "string", tagsItems["type"])
+}
+
+// enum 值非字符串时第 9 步会把 type 强改成 string，此时残留的 items 也要被清掉。
+func TestCleanJSONSchema_DropsItemsAfterEnumForcesString(t *testing.T) {
+	input := map[string]any{
+		"type":  "object",
+		"enum":  []any{1, 2},
+		"items": map[string]any{"type": "string"},
+	}
+
+	cleaned := CleanJSONSchema(input)
+	require.NotNil(t, cleaned)
+	assert.Equal(t, "string", cleaned["type"])
+	_, hasItems := cleaned["items"]
+	assert.False(t, hasItems, "type 被 enum 规则改成 string 后，items 必须删除")
+}
