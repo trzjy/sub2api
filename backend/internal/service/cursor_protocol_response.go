@@ -42,6 +42,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -2325,6 +2326,13 @@ func isJSONNumberLiteral(s string) bool {
 // 类型驱动的最小结构变换。根对象整体走 OBJECT 分支（复用 retypeValue）。
 // 任一不可判定 → 返回 ErrCursorProtocol 包裹的结构化原因。
 func cursorRetypeMcpArgs(argsJSON, schemaJSON []byte) ([]byte, error) {
+	return cursorRetypeMcpArgsOptions(argsJSON, schemaJSON, true)
+}
+
+// cursorRetypeMcpArgsOptions 是 cursorRetypeMcpArgs 的可配置版本：enforceRequired 为
+// false 时不消费根 schema 的 required（仅用于本站合成的降级壳，见
+// cursorIsSyntheticDowngradeShell）。形状投影与其余校验完全一致。
+func cursorRetypeMcpArgsOptions(argsJSON, schemaJSON []byte, enforceRequired bool) ([]byte, error) {
 	var args any
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
 		return nil, fmt.Errorf("%w: parse mcp args: %v", ErrCursorProtocol, err)
@@ -2335,6 +2343,10 @@ func cursorRetypeMcpArgs(argsJSON, schemaJSON []byte) ([]byte, error) {
 	}
 	if root == nil {
 		return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
+	}
+	if !enforceRequired {
+		// 降级壳：required 是本站为引导模型而编的，不构成"上游参数残缺"的依据。
+		delete(root, "required")
 	}
 	// 根对象必须声明为 object 类型，否则无结构可投影（§3.3 形态校验）。
 	// type 缺省（如空 schema "{}"）→ 无 type 声明，不存在 array 投影，原样返回。
@@ -2376,7 +2388,13 @@ func cursorRetypeArgsByToolDefs(id, name, argsJSON string, defs [][]byte, onFail
 		}
 		return "", cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
 	}
-	retyped, err := cursorRetypeMcpArgs([]byte(argsJSON), schemaJSON)
+	// 本站自己合成的降级壳（custom/freeform 与 tool_search 降级为普通 function 时，
+	// 由 apicompat 编出来的 {"input":...} / {"query":...} 壳）：壳里的 required 是
+	// 我们为引导模型而编的，不是客户端真实参数契约，上游模型本来就看不到原始形态，
+	// 拿这个壳去判"上游参数残缺"只会把正常 custom 调用一律打成 missing_required。
+	// 该路径不做必填校验（其余形状投影照旧），见 cursorIsSyntheticDowngradeShell。
+	enforceRequired := !cursorIsSyntheticDowngradeShell(schemaJSON)
+	retyped, err := cursorRetypeMcpArgsOptions([]byte(argsJSON), schemaJSON, enforceRequired)
 	if err != nil {
 		reason := cursorRetypeErrReason("unknown")
 		var re *cursorRetypeError
@@ -2390,6 +2408,35 @@ func cursorRetypeArgsByToolDefs(id, name, argsJSON string, defs [][]byte, onFail
 	}
 	return string(retyped), nil
 }
+
+// cursorIsSyntheticDowngradeShell 报告归一化后的 schema 是否等于本站合成的降级壳。
+//
+// 判据是归一化字节相等——壳是常量，客户端真实声明的 schema 不可能与之逐字节相同
+// （normalize 是确定性函数，同一输入必得同一输出）。命中即说明该工具在 chat 侧是
+// 本端降级造出来的，required 不可作为"上游参数残缺"的依据。
+func cursorIsSyntheticDowngradeShell(normalizedSchema []byte) bool {
+	if len(normalizedSchema) == 0 {
+		return false
+	}
+	cursorSyntheticShellsOnce.Do(func() {
+		cursorSyntheticShells = make(map[string]struct{}, 2)
+		for _, raw := range []string{
+			apicompat.CustomToolInputSchema,
+			apicompat.ToolSearchProxySchema,
+		} {
+			if n := cursorNormalizeIndexedSchema("", []byte(raw)); len(n) > 0 {
+				cursorSyntheticShells[string(n)] = struct{}{}
+			}
+		}
+	})
+	_, ok := cursorSyntheticShells[string(normalizedSchema)]
+	return ok
+}
+
+var (
+	cursorSyntheticShellsOnce sync.Once
+	cursorSyntheticShells     map[string]struct{}
+)
 
 // retypeValue 递归地按 schema 还原单个 value（方案 §3.3 算法）。
 func retypeValue(value any, schema map[string]any) (any, error) {

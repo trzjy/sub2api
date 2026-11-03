@@ -1196,7 +1196,15 @@ func chatContentFromSingleResponsesPart(partType string, part map[string]json.Ra
 // chat 协议无法表达 custom 工具的自由文本输入（及其 grammar 约束），退化为单一
 // input 字符串参数；回程时再从 arguments 的 input 字段还原（见
 // extractCustomToolCallInput）。
-const customToolInputSchema = `{"type":"object","properties":{"input":{"type":"string","description":"The raw input for this tool, passed through verbatim."}},"required":["input"]}`
+//
+// 注意：这是**本站自己编的降级壳**，不是客户端的真实参数契约。上游模型看不到
+// custom 工具的原始自由文本协议，只会照着这个壳凑参数（也常常直接给 {"input": ...}
+// 之外的空对象）。因此下游按 schema 校验"必填"时必须把这类合成壳排除在外，否则
+// 一批正常的 custom 工具调用会被判成"参数残缺"——见 CustomToolInputSchema。
+const CustomToolInputSchema = `{"type":"object","properties":{"input":{"type":"string","description":"The raw input for this tool, passed through verbatim."}},"required":["input"]}`
+
+// customToolInputSchema 保留旧名（包内既有引用与测试沿用），值同 CustomToolInputSchema。
+const customToolInputSchema = CustomToolInputSchema
 
 func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 	// 顶层 function/custom 工具名集合：namespace 子工具摊平后与其撞名时，chat
@@ -1273,9 +1281,18 @@ func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 	return out, nil
 }
 
+// ToolSearchProxyName 是 tool_search 服务端工具降级后的 function 工具名（导出供下游
+// 识别本站合成的降级壳，见 CustomToolInputSchema 的同理说明）。
+const ToolSearchProxyName = toolSearchProxyName
+
 // toolSearchProxyName 是 tool_search 服务端工具降级后的 function 工具名。模型对
 // 它的调用以同名 function_call 原样回传，由 codex 端路由。
 const toolSearchProxyName = "tool_search"
+
+// ToolSearchProxySchema 是 tool_search 降级壳的参数 schema（本站合成，非客户端契约）。
+// 与 CustomToolInputSchema 同理：其中的 required 是本端为引导模型而编的，下游不得
+// 拿它去判"上游给的参数残缺"。
+const ToolSearchProxySchema = toolSearchProxySchema
 
 const toolSearchProxySchema = `{"type":"object","properties":{"query":{"type":"string","description":"Search query for tools or connectors to load."},"limit":{"type":"integer","description":"Maximum number of tool groups to return."}},"required":["query"]}`
 
