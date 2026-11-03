@@ -3548,6 +3548,17 @@ func mapGeminiFinishReasonToClaudeStopReason(finishReason string) string {
 	}
 }
 
+// ConvertClaudeMessagesToGeminiGenerateContent 把 Anthropic Messages 形状的请求体
+// 转成 Gemini generateContent 形状，供 Anthropic 入口在转发给 Antigravity 账号前调用。
+//
+// 为什么需要单独导出：Antigravity 的 Gemini 转发链路（ForwardGemini）只做
+// 身份提示词注入 / schema 清理 / v1internal 包装，它假定入参已经是 Gemini 形状。
+// 直接把 /v1/messages 的原始请求体塞进去，上游会收到 {"request":{"messages":…,
+// "max_tokens":…}} 并返回 400 "Unknown name \"max_tokens\" at 'request'"。
+func ConvertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
+	return convertClaudeMessagesToGeminiGenerateContent(body)
+}
+
 func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {

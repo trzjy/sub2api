@@ -562,6 +562,16 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 			requestCtx = c.Request.Context()
 			if account.Platform == service.PlatformAntigravity {
+				// /v1/messages 入站是 Anthropic 形状，而 Antigravity 的 Gemini 转发链路
+				// 只做身份注入 / schema 清理 / v1internal 包装，入参必须是 Gemini 形状。
+				// 不转换会把 messages / max_tokens 原样包进 request 字段，上游返回
+				// 400 "Unknown name \"max_tokens\" at 'request'"。
+				antigravityBody := body
+				if geminiBody, convErr := service.ConvertClaudeMessagesToGeminiGenerateContent(body); convErr != nil {
+					reqLog.Warn("gateway.antigravity_gemini_body_convert_failed", zap.Error(convErr))
+				} else {
+					antigravityBody = geminiBody
+				}
 				result, err = h.antigravityGatewayService.ForwardGemini(
 					requestCtx,
 					c,
@@ -569,7 +579,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					reqModel,
 					"generateContent",
 					reqStream,
-					body,
+					antigravityBody,
 					hasBoundSession,
 					service.WithForwardGeminiSession(derefGroupID(apiKey.GroupID), sessionKey),
 				)

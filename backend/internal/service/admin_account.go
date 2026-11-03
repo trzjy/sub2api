@@ -825,6 +825,11 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err != nil {
 		return nil, err
 	}
+	// Antigravity 账号默认开启混合调度：mixed_scheduling 是聚合平台账号进入
+	// gemini / claude 分组候选池的硬门（见 gateway_scheduling 的
+	// IsMixedSchedulingEnabled 判定）。缺省关闭会让账号"配了模型却永远选不中"，
+	// 在分组侧表现为「该分组暂无可用账号」。显式传 false 时尊重调用方意图。
+	accountExtra = applyAntigravityDefaultMixedScheduling(input.Platform, accountExtra)
 	if err := ValidateUpstreamRequestIDHeaderExtra(accountExtra); err != nil {
 		return nil, err
 	}
