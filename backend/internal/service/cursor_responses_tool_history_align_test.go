@@ -13,6 +13,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -499,4 +500,50 @@ func TestCursorResumeOmittedHistoryValidResultTypeStillSucceeds(t *testing.T) {
 	require.NoError(t, err, "省略历史路径下，结果类型正确的 custom 续轮必须成功（不得误伤合法请求）")
 	require.Equal(t, 1, fixture.intake.callCount(), "真实结果必须整批写入一次")
 	require.Equal(t, []string{"call_1"}, []string{fixture.intake.results[0][0].CallID})
+}
+
+// TestCursorResumeCustomToolWrappedInputAligned 是生产 history_first_divergence 直接
+// 定位到的缺陷的回归用例：
+//
+//	history_first_divergence: idx=1 stored=responses.custom_tool_call(d54a7d85)
+//	                               request=responses.custom_tool_call(6d8ec87d)
+//	protocol=responses, model=gpt-6.1-sol
+//
+// 根因：模型按降级 function 的形状输出 `{"input":"<自由文本>"}` 作为 arguments。
+// 写出侧 apicompat 用 extractCustomToolCallInput 取出**自由文本**放进 custom_tool_call
+// 的 input 字段（客户端收到/回传的就是这段文本）；而交付侧历史登记却拿**原始
+// arguments 包**参与摘要 → 同一逻辑调用两侧 canonical 不同 → 续轮必拒。
+//
+// 本用例断言：包裹形态与裸文本形态（客户端回传的 input）必须得到同一摘要。
+func TestCursorResumeCustomToolWrappedInputAligned(t *testing.T) {
+	const wrappedArgs = `{"input":"*** Begin Patch\n*** End Patch"}`
+	const plainInput = "*** Begin Patch\n*** End Patch"
+
+	fixture := newCursorResumeFixture(t, CursorResumeProtocolResponses, []byte(cursorAlignCustomFirst), "cursor-test-model",
+		[]cursorToolCallCapture{{ID: "call_1", Name: "exec", ArgsJSON: wrappedArgs}},
+		"mc-1", "resp_1")
+
+	// 客户端回传的是 custom_tool_call 的 input（自由文本，无包裹）。
+	body := `{
+  "model": "cursor-test-model",
+  "input": [
+    ` + cursorAlignResponsesUserMsg + `,
+    {"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"*** Begin Patch\n*** End Patch"},
+    {"type":"custom_tool_call_output","call_id":"call_1","output":"ran"}
+  ],
+  "tools": [{"type":"custom","name":"exec","description":"freeform exec"}]
+}`
+	_, err := fixture.resume(t, CursorResumeProtocolResponses, []byte(body), false)
+	require.NoError(t, err, "模型输出 {\"input\":...} 包裹形态时，交付侧必须按抽取后的自由文本登记")
+	require.Equal(t, 1, fixture.intake.callCount())
+
+	// 反例：客户端回传的 input 与交付侧抽取结果不同 → 必须拒绝（防篡改不降）。
+	other := newCursorResumeFixture(t, CursorResumeProtocolResponses, []byte(cursorAlignCustomFirst), "cursor-test-model",
+		[]cursorToolCallCapture{{ID: "call_1", Name: "exec", ArgsJSON: wrappedArgs}},
+		"mc-1", "resp_1")
+	tampered := strings.Replace(body, "*** Begin Patch\\n*** End Patch", "*** Begin Patch\\n*** EVIL *** End Patch", 1)
+	_, err = other.resume(t, CursorResumeProtocolResponses, []byte(tampered), false)
+	require.Error(t, err, "input 被改必须得到不同摘要并拒绝")
+	require.Equal(t, 0, other.intake.callCount())
+	_ = plainInput
 }

@@ -8050,7 +8050,15 @@ func appendCursorBatchAssistantHistory(
 			// （cursorResponsesItemItem）同源，保证两侧摘要逐字节相等。语义从实际交付
 			// 捕获 + 首轮工具元数据派生（apicompat 同源判定），与 writer 写出侧一致。
 			dt := cursorResponsesDeliveredToolCall(name, delegations.responsesTools)
-			canonical, err := cursorResponsesToolCallHistoryCanonical(dt.Kind, call, dt.Name, dt.Namespace, args)
+			// custom 工具：客户端收到/回传的是**抽取后的自由文本 input**（custom_tool_call
+			// 项的 input 字段），不是原始 arguments 包 {"input":"..."}。必须用与写出侧
+			// 完全相同的抽取结果登记，否则两侧必然不同——生产实测该项内容差异，已由
+			// history_first_divergence 定位（responses.custom_tool_call，idx=1/2）。
+			payload := args
+			if dt.Kind == "custom_tool_call" {
+				payload = apicompat.ExtractCustomToolCallInput(args)
+			}
+			canonical, err := cursorResponsesToolCallHistoryCanonical(dt.Kind, call, dt.Name, dt.Namespace, payload)
 			if err != nil {
 				return err
 			}

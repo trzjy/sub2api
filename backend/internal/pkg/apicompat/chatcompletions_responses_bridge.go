@@ -1428,6 +1428,16 @@ func responsesToolChoiceToChatToolChoice(raw json.RawMessage, declared map[strin
 // extractCustomToolCallInput 从降级 function 调用的 arguments 中还原 custom 工具的
 // 自由文本输入：优先取 {"input": "..."} 的 input 字段；模型未按 schema 输出时原样
 // 回传，交由客户端校验、模型重试。
+//
+// ExtractCustomToolCallInput 是对外导出版本：服务层登记历史摘要时必须用**与客户端实际
+// 收到的同一段文本**（custom_tool_call 项的 input 就是这个抽取结果），否则交付侧登记
+// 原始 arguments、客户端回传抽取后的 input，两侧必然不同（生产实测 responses 的
+// custom_tool_call 项内容差异，history_first_divergence 已定位到该项）。
+func ExtractCustomToolCallInput(arguments string) string {
+	return extractCustomToolCallInput(arguments)
+}
+
+// extractCustomToolCallInput 见 ExtractCustomToolCallInput 的说明。
 func extractCustomToolCallInput(arguments string) string {
 	trimmed := strings.TrimSpace(arguments)
 	if trimmed == "" {
