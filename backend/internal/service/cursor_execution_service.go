@@ -183,6 +183,22 @@ type CursorExecutionService struct {
 	accountExhaustedHandler func(ctx context.Context, accountID int64, reason string)
 }
 
+// cursorWaitingToolsIdleTimeout 是 waiting_tools 状态允许的最长静默时间（方案 §2.5）。
+//
+// 交付完整工具批后，会话停在 waiting_tools 等客户端续轮；客户端按 esc 中断、直接退出、
+// 或根本没打算续轮时，会话既等不到真实终态也等不到取消，用户槽/账号槽与余额预留会
+// 一直被持有（§25.4 资源跟着会话走）。生产实证（2026-11-04）：3 个账号槽挂死 → 该账号
+// 对**新**请求持续表现为"并发满" → 粘性会话又不换号 → 整条链路每 120 秒撞一次 429，
+// 直到 Redis 侧 concurrency_slot_ttl（30 分钟）被动清理才恢复。
+//
+// 到期且仍处于 waiting_tools、本批结果仍未被消费（pending.consumed == false）时，走
+// **同一个**唯一 finalizer 收尾（reason=waiting_tools_idle），结算口径不变：没有
+// TurnEnded 就照旧 session_settle_skipped，不伪造 usage。
+//
+// 取值 120 秒来自用户 2026-11-01 裁定 B（"等待时长取 120 秒"）。它与 180 秒总期限是
+// 两个独立条件、取先到者；后续到达的续轮按既有 session_finished 拒绝（CUR-RES-03）。
+const cursorWaitingToolsIdleTimeout = 120 * time.Second
+
 // SetAccountExhaustedHandler 注入"账号额度耗尽/限流"回调（与 SetHTTPResponseOwnerBinder 同型）。
 //
 // 未注入时安全 no-op（已通过 nil 守卫）。回调报错（含 panic）只记 Warn，绝不改变
@@ -2923,6 +2939,14 @@ type cursorSessionRecord struct {
 	// httpAttachStop 停止当前 HTTP 附着期取消回调；attached 表示是否有 HTTP 附着。
 	httpAttachStop func() bool
 	attached       bool
+	// waitingIdleTimer 是 waiting_tools 空闲释放计时器（§2.5，用户 2026-11-01 裁定 B）。
+	//
+	// 交付完整工具批后会话停在 waiting_tools 等客户端续轮；客户端按 esc 中断或退出时
+	// 无人续轮，会话既等不到真实终态也等不到取消，用户槽/账号槽与余额预留会一直被持有
+	// （2026-11-04 生产实证：3 个槽挂死 → 该账号每 2 分钟撞一次 429）。
+	// 到期且 pending 仍未消费即走唯一 finalizer（reason=waiting_tools_idle）。
+	// 全部读写都在 record.mu 下。
+	waitingIdleTimer *time.Timer
 	// owner 是会话表的唯一所有者（finalizer/结算入口），只在取消回调里使用。
 	owner *CursorExecutionService
 	// unavailable 标记会话在"建表后、绑定 owner 前"被 Stop 作废（§25.17.7 A09 登记空隙）。
@@ -4566,6 +4590,55 @@ func (s *CursorExecutionService) adoptHandover(ctx context.Context, record *curs
 	return nil
 }
 
+// armWaitingToolsIdleTimer 在会话进入 waiting_tools 时启动一次性空闲释放计时器（**必须持 record.mu 调用**）。
+//
+// 同一时刻只保留一个计时器：重复进入 waiting_tools 先停旧的再起新的，避免上一批的
+// 计时器把刚接管的会话误判为"无人续轮"。
+func (s *CursorExecutionService) armWaitingToolsIdleTimer(record *cursorSessionRecord) {
+	if s == nil || record == nil {
+		return
+	}
+	stopWaitingToolsIdleTimerLocked(record)
+	record.waitingIdleTimer = time.AfterFunc(cursorWaitingToolsIdleTimeout, func() {
+		s.onWaitingToolsIdle(record)
+	})
+}
+
+// stopWaitingToolsIdleTimerLocked 停止空闲释放计时器（**必须持 record.mu 调用**；幂等）。
+func stopWaitingToolsIdleTimerLocked(record *cursorSessionRecord) {
+	if record == nil || record.waitingIdleTimer == nil {
+		return
+	}
+	record.waitingIdleTimer.Stop()
+	record.waitingIdleTimer = nil
+}
+
+// onWaitingToolsIdle 是空闲释放计时器的到期回调。
+//
+// 到期只代表"可能没人续轮了"，是否真的终结由 finalizer 的 precond 在 record.mu 下
+// 原子复核：客户端恰好在此刻续轮（state 已回 running / pending 已消费）则放弃，
+// 绝不误杀正在续跑的会话。
+func (s *CursorExecutionService) onWaitingToolsIdle(record *cursorSessionRecord) {
+	if s == nil || record == nil {
+		return
+	}
+	record.mu.Lock()
+	record.waitingIdleTimer = nil
+	sessionID := record.id
+	record.mu.Unlock()
+
+	released := s.finishCursorSessionIf(record, "waiting_tools_idle", func() bool {
+		return record.state == cursorSessionWaitingTools &&
+			record.pending != nil && !record.pending.consumed
+	})
+	if released {
+		cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_waiting_tools_idle_released",
+			record.spec.requestedModel,
+			zap.String("session_id", sessionID),
+			zap.String("idle_timeout", cursorWaitingToolsIdleTimeout.String()))
+	}
+}
+
 // finishCursorSession 是**唯一 finalizer**（§25.4 末段）。
 //
 // 固定顺序：停止接新结果 → 关闭原生流/取消读写 → 已获完整真实 usage 则提交唯一结算
@@ -4601,6 +4674,8 @@ func (s *CursorExecutionService) finishCursorSessionIf(record *cursorSessionReco
 	record.finishing = true
 	record.state = cursorSessionFinalizing
 	record.interruptReason = reason
+	// 已经进入 finalizer：空闲释放计时器没有意义，先停掉避免重复进入。
+	stopWaitingToolsIdleTimerLocked(record)
 	record.mu.Unlock()
 
 	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_finalize_begin", record.spec.requestedModel,
@@ -6726,6 +6801,8 @@ func (s *cursorSessionStore) beginResumeTakeover(
 	}
 	record.pending.consumed = true
 	record.state = cursorSessionRunning
+	// 客户端已续轮：作废 waiting_tools 空闲计时器，不得在续跑期间被回收。
+	stopWaitingToolsIdleTimerLocked(record)
 	record.resumeCount++
 	record.attached = true
 	if httpCtx != nil {
@@ -8064,6 +8141,9 @@ func (s *CursorExecutionService) commitDeliveredBatchState(
 		}
 	}
 	record.state = cursorSessionWaitingTools
+	// §2.5：交付完整工具批后若客户端不续轮，会话会一直持有用户槽/账号槽与余额预留。
+	// 进入 waiting_tools 即起表，到期且本批结果仍未消费即走唯一 finalizer 归还。
+	s.armWaitingToolsIdleTimer(record)
 	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_batch_delivered", record.spec.requestedModel,
 		zap.String("session_id", record.id),
 		zap.String("batch_id", prepared.batchID),

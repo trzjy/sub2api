@@ -386,7 +386,21 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								}
 							}
 
-							if stickyCacheMissReason == "" {
+						if stickyCacheMissReason == "" {
+							// 槽位已满（stickyAccount 是当前命中账号，slot 抢不到走到这里）。
+							//
+							// Cursor 平台：**直接换号，不给等待计划**。理由：
+							//  1. Cursor 的用户槽/账号槽跟着会话走（§25.4），会话在客户端按 esc
+							//     中断后要等 waiting_tools 空闲释放（§2.5，120 秒）或 Redis 侧槽 TTL
+							//     （30 分钟）才归还，期间干等只会把整条链路拖成每 2 分钟一次 429
+							//     （2026-11-04 生产实证）；
+							//  2. Cursor 粘性的收益仅"新会话尽量复用同一账号"——真正的续轮是在
+							//     内存会话表里按 call_id 命中的，不依赖这次选号，换号不会打断会话；
+							//  3. 池内同组还有大量空闲账号，让它们闲着而请求等死是最差解。
+							// 其他平台保持既有等待语义（会话亲和 / 上游 prompt cache 收益更确定）。
+							if shouldSwitchAccountOnStickySlotFull(stickyAccount) {
+								stickyCacheMissReason = "slot_full"
+							} else {
 								waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
 								if waitingCount < cfg.StickySessionMaxWaiting {
 									// 会话数量限制检查（等待计划也需要占用会话配额）
@@ -408,6 +422,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 									stickyCacheMissReason = "wait_queue_full"
 								}
 							}
+						}
 							// 粘性账号槽位满且等待队列已满，继续使用负载感知选择
 						} else if !gatePass {
 							stickyCacheMissReason = "gate_check"
@@ -793,6 +808,16 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		})
 	}
 	return nil, ErrNoAvailableAccounts
+}
+
+// shouldSwitchAccountOnStickySlotFull 报告粘性账号槽位已满时是否应**直接换号**而不是原地等待。
+//
+// 只有 Cursor 供给换号：它的并发槽跟着会话走（§25.4），客户端中断后要等 waiting_tools
+// 空闲释放（§2.5，120 秒）或 Redis 槽 TTL（30 分钟）才归还；而 Cursor 的续轮是在内存
+// 会话表里按 call_id 命中，不依赖本次选号，换号不会打断会话。
+// 其他平台保持既有等待语义：会话亲和与上游 prompt cache 的收益更确定，宁可等一会儿。
+func shouldSwitchAccountOnStickySlotFull(account *Account) bool {
+	return account != nil && account.Platform == PlatformCursor
 }
 
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
