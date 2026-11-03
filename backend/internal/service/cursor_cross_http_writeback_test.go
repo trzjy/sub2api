@@ -186,7 +186,7 @@ func decodeWritebackStream(t *testing.T, wire []byte) []cursorWritebackDecoded {
 func TestCursorWritebackFourLayerEncoding(t *testing.T) {
 	// 成功 + 文本 + 结构化。
 	okPayload := cursorEncodeMcpToolResult(7, []byte("exec-id-7"), "call_1",
-		[]string{"sunny, 25C"}, []byte(`{"temp":25}`), false)
+		[]string{"sunny, 25C"}, nil, []byte(`{"temp":25}`), false)
 	ok := decodeWritebackExec(t, okPayload)
 	require.False(t, ok.isError, "成功结果不得走错误分支")
 	require.EqualValues(t, 7, ok.execID, "必须原样带回原 exec_id")
@@ -196,7 +196,7 @@ func TestCursorWritebackFourLayerEncoding(t *testing.T) {
 
 	// is_error：必须走 McpResult.f2（错误语义），绝不把失败写成成功。
 	errPayload := cursorEncodeMcpToolResult(9, []byte("exec-id-9"), "call_2",
-		[]string{"boom"}, nil, true)
+		[]string{"boom"}, nil, nil, true)
 	errDecoded := decodeWritebackExec(t, errPayload)
 	require.True(t, errDecoded.isError, "is_error 结果必须保留错误语义")
 	require.Equal(t, []string{"boom"}, errDecoded.texts)
@@ -204,7 +204,7 @@ func TestCursorWritebackFourLayerEncoding(t *testing.T) {
 
 	// 多文本项：每条文本独立成一条 ContentItem（repeated），顺序保留。
 	multiPayload := cursorEncodeMcpToolResult(3, nil, "call_3",
-		[]string{"line-a", "line-b"}, nil, false)
+		[]string{"line-a", "line-b"}, nil, nil, false)
 	multi := decodeWritebackExec(t, multiPayload)
 	require.False(t, multi.isError)
 	require.Equal(t, []string{"line-a", "line-b"}, multi.texts)

@@ -103,7 +103,7 @@ func decodeMcpResultFrame(t *testing.T, execMsg []byte) cursorMcpResultFrame {
 func TestCursorMcpResultFrameInnerFieldIsEleven(t *testing.T) {
 	// 成功 + 文本 + 结构化：f11 承载 McpResult，四层结构逐层成立。
 	execMsg := cursorEncodeMcpToolResult(42, []byte("exec-orig-42"), "call_x",
-		[]string{"hello world"}, []byte(`{"k":1}`), false)
+		[]string{"hello world"}, nil, []byte(`{"k":1}`), false)
 	frame := decodeMcpResultFrame(t, execMsg)
 	require.EqualValues(t, 42, frame.execID, "必须原样带回原 exec_id（f1 varint）")
 	require.Equal(t, []byte("exec-orig-42"), frame.idField, "必须原样带回原 f15 id 字节")
@@ -112,14 +112,14 @@ func TestCursorMcpResultFrameInnerFieldIsEleven(t *testing.T) {
 
 	// is_error：必须走 McpResult.f2（错误语义），内层 McpResult 仍在 f11。
 	errMsg := cursorEncodeMcpToolResult(9, []byte("exec-orig-9"), "call_err",
-		[]string{"boom"}, nil, true)
+		[]string{"boom"}, nil, nil, true)
 	errFrame := decodeMcpResultFrame(t, errMsg)
 	require.True(t, errFrame.isError, "is_error 结果必须保留错误语义（McpResult.f2）")
 	require.Equal(t, []string{"boom"}, errFrame.texts)
 
 	// 多文本项：每条文本独立成一条 ContentItem（repeated），顺序保留，内层仍在 f11。
 	multiMsg := cursorEncodeMcpToolResult(3, nil, "call_multi",
-		[]string{"line-a", "line-b"}, nil, false)
+		[]string{"line-a", "line-b"}, nil, nil, false)
 	multiFrame := decodeMcpResultFrame(t, multiMsg)
 	require.False(t, multiFrame.isError)
 	require.Equal(t, []string{"line-a", "line-b"}, multiFrame.texts,
@@ -134,7 +134,7 @@ func TestCursorMcpResultFrameInnerFieldIsEleven(t *testing.T) {
 // 与 B4 修正前一致；B4 仅修正内层（2 → 11），不动外层信封。
 func TestCursorMcpResultFrameEnvelopeFieldStillTwo(t *testing.T) {
 	execMsg := cursorEncodeMcpToolResult(7, []byte("exec-orig-7"), "call_1",
-		[]string{"sunny"}, []byte(`{"temp":25}`), false)
+		[]string{"sunny"}, nil, []byte(`{"temp":25}`), false)
 
 	// 复刻 send 的外层包裹：cursorEncodeEnvelope(cursorAppendBytesField(nil, 2, execMsg))。
 	envelope := cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldClientMessage, execMsg))

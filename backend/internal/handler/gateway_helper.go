@@ -813,6 +813,16 @@ func (h *transferableInflight) TransferTo(sessionCtx context.Context) error {
 	return nil
 }
 
+// HandedOver 报告余额预留是否已交给会话（诊断/测试用；换号重试不重复转交）。
+func (h *transferableInflight) HandedOver() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.handed
+}
+
 // Release 按原 HTTP 生命周期归还（已转交则空操作，归会话 finalizer）。
 func (h *transferableInflight) Release() {
 	if h == nil || h.res == nil {
@@ -1104,19 +1114,26 @@ func isCursorPlatformAccount(account *service.Account) bool {
 //
 // nil 句柄表示该资源本次未获取（开关关闭、订阅模式、无限并发等），不登记空壳，
 // 会话 finalizer 只释放真正转交过的句柄。
+//
+// 已交出过的句柄一律跳过（2026-11-03 生产实证）：用户槽与余额预留是**每个 HTTP 请求
+// 只拿一次**的（选号循环外获取），而 Cursor 分支在**每次尝试**都会把本 HTTP 的资源
+// 转交给该次尝试的会话。首轮尝试（任意原因）失败后换号重试时，第二次转交同一句柄
+// 必然撞上「句柄已交出」，整条请求直接 502（`cursor slot handle already handed over`，
+// 24h 10 次，一次请求内后续所有换号都死）。资源所有权已经归首轮会话，重试不重复登记
+// 即可：释放仍由持有它的那个会话 finalizer 负责，绝不重复释放。
 func cursorHandoverResources(
 	userSlot *transferableRelease,
 	accountSlot *transferableRelease,
 	inflight *transferableInflight,
 ) []service.CursorTransferableResource {
 	resources := make([]service.CursorTransferableResource, 0, 3)
-	if userSlot != nil {
+	if userSlot != nil && !userSlot.HandedOver() {
 		resources = append(resources, userSlot)
 	}
-	if accountSlot != nil {
+	if accountSlot != nil && !accountSlot.HandedOver() {
 		resources = append(resources, accountSlot)
 	}
-	if inflight != nil {
+	if inflight != nil && !inflight.HandedOver() {
 		resources = append(resources, inflight)
 	}
 	return resources

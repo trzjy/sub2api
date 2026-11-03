@@ -32,6 +32,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -5120,8 +5121,12 @@ type cursorContextItem struct {
 // Text 按顺序保留文本结果项；Structured 是结构化 JSON（可为空）；IsError 原样保留
 // 客户端明确声明的错误语义（绝不把客户端失败写成成功）。
 type CursorToolResult struct {
-	CallID     string
-	Text       []string
+	CallID string
+	Text   []string
+	// Images 是本次工具结果携带的图片（工具读图场景）。按出现顺序出站为
+	// McpToolResultContentItem.f2（McpImageContent），排在全部文本项之后。
+	// 空表示本条结果不带图（出站字节与不支持图片时完全一致）。
+	Images     []cursorTurnImage
 	Structured []byte
 	IsError    bool
 	// ResultType 是客户端在续轮 input 中给出的结果项类型（仅 Responses 协议有意义，
@@ -5602,6 +5607,93 @@ func cursorAnthropicBlocks(raw json.RawMessage) ([]apicompat.AnthropicContentBlo
 	return blocks, nil
 }
 
+// cursorAnthropicImage 把 anthropic image 块解成 cursorTurnImage（原始字节 + mime）。
+//
+// 只接受 source.type=="base64"（客户端内联图）；远程 url 一律失败关闭（本层不服务端
+// 抓取）。与 cursorDecodeImageURL 同一套护栏：mime 必须 image/*、base64 兼容
+// Std/URL 两种字母表、解码后不超既有请求体上限。
+func cursorAnthropicImage(block apicompat.AnthropicContentBlock) (cursorTurnImage, error) {
+	src := block.Source
+	if src == nil {
+		return cursorTurnImage{}, fmt.Errorf("%w: anthropic image without source", ErrCursorResumeUnsupportedContent)
+	}
+	if strings.TrimSpace(src.Type) != "base64" {
+		return cursorTurnImage{}, fmt.Errorf("%w: anthropic image source %q", ErrCursorResumeUnsupportedContent, strings.TrimSpace(src.Type))
+	}
+	mime := strings.TrimSpace(src.MediaType)
+	if !strings.HasPrefix(mime, "image/") {
+		return cursorTurnImage{}, fmt.Errorf("%w: anthropic image media type %q", ErrCursorResumeUnsupportedContent, mime)
+	}
+	cleaned := strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\n', '\r':
+			return -1
+		}
+		return r
+	}, src.Data)
+	data, err := base64.StdEncoding.DecodeString(cleaned)
+	if err != nil {
+		data, err = base64.URLEncoding.DecodeString(cleaned)
+	}
+	if err != nil {
+		return cursorTurnImage{}, fmt.Errorf("%w: anthropic image base64: %v", ErrCursorResumeUnsupportedContent, err)
+	}
+	if len(data) == 0 {
+		return cursorTurnImage{}, fmt.Errorf("%w: anthropic image payload is empty", ErrCursorResumeUnsupportedContent)
+	}
+	if len(data) > cursorUpstreamStreamMaxBytes {
+		return cursorTurnImage{}, fmt.Errorf("%w: anthropic image payload exceeds request body size limit (%d bytes)", ErrCursorResumeUnsupportedContent, cursorUpstreamStreamMaxBytes)
+	}
+	return cursorTurnImage{data: data, mimeType: mime}, nil
+}
+
+// cursorToolResultContent 是 tool_result 内层块的**唯一**表示：文本按出现顺序拼接，
+// 图片按出现顺序收集，非文本块在文本流里留一个 `\x00block:<json>` 定位标记。
+//
+// 两条路径必须共用它，否则「本次结果的文本」与「下次续轮重算的历史前缀」不一致，
+// 续轮会以 history_mismatch 失败关闭：
+//   - 历史项规范化（cursorAnthropicBlockItem 的 tool_result 分支，collectImages=false）；
+//   - 本批结果生成（cursorPlanFromMessages 的尾部结果循环，collectImages=true）。
+//
+// collectImages=true 时图片块会被解成可出站字节（工具读图场景）。解码失败不 fail 整轮：
+// 文本标记照样保留（历史前缀仍对齐），只是本次不带图出站——比整轮 400 更可控。
+// strict=true 时未知块类型失败关闭；strict=false 时按既有历史口径序列化成标记
+// （历史里已存在的未知块不能被新代码变成整轮失败）。
+func cursorToolResultContent(blocks []apicompat.AnthropicContentBlock, collectImages, strict bool) (string, []cursorTurnImage, error) {
+	var text strings.Builder
+	var images []cursorTurnImage
+	for _, inner := range blocks {
+		switch inner.Type {
+		case "text", "":
+			text.WriteString(inner.Text)
+		case "image":
+			if collectImages {
+				if img, err := cursorAnthropicImage(inner); err == nil {
+					images = append(images, img)
+				}
+			}
+			encoded, jerr := json.Marshal(inner)
+			if jerr != nil {
+				return "", nil, fmt.Errorf("%w: anthropic tool_result image", ErrCursorResumeUnsupportedContent)
+			}
+			text.WriteString("\x00block:")
+			text.Write(encoded)
+		default:
+			if strict {
+				return "", nil, fmt.Errorf("%w: tool_result block %q", ErrCursorResumeUnsupportedContent, inner.Type)
+			}
+			// 结果内的其他非文本内容原样参与摘要（不丢语义）。
+			encoded, jerr := json.Marshal(inner)
+			if jerr != nil {
+				return "", nil, fmt.Errorf("%w: anthropic tool_result block", ErrCursorResumeUnsupportedContent)
+			}
+			text.WriteString("\x00block:")
+			text.Write(encoded)
+		}
+	}
+	return text.String(), images, nil
+}
+
 // cursorAnthropicBlockItem 把单个内容块规范化为历史项（保留类型与内容顺序）。
 func cursorAnthropicBlockItem(role string, block apicompat.AnthropicContentBlock) (cursorContextItem, error) {
 	prefix := "messages." + role
@@ -5637,24 +5729,16 @@ func cursorAnthropicBlockItem(role string, block apicompat.AnthropicContentBlock
 		if err != nil {
 			return cursorContextItem{}, err
 		}
-		var text strings.Builder
-		for _, inner := range content {
-			switch inner.Type {
-			case "text", "":
-				text.WriteString(inner.Text)
-			default:
-				// 结果内的非文本内容原样参与摘要（不丢语义）。
-				encoded, jerr := json.Marshal(inner)
-				if jerr != nil {
-					return cursorContextItem{}, fmt.Errorf("%w: anthropic tool_result block", ErrCursorResumeUnsupportedContent)
-				}
-				text.WriteString("\x00block:")
-				text.Write(encoded)
-			}
+		// 与结果侧（cursorPlanFromMessages 尾部循环）共用同一表示：历史前缀重算
+		// 才能与本批结果的文本逐字节对齐。历史侧不收集图片（不出站），未知块按
+		// 既有口径序列化成标记，不因新增图片支持而让已存在的历史变成整轮失败。
+		text, _, err := cursorToolResultContent(content, false, false)
+		if err != nil {
+			return cursorContextItem{}, err
 		}
 		payload := map[string]json.RawMessage{
 			"tool_use_id": mustCursorJSON(block.ToolUseID),
-			"content":     mustCursorJSON(text.String()),
+			"content":     mustCursorJSON(text),
 			"is_error":    mustCursorJSON(fmt.Sprintf("%t", block.IsError)),
 		}
 		return cursorContextItem{itemType: "messages.tool_result", canonical: mustCursorJSONValue(payload)}, nil
@@ -5780,21 +5864,17 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 			if berr != nil {
 				return nil, berr
 			}
-			texts := make([]string, 0, len(inner))
-			for _, piece := range inner {
-				switch piece.Type {
-				case "text", "":
-					texts = append(texts, piece.Text)
-				default:
-					return nil, fmt.Errorf("%w: tool_result block %q", ErrCursorResumeUnsupportedContent, piece.Type)
-				}
-			}
-			if len(texts) == 0 {
-				texts = append(texts, "")
+			// 与历史项规范化共用同一表示（cursorToolResultContent）：图片不再整轮
+			// 失败，而是解成可出站字节随结果发给上游（工具读图场景），文本里保留
+			// 与历史前缀完全一致的定位标记；未知块类型仍失败关闭。
+			text, images, terr := cursorToolResultContent(inner, true, true)
+			if terr != nil {
+				return nil, terr
 			}
 			plan.results = append(plan.results, CursorToolResult{
 				CallID:  strings.TrimSpace(block.ToolUseID),
-				Text:    texts,
+				Text:    []string{text},
+				Images:  images,
 				IsError: block.IsError,
 			})
 		}
@@ -7677,7 +7757,7 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 		}
 		// callID 只用于日志/诊断（上游靠 ExecID + IDField 关联 exec）；这里用**上游原 id**，
 		// 不用客户端回传的可见 id，避免日志与上游锚点口径不一致。
-		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, cap.ID, r.Text, r.Structured, r.IsError)
+		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, cap.ID, r.Text, r.Images, r.Structured, r.IsError)
 		if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
 			// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
 			it.svc.finishCursorSession(it.session, "resume_write_transport_failure")

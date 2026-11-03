@@ -69,11 +69,25 @@ const (
 	cursorFldMcpSuccessContent           = 1 // f1 content（repeated McpToolResultContentItem）
 	cursorFldMcpSuccessStructuredContent = 2 // f2 structured_content（实际结构化 JSON 类型）
 
-	// McpToolResultContentItem 字段。
-	cursorFldContentItemText = 1 // f1 text（McpTextContent）
+	// McpToolResultContentItem 字段（oneof content）：
+	//   f1 text  = McpTextContent
+	//   f2 image = McpImageContent
+	// 取证：Cursor 客户端产物 workbench.glass.main.js 内
+	// `makeMessageType("agent.v1.McpToolResultContentItem", () => [
+	//    {no:1,name:"text",kind:"message",T:McpTextContent,oneof:"content"},
+	//    {no:2,name:"image",kind:"message",T:McpImageContent,oneof:"content"}])`。
+	cursorFldContentItemText  = 1 // f1 text（McpTextContent）
+	cursorFldContentItemImage = 2 // f2 image（McpImageContent）
 
 	// McpTextContent 字段。
 	cursorFldTextContentText = 1 // f1 text（string）
+
+	// McpImageContent 字段（同一产物取证）：
+	// `makeMessageType("agent.v1.McpImageContent", () => [
+	//    {no:1,name:"data",kind:"scalar",T:12},      // bytes
+	//    {no:2,name:"mime_type",kind:"scalar",T:9}]) // string
+	cursorFldImageContentData     = 1 // f1 data（bytes，原始图片字节）
+	cursorFldImageContentMimeType = 2 // f2 mime_type（string）
 
 	// cursorFldClientControlMessage 是信封 AgentClientMessage.f5（exec_client_control_message）。
 	cursorFldClientControlMessage = 5
@@ -90,15 +104,19 @@ const (
 // callID 仅用于日志/诊断（上游靠 ExecID + IDField 关联 exec 关联）；execID / idField 必须
 // 是原 mcp_args 委托捕获时带回的原值，否则上游无法把结果关联到对应 exec。is_error 走
 // McpResult.f2（错误语义），结构化 JSON 走 McpSuccess.f2（structured_content）。
+// images 是本次工具结果携带的图片（如客户端工具读到图片文件）：每张图独立成一条
+// McpSuccess.f1 内容项，走 McpToolResultContentItem.f2（McpImageContent{f1 data bytes,
+// f2 mime_type}），排在全部文本项之后——与历史侧「先文本后图片」的顺序同一口径。
+// 无图时字节形状与此前完全一致（零变化）。
 func cursorEncodeMcpToolResult(
 	execID uint64, idField []byte, callID string,
-	texts []string, structured []byte, isError bool,
+	texts []string, images []cursorTurnImage, structured []byte, isError bool,
 ) []byte {
 	// 每条文本结果项独立成**一条** McpSuccess.f1（repeated McpToolResultContentItem）：
 	// 每个 ContentItem 各自一个 f1 tag-value，**不得**把多条编码拼进同一个 length-delimited
 	// 载荷（那样整段会被当作一个 ContentItem 解析，除最后一条外全部丢失）。
 	var payload []byte
-	if len(texts) == 0 {
+	if len(texts) == 0 && len(images) == 0 {
 		// 空结果也保留一个空文本项，保证 ContentItem 形状完整（上游不接受缺 content）。
 		textContent := cursorAppendStringField(nil, cursorFldTextContentText, "")
 		item := cursorAppendBytesField(nil, cursorFldContentItemText, textContent)
@@ -107,6 +125,18 @@ func cursorEncodeMcpToolResult(
 	for _, t := range texts {
 		textContent := cursorAppendStringField(nil, cursorFldTextContentText, t)
 		item := cursorAppendBytesField(nil, cursorFldContentItemText, textContent)
+		payload = cursorAppendBytesField(payload, cursorFldMcpSuccessContent, item)
+	}
+	for _, img := range images {
+		if len(img.data) == 0 {
+			continue
+		}
+		var imageContent []byte
+		imageContent = cursorAppendBytesField(imageContent, cursorFldImageContentData, img.data)
+		if img.mimeType != "" {
+			imageContent = cursorAppendStringField(imageContent, cursorFldImageContentMimeType, img.mimeType)
+		}
+		item := cursorAppendBytesField(nil, cursorFldContentItemImage, imageContent)
 		payload = cursorAppendBytesField(payload, cursorFldMcpSuccessContent, item)
 	}
 	// McpSuccess / McpError{f1 content, f2 structured_content}。
