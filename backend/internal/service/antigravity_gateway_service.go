@@ -470,6 +470,7 @@ func (s *AntigravityGatewayService) TestConnectionWithPrompt(ctx context.Context
 func validateTestConnectionResponse(respBody []byte) (string, []TestConnectionImage, error) {
 	text, images := extractContentFromSSEResponse(respBody)
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
+		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Test] empty_content: respBody=%s", string(respBody))
 		return "", nil, fmt.Errorf("上游返回 200 但未提取到任何有效文本或图片内容 (响应为空)")
 	}
 	return text, images, nil
