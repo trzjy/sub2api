@@ -22,9 +22,12 @@ package service
 //     （`<toolName>` / `<arguments>` / `<code>` / `<mcpDetails>` / ...）。
 //
 // **误判防护**（标记是裸字节，防误判只能靠**标记形状**，不能靠不可见字符）：
-//   - 只有**开闭标记成对**、且**每段内容非空**，才认定为内联形态；
-//   - 只出现开标记、没有配对闭标记 → **不认定为内联形态**（按「未识别」处理，
-//     而不是「识别到但解析失败」）：宁可漏判，也不能把正常正文当工具调用吃掉；
+//   - **成对形态**：开闭标记成对出现、且每段内容非空；
+//   - **半闭合形态**（2026-11-03 补）：只写开标记、不写闭标记，但**每段都是
+//     完整可解的 JSON 对象且能解析出工具名**。这是模型一次写多个并行调用时的
+//     高频退化写法（9 连发全漏闭合，线上实证），不兜底就会整批静默丢失；
+//   - 上面两种都不成立 → **不认定为内联形态**（按「未识别」处理，而不是
+//     「识别到但解析失败」）：宁可漏判，也不能把正常正文当工具调用吃掉；
 //   - 正文里单独出现 `tool_call` 字样 → 不认定为内联形态。
 
 import (
@@ -145,18 +148,31 @@ func cursorParseInlineToolCalls(content string) (calls []cursorInlineToolCall, r
 
 // cursorInlineScanSegments 扫描正文里的内联片段，并做**形态认定**。
 //
-// 形态认定判据（与 cursorParseInlineToolCalls 的文档一致）：
+// 先按成对形态认定（cursorInlineScanPairedSegments）；不成立时再按半闭合形态
+// 认定（cursorInlineScanHalfClosedSegments）。
+//
+// 任一条都不成立 → ok=false（**未认定形态**），调用方按「未识别」原样返回正文。
+func cursorInlineScanSegments(content string) (segments []cursorInlineSegment, trailing string, ok bool) {
+	if segs, tail, ok := cursorInlineScanPairedSegments(content); ok {
+		return segs, tail, true
+	}
+	return cursorInlineScanHalfClosedSegments(content)
+}
+
+// cursorInlineScanPairedSegments 按**成对形态**扫描正文里的内联片段。
+//
+// 形态认定判据：
 //  1. 开标记与闭标记必须**成对**出现，且开标记后面跟得上闭标记；
 //  2. 每一对开闭标记之间的**内容必须非空**；
 //  3. 全文的开/闭标记数必须与解析出的片段数一致（标记两两配平，不允许落单
 //     的开标记或闭标记）。
 //
-// 任一条不满足 → ok=false（**未认定形态**），调用方按「未识别」原样返回正文。
+// 任一不满足 → ok=false（**未认定形态**），由半闭合形态接手。
 //
 // 严格判据的取舍：落单标记说明片段边界不可信（也可能只是正文里提到了标记
 // 字样），此时宁可**漏判**（这一轮工具调用没被执行）也不**误判**（把正常正文
 // 当工具调用吃掉）；正文一个字节都不吞。
-func cursorInlineScanSegments(content string) (segments []cursorInlineSegment, trailing string, ok bool) {
+func cursorInlineScanPairedSegments(content string) (segments []cursorInlineSegment, trailing string, ok bool) {
 	remain := content
 	for {
 		open := strings.Index(remain, cursorInlineToolCallOpen)
@@ -166,7 +182,8 @@ func cursorInlineScanSegments(content string) (segments []cursorInlineSegment, t
 		bodyStart := open + len(cursorInlineToolCallOpen)
 		closeIdx := strings.Index(remain[bodyStart:], cursorInlineToolCallClose)
 		if closeIdx < 0 {
-			// 落单的开标记：后面没有配对的闭标记 → 形态不成立。
+			// 落单的开标记：后面没有配对的闭标记 → 成对形态不成立，
+			// 交给半闭合形态判定（它不是「一定不能认」，只是「边界不可信」）。
 			return nil, "", false
 		}
 		body := remain[bodyStart : bodyStart+closeIdx]
@@ -188,6 +205,79 @@ func cursorInlineScanSegments(content string) (segments []cursorInlineSegment, t
 		return nil, "", false
 	}
 	return segments, remain, true
+}
+
+// cursorInlineScanHalfClosedSegments 按**半闭合形态**扫描正文里的内联片段。
+//
+// 触发场景（2026-11-03 线上实证）：模型一次写多个并行调用时，只写 `<tool_call>`
+// 开标记、漏写 `</tool_call>` 闭标记，形如
+//
+//	<tool_call>\n{json1}\n<tool_call>\n{json2}\n\n<正文>
+//
+// 成对判据必然不成立。若直接按「未识别」放行，整批调用会被当作普通正文透传：
+// 客户端拿不到 tool_calls，本轮工具一个都不执行，模型停在「我等结果」上，
+// 助手空转收尾（会话表现为「跑到一半自己停了」）。
+//
+// 段边界本来不可信，因此设两道安全闸，任一不满足即判「未识别」（正文一个
+// 字节都不吞）：
+//  1. 每段从 `{` 起必须是一个**完整可解的 JSON 对象**——用流式解码取精确字节
+//     边界，只吃一个对象；段后的正文（「我等结果」这类话）留给 trailing，
+//     绝不按「最后一个 }」切而把正文吞进参数；
+//  2. 每段都必须能解析成合法工具调用（形态 A 带工具名 / 形态 B 标签信封）——
+//     全有或全无，任一段解析不出就整批不认。
+//
+// 段内不允许夹闭标记：夹了就说明这是成对写法（只是没配平），不归这里的兜底管。
+func cursorInlineScanHalfClosedSegments(content string) (segments []cursorInlineSegment, trailing string, ok bool) {
+	remain := content
+	for {
+		open := strings.Index(remain, cursorInlineToolCallOpen)
+		if open < 0 {
+			break
+		}
+		// 开标记之前出现闭标记 → 配对关系已被成对路径否定，这里不再兜底。
+		if strings.Contains(remain[:open], cursorInlineToolCallClose) {
+			return nil, "", false
+		}
+		bodyStart := open + len(cursorInlineToolCallOpen)
+		head := remain[bodyStart:]
+		if strings.Contains(head, cursorInlineToolCallClose) {
+			return nil, "", false
+		}
+		size := cursorInlineJSONObjectPrefixLen(head)
+		if size <= 0 {
+			return nil, "", false
+		}
+		segments = append(segments, cursorInlineSegment{before: remain[:open], body: head[:size]})
+		remain = head[size:]
+	}
+	if len(segments) == 0 {
+		return nil, "", false
+	}
+	for i, seg := range segments {
+		if _, parsed := cursorParseInlineFragment(seg.body, content, i+1); !parsed {
+			return nil, "", false
+		}
+	}
+	return segments, remain, true
+}
+
+// cursorInlineJSONObjectPrefixLen 返回 s 开头（允许前导空白）那个完整 JSON 对象的
+// 字节长度；s 不以 `{` 起、或不构成完整对象时返回 0。
+//
+// 刻意用 Decoder 取边界而不是找「最后一个 }」：半闭合段的后面常常还跟着模型
+// 自己的话，按最后一个括号切会把那段话一起吞进工具参数里。
+func cursorInlineJSONObjectPrefixLen(s string) int {
+	trimmed := strings.TrimLeft(s, " \t\r\n")
+	if !strings.HasPrefix(trimmed, "{") {
+		return 0
+	}
+	lead := len(s) - len(trimmed)
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return 0
+	}
+	return lead + int(dec.InputOffset())
 }
 
 // cursorParseInlineFragment 解析一段内联片段正文。

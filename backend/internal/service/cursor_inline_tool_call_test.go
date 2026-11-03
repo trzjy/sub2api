@@ -29,6 +29,7 @@ package service
 // 断言只依赖本卡的新增文件，不触碰 TC-02 / TC-03 的禁区文件。
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -262,17 +263,21 @@ func TestCursorParseInlineToolCall_Multiple(t *testing.T) {
 }
 
 // TestCursorParseInlineToolCall_OpenOnlyNoClose 误判防护：正文里**只出现开标记、
-// 没有闭标记** → **不判为内联形态**（recognized=false，按「未识别」处理，
-// 而不是「识别到但解析失败」）。
+// 没有闭标记**且**开标记后不是一个完整可解的 JSON 对象** → **不判为内联形态**
+// （recognized=false，按「未识别」处理，而不是「识别到但解析失败」）。
 //
 // 去掉零宽字符后，标记只能靠**形状**识别：不成对就没有内联形态可言，
 // 宁可漏判也不能把正常正文当工具调用吃掉。
+//
+// 注意：开标记后跟**完整 JSON 对象**的半闭合写法不在此列——那是模型并行连发时
+// 的真实退化形态，由 cursorInlineScanHalfClosedSegments 兜底（见
+// TestCursorParseInlineToolCall_HalfClosedBatch）。
 func TestCursorParseInlineToolCall_OpenOnlyNoClose(t *testing.T) {
 	for _, content := range []string{
 		tc01Open,
 		"前缀。" + tc01Open,
-		"前缀。" + tc01Open + "\n" + `{"id":"call_x","name":"REPL","arguments":{}}`,
 		"前缀。" + tc01Open + " 只有开标记没有闭标记",
+		"前缀。" + tc01Open + "\n" + `{"id":"call_x","name":"REPL","argu`, // JSON 被截断
 	} {
 		calls, rest, recognized := cursorParseInlineToolCalls(content)
 
@@ -280,6 +285,54 @@ func TestCursorParseInlineToolCall_OpenOnlyNoClose(t *testing.T) {
 		require.Empty(t, calls)
 		require.Equal(t, content, rest, "未识别时正文必须原样返回")
 	}
+}
+
+// TestCursorParseInlineToolCall_HalfClosedBatch 半闭合形态（2026-11-03 线上实证）：
+//
+// 模型一次写多个并行调用时，只写开标记、漏写闭标记，形如
+// `<tool_call>\n{json1}\n<tool_call>\n{json2}...`，随后还跟着自己的话。
+//
+// 期望：每段都还原成一条调用（不是整批丢掉），且段后的正文**不得**被吞进
+// 工具参数——段落边界按「一个完整 JSON 对象」取，不按「最后一个 }」取。
+func TestCursorParseInlineToolCall_HalfClosedBatch(t *testing.T) {
+	const batch = 9
+	var b strings.Builder
+	b.WriteString("先核实另一条事实。\n")
+	for i := 0; i < batch; i++ {
+		b.WriteString(tc01Open + "\n")
+		b.WriteString(`{"id":"call_` + strconv.Itoa(i) + `","name":"Bash","arguments":{"command":"sed -n '1,10p' f.go"}}`)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nLet me consolidate. I'll wait for results.\n\n[Waiting for tool results]\n")
+
+	calls, rest, recognized := cursorParseInlineToolCalls(b.String())
+
+	require.True(t, recognized, "半闭合形态必须被识别，否则整批调用静默丢失")
+	require.Len(t, calls, batch)
+	for i, call := range calls {
+		require.Equal(t, "Bash", call.Name)
+		require.Equal(t, "call_"+strconv.Itoa(i), call.ID)
+		require.JSONEq(t, `{"command":"sed -n '1,10p' f.go"}`, call.Arguments,
+			"参数必须只含该段自己的 JSON 对象")
+	}
+	require.NotContains(t, rest, tc01Open)
+	require.NotContains(t, rest, "command", "段后的正文不得被吞进工具参数")
+	require.Contains(t, rest, "先核实另一条事实。")
+	require.Contains(t, rest, "Let me consolidate. I'll wait for results.")
+	require.Contains(t, rest, "[Waiting for tool results]")
+}
+
+// TestCursorParseInlineToolCall_HalfClosedAllOrNone 半闭合形态下「全有或全无」：
+// 只要有一段解不出参数，整批一律不认，正文原样返回（不得执行一半、吞掉一半）。
+func TestCursorParseInlineToolCall_HalfClosedAllOrNone(t *testing.T) {
+	content := tc01Open + "\n" + `{"id":"call_a","name":"REPL","arguments":{}}` + "\n" +
+		tc01Open + "\n" + `{"id":"call_b","arguments":{}}` + "\n" // 缺 name → 解不出工具名
+
+	calls, rest, recognized := cursorParseInlineToolCalls(content)
+
+	require.False(t, recognized)
+	require.Empty(t, calls)
+	require.Equal(t, content, rest)
 }
 
 // TestCursorParseInlineToolCall_PlainWord 正文只含 `tool_call` 字样 →
@@ -306,21 +359,26 @@ func TestCursorParseInlineToolCall_Empty(t *testing.T) {
 	}
 }
 
-// TestCursorParseInlineToolCall_MalformedNoClose 畸形输入（开标记后无闭标记）
-// → **不判为内联形态**（recognized=false）、calls 空、rest 保持原文
-// （一个字节都不吞）。
+// TestCursorParseInlineToolCall_MalformedNoClose 开标记后无闭标记的**边界语义**。
 //
-// 语义变更说明：TC-01 原语义是 recognized=true（形态已被识别）+ calls 空，
-// 调用方据此失败关闭；TC-01R2 按新判据改为 recognized=false（未识别），
-// 理由见 cursorInlineScanSegments 的注释：不成对就没有内联形态。
+// 语义变更（2026-11-03，线上实证驱动）：TC-01R2 曾把「开标记 + 无闭标记」一律
+// 判为未识别（recognized=false）。实际线上模型一次写多个并行调用时普遍只写开
+// 标记、漏写闭标记，按未识别放行会让整批调用静默消失（客户端只拿到一段话，
+// 助手空转收尾）。故改为：
+//   - 开标记后跟着**完整可解的 JSON 对象**（带工具名）→ 按半闭合形态识别，
+//     正常还原成调用（本条用例）；
+//   - JSON 截断 / 不是 JSON → 仍判未识别、正文一个字节不吞
+//     （见 TestCursorParseInlineToolCall_OpenOnlyNoClose）。
 func TestCursorParseInlineToolCall_MalformedNoClose(t *testing.T) {
 	content := "前缀。" + tc01Open + "\n" + `{"id":"call_x","name":"REPL","arguments":{}}`
 
 	calls, rest, recognized := cursorParseInlineToolCalls(content)
 
-	require.False(t, recognized, "开标记无闭标记 → 不得判为内联形态")
-	require.Empty(t, calls, "未识别时不得返回半成品调用")
-	require.Equal(t, content, rest, "未识别时正文必须原样返回")
+	require.True(t, recognized, "开标记后跟完整 JSON 对象 → 按半闭合形态识别")
+	require.Len(t, calls, 1)
+	require.Equal(t, "call_x", calls[0].ID)
+	require.Equal(t, "REPL", calls[0].Name)
+	require.Equal(t, "前缀。", rest, "只剔除内联片段，前缀正文必须保留")
 }
 
 // TestCursorParseInlineToolCall_MalformedGarbage 畸形输入（开闭成对但内容解不出
