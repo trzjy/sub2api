@@ -104,6 +104,7 @@ func maskedQuotaKey(st *service.QuotaKeyStatus) dto.QuotaKey {
 		LastRefreshAt:    st.LastRefreshAt,
 		LastRefreshError: st.LastRefreshError,
 		Notes:            st.Notes,
+		Priority:         st.Priority,
 	}
 }
 
@@ -149,6 +150,9 @@ type createQuotaKeyRequest struct {
 	Code      string     `json:"code" binding:"required"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	Notes     *string    `json:"notes"`
+	// Priority 是调度优先级（数值越小越优先）；缺省 0 → 服务端按列默认 1 落库。
+	// 该码名下账号的 priority 跟随此值。
+	Priority int `json:"priority"`
 }
 
 // Create 新建激活码：接 code 原文一次 → 加密落库 → 返回脱敏结果。
@@ -164,7 +168,7 @@ func (h *QuotaKeyHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "code is required")
 		return
 	}
-	st, err := h.svc.Create(c.Request.Context(), req.Code, req.ExpiresAt, req.Notes)
+	st, err := h.svc.Create(c.Request.Context(), req.Code, req.ExpiresAt, req.Notes, req.Priority)
 	if err != nil {
 		respondQuotaKeyError(c, err)
 		return
@@ -257,6 +261,9 @@ type updateQuotaKeyRequest struct {
 	Code      *string         `json:"code"`
 	ExpiresAt json.RawMessage `json:"expires_at"`
 	Notes     json.RawMessage `json:"notes"`
+	// Priority 为 nil 表示本次不改优先级；给出时必须是正整数（数值越小越优先），
+	// 服务端会在同一事务内把该码名下未删除账号的 priority 一并同步。
+	Priority *int `json:"priority"`
 }
 
 // Update 编辑激活码（code / expires_at / notes；status 不允许改）。
@@ -297,7 +304,7 @@ func (h *QuotaKeyHandler) Update(c *gin.Context) {
 		}
 		notes = &value
 	}
-	st, err := h.svc.Update(c.Request.Context(), id, req.Code, expiresAt, notes)
+	st, err := h.svc.Update(c.Request.Context(), id, req.Code, expiresAt, notes, req.Priority)
 	if err != nil {
 		respondQuotaKeyError(c, err)
 		return

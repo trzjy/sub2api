@@ -65,6 +65,12 @@
             </span>
           </template>
 
+          <template #cell-priority="{ row }">
+            <span class="text-sm tabular-nums text-gray-900 dark:text-gray-100" :title="t('admin.quotaKeys.priorityHint')">
+              {{ row.priority ?? 1 }}
+            </span>
+          </template>
+
           <template #cell-account_count="{ row }">
             <span class="text-sm text-gray-900 dark:text-gray-100">{{ row.account_count ?? 0 }}</span>
           </template>
@@ -181,6 +187,22 @@
           </label>
           <input v-model="form.expires_at" type="datetime-local" class="input" />
           <p class="input-hint mt-1">{{ t('admin.quotaKeys.expiresAtPlaceholder') }}</p>
+        </div>
+
+        <div>
+          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.quotaKeys.priority') }}
+          </label>
+          <input
+            v-model.number="form.priority"
+            type="number"
+            min="1"
+            step="1"
+            class="input"
+            :placeholder="t('admin.quotaKeys.priorityPlaceholder')"
+            @input="formError = ''"
+          />
+          <p class="input-hint mt-1">{{ t('admin.quotaKeys.priorityHint') }}</p>
         </div>
 
         <div>
@@ -518,7 +540,10 @@ const formError = ref('')
 const form = reactive({
   code: '',
   expires_at: '',
-  notes: ''
+  notes: '',
+  // 激活码优先级：数值越小越优先，与账号 priority 同一语义。该码名下账号的优先级
+  // 跟随此值（后端拉号时写入、改优先级时同事务同步）。
+  priority: 1
 })
 
 /**
@@ -533,6 +558,7 @@ const columns = computed<Column[]>(() => [
   // 来源额度快照列（§25.6⑦）：列名沿用「激活码用量」口径，数值为一层（key/来源）快照。
   { key: 'usage', label: t('admin.quotaKeys.probe.title'), sortable: false },
   { key: 'status', label: t('admin.quotaKeys.columns.status'), sortable: false },
+  { key: 'priority', label: t('admin.quotaKeys.columns.priority'), sortable: false },
   { key: 'exhausted', label: t('admin.quotaKeys.columns.exhausted'), sortable: false },
   { key: 'account_count', label: t('admin.quotaKeys.columns.accountCount'), sortable: false },
   { key: 'working_count', label: t('admin.quotaKeys.columns.workingCount'), sortable: false },
@@ -620,6 +646,7 @@ function openCreateDialog() {
   form.code = ''
   form.expires_at = ''
   form.notes = ''
+  form.priority = 1
   formError.value = ''
   showFormDialog.value = true
 }
@@ -629,6 +656,7 @@ function openEditDialog(row: QuotaKey) {
   form.code = ''
   form.expires_at = row.expires_at ? toLocalInputValue(row.expires_at) : ''
   form.notes = row.notes ?? ''
+  form.priority = row.priority ?? 1
   formError.value = ''
   showFormDialog.value = true
 }
@@ -651,13 +679,19 @@ function buildPayload(): CreateQuotaKeyRequest | UpdateQuotaKeyRequest {
   const expiresAt = form.expires_at ? new Date(form.expires_at).toISOString() : null
   return {
     expires_at: expiresAt,
-    notes: form.notes.trim() ? form.notes.trim() : null
+    notes: form.notes.trim() ? form.notes.trim() : null,
+    priority: form.priority
   }
 }
 
 async function submitForm() {
   if (!editing.value && !form.code.trim()) {
     formError.value = t('admin.quotaKeys.codePlaceholder')
+    return
+  }
+  // 优先级：正整数，数值越小越优先（与账号 priority 同一口径）。
+  if (!Number.isInteger(form.priority) || form.priority < 1) {
+    formError.value = t('admin.quotaKeys.priorityInvalid')
     return
   }
   saving.value = true

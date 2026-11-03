@@ -190,6 +190,20 @@ func (_c *QuotaKeyCreate) SetNillableUpdatedAt(v *time.Time) *QuotaKeyCreate {
 	return _c
 }
 
+// SetPriority sets the "priority" field.
+func (_c *QuotaKeyCreate) SetPriority(v int) *QuotaKeyCreate {
+	_c.mutation.SetPriority(v)
+	return _c
+}
+
+// SetNillablePriority sets the "priority" field if the given value is not nil.
+func (_c *QuotaKeyCreate) SetNillablePriority(v *int) *QuotaKeyCreate {
+	if v != nil {
+		_c.SetPriority(*v)
+	}
+	return _c
+}
+
 // SetNotes sets the "notes" field.
 func (_c *QuotaKeyCreate) SetNotes(v string) *QuotaKeyCreate {
 	_c.mutation.SetNotes(v)
@@ -278,6 +292,10 @@ func (_c *QuotaKeyCreate) defaults() error {
 		v := quotakey.DefaultUpdatedAt()
 		_c.mutation.SetUpdatedAt(v)
 	}
+	if _, ok := _c.mutation.Priority(); !ok {
+		v := quotakey.DefaultPriority
+		_c.mutation.SetPriority(v)
+	}
 	return nil
 }
 
@@ -327,6 +345,14 @@ func (_c *QuotaKeyCreate) check() error {
 	}
 	if _, ok := _c.mutation.UpdatedAt(); !ok {
 		return &ValidationError{Name: "updated_at", err: errors.New(`ent: missing required field "QuotaKey.updated_at"`)}
+	}
+	if _, ok := _c.mutation.Priority(); !ok {
+		return &ValidationError{Name: "priority", err: errors.New(`ent: missing required field "QuotaKey.priority"`)}
+	}
+	if v, ok := _c.mutation.Priority(); ok {
+		if err := quotakey.PriorityValidator(v); err != nil {
+			return &ValidationError{Name: "priority", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.priority": %w`, err)}
+		}
 	}
 	return nil
 }
@@ -406,6 +432,10 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.UpdatedAt(); ok {
 		_spec.SetField(quotakey.FieldUpdatedAt, field.TypeTime, value)
 		_node.UpdatedAt = value
+	}
+	if value, ok := _c.mutation.Priority(); ok {
+		_spec.SetField(quotakey.FieldPriority, field.TypeInt, value)
+		_node.Priority = value
 	}
 	if value, ok := _c.mutation.Notes(); ok {
 		_spec.SetField(quotakey.FieldNotes, field.TypeString, value)
@@ -668,6 +698,24 @@ func (u *QuotaKeyUpsert) SetUpdatedAt(v time.Time) *QuotaKeyUpsert {
 // UpdateUpdatedAt sets the "updated_at" field to the value that was provided on create.
 func (u *QuotaKeyUpsert) UpdateUpdatedAt() *QuotaKeyUpsert {
 	u.SetExcluded(quotakey.FieldUpdatedAt)
+	return u
+}
+
+// SetPriority sets the "priority" field.
+func (u *QuotaKeyUpsert) SetPriority(v int) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldPriority, v)
+	return u
+}
+
+// UpdatePriority sets the "priority" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdatePriority() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldPriority)
+	return u
+}
+
+// AddPriority adds v to the "priority" field.
+func (u *QuotaKeyUpsert) AddPriority(v int) *QuotaKeyUpsert {
+	u.Add(quotakey.FieldPriority, v)
 	return u
 }
 
@@ -955,6 +1003,27 @@ func (u *QuotaKeyUpsertOne) SetUpdatedAt(v time.Time) *QuotaKeyUpsertOne {
 func (u *QuotaKeyUpsertOne) UpdateUpdatedAt() *QuotaKeyUpsertOne {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.UpdateUpdatedAt()
+	})
+}
+
+// SetPriority sets the "priority" field.
+func (u *QuotaKeyUpsertOne) SetPriority(v int) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetPriority(v)
+	})
+}
+
+// AddPriority adds v to the "priority" field.
+func (u *QuotaKeyUpsertOne) AddPriority(v int) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.AddPriority(v)
+	})
+}
+
+// UpdatePriority sets the "priority" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdatePriority() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdatePriority()
 	})
 }
 
@@ -1411,6 +1480,27 @@ func (u *QuotaKeyUpsertBulk) SetUpdatedAt(v time.Time) *QuotaKeyUpsertBulk {
 func (u *QuotaKeyUpsertBulk) UpdateUpdatedAt() *QuotaKeyUpsertBulk {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.UpdateUpdatedAt()
+	})
+}
+
+// SetPriority sets the "priority" field.
+func (u *QuotaKeyUpsertBulk) SetPriority(v int) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetPriority(v)
+	})
+}
+
+// AddPriority adds v to the "priority" field.
+func (u *QuotaKeyUpsertBulk) AddPriority(v int) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.AddPriority(v)
+	})
+}
+
+// UpdatePriority sets the "priority" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdatePriority() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdatePriority()
 	})
 }
 

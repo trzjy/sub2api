@@ -18,6 +18,11 @@ type QuotaKeyStatus struct {
 	// 不再各自挑字段（多轨投影导致的展示漂移修复）。
 	Notes *string `json:"notes,omitempty"`
 
+	// Priority 是激活码优先级（quota_keys.priority），数值越小越优先，与 accounts.priority
+	// 同一语义。该码名下账号的 priority 跟随此值：拉号入库时写入，修改时同事务同步
+	//（用户裁定 2026-11-03：日限额码取小值优先消耗，月总限额码取大值兜底）。
+	Priority int `json:"priority"`
+
 	// Usage 是来源额度快照的展示投影（方案 §25.6 消费闭包⑤ / §25.7-B）。
 	//
 	// 只读：来自 quota_keys.usage_snapshot 已提交值，解析/投影唯一实现在
@@ -38,4 +43,6 @@ type CreateQuotaKeyInput struct {
 	Exhausted     bool
 	ExpiresAt     *time.Time
 	Notes         *string
+	// Priority 是新建激活码的优先级；0 表示未指定，仓储层按列默认值（1）落库。
+	Priority int
 }

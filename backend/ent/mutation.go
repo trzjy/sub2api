@@ -42855,6 +42855,8 @@ type QuotaKeyMutation struct {
 	appendusage_snapshot jsontext.Value
 	created_at           *time.Time
 	updated_at           *time.Time
+	priority             *int
+	addpriority          *int
 	notes                *string
 	clearedFields        map[string]struct{}
 	accounts             map[int64]struct{}
@@ -43551,6 +43553,62 @@ func (m *QuotaKeyMutation) ResetUpdatedAt() {
 	m.updated_at = nil
 }
 
+// SetPriority sets the "priority" field.
+func (m *QuotaKeyMutation) SetPriority(i int) {
+	m.priority = &i
+	m.addpriority = nil
+}
+
+// Priority returns the value of the "priority" field in the mutation.
+func (m *QuotaKeyMutation) Priority() (r int, exists bool) {
+	v := m.priority
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPriority returns the old "priority" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldPriority(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPriority is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPriority requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPriority: %w", err)
+	}
+	return oldValue.Priority, nil
+}
+
+// AddPriority adds i to the "priority" field.
+func (m *QuotaKeyMutation) AddPriority(i int) {
+	if m.addpriority != nil {
+		*m.addpriority += i
+	} else {
+		m.addpriority = &i
+	}
+}
+
+// AddedPriority returns the value that was added to the "priority" field in this mutation.
+func (m *QuotaKeyMutation) AddedPriority() (r int, exists bool) {
+	v := m.addpriority
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPriority resets all changes to the "priority" field.
+func (m *QuotaKeyMutation) ResetPriority() {
+	m.priority = nil
+	m.addpriority = nil
+}
+
 // SetNotes sets the "notes" field.
 func (m *QuotaKeyMutation) SetNotes(s string) {
 	m.notes = &s
@@ -43688,7 +43746,7 @@ func (m *QuotaKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *QuotaKeyMutation) Fields() []string {
-	fields := make([]string, 0, 14)
+	fields := make([]string, 0, 15)
 	if m.deleted_at != nil {
 		fields = append(fields, quotakey.FieldDeletedAt)
 	}
@@ -43728,6 +43786,9 @@ func (m *QuotaKeyMutation) Fields() []string {
 	if m.updated_at != nil {
 		fields = append(fields, quotakey.FieldUpdatedAt)
 	}
+	if m.priority != nil {
+		fields = append(fields, quotakey.FieldPriority)
+	}
 	if m.notes != nil {
 		fields = append(fields, quotakey.FieldNotes)
 	}
@@ -43765,6 +43826,8 @@ func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedAt()
 	case quotakey.FieldUpdatedAt:
 		return m.UpdatedAt()
+	case quotakey.FieldPriority:
+		return m.Priority()
 	case quotakey.FieldNotes:
 		return m.Notes()
 	}
@@ -43802,6 +43865,8 @@ func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldCreatedAt(ctx)
 	case quotakey.FieldUpdatedAt:
 		return m.OldUpdatedAt(ctx)
+	case quotakey.FieldPriority:
+		return m.OldPriority(ctx)
 	case quotakey.FieldNotes:
 		return m.OldNotes(ctx)
 	}
@@ -43904,6 +43969,13 @@ func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetUpdatedAt(v)
 		return nil
+	case quotakey.FieldPriority:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPriority(v)
+		return nil
 	case quotakey.FieldNotes:
 		v, ok := value.(string)
 		if !ok {
@@ -43918,13 +43990,21 @@ func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *QuotaKeyMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addpriority != nil {
+		fields = append(fields, quotakey.FieldPriority)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *QuotaKeyMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case quotakey.FieldPriority:
+		return m.AddedPriority()
+	}
 	return nil, false
 }
 
@@ -43933,6 +44013,13 @@ func (m *QuotaKeyMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *QuotaKeyMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case quotakey.FieldPriority:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPriority(v)
+		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey numeric field %s", name)
 }
@@ -44055,6 +44142,9 @@ func (m *QuotaKeyMutation) ResetField(name string) error {
 		return nil
 	case quotakey.FieldUpdatedAt:
 		m.ResetUpdatedAt()
+		return nil
+	case quotakey.FieldPriority:
+		m.ResetPriority()
 		return nil
 	case quotakey.FieldNotes:
 		m.ResetNotes()

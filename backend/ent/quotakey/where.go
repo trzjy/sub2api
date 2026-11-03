@@ -115,6 +115,11 @@ func UpdatedAt(v time.Time) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldEQ(FieldUpdatedAt, v))
 }
 
+// Priority applies equality check predicate on the "priority" field. It's identical to PriorityEQ.
+func Priority(v int) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEQ(FieldPriority, v))
+}
+
 // Notes applies equality check predicate on the "notes" field. It's identical to NotesEQ.
 func Notes(v string) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldEQ(FieldNotes, v))
@@ -798,6 +803,46 @@ func UpdatedAtLT(v time.Time) predicate.QuotaKey {
 // UpdatedAtLTE applies the LTE predicate on the "updated_at" field.
 func UpdatedAtLTE(v time.Time) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldLTE(FieldUpdatedAt, v))
+}
+
+// PriorityEQ applies the EQ predicate on the "priority" field.
+func PriorityEQ(v int) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEQ(FieldPriority, v))
+}
+
+// PriorityNEQ applies the NEQ predicate on the "priority" field.
+func PriorityNEQ(v int) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNEQ(FieldPriority, v))
+}
+
+// PriorityIn applies the In predicate on the "priority" field.
+func PriorityIn(vs ...int) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldIn(FieldPriority, vs...))
+}
+
+// PriorityNotIn applies the NotIn predicate on the "priority" field.
+func PriorityNotIn(vs ...int) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNotIn(FieldPriority, vs...))
+}
+
+// PriorityGT applies the GT predicate on the "priority" field.
+func PriorityGT(v int) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldGT(FieldPriority, v))
+}
+
+// PriorityGTE applies the GTE predicate on the "priority" field.
+func PriorityGTE(v int) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldGTE(FieldPriority, v))
+}
+
+// PriorityLT applies the LT predicate on the "priority" field.
+func PriorityLT(v int) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldLT(FieldPriority, v))
+}
+
+// PriorityLTE applies the LTE predicate on the "priority" field.
+func PriorityLTE(v int) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldLTE(FieldPriority, v))
 }
 
 // NotesEQ applies the EQ predicate on the "notes" field.

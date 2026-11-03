@@ -45,6 +45,8 @@ type QuotaKey struct {
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	// Priority holds the value of the "priority" field.
+	Priority int `json:"priority,omitempty"`
 	// Notes holds the value of the "notes" field.
 	Notes *string `json:"notes,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
@@ -80,7 +82,7 @@ func (*QuotaKey) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case quotakey.FieldExhausted:
 			values[i] = new(sql.NullBool)
-		case quotakey.FieldID:
+		case quotakey.FieldID, quotakey.FieldPriority:
 			values[i] = new(sql.NullInt64)
 		case quotakey.FieldCodeEncrypted, quotakey.FieldCodeMAC, quotakey.FieldCodeLast4, quotakey.FieldStatus, quotakey.FieldLastRefreshError, quotakey.FieldDeviceID, quotakey.FieldNotes:
 			values[i] = new(sql.NullString)
@@ -192,6 +194,12 @@ func (_m *QuotaKey) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.UpdatedAt = value.Time
 			}
+		case quotakey.FieldPriority:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field priority", values[i])
+			} else if value.Valid {
+				_m.Priority = int(value.Int64)
+			}
 		case quotakey.FieldNotes:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field notes", values[i])
@@ -288,6 +296,9 @@ func (_m *QuotaKey) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("updated_at=")
 	builder.WriteString(_m.UpdatedAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("priority=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Priority))
 	builder.WriteString(", ")
 	if v := _m.Notes; v != nil {
 		builder.WriteString("notes=")

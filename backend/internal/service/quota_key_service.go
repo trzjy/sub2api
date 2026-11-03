@@ -54,6 +54,11 @@ type QuotaKeyRepository interface {
 	// 不得绕回默认 client 走锁外独立提交——否则管理员的日期编辑可越过来源观测的同 key 串行边界
 	// （§25.14-C / §25.17.6）。仓储实现在 tx 为 nil 时失败关闭，不退化为锁外写。
 	UpdateMeta(ctx context.Context, tx *ent.Tx, id int64, expiresAt **time.Time, notes **string) error
+	// UpdatePriority 在**调用方已开启的事务内**改写激活码优先级，并同步该码名下未软删账号
+	// 的 accounts.priority（"码的优先级 = 码下账号的优先级"，用户裁定 2026-11-03）。
+	// 只改 priority 一列；返回同步的账号行数。tx 必填（元数据编辑与拉号共用同一 per-key
+	// 串行边界，不得绕回默认 client 锁外独立提交）。
+	UpdatePriority(ctx context.Context, tx *ent.Tx, id int64, priority int) (int, error)
 	ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error)
 	// ListAccountsByQuotaKeys 批量返回归属给定激活码的账号（一次 QuotaKeyIDIn 查询），
 	// 供 List 端点按 quota_key_id 分组聚合计数，避免逐激活码查询退化为 N+1。
@@ -546,7 +551,13 @@ func (s *QuotaKeyService) List(ctx context.Context) ([]*QuotaKeyStatus, error) {
 //
 // 明文 code 只进不出：加密后仅以密文/last4/MAC 形态入库，返回值一律脱敏，
 // 明文绝不进入任何返回值或日志（F1）。新激活码默认 status=active。
-func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *time.Time, notes *string) (*QuotaKeyStatus, error) {
+//
+// priority 为该码的调度优先级（数值越小越优先）；<=0 时按列默认值 1 落库，
+// 该值会成为本码拉出账号的入库优先级（用户裁定 2026-11-03）。
+func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *time.Time, notes *string, priority int) (*QuotaKeyStatus, error) {
+	if priority < 0 {
+		return nil, errors.New("quota_key_service: priority must not be negative")
+	}
 	enc, err := s.enc.Encrypt([]byte(code))
 	if err != nil {
 		return nil, err
@@ -561,6 +572,7 @@ func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *ti
 		Status:        domain.QuotaKeyStatusActive,
 		ExpiresAt:     expiresAt,
 		Notes:         notes,
+		Priority:      priority,
 	})
 	if err != nil {
 		return nil, err
@@ -577,7 +589,10 @@ func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *ti
 // 此前 rotate 的锁内提交与 UpdateMeta 的锁外默认 client 提交是分离的两笔，管理员的日期编辑
 // 可以在 Probe 持锁等待 lookup 期间提交，再被 Probe 的旧观测结果覆盖。
 // 凭据写本体复用 writeCredentialsLocked（同 key 锁内），不再嵌套取同 key 锁。
-func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, expiresAt **time.Time, notes **string) (*QuotaKeyStatus, error) {
+func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, expiresAt **time.Time, notes **string, priority *int) (*QuotaKeyStatus, error) {
+	if priority != nil && *priority <= 0 {
+		return nil, errors.New("quota_key_service: priority must be positive")
+	}
 	obs, err := asObservationRepo(s.repo)
 	if err != nil {
 		return nil, err
@@ -593,7 +608,7 @@ func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, ex
 		codeMAC = quotaKeyMACOfPlaintext(*code)
 		codeLast4 = last4Of(*code)
 	}
-	if code != nil || expiresAt != nil || notes != nil {
+	if code != nil || expiresAt != nil || notes != nil || priority != nil {
 		lockCtx := ctx
 		if lockCtx == nil {
 			lockCtx = context.Background()
@@ -614,6 +629,13 @@ func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, ex
 			}
 			if expiresAt != nil || notes != nil {
 				if werr := s.repo.UpdateMeta(lockCtx, tx, id, expiresAt, notes); werr != nil {
+					return werr
+				}
+			}
+			// 优先级与名下账号同事务同步：码的优先级即码下账号的优先级（用户裁定 2026-11-03）。
+			// 未软删账号全部改写；软删账号不改（其调度资格已失效）。
+			if priority != nil {
+				if _, werr := s.repo.UpdatePriority(lockCtx, tx, id, *priority); werr != nil {
 					return werr
 				}
 			}
@@ -1655,6 +1677,7 @@ func quotaKeyToStatus(qk *ent.QuotaKey) *QuotaKeyStatus {
 		CodeValueMasked:  maskCodeValue(qk.CodeLast4),
 		ExpiresAt:        qk.ExpiresAt,
 		Notes:            qk.Notes,
+		Priority:         qk.Priority,
 	}
 }
 
@@ -2149,9 +2172,14 @@ func isCooldownRefreshError(errStr *string) bool {
 //     其时间流逝不产生任何限频豁免（不进入冷却窗口判定，窗口仅认冷却类错误）；
 //     真正被上方查询排除的是两类已确认事实：status 已非 active（含上游确认过期的 expired）
 //     与插入失败标记的 exhausted=true。
+//
+// 优先级顺序（用户裁定 2026-11-03）：候选按 quota_keys.priority 升序（数值越小越优先），
+// 同优先级按 id 升序稳定输出。这样补池时先拉"优先码"（日限额码）的号，月总限额码排在后面
+// 作为兜底；配合账号入库优先级跟随码优先级，调度层同样先消耗优先码的号。
 func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, limit int) ([]int64, error) {
 	now := time.Now()
 	keys, err := w.client.QuotaKey.Query().
+		Order(ent.Asc(quotakey.FieldPriority), ent.Asc(quotakey.FieldID)).
 		Where(
 			quotakey.Status(domain.QuotaKeyStatusActive),
 			quotakey.Exhausted(false),

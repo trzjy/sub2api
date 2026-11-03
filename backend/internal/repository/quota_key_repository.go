@@ -63,7 +63,27 @@ func (r *quotaKeyRepository) Create(ctx context.Context, input service.CreateQuo
 	if input.Notes != nil {
 		q = q.SetNillableNotes(input.Notes)
 	}
+	if input.Priority > 0 {
+		q = q.SetPriority(input.Priority)
+	}
 	return q.Save(ctx)
+}
+
+// UpdatePriority 在同一事务内改写激活码优先级，并把该码名下**未软删**账号的
+// accounts.priority 同步为该值（"码的优先级 = 码下账号的优先级"，用户裁定 2026-11-03）。
+//
+// 口径：
+//   - 只改 priority 一列，不触碰 status / exhausted / expires_at / 额度快照；
+//   - 软删账号不参与同步（其调度资格已失效，不改写历史行）；
+//   - 返回实际同步的账号行数，供调用方判断影响面。
+func (r *quotaKeyRepository) UpdatePriority(ctx context.Context, tx *ent.Tx, id int64, priority int) (int, error) {
+	if _, err := tx.QuotaKey.UpdateOneID(id).SetPriority(priority).Save(ctx); err != nil {
+		return 0, err
+	}
+	return tx.Account.Update().
+		Where(account.QuotaKeyID(id), account.DeletedAtIsNil()).
+		SetPriority(priority).
+		Save(ctx)
 }
 
 // UpdateStatusFields 在事务内更新拉号状态相关字段。tx 为调用方已开启的事务。

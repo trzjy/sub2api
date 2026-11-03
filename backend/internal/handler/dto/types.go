@@ -577,6 +577,9 @@ type QuotaKey struct {
 	LastRefreshAt    *time.Time `json:"last_refresh_at,omitempty"`
 	LastRefreshError string     `json:"last_refresh_error,omitempty"`
 	Notes            *string    `json:"notes,omitempty"`
+	// Priority 是激活码优先级（数值越小越优先，与 accounts.priority 同义）。该码名下账号的
+	// priority 跟随此值。不加 omitempty：1 是有效值，前端需要稳定拿到当前档位。
+	Priority int `json:"priority"`
 }
 
 type AccountGroup struct {

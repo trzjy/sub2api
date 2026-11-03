@@ -375,16 +375,55 @@ func (s *CursorAutoEntryService) ApplyEntryDefaults(ctx context.Context, tx *ent
 	if account == nil {
 		return nil, fmt.Errorf("cursor_auto_entry: nil account")
 	}
-	if err := s.writer.ApplyEntryDefaults(ctx, tx, account.ID, CursorEntryPriority, CursorEntryRateMultiplier, nil); err != nil {
+	// 入库优先级跟随所属激活码（用户裁定 2026-11-03）：码的 priority 直接成为账号
+	// 的 accounts.priority，使"日限额码优先消耗、月总限额码兜底"在账号调度层生效。
+	priority, perr := s.entryPriorityFor(ctx, tx, account)
+	if perr != nil {
+		return nil, perr
+	}
+	if err := s.writer.ApplyEntryDefaults(ctx, tx, account.ID, priority, CursorEntryRateMultiplier, nil); err != nil {
 		return nil, fmt.Errorf("cursor_auto_entry: apply entry defaults to account %d: %w", account.ID, err)
 	}
 	// 回填内存实体，便于调用方继续复用（如挂组）。
 	// 注：此处 account 为 *ent.Account（ent ORM 实体，单次请求内新建/加载、随请求结束即弃），
 	// 并非并发收口机制所保护的 service.Account，属请求局部实体，直接写字段为正当保留。
-	account.Priority = CursorEntryPriority
+	account.Priority = priority
 	account.RateMultiplier = CursorEntryRateMultiplier
 	// concurrency 不回填：保留列默认 3，避免以零值覆盖。
 	return account, nil
+}
+
+// entryPriorityFor 取账号所属激活码的优先级（数值越小越优先）。
+//
+// 账号强制归属激活码（quota_key_id 非空）；取不到归属或未配置仓储/ent client
+// （单测内存替身装配）时退回入库常量 CursorEntryPriority，行为与接入前一致。
+// 读库失败（非"不存在"）如实上抛：不得用常量静默顶替未知归属。
+func (s *CursorAutoEntryService) entryPriorityFor(ctx context.Context, tx *ent.Tx, account *ent.Account) (int, error) {
+	if account == nil || account.QuotaKeyID == nil {
+		return CursorEntryPriority, nil
+	}
+	var (
+		qk  *ent.QuotaKey
+		err error
+	)
+	switch {
+	case tx != nil:
+		qk, err = tx.QuotaKey.Get(ctx, *account.QuotaKeyID)
+	case s.client != nil:
+		qk, err = s.client.QuotaKey.Get(ctx, *account.QuotaKeyID)
+	default:
+		return CursorEntryPriority, nil
+	}
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return CursorEntryPriority, nil
+		}
+		return 0, fmt.Errorf("cursor_auto_entry: load quota key %d priority: %w", *account.QuotaKeyID, err)
+	}
+	if qk == nil || qk.Priority <= 0 {
+		return CursorEntryPriority, nil
+	}
+	return qk.Priority, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,8 @@ const (
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
 	FieldUpdatedAt = "updated_at"
+	// FieldPriority holds the string denoting the priority field in the database.
+	FieldPriority = "priority"
 	// FieldNotes holds the string denoting the notes field in the database.
 	FieldNotes = "notes"
 	// EdgeAccounts holds the string denoting the accounts edge name in mutations.
@@ -72,6 +74,7 @@ var Columns = []string{
 	FieldUsageSnapshot,
 	FieldCreatedAt,
 	FieldUpdatedAt,
+	FieldPriority,
 	FieldNotes,
 }
 
@@ -115,6 +118,10 @@ var (
 	DefaultUpdatedAt func() time.Time
 	// UpdateDefaultUpdatedAt holds the default value on update for the "updated_at" field.
 	UpdateDefaultUpdatedAt func() time.Time
+	// DefaultPriority holds the default value on creation for the "priority" field.
+	DefaultPriority int
+	// PriorityValidator is a validator for the "priority" field. It is called by the builders before save.
+	PriorityValidator func(int) error
 )
 
 // OrderOption defines the ordering options for the QuotaKey queries.
@@ -183,6 +190,11 @@ func ByCreatedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByUpdatedAt orders the results by the updated_at field.
 func ByUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpdatedAt, opts...).ToFunc()
+}
+
+// ByPriority orders the results by the priority field.
+func ByPriority(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPriority, opts...).ToFunc()
 }
 
 // ByNotes orders the results by the notes field.

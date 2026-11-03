@@ -90,6 +90,10 @@ func (f *fakeQuotaKeyRepo) GetByID(_ context.Context, id int64) (*ent.QuotaKey, 
 
 func (f *fakeQuotaKeyRepo) Create(_ context.Context, input CreateQuotaKeyInput) (*ent.QuotaKey, error) {
 	f.nextID++
+	priority := input.Priority
+	if priority <= 0 {
+		priority = 1 // 列默认值
+	}
 	qk := &ent.QuotaKey{
 		ID:            f.nextID,
 		CodeEncrypted: input.CodeEncrypted,
@@ -98,9 +102,29 @@ func (f *fakeQuotaKeyRepo) Create(_ context.Context, input CreateQuotaKeyInput) 
 		Status:        input.Status,
 		Exhausted:     input.Exhausted,
 		ExpiresAt:     input.ExpiresAt,
+		Priority:      priority,
 	}
 	f.byID[qk.ID] = qk
 	return qk, nil
+}
+
+// UpdatePriority 内存替身：改写码优先级，并同步该码名下未软删账号的 priority
+// （与生产仓储同口径：软删账号不改，返回同步行数）。
+func (f *fakeQuotaKeyRepo) UpdatePriority(_ context.Context, _ *ent.Tx, id int64, priority int) (int, error) {
+	qk, ok := f.byID[id]
+	if !ok {
+		return 0, errQuotaKeyNotFound
+	}
+	qk.Priority = priority
+	synced := 0
+	for _, acc := range f.accounts {
+		if acc == nil || acc.QuotaKeyID == nil || *acc.QuotaKeyID != id || acc.DeletedAt != nil {
+			continue
+		}
+		acc.Priority = priority
+		synced++
+	}
+	return synced, nil
 }
 
 func (f *fakeQuotaKeyRepo) UpdateStatusFields(_ context.Context, _ *ent.Tx, id int64, status string, exhausted bool, lastError *string, lastRefreshAt *time.Time) error {
@@ -1259,7 +1283,7 @@ func TestQuotaKeyService_CreateEncryptsAndMasks(t *testing.T) {
 	enc := testEncryptor{}
 	svc := NewQuotaKeyService(repo, enc, nil, nil)
 
-	dto, err := svc.Create(context.Background(), plain, nil, nil)
+	dto, err := svc.Create(context.Background(), plain, nil, nil, 0)
 	require.NoError(t, err)
 	require.NotNil(t, dto)
 
@@ -1309,7 +1333,7 @@ func TestQuotaKeyService_UpdateReencryptsCode(t *testing.T) {
 	svc := NewQuotaKeyService(repo, enc, nil, nil)
 
 	newCode := "CURSOR-ACTIVATION-CODE-NEW9-7777"
-	dto, err := svc.Update(context.Background(), 1, &newCode, nil, nil)
+	dto, err := svc.Update(context.Background(), 1, &newCode, nil, nil, nil)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, repo.updateCredsCalls, "UpdateCredentials must be called exactly once")
@@ -1340,7 +1364,7 @@ func TestQuotaKeyService_UpdateMetaTriState(t *testing.T) {
 
 	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, nil)
 
-	_, err := svc.Update(context.Background(), 1, nil, nil, nil)
+	_, err := svc.Update(context.Background(), 1, nil, nil, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, 0, repo.updateMetaCalls, "omitted metadata must not call UpdateMeta")
 	require.Equal(t, initialExpiresAt, *repo.byID[1].ExpiresAt)
@@ -1348,7 +1372,7 @@ func TestQuotaKeyService_UpdateMetaTriState(t *testing.T) {
 
 	var clearExpiresAt *time.Time
 	var clearNotes *string
-	_, err = svc.Update(context.Background(), 1, nil, &clearExpiresAt, &clearNotes)
+	_, err = svc.Update(context.Background(), 1, nil, &clearExpiresAt, &clearNotes, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, repo.updateMetaCalls)
 	require.Nil(t, repo.byID[1].ExpiresAt, "explicit null must clear expires_at")
@@ -1358,7 +1382,7 @@ func TestQuotaKeyService_UpdateMetaTriState(t *testing.T) {
 	notes := "rotation note"
 	expiresAtValue := &expiresAt
 	notesValue := &notes
-	dto, err := svc.Update(context.Background(), 1, nil, &expiresAtValue, &notesValue)
+	dto, err := svc.Update(context.Background(), 1, nil, &expiresAtValue, &notesValue, nil)
 	require.NoError(t, err)
 	require.Equal(t, 2, repo.updateMetaCalls)
 
@@ -1419,7 +1443,7 @@ func TestQuotaKeyService_ShortCodeNeverLeaksPlaintext(t *testing.T) {
 	svc := NewQuotaKeyService(repo, enc, nil, nil)
 
 	for _, code := range shortCodes {
-		dto, err := svc.Create(context.Background(), code, nil, nil)
+		dto, err := svc.Create(context.Background(), code, nil, nil, 0)
 		require.NoError(t, err, "Create must accept short code %q without error", code)
 		require.NotNil(t, dto)
 		// 不得包含原文任何字符（逐字符校验，杜绝部分泄露）。
@@ -3136,7 +3160,7 @@ func TestQuotaKeyUpdateCode_UsesSameAtomicCredentialWrite(t *testing.T) {
 	svc := NewQuotaKeyService(repo, testEncryptor{}, nil, nil)
 
 	newCode := "JG-NEW-CODE"
-	_, err := svc.Update(context.Background(), 7, &newCode, nil, nil)
+	_, err := svc.Update(context.Background(), 7, &newCode, nil, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, repo.clearSnapshotCalls, "Update(code) 必须与 RotateCredentials 同一边界")
 	require.Nil(t, repo.byID[7].UsageSnapshot)
@@ -3144,7 +3168,7 @@ func TestQuotaKeyUpdateCode_UsesSameAtomicCredentialWrite(t *testing.T) {
 	// 同一 code 再提交一次：不清快照。
 	mustSeedSnapshotKey(repo, 7, "JG-NEW-CODE")
 	before := []byte(repo.byID[7].UsageSnapshot)
-	_, err = svc.Update(context.Background(), 7, &newCode, nil, nil)
+	_, err = svc.Update(context.Background(), 7, &newCode, nil, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, repo.clearSnapshotCalls, "同 MAC 不得再清快照")
 	require.Equal(t, before, []byte(repo.byID[7].UsageSnapshot))
@@ -3160,7 +3184,7 @@ func TestQuotaKeyUpdateMeta_DoesNotTouchSnapshot(t *testing.T) {
 
 	expires := time.Date(2030, 5, 1, 0, 0, 0, 0, time.UTC)
 	expPtr := &expires
-	_, err := svc.Update(context.Background(), 9, nil, &expPtr, nil)
+	_, err := svc.Update(context.Background(), 9, nil, &expPtr, nil, nil)
 	require.NoError(t, err)
 	require.Zero(t, repo.clearSnapshotCalls)
 	require.Zero(t, repo.updateCredsCalls, "无 code 时不得写凭据")

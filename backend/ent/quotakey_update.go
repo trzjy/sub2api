@@ -237,6 +237,27 @@ func (_u *QuotaKeyUpdate) SetUpdatedAt(v time.Time) *QuotaKeyUpdate {
 	return _u
 }
 
+// SetPriority sets the "priority" field.
+func (_u *QuotaKeyUpdate) SetPriority(v int) *QuotaKeyUpdate {
+	_u.mutation.ResetPriority()
+	_u.mutation.SetPriority(v)
+	return _u
+}
+
+// SetNillablePriority sets the "priority" field if the given value is not nil.
+func (_u *QuotaKeyUpdate) SetNillablePriority(v *int) *QuotaKeyUpdate {
+	if v != nil {
+		_u.SetPriority(*v)
+	}
+	return _u
+}
+
+// AddPriority adds value to the "priority" field.
+func (_u *QuotaKeyUpdate) AddPriority(v int) *QuotaKeyUpdate {
+	_u.mutation.AddPriority(v)
+	return _u
+}
+
 // SetNotes sets the "notes" field.
 func (_u *QuotaKeyUpdate) SetNotes(v string) *QuotaKeyUpdate {
 	_u.mutation.SetNotes(v)
@@ -372,6 +393,11 @@ func (_u *QuotaKeyUpdate) check() error {
 			return &ValidationError{Name: "device_id", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.device_id": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.Priority(); ok {
+		if err := quotakey.PriorityValidator(v); err != nil {
+			return &ValidationError{Name: "priority", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.priority": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -451,6 +477,12 @@ func (_u *QuotaKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(quotakey.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.Priority(); ok {
+		_spec.SetField(quotakey.FieldPriority, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedPriority(); ok {
+		_spec.AddField(quotakey.FieldPriority, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.Notes(); ok {
 		_spec.SetField(quotakey.FieldNotes, field.TypeString, value)
@@ -729,6 +761,27 @@ func (_u *QuotaKeyUpdateOne) SetUpdatedAt(v time.Time) *QuotaKeyUpdateOne {
 	return _u
 }
 
+// SetPriority sets the "priority" field.
+func (_u *QuotaKeyUpdateOne) SetPriority(v int) *QuotaKeyUpdateOne {
+	_u.mutation.ResetPriority()
+	_u.mutation.SetPriority(v)
+	return _u
+}
+
+// SetNillablePriority sets the "priority" field if the given value is not nil.
+func (_u *QuotaKeyUpdateOne) SetNillablePriority(v *int) *QuotaKeyUpdateOne {
+	if v != nil {
+		_u.SetPriority(*v)
+	}
+	return _u
+}
+
+// AddPriority adds value to the "priority" field.
+func (_u *QuotaKeyUpdateOne) AddPriority(v int) *QuotaKeyUpdateOne {
+	_u.mutation.AddPriority(v)
+	return _u
+}
+
 // SetNotes sets the "notes" field.
 func (_u *QuotaKeyUpdateOne) SetNotes(v string) *QuotaKeyUpdateOne {
 	_u.mutation.SetNotes(v)
@@ -877,6 +930,11 @@ func (_u *QuotaKeyUpdateOne) check() error {
 			return &ValidationError{Name: "device_id", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.device_id": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.Priority(); ok {
+		if err := quotakey.PriorityValidator(v); err != nil {
+			return &ValidationError{Name: "priority", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.priority": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -973,6 +1031,12 @@ func (_u *QuotaKeyUpdateOne) sqlSave(ctx context.Context) (_node *QuotaKey, err 
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(quotakey.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.Priority(); ok {
+		_spec.SetField(quotakey.FieldPriority, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedPriority(); ok {
+		_spec.AddField(quotakey.FieldPriority, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.Notes(); ok {
 		_spec.SetField(quotakey.FieldNotes, field.TypeString, value)

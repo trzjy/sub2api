@@ -2104,6 +2104,12 @@ func init() {
 	quotakey.DefaultUpdatedAt = quotakeyDescUpdatedAt.Default.(func() time.Time)
 	// quotakey.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	quotakey.UpdateDefaultUpdatedAt = quotakeyDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// quotakeyDescPriority is the schema descriptor for priority field.
+	quotakeyDescPriority := quotakeyFields[12].Descriptor()
+	// quotakey.DefaultPriority holds the default value on creation for the priority field.
+	quotakey.DefaultPriority = quotakeyDescPriority.Default.(int)
+	// quotakey.PriorityValidator is a validator for the "priority" field. It is called by the builders before save.
+	quotakey.PriorityValidator = quotakeyDescPriority.Validators[0].(func(int) error)
 	redeembatchFields := schema.RedeemBatch{}.Fields()
 	_ = redeembatchFields
 	// redeembatchDescName is the schema descriptor for name field.

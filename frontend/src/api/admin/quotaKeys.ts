@@ -39,6 +39,9 @@ export interface QuotaKey {
   account_count?: number
   working_count?: number
   notes?: string | null
+  // 激活码优先级（数值越小越优先，与账号 priority 同义）。该码名下账号的优先级跟随此值：
+  // 拉号入库时写入，修改时后端同事务同步（日限额码取小值优先消耗，月总限额码取大值兜底）。
+  priority: number
   // 来源额度快照投影（方案 §25.6 消费闭包⑤ / §25.7-B）。
   // 口径：quota_keys.usage_snapshot 的**已提交**值，列表/详情/probe 与账号行同源同值。
   // 无快照时省略（不是 0）；查询失败时 total/used 是上次成功值，须带时间并标注失败。
@@ -73,12 +76,16 @@ export interface CreateQuotaKeyRequest {
   code: string
   expires_at?: string | null
   notes?: string | null
+  /** 调度优先级（数值越小越优先）；缺省不传时后端按默认 1 落库。 */
+  priority?: number
 }
 
-/** 编辑激活码请求（仅允许 expires_at / notes）。 */
+/** 编辑激活码请求（expires_at / notes / priority）。 */
 export interface UpdateQuotaKeyRequest {
   expires_at?: string | null
   notes?: string | null
+  /** 不传表示不改；传值时后端同事务同步该码名下账号的 priority。 */
+  priority?: number
 }
 
 export interface QuotaKeyListResponse {

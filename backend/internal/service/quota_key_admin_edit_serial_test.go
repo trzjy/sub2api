@@ -159,7 +159,7 @@ func TestQuotaKeyService_AdminEditExpiresAtWaitsForProbeLock_AdminValueWins(t *t
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, adminErr = f.svc.Update(ctx, f.keyID, nil, adminArg, nil)
+		_, adminErr = f.svc.Update(ctx, f.keyID, nil, adminArg, nil, nil)
 		close(adminDone)
 	}()
 
@@ -199,7 +199,7 @@ func TestQuotaKeyService_ProbeAfterAdminCommitStillWritesUpstreamExpiry(t *testi
 
 	adminValue := time.Date(2027, 3, 15, 0, 0, 0, 0, time.UTC)
 	adminExpires := &adminValue
-	_, err := f.svc.Update(ctx, f.keyID, nil, &adminExpires, nil)
+	_, err := f.svc.Update(ctx, f.keyID, nil, &adminExpires, nil, nil)
 	require.NoError(t, err)
 
 	// Probe 在管理员提交**之后**才开始：不得被锁挡住，也不得被当作冲突拒绝。

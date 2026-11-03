@@ -142,6 +142,17 @@ func (QuotaKey) Fields() []ent.Field {
 			Default(time.Now).
 			UpdateDefault(time.Now).
 			SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),
+		// priority：激活码优先级，数值越小越优先（与 accounts.priority 同一语义）。
+		//
+		// 该值直接作为本激活码拉出的账号的入库优先级：拉号时取本列覆盖入库常量，
+		// 修改本列时同步刷新名下未删除账号的 accounts.priority，使"码的优先级"与
+		// "码下账号的优先级"始终一致（用户裁定 2026-11-03）。
+		//
+		// 业务口径：日限额激活码取小值（优先消耗），月总限额激活码取大值（兜底补充）。
+		// 默认 1 与既有入库常量 CursorEntryPriority 相同，保证存量行为不变。
+		field.Int("priority").
+			Default(1).
+			Min(1),
 		// notes：admin 备注。
 		field.String("notes").
 			Optional().
