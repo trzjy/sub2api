@@ -531,10 +531,10 @@ func (s *AntigravityGatewayService) buildClaudeTestRequest(ctx context.Context, 
 		Messages: []antigravity.ClaudeMessage{
 			{
 				Role:    "user",
-				Content: json.RawMessage(`"."`),
+				Content: json.RawMessage(`"hi"`),
 			},
 		},
-		MaxTokens: 1,
+		MaxTokens: 16,
 		Stream:    false,
 	}
 	transformOpts := s.getClaudeTransformOptions(ctx)
