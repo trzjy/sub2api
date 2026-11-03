@@ -402,7 +402,7 @@ func (s *AntigravityGatewayService) TestConnectionWithPrompt(ctx context.Context
 		requestBody, err = s.buildGeminiTestRequestWithPrompt(projectID, mappedModel, prompt)
 	} else {
 		inboundProtocol = "claude"
-		requestBody, err = s.buildClaudeTestRequest(ctx, projectID, mappedModel)
+		requestBody, err = s.buildClaudeTestRequest(ctx, projectID, mappedModel, prompt)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("构建请求失败: %w", err)
@@ -528,16 +528,21 @@ func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, 
 // buildClaudeTestRequest 构建 Claude 格式测试请求并转换为 Gemini 格式（真实入站链路）。
 // 与真实 Forward（antigravity_gateway_claude.go）保持一致：必须注入 TransformOptions
 // 且 EnableIdentityPatch=true（Antigravity 上游必需）。使用最小 token 消耗：输入 "." + MaxTokens: 1。
-func (s *AntigravityGatewayService) buildClaudeTestRequest(ctx context.Context, projectID, mappedModel string) ([]byte, error) {
+func (s *AntigravityGatewayService) buildClaudeTestRequest(ctx context.Context, projectID, mappedModel string, prompt string) ([]byte, error) {
+	testPrompt := strings.TrimSpace(prompt)
+	if testPrompt == "" {
+		testPrompt = "hi"
+	}
+	promptBytes, _ := json.Marshal(testPrompt)
 	claudeReq := &antigravity.ClaudeRequest{
 		Model: mappedModel,
 		Messages: []antigravity.ClaudeMessage{
 			{
 				Role:    "user",
-				Content: json.RawMessage(`"hi"`),
+				Content: json.RawMessage(promptBytes),
 			},
 		},
-		MaxTokens: 16,
+		MaxTokens: 64,
 		Stream:    false,
 	}
 	transformOpts := s.getClaudeTransformOptions(ctx)
@@ -613,8 +618,11 @@ func extractContentFromSSEResponse(respBody []byte) (string, []TestConnectionIma
 
 		for _, part := range parts {
 			if partMap, ok := part.(map[string]any); ok {
+				// 支持常规 text 字段与 Claude 转换链路中的文本/思考片段
 				if text, ok := partMap["text"].(string); ok && text != "" {
 					texts = append(texts, text)
+				} else if thought, ok := partMap["thought"].(string); ok && thought != "" {
+					texts = append(texts, thought)
 				}
 				if inlineData, ok := partMap["inlineData"].(map[string]any); ok {
 					mimeType, _ := inlineData["mimeType"].(string)

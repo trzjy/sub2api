@@ -29,7 +29,7 @@ func TestAntigravityBuildClaudeTestRequest_RealInboundLink(t *testing.T) {
 			t.Parallel()
 
 			svc := &AntigravityGatewayService{}
-			raw, err := svc.buildClaudeTestRequest(context.Background(), "proj-123", model)
+			raw, err := svc.buildClaudeTestRequest(context.Background(), "proj-123", model, "")
 			require.NoError(t, err)
 
 			var v1Req map[string]any
