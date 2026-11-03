@@ -4179,9 +4179,11 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	// 拒付）→ 统一中文终态 CUR-RES-11，绝不把 unknown_association 或上游原文暴露给用户。
 	// 其它平台的换号耗尽路径保持原样（仅按 Reason 命中 Cursor 语义时生效）。
 	if failoverErr != nil && service.IsCursorQuotaExhaustedReason(failoverErr.Reason) {
+		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
 		message := cursorPoolExhaustedMessage(c)
-		service.SetOpsUpstreamError(c, http.StatusServiceUnavailable, message, "")
-		h.handleStreamingAwareErrorWithCode(c, http.StatusServiceUnavailable, "server_error",
+		status := cursorPoolExhaustedStatus(failoverErr)
+		service.SetOpsUpstreamError(c, status, message, "")
+		h.handleStreamingAwareErrorWithCode(c, status, "server_error",
 			infraerrors.CursorResPoolExhaustedCode, message, streamStarted, false)
 		return
 	}

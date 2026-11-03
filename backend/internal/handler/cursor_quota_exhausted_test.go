@@ -30,20 +30,20 @@ func TestCursorQuotaExhaustedChatCompletions(t *testing.T) {
 
 	(&GatewayHandler{}).handleCCFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 	require.Contains(t, recorder.Body.String(), `"type":"server_error"`)
 }
 
 // TestCursorQuotaExhaustedChatCompletionsDefaultsTo429 verifies that
-// cursor_quota_exhausted defaults to 429 when ClientStatusCode is unset.
+// cursor_quota_exhausted defaults to 429 when neither ClientStatusCode nor StatusCode is set.
 func TestCursorQuotaExhaustedChatCompletionsDefaultsTo429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
 	failoverErr := &service.UpstreamFailoverError{
-		StatusCode:        http.StatusBadGateway,
+		StatusCode:        0,
 		Reason:            "cursor_quota_exhausted",
 		ClientStatusCode:  0,
 		ClientMessage:     "cursor 账号额度耗尽，已停止调度",
@@ -52,7 +52,7 @@ func TestCursorQuotaExhaustedChatCompletionsDefaultsTo429(t *testing.T) {
 
 	(&GatewayHandler{}).handleCCFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 }
 
@@ -73,20 +73,20 @@ func TestCursorQuotaExhaustedResponses(t *testing.T) {
 
 	(&GatewayHandler{}).handleResponsesFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 	require.Contains(t, recorder.Body.String(), `"code":"server_error"`)
 }
 
 // TestCursorQuotaExhaustedResponsesDefaultsTo429 verifies that
-// cursor_quota_exhausted defaults to 429 when ClientStatusCode is unset.
+// cursor_quota_exhausted defaults to 429 when neither ClientStatusCode nor StatusCode is set.
 func TestCursorQuotaExhaustedResponsesDefaultsTo429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
 	failoverErr := &service.UpstreamFailoverError{
-		StatusCode:        http.StatusBadGateway,
+		StatusCode:        0,
 		Reason:            "cursor_quota_exhausted",
 		ClientStatusCode:  0,
 		ClientMessage:     "cursor 账号额度耗尽，已停止调度",
@@ -95,7 +95,7 @@ func TestCursorQuotaExhaustedResponsesDefaultsTo429(t *testing.T) {
 
 	(&GatewayHandler{}).handleResponsesFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 }
 
@@ -116,20 +116,20 @@ func TestCursorQuotaExhaustedOpenAIGateway(t *testing.T) {
 
 	(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 	require.Contains(t, recorder.Body.String(), `"type":"server_error"`)
 }
 
 // TestCursorQuotaExhaustedOpenAIGatewayDefaultsTo429 verifies that
-// cursor_quota_exhausted defaults to 429 when ClientStatusCode is unset.
+// cursor_quota_exhausted defaults to 429 when neither ClientStatusCode nor StatusCode is set.
 func TestCursorQuotaExhaustedOpenAIGatewayDefaultsTo429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
 	failoverErr := &service.UpstreamFailoverError{
-		StatusCode:        http.StatusBadGateway,
+		StatusCode:        0,
 		Reason:            "cursor_quota_exhausted",
 		ClientStatusCode:  0,
 		ClientMessage:     "cursor 账号额度耗尽，已停止调度",
@@ -138,7 +138,7 @@ func TestCursorQuotaExhaustedOpenAIGatewayDefaultsTo429(t *testing.T) {
 
 	(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, failoverErr, false)
 
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Contains(t, recorder.Body.String(), infraerrors.CursorResPoolExhausted)
 }
 

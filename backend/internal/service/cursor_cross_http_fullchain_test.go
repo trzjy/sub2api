@@ -1162,3 +1162,82 @@ func TestCursorResumeGateDeniedAfterCompleteUsageSettlesOnce(t *testing.T) {
 		})
 	}
 }
+
+// ===========================================================================
+// 7. 孤儿续轮（本站无会话登记）+ 完整历史 → 真的新建 AgentRun 并交付内容
+// ===========================================================================
+//
+// 生产事故的核心疑虑不是"准入是否放行"，而是"放行后到底有没有真的跑起来"。
+// 本用例用**空的会话表**直接走 Execute（等价于站点重启/会话已被清理后客户端原样重试）：
+// 请求体是 cursorFullChainResumeBody —— assistant tool_calls + 对应 tool 结果的完整历史，
+// 但本站没有任何会话登记。断言必须看到新 AgentRun、真实工具交接与已登记的新会话。
+//
+// 反证（historyComplete=false：只有孤儿 tool 结果、正文无对应 tool_calls）已在
+// cursor_resume_digest_test.go 的 TestCursorResumeRestartOrphanAllProtocolsRejected
+// 覆盖（四协议均 400 ErrCursorResumeUnknownAssociation），此处不重复。
+func TestCursorRebuildOrphanFullHistoryStartsFreshAgentRun(t *testing.T) {
+	calls := []cursorFullChainCall{{
+		CallID: "call_1", Name: "get_weather", City: "hangzhou", ExecID: 101, IDField: []byte("exec-101"),
+	}}
+	upstream := newCursorFullChainUpstream(cursorFullChainScript{
+		calls:     calls,
+		afterText: "Hangzhou is sunny, 25C",
+		usage:     [4]uint64{12601, 15, 128, 0},
+	})
+	svc := newCursorFullChainService(t, upstream)
+
+	// 关键前提：新服务实例的会话表为空 —— 这是"本站没有任何会话登记"的孤儿形状。
+	require.Zero(t, svc.sessions.sessionCount(), "用例前提：会话表必须为空")
+	require.Zero(t, svc.sessions.indexCount(), "用例前提：统一索引必须为空")
+
+	body := cursorFullChainResumeBody(calls, map[string]string{"call_1": "sunny, 25C"})
+	var ccReq apicompat.ChatCompletionsRequest
+	require.NoError(t, json.Unmarshal([]byte(body), &ccReq))
+	plan, planErr := cursorPlanFromChat(&ccReq, "cursor-sonnet")
+	require.NoError(t, planErr)
+	require.True(t, plan.claimsContinuation(), "正文必须声明续轮（携带本批工具结果）")
+	require.True(t, plan.historySupportsRebuild(), "正文必须携带可独立重建的完整历史")
+
+	// 用有界 ctx 收尾：即便上游在交付批次后等待写回，也不让用例挂到上游的 10s 兜底。
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	result, execErr := svc.Execute(ctx, c, cursorFullChainAccount(), &CursorExecutionRequest{
+		Chat:      &ccReq,
+		Model:     "cursor-sonnet",
+		Stream:    true,
+		StartTime: time.Now(),
+		Protocol:  cursorProtocolChat,
+		Identity:  cursorFullChainIdentity,
+		Plan:      plan,
+	})
+
+	// ① 不得按"未知关联"拒绝；更不得以 400 失败关闭。
+	require.NotErrorIs(t, execErr, ErrCursorResumeUnknownAssociation,
+		"完整历史的孤儿续轮不得返回 ErrCursorResumeUnknownAssociation")
+	if execErr != nil {
+		status, _ := CursorResumeHTTPStatus(execErr)
+		require.NotEqual(t, http.StatusBadRequest, status, "完整历史的孤儿续轮不得按 400 拒绝")
+	}
+	require.NoError(t, execErr, "完整历史的孤儿续轮必须真的重建并交付工具批")
+	require.NotNil(t, result)
+
+	// ② 真的发起了新 AgentRun（不是复用/空转）。
+	require.Equal(t, 1, upstream.runCount(), "孤儿重建必须真的向原上游发起一次新 AgentRun")
+
+	// ③ 客户端拿得到本轮工具交接。
+	out := w.Body.String()
+	require.Contains(t, out, `"tool_calls"`, "客户端响应必须包含本轮工具交接")
+	require.Contains(t, out, `"call_1"`)
+	require.Contains(t, out, `"finish_reason":"tool_calls"`)
+
+	// ④ 会话已登记，且处于等待工具结果的真实存活态（不是只留墓碑）。
+	require.Greater(t, svc.sessions.sessionCount(), 0, "重建后必须登记新会话")
+	record := onlySession(t, svc)
+	record.mu.Lock()
+	state := record.state
+	record.mu.Unlock()
+	require.Equal(t, cursorSessionWaitingTools, state, "工具批交付后会话必须进入 waiting_tools")
+}

@@ -421,7 +421,8 @@ const (
 
 	// 触发条件：续轮换号重建期间，本请求内所有候选账号都因额度耗尽/拒付被排除
 	// （reason=account_pool_exhausted）。这是池子容量问题，不是用户请求问题；
-	// 绝不把上游原文或 unknown_association 暴露给用户。HTTP 状态沿用换号耗尽既有语义（503）。
+	// 绝不把上游原文或 unknown_association 暴露给用户。HTTP 状态沿用换号错误自带的
+	// ClientStatusCode（cursor 额度耗尽场景为 429 + 可重试提示），仅替换 message。
 	CursorResPoolExhaustedCode = "CUR-RES-11"
 	CursorResPoolExhausted     = "账号池暂无可用的额度，请稍后重试"
 

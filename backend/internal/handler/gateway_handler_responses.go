@@ -513,20 +513,22 @@ func (h *GatewayHandler) responsesErrorResponse(c *gin.Context, status int, code
 
 // handleResponsesFailoverExhausted writes a failover-exhausted error in Responses format.
 func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastErr *service.UpstreamFailoverError, streamStarted bool) {
+	if lastErr != nil {
+		copyFailoverRetryAfter(c, lastErr.ResponseHeaders)
+	}
 	// 2026-11-04 方案 §2.4-7：Cursor 账号池真耗尽统一中文终态 CUR-RES-11。
-	// 放在最前：无论是否已开始流式，都不得透出上游原文或内部 reason，也不得静默 EOF。
+	// 无论是否已开始流式，都不得透出上游原文或内部 reason，也不得静默 EOF；
+	// 状态码沿用换号错误自带值（cursor 额度耗尽为 429），error.type/code 保持原写法。
 	if lastErr != nil && service.IsCursorQuotaExhaustedReason(lastErr.Reason) {
 		message := cursorPoolExhaustedMessage(c)
+		status := cursorPoolExhaustedStatus(lastErr)
 		if streamStarted {
-			service.MarkOpsStreamError(c, "server_error", message, http.StatusServiceUnavailable)
+			service.MarkOpsStreamError(c, "server_error", message, status)
 			writeResponsesFailedSSE(c, "server_error", infraerrors.CursorResPoolExhaustedCode, message)
 			return
 		}
-		h.responsesErrorResponse(c, http.StatusServiceUnavailable, "server_error", message)
+		h.responsesErrorResponse(c, status, "server_error", message)
 		return
-	}
-	if lastErr != nil {
-		copyFailoverRetryAfter(c, lastErr.ResponseHeaders)
 	}
 	statusCode := http.StatusBadGateway
 	if lastErr != nil && lastErr.StatusCode > 0 {

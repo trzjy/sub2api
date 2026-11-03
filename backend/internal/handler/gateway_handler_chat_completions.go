@@ -553,8 +553,9 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 	// CUR-RES-11，不再透出上游原文或内部 reason。
 	if lastErr != nil && service.IsCursorQuotaExhaustedReason(lastErr.Reason) {
 		message := cursorPoolExhaustedMessage(c)
-		service.SetOpsUpstreamError(c, http.StatusServiceUnavailable, message, "")
-		h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "server_error", message)
+		status := cursorPoolExhaustedStatus(lastErr)
+		service.SetOpsUpstreamError(c, status, message, "")
+		h.chatCompletionsErrorResponse(c, status, "server_error", message)
 		return
 	}
 	if lastErr != nil && lastErr.IsCredentialFailure() {

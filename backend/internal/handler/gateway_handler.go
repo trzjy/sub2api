@@ -2098,12 +2098,34 @@ func cursorPoolExhaustedMessage(c *gin.Context) string {
 		pkgerrors.CursorResPoolExhausted, requestID)
 }
 
+// cursorPoolExhaustedStatus 返回 Cursor 池子真耗尽时写回下游的 HTTP 状态码。
+//
+// 契约（docs-local/downstream-error-zh-localization-plan.md §2）：中文化只替换 message，
+// HTTP 状态码 / error.type / 稳定 code 一律沿用换号错误自带的语义。Cursor 额度耗尽错误
+// 在 service 层固定携带 ClientStatusCode=429（CursorQuotaExhaustedReason 分支），
+// 因此全池耗尽也必须给 429 + 可重试提示；ClientStatusCode 未设置时退回 StatusCode。
+func cursorPoolExhaustedStatus(failoverErr *service.UpstreamFailoverError) int {
+	status := 0
+	if failoverErr != nil {
+		status = failoverErr.ClientStatusCode
+		if status <= 0 {
+			status = failoverErr.StatusCode
+		}
+	}
+	if status <= 0 {
+		// 两者都未设置时按 Cursor 额度耗尽的语义固定为 429，不得退化成 5xx。
+		status = http.StatusTooManyRequests
+	}
+	return status
+}
+
 func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, platform string, streamStarted bool) {
 	if failoverErr != nil && service.IsCursorQuotaExhaustedReason(failoverErr.Reason) {
-		// 池子真耗尽（全是额度耗尽/拒付账号）：给中文终态，不暴露上游原文/内部 reason。
+		// 池子真耗尽（全是额度耗尽/拒付账号）：只换中文终态 message，状态码沿用换号错误自带值。
 		message := cursorPoolExhaustedMessage(c)
-		service.SetOpsUpstreamError(c, http.StatusServiceUnavailable, message, "")
-		h.handleStreamingAwareErrorWithCode(c, http.StatusServiceUnavailable, "api_error",
+		status := cursorPoolExhaustedStatus(failoverErr)
+		service.SetOpsUpstreamError(c, status, message, "")
+		h.handleStreamingAwareErrorWithCode(c, status, "api_error",
 			pkgerrors.CursorResPoolExhaustedCode, message, streamStarted)
 		return
 	}
