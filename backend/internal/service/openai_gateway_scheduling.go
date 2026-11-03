@@ -515,7 +515,10 @@ const (
 	// quotaKeyUsageStale 表示成功值 checked_at 缺失或距今超过新鲜窗口：等待
 	// reconciler / 管理员刷新，本函数直接否决（不拿陈旧数值放行）。
 	quotaKeyUsageStale = "quota_key_usage_stale"
-	// quotaKeyUsageExhausted 表示真实剩余 total-used ≤ 0：供应商额度已耗尽。
+	// quotaKeyUsageExhausted 表示真实剩余 total-used 低于调度下限
+	// （cursorQuotaKeyRemainingFloor）：剩余额度已不足以安全承接请求，含 total-used == 0
+	// 的真实耗尽。激活码额度是名下账号共享的总额度池，本原因触发即意味着名下账号全部
+	// 不可调度；快照回升（剩余回到下限之上）后立即自动放行，无需任何额外的恢复动作。
 	quotaKeyUsageExhausted = "quota_key_usage_exhausted"
 	// quotaKeySourceUnbound 表示 cursor 账号没有有效归属激活码（nil / ≤0）：来源不可判定，
 	// 即来源不可用，来源门一律否决（§25.17.3「Cursor 无有效 QuotaKeyID 不得放行」）。
@@ -527,6 +530,17 @@ const (
 	// 真实 0 不是缺失——total=0/used=0 走 quotaKeyUsageExhausted，不得记作本原因。
 	quotaKeyUsageIncomplete = "quota_key_usage_incomplete"
 )
+
+// cursorQuotaKeyRemainingFloor 是 Cursor 激活码**剩余额度**的调度下限（绝对值，不是百分比）。
+//
+// 语义：激活码的 total/used/remaining 是**名下所有账号共享的总额度池**（第一层额度），
+// 与账号自身的日额度（第二层）是 AND 关系——只要激活码侧不可用，其名下账号一律不可用，
+// 哪怕账号自身还有额度。因此这里用绝对值门槛而非占比：一个 total=1000 的码剩 5 次，
+// 与一个 total=20 的码剩 5 次，对调度而言是同一个事实（再调两三次就撞墙）。
+//
+// 判据是「剩余 < 下限」：remaining == 10 放行，remaining <= 9 否决（含 remaining == 0
+// 的真实耗尽）。放宽/收紧只改这一个常量，不要在调用方另加条件。
+const cursorQuotaKeyRemainingFloor = 10
 
 // cursorSupplySourceUsageFreshnessWindow 是成功值 checked_at 的可接受新鲜度（§25.6：
 // 快照/成功值距今超过 5 分钟即等待刷新）。
@@ -548,7 +562,8 @@ var cursorSupplySourceUsageNow = time.Now
 //  6. 最近一次观测失败（error_code 非空）→ 否决（失败关闭，不使用保留数值放行）；
 //  7. 成功值 checked_at 缺失或距今 > 5 分钟 → 否决（等待 reconciler/管理员刷新）；
 //  8. total 或 used 任一缺失 → 否决（剩余额度不可计算）；
-//  9. 真实剩余 total−used ≤ 0 → 否决（真实 0 保持为 0：total=0 不等于字段缺失）。
+//  9. 真实剩余 total−used 低于调度下限 cursorQuotaKeyRemainingFloor（绝对值 10，含
+//     total−used == 0 的真实耗尽）→ 否决。剩余回到下限之上即自动放行。
 //
 // 非 cursor 平台恒返回 ("", nil)（无 Cursor 否决）。本函数不区分"窄目录入口"与"普通调度"：
 // 两种消费方看到完全相同的结论，调用方只能投影 bool/string，不得另加放行条件。
@@ -593,8 +608,9 @@ func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (s
 	if snapshot.Total == nil || snapshot.Used == nil {
 		return quotaKeyUsageIncomplete, nil
 	}
-	// 规则⑨：真实剩余 total-used ≤ 0 → 否决。
-	if (*snapshot.Total - *snapshot.Used) <= 0 {
+	// 规则⑨：真实剩余 total-used 低于调度下限 → 否决（真实 0 保持为 0：total=0 不等于字段
+	// 缺失；剩余 10 放行、剩余 9 否决——下限是绝对值，不按 total 占比折算）。
+	if (*snapshot.Total - *snapshot.Used) < cursorQuotaKeyRemainingFloor {
 		return quotaKeyUsageExhausted, nil
 	}
 	return "", nil

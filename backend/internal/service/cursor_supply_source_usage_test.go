@@ -318,11 +318,15 @@ func TestCursorSupplySourceAvailabilityGateUsageRules(t *testing.T) {
 		require.NotEqual(t, quotaKeyUsageIncomplete, reason, "真实 0 不是字段缺失")
 	})
 
-	t.Run("real zero total with real zero used boundary passes only above zero", func(t *testing.T) {
-		// 边界：total-used==1 仍有剩余 → 放行（0 与 1 的判定必须分开）。
-		reason, err := gate(t, map[int64][]byte{qkID: makeSnap(100, 99, "", freshCheckedAt)})
+	t.Run("remaining floor boundary ten passes nine vetoes", func(t *testing.T) {
+		// 下限是绝对值 10：remaining == 10 放行，remaining == 9 否决。
+		reason, err := gate(t, map[int64][]byte{qkID: makeSnap(100, 90, "", freshCheckedAt)})
 		require.NoError(t, err)
-		require.Empty(t, reason)
+		require.Empty(t, reason, "剩余恰好等于下限放行")
+
+		reason, err = gate(t, map[int64][]byte{qkID: makeSnap(100, 91, "", freshCheckedAt)})
+		require.NoError(t, err)
+		require.Equal(t, quotaKeyUsageExhausted, reason, "剩余低于下限一律否决")
 	})
 
 	t.Run("fresh snapshot with remaining passes", func(t *testing.T) {
@@ -347,6 +351,69 @@ func TestCursorSupplySourceAvailabilityGateUsageRules(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, reason)
 	})
+}
+
+// TestCursorSupplyAvailability_RemainingFloorIsAbsoluteNotPercentage 钉死「激活码剩余额度用
+// **绝对值**下限，不按 total 占比折算」：激活码额度是名下所有账号共享的总额度池（第一层），
+// 一个 total=20 剩 11 的码和一个 total=1000 剩 11 的码对调度是同一个事实（还能调）；
+// 反过来 total=1000 只剩 5 的码，占比上"还没耗尽"，但绝对值已低于下限，同样必须否决。
+func TestCursorSupplyAvailability_RemainingFloorIsAbsoluteNotPercentage(t *testing.T) {
+	const qkID int64 = 42
+	gate := func(t *testing.T, total, used int) string {
+		t.Helper()
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses: map[int64]string{qkID: domain.QuotaKeyStatusActive},
+			snapshots: map[int64][]byte{qkID: []byte(fmt.Sprintf(
+				`{"total":%d,"used":%d,"status_code":200,"checked_at":%q,"error_code":""}`,
+				total, used, time.Now().Add(-time.Minute).Format(time.RFC3339),
+			))},
+		})
+		reason, err := cursorSupplySourceAvailabilityVetoReason(context.Background(), cursorSourceTestAccount(qkID))
+		require.NoError(t, err)
+		return reason
+	}
+
+	t.Run("small pool above floor passes", func(t *testing.T) {
+		// total=20 剩 11：占比已用 45%，但绝对值高于下限 → 放行。
+		require.Empty(t, gate(t, 20, 9))
+	})
+	t.Run("small pool below floor vetoes", func(t *testing.T) {
+		// total=20 剩 8：低于下限 → 否决。
+		require.Equal(t, quotaKeyUsageExhausted, gate(t, 20, 12))
+	})
+	t.Run("large pool with tiny remainder vetoes", func(t *testing.T) {
+		// total=1000 只剩 5（占比 99.5% 已用）：没"耗尽"，但绝对值低于下限 → 否决。
+		// 这一条正是「占比口径」会漏掉的场景：按 used/total 算远不到 100%。
+		require.Equal(t, quotaKeyUsageExhausted, gate(t, 1000, 995))
+	})
+	t.Run("large pool above floor passes", func(t *testing.T) {
+		require.Empty(t, gate(t, 1000, 900))
+	})
+}
+
+// TestCursorSupplyAvailability_SourceRecoveryReleasesVetoWithoutExtraAction 钉死「激活码额度
+// 恢复 → 名下账号自动恢复调度」：来源门每次判定都实时读快照，快照回升到下限之上即放行，
+// 不需要任何额外的巡检 / 定时清除 / 解锁动作——账号没有被写坏，只是这次不被选中。
+func TestCursorSupplyAvailability_SourceRecoveryReleasesVetoWithoutExtraAction(t *testing.T) {
+	const qkID int64 = 42
+	gate := func(t *testing.T, total, used int) string {
+		t.Helper()
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses: map[int64]string{qkID: domain.QuotaKeyStatusActive},
+			snapshots: map[int64][]byte{qkID: []byte(fmt.Sprintf(
+				`{"total":%d,"used":%d,"status_code":200,"checked_at":%q,"error_code":""}`,
+				total, used, time.Now().Add(-time.Minute).Format(time.RFC3339),
+			))},
+		})
+		reason, err := cursorSupplySourceAvailabilityVetoReason(context.Background(), cursorSourceTestAccount(qkID))
+		require.NoError(t, err)
+		return reason
+	}
+
+	// 低水位：否决。
+	require.Equal(t, quotaKeyUsageExhausted, gate(t, 100, 96), "剩余 4 应否决")
+	// 供应商回补额度、快照刷新：同一账号、同一条判定路径，立即放行。
+	require.Empty(t, gate(t, 100, 20), "剩余回升到 80 应自动放行，无需任何解锁动作")
 }
 
 // TestCursorSupplyAvailability_ExhaustedRejectsAccountAvailable 钉死「来源耗尽而账号自身
