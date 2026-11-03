@@ -6686,6 +6686,12 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		return nil, newCursorResumeError(http.StatusBadRequest, "protocol_mismatch", ErrCursorResumeStaleBatch)
 	}
 	if strings.TrimSpace(ticket.Model) != "" && strings.TrimSpace(spec.requestedModel) != strings.TrimSpace(ticket.Model) {
+		// 型号变了同样只留一个 model_changed，线上无法判断是客户端换了模型、还是
+		// 别名/映射解析落到另一个真实型号。两个值都落（都是客户端可见的标识，无敏感内容）。
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "resume_model_changed", spec.requestedModel,
+			zap.String("session_id", record.id),
+			zap.String("model_stored", spec.requestedModel),
+			zap.String("model_ticket", strings.TrimSpace(ticket.Model)))
 		return nil, newCursorResumeError(http.StatusBadRequest, "model_changed", ErrCursorResumeConfigChanged)
 	}
 	// 已被消费的批**先于**摘要校验返回 409：并发重复提交不得因会话历史已推进而报成
@@ -6703,6 +6709,11 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		return nil, newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", modelErr)
 	}
 	if strings.TrimSpace(bodyModel) != "" && strings.TrimSpace(bodyModel) != strings.TrimSpace(spec.requestedModel) {
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "resume_model_changed", spec.requestedModel,
+			zap.String("session_id", record.id),
+			zap.String("model_stored", spec.requestedModel),
+			zap.String("model_ticket", strings.TrimSpace(bodyModel)),
+			zap.String("model_source", "body"))
 		return nil, newCursorResumeError(http.StatusBadRequest, "model_changed", ErrCursorResumeConfigChanged)
 	}
 	plan, planErr := cursorResumePlan(ticket.Protocol, in, bodyModel)
@@ -6736,6 +6747,19 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		if record.batchConsumed() {
 			return nil, newCursorResumeError(http.StatusConflict, "already_consumed", ErrCursorResumeAlreadyConsumed)
 		}
+		// history_mismatch 是线上 CUR-RES-04 的**最大来源**，而旧实现只回一个 reason，
+		// 完全没有办法回答"是客户端少发了历史、多发了一条、还是我们登记错了"。这里落
+		// 两侧项数与摘要前缀（纯计数/哈希前缀，不含任何正文），足以判断方向：
+		//   stored > request → 客户端截断了历史；
+		//   stored < request → 客户端多带了条目（常见于重试时把失败轮也拼进去）；
+		//   项数相同但哈希不同 → 同数量不同内容（重排/改字/换序列化）。
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "resume_history_mismatch", spec.requestedModel,
+			zap.String("session_id", record.id),
+			zap.Int("history_items_stored", storedHistory.ItemCount()),
+			zap.Int("history_items_request", plan.history.ItemCount()),
+			zap.String("history_digest_stored", cursorDigestPrefix(storedHistory)),
+			zap.String("history_digest_request", cursorDigestPrefix(plan.history)),
+			zap.String("protocol", string(ticket.Protocol)))
 		return nil, newCursorResumeError(http.StatusBadRequest, "history_mismatch", ErrCursorResumeHistoryMismatch)
 	}
 	if err := cursorValidateResumeResults(ticket.CallIDs, plan.results); err != nil {

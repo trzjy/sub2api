@@ -739,6 +739,71 @@ func TestCursorResumeConfigDriftLogged(t *testing.T) {
 	})
 }
 
+// TestCursorResumeRejectDiagnosticsLogged 是**拒轮可观测性**的取证：三种拒轮都必须带
+// 可定位字段落盘，否则线上只有 error_code + reason，无法判断是谁改了什么。
+//
+// 这是用生产日志反推出来的需求：部署后 config_changed 归零，但 history_mismatch(30) 与
+// model_changed(12) 各留一堆裸 reason，排查只能靠猜。三者都必须能回答"存量 vs 请求"。
+func TestCursorResumeRejectDiagnosticsLogged(t *testing.T) {
+	t.Run("history_mismatch_logged_with_counts", func(t *testing.T) {
+		core, logs := observer.New(zap.DebugLevel)
+		ctx := logger.IntoContext(context.Background(), zap.New(core))
+
+		fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
+			[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "mc-1", "")
+		// 客户端多带了一条历史（首轮没有的用户消息），项数必然与存量不同。
+		body := `{
+  "model": "cursor-test-model",
+  "messages": [
+    {"role": "user", "content": "weather please"},
+    {"role": "assistant", "content": "let me check"},
+    {"role": "user", "content": "another question"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+  ],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+}`
+		_, err := fixture.resumeCtx(t, ctx, CursorResumeProtocolChat, []byte(body), false)
+		require.ErrorIs(t, err, ErrCursorResumeHistoryMismatch)
+		require.Equal(t, 0, fixture.intake.callCount(), "拒绝必须零上游写入")
+
+		entries := cursorPhaseEntries(logs, "resume_history_mismatch")
+		require.Len(t, entries, 1, "history_mismatch 必须落带字段的诊断事件")
+		fields := entries[0].ContextMap()
+		require.Contains(t, fields, "history_items_stored")
+		require.Contains(t, fields, "history_items_request")
+		require.Contains(t, fields, "history_digest_stored")
+		require.Contains(t, fields, "history_digest_request")
+		require.NotEmpty(t, fields["session_id"])
+	})
+
+	t.Run("model_changed_logged_with_both_models", func(t *testing.T) {
+		core, logs := observer.New(zap.DebugLevel)
+		ctx := logger.IntoContext(context.Background(), zap.New(core))
+
+		fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
+			[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "mc-1", "")
+		body := `{
+  "model": "cursor-other-model",
+  "messages": [
+    {"role": "user", "content": "weather please"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+  ],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+}`
+		_, err := fixture.resumeCtx(t, ctx, CursorResumeProtocolChat, []byte(body), false)
+		require.Error(t, err)
+		require.Equal(t, 0, fixture.intake.callCount())
+
+		entries := cursorPhaseEntries(logs, "resume_model_changed")
+		require.Len(t, entries, 1, "model_changed 必须落带两侧型号的诊断事件")
+		fields := entries[0].ContextMap()
+		require.Equal(t, "cursor-test-model", fields["model_stored"])
+		require.NotEmpty(t, fields["model_ticket"])
+	})
+}
+
 // TestCursorResumeBodyChangedRejected 覆盖清单第 3 条：改正文拒绝。
 func TestCursorResumeBodyChangedRejected(t *testing.T) {
 	fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
