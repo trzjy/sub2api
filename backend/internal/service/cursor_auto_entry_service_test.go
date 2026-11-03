@@ -437,6 +437,69 @@ func TestProbeKeyQuota_WritesSingleCommittedSnapshot(t *testing.T) {
 	require.Zero(t, rollbacks)
 }
 
+// TestProbeKeyQuota_UnusedKeyKeepsExistingExpiry：未使用状态（status_code=0）的激活码，
+// 上游把 activated_at 给成"本次查询时刻"、expired_at 给成"查询时刻 + 30 天"（滚动值）。
+// 本地已有 expires_at 时不得被滚动值覆盖（含管理员手工填写的日期）。
+func TestProbeKeyQuota_UnusedKeyKeepsExistingExpiry(t *testing.T) {
+	body := `{"code":0,"msg":"ok","data":{"key_info":{` +
+		`"group":"Pro","key_status_code":0,"quota_key_max_quota":30000,` +
+		`"quota_key_used_quota":0,"device_count":0,"device_max_count":3,` +
+		`"mode":1,"expired_at":"2026-12-03T13:09:24.788Z"}}}`
+	ls := newLookupServer(t, func() string { return body })
+	repo := newFakeQuotaKeyRepo()
+	existing := time.Date(2026, 12, 3, 20, 33, 44, 0, time.Local)
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", ExpiresAt: &existing}
+
+	svc := newAutoEntryProbeService(ls.srv, repo)
+	_, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.NoError(t, err)
+
+	require.NotNil(t, repo.byID[42].ExpiresAt)
+	require.True(t, existing.Equal(*repo.byID[42].ExpiresAt),
+		"未使用状态的滚动期限不得覆盖本地已有值，实际=%v", repo.byID[42].ExpiresAt)
+	// 额度快照仍照常写入（只冻结期限维度，不冻结观测）。
+	snapshot, ok := ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
+	require.True(t, ok)
+	require.Equal(t, 30000, *snapshot.Total)
+}
+
+// TestProbeKeyQuota_UnusedKeyAdoptsExpiryOnceWhenEmpty：未使用状态且本地无期限 → 接受一次
+// 上游值（把首次观测到的期限固化下来），后续不再滚动。
+func TestProbeKeyQuota_UnusedKeyAdoptsExpiryOnceWhenEmpty(t *testing.T) {
+	body := `{"code":0,"msg":"ok","data":{"key_info":{` +
+		`"group":"Pro","key_status_code":0,"quota_key_max_quota":30000,` +
+		`"quota_key_used_quota":0,"device_count":0,"device_max_count":3,` +
+		`"mode":1,"expired_at":"2026-12-03T13:09:24.788Z"}}}`
+	ls := newLookupServer(t, func() string { return body })
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST"}
+
+	svc := newAutoEntryProbeService(ls.srv, repo)
+	_, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.NoError(t, err)
+
+	require.NotNil(t, repo.byID[42].ExpiresAt)
+	require.Equal(t, 2026, repo.byID[42].ExpiresAt.UTC().Year())
+	require.Equal(t, time.December, repo.byID[42].ExpiresAt.UTC().Month())
+}
+
+// TestProbeKeyQuota_InUseKeyOverwritesExpiry：进入使用中（status_code=1）后上游期限已固定，
+// 仍是唯一权威，按原语义覆盖本地值。
+func TestProbeKeyQuota_InUseKeyOverwritesExpiry(t *testing.T) {
+	ls := newLookupServer(t, func() string { return probeOKBody })
+	repo := newFakeQuotaKeyRepo()
+	stale := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", ExpiresAt: &stale}
+
+	svc := newAutoEntryProbeService(ls.srv, repo)
+	_, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.NoError(t, err)
+
+	require.NotNil(t, repo.byID[42].ExpiresAt)
+	require.True(t, repo.byID[42].ExpiresAt.After(stale), "使用中状态的上游期限必须覆盖过期的本地值")
+	require.Equal(t, 2026, repo.byID[42].ExpiresAt.UTC().Year())
+}
+
 // TestProbeKeyQuota_DerivedDeviceForExistingAccounts：存量码（无持久 device、已有账号）
 // 复用派生值 deviceID(code)，且**不写新身份**（§25.14-C 设备三分支②）。
 func TestProbeKeyQuota_DerivedDeviceForExistingAccounts(t *testing.T) {

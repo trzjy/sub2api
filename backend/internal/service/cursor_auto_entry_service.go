@@ -511,8 +511,9 @@ func (s *CursorAutoEntryService) ProbeKeyQuota(ctx context.Context, quotaKeyID i
 			return fmt.Errorf("%w: build observation for quota key %d: %v", errCursorObservationStorage, quotaKeyID, berr)
 		}
 		var expiresAt **time.Time
-		if parsed := parseKeyExpiresAt(info.ExpiredAt); parsed != nil {
+		if parsed := parseKeyExpiresAt(info.ExpiredAt); parsed != nil && adoptUpstreamExpiry(current, info) {
 			// 期限只写既有 quota_keys.expires_at（唯一期限列）；空/无效期限保留原值。
+			// 未使用状态的上游期限随查询滚动（见 adoptUpstreamExpiry），已有值时不再覆盖。
 			expiresAt = &parsed
 		}
 		if werr := obs.UpdateUsageSnapshot(finishCtx, tx, quotaKeyID, snapshot, expiresAt); werr != nil {
@@ -542,6 +543,37 @@ func (s *CursorAutoEntryService) ProbeKeyQuota(ctx context.Context, quotaKeyID i
 		Mode:           observed.Mode,
 		ExpiredAt:      observed.ExpiredAt,
 	}, nil
+}
+
+// cursorKeyUnusedStatusCode 是上游 key_status_code 的"未使用"取值（key_status_name="未使用"）。
+//
+// 生产实测（2026-11-03，尾号 7934 的月总限额码，总额 30000 / 已用 0）：
+//   - 未使用状态：每次 lookup 的 activated_at 都等于【本次查询时刻】，expired_at 随之顺延为
+//     "查询时刻 + 30 天"。连续两轮观测（20:58:44 / 21:03:45）落库的 expires_at 精确相差 5 分钟，
+//     即期限随查询滚动，不是固定事实。
+//   - 使用中状态（status_code=1，尾号 AFC9）：activated_at 固定为首次激活时刻（创建后 23 秒），
+//     expired_at 恒为"首次激活 + 30 天"，此后不变。
+//
+// 因此未使用状态的期限只能"取一次"，不能每轮覆盖。
+const cursorKeyUnusedStatusCode = 0
+
+// adoptUpstreamExpiry 判定本次观测到的上游期限是否应写回 quota_keys.expires_at。
+//
+// 规则（与 §25.14-C「不把观测到的数字当事实乱写」同调）：
+//   - 未使用（cursorKeyUnusedStatusCode）：上游给的是"查询时刻 + 30 天"的滚动值。仅在本地
+//     尚无 expires_at 时接受一次（把首次观测到的期限固化下来），之后一律保留本地值——
+//     既不被滚动值刷掉，也不覆盖管理员手工填写的日期；
+//   - 其它状态（使用中/已用等）：上游期限已固定，仍是期限的唯一权威，按原语义覆盖。
+//
+// current 为锁内重读的来源行（可含刚写入的 usage_snapshot），nil 视为"无本地值"。
+func adoptUpstreamExpiry(current *ent.QuotaKey, info *lookupKeyInfo) bool {
+	if info == nil {
+		return false
+	}
+	if info.StatusCode != cursorKeyUnusedStatusCode {
+		return true
+	}
+	return current == nil || current.ExpiresAt == nil
 }
 
 // runObservationTx 执行"每 key 互斥 + 单事务"骨架（步骤 2–6 的载体）。
