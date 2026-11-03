@@ -276,6 +276,45 @@ func TestVerifyResumeEligibilityDeniesWhenSourceExhausted(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. 激活码只剩几轮额度（0 < 剩余 < 调度下限）：续轮照常放行
+// 额度不足要的是换号 / 轮询，不是把 403 甩给客户端——会话已经绑在这个号上，
+// 拒绝即等于报错，而换号会丢上下文。真耗尽（剩余 ≤ 0）才拒绝。
+// ---------------------------------------------------------------------------
+
+func TestVerifyResumeEligibilityAllowsLowRemainderWithoutClientError(t *testing.T) {
+	installCursorEligibilitySource(t, []byte(fmt.Sprintf(
+		`{"total":100,"used":93,"status_code":200,"checked_at":%q,"error_code":""}`,
+		time.Now().Add(-time.Minute).Format(time.RFC3339),
+	)))
+	svc := newCursorEligibilityService(t, cursorEligibilityRepo(cursorEligibilityCode))
+	sess := cursorEligibilitySession(svc, cursorEligibilityCode)
+	account := cursorEligibilityAccount()
+
+	if err := svc.verifyResumeEligibility(context.Background(), sess, account); err != nil {
+		status, reason := CursorResumeHTTPStatus(err)
+		require.FailNowf(t, "低水位不得拦续轮",
+			"剩余 7（低于下限但大于 0）应放行，实际 status=%d reason=%q err=%v", status, reason, err)
+	}
+}
+
+func TestVerifyResumeEligibilityAllowsRemainderExactlyNine(t *testing.T) {
+	// 边界：剩余恰好 9（下限前一格）——低水位，续轮放行。
+	installCursorEligibilitySource(t, []byte(fmt.Sprintf(
+		`{"total":100,"used":91,"status_code":200,"checked_at":%q,"error_code":""}`,
+		time.Now().Add(-time.Minute).Format(time.RFC3339),
+	)))
+	svc := newCursorEligibilityService(t, cursorEligibilityRepo(cursorEligibilityCode))
+	sess := cursorEligibilitySession(svc, cursorEligibilityCode)
+	account := cursorEligibilityAccount()
+
+	if err := svc.verifyResumeEligibility(context.Background(), sess, account); err != nil {
+		status, reason := CursorResumeHTTPStatus(err)
+		require.FailNowf(t, "低水位不得拦续轮",
+			"剩余 9 应放行，实际 status=%d reason=%q err=%v", status, reason, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 6. 模型映射改变：400（不换号、不重建 AgentRun）
 // ---------------------------------------------------------------------------
 

@@ -529,6 +529,15 @@ const (
 	// quotaKeyUsageIncomplete 表示快照缺 total 或 used 任一：剩余额度不可计算，失败关闭。
 	// 真实 0 不是缺失——total=0/used=0 走 quotaKeyUsageExhausted，不得记作本原因。
 	quotaKeyUsageIncomplete = "quota_key_usage_incomplete"
+	// quotaKeyUsageBelowFloor 表示真实剩余 total-used 大于 0 但低于调度下限
+	// （cursorQuotaKeyRemainingFloor）：还能再调几次，但已经不值得再往里放新流量。
+	//
+	// 与 quotaKeyUsageExhausted 的区别是**这一维能否被"换号"消解**：
+	//   - 新会话选号：两者同样否决（换一个额度充足的号即可，不需要报错）；
+	//   - 已绑定账号的续轮（resume）：本原因不拒绝——会话已经在这个号上，换号等于丢
+	//     上下文，而上游大概率还有余额，直接放行由上游裁决；真撞墙了由既有流内识别
+	//     + 停号 + 换号链路兜底。只有 quotaKeyUsageExhausted（剩余真的没了）才拒绝。
+	quotaKeyUsageBelowFloor = "quota_key_usage_below_floor"
 )
 
 // cursorQuotaKeyRemainingFloor 是 Cursor 激活码**剩余额度**的调度下限（绝对值，不是百分比）。
@@ -608,10 +617,17 @@ func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (s
 	if snapshot.Total == nil || snapshot.Used == nil {
 		return quotaKeyUsageIncomplete, nil
 	}
-	// 规则⑨：真实剩余 total-used 低于调度下限 → 否决（真实 0 保持为 0：total=0 不等于字段
-	// 缺失；剩余 10 放行、剩余 9 否决——下限是绝对值，不按 total 占比折算）。
-	if (*snapshot.Total - *snapshot.Used) < cursorQuotaKeyRemainingFloor {
+	// 规则⑨：真实剩余 total-used 低于调度下限 → 否决。
+	//   - 剩余 ≤ 0（真耗尽）→ quotaKeyUsageExhausted：来源彻底不可用，任何场景都拒绝；
+	//   - 0 < 剩余 < 下限 → quotaKeyUsageBelowFloor：不往里放新流量，但已在这个号上的
+	//     续轮不被拦（换号丢上下文，且上游大概率还有余额），由上游裁决。
+	// 真实 0 保持为 0：total=0 不等于字段缺失。下限是绝对值，不按 total 占比折算。
+	remaining := *snapshot.Total - *snapshot.Used
+	if remaining <= 0 {
 		return quotaKeyUsageExhausted, nil
+	}
+	if remaining < cursorQuotaKeyRemainingFloor {
+		return quotaKeyUsageBelowFloor, nil
 	}
 	return "", nil
 }

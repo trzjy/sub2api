@@ -326,7 +326,7 @@ func TestCursorSupplySourceAvailabilityGateUsageRules(t *testing.T) {
 
 		reason, err = gate(t, map[int64][]byte{qkID: makeSnap(100, 91, "", freshCheckedAt)})
 		require.NoError(t, err)
-		require.Equal(t, quotaKeyUsageExhausted, reason, "剩余低于下限一律否决")
+		require.Equal(t, quotaKeyUsageBelowFloor, reason, "剩余低于下限一律否决（不往里放新流量）")
 	})
 
 	t.Run("fresh snapshot with remaining passes", func(t *testing.T) {
@@ -379,12 +379,12 @@ func TestCursorSupplyAvailability_RemainingFloorIsAbsoluteNotPercentage(t *testi
 	})
 	t.Run("small pool below floor vetoes", func(t *testing.T) {
 		// total=20 剩 8：低于下限 → 否决。
-		require.Equal(t, quotaKeyUsageExhausted, gate(t, 20, 12))
+		require.Equal(t, quotaKeyUsageBelowFloor, gate(t, 20, 12))
 	})
 	t.Run("large pool with tiny remainder vetoes", func(t *testing.T) {
 		// total=1000 只剩 5（占比 99.5% 已用）：没"耗尽"，但绝对值低于下限 → 否决。
 		// 这一条正是「占比口径」会漏掉的场景：按 used/total 算远不到 100%。
-		require.Equal(t, quotaKeyUsageExhausted, gate(t, 1000, 995))
+		require.Equal(t, quotaKeyUsageBelowFloor, gate(t, 1000, 995))
 	})
 	t.Run("large pool above floor passes", func(t *testing.T) {
 		require.Empty(t, gate(t, 1000, 900))
@@ -411,7 +411,7 @@ func TestCursorSupplyAvailability_SourceRecoveryReleasesVetoWithoutExtraAction(t
 	}
 
 	// 低水位：否决。
-	require.Equal(t, quotaKeyUsageExhausted, gate(t, 100, 96), "剩余 4 应否决")
+	require.Equal(t, quotaKeyUsageBelowFloor, gate(t, 100, 96), "剩余 4 应否决（低水位）")
 	// 供应商回补额度、快照刷新：同一账号、同一条判定路径，立即放行。
 	require.Empty(t, gate(t, 100, 20), "剩余回升到 80 应自动放行，无需任何解锁动作")
 }

@@ -5034,7 +5034,11 @@ func (s *CursorExecutionService) verifyResumeEligibility(
 	if vetoErr != nil {
 		return newCursorResumeError(http.StatusServiceUnavailable, "source_unavailable", vetoErr)
 	}
-	if veto != "" {
+	// 仅"低水位"（0 < 剩余 < 调度下限）不拦续轮：会话已经绑在这个号上，拒绝即把错误甩给
+	// 客户端，而换号等于丢上下文；上游大概率仍有余额，放行由上游裁决——真撞墙由既有流内
+	// 识别 + 停号 + 换号链路兜底。
+	// 真耗尽（剩余 ≤ 0）/ 码过期 / 观测失败 / 快照陈旧一律照旧拒绝（这些换号也救不回来）。
+	if veto != "" && veto != quotaKeyUsageBelowFloor {
 		return newCursorResumeError(http.StatusForbidden, veto, ErrCursorResumeSourceBlocked)
 	}
 	// ⑨ 重新映射：目标必须与会话初始 upstreamModel 一致（改 mapping 即 400，不换号）。
