@@ -192,3 +192,39 @@ func TestCursorContextPlanHistoryComplete(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, pairedPlan.historySupportsRebuild())
 }
+
+// TestCursorRebuildExcludedIDs 锁定 2026-11-04 收口 M2：
+// 重建请求的死亡账号必须并入排除集合，且不得改写调用方传入的 map
+// （FailoverState 自己维护那份集合，服务层偷偷加进去会让它的耗尽判定失真）。
+func TestCursorRebuildExcludedIDs(t *testing.T) {
+	t.Run("no_rebuild_keeps_original_map", func(t *testing.T) {
+		original := map[int64]struct{}{7: {}}
+		got := cursorRebuildExcludedIDs(context.Background(), original)
+		require.Len(t, got, 1)
+		_, ok := got[7]
+		require.True(t, ok)
+	})
+
+	t.Run("rebuild_adds_dead_account_without_mutation", func(t *testing.T) {
+		original := map[int64]struct{}{7: {}}
+		ctx := WithCursorRebuild(context.Background(), CursorRebuildInfo{DeadAccountID: 344, Reason: CursorQuotaExhaustedReason})
+		got := cursorRebuildExcludedIDs(ctx, original)
+		require.Len(t, got, 2)
+		_, hasDead := got[344]
+		require.True(t, hasDead, "死亡账号必须被排除")
+		require.Len(t, original, 1, "调用方的 map 不得被修改")
+	})
+
+	t.Run("already_excluded_is_idempotent", func(t *testing.T) {
+		original := map[int64]struct{}{344: {}}
+		ctx := WithCursorRebuild(context.Background(), CursorRebuildInfo{DeadAccountID: 344})
+		got := cursorRebuildExcludedIDs(ctx, original)
+		require.Len(t, got, 1)
+	})
+
+	t.Run("zero_dead_account_is_ignored", func(t *testing.T) {
+		ctx := WithCursorRebuild(context.Background(), CursorRebuildInfo{})
+		got := cursorRebuildExcludedIDs(ctx, nil)
+		require.Empty(t, got)
+	})
+}

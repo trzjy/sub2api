@@ -349,8 +349,10 @@ func (s *CursorExecutionService) Execute(
 	// function_call 也出现在同一正文中 —— 那是客户端自带完整两端的已完成工具对，不构成
 	// 续轮声明，按原普通请求继续。判定只取本 HTTP 请求数据，不新增持久化表/墓碑/ID 前缀，
 	// 也不猜最近会话。
+	// 重建决定在建会话之前取出：准入断言用它放行，会话登记后用同一份信息打
+	// "死号 → 新号"落点日志（2026-11-04 收口 M5）。
+	rebuildInfo, rebuildRequested := CursorRebuildFromContext(ctx)
 	if req.Plan.claimsContinuation() && !req.Plan.resultsReplayHistory() {
-		rebuildInfo, rebuildRequested := CursorRebuildFromContext(ctx)
 		historyComplete := req.Plan.historySupportsRebuild()
 		if !rebuildRequested && !historyComplete {
 			return nil, newCursorResumeError(http.StatusBadRequest, "unknown_association",
@@ -456,6 +458,14 @@ func (s *CursorExecutionService) Execute(
 	// 必须在模型出站/AgentRun 之前失败关闭（零 AgentRun、零游离会话状态）。
 	if session == nil {
 		return nil, fmt.Errorf("%w: cursor execution service is stopped", ErrCursorExecutionUnavailable)
+	}
+	// 重建落点（2026-11-04 收口 M5）：只记 ID 与原因枚举，不记正文/凭据。
+	// 排查"死号 → 新号"时必须能在日志里连起来，不能只看到重建开始看不到落到哪。
+	if rebuildRequested {
+		cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_session_rebuild_bound", originalModel,
+			zap.Int64("dead_account_id", rebuildInfo.DeadAccountID),
+			zap.Int64("new_account_id", account.ID),
+			zap.String("reason", string(rebuildInfo.Reason)))
 	}
 	// §25.14-D：首 HTTP 把有效输入历史逐项摘要入会话（config_digest + history_digest +
 	// 逻辑项数），供续轮重算前缀摘要对比。只落摘要状态，不落正文。
@@ -967,7 +977,42 @@ func (s *CursorExecutionService) cursorResumeRebuildError(
 		zap.Int64("account_id", accountID),
 		zap.String("reason", string(reason)),
 		zap.String("error_class", cursorStreamErrClass(err)))
+	// 2026-11-04 收口 M3：返回哨兵前**同步**收尾死亡会话，并等到 finalizeDone 关闭。
+	// 不这么做的后果：pump 在另一个 goroutine 里收尾，handler 立刻拿重建决定去重新选号，
+	// 旧会话的索引/槽位可能还没归还，偶发 409/identity 冲突被当成 CUR-RES-99。
+	s.settleDeadSessionBeforeRebuild(session)
 	return &CursorResumeRebuildError{DeadAccountID: accountID, Reason: reason, Err: err}
+}
+
+// cursorRebuildFinalizeWait 是重建前等待旧会话终结完成的上界。
+//
+// finalize 会做网络结算与资源归还，正常在毫秒级；给 5 秒是为了绝不把 HTTP 卡死——
+// 超时后照样返回重建哨兵（新会话的登记不依赖旧索引，最坏只是多一条告警）。
+const cursorRebuildFinalizeWait = 5 * time.Second
+
+// settleDeadSessionBeforeRebuild 在重建前把死亡会话收尾，并等待终结真正完成（M3）。
+//
+// 幂等：pump 若已抢先进入 finalizer，本调用返回 false，改为等它的完成信号。
+// 无论谁胜出，函数返回时（或超时后）旧会话的索引关联与两槽都已按唯一 finalizer 处理。
+func (s *CursorExecutionService) settleDeadSessionBeforeRebuild(session *cursorSessionRecord) {
+	if s == nil || session == nil {
+		return
+	}
+	s.finishCursorSessionIf(session, "resume_rebuild", nil)
+	signal := session.finalizeSignal()
+	if signal == nil {
+		return
+	}
+	timer := time.NewTimer(cursorRebuildFinalizeWait)
+	defer timer.Stop()
+	select {
+	case <-signal:
+	case <-timer.C:
+		cursorPhaseLog(session.phaseContext(), zapcore.WarnLevel, "cursor_session_rebuild_finalize_wait_timeout",
+			session.spec.requestedModel,
+			zap.String("session_id", session.id),
+			zap.String("wait", cursorRebuildFinalizeWait.String()))
+	}
 }
 
 // notifyAccountExhausted 调用装配层注入的停号回调（未注入时 no-op）。
@@ -5199,6 +5244,29 @@ func CursorRebuildFromContext(ctx context.Context) (CursorRebuildInfo, bool) {
 func CursorRebuildRequested(ctx context.Context) bool {
 	_, ok := CursorRebuildFromContext(ctx)
 	return ok
+}
+
+// cursorRebuildExcludedIDs 把"续轮重建的死号"并入本次选号的排除集合（2026-11-04 收口 M2）。
+//
+// 方案 §2.4-4 要求失败账号进排除表；原实现只把 DeadAccountID 用于日志与重绑，导致
+// 账号级终态里"非业务码上游故障"这一类（不停号、不冷却）可能被新一局重新选中，白撞一次。
+//
+// 放在选号入口而不是 7 个 handler 调用点：ctx 上的重建决定天然覆盖所有入口，
+// 不新增平行链，也不会漏掉任何一个协议。**不改调用方传入的 map**（FailoverState 自己维护它）。
+func cursorRebuildExcludedIDs(ctx context.Context, excludedIDs map[int64]struct{}) map[int64]struct{} {
+	info, ok := CursorRebuildFromContext(ctx)
+	if !ok || info.DeadAccountID == 0 {
+		return excludedIDs
+	}
+	if _, exists := excludedIDs[info.DeadAccountID]; exists {
+		return excludedIDs
+	}
+	merged := make(map[int64]struct{}, len(excludedIDs)+1)
+	for id := range excludedIDs {
+		merged[id] = struct{}{}
+	}
+	merged[info.DeadAccountID] = struct{}{}
+	return merged
 }
 
 // CursorResumeHTTPStatus 返回续轮错误应使用的 HTTP 状态与安全 reason。
