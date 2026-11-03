@@ -226,6 +226,8 @@ func cursorStreamErrClass(err error) string {
 		return "context_deadline"
 	case errors.Is(err, ErrCursorKeyRejectedUpstream):
 		return "key_rejected"
+	case errors.Is(err, ErrCursorQuotaExhaustedInStream):
+		return "quota_exhausted_in_stream"
 	case errors.Is(err, ErrCursorUpstreamStream):
 		return "upstream_end_stream_error"
 	case errors.Is(err, ErrCursorMissingEndStream):

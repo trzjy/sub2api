@@ -489,6 +489,12 @@ const (
 	// 本层拦截后按上游失败终止本轮，绝不把残缺调用交付给客户端。
 	CursorExecArgsIncompleteCode = "CUR-EXEC-10"
 	CursorExecArgsIncomplete     = "模型返回的工具参数不完整，本轮已终止，请重试"
+
+	// CUR-EXEC-11：上游账号当日额度耗尽（流内注入文案命中）。账号属"用完即丢"的一次性
+	// 额度，服务会自动停用该账号并换号重试；客户端只见干净的 429 文案，
+	// 绝不透传上游原文（原文含账号卡 ID，泄露账号池身份）。
+	CursorExecQuotaExhaustedCode = "CUR-EXEC-11"
+	CursorExecQuotaExhausted     = "当前账号今日额度已用完，已自动切换账号，请重新发起请求"
 )
 
 // CursorResumeReasonCode 把 newCursorResumeError 的 reason 映射到 §2.2 续轮码表；

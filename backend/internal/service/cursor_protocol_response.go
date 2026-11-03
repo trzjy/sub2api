@@ -400,6 +400,13 @@ var (
 	// 与拒付区分：拒付是账号额度问题（要停号），本错误是上游临时故障（不停号）。
 	// 命中即终态错误：不得当模型成功、不得伪造 usage。
 	ErrCursorUpstreamModelUnavailable = errors.New("cursor: upstream model temporarily unavailable")
+
+	// ErrCursorQuotaExhaustedInStream 是**流内当日额度耗尽哨兵**（RL-STOP 同族）。
+	//
+	// 触发条件：正文累计内容出现固定模板「今日额度已用完」（2026-11-03 生产活体）。
+	// 与拒付同语义：账号当日额度耗尽，账号级终态 → 停号 + 换号；命中即终态错误，
+	// 不得当模型成功、不得伪造 usage、不得把上游原文（含卡 ID）透传给客户端。
+	ErrCursorQuotaExhaustedInStream = errors.New("cursor: upstream account daily quota exhausted")
 )
 
 // cursorUpstreamStreamError 是 ErrCursorUpstreamStream 的结构化载体，携带上游 EndStream 的
@@ -505,10 +512,44 @@ func (e *CursorModelUnavailableError) Error() string {
 // Unwrap 让 errors.Is(err, ErrCursorUpstreamModelUnavailable) 成立。
 func (e *CursorModelUnavailableError) Unwrap() error { return ErrCursorUpstreamModelUnavailable }
 
+// cursorUpstreamQuotaExhaustedTemplate 是上游注入的**固定**"当日额度耗尽"模板（不含动态后缀）。
+//
+// 来源证据：2026-11-03 生产活体（Claude Code 客户端原样收到含卡 ID 的完整原文，
+// 账号未停调度、请求不换号，同账号反复撞墙）。完整形如
+// `今日额度已用完，每日早上8点重置（时长卡每日用量有上限，…）（1793676349583-clard21b）`：
+// 上游以普通 TextDelta 下发、无 is_server_notice 位（与模型暂不可用模板同族），且
+// EndStream 不带 ERROR_PRO_USER_RATE_LIMIT_EXCEEDED 等 code，故只能按正文模板识别。
+const cursorUpstreamQuotaExhaustedTemplate = "今日额度已用完"
+
+// CursorQuotaExhaustedError 是 ErrCursorQuotaExhaustedInStream 的结构化载体。
+//
+// 语义与 EndStream 的 ERROR_PRO_USER_RATE_LIMIT_EXCEEDED 同级：**账号当日额度耗尽**
+// （时长卡每日用量上限），属账号级终态，走 RL-STOP 同款处置（停号回调 + 换号）。
+type CursorQuotaExhaustedError struct {
+	// Template 是命中的原始模板片段（含动态后缀），原样留存，不改写。
+	Template string
+	// TurnID 是模板后缀里上游给的轮次标识；上游未带后缀时为空串。
+	TurnID string
+}
+
+// Error 实现 error。
+func (e *CursorQuotaExhaustedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.TurnID != "" {
+		return "cursor: upstream account daily quota exhausted (turn " + e.TurnID + "): " + e.Template
+	}
+	return "cursor: upstream account daily quota exhausted: " + e.Template
+}
+
+// Unwrap 让 errors.Is(err, ErrCursorQuotaExhaustedInStream) 成立。
+func (e *CursorQuotaExhaustedError) Unwrap() error { return ErrCursorQuotaExhaustedInStream }
+
 // cursorMatchKeyRejected 在一段文本里匹配上游固定注入模板，命中即返回结构化错误，未命中返回 nil。
 //
 // 按序匹配：先拒付模板（*CursorKeyRejectedError），再模型暂不可用模板
-// （*CursorModelUnavailableError）。
+// （*CursorModelUnavailableError），最后当日额度耗尽模板（*CursorQuotaExhaustedError）。
 func cursorMatchKeyRejected(text string) error {
 	if fragment, turnID, ok := cursorMatchInjectedTemplate(text, cursorUpstreamRejectTemplate); ok {
 		return &CursorKeyRejectedError{Template: fragment, TurnID: turnID}
@@ -516,10 +557,17 @@ func cursorMatchKeyRejected(text string) error {
 	if fragment, turnID, ok := cursorMatchInjectedTemplate(text, cursorUpstreamModelUnavailableTemplate); ok {
 		return &CursorModelUnavailableError{Template: fragment, TurnID: turnID}
 	}
+	if fragment, turnID, ok := cursorMatchInjectedTemplate(text, cursorUpstreamQuotaExhaustedTemplate); ok {
+		return &CursorQuotaExhaustedError{Template: fragment, TurnID: turnID}
+	}
 	return nil
 }
 
 // cursorMatchInjectedTemplate 定位固定模板，截取到换行为止的片段，并解析括号内的轮次标识。
+//
+// 轮次标识括号兼容半角 (…) 与全角（…）：2026-11-03 生产活体的额度耗尽文案
+// （今日额度已用完…）后缀即全角括号，旧解析只认半角会漏取标识。
+// 标识取**最后一个**括号组：额度耗尽文案行中还有说明性括号内容（如时长卡说明）。
 func cursorMatchInjectedTemplate(text, template string) (fragment, turnID string, ok bool) {
 	idx := strings.Index(text, template)
 	if idx < 0 {
@@ -529,12 +577,49 @@ func cursorMatchInjectedTemplate(text, template string) (fragment, turnID string
 	if nl := strings.IndexByte(fragment, '\n'); nl >= 0 {
 		fragment = fragment[:nl]
 	}
-	if open := strings.IndexByte(fragment, '('); open >= 0 {
-		if close := strings.IndexByte(fragment[open:], ')'); close > 0 {
-			turnID = strings.TrimSpace(fragment[open+1 : open+close])
+	fragment = strings.TrimSpace(fragment)
+	if turnID == "" {
+		turnID = cursorTurnIDInParens(fragment, '(', ')')
+	}
+	if turnID == "" {
+		turnID = cursorTurnIDInRunes(fragment, '（', '）')
+	}
+	return fragment, turnID, true
+}
+
+// cursorTurnIDInParens 取片段内**最后一个**半角括号组的内容。
+func cursorTurnIDInParens(fragment string, open, close byte) string {
+	idx := strings.LastIndexByte(fragment, open)
+	if idx < 0 {
+		return ""
+	}
+	tail := fragment[idx+1:]
+	end := strings.IndexByte(tail, close)
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(tail[:end])
+}
+
+// cursorTurnIDInRunes 同 cursorTurnIDInParens，但按 rune 匹配（全角括号是多字节字符）。
+func cursorTurnIDInRunes(fragment string, open, close rune) string {
+	runes := []rune(fragment)
+	idx := -1
+	for i := len(runes) - 1; i >= 0; i-- {
+		if runes[i] == open {
+			idx = i
+			break
 		}
 	}
-	return strings.TrimSpace(fragment), turnID, true
+	if idx < 0 {
+		return ""
+	}
+	for j := idx + 1; j < len(runes); j++ {
+		if runes[j] == close {
+			return strings.TrimSpace(string(runes[idx+1 : j]))
+		}
+	}
+	return ""
 }
 
 // cursorConnectContentType 是 Connect RPC 二进制 protobuf 的请求内容类型。

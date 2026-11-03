@@ -57,6 +57,9 @@ func CursorUserFacingError(ctx context.Context, err error) (status int, code, me
 		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecUpstreamAuthFailedCode, infraerrors.CursorExecUpstreamAuthFailed
 	case errors.Is(err, ErrCursorUpstreamModelUnavailable):
 		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecModelUnavailableCode, infraerrors.CursorExecModelUnavailable
+	case errors.Is(err, ErrCursorQuotaExhaustedInStream):
+		// 流内「今日额度已用完」模板：账号当日额度耗尽。绝不透传上游原文（含卡 ID）。
+		status, code, zh = http.StatusTooManyRequests, infraerrors.CursorExecQuotaExhaustedCode, infraerrors.CursorExecQuotaExhausted
 	case errors.Is(err, ErrCursorBatchIncomplete), errors.Is(err, ErrCursorBatchAmbiguous):
 		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecBatchIncompleteCode, infraerrors.CursorExecBatchIncomplete
 	case errors.Is(err, ErrCursorArgsIncomplete):

@@ -475,6 +475,38 @@ func (s *CursorExecutionService) Execute(
 			}
 			return
 		}
+		// 流内「今日额度已用完」模板（CursorQuotaExhaustedError）：与 EndStream 限流 code
+		// 同级——账号当日额度耗尽，账号级终态。同款处置：停号回调 + 未发布字节时替换为
+		// 可换号 failover；绝不把上游原文（含卡 ID）透传给客户端。
+		var qe *CursorQuotaExhaustedError
+		if errors.As(err, &qe) {
+			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_exhausted", originalModel,
+				zap.Int64("account_id", account.ID), zap.String("code", "in_stream_quota_exhausted"),
+				zap.String("turn_id", qe.TurnID))
+			if s.accountExhaustedHandler != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_exhausted_handler_panic", originalModel,
+								zap.Int64("account_id", account.ID), zap.Any("panic", r))
+						}
+					}()
+					s.accountExhaustedHandler(ctx, account.ID, "cursor upstream account daily quota exhausted (in-stream template)")
+				}()
+			}
+			if !session.bodyPublished && session.deliveredBatchSeq == 0 {
+				err = &UpstreamFailoverError{
+					StatusCode:        429,
+					Stage:             GatewayFailureStage("upstream"),
+					Scope:             GatewayFailureScopeAccount,
+					Reason:            GatewayFailureReason("cursor_quota_exhausted"),
+					NextAccountAction: NextAccountRetry,
+					ClientStatusCode:  429,
+					ClientMessage:     "cursor 账号额度耗尽，已停止调度",
+				}
+			}
+			return
+		}
 		// 上游对本账号回吐「非业务码」的终态错误（Connect 传输码：internal / unknown /
 		// unavailable 等，典型报文 internal: Cannot read properties of undefined (reading
 		// 'toString')）：这表示该账号当下无法服务，不是请求侧问题，因此不能把 502 直接
