@@ -531,29 +531,21 @@ func TestCursorResumeBigIntegerPrecision(t *testing.T) {
 	require.Equal(t, 0, fixture.intake.callCount())
 }
 
-// TestCursorResumeConfigChangesRejected 覆盖清单第 3 条：改**硬组**配置（模型 / 工具声明
-// 与 schema）各项零上游写入拒绝。
+// TestCursorResumeConfigChangesRejected 覆盖清单第 3 条：改**硬组**配置（工具声明与 schema）
+// 各项零上游写入拒绝。
 //
-// 硬组是"还是不是同一次生成"的判据：模型换了、工具集合或 schema 换了，上游 wire 契约与
-// 工具模式都变了，必须拒绝。system 文本与采样参数属软组，见
+// 硬组是"还是不是同一次生成"的判据：工具集合或 schema 换了，上游 wire 契约与工具模式
+// 都变了，必须拒绝。system 文本与采样参数属软组，见
 // TestCursorResumeSoftConfigDriftAccepted（只留痕不拒绝）。
+//
+// 注意：**模型变了不在这里**。2026-11-04 用户裁定后，换模型且有完整历史 = 按新模型重开
+// 一局（见 cursor_resume_model_rebuild_test.go），不再 400——"防串号"的目的由"开新局"
+// 达成，不该顺带砍掉"用户换模型继续聊"这个合法需求。
 func TestCursorResumeConfigChangesRejected(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
 	}{
-		{
-			name: "model_changed",
-			body: `{
-  "model": "cursor-other-model",
-  "messages": [
-    {"role": "user", "content": "weather please"},
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"hz\"}"}}]},
-    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
-  ],
-  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
-}`,
-		},
 		{
 			name: "tool_schema_changed",
 			body: `{

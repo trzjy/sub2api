@@ -1295,6 +1295,8 @@ func serveCursorResumeIfRequested(
 			ctx = service.WithCursorRebuild(ctx, service.CursorRebuildInfo{
 				DeadAccountID: rebuildErr.DeadAccountID,
 				Reason:        rebuildErr.Reason,
+				// 账号没坏（只是换了模型）时不排除它：否则每次换模型都白换一个号。
+				KeepAccount: rebuildErr.KeepAccount,
 			})
 			c.Request = c.Request.WithContext(ctx)
 			logger.FromContext(ctx).Info("cursor_resume_rebuild_requested",

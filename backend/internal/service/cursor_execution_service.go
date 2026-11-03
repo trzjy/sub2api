@@ -1015,8 +1015,66 @@ func (s *CursorExecutionService) settleDeadSessionBeforeRebuild(session *cursorS
 	}
 }
 
-// notifyAccountExhausted 调用装配层注入的停号回调（未注入时 no-op）。
+// resumeModelChangedOutcome 决定"同一会话换了模型来续轮"该怎么办。
 //
+// 背景：model_changed 原本直接 400，理由是"同一次生成不能换模型"——上游那条会话是用旧
+// 模型开的，喂进去的字节按旧契约编码，换模型就等于往别人的会话里灌结果。这个**防串号**
+// 的目的仍然成立，但它不该演变成"禁止用户换模型继续聊"：用户在会话中途从 sonnet 换到
+// opus 是完全合理的，我们拿着完整历史自己重开一局就行（2026-11-04 用户裁定）。
+//
+// 于是分两种：
+//   - 正文带完整历史（historySupportsRebuild）→ 终结旧会话，按新模型重建（同号优先）。
+//   - 历史不完整（典型：Responses 只给 previous_response_id）→ 维持 400，绝不凭残缺正文
+//     重开（那会丢上下文，比报错更糟）。
+//
+// KeepAccount=true：账号没坏，只是请求变了。选号时不排除它、也不因为它换号。
+func (s *CursorExecutionService) resumeModelChangedOutcome(
+	ctx context.Context,
+	record *cursorSessionRecord,
+	ticket *CursorResumeTicket,
+	account *Account,
+	storedModel, incomingModel, source string,
+) error {
+	var accountID int64
+	if account != nil {
+		accountID = account.ID
+	}
+	if ticket == nil || ticket.probe == nil || !ticket.probe.Plan.historySupportsRebuild() {
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "session_resume_rebuild_skipped", storedModel,
+			zap.String("session_id", cursorSessionIDOf(record)),
+			zap.String("deny_reason", "model_changed"),
+			zap.String("skip_reason", "history_incomplete"),
+			zap.String("model_stored", storedModel),
+			zap.String("model_incoming", incomingModel),
+			zap.String("model_source", source))
+		return newCursorResumeError(http.StatusBadRequest, "model_changed", ErrCursorResumeConfigChanged)
+	}
+	cursorPhaseLog(ctx, zapcore.InfoLevel, "session_resume_model_rebuild", storedModel,
+		zap.String("session_id", cursorSessionIDOf(record)),
+		zap.String("batch_id", ticket.BatchID),
+		zap.String("model_stored", storedModel),
+		zap.String("model_incoming", incomingModel),
+		zap.String("model_source", source),
+		zap.Int64("account_id", accountID))
+	// 与 P1 / 资格拒绝同一条收尾路径：同步 finalize 并等终结完成，避免重建撞上旧会话残留。
+	s.settleDeadSessionBeforeRebuild(record)
+	return &CursorResumeRebuildError{
+		DeadAccountID: accountID,
+		Reason:        CursorResumeModelChangedReason,
+		KeepAccount:   true,
+		Err:           newCursorResumeError(http.StatusBadRequest, "model_changed", ErrCursorResumeConfigChanged),
+	}
+}
+
+// cursorSessionIDOf 取会话 ID（nil 安全，只用于日志）。
+func cursorSessionIDOf(record *cursorSessionRecord) string {
+	if record == nil {
+		return ""
+	}
+	return record.id
+}
+
+// notifyAccountExhausted 调用装配层注入的停号回调（未注入时 no-op）。
 // 回调 panic 只记录 Warn：停号是旁路副作用，任何异常都不得改变主链路的失败分类。
 func (s *CursorExecutionService) notifyAccountExhausted(ctx context.Context, accountID int64, reason string) {
 	if s == nil || s.accountExhaustedHandler == nil {
@@ -5192,6 +5250,13 @@ func newCursorResumeError(status int, reason string, err error) *CursorResumeErr
 	return &CursorResumeError{Status: status, Reason: reason, Err: err}
 }
 
+// CursorResumeModelChangedReason 表示续轮请求换了模型（同一会话、换了个模型继续）：
+// 账号没问题，按新模型重新开一局即可（2026-11-04 用户裁定）。
+//
+// 单独一个原因串是为了线上可分辨：它既不该让账号进冷却（不是账号故障），也不该计入
+// "换号重建"的统计口径——那是容量问题，这是客户端行为。
+const CursorResumeModelChangedReason = GatewayFailureReason("cursor_resume_model_changed")
+
 // CursorResumeRebuildError 表示续轮 serve 命中**账号级终态**（当日额度耗尽 / 上游拒付 /
 // 非业务码的上游终态错误），且本 HTTP 尚未向客户端写出任何语义字节——可以终结旧会话后，
 // 在**同一个 HTTP 请求内**换号、以请求正文的完整历史新建 AgentRun 继续服务
@@ -5207,6 +5272,10 @@ type CursorResumeRebuildError struct {
 	Reason GatewayFailureReason
 	// Err 是原始上游/协议错误（供 errors.Is 复核）。
 	Err error
+	// KeepAccount 表示**账号本身没坏**，只是这次请求换了模型（2026-11-04 用户裁定）：
+	// 重建时不要把这个号排除（它还健康，新模型它可能也支持），也不因为它而换号。
+	// false = 原来的语义：这个号已经不能用了，必须排除。
+	KeepAccount bool
 }
 
 // Error 实现 error。
@@ -5236,6 +5305,8 @@ type CursorRebuildInfo struct {
 	DeadAccountID int64
 	// Reason 是换号原因。
 	Reason GatewayFailureReason
+	// KeepAccount 表示账号没坏（只是换了模型）：选号时不得排除它。
+	KeepAccount bool
 }
 
 // WithCursorRebuild 把"续轮换号重建"决定挂到请求 ctx。
@@ -5274,6 +5345,10 @@ func CursorRebuildRequested(ctx context.Context) bool {
 func cursorRebuildExcludedIDs(ctx context.Context, excludedIDs map[int64]struct{}) map[int64]struct{} {
 	info, ok := CursorRebuildFromContext(ctx)
 	if !ok || info.DeadAccountID == 0 {
+		return excludedIDs
+	}
+	// 账号没坏（只是换了模型）：它可能照样支持新模型，白排除等于白白换号。
+	if info.KeepAccount {
 		return excludedIDs
 	}
 	if _, exists := excludedIDs[info.DeadAccountID]; exists {
@@ -7290,7 +7365,7 @@ func (s *CursorExecutionService) ResumeCursorSession(
 			zap.String("session_id", record.id),
 			zap.String("model_stored", spec.requestedModel),
 			zap.String("model_ticket", strings.TrimSpace(ticket.Model)))
-		return nil, newCursorResumeError(http.StatusBadRequest, "model_changed", ErrCursorResumeConfigChanged)
+		return nil, s.resumeModelChangedOutcome(ctx, record, ticket, account, spec.requestedModel, strings.TrimSpace(ticket.Model), "ticket")
 	}
 	// 已被消费的批**先于**摘要校验返回 409：并发重复提交不得因会话历史已推进而报成
 	// 入参错误，也不得重放（§25.2「重复提交已经消费的结果返回冲突」）。
@@ -7312,7 +7387,7 @@ func (s *CursorExecutionService) ResumeCursorSession(
 			zap.String("model_stored", spec.requestedModel),
 			zap.String("model_ticket", strings.TrimSpace(bodyModel)),
 			zap.String("model_source", "body"))
-		return nil, newCursorResumeError(http.StatusBadRequest, "model_changed", ErrCursorResumeConfigChanged)
+		return nil, s.resumeModelChangedOutcome(ctx, record, ticket, account, spec.requestedModel, strings.TrimSpace(bodyModel), "body")
 	}
 	plan, planErr := cursorResumePlan(ticket.Protocol, in, bodyModel)
 	if planErr != nil {
