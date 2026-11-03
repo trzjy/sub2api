@@ -1110,6 +1110,15 @@ func isCursorPlatformAccount(account *service.Account) bool {
 	return account != nil && account.Platform == service.PlatformCursor
 }
 
+// cursorAccountBilledBySession 判定该账号的用量是否**只能**由会话终态的唯一结算驱动。
+//
+// §25.17.5 A06：Cursor 账号的账走会话终结时的已注册结算钩子，handler 在首次/最终 HTTP
+// 返回时一律不得再直接提交（否则与终结结算冲突、重复计费）；其它平台返回 false，保持
+// 原有直接提交路径不变。抽成独立判定便于单测直接断言"直接提交被跳过"的条件。
+func cursorAccountBilledBySession(account *service.Account) bool {
+	return isCursorPlatformAccount(account)
+}
+
 // cursorHandoverResources 收集本次真正获取到的 Cursor 可转交资源。
 //
 // nil 句柄表示该资源本次未获取（开关关闭、订阅模式、无限并发等），不登记空壳，

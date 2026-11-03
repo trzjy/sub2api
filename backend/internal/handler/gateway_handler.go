@@ -532,6 +532,33 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				cursorHandoverResources(userSlot, accountSlot, inflightHandle),
 				h.submitMandatoryUsageRecordTask,
 			)
+			// §25.17.5 A06：gemini 分支此前漏了这次注册——Cursor 账号的账只能由会话终态
+			// 的唯一结算钩子驱动。带工具的多轮会话首轮只交付工具批（此时还没有 usage），
+			// 后续轮走续轮不再经过本 handler 提交，结果整段会话不计费；会话终结时还会因
+			// "settlement func not registered" 报 ERROR。必须在首次 Execute 与资源转交**之前**
+			// 注册，且只在这里注册一次（见下方对直接提交的守卫）。
+			h.registerMessagesGeminiCursorSettlement(attemptHandover, account, cursorSettlementSnapshot{
+				apiKey:             apiKey,
+				user:               apiKey.User,
+				account:            account,
+				subscription:       subscription,
+				pricingAt:          pricingAt,
+				quotaPlatform:      service.QuotaPlatform(c.Request.Context(), apiKey),
+				inboundEndpoint:    GetInboundEndpoint(c),
+				upstreamEndpoint:   GetUpstreamEndpoint(c, account.Platform),
+				userAgent:          c.GetHeader("User-Agent"),
+				ipAddress:          ip.GetClientIP(c),
+				sessionID:          service.ExtractClientSessionID(c),
+				requestPayloadHash: service.HashUsageRequestPayload(body),
+				forceCacheBilling:  fs.ForceCacheBilling,
+				channelMapping:     channelMapping,
+				requestedModel:     clientRequestedModel(c, reqModel),
+				normalizedEffort:   service.NormalizeClaudeOutputEffort(parsedReq.OutputEffort),
+				thinking:           parsedReq.ThinkingEnabled,
+				userID:             subject.UserID,
+				groupID:            apiKey.GroupID,
+				reqModel:           reqModel,
+			})
 			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 			requestCtx = c.Request.Context()
 			if account.Platform == service.PlatformAntigravity {
@@ -610,13 +637,6 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 
-			// 捕获请求信息（用于异步记录，避免在 goroutine 中访问 gin.Context）
-			userAgent := c.GetHeader("User-Agent")
-			clientIP := ip.GetClientIP(c)
-			requestPayloadHash := service.HashUsageRequestPayload(body)
-			inboundEndpoint := GetInboundEndpoint(c)
-			upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
-
 			stampForwardRequestedReasoningEffort(result, service.NormalizeClaudeOutputEffort(parsedReq.OutputEffort))
 			if result.ReasoningEffort == nil {
 				result.ReasoningEffort = service.NormalizeClaudeOutputEffort(parsedReq.OutputEffort)
@@ -632,40 +652,52 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				result.ReasoningEffort = service.DefaultEffortForThinkingEnabled(protocolModel)
 			}
 
-			// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
-			// ForceCacheBilling 提前拍成标量，避免 worker 闭包保活 failover 状态里的响应体。
-			forceCacheBilling := fs.ForceCacheBilling
-			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
-			sessionID := service.ExtractClientSessionID(c)
-			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
-				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
-					Result:             result,
-					QuotaPlatform:      quotaPlatform,
-					APIKey:             apiKey,
-					User:               apiKey.User,
-					Account:            account,
-					Subscription:       subscription,
-					PricingAt:          pricingAt,
-					InboundEndpoint:    inboundEndpoint,
-					UpstreamEndpoint:   upstreamEndpoint,
-					UserAgent:          userAgent,
-					IPAddress:          clientIP,
-					SessionID:          sessionID,
-					RequestPayloadHash: requestPayloadHash,
-					ForceCacheBilling:  forceCacheBilling,
-					APIKeyService:      h.apiKeyService,
-					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, result.UpstreamModel),
-				}); err != nil {
-					logger.L().With(
-						zap.String("component", "handler.gateway.messages"),
-						zap.Int64("user_id", subject.UserID),
-						zap.Int64("api_key_id", apiKey.ID),
-						zap.Any("group_id", apiKey.GroupID),
-						zap.String("model", reqModel),
-						zap.Int64("account_id", account.ID),
-					).Error("gateway.record_usage_failed", zap.Error(err))
-				}
-			})
+			// §25.17.5 A06：Cursor 账号的账只能走会话终态的唯一结算钩子（上方已注册），
+			// 这里不得再直接提交一次——否则会与终结结算冲突、造成重复计费；多轮会话首轮
+			// 没有完整 usage 时直接提交也会漏账。非 Cursor 账号保持原直接提交路径。
+			if !cursorAccountBilledBySession(account) {
+				// 捕获请求信息（用于异步记录，避免在 goroutine 中访问 gin.Context）
+				userAgent := c.GetHeader("User-Agent")
+				clientIP := ip.GetClientIP(c)
+				requestPayloadHash := service.HashUsageRequestPayload(body)
+				inboundEndpoint := GetInboundEndpoint(c)
+				upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
+
+				// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
+				// ForceCacheBilling 提前拍成标量，避免 worker 闭包保活 failover 状态里的响应体。
+				forceCacheBilling := fs.ForceCacheBilling
+				quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
+				sessionID := service.ExtractClientSessionID(c)
+				h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
+					if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
+						Result:             result,
+						QuotaPlatform:      quotaPlatform,
+						APIKey:             apiKey,
+						User:               apiKey.User,
+						Account:            account,
+						Subscription:       subscription,
+						PricingAt:          pricingAt,
+						InboundEndpoint:    inboundEndpoint,
+						UpstreamEndpoint:   upstreamEndpoint,
+						UserAgent:          userAgent,
+						IPAddress:          clientIP,
+						SessionID:          sessionID,
+						RequestPayloadHash: requestPayloadHash,
+						ForceCacheBilling:  forceCacheBilling,
+						APIKeyService:      h.apiKeyService,
+						ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, result.UpstreamModel),
+					}); err != nil {
+						logger.L().With(
+							zap.String("component", "handler.gateway.messages"),
+							zap.Int64("user_id", subject.UserID),
+							zap.Int64("api_key_id", apiKey.ID),
+							zap.Any("group_id", apiKey.GroupID),
+							zap.String("model", reqModel),
+							zap.Int64("account_id", account.ID),
+						).Error("gateway.record_usage_failed", zap.Error(err))
+					}
+				})
+			}
 			return
 		}
 	}
@@ -3020,6 +3052,26 @@ func (h *GatewayHandler) cursorSettlementFunc(snap cursorSettlementSnapshot, sub
 			}
 		})
 	}
+}
+
+// registerMessagesGeminiCursorSettlement 在 /v1/messages 的 gemini 分支为 Cursor 账号
+// 注册会话唯一结算（§25.17.5 A06）。
+//
+// 返回 true 表示已注册：调用方必须在**首次 Execute 与资源转交之前**调用，且此后不得再
+// 直接提交用量（见 cursorAccountBilledBySession 守卫）。非 Cursor 账号不注册、返回 false，
+// 调用方仍需照旧直接提交用量。
+//
+// 这里单独抽出是为了让"是否注册 + 用什么快照"可被单测直接断言：gemini 分支此前漏注册，
+// 导致多轮会话（首轮仅交付工具批、后续轮走续轮不经过本 handler）整段不计费，会话终结时
+// 还会误报 "cursor settlement func not registered" ERROR。
+func (h *GatewayHandler) registerMessagesGeminiCursorSettlement(
+	handover *cursorResourceHandover, account *service.Account, snap cursorSettlementSnapshot,
+) bool {
+	if !isCursorPlatformAccount(account) || handover == nil {
+		return false
+	}
+	handover.RegisterCursorSettlement(h.cursorSettlementFunc(snap, h.submitMandatoryUsageRecordTask))
+	return true
 }
 
 // submitMandatoryUsageRecordTask never silently drops billing work on pool overflow.
