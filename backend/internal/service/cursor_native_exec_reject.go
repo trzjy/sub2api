@@ -11,7 +11,6 @@ package service
 // 既有常量（cursorFldClientMsg* / cursorFldServerMsg* / cursorFldShellStream* 等）。
 
 import (
-	"fmt"
 	"strings"
 
 	"go.uber.org/zap"
@@ -222,8 +221,8 @@ func cursorEncodeNativeExecRejection(field int, args []byte, reason string) (int
 		return field, payload, "", nil
 
 	default:
-		return 0, nil, "", fmt.Errorf(
-			"%w: unsupported native exec reject field %d", ErrCursorProtocol, field)
+		return 0, nil, "", cursorFrameErrorf(cursorFrameDuplex,
+			"unsupported native exec reject field %d", field)
 	}
 }
 
@@ -238,7 +237,7 @@ func cursorEncodeNativeExecRejection(field int, args []byte, reason string) (int
 func (d *cursorAgentDuplex) cursorRejectNativeExec(parts []cursorPBField, field int, execID uint64, idField []byte) error {
 	argsField, ok := cursorFindField(parts, field)
 	if !ok {
-		return fmt.Errorf("%w: native reject target field %d missing in exec message", ErrCursorProtocol, field)
+		return cursorFrameErrorf(cursorFrameDuplex, "native reject target field %d missing in exec message", field)
 	}
 	reason := cursorNativeExecRejectReason(d.declaredToolNames())
 	resultField, payload, toolCallID, err := cursorEncodeNativeExecRejection(field, argsField.Bytes, reason)

@@ -25,7 +25,6 @@ package service
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 )
 
 // ---------------------------------------------------------------------------
@@ -101,19 +100,19 @@ func cursorEncodeEnvelope(payload []byte) []byte {
 // 与尾部半帧（`incomplete envelope`）都归为协议错误。
 func cursorReadEnvelopeFrame(b []byte, off int) (cursorEnvelopeFrame, int, error) {
 	if off < 0 || off+cursorEnvelopeHeaderSize > len(b) {
-		return cursorEnvelopeFrame{}, 0, fmt.Errorf("%w: truncated envelope header at offset %d", ErrCursorProtocol, off)
+		return cursorEnvelopeFrame{}, 0, cursorFrameErrorf(cursorFrameEnvelope, "truncated envelope header at offset %d", off)
 	}
 	flags := b[off]
 	if flags&cursorEnvelopeFlagCompressed != 0 {
 		// 不解压缩：客户端从不压缩，中转若启用压缩客户端会直接抛错（证据 03 §1）。
-		return cursorEnvelopeFrame{}, 0, fmt.Errorf(
-			"%w: compressed envelope (flags=0x%02x) but client never negotiates compression", ErrCursorProtocol, flags)
+		return cursorEnvelopeFrame{}, 0, cursorFrameErrorf(cursorFrameEnvelope,
+			"compressed envelope (flags=0x%02x) but client never negotiates compression", flags)
 	}
 	n := binary.BigEndian.Uint32(b[off+1 : off+5])
 	// uint32 → int 在 32 位平台可能溢出，先按 uint64 比对再做转换。
 	if uint64(n) > uint64(len(b)-off-cursorEnvelopeHeaderSize) {
-		return cursorEnvelopeFrame{}, 0, fmt.Errorf(
-			"%w: promised %d bytes, received %d", ErrCursorProtocol, n, len(b)-off-cursorEnvelopeHeaderSize)
+		return cursorEnvelopeFrame{}, 0, cursorFrameErrorf(cursorFrameEnvelope,
+			"promised %d bytes, received %d", n, len(b)-off-cursorEnvelopeHeaderSize)
 	}
 	start := off + cursorEnvelopeHeaderSize
 	return cursorEnvelopeFrame{Flags: flags, Data: b[start : start+int(n)]}, start + int(n), nil
@@ -218,7 +217,7 @@ func cursorDecodeProtobuf(b []byte) ([]cursorPBField, error) {
 		field := int(key >> 3)
 		wire := int(key & 0x7)
 		if field <= 0 {
-			return nil, fmt.Errorf("%w: invalid field number %d at offset %d", ErrCursorProtocol, field, i)
+			return nil, cursorFrameErrorf(cursorFrameProtobuf, "invalid field number %d at offset %d", field, i)
 		}
 		switch wire {
 		case cursorWireVarint:
@@ -235,15 +234,15 @@ func cursorDecodeProtobuf(b []byte) ([]cursorPBField, error) {
 			}
 			i = n
 			if ln > uint64(len(b)-i) {
-				return nil, fmt.Errorf(
-					"%w: field %d promises %d bytes, only %d remain", ErrCursorProtocol, field, ln, len(b)-i)
+				return nil, cursorFrameErrorf(cursorFrameProtobuf,
+					"field %d promises %d bytes, only %d remain", field, ln, len(b)-i)
 			}
 			out = append(out, cursorPBField{Number: field, Wire: wire, Bytes: b[i : i+int(ln)]})
 			i += int(ln)
 		default:
 			// 固定 32/64 位 wire type（5/1）本协议不使用。直接失败，不跳 4/8 字节
 			// 继续解——那会让后续字段全部错位。
-			return nil, fmt.Errorf("%w: unsupported wire type %d for field %d", ErrCursorProtocol, wire, field)
+			return nil, cursorFrameErrorf(cursorFrameProtobuf, "unsupported wire type %d for field %d", wire, field)
 		}
 	}
 	return out, nil
@@ -256,7 +255,7 @@ func cursorConsumeVarint(b []byte, off int) (uint64, int, error) {
 	for i := off; i < len(b); i++ {
 		c := b[i]
 		if shift >= 64 {
-			return 0, 0, fmt.Errorf("%w: varint overflow at offset %d", ErrCursorProtocol, off)
+			return 0, 0, cursorFrameErrorf(cursorFrameProtobuf, "varint overflow at offset %d", off)
 		}
 		v |= uint64(c&0x7f) << shift
 		if c&0x80 == 0 {
@@ -265,10 +264,10 @@ func cursorConsumeVarint(b []byte, off int) (uint64, int, error) {
 		shift += 7
 		if shift > 63 && i+1 < len(b) {
 			// 10 字节 varint 的高位只允许 1 位；再多即溢出。
-			return 0, 0, fmt.Errorf("%w: varint too long at offset %d", ErrCursorProtocol, off)
+			return 0, 0, cursorFrameErrorf(cursorFrameProtobuf, "varint too long at offset %d", off)
 		}
 	}
-	return 0, 0, fmt.Errorf("%w: truncated varint at offset %d", ErrCursorProtocol, off)
+	return 0, 0, cursorFrameErrorf(cursorFrameProtobuf, "truncated varint at offset %d", off)
 }
 
 // cursorFindField 返回指定字段号的最后一次出现（protobuf last-one-wins）。

@@ -1067,7 +1067,7 @@ func applyCursorJSONHeadersDeferred(c *gin.Context, resp *CursorUpstreamResponse
 // copyCursorStream 把解析器产出的 SSE 字节流原样搬到目标 writer 并逐块 Flush。
 func copyCursorStream(dst io.Writer, src io.Reader) error {
 	if dst == nil || src == nil {
-		return fmt.Errorf("%w: nil stream", ErrCursorProtocol)
+		return cursorFrameErrorf(cursorFrameDelegation, "nil stream")
 	}
 	buf := make([]byte, 32*1024)
 	for {
@@ -1339,6 +1339,10 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 			if sealReason != nil {
 				parseDoneFields = append(parseDoneFields, zap.String("seal_blocked_reason", sealReason.Error()))
 			}
+			// 帧级诊断（CUR-EXEC-03 根因定位）：终态是协议错误时，附带
+			// protocol_frame_class / protocol_frame_index，直接把"哪一类帧、第几帧"写进
+			// 终态日志；非帧级错误不追加任何字段。
+			parseDoneFields = append(parseDoneFields, cursorFrameErrFields(rerr)...)
 			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_parse_done", opts.model,
 				parseDoneFields...)
 			// cursorSessionStreamResult 内部会取 session.mu 读取最终 usage，不得在持锁时调用
@@ -3747,7 +3751,7 @@ func (d *cursorToolDelegations) noteToolRequestsListed(modelCallID string, count
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if count < 0 {
-		return fmt.Errorf("%w: negative tool_requests_listed count", ErrCursorProtocol)
+		return cursorFrameErrorf(cursorFrameMessage, "negative tool_requests_listed count")
 	}
 	batch, err := d.batchFor(modelCallID)
 	if err != nil {
@@ -3821,7 +3825,7 @@ func (d *cursorToolDelegations) noteDelegation(modelCallID string, tc cursorTool
 		return nil
 	}
 	if strings.TrimSpace(tc.ID) == "" {
-		return fmt.Errorf("%w: mcp_args without tool_call_id", ErrCursorProtocol)
+		return cursorFrameErrorf(cursorFrameDelegation, "mcp_args without tool_call_id")
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -3838,7 +3842,7 @@ func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) e
 	for _, existing := range batch.delegations {
 		if existing.ID == tc.ID {
 			// 重复 ID：同一委托被重复提交，按冲突拒绝（§25.2）。
-			return fmt.Errorf("%w: duplicate tool delegation %q", ErrCursorProtocol, tc.ID)
+			return cursorFrameErrorf(cursorFrameDelegation, "duplicate tool delegation %q", tc.ID)
 		}
 	}
 	batch.delegations = append(batch.delegations, tc)
@@ -3990,8 +3994,8 @@ func (d *cursorToolDelegations) newWireIDLocked() (string, error) {
 		}
 		return candidate, nil
 	}
-	return "", fmt.Errorf("%w: failed to allocate a unique wire tool_call_id after %d attempts",
-		ErrCursorProtocol, cursorWireIDMaxAttempts)
+	return "", cursorFrameErrorf(cursorFrameDelegation,
+		"failed to allocate a unique wire tool_call_id after %d attempts", cursorWireIDMaxAttempts)
 }
 
 // upstreamIDKnownLocked 报告 candidate 是否是某个委托的上游原 id（调用方必须已持 d.mu）。

@@ -4286,11 +4286,13 @@ func cursorCompatUserError(c *gin.Context, account *Account, err error) (status 
 	if !ok {
 		return 0, "", false
 	}
-	logger.FromContext(ctx).Warn("cursor_user_error",
+	fields := []zap.Field{
 		zap.String("error_code", code),
 		zap.Int("status", status),
 		zap.String("error_class", cursorStreamErrClass(err)),
-	)
+	}
+	fields = append(fields, cursorFrameErrFields(err)...)
+	logger.FromContext(ctx).Warn("cursor_user_error", fields...)
 	return status, message, true
 }
 

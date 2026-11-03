@@ -239,6 +239,13 @@ func cursorStreamErrClass(err error) string {
 	case errors.Is(err, ErrCursorBatchAmbiguous):
 		return "batch_ambiguous"
 	case errors.Is(err, ErrCursorProtocol):
+		// 帧级细分：有类别时输出 `protocol_frame:<class>`（如 frame_envelope /
+		// frame_protobuf / frame_message / frame_mcp_args / frame_duplex …），
+		// 让生产一出现就能定位到"第几类帧坏了"；只有裸哨兵（无帧级信息）才退回
+		// 粗粒度 `protocol_frame`。类别集合见 cursor_frame_error.go。
+		if class, _, ok := cursorFrameClassify(err); ok {
+			return "protocol_frame:" + string(class)
+		}
 		return "protocol_frame"
 	}
 	return "protocol_other"

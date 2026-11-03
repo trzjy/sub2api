@@ -201,7 +201,7 @@ func newCursorAgentDuplex(initial []byte, delegations *cursorToolDelegations) (*
 	}
 	run, ok := cursorFindField(fields, cursorFldAgentRunRequest)
 	if !ok {
-		return nil, fmt.Errorf("%w: missing AgentRun request", ErrCursorProtocol)
+		return nil, cursorFrameErrorf(cursorFrameDuplex, "missing AgentRun request")
 	}
 	fields, err = cursorDecodeProtobuf(run.Bytes)
 	if err != nil {
@@ -240,11 +240,11 @@ func newCursorAgentDuplex(initial []byte, delegations *cursorToolDelegations) (*
 		key, foundKey := cursorFindField(blob, cursorFldBlobID)
 		value, foundValue := cursorFindField(blob, cursorFldBlobValue)
 		if !foundKey || !foundValue {
-			return nil, fmt.Errorf("%w: malformed pre-fetched blob", ErrCursorProtocol)
+			return nil, cursorFrameErrorf(cursorFrameDuplex, "malformed pre-fetched blob")
 		}
 		d.bytes += len(key.Bytes) + len(value.Bytes)
 		if d.bytes > cursorUpstreamStreamMaxBytes {
-			return nil, fmt.Errorf("%w: KV storage exceeds limit", ErrCursorProtocol)
+			return nil, cursorFrameErrorf(cursorFrameDuplex, "KV storage exceeds limit")
 		}
 		d.blobs[string(key.Bytes)] = value.Bytes
 	}
@@ -362,7 +362,7 @@ func (b *cursorAgentResponseBody) Read(p []byte) (int, error) {
 	n := int(binary.BigEndian.Uint32(header[1:]))
 	b.bytes += len(header) + n
 	if b.bytes > cursorUpstreamStreamMaxBytes {
-		return 0, fmt.Errorf("%w: AgentRun response exceeds limit", ErrCursorProtocol)
+		return 0, cursorFrameErrorf(cursorFrameDuplex, "AgentRun response exceeds limit")
 	}
 	payload := make([]byte, n)
 	if _, err := io.ReadFull(b.source, payload); err != nil {
@@ -497,7 +497,7 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				// 属内部逻辑错误，保持失败关闭（绝不静默忽略真实执行请求）。
 				d.logPhase(zapcore.ErrorLevel, "exec_dispatch_internal_error", "",
 					zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
-				return false, fmt.Errorf("%w: AgentRun exec dispatch ordering broken", ErrCursorProtocol)
+				return false, cursorFrameErrorf(cursorFrameDuplex, "AgentRun exec dispatch ordering broken")
 			}
 			if cursorExecMetadataOnly(parts) {
 				// 纯元数据伴随消息（仅服务端方向已证字段 f1/f15/f19/f55/f57）：不承载执行指令，
@@ -528,14 +528,14 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			key, foundKey := cursorFindField(values, 1)
 			value, foundValue := cursorFindField(values, 2)
 			if !foundKey || !foundValue {
-				return false, fmt.Errorf("%w: malformed KV set", ErrCursorProtocol)
+				return false, cursorFrameErrorf(cursorFrameDuplex, "malformed KV set")
 			}
 			// §18.5 T：只记 KV 操作种类（kv_set）与耗时，不记 key/value 明文。
 			d.logPhase(zapcore.DebugLevel, "kv_write_before", "",
 				zap.String("kind", "kv_set"))
 			d.bytes += len(key.Bytes) + len(value.Bytes)
 			if d.bytes > cursorUpstreamStreamMaxBytes {
-				return false, fmt.Errorf("%w: KV storage exceeds limit", ErrCursorProtocol)
+				return false, cursorFrameErrorf(cursorFrameDuplex, "KV storage exceeds limit")
 			}
 			d.blobs[string(key.Bytes)] = value.Bytes
 			response = cursorAppendBytesField(response, 3, nil)
@@ -554,7 +554,7 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 			key, found := cursorFindField(values, 1)
 			value, exists := d.blobs[string(key.Bytes)]
 			if !found || !exists {
-				return false, fmt.Errorf("%w: AgentRun requested unknown KV blob", ErrCursorProtocol)
+				return false, cursorFrameErrorf(cursorFrameDuplex, "AgentRun requested unknown KV blob")
 			}
 			response = cursorAppendBytesField(response, 2, cursorAppendBytesField(nil, 1, value))
 			serr := d.send(3, response)
@@ -562,7 +562,7 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				zap.String("kind", "kv_get"))
 			return false, serr
 		} else {
-			return false, fmt.Errorf("%w: unsupported KV operation", ErrCursorProtocol)
+			return false, cursorFrameErrorf(cursorFrameDuplex, "unsupported KV operation")
 		}
 	}
 	return false, nil
@@ -649,7 +649,7 @@ func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error
 		return unsupported()
 	}
 	if query.Wire != cursorWireBytes {
-		return false, fmt.Errorf("%w: interaction query field %d is not a message", ErrCursorProtocol, field)
+		return false, cursorFrameErrorf(cursorFrameMessage, "interaction query field %d is not a message", field)
 	}
 	sub, err := cursorDecodeProtobuf(query.Bytes)
 	if err != nil {
@@ -889,7 +889,7 @@ func (d *cursorAgentDuplex) cursorMcpStateReply(execID uint64, idField []byte) (
 func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID uint64, idField []byte) (cursorToolCallCapture, error) {
 	argsField, ok := cursorFindField(parts, 11)
 	if !ok {
-		return cursorToolCallCapture{}, fmt.Errorf("%w: mcp_args without f11", ErrCursorProtocol)
+		return cursorToolCallCapture{}, cursorFrameErrorf(cursorFrameDelegation, "mcp_args without f11")
 	}
 	id, name, argsJSON, err := cursorDecodeMcpArgs(argsField.Bytes)
 	if err != nil {

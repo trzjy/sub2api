@@ -597,10 +597,13 @@ func (h *GatewayHandler) writeCCCursorUserError(c *gin.Context, reqLog *zap.Logg
 	if !ok {
 		return false
 	}
-	reqLog.Warn("cursor_user_error",
+	fields := []zap.Field{
 		zap.String("error_code", code),
 		zap.Int("status", status),
-	)
+		zap.String("error_class", service.CursorStreamErrClassForLog(err)),
+	}
+	fields = append(fields, service.CursorFrameErrFieldsForLog(err)...)
+	reqLog.Warn("cursor_user_error", fields...)
 	errType := "upstream_error"
 	if status >= 400 && status < 500 {
 		errType = "invalid_request_error"

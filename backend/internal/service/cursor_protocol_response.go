@@ -81,6 +81,11 @@ type cursorSSEStream struct {
 	// 语义：每帧覆盖为最新值即可，无需历史队列；交接成功（sealable 通过）时清空。
 	// 与 err/errMu 复用同一把锁。
 	lastSealErr error
+
+	// frameIndex 是当前已成功读到的帧计数（从 1 开始），仅用于给**读失败**的帧级错误
+	// 标注"第几帧坏了"。next() 每次进入前把"本次尝试读取的帧序号"写进错误，
+	// 生产日志因此能给出 protocol_frame_index=N（见 cursor_frame_error.go）。
+	frameIndex int
 }
 
 func (s *cursorSSEStream) Close() error { return s.source.Close() }
@@ -131,21 +136,31 @@ func (s *cursorSSEStream) Read(dst []byte) (int, error) {
 	return 0, io.EOF
 }
 
-func (s *cursorSSEStream) next() error {
+func (s *cursorSSEStream) next() (err error) {
+	// 帧序号：本次尝试读取的是第 frameIndex+1 帧。读成功才递增；失败时把序号
+	// 标注进帧级错误（只写整数，不含帧内容），生产日志据此给出 protocol_frame_index。
+	attempt := s.frameIndex + 1
+	defer func() {
+		if err != nil {
+			err = cursorAnnotateFrame(err, attempt)
+			return
+		}
+		s.frameIndex = attempt
+	}()
 	header := make([]byte, cursorEnvelopeHeaderSize)
 	if _, err := io.ReadFull(s.source, header); err != nil {
 		if err == io.EOF {
 			return ErrCursorMissingEndStream
 		}
-		return fmt.Errorf("%w: read envelope: %w", ErrCursorProtocol, err)
+		return cursorFrameErrorWrapf(cursorFrameEnvelope, err, "read envelope: %v", err)
 	}
 	n := int(binary.BigEndian.Uint32(header[1:]))
 	if n > cursorUpstreamStreamMaxBytes {
-		return fmt.Errorf("%w: oversized envelope", ErrCursorProtocol)
+		return cursorFrameErrorf(cursorFrameEnvelope, "oversized envelope")
 	}
 	payload := make([]byte, n)
 	if _, err := io.ReadFull(s.source, payload); err != nil {
-		return fmt.Errorf("%w: read payload: %w", ErrCursorProtocol, err)
+		return cursorFrameErrorWrapf(cursorFrameEnvelope, err, "read payload: %v", err)
 	}
 	frame, _, err := cursorReadEnvelopeFrame(append(header, payload...), 0)
 	if err != nil {
@@ -185,7 +200,7 @@ func (s *cursorSSEStream) next() error {
 						cursorInlineToolCallRejectedFields(
 							cursorInlineToolCallShapeOf(s.parser.rawContent),
 							cursorInlineRejectReasonStreamHit)...)
-					return fmt.Errorf("%w: inline tool call present in stream", ErrCursorProtocol)
+					return cursorFrameErrorf(cursorFrameInlineToolCall, "inline tool call present in stream")
 				}
 			}
 			if !s.parser.started {
@@ -741,12 +756,12 @@ func cursorTurnTokenField(fields []cursorPBField, number int) (int, bool, error)
 		return 0, false, nil
 	}
 	if f.Wire != cursorWireVarint {
-		return 0, false, fmt.Errorf(
-			"%w: turn_ended field %d has wire type %d, want varint", ErrCursorProtocol, number, f.Wire)
+		return 0, false, cursorFrameErrorf(cursorFrameMessage,
+			"turn_ended field %d has wire type %d, want varint", number, f.Wire)
 	}
 	if f.Varint > uint64(math.MaxInt) {
-		return 0, false, fmt.Errorf(
-			"%w: turn_ended field %d value %d is not a non-negative int", ErrCursorProtocol, number, f.Varint)
+		return 0, false, cursorFrameErrorf(cursorFrameMessage,
+			"turn_ended field %d value %d is not a non-negative int", number, f.Varint)
 	}
 	return int(f.Varint), true, nil
 }
@@ -761,8 +776,8 @@ func cursorTurnEndedAtField(fields []cursorPBField, number int) (uint64, bool, e
 		return 0, false, nil
 	}
 	if f.Wire != cursorWireVarint {
-		return 0, false, fmt.Errorf(
-			"%w: turn_ended field %d has wire type %d, want varint", ErrCursorProtocol, number, f.Wire)
+		return 0, false, cursorFrameErrorf(cursorFrameMessage,
+			"turn_ended field %d has wire type %d, want varint", number, f.Wire)
 	}
 	return f.Varint, true, nil
 }
@@ -1184,7 +1199,7 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 
 		if frame.cursorIsEndStream() {
 			if p.endStreamSeen {
-				return nil, fmt.Errorf("%w: received extra EndStreamResponse", ErrCursorProtocol)
+				return nil, cursorFrameErrorf(cursorFrameMessage, "received extra EndStreamResponse")
 			}
 			p.endStreamSeen = true
 			code, msg, err := cursorParseEndStream(frame.Data, p.secrets...)
@@ -1200,7 +1215,7 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 			continue
 		}
 		if p.endStreamSeen {
-			return nil, fmt.Errorf("%w: received extra message after EndStreamResponse", ErrCursorProtocol)
+			return nil, cursorFrameErrorf(cursorFrameMessage, "received extra message after EndStreamResponse")
 		}
 
 		ev, err := p.cursorParseMessageFrame(frame.Data)
@@ -1516,13 +1531,13 @@ func (p *cursorStreamParser) noteToolRequestsListed(b []byte) error {
 	}
 	f, ok := cursorFindField(fields, cursorFldToolRequestsListedCallCount)
 	if !ok {
-		return fmt.Errorf("%w: tool_requests_listed without call_count", ErrCursorProtocol)
+		return cursorFrameErrorf(cursorFrameMessage, "tool_requests_listed without call_count")
 	}
 	if f.Wire != cursorWireVarint {
-		return fmt.Errorf("%w: tool_requests_listed.call_count has wrong wire type", ErrCursorProtocol)
+		return cursorFrameErrorf(cursorFrameMessage, "tool_requests_listed.call_count has wrong wire type")
 	}
 	if f.Varint > math.MaxUint32 {
-		return fmt.Errorf("%w: tool_requests_listed.call_count overflows uint32", ErrCursorProtocol)
+		return cursorFrameErrorf(cursorFrameMessage, "tool_requests_listed.call_count overflows uint32")
 	}
 	count := int(f.Varint)
 
@@ -1595,7 +1610,7 @@ func cursorDecodeMcpArgs(payload []byte) (string, string, string, error) {
 	}
 	b, err := json.Marshal(obj)
 	if err != nil {
-		return "", "", "", fmt.Errorf("%w: marshal mcp args: %v", ErrCursorProtocol, err)
+		return "", "", "", cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "marshal mcp args: %v", err)
 	}
 	return idF.String(), nameF.String(), string(b), nil
 }
@@ -1613,13 +1628,13 @@ func cursorDecodeMcpArgs(payload []byte) (string, string, string, error) {
 func cursorDecodeMcpValue(b []byte) (string, error) {
 	value := &structpb.Value{}
 	if err := proto.Unmarshal(b, value); err != nil {
-		return "", fmt.Errorf("%w: unmarshal mcp value: %v", ErrCursorProtocol, err)
+		return "", cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "unmarshal mcp value: %v", err)
 	}
 	// kind 未设置（等价于 WhichOneof("kind")==nil）与"合法 null（Value_NullValue）"
 	// 不是一回事：前者说明这条 Value 没有写任何 oneof 分支，必须明确失败，绝不允许
 	// 落到 JSON null（那样会静默吞掉畸形/未设置的参数）。
 	if value.Kind == nil {
-		return "", fmt.Errorf("%w: mcp value has no kind set", ErrCursorProtocol)
+		return "", cursorFrameErrorf(cursorFrameMcpArgs, "mcp value has no kind set")
 	}
 	// 非有限数值必须明确失败：protojson 会把 NaN/±Inf 写成字符串 "NaN"/"Infinity"，
 	// 等于把数字静默改成字符串（与手写循环把数字读错的同类错误）。任意深度（嵌套
@@ -1629,13 +1644,13 @@ func cursorDecodeMcpValue(b []byte) (string, error) {
 	}
 	out, err := protojson.Marshal(value)
 	if err != nil {
-		return "", fmt.Errorf("%w: marshal mcp value: %v", ErrCursorProtocol, err)
+		return "", cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "marshal mcp value: %v", err)
 	}
 	// protojson 对单行输出在逗号后随机插空格（detrand），同一输入会产出不同字节；
 	// 序列化后必须用 json.Compact 归一经压缩结果再返回（只去除无语义空白，不改语义）。
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, out); err != nil {
-		return "", fmt.Errorf("%w: compact mcp value: %v", ErrCursorProtocol, err)
+		return "", cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "compact mcp value: %v", err)
 	}
 	return buf.String(), nil
 }
@@ -2335,11 +2350,11 @@ func cursorRetypeMcpArgs(argsJSON, schemaJSON []byte) ([]byte, error) {
 func cursorRetypeMcpArgsOptions(argsJSON, schemaJSON []byte, enforceRequired bool) ([]byte, error) {
 	var args any
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
-		return nil, fmt.Errorf("%w: parse mcp args: %v", ErrCursorProtocol, err)
+		return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "parse mcp args: %v", err)
 	}
 	var root map[string]any
 	if err := json.Unmarshal(schemaJSON, &root); err != nil {
-		return nil, fmt.Errorf("%w: parse tool schema: %v", ErrCursorProtocol, err)
+		return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "parse tool schema: %v", err)
 	}
 	if root == nil {
 		return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
@@ -2362,7 +2377,7 @@ func cursorRetypeMcpArgsOptions(argsJSON, schemaJSON []byte, enforceRequired boo
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
-		return nil, fmt.Errorf("%w: marshal retyped mcp args: %v", ErrCursorProtocol, err)
+		return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "marshal retyped mcp args: %v", err)
 	}
 	return b, nil
 }
@@ -2649,7 +2664,7 @@ func cursorCheckFiniteValue(v *structpb.Value) error {
 	switch k := v.Kind.(type) {
 	case *structpb.Value_NumberValue:
 		if math.IsNaN(k.NumberValue) || math.IsInf(k.NumberValue, 0) {
-			return fmt.Errorf("%w: mcp value number is not finite", ErrCursorProtocol)
+			return cursorFrameErrorf(cursorFrameMcpArgs, "mcp value number is not finite")
 		}
 	case *structpb.Value_StructValue:
 		for _, fv := range k.StructValue.GetFields() {
@@ -2694,7 +2709,7 @@ func cursorParseEndStream(payload []byte, secrets ...string) (string, string, er
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(payload, &env); err != nil {
-		return "", "", fmt.Errorf("%w: EndStream payload is not JSON: %v", ErrCursorProtocol, err)
+		return "", "", cursorFrameErrorWrapf(cursorFrameEndStreamPayload, err, "EndStream payload is not JSON: %v", err)
 	}
 	if env.Error == nil {
 		return "", "", nil
