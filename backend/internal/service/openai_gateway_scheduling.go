@@ -501,7 +501,7 @@ func cursorAccountQuotaKeyVetoReasonWithError(ctx context.Context, account *Acco
 			"account_id", account.ID,
 			"quota_key_id", *account.QuotaKeyID,
 		)
-		return "quota_key_expired", nil
+		return quotaKeyExpired, nil
 	}
 	return "", nil
 }
@@ -529,6 +529,8 @@ const (
 	// quotaKeyUsageIncomplete 表示快照缺 total 或 used 任一：剩余额度不可计算，失败关闭。
 	// 真实 0 不是缺失——total=0/used=0 走 quotaKeyUsageExhausted，不得记作本原因。
 	quotaKeyUsageIncomplete = "quota_key_usage_incomplete"
+	// quotaKeyExpired 表示来源行本身已过期（key 终态）：名下账号一律不可用，只能等换码。
+	quotaKeyExpired = "quota_key_expired"
 )
 
 // cursorQuotaKeyRemainingFloor 是 Cursor 激活码**剩余额度**的调度下限（绝对值，不是百分比）。

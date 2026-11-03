@@ -5148,6 +5148,24 @@ type CursorResumeError struct {
 	Reason string
 	// Err 是底层语义错误（errors.Is 可判定）。
 	Err error
+	// Rebuild 非空表示：这次拒绝的原因是**账号侧容量/额度问题**（号被停、卡没额度、
+	// 卡被换/被改、号被删、映射被改），换一个号就能接着干——因此不得回显给下游用户。
+	// 调用方（guardResumeEligibility）据此终结旧会话并转成换号重建（2026-11-04 用户裁定：
+	// "还有号就不该报错，换号重试是站点义务"）。空串 = 真用户错误（平台/分组不允许）。
+	Rebuild GatewayFailureReason
+}
+
+// IsRebuild 判定该拒绝是否应转成换号重建而不是返回给用户。
+func (e *CursorResumeError) IsRebuild() bool {
+	return e != nil && e.Rebuild != ""
+}
+
+// newCursorResumeRebuildDenial 构造"账号侧问题、应换号重建"的拒绝。
+//
+// 仍然复用 CursorResumeError 的状态/原因串（日志与既有断言不变），只额外标记 Rebuild，
+// 让调用方知道这条拒绝不能写回给客户端。status 只用于日志留痕，不会真的发给下游。
+func newCursorResumeRebuildDenial(status int, reason string, rebuild GatewayFailureReason, err error) *CursorResumeError {
+	return &CursorResumeError{Status: status, Reason: reason, Err: err, Rebuild: rebuild}
 }
 
 // Error 实现 error。
@@ -5343,7 +5361,9 @@ func (s *CursorExecutionService) verifyResumeEligibility(
 
 	// ① 原账号：存在未删除 + 仍是 cursor 账号（软删账号由账号读取本身拒绝）。
 	if !isCursorAccount(account) {
-		return newCursorResumeError(http.StatusForbidden, "account_unavailable", ErrCursorResumeAccountIneligible)
+		// ① 号被删/不再是 cursor 号：站点侧资源变化，换号重建。
+		return newCursorResumeRebuildDenial(http.StatusForbidden, "account_unavailable",
+			CursorUpstreamAccountFailureReason, ErrCursorResumeAccountIneligible)
 	}
 	// ② 请求平台准入：只复用既有平台纯谓词，不按模型名猜归属。
 	if platform := cursorResumeRequestPlatform(spec); platform == "" || !cursorNativeBridgePlatforms(platform) {
@@ -5360,39 +5380,78 @@ func (s *CursorExecutionService) verifyResumeEligibility(
 			// 账号本体可调度、仅该模型被熔断：与调度链同一原因串（model_rate_limited）。
 			reason = "model_rate_limited"
 		}
-		return newCursorResumeError(http.StatusForbidden, reason, ErrCursorResumeAccountIneligible)
+		return newCursorResumeRebuildDenial(http.StatusForbidden, reason,
+			CursorUpstreamAccountFailureReason, ErrCursorResumeAccountIneligible)
 	}
 	// ⑤ 首次来源指纹必须可靠：缺失即失效关联，绝不以空值代表"与首次鉴权同源"。
 	sourceFP, fpErr := cursorSessionSourceFingerprint(spec)
 	if fpErr != nil {
-		return newCursorResumeError(http.StatusBadRequest, "source_fingerprint_unavailable", fpErr)
+		// ⑤ 首次来源指纹取不到：站内读数失败，换号重建。
+		return newCursorResumeRebuildDenial(http.StatusBadRequest, "source_fingerprint_unavailable",
+			CursorUpstreamAccountFailureReason, fpErr)
 	}
 	// ⑥ 当前绑定必须仍是那一个来源（改绑定/换码 = 失效关联，不换号重试）。
 	if currentKeyID := cursorAccountQuotaKeyID(account); currentKeyID != sourceFP.QuotaKeyID {
-		return newCursorResumeError(http.StatusBadRequest, "source_changed", ErrCursorResumeSourceChanged)
+		// ⑥ 号被换了绑卡（运维换卡）：站点侧变化，换号重建。
+		return newCursorResumeRebuildDenial(http.StatusBadRequest, "source_changed",
+			CursorUpstreamAccountFailureReason, ErrCursorResumeSourceChanged)
 	}
 	// ⑦ 读该来源并比较首次 MAC（同一解密 + 取号链同一 HMAC，不另算一份指纹）。
 	codeMAC, macErr := s.resumeSourceCodeMAC(ctx, sourceFP.QuotaKeyID)
 	if macErr != nil {
-		return newCursorResumeError(http.StatusServiceUnavailable, "source_unavailable", macErr)
+		// ⑦ 卡行读不到（DB/解密故障）：同样是"站点侧读不到"，与⑤⑧同处置——换号重建，
+		// 绝不把站内故障说成"你的账号已不可用，请重新发起请求"。
+		return newCursorResumeRebuildDenial(http.StatusServiceUnavailable, "source_unavailable",
+			CursorUpstreamAccountFailureReason, macErr)
 	}
 	if subtle.ConstantTimeCompare([]byte(codeMAC), []byte(sourceFP.CodeMAC)) != 1 {
-		return newCursorResumeError(http.StatusBadRequest, "source_changed", ErrCursorResumeSourceChanged)
+		// ⑦ 卡内容与首次记录不符（卡被改过）：站点侧变化，换号重建。
+		return newCursorResumeRebuildDenial(http.StatusBadRequest, "source_changed",
+			CursorUpstreamAccountFailureReason, ErrCursorResumeSourceChanged)
 	}
 	// ⑧ A04 共同来源门：与调度/粘性/DB 复核/水位/公开目录同一实现（不另加放行条件）。
+	// 2026-11-04 用户裁定：号被停用/卡过期/卡额度用完/读数失败，全是站点侧问题——
+	// 换一个还有额度的号就能接着干，绝不能让用户看到"账号已不可用，请重新发起请求"。
 	veto, vetoErr := cursorSupplySourceAvailabilityVetoReason(ctx, account)
 	if vetoErr != nil {
-		return newCursorResumeError(http.StatusServiceUnavailable, "source_unavailable", vetoErr)
+		return newCursorResumeRebuildDenial(http.StatusServiceUnavailable, "source_unavailable",
+			CursorUpstreamAccountFailureReason, vetoErr)
 	}
 	if veto != "" {
-		return newCursorResumeError(http.StatusForbidden, veto, ErrCursorResumeSourceBlocked)
+		// 额度类否决按额度耗尽语义上抛：本请求内所有候选都这样时，才由 CUR-RES-11 说明容量。
+		rebuildReason := CursorUpstreamAccountFailureReason
+		if isCursorQuotaVetoReason(veto) {
+			rebuildReason = CursorQuotaExhaustedReason
+		}
+		return newCursorResumeRebuildDenial(http.StatusForbidden, veto, rebuildReason, ErrCursorResumeSourceBlocked)
 	}
-	// ⑨ 重新映射：目标必须与会话初始 upstreamModel 一致（改 mapping 即 400，不换号）。
+	// ⑨ 重新映射：账号侧映射配置变了同样属于站点侧变化，换号重建（新号按自己的映射解析）。
 	upstreamModel, matched := account.ResolveMappedModel(spec.requestedModel)
 	if !matched || strings.TrimSpace(upstreamModel) != strings.TrimSpace(spec.upstreamModel) {
-		return newCursorResumeError(http.StatusBadRequest, "model_mapping_changed", ErrCursorResumeConfigChanged)
+		return newCursorResumeRebuildDenial(http.StatusBadRequest, "model_mapping_changed",
+			CursorUpstreamAccountFailureReason, ErrCursorResumeConfigChanged)
 	}
 	return nil
+}
+
+// isCursorQuotaVetoReason 判定来源门否决串是否真属"没额度了"。
+//
+// 只认两种：卡真实剩余低于调度下限（quota_key_usage_exhausted，含真实 0）与卡已过期
+// （quota_key_expired）。这两种意味着"换任何号都还是没额度"，才是 CUR-RES-11「账号池暂无
+// 可用额度」的语义。
+//
+// 其余否决串（未观测 / 观测失败 / 读数陈旧 / 字段不全 / 未绑卡 / 卡状态读不到）同样属于
+// 站点侧问题、同样要换号重建，但它们说的是"我们不知道有没有额度"或"配置不完整"，不是
+// "没额度"。混进来的后果是把运维配置问题对外说成容量问题，V3（池真耗尽）就判不准了。
+//
+// 用常量而不是字面量：这些串是来源门的对外契约，两边各写一份必然漂移。
+func isCursorQuotaVetoReason(veto string) bool {
+	switch veto {
+	case quotaKeyUsageExhausted, quotaKeyExpired:
+		return true
+	default:
+		return false
+	}
 }
 
 // resumeSourceCodeMAC 读取指定来源行并返回其激活码的 MAC（取号链同一 HMAC）。
@@ -8849,6 +8908,30 @@ func (s *CursorExecutionService) guardResumeEligibility(
 	denial := s.verifyResumeEligibility(ctx, ticket.session, account)
 	if denial == nil {
 		return nil
+	}
+	// 2026-11-04 用户裁定：账号侧容量/额度类拒绝（号被停、卡过期/额度用完/被换/被改、
+	// 号被删、映射被改）一律不外显。终结旧会话后转成换号重建，用户在同一个 HTTP 里
+	// 无缝接着跑；只有平台/分组类拒绝才作为用户错误返回。
+	if denial.IsRebuild() {
+		// 历史不完整（典型：Responses 只给 previous_response_id、没带正文历史）时不许重建：
+		// 重开一局会丢上下文，比报错更糟（方案 §2.3）。这类仍按原拒绝返回。
+		if ticket.probe == nil || !ticket.probe.Plan.historySupportsRebuild() {
+			cursorPhaseLog(ctx, zapcore.WarnLevel, "session_resume_rebuild_skipped", ticket.Model,
+				zap.String("session_id", ticket.SessionID),
+				zap.String("deny_reason", denial.Reason),
+				zap.String("skip_reason", "history_incomplete"))
+			s.finishCursorSession(ticket.session, "resume_denied_"+denial.Reason)
+			return denial
+		}
+		cursorPhaseLog(ctx, zapcore.InfoLevel, "session_resume_rebuild", ticket.Model,
+			zap.String("session_id", ticket.SessionID),
+			zap.String("batch_id", ticket.BatchID),
+			zap.String("deny_reason", denial.Reason),
+			zap.String("rebuild_reason", string(denial.Rebuild)),
+			zap.Int64("dead_account_id", account.ID))
+		// 与 P1 同一条收尾路径：同步 finalize 并等终结完成，避免重建撞上旧会话残留。
+		s.settleDeadSessionBeforeRebuild(ticket.session)
+		return &CursorResumeRebuildError{DeadAccountID: account.ID, Reason: denial.Rebuild, Err: denial}
 	}
 	cursorPhaseLog(ctx, zapcore.InfoLevel, "session_resume_denied", ticket.Model,
 		zap.String("session_id", ticket.SessionID),

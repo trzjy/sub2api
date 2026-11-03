@@ -63,9 +63,9 @@ func cursorEligibilityRepo(code string) *cursorOutboundRepo {
 	})
 }
 
-// cursorEligibilitySession 登记一条已固定首次来源指纹的会话（并发 1 的原会话）。
-func cursorEligibilitySession(svc *CursorExecutionService, code string) *cursorSessionRecord {
-	return svc.sessions.start(cursorSessionSpec{
+// cursorEligibilitySpec 是一条已固定首次来源指纹的会话 spec（并发 1 的原会话）。
+func cursorEligibilitySpec(code string) cursorSessionSpec {
+	return cursorSessionSpec{
 		protocol:         cursorProtocolChat,
 		requestedModel:   cursorEligibilityModel,
 		upstreamModel:    cursorEligibilityUpstream,
@@ -78,7 +78,12 @@ func cursorEligibilitySession(svc *CursorExecutionService, code string) *cursorS
 			APIKeyID: 9102,
 			GroupID:  cursorEligibilityGroupID,
 		},
-	})
+	}
+}
+
+// cursorEligibilitySession 登记一条已固定首次来源指纹的会话（并发 1 的原会话）。
+func cursorEligibilitySession(svc *CursorExecutionService, code string) *cursorSessionRecord {
+	return svc.sessions.start(cursorEligibilitySpec(code))
 }
 
 // cursorEligibilityAccount 构造原账号：显式挂组 + 声明模型映射 + 绑定来源。
