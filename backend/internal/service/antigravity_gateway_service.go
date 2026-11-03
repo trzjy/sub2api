@@ -455,6 +455,8 @@ func (s *AntigravityGatewayService) TestConnectionWithPrompt(ctx context.Context
 	if result.resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("API 返回 %d: %s", result.resp.StatusCode, string(respBody))
 	}
+	logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Test] status=%d body_len=%d resp_sample=%s",
+		result.resp.StatusCode, len(respBody), truncateForLog(respBody, 500))
 
 	text, images, err := validateTestConnectionResponse(respBody)
 	if err != nil {
