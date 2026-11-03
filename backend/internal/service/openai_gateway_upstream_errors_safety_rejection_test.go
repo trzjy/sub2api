@@ -132,3 +132,114 @@ func TestNewOpenAIUpstreamFailoverError_Plain400NotSafetyRejection(t *testing.T)
 	assert.False(t, foErr.IsOpenAIUpstreamSafetyRejection())
 	assert.Zero(t, foErr.ClientStatusCode)
 }
+
+// 审核拒绝必须带上「上游主机」，否则 handler 只能逐个撞同源账号：
+// 生产实测 419→416→426 连撞三次商汤，切换预算全耗在同一面墙上。
+func TestUpstreamHostOfAccount(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		acc  *Account
+		want string
+	}{
+		{
+			name: "商汤显式 base_url",
+			acc: &Account{
+				ID:          419,
+				Platform:    "deepseek",
+				Type:        AccountTypeAPIKey,
+				Credentials: map[string]any{"base_url": "https://token.sensenova.cn/v1/chat/completions"},
+			},
+			want: "token.sensenova.cn",
+		},
+		{
+			name: "带端口的自建地址",
+			acc: &Account{
+				ID:          411,
+				Platform:    "deepseek",
+				Type:        AccountTypeAPIKey,
+				Credentials: map[string]any{"base_url": "http://119.28.137.187:18081"},
+			},
+			want: "119.28.137.187:18081",
+		},
+		{
+			name: "大小写与空格归一",
+			acc: &Account{
+				ID:          1,
+				Type:        AccountTypeAPIKey,
+				Credentials: map[string]any{"base_url": " HTTPS://Token.SenseNova.CN/v1 "},
+			},
+			want: "token.sensenova.cn",
+		},
+		{
+			name: "没有 base_url 时返回空（视为不排除）",
+			acc:  &Account{ID: 2, Type: AccountTypeAPIKey, Credentials: map[string]any{}},
+			want: "",
+		},
+		{
+			name: "nil 账号",
+			acc:  nil,
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, upstreamHostOfAccount(tc.acc))
+		})
+	}
+}
+
+// 一次把整片同源账号摘出去：同 host 的全排、别家留着、没有 base_url 的不误伤。
+func TestSiblingAccountIDsByHost(t *testing.T) {
+	t.Parallel()
+
+	mk := func(id int64, baseURL string) Account {
+		creds := map[string]any{}
+		if baseURL != "" {
+			creds["base_url"] = baseURL
+		}
+		return Account{ID: id, Platform: "deepseek", Type: AccountTypeAPIKey, Credentials: creds}
+	}
+
+	accounts := []Account{
+		mk(416, "https://token.sensenova.cn/v1/chat/completions"),
+		mk(419, "https://token.sensenova.cn/v1/chat/completions"),
+		mk(426, "https://token.sensenova.cn/v1/chat/completions"),
+		mk(239, "https://model.kimitk.top/v1"),
+		mk(411, "http://119.28.137.187:18081"),
+		mk(999, ""),
+	}
+
+	assert.Equal(t, []int64{416, 419, 426}, siblingAccountIDsByHost(accounts, "token.sensenova.cn"))
+	assert.Equal(t, []int64{239}, siblingAccountIDsByHost(accounts, "model.kimitk.top"))
+	assert.Empty(t, siblingAccountIDsByHost(accounts, ""), "空主机名不得排除任何人")
+	assert.Empty(t, siblingAccountIDsByHost(accounts, "unknown.example"))
+}
+
+// 端到端：safety 400 构造出的 failover 错误必须携带主机，普通 400 不得携带。
+func TestNewOpenAIAccountFailoverError_CarriesUpstreamHostForSafety(t *testing.T) {
+	t.Parallel()
+
+	s := &OpenAIGatewayService{}
+	account := &Account{
+		ID:          419,
+		Platform:    "deepseek",
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{"base_url": "https://token.sensenova.cn/v1/chat/completions"},
+	}
+
+	safetyBody := []byte(`{"error":{"code":"9","message":"safety check failed","type":"failed_precondition_error"}}`)
+	foErr := s.newOpenAIAccountFailoverError(account, http.StatusBadRequest, http.Header{}, safetyBody, "safety check failed", false, false)
+	require.NotNil(t, foErr)
+	assert.True(t, foErr.IsOpenAIUpstreamSafetyRejection())
+	assert.Equal(t, "token.sensenova.cn", foErr.ExcludeUpstreamHost)
+
+	plainBody := []byte(`{"error":{"message":"invalid temperature","type":"invalid_request_error"}}`)
+	plainErr := s.newOpenAIAccountFailoverError(account, http.StatusBadRequest, http.Header{}, plainBody, "invalid temperature", false, false)
+	require.NotNil(t, plainErr)
+	assert.Empty(t, plainErr.ExcludeUpstreamHost, "普通 400 不应触发同源排除")
+}

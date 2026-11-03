@@ -196,6 +196,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
+	// 本次请求内已整体排除过的上游主机（审核拒绝按主机生效，同源只查一次）。
+	excludedUpstreamHosts := make(map[string]struct{})
 
 	// 分组利润控制：chat completions 文本入口请求级装门并固定 pricingAt。
 	// 带图请求沿用生图惯例跳过利润门（方案 §3.6）：先打 suppressed 标记再装门，
@@ -497,6 +499,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 					}
 					failedAccountIDs[account.ID] = struct{}{}
+					// 同源整体排除：审核拒绝按上游主机生效，只排除当前账号会让下一个
+					// 候选又落回同一家，切换预算全耗在同一面墙上。
+					h.excludeUpstreamSiblings(c.Request.Context(), apiKey, failoverErr, failedAccountIDs, excludedUpstreamHosts, reqLog)
 					lastFailoverErr = failoverErr
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -520,7 +521,70 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHe
 		failoverErr.SameAccountRetryDeadline = s.openAIOAuth429RetryDeadline(account)
 		failoverErr.SameAccountRetryDelay = openAIOAuth429SameAccountRetryDelay(responseHeaders, failoverErr.SameAccountRetryDeadline)
 	}
+	// 审核拒绝是按「上游主机」生效的：同一供应商的多把 key 共享同一套审核策略。
+	// 带上主机让 handler 一次排除同源账号，避免 419→416→426 连着撞三面同一堵墙。
+	if failoverErr.IsOpenAIUpstreamSafetyRejection() {
+		failoverErr.ExcludeUpstreamHost = upstreamHostOfAccount(account)
+	}
 	return failoverErr
+}
+
+// upstreamHostOfAccount 取账号上游 base_url 的主机名（小写，含端口），用于判断
+// 「哪些账号共用同一个上游」。取不到时返回空串，调用方应视为「不排除」。
+// 优先读账号显式配置的 base_url（各平台键名统一），再退回平台默认值推导——只看
+// GetOpenAIBaseURL 会漏掉 deepseek/kimi 这类非 OpenAI 平台的自建地址。
+func upstreamHostOfAccount(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(account.GetCredential("base_url"))
+	if raw == "" {
+		raw = strings.TrimSpace(account.GetOpenAIBaseURL())
+	}
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parsed.Host))
+}
+
+// SiblingAccountIDsByUpstreamHost 返回同分组内与该主机同源的账号 ID（含入参账号本身，
+// 调用方本来也已排除它）。上游按主机整体拒绝时用它一次性摘掉整片同源账号：逐个去撞
+// 兄弟账号既把切换预算耗在同一面墙上，又让客户端多等好几轮上游审核耗时。
+// 查询失败按「不排除」处理——宁可多试一次，也不要因为一次 DB 抖动把请求打死。
+func (s *OpenAIGatewayService) SiblingAccountIDsByUpstreamHost(ctx context.Context, groupID int64, host string) []int64 {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if s == nil || s.accountRepo == nil || groupID <= 0 || host == "" {
+		return nil
+	}
+	accounts, err := s.accountRepo.ListByGroup(ctx, groupID)
+	if err != nil {
+		logger.L().Warn("openai.sibling_upstream_host_lookup_failed",
+			zap.Int64("group_id", groupID),
+			zap.String("upstream_host", host),
+			zap.Error(err),
+		)
+		return nil
+	}
+	return siblingAccountIDsByHost(accounts, host)
+}
+
+// siblingAccountIDsByHost 从账号列表里挑出与该主机同源的账号 ID（纯函数，便于回归）。
+func siblingAccountIDsByHost(accounts []Account, host string) []int64 {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return nil
+	}
+	ids := make([]int64, 0, len(accounts))
+	for i := range accounts {
+		if upstreamHostOfAccount(&accounts[i]) == host {
+			ids = append(ids, accounts[i].ID)
+		}
+	}
+	return ids
 }
 
 const (

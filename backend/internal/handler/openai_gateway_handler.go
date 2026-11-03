@@ -702,6 +702,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
+	// 本次请求内已整体排除过的上游主机（审核拒绝按主机生效，同源只查一次）。
+	excludedUpstreamHosts := make(map[string]struct{})
 
 	// 生图意图的 /v1/responses 请求必须调度到确实支持 Responses API 的账号，否则
 	// 会在 forward 阶段被静默降级为无法生图的 Chat Completions 直转（#4417）。
@@ -1103,6 +1105,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 					}
 					failedAccountIDs[account.ID] = struct{}{}
+					// 同源整体排除：审核拒绝按上游主机生效，只排除当前账号会让下一个
+					// 候选又落回同一家，切换预算全耗在同一面墙上。
+					h.excludeUpstreamSiblings(c.Request.Context(), apiKey, failoverErr, failedAccountIDs, excludedUpstreamHosts, reqLog)
 					lastFailoverErr = failoverErr
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
@@ -1485,6 +1490,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	effectiveMappedModel := preferredMappedModel
+	// 本次请求内已整体排除过的上游主机（审核拒绝按主机生效，同源只查一次）。
+	excludedUpstreamHosts := make(map[string]struct{})
 
 	// 分组利润控制：Messages 文本入口同样请求级装门并固定 pricingAt。
 	// B2 /v1/messages 标记（docs-local/platform-merge-refactor-plan.md §5.2）：本入口装上
@@ -1805,6 +1812,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 					}
 					failedAccountIDs[account.ID] = struct{}{}
+					// 同源整体排除：审核拒绝按上游主机生效（同一供应商的多把 key 共享
+					// 同一套策略），只排除当前账号会 419→416→426 连撞三面同一堵墙。
+					h.excludeUpstreamSiblings(c.Request.Context(), apiKey, failoverErr, failedAccountIDs, excludedUpstreamHosts, reqLog)
 					lastFailoverErr = failoverErr
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
@@ -1927,6 +1937,45 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 }
 
 // handleAnthropicFailoverExhausted maps upstream failover errors to Anthropic format.
+// excludeUpstreamSiblings 把「与当前失败账号同上游主机」的账号整体并入本次请求的
+// 排除集。上游按主机整体拒绝时（同一供应商的多把 key 共享同一套审核/风控策略），
+// 只排除当前账号会让下一个候选又落回同一家——419→416→426 连撞三面同一堵墙，
+// 把切换预算和客户端等待时间全耗在同一个上游。每个主机每次请求只查一次。
+func (h *OpenAIGatewayHandler) excludeUpstreamSiblings(
+	ctx context.Context,
+	apiKey *service.APIKey,
+	failoverErr *service.UpstreamFailoverError,
+	failedAccountIDs map[int64]struct{},
+	excludedHosts map[string]struct{},
+	reqLog *zap.Logger,
+) {
+	if failoverErr == nil || failedAccountIDs == nil || excludedHosts == nil {
+		return
+	}
+	host := strings.TrimSpace(failoverErr.ExcludeUpstreamHost)
+	if host == "" {
+		return
+	}
+	if _, done := excludedHosts[host]; done {
+		return
+	}
+	excludedHosts[host] = struct{}{}
+	var groupID int64
+	if apiKey != nil && apiKey.GroupID != nil {
+		groupID = *apiKey.GroupID
+	}
+	siblingIDs := h.gatewayService.SiblingAccountIDsByUpstreamHost(ctx, groupID, host)
+	for _, siblingID := range siblingIDs {
+		failedAccountIDs[siblingID] = struct{}{}
+	}
+	if reqLog != nil {
+		reqLog.Warn("openai.upstream_safety_host_excluded",
+			zap.String("upstream_host", host),
+			zap.Int("excluded_accounts", len(siblingIDs)),
+		)
+	}
+}
+
 func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)

@@ -712,6 +712,10 @@ type UpstreamFailoverError struct {
 	NextAccountAction        NextAccountAction
 	ClientStatusCode         int
 	ClientMessage            string
+	// ExcludeUpstreamHost 非空时，调用方应把同分组内与该主机同源的账号一并排除出
+	// 本次请求的候选集。上游按主机整体拒绝（同一供应商的多把 key 共享同一套审核/
+	// 限额策略）时，逐个去撞兄弟账号只会把切换预算耗在同一面墙上。
+	ExcludeUpstreamHost string
 }
 
 func (e *UpstreamFailoverError) Error() string {
