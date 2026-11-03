@@ -821,7 +821,7 @@ func (s *CursorExecutionService) cursorDrainAttachedOutput(
 				return nil, err
 			}
 			// 写出本 HTTP 的协议结束标记（完整批已在此前的数据帧里完整写出）。
-			if err := s.finishHTTPOutput(writer, req, &aggregated, false); err != nil {
+			if err := s.finishHTTPOutput(session.phaseContext(), writer, req, &aggregated, false); err != nil {
 				return nil, err
 			}
 			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_write_done", req.Model,
@@ -838,7 +838,7 @@ func (s *CursorExecutionService) cursorDrainAttachedOutput(
 				// 失败链：连接上的成功信号到此为止，绝不再写终结成功标记、也不提交批次。
 				return nil, ev.err
 			}
-			if err := s.finishHTTPOutput(writer, req, &aggregated, true); err != nil {
+			if err := s.finishHTTPOutput(session.phaseContext(), writer, req, &aggregated, true); err != nil {
 				return nil, err
 			}
 			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_write_done", req.Model,
@@ -866,11 +866,11 @@ func (s *CursorExecutionService) cursorDrainAttachedOutput(
 //
 // stream：写出目标协议的终止事件；nonstream：把本 HTTP 累计的增量聚合成**一个**合法
 // 响应 JSON 后整包写出（聚合器随本 HTTP 结束释放，不把全会话内容重播给下一 HTTP）。
-func (s *CursorExecutionService) finishHTTPOutput(w io.Writer, req *CursorExecutionRequest, aggregated *bytes.Buffer, terminal bool) error {
+func (s *CursorExecutionService) finishHTTPOutput(ctx context.Context, w io.Writer, req *CursorExecutionRequest, aggregated *bytes.Buffer, terminal bool) error {
 	if req.Stream {
 		return s.finalizeResponseWriter(w, req, terminal)
 	}
-	completion, err := cursorAggregateSSEToCompletion(aggregated.Bytes())
+	completion, err := cursorAggregateSSEToCompletion(ctx, aggregated.Bytes())
 	if err != nil {
 		return err
 	}
@@ -899,7 +899,9 @@ func cursorWriteAll(w io.Writer, p []byte) error {
 //
 // 只用**本 HTTP 实际写出的字节**（同一 writer 语义），因此不会把上一 HTTP 的正文或已交付
 // 工具批重播；id 取本 HTTP 实际响应 ID（chunk 内已由解析器写入）。
-func cursorAggregateSSEToCompletion(sseBody []byte) ([]byte, error) {
+//
+// ctx 只用于落阶段事件（正文含开标记却认不出形态时的 warn），不参与聚合语义。
+func cursorAggregateSSEToCompletion(ctx context.Context, sseBody []byte) ([]byte, error) {
 	id, model := "", ""
 	content := strings.Builder{}
 	type callAcc struct {
@@ -957,6 +959,14 @@ func cursorAggregateSSEToCompletion(sseBody []byte) ([]byte, error) {
 
 	body := content.String()
 	inline, rest, recognized := cursorParseInlineToolCalls(body)
+	if !recognized {
+		// 含开标记却认不出形态：此前的行为是完全静默的「未识别 → 原文透传」，
+		// 既不记归一成功也不记拒绝，线上看不到。这类样本最可能变成「工具静默
+		// 丢失」（客户端只收到一段话），故补一条 warn（只记形态与开标记个数）。
+		if marks := strings.Count(body, cursorInlineToolCallOpen); marks > 0 {
+			cursorPhaseLogInlineToolCallUnrecognized(ctx, model, cursorInlineToolCallShapeOf(body), marks)
+		}
+	}
 	if recognized && len(inline) == 0 {
 		// 识别到内联形态但解析不出参数 → 失败关闭：不得把原文透传成正文
 		// （静默透传正是本缺陷的成因：客户端拿不到 tool_calls，工具静默不执行）。

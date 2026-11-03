@@ -38,6 +38,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -189,26 +190,47 @@ func (s *cursorSSEStream) next() (err error) {
 				return err
 			}
 			// 正文内联 tool call：上游没走结构化委托帧，把调用写进了正文。
-			// 流式下无法先收齐再归一而不破坏流式语义，故在此失败关闭——
-			// 让客户端收到明确错误，而不是拿到一段不可执行的正文。
+			//
+			// 命中形态即转入 inlineMode：此后不再写正文，done 时统一还原成
+			// tool_calls（与非流式 cursorAggregateSSEToCompletion 同口径）。
+			// 半闭合形态（并行连发漏闭标记）同样走这条路径。
 			//
 			// 短路：正文里没有开标记就不必调解析器（长正文避免 O(n²)）。
-			if strings.Contains(s.parser.rawContent, cursorInlineToolCallOpen) {
-				if _, _, recognized := cursorParseInlineToolCalls(s.parser.rawContent); recognized {
-					// 先落 phase 事件（流式侧归一不了 → 只有拒绝事件），再返回错误。
+			if !s.parser.inlineMode && strings.Contains(s.parser.rawContent, cursorInlineToolCallOpen) {
+				calls, _, recognized := cursorParseInlineToolCalls(s.parser.rawContent)
+				switch {
+				case recognized && len(calls) > 0:
+					s.parser.inlineMode = true
+					s.parser.inlineCalls = calls
+					// 丢弃尚未写出的尾巴：那里面可能正含标记前缀（如 "<tool_c"）。
+					s.parser.textTail = ""
+					s.parser.logPhase(zapcore.InfoLevel, cursorPhaseInlineToolCallNormalized, "",
+						cursorInlineToolCallNormalizedFields(
+							cursorInlineToolCallShapeOf(s.parser.rawContent), len(calls))...)
+				case recognized:
+					// 识别到形态但一个可执行调用都解不出：失败关闭，绝不把原文
+					// 当正文透传（那等于让工具调用静默消失、助手继续空转）。
 					s.parser.logPhase(zapcore.WarnLevel, cursorPhaseInlineToolCallRejected, "",
 						cursorInlineToolCallRejectedFields(
 							cursorInlineToolCallShapeOf(s.parser.rawContent),
 							cursorInlineRejectReasonStreamHit)...)
 					return cursorFrameErrorf(cursorFrameInlineToolCall, "inline tool call present in stream")
+				default:
+					// 含开标记但形态不成形：按正文放行（宁可漏判也不误判）。此路径此前
+					// 完全静默，而它正是「模型写了调用但格式不成立 → 工具静默丢失」的
+					// 高危形态，故每条请求补一条 warn（只记形态与开标记个数，不含正文）。
+					if !s.parser.inlineUnrecognizedLogged {
+						s.parser.inlineUnrecognizedLogged = true
+						s.parser.logPhase(zapcore.WarnLevel, cursorPhaseInlineToolCallUnrecognized, "",
+							cursorInlineToolCallUnrecognizedFields(
+								cursorInlineToolCallShapeOf(s.parser.rawContent),
+								strings.Count(s.parser.rawContent, cursorInlineToolCallOpen))...)
+					}
 				}
 			}
-			if !s.parser.started {
-				s.buffer.WriteString(s.parser.cursorSSERoleChunk())
-				s.parser.started = true
+			if !s.parser.inlineMode {
+				s.emitStreamText(ev.Text)
 			}
-			s.parser.markFirstToken()
-			s.buffer.WriteString(s.parser.cursorSSETextChunk(ev.Text))
 		}
 		s.done = s.parser.usage.Seen
 	}
@@ -250,6 +272,25 @@ func (s *cursorSSEStream) next() (err error) {
 		}
 	}
 	if s.done {
+		// 内联 tool call 归一（流式）：与非流式 cursorAggregateSSEToCompletion 同口径 —
+		// 结构化委托优先，只有本 HTTP 没有结构化委托时才用正文内联补位。
+		//
+		// 走这条路径时**不写正文**：命中形态那一刻已停止写出，保留的短尾也已丢弃，
+		// 客户端拿到的就是"前言 + 完整 tool_calls"，不会看到半截标记或不可执行的正文。
+		if s.parser.inlineMode && len(s.parser.inlineCalls) > 0 && len(s.parser.capturedToolCalls()) == 0 {
+			if !s.parser.started {
+				s.buffer.WriteString(s.parser.cursorSSERoleChunk())
+				s.parser.started = true
+			}
+			for i, call := range s.parser.inlineCalls {
+				capture := cursorToolCallCapture{ID: call.ID, Name: call.Name, ArgsJSON: call.Arguments}
+				s.buffer.WriteString(s.parser.cursorSSEToolCallNameChunk(i, capture))
+				s.buffer.WriteString(s.parser.cursorSSEToolCallArgsChunk(i, capture))
+			}
+			s.buffer.WriteString(s.parser.cursorSSEFinishChunkWithReason("tool_calls"))
+			s.buffer.WriteString("data: [DONE]\n\n")
+			return nil
+		}
 		// 收尾尾段：<think> 剥离的跨帧缓冲在这里吐完（段内残留一律丢弃）。
 		// 必须在 finish 之前写出，否则正文末尾几个字符会丢。
 		if tail := s.parser.flushThinkTail(); tail != "" {
@@ -260,6 +301,9 @@ func (s *cursorSSEStream) next() (err error) {
 			s.parser.markFirstToken()
 			s.buffer.WriteString(s.parser.cursorSSETextChunk(tail))
 		}
+		// 正文短尾：未命中内联形态时把 emitStreamText 保留的尾巴冲出，
+		// 否则普通正文的最后几个字符会留在缓冲里丢掉。
+		s.flushStreamTextTail()
 		// 交付侧 id 重写（派发单 CALLID）：在写出**任何** tool_calls 字节之前决定出站 id。
 		// 失败即返回错误（本 HTTP 不交出带 id 的工具批），绝不发原 id 冒充新调用。
 		if err := s.parser.assignToolCallWireIDs(); err != nil {
@@ -297,6 +341,77 @@ func (s *cursorSSEStream) next() (err error) {
 		s.buffer.WriteString("data: [DONE]\n\n")
 	}
 	return nil
+}
+
+// emitStreamText 写出正文增量，并对**可能是内联标记前缀的尾部**做极短扣留。
+//
+// 为什么要扣留：内联 tool call 标记可能**跨帧**到达（第一帧尾巴是 "<tool_c"、
+// 第二帧才是 "all>"）。逐帧立即写出会把标记碎片漏给客户端，而这些字节一旦写出
+// 就收不回。
+//
+// 为什么不整段扣留固定长度：流式正文必须**即时到达**（上游边生成边交付，客户端
+// 靠首字判断链路是否活着）。固定扣留 N 字节会让短文本（不足 N 字节）一直躺在
+// 缓冲里等 turn_ended，表现为"卡住不吐字"。因此只扣留**确实是标记前缀**的那几个
+// 字节：普通正文 hold=0 立即写出，只有尾部像 "<"、"<to"、"<tool_call" 时才延迟。
+//
+// 未命中形态时，被扣住的尾巴由 flushStreamTextTail 在 done 处冲出，不会丢字。
+func (s *cursorSSEStream) emitStreamText(delta string) {
+	pending := s.parser.textTail + delta
+	hold := cursorInlineMarkerPrefixSuffixLen(pending)
+	if hold >= len(pending) {
+		s.parser.textTail = pending
+		return
+	}
+	cut := len(pending) - hold
+	// 按字节切会把多字节字符（中文 3 字节）劈成非法 UTF-8，切点回退到字符边界。
+	// cut == len(pending) 表示整段都要写出，本来就是合法边界，不必回退（也不能
+	// 越界访问 pending[cut]）。
+	for cut > 0 && cut < len(pending) && !utf8.RuneStart(pending[cut]) {
+		cut--
+	}
+	emit := pending[:cut]
+	s.parser.textTail = pending[cut:]
+	if emit == "" {
+		return
+	}
+	if !s.parser.started {
+		s.buffer.WriteString(s.parser.cursorSSERoleChunk())
+		s.parser.started = true
+	}
+	s.parser.markFirstToken()
+	s.buffer.WriteString(s.parser.cursorSSETextChunk(emit))
+}
+
+// cursorInlineMarkerPrefixSuffixLen 返回 text 末尾与开标记**前缀**匹配的最大字节数
+// （即需要扣留、暂不写出的长度）。匹配不上（普通正文）返回 0。
+//
+// 例：text 以 "<tool_c" 结尾、开标记是 "<tool_call>" → 返回 7；以 "他说" 结尾 → 0。
+func cursorInlineMarkerPrefixSuffixLen(text string) int {
+	maxN := len(cursorInlineToolCallOpen) - 1
+	if len(text) < maxN {
+		maxN = len(text)
+	}
+	for n := maxN; n > 0; n-- {
+		if strings.HasSuffix(text, cursorInlineToolCallOpen[:n]) {
+			return n
+		}
+	}
+	return 0
+}
+
+// flushStreamTextTail 冲出保留的正文尾巴（仅未进入 inlineMode 时使用）。
+func (s *cursorSSEStream) flushStreamTextTail() {
+	if s.parser.inlineMode || s.parser.textTail == "" {
+		return
+	}
+	tail := s.parser.textTail
+	s.parser.textTail = ""
+	if !s.parser.started {
+		s.buffer.WriteString(s.parser.cursorSSERoleChunk())
+		s.parser.started = true
+	}
+	s.parser.markFirstToken()
+	s.buffer.WriteString(s.parser.cursorSSETextChunk(tail))
 }
 
 // agent.v1.AgentServerMessage（32 号证据：KW）的 oneof 字段号。
@@ -908,6 +1023,21 @@ type cursorStreamParser struct {
 	usage cursorTurnUsage
 	// rejected 命中流内注入模板（拒付 / 模型暂不可用）后的结构化错误（非 nil 即终态失败）。
 	rejected error
+	// inlineUnrecognizedLogged 保证「正文含开标记但形态不成形」的 warn 每条请求只落一次
+	// （该判定逐帧执行，不去重会按帧刷屏）。
+	inlineUnrecognizedLogged bool
+	// textTail 是尚未写出的正文尾巴（最多 len(开标记)-1 字节）。
+	//
+	// 内联标记可能**跨帧**（第一帧尾巴是 "<tool_c"，第二帧才是 "all>"），逐帧立即写出
+	// 会把标记碎片漏给客户端；保留一个短尾、只在确认安全时写出，才能保证客户端要么看到
+	// 完整正文、要么看到完整的 tool_calls，不会看到半截标记。
+	textTail string
+	// inlineMode 表示本轮正文已命中内联 tool call 形态（含半闭合）：此后不再写出正文，
+	// 统一在 done 时还原成结构化 tool_calls（与非流式 cursorAggregateSSEToCompletion
+	// 同口径，避免"流式直接报错、非流式能归一"的两套语义）。
+	inlineMode bool
+	// inlineCalls 是 inlineMode 下从正文还原出的调用（按正文顺序）。
+	inlineCalls []cursorInlineToolCall
 
 	// delegations 是本轮工具委托的**唯一**记录（§24.2-6）。
 	//

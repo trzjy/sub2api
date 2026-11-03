@@ -20,8 +20,8 @@ package service
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -69,10 +69,19 @@ func cursorInlineStreamPhaseEvents(t *testing.T, logs *observer.ObservedLogs, ph
 	return out
 }
 
-// TestInlineToolCallStreamFailsClosedOnInlineToolCall 流式-命中失败关闭：
-// 正文含裸字节形态 A → next() 返回协议错误，且缓冲区没有写出含 blob 的 chunk。
-func TestInlineToolCallStreamFailsClosedOnInlineToolCall(t *testing.T) {
+// TestInlineToolCallStreamNormalizesInlineToolCall 流式-内联归一：
+//
+// 正文含裸字节形态 A → **不报错**、不写出含 blob 的正文；体面收尾（turn_ended）时
+// 还原成结构化 tool_calls，与非流式 cursorAggregateSSEToCompletion 同口径。
+//
+// 历史：本用例原名 ...StreamFailsClosedOnInlineToolCall，断言流式命中即失败关闭。
+// 2026-11-04 改为归一——失败关闭对客户端同样是「拿不到工具」，只是换了个报错方式，
+// 属把问题从静默变成显式、并未真正修好。
+func TestInlineToolCallStreamNormalizesInlineToolCall(t *testing.T) {
+	// 第一帧：正文（前言 + 内联调用 + 尾语）；第二帧：turn_ended（usage 齐全 → done）。
 	frames := cursorInlineStreamTextFrame(t, "前言。"+cursorInlineStreamFormA+"后语。")
+	frames = append(frames, cursorTurnEndedFrame(t,
+		[2]uint64{1, 10}, [2]uint64{2, 5}, [2]uint64{3, 0}, [2]uint64{4, 0})...)
 
 	core, logs := observer.New(zapcore.DebugLevel)
 	s := &cursorSSEStream{
@@ -81,31 +90,66 @@ func TestInlineToolCallStreamFailsClosedOnInlineToolCall(t *testing.T) {
 	}
 	s.parser.lg = zap.New(core)
 
-	err := s.next()
-	require.Error(t, err, "正文命中内联 tool call 必须失败关闭")
-	require.True(t, errors.Is(err, ErrCursorProtocol),
-		"失败关闭必须归到 ErrCursorProtocol（可判定的协议类错误），实际: %v", err)
-	require.Contains(t, err.Error(), "inline tool call present in stream",
-		"错误文案应点明是正文内联 tool call 命中")
+	require.NoError(t, s.next(), "流式正文内联 tool call 必须归一，不得失败关闭")
+	require.NoError(t, s.next(), "turn_ended 收尾必须写出 tool_calls")
 
-	// 失败关闭发生在写 chunk **之前**：客户端拿不到含 blob 的正文片段。
+	// 交付侧绝不出现内联原文：客户端要么拿到正文、要么拿到 tool_calls。
 	out := s.buffer.String()
 	require.NotContains(t, out, cursorInlineStreamOpen, "缓冲区不得写出内联开标记")
 	require.NotContains(t, out, cursorInlineStreamClose, "缓冲区不得写出内联闭标记")
-	require.NotContains(t, out, "call_c3a4d6c4a7f54a5e9f5c2b8d", "缓冲区不得写出内联调用 id")
-	require.NotContains(t, out, "const out = {};", "缓冲区不得写出内联调用的参数原文")
 
-	// 可观测性：命中落 inline_tool_call_rejected（reason=stream_hit）。
-	rejected := cursorInlineStreamPhaseEvents(t, logs, cursorPhaseInlineToolCallRejected)
-	require.Len(t, rejected, 1, "流式命中必须落且只落一次 inline_tool_call_rejected")
-	require.Equal(t, cursorInlineRejectReasonStreamHit, rejected[0]["inline_reason"],
-		"失败原因必须是稳定短串 stream_hit")
-	require.Equal(t, cursorInlineShapeSiteBlob, rejected[0]["inline_shape"],
-		"形态标识必须是稳定短串 site_blob")
-	// 脱敏：事件里不得出现 args 明文 / 工具名 / 正文原文。
-	require.NotContains(t, rejected[0], "arguments")
-	require.NotContains(t, rejected[0], "const out = {};")
-	require.NotContains(t, rejected[0], "REPL")
+	// 归一结果：结构化 tool_calls + finish_reason=tool_calls，id / 名称 / 参数完整交付。
+	require.Contains(t, out, `"tool_calls"`, "必须吐出结构化 tool_calls")
+	require.Contains(t, out, `"call_c3a4d6c4a7f54a5e9f5c2b8d"`, "调用 id 必须原样交付")
+	require.Contains(t, out, `"name":"REPL"`, "工具名必须还原")
+	require.Contains(t, out, `"finish_reason":"tool_calls"`, "收尾原因必须是 tool_calls")
+
+	// 可观测性：归一成功落 inline_tool_call_normalized，且不再落 rejected。
+	normalized := cursorInlineStreamPhaseEvents(t, logs, cursorPhaseInlineToolCallNormalized)
+	require.Len(t, normalized, 1, "归一成功必须落且只落一次 inline_tool_call_normalized")
+	require.Equal(t, cursorInlineShapeSiteBlob, normalized[0]["inline_shape"])
+	require.Equal(t, int64(1), normalized[0]["inline_tool_count"])
+	require.Empty(t, cursorInlineStreamPhaseEvents(t, logs, cursorPhaseInlineToolCallRejected),
+		"归一成功不得落 rejected")
+}
+
+// TestInlineToolCallStreamHalfClosedBatchNormalizes 流式-半闭合形态归一：
+//
+// 并行连发只写开标记、漏写闭标记（线上实证形态）在流式下同样必须还原成多条
+// tool_calls，而不是报错或透传。
+func TestInlineToolCallStreamHalfClosedBatchNormalizes(t *testing.T) {
+	text := ""
+	for i := 0; i < 3; i++ {
+		text += cursorInlineStreamOpen + "\n" +
+			`{"id":"call_` + strconv.Itoa(i) + `","name":"Bash","arguments":{"command":"ls"}}` + "\n"
+	}
+	text += "\nLet me consolidate. I'll wait for results.\n"
+
+	frames := cursorInlineStreamTextFrame(t, text)
+	frames = append(frames, cursorTurnEndedFrame(t,
+		[2]uint64{1, 10}, [2]uint64{2, 5}, [2]uint64{3, 0}, [2]uint64{4, 0})...)
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	s := &cursorSSEStream{
+		source: io.NopCloser(bytes.NewReader(frames)),
+		parser: cursorNewStreamParser("m"),
+	}
+	s.parser.lg = zap.New(core)
+
+	require.NoError(t, s.next())
+	require.NoError(t, s.next())
+
+	out := s.buffer.String()
+	require.NotContains(t, out, cursorInlineStreamOpen)
+	require.Contains(t, out, `"tool_calls"`)
+	for i := 0; i < 3; i++ {
+		require.Contains(t, out, `"call_`+strconv.Itoa(i)+`"`, "三条调用必须全部交付")
+	}
+	require.Contains(t, out, `"finish_reason":"tool_calls"`)
+
+	normalized := cursorInlineStreamPhaseEvents(t, logs, cursorPhaseInlineToolCallNormalized)
+	require.Len(t, normalized, 1)
+	require.Equal(t, int64(3), normalized[0]["inline_tool_count"])
 }
 
 // TestInlineToolCallStreamPlainTextPasses 流式-正常文本回归：普通正文正常写出 chunk。

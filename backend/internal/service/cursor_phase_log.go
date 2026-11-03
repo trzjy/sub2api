@@ -68,12 +68,16 @@ func cursorInlineToolCallShapeOf(content string) string {
 //
 // 事件名：
 //   - inline_tool_call_normalized：识别到内联形态并**归一成功**（还原成结构化
-//     tool_calls）；
-//   - inline_tool_call_rejected：识别到内联形态但**不可交付**（解析失败 / 流式命中）。
+//     tool_calls）。流式与非流式共用：流式在收尾时统一还原，不再失败关闭；
+//   - inline_tool_call_rejected：识别到内联形态但**不可交付**（一个可执行调用都
+//     解不出 → 失败关闭，不把原文当正文透传）；
+//   - inline_tool_call_unrecognized：正文含开标记但**形态不成形**（按正文放行）。
+//     这条此前完全没有日志，而它正是「工具静默丢失」的高危形态，故单独记一条。
 //
 // 字段：
 //   - normalized：inline_shape（形态标识）、inline_tool_count（工具条数）；
-//   - rejected：inline_shape（形态标识）、inline_reason（失败原因，稳定短串枚举）。
+//   - rejected：inline_shape（形态标识）、inline_reason（失败原因，稳定短串枚举）；
+//   - unrecognized：inline_shape（形态标识）、inline_open_marks（开标记个数）。
 //
 // 脱敏（硬性）：**不记 args 明文、不记工具返回内容、不记正文原文**。
 // 形态标识与失败原因都是稳定短串枚举，正文只进判定不进日志。
@@ -85,6 +89,13 @@ const (
 	cursorPhaseInlineToolCallNormalized = "inline_tool_call_normalized"
 	// cursorPhaseInlineToolCallRejected 是"识别到内联形态但不可交付"的 phase 名。
 	cursorPhaseInlineToolCallRejected = "inline_tool_call_rejected"
+	// cursorPhaseInlineToolCallUnrecognized 是"正文含开标记但形态不成形、按正文放行"
+	// 的 phase 名。
+	//
+	// 这类样本此前**完全静默**：走的是「未识别 → 原样透传」路径，既不记归一成功也不记
+	// 拒绝，线上看不到。而它恰恰是工具静默丢失的高危形态（模型写了调用但格式不成立），
+	// 故单独记一条 warn，便于按 inline_open_marks 分布回捞样本。
+	cursorPhaseInlineToolCallUnrecognized = "inline_tool_call_unrecognized"
 )
 
 // 内联 tool call 的形态标识（稳定短串；不含正文原文）。
@@ -138,6 +149,25 @@ func cursorPhaseLogInlineToolCallNormalized(ctx context.Context, model, shape st
 func cursorPhaseLogInlineToolCallRejected(ctx context.Context, model, shape, reason string) {
 	cursorPhaseLog(ctx, zapcore.WarnLevel, cursorPhaseInlineToolCallRejected, model,
 		cursorInlineToolCallRejectedFields(shape, reason)...)
+}
+
+// cursorInlineToolCallUnrecognizedFields 组装"含开标记但形态不成形"事件的字段。
+//
+// 脱敏（硬性）：只含形态标识与开标记**个数**，不含正文原文、不含工具参数。
+func cursorInlineToolCallUnrecognizedFields(shape string, openMarks int) []zap.Field {
+	return []zap.Field{
+		zap.String("inline_shape", shape),
+		zap.Int("inline_open_marks", openMarks),
+	}
+}
+
+// cursorPhaseLogInlineToolCallUnrecognized 落盘"正文含开标记但形态不成形、按正文放行"事件。
+//
+// 这条事件的用途：这类样本此前完全没有日志（既不归一也不拒绝，直接透传），
+// 是工具静默丢失的高危形态。记一条 warn 便于线上按 inline_open_marks 回捞。
+func cursorPhaseLogInlineToolCallUnrecognized(ctx context.Context, model, shape string, openMarks int) {
+	cursorPhaseLog(ctx, zapcore.WarnLevel, cursorPhaseInlineToolCallUnrecognized, model,
+		cursorInlineToolCallUnrecognizedFields(shape, openMarks)...)
 }
 
 // cursorPhaseLogFields 是底层落盘：调用方已捕获不可变标识（logger / model / request_id），

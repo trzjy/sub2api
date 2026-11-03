@@ -22,6 +22,7 @@ package service
 // 零宽字符，字节一旦写错就必然对不上（这正是 TC-01 的原始缺陷）。
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -114,7 +115,7 @@ type tc02aToolCall struct {
 // tc02aAggregate 跑一次聚合并解出 message（同时保留原始 map 供键存在性断言）。
 func tc02aAggregate(t *testing.T, sse []byte) (tc02aMessage, map[string]any) {
 	t.Helper()
-	raw, err := cursorAggregateSSEToCompletion(sse)
+	raw, err := cursorAggregateSSEToCompletion(context.Background(), sse)
 	require.NoError(t, err, "聚合失败")
 	var out struct {
 		Choices []struct {
@@ -240,7 +241,7 @@ func TestCursorInlineToolCallResponseNonStreamingFailsClosed(t *testing.T) {
 	content := "我来处理。" + tc02aOpen + "这里既不是合法 JSON，也没有工具名标签。" + tc02aClose
 	sse := tc02aSSE(tc02aChunkJSON(t, "chatcmpl_tc02a_bad", &content, nil))
 
-	out, err := cursorAggregateSSEToCompletion(sse)
+	out, err := cursorAggregateSSEToCompletion(context.Background(), sse)
 	require.Error(t, err, "识别到内联形态但解析不出参数必须失败关闭")
 	require.True(t, errors.Is(err, ErrCursorProtocolBridgeUnavailable),
 		"失败关闭的错误必须包裹 ErrCursorProtocolBridgeUnavailable，实际=%v", err)
