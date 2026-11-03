@@ -206,7 +206,7 @@ func newUpstreamModelSyncCredentialError(message string, statusCode int, err err
 // FetchUpstreamSupportedModels fetches only live model IDs. The admin sync path
 // uses SyncUpstreamModelCatalog so capability metadata can also be persisted.
 func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, account *Account) ([]string, error) {
-	models, _, _, err := s.fetchUpstreamModelList(ctx, account)
+	models, _, _, err := s.fetchUpstreamModelList(ctx, account, false)
 	return models, err
 }
 
@@ -244,7 +244,7 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 			fmt.Sprintf("Unsupported platform for upstream model sync: %s (web access mode)", account.Platform), nil,
 		)
 	}
-	models, body, fetchWarnings, err := s.fetchUpstreamModelList(ctx, account)
+	models, body, fetchWarnings, err := s.fetchUpstreamModelList(ctx, account, true)
 	liveListAvailable := err == nil
 	if err != nil {
 		configuredModels := configuredUpstreamModelsForCapabilitySync(account)
@@ -768,7 +768,7 @@ func normalizeModelRegistryBaseURL(raw string) string {
 // fetchUpstreamModelList 拉取账号的上游支持模型。火山订阅号（platform=deepseek +
 // ark 基址）不走通用 /models 目录，而是复用 volcanoPlanProfile 对真实对话端点做
 // 全量探活（见 fetchVolcanoPlanSupportedModels）。返回 (models, body, warnings, err)。
-func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account *Account) ([]string, []byte, []UpstreamModelSyncWarning, error) {
+func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account *Account, allowRefresh bool) ([]string, []byte, []UpstreamModelSyncWarning, error) {
 	if s == nil {
 		return nil, nil, nil, newUpstreamModelSyncConfigError("Account test service is not configured", nil)
 	}
@@ -777,7 +777,7 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 	}
 
 	if account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
-		models, _, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account)
+		models, _, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account, allowRefresh)
 		return models, nil, nil, err
 	}
 
@@ -1362,15 +1362,25 @@ func (s *AccountTestService) buildGeminiUpstreamModelsRequest(ctx context.Contex
 	return req, nil
 }
 
-func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, []byte, error) {
+func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Context, account *Account, allowRefresh bool) ([]string, []byte, error) {
 	if s.antigravityGatewayService == nil || s.antigravityGatewayService.GetTokenProvider() == nil {
 		return nil, nil, newUpstreamModelSyncConfigError("Antigravity token provider is not configured", nil)
 	}
 
-	accessToken, err := s.antigravityGatewayService.GetTokenProvider().GetAccessToken(ctx, account)
-	if err != nil {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to get Antigravity access token", err)
+	var accessToken string
+	var err error
+
+	if allowRefresh {
+		// 同步/测试场景：允许触发 token 刷新
+		accessToken, err = s.antigravityGatewayService.GetTokenProvider().GetAccessToken(ctx, account)
+		if err != nil {
+			return nil, nil, newUpstreamModelSyncUpstreamError("Failed to get Antigravity access token", err)
+		}
+	} else {
+		// 候选模型读取场景：直接读现有 token，不刷新（对齐 OpenAI OAuth 设计）
+		accessToken = strings.TrimSpace(account.GetCredential("access_token"))
 	}
+
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" {
 		return nil, nil, newUpstreamModelSyncConfigError("No Antigravity access token is available", nil)

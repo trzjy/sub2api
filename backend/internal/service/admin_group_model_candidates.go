@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 )
@@ -122,8 +123,8 @@ func (r *groupModelCatalogReader) fetchOpenAICatalog(ctx context.Context, accoun
 // collectGroupModelAllowlistCandidates 聚合组内适用账号的真实供给候选（plan §5.2）。
 //
 //  1. 适用账号 = 组内既存 schedulable 账号按平台过滤（composite 取具体平台账号）；
-//  2. 每个适用账号读取真实目录；任一账号读取失败 → 整次候选请求失败（P3），
-//     不静默跳过失败账号拼出不完整并集；
+//  2. 每个适用账号读取真实目录；单账号读取失败跳过并记 Warn（slog），
+//     继续聚合其余账号的候选，仅全部适用账号都失败时返回错误；
 //  3. 可枚举公开名只来自：真实目录 ID、账号显式精确 alias、组内已保存的精确
 //     composite 路由公开名；每项用既有映射/路由解析实际供给目标并在相应目录命中；
 //  4. 排序去重后输出；结果只表达目录与既有供给资格，不宣称生成探活/额度可用。
@@ -157,11 +158,21 @@ func (s *adminServiceImpl) collectGroupModelAllowlistCandidates(ctx context.Cont
 	}
 
 	catalogs := make([]map[string]struct{}, len(applicable))
+	successCount := 0
+	var failedAccounts []int64
 	for i := range applicable {
 		acc := &applicable[i]
 		ids, err := reader.FetchAccountModelCatalog(ctx, acc)
 		if err != nil {
-			return nil, fmt.Errorf("load model catalog for account %d (%s): %w", acc.ID, acc.Platform, err)
+			// 容错：记录警告并跳过，继续处理其他账号（对齐 Claude/OpenAI 容错设计）
+			slog.Warn("group_model_candidates_account_failed",
+				"group_id", groupID,
+				"account_id", acc.ID,
+				"platform", acc.Platform,
+				"error", err,
+			)
+			failedAccounts = append(failedAccounts, acc.ID)
+			continue
 		}
 		set := make(map[string]struct{}, len(ids))
 		for _, id := range ids {
@@ -170,6 +181,13 @@ func (s *adminServiceImpl) collectGroupModelAllowlistCandidates(ctx context.Cont
 			}
 		}
 		catalogs[i] = set
+		successCount++
+	}
+
+	// 只有所有账号都失败才返回错误
+	if successCount == 0 {
+		return nil, fmt.Errorf("all %d applicable accounts failed to load model catalog (failed IDs: %v)",
+			len(applicable), failedAccounts)
 	}
 
 	seen := make(map[string]struct{})

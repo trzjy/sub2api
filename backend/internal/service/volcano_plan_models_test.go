@@ -189,8 +189,8 @@ func TestParseVolcanoPlanProfileRecognizesAgentAndCoding(t *testing.T) {
 	require.False(t, mustParseVolcano(t, "https://api.deepseek.com"))
 	require.False(t, mustParseVolcano(t, "https://api.openai.com/v1"))
 	require.False(t, mustParseVolcano(t, "https://ark.cn-beijing.volces.com"))               // 缺套餐 path
-	require.False(t, mustParseVolcano(t, "https://ark.cn-beijing.volces.com/api/other"))      // 非套餐 path
-	require.False(t, mustParseVolcano(t, "https://evil-ark.cn-beijing.volces.com/api/plan"))  // 相似子串主机
+	require.False(t, mustParseVolcano(t, "https://ark.cn-beijing.volces.com/api/other"))     // 非套餐 path
+	require.False(t, mustParseVolcano(t, "https://evil-ark.cn-beijing.volces.com/api/plan")) // 相似子串主机
 	require.False(t, mustParseVolcano(t, ""))
 	require.False(t, mustParseVolcano(t, "not a url"))
 }
@@ -454,7 +454,6 @@ func TestFetchVolcanoPlanSupportedModelsRoutesThroughProxy(t *testing.T) {
 	}
 }
 
-
 func TestFetchUpstreamModelListVolcanoSkipsModelsDirectory(t *testing.T) {
 	t.Parallel()
 
@@ -471,10 +470,9 @@ func TestFetchUpstreamModelListVolcanoSkipsModelsDirectory(t *testing.T) {
 	}
 	svc := newVolcanoSyncService(t, stub)
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/coding", "anthropic")
-	models, body, _, err := svc.fetchUpstreamModelList(context.Background(), account)
+	models, body, _, err := svc.fetchUpstreamModelList(context.Background(), account, true)
 	require.NoError(t, err)
 	require.NotEmpty(t, models)
 	require.Nil(t, body)
 	require.True(t, calledHTTP)
 }
-

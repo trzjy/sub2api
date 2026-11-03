@@ -116,8 +116,8 @@ func TestAdminService_GroupModelAllowlistCandidates_CompositeMergesConcreteAccou
 	require.Equal(t, []string{"claude-sonnet-4-6", "gpt-5.5"}, candidates)
 }
 
-func TestAdminService_GroupModelAllowlistCandidates_OneAccountFailureFailsWholeRequest(t *testing.T) {
-	// P3：任一适用账号目录失败 → 整次候选请求失败，不静默跳过返回不完整并集。
+func TestAdminService_GroupModelAllowlistCandidates_OneAccountFailureSkipped(t *testing.T) {
+	// 新容错语义：单账号目录失败跳过并继续聚合其余账号候选，仅全失败才返回错误。
 	reader := &stubGroupModelCatalogReader{
 		byAccount: map[int64][]string{1: {"gpt-5.5"}},
 		errs:      map[int64]error{2: newUpstreamModelSyncUpstreamError("upstream timeout", nil)},
@@ -128,9 +128,28 @@ func TestAdminService_GroupModelAllowlistCandidates_OneAccountFailureFailsWholeR
 	}
 	svc := svcForCandidateTest(reader, nil, accounts)
 
+	candidates, err := svc.collectGroupModelAllowlistCandidates(context.Background(), 99, PlatformOpenAI, accounts)
+	require.NoError(t, err)
+	require.Contains(t, candidates, "gpt-5.5")
+}
+
+func TestAdminService_GroupModelAllowlistCandidates_AllAccountsFailureReturnsError(t *testing.T) {
+	// 新容错语义：全部适用账号目录失败 → 返回错误（含 all）。
+	reader := &stubGroupModelCatalogReader{
+		errs: map[int64]error{
+			1: newUpstreamModelSyncUpstreamError("upstream timeout", nil),
+			2: newUpstreamModelSyncUpstreamError("upstream timeout", nil),
+		},
+	}
+	accounts := []Account{
+		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+	}
+	svc := svcForCandidateTest(reader, nil, accounts)
+
 	_, err := svc.collectGroupModelAllowlistCandidates(context.Background(), 99, PlatformOpenAI, accounts)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "account 2")
+	require.Contains(t, err.Error(), "all")
 }
 
 func TestAdminService_GroupModelAllowlistCandidates_AuthoritativeEmptyCatalog(t *testing.T) {
@@ -279,7 +298,9 @@ func TestAdminService_GroupModelAllowlistCandidates_MixedGeminiAccountIncluded(t
 	require.Contains(t, candidates, "gemini-2.5-flash")
 }
 
-// F3 反向 A：同账号 mixed_scheduling=false → 不纳入 Gemini 组候选。
+// F3 反向 A（已按生产口径更新）：mixedListingAccountAllowed 不再依赖 mixed_scheduling
+// 开关（见 gateway_service.go 注释：候选展示是管理端静态配置口径，混合调度已自动启用），
+// 故 mixed_scheduling=false 的聚合账号仍纳入 Gemini 组候选。
 func TestAdminService_GroupModelAllowlistCandidates_MixedGeminiAccountDisabledNotIncluded(t *testing.T) {
 	reader := &stubGroupModelCatalogReader{
 		byAccount: map[int64][]string{1: {"gemini-2.5-flash"}},
@@ -292,7 +313,7 @@ func TestAdminService_GroupModelAllowlistCandidates_MixedGeminiAccountDisabledNo
 	svc := svcForCandidateTest(reader, nil, accounts)
 	candidates, err := svc.collectGroupModelAllowlistCandidates(context.Background(), 88, PlatformGemini, accounts)
 	require.NoError(t, err)
-	require.Empty(t, candidates)
+	require.Contains(t, candidates, "gemini-2.5-flash")
 }
 
 // F3 反向 B：mixed 账号目录含非 gemini 模型（antigravity-only-model）→ 不列（按运行时口径
