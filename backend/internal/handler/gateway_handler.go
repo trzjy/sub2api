@@ -562,26 +562,19 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 			requestCtx = c.Request.Context()
 			if account.Platform == service.PlatformAntigravity {
-				// /v1/messages 入站是 Anthropic 形状，而 Antigravity 的 Gemini 转发链路
-				// 只做身份注入 / schema 清理 / v1internal 包装，入参必须是 Gemini 形状。
-				// 不转换会把 messages / max_tokens 原样包进 request 字段，上游返回
-				// 400 "Unknown name \"max_tokens\" at 'request'"。
-				antigravityBody := body
-				if geminiBody, convErr := service.ConvertClaudeMessagesToGeminiGenerateContent(body); convErr != nil {
-					reqLog.Warn("gateway.antigravity_gemini_body_convert_failed", zap.Error(convErr))
-				} else {
-					antigravityBody = geminiBody
-				}
-				result, err = h.antigravityGatewayService.ForwardGemini(
+				// Gemini 分组里的 Antigravity 账号：ForwardGemini 是原生 Gemini 形状的
+				// 透传通道（只做身份注入 / schema 清理 / v1internal 包装），既不吃
+				// Anthropic 入参，也不产出 Anthropic 出参。/v1/messages 走它会先撞
+				// 400 "Unknown name \"max_tokens\" at 'request'"，即使上游通了，客户端
+				// 拿到的也是 candidates 形状。
+				// 改走 Claude 通道：它内部已完成 Claude→Gemini（含 Antigravity 必需的
+				// 身份提示词）与 Gemini→Claude 双向转换，模型名照旧走账号 model_mapping。
+				result, err = h.antigravityGatewayService.Forward(
 					requestCtx,
 					c,
 					account,
-					reqModel,
-					"generateContent",
-					reqStream,
-					antigravityBody,
+					body,
 					hasBoundSession,
-					service.WithForwardGeminiSession(derefGroupID(apiKey.GroupID), sessionKey),
 				)
 			} else {
 				result, err = h.geminiCompatService.Forward(requestCtx, c, account, body)
