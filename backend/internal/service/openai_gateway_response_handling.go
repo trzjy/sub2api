@@ -1903,7 +1903,8 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	logOpenAISuccessMissingUsage(ctx, c, account, resp, usage, "json", false)
 
 	// Replace model in response if needed
-	if originalModel != mappedModel {
+	// 归一化（用户裁定）：客户端若直接用上游写法请求，也要回写成站内统一写法。
+	if originalModel != mappedModel || NormalizeModelName(originalModel) != mappedModel {
 		// 掩码账号按别名集回写（含去后缀别名），非掩码账号保持既有的
 		// fromModel 精确匹配语义零变化。
 		if IsResponseIdentityMaskedAccount(account) {
@@ -2021,7 +2022,8 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		}
 		finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
 		body = finalResponse
-		if originalModel != mappedModel {
+		// 归一化（用户裁定）：同上，客户端用上游写法请求时也要回写成站内统一写法。
+		if originalModel != mappedModel || NormalizeModelName(originalModel) != mappedModel {
 			// 掩码账号按别名集回写，非掩码账号仅精确匹配。
 			if IsResponseIdentityMaskedAccount(account) {
 				body = s.replaceModelInResponseBody(body, mappedModel, originalModel, IdentityRewriteAliases(mappedModel)...)
@@ -2046,7 +2048,9 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		restoredBody = restoreCodexToolNamesFromContext(c, restoredBody)
 		body = ensureOpenAIResponseObjectCreatedAt(restoredBody)
 	} else {
-		if originalModel != mappedModel {
+		// 归一化（用户裁定）：客户端若直接用上游写法请求（originalModel 就是上游名），
+		// 也必须回写成站内统一写法，故第二个条件不可省。
+		if originalModel != mappedModel || NormalizeModelName(originalModel) != mappedModel {
 			// 掩码账号按别名集回写，非掩码账号仅精确匹配。
 			if IsResponseIdentityMaskedAccount(account) {
 				bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel, IdentityRewriteAliases(mappedModel)...)
@@ -2723,6 +2727,9 @@ func (s *OpenAIGatewayService) parseSSEUsageFromBody(body string) *OpenAIUsage {
 // replaceModelInSSEBody rewrites every SSE data line in a raw SSE body. See
 // replaceModelInSSELine for the alias semantics; aliases are forwarded verbatim.
 func (s *OpenAIGatewayService) replaceModelInSSEBody(body, fromModel, toModel string, aliases ...string) string {
+	// 模型名归一化（用户裁定）：同 replaceModelInResponseBody，流式响应的每块 model
+	// 字段也必须归一到站内统一写法，否则客户端在流里仍能看到上游真名。
+	toModel = NormalizeModelName(toModel)
 	lines := strings.Split(body, "\n")
 	for i, line := range lines {
 		if _, ok := extractOpenAISSEDataLine(line); !ok {

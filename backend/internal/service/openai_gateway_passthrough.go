@@ -2388,7 +2388,8 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	if originalModel != "" && mappedModel != "" && originalModel != mappedModel {
+	if originalModel != "" && mappedModel != "" &&
+		(originalModel != mappedModel || NormalizeModelName(originalModel) != mappedModel) {
 		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
 	}
 	body, err = restoreOpenAIResponsesNamespacePayload(c, body)

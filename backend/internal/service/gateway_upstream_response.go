@@ -1460,7 +1460,9 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 	}
 
 	// 如果有模型映射，替换响应中的model字段
-	if originalModel != mappedModel {
+	// 归一化（用户裁定）：客户端直接用上游写法请求时 originalModel 就是上游名，
+	// 与 mappedModel 相同，但仍要对外显示站内统一写法，故补第二个条件。
+	if originalModel != mappedModel || NormalizeModelName(originalModel) != mappedModel {
 		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
 	}
 
@@ -1484,6 +1486,9 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 // replaceModelInResponseBody 替换响应体中的model字段
 // 使用 gjson/sjson 精确替换，避免全量 JSON 反序列化
 func (s *GatewayService) replaceModelInResponseBody(body []byte, fromModel, toModel string) []byte {
+	// 模型名归一化（用户裁定）：上游真名（如 deepseek-v4.1-flash-1017）一律归一成
+	// 站内统一写法（deepseek-v4.1-flash）后再展示给用户。
+	toModel = NormalizeModelName(toModel)
 	if m := gjson.GetBytes(body, "model"); m.Exists() && m.Str == fromModel {
 		newBody, err := sjson.SetBytes(body, "model", toModel)
 		if err != nil {

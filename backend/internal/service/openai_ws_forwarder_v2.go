@@ -371,7 +371,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	responseID := ""
 	var finalResponse []byte
 	wroteDownstream := false
-	needModelReplace := originalModel != mappedModel
+	// 归一化（用户裁定）：客户端直接用上游写法请求时 originalModel 就是上游名，
+	// 与 mappedModel 相同，但对外仍要显示站内统一写法，故补第二个条件。
+	needModelReplace := originalModel != mappedModel || NormalizeModelName(originalModel) != mappedModel
 	var mappedModelBytes []byte
 	if needModelReplace && mappedModel != "" {
 		mappedModelBytes = []byte(mappedModel)

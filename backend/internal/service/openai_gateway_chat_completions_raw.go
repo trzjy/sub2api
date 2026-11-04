@@ -539,8 +539,12 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 // 仅当账号开启 mask_upstream_identity、且存在可区分的上下游模型名（非空且不同）
 // 时触发。闸门刻意保持最小：观察/计费链（observer.ObserveOpenAI）看到的仍是
 // 原始上游回显，此处只改客户端可见的写出行；非掩码账号字节行为零变化。
+// 归一化（用户裁定）：上游真名（如 deepseek-v4.1-flash-1017）要归一成站内统一写法
+// 再给客户端。客户端若直接用上游写法请求，originalModel 与 upstreamModel 相同，
+// 仍需改动客户端可见响应，故补第二个条件。
 func rawChatCompletionsMaskGate(account *Account, originalModel, upstreamModel string) bool {
-	return IsResponseIdentityMaskedAccount(account) && originalModel != "" && upstreamModel != "" && originalModel != upstreamModel
+	return IsResponseIdentityMaskedAccount(account) && originalModel != "" && upstreamModel != "" &&
+		(originalModel != upstreamModel || NormalizeModelName(originalModel) != upstreamModel)
 }
 
 // ensureOpenAIChatStreamUsage 确保 raw Chat Completions 流式请求会让上游返回 usage。

@@ -1042,6 +1042,10 @@ func appendOpenAIResponsesRequestPathSuffix(baseURL, suffix string) string {
 // restricted to the top-level "model" field; a missing field or a value outside
 // the candidate set is passed through untouched.
 func (s *OpenAIGatewayService) replaceModelInResponseBody(body []byte, fromModel, toModel string, aliases ...string) []byte {
+	// 模型名归一化（用户裁定）：上游真名（如 deepseek-v4.1-flash-1017）一律归一成
+	// 站内统一写法（deepseek-v4.1-flash）后再展示给用户。客户端若直接用了上游写法，
+	// originalModel 就是上游写法，此处若不归一，客户端会看到 -1017，与裁定冲突。
+	toModel = NormalizeModelName(toModel)
 	// 正交守卫（吸收上游）：无改写目标或非法 JSON 时原样返回。
 	// 注：不采用上游 fromModel=="" / fromModel==toModel 的提前返回——
 	// 我方别名集语义下 fromModel 为空但别名非空时仍须改写。
