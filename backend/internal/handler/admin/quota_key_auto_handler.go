@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/cursorupstream"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -56,8 +58,8 @@ const (
 	autoPoolNotesPrefix = "auto_pool:"
 
 	// autoPoolBindFailedMarker 标记本地行对应的上游绑定失败。
-	// 失败行会被 neutralize（expires_at 置为过去），因此不会被补池器选中，
-	// 但 notes 仍保留完整设备凭据，运维可据此人工恢复绑定。
+	// 失败行**从落库起**就不可选（expires_at 落在过去），因此不会被补池
+	// 候选查询选中；但 notes 仍保留完整设备凭据，运维可据此人工恢复绑定。
 	autoPoolBindFailedMarker = "bind=failed"
 )
 
@@ -143,12 +145,25 @@ func formatAutoPoolFailedNotes(devCode, devMD5 string) string {
 //	上游绑定是对外部系统的不可逆副作用，本地 quota_keys 行是绑定关系的唯一凭据。
 //	因此**先落库、后绑定**：只有本地已持久化的卡密才会去上游绑定设备码。
 //	这样「上游已绑定但本地无记录」的孤儿绑定在结构上不可能出现——
-//	落库失败时上游尚未被触碰，内存池也不会被污染；
-//	绑定失败时本地行保留完整设备凭据（dev + md5）并被移出补池候选集，可人工恢复。
+//	落库失败时上游尚未被触碰，内存池也不会被污染。
 //
-//	单卡失败隔离：每张卡密独立走「落库 → 绑定 → 入池」三段，任一段失败只影响
-//	该卡（计入 failed_count 并回写可定位的错误文案），不影响同批其它卡密，
+//	单卡失败隔离：每张卡密独立走「落库 → 绑定 → 转可选 → 入池」四段，任一段失败
+//	只影响该卡（计入 failed_count 并回写可定位的错误文案），不影响同批其它卡密，
 //	也不会把半成品卡留在内存池里。
+//
+// 不可选不变量（派发单 CARD-06 P2，终审「人工告警不等于关闭」）：
+//
+//	**落库即不可选，绑成功才转可选**。阶段 1 落库时把 expires_at 置为过去，
+//	该行从出生起就被补池候选查询（status=active AND 未过期）排除；阶段 3 只在
+//	上游绑定成功后才把 expires_at 清空使其重新可选。于是：
+//
+//	  - 绑定失败的行天然不可选 —— 不再依赖任何可能失败的中和步骤，
+//	    「中和失败导致行仍 active+未过期、随后被重消费」这条路径被结构性消除；
+//	  - 绝不产生「active+未过期却从未绑定上游」的可重消费行；
+//	  - 转可选失败只会把行留在「不可选」安全态（行不可选、不会被重消费），
+//	    属可恢复的硬失败，需人工处理。
+//
+//	notes 始终保留完整设备凭据（dev + md5），运维可据此人工恢复绑定。
 func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 	var req batchImportCardsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -175,10 +190,16 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 
 		devCode, devMD5 := cursorupstream.GenerateVirtualDeviceCode()
 
-		// 阶段 1：先落库（写前记录绑定意图）。
+		// 阶段 1：先落库，且**落库即不可选**。
 		// 失败即结束本卡：上游尚未绑定 → 无孤儿绑定；内存池不写入 → 无池污染。
+		//
+		// expires_at 置为过去（now-1min）使该行从出生起就被补池候选查询
+		// （status=active AND 未过期）排除：即便后续任一步失败、即便 notes 标记
+		// 也写不进去，这一行都不会被重新消费。notes 同时记录完整绑定凭据，
+		// 供人工恢复绑定。
 		notes := formatAutoPoolNotes(devCode, devMD5)
-		st, createErr := h.svc.Create(c.Request.Context(), cardKey, nil, &notes, 1)
+		unselectableUntil := time.Now().Add(-time.Minute)
+		st, createErr := h.svc.Create(c.Request.Context(), cardKey, &unselectableUntil, &notes, 1)
 		if createErr != nil {
 			res.FailedCount++
 			res.Errors = append(res.Errors, fmt.Sprintf("card %s persist failed: %v", maskCardKey(cardKey), createErr))
@@ -186,20 +207,44 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 		}
 
 		// 阶段 2：绑定上游设备码。
-		// 失败时上游并未绑定（卡未被消耗），但本地行已经存在；把该行 neutralize
-		// （expires_at 置为过去）使其退出补池候选集，同时保留设备凭据以便人工恢复。
+		// 失败时上游并未绑定（卡未被消耗），但本地行已经存在且**天然不可选**
+		// （阶段 1 已把 expires_at 置为过去）—— 无需任何中和步骤，
+		// 因此不再有「中和失败导致行仍 active+未过期」的路径。
+		// 这里只登记失败标记（bind=failed）供运维检索与人工恢复绑定。
 		if bindErr := client.ValidateActivationCode(c.Request.Context(), cardKey, devCode, devMD5); bindErr != nil {
 			res.FailedCount++
 			msg := fmt.Sprintf("card %s bind failed: %v", maskCardKey(cardKey), bindErr)
-			if neutralizeErr := h.neutralizeFailedAutoCard(c.Request.Context(), st.ID, devCode, devMD5); neutralizeErr != nil {
-				msg += fmt.Sprintf(" (local row %d left active for manual recovery: %v)", st.ID, neutralizeErr)
+			// 标记写失败不影响安全性：行仍是不可选态（expires_at 在过去），
+			// 不会被重消费；但运维失去了「这张卡从未绑定」的显式信号，如实上报。
+			if markErr := h.markAutoCardBindFailed(c.Request.Context(), st.ID, devCode, devMD5); markErr != nil {
+				msg += fmt.Sprintf("; failed-marker NOT persisted (%v): row %d stays unselectable (expires_at in the past) but carries no bind=failed marker", markErr, st.ID)
+				slog.Error("cursor auto: bind failed AND failed-marker write failed, row stays unselectable and needs manual recovery",
+					"quota_key_id", st.ID,
+					"bind_err", bindErr,
+					"marker_err", markErr,
+				)
 			}
 			res.Errors = append(res.Errors, msg)
 			continue
 		}
 
-		// 阶段 3：查一次额度（尽力而为）。
-		// 额度未知不阻断导入：卡密已绑定且已落库，后续 refresh_all 会补齐额度。
+		// 阶段 3：转可选 —— 只有绑成功才把该行放回补池候选集。
+		// 失败 = 卡已绑上游但本地仍不可选：属**可恢复**的硬失败（行不可选、
+		// 不会被重消费），报错并标注需人工处理；该卡不进内存池。
+		if activateErr := h.activateAutoCard(c.Request.Context(), st.ID); activateErr != nil {
+			res.FailedCount++
+			msg := fmt.Sprintf("card %s bound upstream but NOT selectable locally (%v) — 已绑定但未转可选，需人工处理: row %d stays unselectable (expires_at in the past) and will not be re-consumed",
+				maskCardKey(cardKey), activateErr, st.ID)
+			slog.Error("cursor auto: bound upstream but activation to selectable failed, row left unselectable and requires manual handling",
+				"quota_key_id", st.ID,
+				"activate_err", activateErr,
+			)
+			res.Errors = append(res.Errors, msg)
+			continue
+		}
+
+		// 阶段 4：查一次额度（尽力而为）并入池。
+		// 额度未知不阻断导入：卡密已绑定、已落库且已转可选，后续 refresh_all 会补齐额度。
 		overCount := 0
 		sumCount := 0
 		countResp, countErr := client.RefreshCount(c.Request.Context(), devCode, devMD5)
@@ -208,8 +253,8 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 			sumCount = countResp.SumCount
 		}
 
-		// 阶段 4：入池。只有「本地已落库 + 上游已绑定」的卡密才允许进入内存池，
-		// 失败卡密永不进池（避免污染池内额度统计与取号候选集）。
+		// 入池。只有「本地已落库 + 上游已绑定 + 本地已转可选」的卡密才允许进入
+		// 内存池，失败卡密永不进池（避免污染池内额度统计与取号候选集）。
 		// st.ID 来自本次新建行，池内不存在同 ID 的旧状态，整卡登记不会覆盖他人状态。
 		if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
 			pool.RegisterCard(st.ID, cardKey, devCode, devMD5, overCount, sumCount)
@@ -221,19 +266,50 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 	response.Success(c, res)
 }
 
-// neutralizeFailedAutoCard 把绑定失败的本地行移出补池候选集。
+// activateAutoCard 把已绑定成功的行从「不可选」转为「可选」。
 //
-// 做法：expires_at 置为过去 → 补池候选查询（status=active AND exhausted=false
-// AND 未过期）不再选中它，清扫器随后把它归入 expired 终态。notes 里保留完整
-// 设备凭据（dev + md5），运维可据此人工恢复绑定。
+// 做法：清空 expires_at（显式清空 = 永不过期）→ 该行重新满足补池候选查询的
+// 「status=active AND 未过期」条件，回到候选集。清空而非置未来：Auto 卡密的
+// 有效期由上游额度（over/sum count）决定，本地不应再设一个到期日把它扫成 expired。
 //
-// 该行不会被物理删除：code_mac 上有唯一索引，删除会让同一张卡密永远无法再次导入。
-func (h *QuotaKeyHandler) neutralizeFailedAutoCard(ctx context.Context, quotaKeyID int64, devCode, devMD5 string) error {
-	past := time.Now().Add(-time.Minute)
-	expiresAt := &past
+// 失败语义：卡已绑上游但本地仍不可选 —— 行停留在「不可选」安全态
+//（expires_at 仍在过去），不会被补池重消费，属可恢复的硬失败，
+// 调用方必须按硬失败上报（明确标注需人工处理）。
+//
+// 额外校验（防清扫器竞态）：清空 expires_at 后回读状态，确认该行**确实**可选。
+// 若清扫器在「落库 → 转可选」窗口内把该行标成了 expired，清空 expires_at 也
+// 救不回来（status 已是终态）—— 此时必须显式失败，不能谎报成功。
+func (h *QuotaKeyHandler) activateAutoCard(ctx context.Context, quotaKeyID int64) error {
+	// 内层 nil = 显式清空 expires_at（外层非 nil 表示「要写这一列」）。
+	var clearExpiresAt *time.Time
+	updated, err := h.svc.Update(ctx, quotaKeyID, nil, &clearExpiresAt, nil, nil)
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		return fmt.Errorf("quota_key_auto: activation returned empty status for row %d", quotaKeyID)
+	}
+	if updated.Status != domain.QuotaKeyStatusActive ||
+		(updated.ExpiresAt != nil && !updated.ExpiresAt.After(time.Now())) {
+		return fmt.Errorf("quota_key_auto: row %d not selectable after activation (status=%s)", quotaKeyID, updated.Status)
+	}
+	return nil
+}
+
+// markAutoCardBindFailed 把「上游绑定失败」标记写进 notes（**不**写 expires_at）。
+//
+// 用途：绑定失败时登记这一行，让运维能按 notes 检索出这些行，凭 dev+md5 人工恢复绑定。
+//
+// 写标记**不**承担任何安全性职责：这一行从落库起就不可选（阶段 1 已把 expires_at
+// 置为过去），无论标记写成功还是失败，它都不会被补池候选查询选中、不会被重消费。
+// 因此标记写失败只影响可观测性（运维少了检索信号），不改变安全态 —— 如实上报即可。
+//
+// 运维恢复路径：改 expires_at 为 null（或未来时间）即可让该行重新可选；
+// 但 bind=failed 标记的行**从未绑定上游**，恢复前必须先按 dev+md5 完成绑定。
+func (h *QuotaKeyHandler) markAutoCardBindFailed(ctx context.Context, quotaKeyID int64, devCode, devMD5 string) error {
 	notesValue := formatAutoPoolFailedNotes(devCode, devMD5)
 	notes := &notesValue
-	_, err := h.svc.Update(ctx, quotaKeyID, nil, &expiresAt, &notes, nil)
+	_, err := h.svc.Update(ctx, quotaKeyID, nil, nil, &notes, nil)
 	return err
 }
 
