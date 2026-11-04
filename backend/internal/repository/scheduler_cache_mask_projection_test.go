@@ -90,6 +90,9 @@ func TestSchedulerCacheSnapshotPreservesMaskedInputBand(t *testing.T) {
 		Extra: map[string]any{
 			"mask_upstream_identity": true,
 			"masked_input_band":      map[string]any{"min": 10000, "max": 150000},
+			// 人设与思考净化：转发链/响应链读的是选号返回的账号，必须同样活过投影。
+			"identity_prompt":         "你是 Kimi。",
+			"strip_reasoning_content": true,
 		},
 		Credentials: map[string]any{
 			"model_mapping": map[string]any{"kimi-k3": "kimi-k3"},
@@ -111,6 +114,12 @@ func TestSchedulerCacheSnapshotPreservesMaskedInputBand(t *testing.T) {
 	require.Equal(t, 150000, parsed.Max)
 	require.True(t, parsed.Contains(50000))
 	require.False(t, parsed.Contains(2000))
+
+	// 人设注入与思考净化读的是同一个账号对象：投影丢掉它们，伪装就只剩"改个模型名"。
+	require.Equal(t, "你是 Kimi。", got[0].Extra["identity_prompt"],
+		"快照投影必须保留 identity_prompt，否则账号级人设永远注不进上游请求")
+	require.True(t, service.IsReasoningStrippedAccount(&got[0]),
+		"快照投影必须保留 strip_reasoning_content，否则思考过程里的身份线索不会被剥离")
 }
 
 func TestSchedulerCacheSnapshotPreservesUpstreamModelMetadata(t *testing.T) {

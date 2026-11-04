@@ -138,6 +138,10 @@ func IsIdentityMaskedAccount(a *Account) bool {
 // 不参与任何调度或分层判定。
 const responseIdentityMaskKey = "response_identity_mask"
 
+// ResponseIdentityMaskExtraKey 是 responseIdentityMaskKey 的导出别名，供仓储层调度快照
+// 投影白名单引用——投影裁掉它，新开关在选号返回的账号上恒为 false，响应侧净化静默失效。
+const ResponseIdentityMaskExtraKey = responseIdentityMaskKey
+
 // IsResponseIdentityMaskedAccount 报告该账号是否需要响应侧身份净化。
 // 语义 = mask_upstream_identity（旧开关，保持既有账号行为不变）|| extra.response_identity_mask（新开关）。
 // 读取口径与 IsIdentityMaskedAccount 一致：SnapshotExtra 快照读取；bool 与 "true"/"1" 字符串均视为真；

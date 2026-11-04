@@ -1340,6 +1340,16 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 裁掉它，大档专用账号（kiro 中转）会被当成未声明区间的普通伪装号，退回小档
 		// 抢 1 万以下的活，而 1 万以上的请求则整池无候选、全部回落星思付费池。
 		service.MaskedInputBandExtraKey,
+		// 身份人设与思考净化必须进投影：转发链（sendCCUpstreamRequest →
+		// injectAccountIdentitySystemMessage）与响应链（IsReasoningStrippedAccount）读的都是
+		// 选号返回的账号对象，而选号返回的正是本投影。裁掉这两个键，伪装账号配的人设永远
+		// 注不进去（客户端直接问"你是谁"会得到上游模型的真名），思考过程里的身份线索也不会
+		// 被剥离——两种泄漏都不报错，只在用户侧体现。
+		"identity_prompt",
+		"strip_reasoning_content",
+		// 响应侧身份净化新开关（与 mask_upstream_identity 解耦，见
+		// IsResponseIdentityMaskedAccount）。旧开关在投影里，新开关同样不能少。
+		service.ResponseIdentityMaskExtraKey,
 		// HY3 legacy eligibility rechecks the mapped model against this existing
 		// account catalog snapshot. Dropping it makes a valid masked account fail
 		// closed after scheduler snapshot projection.
