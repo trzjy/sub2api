@@ -138,14 +138,19 @@ func (p *CursorDynamicPool) AcquireToken(ctx context.Context, sessionID string) 
 	now := time.Now()
 
 	// 1. 优先命中会话粘性且未进入冷却的 Token
+	//
+	// 并发上限口径与普通选取分支一致：粘性命中同样必须满足 InFlight < maxInFlight。
+	// 否则同一 sessionID 的第三次并发调用会把已满载的 Token 顶到 maxInFlight+1，
+	// 绕过单 Token 并发上限（增量外审 P1）。达到上限时走下面的解绑路径，
+	// 漂移到别的有余量的 Token 或拉新 Token。
 	if sessionID != "" {
 		if tok, ok := p.sessionMap[sessionID]; ok {
-			if tok.CooldownTo.Before(now) && tok.FailCount == 0 {
+			if tok.CooldownTo.Before(now) && tok.FailCount == 0 && tok.InFlight < p.maxInFlight {
 				tok.InFlight++
 				p.mu.Unlock()
 				return tok, nil
 			}
-			// 绑定的 Token 已失效，解绑并准备漂移接续
+			// 绑定的 Token 已失效或已达并发上限，解绑并准备漂移接续
 			delete(p.sessionMap, sessionID)
 		}
 	}
@@ -304,8 +309,16 @@ func (p *CursorDynamicPool) MarkTokenError(tok *DynamicCursorToken, sessionID st
 
 	tok.FailCount++
 	tok.CooldownTo = time.Now().Add(cooldownDuration)
+	// 解绑只针对「会话当前仍绑在出故障的这个 Token 上」的情形。
+	//
+	// 会话因并发上限/冷却漂移到新 Token 后（AcquireToken 里 p.sessionMap[sessionID]
+	// 已指向新 Token），旧 Token 迟到的 429 仍会走到这里。若无条件 delete，
+	// 会把**新绑定**误删：会话粘性被无谓打断，且该 Token 未必已故障。
+	// 故只有映射仍指向传入的 tok 时才解绑；已迁移到别的 Token 则保留新绑定。
 	if sessionID != "" {
-		delete(p.sessionMap, sessionID)
+		if cur, ok := p.sessionMap[sessionID]; ok && cur == tok {
+			delete(p.sessionMap, sessionID)
+		}
 	}
 
 	if p.logger != nil {

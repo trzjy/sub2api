@@ -607,3 +607,125 @@ func TestCursorDynamicPool_AcquireWithoutCardsReturnsExhausted(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrNoAvailableCursorAutoToken)
 }
+
+// TestCursorDynamicPool_SessionAffinityRespectsMaxInFlight 锁定会话粘性分支的并发上限
+// （增量外审 P1）。
+//
+// 回归背景：会话粘性分支原先只检查「未冷却 + 无失败计数」，**没有**检查
+// tok.InFlight < p.maxInFlight，而普通选取分支有该检查。于是同一 sessionID
+// 绑定到健康 Token 后，第三次并发调用会把同一个 Token 的 InFlight 顶到 3，
+// 突破 maxInFlight=2 的单 Token 并发上限 —— 同一上游试用号被同时使用 3 路。
+//
+// 修复后：粘性 Token 达到并发上限时走既有解绑路径（delete sessionMap），
+// 漂移到别的有余量 Token 或拉新 Token，InFlight 永远不超过 maxInFlight。
+func TestCursorDynamicPool_SessionAffinityRespectsMaxInFlight(t *testing.T) {
+	up := newMockCursorUpstream(t, func(callIdx int, _ mockCursorUpstreamCall) mockCursorUpstreamResponse {
+		return mockCursorUpstreamResponse{
+			Email: fmt.Sprintf("cap%d@test.com", callIdx),
+			Token: fmt.Sprintf("tok_cap_%d", callIdx),
+		}
+	})
+
+	pool := NewCursorDynamicPool(up.URL(), zap.NewNop())
+	pool.RegisterCard(51, "card-key-51", "dev-51", "md5-51", 5, 100)
+	require.Equal(t, 2, pool.maxInFlight)
+
+	// 第 1 次：池空 → 走上游拉号，绑定 sess-cap。
+	tok1, err := pool.AcquireToken(context.Background(), "sess-cap")
+	require.NoError(t, err)
+	require.Equal(t, "tok_cap_0", tok1.AccessToken)
+	require.Equal(t, 1, tok1.InFlight)
+
+	// 第 2 次：同会话命中粘性 → 同一个 Token，占满 maxInFlight=2。
+	tok2, err := pool.AcquireToken(context.Background(), "sess-cap")
+	require.NoError(t, err)
+	require.Same(t, tok1, tok2, "同会话未达上限时必须保持粘性")
+	require.Equal(t, 2, tok1.InFlight)
+
+	// 第 3 次：粘性 Token 已达并发上限 → 绝不能把 InFlight 顶到 3。
+	tok3, err := pool.AcquireToken(context.Background(), "sess-cap")
+	require.NoError(t, err)
+
+	// 核心断言：原 Token 的 InFlight 不得突破上限。
+	require.LessOrEqual(t, tok1.InFlight, pool.maxInFlight,
+		"会话粘性分支突破了单 Token 并发上限（InFlight=%d > maxInFlight=%d）", tok1.InFlight, pool.maxInFlight)
+	require.Equal(t, 2, tok1.InFlight, "原 Token 的并发占用不应再增加")
+
+	// 且必须漂移到另一个 Token（本次是上游拉的新号），而不是继续压原 Token。
+	require.NotSame(t, tok1, tok3, "达到并发上限后必须漂移到其它 Token")
+	require.Equal(t, "tok_cap_1", tok3.AccessToken)
+	require.Equal(t, 1, tok3.InFlight)
+
+	// 会话已重新绑定到新 Token，池内每个 Token 的 InFlight 都在上限内。
+	pool.mu.RLock()
+	require.Same(t, tok3, pool.sessionMap["sess-cap"])
+	pool.mu.RUnlock()
+
+	for _, tok := range cursorPoolSnapshotTokens(pool) {
+		require.LessOrEqual(t, tok.InFlight, pool.maxInFlight)
+	}
+}
+
+// TestCursorDynamicPool_MarkTokenErrorKeepsBindingAfterSessionMigrated 锁定 P1：
+// 会话迁移到新 Token 后，旧 Token 迟到的 429 不得把**新绑定**误删。
+//
+// 回归背景：MarkTokenError 原先无条件执行 delete(p.sessionMap, sessionID)。
+// 但会话因并发上限/冷却漂移后，p.sessionMap[sessionID] 已指向**新** Token；
+// 此时旧 Token 的迟到 429 会把新绑定误删 —— 粘性被无谓打断，
+// 且被绑的新 Token 根本没有任何故障。
+//
+// 修复后：只有 p.sessionMap[sessionID] 仍指向出故障的 tok 时才解绑。
+func TestCursorDynamicPool_MarkTokenErrorKeepsBindingAfterSessionMigrated(t *testing.T) {
+	up := newMockCursorUpstream(t, func(callIdx int, _ mockCursorUpstreamCall) mockCursorUpstreamResponse {
+		return mockCursorUpstreamResponse{
+			Email: fmt.Sprintf("mig%d@test.com", callIdx),
+			Token: fmt.Sprintf("tok_mig_%d", callIdx),
+		}
+	})
+
+	pool := NewCursorDynamicPool(up.URL(), zap.NewNop())
+	pool.RegisterCard(61, "card-key-61", "dev-61", "md5-61", 5, 100)
+
+	// 第 1 次：池空 → 拉号 tok_mig_0（记为 tokA），会话粘在 tokA 上。
+	tokA, err := pool.AcquireToken(context.Background(), "sess-mig")
+	require.NoError(t, err)
+	require.Equal(t, "tok_mig_0", tokA.AccessToken)
+	require.Equal(t, 1, tokA.InFlight)
+
+	// 第 2 次：同会话命中粘性 → 仍是 tokA，占满 maxInFlight=2。
+	tokAgain, err := pool.AcquireToken(context.Background(), "sess-mig")
+	require.NoError(t, err)
+	require.Same(t, tokA, tokAgain)
+	require.Equal(t, 2, tokA.InFlight)
+
+	// 第 3 次：tokA 已达并发上限 → 解绑并漂移到新 Token（tok_mig_1）。
+	tokB, err := pool.AcquireToken(context.Background(), "sess-mig")
+	require.NoError(t, err)
+	require.NotSame(t, tokA, tokB, "达到并发上限后必须漂移到新 Token")
+	require.Equal(t, "tok_mig_1", tokB.AccessToken)
+
+	pool.mu.RLock()
+	require.Same(t, tokB, pool.sessionMap["sess-mig"], "前置条件：会话应已迁移到新 Token")
+	pool.mu.RUnlock()
+
+	// 旧 Token 迟到 429：标记 tokA 故障，但**不得**删掉指向 tokB 的新绑定。
+	pool.MarkTokenError(tokA, "sess-mig", 60*time.Second)
+
+	// tokA 确实被标记故障（冷却 + 失败计数）。
+	require.Equal(t, 1, tokA.FailCount)
+	require.True(t, tokA.CooldownTo.After(time.Now()))
+
+	// 核心断言：会话的新绑定仍在，未被旧 Token 的迟到故障误删。
+	pool.mu.RLock()
+	bound, stillBound := pool.sessionMap["sess-mig"]
+	pool.mu.RUnlock()
+	require.True(t, stillBound, "旧 Token 的迟到故障把会话的新绑定误删了")
+	require.Same(t, tokB, bound, "会话绑定必须仍指向迁移后的新 Token")
+
+	// 反向对照：故障会话仍绑在该 Token 上时，MarkTokenError 必须照常解绑。
+	pool.MarkTokenError(tokB, "sess-mig", 60*time.Second)
+	pool.mu.RLock()
+	_, stillBound = pool.sessionMap["sess-mig"]
+	pool.mu.RUnlock()
+	require.False(t, stillBound, "会话确实绑在该故障 Token 上时必须解绑")
+}

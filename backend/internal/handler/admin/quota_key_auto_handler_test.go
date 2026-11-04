@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/cursorupstream"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -48,6 +49,34 @@ type autoCardQuotaKeyRepo struct {
 	keys      map[int64]*ent.QuotaKey
 	nextID    int64
 	failLast4 map[string]bool // 明文末 4 位 → 落库失败（模拟 DB 抖动/唯一键冲突）
+
+	// failUpdateMetaAll 为真时 UpdateMeta 一律失败（模拟 DB 完全不可写）。
+	failUpdateMetaAll bool
+	// failUpdateMetaExpireTimes 控制「带 expires_at 的 UpdateMeta 调用」的失败次数：
+	// 0 = 不失败；-1 = 一直失败；n>0 = 前 n 次失败（覆盖瞬时 DB 抖动）。
+	// 只写 notes 的调用不受它影响（模拟「转可选写入被 DB 拒绝、但标记写入可用」）。
+	failUpdateMetaExpireTimes int
+	// updateMetaCalls 记录 UpdateMeta 的总调用次数。
+	updateMetaCalls int
+	// updateMetaExpireCalls 记录带 expires_at 的 UpdateMeta 调用次数（校验重试次数）。
+	updateMetaExpireCalls int
+	// updateMetaNotesOnlyCalls 记录只带 notes（expires_at 省略）的 UpdateMeta 调用次数，
+	// 用于确认「待人工中和」标记写入确实发生过。
+	updateMetaNotesOnlyCalls int
+	// markExpiredOnExpireWrite 为真时，带 expires_at 的 UpdateMeta 成功后会额外把行
+	// 状态改成 expired —— 模拟生产清扫器在「落库 → 转可选」窗口内抢先把该行
+	// 标成 expired（MarkExpiredIfStillExpired）的竞态。
+	markExpiredOnExpireWrite bool
+	// createdRows 记录每次 Create 的落库快照（ID + 落库瞬间的 expires_at）。
+	// 用于断言「行从落库那一刻起就不可选」（而非事后中和出来的）。
+	createdRows []autoCardCreatedRow
+}
+
+// autoCardCreatedRow 是 Create 落库瞬间的行快照。
+type autoCardCreatedRow struct {
+	ID        int64
+	ExpiresAt *time.Time
+	Notes     *string
 }
 
 func newAutoCardQuotaKeyRepo() *autoCardQuotaKeyRepo {
@@ -76,6 +105,18 @@ func (r *autoCardQuotaKeyRepo) Create(_ context.Context, input service.CreateQuo
 		Priority:      input.Priority,
 	}
 	r.keys[qk.ID] = qk
+	// 落库瞬间快照：用于断言「行从出生起就不可选」（expires_at 落在过去），
+	// 而不是事后靠中和写入把它改成不可选。
+	var createdExpires *time.Time
+	if qk.ExpiresAt != nil {
+		v := *qk.ExpiresAt
+		createdExpires = &v
+	}
+	r.createdRows = append(r.createdRows, autoCardCreatedRow{
+		ID:        qk.ID,
+		ExpiresAt: createdExpires,
+		Notes:     qk.Notes,
+	})
 	return qk, nil
 }
 
@@ -96,6 +137,12 @@ func (r *autoCardQuotaKeyRepo) GetByIDInTx(ctx context.Context, _ *ent.Tx, id in
 
 // UpdateMeta 复刻生产仓储的双指针语义：外层 nil = 不写；内层 nil = 显式清空；
 // 否则写入内层指向的值（与 quotaKeyRepository.UpdateMeta 一致）。
+//
+// 失败注入语义：
+//   - failUpdateMetaAll：整个 UpdateMeta 调用失败（生产里是一条 SQL，要么成要么败，
+//     故此处整体失败、不写任何列）；
+//   - failUpdateMetaExpire：仅「带 expires_at 的调用」失败（模拟该列写入被 DB 拒绝），
+//     只写 notes 的调用仍成功。
 func (r *autoCardQuotaKeyRepo) UpdateMeta(_ context.Context, _ *ent.Tx, id int64, expiresAt **time.Time, notes **string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -103,12 +150,35 @@ func (r *autoCardQuotaKeyRepo) UpdateMeta(_ context.Context, _ *ent.Tx, id int64
 	if !ok {
 		return &ent.NotFoundError{}
 	}
+	r.updateMetaCalls++
+	if expiresAt != nil {
+		r.updateMetaExpireCalls++
+	} else if notes != nil {
+		r.updateMetaNotesOnlyCalls++
+	}
+	if r.failUpdateMetaAll {
+		return fmt.Errorf("quota_keys: update meta failed")
+	}
+	// 仅「带 expires_at 的调用」失败：模拟该列写入被 DB 拒绝，
+	// 而只写 notes 的调用仍可用（生产里是一条 SQL，这里按列区分以覆盖
+	// 「转可选写入失败但标记写入可用」的分支）。
+	if expiresAt != nil && r.failUpdateMetaExpireTimes != 0 {
+		if r.failUpdateMetaExpireTimes < 0 {
+			return fmt.Errorf("quota_keys: update meta (expires_at) failed")
+		}
+		r.failUpdateMetaExpireTimes--
+		return fmt.Errorf("quota_keys: update meta (expires_at) failed")
+	}
 	if expiresAt != nil {
 		if *expiresAt == nil {
 			qk.ExpiresAt = nil
 		} else {
 			v := **expiresAt
 			qk.ExpiresAt = &v
+		}
+		// 模拟清扫器竞态：写 expires_at 的同时把行标成 expired。
+		if r.markExpiredOnExpireWrite {
+			qk.Status = domain.QuotaKeyStatusExpired
 		}
 	}
 	if notes != nil {
@@ -379,7 +449,17 @@ func TestQuotaKeyAuto_BatchImport_PersistFailure_NeverBindsUpstream(t *testing.T
 	require.Empty(t, pool.ListCards(), "失败卡密不得进入内存池")
 }
 
-func TestQuotaKeyAuto_BatchImport_BindFailure_NeutralizesRowAndSkipsPool(t *testing.T) {
+// TestQuotaKeyAuto_BatchImport_BindFailure_BornUnselectableAndSkipsPool 锁定 P2 的
+// 核心不变量：**绑定失败的行从落库那一刻起就不可选**。
+//
+// 回归背景（终审 CARD-06 P2）：上轮修复只写 notes 标记 + 错误日志，
+// markAutoCardBindFailed 不改 expires_at，行仍 active+未过期 →
+// 会被补池候选查询（选 active+未过期）重消费，而它从未成功绑定过上游。
+// 终审明确「人工告警不等于关闭」。
+//
+// 本用例断言落库瞬间（Create 返回时）该行就已是不可选态 —— 不是事后靠某个
+// 可能失败的中和写入把它改成不可选的。
+func TestQuotaKeyAuto_BatchImport_BindFailure_BornUnselectableAndSkipsPool(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	upstream.validateCode = 500
 	upstream.validateMsg = "activation code invalid"
@@ -399,18 +479,219 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_NeutralizesRowAndSkipsPool(t *test
 	require.Len(t, res.Errors, 1)
 	require.Contains(t, res.Errors[0], "bind failed")
 
-	// 绑定失败：本地行保留设备凭据（可人工恢复绑定），但退出补池候选集。
+	// P2 核心断言：行在**落库瞬间**就已不可选（expires_at 落在过去），
+	// 而不是靠后续某个可能失败的中和写入才变成不可选。
+	require.Len(t, repo.createdRows, 1)
+	created := repo.createdRows[0]
+	require.NotNil(t, created.ExpiresAt,
+		"落库瞬间就必须带过去时间的 expires_at —— 该行从出生起就不可选")
+	require.True(t, created.ExpiresAt.Before(time.Now()),
+		"落库瞬间的 expires_at 必须落在过去，否则该行会被补池候选查询选中")
+	require.NotNil(t, created.Notes)
+	require.Contains(t, *created.Notes, "auto_pool:dev=")
+	require.Contains(t, *created.Notes, "md5=")
+
+	// 当前行仍不可选（expires_at 在过去），且带失败标记供运维检索。
 	rows := repo.snapshot()
 	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].ExpiresAt, "绑定失败的行必须退出补池候选集")
+	require.True(t, rows[0].ExpiresAt.Before(time.Now()), "失败行的 expires_at 必须落在过去")
 	require.NotNil(t, rows[0].Notes)
 	require.Contains(t, *rows[0].Notes, "auto_pool:dev=")
 	require.Contains(t, *rows[0].Notes, "md5=")
 	require.Contains(t, *rows[0].Notes, autoPoolBindFailedMarker)
-	require.NotNil(t, rows[0].ExpiresAt, "绑定失败的行必须退出补池候选集")
-	require.True(t, rows[0].ExpiresAt.Before(time.Now()), "失败行的 expires_at 必须落在过去")
 
 	// 失败卡密不得污染内存池。
 	require.Empty(t, pool.ListCards(), "绑定失败的卡密不得进入内存池")
+}
+
+// TestQuotaKeyAuto_BatchImport_BindFailure_MarkerWriteFails_StillUnselectable 锁定
+// P2 的最坏分支：绑定失败**且**失败标记也写不进去时，该行仍必须不可选。
+//
+// 这是 P2 相对上轮修复的根本改进：上轮把「行不可选」寄托在一次可能失败的
+// 中和写入上，中和失败就留下 active+未过期的行（会被重消费）；现在行从落库起
+// 就不可选，任何后续写入失败都改变不了这一点。
+func TestQuotaKeyAuto_BatchImport_BindFailure_MarkerWriteFails_StillUnselectable(t *testing.T) {
+	upstream := newAutoCardUpstreamStub(t)
+	upstream.validateCode = 500
+	upstream.validateMsg = "activation code invalid"
+	repo := newAutoCardQuotaKeyRepo()
+	repo.failUpdateMetaAll = true // DB 完全不可写
+	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
+	installAutoCardPool(t, pool)
+	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+
+	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
+	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
+		`{"cards":["CARD-KEY-0001"]}`)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	res := parseAutoCardBatchImport(t, rec)
+	require.Equal(t, 0, res.SuccessCount)
+	require.Equal(t, 1, res.FailedCount)
+	require.Len(t, res.Errors, 1)
+	require.Contains(t, res.Errors[0], "bind failed")
+
+	// 标记写失败必须如实上报（运维据此知道这行缺少 bind=failed 信号）。
+	require.Contains(t, res.Errors[0], "failed-marker NOT persisted")
+
+	// P2 核心断言：即便所有后续写入都失败，该行仍不可选 ——
+	// 因为它从落库那一刻起就带着过去时间的 expires_at。
+	rows := repo.snapshot()
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].ExpiresAt,
+		"标记写失败不得让该行回到 active+未过期的可重消费状态")
+	require.True(t, rows[0].ExpiresAt.Before(time.Now()),
+		"标记写失败时该行的 expires_at 仍必须落在过去（不可选）")
+
+	// 旧的软性措辞必须已被移除 —— 它正是让失败静默滑过的根源。
+	require.NotContains(t, res.Errors[0], "left active for manual recovery")
+	require.NotContains(t, res.Errors[0], "left ACTIVE and will be re-consumed")
+
+	require.Empty(t, pool.ListCards(), "绑定失败的卡密不得进入内存池")
+}
+
+// TestQuotaKeyAuto_BatchImport_BindSuccess_ActivateFails_StaysUnselectable 锁定
+// P2 阶段 3 的失败语义：绑定成功但「转可选」失败时，该行必须留在不可选安全态
+//（不会被重消费），且按**硬失败**上报并标注需人工处理。
+func TestQuotaKeyAuto_BatchImport_BindSuccess_ActivateFails_StaysUnselectable(t *testing.T) {
+	upstream := newAutoCardUpstreamStub(t)
+	repo := newAutoCardQuotaKeyRepo()
+	// 带 expires_at 的写（= 转可选那一步）一律失败；只写 notes 的调用仍可用。
+	repo.failUpdateMetaExpireTimes = -1
+	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
+	installAutoCardPool(t, pool)
+	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+
+	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
+	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
+		`{"cards":["CARD-KEY-0001"]}`)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	res := parseAutoCardBatchImport(t, rec)
+	require.Equal(t, 0, res.SuccessCount)
+	require.Equal(t, 1, res.FailedCount)
+	require.Len(t, res.Errors, 1)
+
+	// 硬失败信号：已绑定但未转可选、需人工处理。
+	require.Contains(t, res.Errors[0], "已绑定但未转可选")
+	require.Contains(t, res.Errors[0], "需人工处理")
+
+	// P2 核心断言：转可选失败后该行仍不可选（expires_at 仍在过去），
+	// 不会被补池候选查询重新消费。
+	rows := repo.snapshot()
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].ExpiresAt)
+	require.True(t, rows[0].ExpiresAt.Before(time.Now()),
+		"转可选失败后该行的 expires_at 必须仍落在过去（不可选安全态）")
+
+	// 转可选失败 ⇒ 不入池。
+	require.Empty(t, pool.ListCards(), "转可选失败的卡密不得进入内存池")
+}
+
+// TestQuotaKeyAuto_BatchImport_BindSuccess_SweeperRace_NotSelectable 锁定 P2 阶段 3
+// 的清扫器竞态防护：转可选写成功但清扫器已把该行标成 expired 时，必须按硬失败
+// 上报（行确实不可选），绝不能谎报成功。
+func TestQuotaKeyAuto_BatchImport_BindSuccess_SweeperRace_NotSelectable(t *testing.T) {
+	upstream := newAutoCardUpstreamStub(t)
+	repo := newAutoCardQuotaKeyRepo()
+	repo.markExpiredOnExpireWrite = true // 模拟清扫器抢先标 expired
+	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
+	installAutoCardPool(t, pool)
+	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+
+	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
+	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
+		`{"cards":["CARD-KEY-0001"]}`)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	res := parseAutoCardBatchImport(t, rec)
+	require.Equal(t, 0, res.SuccessCount, "清扫器竞态下不得谎报成功")
+	require.Equal(t, 1, res.FailedCount)
+	require.Len(t, res.Errors, 1)
+	require.Contains(t, res.Errors[0], "已绑定但未转可选")
+	require.Contains(t, res.Errors[0], "需人工处理")
+
+	rows := repo.snapshot()
+	require.Len(t, rows, 1)
+	require.Equal(t, domain.QuotaKeyStatusExpired, rows[0].Status,
+		"清扫器已把该行标成 expired —— 该行确实不可选")
+
+	require.Empty(t, pool.ListCards(), "不可选的卡密不得进入内存池")
+}
+
+// TestQuotaKeyAuto_BatchImport_BindFailure_NoExpiryWriteAfterCreate 锁定 P2 的
+// 结构性改进：绑定失败路径**不再有任何「中和」写入**。
+//
+// 回归背景：上轮修复在绑定失败后调用 neutralize 把 expires_at 置为过去，
+// 该写入是「行不可选」的唯一依据 —— 它失败就留下 active+未过期的可重消费行。
+// 现在行从落库起就不可选，中和步骤被彻底移除，故失败路径上不应再有
+// 任何带 expires_at 的写入（只有一次只写 notes 的失败标记写入）。
+func TestQuotaKeyAuto_BatchImport_BindFailure_NoExpiryWriteAfterCreate(t *testing.T) {
+	upstream := newAutoCardUpstreamStub(t)
+	upstream.validateCode = 500
+	upstream.validateMsg = "activation code invalid"
+	repo := newAutoCardQuotaKeyRepo()
+	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
+	installAutoCardPool(t, pool)
+	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+
+	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
+	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
+		`{"cards":["CARD-KEY-0001"]}`)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	res := parseAutoCardBatchImport(t, rec)
+	require.Equal(t, 1, res.FailedCount)
+
+	// 核心断言：失败路径上没有任何带 expires_at 的写入 —— 「中和」步骤已移除。
+	require.Zero(t, repo.updateMetaExpireCalls,
+		"绑定失败路径不得再有中和写入（行从落库起就不可选）")
+	// 只有一次「只写 notes」的失败标记写入。
+	require.Equal(t, 1, repo.updateMetaNotesOnlyCalls,
+		"绑定失败应写一次 bind=failed 标记（notes only）")
+	require.Equal(t, 1, repo.updateMetaCalls)
+
+	require.Empty(t, pool.ListCards(), "绑定失败的卡密不得进入内存池")
+}
+
+// TestQuotaKeyAuto_BatchImport_Success_BornUnselectableThenActivated 锁定 P2 的完整
+// 状态迁移：成功路径上的行同样是「落库即不可选 → 绑成功后转可选」。
+//
+// 这条不变量对成功路径同样重要：Create 与 ValidateActivationCode 之间存在时间窗，
+// 若行在落库时即可选，它会在「尚未绑定上游」时被补池候选查询消费。
+func TestQuotaKeyAuto_BatchImport_Success_BornUnselectableThenActivated(t *testing.T) {
+	upstream := newAutoCardUpstreamStub(t)
+	repo := newAutoCardQuotaKeyRepo()
+	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
+	installAutoCardPool(t, pool)
+	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+
+	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
+	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
+		`{"cards":["CARD-KEY-0001"]}`)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	res := parseAutoCardBatchImport(t, rec)
+	require.Equal(t, 1, res.SuccessCount)
+	require.Equal(t, 0, res.FailedCount)
+
+	// 落库瞬间：不可选（expires_at 在过去）。
+	require.Len(t, repo.createdRows, 1)
+	require.NotNil(t, repo.createdRows[0].ExpiresAt)
+	require.True(t, repo.createdRows[0].ExpiresAt.Before(time.Now()),
+		"落库瞬间该行必须不可选，否则「落库→绑定」窗口内会被候选查询消费")
+
+	// 绑定成功后：转可选（expires_at 被清空），行回到候选集。
+	rows := repo.snapshot()
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].ExpiresAt, "绑定成功后该行必须转可选（expires_at 清空）")
+	require.Equal(t, domain.QuotaKeyStatusActive, rows[0].Status)
+
+	// 转可选这一步恰好发生一次。
+	require.Equal(t, 1, repo.updateMetaExpireCalls)
+
+	require.Len(t, pool.ListCards(), 1)
 }
 
 func TestQuotaKeyAuto_BatchImport_Success_PersistsThenBindsThenRegistersInPool(t *testing.T) {
@@ -451,6 +732,11 @@ func TestQuotaKeyAuto_BatchImport_Success_PersistsThenBindsThenRegistersInPool(t
 		require.Contains(t, *row.Notes, "auto_pool:dev=")
 		require.Contains(t, *row.Notes, "md5=")
 		require.NotContains(t, *row.Notes, autoPoolBindFailedMarker)
+		// P2：绑定成功后必须转可选 —— expires_at 被清空（永不过期），
+		// 该行重新进入补池候选集。
+		require.Nil(t, row.ExpiresAt,
+			"绑定成功转可选后 expires_at 必须被清空，该行重新可选")
+		require.Equal(t, domain.QuotaKeyStatusActive, row.Status)
 	}
 }
 
