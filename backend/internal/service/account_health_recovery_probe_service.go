@@ -40,13 +40,21 @@ const (
 	// accountHealthProbeDataPlaneTimeout 单次数据面探测超时。取 45s：上游正常时
 	// 极简探测请求在数秒内返回；故障时快速失败，不必等满客户端链路时长。
 	accountHealthProbeDataPlaneTimeout = 45 * time.Second
-	// accountHealthProbeDataPlaneMaxTokens 数据面探测的输出上限。取 16 而不是 1：
-	// 部分自建反代/桥接服务会把「上游没有产出助手文本」判成 502
-	// upstream_empty_result（生产实证：qoder-bridge 即如此）。max_tokens=1 时模型
-	// 往往还没吐正文就撞上限，于是探针永远失败、账号熔断后永远恢复不了
-	// （生产实证：账号 406 连续探测 1.6 万余次全失败，而同一地址 /v1/models 秒回 200）。
-	// 16 与原 Responses 分支的 max_output_tokens 对齐，单次成本可忽略。
-	accountHealthProbeDataPlaneMaxTokens = 16
+	// accountHealthProbeDataPlaneMaxTokens 数据面探测的输出上限。
+	//
+	// 为什么不能取极小值（1、16、32）：思考型模型把输出预算先花在 reasoning_content
+	// 上，给多少都能吃满；正文一个字都轮不到时，桥接会判「上游没有产出助手文本」
+	// 并回 502 upstream_empty_result（生产实证：qoder-bridge）。
+	//
+	// 生产实测（账号 411，上游 119.28.137.187:18081，deepseek-v4-pro，prompt="hi"）：
+	//   max_tokens=16/24/32 → 502 upstream_empty_result
+	//   max_tokens=48/64/96/128/256 → 200，正文正常，reasoning_content 127~287 字符
+	// 即阈值落在 32~48 之间，且思考长度随采样波动。取 256 留约 3 倍余量，单次探测
+	// 实际只产出百余 token，成本可忽略；同时远低于 45s 探测超时（实测 2~3s 返回）。
+	//
+	// 历史：曾从 1 提到 16，方向对但仍不够——账号 406 因此连续探测 1.6 万余次全失败，
+	// 熔断后永远恢复不了，而同地址 /v1/models 秒回 200、同 key 的业务请求完全正常。
+	accountHealthProbeDataPlaneMaxTokens = 256
 	// accountHealthProbeDataPlaneMaxBodyBytes 探测响应读取上限，防止异常大响应。
 	accountHealthProbeDataPlaneMaxBodyBytes = 256 << 10
 	// probeRecoverySuccessThreshold 连续多少次真实探测成功才解除熔断。
@@ -868,7 +876,7 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlane(ctx context.C
 		payload, err = json.Marshal(map[string]any{
 			"model":             upstreamModel,
 			"input":             "hi",
-			"max_output_tokens": 16,
+			"max_output_tokens": accountHealthProbeDataPlaneMaxTokens,
 			"stream":            false,
 		})
 	} else {

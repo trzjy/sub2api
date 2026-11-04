@@ -140,8 +140,10 @@ func TestProbeUpstreamDataPlaneUsesChatCompletionsAndJudgesBody(t *testing.T) {
 	require.Equal(t, "user", messages[0].(map[string]any)["role"])
 	// 输出上限必须给足：部分自建反代把「没产出助手文本」判成 502（qoder-bridge 即如此），
 	// max_tokens=1 会让探针永远失败、熔断后账号永远恢复不了（账号 406 实证）。
+	// 阈值也不能只提到 16——思考型模型先把预算花在 reasoning_content 上，实测 32 仍挂、
+	// 48 才通过，故要求至少 128 留出采样波动余量。
 	require.Equal(t, float64(accountHealthProbeDataPlaneMaxTokens), body["max_tokens"], "探测体输出上限")
-	require.Greater(t, body["max_tokens"].(float64), float64(1), "不得再用 max_tokens=1 探测")
+	require.GreaterOrEqual(t, body["max_tokens"].(float64), float64(128), "不得用被思考过程吃光的极小 max_tokens 探测")
 	require.Equal(t, false, body["stream"], "非流式探测")
 }
 
