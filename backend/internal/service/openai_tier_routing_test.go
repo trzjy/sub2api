@@ -313,6 +313,19 @@ func TestTierRoutingGateOpenForAccounts(t *testing.T) {
 			"model_mapping 不含目标模型键不装门")
 	})
 
+	// 模型名归一化（用户裁定：上游的 -1017 一律归一成 flash 再对下游提供）：
+	// 下游只会用统一写法请求，账号映射里配的可能是族内任一写法，门必须按族匹配，
+	// 否则统一写法请求命中不了「只配了历史写法」的账号，被误判成门关而回落真上游。
+	t.Run("gate_matches_model_name_alias_family", func(t *testing.T) {
+		acct := tierRoutingMaskedAccountWithModel(5006, PlatformKimi, "deepseek-v4.1-flash-1017")
+		require.True(t, tierRoutingGateOpenForAccounts([]Account{acct}, model),
+			"账号只配族内历史写法 -1017 时，统一写法 flash 的请求也应开门")
+
+		reverse := tierRoutingMaskedAccountWithModel(5007, PlatformKimi, model)
+		require.True(t, tierRoutingGateOpenForAccounts([]Account{reverse}, "deepseek-v4.1-flash-1017"),
+			"反向同理：账号只配统一写法时，族内历史写法请求也应开门")
+	})
+
 	t.Run("inactive_account_gate_closed", func(t *testing.T) {
 		acct := tierRoutingMaskedAccountWithModel(5006, PlatformKimi, model)
 		acct.Status = StatusDisabled

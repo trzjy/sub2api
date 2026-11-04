@@ -2671,9 +2671,15 @@ func (s *OpenAIGatewayService) TierRoutingGateOpen(ctx context.Context, groupID 
 }
 
 // tierRoutingGateOpenForAccounts 是动态门控的判定纯函数（派发单 OC-T1）：任一账号满足
-// 「管理态 schedulable=true 且掩码（mask_upstream_identity=true）且 model_mapping 含键
-// model」即开门。运行态不可用（熔断/配额暂停/临时停调）一律不关门——这里只看管理态
-// Schedulable 字段，绝不调用运行态 IsSchedulable()。
+// 「管理态 schedulable=true 且掩码（mask_upstream_identity=true）且 model_mapping 含
+// model（含其模型名别名族写法）」即开门。运行态不可用（熔断/配额暂停/临时停调）一律
+// 不关门——这里只看管理态 Schedulable 字段，绝不调用运行态 IsSchedulable()。
+//
+// 模型名必须按别名族匹配（见 model_name_alias.go）：用户裁定「上游的
+// deepseek-v4.1-flash-1017 一律归一化成 deepseek-v4.1-flash 再提供给下游」，因此下游
+// 只会用统一写法请求，而账号映射里可能只配了族内历史写法（例如 450 只配
+// deepseek-v4.1-flash、其值为上游真名 -1017）。若此处做精确 map 查表，统一写法请求
+// 就命中不了这类账号，门被判成关闭，请求绕过分档直接回落真上游——与归一化裁定冲突。
 func tierRoutingGateOpenForAccounts(accounts []Account, model string) bool {
 	for i := range accounts {
 		a := &accounts[i]
@@ -2683,8 +2689,11 @@ func tierRoutingGateOpenForAccounts(accounts []Account, model string) bool {
 		if !IsIdentityMaskedAccount(a) {
 			continue
 		}
-		if _, ok := a.GetModelMapping()[model]; ok {
-			return true
+		mapping := a.GetModelMapping()
+		for _, alias := range ModelNameAliases(model) {
+			if _, ok := mapping[alias]; ok {
+				return true
+			}
 		}
 	}
 	return false
