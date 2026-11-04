@@ -166,6 +166,15 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		}
 	}
 	if account != nil && account.Platform == PlatformAnthropic {
+		// thinking 契约翻译（见 normalizeClaude55Thinking）：5.5 系列不认的 thinking.type
+		// 改写成 adaptive 后再校验，避免让用户为模型换代吃 400。
+		if raw := parsed.Body.Bytes(); len(raw) > 0 {
+			if normalized := normalizeClaude55Thinking(raw, validationModel); !bytes.Equal(normalized, raw) {
+				if err := parsed.ReplaceBody(normalized); err != nil {
+					return nil, fmt.Errorf("normalize claude 5.5 thinking: %w", err)
+				}
+			}
+		}
 		if err := validateClaude55Request(parsed.Body.Bytes(), validationModel); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": gin.H{"type": "invalid_request_error", "message": err.Error()}})
 			return nil, err

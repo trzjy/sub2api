@@ -202,6 +202,9 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	upstreamBody = applyOllamaCloudRawChatCompletionsRequest(account, upstreamBody)
 	upstreamBody = clampOllamaCloudUpstreamMaxTokens(account, upstreamBody)
 	upstreamBody = clampSensenovaUpstreamMaxTokens(account, upstreamBody)
+	// 国产厂商（deepseek/kimi/zhipu/minimax）越界的 max_tokens 直接夹到 [1, 65536]，
+	// 避免上游回 400 "field MaxTokens invalid"（生产 7 天 62 次）。
+	upstreamBody = clampCNUpstreamMaxTokens(account, upstreamBody)
 
 	logger.L().Debug("openai chat_completions raw: forwarding without protocol conversion",
 		zap.Int64("account_id", account.ID),

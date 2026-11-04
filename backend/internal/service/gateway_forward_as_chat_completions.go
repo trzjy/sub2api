@@ -75,6 +75,8 @@ func (s *GatewayService) ForwardAsChatCompletions(
 			mappedModel = normalized
 		}
 	}
+	// thinking 契约翻译必须在校验之前（见 normalizeClaude55Thinking）。
+	body = normalizeClaude55Thinking(body, mappedModel)
 	if err := validateClaude55Request(body, mappedModel); err != nil {
 		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err

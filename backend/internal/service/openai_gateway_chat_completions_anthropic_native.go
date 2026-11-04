@@ -67,6 +67,8 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 	// Resolve the mapped model before choosing its thinking/tool protocol.
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
+	// thinking 契约翻译必须在校验之前（见 normalizeClaude55Thinking）。
+	body = normalizeClaude55Thinking(body, upstreamModel)
 	if err := validateClaude55Request(body, upstreamModel); err != nil {
 		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err

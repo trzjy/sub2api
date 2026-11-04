@@ -85,6 +85,9 @@ func (s *GatewayService) ForwardAsResponses(
 			mappedModel = normalized
 		}
 	}
+	// thinking 契约翻译必须在校验之前：把 5.5 系列不认的 thinking.type 改写成 adaptive，
+	// 而不是让用户为"模型换代"吃一个 400（2026-11-04 裁定）。
+	body = normalizeClaude55Thinking(body, mappedModel)
 	if err := validateClaude55Request(body, mappedModel); err != nil {
 		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err

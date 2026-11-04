@@ -1993,7 +1993,9 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		}
 		message := strings.TrimSpace(failoverErr.ClientMessage)
 		if message == "" {
-			message = infraerrors.UpstreamUnavailable
+			// 2026-11-04：换用中文终态文案。原先是「上游不可用」，会误导用户以为稍后重试
+			// 就好；实际是内容触发上游审核，必须改内容。英文原文更不许透传。
+			message = service.OpenAIContentScreeningClientMessage()
 		}
 		service.SetOpsUpstreamError(c, status, message, "")
 		h.anthropicStreamingAwareError(c, status, "api_error", message, streamStarted)
@@ -4218,7 +4220,9 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		}
 		message := strings.TrimSpace(failoverErr.ClientMessage)
 		if message == "" {
-			message = infraerrors.UpstreamUnavailable
+			// 2026-11-04：换用中文终态文案。原先是「上游不可用」，会误导用户以为稍后重试
+			// 就好；实际是内容触发上游审核，必须改内容。英文原文更不许透传。
+			message = service.OpenAIContentScreeningClientMessage()
 		}
 		service.SetOpsUpstreamError(c, status, message, "")
 		h.handleStreamingAwareError(c, status, "api_error", message, streamStarted)

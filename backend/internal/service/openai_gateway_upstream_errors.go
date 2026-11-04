@@ -368,6 +368,13 @@ func isOpenAIUpstreamSafetyRejection(statusCode int, upstreamMsg string, upstrea
 	if statusCode != http.StatusBadRequest {
 		return false
 	}
+	// 2026-11-04：话术表统一收口到 IsOpenAIContentScreeningRejection（新增
+	// "Inappropriate input/output rejected for security reasons"、content_policy_violation
+	// 等固定话术）。此前只认 "safety check failed"，另一类英文审核拒绝会绕过换号、
+	// 并把英文原文透传给用户（生产 7 天 764 次 / 2 用户）。
+	if IsOpenAIContentScreeningRejection(statusCode, upstreamMsg, upstreamBody) {
+		return true
+	}
 	const safetyCheckFailed = "safety check failed"
 	containsSafety := func(text string) bool {
 		return strings.Contains(strings.ToLower(text), safetyCheckFailed)

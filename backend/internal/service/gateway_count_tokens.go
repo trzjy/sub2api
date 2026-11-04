@@ -42,6 +42,14 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 		}
 	}
 	if account != nil && account.Platform == PlatformAnthropic {
+		// 与 Forward 同口径：先做 thinking 契约翻译，再校验（见 normalizeClaude55Thinking）。
+		if raw := parsed.Body.Bytes(); len(raw) > 0 {
+			if normalized := normalizeClaude55Thinking(raw, validationModel); !bytes.Equal(normalized, raw) {
+				if err := parsed.ReplaceBody(normalized); err != nil {
+					return fmt.Errorf("normalize claude 5.5 thinking: %w", err)
+				}
+			}
+		}
 		if err := validateClaude55Request(parsed.Body.Bytes(), validationModel); err != nil {
 			s.countTokensError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return err

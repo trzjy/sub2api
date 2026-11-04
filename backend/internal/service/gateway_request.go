@@ -573,6 +573,49 @@ func isClaude55SignedThinkingModel(model string) bool {
 	return claude.IsOpus55(model) || claude.IsSonnet55(model) || claude.IsHaiku55(model)
 }
 
+// normalizeClaude55Thinking 把 5.5 系列模型不支持的 thinking 配置改写成上游认的形态。
+//
+// 背景（2026-11-04 用户裁定）：客户端传 thinking.type=enabled（旧契约）时，opus/sonnet/haiku-5-5
+// 一律被上游拒绝，我们此前在 validateClaude55Request 里直接回 400。生产 7 天实测 19 次。
+// 这不是用户的错，也不是账号问题——模型换了一代，契约变了，网关该做的是**翻译**
+// 而不是把内部契约冲突甩给用户。
+//
+// 改写规则（只改会让上游拒收的组合，能跑的一律不动）：
+//   - thinking.type=enabled → adaptive，删掉 adaptive 不接受的 budget_tokens；
+//   - thinking.type=between_tools 且模型不是 sonnet-5-5 → adaptive（只有 sonnet 支持该模式）；
+//   - 改写后缺 output_config.effort 时补 high（adaptive 需要 effort 才有效果）。
+//
+// 返回值：改写后的请求体；无需改写时返回原切片（调用方可按字节相等判断是否要替换）。
+func normalizeClaude55Thinking(body []byte, model string) []byte {
+	if len(body) == 0 || !isClaude55SignedThinkingModel(model) || !gjson.ValidBytes(body) {
+		return body
+	}
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" && thinkingType != "between_tools" {
+		return body
+	}
+	// sonnet-5-5 是唯一支持 between_tools 的 5.5 模型，它的该模式不需要改写。
+	if thinkingType == "between_tools" && claude.IsSonnet55(model) {
+		return body
+	}
+	out, err := sjson.SetBytes(body, "thinking.type", "adaptive")
+	if err != nil {
+		return body
+	}
+	// adaptive 不接受 budget_tokens（上游会按"未知字段/非法组合"拒收）。
+	if gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
+		if stripped, delErr := sjson.DeleteBytes(out, "thinking.budget_tokens"); delErr == nil {
+			out = stripped
+		}
+	}
+	if strings.TrimSpace(gjson.GetBytes(out, "output_config.effort").String()) == "" {
+		if filled, setErr := sjson.SetBytes(out, "output_config.effort", "high"); setErr == nil {
+			out = filled
+		}
+	}
+	return out
+}
+
 // validateClaude55Request rejects settings that the upstream cannot honor.
 // Call before OAuth mimicry can remove tool_choice or alter thinking defaults.
 func validateClaude55Request(body []byte, model string) error {
