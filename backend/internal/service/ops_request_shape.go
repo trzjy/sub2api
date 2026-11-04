@@ -29,8 +29,29 @@ import (
 //   - body_bytes 特别大 → 上行体积被截断。
 const OpsRequestShapeKey = "ops_request_shape"
 
+// RequestShapeProtocolAuto 让 DescribeRequestShape 自己按字段名判断协议：
+// 入口中间件在路由分发之前执行，此时还不知道这次会走哪条转发路径。
+const RequestShapeProtocolAuto = "auto"
+
+// describeRequestShapeDetectProtocol 按请求体的标志性字段推断协议（只读字段名，不读内容）。
+func describeRequestShapeDetectProtocol(body []byte) string {
+	switch {
+	case gjson.GetBytes(body, "input").Exists():
+		return "responses"
+	case gjson.GetBytes(body, "contents").Exists():
+		return "gemini"
+	case gjson.GetBytes(body, "messages").Exists():
+		return "chat"
+	default:
+		return "unknown"
+	}
+}
+
 // DescribeRequestShape 从请求体提取不含内容的形状摘要。非法 JSON 时只返回字节数。
 func DescribeRequestShape(body []byte, protocol string) map[string]any {
+	if protocol == RequestShapeProtocolAuto && len(body) > 0 && gjson.ValidBytes(body) {
+		protocol = describeRequestShapeDetectProtocol(body)
+	}
 	shape := map[string]any{
 		"protocol":   protocol,
 		"body_bytes": len(body),
