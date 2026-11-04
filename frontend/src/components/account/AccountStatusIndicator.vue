@@ -274,8 +274,22 @@ const formatScopeName = (scope: string): string => {
     'gemini-2.5-flash-thinking': 'G25FT',
     'gemini-2.5-pro': 'G25P',
     'gemini-2.5-flash-image': 'G25I',
+    // Gemini 4 Argon 系列
+    'gemini-4-argon': 'G4A',
+    'gemini-4-argon-high': 'G4AH',
+    'gemini-4-argon-medium': 'G4AM',
+    'gemini-4-argon-low': 'G4AL',
     // Gemini 3.5 系列
     'gemini-3.5-flash': 'G35F',
+    'gemini-3.5-flash-lite': 'G35FL',
+    // Gemini 3.6 - 3.8 系列
+    'gemini-3.6-flash': 'G36F',
+    'gemini-3.7-flash': 'G37F',
+    'gemini-3.8-flash': 'G38F',
+    'gemini-3.8-flash-high': 'G38FH',
+    'gemini-3.8-flash-medium': 'G38FM',
+    'gemini-3.8-flash-low': 'G38FL',
+    'gemini-3.8-flash-tiered': 'G38F',
     // Gemini 3 系列
     'gemini-3-flash': 'G3F',
     'gemini-3.1-pro-high': 'G3PH',

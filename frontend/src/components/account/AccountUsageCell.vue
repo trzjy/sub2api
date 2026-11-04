@@ -290,9 +290,16 @@
 
       <!-- Usage data from API -->
       <div v-else-if="hasAntigravityQuotaFromAPI" class="space-y-1">
-        <!-- Gemini 3 Pro -->
+        <!-- Gemini 4 Argon / Gemini 3 Pro -->
         <UsageProgressBar
-          v-if="antigravity3ProUsageFromAPI !== null"
+          v-if="antigravity4ArgonUsageFromAPI !== null"
+          :label="t('admin.accounts.usageWindow.gemini4Argon')"
+          :utilization="antigravity4ArgonUsageFromAPI.utilization"
+          :resets-at="antigravity4ArgonUsageFromAPI.resetTime"
+          color="indigo"
+        />
+        <UsageProgressBar
+          v-else-if="antigravity3ProUsageFromAPI !== null"
           :label="t('admin.accounts.usageWindow.gemini3Pro')"
           :utilization="antigravity3ProUsageFromAPI.utilization"
           :resets-at="antigravity3ProUsageFromAPI.resetTime"
@@ -1256,13 +1263,41 @@ const getAntigravityUsageFromAPI = (
   }
 }
 
+// Gemini 4 Argon from API
+const antigravity4ArgonUsageFromAPI = computed(() =>
+  getAntigravityUsageFromAPI([
+    'gemini-4-argon',
+    'gemini-4-argon-high',
+    'gemini-4-argon-medium',
+    'gemini-4-argon-low'
+  ])
+)
+
 // Gemini 3 Pro from API
 const antigravity3ProUsageFromAPI = computed(() =>
   getAntigravityUsageFromAPI(['gemini-3-pro-low', 'gemini-3-pro-high', 'gemini-3-pro-preview'])
 )
 
 // Gemini 3 Flash from API
-const antigravity3FlashUsageFromAPI = computed(() => getAntigravityUsageFromAPI(['gemini-3-flash']))
+const antigravity3FlashUsageFromAPI = computed(() =>
+  getAntigravityUsageFromAPI([
+    'gemini-3-flash',
+    'gemini-3.8-flash',
+    'gemini-3.8-flash-high',
+    'gemini-3.8-flash-medium',
+    'gemini-3.8-flash-low',
+    'gemini-3.8-flash-tiered',
+    'gemini-3.7-flash',
+    'gemini-3.7-flash-high',
+    'gemini-3.7-flash-medium',
+    'gemini-3.7-flash-low',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite',
+    'gemini-2.5-flash'
+  ])
+)
 
 // Gemini Image from API
 const antigravity3ImageUsageFromAPI = computed(() =>
@@ -1272,11 +1307,25 @@ const antigravity3ImageUsageFromAPI = computed(() =>
 // Claude from API (all Claude model variants)
 const antigravityClaudeUsageFromAPI = computed(() =>
   getAntigravityUsageFromAPI([
+    'claude-sonnet-5-5-high',
+    'claude-sonnet-5-5-medium',
+    'claude-sonnet-5-5-low',
+    'claude-opus-5-5-high',
+    'claude-opus-5-5-medium',
+    'claude-opus-5-5-low',
+    'claude-opus-5-5',
+    'claude-sonnet-5-5',
+    'claude-opus-5',
+    'claude-sonnet-5',
     'claude-fable-5-1',
     'claude-fable-5',
-    'claude-sonnet-4-5', 'claude-opus-4-5-thinking',
-    'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-6-thinking',
-    'claude-opus-4-7', 'claude-opus-4-8',
+    'claude-sonnet-4-5',
+    'claude-opus-4-5-thinking',
+    'claude-sonnet-4-6',
+    'claude-opus-4-6',
+    'claude-opus-4-6-thinking',
+    'claude-opus-4-7',
+    'claude-opus-4-8'
   ])
 )
 

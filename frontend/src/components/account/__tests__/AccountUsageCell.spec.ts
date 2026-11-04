@@ -2272,4 +2272,162 @@ describe('AccountUsageCell', () => {
     // CN 余额单元格绝不出现（gemini 被父门能力项排除，不进入 CN 块）
     expect(wrapper.find('[data-test="cn-provider-balance-value"]').exists()).toBe(false)
   })
+
+  // ===== 派发单 AG-QUOTA-04：Gemini 4 Argon / 最新 Flash / Claude 5.5 匹配与展示 =====
+
+  // Done when #1：gemini-4-argon-high 命中 gemini4Argon 进度条（而非旧 gemini3Pro）。
+  it('Antigravity Gemini 4 Argon 系列（gemini-4-argon-high）会渲染 gemini4Argon 进度条', async () => {
+    getUsage.mockResolvedValue({
+      antigravity_quota: {
+        'gemini-4-argon-high': {
+          utilization: 33,
+          reset_time: '2026-04-01T08:00:00Z'
+        }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 1003,
+          platform: 'antigravity',
+          type: 'oauth',
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.gemini4Argon|33|2026-04-01T08:00:00Z')
+  })
+
+  // Done when #1：仅存在 gemini-3-pro 旧模型时仍回退渲染 gemini3Pro 进度条（v-else-if）。
+  it('Antigravity 仅 gemini-3-pro 旧模型时回退渲染 gemini3Pro 进度条', async () => {
+    getUsage.mockResolvedValue({
+      antigravity_quota: {
+        'gemini-3-pro-high': {
+          utilization: 22,
+          reset_time: '2026-04-01T06:00:00Z'
+        }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 1005,
+          platform: 'antigravity',
+          type: 'oauth',
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.gemini3Pro|22|2026-04-01T06:00:00Z')
+    // Argon 进度条不应出现
+    expect(wrapper.text()).not.toContain('admin.accounts.usageWindow.gemini4Argon')
+  })
+
+  // Done when #1：Flash 系列新增模型（gemini-3.8-flash-high / gemini-2.5-flash）命中 gemini3Flash 进度条。
+  it('Antigravity Flash 系列（gemini-3.8-flash-high / gemini-2.5-flash）会渲染 gemini3Flash 进度条', async () => {
+    getUsage.mockResolvedValue({
+      antigravity_quota: {
+        'gemini-3.8-flash-high': {
+          utilization: 61,
+          reset_time: '2026-04-03T10:00:00Z'
+        },
+        'gemini-2.5-flash': {
+          utilization: 48,
+          reset_time: '2026-04-03T11:00:00Z'
+        }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 1006,
+          platform: 'antigravity',
+          type: 'oauth',
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    // 多模型取最高使用率 61，最早 reset_time 10:00
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.gemini3Flash|61|2026-04-03T10:00:00Z')
+  })
+
+  // Done when #1：Claude 5.5 系列（claude-sonnet-5-5 / claude-opus-5-5-high 等）命中 claude 进度条。
+  it('Antigravity Claude 5.5 系列（claude-sonnet-5-5-high / claude-opus-5-5-medium）会渲染 claude 进度条', async () => {
+    getUsage.mockResolvedValue({
+      antigravity_quota: {
+        'claude-sonnet-5-5-high': {
+          utilization: 55,
+          reset_time: '2026-04-02T09:00:00Z'
+        },
+        'claude-opus-5-5-medium': {
+          utilization: 40,
+          reset_time: '2026-04-02T07:00:00Z'
+        }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 1004,
+          platform: 'antigravity',
+          type: 'oauth',
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    // 多模型取最高使用率 55，最早 reset_time 07:00
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.claude|55|2026-04-02T07:00:00Z')
+  })
 })

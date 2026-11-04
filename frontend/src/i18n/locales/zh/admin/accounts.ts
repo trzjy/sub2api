@@ -785,6 +785,7 @@ export default {
         geminiProDaily: 'Pro',
         geminiFlashDaily: 'Flash',
         gemini3Pro: 'G3P',
+        gemini4Argon: 'G4A',
         gemini3Flash: 'G3F',
         gemini3Image: 'G31FI',
         claude: 'Claude',

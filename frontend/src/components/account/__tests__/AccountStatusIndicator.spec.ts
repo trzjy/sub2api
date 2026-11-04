@@ -395,6 +395,35 @@ describe('AccountStatusIndicator', () => {
 
   // D-FE-001 用例 2：真实限流条目（有 rate_limited_at + 未来 rate_limit_reset_at、
   // 无 reason）→ 徽章照常渲染（回归保护）。
+  it('Gemini 4 Argon 系列模型限流时显示 G4AH 短别名', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          id: 12,
+          name: 'ag-g4a-1',
+          platform: 'antigravity',
+          type: 'oauth',
+          extra: {
+            model_rate_limits: {
+              'gemini-4-argon-high': {
+                rate_limited_at: '2026-03-15T00:00:00Z',
+                rate_limit_reset_at: '2099-03-15T00:00:00Z'
+              }
+            }
+          }
+        })
+      },
+      global: {
+        stubs: {
+          Icon: true
+        }
+      }
+    })
+
+    expect(wrapper.text()).toContain('G4AH')
+    expect(wrapper.text()).not.toContain('gemini-4-argon-high')
+  })
+
   it('真实限流条目（无 reason，reset 在未来）→ 徽章照常渲染', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {
