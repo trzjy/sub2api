@@ -1066,6 +1066,63 @@ func (s *CursorExecutionService) resumeModelChangedOutcome(
 	}
 }
 
+// CursorResumeRequestRebuildReason 表示续轮请求与已登记会话对不上（历史/工具声明/配置），
+// 而客户端带了可独立重建的完整历史：按"另开一局"处置（2026-11-04 裁定）。
+const CursorResumeRequestRebuildReason = GatewayFailureReason("cursor_resume_request_rebuild")
+
+// resumeMismatchOutcome 决定"续轮请求内容与已登记会话对不上"该怎么办。
+//
+// 背景：`history_mismatch` / `config_changed` / `tool_set_changed` 原本一律 400。它们想挡的
+// 是同一件真威胁——客户端同时跑两个模型/两套工具时把 call_id 串了台。但这个威胁真正靠的
+// 是结果侧校验（call_id 归属、结果类型、结果完整性）与会话锁，不是"逐字节比对历史"。
+// 而逐字节比对必然被客户端合法的历史管理（裁剪正文、多回一条结果、续轮少声明一个工具）
+// 打成假错误，且**没有自愈**：第一次对不上之后，客户端重试只会带上更多历史，越试越对不上。
+// 2026-11-04 生产实测：12 小时内 123 次 CUR-RES-04，29 个会话里 25 个连续失败 3 次以上。
+//
+// 处置与 a66fc8bf7（换模型）同一条：只要客户端正文里带着可独立重建的完整历史，就终结
+// 旧会话、按本请求正文另开一局（同号优先，账号没坏不排除）。旧会话已终结 ⇒ 旧 call_id
+// 永远灌不进新局，防串号目的照样达成，用户不用看红字。
+//
+// 判据拿不到（probe 缺失）或历史不完整（如 Responses 只给 previous_response_id）时保持
+// 原 400：不能在"历史未知"的情况下重开，那才是真的丢上下文。
+func (s *CursorExecutionService) resumeMismatchOutcome(
+	ctx context.Context,
+	record *cursorSessionRecord,
+	ticket *CursorResumeTicket,
+	account *Account,
+	denyReason string,
+	fallback error,
+) error {
+	var accountID int64
+	if account != nil {
+		accountID = account.ID
+	}
+	model := ""
+	if record != nil {
+		model = record.spec.requestedModel
+	}
+	if ticket == nil || ticket.probe == nil || !ticket.probe.Plan.historySupportsRebuild() {
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "session_resume_rebuild_skipped", model,
+			zap.String("session_id", cursorSessionIDOf(record)),
+			zap.String("deny_reason", denyReason),
+			zap.String("skip_reason", "history_incomplete"))
+		return fallback
+	}
+	cursorPhaseLog(ctx, zapcore.InfoLevel, "session_resume_request_rebuild", model,
+		zap.String("session_id", cursorSessionIDOf(record)),
+		zap.String("batch_id", ticket.BatchID),
+		zap.String("deny_reason", denyReason),
+		zap.Int64("account_id", accountID))
+	// 与换模型重建同一条收尾路径：同步 finalize 并等终结完成，避免重建撞上旧会话残留。
+	s.settleDeadSessionBeforeRebuild(record)
+	return &CursorResumeRebuildError{
+		DeadAccountID: accountID,
+		Reason:        CursorResumeRequestRebuildReason,
+		KeepAccount:   true,
+		Err:           fallback,
+	}
+}
+
 // cursorSessionIDOf 取会话 ID（nil 安全，只用于日志）。
 func cursorSessionIDOf(record *cursorSessionRecord) string {
 	if record == nil {
@@ -7399,10 +7456,15 @@ func (s *CursorExecutionService) ResumeCursorSession(
 	}
 	if storedConfig != nil && !storedConfig.Equal(plan.config) {
 		// 硬组（模型 + 工具声明/schema）变了就是**另一次生成**：上游 wire 契约、工具模式、
-		// 计费口径都不再是同一件事，必须拒绝。拒绝前先落痕，把"究竟是哪一组、哪一项"
-		// 钉在日志里（此前这里只有一个 config_changed，线上无法区分根因）。
+		// 计费口径都不再是同一件事。拒绝前先落痕，把"究竟是哪一组、哪一项"钉在日志里
+		// （此前这里只有一个 config_changed，线上无法区分根因）。
+		//
+		// 2026-11-04：拒绝本身不再直接回 400。生产实测残留 CUR-RES-04 的 36 次里，全部是
+		// "续轮比首轮少声明一个工具"（22→21 / 24→23）——客户端自己的工具集在变，不是串号。
+		// 有完整历史就另开一局（防串号由结果侧 call_id 归属 + 类型 + 完整性校验承担）。
 		cursorLogResumeConfigHardMismatch(ctx, record, storedConfig, exposed, plan)
-		return nil, newCursorResumeError(http.StatusBadRequest, "config_changed", ErrCursorResumeConfigChanged)
+		return nil, s.resumeMismatchOutcome(ctx, record, ticket, account, "config_changed",
+			newCursorResumeError(http.StatusBadRequest, "config_changed", ErrCursorResumeConfigChanged))
 	}
 	// 软组（system 文本 / 采样参数）**只留痕不拒绝**：这两组是客户端每轮重新拼出来的
 	// 字节——system 里带环境快照、工具说明会变，重试时 thinking/温度字段会丢。逐字节比对
@@ -7410,7 +7472,10 @@ func (s *CursorExecutionService) ResumeCursorSession(
 	// 完整性）挡住。留着当闸门等于拿大量正常用户的失败去拦一个不存在的威胁。
 	cursorLogResumeConfigDrift(ctx, record, storedSystem, storedSampling, plan)
 	if !cursorToolSetEqual(exposed, plan.tools) {
-		return nil, newCursorResumeError(http.StatusBadRequest, "tool_set_changed", ErrCursorResumeToolSetChanged)
+		// 工具集合变了：同样是"客户端这一轮声明的东西跟首轮不同"，有完整历史就另开一局
+		// （与 config_changed 同一处置口径，理由见 resumeMismatchOutcome）。
+		return nil, s.resumeMismatchOutcome(ctx, record, ticket, account, "tool_set_changed",
+			newCursorResumeError(http.StatusBadRequest, "tool_set_changed", ErrCursorResumeToolSetChanged))
 	}
 	// previous_response_id 精确指向当前批时可**仅携带本批结果**省略历史；
 	// 一旦提供重复历史就必须整段匹配（不把任意短前缀当完整历史）。
@@ -7445,7 +7510,11 @@ func (s *CursorExecutionService) ResumeCursorSession(
 			zap.String("history_item_types_request", plan.history.TraceString()),
 			zap.String("history_first_divergence", storedHistory.FirstDivergence(plan.history)),
 			zap.String("protocol", string(ticket.Protocol)))
-		return nil, newCursorResumeError(http.StatusBadRequest, "history_mismatch", ErrCursorResumeHistoryMismatch)
+		// 2026-11-04：历史对不上不再直接回 400。生产实测这类拒绝**没有自愈能力**——第一次
+		// 对不上之后客户端重试只会带上更多历史（它自己记下的 tool_result），于是永久卡死
+		// （29 个会话里 25 个连错 3 次以上）。有完整历史就按本请求正文另开一局。
+		return nil, s.resumeMismatchOutcome(ctx, record, ticket, account, "history_mismatch",
+			newCursorResumeError(http.StatusBadRequest, "history_mismatch", ErrCursorResumeHistoryMismatch))
 	}
 	// 骨架一致、但全链不一致 = 客户端裁剪/省略了 assistant 可见正文。这是**正常**行为，
 	// 必须放行；同时留一条可统计的痕迹，让"正文裁剪到底有多普遍"在线上可观测，
