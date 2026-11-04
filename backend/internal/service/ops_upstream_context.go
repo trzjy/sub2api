@@ -466,6 +466,12 @@ type OpsUpstreamErrorEvent struct {
 	Message string `json:"message,omitempty"`
 	Detail  string `json:"detail,omitempty"`
 
+	// RequestShape 是本请求的结构快照（只有计数与开关：消息条数、工具数、图片数、
+	// max_tokens、字节数等，绝不含正文/工具名），用于诊断那些"上游只回一句泛化 400"
+	// 的失败（典型：`inference request is invalid`，生产 7 天 525 次）。
+	// 由 appendOpsUpstreamError 自动从 gin context 填充，调用方无需关心。
+	RequestShape map[string]any `json:"request_shape,omitempty"`
+
 	// SkipMonitoring is request-local rule state. It is intentionally excluded
 	// from persisted attempt JSON. The logger consults it only when this event is
 	// the final client-visible failure; recovered attempts remain provider-health
@@ -502,6 +508,11 @@ func appendOpsUpstreamError(c *gin.Context, ev OpsUpstreamErrorEvent) {
 	if ev.Message != "" {
 		ev.Message = sanitizeUpstreamErrorMessage(ev.Message)
 	}
+	// 请求形状由请求入口统一挂载，这里自动带上：任何一条上游错误事件都能回答
+	// "这次请求长什么样"，不必在每个失败分支重复拼装。
+	if ev.RequestShape == nil {
+		ev.RequestShape = OpsRequestShapeFrom(c)
+	}
 
 	var existing []*OpsUpstreamErrorEvent
 	if v, ok := c.Get(OpsUpstreamErrorsKey); ok {
@@ -513,6 +524,10 @@ func appendOpsUpstreamError(c *gin.Context, ev OpsUpstreamErrorEvent) {
 	evCopy := ev
 	existing = append(existing, &evCopy)
 	c.Set(OpsUpstreamErrorsKey, existing)
+
+	// 泛化拒绝（"inference request is invalid" 这类）额外落一条带请求形状的日志：
+	// 上游不给字段信息，只能靠形状反推成因（2026-11-04）。
+	logGenericUpstreamRejection(evCopy)
 
 	checkSkipMonitoringForUpstreamEvent(c, &evCopy)
 }

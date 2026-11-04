@@ -75,6 +75,10 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
 
+	// 2026-11-04：挂请求形状（只有计数/开关，不含正文），供上游泛化 400 的诊断用
+	// （典型 `inference request is invalid`：上游不给字段信息，只能靠请求形状反推）。
+	SetOpsRequestShape(c, DescribeRequestShape(body, "chat"))
+
 	// 1. Parse minimal fields needed for routing/billing
 	originalModel := gjson.GetBytes(body, "model").String()
 	if originalModel == "" {
@@ -205,6 +209,10 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	// 国产厂商（deepseek/kimi/zhipu/minimax）越界的 max_tokens 直接夹到 [1, 65536]，
 	// 避免上游回 400 "field MaxTokens invalid"（生产 7 天 62 次）。
 	upstreamBody = clampCNUpstreamMaxTokens(account, upstreamBody)
+
+	// 形状以「实际发出去的那份」为准：上面这一串桥接/夹取/改写之后重新采一次，
+	// 否则日志里的 max_tokens 还是用户原始值，和上游真正收到的对不上（2026-11-04）。
+	SetOpsRequestShape(c, DescribeRequestShape(upstreamBody, "chat"))
 
 	logger.L().Debug("openai chat_completions raw: forwarding without protocol conversion",
 		zap.Int64("account_id", account.ID),

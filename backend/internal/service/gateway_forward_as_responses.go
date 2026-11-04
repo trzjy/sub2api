@@ -40,6 +40,9 @@ func (s *GatewayService) ForwardAsResponses(
 	defer func() { cf524ResolveGuardOutcome(c, ctx, fwdErr) }()
 	startTime := time.Now()
 
+	// 2026-11-04：挂请求形状（计数/开关，不含正文），供上游泛化 400 的诊断用。
+	SetOpsRequestShape(c, DescribeRequestShape(body, "responses"))
+
 	// Cursor 账号前置分流：Responses 入站先转 Chat Completions，再走契约 0.1
 	// 文本桥接；响应按 Responses 协议回桥。usage 由 handler 既有链计费一次。
 	if isCursorAccount(account) {

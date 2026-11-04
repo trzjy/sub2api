@@ -38,6 +38,9 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	defer func() { cf524ResolveGuardOutcome(c, ctx, fwdErr) }()
 	startTime := time.Now()
 
+	// 2026-11-04：挂请求形状（计数/开关，不含正文），供上游泛化 400 的诊断用。
+	SetOpsRequestShape(c, DescribeRequestShape(body, "chat"))
+
 	// Cursor 账号前置分流：入站已是 Chat Completions 形状，**解码一次**成类型化
 	// 请求后交唯一执行部件（出站为 Cursor 原生协议，不能落到 Anthropic 通用路径）。
 	// 返回的 *ForwardResult 由 handler 既有 RecordUsage 链计费一次，执行层不二次计费。

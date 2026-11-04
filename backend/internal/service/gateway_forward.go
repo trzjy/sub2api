@@ -150,6 +150,10 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	if parsed == nil {
 		return nil, fmt.Errorf("parse request: empty request")
 	}
+	// 2026-11-04：挂请求形状（计数/开关，不含正文），供上游泛化 400 的诊断用。
+	if c != nil {
+		SetOpsRequestShape(c, DescribeRequestShape(parsed.Body.Bytes(), "messages"))
+	}
 	// Cursor 账号前置分流：出站为 Cursor 原生协议，绝不能落到 Anthropic 通用路径。
 	if isCursorAccount(account) {
 		return s.forwardCursorAsAnthropicMessages(ctx, c, account, parsed)
@@ -175,6 +179,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				}
 			}
 		}
+		// 改写后刷新请求形状：日志要能回答"上游收到的到底是什么样"（2026-11-04）。
+		SetOpsRequestShape(c, DescribeRequestShape(parsed.Body.Bytes(), "messages"))
 		if err := validateClaude55Request(parsed.Body.Bytes(), validationModel); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": gin.H{"type": "invalid_request_error", "message": err.Error()}})
 			return nil, err
