@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -68,4 +70,51 @@ func isSensenovaBaseURL(raw string) bool {
 		return false
 	}
 	return strings.EqualFold(parsed.Hostname(), "token.sensenova.cn")
+}
+
+// SensenovaContextWindowCap 是商汤 token.sensenova.cn 官方物理上下文窗口上限（256K，262144 tokens）。
+// 请求 input tokens 超过此值时上游无法产出完整响应或直接挂死/空流。
+const SensenovaContextWindowCap int = 262144
+
+// sensenovaAccountIDs 从候选账号集合中挑出上游 base_url 命中商汤（token.sensenova.cn）的账号 id。
+// 纯函数：用构造 Account 即可单测，不连 DB；不改变任何既有选号/调度行为。
+func sensenovaAccountIDs(accounts []Account) map[int64]struct{} {
+	excluded := make(map[int64]struct{})
+	for i := range accounts {
+		if isSensenovaBaseURL(accounts[i].GetOpenAIBaseURL()) {
+			excluded[accounts[i].ID] = struct{}{}
+		}
+	}
+	return excluded
+}
+
+// SensenovaExcludedIDs 列举该分组可调度候选中商汤账号 id 集合（派发单 SENSENOVA-256K-01）。
+//
+// 语义：复用 OpenAIGatewayService.listSchedulableAccounts 的候选列举，返回
+// GetOpenAIBaseURL() 命中 isSensenovaBaseURL 的账号 id。仅供 handler 侧选号前
+// 大请求动态排除使用，不改任何既有选号/调度函数签名与行为；列举候选失败返回 error，
+// 由调用方失败开放处理。
+func (s *OpenAIGatewayService) SensenovaExcludedIDs(ctx context.Context, groupID *int64, platform string) (map[int64]struct{}, error) {
+	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	if err != nil {
+		return nil, err
+	}
+	return sensenovaAccountIDs(accounts), nil
+}
+
+// SensenovaEmptyStreamReason 标记商汤上游返回合法空流（HTTP 200 但正文 0 字符）。
+const SensenovaEmptyStreamReason GatewayFailureReason = "sensenova_empty_stream"
+
+// failoverSensenovaEmptyStream 处理商汤上游返回合法空流的情形：请求被上游承接且
+// 响应头正常（HTTP 200），但剥离 reasoning 后可见正文为 0 字符（outputStarted 仍为
+// false）。这是商汤逼近 256K 物理上限时的典型表现（reasoning 被网关剥离后正文空）。
+// 返回 NextAccountRetry 让 handler 自动把当前商汤账号并入 failedAccountIDs 并换号；
+// 不走账号冷却（该账号对更小请求仍健康），Scope 设为请求级瞬时。
+func (s *OpenAIGatewayService) failoverSensenovaEmptyStream(ctx context.Context, account *Account, upstreamModel string) *UpstreamFailoverError {
+	return &UpstreamFailoverError{
+		StatusCode:        http.StatusOK,
+		NextAccountAction: NextAccountRetry,
+		Scope:             GatewayFailureScopeRequest,
+		Reason:            SensenovaEmptyStreamReason,
+	}
 }

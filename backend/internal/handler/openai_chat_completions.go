@@ -235,6 +235,15 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 	}
 
+	// 商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）：超大请求（>256K）
+	// 将商汤账号并入 failedAccountIDs，自动顺延至备用大容量上游；≤256K 或估算失败
+	// （失败开放）时不排除任何账号。
+	if adds := h.applySensenovaSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
+
 	for {
 		if failoverClientGone(c) {
 			return

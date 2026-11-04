@@ -199,3 +199,75 @@ func TestForwardAnthropicViaRawChatCompletions_SensenovaClampsMaxTokens(t *testi
 	require.Error(t, err)
 	require.Equal(t, int64(128000), gjson.GetBytes(officialUpstream.lastBody, "max_completion_tokens").Int())
 }
+
+func TestSensenovaContextWindowCap(t *testing.T) {
+	t.Parallel()
+	// 商汤官方物理上下文窗口上限：256K = 262144 tokens（派发单 SENSENOVA-256K-01）。
+	require.Equal(t, 262144, SensenovaContextWindowCap)
+}
+
+func TestSensenovaAccountIDs(t *testing.T) {
+	t.Parallel()
+
+	sensenovaDS := sensenovaTestAccount(PlatformDeepseek, 416)
+	sensenovaKimi := sensenovaTestAccount(PlatformKimi, 418)
+	other := &Account{
+		ID:       200,
+		Name:     "openai",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://api.openai.com",
+		},
+	}
+
+	got := sensenovaAccountIDs([]Account{*sensenovaDS, *sensenovaKimi, *other})
+	require.Len(t, got, 2, "only sensenova upstream accounts must be excluded")
+	require.Contains(t, got, int64(416))
+	require.Contains(t, got, int64(418))
+	require.NotContains(t, got, int64(200), "non-sensenova account must not be excluded")
+}
+
+func TestSensenovaExcludedIDs(t *testing.T) {
+	t.Parallel()
+
+	sensenova := sensenovaTestAccount(PlatformDeepseek, 416)
+	other := &Account{
+		ID:       200,
+		Name:     "openai",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://api.openai.com",
+		},
+	}
+	// 通过调度快照注入候选账号，复用 listSchedulableAccounts 的既有候选列举路径。
+	svc := &OpenAIGatewayService{
+		schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{snapshotAccounts: []*Account{sensenova, other}}},
+	}
+
+	ids, err := svc.SensenovaExcludedIDs(context.Background(), nil, PlatformOpenAI)
+	require.NoError(t, err)
+	require.Len(t, ids, 1, "exactly one sensenova account must be excluded")
+	_, ok := ids[416]
+	require.True(t, ok, "sensenova account 416 must be excluded")
+	_, ok = ids[200]
+	require.False(t, ok, "non-sensenova account 200 must not be excluded")
+}
+
+func TestSensenovaEmptyStreamFailover(t *testing.T) {
+	t.Parallel()
+
+	svc := &OpenAIGatewayService{}
+	account := sensenovaTestAccount(PlatformDeepseek, 416)
+	fe := svc.failoverSensenovaEmptyStream(context.Background(), account, "sensenova-6.8-flash-lite")
+	require.NotNil(t, fe)
+	// 必须触发换号重试（handler 会把当前商汤账号并入 failedAccountIDs）。
+	require.True(t, fe.ShouldRetryNextAccount(), "empty stream must trigger next-account failover")
+	require.Equal(t, SensenovaEmptyStreamReason, fe.Reason)
+	require.Equal(t, GatewayFailureScopeRequest, fe.Scope)
+	require.False(t, fe.RequestScopedTransient, "must switch account, not retry on same account")
+	require.False(t, fe.RetryableOnSameAccount, "must switch account, not retry on same account")
+}

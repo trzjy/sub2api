@@ -754,6 +754,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 	}
 
+	// 商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）：超大请求（>256K）
+	// 将商汤账号并入 failedAccountIDs，自动顺延至备用大容量上游；≤256K 或估算失败
+	// （失败开放）时不排除任何账号。
+	if adds := h.applySensenovaSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
+
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
 		// be drained after a disconnect. Re-check the client context before every
@@ -1532,6 +1541,15 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
 	// 估算模型用映射后的 estimateModel（与 applyTierRouting 同口径）。
 	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
+
+	// 商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）：超大请求（>256K）
+	// 将商汤账号并入 failedAccountIDs，自动顺延至备用大容量上游；≤256K 或估算失败
+	// （失败开放）时不排除任何账号。
+	if adds := h.applySensenovaSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body); len(adds) > 0 {
 		for id := range adds {
 			failedAccountIDs[id] = struct{}{}
 		}
@@ -3316,6 +3334,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
 	if adds := h.applySelfHostSizeExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
+
+	// 商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）：超大请求（>256K）
+	// 将商汤账号并入 failedAccountIDs，自动顺延至备用大容量上游；≤256K 或估算失败
+	// （失败开放）时不排除任何账号。
+	if adds := h.applySensenovaSizeExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage); len(adds) > 0 {
 		for id := range adds {
 			failedAccountIDs[id] = struct{}{}
 		}
@@ -5429,6 +5456,64 @@ func (h *OpenAIGatewayHandler) applySelfHostSizeExclusion(
 	if err != nil {
 		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
 		reqLog.Warn("selfhost_size_exclusion_list_failed",
+			zap.Int64("group_id", groupIDVal),
+			zap.String("platform", platform),
+			zap.Int("estimated_input_tokens", estimated),
+			zap.Error(err))
+		return empty
+	}
+	return excluded
+}
+
+// applySensenovaSizeExclusion 实现商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）。
+//
+// 在选号循环之前调用：先估算本次请求的 input token（input-only），估算失败 → 失败开放
+// 返回空集（绝不因估算失败拦请求）；估算 <= service.SensenovaContextWindowCap（262144，
+// 即 256K）视为中小请求，参与调度、不排除任何商汤账号；估算 > 262144 视为超大请求，
+// 调用 GatewayService.SensenovaExcludedIDs 取该分组可调度候选中的商汤账号并入
+// failedAccountIDs，请求自动顺延至 Priority 更高的备用大容量上游（GoAIChat 500K / 星思 1000K）。
+//
+// 失败开放兜底：列举候选或上下文异常一律按空集处理（不缩小候选），与既有选号路径
+// 零行为变化。返回集合由调用方并入各函数自持的 failedAccountIDs。
+//
+// 注：platform 为 SensenovaExcludedIDs 列举候选所需的平台维度；ctx/groupID/model/
+// protocol/body 与 applySelfHostSizeExclusion 同来源。
+func (h *OpenAIGatewayHandler) applySensenovaSizeExclusion(
+	ctx context.Context,
+	reqLog *zap.Logger,
+	groupID *int64,
+	platform string,
+	model string,
+	protocol service.TierRoutingRequestProtocol,
+	body []byte,
+) map[int64]struct{} {
+	empty := make(map[int64]struct{})
+	groupIDVal := int64(0)
+	if groupID != nil {
+		groupIDVal = *groupID
+	}
+
+	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
+	if err != nil {
+		// 估算失败 → 失败开放：不排除任何账号，仅告警，绝不因估算失败拦请求。
+		reqLog.Warn("sensenova_size_exclusion_estimate_failed",
+			zap.Int64("group_id", groupIDVal),
+			zap.String("platform", platform),
+			zap.String("model", model),
+			zap.Error(err))
+		return empty
+	}
+
+	if estimated <= service.SensenovaContextWindowCap {
+		// 中小请求（≤256K）：参与调度，不排除商汤账号（Priority 1 低成本优势保留）。
+		return empty
+	}
+
+	// 超大请求（>256K）：取该分组可调度候选中的商汤账号 id，交由调用方并入 failedAccountIDs。
+	excluded, err := h.gatewayService.SensenovaExcludedIDs(ctx, groupID, platform)
+	if err != nil {
+		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
+		reqLog.Warn("sensenova_size_exclusion_list_failed",
 			zap.Int64("group_id", groupIDVal),
 			zap.String("platform", platform),
 			zap.Int("estimated_input_tokens", estimated),

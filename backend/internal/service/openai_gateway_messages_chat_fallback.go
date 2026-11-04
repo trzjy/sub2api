@@ -686,6 +686,14 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		}, newOpenAIUpstreamStreamReadError(streamErr)
 	}
 
+	// 商汤空流兜底（派发单 SENSENOVA-256K-01 第 3 项）：上游 HTTP 200 正常结束、客户端
+	// 未断连，但剥离 reasoning 后可见正文为 0 字符（outputStarted 仍为 false）。这是商汤
+	// 逼近 256K 物理上限时的典型空流，触发换号重试，避免向客户端回显空回复。
+	if scan.Err == nil && !clientDisconnected && c.Request.Context().Err() == nil && !outputStarted && isSensenovaBaseURL(account.GetOpenAIBaseURL()) {
+		logger.L().Warn("openai messages chat fallback: sensenova returned empty stream without visible text, triggering failover")
+		return nil, s.failoverSensenovaEmptyStream(context.Background(), account, upstreamModel)
+	}
+
 	// Finalize: close open blocks + emit message_delta/message_stop.
 	finalEvents := apicompat.FinalizeChatCompletionsAnthropicStream(anthropicState)
 	// 写侧：Finalize 会补宣布「上游 tool name 迟到/缺失」的 tool_use，这些 id 不
