@@ -108,7 +108,7 @@ func TestSchedulerCacheSnapshotPreservesMaskedInputBand(t *testing.T) {
 	require.True(t, hit)
 	require.Len(t, got, 1)
 
-	parsed, ok := service.MaskedInputBandOf(&got[0])
+	parsed, ok := service.MaskedInputBandOf(got[0])
 	require.True(t, ok, "快照投影必须保留 masked_input_band，否则大档专用账号被误判为小档账号")
 	require.Equal(t, 10000, parsed.Min)
 	require.Equal(t, 150000, parsed.Max)
@@ -118,7 +118,7 @@ func TestSchedulerCacheSnapshotPreservesMaskedInputBand(t *testing.T) {
 	// 人设注入与思考净化读的是同一个账号对象：投影丢掉它们，伪装就只剩"改个模型名"。
 	require.Equal(t, "你是 Kimi。", got[0].Extra["identity_prompt"],
 		"快照投影必须保留 identity_prompt，否则账号级人设永远注不进上游请求")
-	require.True(t, service.IsReasoningStrippedAccount(&got[0]),
+	require.True(t, service.IsReasoningStrippedAccount(got[0]),
 		"快照投影必须保留 strip_reasoning_content，否则思考过程里的身份线索不会被剥离")
 }
 

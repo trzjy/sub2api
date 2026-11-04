@@ -809,19 +809,14 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 }
 
 func openAIAccountEligibleForTierPool(ctx context.Context, account *Account) bool {
-	pool := tierRoutingPoolFromContext(ctx)
-	if pool == "" {
-		return true
-	}
-	masked := IsIdentityMaskedAccount(account)
-	switch pool {
-	case tierRoutingPoolMasked:
-		return masked
-	case tierRoutingPoolUpstream:
-		return !masked
-	default:
-		return true
-	}
+	// 判定逻辑单点在 tierRoutingPoolAdmitsAccount：本函数只负责从请求 ctx 取分档状态，
+	// 不再自己维护一份 switch。历史上这里独立写了一份 pool 判定，新增池常量时容易漏改，
+	// 漏改的后果是未知池走 default 放行 → 大档被伪装号抢走。
+	return tierRoutingPoolAdmitsAccount(
+		tierRoutingPoolFromContext(ctx),
+		tierRoutingEstimatedInputFromContext(ctx),
+		account,
+	)
 }
 
 func codeBuddyTierPlatformMismatchAllowed(account *Account, platform string, requestedModel string, groupID int64, group *Group, tierPool string) bool {

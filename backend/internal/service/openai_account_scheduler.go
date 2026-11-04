@@ -2216,33 +2216,13 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 		}
 		// unknown：放行（保守），等待管理端检测收敛为 known。
 	}
-	// 分层路由候选约束：小档仅伪装线小档池（extra.mask_upstream_identity=true 且未声明
-	// masked_input_band），大档仅伪装线大档池（声明了区间且本次估算 input 命中区间），
-	// 星思池要求非伪装。空值不约束（非分层目标模型零行为变化）。换号不出档——同档内换号
-	// 走既有熔断/重试，跨档只发生在 selectAccountWithScheduler 的整池无可用重试（告警）。
-	if req.TierRoutingPool != "" {
-		masked := IsIdentityMaskedAccount(account)
-		band, hasBand := MaskedInputBandOf(account)
-		switch req.TierRoutingPool {
-		case tierRoutingPoolMasked:
-			// 小档：只收未声明区间的伪装账号。声明了区间的大档专用账号（如 kiro 中转）
-			// 一律退出小档——1 万以下的小活由不花钱的 qwen 伪装线承接更划算，让 kiro
-			// 的积分只烧在 1 万以上的大请求上。
-			if !masked || hasBand {
-				return false, "tier_pool_excluded"
-			}
-		case tierRoutingPoolMaskedLarge:
-			// 大档：只收声明了区间、且本次估算 input 落在区间内的伪装账号。区间上界由
-			// 账号自己声明（例如 kiro 侧受 20 万上下文约束，声明到 15 万），本次估算超
-			// 出上界的账号在这一档直接出局，请求顺势跨到星思池。
-			if !masked || !hasBand || !band.Contains(req.TierRoutingEstimatedInput) {
-				return false, "tier_pool_excluded"
-			}
-		case tierRoutingPoolUpstream:
-			if masked {
-				return false, "tier_pool_excluded"
-			}
-		}
+	// 分层路由候选约束：小档仅伪装线小档池，大档仅伪装线大档池（按账号声明的区间
+	// masked_input_band 收窄），星思池要求非伪装；空值不约束（非分层目标模型零行为变化）。
+	// 判定逻辑单点在 tierRoutingPoolAdmitsAccount，不在此处重写 switch。
+	// 换号不出档——同档内换号走既有熔断/重试，跨档只发生在 selectAccountWithScheduler
+	// 的整池无可用重试（告警）。
+	if !tierRoutingPoolAdmitsAccount(req.TierRoutingPool, req.TierRoutingEstimatedInput, account) {
+		return false, "tier_pool_excluded"
 	}
 	// 分组利润控制：不合格账号在候选过滤与抢槽后终检阶段即被排除，
 	// 排序/评分/粘性/熔断只在合格账号之间工作；named reason 进入 filter stats。
@@ -2609,6 +2589,37 @@ func tierRoutingPoolFromContext(ctx context.Context) string {
 		return tierRoutingPoolMaskedLarge
 	default:
 		return ""
+	}
+}
+
+// tierRoutingPoolAdmitsAccount 是分层路由「池准入」的唯一判定实现。候选过滤
+// （isAccountRequestCompatibleReason）与资格复核（openAIAccountEligibleForTierPool）
+// 共用本函数——两处各写一份 switch 必然漂移：新增 masked_large 时若只改一处，另一处
+// 会把它当未知池放行，表现为大档被伪装号抢走 / 大档号被挤回小档。
+//
+// estimatedInputTokens 取本次请求的估算 input（与分档判定同源），用于大档区间判定。
+// 空 pool 表示未装分档门，一律放行（零行为变化）。
+func tierRoutingPoolAdmitsAccount(pool string, estimatedInputTokens int, account *Account) bool {
+	if pool == "" {
+		return true
+	}
+	masked := IsIdentityMaskedAccount(account)
+	switch pool {
+	case tierRoutingPoolMasked:
+		// 小档：只收未声明区间的大档号退出小档——1 万以下的小活由不花钱的 qwen
+		// 伪装线承接更划算，让 kiro 的积分只烧在 1 万以上的大请求上。
+		_, hasBand := MaskedInputBandOf(account)
+		return masked && !hasBand
+	case tierRoutingPoolMaskedLarge:
+		// 大档：只收声明了区间、且本次估算 input 落在区间内的伪装账号。区间上界由账号
+		// 自己声明（kiro 侧受 20 万上下文约束，声明到 15 万），超出上界的账号在这一档
+		// 直接出局，请求顺势跨到星思池。
+		band, hasBand := MaskedInputBandOf(account)
+		return masked && hasBand && band.Contains(estimatedInputTokens)
+	case tierRoutingPoolUpstream:
+		return !masked
+	default:
+		return true
 	}
 }
 

@@ -63,13 +63,22 @@ func TestResponseIdentityMaskDecouplesTierRouting(t *testing.T) {
 	})
 
 	t.Run("分层池准入判定与基准账号一致", func(t *testing.T) {
-		// 大档（upstream 池）：新开关账号与基准账号都必须入选（它仍是上游供给账号）。
+		// 大档首轮落伪装线大档池（masked_large，要求声明 masked_input_band）：两个账号都
+		// 不是大档伪装号，必须一致落选；它们是大档整池无可用、跨档之后星思池的供给。
 		bigCtx := WithTierRouting(context.Background(), TierRoutingBig, tierRoutingBigEstimate)
 		require.Equal(t, openAIAccountEligibleForTierPool(bigCtx, plain),
 			openAIAccountEligibleForTierPool(bigCtx, decoupled),
-			"响应侧净化开关不得改变大档池准入判定")
-		require.True(t, openAIAccountEligibleForTierPool(bigCtx, decoupled),
-			"该账号仍应留在大档上游池（保住档位供给）")
+			"响应侧净化开关不得改变大档首轮池准入判定")
+		require.False(t, openAIAccountEligibleForTierPool(bigCtx, decoupled),
+			"未声明区间的普通账号不进大档伪装池")
+
+		// 估算超过伪装线大档上限 → 直回星思池，此时两者都必须一致入选（档位供给不能丢）。
+		upstreamCtx := WithTierRouting(context.Background(), TierRoutingBig, TierRoutingMaskedInputCeilingTokens+1)
+		require.Equal(t, openAIAccountEligibleForTierPool(upstreamCtx, plain),
+			openAIAccountEligibleForTierPool(upstreamCtx, decoupled),
+			"响应侧净化开关不得改变星思池准入判定")
+		require.True(t, openAIAccountEligibleForTierPool(upstreamCtx, decoupled),
+			"超过伪装线大档上限时该账号必须留在星思池（保住档位供给）")
 
 		// 小档（masked 池）：新开关账号与基准账号都必须落选（都不是伪装线账号）。
 		smallCtx := WithTierRouting(context.Background(), TierRoutingSmall, tierRoutingSmallEstimate)
