@@ -392,16 +392,23 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		}
 	}
 
+	// 掩码回写门在整条流里恒定，循环外算一次即可。
+	maskGated := rawChatCompletionsMaskGate(account, originalModel, upstreamModel)
+	// 非掩码账号的同族改名：从首帧解析出上游回显名后确定改写目标，后续帧复用，
+	// 避免每帧都做一次别名族解析。
+	var familyFrom, familyTo string
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		refusalDetector.ObserveSSELine(line)
-		if payload, ok := extractOpenAISSEDataLine(line); ok {
-			trimmedPayload := strings.TrimSpace(payload)
+		ssePayload, hasSSEData := extractOpenAISSEDataLine(line)
+		if hasSSEData {
+			trimmedPayload := strings.TrimSpace(ssePayload)
 			terminal.ObserveDataLine(trimmedPayload)
 			if trimmedPayload != "[DONE]" {
-				observer.ObserveOpenAI([]byte(payload), strings.TrimSpace(gjson.Get(payload, "type").String()))
-				usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(payload)
-				if u := extractCCStreamUsage(payload); u != nil {
+				observer.ObserveOpenAI([]byte(ssePayload), strings.TrimSpace(gjson.Get(ssePayload, "type").String()))
+				usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(ssePayload)
+				if u := extractCCStreamUsage(ssePayload); u != nil {
 					usage = *u
 				}
 				if firstTokenMs == nil && !usageOnlyChunk {
@@ -415,8 +422,19 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 
 		// 掩码账号身份回写：observer 已看到原始上游回显（计费/观察链不变），
 		// 此处只把客户端可见行的回显模型改写回客户端请求名。
-		if rawChatCompletionsMaskGate(account, originalModel, upstreamModel) {
+		if maskGated {
 			line = s.replaceModelInSSELine(line, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
+		} else if familyTo != "" {
+			// 非掩码账号：只做同族改名（-1017 → flash），跨族映射保持上游真实名。
+			line = s.replaceModelInSSELine(line, familyFrom, familyTo)
+		} else if hasSSEData {
+			// 首帧定名：拿到上游回显的模型名，算出归一目标后立即改写本帧。
+			if echoed := strings.TrimSpace(gjson.Get(ssePayload, "model").String()); echoed != "" {
+				if normalized := NormalizeModelName(echoed); normalized != echoed {
+					familyFrom, familyTo = echoed, normalized
+					line = s.replaceModelInSSELine(line, familyFrom, familyTo)
+				}
+			}
 		}
 
 		// 思考过程剥离：开启 strip_reasoning_content 的账号，删除客户端可见行里的
@@ -547,6 +565,28 @@ func rawChatCompletionsMaskGate(account *Account, originalModel, upstreamModel s
 		(originalModel != upstreamModel || NormalizeModelName(originalModel) != upstreamModel)
 }
 
+// normalizeResponseModelFamily 把客户端可见响应体里上游回显的模型名归一成同一别名族的
+// 站内统一写法（deepseek-v4.1-flash-1017 → deepseek-v4.1-flash）。
+//
+// 与掩码账号身份回写的区别：掩码回写会把回显改成"客户端请求的名字"，而这里只做同族
+// 改名，绝不把 A 模型说成 B 模型——族外名字原样保留，所以跨族映射（例如 flash 被映射
+// 到 deepseek-v4-pro）仍如实显示上游真实模型，不误导用户。
+//
+// 为什么非掩码账号也需要它（用户裁定）：上游 deepseek-v4.1-flash-1017 这类历史写法必须
+// 归一成 deepseek-v4.1-flash 再提供给下游。此前只有掩码账号才改写，普通 APIKey 账号
+// 原样透传，用户会在响应里看见 -1017（生产实测：账号 239 回显 deepseek-v4.1-flash-1017、
+// 406 号回显 deepseek-v4-pro）。
+func (s *OpenAIGatewayService) normalizeResponseModelFamily(body []byte) []byte {
+	echoed := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if echoed == "" || NormalizeModelName(echoed) == echoed {
+		// 无需归一（或名称为空）时零改动，保持字节不变。
+		return body
+	}
+	// from=to=回显名：replaceModelInResponseBody 内部会把 toModel 归一，
+	// 并把候选集限定在该名字的别名族内，正好是"同族改名"语义。
+	return s.replaceModelInResponseBody(body, echoed, echoed)
+}
+
 // ensureOpenAIChatStreamUsage 确保 raw Chat Completions 流式请求会让上游返回 usage。
 // usage 也会继续向下游透传，支持级联代理和下游计费系统。
 func ensureOpenAIChatStreamUsage(body []byte) ([]byte, error) {
@@ -629,6 +669,10 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 	// 此处只把客户端可见响应体的回显模型改写回客户端请求名。
 	if rawChatCompletionsMaskGate(account, originalModel, upstreamModel) {
 		respBody = s.replaceModelInResponseBody(respBody, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
+	} else {
+		// 非掩码账号也要做同族改名，避免把 deepseek-v4.1-flash-1017 这类上游历史
+		// 写法直接透给用户（用户裁定）。
+		respBody = s.normalizeResponseModelFamily(respBody)
 	}
 
 	// 思考过程剥离：删除客户端可见响应体里的 reasoning_content。
@@ -762,6 +806,8 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsRawCC(
 	// 此处只把客户端可见聚合体的回显模型改写回客户端请求名。
 	if rawChatCompletionsMaskGate(account, originalModel, upstreamModel) {
 		ccBytes = s.replaceModelInResponseBody(ccBytes, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
+	} else {
+		ccBytes = s.normalizeResponseModelFamily(ccBytes)
 	}
 
 	// 思考过程剥离：删除客户端可见聚合体里的 reasoning_content。

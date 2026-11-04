@@ -48,3 +48,45 @@ func TestResponseModelNameNormalizedForClient(t *testing.T) {
 		require.Contains(t, got, `"model":"deepseek-v4-pro"`)
 	})
 }
+
+// TestNormalizeResponseModelFamilyForAllAccounts 锁死：**普通（非掩码）账号**的响应
+// 也必须做同族改名。
+//
+// 生产实证（2026-11-04）：客服号 239 的映射链是
+// deepseek-v4.1-flash → deepseek-v4.1-flash-1017，上游回显 -1017；raw chat 路径的
+// 改写门只看掩码账号（rawChatCompletionsMaskGate），普通账号原样透传，用户就在响应里
+// 看见了 deepseek-v4.1-flash-1017，与归一化裁定冲突。
+func TestNormalizeResponseModelFamilyForAllAccounts(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	const upstream = "deepseek-v4.1-flash-1017"
+	const canonical = "deepseek-v4.1-flash"
+
+	t.Run("ordinary_account_family_rewritten", func(t *testing.T) {
+		body := []byte(`{"model":"` + upstream + `","choices":[{"message":{"content":"ok"}}]}`)
+		got := string(svc.normalizeResponseModelFamily(body))
+		require.Contains(t, got, `"model":"`+canonical+`"`)
+		require.NotContains(t, got, upstream)
+	})
+
+	// 跨族映射必须如实显示上游真实模型：把 deepseek-v4-pro 说成 deepseek-v4.1-flash
+	// 会误导用户（那是两个不同模型）。同族改名只对同一族的名字生效。
+	t.Run("cross_family_left_truthful", func(t *testing.T) {
+		body := []byte(`{"model":"deepseek-v4-pro","choices":[]}`)
+		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body)))
+	})
+
+	t.Run("already_canonical_untouched", func(t *testing.T) {
+		body := []byte(`{"model":"` + canonical + `","choices":[]}`)
+		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body)))
+	})
+
+	t.Run("no_model_field_untouched", func(t *testing.T) {
+		body := []byte(`{"choices":[]}`)
+		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body)))
+	})
+
+	t.Run("non_json_untouched", func(t *testing.T) {
+		body := []byte(`not json at all`)
+		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body)))
+	})
+}
