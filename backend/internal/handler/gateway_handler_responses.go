@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"context"
 	"errors"
 	"net/http"
@@ -80,7 +81,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	bindRequestedReasoningEffort(c, body, reqModel)
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.gatewayService)
 	if !compositeTargetPlatformResolved(c, apiKey, reqModel, h.gatewayService) {
-		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
+		h.responsesErrorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(infraerrors.ModelNotInGroup, reqModel))
 		return
 	}
 	if rejectSystemOneOnlyPlatform(c, apiKey, h.responsesErrorResponse) {

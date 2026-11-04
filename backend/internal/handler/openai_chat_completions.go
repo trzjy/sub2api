@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,6 +32,26 @@ func syncStreamStartedIfResponseCommitted(c *gin.Context, streamStarted *bool) {
 	if c.Writer.Written() {
 		*streamStarted = true
 	}
+}
+
+// applyTierRoutingFailOpen 封装分层路由的 Fail-Open 语义（派发单 CARD-06）。
+// applyTierRouting 仅在 token 估算失败时返回 error；此时不阻断用户请求、不回 400，
+// 保留基础 context 按原路径正常转发。门控查询失败等路径在 applyTierRouting 内已回落
+// baseCtx 并返回 nil error，本封装对其无副作用（tierCtx == baseCtx）。
+func (h *OpenAIGatewayHandler) applyTierRoutingFailOpen(
+	c *gin.Context,
+	reqLog *zap.Logger,
+	routingModel, estimateModel string,
+	protocol service.TierRoutingRequestProtocol,
+	body []byte,
+	gateOpen func(string) (bool, error),
+) context.Context {
+	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, routingModel, estimateModel, protocol, body, gateOpen)
+	if err != nil {
+		reqLog.Warn("openai_chat_completions.kimi_tier_estimate_failed", zap.Error(err))
+		return c.Request.Context()
+	}
+	return tierCtx
 }
 
 // ChatCompletions handles OpenAI Chat Completions API requests.
@@ -93,7 +114,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel, h.coreGatewayService) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
+		h.errorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(infraerrors.ModelNotInGroup, reqModel))
 		return
 	}
 	if cappedBody, changed, err := applyOpenAIReasoningEffortPolicyForRequest(c, apiKey, body); err != nil {
@@ -219,12 +240,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	gateOpen := func(m string) (bool, error) {
 		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
 	}
-	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, forwardModel, forwardModel, service.TierRoutingProtocolChatCompletions, body, gateOpen)
-	if err != nil {
-		reqLog.Warn("openai_chat_completions.kimi_tier_estimate_failed", zap.Error(err))
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.TierRoutingEstimateFailed)
-		return
-	}
+	// 分层路由 Fail-Open（派发单 CARD-06）：token 预估失败不应阻断用户请求，
+	// 不回 400，打 Warn 日志并保留基础 context 按原路径正常转发。
+	tierCtx := h.applyTierRoutingFailOpen(c, reqLog, forwardModel, forwardModel, service.TierRoutingProtocolChatCompletions, body, gateOpen)
 	c.Request = c.Request.WithContext(tierCtx)
 
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号

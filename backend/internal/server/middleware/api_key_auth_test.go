@@ -1501,6 +1501,184 @@ func TestAPIKeyAuthQuotaErrorKeepsLegacyFormatOutsideResponses(t *testing.T) {
 	requireAPIKeyAuthError(t, w, "API_KEY_QUOTA_EXHAUSTED", "API key 额度已用完")
 }
 
+func TestAPIKeyAuthSubscriptionValidationErrorDoesNotLeakStruct(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 验证订阅验证错误不再把 Go 调试结构体（error: code=429 reason="DAILY_LIMIT_EXCEEDED"）
+	// 直接写回下游，而是映射为固定中文文案 + 稳定 code。
+	limit := 1.0
+	group := &service.Group{
+		ID:               42,
+		Name:             "sub",
+		Status:           service.StatusActive,
+		Hydrated:         true,
+		SubscriptionType: service.SubscriptionTypeSubscription,
+	}
+	user := &service.User{
+		ID:          7,
+		Role:        service.RoleUser,
+		Status:      service.StatusActive,
+		Balance:     10,
+		Concurrency: 3,
+	}
+	apiKey := &service.APIKey{
+		ID:     100,
+		UserID: user.ID,
+		Key:    "test-key",
+		Status: service.StatusActive,
+		User:   user,
+		Group:  group,
+	}
+	apiKey.GroupID = &group.ID
+
+	apiKeyRepo := &stubApiKeyRepo{
+		getByKey: func(ctx context.Context, key string) (*service.APIKey, error) {
+			if key != apiKey.Key {
+				return nil, service.ErrAPIKeyNotFound
+			}
+			clone := *apiKey
+			return &clone, nil
+		},
+	}
+
+	now := time.Now()
+	baseSub := func() *service.UserSubscription {
+		return &service.UserSubscription{
+			ID:                 55,
+			UserID:             user.ID,
+			GroupID:            group.ID,
+			Status:             service.SubscriptionStatusActive,
+			ExpiresAt:          now.Add(24 * time.Hour),
+			DailyWindowStart:   &now,
+			WeeklyWindowStart:  &now,
+			MonthlyWindowStart: &now,
+			DailyUsageUSD:      0,
+			WeeklyUsageUSD:     0,
+			MonthlyUsageUSD:    0,
+		}
+	}
+
+	tests := []struct {
+		name       string
+		setupGroup func()
+		setupSub   func(*service.UserSubscription)
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "daily limit exceeded -> 429 USAGE_LIMIT_EXCEEDED",
+			setupGroup: func() { group.DailyLimitUSD = &limit },
+			setupSub:   func(s *service.UserSubscription) { s.DailyUsageUSD = 10 },
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "USAGE_LIMIT_EXCEEDED",
+		},
+		{
+			name:       "weekly limit exceeded -> 429 USAGE_LIMIT_EXCEEDED",
+			setupGroup: func() { group.WeeklyLimitUSD = &limit },
+			setupSub:   func(s *service.UserSubscription) { s.WeeklyUsageUSD = 10 },
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "USAGE_LIMIT_EXCEEDED",
+		},
+		{
+			name:       "monthly limit exceeded -> 429 USAGE_LIMIT_EXCEEDED",
+			setupGroup: func() { group.MonthlyLimitUSD = &limit },
+			setupSub:   func(s *service.UserSubscription) { s.MonthlyUsageUSD = 10 },
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "USAGE_LIMIT_EXCEEDED",
+		},
+		{
+			name:       "subscription expired -> 403 SUBSCRIPTION_EXPIRED",
+			setupGroup: func() {},
+			setupSub:   func(s *service.UserSubscription) { s.ExpiresAt = now.Add(-24 * time.Hour) },
+			wantStatus: http.StatusForbidden,
+			wantCode:   "SUBSCRIPTION_EXPIRED",
+		},
+		{
+			name:       "suspended subscription -> 403 SUBSCRIPTION_INVALID",
+			setupGroup: func() {},
+			setupSub:   func(s *service.UserSubscription) { s.Status = service.SubscriptionStatusSuspended },
+			wantStatus: http.StatusForbidden,
+			wantCode:   "SUBSCRIPTION_INVALID",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			group.DailyLimitUSD = nil
+			group.WeeklyLimitUSD = nil
+			group.MonthlyLimitUSD = nil
+			tt.setupGroup()
+			sub := baseSub()
+			tt.setupSub(sub)
+			subscriptionRepo := &stubUserSubscriptionRepo{
+				getActive: func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
+					if userID != sub.UserID || groupID != sub.GroupID {
+						return nil, service.ErrSubscriptionNotFound
+					}
+					clone := *sub
+					return &clone, nil
+				},
+				updateStatus:   func(ctx context.Context, subscriptionID int64, status string) error { return nil },
+				activateWindow: func(ctx context.Context, id int64, dailyStart, periodicStart time.Time) error { return nil },
+				resetDaily:     func(ctx context.Context, id int64, start time.Time) error { return nil },
+				resetWeekly:    func(ctx context.Context, id int64, start time.Time) error { return nil },
+				resetMonthly:   func(ctx context.Context, id int64, start time.Time) error { return nil },
+			}
+			cfg := &config.Config{RunMode: config.RunModeStandard}
+			apiKeyService := service.NewAPIKeyService(apiKeyRepo, nil, nil, nil, nil, nil, cfg)
+			subscriptionService := service.NewSubscriptionService(nil, subscriptionRepo, nil, nil, cfg)
+			router := newAuthTestRouter(apiKeyService, subscriptionService, cfg)
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/t", nil)
+			req.Header.Set("x-api-key", apiKey.Key)
+			router.ServeHTTP(w, req)
+
+			require.Equal(t, tt.wantStatus, w.Code)
+			require.Contains(t, w.Body.String(), tt.wantCode)
+
+			// 关键回归点：不得泄漏 Go 调试结构体（error: code=... reason=...）。
+			require.NotContains(t, w.Body.String(), "error: code=")
+			require.NotContains(t, w.Body.String(), "reason=")
+			require.NotContains(t, w.Body.String(), "DAILY_LIMIT_EXCEEDED")
+			require.NotContains(t, w.Body.String(), "WEEKLY_LIMIT_EXCEEDED")
+			require.NotContains(t, w.Body.String(), "MONTHLY_LIMIT_EXCEEDED")
+
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			require.NotEmpty(t, resp.Message, "下游文案不应为空")
+			// 文案必须是友好的中文固定串，而非英文调试信息。
+			require.NotContains(t, resp.Message, "exceeded")
+		})
+	}
+}
+
+func TestResolveSubscriptionValidationErrorMapping(t *testing.T) {
+	// 直接对纯函数做映射断言，确保各 sentinel 走对分支。
+	status, code, message := resolveSubscriptionValidationError(service.ErrDailyLimitExceeded)
+	require.Equal(t, http.StatusTooManyRequests, status)
+	require.Equal(t, "USAGE_LIMIT_EXCEEDED", code)
+	require.NotContains(t, message, "exceeded")
+
+	status, code, message = resolveSubscriptionValidationError(service.ErrWeeklyLimitExceeded)
+	require.Equal(t, http.StatusTooManyRequests, status)
+	require.Equal(t, "USAGE_LIMIT_EXCEEDED", code)
+
+	status, code, message = resolveSubscriptionValidationError(service.ErrMonthlyLimitExceeded)
+	require.Equal(t, http.StatusTooManyRequests, status)
+	require.Equal(t, "USAGE_LIMIT_EXCEEDED", code)
+
+	status, code, message = resolveSubscriptionValidationError(service.ErrSubscriptionExpired)
+	require.Equal(t, http.StatusForbidden, status)
+	require.Equal(t, "SUBSCRIPTION_EXPIRED", code)
+	require.Equal(t, infraerrors.SubscriptionInvalid, message)
+
+	status, code, message = resolveSubscriptionValidationError(errors.New("unknown subscription error"))
+	require.Equal(t, http.StatusForbidden, status)
+	require.Equal(t, "SUBSCRIPTION_INVALID", code)
+	require.Equal(t, infraerrors.SubscriptionInvalid, message)
+}
+
 func newAuthTestRouter(apiKeyService *service.APIKeyService, subscriptionService *service.SubscriptionService, cfg *config.Config) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(apiKeyService, subscriptionService, cfg)))

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -62,7 +63,7 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 	reqModel := strings.TrimSpace(modelResult.String())
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel, h.coreGatewayService) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", pkgerrors.ModelNotSupportedByComposite)
+		h.errorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(pkgerrors.ModelNotInGroup, reqModel))
 		return
 	}
 
@@ -239,7 +240,7 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	// composite+grok 在路由层已分流到 GrokCountTokens，这里可达的目标平台是
 	// openai 与 CN 供应商；CN 账号由 ForwardCountTokensAsAnthropic 本地估算。
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel, h.coreGatewayService) {
-		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", pkgerrors.ModelNotSupportedByComposite)
+		h.anthropicErrorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(pkgerrors.ModelNotInGroup, reqModel))
 		return
 	}
 	routingModel := service.NormalizeOpenAICompatRequestedModel(reqModel)

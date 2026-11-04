@@ -188,16 +188,23 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 				subscription = refreshed
 				_, err = subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
 			}
-			if err != nil {
-				status := 403
-				if errors.Is(err, service.ErrDailyLimitExceeded) ||
-					errors.Is(err, service.ErrWeeklyLimitExceeded) ||
-					errors.Is(err, service.ErrMonthlyLimitExceeded) {
-					status = 429
-				}
-				abortWithGoogleError(c, status, err.Error())
-				return
+		if err != nil {
+			status := 403
+			message := err.Error()
+			switch {
+			case errors.Is(err, service.ErrDailyLimitExceeded):
+				status = 429
+				message = infraerrors.SubscriptionDailyLimit
+			case errors.Is(err, service.ErrWeeklyLimitExceeded):
+				status = 429
+				message = infraerrors.SubscriptionWeeklyLimit
+			case errors.Is(err, service.ErrMonthlyLimitExceeded):
+				status = 429
+				message = infraerrors.SubscriptionMonthlyLimit
 			}
+			abortWithGoogleError(c, status, message)
+			return
+		}
 
 			c.Set(string(ContextKeySubscription), subscription)
 		} else {

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"context"
 	"errors"
 	"net/http"
@@ -82,7 +83,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		routingModel = resolvedModel
 	}
 	if !compositeTargetPlatformAllowed(c, apiKey, requestModel, h.coreGatewayService, service.PlatformOpenAI) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
+		h.errorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(infraerrors.ModelNotInGroup, requestModel))
 		return
 	}
 

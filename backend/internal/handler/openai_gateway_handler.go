@@ -510,7 +510,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel, h.coreGatewayService) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
+		// 复合分组不支持该模型：收敛为 404 model_not_found + 统一 ModelNotInGroup 中文文案。
+		h.errorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(infraerrors.ModelNotInGroup, reqModel))
 		return
 	}
 	if cappedBody, changed, err := applyOpenAIReasoningEffortPolicyForRequest(c, apiKey, body); err != nil {
@@ -740,11 +741,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, forwardModel, forwardModel, service.TierRoutingProtocolResponses, body, gateOpen)
 	if err != nil {
+		// 分层路由估算失败不阻断请求：Fail-Open 仅告警并继续原路径转发（派发单 CARD-07）。
 		reqLog.Warn("openai.responses.kimi_tier_estimate_failed", zap.Error(err))
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.TierRoutingEstimateFailed)
-		return
+	} else {
+		c.Request = c.Request.WithContext(tierCtx)
 	}
-	c.Request = c.Request.WithContext(tierCtx)
 
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
@@ -1408,7 +1409,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel, h.coreGatewayService) {
-		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
+		// 复合分组不支持该模型：收敛为 404 model_not_found + 统一 ModelNotInGroup 中文文案。
+		h.anthropicErrorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(infraerrors.ModelNotInGroup, reqModel))
 		return
 	}
 	bindOpenAIReasoningEffortPolicyForMessagesRequest(c, apiKey, body)
@@ -1531,11 +1533,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	}
 	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, routingModel, estimateModel, service.TierRoutingProtocolMessages, body, gateOpen)
 	if err != nil {
+		// 分层路由估算失败不阻断请求：Fail-Open 仅告警并继续原路径转发（派发单 CARD-07）。
 		reqLog.Warn("openai_messages.kimi_tier_estimate_failed", zap.Error(err))
-		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.TierRoutingEstimateFailed, streamStarted)
-		return
+	} else {
+		c.Request = c.Request.WithContext(tierCtx)
 	}
-	c.Request = c.Request.WithContext(tierCtx)
 
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
@@ -3325,11 +3327,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 	tierCtx, err := applyTierRouting(c, ctx, reqLog, wsForwardModel, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage, gateOpen)
 	if err != nil {
+		// 分层路由估算失败不关连接：Fail-Open 仅告警并继续原路径转发（派发单 CARD-07）。
 		reqLog.Warn("openai.websocket.kimi_tier_estimate_failed", zap.Error(err))
-		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.TierRoutingEstimateFailed)
-		return
+	} else {
+		ctx = tierCtx
 	}
-	ctx = tierCtx
 
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。

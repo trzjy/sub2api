@@ -44,6 +44,11 @@ const (
 	PlatformDailyQuota        = "该平台今日用量配额已用完，请稍后重试或联系管理员提升配额"
 	PlatformWeeklyQuota       = "该平台本周用量配额已用完，请稍后重试或联系管理员提升配额"
 	PlatformMonthlyQuota      = "该平台本月用量配额已用完，请稍后重试或联系管理员提升配额"
+	// 订阅口径的日/周/月使用额度上限（写入订阅哨兵错误稳定 code 不变，仅换 message）。
+	// 与平台口径的 Platform*Quota 区分锚点：本族锚点为订阅自身用量窗口耗尽。
+	SubscriptionDailyLimit    = "当前订阅今日使用额度已达上限，请明日重试"
+	SubscriptionWeeklyLimit   = "当前订阅本周使用额度已达上限，请下周重试"
+	SubscriptionMonthlyLimit  = "当前订阅本月使用额度已达上限，请下月重试"
 
 	// 并发/排队。
 	GatewayQueueFull    = "当前排队请求已满，请稍后重试"
@@ -63,7 +68,9 @@ const (
 	ImageConcurrencyLimitReached = "图片生成并发已达上限，请稍后重试"
 
 	// 请求侧/配置边界（调用方用模型名做 Sprintf）。
-	ModelNotInGroup = "模型 %s 不在当前分组支持范围内，请检查模型名称或联系管理员"
+	// 2026-11-04 CARD-01：去甩锅口径——不再写"请检查模型名称"（甩给用户），改为地道中文，
+	// 既说明分组不支持该模型，也覆盖"分组暂未配置可用通道"的情形，并指向管理员。
+	ModelNotInGroup = "当前分组不支持模型 %s，或暂未配置可用通道，请联系管理员"
 	// ModelRetiredSubscription 为 GPT-5.5 等已从 Codex（ChatGPT 登录方式）退役的模型在
 	// 分组内有账号但无模型支持时的专属文案（上游 v0.2.18 引入 HasRetiredSubscriptionModel
 	// 判定；本仓库按二期中文化口径落中文）。责任归属=上游渠道策略退役，动作=换模型或换上游。
@@ -138,6 +145,9 @@ const (
 	RequestBodyParseFailed            = "请求体解析失败"
 	RequestBodyTooLargeFormat         = "请求体过大，上限为 %s"
 	ModelRequired                     = "缺少 model 字段"
+	// ModelNotSupportedByComposite：CARD-01 保留的废弃别名（deprecated alias）。
+	// 历史调用方仍可能引用，故保留常量但不再新增引用；新文案统一走
+	// ModelNotInGroup。禁止删除，避免破坏既有引用方编译。
 	ModelNotSupportedByComposite      = "该模型不被复合分组支持"
 	ModelNotSupportedOnChatCompletio  = "该模型不支持 Chat Completions 端点"
 	ReasoningEffortPolicyFailed       = "应用推理力度策略失败"

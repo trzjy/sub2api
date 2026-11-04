@@ -224,7 +224,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 	if !compositeTargetPlatformResolved(c, apiKey, reqModel, h.gatewayService) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", pkgerrors.ModelNotSupportedByComposite)
+		h.errorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(pkgerrors.ModelNotInGroup, reqModel))
 		return
 	}
 	if rejectSystemOneOnlyPlatform(c, apiKey, h.errorResponse) {
@@ -2573,7 +2573,7 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 		return
 	}
 	if !compositeTargetPlatformResolved(c, apiKey, parsedReq.Model, h.gatewayService) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", pkgerrors.ModelNotSupportedByComposite)
+		h.errorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(pkgerrors.ModelNotInGroup, parsedReq.Model))
 		return
 	}
 	if rejectSystemOneOnlyPlatform(c, apiKey, h.errorResponse) {

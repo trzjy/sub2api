@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"context"
 	"errors"
 	"net/http"
@@ -74,7 +75,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
 	if !compositeTargetPlatformAllowed(c, apiKey, reqModel, h.coreGatewayService, service.PlatformOpenAI) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
+		h.errorResponse(c, http.StatusNotFound, "model_not_found", fmt.Sprintf(infraerrors.ModelNotInGroup, reqModel))
 		return
 	}
 	reqLog = reqLog.With(zap.String("model", reqModel))

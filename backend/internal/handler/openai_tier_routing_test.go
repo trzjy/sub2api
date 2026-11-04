@@ -120,7 +120,7 @@ func TestTierRoutingApplyRoutingTargetModelGateOpen(t *testing.T) {
 	}{
 		{"small_below", "hello world", "small"},
 		{"small_above_old_threshold", repeatWords(1500), "small"},
-		{"big_above", repeatWords(2500), "big"},
+		{"big_above", repeatWords(3500), "big"},
 	}
 	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "glm-5.3-flash"} {
 		for _, tc := range cases {

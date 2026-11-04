@@ -51,12 +51,13 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	// per-model cooldown on one of the remaining candidates does not make "all
 	// available accounts are rate-limited" true.
 	//
-	// Reporting 429 here is actively harmful: retrying can never succeed, and
-	// clients that treat 429 as a rate limit retry hard and swallow the body
-	// (Codex surfaces only "exceeded retry limit, last status: 429"), losing the
-	// one message that names the real problem. It also flips the ops attribution
-	// from a local model-configuration issue to routing capacity, because call
-	// sites gate markOpsRoutingCapacityLimitedIfNoAvailable on ModelNotFound.
+	// Overriding this 404 with the rate-limit verdict is actively harmful:
+	// retrying can never succeed, and clients that treat the rate-limit verdict
+	// as a transient condition retry hard and swallow the body (Codex surfaces
+	// only "exceeded retry limit, last status: 503"), losing the one message
+	// that names the real problem. It also flips the ops attribution from a local
+	// model-configuration issue to routing capacity, because call sites gate
+	// markOpsRoutingCapacityLimitedIfNoAvailable on ModelNotFound.
 	if fallback.ModelNotFound {
 		return fallback
 	}
@@ -69,8 +70,8 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 		return fallback
 	}
 	return noAccountErrorClassification{
-		Status:  http.StatusTooManyRequests,
-		ErrType: "rate_limit_error",
+		Status:  http.StatusServiceUnavailable,
+		ErrType: "service_unavailable",
 		Message: infraerrors.AllAccountsRateLimited,
 	}
 }

@@ -24,13 +24,22 @@ func TestConcurrencyErrorResponse(t *testing.T) {
 		wantMessage string
 	}{
 		{
-			name:        "true concurrency timeout remains rate limit",
+			name:        "account slot concurrency returns 503 service unavailable",
 			err:         &ConcurrencyError{SlotType: "account", IsTimeout: true},
+			slotType:    "user",
+			wantStatus:  http.StatusServiceUnavailable,
+			wantType:    "api_error",
+			wantCode:    gatewayConcurrencyLimitCode,
+			wantMessage: infraerrors.AccountSlotConcurrencyLimit,
+		},
+		{
+			name:        "user slot concurrency keeps 429 rate limit",
+			err:         &ConcurrencyError{SlotType: "user", Limit: 5},
 			slotType:    "user",
 			wantStatus:  http.StatusTooManyRequests,
 			wantType:    "rate_limit_error",
 			wantCode:    gatewayConcurrencyLimitCode,
-			wantMessage: infraerrors.AccountSlotConcurrencyLimit,
+			wantMessage: "您的用户并发请求已达上限（5），请降低并发或稍后重试",
 		},
 		{
 			name:        "full local wait queue has gateway code",

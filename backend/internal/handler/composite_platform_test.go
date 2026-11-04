@@ -28,6 +28,13 @@ func (r *compositeGateAccountRepo) ListSchedulableByGroupID(ctx context.Context,
 	return r.accounts, nil
 }
 
+func (r *compositeGateAccountRepo) ListModelAvailabilityCandidates(ctx context.Context, groupID *int64, platforms []string, includeEmptyModelMapping bool) ([]service.Account, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.accounts, nil
+}
+
 // newCompositeGateGatewayService 以最小结构构造 *service.GatewayService：accountRepo
 // stub + ownership 闭包（由 NewGatewayService 自动将 resolver 的 modelOwnershipResolver
 // 接到 svc.resolveCompositeModelOwnership）。resolver 的 repo 传 nil，使显式路由层级

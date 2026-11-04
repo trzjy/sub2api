@@ -18,6 +18,14 @@ import (
 
 const maxAPIKeyAuthorizationHeaderBytes = service.MaxAPIKeyCredentialBytes + 128
 
+// 订阅用量超限（日/周/月）的下游固定文案。
+//
+// 说明：infraerrors.SubscriptionDailyLimit / SubscriptionWeeklyLimit /
+// SubscriptionMonthlyLimit 尚未在 downstream_messages.go 合并（派发单已列明豁免），
+// 此处按 SSOT 风格在包内临时定义固定中文文案，待上游常量到位后替换引用即可，
+// 禁止在分支里直接拼接 validateErr.Error() 泄漏 Go 调试结构体。
+// 订阅限额超限文案直接引用 infraerrors.Subscription*Limit 常量（CARD-01）
+
 // NewAPIKeyAuthMiddleware 创建 API Key 认证中间件
 func NewAPIKeyAuthMiddleware(apiKeyService *service.APIKeyService, subscriptionService *service.SubscriptionService, cfg *config.Config) APIKeyAuthMiddleware {
 	return APIKeyAuthMiddleware(apiKeyAuthWithSubscription(apiKeyService, subscriptionService, cfg))
@@ -247,18 +255,11 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 					subscription = refreshed
 					_, validateErr = subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
 				}
-				if validateErr != nil {
-					code := "SUBSCRIPTION_INVALID"
-					status := 403
-					if errors.Is(validateErr, service.ErrDailyLimitExceeded) ||
-						errors.Is(validateErr, service.ErrWeeklyLimitExceeded) ||
-						errors.Is(validateErr, service.ErrMonthlyLimitExceeded) {
-						code = "USAGE_LIMIT_EXCEEDED"
-						status = 429
-					}
-					AbortWithError(c, status, code, validateErr.Error())
-					return
-				}
+			if validateErr != nil {
+				status, code, message := resolveSubscriptionValidationError(validateErr)
+				AbortWithError(c, status, code, message)
+				return
+			}
 			} else {
 				// 非订阅模式 或 订阅模式但 subscriptionService 未注入：回退到余额检查
 				if apiKeyBalanceBelowAuthThreshold(apiKey.User.Balance, cfg) {
@@ -339,6 +340,27 @@ func isAsyncImageTaskRead(method, path string) bool {
 		return false
 	}
 	return strings.HasPrefix(path, "/v1/images/tasks/") || strings.HasPrefix(path, "/images/tasks/")
+}
+
+// resolveSubscriptionValidationError 将订阅验证错误映射为（HTTP 状态, 稳定 code, 下游文案）。
+//
+// 关键约束：返回文案一律为固定中文常量，绝不把 validateErr.Error() 直接回写下游，
+// 否则会向用户泄漏 Go 调试结构体（error: code=429 reason="DAILY_LIMIT_EXCEEDED"...）。
+// 三个限额超限共享稳定 code "USAGE_LIMIT_EXCEEDED"（429），过期与其它无效统一为
+// "SUBSCRIPTION_EXPIRED"（403）与 "SUBSCRIPTION_INVALID"（403）。
+func resolveSubscriptionValidationError(err error) (int, string, string) {
+	switch {
+	case errors.Is(err, service.ErrDailyLimitExceeded):
+		return http.StatusTooManyRequests, "USAGE_LIMIT_EXCEEDED", infraerrors.SubscriptionDailyLimit
+	case errors.Is(err, service.ErrWeeklyLimitExceeded):
+		return http.StatusTooManyRequests, "USAGE_LIMIT_EXCEEDED", infraerrors.SubscriptionWeeklyLimit
+	case errors.Is(err, service.ErrMonthlyLimitExceeded):
+		return http.StatusTooManyRequests, "USAGE_LIMIT_EXCEEDED", infraerrors.SubscriptionMonthlyLimit
+	case errors.Is(err, service.ErrSubscriptionExpired):
+		return http.StatusForbidden, "SUBSCRIPTION_EXPIRED", infraerrors.SubscriptionInvalid
+	default:
+		return http.StatusForbidden, "SUBSCRIPTION_INVALID", infraerrors.SubscriptionInvalid
+	}
 }
 
 // GetAPIKeyFromContext 从上下文中获取API key

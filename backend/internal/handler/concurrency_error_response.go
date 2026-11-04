@@ -73,13 +73,13 @@ func concurrencyErrorResponse(err error, slotType string, concurrencyLimitMessag
 		if concurrencyErr.SlotType != "" {
 			slotType = concurrencyErr.SlotType
 		}
-		// account 维度保持英文，绝不套用本文案；仅 user/group 渲染可配文案。
-		if (slotType == "user" || slotType == "group") && strings.TrimSpace(concurrencyLimitMessage) != "" {
+		// 用户/订阅维度并发超限属客户端自身并发 → 429 rate_limit_error；
+		// 账号槽位并发打满属站点供给不足 → 503 api_error（避免客户端死循环重试）。
+		if slotType == "user" || slotType == "group" {
 			return http.StatusTooManyRequests, "rate_limit_error", gatewayConcurrencyLimitCode,
 				renderConcurrencyLimitMessage(concurrencyLimitMessage, slotType, concurrencyErr.Limit)
 		}
-		// account 维度（或非 user/group、或 user/group 未配置可配文案）→ 同走中文语义，不残留英文。
-		return http.StatusTooManyRequests, "rate_limit_error", gatewayConcurrencyLimitCode,
+		return http.StatusServiceUnavailable, "api_error", gatewayConcurrencyLimitCode,
 			renderConcurrencyLimitMessage(concurrencyLimitMessage, slotType, concurrencyErr.Limit)
 	}
 
