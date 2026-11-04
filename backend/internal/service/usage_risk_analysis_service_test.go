@@ -2,13 +2,21 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/enttest"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/stretchr/testify/require"
+
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	_ "modernc.org/sqlite"
 )
 
 // ───────────────────────── 测试桩：UsageRiskRepository ─────────────────────────
@@ -24,39 +32,39 @@ type fakeUsageRiskRepo struct {
 	// updateStatusWithAuditOK 控制 UpdateStatusWithAudit 的返回；为真时记录 entry 到 auditEntries（模拟成功落账）。
 	updateStatusWithAuditOK  bool
 	updateStatusWithAuditErr error
-	auditEntries            []*AuditLog
-	latestRunResult         *UsageRiskRunStatus
-	latestCursorResult      *UsageRiskReconCursor
-	listReportsResult       []UsageRiskReportItem
-	listReportsTotal        int
-	riskSummaryResult       *UsageRiskSummary
-	aggregateHourlyFn       func(dayStart time.Time) []UsageRiskHourAggregate
-	userActiveBucketHoursFn func(userID int64, lookbackStart, reportDay time.Time) []time.Time
-	reconcileCalls          int
-	upsertDeriveCalls       int
-	createRunID             int64
+	auditEntries             []*AuditLog
+	latestRunResult          *UsageRiskRunStatus
+	latestCursorResult       *UsageRiskReconCursor
+	listReportsResult        []UsageRiskReportItem
+	listReportsTotal         int
+	riskSummaryResult        *UsageRiskSummary
+	aggregateHourlyFn        func(dayStart time.Time) []UsageRiskHourAggregate
+	userActiveBucketHoursFn  func(userID int64, lookbackStart, reportDay time.Time) []time.Time
+	reconcileCalls           int
+	upsertDeriveCalls        int
+	createRunID              int64
 
 	// 录制字段（供锁定测试断言副作用顺序与计数）。
-	callOrder                []string // 方法调用名顺序（B/F2 顺序重排断言）
-	createRunCalls           int
-	rebuildHourlyCalls       int
-	invalidateCalls          int // InvalidateOutsideKeySet 调用次数（F4 部分键集不失效断言）
-	completeRunCalls         int
-	updateProgressCalls      int
-	updateProgressHistory    []UsageRiskRunProgress // 进度持久化按调用顺序录制（R8-2b 锁定测试）
-	updateProgressCtxDeadlines []time.Time // F1：每次进度写收到 ctx 的 deadline（证明每写新建 ctx）
-	completeRunCtxDeadlines []time.Time // F1：CompleteRun 收到 ctx 的 deadline
-	completeRunStatus        string
-	completeRunProgress      UsageRiskRunProgress
-	completeRunCtxErr        error // CompleteRun 调用时 ctx.Err()（N/F18 断言收尾 ctx 独立性）
-	invalidatedDays          []time.Time // F：InvalidateOutsideKeySet 传入的 day 参数录制（上界扩展断言）
-	invalidateErr            error
-	invalidateAllCalls       int    // InvalidateAllEffective 调用次数（R13-3：时区迁移单一 SQL 全量失效）
-	invalidateAllErr         error // InvalidateAllEffective 错误注入（迁移失败关闭路径）
-	rebuildHourlyErr         error
-	rebuildHourlyWindows     []struct{ Start, End time.Time } // I：回填窗口录制（含当日、不含次日）
-	listCandidatesResult     []UsageRiskCandidate
-	distinctIPsErr           error
+	callOrder                  []string // 方法调用名顺序（B/F2 顺序重排断言）
+	createRunCalls             int
+	rebuildHourlyCalls         int
+	invalidateCalls            int // InvalidateOutsideKeySet 调用次数（F4 部分键集不失效断言）
+	completeRunCalls           int
+	updateProgressCalls        int
+	updateProgressHistory      []UsageRiskRunProgress // 进度持久化按调用顺序录制（R8-2b 锁定测试）
+	updateProgressCtxDeadlines []time.Time            // F1：每次进度写收到 ctx 的 deadline（证明每写新建 ctx）
+	completeRunCtxDeadlines    []time.Time            // F1：CompleteRun 收到 ctx 的 deadline
+	completeRunStatus          string
+	completeRunProgress        UsageRiskRunProgress
+	completeRunCtxErr          error       // CompleteRun 调用时 ctx.Err()（N/F18 断言收尾 ctx 独立性）
+	invalidatedDays            []time.Time // F：InvalidateOutsideKeySet 传入的 day 参数录制（上界扩展断言）
+	invalidateErr              error
+	invalidateAllCalls         int   // InvalidateAllEffective 调用次数（R13-3：时区迁移单一 SQL 全量失效）
+	invalidateAllErr           error // InvalidateAllEffective 错误注入（迁移失败关闭路径）
+	rebuildHourlyErr           error
+	rebuildHourlyWindows       []struct{ Start, End time.Time } // I：回填窗口录制（含当日、不含次日）
+	listCandidatesResult       []UsageRiskCandidate
+	distinctIPsErr             error
 	userActiveBucketHoursCalls int
 }
 
@@ -248,12 +256,12 @@ var _ UsageRiskRepository = (*fakeUsageRiskRepo)(nil)
 func newTestUsageRiskService(repo UsageRiskRepository) *UsageRiskAnalysisService {
 	fixed := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	return &UsageRiskAnalysisService{
-		repo:      repo,
-		nowFn:     func() time.Time { return fixed },
-		policyFn:  func(context.Context) (UsageRiskPolicy, error) { return UsageRiskPolicy{ListingMinScore: 40}, nil },
+		repo:       repo,
+		nowFn:      func() time.Time { return fixed },
+		policyFn:   func(context.Context) (UsageRiskPolicy, error) { return UsageRiskPolicy{ListingMinScore: 40}, nil },
 		instanceID: "test-instance",
-		interval:  time.Hour,
-		budget:    4 * time.Minute,
+		interval:   time.Hour,
+		budget:     4 * time.Minute,
 	}
 }
 
@@ -429,8 +437,8 @@ func TestUsageRiskGetReport(t *testing.T) {
 	repo := &fakeUsageRiskRepo{
 		getReportDetailResult: &UsageRiskReportDetail{
 			UsageRiskReportItem: UsageRiskReportItem{ReportID: 7, Status: statusUsageRiskOpen},
-			Evidence:           json.RawMessage(`{}`),
-			PolicyVersion:      "1",
+			Evidence:            json.RawMessage(`{}`),
+			PolicyVersion:       "1",
 		},
 	}
 	svc := newTestUsageRiskService(repo)
@@ -454,13 +462,13 @@ func TestUsageRiskGetRiskSummaryErrorState(t *testing.T) {
 	// 失败关闭态：API 不报错，但 Summary.Error 暴露配置失败。
 	fixed := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	svc := &UsageRiskAnalysisService{
-		repo:        &fakeUsageRiskRepo{},
-		nowFn:       func() time.Time { return fixed },
+		repo:         &fakeUsageRiskRepo{},
+		nowFn:        func() time.Time { return fixed },
 		failedClosed: true,
-		failedErr:   errors.New("retention binding violated"),
-		instanceID:  "test",
-		interval:    time.Hour,
-		budget:      4 * time.Minute,
+		failedErr:    errors.New("retention binding violated"),
+		instanceID:   "test",
+		interval:     time.Hour,
+		budget:       4 * time.Minute,
 	}
 	sum, err := svc.GetRiskSummary(context.Background())
 	require.NoError(t, err)
@@ -673,7 +681,7 @@ func TestUsageRiskBuildReportRecordCrossGroupActiveHours(t *testing.T) {
 	dayMap := map[UsageRiskUserGroupKey]*dayAgg{
 		{UserID: 1, GroupID: 2}: {BucketInstants: []time.Time{h1, h2, h3}}, // 3 桶
 		{UserID: 1, GroupID: 3}: {BucketInstants: []time.Time{h3, h4}},     // 2 桶，h3 与分组2共享
-		{UserID: 9, GroupID: 2}: {BucketInstants: []time.Time{h1}},          // 其他用户，不计
+		{UserID: 9, GroupID: 2}: {BucketInstants: []time.Time{h1}},         // 其他用户，不计
 	}
 	c := UsageRiskCandidate{UserID: 1, GroupID: 2, RequestCount: 5}
 	svc := newSvcWithPolicy(&fakeUsageRiskRepo{}, UsageRiskPolicy{Enabled: true, MinDailyRequests: 1})
@@ -704,7 +712,7 @@ func TestUsageRiskHandleTimezoneChangeInvalidates(t *testing.T) {
 func TestUsageRiskRunAnalysisTZChangeFailedClosed(t *testing.T) {
 	policy := UsageRiskPolicy{Enabled: true, RetentionDays: 2}
 	repo := &fakeUsageRiskRepo{
-		latestRunResult: &UsageRiskRunStatus{Status: "completed", HistoryCovered: true, TZName: "America/New_York"},
+		latestRunResult:  &UsageRiskRunStatus{Status: "completed", HistoryCovered: true, TZName: "America/New_York"},
 		invalidateAllErr: errors.New("migration failed"),
 	}
 	svc := newSvcWithPolicy(repo, policy)
@@ -956,3 +964,69 @@ func TestUsageRiskR8_2b_F1FinalizeWritePerWriteFreshContext(t *testing.T) {
 // retry 仍失败（该日保留于列表）+ 近窗循环跳过 → failedBatches 无重复项。
 // 注：实现基于 orchFakeRepo（按日注入候选/失败），见
 // usage_risk_analysis_orchestration_test.go TestUsageRiskR8_2b_F3*。
+
+// ───────────────────────── F4-C 卡C（#3a）锁定测试：软删除跳过 ─────────────────────────
+//
+// 根因（方案 §2.3 + 卡C）：groupRPMLimit / userRPMLimit 用 s.client.Group.Get /
+// s.client.User.Get，ent 默认软删过滤会隐藏软删实体 → 整轮对账抛 "user not found" 中断。
+// 修复：两处 Get 包裹 mixins.SkipSoftDelete(ctx)。
+//
+// 本测试以 in-memory sqlite + enttest 真实迁移构造软删除的用户/分组，覆盖 SkipSoftDelete
+// ctx 传递路径（无需外部 DB、无需 mock ent 客户端）：
+//  1. 反向基线——普通 Get（不带 SkipSoftDelete）读不到软删实体，证明软删是真实的；
+//  2. 核心——svc.userRPMLimit / svc.groupRPMLimit 经内部 SkipSoftDelete 仍读到 rpm_limit。
+func TestUsageRiskRPMLimitSkipsSoftDelete(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires in-memory sqlite migration")
+	}
+
+	dbName := fmt.Sprintf("file:usage_risk_rpm_%d?mode=memory&cache=shared&_fk=1", time.Now().UnixNano())
+	db, err := sql.Open("sqlite", dbName)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec("PRAGMA foreign_keys = ON")
+	require.NoError(t, err)
+
+	drv := entsql.OpenDB(dialect.SQLite, db)
+	client := enttest.NewClient(t, enttest.WithOptions(ent.Driver(drv)))
+	t.Cleanup(func() { _ = client.Close() })
+
+	ctx := context.Background()
+
+	// 构造并软删除一个用户（RpmLimit=123）。DeleteOneID 走 SoftDeleteMixin Hook → 仅置 deleted_at。
+	u, err := client.User.Create().
+		SetEmail(fmt.Sprintf("quota-rpm-%d@example.com", time.Now().UnixNano())).
+		SetPasswordHash("hash").
+		SetRole(RoleUser).
+		SetStatus(StatusActive).
+		SetRpmLimit(123).
+		Save(ctx)
+	require.NoError(t, err)
+	require.NoError(t, client.User.DeleteOneID(u.ID).Exec(ctx), "软删用户须成功（置 deleted_at）")
+
+	// 构造并软删除一个分组（RpmLimit=456）。
+	g, err := client.Group.Create().
+		SetName(fmt.Sprintf("quota-rpm-group-%d", time.Now().UnixNano())).
+		SetRpmLimit(456).
+		Save(ctx)
+	require.NoError(t, err)
+	require.NoError(t, client.Group.DeleteOneID(g.ID).Exec(ctx), "软删分组须成功（置 deleted_at）")
+
+	svc := &UsageRiskAnalysisService{client: client}
+
+	// 反向基线：普通 Get（不带 SkipSoftDelete）读不到软删实体，证明软删是真实生效的，
+	// 因而修复前的 userRPMLimit/groupRPMLimit 会抛 not found。
+	_, baseUserErr := client.User.Get(ctx, u.ID)
+	require.Error(t, baseUserErr, "基线：普通 Get 须读不到软删用户（被软删过滤）")
+	_, baseGroupErr := client.Group.Get(ctx, g.ID)
+	require.Error(t, baseGroupErr, "基线：普通 Get 须读不到软删分组")
+
+	// 核心断言：经 SkipSoftDelete 仍可读到 rpm_limit（修复后整轮对账不再因软删中断）。
+	ul, err := svc.userRPMLimit(ctx, u.ID)
+	require.NoError(t, err, "卡C：软删用户经 SkipSoftDelete 须可读到 rpm_limit，不得 not found")
+	require.Equal(t, 123, ul, "卡C：须读回软删用户 rpm_limit=123")
+
+	gl, err := svc.groupRPMLimit(ctx, g.ID)
+	require.NoError(t, err, "卡C：软删分组经 SkipSoftDelete 须可读到 rpm_limit，不得 not found")
+	require.Equal(t, 456, gl, "卡C：须读回软删分组 rpm_limit=456")
+}

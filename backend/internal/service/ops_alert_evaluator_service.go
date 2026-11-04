@@ -483,8 +483,8 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		if err != nil || availability == nil {
 			return 0, false
 		}
-		if availability.Group == nil {
-			return 0, true
+		if groupID != nil && *groupID > 0 && availability.Group == nil {
+			return 0, false
 		}
 		return float64(availability.Group.AvailableCount), true
 	case "group_available_ratio":
@@ -498,6 +498,9 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		if err != nil || availability == nil {
 			return 0, false
 		}
+		if groupID != nil && *groupID > 0 && availability.Group == nil {
+			return 0, false
+		}
 		return computeGroupAvailableRatio(availability.Group), true
 	case "account_rate_limited_count":
 		if s == nil || s.opsService == nil {
@@ -505,6 +508,9 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		}
 		availability, err := s.opsService.GetAccountAvailability(ctx, platform, groupID)
 		if err != nil || availability == nil {
+			return 0, false
+		}
+		if groupID != nil && *groupID > 0 && availability.Group == nil {
 			return 0, false
 		}
 		return float64(countAccountsByCondition(availability.Accounts, func(acc *AccountAvailability) bool {
@@ -518,6 +524,9 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		if err != nil || availability == nil {
 			return 0, false
 		}
+		if groupID != nil && *groupID > 0 && availability.Group == nil {
+			return 0, false
+		}
 		return float64(countAccountsByCondition(availability.Accounts, func(acc *AccountAvailability) bool {
 			return acc.HasError && acc.TempUnschedulableUntil == nil
 		})), true
@@ -527,6 +536,9 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		}
 		availability, err := s.opsService.GetAccountAvailability(ctx, platform, groupID)
 		if err != nil || availability == nil {
+			return 0, false
+		}
+		if groupID != nil && *groupID > 0 && availability.Group == nil {
 			return 0, false
 		}
 		now := time.Now().UTC()
@@ -544,6 +556,9 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		if err != nil || availability == nil {
 			return 0, false
 		}
+		if groupID != nil && *groupID > 0 && availability.Group == nil {
+			return 0, false
+		}
 		if availability.Group == nil || availability.Group.TotalAccounts <= 0 {
 			return 0, true
 		}
@@ -554,6 +569,9 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		}
 		availability, err := s.opsService.GetAccountAvailability(ctx, platform, groupID)
 		if err != nil || availability == nil {
+			return 0, false
+		}
+		if groupID != nil && *groupID > 0 && availability.Group == nil {
 			return 0, false
 		}
 		total := int64(len(availability.Accounts))
@@ -570,6 +588,9 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		}
 		availability, err := s.opsService.GetAccountAvailability(ctx, platform, groupID)
 		if err != nil || availability == nil {
+			return 0, false
+		}
+		if groupID != nil && *groupID > 0 && availability.Group == nil {
 			return 0, false
 		}
 		return float64(countAccountsByCondition(availability.Accounts, func(acc *AccountAvailability) bool {

@@ -38,6 +38,10 @@ const accountHealthProbeCandidateLimit = 200
 const (
 	// accountHealthProbeRetryInterval 首探失败后的补探间隔（秒级，AC-C1 不动）。
 	accountHealthProbeRetryInterval = 5 * time.Second
+	// accountHealthProbeQuotaRetryInterval 是 429/额度耗尽类停调的补探间隔：额度以小时/自然月
+	// 为周期，5 秒补探只会无意义轰炸上游与 DB 写锁；拉长到 5 分钟，恢复仍由探针自动拉活
+	// （首成功后加速见 runProbeRetryBurst）。
+	accountHealthProbeQuotaRetryInterval = 5 * time.Minute
 	// accountHealthProbeDataPlaneTimeout 单次数据面探测超时。取 45s：上游正常时
 	// 极简探测请求在数秒内返回；故障时快速失败，不必等满客户端链路时长。
 	accountHealthProbeDataPlaneTimeout = 45 * time.Second
@@ -653,6 +657,20 @@ func (p *AccountHealthRecoveryProbeService) probeRetryInterval() time.Duration {
 	return accountHealthProbeRetryInterval
 }
 
+// isQuotaExhaustedTrip 判定一次可探测停调是否属 429/额度耗尽类（慢类，长间隔补探）。
+// 健康熔断仅把 429/500/503/504 计入（openai_apikey_health_breaker.go），401 冷却与
+// oauth401/pool401 的 StatusCode=401 均不属慢类，保持秒级现状。
+func (p *AccountHealthRecoveryProbeService) isQuotaExhaustedTrip(acc *Account) bool {
+	if acc == nil {
+		return false
+	}
+	state, ok := parseHealthBreakerState(acc.TempUnschedulableReason)
+	if !ok || state == nil {
+		return false
+	}
+	return state.StatusCode == http.StatusTooManyRequests
+}
+
 // probeIntervalFromSettings 解析探测 sweep 间隔（AC-C1：旧默认 60s → 15s）。
 // 规则：settings.Probe 未配置或读取失败时回落默认 15s；IntervalSeconds >= 15
 // （经 normalize 已 clamp 到 [15,600]）时采用配置值，否则回落默认 15s。外审实证
@@ -741,15 +759,55 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 			p.clearRetryInFlight(acc.ID)
 		}
 	}()
-	interval := p.probeRetryInterval()
-	for round := 1; len(pending) > 0; round++ {
-		if !p.sleepBeforeProbeRetry(ctx, stopCh, interval) {
-			return
+	// nextAt 维护每个账号的下次探测时间（零值=立即）：429/额度耗尽类失败写入
+	// accountHealthProbeQuotaRetryInterval（5min），其余失败与「首成功后加速」写入
+	// accountHealthProbeRetryInterval（5s，可被测试注入 retryInterval 覆盖）。
+	nextAt := make(map[int64]time.Time, len(pending))
+	stay := make([]*Account, 0, len(pending))
+	stay = append(stay, pending...)
+	round := 0
+	for len(stay) > 0 {
+		round++
+		// 取仍停留账号中最早的非零 nextAt；全为零值（立即）则不睡，直接探测本轮。
+		earliest := time.Time{}
+		hasScheduled := false
+		for _, acc := range stay {
+			if t, ok := nextAt[acc.ID]; ok && !t.IsZero() {
+				hasScheduled = true
+				if earliest.IsZero() || t.Before(earliest) {
+					earliest = t
+				}
+			}
 		}
-		next := make([]*Account, 0, len(pending))
-		for _, acc := range pending {
+		if hasScheduled {
+			// 睡到最早到期时间（sleep 时长取 time.Until(最早到期)）；ctx 取消或 Stop
+			// 触发时 sleepBeforeProbeRetry 立即返回 false，本函数随之强退（不把补探
+			// 等待拖进优雅关闭路径）。
+			if !p.sleepBeforeProbeRetry(ctx, stopCh, time.Until(earliest)) {
+				return
+			}
+		} else {
+			// 本轮全部账号立即探测：仍须尊重 ctx/stop 强退（非阻塞检查，不 sleep）。
 			if ctx.Err() != nil {
 				return
+			}
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
+		}
+
+		now := time.Now()
+		next := make([]*Account, 0, len(stay))
+		for _, acc := range stay {
+			if ctx.Err() != nil {
+				return
+			}
+			// 本轮仅探测已到期账号；未到期者保留到后续轮（其 nextAt 不变）。
+			if t, ok := nextAt[acc.ID]; ok && !t.IsZero() && t.After(now) {
+				next = append(next, acc)
+				continue
 			}
 			// 回读最新账号：补探前必须确认账号仍处于可探测停调态（他实例可能已恢复，
 			// 冷却也可能已到期），且要拿到最新的连续成功计数。
@@ -767,12 +825,6 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 			if st, ok := parseHealthBreakerState(fresh.TempUnschedulableReason); ok && st != nil {
 				attempt = st.ProbeAttempts + 1
 			}
-			logger.L().Info("openai.apikey_health_probe_retry",
-				zap.Int64("account_id", acc.ID),
-				zap.Int("round", round),
-				zap.Int("attempt", attempt),
-				zap.Duration("interval", interval),
-			)
 			// 代际令牌取入队时读到的 until（untils，全精度 time.Time），而非回读的最新
 			// until：若探测期间 until 被他人改写（新停调接管，必写更晚 until），用最新
 			// until 作令牌会误清新停调；用入队令牌则条件清除命中失配、rows==0、保留新停调
@@ -781,11 +833,44 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 			if u, ok := untils[acc.ID]; ok {
 				expectedUntil = u
 			}
-			if p.probeAccountWithReason(ctx, fresh, expectedUntil) {
-				next = append(next, fresh)
+			stillParked := p.probeAccountWithReason(ctx, fresh, expectedUntil)
+
+			// 探测后重读最新 reason，依据本次结果决定该账号下次补探间隔（首成功后加速 /
+			// 429 慢类 5min）：
+			//   - 探测成功且未达恢复阈值：probeAccountWithReason 已把 ConsecutiveSuccesses
+			//     递增回写，重读应见 >0 → 下次 accountHealthProbeRetryInterval（5s，首成功后
+			//     加速确认第二次）；
+			//   - 探测失败：ConsecutiveSuccesses==0，按 isQuotaExhaustedTrip 分类——慢类
+			//     （429）accountHealthProbeQuotaRetryInterval（5min），其余 accountHealthProbeRetryInterval。
+			chosen := p.probeRetryInterval()
+			if stillParked {
+				if reread, rerr := p.accountRepo.GetByID(ctx, acc.ID); rerr == nil && reread != nil {
+					if st, ok := parseHealthBreakerState(reread.TempUnschedulableReason); ok && st != nil {
+						if st.ConsecutiveSuccesses > 0 {
+							chosen = p.probeRetryInterval()
+						} else if p.isQuotaExhaustedTrip(reread) {
+							chosen = accountHealthProbeQuotaRetryInterval
+						} else {
+							chosen = p.probeRetryInterval()
+						}
+					}
+				}
 			}
+			// 日志 interval 字段改为该账号本次实际采用间隔（chosen）。
+			logger.L().Info("openai.apikey_health_probe_retry",
+				zap.Int64("account_id", acc.ID),
+				zap.Int("round", round),
+				zap.Int("attempt", attempt),
+				zap.Duration("interval", chosen),
+			)
+			if !stillParked {
+				// 恢复/被接管：退出队列（不探测，不安排下次）。
+				continue
+			}
+			nextAt[acc.ID] = time.Now().Add(chosen)
+			next = append(next, acc)
 		}
-		pending = next
+		stay = next
 	}
 }
 

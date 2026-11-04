@@ -176,22 +176,22 @@ type UsageRiskUserGroupKey struct {
 
 // UsageRiskHourAggregate 是小时桶聚合事实（§6.1 字段）。
 type UsageRiskHourAggregate struct {
-	UserID               int64
-	GroupID              int64
-	BucketHour           time.Time
-	RequestCount         int
-	InputTokensSum       int64
-	OutputTokensSum      int64
-	CacheReadTokensSum   int64
-	CostUSDSum           float64
-	OccupiedMsSum        int64
+	UserID                int64
+	GroupID               int64
+	BucketHour            time.Time
+	RequestCount          int
+	InputTokensSum        int64
+	OutputTokensSum       int64
+	CacheReadTokensSum    int64
+	CostUSDSum            float64
+	OccupiedMsSum         int64
 	NonWhitelistedUACount int
 }
 
 // UsageRiskRPMLimit 是用户-分组作用域限额输入（适用分组上限，调用方按 checkRPM 语义算好）。
 type UsageRiskRPMLimit struct {
-	UserID   int64
-	GroupID  int64
+	UserID     int64
+	GroupID    int64
 	GroupLimit int // 适用分组上限；0 = 免除分组检查（override=0）→ 不参与贴线
 }
 
@@ -256,7 +256,7 @@ type UsageRiskRunProgress struct {
 	HistoryCovered      bool
 	CandidatesTotal     int  // 本轮累计候选数（L137 台账契约）
 	ConsecutivePartials int  // 连续 partial 计数（completed 重置 0，否则上一轮+1；M）
-	R1ReevalPending     bool  // 覆盖翻转后待重评 R1 标记（E）
+	R1ReevalPending     bool // 覆盖翻转后待重评 R1 标记（E）
 	FinishedAt          *time.Time
 	FailureStage        *string
 }
@@ -317,7 +317,7 @@ func eligibilityClause(p AggregateParams) string {
 // uaWhitelistTerms 返回白名单子串原文数组（字面子串语义，与规则引擎
 // isWhitelistedUA/containsSubstr 同口径），滤空串，空列表返回 nil。
 // 外审⑧ #5：LIKE 模式包装（%sub%）会把配置中的 %/_ 解释为通配符，与规则引擎
-// 字面匹配对同一日志集产出不同事实；空哨兵 [''] 又使空串 UA 对模式 '' 的 LIKE
+// 字面匹配对同一日志集产出不同事实；空哨兵 [”] 又使空串 UA 对模式 ” 的 LIKE
 // 为 true 被误当白名单命中——两路径事实分叉，一律废除。
 func uaWhitelistTerms(whitelist []string) []string {
 	out := make([]string, 0, len(whitelist))
@@ -631,6 +631,8 @@ SELECT user_id, group_id, request_count FROM (
     FROM usage_logs ul
     WHERE ul.created_at >= $1 AND ul.created_at < $2
       AND %s
+      AND ul.user_id IS NOT NULL AND ul.user_id > 0
+      AND ul.group_id IS NOT NULL AND ul.group_id > 0
     GROUP BY ul.user_id, ul.group_id
     HAVING COUNT(*) >= $3
     UNION
@@ -638,6 +640,8 @@ SELECT user_id, group_id, request_count FROM (
     FROM usage_logs ul
     WHERE ul.created_at >= $1 AND ul.created_at < $2
       AND %s
+      AND ul.user_id IS NOT NULL AND ul.user_id > 0
+      AND ul.group_id IS NOT NULL AND ul.group_id > 0
       AND ul.user_id IN (
           SELECT ul.user_id FROM usage_logs ul
           WHERE ul.created_at >= $1 AND ul.created_at < $2
@@ -1260,9 +1264,9 @@ LIMIT 1
 		return nil, nil
 	}
 	var (
-		reconDate     sql.NullTime
-		offset        sql.NullInt64
-		failedBatches []byte
+		reconDate      sql.NullTime
+		offset         sql.NullInt64
+		failedBatches  []byte
 		historyCovered bool
 	)
 	if err := rows.Scan(&reconDate, &offset, &failedBatches, &historyCovered); err != nil {
@@ -1489,7 +1493,7 @@ LIMIT $2
 	defer func() { _ = topRows.Close() }()
 
 	type topEntry struct {
-		userID  int64
+		userID   int64
 		maxScore int
 	}
 	entries := make([]topEntry, 0, topN)
@@ -1589,8 +1593,3 @@ func (r *usageRiskRepository) CleanupReportAndRollup(ctx context.Context, report
 	}
 	return nReport, nRollup, nil
 }
-
-
-
-
-

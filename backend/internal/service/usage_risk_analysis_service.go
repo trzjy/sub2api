@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/google/uuid"
@@ -63,7 +64,7 @@ const (
 
 // 报告四态状态机取值（方案 §6.2 冻结）。
 const (
-	statusUsageRiskOpen        = "open"
+	statusUsageRiskOpen         = "open"
 	statusUsageRiskAcknowledged = "acknowledged"
 	statusUsageRiskResolved     = "resolved"
 	statusUsageRiskDismissed    = "dismissed"
@@ -358,11 +359,11 @@ func (s *UsageRiskAnalysisService) runAnalysis(ctx context.Context, now time.Tim
 		return fmt.Errorf("解析策略版本失败（失败关闭，不静默 0）: %w", verr)
 	}
 	runID, err := s.repo.CreateRun(ctx, UsageRiskRunRecord{
-		RunAt:          now,
-		WindowStart:    windowStart,
-		WindowEnd:      windowEnd,
-		PolicyVersion:  int64(versionU),
-		PolicySnapshot: snapshotJSON,
+		RunAt:           now,
+		WindowStart:     windowStart,
+		WindowEnd:       windowEnd,
+		PolicyVersion:   int64(versionU),
+		PolicySnapshot:  snapshotJSON,
 		CandidatesTotal: 0,
 	})
 	if err != nil {
@@ -384,9 +385,9 @@ func (s *UsageRiskAnalysisService) runAnalysis(ctx context.Context, now time.Tim
 		// R10-2/#3：partial 收尾不再吞错（原 `_ =` 使 NOT NULL 违反静默、run 停留 running）；
 		// FailedBatches 归一为 []（nil 经 pq 发 SQL NULL）。收尾失败仅告警，不覆盖主错误。
 		partialP := UsageRiskRunProgress{
-			FailureStage: ptrStr(failureStage),
-			FinishedAt:   ptrTime(s.now()),
-			BudgetExhausted: true,
+			FailureStage:        ptrStr(failureStage),
+			FinishedAt:          ptrTime(s.now()),
+			BudgetExhausted:     true,
 			ConsecutivePartials: consecutivePartialOf("partial", prevConsecutivePartials),
 		}
 		ensureProgressJSON(&partialP)
@@ -972,7 +973,7 @@ func (s *UsageRiskAnalysisService) groupRPMLimit(ctx context.Context, groupID in
 	if s.client == nil {
 		return 0, nil
 	}
-	g, err := s.client.Group.Get(ctx, groupID)
+	g, err := s.client.Group.Get(mixins.SkipSoftDelete(ctx), groupID)
 	if err != nil {
 		return 0, fmt.Errorf("读取分组限额失败: %w", err)
 	}
@@ -984,7 +985,7 @@ func (s *UsageRiskAnalysisService) userRPMLimit(ctx context.Context, userID int6
 	if s.client == nil {
 		return 0, nil
 	}
-	u, err := s.client.User.Get(ctx, userID)
+	u, err := s.client.User.Get(mixins.SkipSoftDelete(ctx), userID)
 	if err != nil {
 		return 0, fmt.Errorf("读取用户限额失败: %w", err)
 	}
@@ -1109,19 +1110,19 @@ func (s *UsageRiskAnalysisService) buildReportRecord(
 	}
 
 	rc := RuleContext{
-		DayStart:           dayStart,
-		DayEnd:             dayEnd,
-		ElapsedHours:       dayElapsed,
-		R1HistoryCovered:   historyCovered,
-		R1ConsecutiveDays:  consecutiveDays,
-		R2PeerCost:         peerCost,
-		R2Filter:           fmt.Sprintf("group_id=%d AND subscription_id IS NOT NULL AND request_count>=%d", c.GroupID, policy.MinDailyRequests),
-		R2Algorithm:        "linear-interpolation-p95",
-		UserRPMLimit:       userLimit,
-		GroupRPMLimit:      groupLimit,
-		Override:           override,
-		LimitSnapshotTime:   s.now(),
-		TZName:             tzName,
+		DayStart:          dayStart,
+		DayEnd:            dayEnd,
+		ElapsedHours:      dayElapsed,
+		R1HistoryCovered:  historyCovered,
+		R1ConsecutiveDays: consecutiveDays,
+		R2PeerCost:        peerCost,
+		R2Filter:          fmt.Sprintf("group_id=%d AND subscription_id IS NOT NULL AND request_count>=%d", c.GroupID, policy.MinDailyRequests),
+		R2Algorithm:       "linear-interpolation-p95",
+		UserRPMLimit:      userLimit,
+		GroupRPMLimit:     groupLimit,
+		Override:          override,
+		LimitSnapshotTime: s.now(),
+		TZName:            tzName,
 	}
 
 	outcome := EvaluateRules(policy, dayFacts, userFacts, rc)
@@ -1338,10 +1339,10 @@ func (s *UsageRiskAnalysisService) currentPolicy(ctx context.Context) (UsageRisk
 // usageRiskTransitions 是 §6.2 冻结的四态状态机：
 // open → acknowledged → resolved；open/acknowledged → dismissed（终态）。
 var usageRiskTransitions = map[string][]string{
-	statusUsageRiskOpen:       {statusUsageRiskAcknowledged, statusUsageRiskDismissed},
+	statusUsageRiskOpen:         {statusUsageRiskAcknowledged, statusUsageRiskDismissed},
 	statusUsageRiskAcknowledged: {statusUsageRiskResolved, statusUsageRiskDismissed},
-	statusUsageRiskResolved:   {}, // 终态
-	statusUsageRiskDismissed:  {}, // 终态
+	statusUsageRiskResolved:     {}, // 终态
+	statusUsageRiskDismissed:    {}, // 终态
 }
 
 func isValidTransition(oldStatus, newStatus string) bool {
@@ -1359,20 +1360,20 @@ func isValidTransition(oldStatus, newStatus string) bool {
 func aggParams(p UsageRiskPolicy) AggregateParams {
 	return AggregateParams{
 		UnlimitedGroupsOnly: p.UnlimitedGroupsOnly,
-		UAWhitelist:        p.UAWhitelist,
+		UAWhitelist:         p.UAWhitelist,
 	}
 }
 
 // dayAgg 是单 (user,group) 一日的小时桶汇总（R3a 分组 RPM 贴线分钟数不在小时桶内，
 // 由 AggregateGroupRPMMinutes 单独产出，经 groupHitMinutes[key] 注入 DayFacts）。
 type dayAgg struct {
-	RequestCount        int
-	InputTokensSum      int64
-	OutputTokensSum     int64
-	CacheReadTokensSum  int64
-	CostUSDSum          float64
-	OccupiedMsSum       int64
-	BucketInstants      []time.Time
+	RequestCount       int
+	InputTokensSum     int64
+	OutputTokensSum    int64
+	CacheReadTokensSum int64
+	CostUSDSum         float64
+	OccupiedMsSum      int64
+	BucketInstants     []time.Time
 }
 
 // buildDayAggMap 将小时桶切片汇总为 (user,group) → 日级聚合（小时桶 → 日级指标）。
@@ -1412,10 +1413,10 @@ func daysBetween(a, b time.Time) int {
 	return int(b.Sub(a).Hours() / 24)
 }
 
-func ptrStr(s string) *string { return &s }
+func ptrStr(s string) *string        { return &s }
 func ptrTime(t time.Time) *time.Time { return &t }
-func ptrInt64(i int64) *int64 { return &i }
-func usageRiskIntPtr(i int) *int { return &i }
+func ptrInt64(i int64) *int64        { return &i }
+func usageRiskIntPtr(i int) *int     { return &i }
 
 // parsePolicyVersionHex 解析策略版本哈希（16 进制 64 位无符号）为 int64，位保真。
 // 与旧 ParseInt 不同：≥2^63 时 ParseInt 会越界 err 并被吞掉静默成 0（生产首跑即炸），

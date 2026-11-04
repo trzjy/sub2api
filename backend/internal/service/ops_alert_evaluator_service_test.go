@@ -148,6 +148,112 @@ func TestComputeRuleMetric_AccountTempUnscheduledCount(t *testing.T) {
 	require.InDelta(t, 2.0, val, 0.0001, "only 2 accounts have an active temp-unsched window")
 }
 
+// firingTrackingRepo wraps opsRepoMock to record whether a firing alert event
+// is ever created during evaluation. It must NOT be modified glob-imported; we
+// reuse the existing opsRepoMock implementation and only override the two
+// methods the evaluator touches for our scenario.
+type firingTrackingRepo struct {
+	*opsRepoMock
+	rules   []*OpsAlertRule
+	created int
+}
+
+func (r *firingTrackingRepo) ListAlertRules(ctx context.Context) ([]*OpsAlertRule, error) {
+	return r.rules, nil
+}
+
+func (r *firingTrackingRepo) CreateAlertEvent(ctx context.Context, event *OpsAlertEvent) (*OpsAlertEvent, error) {
+	r.created++
+	return event, nil
+}
+
+// TestComputeRuleMetric_SoftDeletedGroup verifies that metrics scoped to a
+// soft-deleted (or non-existent) group — i.e. GetAccountAvailability returns
+// Group == nil while Accounts may still be populated — become unavailable
+// (0, false) instead of producing a false (0 < threshold) firing.
+//
+// Regression: before the fix, group_available_accounts / group_available_ratio
+// returned (0, true) on a Group==nil availability, and group_rate_limit_ratio
+// returned (0, true) when Group==nil, so a rule like "available accounts > 0"
+// against a deleted group would falsely fire and create a firing event.
+func TestComputeRuleMetric_SoftDeletedGroup(t *testing.T) {
+	t.Parallel()
+
+	// Soft-deleted group (e.g. group_id = 108 removed upstream).
+	groupID := int64(108)
+	platform := "openai"
+
+	// Group is nil but Accounts are present: this is exactly the state that
+	// used to fall through to a (0, true) return and a false firing.
+	availability := &OpsAccountAvailability{
+		Group: nil,
+		Accounts: map[int64]*AccountAvailability{
+			1: {IsRateLimited: true},
+			2: {HasError: true},
+		},
+	}
+
+	opsService := &OpsService{
+		getAccountAvailability: func(_ context.Context, _ string, _ *int64) (*OpsAccountAvailability, error) {
+			return availability, nil
+		},
+	}
+
+	svc := &OpsAlertEvaluatorService{
+		opsService: opsService,
+		opsRepo:    &stubOpsRepo{},
+	}
+
+	start := time.Now().UTC().Add(-5 * time.Minute)
+	end := time.Now().UTC()
+	ctx := context.Background()
+
+	groupMetrics := []string{
+		"group_available_accounts",
+		"group_available_ratio",
+		"group_rate_limit_ratio",
+	}
+
+	for _, mt := range groupMetrics {
+		mt := mt
+		t.Run("指标 "+mt+" 在软删分组下返回 (0,false)", func(t *testing.T) {
+			t.Parallel()
+
+			rule := &OpsAlertRule{MetricType: mt}
+			// groupID is non-nil and > 0, which is the soft-delete path that
+			// previously slipped through.
+			val, ok := svc.computeRuleMetric(ctx, rule, nil, start, end, platform, &groupID)
+			require.False(t, ok, "soft-deleted group must render the metric unavailable")
+			require.Equal(t, 0.0, val)
+		})
+	}
+
+	t.Run("评估器跳过软删分组规则不创建 firing event", func(t *testing.T) {
+		repo := &firingTrackingRepo{opsRepoMock: &opsRepoMock{}}
+		repo.rules = []*OpsAlertRule{
+			{
+				ID:               1,
+				Enabled:          true,
+				Name:             "soft-deleted-group-availability",
+				MetricType:       "group_available_accounts",
+				Operator:         ">",
+				Threshold:        0,
+				Filters:          map[string]any{"group_id": groupID},
+				SustainedMinutes: 1,
+			},
+		}
+
+		evaluator := &OpsAlertEvaluatorService{
+			opsService: opsService,
+			opsRepo:    repo,
+		}
+		evaluator.evaluateOnce(60 * time.Second)
+
+		require.Equal(t, 0, repo.created,
+			"a rule scoped to a soft-deleted group must not create any firing event")
+	})
+}
+
 func TestComputeRuleMetricNewIndicators(t *testing.T) {
 	t.Parallel()
 

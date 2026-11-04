@@ -407,6 +407,46 @@ func TestUsageRiskListCandidatesBatchLimit(t *testing.T) {
 
 // ── 用户全局 RPM（含按量行，无资格过滤） ──
 
+// TestUsageRiskListCandidatesLegalUserGroupFilter 锁定 [F4-D/#3b]：
+// ListCandidates 内层两个 UNION SELECT 分支的 WHERE 必须各追加
+// `ul.user_id IS NOT NULL AND ul.user_id > 0` 与 `ul.group_id IS NOT NULL AND ul.group_id > 0`，
+// 过滤平台侧 NULL（usage_logs.user_id 是 Optional）与非法 0 值，避免下游
+// userRPMLimit/groupRPMLimit 对 NULL/0 查 ent 抛 not found 中断整轮对账。
+// 文本断言：两个过滤子句在两段 UNION 分支各出现一次（共 2 次），UNION 语义对称。
+// mutation 反证：去掉任一分支的过滤 → 计数断言 FAIL。
+func TestUsageRiskListCandidatesLegalUserGroupFilter(t *testing.T) {
+	var capturedSQL string
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+		capturedSQL = actualSQL
+		return nil
+	})))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := newUsageRiskRepositoryWithSQL(nil, db, db)
+	start := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+
+	mock.ExpectQuery(`UNION`).
+		WithArgs(start, end, 10, 100, 100).
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "group_id", "request_count"}).
+			AddRow(int64(7), int64(3), 4))
+
+	_, err = repo.ListCandidates(context.Background(), start, end,
+		AggregateParams{UnlimitedGroupsOnly: true}, 10, 100, 100)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	const userFilter = "ul.user_id IS NOT NULL AND ul.user_id > 0"
+	const groupFilter = "ul.group_id IS NOT NULL AND ul.group_id > 0"
+	require.Contains(t, capturedSQL, userFilter, "F4-D/#3b：必须过滤 NULL/非法的 user_id")
+	require.Contains(t, capturedSQL, groupFilter, "F4-D/#3b：必须过滤 NULL/非法的 group_id")
+	// 两个 UNION 分支各出现一次（普通达标分支 + 用户级全量达标分支）。
+	require.Equal(t, 2, strings.Count(capturedSQL, userFilter),
+		"F4-D/#3b：user_id 合法性过滤必须在两个 UNION 分支各出现一次")
+	require.Equal(t, 2, strings.Count(capturedSQL, groupFilter),
+		"F4-D/#3b：group_id 合法性过滤必须在两个 UNION 分支各出现一次")
+}
+
 func TestUsageRiskAggregateUserGlobalRPMMinutesNoEligibilityFilter(t *testing.T) {
 	repo, mock := newUsageRiskRepoMock(t)
 	start := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
@@ -430,12 +470,12 @@ func TestUsageRiskUpdateStatusWithAuditSuccessSameTx(t *testing.T) {
 	repo, mock := newUsageRiskRepoMock(t)
 	at := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	entry := &service.AuditLog{
-		Action:      "admin.usage_risk.status",
-		Method:      "POST",
-		Path:        "/api/v1/admin/usage-risk/reports/9/status",
-		StatusCode:  200,
-		Extra:       map[string]any{"report_id": int64(9), "old_status": "open", "new_status": "acknowledged"},
-		CreatedAt:   at,
+		Action:     "admin.usage_risk.status",
+		Method:     "POST",
+		Path:       "/api/v1/admin/usage-risk/reports/9/status",
+		StatusCode: 200,
+		Extra:      map[string]any{"report_id": int64(9), "old_status": "open", "new_status": "acknowledged"},
+		CreatedAt:  at,
 	}
 
 	// 序列断言：同一事务，顺序 UPDATE → INSERT（audit）。
@@ -766,9 +806,9 @@ func TestUsageRiskR7PolicyVersionHexRoundTrip(t *testing.T) {
 		name string
 		in   string // 入库前的 hex 串（sha256 前 16 hex）
 	}{
-		{name: "high_bit_all_ones", in: "ffffffffffffffff"},   // 高位全 1 → int64(-1)，旧 FormatInt 输出 "-1"
-		{name: "high_bit_2_63", in: "8000000000000000"},       // ≥2^63 → int64 负数，旧 FormatInt 输出 "-9223...8"
-		{name: "leading_zeros", in: "0000000000000ab1"},       // 前导零，旧 FormatInt/FormatUint 丢弃为 "ab1"
+		{name: "high_bit_all_ones", in: "ffffffffffffffff"}, // 高位全 1 → int64(-1)，旧 FormatInt 输出 "-1"
+		{name: "high_bit_2_63", in: "8000000000000000"},     // ≥2^63 → int64 负数，旧 FormatInt 输出 "-9223...8"
+		{name: "leading_zeros", in: "0000000000000ab1"},     // 前导零，旧 FormatInt/FormatUint 丢弃为 "ab1"
 		{name: "mixed", in: "1a2b3c4d5e6f7081"},
 		{name: "small", in: "0000000000000007"},
 	}
@@ -1004,19 +1044,19 @@ func TestUsageRiskR8CompleteRunPersistsCandidatesTotal(t *testing.T) {
 	runID := int64(42)
 	status := "completed"
 	p := UsageRiskRunProgress{
-		BatchesDone:      3,
-		BatchesFailed:    1,
-		FailedBatches:    json.RawMessage(`[{"day":"2026-09-23","offset":10}]`),
-		BudgetExhausted:  true,
-		CandidatesTotal:  128,
-		ReconBatchesDone: 1,
-		ReconCursorDate:  nil,
-		ReconBatchOffset: nil,
-		HistoryCovered:   true,
+		BatchesDone:         3,
+		BatchesFailed:       1,
+		FailedBatches:       json.RawMessage(`[{"day":"2026-09-23","offset":10}]`),
+		BudgetExhausted:     true,
+		CandidatesTotal:     128,
+		ReconBatchesDone:    1,
+		ReconCursorDate:     nil,
+		ReconBatchOffset:    nil,
+		HistoryCovered:      true,
 		ConsecutivePartials: 2,
-		R1ReevalPending:  false,
-		FinishedAt:       nil,
-		FailureStage:     nil,
+		R1ReevalPending:     false,
+		FinishedAt:          nil,
+		FailureStage:        nil,
 	}
 	finished := time.Date(2026, 9, 24, 1, 30, 0, 0, time.UTC)
 	p.FinishedAt = &finished
@@ -1042,19 +1082,19 @@ func TestUsageRiskR8ReconCursorKeyRangeRemoved(t *testing.T) {
 	status := "completed"
 	finished := time.Date(2026, 9, 24, 1, 30, 0, 0, time.UTC)
 	p := UsageRiskRunProgress{
-		BatchesDone:        1,
-		BatchesFailed:      0,
-		FailedBatches:      json.RawMessage(`[]`),
-		BudgetExhausted:    false,
-		ReconCursorDate:    nil,
-		ReconBatchOffset:   nil,
-		ReconBatchesDone:   0,
-		HistoryCovered:     true,
-		CandidatesTotal:    12,
+		BatchesDone:         1,
+		BatchesFailed:       0,
+		FailedBatches:       json.RawMessage(`[]`),
+		BudgetExhausted:     false,
+		ReconCursorDate:     nil,
+		ReconBatchOffset:    nil,
+		ReconBatchesDone:    0,
+		HistoryCovered:      true,
+		CandidatesTotal:     12,
 		ConsecutivePartials: 0,
-		R1ReevalPending:    false,
-		FinishedAt:         &finished,
-		FailureStage:       nil,
+		R1ReevalPending:     false,
+		FinishedAt:          &finished,
+		FailureStage:        nil,
 	}
 
 	// UpdateRunProgress 操作级（隐式文本断言）：参数序 = 9 个进度字段 + run_id。
@@ -1150,6 +1190,7 @@ func extractOuterSelectExprs(t *testing.T, sqlText string) []string {
 	}
 	return out
 }
+
 // ───────────────── R10-1（外审⑥ #1/#2/#6）锁定测试 ─────────────────
 
 // alignToAppHour 返回 t 按应用时区墙钟下取整到整点的时刻（测试侧独立表达式：墙钟
