@@ -116,6 +116,67 @@ describe('PlazaMergedTable 折扣徽章', () => {
   })
 })
 
+describe('PlazaMergedTable 分组列不溢出 (溢出压字回归)', () => {
+  // 线上回归：分组列只有 10% 宽时，inline-flex 徽章按「最小内容宽度」(nowrap 整段
+  // 中文分组名) 撑开，直接压到右侧实付价格列上，字叠字。修复三件套必须同时在：
+  // ① 分组 td 里有 overflow-hidden 的限宽包裹层；② 徽章走换行形态(truncate=false)；
+  // ③ colgroup 列宽合计 100%，分组列不低于 12%。
+  const GroupBadgeStub = {
+    name: 'GroupBadge',
+    props: ['name', 'truncate'],
+    template: '<span class="group-badge">{{ name }}</span>'
+  }
+
+  function mountWithBadge() {
+    const m = model({ name: 'gemini-3.1-flash-image', platform: 'gemini' })
+    return mount(PlazaMergedTable, {
+      props: {
+        rows: [
+          {
+            key: 'gemini',
+            model: m,
+            entries: [{ model: m, groupId: 1, groupName: 'Gemini 计量分组（余额消费）', rate: 0.33 }]
+          }
+        ],
+        platform: ''
+      },
+      global: { stubs: { GroupBadge: GroupBadgeStub, PlatformIcon: true } }
+    })
+  }
+
+  it('分组单元格内容被 overflow-hidden 限宽容器包住', () => {
+    const wrapper = mountWithBadge()
+    const cell = wrapper.findAll('tbody td')[1]
+    const wrap = cell.find('div')
+    expect(wrap.exists()).toBe(true)
+    expect(wrap.classes()).toContain('max-w-full')
+    expect(wrap.classes()).toContain('overflow-hidden')
+  })
+
+  it('徽章走换行形态,长分组名在单元格内折行而不是撑破列宽', () => {
+    const wrapper = mountWithBadge()
+    const badge = wrapper.findAllComponents(GroupBadgeStub)[0]
+    expect(badge.props('truncate')).toBe(false)
+    expect(badge.props('name')).toBe('Gemini 计量分组（余额消费）')
+  })
+
+  it('colgroup 列宽合计 100%,分组列不少于 12%', () => {
+    const wrapper = mountWithBadge()
+    const widths = wrapper.findAll('col').map((c) => {
+      const cls = c.classes().find((n) => n.startsWith('w-['))
+      return Number(cls?.replace('w-[', '').replace('%]', ''))
+    })
+    expect(widths).toHaveLength(9)
+    expect(widths.reduce((a, b) => a + b, 0)).toBe(100)
+    expect(widths[1]).toBeGreaterThanOrEqual(12)
+  })
+
+  it('表格最小宽度足以容纳 9 列,不再挤成 1200px', () => {
+    const wrapper = mountWithBadge()
+    expect(wrapper.find('table').classes()).toContain('min-w-[1280px]')
+  })
+})
+
 describe('PlazaMergedTable 平台徽章由 platform 字段驱动 (D5 回归)', () => {
   it("platform='composite' 渲染 Composite 徽章,platform='codebuddy' 渲染 CodeBuddy 原徽章", () => {
     function mk(name: string, platform: string): PlazaModel {

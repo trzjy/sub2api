@@ -1,14 +1,24 @@
 <template>
+  <!--
+    单行截断形态(items-center)图标与文字垂直居中；多行换行形态(items-start)
+    图标与首行顶部对齐，否则图标会被居中挤到第二行位置，看着像"掉行"。
+  -->
   <span
     :class="[
-      'inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium transition-colors',
+      'inline-flex max-w-full gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium transition-colors',
+      truncate ? 'items-center' : 'items-start',
       badgeClass
     ]"
   >
     <!-- Platform logo -->
-    <PlatformIcon v-if="platform" :platform="platform" size="sm" />
+    <PlatformIcon
+      v-if="platform"
+      :platform="platform"
+      size="sm"
+      :class="truncate ? 'shrink-0' : 'mt-[1px] shrink-0'"
+    />
     <!-- Group name -->
-    <span :class="truncate ? 'truncate' : 'min-w-0 whitespace-normal [overflow-wrap:anywhere]'">{{ name }}</span>
+    <span :class="truncate ? 'min-w-0 truncate' : 'min-w-0 whitespace-normal leading-snug [overflow-wrap:anywhere]'">{{ name }}</span>
     <!-- Right side label -->
     <span v-if="showLabel" :class="labelClass">
       <template v-if="hasCustomRate">

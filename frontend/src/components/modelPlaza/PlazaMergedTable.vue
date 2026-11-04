@@ -3,19 +3,21 @@
     <!--
       table-fixed + colgroup：col 定义必须与实际列数一致（9 列），否则缺列的列
       宽由浏览器挤算，配合 whitespace-nowrap 会把内容溢画到相邻列（错位重叠）。
-      宽度按各列最宽内容（含折扣徽章/tier 标签）预留，合计 100%。
+      宽度按各列最宽内容（含分组名/折扣徽章/tier 标签）预留，合计 100%。
+      分组列 14%：分组名普遍是「XX 计量分组（余额消费）」这类长中文串，
+      10% 时整段徽章会溢出单元格压到实付价格列上。
     -->
-    <table class="w-full min-w-[1200px] table-fixed border-collapse text-sm tabular-nums">
+    <table class="w-full min-w-[1280px] table-fixed border-collapse text-sm tabular-nums">
       <colgroup>
-        <col class="w-[15%]" />
-        <col class="w-[10%]" />
-        <col class="w-[15%]" />
-        <col class="w-[12%]" />
-        <col class="w-[10%]" />
-        <col class="w-[10%]" />
-        <col class="w-[8%]" />
+        <col class="w-[14%]" />
+        <col class="w-[14%]" />
         <col class="w-[13%]" />
-        <col class="w-[7%]" />
+        <col class="w-[11%]" />
+        <col class="w-[10%]" />
+        <col class="w-[10%]" />
+        <col class="w-[9%]" />
+        <col class="w-[11%]" />
+        <col class="w-[8%]" />
       </colgroup>
       <thead>
         <tr class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-dark-400">
@@ -83,14 +85,18 @@
               </div>
             </td>
 
-            <!-- 分组（供应商）徽章 -->
-            <td class="py-2.5 pr-4 align-middle">
-              <GroupBadge
-                :name="entry.groupName"
-                :platform="(row.model.platform as any)"
-                :subscription-type="(entry.subscriptionType as any)"
-                hide-rate
-              />
+            <!-- 分组（供应商）徽章：外层 div 兜住宽度，长分组名在单元格内换行，绝不溢到价格列 -->
+            <td class="py-2.5 pr-3 align-middle">
+              <div class="min-w-0 max-w-full overflow-hidden">
+                <GroupBadge
+                  :name="entry.groupName"
+                  :platform="(row.model.platform as any)"
+                  :subscription-type="(entry.subscriptionType as any)"
+                  :truncate="false"
+                  :title="entry.groupName"
+                  hide-rate
+                />
+              </div>
             </td>
 
             <template v-if="billingMode(row.model) === BILLING_MODE_TOKEN">
@@ -219,7 +225,11 @@
 
             <!-- 高峰倍率提示（仅实际启用的分组显示） -->
             <td class="border-l border-gray-100 px-3 py-2.5 text-right align-middle font-mono text-xs text-gray-500 dark:border-dark-700/60 dark:text-dark-400">
-              <span v-if="entry.peakRateText" class="text-amber-700 dark:text-amber-300" :title="entry.peakRateTitle">{{ entry.peakRateText }}</span>
+              <span
+                v-if="entry.peakRateText"
+                class="whitespace-normal break-words leading-5 text-amber-700 dark:text-amber-300"
+                :title="entry.peakRateTitle"
+              >{{ entry.peakRateText }}</span>
               <span v-else class="text-gray-400 dark:text-dark-500">-</span>
             </td>
           </tr>
