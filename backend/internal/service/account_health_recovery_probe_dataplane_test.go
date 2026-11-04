@@ -138,7 +138,10 @@ func TestProbeUpstreamDataPlaneUsesChatCompletionsAndJudgesBody(t *testing.T) {
 	messages, ok := body["messages"].([]any)
 	require.True(t, ok, "探测体必须是最小 chat 请求（含 messages）")
 	require.Equal(t, "user", messages[0].(map[string]any)["role"])
-	require.Equal(t, float64(1), body["max_tokens"], "max_tokens=1 最小探测")
+	// 输出上限必须给足：部分自建反代把「没产出助手文本」判成 502（qoder-bridge 即如此），
+	// max_tokens=1 会让探针永远失败、熔断后账号永远恢复不了（账号 406 实证）。
+	require.Equal(t, float64(accountHealthProbeDataPlaneMaxTokens), body["max_tokens"], "探测体输出上限")
+	require.Greater(t, body["max_tokens"].(float64), float64(1), "不得再用 max_tokens=1 探测")
 	require.Equal(t, false, body["stream"], "非流式探测")
 }
 

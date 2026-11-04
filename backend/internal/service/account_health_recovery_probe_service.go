@@ -38,8 +38,15 @@ const (
 	// accountHealthProbeRetryInterval 首探失败后的补探间隔（秒级，AC-C1 不动）。
 	accountHealthProbeRetryInterval = 5 * time.Second
 	// accountHealthProbeDataPlaneTimeout 单次数据面探测超时。取 45s：上游正常时
-	// max_tokens=1 的请求在数秒内返回；故障时快速失败，不必等满客户端链路时长。
+	// 极简探测请求在数秒内返回；故障时快速失败，不必等满客户端链路时长。
 	accountHealthProbeDataPlaneTimeout = 45 * time.Second
+	// accountHealthProbeDataPlaneMaxTokens 数据面探测的输出上限。取 16 而不是 1：
+	// 部分自建反代/桥接服务会把「上游没有产出助手文本」判成 502
+	// upstream_empty_result（生产实证：qoder-bridge 即如此）。max_tokens=1 时模型
+	// 往往还没吐正文就撞上限，于是探针永远失败、账号熔断后永远恢复不了
+	// （生产实证：账号 406 连续探测 1.6 万余次全失败，而同一地址 /v1/models 秒回 200）。
+	// 16 与原 Responses 分支的 max_output_tokens 对齐，单次成本可忽略。
+	accountHealthProbeDataPlaneMaxTokens = 16
 	// accountHealthProbeDataPlaneMaxBodyBytes 探测响应读取上限，防止异常大响应。
 	accountHealthProbeDataPlaneMaxBodyBytes = 256 << 10
 	// probeRecoverySuccessThreshold 连续多少次真实探测成功才解除熔断。
@@ -869,7 +876,7 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlane(ctx context.C
 		payload, err = json.Marshal(map[string]any{
 			"model":      upstreamModel,
 			"messages":   []map[string]any{{"role": "user", "content": "hi"}},
-			"max_tokens": 1,
+			"max_tokens": accountHealthProbeDataPlaneMaxTokens,
 			"stream":     false,
 		})
 	}
