@@ -301,7 +301,14 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			accountReleaseFunc = accountSlot.Release
 		}
 
-		if groupPlatform == service.PlatformGemini && account.Platform != service.PlatformGemini && account.Platform != service.PlatformCursor {
+		// gemini 分组只放行 gemini 平台自身、Cursor 与 antigravity OAuth 账号。
+		// antigravity 必须放行：分组平台是 gemini 时，本文件下方 §5 的
+		// shouldUseAntigravityCompat 分支正是为这类账号准备的（转发
+		// streamGenerateContent），不在此放行会让该分支成为不可达代码，
+		// 表现为「账号健康、/v1/messages 200，但 /v1/chat/completions 直接
+		// 502 该分组所有账号均请求失败」且无任何上游错误记录。
+		// /v1/messages 入口没有同款平台白名单，两者行为必须一致。
+		if !geminiGroupAdmitsAccount(groupPlatform, account) {
 			if accountReleaseFunc != nil {
 				accountReleaseFunc()
 			}
@@ -501,6 +508,25 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		return
 	}
+}
+
+// geminiGroupAdmitsAccount 判定 gemini 分组是否放行该账号进入转发阶段。
+// 非 gemini 分组不受此闸约束（保持历史行为）；gemini 分组放行 gemini 平台自身、
+// Cursor，以及 antigravity OAuth 账号——后者由本文件 §5 的
+// shouldUseAntigravityCompat 分支以 streamGenerateContent 转发，与 /v1/messages
+// 入口的放行范围保持一致。
+func geminiGroupAdmitsAccount(groupPlatform string, account *service.Account) bool {
+	if groupPlatform != service.PlatformGemini {
+		return true
+	}
+	if account == nil {
+		return false
+	}
+	switch account.Platform {
+	case service.PlatformGemini, service.PlatformCursor:
+		return true
+	}
+	return shouldUseAntigravityCompat(account)
 }
 
 // newChatCompletionsFailoverState 构造 ChatCompletions 入口的 failover 状态：
