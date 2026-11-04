@@ -558,21 +558,28 @@ func TestAntigravityCompatEmptyStreamTriggersFailover(t *testing.T) {
 	}
 }
 
+// Chat Completions 与 Anthropic Messages 必须对同一上游响应给出一致的判定：
+// 上游返回合法结构事件但没有文本正文时，Messages 入口按成功（content: []）返回，
+// Chat Completions 入口也按协议正常收尾，不再把健康账号判成故障并短停调。
+// Responses 入口不受此对齐影响，仍保留原有的空流 failover 语义。
 func TestAntigravityCompatUsageOnlyStreamTriggersFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
-		name string
-		run  func(*AntigravityGatewayService, *gin.Context, *http.Response) (*antigravityStreamResult, error)
+		name         string
+		wantFailover bool
+		run          func(*AntigravityGatewayService, *gin.Context, *http.Response) (*antigravityStreamResult, error)
 	}{
 		{
-			name: "chat completions",
+			name:         "chat completions",
+			wantFailover: false,
 			run: func(svc *AntigravityGatewayService, c *gin.Context, resp *http.Response) (*antigravityStreamResult, error) {
 				return svc.handleChatCompletionsStreamingFromAntigravity(c, resp, time.Now(), "gemini-3.1-pro-high", true)
 			},
 		},
 		{
-			name: "responses",
+			name:         "responses",
+			wantFailover: true,
 			run: func(svc *AntigravityGatewayService, c *gin.Context, resp *http.Response) (*antigravityStreamResult, error) {
 				return svc.handleResponsesStreamingFromAntigravity(c, resp, time.Now(), "gemini-3.1-pro-high")
 			},
@@ -593,6 +600,12 @@ func TestAntigravityCompatUsageOnlyStreamTriggersFailover(t *testing.T) {
 
 			result, err := tt.run(svc, c, resp)
 
+			if !tt.wantFailover {
+				require.NoError(t, err)
+				require.NotNil(t, result)
+				require.Contains(t, recorder.Body.String(), "[DONE]")
+				return
+			}
 			require.Nil(t, result)
 			var failoverErr *UpstreamFailoverError
 			require.ErrorAs(t, err, &failoverErr)

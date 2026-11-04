@@ -107,17 +107,25 @@ type antigravityCompatScanEvent struct {
 }
 
 type antigravityCompatStreamSession struct {
-	processor                   *antigravity.StreamingProcessor
-	adapter                     antigravityCompatStreamAdapter
-	writer                      *antigravityClientWriter
-	usage                       *ClaudeUsage
-	pendingEvents               []apicompat.AnthropicStreamEvent
-	firstTokenMs                *int
-	startTime                   time.Time
-	meaningfulData              bool
+	processor      *antigravity.StreamingProcessor
+	adapter        antigravityCompatStreamAdapter
+	writer         *antigravityClientWriter
+	usage          *ClaudeUsage
+	pendingEvents  []apicompat.AnthropicStreamEvent
+	firstTokenMs   *int
+	startTime      time.Time
+	meaningfulData bool
+	// sawStructuredEvent 记录上游是否返回过可解析的结构化 SSE 事件
+	// （message_start / message_delta / message_stop 等）。这类事件不含正文，
+	// 但足以证明链路是通的，不能与「上游完全没响应」混为一谈。
+	sawStructuredEvent          bool
+	observedLines               int
+	observedHead                string
 	preContentKeepaliveSent     bool
 	preContentKeepaliveInterval time.Duration
 }
+
+const antigravityCompatObservedHeadLimit = 512
 
 const (
 	antigravityCompatPreContentKeepaliveInterval = 15 * time.Second
@@ -142,6 +150,13 @@ func newAntigravityCompatStreamSession(
 }
 
 func (s *antigravityCompatStreamSession) consume(line string) {
+	s.observedLines++
+	if len(s.observedHead) < antigravityCompatObservedHeadLimit {
+		s.observedHead += strings.TrimSpace(line) + " | "
+		if len(s.observedHead) > antigravityCompatObservedHeadLimit {
+			s.observedHead = s.observedHead[:antigravityCompatObservedHeadLimit]
+		}
+	}
 	claudeEvents := s.processor.ProcessLine(strings.TrimRight(line, "\r\n"))
 	if len(claudeEvents) == 0 {
 		return
@@ -173,10 +188,24 @@ func (s *antigravityCompatStreamSession) finish() (*antigravityStreamResult, err
 			s.adapter.WriteError(s.writer, "empty_stream")
 			return s.result(false), errors.New("empty Antigravity compatibility stream after keepalive")
 		}
-		return nil, antigravityCompatEmptyStreamError()
+		if result, handled := tryFinalizeTextlessChatCompletions(s, "finish"); handled {
+			return result, nil
+		}
+		return nil, antigravityCompatEmptyStreamError(s, "finish")
 	}
 	s.adapter.Finalize(s.writer)
 	return s.result(s.writer.Disconnected()), nil
+}
+
+// flushStructuredResponse 把已缓冲的结构化事件按客户端协议正常收尾输出。
+// 上游返回了合法 SSE 事件但没有文本正文时调用，避免把「内容为空」误判成
+// 「账号不可用」而触发 failover 与账号短停调。
+func (s *antigravityCompatStreamSession) flushStructuredResponse() {
+	for i := range s.pendingEvents {
+		s.adapter.Emit(&s.pendingEvents[i], s.writer)
+	}
+	s.pendingEvents = nil
+	s.adapter.Finalize(s.writer)
 }
 
 func (s *antigravityCompatStreamSession) collectResult(clientDisconnect bool) *antigravityStreamResult {
@@ -213,6 +242,9 @@ func (s *antigravityCompatStreamSession) consumeClaudeData(eventType, payload st
 	}
 	if event.Type == "" {
 		event.Type = eventType
+	}
+	if event.Type != "" {
+		s.sawStructuredEvent = true
 	}
 	if event.Usage != nil {
 		mergeAnthropicUsage(s.usage, *event.Usage)
@@ -334,7 +366,10 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			writeAntigravityCompatStreamError(c, adapter, writer, "stream_timeout")
 			return session.collectResult(false), fmt.Errorf("pre-content stream timeout")
 		}
-		return nil, antigravityCompatEmptyStreamError()
+		if result, handled := tryFinalizeTextlessChatCompletions(session, "pre_content_timeout"); handled {
+			return result, nil
+		}
+		return nil, antigravityCompatEmptyStreamError(session, "pre_content_timeout")
 	}
 
 	for {
@@ -387,12 +422,39 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 	}
 }
 
+// tryFinalizeTextlessChatCompletions 处理「上游有合法结构事件、但没有文本正文」的
+// Chat Completions 流。Anthropic Messages 入口对 content: [] 的响应按成功返回，
+// 本入口必须与之对齐，否则同一账号在两种协议下表现不一致：聊天格式请求被判成
+// 账号故障而 failover，健康账号随后被短停调，连 /v1/messages 也报「暂无可用账号」。
+//
+// 只对 Chat Completions 适配器生效；Responses 协议与「已发过 keepalive、HTTP 200
+// 已提交」的场景保持原有的错误语义不变。
+func tryFinalizeTextlessChatCompletions(
+	session *antigravityCompatStreamSession,
+	reason string,
+) (*antigravityStreamResult, bool) {
+	if _, isChat := session.adapter.(*antigravityChatStreamAdapter); !isChat {
+		return nil, false
+	}
+	if !session.sawStructuredEvent || session.preContentKeepaliveSent || session.writer.Disconnected() {
+		return nil, false
+	}
+	logger.LegacyPrintf("service.antigravity_gateway",
+		"Antigravity chat completions stream has structured events but no text (%s); finalizing normally. lines=%d head=%q",
+		reason, session.observedLines, session.observedHead)
+	session.flushStructuredResponse()
+	return session.result(false), true
+}
+
 func handleAntigravityCompatEmptyStream(c *gin.Context, session *antigravityCompatStreamSession) (*antigravityStreamResult, error) {
 	if session.preContentKeepaliveSent {
 		writeAntigravityCompatStreamError(c, session.adapter, session.writer, "empty_stream")
 		return session.collectResult(false), errors.New("empty Antigravity compatibility stream after keepalive")
 	}
-	return nil, antigravityCompatEmptyStreamError()
+	if result, handled := tryFinalizeTextlessChatCompletions(session, "eof"); handled {
+		return result, nil
+	}
+	return nil, antigravityCompatEmptyStreamError(session, "eof")
 }
 
 func (s *AntigravityGatewayService) startAntigravityCompatScanner(
@@ -483,7 +545,10 @@ func (s *AntigravityGatewayService) handleAntigravityCompatReadError(
 			writeAntigravityCompatStreamError(c, session.adapter, session.writer, "stream_read_error")
 			return session.collectResult(false), fmt.Errorf("stream read error: %w", err)
 		}
-		return nil, antigravityCompatEmptyStreamError()
+		if result, handled := tryFinalizeTextlessChatCompletions(session, fmt.Sprintf("read_error: %v", err)); handled {
+			return result, nil
+		}
+		return nil, antigravityCompatEmptyStreamError(session, fmt.Sprintf("read_error: %v", err))
 	}
 	if disconnect, handled := handleStreamReadError(err, session.writer.Disconnected(), prefix); handled {
 		return session.collectResult(disconnect), nil
@@ -507,8 +572,14 @@ func writeAntigravityCompatStreamError(
 	MarkResponseCommitted(c)
 }
 
-func antigravityCompatEmptyStreamError() error {
-	logger.LegacyPrintf("service.antigravity_gateway", "Empty Antigravity compatibility stream, triggering failover")
+func antigravityCompatEmptyStreamError(session *antigravityCompatStreamSession, reason string) error {
+	lines, head := 0, ""
+	if session != nil {
+		lines, head = session.observedLines, session.observedHead
+	}
+	logger.LegacyPrintf("service.antigravity_gateway",
+		"Empty Antigravity compatibility stream (%s), triggering failover. lines=%d head=%q",
+		reason, lines, head)
 	return &UpstreamFailoverError{
 		StatusCode:             http.StatusBadGateway,
 		ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
