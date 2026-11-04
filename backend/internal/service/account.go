@@ -1050,6 +1050,17 @@ func (a *Account) isModelMappingSupported(requestedModel string) bool {
 	if mappingSupportsRequestedModel(mapping, requestedModel) {
 		return true
 	}
+	// 模型名别名族（见 model_name_alias.go）：客户端与账号映射对同一模型写法不一致
+	// （点/横线、带不带尾部版本后缀）时，仍按族内其它写法查找，避免明明有账号能服务
+	// 却被判成「不在分组支持范围」。
+	for _, alias := range ModelNameAliases(requestedModel) {
+		if strings.EqualFold(alias, requestedModel) {
+			continue
+		}
+		if mappingSupportsRequestedModel(mapping, alias) {
+			return true
+		}
+	}
 	normalized := normalizeRequestedModelForLookup(a.Platform, requestedModel)
 	return normalized != requestedModel && mappingSupportsRequestedModel(mapping, normalized)
 }
@@ -1070,6 +1081,17 @@ func (a *Account) ResolveMappedModel(requestedModel string) (mappedModel string,
 	}
 	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
 		return mappedModel, true
+	}
+	// 模型名别名族（见 model_name_alias.go）：按族内其它写法再找一次，命中的值仍是
+	// 账号里配的上游真名（例如 deepseek-v4.1-flash 命中 deepseek-v4.1-flash-1017
+	// 这条，发给上游的就是 -1017，不会被改写成统一名）。
+	for _, alias := range ModelNameAliases(requestedModel) {
+		if strings.EqualFold(alias, requestedModel) {
+			continue
+		}
+		if mappedModel, matched := resolveRequestedModelInMapping(mapping, alias); matched {
+			return mappedModel, true
+		}
 	}
 	normalized := normalizeRequestedModelForLookup(a.Platform, requestedModel)
 	if normalized != requestedModel {

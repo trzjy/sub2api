@@ -154,7 +154,12 @@ func groupModelAllowlistCandidates(model string) []string {
 	}
 
 	for _, candidateModel := range []string{model, normalizeClaudeCodeLongContextModel(model)} {
-		add(candidateModel)
+		// 模型名别名族（见 model_name_alias.go）：白名单里写 claude-fable-5-1、
+		// 客户端发 claude-fable-5.1（或 DeepSeek 带不带尾部版本后缀）时，
+		// 两者应视为同一模型，否则准入与账号映射的判定会打架。
+		for _, alias := range ModelNameAliases(candidateModel) {
+			add(alias)
+		}
 		add(strings.TrimPrefix(candidateModel, "models/"))
 		add(claude.NormalizeModelID(strings.TrimSuffix(candidateModel, "-thinking")))
 		add(NormalizeOpenAICompatRequestedModel(candidateModel))
@@ -230,6 +235,11 @@ func (a GroupModelAllowlist) FilterForListing(source []string) []string {
 func allowlistSourcePatternAllowsModel(patterns []string, model string) bool {
 	for _, pattern := range patterns {
 		if strings.EqualFold(pattern, model) {
+			return true
+		}
+		// 别名族等价：白名单条目与账号映射键写法不同但属同一模型时，
+		// 列表可见性必须与准入一致（「准入允许 ⇒ 列表可见」）。
+		if SameModelNameFamily(pattern, model) {
 			return true
 		}
 		if strings.HasSuffix(pattern, "*") && strings.HasPrefix(strings.ToLower(model), strings.ToLower(strings.TrimSuffix(pattern, "*"))) {
