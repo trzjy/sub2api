@@ -160,7 +160,14 @@ func ProvideCursorExecutionService(
 	deviceIDs CursorDeviceIDResolver,
 ) (*CursorExecutionService, error) {
 	forwarder := NewCursorUpstreamForwarder(WithCursorUpstreamNodes(cursorUpstreamNodesSingleton()))
-	return NewCursorExecutionService(quotaKeys, enc, deviceIDs, forwarder)
+	svc, err := NewCursorExecutionService(quotaKeys, enc, deviceIDs, forwarder)
+	if err != nil {
+		return nil, err
+	}
+	// 装配全局 Auto 动态号池单例
+	pool := NewCursorDynamicPool("", logger.L())
+	SetGlobalCursorDynamicPool(pool)
+	return svc, nil
 }
 
 // BuildInfo contains build information

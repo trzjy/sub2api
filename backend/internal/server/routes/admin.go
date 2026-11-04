@@ -378,6 +378,9 @@ func registerQuotaKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 		// 静态子路径优先于 :id 通配注册（gin 静态优先匹配），auto_entry_config 不会被 :id 吞掉。
 		qk.GET("/auto_entry_config", h.Admin.QuotaKey.GetAutoEntryConfig)
 		qk.PUT("/auto_entry_config", h.Admin.QuotaKey.UpdateAutoEntryConfig)
+		qk.POST("/auto/batch_import", h.Admin.QuotaKey.BatchImportCards)
+		qk.POST("/auto/refresh_all", h.Admin.QuotaKey.RefreshAutoPool)
+		qk.GET("/auto/status", h.Admin.QuotaKey.GetAutoPoolStatus)
 		qk.GET("", h.Admin.QuotaKey.List)
 		qk.GET("/:id", h.Admin.QuotaKey.Get)
 		qk.POST("", h.Admin.QuotaKey.Create)

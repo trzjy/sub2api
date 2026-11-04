@@ -14,25 +14,54 @@
               {{ t('admin.quotaKeys.description') }}
             </p>
           </div>
-          <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
+          <!-- 渠道分流 Tab (Standard 扩展节点 vs Auto 极速号池) -->
+          <div class="inline-flex rounded-lg bg-gray-100 p-1 dark:bg-gray-800">
             <button
-              class="btn btn-secondary"
-              :disabled="loading"
-              :title="t('common.refresh')"
-              @click="load"
+              class="rounded-md px-3 py-1.5 text-xs font-semibold transition-colors"
+              :class="activeChannelTab === 'standard' ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-700 dark:text-blue-400' : 'text-gray-600 hover:text-gray-900 dark:text-gray-400'"
+              @click="activeChannelTab = 'standard'"
             >
-              <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
+              Cursor 标准渠道 (12模型/非Auto)
             </button>
-            <button class="btn btn-secondary" :disabled="sweeping" @click="openSweepDialog">
-              {{ t('admin.quotaKeys.sweepExpired') }}
+            <button
+              class="rounded-md px-3 py-1.5 text-xs font-semibold transition-colors"
+              :class="activeChannelTab === 'auto' ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-700 dark:text-blue-400' : 'text-gray-600 hover:text-gray-900 dark:text-gray-400'"
+              @click="activeChannelTab = 'auto'"
+            >
+              Cursor 极速号池 (Auto动态池)
             </button>
-            <button class="btn btn-secondary" @click="showConfigModal = true">
-              {{ t('admin.quotaKeys.autoEntry.title') }}
-            </button>
-            <button class="btn btn-primary" @click="openCreateDialog">
-              <Icon name="plus" size="md" class="mr-1" />
-              {{ t('admin.quotaKeys.create') }}
-            </button>
+          </div>
+          <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
+            <template v-if="activeChannelTab === 'auto'">
+              <button class="btn btn-secondary" :disabled="loading" @click="refreshAutoPool">
+                <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
+                批量刷新上游额度
+              </button>
+              <button class="btn btn-primary" @click="showAutoBatchModal = true">
+                <Icon name="plus" size="md" class="mr-1" />
+                批量导入Auto卡密
+              </button>
+            </template>
+            <template v-else>
+              <button
+                class="btn btn-secondary"
+                :disabled="loading"
+                :title="t('common.refresh')"
+                @click="load"
+              >
+                <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
+              </button>
+              <button class="btn btn-secondary" :disabled="sweeping" @click="openSweepDialog">
+                {{ t('admin.quotaKeys.sweepExpired') }}
+              </button>
+              <button class="btn btn-secondary" @click="showConfigModal = true">
+                {{ t('admin.quotaKeys.autoEntry.title') }}
+              </button>
+              <button class="btn btn-primary" @click="openCreateDialog">
+                <Icon name="plus" size="md" class="mr-1" />
+                {{ t('admin.quotaKeys.create') }}
+              </button>
+            </template>
           </div>
         </div>
       </template>
@@ -485,6 +514,36 @@
         </div>
       </template>
     </BaseDialog>
+
+    <!-- 批量录入 Auto 卡密弹窗 -->
+    <BaseDialog
+      :show="showAutoBatchModal"
+      title="批量导入 Cursor Auto 卡密"
+      width="normal"
+      @close="showAutoBatchModal = false"
+    >
+      <div class="space-y-4">
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          每行输入一个激活码（例如 sky_cc_xxxx）。系统将自动为每个激活码生成虚拟硬件特征并向上游完成设备绑定，实现 1 对多卡密自动聚合调度。
+        </p>
+        <TextArea
+          v-model="autoBatchText"
+          rows="6"
+          placeholder="sky_cc_xxxxxx&#10;sky_cc_yyyyyy"
+        />
+      </div>
+      <template #footer>
+        <div class="flex items-center justify-end gap-2">
+          <button class="btn btn-secondary" :disabled="autoBatchLoading" @click="showAutoBatchModal = false">
+            {{ t('common.cancel') }}
+          </button>
+          <button class="btn btn-primary" :disabled="autoBatchLoading" @click="submitAutoBatch">
+            <Icon v-if="autoBatchLoading" name="refresh" size="sm" class="mr-1 animate-spin" />
+            开始批量绑定入库
+          </button>
+        </div>
+      </template>
+    </BaseDialog>
   </AppLayout>
 </template>
 
@@ -519,6 +578,12 @@ import PriorityStepper from '@/components/common/PriorityStepper.vue'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+
+// 双轨分流控制：'standard' (非Auto) vs 'auto' (动态号池)
+const activeChannelTab = ref<'standard' | 'auto'>('standard')
+const showAutoBatchModal = ref(false)
+const autoBatchText = ref('')
+const autoBatchLoading = ref(false)
 
 const keys = ref<QuotaKey[]>([])
 const loading = ref(false)
@@ -848,6 +913,57 @@ async function confirmSweep() {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.sweepError')))
   } finally {
     sweeping.value = false
+  }
+}
+
+async function refreshAutoPool() {
+  loading.value = true
+  try {
+    const res = await fetch('/api/v1/admin/quota_keys/auto/refresh_all', { credentials: 'include', method: 'POST' })
+    const data = await res.json()
+    if (data.code === 0 || data.code === 200) {
+      appStore.showSuccess(`刷新完成：成功 ${data.data?.refreshed_count ?? 0} 个，失败 ${data.data?.failed_count ?? 0} 个`)
+    } else {
+      appStore.showError(data.msg || '刷新失败')
+    }
+    await load()
+  } catch (err: unknown) {
+    appStore.showError('批量刷新失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function submitAutoBatch() {
+  const cards = autoBatchText.value
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean)
+  if (!cards.length) {
+    appStore.showError('请输入至少一个激活码')
+    return
+  }
+  autoBatchLoading.value = true
+  try {
+    const res = await fetch('/api/v1/admin/quota_keys/auto/batch_import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ cards })
+    })
+    const data = await res.json()
+    if (data.code === 0 || data.code === 200) {
+      appStore.showSuccess(`批量导入完成：成功 ${data.data?.success_count ?? 0} 个，失败 ${data.data?.failed_count ?? 0} 个`)
+      showAutoBatchModal.value = false
+      autoBatchText.value = ''
+      await load()
+    } else {
+      appStore.showError(data.msg || '批量导入失败')
+    }
+  } catch (err: unknown) {
+    appStore.showError('批量导入请求异常')
+  } finally {
+    autoBatchLoading.value = false
   }
 }
 
