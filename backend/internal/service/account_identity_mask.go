@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -162,6 +163,95 @@ func IsResponseIdentityMaskedAccount(a *Account) bool {
 		return b == "true" || b == "1"
 	default:
 		return false
+	}
+}
+
+// maskedInputBandKey 是「伪装线账号可接档位区间」声明（账号 extra 键名）。
+//
+// 背景：分层路由把请求按估算 input 分成小档（→ 伪装线池）与大档（→ 星思池）。伪装线池
+// 里各账号的真实上下文能力并不一样：qwen 伪装线（codebuddy）只适合小请求，而 kiro 中转
+// 背后是 20 万上下文的上游，适合吃 1 万以上的大请求。用本键把「谁能接哪一段」写成数据，
+// 不再写死在代码里。
+//
+// 取值形如 {"min": 10000, "max": 150000}（单位 = 分层路由的估算 input tokens，闭区间）。
+// 语义：
+//   - 未声明本键 → 保持历史行为：只参与小档，永不被大档选中；
+//   - 已声明本键 → 退出小档池，只在大档被选中，且仅当估算 input 落在 [min, max] 内。
+//
+// 上限必须小于上游真实上下文窗口：kiro-go 对非 Claude 模型按 200k 返回窗口大小，
+// 超过后上游会静默截断（不报错、直接丢上下文），因此上限要留出输出与估算误差的余量。
+const maskedInputBandKey = "masked_input_band"
+
+// MaskedInputBandExtraKey 是 maskedInputBandKey 的导出别名，供仓储层的调度快照投影
+// （filterSchedulerExtra 白名单）引用。该白名单必须保留本键：候选过滤读的是快照投影，
+// 丢掉本键会让大档专用账号退化成「未声明区间」→ 被当成小档账号，反而去抢 1 万以下的小活。
+const MaskedInputBandExtraKey = maskedInputBandKey
+
+// MaskedInputBand 是伪装线账号声明承接的估算 input 区间（单位 tokens，闭区间）。
+type MaskedInputBand struct {
+	Min int
+	Max int
+}
+
+// maskedInputBandUnboundedMax 是只声明 min 时的上界兜底（等价于「不设上限」）。
+const maskedInputBandUnboundedMax = 1 << 30
+
+// Contains 报告估算 input 是否落在本区间内（闭区间，含两端）。
+func (b MaskedInputBand) Contains(estimatedInputTokens int) bool {
+	return estimatedInputTokens >= b.Min && estimatedInputTokens <= b.Max
+}
+
+// MaskedInputBandOf 解析账号 extra.masked_input_band 声明。
+//
+// 返回 ok=false 表示未声明或声明非法（缺 min/max 之外的退化形态、max<=0、min>max、
+// 非对象、nil 账号、nil Extra），此时账号按历史语义处理（只参与小档）。
+// 只容忍「仅 min」或「仅 max」的写法：缺 min 视为 0，缺 max 视为无上限。
+func MaskedInputBandOf(a *Account) (MaskedInputBand, bool) {
+	asnap := a.SnapshotExtra()
+	if a == nil || asnap == nil {
+		return MaskedInputBand{}, false
+	}
+	raw, ok := asnap[maskedInputBandKey]
+	if !ok {
+		return MaskedInputBand{}, false
+	}
+	obj := maskedInputBandObject(raw)
+	if len(obj) == 0 {
+		return MaskedInputBand{}, false
+	}
+	minRaw, hasMin := obj["min"]
+	maxRaw, hasMax := obj["max"]
+	if !hasMin && !hasMax {
+		return MaskedInputBand{}, false
+	}
+	band := MaskedInputBand{Min: 0, Max: maskedInputBandUnboundedMax}
+	if hasMin {
+		band.Min = int(parseExtraFloat64(minRaw))
+	}
+	if hasMax {
+		band.Max = int(parseExtraFloat64(maxRaw))
+	}
+	if band.Min < 0 || band.Max <= 0 || band.Min > band.Max {
+		return MaskedInputBand{}, false
+	}
+	return band, true
+}
+
+// maskedInputBandObject 把 extra 里的原始值归一为 map[string]any。
+// DB 读回的 extra 是 jsonb → map[string]any；升级/导入路径可能带 JSON 字符串，
+// 两种形态都接受，其余形态返回 nil（视为未声明）。
+func maskedInputBandObject(raw any) map[string]any {
+	switch v := raw.(type) {
+	case map[string]any:
+		return v
+	case string:
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(v), &obj); err != nil {
+			return nil
+		}
+		return obj
+	default:
+		return nil
 	}
 }
 

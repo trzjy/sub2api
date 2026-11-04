@@ -126,7 +126,7 @@ func TestLegacyTierRoutingCodeBuddySelectsMappedAccountByPool(t *testing.T) {
 			require.Nil(t, svc.getOpenAIAccountScheduler(context.Background()), "test requires the production legacy path")
 
 			selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-				WithTierRouting(context.Background(), TierRoutingSmall), &groupID, "", "", route.model, nil,
+				WithTierRouting(context.Background(), TierRoutingSmall, tierRoutingSmallEstimate), &groupID, "", "", route.model, nil,
 				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, true, false, route.platform,
 			)
 			require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestLegacyTierRoutingCodeBuddySelectsMappedAccountByPool(t *testing.T) {
 			releaseLegacySchedulerDecisionSelection(selection)
 
 			selection, _, err = svc.SelectAccountWithSchedulerForCapability(
-				WithTierRouting(context.Background(), TierRoutingBig), &groupID, "", "", route.model, nil,
+				WithTierRouting(context.Background(), TierRoutingBig, tierRoutingBigEstimate), &groupID, "", "", route.model, nil,
 				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, true, false, route.platform,
 			)
 			require.NoError(t, err)
@@ -162,7 +162,7 @@ func TestLegacyTierRoutingCodeBuddyStickySmallThenBig(t *testing.T) {
 	require.NoError(t, svc.setStickySessionAccountID(ctx, &groupID, session, 5020, openaiStickySessionTTL))
 
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-		WithTierRouting(ctx, TierRoutingSmall), &groupID, "", session, "kimi-k3", nil,
+		WithTierRouting(ctx, TierRoutingSmall, tierRoutingSmallEstimate), &groupID, "", session, "kimi-k3", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, true, false, PlatformKimi,
 	)
 	require.NoError(t, err)
@@ -171,7 +171,7 @@ func TestLegacyTierRoutingCodeBuddyStickySmallThenBig(t *testing.T) {
 	releaseLegacySchedulerDecisionSelection(selection)
 
 	selection, _, err = svc.SelectAccountWithSchedulerForCapability(
-		WithTierRouting(ctx, TierRoutingBig), &groupID, "", session, "kimi-k3", nil,
+		WithTierRouting(ctx, TierRoutingBig, tierRoutingBigEstimate), &groupID, "", session, "kimi-k3", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, true, false, PlatformKimi,
 	)
 	require.NoError(t, err)
@@ -213,7 +213,7 @@ func TestLegacyTierRoutingCodeBuddyRejectsOutsideQualification(t *testing.T) {
 			t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
 			ctx := context.Background()
 			if tc.withTier {
-				ctx = WithTierRouting(ctx, TierRoutingSmall)
+				ctx = WithTierRouting(ctx, TierRoutingSmall, tierRoutingSmallEstimate)
 			}
 			selection, _, err := svc.SelectAccountWithSchedulerForCapability(
 				ctx, &groupID, "", "", tc.model, nil,
@@ -243,7 +243,7 @@ func TestLegacyTierRoutingCodeBuddyClosedGroupRejectsStickyAccount(t *testing.T)
 	require.NoError(t, svc.setStickySessionAccountID(ctx, &groupID, session, 5040, openaiStickySessionTTL))
 
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-		WithTierRouting(ctx, TierRoutingSmall), &groupID, "", session, "kimi-k3", nil,
+		WithTierRouting(ctx, TierRoutingSmall, tierRoutingSmallEstimate), &groupID, "", session, "kimi-k3", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, true, false, PlatformKimi,
 	)
 	require.NoError(t, err)
@@ -263,7 +263,7 @@ func TestLegacyTierRoutingCodeBuddySmallPoolExhaustionUsesExistingCrossPool(t *t
 	svc := newHy3LegacyTestService(group, accounts, nil)
 	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-		WithTierRouting(context.Background(), TierRoutingSmall), &groupID, "", "", "kimi-k3", nil,
+		WithTierRouting(context.Background(), TierRoutingSmall, tierRoutingSmallEstimate), &groupID, "", "", "kimi-k3", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, true, false, PlatformKimi,
 	)
 	require.NoError(t, err)
@@ -297,7 +297,7 @@ func TestLegacyTierRoutingCodeBuddyDBRecheckUsesFreshCatalog(t *testing.T) {
 	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
 
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-		WithTierRouting(context.Background(), TierRoutingSmall), &groupID, "", "", "kimi-k3", nil,
+		WithTierRouting(context.Background(), TierRoutingSmall, tierRoutingSmallEstimate), &groupID, "", "", "kimi-k3", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, true, false, PlatformKimi,
 	)
 	require.NoError(t, err)
@@ -331,7 +331,7 @@ func TestLegacyTierRoutingCodeBuddySnapshotFreshAccountCatalog(t *testing.T) {
 	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
 
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-		WithTierRouting(context.Background(), TierRoutingSmall), &groupID, "", "", "kimi-k3", nil,
+		WithTierRouting(context.Background(), TierRoutingSmall, tierRoutingSmallEstimate), &groupID, "", "", "kimi-k3", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions, false, false, true, false, PlatformKimi,
 	)
 	require.NoError(t, err)

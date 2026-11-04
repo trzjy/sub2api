@@ -1335,6 +1335,11 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 伪装线池是否可用。裁掉它，快照解码出的账号丢失伪装标记 → 门控恒判门关，
 		// 表现为"门在生产零次开启、kimi-k3 小请求全落未伪装号"（OC-T1-FIX3 根因）。
 		"mask_upstream_identity",
+		// 伪装线可接档位区间必须进投影：候选过滤（isAccountRequestCompatibleReason）
+		// 按 extra.masked_input_band 把伪装线拆成小档池 / 大档池，读的同样是本投影。
+		// 裁掉它，大档专用账号（kiro 中转）会被当成未声明区间的普通伪装号，退回小档
+		// 抢 1 万以下的活，而 1 万以上的请求则整池无候选、全部回落星思付费池。
+		service.MaskedInputBandExtraKey,
 		// HY3 legacy eligibility rechecks the mapped model against this existing
 		// account catalog snapshot. Dropping it makes a valid masked account fail
 		// closed after scheduler snapshot projection.

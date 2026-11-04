@@ -13,20 +13,72 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestTierRoutingClassForEstimate 覆盖分层路由边界语义：估算 input ≤3000 判小
-// （含 =3000 边界），>3000 判大。
+// TestTierRoutingClassForEstimate 覆盖分层路由边界语义：估算 input ≤10000 判小
+// （含 =10000 边界），>10000 判大。
 func TestTierRoutingClassForEstimate(t *testing.T) {
 	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(0))
-	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(2999))
-	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(3000))
-	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(3001))
-	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(5000))
+	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(9999))
+	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(10000))
+	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(10001))
+	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(150000))
+	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(150001))
 }
 
-func TestTierRoutingClassForEstimateUnifiesGeneralMaskThreshold(t *testing.T) {
-	// 通用伪装线 1000 到 3000（含）仍属于小请求，口径与自建账号排除线统一。
-	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(1001))
-	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(3000))
+// TestTierRoutingThresholdCoversFormerSmallBand 锁死阈值沿革：2026-11-04 用户裁定把
+// 阈值从 3000 提到 10000，让伪装线小档把 1 万以下的体量吃满（之前 3001~10000 这段
+// 全部直落星思池，伪装线没发挥潜力）。
+func TestTierRoutingThresholdCoversFormerSmallBand(t *testing.T) {
+	require.Equal(t, 10000, TierRoutingInputThreshold, "阈值必须为 1 万")
+	for _, est := range []int{1001, 3000, 3001, 8000, 10000} {
+		require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(est),
+			"估算 %d 应判小档，交给伪装线小档池", est)
+	}
+}
+
+// TestMaskedInputBandOf 覆盖 extra.masked_input_band 的解析容错：
+//   - 未声明 / 非对象 / 缺 min+max / max<=0 / min>max → ok=false（按历史语义只参与小档）；
+//   - {"min":a,"max":b} → 闭区间，两端都命中；
+//   - 只给 min 或只给 max → 缺失侧取默认（0 / 无上限）。
+func TestMaskedInputBandOf(t *testing.T) {
+	bandAccount := func(raw any) *Account {
+		return &Account{ID: 1, Extra: map[string]any{maskedInputBandKey: raw}}
+	}
+
+	_, ok := MaskedInputBandOf(&Account{ID: 1})
+	require.False(t, ok, "未声明区间 → 不参与大档")
+	_, ok = MaskedInputBandOf(bandAccount(map[string]any{}))
+	require.False(t, ok, "空对象 → 视为未声明")
+	_, ok = MaskedInputBandOf(bandAccount(map[string]any{"foo": 1}))
+	require.False(t, ok, "缺 min/max → 视为未声明")
+	_, ok = MaskedInputBandOf(bandAccount(map[string]any{"min": 10000, "max": 0}))
+	require.False(t, ok, "max<=0 → 视为未声明")
+	_, ok = MaskedInputBandOf(bandAccount(map[string]any{"min": 20000, "max": 10000}))
+	require.False(t, ok, "min>max → 视为未声明")
+
+	band, ok := MaskedInputBandOf(bandAccount(map[string]any{"min": float64(10000), "max": float64(150000)}))
+	require.True(t, ok)
+	require.Equal(t, 10000, band.Min)
+	require.Equal(t, 150000, band.Max)
+	require.False(t, band.Contains(9999), "下界外")
+	require.True(t, band.Contains(10000), "下界含")
+	require.True(t, band.Contains(150000), "上界含")
+	require.False(t, band.Contains(150001), "上界外")
+
+	minOnly, ok := MaskedInputBandOf(bandAccount(map[string]any{"min": 10000}))
+	require.True(t, ok)
+	require.Equal(t, 0+10000, minOnly.Min)
+	require.True(t, minOnly.Contains(900000), "只声明 min 时无上限")
+
+	maxOnly, ok := MaskedInputBandOf(bandAccount(map[string]any{"max": 8000}))
+	require.True(t, ok)
+	require.Equal(t, 0, maxOnly.Min)
+	require.True(t, maxOnly.Contains(0))
+	require.False(t, maxOnly.Contains(8001))
+
+	// 导入路径可能带 JSON 字符串形态。
+	fromString, ok := MaskedInputBandOf(bandAccount(`{"min":10000,"max":150000}`))
+	require.True(t, ok, "JSON 字符串形态也应解析")
+	require.Equal(t, 150000, fromString.Max)
 }
 
 // TestTierRoutingEstimateInputTokens 覆盖既有估算链导出入口：合法 chat completions
@@ -64,6 +116,22 @@ func tierRoutingTestService(t *testing.T, accounts []Account) *OpenAIGatewayServ
 	}
 }
 
+// 测试用估算 input：分别落在小档（≤1 万）与大档（1 万~15 万）区间内。
+const (
+	tierRoutingSmallEstimate = 5000
+	tierRoutingBigEstimate   = 50000
+)
+
+// tierRoutingTestEstimateFor 按档位返回一个落在该档内的估算 input。
+func tierRoutingTestEstimateFor(class TierRoutingClass) int {
+	if class == TierRoutingBig {
+		return tierRoutingBigEstimate
+	}
+	return tierRoutingSmallEstimate
+}
+
+// tierRoutingMaskedAccount 构造伪装（mask_upstream_identity=true）账号，未声明
+// masked_input_band——按历史语义只参与伪装线小档池。
 func tierRoutingMaskedAccount(id int64, platform string) Account {
 	return Account{
 		ID:          id,
@@ -104,6 +172,99 @@ func tierRoutingMaskedAccountWithModel(id int64, platform string, models ...stri
 		Extra:       map[string]any{"mask_upstream_identity": true},
 		Credentials: map[string]any{"model_mapping": mapping},
 	}
+}
+
+// tierRoutingBandAccount 构造伪装线大档账号：mask_upstream_identity=true 且声明
+// extra.masked_input_band=[minInput, maxInput]，其 model_mapping 含目标模型键。
+func tierRoutingBandAccount(id int64, platform string, minInput, maxInput int) Account {
+	a := tierRoutingMaskedAccountWithModel(id, platform, "kimi-k3", "kimi-k3.1")
+	a.Extra[maskedInputBandKey] = map[string]any{"min": minInput, "max": maxInput}
+	return a
+}
+
+// TestTierRoutingMaskedBandSplit 覆盖「按估算 input 把伪装线拆成小档池 / 大档池」：
+//   - 小档（≤1 万）只收未声明区间的伪装号（qwen 伪装线）；声明了区间的大档专用号
+//     （kiro 中转）不得抢小活，1 万以下由不花钱的 qwen 承接；
+//   - 大档（1 万~15 万）只收声明了区间且估算命中区间的伪装号；
+//   - 估算超过全局上限 15 万 → 直接回星思池，不进任何伪装号（kiro 上下文 20 万，超了静默截断）；
+//   - 区间不命中（估算 12 万但账号上限只到 10 万）→ 也落星思池。
+func TestTierRoutingMaskedBandSplit(t *testing.T) {
+	groupID := int64(105001)
+	model := "kimi-k3"
+
+	selectWithEstimate := func(t *testing.T, svc *OpenAIGatewayService, estimated int) *AccountSelectionResult {
+		t.Helper()
+		class := TierRoutingClassForEstimate(estimated)
+		sel, _, err := svc.SelectAccountWithSchedulerForCapability(
+			WithTierRouting(context.Background(), class, estimated), &groupID, "", "", model, nil,
+			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+			false, false, false, false, PlatformKimi,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, sel)
+		require.NotNil(t, sel.Account)
+		return sel
+	}
+
+	newService := func(t *testing.T) *OpenAIGatewayService {
+		return tierRoutingTestService(t, []Account{
+			tierRoutingMaskedAccountWithModel(8101, PlatformKimi, model), // qwen 伪装线（小档专用）
+			tierRoutingBandAccount(8102, PlatformKimi, 10000, 150000),    // kiro 中转（大档专用）
+			tierRoutingUpstreamAccount(8103, PlatformKimi),               // 星思
+		})
+	}
+
+	t.Run("small_lands_on_qwen_not_kiro", func(t *testing.T) {
+		sel := selectWithEstimate(t, newService(t), 5000)
+		require.Equal(t, int64(8101), sel.Account.ID, "小活必须落 qwen 伪装线，不能烧 kiro 积分")
+	})
+
+	t.Run("small_band_account_excluded_from_small_pool", func(t *testing.T) {
+		// 只剩 qwen 伪装线不可用 + kiro 号可用：小活也不许落 kiro。
+		qwen := tierRoutingMaskedAccountWithModel(8111, PlatformKimi, model)
+		future := time.Now().Add(time.Hour)
+		qwen.RateLimitResetAt = &future
+		svc := tierRoutingTestService(t, []Account{
+			qwen,
+			tierRoutingBandAccount(8112, PlatformKimi, 10000, 150000),
+			tierRoutingUpstreamAccount(8113, PlatformKimi),
+		})
+		sel := selectWithEstimate(t, svc, 5000)
+		require.Equal(t, int64(8113), sel.Account.ID, "小档伪装池耗尽时跨档到星思，绝不落大档专用号")
+	})
+
+	t.Run("big_band_lands_on_kiro", func(t *testing.T) {
+		for _, est := range []int{10001, 50000, 149999, 150000} {
+			sel := selectWithEstimate(t, newService(t), est)
+			require.Equal(t, int64(8102), sel.Account.ID, "估算 %d 落 kiro 大档池", est)
+		}
+	})
+
+	t.Run("big_over_ceiling_goes_upstream", func(t *testing.T) {
+		// 超过全局上限：直回星思，绝不进 kiro（20 万上下文之外静默截断）。
+		sel := selectWithEstimate(t, newService(t), TierRoutingMaskedInputCeilingTokens+1)
+		require.Equal(t, int64(8103), sel.Account.ID, "超过伪装线大档上限必须直回星思池")
+	})
+
+	t.Run("big_outside_account_band_goes_upstream", func(t *testing.T) {
+		// 账号自己声明上限 10 万；估算 12 万不命中区间 → 落星思。
+		svc := tierRoutingTestService(t, []Account{
+			tierRoutingBandAccount(8122, PlatformKimi, 10000, 100000),
+			tierRoutingUpstreamAccount(8123, PlatformKimi),
+		})
+		sel := selectWithEstimate(t, svc, 120000)
+		require.Equal(t, int64(8123), sel.Account.ID, "估算超出账号声明区间时必须落星思池")
+	})
+
+	t.Run("big_below_band_min_goes_upstream", func(t *testing.T) {
+		// 账号声明下限 3 万；估算恰好 1.5 万（仍属大档）不命中 → 落星思。
+		svc := tierRoutingTestService(t, []Account{
+			tierRoutingBandAccount(8132, PlatformKimi, 30000, 150000),
+			tierRoutingUpstreamAccount(8133, PlatformKimi),
+		})
+		sel := selectWithEstimate(t, svc, 15000)
+		require.Equal(t, int64(8133), sel.Account.ID, "估算低于账号声明下限时必须落星思池")
+	})
 }
 
 // TestTierRoutingGateOpenForAccounts 覆盖动态门控判定纯函数（派发单 OC-T1，测试 #1 动态门
@@ -226,7 +387,7 @@ func TestTierRoutingSelectAccountFaultPaths(t *testing.T) {
 	selectFor := func(t *testing.T, svc *OpenAIGatewayService, class TierRoutingClass) (*AccountSelectionResult, error) {
 		t.Helper()
 		sel, _, err := svc.SelectAccountWithSchedulerForCapability(
-			WithTierRouting(ctx, class), &groupID, "", "", model, nil,
+			WithTierRouting(ctx, class, tierRoutingTestEstimateFor(class)), &groupID, "", "", model, nil,
 			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
 			false, false, false, false, PlatformKimi,
 		)
@@ -270,8 +431,10 @@ func TestTierRoutingSelectAccountFaultPaths(t *testing.T) {
 		require.Contains(t, buf.String(), "kimi_tier_cross_pool_failover", "小档跨档必须产生告警事件")
 	})
 
-	t.Run("masked_pool_exhausted_big_never_enters_masked", func(t *testing.T) {
-		unavailable := tierRoutingMaskedAccount(5221, PlatformKimi)
+	t.Run("big_band_pool_exhausted_crosses_with_alert", func(t *testing.T) {
+		// 大档先试伪装线大档池（声明了 masked_input_band 的账号）；该账号运行态不可用
+		// 时整池无可用 → 跨档到星思池并告警。
+		unavailable := tierRoutingBandAccount(5221, PlatformKimi, 10000, TierRoutingMaskedInputCeilingTokens)
 		unavailable.RateLimitResetAt = &future
 		svc := tierRoutingTestService(t, []Account{unavailable, tierRoutingUpstreamAccount(5222, PlatformKimi)})
 
@@ -284,8 +447,21 @@ func TestTierRoutingSelectAccountFaultPaths(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, sel)
 		require.NotNil(t, sel.Account)
-		require.Equal(t, int64(5222), sel.Account.ID, "大档只落上游池，任何重试不进伪装池")
-		require.NotContains(t, buf.String(), "kimi_tier_cross_pool_failover", "大档不跨档（无跨档告警）")
+		require.Equal(t, int64(5222), sel.Account.ID, "大档伪装池无可用时跨档到上游池")
+		require.Contains(t, buf.String(), "kimi_tier_cross_pool_failover", "大档跨档必须产生告警事件")
+	})
+
+	t.Run("big_never_falls_back_to_small_masked_pool", func(t *testing.T) {
+		// 大档伪装池空、但存在未声明区间的小档伪装号：大请求绝不能落到它身上。
+		svc := tierRoutingTestService(t, []Account{
+			tierRoutingMaskedAccount(5231, PlatformKimi),
+			tierRoutingUpstreamAccount(5232, PlatformKimi),
+		})
+		sel, err := selectFor(t, svc, TierRoutingBig)
+		require.NoError(t, err)
+		require.NotNil(t, sel)
+		require.NotNil(t, sel.Account)
+		require.Equal(t, int64(5232), sel.Account.ID, "大请求不得回落到小档伪装池")
 	})
 }
 
@@ -305,7 +481,7 @@ func TestTierRoutingSelectAccountRouting(t *testing.T) {
 			tierRoutingMaskedAccount(4001, PlatformKimi),
 			tierRoutingUpstreamAccount(4002, PlatformKimi),
 		})
-		selCtx := WithTierRouting(ctx, TierRoutingSmall)
+		selCtx := WithTierRouting(ctx, TierRoutingSmall, tierRoutingSmallEstimate)
 		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
 			selCtx, &groupID, "", "", model, nil,
 			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
@@ -322,7 +498,7 @@ func TestTierRoutingSelectAccountRouting(t *testing.T) {
 			tierRoutingMaskedAccount(4011, PlatformKimi),
 			tierRoutingUpstreamAccount(4012, PlatformKimi),
 		})
-		selCtx := WithTierRouting(ctx, TierRoutingBig)
+		selCtx := WithTierRouting(ctx, TierRoutingBig, tierRoutingBigEstimate)
 		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
 			selCtx, &groupID, "", "", model, nil,
 			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
@@ -339,7 +515,7 @@ func TestTierRoutingSelectAccountRouting(t *testing.T) {
 		svc := tierRoutingTestService(t, []Account{
 			tierRoutingUpstreamAccount(4022, PlatformKimi),
 		})
-		selCtx := WithTierRouting(ctx, TierRoutingSmall)
+		selCtx := WithTierRouting(ctx, TierRoutingSmall, tierRoutingSmallEstimate)
 		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
 			selCtx, &groupID, "", "", model, nil,
 			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
@@ -354,7 +530,7 @@ func TestTierRoutingSelectAccountRouting(t *testing.T) {
 	t.Run("both_pools_empty_fail_closed", func(t *testing.T) {
 		// 双侧整池无可用 → fail-closed 返回可见错误，禁止隐式转 infer-kimi / 第三回退源。
 		svc := tierRoutingTestService(t, nil)
-		selCtx := WithTierRouting(ctx, TierRoutingSmall)
+		selCtx := WithTierRouting(ctx, TierRoutingSmall, tierRoutingSmallEstimate)
 		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
 			selCtx, &groupID, "", "", model, nil,
 			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
@@ -390,7 +566,7 @@ func TestTierRoutingSelectAccountPlatformCombinations(t *testing.T) {
 				tierRoutingUpstreamAccount(7002, combo.platform),
 			})
 			sel, _, err := svc.SelectAccountWithSchedulerForCapability(
-				WithTierRouting(context.Background(), TierRoutingSmall), &groupID, "", "", combo.model, nil,
+				WithTierRouting(context.Background(), TierRoutingSmall, tierRoutingSmallEstimate), &groupID, "", "", combo.model, nil,
 				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
 				false, false, false, false, combo.platform,
 			)
@@ -405,7 +581,7 @@ func TestTierRoutingSelectAccountPlatformCombinations(t *testing.T) {
 				tierRoutingUpstreamAccount(7012, combo.platform),
 			})
 			sel, _, err := svc.SelectAccountWithSchedulerForCapability(
-				WithTierRouting(context.Background(), TierRoutingBig), &groupID, "", "", combo.model, nil,
+				WithTierRouting(context.Background(), TierRoutingBig, tierRoutingBigEstimate), &groupID, "", "", combo.model, nil,
 				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
 				false, false, false, false, combo.platform,
 			)
@@ -419,7 +595,7 @@ func TestTierRoutingSelectAccountPlatformCombinations(t *testing.T) {
 				tierRoutingUpstreamAccount(7022, combo.platform),
 			})
 			sel, _, err := svc.SelectAccountWithSchedulerForCapability(
-				WithTierRouting(context.Background(), TierRoutingSmall), &groupID, "", "", combo.model, nil,
+				WithTierRouting(context.Background(), TierRoutingSmall, tierRoutingSmallEstimate), &groupID, "", "", combo.model, nil,
 				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
 				false, false, false, false, combo.platform,
 			)

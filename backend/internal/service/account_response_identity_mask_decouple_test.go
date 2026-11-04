@@ -64,7 +64,7 @@ func TestResponseIdentityMaskDecouplesTierRouting(t *testing.T) {
 
 	t.Run("分层池准入判定与基准账号一致", func(t *testing.T) {
 		// 大档（upstream 池）：新开关账号与基准账号都必须入选（它仍是上游供给账号）。
-		bigCtx := WithTierRouting(context.Background(), TierRoutingBig)
+		bigCtx := WithTierRouting(context.Background(), TierRoutingBig, tierRoutingBigEstimate)
 		require.Equal(t, openAIAccountEligibleForTierPool(bigCtx, plain),
 			openAIAccountEligibleForTierPool(bigCtx, decoupled),
 			"响应侧净化开关不得改变大档池准入判定")
@@ -72,7 +72,7 @@ func TestResponseIdentityMaskDecouplesTierRouting(t *testing.T) {
 			"该账号仍应留在大档上游池（保住档位供给）")
 
 		// 小档（masked 池）：新开关账号与基准账号都必须落选（都不是伪装线账号）。
-		smallCtx := WithTierRouting(context.Background(), TierRoutingSmall)
+		smallCtx := WithTierRouting(context.Background(), TierRoutingSmall, tierRoutingSmallEstimate)
 		require.Equal(t, openAIAccountEligibleForTierPool(smallCtx, plain),
 			openAIAccountEligibleForTierPool(smallCtx, decoupled),
 			"响应侧净化开关不得改变小档池准入判定")
@@ -92,11 +92,11 @@ func TestResponseIdentityMaskKeepsLegacyMaskBehavior(t *testing.T) {
 	require.True(t, tierRoutingGateOpenForAccounts([]Account{*legacy}, model),
 		"老开关账号的分层门控行为不变")
 
-	bigCtx := WithTierRouting(context.Background(), TierRoutingBig)
+	bigCtx := WithTierRouting(context.Background(), TierRoutingBig, tierRoutingBigEstimate)
 	require.False(t, openAIAccountEligibleForTierPool(bigCtx, legacy),
 		"老开关账号仍只进小档伪装池（行为不变）")
 
-	smallCtx := WithTierRouting(context.Background(), TierRoutingSmall)
+	smallCtx := WithTierRouting(context.Background(), TierRoutingSmall, tierRoutingSmallEstimate)
 	require.True(t, openAIAccountEligibleForTierPool(smallCtx, legacy),
 		"老开关账号仍进小档伪装池（行为不变）")
 }

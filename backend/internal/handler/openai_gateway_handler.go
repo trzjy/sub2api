@@ -5554,7 +5554,7 @@ func applyTierRouting(
 		return nil, fmt.Errorf("tier routing input estimate failed: %w", err)
 	}
 	class := service.TierRoutingClassForEstimate(estimated)
-	ctx := service.WithTierRouting(baseCtx, class)
+	ctx := service.WithTierRouting(baseCtx, class, estimated)
 	requestID, _ := c.Request.Context().Value(ctxkey.RequestID).(string)
 	reqLog.Info("kimi_tier_routing_decision",
 		zap.String("request_id", requestID),

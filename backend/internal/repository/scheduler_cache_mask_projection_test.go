@@ -65,6 +65,54 @@ func TestSchedulerCacheSnapshotPreservesMaskUpstreamIdentity(t *testing.T) {
 		"快照投影必须保留 model_mapping（选号/门控均依赖）")
 }
 
+// TestSchedulerCacheSnapshotPreservesMaskedInputBand 钉死分层路由大档改造的投影依赖：
+// 候选过滤把伪装线拆成小档池（未声明区间）/ 大档池（extra.masked_input_band 命中区间），
+// 读的同样是 sched:meta 元数据投影。若投影裁掉 masked_input_band，大档专用账号（kiro 中转）
+// 会退化成普通伪装号 → 被小档池收下、反过来抢 1 万以下的小活，而 1 万以上的请求整池
+// 无候选、全部回落星思付费池（两种方向都错，且不报错、只在账单上体现）。
+func TestSchedulerCacheSnapshotPreservesMaskedInputBand(t *testing.T) {
+	ctx := context.Background()
+	cache, _ := newSchedulerCacheUnitWithRedis(t)
+
+	bucket := service.SchedulerBucket{
+		GroupID:  56,
+		Platform: "kimi@agg1",
+		Mode:     service.SchedulerModeSingle,
+	}
+
+	banded := service.Account{
+		ID:          451,
+		Platform:    service.PlatformKimi,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Extra: map[string]any{
+			"mask_upstream_identity": true,
+			"masked_input_band":      map[string]any{"min": 10000, "max": 150000},
+		},
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"kimi-k3": "kimi-k3"},
+		},
+	}
+
+	token, err := cache.CaptureBucketWriteToken(ctx, bucket)
+	require.NoError(t, err)
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, []service.Account{banded}))
+
+	got, hit, err := cache.GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Len(t, got, 1)
+
+	parsed, ok := service.MaskedInputBandOf(&got[0])
+	require.True(t, ok, "快照投影必须保留 masked_input_band，否则大档专用账号被误判为小档账号")
+	require.Equal(t, 10000, parsed.Min)
+	require.Equal(t, 150000, parsed.Max)
+	require.True(t, parsed.Contains(50000))
+	require.False(t, parsed.Contains(2000))
+}
+
 func TestSchedulerCacheSnapshotPreservesUpstreamModelMetadata(t *testing.T) {
 	ctx := context.Background()
 	cache, _ := newSchedulerCacheUnitWithRedis(t)
