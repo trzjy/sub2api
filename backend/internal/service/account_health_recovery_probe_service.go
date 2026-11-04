@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -868,11 +869,22 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlane(ctx context.C
 		return false, fmt.Errorf("invalid probe base url: %w", err)
 	}
 
-	useResponses := openai_compat.ShouldUseResponsesAPI(acc.SnapshotExtra())
+	// base_url 若已经写到具体端点（…/v1/chat/completions、…/v1/responses），它就
+	// 是管理员写死的真实端点，探测必须照用、不得再按能力标记派生别的端点（见
+	// probeConcreteEndpoint 的生产实证）。
+	concreteEndpoint, concreteIsResponses := probeConcreteEndpoint(normalizedBase)
+	useResponses := concreteIsResponses
+	if !concreteEndpoint {
+		useResponses = openai_compat.ShouldUseResponsesAPI(acc.SnapshotExtra())
+	}
 	var targetURL string
 	var payload []byte
 	if useResponses {
-		targetURL = openAIResponsesURLForBase(acc.Platform, normalizedBase)
+		if concreteEndpoint {
+			targetURL = normalizedBase
+		} else {
+			targetURL = openAIResponsesURLForBase(acc.Platform, normalizedBase)
+		}
 		payload, err = json.Marshal(map[string]any{
 			"model":             upstreamModel,
 			"input":             "hi",
@@ -880,7 +892,11 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlane(ctx context.C
 			"stream":            false,
 		})
 	} else {
-		targetURL = openAIChatCompletionsURLForBase(normalizedBase)
+		if concreteEndpoint {
+			targetURL = normalizedBase
+		} else {
+			targetURL = openAIChatCompletionsURLForBase(normalizedBase)
+		}
 		payload, err = json.Marshal(map[string]any{
 			"model":      upstreamModel,
 			"messages":   []map[string]any{{"role": "user", "content": "hi"}},
@@ -949,6 +965,35 @@ func (p *AccountHealthRecoveryProbeService) probeModelForAccount(acc *Account) s
 		return m
 	}
 	return strings.TrimSpace(openai.DefaultTestModel)
+}
+
+// probeConcreteEndpoint 判断 base_url 是否已经写到具体端点（而非主机或 /v1 前缀），
+// 并返回该端点是否为 Responses 协议。
+//
+// 为什么必须单独判：base_url 写成 http://host/v1/chat/completions 时，端点派生函数
+// （buildVersionedEndpointURL）看到 path 既不以 /v1/responses 结尾、末段也不是版本号，
+// 会直接追加一段 /v1/responses，拼出 /v1/chat/completions/v1/responses 这种根本不存在
+// 的路径。这里的后果是致命的：探测永远 404/秒失败（生产实证：账号 451 探针 50ms 失败、
+// 熔断后停到 9999 年永远恢复不了），而同一 base_url 的业务链路完全正常（线上 419/416 号
+// 各 2~3 万次请求均如此配置）。
+//
+// 更糟的是它构成死循环：extra 里的 openai_responses_supported 由自动探测写回，而探测本身
+// 要先能把 Responses 端点探通才能写回。URL 拼错 → 标记永远缺失 → 按"未探测=保留旧行为=
+// 走 Responses"处理 → 继续拼错。管理员既然写死了完整端点，就照用，不再派生。
+func probeConcreteEndpoint(base string) (isConcrete bool, isResponses bool) {
+	parsed, err := url.Parse(strings.TrimSpace(base))
+	if err != nil {
+		return false, false
+	}
+	path := strings.ToLower(strings.TrimRight(parsed.Path, "/"))
+	switch {
+	case strings.HasSuffix(path, "/responses"):
+		return true, true
+	case strings.HasSuffix(path, "/chat/completions"):
+		return true, false
+	default:
+		return false, false
+	}
 }
 
 // evaluateProbeDataPlaneResponse 判定一次真实数据面探测是否成功。

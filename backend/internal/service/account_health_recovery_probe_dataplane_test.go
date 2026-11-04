@@ -147,6 +147,71 @@ func TestProbeUpstreamDataPlaneUsesChatCompletionsAndJudgesBody(t *testing.T) {
 	require.Equal(t, false, body["stream"], "非流式探测")
 }
 
+// base_url 已经写到具体端点时，探测必须照用该端点，不得再派生 /v1/responses。
+//
+// 生产实证（账号 451）：base_url = http://kiro-go:8080/v1/chat/completions，extra 里
+// 没有 openai_responses_supported 标记（未探测按"保留旧行为=走 Responses"处理），旧
+// 实现把请求打到 /v1/chat/completions/v1/responses，探针 50ms 秒失败、账号停到 9999 年
+// 永远恢复不了；而同一 base_url 的业务链路完全正常（线上 419/416 号各 2~3 万次请求）。
+func TestProbeDataPlaneKeepsConcreteEndpointBaseURL(t *testing.T) {
+	rlRepo := &probeRateLimitRepo{}
+	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
+	cand := parkedBreakerAccount(22, 0)
+	cand.Credentials = map[string]any{
+		"api_key":  "sk-probe-test",
+		"base_url": "https://example.com/v1/chat/completions",
+	}
+	// 前提校验：不带能力标记时 ShouldUseResponsesAPI 确实会返回 true，
+	// 否则这条用例就退化成"本来就选 chat"，测不到派生逻辑。
+	require.True(t, openai_compat.ShouldUseResponsesAPI(cand.SnapshotExtra()),
+		"未探测账号默认按走 Responses 处理，这正是需要被 base_url 具体端点覆盖的情形")
+
+	repo := &probeRepoMock{
+		accounts:   map[int64]*Account{22: cand},
+		candidates: []*Account{cand},
+	}
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK,
+		`{"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}`)
+	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
+	setFastProbeRetry(p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream.cancelAfterRequests(2, cancel)
+
+	p.RunOnce(ctx)
+	p.wg.Wait()
+
+	rec := upstream.lastRecord(t)
+	require.Equal(t, "/v1/chat/completions", rec.Path,
+		"base_url 已带具体端点时不得再派生 /v1/responses（会拼出不存在的路径）")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body, &body))
+	require.Contains(t, body, "messages", "具体端点是非 Responses 端点，探测体按 chat 形状构造")
+}
+
+// probeConcreteEndpoint 的判定边界：只有真正写到端点的 base 才算具体端点，
+// 主机与 /v1 前缀仍走能力标记派生的老路。
+func TestProbeConcreteEndpointClassification(t *testing.T) {
+	cases := []struct {
+		base        string
+		concrete    bool
+		isResponses bool
+	}{
+		{"https://api.openai.com", false, false},
+		{"https://api.openai.com/v1", false, false},
+		{"https://api.openai.com/v1/", false, false},
+		{"http://kiro-go:8080/v1/chat/completions", true, false},
+		{"https://token.sensenova.cn/v1/chat/completions", true, false},
+		{"https://api.openai.com/v1/responses", true, true},
+	}
+	for _, c := range cases {
+		concrete, isResponses := probeConcreteEndpoint(c.base)
+		require.Equal(t, c.concrete, concrete, "concrete: %s", c.base)
+		require.Equal(t, c.isResponses, isResponses, "isResponses: %s", c.base)
+	}
+}
+
 // 传输层失败（上游不可达）按「不健康」处理，返回 (false, nil) 而非 error——保持停调，
 // 不得误触降级到期恢复。
 func TestProbeUpstreamDataPlaneTransportFailureIsUnhealthy(t *testing.T) {
