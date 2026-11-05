@@ -288,7 +288,7 @@ func CountLegacyCredentials(ctx context.Context, db sqlExecutor, includeDeleted 
 			}
 			needEncrypt := false
 			for _, key := range service.SensitiveCredentialKeys {
-				if str, ok := credentials[key].(string); ok && str != "" && !credcrypt.IsEncrypted(str) {
+				if str, ok := stored[key].(string); ok && str != "" && !credcrypt.IsEncrypted(str) {
 					needEncrypt = true
 					break
 				}
