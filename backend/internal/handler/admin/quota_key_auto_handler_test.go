@@ -54,6 +54,9 @@ type autoCardQuotaKeyRepo struct {
 	failUpdateMetaAll bool
 	// failUpdateStatusFields 为真时 UpdateStatusFields 失败（模拟失败态无法持久化）。
 	failUpdateStatusFields bool
+	// failGetByID 为真时 GetByID 失败（模拟刷新成功后无法复核权威状态）。
+	// 只影响 GetStatus 路径；事务内 GetByIDInTx 不受影响，与生产两种读入口一致。
+	failGetByID bool
 	// failUpdateMetaExpireTimes 控制「带 expires_at 的 UpdateMeta 调用」的失败次数：
 	// 0 = 不失败；-1 = 一直失败；n>0 = 前 n 次失败（覆盖瞬时 DB 抖动）。
 	// 只写 notes 的调用不受它影响（模拟「转可选写入被 DB 拒绝、但标记写入可用」）。
@@ -125,6 +128,9 @@ func (r *autoCardQuotaKeyRepo) Create(_ context.Context, input service.CreateQuo
 func (r *autoCardQuotaKeyRepo) GetByID(_ context.Context, id int64) (*ent.QuotaKey, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.failGetByID {
+		return nil, fmt.Errorf("quota_keys: get by id failed")
+	}
 	qk, ok := r.keys[id]
 	if !ok {
 		return nil, &ent.NotFoundError{}
@@ -133,8 +139,15 @@ func (r *autoCardQuotaKeyRepo) GetByID(_ context.Context, id int64) (*ent.QuotaK
 }
 
 // GetByIDInTx 满足 svc.Update 的观测窄接口断言（替身装配下 tx 为 nil）。
-func (r *autoCardQuotaKeyRepo) GetByIDInTx(ctx context.Context, _ *ent.Tx, id int64) (*ent.QuotaKey, error) {
-	return r.GetByID(ctx, id)
+// 刻意不复用 GetByID：生产里事务内读与 GetStatus 读是两个入口，failGetByID 只模拟后者。
+func (r *autoCardQuotaKeyRepo) GetByIDInTx(_ context.Context, _ *ent.Tx, id int64) (*ent.QuotaKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	qk, ok := r.keys[id]
+	if !ok {
+		return nil, &ent.NotFoundError{}
+	}
+	return qk, nil
 }
 
 // UpdateMeta 复刻生产仓储的双指针语义：外层 nil = 不写；内层 nil = 显式清空；
@@ -906,3 +919,30 @@ func TestQuotaKeyAuto_RefreshAutoCard_FailureThenSuccess_ReRegisters(t *testing.
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestQuotaKeyAuto_RefreshAutoCard_RecheckError_WithdrawsAndFailsClosed 锁定：
+// 刷新成功但无法复核权威状态（GetStatus 失败）时，必须撤出运行池并硬失败 ——
+// 宁可不服务，也不能让运行期池成员与重启回放依据的 DB 状态分叉。
+func TestQuotaKeyAuto_RefreshAutoCard_RecheckError_WithdrawsAndFailsClosed(t *testing.T) {
+	upstream := newAutoCardUpstreamStub(t)
+	repo := newAutoCardQuotaKeyRepo()
+	repo.keys[1] = &ent.QuotaKey{
+		ID:        1,
+		CodeLast4: "0001",
+		Status:    domain.QuotaKeyStatusActive,
+		Notes:     strPtr(formatAutoPoolNotes("dev-code-1", "dev-md5-1")),
+		Priority:  5,
+	}
+	// 快照写入走事务内读，仍可成功；复核走 GetStatus（GetByID）并失败。
+	repo.failGetByID = true
+	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
+	pool.RegisterCard(1, "0001", "dev-code-1", "dev-md5-1", 5, 10)
+	installAutoCardPool(t, pool)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
+
+	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
+	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/1/refresh", "")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	require.Empty(t, pool.ListCards(), "无法复核权威状态时必须撤池，不得与重启回放分叉")
+}

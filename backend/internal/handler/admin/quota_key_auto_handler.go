@@ -200,31 +200,41 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 		overCount := countResp.OverCount
 		sumCount := countResp.SumCount
 
-		// 阶段 5：持久化额度快照（绝不存 Token）。失败 → 卡保持不可选，不入池。
-		if snapErr := h.syncAutoCardUsageSnapshot(c.Request.Context(), st.ID, overCount, sumCount); snapErr != nil {
+		// 阶段 5 + 6：快照回写、转可选、入池，全部在同一激活码串行边界内完成 ——
+		// 与单卡刷新共用该边界，避免并发刷新读到「已入池但快照未提交」的中间态。
+		// 只有五步全部成功的卡密才允许进入内存池，失败卡密永不进池。
+		var stageErr error
+		activateFailed := false
+		_ = service.WithAutoCardSync(st.ID, func() error {
+			if snapErr := h.syncAutoCardUsageSnapshot(c.Request.Context(), st.ID, overCount, sumCount); snapErr != nil {
+				stageErr = fmt.Errorf("snapshot persist failed: %v", snapErr)
+				return nil
+			}
+			if activateErr := h.activateAutoCard(c.Request.Context(), st.ID, req.ExpiresAt); activateErr != nil {
+				stageErr = activateErr
+				activateFailed = true
+				return nil
+			}
+			if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
+				pool.RegisterCard(st.ID, cardKey, devCode, devMD5, overCount, sumCount, st.Priority)
+			}
+			return nil
+		})
+		if stageErr != nil {
 			res.FailedCount++
-			res.Errors = append(res.Errors, fmt.Sprintf("card %s snapshot persist failed: %v", maskCardKey(cardKey), snapErr))
+			if activateFailed {
+				msg := fmt.Sprintf("card %s bound upstream but NOT selectable locally (%v) — 已绑定已查额但未转可选，需人工处理: row %d stays unselectable (expires_at in the past) and will not be re-consumed",
+					maskCardKey(cardKey), stageErr, st.ID)
+				slog.Error("cursor auto: bound upstream but activation to selectable failed, row left unselectable and requires manual handling",
+					"quota_key_id", st.ID,
+					"activate_err", stageErr,
+				)
+				res.Errors = append(res.Errors, msg)
+			} else {
+				res.Errors = append(res.Errors, fmt.Sprintf("card %s %v", maskCardKey(cardKey), stageErr))
+			}
 			continue
 		}
-
-		// 阶段 6：仅当 3、4、5 全部成功后，才恢复设定的 expires_at 并进入内存池。
-		if activateErr := h.activateAutoCard(c.Request.Context(), st.ID, req.ExpiresAt); activateErr != nil {
-			res.FailedCount++
-			msg := fmt.Sprintf("card %s bound upstream but NOT selectable locally (%v) — 已绑定已查额但未转可选，需人工处理: row %d stays unselectable (expires_at in the past) and will not be re-consumed",
-				maskCardKey(cardKey), activateErr, st.ID)
-			slog.Error("cursor auto: bound upstream but activation to selectable failed, row left unselectable and requires manual handling",
-				"quota_key_id", st.ID,
-				"activate_err", activateErr,
-			)
-			res.Errors = append(res.Errors, msg)
-			continue
-		}
-
-		// 入池。只有「落库 + 绑定 + 预热 + 查额 + 快照回写」五步全部成功的卡密才允许进入
-		// 内存池，失败卡密永不进池（避免污染池内额度统计与取号候选集，且天然保持不可选）。
-	if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
-		pool.RegisterCard(st.ID, cardKey, devCode, devMD5, overCount, sumCount, st.Priority)
-	}
 
 		res.SuccessCount++
 	}
@@ -312,12 +322,17 @@ func (h *QuotaKeyHandler) RefreshAutoPool(c *gin.Context) {
 			failed++
 			continue
 		}
-		// 只更新额度，保留单卡的冷却/禁用状态。
-		pool.UpdateCardCounts(card.ID, countResp.OverCount, countResp.SumCount)
-
-		// 同步回写数据库快照（单卡与全量刷新均持久化，供前端读取真实剩余额度）。
-		// 失败只影响可观测性，不影响号池运行时额度。
-		if snapErr := h.syncAutoCardUsageSnapshot(c.Request.Context(), card.ID, countResp.OverCount, countResp.SumCount); snapErr != nil {
+		// 额度更新与快照回写放入同一激活码串行边界：避免与单卡刷新的「DB 写入 → 池同步」
+		// 交错，把已提交的权威状态覆盖成旧值。只更新额度，保留冷却/禁用状态。
+		var snapErr error
+		_ = service.WithAutoCardSync(card.ID, func() error {
+			if snapErr = h.syncAutoCardUsageSnapshot(c.Request.Context(), card.ID, countResp.OverCount, countResp.SumCount); snapErr != nil {
+				return nil
+			}
+			pool.UpdateCardCounts(card.ID, countResp.OverCount, countResp.SumCount)
+			return nil
+		})
+		if snapErr != nil {
 			slog.Warn("cursor auto: refresh pool snapshot persist failed", "card_id", card.ID, "err", snapErr)
 			failed++
 			continue
@@ -394,46 +409,21 @@ func (h *QuotaKeyHandler) RefreshAutoCard(c *gin.Context) {
 	}
 
 	countResp, cerr := client.RefreshCount(c.Request.Context(), devCode, devMD5)
-	if cerr != nil || countResp == nil {
-		failErr := cerr
-		if failErr == nil {
-			failErr = fmt.Errorf("cursor auto: refresh count returned nil response")
-		}
-		// 失败态必须**先落库成功、再撤出运行池**：启动回放只拦截已持久化的
-		// last_refresh_error，若这里是「先撤池、后落库失败」，重启会把该卡以旧额度
-		// 重新纳管，运行期与重启期分叉。落库失败时保持池内状态不变并硬失败上报。
-		if snapErr := h.svc.WriteAutoCardUsageSnapshot(c.Request.Context(), id, nil, failErr); snapErr != nil {
-			slog.Error("cursor auto: single-card refresh error persist failed", "card_id", id, "err", snapErr)
-			response.Error(c, http.StatusInternalServerError, "persist refresh failure state failed: "+snapErr.Error())
-			return
-		}
-		// 失败态已持久化：从号池注销该卡，保持运行态与重启态一致（启动时会拦截非空错误卡）
-		if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
-			pool.UnregisterCard(id)
-		}
-		response.Error(c, http.StatusBadGateway, "refresh count failed: "+failErr.Error())
-		return
+	refreshErr := cerr
+	if refreshErr == nil && countResp == nil {
+		refreshErr = fmt.Errorf("cursor auto: refresh count returned nil response")
 	}
 
-	// 持久化回写数据库快照，供前端读取真实剩余额度。
-	// 快照写库失败时，内存与数据库已分叉，必须直接返回 500 报错，禁止虚假成功。
-	if snapErr := h.syncAutoCardUsageSnapshot(c.Request.Context(), id, countResp.OverCount, countResp.SumCount); snapErr != nil {
-		slog.Error("cursor auto: single-card refresh snapshot persist failed", "card_id", id, "err", snapErr)
-		response.Error(c, http.StatusInternalServerError, "persist usage snapshot failed: "+snapErr.Error())
+	// DB 快照/失败态写入与运行池成员同步必须在同一串行边界内完成，否则并发单卡刷新
+	// 会出现「后提交的 DB 状态被先到的池变更覆盖」，运行期池成员与重启回放分叉。
+	if applyErr := h.applyAutoCardRefresh(c.Request.Context(), id, devCode, devMD5, countResp, refreshErr); applyErr != nil {
+		slog.Error("cursor auto: single-card refresh apply failed", "card_id", id, "err", applyErr)
+		response.Error(c, http.StatusInternalServerError, "apply refresh state failed: "+applyErr.Error())
 		return
 	}
-
-	// 更新号池内存额度（只改额度，保留冷却/禁用状态）。
-	if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
-		if poolHasCard(pool, id) {
-			pool.UpdateCardCounts(id, countResp.OverCount, countResp.SumCount)
-		} else if rerr := h.reregisterAutoCard(c.Request.Context(), pool, id, devCode, devMD5, countResp); rerr != nil {
-			// 失败态已解除（last_refresh_error 已清空）却无法重新纳管：重启回放会重新
-			// 入池而当前进程不会，属运行期/重启期分叉，必须硬失败暴露而不是静默成功。
-			slog.Error("cursor auto: re-register recovered card into pool failed", "card_id", id, "err", rerr)
-			response.Error(c, http.StatusInternalServerError, "re-register card into pool failed: "+rerr.Error())
-			return
-		}
+	if refreshErr != nil {
+		response.Error(c, http.StatusBadGateway, "refresh count failed: "+refreshErr.Error())
+		return
 	}
 
 	response.Success(c, gin.H{
@@ -444,68 +434,68 @@ func (h *QuotaKeyHandler) RefreshAutoCard(c *gin.Context) {
 	})
 }
 
-// poolHasCard 报告指定卡密当前是否仍在运行池内（ListCards 返回的是快照副本）。
-func poolHasCard(pool *service.CursorDynamicPool, id int64) bool {
-	for _, card := range pool.ListCards() {
-		if card.ID == id {
-			return true
+// applyAutoCardRefresh 在指定激活码的串行边界内完成「DB 写入 → 运行池成员同步」。
+//
+// 两条路径的失败关闭语义：
+//   - 失败刷新：先落库失败态，成功后才撤池；落库失败则保持池内状态不变并返回错误
+//     （此时 DB 无失败态，重启回放会纳管该卡，撤池会导致两侧分叉）。
+//   - 成功刷新：先落库快照（清空失败态），再以**刚提交的持久化状态**为唯一依据决定池
+//     成员（与启动回放同一判定）；读库失败时撤池并返回错误，宁可不服务也不与回放分叉。
+func (h *QuotaKeyHandler) applyAutoCardRefresh(ctx context.Context, id int64, devCode, devMD5 string, countResp *cursorupstream.CountResponse, refreshErr error) error {
+	return service.WithAutoCardSync(id, func() error {
+		pool := service.GetGlobalCursorDynamicPool()
+
+		if refreshErr != nil {
+			if snapErr := h.svc.WriteAutoCardUsageSnapshot(ctx, id, nil, refreshErr); snapErr != nil {
+				return fmt.Errorf("persist refresh failure state: %w", snapErr)
+			}
+			if pool != nil {
+				pool.UnregisterCard(id)
+			}
+			return nil
 		}
-	}
-	return false
+
+		if snapErr := h.syncAutoCardUsageSnapshot(ctx, id, countResp.OverCount, countResp.SumCount); snapErr != nil {
+			return fmt.Errorf("persist usage snapshot: %w", snapErr)
+		}
+		if pool == nil {
+			return nil
+		}
+		st, err := h.svc.GetStatus(ctx, id)
+		if err != nil {
+			// 无法确认权威状态：按「不服务也不分叉」处置，撤池并硬失败。
+			pool.UnregisterCard(id)
+			return fmt.Errorf("load quota key %d: %w", id, err)
+		}
+		if !autoCardPoolEligible(st) {
+			pool.UnregisterCard(id)
+			return nil
+		}
+		// cardKey 仅作标识（网络取号只用 dev/md5）；原子纳管避免与并发路径互相清理 Token。
+		pool.EnsureCardRegistered(id, st.CodeValueMasked, devCode, devMD5, countResp.OverCount, countResp.SumCount, st.Priority)
+		return nil
+	})
 }
 
-// reregisterAutoCard 在单卡刷新成功后，把此前因刷新失败被移出运行池的卡按统一
-// 注册路径重新纳管。
-//
-// 入池资格与启动回放（CursorDynamicPool.LoadFromRepository）保持同一判定：status
-// 必须 active、未过期、notes 带 Auto 前缀且不含 bind=failed 标记；priority 取库内值，
-// 避免重新纳管把选卡顺序重置为 0。不合格时保持池外（重启回放同样会排除，二者仍同态），
-// 仅读库失败才返回错误，由调用方硬失败暴露。
-func (h *QuotaKeyHandler) reregisterAutoCard(ctx context.Context, pool *service.CursorDynamicPool, id int64, devCode, devMD5 string, countResp *cursorupstream.CountResponse) error {
-	st, err := h.svc.GetStatus(ctx, id)
-	if err != nil {
-		return fmt.Errorf("load quota key %d: %w", id, err)
-	}
+// autoCardPoolEligible 与 CursorDynamicPool.LoadFromRepository 的入池判定逐条一致：
+// status=active、未过期、notes 带 Auto 前缀、非 bind=failed、无未清除的失败态。
+func autoCardPoolEligible(st *service.QuotaKeyStatus) bool {
 	if st == nil {
-		return fmt.Errorf("quota key %d not found", id)
+		return false
 	}
 	if st.Status != domain.QuotaKeyStatusActive {
-		slog.Warn("cursor auto: card refreshed but not re-registered (status not active)", "card_id", id, "status", st.Status)
-		return nil
+		return false
 	}
 	if st.ExpiresAt != nil && st.ExpiresAt.Before(time.Now()) {
-		slog.Warn("cursor auto: card refreshed but not re-registered (expired)", "card_id", id)
-		return nil
+		return false
 	}
-	if st.Notes == nil || !strings.HasPrefix(*st.Notes, autoPoolNotesPrefix) || strings.Contains(*st.Notes, autoPoolBindFailedMarker) {
-		slog.Warn("cursor auto: card refreshed but not re-registered (notes not eligible)", "card_id", id)
-		return nil
+	if st.Notes == nil || !strings.HasPrefix(*st.Notes, autoPoolNotesPrefix) {
+		return false
 	}
-	// 并发同卡刷新时，另一路可能在本路快照成功之后重新写入失败态；此时启动回放会
-	// 排除该卡，运行期也不得纳管，否则两侧再次分叉。判定与启动回放保持同一口径
-	// （TrimSpace 后非空白才算失败态）。
-	if strings.TrimSpace(st.LastRefreshError) != "" {
-		slog.Warn("cursor auto: card refreshed but not re-registered (last_refresh_error still set)", "card_id", id)
-		return nil
+	if strings.Contains(*st.Notes, autoPoolBindFailedMarker) {
+		return false
 	}
-	// cardKey 仅作标识（网络取号只用 dev/md5），此处复用脱敏末 4 位投影。
-	// 使用原子 EnsureCardRegistered：并发同卡刷新不会互相清理刚建立的 Token/会话。
-	pool.EnsureCardRegistered(id, st.CodeValueMasked, devCode, devMD5, countResp.OverCount, countResp.SumCount, st.Priority)
-
-	// 纳管后复核：另一路失败刷新可能在「读状态」与「纳管」之间写入失败态并撤池，
-	// 若本路纳管晚于其撤池，就会形成「库内有失败态、运行池有卡」的分叉。这里再读
-	// 一次持久化状态，发现失败态则按同一注销路径回退；下一次成功刷新仍会自愈。
-	latest, lerr := h.svc.GetStatus(ctx, id)
-	if lerr != nil {
-		slog.Warn("cursor auto: post-register state recheck failed", "card_id", id, "err", lerr)
-		return nil
-	}
-	if latest == nil || strings.TrimSpace(latest.LastRefreshError) == "" {
-		return nil
-	}
-	pool.UnregisterCard(id)
-	slog.Warn("cursor auto: card re-registered then withdrawn (concurrent failure state)", "card_id", id)
-	return nil
+	return strings.TrimSpace(st.LastRefreshError) == ""
 }
 
 // resolveAutoCardDevice 解析 Auto 卡密的设备凭据（dev / md5）。

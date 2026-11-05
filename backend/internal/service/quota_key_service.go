@@ -1462,9 +1462,13 @@ func (s *QuotaKeyService) DeleteWithAccounts(ctx context.Context, quotaKeyID int
 		s.reconciler.NotifyAccountRemoved()
 	}
 	// CARD-5：卡密被软删事务提交成功后，从运行内存池同步注销该卡及相关 Token。
-	if pool := GetGlobalCursorDynamicPool(); pool != nil {
-		pool.UnregisterCard(quotaKeyID)
-	}
+	// 走同一激活码串行边界，避免与并发单卡刷新的「DB 写入 → 池纳管」交错。
+	_ = WithAutoCardSync(quotaKeyID, func() error {
+		if pool := GetGlobalCursorDynamicPool(); pool != nil {
+			pool.UnregisterCard(quotaKeyID)
+		}
+		return nil
+	})
 	return nil
 }
 

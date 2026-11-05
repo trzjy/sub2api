@@ -155,7 +155,12 @@ func (s *QuotaKeySweeper) unregisterExpiredAutoCards(ctx context.Context) {
 			return
 		}
 		for _, k := range expired {
-			pool.UnregisterCard(k.ID)
+			// 与「DB 写入 → 池纳管」共用同一激活码串行边界（见 WithAutoCardSync），
+			// 避免清扫注销与并发单卡刷新交错后留下池成员与 DB 状态不一致。
+			_ = WithAutoCardSync(k.ID, func() error {
+				pool.UnregisterCard(k.ID)
+				return nil
+			})
 		}
 	}
 }
