@@ -184,6 +184,28 @@ func (r *fakeQuotaKeyRepo) UpdateCredentials(_ context.Context, id int64, codeEn
 	return nil
 }
 
+// UpdatePriority 满足 service.QuotaKeyRepository 接口（激活码优先级，330581f64）。
+// 语义对齐真实仓储 quota_key_repository.go:79：把激活码 Priority 置为入参，并同步
+// 该码名下（r.accounts[id]）账号的 Priority 为同一值，返回同步账号数（len）。
+func (r *fakeQuotaKeyRepo) UpdatePriority(_ context.Context, _ *ent.Tx, id int64, priority int) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.updateErr != nil {
+		return 0, r.updateErr
+	}
+	qk, ok := r.keys[id]
+	if !ok {
+		return 0, &ent.NotFoundError{}
+	}
+	qk.Priority = priority
+	synced := 0
+	for _, acc := range r.accounts[id] {
+		acc.Priority = priority
+		synced++
+	}
+	return synced, nil
+}
+
 func (r *fakeQuotaKeyRepo) ListExpired(_ context.Context, _ time.Time) ([]*ent.QuotaKey, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

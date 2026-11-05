@@ -108,7 +108,7 @@ func TestProbeQuota_WritesSnapshotToAccounts(t *testing.T) {
 
 	// 在 sqlite 中建一个激活码（明文加密落库）与两个账号。
 	qkSvc := service.NewQuotaKeyService(repository.NewQuotaKeyRepository(client), service.NewCredcryptEncryptor(), nil, client)
-	st, err := qkSvc.Create(context.Background(), "JG-CF-PROBE-TEST", nil, nil)
+	st, err := qkSvc.Create(context.Background(), "JG-CF-PROBE-TEST", nil, nil, 0)
 	require.NoError(t, err)
 	qkID := st.ID
 	for i := 0; i < 2; i++ {
