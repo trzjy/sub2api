@@ -63,7 +63,7 @@ func TestNormalizeResponseModelFamilyForAllAccounts(t *testing.T) {
 
 	t.Run("ordinary_account_family_rewritten", func(t *testing.T) {
 		body := []byte(`{"model":"` + upstream + `","choices":[{"message":{"content":"ok"}}]}`)
-		got := string(svc.normalizeResponseModelFamily(body))
+		got := string(svc.normalizeResponseModelFamily(body, ""))
 		require.Contains(t, got, `"model":"`+canonical+`"`)
 		require.NotContains(t, got, upstream)
 	})
@@ -72,21 +72,21 @@ func TestNormalizeResponseModelFamilyForAllAccounts(t *testing.T) {
 	// 会误导用户（那是两个不同模型）。同族改名只对同一族的名字生效。
 	t.Run("cross_family_left_truthful", func(t *testing.T) {
 		body := []byte(`{"model":"deepseek-v4-pro","choices":[]}`)
-		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body)))
+		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body, "")))
 	})
 
 	t.Run("already_canonical_untouched", func(t *testing.T) {
 		body := []byte(`{"model":"` + canonical + `","choices":[]}`)
-		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body)))
+		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body, "")))
 	})
 
 	t.Run("no_model_field_untouched", func(t *testing.T) {
 		body := []byte(`{"choices":[]}`)
-		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body)))
+		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body, "")))
 	})
 
 	t.Run("non_json_untouched", func(t *testing.T) {
 		body := []byte(`not json at all`)
-		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body)))
+		require.Equal(t, string(body), string(svc.normalizeResponseModelFamily(body, "")))
 	})
 }

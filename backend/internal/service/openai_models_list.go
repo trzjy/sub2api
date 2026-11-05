@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // FetchOpenAIModelsList discovers a single account's raw public model catalog.
@@ -352,12 +354,46 @@ func selectModelCatalogEntries(byID map[string]json.RawMessage, selected []strin
 		if _, ok := seen[id]; ok {
 			continue
 		}
-		if raw, exists := byID[id]; exists {
+		raw, exists := byID[id]
+		if !exists {
+			// 列表对外输出的是官方展示名（如 deepseek-flash），而目录键仍是站内
+			// 统一写法（deepseek-v4.1-flash）：这里回查一次目录，并把条目内的
+			// id/slug 改写成对外名，否则新用户拿到的列表会整项缺失。
+			if internal, ok := internalModelNameForPublic(id); ok {
+				if internalRaw, okInternal := byID[internal]; okInternal {
+					raw, exists = rewriteCatalogEntryIdentity(internalRaw, id), true
+				}
+			}
+		}
+		if exists {
 			models = append(models, raw)
 			seen[id] = struct{}{}
 		}
 	}
 	return models
+}
+
+// rewriteCatalogEntryIdentity 把目录条目里指向旧写法的标识字段改写成对外展示名。
+// 只动 id / slug 两个字段，其余字段与字节顺序保持原样（ETag 仍稳定）。
+func rewriteCatalogEntryIdentity(raw json.RawMessage, publicName string) json.RawMessage {
+	publicName = strings.TrimSpace(publicName)
+	if publicName == "" || !gjson.ValidBytes(raw) {
+		return raw
+	}
+	updated := raw
+	for _, field := range []string{"id", "slug"} {
+		value := gjson.GetBytes(updated, field)
+		if !value.Exists() || value.Type != gjson.String {
+			continue
+		}
+		if strings.EqualFold(value.Str, publicName) {
+			continue
+		}
+		if next, err := sjson.SetBytes(updated, field, publicName); err == nil {
+			updated = next
+		}
+	}
+	return updated
 }
 
 func orderPinnedCodexModelsBySelection(body []byte, allowlist GroupModelAllowlist) ([]byte, error) {

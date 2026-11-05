@@ -25,15 +25,16 @@ func TestRetiredModelNameRejectedByAllowlist(t *testing.T) {
 }
 
 func TestRetiredModelNameHiddenFromListing(t *testing.T) {
-	// 白名单开启：source 里带 1017 键（账号映射键）时也不能出现在列表里。
+	// 白名单开启：source 里带 1017 键（账号映射键）时也不能出现在列表里，
+	// 且族内旧写法一律呈现为对外官方名（2026-11-05 二次裁定）。
 	enabled := GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-v4.1-flash"}}
 	listed := enabled.FilterForListing([]string{"deepseek-v4.1-flash", "deepseek-v4.1-flash-1017"})
-	require.Equal(t, []string{"deepseek-v4.1-flash"}, listed)
+	require.Equal(t, []string{"deepseek-flash"}, listed)
 
-	// 白名单未开启：透传 source 时同样过滤。
+	// 白名单未开启：透传 source 时同样过滤 + 换成对外名。
 	disabled := GroupModelAllowlist{}
 	listed = disabled.FilterForListing([]string{"deepseek-v4.1-flash-1017", "deepseek-v4.1-flash"})
-	require.Equal(t, []string{"deepseek-v4.1-flash"}, listed)
+	require.Equal(t, []string{"deepseek-flash"}, listed)
 }
 
 func TestAliasFamilyStillUsedForMappingLookup(t *testing.T) {

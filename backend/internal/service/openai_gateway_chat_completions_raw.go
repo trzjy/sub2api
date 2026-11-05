@@ -576,15 +576,24 @@ func rawChatCompletionsMaskGate(account *Account, originalModel, upstreamModel s
 // 归一成 deepseek-v4.1-flash 再提供给下游。此前只有掩码账号才改写，普通 APIKey 账号
 // 原样透传，用户会在响应里看见 -1017（生产实测：账号 239 回显 deepseek-v4.1-flash-1017、
 // 406 号回显 deepseek-v4-pro）。
-func (s *OpenAIGatewayService) normalizeResponseModelFamily(body []byte) []byte {
+func (s *OpenAIGatewayService) normalizeResponseModelFamily(body []byte, requestedModel string) []byte {
 	echoed := strings.TrimSpace(gjson.GetBytes(body, "model").String())
-	if echoed == "" || NormalizeModelName(echoed) == echoed {
-		// 无需归一（或名称为空）时零改动，保持字节不变。
+	if echoed == "" {
 		return body
 	}
-	// from=to=回显名：replaceModelInResponseBody 内部会把 toModel 归一，
-	// 并把候选集限定在该名字的别名族内，正好是"同族改名"语义。
-	return s.replaceModelInResponseBody(body, echoed, echoed)
+	target := NormalizeModelName(echoed)
+	// 回显优先还给"客户端请求的那个名字"（用户裁定 2026-11-05：新老更迭要无缝）。
+	// 同族命中时用请求名而不是站内统一写法：老用户继续看到自己写的旧名，
+	// 新用户看到官方名（deepseek-flash），两边都不会看到上游真名（-1017）。
+	if requested := strings.TrimSpace(requestedModel); requested != "" && SameModelNameFamily(echoed, requested) {
+		target = requested
+	}
+	if target == "" || target == echoed {
+		// 无需改写（或名称为空）时零改动，保持字节不变。
+		return body
+	}
+	// 用不归一的改写版本，否则 replaceModelInResponseBody 会把请求名再次归一。
+	return s.rewriteResponseModel(body, echoed, target)
 }
 
 // ensureOpenAIChatStreamUsage 确保 raw Chat Completions 流式请求会让上游返回 usage。
@@ -672,7 +681,7 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 	} else {
 		// 非掩码账号也要做同族改名，避免把 deepseek-v4.1-flash-1017 这类上游历史
 		// 写法直接透给用户（用户裁定）。
-		respBody = s.normalizeResponseModelFamily(respBody)
+		respBody = s.normalizeResponseModelFamily(respBody, originalModel)
 	}
 
 	// 思考过程剥离：删除客户端可见响应体里的 reasoning_content。
@@ -807,7 +816,7 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsRawCC(
 	if rawChatCompletionsMaskGate(account, originalModel, upstreamModel) {
 		ccBytes = s.replaceModelInResponseBody(ccBytes, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
 	} else {
-		ccBytes = s.normalizeResponseModelFamily(ccBytes)
+		ccBytes = s.normalizeResponseModelFamily(ccBytes, originalModel)
 	}
 
 	// 思考过程剥离：删除客户端可见聚合体里的 reasoning_content。

@@ -26,6 +26,9 @@ func TestNormalizeModelName(t *testing.T) {
 		"deepseek-v4-pro-0813":      "deepseek-v4-pro",
 		"deepseek-v4-pro-ga-260813": "deepseek-v4-pro",
 		"deepseek-v4-1-flash":       "deepseek-v4.1-flash",
+		// 官方现行调用名并入同一族（2026-11-05）：站内统一写法仍是带版本段的
+		// v4.1-flash，对外展示名另由 PublicModelName 决定。
+		"deepseek-flash":            "deepseek-v4.1-flash",
 		// 规则三：缺版本段（用户确认一并归一）
 		"claude-sonnet-5": "claude-sonnet-5-5",
 		// 缺分隔横线

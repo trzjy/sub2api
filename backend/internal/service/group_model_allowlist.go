@@ -54,6 +54,31 @@ func filterRetiredModelNames(models []string) []string {
 	return out
 }
 
+// presentModelNamesForListing 生成"下游可见"的模型名列表：
+// 先剔除已下线的名字，再把族内旧写法统一换成对外展示名（PublicModelName），
+// 最后按小写去重保持原顺序。列表是下游唯一能看见模型名的入口，所以新老更迭
+// 只在这里收口：老写法继续可调，但新用户从列表里只会拿到官方现行调用名。
+func presentModelNamesForListing(models []string) []string {
+	if len(models) == 0 {
+		return models
+	}
+	out := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range filterRetiredModelNames(models) {
+		presented := PublicModelName(model)
+		if presented == "" {
+			continue
+		}
+		key := strings.ToLower(presented)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, presented)
+	}
+	return out
+}
+
 // DomainGroupModelAllowlist 把 service 白名单转换为 ent 持久化使用的 domain 类型。
 func DomainGroupModelAllowlist(cfg GroupModelAllowlist) domain.GroupModelAllowlist {
 	return domain.GroupModelAllowlist{Enabled: cfg.Enabled, Models: cfg.Models}
@@ -218,8 +243,8 @@ func groupModelAllowlistCandidates(model string) []string {
 func (a GroupModelAllowlist) FilterForListing(source []string) []string {
 	if !a.Enabled {
 		// 白名单未开启时列表直接透传 source（账号映射键），同样不得把已下线的
-		// 模型名暴露给下游。
-		return filterRetiredModelNames(source)
+		// 模型名暴露给下游，也不得把旧写法暴露给新用户（统一换成对外展示名）。
+		return presentModelNamesForListing(source)
 	}
 	if len(a.Models) == 0 {
 		// 开启但为空的配置在管理端已被拒绝；对遗留脏数据保持“看到什么 = 能调什么”，
@@ -244,6 +269,9 @@ func (a GroupModelAllowlist) FilterForListing(source []string) []string {
 		if IsRetiredModelName(model) {
 			return
 		}
+		// 列表是下游唯一能"看见"模型名的地方：族内旧写法一律换成对外展示名，
+		// 新用户因此看不到任何旧名字（用户裁定 2026-11-05）。准入与映射不受影响。
+		model = PublicModelName(model)
 		key := strings.ToLower(model)
 		if _, ok := seen[key]; ok {
 			return

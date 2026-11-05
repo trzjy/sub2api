@@ -51,10 +51,15 @@ var modelAliasFamilies = []modelAliasFamily{
 	{canonical: "claude-sonnet-5-5", aliases: []string{"claude-sonnet-5"}},
 	// Claude：缺分隔横线的写法。
 	{canonical: "claude-fable-5", aliases: []string{"claude-fable5"}},
-	// DeepSeek：去掉尾部版本后缀（用户裁定）。
+	// DeepSeek：去掉尾部版本后缀（用户裁定）；并入官方现行调用名。
+	// 官方文档（api-docs.deepseek.com/quick_start/pricing，2026-11-05 核对）现只有
+	// `deepseek-flash` 与 `deepseek-v4-pro` 两个调用名，`DeepSeek-V4.1-Flash-1017`
+	// 是前者的版本号而非模型名。此处把官方名并进同一族：老写法继续可用，
+	// 新写法直接命中既有账号映射键，出站名不受影响。
 	{canonical: "deepseek-v4.1-flash", aliases: []string{
 		"deepseek-v4.1-flash-1017",
 		"deepseek-v4-1-flash",
+		"deepseek-flash",
 	}},
 	{canonical: "deepseek-v4-pro", aliases: []string{
 		"deepseek-v4-pro-0813",
@@ -74,6 +79,41 @@ func NormalizeModelName(name string) string {
 		return family.canonical
 	}
 	return trimmed
+}
+
+// 对外展示名（用户裁定 2026-11-05）：族内旧写法对下游一律呈现为这里配置的
+// 官方现行调用名。键是站内统一写法（NormalizeModelName 的结果），值是对外名。
+// 只影响「下游看得见的列表与回显」，不影响准入判定、账号映射键与出站名。
+var publicModelNames = map[string]string{
+	"deepseek-v4.1-flash": "deepseek-flash",
+}
+
+// PublicModelName 返回对下游展示用的模型名。
+// 族内旧写法归到对外名，族外/未配置的名字返回站内统一写法（即原行为）。
+func PublicModelName(name string) string {
+	normalized := NormalizeModelName(name)
+	if normalized == "" {
+		return ""
+	}
+	if public, ok := publicModelNames[strings.ToLower(normalized)]; ok {
+		return public
+	}
+	return normalized
+}
+
+// internalModelNameForPublic 是 PublicModelName 的反向查找：
+// 对外名 → 站内统一写法。列表层用它回查模型目录（目录键仍是站内写法）。
+func internalModelNameForPublic(name string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return "", false
+	}
+	for internal, public := range publicModelNames {
+		if strings.EqualFold(public, lower) {
+			return internal, true
+		}
+	}
+	return "", false
 }
 
 // ModelNameAliases 返回该模型名所在别名族的全部写法，输入本身排第一。
