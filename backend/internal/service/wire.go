@@ -164,8 +164,15 @@ func ProvideCursorExecutionService(
 	if err != nil {
 		return nil, err
 	}
-	// 装配全局 Auto 动态号池单例
-	pool := NewCursorDynamicPool("", logger.L())
+	// 装配全局 Auto 动态号池单例：与 handler 共用同一份环境解析口径。
+	// 解析失败时标记不可用 → 取号直接失败关闭，绝不回落到包内默认地址。
+	poolBaseURL, poolErr := ResolveCursorAutoUpstreamBaseURL()
+	pool := NewCursorDynamicPool(poolBaseURL, logger.L())
+	if poolErr != nil {
+		pool.MarkUpstreamUnavailable(poolErr)
+		logger.L().Warn("cursor auto: upstream base URL unavailable, dynamic pool fails closed",
+			zap.Error(poolErr))
+	}
 	SetGlobalCursorDynamicPool(pool)
 	return svc, nil
 }

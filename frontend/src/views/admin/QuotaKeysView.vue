@@ -67,7 +67,7 @@
       </template>
 
       <template #table>
-        <DataTable :columns="columns" :data="keys" :loading="loading">
+        <DataTable :columns="columns" :data="visibleKeys" :loading="loading">
           <template #cell-code_masked="{ value }">
             <code class="font-mono text-sm text-gray-900 dark:text-gray-100">{{ value || t('admin.quotaKeys.na') }}</code>
           </template>
@@ -184,8 +184,8 @@
             <EmptyState
               :title="t('admin.quotaKeys.emptyTitle')"
               :description="t('admin.quotaKeys.emptyDescription')"
-              :action-text="t('admin.quotaKeys.create')"
-              @action="openCreateDialog"
+              :action-text="activeChannelTab === 'standard' ? t('admin.quotaKeys.create') : undefined"
+              @action="activeChannelTab === 'standard' ? openCreateDialog : undefined"
             />
           </template>
         </DataTable>
@@ -587,6 +587,18 @@ const autoBatchLoading = ref(false)
 
 const keys = ref<QuotaKey[]>([])
 const loading = ref(false)
+
+// Auto 卡密在 quota_keys.notes 中的标记前缀（后端 service 层
+// formatAutoPoolNotes 写入 "auto_pool:dev=...;md5=..."）。
+// 列表接口已返回 notes，按前缀把两个渠道的数据分开。
+const AUTO_POOL_NOTES_PREFIX = 'auto_pool:'
+
+const visibleKeys = computed(() =>
+  keys.value.filter((k) => {
+    const isAuto = (k.notes ?? '').startsWith(AUTO_POOL_NOTES_PREFIX)
+    return activeChannelTab.value === 'auto' ? isAuto : !isAuto
+  })
+)
 const busyId = ref<number | null>(null)
 const saving = ref(false)
 const sweeping = ref(false)
@@ -919,16 +931,11 @@ async function confirmSweep() {
 async function refreshAutoPool() {
   loading.value = true
   try {
-    const res = await fetch('/api/v1/admin/quota_keys/auto/refresh_all', { credentials: 'include', method: 'POST' })
-    const data = await res.json()
-    if (data.code === 0 || data.code === 200) {
-      appStore.showSuccess(`刷新完成：成功 ${data.data?.refreshed_count ?? 0} 个，失败 ${data.data?.failed_count ?? 0} 个`)
-    } else {
-      appStore.showError(data.msg || '刷新失败')
-    }
+    const res = await adminAPI.quotaKeys.refreshAutoPool()
+    appStore.showSuccess(`刷新完成：成功 ${res.refreshed_count ?? 0} 个，失败 ${res.failed_count ?? 0} 个`)
     await load()
   } catch (err: unknown) {
-    appStore.showError('批量刷新失败')
+    appStore.showError(extractApiErrorMessage(err, '批量刷新失败'))
   } finally {
     loading.value = false
   }
@@ -945,23 +952,13 @@ async function submitAutoBatch() {
   }
   autoBatchLoading.value = true
   try {
-    const res = await fetch('/api/v1/admin/quota_keys/auto/batch_import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ cards })
-    })
-    const data = await res.json()
-    if (data.code === 0 || data.code === 200) {
-      appStore.showSuccess(`批量导入完成：成功 ${data.data?.success_count ?? 0} 个，失败 ${data.data?.failed_count ?? 0} 个`)
-      showAutoBatchModal.value = false
-      autoBatchText.value = ''
-      await load()
-    } else {
-      appStore.showError(data.msg || '批量导入失败')
-    }
+    const res = await adminAPI.quotaKeys.batchImportAutoCards(cards)
+    appStore.showSuccess(`批量导入完成：成功 ${res.success_count ?? 0} 个，失败 ${res.failed_count ?? 0} 个`)
+    showAutoBatchModal.value = false
+    autoBatchText.value = ''
+    await load()
   } catch (err: unknown) {
-    appStore.showError('批量导入请求异常')
+    appStore.showError(extractApiErrorMessage(err, '批量导入失败'))
   } finally {
     autoBatchLoading.value = false
   }

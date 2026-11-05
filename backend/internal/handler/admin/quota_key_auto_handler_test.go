@@ -364,47 +364,13 @@ func parseAutoCardBatchImport(t *testing.T, rec *httptest.ResponseRecorder) auto
 }
 
 // ---------------------------------------------------------------------------
-// P3：安全配置（上游基址只来自环境配置）
+// P3：安全配置（上游基址只来自环境配置，解析口径由 service 层统一覆盖）
 // ---------------------------------------------------------------------------
-
-func TestResolveCursorAutoUpstreamBaseURL_SecurityPolicy(t *testing.T) {
-	cases := []struct {
-		name    string
-		raw     string
-		want    string
-		wantErr bool
-	}{
-		{name: "未配置一律失败关闭", raw: "", wantErr: true},
-		{name: "空白值等价于未配置", raw: "   ", wantErr: true},
-		{name: "明文公网地址被拒", raw: "http://82.157.20.83:9098", wantErr: true},
-		{name: "明文域名被拒", raw: "http://cursor.example.com", wantErr: true},
-		{name: "非 http 协议被拒", raw: "ftp://cursor.example.com", wantErr: true},
-		{name: "缺少主机名被拒", raw: "https:///api", wantErr: true},
-		{name: "内嵌凭据被拒", raw: "https://user:pass@cursor.example.com", wantErr: true},
-		{name: "https 公网端点放行", raw: "https://cursor.example.com:9098", want: "https://cursor.example.com:9098"},
-		{name: "https 去掉尾部斜杠", raw: "https://cursor.example.com/", want: "https://cursor.example.com"},
-		{name: "回环明文放行（本地联调）", raw: "http://127.0.0.1:9098", want: "http://127.0.0.1:9098"},
-		{name: "内网明文放行", raw: "http://10.0.0.5:9098", want: "http://10.0.0.5:9098"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(envCursorAutoUpstreamBaseURL, tc.raw)
-			got, err := resolveCursorAutoUpstreamBaseURL()
-			if tc.wantErr {
-				require.Error(t, err, "期望拒绝该基址，实际通过：%q", tc.raw)
-				require.Empty(t, got)
-				return
-			}
-			require.NoError(t, err, tc.raw)
-			require.Equal(t, tc.want, got)
-		})
-	}
-}
 
 func TestQuotaKeyAuto_BatchImport_UnconfiguredUpstream_FailsClosed(t *testing.T) {
 	repo := newAutoCardQuotaKeyRepo()
 	installAutoCardPool(t, service.NewCursorDynamicPool("", zap.NewNop()))
-	t.Setenv(envCursorAutoUpstreamBaseURL, "")
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, "")
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -424,7 +390,7 @@ func TestQuotaKeyAuto_BatchImport_PersistFailure_NeverBindsUpstream(t *testing.T
 	repo.failLast4["0001"] = true
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -466,7 +432,7 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_BornUnselectableAndSkipsPool(t *te
 	repo := newAutoCardQuotaKeyRepo()
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -519,7 +485,7 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_MarkerWriteFails_StillUnselectable
 	repo.failUpdateMetaAll = true // DB 完全不可写
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -553,7 +519,7 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_MarkerWriteFails_StillUnselectable
 
 // TestQuotaKeyAuto_BatchImport_BindSuccess_ActivateFails_StaysUnselectable 锁定
 // P2 阶段 3 的失败语义：绑定成功但「转可选」失败时，该行必须留在不可选安全态
-//（不会被重消费），且按**硬失败**上报并标注需人工处理。
+// （不会被重消费），且按**硬失败**上报并标注需人工处理。
 func TestQuotaKeyAuto_BatchImport_BindSuccess_ActivateFails_StaysUnselectable(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	repo := newAutoCardQuotaKeyRepo()
@@ -561,7 +527,7 @@ func TestQuotaKeyAuto_BatchImport_BindSuccess_ActivateFails_StaysUnselectable(t 
 	repo.failUpdateMetaExpireTimes = -1
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -598,7 +564,7 @@ func TestQuotaKeyAuto_BatchImport_BindSuccess_SweeperRace_NotSelectable(t *testi
 	repo.markExpiredOnExpireWrite = true // 模拟清扫器抢先标 expired
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -634,7 +600,7 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_NoExpiryWriteAfterCreate(t *testin
 	repo := newAutoCardQuotaKeyRepo()
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -665,7 +631,7 @@ func TestQuotaKeyAuto_BatchImport_Success_BornUnselectableThenActivated(t *testi
 	repo := newAutoCardQuotaKeyRepo()
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -699,7 +665,7 @@ func TestQuotaKeyAuto_BatchImport_Success_PersistsThenBindsThenRegistersInPool(t
 	repo := newAutoCardQuotaKeyRepo()
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -746,7 +712,7 @@ func TestQuotaKeyAuto_BatchImport_FailureIsolation_OneCardFailsOthersSucceed(t *
 	repo.failLast4["0001"] = true
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/batch_import",
@@ -776,7 +742,7 @@ func TestQuotaKeyAuto_RefreshAutoPool_UpdatesCountsButPreservesCooldownState(t *
 	upstream.forceReused = true
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
 	installAutoCardPool(t, pool)
-	t.Setenv(envCursorAutoUpstreamBaseURL, upstream.server.URL)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	// 先让卡密进入冷却：上游返回 force_reused → 动态池把该卡置入 60s 冷却。
 	pool.RegisterCard(1, "CARD-KEY-0001", "dev-code-1", "dev-md5-1", 5, 10)
@@ -815,7 +781,7 @@ func TestQuotaKeyAuto_RefreshAutoPool_UpdatesCountsButPreservesCooldownState(t *
 
 func TestQuotaKeyAuto_RefreshAutoPool_UnconfiguredUpstream_FailsClosed(t *testing.T) {
 	installAutoCardPool(t, service.NewCursorDynamicPool("", zap.NewNop()))
-	t.Setenv(envCursorAutoUpstreamBaseURL, "")
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, "")
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(newAutoCardQuotaKeyRepo()))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/refresh_all", "")
@@ -825,7 +791,7 @@ func TestQuotaKeyAuto_RefreshAutoPool_UnconfiguredUpstream_FailsClosed(t *testin
 
 func TestQuotaKeyAuto_RefreshAutoPool_PoolNotInitialized(t *testing.T) {
 	installAutoCardPool(t, nil)
-	t.Setenv(envCursorAutoUpstreamBaseURL, "https://cursor.example.com")
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, "https://cursor.example.com")
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(newAutoCardQuotaKeyRepo()))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/refresh_all", "")

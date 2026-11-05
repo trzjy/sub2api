@@ -4,10 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -45,13 +42,6 @@ type batchImportCardsResult struct {
 // ---------------------------------------------------------------------------
 
 const (
-	// envCursorAutoUpstreamBaseURL 是 Cursor Auto 上游卡密服务的基址环境变量名。
-	//
-	// 硬约束（派发单 CARD-02 第 3 项）：上游基址只能来自部署环境配置，代码内
-	// 不得出现任何上游地址常量（尤其禁止明文公网地址）。未配置即失败关闭，
-	// 绝不回落到 cursorupstream 包内的默认地址。
-	envCursorAutoUpstreamBaseURL = "CURSOR_AUTO_UPSTREAM_BASE_URL"
-
 	// autoPoolNotesPrefix 是 Auto 卡密在 quota_keys.notes 中的标记前缀。
 	// notes 同时承载设备码与设备 MD5：二者合起来才是「这张卡绑定了哪台虚拟
 	// 设备」的完整凭据，缺一则绑定不可复原、不可重放。
@@ -63,62 +53,10 @@ const (
 	autoPoolBindFailedMarker = "bind=failed"
 )
 
-// resolveCursorAutoUpstreamBaseURL 从部署环境解析 Cursor Auto 上游基址。
-//
-// 校验口径：
-//   - 未配置 → 失败关闭（不回落到包内默认的明文公网地址）；
-//   - 必须是绝对的 http(s) URL 且带主机名，且不得内嵌用户凭据；
-//   - 明文 http 只放行本机回环与内网地址；公网端点必须 https。
-//
-// 返回值已去掉尾部斜杠：cursorupstream 客户端按 "<baseURL><baseAPI>/<path>"
-// 拼接请求路径，保留尾部斜杠会产生双斜杠。
-func resolveCursorAutoUpstreamBaseURL() (string, error) {
-	raw := strings.TrimSpace(os.Getenv(envCursorAutoUpstreamBaseURL))
-	if raw == "" {
-		return "", fmt.Errorf("%s is not configured", envCursorAutoUpstreamBaseURL)
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", fmt.Errorf("invalid %s: %w", envCursorAutoUpstreamBaseURL, err)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("invalid %s: missing host", envCursorAutoUpstreamBaseURL)
-	}
-	if u.User != nil {
-		return "", fmt.Errorf("invalid %s: embedded credentials are not allowed", envCursorAutoUpstreamBaseURL)
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-	case "http":
-		if !isPrivateOrLoopbackHost(u.Hostname()) {
-			return "", fmt.Errorf("invalid %s: https is required for public endpoints", envCursorAutoUpstreamBaseURL)
-		}
-	default:
-		return "", fmt.Errorf("invalid %s: only http/https are allowed", envCursorAutoUpstreamBaseURL)
-	}
-	return strings.TrimRight(u.String(), "/"), nil
-}
-
-// isPrivateOrLoopbackHost 判断主机名是否指向本机回环或内网地址。
-//
-// 只接受 IP 字面量与 "localhost"：域名无法静态判定是否内网，一律按公网处理
-// （要求 https），避免把明文流量发往不可信公网端点。
-func isPrivateOrLoopbackHost(host string) bool {
-	host = strings.TrimSpace(strings.ToLower(host))
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback() || ip.IsPrivate()
-}
-
 // newCursorAutoUpstreamClient 按环境配置构造上游客户端。
 // 基址不可信（未配置 / 非安全端点）时直接失败，绝不使用包内默认地址。
 func newCursorAutoUpstreamClient() (*cursorupstream.Client, error) {
-	baseURL, err := resolveCursorAutoUpstreamBaseURL()
+	baseURL, err := service.ResolveCursorAutoUpstreamBaseURL()
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +211,7 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 // 有效期由上游额度（over/sum count）决定，本地不应再设一个到期日把它扫成 expired。
 //
 // 失败语义：卡已绑上游但本地仍不可选 —— 行停留在「不可选」安全态
-//（expires_at 仍在过去），不会被补池重消费，属可恢复的硬失败，
+// （expires_at 仍在过去），不会被补池重消费，属可恢复的硬失败，
 // 调用方必须按硬失败上报（明确标注需人工处理）。
 //
 // 额外校验（防清扫器竞态）：清空 expires_at 后回读状态，确认该行**确实**可选。

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +18,10 @@ var (
 	ErrNoAvailableCursorAutoToken = errors.New("cursor_auto: no available tokens in dynamic pool")
 	ErrAllCardsExhausted          = errors.New("cursor_auto: all activation cards exhausted")
 )
+
+// EnvCursorAutoUpstreamBaseURL 是 Cursor Auto 上游卡密服务的基址环境变量名。
+// 上游基址只来自部署环境配置；未配置即失败关闭，不回落代码内默认地址。
+const EnvCursorAutoUpstreamBaseURL = "CURSOR_AUTO_UPSTREAM_BASE_URL"
 
 var (
 	globalCursorDynamicPool   *CursorDynamicPool
@@ -33,6 +40,38 @@ func GetGlobalCursorDynamicPool() *CursorDynamicPool {
 	globalCursorDynamicPoolMu.RLock()
 	defer globalCursorDynamicPoolMu.RUnlock()
 	return globalCursorDynamicPool
+}
+
+// ResolveCursorAutoUpstreamBaseURL 从部署环境解析 Cursor Auto 上游基址。
+//
+// 校验口径：非空、绝对 http(s) URL、带主机名、无内嵌凭据。
+// 不限制明文 http：上游实际只提供 http，运维显式配置该值即视为授权使用该端点；
+// 仍然禁止回落到代码内任何默认地址（未配置即失败关闭）。
+// 返回值去掉尾部斜杠。
+func ResolveCursorAutoUpstreamBaseURL() (string, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvCursorAutoUpstreamBaseURL))
+	if raw == "" {
+		return "", fmt.Errorf("%s is not configured", EnvCursorAutoUpstreamBaseURL)
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid %s: %w", EnvCursorAutoUpstreamBaseURL, err)
+	}
+
+	if u.Host == "" {
+		return "", fmt.Errorf("invalid %s: missing host", EnvCursorAutoUpstreamBaseURL)
+	}
+
+	if u.User != nil {
+		return "", fmt.Errorf("invalid %s: embedded credentials are not allowed", EnvCursorAutoUpstreamBaseURL)
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("invalid %s: only http/https are allowed", EnvCursorAutoUpstreamBaseURL)
+	}
+
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 // DynamicCursorToken 封装单个动态试用号的内存运行态
@@ -69,6 +108,7 @@ type CursorDynamicPool struct {
 	sessionMap   map[string]*DynamicCursorToken
 	logger       *zap.Logger
 	maxInFlight  int // 单 Token 最大并发 (默认 2)
+	upstreamErr  error
 }
 
 func NewCursorDynamicPool(baseURL string, logger *zap.Logger) *CursorDynamicPool {
@@ -80,6 +120,14 @@ func NewCursorDynamicPool(baseURL string, logger *zap.Logger) *CursorDynamicPool
 		logger:       logger,
 		maxInFlight:  2,
 	}
+}
+
+// MarkUpstreamUnavailable 记录上游基址不可用原因。此后取号直接返回该错误，
+// 不访问网络、不回落到 cursorupstream 包内默认地址。
+func (p *CursorDynamicPool) MarkUpstreamUnavailable(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.upstreamErr = err
 }
 
 // RegisterCard 注册/更新一张卡密到多卡聚合器
@@ -135,6 +183,11 @@ func (p *CursorDynamicPool) GetStats() map[string]any {
 // AcquireToken 获取可用 Token：优先遵循会话粘性，其次选择 In-Flight 最小的可用 Token
 func (p *CursorDynamicPool) AcquireToken(ctx context.Context, sessionID string) (*DynamicCursorToken, error) {
 	p.mu.Lock()
+	if p.upstreamErr != nil {
+		err := p.upstreamErr
+		p.mu.Unlock()
+		return nil, err
+	}
 	now := time.Now()
 
 	// 1. 优先命中会话粘性且未进入冷却的 Token

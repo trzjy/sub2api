@@ -231,6 +231,38 @@ export async function probeQuota(id: number): Promise<ProbeQuotaResponse> {
   return data
 }
 
+/** Auto 卡密批量导入结果（POST /admin/quota_keys/auto/batch_import 的 data）。 */
+export interface BatchImportAutoCardsResult {
+  success_count: number
+  failed_count: number
+  errors?: string[]
+}
+
+/** Auto 号池批量刷新结果（POST /admin/quota_keys/auto/refresh_all 的 data）。 */
+export interface RefreshAutoPoolResult {
+  refreshed_count: number
+  failed_count: number
+}
+
+/**
+ * 批量导入 Auto 卡密。
+ * 必须走 apiClient：管理端鉴权是 Authorization: Bearer <auth_token>，
+ * 裸 fetch 不带该头，生产实测 401。
+ */
+export async function batchImportAutoCards(cards: string[]): Promise<BatchImportAutoCardsResult> {
+  const { data } = await apiClient.post<BatchImportAutoCardsResult>(
+    '/admin/quota_keys/auto/batch_import',
+    { cards }
+  )
+  return data
+}
+
+/** 批量刷新 Auto 号池上游额度。 */
+export async function refreshAutoPool(): Promise<RefreshAutoPoolResult> {
+  const { data } = await apiClient.post<RefreshAutoPoolResult>('/admin/quota_keys/auto/refresh_all')
+  return data
+}
+
 const quotaKeysAPI = {
   list,
   create,
@@ -242,7 +274,9 @@ const quotaKeysAPI = {
   sweepExpired,
   getAutoEntryConfig,
   updateAutoEntryConfig,
-  probeQuota
+  probeQuota,
+  batchImportAutoCards,
+  refreshAutoPool
 }
 
 export default quotaKeysAPI
