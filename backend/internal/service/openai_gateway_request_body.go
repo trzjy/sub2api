@@ -1045,7 +1045,7 @@ func (s *OpenAIGatewayService) replaceModelInResponseBody(body []byte, fromModel
 	// 模型名归一化（用户裁定）：上游真名（如 deepseek-v4.1-flash-1017）一律归一成
 	// 站内统一写法（deepseek-v4.1-flash）后再展示给用户。客户端若直接用了上游写法，
 	// originalModel 就是上游写法，此处若不归一，客户端会看到 -1017，与裁定冲突。
-	return s.rewriteResponseModel(body, fromModel, NormalizeModelName(toModel), aliases...)
+	return s.rewriteResponseModel(body, fromModel, responseModelName(toModel), aliases...)
 }
 
 // rewriteResponseModel 与 replaceModelInResponseBody 相同的改写语义，但不做名字归一。

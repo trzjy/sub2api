@@ -1488,7 +1488,7 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 func (s *GatewayService) replaceModelInResponseBody(body []byte, fromModel, toModel string) []byte {
 	// 模型名归一化（用户裁定）：上游真名（如 deepseek-v4.1-flash-1017）一律归一成
 	// 站内统一写法（deepseek-v4.1-flash）后再展示给用户。
-	toModel = NormalizeModelName(toModel)
+	toModel = responseModelName(toModel)
 	if m := gjson.GetBytes(body, "model"); m.Exists() && m.Str == fromModel {
 		newBody, err := sjson.SetBytes(body, "model", toModel)
 		if err != nil {

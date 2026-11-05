@@ -116,6 +116,38 @@ func internalModelNameForPublic(name string) (string, bool) {
 	return "", false
 }
 
+// responseModelName 决定"回显给客户端的模型名"。
+//
+// 与 NormalizeModelName 的区别：已配置对外展示名的族（deepseek）保留客户端自己的
+// 书写（写官方名回官方名、写旧名回旧名），不再折回站内统一写法——这样新老用户
+// 都能无缝更迭（用户裁定 2026-11-05）。已下线的名字一律折回，绝不外露。
+// 未配置对外展示名的族（claude 等）维持原有归一行为，零变化。
+func responseModelName(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return ""
+	}
+	normalized := NormalizeModelName(trimmed)
+	if IsRetiredModelName(trimmed) {
+		return normalized
+	}
+	if _, configured := publicModelNames[strings.ToLower(normalized)]; configured {
+		return trimmed
+	}
+	return normalized
+}
+
+// responseModelForClient 在已知"客户端请求名"时决定回显名：
+// 请求名与上游回显同族就用请求名，否则退回 responseModelName 的规则。
+// 跨族映射（如 flash 被路由到别家模型）因此仍如实显示上游真实模型。
+func responseModelForClient(echoed, requestedModel string) string {
+	requested := strings.TrimSpace(requestedModel)
+	if requested != "" && !IsRetiredModelName(requested) && SameModelNameFamily(echoed, requested) {
+		return requested
+	}
+	return responseModelName(echoed)
+}
+
 // ModelNameAliases 返回该模型名所在别名族的全部写法，输入本身排第一。
 // 不在族内时只返回输入本身（去空白后），调用方可安全地逐个尝试。
 //

@@ -2729,7 +2729,7 @@ func (s *OpenAIGatewayService) parseSSEUsageFromBody(body string) *OpenAIUsage {
 func (s *OpenAIGatewayService) replaceModelInSSEBody(body, fromModel, toModel string, aliases ...string) string {
 	// 模型名归一化（用户裁定）：同 replaceModelInResponseBody，流式响应的每块 model
 	// 字段也必须归一到站内统一写法，否则客户端在流里仍能看到上游真名。
-	toModel = NormalizeModelName(toModel)
+	toModel = responseModelName(toModel)
 	lines := strings.Split(body, "\n")
 	for i, line := range lines {
 		if _, ok := extractOpenAISSEDataLine(line); !ok {

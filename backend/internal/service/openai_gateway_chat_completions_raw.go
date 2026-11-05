@@ -428,10 +428,10 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			// 非掩码账号：只做同族改名（-1017 → flash），跨族映射保持上游真实名。
 			line = s.replaceModelInSSELine(line, familyFrom, familyTo)
 		} else if hasSSEData {
-			// 首帧定名：拿到上游回显的模型名，算出归一目标后立即改写本帧。
+			// 首帧定名：拿到上游回显的模型名，算出回显目标后立即改写本帧。
 			if echoed := strings.TrimSpace(gjson.Get(ssePayload, "model").String()); echoed != "" {
-				if normalized := NormalizeModelName(echoed); normalized != echoed {
-					familyFrom, familyTo = echoed, normalized
+				if target := responseModelForClient(echoed, originalModel); target != echoed {
+					familyFrom, familyTo = echoed, target
 					line = s.replaceModelInSSELine(line, familyFrom, familyTo)
 				}
 			}
@@ -565,8 +565,9 @@ func rawChatCompletionsMaskGate(account *Account, originalModel, upstreamModel s
 		(originalModel != upstreamModel || NormalizeModelName(originalModel) != upstreamModel)
 }
 
-// normalizeResponseModelFamily 把客户端可见响应体里上游回显的模型名归一成同一别名族的
-// 站内统一写法（deepseek-v4.1-flash-1017 → deepseek-v4.1-flash）。
+// normalizeResponseModelFamily 把客户端可见响应体里上游回显的模型名改成"客户端请求的
+// 那个名字"：老用户写旧名就回旧名，新用户写官方名（deepseek-flash）就回官方名，
+// 两边都不会看到上游真名 -1017。族外回显原样保留，不把 A 模型说成 B 模型。
 //
 // 与掩码账号身份回写的区别：掩码回写会把回显改成"客户端请求的名字"，而这里只做同族
 // 改名，绝不把 A 模型说成 B 模型——族外名字原样保留，所以跨族映射（例如 flash 被映射
@@ -581,13 +582,7 @@ func (s *OpenAIGatewayService) normalizeResponseModelFamily(body []byte, request
 	if echoed == "" {
 		return body
 	}
-	target := NormalizeModelName(echoed)
-	// 回显优先还给"客户端请求的那个名字"（用户裁定 2026-11-05：新老更迭要无缝）。
-	// 同族命中时用请求名而不是站内统一写法：老用户继续看到自己写的旧名，
-	// 新用户看到官方名（deepseek-flash），两边都不会看到上游真名（-1017）。
-	if requested := strings.TrimSpace(requestedModel); requested != "" && SameModelNameFamily(echoed, requested) {
-		target = requested
-	}
+	target := responseModelForClient(echoed, requestedModel)
 	if target == "" || target == echoed {
 		// 无需改写（或名称为空）时零改动，保持字节不变。
 		return body

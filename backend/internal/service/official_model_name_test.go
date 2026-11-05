@@ -116,12 +116,38 @@ func TestResponseEchoFollowsRequestedName(t *testing.T) {
 	got = svc.normalizeResponseModelFamily(body, "deepseek-v4.1-flash")
 	require.Equal(t, "deepseek-v4.1-flash", gjsonGet(got, "model"))
 
-	// 客户端直接用了上游真名（入口会被白名单拦，这里只保证回显不炸）。
+	// 客户端硬要用已下线的上游真名（入口已经 404，这里兜住回显不外露真名）。
 	got = svc.normalizeResponseModelFamily(body, "deepseek-v4.1-flash-1017")
-	require.Equal(t, "deepseek-v4.1-flash-1017", gjsonGet(got, "model"))
+	require.Equal(t, "deepseek-v4.1-flash", gjsonGet(got, "model"))
 
 	// 族外回显（跨渠道映射）保持上游真实模型，不冒充 flash。
 	cross := []byte(`{"id":"y","model":"sensenova-6.8-flash-lite"}`)
 	got = svc.normalizeResponseModelFamily(cross, "deepseek-flash")
 	require.Equal(t, "sensenova-6.8-flash-lite", gjsonGet(got, "model"))
+}
+
+// TestReplaceModelInResponseBodyKeepsOfficialName 钉死主链路（chat completions /
+// responses 的 JSON 与 SSE 改写都走它）：目标名是客户端请求名时不得折回旧写法。
+// 线上回归依据：2026-11-05 部署后实测 deepseek-flash 请求回显成 deepseek-v4.1-flash，
+// 就是这里把 toModel 归一造成的。
+func TestReplaceModelInResponseBodyKeepsOfficialName(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	body := []byte(`{"model":"deepseek-v4.1-flash-1017"}`)
+
+	// 新用户写官方名：回显官方名。
+	got := svc.replaceModelInResponseBody(body, "deepseek-v4.1-flash-1017", "deepseek-flash")
+	require.Equal(t, "deepseek-flash", gjsonGet(got, "model"))
+
+	// 老用户写旧名：回显旧名（与改动前一致）。
+	got = svc.replaceModelInResponseBody(body, "deepseek-v4.1-flash-1017", "deepseek-v4.1-flash")
+	require.Equal(t, "deepseek-v4.1-flash", gjsonGet(got, "model"))
+
+	// 其它族的归一行为零变化（claude-sonnet-5 仍归到 claude-sonnet-5-5）。
+	cl := []byte(`{"model":"claude-sonnet-5"}`)
+	got = svc.replaceModelInResponseBody(cl, "claude-sonnet-5", "claude-sonnet-5")
+	require.Equal(t, "claude-sonnet-5-5", gjsonGet(got, "model"))
+
+	// SSE 版同理。
+	stream := "data: {\"model\":\"deepseek-v4.1-flash-1017\"}\n\n"
+	require.Contains(t, svc.replaceModelInSSEBody(stream, "deepseek-v4.1-flash-1017", "deepseek-flash"), `"model":"deepseek-flash"`)
 }
