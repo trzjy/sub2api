@@ -481,8 +481,15 @@ func (h *QuotaKeyHandler) reregisterAutoCard(ctx context.Context, pool *service.
 		slog.Warn("cursor auto: card refreshed but not re-registered (notes not eligible)", "card_id", id)
 		return nil
 	}
+	// 并发同卡刷新时，另一路可能在本路快照成功之后重新写入失败态；此时启动回放会
+	// 排除该卡，运行期也不得纳管，否则两侧再次分叉。以最近一次读取的持久化状态为准。
+	if st.LastRefreshError != "" {
+		slog.Warn("cursor auto: card refreshed but not re-registered (last_refresh_error still set)", "card_id", id)
+		return nil
+	}
 	// cardKey 仅作标识（网络取号只用 dev/md5），此处复用脱敏末 4 位投影。
-	pool.RegisterCard(id, st.CodeValueMasked, devCode, devMD5, countResp.OverCount, countResp.SumCount, st.Priority)
+	// 使用原子 EnsureCardRegistered：并发同卡刷新不会互相清理刚建立的 Token/会话。
+	pool.EnsureCardRegistered(id, st.CodeValueMasked, devCode, devMD5, countResp.OverCount, countResp.SumCount, st.Priority)
 	return nil
 }
 

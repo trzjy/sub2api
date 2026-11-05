@@ -333,6 +333,41 @@ func (p *CursorDynamicPool) UpdateCardCounts(id int64, overCount, sumCount int) 
 	}
 }
 
+// EnsureCardRegistered 原子地「不存在才纳管」，供单卡刷新成功后的恢复路径使用。
+//
+// 与「先判存在、再 RegisterCard」两步组合的关键差别：判定与纳管在 p.mu 内一次完成，
+// 不会出现两个并发刷新都判定卡不在池、先后 RegisterCard，由后者清理掉前者刚建立的
+// Token 与会话绑定。卡已在池内时只刷新额度，保留 Token、会话粘性、冷却与禁用态
+// （与 UpdateCardCounts 同语义）。返回 true 表示本次新纳管。
+func (p *CursorDynamicPool) EnsureCardRegistered(id int64, cardKey, devCode, devMD5 string, overCount, sumCount int, priority ...int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if card, ok := p.cards[id]; ok {
+		card.OverCount = overCount
+		card.SumCount = sumCount
+		card.IsUnlimited = IsUnlimitedCard(sumCount)
+		return false
+	}
+	prio := 0
+	if len(priority) > 0 {
+		prio = priority[0]
+	}
+	p.genCounter++
+	p.cards[id] = &ManagedCard{
+		ID:            id,
+		CardKey:       cardKey,
+		DeviceCode:    devCode,
+		DeviceCodeMD5: devMD5,
+		OverCount:     overCount,
+		SumCount:      sumCount,
+		IsUnlimited:   IsUnlimitedCard(sumCount),
+		Priority:      prio,
+		Generation:    p.genCounter,
+	}
+	return true
+}
+
 // UnregisterCard 从多卡聚合器注销一张卡密（卡密被删除或过期时调用）。
 //
 // 加锁原子完成三步清理：

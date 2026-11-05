@@ -864,10 +864,11 @@ func TestQuotaKeyAuto_RefreshAutoCard_FailurePersistError_KeepsCardInPool(t *tes
 		"失败态未能持久化时撤池会造成重启回放分叉，运行池必须保持不变")
 }
 
-// TestQuotaKeyAuto_RefreshAutoCard_SuccessReRegistersRemovedCard 锁定：
-// 卡密因刷新失败被移出运行池后，一旦刷新成功（失败态已清除），必须按统一注册路径
-// 重新纳管并保留库内 priority，否则运行期（池外）与重启期（回放入池）再次分叉。
-func TestQuotaKeyAuto_RefreshAutoCard_SuccessReRegistersRemovedCard(t *testing.T) {
+// TestQuotaKeyAuto_RefreshAutoCard_FailureThenSuccess_ReRegisters 锁定完整的
+// 「失败 → 撤池并落库失败态 → 下次刷新成功清错 → 重新纳管」状态转换，而不是只验证
+// 「空池刷新成功会纳管」。断言覆盖失败态是否真的持久化、卡是否真的被撤池，以及恢复后
+// 库内 priority 是否被沿用 —— 否则运行期（池外）与重启期（回放入池）再次分叉。
+func TestQuotaKeyAuto_RefreshAutoCard_FailureThenSuccess_ReRegisters(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	repo := newAutoCardQuotaKeyRepo()
 	repo.keys[1] = &ent.QuotaKey{
@@ -878,14 +879,24 @@ func TestQuotaKeyAuto_RefreshAutoCard_SuccessReRegistersRemovedCard(t *testing.T
 		Priority:  5,
 	}
 	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
+	pool.RegisterCard(1, "0001", "dev-code-1", "dev-md5-1", 5, 10)
 	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
-	require.Empty(t, pool.ListCards(), "前置条件：该卡已因失败被移出运行池")
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
-	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/1/refresh", "")
 
+	// 第一步：上游刷新失败 → 失败态落库 + 卡被撤出运行池。
+	upstream.refreshCode = 500
+	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/1/refresh", "")
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	require.Empty(t, pool.ListCards(), "失败态已持久化，卡必须被移出运行池")
+	require.NotNil(t, repo.keys[1].LastRefreshError, "失败态必须落库，供重启回放拦截")
+
+	// 第二步：上游恢复 → 失败态被清除，卡按统一注册路径重新纳管并沿用库内 priority。
+	upstream.refreshCode = 200
+	rec = doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/1/refresh", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Nil(t, repo.keys[1].LastRefreshError, "刷新成功必须清除持久化的失败态")
 	cards := pool.ListCards()
 	require.Len(t, cards, 1, "刷新成功后必须重新纳管被移出的卡密")
 	require.Equal(t, int64(1), cards[0].ID)
