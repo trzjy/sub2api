@@ -305,6 +305,7 @@ func TestBuildGenerationConfig_ThinkingDynamicBudget(t *testing.T) {
 		name        string
 		model       string
 		thinking    *ThinkingConfig
+		stream      bool
 		wantBudget  int
 		wantPresent bool
 	}{
@@ -357,6 +358,30 @@ func TestBuildGenerationConfig_ThinkingDynamicBudget(t *testing.T) {
 			wantBudget:  0,
 			wantPresent: false,
 		},
+		{
+			name:        "streaming + nil thinking on thinking capable model defaults to includeThoughts",
+			model:       "claude-opus-4-6-thinking",
+			thinking:    nil,
+			stream:      true,
+			wantBudget:  -1,
+			wantPresent: true,
+		},
+		{
+			name:        "streaming + disabled thinking does not emit thinkingConfig",
+			model:       "claude-opus-4-6-thinking",
+			thinking:    &ThinkingConfig{Type: "disabled", BudgetTokens: 1024},
+			stream:      true,
+			wantBudget:  0,
+			wantPresent: false,
+		},
+		{
+			name:        "streaming + nil thinking on non-thinking model does not emit thinkingConfig",
+			model:       "claude-opus-4-6",
+			thinking:    nil,
+			stream:      true,
+			wantBudget:  0,
+			wantPresent: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -364,6 +389,7 @@ func TestBuildGenerationConfig_ThinkingDynamicBudget(t *testing.T) {
 			req := &ClaudeRequest{
 				Model:    tt.model,
 				Thinking: tt.thinking,
+				Stream:   tt.stream,
 			}
 			cfg := buildGenerationConfig(req)
 			if cfg == nil {

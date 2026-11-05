@@ -229,7 +229,13 @@ func (s *cursorSSEStream) next() (err error) {
 				}
 			}
 			if !s.parser.inlineMode {
-				s.emitStreamText(ev.Text)
+				// 双通道发射：思考走 reasoning_content，正文走 content，二者都即时到达。
+				if ev.Reasoning != "" {
+					s.emitStreamReasoning(ev.Reasoning)
+				}
+				if ev.Text != "" {
+					s.emitStreamText(ev.Text)
+				}
 			}
 		}
 		s.done = s.parser.usage.Seen
@@ -291,15 +297,22 @@ func (s *cursorSSEStream) next() (err error) {
 			s.buffer.WriteString("data: [DONE]\n\n")
 			return nil
 		}
-		// 收尾尾段：<think> 剥离的跨帧缓冲在这里吐完（段内残留一律丢弃）。
-		// 必须在 finish 之前写出，否则正文末尾几个字符会丢。
-		if tail := s.parser.flushThinkTail(); tail != "" {
+		// 收尾尾段：<think> 剥离的跨帧缓冲（双通道）在这里吐完。
+		// 必须在 finish 之前写出，否则正文/思考末尾几个字符会丢。
+		// 顺序：先 reasoning 尾巴再 text 尾巴（二者通常互斥，这里按通道分别落盘）。
+		if rTail, tTail := s.parser.flushThinkTail(); rTail != "" || tTail != "" {
 			if !s.parser.started {
 				s.buffer.WriteString(s.parser.cursorSSERoleChunk())
 				s.parser.started = true
 			}
-			s.parser.markFirstToken()
-			s.buffer.WriteString(s.parser.cursorSSETextChunk(tail))
+			if rTail != "" {
+				s.parser.markFirstToken()
+				s.buffer.WriteString(s.parser.cursorSSEReasoningChunk(rTail))
+			}
+			if tTail != "" {
+				s.parser.markFirstToken()
+				s.buffer.WriteString(s.parser.cursorSSETextChunk(tTail))
+			}
 		}
 		// 正文短尾：未命中内联形态时把 emitStreamText 保留的尾巴冲出，
 		// 否则普通正文的最后几个字符会留在缓冲里丢掉。
@@ -380,6 +393,22 @@ func (s *cursorSSEStream) emitStreamText(delta string) {
 	}
 	s.parser.markFirstToken()
 	s.buffer.WriteString(s.parser.cursorSSETextChunk(emit))
+}
+
+// emitStreamReasoning 写出思考增量 chunk（reasoning_content 通道）。
+//
+// 与 emitStreamText 同构：首包带 role、markFirstToken 记录首 token 耗时，但不扣留
+// 末尾字节（思考内容必须即时到达，否则下游感知为"思考卡死"）。空增量直接跳过。
+func (s *cursorSSEStream) emitStreamReasoning(delta string) {
+	if delta == "" {
+		return
+	}
+	if !s.parser.started {
+		s.buffer.WriteString(s.parser.cursorSSERoleChunk())
+		s.parser.started = true
+	}
+	s.parser.markFirstToken()
+	s.buffer.WriteString(s.parser.cursorSSEReasoningChunk(delta))
 }
 
 // cursorInlineMarkerPrefixSuffixLen 返回 text 末尾与开标记**前缀**匹配的最大字节数
@@ -847,6 +876,12 @@ type cursorStreamEvent struct {
 	Kind string
 	// Text 仅在 Kind == cursorEventText 时有意义（**可能为空**：模型可发空 delta）。
 	Text string
+	// Reasoning 是上游内联 `<think>…</think>` 推理段剥离出的思考内容（可能为空）。
+	//
+	// 与 Text 是**双通道**：完整标签被彻底吞噬（既不进 Reasoning 也不进 Text），
+	// 思考内容经此字段作为 OpenAI `delta.reasoning_content` 交付，正文进 Text，
+	// 二者互不污染。未闭合的推理段在流式过程中随帧增量吐出，消除假死卡死。
+	Reasoning string
 }
 
 // 事件种类。
@@ -1272,25 +1307,44 @@ const (
 	cursorThinkCloseTag = "</think>"
 )
 
-// filterThinkDelta 从增量正文里剥离上游内联的 <think>…</think> 推理段，返回本帧
-// **可以对外输出**的可见文本（可能为空）。
+// parseThinkDeltas 把增量正文切成**两个通道**：
+//   - reasoning：处于 <think>…</think> 段内、被完整开闭标签夹住的内容；
+//   - text：段外可见正文（已去除标签、清理首段前导空白）。
 //
-// 剥离是出口纪律：推理段不属于正文，直接透传会让客户端打印出 <> 与整段内部推理
-// （11-03 实测 6/6 非流式响应都带该段）。跨帧切分（"<thi" + "nk>"）由 thinkRaw
-// 缓冲 + trailingPartialTag 兜住，绝不把半个标签吐出去。
-func (p *cursorStreamParser) filterThinkDelta(delta string) string {
+// 双通道纪律（用户裁定：思考必须作为 reasoning 交付，且标签绝对不能外泄）：
+//  1. 完整 `<think>` / `</think>` 一旦匹配即**彻底吞噬**——既不进 reasoning 也不进
+//     text，客户端绝不会打印出 "<" 或整段内部推理（11-03 实测 6/6 非流式响应都带该段）。
+//  2. 遇到 `<`、`<t`、`</`、`</th` 等标签前缀时，用 trailingPartialTag 把"可能是半截
+//     标签"的那几个字节**严格扣留**在 thinkRaw 里，绝不提前外发——跨帧切碎的标签
+//     （"<thi" + "nk>"）因此被 100% 吞噬，不会把半个标签漏给客户端。
+//  3. 段外首段正文的前导空白/换行由 finalizeVisible 清理（剥标签留下的 "\n\n" 副产物）。
+//
+// rawContent 始终累加原始增量（含 <think> 段），供流内拒付 / 模型暂不可用模板匹配
+// 使用——剥离动作不会改变这些终态判定的灵敏度。
+func (p *cursorStreamParser) parseThinkDeltas(delta string) (reasoning string, text string) {
 	if delta == "" {
-		return ""
+		return "", ""
 	}
 	p.rawContent += delta
 	p.thinkRaw += delta
-	var out strings.Builder
+	var rb, tb strings.Builder
 	for {
 		if p.inThink {
 			idx := strings.Index(p.thinkRaw, cursorThinkCloseTag)
 			if idx < 0 {
-				p.thinkRaw = trailingPartialTag(p.thinkRaw, cursorThinkCloseTag)
-				return p.finalizeVisible(out.String())
+				// 尚未见到闭合标签：把"可能是闭合标签前缀"的那段扣留，其余作为
+				// 思考增量吐出（流式过程中增量交付，避免假死）。
+				hold := trailingPartialTag(p.thinkRaw, cursorThinkCloseTag)
+				cut := len(p.thinkRaw) - len(hold)
+				if cut > 0 {
+					rb.WriteString(p.thinkRaw[:cut])
+				}
+				p.thinkRaw = hold
+				return rb.String(), p.finalizeVisible(tb.String())
+			}
+			// 命中闭合标签：标签之前（段内）的思考内容进 reasoning，标签本身吞噬。
+			if idx > 0 {
+				rb.WriteString(p.thinkRaw[:idx])
 			}
 			p.thinkRaw = p.thinkRaw[idx+len(cursorThinkCloseTag):]
 			p.inThink = false
@@ -1298,16 +1352,29 @@ func (p *cursorStreamParser) filterThinkDelta(delta string) string {
 		}
 		idx := strings.Index(p.thinkRaw, cursorThinkOpenTag)
 		if idx >= 0 {
-			out.WriteString(p.thinkRaw[:idx])
+			// 开标签之前是可见正文，开标签本身吞噬，进入思考态。
+			if idx > 0 {
+				tb.WriteString(p.thinkRaw[:idx])
+			}
 			p.thinkRaw = p.thinkRaw[idx+len(cursorThinkOpenTag):]
 			p.inThink = true
 			continue
 		}
-		keep := trailingPartialTag(p.thinkRaw, cursorThinkOpenTag)
-		out.WriteString(p.thinkRaw[:len(p.thinkRaw)-len(keep)])
-		p.thinkRaw = keep
-		return p.finalizeVisible(out.String())
+		// 未见开标签：扣留"可能是开标签前缀"的那段，其余作为正文增量吐出。
+		hold := trailingPartialTag(p.thinkRaw, cursorThinkOpenTag)
+		cut := len(p.thinkRaw) - len(hold)
+		if cut > 0 {
+			tb.WriteString(p.thinkRaw[:cut])
+		}
+		p.thinkRaw = hold
+		return p.maybeFinalizeReasoning(rb.String()), p.finalizeVisible(tb.String())
 	}
+}
+
+// maybeFinalizeReasoning 是 reasoning 通道的归一钩子（当前与 text 通道不同：
+// 思考内容保留其自身空白，不去除首段前导空白，避免截断模型首字符前的合法缩进）。
+func (p *cursorStreamParser) maybeFinalizeReasoning(raw string) string {
+	return raw
 }
 
 // finalizeVisible 归一本次可交付文本：剥离 <think> 后残留的前导空白只在**首段**
@@ -1325,20 +1392,31 @@ func (p *cursorStreamParser) finalizeVisible(raw string) string {
 	return trimmed
 }
 
-// flushThinkTail 在流收尾时吐出缓冲尾段：处于推理段内的残留一律丢弃（未闭合的
-// 推理不是正文），段外残留（如结尾恰好是 "<thi"）如实交付。只吐一次。
-func (p *cursorStreamParser) flushThinkTail() string {
+// flushThinkTail 在流收尾时吐出**双通道**缓冲尾段：
+//   - reasoning：处于推理段内、尚未随帧吐出的思考尾巴（收尾时切除闭合标签前缀，
+//     不残留在正文，也不外泄半个闭合标签）；
+//   - text：段外残留的可见正文尾巴（如结尾恰好是 "<thi" 的半截开标签前缀，如实交付，
+//     不丢字节；完整 <think>/</think> 段早已被吞噬，不会泄露）。
+//
+// 只吐一次（thinkFlushed 保证）。两个返回值的语义分别对应 emitStreamReasoning 与
+// emitStreamText，由调用方决定各自如何写出。
+func (p *cursorStreamParser) flushThinkTail() (string, string) {
 	if p.thinkFlushed {
-		return ""
+		return "", ""
 	}
 	p.thinkFlushed = true
 	if p.inThink {
+		// 未闭合推理段：把已缓冲的思考尾巴作为 reasoning 吐出（先切除可能的闭合标签前缀），
+		// 不再丢弃——消除"思考内容被静默吞噬 + 下游假死"的问题。
+		hold := trailingPartialTag(p.thinkRaw, cursorThinkCloseTag)
+		cut := len(p.thinkRaw) - len(hold)
+		reasoning := p.thinkRaw[:cut]
 		p.thinkRaw = ""
-		return ""
+		return reasoning, ""
 	}
 	tail := p.finalizeVisible(p.thinkRaw)
 	p.thinkRaw = ""
-	return tail
+	return "", tail
 }
 
 // trailingPartialTag 返回 s 末尾"可能是 tag 不完整前缀"的那一段（跨帧缓冲用）。
@@ -1447,7 +1525,13 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 		}
 		p.content += ev.Text
 		p.markFirstToken()
-		sseLines = append(sseLines, p.cursorSSETextChunk(ev.Text))
+		// 双通道发射：思考先走 reasoning_content，正文走 content，二者互不污染。
+		if ev.Reasoning != "" {
+			sseLines = append(sseLines, p.cursorSSEReasoningChunk(ev.Reasoning))
+		}
+		if ev.Text != "" {
+			sseLines = append(sseLines, p.cursorSSETextChunk(ev.Text))
+		}
 		// 拒付模板可能跨帧：每收到一段就在**累加结果**上匹配一次。
 		// 判定用原始文本（含 <think> 段），与流式侧同口径。
 		if err := cursorMatchKeyRejected(p.rawContent); err != nil {
@@ -1469,15 +1553,20 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 		sseLines = append(sseLines, p.cursorSSERoleChunk())
 		p.started = true
 	}
-	// 收尾尾段：<think> 剥离的跨帧缓冲在这里吐完（段内残留一律丢弃）。
-	if tail := p.flushThinkTail(); tail != "" {
+	// 收尾尾段：<think> 剥离的双通道缓冲在这里吐完（reasoning 与 text 各自收口）。
+	if rTail, tTail := p.flushThinkTail(); rTail != "" || tTail != "" {
 		if !p.started {
 			sseLines = append(sseLines, p.cursorSSERoleChunk())
 			p.started = true
 		}
 		p.markFirstToken()
-		p.content += tail
-		sseLines = append(sseLines, p.cursorSSETextChunk(tail))
+		if rTail != "" {
+			sseLines = append(sseLines, p.cursorSSEReasoningChunk(rTail))
+		}
+		if tTail != "" {
+			p.content += tTail
+			sseLines = append(sseLines, p.cursorSSETextChunk(tTail))
+		}
 	}
 	// 工具委托捕获：在 finish 前吐 tool_calls delta（流式与 cursorParseStreamToSSE 同口径）。
 	if calls := p.capturedToolCalls(); len(calls) > 0 {
@@ -1618,13 +1707,14 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 	// 增量语义依据：更新类型名即 text_**delta**_update（32 号证据 Gyt），且
 	// InteractionUpdate 另有独立的 summary / thinking_delta 承担"中间态/全量"语义。
 	//
-	// 出口纪律：上游把推理内联进正文（<think>…</think>），此处统一剥离——本帧剥完
-	// 没有可见文本时返回 skip（空 delta 不得产出空 content block）。
-	visible := p.filterThinkDelta(text)
-	if visible == "" {
+	// 出口纪律：上游把推理内联进正文（<think>…</think>），此处统一双通道切分——
+	// 思考进 Reasoning，正文进 Text，完整标签被彻底吞噬。本帧两个通道都空时返回 skip
+	// （空 delta 不得产出空 content / 空 reasoning block）。
+	reasoning, visible := p.parseThinkDeltas(text)
+	if visible == "" && reasoning == "" {
 		return cursorStreamEvent{Kind: cursorEventSkip}, nil
 	}
-	return cursorStreamEvent{Kind: cursorEventText, Text: visible}, nil
+	return cursorStreamEvent{Kind: cursorEventText, Reasoning: reasoning, Text: visible}, nil
 }
 
 // cursorIntField 取 varint 字段的 int 值（字段缺失时为 0）。
@@ -2972,6 +3062,15 @@ func (p *cursorStreamParser) cursorSSERoleChunk() string {
 // cursorSSETextChunk 返回携带增量文本的 chunk。
 func (p *cursorStreamParser) cursorSSETextChunk(text string) string {
 	return "data: " + p.cursorChunk(`"delta":{"content":`+cursorJSONString(text)+`},"finish_reason":null`) + "\n\n"
+}
+
+// cursorSSEReasoningChunk 返回携带增量思考内容的 chunk（OpenAI reasoning_content）。
+//
+// 思考内容与正文走两条独立通道：客户端（尤其带思考态 UI 的）需要单独消费 reasoning，
+// 不能混进 content。标签（<think>/</think>）已在 parseThinkDeltas 被彻底吞噬，永不出现
+// 在本 chunk 里。
+func (p *cursorStreamParser) cursorSSEReasoningChunk(reasoning string) string {
+	return "data: " + p.cursorChunk(`"delta":{"reasoning_content":`+cursorJSONString(reasoning)+`},"finish_reason":null`) + "\n\n"
 }
 
 // cursorChunkIDJSON 渲染本 HTTP 实际输出响应 ID 的 JSON 字符串字面量。

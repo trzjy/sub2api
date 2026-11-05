@@ -687,6 +687,33 @@ func isAntigravityOpusHighTierModel(model string) bool {
 		strings.HasPrefix(lower, "claude-opus-4-8")
 }
 
+// IsAntigravityThinkingCapableModel 判断是否为 Antigravity 官方正版下支持思考输出的模型。
+// 覆盖带 -thinking / -high / -medium / -low / -tiered 后缀的模型名，以及 IsGeminiReasoningModel 判定的模型。
+func IsAntigravityThinkingCapableModel(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	for _, suffix := range []string{"-thinking", "-high", "-medium", "-low", "-tiered"} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return IsGeminiReasoningModel(modelID)
+}
+
+// isClaudeThinkingExplicitlyDisabled 判断 Claude thinking 是否被显式禁用。
+// type == "disabled"，或被显式 enabled 但 budget_tokens == 0（等价无思考预算）。
+func isClaudeThinkingExplicitlyDisabled(thinking *ThinkingConfig) bool {
+	if thinking == nil {
+		return false
+	}
+	if thinking.Type == "disabled" {
+		return true
+	}
+	if thinking.Type == "enabled" && thinking.BudgetTokens == 0 {
+		return true
+	}
+	return false
+}
+
 func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 	maxLimit := maxOutputTokensLimit(req.Model)
 	config := &GeminiGenerationConfig{
@@ -734,6 +761,15 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 			}
 		}
 		config.ThinkingConfig.ThinkingBudget = budget
+	}
+
+	// 流式 + 具备思考能力模型 + 未显式禁用思考：官方正版默认开启思考输出，避免下游假死卡顿。
+	// 仅在没有显式 thinking 配置时注入（避免覆盖上方 enabled/adaptive 分支）。
+	if config.ThinkingConfig == nil && req.Stream && !isClaudeThinkingExplicitlyDisabled(req.Thinking) && IsAntigravityThinkingCapableModel(req.Model) {
+		config.ThinkingConfig = &GeminiThinkingConfig{
+			IncludeThoughts: true,
+			ThinkingBudget:  -1,
+		}
 	}
 
 	if config.MaxOutputTokens > maxLimit {
