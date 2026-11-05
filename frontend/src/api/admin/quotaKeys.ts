@@ -148,6 +148,15 @@ export async function refresh(id: number): Promise<QuotaKey> {
   return data
 }
 
+/**
+ * 单卡刷新 Auto 动态号池上游额度（专用端点）。
+ * 返回上游 over_count 与 sum_count 投影；与标准 refresh 端点（刷新本地账号状态）区分。
+ */
+export async function refreshAutoCard(id: number): Promise<{ over_count: number; sum_count: number }> {
+  const { data } = await apiClient.post<{ over_count: number; sum_count: number }>(`/admin/quota_keys/auto/${id}/refresh`)
+  return data
+}
+
 /** 解除 exhausted 标记。 */
 export async function clearExhausted(id: number): Promise<QuotaKey> {
   const { data } = await apiClient.post<QuotaKey>(`/admin/quota_keys/${id}/clear_exhausted`)
@@ -276,6 +285,7 @@ const quotaKeysAPI = {
   update,
   remove,
   refresh,
+  refreshAutoCard,
   clearExhausted,
   sweepExpired,
   getAutoEntryConfig,

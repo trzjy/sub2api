@@ -476,6 +476,47 @@ func (s *QuotaKeyService) CursorQuotaKeyUsageSnapshot(ctx context.Context, quota
 	return qk.UsageSnapshot, nil
 }
 
+// WriteAutoCardUsageSnapshot 把 Auto 卡密上游额度快照持久化写入 quota_keys.usage_snapshot，
+// 并在成功时清空 last_refresh_error；传入 refreshErr 非 nil 时只登记该错误、不写快照
+// （用于导入预热 / 查额度失败：卡密停留在不可选态，错误可观测，不入池）。
+//
+// 安全铁律（派发单 CARD-06）：本方法只写聚合额度（total/used/remaining/over_count/
+// sum_count/is_unlimited/checked_at），**绝不写入任何 Bearer Token 或密钥明文**——
+// Token 仅驻留动态池内存，从不落库。
+//
+// 实现复用既有「每 key 事务锁 + quotaKeyObservationRepo」写入路径（与 CursorAutoEntryService
+// 的观测写入同款，§25.14-C 唯一状态表示），不另造写入口。
+func (s *QuotaKeyService) WriteAutoCardUsageSnapshot(ctx context.Context, quotaKeyID int64, snapshot []byte, refreshErr error) error {
+	if s == nil || s.repo == nil {
+		return errors.New("quota_key_service: quota key repository unavailable")
+	}
+	if quotaKeyID <= 0 {
+		return fmt.Errorf("quota_key_service: invalid quota key id %d", quotaKeyID)
+	}
+	obs, err := asObservationRepo(s.repo)
+	if err != nil {
+		return err
+	}
+	return s.withQuotaKeyLock(ctx, quotaKeyID, func(tx *ent.Tx) error {
+		current, rerr := obs.GetByIDInTx(ctx, tx, quotaKeyID)
+		if rerr != nil {
+			return rerr
+		}
+		if current == nil {
+			return fmt.Errorf("quota_key_service: quota key %d not found", quotaKeyID)
+		}
+		if refreshErr != nil {
+			msg := refreshErr.Error()
+			return s.repo.UpdateStatusFields(ctx, tx, quotaKeyID, current.Status, current.Exhausted, &msg, nil)
+		}
+		if werr := obs.UpdateUsageSnapshot(ctx, tx, quotaKeyID, snapshot, nil); werr != nil {
+			return werr
+		}
+		// 成功写入快照后清空 last_refresh_error，保留 status / exhausted 原值不变。
+		return s.repo.UpdateStatusFields(ctx, tx, quotaKeyID, current.Status, current.Exhausted, nil, nil)
+	})
+}
+
 // RotateCredentials 加密新激活码原文后写入 code_encrypted / code_mac / code_last4，
 // 返回脱敏后的状态。
 //

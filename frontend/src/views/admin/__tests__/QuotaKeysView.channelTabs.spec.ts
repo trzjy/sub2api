@@ -44,6 +44,7 @@ vi.mock('@/api/admin', () => ({
       get: vi.fn(),
       probeQuota: vi.fn(),
       refresh: vi.fn(),
+      refreshAutoCard: vi.fn(),
       clearExhausted: vi.fn(),
       remove: vi.fn(),
       sweepExpired: vi.fn(),
@@ -86,6 +87,7 @@ function mountView() {
         DataTable: {
           props: ['columns', 'data', 'loading'],
           template: `<div class="datatable-stub">
+            <span v-for="col in columns" :key="col.key" class="col-label">{{ col.label }}</span>
             <template v-for="(row, i) in data" :key="i">
               <span class="cell-code">{{ row.code_masked }}</span>
               <slot name="cell-actions" :row="row" />
@@ -127,6 +129,8 @@ describe('QuotaKeysView 渠道 Tab 数据分流（派发单 F）', () => {
     vi.mocked(adminAPI.quotaKeys.list).mockReset()
     vi.mocked(adminAPI.quotaKeys.get).mockReset()
     vi.mocked(adminAPI.quotaKeys.probeQuota).mockReset()
+    vi.mocked(adminAPI.quotaKeys.refresh).mockReset()
+    vi.mocked(adminAPI.quotaKeys.refreshAutoCard).mockReset()
   })
 
   it('标准 Tab 只显示非 Auto 卡密', async () => {
@@ -308,6 +312,97 @@ describe('QuotaKeysView 渠道 Tab 数据分流（派发单 F）', () => {
     expect(callArgs[0]).toContain('sky_cc_test123')
     expect(callArgs[1]).toMatch(/^2026-12-31T\d{2}:00:00\.000Z$/)
 
+    wrapper.unmount()
+  })
+
+  // --- CARD-7：Auto Tab 专属列/隐藏探针/刷新分流 ---
+
+  // 切换 Auto Tab 时，表格不渲染「账号数」「可用账号数」两列（恒为 0）。
+  it('Auto Tab 专属列不渲染账号数/可用账号数列（CARD-7）', async () => {
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue(listWith([autoRow, stdRow]))
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    // 标准 Tab（默认）应渲染账号数列标签。
+    expect(wrapper.text()).toContain('admin.quotaKeys.columns.accountCount')
+    expect(wrapper.text()).toContain('admin.quotaKeys.columns.workingCount')
+
+    // 切到 Auto Tab。
+    const autoBtn = wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('Cursor 极速号池 (Auto动态池)'))
+    expect(autoBtn).toBeDefined()
+    await autoBtn!.trigger('click')
+    await nextTick()
+    await flushPromises()
+
+    // Auto Tab 不应渲染账号数相关列标签。
+    expect(wrapper.text()).not.toContain('admin.quotaKeys.columns.accountCount')
+    expect(wrapper.text()).not.toContain('admin.quotaKeys.columns.workingCount')
+    // 其余关键列仍保留。
+    expect(wrapper.text()).toContain('admin.quotaKeys.columns.status')
+    expect(wrapper.text()).toContain('admin.quotaKeys.columns.actions')
+    wrapper.unmount()
+  })
+
+  // Auto 行不提供 shareai 用量探针（柱状图）按钮，彻底消除 CURSOR_LOOKUP_CODE 报错。
+  it('Auto 行不提供 shareai 探针按钮（CARD-7）', async () => {
+    const probeButtons = (w: ReturnType<typeof mountView>) =>
+      w.findAll('button').filter((b) => b.attributes('title') === 'admin.quotaKeys.probe.button')
+
+    // 标准行：操作列提供探针按钮。
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue(listWith([stdRow]))
+    const stdWrapper = mountView()
+    await flushPromises()
+    expect(probeButtons(stdWrapper)).toHaveLength(1)
+    stdWrapper.unmount()
+
+    // Auto 行：操作列不提供探针按钮。
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue(listWith([autoRow]))
+    const autoWrapper = mountView()
+    await flushPromises()
+    const autoBtn = autoWrapper
+      .findAll('button')
+      .find((b) => b.text().includes('Cursor 极速号池 (Auto动态池)'))
+    expect(autoBtn).toBeDefined()
+    await autoBtn!.trigger('click')
+    await nextTick()
+    await flushPromises()
+    expect(autoWrapper.text()).toContain('****auto')
+    expect(probeButtons(autoWrapper)).toHaveLength(0)
+    autoWrapper.unmount()
+  })
+
+  // 单卡刷新正确分流：Auto 行刷新调用 refreshAutoCard，绝不会调用标准 refresh。
+  it('Auto 行刷新调用 refreshAutoCard 而非标准 refresh（CARD-7）', async () => {
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue(listWith([autoRow]))
+    vi.mocked(adminAPI.quotaKeys.refreshAutoCard).mockResolvedValue(
+      { over_count: 0, sum_count: 0 } as never
+    )
+    vi.mocked(adminAPI.quotaKeys.refresh).mockResolvedValue({} as never)
+
+    const wrapper = mountView()
+    await flushPromises()
+    const autoBtn = wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('Cursor 极速号池 (Auto动态池)'))
+    expect(autoBtn).toBeDefined()
+    await autoBtn!.trigger('click')
+    await nextTick()
+    await flushPromises()
+
+    // Auto 行的刷新按钮（sync 图标，title = actions.refresh）。
+    const refreshBtn = wrapper
+      .findAll('button')
+      .find((b) => b.attributes('title') === 'admin.quotaKeys.actions.refresh')
+    expect(refreshBtn).toBeDefined()
+    await refreshBtn!.trigger('click')
+    await flushPromises()
+
+    expect(adminAPI.quotaKeys.refreshAutoCard).toHaveBeenCalledTimes(1)
+    expect(adminAPI.quotaKeys.refreshAutoCard).toHaveBeenCalledWith(autoRow.id)
+    expect(adminAPI.quotaKeys.refresh).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })

@@ -380,6 +380,7 @@ func registerQuotaKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 		qk.PUT("/auto_entry_config", h.Admin.QuotaKey.UpdateAutoEntryConfig)
 		qk.POST("/auto/batch_import", h.Admin.QuotaKey.BatchImportCards)
 		qk.POST("/auto/refresh_all", h.Admin.QuotaKey.RefreshAutoPool)
+		qk.POST("/auto/:id/refresh", h.Admin.QuotaKey.RefreshAutoCard)
 		qk.GET("/auto/status", h.Admin.QuotaKey.GetAutoPoolStatus)
 		// 每日额度实测统计（D2 统计设计）：回答"每码每天 400 被几个号烧光"与
 		// "每个号每天多少额度"。静态路径必须注册在 /:id 之前，否则会被当成 id 解析。

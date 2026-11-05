@@ -2,9 +2,11 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -133,9 +135,8 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 		// 失败即结束本卡：上游尚未绑定 → 无孤儿绑定；内存池不写入 → 无池污染。
 		//
 		// expires_at 置为过去（now-1min）使该行从出生起就被补池候选查询
-		// （status=active AND 未过期）排除：即便后续任一步失败、即便 notes 标记
-		// 也写不进去，这一行都不会被重新消费。notes 同时记录完整绑定凭据，
-		// 供人工恢复绑定。
+		// （status=active AND 未过期）排除：即便后续任一步失败，这一行都不会被重新消费。
+		// notes 同时记录完整绑定凭据，供人工恢复绑定。
 		notes := formatAutoPoolNotes(devCode, devMD5)
 		unselectableUntil := time.Now().Add(-time.Minute)
 		st, createErr := h.svc.Create(c.Request.Context(), cardKey, &unselectableUntil, &notes, 1)
@@ -147,14 +148,11 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 
 		// 阶段 2：绑定上游设备码。
 		// 失败时上游并未绑定（卡未被消耗），但本地行已经存在且**天然不可选**
-		// （阶段 1 已把 expires_at 置为过去）—— 无需任何中和步骤，
-		// 因此不再有「中和失败导致行仍 active+未过期」的路径。
+		// （阶段 1 已把 expires_at 置为过去）—— 无需任何中和步骤。
 		// 这里只登记失败标记（bind=failed）供运维检索与人工恢复绑定。
 		if bindErr := client.ValidateActivationCode(c.Request.Context(), cardKey, devCode, devMD5); bindErr != nil {
 			res.FailedCount++
 			msg := fmt.Sprintf("card %s bind failed: %v", maskCardKey(cardKey), bindErr)
-			// 标记写失败不影响安全性：行仍是不可选态（expires_at 在过去），
-			// 不会被重消费；但运维失去了「这张卡从未绑定」的显式信号，如实上报。
 			if markErr := h.markAutoCardBindFailed(c.Request.Context(), st.ID, devCode, devMD5); markErr != nil {
 				msg += fmt.Sprintf("; failed-marker NOT persisted (%v): row %d stays unselectable (expires_at in the past) but carries no bind=failed marker", markErr, st.ID)
 				slog.Error("cursor auto: bind failed AND failed-marker write failed, row stays unselectable and needs manual recovery",
@@ -167,12 +165,52 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 			continue
 		}
 
-		// 阶段 3：转可选 —— 只有绑成功才把该行放回补池候选集。
-		// 失败 = 卡已绑上游但本地仍不可选：属**可恢复**的硬失败（行不可选、
-		// 不会被重消费），报错并标注需人工处理；该卡不进内存池。
+		// 阶段 3：提取首号预热（GetCredentialsSecure）。
+		// 失败 → 卡保持不可选（expires_at 仍在过去），错误记入 last_refresh_error，不入池。
+		if _, warmErr := client.GetCredentialsSecure(c.Request.Context(), devCode, devMD5); warmErr != nil {
+			res.FailedCount++
+			msg := fmt.Sprintf("card %s warmup failed: %v", maskCardKey(cardKey), warmErr)
+			if snapErr := h.svc.WriteAutoCardUsageSnapshot(c.Request.Context(), st.ID, nil, warmErr); snapErr != nil {
+				msg += fmt.Sprintf("; last_refresh_error NOT persisted (%v)", snapErr)
+				slog.Error("cursor auto: warmup failed AND refresh-error write failed, row stays unselectable",
+					"quota_key_id", st.ID, "warm_err", warmErr, "snap_err", snapErr)
+			}
+			res.Errors = append(res.Errors, msg)
+			continue
+		}
+
+		// 阶段 4：查额度（RefreshCount）。
+		// 失败 → 卡保持不可选，错误记入 last_refresh_error，不入池。
+		countResp, countErr := client.RefreshCount(c.Request.Context(), devCode, devMD5)
+		if countErr != nil || countResp == nil {
+			res.FailedCount++
+			failErr := countErr
+			if failErr == nil {
+				failErr = fmt.Errorf("cursor auto: refresh count returned nil response")
+			}
+			msg := fmt.Sprintf("card %s count failed: %v", maskCardKey(cardKey), failErr)
+			if snapErr := h.svc.WriteAutoCardUsageSnapshot(c.Request.Context(), st.ID, nil, failErr); snapErr != nil {
+				msg += fmt.Sprintf("; last_refresh_error NOT persisted (%v)", snapErr)
+				slog.Error("cursor auto: count failed AND refresh-error write failed, row stays unselectable",
+					"quota_key_id", st.ID, "count_err", failErr, "snap_err", snapErr)
+			}
+			res.Errors = append(res.Errors, msg)
+			continue
+		}
+		overCount := countResp.OverCount
+		sumCount := countResp.SumCount
+
+		// 阶段 5：持久化额度快照（绝不存 Token）。失败 → 卡保持不可选，不入池。
+		if snapErr := h.syncAutoCardUsageSnapshot(c.Request.Context(), st.ID, overCount, sumCount); snapErr != nil {
+			res.FailedCount++
+			res.Errors = append(res.Errors, fmt.Sprintf("card %s snapshot persist failed: %v", maskCardKey(cardKey), snapErr))
+			continue
+		}
+
+		// 阶段 6：仅当 3、4、5 全部成功后，才恢复设定的 expires_at 并进入内存池。
 		if activateErr := h.activateAutoCard(c.Request.Context(), st.ID, req.ExpiresAt); activateErr != nil {
 			res.FailedCount++
-			msg := fmt.Sprintf("card %s bound upstream but NOT selectable locally (%v) — 已绑定但未转可选，需人工处理: row %d stays unselectable (expires_at in the past) and will not be re-consumed",
+			msg := fmt.Sprintf("card %s bound upstream but NOT selectable locally (%v) — 已绑定已查额但未转可选，需人工处理: row %d stays unselectable (expires_at in the past) and will not be re-consumed",
 				maskCardKey(cardKey), activateErr, st.ID)
 			slog.Error("cursor auto: bound upstream but activation to selectable failed, row left unselectable and requires manual handling",
 				"quota_key_id", st.ID,
@@ -182,19 +220,8 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 			continue
 		}
 
-		// 阶段 4：查一次额度（尽力而为）并入池。
-		// 额度未知不阻断导入：卡密已绑定、已落库且已转可选，后续 refresh_all 会补齐额度。
-		overCount := 0
-		sumCount := 0
-		countResp, countErr := client.RefreshCount(c.Request.Context(), devCode, devMD5)
-		if countErr == nil && countResp != nil {
-			overCount = countResp.OverCount
-			sumCount = countResp.SumCount
-		}
-
-		// 入池。只有「本地已落库 + 上游已绑定 + 本地已转可选」的卡密才允许进入
-		// 内存池，失败卡密永不进池（避免污染池内额度统计与取号候选集）。
-		// st.ID 来自本次新建行，池内不存在同 ID 的旧状态，整卡登记不会覆盖他人状态。
+		// 入池。只有「落库 + 绑定 + 预热 + 查额 + 快照回写」五步全部成功的卡密才允许进入
+		// 内存池，失败卡密永不进池（避免污染池内额度统计与取号候选集，且天然保持不可选）。
 		if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
 			pool.RegisterCard(st.ID, cardKey, devCode, devMD5, overCount, sumCount)
 		}
@@ -287,6 +314,14 @@ func (h *QuotaKeyHandler) RefreshAutoPool(c *gin.Context) {
 		}
 		// 只更新额度，保留单卡的冷却/禁用状态。
 		pool.UpdateCardCounts(card.ID, countResp.OverCount, countResp.SumCount)
+
+		// 同步回写数据库快照（单卡与全量刷新均持久化，供前端读取真实剩余额度）。
+		// 失败只影响可观测性，不影响号池运行时额度。
+		if snapErr := h.syncAutoCardUsageSnapshot(c.Request.Context(), card.ID, countResp.OverCount, countResp.SumCount); snapErr != nil {
+			slog.Warn("cursor auto: refresh pool snapshot persist failed", "card_id", card.ID, "err", snapErr)
+			failed++
+			continue
+		}
 		refreshed++
 	}
 
@@ -294,6 +329,145 @@ func (h *QuotaKeyHandler) RefreshAutoPool(c *gin.Context) {
 		"refreshed_count": refreshed,
 		"failed_count":    failed,
 	})
+}
+
+// autoCardUsageSnapshot 是 Auto 卡密写入 quota_keys.usage_snapshot 的 JSON 形态。
+//
+// 安全铁律（派发单 CARD-06）：只存聚合额度，**绝不写入任何 Bearer Token 或密钥明文**——
+// Token 仅驻留动态池内存。前端读取该快照展示真实剩余额度。
+type autoCardUsageSnapshot struct {
+	Total       int    `json:"total"`
+	Used        int    `json:"used"`
+	Remaining   int    `json:"remaining"`
+	OverCount   int    `json:"over_count"`
+	SumCount    int    `json:"sum_count"`
+	IsUnlimited bool   `json:"is_unlimited"`
+	CheckedAt   string `json:"checked_at"`
+}
+
+// syncAutoCardUsageSnapshot 把单卡上游额度持久化写入 quota_keys.usage_snapshot。
+//
+// 计算 isUnlimited := sumCount >= 90000000 || sumCount == 99999999 || sumCount == 99999990，
+// 构造 JSON 快照并通过 service 层写回数据库，成功时清空 last_refresh_error。
+// 绝不写入 Token —— 该函数仅搬运转译上游聚合计数。
+func (h *QuotaKeyHandler) syncAutoCardUsageSnapshot(ctx context.Context, id int64, overCount, sumCount int) error {
+	isUnlimited := sumCount >= 90000000 || sumCount == 99999999 || sumCount == 99999990
+	used := sumCount - overCount
+	if used < 0 {
+		used = 0
+	}
+	snap := autoCardUsageSnapshot{
+		Total:       sumCount,
+		Used:        used,
+		Remaining:   overCount,
+		OverCount:   overCount,
+		SumCount:    sumCount,
+		IsUnlimited: isUnlimited,
+		CheckedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	return h.svc.WriteAutoCardUsageSnapshot(ctx, id, data, nil)
+}
+
+// RefreshAutoCard 单卡刷新：解析设备凭据，向上游查额度，更新号池与数据库快照，返回最新额度。
+// POST /api/v1/admin/quota_keys/auto/:id/refresh
+func (h *QuotaKeyHandler) RefreshAutoCard(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "invalid id")
+		return
+	}
+
+	client, err := newCursorAutoUpstreamClient()
+	if err != nil {
+		response.Error(c, http.StatusServiceUnavailable, "Cursor auto upstream unavailable: "+err.Error())
+		return
+	}
+
+	devCode, devMD5, derr := h.resolveAutoCardDevice(c.Request.Context(), id)
+	if derr != nil {
+		response.Error(c, http.StatusNotFound, derr.Error())
+		return
+	}
+
+	countResp, cerr := client.RefreshCount(c.Request.Context(), devCode, devMD5)
+	if cerr != nil || countResp == nil {
+		failErr := cerr
+		if failErr == nil {
+			failErr = fmt.Errorf("cursor auto: refresh count returned nil response")
+		}
+		// 失败也登记 last_refresh_error，保持可观测。
+		if snapErr := h.svc.WriteAutoCardUsageSnapshot(c.Request.Context(), id, nil, failErr); snapErr != nil {
+			slog.Warn("cursor auto: single-card refresh error persist failed", "card_id", id, "err", snapErr)
+		}
+		response.Error(c, http.StatusBadGateway, "refresh count failed: "+failErr.Error())
+		return
+	}
+
+	// 更新号池内存额度（只改额度，保留冷却/禁用状态）。
+	if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
+		pool.UpdateCardCounts(id, countResp.OverCount, countResp.SumCount)
+	}
+	// 持久化回写数据库快照，供前端读取真实剩余额度。
+	if snapErr := h.syncAutoCardUsageSnapshot(c.Request.Context(), id, countResp.OverCount, countResp.SumCount); snapErr != nil {
+		slog.Warn("cursor auto: single-card refresh snapshot persist failed", "card_id", id, "err", snapErr)
+	}
+
+	response.Success(c, gin.H{
+		"id":           id,
+		"over_count":   countResp.OverCount,
+		"sum_count":    countResp.SumCount,
+		"is_unlimited": countResp.SumCount >= 90000000 || countResp.SumCount == 99999999 || countResp.SumCount == 99999990,
+	})
+}
+
+// resolveAutoCardDevice 解析 Auto 卡密的设备凭据（dev / md5）。
+// 优先取自动态号池（已入池卡）；池内无（导入失败未入池）则从 DB notes 回解。
+func (h *QuotaKeyHandler) resolveAutoCardDevice(ctx context.Context, id int64) (string, string, error) {
+	if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
+		for _, card := range pool.ListCards() {
+			if card.ID == id {
+				return card.DeviceCode, card.DeviceCodeMD5, nil
+			}
+		}
+	}
+	status, err := h.svc.GetStatus(ctx, id)
+	if err != nil {
+		return "", "", fmt.Errorf("quota key %d not found: %w", id, err)
+	}
+	if status == nil || status.Notes == nil {
+		return "", "", fmt.Errorf("quota key %d has no device credentials", id)
+	}
+	devCode, devMD5, ok := parseAutoPoolDeviceFromNotes(*status.Notes)
+	if !ok {
+		return "", "", fmt.Errorf("quota key %d notes missing device credentials", id)
+	}
+	return devCode, devMD5, nil
+}
+
+// parseAutoPoolDeviceFromNotes 从 notes（auto_pool:dev=...;md5=...[;bind=failed]）解析设备凭据。
+// 失败返回 ok=false（凭据缺失或格式不符）。
+func parseAutoPoolDeviceFromNotes(notes string) (devCode, devMD5 string, ok bool) {
+	if !strings.HasPrefix(notes, autoPoolNotesPrefix) {
+		return "", "", false
+	}
+	body := notes[len(autoPoolNotesPrefix):]
+	for _, p := range strings.Split(body, ";") {
+		p = strings.TrimSpace(p)
+		switch {
+		case strings.HasPrefix(p, "dev="):
+			devCode = strings.TrimPrefix(p, "dev=")
+		case strings.HasPrefix(p, "md5="):
+			devMD5 = strings.TrimPrefix(p, "md5=")
+		}
+	}
+	if devCode == "" || devMD5 == "" {
+		return "", "", false
+	}
+	return devCode, devMD5, true
 }
 
 // GetAutoPoolStatus 查询当前 Auto 动态号池的在线健康指标

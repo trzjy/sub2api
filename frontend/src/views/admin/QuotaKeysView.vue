@@ -163,6 +163,7 @@
                 <Icon name="checkCircle" size="sm" />
               </button>
               <button
+                v-if="!isAutoKey(row)"
                 class="rounded p-1 text-gray-400 transition-colors hover:text-blue-600 disabled:opacity-40 dark:hover:text-blue-400"
                 :disabled="busyId === row.id"
                 :title="t('admin.quotaKeys.probe.button')"
@@ -652,19 +653,27 @@ const form = reactive({
  */
 const expandedAccounts = reactive(new Set<number>())
 
-const columns = computed<Column[]>(() => [
-  { key: 'code_masked', label: t('admin.quotaKeys.columns.maskedCode'), sortable: false },
-  // 来源额度快照列（§25.6⑦）：列名沿用「激活码用量」口径，数值为一层（key/来源）快照。
-  { key: 'usage', label: t('admin.quotaKeys.probe.title'), sortable: false },
-  { key: 'status', label: t('admin.quotaKeys.columns.status'), sortable: false },
-  { key: 'priority', label: t('admin.quotaKeys.columns.priority'), sortable: false },
-  { key: 'exhausted', label: t('admin.quotaKeys.columns.exhausted'), sortable: false },
-  { key: 'account_count', label: t('admin.quotaKeys.columns.accountCount'), sortable: false },
-  { key: 'working_count', label: t('admin.quotaKeys.columns.workingCount'), sortable: false },
-  { key: 'expires_at', label: t('admin.quotaKeys.columns.expiresAt'), sortable: false },
-  { key: 'last_refresh_error', label: t('admin.quotaKeys.columns.lastRefreshError'), sortable: false },
-  { key: 'actions', label: t('admin.quotaKeys.columns.actions'), sortable: false }
-])
+const columns = computed<Column[]>(() => {
+  // 标准渠道全列展示；Auto 动态号池不承载账号数语义（恒为 0），
+  // 故按 activeChannelTab 动态排除 account_count / working_count 两列（CARD-7）。
+  const base: Column[] = [
+    { key: 'code_masked', label: t('admin.quotaKeys.columns.maskedCode'), sortable: false },
+    // 来源额度快照列（§25.6⑦）：列名沿用「激活码用量」口径，数值为一层（key/来源）快照。
+    { key: 'usage', label: t('admin.quotaKeys.probe.title'), sortable: false },
+    { key: 'status', label: t('admin.quotaKeys.columns.status'), sortable: false },
+    { key: 'priority', label: t('admin.quotaKeys.columns.priority'), sortable: false },
+    { key: 'exhausted', label: t('admin.quotaKeys.columns.exhausted'), sortable: false },
+    { key: 'account_count', label: t('admin.quotaKeys.columns.accountCount'), sortable: false },
+    { key: 'working_count', label: t('admin.quotaKeys.columns.workingCount'), sortable: false },
+    { key: 'expires_at', label: t('admin.quotaKeys.columns.expiresAt'), sortable: false },
+    { key: 'last_refresh_error', label: t('admin.quotaKeys.columns.lastRefreshError'), sortable: false },
+    { key: 'actions', label: t('admin.quotaKeys.columns.actions'), sortable: false }
+  ]
+  if (activeChannelTab.value === 'auto') {
+    return base.filter((c) => c.key !== 'account_count' && c.key !== 'working_count')
+  }
+  return base
+})
 
 function statusLabel(row: QuotaKey | QuotaKeyDetail): string {
   if (row.exhausted) return t('admin.quotaKeys.status.exhausted')
@@ -861,7 +870,13 @@ async function handleRefresh(row: QuotaKey) {
   if (busyId.value !== null) return
   busyId.value = row.id
   try {
-    await adminAPI.quotaKeys.refresh(row.id)
+    // 单卡刷新分流（CARD-7）：Auto 动态号池走专用 refreshAutoCard 上游额度刷新，
+    // 标准渠道走本地账号状态刷新 refresh，严禁 Auto 行调用会报错的 shareai 探针/标准拉号。
+    if (isAutoKey(row)) {
+      await adminAPI.quotaKeys.refreshAutoCard(row.id)
+    } else {
+      await adminAPI.quotaKeys.refresh(row.id)
+    }
     appStore.showSuccess(t('admin.quotaKeys.refreshed'))
     await load()
   } catch (err: unknown) {
