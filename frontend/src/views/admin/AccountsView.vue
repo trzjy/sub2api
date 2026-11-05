@@ -1214,18 +1214,38 @@ const ACCOUNT_STATUS_FILTER_VALUES = new Set([
   'available',
   'temp_limited'
 ])
-const initialQueryParam = (key: string): string => {
-  // 测试环境中组件可能未挂载 router，此时 route 为 undefined。
-  const value = route?.query?.[key]
-  return typeof value === 'string' ? value : ''
-}
-const initialStatusQueryParam = (): string => {
-  const value = initialQueryParam('status')
-  return ACCOUNT_STATUS_FILTER_VALUES.has(value) ? value : ''
-}
+// 从 URL query 解析账号筛选意图，并在没有针对性深链参数时回落到 localStorage 历史偏好。
+const resolveAccountFiltersFromQuery = (query: Record<string, any> = {}) => {
+  const getQueryStr = (key: string): string => {
+    const value = query[key]
+    return typeof value === 'string' ? value : ''
+  }
+  const group = getQueryStr('group')
+  const search = getQueryStr('search')
+  const type = getQueryStr('type')
+  const privacy_mode = getQueryStr('privacy_mode')
+  const queryPlatform = getQueryStr('platform')
+  const rawStatus = getQueryStr('status')
+  const queryStatus = ACCOUNT_STATUS_FILTER_VALUES.has(rawStatus) ? rawStatus : ''
 
-// 页面首次加载时的历史筛选值（platform/status）；URL 深链参数优先于它。
-const persistedAccountFilters = loadInitialAccountFilterValues()
+  // 深链针对性筛选判断：
+  // 当 URL 带有 group, search, type, privacy_mode, platform, status 等任一明确筛选意图时，
+  // 属于目标下钻/特定查询，未在 URL 指定的维度应保持缺省空值（如全部平台、全部状态），
+  // 严禁将 localStorage 历史偏好注入进来，造成跨平台分组（如含 Cursor/Antigravity 的 Gemini 分组）
+  // 账号被静默遮蔽；只有在完全没有针对性 URL 参数时，才回落到 localStorage 缓存的平台和状态。
+  const hasTargetedFilter = Boolean(group || search || type || privacy_mode || queryPlatform || queryStatus)
+
+  const persisted = loadInitialAccountFilterValues()
+
+  return {
+    group,
+    search,
+    type,
+    privacy_mode,
+    platform: queryPlatform || (!hasTargetedFilter ? persisted.platform : ''),
+    status: queryStatus || (!hasTargetedFilter ? persisted.status : '')
+  }
+}
 
 const {
   items: accounts,
@@ -1239,19 +1259,22 @@ const {
   handlePageSizeChange: baseHandlePageSizeChange
 } = useTableLoader<AccountListItem, any>({
   fetchFn: adminAPI.accounts.list,
-  initialParams: {
-    // 深链 URL 参数优先；未带参数时回落到上次保存的筛选（localStorage）。
-    platform: initialQueryParam('platform') || persistedAccountFilters.platform,
-    type: initialQueryParam('type'),
-    status: initialStatusQueryParam() || persistedAccountFilters.status,
-    privacy_mode: initialQueryParam('privacy_mode'),
-    group: initialQueryParam('group'),
-    search: initialQueryParam('search'),
-    lite: '1',
-    include_scheduler_score: shouldIncludeSchedulerScore() ? '1' : '0',
-    sort_by: sortState.sort_by,
-    sort_order: sortState.sort_order
-  }
+  initialParams: (() => {
+    // 深链 URL 参数优先；未带针对性参数时回落到上次保存的筛选（localStorage）。
+    const initialFilters = resolveAccountFiltersFromQuery(route?.query || {})
+    return {
+      platform: initialFilters.platform,
+      type: initialFilters.type,
+      status: initialFilters.status,
+      privacy_mode: initialFilters.privacy_mode,
+      group: initialFilters.group,
+      search: initialFilters.search,
+      lite: '1',
+      include_scheduler_score: shouldIncludeSchedulerScore() ? '1' : '0',
+      sort_by: sortState.sort_by,
+      sort_order: sortState.sort_order
+    }
+  })()
 })
 
 const {
@@ -1450,6 +1473,8 @@ const refreshUpstreamBillingSortedList = async (force = false) => {
 useIntervalFn(() => { void refreshUpstreamBillingRates() }, 5 * 60_000, { immediate: false })
 
 const saveAccountFilterValues = () => {
+  // 当处于分组筛选（params.group）时，属于针对特定分组的上下文操作，不污染全局账号筛选偏好
+  if (params.group) return
   try {
     localStorage.setItem(ACCOUNT_FILTER_STORAGE_KEY, JSON.stringify({
       platform: params.platform,
@@ -1469,6 +1494,21 @@ const debouncedReload = () => {
   pendingTodayStatsRefresh.value = true
   baseDebouncedReload()
 }
+
+// 监听路由 query 动态变化（例如从分组 A 下钻切换到分组 B）。
+// 解析结果同步到 params，并以全部平台/全部状态为缺省，避免把某个分组
+// 的历史平台偏好带到另一个分组造成静默过滤；随后触发列表刷新。
+watch(() => route?.query, (newQuery) => {
+  const resolved = resolveAccountFiltersFromQuery(newQuery || {})
+  const requestParams = params as any
+  requestParams.platform = resolved.platform
+  requestParams.type = resolved.type
+  requestParams.status = resolved.status
+  requestParams.privacy_mode = resolved.privacy_mode
+  requestParams.group = resolved.group
+  requestParams.search = resolved.search
+  debouncedReload()
+})
 
 const handlePageChange = (page: number) => {
   syncAccountListDerivedParams()
