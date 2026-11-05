@@ -399,22 +399,22 @@ func (h *QuotaKeyHandler) RefreshAutoCard(c *gin.Context) {
 		if failErr == nil {
 			failErr = fmt.Errorf("cursor auto: refresh count returned nil response")
 		}
-		// 失败时从号池注销该卡，保持运行态与重启态一致（启动时也会拦截非空错误卡）
+		// 失败态必须**先落库成功、再撤出运行池**：启动回放只拦截已持久化的
+		// last_refresh_error，若这里是「先撤池、后落库失败」，重启会把该卡以旧额度
+		// 重新纳管，运行期与重启期分叉。落库失败时保持池内状态不变并硬失败上报。
+		if snapErr := h.svc.WriteAutoCardUsageSnapshot(c.Request.Context(), id, nil, failErr); snapErr != nil {
+			slog.Error("cursor auto: single-card refresh error persist failed", "card_id", id, "err", snapErr)
+			response.Error(c, http.StatusInternalServerError, "persist refresh failure state failed: "+snapErr.Error())
+			return
+		}
+		// 失败态已持久化：从号池注销该卡，保持运行态与重启态一致（启动时会拦截非空错误卡）
 		if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
 			pool.UnregisterCard(id)
-		}
-		// 失败也登记 last_refresh_error，保持可观测。
-		if snapErr := h.svc.WriteAutoCardUsageSnapshot(c.Request.Context(), id, nil, failErr); snapErr != nil {
-			slog.Warn("cursor auto: single-card refresh error persist failed", "card_id", id, "err", snapErr)
 		}
 		response.Error(c, http.StatusBadGateway, "refresh count failed: "+failErr.Error())
 		return
 	}
 
-	// 更新号池内存额度（只改额度，保留冷却/禁用状态）。
-	if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
-		pool.UpdateCardCounts(id, countResp.OverCount, countResp.SumCount)
-	}
 	// 持久化回写数据库快照，供前端读取真实剩余额度。
 	// 快照写库失败时，内存与数据库已分叉，必须直接返回 500 报错，禁止虚假成功。
 	if snapErr := h.syncAutoCardUsageSnapshot(c.Request.Context(), id, countResp.OverCount, countResp.SumCount); snapErr != nil {
@@ -423,12 +423,67 @@ func (h *QuotaKeyHandler) RefreshAutoCard(c *gin.Context) {
 		return
 	}
 
+	// 更新号池内存额度（只改额度，保留冷却/禁用状态）。
+	if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
+		if poolHasCard(pool, id) {
+			pool.UpdateCardCounts(id, countResp.OverCount, countResp.SumCount)
+		} else if rerr := h.reregisterAutoCard(c.Request.Context(), pool, id, devCode, devMD5, countResp); rerr != nil {
+			// 失败态已解除（last_refresh_error 已清空）却无法重新纳管：重启回放会重新
+			// 入池而当前进程不会，属运行期/重启期分叉，必须硬失败暴露而不是静默成功。
+			slog.Error("cursor auto: re-register recovered card into pool failed", "card_id", id, "err", rerr)
+			response.Error(c, http.StatusInternalServerError, "re-register card into pool failed: "+rerr.Error())
+			return
+		}
+	}
+
 	response.Success(c, gin.H{
 		"id":           id,
 		"over_count":   countResp.OverCount,
 		"sum_count":    countResp.SumCount,
 		"is_unlimited": service.IsUnlimitedCard(countResp.SumCount),
 	})
+}
+
+// poolHasCard 报告指定卡密当前是否仍在运行池内（ListCards 返回的是快照副本）。
+func poolHasCard(pool *service.CursorDynamicPool, id int64) bool {
+	for _, card := range pool.ListCards() {
+		if card.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// reregisterAutoCard 在单卡刷新成功后，把此前因刷新失败被移出运行池的卡按统一
+// 注册路径重新纳管。
+//
+// 入池资格与启动回放（CursorDynamicPool.LoadFromRepository）保持同一判定：status
+// 必须 active、未过期、notes 带 Auto 前缀且不含 bind=failed 标记；priority 取库内值，
+// 避免重新纳管把选卡顺序重置为 0。不合格时保持池外（重启回放同样会排除，二者仍同态），
+// 仅读库失败才返回错误，由调用方硬失败暴露。
+func (h *QuotaKeyHandler) reregisterAutoCard(ctx context.Context, pool *service.CursorDynamicPool, id int64, devCode, devMD5 string, countResp *cursorupstream.CountResponse) error {
+	st, err := h.svc.GetStatus(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load quota key %d: %w", id, err)
+	}
+	if st == nil {
+		return fmt.Errorf("quota key %d not found", id)
+	}
+	if st.Status != domain.QuotaKeyStatusActive {
+		slog.Warn("cursor auto: card refreshed but not re-registered (status not active)", "card_id", id, "status", st.Status)
+		return nil
+	}
+	if st.ExpiresAt != nil && st.ExpiresAt.Before(time.Now()) {
+		slog.Warn("cursor auto: card refreshed but not re-registered (expired)", "card_id", id)
+		return nil
+	}
+	if st.Notes == nil || !strings.HasPrefix(*st.Notes, autoPoolNotesPrefix) || strings.Contains(*st.Notes, autoPoolBindFailedMarker) {
+		slog.Warn("cursor auto: card refreshed but not re-registered (notes not eligible)", "card_id", id)
+		return nil
+	}
+	// cardKey 仅作标识（网络取号只用 dev/md5），此处复用脱敏末 4 位投影。
+	pool.RegisterCard(id, st.CodeValueMasked, devCode, devMD5, countResp.OverCount, countResp.SumCount, st.Priority)
+	return nil
 }
 
 // resolveAutoCardDevice 解析 Auto 卡密的设备凭据（dev / md5）。

@@ -52,6 +52,8 @@ type autoCardQuotaKeyRepo struct {
 
 	// failUpdateMetaAll 为真时 UpdateMeta 一律失败（模拟 DB 完全不可写）。
 	failUpdateMetaAll bool
+	// failUpdateStatusFields 为真时 UpdateStatusFields 失败（模拟失败态无法持久化）。
+	failUpdateStatusFields bool
 	// failUpdateMetaExpireTimes 控制「带 expires_at 的 UpdateMeta 调用」的失败次数：
 	// 0 = 不失败；-1 = 一直失败；n>0 = 前 n 次失败（覆盖瞬时 DB 抖动）。
 	// 只写 notes 的调用不受它影响（模拟「转可选写入被 DB 拒绝、但标记写入可用」）。
@@ -208,6 +210,9 @@ func (r *autoCardQuotaKeyRepo) UpdateStatusFields(_ context.Context, _ *ent.Tx, 
 	if !ok {
 		return &ent.NotFoundError{}
 	}
+	if r.failUpdateStatusFields {
+		return fmt.Errorf("quota_keys: update status fields failed")
+	}
 	qk.Status = status
 	qk.Exhausted = exhausted
 	qk.LastRefreshError = lastError
@@ -260,6 +265,8 @@ type autoCardUpstreamStub struct {
 	overCount    int
 	sumCount     int
 	forceReused  bool
+	// refreshCode 控制 /refreshCount 返回的业务 code（非 200 即客户端判失败）。
+	refreshCode int
 }
 
 func newAutoCardUpstreamStub(t *testing.T) *autoCardUpstreamStub {
@@ -268,6 +275,7 @@ func newAutoCardUpstreamStub(t *testing.T) *autoCardUpstreamStub {
 		validateCode: 200,
 		overCount:    7,
 		sumCount:     9,
+		refreshCode:  200,
 	}
 	s.server = httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(s.server.Close)
@@ -285,7 +293,7 @@ func (s *autoCardUpstreamStub) handle(w http.ResponseWriter, r *http.Request) {
 		s.record(r.URL.Path, card)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 200,
+			"code": s.refreshCode,
 			"msg":  "ok",
 			"data": map[string]any{"over_count": s.overCount, "sum_count": s.sumCount},
 		})
@@ -337,6 +345,7 @@ func setupAutoCardRouter(svc *service.QuotaKeyService) *gin.Engine {
 	qk.POST("/batch_import", h.BatchImportCards)
 	qk.POST("/refresh_all", h.RefreshAutoPool)
 	qk.GET("/status", h.GetAutoPoolStatus)
+	qk.POST("/:id/refresh", h.RefreshAutoCard)
 	return router
 }
 
@@ -823,3 +832,66 @@ func TestQuotaKeyAuto_RefreshAutoPool_PoolNotInitialized(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Contains(t, rec.Body.String(), "pool_not_initialized")
 }
+
+// ---------------------------------------------------------------------------
+// 单卡刷新：失败态持久化与恢复重纳管的运行期/重启期同态保护
+// ---------------------------------------------------------------------------
+
+// TestQuotaKeyAuto_RefreshAutoCard_FailurePersistError_KeepsCardInPool 锁定：
+// 上游刷新失败但失败态**无法持久化**时，不得单方面把卡撤出运行池 —— 启动回放只拦截
+// 已持久化的 last_refresh_error，先撤池后落库失败会让重启把该卡以旧额度重新纳管。
+func TestQuotaKeyAuto_RefreshAutoCard_FailurePersistError_KeepsCardInPool(t *testing.T) {
+	upstream := newAutoCardUpstreamStub(t)
+	upstream.refreshCode = 500
+	repo := newAutoCardQuotaKeyRepo()
+	repo.keys[1] = &ent.QuotaKey{
+		ID:        1,
+		CodeLast4: "0001",
+		Status:    domain.QuotaKeyStatusActive,
+		Notes:     strPtr(formatAutoPoolNotes("dev-code-1", "dev-md5-1")),
+	}
+	repo.failUpdateStatusFields = true
+	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
+	pool.RegisterCard(1, "0001", "dev-code-1", "dev-md5-1", 5, 10)
+	installAutoCardPool(t, pool)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
+
+	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
+	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/1/refresh", "")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	require.Len(t, pool.ListCards(), 1,
+		"失败态未能持久化时撤池会造成重启回放分叉，运行池必须保持不变")
+}
+
+// TestQuotaKeyAuto_RefreshAutoCard_SuccessReRegistersRemovedCard 锁定：
+// 卡密因刷新失败被移出运行池后，一旦刷新成功（失败态已清除），必须按统一注册路径
+// 重新纳管并保留库内 priority，否则运行期（池外）与重启期（回放入池）再次分叉。
+func TestQuotaKeyAuto_RefreshAutoCard_SuccessReRegistersRemovedCard(t *testing.T) {
+	upstream := newAutoCardUpstreamStub(t)
+	repo := newAutoCardQuotaKeyRepo()
+	repo.keys[1] = &ent.QuotaKey{
+		ID:        1,
+		CodeLast4: "0001",
+		Status:    domain.QuotaKeyStatusActive,
+		Notes:     strPtr(formatAutoPoolNotes("dev-code-1", "dev-md5-1")),
+		Priority:  5,
+	}
+	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
+	installAutoCardPool(t, pool)
+	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
+	require.Empty(t, pool.ListCards(), "前置条件：该卡已因失败被移出运行池")
+
+	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
+	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/1/refresh", "")
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	cards := pool.ListCards()
+	require.Len(t, cards, 1, "刷新成功后必须重新纳管被移出的卡密")
+	require.Equal(t, int64(1), cards[0].ID)
+	require.Equal(t, 5, cards[0].Priority, "重新纳管必须沿用库内 priority，不得重置为 0")
+	require.Equal(t, upstream.overCount, cards[0].OverCount)
+	require.Equal(t, upstream.sumCount, cards[0].SumCount)
+}
+
+func strPtr(s string) *string { return &s }
