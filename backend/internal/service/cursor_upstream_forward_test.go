@@ -45,6 +45,7 @@ type cursorFakeUpstream struct {
 	mu       sync.Mutex
 	path     string
 	headers  http.Header
+	host     string
 	body     string
 	requests int
 }
@@ -523,13 +524,32 @@ func newCursorAutoDirectFixture(
 	t *testing.T,
 	handler func(w http.ResponseWriter, r *http.Request),
 ) (*CursorUpstreamForwarder, *cursorFakeUpstream, string) {
+	return newCursorAutoDirectFixtureWithBodyReader(t, nil, handler)
+}
+
+// newCursorAutoDirectFixtureWithBodyReader 是夹具的可定制变体：readBody 决定服务端如何
+// 读取请求体，缺省 io.ReadAll。
+//
+// 双工流（AgentRun）路径必须用「按已知字节数精确读取」：客户端的双工 writer 要等响应
+// 读循环收尾才关闭，服务端 ReadAll 等到 EOF 会与客户端互等死锁（本用例曾因此挂 10 分钟）。
+func newCursorAutoDirectFixtureWithBodyReader(
+	t *testing.T,
+	readBody func(io.Reader) ([]byte, error),
+	handler func(w http.ResponseWriter, r *http.Request),
+) (*CursorUpstreamForwarder, *cursorFakeUpstream, string) {
 	t.Helper()
+	if readBody == nil {
+		readBody = io.ReadAll
+	}
 	fake := &cursorFakeUpstream{}
-	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
+	// 官方直连是 HTTP/2 双工流：测试服务端必须开启 h2，否则 HTTP/1.1 下客户端写循环
+	// 与响应读取互等（曾致用例挂起超时）。
+	tlsSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := readBody(r.Body)
 		fake.mu.Lock()
 		fake.path = r.URL.Path
 		fake.headers = r.Header.Clone()
+		fake.host = r.Host
 		fake.body = string(raw)
 		fake.requests++
 		fake.mu.Unlock()
@@ -540,6 +560,8 @@ func newCursorAutoDirectFixture(
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("ok"))
 	}))
+	tlsSrv.EnableHTTP2 = true
+	tlsSrv.StartTLS()
 	t.Cleanup(tlsSrv.Close)
 
 	u, err := url.Parse(tlsSrv.URL)
@@ -582,7 +604,7 @@ func TestCursorForward_AutoDirectDirectsToOfficialAndBypassesShareAI(t *testing.
 		t.Errorf("want exactly 1 upstream hit, got %d", fake.requests)
 	}
 	// 锁定 host：出站目标必须指向配置好的官方节点 host，而非 shareai 中转。
-	if fake.headers == nil || fake.headers.Get("Host") != host {
+	if fake.host != host {
 		t.Errorf("request host = %q, want locked official host %q", hostOf(fake), host)
 	}
 	// 协议不重写：路径与请求体逐字节沿用 Cursor 原生形态。
@@ -638,15 +660,21 @@ func TestCursorForward_AutoDirectRejectsRedirect(t *testing.T) {
 // 19) 保留双工流：AgentRun 路径下直连模式仍创建并接回 cursorAgentDuplex，
 // 请求体经双工 pipe 完整送达官方节点，且响应体接管成功。
 func TestCursorForward_AutoDirectPreservesDuplex(t *testing.T) {
-	f, fake, _ := newCursorAutoDirectFixture(t, func(w http.ResponseWriter, r *http.Request) {
-		// 读取经双工 pipe 送来的请求体。
-		_, _ = io.ReadAll(r.Body)
+	body := cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil))
+	// 双工请求体在响应前不会 EOF，服务端按已知长度精确读取，绝不 ReadAll 等 EOF。
+	readExactly := func(r io.Reader) ([]byte, error) {
+		buf := make([]byte, len(body))
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
+	f, fake, _ := newCursorAutoDirectFixtureWithBodyReader(t, readExactly, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", cursorConnectContentType)
 		// 回一个 EndStream 终态帧，双工读循环应当干净收尾。
 		_, _ = w.Write(cursorEndStreamFrame([]byte(`{"type":"end"}`)))
 	})
 
-	body := cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil))
 	resp, err := f.Do(context.Background(), &CursorUpstreamRequest{
 		Path:          cursorPathAgentRun,
 		Body:          body,
@@ -675,10 +703,7 @@ func TestCursorForward_AutoDirectPreservesDuplex(t *testing.T) {
 	}
 }
 
-// hostOf 从 fake 记录里取 Host 头（便捷/诊断用）。
+// hostOf 返回 fake 记录的实际出站 Host（取自 r.Host：Go 客户端不把 Host 放进 Header）。
 func hostOf(fake *cursorFakeUpstream) string {
-	if fake.headers == nil {
-		return ""
-	}
-	return fake.headers.Get("Host")
+	return fake.host
 }
