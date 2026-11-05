@@ -160,7 +160,8 @@ func TestGroupModelAllowlistAllowsAliasFamily(t *testing.T) {
 		Models:  []string{"claude-fable-5-1", "deepseek-v4.1-flash"},
 	}
 	require.True(t, allowlist.Allows("claude-fable-5.1"), "点号写法应命中横线白名单")
-	require.True(t, allowlist.Allows("deepseek-v4.1-flash-1017"), "带版本后缀应命中主干白名单")
+	require.False(t, allowlist.Allows("deepseek-v4.1-flash-1017"),
+		"1017 已对下游下线（2026-11-05 用户裁定），即使属别名族也不得准入")
 	require.False(t, allowlist.Allows("claude-sonnet-5"), "白名单没列 sonnet，不应放行")
 
 	// 白名单列的是点号写法时，横线写法同样放行。

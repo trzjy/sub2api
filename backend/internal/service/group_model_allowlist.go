@@ -18,6 +18,42 @@ type GroupModelAllowlist struct {
 	Models  []string `json:"models,omitempty"`
 }
 
+// retiredModelNames 是对下游下线的模型名（2026-11-05 用户裁定）。
+//
+// `deepseek-v4.1-flash-1017` 只是上游真名，产品上对下游只提供
+// `deepseek-v4.1-flash`：账号映射负责把下游标准名翻译成上游真名
+// （`deepseek-v4.1-flash` → `deepseek-v4.1-flash-1017`），响应侧把上游真名
+// 归一回标准名。别名族（model_name_alias.go）保留该别名用于映射查找与响应归一
+// ——那些链路只读名字，不构成"对下游提供"。
+//
+// 因此本名单只作用于**下游入口**：白名单准入（Allows）与模型列表（FilterForListing）。
+// 不删别名族，是因为它同时被账号映射查找与响应归一复用，删掉会让存量账号的
+// 1017 映射键直接失效。
+var retiredModelNames = map[string]struct{}{
+	"deepseek-v4.1-flash-1017": {},
+}
+
+// IsRetiredModelName 报告该模型名是否已对下游下线。大小写不敏感。
+func IsRetiredModelName(name string) bool {
+	_, ok := retiredModelNames[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
+
+// filterRetiredModelNames 去掉列表里的已下线模型名（保持原顺序）。
+func filterRetiredModelNames(models []string) []string {
+	if len(models) == 0 {
+		return models
+	}
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		if IsRetiredModelName(model) {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
+}
+
 // DomainGroupModelAllowlist 把 service 白名单转换为 ent 持久化使用的 domain 类型。
 func DomainGroupModelAllowlist(cfg GroupModelAllowlist) domain.GroupModelAllowlist {
 	return domain.GroupModelAllowlist{Enabled: cfg.Enabled, Models: cfg.Models}
@@ -92,6 +128,12 @@ func (g *Group) ModelAllowlistEnabled() bool {
 // 候选形式覆盖代码中已有的模型名等价规则（Gemini models/ 前缀、
 // Antigravity/Claude -thinking 宽容规则、OpenAI 推理后缀），不做模糊匹配。
 func (a GroupModelAllowlist) Allows(model string) bool {
+	// 已对下游下线的模型名一律拒绝：白名单未开启也要拦（见 retiredModelNames）。
+	// 必须先于别名族展开判断，否则 `deepseek-v4.1-flash-1017` 会以
+	// `deepseek-v4.1-flash` 的别名身份混进白名单。
+	if IsRetiredModelName(model) {
+		return false
+	}
 	if !a.Enabled {
 		return true
 	}
@@ -175,7 +217,9 @@ func groupModelAllowlistCandidates(model string) []string {
 // 交集不会被枚举为模型 ID，列表可能省略仍可请求的模型。
 func (a GroupModelAllowlist) FilterForListing(source []string) []string {
 	if !a.Enabled {
-		return source
+		// 白名单未开启时列表直接透传 source（账号映射键），同样不得把已下线的
+		// 模型名暴露给下游。
+		return filterRetiredModelNames(source)
 	}
 	if len(a.Models) == 0 {
 		// 开启但为空的配置在管理端已被拒绝；对遗留脏数据保持“看到什么 = 能调什么”，
@@ -197,6 +241,9 @@ func (a GroupModelAllowlist) FilterForListing(source []string) []string {
 	seen := make(map[string]struct{}, len(a.Models)+len(patterns))
 	filtered := make([]string, 0, len(patterns))
 	add := func(model string) {
+		if IsRetiredModelName(model) {
+			return
+		}
 		key := strings.ToLower(model)
 		if _, ok := seen[key]; ok {
 			return
