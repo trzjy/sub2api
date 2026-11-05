@@ -2,10 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -95,8 +97,18 @@ type ManagedCard struct {
 	OverCount     int
 	SumCount      int
 	IsUnlimited   bool
+	// Priority 是管理员设定的选卡优先级：数值越小越优先（与 quota_keys.priority 同语义）。
+	Priority      int
 	CooldownUntil time.Time
 	Disabled      bool
+}
+
+// isUnlimitedCard 通用判断某卡密是否为「无限卡」（总额度达到虚拟无限阈值）。
+//
+// 旧硬编码 `sumCount == 99999990` 漏掉了同为上游虚拟无限标记的 99999999，
+// 且未覆盖 >= 90000000 的整段阈值区间；这里收口为统一判断，避免失效卡被错判为有限卡。
+func isUnlimitedCard(sumCount int) bool {
+	return sumCount >= 90000000 || sumCount == 99999999 || sumCount == 99999990
 }
 
 // CursorDynamicPool 管理 1 对多卡密聚合、Token 预热环、会话粘性及 429 内部自愈
@@ -130,10 +142,19 @@ func (p *CursorDynamicPool) MarkUpstreamUnavailable(err error) {
 	p.upstreamErr = err
 }
 
-// RegisterCard 注册/更新一张卡密到多卡聚合器
-func (p *CursorDynamicPool) RegisterCard(id int64, cardKey, devCode, devMD5 string, overCount, sumCount int) {
+// RegisterCard 注册/更新一张卡密到多卡聚合器。
+//
+// priority 为可选参数：不传（生产既有调用方）时默认 0；LoadFromRepository 回放时
+// 传入 quota_keys.priority，使选卡排序遵循管理员设定的优先级（数值越小越优先）。
+// 使用可变参数以保持既有调用方（handler / 其它测试）无需改动（禁区约束）。
+func (p *CursorDynamicPool) RegisterCard(id int64, cardKey, devCode, devMD5 string, overCount, sumCount int, priority ...int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	prio := 0
+	if len(priority) > 0 {
+		prio = priority[0]
+	}
 
 	p.cards[id] = &ManagedCard{
 		ID:            id,
@@ -142,7 +163,8 @@ func (p *CursorDynamicPool) RegisterCard(id int64, cardKey, devCode, devMD5 stri
 		DeviceCodeMD5: devMD5,
 		OverCount:     overCount,
 		SumCount:      sumCount,
-		IsUnlimited:   sumCount == 99999990,
+		IsUnlimited:   isUnlimitedCard(sumCount),
+		Priority:      prio,
 	}
 }
 
@@ -254,8 +276,153 @@ func (p *CursorDynamicPool) UpdateCardCounts(id int64, overCount, sumCount int) 
 	if card, ok := p.cards[id]; ok {
 		card.OverCount = overCount
 		card.SumCount = sumCount
-		card.IsUnlimited = sumCount == 99999990
+		card.IsUnlimited = isUnlimitedCard(sumCount)
 	}
+}
+
+// UnregisterCard 从多卡聚合器注销一张卡密（卡密被删除或过期时调用）。
+//
+// 加锁原子完成三步清理：
+//  1. 从 p.cards 移除目标卡；
+//  2. 遍历 p.activeTokens 剔除所有 CardID == id 的 Token（失效卡不再提供号）；
+//  3. 遍历 p.sessionMap 解绑所有指向被剔除 Token 的会话粘性。
+//
+// 并发防重入：全程持 p.mu，与选卡取号（pullNewTokenFromAnyCard 的锁内候选扫描、
+// 锁外取号后的 p.cards 存在性复核）互斥，保证注销与取号不会出现竞态残留。
+func (p *CursorDynamicPool) UnregisterCard(id int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// 1. 移除目标卡。
+	delete(p.cards, id)
+
+	// 2. 剔除所有指向该卡的活跃 Token（失效卡密选中的号不再可用）。
+	kept := make([]*DynamicCursorToken, 0, len(p.activeTokens))
+	for _, tok := range p.activeTokens {
+		if tok.CardID == id {
+			continue
+		}
+		kept = append(kept, tok)
+	}
+	p.activeTokens = kept
+
+	// 3. 解绑所有指向被剔除 Token 的会话（按 CardID 追溯，避免悬挂粘性）。
+	for sid, tok := range p.sessionMap {
+		if tok != nil && tok.CardID == id {
+			delete(p.sessionMap, sid)
+		}
+	}
+}
+
+// UpdateCardPriority 加锁更新目标卡的选卡优先级。
+//
+// 并发防重入：持 p.mu 保证与选卡排序（读 Priority）互斥；卡不存在时为无操作。
+func (p *CursorDynamicPool) UpdateCardPriority(id int64, priority int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if card, ok := p.cards[id]; ok {
+		card.Priority = priority
+	}
+}
+
+// LoadFromRepository 从库内有效卡密回放重建号池（服务重启后恢复内存状态）。
+//
+// 查询库内有效卡密（status=active、软删 deleted_at 为空、未过期），过滤 notes
+// 以 `auto_pool:` 前缀的行，解析虚拟设备凭据（dev/md5）、提取 priority 与 usage_snapshot
+// 快照额度，逐张调用 RegisterCard 纳管。ent 的 SoftDeleteMixin 已在查询层自动排除
+// 软删行，此处仍显式再次校验 deleted_at 以防御绕开拦截器的写入路径。
+//
+// 并发防重入：RegisterCard 内部加锁；本方法本身不持有长锁，逐卡注册互不冲突，
+// 可与运行中的取号并发进行（取号侧已对并发注销做存在性复核）。
+func (p *CursorDynamicPool) LoadFromRepository(ctx context.Context, repo QuotaKeyRepository) error {
+	keys, err := repo.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	for _, qk := range keys {
+		// 过滤：仅 status=active 且未过期且未软删的有效卡密。
+		if qk.Status != "active" {
+			continue
+		}
+		if qk.DeletedAt != nil {
+			continue
+		}
+		if qk.ExpiresAt != nil && qk.ExpiresAt.Before(now) {
+			continue
+		}
+		// 仅回放 Auto 渠道卡密（notes 以 auto_pool: 前缀标记）。
+		if qk.Notes == nil || !strings.HasPrefix(*qk.Notes, autoPoolNotesPrefix) {
+			continue
+		}
+		devCode, devMD5, ok := parseAutoPoolNotes(*qk.Notes)
+		if !ok {
+			if p.logger != nil {
+				p.logger.Warn("cursor_auto: skip auto_pool card with unparseable notes",
+					zap.Int64("quota_key_id", qk.ID),
+				)
+			}
+			continue
+		}
+		overCount, sumCount := snapshotQuotaFromUsage(json.RawMessage(qk.UsageSnapshot))
+		// cardKey 仅作标识（网络取号只用 dev/md5）；库内无明文激活码，取脱敏末 4 位。
+		cardKey := qk.CodeLast4
+		p.RegisterCard(qk.ID, cardKey, devCode, devMD5, overCount, sumCount, qk.Priority)
+	}
+	return nil
+}
+
+// autoPoolNotesPrefix 是 Auto 卡密在 quota_keys.notes 中的标记前缀（与
+// handler/admin/quota_key_auto_handler.go 保持字面一致，避免重复定义漂移）。
+const autoPoolNotesPrefix = "auto_pool:"
+
+// parseAutoPoolNotes 解析 `auto_pool:dev=...;md5=...` 格式的 notes，提取虚拟设备凭据。
+// 返回 (devCode, devMD5, ok)；任一缺失即 ok=false。
+func parseAutoPoolNotes(notes string) (devCode, devMD5 string, ok bool) {
+	if !strings.HasPrefix(notes, autoPoolNotesPrefix) {
+		return "", "", false
+	}
+	body := notes[len(autoPoolNotesPrefix):]
+	parts := strings.Split(body, ";")
+	for _, part := range parts {
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch kv[0] {
+		case "dev":
+			devCode = kv[1]
+		case "md5":
+			devMD5 = kv[1]
+		}
+	}
+	if devCode == "" || devMD5 == "" {
+		return "", "", false
+	}
+	return devCode, devMD5, true
+}
+
+// snapshotQuotaFromUsage 从 quota_keys.usage_snapshot（JSONB）解析来源额度快照，
+// 返回 (overCount 剩余, sumCount 总额)。快照口径：total - used = 剩余。
+// 无快照 / 解析失败 / 负剩余均回落为 (0, 0)，不臆造额度事实（与 schema 注释一致）。
+func snapshotQuotaFromUsage(snap json.RawMessage) (overCount, sumCount int) {
+	if len(snap) == 0 {
+		return 0, 0
+	}
+	var data struct {
+		Total int `json:"total"`
+		Used  int `json:"used"`
+	}
+	if err := json.Unmarshal(snap, &data); err != nil {
+		return 0, 0
+	}
+	sumCount = data.Total
+	overCount = data.Total - data.Used
+	if overCount < 0 {
+		overCount = 0
+	}
+	return overCount, sumCount
 }
 
 // pullNewTokenFromAnyCard 原子预留卡密额度并在锁外调用网络请求，避免并发超扣并支持自动切至备用卡
@@ -266,14 +433,18 @@ func (p *CursorDynamicPool) UpdateCardCounts(id int64, overCount, sumCount int) 
 // 冷却语义：只有上游明确回 force_reused（拉号过频）才给该卡加 60s 冷却；
 // 429 / 网络错误属于瞬时限流，不给卡加冷却，只做「本轮换下一张卡重试」。
 func (p *CursorDynamicPool) pullNewTokenFromAnyCard(ctx context.Context) (*DynamicCursorToken, error) {
-	now := time.Now()
 	var lastErr error
 	// tried: 本轮已尝试的卡 ID，保证每卡至多一次
 	tried := make(map[int64]bool)
 
 	for {
+		now := time.Now()
+
 		p.mu.Lock()
 		var targetCard *ManagedCard
+		// candidates: 本轮尚未尝试、未禁用、已退出冷却、且有可用额度（无限卡或剩余 > 0）的候选卡。
+		// 选卡排序：按 Priority 升序（数值越小越优先）；同优先级按 OverCount 剩余次数多者优先（更耐用）。
+		candidates := make([]*ManagedCard, 0, len(p.cards))
 		for _, c := range p.cards {
 			if tried[c.ID] {
 				continue // 本轮已试过该卡，换下一张
@@ -282,13 +453,21 @@ func (p *CursorDynamicPool) pullNewTokenFromAnyCard(ctx context.Context) (*Dynam
 				continue
 			}
 			if c.IsUnlimited || c.OverCount > 0 {
-				targetCard = c
-				if !c.IsUnlimited {
-					c.OverCount-- // 锁内原子预留
-				}
-				tried[c.ID] = true // 预留成功即登记，保证每卡至多一次
-				break
+				candidates = append(candidates, c)
 			}
+		}
+		if len(candidates) > 0 {
+			sort.Slice(candidates, func(i, j int) bool {
+				if candidates[i].Priority != candidates[j].Priority {
+					return candidates[i].Priority < candidates[j].Priority
+				}
+				return candidates[i].OverCount > candidates[j].OverCount
+			})
+			targetCard = candidates[0]
+			if !targetCard.IsUnlimited {
+				targetCard.OverCount-- // 锁内原子预留
+			}
+			tried[targetCard.ID] = true // 预留成功即登记，保证每卡至多一次
 		}
 		p.mu.Unlock()
 
@@ -329,6 +508,22 @@ func (p *CursorDynamicPool) pullNewTokenFromAnyCard(ctx context.Context) (*Dynam
 			lastErr = cursorupstream.ErrAccountCooling
 			continue // 自动切至备用卡
 		}
+
+		// 锁外网络取号成功：再次持锁检查目标卡是否已被并发注销（UnregisterCard）。
+		// 若卡已被移除，本次取到的 Token 直接丢弃、不加入活跃池，并继续选下一张卡，
+		// 绝不让失效卡密选中的 Token 进入可用集合（并发注销竞态防护）。
+		p.mu.Lock()
+		if _, stillPresent := p.cards[targetCard.ID]; !stillPresent {
+			delete(tried, targetCard.ID) // 放行：该卡已不存在，下一轮不会再被选中
+			p.mu.Unlock()
+			if p.logger != nil {
+				p.logger.Warn("cursor_auto: upstream token discarded, target card concurrently unregistered",
+					zap.Int64("card_id", targetCard.ID),
+				)
+			}
+			continue
+		}
+		p.mu.Unlock()
 
 		return &DynamicCursorToken{
 			AccessToken: creds.Token,

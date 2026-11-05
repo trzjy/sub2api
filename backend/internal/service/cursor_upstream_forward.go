@@ -33,6 +33,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,9 @@ const (
 	cursorJgModelHeader = "x-jg-model"
 	// cursorJgModelHeaderValue 是 x-jg-model 的取值（isMaster=true 时）。
 	cursorJgModelHeaderValue = "1"
+
+	// cursorAutoDirectHost 是 Auto 渠道官方直连端点 host（https 强约束，禁止任意注入）。
+	cursorAutoDirectHost = "api2.cursor.sh"
 )
 
 // cursor 出站失败关闭错误（调用方可 errors.Is 识别）。
@@ -147,6 +151,18 @@ type CursorUpstreamRequest struct {
 	//
 	// 为 nil 时回落到转发器上配置的 provider（仅供单账号场景与测试使用）。
 	AuthProvider CursorUpstreamAuthProvider
+
+	// UseAutoDirect 为 true 时走**官方直连双工流**（Auto 渠道持有官方 Cursor Pro Token，
+	// 出站应直连官方端点 https://api2.cursor.sh，而非 shareai 中转节点）。
+	//
+	// 该模式由唯一转发器边界统一分流，严格满足：
+	//   - 目标 host 锁定为 cursorAutoDirectHost（api2.cursor.sh），scheme 必须为 https；
+	//     拼出的 URL 必须断言 host/scheme，禁止外部任意 URL 注入（防路径层面的 host 劫持）。
+	//   - 出站 HTTP Client 拒绝所有 3xx 重定向（CheckRedirect=ErrUseLastResponse），
+	//     防止 Bearer 凭据随重定向泄露到第三方。
+	//   - 绕过 cursorUpstreamAuthFrom（不注入 x-jg-auth，不调用 shareai）。
+	//   - 完整保留 newCursorAgentDuplex 双工流创建（Connect 双工 + 429 换号自愈照常工作）。
+	UseAutoDirect bool
 }
 
 // CursorUpstreamResponse 是 cursor 上游的原始响应（流式帧原样透传）。
@@ -205,6 +221,12 @@ type CursorUpstreamForwarder struct {
 	nodes        *CursorUpstreamNodesResolver
 	httpClient   *http.Client
 	authProvider CursorUpstreamAuthProvider
+
+	// autoDirectHost 是官方直连端点的 host（UseAutoDirect 模式使用）。
+	// 默认锁定为 cursorAutoDirectHost（api2.cursor.sh）；仅测试可经
+	// WithCursorUpstreamAutoDirectHost 覆盖为本地 fake 官方节点。
+	// 注意：该值是**受信配置**，绝非来自请求输入，故不构成任意 URL 注入面。
+	autoDirectHost string
 }
 
 // NewCursorUpstreamForwarder 构造 cursor 出站转发器。
@@ -212,13 +234,24 @@ type CursorUpstreamForwarder struct {
 // authProvider 为 nil 时转发器拒绝发出任何请求（失败关闭）。
 func NewCursorUpstreamForwarder(opts ...CursorUpstreamOption) *CursorUpstreamForwarder {
 	f := &CursorUpstreamForwarder{
-		nodes:      NewCursorUpstreamNodesResolver(),
-		httpClient: &http.Client{},
+		nodes:         NewCursorUpstreamNodesResolver(),
+		httpClient:    &http.Client{},
+		autoDirectHost: cursorAutoDirectHost,
 	}
 	for _, o := range opts {
 		o(f)
 	}
 	return f
+}
+
+// WithCursorUpstreamAutoDirectHost 覆盖官方直连端点的 host（仅测试用；
+// 生产默认锁定 cursorAutoDirectHost，禁止随意改动）。
+func WithCursorUpstreamAutoDirectHost(host string) CursorUpstreamOption {
+	return func(f *CursorUpstreamForwarder) {
+		if host != "" {
+			f.autoDirectHost = host
+		}
+	}
 }
 
 // HTTP1BaseURL 返回当前 HTTP/1.1 出站 base（供 E2 卡拼 GetOpenAIBaseURL）。
@@ -244,6 +277,12 @@ func (f *CursorUpstreamForwarder) Do(
 	}
 	if !IsCursorAllowedUpstreamPath(req.Path) {
 		return nil, fmt.Errorf("%w: path %q", ErrCursorUnsupportedEndpoint, req.Path)
+	}
+
+	// Auto 官方直连双工流：在唯一转发器边界分流，锁定官方端点、拒绝重定向、
+	// 绕过 shareai 鉴权，但完整保留 AgentRun 双工流与 429 换号自愈。
+	if req.UseAutoDirect {
+		return f.doAutoDirect(ctx, req)
 	}
 
 	// 鉴权材料先取：不可得则失败关闭，绝不发出无鉴权请求去白耗中转额度。
@@ -350,6 +389,119 @@ func (f *CursorUpstreamForwarder) Do(
 		}
 		return nil, fmt.Errorf("cursor: upstream request failed: %w", err)
 	}
+	if duplex != nil {
+		if resp.StatusCode == http.StatusOK {
+			resp.Body = duplex.responseBody(resp.Body)
+		} else {
+			duplex.close(nil)
+		}
+	}
+	return &CursorUpstreamResponse{
+		StatusCode: resp.StatusCode,
+		Header:     resp.Header,
+		Body:       resp.Body,
+		TargetURL:  target,
+		Duplex:     duplex,
+	}, nil
+}
+
+// doAutoDirect 执行 Auto 渠道官方直连出站：目标锁定官方端点 api2.cursor.sh，
+// 拒绝所有 3xx 重定向（防 Bearer 泄露），绕过 shareai 鉴权，完整保留 AgentRun 双工流
+// 与 429 换号自愈。详见 CursorUpstreamRequest.UseAutoDirect 字段注释。
+func (f *CursorUpstreamForwarder) doAutoDirect(
+	ctx context.Context,
+	req *CursorUpstreamRequest,
+) (*CursorUpstreamResponse, error) {
+	// (a) 目标 URL 构造：受信 base（host 固定为官方域）+ req.Path。
+	// 拼完后必须断言 scheme=https 且 host=官方域，禁止外部任意 URL 注入
+	// （path 中的 // 之类必须被断言拦下，否则会被解析成其它 host）。
+	base := "https://" + f.autoDirectHost
+	target := strings.TrimRight(base, "/") + req.Path
+
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: parse auto-direct URL: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return nil, fmt.Errorf("%w: auto-direct scheme must be https, got %q",
+			ErrCursorUnsupportedEndpoint, parsed.Scheme)
+	}
+	if parsed.Host != f.autoDirectHost {
+		return nil, fmt.Errorf("%w: auto-direct host must be %q, got %q",
+			ErrCursorUnsupportedEndpoint, f.autoDirectHost, parsed.Host)
+	}
+
+	// (c) 绕过 cursorUpstreamAuthFrom：不注入 x-jg-auth，不调用 shareai。
+
+	// (d) 完整保留 AgentRun 双工流创建。
+	var requestBody io.Reader = bytes.NewReader(req.Body)
+	var duplex *cursorAgentDuplex
+	if req.Path == cursorPathAgentRun {
+		duplex, err = newCursorAgentDuplex(req.Body, req.ToolDelegations)
+		if err != nil {
+			return nil, err
+		}
+		requestBody = duplex.reader
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: build auto-direct request: %w", err)
+	}
+	for k, v := range req.Headers {
+		httpReq.Header.Set(k, v)
+	}
+	if httpReq.Header.Get("Content-Type") == "" {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
+
+	// §18.5 T 阶段日志（不可变标识，跨 goroutine 只读）。
+	reqStart := time.Now()
+	reqID, _ := ctx.Value(ctxkey.RequestID).(string)
+	model := req.Model
+	if model == "" {
+		model = req.Path
+	}
+	lg := logger.FromContext(ctx)
+	trace := &httptrace.ClientTrace{
+		GotFirstResponseByte: func() {
+			cursorPhaseLogFields(lg, zapcore.InfoLevel, "auto_direct_response_headers", model, reqID,
+				zap.Int64("elapsed_ms", time.Since(reqStart).Milliseconds()))
+		},
+	}
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(ctx, trace))
+
+	cursorPhaseLogFields(lg, zapcore.InfoLevel, "auto_direct_request_start", model, reqID,
+		zap.String("path", req.Path), zap.String("host", f.autoDirectHost))
+
+	if duplex != nil {
+		duplex.lg = lg
+		duplex.reqID = reqID
+		duplex.model = model
+		duplex.ctx = ctx
+		duplex.start(req.Body)
+	}
+
+	// (b) 重定向防御：拒绝一切 3xx 重定向，防止 Bearer 凭据随重定向泄露到第三方。
+	autoClient := &http.Client{
+		Transport: f.httpClient.Transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// (e) 发送 HTTP/2 POST 请求并完整接回响应（含 Duplex / Header / Body）。
+	resp, err := autoClient.Do(httpReq)
+	if err != nil {
+		cursorPhaseLogFields(lg, zapcore.ErrorLevel, "auto_direct_error", model, reqID,
+			zap.String("outcome", cursorHTTPErrClass(err)),
+			zap.Int64("elapsed_ms", time.Since(reqStart).Milliseconds()))
+		if duplex != nil {
+			duplex.close(err)
+		}
+		return nil, fmt.Errorf("cursor: auto-direct request failed: %w", err)
+	}
+	// (f) 保持 429 状态返回：供上层执行器识别并触发号池换号；双工流只在 200 时接管响应体。
 	if duplex != nil {
 		if resp.StatusCode == http.StatusOK {
 			resp.Body = duplex.responseBody(resp.Body)

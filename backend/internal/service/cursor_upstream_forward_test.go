@@ -3,13 +3,16 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -501,4 +504,181 @@ func TestCursorForward_BaseURLAccessors(t *testing.T) {
 	if got := f.HTTP2BaseURL(context.Background()); got != fake.server.URL {
 		t.Errorf("HTTP2BaseURL = %q, want %q", got, fake.server.URL)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// UseAutoDirect（CARD-3）：官方直连双工流 + 重定向安全防御
+//
+// 直连模式由唯一转发器边界分流：锁定官方端点 api2.cursor.sh、拒绝所有 3xx 重定向、
+// 绕过 shareai 鉴权，同时完整保留 AgentRun 双工流与 429 换号自愈。
+// 测试无法触达真实 api2.cursor.sh，故用 TLS fake 官方节点 + WithCursorUpstreamAutoDirectHost
+// 把锁定 host 指向 fake（受信配置覆盖，非请求注入），验证三件事：
+//   直连官方 / 拒绝重定向 / 保留双工流。
+// ---------------------------------------------------------------------------
+
+// cursorAutoDirectFixture 造一个"官方直连指向 TLS fake 官方节点"的转发器。
+// 返回的 host 即 fake 节点的 host（已通过 WithCursorUpstreamAutoDirectHost 锁进转发器），
+// 断言阶段只校验它等于配置值、scheme=https，不依赖真实网络。
+func newCursorAutoDirectFixture(
+	t *testing.T,
+	handler func(w http.ResponseWriter, r *http.Request),
+) (*CursorUpstreamForwarder, *cursorFakeUpstream, string) {
+	t.Helper()
+	fake := &cursorFakeUpstream{}
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		fake.mu.Lock()
+		fake.path = r.URL.Path
+		fake.headers = r.Header.Clone()
+		fake.body = string(raw)
+		fake.requests++
+		fake.mu.Unlock()
+		if handler != nil {
+			handler(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	u, err := url.Parse(tlsSrv.URL)
+	if err != nil {
+		t.Fatalf("parse tls server url: %v", err)
+	}
+	f := NewCursorUpstreamForwarder(
+		WithCursorUpstreamHTTPClient(tlsSrv.Client()),
+		WithCursorUpstreamAutoDirectHost(u.Host),
+	)
+	return f, fake, u.Host
+}
+
+// cursorEndStreamFrame 手工构造带 EndStream 标志的信封帧（cursorEncodeEnvelope 恒用 flags=0，
+// 故此处直接写 header 的 flags 字节）。
+func cursorEndStreamFrame(payload []byte) []byte {
+	out := make([]byte, cursorEnvelopeHeaderSize+len(payload))
+	out[0] = cursorEnvelopeFlagEndStream
+	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
+	copy(out[5:], payload)
+	return out
+}
+
+// 17) 直连官方：请求落到锁定 host、路径/请求体原样保留，且**不**注入 x-jg-auth。
+func TestCursorForward_AutoDirectDirectsToOfficialAndBypassesShareAI(t *testing.T) {
+	f, fake, host := newCursorAutoDirectFixture(t, nil)
+
+	body := []byte(`{"model":"cursor-small","messages":[{"role":"user","content":"hi"}]}`)
+	resp, err := f.Do(context.Background(), &CursorUpstreamRequest{
+		Path:          cursorPathAvailableModels,
+		Body:          body,
+		UseAutoDirect: true,
+	})
+	if err != nil {
+		t.Fatalf("Do(auto-direct): %v", err)
+	}
+	defer resp.Body.Close()
+
+	if fake.requests != 1 {
+		t.Errorf("want exactly 1 upstream hit, got %d", fake.requests)
+	}
+	// 锁定 host：出站目标必须指向配置好的官方节点 host，而非 shareai 中转。
+	if fake.headers == nil || fake.headers.Get("Host") != host {
+		t.Errorf("request host = %q, want locked official host %q", hostOf(fake), host)
+	}
+	// 协议不重写：路径与请求体逐字节沿用 Cursor 原生形态。
+	if fake.path != cursorPathAvailableModels {
+		t.Errorf("path = %q, want %q", fake.path, cursorPathAvailableModels)
+	}
+	if fake.body != string(body) {
+		t.Errorf("body mutated: %q", fake.body)
+	}
+	// 关键红线：直连模式不得注入 shareai 的 x-jg-auth。
+	if got := fake.headers.Get(cursorJgAuthHeader); got != "" {
+		t.Errorf("auto-direct must NOT inject x-jg-auth, got %q", got)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.HasSuffix(resp.TargetURL, cursorPathAvailableModels) {
+		t.Errorf("TargetURL = %q", resp.TargetURL)
+	}
+}
+
+// 18) 重定向防御：上游返回 302 时，客户端必须**拒绝**跟随（CheckRedirect=ErrUseLastResponse），
+// 既不二次请求、也绝不把 Bearer 凭据带到重定向目标。上层据此拿到 429 同类状态自行换号。
+func TestCursorForward_AutoDirectRejectsRedirect(t *testing.T) {
+	f, fake, _ := newCursorAutoDirectFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/somewhere-else")
+		w.WriteHeader(http.StatusFound)
+	})
+
+	resp, err := f.Do(context.Background(), &CursorUpstreamRequest{
+		Path:          cursorPathAvailableModels,
+		Body:          []byte(`{}`),
+		UseAutoDirect: true,
+	})
+	if err != nil {
+		t.Fatalf("Do(auto-direct): %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 拒绝跟随：只发一次请求，直接把 3xx 状态回给上层。
+	if fake.requests != 1 {
+		t.Errorf("redirect must NOT be followed, want 1 request, got %d", fake.requests)
+	}
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want %d (redirect returned as-is)", resp.StatusCode, http.StatusFound)
+	}
+	// 同样不得注入 x-jg-auth（重定向场景下泄露风险最高）。
+	if got := fake.headers.Get(cursorJgAuthHeader); got != "" {
+		t.Errorf("auto-direct must NOT inject x-jg-auth, got %q", got)
+	}
+}
+
+// 19) 保留双工流：AgentRun 路径下直连模式仍创建并接回 cursorAgentDuplex，
+// 请求体经双工 pipe 完整送达官方节点，且响应体接管成功。
+func TestCursorForward_AutoDirectPreservesDuplex(t *testing.T) {
+	f, fake, _ := newCursorAutoDirectFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		// 读取经双工 pipe 送来的请求体。
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", cursorConnectContentType)
+		// 回一个 EndStream 终态帧，双工读循环应当干净收尾。
+		_, _ = w.Write(cursorEndStreamFrame([]byte(`{"type":"end"}`)))
+	})
+
+	body := cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil))
+	resp, err := f.Do(context.Background(), &CursorUpstreamRequest{
+		Path:          cursorPathAgentRun,
+		Body:          body,
+		UseAutoDirect: true,
+	})
+	if err != nil {
+		t.Fatalf("Do(auto-direct agent run): %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 双工流被创建并随响应接回。
+	if resp.Duplex == nil {
+		t.Fatal("auto-direct AgentRun must preserve duplex (resp.Duplex == nil)")
+	}
+	// 请求体经双工 pipe 完整送达官方节点（证明双工 reader 已接为请求体）。
+	if fake.body != string(body) {
+		t.Errorf("duplex-fed request body = %q, want %q", fake.body, string(body))
+	}
+	// 响应体接管成功：读出 EndStream 帧，不应报错。
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read auto-direct response body: %v", err)
+	}
+	if !bytes.Equal(got, cursorEndStreamFrame([]byte(`{"type":"end"}`))) {
+		t.Errorf("response body not passed through duplex: %q", got)
+	}
+}
+
+// hostOf 从 fake 记录里取 Host 头（便捷/诊断用）。
+func hostOf(fake *cursorFakeUpstream) string {
+	if fake.headers == nil {
+		return ""
+	}
+	return fake.headers.Get("Host")
 }
