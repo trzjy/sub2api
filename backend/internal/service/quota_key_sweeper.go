@@ -149,10 +149,13 @@ func (s *QuotaKeySweeper) runOnce() {
 // 保证自动 / 手动清扫后过期卡密不再停留在运行池中。幂等：已注销的卡忽略。
 func (s *QuotaKeySweeper) unregisterExpiredAutoCards(ctx context.Context) {
 	if pool := GetGlobalCursorDynamicPool(); pool != nil {
-		if expired, lerr := s.repo.ListExpired(ctx, time.Now()); lerr == nil {
-			for _, k := range expired {
-				pool.UnregisterCard(k.ID)
-			}
+		expired, err := s.repo.ListExpired(ctx, time.Now())
+		if err != nil {
+			log.Printf("[QuotaKeySweep] failed to list expired keys for dynamic pool unregister: %v", err)
+			return
+		}
+		for _, k := range expired {
+			pool.UnregisterCard(k.ID)
 		}
 	}
 }

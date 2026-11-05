@@ -347,11 +347,11 @@ type autoCardUsageSnapshot struct {
 
 // syncAutoCardUsageSnapshot 把单卡上游额度持久化写入 quota_keys.usage_snapshot。
 //
-// 计算 isUnlimited := sumCount >= 90000000 || sumCount == 99999999 || sumCount == 99999990，
+// 统一复用 service.IsUnlimitedCard(sumCount) 计算无限卡判定（与号池口径一致），
 // 构造 JSON 快照并通过 service 层写回数据库，成功时清空 last_refresh_error。
 // 绝不写入 Token —— 该函数仅搬运转译上游聚合计数。
 func (h *QuotaKeyHandler) syncAutoCardUsageSnapshot(ctx context.Context, id int64, overCount, sumCount int) error {
-	isUnlimited := sumCount >= 90000000 || sumCount == 99999999 || sumCount == 99999990
+	isUnlimited := service.IsUnlimitedCard(sumCount)
 	used := sumCount - overCount
 	if used < 0 {
 		used = 0
@@ -399,6 +399,10 @@ func (h *QuotaKeyHandler) RefreshAutoCard(c *gin.Context) {
 		if failErr == nil {
 			failErr = fmt.Errorf("cursor auto: refresh count returned nil response")
 		}
+		// 失败时从号池注销该卡，保持运行态与重启态一致（启动时也会拦截非空错误卡）
+		if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
+			pool.UnregisterCard(id)
+		}
 		// 失败也登记 last_refresh_error，保持可观测。
 		if snapErr := h.svc.WriteAutoCardUsageSnapshot(c.Request.Context(), id, nil, failErr); snapErr != nil {
 			slog.Warn("cursor auto: single-card refresh error persist failed", "card_id", id, "err", snapErr)
@@ -423,7 +427,7 @@ func (h *QuotaKeyHandler) RefreshAutoCard(c *gin.Context) {
 		"id":           id,
 		"over_count":   countResp.OverCount,
 		"sum_count":    countResp.SumCount,
-		"is_unlimited": countResp.SumCount >= 90000000 || countResp.SumCount == 99999999 || countResp.SumCount == 99999990,
+		"is_unlimited": service.IsUnlimitedCard(countResp.SumCount),
 	})
 }
 

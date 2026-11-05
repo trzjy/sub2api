@@ -115,7 +115,7 @@ type ManagedCard struct {
 // 收紧为上游已验证的两个明确标记集合 {99999999, 99999990}，移除宽泛的
 // `>= 90000000` 区间判定：旧口径会把 90000000~99999989 之间的普通大额卡
 // 误判为无限卡，导致超额扣减无限卡的额度预留逻辑被错误套用。
-func isUnlimitedCard(sumCount int) bool {
+func IsUnlimitedCard(sumCount int) bool {
 	return sumCount == 99999999 || sumCount == 99999990
 }
 
@@ -160,6 +160,12 @@ func (p *CursorDynamicPool) RegisterCard(id int64, cardKey, devCode, devMD5 stri
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// 重新注册（同一卡密再次注册）时，锁内原子清理该卡已存在的所有旧代
+	// Token 与会话绑定，防止旧代 Token 被复用（外审必须项）。
+	if _, exists := p.cards[id]; exists {
+		p.purgeCardTokensLocked(id)
+	}
+
 	prio := 0
 	if len(priority) > 0 {
 		prio = priority[0]
@@ -177,9 +183,33 @@ func (p *CursorDynamicPool) RegisterCard(id int64, cardKey, devCode, devMD5 stri
 		DeviceCodeMD5: devMD5,
 		OverCount:     overCount,
 		SumCount:      sumCount,
-		IsUnlimited:   isUnlimitedCard(sumCount),
+		IsUnlimited:   IsUnlimitedCard(sumCount),
 		Priority:      prio,
 		Generation:    gen,
+	}
+}
+
+// purgeCardTokensLocked 在调用方已持有 p.mu 的前提下，原子清理指定卡密已存在的
+// 所有 Token 与会话绑定：从 activeTokens 中过滤剔除 CardID == cardID 的 Token，
+// 并解绑 sessionMap 中关联此 cardID 的会话。供 RegisterCard（重注册清理旧代）
+// 与 UnregisterCard（注销清理）复用，防止旧代 Token 被并发复用。
+//
+// 非线程安全：必须在调用方已加锁（p.mu）时调用。
+func (p *CursorDynamicPool) purgeCardTokensLocked(cardID int64) {
+	// 从 activeTokens 中过滤剔除 CardID == cardID 的 Token。
+	remainingTokens := make([]*DynamicCursorToken, 0, len(p.activeTokens))
+	for _, tok := range p.activeTokens {
+		if tok.CardID != cardID {
+			remainingTokens = append(remainingTokens, tok)
+		}
+	}
+	p.activeTokens = remainingTokens
+
+	// 解绑 sessionMap 中关联此 cardID 的会话。
+	for sessID, tok := range p.sessionMap {
+		if tok.CardID == cardID {
+			delete(p.sessionMap, sessID)
+		}
 	}
 }
 
@@ -299,7 +329,7 @@ func (p *CursorDynamicPool) UpdateCardCounts(id int64, overCount, sumCount int) 
 	if card, ok := p.cards[id]; ok {
 		card.OverCount = overCount
 		card.SumCount = sumCount
-		card.IsUnlimited = isUnlimitedCard(sumCount)
+		card.IsUnlimited = IsUnlimitedCard(sumCount)
 	}
 }
 
@@ -319,22 +349,8 @@ func (p *CursorDynamicPool) UnregisterCard(id int64) {
 	// 1. 移除目标卡。
 	delete(p.cards, id)
 
-	// 2. 剔除所有指向该卡的活跃 Token（失效卡密选中的号不再可用）。
-	kept := make([]*DynamicCursorToken, 0, len(p.activeTokens))
-	for _, tok := range p.activeTokens {
-		if tok.CardID == id {
-			continue
-		}
-		kept = append(kept, tok)
-	}
-	p.activeTokens = kept
-
-	// 3. 解绑所有指向被剔除 Token 的会话（按 CardID 追溯，避免悬挂粘性）。
-	for sid, tok := range p.sessionMap {
-		if tok != nil && tok.CardID == id {
-			delete(p.sessionMap, sid)
-		}
-	}
+	// 2. + 3. 复用统一清理：剔除该卡的活跃 Token 并解绑关联会话。
+	p.purgeCardTokensLocked(id)
 }
 
 // UpdateCardPriority 加锁更新目标卡的选卡优先级。
@@ -619,7 +635,15 @@ func (p *CursorDynamicPool) MarkTokenError(tok *DynamicCursorToken, sessionID st
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		if newTok, err := p.pullNewTokenFromAnyCard(ctx); err == nil && newTok != nil {
+			// 锁内原子代际校验：异步预热取号期间目标卡可能已被注销或重新注册
+			// （Generation 不匹配）。此时原子丢弃该 Token，绝不加入 activeTokens，
+			// 防止旧代 Token 进入可用集合（并发注销/重注册竞态防护）。
 			p.mu.Lock()
+			card, ok := p.cards[newTok.CardID]
+			if !ok || card.Generation != newTok.Generation {
+				p.mu.Unlock()
+				return
+			}
 			p.activeTokens = append(p.activeTokens, newTok)
 			p.mu.Unlock()
 			if p.logger != nil {
