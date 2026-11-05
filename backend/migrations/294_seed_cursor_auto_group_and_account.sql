@@ -15,7 +15,11 @@ VALUES (
     NOW(),
     NOW()
 )
-ON CONFLICT (name) DO NOTHING;
+-- groups.name 的唯一性由部分索引 groups_name_unique_active 提供
+-- （016_soft_delete_partial_unique_indexes.sql：ON groups(name) WHERE deleted_at IS NULL），
+-- 推断该索引必须带同一谓词，否则 PostgreSQL 报
+-- "there is no unique or exclusion constraint matching the ON CONFLICT specification"。
+ON CONFLICT (name) WHERE deleted_at IS NULL DO NOTHING;
 
 -- 2) 预置 Cursor Auto 动态号池调度承载账号
 INSERT INTO accounts (name, platform, type, status, credentials, extra, created_at, updated_at)
