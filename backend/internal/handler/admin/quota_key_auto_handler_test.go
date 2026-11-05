@@ -197,6 +197,26 @@ func (r *autoCardQuotaKeyRepo) UpdateUsageSnapshot(context.Context, *ent.Tx, int
 	return nil
 }
 
+// UpdateStatusFields 复刻生产仓储的同名语义：批量导入阶段 4 写回快照成功后，服务层
+// 会在同一每 key 事务内按原 status/exhausted 清空 last_refresh_error；失败态分支写入
+// 错误消息。替身装配下 tx 为 nil，直接更新内存行（不实现的方法保持嵌入接口的 panic
+// 语义，避免意外调用被静默吞掉）。
+func (r *autoCardQuotaKeyRepo) UpdateStatusFields(_ context.Context, _ *ent.Tx, id int64, status string, exhausted bool, lastError *string, lastRefreshAt *time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	qk, ok := r.keys[id]
+	if !ok {
+		return &ent.NotFoundError{}
+	}
+	qk.Status = status
+	qk.Exhausted = exhausted
+	qk.LastRefreshError = lastError
+	if lastRefreshAt != nil {
+		qk.LastRefreshAt = lastRefreshAt
+	}
+	return nil
+}
+
 func (r *autoCardQuotaKeyRepo) UpdateCredentialsAtomically(context.Context, *ent.Tx, int64, string, string, string, bool) error {
 	return nil
 }
@@ -539,8 +559,8 @@ func TestQuotaKeyAuto_BatchImport_BindSuccess_ActivateFails_StaysUnselectable(t 
 	require.Equal(t, 1, res.FailedCount)
 	require.Len(t, res.Errors, 1)
 
-	// 硬失败信号：已绑定但未转可选、需人工处理。
-	require.Contains(t, res.Errors[0], "已绑定但未转可选")
+	// 硬失败信号：已绑定且已查额、但未转可选，需人工处理。
+	require.Contains(t, res.Errors[0], "已绑定已查额但未转可选")
 	require.Contains(t, res.Errors[0], "需人工处理")
 
 	// P2 核心断言：转可选失败后该行仍不可选（expires_at 仍在过去），
@@ -575,7 +595,7 @@ func TestQuotaKeyAuto_BatchImport_BindSuccess_SweeperRace_NotSelectable(t *testi
 	require.Equal(t, 0, res.SuccessCount, "清扫器竞态下不得谎报成功")
 	require.Equal(t, 1, res.FailedCount)
 	require.Len(t, res.Errors, 1)
-	require.Contains(t, res.Errors[0], "已绑定但未转可选")
+	require.Contains(t, res.Errors[0], "已绑定已查额但未转可选")
 	require.Contains(t, res.Errors[0], "需人工处理")
 
 	rows := repo.snapshot()
@@ -754,7 +774,11 @@ func TestQuotaKeyAuto_RefreshAutoPool_UpdatesCountsButPreservesCooldownState(t *
 	require.True(t, before[0].CooldownUntil.After(time.Now()), "前置条件：卡密应处于冷却中")
 
 	// 刷新额度：只允许更新 OverCount/SumCount。
-	router := setupAutoCardRouter(newAutoCardQuotaKeyService(newAutoCardQuotaKeyRepo()))
+	// 号池内的卡密在生产中必有对应 quota_keys 行；刷新成功后要回写快照，
+	// 故替身需预置同一 ID 的行，否则会被「快照落库失败」判为刷新失败。
+	repo := newAutoCardQuotaKeyRepo()
+	repo.keys[1] = &ent.QuotaKey{ID: 1, CodeLast4: "0001", Status: domain.QuotaKeyStatusActive}
+	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/refresh_all", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
