@@ -180,6 +180,12 @@ func ProvideCursorExecutionService(
 			zap.Error(poolErr))
 	}
 	SetGlobalCursorDynamicPool(pool)
+	// CARD-5：装配号池后同步回放加载卡密，恢复内存池（容器重启后不再丢卡）。
+	// 回放失败记录日志并标记不可用（fail-closed），绝不回落到空池静默放行。
+	if loadErr := pool.LoadFromRepository(context.Background(), quotaKeys); loadErr != nil {
+		pool.MarkUpstreamUnavailable(loadErr)
+		logger.L().Error("cursor auto: startup card replay failed, pool marked unavailable", zap.Error(loadErr))
+	}
 	return svc, nil
 }
 

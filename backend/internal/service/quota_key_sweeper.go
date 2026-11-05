@@ -173,6 +173,15 @@ func (s *QuotaKeySweeper) SweepNow(ctx context.Context) (int, error) {
 		return n, fmt.Errorf("quota_key_sweeper: commit sweep: %w", err)
 	}
 	committed = true
+	// CARD-5：清扫标 expired 成功后，从运行内存池同步注销该批卡密及相关 Token。
+	// 复用与 sweepOnce 同一的过期判定（re-list 当前 expired 集合），幂等，已注销的卡忽略。
+	if pool := GetGlobalCursorDynamicPool(); pool != nil {
+		if expired, lerr := s.repo.ListExpired(ctx, time.Now()); lerr == nil {
+			for _, k := range expired {
+				pool.UnregisterCard(k.ID)
+			}
+		}
+	}
 	return n, nil
 }
 

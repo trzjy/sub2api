@@ -664,6 +664,10 @@ func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, ex
 		if err != nil {
 			return nil, err
 		}
+		// CARD-5：卡密优先级修改事务提交成功后，同步更新运行内存池选卡优先级。
+		if pool := GetGlobalCursorDynamicPool(); pool != nil && priority != nil {
+			pool.UpdateCardPriority(id, *priority)
+		}
 	}
 	return s.GetStatus(ctx, id)
 }
@@ -1415,6 +1419,10 @@ func (s *QuotaKeyService) DeleteWithAccounts(ctx context.Context, quotaKeyID int
 	// reconciler 轮出前追加一次水位判定，有缺口才补）。reconciler 未装配（nil）时跳过。
 	if s.reconciler != nil {
 		s.reconciler.NotifyAccountRemoved()
+	}
+	// CARD-5：卡密被软删事务提交成功后，从运行内存池同步注销该卡及相关 Token。
+	if pool := GetGlobalCursorDynamicPool(); pool != nil {
+		pool.UnregisterCard(quotaKeyID)
 	}
 	return nil
 }

@@ -458,14 +458,18 @@ func (s *CursorExecutionService) Execute(
 	var bearer string
 
 	if isAuto {
-		// Auto 路径前置接管：直接从动态池获取可用 Token，无需依赖账号静态凭据（Codex 外审 P1 修复）
+		// Auto 路径前置接管：直接从动态池获取可用 Token，无需依赖账号静态凭据（Codex 外审 P1 修复）。
+		// 取号失败必须严格失败关闭，禁止回退到标准 Cursor 静态鉴权链。
 		if pool := GetGlobalCursorDynamicPool(); pool != nil {
 			sessionID := fmt.Sprintf("%d:%d", req.Identity.UserID, req.Identity.APIKeyID)
 			tok, tokErr := pool.AcquireToken(ctx, sessionID)
-			if tokErr == nil && tok != nil {
-				dynamicTok = tok
-				bearer = tok.AccessToken
+			if tokErr != nil || tok == nil {
+				return nil, fmt.Errorf("%w: %v", ErrNoAvailableCursorAutoToken, tokErr)
 			}
+			dynamicTok = tok
+			bearer = tok.AccessToken
+		} else {
+			return nil, fmt.Errorf("%w: cursor dynamic pool not initialized", ErrNoAvailableCursorAutoToken)
 		}
 	}
 
@@ -799,6 +803,7 @@ func (s *CursorExecutionService) Execute(
 		Model:           upstreamModel,
 		ToolDelegations: delegations,
 		Headers:         headers,
+		UseAutoDirect:   isAuto,
 	}
 
 	var resp *CursorUpstreamResponse
@@ -2379,6 +2384,10 @@ func (s *CursorExecutionService) ProbeAgentRun(
 	}
 	if !isCursorAccount(account) {
 		return 0, "", "", errors.New("cursor: probe requires a cursor platform account")
+	}
+	// Auto 动态池承接账号走官方直连双工通道，不支持 shareai 静态探测；应改用池状态端点。
+	if isCursorAutoRequest(account, upstreamModel) {
+		return 0, "", "", errors.New("cursor: auto dynamic pool accounts do not support static probe; use pool status endpoint")
 	}
 	if strings.TrimSpace(upstreamModel) == "" {
 		return 0, "", "", newCursorRequestError(infraerrors.CursorExecModelMappingInvalidCode, http.StatusInternalServerError, "empty upstream model")
