@@ -148,9 +148,10 @@ const qwenModels = [
 ]
 
 // DeepSeek
-// deepseek-v4-flash 已永久下线（2026-11-05 裁定），不再出现在白名单候选里。
+// deepseek-v4-flash / deepseek-v4-flash-vision-exp 已永久下线（2026-11-05 裁定），
+// 不再出现在白名单候选里。
 const deepseekModels = [
-  'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp', 'deepseek-flash',
+  'deepseek-v4-pro', 'deepseek-flash',
   'deepseek-coder',
   'deepseek-v3', 'deepseek-v3-0324',
   'deepseek-r1', 'deepseek-r1-0528',

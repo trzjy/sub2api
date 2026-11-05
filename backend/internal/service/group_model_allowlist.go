@@ -35,6 +35,9 @@ var retiredModelNames = map[string]struct{}{
 	// 由 V4.1-Flash-1017 承接）。爹要求「哪怕上游还提供，也不再请求、从清单永久删除」。
 	// 实测：全站近 7 天零调用、分组 60 零 key，下线零影响。
 	"deepseek-v4-flash": {},
+	// 2026-11-05 三次裁定：视觉变体也一并停止提供。实测近 7 天零调用、无分组白名单。
+	// 注意：账号映射里的上游侧配置不动（爹明确「对上游的请求不变，只改下游出口」）。
+	"deepseek-v4-flash-vision-exp": {},
 }
 
 // IsRetiredModelName 报告该模型名是否已对下游下线。大小写不敏感。

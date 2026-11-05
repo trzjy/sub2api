@@ -46,8 +46,26 @@ func TestDeepSeekV4FlashFullyRetired(t *testing.T) {
 	require.True(t, isDeepseekServableModel("deepseek-flash"))
 	require.True(t, isDeepseekServableModel("deepseek-v4.1-flash"))
 	require.True(t, isDeepseekServableModel("deepseek-v4-pro"))
-	// vision 变体是另一个名字，本次未动。
-	require.True(t, isDeepseekServableModel("deepseek-v4-flash-vision-exp"))
+}
+
+// TestDeepSeekVisionExpRetired 锁死 2026-11-05 三次裁定：视觉变体也停止提供。
+// 「对上游的请求不变，只改下游出口」——所以只验入口与出站名单，不看账号映射。
+func TestDeepSeekVisionExpRetired(t *testing.T) {
+	require.True(t, IsRetiredModelName("deepseek-v4-flash-vision-exp"))
+	require.True(t, IsRetiredModelName("DeepSeek-V4-Flash-Vision-Exp"))
+
+	enabled := GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-v4.1-flash", "deepseek-v4-flash-vision-exp"}}
+	require.False(t, enabled.Allows("deepseek-v4-flash-vision-exp"))
+	require.True(t, enabled.Allows("deepseek-v4.1-flash"))
+	// 未开启白名单同样拒绝。
+	require.False(t, (GroupModelAllowlist{}).Allows("deepseek-v4-flash-vision-exp"))
+
+	// 列表里不出现；且不能把 v4-flash 的过滤连带成子串误伤。
+	require.Equal(t, []string{"deepseek-flash"}, enabled.FilterForListing([]string{"deepseek-v4.1-flash", "deepseek-v4-flash-vision-exp"}))
+	require.Empty(t, (GroupModelAllowlist{}).FilterForListing([]string{"deepseek-v4-flash-vision-exp"}))
+
+	// 未配映射的账号也不许再发出去。
+	require.False(t, isDeepseekServableModel("deepseek-v4-flash-vision-exp"))
 }
 
 func TestPublicModelNameMapping(t *testing.T) {
