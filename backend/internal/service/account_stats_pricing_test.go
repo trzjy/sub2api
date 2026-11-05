@@ -646,9 +646,9 @@ func TestTryModelFilePricing_WithCacheTokens(t *testing.T) {
 	}
 	result := tryModelFilePricing(bs, "claude-sonnet-4", tokens, "", time.Time{}, true)
 	require.NotNil(t, result)
-	// 100*0.001 + 50*0.002 + 200*0.003*2.5 + 300*0.0005
-	// = 0.1 + 0.1 + 1.5 + 0.15 = 1.85
-	require.InDelta(t, 1.85, *result, 1e-12)
+	// 100*0.001 + 50*0.002 + 200*0.003*1.6 + 300*0.0005
+	// = 0.1 + 0.1 + 0.96 + 0.15 = 1.31
+	require.InDelta(t, 1.31, *result, 1e-12)
 }
 
 func TestTryModelFilePricing_DeepSeekPeakPricing(t *testing.T) {

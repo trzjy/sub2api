@@ -287,8 +287,8 @@ const (
 
 // DefaultCacheCreationCostMultiplier 是缓存创建（Cache Write）基础费率的全局上浮倍率。
 // 官方口径缓存创建价为输入价的 1.25 倍，本系统在此之上再乘该倍率，
-// 即实际缓存创建价 = 输入价 × 1.25 × DefaultCacheCreationCostMultiplier（= 3.125x 输入价）。
-const DefaultCacheCreationCostMultiplier = 2.5
+// 即实际缓存创建价 = 输入价 × 1.25 × DefaultCacheCreationCostMultiplier（= 2.0x 输入价）。
+const DefaultCacheCreationCostMultiplier = 1.6
 
 // isDeepSeekModel 判断模型名是否为 DeepSeek 模型（大小写不敏感）。
 // 任意 deepseek- 前缀均视为 DeepSeek 模型：官方模型（v4-flash / v4-pro /
