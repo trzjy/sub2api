@@ -31,6 +31,10 @@ type GroupModelAllowlist struct {
 // 1017 映射键直接失效。
 var retiredModelNames = map[string]struct{}{
 	"deepseek-v4.1-flash-1017": {},
+	// 2026-11-05 二次裁定：`deepseek-v4-flash` 是官方已退役的 legacy 名（模型已停，
+	// 由 V4.1-Flash-1017 承接）。爹要求「哪怕上游还提供，也不再请求、从清单永久删除」。
+	// 实测：全站近 7 天零调用、分组 60 零 key，下线零影响。
+	"deepseek-v4-flash": {},
 }
 
 // IsRetiredModelName 报告该模型名是否已对下游下线。大小写不敏感。

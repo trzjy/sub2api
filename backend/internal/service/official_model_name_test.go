@@ -22,6 +22,34 @@ func gjsonGet(raw []byte, path string) string {
 	return gjson.GetBytes(raw, path).String()
 }
 
+// TestDeepSeekV4FlashFullyRetired 锁死 2026-11-05 二次裁定：
+// `deepseek-v4-flash` 永久下线——入口拒绝、列表不显示、未配映射也不许出站，
+// 且不得因此把同族的 `deepseek-flash` / `deepseek-v4.1-flash` 误伤。
+func TestDeepSeekV4FlashFullyRetired(t *testing.T) {
+	require.True(t, IsRetiredModelName("deepseek-v4-flash"))
+	require.True(t, IsRetiredModelName("DeepSeek-V4-Flash"))
+
+	// 入口：开不开白名单都拒。
+	enabled := GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-v4-pro", "deepseek-v4-flash"}}
+	require.False(t, enabled.Allows("deepseek-v4-flash"))
+	require.True(t, enabled.Allows("deepseek-v4-pro"))
+	require.False(t, (GroupModelAllowlist{}).Allows("deepseek-v4-flash"))
+
+	// 列表：即使白名单/映射里还留着，也不输出。
+	require.Equal(t, []string{"deepseek-v4-pro"}, enabled.FilterForListing([]string{"deepseek-v4-pro", "deepseek-v4-flash"}))
+	flashGroup := GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-v4.1-flash"}}
+	require.Equal(t, []string{"deepseek-flash"}, flashGroup.FilterForListing([]string{"deepseek-v4.1-flash"}))
+	require.Empty(t, (GroupModelAllowlist{}).FilterForListing([]string{"deepseek-v4-flash"}))
+
+	// 未配映射时也不许把旧名发给上游。
+	require.False(t, isDeepseekServableModel("deepseek-v4-flash"))
+	require.True(t, isDeepseekServableModel("deepseek-flash"))
+	require.True(t, isDeepseekServableModel("deepseek-v4.1-flash"))
+	require.True(t, isDeepseekServableModel("deepseek-v4-pro"))
+	// vision 变体是另一个名字，本次未动。
+	require.True(t, isDeepseekServableModel("deepseek-v4-flash-vision-exp"))
+}
+
 func TestPublicModelNameMapping(t *testing.T) {
 	// 族内所有写法，对外展示名统一为官方现行调用名。
 	for _, name := range []string{

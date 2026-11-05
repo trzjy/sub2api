@@ -84,9 +84,11 @@ func isOpenAIOAuthServableModel(requestedModel string) bool {
 
 // deepseekServableModels 列出 DeepSeek 平台账号在「未配置 model_mapping」时
 // 可服务的官方模型名（精确匹配，小写比较）。deepseek-flash 与 deepseek-v4-pro
-// 为官方现行名；deepseek-v4-flash / deepseek-v4-flash-vision-exp 为处于兼容
-// 路由期的旧名（上游仍接受并按 flash 价计费）；deepseek-v4-pro-0813 为与
-// 计费 pro 档口径一致的版本化名。
+// 为官方现行名；deepseek-v4-flash-vision-exp 为处于兼容路由期的旧名（上游仍
+// 接受并按 flash 价计费）；deepseek-v4-pro-0813 为与计费 pro 档口径一致的版本化名。
+//
+// `deepseek-v4-flash` 已按 2026-11-05 裁定永久移除：官方已停该模型，爹要求
+// 「哪怕上游还提供也不再请求」，故未配映射的账号也不得再把它发出去。
 //
 // 自研模型（DeepSeek-V4.1-Flash 系，如 deepseek-v4.1-flash / deepseek-v4.1-pro）
 // 由我方自研渠道目录授权，与上游官方目录并存：生产实证 deepseek-v4.1-flash
@@ -96,7 +98,6 @@ func isOpenAIOAuthServableModel(requestedModel string) bool {
 var deepseekServableModels = []string{
 	"deepseek-flash",
 	"deepseek-v4-pro",
-	"deepseek-v4-flash",
 	"deepseek-v4-flash-vision-exp",
 	"deepseek-v4-pro-0813",
 	// 自研模型：由我方渠道目录授权，与上游官方目录并存（详见上面注释）。
