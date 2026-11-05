@@ -970,7 +970,9 @@ async function submitAutoBatch() {
   }
   autoBatchLoading.value = true
   try {
-    const expiresAt = autoBatchExpiresAt.value || null
+    const expiresAt = autoBatchExpiresAt.value
+      ? new Date(autoBatchExpiresAt.value).toISOString()
+      : null
     const res = await adminAPI.quotaKeys.batchImportAutoCards(cards, expiresAt)
     appStore.showSuccess(`批量导入完成：成功 ${res.success_count ?? 0} 个，失败 ${res.failed_count ?? 0} 个`)
     showAutoBatchModal.value = false

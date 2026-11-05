@@ -105,7 +105,11 @@ function mountView() {
             <span v-if="actionText" class="empty-action">{{ actionText }}</span>
           </div>`
         },
-        TextArea: true,
+        TextArea: {
+          props: ['modelValue', 'disabled'],
+          emits: ['update:modelValue'],
+          template: '<textarea :value="modelValue" :disabled="disabled" @input="$emit(\'update:modelValue\', $event.target.value)" />'
+        },
         Icon: true,
         AutoEntryConfigModal: true,
         BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' }
@@ -226,6 +230,9 @@ describe('QuotaKeysView 渠道 Tab 数据分流（派发单 F）', () => {
       'Auto 动态号池绑定凭据由系统管理，不可直接改写（已锁定保护）。'
     )
 
+    // Auto 编辑弹窗中的 notes 输入框处于 disabled 状态（保护绑定凭据）。
+    expect(autoWrapper.find('textarea').attributes('disabled')).toBeDefined()
+
     // 提交：更新请求的 payload 不应包含 notes 字段，保护绑定的虚拟设备凭据。
     vi.mocked(adminAPI.quotaKeys.update).mockResolvedValue({} as never)
     const saveBtn = autoWrapper
@@ -242,5 +249,65 @@ describe('QuotaKeysView 渠道 Tab 数据分流（派发单 F）', () => {
     expect(updatePayload).toHaveProperty('priority')
 
     autoWrapper.unmount()
+  })
+
+  it('Auto 批量导入弹窗支持选填到期时间并转换为 ISO 字符串提交', async () => {
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue(listWith([autoRow]))
+    vi.mocked(adminAPI.quotaKeys.batchImportAutoCards).mockResolvedValue(
+      { success_count: 0, failed_count: 0 } as never
+    )
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    // 切到 Auto Tab。
+    const autoBtn = wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('Cursor 极速号池 (Auto动态池)'))
+    expect(autoBtn).toBeDefined()
+    await autoBtn!.trigger('click')
+    await nextTick()
+    await flushPromises()
+
+    // 打开「批量导入 Auto 卡密」弹窗。
+    const openBatchBtn = wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('批量导入Auto卡密'))
+    expect(openBatchBtn).toBeDefined()
+    await openBatchBtn!.trigger('click')
+    await nextTick()
+    await flushPromises()
+
+    // 找到最后一个 textarea（即批量导入弹窗内的 textarea）并赋值。
+    const textareas = wrapper.findAll('textarea')
+    const batchTextarea = textareas[textareas.length - 1]
+    if (batchTextarea) {
+      await batchTextarea.setValue('sky_cc_test123')
+    }
+
+    // 找到批量导入弹窗内的到期时间输入框（最后一个 datetime-local）并赋值。
+    const dateInputs = wrapper.findAll('input[type="datetime-local"]')
+    const dateInput = dateInputs[dateInputs.length - 1]
+    if (dateInput && dateInput.exists()) {
+      await dateInput.setValue('2026-12-31T12:00')
+    }
+
+    await nextTick()
+    await flushPromises()
+
+    // 提交：点击「开始批量绑定入库」。
+    const submitBtn = wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('开始批量绑定入库'))
+    expect(submitBtn).toBeDefined()
+    await submitBtn!.trigger('click')
+    await flushPromises()
+
+    expect(adminAPI.quotaKeys.batchImportAutoCards).toHaveBeenCalled()
+    const callArgs = vi.mocked(adminAPI.quotaKeys.batchImportAutoCards).mock.calls[0]
+    expect(callArgs[0]).toContain('sky_cc_test123')
+    expect(callArgs[1]).toMatch(/^2026-12-31T\d{2}:00:00\.000Z$/)
+
+    wrapper.unmount()
   })
 })

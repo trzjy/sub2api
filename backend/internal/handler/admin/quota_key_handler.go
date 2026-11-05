@@ -297,6 +297,13 @@ func (h *QuotaKeyHandler) Update(c *gin.Context) {
 	}
 	var notes **string
 	if req.Notes != nil {
+		// 防御校验：Auto 卡密的 notes 由系统自动维护（虚拟设备绑定凭据），
+		// 禁止通过 API 直接改写，否则会导致绑定凭据丢失（外审 P1）。
+		st, err := h.svc.GetStatus(c.Request.Context(), id)
+		if err == nil && st != nil && st.Notes != nil && strings.HasPrefix(*st.Notes, "auto_pool:") {
+			response.BadRequest(c, "auto pool card notes cannot be modified")
+			return
+		}
 		var value *string
 		if err := json.Unmarshal(req.Notes, &value); err != nil {
 			response.BadRequest(c, "Invalid notes: "+err.Error())
