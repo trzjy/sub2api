@@ -482,14 +482,29 @@ func (h *QuotaKeyHandler) reregisterAutoCard(ctx context.Context, pool *service.
 		return nil
 	}
 	// 并发同卡刷新时，另一路可能在本路快照成功之后重新写入失败态；此时启动回放会
-	// 排除该卡，运行期也不得纳管，否则两侧再次分叉。以最近一次读取的持久化状态为准。
-	if st.LastRefreshError != "" {
+	// 排除该卡，运行期也不得纳管，否则两侧再次分叉。判定与启动回放保持同一口径
+	// （TrimSpace 后非空白才算失败态）。
+	if strings.TrimSpace(st.LastRefreshError) != "" {
 		slog.Warn("cursor auto: card refreshed but not re-registered (last_refresh_error still set)", "card_id", id)
 		return nil
 	}
 	// cardKey 仅作标识（网络取号只用 dev/md5），此处复用脱敏末 4 位投影。
 	// 使用原子 EnsureCardRegistered：并发同卡刷新不会互相清理刚建立的 Token/会话。
 	pool.EnsureCardRegistered(id, st.CodeValueMasked, devCode, devMD5, countResp.OverCount, countResp.SumCount, st.Priority)
+
+	// 纳管后复核：另一路失败刷新可能在「读状态」与「纳管」之间写入失败态并撤池，
+	// 若本路纳管晚于其撤池，就会形成「库内有失败态、运行池有卡」的分叉。这里再读
+	// 一次持久化状态，发现失败态则按同一注销路径回退；下一次成功刷新仍会自愈。
+	latest, lerr := h.svc.GetStatus(ctx, id)
+	if lerr != nil {
+		slog.Warn("cursor auto: post-register state recheck failed", "card_id", id, "err", lerr)
+		return nil
+	}
+	if latest == nil || strings.TrimSpace(latest.LastRefreshError) == "" {
+		return nil
+	}
+	pool.UnregisterCard(id)
+	slog.Warn("cursor auto: card re-registered then withdrawn (concurrent failure state)", "card_id", id)
 	return nil
 }
 
