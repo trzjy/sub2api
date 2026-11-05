@@ -32,7 +32,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 	"github.com/lib/pq"
-	"go.uber.org/zap"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqljson"
@@ -4258,33 +4257,36 @@ func (r *accountRepository) updateUpstreamBillingProbeSnapshotInTx(
 	if account.ProxyID != nil {
 		proxyID = *account.ProxyID
 	}
-	// 凭证一致性守卫改用指纹比对（A3-E2）。
-	credentialsMac, err := credentialsMACOf(account.Credentials)
+	// 凭证一致性守卫收窄为真正身份字段：api_key 指纹 + base_url 原文，
+	// 不再用整份 credentials_mac（部分更新会置 NULL，导致 CAS 恒失配）。
+	apiKeyMAC, err := credentialsApiKeyMACOf(account.Credentials)
 	if err != nil {
 		return err
 	}
+	baseURL := account.GetCredential("base_url")
 	result, err := client.ExecContext(ctx, `
 		UPDATE accounts
 		SET
 			extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb,
 			rate_multiplier = CASE
-				WHEN $10::numeric IS NOT NULL
+				WHEN $11::numeric IS NOT NULL
 					AND extra @> '{"upstream_billing_probe_enabled": true}'::jsonb
 					AND extra @> '{"upstream_billing_rate_sync_enabled": true}'::jsonb
-				THEN $10::numeric
+				THEN $11::numeric
 				ELSE rate_multiplier
 			END,
 			updated_at = NOW()
 		WHERE id = $2
 			AND platform = $3
 			AND type = $4
-			AND credentials_mac = $5
-			AND proxy_id IS NOT DISTINCT FROM $6
-			AND COALESCE(extra -> 'upstream_billing_probe', 'null'::jsonb) = $7::jsonb
-			AND COALESCE(extra -> 'upstream_billing_probe_enabled', 'null'::jsonb) = $8::jsonb
-			AND COALESCE(extra -> 'upstream_billing_rate_sync_enabled', 'null'::jsonb) = $9::jsonb
+			AND credentials_api_key_mac IS NOT DISTINCT FROM $5
+			AND COALESCE(credentials ->> 'base_url', '') = $6
+			AND proxy_id IS NOT DISTINCT FROM $7
+			AND COALESCE(extra -> 'upstream_billing_probe', 'null'::jsonb) = $8::jsonb
+			AND COALESCE(extra -> 'upstream_billing_probe_enabled', 'null'::jsonb) = $9::jsonb
+			AND COALESCE(extra -> 'upstream_billing_rate_sync_enabled', 'null'::jsonb) = $10::jsonb
 			AND deleted_at IS NULL
-	`, string(payload), account.ID, account.Platform, account.Type, credentialsMac, proxyID, string(expectedSnapshotJSON), string(expectedEnabledJSON), string(expectedRateSyncEnabledJSON), rateMultiplier)
+	`, string(payload), account.ID, account.Platform, account.Type, apiKeyMAC, baseURL, proxyID, string(expectedSnapshotJSON), string(expectedEnabledJSON), string(expectedRateSyncEnabledJSON), rateMultiplier)
 	if err != nil {
 		return err
 	}
@@ -4293,57 +4295,6 @@ func (r *accountRepository) updateUpstreamBillingProbeSnapshotInTx(
 		return err
 	}
 	if affected == 0 {
-		// 只读诊断（生产排障用，不改写、不重试）：逐个 CAS 条件反查当前行，
-		// 输出哪个字段失配。定位到失配字段后由主会话裁决移除。
-		diagRows, diagErr := client.QueryContext(ctx, `
-			SELECT
-				platform = $1,
-				type = $2,
-				credentials_mac = $3,
-				proxy_id IS NOT DISTINCT FROM $4,
-				COALESCE(extra -> 'upstream_billing_probe', 'null'::jsonb) = $5::jsonb,
-				COALESCE(extra -> 'upstream_billing_probe_enabled', 'null'::jsonb) = $6::jsonb,
-				COALESCE(extra -> 'upstream_billing_rate_sync_enabled', 'null'::jsonb) = $7::jsonb,
-				deleted_at IS NULL
-			FROM accounts
-			WHERE id = $8
-		`, account.Platform, account.Type, credentialsMac, proxyID,
-			string(expectedSnapshotJSON), string(expectedEnabledJSON), string(expectedRateSyncEnabledJSON), account.ID)
-		if diagErr != nil {
-			logger.L().Warn("upstream_billing_probe_cas_mismatch_diag",
-				zap.Int64("account_id", account.ID),
-				zap.String("diag_error", diagErr.Error()),
-			)
-		} else {
-			var platformMatch, typeMatch, macMatch, proxyMatch bool
-			var probeMatch, enabledMatch, rateSyncMatch, deletedMatch bool
-			if !diagRows.Next() {
-				logger.L().Warn("upstream_billing_probe_cas_mismatch_diag",
-					zap.Int64("account_id", account.ID),
-					zap.Bool("row_found", false),
-				)
-			} else if scanErr := diagRows.Scan(&platformMatch, &typeMatch, &macMatch, &proxyMatch,
-				&probeMatch, &enabledMatch, &rateSyncMatch, &deletedMatch); scanErr != nil {
-				logger.L().Warn("upstream_billing_probe_cas_mismatch_diag",
-					zap.Int64("account_id", account.ID),
-					zap.String("diag_scan_error", scanErr.Error()),
-				)
-			} else {
-				logger.L().Warn("upstream_billing_probe_cas_mismatch_diag",
-					zap.Int64("account_id", account.ID),
-					zap.Bool("row_found", true),
-					zap.Bool("platform_match", platformMatch),
-					zap.Bool("type_match", typeMatch),
-					zap.Bool("credentials_mac_match", macMatch),
-					zap.Bool("proxy_match", proxyMatch),
-					zap.Bool("probe_extra_match", probeMatch),
-					zap.Bool("probe_enabled_match", enabledMatch),
-					zap.Bool("rate_sync_match", rateSyncMatch),
-					zap.Bool("deleted_match", deletedMatch),
-				)
-			}
-			_ = diagRows.Close()
-		}
 		return service.ErrUpstreamBillingProbeIdentityChanged
 	}
 	return enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &account.ID, nil, nil)
