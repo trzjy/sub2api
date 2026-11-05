@@ -71,7 +71,7 @@ func TestCalculateCost_WithCacheTokens(t *testing.T) {
 	cost, err := svc.CalculateCost("claude-sonnet-4", tokens, 1.0)
 	require.NoError(t, err)
 
-	expectedCacheCreation := 2000 * 3.75e-6
+	expectedCacheCreation := 2000 * 3.75e-6 * DefaultCacheCreationCostMultiplier
 	expectedCacheRead := 3000 * 0.3e-6
 	require.InDelta(t, expectedCacheCreation, cost.CacheCreationCost, 1e-10)
 	require.InDelta(t, expectedCacheRead, cost.CacheReadCost, 1e-10)
@@ -444,7 +444,7 @@ func TestCalculateCost_OpenAIGPT54LongContextAppliesMultiplierToCacheCreation(t 
 	require.NoError(t, err)
 
 	// gpt-5.4 fallback: CacheCreationPricePerToken = 2.5e-6, LongContextInputMultiplier = 2.0
-	expectedCacheCreation := float64(tokens.CacheCreationTokens) * 2.5e-6 * 2.0
+	expectedCacheCreation := float64(tokens.CacheCreationTokens) * 2.5e-6 * 2.0 * DefaultCacheCreationCostMultiplier
 	require.InDelta(t, expectedCacheCreation, cost.CacheCreationCost, 1e-10,
 		"cache_creation_cost should be scaled by LongContextInputMultiplier when long-context pricing applies")
 }
@@ -464,7 +464,7 @@ func TestCalculateCost_OpenAIGPT54NoLongContextKeepsCacheCreationAtBasePrice(t *
 	cost, err := svc.CalculateCost("gpt-5.4-2026-03-05", tokens, 1.0)
 	require.NoError(t, err)
 
-	expectedCacheCreation := float64(tokens.CacheCreationTokens) * 2.5e-6
+	expectedCacheCreation := float64(tokens.CacheCreationTokens) * 2.5e-6 * DefaultCacheCreationCostMultiplier
 	require.InDelta(t, expectedCacheCreation, cost.CacheCreationCost, 1e-10,
 		"cache_creation_cost should remain at base price when below long-context threshold")
 }

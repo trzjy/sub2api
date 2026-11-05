@@ -394,10 +394,10 @@ func TestPlazaSchedulePreservesCacheWrite1h(t *testing.T) {
 	sched, err := bs.ResolveContextPricingSchedule(context.Background(), resolver, ContextPricingScheduleInput{Model: "claude-sonnet-4", Group: group, Platform: PlatformAnthropic})
 	require.NoError(t, err)
 	display := plazaPricingFromSchedule(&cp[0], sched)
-	requirePrice(t, testPtrFloat64(20e-6), display.CacheWrite1hPrice, "base 1h")
+	requirePrice(t, testPtrFloat64(20e-6*DefaultCacheCreationCostMultiplier), display.CacheWrite1hPrice, "base 1h")
 	require.Len(t, display.Intervals, 2)
-	requirePrice(t, testPtrFloat64(25e-6), display.Intervals[1].CacheWritePrice, "tier 5m")
-	requirePrice(t, testPtrFloat64(40e-6), display.Intervals[1].CacheWrite1hPrice, "tier 1h")
+	requirePrice(t, testPtrFloat64(25e-6*DefaultCacheCreationCostMultiplier), display.Intervals[1].CacheWritePrice, "tier 5m")
+	requirePrice(t, testPtrFloat64(40e-6*DefaultCacheCreationCostMultiplier), display.Intervals[1].CacheWrite1hPrice, "tier 1h")
 	a := ContextPricingTier{CacheWrite1h: testPtrFloat64(1)}
 	b := ContextPricingTier{CacheWrite1h: testPtrFloat64(2)}
 	require.Len(t, mergeEqualContextTiers([]ContextPricingTier{a, b}), 2)

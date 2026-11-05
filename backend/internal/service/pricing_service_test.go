@@ -204,15 +204,15 @@ func TestBillingService_GPT56CacheWritePricingUsesOfficialMultiplier(t *testing.
 			tokens := UsageTokens{InputTokens: 700, OutputTokens: 50, CacheCreationTokens: 200, CacheReadTokens: 100}
 			standard, err := svc.CalculateCostWithServiceTier(tt.model, tokens, 1, "")
 			require.NoError(t, err)
-			require.InDelta(t, 200*tt.input*1.25, standard.CacheCreationCost, 1e-12)
+			require.InDelta(t, 200*tt.input*1.25*DefaultCacheCreationCostMultiplier, standard.CacheCreationCost, 1e-12)
 
 			priority, err := svc.CalculateCostWithServiceTier(tt.model, tokens, 1, "priority")
 			require.NoError(t, err)
-			require.InDelta(t, 200*tt.inputPriority*1.25, priority.CacheCreationCost, 1e-12)
+			require.InDelta(t, 200*tt.inputPriority*1.25*DefaultCacheCreationCostMultiplier, priority.CacheCreationCost, 1e-12)
 
 			flex, err := svc.CalculateCostWithServiceTier(tt.model, tokens, 1, "flex")
 			require.NoError(t, err)
-			require.InDelta(t, 200*tt.input*1.25*0.5, flex.CacheCreationCost, 1e-12)
+			require.InDelta(t, 200*tt.input*1.25*0.5*DefaultCacheCreationCostMultiplier, flex.CacheCreationCost, 1e-12)
 		})
 	}
 }

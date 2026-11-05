@@ -285,6 +285,11 @@ const (
 	deepseekProOffPeakCacheRead     = 2.2e-8  // $0.022 per MTok (cache hit)
 )
 
+// DefaultCacheCreationCostMultiplier 是缓存创建（Cache Write）基础费率的全局上浮倍率。
+// 官方口径缓存创建价为输入价的 1.25 倍，本系统在此之上再乘该倍率，
+// 即实际缓存创建价 = 输入价 × 1.25 × DefaultCacheCreationCostMultiplier（= 3.125x 输入价）。
+const DefaultCacheCreationCostMultiplier = 2.5
+
 // isDeepSeekModel 判断模型名是否为 DeepSeek 模型（大小写不敏感）。
 // 任意 deepseek- 前缀均视为 DeepSeek 模型：官方模型（v4-flash / v4-pro /
 // v4-flash-vision-exp）按各自价卡计价，其余 deepseek-*（含已停服的
@@ -1748,7 +1753,7 @@ func (s *BillingService) computeTokenBreakdown(
 	outputPrice := pricing.OutputPricePerToken
 	cacheReadPrice := pricing.CacheReadPricePerToken
 	cacheCreationPrice := pricing.CacheCreationPricePerToken
-	cacheCreationMultiplier := 1.0
+	cacheCreationMultiplier := DefaultCacheCreationCostMultiplier
 	tierMultiplier := 1.0
 
 	if usePriorityServiceTierPricing(serviceTier, pricing) {
@@ -1783,7 +1788,7 @@ func (s *BillingService) computeTokenBreakdown(
 		// 缓存创建（cache_write）也是输入侧操作，三档价格（标准 / 5m / 1h）
 		// 都通过 computeCacheCreationCost 直接读取 pricing.*，不会经过这里
 		// 的倍率修改，因此显式向下传一个倍率，避免长上下文场景下被漏乘。
-		cacheCreationMultiplier = longCtxInputMultiplier
+		cacheCreationMultiplier = longCtxInputMultiplier * DefaultCacheCreationCostMultiplier
 	}
 
 	bd := &CostBreakdown{}

@@ -412,3 +412,21 @@ func newTestChannelServiceWithCache(t *testing.T, cache *channelCache) *ChannelS
 	cs.cache.Store(cache)
 	return cs
 }
+
+// TestCalculateCostUnified_CacheCreationScaledBy2_5 锁定全局缓存创建费率上浮 2.5 倍：
+// claude-sonnet-4 的缓存创建价为 3.75e-6/ token，1000 缓存写入 token 费用应为
+// 3.75e-6 * 2.5 * 1000 = 0.009375（即 1.25x 官方价再乘 2.5 = 3.125x 输入价）。
+func TestCalculateCostUnified_CacheCreationScaledBy2_5(t *testing.T) {
+	bs := newTestBillingService()
+	resolver := NewModelPricingResolver(nil, bs)
+
+	cost, err := bs.CalculateCostUnified(CostInput{
+		Ctx:            context.Background(),
+		Model:          "claude-sonnet-4",
+		Tokens:         UsageTokens{CacheCreationTokens: 1000},
+		RateMultiplier: 1.0,
+		Resolver:       resolver,
+	})
+	require.NoError(t, err)
+	require.InDelta(t, 0.009375, cost.CacheCreationCost, 1e-12)
+}
