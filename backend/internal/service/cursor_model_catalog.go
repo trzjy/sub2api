@@ -130,6 +130,16 @@ func CursorModelIDSet() map[string]struct{} {
 // 取值：§1 实供 11 项 + §2 活体证据保留项 composer-2.5（其余 §2 差异项"如实登记、不擅自
 // 合并"，待实测补验后再定，不列入本轮）。清单以既有 catalog 结构扩展落库，零新增表/字段。
 // 该清单随上游变化，本轮不实现自动同步（见 SSOT §4 未决）。
+//
+// 2026-11-06 校准（用户裁定「最小补齐」）：
+//   - Claude 家族版本号统一用横线：`claude-fable-5.1` → `claude-fable-5-1`。
+//     站点不再提供点号名调用；上游 `AvailableModels` 真实目录里也只有横线形态。
+//   - 补入分组白名单已点名、原清单却缺失的 5 个实供项（gpt-5.6-terra / gpt-5.6-luna /
+//     gpt-6-luna / gemini-4-argon / claude-haiku-5-5）——缺它们会让白名单点名的模型
+//     因账号映射缺键而无法供给。
+//   - 不在本轮：上游目录尚有 30 余项（default/Auto、claude-opus-4-x、gpt-5-mini 等旧代）
+//     未被任何分组白名单点名，不纳入入库映射。
+//
 // ---------------------------------------------------------------------------
 var CursorRealSupplyModels = []CursorModelEntry{
 	// §1 实供 11 项（2026-10-17 截图）
@@ -140,12 +150,18 @@ var CursorRealSupplyModels = []CursorModelEntry{
 	{ID: "gpt-6.1-sol", Vendor: CursorVendorOpenAI},
 	{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI},
 	{ID: "gpt-5.6-sol", Vendor: CursorVendorOpenAI},
-	{ID: "claude-fable-5.1", Vendor: CursorVendorAnthropic},
+	{ID: "claude-fable-5-1", Vendor: CursorVendorAnthropic},
 	{ID: "gemini-3.8-flash", Vendor: CursorVendorGoogle},
 	{ID: "muse-spark-1.3", Vendor: CursorVendorMuse},
 	{ID: "claude-sonnet-5-5", Vendor: CursorVendorAnthropic},
 	// §2 活体证据保留项（既有可用性证据）
 	{ID: "composer-2.5", Vendor: CursorVendorComposer},
+	// 2026-11-06 校准：分组白名单已点名、原清单缺失的实供项
+	{ID: "gpt-5.6-terra", Vendor: CursorVendorOpenAI},
+	{ID: "gpt-5.6-luna", Vendor: CursorVendorOpenAI},
+	{ID: "gpt-6-luna", Vendor: CursorVendorOpenAI},
+	{ID: "gemini-4-argon", Vendor: CursorVendorGoogle},
+	{ID: "claude-haiku-5-5", Vendor: CursorVendorAnthropic},
 }
 
 // CursorStaticEntryModels 返回入库 entry 模型的静态清单（保序、去重、去空）。
