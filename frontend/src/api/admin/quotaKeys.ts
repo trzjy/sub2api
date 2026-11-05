@@ -249,10 +249,16 @@ export interface RefreshAutoPoolResult {
  * 必须走 apiClient：管理端鉴权是 Authorization: Bearer <auth_token>，
  * 裸 fetch 不带该头，生产实测 401。
  */
-export async function batchImportAutoCards(cards: string[]): Promise<BatchImportAutoCardsResult> {
+export async function batchImportAutoCards(
+  cards: string[],
+  expiresAt?: string | null
+): Promise<BatchImportAutoCardsResult> {
   const { data } = await apiClient.post<BatchImportAutoCardsResult>(
     '/admin/quota_keys/auto/batch_import',
-    { cards }
+    {
+      cards,
+      expires_at: expiresAt || undefined
+    }
   )
   return data
 }

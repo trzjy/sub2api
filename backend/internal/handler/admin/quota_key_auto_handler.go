@@ -28,7 +28,8 @@ type CursorAutoCardDTO struct {
 }
 
 type batchImportCardsRequest struct {
-	Cards []string `json:"cards" binding:"required"` // 每行一个卡密
+	Cards     []string   `json:"cards" binding:"required"` // 每行一个卡密
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`     // 选填到期时间；提供则落库，未提供则清空为 NULL
 }
 
 type batchImportCardsResult struct {
@@ -169,7 +170,7 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 		// 阶段 3：转可选 —— 只有绑成功才把该行放回补池候选集。
 		// 失败 = 卡已绑上游但本地仍不可选：属**可恢复**的硬失败（行不可选、
 		// 不会被重消费），报错并标注需人工处理；该卡不进内存池。
-		if activateErr := h.activateAutoCard(c.Request.Context(), st.ID); activateErr != nil {
+		if activateErr := h.activateAutoCard(c.Request.Context(), st.ID, req.ExpiresAt); activateErr != nil {
 			res.FailedCount++
 			msg := fmt.Sprintf("card %s bound upstream but NOT selectable locally (%v) — 已绑定但未转可选，需人工处理: row %d stays unselectable (expires_at in the past) and will not be re-consumed",
 				maskCardKey(cardKey), activateErr, st.ID)
@@ -217,10 +218,13 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 // 额外校验（防清扫器竞态）：清空 expires_at 后回读状态，确认该行**确实**可选。
 // 若清扫器在「落库 → 转可选」窗口内把该行标成了 expired，清空 expires_at 也
 // 救不回来（status 已是终态）—— 此时必须显式失败，不能谎报成功。
-func (h *QuotaKeyHandler) activateAutoCard(ctx context.Context, quotaKeyID int64) error {
-	// 内层 nil = 显式清空 expires_at（外层非 nil 表示「要写这一列」）。
-	var clearExpiresAt *time.Time
-	updated, err := h.svc.Update(ctx, quotaKeyID, nil, &clearExpiresAt, nil, nil)
+func (h *QuotaKeyHandler) activateAutoCard(ctx context.Context, quotaKeyID int64, expiresAt *time.Time) error {
+	var targetExpiresAt *time.Time
+	if expiresAt != nil {
+		tVal := *expiresAt
+		targetExpiresAt = &tVal
+	}
+	updated, err := h.svc.Update(ctx, quotaKeyID, nil, &targetExpiresAt, nil, nil)
 	if err != nil {
 		return err
 	}

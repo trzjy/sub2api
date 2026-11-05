@@ -189,7 +189,7 @@ describe('QuotaKeysView 渠道 Tab 数据分流（派发单 F）', () => {
     wrapper.unmount()
   })
 
-  it('Auto 行不提供编辑入口（notes 承载设备绑定凭据，禁止改写）', async () => {
+  it('Auto 行提供编辑入口，且编辑时 notes 得到保护（CARD-C）', async () => {
     const editButtons = (wrapper: ReturnType<typeof mountView>) =>
       wrapper
         .findAll('button')
@@ -202,7 +202,7 @@ describe('QuotaKeysView 渠道 Tab 数据分流（派发单 F）', () => {
     expect(editButtons(stdWrapper)).toHaveLength(1)
     stdWrapper.unmount()
 
-    // Auto Tab：Auto 行没有编辑按钮（优先级仍在列表内直接改）。
+    // Auto Tab：Auto 行也提供编辑按钮（CARD-C 恢复入口）。
     vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue(listWith([autoRow]))
     const autoWrapper = mountView()
     await flushPromises()
@@ -214,7 +214,33 @@ describe('QuotaKeysView 渠道 Tab 数据分流（派发单 F）', () => {
     await nextTick()
     await flushPromises()
     expect(autoWrapper.text()).toContain('****auto')
-    expect(editButtons(autoWrapper)).toHaveLength(0)
+    expect(editButtons(autoWrapper)).toHaveLength(1)
+
+    // 点击编辑按钮打开弹窗。
+    await editButtons(autoWrapper)[0].trigger('click')
+    await nextTick()
+    await flushPromises()
+
+    // notes 输入框在 Auto 编辑时展示锁定保护提示（绑定凭据由系统管理）。
+    expect(autoWrapper.text()).toContain(
+      'Auto 动态号池绑定凭据由系统管理，不可直接改写（已锁定保护）。'
+    )
+
+    // 提交：更新请求的 payload 不应包含 notes 字段，保护绑定的虚拟设备凭据。
+    vi.mocked(adminAPI.quotaKeys.update).mockResolvedValue({} as never)
+    const saveBtn = autoWrapper
+      .findAll('button')
+      .find((b) => b.text().includes('common.save'))
+    expect(saveBtn).toBeDefined()
+    await saveBtn!.trigger('click')
+    await flushPromises()
+
+    expect(adminAPI.quotaKeys.update).toHaveBeenCalledTimes(1)
+    const updatePayload = vi.mocked(adminAPI.quotaKeys.update).mock.calls[0][1] as Record<string, unknown>
+    expect(updatePayload).not.toHaveProperty('notes')
+    expect(updatePayload).toHaveProperty('expires_at')
+    expect(updatePayload).toHaveProperty('priority')
+
     autoWrapper.unmount()
   })
 })

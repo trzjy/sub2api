@@ -139,7 +139,6 @@
                 <Icon name="eye" size="sm" />
               </button>
               <button
-                v-if="!isAutoKey(row)"
                 class="rounded p-1 text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200"
                 :title="t('admin.quotaKeys.actions.edit')"
                 @click="openEditDialog(row)"
@@ -248,8 +247,10 @@
           <TextArea
             v-model="form.notes"
             :rows="3"
+            :disabled="editing ? isAutoKey(editing) : false"
             :placeholder="t('admin.quotaKeys.notesPlaceholder')"
           />
+          <p v-if="editing && isAutoKey(editing)" class="input-hint mt-1 text-amber-600 dark:text-amber-400">Auto 动态号池绑定凭据由系统管理，不可直接改写（已锁定保护）。</p>
         </div>
 
         <p v-if="formError" class="text-sm text-red-600 dark:text-red-400">{{ formError }}</p>
@@ -532,6 +533,13 @@
           rows="6"
           placeholder="sky_cc_xxxxxx&#10;sky_cc_yyyyyy"
         />
+        <div>
+          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.quotaKeys.expiresAt') }}（选填）
+          </label>
+          <input v-model="autoBatchExpiresAt" type="datetime-local" class="input" />
+          <p class="input-hint mt-1">选填。设置本批卡密的到期时间；留空表示无固定期限（由卡密剩余额度决定）。</p>
+        </div>
       </div>
       <template #footer>
         <div class="flex items-center justify-end gap-2">
@@ -584,6 +592,7 @@ const appStore = useAppStore()
 const activeChannelTab = ref<'standard' | 'auto'>('standard')
 const showAutoBatchModal = ref(false)
 const autoBatchText = ref('')
+const autoBatchExpiresAt = ref('')
 const autoBatchLoading = ref(false)
 
 const keys = ref<QuotaKey[]>([])
@@ -596,7 +605,8 @@ const AUTO_POOL_NOTES_PREFIX = 'auto_pool:'
 
 // Auto 卡的 notes 不是普通备注：它承载上游绑定的设备凭据（dev + md5），
 // 改掉会让绑定关系不可复原，并让该卡在前端被归到标准渠道。
-// 因此 Auto 行的编辑入口关闭（优先级仍在列表内直接改）。
+// 因此 Auto 行的编辑入口保留（可改 expires_at / priority），但 notes 在弹窗中
+// 被禁用并在 buildPayload 中剔除，确保绑定的虚拟设备凭据绝不被覆盖。
 function isAutoKey(row: QuotaKey): boolean {
   return (row.notes ?? '').startsWith(AUTO_POOL_NOTES_PREFIX)
 }
@@ -766,11 +776,14 @@ function toLocalInputValue(value: string): string {
 
 function buildPayload(): CreateQuotaKeyRequest | UpdateQuotaKeyRequest {
   const expiresAt = form.expires_at ? new Date(form.expires_at).toISOString() : null
-  return {
+  const payload: Record<string, unknown> = {
     expires_at: expiresAt,
-    notes: form.notes.trim() ? form.notes.trim() : null,
     priority: form.priority
   }
+  if (!editing.value || !isAutoKey(editing.value)) {
+    payload.notes = form.notes.trim() ? form.notes.trim() : null
+  }
+  return payload as UpdateQuotaKeyRequest
 }
 
 async function submitForm() {
@@ -957,10 +970,12 @@ async function submitAutoBatch() {
   }
   autoBatchLoading.value = true
   try {
-    const res = await adminAPI.quotaKeys.batchImportAutoCards(cards)
+    const expiresAt = autoBatchExpiresAt.value || null
+    const res = await adminAPI.quotaKeys.batchImportAutoCards(cards, expiresAt)
     appStore.showSuccess(`批量导入完成：成功 ${res.success_count ?? 0} 个，失败 ${res.failed_count ?? 0} 个`)
     showAutoBatchModal.value = false
     autoBatchText.value = ''
+    autoBatchExpiresAt.value = ''
     await load()
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, '批量导入失败'))
