@@ -139,6 +139,7 @@
                 <Icon name="eye" size="sm" />
               </button>
               <button
+                v-if="!isAutoKey(row)"
                 class="rounded p-1 text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200"
                 :title="t('admin.quotaKeys.actions.edit')"
                 @click="openEditDialog(row)"
@@ -593,11 +594,15 @@ const loading = ref(false)
 // 列表接口已返回 notes，按前缀把两个渠道的数据分开。
 const AUTO_POOL_NOTES_PREFIX = 'auto_pool:'
 
+// Auto 卡的 notes 不是普通备注：它承载上游绑定的设备凭据（dev + md5），
+// 改掉会让绑定关系不可复原，并让该卡在前端被归到标准渠道。
+// 因此 Auto 行的编辑入口关闭（优先级仍在列表内直接改）。
+function isAutoKey(row: QuotaKey): boolean {
+  return (row.notes ?? '').startsWith(AUTO_POOL_NOTES_PREFIX)
+}
+
 const visibleKeys = computed(() =>
-  keys.value.filter((k) => {
-    const isAuto = (k.notes ?? '').startsWith(AUTO_POOL_NOTES_PREFIX)
-    return activeChannelTab.value === 'auto' ? isAuto : !isAuto
-  })
+  keys.value.filter((k) => (activeChannelTab.value === 'auto' ? isAutoKey(k) : !isAutoKey(k)))
 )
 const busyId = ref<number | null>(null)
 const saving = ref(false)

@@ -88,10 +88,14 @@ function mountView() {
           template: `<div class="datatable-stub">
             <template v-for="(row, i) in data" :key="i">
               <span class="cell-code">{{ row.code_masked }}</span>
+              <slot name="cell-actions" :row="row" />
             </template>
             <slot name="empty" />
           </div>`
         },
+        PriorityStepper: true,
+        QuotaKeyUsageCell: true,
+        Pagination: true,
         ConfirmDialog: true,
         // 渲染标题与 action 文本，便于断言 Auto Tab 空状态无「新建激活码」动作。
         EmptyState: {
@@ -183,5 +187,34 @@ describe('QuotaKeysView 渠道 Tab 数据分流（派发单 F）', () => {
     // Auto Tab 空状态不提供「新建激活码」动作文本。
     expect(text).not.toContain('admin.quotaKeys.create')
     wrapper.unmount()
+  })
+
+  it('Auto 行不提供编辑入口（notes 承载设备绑定凭据，禁止改写）', async () => {
+    const editButtons = (wrapper: ReturnType<typeof mountView>) =>
+      wrapper
+        .findAll('button')
+        .filter((b) => b.attributes('title') === 'admin.quotaKeys.actions.edit')
+
+    // 标准 Tab：标准行有编辑按钮。
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue(listWith([stdRow]))
+    const stdWrapper = mountView()
+    await flushPromises()
+    expect(editButtons(stdWrapper)).toHaveLength(1)
+    stdWrapper.unmount()
+
+    // Auto Tab：Auto 行没有编辑按钮（优先级仍在列表内直接改）。
+    vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue(listWith([autoRow]))
+    const autoWrapper = mountView()
+    await flushPromises()
+    const autoBtn = autoWrapper
+      .findAll('button')
+      .find((b) => b.text().includes('Cursor 极速号池 (Auto动态池)'))
+    expect(autoBtn).toBeDefined()
+    await autoBtn!.trigger('click')
+    await nextTick()
+    await flushPromises()
+    expect(autoWrapper.text()).toContain('****auto')
+    expect(editButtons(autoWrapper)).toHaveLength(0)
+    autoWrapper.unmount()
   })
 })
