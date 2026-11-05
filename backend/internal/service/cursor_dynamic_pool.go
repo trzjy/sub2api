@@ -82,6 +82,10 @@ type DynamicCursorToken struct {
 	Email       string
 	MachineIDs  cursorupstream.MachineIDs
 	CardID      int64
+	// Generation 记录取号时目标卡密的代际；锁外取号返回后重新加锁时，
+	// 必须与 p.cards 中该卡当前的 Generation 严格相等，否则该 Token 被原子丢弃
+	// （卡密在网络 I/O 期间被注销或重新注册）。
+	Generation  int64
 	CreatedAt   time.Time
 	FailCount   int
 	InFlight    int
@@ -101,14 +105,18 @@ type ManagedCard struct {
 	Priority      int
 	CooldownUntil time.Time
 	Disabled      bool
+	// Generation 是卡密的代际计数器：每次注册/重新注册都会自增，用于取号时的
+	// 原子代际校验（锁外取号返回后比对，识别注销或重新注册）。
+	Generation    int64
 }
 
 // isUnlimitedCard 通用判断某卡密是否为「无限卡」（总额度达到虚拟无限阈值）。
 //
-// 旧硬编码 `sumCount == 99999990` 漏掉了同为上游虚拟无限标记的 99999999，
-// 且未覆盖 >= 90000000 的整段阈值区间；这里收口为统一判断，避免失效卡被错判为有限卡。
+// 收紧为上游已验证的两个明确标记集合 {99999999, 99999990}，移除宽泛的
+// `>= 90000000` 区间判定：旧口径会把 90000000~99999989 之间的普通大额卡
+// 误判为无限卡，导致超额扣减无限卡的额度预留逻辑被错误套用。
 func isUnlimitedCard(sumCount int) bool {
-	return sumCount >= 90000000 || sumCount == 99999999 || sumCount == 99999990
+	return sumCount == 99999999 || sumCount == 99999990
 }
 
 // CursorDynamicPool 管理 1 对多卡密聚合、Token 预热环、会话粘性及 429 内部自愈
@@ -121,6 +129,7 @@ type CursorDynamicPool struct {
 	logger       *zap.Logger
 	maxInFlight  int // 单 Token 最大并发 (默认 2)
 	upstreamErr  error
+	genCounter   int64 // 卡密代际单调计数器：每次 RegisterCard 自增并写入目标卡
 }
 
 func NewCursorDynamicPool(baseURL string, logger *zap.Logger) *CursorDynamicPool {
@@ -156,6 +165,11 @@ func (p *CursorDynamicPool) RegisterCard(id int64, cardKey, devCode, devMD5 stri
 		prio = priority[0]
 	}
 
+	// 代际自增：同一 ID 的重新注册会得到更大的 Generation，使锁外取号期间
+	// 完成的重新注册能被 AcquireToken 的原子代际校验识别并丢弃旧代 Token。
+	p.genCounter++
+	gen := p.genCounter
+
 	p.cards[id] = &ManagedCard{
 		ID:            id,
 		CardKey:       cardKey,
@@ -165,6 +179,7 @@ func (p *CursorDynamicPool) RegisterCard(id int64, cardKey, devCode, devMD5 stri
 		SumCount:      sumCount,
 		IsUnlimited:   isUnlimitedCard(sumCount),
 		Priority:      prio,
+		Generation:    gen,
 	}
 }
 
@@ -259,6 +274,14 @@ func (p *CursorDynamicPool) AcquireToken(ctx context.Context, sessionID string) 
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// 锁内原子代际校验：网络 I/O 期间目标卡可能已被注销或重新注册。
+	// 不仅要求卡仍存在，还要求代际严格等于发起取号时的代际；否则丢弃旧代 Token，
+	// 绝不加入 activeTokens 或 sessionMap（并发注销/重注册竞态防护）。
+	card, exists := p.cards[newTok.CardID]
+	if !exists || card.Generation != newTok.Generation {
+		return nil, fmt.Errorf("%w: card %d was invalidated during token acquire", ErrNoAvailableCursorAutoToken, newTok.CardID)
+	}
 
 	p.activeTokens = append(p.activeTokens, newTok)
 	newTok.InFlight++
@@ -356,6 +379,15 @@ func (p *CursorDynamicPool) LoadFromRepository(ctx context.Context, repo QuotaKe
 		if qk.Notes == nil || !strings.HasPrefix(*qk.Notes, autoPoolNotesPrefix) {
 			continue
 		}
+		// 启动失败态硬拦截：绑定失败（`bind=failed`）的卡密绝不入池。
+		if strings.Contains(*qk.Notes, autoPoolBindFailedMarker) {
+			continue
+		}
+		// 启动失败态硬拦截：存在未清除的预热/查额错误（LastRefreshError 非空且非空白）
+		// 的卡密尚未恢复，禁止装配入池。
+		if qk.LastRefreshError != nil && strings.TrimSpace(*qk.LastRefreshError) != "" {
+			continue
+		}
 		devCode, devMD5, ok := parseAutoPoolNotes(*qk.Notes)
 		if !ok {
 			if p.logger != nil {
@@ -376,6 +408,10 @@ func (p *CursorDynamicPool) LoadFromRepository(ctx context.Context, repo QuotaKe
 // autoPoolNotesPrefix 是 Auto 卡密在 quota_keys.notes 中的标记前缀（与
 // handler/admin/quota_key_auto_handler.go 保持字面一致，避免重复定义漂移）。
 const autoPoolNotesPrefix = "auto_pool:"
+
+// autoPoolBindFailedMarker 是卡密 notes 中标记「绑定失败」的子串。
+// 绑定失败的卡密绝不允许装配入动态池（启动失败态拦截）。
+const autoPoolBindFailedMarker = "bind=failed"
 
 // parseAutoPoolNotes 解析 `auto_pool:dev=...;md5=...` 格式的 notes，提取虚拟设备凭据。
 // 返回 (devCode, devMD5, ok)；任一缺失即 ok=false。
@@ -530,6 +566,7 @@ func (p *CursorDynamicPool) pullNewTokenFromAnyCard(ctx context.Context) (*Dynam
 			Email:       creds.Email,
 			MachineIDs:  cursorupstream.GenerateMachineIDs(),
 			CardID:      targetCard.ID,
+			Generation:  targetCard.Generation,
 			CreatedAt:   time.Now(),
 		}, nil
 	}

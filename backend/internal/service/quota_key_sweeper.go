@@ -138,9 +138,23 @@ func (s *QuotaKeySweeper) runOnce() {
 	}
 	committed = true
 	if n > 0 {
+		s.unregisterExpiredAutoCards(ctx)
 		log.Printf("[QuotaKeySweep] marked %d expired quota keys", n)
 	}
 	s.recordHeartbeat(ctx, runAt, true, nil, n)
+}
+
+// unregisterExpiredAutoCards 在事务提交后，将当前 expired 集合对应的卡密从运行
+// 内存号池（GlobalCursorDynamicPool）同步注销。runOnce 与 SweepNow 共用此逻辑，
+// 保证自动 / 手动清扫后过期卡密不再停留在运行池中。幂等：已注销的卡忽略。
+func (s *QuotaKeySweeper) unregisterExpiredAutoCards(ctx context.Context) {
+	if pool := GetGlobalCursorDynamicPool(); pool != nil {
+		if expired, lerr := s.repo.ListExpired(ctx, time.Now()); lerr == nil {
+			for _, k := range expired {
+				pool.UnregisterCard(k.ID)
+			}
+		}
+	}
 }
 
 // SweepNow 同步执行一次到期清扫，返回本轮标记为 expired 的条数（§4.4 sweep_expired
@@ -173,15 +187,9 @@ func (s *QuotaKeySweeper) SweepNow(ctx context.Context) (int, error) {
 		return n, fmt.Errorf("quota_key_sweeper: commit sweep: %w", err)
 	}
 	committed = true
-	// CARD-5：清扫标 expired 成功后，从运行内存池同步注销该批卡密及相关 Token。
-	// 复用与 sweepOnce 同一的过期判定（re-list 当前 expired 集合），幂等，已注销的卡忽略。
-	if pool := GetGlobalCursorDynamicPool(); pool != nil {
-		if expired, lerr := s.repo.ListExpired(ctx, time.Now()); lerr == nil {
-			for _, k := range expired {
-				pool.UnregisterCard(k.ID)
-			}
-		}
-	}
+	// CARD-B：清扫标 expired 成功后，从运行内存池同步注销该批卡密及相关 Token。
+	// 复用统一的 unregisterExpiredAutoCards，与 runOnce 自动清扫共享同一注销逻辑。
+	s.unregisterExpiredAutoCards(ctx)
 	return n, nil
 }
 

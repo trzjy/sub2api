@@ -222,9 +222,9 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 
 		// 入池。只有「落库 + 绑定 + 预热 + 查额 + 快照回写」五步全部成功的卡密才允许进入
 		// 内存池，失败卡密永不进池（避免污染池内额度统计与取号候选集，且天然保持不可选）。
-		if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
-			pool.RegisterCard(st.ID, cardKey, devCode, devMD5, overCount, sumCount)
-		}
+	if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
+		pool.RegisterCard(st.ID, cardKey, devCode, devMD5, overCount, sumCount, st.Priority)
+	}
 
 		res.SuccessCount++
 	}
@@ -412,8 +412,11 @@ func (h *QuotaKeyHandler) RefreshAutoCard(c *gin.Context) {
 		pool.UpdateCardCounts(id, countResp.OverCount, countResp.SumCount)
 	}
 	// 持久化回写数据库快照，供前端读取真实剩余额度。
+	// 快照写库失败时，内存与数据库已分叉，必须直接返回 500 报错，禁止虚假成功。
 	if snapErr := h.syncAutoCardUsageSnapshot(c.Request.Context(), id, countResp.OverCount, countResp.SumCount); snapErr != nil {
-		slog.Warn("cursor auto: single-card refresh snapshot persist failed", "card_id", id, "err", snapErr)
+		slog.Error("cursor auto: single-card refresh snapshot persist failed", "card_id", id, "err", snapErr)
+		response.Error(c, http.StatusInternalServerError, "persist usage snapshot failed: "+snapErr.Error())
+		return
 	}
 
 	response.Success(c, gin.H{
