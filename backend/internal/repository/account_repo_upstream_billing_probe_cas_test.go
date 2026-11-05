@@ -48,6 +48,11 @@ func TestUpdateUpstreamBillingProbeSnapshotRequiresSameIdentityAndSnapshot(t *te
 				mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox")).
 					WithArgs(service.SchedulerOutboxEventAccountChanged, int64(17), nil, nil, sqlmock.AnyArg()).
 					WillReturnResult(sqlmock.NewResult(1, 1))
+			} else {
+				mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("platform = $1")+`.*`+regexp.QuoteMeta("deleted_at IS NULL")+`.*`+regexp.QuoteMeta("FROM accounts")+`.*`+regexp.QuoteMeta("WHERE id = $8")).
+					WithArgs(service.PlatformOpenAI, service.AccountTypeAPIKey, sqlmock.AnyArg(), int64(9), `{"status":"stale"}`, "null", "null", int64(17)).
+					WillReturnRows(sqlmock.NewRows([]string{"platform_match", "type_match", "credentials_mac_match", "proxy_match", "probe_extra_match", "probe_enabled_match", "rate_sync_match", "deleted_match"}).
+						AddRow(true, true, true, true, false, true, true, true))
 			}
 			repo := newAccountRepositoryWithSQL(client, &recordingSQLExecutor{err: errors.New("must use transaction client")}, nil)
 			proxyID := int64(9)

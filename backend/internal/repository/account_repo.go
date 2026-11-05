@@ -32,6 +32,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 	"github.com/lib/pq"
+	"go.uber.org/zap"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqljson"
@@ -4292,6 +4293,57 @@ func (r *accountRepository) updateUpstreamBillingProbeSnapshotInTx(
 		return err
 	}
 	if affected == 0 {
+		// 只读诊断（生产排障用，不改写、不重试）：逐个 CAS 条件反查当前行，
+		// 输出哪个字段失配。定位到失配字段后由主会话裁决移除。
+		diagRows, diagErr := client.QueryContext(ctx, `
+			SELECT
+				platform = $1,
+				type = $2,
+				credentials_mac = $3,
+				proxy_id IS NOT DISTINCT FROM $4,
+				COALESCE(extra -> 'upstream_billing_probe', 'null'::jsonb) = $5::jsonb,
+				COALESCE(extra -> 'upstream_billing_probe_enabled', 'null'::jsonb) = $6::jsonb,
+				COALESCE(extra -> 'upstream_billing_rate_sync_enabled', 'null'::jsonb) = $7::jsonb,
+				deleted_at IS NULL
+			FROM accounts
+			WHERE id = $8
+		`, account.Platform, account.Type, credentialsMac, proxyID,
+			string(expectedSnapshotJSON), string(expectedEnabledJSON), string(expectedRateSyncEnabledJSON), account.ID)
+		if diagErr != nil {
+			logger.L().Warn("upstream_billing_probe_cas_mismatch_diag",
+				zap.Int64("account_id", account.ID),
+				zap.String("diag_error", diagErr.Error()),
+			)
+		} else {
+			var platformMatch, typeMatch, macMatch, proxyMatch bool
+			var probeMatch, enabledMatch, rateSyncMatch, deletedMatch bool
+			if !diagRows.Next() {
+				logger.L().Warn("upstream_billing_probe_cas_mismatch_diag",
+					zap.Int64("account_id", account.ID),
+					zap.Bool("row_found", false),
+				)
+			} else if scanErr := diagRows.Scan(&platformMatch, &typeMatch, &macMatch, &proxyMatch,
+				&probeMatch, &enabledMatch, &rateSyncMatch, &deletedMatch); scanErr != nil {
+				logger.L().Warn("upstream_billing_probe_cas_mismatch_diag",
+					zap.Int64("account_id", account.ID),
+					zap.String("diag_scan_error", scanErr.Error()),
+				)
+			} else {
+				logger.L().Warn("upstream_billing_probe_cas_mismatch_diag",
+					zap.Int64("account_id", account.ID),
+					zap.Bool("row_found", true),
+					zap.Bool("platform_match", platformMatch),
+					zap.Bool("type_match", typeMatch),
+					zap.Bool("credentials_mac_match", macMatch),
+					zap.Bool("proxy_match", proxyMatch),
+					zap.Bool("probe_extra_match", probeMatch),
+					zap.Bool("probe_enabled_match", enabledMatch),
+					zap.Bool("rate_sync_match", rateSyncMatch),
+					zap.Bool("deleted_match", deletedMatch),
+				)
+			}
+			_ = diagRows.Close()
+		}
 		return service.ErrUpstreamBillingProbeIdentityChanged
 	}
 	return enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &account.ID, nil, nil)
