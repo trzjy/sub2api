@@ -296,10 +296,16 @@ func lockOllamaCloudUsageGroup(
 	account *service.Account,
 	apiKey string,
 ) ([]lockedOllamaCloudUsageMember, error) {
-	// 锚点一致性与分组匹配均改用指纹（A3-E2），明文凭证与明文 api_key 不进 SQL。
-	anchorMac, err := credentialsMACOf(account.Credentials)
-	if err != nil {
-		return nil, err
+	// 锚点一致性收窄为真正身份字段：base_url 原文，与 SQL ->> 严格同口径
+	// （string 取原文，非 string 取 JSON 文本）。不再用整份 credentials_mac：
+	// BulkUpdate 部分凭据更新会把它置 NULL，锚点恒失配（同计费探针 CAS 修复口径）。
+	baseURL := ""
+	if v, ok := account.Credentials["base_url"]; ok && v != nil {
+		if s, isStr := v.(string); isStr {
+			baseURL = s
+		} else if encoded, err := json.Marshal(v); err == nil {
+			baseURL = string(encoded)
+		}
 	}
 	var proxyID any
 	if account.ProxyID != nil {
@@ -311,7 +317,7 @@ func lockOllamaCloudUsageGroup(
 			id = $2
 				AND platform = $3
 				AND type = $4
-				AND credentials_mac = $5
+				AND COALESCE(credentials ->> 'base_url', '') = $5
 				AND proxy_id IS NOT DISTINCT FROM $6,
 			COALESCE((extra -> 'ollama_cloud_usage_session')::text, 'null'),
 			COALESCE((extra -> 'ollama_cloud_usage_auto_refresh')::text, 'null'),
@@ -322,7 +328,7 @@ func lockOllamaCloudUsageGroup(
 			AND credentials_api_key_mac = $1
 		ORDER BY id
 		FOR NO KEY UPDATE
-	`, credentialsMACOfJSON([]byte(apiKey)), account.ID, account.Platform, account.Type, anchorMac, proxyID)
+	`, credentialsMACOfJSON([]byte(apiKey)), account.ID, account.Platform, account.Type, baseURL, proxyID)
 	if err != nil {
 		return nil, err
 	}

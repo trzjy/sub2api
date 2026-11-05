@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -67,14 +68,20 @@ func expectOllamaCloudUsageGroupLock(
 ) {
 	t.Helper()
 	apiKey, _ := account.Credentials["api_key"].(string)
-	anchorMac, err := credentialsMACOf(account.Credentials)
-	require.NoError(t, err)
+	baseURL := ""
+	if v, ok := account.Credentials["base_url"]; ok && v != nil {
+		if s, isStr := v.(string); isStr {
+			baseURL = s
+		} else if encoded, err := json.Marshal(v); err == nil {
+			baseURL = string(encoded)
+		}
+	}
 	var proxyID any
 	if account.ProxyID != nil {
 		proxyID = *account.ProxyID
 	}
 	mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("FOR NO KEY UPDATE")).
-		WithArgs(credentialsMACOfJSON([]byte(apiKey)), account.ID, account.Platform, account.Type, anchorMac, proxyID).
+		WithArgs(credentialsMACOfJSON([]byte(apiKey)), account.ID, account.Platform, account.Type, baseURL, proxyID).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "anchor_matches", "session", "auto_refresh", "snapshot"}).
 			AddRow(account.ID, anchorMatches, sessionJSON, autoJSON, snapshotJSON))
 }
@@ -380,5 +387,49 @@ func TestUpdateCredentialsPlainCNAPIKeyAccountCleanupStaysSemanticallyEquivalent
 		"THEN COALESCE(extra, '{}'::jsonb) - 'upstream_billing_probe' - 'ollama_cloud_usage_session' - 'ollama_cloud_usage_auto_refresh' - 'ollama_cloud_usage_snapshot'")
 	require.NotContains(t, query, "- 'upstream_billing_probe_enabled'")
 	require.NotContains(t, query, "- 'upstream_billing_rate_sync_enabled'")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 锚点身份判定不再依赖整份 credentials_mac：BulkUpdate 部分凭据更新会把它置
+// NULL，导致锚点恒失配。本用例捕获实际执行的锚点 SELECT，断言其按 base_url
+// 原文参与匹配（credentials ->> 'base_url'），且不再引用 credentials_mac。
+func TestOllamaCloudUsageAnchorCheckDoesNotDependOnCredentialsMAC(t *testing.T) {
+	var capturedSQL []string
+	matcher := sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+		capturedSQL = append(capturedSQL, actualSQL)
+		return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	t.Cleanup(func() { _ = client.Close() })
+	repo := newAccountRepositoryWithSQL(client, db, nil)
+	account := ollamaCloudUsageRepositoryAccount()
+
+	mock.ExpectBegin()
+	expectOllamaCloudUsageGroupLock(t, mock, account, true, `"cipher:wos-session=secret"`, `true`, `null`)
+	mock.ExpectExec(`(?s)UPDATE accounts.*ollama_cloud_usage_session.*ollama_cloud_usage_auto_refresh.*ollama_cloud_usage_snapshot`).
+		WithArgs(sqlmock.AnyArg(), credentialsMACOfJSON([]byte("key")), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err = repo.UpdateOllamaCloudUsageSnapshot(context.Background(), account, &service.OllamaCloudUsageSnapshot{
+		Status:        service.OllamaCloudUsageStatusOK,
+		LastAttemptAt: time.Now(),
+		NextRefreshAt: time.Now().Add(time.Hour),
+	})
+	require.NoError(t, err)
+
+	anchorSQL := ""
+	for _, query := range capturedSQL {
+		if strings.Contains(query, "FOR NO KEY UPDATE") {
+			anchorSQL = query
+			break
+		}
+	}
+	require.NotEmpty(t, anchorSQL, "锚点 SELECT 应被捕获")
+	require.Contains(t, anchorSQL, "credentials ->> 'base_url'")
+	require.NotContains(t, anchorSQL, "credentials_mac")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
