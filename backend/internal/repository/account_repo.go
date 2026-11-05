@@ -4263,7 +4263,17 @@ func (r *accountRepository) updateUpstreamBillingProbeSnapshotInTx(
 	if err != nil {
 		return err
 	}
-	baseURL := account.GetCredential("base_url")
+	// base_url 身份等值与 SQL 侧 credentials ->> 'base_url' 严格同口径：string 取原文，
+	// 非 string 取 JSON 文本（与 ->> 一致）。不用 GetCredential 的数值强转
+	// （float64 截断 / bool·对象返空），避免与 ->> 口径漂移导致 CAS 误判（外审发现）。
+	baseURL := ""
+	if v, ok := account.Credentials["base_url"]; ok && v != nil {
+		if s, isStr := v.(string); isStr {
+			baseURL = s
+		} else if b, err := json.Marshal(v); err == nil {
+			baseURL = string(b)
+		}
+	}
 	result, err := client.ExecContext(ctx, `
 		UPDATE accounts
 		SET
