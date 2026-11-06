@@ -2942,6 +2942,50 @@ func TestCURF1_CandidateKeys_CooldownWindow(t *testing.T) {
 		"cooldown marker must not exclude the key regardless of elapsed time")
 }
 
+// TestListCandidateKeys_StoppedAccountsDoNotCount（2026-11-06 用户裁定）：
+// "我说的是 5 个可用账号，不包括停调账号。"
+//
+// 码名下 5 个号全部处于停调中时，可用数 = 0 < 5，该码必须重新进入候选补号。
+// 旧口径数的是总行数（5 行），于是"5 个号全废、池子空了、却永远不补号"——
+// 这正是用户反复指出的问题。schedulable=false 的号同样不算可用。
+func TestListCandidateKeys_StoppedAccountsDoNotCount(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	w := NewQuotaKeyModelWater(client, nil)
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	mustCreateAccounts(t, client, qk.ID, CursorAutoPullAccountsPerKey) // 表里 5 个号，全部可用
+
+	// 对照：5 个号都能干活 → 不该入选。
+	cands, err := w.ListCandidateKeys(ctx, "cursor-stopped", 0)
+	require.NoError(t, err)
+	require.NotContains(t, cands, qk.ID, "5 个可用号已满，不该再拉")
+
+	// 全部置为"停调中且未到期"（被上游挡住）→ 可用 0 → 必须重新入选。
+	_, err = client.Account.Update().
+		Where(account.QuotaKeyID(qk.ID)).
+		SetTempUnschedulableUntil(time.Now().Add(30 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	cands, err = w.ListCandidateKeys(ctx, "cursor-stopped", 0)
+	require.NoError(t, err)
+	require.Contains(t, cands, qk.ID,
+		"5 个号全停调 = 0 个可用，必须重新入选补号（用户裁定：停调账号不算数）")
+
+	// schedulable=false 同样不算可用号（人工/状态机停用）。
+	_, err = client.Account.Update().
+		Where(account.QuotaKeyID(qk.ID)).
+		SetTempUnschedulableUntil(time.Now().Add(-time.Minute)). // 停调已过期
+		SetSchedulable(false).
+		Save(ctx)
+	require.NoError(t, err)
+
+	cands, err = w.ListCandidateKeys(ctx, "cursor-stopped", 0)
+	require.NoError(t, err)
+	require.Contains(t, cands, qk.ID, "schedulable=false 的号也不算可用，仍须补号")
+}
+
 // TestCURF1_CandidateKeys_NonCooldownNotReinstatedByTime（6，非冷却错误不得因时间被当冷却）：
 // 带非冷却 last_refresh_error 的 key，即便 last_refresh_at 很旧，也不产生限频豁免
 // （仍按 exhausted 占位排除）。判据是错误分类而非时间。

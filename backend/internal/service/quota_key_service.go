@@ -847,6 +847,33 @@ func countWorkingQuotaKeyAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID in
 		Count(ctx)
 }
 
+// countUsableQuotaKeyAccounts 统计归属某激活码、且**现在真的能干活**的账号数。
+//
+// "能用"的谓词（用户裁定 2026-11-06："5 个可用账号，不包括停调账号"）：
+//   - 未软删；
+//   - schedulable = true（没被人工/状态机停用）；
+//   - status = active（不是 error / disabled）；
+//   - 没有未到期的临时停调（temp_unschedulable_until 为空或已过期）。
+//
+// 与 countWorkingQuotaKeyAccounts 的区别：后者只排除软删，被上游挡住、正在停调的号
+// 依然算进去。用它做"够不够 5 个"的判据，就会出现"5 个号全停调、池子空了、
+// 却因为号数还是 5 而永远不补号"——这正是用户反复指出的问题。
+func countUsableQuotaKeyAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error) {
+	now := time.Now()
+	return tx.Account.Query().
+		Where(
+			account.QuotaKeyID(quotaKeyID),
+			account.DeletedAtIsNil(),
+			account.Schedulable(true),
+			account.StatusEQ(domain.StatusActive),
+			account.Or(
+				account.TempUnschedulableUntilIsNil(),
+				account.TempUnschedulableUntilLTE(now),
+			),
+		).
+		Count(ctx)
+}
+
 // checkQuotaKeyCapacityLocked 是容量判定的唯一实现，运行在"已持有该激活码 advisory
 // 事务锁"的 tx 内（软删校验随之前移进锁内，修 r4 #2），返回判定时刻的 working 计数：
 //  1. quota_key 必须存在且未软删（普通查询天然排除软删行）；
@@ -872,6 +899,16 @@ func checkQuotaKeyCapacityLocked(ctx context.Context, tx *ent.Tx, quotaKeyID int
 	working, err := countWorkingQuotaKeyAccounts(ctx, tx, quotaKeyID)
 	if err != nil {
 		return 0, fmt.Errorf("quota_key_service: count working accounts: %w", err)
+	}
+	// 自动补位（limit > 0）判的是"可用号数"，不是"表里还剩几行"：停调中的号不算数，
+	// 否则 5 个号全停调时会因为"还是 5 行"而永远拉不进新号（2026-11-06 用户裁定）。
+	// 人工建号/改绑（limit <= 0）没有上限，仍返回总行数供调用方展示。
+	if limit > 0 {
+		usable, uerr := countUsableQuotaKeyAccounts(ctx, tx, quotaKeyID)
+		if uerr != nil {
+			return 0, fmt.Errorf("quota_key_service: count usable accounts: %w", uerr)
+		}
+		working = usable
 	}
 	if limit > 0 && working >= limit {
 		return working, ErrQuotaKeyAccountLimitReached.WithMetadata(map[string]string{
@@ -2265,10 +2302,11 @@ func isDeadKeyRefreshError(errStr *string) bool {
 //
 // 判据（2026-11-06 用户裁定，二次收敛 —— 唯一一条）：
 //
-//	这个码名下还有几个号：少于 CursorAutoPullAccountsPerKey(5) 个就入选，够 5 个就不入选。
+//	这个码名下还有几个【可用】账号：少于 CursorAutoPullAccountsPerKey(5) 个就入选，
+//	够 5 个就不入选。"可用"= 未软删 + schedulable + status=active + 没有未到期的临时停调。
 //
-// 除此之外不做任何叠加过滤：不看余额、不看水位、不看今天拉过几次、不看上次错误是不是冷却。
-// 用户原话："有 5 个号，就不再拉，少于 5 个号就拉，其他条件都不需要设。"
+// 用户两次原话：先"有 5 个号，就不再拉，少于 5 个号就拉，其他条件都不需要设"，
+// 再澄清"我说的是 5 个可用账号，不包括停调账号"——所以数的是能干活的人头，不是墓碑。
 //
 // 保留的排除项不是"业务条件"，而是"这个码还成立"的前提：
 //   - status 非 active / exhausted / 已软删 / 已过期：这些码拉号必失败；
@@ -2305,8 +2343,20 @@ func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, li
 		// 原"5 分钟冷却窗口内不入选"的过滤已删除：冷却只是限频状态，不该把"号不够"的码
 		// 挡在候选之外，那正是"号池告急却永远不补号"的成因之一。
 		// 死码过滤保留（上游明确说密钥作废，不是推断状态）。
+		// 数的是"可用账号"（用户裁定 2026-11-06："5 个可用账号，不包括停调账号"）。
+		// 谓词与 countUsableQuotaKeyAccounts 保持一致：未软删 + schedulable + active +
+		// 没有未到期的临时停调。用总行数会让"5 个号全停调"的码永远够数、永远不补号。
 		working, werr := w.client.Account.Query().
-			Where(account.QuotaKeyID(k.ID), account.DeletedAtIsNil()).
+			Where(
+				account.QuotaKeyID(k.ID),
+				account.DeletedAtIsNil(),
+				account.Schedulable(true),
+				account.StatusEQ(domain.StatusActive),
+				account.Or(
+					account.TempUnschedulableUntilIsNil(),
+					account.TempUnschedulableUntilLTE(now),
+				),
+			).
 			Count(ctx)
 		if werr != nil {
 			return nil, fmt.Errorf("quota_key_model_water: count working for key %d: %w", k.ID, werr)
