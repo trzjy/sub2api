@@ -32,12 +32,17 @@ const (
 	cursorSupplyProjWildcard = "gpt-*"
 )
 
-// cursorSupplyProjAccount 构造一个显式挂组的 cursor 供给账号（mapping 键＝公开名）。
+// cursorSupplyProjAccount 构造一个显式挂组、绑定 ShareAI 归属激活码的 cursor 号池账号
+// （mapping 键＝公开名）。
+//
+// Type 固定为 OAuth：本文件的用例全部围绕"绑定 QuotaKeyID 的号池账号"的来源门语义
+// （快照新鲜度 / key 终态 / 依赖装配）。第三方 OpenAI 兼容反代账号（cursor + api_key）
+// 按 CARD-KC-10 已整体豁免该来源门，若夹具延用 api_key，来源相关断言会全部失去对象。
 func cursorSupplyProjAccount(id int64, quotaKeyID *int64, mapping map[string]any) Account {
 	return Account{
 		ID:          id,
 		Platform:    PlatformCursor,
-		Type:        AccountTypeAPIKey,
+		Type:        AccountTypeOAuth,
 		Status:      StatusActive,
 		Schedulable: true,
 		Concurrency: 1,

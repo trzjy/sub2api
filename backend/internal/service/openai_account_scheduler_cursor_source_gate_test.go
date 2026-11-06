@@ -109,3 +109,56 @@ func TestCursorSchedulingAdvancedPoolSourceGateErrorExcludesAndRecords(t *testin
 		})
 	}
 }
+
+// TestCursorSupplySourceGate_APIKeyAllowed 钉死 CARD-KC-10：第三方 Cursor APIKey 账号
+// （OpenAI 兼容反代，platform=cursor && type=api_key）不依赖 ShareAI 激活码号池，
+// 因此来源门必须放行——不得因其无 QuotaKeyID 返回 quota_key_source_unbound。
+//
+// 反面同样钉死：号池 OAuth 账号（type≠api_key）未绑码时仍必须被否决，放行条件不得外溢。
+func TestCursorSupplySourceGate_APIKeyAllowed(t *testing.T) {
+	ctx := context.Background()
+
+	// 未装配任何 provider：APIKey 账号本就无需来源依赖，放行不受装配形态影响。
+	clearCursorQuotaKeySourceProvidersForTest(t)
+
+	apiKeyAccount := &Account{
+		ID:          9901,
+		Platform:    PlatformCursor,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{"api_key": "sk-kn-cy-secret"},
+	}
+	require.True(t, apiKeyAccount.IsCursorOpenAICompatibleAccount(),
+		"前置：platform=cursor && type=api_key 判定为 OpenAI 兼容反代账号")
+
+	reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, apiKeyAccount)
+	require.NoError(t, err, "APIKey 类型 Cursor 账号不得因来源依赖未装配而报错")
+	require.Empty(t, reason, "APIKey 类型 Cursor 账号必须整体放行来源门")
+
+	reason, err = cursorSupplySourceUsageVetoReason(ctx, apiKeyAccount)
+	require.NoError(t, err)
+	require.Empty(t, reason, "用量子谓词对 APIKey 类型 Cursor 账号同样必须放行")
+	require.NotEqual(t, quotaKeySourceUnbound, reason, "不得返回 quota_key_source_unbound")
+
+	// 兼容投影（既有调度路径消费的 string 形态）同样是空串。
+	require.Empty(t, cursorSupplySourceAvailabilityVetoReasonString(ctx, apiKeyAccount))
+
+	// 反证：号池 OAuth 账号未绑码时仍被否决（§25.17.3 不放宽 OAuth 账号的来源检查）。
+	poolAccount := &Account{
+		ID:          9902,
+		Platform:    PlatformCursor,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+	}
+	require.False(t, poolAccount.IsCursorOpenAICompatibleAccount())
+
+	reason, err = cursorSupplySourceAvailabilityVetoReason(ctx, poolAccount)
+	require.NoError(t, err)
+	require.Equal(t, quotaKeySourceUnbound, reason, "号池 OAuth 账号未绑码仍须否决")
+
+	reason, err = cursorSupplySourceUsageVetoReason(ctx, poolAccount)
+	require.NoError(t, err)
+	require.Equal(t, quotaKeySourceUnbound, reason, "用量子谓词对号池 OAuth 账号同样不放宽")
+}

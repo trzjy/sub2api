@@ -73,12 +73,19 @@ func cursorSchedFreshUsageSnapshot() []byte {
 	))
 }
 
-// cursorSchedTestAccount 构造一个可参与 cursor 调度的账号（显式挂组 + 声明模型映射）。
+// cursorSchedTestAccount 构造一个可参与 cursor 调度的**ShareAI 号池 OAuth 账号**
+// （显式挂组 + 声明模型映射 + 绑定归属激活码）。
+//
+// Type 必须是 OAuth（≠ api_key）：本文件与 cursor_o57a_integration_test.go、
+// openai_account_scheduler_cursor_source_gate_test.go 里的用例覆盖的全是"号池账号的
+// 归属激活码来源门"（key 终态 / 快照可用性 / 依赖装配）。第三方 OpenAI 兼容反代账号
+// （Cursor + AccountTypeAPIKey）按 CARD-KC-10 已整体豁免该来源门，若夹具延用 api_key
+// 类型，这些用例会因来源门被跳过而失去断言对象（形同空跑）。
 func cursorSchedTestAccount(id int64, quotaKeyID *int64, model string) Account {
 	return Account{
 		ID:          id,
 		Platform:    PlatformCursor,
-		Type:        AccountTypeAPIKey,
+		Type:        AccountTypeOAuth,
 		Status:      StatusActive,
 		Schedulable: true,
 		Concurrency: 1,

@@ -35,14 +35,18 @@ const (
 	a04nSchedPlatform = PlatformAnthropic
 )
 
-// a04nSchedAccount 构造一个可参与 cursor 跨平台供给的账号：显式挂组 +
+// a04nSchedAccount 构造一个可参与 cursor 跨平台供给的**号池 OAuth 账号**：显式挂组 +
 // model_mapping 显式声明请求模型 + 绑定激活码（绑定后才会进入来源门）。
+//
+// Type 固定为 OAuth：本文件钉死的是"号池账号的来源门消费点"。第三方 OpenAI 兼容反代
+// 账号（cursor + api_key）按 CARD-KC-10 已整体豁免来源门，用 api_key 会让本文件四类
+// 否决场景全部失去断言对象。
 func a04nSchedAccount() Account {
 	keyID := a04nSchedKeyID
 	return Account{
 		ID:          8803,
 		Platform:    PlatformCursor,
-		Type:        AccountTypeAPIKey,
+		Type:        AccountTypeOAuth,
 		Status:      StatusActive,
 		Schedulable: true,
 		Concurrency: 1,

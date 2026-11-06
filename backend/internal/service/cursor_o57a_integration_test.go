@@ -165,7 +165,7 @@ func TestAvailableModelsCursorSupplySameSourceO57A(t *testing.T) {
 	cursorAcc := Account{
 		ID:          7002,
 		Platform:    PlatformCursor,
-		Type:        AccountTypeAPIKey,
+		Type:        AccountTypeOAuth,
 		Status:      StatusActive,
 		Schedulable: true,
 		QuotaKeyID:  &quotaKeyID,
@@ -189,10 +189,12 @@ func TestAvailableModelsCursorSupplySameSourceO57A(t *testing.T) {
 // muse 等非桥接平台分组即便绑定了 cursor 账号，公开列表也不得暴露 cursor 供给。
 func TestAvailableModelsCursorExcludedForNonBridgeablePlatformO57A(t *testing.T) {
 	groupID := int64(109)
+	// 号池 OAuth 账号（Type 非 api_key）：muse 不在桥接白名单内，无论来源门结论如何，
+	// 该账号都不得为 muse 分组贡献模型。
 	cursorAcc := Account{
 		ID:          7002,
 		Platform:    PlatformCursor,
-		Type:        AccountTypeAPIKey,
+		Type:        AccountTypeOAuth,
 		Status:      StatusActive,
 		Schedulable: true,
 		Credentials: map[string]any{"model_mapping": map[string]any{"gpt-6-sol": "upstream-6-sol"}},
@@ -212,7 +214,7 @@ func TestAvailableModelsMuseEmptyGroupReturnsNilO57A(t *testing.T) {
 	cursorAcc := Account{
 		ID:          7002,
 		Platform:    PlatformCursor,
-		Type:        AccountTypeAPIKey,
+		Type:        AccountTypeOAuth,
 		Status:      StatusActive,
 		Schedulable: true,
 		Credentials: map[string]any{"model_mapping": map[string]any{"gpt-6-sol": "upstream-6-sol"}},

@@ -570,7 +570,10 @@ var cursorSupplySourceUsageNow = time.Now
 // 非 cursor 平台恒返回 ("", nil)（无 Cursor 否决）。本函数不区分"窄目录入口"与"普通调度"：
 // 两种消费方看到完全相同的结论，调用方只能投影 bool/string，不得另加放行条件。
 func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (string, error) {
-	if account == nil || account.Platform != PlatformCursor {
+	// 第三方 Cursor APIKey 账号（OpenAI 兼容反代）不依赖 ShareAI 激活码号池快照，
+	// 其上游额度由账号自身凭据承载，故不受本来源门约束——否则这类账号会因无
+	// QuotaKeyID 被永久判为 quota_key_source_unbound 而无法参与调度。
+	if account == nil || account.Platform != PlatformCursor || account.IsCursorOpenAICompatibleAccount() {
 		return "", nil
 	}
 	// 规则①：无有效归属激活码——来源不可判定即不可用。
@@ -630,7 +633,10 @@ func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (s
 // 包装器（cursorSupplySourceAvailabilityVetoReasonString 等）只能投影，不能另加放行条件，
 // 也不再需要"窄目录入口单独加严、普通调度仍放行"的双轨——加严部分已并入本门本体。
 func cursorSupplySourceAvailabilityVetoReason(ctx context.Context, account *Account) (string, error) {
-	if account == nil || account.Platform != PlatformCursor {
+	// 第三方 Cursor APIKey 账号不依赖 ShareAI 激活码号池（无 QuotaKeyID、无 key 终态与
+	// 快照可判），来源门必须整体放行；否则它会在下面的"无有效归属激活码"规则处被永久
+	// 否决。注意放行仅限于 APIKey 类型：号池 OAuth 账号仍严格检查 QuotaKeyID 与快照可用性。
+	if account == nil || account.Platform != PlatformCursor || account.IsCursorOpenAICompatibleAccount() {
 		return "", nil
 	}
 	// 无有效归属激活码：来源不可判定即不可用（与 usage 子谓词同一结论，先于依赖检查，
