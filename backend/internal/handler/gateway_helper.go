@@ -1112,11 +1112,16 @@ func isCursorPlatformAccount(account *service.Account) bool {
 
 // cursorAccountBilledBySession 判定该账号的用量是否**只能**由会话终态的唯一结算驱动。
 //
-// §25.17.5 A06：Cursor 账号的账走会话终结时的已注册结算钩子，handler 在首次/最终 HTTP
-// 返回时一律不得再直接提交（否则与终结结算冲突、重复计费）；其它平台返回 false，保持
-// 原有直接提交路径不变。抽成独立判定便于单测直接断言"直接提交被跳过"的条件。
+// §25.17.5 A06：Cursor 会话式账号（ShareAI 号池 OAuth）的账走会话终结时的已注册结算钩子，
+// handler 在首次/最终 HTTP 返回时一律不得再直接提交（否则与终结结算冲突、重复计费）；
+// 其它平台返回 false，保持原有直接提交路径不变。抽成独立判定便于单测直接断言
+// "直接提交被跳过"的条件。
+//
+// CARD-KC-06：第三方 OpenAI 兼容反代（如 kn-cy.com，type=api_key）属于标准 HTTP 请求，
+// **没有**会话终态钩子可挂，必须由 handler 在 HTTP 返回时直接提交用量；若也判为 true，
+// 该账号的用量将永远无人提交（漏账）。因此按 type 豁免 APIKey 形态的 Cursor 账号。
 func cursorAccountBilledBySession(account *service.Account) bool {
-	return isCursorPlatformAccount(account)
+	return isCursorPlatformAccount(account) && account.Type != service.AccountTypeAPIKey
 }
 
 // cursorHandoverResources 收集本次真正获取到的 Cursor 可转交资源。

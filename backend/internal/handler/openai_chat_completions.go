@@ -375,7 +375,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		// helper settle 把终态真实 *ForwardResult 交回；缺完整 usage 不提交的判定在
 		// helper/执行服务侧完成，这里只构造原 RecordUsage 输入并调用原 mandatory
 		// usage worker（至多一次）。
-		if isCursorPlatformAccount(account) {
+		// CARD-KC-06：只对会话式 Connect 账号（ShareAI 号池 OAuth）注册会话唯一结算；
+		// 第三方 OpenAI 兼容反代（type=api_key）没有会话终态可挂，不得注入空钩子，
+		// 其用量由下方 submitChatUsage 在 HTTP 返回时直接提交。
+		if isCursorPlatformAccount(account) && account.Type != service.AccountTypeAPIKey {
 			snapshot := captureOpenAIChatCursorSettlement(
 				c, apiKey, account, subscription, channelMapping, reqModel, pricingAt, body,
 			)
@@ -415,7 +418,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			// 承载（上方注册的 CursorSettlementFunc 收到终态真实 usage 后至多提交一次），
 			// 原"Execute 返回后捕获 result 的晚绑定链"已删除；首/最终 HTTP 返回后不得
 			// 再为 Cursor 另排一次账。非 Cursor 路径保持原样（含 #5148 部分 result 入账）。
-			if res == nil || isCursorPlatformAccount(account) {
+			// CARD-KC-06：APIKey 类型的 Cursor 反代账号不参与会话结算，必须在此直接提交，
+			// 故与注册侧共用 cursorAccountBilledBySession 判定，避免漏账。
+			if res == nil || cursorAccountBilledBySession(account) {
 				return
 			}
 			stampOpenAIRequestedReasoningEffort(res, c)
