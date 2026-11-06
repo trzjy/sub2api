@@ -799,7 +799,12 @@ func TestQuotaKeyAuto_RefreshAutoPool_UpdatesCountsButPreservesCooldownState(t *
 	// 号池内的卡密在生产中必有对应 quota_keys 行；刷新成功后要回写快照，
 	// 故替身需预置同一 ID 的行，否则会被「快照落库失败」判为刷新失败。
 	repo := newAutoCardQuotaKeyRepo()
-	repo.keys[1] = &ent.QuotaKey{ID: 1, CodeLast4: "0001", Status: domain.QuotaKeyStatusActive}
+	repo.keys[1] = &ent.QuotaKey{
+		ID:        1,
+		CodeLast4: "0001",
+		Status:    domain.QuotaKeyStatusActive,
+		Notes:     strPtr(formatAutoPoolNotes("dev-code-1", "dev-md5-1")),
+	}
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
 	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/refresh_all", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

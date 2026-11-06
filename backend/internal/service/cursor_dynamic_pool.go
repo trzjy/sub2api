@@ -85,11 +85,11 @@ type DynamicCursorToken struct {
 	// Generation 记录取号时目标卡密的代际；锁外取号返回后重新加锁时，
 	// 必须与 p.cards 中该卡当前的 Generation 严格相等，否则该 Token 被原子丢弃
 	// （卡密在网络 I/O 期间被注销或重新注册）。
-	Generation  int64
-	CreatedAt   time.Time
-	FailCount   int
-	InFlight    int
-	CooldownTo  time.Time
+	Generation int64
+	CreatedAt  time.Time
+	FailCount  int
+	InFlight   int
+	CooldownTo time.Time
 }
 
 // ManagedCard 封装一张上游卡密及其独占虚拟设备
@@ -107,7 +107,7 @@ type ManagedCard struct {
 	Disabled      bool
 	// Generation 是卡密的代际计数器：每次注册/重新注册都会自增，用于取号时的
 	// 原子代际校验（锁外取号返回后比对，识别注销或重新注册）。
-	Generation    int64
+	Generation int64
 }
 
 // isUnlimitedCard 通用判断某卡密是否为「无限卡」（总额度达到虚拟无限阈值）。
@@ -406,8 +406,15 @@ func (p *CursorDynamicPool) UpdateCardPriority(id int64, priority int) {
 // 快照额度，逐张调用 RegisterCard 纳管。ent 的 SoftDeleteMixin 已在查询层自动排除
 // 软删行，此处仍显式再次校验 deleted_at 以防御绕开拦截器的写入路径。
 //
-// 并发防重入：RegisterCard 内部加锁；本方法本身不持有长锁，逐卡注册互不冲突，
-// 可与运行中的取号并发进行（取号侧已对并发注销做存在性复核）。
+// 并发防重入：逐卡注册均进入 WithAutoCardSync(qk.ID) 串行边界，与运行期单卡刷新
+// 的「DB 写入 → 池同步」串行区同形，避免启动回放与运行期刷新交错造成池成员分叉；
+// RegisterCard 自身也加锁，逐卡注册互不冲突。
+//
+// 生命周期约束（外审 R7 残余风险整改）：本方法**只在进程启动、HTTP 开始接流量之前
+// 调用一次**，装配点为 ProvideCursorExecutionService。它是启动期的批量快照回放，
+// 不在运行期与 DB 持续同步。若将来需要在运行期触发回放，必须按卡重读**当前**持久化
+// 状态（GetStatus）后再同步到运行池，绝不得沿用启动时抓取的这批批量快照 —— 否则
+// 会把启动瞬间的旧额度/旧资格误当作运行期权威状态，再次造成运行池与 DB 分叉。
 func (p *CursorDynamicPool) LoadFromRepository(ctx context.Context, repo QuotaKeyRepository) error {
 	keys, err := repo.List(ctx)
 	if err != nil {
@@ -451,7 +458,12 @@ func (p *CursorDynamicPool) LoadFromRepository(ctx context.Context, repo QuotaKe
 		overCount, sumCount := snapshotQuotaFromUsage(json.RawMessage(qk.UsageSnapshot))
 		// cardKey 仅作标识（网络取号只用 dev/md5）；库内无明文激活码，取脱敏末 4 位。
 		cardKey := qk.CodeLast4
-		p.RegisterCard(qk.ID, cardKey, devCode, devMD5, overCount, sumCount, qk.Priority)
+		// 进入按卡串行边界（与运行期单卡刷新的纳管同形），防止启动回放与运行期
+		// 刷新交错造成池成员分叉。
+		_ = WithAutoCardSync(qk.ID, func() error {
+			p.RegisterCard(qk.ID, cardKey, devCode, devMD5, overCount, sumCount, qk.Priority)
+			return nil
+		})
 	}
 	return nil
 }

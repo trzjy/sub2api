@@ -322,18 +322,27 @@ func (h *QuotaKeyHandler) RefreshAutoPool(c *gin.Context) {
 			failed++
 			continue
 		}
-		// 额度更新与快照回写放入同一激活码串行边界：避免与单卡刷新的「DB 写入 → 池同步」
-		// 交错，把已提交的权威状态覆盖成旧值。只更新额度，保留冷却/禁用状态。
+		// 额度更新与快照回写、运行池成员复核放入同一激活码串行边界：避免与单卡刷新的
+		// 「DB 写入 → 池同步」交错，把已提交的权威状态覆盖成旧值。快照写入成功后按
+		// 持久化状态复核运行池成员（闭合外审 R7 P1）：并发单卡刷新把某卡移出运行池后，
+		// 全量刷新若只清 DB 失败态却不再纳管，会造成「DB 可回放、运行池无此卡」的
+		// 运行期/重启期分叉；同样不得用整卡重建，需保留冷却/禁用/设备码。
 		var snapErr error
+		var reconcileErr error
 		_ = service.WithAutoCardSync(card.ID, func() error {
 			if snapErr = h.syncAutoCardUsageSnapshot(c.Request.Context(), card.ID, countResp.OverCount, countResp.SumCount); snapErr != nil {
 				return nil
 			}
-			pool.UpdateCardCounts(card.ID, countResp.OverCount, countResp.SumCount)
-			return nil
+			reconcileErr = h.reconcileAutoCardMembershipLocked(c.Request.Context(), pool, card.ID, card.DeviceCode, card.DeviceCodeMD5, countResp.OverCount, countResp.SumCount)
+			return reconcileErr
 		})
 		if snapErr != nil {
 			slog.Warn("cursor auto: refresh pool snapshot persist failed", "card_id", card.ID, "err", snapErr)
+			failed++
+			continue
+		}
+		if reconcileErr != nil {
+			slog.Warn("cursor auto: refresh pool reconcile membership failed", "card_id", card.ID, "err", reconcileErr)
 			failed++
 			continue
 		}
@@ -458,23 +467,40 @@ func (h *QuotaKeyHandler) applyAutoCardRefresh(ctx context.Context, id int64, de
 		if snapErr := h.syncAutoCardUsageSnapshot(ctx, id, countResp.OverCount, countResp.SumCount); snapErr != nil {
 			return fmt.Errorf("persist usage snapshot: %w", snapErr)
 		}
-		if pool == nil {
-			return nil
-		}
-		st, err := h.svc.GetStatus(ctx, id)
-		if err != nil {
-			// 无法确认权威状态：按「不服务也不分叉」处置，撤池并硬失败。
-			pool.UnregisterCard(id)
-			return fmt.Errorf("load quota key %d: %w", id, err)
-		}
-		if !autoCardPoolEligible(st) {
-			pool.UnregisterCard(id)
-			return nil
-		}
-		// cardKey 仅作标识（网络取号只用 dev/md5）；原子纳管避免与并发路径互相清理 Token。
-		pool.EnsureCardRegistered(id, st.CodeValueMasked, devCode, devMD5, countResp.OverCount, countResp.SumCount, st.Priority)
-		return nil
+		// 写快照后按持久化状态复核运行池成员（与启动回放同一判定）；
+		// reconcileAutoCardMembershipLocked 内部已处理 pool==nil 与读库失败关闭。
+		return h.reconcileAutoCardMembershipLocked(ctx, pool, id, devCode, devMD5, countResp.OverCount, countResp.SumCount)
 	})
+}
+
+// reconcileAutoCardMembershipLocked 在调用方已持有 service.WithAutoCardSync(id) 串行
+// 边界的前提下，按**刚提交的持久化状态**复核该卡是否应留在运行池：
+//   - pool == nil：无运行池可取，直接返回 nil（无操作）；
+//   - 读库失败：按「宁可不服务也不与重启回放分叉」处置，撤池并硬失败返回错误（失败关闭）；
+//   - 不合格（复用 autoCardPoolEligible 判定）：撤池；
+//   - 合格：原子纳管（EnsureCardRegistered 在池内已存在时只刷新额度，保留 Token、
+//     会话粘性、冷却与禁用态；不存在才纳管）。
+//
+// 调用方约定：必须已持有 service.WithAutoCardSync(id) —— 本函数不重复加该边界。
+// 该边界保证「DB 快照/失败态写入」与「运行池成员变更」在同一串行区内完成，
+// 避免并发单卡刷新把持久化状态覆盖成旧值，造成运行期与重启期分叉。
+func (h *QuotaKeyHandler) reconcileAutoCardMembershipLocked(ctx context.Context, pool *service.CursorDynamicPool, id int64, devCode, devMD5 string, overCount, sumCount int) error {
+	if pool == nil {
+		return nil
+	}
+	st, err := h.svc.GetStatus(ctx, id)
+	if err != nil {
+		// 无法确认权威状态：按「不服务也不分叉」处置，撤池并硬失败。
+		pool.UnregisterCard(id)
+		return fmt.Errorf("load quota key %d: %w", id, err)
+	}
+	if !autoCardPoolEligible(st) {
+		pool.UnregisterCard(id)
+		return nil
+	}
+	// cardKey 仅作标识（网络取号只用 dev/md5）；原子纳管避免与并发路径互相清理 Token。
+	pool.EnsureCardRegistered(id, st.CodeValueMasked, devCode, devMD5, overCount, sumCount, st.Priority)
+	return nil
 }
 
 // autoCardPoolEligible 与 CursorDynamicPool.LoadFromRepository 的入池判定逐条一致：
