@@ -415,6 +415,17 @@ func isCursorAccount(account *Account) bool {
 	return account != nil && account.Platform == PlatformCursor
 }
 
+// isCursorOpenAICompatibleAccount 判定是否为 OpenAI 兼容的第三方 Cursor 反代账号
+// （如 kn-cy.com 备用渠道）。这类账号以 APIKey 形态接入、出站目标为 OpenAI 兼容
+// 的 /v1/chat/completions 反代端点，因此必须绕过 Cursor 原生协议执行部件
+// （forwardCursorChatCompletionsEntry），自然落入下方通用 OpenAI 转发管线。
+//
+// 注意：本谓词仅对「Cursor 平台 + APIKey 类型」成立；既有的 ShareAI 号池 OAuth
+// 账号（type=oauth）不受影响，仍按原逻辑走 Cursor 原生协议分派。
+func isCursorOpenAICompatibleAccount(account *Account) bool {
+	return account != nil && account.Platform == PlatformCursor && account.Type == AccountTypeAPIKey
+}
+
 // ---------------------------------------------------------------------------
 // 结果与观测
 // ---------------------------------------------------------------------------

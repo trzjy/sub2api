@@ -133,11 +133,14 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		return s.forwardCodeBuddy(ctx, c, account, body, view.Model, view.Stream, time.Now())
 	}
 
-	// Cursor（shareai 号池中转）：必须在通用 OpenAI 路径之前分流，理由同
-	// OpenAIGatewayService.Forward 的 cursor 分支（出站为 Cursor 原生协议端点）。
-	// 分发口径与 Forward 保持一致的单一列表。P1-A2 起统一走契约 0.1 包级桥接入口
-	// 唯一执行部件（出站 = 账号 Bearer + 同源 device/code 的 x-jg-auth）。
-	if isCursorAccount(account) {
+	// Cursor 分派：
+	//   - shareai 号池 OAuth 账号（type=oauth）：出站为 Cursor 原生协议端点，
+	//     走唯一执行部件（出站 = 账号 Bearer + 同源 device/code 的 x-jg-auth）。
+	//   - OpenAI 兼容反代渠道（如 kn-cy.com 备用渠道，type=api_key）：出站目标为
+	//     OpenAI 兼容的 /v1/chat/completions 反代端点，必须绕过 Cursor 原生协议
+	//     执行部件，自然落入下方通用 OpenAI 转发管线。
+	// 分发口径与 Forward 保持一致的单一列表；两者均为 PlatformCursor，靠账号类型区分。
+	if isCursorAccount(account) && !isCursorOpenAICompatibleAccount(account) {
 		return s.forwardCursorChatCompletionsEntry(ctx, c, account, body)
 	}
 

@@ -1876,3 +1876,93 @@ func TestGPT61SolOnlyChatFallbackRejectsToolsAndDisabledReasoning(t *testing.T) 
 		}
 	}
 }
+
+// TestCursorOpenAICompatible_ChatCompletionsForward 验证 CARD-KC-04 的分流语义：
+//  1. 谓词 isCursorOpenAICompatibleAccount 仅在「Cursor 平台 + APIKey 类型」成立；
+//  2. Cursor APIKey 账号（如 kn-cy.com 备用渠道）在 ForwardAsChatCompletions 中绕过
+//     forwardCursorChatCompletionsEntry（Cursor 原生协议执行部件），自然落入下方通用
+//     OpenAI 转发管线（raw chat completions）；
+//  3. 既有的 ShareAI 号池 OAuth 账号（type=oauth）不受影响，仍命中 Cursor 原生协议分派。
+func TestCursorOpenAICompatible_ChatCompletionsForward(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("predicate_isCursorOpenAICompatibleAccount", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			account *Account
+			want    bool
+		}{
+			{"nil account", nil, false},
+			{"cursor oauth (shareai pool)", &Account{Platform: PlatformCursor, Type: AccountTypeOAuth}, false},
+			{"cursor apikey (kn-cy compatible)", &Account{Platform: PlatformCursor, Type: AccountTypeAPIKey}, true},
+			{"openai apikey (not cursor)", &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, false},
+			{"other apikey", &Account{Platform: PlatformOther, Type: AccountTypeAPIKey}, false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				require.Equal(t, tc.want, isCursorOpenAICompatibleAccount(tc.account))
+			})
+		}
+	})
+
+	t.Run("cursor_apikey_bypasses_cursor_native_branch", func(t *testing.T) {
+		// Cursor APIKey 反代渠道必须不走 forwardCursorChatCompletionsEntry
+		// （Cursor 原生协议执行部件），而是落入下方通用 OpenAI 转发管线。
+		//
+		// 本测试用「错误差异」确定性地证明分流：
+		//   - 若分派错误地进入 Cursor 原生协议执行部件，对一个无 quota key / Bearer
+		//     的 Cursor 账号会返回 ErrCursorQuotaKeyUnresolved（失败关闭）；
+		//   - 正确落入通用 OpenAI 路径后，会在 GetAccessToken 阶段因 PlatformCursor
+		//     的 api_key 读取缺口（account.go 的 GetOpenAIProtocolAPIKey 仅对
+		//     IsOpenAI() 平台生效，超出本卡范围）返回 "api_key not found"。
+		// 两者是互斥的错误，故命中 api_key 错误即证明未走 Cursor 原生分支。
+		// 注意：本卡只改分派（cursor_gateway_forward.go / openai_gateway_chat_completions.go），
+		// api_key 读取缺口作为未完成项在完工报告中单列，不在此卡改动。
+		body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_kncy"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"id":"chatcmpl_kncy","object":"chat.completion","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				)),
+			},
+		}}
+		svc := &OpenAIGatewayService{
+			cfg:          structuredInputRetryTestConfig(),
+			httpUpstream: upstream,
+		}
+		account := &Account{
+			ID:          202,
+			Name:        "cursor-kncy-apikey",
+			Platform:    PlatformCursor,
+			Type:        AccountTypeAPIKey,
+			Concurrency: 1,
+			Credentials: map[string]any{"api_key": "sk-kncy", "base_url": "http://upstream.example"},
+			Extra:       map[string]any{openai_compat.ExtraKeyResponsesSupported: false},
+		}
+
+		res, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
+		// CARD-KC-03 + CARD-KC-04 联通后，APIKey 类型的 Cursor 账号直通通用 OpenAI 转发管线，
+		// 正确向上游发送带 Bearer sk-kncy 的 HTTP 请求。
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		require.Len(t, upstream.requests, 1)
+		require.Equal(t, "Bearer sk-kncy", upstream.requests[0].Header.Get("Authorization"))
+	})
+
+	t.Run("cursor_oauth_still_uses_cursor_native_branch", func(t *testing.T) {
+		// 既有 ShareAI 号池 OAuth 账号不得受影响：仍应命中 Cursor 原生协议分派谓词。
+		oauth := &Account{Platform: PlatformCursor, Type: AccountTypeOAuth}
+		require.True(t, isCursorAccount(oauth) && !isCursorOpenAICompatibleAccount(oauth),
+			"Cursor OAuth account must still route into forwardCursorChatCompletionsEntry")
+		apikey := &Account{Platform: PlatformCursor, Type: AccountTypeAPIKey}
+		require.False(t, isCursorAccount(apikey) && !isCursorOpenAICompatibleAccount(apikey),
+			"Cursor APIKey account must bypass forwardCursorChatCompletionsEntry")
+	})
+}
