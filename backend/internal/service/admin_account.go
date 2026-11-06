@@ -803,7 +803,7 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	}
 	// C2（v3.3 §4.2 / v3.4 §2.1）：cursor 平台账号必须归属激活码（应用层校验，DB CHECK
 	// 兜底）；非 cursor 平台必须保持 NULL——携带归属即拒绝（D-CURSOR-035，终审 r5 F1）。
-	if err := validateAccountQuotaKeyBinding(input.Platform, input.QuotaKeyID); err != nil {
+	if err := validateAccountQuotaKeyBinding(input.Platform, input.Type, input.QuotaKeyID); err != nil {
 		return nil, err
 	}
 	// #2b / D-CURSOR-034：走集中入口的建号由入口在持锁事务内完成存在性判定，
@@ -954,7 +954,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	// 反向同理：非 cursor 账号沿用 existing 时若已带归属（历史脏数据）也判非法，
 	// 需显式 QuotaKeyIDSet=true + nil 清空后才可编辑——不静默保留越平台绑定。
 	effectiveQuotaKeyID, quotaKeyProvided := resolveUpdateQuotaKeyID(account.QuotaKeyID, input)
-	if err := validateAccountQuotaKeyBinding(account.Platform, effectiveQuotaKeyID); err != nil {
+	if err := validateAccountQuotaKeyBinding(account.Platform, account.Type, effectiveQuotaKeyID); err != nil {
 		return nil, err
 	}
 	// 提供值 → 校验该激活码存在（沿用既有口径：不存在就是坏引用，不当成清空处理）。

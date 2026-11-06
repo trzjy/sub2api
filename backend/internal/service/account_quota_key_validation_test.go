@@ -47,23 +47,30 @@ func TestNonCursorAccountCreateRejectsQuotaKey(t *testing.T) {
 //   - 非 cursor 平台 + quota_key_id 为 nil → 通过（保持 NULL）
 //   - 非 cursor 平台 + quota_key_id 非 nil → 报错（D-CURSOR-035，不得携带归属）
 //   - cursor 平台 + quota_key_id 非 nil → 通过
+//
+// CARD-KC-02：cursor + apikey + quota_key_id 为 nil → 放行（网关 APIKey 直连上游，
+// 不依赖 ShareAI 激活码）；cursor + oauth + nil 仍报错。
 func TestQuotaKeyBindingValidation(t *testing.T) {
 	// cursor 平台缺归属激活码 → 必须报错
-	err := validateAccountQuotaKeyBinding(domain.PlatformCursor, nil)
+	err := validateAccountQuotaKeyBinding(domain.PlatformCursor, AccountTypeOAuth, nil)
 	require.Error(t, err, "cursor platform account without quota_key_id must be rejected")
 	require.Equal(t, "ACCOUNT_QUOTA_KEY_REQUIRED", infraerrors.Reason(err))
 
+	// cursor + apikey + nil → 放行（CARD-KC-02：第三方网关 APIKey 认证不依赖激活码）
+	err = validateAccountQuotaKeyBinding(domain.PlatformCursor, AccountTypeAPIKey, nil)
+	require.NoError(t, err, "cursor apikey account without quota_key_id must pass (gateway api-key upstream)")
+
 	// 非 cursor 平台缺归属激活码 → 允许（NULL）
-	err = validateAccountQuotaKeyBinding(PlatformOpenAI, nil)
+	err = validateAccountQuotaKeyBinding(PlatformOpenAI, AccountTypeAPIKey, nil)
 	require.NoError(t, err, "non-cursor platform account may have NULL quota_key_id")
 
 	// cursor 平台已归属激活码 → 通过
 	qkID := int64(42)
-	err = validateAccountQuotaKeyBinding(domain.PlatformCursor, &qkID)
+	err = validateAccountQuotaKeyBinding(domain.PlatformCursor, AccountTypeOAuth, &qkID)
 	require.NoError(t, err, "cursor platform account bound to a quota key must pass")
 
 	// 非 cursor 平台携带归属激活码 → 必须报错（D-CURSOR-035 / 终审 r5 F1）
-	err = validateAccountQuotaKeyBinding(PlatformOpenAI, &qkID)
+	err = validateAccountQuotaKeyBinding(PlatformOpenAI, AccountTypeAPIKey, &qkID)
 	require.Error(t, err, "non-cursor platform account must not carry a quota_key_id")
 	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
 	require.Equal(t, "ACCOUNT_QUOTA_KEY_NOT_ALLOWED_FOR_PLATFORM", infraerrors.Reason(err))
@@ -73,26 +80,42 @@ func TestQuotaKeyBindingValidation(t *testing.T) {
 // cursor 归属激活码校验（应用层前置，DB CHECK 兜底）：cursor 平台建号未传 quota_key_id
 // 必须被拒绝，且错误信息指向 quota_key_id。
 //
+// CARD-KC-02：OAuth 账号无 quota_key_id 被拒绝；APIKey 账号无 quota_key_id 放行
+// （第三方 Cursor 网关上游为 API Key 认证，不依赖 ShareAI 激活码）。
+//
 // 使用同包内复用的假 repo（upstreamBillingProbeAccountRepo）：本校验位于
 // CreateAccount 链路最前段（rejectWebCredential 之后、凭证规范化之前），
 // cursor + nil 会立即返回，不依赖任一 repo 方法。
 func TestCursorAccountCreateRejectsMissingQuotaKey(t *testing.T) {
 	repo := &upstreamBillingProbeAccountRepo{}
 
+	// cursor + oauth 无 quota_key_id → 必须拒绝
 	_, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
 		Name:                 "cursor-no-quota-key",
+		Platform:             domain.PlatformCursor,
+		Type:                 AccountTypeOAuth,
+		Credentials:          map[string]any{"access_token": "tok-test"},
+		SkipDefaultGroupBind: true,
+	})
+	require.Error(t, err, "cursor oauth account creation without quota_key_id must be rejected")
+	require.Contains(t, err.Error(), "quota_key_id",
+		"error must indicate the missing quota_key_id binding")
+
+	// cursor + apikey 无 quota_key_id → 放行（CARD-KC-02：网关 APIKey 直连上游不依赖激活码）
+	created, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
+		Name:                 "cursor-apikey-no-quota-key",
 		Platform:             domain.PlatformCursor,
 		Type:                 AccountTypeAPIKey,
 		Credentials:          map[string]any{"api_key": "sk-test"},
 		SkipDefaultGroupBind: true,
 	})
-	require.Error(t, err, "cursor account creation without quota_key_id must be rejected")
-	require.Contains(t, err.Error(), "quota_key_id",
-		"error must indicate the missing quota_key_id binding")
+	require.NoError(t, err, "cursor apikey account creation without quota_key_id must pass")
+	require.NotNil(t, created)
+	require.Nil(t, created.QuotaKeyID)
 
 	// 传入 quota_key_id 后应通过本层校验（后续由 DB 层 FK/CHECK 兜底）。
 	qkID := int64(7)
-	created, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
+	created, err = (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
 		Name:                 "cursor-with-quota-key",
 		Platform:             domain.PlatformCursor,
 		Type:                 AccountTypeAPIKey,
