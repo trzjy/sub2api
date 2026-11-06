@@ -116,6 +116,15 @@ export default {
       vendorAttributionFixed: '修正 {count} 个厂商归属（配置中的厂商与实供清单不符，已自动对齐）',
       staleCleanedAndVendorsFixed: '已清理 {ghost} 个不在实供清单内的失效模型勾选，并修正 {vendor} 个厂商归属'
     },
+    upstreamStore: {
+      button: '上游续费',
+      kncy: 'kn-cy.com 采购续费',
+      shareai: 'ShareAI 采购续费',
+      pending: '待配置',
+      openExternal: '在新标签页打开',
+      shareaiUnconfiguredTitle: '尚未配置续费链接',
+      shareaiUnconfigured: '尚未配置 ShareAI 续费链接'
+    },
     probe: {
       button: '用量查询',
       probing: '查询中…',

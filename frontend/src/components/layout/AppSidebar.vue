@@ -63,17 +63,41 @@
               </button>
               <!-- Children -->
               <div v-if="!sidebarCollapsed && isGroupExpanded(item)" class="mb-1 ml-4 border-l border-gray-200 pl-2 dark:border-dark-600">
-                <router-link
-                  v-for="child in item.children"
-                  :key="child.path"
-                  :to="child.path"
-                  class="sidebar-link mb-0.5 py-1.5 text-sm"
-                  :class="{ 'sidebar-link-active': route.path === child.path }"
-                  @click="handleMenuItemClick(child.path)"
-                >
-                  <component :is="child.icon" class="h-4 w-4 flex-shrink-0" />
-                  <span>{{ child.label }}</span>
-                </router-link>
+                <template v-for="child in item.children" :key="child.path">
+                  <!-- 外链子项（如上游采购商铺）：新标签页打开，不参与路由 -->
+                  <a
+                    v-if="child.href"
+                    :href="child.href"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="sidebar-link mb-0.5 py-1.5 text-sm"
+                    :title="child.label"
+                  >
+                    <component :is="child.icon" class="h-4 w-4 flex-shrink-0" />
+                    <span class="min-w-0 flex-1 truncate">{{ child.label }}</span>
+                    <Icon name="externalLink" size="xs" class="flex-shrink-0 text-gray-400" />
+                  </a>
+                  <!-- 占位子项：链接尚未配置时不静默失败，点击给出提示 -->
+                  <button
+                    v-else-if="child.placeholder"
+                    type="button"
+                    class="sidebar-link mb-0.5 w-full py-1.5 text-sm"
+                    @click="handlePlaceholderNav(child)"
+                  >
+                    <component :is="child.icon" class="h-4 w-4 flex-shrink-0" />
+                    <span class="min-w-0 flex-1 truncate text-left">{{ child.label }}</span>
+                  </button>
+                  <router-link
+                    v-else
+                    :to="child.path"
+                    class="sidebar-link mb-0.5 py-1.5 text-sm"
+                    :class="{ 'sidebar-link-active': route.path === child.path }"
+                    @click="handleMenuItemClick(child.path)"
+                  >
+                    <component :is="child.icon" class="h-4 w-4 flex-shrink-0" />
+                    <span>{{ child.label }}</span>
+                  </router-link>
+                </template>
               </div>
             </template>
             <!-- Normal item (no children) -->
@@ -212,6 +236,22 @@ interface NavItem {
    * does NOT navigate to its `path`. The `path` is purely a stable key.
    */
   expandOnly?: boolean
+  /**
+   * When true, the parent group starts expanded instead of relying on the
+   * active-route heuristic. Used by shortcut groups whose children are links
+   * to external destinations (so no child route can ever be active).
+   */
+  defaultExpanded?: boolean
+  /**
+   * External link target. When set, the entry renders as a plain <a> that
+   * opens in a new tab instead of a router-link.
+   */
+  href?: string
+  /**
+   * Placeholder entry whose destination is not configured yet. Renders as a
+   * button that reports the pending state instead of navigating.
+   */
+  placeholder?: boolean
   /**
    * 可选的功能开关 getter。返回 false 时菜单项被隐藏；返回 undefined/true 时显示。
    * 宽容策略（undefined → 显示）避免 public settings 未加载完成时菜单闪烁消失。
@@ -713,6 +753,10 @@ const flagAdminPayment = () => adminSettingsStore.paymentEnabled
 const flagXianyuDelivery = () => adminSettingsStore.xianyuDeliveryEnabled
 const flagBatchImageAccess = () => canUseBatchImage.value
 
+// 上游采购商铺地址（CARD-KC-09）。kn-cy.com 已有公开商铺；
+// ShareAI 暂无公开商铺，菜单项保留占位。
+const KNCY_STORE_URL = 'https://shop.kn-cy.com/products'
+
 // buildSelfNavItems 构造用户自己的导航项（用户端主菜单和管理员的"我的账户"子菜单共享这组声明）。
 // withDashboard=true 时包含仪表盘（用户端），false 时不含（管理员的个人区已经有独立仪表盘入口）。
 //
@@ -798,6 +842,30 @@ const adminNavItems = computed((): NavItem[] => {
     // Cursor 站点渠道激活码管理入口（/admin/quota-keys）。
     // 复用 KeyIcon 与管理菜单样式；激活码为高级运营功能，简单模式下隐藏。
     { path: '/admin/quota-keys', label: t('nav.quotaKeys'), icon: KeyIcon, hideInSimpleMode: true },
+    // 上游续费/采购快捷入口（CARD-KC-09）：kn-cy.com 直达公开商铺，
+    // ShareAI 暂无公开商铺，作为占位子项保留，点击给出提示。
+    {
+      path: '/admin/quota-keys-upstream',
+      label: t('nav.upstreamStore'),
+      icon: CreditCardIcon,
+      hideInSimpleMode: true,
+      expandOnly: true,
+      defaultExpanded: true,
+      children: [
+        {
+          path: 'kncy-store',
+          label: t('nav.kncyStore'),
+          icon: CreditCardIcon,
+          href: KNCY_STORE_URL
+        },
+        {
+          path: 'shareai-store',
+          label: t('nav.shareaiStore'),
+          icon: CreditCardIcon,
+          placeholder: true
+        }
+      ]
+    },
     { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon },
     { path: '/admin/promo-intel', label: t('nav.promoIntel'), icon: GiftIcon, hideInSimpleMode: true },
@@ -920,6 +988,18 @@ function isActive(path: string): boolean {
   return route.path === path || route.path.startsWith(path + '/')
 }
 
+// 占位菜单项（链接尚未配置）：给出明确提示，不静默失败也不跳空路由。
+function handlePlaceholderNav(item: NavItem) {
+  if (mobileOpen.value) {
+    setTimeout(() => {
+      appStore.setMobileOpen(false)
+    }, 150)
+  }
+  appStore.showInfo(
+    `${item.label}：${t('admin.quotaKeys.upstreamStore.shareaiUnconfigured')}`
+  )
+}
+
 function isGroupActive(item: NavItem): boolean {
   if (!item.children) return false
   return item.children.some(child => route.path === child.path)
@@ -928,6 +1008,7 @@ function isGroupActive(item: NavItem): boolean {
 function isGroupExpanded(item: NavItem): boolean {
   const override = groupExpandOverrides.value.get(item.path)
   if (override !== undefined) return override
+  if (item.defaultExpanded) return true
   return isGroupActive(item)
 }
 

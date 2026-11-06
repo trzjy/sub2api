@@ -229,6 +229,10 @@ export default {
     modelPricing: 'Model Pricing',
     pricing: 'Pricing Console',
     quotaKeys: 'Quota Keys',
+    // Upstream renewal/purchase entries (CARD-KC-09): kn-cy.com has a public store, ShareAI is a placeholder.
+    upstreamStore: 'Upstream Renewal',
+    kncyStore: 'kn-cy.com Store',
+    shareaiStore: 'ShareAI Store',
   },
 
   // Auth

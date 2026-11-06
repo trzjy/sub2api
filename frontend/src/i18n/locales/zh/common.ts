@@ -229,6 +229,10 @@ export default {
     modelPricing: '模型价格',
     pricing: '价格管理',
     quotaKeys: '激活码管理',
+    // 上游续费/采购入口（CARD-KC-09）：kn-cy.com 有公开商铺，ShareAI 暂为占位。
+    upstreamStore: '上游续费',
+    kncyStore: 'kn-cy.com 采购续费',
+    shareaiStore: 'ShareAI 采购续费',
   },
 
   // Auth

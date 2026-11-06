@@ -116,6 +116,15 @@ export default {
       vendorAttributionFixed: 'Fixed {count} vendor attribution(s) (config vendor mismatched real-supply list, auto-aligned)',
       staleCleanedAndVendorsFixed: 'Cleaned {ghost} stale model selection(s) not in the real-supply list and fixed {vendor} vendor attribution(s)'
     },
+    upstreamStore: {
+      button: 'Upstream Renewal',
+      kncy: 'kn-cy.com Store',
+      shareai: 'ShareAI Store',
+      pending: 'Not configured',
+      openExternal: 'Opens in a new tab',
+      shareaiUnconfiguredTitle: 'Renewal link not configured',
+      shareaiUnconfigured: 'ShareAI renewal link is not configured yet'
+    },
     probe: {
       button: 'Probe Quota',
       probing: 'Probing…',

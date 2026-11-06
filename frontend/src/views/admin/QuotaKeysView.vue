@@ -32,6 +32,56 @@
             </button>
           </div>
           <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
+            <!-- 上游续费/采购入口（CARD-KC-09）：kn-cy.com 有公开商铺，直开外链；
+                 ShareAI 暂无公开商铺，保留占位项并以提示模态框说明。 -->
+            <div ref="upstreamStoreRef" class="relative">
+              <button
+                class="btn btn-secondary"
+                :aria-expanded="upstreamStoreOpen"
+                aria-haspopup="menu"
+                data-testid="upstream-store-toggle"
+                @click="upstreamStoreOpen = !upstreamStoreOpen"
+              >
+                <Icon name="creditCard" size="md" class="mr-1" />
+                {{ t('admin.quotaKeys.upstreamStore.button') }}
+                <Icon
+                  name="chevronDown"
+                  size="sm"
+                  class="ml-1 transition-transform duration-200"
+                  :class="upstreamStoreOpen ? 'rotate-180' : ''"
+                />
+              </button>
+              <div
+                v-if="upstreamStoreOpen"
+                class="absolute right-0 z-40 mt-1 w-56 overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-lg dark:border-dark-700 dark:bg-dark-800"
+                role="menu"
+              >
+                <a
+                  :href="KNCY_STORE_URL"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="flex items-center justify-between gap-2 px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-dark-200 dark:hover:bg-dark-700"
+                  role="menuitem"
+                  data-testid="upstream-store-kncy"
+                  :title="t('admin.quotaKeys.upstreamStore.openExternal')"
+                  @click="upstreamStoreOpen = false"
+                >
+                  <span class="truncate">{{ t('admin.quotaKeys.upstreamStore.kncy') }}</span>
+                  <Icon name="externalLink" size="sm" class="shrink-0 text-gray-400" />
+                </a>
+                <button
+                  class="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-dark-200 dark:hover:bg-dark-700"
+                  role="menuitem"
+                  data-testid="upstream-store-shareai"
+                  @click="openShareaiPlaceholder"
+                >
+                  <span class="truncate">{{ t('admin.quotaKeys.upstreamStore.shareai') }}</span>
+                  <span class="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-dark-700 dark:text-dark-400">
+                    {{ t('admin.quotaKeys.upstreamStore.pending') }}
+                  </span>
+                </button>
+              </div>
+            </div>
             <template v-if="activeChannelTab === 'auto'">
               <button class="btn btn-secondary" :disabled="loading" @click="refreshAutoPool">
                 <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
@@ -433,6 +483,25 @@
       @cancel="showSweepDialog = false"
     />
 
+    <!-- 上游续费占位提示：ShareAI 暂无公开商铺（CARD-KC-09） -->
+    <BaseDialog
+      :show="showShareaiPlaceholder"
+      :title="t('admin.quotaKeys.upstreamStore.shareaiUnconfiguredTitle')"
+      width="normal"
+      @close="showShareaiPlaceholder = false"
+    >
+      <p class="text-sm text-gray-600 dark:text-gray-300">
+        {{ t('admin.quotaKeys.upstreamStore.shareaiUnconfigured') }}
+      </p>
+      <template #footer>
+        <div class="flex items-center justify-end">
+          <button class="btn btn-secondary" @click="showShareaiPlaceholder = false">
+            {{ t('common.close') }}
+          </button>
+        </div>
+      </template>
+    </BaseDialog>
+
     <!-- 入库可配置（D2-a） -->
     <AutoEntryConfigModal :show="showConfigModal" @close="showConfigModal = false" />
 
@@ -557,7 +626,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
@@ -590,6 +659,27 @@ const appStore = useAppStore()
 
 // 双轨分流控制：'standard' (非Auto) vs 'auto' (动态号池)
 const activeChannelTab = ref<'standard' | 'auto'>('standard')
+
+// --- 上游续费/采购入口（CARD-KC-09）-------------------------------------
+// kn-cy.com 已有公开商铺，直达产品列表页；ShareAI 暂无公开商铺，
+// 菜单项保留为占位（配置项留待后端/设置页落地），点击给出友好提示而非静默失败。
+const KNCY_STORE_URL = 'https://shop.kn-cy.com/products'
+const upstreamStoreOpen = ref(false)
+const upstreamStoreRef = ref<HTMLElement | null>(null)
+const showShareaiPlaceholder = ref(false)
+
+function openShareaiPlaceholder() {
+  upstreamStoreOpen.value = false
+  // 配置项接入后此处可直接跳转；当前无链接，必须明确告知用户。
+  showShareaiPlaceholder.value = true
+}
+
+function handleUpstreamStoreClickOutside(event: MouseEvent) {
+  const target = event.target as Node
+  if (upstreamStoreRef.value && !upstreamStoreRef.value.contains(target)) {
+    upstreamStoreOpen.value = false
+  }
+}
 const showAutoBatchModal = ref(false)
 const autoBatchText = ref('')
 const autoBatchExpiresAt = ref('')
@@ -988,5 +1078,10 @@ async function submitAutoBatch() {
 
 onMounted(() => {
   void load()
+  document.addEventListener('click', handleUpstreamStoreClickOutside)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleUpstreamStoreClickOutside)
 })
 </script>
