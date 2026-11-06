@@ -1614,6 +1614,16 @@ func (a *Account) IsOpenAIApiKey() bool {
 	return a.IsOpenAI() && a.Type == AccountTypeAPIKey
 }
 
+// IsCursorConnectSessionAccount 判定是否为经由 CursorExecutionService 会话式出站的号池账号（ShareAI 号池 OAuth 账号）。
+func (a *Account) IsCursorConnectSessionAccount() bool {
+	return a != nil && a.Platform == PlatformCursor && a.Type != AccountTypeAPIKey
+}
+
+// IsCursorOpenAICompatibleAccount 判定是否为 OpenAI 兼容的第三方 Cursor 反代账号（如 kn-cy.com 备用渠道）。
+func (a *Account) IsCursorOpenAICompatibleAccount() bool {
+	return a != nil && a.Platform == PlatformCursor && a.Type == AccountTypeAPIKey
+}
+
 // GetOpenAIBaseURL 解析 OpenAI 协议族账号的上游 base_url。
 // 适用 openai、国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）与 muse
 // （OpenCode Go / Meta Muse Spark Contributor 上游）。muse 不走
@@ -2116,7 +2126,7 @@ func (a *Account) GetOpenAIProtocolAPIKey() string {
 	if a == nil {
 		return ""
 	}
-	if a.IsMultiProtocolAPIKey() || a.Platform == PlatformOther || a.Platform == PlatformMuse {
+	if a.IsMultiProtocolAPIKey() || a.Platform == PlatformOther || a.Platform == PlatformMuse || (a.Platform == PlatformCursor && a.Type == AccountTypeAPIKey) {
 		if a.Type != AccountTypeAPIKey {
 			return ""
 		}

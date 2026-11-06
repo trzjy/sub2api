@@ -420,3 +420,63 @@ func (rt *cursorRejectAllTransport) RoundTrip(*http.Request) (*http.Response, er
 	rt.t.Error("cursor forwarder must not issue an upstream request on the fail-closed paths")
 	return nil, errors.New("blocked by cursorRejectAllTransport")
 }
+
+// ---------------------------------------------------------------------------
+// 5. Cursor 渠道账号形态断言 与 OpenAI 协议密钥放行
+// ---------------------------------------------------------------------------
+
+// TestCursorPlatform_AccountTypes 钉死 Cursor 渠道两种账号形态断言，以及
+// GetOpenAIProtocolAPIKey 对 APIKey 类型 Cursor 账号的放行。
+//
+// 背景（CARD-KC-03）：Cursor 平台下区分两种账号形态——
+//  1. ShareAI 号池 OAuth 账号（走 Connect 协议，会话式执行器，type≠api_key）；
+//  2. 第三方 OpenAI 兼容网关账号（如 kn-cy.com，type=api_key，标准 HTTP REST 转发）。
+//
+// 断言：
+//  1. IsCursorConnectSessionAccount：platform=cursor && type≠api_key → true（号池会话账号）。
+//  2. IsCursorOpenAICompatibleAccount：platform=cursor && type=api_key → true（OpenAI 兼容反代）。
+//  3. GetOpenAIProtocolAPIKey：platform=cursor && type=api_key 放行读 credentials["api_key"]；
+//     cursor 非 api_key 账号走回落分支（cursor 非 openai，IsOpenAIApiKey 为 false → ""）。
+func TestCursorPlatform_AccountTypes(t *testing.T) {
+	// 1. ShareAI 号池会话账号：platform=cursor，type 为 OAuth（非 api_key）。
+	pool := &Account{Platform: PlatformCursor, Type: AccountTypeOAuth}
+	require.True(t, pool.IsCursorConnectSessionAccount(),
+		"cursor + 非 api_key 应判定为会话式号池账号（ShareAI 号池 OAuth）")
+	require.False(t, pool.IsCursorOpenAICompatibleAccount(),
+		"会话号池账号不应被误判为 OpenAI 兼容反代")
+
+	// 2. 第三方 OpenAI 兼容反代（kn-cy.com 等）：platform=cursor，type=api_key。
+	compat := &Account{
+		Platform:    PlatformCursor,
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "sk-kn-cy-secret"},
+	}
+	require.False(t, compat.IsCursorConnectSessionAccount(),
+		"api_key 类型的 cursor 账号不是会话号池账号")
+	require.True(t, compat.IsCursorOpenAICompatibleAccount(),
+		"cursor + api_key 应判定为 OpenAI 兼容的第三方反代账号")
+
+	// 3. GetOpenAIProtocolAPIKey 必须对 platform=cursor && type=api_key 放行读取 api_key。
+	require.Equal(t, "sk-kn-cy-secret", compat.GetOpenAIProtocolAPIKey(),
+		"platform=cursor && type=api_key 必须放行读取 credentials.api_key")
+
+	// 反证：cursor 非 api_key 账号不得被 GetOpenAIProtocolAPIKey 放行
+	// （回落 IsOpenAIApiKey，cursor 非 openai 平台 → 返回空串）。
+	require.Equal(t, "", pool.GetOpenAIProtocolAPIKey(),
+		"cursor 非 api_key 账号不应被 GetOpenAIProtocolAPIKey 放行读取")
+
+	// nil 安全：两个断言谓词必须对 nil 账号返回 false 而不 panic。
+	var nilAcc *Account
+	require.False(t, nilAcc.IsCursorConnectSessionAccount())
+	require.False(t, nilAcc.IsCursorOpenAICompatibleAccount())
+
+	// 非 cursor 平台的 api_key 账号不受影响，应由既有 IsMultiProtocolAPIKey / 其它分支判定
+	// （此处仅确认本改动没有把放行条件外溢到 cursor 之外）。
+	other := &Account{
+		Platform:    PlatformOther,
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "sk-other"},
+	}
+	require.Equal(t, "sk-other", other.GetOpenAIProtocolAPIKey(),
+		"非 cursor 平台放行行为不受本次改动影响")
+}
