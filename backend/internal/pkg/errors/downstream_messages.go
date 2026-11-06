@@ -123,6 +123,12 @@ const (
 	UpstreamPayloadTooLarge   = "请求体过大"
 	UpstreamAccessUnavailable = "上游访问暂时不可用，请稍后重试"
 	UpstreamEmptyCompletion   = "上游返回了空回复，请稍后重试"
+	// UpstreamContextWindowExceeded: 上游判定「输入超出模型上下文窗口」时的固定中文文案。
+	// 上游原文是英文技术术语（"prompt is too long: 100001 tokens > 100000 maximum"
+	// 或 "Your input exceeds the context window of this model"），下游用户看不懂。
+	// 这里只换 message 文本，状态码与 error.type/code 保持上游原义。
+	// 防泄露：不出现厂商名、账号类型、内部模型映射，也不回显具体 token 数字。
+	UpstreamContextWindowExceeded = "请求内容太长，超出该模型能处理的最大长度。请精简会话历史、减少附件，或改用支持更长上下文的模型后重试。"
 	// UpstreamCyberPolicyBlocked: 上游网络安全策略拦截的客户端回退文案（cyber 致命不可重试，400 invalid_request_error）。
 	UpstreamCyberPolicyBlocked = "请求被上游网络安全策略拦截"
 	// ResourceNotFound: gemini compat 404 not_found_error 固定文案（Resource not found 裸串补漏）。

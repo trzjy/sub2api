@@ -879,6 +879,68 @@ func ClientSafeUpstreamErrorMessage(account *Account, upstreamMsg, fallback stri
 	return fallback
 }
 
+// openAIUpstreamClientMessage 生成「写给下游看」的上游错误文案。
+//
+// 唯一被改写成固定中文的类别是上下文超限：上游回的是英文技术术语
+// （"prompt is too long: N tokens > M maximum" / "Your input exceeds the context
+// window of this model"），下游用户既看不懂，也不知道该改什么。改写只换 message
+// 文本，状态码、error.type、error.code 全部保持上游原义，客户端按 code 判断的
+// 重试/终止逻辑不受影响。
+//
+// 与 2026-10-14「上限报错都不要」的裁定不冲突：那条针对的是网关自己拦截请求
+// （准入拒绝），这里不做任何拦截，只是把已经发生的上游错误翻译成人话。
+func openAIUpstreamClientMessage(account *Account, upstreamMsg string, upstreamBody []byte) string {
+	if isContextTooLargeForClientMessage(upstreamMsg, upstreamBody) {
+		return infraerrors.UpstreamContextWindowExceeded
+	}
+	return ClientSafeUpstreamErrorMessage(account, upstreamMsg, infraerrors.UpstreamRequestFailed)
+}
+
+// contextTooLargeClientMessagePaths 是文案判定要扫的上游报文路径。
+//
+// 比 isOpenAIContextWindowError 多两处：
+//   - "msg"：部分中转把 Anthropic 原生错误原样包成
+//     {"code":11115,"msg":"prompt is too long: 100001 tokens > 100000 maximum"}，
+//     而 extractUpstreamErrorMessage 不认 msg，upstreamMsg 会是空串。
+//   - "detail"：ChatGPT 内部 API 风格。
+var contextTooLargeClientMessagePaths = []string{
+	"error.message",
+	"response.error.message",
+	"message",
+	"msg",
+	"detail",
+}
+
+// isContextTooLargeForClientMessage 只回答一个问题：这句上游错误该不该翻成中文给下游。
+//
+// 刻意与 isOpenAIContextWindowError 分开，不复用、不扩大后者的匹配面：
+// 后者同时决定「要不要换号」（shouldFailoverOpenAIUpstreamResponse 命中即 return false），
+// 而生产 7 天 83 条超限 400 全部是换号后恢复成 200、下游无感的——把
+// "prompt is too long" 塞进后者会让这些请求不再换号，直接从「用户无感」变成「用户失败」。
+// 因此识别口径只用于文案，换号语义一个字不动。
+func isContextTooLargeForClientMessage(upstreamMsg string, upstreamBody []byte) bool {
+	if isOpenAIContextWindowError(upstreamMsg, upstreamBody) {
+		return true
+	}
+	for _, path := range contextTooLargeClientMessagePaths {
+		if isContextTooLargeText(gjson.GetBytes(upstreamBody, path).String()) {
+			return true
+		}
+	}
+	return isContextTooLargeText(upstreamMsg)
+}
+
+// isContextTooLargeText 匹配不带 "context" 字样的超限话术（Anthropic 原生口径）。
+func isContextTooLargeText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "prompt is too long") ||
+		strings.Contains(lower, "input is too long") ||
+		strings.Contains(lower, "request is too large")
+}
+
 func (s *OpenAIGatewayService) handleErrorResponse(
 	ctx context.Context,
 	resp *http.Response,
@@ -934,7 +996,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	// set per-attempt so it always reflects the account that produced this error.
 	masked := IsResponseIdentityMaskedAccount(account)
 	c.Set(MaskedAccountFailoverKey, masked)
-	clientMsg := ClientSafeUpstreamErrorMessage(account, upstreamMsg, infraerrors.UpstreamRequestFailed)
+	clientMsg := openAIUpstreamClientMessage(account, upstreamMsg, body)
 	upstreamDetail := ""
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
@@ -1214,7 +1276,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	// QK-S2: client-safe variant. No-op for non-masked accounts. Stash the
 	// masked-identity flag for the failover final-write closure (per-attempt).
 	c.Set(MaskedAccountFailoverKey, IsResponseIdentityMaskedAccount(account))
-	clientMsg := ClientSafeUpstreamErrorMessage(account, upstreamMsg, infraerrors.UpstreamRequestFailed)
+	clientMsg := openAIUpstreamClientMessage(account, upstreamMsg, body)
 
 	upstreamDetail := ""
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {

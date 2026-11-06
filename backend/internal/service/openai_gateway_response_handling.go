@@ -2194,7 +2194,7 @@ func sanitizeOpenAIResponseFailedEventForClient(payload []byte, eventType string
 	if !isFailedEvent {
 		return updated, !bytes.Equal(updated, payload)
 	}
-	if clientOutputStarted && isOpenAIContextWindowError(extractOpenAISSEErrorMessage(payload), payload) {
+	if clientOutputStarted && isContextTooLargeForClientMessage(extractOpenAISSEErrorMessage(payload), payload) {
 		errorPath := ""
 		switch {
 		case gjson.GetBytes(updated, "response.error").Exists():
@@ -2209,6 +2209,13 @@ func sanitizeOpenAIResponseFailedEventForClient(payload []byte, eventType string
 			}
 			updated = next
 			next, err = sjson.SetBytes(updated, errorPath+".code", "context_length_exceeded")
+			if err != nil {
+				return payload, false
+			}
+			updated = next
+			// message 也要换成人话：上游原文是英文术语（prompt is too long /
+			// exceeds the context window），下游用户看不懂。只换文本，code 保持不变。
+			next, err = sjson.SetBytes(updated, errorPath+".message", infraerrors.UpstreamContextWindowExceeded)
 			if err != nil {
 				return payload, false
 			}
