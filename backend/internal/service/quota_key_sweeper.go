@@ -166,10 +166,14 @@ func (s *QuotaKeySweeper) runOnce() {
 		s.recordHeartbeat(ctx, runAt, false, sweepErr, n)
 		return
 	}
+	// 先不写成功心跳：窗口补注销必须在心跳之前完成，否则补注销失败只记日志、
+	// 运维看不到失败。补注销成功才记成功心跳，失败记失败心跳。
+	lateErr := s.sweepLateExpiredPoolCards(ctx, doneSet)
+	if lateErr != nil {
+		s.recordHeartbeat(ctx, runAt, false, lateErr, n)
+		return
+	}
 	s.recordHeartbeat(ctx, runAt, true, nil, n)
-	// 窗口补注销：处理「预枚举之后、sweepOnce 查询之前」才到期的池内卡，
-	// 防止其长期留在运行池继续取号。
-	s.sweepLateExpiredPoolCards(ctx, doneSet)
 }
 
 // expiredPoolCardIDs 返回「数据库当前已过期（status=expired 且 expires_at < now）
@@ -241,16 +245,18 @@ func (s *QuotaKeySweeper) unregisterExpiredAutoCardsLocked(ctx context.Context, 
 }
 
 // sweepLateExpiredPoolCards 处理「预枚举之后、sweepOnce 查询之前」才到期的池内卡：
-// 重新枚举 expired ∩ 运行池，对不在 done 中的卡逐个取按卡锁、复核 DB 后注销。
-// 最多 3 轮，防止极端情况下无界循环（每轮都恰好有新卡在枚举间隙到期）。
-// 出错只记日志并退出（本轮已完成的注销不回滚）。
-func (s *QuotaKeySweeper) sweepLateExpiredPoolCards(ctx context.Context, done map[int64]bool) {
+// 重新枚举 expired ∩ 运行池，对不在 done 中的卡逐个取按卡锁后执行**完整状态转换**
+// （标 expired + 到期账号软删，与 sweepKey 同语义），再复核注销。最多 3 轮，防止
+// 极端情况下无界循环（每轮都恰好有新卡在枚举间隙到期）。枚举或单卡事务失败返回错误，
+// 调用方据此把本轮心跳记为失败——运维可观测，不再「补注销失败只记日志」。
+func (s *QuotaKeySweeper) sweepLateExpiredPoolCards(ctx context.Context, done map[int64]bool) error {
 	const maxRounds = 3
+	var firstErr error
 	for round := 0; round < maxRounds; round++ {
 		late, err := s.expiredPoolCardIDs(ctx)
 		if err != nil {
 			log.Printf("[QuotaKeySweep] late expired pool card re-enumeration failed (round %d): %v", round, err)
-			return
+			return err
 		}
 		pending := make([]int64, 0, len(late))
 		for _, id := range late {
@@ -259,17 +265,61 @@ func (s *QuotaKeySweeper) sweepLateExpiredPoolCards(ctx context.Context, done ma
 			}
 		}
 		if len(pending) == 0 {
-			return
+			return firstErr
 		}
 		for _, id := range pending {
 			id := id
-			_ = WithAutoCardSync(id, func() error {
+			cardErr := WithAutoCardSync(id, func() error {
+				qk, gerr := s.repo.GetByID(ctx, id)
+				if gerr != nil {
+					log.Printf("[QuotaKeySweep] late sweep reload card %d failed: %v", id, gerr)
+					done[id] = true
+					return nil
+				}
+				// 无状态需要处理（已软删/未到期）：复核注销后结束本卡。
+				if qk == nil || qk.ExpiresAt == nil || !qk.ExpiresAt.Before(time.Now()) {
+					s.recheckAndUnregisterLocked(ctx, id)
+					done[id] = true
+					return nil
+				}
+				// 运行池存在但 ent client 缺失的退化场景：仅复核注销，不做事务转换。
+				if s.entClient == nil {
+					s.recheckAndUnregisterLocked(ctx, id)
+					done[id] = true
+					return nil
+				}
+				tx, txErr := s.entClient.Tx(ctx)
+				if txErr != nil {
+					log.Printf("[QuotaKeySweep] late sweep open tx for card %d failed: %v", id, txErr)
+					done[id] = true
+					return txErr
+				}
+				committed := false
+				defer func() {
+					if !committed {
+						_ = tx.Rollback()
+					}
+				}()
+				now := time.Now()
+				if _, sweepErr := s.sweepKey(ctx, tx, qk, now); sweepErr != nil {
+					log.Printf("[QuotaKeySweep] late sweep card %d failed: %v", id, sweepErr)
+					return sweepErr
+				}
+				if cErr := tx.Commit(); cErr != nil {
+					log.Printf("[QuotaKeySweep] late sweep commit card %d failed: %v", id, cErr)
+					return cErr
+				}
+				committed = true
 				s.recheckAndUnregisterLocked(ctx, id)
 				done[id] = true
 				return nil
 			})
+			if cardErr != nil && firstErr == nil {
+				firstErr = cardErr
+			}
 		}
 	}
+	return firstErr
 }
 
 // SweepNow 同步执行一次到期清扫，返回本轮标记为 expired 的条数（§4.4 sweep_expired
@@ -325,8 +375,12 @@ func (s *QuotaKeySweeper) SweepNow(ctx context.Context) (int, error) {
 	if sweepErr != nil {
 		return n, sweepErr
 	}
-	// 窗口补注销：处理「预枚举之后、sweepOnce 查询之前」才到期的池内卡。
-	s.sweepLateExpiredPoolCards(ctx, doneSet)
+	// 窗口补注销：处理「预枚举之后、sweepOnce 查询之前」才到期的池内卡；
+	// 失败随清扫结果一并返回，调用方据此判定本轮是否成功。
+	lateErr := s.sweepLateExpiredPoolCards(ctx, doneSet)
+	if lateErr != nil {
+		return n, lateErr
+	}
 	return n, nil
 }
 
@@ -354,6 +408,60 @@ func (s *QuotaKeySweeper) SweepNow(ctx context.Context) (int, error) {
 //
 // tx 由调用方提供：生产路径传真实事务，单测路径传占位事务（fake repo 忽略 tx）。
 // 返回本轮实际改写条数（标 expired 的 key 数，不含纯账号补删）。
+// sweepKey 对单个激活码执行清扫状态转换与账号补删（EXP-B 语义不变）：
+// active 且已过期 → 条件化标 expired（MarkExpiredIfStillExpired）；
+// expired → 补删账号；其它状态 → 跳过。返回标记条数。
+func (s *QuotaKeySweeper) sweepKey(ctx context.Context, tx *ent.Tx, qk *ent.QuotaKey, now time.Time) (int, error) {
+	marked := 0
+	switch qk.Status {
+	case domain.QuotaKeyStatusActive:
+		// 先条件化标 expired（DB 当前行重新判定，旧快照不生效）。
+		affected, err := s.repo.MarkExpiredIfStillExpired(ctx, tx, qk.ID, now)
+		if err != nil {
+			return 0, err
+		}
+		marked = affected
+	case domain.QuotaKeyStatusExpired:
+		// 历史已 expired、此前未做账号补删的 key，继续补删。
+	default:
+		return 0, nil // 其它状态不触发账号删除
+	}
+	// 账号级补删：DB 当前条件在仓储方法内用行锁复核（status='expired' AND 仍到期），
+	// 不满足则返回空集合 → 不产生 outbox。
+	ids, err := s.repo.SoftDeleteCursorAccountsByExpiredQuotaKey(ctx, tx, qk.ID, now)
+	if err != nil {
+		return marked, fmt.Errorf("sweep quota key %d cursor accounts: %w", qk.ID, err)
+	}
+	if len(ids) == 0 {
+		return marked, nil
+	}
+	// outbox 与软删同事务；失败返回错误 → 整个 sweeper 事务回滚。
+	if err := s.repo.EnqueueAccountChangedOutbox(ctx, tx, ids); err != nil {
+		return marked, fmt.Errorf("sweep quota key %d enqueue outbox: %w", qk.ID, err)
+	}
+	// 脱敏日志：只记 key ID 与删除数量，禁止记录 code/token/鉴权头。
+	log.Printf("[QuotaKeySweep] quota key %d expired: soft-deleted %d cursor accounts", qk.ID, len(ids))
+	return marked, nil
+}
+
+// sweepOnce 对当前过期集合逐条处理：active 的按 DB 当前条件标 expired；随后统一
+// 尝试「到期激活码名下 cursor 账号」的软删补删，账号软删与 outbox 写同一事务。
+//
+// 分派逻辑（EXP-B）下沉到 sweepKey：仅做两件事（标 expired + 账号软删），不再造任何
+// 新清扫维度；sweepOnce 只负责枚举 ListExpired 结果并逐条累加改写条数（行为不变）。
+//
+// 幂等：已是 expired 的跳过标 expired；软删条件含 deleted_at IS NULL，第二次 sweep
+// 不再改写。两个维度独立：只标 expired，保留 exhausted / last_error / last_refresh_at
+// （不重置 exhausted）。
+//
+// 关键约束（D-CURSOR-032）：状态写入按数据库当前 expires_at 条件限定。ListExpired 取回
+// 的是旧值，管理员可能在两步间用 UpdateMeta 清空 expires_at；因此写入走条件化方法
+// MarkExpiredIfStillExpired（UPDATE ... WHERE id AND status='active' AND expires_at
+// IS NOT NULL AND expires_at < now），由 DB 当前行重新判定，不受旧值影响。条件不满足时
+// 影响 0 行，count 不增，天然幂等。
+//
+// tx 由调用方提供：生产路径传真实事务，单测路径传占位事务（fake repo 忽略 tx）。
+// 返回本轮实际改写条数（标 expired 的 key 数，不含纯账号补删）。
 func (s *QuotaKeySweeper) sweepOnce(ctx context.Context, tx *ent.Tx) (int, error) {
 	now := time.Now()
 	expired, err := s.repo.ListExpired(ctx, now)
@@ -362,33 +470,13 @@ func (s *QuotaKeySweeper) sweepOnce(ctx context.Context, tx *ent.Tx) (int, error
 	}
 	count := 0
 	for _, qk := range expired {
-		switch qk.Status {
-		case domain.QuotaKeyStatusActive:
-			// 先条件化标 expired（DB 当前行重新判定，旧快照不生效）。
-			affected, err := s.repo.MarkExpiredIfStillExpired(ctx, tx, qk.ID, now)
-			if err != nil {
-				return count, err
-			}
-			count += affected
-		case domain.QuotaKeyStatusExpired:
-			// 历史已 expired、此前未做账号补删的 key，继续补删。
-		default:
-			continue // 其它状态不触发账号删除
-		}
-		// 账号级补删：DB 当前条件在仓储方法内用行锁复核，不满足则返回空集合。
-		ids, err := s.repo.SoftDeleteCursorAccountsByExpiredQuotaKey(ctx, tx, qk.ID, now)
+		affected, err := s.sweepKey(ctx, tx, qk, now)
 		if err != nil {
-			return count, fmt.Errorf("sweep quota key %d cursor accounts: %w", qk.ID, err)
+			// 标 expired 已在错误前计入改写条数（与原 sweepOnce 行为一致）：上层事务
+			// 将回滚本次写入，但 count 仍反映本批已发生的状态转换，便于失败归因。
+			return count + affected, err
 		}
-		if len(ids) == 0 {
-			continue
-		}
-		// outbox 与软删同事务；失败返回错误 → 整个 sweeper 事务回滚。
-		if err := s.repo.EnqueueAccountChangedOutbox(ctx, tx, ids); err != nil {
-			return count, fmt.Errorf("sweep quota key %d enqueue outbox: %w", qk.ID, err)
-		}
-		// 脱敏日志：只记 key ID 与删除数量，禁止记录 code/token/鉴权头。
-		log.Printf("[QuotaKeySweep] quota key %d expired: soft-deleted %d cursor accounts", qk.ID, len(ids))
+		count += affected
 	}
 	return count, nil
 }

@@ -315,10 +315,25 @@ func (h *QuotaKeyHandler) RefreshAutoPool(c *gin.Context) {
 	refreshed := 0
 	failed := 0
 
-	cards := pool.ListCards()
-	for _, card := range cards {
-		countResp, err := client.RefreshCount(c.Request.Context(), card.DeviceCode, card.DeviceCodeMD5)
-		if err != nil || countResp == nil {
+	// 全量刷新以**持久化行**为准，而非仅遍历内存运行池：单卡刷新失败被移出池的卡
+	// 不会再被 pool.ListCards() 看到，永远无法恢复入池。改为枚举持久化的 Auto 卡密
+	// （notes 前缀 auto_pool:），即使是池外但库内合格的卡，也会被刷新并重新纳管。
+	statuses, err := h.svc.List(c.Request.Context())
+	if err != nil {
+		response.Error(c, 500, "list quota keys failed: "+err.Error())
+		return
+	}
+	for _, st := range statuses {
+		if st.Notes == nil || !strings.HasPrefix(*st.Notes, autoPoolNotesPrefix) {
+			continue
+		}
+		devCode, devMD5, ok := parseAutoPoolDeviceFromNotes(*st.Notes)
+		if !ok {
+			failed++
+			continue
+		}
+		countResp, rerr := client.RefreshCount(c.Request.Context(), devCode, devMD5)
+		if rerr != nil || countResp == nil {
 			failed++
 			continue
 		}
@@ -327,22 +342,21 @@ func (h *QuotaKeyHandler) RefreshAutoPool(c *gin.Context) {
 		// 持久化状态复核运行池成员（闭合外审 R7 P1）：并发单卡刷新把某卡移出运行池后，
 		// 全量刷新若只清 DB 失败态却不再纳管，会造成「DB 可回放、运行池无此卡」的
 		// 运行期/重启期分叉；同样不得用整卡重建，需保留冷却/禁用/设备码。
-		var snapErr error
-		var reconcileErr error
-		_ = service.WithAutoCardSync(card.ID, func() error {
-			if snapErr = h.syncAutoCardUsageSnapshot(c.Request.Context(), card.ID, countResp.OverCount, countResp.SumCount); snapErr != nil {
+		var snapErr, reconcileErr error
+		_ = service.WithAutoCardSync(st.ID, func() error {
+			if snapErr = h.syncAutoCardUsageSnapshot(c.Request.Context(), st.ID, countResp.OverCount, countResp.SumCount); snapErr != nil {
 				return nil
 			}
-			reconcileErr = h.reconcileAutoCardMembershipLocked(c.Request.Context(), pool, card.ID, card.DeviceCode, card.DeviceCodeMD5, countResp.OverCount, countResp.SumCount)
+			reconcileErr = h.reconcileAutoCardMembershipLocked(c.Request.Context(), pool, st.ID, devCode, devMD5, countResp.OverCount, countResp.SumCount)
 			return reconcileErr
 		})
 		if snapErr != nil {
-			slog.Warn("cursor auto: refresh pool snapshot persist failed", "card_id", card.ID, "err", snapErr)
+			slog.Warn("cursor auto: refresh pool snapshot persist failed", "card_id", st.ID, "err", snapErr)
 			failed++
 			continue
 		}
 		if reconcileErr != nil {
-			slog.Warn("cursor auto: refresh pool reconcile membership failed", "card_id", card.ID, "err", reconcileErr)
+			slog.Warn("cursor auto: refresh pool reconcile membership failed", "card_id", st.ID, "err", reconcileErr)
 			failed++
 			continue
 		}

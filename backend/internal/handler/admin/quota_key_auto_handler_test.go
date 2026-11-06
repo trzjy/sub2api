@@ -150,6 +150,19 @@ func (r *autoCardQuotaKeyRepo) GetByIDInTx(_ context.Context, _ *ent.Tx, id int6
 	return qk, nil
 }
 
+// List 满足 QuotaKeyRepository.List：返回替身内所有持久化激活码，供 RefreshAutoPool
+// 以「持久化行」为准全量枚举 Auto 卡密（修复单卡刷新失败移出池后无法恢复入池的 P1）。
+// 仅返回本用例实际用到的字段（ID/Notes/Status/ExpiresAt/Priority）。
+func (r *autoCardQuotaKeyRepo) List(_ context.Context) ([]*ent.QuotaKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*ent.QuotaKey, 0, len(r.keys))
+	for _, qk := range r.keys {
+		out = append(out, qk)
+	}
+	return out, nil
+}
+
 // UpdateMeta 复刻生产仓储的双指针语义：外层 nil = 不写；内层 nil = 显式清空；
 // 否则写入内层指向的值（与 quotaKeyRepository.UpdateMeta 一致）。
 //
