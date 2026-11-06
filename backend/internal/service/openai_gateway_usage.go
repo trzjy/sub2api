@@ -41,6 +41,9 @@ type OpenAIRecordUsageInput struct {
 	PricingAt time.Time
 	// CyberBlocked 为 true 时把该用量行标记为 cyber（request_type=cyber），计费逻辑不变。
 	CyberBlocked bool
+	// EstimatedInputTokens 是本地精确估算的输入 Token 数（当上游 Token 虚高时用于
+	// 覆盖 actualInputTokens 计费）。
+	EstimatedInputTokens int
 	// NativeCompactionV2 is an orthogonal semantic flag captured by the
 	// Responses handler from stream=true + compaction_trigger. It never stores
 	// the request payload and does not replace the transport request type.
@@ -225,6 +228,14 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	actualInputTokens := result.Usage.InputTokens - result.Usage.CacheReadInputTokens - result.Usage.CacheCreationInputTokens
 	if actualInputTokens < 0 {
 		actualInputTokens = 0
+	}
+	// 当账号为 Cursor APIKey 渠道（或显式标记 recount_input_tokens）且传入了有效的
+	// EstimatedInputTokens 时，优先使用本地精准重算的输入 Token 进行计费（第三方
+	// Cursor 网关如 kn-cy.com 上游返回的 prompt_tokens 存在虚高）。
+	if account != nil && (account.IsCursorOpenAICompatibleAccount() || account.GetCredential("recount_input_tokens") == "true") {
+		if input.EstimatedInputTokens > 0 {
+			actualInputTokens = input.EstimatedInputTokens
+		}
 	}
 
 	// Calculate cost

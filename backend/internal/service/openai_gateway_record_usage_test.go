@@ -1999,6 +1999,61 @@ func TestOpenAIGatewayServiceRecordUsage_UnpricedTokenModelFallsBackToZeroCostUs
 	require.Equal(t, 0, subRepo.incrementCalls)
 }
 
+// TestRecordUsage_CursorAPIKeyEstimatedInputTokens 覆盖第三方 Cursor 网关（如
+// kn-cy.com）输入 Token 虚高场景：platform=cursor && type=api_key 的 OpenAI 兼容
+// 反代账号，上游返回 prompt_tokens=5000（1.6~2.5 倍虚高），本地按请求体实际内容
+// 重算得 2000（EstimatedInputTokens）。计费金额与扣减额度必须严格基于 2000，
+// 而不是采信虚高的 5000。
+func TestRecordUsage_CursorAPIKeyEstimatedInputTokens(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	subRepo := &openAIRecordUsageSubRepoStub{}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, nil)
+
+	upstreamUsage := OpenAIUsage{InputTokens: 5000, OutputTokens: 300}
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "resp_cursor_kncy_recount",
+			Usage:     upstreamUsage,
+			Model:     "gpt-5.1",
+			Duration:  time.Second,
+		},
+		APIKey:               &APIKey{ID: 300},
+		User:                 &User{ID: 400},
+		Account:              &Account{ID: 500, Platform: PlatformCursor, Type: AccountTypeAPIKey},
+		EstimatedInputTokens: 2000,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	// 用量行输入 Token 必须为本地重算值，而非上游虚高的 5000。
+	require.Equal(t, 2000, usageRepo.lastLog.InputTokens)
+	require.Equal(t, 300, usageRepo.lastLog.OutputTokens)
+
+	// 期望成本基于本地重算的 2000 输入 Token 计算（cfg.Default.RateMultiplier=1.1，
+	// APIKey 无 GroupID 时使用默认倍率）。
+	expectedCost, calcErr := svc.billingService.CalculateCost("gpt-5.1", UsageTokens{
+		InputTokens:  2000,
+		OutputTokens: 300,
+	}, 1.1)
+	require.NoError(t, calcErr)
+
+	require.InDelta(t, expectedCost.TotalCost, usageRepo.lastLog.TotalCost, 1e-12)
+	require.InDelta(t, expectedCost.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
+	// 扣减额度严格基于 2000 Token 而非 5000 Token。
+	require.Equal(t, 1, userRepo.deductCalls)
+	require.InDelta(t, expectedCost.ActualCost, userRepo.lastAmount, 1e-12)
+
+	// 反证：若误按上游 5000 Token 计费，金额必然更大，确保断言真有区分度。
+	inflatedCost, calcErr := svc.billingService.CalculateCost("gpt-5.1", UsageTokens{
+		InputTokens:  5000,
+		OutputTokens: 300,
+	}, 1.1)
+	require.NoError(t, calcErr)
+	require.Greater(t, inflatedCost.ActualCost, usageRepo.lastLog.ActualCost,
+		"上游虚高的 5000 token 计费必须高于本地重算的 2000 token 计费")
+}
+
 func TestOpenAIGatewayServiceRecordUsage_SubscriptionBillingSetsSubscriptionFields(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	userRepo := &openAIRecordUsageUserRepoStub{}
