@@ -146,6 +146,25 @@ func TestParseOpenCodeGoProtocolRulesAcceptsTypedMaps(t *testing.T) {
 	}, rules)
 }
 
+func TestShouldForwardOpenAIResponsesViaRawChatCompletions_CursorAPIKeyIsRawChatCompletions(t *testing.T) {
+	t.Parallel()
+	// API Key 类型的 Cursor 账号（kn-cy.com 上游）必须按原始 Chat Completions HTTP
+	// POST 打向上游，返回 true。
+	account := &Account{
+		Platform: PlatformCursor,
+		Type:     AccountTypeAPIKey,
+	}
+	require.True(t, shouldForwardOpenAIResponsesViaRawChatCompletions(account))
+
+	// 非 API Key 类型的 Cursor 账号（例如 OAuth 类）仍按既有逻辑判定，函数入口
+	// 已对 Type != AccountTypeAPIKey 直接返回 false，不受本次新增分支影响。
+	oauthAccount := &Account{
+		Platform: PlatformCursor,
+		Type:     AccountTypeOAuth,
+	}
+	require.False(t, shouldForwardOpenAIResponsesViaRawChatCompletions(oauthAccount))
+}
+
 func TestShouldForwardOpenAIResponsesViaRawChatCompletions_OpenCodeGoIgnoresProbe(t *testing.T) {
 	t.Parallel()
 	account := &Account{

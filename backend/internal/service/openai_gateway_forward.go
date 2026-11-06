@@ -208,7 +208,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// body 发到 Cursor 原生端点并白耗 shareai 额度。
 	// §24.2-1 起统一走唯一执行部件的类型化入口（出站 = 账号 Bearer +
 	// 同源 device/code 的 x-jg-auth），本入口只做形状转换回 OpenAI 结果（不二次计费）。
-	if isCursorAccount(account) {
+	if isCursorAccount(account) && (account.Type != AccountTypeAPIKey) {
 		return s.forwardCursorResponsesEntry(ctx, c, account, body)
 	}
 
@@ -1485,6 +1485,12 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 	if account.Platform == PlatformOther {
 		// other 是通用 ChatCompletions 自定义上游：一律按 CC 转发，避免账号 Extra
 		// 残留 probe 标记把入站消息/chat 推向上游不存在的 /v1/responses。
+		return true
+	}
+	if account.Platform == PlatformCursor && account.Type == AccountTypeAPIKey {
+		// API Key 类型的 Cursor 账号（kn-cy.com 上游）：Chat Completions 上游不具备
+		// 原生 Responses 端点，一律按原始 Chat Completions HTTP POST 打向上游，
+		// 避免落入 ShareAI Connect 桥。
 		return true
 	}
 	if account.routesByModel() {
