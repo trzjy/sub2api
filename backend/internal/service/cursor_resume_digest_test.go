@@ -1007,8 +1007,13 @@ func TestCursorResumeGeminiAmbiguousParallel(t *testing.T) {
     ]}
   ]
 }`
-	_, err := CursorProbeResumeRequest(CursorResumeProtocolGemini, []byte(geminiBody))
-	require.ErrorIs(t, err, ErrCursorResumeAmbiguousResults, "同名并行缺 ID 必须明确拒绝歧义")
+	// 2026-11-06 口径：同名并行结果缺 ID → 无法配对的那几条**丢掉并记账**，
+	// 不整轮拒（客户少一条结果，也比整轮 400 好）。
+	probe, err := CursorProbeResumeRequest(CursorResumeProtocolGemini, []byte(geminiBody))
+	require.NoError(t, err, "缺 ID 的并行结果不得整轮拒")
+	require.Empty(t, probe.ResultCallIDs, "没有 ID 的结果一律不配对")
+	require.GreaterOrEqual(t, probe.Plan.skippedItems["gemini_function_response_without_id"], 1,
+		"丢弃原因要记账，实际=%s", probe.Plan.skippedItems.summary())
 }
 
 // TestCursorResumeGeminiPairedByCallID 覆盖清单第 1 条（Gemini）：按 call ID 配对成功。

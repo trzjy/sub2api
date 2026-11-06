@@ -63,7 +63,7 @@ func TestCursorToolResultTextMatchesHistoryRepresentation(t *testing.T) {
 		{Type: "image", Source: &apicompat.AnthropicImageSource{Type: "base64", MediaType: "image/png", Data: cursorTestImageB64}},
 		{Type: "text", Text: "after"},
 	}
-	resultText, images, err := cursorToolResultContent(blocks, true, true)
+	resultText, images, err := cursorToolResultContent(blocks, true, cursorSkipLedger{})
 	require.NoError(t, err)
 	require.Len(t, images, 1)
 
@@ -74,7 +74,7 @@ func TestCursorToolResultTextMatchesHistoryRepresentation(t *testing.T) {
 		Type:      "tool_result",
 		ToolUseID: "toolu_1",
 		Content:   raw,
-	})
+	}, cursorSkipLedger{})
 	require.NoError(t, err)
 	var payload struct {
 		Content string `json:"content"`
@@ -84,9 +84,10 @@ func TestCursorToolResultTextMatchesHistoryRepresentation(t *testing.T) {
 		"本批结果的文本与历史前缀的 tool_result content 必须逐字节一致")
 }
 
-// TestCursorToolResultUnknownBlockStillFailsClosed 覆盖：只扩 image，其他未知块类型
-// 仍在结果侧失败关闭（不借机放宽到任意类型）。
-func TestCursorToolResultUnknownBlockStillFailsClosed(t *testing.T) {
+// TestCursorToolResultUnknownBlockIsKeptAsMarker 覆盖 2026-11-06 口径：
+// 工具结果里的未知块类型（如 document）不再整轮失败，而是序列化成定位标记参与摘要。
+// 客户多传一种块，最多少一点可读内容，不该换来一个 400。
+func TestCursorToolResultUnknownBlockIsKeptAsMarker(t *testing.T) {
 	req := &apicompat.AnthropicRequest{
 		Model: "claude-opus-5-5",
 		Messages: []apicompat.AnthropicMessage{
@@ -96,9 +97,14 @@ func TestCursorToolResultUnknownBlockStillFailsClosed(t *testing.T) {
 				`{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"AA=="}}]}]`)},
 		},
 	}
-	_, err := cursorPlanFromMessages(req, req.Model)
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCursorResumeUnsupportedContent)
+	plan, err := cursorPlanFromMessages(req, req.Model)
+	require.NoError(t, err, "未知块类型不得整轮拒")
+	require.Len(t, plan.results, 1, "结果本身仍要形成一条，文本里带定位标记")
+	require.Equal(t, "toolu_1", plan.results[0].CallID)
+	require.Contains(t, plan.results[0].Text[0], "document",
+		"未知块要序列化成标记，历史与结果两侧才能对齐")
+	require.GreaterOrEqual(t, plan.skippedItems[cursorSkipUnsupportedPart], 1,
+		"丢块要记账，实际=%s", plan.skippedItems.summary())
 }
 
 // TestCursorMcpResultFrameCarriesImageItem 覆盖出站编码：图片独立成一条

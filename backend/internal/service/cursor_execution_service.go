@@ -6106,6 +6106,9 @@ func (b *cursorConfigBuilder) plan() *cursorContextPlan {
 		configSystem:   b.system,
 		configSampling: b.sampling,
 		history:        NewCursorHistoryDigest(),
+		// 账本必须在这里就分配：各协议的空镜化函数会把 plan.skippedItems 直接传下去
+		// 记账，nil map 上的写入会静默丢失（丢了账就等于没有观测手段）。
+		skippedItems: cursorSkipLedger{},
 	}
 }
 
@@ -6157,7 +6160,11 @@ func mustCursorJSONValue(v map[string]json.RawMessage) []byte {
 }
 
 // cursorChatContentText 提取 Chat 消息正文（字符串或文本分段），不做 trim/换行改写。
-func cursorChatContentText(raw json.RawMessage) (string, error) {
+//
+// 口径（2026-11-06）：本函数只服务**历史摘要**，不承担准入职责。
+// 读不出来的 part / 内容一律丢弃并记账——摘要是给"请求是否变了"做对比用的，
+// 为它把整轮 400 掉是拿客户换内部一致性，不值。
+func cursorChatContentText(raw json.RawMessage, skipped cursorSkipLedger) (string, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
 		return "", nil
@@ -6174,56 +6181,33 @@ func cursorChatContentText(raw json.RawMessage) (string, error) {
 			case "text", "input_text", "output_text", "":
 				b.WriteString(part.Text)
 			case "image_url", "file":
-				// 图像/文件属于已接纳的输入语义：按出现顺序参与摘要（不丢语义字段）。
+				// 图像/文件属于已接纳的输入语义：按出现顺序参与摘要（不丢语义字段）——
+				// 摘要保留"这里有张图"，不代表这张图一定要发给上游（转换层按落点决定）。
 				encoded, err := json.Marshal(part)
 				if err != nil {
-					return "", fmt.Errorf("%w: chat content part marshal", ErrCursorResumeUnsupportedContent)
+					skipped.note(cursorSkipBadContent)
+					continue
 				}
 				b.WriteString("\x00part:")
 				b.Write(encoded)
 			default:
-				return "", fmt.Errorf("%w: chat content part %q", ErrCursorResumeUnsupportedContent, part.Type)
+				// 未知 part 类型：摘要里丢掉这个 part，不整轮拒。
+				skipped.note(cursorSkipUnsupportedPart)
+				continue
 			}
 		}
 		return b.String(), nil
 	}
-	return "", fmt.Errorf("%w: undecodable chat content", ErrCursorResumeUnsupportedContent)
+	// 数字 / 布尔 / 对象等：摘要按空内容处理。
+	skipped.note(cursorSkipBadContent)
+	return "", nil
 }
 
-// cursorValidateChatPlanContent applies the same Cursor landing constraint to
-// continuation plans as the first-request converter: only user messages may
-// carry images, because Cursor conversation history has no assistant/system/
-// tool image slot.  This keeps a continuation from becoming valid merely
-// because its digest parser accepted a richer Chat wire shape.
-//
-// 判据是**原始形状里有没有图片 part**，不经过转换层的解码：
-// 2026-11-06 起转换层改为「丢图保文本」（见 cursorSkipLedger），
-// 但续轮准入判断的是另一件事——"客户端送来的历史里有没有图"。
-// 两件事分开判，避免把"转换时怎么降级"和"历史能不能用来重建会话"混成一处。
-func cursorValidateChatPlanContent(role string, msg apicompat.ChatMessage) error {
-	if cursorMessageHasImagePart(msg) && role != "user" {
-		return fmt.Errorf("%w: chat %s message contains image content", ErrCursorResumeUnsupportedContent, role)
-	}
-	return nil
-}
-
-// cursorMessageHasImagePart 判断一条消息的**原始 content** 里是否声明了图片 part。
-func cursorMessageHasImagePart(m apicompat.ChatMessage) bool {
-	raw := strings.TrimSpace(string(m.Content))
-	if len(raw) == 0 || raw[0] != '[' {
-		return false
-	}
-	var parts []apicompat.ChatContentPart
-	if err := json.Unmarshal([]byte(raw), &parts); err != nil {
-		return false
-	}
-	for _, p := range parts {
-		if p.Type == "image_url" {
-			return true
-		}
-	}
-	return false
-}
+// 这里曾有一对 cursorValidateChatPlanContent / cursorMessageHasImagePart，
+// 作用是"历史里非 user 消息带图就整轮拒"。2026-11-06 已删除：
+// 它们与转换层各自实现了一遍准入判据，而计划层在转换层之前执行，导致
+// 转换层改成"丢图保文本"之后客户仍然收到 400（同一规则两处实现 = 认知分裂）。
+// 现在准入只有一处判据：协议没有落点的内容一律丢 + 记账（cursorSkipLedger）。
 
 // cursorChatToolItem 生成一条工具声明项（顺序保留，不改写 schema）。
 func cursorChatToolItem(tool apicompat.ChatTool) (cursorContextItem, string, error) {
@@ -6311,19 +6295,22 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 		start--
 	}
 	for _, msg := range req.Messages[start:] {
-		if err := cursorValidateChatPlanContent(strings.ToLower(strings.TrimSpace(msg.Role)), msg); err != nil {
-			return nil, err
-		}
+		// 计划层只负责"这批结果是什么"，不做准入（2026-11-06 口径：能丢就丢）。
+		// 读不出来的部分一律跳过记账；只有"结果缺 call_id、无法与本轮任何调用对上号"
+		// 才放弃这一条（它本来就无法回写，留着只会污染摘要）。
 		if len(msg.ToolCalls) > 0 || msg.FunctionCall != nil {
-			return nil, fmt.Errorf("%w: chat tool result carries assistant-only call fields", ErrCursorResumeUnsupportedContent)
+			// 结果消息里出现 assistant 专属的调用字段：丢弃这些字段，结果文本照用。
+			plan.noteSkippedItem("chat_result_call_fields")
 		}
 		callID := strings.TrimSpace(msg.ToolCallID)
 		if callID == "" {
-			return nil, fmt.Errorf("%w: chat %s result without tool_call_id", ErrCursorResumeUnsupportedContent, strings.ToLower(strings.TrimSpace(msg.Role)))
+			plan.noteSkippedItem("chat_result_without_call_id")
+			continue
 		}
-		text, err := cursorChatContentText(msg.Content)
+		text, err := cursorChatContentText(msg.Content, plan.skippedItems)
 		if err != nil {
-			return nil, err
+			plan.noteSkippedItem("chat_result_undecodable")
+			continue
 		}
 		plan.results = append(plan.results, CursorToolResult{CallID: callID, Text: []string{text}})
 	}
@@ -6335,9 +6322,10 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 		role := strings.ToLower(strings.TrimSpace(msg.Role))
 		switch role {
 		case "system", "developer":
-			text, err := cursorChatContentText(msg.Content)
+			text, err := cursorChatContentText(msg.Content, plan.skippedItems)
 			if err != nil {
-				return nil, err
+				plan.noteSkippedItem("chat_system_undecodable")
+				continue
 			}
 			builder.in(cursorConfigSystem)
 			if err := builder.text("config.system", text); err != nil {
@@ -6346,20 +6334,23 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 			continue
 		case "user", "assistant", "tool", "function":
 		default:
-			return nil, fmt.Errorf("%w: chat role %q", ErrCursorResumeUnsupportedContent, msg.Role)
+			// 未知角色（critic / narrator 之类客户端自定义）：不进摘要，按「丢这一条」
+			// 处理并记账（2026-11-06 口径：客户把 400 当成模型不稳定）。
+			plan.noteSkippedItem("chat_role_" + role)
+			continue
 		}
 		if role != "assistant" && len(msg.ToolCalls) > 0 {
-			return nil, fmt.Errorf("%w: chat tool_calls on role %q", ErrCursorResumeUnsupportedContent, msg.Role)
+			// 非 assistant 带 tool_calls：丢掉这些字段，文本照进摘要。
+			plan.noteSkippedItem("chat_call_fields_outside_assistant")
 		}
 		if msg.FunctionCall != nil {
-			return nil, fmt.Errorf("%w: legacy chat function_call is not supported by cursor continuation", ErrCursorResumeUnsupportedContent)
+			// legacy function_call：旧字段，Cursor 侧无落点 → 丢字段，文本照进摘要。
+			plan.noteSkippedItem("chat_legacy_function_call")
 		}
-		if err := cursorValidateChatPlanContent(role, msg); err != nil {
-			return nil, err
-		}
-		text, err := cursorChatContentText(msg.Content)
+		text, err := cursorChatContentText(msg.Content, plan.skippedItems)
 		if err != nil {
-			return nil, err
+			plan.noteSkippedItem("chat_message_undecodable")
+			continue
 		}
 		if role == "user" {
 			if err := plan.history.AppendText("chat.user", text); err != nil {
@@ -6375,18 +6366,23 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 				return nil, err
 			}
 		}
-		for _, call := range msg.ToolCalls {
-			canonical, err := cursorToolCallCanonical(call.ID, call.Function.Name, call.Function.Arguments)
-			if err != nil {
-				return nil, err
-			}
-			if err := plan.history.AppendItem("chat.assistant.tool_call", canonical); err != nil {
-				return nil, err
-			}
-			// 历史前缀里真实出现的调用 ID：本批结果能在此找到对应调用，才证明正文携带
-			// 完整历史（重建只把历史当上下文，不重执行工具）。
-			if id := strings.TrimSpace(call.ID); id != "" {
-				historyCalls[id] = struct{}{}
+		// tool_calls 只属于 assistant：挂在 user 上会被当成"用户发起的调用"，
+		// 语义错得比丢掉更远。非 assistant 的调用字段已在上面记账丢弃。
+		if role == "assistant" {
+			for _, call := range msg.ToolCalls {
+				canonical, err := cursorToolCallCanonical(call.ID, call.Function.Name, call.Function.Arguments)
+				if err != nil {
+					plan.noteSkippedItem("chat_tool_call_unparsable")
+					continue
+				}
+				if err := plan.history.AppendItem("chat.assistant.tool_call", canonical); err != nil {
+					return nil, err
+				}
+				// 历史前缀里真实出现的调用 ID：本批结果能在此找到对应调用，才证明正文携带
+				// 完整历史（重建只把历史当上下文，不重执行工具）。
+				if id := strings.TrimSpace(call.ID); id != "" {
+					historyCalls[id] = struct{}{}
+				}
 			}
 		}
 	}
@@ -6461,9 +6457,11 @@ func cursorAnthropicImage(block apicompat.AnthropicContentBlock) (cursorTurnImag
 //
 // collectImages=true 时图片块会被解成可出站字节（工具读图场景）。解码失败不 fail 整轮：
 // 文本标记照样保留（历史前缀仍对齐），只是本次不带图出站——比整轮 400 更可控。
-// strict=true 时未知块类型失败关闭；strict=false 时按既有历史口径序列化成标记
-// （历史里已存在的未知块不能被新代码变成整轮失败）。
-func cursorToolResultContent(blocks []apicompat.AnthropicContentBlock, collectImages, strict bool) (string, []cursorTurnImage, error) {
+//
+// 未知块类型的处置（2026-11-06 口径）：**序列化成定位标记**（历史与本批结果两侧
+// 用同一表示，摘要才能逐字节对齐），绝不整轮拒。原来 strict=true 会在结果侧抛错，
+// 那正是"客户只是多传了一种块，整轮就 400"的来源。
+func cursorToolResultContent(blocks []apicompat.AnthropicContentBlock, collectImages bool, skipped cursorSkipLedger) (string, []cursorTurnImage, error) {
 	var text strings.Builder
 	var images []cursorTurnImage
 	for _, inner := range blocks {
@@ -6474,22 +6472,23 @@ func cursorToolResultContent(blocks []apicompat.AnthropicContentBlock, collectIm
 			if collectImages {
 				if img, err := cursorAnthropicImage(inner); err == nil {
 					images = append(images, img)
+				} else {
+					skipped.note(cursorSkipImageInvalid)
 				}
 			}
 			encoded, jerr := json.Marshal(inner)
 			if jerr != nil {
-				return "", nil, fmt.Errorf("%w: anthropic tool_result image", ErrCursorResumeUnsupportedContent)
+				skipped.note(cursorSkipBadContent)
+				continue
 			}
 			text.WriteString("\x00block:")
 			text.Write(encoded)
 		default:
-			if strict {
-				return "", nil, fmt.Errorf("%w: tool_result block %q", ErrCursorResumeUnsupportedContent, inner.Type)
-			}
-			// 结果内的其他非文本内容原样参与摘要（不丢语义）。
+			// 未知块类型：原样序列化成定位标记参与摘要，不整轮拒。
+			skipped.note(cursorSkipUnsupportedPart)
 			encoded, jerr := json.Marshal(inner)
 			if jerr != nil {
-				return "", nil, fmt.Errorf("%w: anthropic tool_result block", ErrCursorResumeUnsupportedContent)
+				continue
 			}
 			text.WriteString("\x00block:")
 			text.Write(encoded)
@@ -6499,7 +6498,7 @@ func cursorToolResultContent(blocks []apicompat.AnthropicContentBlock, collectIm
 }
 
 // cursorAnthropicBlockItem 把单个内容块规范化为历史项（保留类型与内容顺序）。
-func cursorAnthropicBlockItem(role string, block apicompat.AnthropicContentBlock) (cursorContextItem, error) {
+func cursorAnthropicBlockItem(role string, block apicompat.AnthropicContentBlock, skipped cursorSkipLedger) (cursorContextItem, error) {
 	prefix := "messages." + role
 	switch block.Type {
 	case "text", "":
@@ -6536,7 +6535,7 @@ func cursorAnthropicBlockItem(role string, block apicompat.AnthropicContentBlock
 		// 与结果侧（cursorPlanFromMessages 尾部循环）共用同一表示：历史前缀重算
 		// 才能与本批结果的文本逐字节对齐。历史侧不收集图片（不出站），未知块按
 		// 既有口径序列化成标记，不因新增图片支持而让已存在的历史变成整轮失败。
-		text, _, err := cursorToolResultContent(content, false, false)
+		text, _, err := cursorToolResultContent(content, false, skipped)
 		if err != nil {
 			return cursorContextItem{}, err
 		}
@@ -6569,13 +6568,16 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 	plan := builder.plan()
 	systemBlocks, err := cursorAnthropicBlocks(req.System)
 	if err != nil {
-		return nil, err
+		// system 读不出来：丢掉整段 system（不整轮拒），正文照发。
+		plan.noteSkippedItem("messages_system_undecodable")
+		systemBlocks = nil
 	}
 	builder.in(cursorConfigSystem)
 	for _, block := range systemBlocks {
-		item, err := cursorAnthropicBlockItem("system", block)
-		if err != nil {
-			return nil, err
+		item, ierr := cursorAnthropicBlockItem("system", block, plan.skippedItems)
+		if ierr != nil {
+			plan.noteSkippedItem("messages_system_block_" + strings.ToLower(strings.TrimSpace(block.Type)))
+			continue
 		}
 		if err := builder.item(item.itemType, item.canonical); err != nil {
 			return nil, err
@@ -6638,7 +6640,8 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 		}
 		blocks, berr := cursorAnthropicBlocks(msg.Content)
 		if berr != nil {
-			return nil, berr
+			// 读不出来就当作"不是结果容器"，交给历史处理（2026-11-06 口径）。
+			break
 		}
 		if len(blocks) == 0 {
 			break
@@ -6658,22 +6661,28 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 	for _, msg := range req.Messages[start:] {
 		blocks, berr := cursorAnthropicBlocks(msg.Content)
 		if berr != nil {
-			return nil, berr
+			plan.noteSkippedItem("messages_result_undecodable")
+			continue
 		}
 		for _, block := range blocks {
 			if strings.TrimSpace(block.ToolUseID) == "" {
-				return nil, fmt.Errorf("%w: messages tool_result without tool_use_id", ErrCursorResumeAmbiguousResults)
+				// 无 tool_use_id 的结果无法与本轮任何调用配对：丢这一条并记账，
+				// 不整轮拒（客户少一条结果，也比整轮 400 好）。
+				plan.noteSkippedItem("messages_result_without_tool_use_id")
+				continue
 			}
 			inner, berr := cursorAnthropicBlocks(block.Content)
 			if berr != nil {
-				return nil, berr
+				plan.noteSkippedItem("messages_result_content_undecodable")
+				continue
 			}
 			// 与历史项规范化共用同一表示（cursorToolResultContent）：图片不再整轮
 			// 失败，而是解成可出站字节随结果发给上游（工具读图场景），文本里保留
 			// 与历史前缀完全一致的定位标记；未知块类型仍失败关闭。
-			text, images, terr := cursorToolResultContent(inner, true, true)
+			text, images, terr := cursorToolResultContent(inner, true, plan.skippedItems)
 			if terr != nil {
-				return nil, terr
+				plan.noteSkippedItem("messages_result_content_undecodable")
+				continue
 			}
 			plan.results = append(plan.results, CursorToolResult{
 				CallID:  strings.TrimSpace(block.ToolUseID),
@@ -6689,19 +6698,24 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 	for _, msg := range req.Messages[:start] {
 		role := strings.ToLower(strings.TrimSpace(msg.Role))
 		if role != "user" && role != "assistant" && role != "system" {
-			return nil, fmt.Errorf("%w: messages role %q", ErrCursorResumeUnsupportedContent, msg.Role)
+			// 未知角色：丢这一条（2026-11-06 口径），不整轮拒。
+			plan.noteSkippedItem("messages_role_" + role)
+			continue
 		}
 		blocks, berr := cursorAnthropicBlocks(msg.Content)
 		if berr != nil {
-			return nil, berr
+			plan.noteSkippedItem("messages_message_undecodable")
+			continue
 		}
 		for _, block := range blocks {
 			if role == "system" && block.Type != "text" && block.Type != "" {
-				return nil, fmt.Errorf("%w: system message block %q", ErrCursorResumeUnsupportedContent, block.Type)
+				plan.noteSkippedItem("messages_system_block_" + strings.ToLower(strings.TrimSpace(block.Type)))
+				continue
 			}
-			item, ierr := cursorAnthropicBlockItem(role, block)
+			item, ierr := cursorAnthropicBlockItem(role, block, plan.skippedItems)
 			if ierr != nil {
-				return nil, ierr
+				plan.noteSkippedItem("messages_block_" + strings.ToLower(strings.TrimSpace(block.Type)))
+				continue
 			}
 			if role == "system" {
 				if err := plan.configSystem.AppendItem(item.itemType, item.canonical); err != nil {
@@ -6769,7 +6783,10 @@ func cursorResponsesItemResultOutput(item apicompat.ResponsesInputItem) string {
 }
 
 // cursorResponsesItemItem 把单个 input 条目规范化为历史项（保留语义字段）。
-func cursorResponsesItemItem(item apicompat.ResponsesInputItem) (cursorContextItem, error) {
+//
+// 返回 error 只表示"这一条确实无法规范化"——**读侧调用方按「丢这一条」处理**
+// （见 cursorPlanFromResponses 的 noteSkippedItem 分支），不整轮拒。
+func cursorResponsesItemItem(item apicompat.ResponsesInputItem, skipped cursorSkipLedger) (cursorContextItem, error) {
 	itemType := strings.ToLower(strings.TrimSpace(item.Type))
 	switch itemType {
 	case "", "message":
@@ -6779,7 +6796,7 @@ func cursorResponsesItemItem(item apicompat.ResponsesInputItem) (cursorContextIt
 		default:
 			return cursorContextItem{}, fmt.Errorf("%w: responses message role %q", ErrCursorResumeUnsupportedContent, item.Role)
 		}
-		text, err := cursorChatContentText(item.Content)
+		text, err := cursorChatContentText(item.Content, skipped)
 		if err != nil {
 			return cursorContextItem{}, err
 		}
@@ -6928,7 +6945,10 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 
 	items, err := cursorResponsesInputItems(req.Input)
 	if err != nil {
-		return nil, err
+		// input 既不是字符串也不是条目数组：丢掉整段 input 并记账，不整轮拒。
+		// 如果丢掉之后确实没有可发送内容，会以 CUR-REQ-06 明说"缺什么"。
+		plan.noteSkippedItem("responses_input_undecodable")
+		items = nil
 	}
 	// 只剥离**尾部连续**的 output 条目（当前批），前缀必须完整匹配。
 	start := len(items)
@@ -6965,7 +6985,7 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 			}
 			plan.historyCallIDs[callID] = struct{}{}
 		}
-		digestItem, ierr := cursorResponsesItemItem(item)
+		digestItem, ierr := cursorResponsesItemItem(item, plan.skippedItems)
 		if ierr != nil {
 			// 认得类型但内容畸形（role 不认识、content 不是文本等）：丢这一条，
 			// 不整轮拒——一条畸形条目不该让整轮任务失败。
@@ -7186,11 +7206,10 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 			}
 			batchNames[name]++
 			if id == "" {
-				// 缺 ID：只有当同名调用唯一时才能唯一配对，否则明确拒绝歧义。
-				if batchNames[name] > 1 || nameCount[name] > 1 {
-					return nil, fmt.Errorf("%w: gemini parallel %q", ErrCursorResumeAmbiguousResults, name)
-				}
-				return nil, fmt.Errorf("%w: gemini functionResponse without id", ErrCursorResumeAmbiguousResults)
+				// 缺 ID 时只有"同名调用唯一"才能配对；否则丢这一条结果并记账，
+				// 不整轮拒（2026-11-06 口径）。
+				plan.noteSkippedItem("gemini_function_response_without_id")
+				continue
 			}
 			plan.results = append(plan.results, CursorToolResult{CallID: id, Text: []string{string(part["functionResponse"])}})
 		}
@@ -7204,7 +7223,9 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 			role = "user"
 		}
 		if role != "user" && role != "model" && role != "assistant" && role != "system" {
-			return nil, fmt.Errorf("%w: gemini role %q", ErrCursorResumeUnsupportedContent, content.Role)
+			// 未知角色：丢这一条 content，不整轮拒（2026-11-06 口径）。
+			plan.noteSkippedItem("gemini_role_" + role)
+			continue
 		}
 		if role == "assistant" {
 			role = "model"
@@ -7242,7 +7263,8 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 			}
 			encoded, err := json.Marshal(part)
 			if err != nil {
-				return nil, fmt.Errorf("%w: gemini part", ErrCursorResumeUnsupportedContent)
+				plan.noteSkippedItem("gemini_part_undecodable")
+				continue
 			}
 			if err := plan.history.AppendItem("gemini."+role+".part", encoded); err != nil {
 				return nil, err
@@ -8200,7 +8222,7 @@ func appendCursorDeliveredResultsToHistory(d *CursorHistoryDigest, protocol Curs
 				CallID: result.CallID,
 				Output: strings.Join(result.Text, ""),
 			}
-			digestItem, err := cursorResponsesItemItem(item)
+			digestItem, err := cursorResponsesItemItem(item, nil)
 			if err != nil {
 				return err
 			}

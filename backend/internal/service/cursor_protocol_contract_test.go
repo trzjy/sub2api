@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -65,7 +64,7 @@ func TestCursorResponsesPlanSkipsHostedSearchItem(t *testing.T) {
 	require.Equal(t, 1, plan.skippedItems["web_search_call"])
 }
 
-func TestCursorChatPlanRejectsToolCallsOnNonAssistantMessage(t *testing.T) {
+func TestCursorChatPlanSkipsToolCallsOnNonAssistantMessage(t *testing.T) {
 	req := &apicompat.ChatCompletionsRequest{
 		Model: "cursor-test-model",
 		Messages: []apicompat.ChatMessage{{
@@ -78,11 +77,17 @@ func TestCursorChatPlanRejectsToolCallsOnNonAssistantMessage(t *testing.T) {
 		}},
 	}
 
-	_, err := cursorPlanFromChat(req, req.Model)
-	require.ErrorIs(t, err, ErrCursorResumeUnsupportedContent)
+	// 2026-11-06 口径：user 上挂 tool_calls 是客户端拼错了，不是"整轮不可用"。
+	// 丢掉这些调用字段、保留文本，并记账——不能因为它把整轮打成 400。
+	plan, err := cursorPlanFromChat(req, req.Model)
+	require.NoError(t, err)
+	require.Equal(t, 1, plan.skippedItems["chat_call_fields_outside_assistant"],
+		"丢弃原因要记账，实际=%s", plan.skippedItems.summary())
 }
 
-func TestCursorInboundProtocolErrorsAreClient400(t *testing.T) {
+// 2026-11-06 口径：这两类入站形状**不再**返回 400，而是丢弃后继续本轮。
+// 历史：它们曾经是 TestCursorInboundProtocolErrorsAreClient400 的用例。
+func TestCursorInboundShapesAreDroppedNotRejected(t *testing.T) {
 	ctx := context.Background()
 	account := &Account{Platform: PlatformCursor}
 	exec := newCursorLifecycleTestService()
@@ -90,25 +95,21 @@ func TestCursorInboundProtocolErrorsAreClient400(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{name: "chat continuation", run: func() error {
+		{name: "chat tool_calls on user message", run: func() error {
 			_, err := cursorExecuteChat(ctx, nil, exec, account, []byte(`{"model":"cursor-test-model","messages":[{"role":"user","content":"hello","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}]}`))
 			return err
 		}},
-		{name: "anthropic continuation", run: func() error {
+		{name: "anthropic unknown role", run: func() error {
 			_, err := cursorExecuteAnthropic(ctx, nil, exec, account, &apicompat.AnthropicRequest{Model: "cursor-test-model", Messages: []apicompat.AnthropicMessage{{Role: "developer", Content: json.RawMessage(`"do not demote me"`)}}})
 			return err
 		}},
-		// Responses 侧已改成"丢弃 + 记账"（见 TestCursorResponsesPlanSkipsHostedSearchItem）：
-		// 旁支条目与未知类型都不再整轮拒，所以这里不再列它。
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.run()
 			var resumeErr *CursorResumeError
-			require.True(t, errors.As(err, &resumeErr))
-			status, reason := CursorResumeHTTPStatus(err)
-			require.Equal(t, http.StatusBadRequest, status)
-			require.Equal(t, "unsupported_content", reason)
+			require.False(t, errors.As(err, &resumeErr),
+				"这类形状必须丢弃继续本轮，不能变成续轮错误：%v", err)
 		})
 	}
 }
