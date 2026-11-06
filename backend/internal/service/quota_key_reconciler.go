@@ -518,8 +518,10 @@ func (r *QuotaKeyReconciler) runOnce() {
 		return
 	}
 	if candidateCount == 0 {
-		// 无候选 key：停止补池并记录原因（可能是每码都满 5 个了，或全部死在冷却/密钥无效）。
-		r.recordHeartbeat(ctx, runAt, true, nil, "no candidate keys for any allowed model", sourceUsage)
+		// 无候选 key：按 2026-11-06 口径，唯一成因是"每个有效码名下都已有 5 个号"，
+		// 或剩下的码都是死码。冷却、今日额度、余额这些已不再参与筛选，所以不再罗列。
+		r.recordHeartbeat(ctx, runAt, true, nil,
+			"no pullable quota key this round (every active key already has its 5 accounts)", sourceUsage)
 		return
 	}
 	if r.pullByBudget {
@@ -544,8 +546,9 @@ type pullBudgetRound struct {
 
 // pullByBudgetRound 遍历本轮全部有效码，每码各拉一次（D4/D5）。
 //
-// 候选由 provider 负责筛：active / 未过期 / 未软删 / 未 exhausted / 未满容量（< 5 个）/
-// 未在冷却窗口 / 不是密钥级死码。这里只做"同轮不重复"去重与结果计数。
+// 候选由 provider 负责筛：active / 未过期 / 未软删 / 未 exhausted /
+// 名下账号数不足 5 个（CursorAutoPullAccountsPerKey）/ 不是密钥级死码。
+// 冷却窗口自 2026-11-06 用户裁定起不再参与筛选。这里只做"同轮不重复"去重与结果计数。
 //
 // 与旧水位路径的区别：不再"拉一次就重算总量、达标即停"——目标从"池子总数够 10"变成
 // "每个码自己够 5 个"，总量与真实可用性脱钩（额度耗尽的号也算总量）是旧口径失效的原因。

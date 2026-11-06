@@ -45,9 +45,11 @@ const MaxAccountsPerQuotaKey = 50
 // 「400 分到底要几个号」这个账才能算清楚。
 const CursorAutoPullAccountsPerKey = 5
 
-// quotaKeyCooldownWindow 是 shareai 上游实测的刷新冷却窗口（方案 §10 #26）。带冷却标记的 key
-// 在 last_refresh_at 距今不足该窗口内不进入补池候选；窗口期满后自动重新入选，无需人工 clear。
-// 写成包内常量并注明出处，不引入可配置项（裁定 3）。
+// quotaKeyCooldownWindow 是 shareai 上游实测的刷新冷却窗口（方案 §10 #26）。
+//
+// 注意（2026-11-06 起）：该窗口**不再参与补池候选过滤**——用户裁定拉号只看号数
+// （少于 5 个就拉），冷却窗口属于"推断出来的状态"，不得到此为止挡住号不够的码。
+// 常量保留用于错误分类与展示判定（日志分级、看板区分限流与真失败）。
 const quotaKeyCooldownWindow = 5 * time.Minute
 
 // QuotaKeyRepository 是 QuotaKeyService 依赖的存储契约。
@@ -2216,8 +2218,11 @@ func waterLevelAdmissionGroup(g *ent.Group) *Group {
 
 // isCooldownRefreshError 判定该 key 的 last_refresh_error 是否为【冷却】类错误。
 // 判据是错误分类（错误链是否包 ErrUpstreamCooldown），而非时间：冷却错误由 writeCooldownMarker
-// 以 fmt.Errorf("%w: ...", ErrUpstreamCooldown, ...) 写入，故以哨兵前缀识别。非冷却错误
-// （exhausted / 插入失败 / 未知结果）即使时间久远也不得被当成限频而重新入选。
+// 以 fmt.Errorf("%w: ...", ErrUpstreamCooldown, ...) 写入，故以哨兵前缀识别。
+//
+// 注意（2026-11-06 起）：本函数**不再参与 ListCandidateKeys 的候选过滤**——用户裁定
+// 拉号只看号数，冷却窗口挡拉号属于"用推断状态挡住号不够的码"，已删除。现仅用于
+// 错误分类与展示层判断（如日志、看板区分限流与真失败）。
 func isCooldownRefreshError(errStr *string) bool {
 	if errStr == nil {
 		return false
@@ -2256,24 +2261,21 @@ func isDeadKeyRefreshError(errStr *string) bool {
 	return false
 }
 
-// ListCandidateKeys 返回池级（不按模型收窄）需要补池的候选 quota_key ID：
-// active + 非 exhausted + 未过期 + 未软删 + 有剩余容量（working < MaxAccountsPerQuotaKey）。
-// limit>0 时由实现方按需截断（reconciler 传入的是总量缺口）；模型 M 不收窄候选集——
-// 挂载语义由 PullAccountsForModel 决定目标分组。
+// ListCandidateKeys 返回池级（不按模型收窄）需要补池的候选 quota_key ID。
 //
-// P1-D2 总量制：缺号驱动由"cursor 可服务账号总量 < 10"触发，候选集与具体模型无关，
-// 故此处对全部有效码统一预检后返回（单码语义不变：只按 key 自身状态过滤、不做跨模型展开；
-// 每码 MaxAccountsPerQuotaKey=15 上限与非幂等保护均保持不变）。
+// 判据（2026-11-06 用户裁定，二次收敛 —— 唯一一条）：
 //
-// 裁定 3 冷却规则（last_refresh_error IS NULL 这一永久排除已删除，不得换皮重演）：
-//   - 冷却类错误（last_refresh_error 包 ErrUpstreamCooldown）且距 last_refresh_at 不足
-//     quotaKeyCooldownWindow（5min，shareai 实测窗口）→ 跳过（仍在冷却）；
-//   - 冷却类错误但窗口已过 → 自动重新入选（不等人工 clear）；
-//   - 非冷却错误（未知/普通上游失败）只写 last_refresh_error、不动 exhausted
-//     （CUR-P1-FIX-KEY-EXHAUSTED：未知失败不得推导停供），故该类 key 仍留在候选集内，
-//     其时间流逝不产生任何限频豁免（不进入冷却窗口判定，窗口仅认冷却类错误）；
-//     真正被上方查询排除的是两类已确认事实：status 已非 active（含上游确认过期的 expired）
-//     与插入失败标记的 exhausted=true。
+//	这个码名下还有几个号：少于 CursorAutoPullAccountsPerKey(5) 个就入选，够 5 个就不入选。
+//
+// 除此之外不做任何叠加过滤：不看余额、不看水位、不看今天拉过几次、不看上次错误是不是冷却。
+// 用户原话："有 5 个号，就不再拉，少于 5 个号就拉，其他条件都不需要设。"
+//
+// 保留的排除项不是"业务条件"，而是"这个码还成立"的前提：
+//   - status 非 active / exhausted / 已软删 / 已过期：这些码拉号必失败；
+//   - 密钥级死码（上游明确说该密钥不存在 / 无效 / 已过期）：拉一万次也拉不出号，等人工换码。
+//
+// 优先级顺序（用户裁定 2026-11-03）：候选按 quota_keys.priority 升序（数值越小越优先），
+// 同优先级按 id 升序稳定输出。
 //
 // 优先级顺序（用户裁定 2026-11-03）：候选按 quota_keys.priority 升序（数值越小越优先），
 // 同优先级按 id 升序稳定输出。这样补池时先拉"优先码"（日限额码）的号，月总限额码排在后面
@@ -2299,12 +2301,10 @@ func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, li
 			// 只会每轮给上游送一次无效请求并把心跳写成失败。等人工换码。
 			continue
 		}
-		if isCooldownRefreshError(k.LastRefreshError) {
-			if k.LastRefreshAt != nil && now.Sub(*k.LastRefreshAt) < quotaKeyCooldownWindow {
-				continue // 冷却窗口内：跳过，不进入候选
-			}
-			// 冷却窗口已过：自动重新入选（fall through）。
-		}
+		// 2026-11-06 用户裁定（二次收敛）：候选只认一条——这个码名下还有没有满 5 个号。
+		// 原"5 分钟冷却窗口内不入选"的过滤已删除：冷却只是限频状态，不该把"号不够"的码
+		// 挡在候选之外，那正是"号池告急却永远不补号"的成因之一。
+		// 死码过滤保留（上游明确说密钥作废，不是推断状态）。
 		working, werr := w.client.Account.Query().
 			Where(account.QuotaKeyID(k.ID), account.DeletedAtIsNil()).
 			Count(ctx)

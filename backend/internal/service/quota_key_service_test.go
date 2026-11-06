@@ -2288,23 +2288,23 @@ func TestQuotaKeyModelWater_ListCandidateKeysFiltersByKeyState(t *testing.T) {
 	_, err = client.QuotaKey.UpdateOneID(keyExpired.ID).SetExpiresAt(time.Now().Add(-time.Hour)).Save(ctx)
 	require.NoError(t, err)
 	keyCooldown := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	// 裁定 3：冷却判定基于错误【分类】（前缀 ErrUpstreamCooldown）+ 5 分钟窗口，而非
-	// last_refresh_error 是否非空。故此处用冷却分类前缀错误 + 近期 last_refresh_at，
-	// 使该 key 落入冷却窗口内、被排除。
+	// 2026-11-06 用户裁定后：冷却分类前缀 + 近期 last_refresh_at **不再**让码退出候选，
+	// 因为拉号只看号数。此处构造该状态，用来反向断言"冷却挡不住号数不足的码"。
 	_, err = client.QuotaKey.UpdateOneID(keyCooldown.ID).
 		SetLastRefreshError(ErrUpstreamCooldown.Error() + ": 每5分钟内仅可刷新1次").
 		SetLastRefreshAt(time.Now()).
 		Save(ctx)
 	require.NoError(t, err)
 	keyFull := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	mustCreateAccounts(t, client, keyFull.ID, MaxAccountsPerQuotaKey) // working=15 → 无剩余容量
+	mustCreateAccounts(t, client, keyFull.ID, MaxAccountsPerQuotaKey) // 号数 ≥ 5 → 自动补位已满
 
 	cands, err := w.ListCandidateKeys(ctx, "cursor-fix1-cand", 0)
 	require.NoError(t, err)
 	require.Contains(t, cands, keyOK.ID, "active key with capacity must be a candidate")
 	require.NotContains(t, cands, keyExhausted.ID, "exhausted key must be excluded")
 	require.NotContains(t, cands, keyExpired.ID, "expired key must be excluded")
-	require.NotContains(t, cands, keyCooldown.ID, "cooldown (last_refresh_error set) key must be excluded")
+	require.Contains(t, cands, keyCooldown.ID,
+		"cooldown marker must NOT exclude a key with < 5 accounts (2026-11-06 裁定：只看号数)")
 	require.NotContains(t, cands, keyFull.ID, "key with no remaining capacity must be excluded")
 }
 
@@ -2907,8 +2907,10 @@ func TestCURF1_UpstreamClassify_UnknownCode1FailsClosed(t *testing.T) {
 		"unknown code=1 error text must preserve the original msg verbatim (fail-closed)")
 }
 
-// TestCURF1_CandidateKeys_CooldownWindow（5，冷却 5 分钟窗口内外）：
-// 带冷却标记且 last_refresh_at=now-1min → 候选排除；=now-6min → 自动重新入选（不等人工 clear）。
+// TestCURF1_CandidateKeys_CooldownWindow（5，冷却不再参与候选过滤）：
+// 2026-11-06 用户裁定："有 5 个号，就不再拉，少于 5 个号就拉，其他条件都不需要设。"
+// 故冷却标记（无论窗口内 now-1min 还是窗口外 now-6min）都不再把"号数不足"的码挡在候选之外，
+// 两个时间点都必须入选。旧行为（窗口内排除 / 窗口外重新入选）已随裁定废弃。
 func TestCURF1_CandidateKeys_CooldownWindow(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -2918,7 +2920,7 @@ func TestCURF1_CandidateKeys_CooldownWindow(t *testing.T) {
 	// 冷却错误标记：前缀须为 ErrUpstreamCooldown.Error()（与 writeCooldownMarker 写入形态一致）。
 	cooldownErr := ErrUpstreamCooldown.Error() + ": 每5分钟内仅可刷新1次"
 
-	// 窗口内（now-1min）：排除。
+	// 窗口内（now-1min）：冷却窗口不得阻挡拉号 → 仍入选。
 	_, err := client.QuotaKey.UpdateOneID(qk.ID).
 		SetLastRefreshError(cooldownErr).
 		SetLastRefreshAt(time.Now().Add(-1 * time.Minute)).
@@ -2926,9 +2928,10 @@ func TestCURF1_CandidateKeys_CooldownWindow(t *testing.T) {
 	require.NoError(t, err)
 	cands, err := w.ListCandidateKeys(ctx, "cursor-f1-cool", 0)
 	require.NoError(t, err)
-	require.NotContains(t, cands, qk.ID, "cooldown within 5min window must exclude the key")
+	require.Contains(t, cands, qk.ID,
+		"cooldown marker must not exclude a key with < 5 accounts (no cooldown window filtering)")
 
-	// 窗口外（now-6min）：自动重新入选（不必人工 clear）。
+	// 窗口外（now-6min）：同样入选（行为与窗口内一致）。
 	_, err = client.QuotaKey.UpdateOneID(qk.ID).
 		SetLastRefreshAt(time.Now().Add(-6 * time.Minute)).
 		Save(ctx)
@@ -2936,7 +2939,7 @@ func TestCURF1_CandidateKeys_CooldownWindow(t *testing.T) {
 	cands, err = w.ListCandidateKeys(ctx, "cursor-f1-cool", 0)
 	require.NoError(t, err)
 	require.Contains(t, cands, qk.ID,
-		"cooldown past 5min window must auto re-include the key (no manual clear)")
+		"cooldown marker must not exclude the key regardless of elapsed time")
 }
 
 // TestCURF1_CandidateKeys_NonCooldownNotReinstatedByTime（6，非冷却错误不得因时间被当冷却）：
