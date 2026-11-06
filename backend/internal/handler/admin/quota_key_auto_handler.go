@@ -327,6 +327,19 @@ func (h *QuotaKeyHandler) RefreshAutoPool(c *gin.Context) {
 		if st.Notes == nil || !strings.HasPrefix(*st.Notes, autoPoolNotesPrefix) {
 			continue
 		}
+		// 刷新资格过滤：与启动回放（CursorDynamicPool.LoadFromRepository）同一口径，
+		// 只刷新仍有资格入池的行——已过期 / 过期时间已落表 / bind=failed 的行不应触发
+		// 上游刷新，也不应被后续 reconcile 重新纳管（闭合外审 R12 P1-1）。
+		// 注意：last_refresh_error 非空的行**仍要刷新**（这是恢复路径，这里不过滤）。
+		if st.Status != domain.QuotaKeyStatusActive {
+			continue
+		}
+		if st.ExpiresAt != nil && st.ExpiresAt.Before(time.Now()) {
+			continue
+		}
+		if strings.Contains(*st.Notes, autoPoolBindFailedMarker) {
+			continue
+		}
 		devCode, devMD5, ok := parseAutoPoolDeviceFromNotes(*st.Notes)
 		if !ok {
 			failed++

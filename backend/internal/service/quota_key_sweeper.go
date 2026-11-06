@@ -272,9 +272,11 @@ func (s *QuotaKeySweeper) sweepLateExpiredPoolCards(ctx context.Context, done ma
 			cardErr := WithAutoCardSync(id, func() error {
 				qk, gerr := s.repo.GetByID(ctx, id)
 				if gerr != nil {
+					// 读取失败：保留未完成状态（不标 done），让 cardErr 传播 ——
+					// 最终进入 firstErr → runOnce 记失败心跳、SweepNow 返回错误（闭合外审 R12 P1-2）。
+					// 后续轮次不再被 done 跳过，可在 ≤3 轮内重试。
 					log.Printf("[QuotaKeySweep] late sweep reload card %d failed: %v", id, gerr)
-					done[id] = true
-					return nil
+					return gerr
 				}
 				// 无状态需要处理（已软删/未到期）：复核注销后结束本卡。
 				if qk == nil || qk.ExpiresAt == nil || !qk.ExpiresAt.Before(time.Now()) {
