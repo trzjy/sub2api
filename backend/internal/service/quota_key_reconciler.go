@@ -111,6 +111,14 @@ type QuotaKeyReconciler struct {
 	// （只影响观测职责，不影响既有补池行为）。
 	usageObserver quotaKeyUsageObserver
 
+	// accountStopSink 是码级停调窄面（D9）：激活码额度见底时把名下账号一起停到最近的
+	// 码级恢复点（19:00 / 次日 08:00），恢复后按原因前缀精确清除。nil 时跳过该职责。
+	accountStopSink quotaKeyAccountStopSink
+
+	// lastDailyStatsRollupAt 是每日额度统计汇总的上次执行时刻（每小时一次，D2 统计设计）。
+	// 只在 loop 单 goroutine 内读写，无需加锁。
+	lastDailyStatsRollupAt time.Time
+
 	// coalescer 提供单 flight + pending wakeup：同一 key 在拉号中再次被请求时合并，
 	// 拉号结束后若有 pending 则补拉一次。
 	coalescer *pullCoalescer
@@ -296,6 +304,14 @@ func (r *QuotaKeyReconciler) runOnce() {
 		usageRefresh := r.refreshSourceUsage(ctx)
 		sourceUsage = usageRefresh.summary(true)
 	}
+
+	// D9：把激活码额度状态同步到名下账号的停调状态（必须在额度刷新之后，用的是本轮新数据）。
+	// 与"是否要补号"无关：码见底了照样要停号，补不补是另一条线。
+	r.sweepQuotaKeyLevelStops(ctx)
+
+	// D2 统计：每小时把"昨天 + 今天"的账号用量事实汇总进 cursor_account_daily_quota_stats，
+	// 为"每码每天 400 分被几个号烧光 / 每个号每天到底能扛多少"沉淀实测数据。
+	r.rollupCursorDailyQuotaStats(ctx)
 
 	// 提供方未接入（C11 接线前）：本轮无候选，停拉并记录原因。
 	if r.modelWater == nil {

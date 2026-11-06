@@ -49,8 +49,12 @@ func CursorUserFacingError(ctx context.Context, err error) (status int, code, me
 		zh = cursorRequestCodeMessage(reqErr.Code)
 	case errors.Is(err, context.DeadlineExceeded):
 		status, code, zh = http.StatusGatewayTimeout, infraerrors.CursorExecDeadlineExceededCode, infraerrors.CursorExecDeadlineExceeded
-	case errors.Is(err, ErrCursorKeyRejectedUpstream),
-		errors.Is(err, ErrCursorRelayAuthRejected),
+	case errors.Is(err, ErrCursorKeyRejectedUpstream):
+		// 上游正文注入「密钥已过期或额度耗尽，请续费后使用」——这是**可信的额度/凭据
+		// 耗尽信号**（带"请续费"语义、密钥级终态），2026-11-06 起单独给 CUR-EXEC-12，
+		// 与那句挡板话术（CUR-EXEC-11）区分开。绝不透传上游原文（含账号卡 ID）。
+		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecAccountRejectedCode, infraerrors.CursorExecAccountRejected
+	case errors.Is(err, ErrCursorRelayAuthRejected),
 		errors.Is(err, ErrCursorAuthMaterialUnavailable),
 		errors.Is(err, ErrCursorQuotaKeyUnresolved),
 		errors.Is(err, ErrCursorAccountBearerMissing):

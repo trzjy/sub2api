@@ -622,6 +622,29 @@ func (s *OpenAIGatewayService) tempUnscheduleCursorAccountExhausted(ctx context.
 	tempUnscheduleCursorQuotaExhausted(ctx, s.accountRepo, accountID, "[cursor-exec:"+reason+"]")
 }
 
+// tempUnscheduleCursorAccountRateLimited 是 CursorExecutionService 的「账号被上游限流」回调实现。
+//
+// 与额度耗尽回调刻意分开：限流只停 cursorRateLimitedCooldown（2 分钟），额度耗尽才按日停。
+// 二者共用回调是本轮事故的根因——一次 429 就能把整个激活码名下的账号全部按日摘掉。
+func (s *OpenAIGatewayService) tempUnscheduleCursorAccountRateLimited(ctx context.Context, accountID int64, reason string) {
+	if s == nil || s.accountRepo == nil || accountID <= 0 {
+		return
+	}
+	tempUnscheduleCursorRateLimited(ctx, s.accountRepo, accountID, "[cursor-exec:"+reason+"]")
+}
+
+// tempUnscheduleCursorProtocolPollution 把「内联工具调用救不回来」的账号按上游故障处理。
+//
+// 用 5 分钟短冷却而不是额度耗尽的 20 分钟：这不是账号没额度，而是它背后的真实模型
+// 这一轮不按规矩说话（上游随机轮换），属分钟级抖动。冷却到期自动回池，首笔真实请求
+// 即探测——正常则继续服务，仍污染则再次命中本分支继续冷却。
+func (s *OpenAIGatewayService) tempUnscheduleCursorProtocolPollution(ctx context.Context, accountID int64, reason string) {
+	if s == nil || s.accountRepo == nil || accountID <= 0 {
+		return
+	}
+	tempUnscheduleCursorUpstreamFailure(ctx, s.accountRepo, accountID, "[cursor-exec:"+reason+"]")
+}
+
 // ResolveChannelMapping 解析渠道级模型映射（代理到 ChannelService）
 func (s *OpenAIGatewayService) ResolveChannelMapping(ctx context.Context, groupID int64, model string) ChannelMappingResult {
 	if s.channelService == nil {

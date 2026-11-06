@@ -66,8 +66,12 @@ func TestLocalizeUserAvailableGroups(t *testing.T) {
 
 // 用户侧 handler 输出带分组的 DTO 时必须经过 Localized，否则分组名称与描述会
 // 停留在原字段，并把译文表原样带给用户。管理端（handler/admin）不在此列。
+//
+// 2026-11-06 修正误报：函数名本身以 Localized 结尾的转换器（如
+// dto.APIKeyFromServiceForUserLocalized）已经按 Accept-Language 产出译文，
+// 调用处不需要也不应该再链一次 .Localized(——按字面匹配会把它当成未本地化。
 func TestUserFacingGroupDTOsAreLocalized(t *testing.T) {
-	mapperCall := regexp.MustCompile(`dto\.(APIKey|UserSubscription|RedeemCode|UsageLog|Group)FromService[A-Za-z]*\(`)
+	mapperCall := regexp.MustCompile(`dto\.((?:APIKey|UserSubscription|RedeemCode|UsageLog|Group)FromService[A-Za-z]*)\(`)
 
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
@@ -80,10 +84,14 @@ func TestUserFacingGroupDTOsAreLocalized(t *testing.T) {
 		source, err := os.ReadFile(file)
 		require.NoError(t, err)
 		for i, line := range strings.Split(string(source), "\n") {
-			if !mapperCall.MatchString(line) {
+			matched := mapperCall.FindStringSubmatch(line)
+			if matched == nil {
 				continue
 			}
 			checked++
+			if strings.HasSuffix(matched[1], "Localized") {
+				continue
+			}
 			require.Containsf(t, line, ".Localized(",
 				"%s:%d outputs a group DTO without Localized(Accept-Language)", file, i+1)
 		}

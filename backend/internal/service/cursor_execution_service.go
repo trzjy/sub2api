@@ -181,6 +181,22 @@ type CursorExecutionService struct {
 	// （schedulable=false），不能靠重试自愈；同一请求应换到别的账号继续。本回调由装配层注入，
 	// 负责把账号置为不可调度。未注入（nil）时安全 no-op，行为与本卡之前完全一致。
 	accountExhaustedHandler func(ctx context.Context, accountID int64, reason string)
+	// accountRateLimitedHandler 是「账号被上游限流」回调（2026-11-06 拆包）。
+	//
+	// 必须与 accountExhaustedHandler 分开：限流是秒/分钟级瞬时状态，额度耗尽要等到
+	// 次日 8:00 重置。两者原先共用同一个回调，导致每一次 429 限流都被写成"当日额度
+	// 耗尽"并按日停调——生产实证（2026-11-06 02:28）单码 15 个账号在 1 秒内被同一次
+	// 429 全部摘出候选池，这是"号池没有可用账号"的直接成因。
+	//
+	// 未注入（nil）时退化为只换号、不停号。
+	accountRateLimitedHandler func(ctx context.Context, accountID int64, reason string)
+	// accountProtocolFailureHandler 是「上游协议污染」回调（2026-11-04 活体补装）。
+	//
+	// 与额度耗尽不同：这类故障不是账号没额度，而是账号背后的真实模型被上游随机
+	// 轮换，某一轮把工具调用吐进正文、且救不回来。此时本轮已经无法交付有效结果，
+	// 但账号本身没坏——用短冷却把它移出候选池，让下一次请求换号即可，不能像额度
+	// 耗尽那样长时间摘号，也不能什么都不做（粘性会话会一直粘着它）。
+	accountProtocolFailureHandler func(ctx context.Context, accountID int64, reason string)
 }
 
 // cursorWaitingToolsIdleTimeout 是 waiting_tools 状态允许的最长静默时间（方案 §2.5）。
@@ -211,6 +227,29 @@ func (s *CursorExecutionService) SetAccountExhaustedHandler(fn func(ctx context.
 		return
 	}
 	s.accountExhaustedHandler = fn
+}
+
+// SetAccountRateLimitedHandler 注入「账号被上游限流」回调，与 SetAccountExhaustedHandler 同型。
+//
+// 两个回调必须分开：限流→分钟级冷却，额度耗尽→等次日 8:00 重置。混用会把好号按日摘掉。
+func (s *CursorExecutionService) SetAccountRateLimitedHandler(fn func(ctx context.Context, accountID int64, reason string)) {
+	if s == nil {
+		return
+	}
+	s.accountRateLimitedHandler = fn
+}
+
+// SetAccountProtocolFailureHandler 注入「上游协议污染」回调。
+//
+// 触发场景：本轮产物里出现工具调用暗号但一个都解析不出来（InlineToolCallSuspected）。
+// 这一刻客户端已经拿到了一轮"看起来正常、实际什么都没有"的结束，用户侧只会看到
+// 模型答应了却没动静。粘性会话会把用户继续摁在同一个账号上反复复现，所以必须让
+// 该账号短暂退出候选池。未注入时 no-op，行为与注入前一致。
+func (s *CursorExecutionService) SetAccountProtocolFailureHandler(fn func(ctx context.Context, accountID int64, reason string)) {
+	if s == nil {
+		return
+	}
+	s.accountProtocolFailureHandler = fn
 }
 
 // NewCursorExecutionService 构造唯一执行部件。
@@ -532,7 +571,12 @@ func (s *CursorExecutionService) Execute(
 		isAutoReq := isCursorAutoRequest(account, originalModel)
 		if code, ok := cursorUpstreamStreamErrorCode(err); ok && code == "ERROR_PRO_USER_RATE_LIMIT_EXCEEDED" {
 			// 限流路径：Info 级一条（含 account_id 与 code），正常路径不额外写日志。
-			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_exhausted", originalModel,
+			//
+			// 2026-11-06 拆包：这里原本走 accountExhaustedHandler，把"限流"当"当日额度
+			// 耗尽"处理。生产实证 02:28 一次 429 让单码 15 个账号在 1 秒内全被摘出候选池
+			// 并停到次日 8:05，而同码当天没有任何「今日额度已用完」记录。限流必须走短冷却，
+			// 否则一次上游抖动就能把整个码清空。
+			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_rate_limited", originalModel,
 				zap.Int64("account_id", account.ID), zap.String("code", code))
 
 			// 外审 P1 修复：流内限流错误同步标记动态 Token 为冷却并解绑会话
@@ -547,15 +591,15 @@ func (s *CursorExecutionService) Execute(
 
 			// 动作 A：无论是否已发布正文字节，停号回调只调用一次；回调报错（含 panic）只记 Warn，
 			// 绝不改变返回的错误类型与换号语义。
-			if s.accountExhaustedHandler != nil {
+			if s.accountRateLimitedHandler != nil {
 				func() {
 					defer func() {
 						if r := recover(); r != nil {
-							cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_exhausted_handler_panic", originalModel,
+							cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_rate_limited_handler_panic", originalModel,
 								zap.Int64("account_id", account.ID), zap.Any("panic", r))
 						}
 					}()
-					s.accountExhaustedHandler(ctx, account.ID, "cursor upstream quota exhausted (rate limited)")
+					s.accountRateLimitedHandler(ctx, account.ID, "cursor account rate limited (upstream stream code)")
 				}()
 			}
 			// 动作 B（外审 B3 加固）：仅当本 HTTP 尚未发布正文字节，且会话从未交付过工具批
@@ -566,21 +610,24 @@ func (s *CursorExecutionService) Execute(
 					StatusCode:        429,
 					Stage:             GatewayFailureStage("upstream"),
 					Scope:             GatewayFailureScopeAccount,
-					Reason:            CursorQuotaExhaustedReason,
+					Reason:            CursorRateLimitedReason,
 					NextAccountAction: NextAccountRetry,
 					ClientStatusCode:  429,
-					ClientMessage:     "cursor 账号额度耗尽，已停止调度",
+					ClientMessage:     "cursor 账号被上游限流，已切换账号",
 				}
 			}
 			return
 		}
-		// 流内「今日额度已用完」模板（CursorQuotaExhaustedError）：与 EndStream 限流 code
-		// 同级——账号当日额度耗尽，账号级终态。同款处置：停号回调 + 未发布字节时替换为
-		// 可换号 failover；绝不把上游原文（含卡 ID）透传给客户端。
+		// 流内「今日额度已用完」模板（CursorQuotaExhaustedError）。
+		//
+		// 2026-11-06 定性更正：这句文案不是余额判定，是上游对单个账号状态异常的挡板话术
+		// （三重排他证据见 downstream_messages.go CUR-EXEC-11 注释）。处置相应改为：
+		// 走账号级短冷却（5 分钟）+ 换号，不再按日停调；对外文案不再声称"额度耗尽"。
+		// 仍绝不把上游原文（含卡 ID）透传给客户端。
 		var qe *CursorQuotaExhaustedError
 		if errors.As(err, &qe) {
-			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_exhausted", originalModel,
-				zap.Int64("account_id", account.ID), zap.String("code", "in_stream_quota_exhausted"),
+			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_blocked_by_upstream", originalModel,
+				zap.Int64("account_id", account.ID), zap.String("code", "in_stream_quota_template"),
 				zap.String("turn_id", qe.TurnID))
 			if s.accountExhaustedHandler != nil {
 				func() {
@@ -590,7 +637,7 @@ func (s *CursorExecutionService) Execute(
 								zap.Int64("account_id", account.ID), zap.Any("panic", r))
 						}
 					}()
-					s.accountExhaustedHandler(ctx, account.ID, "cursor upstream account daily quota exhausted (in-stream template)")
+					s.accountExhaustedHandler(ctx, account.ID, "cursor upstream claimed daily quota exhausted (in-stream template)")
 				}()
 			}
 			if !session.bodyPublished && session.deliveredBatchSeq == 0 {
@@ -601,7 +648,7 @@ func (s *CursorExecutionService) Execute(
 					Reason:            CursorQuotaExhaustedReason,
 					NextAccountAction: NextAccountRetry,
 					ClientStatusCode:  429,
-					ClientMessage:     "cursor 账号额度耗尽，已停止调度",
+					ClientMessage:     "cursor 账号暂时不可用，已切换账号",
 				}
 			}
 			return

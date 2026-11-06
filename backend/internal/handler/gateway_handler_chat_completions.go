@@ -550,9 +550,33 @@ func (h *GatewayHandler) chatCompletionsErrorResponse(c *gin.Context, status int
 	})
 }
 
+// isAlreadyRelayedUpstreamErrorEvent 判定 failover 体是否为「上游自己发出的错误事件」。
+//
+// 形状：{"error":{"type":"overloaded_error",...}} 或流内的 {"type":"error","error":{...}}。
+// 这类错误在流内已经原样写给客户端，网关不应该再补第二条错误帧。
+//
+// 首字节超时是网关自己合成的（error.type=upstream_first_byte_timeout），不算上游错误事件，
+// 它的错误体必须继续由 M1 帧分支写出，故这里显式排除。
+func isAlreadyRelayedUpstreamErrorEvent(body []byte) bool {
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return false
+	}
+	if !gjson.GetBytes(body, "error").Exists() {
+		return false
+	}
+	return gjson.GetBytes(body, "error.type").String() != service.UpstreamFirstByteTimeoutType
+}
+
 // handleCCFailoverExhausted writes a failover-exhausted error in CC format.
 func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *service.UpstreamFailoverError, streamStarted bool) {
 	if streamStarted {
+		// 2026-11-06 修：上游过载等错误事件在流内已经透传给客户端了，此时再补一条网关
+		// 错误帧会让客户端收到两个终止事件；而且网关只能靠猜原因——这里原先一律写
+		// "首字节超时"，把"上游过载"硬说成"超时"，既误导排查，也让计费/重试判定失真。
+		// 已经写出去的错误内容就是客户端的终止事件，网关不再画蛇添足。
+		if lastErr != nil && c.Writer.Size() > 0 && isAlreadyRelayedUpstreamErrorEvent(lastErr.ResponseBody) {
+			return
+		}
 		// 流已开始（心跳已提交 SSE 200）：预算耗尽不得静默 EOF，必须写出协议合规的
 		// 流内错误帧，使客户端识别为错误而非"用户主动取消"（方案文档 §1.4）。
 		// 文案与 type 取自 SSOT（M1-a / M1-e），不含 abort/cancel 类触发词，且携带可区分
@@ -577,7 +601,7 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 	}
 	// 2026-11-04 方案 §2.4-7：Cursor 账号池真耗尽（全是额度耗尽/拒付账号）统一中文终态
 	// CUR-RES-11，不再透出上游原文或内部 reason。
-	if lastErr != nil && service.IsCursorQuotaExhaustedReason(lastErr.Reason) {
+	if lastErr != nil && service.IsCursorPoolUnavailableReason(lastErr.Reason) {
 		message := cursorPoolExhaustedMessage(c)
 		status := cursorPoolExhaustedStatus(lastErr)
 		service.SetOpsUpstreamError(c, status, message, "")

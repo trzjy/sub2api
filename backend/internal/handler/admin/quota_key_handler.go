@@ -50,6 +50,13 @@ func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeyS
 type quotaKeySummaryView struct {
 	dto.QuotaKey
 	Usage *service.QuotaKeyUsageProjection `json:"usage,omitempty"`
+	// UsableCount 是「现在真的能跑」的账号数 = working 计数，但来源额度已耗尽或密钥无效时归零。
+	// 与 working_count 并存而不是替换：working_count 回答"这个码手里有几个号"，
+	// usable_count 回答"这几个号此刻能不能用"。两者不等就是故障现场的真实写照。
+	UsableCount int64 `json:"usable_count"`
+	// SourceBlockReason 非空时说明可用数为什么是 0（quota_exhausted / key_invalid），
+	// 供前端直接出人话文案，不必自己再推一遍。
+	SourceBlockReason string `json:"source_block_reason,omitempty"`
 }
 
 // quotaKeySummaryEnvelope 复用既有分页信封（response.PaginatedData），在顶层追加
@@ -139,6 +146,9 @@ func (h *QuotaKeyHandler) List(c *gin.Context) {
 		cnt := counts[st.ID]
 		item.AccountCount = cnt.AccountCount
 		item.WorkingCount = cnt.WorkingCount
+		// 来源额度折算：码没额度（或被判密钥无效）时可用数归零，并给出归因。
+		item.SourceBlockReason = service.QuotaKeySourceBlockReason(st.Usage)
+		item.UsableCount = service.UsableAccountsForSource(cnt.WorkingCount, st.Usage)
 		items = append(items, item)
 	}
 	// items 与 quota_key_summaries 传的是同一切片，天然同批对象、计数与快照一致。
@@ -193,12 +203,15 @@ type quotaKeyDetailResponse struct {
 	*service.QuotaKeyStatus
 	// AccountCount = 未软删归属账号总数；WorkingCount = 其中可调度（schedulable+active）
 	// 数。用户验收口径（2026-10-15）：详情弹窗"账号数/可用账号数"必须真实反映，缺省 0 误导。
-	AccountCount int64                 `json:"account_count"`
-	WorkingCount int64                 `json:"working_count"`
-	Accounts     []quotaKeyAccountItem `json:"accounts"`
-	Total        int64                 `json:"total"`
-	Page         int                   `json:"page"`
-	PageSize     int                   `json:"page_size"`
+	AccountCount int64 `json:"account_count"`
+	WorkingCount int64 `json:"working_count"`
+	// UsableCount / SourceBlockReason 见 quotaKeySummaryView 同名注释（同一口径，列表与详情同源）。
+	UsableCount       int64                 `json:"usable_count"`
+	SourceBlockReason string                `json:"source_block_reason,omitempty"`
+	Accounts          []quotaKeyAccountItem `json:"accounts"`
+	Total             int64                 `json:"total"`
+	Page              int                   `json:"page"`
+	PageSize          int                   `json:"page_size"`
 }
 
 // Get 读取单个激活码详情（脱敏 status + 账号分页）。
@@ -215,11 +228,12 @@ func (h *QuotaKeyHandler) Get(c *gin.Context) {
 	}
 	// §25.6⑤：详情与列表/probe 展示同一份**已提交**快照投影（只读，不发网络查询）。
 	// 读取失败仅降级省略该字段：不填 0、不伪造"无额度"（缺失不是 0）。
-	usage, usageErr := h.svc.QuotaKeyUsageProjectionFor(c.Request.Context(), id)
-	if usageErr != nil {
+	var usage *service.QuotaKeyUsageProjection
+	if proj, usageErr := h.svc.QuotaKeyUsageProjectionFor(c.Request.Context(), id); usageErr != nil {
 		slog.Warn("admin_quota_key_usage_projection_failed", "quota_key_id", id, "error", usageErr)
 	} else {
-		status.Usage = usage
+		usage = proj
+		status.Usage = proj
 	}
 	page, pageSize := response.ParsePagination(c)
 	total := int64(len(accounts))
@@ -245,13 +259,15 @@ func (h *QuotaKeyHandler) Get(c *gin.Context) {
 	// 计数口径收敛到 service helper（未软删 + working 谓词），此处不再自持第二份循环。
 	accountCount, workingCount := service.CountQuotaKeyAccountStats(accounts)
 	response.Success(c, quotaKeyDetailResponse{
-		QuotaKeyStatus: status,
-		AccountCount:   accountCount,
-		WorkingCount:   workingCount,
-		Accounts:       items,
-		Total:          total,
-		Page:           page,
-		PageSize:       pageSize,
+		QuotaKeyStatus:    status,
+		AccountCount:      accountCount,
+		WorkingCount:      workingCount,
+		UsableCount:       service.UsableAccountsForSource(workingCount, usage),
+		SourceBlockReason: service.QuotaKeySourceBlockReason(usage),
+		Accounts:          items,
+		Total:             total,
+		Page:              page,
+		PageSize:          pageSize,
 	})
 }
 
@@ -494,4 +510,93 @@ func (h *QuotaKeyHandler) ProbeQuota(c *gin.Context) {
 		}
 	}
 	response.Success(c, body)
+}
+
+// quotaKeyDailyStatsResponse 是每日额度统计的响应。
+//
+// 一次返回两张表，因为它们回答的是同一件事的两面：
+//   - ByKey：每个激活码每天手里几个号、几个在干活、几个被挡、被挡后是否还能继续跑
+//     （回答"400 被几个号消耗掉、这个码一天烧掉多少成本"）；
+//   - ByAccount：每个号每天的用量、有没有被挡、以及被挡那刻的实测日容量
+//     （回答"每个号每天到底有多少额度"）。
+//
+// 两张表都受 quota_key_id 过滤，口径一致，不会出现"明细筛了一个码、汇总还是全站"。
+//
+// 空数组而不是 null：前端不用为"没数据"多写一个分支。
+type quotaKeyDailyStatsResponse struct {
+	From      string                                `json:"from"`
+	To        string                                `json:"to"`
+	ByKey     []service.CursorQuotaKeyDailyBurn     `json:"by_key"`
+	ByAccount []service.CursorAccountDailyQuotaStat `json:"by_account"`
+}
+
+// DailyStats 查询 Cursor 账号每日额度实测统计。
+// GET /api/v1/admin/quota_keys/daily_stats?from=YYYY-MM-DD&to=YYYY-MM-DD&quota_key_id=N
+//
+// 数据来源是周期汇总表 cursor_account_daily_quota_stats（每小时汇总"昨天+今天"），
+// 不在这里现算 usage_logs——后台点一下不该扫全表。
+//
+// 默认区间：最近 7 天（含今天）。to 允许等于今天，此时今天的数据是"截至上次汇总"的值。
+func (h *QuotaKeyHandler) DailyStats(c *gin.Context) {
+	now := time.Now()
+	to := now
+	from := now.AddDate(0, 0, -6)
+	if raw := strings.TrimSpace(c.Query("to")); raw != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+		if err != nil {
+			response.BadRequest(c, "invalid to: want YYYY-MM-DD")
+			return
+		}
+		to = parsed
+	}
+	if raw := strings.TrimSpace(c.Query("from")); raw != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+		if err != nil {
+			response.BadRequest(c, "invalid from: want YYYY-MM-DD")
+			return
+		}
+		from = parsed
+	}
+	if from.After(to) {
+		response.BadRequest(c, "from must not be after to")
+		return
+	}
+	// 上限 92 天：再长就该走导出，不该让一个 GET 把后台拖住。
+	if to.Sub(from) > 92*24*time.Hour {
+		response.BadRequest(c, "range too large: max 92 days")
+		return
+	}
+
+	var quotaKeyID *int64
+	if raw := strings.TrimSpace(c.Query("quota_key_id")); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			response.BadRequest(c, "invalid quota_key_id")
+			return
+		}
+		quotaKeyID = &id
+	}
+
+	byKey, err := h.svc.SummarizeCursorQuotaKeyDailyBurn(c.Request.Context(), from, to, quotaKeyID)
+	if err != nil {
+		respondQuotaKeyError(c, err)
+		return
+	}
+	byAccount, err := h.svc.ListCursorAccountDailyQuotaStats(c.Request.Context(), from, to, quotaKeyID)
+	if err != nil {
+		respondQuotaKeyError(c, err)
+		return
+	}
+	if byKey == nil {
+		byKey = []service.CursorQuotaKeyDailyBurn{}
+	}
+	if byAccount == nil {
+		byAccount = []service.CursorAccountDailyQuotaStat{}
+	}
+	response.Success(c, quotaKeyDailyStatsResponse{
+		From:      from.Format("2006-01-02"),
+		To:        to.Format("2006-01-02"),
+		ByKey:     byKey,
+		ByAccount: byAccount,
+	})
 }

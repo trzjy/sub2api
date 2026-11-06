@@ -279,6 +279,13 @@ const (
 	WebSearchAPINotSupported  = "该平台不支持 Web Search API"
 	XSearchAPINotSupported    = "该平台不支持 X Search API"
 
+	// Claude Code 客户端门禁（2026-11-06 补齐：这两条原先是写死在 handler 里的英文裸串，
+	// 是"英文未映射中文"审计里真会下发下游的漏网项）。
+	// Claude Code 为客户端产品名、/v1/messages 为协议路径，按既有裁定（产品名/路径保留）
+	// 不翻译，只把整句换成中文。
+	GroupClaudeCodeOnly             = "该分组仅允许 Claude Code 客户端调用（/v1/messages）"
+	GroupMessagesDispatchNotAllowed = "该分组未开放 /v1/messages 调度，请联系管理员"
+
 	// Claude Code 客户端版本限制（npm 命令与环境变量名为命令，保留英文）。
 	CCVersionUndetermined   = "无法确定 Claude Code 版本，请更新 Claude Code：npm update -g @anthropic-ai/claude-code"
 	CCVersionBelowMinFormat = "您的 Claude Code 版本（%s）低于最低要求版本（%s），请更新：npm update -g @anthropic-ai/claude-code"
@@ -507,11 +514,29 @@ const (
 	CursorExecArgsIncompleteCode = "CUR-EXEC-10"
 	CursorExecArgsIncomplete     = "模型返回的工具参数不完整，本轮已终止，请重试"
 
-	// CUR-EXEC-11：上游账号当日额度耗尽（流内注入文案命中）。账号属"用完即丢"的一次性
-	// 额度，服务会自动停用该账号并换号重试；客户端只见干净的 429 文案，
-	// 绝不透传上游原文（原文含账号卡 ID，泄露账号池身份）。
+	// CUR-EXEC-11：上游对单个账号回了「今日额度已用完」这句挡板文案。
+	//
+	// 2026-11-06 定性更正（重要）：这句文案**不是余额判定**。生产数据三重排他——
+	//   1. 命中时累计用量从 0 到 405 万 token 不等（差 16 倍），其中一次该号 24 小时
+	//      零请求、上次成功在 30 小时前，照样报"用完"；
+	//   2. 同码同日：340 号跑 49 次 / 405 万 token 从未命中，343 号只跑 3 次 / 14 万就命中；
+	//   3. 343 在 15:38 命中的同一小时里，同码 340 号正在跑 28 次 / 241 万 token 并全部成功。
+	// 每号独立额度 / 同码共享额度 / 按次上限三种解释全被推翻，故它只能是上游对单个账号
+	// 状态异常的挡板话术。
+	//
+	// 因此对外文案不得再声称"额度已用完"——那是误报，会让用户误以为该充钱。
+	// 错误码 CUR-EXEC-11 保持不变（客户端/前端可能已按码覆盖文案），只改语义与文案。
+	// 真·额度/凭据耗尽走 CUR-EXEC-12（上游带"请续费"语义的拒付模板）。
 	CursorExecQuotaExhaustedCode = "CUR-EXEC-11"
-	CursorExecQuotaExhausted     = "当前账号今日额度已用完，已自动切换账号，请重新发起请求"
+	CursorExecQuotaExhausted     = "当前账号暂时不可用，已自动切换账号，请重新发起请求"
+
+	// CUR-EXEC-12：上游拒付——正文注入「密钥已过期或额度耗尽，请续费后使用」模板。
+	//
+	// 这才是**可信的额度/凭据耗尽信号**：它带"请续费"语义，且属于密钥级终态，与
+	// CUR-EXEC-11 那句挡板话术完全不是一回事。客户端见到的不能是上游原文
+	// （原文含账号卡 ID，会泄露号池身份）。
+	CursorExecAccountRejectedCode = "CUR-EXEC-12"
+	CursorExecAccountRejected     = "当前账号额度或凭据已失效，已自动切换账号，请重新发起请求"
 )
 
 // CursorResumeReasonCode 把 newCursorResumeError 的 reason 映射到 §2.2 续轮码表；

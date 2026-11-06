@@ -2229,7 +2229,14 @@ func classifyOpsPhase(errType, message, code string) string {
 	case "billing_error", "subscription_error":
 		return "request"
 	case "rate_limit_error":
-		if strings.Contains(msg, "concurrency") || strings.Contains(msg, "pending") || strings.Contains(msg, "queue") {
+		// 并发/排队类限流属请求侧（可重试），与上游故障区分。
+		// 2026-11-06 补中文对照：并发文案中文化之后，原来只认英文 "concurrency"
+		// 会让这类错误掉进 upstream，把"用户并发打满"记成"上游挂了"。
+		if code == gatewayConcurrencyLimitCode || code == gatewayQueueFullCode {
+			return "request"
+		}
+		if strings.Contains(msg, "concurrency") || strings.Contains(msg, "pending") ||
+			strings.Contains(msg, "queue") || strings.Contains(msg, "并发") || strings.Contains(msg, "排队") {
 			return "request"
 		}
 		return "upstream"

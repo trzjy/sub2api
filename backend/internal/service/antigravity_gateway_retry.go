@@ -18,6 +18,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/gin-gonic/gin"
 )
 
@@ -846,8 +847,29 @@ func tempUnscheduleCursorUpstreamFailure(ctx context.Context, repo AccountReposi
 }
 
 // CursorQuotaExhaustedReason 是 cursor 账号「当日额度耗尽」的换号原因串
-// （CursorExecutionService 在流内命中「今日额度已用完」模板或 EndStream 限流码时写入）。
+// （CursorExecutionService 在流内命中「今日额度已用完」模板时写入）。
+//
+// 注意：EndStream 的 ERROR_PRO_USER_RATE_LIMIT_EXCEEDED（限流）**不再**归到这里，
+// 走 CursorRateLimitedReason。两者混用会让每次 429 都把账号按日摘掉（2026-11-06 拆包）。
 const CursorQuotaExhaustedReason = GatewayFailureReason("cursor_quota_exhausted")
+
+// CursorRateLimitedReason 是 cursor 账号「被上游限流」的换号原因串。
+//
+// 与额度耗尽严格区分：限流是秒/分钟级瞬时状态，冷却几分钟即可回池；额度耗尽要等次日
+// 8:00 重置。生产实证（2026-11-06 02:28）：一次 429 让单码 15 个账号在 1 秒内全部被
+// 按"额度耗尽"停到次日 8:05，而该码当天没有任何一条「今日额度已用完」记录——这就是
+// "后台显示 15 个可用号、实际一个都调度不出来"的成因。
+const CursorRateLimitedReason = GatewayFailureReason("cursor_rate_limited")
+
+// cursorRateLimitedCooldown 是账号被上游限流后的冷却时长。
+//
+// 定 2 分钟而不是按日：全站峰值仅 75 请求/小时，分摊到数十个账号后平均每分钟请求不足
+// 2 次，2 分钟足以让同一账号的并发窗口自然错开；即便再次撞上，代价也只是再等 2 分钟，
+// 而不是丢掉一整天。原先 20 分钟的定长冷却已属过重，按日停调则是把好号直接清空。
+const cursorRateLimitedCooldown = 2 * time.Minute
+
+// cursorRateLimitedReasonPrefix 是限流停调的原因前缀，恢复时按前缀精确清除。
+const cursorRateLimitedReasonPrefix = "cursor account rate limited"
 
 // IsCursorQuotaExhaustedReason 判定换号原因是否为 cursor 账号当日额度耗尽。
 // 该原因属账号级终态（时长卡每日用量上限按账号计），必须停号，不能只换号。
@@ -855,25 +877,99 @@ func IsCursorQuotaExhaustedReason(reason GatewayFailureReason) bool {
 	return reason == CursorQuotaExhaustedReason
 }
 
-// cursorQuotaExhaustedCooldown 是 cursor 账号当日额度耗尽后的停调时长。
+// IsCursorPoolUnavailableReason 判定换号原因是否属于「cursor 账号本轮都没法干活」。
 //
-// 取 20 分钟：此非瞬时抖动，而是上游按账号计的当日上限；单次请求的换号循环内
-// 该账号必须被彻底摘出候选池，否则同一请求会把整池扫完再回来重撞。
-// 取 20 分钟而非"到次日 8 点"：保持与既有停调原语同型的定长冷却（不引入跨日
-// 定时器/新状态机），到期自动回池探测——上游已重置则恢复服务，未重置则下一次
-// 真实请求再次命中本分支继续冷却，形成「冷却→探测→再冷却」闭环。
-const cursorQuotaExhaustedCooldown = 20 * time.Minute
+// 用于换号耗尽后给用户的终态文案：额度耗尽（要等次日 8:00）和限流（等 2 分钟）
+// 都该回 429 + 可重试，而不是把上游原文或内部 reason 透出去。
+//
+// 注意：本函数只用于**文案/状态码判定**，不能用于决定停调时长——两者停调时长必须
+// 分开（限流 2 分钟，额度耗尽按日），见 tempUnscheduleCursorRateLimited。
+func IsCursorPoolUnavailableReason(reason GatewayFailureReason) bool {
+	return reason == CursorQuotaExhaustedReason || reason == CursorRateLimitedReason
+}
 
-// tempUnscheduleCursorQuotaExhausted 对 cursor 账号当日额度耗尽触发临时停调，
-// 让该账号立刻退出候选池，本轮请求改由池内其他仍有额度的账号承接。
+// cursorAccountQuotaExhaustedReasonPrefix 是 cursor 账号级「上游声称额度用完」停调原因的
+// 固定前缀。停调原因按前缀区分层级，恢复后据此精确清除：
+//   - 账号级（本常量）：上游对这一个账号说了「今日额度已用完」；
+//   - 码级（cursorQuotaKeyExhaustedReasonPrefix）：激活码共享额度池见底（这个是真的，
+//     有 400 积分的硬计数），名下所有账号一起停，属于"娘没钱了"而不是"儿子花完了"。
+//
+// 两者必须分开：码级停调依赖真实计数，账号级只依赖上游一句话，处置完全不同。
+//
+// 2026-11-06 文案同步更正：前缀值从 "cursor account daily quota exhausted" 改为
+// "cursor account blocked by upstream"。原因是这句 reason 会原样出现在后台账号列表里，
+// 旧文案会让运营看到"额度耗尽"进而误判（而它其实是上游挡板话术，见下方冷却注释）。
+// 旧前缀只在历史数据里存在，当前没有任何清除逻辑依赖它，故改值无兼容负担。
+const cursorAccountQuotaExhaustedReasonPrefix = "cursor account blocked by upstream"
+
+// cursorQuotaExhaustedCooldown 是「上游声称当日额度已用完」后的停调时长（2026-11-06 退档）。
+//
+// 为什么从「停到次日 08:05」退成 5 分钟：生产数据证明这个文案不是余额判定。
+// 30 天内 5 次命中，其中一次该号 24 小时零请求、上次成功在 30 小时前，照样报"用完"；
+// 撞"上限"时的累计用量从 0 到 405 万 token 不等（差 16 倍）；同一天同码的 340 号跑
+// 49 次 / 405 万 token 从未报过，343 号只跑 3 次 / 14 万就报"用完"；更关键的是 343 在
+// 15:38 报用完的同一小时里，同码 340 号正在跑 28 次 / 241 万 token 并全部成功。
+// 三重排他（每号独立额度 / 同码共享额度 / 按次上限）全部不成立，故它只能是上游对单个
+// 账号状态异常的挡板话术。按"钱花完了"停一整天，等于让好号白躺，代价远大于收益。
+//
+// 5 分钟的取值与 cursorUpstreamFailureCooldown 对齐：把这类账号当普通上游故障处理。
+const cursorQuotaExhaustedCooldown = 5 * time.Minute
+
+// cursorQuotaProbeWindows / cursorQuotaExhaustedUntil 已于 2026-11-06 删除。
+//
+// 原设计：命中「今日额度已用完」后，00:00–08:05 停到当天 08:05，08:05 起按
+// 5 / 10 / 20 / 40 分钟逐级放宽探测，探到 10:40 仍不恢复就停到次日 08:05。
+//
+// 删除理由（生产数据，见 cursorQuotaExhaustedCooldown）：这个文案不是余额判定，
+// 「每天 8 点重置」也从未被正面验证（5 次里唯一像跨 8 点的一次是 355 的 04:50→13:47，
+// 而 358 是 33 小时后才恢复、367/343 至今未恢复）。为一个不存在的前提维护一套梯度表，
+// 只会持续拿真实用户流量去撞已经被上游挡掉的号。
+
+// cursor_daily_exhausted_at 观测标记已于 2026-11-06 删除。
+//
+// 原实现会把这个时刻写进 accounts.extra，本意是"攒样本反推上游扣量口径"。
+// 全仓（后端 + 前端）实测无任何读取方，属于只写不读的字段；而"被挡几次、什么时候
+// 第一次被挡、被挡后还成功了多少"已由 cursor_account_daily_quota_stats 的
+// blocked_count / first_block_at / requests_after_block 三列正经落表，这个散字段的
+// 观测职责被完全取代，故连同写入一起删掉。
+
+// tempUnscheduleCursorQuotaExhausted 对「上游声称当日额度已用完」的账号做短冷却。
+//
+// 2026-11-06 退档：原实现按自然日停到次日 08:05，并配了一套 08:05→10:40 的梯度探测。
+// 该设计的前提（账号有稳定的每日额度、且在 8:00 重置）已被生产数据全盘否证，见
+// cursorQuotaExhaustedCooldown 的注释。现在只停 5 分钟，让账号尽快回池。
 func tempUnscheduleCursorQuotaExhausted(ctx context.Context, repo AccountRepository, accountID int64, logPrefix string) {
-	until := time.Now().Add(cursorQuotaExhaustedCooldown)
-	reason := "cursor account daily quota exhausted (auto temp-unschedule 20m)"
+	if repo == nil || accountID <= 0 {
+		return
+	}
+	now := timezone.Now()
+	until := now.Add(cursorQuotaExhaustedCooldown)
+	reason := fmt.Sprintf("%s (auto temp-unschedule %s)", cursorAccountQuotaExhaustedReasonPrefix, cursorQuotaExhaustedCooldown)
 	if err := repo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
 		log.Printf("%s temp_unschedule_failed account=%d error=%v", logPrefix, accountID, err)
-	} else {
-		log.Printf("%s temp_unscheduled account=%d until=%v reason=%q", logPrefix, accountID, until.Format("15:04:05"), reason)
+		return
 	}
+	log.Printf("%s temp_unscheduled account=%d until=%v cooldown=%s reason=%q", logPrefix, accountID, until.Format("15:04:05"), cursorQuotaExhaustedCooldown, reason)
+}
+
+// tempUnscheduleCursorRateLimited 对 cursor 账号被上游限流触发短冷却。
+//
+// 与 tempUnscheduleCursorQuotaExhausted 分开是有意的：限流几分钟就过去，额度耗尽要等
+// 次日 8:00。混成一个函数会让每一次 429 都按日摘号（2026-11-06 生产事故成因）。
+// 这里只停 cursorRateLimitedCooldown（2 分钟），不写任何"额度"观测字段，
+// 后台也不会把这类账号显示成"今日额度已耗尽"。
+func tempUnscheduleCursorRateLimited(ctx context.Context, repo AccountRepository, accountID int64, logPrefix string) {
+	if repo == nil || accountID <= 0 {
+		return
+	}
+	forStart := timezone.Now()
+	until := forStart.Add(cursorRateLimitedCooldown)
+	reason := fmt.Sprintf("%s (auto temp-unschedule %s)", cursorRateLimitedReasonPrefix, cursorRateLimitedCooldown)
+	if err := repo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
+		log.Printf("%s temp_unschedule_failed account=%d error=%v", logPrefix, accountID, err)
+		return
+	}
+	log.Printf("%s temp_unscheduled account=%d until=%v cooldown=%s reason=%q", logPrefix, accountID, until.Format("15:04:05"), cursorRateLimitedCooldown, reason)
 }
 
 // sleepAntigravityBackoffWithContext 带 context 取消检查的退避等待

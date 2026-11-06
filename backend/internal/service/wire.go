@@ -104,6 +104,12 @@ func ProvideOpenAIGatewayService(
 		// 与换号链的 IsCursorQuotaExhaustedReason 分支是"双保险"——前者在 Execute
 		// 当场停号（同请求内即生效），后者覆盖 handler 侧换号时的统一停号入口。
 		cursorExecution.SetAccountExhaustedHandler(svc.tempUnscheduleCursorAccountExhausted)
+		// 限流停调（2026-11-06 拆包）：EndStream 的 ERROR_PRO_USER_RATE_LIMIT_EXCEEDED
+		// 此前复用额度耗尽回调，被当成"当日额度耗尽"停到次日 8:05。生产实证 02:28 一次
+		// 429 让单码 15 个账号在 1 秒内全部被摘出候选池，而该码当天零条「今日额度已用完」
+		// 记录——这是"后台显示 15 个可用号、实际一个都调不出来"的直接成因。限流独立走
+		// 2 分钟短冷却，绝不再动按日停调。
+		cursorExecution.SetAccountRateLimitedHandler(svc.tempUnscheduleCursorAccountRateLimited)
 	}
 	return svc
 }
@@ -986,6 +992,9 @@ func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService,
 	puller.SetReconciler(svc)
 	// §25.19 第2项：注入来源额度观测窄面（须在 Start() 之前，否则首轮恒跳过余额刷新）。
 	svc.SetUsageObserver(autoEntry)
+	// D9：注入码级停调窄面——激活码额度见底时把名下账号一起停到最近的码级恢复点。
+	// 复用已装配的 puller（*QuotaKeyService 持有 ent client），不新增装配入参。
+	svc.SetAccountStopSink(puller)
 	// F1：注入生产用模型水位提供方（C11 接入点），使 reconciler 枚举模型→比对水位→
 	// 按差额触发 PullAccountsForModel 补池。ent client 直接取拉号服务已装配的实例，
 	// 不新增装配入参、不新造机制；但为接入来源额度观测（§25.19 第2项），本函数已新增

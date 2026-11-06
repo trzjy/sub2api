@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	middleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -214,10 +215,19 @@ func TestGatewayCompatibilityHandlers_UpstreamErrorEventAfterOutputIsNotBilled(t
 
 			require.Equal(t, 1, run.upstream.calls)
 			out := run.rec.Body.String()
+			t.Logf("%s 实际输出：\n%s", endpoint, out)
 			require.Contains(t, out, "partial")
 			require.Equal(t, 1, strings.Count(out, failureMarker), "exactly one terminal event")
 			require.NotContains(t, out, `data: {"type":"error"`, "the handler must not append a fallback frame")
 			require.Contains(t, out, "Overloaded")
+			// 2026-11-06 钉死「不许把上游过载改写成首字节超时」：
+			// 上游已经把 overloaded_error 透传给了客户端，网关若再补一条
+			// "上游在时限内未返回首字节"，等于给客户展示一个假原因，
+			// 后台排查也会被带到超时方向上。任何形态的该文案都不许出现。
+			require.NotContains(t, out, infraerrors.UpstreamFirstByteTimeoutStreamFrame,
+				"上游自己报的错不得被改写成首字节超时")
+			require.NotContains(t, out, service.UpstreamFirstByteTimeoutType,
+				"错误类型必须保留上游语义，不得覆盖成网关超时类型")
 			require.NotContains(t, out, successMarker)
 
 			run.billingRepo.mu.Lock()

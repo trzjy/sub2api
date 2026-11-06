@@ -779,6 +779,14 @@ func (s *GatewayService) TempUnscheduleRetryableError(ctx context.Context, accou
 		tempUnscheduleCursorUpstreamFailure(ctx, s.accountRepo, accountID, "[handler]")
 		return
 	}
+	// cursor 账号被上游限流：秒/分钟级瞬时状态，短冷却即可回池。
+	//
+	// 必须排在额度耗尽分支之前，且绝不能复用 tempUnscheduleCursorQuotaExhausted：
+	// 那条路会停到次日 8:05，一次 429 抖动就能把整个码的账号清空（2026-11-06 事故）。
+	if failoverErr.Reason == CursorRateLimitedReason {
+		tempUnscheduleCursorRateLimited(ctx, s.accountRepo, accountID, "[handler]")
+		return
+	}
 	// cursor 账号「当日额度耗尽」（时长卡每日用量上限）：账号级终态，同属一次即停号。
 	// 上游已明确拒绝该账号，重试/重选它只会继续撞墙；若不停号，耗尽账号会一直留在
 	// 候选池被反复选中，而池内其他仍有额度的账号反而轮询不到。

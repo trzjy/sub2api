@@ -24,8 +24,26 @@ import (
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 )
 
-// MaxAccountsPerQuotaKey 是单个激活码可持有（working）账号的上限；达到后停止拉号。
-const MaxAccountsPerQuotaKey = 15
+// MaxAccountsPerQuotaKey 是单个激活码可持有（working）账号的**硬上限**（人工与自动共用）。
+//
+// 2026-11-06 用户裁定（第二次）：自动补位固定 5 个，人工拉取不受限制，存量超出的裁掉。
+// 所以这个常量现在只作为"人工也不能无限堆"的兜底护栏，不再决定自动补位目标——
+// 自动补位的目标值见 CursorAutoPullAccountsPerKey。
+//
+// 历史：原值 15（把「上游每日 5 次拉号额度」和「耗尽账号」混在一个桶里导致死锁），
+// 中途调到 50 用于观察，现在回落到 50 只作护栏。
+const MaxAccountsPerQuotaKey = 50
+
+// CursorAutoPullAccountsPerKey 是**自动补位**的每码固定目标账号数（用户裁定 2026-11-06）。
+//
+// 为什么定 5：上游每个激活码每天只允许拉 5 次号（ErrUpstreamDailyRefreshLimit），
+// 自动补位拉到 5 个刚好把当天额度用干净，多拉也拉不动；而人工拉取（后台手动建号/改绑）
+// 不走这个限制，因为人是有意为之，不需要替他省额度。
+//
+// 为什么不再看"水位缺口"：之前按额度水位算缺口，会在额度满的时候一个都不拉、额度紧张时
+// 一次拉一堆，账号数忽多忽少。固定 5 个后，每码每天稳定消耗 5 个号，
+// 「400 分到底要几个号」这个账才能算清楚。
+const CursorAutoPullAccountsPerKey = 5
 
 // quotaKeyCooldownWindow 是 shareai 上游实测的刷新冷却窗口（方案 §10 #26）。带冷却标记的 key
 // 在 last_refresh_at 距今不足该窗口内不进入补池候选；窗口期满后自动重新入选，无需人工 clear。
@@ -691,6 +709,52 @@ func CountQuotaKeyAccountStats(accounts []*ent.Account) (accountCount, workingCo
 	return countQuotaKeyAccountStats(accounts)
 }
 
+// 来源额度层面的「这个激活码还能不能用」归因取值。
+//
+// 背景（2026-11-06 生产排查）：后台「可用账号」原来是 working 计数（schedulable && active），
+// 完全没看激活码额度，于是出现"显示可用 15 个、实际一个都跑不动"的错觉——15 个账号确实
+// 都活着，但它们的激活码只剩 1 次额度，调度侧早就把它们全否决了。计数口径必须带上来源，
+// 否则这个数字永远在骗人。
+const (
+	// QuotaKeySourceBlockExhausted：快照新鲜、观测成功，但真实剩余低于调度下限（<10，含 0）。
+	QuotaKeySourceBlockExhausted = "quota_exhausted"
+	// QuotaKeySourceBlockKeyInvalid：最近一次观测就失败了（error_code 非空），
+	// 即密钥无效 / 过期 / 被上游拒绝。此时名下账号一个都用不了。
+	QuotaKeySourceBlockKeyInvalid = "key_invalid"
+)
+
+// QuotaKeySourceBlockReason 归纳激活码来源额度是否已经不足以支撑任何调度。
+//
+// 返回空串表示"还能用"（含"从未观测"——缺失不等于耗尽，不能凭空断言不可用）；
+// 返回非空即名下所有账号都不可调度，原因值见上面两个常量。
+//
+// 刻意不判快照新鲜度：宁可显示上一轮的确定结论，也不要因为刷新滞后在"耗尽/可用"之间
+// 来回跳。真实恢复后 5 分钟内一定会有新一轮探测把它翻过来。
+func QuotaKeySourceBlockReason(usage *QuotaKeyUsageProjection) string {
+	if usage == nil || !usage.HasSnapshot {
+		return ""
+	}
+	if usage.QueryFailed {
+		return QuotaKeySourceBlockKeyInvalid
+	}
+	if usage.Remaining == nil {
+		return ""
+	}
+	if *usage.Remaining < cursorQuotaKeyRemainingFloor {
+		return QuotaKeySourceBlockExhausted
+	}
+	return ""
+}
+
+// UsableAccountsForSource 把「账号自己活着」纠正成「现在真的能跑」：
+// 来源被归因为耗尽或密钥无效时，可用数归零；否则沿用 working 计数。
+func UsableAccountsForSource(workingCount int64, usage *QuotaKeyUsageProjection) int64 {
+	if QuotaKeySourceBlockReason(usage) != "" {
+		return 0
+	}
+	return workingCount
+}
+
 // CountAccountsByQuotaKeys 批量统计各激活码下的账号数（一次查询，按 quota_key_id 分组）。
 //
 // 计数口径见 countQuotaKeyAccountStats，与详情端点 Get 逐字一致。查询次数与激活码数量
@@ -781,14 +845,18 @@ func countWorkingQuotaKeyAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID in
 		Count(ctx)
 }
 
-// checkQuotaKeyCapacityLocked 是 ≤15 强制的唯一判定实现，运行在"已持有该激活码 advisory
+// checkQuotaKeyCapacityLocked 是容量判定的唯一实现，运行在"已持有该激活码 advisory
 // 事务锁"的 tx 内（软删校验随之前移进锁内，修 r4 #2），返回判定时刻的 working 计数：
 //  1. quota_key 必须存在且未软删（普通查询天然排除软删行）；
 //  2. status 必须为 active；
-//  3. working 必须 < MaxAccountsPerQuotaKey。
+//  3. working 必须 < limit（limit <= 0 表示不设上限）。
+//
+// limit 由调用方按"人工 / 自动"两条路分别给：
+//   - 自动补位传 CursorAutoPullAccountsPerKey（固定 5）；
+//   - 人工建号/改绑传 0（不受限制，用户裁定 2026-11-06）。
 //
 // 调用方必须在【同一 tx】内完成写入：判定与写入分属两个事务时，锁一释放就有并发漏网窗口。
-func checkQuotaKeyCapacityLocked(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error) {
+func checkQuotaKeyCapacityLocked(ctx context.Context, tx *ent.Tx, quotaKeyID int64, limit int) (int, error) {
 	qk, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
@@ -803,11 +871,11 @@ func checkQuotaKeyCapacityLocked(ctx context.Context, tx *ent.Tx, quotaKeyID int
 	if err != nil {
 		return 0, fmt.Errorf("quota_key_service: count working accounts: %w", err)
 	}
-	if working >= MaxAccountsPerQuotaKey {
+	if limit > 0 && working >= limit {
 		return working, ErrQuotaKeyAccountLimitReached.WithMetadata(map[string]string{
 			"quota_key_id": strconv.FormatInt(quotaKeyID, 10),
 			"working":      strconv.Itoa(working),
-			"limit":        strconv.Itoa(MaxAccountsPerQuotaKey),
+			"limit":        strconv.Itoa(limit),
 		})
 	}
 	return working, nil
@@ -818,22 +886,25 @@ func checkQuotaKeyCapacityLocked(ctx context.Context, tx *ent.Tx, quotaKeyID int
 // → 在【同一事务】内调用 fn(tx) 写入 → 提交（锁随事务释放）。
 // fn 内不得再自行取锁/计数/开事务：那样会与本入口形成嵌套 tx 或两个事务的两个临界区
 // （即 r4 #1/#3 的漏网形态）。容量不足返回 ErrQuotaKeyAccountLimitReached。
-func (s *QuotaKeyService) withQuotaKeyCapacity(ctx context.Context, quotaKeyID int64, fn func(tx *ent.Tx) error) error {
+func (s *QuotaKeyService) withQuotaKeyCapacity(ctx context.Context, quotaKeyID int64, limit int, fn func(tx *ent.Tx) error) error {
 	if s.client == nil {
 		return errors.New("quota_key_service: ent client not configured")
 	}
-	return withQuotaKeyCapacityTx(ctx, s.client, quotaKeyID, fn)
+	return withQuotaKeyCapacityTx(ctx, s.client, quotaKeyID, limit, fn)
 }
 
 // withQuotaKeyCapacityTx 是 withQuotaKeyCapacity 的实现本体，供不持有 QuotaKeyService
 // 的写路径（admin 建号 / admin 改绑）复用同一入口、同一互斥域，不复制一份临界区。
 //
+// limit 语义见 checkQuotaKeyCapacityLocked：自动补位传 CursorAutoPullAccountsPerKey，
+// 人工建号/改绑传 0（不限）。
+//
 // §25.14-C：只抽出"same-key advisory lock + 单事务"这一层公共骨架
 // （withQuotaKeyLockTx），容量入口在骨架内执行**自己的**容量校验；观测/换码入口复用
 // 同一骨架但**不**借用容量/active 门（额度刷新不因容量已满或状态变更被拒绝）。
-func withQuotaKeyCapacityTx(ctx context.Context, client *ent.Client, quotaKeyID int64, fn func(tx *ent.Tx) error) error {
+func withQuotaKeyCapacityTx(ctx context.Context, client *ent.Client, quotaKeyID int64, limit int, fn func(tx *ent.Tx) error) error {
 	return withQuotaKeyLockTx(ctx, ctx, client, quotaKeyID, func(tx *ent.Tx) error {
-		if _, err := checkQuotaKeyCapacityLocked(ctx, tx, quotaKeyID); err != nil {
+		if _, err := checkQuotaKeyCapacityLocked(ctx, tx, quotaKeyID, limit); err != nil {
 			return err
 		}
 		return fn(tx)
@@ -968,7 +1039,7 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		}
 	}
 
-	err := s.withQuotaKeyCapacity(ctx, quotaKeyID, func(tx *ent.Tx) error {
+	err := s.withQuotaKeyCapacity(ctx, quotaKeyID, CursorAutoPullAccountsPerKey, func(tx *ent.Tx) error {
 		// 二次读状态（防 sweep 竞态）：重新 FOR UPDATE 确认仍为 active 且未过期。
 		qk2, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
 		if err != nil {
@@ -1050,7 +1121,7 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			return nil
 		}
 		// 插入前在同一事务/同一锁内重判容量：并发抢位（如上一次拉号刚提交）在此拦住。
-		working, err := checkQuotaKeyCapacityLocked(ctx, tx, quotaKeyID)
+		working, err := checkQuotaKeyCapacityLocked(ctx, tx, quotaKeyID, CursorAutoPullAccountsPerKey)
 		if err != nil {
 			if errors.Is(err, ErrQuotaKeyAccountLimitReached) || errors.Is(err, ErrQuotaKeyNotActive) {
 				return nil
@@ -1059,9 +1130,9 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		}
 
 		// 容量判定与插入在同一事务/同一 advisory 互斥域内：maxInsert 以插入前读到的
-		// working 为基准，working=14 而上游返 2 时只落 1 条，总数恰好 15（不多不少）。
+		// working 为基准，working=4 而上游返 2 时只落 1 条，总数恰好 5（不多不少）。
 		// upstream 溢出的账号直接丢弃：UpstreamPullResult 不带重放字段，不做二次落库。
-		maxInsert := MaxAccountsPerQuotaKey - working
+		maxInsert := CursorAutoPullAccountsPerKey - working
 		if maxInsert <= 0 {
 			return nil
 		}
@@ -2204,8 +2275,11 @@ func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, li
 		if werr != nil {
 			return nil, fmt.Errorf("quota_key_model_water: count working for key %d: %w", k.ID, werr)
 		}
-		if working >= MaxAccountsPerQuotaKey {
-			continue // 无剩余容量：working 已满 15，跳过
+		// 自动补位的目标是每码固定 CursorAutoPullAccountsPerKey 个（用户裁定 2026-11-06）。
+		// 注意这里用的是"自动补位目标"而不是 MaxAccountsPerQuotaKey（人工护栏）：
+		// 人工拉到 8 个的码不该被自动逻辑当成"已满"，但也不该继续自动补。
+		if working >= CursorAutoPullAccountsPerKey {
+			continue // 自动补位名额已满：跳过
 		}
 		out = append(out, k.ID)
 	}

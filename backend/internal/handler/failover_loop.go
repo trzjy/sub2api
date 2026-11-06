@@ -234,7 +234,8 @@ func (s *FailoverState) HandleFailoverError(
 	// 若上游已重置则正常服务、仍未重置则再次命中本分支继续冷却）。
 	if failoverErr.RetryableOnSameAccount ||
 		failoverErr.Reason == service.CursorUpstreamAccountFailureReason ||
-		service.IsCursorQuotaExhaustedReason(failoverErr.Reason) {
+		service.IsCursorQuotaExhaustedReason(failoverErr.Reason) ||
+		failoverErr.Reason == service.CursorRateLimitedReason {
 		gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
 	}
 

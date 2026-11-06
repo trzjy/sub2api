@@ -427,6 +427,10 @@ func TestCF524G2b_HeartbeatStartFailureWarnsAndContinues(t *testing.T) {
 // TestCF524G2b_HeartbeatCommittedExhaustedEmitsSSEError 验证（v6，零改动验证）：
 // 心跳已提交后直接耗尽，handler 既有 handleFailoverExhausted(streamStarted=true)
 // 走 SSE error 帧分支，不写非流式 JSON。
+//
+// 2026-11-06 修正断言：流内错误帧的 error.type 现在跟随 failover 体里的
+// error.type（M1 首字节超时 SSOT），不再一律写通用 upstream_error。
+// 本例的 failover 体声明的是 upstream_first_byte_timeout，故帧里必须是它。
 func TestCF524G2b_HeartbeatCommittedExhaustedEmitsSSEError(t *testing.T) {
 	c, rec := newCF524TestContext(t, "/v1/messages")
 	snapshot := service.NewRequestBudgetSnapshot(30, 1, time.Now().Add(-2*time.Second), true)
@@ -445,7 +449,7 @@ func TestCF524G2b_HeartbeatCommittedExhaustedEmitsSSEError(t *testing.T) {
 
 	body := rec.Body.String()
 	require.True(t, strings.HasPrefix(body, "data: "), "耗尽必须追加 SSE error 帧（而非非流式 JSON）")
-	require.Contains(t, body, `"type":"upstream_error"`)
+	require.Contains(t, body, `"type":"`+service.UpstreamFirstByteTimeoutType+`"`)
 	require.NotContains(t, body, `"object":`)
 }
 
