@@ -95,12 +95,40 @@ func cursorToolMetaFromResponses(req *apicompat.ResponsesRequest) (cursorRespons
 	if err != nil {
 		return cursorResponsesToolMeta{}, fmt.Errorf("cursor: resolve effective responses tools: %w", err)
 	}
+	return cursorToolMetaFromTools(effective), nil
+}
+
+// cursorToolMetaFromTools 由**已提升的有效工具集**派生元数据。
+//
+// 单独拆出来是为了让计划构造只解析一次 input：工具声明可能来自 top-level tools，
+// 也可能来自 input 里的 additional_tools；两处必须用同一份结果，否则
+// "元数据认识某些工具、上行声明里却没有"这类不一致会重演（2026-11-06）。
+func cursorToolMetaFromTools(effective []apicompat.ResponsesTool) cursorResponsesToolMeta {
 	return cursorResponsesToolMeta{
 		customTools:    apicompat.CustomToolNames(effective),
 		functionTools:  apicompat.FunctionToolNames(effective),
 		namespaceTools: apicompat.NamespaceToolNames(effective),
 		toolSearch:     apicompat.HasToolSearchTool(effective),
-	}, nil
+	}
+}
+
+// cursorResponsesDeclaredToolNames 返回**上行真正声明的工具名**（保持声明顺序）。
+//
+// 唯一来源是 apicompat.EffectiveResponsesTools：top-level tools + input 里的
+// additional_tools 声明。任何"工具集合一致性"校验都必须走这里，不得再直接读
+// req.Tools——两处读法不同正是 2026-11-06 续轮误判 tool_set_changed 的原因。
+func cursorResponsesDeclaredToolNames(req *apicompat.ResponsesRequest) ([]string, error) {
+	effective, err := apicompat.EffectiveResponsesTools(req)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(effective))
+	for _, tool := range effective {
+		if name := strings.TrimSpace(tool.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -6650,12 +6678,11 @@ func cursorResponsesInputItems(raw json.RawMessage) ([]apicompat.ResponsesInputI
 }
 
 // cursorResponsesItemIsOutput 判断条目是否为客户端工具结果（本批候选）。
+//
+// 分类口径归口 apicompat.ClassifyResponsesInputItemType（唯一事实源），
+// 本文件不再维护第二份"我认识的类型"清单。
 func cursorResponsesItemIsOutput(item apicompat.ResponsesInputItem) bool {
-	switch strings.ToLower(strings.TrimSpace(item.Type)) {
-	case "function_call_output", "custom_tool_call_output", "tool_search_output":
-		return true
-	}
-	return false
+	return apicompat.IsResponsesInputResult(item.Type)
 }
 
 // cursorResponsesItemResultOutput 取工具结果条目的可摘要输出文本。
@@ -6754,12 +6781,13 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		return nil, err
 	}
 	plan := builder.plan()
-	// 工具元数据与本请求的声明同源：续轮写出侧据此还原 custom / namespace / tool_search。
-	toolMeta, metaErr := cursorToolMetaFromResponses(req)
-	if metaErr != nil {
-		return nil, metaErr
+	// 工具集是**有效工具集**（top-level tools + input 里的 additional_tools 声明）：
+	// 元数据与上行 config.tool 必须同源，否则声明只在其中一侧生效。
+	effectiveTools, toolsErr := apicompat.EffectiveResponsesTools(req)
+	if toolsErr != nil {
+		return nil, fmt.Errorf("%w: responses tools: %v", ErrCursorResumeUnsupportedContent, toolsErr)
 	}
-	plan.responsesTools = toolMeta
+	plan.responsesTools = cursorToolMetaFromTools(effectiveTools)
 	// §25.17.4（A08）：显式 previous_response_id 是本协议层的续轮声明，必须随计划带到执行
 	// 入口（转换不得抹掉该标记）。
 	plan.previousResponseID = strings.TrimSpace(req.PreviousResponseID)
@@ -6769,8 +6797,8 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		return nil, err
 	}
 	builder.in(cursorConfigHard)
-	tools := make([]string, 0, len(req.Tools))
-	for _, tool := range req.Tools {
+	tools := make([]string, 0, len(effectiveTools))
+	for _, tool := range effectiveTools {
 		encoded, err := json.Marshal(tool)
 		if err != nil {
 			return nil, fmt.Errorf("%w: responses tool marshal", ErrCursorResumeUnsupportedContent)
@@ -6839,6 +6867,15 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		plan.results = append(plan.results, CursorToolResult{CallID: callID, Text: []string{cursorResponsesItemResultOutput(item)}, ResultType: item.Type})
 	}
 	for _, item := range items[:start] {
+		// 按**归类**处理，而不是按"我认识哪些类型名"：
+		//   声明（additional_tools 等）不是对话内容，交付侧历史从未登记它 → 跳过；
+		//   未知类型 → 失败关闭（绝不静默丢弃客户端内容）。
+		switch apicompat.ClassifyResponsesInputItem(item) {
+		case apicompat.ResponsesInputItemDeclaration:
+			continue
+		case apicompat.ResponsesInputItemUnknown:
+			return nil, fmt.Errorf("%w: responses item %q", ErrCursorResumeUnsupportedContent, item.Type)
+		}
 		if callID := cursorResponsesItemCallID(item); callID != "" {
 			// §25.17.4 行 1：该调用的声明就在同一正文里 → 与之配对的尾部 output 属于
 			// 「历史中已完成工具对」，不构成对本站待完成关联的声明。
@@ -8312,11 +8349,11 @@ func cursorValidateToolChoiceForSession(
 			return newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", ErrCursorResumeUnsupportedContent)
 		}
 		rawChoice = req.ToolChoice
-		names := make([]string, 0, len(req.Tools))
-		for _, tool := range req.Tools {
-			if name := strings.TrimSpace(tool.Name); name != "" {
-				names = append(names, name)
-			}
+		// 声明集合必须与"上行真正声明的工具集"同源（含 input 里的 additional_tools），
+		// 否则客户端按 Responses Lite 形态声明工具时会被误判成套件变更（2026-11-06）。
+		names, err := cursorResponsesDeclaredToolNames(&req)
+		if err != nil {
+			return newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", ErrCursorResumeUnsupportedContent)
 		}
 		if !cursorToolSetEqual(exposed, names) {
 			return newCursorResumeError(http.StatusBadRequest, "tool_set_changed", ErrCursorResumeToolSetChanged)

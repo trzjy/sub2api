@@ -131,7 +131,7 @@ func EffectiveResponsesTools(req *ResponsesRequest) ([]ResponsesTool, error) {
 		if err := json.Unmarshal(raw, &discriminator); err != nil {
 			return nil, fmt.Errorf("parse responses additional tools item: %w", err)
 		}
-		if discriminator.Type != "additional_tools" {
+		if !IsResponsesInputDeclaration(discriminator.Type) {
 			continue
 		}
 		var item struct {
