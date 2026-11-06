@@ -214,24 +214,33 @@ func (s *QuotaKeySweeper) expiredPoolCardIDs(ctx context.Context) ([]int64, erro
 
 // recheckAndUnregisterLocked 复核单个卡的 DB 当前状态后，从运行内存号池
 // （GlobalCursorDynamicPool）同步注销（调用方须已持有该卡的按卡串行边界）：
-//   - qk == nil 或 NotFound（软删/已删除）→ 注销；
-//   - 当前 status == expired → 注销；
-//   - 仍 active（如管理员在窗口内清空了 expires_at）→ 不注销，保留池内状态等下一轮收敛；
-//   - 读失败 → 继续保留并记日志，下一轮再收敛（不回滚本轮已完成的注销）。
+//   - 池为 nil → 直接 return nil（无运行池可注销，属正常空态）；
+//   - GetByID 失败 → 记日志并 return err（不注销、保持池内状态，等下一轮重试）；
+//   - qk == nil 或 NotFound（软删/已删除）→ 注销后 return nil；
+//   - 当前 status == expired → 注销后 return nil；
+//   - 仍 active（如管理员在窗口内清空了 expires_at）→ 不注销，return nil 保留池内状态等下一轮收敛。
 //
-// 由 unregisterExpiredAutoCardsLocked（批量）与 sweepLateExpiredPoolCards（窗口补注销）
-// 共用，语义保持一致。
-func (s *QuotaKeySweeper) recheckAndUnregisterLocked(ctx context.Context, id int64) {
-	if pool := GetGlobalCursorDynamicPool(); pool != nil {
-		qk, err := s.repo.GetByID(ctx, id)
-		if err != nil {
-			log.Printf("[QuotaKeySweep] reload expired card %d for pool unregister failed: %v", id, err)
-			return // 读失败保持池内状态，下一轮再收敛
-		}
-		if qk == nil || qk.Status == domain.QuotaKeyStatusExpired {
-			pool.UnregisterCard(id)
-		}
+// 关键修复（外审 R13 P1）：改为返回 error。GetByID 失败时不再静默吞错，
+// 调用方据 err 决定是否标 done；失败传播到 sweepLateExpiredPoolCards 的 firstErr
+//
+//	→ runOnce 写失败心跳 / SweepNow 返回错误，杜绝「二次复核失败却报成功」。
+//
+// 由 unregisterExpiredAutoCardsLocked（批量，best-effort 忽略 error）与
+// sweepLateExpiredPoolCards（窗口补注销，须先成功再标 done）共用。
+func (s *QuotaKeySweeper) recheckAndUnregisterLocked(ctx context.Context, id int64) error {
+	pool := GetGlobalCursorDynamicPool()
+	if pool == nil {
+		return nil
 	}
+	qk, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		log.Printf("[QuotaKeySweep] reload expired card %d for pool unregister failed: %v", id, err)
+		return err // 读失败保持池内状态，传播错误等下一轮重试
+	}
+	if qk == nil || qk.Status == domain.QuotaKeyStatusExpired {
+		pool.UnregisterCard(id)
+	}
+	return nil
 }
 
 // unregisterExpiredAutoCardsLocked 在调用方已持有这些卡的按卡串行边界后，将「当前
@@ -240,7 +249,9 @@ func (s *QuotaKeySweeper) recheckAndUnregisterLocked(ctx context.Context, id int
 // 且注销前逐 id 复核 DB 当前状态（见 recheckAndUnregisterLocked）。
 func (s *QuotaKeySweeper) unregisterExpiredAutoCardsLocked(ctx context.Context, ids []int64) {
 	for _, id := range ids {
-		s.recheckAndUnregisterLocked(ctx, id)
+		// best-effort：批量注销阶段单个卡复核失败不阻断其它卡，
+		// 失败保持池内状态、由后续窗口补注销收敛（与现状一致，忽略 error）。
+		_ = s.recheckAndUnregisterLocked(ctx, id)
 	}
 }
 
@@ -249,6 +260,11 @@ func (s *QuotaKeySweeper) unregisterExpiredAutoCardsLocked(ctx context.Context, 
 // （标 expired + 到期账号软删，与 sweepKey 同语义），再复核注销。最多 3 轮，防止
 // 极端情况下无界循环（每轮都恰好有新卡在枚举间隙到期）。枚举或单卡事务失败返回错误，
 // 调用方据此把本轮心跳记为失败——运维可观测，不再「补注销失败只记日志」。
+//
+// 二次复核（recheckAndUnregisterLocked）的失败必须传播：任一调用点若返回 error，
+// 该卡不得标 done[id]（保留池中、下一轮可重试），error 进入 firstErr；firstErr 非
+// nil 时本函数返回它 → runOnce 写失败心跳 / SweepNow 返回错误，杜绝「过期卡仍在池内
+// 却报成功」。任何返回错误的分支都不得写 done[id]。
 func (s *QuotaKeySweeper) sweepLateExpiredPoolCards(ctx context.Context, done map[int64]bool) error {
 	const maxRounds = 3
 	var firstErr error
@@ -278,22 +294,28 @@ func (s *QuotaKeySweeper) sweepLateExpiredPoolCards(ctx context.Context, done ma
 					log.Printf("[QuotaKeySweep] late sweep reload card %d failed: %v", id, gerr)
 					return gerr
 				}
-				// 无状态需要处理（已软删/未到期）：复核注销后结束本卡。
+				// 无状态需要处理（已软删/未到期）：先复核注销，成功才标 done；
+				// 复核失败传播 error，本卡不标 done（下一轮可重试）。
 				if qk == nil || qk.ExpiresAt == nil || !qk.ExpiresAt.Before(time.Now()) {
-					s.recheckAndUnregisterLocked(ctx, id)
+					if err := s.recheckAndUnregisterLocked(ctx, id); err != nil {
+						return err
+					}
 					done[id] = true
 					return nil
 				}
-				// 运行池存在但 ent client 缺失的退化场景：仅复核注销，不做事务转换。
+				// 运行池存在但 ent client 缺失的退化场景：仅复核注销，不做事务转换；
+				// 先复核、成功才标 done，失败传播。
 				if s.entClient == nil {
-					s.recheckAndUnregisterLocked(ctx, id)
+					if err := s.recheckAndUnregisterLocked(ctx, id); err != nil {
+						return err
+					}
 					done[id] = true
 					return nil
 				}
 				tx, txErr := s.entClient.Tx(ctx)
 				if txErr != nil {
 					log.Printf("[QuotaKeySweep] late sweep open tx for card %d failed: %v", id, txErr)
-					done[id] = true
+					// 开事务失败：不标 done（下一轮可重试），让 error 传播到 firstErr。
 					return txErr
 				}
 				committed := false
@@ -312,7 +334,11 @@ func (s *QuotaKeySweeper) sweepLateExpiredPoolCards(ctx context.Context, done ma
 					return cErr
 				}
 				committed = true
-				s.recheckAndUnregisterLocked(ctx, id)
+				// 事务提交成功后再复核注销：先复核、成功才标 done；失败传播、
+				// 本卡不标 done（下一轮可重试），杜绝「过期卡仍在池内却报成功」。
+				if err := s.recheckAndUnregisterLocked(ctx, id); err != nil {
+					return err
+				}
 				done[id] = true
 				return nil
 			})
