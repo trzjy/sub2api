@@ -547,10 +547,14 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 			}
 			turns = append(turns, cursorAgentTurn{role: "user", text: tt, images: tImages})
 		case "":
-			return nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "message without role")
+			// 没有角色的消息：丢这一条，不整轮拒（2026-11-06 产品口径：
+			// 客户把 400 当成"模型不稳定"，宁可少一条也不能整轮失败）。
+			continue
 		default:
-			// 未知角色：按 user 处理会把 assistant 语义搞错，宁可失败关闭。
-			return nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "unsupported role %q", m.Role)
+			// 未知角色（critic / narrator 之类客户端自定义）：按 user 处理会把
+			// assistant 语义搞错，按 assistant 处理又会篡改轮次；因此**丢掉这一条**
+			// 继续本轮，而不是把整个请求 400 掉。
+			continue
 		}
 	}
 
