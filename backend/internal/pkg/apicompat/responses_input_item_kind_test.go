@@ -26,8 +26,21 @@ func TestClassifyResponsesInputItemType(t *testing.T) {
 		{"custom_tool_call_output", ResponsesInputItemResult},
 		{"tool_search_output", ResponsesInputItemResult},
 
-		{"item_reference", ResponsesInputItemUnknown},
-		{"web_search_call", ResponsesInputItemUnknown},
+		// 旁支：本站从不转发，回放时丢弃（不整轮拒）。
+		{"item_reference", ResponsesInputItemIgnorable},
+		{"web_search_call", ResponsesInputItemIgnorable},
+		{"Web_Search_Call", ResponsesInputItemIgnorable},
+		{"x_search_call", ResponsesInputItemIgnorable},
+		{"image_generation_call", ResponsesInputItemIgnorable},
+		{"local_shell_call", ResponsesInputItemIgnorable},
+		{"local_shell_call_output", ResponsesInputItemIgnorable},
+		{"mcp_tool_call", ResponsesInputItemIgnorable},
+		{"mcp_tool_call_output", ResponsesInputItemIgnorable},
+		{"agent_message", ResponsesInputItemIgnorable},
+		{"compaction", ResponsesInputItemIgnorable},
+		{"compaction_summary", ResponsesInputItemIgnorable},
+
+		// 还没接纳的新类型：丢弃并记账（口径见文件头注释）。
 		{"totally_unknown", ResponsesInputItemUnknown},
 	}
 	for _, c := range cases {
@@ -44,5 +57,11 @@ func TestResponsesInputItemKindHelpers(t *testing.T) {
 	}
 	if !IsResponsesInputResult("function_call_output") || IsResponsesInputResult("message") {
 		t.Fatal("result 谓词与归类不一致")
+	}
+	if !IsResponsesInputIgnorable("web_search_call") || IsResponsesInputIgnorable("message") {
+		t.Fatal("ignorable 谓词与归类不一致")
+	}
+	if IsResponsesInputIgnorable("totally_unknown") {
+		t.Fatal("未知类型与旁支必须分得清：账要分开记")
 	}
 }

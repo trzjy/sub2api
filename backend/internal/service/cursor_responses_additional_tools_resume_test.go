@@ -54,9 +54,11 @@ func TestCursorResumeAdditionalToolsDeclarationSkipped(t *testing.T) {
 	require.Equal(t, []string{"sunny"}, fixture.intake.results[0][0].Text)
 }
 
-// TestCursorResumeUnknownItemStillRejected：修复只放行声明类条目，未知类型仍失败关闭，
-// 不得把"看不懂就跳过"变成通用行为。
-func TestCursorResumeUnknownItemStillRejected(t *testing.T) {
+// TestCursorResumeUnknownItemIsSkippedNotRejected：本站还没接纳的新条目类型不得整轮拒。
+//
+// 产品口径（2026-11-06）：客户端每加一种新条目，若一律 400，客户只会认为"你们模型不稳定"。
+// 正确做法是丢掉这一条、继续把本轮做完，并记一笔台账（plan.skippedItems）供我们观察。
+func TestCursorResumeUnknownItemIsSkippedNotRejected(t *testing.T) {
 	body := `{
   "model": "cursor-test-model",
   "input": [
@@ -66,9 +68,65 @@ func TestCursorResumeUnknownItemStillRejected(t *testing.T) {
 }`
 	var req apicompat.ResponsesRequest
 	require.NoError(t, json.Unmarshal([]byte(body), &req))
-	_, err := cursorPlanFromResponses(&req, "cursor-test-model")
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCursorResumeUnsupportedContent)
+	plan, err := cursorPlanFromResponses(&req, "cursor-test-model")
+	require.NoError(t, err, "未知条目必须被丢弃，不得整轮拒")
+	require.Equal(t, 1, plan.skippedItems["totally_unknown_item"])
+	require.Equal(t, 1, plan.history.ItemCount(), "只保留 message 这条历史")
+}
+
+// web_search_call 是模型自己联网搜的痕迹：本站从不转发，回放时也不得让它把整轮打断。
+func TestCursorResumeHostedWebSearchCallIsSkipped(t *testing.T) {
+	body := `{
+  "model": "cursor-test-model",
+  "input": [
+    {"type":"message","role":"user","content":"查一下天气"},
+    {"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"杭州天气"}},
+    {"type":"message","role":"assistant","content":"杭州 24 度"}
+  ]
+}`
+	var req apicompat.ResponsesRequest
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+	plan, err := cursorPlanFromResponses(&req, "cursor-test-model")
+	require.NoError(t, err)
+	require.Equal(t, 1, plan.skippedItems["web_search_call"])
+	require.Equal(t, 2, plan.history.ItemCount(), "两侧 message 仍进历史")
+}
+
+// 宿主工具的「调用 + 结果」必须**成对丢弃**：只丢调用、把结果当本批结果投递，
+// 上游会看到"有结果、没有对应调用"，那才是真正会把模型答错的情形。
+func TestCursorResumeHostedShellPairSkippedTogether(t *testing.T) {
+	body := `{
+  "model": "cursor-test-model",
+  "input": [
+    {"type":"message","role":"user","content":"跑个命令"},
+    {"type":"local_shell_call","call_id":"shell_1","action":{"type":"exec","command":["ls"]}},
+    {"type":"local_shell_call_output","call_id":"shell_1","output":"a.txt"}
+  ]
+}`
+	var req apicompat.ResponsesRequest
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+	plan, err := cursorPlanFromResponses(&req, "cursor-test-model")
+	require.NoError(t, err, "宿主工具条目不得整轮拒")
+	require.Empty(t, plan.results, "local_shell_call_output 不是本站投递过的结果，不能进本批结果")
+	require.Equal(t, 1, plan.skippedItems["local_shell_call"])
+	require.Equal(t, 1, plan.skippedItems["local_shell_call_output"])
+}
+
+// 认得类型但内容畸形（message role 不认识）也只丢这一条，不整轮拒。
+func TestCursorResumeMalformedItemSkippedNotRejected(t *testing.T) {
+	body := `{
+  "model": "cursor-test-model",
+  "input": [
+    {"type":"message","role":"weird_role","content":"???"},
+    {"type":"message","role":"user","content":"真实的用户消息"}
+  ]
+}`
+	var req apicompat.ResponsesRequest
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+	plan, err := cursorPlanFromResponses(&req, "cursor-test-model")
+	require.NoError(t, err)
+	require.Equal(t, 1, plan.skippedItems["message"])
+	require.Equal(t, 1, plan.history.ItemCount(), "好的那条 message 仍进历史")
 }
 
 // TestCursorPlanDeclaresAdditionalToolsUpstream：声明只写在 input 里（顶层 tools 为空）时，

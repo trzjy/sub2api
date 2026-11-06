@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -2056,6 +2057,7 @@ func cursorExecuteResponses(
 		}
 		return nil, planErr
 	}
+	plan.logSkippedItems(ctx, req.Model)
 	mode, name, modeErr := cursorToolChoiceMode(req.ToolChoice)
 	if modeErr != nil {
 		return nil, modeErr
@@ -5869,6 +5871,12 @@ type cursorContextPlan struct {
 	tools []string
 	// results 是本批真实工具结果（按交付顺序），仅续轮请求非空。
 	results []CursorToolResult
+	// skippedItems 记录本次请求里被**丢弃**的 input 条目（类型 → 条数）。
+	//
+	// 丢弃而不是报错是产品口径（2026-11-06）：客户端每加一种新条目，若一律整轮 400，
+	// 客户只会认为"你们模型不稳定"。旁支条目（联网搜索 / 压缩记录 / 引用 / 多智能体
+	// 消息）与尚未接纳的新类型都丢弃并记账，靠这条日志观察客户端在演进什么。
+	skippedItems map[string]int
 	// delivered 是本次交付的工具调用（首 HTTP 生成历史时追加，续轮为空）。
 	delivered []cursorContextItem
 	// instructions 记录本次是否声明了非空 instructions（Responses 用）。
@@ -5912,6 +5920,42 @@ func (p *cursorContextPlan) claimsContinuation() bool {
 		return false
 	}
 	return len(p.results) > 0 || strings.TrimSpace(p.previousResponseID) != ""
+}
+
+// noteSkippedItem 记一笔"这条 input 被丢弃"（类型名统一小写，空类型按 message 记）。
+func (p *cursorContextPlan) noteSkippedItem(typeName string) {
+	if p == nil {
+		return
+	}
+	name := strings.ToLower(strings.TrimSpace(typeName))
+	if name == "" {
+		name = "message"
+	}
+	if p.skippedItems == nil {
+		p.skippedItems = make(map[string]int, 2)
+	}
+	p.skippedItems[name]++
+}
+
+// logSkippedItems 把本次丢弃的条目类型与条数落一条日志（无丢弃时静默）。
+//
+// 这是"不要下抛报错"之后唯一的观测手段：哪一类条目在被丢、丢了多少，
+// 新类型出现时先在这里看见，再决定要不要真的为它写摘要规则。
+func (p *cursorContextPlan) logSkippedItems(ctx context.Context, model string) {
+	if p == nil || len(p.skippedItems) == 0 {
+		return
+	}
+	names := make([]string, 0, len(p.skippedItems))
+	total := 0
+	for name, count := range p.skippedItems {
+		names = append(names, fmt.Sprintf("%s×%d", name, count))
+		total += count
+	}
+	sort.Strings(names)
+	cursorPhaseLog(ctx, zapcore.InfoLevel, "responses_items_skipped", model,
+		zap.Int("skipped_total", total),
+		zap.String("skipped_types", strings.Join(names, ",")),
+	)
 }
 
 // resultsReplayHistory 判定本次携带的工具结果是否**全部属于正文内已完成的工具对**
@@ -6859,22 +6903,24 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		}
 		start--
 	}
-	for _, item := range items[start:] {
-		callID := strings.TrimSpace(item.CallID)
-		if callID == "" {
-			return nil, fmt.Errorf("%w: responses tool output without call_id", ErrCursorResumeAmbiguousResults)
-		}
-		plan.results = append(plan.results, CursorToolResult{CallID: callID, Text: []string{cursorResponsesItemResultOutput(item)}, ResultType: item.Type})
-	}
+	// 前缀里被丢弃的调用：结果条目要**跟着一起丢**，否则上游会看到
+	// "有结果、找不到对应调用"的畸形历史（那才是真会让模型答错的东西）。
+	skippedCalls := make(map[string]struct{}, 4)
 	for _, item := range items[:start] {
-		// 按**归类**处理，而不是按"我认识哪些类型名"：
+		// 分类器是唯一口径（apicompat/responses_input_item_kind.go）：
 		//   声明（additional_tools 等）不是对话内容，交付侧历史从未登记它 → 跳过；
-		//   未知类型 → 失败关闭（绝不静默丢弃客户端内容）。
+		//   旁支（联网搜索 / 压缩记录 / 引用 / 多智能体消息）与尚未接纳的新类型
+		//   → **丢弃并记账**，绝不整轮拒。客户把 400 当成"你们模型不稳定"，
+		//   宁可少一点上下文也不能把报错丢给客户（2026-11-06 产品口径）。
 		switch apicompat.ClassifyResponsesInputItem(item) {
 		case apicompat.ResponsesInputItemDeclaration:
 			continue
-		case apicompat.ResponsesInputItemUnknown:
-			return nil, fmt.Errorf("%w: responses item %q", ErrCursorResumeUnsupportedContent, item.Type)
+		case apicompat.ResponsesInputItemIgnorable, apicompat.ResponsesInputItemUnknown:
+			plan.noteSkippedItem(item.Type)
+			if callID := strings.TrimSpace(item.CallID); callID != "" {
+				skippedCalls[callID] = struct{}{}
+			}
+			continue
 		}
 		if callID := cursorResponsesItemCallID(item); callID != "" {
 			// §25.17.4 行 1：该调用的声明就在同一正文里 → 与之配对的尾部 output 属于
@@ -6886,11 +6932,32 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		}
 		digestItem, ierr := cursorResponsesItemItem(item)
 		if ierr != nil {
-			return nil, ierr
+			// 认得类型但内容畸形（role 不认识、content 不是文本等）：丢这一条，
+			// 不整轮拒——一条畸形条目不该让整轮任务失败。
+			plan.noteSkippedItem(item.Type)
+			if callID := strings.TrimSpace(item.CallID); callID != "" {
+				skippedCalls[callID] = struct{}{}
+			}
+			continue
 		}
 		if err := plan.history.AppendItem(digestItem.itemType, digestItem.canonical); err != nil {
 			return nil, err
 		}
+	}
+	// 本批结果：只收**本站真的会投递**的结果类型，且调用没被丢弃。
+	for _, item := range items[start:] {
+		callID := strings.TrimSpace(item.CallID)
+		if !apicompat.IsResponsesInputResult(item.Type) || callID == "" {
+			// 宿主工具结果（local_shell_call_output 等）本来就没有被转发过的调用；
+			// 没有 call_id 的结果无从投递。一律丢弃记账，不报错。
+			plan.noteSkippedItem(item.Type)
+			continue
+		}
+		if _, skipped := skippedCalls[callID]; skipped {
+			plan.noteSkippedItem(item.Type)
+			continue
+		}
+		plan.results = append(plan.results, CursorToolResult{CallID: callID, Text: []string{cursorResponsesItemResultOutput(item)}, ResultType: item.Type})
 	}
 	// Responses 的"完整历史"必须能自证：本批每个结果 ID 的调用条目都出现在**同一正文**
 	// 的历史前缀里（成对 function_call + function_call_output）。只有 previous_response_id

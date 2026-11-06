@@ -39,24 +39,30 @@ func TestCursorMessagesPlanPreservesOfficialSystemMessage(t *testing.T) {
 	require.Equal(t, baseline.history.HexString(), plan.history.HexString(), "system message must not enter user history")
 }
 
-func TestCursorResponsesPlanRejectsUnknownMessageRole(t *testing.T) {
+// 产品口径（2026-11-06）：认得类型但内容畸形（role 不认识）不得整轮拒——只丢这一条，
+// 把本轮做完。客户看到的 400 会被理解成"模型不稳定"，代价远大于少一条消息。
+func TestCursorResponsesPlanSkipsUnknownMessageRole(t *testing.T) {
 	req := &apicompat.ResponsesRequest{
 		Model: "cursor-test-model",
 		Input: json.RawMessage(`[{"type":"message","role":"critic","content":"do not demote me"}]`),
 	}
 
-	_, err := cursorPlanFromResponses(req, req.Model)
-	require.ErrorIs(t, err, ErrCursorResumeUnsupportedContent)
+	plan, err := cursorPlanFromResponses(req, req.Model)
+	require.NoError(t, err, "畸形 message 只丢这一条，不得整轮拒")
+	require.Equal(t, 1, plan.skippedItems["message"])
+	require.Equal(t, 0, plan.history.ItemCount())
 }
 
-func TestCursorResponsesPlanRejectsUnknownItemType(t *testing.T) {
+// 旁支条目（模型自己联网搜的痕迹）本来就从不转发，回放时丢弃即可，不整轮拒。
+func TestCursorResponsesPlanSkipsHostedSearchItem(t *testing.T) {
 	req := &apicompat.ResponsesRequest{
 		Model: "cursor-test-model",
 		Input: json.RawMessage(`[{"type":"web_search_call","id":"ws_1"}]`),
 	}
 
-	_, err := cursorPlanFromResponses(req, req.Model)
-	require.ErrorIs(t, err, ErrCursorResumeUnsupportedContent)
+	plan, err := cursorPlanFromResponses(req, req.Model)
+	require.NoError(t, err, "web_search_call 必须被丢弃而不是整轮拒")
+	require.Equal(t, 1, plan.skippedItems["web_search_call"])
 }
 
 func TestCursorChatPlanRejectsToolCallsOnNonAssistantMessage(t *testing.T) {
@@ -88,14 +94,12 @@ func TestCursorInboundProtocolErrorsAreClient400(t *testing.T) {
 			_, err := cursorExecuteChat(ctx, nil, exec, account, []byte(`{"model":"cursor-test-model","messages":[{"role":"user","content":"hello","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}]}`))
 			return err
 		}},
-		{name: "responses continuation", run: func() error {
-			_, err := cursorExecuteResponses(ctx, nil, exec, account, &apicompat.ResponsesRequest{Model: "cursor-test-model", Input: json.RawMessage(`[{"type":"web_search_call","id":"ws_1"}]`)})
-			return err
-		}},
 		{name: "anthropic continuation", run: func() error {
 			_, err := cursorExecuteAnthropic(ctx, nil, exec, account, &apicompat.AnthropicRequest{Model: "cursor-test-model", Messages: []apicompat.AnthropicMessage{{Role: "developer", Content: json.RawMessage(`"do not demote me"`)}}})
 			return err
 		}},
+		// Responses 侧已改成"丢弃 + 记账"（见 TestCursorResponsesPlanSkipsHostedSearchItem）：
+		// 旁支条目与未知类型都不再整轮拒，所以这里不再列它。
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
