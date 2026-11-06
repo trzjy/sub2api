@@ -466,7 +466,7 @@ func TestCursorProtocolRequestReturnsConversationID(t *testing.T) {
 	req := &apicompat.ChatCompletionsRequest{
 		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 	}
-	body, convID, err := cursorBuildAgentRun(req, "grok-4.7")
+	body, convID, err := cursorBuildAgentRun(req, "grok-4.7", cursorSkipLedger{})
 	require.NoError(t, err)
 	require.Equal(t, "conv-A", convID)
 	run := cursorAgentRunOf(t, body)

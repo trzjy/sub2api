@@ -38,7 +38,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -522,8 +521,8 @@ func (s *CursorExecutionService) Execute(
 		}
 	}
 
-	// ④ 请求转换。
-	payload, err := cursorConvertRequest(req.Chat, upstreamModel)
+	// ④ 请求转换（带丢弃记账：本层不支持的形状一律丢弃并落日志，不整轮 400）。
+	payload, err := cursorConvertRequestWithContext(ctx, req.Chat, upstreamModel)
 	if err != nil {
 		return nil, err
 	}
@@ -5876,7 +5875,10 @@ type cursorContextPlan struct {
 	// 丢弃而不是报错是产品口径（2026-11-06）：客户端每加一种新条目，若一律整轮 400，
 	// 客户只会认为"你们模型不稳定"。旁支条目（联网搜索 / 压缩记录 / 引用 / 多智能体
 	// 消息）与尚未接纳的新类型都丢弃并记账，靠这条日志观察客户端在演进什么。
-	skippedItems map[string]int
+	//
+	// 类型是 cursorSkipLedger（见 cursor_skip_ledger.go）：chat/messages 路径与
+	// Responses 路径共用同一个账本类型，避免两套"丢了多少"的口径。
+	skippedItems cursorSkipLedger
 	// delivered 是本次交付的工具调用（首 HTTP 生成历史时追加，续轮为空）。
 	delivered []cursorContextItem
 	// instructions 记录本次是否声明了非空 instructions（Responses 用）。
@@ -5927,14 +5929,10 @@ func (p *cursorContextPlan) noteSkippedItem(typeName string) {
 	if p == nil {
 		return
 	}
-	name := strings.ToLower(strings.TrimSpace(typeName))
-	if name == "" {
-		name = "message"
-	}
 	if p.skippedItems == nil {
-		p.skippedItems = make(map[string]int, 2)
+		p.skippedItems = make(cursorSkipLedger, 2)
 	}
-	p.skippedItems[name]++
+	p.skippedItems.note(typeName)
 }
 
 // logSkippedItems 把本次丢弃的条目类型与条数落一条日志（无丢弃时静默）。
@@ -5942,20 +5940,10 @@ func (p *cursorContextPlan) noteSkippedItem(typeName string) {
 // 这是"不要下抛报错"之后唯一的观测手段：哪一类条目在被丢、丢了多少，
 // 新类型出现时先在这里看见，再决定要不要真的为它写摘要规则。
 func (p *cursorContextPlan) logSkippedItems(ctx context.Context, model string) {
-	if p == nil || len(p.skippedItems) == 0 {
+	if p == nil {
 		return
 	}
-	names := make([]string, 0, len(p.skippedItems))
-	total := 0
-	for name, count := range p.skippedItems {
-		names = append(names, fmt.Sprintf("%s×%d", name, count))
-		total += count
-	}
-	sort.Strings(names)
-	cursorPhaseLog(ctx, zapcore.InfoLevel, "responses_items_skipped", model,
-		zap.Int("skipped_total", total),
-		zap.String("skipped_types", strings.Join(names, ",")),
-	)
+	p.skippedItems.log(ctx, "responses_items_skipped", model)
 }
 
 // resultsReplayHistory 判定本次携带的工具结果是否**全部属于正文内已完成的工具对**
@@ -6190,15 +6178,34 @@ func cursorChatContentText(raw json.RawMessage) (string, error) {
 // carry images, because Cursor conversation history has no assistant/system/
 // tool image slot.  This keeps a continuation from becoming valid merely
 // because its digest parser accepted a richer Chat wire shape.
+//
+// 判据是**原始形状里有没有图片 part**，不经过转换层的解码：
+// 2026-11-06 起转换层改为「丢图保文本」（见 cursorSkipLedger），
+// 但续轮准入判断的是另一件事——"客户端送来的历史里有没有图"。
+// 两件事分开判，避免把"转换时怎么降级"和"历史能不能用来重建会话"混成一处。
 func cursorValidateChatPlanContent(role string, msg apicompat.ChatMessage) error {
-	_, images, err := cursorMessageContent(msg)
-	if err != nil {
-		return err
-	}
-	if len(images) > 0 && role != "user" {
+	if cursorMessageHasImagePart(msg) && role != "user" {
 		return fmt.Errorf("%w: chat %s message contains image content", ErrCursorResumeUnsupportedContent, role)
 	}
 	return nil
+}
+
+// cursorMessageHasImagePart 判断一条消息的**原始 content** 里是否声明了图片 part。
+func cursorMessageHasImagePart(m apicompat.ChatMessage) bool {
+	raw := strings.TrimSpace(string(m.Content))
+	if len(raw) == 0 || raw[0] != '[' {
+		return false
+	}
+	var parts []apicompat.ChatContentPart
+	if err := json.Unmarshal([]byte(raw), &parts); err != nil {
+		return false
+	}
+	for _, p := range parts {
+		if p.Type == "image_url" {
+			return true
+		}
+	}
+	return false
 }
 
 // cursorChatToolItem 生成一条工具声明项（顺序保留，不改写 schema）。

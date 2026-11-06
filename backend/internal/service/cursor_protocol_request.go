@@ -20,12 +20,14 @@ package service
 // 首版范围（沿用 E6 卡的用户裁定，**纯文本**）：
 //   - 请求侧 `tools` / `tool_choice` **丢弃**（Cursor 无对等结构；AgentRun 侧唯一
 //     形似的是 mcp_tools，自造映射风险高于收益）。
-//   - **不支持多模态**：历史 blob 的 content 只有 text 一种落点，带 content-parts
-//     非文本的消息直接失败关闭而非静默丢图。
+//   - 多模态：历史 blob 的 content 只有 text 一种落点，图片只在**当前轮 user**
+//     有落点（selected_context）。协议没有落点的图**丢掉并记账**，绝不为一张图
+//     把整轮打成 400（口径见 cursorSkipLedger）。
 //   - 不新增任何非文本 action（工具/执行/多模态一律不发）。
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -143,15 +145,32 @@ var cursorNewUUID = func() string { return uuid.NewString() }
 // upstreamModel 必须是 **wire ID**（如 `grok-4.7`）——填展示名会被上游拒
 // ERROR_BAD_MODEL_NAME；本层不做任何"猜测式"模型名修正。
 func cursorConvertRequest(req *apicompat.ChatCompletionsRequest, upstreamModel string) ([]byte, error) {
-	body, _, err := cursorBuildAgentRun(req, upstreamModel)
+	body, _, err := cursorBuildAgentRun(req, upstreamModel, nil)
 	return body, err
+}
+
+// cursorConvertRequestWithContext 是**生产入口**：转换请求，并把本次丢弃的内容
+// （见 cursorSkipLedger）落一条日志。
+//
+// 与 cursorConvertRequest 的区别只有记账：后者给探针/单测用（不需要日志，也不关心丢了多少）。
+func cursorConvertRequestWithContext(ctx context.Context, req *apicompat.ChatCompletionsRequest, upstreamModel string) ([]byte, error) {
+	skipped := cursorSkipLedger{}
+	body, _, err := cursorBuildAgentRun(req, upstreamModel, skipped)
+	if err != nil {
+		return nil, err
+	}
+	skipped.log(ctx, "chat_messages_dropped", upstreamModel)
+	return body, nil
 }
 
 // cursorBuildAgentRun 构造 AgentRun 请求体，并回传本次的 conversation_id。
 //
 // 回传 conversation_id 的目的：它是这一轮对话在上游的唯一标识，调用方可据此把
 // 流内事件（含 P1-A1 的拒付哨兵）关联回具体请求。
-func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel string) ([]byte, string, error) {
+//
+// skipped 是丢弃账本（可为 nil）：本层所有「协议没有落点」的形状一律丢弃记账，
+// 不再整轮 400——口径见 cursorSkipLedger 的注释。
+func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel string, skipped cursorSkipLedger) ([]byte, string, error) {
 	if req == nil {
 		return nil, "", newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil request")
 	}
@@ -159,21 +178,36 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 		return nil, "", newCursorRequestError(infraerrors.CursorExecModelMappingInvalidCode, http.StatusInternalServerError, "empty upstream model")
 	}
 
-	turns, err := cursorConvertMessages(req.Messages)
+	turns, err := cursorConvertMessages(req.Messages, skipped)
 	if err != nil {
 		return nil, "", err
 	}
+
+	// 尾部的**空** assistant 是 prefill 最常见的形态：客户端先塞一条空的助手占位
+	// （或把上一轮的空回复原样带回来）。它不含任何内容，丢掉本轮就能正常发出去。
+	// 只削尾部、且保留至少一轮，所以不会把 [assistant, 空 assistant] 削成空对话。
+	for len(turns) > 1 && turns[len(turns)-1].role == "assistant" && strings.TrimSpace(turns[len(turns)-1].text) == "" {
+		skipped.note(cursorSkipEmptyAssistantTail)
+		turns = turns[:len(turns)-1]
+	}
+
 	if len(turns) == 0 {
-		return nil, "", newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "no convertible messages")
+		return nil, "", newCursorRequestError(infraerrors.CursorReqNoContentCode, http.StatusBadRequest, "no convertible messages")
 	}
 
 	// AgentRun 的已取证入口只有 user_message_action：最后一轮必须是用户消息，
-	// 否则上游无处接收"当前这一轮的提问"。以 assistant 结尾的入站（prefill）
-	// 本层不支持，**失败关闭**而不是悄悄把 assistant 文本当用户话发出去
-	// （那会把模型续写当成用户指令，语义彻底错乱）。
+	// 否则上游无处接收"当前这一轮的提问"。
+	//
+	// **这是整条链路上唯一必须拒的入站形状**：以实质内容结尾的 assistant
+	// （prefill / 续写请求）在我们这边的协议里没有落点。硬把它当用户话发出去，
+	// 等于把"模型该续写的内容"当成"用户新下的指令"，语义彻底错乱——客户拿到的是
+	// 答非所问，比一个明确的拒绝更难排查。
+	//
+	// 所以这里拒，但**拒要说清**：CUR-REQ-06 的对客文案直接写明"最后一条是助手消息、
+	// 本站不支持从助手消息续写、请在末尾补一条用户消息"，不让客户去猜。
 	last := turns[len(turns)-1]
 	if last.role != "user" {
-		return nil, "", newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "conversation must end with a user message")
+		return nil, "", newCursorRequestError(infraerrors.CursorReqPrefillCode, http.StatusBadRequest, "conversation must end with a user message")
 	}
 	history := turns[:len(turns)-1]
 
@@ -185,7 +219,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// 证据 63：conversation_state = {mode:2, root_prompt_messages_json:[blobId…]}，
 	// 每个 blobId 32 字节 = sha256(blobValue)，blobValue 由 pre_fetched_blobs 携带。
 	state := cursorAppendVarintField(nil, cursorFldStateMode, cursorConversationModeAgent)
-	blobs, err := cursorHistoryBlobs(history)
+	blobs, err := cursorHistoryBlobs(history, skipped)
 	if err != nil {
 		return nil, "", err
 	}
@@ -223,7 +257,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// f4（McpTools）声明给上游；否则保持空 message（f4 字段存在、长度 0，与活体样本
 	// 同形——既满足"无 tools 时零变化"的纯文本链回归保护，也保住 33/63 号黄金字节）。
 	declared := cursorResolveDeclaredTools(req)
-	mcpTools, err := cursorBuildMcpTools(declared)
+	mcpTools, err := cursorBuildMcpTools(declared, skipped)
 	if err != nil {
 		return nil, "", err
 	}
@@ -298,10 +332,13 @@ func cursorFunctionTools(tools []apicompat.ChatTool) []apicompat.ChatTool {
 // 每个函数生成一条 McpToolDefinition（McpTools.f1 repeated），五个字段都要写：
 // f1 name / f2 description / f4 provider_identifier="sub2api" / f5 tool_name /
 // f3 input_schema（google.protobuf.Value，由 function.parameters 的 JSON 经
-// structpb + proto.Marshal 编码，与 AgentRun 真实出站同形；schema 缺失补空 Struct，
-// 非法 JSON 失败关闭，绝不静默丢工具）。
+// structpb + proto.Marshal 编码，与 AgentRun 真实出站同形；schema 缺失补空 Struct）。
 // 返回空切片表示"无声明"（f4 保持空 message，与活体样本同形）。
-func cursorBuildMcpTools(tools []apicompat.ChatTool) ([]byte, error) {
+//
+// 非法 schema 的处置（2026-11-06 口径修正）：**丢掉这一个工具并记账**，不再整轮 400。
+// 客户端的 schema 写错是它自己的 bug；但为一个坏 schema 把整轮打成"模型不稳定"，
+// 是更坏的交换——少一个工具本轮还能答，400 则什么都答不了。
+func cursorBuildMcpTools(tools []apicompat.ChatTool, skipped cursorSkipLedger) ([]byte, error) {
 	var mcp []byte
 	for _, t := range tools {
 		if t.Function == nil || t.Function.Name == "" {
@@ -311,17 +348,16 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool) ([]byte, error) {
 		if strings.TrimSpace(schema) == "" || schema == "null" {
 			schema = "{}"
 		}
-		// schema 必须是合法 JSON 对象，才能编码进 google.protobuf.Value；
-		// 非法则**失败关闭**（不静默丢工具、不猜宽松 fallback）。
+		// schema 必须是合法 JSON 对象，才能编码进 google.protobuf.Value。
 		value := &structpb.Value{}
 		if err := protojson.Unmarshal([]byte(schema), value); err != nil {
-			return nil, newCursorRequestError(infraerrors.CursorReqInvalidToolSchemaCode, http.StatusBadRequest,
-				"tool %q: invalid input_schema JSON: %v", t.Function.Name, err)
+			skipped.note(cursorSkipToolSchemaInvalid)
+			continue
 		}
 		valBytes, err := proto.Marshal(value)
 		if err != nil {
-			return nil, newCursorRequestError(infraerrors.CursorReqInvalidToolSchemaCode, http.StatusBadRequest,
-				"tool %q: marshal input_schema Value: %v", t.Function.Name, err)
+			skipped.note(cursorSkipToolSchemaInvalid)
+			continue
 		}
 		var def []byte
 		def = cursorAppendStringField(def, cursorFldMcpToolDefName, t.Function.Name)
@@ -426,7 +462,7 @@ func cursorHistoryUserRichBlobOf(turn cursorAgentTurn) cursorHistoryUserRichBlob
 }
 
 // cursorHistoryBlobs 把历史轮次序列化为内容寻址的 KV 载荷（保序）。
-func cursorHistoryBlobs(history []cursorAgentTurn) ([]cursorHistoryBlob, error) {
+func cursorHistoryBlobs(history []cursorAgentTurn, skipped cursorSkipLedger) ([]cursorHistoryBlob, error) {
 	out := make([]cursorHistoryBlob, 0, len(history))
 	assistantSeq := 0
 	for _, turn := range history {
@@ -434,11 +470,14 @@ func cursorHistoryBlobs(history []cursorAgentTurn) ([]cursorHistoryBlob, error) 
 		var err error
 		if turn.role == "assistant" {
 			// assistant 历史侧无 image 落点（agent.v1.ConversationHistoryAssistantContent
-			// 仅 text / reasoning / redacted_reasoning / tool_call）。带图是协议不支持
-			// 的形状，**失败关闭**而非静默丢图（踩项目红线）。
+			// 仅 text / reasoning / redacted_reasoning / tool_call）。
+			//
+			// 2026-11-06 口径修正：带图时**丢图保文本**并记账，不再整轮 400。
+			// "协议没有图片落点"是我们这一侧的限制，不该让客户为此收到一个错误——
+			// 图丢了只是少一点上下文，400 是整轮白跑。
 			if len(turn.images) > 0 {
-				return nil, newCursorRequestError(infraerrors.CursorReqImageOutsideUserCode, http.StatusBadRequest,
-					"assistant message must not contain images (no image landing in conversation history)")
+				skipped.note(cursorSkipImageOutsideUser)
+				turn.images = nil
 			}
 			assistantSeq++
 			value, err = cursorMarshalBlobJSON(cursorHistoryAssistantBlob{
@@ -493,22 +532,24 @@ func cursorMarshalBlobJSON(v any) ([]byte, error) {
 // 因此：system 文本按出现顺序拼到**第一条 user** 消息的开头，标记行分隔；
 // 若整段对话没有任何 user（纯 system+assistant），则新建一条 user 承载
 // （否则请求会被上游判为空对话）。
-func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, error) {
+func cursorConvertMessages(msgs []apicompat.ChatMessage, skipped cursorSkipLedger) ([]cursorAgentTurn, error) {
 	turns := make([]cursorAgentTurn, 0, len(msgs))
 	var systemParts []string
 	sawUser := false
 
 	for _, m := range msgs {
-		text, images, err := cursorMessageContent(m)
+		text, images, err := cursorMessageContent(m, skipped)
 		if err != nil {
+			// 内容层已改成「解析不了的只丢这一条」，正常路径不再有可预期错误；
+			// 返回位留给真正的内部失败（不吞，避免把 bug 伪装成"丢了一条"）。
 			return nil, err
 		}
 		switch strings.ToLower(strings.TrimSpace(m.Role)) {
 		case "system", "developer":
-			// system/developer 无图片落点：含图则失败关闭（不静默丢图、也不乱放）。
+			// system/developer 无图片落点 → 丢图保文本并记账（2026-11-06 口径）。
 			if len(images) > 0 {
-				return nil, newCursorRequestError(infraerrors.CursorReqImageOutsideUserCode, http.StatusBadRequest,
-					"system/developer message must not contain images (no image landing in protocol)")
+				skipped.note(cursorSkipImageOutsideUser)
+				images = nil
 			}
 			if text != "" {
 				systemParts = append(systemParts, text)
@@ -523,16 +564,17 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 			sawUser = true
 		case "assistant", "ai":
 			if m.FunctionCall != nil {
-				return nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest,
-					"legacy assistant function_call is not supported by cursor protocol")
+				// legacy function_call：旧版 OpenAI 的 deprecated 字段，Cursor 协议里
+				// 没有对应落点。2026-11-06 口径：**丢掉这个字段、保留本条文本**并记账，
+				// 不整轮 400（存量客户端早已不用它，还在发的多是从别的格式转过来的）。
+				skipped.note(cursorSkipLegacyFunctionCall)
 			}
 			// 图片落点仅在 user 侧：assistant 历史 blob 没有任何 image 字段
 			// （agent.v1.ConversationHistoryAssistantContent 只含
-			// text / reasoning / redacted_reasoning / tool_call）。带图属协议不支持
-			// 的形状，**失败关闭**而非静默丢图（踩项目红线），尽早在此报出。
+			// text / reasoning / redacted_reasoning / tool_call）→ 丢图保文本。
 			if len(images) > 0 {
-				return nil, newCursorRequestError(infraerrors.CursorReqImageOutsideUserCode, http.StatusBadRequest,
-					"assistant message must not contain images (no image landing in conversation history)")
+				skipped.note(cursorSkipImageOutsideUser)
+				images = nil
 			}
 			// assistant 可能携带 tool_calls：原 content（可空）+ 每块一个
 			// <tool_call> blob（见 §4 续轮文本化）。
@@ -541,7 +583,7 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 			// 工具结果 → user turn（Cursor 历史仅 user/assistant 两种落点，见 §4）。
 			// 文本化失败关闭（含非文本 part 时与多模态口径一致）；图片挂到该
 			// user turn 上（若有，走 history rich blob）。
-			tt, tImages, err := cursorToolResultText(m)
+			tt, tImages, err := cursorToolResultText(m, skipped)
 			if err != nil {
 				return nil, err
 			}
@@ -549,11 +591,13 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 		case "":
 			// 没有角色的消息：丢这一条，不整轮拒（2026-11-06 产品口径：
 			// 客户把 400 当成"模型不稳定"，宁可少一条也不能整轮失败）。
+			skipped.note(cursorSkipEmptyRole)
 			continue
 		default:
 			// 未知角色（critic / narrator 之类客户端自定义）：按 user 处理会把
 			// assistant 语义搞错，按 assistant 处理又会篡改轮次；因此**丢掉这一条**
 			// 继续本轮，而不是把整个请求 400 掉。
+			skipped.note(cursorSkipUnknownRole)
 			continue
 		}
 	}
@@ -563,7 +607,18 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage) ([]cursorAgentTurn, err
 	if len(systemParts) > 0 {
 		turns = append(turns, cursorAgentTurn{role: "user", text: cursorJoinSystem(systemParts)})
 	}
-	return turns, nil
+
+	// 丢弃可能把某条消息变成"空轮"（文本空 + 无图）：发上去等于一个空提问，
+	// 上游要么回空要么报错。它们不含任何信息，剔掉只会让请求更干净——记账即可。
+	kept := turns[:0]
+	for _, turn := range turns {
+		if turn.role == "user" && strings.TrimSpace(turn.text) == "" && len(turn.images) == 0 {
+			skipped.note(cursorSkipEmptyMessage)
+			continue
+		}
+		kept = append(kept, turn)
+	}
+	return kept, nil
 }
 
 // cursorJoinSystem 把多条 system 文本拼成一条，保留顺序并加显式边界。
@@ -618,25 +673,27 @@ func cursorAssistantText(m apicompat.ChatMessage, base string) string {
 //
 // 续轮文本化（§4）：Cursor 历史仅 user/assistant 两种落点，工具结果无处可去，
 // 故包成 `<tool_result tool_call_id="..." name="...">\n<content>\n...\n</tool_result>`
-// 落为 user。content 为字符串或纯 text part 拼接；含非文本 part 时按新口径：
-// image_url（data URI）解出图片、远程 URL / file / 未知 → 失败关闭
-// （与多模态口径一致）。图片随 user turn 一并返回，供 history rich blob 使用。
-func cursorToolResultText(m apicompat.ChatMessage) (string, []cursorTurnImage, error) {
-	content, images, err := cursorMessageContent(m)
+// 落为 user。content 为字符串或纯 text part 拼接；image_url（data URI）解出图片后
+// **丢弃并记账**（tool result 无图片落点，见下），远程 URL / file / 未知 part
+// 在内容层已按「丢这个 part」处理，不再上抛。
+func cursorToolResultText(m apicompat.ChatMessage, skipped cursorSkipLedger) (string, []cursorTurnImage, error) {
+	content, images, err := cursorMessageContent(m, skipped)
 	if err != nil {
 		return "", nil, err
 	}
 	if len(images) > 0 {
-		// tool 结果无图片落点：协议里 tool result 不能承载当前轮/历史图片，
-		// 避免把工具产物当成用户上传的图写进 selected_context 或历史 blob。失败关闭。
-		return "", nil, newCursorRequestError(infraerrors.CursorReqImageOutsideUserCode, http.StatusBadRequest,
-			"tool message must not contain images (no image landing for tool results in protocol)")
+		// tool 结果无图片落点：协议里 tool result 不能承载图片，丢图保文本
+		// （2026-11-06 口径：图丢了只是少一点上下文，整轮 400 是白跑）。
+		skipped.note(cursorSkipImageOutsideUser)
+		images = nil
 	}
 	id := m.ToolCallID
 	name := m.Name
 	if strings.EqualFold(strings.TrimSpace(m.Role), "function") && strings.TrimSpace(id) == "" {
-		return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest,
-			"legacy function message has no tool_call_id and cannot be associated with a Cursor tool call")
+		// legacy function 消息没有 tool_call_id：无法与本轮工具调用对上号。
+		// 2026-11-06 口径：不拒，落成一条**不带 id 的结果文本**（模型仍能读到内容），
+		// 记账即可——拒掉整轮换来的只是"客户看到 400"。
+		skipped.note(cursorSkipLegacyFunctionNoID)
 	}
 	if name == "" && m.FunctionCall != nil {
 		name = m.FunctionCall.Name
@@ -654,19 +711,17 @@ func cursorToolResultText(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 
 // cursorMessageContent 从一条 OpenAI 消息取（文本 + 图片）。
 //
-// 失败关闭口径（与首版"不静默丢图"一致）：
+// 口径（2026-11-06 修正，替代原「失败关闭」）：**能丢就丢，丢了记账**。
+//
 //   - content 是字符串 → text 原样，images 空；
-//   - content 是 parts 数组：
-//   - 先扫描是否含 image_url：无图走基线（非 text / 空白 text 一律失败关闭，文案不变），
-//     锁定「纯文本逐字节不变」；含图才允许空白 text 静默跳过；
-//   - type=="image_url" → 解析 ImageURL.URL：
-//   - `data:<mime>;base64,<payload>` → 解 base64 存 data，mime 取头部；
-//     头部缺失 / 非 base64 / 解失败 → 失败关闭（文案说明需要 data URI）；
-//   - 其它形态（http/https 等远程 URL）→ 失败关闭，文案明确
-//     "remote image url is not supported"（本层不服务端抓取远程图片）；
-//   - 其它 type（file / 未知）→ 仍失败关闭（沿用现有文案）。
-//   - content 是数字 / 布尔 / 对象 → 仍失败关闭。
-func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, error) {
+//   - content 是 parts 数组 → 逐 part 处理：
+//     type=="text" 拼接；type=="image_url" 解 data URI（解不出就丢这张图）；
+//     其它 type（file / 音频 / 未知）→ 丢这个 part，保留文本；
+//   - content 是数字 / 布尔 / 对象 / 坏 JSON → 本条消息按「无内容」处理并记账
+//     （调用方随后会把空轮剔掉，整轮真没东西才拒）。
+//
+// 唯一不上抛的例外是内部编程错误，不在这里。
+func cursorMessageContent(m apicompat.ChatMessage, skipped cursorSkipLedger) (string, []cursorTurnImage, error) {
 	raw := strings.TrimSpace(string(m.Content))
 	if raw == "" || raw == "null" {
 		// 兼容 content 缺省与显式 null；tool_calls 型消息正文为空是合法的。
@@ -675,92 +730,75 @@ func cursorMessageContent(m apicompat.ChatMessage) (string, []cursorTurnImage, e
 	if raw[0] == '"' {
 		var s string
 		if err := json.Unmarshal([]byte(raw), &s); err != nil {
-			return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "message content is not a string: %v", err)
+			skipped.note(cursorSkipBadContent)
+			return "", nil, nil
 		}
 		return s, nil, nil
 	}
 	if raw[0] == '[' {
-		// content-parts：先扫描是否含 image_url。
-		//   - 无图 → 完全走基线逻辑：非 text 或空白 text 一律失败关闭（文案不变），
-		//     以锁定「纯文本逐字节不变」；
-		//   - 含图 → text 拼接（空白 text 静默跳过）、image_url 解码、其它 type 失败关闭。
 		var parts []apicompat.ChatContentPart
 		if err := json.Unmarshal([]byte(raw), &parts); err != nil {
-			return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "message content is not a valid parts array: %v", err)
+			skipped.note(cursorSkipBadContent)
+			return "", nil, nil
 		}
-		hasImage := false
-		for _, p := range parts {
-			if p.Type == "image_url" {
-				hasImage = true
-				break
-			}
-		}
-		if !hasImage {
-			// 基线逻辑：非 text 或空白 text 一律失败关闭，行为与改动前逐字节一致。
-			var b strings.Builder
-			for _, p := range parts {
-				if p.Type != "text" || strings.TrimSpace(p.Text) == "" {
-					return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest,
-						"multi-modal content (part type %q) is not supported by cursor protocol", p.Type)
-				}
-				b.WriteString(p.Text)
-			}
-			return b.String(), nil, nil
-		}
-		// 含图：text 拼接（空白跳过）、image_url 解码、其它 type 失败关闭。
 		var b strings.Builder
 		images := make([]cursorTurnImage, 0, len(parts))
 		for _, p := range parts {
 			switch p.Type {
 			case "text":
-				// 空白 text 跳过（仅含图时才允许，避免改变纯文本路径行为）。
+				// 空白 text 跳过：它不含信息，拼进去只会多出无意义换行。
 				if strings.TrimSpace(p.Text) == "" {
 					continue
 				}
 				b.WriteString(p.Text)
 			case "image_url":
 				if p.ImageURL == nil {
-					return "", nil, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
-						"image_url part missing url")
+					skipped.note(cursorSkipImageInvalid)
+					continue
 				}
-				img, err := cursorDecodeImageURL(p.ImageURL.URL)
-				if err != nil {
-					return "", nil, err
+				img, ok := cursorDecodeImageURL(p.ImageURL.URL, skipped)
+				if !ok {
+					continue
 				}
 				images = append(images, img)
 			default:
-				// file / 未知 type → 失败关闭（沿用现有文案）。
-				return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest,
-					"multi-modal content (part type %q) is not supported by cursor protocol", p.Type)
+				// file / 音频 / 未知 part：本协议没有落点 → 丢这个 part 保文本。
+				skipped.note(cursorSkipUnsupportedPart)
+				continue
 			}
 		}
 		return b.String(), images, nil
 	}
-	// 数字 / 布尔 / 对象等：Cursor 侧只接受 string，失败关闭。
-	return "", nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "message content must be a string or content-parts array")
+	// 数字 / 布尔 / 对象等：Cursor 侧只接受 string → 本条按「无内容」处理。
+	skipped.note(cursorSkipBadContent)
+	return "", nil, nil
 }
 
 // cursorDecodeImageURL 解析 image_url 的 URL 为 cursorTurnImage。
 //
 // 仅接受 data URI（`data:<mime>;base64,<payload>`，或带额外参数如
-// `data:image/svg+xml;charset=utf-8;base64,<payload>`）；远程 URL（http/https 等）
-// 一律失败关闭（本层不服务端抓取远程图片）。新增护栏：
+// `data:image/svg+xml;charset=utf-8;base64,<payload>`）。护栏：
 //   - MIME 必须 image/ 前缀（防 data:text/html 等透传）；
 //   - base64 解码前剔除空白，依次尝试 StdEncoding → URLEncoding（URL-safe 字母表）；
-//   - 解码后字节数超过既有请求体上限（cursorUpstreamStreamMaxBytes）失败关闭。
-func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
+//   - 解码后字节数超过既有请求体上限（cursorUpstreamStreamMaxBytes）。
+//
+// **所有不合规分支一律「丢这张图」并记账**（2026-11-06 口径）：本层不服务端抓取
+// 远程图片、也不接受非 base64，但"这张图用不了"不等于"整轮不能答"——
+// 丢掉图、保留文字，客户至少还能得到回答；返回 400 只会让客户觉得模型坏了。
+// ok=false 表示这张图被丢弃（调用方继续处理同一消息的其它部分）。
+func cursorDecodeImageURL(u string, skipped cursorSkipLedger) (cursorTurnImage, bool) {
 	const prefix = "data:"
 	if !strings.HasPrefix(u, prefix) {
-		// 远程 URL：错误信息只回显安全引用（host+path 或 data:<mime>,<N> bytes），
-		// 防签名参数 / 凭据 / 内联二进制进日志。
-		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
-			"remote image url is not supported (%s); send an inline data: URI instead", cursorSafeImageRefForLog(u))
+		// 远程 URL（http/https 等）：本层不抓取。丢弃时**不把 URL 写进任何输出**
+		// （签名参数 / 凭据会泄露），只记账。
+		skipped.note(cursorSkipImageInvalid)
+		return cursorTurnImage{}, false
 	}
 	rest := u[len(prefix):]
 	comma := strings.IndexByte(rest, ',')
 	if comma < 0 {
-		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
-			"image data URI must be data:<mime>;base64,<payload>")
+		skipped.note(cursorSkipImageInvalid)
+		return cursorTurnImage{}, false
 	}
 	meta := rest[:comma]
 	payload := rest[comma+1:]
@@ -776,22 +814,21 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 		}
 	}
 	if !isBase64 {
-		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
-			"image data URI must use base64 encoding")
+		skipped.note(cursorSkipImageInvalid)
+		return cursorTurnImage{}, false
 	}
 	if mime == "" {
-		// 头部缺失 mime → 失败关闭。
-		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
-			"image data URI missing mime type")
+		skipped.note(cursorSkipImageInvalid)
+		return cursorTurnImage{}, false
 	}
 	// MIME 必须是 image/ 前缀（否则 data:text/html 等会被透传，危险）。
 	if !strings.HasPrefix(mime, "image/") {
-		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
-			"image data URI mime type must be image/* (got %q)", mime)
+		skipped.note(cursorSkipImageInvalid)
+		return cursorTurnImage{}, false
 	}
 
 	// base64 健壮性：解码前剔除空白字符（换行/空格/制表/回车），依次尝试
-	// StdEncoding → URLEncoding（-/_ 字母表）。仍失败才失败关闭。
+	// StdEncoding → URLEncoding（-/_ 字母表）。
 	cleaned := strings.Map(func(r rune) rune {
 		switch r {
 		case ' ', '\t', '\n', '\r':
@@ -804,19 +841,19 @@ func cursorDecodeImageURL(u string) (cursorTurnImage, error) {
 		data, err = base64.URLEncoding.DecodeString(cleaned)
 	}
 	if err != nil {
-		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
-			"image data URI payload is not valid base64: %v", err)
+		skipped.note(cursorSkipImageInvalid)
+		return cursorTurnImage{}, false
 	}
 	if len(data) == 0 {
-		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
-			"image data URI payload is empty")
+		skipped.note(cursorSkipImageInvalid)
+		return cursorTurnImage{}, false
 	}
-	// 体积护栏：解码后字节数超过既有请求体上限 → 失败关闭（复用既有常量，不新增阈值）。
+	// 体积护栏：解码后字节数超过既有请求体上限 → 丢弃这张图（复用既有常量，不新增阈值）。
 	if len(data) > cursorUpstreamStreamMaxBytes {
-		return cursorTurnImage{}, newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest,
-			"image data URI payload exceeds request body size limit (%d bytes)", cursorUpstreamStreamMaxBytes)
+		skipped.note(cursorSkipImageInvalid)
+		return cursorTurnImage{}, false
 	}
-	return cursorTurnImage{data: data, mimeType: mime}, nil
+	return cursorTurnImage{data: data, mimeType: mime}, true
 }
 
 // cursorSafeImageRefForLog 把图片引用安全地回显到日志/错误信息，避免泄露敏感内容。

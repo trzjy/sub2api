@@ -483,23 +483,50 @@ const (
 	CursorReqMissingModelCode = "CUR-REQ-01"
 	CursorReqMissingModel     = "请求缺少模型名，请在请求中填写 model 后重试"
 
-	// 触发条件（400）：图片 data URI 格式/大小/远程链接不合规（缺 url、远程链接、非 data:<mime>;base64、
-	// 缺 mime 或非 image/*、base64 无效、payload 为空、超过请求体大小限制）
+	// ===== 以下 CUR-REQ-02 / 03 / 05 三个码自 2026-11-06 起**不再产生** =====
+	//
+	// 口径变更：图片格式不合规（02）、图片落在非 user 消息（03）、工具 schema 非法（05）
+	// 三类一律改为「丢掉那张图 / 那个工具 + 记账」，不再整轮 400（见 cursorSkipLedger）。
+	// 码位与文案保留，供历史日志与老客户端对照，不制造码表空洞。
+	// 若将来某条规则升级为"必须拒绝"，复用这三个码位，不要新开。
+
+	// 触发条件（历史，现已不再产生）：图片 data URI 格式/大小/远程链接不合规。
 	CursorReqInvalidImageCode = "CUR-REQ-02"
 	CursorReqInvalidImage     = "图片格式不正确（仅支持 base64 内嵌的 data URI 图片，不支持远程链接，且不能为空或超过大小限制），请修改后重试"
 
-	// 触发条件（400）：system/developer、assistant、tool 消息里带了图片
+	// 触发条件（历史，现已不再产生）：system/developer、assistant、tool 消息里带了图片。
 	CursorReqImageOutsideUserCode = "CUR-REQ-03"
 	CursorReqImageOutsideUser     = "图片只能放在用户消息中（系统、助手和工具消息里不能带图片），请修改后重试"
 
-	// 触发条件（400）：消息结构不被支持（无可转换消息、最后一条不是用户消息、缺 role 或未知 role、
-	// content 非字符串/非合法 parts 数组、不支持的多模态 part 类型、Gemini 原生转换失败）
+	// 触发条件（400）：请求内容无法解析成可发送的消息。
+	//
+	// 2026-11-06 起只剩两类会产生本码：① Gemini 原生 contents 转换失败；
+	// ② 内容层构造彻底失败（既读不出文本也读不出 parts）。
+	// 「不认识的条目 / 坏 part / 坏图片」都已在更早的层被丢弃，不会走到这里。
 	CursorReqUnsupportedMessageCode = "CUR-REQ-04"
-	CursorReqUnsupportedMessage     = "请求的消息格式不被支持（消息角色、内容格式不正确，或最后一条不是用户消息），请检查客户端后重试"
+	CursorReqUnsupportedMessage     = "请求内容无法解析成可发送的消息（消息结构或内容格式不受支持），请检查客户端构造请求的方式后重试"
 
-	// 触发条件（400）：工具 input_schema JSON 无效或无法编码
+	// 触发条件（历史，现已不再产生）：工具 input_schema JSON 无效。
+	// 2026-11-06 起坏 schema 只丢那一个工具。
 	CursorReqInvalidToolSchemaCode = "CUR-REQ-05"
 	CursorReqInvalidToolSchema     = "工具参数定义（input_schema）无效，请检查客户端声明的工具后重试"
+
+	// 触发条件（400）：整轮没有任何可发送内容（消息全被过滤成空轮，或请求体里
+	// 只有空消息 / 只有被丢弃的旁支内容）。
+	//
+	// 这是**真的没东西可发**：上游没有"提问"可接收，只能拒。文案要告诉客户
+	// 到底缺什么、下一步怎么做，不能丢一个 400 让他猜。
+	CursorReqNoContentCode = "CUR-REQ-06"
+	CursorReqNoContent     = "这次请求里没有可以发送的内容（消息为空，或内容都无法识别），请在末尾补一条有内容的用户消息后重试"
+
+	// 触发条件（400）：最后一轮是助手消息（prefill / 续写请求），本层无处接收
+	// "当前这一轮的提问"。
+	//
+	// 这是全链路**唯一因为形状而必须拒**的入站：把助手文本当用户指令发出去会得到
+	// 答非所问的结果，比明确拒更难排查。文案必须说清"你发的是续写请求、我们暂不
+	// 支持、请在末尾补一条用户消息"。
+	CursorReqPrefillCode = "CUR-REQ-07"
+	CursorReqPrefill     = "这次请求以助手消息结尾（属于续写 / prefill 请求），本通道暂不支持从助手消息续写，请在最后补一条用户消息后重试"
 
 	// 触发条件（500）：分组模型映射后上游模型为空（empty upstream model，含探针入口）
 	CursorExecModelMappingInvalidCode = "CUR-EXEC-07"

@@ -143,9 +143,13 @@ func TestCursorImageHistoryBlobCarriesImagePart(t *testing.T) {
 	require.Equal(t, pngBytes, decoded, "history blob image data must equal the original image bytes")
 }
 
-// TestCursorAssistantImageHistoryFailsClosed 覆盖缺陷 2：assistant 历史轮带图时
-// 必须失败关闭（assistant 侧无 image 落点，不得静默丢图）。
-func TestCursorAssistantImageHistoryFailsClosed(t *testing.T) {
+// TestCursorAssistantImageHistoryDropsImage 钉住 assistant 历史轮带图的**新口径**
+// （2026-11-06）：丢掉这张图、保留文本，不整轮 400。
+//
+// assistant 历史侧没有 image 落点（agent.v1.ConversationHistoryAssistantContent
+// 只含 text / reasoning / redacted_reasoning / tool_call），这是我们这一侧的协议
+// 限制；凭这一条把整轮打成错误，客户看到的是"模型不稳定"。
+func TestCursorAssistantImageHistoryDropsImage(t *testing.T) {
 	req := &apicompat.ChatCompletionsRequest{
 		Messages: []apicompat.ChatMessage{
 			{Role: "user", Content: json.RawMessage(`"hello"`)},
@@ -156,9 +160,19 @@ func TestCursorAssistantImageHistoryFailsClosed(t *testing.T) {
 			{Role: "user", Content: json.RawMessage(`"describe it"`)},
 		},
 	}
-	_, err := cursorConvertRequest(req, "grok-4.7")
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
-	require.Contains(t, err.Error(), "assistant")
+	skipped := cursorSkipLedger{}
+	body, _, err := cursorBuildAgentRun(req, "grok-4.7", skipped)
+	require.NoError(t, err, "assistant 历史带图只丢图，不得整轮拒")
+	require.NotNil(t, body)
+	require.GreaterOrEqual(t, skipped[cursorSkipImageOutsideUser], 1,
+		"丢图要记 image_outside_user，实际=%s", skipped.summary())
+
+	// 被丢弃的图不得以任何形式混进历史 blob（防"丢了却还在"）。
+	run := cursorAgentRunOf(t, body)
+	for _, b := range cursorBlobsOf(t, run) {
+		require.NotContains(t, string(b[1]), "image/png",
+			"assistant 侧无图片落点，被丢弃的图不得出现在历史 blob 里")
+	}
 }
 
 // TestCursorPlainTextBytesUnchanged 覆盖纯文本路径字节稳定：不含 f3，且 history
@@ -198,39 +212,68 @@ func TestCursorPlainTextBytesUnchanged(t *testing.T) {
 	}
 }
 
-// TestCursorRemoteImageURLFailsClosed 覆盖改动 B：远程图片 URL 失败关闭（不抓取）。
-func TestCursorRemoteImageURLFailsClosed(t *testing.T) {
+// TestCursorRemoteImageURLDropped 覆盖改动 B 的新口径（2026-11-06）：
+// 远程图片 URL 本层不抓取，但**也不整轮拒**——丢这张图、保留同条消息的文字，
+// 本轮照常发出去。客户宁可少一张图，也不该收到一个 400。
+func TestCursorRemoteImageURLDropped(t *testing.T) {
 	req := &apicompat.ChatCompletionsRequest{
-		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(
-			`[{"type":"image_url","image_url":{"url":"https://example.com/x.png"}}]`)}},
+		Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"先看文字"`)},
+			{Role: "user", Content: json.RawMessage(
+				`[{"type":"text","text":"再看这张图"},` +
+					`{"type":"image_url","image_url":{"url":"https://example.com/x.png"}}]`)},
+		},
 	}
-	_, err := cursorConvertRequest(req, "grok-4.7")
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+	skipped := cursorSkipLedger{}
+	body, _, err := cursorBuildAgentRun(req, "grok-4.7", skipped)
+	require.NoError(t, err, "远程图片只丢图，不得整轮拒")
+	require.NotNil(t, body)
+	require.Equal(t, 1, skipped[cursorSkipImageInvalid],
+		"丢图要记 image_invalid，实际=%s", skipped.summary())
 }
 
-// TestCursorFilePartStillFailsClosed 覆盖改动 B：file part 仍失败关闭（不扩 file）。
-func TestCursorFilePartStillFailsClosed(t *testing.T) {
+// TestCursorFilePartDropped 覆盖改动 B 的新口径（2026-11-06）：file part 丢**这个
+// part**，同条消息的文本照常带出去（不扩张 file 支持，也不整轮拒）。
+func TestCursorFilePartDropped(t *testing.T) {
 	req := &apicompat.ChatCompletionsRequest{
-		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(
-			`[{"type":"file","file":{"file_data":"data:application/pdf;base64,abc"}}]`)}},
+		Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"先看文字"`)},
+			{Role: "user", Content: json.RawMessage(
+				`[{"type":"text","text":"附件在这里"},` +
+					`{"type":"file","file":{"file_data":"data:application/pdf;base64,abc"}}]`)},
+		},
 	}
-	_, err := cursorConvertRequest(req, "grok-4.7")
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+	skipped := cursorSkipLedger{}
+	body, _, err := cursorBuildAgentRun(req, "grok-4.7", skipped)
+	require.NoError(t, err, "file part 只丢这个 part，不得整轮拒")
+	require.NotNil(t, body)
+	require.Equal(t, 1, skipped[cursorSkipUnsupportedPart],
+		"丢 part 要记 content_unsupported_part，实际=%s", skipped.summary())
 }
 
 // ---------------------------------------------------------------------------
 // IMG-03：外审 must_fix + 健壮性/归属修正的回归用例
 // ---------------------------------------------------------------------------
 
-// TestCursorBlankTextPartWithoutImageFailsClosed 锁死必修项：无图时空白 text part
-// 必须失败关闭（不能静默跳过改成"Helloworld"），纯文本路径行为回到基线。
-func TestCursorBlankTextPartWithoutImageFailsClosed(t *testing.T) {
+// TestCursorBlankTextPartSkipped 钉住 2026-11-06 之后的口径：空白 text part 跳过，
+// 其余 part 按顺序拼接成 "ab"。
+//
+// 历史：这条曾经要求"无图时空白 text part 必须失败关闭"，为的是锁死纯文本逐字节
+// 稳定。新口径下空白 part 不含任何信息，跳过它比整轮 400 对客户更有价值；
+// "纯文本逐字节不变"由 TestCursorPlainTextBytesUnchanged 继续守着。
+func TestCursorBlankTextPartSkipped(t *testing.T) {
 	req := &apicompat.ChatCompletionsRequest{
 		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(
 			`[{"type":"text","text":"a"},{"type":"text","text":" "},{"type":"text","text":"b"}]`)}},
 	}
-	_, err := cursorConvertRequest(req, "grok-4.7")
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+	body, err := cursorConvertRequest(req, "grok-4.7")
+	require.NoError(t, err)
+
+	run := cursorAgentRunOf(t, body)
+	msgFields := cursorUserMessageFieldsOf(t, run)
+	text, ok := cursorFindField(msgFields, cursorFldUserMsgText)
+	require.True(t, ok)
+	require.Equal(t, "ab", text.String(), "空白 part 跳过，其余照顺序拼接")
 }
 
 // TestCursorBlankTextPartWithImageAllowed 含图时空白 text part 静默跳过，其余拼接。
@@ -269,32 +312,47 @@ func TestCursorBlankTextPartWithImageAllowed(t *testing.T) {
 	require.Equal(t, "image/png", mimeField.String())
 }
 
-// TestCursorNonImageMimeFailsClosed 非 image/ 的 mime（如 data:text/html）必须失败关闭，
-// 防 html 等被透传进 selected_context。
-func TestCursorNonImageMimeFailsClosed(t *testing.T) {
+// TestCursorNonImageMimeDropped 非 image/ 的 mime（如 data:text/html）既不能透传进
+// selected_context，也不能整轮拒：处置是**丢这张图**并记账（2026-11-06 口径）。
+func TestCursorNonImageMimeDropped(t *testing.T) {
 	payload := base64.StdEncoding.EncodeToString([]byte("<html>hi</html>"))
 	content := json.RawMessage(fmt.Sprintf(
-		`[{"type":"image_url","image_url":{"url":"data:text/html;base64,%s"}}]`, payload))
+		`[{"type":"text","text":"看这个"},`+
+			`{"type":"image_url","image_url":{"url":"data:text/html;base64,%s"}}]`, payload))
 	req := &apicompat.ChatCompletionsRequest{
-		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
+		Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"先看文字"`)},
+			{Role: "user", Content: content},
+		},
 	}
-	_, err := cursorConvertRequest(req, "grok-4.7")
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
+	skipped := cursorSkipLedger{}
+	body, _, err := cursorBuildAgentRun(req, "grok-4.7", skipped)
+	require.NoError(t, err, "非 image/* 的 data URI 只丢图，不得整轮拒")
+	require.Equal(t, 1, skipped[cursorSkipImageInvalid])
+	require.NotContains(t, string(body), payload,
+		"data:text/html 的机身绝不能被透传出站（这是 XSS 面，不是少一张图的问题）")
 }
 
-// TestCursorNonImageMimeNoOutbound 非 image/* 的 data URI 必须失败关闭，且不得产生任何
-// 出站 AgentRun 字节、不得静默丢图（即要么成功带图、要么失败关闭，绝不在出错时仍发请求）。
-func TestCursorNonImageMimeNoOutbound(t *testing.T) {
-	payload := base64.StdEncoding.EncodeToString([]byte("<html>x</html>"))
+// TestCursorOversizedImageDropped 解码后字节数超过既有请求体上限时，丢这张图并记账，
+// 而不是整轮拒（2026-11-06 口径）。
+func TestCursorOversizedImageDropped(t *testing.T) {
+	// 构造一个超过 cursorUpstreamStreamMaxBytes 的 payload（既有请求体上限常量）。
+	big := make([]byte, cursorUpstreamStreamMaxBytes+1)
+	for i := range big {
+		big[i] = 0xAB
+	}
+	payload := base64.StdEncoding.EncodeToString(big)
 	content := json.RawMessage(fmt.Sprintf(
-		`[{"type":"image_url","image_url":{"url":"data:text/html;base64,%s"}}]`, payload))
+		`[{"type":"text","text":"看这个大图"},`+
+			`{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, payload))
 	req := &apicompat.ChatCompletionsRequest{
 		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
 	}
-	body, err := cursorConvertRequest(req, "grok-4.7")
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
-	require.Nil(t, body, "non-image mime must fail closed with no outbound AgentRun bytes")
-	require.Contains(t, err.Error(), "image/*", "error must explain the mime must be image/*")
+	skipped := cursorSkipLedger{}
+	body, _, err := cursorBuildAgentRun(req, "grok-4.7", skipped)
+	require.NoError(t, err, "超大图只丢图，不得整轮拒")
+	require.Equal(t, 1, skipped[cursorSkipImageInvalid])
+	require.NotContains(t, string(body), payload, "超限的图不得出站")
 }
 
 // TestCursorDataURINotLoggedVerbatim 锁死 IMG-08 改动 B：内联 SVG 这类 data URI
@@ -310,24 +368,6 @@ func TestCursorDataURINotLoggedVerbatim(t *testing.T) {
 	require.Contains(t, ref, "bytes", "data URI log ref must include a byte count, not the body")
 	require.Contains(t, ref, "data:image/svg+xml;base64,",
 		"log ref must keep the mime prefix so operators can tell the image type")
-}
-
-// TestCursorOversizedImageFailsClosed 解码后字节数超过既有请求体上限必须失败关闭。
-func TestCursorOversizedImageFailsClosed(t *testing.T) {
-	// 构造一个超过 cursorUpstreamStreamMaxBytes 的 payload（既有请求体上限常量）。
-	big := make([]byte, cursorUpstreamStreamMaxBytes+1)
-	for i := range big {
-		big[i] = 0xAB
-	}
-	payload := base64.StdEncoding.EncodeToString(big)
-	content := json.RawMessage(fmt.Sprintf(
-		`[{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, payload))
-	req := &apicompat.ChatCompletionsRequest{
-		Messages: []apicompat.ChatMessage{{Role: "user", Content: content}},
-	}
-	_, err := cursorConvertRequest(req, "grok-4.7")
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
-	require.Contains(t, err.Error(), "exceeds request body size limit")
 }
 
 // TestCursorBase64WithLineBreaksDecodes payload 含换行（76 列包装）时必须能解出。
@@ -433,11 +473,13 @@ func TestCursorDataURIWithCharsetParamDecodes(t *testing.T) {
 	require.Equal(t, "image/svg+xml", mimeField.String())
 }
 
-// TestCursorToolMessageImageFailsClosed tool/function 轮若含图片必须失败关闭：
-// 协议里 tool 结果无图片落点，避免把工具产物当成用户上传的图写进 selected_context。
-func TestCursorToolMessageImageFailsClosed(t *testing.T) {
+// TestCursorToolMessageImageDropped tool/function 轮含图片时**丢图保文本**（2026-11-06 口径）：
+// 协议里 tool 结果无图片落点，图丢掉、结果文本照常带上；不得把图当成用户上传的图
+// 写进 selected_context，也不得整轮拒。
+func TestCursorToolMessageImageDropped(t *testing.T) {
 	content := json.RawMessage(fmt.Sprintf(
-		`[{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, cursorTestPNGDataURI))
+		`[{"type":"text","text":"截图见上"},`+
+			`{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, cursorTestPNGDataURI))
 	req := &apicompat.ChatCompletionsRequest{
 		Messages: []apicompat.ChatMessage{
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
@@ -445,9 +487,17 @@ func TestCursorToolMessageImageFailsClosed(t *testing.T) {
 			{Role: "user", Content: json.RawMessage(`"next"`)},
 		},
 	}
-	_, err := cursorConvertRequest(req, "grok-4.7")
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
-	require.Contains(t, err.Error(), "tool")
+	skipped := cursorSkipLedger{}
+	body, _, err := cursorBuildAgentRun(req, "grok-4.7", skipped)
+	require.NoError(t, err, "tool 轮带图只丢图，不得整轮拒")
+	require.Equal(t, 1, skipped[cursorSkipImageOutsideUser],
+		"丢图要记 image_outside_user，实际=%s", skipped.summary())
+
+	// 图片的**原始字节**不得出现在出站字节里（既不能进 selected_context，也不能进历史 blob）。
+	pngBytes, derr := base64.StdEncoding.DecodeString(cursorTestPNGDataURI)
+	require.NoError(t, derr)
+	require.NotContains(t, string(body), string(pngBytes),
+		"tool 结果的图不得以任何形式出站")
 }
 
 // ---------------------------------------------------------------------------

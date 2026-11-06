@@ -129,6 +129,8 @@ var cursorCodeMessages = [][2]string{
 	{CursorReqImageOutsideUserCode, CursorReqImageOutsideUser},
 	{CursorReqUnsupportedMessageCode, CursorReqUnsupportedMessage},
 	{CursorReqInvalidToolSchemaCode, CursorReqInvalidToolSchema},
+	{CursorReqNoContentCode, CursorReqNoContent},
+	{CursorReqPrefillCode, CursorReqPrefill},
 	{CursorExecModelMappingInvalidCode, CursorExecModelMappingInvalid},
 	{CursorExecInternalErrorCode, CursorExecInternalError},
 	{CursorExecModelUnavailableCode, CursorExecModelUnavailable},
@@ -186,5 +188,5 @@ func TestCursorCodeMessages_UniqueAndClean(t *testing.T) {
 			require.NotContainsf(t, msg, reason, "%s 文案含 reason 原文 %q", code, reason)
 		}
 	}
-	require.Len(t, seenCode, 26)
+	require.Len(t, seenCode, 28)
 }

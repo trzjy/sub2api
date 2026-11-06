@@ -115,12 +115,14 @@ func TestCursorInboundProtocolErrorsAreClient400(t *testing.T) {
 
 // 未知角色的消息只丢这一条，不整轮拒（2026-11-06 产品口径：客户把 400 当成模型不稳定）。
 func TestCursorConvertMessagesSkipsUnknownRole(t *testing.T) {
+	skipped := cursorSkipLedger{}
 	turns, err := cursorConvertMessages([]apicompat.ChatMessage{
 		{Role: "critic", Content: json.RawMessage(`"do not demote me"`)},
 		{Role: "user", Content: json.RawMessage(`"真正的提问"`)},
-	})
+	}, skipped)
 	require.NoError(t, err, "未知角色不得整轮拒")
 	require.Len(t, turns, 1, "只保留能落地的那一条")
 	require.Equal(t, "user", turns[0].role)
 	require.Contains(t, turns[0].text, "真正的提问")
+	require.Equal(t, 1, skipped[cursorSkipUnknownRole], "丢弃原因要记账，实际=%s", skipped.summary())
 }

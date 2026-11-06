@@ -100,6 +100,10 @@ func cursorRequestCodeMessage(code string) string {
 		return infraerrors.CursorReqUnsupportedMessage
 	case infraerrors.CursorReqInvalidToolSchemaCode:
 		return infraerrors.CursorReqInvalidToolSchema
+	case infraerrors.CursorReqNoContentCode:
+		return infraerrors.CursorReqNoContent
+	case infraerrors.CursorReqPrefillCode:
+		return infraerrors.CursorReqPrefill
 	case infraerrors.CursorExecUnsupportedCode:
 		return infraerrors.CursorExecUnsupported
 	case infraerrors.CursorExecResultWriteFailedCode:
