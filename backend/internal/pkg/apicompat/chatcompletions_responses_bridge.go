@@ -105,6 +105,14 @@ func ResponsesToChatCompletionsRequestWithOptions(req *ResponsesRequest, opts *R
 // Responses request. Newer Codex clients place their runtime tools in an
 // input item shaped as {"type":"additional_tools","tools":[...]} instead of
 // the top-level tools field. Chat-only upstreams must receive both forms.
+//
+// 顶层 tools 与 input 里的 additional_tools 是**同一份工具集的两种声明站点**，
+// 不是两个工具集：同一条工具在两处都出现时仍然只有一个工具。合并按工具身份
+// （见 responsesToolIdentity）跨站点去重，先见者为准。
+//
+// 只在站点之间去重，**不吞站点内部的重复**：同一份清单里出现两个同名可执行工具
+// 是客户端真实歧义，必须留给下游的冲突检查显式报错（见 responsesToolsToChatTools），
+// 静默保留首个会把客户端的定义错误藏起来。
 func EffectiveResponsesTools(req *ResponsesRequest) ([]ResponsesTool, error) {
 	if req == nil {
 		return nil, nil
@@ -114,6 +122,23 @@ func EffectiveResponsesTools(req *ResponsesRequest) ([]ResponsesTool, error) {
 	inputRaw := bytesTrimSpace(req.Input)
 	if len(inputRaw) == 0 || string(inputRaw) == "null" || inputRaw[0] != '[' {
 		return tools, nil
+	}
+
+	// 已声明身份集合：跨批次累积。批**内部**重复不查集合，故原样保留给下游冲突检查。
+	declared := responsesToolIdentities(tools)
+	appendDeclared := func(incoming []ResponsesTool) {
+		keep := make([]ResponsesTool, 0, len(incoming))
+		for _, tool := range incoming {
+			if _, dup := declared[responsesToolIdentity(tool)]; dup {
+				continue
+			}
+			keep = append(keep, tool)
+		}
+		// 整批筛选完再登记身份，批内重复才能一起留下来。
+		for _, tool := range keep {
+			declared[responsesToolIdentity(tool)] = struct{}{}
+		}
+		tools = append(tools, keep...)
 	}
 
 	var items []json.RawMessage
@@ -140,7 +165,7 @@ func EffectiveResponsesTools(req *ResponsesRequest) ([]ResponsesTool, error) {
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return nil, fmt.Errorf("parse responses additional tools item: %w", err)
 		}
-		tools = append(tools, item.Tools...)
+		appendDeclared(item.Tools)
 	}
 
 	// A completed client tool search can introduce tools for the remainder of
@@ -170,9 +195,28 @@ func EffectiveResponsesTools(req *ResponsesRequest) ([]ResponsesTool, error) {
 		if err := json.Unmarshal(promotedRaw, &discovered); err != nil {
 			return nil, fmt.Errorf("decode promoted responses tools: %w", err)
 		}
-		tools = append(tools, discovered...)
+		appendDeclared(discovered)
 	}
 	return tools, nil
+}
+
+// responsesToolIdentity 是"两条工具声明是不是同一个工具"的唯一判定。
+//
+// 身份 = 类型 + 名字。namespace 工具以 namespace 名为 name（子工具在 children 里），
+// 内置工具大多无名字、按类型唯一，故空名字的内置工具天然合并为一。
+//
+// 只比身份不比 schema：向上游提交两份同名定义本身就是无效请求，能落地的只有一份，
+// 靠"都留着"表达冲突没有意义（真要报冲突由下游显式检查）。
+func responsesToolIdentity(tool ResponsesTool) string {
+	return strings.ToLower(strings.TrimSpace(tool.Type)) + "|" + strings.TrimSpace(tool.Name)
+}
+
+func responsesToolIdentities(tools []ResponsesTool) map[string]struct{} {
+	out := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		out[responsesToolIdentity(tool)] = struct{}{}
+	}
+	return out
 }
 
 // CustomToolNames 收集 Responses 请求中 custom/freeform 工具的名字。chat 桥回程时
