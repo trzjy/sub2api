@@ -1,0 +1,82 @@
+package apicompat
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func decodeFlatToolsRequest(t *testing.T, raw string) *ResponsesRequest {
+	t.Helper()
+	var req ResponsesRequest
+	require.NoError(t, json.Unmarshal([]byte(raw), &req))
+	return &req
+}
+
+// namespace 内的 custom 子工具必须摊平：只摊 function 会让 codex 的 custom exec
+// 永远下不到上游（2026-11-06 实测：摊平前模型报"没有工具"，摊平并改名后正常出 tool call）。
+func TestEffectiveResponsesFlatToolsFlattensNamespaceCustomChildren(t *testing.T) {
+	req := decodeFlatToolsRequest(t, `{
+	  "model":"m",
+	  "tools":[],
+	  "input":[
+	    {"type":"additional_tools","role":"developer","tools":[
+	      {"type":"namespace","name":"functions","tools":[
+	        {"type":"custom","name":"exec","format":{"type":"grammar","definition":"start: /.+/"}},
+	        {"type":"function","name":"wait","parameters":{"type":"object"}}
+	      ]}
+	    ]}
+	  ]
+	}`)
+
+	set, err := EffectiveResponsesFlatTools(req)
+	require.NoError(t, err)
+	require.Equal(t, []string{"functions__exec", "functions__wait"}, toolNames(set.Tools))
+	// custom 按裸名记（回程要还原成客户端声明的名字），摊平名到裸名的关系由 namespace 表承载。
+	require.True(t, set.CustomTools["exec"])
+	require.False(t, set.CustomTools["functions__exec"])
+	require.True(t, set.NamespaceCustomTools["functions__exec"])
+	require.True(t, set.FunctionTools["functions__wait"])
+	require.Equal(t, NamespacedToolName{Namespace: "functions", Name: "exec"},
+		set.NamespaceTools["functions__exec"])
+	// format 必须原样保真：丢掉 grammar 会让 custom 工具在上游退化成无约束工具。
+	require.JSONEq(t, `{"type":"grammar","definition":"start: /.+/"}`,
+		string(set.Tools[0].Format))
+}
+
+func TestEffectiveResponsesFlatToolsKeepsTopLevelTools(t *testing.T) {
+	req := decodeFlatToolsRequest(t, `{
+	  "model":"m",
+	  "tools":[{"type":"function","name":"shell","parameters":{"type":"object"}}],
+	  "input":[{"type":"message","role":"user","content":"hi"}]
+	}`)
+
+	set, err := EffectiveResponsesFlatTools(req)
+	require.NoError(t, err)
+	require.Equal(t, []string{"shell"}, toolNames(set.Tools))
+	require.Nil(t, set.NamespaceTools)
+}
+
+// 摊平名与顶层工具撞名必须明确失败，不能静默覆盖（上游无法区分两者）。
+func TestEffectiveResponsesFlatToolsRejectsFlattenCollision(t *testing.T) {
+	req := decodeFlatToolsRequest(t, `{
+	  "model":"m",
+	  "tools":[
+	    {"type":"function","name":"functions__wait","parameters":{"type":"object"}},
+	    {"type":"namespace","name":"functions","tools":[{"type":"function","name":"wait"}]}
+	  ]
+	}`)
+
+	_, err := EffectiveResponsesFlatTools(req)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "conflicts with a top-level tool")
+}
+
+func toolNames(tools []ResponsesTool) []string {
+	out := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, tool.Name)
+	}
+	return out
+}

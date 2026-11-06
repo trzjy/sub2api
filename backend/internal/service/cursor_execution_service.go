@@ -81,12 +81,16 @@ type cursorResponsesToolMeta struct {
 	customTools    map[string]bool
 	functionTools  map[string]bool
 	namespaceTools map[string]apicompat.NamespacedToolName
-	toolSearch     bool
+	// namespaceCustomTools 标记哪些摊平名属于 namespace 内的 custom 子工具。
+	// 缺这一位时，摊平名一律按普通 function_call 交付；codex 收到 function_call
+	// 而不是 custom_tool_call，会直接把这次工具调用当不认识的工具扔掉。
+	namespaceCustomTools map[string]bool
+	toolSearch           bool
 }
 
 // cursorToolMetaFromResponses 从原始 Responses 请求派生回桥工具元数据。
 //
-// 与 codebuddy / responses-chat-fallback 同源同一组 api 调用（单一实现来源）。
+// 与下发声明同源同一组 api 调用（apicompat.EffectiveResponsesFlatTools）。
 func cursorToolMetaFromResponses(req *apicompat.ResponsesRequest) (cursorResponsesToolMeta, error) {
 	if req == nil {
 		return cursorResponsesToolMeta{}, nil
@@ -95,35 +99,43 @@ func cursorToolMetaFromResponses(req *apicompat.ResponsesRequest) (cursorRespons
 	if err != nil {
 		return cursorResponsesToolMeta{}, fmt.Errorf("cursor: resolve effective responses tools: %w", err)
 	}
-	return cursorToolMetaFromTools(effective), nil
+	return cursorToolMetaFromTools(effective)
 }
 
 // cursorToolMetaFromTools 由**已提升的有效工具集**派生元数据。
 //
-// 单独拆出来是为了让计划构造只解析一次 input：工具声明可能来自 top-level tools，
-// 也可能来自 input 里的 additional_tools；两处必须用同一份结果，否则
-// "元数据认识某些工具、上行声明里却没有"这类不一致会重演（2026-11-06）。
-func cursorToolMetaFromTools(effective []apicompat.ResponsesTool) cursorResponsesToolMeta {
-	return cursorResponsesToolMeta{
-		customTools:    apicompat.CustomToolNames(effective),
-		functionTools:  apicompat.FunctionToolNames(effective),
-		namespaceTools: apicompat.NamespaceToolNames(effective),
-		toolSearch:     apicompat.HasToolSearchTool(effective),
+// 内部先摊平 namespace：上行声明用的就是摊平名（见 cursorPlanFromResponses），
+// 元数据只有记同一份名字，回程才认得上游回调的那个名字。摊平含 custom 子工具，
+// 并把"哪些摊平名是 custom"单独标记出来，供回程判 custom_tool_call。
+func cursorToolMetaFromTools(effective []apicompat.ResponsesTool) (cursorResponsesToolMeta, error) {
+	flat, err := apicompat.FlattenResponsesToolList(effective)
+	if err != nil {
+		// 摊平撞名（顶层工具与 namespace 子工具同名）必须失败关闭：
+		// 此时"猜一个名字"必然把调用挂到错的工具上。
+		return cursorResponsesToolMeta{}, fmt.Errorf("%w: responses tools: %v", ErrCursorResumeUnsupportedContent, err)
 	}
+	return cursorResponsesToolMeta{
+		customTools:          flat.CustomTools,
+		functionTools:        flat.FunctionTools,
+		namespaceTools:       flat.NamespaceTools,
+		namespaceCustomTools: flat.NamespaceCustomTools,
+		toolSearch:           flat.ToolSearch,
+	}, nil
 }
 
 // cursorResponsesDeclaredToolNames 返回**上行真正声明的工具名**（保持声明顺序）。
 //
-// 唯一来源是 apicompat.EffectiveResponsesTools：top-level tools + input 里的
-// additional_tools 声明。任何"工具集合一致性"校验都必须走这里，不得再直接读
-// req.Tools——两处读法不同正是 2026-11-06 续轮误判 tool_set_changed 的原因。
+// 唯一来源是 apicompat.EffectiveResponsesFlatTools：top-level tools + input 里的
+// additional_tools 声明 + namespace 摊平。任何"工具集合一致性"校验都必须走这里，
+// 不得再直接读 req.Tools——两处读法不同正是 2026-11-06 续轮误判 tool_set_changed
+// 的原因；不摊平则与上行声明名对不上，同样会误判。
 func cursorResponsesDeclaredToolNames(req *apicompat.ResponsesRequest) ([]string, error) {
-	effective, err := apicompat.EffectiveResponsesTools(req)
+	flat, err := apicompat.EffectiveResponsesFlatTools(req)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(effective))
-	for _, tool := range effective {
+	names := make([]string, 0, len(flat.Tools))
+	for _, tool := range flat.Tools {
 		if name := strings.TrimSpace(tool.Name); name != "" {
 			names = append(names, name)
 		}
@@ -3581,7 +3593,12 @@ func cursorCustomToolCallName(name string, meta cursorResponsesToolMeta) (string
 	if meta.customTools[name] {
 		return name, true
 	}
-	if _, ok := meta.namespaceTools[name]; ok {
+	// namespace 子工具占用了这个摊平名：是 custom 子工具就还原成裸名并判 custom_tool_call，
+	// 是 function 子工具则保持"真名优先、别名不生效"的原语义。
+	if origin, ok := meta.namespaceTools[name]; ok {
+		if meta.namespaceCustomTools[name] {
+			return origin.Name, true
+		}
 		return "", false
 	}
 	match := ""
@@ -6832,13 +6849,24 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		return nil, err
 	}
 	plan := builder.plan()
-	// 工具集是**有效工具集**（top-level tools + input 里的 additional_tools 声明）：
-	// 元数据与上行 config.tool 必须同源，否则声明只在其中一侧生效。
+	// 工具集是**有效工具集**（top-level tools + input 里的 additional_tools 声明）。
+	// 再摊平 namespace：上游只接受扁平的 function/custom 声明，分组名原样下发等于
+	// 没声明（codex 0.166 的工具全在 namespace 里）。摊平同时把客户端自起的名字
+	// 加上 ns__ 前缀，顺带避开与 Cursor 原生 exec 通道同名。
 	effectiveTools, toolsErr := apicompat.EffectiveResponsesTools(req)
 	if toolsErr != nil {
 		return nil, fmt.Errorf("%w: responses tools: %v", ErrCursorResumeUnsupportedContent, toolsErr)
 	}
-	plan.responsesTools = cursorToolMetaFromTools(effectiveTools)
+	flatTools, flatErr := apicompat.FlattenResponsesToolList(effectiveTools)
+	if flatErr != nil {
+		return nil, fmt.Errorf("%w: responses tools: %v", ErrCursorResumeUnsupportedContent, flatErr)
+	}
+	// 元数据与上行 config.tool 必须同源，否则声明只在其中一侧生效。
+	toolMeta, metaErr := cursorToolMetaFromTools(effectiveTools)
+	if metaErr != nil {
+		return nil, metaErr
+	}
+	plan.responsesTools = toolMeta
 	// §25.17.4（A08）：显式 previous_response_id 是本协议层的续轮声明，必须随计划带到执行
 	// 入口（转换不得抹掉该标记）。
 	plan.previousResponseID = strings.TrimSpace(req.PreviousResponseID)
@@ -6848,8 +6876,8 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		return nil, err
 	}
 	builder.in(cursorConfigHard)
-	tools := make([]string, 0, len(effectiveTools))
-	for _, tool := range effectiveTools {
+	tools := make([]string, 0, len(flatTools.Tools))
+	for _, tool := range flatTools.Tools {
 		encoded, err := json.Marshal(tool)
 		if err != nil {
 			return nil, fmt.Errorf("%w: responses tool marshal", ErrCursorResumeUnsupportedContent)

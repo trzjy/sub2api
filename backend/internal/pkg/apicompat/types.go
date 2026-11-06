@@ -367,6 +367,9 @@ type ResponsesTool struct {
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 	Strict      *bool           `json:"strict,omitempty"`
+	// type=custom 的自由文本语法声明（codex 的 {type:"grammar", definition:...}）。
+	// 原样保真转发：丢弃它会让上游把 custom 工具退化成无约束工具。
+	Format json.RawMessage `json:"format,omitempty"`
 
 	// type=namespace 的子工具列表（tools 与 children 二选一，语义相同）。
 	Tools    []ResponsesTool `json:"tools,omitempty"`
