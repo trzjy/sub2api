@@ -938,10 +938,15 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 	if rerr != nil {
 		if !cursorRetypeDegradable(failReason) {
 			// 参数残缺（缺必填）：与 parser 侧同口径，绝不降级交付残调用。
-			d.logPhase(zapcore.ErrorLevel, "mcp_args_incomplete_rejected", "",
+			// 诊断字段（missing_fields / present_fields / missing_depth）只含字段名与
+			// 深度，用于区分真空缺与命名错位，见 cursorArgsDiagFields。
+			fields := []zap.Field{
 				zap.String("retype_error", string(failReason)),
 				zap.String("tool_name", name),
-				zap.String("call_id", id))
+				zap.String("call_id", id),
+			}
+			fields = append(fields, cursorArgsDiagFields(rerr)...)
+			d.logPhase(zapcore.ErrorLevel, "mcp_args_incomplete_rejected", "", fields...)
 			return cursorToolCallCapture{}, fmt.Errorf("%w: tool %q args incomplete (%s)",
 				ErrCursorArgsIncomplete, name, failReason)
 		}

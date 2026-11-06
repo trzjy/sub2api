@@ -545,12 +545,21 @@ var (
 	// 命中即终态错误：不得当模型成功、不得伪造 usage。
 	ErrCursorUpstreamModelUnavailable = errors.New("cursor: upstream model temporarily unavailable")
 
-	// ErrCursorQuotaExhaustedInStream 是**流内当日额度耗尽哨兵**（RL-STOP 同族）。
+	// ErrCursorQuotaExhaustedInStream 是**流内「今日额度已用完」模板**哨兵（RL-STOP 同族）。
 	//
 	// 触发条件：正文累计内容出现固定模板「今日额度已用完」（2026-11-03 生产活体）。
-	// 与拒付同语义：账号当日额度耗尽，账号级终态 → 停号 + 换号；命中即终态错误，
-	// 不得当模型成功、不得伪造 usage、不得把上游原文（含卡 ID）透传给客户端。
-	ErrCursorQuotaExhaustedInStream = errors.New("cursor: upstream account daily quota exhausted")
+	//
+	// 2026-11-06 定性更正：这个模板**不是余额判定**，是上游对单个账号状态异常的挡板话术。
+	// 生产三重排他证据（见 downstream_messages.go CUR-EXEC-11 与
+	// antigravity_gateway_retry.go cursorQuotaExhaustedCooldown）：
+	//   - 命中时累计用量 0 ～ 405 万 token 不等，其中一次 24 小时零请求也命中；
+	//   - 同码同日 340 号跑 49 次从未命中，343 号只跑 3 次就命中；
+	//   - 343 命中那一刻，同码 340 号正在连续成功。
+	//
+	// 故处置改为：短冷却（5 分钟）+ 换号，**不再按日停调**，对外文案也不再声称额度耗尽。
+	// 真·额度/凭据耗尽走拒付模板 ErrCursorKeyRejectedUpstream（CUR-EXEC-12）。
+	// 命中仍是终态错误：不得当模型成功、不得伪造 usage、不得把上游原文（含卡 ID）透传。
+	ErrCursorQuotaExhaustedInStream = errors.New("cursor: upstream claimed account daily quota exhausted (unverified)")
 )
 
 // cursorUpstreamStreamError 是 ErrCursorUpstreamStream 的结构化载体，携带上游 EndStream 的
@@ -1621,10 +1630,15 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 					if !cursorRetypeDegradable(failReason) {
 						// 参数残缺（缺必填）：绝不降级交付。交给客户端只会变成
 						// InputValidationError + 回填被拒，把一次上游残缺放大成两轮失败。
-						p.logPhase(zapcore.ErrorLevel, "mcp_args_incomplete_rejected", "",
+						// 诊断字段（missing_fields / present_fields / missing_depth）只含
+						// 字段名与深度，用于区分真空缺与命名错位，见 cursorArgsDiagFields。
+						fields := []zap.Field{
 							zap.String("retype_error", string(failReason)),
 							zap.String("tool_name", name),
-							zap.String("call_id", id))
+							zap.String("call_id", id),
+						}
+						fields = append(fields, cursorArgsDiagFields(rerr)...)
+						p.logPhase(zapcore.ErrorLevel, "mcp_args_incomplete_rejected", "", fields...)
 						return cursorStreamEvent{}, fmt.Errorf("%w: tool %q args incomplete (%s)",
 							ErrCursorArgsIncomplete, name, failReason)
 					}
@@ -2009,16 +2023,108 @@ func cursorRetypeDegradable(reason cursorRetypeErrReason) bool {
 
 // cursorRetypeError 是 retype 失败关闭的结构化错误：Unwrap 到 ErrCursorProtocol，
 // 不含参数明文；Reason 暴露 §3.5 枚举值（供错误返回点日志与安全分类）。
+//
+// 诊断三件套（diag*）只在 missing_required 时填充，且**只记字段名、不记字段值**：
+// 用来区分"上游真的没给"与"上游给了但叫法不同"（如 path vs absolute_path）——
+// 两者在当前实现里都表现为缺必填，但根因与修法完全相反。Error() 刻意不含诊断，
+// 避免字段名混进错误串（错误串会进上游错误日志，也贴近下游响应路径）。
 type cursorRetypeError struct {
 	reason cursorRetypeErrReason
+
+	// diagMissing 是缺失的必填字段名（升序、已去重、超长名已截断）。
+	diagMissing []string
+	// diagPresent 是发生缺失的那一层对象实际携带的字段名（升序，只记名字）。
+	diagPresent []string
+	// diagDepth 是那层对象的嵌套深度：根对象 0，嵌套一层 1，依次递增。
+	diagDepth int
 }
 
 func (e *cursorRetypeError) Error() string                 { return "cursor mcp_args retype: " + string(e.reason) }
 func (e *cursorRetypeError) Unwrap() error                 { return ErrCursorProtocol }
 func (e *cursorRetypeError) Reason() cursorRetypeErrReason { return e.reason }
 
+// MissingFields 返回缺失的必填字段名（仅 missing_required 时非空）。
+func (e *cursorRetypeError) MissingFields() []string { return e.diagMissing }
+
+// PresentFields 返回缺失所在层实际携带的字段名（仅 missing_required 时非空）。
+func (e *cursorRetypeError) PresentFields() []string { return e.diagPresent }
+
+// MissingDepth 返回缺失字段所在的嵌套深度（根对象为 0）。
+func (e *cursorRetypeError) MissingDepth() int { return e.diagDepth }
+
 func cursorRetypeErrorf(reason cursorRetypeErrReason) error {
 	return &cursorRetypeError{reason: reason}
+}
+
+// cursorArgsDiagFields 从 retype 错误里取出脱敏诊断字段，供"缺必填"拒绝日志使用。
+//
+// 只输出**字段名清单**与嵌套深度，绝不输出字段值：这些日志的用途是区分
+// "上游真的没给这个字段"（真空缺，只能让模型重生成）与"上游给了但叫法不同"
+// （如 path vs absolute_path，可做确定性名字对齐），字段值对判断没有帮助，
+// 且可能携带账号/会话数据。
+//
+// 非 missing_required 的失败（schema 侧问题）没有诊断，返回 nil。
+func cursorArgsDiagFields(err error) []zap.Field {
+	var re *cursorRetypeError
+	if !errors.As(err, &re) {
+		return nil
+	}
+	missing := re.MissingFields()
+	if len(missing) == 0 {
+		return nil
+	}
+	return []zap.Field{
+		zap.Strings("missing_fields", missing),
+		zap.Strings("present_fields", re.PresentFields()),
+		zap.Int("missing_depth", re.MissingDepth()),
+	}
+}
+
+// cursorRetypeDiagFieldNameMax / cursorRetypeDiagFieldCountMax 是诊断字段清单的上限：
+// 字段名最多 64 字节、每类清单最多 24 项。上游畸形参数可能塞几十个无关 key，
+// 不设上限会把日志撑爆。
+const (
+	cursorRetypeDiagFieldNameMax  = 64
+	cursorRetypeDiagFieldCountMax = 24
+)
+
+// cursorRetypeMissingRequiredError 构造带脱敏诊断的 missing_required 错误。
+//
+// present 是缺失所在层实际携带的字段名（任意顺序，本函数负责排序去重截断）。
+func cursorRetypeMissingRequiredError(missing []string, present []string, depth int) error {
+	return &cursorRetypeError{
+		reason:      cursorRetypeMissingRequired,
+		diagMissing: cursorRetypeDiagNames(missing),
+		diagPresent: cursorRetypeDiagNames(present),
+		diagDepth:   depth,
+	}
+}
+
+// cursorRetypeDiagNames 归一化诊断字段名清单：去空、截断超长名、排序、去重、限量。
+func cursorRetypeDiagNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if len(name) > cursorRetypeDiagFieldNameMax {
+			name = name[:cursorRetypeDiagFieldNameMax]
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	if len(out) > cursorRetypeDiagFieldCountMax {
+		out = out[:cursorRetypeDiagFieldCountMax]
+	}
+	return out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2676,7 +2782,7 @@ func cursorRetypeMcpArgsOptions(argsJSON, schemaJSON []byte, enforceRequired boo
 			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
 		}
 	}
-	out, err := retypeValue(args, root)
+	out, err := retypeValue(args, root, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -2759,7 +2865,10 @@ var (
 )
 
 // retypeValue 递归地按 schema 还原单个 value（方案 §3.3 算法）。
-func retypeValue(value any, schema map[string]any) (any, error) {
+//
+// depth 是该节点在参数树里的嵌套深度（根对象 0），只用于 missing_required 的
+// 脱敏诊断（区分顶层缺字段与嵌套缺字段），不参与任何投影/校验决策。
+func retypeValue(value any, schema map[string]any, depth int) (any, error) {
 	// 0. schema 形态
 	if schema == nil {
 		return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
@@ -2784,9 +2893,9 @@ func retypeValue(value any, schema map[string]any) (any, error) {
 	case "string", "null":
 		return value, nil
 	case "array":
-		return retypeArray(value, schema)
+		return retypeArray(value, schema, depth)
 	case "object":
-		return retypeObject(value, schema)
+		return retypeObject(value, schema, depth)
 	case "number", "integer", "boolean":
 		return retypeScalar(value, rawType)
 	default:
@@ -2794,7 +2903,7 @@ func retypeValue(value any, schema map[string]any) (any, error) {
 	}
 }
 
-func retypeArray(value any, schema map[string]any) (any, error) {
+func retypeArray(value any, schema map[string]any, depth int) (any, error) {
 	var seq []any
 	switch v := value.(type) {
 	case []any:
@@ -2831,7 +2940,7 @@ func retypeArray(value any, schema map[string]any) (any, error) {
 	case map[string]any:
 		out := make([]any, len(seq))
 		for i, e := range seq {
-			r, err := retypeValue(e, items)
+			r, err := retypeValue(e, items, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -2843,7 +2952,7 @@ func retypeArray(value any, schema map[string]any) (any, error) {
 	}
 }
 
-func retypeObject(value any, schema map[string]any) (any, error) {
+func retypeObject(value any, schema map[string]any, depth int) (any, error) {
 	v, ok := value.(map[string]any)
 	if !ok {
 		return nil, cursorRetypeErrorf(cursorRetypeObjectTypeMismatch)
@@ -2871,7 +2980,7 @@ func retypeObject(value any, schema map[string]any) (any, error) {
 				// 属性 schema 不是对象（null/字面量）→ 不可作为投影依据。
 				return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
 			}
-			r, err := retypeValue(vv, sub)
+			r, err := retypeValue(vv, sub, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -2880,7 +2989,7 @@ func retypeObject(value any, schema map[string]any) (any, error) {
 		}
 		switch {
 		case apSchema != nil:
-			r, err := retypeValue(vv, apSchema)
+			r, err := retypeValue(vv, apSchema, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -2897,7 +3006,11 @@ func retypeObject(value any, schema map[string]any) (any, error) {
 	// 上游只发一个空 args（活体 11-03 04:45 的 Bash input={}）也照样重打成功，
 	// 我们便把空壳调用交付给客户端。必填缺失 → missing_required，由调用点按
 	// cursorRetypeDegradable 判定为不可降级，改走上游失败。
-	if err := cursorCheckRetypeRequired(out, schema); err != nil {
+	//
+	// 诊断口径：缺失字段名与该层实际携带的字段名一并带出（只记名字、不记值），
+	// 供调用点区分"上游真没给"与"上游给了但叫法不同"。原始 v 的 key 才是上游给的
+	// 字段名（out 是投影结果，会因 additionalProperties:false 少项）。
+	if err := cursorCheckRetypeRequired(out, schema, depth, v); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -2907,32 +3020,46 @@ func retypeObject(value any, schema map[string]any) (any, error) {
 //
 // 只做"存在性"判定（含显式 null），不做值域判定：值是否合法由客户端按同一 schema
 // 复核，本层只负责不让**残缺**调用流出。
-func cursorCheckRetypeRequired(out map[string]any, schema map[string]any) error {
+//
+// raw 是上游传进该层的原始对象，只用于诊断：缺失时把（缺的字段名、raw 实际携带的
+// 字段名、嵌套深度）一并带进错误，绝不把字段值写入错误或日志。
+func cursorCheckRetypeRequired(out map[string]any, schema map[string]any, depth int, raw map[string]any) error {
 	rv, exists := schema["required"]
 	if !exists || rv == nil {
 		return nil
 	}
+	var declared []string
 	switch reqList := rv.(type) {
 	case []any:
+		declared = make([]string, 0, len(reqList))
 		for _, item := range reqList {
 			name, ok := item.(string)
 			if !ok {
 				return cursorRetypeErrorf(cursorRetypeSchemaInvalid)
 			}
-			if _, present := out[name]; !present {
-				return cursorRetypeErrorf(cursorRetypeMissingRequired)
-			}
+			declared = append(declared, name)
 		}
 	case []string:
-		for _, name := range reqList {
-			if _, present := out[name]; !present {
-				return cursorRetypeErrorf(cursorRetypeMissingRequired)
-			}
-		}
+		declared = reqList
 	default:
 		return cursorRetypeErrorf(cursorRetypeSchemaInvalid)
 	}
-	return nil
+	// 收集**全部**缺失字段（不是第一个就返回）：诊断需要完整清单，才能一眼看出
+	// 是整体空对象（模型压根没填）还是只错位了一两个名字（命名风格不一致）。
+	var missing []string
+	for _, name := range declared {
+		if _, present := out[name]; !present {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	present := make([]string, 0, len(raw))
+	for k := range raw {
+		present = append(present, k)
+	}
+	return cursorRetypeMissingRequiredError(missing, present, depth)
 }
 
 func retypeScalar(value any, rawType string) (any, error) {
