@@ -2646,6 +2646,50 @@ func cursorToolSchemaIndex(defs [][]byte) map[string][]byte {
 	return idx
 }
 
+// cursorToolDeclaredWithoutSchema 判断该工具名是否**已被客户端声明、但没有 input_schema**。
+//
+// custom / freeform 工具（codex 的 exec 就是这种：参数是一段自由文本 JavaScript）
+// 本来就不带 parameters，因此索引里查不到 schema 属正常形态，和"根本没声明这个工具"
+// 是两件完全不同的事：
+//   - 声明过、无 schema → 没有必填可校验，参数原样交付；
+//   - 没声明过 → 上游在调一个我们没下发的工具，才是真异常（schema_absent）。
+//
+// 两者混为一谈时，codex 的每一次 exec 调用都会被判"参数残缺"整轮终止
+// （2026-11-06 线上：CUR-EXEC-10，模型明明发了完整 JS）。
+//
+// 与 cursorToolSchemaIndex 共用同一段 f4 解码口径（同名字段、同一回落顺序）。
+func cursorToolDeclaredWithoutSchema(defs [][]byte, name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, raw := range defs {
+		fields, err := cursorDecodeProtobuf(raw)
+		if err != nil {
+			continue
+		}
+		declaredName := ""
+		hasSchema := false
+		for _, f := range fields {
+			switch f.Number {
+			case cursorFldMcpToolDefToolName:
+				declaredName = f.String()
+			case cursorFldMcpToolDefInputSchemaValue:
+				if _, ok := cursorSchemaFromF3(f.Bytes); ok {
+					hasSchema = true
+				}
+			case cursorFldMcpToolDefInputSchemaLegacy:
+				if f.String() != "" {
+					hasSchema = true
+				}
+			}
+		}
+		if declaredName == name && !hasSchema {
+			return true
+		}
+	}
+	return false
+}
+
 // cursorNormalizeIndexedSchema 对入索引的 schema 做确定性归一化（方案 §4）。
 // 归一化失败（含 schema 非 JSON 对象）记 schema_normalize_failed 事件并返回
 // nil 哨兵：该工具后续按既有 schema_unresolvable 失败关闭。
@@ -2801,6 +2845,11 @@ func cursorRetypeArgsByToolDefs(id, name, argsJSON string, defs [][]byte, onFail
 	idx := cursorToolSchemaIndex(defs)
 	schemaJSON, ok := idx[name]
 	if !ok {
+		// 声明过、但没有 input_schema：custom / freeform 工具的正常形态，
+		// 参数是自由文本，没有必填项可校验 → 原样交付，不算残缺。
+		if cursorToolDeclaredWithoutSchema(defs, name) {
+			return argsJSON, nil
+		}
 		if onFail != nil {
 			onFail(cursorRetypeSchemaAbsent)
 		}
