@@ -1,6 +1,9 @@
 package service
 
-import "sync"
+import (
+	"sort"
+	"sync"
+)
 
 // autoCardSyncLocks 按激活码 ID 串行化「DB 状态写入 → 运行池纳管/注销」临界区。
 //
@@ -58,5 +61,34 @@ var globalAutoCardSyncLocks = newAutoCardSyncLocks()
 func WithAutoCardSync(id int64, fn func() error) error {
 	unlock := globalAutoCardSyncLocks.lock(id)
 	defer unlock()
+	return fn()
+}
+
+// WithAutoCardSyncMany 按 ID 升序依次获取多个激活码的串行边界后执行 fn。
+// 用于「同一轮需要同时锁定若干卡」的批处理（如到期清扫）：固定升序可避免
+// 两个批处理交叉持锁形成环等待。空 ids 时直接执行 fn。
+func WithAutoCardSyncMany(ids []int64, fn func() error) error {
+	if len(ids) == 0 {
+		return fn()
+	}
+	// 复制后升序去重，固定加锁顺序，杜绝批处理间环等待。
+	ordered := make([]int64, len(ids))
+	copy(ordered, ids)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	seen := make(map[int64]struct{}, len(ordered))
+	unlocks := make([]func(), 0, len(ordered))
+	for _, id := range ordered {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		unlocks = append(unlocks, globalAutoCardSyncLocks.lock(id))
+	}
+	// 逆序释放，与加锁顺序相反，保持对称。
+	defer func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}()
 	return fn()
 }

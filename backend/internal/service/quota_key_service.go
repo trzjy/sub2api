@@ -1406,10 +1406,22 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 }
 
 // DeleteWithAccounts 软删激活码及其全部账号（§3.2 删除唯一路径 = 软删口径）。
-// 锁 → tx：逐账号软删 → 写 scheduler outbox（既有入口，同事务持久）→ 软删 quota_key
-// → commit（全删或不删）。
-// 数据库账号行与全部历史记录保留，禁止物理 DELETE 账号行。
+// 先取按卡串行边界（WithAutoCardSync），再在临界区内开事务、加 advisory 锁、软删、
+// 提交，最后注销运行池（池锁在按卡锁内）。锁序 = 按卡锁 → DB 每 key 锁 → 池锁，
+// 与刷新/清扫三条路径统一，保证「DB 软删提交前不会有新取号（AcquireToken 不复核 DB）
+// 把该卡的 Token 发出去」。
 func (s *QuotaKeyService) DeleteWithAccounts(ctx context.Context, quotaKeyID int64) error {
+	return WithAutoCardSync(quotaKeyID, func() error {
+		return s.deleteWithAccountsLocked(ctx, quotaKeyID)
+	})
+}
+
+// deleteWithAccountsLocked 在调用方已持有 quotaKeyID 的按卡串行边界内执行软删：
+// 开事务、加 advisory 锁、逐账号软删 + outbox + 软删 quota_key + commit，最后在同一
+// 临界区内注销运行池（池锁在按卡锁内，锁序正确）。函数体即原 DeleteWithAccounts，
+// 仅移除外层的 WithAutoCardSync 包裹（改由 DeleteWithAccounts 持有），使「按卡锁 →
+// DB 每 key 锁 → 池锁」成为同一临界区，消除等待锁窗口内的取号竞态。
+func (s *QuotaKeyService) deleteWithAccountsLocked(ctx context.Context, quotaKeyID int64) error {
 	if s.client == nil {
 		return errors.New("quota_key_service: ent client not configured")
 	}
@@ -1462,13 +1474,11 @@ func (s *QuotaKeyService) DeleteWithAccounts(ctx context.Context, quotaKeyID int
 		s.reconciler.NotifyAccountRemoved()
 	}
 	// CARD-5：卡密被软删事务提交成功后，从运行内存池同步注销该卡及相关 Token。
-	// 走同一激活码串行边界，避免与并发单卡刷新的「DB 写入 → 池纳管」交错。
-	_ = WithAutoCardSync(quotaKeyID, func() error {
-		if pool := GetGlobalCursorDynamicPool(); pool != nil {
-			pool.UnregisterCard(quotaKeyID)
-		}
-		return nil
-	})
+	// 调用方已持有按卡锁，此处直接注销（池锁在按卡锁内），避免与并发单卡刷新的
+	// 「DB 写入 → 池纳管」交错。
+	if pool := GetGlobalCursorDynamicPool(); pool != nil {
+		pool.UnregisterCard(quotaKeyID)
+	}
 	return nil
 }
 
