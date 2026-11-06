@@ -1,3 +1,5 @@
+//go:build unit
+
 package service
 
 // 本组用例锁死「本站合成的降级壳不参与必填校验」的口径。

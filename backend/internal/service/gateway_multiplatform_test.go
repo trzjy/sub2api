@@ -399,9 +399,8 @@ func (m *mockGroupRepoForGateway) UpdateSortOrders(ctx context.Context, updates 
 	return nil
 }
 
-func ptr[T any](v T) *T {
-	return &v
-}
+// ptr 已移入无 build tag 的 testhelpers_shared_test.go：默认组（go test ./...）
+// 也要用它，留在本 unit tag 文件里会让默认组编译失败。
 
 // TestGatewayService_SelectAccountForModelWithPlatform_Anthropic 测试 anthropic 单平台选择
 func TestGatewayService_SelectAccountForModelWithPlatform_Anthropic(t *testing.T) {
