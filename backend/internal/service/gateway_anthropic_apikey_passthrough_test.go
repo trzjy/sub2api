@@ -1509,6 +1509,10 @@ func TestGatewayService_AnthropicAPIKeyPassthrough_StreamingKeepaliveDoesNotInte
 		_, _ = pw.Write([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":4}}}` + "\n"))
 		time.Sleep(1200 * time.Millisecond)
 		_, _ = pw.Write([]byte("\n"))
+		// 必须带一段真实正文：本用例测的是 keepalive 不插进未完成事件，
+		// 而「只有 message_start + 终态、没有任何正文」现在会被判上游空完成
+		// （见 upstream_completion_audit.go），夹具补上正文以免测到别的判据。
+		_, _ = pw.Write([]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}` + "\n\n"))
 		_, _ = pw.Write([]byte("data: [DONE]\n\n"))
 		_ = pw.Close()
 	}()

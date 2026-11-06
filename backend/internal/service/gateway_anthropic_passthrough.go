@@ -458,6 +458,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	}
 
 	usage := &ClaudeUsage{}
+	audit := &upstreamCompletionAudit{}
 	var firstTokenMs *int
 	clientDisconnected := false
 	sawTerminalEvent := false
@@ -543,6 +544,17 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	}
 	inPartialEvent := false
 
+	// finishUpstreamStream 是「流正常结束」的唯一出口。
+	// 先判「上游空完成」再当成功返回：判据与处置都只在 upstreamCompletionAudit 里实现，
+	// 这里不允许再就地写一套「内容为空」的判断（否则就是同一规则的第二份实现）。
+	finishUpstreamStream := func() (*streamingResult, error) {
+		result := &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}
+		if clientDisconnected || !audit.isEmptyCompletion(usage) {
+			return result, nil
+		}
+		return result, s.noteEmptyUpstreamCompletion(ctx, account, model, usage, audit)
+	}
+
 	for {
 		select {
 		case ev, ok := <-events:
@@ -560,11 +572,11 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					}
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, fmt.Errorf("stream usage incomplete: missing terminal event")
 				}
-				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
+				return finishUpstreamStream()
 			}
 			if ev.err != nil {
 				if sawTerminalEvent {
-					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
+					return finishUpstreamStream()
 				}
 				if clientDisconnected {
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after disconnect: %w", ev.err)
@@ -591,6 +603,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					firstTokenMs = &ms
 				}
 				parseSSEUsagePassthrough(data, usage)
+				audit.observeAnthropicSSE(trimmed)
 			} else {
 				trimmed := strings.TrimSpace(line)
 				if strings.HasPrefix(trimmed, "event:") && anthropicStreamEventIsTerminal(strings.TrimSpace(strings.TrimPrefix(trimmed, "event:")), "") {
@@ -920,6 +933,15 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 	}
 
 	usage := parseClaudeUsageFromResponseBody(body)
+	// 非流式同样要判「上游空完成」：200 + 合法的空 content 数组同样是客户拿不到任何回答，
+	// 与流式走同一份判据和同一处置（见 upstream_completion_audit.go）。
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		audit := &upstreamCompletionAudit{}
+		audit.observeAnthropicBody(body)
+		if audit.isEmptyCompletion(usage) {
+			return nil, s.noteEmptyUpstreamCompletion(ctx, account, "", usage, audit)
+		}
+	}
 	if IsForceCacheBilling(ctx) && usage.InputTokens > 0 {
 		body, err = classifyAnthropicResponseInputAsCacheRead(body, usage)
 		if err != nil {
