@@ -59,15 +59,24 @@ func TestAnthropicToResponses_SystemMessageRolePreserved(t *testing.T) {
 	require.Equal(t, "system", items[0].Role)
 }
 
-func TestAnthropicToResponses_UnknownRoleRejected(t *testing.T) {
+// 未知角色：丢弃这条消息继续转换，不报错（2026-11-06 口径：不认识就丢，别把报错
+// 丢给客户——客户只会认为模型不稳定）。
+func TestAnthropicToResponses_UnknownRoleDropped(t *testing.T) {
 	req := &AnthropicRequest{
 		Model:     "gpt-5.2",
 		MaxTokens: 100,
-		Messages:  []AnthropicMessage{{Role: "developer", Content: json.RawMessage(`"do not demote me"`)}},
+		Messages: []AnthropicMessage{
+			{Role: "developer", Content: json.RawMessage(`"do not demote me"`)},
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+		},
 	}
 
-	_, err := AnthropicToResponses(req)
-	require.Error(t, err)
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err, "未知角色不得整轮报错")
+	var items []ResponsesInputItem
+	require.NoError(t, json.Unmarshal(resp.Input, &items))
+	require.Len(t, items, 1, "只保留能落地的那一条")
+	require.Equal(t, "user", items[0].Role)
 }
 
 func TestAnthropicToResponses_SystemPrompt(t *testing.T) {

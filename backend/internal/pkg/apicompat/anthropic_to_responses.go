@@ -206,7 +206,9 @@ func anthropicMsgToResponsesItems(m AnthropicMessage) ([]ResponsesInputItem, err
 	case "assistant":
 		return anthropicAssistantToResponses(m.Content)
 	default:
-		return nil, fmt.Errorf("unsupported anthropic message role %q", m.Role)
+		// 未知角色：丢弃这条消息继续转换（2026-11-06 口径，与
+		// chatcompletions_anthropic_bridge.go 同一判据：不认识就丢，不报错）。
+		return nil, nil
 	}
 }
 

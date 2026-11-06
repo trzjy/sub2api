@@ -178,7 +178,12 @@ func anthropicMsgToChatMessages(m AnthropicMessage, requestHasTools bool) ([]Cha
 	case "user":
 		return anthropicUserToChatMessages(m.Content)
 	default:
-		return nil, fmt.Errorf("unsupported anthropic message role %q", m.Role)
+		// 未知角色（critic / narrator 之类客户端自定义）：**丢弃这条消息**继续转换。
+		//
+		// 2026-11-06 口径：客户把"有报错"等同于"你们模型不稳定"，而一条角色我们
+		// 不认识，最坏后果只是少一轮上下文——不值得把整轮打成错误。这也是角色判据
+		// 的唯一一处实现，上层（cursor 计划层/转换层）不再重复判定。
+		return nil, nil
 	}
 }
 

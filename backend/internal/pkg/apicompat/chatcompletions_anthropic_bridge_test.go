@@ -93,15 +93,21 @@ func TestAnthropicToChatCompletionsRequest_SystemMessageRolePreserved(t *testing
 	require.JSONEq(t, `"Follow the repository instructions."`, string(out.Messages[0].Content))
 }
 
-func TestAnthropicToChatCompletionsRequest_UnknownRoleRejected(t *testing.T) {
+// 未知角色：丢弃这条消息继续转换（2026-11-06 口径）。
+func TestAnthropicToChatCompletionsRequest_UnknownRoleDropped(t *testing.T) {
 	req := &AnthropicRequest{
 		Model:     "claude-sonnet-4-20250514",
 		MaxTokens: 100,
-		Messages:  []AnthropicMessage{{Role: "developer", Content: json.RawMessage(`"do not demote me"`)}},
+		Messages: []AnthropicMessage{
+			{Role: "developer", Content: json.RawMessage(`"do not demote me"`)},
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+		},
 	}
 
-	_, err := AnthropicToChatCompletionsRequest(req)
-	require.Error(t, err)
+	out, err := AnthropicToChatCompletionsRequest(req)
+	require.NoError(t, err, "未知角色不得整轮报错")
+	require.Len(t, out.Messages, 1, "只保留能落地的那一条")
+	require.Equal(t, "user", out.Messages[0].Role)
 }
 
 func TestAnthropicToChatCompletionsRequest_ToolUseInAssistant(t *testing.T) {
