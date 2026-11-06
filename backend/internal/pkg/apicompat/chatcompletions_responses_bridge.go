@@ -200,24 +200,7 @@ func EffectiveResponsesTools(req *ResponsesRequest) ([]ResponsesTool, error) {
 	return tools, nil
 }
 
-// responsesToolIdentity 是"两条工具声明是不是同一个工具"的唯一判定。
-//
-// 身份 = 类型 + 名字。namespace 工具以 namespace 名为 name（子工具在 children 里），
-// 内置工具大多无名字、按类型唯一，故空名字的内置工具天然合并为一。
-//
-// 只比身份不比 schema：向上游提交两份同名定义本身就是无效请求，能落地的只有一份，
-// 靠"都留着"表达冲突没有意义（真要报冲突由下游显式检查）。
-func responsesToolIdentity(tool ResponsesTool) string {
-	return strings.ToLower(strings.TrimSpace(tool.Type)) + "|" + strings.TrimSpace(tool.Name)
-}
-
-func responsesToolIdentities(tools []ResponsesTool) map[string]struct{} {
-	out := make(map[string]struct{}, len(tools))
-	for _, tool := range tools {
-		out[responsesToolIdentity(tool)] = struct{}{}
-	}
-	return out
-}
+// 身份判定与合并规则见 responses_tool_declaration_merge.go（typed / raw 两条路共用）。
 
 // CustomToolNames 收集 Responses 请求中 custom/freeform 工具的名字。chat 桥回程时
 // 需要据此把模型对这些工具的调用还原为 custom_tool_call 项（codex 只按该类型路由）。

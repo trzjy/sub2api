@@ -296,18 +296,24 @@ func adaptResponsesClientToolsForAnthropic(body []byte) ([]byte, apicompat.Respo
 	return rebuilt, mapping, nil
 }
 
+// liftResponsesAdditionalTools 把 input 里的工具声明条目提升为顶层 tools，并从这里删除该条目。
+//
+// 提升后必须按工具身份跨站点合并（apicompat.MergeDeclaredRawResponsesTools）：
+// 顶层 tools 与 additional_tools 是同一份工具集的两个载体，客户端两处都写时
+// 上游只能收到一份。直接 append 会把同名工具发两遍——实测 relay 会回空正文。
 func liftResponsesAdditionalTools(requestBody map[string]any) (bool, error) {
 	input, ok := requestBody["input"].([]any)
 	if !ok {
 		return false, nil
 	}
 
-	tools, _ := requestBody["tools"].([]any)
+	base, _ := requestBody["tools"].([]any)
 	kept := make([]any, 0, len(input))
+	declared := make([]any, 0, len(input))
 	changed := false
 	for _, raw := range input {
 		item, ok := raw.(map[string]any)
-		if !ok || strings.TrimSpace(fmt.Sprint(item["type"])) != "additional_tools" {
+		if !ok || !apicompat.IsResponsesInputDeclaration(firstNonEmptyString(item["type"])) {
 			kept = append(kept, raw)
 			continue
 		}
@@ -315,13 +321,14 @@ func liftResponsesAdditionalTools(requestBody map[string]any) (bool, error) {
 		if !ok {
 			return false, fmt.Errorf("additional_tools.tools must be an array")
 		}
-		tools = append(tools, additional...)
+		declared = append(declared, additional...)
 		changed = true
 	}
 	if !changed {
 		return false, nil
 	}
-	requestBody["tools"] = tools
+	merged, _ := apicompat.MergeDeclaredRawResponsesTools(base, declared)
+	requestBody["tools"] = merged
 	requestBody["input"] = kept
 	return true, nil
 }
