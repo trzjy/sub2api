@@ -2225,6 +2225,37 @@ func isCooldownRefreshError(errStr *string) bool {
 	return strings.HasPrefix(strings.TrimSpace(*errStr), ErrUpstreamCooldown.Error())
 }
 
+// isDeadKeyRefreshError 判定最近一次拉号错误是否是「密钥级死码」——上游明确说这个码
+// 不存在 / 无效 / 已过期。这类码再拉一万次也拉不出账号，只会每轮给上游送一次无效请求、
+// 并把 reconcile 心跳写成失败，所以在候选筛选阶段直接排除，等人工换码。
+//
+// 与冷却类严格区分：冷却窗口过了会自动回候选；死码不回，因为状态不会自己变好。
+// 与"未知失败"也严格区分（CUR-P1-FIX-KEY-EXHAUSTED）：未知失败仍留候选，不得据此停供。
+//
+// 匹配的是上游原文片段（shareai 的 code=1 文案），故用包含匹配而非前缀匹配。
+func isDeadKeyRefreshError(errStr *string) bool {
+	if errStr == nil {
+		return false
+	}
+	s := strings.ToLower(strings.TrimSpace(*errStr))
+	if s == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"密钥不存在",
+		"无效的密钥",
+		"密钥已过期",
+		"key not found",
+		"invalid key",
+		"key expired",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // ListCandidateKeys 返回池级（不按模型收窄）需要补池的候选 quota_key ID：
 // active + 非 exhausted + 未过期 + 未软删 + 有剩余容量（working < MaxAccountsPerQuotaKey）。
 // limit>0 时由实现方按需截断（reconciler 传入的是总量缺口）；模型 M 不收窄候选集——
@@ -2263,6 +2294,11 @@ func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, li
 	}
 	out := make([]int64, 0, len(keys))
 	for _, k := range keys {
+		if isDeadKeyRefreshError(k.LastRefreshError) {
+			// 密钥级死码（上游说这个码不存在/无效/已过期）：拉一万次也拉不出号，
+			// 只会每轮给上游送一次无效请求并把心跳写成失败。等人工换码。
+			continue
+		}
 		if isCooldownRefreshError(k.LastRefreshError) {
 			if k.LastRefreshAt != nil && now.Sub(*k.LastRefreshAt) < quotaKeyCooldownWindow {
 				continue // 冷却窗口内：跳过，不进入候选

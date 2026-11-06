@@ -995,6 +995,11 @@ func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService,
 	// D9：注入码级停调窄面——激活码额度见底时把名下账号一起停到最近的码级恢复点。
 	// 复用已装配的 puller（*QuotaKeyService 持有 ent client），不新增装配入参。
 	svc.SetAccountStopSink(puller)
+	// D4/D5：补池口径切到"拉号额度驱动"（用户裁定 2026-11-06："有拉取额度就拉，
+	// 不要考虑那么多"）。旧口径"池级总量 < 10 才拉"的总量用 accounts.schedulable 算，
+	// 额度耗尽/被上游挡住的号在表里依然 schedulable，于是池子永远达标、永远不补号
+	// （2026-11-06 08:25—11:20 生产实测：三小时零拉号，码 10/11 手里 0 个号也不补）。
+	svc.SetPullByBudget(true)
 	// F1：注入生产用模型水位提供方（C11 接入点），使 reconciler 枚举模型→比对水位→
 	// 按差额触发 PullAccountsForModel 补池。ent client 直接取拉号服务已装配的实例，
 	// 不新增装配入参、不新造机制；但为接入来源额度观测（§25.19 第2项），本函数已新增

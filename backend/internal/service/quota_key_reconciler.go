@@ -119,6 +119,14 @@ type QuotaKeyReconciler struct {
 	// 只在 loop 单 goroutine 内读写，无需加锁。
 	lastDailyStatsRollupAt time.Time
 
+	// pullByBudget 切换补池编排口径（D4/D5）：false = 旧的"池级总量 < 10 才拉"水位驱动，
+	// true = "只要这个码还没满 5 个、今天还有拉号次数，就拉"。
+	//
+	// 2026-11-06 生产事故：旧口径下的"总量"是用 accounts.schedulable 算的，而额度耗尽/
+	// 被上游挡住的号在表里依然 schedulable，于是 40 个号的池子永远"达标"，8 点后三小时
+	// 一次号都没补，码 10/11 手里 0 个号也不拉。用户裁定："有拉取额度就拉，不要考虑那么多。"
+	pullByBudget bool
+
 	// coalescer 提供单 flight + pending wakeup：同一 key 在拉号中再次被请求时合并，
 	// 拉号结束后若有 pending 则补拉一次。
 	coalescer *pullCoalescer
@@ -166,6 +174,15 @@ func (r *QuotaKeyReconciler) SetModelWaterProvider(p QuotaKeyModelWaterProvider)
 		return
 	}
 	r.modelWater = p
+}
+
+// SetPullByBudget 切换补池编排到"拉号额度驱动"（D4/D5）。
+// 生产由 wire 在装配点打开；默认仍走旧的水位驱动路径。
+func (r *QuotaKeyReconciler) SetPullByBudget(enabled bool) {
+	if r == nil {
+		return
+	}
+	r.pullByBudget = enabled
 }
 
 // SetUsageObserver 注入来源额度观测窄面（§25.6 消费闭包①）。
@@ -360,6 +377,27 @@ func (r *QuotaKeyReconciler) runOnce() {
 			stopped = true
 			break
 		}
+		if r.pullByBudget {
+			// ===== 新路径：拉号额度驱动（D4/D5，用户裁定 2026-11-06）=====
+			//
+			// 不看池级总量水位。旧口径的"总量"用 accounts.schedulable 算，而额度耗尽 /
+			// 被上游挡住的号在表里依然是 schedulable，于是 40 个号的池子永远"达标"、
+			// 拉号永远不触发，码 10/11 手里 0 个号也不补（2026-11-06 08:25—11:20 实测
+			// 三小时零拉号）。用户原话："有拉取额度就拉，不要考虑那么多。"
+			round := r.pullByBudgetRound(ctx, models, &modelIdx, attempted)
+			if round.err != nil {
+				log.Printf("[QuotaKeyReconcile] %v", round.err)
+				r.recordHeartbeat(ctx, runAt, false, round.err, "", sourceUsage)
+				return
+			}
+			candidateCount += round.candidates
+			blockedCount += round.blocked
+			dailyLimitCount += round.dailyLimit
+			if round.mountStopReason != "" {
+				mountStopReason = round.mountStopReason
+			}
+			break
+		}
 		mountModel := models[modelIdx%len(models)]
 		modelIdx++
 		// 总量水位：同一账号跨多个覆盖模型只计一次，modelM 仅作调用上下文。
@@ -480,8 +518,14 @@ func (r *QuotaKeyReconciler) runOnce() {
 		return
 	}
 	if candidateCount == 0 {
-		// 无候选 key：停止补池并记录原因（可能是池级总量已达水位，或候选 key 不可补）。
+		// 无候选 key：停止补池并记录原因（可能是每码都满 5 个了，或全部死在冷却/密钥无效）。
 		r.recordHeartbeat(ctx, runAt, true, nil, "no candidate keys for any allowed model", sourceUsage)
+		return
+	}
+	if r.pullByBudget {
+		// 新口径下候选数就是"本轮真的去拉的码数"：如实写进心跳，方便判断补池有没有在干活
+		// （旧口径这里写空摘要，光看心跳看不出到底拉没拉）。
+		r.recordHeartbeat(ctx, runAt, true, nil, fmt.Sprintf("reconciled %d quota keys (pull by budget)", candidateCount), sourceUsage)
 		return
 	}
 	r.recordHeartbeat(ctx, runAt, true, nil, "", sourceUsage)
@@ -489,6 +533,63 @@ func (r *QuotaKeyReconciler) runOnce() {
 
 // poolShortfall 生成本轮水位缺口的如实摘要（total/threshold/deficit + 成因），用于心跳
 // LastResult：既不说"已补满"，也不把"选中/拉取的 key 数"报成账号增量。
+// pullBudgetRound 是一轮"拉号额度驱动"的执行结果（只影响心跳摘要，不影响控制流）。
+type pullBudgetRound struct {
+	candidates      int
+	blocked         int
+	dailyLimit      int
+	mountStopReason string
+	err             error
+}
+
+// pullByBudgetRound 遍历本轮全部有效码，每码各拉一次（D4/D5）。
+//
+// 候选由 provider 负责筛：active / 未过期 / 未软删 / 未 exhausted / 未满容量（< 5 个）/
+// 未在冷却窗口 / 不是密钥级死码。这里只做"同轮不重复"去重与结果计数。
+//
+// 与旧水位路径的区别：不再"拉一次就重算总量、达标即停"——目标从"池子总数够 10"变成
+// "每个码自己够 5 个"，总量与真实可用性脱钩（额度耗尽的号也算总量）是旧口径失效的原因。
+func (r *QuotaKeyReconciler) pullByBudgetRound(
+	ctx context.Context,
+	models []string,
+	modelIdx *int,
+	attempted map[int64]bool,
+) pullBudgetRound {
+	var out pullBudgetRound
+
+	candidates, err := r.modelWater.ListCandidateKeys(ctx, models[0], 0)
+	if err != nil {
+		out.err = fmt.Errorf("list candidate keys failed: %w", err)
+		return out
+	}
+	out.candidates = len(candidates)
+	for _, keyID := range candidates {
+		if attempted[keyID] {
+			continue
+		}
+		// double-checked exit：停机信号出现后不再发起新的上游拉号（非幂等）。
+		if r.isStopping() {
+			break
+		}
+		attempted[keyID] = true
+		mountModel := models[*modelIdx%len(models)]
+		*modelIdx++
+		mf, blk, dailyLimit := r.pullKey(ctx, keyID, mountModel)
+		if mf {
+			out.mountStopReason = fmt.Sprintf("stopped: upstream may have been consumed (mount failed) for quota key %d", keyID)
+			break
+		}
+		if blk {
+			out.blocked++
+		}
+		if dailyLimit {
+			out.dailyLimit++
+			log.Printf("[QuotaKeyReconcile] quota key %d exhausted today's pull budget", keyID)
+		}
+	}
+	return out
+}
+
 func poolShortfall(total, threshold, deficit int, cause string) string {
 	return fmt.Sprintf("pool below target: servable cursor accounts total=%d threshold=%d deficit=%d unresolved; %s",
 		total, threshold, deficit, cause)
