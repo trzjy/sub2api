@@ -206,9 +206,10 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	upstreamBody = applyOllamaCloudRawChatCompletionsRequest(account, upstreamBody)
 	upstreamBody = clampOllamaCloudUpstreamMaxTokens(account, upstreamBody)
 	upstreamBody = clampSensenovaUpstreamMaxTokens(account, upstreamBody)
-	// 国产厂商（deepseek/kimi/zhipu/minimax）越界的 max_tokens 直接夹到 [1, 65536]，
-	// 避免上游回 400 "field MaxTokens invalid"（生产 7 天 62 次）。
-	upstreamBody = clampCNUpstreamMaxTokens(account, upstreamBody)
+	// 国产厂商（deepseek/kimi/zhipu/minimax）不做 max_tokens 夹取：
+	// 2026-10-14 用户裁定「上限报错都不要」，2026-11-06 用户裁定全撤（A）。
+	// 夹取会静默把思考型模型的输出预算砍到 65536（思考与正文共用预算），
+	// 表现为回答被截断，代价不可接受。越界值由客户端自行收敛或由上游直接拒。
 
 	// 形状以「实际发出去的那份」为准：上面这一串桥接/夹取/改写之后重新采一次，
 	// 否则日志里的 max_tokens 还是用户原始值，和上游真正收到的对不上（2026-11-04）。

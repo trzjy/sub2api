@@ -5,15 +5,16 @@ package service
 // 2026-11-04 用户裁定的三项「别把内部契约冲突甩给用户」定向测试：
 //  1. thinking 参数按模型契约自动翻译（enabled → adaptive），而不是回 400；
 //  2. 上游内容审核拒绝必须识别（进换号）并给中文终态文案，不许透传英文；
-//  3. 国产厂商越界 max_tokens 夹到 [1, 65536]，别让上游回 "field MaxTokens invalid"。
+//  3. 国产厂商越界 max_tokens 夹取已于 2026-11-06 按用户裁定（A 全撤）删除，
+//     本文件不再保留相关用例。
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
 
 func TestNormalizeClaude55ThinkingRewritesLegacyEnabled(t *testing.T) {
 	body := []byte(`{"model":"claude-opus-5-5","thinking":{"type":"enabled","budget_tokens":4096},"max_tokens":64}`)
@@ -104,36 +105,4 @@ func TestOpenAIContentScreeningClientMessageIsChinese(t *testing.T) {
 	msg := OpenAIContentScreeningClientMessage()
 	require.NotEmpty(t, msg)
 	require.Contains(t, msg, "审核", "终态文案必须是中文，不能让用户看到英文原文")
-}
-
-func TestClampCNUpstreamMaxTokens(t *testing.T) {
-	// 第三方中转（生产上 deepseek 账号的主要形态，61 个账号走 tokenharbor.ai）：
-	// 这类上游上限就是 65536，越界值必须夹取。
-	account := &Account{ID: 1, Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
-		Credentials: map[string]any{"base_url": "https://tokenharbor.ai"}}
-	cases := []struct {
-		name string
-		body string
-		want int64
-		key  string
-	}{
-		{"超上限夹到 65536", `{"max_tokens":999999}`, 65536, "max_tokens"},
-		{"负数夹到 1", `{"max_tokens":-5}`, 1, "max_tokens"},
-		{"零夹到 1", `{"max_completion_tokens":0}`, 1, "max_completion_tokens"},
-		{"合法值不动", `{"max_tokens":4096}`, 4096, "max_tokens"},
-		{"字段缺失不动", `{"model":"m"}`, 0, "max_tokens"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			out := clampCNUpstreamMaxTokens(account, []byte(tc.body))
-			require.True(t, json.Valid(out))
-			require.Equal(t, tc.want, gjson.GetBytes(out, tc.key).Int())
-		})
-	}
-}
-
-func TestClampCNUpstreamMaxTokensSkipsForeignPlatform(t *testing.T) {
-	body := []byte(`{"max_tokens":999999}`)
-	out := clampCNUpstreamMaxTokens(&Account{ID: 1, Platform: PlatformOpenAI}, body)
-	require.Equal(t, string(body), string(out), "非国产平台不得改写（各模型上限不同，不能一律夹 65536）")
 }
