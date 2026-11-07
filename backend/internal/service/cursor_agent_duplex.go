@@ -670,12 +670,9 @@ func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error
 			zap.Uint64("query_id", id), zap.Int("query_field", field))
 		return false, newCursorRequestError(infraerrors.CursorExecUnsupportedCode, http.StatusBadGateway, "AgentRun interaction query field %d not supported", field)
 	}
-	switch field {
-	case cursorFldInteractionWebSearch, cursorFldInteractionAskQuestion, cursorFldInteractionSwitchMode,
-		cursorFldInteractionCreatePlan, cursorFldInteractionSetupVM, cursorFldInteractionWebFetch,
-		cursorFldInteractionPrManagement, cursorFldInteractionMcpAuth, cursorFldInteractionReplaceEnv,
-		cursorFldInteractionConnectScm:
-	default:
+	// 已知交互询问类型（10 类）全部登记在统一字段表中；查表判定而非各自写一份清单。
+	// 未知类型一律走 unsupported 失败关闭（阶段 1 维持 502，:671 的 unsupported 不动）。
+	if cursorFieldClassOf(cursorDomainInteraction, field) != cursorFieldInteraction {
 		return unsupported()
 	}
 	if query.Wire != cursorWireBytes {
@@ -693,6 +690,9 @@ func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error
 	}
 	var result []byte
 	var answer string
+	// 本段是「已知交互类型各自怎么应答」，不是第二份判定清单：未知类型已在上方
+	// （cursorFieldClassOf(cursorDomainInteraction, field) 判定段）统一拦截并走
+	// unsupported 失败关闭，故这里只需按类型分派应答，不重复判定。
 	switch field {
 	case cursorFldInteractionWebSearch, cursorFldInteractionWebFetch:
 		result, answer = approved(), "approved"
@@ -811,23 +811,23 @@ const (
 
 // cursorExecMetadataFieldOK 判断单个字段号是否属于可忽略的 exec 元数据白名单。
 // **只有**白名单内的字段可被忽略；白名单外的未知字段一律失败关闭。
+//
+// 白名单已收口到统一字段表（cursor_field_table.go）：查 exec 域、判 cursorFieldMetadata
+// 类，而非在此各自写一份 5 字段号的清单。未知字段查表命中 cursorFieldUnknown，返回 false。
 func cursorExecMetadataFieldOK(number int) bool {
-	switch number {
-	case cursorFldExecMetaID, cursorFldExecMetaExecID, cursorFldExecMetaMachineID,
-		cursorFldExecMetaSpanContext, cursorFldExecMetaAcceptHook:
-		return true
-	default:
-		return false
-	}
+	return cursorFieldClassOf(cursorDomainExec, number) == cursorFieldMetadata
 }
 
 // cursorExecMetadataOnly 判断 ExecServerMessage 是否"只含元数据"（非空且全部字段在白名单内）。
+//
+// 逐字段查统一字段表判 cursorFieldMetadata 类；任一字段非元数据即返回 false。这保证未知字段
+// 不会被误判成元数据，上层据此走 unsupported fail-close（见 respond 的 default 分支）。
 func cursorExecMetadataOnly(parts []cursorPBField) bool {
 	if len(parts) == 0 {
 		return false
 	}
 	for _, f := range parts {
-		if !cursorExecMetadataFieldOK(f.Number) {
+		if cursorFieldClassOf(cursorDomainExec, f.Number) != cursorFieldMetadata {
 			return false
 		}
 	}
@@ -835,21 +835,33 @@ func cursorExecMetadataOnly(parts []cursorPBField) bool {
 }
 
 // cursorNativeExecRejectFieldOK 判断 ExecServerMessage 是否承载 11 类已裁定原生 exec 字段之一。
+//
+// 判定已收口到统一字段表：exec 域、cursorFieldNative 类即「已知原生工具字段」，
+// 不再在此各自维护 11 个字段号的清单。
 func cursorNativeExecRejectFieldOK(parts []cursorPBField) bool {
-	_, ok := cursorNativeExecRejectField(parts)
-	return ok
-}
-
-// cursorExecImplementedSubfieldOK 判断是否出现任一已实现的 exec 子字段
-// （f10 context / f36 mcp_state / f11 mcp_args / 11 类原生拒绝字段）。
-// switch 已在 default 之前命中这些字段，故 default 中为 true 属内部逻辑错误。
-func cursorExecImplementedSubfieldOK(parts []cursorPBField) bool {
-	for _, n := range []int{10, 36, 11} {
-		if cursorFindFieldOK(parts, n) {
+	for _, f := range parts {
+		if cursorFieldClassOf(cursorDomainExec, f.Number) == cursorFieldNative {
 			return true
 		}
 	}
-	return cursorNativeExecRejectFieldOK(parts)
+	return false
+}
+
+// cursorExecImplementedSubfieldOK 判断是否出现任一已实现的 exec 子字段
+// （f10 request_context / f36 mcp_state / f11 mcp_args 三类委托字段，或 11 类已裁定原生工具字段）。
+//
+// 判定已收口到统一字段表：exec 域的 cursorFieldHandler（委托字段）或 cursorFieldNative
+// （已知原生工具字段）即属「已实现」。本函数纯查表，不再依赖 exec 派发 switch 的分支顺序；
+// 因此旧注释「switch 已在 default 之前命中这些字段，故 default 中为 true 属内部逻辑错误」这一
+// 前提已不成立——该「内部逻辑错误」的判定与失败关闭现在由调用方（exec 派发 default 分支）负责。
+func cursorExecImplementedSubfieldOK(parts []cursorPBField) bool {
+	for _, f := range parts {
+		c := cursorFieldClassOf(cursorDomainExec, f.Number)
+		if c == cursorFieldHandler || c == cursorFieldNative {
+			return true
+		}
+	}
+	return false
 }
 
 // respondContext 处理 exec 内层 f10（request_context）应答（既有逻辑逐字保留）。

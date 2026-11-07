@@ -82,20 +82,12 @@ const (
 
 // cursorNativeExecRejectField 按方案优先级顺序（2,3,4,5,7,8,9,14,16,20,23）返回第一个出现在
 // parts 中的 ExecServerMessage 原生 exec 字段号。一个都不在 → (0, false)。
+//
+// 优先级顺序的唯一来源是统一字段表的 cursorExecNativeRejectOrder（CARD-01），
+// 本函数不再维护第二份清单：既有清单与字段表曾各写一份，改一处漏一处就会让
+// 「拒绝哪种形状」与「表里登记了什么」对不上。
 func cursorNativeExecRejectField(parts []cursorPBField) (int, bool) {
-	for _, n := range []int{
-		cursorFldNativeRejectShellArgs,
-		cursorFldNativeRejectWriteArgs,
-		cursorFldNativeRejectDeleteArgs,
-		cursorFldNativeRejectGrepArgs,
-		cursorFldNativeRejectReadArgs,
-		cursorFldNativeRejectLsArgs,
-		cursorFldNativeRejectDiagnosticsArgs,
-		cursorFldNativeRejectShellStreamArgs,
-		cursorFldNativeRejectBackgroundShellSpawnArgs,
-		cursorFldNativeRejectFetchArgs,
-		cursorFldNativeRejectWriteShellStdinArgs,
-	} {
+	for _, n := range cursorExecNativeRejectOrder {
 		if _, ok := cursorFindField(parts, n); ok {
 			return n, true
 		}
