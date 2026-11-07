@@ -127,6 +127,21 @@ type QuotaKeyUpstreamClient interface {
 	PullBatch(ctx context.Context, qk *ent.QuotaKey) (*UpstreamPullResult, error)
 }
 
+// upstreamKey 是 quota_keys.upstream_key 的取值集合（激活码所属上行标识）。
+//
+// 与 KC-16 新建的 quota_upstreams 表中 type 列的取值集合保持一致：
+//   - shareai：既有 ShareAI 上游（默认，存量激活码经 NOT NULL DEFAULT 'shareai' 落此值）；
+//   - kn_cy：kn-cy.com 上游（K7 第二上游，与 ShareAI 激活码并列走同一套号池/挂组/额度/停调）。
+//
+// 取值由迁移 297 的 CHECK 约束限定，不得在别处另起一套字符串字面量——
+// 这里集中定义供分派器（upstreamDispatchingClient）按 qk.UpstreamKey 选择具体实现。
+const (
+	// upstreamKeyShareAI 是默认上行标识（quota_keys.upstream_key 的 NOT NULL DEFAULT）。
+	upstreamKeyShareAI = "shareai"
+	// upstreamKeyKnCy 是 kn-cy.com 上行标识。
+	upstreamKeyKnCy = "kn_cy"
+)
+
 // UpstreamAccount 是上游返回的一条待入库账号的规格。
 // 不含 id / quota_key_id（由 service 在插入时写入归属）。
 type UpstreamAccount struct {
@@ -307,6 +322,56 @@ func (NotConnectedUpstreamClient) PullBatch(_ context.Context, _ *ent.QuotaKey) 
 	return nil, ErrUpstreamNotConnected
 }
 
+// upstreamDispatchingClient 实现 QuotaKeyUpstreamClient：按 quota_key 的 upstream_key
+// 分派到对应的具体上游客户端（ShareAI / kn-cy），而非单一上游。
+//
+// 设计要点（方案 §/ KC-17）：
+//   - 持有两个具体实现，PullBatch 仅做"按上游标识选路"这一件事，不引入任何额外行为，
+//     既有的 shareAI / knCy 客户端行为零变化。
+//   - 未知上游标识**失败关闭**：返回 error，绝不静默回落到任一已知实现。
+//     回落会让一张 kn-cy 卡密去打 ShareAI 上游，凭据泄露 + 白耗额度。
+//   - 空标识（qk.UpstreamKey == ""，理论上不该出现：字段 NOT NULL DEFAULT 'shareai'）
+//     同样按未知处理 = 失败关闭。默认值是"入库时"的行为，运行时读取到空串说明数据已
+//     偏离契约（要么直接构造的测试对象漏设，要么 DB 行被异常改写），应暴露而非静默走错链。
+//
+// 装配在 wire（KC-17B）里完成：先构造 shareAI 客户端（不注入 resolver），构造
+// QuotaKeyService 后再回填 resolver（打破循环依赖），最后把 shareAI + knCy 两个具体
+// 实现注入本分派器。本类型不负责那套装配顺序，只保证"选路 + 失败关闭"语义正确。
+type upstreamDispatchingClient struct {
+	shareAI QuotaKeyUpstreamClient
+	knCy    QuotaKeyUpstreamClient
+}
+
+// NewUpstreamDispatchingClient 构造分派器。两个具体客户端均不可为 nil——
+// 缺任一即失败关闭（分派器本身无法兜底，回落会打错上游）。
+//
+// KC-17B 的 wire 提供者会读这个构造器：把 NewShareAIUpstreamClient 与
+// NewKnCyQuotaKeyUpstreamClient 的产物传进来，得到 QuotaKeyUpstreamClient 后传给
+// NewQuotaKeyService。
+func NewUpstreamDispatchingClient(shareAI, knCy QuotaKeyUpstreamClient) (*upstreamDispatchingClient, error) {
+	if shareAI == nil {
+		return nil, errors.New("quota_key_service: shareai upstream client must not be nil")
+	}
+	if knCy == nil {
+		return nil, errors.New("quota_key_service: kn-cy upstream client must not be nil")
+	}
+	return &upstreamDispatchingClient{shareAI: shareAI, knCy: knCy}, nil
+}
+
+// PullBatch 按 qk.UpstreamKey 选择具体上游实现。
+func (c *upstreamDispatchingClient) PullBatch(ctx context.Context, qk *ent.QuotaKey) (*UpstreamPullResult, error) {
+	switch qk.UpstreamKey {
+	case upstreamKeyShareAI:
+		return c.shareAI.PullBatch(ctx, qk)
+	case upstreamKeyKnCy:
+		return c.knCy.PullBatch(ctx, qk)
+	default:
+		// 未知上游标识 = 失败关闭：返回 error，绝不静默回落到 shareai/knCy。
+		// （回落会让一张 kn-cy 卡密去打 ShareAI 上游，凭据泄露 + 白耗额度。）
+		return nil, fmt.Errorf("quota_key_service: unknown upstream key %q", qk.UpstreamKey)
+	}
+}
+
 // ErrQuotaKeyNotFound 表示激活码不存在（或已软删，普通查询不可见）。
 var ErrQuotaKeyNotFound = errors.New("quota key not found")
 
@@ -395,8 +460,18 @@ func NewQuotaKeyService(repo QuotaKeyRepository, enc QuotaKeyEncryptor, upstream
 	// （*QuotaKeyService 同时提供 DeviceIDFor 与 HasAccount）。
 	// 这样 wire / 测试无须新增装配语句，也不必改动构造函数签名；
 	// 传入的是占位或替身上游（不满足类型断言）时整段跳过，行为不变。
+	//
+	// KC-17：注入的可能是分派器 upstreamDispatchingClient（wire 在 KC-17B 里把它绑成
+	// QuotaKeyUpstreamClient 的实现）。分派器只是把 *shareAIUpstreamClient 包了一层，
+	// resolver 必须落到真正的 shareAI 客户端上——否则 shareAI 路径在需要设备解析时会退化为
+	// 既有 deviceID(code) 分支，破坏同源闭环。两种情况都照抄既有"先建客户端 → 后回填 resolver"
+	// 的顺序，不重排。
 	if sac, ok := upstream.(*shareAIUpstreamClient); ok {
 		sac.SetDeviceResolver(s)
+	} else if dc, ok := upstream.(*upstreamDispatchingClient); ok {
+		if sac, ok := dc.shareAI.(*shareAIUpstreamClient); ok {
+			sac.SetDeviceResolver(s)
+		}
 	}
 	// P1-S：cursor 调度资格门所需的激活码状态读取器（包级安装，沿
 	// codeBuddyQuotaInstance 的模式）。调度谓词是包级纯函数、拿不到 service 句柄，

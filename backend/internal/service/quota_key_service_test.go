@@ -528,6 +528,118 @@ func (f *fakeUpstreamClient) PullBatch(_ context.Context, qk *ent.QuotaKey) (*Up
 	return f.batch, nil
 }
 
+// ---------------------------------------------------------------------------
+// KC-17：upstreamDispatchingClient 分派单测（不连 DB、不发起真实上游请求）。
+// 仅验证"按 upstream_key 选路 + 未知标识失败关闭"语义，不触碰既有 shareAI/knCy 行为。
+// ---------------------------------------------------------------------------
+
+// recordingUpstreamClient 是 QuotaKeyUpstreamClient 的带调用记录的测试替身，仅用于断言分派选路。
+type recordingUpstreamClient struct {
+	calls       int
+	lastQK      *ent.QuotaKey
+	toReturn    *UpstreamPullResult
+	errToReturn error
+}
+
+func (r *recordingUpstreamClient) PullBatch(_ context.Context, qk *ent.QuotaKey) (*UpstreamPullResult, error) {
+	r.calls++
+	r.lastQK = qk
+	if r.errToReturn != nil {
+		return nil, r.errToReturn
+	}
+	return r.toReturn, nil
+}
+
+// entQuotaKeyWithUpstreamKey 构造一个带指定 upstream_key 的激活码对象（仅字段级，不落库）。
+func entQuotaKeyWithUpstreamKey(key string) *ent.QuotaKey {
+	qk := &ent.QuotaKey{}
+	qk.UpstreamKey = key
+	return qk
+}
+
+// TestUpstreamDispatchingClient_SelectsByUpstreamKey 验证按 upstream_key 选路：
+// shareai → shareAI 客户端；kn_cy → knCy 客户端；两者互不串路。
+func TestUpstreamDispatchingClient_SelectsByUpstreamKey(t *testing.T) {
+	shareAI := &recordingUpstreamClient{toReturn: &UpstreamPullResult{Accounts: []*UpstreamAccount{{Name: "a"}}}}
+	knCy := &recordingUpstreamClient{toReturn: &UpstreamPullResult{Accounts: []*UpstreamAccount{{Name: "b"}}}}
+
+	dc, err := NewUpstreamDispatchingClient(shareAI, knCy)
+	require.NoError(t, err)
+
+	// shareai 路径：只命中 shareAI 客户端。
+	res, err := dc.PullBatch(context.Background(), entQuotaKeyWithUpstreamKey(upstreamKeyShareAI))
+	require.NoError(t, err)
+	require.Len(t, res.Accounts, 1)
+	require.Equal(t, "a", res.Accounts[0].Name)
+	require.Equal(t, 1, shareAI.calls, "shareai key must route to shareAI client")
+	require.Equal(t, 0, knCy.calls, "shareai key must NOT route to knCy client")
+
+	// kn_cy 路径：只命中 knCy 客户端。
+	res, err = dc.PullBatch(context.Background(), entQuotaKeyWithUpstreamKey(upstreamKeyKnCy))
+	require.NoError(t, err)
+	require.Len(t, res.Accounts, 1)
+	require.Equal(t, "b", res.Accounts[0].Name)
+	require.Equal(t, 1, knCy.calls, "kn_cy key must route to knCy client")
+	require.Equal(t, 1, shareAI.calls, "kn_cy key must NOT route to shareAI client")
+}
+
+// TestUpstreamDispatchingClient_UnknownKeyFailsClosed 验证未知/空上游标识失败关闭：
+// 返回 error，绝不静默回落到任一已知实现（回落会让 kn-cy 卡密去打 ShareAI 上游）。
+func TestUpstreamDispatchingClient_UnknownKeyFailsClosed(t *testing.T) {
+	for _, badKey := range []string{"", "unknown", "KN_CY", "shareai "} {
+		shareAI := &recordingUpstreamClient{}
+		knCy := &recordingUpstreamClient{}
+		dc, err := NewUpstreamDispatchingClient(shareAI, knCy)
+		require.NoError(t, err)
+
+		res, err := dc.PullBatch(context.Background(), entQuotaKeyWithUpstreamKey(badKey))
+		require.Error(t, err, "unknown/empty upstream key %q must fail closed", badKey)
+		require.Nil(t, res, "must not return a result on unknown key")
+		require.Contains(t, err.Error(), "unknown upstream key")
+		require.Equal(t, 0, shareAI.calls, "unknown key must NOT call shareAI client (no fallback)")
+		require.Equal(t, 0, knCy.calls, "unknown key must NOT call knCy client (no fallback)")
+	}
+}
+
+// TestUpstreamDispatchingClient_DefaultShareAI 验证存量激活码的默认 upstream_key='shareai'
+// 走 shareAI 路径（KC-16 字段 NOT NULL DEFAULT 'shareai'）。
+func TestUpstreamDispatchingClient_DefaultShareAI(t *testing.T) {
+	shareAI := &recordingUpstreamClient{toReturn: &UpstreamPullResult{}}
+	knCy := &recordingUpstreamClient{}
+	dc, err := NewUpstreamDispatchingClient(shareAI, knCy)
+	require.NoError(t, err)
+
+	// 模拟存量默认值的读取结果（入库时 NOT NULL DEFAULT 'shareai'）。
+	_, err = dc.PullBatch(context.Background(), entQuotaKeyWithUpstreamKey(upstreamKeyShareAI))
+	require.NoError(t, err)
+	require.Equal(t, 1, shareAI.calls, "default 'shareai' key must route to shareAI client")
+	require.Equal(t, 0, knCy.calls, "default 'shareai' key must NOT route to knCy client")
+}
+
+// TestNewUpstreamDispatchingClient_NilArgs 验证构造器对 nil 实参失败关闭。
+func TestNewUpstreamDispatchingClient_NilArgs(t *testing.T) {
+	_, err := NewUpstreamDispatchingClient(nil, &recordingUpstreamClient{})
+	require.Error(t, err, "nil shareAI client must fail")
+	_, err = NewUpstreamDispatchingClient(&recordingUpstreamClient{}, nil)
+	require.Error(t, err, "nil knCy client must fail")
+}
+
+// TestNewQuotaKeyService_DispatcherResolvesInnerShareAI 验证分派器场景下 P1-B4 构造闭环
+// 被保留：NewQuotaKeyService 必须穿透分派器、把自身回填到内嵌的 *shareAIUpstreamClient
+// 的 deviceResolver（照抄既有"先建客户端→后回填 resolver"顺序）。
+func TestNewQuotaKeyService_DispatcherResolvesInnerShareAI(t *testing.T) {
+	sac := &shareAIUpstreamClient{enc: testEncryptor{}}
+	dc, err := NewUpstreamDispatchingClient(sac, &fakeUpstreamClient{})
+	require.NoError(t, err)
+
+	// 传入分派器、client=nil（内存装配，不触发包级状态读取器安装）。
+	svc := NewQuotaKeyService(newFakeQuotaKeyRepo(), testEncryptor{}, dc, nil)
+	require.NotNil(t, svc)
+
+	// 穿透断言：内嵌 shareAI 客户端的 deviceResolver 必须被回填（本 *QuotaKeyService）。
+	require.NotNil(t, sac.deviceResolver, "dispatcher must drill into inner shareAI client and backfill deviceResolver")
+}
+
 func mustCreateQuotaKey(t *testing.T, client *ent.Client, status string) *ent.QuotaKey {
 	t.Helper()
 	qk, err := client.QuotaKey.Create().
