@@ -352,6 +352,16 @@ func (r *fakeQuotaKeyRepo) listCallCount() int {
 	return r.listCalls
 }
 
+// UpdatePriority 内存替身：改写码优先级（实现 QuotaKeyRepository 接口）。
+func (r *fakeQuotaKeyRepo) UpdatePriority(_ context.Context, _ *ent.Tx, id int64, _ int) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.keys[id]; ok {
+		return 1, nil
+	}
+	return 0, nil
+}
+
 // ---------------------------------------------------------------------------
 // 路由与 HTTP 辅助
 // ---------------------------------------------------------------------------
@@ -359,7 +369,7 @@ func (r *fakeQuotaKeyRepo) listCallCount() int {
 func setupQuotaKeyRouter(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	h := NewQuotaKeyHandler(svc, sweeper, nil)
+	h := NewQuotaKeyHandler(svc, sweeper, nil, nil)
 	// 与 internal/server/routes/admin.go 的 registerQuotaKeyRoutes 同序注册。
 	qk := router.Group("/api/v1/admin/quota_keys")
 	qk.GET("", h.List)

@@ -32,13 +32,17 @@ type QuotaKeyHandler struct {
 	svc       *service.QuotaKeyService
 	sweeper   *service.QuotaKeySweeper
 	autoEntry *service.CursorAutoEntryService
+	// adminService 复用既有 AdminService.CreateAccount/UpdateAccount 落库 kn-cy
+	// 激活产生的 cursor(api_key) 账号（kn-cy 卡密激活入口，CARD-KC 激活入库）。
+	adminService service.AdminService
 }
 
 // NewQuotaKeyHandler 构造激活码管理端点处理器。
 // sweeper 为 nil 时 sweep_expired 端点返回 503（未装配清扫器），其余端点不受影响。
 // autoEntry 为 nil 时 auto_entry_config / probe_quota 端点返回 503（未装配入库可配置服务）。
-func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper, autoEntry *service.CursorAutoEntryService) *QuotaKeyHandler {
-	return &QuotaKeyHandler{svc: svc, sweeper: sweeper, autoEntry: autoEntry}
+// adminService 为 nil 时 kn_cy/claim_activation 端点返回 503（未装配账号写入服务）。
+func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper, autoEntry *service.CursorAutoEntryService, adminService service.AdminService) *QuotaKeyHandler {
+	return &QuotaKeyHandler{svc: svc, sweeper: sweeper, autoEntry: autoEntry, adminService: adminService}
 }
 
 // quotaKeySummaryView 是激活码的展示投影：既有脱敏标量 + 来源额度快照投影

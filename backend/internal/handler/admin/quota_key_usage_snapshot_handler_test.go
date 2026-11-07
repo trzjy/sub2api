@@ -244,7 +244,7 @@ func TestQuotaKeyHandler_Probe_UsageProjectionFromCommittedSnapshot(t *testing.T
 	quotaKeyRepo := repository.NewQuotaKeyRepository(client)
 	autoEntry := service.NewCursorAutoEntryService(settingRepo, quotaKeyRepo, service.NewCredcryptEncryptor(), client, &http.Client{Timeout: 5 * time.Second}, srv.URL)
 	svc := service.NewQuotaKeyService(quotaKeyRepo, service.NewCredcryptEncryptor(), nil, client)
-	handler := NewQuotaKeyHandler(svc, nil, autoEntry)
+	handler := NewQuotaKeyHandler(svc, nil, autoEntry, nil)
 
 	router := gin.New()
 	qk := router.Group("/api/v1/admin/quota_keys")
@@ -323,7 +323,7 @@ func TestQuotaKeyHandler_Probe_CommitFailureMustNotReturnOK(t *testing.T) {
 	baseRepo := repository.NewQuotaKeyRepository(client)
 	autoEntry := service.NewCursorAutoEntryService(settingRepo, baseRepo, service.NewCredcryptEncryptor(), client, &http.Client{Timeout: 5 * time.Second}, srv.URL)
 	svc := service.NewQuotaKeyService(baseRepo, service.NewCredcryptEncryptor(), nil, client)
-	handler := NewQuotaKeyHandler(svc, nil, autoEntry)
+	handler := NewQuotaKeyHandler(svc, nil, autoEntry, nil)
 
 	router := gin.New()
 	qk := router.Group("/api/v1/admin/quota_keys")
@@ -339,7 +339,7 @@ func TestQuotaKeyHandler_Probe_CommitFailureMustNotReturnOK(t *testing.T) {
 	// 其 UpdateUsageSnapshot 明确报错 —— 事务随之回滚，commit 从未发生。
 	failingRepo := &commitFailingQuotaKeyRepo{QuotaKeyRepository: baseRepo}
 	failingAutoEntry := service.NewCursorAutoEntryService(settingRepo, failingRepo, service.NewCredcryptEncryptor(), client, &http.Client{Timeout: 5 * time.Second}, srv.URL)
-	failingHandler := NewQuotaKeyHandler(svc, nil, failingAutoEntry)
+	failingHandler := NewQuotaKeyHandler(svc, nil, failingAutoEntry, nil)
 	failingRouter := gin.New()
 	failingRouter.POST("/api/v1/admin/quota_keys/:id/probe_quota", failingHandler.ProbeQuota)
 
