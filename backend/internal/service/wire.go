@@ -143,10 +143,23 @@ func ProvideQuotaKeyService(
 	client *dbent.Client,
 	autoEntry *CursorAutoEntryService,
 ) (*QuotaKeyService, error) {
-	upstream, err := NewShareAIUpstreamClient(enc)
+	// KC-17B：把生产装配从"直接绑 shareAI 客户端"改成"绑分派器"。
+	// 分派器持有 shareAI 与 kn-cy 两个具体实现，按 quota_keys.upstream_key 选路。
+	// 加密器 enc 复用装配里已注入的同一实例（不新建第二个加密器）。
+	shareAI, err := NewShareAIUpstreamClient(enc)
 	if err != nil {
 		return nil, err
 	}
+	knCy, err := NewKnCyQuotaKeyUpstreamClient(NewKnCyClient(""), enc)
+	if err != nil {
+		return nil, err
+	}
+	upstream, err := NewUpstreamDispatchingClient(shareAI, knCy)
+	if err != nil {
+		return nil, err
+	}
+	// 构造闭环保留：NewQuotaKeyService 内部会按 upstream 类型断言——若为分派器则
+	// 解开取真正的 shareAI 客户端回填 SetDeviceResolver（打破循环依赖），行为不变。
 	svc := NewQuotaKeyService(quotaKeys, enc, upstream, client)
 	svc.SetAutoEntry(autoEntry)
 	return svc, nil
