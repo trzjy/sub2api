@@ -112,9 +112,15 @@ var cursorNativeEquivalent = map[int][]string{
 	cursorFldNativeRejectShellArgs:       {"shell", "bash", "terminal", "run_command"}, // f2  shell_args
 	cursorFldNativeRejectWriteArgs:       {"write", "write_file", "create_file", "edit"}, // f3  write_args
 	cursorFldNativeRejectDeleteArgs:      {"remove", "delete_file"},                     // f4  delete_args
-	cursorFldNativeRejectGrepArgs:        {"search", "ripgrep"},                         // f5  grep_args
+	// f5 grep_args：等价名**必须含 grep 自身** —— Claude Code 声明的工具就叫 grep
+	// （生产实测声明集：question,bash,read,glob,grep,edit,write,…）。
+	// 只列 search/ripgrep（社区表的形态，它假设客户端不叫 grep）会导致：
+	// 客户端明明声明了 grep，我们却点不出它的名 → 拒绝文本退回「列出全部工具」，
+	// 模型还是挑不出来 → 继续瞎试原生工具。
+	cursorFldNativeRejectGrepArgs:        {"grep", "search", "ripgrep"},                 // f5  grep_args
 	cursorFldNativeRejectReadArgs:        {"read", "read_file", "view", "cat"},          // f7  read_args
-	cursorFldNativeRejectLsArgs:          {"list_dir", "glob", "list_files"},            // f8  ls_args
+	// f8 ls_args：等价名含 ls 自身（同 f5 的理由：客户端可能就叫 ls）。
+	cursorFldNativeRejectLsArgs:          {"ls", "list_dir", "glob", "list_files"},        // f8  ls_args
 	cursorFldNativeRejectShellStreamArgs: {"shell", "bash", "terminal", "run_command"},  // f14 shell_stream_args
 }
 
