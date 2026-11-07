@@ -674,8 +674,13 @@ func (s *CursorExecutionService) Execute(
 		var mu *CursorModelUnavailableError
 		if code, ok := cursorUpstreamStreamErrorCode(err); ok &&
 			!isCursorBusinessErrorCode(code) && !errors.As(err, &mu) {
+			// 透传上游 message（已脱敏，见 cursorParseEndStream + cursorRedactSecrets）：
+			// 让「上游自身故障」与「我们的请求触发上游 bug」可区分。取不到时记空串，
+			// 不填占位符 —— 「没有」与「有但是空的」要能区分开。
+			upstreamMsg, _ := cursorUpstreamStreamErrorMessage(err)
 			cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_upstream_account_failure", originalModel,
 				zap.String("code", code),
+				zap.String("upstream_message", truncateOpenAIWSLogValue(upstreamMsg, 240)),
 				zap.Int64("account_id", account.ID),
 				zap.Bool("body_published", session.bodyPublished),
 				zap.Int("delivered_batches", int(session.deliveredBatchSeq)))

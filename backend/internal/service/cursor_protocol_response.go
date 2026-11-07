@@ -588,6 +588,21 @@ func cursorUpstreamStreamErrorCode(err error) (string, bool) {
 	return "", false
 }
 
+// cursorUpstreamStreamErrorMessage 从上游流终态错误中提取已脱敏的 message。
+// 非 ErrCursorUpstreamStream 错误返回 ("", false)。
+//
+// 用途：cursor_upstream_account_failure 日志透传上游原文（如
+// "Cannot read properties of undefined (reading 'toString')"），
+// 让「上游自身故障」与「我们的请求触发上游 bug」可区分 ——
+// 此前 message 只在 Error() 里被拼进字符串，无人读取，线上完全看不到。
+func cursorUpstreamStreamErrorMessage(err error) (string, bool) {
+	var e *cursorUpstreamStreamError
+	if errors.As(err, &e) {
+		return e.Message, true
+	}
+	return "", false
+}
+
 // CursorUpstreamAccountFailureReason 标识「cursor 上游对本账号返回非业务码终态错误」的
 // 换号原因。handler 侧据此对账号做临时停调冷却（见 GatewayService.TempUnscheduleRetryableError），
 // 与其他平台的换号原因共用同一分类点与同一停号原语，不另建通道。
