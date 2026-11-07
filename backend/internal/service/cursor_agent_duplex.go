@@ -325,7 +325,16 @@ func newCursorAgentDuplex(initial []byte, delegations *cursorToolDelegations) (*
 	return d, nil
 }
 
-// declaredToolNames 从 declaredToolDefs 提取每条工具定义的工具名，用于拒绝消息和日志。
+// declaredToolNames 从 declaredToolDefs 提取每条工具定义的工具名，经 declaredToolReverse
+// 反查回**客户端原名**后返回，用于拒绝消息和日志。
+//
+// 为什么必须反查：卡 01 之后 f4 里存的是 wire name（撞 Cursor 内置名时加 "_"，如 Read → Read_），
+// 但客户端只认识自己声明的原名。拒绝文本点名要点的就是客户端认识的名字，日志同理——
+// 否则运维看到 `Read_` 会误以为客户端声明了这个名字。
+//
+// 查不到反查表（nil / 该名未登记，例如独立解析路径没有原始名来源，或上游回调了未声明的名字）
+// → 保持原样（wire name），既有语义不变、不报错。反查是单射（卡 03 保证），不会错配。
+//
 // 返回按声明顺序排列的工具名切片；解析失败的条目跳过（不中断提取）。
 func (d *cursorAgentDuplex) declaredToolNames() []string {
 	if len(d.declaredToolDefs) == 0 {
@@ -339,7 +348,11 @@ func (d *cursorAgentDuplex) declaredToolNames() []string {
 		}
 		for _, f := range fields {
 			if f.Number == cursorFldMcpToolDefToolName {
-				names = append(names, f.String())
+				name := f.String()
+				if orig, ok := d.declaredToolReverse[name]; ok {
+					name = orig
+				}
+				names = append(names, name)
 				break
 			}
 		}
