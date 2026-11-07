@@ -2054,101 +2054,14 @@ func TestRecordUsage_CursorAPIKeyEstimatedInputTokens(t *testing.T) {
 		"上游虚高的 5000 token 计费必须高于本地重算的 2000 token 计费")
 }
 
-// TestRecordUsage_CursorAPIKeyRecountFromPayload 覆盖外审确认的「Token 重算字段未接入
-// 实际 Chat、Responses、Messages 结算构造」缺口：当 Cursor APIKey 上游未由 handler 显式
-// 透传 EstimatedInputTokens 时，RecordUsage 沿既有 EstimateTierRoutingInputTokens 唯一
-// 路径按 RequestProtocol 收敛协议后本地重算纯文本输入 Token，覆盖上游虚高的 prompt_tokens。
-// 三种入口协议形态（chat_completions / responses / messages）统一收敛为计费构造输入，
-// 必须都生效；含图请求则保持纯文本/含图边界，回落上游 Token（不重算）。
-func TestRecordUsage_CursorAPIKeyRecountFromPayload(t *testing.T) {
-	const prompt = "hello world, this is a recount recount test prompt for cursor upstream inflation"
-
-	cases := []struct {
-		name     string
-		protocol TierRoutingRequestProtocol
-		body     string
-	}{
-		{
-			name:     "chat_completions",
-			protocol: TierRoutingProtocolChatCompletions,
-			body:     `{"model":"gpt-5.1","messages":[{"role":"user","content":"` + prompt + `"}]}`,
-		},
-		{
-			name:     "responses",
-			protocol: TierRoutingProtocolResponses,
-			body:     `{"model":"gpt-5.1","input":"` + prompt + `"}`,
-		},
-		{
-			name:     "messages",
-			protocol: TierRoutingProtocolMessages,
-			body:     `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"` + prompt + `"}]}`,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
-			userRepo := &openAIRecordUsageUserRepoStub{}
-			subRepo := &openAIRecordUsageSubRepoStub{}
-			svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, nil)
-
-			expRecount, err := EstimateTierRoutingInputTokens("gpt-5.1", tc.protocol, []byte(tc.body))
-			require.NoError(t, err)
-			require.Greater(t, expRecount, 0, "重算路径必须能产出非零纯文本 token")
-			require.Less(t, expRecount, 5000, "重算值须小于上游虚高的 5000，证明未采信上游")
-
-			inflated := OpenAIUsage{InputTokens: 5000, OutputTokens: 300}
-			err = svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
-				Result: &OpenAIForwardResult{
-					RequestID: "resp_cursor_recount_" + tc.name,
-					Usage:     inflated,
-					Model:     "gpt-5.1",
-					Duration:  time.Second,
-				},
-				APIKey:          &APIKey{ID: 300},
-				User:            &User{ID: 400},
-				Account:         &Account{ID: 500, Platform: PlatformCursor, Type: AccountTypeAPIKey},
-				RequestPayload:  []byte(tc.body),
-				RequestProtocol: tc.protocol,
-			})
-
-			require.NoError(t, err)
-			require.NotNil(t, usageRepo.lastLog)
-			// 用量行输入 Token 必须为按请求体本地重算值，而非上游虚高的 5000。
-			require.Equal(t, expRecount, usageRepo.lastLog.InputTokens,
-				"协议 %s 的本地重算须接入实际结算构造", tc.protocol)
-			require.Equal(t, 300, usageRepo.lastLog.OutputTokens)
-
-			// 反证：若误按上游 5000 Token 计费，金额必然更大，确保断言真有区分度。
-			expectedCost, calcErr := svc.billingService.CalculateCost("gpt-5.1", UsageTokens{
-				InputTokens:  expRecount,
-				OutputTokens: 300,
-			}, 1.1)
-			require.NoError(t, calcErr)
-			require.InDelta(t, expectedCost.TotalCost, usageRepo.lastLog.TotalCost, 1e-12)
-			require.InDelta(t, expectedCost.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
-
-			inflatedCost, calcErr := svc.billingService.CalculateCost("gpt-5.1", UsageTokens{
-				InputTokens:  5000,
-				OutputTokens: 300,
-			}, 1.1)
-			require.NoError(t, calcErr)
-			require.Greater(t, inflatedCost.ActualCost, usageRepo.lastLog.ActualCost,
-				"上游虚高的 5000 token 计费必须高于本地重算的 %d token 计费", expRecount)
-		})
-	}
-}
-
-// TestRecordUsage_CursorAPIKeyRecountFromPayloadSkipsImage 验证含图请求保持纯文本/含图
-// 边界：图片输入由独立 ImageInputTokens 口径承载，本地重算只覆盖文本输入，含图时直接回落
-// 上游 Token，不应把图片内容误计入文本桶造成重复计费。
+// TestRecordUsage_CursorAPIKeyRecountFromPayloadSkipsImage 验证含图请求在透传估算缺失时
+// 回落上游 Token：图片输入由独立 ImageInputTokens 口径承载，未透传 EstimatedInputTokens
+// 时输入 Token 直接沿用上游（计费口径以 EstimatedInputTokens 透传为唯一覆盖来源）。
 func TestRecordUsage_CursorAPIKeyRecountFromPayloadSkipsImage(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	userRepo := &openAIRecordUsageUserRepoStub{}
 	subRepo := &openAIRecordUsageSubRepoStub{}
 	svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, nil)
-
-	chatBody := []byte(`{"model":"gpt-5.1","messages":[{"role":"user","content":"describe this image please"}]}`)
 
 	inflated := OpenAIUsage{InputTokens: 5000, OutputTokens: 300}
 	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
@@ -2159,23 +2072,21 @@ func TestRecordUsage_CursorAPIKeyRecountFromPayloadSkipsImage(t *testing.T) {
 			Duration:   time.Second,
 			ImageCount: 1, // 含图请求：纯文本/含图边界
 		},
-		APIKey:          &APIKey{ID: 300},
-		User:            &User{ID: 400},
-		Account:         &Account{ID: 500, Platform: PlatformCursor, Type: AccountTypeAPIKey},
-		RequestPayload:  chatBody,
-		RequestProtocol: TierRoutingProtocolChatCompletions,
+		APIKey:  &APIKey{ID: 300},
+		User:    &User{ID: 400},
+		Account: &Account{ID: 500, Platform: PlatformCursor, Type: AccountTypeAPIKey},
 	})
 
 	require.NoError(t, err)
 	require.NotNil(t, usageRepo.lastLog)
-	// 含图请求不得触发本地重算，输入 Token 须回落上游虚高的 5000。
+	// 含图请求未透传 EstimatedInputTokens，输入 Token 须回落上游虚高的 5000。
 	require.Equal(t, 5000, usageRepo.lastLog.InputTokens,
 		"含图请求须保持图文边界，回落上游 token")
 }
 
-// TestRecordUsage_CursorAPIKeyRecountFallsBackWhenPayloadMissing 验证请求体/协议缺失时
-// 回落上游 Token（不新增兜底值、不改变计费语义）：未携带 RequestPayload 或 RequestProtocol
-// 时本地重算返回 0，沿用上游 actualInputTokens。
+// TestRecordUsage_CursorAPIKeyRecountFallsBackWhenPayloadMissing 验证透传估算缺失时
+// 回落上游 Token（不新增兜底值、不改变计费语义）：未携带 EstimatedInputTokens 时
+// 输入 Token 沿用上游 actualInputTokens（EstimatedInputTokens 透传为唯一覆盖来源）。
 func TestRecordUsage_CursorAPIKeyRecountFallsBackWhenPayloadMissing(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	userRepo := &openAIRecordUsageUserRepoStub{}
@@ -2184,7 +2095,7 @@ func TestRecordUsage_CursorAPIKeyRecountFallsBackWhenPayloadMissing(t *testing.T
 
 	inflated := OpenAIUsage{InputTokens: 5000, OutputTokens: 300}
 
-	// 仅缺 RequestProtocol：重算无法收敛协议，回落上游。
+	// 未携带 EstimatedInputTokens：回落上游 token。
 	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
 		Result: &OpenAIForwardResult{
 			RequestID: "resp_cursor_recount_no_proto",
@@ -2192,15 +2103,14 @@ func TestRecordUsage_CursorAPIKeyRecountFallsBackWhenPayloadMissing(t *testing.T
 			Model:     "gpt-5.1",
 			Duration:  time.Second,
 		},
-		APIKey:         &APIKey{ID: 300},
-		User:           &User{ID: 400},
-		Account:        &Account{ID: 500, Platform: PlatformCursor, Type: AccountTypeAPIKey},
-		RequestPayload: []byte(`{"model":"gpt-5.1","messages":[{"role":"user","content":"hello"}]}`),
+		APIKey:  &APIKey{ID: 300},
+		User:    &User{ID: 400},
+		Account: &Account{ID: 500, Platform: PlatformCursor, Type: AccountTypeAPIKey},
 	})
 	require.NoError(t, err)
 	require.Equal(t, 5000, usageRepo.lastLog.InputTokens, "缺协议须回落上游 token")
 
-	// 仅缺 RequestPayload：重算无请求体，回落上游。
+	// 未携带 EstimatedInputTokens：回落上游 token。
 	err = svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
 		Result: &OpenAIForwardResult{
 			RequestID: "resp_cursor_recount_no_body",
@@ -2208,10 +2118,9 @@ func TestRecordUsage_CursorAPIKeyRecountFallsBackWhenPayloadMissing(t *testing.T
 			Model:     "gpt-5.1",
 			Duration:  time.Second,
 		},
-		APIKey:          &APIKey{ID: 300},
-		User:            &User{ID: 400},
-		Account:         &Account{ID: 500, Platform: PlatformCursor, Type: AccountTypeAPIKey},
-		RequestProtocol: TierRoutingProtocolChatCompletions,
+		APIKey:  &APIKey{ID: 300},
+		User:    &User{ID: 400},
+		Account: &Account{ID: 500, Platform: PlatformCursor, Type: AccountTypeAPIKey},
 	})
 	require.NoError(t, err)
 	require.Equal(t, 5000, usageRepo.lastLog.InputTokens, "缺请求体须回落上游 token")
