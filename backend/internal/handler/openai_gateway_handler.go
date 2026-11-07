@@ -746,6 +746,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	} else {
 		c.Request = c.Request.WithContext(tierCtx)
 	}
+	// KC-19B：cursor 平台（kn-cy 等 OpenAI 兼容反代）请求在选号前用既有本地估算 SSOT
+	// 装好估算 input，供 RecordUsage 透传为 EstimatedInputTokens 以对冲上游 prompt_tokens 虚高。
+	attachCursorEstimatedInputTokens(c, reqLog, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body)
 
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
@@ -987,25 +990,30 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
+			// KC-19B：异步提交前从请求 ctx 取出选号前装好的本地估算 input（cursor 平台请求
+			// 才有值，非 cursor 读到 0），避免闭包内 ctx 已失效。RecordUsage 由消费端按账号
+			// 类型决定是否覆盖上游虚高 prompt_tokens。
+			estimatedInputTokens := service.TierRoutingEstimatedInputTokens(c.Request.Context())
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-					Result:             res,
-					APIKey:             apiKey,
-					User:               apiKey.User,
-					Account:            account,
-					Subscription:       subscription,
-					InboundEndpoint:    inboundEndpoint,
-					UpstreamEndpoint:   upstreamEndpoint,
-					UserAgent:          userAgent,
-					IPAddress:          clientIP,
-					RequestPayloadHash: requestPayloadHash,
-					APIKeyService:      h.apiKeyService,
-					QuotaPlatform:      quotaPlatform,
-					SessionID:          sessionID,
-					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
-					PricingAt:          pricingAt,
-					CyberBlocked:       cyberBlocked,
-					NativeCompactionV2: nativeV2,
+					Result:               res,
+					APIKey:               apiKey,
+					User:                 apiKey.User,
+					Account:              account,
+					Subscription:         subscription,
+					InboundEndpoint:      inboundEndpoint,
+					UpstreamEndpoint:     upstreamEndpoint,
+					UserAgent:            userAgent,
+					IPAddress:            clientIP,
+					RequestPayloadHash:   requestPayloadHash,
+					APIKeyService:        h.apiKeyService,
+					QuotaPlatform:        quotaPlatform,
+					SessionID:            sessionID,
+					ChannelUsageFields:   clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
+					PricingAt:            pricingAt,
+					CyberBlocked:         cyberBlocked,
+					NativeCompactionV2:   nativeV2,
+					EstimatedInputTokens: estimatedInputTokens,
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.openai_gateway.responses"),
@@ -1538,6 +1546,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	} else {
 		c.Request = c.Request.WithContext(tierCtx)
 	}
+	// KC-19B：cursor 平台（kn-cy 等 OpenAI 兼容反代）请求在选号前用既有本地估算 SSOT
+	// 装好估算 input，供 RecordUsage 透传为 EstimatedInputTokens 以对冲上游 prompt_tokens 虚高。
+	attachCursorEstimatedInputTokens(c, reqLog, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body)
 
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
@@ -1735,24 +1746,29 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
+			// KC-19B：异步提交前从请求 ctx 取出选号前装好的本地估算 input（cursor 平台请求
+			// 才有值，非 cursor 读到 0），避免闭包内 ctx 已失效。RecordUsage 由消费端按账号
+			// 类型决定是否覆盖上游虚高 prompt_tokens。
+			estimatedInputTokens := service.TierRoutingEstimatedInputTokens(c.Request.Context())
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-					Result:             res,
-					APIKey:             apiKey,
-					User:               apiKey.User,
-					Account:            account,
-					Subscription:       subscription,
-					InboundEndpoint:    inboundEndpoint,
-					UpstreamEndpoint:   upstreamEndpoint,
-					UserAgent:          userAgent,
-					IPAddress:          clientIP,
-					RequestPayloadHash: requestPayloadHash,
-					APIKeyService:      h.apiKeyService,
-					QuotaPlatform:      quotaPlatform,
-					SessionID:          sessionID,
-					ChannelUsageFields: clientRequestedUsageFields(c, channelMappingMsg, reqModel, res.UpstreamModel),
-					PricingAt:          pricingAt,
-					CyberBlocked:       cyberBlocked,
+					Result:               res,
+					APIKey:               apiKey,
+					User:                 apiKey.User,
+					Account:              account,
+					Subscription:         subscription,
+					InboundEndpoint:      inboundEndpoint,
+					UpstreamEndpoint:     upstreamEndpoint,
+					UserAgent:            userAgent,
+					IPAddress:            clientIP,
+					RequestPayloadHash:   requestPayloadHash,
+					APIKeyService:        h.apiKeyService,
+					QuotaPlatform:        quotaPlatform,
+					SessionID:            sessionID,
+					ChannelUsageFields:   clientRequestedUsageFields(c, channelMappingMsg, reqModel, res.UpstreamModel),
+					PricingAt:            pricingAt,
+					CyberBlocked:         cyberBlocked,
+					EstimatedInputTokens: estimatedInputTokens,
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.openai_gateway.messages"),
@@ -5523,6 +5539,36 @@ func (h *OpenAIGatewayHandler) applySensenovaSizeExclusion(
 		return empty
 	}
 	return excluded
+}
+
+// attachCursorEstimatedInputTokens 对 cursor 平台请求（含 kn-cy 等 OpenAI 兼容反代），
+// 在选号前用全站唯一的本地估算 SSOT service.EstimateTierRoutingInputTokens 估算 input
+// token，装入请求 ctx 的既有 tierRoutingContextKey 通道（空 class，不装分档门；复用同一
+// SSOT、同一 ctx key，不另起一套估算/分档语义）。RecordUsage 在异步提交前从 ctx 读出该值
+// 填入 OpenAIRecordUsageInput.EstimatedInputTokens，由消费端按账号类型决定是否覆盖上游虚高
+// prompt_tokens。非 cursor 平台零行为变化（ctx 不装门，RecordUsage 读到 0）。
+//
+// 失败开放：估算失败仅告警并保留原 ctx，不阻断请求、不装门（与 applyTierRouting 同口径）。
+func attachCursorEstimatedInputTokens(
+	c *gin.Context,
+	reqLog *zap.Logger,
+	requestPlatform string,
+	estimateModel string,
+	protocol service.TierRoutingRequestProtocol,
+	body []byte,
+) {
+	if requestPlatform != service.PlatformCursor {
+		return
+	}
+	estimated, err := service.EstimateTierRoutingInputTokens(estimateModel, protocol, body)
+	if err != nil {
+		reqLog.Warn("cursor_input_token_estimate_failed",
+			zap.String("platform", requestPlatform),
+			zap.String("model", estimateModel),
+			zap.Error(err))
+		return
+	}
+	c.Request = c.Request.WithContext(service.WithEstimatedInputTokens(c.Request.Context(), estimated))
 }
 
 func applyTierRouting(

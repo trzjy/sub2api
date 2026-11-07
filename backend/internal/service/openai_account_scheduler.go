@@ -2636,6 +2636,30 @@ func tierRoutingEstimatedInputFromContext(ctx context.Context) int {
 	return st.estimatedInput
 }
 
+// WithEstimatedInputTokens 仅把本地估算 input 装入请求 ctx，不装分档门（class 保持空）。
+// 供 handler 对「不参与分层路由」的账号（如 cursor OpenAI 兼容反代）在选号前装好既有估算值，
+// 使 RecordUsage 能从同一 tierRoutingContextKey 通道读到（与 WithTierRouting 共用唯一 ctx key，
+// 不另开第二条通道）。沿用既有 tierRoutingState：若 ctx 已有分档门则保留 class/crossPool 不变。
+func WithEstimatedInputTokens(ctx context.Context, estimatedInputTokens int) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	st, ok := ctx.Value(tierRoutingContextKey{}).(tierRoutingState)
+	if !ok {
+		st = tierRoutingState{}
+	}
+	st.estimatedInput = estimatedInputTokens
+	return context.WithValue(ctx, tierRoutingContextKey{}, st)
+}
+
+// TierRoutingEstimatedInputTokens 是派发单 KC-19B 的只读读取口：从请求 ctx 读出既有本地
+// 估算 input token（由 WithTierRouting / WithEstimatedInputTokens 装入）。未装门或无值时返回 0
+// （不返回 -1 或任何哨兵）；0 对任何声明了 min>0 的区间都不命中，落在安全侧（不进大档伪装池）。
+// 只读：不改 WithTierRouting / tierRoutingPoolFromContext 等任何既有语义。
+func TierRoutingEstimatedInputTokens(ctx context.Context) int {
+	return tierRoutingEstimatedInputFromContext(ctx)
+}
+
 // TierRoutingGateOpen 是派发单 OC-T1 的动态门控判定：对目标模型 model，门开启当且仅当
 // 存在账号 A 满足「管理态 schedulable=true（以调度快照的管理态为准，忽略运行态熔断/
 // 配额暂停/临时停调——它们不改管理态 schedulable）且 extra.mask_upstream_identity=true
