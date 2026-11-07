@@ -123,26 +123,6 @@ func cursorToolMetaFromTools(effective []apicompat.ResponsesTool) (cursorRespons
 	}, nil
 }
 
-// cursorResponsesDeclaredToolNames 返回**上行真正声明的工具名**（保持声明顺序）。
-//
-// 唯一来源是 apicompat.EffectiveResponsesFlatTools：top-level tools + input 里的
-// additional_tools 声明 + namespace 摊平。任何"工具集合一致性"校验都必须走这里，
-// 不得再直接读 req.Tools——两处读法不同正是 2026-11-06 续轮误判 tool_set_changed
-// 的原因；不摊平则与上行声明名对不上，同样会误判。
-func cursorResponsesDeclaredToolNames(req *apicompat.ResponsesRequest) ([]string, error) {
-	flat, err := apicompat.EffectiveResponsesFlatTools(req)
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(flat.Tools))
-	for _, tool := range flat.Tools {
-		if name := strings.TrimSpace(tool.Name); name != "" {
-			names = append(names, name)
-		}
-	}
-	return names, nil
-}
-
 // ---------------------------------------------------------------------------
 // 请求 / 服务
 // ---------------------------------------------------------------------------
@@ -411,32 +391,22 @@ func (s *CursorExecutionService) Execute(
 		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "typed chat completions request missing")
 	}
 
-	// §25.17.4（A08）行 5 的准入断言在 2026-11-04 被用户裁定部分改写
-	// （docs-local/cursor-resume-quota-rebuild-failover-plan-20261104.md §2.4-3）：
-	// Cursor 执行分支的准入断言——请求**在原协议层已声明续轮**（携带本批工具结果或
-	// previous_response_id，见 cursorContextPlan.claimsContinuation），却没有任何有效接管。
+	// §25.17.4（A08）行 5 的准入断言在 2026-11-07 随五道闸退役：
+	// Cursor 执行分支不再因为"声明了续轮却没有可重建的完整历史"返回 400。
 	//
-	// 原 A08 裁定"凡声明续轮却到达新建入口一律 400、不换号"已被替代：
-	//   - 续轮中途额度耗尽后由 handler 在请求 ctx 挂 CursorRebuildInfo → 这是**有意重建**，
-	//     不返回 400，按新建 AgentRun 继续（死亡会话已由 finalizer 终结、不结算）；
-	//   - 客户端在会话已死后原样重试（unknown_association，无 ctx 标记）→ 只要正文携带
-	//     完整历史（historySupportsRebuild）同样放行重建，避免把站点侧会话死亡暴露给用户；
-	//   - 历史不完整（典型：Responses 只有 previous_response_id）→ 维持原 400 失效关联，
-	//     绝不凭残缺正文重建（会丢上下文）。
+	// 原逻辑（保留说明，勿回滚）：请求在原协议层声明续轮（携带本批工具结果或
+	// previous_response_id，见 cursorContextPlan.claimsContinuation），若既不来自
+	// 有意重建（ctx 上的 CursorRebuildInfo），正文又不足以独立重建（historySupportsRebuild），
+	// 就回 400 unknown_association（客户看到 CUR-RES-01）。
 	//
-	// 行 1 的例外（resultsReplayHistory）：Responses 完整 input 回放里，尾部结果的
-	// function_call 也出现在同一正文中 —— 那是客户端自带完整两端的已完成工具对，不构成
-	// 续轮声明，按原普通请求继续。判定只取本 HTTP 请求数据，不新增持久化表/墓碑/ID 前缀，
-	// 也不猜最近会话。
-	// 重建决定在建会话之前取出：准入断言用它放行，会话登记后用同一份信息打
-	// "死号 → 新号"落点日志（2026-11-04 收口 M5）。
+	// 为什么退役：Responses 官方用法就是"previous_response_id + 尾部 function_call_output"，
+	// 客户端**不重放** function_call —— 那种请求永远算不出"完整历史"，于是被这条闸恒定
+	// 拒掉。这是对客户端正常行为的误判，不是真的失联。
+	//
+	// 现在只留痕，一律放行：有会话就按会话续轮，没有会话就按本请求正文新建
+	// （缺的前文由 previous_response_id 语义与本次正文共同决定，不再拦在站点侧）。
 	rebuildInfo, rebuildRequested := CursorRebuildFromContext(ctx)
 	if req.Plan.claimsContinuation() && !req.Plan.resultsReplayHistory() {
-		historyComplete := req.Plan.historySupportsRebuild()
-		if !rebuildRequested && !historyComplete {
-			return nil, newCursorResumeError(http.StatusBadRequest, "unknown_association",
-				ErrCursorResumeUnknownAssociation)
-		}
 		// 日志只记枚举/ID：正文与上游原文一律不落盘。
 		protocol := string(cursorResumeProtocolOfRequest(req))
 		if rebuildRequested {
@@ -444,11 +414,11 @@ func (s *CursorExecutionService) Execute(
 				zap.Int64("dead_account_id", rebuildInfo.DeadAccountID),
 				zap.String("reason", string(rebuildInfo.Reason)),
 				zap.String("protocol", protocol),
-				zap.Bool("history_complete", historyComplete))
+				zap.Bool("history_complete", req.Plan.historySupportsRebuild()))
 		} else {
 			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_session_rebuild_orphan", strings.TrimSpace(req.Model),
 				zap.String("protocol", protocol),
-				zap.Bool("history_complete", historyComplete))
+				zap.Bool("history_complete", req.Plan.historySupportsRebuild()))
 		}
 	}
 
@@ -704,8 +674,13 @@ func (s *CursorExecutionService) Execute(
 		var mu *CursorModelUnavailableError
 		if code, ok := cursorUpstreamStreamErrorCode(err); ok &&
 			!isCursorBusinessErrorCode(code) && !errors.As(err, &mu) {
+			// 透传上游 message（已脱敏，见 cursorParseEndStream + cursorRedactSecrets）：
+			// 让「上游自身故障」与「我们的请求触发上游 bug」可区分。取不到时记空串，
+			// 不填占位符 —— 「没有」与「有但是空的」要能区分开。
+			upstreamMsg, _ := cursorUpstreamStreamErrorMessage(err)
 			cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_upstream_account_failure", originalModel,
 				zap.String("code", code),
+				zap.String("upstream_message", truncateOpenAIWSLogValue(upstreamMsg, 240)),
 				zap.Int64("account_id", account.ID),
 				zap.Bool("body_published", session.bodyPublished),
 				zap.Int("delivered_batches", int(session.deliveredBatchSeq)))
@@ -832,14 +807,7 @@ func (s *CursorExecutionService) Execute(
 		}
 	}()
 
-	fwdReq := &CursorUpstreamRequest{
-		Path:            cursorPathAgentRun,
-		Body:            payload,
-		AuthProvider:    authProvider,
-		Model:           upstreamModel,
-		ToolDelegations: delegations,
-		Headers:         headers,
-	}
+	fwdReq := cursorBuildAgentRunUpstreamRequest(req, payload, authProvider, upstreamModel, delegations, headers)
 
 	var resp *CursorUpstreamResponse
 	resp, err = s.forwarder.Do(sessionCtx, fwdReq)
@@ -1183,17 +1151,16 @@ func (s *CursorExecutionService) settleDeadSessionBeforeRebuild(session *cursorS
 
 // resumeModelChangedOutcome 决定"同一会话换了模型来续轮"该怎么办。
 //
-// 背景：model_changed 原本直接 400，理由是"同一次生成不能换模型"——上游那条会话是用旧
-// 模型开的，喂进去的字节按旧契约编码，换模型就等于往别人的会话里灌结果。这个**防串号**
-// 的目的仍然成立，但它不该演变成"禁止用户换模型继续聊"：用户在会话中途从 sonnet 换到
-// opus 是完全合理的，我们拿着完整历史自己重开一局就行（2026-11-04 用户裁定）。
+// 历史沿革（重要，别照着旧注释把 400 加回来）：
+//   - 最初型号变了直接 400 model_changed，理由是"同一次生成不能换模型"——上游那条会话
+//     是用旧模型开的，喂进去的字节按旧契约编码；
+//   - 2026-11-04 改为"有完整历史就按新模型重建"，但历史不完整仍 400；
+//   - 2026-11-07 五道闸退役：型号变化**不再作为拒绝理由**。正文带完整历史时按新模型
+//     重开一局（用户无感），历史不完整时**原地继续**（返回 nil，由调用方接着走本
+//     会话的续轮流程），绝不再给客户回 model_changed。
 //
-// 于是分两种：
-//   - 正文带完整历史（historySupportsRebuild）→ 终结旧会话，按新模型重建（同号优先）。
-//   - 历史不完整（典型：Responses 只给 previous_response_id）→ 维持 400，绝不凭残缺正文
-//     重开（那会丢上下文，比报错更糟）。
-//
-// KeepAccount=true：账号没坏，只是请求变了。选号时不排除它、也不因为它换号。
+// 重建路径仍然是"按新模型构造本轮"的唯一正确方式：新 AgentRun 用本请求正文的完整
+// 历史 + 新模型创建，旧会话先终结，A 模型的结果不可能灌进 B 模型的会话（防串号）。
 func (s *CursorExecutionService) resumeModelChangedOutcome(
 	ctx context.Context,
 	record *cursorSessionRecord,
@@ -1206,14 +1173,15 @@ func (s *CursorExecutionService) resumeModelChangedOutcome(
 		accountID = account.ID
 	}
 	if ticket == nil || ticket.probe == nil || !ticket.probe.Plan.historySupportsRebuild() {
-		cursorPhaseLog(ctx, zapcore.WarnLevel, "session_resume_rebuild_skipped", storedModel,
+		// 历史不完整（典型：Responses 只给 previous_response_id）：没有可独立重建的正文，
+		// 但会话本身还活着、本批结果照样能写回，直接原地继续，不再拒绝。
+		cursorPhaseLog(ctx, zapcore.InfoLevel, "session_resume_model_kept_in_place", storedModel,
 			zap.String("session_id", cursorSessionIDOf(record)),
-			zap.String("deny_reason", "model_changed"),
 			zap.String("skip_reason", "history_incomplete"),
 			zap.String("model_stored", storedModel),
 			zap.String("model_incoming", incomingModel),
 			zap.String("model_source", source))
-		return newCursorResumeError(http.StatusBadRequest, "model_changed", ErrCursorResumeConfigChanged)
+		return nil
 	}
 	cursorPhaseLog(ctx, zapcore.InfoLevel, "session_resume_model_rebuild", storedModel,
 		zap.String("session_id", cursorSessionIDOf(record)),
@@ -1232,62 +1200,6 @@ func (s *CursorExecutionService) resumeModelChangedOutcome(
 	}
 }
 
-// CursorResumeRequestRebuildReason 表示续轮请求与已登记会话对不上（历史/工具声明/配置），
-// 而客户端带了可独立重建的完整历史：按"另开一局"处置（2026-11-04 裁定）。
-const CursorResumeRequestRebuildReason = GatewayFailureReason("cursor_resume_request_rebuild")
-
-// resumeMismatchOutcome 决定"续轮请求内容与已登记会话对不上"该怎么办。
-//
-// 背景：`history_mismatch` / `config_changed` / `tool_set_changed` 原本一律 400。它们想挡的
-// 是同一件真威胁——客户端同时跑两个模型/两套工具时把 call_id 串了台。但这个威胁真正靠的
-// 是结果侧校验（call_id 归属、结果类型、结果完整性）与会话锁，不是"逐字节比对历史"。
-// 而逐字节比对必然被客户端合法的历史管理（裁剪正文、多回一条结果、续轮少声明一个工具）
-// 打成假错误，且**没有自愈**：第一次对不上之后，客户端重试只会带上更多历史，越试越对不上。
-// 2026-11-04 生产实测：12 小时内 123 次 CUR-RES-04，29 个会话里 25 个连续失败 3 次以上。
-//
-// 处置与 a66fc8bf7（换模型）同一条：只要客户端正文里带着可独立重建的完整历史，就终结
-// 旧会话、按本请求正文另开一局（同号优先，账号没坏不排除）。旧会话已终结 ⇒ 旧 call_id
-// 永远灌不进新局，防串号目的照样达成，用户不用看红字。
-//
-// 判据拿不到（probe 缺失）或历史不完整（如 Responses 只给 previous_response_id）时保持
-// 原 400：不能在"历史未知"的情况下重开，那才是真的丢上下文。
-func (s *CursorExecutionService) resumeMismatchOutcome(
-	ctx context.Context,
-	record *cursorSessionRecord,
-	ticket *CursorResumeTicket,
-	account *Account,
-	denyReason string,
-	fallback error,
-) error {
-	var accountID int64
-	if account != nil {
-		accountID = account.ID
-	}
-	model := ""
-	if record != nil {
-		model = record.spec.requestedModel
-	}
-	if ticket == nil || ticket.probe == nil || !ticket.probe.Plan.historySupportsRebuild() {
-		cursorPhaseLog(ctx, zapcore.WarnLevel, "session_resume_rebuild_skipped", model,
-			zap.String("session_id", cursorSessionIDOf(record)),
-			zap.String("deny_reason", denyReason),
-			zap.String("skip_reason", "history_incomplete"))
-		return fallback
-	}
-	cursorPhaseLog(ctx, zapcore.InfoLevel, "session_resume_request_rebuild", model,
-		zap.String("session_id", cursorSessionIDOf(record)),
-		zap.String("batch_id", ticket.BatchID),
-		zap.String("deny_reason", denyReason),
-		zap.Int64("account_id", accountID))
-	// 与换模型重建同一条收尾路径：同步 finalize 并等终结完成，避免重建撞上旧会话残留。
-	s.settleDeadSessionBeforeRebuild(record)
-	return &CursorResumeRebuildError{
-		DeadAccountID: accountID,
-		Reason:        CursorResumeRequestRebuildReason,
-		KeepAccount:   true,
-		Err:           fallback,
-	}
-}
 
 // cursorSessionIDOf 取会话 ID（nil 安全，只用于日志）。
 func cursorSessionIDOf(record *cursorSessionRecord) string {
@@ -4583,6 +4495,94 @@ func (d *cursorToolDelegations) upstreamCallIDLocked(wireID string) (string, boo
 	return "", false
 }
 
+// deliveredCallArgs 是「客户端可见 call_id → 交付时登记的规范化参数」的只读查询。
+//
+// 与 upstreamCallIDLocked 同形状、同遍历（客户端可见 id 可能是改写后的 WireID，
+// 也可能是上游原 id —— 上游会在会话内复用同一个 tool_call_id，故两种都要认）。
+//
+// 用途（2026-11-07 五道闸退役后拆出防篡改）：续轮回传的 arguments 必须与当初交付
+// 给客户端时登记的一致 —— 同一个 call_id 换了参数是篡改，必须拒。
+//
+// 交付时没有参数的工具（部分工具无 arguments）→ 返回空串且 ok=false：
+// 无基线可比，比对时跳过（不误拒）。
+func (d *cursorToolDelegations) deliveredCallArgs(wireID string) (string, bool) {
+	if d == nil {
+		return "", false
+	}
+	wireID = strings.TrimSpace(wireID)
+	if wireID == "" {
+		return "", false
+	}
+	for _, batch := range d.all {
+		if batch == nil {
+			continue
+		}
+		for _, tc := range batch.delegations {
+			if tc.WireID != wireID && !(tc.WireID == "" && tc.ID == wireID) {
+				continue
+			}
+			args := strings.TrimSpace(tc.ArgsJSON)
+			if args == "" {
+				return "", false
+			}
+			// custom/freeform 工具的交付参数是**抽取后的自由文本**
+			// （client 收到/回传的是 custom_tool_call 项的 input 字段），
+			// 与写出侧 cursorResponsesToolCallHistoryCanonical 的取值口径完全一致
+			// —— 两侧形态必须一样，否则永远比对不上。
+			// 用与写出侧同一个判定（cursorResponsesDeliveredToolCall，同源工具元数据），
+			// 不自己另写一份「怎么算 custom 工具」。
+			if dt := cursorResponsesDeliveredToolCall(tc.Name, d.responsesTools); dt.Kind == "custom_tool_call" {
+				args = strings.TrimSpace(apicompat.ExtractCustomToolCallInput(args))
+				if args == "" {
+					return "", false
+				}
+				return args, true
+			}
+			canonical, err := cursorCanonicalToolArgs(args)
+			if err != nil {
+				return "", false
+			}
+			return string(canonical), true
+		}
+	}
+	return "", false
+}
+
+// cursorValidateResumeResultArgs 校验：续轮正文里每条工具调用的 parameters，
+// 必须与当初交付给客户端时登记的 parameters 一致。
+//
+// 为什么要有这条（2026-11-07 五道闸退役后拆出）：「同一个 call_id 换了参数」是**篡改**
+// （上游会把结果关联到某个具体调用，参数变了就等于让上游按另一组参数执行），
+// 必须拒。但这条能力原先寄生在「历史骨架逐字节跨轮比对」上，而那道比对同时挡着
+// 「客户端工具集变了 / 换模型 / 换配置摘要」（这些是**合法**行为，该退役）。
+// 一并退役时把防篡改一起带走了 → 现在拆成**结果侧**校验：
+// 只看「本批已交付记录」vs「本次正文」，与跨轮配置/工具集/历史骨架无关。
+//
+// 三种情况：
+//   - 两侧都有参数且不一致 → 拒（篡改）。
+//   - 交付时无参数（无基线）→ 跳过，不误拒。
+//   - 本次正文里没有该调用的参数（客户端没回传）→ 跳过，不误拒
+//     （Responses 官方用法本就不重放 function_call）。
+func cursorValidateResumeResultArgs(
+	plan *cursorContextPlan,
+	delegations *cursorToolDelegations,
+) error {
+	if plan == nil || len(plan.historyCallArgs) == 0 || delegations == nil {
+		return nil
+	}
+	for callID, requestArgs := range plan.historyCallArgs {
+		deliveredArgs, ok := delegations.deliveredCallArgs(callID)
+		if !ok {
+			// 交付侧没有这条调用的参数（未交付 / 无参数 / 解析失败）→ 无基线可比，跳过。
+			continue
+		}
+		if deliveredArgs != requestArgs {
+			return newCursorResumeError(http.StatusBadRequest, "tool_args_changed", ErrCursorResumeHistoryMismatch)
+		}
+	}
+	return nil
+}
+
 // sealable 是 seal 的**只读**版本：判定全部未封口批次当前是否已可封口（不改状态）。
 //
 // 用途（§25.3）：读循环在吐工具交接（tool_calls + finish）之前先问"本批是否已齐"，
@@ -5917,6 +5917,18 @@ type cursorContextPlan struct {
 	// function_call 条目也在同一正文中时，这是一个**客户端自带完整两端**的已完成工具对，
 	// 不是在向本站声明某条待完成关联（见 resultsReplayHistory）。
 	historyCallIDs map[string]struct{}
+	// historyCallArgs 是本请求正文**历史前缀里已声明**的工具调用 ID → 其规范化参数
+	// （canonical JSON 字符串）。
+	//
+	// 用途（2026-11-07 五道闸退役后拆出）：续轮回传的 arguments 必须与当初交付给
+	// 客户端时登记的 arguments 一致 —— 同一个 call_id 换了参数是**篡改**，必须拒。
+	// 这条能力原先寄生在「历史骨架逐字节跨轮比对」上，而那道比对同时挡着
+	// 「客户端工具集变了」（合法行为）—— 一并退役时把防篡改一起带走了。
+	// 现在拆成**结果侧**校验：只看本批已交付记录 vs 本次正文，与跨轮配置/工具集无关。
+	//
+	// 只收有参数的工具调用；无参数的（部分工具没有 arguments）不在此集合里，
+	// 比对时跳过（无基线可比，不误拒）。
+	historyCallArgs map[string]string
 	// historyComplete 标记本次请求正文是否携带**可独立重建 AgentRun 的完整历史**
 	// （2026-11-04 续轮额度耗尽换号重建方案 §2.3）。
 	//
@@ -6383,6 +6395,9 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 				if id := strings.TrimSpace(call.ID); id != "" {
 					historyCalls[id] = struct{}{}
 				}
+				// 同时登记该调用的规范化参数：续轮回传的 arguments 必须与这里登记的
+				// 一致（同一个 call_id 换了参数 = 篡改 → 拒）。见 noteHistoryCallArgs。
+				plan.noteHistoryCallArgs(call.ID, call.Function.Arguments)
 			}
 		}
 	}
@@ -6731,6 +6746,8 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 				if id := strings.TrimSpace(block.ID); id != "" {
 					historyCalls[id] = struct{}{}
 				}
+				// 同时登记该调用的规范化参数（防篡改，见 noteHistoryCallArgs）。
+				plan.noteHistoryCallArgs(block.ID, string(block.Input))
 			}
 		}
 	}
@@ -6984,6 +7001,14 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 				plan.historyCallIDs = make(map[string]struct{}, 4)
 			}
 			plan.historyCallIDs[callID] = struct{}{}
+			// 同时登记该调用的规范化参数（防篡改，见 noteHistoryCallArgs）。
+			// Responses 的 arguments 与 input 互不覆盖（types.go：两者各取各的），
+			// 哪个有值用哪个。
+			if args := strings.TrimSpace(item.Arguments); args != "" {
+				plan.noteHistoryCallArgs(callID, args)
+			} else if len(item.Input) > 0 {
+				plan.noteHistoryCallArgs(callID, string(item.Input))
+			}
 		}
 		digestItem, ierr := cursorResponsesItemItem(item, plan.skippedItems)
 		if ierr != nil {
@@ -7019,6 +7044,45 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 	// 而无历史时 false —— 重建会丢上下文，必须维持原失败关闭（方案 §2.3 / V6）。
 	plan.historyComplete = cursorHistoryComplete(plan.results, plan.historyCallIDs)
 	return plan, nil
+}
+
+// noteHistoryCallArgs 登记本请求正文历史前缀里某条工具调用的**规范化参数**。
+//
+// 用途（2026-11-07 五道闸退役后拆出防篡改）：续轮回传的 arguments 必须与当初
+// 交付给客户端时登记的一致 —— 同一个 call_id 换了参数是篡改，必须拒。
+//
+// 规范化用 cursorCanonicalToolArgs（复用 CursorCanonicalToolArgsJSON）：
+// 只把空白/键序差异视为同值，且**不用 float64**（大整数会丢精度）。
+//
+// args 为空（无参数的工具）→ 不登记：没有基线可比，比对时跳过，不误拒。
+func (p *cursorContextPlan) noteHistoryCallArgs(callID, args string) {
+	if p == nil {
+		return
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return
+	}
+	trimmed := strings.TrimSpace(args)
+	if trimmed == "" {
+		return
+	}
+	// 两种形态：
+	//   - function 类工具的 arguments 是 JSON 对象 → 规范化后比对
+	//     （空白/键序差异视为同值；不用 float64，大整数不丢精度）。
+	//   - custom/freeform 工具的 input 是**自由文本**（如 codex 的 exec："text(42)"），
+	//     不是 JSON → 原样登记、原样比对。
+	//     ⚠️ 不能对它做 JSON 规范化：自由文本不是合法 JSON，规范化会失败。
+	canonical := trimmed
+	if json.Valid([]byte(trimmed)) {
+		if c, err := cursorCanonicalToolArgs(trimmed); err == nil {
+			canonical = string(c)
+		}
+	}
+	if p.historyCallArgs == nil {
+		p.historyCallArgs = make(map[string]string, 4)
+	}
+	p.historyCallArgs[callID] = canonical
 }
 
 // cursorHistoryComplete 判定请求正文是否携带可独立重建的完整历史。
@@ -7716,13 +7780,15 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		return nil, newCursorResumeError(http.StatusBadRequest, "protocol_mismatch", ErrCursorResumeStaleBatch)
 	}
 	if strings.TrimSpace(ticket.Model) != "" && strings.TrimSpace(spec.requestedModel) != strings.TrimSpace(ticket.Model) {
-		// 型号变了同样只留一个 model_changed，线上无法判断是客户端换了模型、还是
-		// 别名/映射解析落到另一个真实型号。两个值都落（都是客户端可见的标识，无敏感内容）。
+		// 型号变了：只留痕，不再拒绝（五道闸退役，2026-11-07）。有完整历史就按新模型
+		// 另开一局；否则原地继续。
 		cursorPhaseLog(ctx, zapcore.WarnLevel, "resume_model_changed", spec.requestedModel,
 			zap.String("session_id", record.id),
 			zap.String("model_stored", spec.requestedModel),
 			zap.String("model_ticket", strings.TrimSpace(ticket.Model)))
-		return nil, s.resumeModelChangedOutcome(ctx, record, ticket, account, spec.requestedModel, strings.TrimSpace(ticket.Model), "ticket")
+		if modelErr := s.resumeModelChangedOutcome(ctx, record, ticket, account, spec.requestedModel, strings.TrimSpace(ticket.Model), "ticket"); modelErr != nil {
+			return nil, modelErr
+		}
 	}
 	// 已被消费的批**先于**摘要校验返回 409：并发重复提交不得因会话历史已推进而报成
 	// 入参错误，也不得重放（§25.2「重复提交已经消费的结果返回冲突」）。
@@ -7739,12 +7805,15 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		return nil, newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", modelErr)
 	}
 	if strings.TrimSpace(bodyModel) != "" && strings.TrimSpace(bodyModel) != strings.TrimSpace(spec.requestedModel) {
+		// 同上：正文声明的型号变了也只留痕，不拒绝。
 		cursorPhaseLog(ctx, zapcore.WarnLevel, "resume_model_changed", spec.requestedModel,
 			zap.String("session_id", record.id),
 			zap.String("model_stored", spec.requestedModel),
 			zap.String("model_ticket", strings.TrimSpace(bodyModel)),
 			zap.String("model_source", "body"))
-		return nil, s.resumeModelChangedOutcome(ctx, record, ticket, account, spec.requestedModel, strings.TrimSpace(bodyModel), "body")
+		if modelErr := s.resumeModelChangedOutcome(ctx, record, ticket, account, spec.requestedModel, strings.TrimSpace(bodyModel), "body"); modelErr != nil {
+			return nil, modelErr
+		}
 	}
 	plan, planErr := cursorResumePlan(ticket.Protocol, in, bodyModel)
 	if planErr != nil {
@@ -7755,47 +7824,53 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		return nil, newCursorResumeError(http.StatusBadRequest, "instructions_withdrawn", ErrCursorResumeInstructionsWithdrawn)
 	}
 	if storedConfig != nil && !storedConfig.Equal(plan.config) {
-		// 硬组（模型 + 工具声明/schema）变了就是**另一次生成**：上游 wire 契约、工具模式、
-		// 计费口径都不再是同一件事。拒绝前先落痕，把"究竟是哪一组、哪一项"钉在日志里
-		// （此前这里只有一个 config_changed，线上无法区分根因）。
-		//
-		// 2026-11-04：拒绝本身不再直接回 400。生产实测残留 CUR-RES-04 的 36 次里，全部是
-		// "续轮比首轮少声明一个工具"（22→21 / 24→23）——客户端自己的工具集在变，不是串号。
-		// 有完整历史就另开一局（防串号由结果侧 call_id 归属 + 类型 + 完整性校验承担）。
+		// 硬组（模型 + 工具声明/schema）变了：只留痕，不再拒绝（五道闸退役，2026-11-07）。
+		// 本轮一律按**本次正文声明的**配置构造：客户端每轮重新拼工具声明是合法行为
+		// （生产实测续轮比首轮少声明一个工具 22→21 / 24→23），跨轮比对只会把正常用户
+		// 拒成 CUR-RES-04。防串号由结果侧 call_id 归属 + 结果类型 + 完整性校验承担。
 		cursorLogResumeConfigHardMismatch(ctx, record, storedConfig, exposed, plan)
-		return nil, s.resumeMismatchOutcome(ctx, record, ticket, account, "config_changed",
-			newCursorResumeError(http.StatusBadRequest, "config_changed", ErrCursorResumeConfigChanged))
 	}
 	// 软组（system 文本 / 采样参数）**只留痕不拒绝**：这两组是客户端每轮重新拼出来的
 	// 字节——system 里带环境快照、工具说明会变，重试时 thinking/温度字段会丢。逐字节比对
 	// 必然把正常续轮拒成 CUR-RES-04，而它想挡的"篡改"已由下面的结果校验（编号归属 +
 	// 完整性）挡住。留着当闸门等于拿大量正常用户的失败去拦一个不存在的威胁。
 	cursorLogResumeConfigDrift(ctx, record, storedSystem, storedSampling, plan)
-	if !cursorToolSetEqual(exposed, plan.tools) {
-		// 工具集合变了：同样是"客户端这一轮声明的东西跟首轮不同"，有完整历史就另开一局
-		// （与 config_changed 同一处置口径，理由见 resumeMismatchOutcome）。
-		return nil, s.resumeMismatchOutcome(ctx, record, ticket, account, "tool_set_changed",
-			newCursorResumeError(http.StatusBadRequest, "tool_set_changed", ErrCursorResumeToolSetChanged))
-	}
-	// previous_response_id 精确指向当前批时可**仅携带本批结果**省略历史；
-	// 一旦提供重复历史就必须整段匹配（不把任意短前缀当完整历史）。
+	// 工具集合不再跨轮比对（2026-11-07 五道闸退役）：客户端每轮重新声明的工具集
+	// 本来就允许变化，本轮一律按本次声明的集合构造；结果侧 call_id 归属 + 类型 +
+	// 完整性校验仍然照常执行。
+	// previous_response_id 精确指向当前批时可**仅携带本批结果**省略历史；这里的
+	// historyOmitted 只用于日志留痕，不再作为任何准入条件。
 	historyOmitted := strings.TrimSpace(ticket.ResponseID) != "" && plan.history.ItemCount() == 0
-	// 准入比对用**骨架口径**（SkeletonEqual）：客户端在上传历史时裁剪/省略 assistant
-	// 可见正文是合法行为（tool_use 轮本来就可以没有 text 块），拿正文逐字节比会把正常
-	// 续轮恒定拒成 CUR-RES-04（生产实测 stored 17 / request 16，恒差 1）。正文之外的一切
-	// ——用户输入、tool_use 的 id/name/args、tool_result 内容、reasoning、system、项序 ——
-	// 仍然逐字节强校验，防篡改强度不降。
-	if !historyOmitted && storedHistory != nil && !storedHistory.SkeletonEqual(plan.history) {
-		// 并发窗口：胜者可能刚推进了历史并消费了本批 —— 后者必须是 409 而不是入参错误。
-		if record.batchConsumed() {
-			return nil, newCursorResumeError(http.StatusConflict, "already_consumed", ErrCursorResumeAlreadyConsumed)
-		}
-		// history_mismatch 是线上 CUR-RES-04 的**老**最大来源，旧实现只回一个 reason，
-		// 完全没有办法回答"是客户端少发了历史、多发了一条、还是我们登记错了"。这里落
-		// 两侧项数（全链 + 骨架）、摘要前缀与项类型轨迹，足以一眼定位到具体是哪一项错位：
-		//   骨架项数不等 → 结构性差异（少了/多了一条非正文项）；
-		//   骨架项数相同但链值不同 → 同数量不同内容（重排/改字/换 id）；
-		//   仅全链项数不等而骨架一致 → 那只是正文裁剪，不该走到这里（见下一条）。
+	// 历史摘要不再跨轮比对（五道闸退役，2026-11-07）：客户端回传的历史可以裁剪 assistant
+	// 可见正文、可以省略整段历史（只带 previous_response_id），本轮一律按**本次正文**
+	// 构造。这里只留计数痕迹（不比较链值、不构成任何拒绝条件），供线上观察正文裁剪规模。
+	if !historyOmitted && storedHistory != nil && storedHistory.ItemCount() != plan.history.ItemCount() {
+		cursorPhaseLog(ctx, zapcore.InfoLevel, "resume_history_item_count_drift", spec.requestedModel,
+			zap.String("session_id", record.id),
+			zap.Int("history_items_stored", storedHistory.ItemCount()),
+			zap.Int("history_items_request", plan.history.ItemCount()),
+			zap.String("protocol", string(ticket.Protocol)))
+	}
+	// 2026-11-07 五道闸退役：**历史不再跨轮比对**（客户端裁剪 assistant 可见正文、
+	// 换模型、换工具集都是合法行为），但**留痕必须保留** ——
+	// 线上看到续轮异常时要能回答「谁改了什么」，这是可观测性能力，不是准入闸门。
+	//
+	// ⚠️ 跨轮比对退役时若把留痕一起删掉，线上就只剩一个 reason，
+	// 「history_mismatch 是线上 CUR-RES-04 的老最大来源」这类问题将无从定位。
+	// 这里恢复留痕，**只记不拒**。
+	if !historyOmitted && storedHistory != nil && !storedHistory.Equal(plan.history) &&
+		storedHistory.SkeletonEqual(plan.history) {
+		// 骨架一致、但全链不一致 = 客户端裁剪/省略了 assistant 可见正文。
+		// 这是**正常**行为，必须放行；同时留一条可统计的痕迹，让「正文裁剪到底有多普遍」
+		// 在线���可观测（也为本修复提供生产侧取证）。
+		cursorPhaseLog(ctx, zapcore.InfoLevel, "resume_history_prose_pruned", spec.requestedModel,
+			zap.String("session_id", record.id),
+			zap.Int("history_items_stored", storedHistory.ItemCount()),
+			zap.Int("history_items_request", plan.history.ItemCount()),
+			zap.Int("prose_items_pruned", storedHistory.ItemCount()-plan.history.ItemCount()),
+			zap.String("protocol", string(ticket.Protocol)))
+	}
+	if !historyOmitted && storedHistory != nil && !storedHistory.Equal(plan.history) {
 		cursorPhaseLog(ctx, zapcore.WarnLevel, "resume_history_mismatch", spec.requestedModel,
 			zap.String("session_id", record.id),
 			zap.Int("history_items_stored", storedHistory.ItemCount()),
@@ -7810,25 +7885,17 @@ func (s *CursorExecutionService) ResumeCursorSession(
 			zap.String("history_item_types_request", plan.history.TraceString()),
 			zap.String("history_first_divergence", storedHistory.FirstDivergence(plan.history)),
 			zap.String("protocol", string(ticket.Protocol)))
-		// 2026-11-04：历史对不上不再直接回 400。生产实测这类拒绝**没有自愈能力**——第一次
-		// 对不上之后客户端重试只会带上更多历史（它自己记下的 tool_result），于是永久卡死
-		// （29 个会话里 25 个连错 3 次以上）。有完整历史就按本请求正文另开一局。
-		return nil, s.resumeMismatchOutcome(ctx, record, ticket, account, "history_mismatch",
-			newCursorResumeError(http.StatusBadRequest, "history_mismatch", ErrCursorResumeHistoryMismatch))
-	}
-	// 骨架一致、但全链不一致 = 客户端裁剪/省略了 assistant 可见正文。这是**正常**行为，
-	// 必须放行；同时留一条可统计的痕迹，让"正文裁剪到底有多普遍"在线上可观测，
-	// 也为本修复提供生产侧取证（修复前同样流量会落成 history_mismatch 拒轮）。
-	if !historyOmitted && storedHistory != nil && !storedHistory.Equal(plan.history) &&
-		storedHistory.SkeletonEqual(plan.history) {
-		cursorPhaseLog(ctx, zapcore.InfoLevel, "resume_history_prose_pruned", spec.requestedModel,
-			zap.String("session_id", record.id),
-			zap.Int("history_items_stored", storedHistory.ItemCount()),
-			zap.Int("history_items_request", plan.history.ItemCount()),
-			zap.Int("prose_items_pruned", storedHistory.ItemCount()-plan.history.ItemCount()),
-			zap.String("protocol", string(ticket.Protocol)))
 	}
 	if err := cursorValidateResumeResults(ticket.CallIDs, plan.results); err != nil {
+		if record.batchConsumed() {
+			return nil, newCursorResumeError(http.StatusConflict, "already_consumed", ErrCursorResumeAlreadyConsumed)
+		}
+		return nil, err
+	}
+	// 参数一致性（2026-11-07 五道闸退役后拆出）：本次正文里每条工具调用的 parameters
+	// 必须与当初交付给客户端时登记的一致 —— 同一个 call_id 换了参数是篡改。
+	// 这条能力原先寄生在「历史骨架逐字节跨轮比对」上，一并退役时被带走了。
+	if err := cursorValidateResumeResultArgs(plan, record.delegations); err != nil {
 		if record.batchConsumed() {
 			return nil, newCursorResumeError(http.StatusConflict, "already_consumed", ErrCursorResumeAlreadyConsumed)
 		}
@@ -7897,8 +7964,8 @@ func (s *CursorExecutionService) ResumeCursorSession(
 			Protocol: record.spec.protocol,
 			Stream:   in.Stream,
 			Model:    ticket.Model,
-			// 工具还原映射取本 HTTP 重新声明的同一套工具（续轮必须与首轮声明集合一致，
-			// 见 cursorToolSetEqual）：漏传会让 custom/namespace/tool_search 跨 HTTP 丢失。
+			// 工具还原映射取本 HTTP 重新声明的同一套工具：漏传会让
+			// custom/namespace/tool_search 跨 HTTP 丢失。
 			Tools:          plan.responsesTools,
 			ToolChoiceMode: toolMode,
 			ToolChoiceName: toolName,
@@ -7978,9 +8045,9 @@ func cursorDigestSkeletonPrefix(d *CursorHistoryDigest) string {
 
 // cursorLogResumeConfigHardMismatch 记录续轮**硬组**（模型 + 工具声明/schema）不一致。
 //
-// 硬组不一致会拒绝续轮（config_changed），但只看这个错误码无法知道到底是模型换了还是
-// 工具 schema 换了——线上排查只能猜。这里把两组各自的项数与摘要前缀钉进日志：只写
-// 计数与前缀，不含任何工具正文/参数值（安全字段，不可反推内容）。
+// 2026-11-07 五道闸退役后，硬组不一致**不再拒绝**续轮（本轮按本次正文声明的配置构造），
+// 但仍然留痕：线上只剩这个日志可回答"这一轮客户端到底改了什么"。把两组各自的项数与
+// 摘要前缀钉进日志：只写计数与前缀，不含任何工具正文/参数值（安全字段，不可反推内容）。
 func cursorLogResumeConfigHardMismatch(
 	ctx context.Context,
 	record *cursorSessionRecord,
@@ -8150,27 +8217,6 @@ func cursorValidateResponsesResultKinds(record *cursorSessionRecord, results []C
 		}
 	}
 	return nil
-}
-
-// cursorToolSetEqual 判断两个工具名集合是否一致（顺序不参与比较，集合变化即不同）。
-func cursorToolSetEqual(a, b []string) bool {
-	setA := make(map[string]struct{}, len(a))
-	for _, name := range a {
-		setA[name] = struct{}{}
-	}
-	setB := make(map[string]struct{}, len(b))
-	for _, name := range b {
-		setB[name] = struct{}{}
-	}
-	if len(setA) != len(setB) {
-		return false
-	}
-	for name := range setA {
-		if _, ok := setB[name]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // appendCursorDeliveredResultsToHistory 把本次接纳的真实结果推进已交付历史。
@@ -8434,8 +8480,9 @@ func cursorGeminiDeclaredToolNames(raw json.RawMessage) []string {
 //
 // 规则（§25.14-D）：
 //   - required / auto / none 可在**不改变已暴露工具集合**时切换；
-//   - 具名选择必须保持暴露集合一致，不能从一个工具静默扩展为全部工具；
-//   - 改变集合的续轮明确拒绝。
+//   - 具名选择必须落在**本 HTTP 声明的**工具集合内，不能指向未声明工具；
+//   - 本 HTTP 的声明集合不再与首轮比对（五道闸退役，2026-11-07），客户端每轮
+//     重新声明的工具集允许变化。
 //
 // required 不跨 HTTP 永久套用：本函数只看本次 HTTP 的选择。
 func cursorValidateToolChoiceForSession(
@@ -8449,39 +8496,18 @@ func cursorValidateToolChoiceForSession(
 			return newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", ErrCursorResumeUnsupportedContent)
 		}
 		rawChoice = req.ToolChoice
-		if !cursorToolSetEqual(exposed, cursorChatToolNames(&req)) {
-			return newCursorResumeError(http.StatusBadRequest, "tool_set_changed", ErrCursorResumeToolSetChanged)
-		}
 	case CursorResumeProtocolMessages:
 		var req apicompat.AnthropicRequest
 		if err := json.Unmarshal(body, &req); err != nil {
 			return newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", ErrCursorResumeUnsupportedContent)
 		}
 		rawChoice = req.ToolChoice
-		names := make([]string, 0, len(req.Tools))
-		for _, tool := range req.Tools {
-			if name := strings.TrimSpace(tool.Name); name != "" {
-				names = append(names, name)
-			}
-		}
-		if !cursorToolSetEqual(exposed, names) {
-			return newCursorResumeError(http.StatusBadRequest, "tool_set_changed", ErrCursorResumeToolSetChanged)
-		}
 	case CursorResumeProtocolResponses:
 		var req apicompat.ResponsesRequest
 		if err := json.Unmarshal(body, &req); err != nil {
 			return newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", ErrCursorResumeUnsupportedContent)
 		}
 		rawChoice = req.ToolChoice
-		// 声明集合必须与"上行真正声明的工具集"同源（含 input 里的 additional_tools），
-		// 否则客户端按 Responses Lite 形态声明工具时会被误判成套件变更（2026-11-06）。
-		names, err := cursorResponsesDeclaredToolNames(&req)
-		if err != nil {
-			return newCursorResumeError(http.StatusBadRequest, "undecodable_continuation", ErrCursorResumeUnsupportedContent)
-		}
-		if !cursorToolSetEqual(exposed, names) {
-			return newCursorResumeError(http.StatusBadRequest, "tool_set_changed", ErrCursorResumeToolSetChanged)
-		}
 	case CursorResumeProtocolGemini:
 		// Gemini 原生没有 tool_choice 等价物：集合一致即可（已在摘要阶段校验）。
 		return nil
@@ -8509,6 +8535,9 @@ func cursorValidateToolChoiceForSession(
 }
 
 // cursorChatToolNames 返回 Chat 请求声明的工具名（保持声明顺序）。
+//
+// 2026-11-07 五道闸退役后无调用方，保留注释说明退场原因：跨轮工具集比对
+// 会把客户端合法变更（续轮少声明一个工具）误判为套件变更而拒绝，已不再执行。
 func cursorChatToolNames(req *apicompat.ChatCompletionsRequest) []string {
 	if req == nil {
 		return nil
@@ -9502,4 +9531,65 @@ func (r *cursorSessionRecord) batchConsumed() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.pending != nil && r.pending.consumed
+}
+
+// cursorDeclaredOriginalToolNames 收集本请求客户端声明的**原始**工具名（保持声明顺序）。
+//
+// 出站 f4 里的工具名是 wire name（撞 Cursor 上游内置名时加了后缀，见
+// cursorWireToolNameSet）。上游按 wire name 回调工具时，双工层需要把它映射回
+// **客户端原名**再交付 —— 否则客户端收到一个自己从没声明过的名字。
+//
+// 这里给出原始名集合，双工层据此正向算 wire map 再反转（cursorWireNameReverse），
+// 保证「改名」与「反查」用的是同一份规则（cursorWireToolNamesFromNames），
+// 不会出现两边算出不同名字的情况。
+//
+// 没有工具、没有名字的工具都跳过（返回 nil）—— 双工层据此退化为原样登记，
+// 保持既有语义。
+func cursorDeclaredOriginalToolNames(chat *apicompat.ChatCompletionsRequest) []string {
+	if chat == nil || len(chat.Tools) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(chat.Tools))
+	for _, t := range chat.Tools {
+		if t.Function == nil {
+			continue
+		}
+		if name := strings.TrimSpace(t.Function.Name); name != "" {
+			out = append(out, name)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+
+// cursorBuildAgentRunUpstreamRequest 构造 AgentRun 的出站请求描述。
+//
+// 除了转发所需的基本材料，它还带上**客户端声明的原始工具名**
+// （cursorDeclaredOriginalToolNames）—— 出站 f4 里的工具名是 wire name
+// （撞 Cursor 上游内置名时加了后缀），上游按 wire name 回调时，双工层要靠这份
+// 原始名把它映射回客户端原名再交付。
+//
+// 单独成函数是为了让「原始名有没有真的被带上」这一条**可被单测直接覆盖**：
+// mutation 掉这里的赋值，单测立刻红（2026-11-07 mutation 反证得出：
+// 只测纯函数的话，生产路径漏填了测试照样绿）。
+func cursorBuildAgentRunUpstreamRequest(
+	req *CursorExecutionRequest,
+	payload []byte,
+	authProvider CursorUpstreamAuthProvider,
+	upstreamModel string,
+	delegations *cursorToolDelegations,
+	headers map[string]string,
+) *CursorUpstreamRequest {
+	return &CursorUpstreamRequest{
+		Path:              cursorPathAgentRun,
+		Body:              payload,
+		AuthProvider:      authProvider,
+		Model:             upstreamModel,
+		ToolDelegations:   delegations,
+		Headers:           headers,
+		DeclaredToolNames: cursorDeclaredOriginalToolNames(req.Chat),
+	}
 }

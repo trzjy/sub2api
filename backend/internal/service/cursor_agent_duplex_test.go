@@ -125,31 +125,46 @@ func TestCursorAgentDuplexContextKVAndTurnEnd(t *testing.T) {
 	require.Equal(t, 4, p.usage.Output)
 }
 
-func TestCursorAgentDuplexRejectsUnknownExecutionAndBlob(t *testing.T) {
-	for name, payload := range map[string][]byte{
-		// "unknown_exec"：一条真正未知、且不在本轮 11 类原生 exec 裁定里的执行字段
-		// （f17 list_mcp_resources_exec_args）。f17 不属于 {2,3,4,5,7,8,9,14,16,20,23}
-		// 任一，也不是元数据白名单字段（f1/f15/f19/f55/f57），故走到 respond 的 default
-		// 分支按未实现 exec 失败关闭，仍应返回 error——保留「未知执行 → 失败关闭」的断言意图。
-		// 注：原 "tool" 用例用的 f3 write_args 现已归入 11 类原生 exec 拒绝路径（拒绝而非失败
-		// 关闭），不再是「未知执行」，故改用 f17 作为未知执行载体。
-		"unknown_exec": cursorExecUnknownFieldPayload(),
-		// "unknown_blob"：f4 KV 缺 blob（f2 get 但无对应 blob），语义未变，仍应失败关闭。
-		"unknown_blob": cursorAppendBytesField(nil, 4, cursorAppendBytesField(nil, 2, cursorAppendStringField(nil, 1, "missing"))),
-	} {
-		t.Run(name, func(t *testing.T) {
-			d, err := newCursorAgentDuplex(cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil)), nil)
-			require.NoError(t, err)
-			defer d.close(nil)
-			_, err = d.respond(payload)
-			require.Error(t, err)
-		})
-	}
+// TestCursorAgentDuplexAnswersUnknownExecutionAndContinues 验证「未知 exec 字段 → 回通用错误
+// 结果帧、整轮继续、不 502」的新契约。原用例名 RejectsUnknownExecutionAndBlob 已名不副实
+// （未知 exec 不再被拒绝关闭），故改名。
+//
+// 收尾方式：本用例改用 cursorExecRejectTestDuplex 构造 duplex——它起一个 goroutine 持续排干
+// pipe writer，使 respond 内的 d.send 不会因无人读而阻塞挂起（unbuffered io.Pipe 写阻塞直到
+// 被读）。这是本包其它 reject 类用例的统一收尾写法，照此实现，绝不靠杀进程收场。
+func TestCursorAgentDuplexAnswersUnknownExecutionAndContinues(t *testing.T) {
+	// "unknown_exec"：一条真正未知、且不在本轮 11 类原生 exec 裁定里的执行字段（f17
+	// list_mcp_resources_exec_args）。f17 不属于原生拒绝集合，也不在元数据白名单。派发单 D
+	// 阶段 2：未知 exec 字段不再 502 失败关闭，而是回通用错误结果帧 {field:{f2:{f2:text}}}
+	// 让模型换条路继续，因此 MUST NOT 返回 error，且整轮不终止。
+	t.Run("unknown_exec", func(t *testing.T) {
+		d, buf, logs, cleanup := cursorExecRejectTestDuplex(t)
+		defer cleanup()
+
+		done, err := d.respond(cursorExecUnknownFieldPayload())
+		require.NoError(t, err, "未知 exec 字段不得 502（派发单 D：回通用错误帧，整轮继续）")
+		require.False(t, done, "未知 exec 字段不是终态，整轮必须继续")
+		require.Equal(t, 1, phaseCount(logs, "exec_unsupported_fields"), "必须记一条未知字段取证日志")
+		// 必须写出通用错误结果帧 {field:{f2:{f2:text}}}，且外层 field 与未知字段号一致（17）。
+		cleanup()
+		cursorStage2ExpectGenericReject(t, buf, 17, cursorGenericUnknownExecRejectText)
+	})
+	// "unknown_blob"：f4 KV 缺 blob（f2 get 但无对应 blob）——这是 KV 操作语义错误，不是
+	// 未知 exec 字段，维持失败关闭不变（返回 error）。此路径不写帧，故不会因 pipe 阻塞挂起。
+	t.Run("unknown_blob", func(t *testing.T) {
+		d, _, _, cleanup := cursorExecRejectTestDuplex(t)
+		defer cleanup()
+
+		payload := cursorAppendBytesField(nil, 4, cursorAppendBytesField(nil, 2, cursorAppendStringField(nil, 1, "missing")))
+		_, err := d.respond(payload)
+		require.Error(t, err, "KV 缺 blob 仍是失败关闭（语义未变）")
+	})
 }
 
 // cursorExecUnknownFieldPayload 构造一条携带真正未知执行字段（f17）的 AgentServerMessage，
-// 用于验证「未知 exec → 失败关闭」语义。f17 不在本轮 11 类原生 exec 拒绝字段集合内，
-// 也不在 ExecServerMessage 元数据白名单内，因此必然走到 respond 的 default 失败关闭分支。
+// 用于验证「未知 exec → 回通用错误结果帧、整轮继续」的新语义。f17 不在本轮 11 类原生 exec
+// 拒绝字段集合内，也不在 ExecServerMessage 元数据白名单内，因此走到 respond 的 default
+// 未知字段分支（回通用错误帧、不 502）。
 func cursorExecUnknownFieldPayload() []byte {
 	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 1)
 	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-1"))
@@ -288,6 +303,68 @@ func TestCursorSSEStreamConcurrentTerminalErrorSnapshot(t *testing.T) {
 		}
 	nextFrame:
 	}
+}
+
+// TestCursorAgentDuplexUnknownFieldRepliedLogsShape 证明未知 exec 字段被应答时，会记一条
+// phase=unknown_field_replied 的 Info 级观测日志，且 field / wire_type / shape 三件套齐全，
+// shape 恒为「兜底形状」（未知字段这一路只走通用兜底形状，不存在精确形状分支；精确形状属于 11 类
+// 原生 exec 拒绝，由另一卡负责，不在此链路内，本卡不制造分叉）。同时校验「行为零变化」：仍写出
+// 通用错误结果帧、整轮继续、不 502。
+func TestCursorAgentDuplexUnknownFieldRepliedLogsShape(t *testing.T) {
+	d, buf, logs, cleanup := cursorExecRejectTestDuplex(t)
+	defer cleanup()
+
+	// f40 是未知 exec 字段，wire=2/bytes → 必须回通用错误结果帧。
+	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 40)
+	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-40"))
+	execMsg = cursorAppendBytesField(execMsg, 40, []byte("unknown-exec-bytes"))
+
+	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
+	require.NoError(t, err, "未知 exec 字段（wire=2）不得 502")
+	require.False(t, done, "未知 exec 字段不是终态")
+
+	// 必须记 exactly 一条 unknown_field_replied（Info 级观测点）。
+	require.Equal(t, 1, phaseCount(logs, "unknown_field_replied"),
+		"未知 exec 字段被应答时必须记一条 unknown_field_replied 日志")
+
+	// 取出该条日志，断言三件套齐全且取值正确。
+	var cm map[string]interface{}
+	for _, e := range logs.All() {
+		if e.ContextMap()["phase"] == "unknown_field_replied" {
+			cm = e.ContextMap()
+			break
+		}
+	}
+	require.NotNil(t, cm, "必须找到 unknown_field_replied 日志")
+	require.Contains(t, cm, "field", "日志必须含 field 字段")
+	require.Contains(t, cm, "wire_type", "日志必须含 wire_type 字段")
+	require.Contains(t, cm, "shape", "日志必须含 shape 字段")
+	require.EqualValues(t, 40, cm["field"], "field 必须是未知字段号 40")
+	require.EqualValues(t, cursorWireBytes, cm["wire_type"], "wire_type 必须等于 2（bytes），取自 cursorPBField.Wire")
+	require.Equal(t, "兜底形状", cm["shape"], "未知字段链路只有兜底形状，不允许为精确形状")
+
+	// 行为零变化：必须写出通用错误结果帧 {field:{f2:{f2:text}}}。
+	cleanup()
+	cursorStage2ExpectGenericReject(t, buf, 40, cursorGenericUnknownExecRejectText)
+}
+
+// TestCursorAgentDuplexUnknownFieldWire0NoReplyNoLog 证明未知 exec 字段（wire=0/varint）不承载
+// message，按施工图 W1 不回任何结果帧——因此 unknown_field_replied 日志也不应出现（日志只在
+// 「实际应答」处记，避免对未回包字段误报）。整轮继续、不 502，行为零变化。
+func TestCursorAgentDuplexUnknownFieldWire0NoReplyNoLog(t *testing.T) {
+	d, buf, logs, cleanup := cursorExecRejectTestDuplex(t)
+	defer cleanup()
+
+	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 40)
+	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-40"))
+	execMsg = cursorAppendVarintField(execMsg, 40, 123) // wire=0 / varint 未知字段
+
+	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
+	require.NoError(t, err, "未知 exec 字段（wire=0）不得 502")
+	require.False(t, done)
+	require.Equal(t, 0, phaseCount(logs, "unknown_field_replied"),
+		"wire=0 未知字段不回包，不得记 unknown_field_replied")
+	require.Zero(t, buf.Len(), "wire=0 未知字段不回任何结果帧")
 }
 
 func TestCursorClientChecksumMatchesClientJavaScript(t *testing.T) {

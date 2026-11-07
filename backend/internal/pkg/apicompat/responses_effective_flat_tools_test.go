@@ -80,3 +80,46 @@ func toolNames(tools []ResponsesTool) []string {
 	}
 	return out
 }
+
+// 完全相同的 (namespace, 子工具) 重复声明不构成歧义：去重后只下发一份，且
+// 既不应报错，也不应产出两条同名摊平定义（否则出站 f4 会出现两份同名工具）。
+func TestEffectiveResponsesFlatToolsDedupesIdenticalNamespaceChildren(t *testing.T) {
+	req := decodeFlatToolsRequest(t, `{
+	  "model":"m",
+	  "tools":[],
+	  "input":[
+	    {"type":"additional_tools","role":"developer","tools":[
+	      {"type":"namespace","name":"gmail","tools":[
+	        {"type":"function","name":"send","parameters":{"type":"object"}},
+	        {"type":"function","name":"send","parameters":{"type":"object"}}
+	      ]}
+	    ]}
+	  ]
+	}`)
+
+	set, err := EffectiveResponsesFlatTools(req)
+	require.NoError(t, err)
+	require.Equal(t, []string{"gmail__send"}, toolNames(set.Tools), "重复声明的同一子工具只下发一份")
+	require.Len(t, set.Tools, 1)
+}
+
+// 完全相同 (namespace, custom 子工具) 重复声明同样去重：custom 与 function 走同一条去重。
+func TestEffectiveResponsesFlatToolsDedupesIdenticalNamespaceCustomChildren(t *testing.T) {
+	req := decodeFlatToolsRequest(t, `{
+	  "model":"m",
+	  "tools":[],
+	  "input":[
+	    {"type":"additional_tools","role":"developer","tools":[
+	      {"type":"namespace","name":"functions","tools":[
+	        {"type":"custom","name":"exec","format":{"type":"grammar","definition":"g"}},
+	        {"type":"custom","name":"exec","format":{"type":"grammar","definition":"g"}}
+	      ]}
+	    ]}
+	  ]
+	}`)
+
+	set, err := EffectiveResponsesFlatTools(req)
+	require.NoError(t, err)
+	require.Equal(t, []string{"functions__exec"}, toolNames(set.Tools), "重复的 custom 子工具只下发一份")
+	require.True(t, set.NamespaceCustomTools["functions__exec"], "去重后仍标记为 namespace 内 custom")
+}

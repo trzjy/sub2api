@@ -13,10 +13,13 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // cursorInternalErrorPayload 复刻 2026-11-03 04:50–04:54 生产实测的上游报文：
@@ -169,4 +172,71 @@ func TestTempUnscheduleCursorUpstreamFailure(t *testing.T) {
 
 		require.Zero(t, repo.calls, "不得扩大既有停号条件")
 	})
+}
+
+// cursorUpstreamAccountFailureLogField 抓出 cursor_upstream_account_failure 阶段日志里
+// 指定字段的值（用于断言本次纯观测补点）。
+func cursorUpstreamAccountFailureLogField(t *testing.T, logs *observer.ObservedLogs, key string) string {
+	t.Helper()
+	entries := logs.FilterField(zap.String("phase", "cursor_upstream_account_failure"))
+	require.Positive(t, entries.Len(), "必须记 cursor_upstream_account_failure 日志")
+	val, _ := entries.All()[0].ContextMap()[key].(string)
+	return val
+}
+
+// TestCursorUpstreamAccountFailureLogsUpstreamMessage 覆盖本卡核心补点：
+// cursor_upstream_account_failure 日志透传上游已脱敏 message（upstream_message 字段），
+// 让「上游自身故障」与「我们的请求触发上游 bug」可区分。
+func TestCursorUpstreamAccountFailureLogsUpstreamMessage(t *testing.T) {
+	svc, c := newCursorRLStopService(t, cursorInternalErrorStreamBody(t, false))
+
+	ctx, logs := cursorPhaseObserverCtx(t, "req-msg-1")
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+	_, err := executeCursorForTest(t, svc, ctx, c, acc,
+		cursorRLStopRequestBody(false), "cursor-sonnet", false, time.Now())
+	require.Error(t, err)
+
+	got := cursorUpstreamAccountFailureLogField(t, logs, "upstream_message")
+	want := "Cannot read properties of undefined (reading 'toString')"
+	require.Equal(t, want, got, "upstream_message 必须等于上游脱敏后的 message 原文")
+}
+
+// TestCursorUpstreamAccountFailureLogsTruncatedMessage 覆盖超长 message 被截断：
+// 上游回吐超长原文时，upstream_message 必须被截断（与既有 upstream_error_preview 同口径
+// truncateOpenAIWSLogValue(…, 240)），不得整段落盘。
+func TestCursorUpstreamAccountFailureLogsTruncatedMessage(t *testing.T) {
+	longMsg := strings.Repeat("X", 400)
+	payload := `{"error":{"code":"internal","message":"` + longMsg + `"}}`
+	svc, c := newCursorRLStopService(t, cursorTestEndStream(t, payload))
+
+	ctx, logs := cursorPhaseObserverCtx(t, "req-msg-long")
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+	_, err := executeCursorForTest(t, svc, ctx, c, acc,
+		cursorRLStopRequestBody(false), "cursor-sonnet", false, time.Now())
+	require.Error(t, err)
+
+	got := cursorUpstreamAccountFailureLogField(t, logs, "upstream_message")
+	require.NotEqual(t, longMsg, got, "超长 message 不得整段落盘")
+	require.True(t, strings.HasSuffix(got, "..."), "截断后应带省略号后缀")
+	// truncateOpenAIWSLogValue(value, 240) → 内容 240 + "..." = 243 字符（与既有口径一致）。
+	require.LessOrEqual(t, len(got), 240+3, "截断后不得超过 240+省略号长度")
+}
+
+// TestCursorUpstreamAccountFailureLogsEmptyMessage 覆盖「取不到 message」边界：
+// 上游回吐空 message 时，upstream_message 如实记录，不填 "unknown" 之类占位符 ——
+// 「没有」与「有但是空的」要能区分开（纯观测，行为不变）。
+func TestCursorUpstreamAccountFailureLogsEmptyMessage(t *testing.T) {
+	payload := `{"error":{"code":"internal","message":""}}`
+	svc, c := newCursorRLStopService(t, cursorTestEndStream(t, payload))
+
+	ctx, logs := cursorPhaseObserverCtx(t, "req-msg-empty")
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+	_, err := executeCursorForTest(t, svc, ctx, c, acc,
+		cursorRLStopRequestBody(false), "cursor-sonnet", false, time.Now())
+	require.Error(t, err)
+
+	// 空 message 经 truncateOpenAIWSLogValue 归一为空占位 "-"；核心是**不回填业务占位符**。
+	got := cursorUpstreamAccountFailureLogField(t, logs, "upstream_message")
+	require.NotContains(t, got, "unknown", "不得回填 unknown 之类占位符")
+	require.NotContains(t, got, "N/A", "不得回填 N/A 之类占位符")
 }

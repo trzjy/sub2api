@@ -588,6 +588,21 @@ func cursorUpstreamStreamErrorCode(err error) (string, bool) {
 	return "", false
 }
 
+// cursorUpstreamStreamErrorMessage 从上游流终态错误中提取已脱敏的 message。
+// 非 ErrCursorUpstreamStream 错误返回 ("", false)。
+//
+// 用途：cursor_upstream_account_failure 日志透传上游原文（如
+// "Cannot read properties of undefined (reading 'toString')"），
+// 让「上游自身故障」与「我们的请求触发上游 bug」可区分 ——
+// 此前 message 只在 Error() 里被拼进字符串，无人读取，线上完全看不到。
+func cursorUpstreamStreamErrorMessage(err error) (string, bool) {
+	var e *cursorUpstreamStreamError
+	if errors.As(err, &e) {
+		return e.Message, true
+	}
+	return "", false
+}
+
 // CursorUpstreamAccountFailureReason 标识「cursor 上游对本账号返回非业务码终态错误」的
 // 换号原因。handler 侧据此对账号做临时停调冷却（见 GatewayService.TempUnscheduleRetryableError），
 // 与其他平台的换号原因共用同一分类点与同一停号原语，不另建通道。
@@ -1054,15 +1069,12 @@ type cursorStreamParser struct {
 	// rawContent 是累加后的原始文本（含 <think> 段），只用于上游注入模板匹配
 	// （拒付 / 模型暂不可用）：那类模板可能出现在 think 段之后，用可见文本判定会漏。
 	rawContent string
-	// thinkRaw / inThink 是 <think> 段剥离的跨帧状态：thinkRaw 缓冲可能是标签
-	// 前缀的尾段，inThink 表示当前处于推理段内（段内文本一律不对外输出）。
-	thinkRaw string
-	inThink  bool
-	// thinkFlushed 保证收尾时尾段只吐出一次。
-	thinkFlushed bool
 	// trimmedLeading 表示已交付过第一段可见正文：剥离 <think> 后残留的换行只在
 	// 首段被去掉（正文开头的空行是剥离副产物，不该让客户端看到两行空白）。
 	trimmedLeading bool
+	// thinkStripper 跨帧有状态地剥离内联思考标签（<think>/<thinking>），
+	// 状态由 apicompat.InlineThinkStripper 内部维护（D2 迁移，去掉本地副本）。
+	thinkStripper apicompat.InlineThinkStripper
 	// usage 是 turn_ended 给出的真实用量（未收到则 Seen=false，各项为 0）。
 	usage cursorTurnUsage
 	// rejected 命中流内注入模板（拒付 / 模型暂不可用）后的结构化错误（非 nil 即终态失败）。
@@ -1309,75 +1321,26 @@ func (c cursorToolCallCapture) wireID() string {
 // cursorContent 返回拼出的完整响应文本（非流式入站用）。
 func (p *cursorStreamParser) cursorContent() string { return p.content }
 
-// 上游把推理内联进正文时使用的标签（活体样本：
-// "<think>\n…\n</think>\n\n正文"）。它属于上游 wire 事实，不是本站协议词表。
-const (
-	cursorThinkOpenTag  = "<think>"
-	cursorThinkCloseTag = "</think>"
-)
-
-// parseThinkDeltas 把增量正文切成**两个通道**：
-//   - reasoning：处于 <think>…</think> 段内、被完整开闭标签夹住的内容；
-//   - text：段外可见正文（已去除标签、清理首段前导空白）。
+// parseThinkDeltas 把增量正文切成**两个通道**（委托 apicompat.InlineThinkStripper，
+// D2 迁移：去掉本地副本 earliestThinkOpen / maxTrailingPartialThinkOpen / trailingPartialTag）：
+//   - reasoning：处于 <think>…</think>（含 `<thinking>`…`</thinking>` 变体）段内、
+//     被完整开闭标签夹住的内容；
+//   - text：段外可见正文（已去除标签；首段前导空白由 finalizeVisible 在本方法内清理）。
 //
-// 双通道纪律（用户裁定：思考必须作为 reasoning 交付，且标签绝对不能外泄）：
-//  1. 完整 `<think>` / `</think>` 一旦匹配即**彻底吞噬**——既不进 reasoning 也不进
-//     text，客户端绝不会打印出 "<" 或整段内部推理（11-03 实测 6/6 非流式响应都带该段）。
-//  2. 遇到 `<`、`<t`、`</`、`</th` 等标签前缀时，用 trailingPartialTag 把"可能是半截
-//     标签"的那几个字节**严格扣留**在 thinkRaw 里，绝不提前外发——跨帧切碎的标签
-//     （"<thi" + "nk>"）因此被 100% 吞噬，不会把半个标签漏给客户端。
+// 双通道纪律（用户裁定：思考必须作为 reasoning 交付，且标签绝对不能外泄）由剥离器保证：
+//  1. 完整开/闭标签一旦匹配即**彻底吞噬**——既不进 reasoning 也不进 text；
+//  2. 标签前缀（"<"、`<t`、"</"、`</th` 等）被剥离器严格扣留，跨帧切碎的标签 100% 吞噬；
 //  3. 段外首段正文的前导空白/换行由 finalizeVisible 清理（剥标签留下的 "\n\n" 副产物）。
 //
-// rawContent 始终累加原始增量（含 <think> 段），供流内拒付 / 模型暂不可用模板匹配
-// 使用——剥离动作不会改变这些终态判定的灵敏度。
+// rawContent 始终累加原始增量（含 <think> / <thinking> 段），供流内拒付 / 模型暂不可用
+// 模板匹配使用——剥离动作不会改变这些终态判定的灵敏度。
 func (p *cursorStreamParser) parseThinkDeltas(delta string) (reasoning string, text string) {
 	if delta == "" {
 		return "", ""
 	}
 	p.rawContent += delta
-	p.thinkRaw += delta
-	var rb, tb strings.Builder
-	for {
-		if p.inThink {
-			idx := strings.Index(p.thinkRaw, cursorThinkCloseTag)
-			if idx < 0 {
-				// 尚未见到闭合标签：把"可能是闭合标签前缀"的那段扣留，其余作为
-				// 思考增量吐出（流式过程中增量交付，避免假死）。
-				hold := trailingPartialTag(p.thinkRaw, cursorThinkCloseTag)
-				cut := len(p.thinkRaw) - len(hold)
-				if cut > 0 {
-					rb.WriteString(p.thinkRaw[:cut])
-				}
-				p.thinkRaw = hold
-				return rb.String(), p.finalizeVisible(tb.String())
-			}
-			// 命中闭合标签：标签之前（段内）的思考内容进 reasoning，标签本身吞噬。
-			if idx > 0 {
-				rb.WriteString(p.thinkRaw[:idx])
-			}
-			p.thinkRaw = p.thinkRaw[idx+len(cursorThinkCloseTag):]
-			p.inThink = false
-			continue
-		}
-		idx := strings.Index(p.thinkRaw, cursorThinkOpenTag)
-		if idx >= 0 {
-			// 开标签之前是可见正文，开标签本身吞噬，进入思考态。
-			if idx > 0 {
-				tb.WriteString(p.thinkRaw[:idx])
-			}
-			p.thinkRaw = p.thinkRaw[idx+len(cursorThinkOpenTag):]
-			p.inThink = true
-			continue
-		}
-		// 未见开标签：扣留"可能是开标签前缀"的那段，其余作为正文增量吐出。
-		hold := trailingPartialTag(p.thinkRaw, cursorThinkOpenTag)
-		cut := len(p.thinkRaw) - len(hold)
-		if cut > 0 {
-			tb.WriteString(p.thinkRaw[:cut])
-		}
-		p.thinkRaw = hold
-		return p.maybeFinalizeReasoning(rb.String()), p.finalizeVisible(tb.String())
-	}
+	r, t := p.thinkStripper.Feed(delta)
+	return r, p.finalizeVisible(t)
 }
 
 // maybeFinalizeReasoning 是 reasoning 通道的归一钩子（当前与 text 通道不同：
@@ -1401,45 +1364,16 @@ func (p *cursorStreamParser) finalizeVisible(raw string) string {
 	return trimmed
 }
 
-// flushThinkTail 在流收尾时吐出**双通道**缓冲尾段：
-//   - reasoning：处于推理段内、尚未随帧吐出的思考尾巴（收尾时切除闭合标签前缀，
-//     不残留在正文，也不外泄半个闭合标签）；
+// flushThinkTail 在流收尾时吐出**双通道**缓冲尾段（委托 apicompat.InlineThinkStripper，
+// D2 迁移：去掉本地副本；只吐一次由剥离器内部 flushed 守卫保证）：
+//   - reasoning：处于推理段内、尚未随帧吐出的思考尾巴；
 //   - text：段外残留的可见正文尾巴（如结尾恰好是 "<thi" 的半截开标签前缀，如实交付，
 //     不丢字节；完整 <think>/</think> 段早已被吞噬，不会泄露）。
 //
-// 只吐一次（thinkFlushed 保证）。两个返回值的语义分别对应 emitStreamReasoning 与
-// emitStreamText，由调用方决定各自如何写出。
+// 两个返回值的语义分别对应 emitStreamReasoning 与 emitStreamText，由调用方决定各自如何写出。
 func (p *cursorStreamParser) flushThinkTail() (string, string) {
-	if p.thinkFlushed {
-		return "", ""
-	}
-	p.thinkFlushed = true
-	if p.inThink {
-		// 未闭合推理段：把已缓冲的思考尾巴作为 reasoning 吐出（先切除可能的闭合标签前缀），
-		// 不再丢弃——消除"思考内容被静默吞噬 + 下游假死"的问题。
-		hold := trailingPartialTag(p.thinkRaw, cursorThinkCloseTag)
-		cut := len(p.thinkRaw) - len(hold)
-		reasoning := p.thinkRaw[:cut]
-		p.thinkRaw = ""
-		return reasoning, ""
-	}
-	tail := p.finalizeVisible(p.thinkRaw)
-	p.thinkRaw = ""
-	return "", tail
-}
-
-// trailingPartialTag 返回 s 末尾"可能是 tag 不完整前缀"的那一段（跨帧缓冲用）。
-func trailingPartialTag(s, tag string) string {
-	max := len(tag) - 1
-	if max > len(s) {
-		max = len(s)
-	}
-	for n := max; n > 0; n-- {
-		if strings.HasSuffix(s, tag[:n]) {
-			return s[len(s)-n:]
-		}
-	}
-	return ""
+	r, t := p.thinkStripper.Flush()
+	return r, t
 }
 
 // cursorNewStreamParser 构造解析器（model 为空时 chunk 内 model 字段留空）。
@@ -1628,10 +1562,13 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 					})
 				if rerr != nil {
 					if !cursorRetypeDegradable(failReason) {
-						// 参数残缺（缺必填）：绝不降级交付。交给客户端只会变成
-						// InputValidationError + 回填被拒，把一次上游残缺放大成两轮失败。
-						// 诊断字段（missing_fields / present_fields / missing_depth）只含
-						// 字段名与深度，用于区分真空缺与命名错位，见 cursorArgsDiagFields。
+						// schema 侧不可解析（schema_absent / invalid / unresolvable /
+						// projection_unresolvable）：连「上游给的是什么工具」都判定不了，
+						// 必须按上游失败终止本轮。诊断字段（missing_fields / present_fields /
+						// missing_depth）只含字段名与深度，用于区分真空缺与命名错位，
+						// 见 cursorArgsDiagFields。
+						// 注：缺必填（missing_required）派发单 D 阶段 2 起已纳入可降级，
+						// 不再走到这里（见 cursorRetypeDegradable）。
 						fields := []zap.Field{
 							zap.String("retype_error", string(failReason)),
 							zap.String("tool_name", name),
@@ -1995,26 +1932,32 @@ const (
 	cursorRetypeObjectTypeMismatch     cursorRetypeErrReason = "object_type_mismatch"
 	cursorRetypeNumericOutOfRange      cursorRetypeErrReason = "numeric_out_of_range"
 	// cursorRetypeMissingRequired 表示还原结果缺 schema 声明的必填字段（参数不完整）。
-	// 与上面几类"形状差异"不同：这类**不可降级交付**，见 cursorRetypeDegradable。
+	// 派发单 D 阶段 2 起纳入可降级：缺必填不再打死整轮，而是原样把上游原始参数交付客户端
+	// （见 cursorRetypeDegradable）。
 	cursorRetypeMissingRequired cursorRetypeErrReason = "missing_required"
 )
 
 // cursorRetypeDegradable 报告某类 retype 失败是否允许"降级交付上游原始参数"。
 //
-// 只有**形状差异**类可以降级：客户端 schema 声明 additionalProperties:false 而上游
-// 多给字段、或类型标记与值不一致——这类参数本身是完整的，客户端能自行判定取舍
-// （11-03 03:42 活体：Write 带额外字段，降级后客户端正常执行）。
+// 形状差异类（additionalProperties 多给字段 / 类型标记与值不一致 / 数值越界 / 不允许的 items）
+// 可以降级：参数本身是完整的，客户端能自行判定取舍（11-03 03:42 活体：Write 带额外字段，
+// 降级后客户端正常执行）。
 //
-// 缺必填字段（missing_required）与 schema 侧不可解析一律**不可降级**：那时上游给的
-// 就是一个残缺调用，交给客户端只会变成 InputValidationError + 续轮被拒，把一次上游
-// 残缺放大成两轮失败（11-03 04:45 活体：Bash args={} → CUR-RES-04）。此时必须按
-// 上游失败终止本轮，由客户端重试。
+// 缺必填（missing_required）派发单 D 阶段 2 起**纳入可降级**：旧口径把它打死整轮，等于把
+// 一次上游残缺升级成 502 + 会话终结、违反「不报错给客户」。现改为原样把上游原始参数交付
+// 客户端（retyped = argsJSON，绝不补默认值——Bash 的 command 补空串会真去执行一条空命令，
+// 拿客户机器冒险），由客户端自行决定接受或报错。
+//
+// schema 侧不可解析（schema_absent / schema_invalid / schema_unresolvable /
+// projection_unresolvable）仍**不可降级**：那时连「上游给的是什么工具」都判定不了，
+// 原样交付只会把未定义行为甩给客户端，必须按上游失败终止本轮。
 func cursorRetypeDegradable(reason cursorRetypeErrReason) bool {
 	switch reason {
 	case cursorRetypeAdditionalPropPresent,
 		cursorRetypeObjectTypeMismatch,
 		cursorRetypeNumericOutOfRange,
-		cursorRetypeItemsNotAllowed:
+		cursorRetypeItemsNotAllowed,
+		cursorRetypeMissingRequired:
 		return true
 	default:
 		return false

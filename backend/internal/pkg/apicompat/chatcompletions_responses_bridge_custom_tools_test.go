@@ -34,6 +34,60 @@ func TestResponsesToChatCompletionsRequest_CustomToolBecomesFunctionTool(t *test
 	assert.Equal(t, "wait", out.Tools[1].Function.Name)
 }
 
+// 顶层 custom 与 namespace 内 custom 的 f4 形态**故意不同**，这条用例是那道分界线的护栏：
+//
+//   - 顶层 custom 走 chat 桥降级，必须带 {"input":string} 降级壳。回程
+//     extractCustomToolCallInput 从 {"input":"<自由文本>"} 里抽回纯文本交给客户端
+//     （custom_tool_call 项的 input 字段）。没有这个壳，模型发别的形状就抽不出来。
+//   - namespace 内 custom 由 Responses 摊平而来，本来就没有 input_schema
+//     （Responses 的 custom 类型无 parameters），按「无 schema」原样下发，
+//     回程走 cursorToolDeclaredWithoutSchema 原样交付。
+//
+// 顶层 custom 不是阶段 0 的改动对象：它当前在生产服役（codex 0.14x 的 exec）。
+// 统一两者形态的那次改动会让顶层 custom 的回程抽不出自由文本，**不许再发生**。
+func TestResponsesToChatCompletionsRequest_TopLevelCustomKeepsDowngradeShell(t *testing.T) {
+	req := &ResponsesRequest{
+		Model: "glm-5.2",
+		Input: json.RawMessage(`"run dir"`),
+		Tools: []ResponsesTool{
+			{Type: "custom", Name: "exec", Description: "Run JavaScript code"},
+			{Type: "namespace", Name: "functions", Tools: []ResponsesTool{
+				{Type: "custom", Name: "run"},
+				{Type: "function", Name: "wait", Parameters: json.RawMessage(`{"type":"object"}`)},
+			}},
+		},
+	}
+
+	out, err := ResponsesToChatCompletionsRequest(req)
+	require.NoError(t, err)
+	require.Len(t, out.Tools, 3)
+
+	byName := make(map[string]ChatTool)
+	for _, tool := range out.Tools {
+		byName[tool.Function.Name] = tool
+	}
+
+	// 顶层 custom：带降级壳、不打 Custom 标记（Custom=true 会让下游不写 f3，
+	// 那条路是 namespace 内 custom 专用的）。
+	top, ok := byName["exec"]
+	require.True(t, ok, "顶层 custom 必须存在")
+	assert.False(t, top.Custom, "顶层 custom 不打 Custom 标记：它的降级壳由 chat 桥自己编，不由下游决定")
+	assert.JSONEq(t, customToolInputSchema, string(top.Function.Parameters),
+		"顶层 custom 必须保留 {\"input\":string} 降级壳，否则回程抽不出自由文本")
+
+	// namespace 内 custom：无 schema、打 Custom 标记。
+	ns, ok := byName["functions__run"]
+	require.True(t, ok, "namespace 内 custom 必须被摊平")
+	assert.True(t, ns.Custom, "namespace 内 custom 打 Custom 标记")
+	assert.Empty(t, ns.Function.Parameters, "namespace 内 custom 不携带 schema")
+
+	// namespace 内 function：schema 保留、不打 Custom 标记。
+	fn, ok := byName["functions__wait"]
+	require.True(t, ok, "namespace 内 function 必须被摊平")
+	assert.False(t, fn.Custom, "namespace 内 function 不打 Custom 标记")
+	assert.JSONEq(t, `{"type":"object"}`, string(fn.Function.Parameters))
+}
+
 func TestResponsesChatBridge_MixedCustomAndNamespaceToolNames(t *testing.T) {
 	req := &ResponsesRequest{
 		Model: "deepseek-test",
@@ -542,17 +596,33 @@ func TestResponsesToChatCompletionsRequest_NamespaceToolFlattensChildren(t *test
 			Name: "gmail",
 			Tools: []ResponsesTool{
 				{Type: "function", Name: "send", Description: "Send mail", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)},
-				{Type: "custom", Name: "ignored_child"},
+				// 改造前这个 custom 子工具的名字是 "ignored_child"——旧实现只摊平
+				// function 子工具，custom 子工具被整个丢弃，那个名字就是在标记
+				// 「它会被忽略」。改造后 custom 子工具照样摊平，名字改回中性的
+				// "compose"：若哪天 custom 又被丢弃，这条用例会因少一条工具而红。
+				{Type: "custom", Name: "compose"},
 			},
 		}},
 	}
 
 	out, err := ResponsesToChatCompletionsRequest(req)
 	require.NoError(t, err)
-	require.Len(t, out.Tools, 1, "namespace 子工具中仅 function 类型被摊平")
+	require.Len(t, out.Tools, 2, "namespace 子工具中 function 与 custom 类型都被摊平（custom 不再被丢弃）")
 
-	assert.Equal(t, "gmail__send", out.Tools[0].Function.Name)
-	assert.Equal(t, "Send mail", out.Tools[0].Function.Description)
+	byName := make(map[string]ChatTool)
+	for _, tool := range out.Tools {
+		byName[tool.Function.Name] = tool
+	}
+
+	send, ok := byName["gmail__send"]
+	require.True(t, ok, "function 子工具必须被摊平")
+	assert.Equal(t, "Send mail", send.Function.Description)
+	assert.False(t, send.Custom, "function 子工具不带 Custom 标记")
+
+	compose, ok := byName["gmail__compose"]
+	require.True(t, ok, "custom 子工具必须被摊平（本阶段核心目标：不再被丢弃）")
+	assert.True(t, compose.Custom, "custom 子工具打 Custom 标记")
+	assert.Empty(t, compose.Function.Parameters, "custom 子工具无 schema")
 }
 
 func TestResponsesToolsParsing_StringToolBecomesCustom(t *testing.T) {
@@ -767,7 +837,7 @@ func TestNamespaceToolNames_MapsFlattenedNames(t *testing.T) {
 	tools := []ResponsesTool{
 		{Type: "namespace", Name: "gmail", Tools: []ResponsesTool{
 			{Type: "function", Name: "send"},
-			{Type: "custom", Name: "skip_me"},
+			{Type: "custom", Name: "compose"},
 		}},
 		{Type: "namespace", Name: "crm", Children: []ResponsesTool{
 			{Type: "function", Name: "query"},
@@ -776,8 +846,10 @@ func TestNamespaceToolNames_MapsFlattenedNames(t *testing.T) {
 	}
 
 	m := NamespaceToolNames(tools)
-	require.Len(t, m, 2)
+	// function 与 custom 两类子工具都要被收集（修复前 custom 子工具被丢弃）。
+	require.Len(t, m, 3)
 	assert.Equal(t, NamespacedToolName{Namespace: "gmail", Name: "send"}, m["gmail__send"])
+	assert.Equal(t, NamespacedToolName{Namespace: "gmail", Name: "compose", IsCustom: true}, m["gmail__compose"])
 	assert.Equal(t, NamespacedToolName{Namespace: "crm", Name: "query"}, m["crm__query"])
 
 	// 摊平名超长时截断加哈希，无法按字符串切分还原，必须经映射反查。
@@ -791,6 +863,194 @@ func TestNamespaceToolNames_MapsFlattenedNames(t *testing.T) {
 		m2[FlattenNamespaceToolName(longNS, longChild)])
 
 	assert.Nil(t, NamespaceToolNames(nil))
+}
+
+// 修复前 NamespaceToolNames 只收 function 子工具，custom 子工具的摊平名不在集合里，
+// 导致回程判不成 custom_tool_call。这条用例锁定：namespace 内 custom 子工具的摊平名
+// 既在 NamespaceToolNames 里，也在 NamespaceCustomToolNames 里（且 IsCustom=true）。
+func TestNamespaceCustomToolNames_MarksCustomChildren(t *testing.T) {
+	tools := []ResponsesTool{
+		{Type: "namespace", Name: "functions", Tools: []ResponsesTool{
+			{Type: "custom", Name: "run"},
+			{Type: "function", Name: "wait", Parameters: json.RawMessage(`{"type":"object"}`)},
+		}},
+		{Type: "namespace", Name: "crm", Children: []ResponsesTool{
+			{Type: "function", Name: "query"},
+		}},
+		{Type: "custom", Name: "exec"}, // 顶层 custom：不在 namespace 集合里
+	}
+
+	ns := NamespaceToolNames(tools)
+	require.Contains(t, ns, "functions__run", "namespace 内 custom 子工具必须被收集")
+	require.True(t, ns["functions__run"].IsCustom, "namespace 内 custom 子工具必须标记 IsCustom")
+	require.Contains(t, ns, "functions__wait", "namespace 内 function 子工具必须被收集")
+	require.False(t, ns["functions__wait"].IsCustom, "namespace 内 function 子工具不标记 IsCustom")
+
+	custom := NamespaceCustomToolNames(tools)
+	require.Contains(t, custom, "functions__run", "namespace 内 custom 子工具的摊平名必须在集合里")
+	require.NotContains(t, custom, "functions__wait", "namespace 内 function 子工具不在集合里")
+	require.NotContains(t, custom, "crm__query", "namespace 内 function 子工具不在集合里")
+	require.NotContains(t, custom, "exec", "顶层 custom 不在 namespace 集合里")
+
+	// 没有任何 namespace 内 custom 子工具时返回 nil。
+	noCustom := NamespaceCustomToolNames([]ResponsesTool{
+		{Type: "namespace", Name: "crm", Children: []ResponsesTool{{Type: "function", Name: "query"}}},
+	})
+	assert.Nil(t, noCustom)
+}
+
+// 回程核心修复：namespace 内 custom 子工具必须判成 custom_tool_call 并还原成裸名，
+// namespace 内 function 子工具必须判成带 namespace 字段的 function_call，两者不串台。
+// 此前 custom 子工具被 NamespaceToolNames 丢弃，回程只能当普通 function_call 交付，
+// codex 收到 function_call 而非 custom_tool_call，直接不认这个工具调用。
+func TestChatCompletionsResponseToResponses_NamespaceCustomToolCallBecomesCustomToolCall(t *testing.T) {
+	tools := []ResponsesTool{
+		{Type: "namespace", Name: "functions", Tools: []ResponsesTool{
+			{Type: "custom", Name: "run"},
+			{Type: "function", Name: "wait", Parameters: json.RawMessage(`{"type":"object"}`)},
+		}},
+	}
+	// 注意：本例没有顶层 custom，customTools 里不会有 "run"——回程必须靠
+	// namespaceTools 的 IsCustom 位把 functions__run 判成 custom_tool_call。
+	namespaceTools := NamespaceToolNames(tools)
+	require.True(t, namespaceTools["functions__run"].IsCustom)
+
+	resp := &ChatCompletionsResponse{Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", ToolCalls: []ChatToolCall{
+		{ID: "call_run", Function: ChatFunctionCall{Name: "functions__run", Arguments: `{"a":1}`}},
+		{ID: "call_wait", Function: ChatFunctionCall{Name: "functions__wait", Arguments: `{"b":2}`}},
+	}}}}}
+
+	out := ChatCompletionsResponseToResponses(resp, "deepseek-test", CustomToolNames(tools), FunctionToolNames(tools), false, namespaceTools)
+	require.Len(t, out.Output, 2)
+
+	run := out.Output[0]
+	assert.Equal(t, "custom_tool_call", run.Type, "namespace 内 custom 子工具判成 custom_tool_call")
+	assert.Equal(t, "run", run.Name, "还原为裸名 run，不是摊平名 functions__run")
+	assert.Empty(t, run.Namespace, "custom_tool_call 不带 namespace 字段")
+
+	wait := out.Output[1]
+	assert.Equal(t, "function_call", wait.Type, "namespace 内 function 子工具判成 function_call，不串台")
+	assert.Equal(t, "wait", wait.Name, "还原为裸名 wait")
+	assert.Equal(t, "functions", wait.Namespace, "function 子工具带 namespace 字段")
+}
+
+// 流式回程与上面同一条语义：namespace 内 custom 子工具Declare为 custom_tool_call 裸名。
+func TestChatCompletionsChunkToResponsesEvents_NamespaceCustomToolCallStream(t *testing.T) {
+	state := NewChatCompletionsToResponsesStreamState("deepseek-test")
+	state.NamespaceTools = map[string]NamespacedToolName{
+		"functions__run":  {Namespace: "functions", Name: "run", IsCustom: true},
+		"functions__wait": {Namespace: "functions", Name: "wait"},
+	}
+
+	idx := 0
+	chunk := &ChatCompletionsChunk{Choices: []ChatChunkChoice{{Delta: ChatDelta{ToolCalls: []ChatToolCall{{
+		Index:    &idx,
+		ID:       "call_run",
+		Function: ChatFunctionCall{Name: "functions__run", Arguments: `{"a":1}`},
+	}}}}}}
+
+	events := ChatCompletionsChunkToResponsesEvents(chunk, state)
+	events = append(events, FinalizeChatCompletionsResponsesStream(state)...)
+
+	var added, itemDone *ResponsesStreamEvent
+	for i := range events {
+		evt := &events[i]
+		switch evt.Type {
+		case "response.output_item.added":
+			if evt.Item != nil && evt.Item.Type == "custom_tool_call" {
+				added = evt
+			}
+		case "response.output_item.done":
+			if evt.Item != nil && evt.Item.Type == "custom_tool_call" {
+				itemDone = evt
+			}
+		case "response.custom_tool_call_input.delta", "response.custom_tool_call_input.done":
+			// OK
+		case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+			t.Fatalf("namespace 内 custom 调用不应产出 function 参数事件: %s", evt.Type)
+		}
+	}
+
+	require.NotNil(t, added, "缺少 custom_tool_call 的 output_item.added")
+	assert.Equal(t, "run", added.Item.Name, "流式也还原为裸名 run")
+	assert.Empty(t, added.Item.Namespace)
+
+	require.NotNil(t, itemDone, "缺少 custom_tool_call 的 output_item.done")
+	assert.Equal(t, "run", itemDone.Item.Name)
+
+	final := events[len(events)-1]
+	require.Equal(t, "response.completed", final.Type)
+	require.NotNil(t, final.Response)
+	found := false
+	for _, item := range final.Response.Output {
+		if item.Type == "custom_tool_call" {
+			found = true
+			assert.Equal(t, "run", item.Name)
+		}
+	}
+	assert.True(t, found, "response.completed 缺少还原后的 namespace custom 调用项")
+}
+
+// 顶层 custom / function 的既有语义不得被本次改动影响：本例同时带顶层 custom(exec)、
+// 顶层 function(wait)、namespace 内 custom(run) 与 namespace 内 function(send)，
+// 四种调用必须各自落到正确的项类型与名字上。
+func TestChatCompletionsResponseToResponses_TopLevelUnaffectedByNamespaceCustomFix(t *testing.T) {
+	tools := []ResponsesTool{
+		{Type: "custom", Name: "exec"},
+		{Type: "function", Name: "wait", Parameters: json.RawMessage(`{"type":"object"}`)},
+		{Type: "namespace", Name: "functions", Tools: []ResponsesTool{
+			{Type: "custom", Name: "run"},
+			{Type: "function", Name: "send", Parameters: json.RawMessage(`{"type":"object"}`)},
+		}},
+	}
+	namespaceTools := NamespaceToolNames(tools)
+
+	resp := &ChatCompletionsResponse{Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", ToolCalls: []ChatToolCall{
+		{ID: "c1", Function: ChatFunctionCall{Name: "exec", Arguments: `{"input":"pwd"}`}},
+		{ID: "c2", Function: ChatFunctionCall{Name: "wait", Arguments: `{"x":1}`}},
+		{ID: "c3", Function: ChatFunctionCall{Name: "functions__run", Arguments: `{"a":1}`}},
+		{ID: "c4", Function: ChatFunctionCall{Name: "functions__send", Arguments: `{"y":2}`}},
+	}}}}}
+
+	out := ChatCompletionsResponseToResponses(resp, "deepseek-test", CustomToolNames(tools), FunctionToolNames(tools), false, namespaceTools)
+	require.Len(t, out.Output, 4)
+
+	assert.Equal(t, "custom_tool_call", out.Output[0].Type)
+	assert.Equal(t, "exec", out.Output[0].Name)
+
+	assert.Equal(t, "function_call", out.Output[1].Type)
+	assert.Equal(t, "wait", out.Output[1].Name)
+	assert.Empty(t, out.Output[1].Namespace)
+
+	assert.Equal(t, "custom_tool_call", out.Output[2].Type, "顶层 custom 与 namespace custom 都判 custom_tool_call")
+	assert.Equal(t, "run", out.Output[2].Name)
+
+	assert.Equal(t, "function_call", out.Output[3].Type)
+	assert.Equal(t, "send", out.Output[3].Name)
+	assert.Equal(t, "functions", out.Output[3].Namespace)
+}
+
+// 别名兜底：模型自造的 functions__exec 别名（参照邻近摊平工具名拼出）仍按原语义处理——
+// 真实声明的子工具名优先，歧义时按普通 function_call 处理。本例顶层 custom=exec，
+// namespace 内 custom=run，模型调 functions__exec 应判成顶层 custom 的 custom_tool_call。
+func TestChatCompletionsResponseToResponses_NamespaceAliasFallbackForTopCustom(t *testing.T) {
+	tools := []ResponsesTool{
+		{Type: "custom", Name: "exec"},
+		{Type: "namespace", Name: "functions", Tools: []ResponsesTool{
+			{Type: "custom", Name: "run"},
+		}},
+	}
+	namespaceTools := NamespaceToolNames(tools)
+
+	resp := &ChatCompletionsResponse{Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", ToolCalls: []ChatToolCall{
+		{ID: "c1", Function: ChatFunctionCall{Name: "functions__exec", Arguments: `{"input":"x"}`}},
+	}}}}}
+
+	out := ChatCompletionsResponseToResponses(resp, "deepseek-test", CustomToolNames(tools), FunctionToolNames(tools), false, namespaceTools)
+	require.Len(t, out.Output, 1)
+	// functions__exec 不是真实 namespace 子工具名，命中别名兜底，指向顶层 custom exec。
+	assert.Equal(t, "custom_tool_call", out.Output[0].Type)
+	assert.Equal(t, "exec", out.Output[0].Name)
 }
 
 // 内置 tool_search 降级后的代理 function 与客户端声明的同名工具无法区分：回程会把

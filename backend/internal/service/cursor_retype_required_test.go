@@ -9,8 +9,9 @@ import (
 
 // 11-03 活体：上游只交来空参数（Bash input={}），旧实现把 required 原样保留却从不
 // 消费，空对象被当成"重打成功"直接交付给客户端 → 客户端 InputValidationError →
-// 回填后撞续轮校验（CUR-RES-04）。本组用例锁死新口径：缺必填即 missing_required，
-// 且该类失败不可降级交付。
+// 回填后撞续轮校验（CUR-RES-04）。本组用例锁死口径：缺必填即 missing_required，
+// 且 retype 本身仍报错（不静默放行）。但派发单 D 阶段 2 起，缺必填已纳入可降级交付
+// （原样把上游原始参数交付客户端，由客户端自行决定接受或报错，绝不补默认值）。
 func TestRetypeArgsMissingRequiredIsRejected(t *testing.T) {
 	bashSchema := []byte(`{
 		"type":"object",
@@ -30,9 +31,10 @@ func TestRetypeArgsMissingRequiredIsRejected(t *testing.T) {
 	if re.Reason() != cursorRetypeMissingRequired {
 		t.Fatalf("reason = %q, want %q", re.Reason(), cursorRetypeMissingRequired)
 	}
-	// 必须不可降级：降级就会把残调用交给客户端，正是本次要消灭的行为。
-	if cursorRetypeDegradable(re.Reason()) {
-		t.Fatal("missing_required 不得判为可降级")
+	// 派发单 D 阶段 2：缺必填必须判为可降级——原样把上游原始参数交付客户端，
+	// 不再打死整轮（绝不补默认值）。
+	if !cursorRetypeDegradable(re.Reason()) {
+		t.Fatal("missing_required 现在必须判为可降级（原样交付客户端）")
 	}
 }
 
@@ -100,20 +102,21 @@ func TestNormalizedSchemaKeepsRequired(t *testing.T) {
 	}
 }
 
-// 形状差异类（多给未声明字段）保持可降级：11-03 03:42 的 Write 场景不能被这次修复反向打死。
+// 形状差异类（多给未声明字段）保持可降级：11-03 03:42 的 Write 场景不能被这次修复反向打死；
+// 缺必填（missing_required）派发单 D 阶段 2 起同样可降级（原样交付上游原始参数）。
 func TestRetypeDegradableKeepsShapeDiffs(t *testing.T) {
 	for _, reason := range []cursorRetypeErrReason{
 		cursorRetypeAdditionalPropPresent,
 		cursorRetypeObjectTypeMismatch,
 		cursorRetypeNumericOutOfRange,
 		cursorRetypeItemsNotAllowed,
+		cursorRetypeMissingRequired,
 	} {
 		if !cursorRetypeDegradable(reason) {
 			t.Fatalf("%q 应保持可降级", reason)
 		}
 	}
 	for _, reason := range []cursorRetypeErrReason{
-		cursorRetypeMissingRequired,
 		cursorRetypeSchemaAbsent,
 		cursorRetypeSchemaInvalid,
 		cursorRetypeSchemaUnresolvable,

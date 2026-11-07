@@ -120,7 +120,7 @@ func TestCursorConvertMessagesSkipsUnknownRole(t *testing.T) {
 	turns, err := cursorConvertMessages([]apicompat.ChatMessage{
 		{Role: "critic", Content: json.RawMessage(`"do not demote me"`)},
 		{Role: "user", Content: json.RawMessage(`"真正的提问"`)},
-	}, skipped)
+	}, nil, skipped)
 	require.NoError(t, err, "未知角色不得整轮拒")
 	require.Len(t, turns, 1, "只保留能落地的那一条")
 	require.Equal(t, "user", turns[0].role)

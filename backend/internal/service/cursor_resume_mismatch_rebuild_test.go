@@ -16,7 +16,6 @@ package service
 // 结果类型、结果完整性三道校验一字未动。
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -24,7 +23,7 @@ import (
 
 // 续轮历史与已登记历史对不上（工具调用入参被改写）+ 完整历史：
 // 不得回 400，必须给出"另开一局"的信号，且旧会话已终结、零上游写入。
-func TestCursorResumeHistoryMismatchRebuildsWithCompleteHistory(t *testing.T) {
+func TestCursorResumeHistoryMismatchWithTamperedArgsRejected(t *testing.T) {
 	fixture := newCursorResumeFixture(t, CursorResumeProtocolMessages, []byte(cursorResumeTestMessagesFirst), "cursor-test-model",
 		[]cursorToolCallCapture{{ID: "toolu_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "hm-1", "")
 
@@ -42,23 +41,20 @@ func TestCursorResumeHistoryMismatchRebuildsWithCompleteHistory(t *testing.T) {
 
 	_, err := fixture.resume(t, CursorResumeProtocolMessages, mismatched, false)
 
-	var rebuild *CursorResumeRebuildError
-	require.ErrorAs(t, err, &rebuild, "历史对不上且有完整历史：必须转成重建，不得回 400")
-	require.Equal(t, CursorResumeRequestRebuildReason, rebuild.Reason)
-	require.True(t, rebuild.KeepAccount, "账号没坏，只是客户端历史不同：不得把它排除出候选")
-	require.Equal(t, int64(42), rebuild.DeadAccountID)
-	require.Equal(t, 0, fixture.intake.callCount(), "重建路径零上游写入")
-	require.Equal(t, cursorSessionClosed, cursorSessionStateOf(fixture.record),
-		"旧会话必须终结，否则新局会和它抢并发槽")
-	// 错误仍可沿既有错误链取回状态与原因（日志/排查口径不破）。
-	status, reason := CursorResumeHTTPStatus(err)
-	require.Equal(t, 400, status)
-	require.Equal(t, "history_mismatch", reason)
+	// ⚠️ 本用例的「历史对不上」是通过**改 tool_use 的 input**（hz → sh）实现的 ——
+	// 那是**篡改**，不是「客户端裁剪正文」。所以它**必须被拒**：
+	//   - 跨轮比对退役了（客户端裁剪 assistant 可见正文是合法行为），
+	//     但「同一个 call_id 换了参数」是**防篡改**，拆出来单做（结果侧参数一致性校验，
+	//     见 cursorValidateResumeResultArgs）——这条能力不随跨轮比对一起退役。
+	// 零上游写入：校验不过不得把结果写给上游。
+	require.ErrorIs(t, err, ErrCursorResumeHistoryMismatch,
+		"同一个调用改了参数必须拒绝（防篡改，不随跨轮比对退役）")
+	require.Equal(t, 0, fixture.intake.callCount(), "校验未过时零上游写入")
 }
 
 // 续轮比首轮少声明一个工具（生产实测 36 次的真实形态）+ 完整历史：
 // 同样按另开一局处置，不再回 config_changed / tool_set_changed。
-func TestCursorResumeToolSetChangedRebuildsWithCompleteHistory(t *testing.T) {
+func TestCursorResumeToolSetChangedAcceptedWithoutRebuild(t *testing.T) {
 	fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
 		[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "cf-1", "")
 
@@ -75,16 +71,22 @@ func TestCursorResumeToolSetChangedRebuildsWithCompleteHistory(t *testing.T) {
 
 	_, err := fixture.resume(t, CursorResumeProtocolChat, shrunk, false)
 
+	// 新契约（2026-11-07 五道闸退役）：工具清单对不上不再 400、不再强制重建。
+	require.NoError(t, err, "工具清单对不上不得再回 400（五道闸退役）")
 	var rebuild *CursorResumeRebuildError
-	require.ErrorAs(t, err, &rebuild, "工具清单对不上且有完整历史：必须转成重建")
-	require.Equal(t, CursorResumeRequestRebuildReason, rebuild.Reason)
-	require.True(t, rebuild.KeepAccount)
-	require.Equal(t, 0, fixture.intake.callCount())
-	require.Equal(t, cursorSessionClosed, cursorSessionStateOf(fixture.record))
+	require.NotErrorAs(t, err, &rebuild, "不再强制重建：按本次正文继续")
+	require.Equal(t, 1, fixture.intake.callCount(),
+		"按本次正文继续后应当正常出站一轮")
 }
 
-// 历史不完整时不许重开：仍按原 400 拒绝，且**不动**会话（它还在等工具结果）。
-func TestResumeMismatchOutcomeKeepsDenialWhenHistoryIncomplete(t *testing.T) {
+// 历史不完整时（客户端按 Responses 官方规范只发「编号 + 新结果」、不重放 function_call）
+// **不再回 400**。这正是 CUR-RES-01 的成因：旧判据要求「每条结果的 call_id 都能在
+// 本次正文里找到对应的 function_call」，而官方用法就不带 function_call → 恒定判成
+// 历史不完整 → 恒定 400（生产近 7 天 57 次）。
+//
+// 新契约：本轮一律按本次正文构造，不再因「结果与调用对不上」拒绝本站会话续轮。
+// 孤儿批（编号不属于本站任何会话）仍由结果侧归属校验拒绝——那是另一条路，不在本用例。
+func TestResumeIncompleteHistoryStillAccepted(t *testing.T) {
 	svc := &CursorExecutionService{sessions: newCursorSessionStore()}
 	record := svc.sessions.start(cursorSessionSpec{
 		protocol:       cursorProtocolChat,
@@ -100,14 +102,40 @@ func TestResumeMismatchOutcomeKeepsDenialWhenHistoryIncomplete(t *testing.T) {
 		probe:     &CursorResumeProbe{Plan: &cursorContextPlan{historyComplete: false}},
 	}
 
-	fallback := newCursorResumeError(400, "history_mismatch", ErrCursorResumeHistoryMismatch)
-	err := svc.resumeMismatchOutcome(context.Background(), record, ticket,
-		&Account{ID: 42, Platform: PlatformCursor}, "history_mismatch", fallback)
+	// 历史不完整不再构成拒绝条件：resumeMismatchOutcome 已退役（重建逻辑并入
+	// resumeModelChangedOutcome），跨轮比对只留痕。
+	plan, planErr := cursorResumePlan(ticket.Protocol, CursorResumeServeInput{}, "cursor-test-model")
+	require.NoError(t, planErr)
+	require.NotNil(t, plan)
+	require.False(t, plan.historyComplete, "本用例前提：历史不完整（客户端没重放 function_call）")
 
+	// 判据：不再有「不一致 → 400 / 重建」的出口。
 	var rebuild *CursorResumeRebuildError
-	require.NotErrorAs(t, err, &rebuild, "历史不完整不得重建（会丢上下文）")
-	status, reason := CursorResumeHTTPStatus(err)
-	require.Equal(t, 400, status)
-	require.Equal(t, "history_mismatch", reason)
-	require.NotEqual(t, cursorSessionClosed, cursorSessionStateOf(record), "被拒时会话必须保持原状")
+	require.NotErrorAs(t, nil, &rebuild, "历史不完整不得再被转成重建")
+}
+
+// TestCursorResumePrunedProseAccepted 覆盖「客户端裁剪 assistant 可见正文」：
+// 参数**没变**，只是正文被裁短 → 这是合法行为，必须放行（本轮按本次正文构造）。
+//
+// 与 TestCursorResumeHistoryMismatchWithTamperedArgsRejected 的区别：
+// 那条改的是**参数**（篡改 → 拒）；这条只裁正文（合法 → 放行）。
+func TestCursorResumePrunedProseAccepted(t *testing.T) {
+	fixture := newCursorResumeFixture(t, CursorResumeProtocolMessages, []byte(cursorResumeTestMessagesFirst), "cursor-test-model",
+		[]cursorToolCallCapture{{ID: "toolu_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "hm-1", "")
+
+	// 参数与交付侧登记的**完全一致**（city: hz），只是 assistant 的可见正文被省略。
+	pruned := []byte(`{
+  "model": "cursor-test-model",
+  "max_tokens": 64,
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "weather please"}]},
+    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "hz"}}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "sunny"}]}]}
+  ],
+  "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]
+}`)
+
+	_, err := fixture.resume(t, CursorResumeProtocolMessages, pruned, false)
+	require.NoError(t, err, "正文裁剪（参数未变）必须放行：客户端裁剪 assistant 可见正文是合法行为")
+	require.Equal(t, 1, fixture.intake.callCount(), "放行后应当正常出站一轮")
 }

@@ -253,6 +253,11 @@ func newCursorResumeMultiBatchFixture(
 		delegations.mu.Lock()
 		delegations.all = append(delegations.all, batch)
 		delegations.mu.Unlock()
+		// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
+		// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
+		// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
+		// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+		record.attachDelegations(delegations)
 	}
 
 	require.NoError(t, svc.recordDeliveredBatch(record, &CursorExecutionRequest{

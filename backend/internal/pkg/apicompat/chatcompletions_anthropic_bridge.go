@@ -651,6 +651,10 @@ type ChatCompletionsToAnthropicStreamState struct {
 	// Responses bridge's ReasoningIndex, but since blocks are sequential we
 	// reuse the single ContentBlockIndex counter.
 
+	// thinkStripper 跨帧剥离正文 delta 里内联的 <think>/<thinking> 段，
+	// 把思考内容转成 thinking_delta 事件而非透传到正文。
+	thinkStripper InlineThinkStripper
+
 	FinishReason string
 
 	InputTokens              int
@@ -717,14 +721,10 @@ func ChatCompletionsChunkToAnthropicEvents(
 			})...)
 		}
 
-		// Text content → text block (closes any open thinking block first).
+		// Text content → text block (closes any open thinking block first),
+		// stripping any inline <think>/<thinking> segments along the way.
 		if choice.Delta.Content != nil && *choice.Delta.Content != "" {
-			events = append(events, closeCCAnthropicBlockIfOpen(state, "thinking")...)
-			events = append(events, ensureCCAnthropicTextBlock(state)...)
-			events = append(events, ccAnthropicDelta(state, &AnthropicDelta{
-				Type: "text_delta",
-				Text: *choice.Delta.Content,
-			})...)
+			events = append(events, handleCCAnthropicTextDelta(state, *choice.Delta.Content)...)
 		}
 
 		// Tool calls → tool_use blocks.
@@ -741,6 +741,45 @@ func ChatCompletionsChunkToAnthropicEvents(
 	return events
 }
 
+// handleCCAnthropicTextDelta processes a Chat Completions text delta: it first
+// strips any inline <think>/<thinking> segments via the cross-frame
+// InlineThinkStripper so reasoning is routed to thinking_delta and the remaining
+// body to text_delta. (Inline tool-call freezing is not part of this bridge's
+// text path, so only the stripping + text emission branches apply here.)
+func handleCCAnthropicTextDelta(state *ChatCompletionsToAnthropicStreamState, delta string) []AnthropicStreamEvent {
+	if state == nil || delta == "" {
+		return nil
+	}
+
+	// 先过 InlineThinkStripper 剥离内联 <think>/<thinking> 段。
+	reasoning, text := state.thinkStripper.Feed(delta)
+
+	var events []AnthropicStreamEvent
+
+	// reasoning 部分 → thinking_delta 事件
+	if reasoning != "" {
+		events = append(events, ensureCCAnthropicThinkingBlock(state)...)
+		events = append(events, ccAnthropicDelta(state, &AnthropicDelta{
+			Type:     "thinking_delta",
+			Thinking: reasoning,
+		})...)
+	}
+
+	// text 部分 → 原有文本处理逻辑（关闭可能已开启的 thinking 块，再走文本）
+	if text != "" {
+		if reasoning != "" {
+			events = append(events, closeCCAnthropicBlockIfOpen(state, "thinking")...)
+		}
+		events = append(events, ensureCCAnthropicTextBlock(state)...)
+		events = append(events, ccAnthropicDelta(state, &AnthropicDelta{
+			Type: "text_delta",
+			Text: text,
+		})...)
+	}
+
+	return events
+}
+
 // FinalizeChatCompletionsAnthropicStream emits terminal Anthropic events
 // (close open blocks + message_delta + message_stop) when the stream ends.
 func FinalizeChatCompletionsAnthropicStream(state *ChatCompletionsToAnthropicStreamState) []AnthropicStreamEvent {
@@ -749,6 +788,27 @@ func FinalizeChatCompletionsAnthropicStream(state *ChatCompletionsToAnthropicStr
 	}
 
 	var events []AnthropicStreamEvent
+
+	// 冲出跨帧缓冲里残留的 think 尾段
+	if r, t := state.thinkStripper.Flush(); r != "" || t != "" {
+		if r != "" {
+			events = append(events, ensureCCAnthropicThinkingBlock(state)...)
+			events = append(events, ccAnthropicDelta(state, &AnthropicDelta{
+				Type:     "thinking_delta",
+				Thinking: r,
+			})...)
+			events = append(events, closeCCAnthropicBlockIfOpen(state, "thinking")...)
+		}
+		if t != "" {
+			events = append(events, closeCCAnthropicBlockIfOpen(state, "thinking")...)
+			events = append(events, ensureCCAnthropicTextBlock(state)...)
+			events = append(events, ccAnthropicDelta(state, &AnthropicDelta{
+				Type: "text_delta",
+				Text: t,
+			})...)
+		}
+	}
+
 	if !state.MessageStartSent {
 		events = append(events, ensureCCAnthropicMessageStart(state)...)
 	}

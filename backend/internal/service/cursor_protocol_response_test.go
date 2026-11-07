@@ -16,6 +16,8 @@ package service
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -404,5 +406,46 @@ func TestCursorProtocolResponseUpstreamStatusError(t *testing.T) {
 		err := cursorUpstreamStatusError(503, nil)
 		require.ErrorIs(t, err, ErrCursorRelayAuthRejected)
 		require.Contains(t, err.Error(), "503")
+	})
+}
+
+// TestCursorUpstreamStreamErrorMessage 覆盖「从上游流终态错误取已脱敏 message」的出口。
+//
+// 与 cursorUpstreamStreamErrorCode 同构：ErrCursorUpstreamStream 结构化载体返回 message，
+// 非该类型错误返回 ("", false)——「没有」与「有但是空的」要能区分开，绝不填占位符。
+func TestCursorUpstreamStreamErrorMessage(t *testing.T) {
+	t.Run("cursorUpstreamStreamError 返回脱敏 message", func(t *testing.T) {
+		msg := "Cannot read properties of undefined (reading 'toString')"
+		err := &cursorUpstreamStreamError{Code: "internal", Message: msg}
+
+		got, ok := cursorUpstreamStreamErrorMessage(err)
+		require.True(t, ok)
+		require.Equal(t, msg, got)
+	})
+
+	t.Run("非内部类型错误返回空串与 false", func(t *testing.T) {
+		got, ok := cursorUpstreamStreamErrorMessage(errors.New("some unrelated error"))
+		require.False(t, ok)
+		require.Equal(t, "", got, "取不到 message 时必须记空串，不填占位符")
+	})
+
+	t.Run("经 errors.As 包装后仍可取 message", func(t *testing.T) {
+		msg := "upstream node panic: undefined"
+		base := &cursorUpstreamStreamError{Code: "internal", Message: msg}
+		wrapped := fmt.Errorf("wrapped: %w", base)
+
+		got, ok := cursorUpstreamStreamErrorMessage(wrapped)
+		require.True(t, ok)
+		require.Equal(t, msg, got)
+	})
+
+	t.Run("message 为空串时返回空串与 true", func(t *testing.T) {
+		// 是 cursorUpstreamStreamError 类型（分支会进入），但 message 本身是空的：
+		// 必须如实返回空串，而不是用占位符顶替。
+		err := &cursorUpstreamStreamError{Code: "internal", Message: ""}
+
+		got, ok := cursorUpstreamStreamErrorMessage(err)
+		require.True(t, ok)
+		require.Equal(t, "", got)
 	})
 }

@@ -93,15 +93,16 @@ func decodeRejectPayload(t *testing.T, payload []byte) (int, []byte) {
 // ---------------------------------------------------------------------------
 
 func TestCursorNativeExecRejectReason(t *testing.T) {
+	// declared（原名）与 wireNames（wire name）在此测试中无碰撞，二者相同；仅验证文本拼接正确。
 	require.Equal(t,
 		"Tool not available in this environment. Use only the client-provided tools: Bash, read_file.",
-		cursorNativeExecRejectReason([]string{"Bash", "read_file"}))
+		cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, []string{"Bash", "read_file"}, []string{"Bash", "read_file"}))
 	require.Equal(t,
 		"Tool not available in this environment. The client declared no tools.",
-		cursorNativeExecRejectReason(nil))
+		cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, nil, nil))
 	require.Equal(t,
 		"Tool not available in this environment. The client declared no tools.",
-		cursorNativeExecRejectReason([]string{}))
+		cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, []string{}, []string{}))
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +135,7 @@ func TestCursorNativeExecRejectField(t *testing.T) {
 
 func TestCursorNativeExecRejectEncode(t *testing.T) {
 	declared := []string{"Bash", "read_file"}
-	reason := cursorNativeExecRejectReason(declared)
+	reason := cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, declared, declared)
 
 	cases := []struct {
 		name               string
@@ -302,7 +303,7 @@ func TestCursorNativeExecRejectEncode(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCursorNativeExecRejectEncodeMissingArgs(t *testing.T) {
-	reason := cursorNativeExecRejectReason([]string{"Bash"})
+	reason := cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, []string{"Bash"}, []string{"Bash"})
 	for _, field := range []int{
 		2,  // shell_args
 		14, // shell_stream_args
@@ -374,7 +375,8 @@ func TestCursorRejectNativeExecWritesFramesAndLogs(t *testing.T) {
 		}
 	}
 	require.Equal(t, 2, resultFrames, "每个拒绝必须写出一个结果帧")
-	require.Equal(t, 2, streamCloseFrames, "每个拒绝必须补一个 stream_close 帧")
+	// 改动点 2：只有 f14 shell_stream 发 stream_close；f7 read_args 只发结果帧、不发 stream_close。
+	require.Equal(t, 1, streamCloseFrames, "只有 f14 必须补 stream_close 帧（f7 不发）")
 	require.True(t, sawF14, "必须含 f14 ShellStream 结果帧")
 	require.True(t, sawF7, "必须含 f7 ReadResult 结果帧")
 

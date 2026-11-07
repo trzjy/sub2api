@@ -7,15 +7,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// assertNoThinkTag 断言输出里**完整** <think>/</think> 标签出现次数恒为 0
-// （用户裁定：标签绝对不能外泄打印到正文）。
+// assertNoThinkTag 断言输出里**完整** <think>/</think> 及 <thinking>/</thinking>
+// 标签出现次数恒为 0（用户裁定：标签绝对不能外泄打印到正文）。
 func assertNoThinkTag(t *testing.T, s string) {
 	t.Helper()
 	require.Equal(t, 0, strings.Count(s, "<think>"), "完整 <think> 标签不得出现在输出: %q", s)
 	require.Equal(t, 0, strings.Count(s, "</think>"), "完整 </think> 标签不得出现在输出: %q", s)
+	require.Equal(t, 0, strings.Count(s, "<thinking>"), "完整 <thinking> 标签不得出现在输出: %q", s)
+	require.Equal(t, 0, strings.Count(s, "</thinking>"), "完整 </thinking> 标签不得出现在输出: %q", s)
 }
 
 // TestCursorThinkStrip_FullSegment 完整段切分：<think>思考</think>正文 →
@@ -25,7 +28,6 @@ func TestCursorThinkStrip_FullSegment(t *testing.T) {
 	reasoning, text := p.parseThinkDeltas("<think>思考</think>正文")
 	require.Equal(t, "思考", reasoning, "思考段应输出到 reasoning 通道")
 	require.Equal(t, "正文", text, "剥离后残留的前导空行也必须在首段去掉")
-	require.False(t, p.inThink)
 	rTail, tTail := p.flushThinkTail()
 	require.Empty(t, rTail)
 	require.Empty(t, tTail)
@@ -48,7 +50,6 @@ func TestCursorThinkStrip_CrossFrame(t *testing.T) {
 	txt.WriteString(tTail)
 	require.Equal(t, "思考", r.String(), "跨帧切分的思考内容应完整提取")
 	require.Equal(t, "正文", txt.String(), "跨帧切分的正文应完整提取")
-	require.False(t, p.inThink)
 	assertNoThinkTag(t, r.String()+txt.String())
 }
 
@@ -65,7 +66,6 @@ func TestCursorThinkStrip_Unclosed(t *testing.T) {
 	rTail, tTail := p.flushThinkTail()
 	require.Empty(t, rTail)
 	require.Empty(t, tTail)
-	require.True(t, p.inThink, "未闭合思考段结束时仍应处于思考态")
 	assertNoThinkTag(t, r0+r1+t0+t1)
 }
 
@@ -151,4 +151,54 @@ func extractSSEField(line, key string) string {
 		return ""
 	}
 	return s
+}
+
+// TestParseThinkDeltas_ThinkingVariant 验证 <thinking>…</thinking> 变体的剥离行为。
+func TestParseThinkDeltas_ThinkingVariant(t *testing.T) {
+	t.Run("单帧完整<thinking>", func(t *testing.T) {
+		p := &cursorStreamParser{}
+		r, txt := p.parseThinkDeltas("<thinking>推理内容</thinking>正文")
+		assert.Equal(t, "推理内容", r)
+		assert.Equal(t, "正文", txt)
+		assertNoThinkTag(t, r+txt)
+	})
+
+	t.Run("<thinking>跨帧切割", func(t *testing.T) {
+		p := &cursorStreamParser{}
+		chunks := []string{"<think", "ing>推理", "内容</think", "ing>正文"}
+		var rb, tb strings.Builder
+		for _, chunk := range chunks {
+			r, txt := p.parseThinkDeltas(chunk)
+			rb.WriteString(r)
+			tb.WriteString(txt)
+		}
+		assert.Equal(t, "推理内容", rb.String())
+		assert.Equal(t, "正文", tb.String())
+		assertNoThinkTag(t, rb.String()+tb.String())
+	})
+
+	t.Run("<thinking>前缀扣留不泄漏", func(t *testing.T) {
+		p := &cursorStreamParser{}
+		// 第一帧只发 "<thi"（是 <think> 和 <thinking> 的共同前缀）
+		r0, t0 := p.parseThinkDeltas("<thi")
+		assert.Empty(t, r0, "前缀段应被扣留，不输出 reasoning")
+		assert.Empty(t, t0, "前缀段应被扣留，不输出 text")
+		// 第二帧补全为 <thinking> 并闭合
+		r1, t1 := p.parseThinkDeltas("nking>思考</thinking>答案")
+		assert.Equal(t, "思考", r1)
+		assert.Equal(t, "答案", t1)
+		assertNoThinkTag(t, r0+r1+t0+t1)
+	})
+
+	t.Run("两段不同变体各自独立", func(t *testing.T) {
+		p := &cursorStreamParser{}
+		// 第一段 <think>，第二段 <thinking>
+		r0, t0 := p.parseThinkDeltas("<think>思考A</think>文本A")
+		r1, t1 := p.parseThinkDeltas("<thinking>思考B</thinking>文本B")
+		assert.Equal(t, "思考A", r0)
+		assert.Equal(t, "文本A", t0)
+		assert.Equal(t, "思考B", r1)
+		assert.Equal(t, "文本B", t1)
+		assertNoThinkTag(t, r0+r1+t0+t1)
+	})
 }

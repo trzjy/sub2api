@@ -8,13 +8,15 @@ package service
 //   - 10 种可应答询问逐一构造 → 断言回帧外层 AgentClientMessage.f6、InteractionResponse.f1 id
 //     原样、oneof 字段号与询问同号、内层形状与 reason/error 文本逐层解回精确一致；
 //   - mcp_auth 两分支（sub2api → approved；其它名 → rejected 且 reason 含该名）；
-//   - f12 generate_image / 不存在字段 / 缺 oneof：返回 ErrCursorUnsupportedRequest 且不写帧；
+//   - f12 generate_image / 不存在字段 / 缺 oneof：派发单 D 阶段 2 起回通用 rejected 应答、整轮继续，
+//     不再 502 失败关闭（不写失败关闭帧）；
 //   - 子消息解码失败：返回 ErrCursorProtocol 且不写帧；
 //   - 日志 interaction_query_answered 不含 args 正文（搜索词 / URL / 问题文本）。
 //
 // 本文件所有字段号均为字面数字（取自证据 39b 与方案 §1.2），不引用实现常量，防止自证。
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -184,28 +186,40 @@ func TestCursorInteractionQueryMcpAuthRejectReasonContainsName(t *testing.T) {
 }
 
 func TestCursorInteractionQueryUnsupportedFailsClosed(t *testing.T) {
-	cases := []struct {
+	// 派发单 D 阶段 2：未知 interaction 类型（f12 generate_image / f30 未登记字段）不再以 502 失败关闭，
+	// 而是回通用 rejected 应答让模型换条路继续（不写失败关闭帧）。
+	for _, tc := range []struct {
 		name    string
 		payload []byte
 		field   int
 	}{
 		{name: "f12_generate_image", payload: cursorIQTestQuery(5, 12, cursorIQTestArgs("draw")), field: 12},
 		{name: "f30_unknown", payload: cursorIQTestQuery(6, 30, cursorIQTestArgs("x")), field: 30},
-		{name: "missing_oneof", payload: cursorAppendBytesField(nil, 7, cursorAppendVarintField(nil, 1, 7)), field: 0},
-	}
-	for _, tc := range cases {
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, logs, stop := cursorIQTestDuplex(t)
+			// 派发单 D 阶段 2：未知 interaction 类型不再以 502 失败关闭，而是回通用
+			// rejected 应答让模型换条路继续（绝不写帧失败关闭）。
 			_, err := d.respond(tc.payload)
-			require.Error(t, err)
-			require.True(t, errors.Is(err, ErrCursorUnsupportedRequest), "got %v", err)
-			require.Contains(t, err.Error(), fmt.Sprintf("field %d not supported", tc.field))
-			require.Empty(t, stop(), "失败关闭时不得写出任何帧")
+			require.NoError(t, err, "未知 interaction 类型不得 502（派发单 D：回通用 rejected，整轮继续）")
+			require.Equal(t, 0, phaseCount(logs, "close"), "连接不得被终止")
+			// 必须写出通用 rejected 应答 {query_field:{f2:{f1:reason}}}。
+			cursorStage2ExpectInteractionRejected(t, bytes.NewBuffer(stop()))
 			entries := logs.FilterField(zap.String("phase", "interaction_query_unsupported")).All()
 			require.Len(t, entries, 1)
 			require.EqualValues(t, tc.field, entries[0].ContextMap()["query_field"])
 		})
 	}
+	// 缺 oneof（只有 f1 id、无实际 query 字段 → query field=0）：同样不再 502，回通用 rejected 继续；
+	// 因 query field 为 0，回包外层 field=0 在重新解码时被视为非法字段号，故只校验「写帧 + 不终止」，
+	// 不按常规 rejected 形状逐层解码（生产对此边角仍回帧、不关闭连接）。
+	t.Run("missing_oneof", func(t *testing.T) {
+		d, logs, stop := cursorIQTestDuplex(t)
+		_, err := d.respond(cursorAppendBytesField(nil, 7, cursorAppendVarintField(nil, 1, 7)))
+		require.NoError(t, err, "缺 oneof interaction 不得 502（派发单 D：回通用 rejected，整轮继续）")
+		require.Equal(t, 0, phaseCount(logs, "close"), "连接不得被终止")
+		require.NotEmpty(t, stop(), "缺 oneof 必须写出一帧通用 rejected 应答（即使外层 field=0）")
+	})
 }
 
 func TestCursorInteractionQueryMalformedSubmessage(t *testing.T) {
