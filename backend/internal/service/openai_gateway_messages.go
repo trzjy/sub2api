@@ -103,7 +103,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 
 	// Cursor 号池：入站 Anthropic Messages，出站 Cursor 原生协议；与 chat/responses 同口径，
 	// 必须先在通用 OpenAI 路径之前分流，否则会落到 OAuth token provider 并 502。
-	if isCursorAccount(account) {
+	// 仅 Connect 会话账号（cursor + 非 api_key）进入原生分支；Cursor APIKey 账号
+	// （kn-cy.com 等 OpenAI 兼容反代）不在此分派，落下方既有 OpenAI 兼容 raw 路径。
+	if account.IsCursorConnectSessionAccount() {
 		var cursorReq apicompat.AnthropicRequest
 		if err := json.Unmarshal(body, &cursorReq); err != nil {
 			return nil, fmt.Errorf("cursor: parse anthropic messages request: %w", err)
