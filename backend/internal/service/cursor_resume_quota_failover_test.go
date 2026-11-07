@@ -146,12 +146,18 @@ func TestCursorExecuteAdmissionRebuildExceptions(t *testing.T) {
 		assertPassedAdmission(t, execute(t, context.Background(), admissionTestPlan(true)))
 	})
 
-	t.Run("incomplete_history_still_400", func(t *testing.T) {
+	t.Run("incomplete_history_no_longer_400", func(t *testing.T) {
+		// 2026-11-07 五道闸退役：历史不完整**不再回 400**。
+		// 旧契约在这道闸上恒定命中 —— 而 Responses 官方用法
+		// （previous_response_id + 尾部 function_call_output，客户端不重放 function_call）
+		// 永远算不出「完整历史」→ 官方用法被恒定拒成 CUR-RES-01（生产近 7 天 57 次）。
+		//
+		// 孤儿批（编号不属于本站任何会话）仍由 IdentifyResume 拒绝，
+		// 见 TestCursorResumeRestartOrphanAllProtocolsRejected。
 		err := execute(t, context.Background(), admissionTestPlan(false))
 		var resumeErr *CursorResumeError
-		require.ErrorAs(t, err, &resumeErr)
-		require.Equal(t, 400, resumeErr.Status)
-		require.Equal(t, "unknown_association", resumeErr.Reason)
+		require.NotErrorAs(t, err, &resumeErr,
+			"历史不完整不再回 400（五道闸退役）：孤儿批的拒绝在 IdentifyResume 层")
 	})
 }
 

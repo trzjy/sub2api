@@ -161,6 +161,21 @@ func newCursorResumeFixture(
 	delegations.mu.Lock()
 	delegations.all = append(delegations.all, batch)
 	delegations.mu.Unlock()
+	// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
+	// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
+	// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
+	// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+	record.attachDelegations(delegations)
+	// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
+	// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
+	// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
+	// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+	record.attachDelegations(delegations)
+	// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
+	// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
+	// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
+	// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+	record.attachDelegations(delegations)
 
 	require.NoError(t, svc.recordDeliveredBatch(record, &CursorExecutionRequest{
 		Protocol:      cursorResumeWriterProtocol(protocol),
@@ -578,10 +593,13 @@ func TestCursorResumeConfigChangesRejected(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
 				[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "mc-1", "")
+			// 2026-11-07 五道闸退役：硬组（工具声明/schema）变了**不再拒绝** ——
+			// 客户端每轮重新拼装工具声明是合法行为（生产实测续轮比首轮少声明一个工具
+			// 22→21 / 24→23），跨轮比对只会把正常用户拒成 CUR-RES-04。
+			// 现在一律按**本次正文声明的**配置构造本轮。
 			_, err := fixture.resume(t, CursorResumeProtocolChat, []byte(tc.body), false)
-			require.Error(t, err, "改硬组配置必须拒绝")
-			require.Equal(t, 0, fixture.intake.callCount(), "拒绝必须零上游写入")
-			require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, err))
+			require.NoError(t, err, "改硬组配置不再拒绝（五道闸退役）")
+			require.Equal(t, 1, fixture.intake.callCount(), "按本次正文继续后应当正常出站一轮")
 		})
 	}
 }
@@ -717,9 +735,12 @@ func TestCursorResumeConfigDriftLogged(t *testing.T) {
   ],
   "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]
 }`
+		// 2026-11-07 五道闸退役：硬组不一致**不再拒绝**，但**仍必须留痕**
+		// （线上看到 CUR-RES-04 时要能回答「到底哪一组变了」——那正是上一轮
+		//  排查走弯路的直接原因。可观测性不因退役而丢失）。
 		_, err := fixture.resumeCtx(t, ctx, CursorResumeProtocolChat, []byte(body), false)
-		require.ErrorIs(t, err, ErrCursorResumeConfigChanged)
-		require.Equal(t, 0, fixture.intake.callCount(), "硬组不一致必须零上游写入")
+		require.NoError(t, err, "硬组不一致不再拒绝（五道闸退役）")
+		require.Equal(t, 1, fixture.intake.callCount(), "按本次正文继续后应当正常出站一轮")
 
 		entries := cursorPhaseEntries(logs, "resume_config_hard_mismatch")
 		require.Len(t, entries, 1, "硬组不一致必须落 resume_config_hard_mismatch")
@@ -755,12 +776,14 @@ func TestCursorResumeRejectDiagnosticsLogged(t *testing.T) {
   ],
   "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
 }`
+		// 2026-11-07 五道闸退役：历史项数不同**不再拒绝**（客户端裁剪 assistant 可见正文
+		// 是合法行为），但**仍必须留痕**（线上看到续轮被拒时要能回答「谁改了什么」）。
 		_, err := fixture.resumeCtx(t, ctx, CursorResumeProtocolChat, []byte(body), false)
-		require.ErrorIs(t, err, ErrCursorResumeHistoryMismatch)
-		require.Equal(t, 0, fixture.intake.callCount(), "拒绝必须零上游写入")
+		require.NoError(t, err, "历史项数不同不再拒绝（五道闸退役）")
+		require.Equal(t, 1, fixture.intake.callCount(), "按本次正文继续后应当正常出站一轮")
 
 		entries := cursorPhaseEntries(logs, "resume_history_mismatch")
-		require.Len(t, entries, 1, "history_mismatch 必须落带字段的诊断事件")
+		require.Len(t, entries, 1, "历史不一致必须落带字段的诊断事件")
 		fields := entries[0].ContextMap()
 		require.Contains(t, fields, "history_items_stored")
 		require.Contains(t, fields, "history_items_request")
@@ -810,9 +833,13 @@ func TestCursorResumeBodyChangedRejected(t *testing.T) {
   ],
   "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
 }`
+	// 2026-11-07 五道闸退役：用户正文被改**不再拒绝** —— 用户自己改写历史是正常行为
+	// （客户端重试、改写提问）。跨轮逐字节比对正文会把正常用户拒成 CUR-RES-04。
+	// ⚠️ 注意「工具参数被改」仍然被拒（防篡改），那是另一条能力：
+	// 见 TestCursorResumeCustomToolInputAligned（结果侧参数一致性校验）。
 	_, err := fixture.resume(t, CursorResumeProtocolChat, []byte(rewrittenUser), false)
-	require.ErrorIs(t, err, ErrCursorResumeHistoryMismatch)
-	require.Equal(t, 0, fixture.intake.callCount())
+	require.NoError(t, err, "正文被改不再拒绝（五道闸退役）")
+	require.Equal(t, 1, fixture.intake.callCount(), "按本次正文继续后应当正常出站一轮")
 }
 
 // TestCursorResumeStreamSwitchNoNewAgentRun 覆盖清单第 5 条：
@@ -1142,17 +1169,21 @@ func TestCursorResumeExecuteAdmissionOnlyPreviousResponseID(t *testing.T) {
 
 	var req apicompat.ResponsesRequest
 	require.NoError(t, json.Unmarshal([]byte(body), &req))
-	ccReq, convErr := apicompat.ResponsesToChatCompletionsRequest(&req)
+	_, convErr := apicompat.ResponsesToChatCompletionsRequest(&req)
 	require.NoError(t, convErr)
-	_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
-		Chat:     ccReq,
-		Model:    "cursor-test-model",
-		Protocol: cursorProtocolResponses,
-		Identity: cursorResumeTestIdentity,
-		Plan:     plan,
-	})
-	require.ErrorIs(t, execErr, ErrCursorResumeUnknownAssociation)
-	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, execErr))
+	// 孤儿批（previous_response_id 完全未登记）的拒绝发生在 **IdentifyResume** ——
+	// 那是「这批结果没有任何已登记关联」的判定点（Execute 拿不到 ticket，
+	// 无法区分孤儿与官方用法，故这道守卫只在 IdentifyResume）。
+	// 生产实测（2026-11-07，版本 7f2eb50f0）：孤儿批 → HTTP 400 + CUR-RES-01。
+	//
+	// 本用例走完整路径（先 IdentifyResume 再 Execute），与生产一致：
+	// 上一版直接调 Execute，绕过了这道判定 → 走到 s.now（测试未注入）而 panic，
+	// 既测不到真实行为、又把「Execute 缺一道防御」误报成生产缺陷。
+	ticket, identifyErr := svc.IdentifyResume(probe)
+	require.ErrorIs(t, identifyErr, ErrCursorResumeUnknownAssociation,
+		"孤儿批（previous_response_id 未登记）必须在 IdentifyResume 就拒绝")
+	require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, identifyErr))
+	require.Nil(t, ticket, "孤儿批不得拿到任何接管凭据")
 	require.Zero(t, svc.sessions.sessionCount(), "不得创建 session/AgentRun")
 	require.Zero(t, svc.sessions.indexCount(), "不得登记任何索引")
 }
@@ -1264,6 +1295,26 @@ func TestCursorResumeRestartOrphanAllProtocolsRejected(t *testing.T) {
 			require.True(t, plan.claimsContinuation(), "转换不得抹掉续轮标记")
 			require.False(t, plan.resultsReplayHistory(), "省略历史的仅结果形状不是回放")
 
+			// 2026-11-07 五道闸退役：Execute 层的「历史不完整 → 400 unknown_association」
+			// 守卫**不再存在**。
+			//
+			// 它为什么该退役：Responses 的官方用法就是「previous_response_id + 尾部
+			// function_call_output」，客户端**不重放** function_call → 正文算不出
+			// 「完整历史」→ 那道守卫恒定命中 → 官方用法被恒定拒成 CUR-RES-01
+			// （生产近 7 天 57 次）。
+			//
+			// 它为什么**不该**原样恢复：Execute 手上只有 Plan（拿不到 ticket），
+			// 分不清「孤儿批」（response_id 完全未登记 → 该拒）与
+			// 「官方用法」（response_id 已登记、只是正文不带 function_call → 该放行）。
+			// 恢复它 = 把官方用法又拒回去 = CUR-RES-01 复发。
+			//
+			// 孤儿批的拒绝由**上一层**保证：IdentifyResume 在「全部 call_id 未登记」时
+			// 就返回可区分的 unknown_association（上面已断言，生产实测同样 400 + CUR-RES-01），
+			// 生产路径 handler 先调 IdentifyResume 再决定是否进 Execute，
+			// 孤儿批根本到不了 Execute。
+			//
+			// 所以这里断言的是：Execute 不再重复拦截（那道守卫已退役），
+			// 而孤儿批的拒绝责任在 IdentifyResume（已由本用例前半段断言）。
 			var ccReq apicompat.ChatCompletionsRequest
 			require.NoError(t, json.Unmarshal([]byte(cursorResumeTestChatFirst), &ccReq))
 			_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
@@ -1273,11 +1324,10 @@ func TestCursorResumeRestartOrphanAllProtocolsRejected(t *testing.T) {
 				Identity: cursorResumeTestIdentity,
 				Plan:     plan,
 			})
-			require.ErrorIs(t, execErr, ErrCursorResumeUnknownAssociation,
-				"历史不完整的孤儿续轮不得重建，必须在准入边界 400")
-			require.Equal(t, http.StatusBadRequest, mustCursorResumeStatus(t, execErr))
-			require.Zero(t, svc.sessions.sessionCount(), "不得创建 session/AgentRun")
-			require.Zero(t, svc.sessions.indexCount(), "不得登记任何索引")
+			// Execute 不再因「历史不完整」拒绝（Execute 拿不到 ticket，分不清孤儿与官方用法）。
+			// 孤儿批的拒绝在 IdentifyResume（前半段已断言）。
+			require.NotErrorIs(t, execErr, ErrCursorResumeUnknownAssociation,
+				"Execute 层不再重复拦截孤儿/官方用法（该判定属 IdentifyResume）")
 		})
 	}
 }
@@ -1492,6 +1542,11 @@ func TestCursorDeliveredHistoryMatchesResumePrefix(t *testing.T) {
 			delegations.mu.Lock()
 			delegations.all = append(delegations.all, batch)
 			delegations.mu.Unlock()
+			// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
+			// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
+			// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
+			// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+			record.attachDelegations(delegations)
 
 			callIDs := make([]string, 0, len(tc.calls))
 			for _, call := range tc.calls {
@@ -1546,6 +1601,11 @@ func TestCursorResumePrunedAssistantProseAccepted(t *testing.T) {
 		delegations.mu.Lock()
 		delegations.all = append(delegations.all, batch)
 		delegations.mu.Unlock()
+		// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
+		// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
+		// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
+		// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+		record.attachDelegations(delegations)
 
 		// 关键：按生产同一路径交付，且**带正文**（这正是修复前造成 17 vs 16 的那一项）。
 		prepared, err := svc.prepareDeliveredBatch(record, CursorResumeProtocolMessages, "cursor-test-model",
