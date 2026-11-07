@@ -96,6 +96,9 @@ type Proxy func(*sql.Selector)
 // QuotaKey is the predicate function for quotakey builders.
 type QuotaKey func(*sql.Selector)
 
+// QuotaUpstream is the predicate function for quotaupstream builders.
+type QuotaUpstream func(*sql.Selector)
+
 // RedeemBatch is the predicate function for redeembatch builders.
 type RedeemBatch func(*sql.Selector)
 

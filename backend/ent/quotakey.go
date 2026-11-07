@@ -49,6 +49,8 @@ type QuotaKey struct {
 	Priority int `json:"priority,omitempty"`
 	// Notes holds the value of the "notes" field.
 	Notes *string `json:"notes,omitempty"`
+	// UpstreamKey holds the value of the "upstream_key" field.
+	UpstreamKey string `json:"upstream_key,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the QuotaKeyQuery when eager-loading is set.
 	Edges        QuotaKeyEdges `json:"edges"`
@@ -84,7 +86,7 @@ func (*QuotaKey) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case quotakey.FieldID, quotakey.FieldPriority:
 			values[i] = new(sql.NullInt64)
-		case quotakey.FieldCodeEncrypted, quotakey.FieldCodeMAC, quotakey.FieldCodeLast4, quotakey.FieldStatus, quotakey.FieldLastRefreshError, quotakey.FieldDeviceID, quotakey.FieldNotes:
+		case quotakey.FieldCodeEncrypted, quotakey.FieldCodeMAC, quotakey.FieldCodeLast4, quotakey.FieldStatus, quotakey.FieldLastRefreshError, quotakey.FieldDeviceID, quotakey.FieldNotes, quotakey.FieldUpstreamKey:
 			values[i] = new(sql.NullString)
 		case quotakey.FieldDeletedAt, quotakey.FieldLastRefreshAt, quotakey.FieldExpiresAt, quotakey.FieldCreatedAt, quotakey.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -207,6 +209,12 @@ func (_m *QuotaKey) assignValues(columns []string, values []any) error {
 				_m.Notes = new(string)
 				*_m.Notes = value.String
 			}
+		case quotakey.FieldUpstreamKey:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field upstream_key", values[i])
+			} else if value.Valid {
+				_m.UpstreamKey = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -304,6 +312,9 @@ func (_m *QuotaKey) String() string {
 		builder.WriteString("notes=")
 		builder.WriteString(*v)
 	}
+	builder.WriteString(", ")
+	builder.WriteString("upstream_key=")
+	builder.WriteString(_m.UpstreamKey)
 	builder.WriteByte(')')
 	return builder.String()
 }

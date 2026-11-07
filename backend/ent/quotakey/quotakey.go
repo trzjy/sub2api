@@ -45,6 +45,8 @@ const (
 	FieldPriority = "priority"
 	// FieldNotes holds the string denoting the notes field in the database.
 	FieldNotes = "notes"
+	// FieldUpstreamKey holds the string denoting the upstream_key field in the database.
+	FieldUpstreamKey = "upstream_key"
 	// EdgeAccounts holds the string denoting the accounts edge name in mutations.
 	EdgeAccounts = "accounts"
 	// Table holds the table name of the quotakey in the database.
@@ -76,6 +78,7 @@ var Columns = []string{
 	FieldUpdatedAt,
 	FieldPriority,
 	FieldNotes,
+	FieldUpstreamKey,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -122,6 +125,10 @@ var (
 	DefaultPriority int
 	// PriorityValidator is a validator for the "priority" field. It is called by the builders before save.
 	PriorityValidator func(int) error
+	// DefaultUpstreamKey holds the default value on creation for the "upstream_key" field.
+	DefaultUpstreamKey string
+	// UpstreamKeyValidator is a validator for the "upstream_key" field. It is called by the builders before save.
+	UpstreamKeyValidator func(string) error
 )
 
 // OrderOption defines the ordering options for the QuotaKey queries.
@@ -200,6 +207,11 @@ func ByPriority(opts ...sql.OrderTermOption) OrderOption {
 // ByNotes orders the results by the notes field.
 func ByNotes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldNotes, opts...).ToFunc()
+}
+
+// ByUpstreamKey orders the results by the upstream_key field.
+func ByUpstreamKey(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUpstreamKey, opts...).ToFunc()
 }
 
 // ByAccountsCount orders the results by accounts count.

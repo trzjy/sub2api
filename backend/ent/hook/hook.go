@@ -369,6 +369,18 @@ func (f QuotaKeyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, er
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.QuotaKeyMutation", m)
 }
 
+// The QuotaUpstreamFunc type is an adapter to allow the use of ordinary
+// function as QuotaUpstream mutator.
+type QuotaUpstreamFunc func(context.Context, *ent.QuotaUpstreamMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f QuotaUpstreamFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.QuotaUpstreamMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.QuotaUpstreamMutation", m)
+}
+
 // The RedeemBatchFunc type is an adapter to allow the use of ordinary
 // function as RedeemBatch mutator.
 type RedeemBatchFunc func(context.Context, *ent.RedeemBatchMutation) (ent.Value, error)

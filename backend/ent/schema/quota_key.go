@@ -158,6 +158,12 @@ func (QuotaKey) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			SchemaType(map[string]string{dialect.Postgres: "text"}),
+		// upstream_key：本激活码所属上游的稳定标识（引用 quota_upstreams.key）。
+		// 决定用哪个拉号客户端实现拉号，以及管理端按上游区分显示。
+		// 默认 'shareai'（存量激活码全部是 ShareAI 号池，见 KC-16 第 4 步回填）。
+		field.String("upstream_key").
+			Default("shareai").
+			MaxLen(64),
 	}
 }
 
@@ -197,5 +203,8 @@ func (QuotaKey) Indexes() []ent.Index {
 		index.Fields("status", "exhausted", "expires_at").
 			StorageKey("idx_quota_keys_reconciler").
 			Annotations(entsql.IndexWhere("status = 'active'")),
+		// upstream_key 普通索引（便于按上游查，非唯一；存量行默认 shareai）
+		index.Fields("upstream_key").
+			StorageKey("idx_quota_keys_upstream_key"),
 	}
 }

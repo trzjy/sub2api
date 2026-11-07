@@ -1608,6 +1608,7 @@ var (
 		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
 		{Name: "priority", Type: field.TypeInt, Default: 1},
 		{Name: "notes", Type: field.TypeString, Nullable: true, SchemaType: map[string]string{"postgres": "text"}},
+		{Name: "upstream_key", Type: field.TypeString, Size: 64, Default: "shareai"},
 	}
 	// QuotaKeysTable holds the schema information for the "quota_keys" table.
 	QuotaKeysTable = &schema.Table{
@@ -1648,6 +1649,41 @@ var (
 				Annotation: &entsql.IndexAnnotation{
 					Where: "status = 'active'",
 				},
+			},
+			{
+				Name:    "idx_quota_keys_upstream_key",
+				Unique:  false,
+				Columns: []*schema.Column{QuotaKeysColumns[16]},
+			},
+		},
+	}
+	// QuotaUpstreamsColumns holds the columns for the "quota_upstreams" table.
+	QuotaUpstreamsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "deleted_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "key", Type: field.TypeString, Size: 64},
+		{Name: "name", Type: field.TypeString, Size: 100},
+		{Name: "type", Type: field.TypeString, Size: 32},
+		{Name: "renewal_url", Type: field.TypeString, Nullable: true, Size: 500},
+		{Name: "notes", Type: field.TypeString, Nullable: true, SchemaType: map[string]string{"postgres": "text"}},
+		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+	}
+	// QuotaUpstreamsTable holds the schema information for the "quota_upstreams" table.
+	QuotaUpstreamsTable = &schema.Table{
+		Name:       "quota_upstreams",
+		Columns:    QuotaUpstreamsColumns,
+		PrimaryKey: []*schema.Column{QuotaUpstreamsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "uq_quota_upstreams_key",
+				Unique:  true,
+				Columns: []*schema.Column{QuotaUpstreamsColumns[2]},
+			},
+			{
+				Name:    "idx_quota_upstreams_type",
+				Unique:  false,
+				Columns: []*schema.Column{QuotaUpstreamsColumns[4]},
 			},
 		},
 	}
@@ -2540,6 +2576,7 @@ var (
 		PromoIntelSourcesTable,
 		ProxiesTable,
 		QuotaKeysTable,
+		QuotaUpstreamsTable,
 		RedeemBatchesTable,
 		RedeemCodesTable,
 		RedeemCodeGroupsTable,
@@ -2675,6 +2712,9 @@ func init() {
 	}
 	QuotaKeysTable.Annotation = &entsql.Annotation{
 		Table: "quota_keys",
+	}
+	QuotaUpstreamsTable.Annotation = &entsql.Annotation{
+		Table: "quota_upstreams",
 	}
 	RedeemBatchesTable.Annotation = &entsql.Annotation{
 		Table: "redeem_batches",

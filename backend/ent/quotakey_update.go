@@ -278,6 +278,20 @@ func (_u *QuotaKeyUpdate) ClearNotes() *QuotaKeyUpdate {
 	return _u
 }
 
+// SetUpstreamKey sets the "upstream_key" field.
+func (_u *QuotaKeyUpdate) SetUpstreamKey(v string) *QuotaKeyUpdate {
+	_u.mutation.SetUpstreamKey(v)
+	return _u
+}
+
+// SetNillableUpstreamKey sets the "upstream_key" field if the given value is not nil.
+func (_u *QuotaKeyUpdate) SetNillableUpstreamKey(v *string) *QuotaKeyUpdate {
+	if v != nil {
+		_u.SetUpstreamKey(*v)
+	}
+	return _u
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *QuotaKeyUpdate) AddAccountIDs(ids ...int64) *QuotaKeyUpdate {
 	_u.mutation.AddAccountIDs(ids...)
@@ -398,6 +412,11 @@ func (_u *QuotaKeyUpdate) check() error {
 			return &ValidationError{Name: "priority", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.priority": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.UpstreamKey(); ok {
+		if err := quotakey.UpstreamKeyValidator(v); err != nil {
+			return &ValidationError{Name: "upstream_key", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.upstream_key": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -489,6 +508,9 @@ func (_u *QuotaKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.NotesCleared() {
 		_spec.ClearField(quotakey.FieldNotes, field.TypeString)
+	}
+	if value, ok := _u.mutation.UpstreamKey(); ok {
+		_spec.SetField(quotakey.FieldUpstreamKey, field.TypeString, value)
 	}
 	if _u.mutation.AccountsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -802,6 +824,20 @@ func (_u *QuotaKeyUpdateOne) ClearNotes() *QuotaKeyUpdateOne {
 	return _u
 }
 
+// SetUpstreamKey sets the "upstream_key" field.
+func (_u *QuotaKeyUpdateOne) SetUpstreamKey(v string) *QuotaKeyUpdateOne {
+	_u.mutation.SetUpstreamKey(v)
+	return _u
+}
+
+// SetNillableUpstreamKey sets the "upstream_key" field if the given value is not nil.
+func (_u *QuotaKeyUpdateOne) SetNillableUpstreamKey(v *string) *QuotaKeyUpdateOne {
+	if v != nil {
+		_u.SetUpstreamKey(*v)
+	}
+	return _u
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *QuotaKeyUpdateOne) AddAccountIDs(ids ...int64) *QuotaKeyUpdateOne {
 	_u.mutation.AddAccountIDs(ids...)
@@ -935,6 +971,11 @@ func (_u *QuotaKeyUpdateOne) check() error {
 			return &ValidationError{Name: "priority", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.priority": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.UpstreamKey(); ok {
+		if err := quotakey.UpstreamKeyValidator(v); err != nil {
+			return &ValidationError{Name: "upstream_key", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.upstream_key": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -1043,6 +1084,9 @@ func (_u *QuotaKeyUpdateOne) sqlSave(ctx context.Context) (_node *QuotaKey, err 
 	}
 	if _u.mutation.NotesCleared() {
 		_spec.ClearField(quotakey.FieldNotes, field.TypeString)
+	}
+	if value, ok := _u.mutation.UpstreamKey(); ok {
+		_spec.SetField(quotakey.FieldUpstreamKey, field.TypeString, value)
 	}
 	if _u.mutation.AccountsCleared() {
 		edge := &sqlgraph.EdgeSpec{

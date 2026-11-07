@@ -45,6 +45,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
+	"github.com/Wei-Shaw/sub2api/ent/quotaupstream"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
@@ -133,6 +134,8 @@ type Client struct {
 	Proxy *ProxyClient
 	// QuotaKey is the client for interacting with the QuotaKey builders.
 	QuotaKey *QuotaKeyClient
+	// QuotaUpstream is the client for interacting with the QuotaUpstream builders.
+	QuotaUpstream *QuotaUpstreamClient
 	// RedeemBatch is the client for interacting with the RedeemBatch builders.
 	RedeemBatch *RedeemBatchClient
 	// RedeemCode is the client for interacting with the RedeemCode builders.
@@ -212,6 +215,7 @@ func (c *Client) init() {
 	c.PromoIntelSource = NewPromoIntelSourceClient(c.config)
 	c.Proxy = NewProxyClient(c.config)
 	c.QuotaKey = NewQuotaKeyClient(c.config)
+	c.QuotaUpstream = NewQuotaUpstreamClient(c.config)
 	c.RedeemBatch = NewRedeemBatchClient(c.config)
 	c.RedeemCode = NewRedeemCodeClient(c.config)
 	c.RedeemCodeGroup = NewRedeemCodeGroupClient(c.config)
@@ -353,6 +357,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		PromoIntelSource:              NewPromoIntelSourceClient(cfg),
 		Proxy:                         NewProxyClient(cfg),
 		QuotaKey:                      NewQuotaKeyClient(cfg),
+		QuotaUpstream:                 NewQuotaUpstreamClient(cfg),
 		RedeemBatch:                   NewRedeemBatchClient(cfg),
 		RedeemCode:                    NewRedeemCodeClient(cfg),
 		RedeemCodeGroup:               NewRedeemCodeGroupClient(cfg),
@@ -421,6 +426,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		PromoIntelSource:              NewPromoIntelSourceClient(cfg),
 		Proxy:                         NewProxyClient(cfg),
 		QuotaKey:                      NewQuotaKeyClient(cfg),
+		QuotaUpstream:                 NewQuotaUpstreamClient(cfg),
 		RedeemBatch:                   NewRedeemBatchClient(cfg),
 		RedeemCode:                    NewRedeemCodeClient(cfg),
 		RedeemCodeGroup:               NewRedeemCodeGroupClient(cfg),
@@ -477,11 +483,12 @@ func (c *Client) Use(hooks ...Hook) {
 		c.Group, c.IdempotencyRecord, c.IdentityAdoptionDecision, c.PaymentAuditLog,
 		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
 		c.PromoCodeUsage, c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.QuotaKey,
-		c.RedeemBatch, c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret, c.Setting,
-		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
-		c.UsageRiskReport, c.UsageRiskRollup, c.UsageRiskRun, c.User,
-		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription, c.WelfareBalance,
+		c.QuotaUpstream, c.RedeemBatch, c.RedeemCode, c.RedeemCodeGroup,
+		c.SecuritySecret, c.Setting, c.SubscriptionPlan, c.TLSFingerprintProfile,
+		c.UsageCleanupTask, c.UsageLog, c.UsageRiskReport, c.UsageRiskRollup,
+		c.UsageRiskRun, c.User, c.UserAllowedGroup, c.UserAttributeDefinition,
+		c.UserAttributeValue, c.UserPlatformQuota, c.UserSubscription,
+		c.WelfareBalance,
 	} {
 		n.Use(hooks...)
 	}
@@ -499,11 +506,12 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.Group, c.IdempotencyRecord, c.IdentityAdoptionDecision, c.PaymentAuditLog,
 		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
 		c.PromoCodeUsage, c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.QuotaKey,
-		c.RedeemBatch, c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret, c.Setting,
-		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
-		c.UsageRiskReport, c.UsageRiskRollup, c.UsageRiskRun, c.User,
-		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription, c.WelfareBalance,
+		c.QuotaUpstream, c.RedeemBatch, c.RedeemCode, c.RedeemCodeGroup,
+		c.SecuritySecret, c.Setting, c.SubscriptionPlan, c.TLSFingerprintProfile,
+		c.UsageCleanupTask, c.UsageLog, c.UsageRiskReport, c.UsageRiskRollup,
+		c.UsageRiskRun, c.User, c.UserAllowedGroup, c.UserAttributeDefinition,
+		c.UserAttributeValue, c.UserPlatformQuota, c.UserSubscription,
+		c.WelfareBalance,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -572,6 +580,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Proxy.mutate(ctx, m)
 	case *QuotaKeyMutation:
 		return c.QuotaKey.mutate(ctx, m)
+	case *QuotaUpstreamMutation:
+		return c.QuotaUpstream.mutate(ctx, m)
 	case *RedeemBatchMutation:
 		return c.RedeemBatch.mutate(ctx, m)
 	case *RedeemCodeMutation:
@@ -5352,6 +5362,141 @@ func (c *QuotaKeyClient) mutate(ctx context.Context, m *QuotaKeyMutation) (Value
 	}
 }
 
+// QuotaUpstreamClient is a client for the QuotaUpstream schema.
+type QuotaUpstreamClient struct {
+	config
+}
+
+// NewQuotaUpstreamClient returns a client for the QuotaUpstream from the given config.
+func NewQuotaUpstreamClient(c config) *QuotaUpstreamClient {
+	return &QuotaUpstreamClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `quotaupstream.Hooks(f(g(h())))`.
+func (c *QuotaUpstreamClient) Use(hooks ...Hook) {
+	c.hooks.QuotaUpstream = append(c.hooks.QuotaUpstream, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `quotaupstream.Intercept(f(g(h())))`.
+func (c *QuotaUpstreamClient) Intercept(interceptors ...Interceptor) {
+	c.inters.QuotaUpstream = append(c.inters.QuotaUpstream, interceptors...)
+}
+
+// Create returns a builder for creating a QuotaUpstream entity.
+func (c *QuotaUpstreamClient) Create() *QuotaUpstreamCreate {
+	mutation := newQuotaUpstreamMutation(c.config, OpCreate)
+	return &QuotaUpstreamCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of QuotaUpstream entities.
+func (c *QuotaUpstreamClient) CreateBulk(builders ...*QuotaUpstreamCreate) *QuotaUpstreamCreateBulk {
+	return &QuotaUpstreamCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *QuotaUpstreamClient) MapCreateBulk(slice any, setFunc func(*QuotaUpstreamCreate, int)) *QuotaUpstreamCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &QuotaUpstreamCreateBulk{err: fmt.Errorf("calling to QuotaUpstreamClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*QuotaUpstreamCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &QuotaUpstreamCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for QuotaUpstream.
+func (c *QuotaUpstreamClient) Update() *QuotaUpstreamUpdate {
+	mutation := newQuotaUpstreamMutation(c.config, OpUpdate)
+	return &QuotaUpstreamUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *QuotaUpstreamClient) UpdateOne(_m *QuotaUpstream) *QuotaUpstreamUpdateOne {
+	mutation := newQuotaUpstreamMutation(c.config, OpUpdateOne, withQuotaUpstream(_m))
+	return &QuotaUpstreamUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *QuotaUpstreamClient) UpdateOneID(id int64) *QuotaUpstreamUpdateOne {
+	mutation := newQuotaUpstreamMutation(c.config, OpUpdateOne, withQuotaUpstreamID(id))
+	return &QuotaUpstreamUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for QuotaUpstream.
+func (c *QuotaUpstreamClient) Delete() *QuotaUpstreamDelete {
+	mutation := newQuotaUpstreamMutation(c.config, OpDelete)
+	return &QuotaUpstreamDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *QuotaUpstreamClient) DeleteOne(_m *QuotaUpstream) *QuotaUpstreamDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *QuotaUpstreamClient) DeleteOneID(id int64) *QuotaUpstreamDeleteOne {
+	builder := c.Delete().Where(quotaupstream.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &QuotaUpstreamDeleteOne{builder}
+}
+
+// Query returns a query builder for QuotaUpstream.
+func (c *QuotaUpstreamClient) Query() *QuotaUpstreamQuery {
+	return &QuotaUpstreamQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeQuotaUpstream},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a QuotaUpstream entity by its id.
+func (c *QuotaUpstreamClient) Get(ctx context.Context, id int64) (*QuotaUpstream, error) {
+	return c.Query().Where(quotaupstream.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *QuotaUpstreamClient) GetX(ctx context.Context, id int64) *QuotaUpstream {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *QuotaUpstreamClient) Hooks() []Hook {
+	hooks := c.hooks.QuotaUpstream
+	return append(hooks[:len(hooks):len(hooks)], quotaupstream.Hooks[:]...)
+}
+
+// Interceptors returns the client interceptors.
+func (c *QuotaUpstreamClient) Interceptors() []Interceptor {
+	inters := c.inters.QuotaUpstream
+	return append(inters[:len(inters):len(inters)], quotaupstream.Interceptors[:]...)
+}
+
+func (c *QuotaUpstreamClient) mutate(ctx context.Context, m *QuotaUpstreamMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&QuotaUpstreamCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&QuotaUpstreamUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&QuotaUpstreamUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&QuotaUpstreamDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown QuotaUpstream mutation op: %q", m.Op())
+	}
+}
+
 // RedeemBatchClient is a client for the RedeemBatch schema.
 type RedeemBatchClient struct {
 	config
@@ -8520,8 +8665,8 @@ type (
 		ErrorPassthroughRule, Group, IdempotencyRecord, IdentityAdoptionDecision,
 		PaymentAuditLog, PaymentOrder, PaymentProviderInstance, PendingAuthSession,
 		PromoCode, PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy, QuotaKey,
-		RedeemBatch, RedeemCode, RedeemCodeGroup, SecuritySecret, Setting,
-		SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
+		QuotaUpstream, RedeemBatch, RedeemCode, RedeemCodeGroup, SecuritySecret,
+		Setting, SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
 		UsageRiskReport, UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup,
 		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
 		UserSubscription, WelfareBalance []ent.Hook
@@ -8534,8 +8679,8 @@ type (
 		ErrorPassthroughRule, Group, IdempotencyRecord, IdentityAdoptionDecision,
 		PaymentAuditLog, PaymentOrder, PaymentProviderInstance, PendingAuthSession,
 		PromoCode, PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy, QuotaKey,
-		RedeemBatch, RedeemCode, RedeemCodeGroup, SecuritySecret, Setting,
-		SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
+		QuotaUpstream, RedeemBatch, RedeemCode, RedeemCodeGroup, SecuritySecret,
+		Setting, SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
 		UsageRiskReport, UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup,
 		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
 		UserSubscription, WelfareBalance []ent.Interceptor

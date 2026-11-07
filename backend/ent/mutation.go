@@ -43,6 +43,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
+	"github.com/Wei-Shaw/sub2api/ent/quotaupstream"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
@@ -104,6 +105,7 @@ const (
 	TypePromoIntelSource              = "PromoIntelSource"
 	TypeProxy                         = "Proxy"
 	TypeQuotaKey                      = "QuotaKey"
+	TypeQuotaUpstream                 = "QuotaUpstream"
 	TypeRedeemBatch                   = "RedeemBatch"
 	TypeRedeemCode                    = "RedeemCode"
 	TypeRedeemCodeGroup               = "RedeemCodeGroup"
@@ -42858,6 +42860,7 @@ type QuotaKeyMutation struct {
 	priority             *int
 	addpriority          *int
 	notes                *string
+	upstream_key         *string
 	clearedFields        map[string]struct{}
 	accounts             map[int64]struct{}
 	removedaccounts      map[int64]struct{}
@@ -43658,6 +43661,42 @@ func (m *QuotaKeyMutation) ResetNotes() {
 	delete(m.clearedFields, quotakey.FieldNotes)
 }
 
+// SetUpstreamKey sets the "upstream_key" field.
+func (m *QuotaKeyMutation) SetUpstreamKey(s string) {
+	m.upstream_key = &s
+}
+
+// UpstreamKey returns the value of the "upstream_key" field in the mutation.
+func (m *QuotaKeyMutation) UpstreamKey() (r string, exists bool) {
+	v := m.upstream_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpstreamKey returns the old "upstream_key" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldUpstreamKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpstreamKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpstreamKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpstreamKey: %w", err)
+	}
+	return oldValue.UpstreamKey, nil
+}
+
+// ResetUpstreamKey resets all changes to the "upstream_key" field.
+func (m *QuotaKeyMutation) ResetUpstreamKey() {
+	m.upstream_key = nil
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by ids.
 func (m *QuotaKeyMutation) AddAccountIDs(ids ...int64) {
 	if m.accounts == nil {
@@ -43746,7 +43785,7 @@ func (m *QuotaKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *QuotaKeyMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 16)
 	if m.deleted_at != nil {
 		fields = append(fields, quotakey.FieldDeletedAt)
 	}
@@ -43792,6 +43831,9 @@ func (m *QuotaKeyMutation) Fields() []string {
 	if m.notes != nil {
 		fields = append(fields, quotakey.FieldNotes)
 	}
+	if m.upstream_key != nil {
+		fields = append(fields, quotakey.FieldUpstreamKey)
+	}
 	return fields
 }
 
@@ -43830,6 +43872,8 @@ func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.Priority()
 	case quotakey.FieldNotes:
 		return m.Notes()
+	case quotakey.FieldUpstreamKey:
+		return m.UpstreamKey()
 	}
 	return nil, false
 }
@@ -43869,6 +43913,8 @@ func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldPriority(ctx)
 	case quotakey.FieldNotes:
 		return m.OldNotes(ctx)
+	case quotakey.FieldUpstreamKey:
+		return m.OldUpstreamKey(ctx)
 	}
 	return nil, fmt.Errorf("unknown QuotaKey field %s", name)
 }
@@ -43982,6 +44028,13 @@ func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetNotes(v)
+		return nil
+	case quotakey.FieldUpstreamKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpstreamKey(v)
 		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey field %s", name)
@@ -44149,6 +44202,9 @@ func (m *QuotaKeyMutation) ResetField(name string) error {
 	case quotakey.FieldNotes:
 		m.ResetNotes()
 		return nil
+	case quotakey.FieldUpstreamKey:
+		m.ResetUpstreamKey()
+		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey field %s", name)
 }
@@ -44235,6 +44291,770 @@ func (m *QuotaKeyMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey edge %s", name)
+}
+
+// QuotaUpstreamMutation represents an operation that mutates the QuotaUpstream nodes in the graph.
+type QuotaUpstreamMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *int64
+	deleted_at    *time.Time
+	key           *string
+	name          *string
+	_type         *string
+	renewal_url   *string
+	notes         *string
+	created_at    *time.Time
+	updated_at    *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*QuotaUpstream, error)
+	predicates    []predicate.QuotaUpstream
+}
+
+var _ ent.Mutation = (*QuotaUpstreamMutation)(nil)
+
+// quotaupstreamOption allows management of the mutation configuration using functional options.
+type quotaupstreamOption func(*QuotaUpstreamMutation)
+
+// newQuotaUpstreamMutation creates new mutation for the QuotaUpstream entity.
+func newQuotaUpstreamMutation(c config, op Op, opts ...quotaupstreamOption) *QuotaUpstreamMutation {
+	m := &QuotaUpstreamMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeQuotaUpstream,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withQuotaUpstreamID sets the ID field of the mutation.
+func withQuotaUpstreamID(id int64) quotaupstreamOption {
+	return func(m *QuotaUpstreamMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *QuotaUpstream
+		)
+		m.oldValue = func(ctx context.Context) (*QuotaUpstream, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().QuotaUpstream.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withQuotaUpstream sets the old QuotaUpstream of the mutation.
+func withQuotaUpstream(node *QuotaUpstream) quotaupstreamOption {
+	return func(m *QuotaUpstreamMutation) {
+		m.oldValue = func(context.Context) (*QuotaUpstream, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m QuotaUpstreamMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m QuotaUpstreamMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *QuotaUpstreamMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *QuotaUpstreamMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().QuotaUpstream.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (m *QuotaUpstreamMutation) SetDeletedAt(t time.Time) {
+	m.deleted_at = &t
+}
+
+// DeletedAt returns the value of the "deleted_at" field in the mutation.
+func (m *QuotaUpstreamMutation) DeletedAt() (r time.Time, exists bool) {
+	v := m.deleted_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletedAt returns the old "deleted_at" field's value of the QuotaUpstream entity.
+// If the QuotaUpstream object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaUpstreamMutation) OldDeletedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletedAt: %w", err)
+	}
+	return oldValue.DeletedAt, nil
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (m *QuotaUpstreamMutation) ClearDeletedAt() {
+	m.deleted_at = nil
+	m.clearedFields[quotaupstream.FieldDeletedAt] = struct{}{}
+}
+
+// DeletedAtCleared returns if the "deleted_at" field was cleared in this mutation.
+func (m *QuotaUpstreamMutation) DeletedAtCleared() bool {
+	_, ok := m.clearedFields[quotaupstream.FieldDeletedAt]
+	return ok
+}
+
+// ResetDeletedAt resets all changes to the "deleted_at" field.
+func (m *QuotaUpstreamMutation) ResetDeletedAt() {
+	m.deleted_at = nil
+	delete(m.clearedFields, quotaupstream.FieldDeletedAt)
+}
+
+// SetKey sets the "key" field.
+func (m *QuotaUpstreamMutation) SetKey(s string) {
+	m.key = &s
+}
+
+// Key returns the value of the "key" field in the mutation.
+func (m *QuotaUpstreamMutation) Key() (r string, exists bool) {
+	v := m.key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKey returns the old "key" field's value of the QuotaUpstream entity.
+// If the QuotaUpstream object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaUpstreamMutation) OldKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKey: %w", err)
+	}
+	return oldValue.Key, nil
+}
+
+// ResetKey resets all changes to the "key" field.
+func (m *QuotaUpstreamMutation) ResetKey() {
+	m.key = nil
+}
+
+// SetName sets the "name" field.
+func (m *QuotaUpstreamMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *QuotaUpstreamMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the QuotaUpstream entity.
+// If the QuotaUpstream object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaUpstreamMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *QuotaUpstreamMutation) ResetName() {
+	m.name = nil
+}
+
+// SetType sets the "type" field.
+func (m *QuotaUpstreamMutation) SetType(s string) {
+	m._type = &s
+}
+
+// GetType returns the value of the "type" field in the mutation.
+func (m *QuotaUpstreamMutation) GetType() (r string, exists bool) {
+	v := m._type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldType returns the old "type" field's value of the QuotaUpstream entity.
+// If the QuotaUpstream object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaUpstreamMutation) OldType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldType: %w", err)
+	}
+	return oldValue.Type, nil
+}
+
+// ResetType resets all changes to the "type" field.
+func (m *QuotaUpstreamMutation) ResetType() {
+	m._type = nil
+}
+
+// SetRenewalURL sets the "renewal_url" field.
+func (m *QuotaUpstreamMutation) SetRenewalURL(s string) {
+	m.renewal_url = &s
+}
+
+// RenewalURL returns the value of the "renewal_url" field in the mutation.
+func (m *QuotaUpstreamMutation) RenewalURL() (r string, exists bool) {
+	v := m.renewal_url
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRenewalURL returns the old "renewal_url" field's value of the QuotaUpstream entity.
+// If the QuotaUpstream object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaUpstreamMutation) OldRenewalURL(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRenewalURL is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRenewalURL requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRenewalURL: %w", err)
+	}
+	return oldValue.RenewalURL, nil
+}
+
+// ClearRenewalURL clears the value of the "renewal_url" field.
+func (m *QuotaUpstreamMutation) ClearRenewalURL() {
+	m.renewal_url = nil
+	m.clearedFields[quotaupstream.FieldRenewalURL] = struct{}{}
+}
+
+// RenewalURLCleared returns if the "renewal_url" field was cleared in this mutation.
+func (m *QuotaUpstreamMutation) RenewalURLCleared() bool {
+	_, ok := m.clearedFields[quotaupstream.FieldRenewalURL]
+	return ok
+}
+
+// ResetRenewalURL resets all changes to the "renewal_url" field.
+func (m *QuotaUpstreamMutation) ResetRenewalURL() {
+	m.renewal_url = nil
+	delete(m.clearedFields, quotaupstream.FieldRenewalURL)
+}
+
+// SetNotes sets the "notes" field.
+func (m *QuotaUpstreamMutation) SetNotes(s string) {
+	m.notes = &s
+}
+
+// Notes returns the value of the "notes" field in the mutation.
+func (m *QuotaUpstreamMutation) Notes() (r string, exists bool) {
+	v := m.notes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotes returns the old "notes" field's value of the QuotaUpstream entity.
+// If the QuotaUpstream object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaUpstreamMutation) OldNotes(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotes: %w", err)
+	}
+	return oldValue.Notes, nil
+}
+
+// ClearNotes clears the value of the "notes" field.
+func (m *QuotaUpstreamMutation) ClearNotes() {
+	m.notes = nil
+	m.clearedFields[quotaupstream.FieldNotes] = struct{}{}
+}
+
+// NotesCleared returns if the "notes" field was cleared in this mutation.
+func (m *QuotaUpstreamMutation) NotesCleared() bool {
+	_, ok := m.clearedFields[quotaupstream.FieldNotes]
+	return ok
+}
+
+// ResetNotes resets all changes to the "notes" field.
+func (m *QuotaUpstreamMutation) ResetNotes() {
+	m.notes = nil
+	delete(m.clearedFields, quotaupstream.FieldNotes)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *QuotaUpstreamMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *QuotaUpstreamMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the QuotaUpstream entity.
+// If the QuotaUpstream object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaUpstreamMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *QuotaUpstreamMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *QuotaUpstreamMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *QuotaUpstreamMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the QuotaUpstream entity.
+// If the QuotaUpstream object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaUpstreamMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *QuotaUpstreamMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the QuotaUpstreamMutation builder.
+func (m *QuotaUpstreamMutation) Where(ps ...predicate.QuotaUpstream) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the QuotaUpstreamMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *QuotaUpstreamMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.QuotaUpstream, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *QuotaUpstreamMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *QuotaUpstreamMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (QuotaUpstream).
+func (m *QuotaUpstreamMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *QuotaUpstreamMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.deleted_at != nil {
+		fields = append(fields, quotaupstream.FieldDeletedAt)
+	}
+	if m.key != nil {
+		fields = append(fields, quotaupstream.FieldKey)
+	}
+	if m.name != nil {
+		fields = append(fields, quotaupstream.FieldName)
+	}
+	if m._type != nil {
+		fields = append(fields, quotaupstream.FieldType)
+	}
+	if m.renewal_url != nil {
+		fields = append(fields, quotaupstream.FieldRenewalURL)
+	}
+	if m.notes != nil {
+		fields = append(fields, quotaupstream.FieldNotes)
+	}
+	if m.created_at != nil {
+		fields = append(fields, quotaupstream.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, quotaupstream.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *QuotaUpstreamMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case quotaupstream.FieldDeletedAt:
+		return m.DeletedAt()
+	case quotaupstream.FieldKey:
+		return m.Key()
+	case quotaupstream.FieldName:
+		return m.Name()
+	case quotaupstream.FieldType:
+		return m.GetType()
+	case quotaupstream.FieldRenewalURL:
+		return m.RenewalURL()
+	case quotaupstream.FieldNotes:
+		return m.Notes()
+	case quotaupstream.FieldCreatedAt:
+		return m.CreatedAt()
+	case quotaupstream.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *QuotaUpstreamMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case quotaupstream.FieldDeletedAt:
+		return m.OldDeletedAt(ctx)
+	case quotaupstream.FieldKey:
+		return m.OldKey(ctx)
+	case quotaupstream.FieldName:
+		return m.OldName(ctx)
+	case quotaupstream.FieldType:
+		return m.OldType(ctx)
+	case quotaupstream.FieldRenewalURL:
+		return m.OldRenewalURL(ctx)
+	case quotaupstream.FieldNotes:
+		return m.OldNotes(ctx)
+	case quotaupstream.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case quotaupstream.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown QuotaUpstream field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *QuotaUpstreamMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case quotaupstream.FieldDeletedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletedAt(v)
+		return nil
+	case quotaupstream.FieldKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKey(v)
+		return nil
+	case quotaupstream.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case quotaupstream.FieldType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetType(v)
+		return nil
+	case quotaupstream.FieldRenewalURL:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRenewalURL(v)
+		return nil
+	case quotaupstream.FieldNotes:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotes(v)
+		return nil
+	case quotaupstream.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case quotaupstream.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown QuotaUpstream field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *QuotaUpstreamMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *QuotaUpstreamMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *QuotaUpstreamMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown QuotaUpstream numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *QuotaUpstreamMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(quotaupstream.FieldDeletedAt) {
+		fields = append(fields, quotaupstream.FieldDeletedAt)
+	}
+	if m.FieldCleared(quotaupstream.FieldRenewalURL) {
+		fields = append(fields, quotaupstream.FieldRenewalURL)
+	}
+	if m.FieldCleared(quotaupstream.FieldNotes) {
+		fields = append(fields, quotaupstream.FieldNotes)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *QuotaUpstreamMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *QuotaUpstreamMutation) ClearField(name string) error {
+	switch name {
+	case quotaupstream.FieldDeletedAt:
+		m.ClearDeletedAt()
+		return nil
+	case quotaupstream.FieldRenewalURL:
+		m.ClearRenewalURL()
+		return nil
+	case quotaupstream.FieldNotes:
+		m.ClearNotes()
+		return nil
+	}
+	return fmt.Errorf("unknown QuotaUpstream nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *QuotaUpstreamMutation) ResetField(name string) error {
+	switch name {
+	case quotaupstream.FieldDeletedAt:
+		m.ResetDeletedAt()
+		return nil
+	case quotaupstream.FieldKey:
+		m.ResetKey()
+		return nil
+	case quotaupstream.FieldName:
+		m.ResetName()
+		return nil
+	case quotaupstream.FieldType:
+		m.ResetType()
+		return nil
+	case quotaupstream.FieldRenewalURL:
+		m.ResetRenewalURL()
+		return nil
+	case quotaupstream.FieldNotes:
+		m.ResetNotes()
+		return nil
+	case quotaupstream.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case quotaupstream.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown QuotaUpstream field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *QuotaUpstreamMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *QuotaUpstreamMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *QuotaUpstreamMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *QuotaUpstreamMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *QuotaUpstreamMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *QuotaUpstreamMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *QuotaUpstreamMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown QuotaUpstream unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *QuotaUpstreamMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown QuotaUpstream edge %s", name)
 }
 
 // RedeemBatchMutation represents an operation that mutates the RedeemBatch nodes in the graph.

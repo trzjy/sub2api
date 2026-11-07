@@ -218,6 +218,20 @@ func (_c *QuotaKeyCreate) SetNillableNotes(v *string) *QuotaKeyCreate {
 	return _c
 }
 
+// SetUpstreamKey sets the "upstream_key" field.
+func (_c *QuotaKeyCreate) SetUpstreamKey(v string) *QuotaKeyCreate {
+	_c.mutation.SetUpstreamKey(v)
+	return _c
+}
+
+// SetNillableUpstreamKey sets the "upstream_key" field if the given value is not nil.
+func (_c *QuotaKeyCreate) SetNillableUpstreamKey(v *string) *QuotaKeyCreate {
+	if v != nil {
+		_c.SetUpstreamKey(*v)
+	}
+	return _c
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_c *QuotaKeyCreate) AddAccountIDs(ids ...int64) *QuotaKeyCreate {
 	_c.mutation.AddAccountIDs(ids...)
@@ -296,6 +310,10 @@ func (_c *QuotaKeyCreate) defaults() error {
 		v := quotakey.DefaultPriority
 		_c.mutation.SetPriority(v)
 	}
+	if _, ok := _c.mutation.UpstreamKey(); !ok {
+		v := quotakey.DefaultUpstreamKey
+		_c.mutation.SetUpstreamKey(v)
+	}
 	return nil
 }
 
@@ -352,6 +370,14 @@ func (_c *QuotaKeyCreate) check() error {
 	if v, ok := _c.mutation.Priority(); ok {
 		if err := quotakey.PriorityValidator(v); err != nil {
 			return &ValidationError{Name: "priority", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.priority": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.UpstreamKey(); !ok {
+		return &ValidationError{Name: "upstream_key", err: errors.New(`ent: missing required field "QuotaKey.upstream_key"`)}
+	}
+	if v, ok := _c.mutation.UpstreamKey(); ok {
+		if err := quotakey.UpstreamKeyValidator(v); err != nil {
+			return &ValidationError{Name: "upstream_key", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.upstream_key": %w`, err)}
 		}
 	}
 	return nil
@@ -440,6 +466,10 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Notes(); ok {
 		_spec.SetField(quotakey.FieldNotes, field.TypeString, value)
 		_node.Notes = &value
+	}
+	if value, ok := _c.mutation.UpstreamKey(); ok {
+		_spec.SetField(quotakey.FieldUpstreamKey, field.TypeString, value)
+		_node.UpstreamKey = value
 	}
 	if nodes := _c.mutation.AccountsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -734,6 +764,18 @@ func (u *QuotaKeyUpsert) UpdateNotes() *QuotaKeyUpsert {
 // ClearNotes clears the value of the "notes" field.
 func (u *QuotaKeyUpsert) ClearNotes() *QuotaKeyUpsert {
 	u.SetNull(quotakey.FieldNotes)
+	return u
+}
+
+// SetUpstreamKey sets the "upstream_key" field.
+func (u *QuotaKeyUpsert) SetUpstreamKey(v string) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldUpstreamKey, v)
+	return u
+}
+
+// UpdateUpstreamKey sets the "upstream_key" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdateUpstreamKey() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldUpstreamKey)
 	return u
 }
 
@@ -1045,6 +1087,20 @@ func (u *QuotaKeyUpsertOne) UpdateNotes() *QuotaKeyUpsertOne {
 func (u *QuotaKeyUpsertOne) ClearNotes() *QuotaKeyUpsertOne {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.ClearNotes()
+	})
+}
+
+// SetUpstreamKey sets the "upstream_key" field.
+func (u *QuotaKeyUpsertOne) SetUpstreamKey(v string) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetUpstreamKey(v)
+	})
+}
+
+// UpdateUpstreamKey sets the "upstream_key" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdateUpstreamKey() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateUpstreamKey()
 	})
 }
 
@@ -1522,6 +1578,20 @@ func (u *QuotaKeyUpsertBulk) UpdateNotes() *QuotaKeyUpsertBulk {
 func (u *QuotaKeyUpsertBulk) ClearNotes() *QuotaKeyUpsertBulk {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.ClearNotes()
+	})
+}
+
+// SetUpstreamKey sets the "upstream_key" field.
+func (u *QuotaKeyUpsertBulk) SetUpstreamKey(v string) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetUpstreamKey(v)
+	})
+}
+
+// UpdateUpstreamKey sets the "upstream_key" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdateUpstreamKey() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateUpstreamKey()
 	})
 }
 

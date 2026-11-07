@@ -35,6 +35,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
+	"github.com/Wei-Shaw/sub2api/ent/quotaupstream"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
@@ -2110,6 +2111,59 @@ func init() {
 	quotakey.DefaultPriority = quotakeyDescPriority.Default.(int)
 	// quotakey.PriorityValidator is a validator for the "priority" field. It is called by the builders before save.
 	quotakey.PriorityValidator = quotakeyDescPriority.Validators[0].(func(int) error)
+	// quotakeyDescUpstreamKey is the schema descriptor for upstream_key field.
+	quotakeyDescUpstreamKey := quotakeyFields[14].Descriptor()
+	// quotakey.DefaultUpstreamKey holds the default value on creation for the upstream_key field.
+	quotakey.DefaultUpstreamKey = quotakeyDescUpstreamKey.Default.(string)
+	// quotakey.UpstreamKeyValidator is a validator for the "upstream_key" field. It is called by the builders before save.
+	quotakey.UpstreamKeyValidator = quotakeyDescUpstreamKey.Validators[0].(func(string) error)
+	quotaupstreamMixin := schema.QuotaUpstream{}.Mixin()
+	quotaupstreamMixinHooks0 := quotaupstreamMixin[0].Hooks()
+	quotaupstream.Hooks[0] = quotaupstreamMixinHooks0[0]
+	quotaupstreamMixinInters0 := quotaupstreamMixin[0].Interceptors()
+	quotaupstream.Interceptors[0] = quotaupstreamMixinInters0[0]
+	quotaupstreamFields := schema.QuotaUpstream{}.Fields()
+	_ = quotaupstreamFields
+	// quotaupstreamDescKey is the schema descriptor for key field.
+	quotaupstreamDescKey := quotaupstreamFields[0].Descriptor()
+	// quotaupstream.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	quotaupstream.KeyValidator = func() func(string) error {
+		validators := quotaupstreamDescKey.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(key string) error {
+			for _, fn := range fns {
+				if err := fn(key); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// quotaupstreamDescName is the schema descriptor for name field.
+	quotaupstreamDescName := quotaupstreamFields[1].Descriptor()
+	// quotaupstream.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	quotaupstream.NameValidator = quotaupstreamDescName.Validators[0].(func(string) error)
+	// quotaupstreamDescType is the schema descriptor for type field.
+	quotaupstreamDescType := quotaupstreamFields[2].Descriptor()
+	// quotaupstream.TypeValidator is a validator for the "type" field. It is called by the builders before save.
+	quotaupstream.TypeValidator = quotaupstreamDescType.Validators[0].(func(string) error)
+	// quotaupstreamDescRenewalURL is the schema descriptor for renewal_url field.
+	quotaupstreamDescRenewalURL := quotaupstreamFields[3].Descriptor()
+	// quotaupstream.RenewalURLValidator is a validator for the "renewal_url" field. It is called by the builders before save.
+	quotaupstream.RenewalURLValidator = quotaupstreamDescRenewalURL.Validators[0].(func(string) error)
+	// quotaupstreamDescCreatedAt is the schema descriptor for created_at field.
+	quotaupstreamDescCreatedAt := quotaupstreamFields[5].Descriptor()
+	// quotaupstream.DefaultCreatedAt holds the default value on creation for the created_at field.
+	quotaupstream.DefaultCreatedAt = quotaupstreamDescCreatedAt.Default.(func() time.Time)
+	// quotaupstreamDescUpdatedAt is the schema descriptor for updated_at field.
+	quotaupstreamDescUpdatedAt := quotaupstreamFields[6].Descriptor()
+	// quotaupstream.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	quotaupstream.DefaultUpdatedAt = quotaupstreamDescUpdatedAt.Default.(func() time.Time)
+	// quotaupstream.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	quotaupstream.UpdateDefaultUpdatedAt = quotaupstreamDescUpdatedAt.UpdateDefault.(func() time.Time)
 	redeembatchFields := schema.RedeemBatch{}.Fields()
 	_ = redeembatchFields
 	// redeembatchDescName is the schema descriptor for name field.

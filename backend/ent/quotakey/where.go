@@ -125,6 +125,11 @@ func Notes(v string) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldEQ(FieldNotes, v))
 }
 
+// UpstreamKey applies equality check predicate on the "upstream_key" field. It's identical to UpstreamKeyEQ.
+func UpstreamKey(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEQ(FieldUpstreamKey, v))
+}
+
 // DeletedAtEQ applies the EQ predicate on the "deleted_at" field.
 func DeletedAtEQ(v time.Time) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldEQ(FieldDeletedAt, v))
@@ -918,6 +923,71 @@ func NotesEqualFold(v string) predicate.QuotaKey {
 // NotesContainsFold applies the ContainsFold predicate on the "notes" field.
 func NotesContainsFold(v string) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldContainsFold(FieldNotes, v))
+}
+
+// UpstreamKeyEQ applies the EQ predicate on the "upstream_key" field.
+func UpstreamKeyEQ(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEQ(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyNEQ applies the NEQ predicate on the "upstream_key" field.
+func UpstreamKeyNEQ(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNEQ(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyIn applies the In predicate on the "upstream_key" field.
+func UpstreamKeyIn(vs ...string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldIn(FieldUpstreamKey, vs...))
+}
+
+// UpstreamKeyNotIn applies the NotIn predicate on the "upstream_key" field.
+func UpstreamKeyNotIn(vs ...string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNotIn(FieldUpstreamKey, vs...))
+}
+
+// UpstreamKeyGT applies the GT predicate on the "upstream_key" field.
+func UpstreamKeyGT(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldGT(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyGTE applies the GTE predicate on the "upstream_key" field.
+func UpstreamKeyGTE(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldGTE(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyLT applies the LT predicate on the "upstream_key" field.
+func UpstreamKeyLT(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldLT(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyLTE applies the LTE predicate on the "upstream_key" field.
+func UpstreamKeyLTE(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldLTE(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyContains applies the Contains predicate on the "upstream_key" field.
+func UpstreamKeyContains(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldContains(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyHasPrefix applies the HasPrefix predicate on the "upstream_key" field.
+func UpstreamKeyHasPrefix(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldHasPrefix(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyHasSuffix applies the HasSuffix predicate on the "upstream_key" field.
+func UpstreamKeyHasSuffix(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldHasSuffix(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyEqualFold applies the EqualFold predicate on the "upstream_key" field.
+func UpstreamKeyEqualFold(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEqualFold(FieldUpstreamKey, v))
+}
+
+// UpstreamKeyContainsFold applies the ContainsFold predicate on the "upstream_key" field.
+func UpstreamKeyContainsFold(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldContainsFold(FieldUpstreamKey, v))
 }
 
 // HasAccounts applies the HasEdge predicate on the "accounts" edge.
