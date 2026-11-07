@@ -1175,3 +1175,86 @@ func TestChatCompletionsResponseToAnthropic_ContentFilterWithToolUse(t *testing.
 	out := ChatCompletionsResponseToAnthropic(resp, "claude-sonnet-4-20250514")
 	require.Equal(t, "tool_use", AnthropicStopReasonString(out.StopReason))
 }
+
+// TestCCAnthropicBridge_InlineThinkStrip 验证流式 bridge 能正确剥离文本 delta 里
+// 内联的 <thinking> / <think> 标签，thinking 内容进 thinking_delta，正文进 text_delta。
+//
+// 注：派发单原稿引用的 ChatStreamChoice / ChatMessageDelta / ChatCompletionsChunkToAnthropicStreamEvents
+// 在本 worktree 实际并不存在（类型实为 ChatChunkChoice / ChatDelta，入口为
+// ChatCompletionsChunkToAnthropicEvents）；此处按实际类型与入口改写，断言语义与派发单一致。
+func TestCCAnthropicBridge_InlineThinkStrip(t *testing.T) {
+	t.Run("单帧 <think> 内联", func(t *testing.T) {
+		state := NewChatCompletionsToAnthropicStreamState("test-model")
+		chunk := ChatCompletionsChunk{
+			Choices: []ChatChunkChoice{{
+				Delta: ChatDelta{Content: strPtr("<think>推理</think>正文")},
+			}},
+		}
+		events := ChatCompletionsChunkToAnthropicEvents(&chunk, state)
+		hasThinkingDelta := false
+		hasTextDelta := false
+		leaked := false
+		for _, e := range events {
+			if e.Type == "content_block_delta" && e.Delta != nil {
+				if e.Delta.Type == "thinking_delta" && e.Delta.Thinking == "推理" {
+					hasThinkingDelta = true
+				}
+				if e.Delta.Type == "text_delta" && e.Delta.Text == "正文" {
+					hasTextDelta = true
+				}
+				if strings.Contains(e.Delta.Text, "<think") || strings.Contains(e.Delta.Text, "</think") {
+					leaked = true
+				}
+			}
+		}
+		require.True(t, hasThinkingDelta, "应有 thinking_delta 事件")
+		require.True(t, hasTextDelta, "应有 text_delta 事件")
+		require.False(t, leaked, "标签不得泄漏进正文")
+	})
+
+	t.Run("单帧 <thinking> 内联", func(t *testing.T) {
+		state := NewChatCompletionsToAnthropicStreamState("test-model")
+		chunk := ChatCompletionsChunk{
+			Choices: []ChatChunkChoice{{
+				Delta: ChatDelta{Content: strPtr("<thinking>推理B</thinking>正文B")},
+			}},
+		}
+		events := ChatCompletionsChunkToAnthropicEvents(&chunk, state)
+		hasThinkingDelta := false
+		hasTextDelta := false
+		leaked := false
+		for _, e := range events {
+			if e.Type == "content_block_delta" && e.Delta != nil {
+				if e.Delta.Type == "thinking_delta" && e.Delta.Thinking == "推理B" {
+					hasThinkingDelta = true
+				}
+				if e.Delta.Type == "text_delta" && e.Delta.Text == "正文B" {
+					hasTextDelta = true
+				}
+				if strings.Contains(e.Delta.Text, "<thinking") || strings.Contains(e.Delta.Text, "</thinking") {
+					leaked = true
+				}
+			}
+		}
+		require.True(t, hasThinkingDelta, "应有 thinking_delta 事件")
+		require.True(t, hasTextDelta, "应有 text_delta 事件")
+		require.False(t, leaked, "标签不得泄漏进正文")
+	})
+
+	t.Run("纯正文无标签不受影响", func(t *testing.T) {
+		state := NewChatCompletionsToAnthropicStreamState("test-model")
+		chunk := ChatCompletionsChunk{
+			Choices: []ChatChunkChoice{{
+				Delta: ChatDelta{Content: strPtr("hello world")},
+			}},
+		}
+		events := ChatCompletionsChunkToAnthropicEvents(&chunk, state)
+		var textOut string
+		for _, e := range events {
+			if e.Type == "content_block_delta" && e.Delta != nil && e.Delta.Type == "text_delta" {
+				textOut += e.Delta.Text
+			}
+		}
+		require.Equal(t, "hello world", textOut)
+	})
+}

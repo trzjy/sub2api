@@ -1054,17 +1054,12 @@ type cursorStreamParser struct {
 	// rawContent 是累加后的原始文本（含 <think> 段），只用于上游注入模板匹配
 	// （拒付 / 模型暂不可用）：那类模板可能出现在 think 段之后，用可见文本判定会漏。
 	rawContent string
-	// thinkRaw / inThink 是 <think> 段剥离的跨帧状态：thinkRaw 缓冲可能是标签
-	// 前缀的尾段，inThink 表示当前处于推理段内（段内文本一律不对外输出）。
-	thinkRaw string
-	inThink  bool
-	// activeCloseTag 是当前推理段对应的闭标签（由进入思考态时命中的变体决定）。
-	activeCloseTag string
-	// thinkFlushed 保证收尾时尾段只吐出一次。
-	thinkFlushed bool
 	// trimmedLeading 表示已交付过第一段可见正文：剥离 <think> 后残留的换行只在
 	// 首段被去掉（正文开头的空行是剥离副产物，不该让客户端看到两行空白）。
 	trimmedLeading bool
+	// thinkStripper 跨帧有状态地剥离内联思考标签（<think>/<thinking>），
+	// 状态由 apicompat.InlineThinkStripper 内部维护（D2 迁移，去掉本地副本）。
+	thinkStripper apicompat.InlineThinkStripper
 	// usage 是 turn_ended 给出的真实用量（未收到则 Seen=false，各项为 0）。
 	usage cursorTurnUsage
 	// rejected 命中流内注入模板（拒付 / 模型暂不可用）后的结构化错误（非 nil 即终态失败）。
@@ -1311,69 +1306,16 @@ func (c cursorToolCallCapture) wireID() string {
 // cursorContent 返回拼出的完整响应文本（非流式入站用）。
 func (p *cursorStreamParser) cursorContent() string { return p.content }
 
-// 上游把推理内联进正文时使用的标签（活体样本：
-// "<think>\n…\n</think>\n\n正文"）。它属于上游 wire 事实，不是本站协议词表。
-//
-// 注意：除 `<think>` 外，上游还会内联 `<thinking>`（含 ing）标签。两种变体都要被
-// 跨帧有状态地剥离，且开标签确定后闭标签严格与其配对。
-
-// thinkTagVariant 描述一对内联思考标签（开标签 + 配对的闭标签）。
-type thinkTagVariant struct {
-	open  string
-	close string
-}
-
-// cursorThinkTagVariants 是所有受支持的内联思考标签变体，按优先级排列。
-// 匹配时取正文里最早出现的开标签；开标签确定后闭标签严格与其配对。
-// 注意：`<thinking>` 必须排在 `<think>` 之前——若先搜短串，`<thinking>` 的
-// `<think` 前缀会被误命中，导致以 `</think>` 搜索闭合标签而漏掉 `</thinking>`。
-var cursorThinkTagVariants = []thinkTagVariant{
-	{open: "<thinking>", close: "</thinking>"},
-	{open: "<think>", close: "</think>"},
-}
-
-// earliestThinkOpen 在 s 中找所有 variant 开标签的最早出现位置，
-// 返回 (index, variant)；都不存在时返回 (-1, {})。
-func earliestThinkOpen(s string) (int, thinkTagVariant) {
-	best := -1
-	var bestV thinkTagVariant
-	for _, v := range cursorThinkTagVariants {
-		idx := strings.Index(s, v.open)
-		if idx >= 0 && (best < 0 || idx < best) {
-			best = idx
-			bestV = v
-		}
-	}
-	return best, bestV
-}
-
-// maxTrailingPartialThinkOpen 返回 s 末尾可能是任意开标签前缀的最长扣留段。
-func maxTrailingPartialThinkOpen(s string) string {
-	best := ""
-	for _, v := range cursorThinkTagVariants {
-		hold := trailingPartialTag(s, v.open)
-		if len(hold) > len(best) {
-			best = hold
-		}
-	}
-	return best
-}
-
-// parseThinkDeltas 把增量正文切成**两个通道**：
+// parseThinkDeltas 把增量正文切成**两个通道**（委托 apicompat.InlineThinkStripper，
+// D2 迁移：去掉本地副本 earliestThinkOpen / maxTrailingPartialThinkOpen / trailingPartialTag）：
 //   - reasoning：处于 <think>…</think>（含 `<thinking>`…`</thinking>` 变体）段内、
 //     被完整开闭标签夹住的内容；
-//   - text：段外可见正文（已去除标签、清理首段前导空白）。
+//   - text：段外可见正文（已去除标签；首段前导空白由 finalizeVisible 在本方法内清理）。
 //
-// 双通道纪律（用户裁定：思考必须作为 reasoning 交付，且标签绝对不能外泄）：
-//  1. 完整开/闭标签一旦匹配即**彻底吞噬**——既不进 reasoning 也不进 text，客户端绝不会
-//     打印出 "<" 或整段内部推理（11-03 实测 6/6 非流式响应都带该段）。
-//  2. 遇到 `<`、`<t`、`</`、`</th` 等标签前缀时，用 trailingPartialTag 把"可能是半截
-//     标签"的那几个字节**严格扣留**在 thinkRaw 里，绝不提前外发——跨帧切碎的标签
-//     （"<thi" + "nk>"）因此被 100% 吞噬，不会把半个标签漏给客户端。
+// 双通道纪律（用户裁定：思考必须作为 reasoning 交付，且标签绝对不能外泄）由剥离器保证：
+//  1. 完整开/闭标签一旦匹配即**彻底吞噬**——既不进 reasoning 也不进 text；
+//  2. 标签前缀（"<"、`<t`、"</"、`</th` 等）被剥离器严格扣留，跨帧切碎的标签 100% 吞噬；
 //  3. 段外首段正文的前导空白/换行由 finalizeVisible 清理（剥标签留下的 "\n\n" 副产物）。
-//
-// 支持 `<think>` 与 `<thinking>` 两种内联变体：进入思考态时由命中的开标签决定配对闭标签
-// （记录在 activeCloseTag），后续闭标签搜索严格用该闭标签，两种变体互不串扰。
 //
 // rawContent 始终累加原始增量（含 <think> / <thinking> 段），供流内拒付 / 模型暂不可用
 // 模板匹配使用——剥离动作不会改变这些终态判定的灵敏度。
@@ -1382,50 +1324,8 @@ func (p *cursorStreamParser) parseThinkDeltas(delta string) (reasoning string, t
 		return "", ""
 	}
 	p.rawContent += delta
-	p.thinkRaw += delta
-	var rb, tb strings.Builder
-	for {
-		if p.inThink {
-			idx := strings.Index(p.thinkRaw, p.activeCloseTag)
-			if idx < 0 {
-				// 尚未见到闭合标签：把"可能是闭合标签前缀"的那段扣留，其余作为
-				// 思考增量吐出（流式过程中增量交付，避免假死）。
-				hold := trailingPartialTag(p.thinkRaw, p.activeCloseTag)
-				cut := len(p.thinkRaw) - len(hold)
-				if cut > 0 {
-					rb.WriteString(p.thinkRaw[:cut])
-				}
-				p.thinkRaw = hold
-				return rb.String(), p.finalizeVisible(tb.String())
-			}
-			// 命中闭合标签：标签之前（段内）的思考内容进 reasoning，标签本身吞噬。
-			if idx > 0 {
-				rb.WriteString(p.thinkRaw[:idx])
-			}
-			p.thinkRaw = p.thinkRaw[idx+len(p.activeCloseTag):]
-			p.inThink = false
-			continue
-		}
-		idx, v := earliestThinkOpen(p.thinkRaw)
-		if idx >= 0 {
-			// 开标签之前是可见正文，开标签本身吞噬，进入思考态。
-			if idx > 0 {
-				tb.WriteString(p.thinkRaw[:idx])
-			}
-			p.thinkRaw = p.thinkRaw[idx+len(v.open):]
-			p.inThink = true
-			p.activeCloseTag = v.close
-			continue
-		}
-		// 未见开标签：扣留"可能是任意开标签前缀"的那段（取最长扣留量），其余作为正文增量吐出。
-		hold := maxTrailingPartialThinkOpen(p.thinkRaw)
-		cut := len(p.thinkRaw) - len(hold)
-		if cut > 0 {
-			tb.WriteString(p.thinkRaw[:cut])
-		}
-		p.thinkRaw = hold
-		return p.maybeFinalizeReasoning(rb.String()), p.finalizeVisible(tb.String())
-	}
+	r, t := p.thinkStripper.Feed(delta)
+	return r, p.finalizeVisible(t)
 }
 
 // maybeFinalizeReasoning 是 reasoning 通道的归一钩子（当前与 text 通道不同：
@@ -1449,49 +1349,16 @@ func (p *cursorStreamParser) finalizeVisible(raw string) string {
 	return trimmed
 }
 
-// flushThinkTail 在流收尾时吐出**双通道**缓冲尾段：
-//   - reasoning：处于推理段内、尚未随帧吐出的思考尾巴（收尾时切除闭合标签前缀，
-//     不残留在正文，也不外泄半个闭合标签）；
+// flushThinkTail 在流收尾时吐出**双通道**缓冲尾段（委托 apicompat.InlineThinkStripper，
+// D2 迁移：去掉本地副本；只吐一次由剥离器内部 flushed 守卫保证）：
+//   - reasoning：处于推理段内、尚未随帧吐出的思考尾巴；
 //   - text：段外残留的可见正文尾巴（如结尾恰好是 "<thi" 的半截开标签前缀，如实交付，
 //     不丢字节；完整 <think>/</think> 段早已被吞噬，不会泄露）。
 //
-// 只吐一次（thinkFlushed 保证）。两个返回值的语义分别对应 emitStreamReasoning 与
-// emitStreamText，由调用方决定各自如何写出。
+// 两个返回值的语义分别对应 emitStreamReasoning 与 emitStreamText，由调用方决定各自如何写出。
 func (p *cursorStreamParser) flushThinkTail() (string, string) {
-	if p.thinkFlushed {
-		return "", ""
-	}
-	p.thinkFlushed = true
-	if p.inThink {
-		// 未闭合推理段：把已缓冲的思考尾巴作为 reasoning 吐出（先切除可能的闭合标签前缀），
-		// 不再丢弃——消除"思考内容被静默吞噬 + 下游假死"的问题。
-		closeTag := p.activeCloseTag
-		if closeTag == "" {
-			closeTag = "</think>" // fallback：正常流不会走到这里
-		}
-		hold := trailingPartialTag(p.thinkRaw, closeTag)
-		cut := len(p.thinkRaw) - len(hold)
-		reasoning := p.thinkRaw[:cut]
-		p.thinkRaw = ""
-		return reasoning, ""
-	}
-	tail := p.finalizeVisible(p.thinkRaw)
-	p.thinkRaw = ""
-	return "", tail
-}
-
-// trailingPartialTag 返回 s 末尾"可能是 tag 不完整前缀"的那一段（跨帧缓冲用）。
-func trailingPartialTag(s, tag string) string {
-	max := len(tag) - 1
-	if max > len(s) {
-		max = len(s)
-	}
-	for n := max; n > 0; n-- {
-		if strings.HasSuffix(s, tag[:n]) {
-			return s[len(s)-n:]
-		}
-	}
-	return ""
+	r, t := p.thinkStripper.Flush()
+	return r, t
 }
 
 // cursorNewStreamParser 构造解析器（model 为空时 chunk 内 model 字段留空）。

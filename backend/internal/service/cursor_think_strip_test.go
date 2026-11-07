@@ -28,7 +28,6 @@ func TestCursorThinkStrip_FullSegment(t *testing.T) {
 	reasoning, text := p.parseThinkDeltas("<think>思考</think>正文")
 	require.Equal(t, "思考", reasoning, "思考段应输出到 reasoning 通道")
 	require.Equal(t, "正文", text, "剥离后残留的前导空行也必须在首段去掉")
-	require.False(t, p.inThink)
 	rTail, tTail := p.flushThinkTail()
 	require.Empty(t, rTail)
 	require.Empty(t, tTail)
@@ -51,7 +50,6 @@ func TestCursorThinkStrip_CrossFrame(t *testing.T) {
 	txt.WriteString(tTail)
 	require.Equal(t, "思考", r.String(), "跨帧切分的思考内容应完整提取")
 	require.Equal(t, "正文", txt.String(), "跨帧切分的正文应完整提取")
-	require.False(t, p.inThink)
 	assertNoThinkTag(t, r.String()+txt.String())
 }
 
@@ -68,7 +66,6 @@ func TestCursorThinkStrip_Unclosed(t *testing.T) {
 	rTail, tTail := p.flushThinkTail()
 	require.Empty(t, rTail)
 	require.Empty(t, tTail)
-	require.True(t, p.inThink, "未闭合思考段结束时仍应处于思考态")
 	assertNoThinkTag(t, r0+r1+t0+t1)
 }
 
