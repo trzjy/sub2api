@@ -9,12 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"sort"
 	"sync"
 	"time"
 
-	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -536,9 +534,28 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 					zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
 				return false, nil
 			}
-			d.logPhase(zapcore.WarnLevel, "exec_unsupported_fields", "",
-				zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
-			return false, newCursorRequestError(infraerrors.CursorExecUnsupportedCode, http.StatusBadGateway, "AgentRun requested unsupported execution")
+		d.logPhase(zapcore.WarnLevel, "exec_unsupported_fields", "",
+			zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
+		// 派发单 D 阶段 2：未知 exec 字段不再以 502 打死整轮，而是对每个「承载 message 的
+		// 字段」（wire=2/bytes）回一个通用错误结果帧 {field:{f2:{f2:text}}}，让模型换条路继续；
+		// varint 字段（wire=0）不承载 message，不回包（施工图 W1：只有承载 message 的字段必须
+		// 回包）；元数据白名单字段已在上方 cursorExecMetadataOnly 分支忽略。无论哪种都继续处理
+		// 本轮，不 502、不断流。绝不使用 sendExecStreamClose（关流会让上游永远等不到应答，
+		// 把「本轮 502」换成「流卡死」，更糟）；stream_close 只在确实完成流式执行时才发。
+		for _, f := range parts {
+			if cursorExecMetadataFieldOK(f.Number) {
+				continue
+			}
+			if f.Wire != cursorWireBytes {
+				// varint 字段不承载 message，不回包，仅忽略（施工图 W1）。
+				continue
+			}
+			frame := cursorEncodeExecGenericUnknownFieldReject(execID, idField, f.Number, cursorGenericUnknownExecRejectText)
+			if err := d.send(cursorFldClientMessage, frame); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
 		}
 	}
 	if q, ok := cursorFindField(fields, cursorFldServerInteractionQuery); ok {
@@ -648,8 +665,12 @@ const (
 	cursorFldInteractionReplaceEnvSetupLogs    = 2
 )
 
+// cursorGenericUnknownInteractionRejectText 是「未知 interaction 类型」通用 rejected 应答文本
+// （人话：这种交互在本环境不支持）。与已知交互类型的精确 rejected 文本互不干扰。
+const cursorGenericUnknownInteractionRejectText = "This interaction type is not supported in this environment."
+
 // respondInteractionQuery 按方案 §1.2 应答表回写 InteractionResponse（AgentClientMessage.f6）。
-// 不支持的询问（f12 generate_image / 未知字段 / 缺 oneof）失败关闭，不写帧。
+// 不支持的询问（f12 generate_image / 未知字段 / 缺 oneof）回通用 rejected 继续，不写帧、不 502。
 // 日志只记 query_id / query_field / answer，不记 args 正文。
 func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error) {
 	fields, err := cursorDecodeProtobuf(payload)
@@ -665,13 +686,23 @@ func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error
 		}
 	}
 	field := query.Number
+	// 派发单 D 阶段 2：未知 interaction 类型不再以 502 打死整轮，而是回一个通用 rejected 应答
+	// 让模型换条路继续（绝不 sendExecStreamClose 关流）。形状遵循已知类型的 rejected：
+	// {field:{f2:{f1:reason}}}。元数据/已知类型仍按既有逻辑在下方分派。
 	unsupported := func() (bool, error) {
 		d.logPhase(zapcore.WarnLevel, "interaction_query_unsupported", "",
 			zap.Uint64("query_id", id), zap.Int("query_field", field))
-		return false, newCursorRequestError(infraerrors.CursorExecUnsupportedCode, http.StatusBadGateway, "AgentRun interaction query field %d not supported", field)
+		result := cursorAppendBytesField(nil, cursorFldInteractionRespRejected,
+			cursorAppendStringField(nil, cursorFldInteractionRejectedReason, cursorGenericUnknownInteractionRejectText))
+		resp := cursorAppendVarintField(nil, cursorFldInteractionID, id)
+		resp = cursorAppendBytesField(resp, field, result)
+		serr := d.send(cursorFldClientInteractionResponse, resp)
+		d.logPhase(zapcore.InfoLevel, "interaction_query_answered", cursorHTTPErrClass(serr),
+			zap.Uint64("query_id", id), zap.Int("query_field", field), zap.String("answer", "rejected-unknown"))
+		return false, serr
 	}
 	// 已知交互询问类型（10 类）全部登记在统一字段表中；查表判定而非各自写一份清单。
-	// 未知类型一律走 unsupported 失败关闭（阶段 1 维持 502，:671 的 unsupported 不动）。
+	// 未知类型走 unsupported（派发单 D 阶段 2：回通用 rejected，不再 502 失败关闭）。
 	if cursorFieldClassOf(cursorDomainInteraction, field) != cursorFieldInteraction {
 		return unsupported()
 	}
@@ -949,9 +980,11 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 		})
 	if rerr != nil {
 		if !cursorRetypeDegradable(failReason) {
-			// 参数残缺（缺必填）：与 parser 侧同口径，绝不降级交付残调用。
-			// 诊断字段（missing_fields / present_fields / missing_depth）只含字段名与
-			// 深度，用于区分真空缺与命名错位，见 cursorArgsDiagFields。
+			// schema 侧不可解析（schema_absent / invalid / unresolvable /
+			// projection_unresolvable）：与 parser 侧同口径，必须按上游失败终止本轮。
+			// 注：缺必填（missing_required）派发单 D 阶段 2 起已纳入可降级，不再走到这里
+			// （见 cursorRetypeDegradable）；诊断字段（missing_fields / present_fields /
+			// missing_depth）只含字段名与深度，用于区分真空缺与命名错位，见 cursorArgsDiagFields。
 			fields := []zap.Field{
 				zap.String("retype_error", string(failReason)),
 				zap.String("tool_name", name),

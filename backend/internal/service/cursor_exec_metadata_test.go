@@ -98,25 +98,28 @@ func TestCursorExecMetaOnlyIgnored(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ② 未知非元数据字段（f99）→ 仍失败关闭，日志含字段号
+// ② 未知非元数据字段（f99，wire=2/bytes）→ 派发单 D 阶段 2：回通用错误结果帧，整轮继续，不 502
 // ---------------------------------------------------------------------------
 
 func TestCursorExecUnknownFieldStillFailsClosed(t *testing.T) {
-	d, _, logs, cleanup := cursorExecRejectTestDuplex(t)
+	d, buf, logs, cleanup := cursorExecRejectTestDuplex(t)
 
 	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 99)
 	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-99"))
 	execMsg = cursorAppendBytesField(execMsg, 99, []byte("unknown-exec"))
 
-	_, err := d.respond(cursorExecMetaTestPayload(execMsg))
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest, "未知非元数据字段必须失败关闭")
-
-	entries := logs.FilterField(zap.String("phase", "exec_unsupported_fields")).All()
-	require.Len(t, entries, 1, "必须保留 exec_unsupported_fields 取证日志")
-	nums := fmt.Sprint(entries[0].ContextMap()["field_numbers"])
+	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
+	// 派发单 D 阶段 2 契约：未知 exec 字段不再 502，而是回通用错误结果帧并继续整轮。
+	require.NoError(t, err, "未知 exec 字段不得 502（派发单 D：回通用错误帧，整轮继续）")
+	require.False(t, done, "未知 exec 字段不是终态")
+	require.Equal(t, 1, phaseCount(logs, "exec_unsupported_fields"), "必须保留 exec_unsupported_fields 取证日志")
+	nums := fmt.Sprint(logs.FilterField(zap.String("phase", "exec_unsupported_fields")).All()[0].ContextMap()["field_numbers"])
 	require.Contains(t, nums, "99", "取证日志必须含未知字段号")
 	require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"), "含未知字段时不得按元数据忽略")
+	require.Equal(t, 0, phaseCount(logs, "close"), "连接不得被终止")
+	// 必须写出通用错误结果帧 {field:{f2:{f2:text}}}。
 	cleanup()
+	cursorStage2ExpectGenericReject(t, buf, 99, cursorGenericUnknownExecRejectText)
 }
 
 // ---------------------------------------------------------------------------
@@ -137,25 +140,28 @@ func TestCursorExecMetaMachineIDOnlyIgnored(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ④ 元数据与未知字段混排 → 仍失败关闭（白名单不得掩盖未知字段）
+// ④ 元数据与未知字段混排 → 未知字段回通用帧继续，不 502（白名单不掩盖未知字段）
 // ---------------------------------------------------------------------------
 
 func TestCursorExecMetaMixedWithUnknownFailsClosed(t *testing.T) {
-	d, _, logs, cleanup := cursorExecRejectTestDuplex(t)
+	d, buf, logs, cleanup := cursorExecRejectTestDuplex(t)
 
 	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 5)
 	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaSpanContext, cursorExecMetaTestSpanContext())
 	execMsg = cursorAppendVarintField(execMsg, cursorFldExecMetaAcceptHook, 1)
 	execMsg = cursorAppendBytesField(execMsg, 99, []byte("unknown-exec"))
 
-	_, err := d.respond(cursorExecMetaTestPayload(execMsg))
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
-	require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"))
+	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
+	// 派发单 D 阶段 2：元数据照旧忽略，未知字段回通用帧继续，整轮不得 502。
+	require.NoError(t, err, "元数据 + 未知字段混排：未知字段回通用帧继续，不得 502")
+	require.False(t, done)
+	require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"), "含未知字段时不得按元数据忽略")
 	cleanup()
+	cursorStage2ExpectGenericReject(t, buf, 99, cursorGenericUnknownExecRejectText)
 }
 
 // ---------------------------------------------------------------------------
-// ⑤ f45（pi_read_args，未实现）→ fail-close，不得按 metadata 忽略、不得空 McpResult
+// ⑤ f45（pi_read_args，未实现，wire=2/bytes）→ 派发单 D 阶段 2：回通用错误帧，不 502
 // ---------------------------------------------------------------------------
 
 func TestCursorExecF45FailsClosed(t *testing.T) {
@@ -165,16 +171,17 @@ func TestCursorExecF45FailsClosed(t *testing.T) {
 	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-45"))
 	execMsg = cursorAppendBytesField(execMsg, 45, []byte("pi-read-args"))
 
-	_, err := d.respond(cursorExecMetaTestPayload(execMsg))
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest, "f45 未实现必须走 unsupported fail-close")
+	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
+	require.NoError(t, err, "f45 未知 exec 字段不得 502（派发单 D：回通用错误帧继续）")
+	require.False(t, done)
 	require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"), "f45 不得按 metadata 忽略")
 	require.Equal(t, 1, phaseCount(logs, "exec_unsupported_fields"))
 	cleanup()
-	require.Empty(t, buf.Len(), "fail-close 不得写出任何结果帧（含空 McpResult）")
+	cursorStage2ExpectGenericReject(t, buf, 45, cursorGenericUnknownExecRejectText)
 }
 
 // ---------------------------------------------------------------------------
-// ⑥ f39（local_execution_time_ms，客户端方向）→ 不再被当作 metadata，fail-close
+// ⑥ f39（local_execution_time_ms，客户端方向，wire=2/bytes）→ 派发单 D：回通用错误帧，不 502
 // ---------------------------------------------------------------------------
 
 func TestCursorExecF39NotMetadata(t *testing.T) {
@@ -183,12 +190,13 @@ func TestCursorExecF39NotMetadata(t *testing.T) {
 	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 39)
 	execMsg = cursorAppendBytesField(execMsg, 39, []byte("local-time"))
 
-	_, err := d.respond(cursorExecMetaTestPayload(execMsg))
-	require.ErrorIs(t, err, ErrCursorUnsupportedRequest, "f39 不再被当 metadata，必须 fail-close")
+	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
+	require.NoError(t, err, "f39 未知 exec 字段不得 502（派发单 D：回通用错误帧继续）")
+	require.False(t, done)
 	require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"))
 	require.Equal(t, 1, phaseCount(logs, "exec_unsupported_fields"))
 	cleanup()
-	require.Empty(t, buf.Len(), "fail-close 不得写出任何结果帧")
+	cursorStage2ExpectGenericReject(t, buf, 39, cursorGenericUnknownExecRejectText)
 }
 
 // ---------------------------------------------------------------------------

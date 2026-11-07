@@ -255,3 +255,26 @@ func (d *cursorAgentDuplex) cursorRejectNativeExec(parts []cursorPBField, field 
 		zap.Int("declared_tool_name_count", len(declared)))
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// 通用兜底形状（派发单 D 阶段 2：未知 exec 字段必应答）
+// ---------------------------------------------------------------------------
+
+// cursorGenericUnknownExecRejectText 是「未知 exec 字段」通用兜底帧的错误文本（人话：
+// 这个工具在本环境不可用）。与 11 类原生 exec 的精确拒绝文本互不干扰、不共享常量。
+const cursorGenericUnknownExecRejectText = "This tool is not available in this environment."
+
+// cursorEncodeExecGenericUnknownFieldReject 构造「未知 exec 字段」的通用兜底错误结果帧：
+// {field:{f2:{f2:text}}} —— 外层 field = 未知字段号，内层 f2 是结果 oneof 子字段，
+// 再内层 f2 是错误文本。
+//
+// 这是派发单 D 阶段 2 的「未知字段必应答」兜底：exec 里出现白名单外字段时，不再以
+// CUR-EXEC-02 / 502 把整轮打死，而是回这个形状让模型换条路继续（绝不能 sendExecStreamClose
+// 关流——关流会让上游永远等不到应答，把「本轮 502」换成「流卡死」，更糟）。
+//
+// 本函数只编形状、不接入派发 switch、不动任何既有精确拒绝形状（精确拒绝形状见上方
+// cursorEncodeNativeExecRejection 及其常量）。
+func cursorEncodeExecGenericUnknownFieldReject(execID uint64, idField []byte, field int, text string) []byte {
+	payload := cursorAppendBytesField(nil, 2, cursorAppendStringField(nil, 2, text))
+	return cursorEncodeExecClientResultFrame(execID, idField, field, payload)
+}

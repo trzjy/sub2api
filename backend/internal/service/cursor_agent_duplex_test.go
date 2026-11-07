@@ -125,31 +125,46 @@ func TestCursorAgentDuplexContextKVAndTurnEnd(t *testing.T) {
 	require.Equal(t, 4, p.usage.Output)
 }
 
-func TestCursorAgentDuplexRejectsUnknownExecutionAndBlob(t *testing.T) {
-	for name, payload := range map[string][]byte{
-		// "unknown_exec"：一条真正未知、且不在本轮 11 类原生 exec 裁定里的执行字段
-		// （f17 list_mcp_resources_exec_args）。f17 不属于 {2,3,4,5,7,8,9,14,16,20,23}
-		// 任一，也不是元数据白名单字段（f1/f15/f19/f55/f57），故走到 respond 的 default
-		// 分支按未实现 exec 失败关闭，仍应返回 error——保留「未知执行 → 失败关闭」的断言意图。
-		// 注：原 "tool" 用例用的 f3 write_args 现已归入 11 类原生 exec 拒绝路径（拒绝而非失败
-		// 关闭），不再是「未知执行」，故改用 f17 作为未知执行载体。
-		"unknown_exec": cursorExecUnknownFieldPayload(),
-		// "unknown_blob"：f4 KV 缺 blob（f2 get 但无对应 blob），语义未变，仍应失败关闭。
-		"unknown_blob": cursorAppendBytesField(nil, 4, cursorAppendBytesField(nil, 2, cursorAppendStringField(nil, 1, "missing"))),
-	} {
-		t.Run(name, func(t *testing.T) {
-			d, err := newCursorAgentDuplex(cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, nil)), nil)
-			require.NoError(t, err)
-			defer d.close(nil)
-			_, err = d.respond(payload)
-			require.Error(t, err)
-		})
-	}
+// TestCursorAgentDuplexAnswersUnknownExecutionAndContinues 验证「未知 exec 字段 → 回通用错误
+// 结果帧、整轮继续、不 502」的新契约。原用例名 RejectsUnknownExecutionAndBlob 已名不副实
+// （未知 exec 不再被拒绝关闭），故改名。
+//
+// 收尾方式：本用例改用 cursorExecRejectTestDuplex 构造 duplex——它起一个 goroutine 持续排干
+// pipe writer，使 respond 内的 d.send 不会因无人读而阻塞挂起（unbuffered io.Pipe 写阻塞直到
+// 被读）。这是本包其它 reject 类用例的统一收尾写法，照此实现，绝不靠杀进程收场。
+func TestCursorAgentDuplexAnswersUnknownExecutionAndContinues(t *testing.T) {
+	// "unknown_exec"：一条真正未知、且不在本轮 11 类原生 exec 裁定里的执行字段（f17
+	// list_mcp_resources_exec_args）。f17 不属于原生拒绝集合，也不在元数据白名单。派发单 D
+	// 阶段 2：未知 exec 字段不再 502 失败关闭，而是回通用错误结果帧 {field:{f2:{f2:text}}}
+	// 让模型换条路继续，因此 MUST NOT 返回 error，且整轮不终止。
+	t.Run("unknown_exec", func(t *testing.T) {
+		d, buf, logs, cleanup := cursorExecRejectTestDuplex(t)
+		defer cleanup()
+
+		done, err := d.respond(cursorExecUnknownFieldPayload())
+		require.NoError(t, err, "未知 exec 字段不得 502（派发单 D：回通用错误帧，整轮继续）")
+		require.False(t, done, "未知 exec 字段不是终态，整轮必须继续")
+		require.Equal(t, 1, phaseCount(logs, "exec_unsupported_fields"), "必须记一条未知字段取证日志")
+		// 必须写出通用错误结果帧 {field:{f2:{f2:text}}}，且外层 field 与未知字段号一致（17）。
+		cleanup()
+		cursorStage2ExpectGenericReject(t, buf, 17, cursorGenericUnknownExecRejectText)
+	})
+	// "unknown_blob"：f4 KV 缺 blob（f2 get 但无对应 blob）——这是 KV 操作语义错误，不是
+	// 未知 exec 字段，维持失败关闭不变（返回 error）。此路径不写帧，故不会因 pipe 阻塞挂起。
+	t.Run("unknown_blob", func(t *testing.T) {
+		d, _, _, cleanup := cursorExecRejectTestDuplex(t)
+		defer cleanup()
+
+		payload := cursorAppendBytesField(nil, 4, cursorAppendBytesField(nil, 2, cursorAppendStringField(nil, 1, "missing")))
+		_, err := d.respond(payload)
+		require.Error(t, err, "KV 缺 blob 仍是失败关闭（语义未变）")
+	})
 }
 
 // cursorExecUnknownFieldPayload 构造一条携带真正未知执行字段（f17）的 AgentServerMessage，
-// 用于验证「未知 exec → 失败关闭」语义。f17 不在本轮 11 类原生 exec 拒绝字段集合内，
-// 也不在 ExecServerMessage 元数据白名单内，因此必然走到 respond 的 default 失败关闭分支。
+// 用于验证「未知 exec → 回通用错误结果帧、整轮继续」的新语义。f17 不在本轮 11 类原生 exec
+// 拒绝字段集合内，也不在 ExecServerMessage 元数据白名单内，因此走到 respond 的 default
+// 未知字段分支（回通用错误帧、不 502）。
 func cursorExecUnknownFieldPayload() []byte {
 	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 1)
 	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-1"))

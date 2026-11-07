@@ -59,9 +59,10 @@ func TestCursorDuplexJudgmentsFollowFieldTable(t *testing.T) {
 	}
 }
 
-// TestCursorDuplexInteractionGateFollowsTable 证明 interaction 未知类型仍走 unsupported：
-// 凡是未登记进字段表的 interaction 字段号，闸门谓词都返回「非 Interaction」从而触发失败关闭；
-// 已登记的 10 类则一律判为 Interaction（闸门放行）。该断言钉住「未知 → 502」不变。
+// TestCursorDuplexInteractionGateFollowsTable 证明 interaction 未知类型仍走 unsupported 分支：
+// 凡是未登记进字段表的 interaction 字段号，闸门谓词都返回「非 Interaction」从而触发 unsupported
+// 分支；已登记的 10 类则一律判为 Interaction（闸门放行）。派发单 D 阶段 2 起该分支不再 502
+// 失败关闭，而是回通用 rejected 让模型换条路继续（闸门分类本身不变）。
 func TestCursorDuplexInteractionGateFollowsTable(t *testing.T) {
 	unknown := []int{0, 12, 30, 99, 1000}
 	for _, n := range unknown {

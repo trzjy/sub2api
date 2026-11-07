@@ -78,16 +78,18 @@ func TestRetypeArgsToolSearchShellAllowsEmptyArgs(t *testing.T) {
 	require.JSONEq(t, `{}`, out)
 }
 
-// 回归护栏：普通 function 工具真缺必填仍必须拒绝（修复不得扩大成"一律不校验"）。
+// 回归护栏：普通 function 工具真缺必填，retype 本身仍必须报错（修复不得扩大成"一律不校验"）；
+// 但报出的 missing_required 现判为可降级（派发单 D 阶段 2：原样把上游原始参数交付客户端，
+// 由客户端自行决定接受或报错，绝不补默认值）。
 func TestRetypeArgsRealToolStillRejectsMissingRequired(t *testing.T) {
 	def := cursorTestBuildToolDef(t, "Bash",
 		`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}`)
 	var reason cursorRetypeErrReason
 	_, err := cursorRetypeArgsByToolDefs("call_1", "Bash", `{}`, [][]byte{def},
 		func(r cursorRetypeErrReason) { reason = r })
-	require.Error(t, err, "真实工具缺必填必须仍然拒绝")
+	require.Error(t, err, "真实工具缺必填 retype 仍必须报错（不静默放行）")
 	require.Equal(t, cursorRetypeMissingRequired, reason)
-	require.False(t, cursorRetypeDegradable(reason), "缺必填仍不可降级交付")
+	require.True(t, cursorRetypeDegradable(reason), "缺必填现必须可降级交付（原样交付上游参数，不补默认值）")
 }
 
 // 形状投影在合成壳路径上仍然生效：值形状照旧还原（只是不查 required）。

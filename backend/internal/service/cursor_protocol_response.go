@@ -1628,10 +1628,13 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 					})
 				if rerr != nil {
 					if !cursorRetypeDegradable(failReason) {
-						// 参数残缺（缺必填）：绝不降级交付。交给客户端只会变成
-						// InputValidationError + 回填被拒，把一次上游残缺放大成两轮失败。
-						// 诊断字段（missing_fields / present_fields / missing_depth）只含
-						// 字段名与深度，用于区分真空缺与命名错位，见 cursorArgsDiagFields。
+						// schema 侧不可解析（schema_absent / invalid / unresolvable /
+						// projection_unresolvable）：连「上游给的是什么工具」都判定不了，
+						// 必须按上游失败终止本轮。诊断字段（missing_fields / present_fields /
+						// missing_depth）只含字段名与深度，用于区分真空缺与命名错位，
+						// 见 cursorArgsDiagFields。
+						// 注：缺必填（missing_required）派发单 D 阶段 2 起已纳入可降级，
+						// 不再走到这里（见 cursorRetypeDegradable）。
 						fields := []zap.Field{
 							zap.String("retype_error", string(failReason)),
 							zap.String("tool_name", name),
@@ -1995,26 +1998,32 @@ const (
 	cursorRetypeObjectTypeMismatch     cursorRetypeErrReason = "object_type_mismatch"
 	cursorRetypeNumericOutOfRange      cursorRetypeErrReason = "numeric_out_of_range"
 	// cursorRetypeMissingRequired 表示还原结果缺 schema 声明的必填字段（参数不完整）。
-	// 与上面几类"形状差异"不同：这类**不可降级交付**，见 cursorRetypeDegradable。
+	// 派发单 D 阶段 2 起纳入可降级：缺必填不再打死整轮，而是原样把上游原始参数交付客户端
+	// （见 cursorRetypeDegradable）。
 	cursorRetypeMissingRequired cursorRetypeErrReason = "missing_required"
 )
 
 // cursorRetypeDegradable 报告某类 retype 失败是否允许"降级交付上游原始参数"。
 //
-// 只有**形状差异**类可以降级：客户端 schema 声明 additionalProperties:false 而上游
-// 多给字段、或类型标记与值不一致——这类参数本身是完整的，客户端能自行判定取舍
-// （11-03 03:42 活体：Write 带额外字段，降级后客户端正常执行）。
+// 形状差异类（additionalProperties 多给字段 / 类型标记与值不一致 / 数值越界 / 不允许的 items）
+// 可以降级：参数本身是完整的，客户端能自行判定取舍（11-03 03:42 活体：Write 带额外字段，
+// 降级后客户端正常执行）。
 //
-// 缺必填字段（missing_required）与 schema 侧不可解析一律**不可降级**：那时上游给的
-// 就是一个残缺调用，交给客户端只会变成 InputValidationError + 续轮被拒，把一次上游
-// 残缺放大成两轮失败（11-03 04:45 活体：Bash args={} → CUR-RES-04）。此时必须按
-// 上游失败终止本轮，由客户端重试。
+// 缺必填（missing_required）派发单 D 阶段 2 起**纳入可降级**：旧口径把它打死整轮，等于把
+// 一次上游残缺升级成 502 + 会话终结、违反「不报错给客户」。现改为原样把上游原始参数交付
+// 客户端（retyped = argsJSON，绝不补默认值——Bash 的 command 补空串会真去执行一条空命令，
+// 拿客户机器冒险），由客户端自行决定接受或报错。
+//
+// schema 侧不可解析（schema_absent / schema_invalid / schema_unresolvable /
+// projection_unresolvable）仍**不可降级**：那时连「上游给的是什么工具」都判定不了，
+// 原样交付只会把未定义行为甩给客户端，必须按上游失败终止本轮。
 func cursorRetypeDegradable(reason cursorRetypeErrReason) bool {
 	switch reason {
 	case cursorRetypeAdditionalPropPresent,
 		cursorRetypeObjectTypeMismatch,
 		cursorRetypeNumericOutOfRange,
-		cursorRetypeItemsNotAllowed:
+		cursorRetypeItemsNotAllowed,
+		cursorRetypeMissingRequired:
 		return true
 	default:
 		return false
