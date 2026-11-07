@@ -204,7 +204,28 @@ type cursorAgentDuplex struct {
 	// **原始字节**（repeated 逐项原样保存，与请求侧 AgentRunRequest.f4 声明逐字节相同）。
 	// 由 newCursorAgentDuplex 从 AgentRun 请求体 f4 解出，供 mcp_state 回包 f5 原样回传
 	// （字节级保真，依据活体探针 T7：f5 内层即完整 McpToolDefinition 五字段，不可只回工具名）。
+	//
+	// 注意：卡 01 已经把 f4 里的工具名改成 wire name（撞 Cursor 内置名时加 "_"），所以
+	// 这里的字节里是 wire name，不是客户端原名。
 	declaredToolDefs [][]byte
+
+	// declaredToolReverse 是「wire name → 客户端原名」的反查表，**只在本请求的声明集合内
+	// 有效**（不同请求工具集不同，wire name 撞了也只在本请求内有意义）。由 newCursorAgentDuplex
+	// 从本请求的**原始**工具名集合正向算 wire map（复用卡 01 的 cursorWireToolNamesFromNames）
+	// 再反转得到。
+	//
+	// 用途（卡 03 方向 1）：上游按 wire name 回调工具时，cursorCaptureMcpArgs 据此把名字映射
+	// 回客户端原名再交付——否则客户端会收到一个自己从没声明过的名字（卡 01 改名后，
+	// Read → Read_，上游回调 Read_，客户端只认识 Read）。
+	//
+	// 反查唯一性：卡 01 的 taken（归一化键）保证两个不同的原名绝不会算出同一个 wire name，
+	// 故反查不会多对一，是单射。即便极端出现多对一（正常不应发生），下面建表时取字典序
+	// 最小的原名，保证结果确定。
+	//
+	// 反查为空（未注入原始名，例如独立解析路径 / 测试未注入）时，cursorCaptureMcpArgs
+	// 保持原样（既有语义，不扩大改动）。
+	declaredToolReverse map[string]string
+
 	// delegations 是本轮工具委托的**唯一**记录（§24.2-6）：duplex 解码 mcp_args
 	// 一次并写入这里，parser 只读取输出，绝不再各自保留一份列表。
 	// 未注入时用本地记录（独立双工场景），保证任何路径都只有一个解码点。
@@ -215,6 +236,29 @@ type cursorAgentDuplex struct {
 	writeMu sync.Mutex
 }
 
+// cursorWireNameReverse 由本请求的**原始**工具名集合正向算 wire map（复用卡 01 的
+// cursorWireToolNamesFromNames）再反转为「wire name → 原名」反查表。
+//
+// 单射保证：卡 01 的 taken（归一化键）保证两个不同原名绝不会算出同一个归一化 wire 形态，
+// 故 wire name 字符串本身也不重复，反查不会多对一。即便极端出现多对一（正常不应发生），
+// 这里取字典序最小的原名，保证结果确定、与卡 01 去重口径一致。
+//
+// originals 为空时返回 nil（双工层据此退化为原样登记，保持既有语义）。
+func cursorWireNameReverse(originals []string) map[string]string {
+	if len(originals) == 0 {
+		return nil
+	}
+	wireMap := cursorWireToolNamesFromNames(originals)
+	reverse := make(map[string]string, len(wireMap))
+	for orig, wire := range wireMap {
+		if cur, ok := reverse[wire]; !ok || orig < cur {
+			reverse[wire] = orig
+		}
+	}
+	return reverse
+}
+
+// newCursorAgentDuplex 构造双工层。
 func newCursorAgentDuplex(initial []byte, delegations *cursorToolDelegations) (*cursorAgentDuplex, error) {
 	if delegations == nil {
 		delegations = newLocalCursorToolDelegations()
@@ -969,6 +1013,8 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 		return cursorToolCallCapture{}, err
 	}
 	// 按 schema 还原（r15 方案 §3）：schema 来源必须是 f4 原始字节（d.declaredToolDefs）。
+	// declaredToolDefs 里是 **wire name**（卡 01 改名后），上游回传的 name 也是 wire name，
+	// 所以这里的 name 仍用 wire name 去匹配 schema —— 不改。
 	var failReason cursorRetypeErrReason
 	retyped, rerr := cursorRetypeArgsByToolDefs(id, name, argsJSON, d.declaredToolDefs,
 		func(reason cursorRetypeErrReason) {
@@ -1002,7 +1048,17 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 			zap.String("call_id", id))
 		retyped = argsJSON
 	}
-	tc := cursorToolCallCapture{ID: id, Name: name, ArgsJSON: retyped, ExecID: execID, IDField: append([]byte(nil), idField...)}
+	// 方向 1（入站映射）：上游按 wire name 回调 → 映射回客户端原名（卡 03）。
+	// 反查只在本请求的声明集合内进行（declaredToolReverse）；查不到（上游回调了没声明的
+	// 名字）→ 保持原样（既有语义，不扩大改动）。
+	//
+	// 注意：交付给客户端的名字必须用原名；上面的 schema 还原已用 wire name 完成匹配，
+	// 这里只在最后一步改写 tc.Name，绝不回头影响 schema 查找。
+	origName := name
+	if mapped, ok := d.declaredToolReverse[name]; ok {
+		origName = mapped
+	}
+	tc := cursorToolCallCapture{ID: id, Name: origName, ArgsJSON: retyped, ExecID: execID, IDField: append([]byte(nil), idField...)}
 	delegations := d.delegations
 	if delegations == nil {
 		delegations = newLocalCursorToolDelegations()

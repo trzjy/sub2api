@@ -513,7 +513,7 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 				},
 			}},
 		}
-		got := cursorAssistantText(msg, "let me check")
+		got := cursorAssistantText(msg, "let me check", nil)
 		want := "let me check" + "\n" +
 			tc03ProdOpen + "\n" +
 			`{"id":"call_1","name":"get_weather","arguments":{"city":"Beijing"}}` + "\n" +
@@ -532,7 +532,7 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 					Name: "b", Arguments: `{}`}},
 			},
 		}
-		got := cursorAssistantText(msg, "y")
+		got := cursorAssistantText(msg, "y", nil)
 		want := "y" + "\n" +
 			tc03ProdOpen + "\n" +
 			`{"id":"call_a","name":"a","arguments":{"k":1}}` + "\n" +
@@ -556,7 +556,7 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 				},
 			}},
 		}
-		got := cursorAssistantText(msg, "x")
+		got := cursorAssistantText(msg, "x", nil)
 		require.Contains(t, got, `"arguments":{}`, "empty arguments must fall back to {}")
 		want := "x" + "\n" +
 			tc03ProdOpen + "\n" +
@@ -578,7 +578,7 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 				},
 			}},
 		}
-		got := cursorAssistantText(msg, "let me check")
+		got := cursorAssistantText(msg, "let me check", nil)
 		require.True(t, len(got) > len("let me check"), "output must carry the blob")
 		require.Equal(t, "let me check", got[:len("let me check")],
 			"original content must come first, unchanged")
@@ -590,7 +590,7 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 
 	t.Run("无 tool_calls：只输出原 content，不产生 blob（回归）", func(t *testing.T) {
 		msg := apicompat.ChatMessage{Role: "assistant", Content: json.RawMessage(`"plain"`)}
-		got := cursorAssistantText(msg, "plain")
+		got := cursorAssistantText(msg, "plain", nil)
 		require.Equal(t, "plain", got, "no tool_calls means no blob at all")
 		require.NotContains(t, got, tc03ProdOpen, "no blob marker must be emitted")
 	})

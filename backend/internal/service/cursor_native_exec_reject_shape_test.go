@@ -150,7 +150,6 @@ type rejectShapeCase struct {
 // 拒绝文本、回显字段、stream_close，并断言日志不泄露业务正文。
 func TestCursorNativeExecRejectWireShape(t *testing.T) {
 	declared := []string{"Bash", "read_file"}
-	reason := cursorNativeExecRejectReason(declared)
 	defs := [][]byte{
 		cursorTestBuildToolDef(t, "Bash", `{"type":"object","properties":{"command":{"type":"string"}}}`),
 		cursorTestBuildToolDef(t, "read_file", `{"type":"object","properties":{"path":{"type":"string"}}}`),
@@ -257,7 +256,11 @@ func TestCursorNativeExecRejectWireShape(t *testing.T) {
 			require.NoError(t, err)
 			rf2, ok := cursorFindField(sub, tc.reasonInnerField)
 			require.True(t, ok, "内层必须含 reason/error 文本字段 %d", tc.reasonInnerField)
-			require.Equal(t, reason, rf2.String(), "拒绝文本必须逐字节等于规定文本（含结尾句点）")
+			// 拒绝文本随「被拒的原生字段」而变（卡 02 的点名重定向）：
+			// 命中客户端等价工具时点名一个，没命中才退回列清单。
+			// 故此处按本 case 的 field 单独算期望文本，不能共用一条。
+			wantReason := cursorNativeExecRejectReason(tc.field, declared)
+			require.Equal(t, wantReason, rf2.String(), "拒绝文本必须逐字节等于规定文本（含结尾句点）")
 
 			for _, bf := range tc.backfills {
 				bfF, ok := cursorFindField(sub, bf.innerField)
@@ -310,7 +313,6 @@ func TestCursorNativeExecRejectMissingArgsStillRejects(t *testing.T) {
 		cursorTestBuildToolDef(t, "read_file", `{"type":"object","properties":{"path":{"type":"string"}}}`),
 	}
 	declared := []string{"Bash", "read_file"}
-	reason := cursorNativeExecRejectReason(declared)
 
 	// ① 全部字段缺失：11 类各自以空 args 拒绝。
 	for _, field := range []int{2, 3, 4, 5, 7, 8, 9, 14, 16, 20, 23} {
@@ -369,7 +371,7 @@ func TestCursorNativeExecRejectMissingArgsStillRejects(t *testing.T) {
 		require.False(t, hasCmd, "缺 command 时内层不得回显 command")
 		rf2, ok := cursorFindField(sub, 3)
 		require.True(t, ok)
-		require.Equal(t, reason, rf2.String(), "缺参仍必须带拒绝文本")
+		require.Equal(t, cursorNativeExecRejectReason(cursorFldNativeRejectShellArgs, declared), rf2.String(), "缺参仍必须带拒绝文本")
 	})
 
 	// ③ write 缺 path（仍有 tool_call_id）：仍拒绝，且内层不回显 path。
@@ -399,7 +401,7 @@ func TestCursorNativeExecRejectMissingArgsStillRejects(t *testing.T) {
 		require.False(t, hasPath, "缺 path 时内层不得回显 path")
 		rf2, ok := cursorFindField(sub, 2)
 		require.True(t, ok)
-		require.Equal(t, reason, rf2.String(), "缺参仍必须带拒绝文本")
+		require.Equal(t, cursorNativeExecRejectReason(cursorFldNativeRejectWriteArgs, declared), rf2.String(), "缺参仍必须带拒绝文本")
 	})
 }
 

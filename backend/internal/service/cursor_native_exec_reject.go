@@ -12,6 +12,7 @@ package service
 
 import (
 	"strings"
+	"unicode"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -95,17 +96,101 @@ func cursorNativeExecRejectField(parts []cursorPBField) (int, bool) {
 	return 0, false
 }
 
-// cursorNativeExecRejectReason 生成拒绝理由文本（唯一，取自方案）。
+// cursorNativeEquivalent 是「原生字段号 → 客户端等价工具名（已归一化为小写下划线形式）」表。
 //
-// declared 非空：「Tool not available in this environment. Use only the client-provided tools: 」
-// + 逗号拼接的声明工具名 + "."
-// declared 为空：「Tool not available in this environment. The client declared no tools.」
-func cursorNativeExecRejectReason(declared []string) string {
-	if len(declared) > 0 {
-		return "Tool not available in this environment. Use only the client-provided tools: " +
-			strings.Join(declared, ", ") + "."
+// 仅收录本卡已实现且 V2 实测有证据的 7 个字段：f2/f3/f4/f5/f7/f8/f14。
+// 来源：社区 BUILTIN_EQUIVALENT（session.py:89）的等价别名列表。
+//
+// 刻意不收录：
+//   - f29 / f52：V2 实测无证据（施工图 W12），本卡不做。
+//   - f9(diagnostics) / f16(background_shell_spawn) / f20(fetch) / f23(write_shell_stdin)：
+//     在我们的代码里对应「无客户端等价工具」场景，不收录（命中即退回列清单）。
+//
+// 等价名一律以小写下划线形式登记（community 给的就是这种形态），与客户端声明名经
+// cursorNormaliseToolName 归一化后再比较——不归一就永远匹配不上（客户端工具名是大写开头驼峰）。
+var cursorNativeEquivalent = map[int][]string{
+	cursorFldNativeRejectShellArgs:       {"shell", "bash", "terminal", "run_command"}, // f2  shell_args
+	cursorFldNativeRejectWriteArgs:       {"write", "write_file", "create_file", "edit"}, // f3  write_args
+	cursorFldNativeRejectDeleteArgs:      {"remove", "delete_file"},                     // f4  delete_args
+	cursorFldNativeRejectGrepArgs:        {"search", "ripgrep"},                         // f5  grep_args
+	cursorFldNativeRejectReadArgs:        {"read", "read_file", "view", "cat"},          // f7  read_args
+	cursorFldNativeRejectLsArgs:          {"list_dir", "glob", "list_files"},            // f8  ls_args
+	cursorFldNativeRejectShellStreamArgs: {"shell", "bash", "terminal", "run_command"},  // f14 shell_stream_args
+}
+
+// cursorNormaliseToolName 把工具名归一化到小写下划线形式，用于与 cursorNativeEquivalent 比较：
+//   - 驼峰 → 下划线：Read→read、WebFetch→web_fetch、myTool→my_tool
+//   - 连字符 '-' 与下划线 '_' 都归一为 '_'
+//   - 全小写
+//
+// 社区用 _normalise（session.py:82）做同样的事（Python）。我们是 Go，独立实现：社区等价名是
+// 小写下划线，我们的客户端工具名是大写开头驼峰，不归一化永远匹配不上。
+//
+// 驼峰边界规则：在一个大写字母前，若它前面是「小写字母或数字」，则插入 '_'（只处理 ASCII
+// 字母；非 ASCII 字母直接转小写，不改变分隔）。
+func cursorNormaliseToolName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name) + 4)
+	prevLowerOrDigit := false
+	for _, r := range name {
+		switch {
+		case r == '-' || r == '_':
+			b.WriteByte('_')
+			prevLowerOrDigit = false
+		case r >= 'A' && r <= 'Z':
+			if prevLowerOrDigit {
+				b.WriteByte('_')
+			}
+			b.WriteRune(unicode.ToLower(r))
+			prevLowerOrDigit = false
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevLowerOrDigit = true
+		default:
+			b.WriteRune(unicode.ToLower(r))
+			prevLowerOrDigit = true
+		}
 	}
-	return "Tool not available in this environment. The client declared no tools."
+	return b.String()
+}
+
+// cursorNativeExecRejectReason 生成拒绝理由文本（唯一，取自方案 + 阶段 3 点名重定向）。
+//
+// 策略（施工图 §3 阶段 3）：
+//   - declared 为空：「Tool not available in this environment. The client declared no tools.」
+//   - declared 非空，且被拒的原生字段 field 在等价表中命中了「某个客户端声明过的等价工具」
+//     → 点名那一个（用客户端声明的原名，不是归一化名）：
+//       "This tool is not connected to the user's machine. Call the tool 'Read' instead."
+//   - 命中多个等价工具时，按客户端声明顺序点第一个（declared 切片已是声明顺序；见下方
+//     遍历顺序，不另排序）。
+//   - 没命中任何等价工具 → 退回列清单（保持原文本）：
+//       "Tool not available in this environment. Use only the client-provided tools: A, B, C."
+//
+// 口径说明（报告需交代）：
+//   - 「命中第一个」的「第一个」= 客户端声明顺序（declared 切片顺序），不是等价表顺序，也不是
+//     字母序。理由：模型看到的是客户端按声明顺序列出的工具，点名「声明里靠前的那个等价工具」
+//     最贴近模型上下文。
+//   - 点名用的是客户端「声明原名」（如 Read），不是归一化后的 read——模型只认自己声明的名字。
+//
+// 铁律 1：本函数只生成文本，绝不执行任何上游要求的工具（本卡不引入任何执行能力）。
+func cursorNativeExecRejectReason(field int, declared []string) string {
+	if len(declared) == 0 {
+		return "Tool not available in this environment. The client declared no tools."
+	}
+	if equiv, ok := cursorNativeEquivalent[field]; ok {
+		set := make(map[string]struct{}, len(equiv))
+		for _, e := range equiv {
+			set[e] = struct{}{}
+		}
+		// 按客户端声明顺序，点第一个归一化后命中等价表的工具（用原名，不归一化）。
+		for _, name := range declared {
+			if _, hit := set[cursorNormaliseToolName(name)]; hit {
+				return "This tool is not connected to the user's machine. Call the tool '" + name + "' instead."
+			}
+		}
+	}
+	return "Tool not available in this environment. Use only the client-provided tools: " +
+		strings.Join(declared, ", ") + "."
 }
 
 // cursorNativeRejectArgString 从已解出的 args 字段集取回某个字符串子字段（不存在回 ""）。
@@ -231,7 +316,7 @@ func (d *cursorAgentDuplex) cursorRejectNativeExec(parts []cursorPBField, field 
 	if !ok {
 		return cursorFrameErrorf(cursorFrameDuplex, "native reject target field %d missing in exec message", field)
 	}
-	reason := cursorNativeExecRejectReason(d.declaredToolNames())
+	reason := cursorNativeExecRejectReason(field, d.declaredToolNames())
 	resultField, payload, toolCallID, err := cursorEncodeNativeExecRejection(field, argsField.Bytes, reason)
 	if err != nil {
 		return err

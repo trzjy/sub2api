@@ -138,6 +138,14 @@ type CursorUpstreamRequest struct {
 	// nil 时双工层使用本地记录（独立场景），不引入第二份共享状态。
 	ToolDelegations *cursorToolDelegations
 
+	// DeclaredToolNames 是**本请求客户端声明的原始工具名**（不是 wire name）。
+	// 仅用于支撑双工层卡 03 的「wire name → 原名」入站映射：双工层据此建反查表，
+	// 把上游按 wire name 回调的工具名映射回客户端原名再交付。
+	// 为空时双工层退化为原样登记（既有语义），不影响无工具或无需改名的请求。
+	// 生产侧由构建 CursorUpstreamRequest 的调用方（cursor_execution_service.go 的
+	// AgentRun 出口）填入 req.Tools 的原始名；本结构体仅承载，不参与任何业务逻辑。
+	DeclaredToolNames []string
+
 	// AuthProvider 是**本次请求**的鉴权材料提供者，覆盖转发器上配置的默认 provider。
 	//
 	// 为什么需要覆盖：x-jg-auth 是**账号级**材料（zk03({d: deviceId, a: 激活码})，
@@ -271,6 +279,10 @@ func (f *CursorUpstreamForwarder) Do(
 		if err != nil {
 			return nil, err
 		}
+		// 卡 03 方向 1：建「wire name → 原名」反查表，上游按 wire name 回调时映射回原名。
+		// DeclaredToolNames 为空（上游转发未注入）→ 反查表为 nil，cursorCaptureMcpArgs
+		// 退化为原样登记（既保持既有语义，也避免没有原始名来源时硬映射）。
+		duplex.declaredToolReverse = cursorWireNameReverse(req.DeclaredToolNames)
 		requestBody = duplex.reader
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, requestBody)

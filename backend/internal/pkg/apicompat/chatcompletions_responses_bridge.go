@@ -235,6 +235,11 @@ func FunctionToolNames(tools []ResponsesTool) map[string]bool {
 type NamespacedToolName struct {
 	Namespace string
 	Name      string
+	// IsCustom 标记该子工具是 namespace 内的 **custom 类型**（而不是 function）。
+	// 回程判定 custom_tool_call 时靠这一位把 namespace 内的 custom 还原成裸名并判
+	// custom_tool_call；function 子工具保持「真名优先、别名不生效」的原语义，按
+	// 带 namespace 字段的普通 function_call 交付。详见 customToolCallName。
+	IsCustom bool
 }
 
 // NamespaceToolNames 收集 Responses 请求中 namespace 子工具的摊平名 →（namespace,
@@ -254,7 +259,7 @@ func NamespaceToolNames(tools []ResponsesTool) map[string]NamespacedToolName {
 			children = tool.Children
 		}
 		for _, child := range children {
-			if child.Type != "function" || child.Name == "" {
+			if (child.Type != "function" && child.Type != "custom") || child.Name == "" {
 				continue
 			}
 			if out == nil {
@@ -263,8 +268,42 @@ func NamespaceToolNames(tools []ResponsesTool) map[string]NamespacedToolName {
 			out[FlattenNamespaceToolName(tool.Name, child.Name)] = NamespacedToolName{
 				Namespace: tool.Name,
 				Name:      child.Name,
+				IsCustom:  child.Type == "custom",
 			}
 		}
+	}
+	return out
+}
+
+// NamespaceCustomToolNames 收集 namespace 内 **custom 类型** 子工具的摊平名集合。
+//
+// 与 NamespaceToolNames 的关系：NamespaceToolNames 说「这个摊平名属于哪个 namespace 的
+// 哪个子工具」，本集合说「这个摊平名的子工具是 custom 类型」——
+// 回程要靠这一位把 namespace 内的 custom 判成 custom_tool_call 并还原成裸名。
+// namespace 内 function 子工具不在本集合里。
+//
+// 为什么需要这一位：customToolCallName 的判定顺序里，namespace 命中即「不是 custom」
+// （那是为 function 子工具定的语义）。若不区分 custom 与 function，namespace 内的
+// custom 子工具会被一起判成普通 function_call —— codex 只认 custom_tool_call。
+// cursor 侧的 cursorCustomToolCallName 用同样的四集合结构，见
+// cursor_execution_service.go:3589。
+//
+// 本函数的回程判定已收敛到 NamespacedToolName.IsCustom 字段（见 customToolCallName），
+// 故此处直接基于 NamespaceToolNames 的结果筛出 custom 子集，口径与下游 FlattenResponsesToolList
+// 的 NamespaceCustomTools 一致（都收 function + custom，都按 FlattenNamespaceToolName 摊平）。
+func NamespaceCustomToolNames(tools []ResponsesTool) map[string]bool {
+	ns := NamespaceToolNames(tools)
+	if len(ns) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(ns))
+	for flat, origin := range ns {
+		if origin.IsCustom {
+			out[flat] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -274,6 +313,12 @@ func NamespaceToolNames(tools []ResponsesTool) map[string]NamespacedToolName {
 // flattened namespace tools (for example functions__exec beside
 // functions__wait). A real declared namespace child always owns its flattened
 // name, and ambiguous aliases are left as ordinary function calls.
+//
+// 判定顺序与 cursor 侧的 cursorCustomToolCallName 同源：namespace 子工具占用了这个
+// 摊平名时，是 custom 子工具就还原成裸名并判 custom_tool_call，是 function 子工具
+// 则保持「真名优先、别名不生效」的原语义（返回 false，按普通 function_call 交付）。
+// 这一位由 NamespacedToolName.IsCustom 承载（避免改动导出 API 签名，也避免动
+// 本包以外的 cursor 侧代码）。
 func customToolCallName(name string, customTools, functionTools map[string]bool, namespaceTools map[string]NamespacedToolName) (string, bool) {
 	if functionTools[name] {
 		return "", false
@@ -281,7 +326,12 @@ func customToolCallName(name string, customTools, functionTools map[string]bool,
 	if customTools[name] {
 		return name, true
 	}
-	if _, ok := namespaceTools[name]; ok {
+	// namespace 子工具占用了这个摊平名：是 custom 子工具就还原成裸名并判 custom_tool_call，
+	// 是 function 子工具则保持"真名优先、别名不生效"的原语义。
+	if origin, ok := namespaceTools[name]; ok {
+		if origin.IsCustom {
+			return origin.Name, true
+		}
 		return "", false
 	}
 	match := ""

@@ -95,13 +95,13 @@ func decodeRejectPayload(t *testing.T, payload []byte) (int, []byte) {
 func TestCursorNativeExecRejectReason(t *testing.T) {
 	require.Equal(t,
 		"Tool not available in this environment. Use only the client-provided tools: Bash, read_file.",
-		cursorNativeExecRejectReason([]string{"Bash", "read_file"}))
+		cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, []string{"Bash", "read_file"}))
 	require.Equal(t,
 		"Tool not available in this environment. The client declared no tools.",
-		cursorNativeExecRejectReason(nil))
+		cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, nil))
 	require.Equal(t,
 		"Tool not available in this environment. The client declared no tools.",
-		cursorNativeExecRejectReason([]string{}))
+		cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, []string{}))
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ func TestCursorNativeExecRejectField(t *testing.T) {
 
 func TestCursorNativeExecRejectEncode(t *testing.T) {
 	declared := []string{"Bash", "read_file"}
-	reason := cursorNativeExecRejectReason(declared)
+	reason := cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, declared)
 
 	cases := []struct {
 		name               string
@@ -302,7 +302,7 @@ func TestCursorNativeExecRejectEncode(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCursorNativeExecRejectEncodeMissingArgs(t *testing.T) {
-	reason := cursorNativeExecRejectReason([]string{"Bash"})
+	reason := cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, []string{"Bash"})
 	for _, field := range []int{
 		2,  // shell_args
 		14, // shell_stream_args

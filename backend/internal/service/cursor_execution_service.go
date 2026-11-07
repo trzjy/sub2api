@@ -832,14 +832,7 @@ func (s *CursorExecutionService) Execute(
 		}
 	}()
 
-	fwdReq := &CursorUpstreamRequest{
-		Path:            cursorPathAgentRun,
-		Body:            payload,
-		AuthProvider:    authProvider,
-		Model:           upstreamModel,
-		ToolDelegations: delegations,
-		Headers:         headers,
-	}
+	fwdReq := cursorBuildAgentRunUpstreamRequest(req, payload, authProvider, upstreamModel, delegations, headers)
 
 	var resp *CursorUpstreamResponse
 	resp, err = s.forwarder.Do(sessionCtx, fwdReq)
@@ -9502,4 +9495,65 @@ func (r *cursorSessionRecord) batchConsumed() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.pending != nil && r.pending.consumed
+}
+
+// cursorDeclaredOriginalToolNames 收集本请求客户端声明的**原始**工具名（保持声明顺序）。
+//
+// 出站 f4 里的工具名是 wire name（撞 Cursor 上游内置名时加了后缀，见
+// cursorWireToolNameSet）。上游按 wire name 回调工具时，双工层需要把它映射回
+// **客户端原名**再交付 —— 否则客户端收到一个自己从没声明过的名字。
+//
+// 这里给出原始名集合，双工层据此正向算 wire map 再反转（cursorWireNameReverse），
+// 保证「改名」与「反查」用的是同一份规则（cursorWireToolNamesFromNames），
+// 不会出现两边算出不同名字的情况。
+//
+// 没有工具、没有名字的工具都跳过（返回 nil）—— 双工层据此退化为原样登记，
+// 保持既有语义。
+func cursorDeclaredOriginalToolNames(chat *apicompat.ChatCompletionsRequest) []string {
+	if chat == nil || len(chat.Tools) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(chat.Tools))
+	for _, t := range chat.Tools {
+		if t.Function == nil {
+			continue
+		}
+		if name := strings.TrimSpace(t.Function.Name); name != "" {
+			out = append(out, name)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+
+// cursorBuildAgentRunUpstreamRequest 构造 AgentRun 的出站请求描述。
+//
+// 除了转发所需的基本材料，它还带上**客户端声明的原始工具名**
+// （cursorDeclaredOriginalToolNames）—— 出站 f4 里的工具名是 wire name
+// （撞 Cursor 上游内置名时加了后缀），上游按 wire name 回调时，双工层要靠这份
+// 原始名把它映射回客户端原名再交付。
+//
+// 单独成函数是为了让「原始名有没有真的被带上」这一条**可被单测直接覆盖**：
+// mutation 掉这里的赋值，单测立刻红（2026-11-07 mutation 反证得出：
+// 只测纯函数的话，生产路径漏填了测试照样绿）。
+func cursorBuildAgentRunUpstreamRequest(
+	req *CursorExecutionRequest,
+	payload []byte,
+	authProvider CursorUpstreamAuthProvider,
+	upstreamModel string,
+	delegations *cursorToolDelegations,
+	headers map[string]string,
+) *CursorUpstreamRequest {
+	return &CursorUpstreamRequest{
+		Path:              cursorPathAgentRun,
+		Body:              payload,
+		AuthProvider:      authProvider,
+		Model:             upstreamModel,
+		ToolDelegations:   delegations,
+		Headers:           headers,
+		DeclaredToolNames: cursorDeclaredOriginalToolNames(req.Chat),
+	}
 }
