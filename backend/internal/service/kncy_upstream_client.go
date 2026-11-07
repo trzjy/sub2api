@@ -109,7 +109,9 @@ func (c *KnCyClient) GetSubscriptionUsage(ctx context.Context, key string) (*KnC
 
 // do 执行一次 HTTP 请求并解析统一响应包。
 //
-// 仅 HTTP 2xx 时解析响应体；否则返回含状态码与响应摘要的传输错误。
+// 仅 HTTP 2xx 时解析响应体；否则返回含状态码与脱敏摘要的传输错误。
+// 非 2xx 响应正文可能回显 Authorization 中的凭据，因此摘要前会先对 bearer
+// 做脱敏（替换为 ***），绝不将凭据原文随错误信息回显。
 // 业务 status 非成功值（空/ok/success 以外的明确失败措辞）时返回业务错误。
 // 错误信息中绝不包含 bearer 凭据（code/key）原文。
 func (c *KnCyClient) do(ctx context.Context, method, path, bearer string) (*knCyResponse, error) {
@@ -132,7 +134,7 @@ func (c *KnCyClient) do(ctx context.Context, method, path, bearer string) (*knCy
 		return nil, fmt.Errorf("kncy: read response %s: %w", url, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("kncy: http %s status %d: %s", url, resp.StatusCode, kncyTruncate(string(raw), 256))
+		return nil, fmt.Errorf("kncy: http %s status %d: %s", url, resp.StatusCode, kncyMaskCredential(string(raw), bearer))
 	}
 
 	var r knCyResponse
@@ -165,4 +167,14 @@ func kncyTruncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// kncyMaskCredential 将响应正文中的 bearer 凭据脱敏后再截断，避免凭据随非 2xx
+// 错误回显。bearer 为空时跳过脱敏，仅做长度截断。
+func kncyMaskCredential(body, bearer string) string {
+	if bearer != "" {
+		body = strings.ReplaceAll(body, "Bearer "+bearer, "Bearer ***")
+		body = strings.ReplaceAll(body, bearer, "***")
+	}
+	return kncyTruncate(body, 256)
 }

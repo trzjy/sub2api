@@ -68,6 +68,26 @@ func (u *g2aMockUpstream) callCount() int {
 	return len(u.calls)
 }
 
+// g2aErrFn 返回一个 transport 错误（非响应），使上游调用走 handleUpstreamTransportError
+// 而非 failover 路径（failover 会触碰 RateLimitService，空壳实例未初始化会 nil 解引用）。
+// 用于断言 fallback 路径命中（而非 Connect 分支）。
+func g2aErrFn() g2aCall {
+	return func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("g2a: upstream transport blocked")
+	}
+}
+
+// g2aFailFn 返回固定状态码的失败响应，用于断言 fallback 路径命中（而非 Connect 分支）。
+func g2aFailFn(code int) g2aCall {
+	return func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: code,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":"blocked"}`)),
+		}, nil
+	}
+}
+
 // g2aHangFn 是悬挂脚本：直到护栏取消 reqCtx 才返回。
 func g2aHangFn(req *http.Request) (*http.Response, error) {
 	<-req.Context().Done()
@@ -535,4 +555,36 @@ func TestG2AMount1HealthyPathZeroHeartbeatZeroGuardTrigger(t *testing.T) {
 	require.Equal(t, 0, obs.heartbeatFrameCount())
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "message_stop", "语义流必须照常送达")
+}
+
+// TestGatewayForward_CursorSessionDispatchSkipsAPIKey 钉死旧 GatewayService /v1/messages
+// 入口的分派缺口修复：仅 IsCursorConnectSessionAccount（cursor + 非 api_key）进入 Connect，
+// 而 Cursor APIKey 账号（kn-cy.com 等 OpenAI 兼容反代）不得进入 Connect，必须落到 raw
+// OpenAI 管线。
+//
+// 判定方式：Connect 分支在 s.cursorExecution 未装配时返回专属错误
+// ErrCursorExecutionUnavailable；本测试据此区分"进入 Connect"与"落到 raw 管线"。
+func TestGatewayForward_CursorSessionDispatchSkipsAPIKey(t *testing.T) {
+	oauthAcct := &Account{
+		ID: 1, Name: "cursor-pool-oauth", Platform: PlatformCursor, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "tok"}, Status: StatusActive,
+	}
+	apiKeyAcct := &Account{
+		ID: 2, Name: "kncy-apikey", Platform: PlatformCursor, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "sk-kn-cy"}, Status: StatusActive,
+	}
+
+	// 1. OAuth 会话账号 → 进入 Connect 分支；执行部件未装配 → ErrCursorExecutionUnavailable。
+	svc := &GatewayService{} // cursorExecution 为 nil
+	_, err := svc.Forward(context.Background(), nil, oauthAcct, g2aParsed(t, g2aNonStreamBody("claude-x")))
+	require.ErrorIs(t, err, ErrCursorExecutionUnavailable, "cursor OAuth 账号必须进入 Connect 分支")
+
+	// 2. Cursor APIKey 账号 → 不得进入 Connect 分支。mock 上游快速 transport 错误，落
+	//    raw 管线并返回 *UpstreamFailoverError，而非 Connect 专属的 ErrCursorExecutionUnavailable。
+	//    用 transport 错误而非 401 响应：failover 分支会触碰未初始化的 RateLimitService 空壳
+	//    导致 nil 解引用；transport 路径走 handleUpstreamTransportError，不触碰该服务。
+	svc2 := g2aService(&g2aMockUpstream{steps: []g2aCall{g2aErrFn()}})
+	_, err2 := svc2.Forward(context.Background(), nil, apiKeyAcct, g2aParsed(t, g2aNonStreamBody("gpt-x")))
+	require.NotErrorIs(t, err2, ErrCursorExecutionUnavailable, "cursor APIKey 账号不得进入 Connect 分支")
+	require.Error(t, err2)
 }

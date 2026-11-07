@@ -44,6 +44,15 @@ type OpenAIRecordUsageInput struct {
 	// EstimatedInputTokens 是本地精确估算的输入 Token 数（当上游 Token 虚高时用于
 	// 覆盖 actualInputTokens 计费）。
 	EstimatedInputTokens int
+	// RequestPayload 是本次请求的原始体（bytes），供本地精准重算输入 Token 使用：
+	// 当上游 Token 虚高的 Cursor 渠道未由 handler 显式透传 EstimatedInputTokens 时，
+	// RecordUsage 沿既有 EstimateTierRoutingInputTokens 唯一路径按 RequestProtocol
+	// 收敛协议后本地重算。仅纯文本请求参与（含图请求保持图文边界，见 recount 逻辑）。
+	// 缺失 / 解析失败回落上游 Token（既有默认，不新增兜底值）。
+	RequestPayload []byte
+	// RequestProtocol 标识 RequestPayload 的入口协议形态（chat / responses / messages），
+	// 与 EstimateTierRoutingInputTokens 共用同一协议枚举，是本地重算唯一路径的入口开关。
+	RequestProtocol TierRoutingRequestProtocol
 	// NativeCompactionV2 is an orthogonal semantic flag captured by the
 	// Responses handler from stream=true + compaction_trigger. It never stores
 	// the request payload and does not replace the transport request type.
@@ -197,6 +206,37 @@ func estimateTokenCount(text string) int {
 	return tokens
 }
 
+// recountInputTokensFromPayload 沿既有 EstimateTierRoutingInputTokens 唯一路径，
+// 按入参协议把请求体收敛为 Responses 形状后本地重算纯文本输入 Token，作为 Cursor
+// 渠道上游虚高 Token 的对冲重算源。
+//
+// 边界与语义约束（外审确认）：
+//   - 仅纯文本请求重算：含图请求保持「纯文本 / 含图」边界，图片输入由独立
+//     ImageInputTokens 口径承载，此处只重算文本输入，避免把图片内容误计入文本桶
+//     造成重复计费；
+//   - 请求体 / 协议缺失，或解析 / 估算失败，一律返回 0，由调用方回落上游 Token——
+//     不新增兜底值、不改变计费语义（EstimateTierRoutingInputTokens 自身 fail-closed，
+//     解析 / 转换 / 估算失败即报错，不会默认大请求）。
+func recountInputTokensFromPayload(input *OpenAIRecordUsageInput, result *OpenAIForwardResult) int {
+	if input == nil || len(input.RequestPayload) == 0 || input.RequestProtocol == "" {
+		return 0
+	}
+	// 含图请求保持纯文本 / 含图边界：图片输入由 ImageInputTokens 独立承载，此处只
+	// 重算文本输入，故仅对纯文本请求启用本地重算，避免与图片 Token 叠加或重复计费。
+	if result != nil && result.ImageCount > 0 {
+		return 0
+	}
+	model := ""
+	if result != nil {
+		model = result.Model
+	}
+	est, err := EstimateTierRoutingInputTokens(model, input.RequestProtocol, input.RequestPayload)
+	if err != nil || est <= 0 {
+		return 0
+	}
+	return est
+}
+
 // RecordUsage records usage and deducts balance
 func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRecordUsageInput) error {
 	if input == nil {
@@ -229,12 +269,20 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if actualInputTokens < 0 {
 		actualInputTokens = 0
 	}
-	// 当账号为 Cursor APIKey 渠道（或显式标记 recount_input_tokens）且传入了有效的
-	// EstimatedInputTokens 时，优先使用本地精准重算的输入 Token 进行计费（第三方
-	// Cursor 网关如 kn-cy.com 上游返回的 prompt_tokens 存在虚高）。
+	// 当账号为 Cursor APIKey 渠道（或显式标记 recount_input_tokens）且本地精准重算
+	// 可用时，优先使用本地重算输入 Token 计费，对冲第三方 Cursor 网关（如 kn-cy.com）
+	// 上游 prompt_tokens 1.6~2.5 倍虚高。重算来源优先级：
+	//   ① handler 显式透传的 EstimatedInputTokens（既有行为，优先，避免重复重算）；
+	//   ② 入参携带的请求体 + 协议，沿既有 EstimateTierRoutingInputTokens 唯一路径
+	//      本地重算（仅纯文本请求，含图保持图文边界）。
+	// 两种来源任一缺失 / 失败均回落上游 actualInputTokens（既有默认，不新增兜底值、
+	// 不改变计费语义）。该路径覆盖 chat / responses / messages 三种入口协议形态——
+	// RequestProtocol 枚举即区分入口，重算逻辑与入口无关，统一收敛为计费构造输入。
 	if account != nil && (account.IsCursorOpenAICompatibleAccount() || account.GetCredential("recount_input_tokens") == "true") {
 		if input.EstimatedInputTokens > 0 {
 			actualInputTokens = input.EstimatedInputTokens
+		} else if est := recountInputTokensFromPayload(input, result); est > 0 {
+			actualInputTokens = est
 		}
 	}
 

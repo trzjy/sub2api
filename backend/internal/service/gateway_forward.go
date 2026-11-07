@@ -154,8 +154,10 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	if c != nil {
 		SetOpsRequestShape(c, DescribeRequestShape(parsed.Body.Bytes(), "messages"))
 	}
-	// Cursor 账号前置分流：出站为 Cursor 原生协议，绝不能落到 Anthropic 通用路径。
-	if isCursorAccount(account) {
+	// Cursor 账号前置分流：仅 Connect 会话账号（非 APIKey 的 cursor 账号）走 Cursor
+	// 原生协议执行部件；Cursor APIKey 账号（kn-cy.com 等 OpenAI 兼容反代）不在此分派，
+	// 自然落到下方 Anthropic 通用路径由更高层 OpenAI 网关承接 raw OpenAI 管线。
+	if account.IsCursorConnectSessionAccount() {
 		return s.forwardCursorAsAnthropicMessages(ctx, c, account, parsed)
 	}
 	// API-key mappings and OAuth native IDs are resolved before mimicry.

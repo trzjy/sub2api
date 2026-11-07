@@ -43,9 +43,9 @@ func (s *GatewayService) ForwardAsResponses(
 	// 2026-11-04：挂请求形状（计数/开关，不含正文），供上游泛化 400 的诊断用。
 	SetOpsRequestShape(c, DescribeRequestShape(body, "responses"))
 
-	// Cursor 账号前置分流：Responses 入站先转 Chat Completions，再走契约 0.1
-	// 文本桥接；响应按 Responses 协议回桥。usage 由 handler 既有链计费一次。
-	if isCursorAccount(account) {
+	// Cursor 账号前置分流：仅 Connect 会话账号（非 APIKey 的 cursor 账号）走 Cursor
+	// 原生协议执行部件；Cursor APIKey 账号不在此分派，落下方既有的 raw OpenAI 管线。
+	if account.IsCursorConnectSessionAccount() {
 		return s.forwardCursorAsResponses(ctx, c, account, body)
 	}
 

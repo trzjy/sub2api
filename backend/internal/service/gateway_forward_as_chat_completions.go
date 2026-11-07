@@ -41,10 +41,10 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	// 2026-11-04：挂请求形状（计数/开关，不含正文），供上游泛化 400 的诊断用。
 	SetOpsRequestShape(c, DescribeRequestShape(body, "chat"))
 
-	// Cursor 账号前置分流：入站已是 Chat Completions 形状，**解码一次**成类型化
-	// 请求后交唯一执行部件（出站为 Cursor 原生协议，不能落到 Anthropic 通用路径）。
+	// Cursor 账号前置分流：仅 Connect 会话账号（非 APIKey 的 cursor 账号）走 Cursor
+	// 原生协议执行部件；Cursor APIKey 账号不在此分派，落下方既有的 raw OpenAI 管线。
 	// 返回的 *ForwardResult 由 handler 既有 RecordUsage 链计费一次，执行层不二次计费。
-	if isCursorAccount(account) {
+	if account.IsCursorConnectSessionAccount() {
 		return s.forwardCursorAsChatCompletions(ctx, c, account, body)
 	}
 

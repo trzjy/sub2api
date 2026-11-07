@@ -334,3 +334,34 @@ func TestHandleCCStreamingFromAnthropic_PreservesMessageStartCacheUsageAndReason
 	require.Equal(t, "medium", *result.ReasoningEffort)
 	require.Contains(t, rec.Body.String(), `[DONE]`)
 }
+
+// TestForwardAsChatCompletions_CursorSessionDispatchSkipsAPIKey 钉死旧 GatewayService
+// /v1/chat/completions 入口的分派缺口修复：仅 IsCursorConnectSessionAccount（cursor + 非
+// api_key）进入 Connect，Cursor APIKey 账号不得进入 Connect，落到 raw OpenAI 管线。
+//
+// 判定方式同 TestGatewayForward_CursorSessionDispatchSkipsAPIKey：Connect 分支在未装配
+// 执行部件时返回 ErrCursorExecutionUnavailable。
+func TestForwardAsChatCompletions_CursorSessionDispatchSkipsAPIKey(t *testing.T) {
+	oauthAcct := &Account{
+		ID: 1, Name: "cursor-pool-oauth", Platform: PlatformCursor, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "tok"}, Status: StatusActive,
+	}
+	apiKeyAcct := &Account{
+		ID: 2, Name: "kncy-apikey", Platform: PlatformCursor, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "sk-kn-cy"}, Status: StatusActive,
+	}
+
+	// 1. OAuth 会话账号 → 进入 Connect 分支 → ErrCursorExecutionUnavailable。
+	svc := &GatewayService{}
+	_, err := svc.ForwardAsChatCompletions(context.Background(), nil, oauthAcct,
+		[]byte(`{"model":"gpt-4","messages":[],"stream":false}`), nil)
+	require.ErrorIs(t, err, ErrCursorExecutionUnavailable, "cursor OAuth 账号必须进入 Connect 分支")
+
+	// 2. Cursor APIKey 账号 → 不得进入 Connect 分支，落 raw 管线（mock 上游 transport 错误；
+	//    failover 分支会触碰未初始化的 RateLimitService 空壳导致 nil 解引用，故用 transport 路径）。
+	svc2 := g2aService(&g2aMockUpstream{steps: []g2aCall{g2aErrFn()}})
+	_, err2 := svc2.ForwardAsChatCompletions(context.Background(), nil, apiKeyAcct,
+		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":false}`), nil)
+	require.NotErrorIs(t, err2, ErrCursorExecutionUnavailable, "cursor APIKey 账号不得进入 Connect 分支")
+	require.Error(t, err2)
+}

@@ -210,3 +210,56 @@ func TestKnCyClient_GetSubscriptionUsage_EmptyKey(t *testing.T) {
 		t.Fatal("GetSubscriptionUsage(empty) error = nil, want non-nil")
 	}
 }
+
+// TestKnCyClient_ClaimActivation_Non2xxCredentialEcho 是凭据回显的回归测试：
+// 当上游非 2xx 错误正文回显了 Authorization 中的凭据（如 "Bearer fake-..."）时，
+// 错误信息必须对凭据脱敏，绝不能包含凭据原文。
+func TestKnCyClient_ClaimActivation_Non2xxCredentialEcho(t *testing.T) {
+	srv := newKnCyTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		// 故意在错误正文里回显了 Authorization 中的凭据原文。
+		_, _ = w.Write([]byte(`{"status":"error","message":"invalid Authorization: Bearer fake-activation-code"}`))
+	})
+
+	c := NewKnCyClient(srv.URL)
+	_, err := c.ClaimActivation(context.Background(), "fake-activation-code")
+	if err == nil {
+		t.Fatal("ClaimActivation() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("ClaimActivation() error = %q, want contains status 401", err.Error())
+	}
+	// 凭据原文绝不可出现在错误信息中（回显泄露）。
+	if strings.Contains(err.Error(), "fake-activation-code") {
+		t.Errorf("ClaimActivation() error leaks credential: %q", err.Error())
+	}
+	// 脱敏后应以固定占位符呈现。
+	if !strings.Contains(err.Error(), "***") {
+		t.Errorf("ClaimActivation() error missing masked digest: %q", err.Error())
+	}
+}
+
+// TestKnCyClient_GetSubscriptionUsage_Non2xxCredentialEcho 同上，覆盖订阅 Key 路径。
+func TestKnCyClient_GetSubscriptionUsage_Non2xxCredentialEcho(t *testing.T) {
+	srv := newKnCyTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"status":"error","message":"unauthorized key fake-subscription-key"}`))
+	})
+
+	c := NewKnCyClient(srv.URL)
+	_, err := c.GetSubscriptionUsage(context.Background(), "fake-subscription-key")
+	if err == nil {
+		t.Fatal("GetSubscriptionUsage() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("GetSubscriptionUsage() error = %q, want contains status 401", err.Error())
+	}
+	if strings.Contains(err.Error(), "fake-subscription-key") {
+		t.Errorf("GetSubscriptionUsage() error leaks credential: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "***") {
+		t.Errorf("GetSubscriptionUsage() error missing masked digest: %q", err.Error())
+	}
+}
