@@ -344,6 +344,19 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool, skipped cursorSkipLedger) (
 		if t.Function == nil || t.Function.Name == "" {
 			continue
 		}
+		var def []byte
+		def = cursorAppendStringField(def, cursorFldMcpToolDefName, t.Function.Name)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, t.Function.Description)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, t.Function.Name)
+		// custom/freeform 工具（如 codex 的 exec）没有 schema：写了 input_schema
+		// 上游就会按 JSON 对象发参，与自由文本语义冲突（模型期望一段自由文本 JS）。
+		// 这种工具按「纯文本自由工具」下发——不写 f3（input_schema），也不写 f6
+		// （旧 input_schema_json 字符串），仅保留 f1/f2/f4/f5 的身份字段。
+		if t.Custom {
+			mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
+			continue
+		}
 		schema := string(t.Function.Parameters)
 		if strings.TrimSpace(schema) == "" || schema == "null" {
 			schema = "{}"
@@ -359,11 +372,6 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool, skipped cursorSkipLedger) (
 			skipped.note(cursorSkipToolSchemaInvalid)
 			continue
 		}
-		var def []byte
-		def = cursorAppendStringField(def, cursorFldMcpToolDefName, t.Function.Name)
-		def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, t.Function.Description)
-		def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
-		def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, t.Function.Name)
 		def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, valBytes)
 		mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
 	}

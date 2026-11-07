@@ -92,6 +92,12 @@ func FlattenResponsesToolList(tools []ResponsesTool) (ResponsesFlatToolSet, erro
 					"namespace tools %q/%q and %q/%q both flatten to %q; this upstream cannot disambiguate them, rename one of the tools",
 					prev.Namespace, prev.Name, namespace, childName, name)
 			}
+			// 完全相同的 (namespace, 子工具) 重复声明不构成歧义：去重后只下发一份。
+			// （旧 chat 桥的 namespaceChildrenToChatTools 就是这个语义，收敛到唯一事实源
+			//   时不能把它丢掉——丢掉会让出站 f4 里出现两份同名工具定义。）
+			if prev, exists := set.NamespaceTools[name]; exists && prev.Namespace == namespace && prev.Name == childName {
+				continue
+			}
 			set.NamespaceTools[name] = NamespacedToolName{Namespace: namespace, Name: childName}
 			if childType == "custom" {
 				if set.NamespaceCustomTools == nil {

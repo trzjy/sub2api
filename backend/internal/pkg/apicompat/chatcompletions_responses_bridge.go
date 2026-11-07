@@ -241,7 +241,7 @@ type NamespacedToolName struct {
 // 子工具名）映射。chat 桥回程时需据此把模型对摊平工具的调用还原为带 namespace 字段
 // 的 function_call 项：codex 按 namespace+name 路由，平铺名会被判为 unsupported
 // call；摊平名超长时带截断哈希（见 FlattenNamespaceToolName），无法按字符串切分还原。
-// 摊平名撞名的请求已在转换阶段被显式拒绝（见 namespaceChildrenToChatTools），
+// 摊平名撞名的请求已在转换阶段被 FlattenResponsesToolList 显式拒绝，
 // 此处映射不存在歧义。
 func NamespaceToolNames(tools []ResponsesTool) map[string]NamespacedToolName {
 	var out map[string]NamespacedToolName
@@ -529,7 +529,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			}
 			name := rawString(item["name"])
 			// namespace 子工具的历史调用带 namespace 字段，需与请求方向的摊平
-			// 命名（namespaceChildrenToChatTools）保持一致。
+			// 命名（FlattenNamespaceToolName）保持一致。
 			if ns := rawString(item["namespace"]); ns != "" {
 				name = FlattenNamespaceToolName(ns, name)
 			}
@@ -1234,10 +1234,8 @@ const CustomToolInputSchema = `{"type":"object","properties":{"input":{"type":"s
 const customToolInputSchema = CustomToolInputSchema
 
 func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
-	// 顶层 function/custom 工具名集合：namespace 子工具摊平后与其撞名时，chat
-	// 上游无法按 namespace 区分调用归属。这类请求在原生 Responses 上游是合法的
-	// （按 namespace+name 路由），歧义由摊平转换制造且无法消除，必须显式拒绝，
-	// 不能静默降级（重复声明发给上游、回程还原到错误工具）。
+	// 顶层重复可执行工具名检查（保留原语义）：同名 function/custom 在原生 Responses
+	// 上游按名字路由不冲突，但本上游无法区分，必须显式拒绝。
 	topLevel := make(map[string]bool)
 	for _, tool := range tools {
 		if (tool.Type == "function" || tool.Type == "custom") && tool.Name != "" {
@@ -1247,10 +1245,19 @@ func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 			topLevel[tool.Name] = true
 		}
 	}
-	flatOwner := make(map[string]NamespacedToolName)
+
+	// 收敛到唯一事实源：所有 namespace 摊平（function 与 custom 子工具都摊平）都由
+	// FlattenResponsesToolList 完成，出来的名字已是 ns__name。chat 桥不再各自实现
+	// 一份 namespace 摊平——旧 namespaceChildrenToChatTools 只认 function、把 custom
+	// 子工具整个 continue 丢掉，正是 codex 的 exec 从不下发给上游的根因。
+	flat, err := FlattenResponsesToolList(tools)
+	if err != nil {
+		return nil, err
+	}
+
 	toolSearchDeclared := false
-	out := make([]ChatTool, 0, len(tools))
-	for _, tool := range tools {
+	out := make([]ChatTool, 0, len(flat.Tools))
+	for _, tool := range flat.Tools {
 		switch tool.Type {
 		case "function":
 			out = append(out, ChatTool{
@@ -1263,8 +1270,33 @@ func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 				},
 			})
 		case "custom":
-			// codex 0.14x 的核心执行工具 exec 即为 custom 类型；丢弃它会让模型
-			// 无法执行任何命令，必须降级为 function 工具透传。
+			// 顶层 custom 与 namespace 内 custom 的 f4 形态**故意不同**：
+			//   - 顶层 custom 走 chat 桥降级，必须带 {"input":string} 降级壳：模型被引导
+			//     发 {"input":"<自由文本>"}，回程 extractCustomToolCallInput 从中抽回纯文本
+			//     （chatcompletions_responses_bridge.go 的 extractCustomToolCallInput）。
+			//     没有这个壳，模型可能直接发裸文本或发别的形状，抽不出纯文本。
+			//   - namespace 内 custom 由 Responses 摊平而来，本来就没有 input_schema
+			//     （Responses 的 custom 类型无 parameters），按「无 schema」原样下发，
+			//     回程走 cursorToolDeclaredWithoutSchema 原样交付。
+			// 顶层 custom 不是本阶段的改动对象，保持既有形态（降级壳 + Custom=false）。
+			//
+			// 区分方式：flat.NamespaceCustomTools[摊平名] 命中即为 namespace 内 custom
+			// 子工具（已摊平、名字是 ns__name）；顶层 custom 未经摊平、不在该集合里。
+			// 不要靠名字形状猜类型。
+			if flat.NamespaceCustomTools[tool.Name] {
+				// namespace 内 custom 子工具：无 schema，打 Custom 标记，下游不写 f3/f6。
+				out = append(out, ChatTool{
+					Type:   "function",
+					Custom: true,
+					Function: &ChatFunction{
+						Name:        tool.Name,
+						Description: tool.Description,
+						Parameters:  nil,
+					},
+				})
+				continue
+			}
+			// 顶层 custom（如 codex 0.14x 的 exec）：恢复降级壳，且不打 Custom 标记。
 			out = append(out, ChatTool{
 				Type: "function",
 				Function: &ChatFunction{
@@ -1285,12 +1317,6 @@ func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 			}
 			toolSearchDeclared = true
 			out = append(out, toolSearchProxyChatTool())
-		case "namespace":
-			flattened, err := namespaceChildrenToChatTools(tool, topLevel, flatOwner)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, flattened...)
 		case "x_search":
 			out = append(out, ChatTool{
 				Type:                     "x_search",
@@ -1332,48 +1358,6 @@ func toolSearchProxyChatTool() ChatTool {
 			Parameters:  json.RawMessage(toolSearchProxySchema),
 		},
 	}
-}
-
-// namespaceChildrenToChatTools 将 namespace 工具的子 function 工具摊平为顶层
-// function 工具，名字加 "<namespace>__" 前缀。摊平名与顶层工具或其他 namespace
-// 撞名时返回错误（歧义不可消除，显式拒绝）；同一 (namespace, 子工具) 的重复声明
-// 去重后不算冲突。
-func namespaceChildrenToChatTools(tool ResponsesTool, topLevel map[string]bool, flatOwner map[string]NamespacedToolName) ([]ChatTool, error) {
-	if tool.Name == "" {
-		return nil, nil
-	}
-	children := tool.Tools
-	if len(children) == 0 {
-		children = tool.Children
-	}
-	var out []ChatTool
-	for _, child := range children {
-		if child.Type != "function" || child.Name == "" {
-			continue
-		}
-		flat := FlattenNamespaceToolName(tool.Name, child.Name)
-		entry := NamespacedToolName{Namespace: tool.Name, Name: child.Name}
-		if topLevel[flat] {
-			return nil, fmt.Errorf("namespace tool %q/%q flattens to %q which conflicts with a top-level tool of the same name; this upstream cannot disambiguate them, rename one of the tools", tool.Name, child.Name, flat)
-		}
-		if prev, ok := flatOwner[flat]; ok {
-			if prev == entry {
-				continue
-			}
-			return nil, fmt.Errorf("namespace tools %q/%q and %q/%q both flatten to %q; this upstream cannot disambiguate them, rename one of the tools", prev.Namespace, prev.Name, tool.Name, child.Name, flat)
-		}
-		flatOwner[flat] = entry
-		out = append(out, ChatTool{
-			Type: "function",
-			Function: &ChatFunction{
-				Name:        flat,
-				Description: child.Description,
-				Parameters:  child.Parameters,
-				Strict:      child.Strict,
-			},
-		})
-	}
-	return out, nil
 }
 
 // chatToolNameMaxLen 是 Chat Completions function 工具名的通用长度上限。

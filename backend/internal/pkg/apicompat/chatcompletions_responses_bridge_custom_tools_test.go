@@ -34,6 +34,60 @@ func TestResponsesToChatCompletionsRequest_CustomToolBecomesFunctionTool(t *test
 	assert.Equal(t, "wait", out.Tools[1].Function.Name)
 }
 
+// 顶层 custom 与 namespace 内 custom 的 f4 形态**故意不同**，这条用例是那道分界线的护栏：
+//
+//   - 顶层 custom 走 chat 桥降级，必须带 {"input":string} 降级壳。回程
+//     extractCustomToolCallInput 从 {"input":"<自由文本>"} 里抽回纯文本交给客户端
+//     （custom_tool_call 项的 input 字段）。没有这个壳，模型发别的形状就抽不出来。
+//   - namespace 内 custom 由 Responses 摊平而来，本来就没有 input_schema
+//     （Responses 的 custom 类型无 parameters），按「无 schema」原样下发，
+//     回程走 cursorToolDeclaredWithoutSchema 原样交付。
+//
+// 顶层 custom 不是阶段 0 的改动对象：它当前在生产服役（codex 0.14x 的 exec）。
+// 统一两者形态的那次改动会让顶层 custom 的回程抽不出自由文本，**不许再发生**。
+func TestResponsesToChatCompletionsRequest_TopLevelCustomKeepsDowngradeShell(t *testing.T) {
+	req := &ResponsesRequest{
+		Model: "glm-5.2",
+		Input: json.RawMessage(`"run dir"`),
+		Tools: []ResponsesTool{
+			{Type: "custom", Name: "exec", Description: "Run JavaScript code"},
+			{Type: "namespace", Name: "functions", Tools: []ResponsesTool{
+				{Type: "custom", Name: "run"},
+				{Type: "function", Name: "wait", Parameters: json.RawMessage(`{"type":"object"}`)},
+			}},
+		},
+	}
+
+	out, err := ResponsesToChatCompletionsRequest(req)
+	require.NoError(t, err)
+	require.Len(t, out.Tools, 3)
+
+	byName := make(map[string]ChatTool)
+	for _, tool := range out.Tools {
+		byName[tool.Function.Name] = tool
+	}
+
+	// 顶层 custom：带降级壳、不打 Custom 标记（Custom=true 会让下游不写 f3，
+	// 那条路是 namespace 内 custom 专用的）。
+	top, ok := byName["exec"]
+	require.True(t, ok, "顶层 custom 必须存在")
+	assert.False(t, top.Custom, "顶层 custom 不打 Custom 标记：它的降级壳由 chat 桥自己编，不由下游决定")
+	assert.JSONEq(t, customToolInputSchema, string(top.Function.Parameters),
+		"顶层 custom 必须保留 {\"input\":string} 降级壳，否则回程抽不出自由文本")
+
+	// namespace 内 custom：无 schema、打 Custom 标记。
+	ns, ok := byName["functions__run"]
+	require.True(t, ok, "namespace 内 custom 必须被摊平")
+	assert.True(t, ns.Custom, "namespace 内 custom 打 Custom 标记")
+	assert.Empty(t, ns.Function.Parameters, "namespace 内 custom 不携带 schema")
+
+	// namespace 内 function：schema 保留、不打 Custom 标记。
+	fn, ok := byName["functions__wait"]
+	require.True(t, ok, "namespace 内 function 必须被摊平")
+	assert.False(t, fn.Custom, "namespace 内 function 不打 Custom 标记")
+	assert.JSONEq(t, `{"type":"object"}`, string(fn.Function.Parameters))
+}
+
 func TestResponsesChatBridge_MixedCustomAndNamespaceToolNames(t *testing.T) {
 	req := &ResponsesRequest{
 		Model: "deepseek-test",
@@ -542,17 +596,33 @@ func TestResponsesToChatCompletionsRequest_NamespaceToolFlattensChildren(t *test
 			Name: "gmail",
 			Tools: []ResponsesTool{
 				{Type: "function", Name: "send", Description: "Send mail", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)},
-				{Type: "custom", Name: "ignored_child"},
+				// 改造前这个 custom 子工具的名字是 "ignored_child"——旧实现只摊平
+				// function 子工具，custom 子工具被整个丢弃，那个名字就是在标记
+				// 「它会被忽略」。改造后 custom 子工具照样摊平，名字改回中性的
+				// "compose"：若哪天 custom 又被丢弃，这条用例会因少一条工具而红。
+				{Type: "custom", Name: "compose"},
 			},
 		}},
 	}
 
 	out, err := ResponsesToChatCompletionsRequest(req)
 	require.NoError(t, err)
-	require.Len(t, out.Tools, 1, "namespace 子工具中仅 function 类型被摊平")
+	require.Len(t, out.Tools, 2, "namespace 子工具中 function 与 custom 类型都被摊平（custom 不再被丢弃）")
 
-	assert.Equal(t, "gmail__send", out.Tools[0].Function.Name)
-	assert.Equal(t, "Send mail", out.Tools[0].Function.Description)
+	byName := make(map[string]ChatTool)
+	for _, tool := range out.Tools {
+		byName[tool.Function.Name] = tool
+	}
+
+	send, ok := byName["gmail__send"]
+	require.True(t, ok, "function 子工具必须被摊平")
+	assert.Equal(t, "Send mail", send.Function.Description)
+	assert.False(t, send.Custom, "function 子工具不带 Custom 标记")
+
+	compose, ok := byName["gmail__compose"]
+	require.True(t, ok, "custom 子工具必须被摊平（本阶段核心目标：不再被丢弃）")
+	assert.True(t, compose.Custom, "custom 子工具打 Custom 标记")
+	assert.Empty(t, compose.Function.Parameters, "custom 子工具无 schema")
 }
 
 func TestResponsesToolsParsing_StringToolBecomesCustom(t *testing.T) {
