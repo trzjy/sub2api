@@ -1586,3 +1586,141 @@ func TestQuotaKeyReconcilerSourceUsageFailureDoesNotStopRound(t *testing.T) {
 	require.Equal(t, []int64{41, 42}, observer.observed(), "单来源失败不得中断其余来源")
 	require.Contains(t, ops.lastResultVal(), "observed=1 failed=1", "心跳必须如实分开成功与失败")
 }
+
+// ---------------------------------------------------------------------------
+// kn-cy 接入权威链（复用 quotaKeyUsageObserver/心跳/失败关闭语义）：
+// 用例名以 TestQuotaKeyReconcilerKnCy 起头，落在派发单白名单的
+//  -run 'TestQuotaKey|TestCursorAutoEntry|TestCursorDevice' 过滤内，可被执行者命令复现。
+//   - 不新增调度器 / cron / 兜底：复用既有 reconciler 单 goroutine + ticker 循环；
+//   - kn-cy 同步先于补池、独立于"是否需要补号"；
+//   - 硬失败走失败关闭（写失败心跳、停轮、不影响下一轮），与 ListAllowedModels 失败同型。
+// ---------------------------------------------------------------------------
+
+// fakeKnCyObserver 是 kn-cy 来源账号同步窄面的替身：记录调用次数与返回结果，可注入硬错误。
+type fakeKnCyObserver struct {
+	mu      sync.Mutex
+	calls   int
+	syncRes knCyAccountSync
+	hardErr error
+	// onSync 在每次同步前回调（用例可在此置停机，模拟轮预算用尽 / Stop 在轮中到达）。
+	onSync func()
+}
+
+func newFakeKnCyObserver() *fakeKnCyObserver {
+	return &fakeKnCyObserver{}
+}
+
+func (o *fakeKnCyObserver) SyncKnCyAccounts(_ context.Context) (knCyAccountSync, error) {
+	o.mu.Lock()
+	o.calls++
+	o.mu.Unlock()
+	if o.onSync != nil {
+		o.onSync()
+	}
+	if o.hardErr != nil {
+		return knCyAccountSync{}, o.hardErr
+	}
+	return o.syncRes, nil
+}
+
+func (o *fakeKnCyObserver) callCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.calls
+}
+
+// TestQuotaKeyReconcilerKnCySync_RunsEachRoundAndFoldsSummary 验证 kn-cy 同步先于补池执行、
+// 每轮调用且如实计入心跳摘要（synced/stopped/failed/not_queried），并与"是否需要补号"解耦：
+// 即便水位提供方未接入（早退路径），kn-cy 同步仍必须执行并落入心跳。
+func TestQuotaKeyReconcilerKnCySync_RunsEachRoundAndFoldsSummary(t *testing.T) {
+	ops := newReconOpsRepo()
+	r := newTestReconciler(newFakePuller(), ops, nil) // 未接入 modelWater → 早退路径
+	obs := newFakeKnCyObserver()
+	obs.syncRes = knCyAccountSync{Synced: 5, Stopped: 1, Failed: 0, NotQueried: 0}
+	r.SetKnCyAccountObserver(obs)
+
+	r.runOnce()
+
+	require.Equal(t, 1, obs.callCount(), "kn-cy sync 必须每轮调用一次")
+	require.Equal(t, 1, ops.hbCalls(), "每轮仍只写一次心跳")
+	require.Contains(t, ops.lastResultVal(),
+		"kn-cy account sync: synced=5 stopped=1 failed=0 not_queried=0",
+		"心跳必须如实记录 kn-cy 同步结果")
+}
+
+// TestQuotaKeyReconcilerKnCySync_HardError_FailsClosed 验证 kn-cy 同步硬失败（枚举/基础设施
+// 错误）走失败关闭：写失败心跳、停轮、不影响下一轮（与 ListAllowedModels 失败同型）。
+func TestQuotaKeyReconcilerKnCySync_HardError_FailsClosed(t *testing.T) {
+	ops := newReconOpsRepo()
+	r := newTestReconciler(newFakePuller(), ops, nil)
+	obs := newFakeKnCyObserver()
+	obs.hardErr = errors.New("kn-cy upstream list boom")
+	r.SetKnCyAccountObserver(obs)
+
+	r.runOnce()
+
+	// 失败关闭：写一次失败心跳，不记入未失败的成功摘要。
+	require.Equal(t, 1, ops.hbCalls(), "hard error must write exactly one heartbeat")
+	require.False(t, ops.lastSuccessCalled(), "hard error must be a failed heartbeat")
+	require.Contains(t, ops.lastErrorVal(), "kn-cy account sync: kn-cy upstream list boom",
+		"failure heartbeat LastError must record the kn-cy sync hard error")
+	// 硬失败后不应再发起新一轮 kn-cy 同步（停轮，等下一轮）。
+	require.Equal(t, 1, obs.callCount(), "kn-cy sync must not be retried within the failed round")
+}
+
+// TestQuotaKeyReconcilerKnCySync_IndependentOfPoolReconcile 验证 kn-cy 同步与补池解耦：同轮内
+// kn-cy 同步先执行（调用一次），补池正常进行（有缺口触发拉号），且心跳同时含两类摘要。
+func TestQuotaKeyReconcilerKnCySync_IndependentOfPoolReconcile(t *testing.T) {
+	mw := newFakeModelWater()
+	mw.models = []string{"m1"}
+	mw.level = 8 // 缺口 2 → 触发补池
+	mw.candidates = []int64{21, 22}
+
+	puller := newFakePuller()
+	puller.autoRegisterOnSuccess(mw, 1)
+	ops := newReconOpsRepo()
+	r := newTestReconciler(puller, ops, mw)
+	obs := newFakeKnCyObserver()
+	obs.syncRes = knCyAccountSync{Synced: 3, Stopped: 2, Failed: 1, NotQueried: 0}
+	r.SetKnCyAccountObserver(obs)
+
+	r.runOnce()
+
+	// kn-cy 同步先于补池、独立执行。
+	require.Equal(t, 1, obs.callCount(), "kn-cy sync must run once this round")
+	// 补池仍正常触发（缺口 2 → 拉 2 个候选）。
+	require.Equal(t, []int64{21, 22}, puller.calledIDs(), "pool reconcile must proceed independently of kn-cy sync")
+	// 心跳同轮含两类摘要（kn-cy 同步 + 补池成功摘要）。
+	require.Contains(t, ops.lastResultVal(), "kn-cy account sync: synced=3 stopped=2 failed=1 not_queried=0",
+		"heartbeat must include kn-cy sync summary")
+	require.Contains(t, ops.lastResultVal(), "reconciled 2 quota keys",
+		"heartbeat must include pool reconcile summary")
+}
+
+// TestQuotaKeyReconcilerKnCySync_NotConfiguredSkips 验证未注入 kn-cy 观测口时，本轮跳过 kn-cy
+// 同步（只影响该职责，不影响既有补池行为与心跳形态）。
+//
+// 重点断言：心跳摘要【不含】"kn-cy account sync"片段 —— 即未配置观测口时该职责整体被跳过；
+// 既有的补池行为/心跳形态不受 kn-cy 接入影响（本轮达水位 → 如实记"无候选/无补池"原因，
+// 该原因非空是 2026-11-06 后补池编排的既有形态，不属 kn-cy 职责，故不再要求结果为空）。
+func TestQuotaKeyReconcilerKnCySync_NotConfiguredSkips(t *testing.T) {
+	mw := newFakeModelWater()
+	mw.models = []string{"m1"}
+	mw.level = 10 // 达水位 → 无候选、无拉号
+
+	puller := newFakePuller()
+	ops := newReconOpsRepo()
+	r := newTestReconciler(puller, ops, mw) // 未 SetKnCyAccountObserver
+
+	r.runOnce()
+
+	if got := puller.callCount(); got != 0 {
+		t.Fatalf("expected 0 pulls when at water level, got %d", got)
+	}
+	if got := ops.hbCalls(); got != 1 {
+		t.Fatalf("expected 1 heartbeat, got %d", got)
+	}
+	if res := ops.lastResultVal(); strings.Contains(res, "kn-cy account sync") {
+		t.Fatalf("expected no kn-cy summary in heartbeat when not configured, got %q", res)
+	}
+}
