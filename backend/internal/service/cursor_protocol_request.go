@@ -61,19 +61,9 @@ const (
 	// AgentRunRequest（rjs）内：
 	cursorFldRunConversationState = 1  // ConversationStateStructure
 	cursorFldRunAction            = 2  // ConversationAction
-	// cursorFldRunModelDetails：S8-A 由社区 cursor2api/session.py:168 逐字节实测改为
-	// **f9**（`"f9": requested_model(self.model, self.model_params)`）。我们此前按旧
-	// 取证写的是 f3，与社区存在逐字节差异（S8-A §5 待验证假设：上游按 f9 读 model_details
-	// → 读到 undefined → 调 .toString() 崩，错码 internal）。本卡改为 f9，内容不变
-	// （仍是 ModelDetails.f1 = wire ID）。**失败即回滚**，不视为定论。
-	cursorFldRunModelDetails      = 9  // ModelDetails（社区 f9，原为 3）
+	cursorFldRunModelDetails      = 3  // ModelDetails
 	cursorFldRunMcpTools          = 4  // McpTools（活体样本里是**空 message**，但仍出现）
 	cursorFldRunConversationID    = 5  // string [opt]
-	// 以下四个字段来自社区 session.py:164-172，S8-A 补上与社区逐字节对齐：
-	cursorFldRunF12 = 12 // varint 0（社区 `"f12": 0`）
-	cursorFldRunF16 = 16 // string = conversation_id（社区 `"f16": self.conv`）
-	cursorFldRunF19 = 19 // varint 1（社区 `"f19": True`）
-	cursorFldRunRid = 25 // string = rid，独立的 uuid（社区 `"f25": self.rid`）
 	cursorFldRunPreFetchedBlobs   = 17 // repeated PreFetchedBlob（多轮历史的 KV 载荷）
 
 	// ConversationStateStructure（Hm）内：
@@ -288,9 +278,6 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 
 	conversationID := cursorNewUUID()
 	messageID := cursorNewUUID()
-	// rid（f25）：与 conversation_id **独立**的 uuid。社区 session.py 用 self.rid 承载
-	// 一个与 self.conv 不同的标识；禁止与 conversation_id 相同。
-	rid := cursorNewUUID()
 
 	// 1) conversation_state：mode + 历史消息的 blob id（content 走 KV 侧信道）。
 	//
@@ -324,30 +311,16 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	userMsgAction := cursorAppendBytesField(nil, cursorFldUserMsgActionMessage, userMessage)
 	action := cursorAppendBytesField(nil, cursorFldActionUserMessage, userMsgAction)
 
-	// 3) 其余字段编码。S8-A 与社区 session.py:164-172 逐字节对齐：
-	//    顺序改为 conversation_state(f1) → action(f2) → conversation_id(f5) →
-	//    model_details(f9) → f12(0) → f16(=conv) → f19(1) → f25(rid) →
-	//    mcp_tools(f4) → pre_fetched_blobs(f17，保持末位与原内容不变)。
-	//    注意：f1/f2/f4/f5/f17 的**字段号与内容绝不变**；只把 model_details 从 f3 提到
-	//    f9，并在 f4 之前插入 f12/f16/f19/f25 四个社区字段。
+	// 3) 其余字段按活体样本的**出现顺序**编码（33/63 均为
+	//    conversation_state → action → model_details → mcp_tools →
+	//    conversation_id → pre_fetched_blobs…）。
 	run := cursorAppendBytesField(nil, cursorFldRunConversationState, state)
 	run = cursorAppendBytesField(run, cursorFldRunAction, action)
-	run = cursorAppendStringField(run, cursorFldRunConversationID, conversationID)
 	run = cursorAppendBytesField(run, cursorFldRunModelDetails,
 		cursorAppendStringField(nil, cursorFldModelDetailsID, upstreamModel))
-	// f12 = varint 0（社区 `"f12": 0`）。
-	run = cursorAppendVarintField(run, cursorFldRunF12, 0)
-	// f16 = conversation_id（社区 `"f16": self.conv`）。
-	run = cursorAppendStringField(run, cursorFldRunF16, conversationID)
-	// f19 = varint 1（社区 `"f19": True`）。
-	run = cursorAppendVarintField(run, cursorFldRunF19, 1)
-	// f25 = 独立 rid（社区 `"f25": self.rid`），与 conversation_id 不同。
-	run = cursorAppendStringField(run, cursorFldRunRid, rid)
 	// mcp_tools：请求携带 tools 且 tool_choice != "none" 时，把 function 工具编码进
 	// f4（McpTools）声明给上游；否则保持空 message（f4 字段存在、长度 0，与活体样本
-	// 同形——既满足"无 tools 时零变化"的纯文本链回归保护，也保住历史黄金字节）。
-	// **禁区**：f4 内 schema 字段号（f3）与 provider_identifier（sub2api）绝不改
-	// （提交 825125837 实测依据 + 回程映射/对账风险，另案处理）。
+	// 同形——既满足"无 tools 时零变化"的纯文本链回归保护，也保住 33/63 号黄金字节）。
 	declared := cursorResolveDeclaredTools(req)
 	// W4 顺序护栏：声明子集仍用原名匹配（上面 cursorResolveDeclaredTools），wire map
 	// 已在函数顶部算好，这里直接复用、只负责改名编码。
@@ -356,6 +329,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 		return nil, "", err
 	}
 	run = cursorAppendBytesField(run, cursorFldRunMcpTools, mcpTools)
+	run = cursorAppendStringField(run, cursorFldRunConversationID, conversationID)
 	for _, b := range blobs {
 		blob := cursorAppendBytesField(nil, cursorFldBlobID, b.id)
 		blob = cursorAppendBytesField(blob, cursorFldBlobValue, b.value)

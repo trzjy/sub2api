@@ -178,7 +178,7 @@ func TestCursorAssistantImageHistoryDropsImage(t *testing.T) {
 // TestCursorPlainTextBytesUnchanged 覆盖纯文本路径字节稳定：不含 f3，且 history
 // user blob 的 content 仍是 JSON 字符串（不得变成数组）。
 func TestCursorPlainTextBytesUnchanged(t *testing.T) {
-	cursorWithFixedUUID(t, "conv-fixed-pt", "msg-fixed-pt", "rid-fixed-pt")
+	cursorWithFixedUUID(t, "conv-fixed-pt", "msg-fixed-pt")
 	req := &apicompat.ChatCompletionsRequest{
 		Model: "gpt-4o",
 		Messages: []apicompat.ChatMessage{
@@ -616,14 +616,14 @@ func TestCursorSafeURLForLogNoPanic(t *testing.T) {
 // 固定 UUID 来源（conv-fixed-pt / msg-fixed-pt）下，纯文本请求的整段 AgentRun
 // 出站字节必须与此逐字节相等。纯文本路径本轮任何改动都不得让它变化
 // （锁死「纯文本逐字节不变」）。由 TestCursorDumpGoldenTmp 在改动前生成。
-const goldenCursorPlainTextAgentRunHex = "00000001660ae3020a4650010a20af4a000f139976ef7fd08bf5f05d5477c3643ab14225814cc70020ff262989170a2041b0ba5a1d50f98ef26cc1b234744e9566c9a9d85d4e32387dfdfec86f7f1bdc121e0a1c0a1a0a08616e6420332b333f120c6d73672d66697865642d707420012a0d636f6e762d66697865642d70744a0a0a0867726f6b2d342e37600082010d636f6e762d66697865642d7074980101ca010c7269642d66697865642d707422008a014c0a20af4a000f139976ef7fd08bf5f05d5477c3643ab14225814cc70020ff2629891712287b22726f6c65223a2275736572222c22636f6e74656e74223a227768617420697320322b323f227d8a01680a2041b0ba5a1d50f98ef26cc1b234744e9566c9a9d85d4e32387dfdfec86f7f1bdc12447b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2234227d5d2c226964223a2231227d"
+const goldenCursorPlainTextAgentRunHex = "00000001420abf020a4650010a20af4a000f139976ef7fd08bf5f05d5477c3643ab14225814cc70020ff262989170a2041b0ba5a1d50f98ef26cc1b234744e9566c9a9d85d4e32387dfdfec86f7f1bdc121e0a1c0a1a0a08616e6420332b333f120c6d73672d66697865642d707420011a0a0a0867726f6b2d342e3722002a0d636f6e762d66697865642d70748a014c0a20af4a000f139976ef7fd08bf5f05d5477c3643ab14225814cc70020ff2629891712287b22726f6c65223a2275736572222c22636f6e74656e74223a227768617420697320322b323f227d8a01680a2041b0ba5a1d50f98ef26cc1b234744e9566c9a9d85d4e32387dfdfec86f7f1bdc12447b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2234227d5d2c226964223a2231227d"
 
 // TestCursorPlainTextAgentRunGoldenBytes 黄金字节回归：纯文本请求的整段出站字节
 // 与冻结 golden 逐字节相等。
 func TestCursorPlainTextAgentRunGoldenBytes(t *testing.T) {
 	golden, err := hex.DecodeString(goldenCursorPlainTextAgentRunHex)
 	require.NoError(t, err)
-	cursorWithFixedUUID(t, "conv-fixed-pt", "msg-fixed-pt", "rid-fixed-pt")
+	cursorWithFixedUUID(t, "conv-fixed-pt", "msg-fixed-pt")
 	req := &apicompat.ChatCompletionsRequest{
 		Model: "gpt-4o",
 		Messages: []apicompat.ChatMessage{

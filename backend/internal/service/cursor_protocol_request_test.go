@@ -69,7 +69,7 @@ func cursorActionTextOf(t *testing.T, run []cursorPBField) string {
 func cursorModelIDOf(t *testing.T, run []cursorPBField) string {
 	t.Helper()
 	md, ok := cursorFindField(run, cursorFldRunModelDetails)
-	require.True(t, ok, "run_request must carry field 9 (model_details, was 3 before S8-A)")
+	require.True(t, ok, "run_request must carry field 3 (model_details)")
 	fields, err := cursorDecodeProtobuf(md.Bytes)
 	require.NoError(t, err)
 	id, ok := cursorFindField(fields, cursorFldModelDetailsID)
@@ -410,49 +410,43 @@ func TestCursorProtocolRequestModelGateRejectsF1(t *testing.T) {
 // 63 号样本同时是"多轮历史确实被构造出来"的实证：它的回包是 "ORCHID"，
 // 只有历史被上游消费才可能答对。
 func TestCursorProtocolRequestMatchesLiveAgentRunSamples(t *testing.T) {
-	t.Run("33 号单轮样本（S8-A 新编码：f9 model_details + f12/f16/f19/f25）", func(t *testing.T) {
-		const golden = "00000000cd0aca010a02500112530a510a4f0a255265706c792077697468204f4b206f6e6c792e20446f206e6f742075" +
+	t.Run("33 号单轮样本（149 字节，活体 200，回包 OK）", func(t *testing.T) {
+		const golden = "00000000900a8d010a02500112530a510a4f0a255265706c792077697468204f4b206f6e6c792e20446f206e6f742075" +
 			"736520746f6f6c732e122433393239663737322d376531312d346664622d396661382d30323261616566323863636220" +
-			"012a2436363762386131622d383266652d343963622d616431642d6361383338623239396364344a0a0a0867726f6b2d" +
-			"342e37600082012436363762386131622d383266652d343963622d616431642d636138333862323939636434980101ca" +
-			"010e7269642d66697865642d303030312200"
+			"011a0a0a0867726f6b2d342e3722002a2436363762386131622d383266652d343963622d616431642d63613833386232" +
+			"3939636434"
 		want, err := hex.DecodeString(golden)
 		require.NoError(t, err)
 
-		// 第三个固定值承载 f25 的 rid（必须与 conversation_id 不同）。
 		cursorWithFixedUUID(t,
 			"667b8a1b-82fe-49cb-ad1d-ca838b299cd4",
-			"3929f772-7e11-4fdb-9fa8-022aaef28ccb",
-			"rid-fixed-0001")
+			"3929f772-7e11-4fdb-9fa8-022aaef28ccb")
 		body, err := cursorConvertRequest(&apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(
 				`"Reply with OK only. Do not use tools."`)}},
 		}, "grok-4.7")
 		require.NoError(t, err)
-		require.Equal(t, want, body, "must reproduce the S8-A-aligned 33 sample byte-for-byte")
+		require.Equal(t, want, body, "must reproduce the live 33-agent-run-request.bin byte-for-byte")
 	})
 
-	t.Run("63 号多轮样本（S8-A 新编码：f9 model_details + f12/f16/f19/f25）", func(t *testing.T) {
-		const golden = "000000022c0aa9040a4650010a2081ff990a60f004dce704c6c48d416b63619bc8b5668f5724b6eaa3841eae110f0a20" +
+	t.Run("63 号多轮样本（500 字节，活体 200，回包 ORCHID）", func(t *testing.T) {
+		const golden = "00000001ef0aec030a4650010a2081ff990a60f004dce704c6c48d416b63619bc8b5668f5724b6eaa3841eae110f0a20" +
 			"bca0f709942ce5c35b912c254c19daf3a0743993730c4ef386f4db35f6aa03cd12760a740a720a485768617420776173" +
 			"2074686520636f646520776f72643f205265706c7920776974682074686520636f646520776f7264206f6e6c792e2044" +
 			"6f206e6f742075736520746f6f6c732e122463333764366265652d393032652d343835632d623432312d336234383262" +
-			"34616335626320012a2466373334373430642d326238662d346337302d626335642d6266316435373336656361644a0a" +
-			"0a0867726f6b2d342e37600082012466373334373430642d326238662d346337302d626335642d626631643537333665" +
-			"636164980101ca010e7269642d66697865642d3030303222008a01650a2081ff990a60f004dce704c6c48d416b63619b" +
-			"c8b5668f5724b6eaa3841eae110f12417b22726f6c65223a2275736572222c22636f6e74656e74223a2254686520636f" +
-			"646520776f7264206973204f52434849442e2052656d656d6265722069742e227d8a018c010a20bca0f709942ce5c35b" +
-			"912c254c19daf3a0743993730c4ef386f4db35f6aa03cd12687b22726f6c65223a22617373697374616e74222c22636f" +
-			"6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a22492077696c6c2072656d656d6265722074" +
-			"686520636f646520776f7264204f52434849442e227d5d2c226964223a2231227d"
+			"34616335626320011a0a0a0867726f6b2d342e3722002a2466373334373430642d326238662d346337302d626335642d" +
+			"6266316435373336656361648a01650a2081ff990a60f004dce704c6c48d416b63619bc8b5668f5724b6eaa3841eae11" +
+			"0f12417b22726f6c65223a2275736572222c22636f6e74656e74223a2254686520636f646520776f7264206973204f52" +
+			"434849442e2052656d656d6265722069742e227d8a018c010a20bca0f709942ce5c35b912c254c19daf3a0743993730c" +
+			"4ef386f4db35f6aa03cd12687b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b22747970" +
+			"65223a2274657874222c2274657874223a22492077696c6c2072656d656d6265722074686520636f646520776f726420" +
+			"4f52434849442e227d5d2c226964223a2231227d"
 		want, err := hex.DecodeString(golden)
 		require.NoError(t, err)
 
-		// 第三个固定值承载 f25 的 rid（必须与 conversation_id 不同）。
 		cursorWithFixedUUID(t,
 			"f734740d-2b8f-4c70-bc5d-bf1d5736ecad",
-			"c37d6bee-902e-485c-b421-3b482b4ac5bc",
-			"rid-fixed-0002")
+			"c37d6bee-902e-485c-b421-3b482b4ac5bc")
 		body, err := cursorConvertRequest(&apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{
 				{Role: "user", Content: json.RawMessage(`"The code word is ORCHID. Remember it."`)},
@@ -462,7 +456,7 @@ func TestCursorProtocolRequestMatchesLiveAgentRunSamples(t *testing.T) {
 			},
 		}, "grok-4.7")
 		require.NoError(t, err)
-		require.Equal(t, want, body, "must reproduce the S8-A-aligned 63 sample byte-for-byte")
+		require.Equal(t, want, body, "must reproduce the live 63-agent-run-request.bin byte-for-byte")
 	})
 }
 
