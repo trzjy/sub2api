@@ -495,6 +495,13 @@ func (b *cursorAgentResponseBody) Read(p []byte) (int, error) {
 	return b.frame.Read(p)
 }
 
+// cursorUnknownFieldReplyShape 是 unknown_field_replied 日志的 shape 取值（施工图 W7）。
+// 未知 exec 字段这条链路只有「兜底形状」一种：回 {field:{f2:{f2:text}}} 通用错误结果帧
+// （cursorEncodeExecGenericUnknownFieldReject）。不存在「精确形状」分支——精确形状只属于 11 类
+// 原生 exec 拒绝（cursor_native_exec_reject.go，由别的卡负责），与未知字段链路无关。本常量仅用于
+// 让日志字段与测试断言引用同一字面量，避免拼写漂移，不引入任何新机制。
+const cursorUnknownFieldReplyShape = "兜底形状"
+
 func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 	fields, err := cursorDecodeProtobuf(payload)
 	if err != nil {
@@ -607,6 +614,14 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				// varint 字段不承载 message，不回包，仅忽略（施工图 W1）。
 				continue
 			}
+			// 施工图 W7 unknown_field_replied：未知字段被应答的观测点（判断「客户跑没跑」）。
+			// 只记字段号 / wire type / 形状种类，绝不记字段字节内容（可能含客户数据）。
+			// 未知字段这一路恒为「兜底形状」——精确形状只属于 11 类原生 exec 拒绝
+			// （cursor_native_exec_reject.go，由别的卡负责），不在此链路内，故不制造分叉。
+			d.logPhase(zapcore.InfoLevel, "unknown_field_replied", "",
+				zap.Int("field", f.Number),
+				zap.Int("wire_type", f.Wire),
+				zap.String("shape", cursorUnknownFieldReplyShape))
 			frame := cursorEncodeExecGenericUnknownFieldReject(execID, idField, f.Number, cursorGenericUnknownExecRejectText)
 			if err := d.send(cursorFldClientMessage, frame); err != nil {
 				return false, err

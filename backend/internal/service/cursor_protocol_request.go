@@ -43,6 +43,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -161,7 +163,63 @@ func cursorConvertRequestWithContext(ctx context.Context, req *apicompat.ChatCom
 		return nil, err
 	}
 	skipped.log(ctx, "chat_messages_dropped", upstreamModel)
+	// W7 观测缺口：记一条 wire_name_renamed，让线上能区分"修好了"和"客户跑了"——
+	// 现有 native_exec_rejected 只记客户端原名与计数，看不出改名条数与原名↔wire 对照。
+	// 改名规则的唯一来源仍是 cursorWireToolNameSet / cursorWireToolNameOf，本函数只负责
+	// 把"本次实际声明并编码上线的工具"与它们的 wire name 对照算出来落盘，不另写一份规则。
+	cursorLogWireNameRenamed(ctx, req, upstreamModel)
 	return body, nil
+}
+
+// cursorPhaseWireNameRenamed 是"工具名重名隔离改名对照"的 phase 名（施工图 W7 要求新增的
+// 三个日志点之一）。一次出站请求只记一条（即使多个工具被改名）。
+const cursorPhaseWireNameRenamed = "wire_name_renamed"
+
+// cursorLogWireNameRenamed 记一条 wire_name_renamed 观测日志（W7 缺口）。
+//
+// 改名规则的唯一来源是 cursorWireToolNameSet / cursorWireToolNameOf（铁律 2：规则只有一个
+// 来源，不为日志另写一份改名规则）。本函数只复用那张 wire map 把"本次实际声明并编码进 f4
+// 的工具"与它们的 wire name 对照算出来并落盘；一次请求一条。
+//
+// 字段（与施工图 §2.4 W7 一致，且只记工具名、不记 description / schema / 参数值）：
+//   - renamed_count：原名 != wire name 的工具条数；
+//   - renamed_tools：改名前后对照，格式 `原名→wire名` 用 `,` 连接，只列被改名的；
+//   - total_count：本次实际声明并编码的工具总数（空 Function.Name 的工具不计入编码，也不计入）。
+//
+// renamed_count == 0 也要记一条（renamed_tools 为空串），以便用"日志存在"确认没有改名发生，
+// 而不是靠日志缺失来猜。
+//
+// 落点说明：cursorBuildMcpTools 是纯函数、无 logger 句柄，且其签名被既有测试锁定（不可改）；
+// 同样 cursorBuildAgentRun 的签名也被 cursor_image_input_test.go 等锁定。故日志放在持有 ctx
+// 的生产入口 cursorConvertRequestWithContext（与 skipped.log 同处），用传入的 req.Tools 复用
+// 同一份 wire map 规则算出对照——这是"选项 (b)：在调用方用 wireMap 算出对照并记日志"的落点。
+func cursorLogWireNameRenamed(ctx context.Context, req *apicompat.ChatCompletionsRequest, model string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// 复用与 cursorBuildAgentRun 完全相同的规则算 wire map，保证对照与实际上线字节一致。
+	wireMap := cursorWireToolNameSet(req.Tools)
+	declared := cursorResolveDeclaredTools(req)
+	var renamed []string
+	total := 0
+	for _, t := range declared {
+		if t.Function == nil || t.Function.Name == "" {
+			continue
+		}
+		total++
+		wireName := cursorWireToolNameOf(wireMap, t.Function.Name)
+		if wireName != t.Function.Name {
+			renamed = append(renamed, t.Function.Name+"→"+wireName)
+		}
+	}
+	// 排序保证日志可对比、用例可稳定断言（对照顺序不依赖工具声明顺序，与 wire map 的
+	// 排序键口径一致——顺序只影响日志文本，不影响计算结果）。
+	sort.Strings(renamed)
+	cursorPhaseLog(ctx, zapcore.InfoLevel, cursorPhaseWireNameRenamed, model,
+		zap.Int("renamed_count", len(renamed)),
+		zap.String("renamed_tools", strings.Join(renamed, ",")),
+		zap.Int("total_count", total),
+	)
 }
 
 // cursorBuildAgentRun 构造 AgentRun 请求体，并回传本次的 conversation_id。

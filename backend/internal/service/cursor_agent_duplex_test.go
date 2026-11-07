@@ -305,6 +305,68 @@ func TestCursorSSEStreamConcurrentTerminalErrorSnapshot(t *testing.T) {
 	}
 }
 
+// TestCursorAgentDuplexUnknownFieldRepliedLogsShape 证明未知 exec 字段被应答时，会记一条
+// phase=unknown_field_replied 的 Info 级观测日志，且 field / wire_type / shape 三件套齐全，
+// shape 恒为「兜底形状」（未知字段这一路只走通用兜底形状，不存在精确形状分支；精确形状属于 11 类
+// 原生 exec 拒绝，由另一卡负责，不在此链路内，本卡不制造分叉）。同时校验「行为零变化」：仍写出
+// 通用错误结果帧、整轮继续、不 502。
+func TestCursorAgentDuplexUnknownFieldRepliedLogsShape(t *testing.T) {
+	d, buf, logs, cleanup := cursorExecRejectTestDuplex(t)
+	defer cleanup()
+
+	// f40 是未知 exec 字段，wire=2/bytes → 必须回通用错误结果帧。
+	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 40)
+	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-40"))
+	execMsg = cursorAppendBytesField(execMsg, 40, []byte("unknown-exec-bytes"))
+
+	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
+	require.NoError(t, err, "未知 exec 字段（wire=2）不得 502")
+	require.False(t, done, "未知 exec 字段不是终态")
+
+	// 必须记 exactly 一条 unknown_field_replied（Info 级观测点）。
+	require.Equal(t, 1, phaseCount(logs, "unknown_field_replied"),
+		"未知 exec 字段被应答时必须记一条 unknown_field_replied 日志")
+
+	// 取出该条日志，断言三件套齐全且取值正确。
+	var cm map[string]interface{}
+	for _, e := range logs.All() {
+		if e.ContextMap()["phase"] == "unknown_field_replied" {
+			cm = e.ContextMap()
+			break
+		}
+	}
+	require.NotNil(t, cm, "必须找到 unknown_field_replied 日志")
+	require.Contains(t, cm, "field", "日志必须含 field 字段")
+	require.Contains(t, cm, "wire_type", "日志必须含 wire_type 字段")
+	require.Contains(t, cm, "shape", "日志必须含 shape 字段")
+	require.EqualValues(t, 40, cm["field"], "field 必须是未知字段号 40")
+	require.EqualValues(t, cursorWireBytes, cm["wire_type"], "wire_type 必须等于 2（bytes），取自 cursorPBField.Wire")
+	require.Equal(t, "兜底形状", cm["shape"], "未知字段链路只有兜底形状，不允许为精确形状")
+
+	// 行为零变化：必须写出通用错误结果帧 {field:{f2:{f2:text}}}。
+	cleanup()
+	cursorStage2ExpectGenericReject(t, buf, 40, cursorGenericUnknownExecRejectText)
+}
+
+// TestCursorAgentDuplexUnknownFieldWire0NoReplyNoLog 证明未知 exec 字段（wire=0/varint）不承载
+// message，按施工图 W1 不回任何结果帧——因此 unknown_field_replied 日志也不应出现（日志只在
+// 「实际应答」处记，避免对未回包字段误报）。整轮继续、不 502，行为零变化。
+func TestCursorAgentDuplexUnknownFieldWire0NoReplyNoLog(t *testing.T) {
+	d, buf, logs, cleanup := cursorExecRejectTestDuplex(t)
+	defer cleanup()
+
+	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 40)
+	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-40"))
+	execMsg = cursorAppendVarintField(execMsg, 40, 123) // wire=0 / varint 未知字段
+
+	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
+	require.NoError(t, err, "未知 exec 字段（wire=0）不得 502")
+	require.False(t, done)
+	require.Equal(t, 0, phaseCount(logs, "unknown_field_replied"),
+		"wire=0 未知字段不回包，不得记 unknown_field_replied")
+	require.Zero(t, buf.Len(), "wire=0 未知字段不回任何结果帧")
+}
+
 func TestCursorClientChecksumMatchesClientJavaScript(t *testing.T) {
 	// Generated independently by the shipped P_v/L_v JavaScript, including its
 	// 32-bit shifts; the synthetic device is not a real installation identity.

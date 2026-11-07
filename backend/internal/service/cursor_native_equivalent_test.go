@@ -37,21 +37,54 @@ func TestCursorNativeEquivalentCoversBuiltinNames(t *testing.T) {
 	}
 }
 
-// TestCursorNativePointNameUsesClientOriginalName 锁定点名用的是**客户端原名**。
-func TestCursorNativePointNameUsesClientOriginalName(t *testing.T) {
-	// 真实客户端声明集（生产实测）。
-	declared := []string{"question", "bash", "read", "glob", "grep", "edit", "write"}
+// TestCursorNativePointNameUsesWireName 锁定：点名用的是**出站 f4 里的 wire name**（模型认识），
+// 不是客户端原名。撞内置名时原名 Read → wire name Read_，点名必须写 Read_ 而非 Read，否则模型
+// 工具表里只有 Read_ 找不到 Read，只能继续瞎试原生工具（生产实测的连环拒绝根因）。
+func TestCursorNativeEquivalentPointNameUsesWireName(t *testing.T) {
+	// declared（客户端原名）与 wire（wire name）逐个对应：Read→Read_、Write→Write_、
+	// Grep→Grep_、Bash 不撞名→bash、Glob→Glob_。
+	declared := []string{"Read", "Write", "Grep", "Bash", "Glob"}
+	wire := []string{"Read_", "Write_", "Grep_", "bash", "Glob_"}
 	cases := map[int]string{
 		cursorFldNativeRejectShellArgs:       "bash",
-		cursorFldNativeRejectWriteArgs:       "edit",
-		cursorFldNativeRejectGrepArgs:        "grep",
-		cursorFldNativeRejectReadArgs:        "read",
-		cursorFldNativeRejectLsArgs:          "glob",
+		cursorFldNativeRejectWriteArgs:       "Write_",
+		cursorFldNativeRejectGrepArgs:        "Grep_",
+		cursorFldNativeRejectReadArgs:        "Read_",
+		cursorFldNativeRejectLsArgs:          "Glob_",
 		cursorFldNativeRejectShellStreamArgs: "bash",
 	}
 	for field, want := range cases {
-		txt := cursorNativeExecRejectReason(field, declared)
-		require.True(t, strings.Contains(txt, "Call the tool '"+want+"' instead."),
-			"字段 %d 必须点名客户端原名 %q，实际文本: %s", field, want, txt)
+		txt, redirected, hit := cursorNativeExecRejectReasonInfo(field, declared, wire)
+		require.True(t, hit, "字段 %d 必须命中等价表", field)
+		require.Equal(t, want, redirected, "字段 %d 点名必须是 wire name %q", field, want)
+		require.Contains(t, txt, "Call the tool '"+want+"' instead.",
+			"字段 %d 文本必须点名 wire name %q，实际: %s", field, want, txt)
 	}
+}
+
+// TestCursorNativePointNameReadCollisionUsesWireName：派发单 Done when 1 的精确形式——
+// 客户端声明 Read（撞内置名，wire name = Read_），断言拒绝文本出现 Read_、且**不出现**
+// 'Read' instead（带引号闭合，避免 Read_ 的子串 Read 误判）。
+func TestCursorNativeEquivalentPointNameReadCollisionUsesWireName(t *testing.T) {
+	declared := []string{"Read"}
+	wire := []string{"Read_"}
+	txt, redirected, hit := cursorNativeExecRejectReasonInfo(cursorFldNativeRejectReadArgs, declared, wire)
+	require.True(t, hit)
+	require.Equal(t, "Read_", redirected)
+	require.Contains(t, txt, "Call the tool 'Read_' instead.")
+	require.False(t, strings.Contains(txt, "'Read' instead"),
+		"拒绝文本不得点名原名 Read（模型工具表只有 Read_），实际: %s", txt)
+}
+
+// TestCursorNativeRejectFallbackListUsesWireName：派发单 Done when 2——等价表没命中时，
+// 退回列清单，清单里的名字必须用 wire name（模型认识的），不是客户端原名。
+func TestCursorNativeEquivalentFallbackListUsesWireName(t *testing.T) {
+	// f9 diagnostics 不在等价表中 → 必走列清单分支。客户端声明 Read（原名）→ wire name Read_。
+	declared := []string{"Read"}
+	wire := []string{"Read_"}
+	txt := cursorNativeExecRejectReason(cursorFldNativeRejectDiagnosticsArgs, declared, wire)
+	require.Contains(t, txt, "Use only the client-provided tools: Read_.",
+		"列清单必须用 wire name Read_")
+	require.False(t, strings.Contains(txt, "Use only the client-provided tools: Read."),
+		"列清单不得用原名 Read")
 }

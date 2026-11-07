@@ -18,6 +18,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // cursorAllFields 取出某个字段号的**全部**出现（repeated 字段需要）。
@@ -606,4 +607,88 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 		require.NotContains(t, cursorInlineToolCallClose, "\u200b",
 			"close marker must be bare bytes (no U+200B)")
 	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W7 观测点：wire_name_renamed（工具名重名隔离改名对照）。
+//
+// 落点：cursorConvertRequestWithContext（持有 ctx 的生产入口，与 skipped.log 同处），
+// 复用 cursorWireToolNameSet / cursorWireToolNameOf 这唯一一份规则算对照，不另写规则。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// cursorWireRenamedEntry 取出唯一一条 wire_name_renamed 观测日志（一次请求一条）。
+func cursorWireRenamedEntry(t *testing.T, logs *observer.ObservedLogs) observer.LoggedEntry {
+	t.Helper()
+	var found *observer.LoggedEntry
+	count := 0
+	for i := range logs.All() {
+		e := logs.All()[i]
+		if e.ContextMap()["phase"] == cursorPhaseWireNameRenamed {
+			count++
+			f := e
+			found = &f
+		}
+	}
+	require.Equal(t, 1, count, "wire_name_renamed must be logged exactly once per request")
+	require.NotNil(t, found)
+	return *found
+}
+
+// TestCursorBuildMcpToolsWireNameRenamedLogged 覆盖改名实际发生时：
+// 记一条日志、字段齐全（renamed_count / renamed_tools / total_count），
+// renamed_tools 格式为 `原名→wire名` 逗号分隔、只含被改名的工具。
+func TestCursorBuildMcpToolsWireNameRenamedLogged(t *testing.T) {
+	ctx, logs := cursorPhaseObserverCtx(t, "req-wire-rename")
+	req := &apicompat.ChatCompletionsRequest{
+		Model: "gpt-4o",
+		Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"use tools"`)},
+		},
+		Tools: []apicompat.ChatTool{
+			{Type: "function", Function: &apicompat.ChatFunction{Name: "Read"}},
+			{Type: "function", Function: &apicompat.ChatFunction{Name: "Write"}},
+			{Type: "function", Function: &apicompat.ChatFunction{Name: "WebFetch"}},
+			{Type: "function", Function: &apicompat.ChatFunction{Name: "Bash"}},
+			{Type: "function", Function: &apicompat.ChatFunction{Name: "MyTool"}},
+		},
+		ToolChoice: json.RawMessage(`"auto"`),
+	}
+
+	_, err := cursorConvertRequestWithContext(ctx, req, "gpt-4o")
+	require.NoError(t, err)
+
+	entry := cursorWireRenamedEntry(t, logs)
+	m := entry.ContextMap()
+	require.EqualValues(t, 3, m["renamed_count"], "three builtin-collision tools renamed")
+	require.EqualValues(t, 5, m["total_count"], "all five declared tools counted")
+	require.Equal(t, "Read→Read_,WebFetch→WebFetch_,Write→Write_", m["renamed_tools"],
+		"renamed_tools must be 'orig→wire' comma-joined, sorted, only renamed")
+	// 只含被改名的工具：原名不变的工具（Bash / MyTool）不得出现在列表里。
+	require.NotContains(t, m["renamed_tools"], "Bash", "unchanged tool must not appear")
+	require.NotContains(t, m["renamed_tools"], "MyTool", "unchanged tool must not appear")
+}
+
+// TestCursorBuildMcpToolsWireNameRenamedZero 覆盖 renamed_count==0 时也要记一条
+// （renamed_tools 为空串）：用"日志存在"确认没有改名，而不是靠日志缺失猜。
+func TestCursorBuildMcpToolsWireNameRenamedZero(t *testing.T) {
+	ctx, logs := cursorPhaseObserverCtx(t, "req-wire-no-rename")
+	req := &apicompat.ChatCompletionsRequest{
+		Model: "gpt-4o",
+		Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+		},
+		Tools: []apicompat.ChatTool{
+			{Type: "function", Function: &apicompat.ChatFunction{Name: "MyTool"}},
+		},
+		ToolChoice: json.RawMessage(`"auto"`),
+	}
+
+	_, err := cursorConvertRequestWithContext(ctx, req, "gpt-4o")
+	require.NoError(t, err)
+
+	entry := cursorWireRenamedEntry(t, logs)
+	m := entry.ContextMap()
+	require.EqualValues(t, 0, m["renamed_count"], "no collision means zero renames")
+	require.EqualValues(t, 1, m["total_count"])
+	require.Equal(t, "", m["renamed_tools"], "empty list when nothing renamed")
 }

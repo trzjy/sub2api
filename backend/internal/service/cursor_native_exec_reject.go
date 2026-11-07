@@ -160,43 +160,73 @@ func cursorNormaliseToolName(name string) string {
 	return b.String()
 }
 
-// cursorNativeExecRejectReason 生成拒绝理由文本（唯一，取自方案 + 阶段 3 点名重定向）。
+// cursorNativeExecRejectReasonInfo 生成拒绝理由文本，并附带点名信息（供日志 native_exec_redirected
+// 取证用）。
 //
-// 策略（施工图 §3 阶段 3）：
+// 策略（施工图 §3 阶段 3 + S5-A 派发单改动点 1）：
 //   - declared 为空：「Tool not available in this environment. The client declared no tools.」
 //   - declared 非空，且被拒的原生字段 field 在等价表中命中了「某个客户端声明过的等价工具」
-//     → 点名那一个（用客户端声明的原名，不是归一化名）：
-//       "This tool is not connected to the user's machine. Call the tool 'Read' instead."
+//     → 点名那一个（用 wire name，不是客户端原名）：
+//       "This tool is not connected to the user's machine. Call the tool 'Read_' instead."
 //   - 命中多个等价工具时，按客户端声明顺序点第一个（declared 切片已是声明顺序；见下方
 //     遍历顺序，不另排序）。
-//   - 没命中任何等价工具 → 退回列清单（保持原文本）：
-//       "Tool not available in this environment. Use only the client-provided tools: A, B, C."
+//   - 没命中任何等价工具 → 退回列清单（清单里也用 wire name）：
+//       "Tool not available in this environment. Use only the client-provided tools: A_, B_."
 //
-// 口径说明（报告需交代）：
-//   - 「命中第一个」的「第一个」= 客户端声明顺序（declared 切片顺序），不是等价表顺序，也不是
-//     字母序。理由：模型看到的是客户端按声明顺序列出的工具，点名「声明里靠前的那个等价工具」
-//     最贴近模型上下文。
-//   - 点名用的是客户端「声明原名」（如 Read），不是归一化后的 read——模型只认自己声明的名字。
+// 入参：
+//   - declared：客户端**原名**切片（按声明顺序），仅用于等价表匹配（经 cursorNormaliseToolName
+//     归一化后与 cursorNativeEquivalent 比较）。为什么用原名匹配：等价表登记的是语义名
+//     （read/write/shell…），其归一化形态与「原名归一化」一致；而 wire name 撞内置名后会加
+//     "_"（如 Read → Read_），归一化形态变成 read_，与表里 read 对不上——所以必须拿原名匹配。
+//   - wireNames：与 declared **等长同序**的 wire name 切片（declared[i] 的 wire name =
+//     wireNames[i]）。文本（点名 / 清单）一律用 wire name，因为模型在出站 f4 里看到的、
+//     能点开的就是 wire name；点客户端原名（如 Read）模型工具表里只有 Read_，依然找不到。
 //
 // 铁律 1：本函数只生成文本，绝不执行任何上游要求的工具（本卡不引入任何执行能力）。
-func cursorNativeExecRejectReason(field int, declared []string) string {
+// 铁律 2「同一条规则只许有一处实现」：等价命中判定落在 cursorNativeExecRejectHit 一处，
+// 本函数与日志取证共用它，不另写一份匹配循环。
+//
+// 返回：(reason 文本, 本次点名到的 wire name 未命中为空串, 是否命中等价表)。
+func cursorNativeExecRejectReasonInfo(field int, declared, wireNames []string) (string, string, bool) {
 	if len(declared) == 0 {
-		return "Tool not available in this environment. The client declared no tools."
+		return "Tool not available in this environment. The client declared no tools.", "", false
 	}
+	if idx, hit := cursorNativeExecRejectHit(field, declared); hit {
+		pointed := ""
+		if idx < len(wireNames) {
+			pointed = wireNames[idx]
+		}
+		return "This tool is not connected to the user's machine. Call the tool '" + pointed + "' instead.",
+			pointed, true
+	}
+	return "Tool not available in this environment. Use only the client-provided tools: " +
+		strings.Join(wireNames, ", ") + ".", "", false
+}
+
+// cursorNativeExecRejectHit 返回被拒字段 field 在等价表中命中的声明工具下标，供点名文本与
+// 日志共用（铁律 2：等价匹配只此一处）。declared 是客户端原名（用于归一化匹配）。
+// 命中返回 (index, true)；未命中（等价表无此字段 / 无任一声明名归一化后命中）返回 (-1, false)。
+func cursorNativeExecRejectHit(field int, declared []string) (int, bool) {
 	if equiv, ok := cursorNativeEquivalent[field]; ok {
 		set := make(map[string]struct{}, len(equiv))
 		for _, e := range equiv {
 			set[e] = struct{}{}
 		}
-		// 按客户端声明顺序，点第一个归一化后命中等价表的工具（用原名，不归一化）。
-		for _, name := range declared {
+		// 按客户端声明顺序，点第一个归一化后命中等价表的工具。
+		for i, name := range declared {
 			if _, hit := set[cursorNormaliseToolName(name)]; hit {
-				return "This tool is not connected to the user's machine. Call the tool '" + name + "' instead."
+				return i, true
 			}
 		}
 	}
-	return "Tool not available in this environment. Use only the client-provided tools: " +
-		strings.Join(declared, ", ") + "."
+	return -1, false
+}
+
+// cursorNativeExecRejectReason 是 cursorNativeExecRejectReasonInfo 只取文本的便捷版
+// （测试 / 形状断言用：caller 通常只关心文本是否逐字节正确）。
+func cursorNativeExecRejectReason(field int, declared, wireNames []string) string {
+	reason, _, _ := cursorNativeExecRejectReasonInfo(field, declared, wireNames)
+	return reason
 }
 
 // cursorNativeRejectArgString 从已解出的 args 字段集取回某个字符串子字段（不存在回 ""）。
@@ -309,20 +339,27 @@ func cursorEncodeNativeExecRejection(field int, args []byte, reason string) (int
 	}
 }
 
-// cursorRejectNativeExec 把一个原生 exec 字段按拒绝形状写出结果帧 + stream_close，并登记
-// noteRejectedCall / 记日志。
+// cursorRejectNativeExec 把一个原生 exec 字段按拒绝形状写出结果帧（+ 仅 f14 的 stream_close），
+// 并登记 noteRejectedCall / 记日志。
 //
-// 从 parts 取 field 的 Bytes → cursorEncodeNativeExecRejection（reason 用 d.declaredToolNames()）。
+// 从 parts 取 field 的 Bytes → cursorEncodeNativeExecRejection（reason 用
+// d.declaredToolNames() 原名匹配 + d.declaredWireToolNames() wire name 写文本）。
 // 顺序：先 noteRejectedCall（发送前，仅 toolCallID 非空且 delegations 非 nil），再 send 结果帧，
-// 再 sendExecStreamClose；任一发送错误原样返回。最后记 Info 级 native_exec_rejected（含
-// exec_id / field / tool_call_id / declared_tool_names / declared_tool_name_count，绝不记
-// command / path / url 的值）。
+// 再（仅当 field == f14 shell_stream 时）sendExecStreamClose；任一发送错误原样返回。
+// 最后记两条 Info 级日志：native_exec_redirected（取证本次点名结果，S5-A 新增）与
+// native_exec_rejected（含 exec_id / field / tool_call_id / declared_tool_names 原名 / count，运维视角）。
+//
+// 铁律（派发单 S5-A 改动点 2）：stream_close 只在 f14 发。社区对 f14 shell_stream 既回结果
+// 又发 stream_close；其余字段只回结果帧。关流会让上游等不到应答，把「本轮 502」换成「流卡死」，更糟。
 func (d *cursorAgentDuplex) cursorRejectNativeExec(parts []cursorPBField, field int, execID uint64, idField []byte) error {
 	argsField, ok := cursorFindField(parts, field)
 	if !ok {
 		return cursorFrameErrorf(cursorFrameDuplex, "native reject target field %d missing in exec message", field)
 	}
-	reason := cursorNativeExecRejectReason(field, d.declaredToolNames())
+	// declared（原名）仅用于等价表匹配；wireNames（wire name）写进拒绝文本，模型才认识。
+	declared := d.declaredToolNames()
+	wireNames := d.declaredWireToolNames()
+	reason, redirectedTool, equivalentHit := cursorNativeExecRejectReasonInfo(field, declared, wireNames)
 	resultField, payload, toolCallID, err := cursorEncodeNativeExecRejection(field, argsField.Bytes, reason)
 	if err != nil {
 		return err
@@ -334,10 +371,22 @@ func (d *cursorAgentDuplex) cursorRejectNativeExec(parts []cursorPBField, field 
 	if err := d.send(cursorFldClientMessage, frame); err != nil {
 		return err
 	}
-	if err := d.sendExecStreamClose(execID); err != nil {
-		return err
+	// 改动点 2：stream_close 只在 f14 shell_stream 发；其余字段只发结果帧。
+	if field == cursorFldNativeRejectShellStreamArgs {
+		if err := d.sendExecStreamClose(execID); err != nil {
+			return err
+		}
 	}
-	declared := d.declaredToolNames()
+	// 改动点 3：native_exec_redirected 取证日志（S5-A 新增，W7 要求）。
+	// 字段纪律：绝不记 command / path / url 值；reject_reason 仅含本卡生成的固定文案 + 工具名，
+	// 无客户业务数据，可记。
+	d.logPhase(zapcore.InfoLevel, "native_exec_redirected", "",
+		zap.Int("field", field),
+		zap.String("redirected_tool", redirectedTool),
+		zap.Bool("equivalent_hit", equivalentHit),
+		zap.Int("declared_tool_count", len(declared)),
+		zap.String("reject_reason", reason),
+		zap.Int("result_oneof_field", resultField))
 	d.logPhase(zapcore.InfoLevel, "native_exec_rejected", "",
 		zap.Uint64("exec_id", execID),
 		zap.Int("field", field),
@@ -345,6 +394,33 @@ func (d *cursorAgentDuplex) cursorRejectNativeExec(parts []cursorPBField, field 
 		zap.String("declared_tool_names", strings.Join(declared, ",")),
 		zap.Int("declared_tool_name_count", len(declared)))
 	return nil
+}
+
+// declaredWireToolNames 从 declaredToolDefs 直接提取每条工具定义的工具名（**不经过**
+// declaredToolReverse）。declaredToolDefs 存的是 f4 原始字节，卡 01 改名后里面的工具名已经是
+// wire name（撞 Cursor 内置名时加 "_"，如 Read → Read_）——这正是模型在出站 f4 里看到、
+// 点名文本必须用的名字。
+//
+// 与 declaredToolNames 同序、等长（两者都按 declaredToolDefs 顺序逐项解码，解码失败都跳过，
+// 同一份字节不会一个解出一个解不出），故 declared[i] 的 wire name == 本切片第 i 个。
+func (d *cursorAgentDuplex) declaredWireToolNames() []string {
+	if len(d.declaredToolDefs) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(d.declaredToolDefs))
+	for _, raw := range d.declaredToolDefs {
+		fields, err := cursorDecodeProtobuf(raw)
+		if err != nil {
+			continue
+		}
+		for _, f := range fields {
+			if f.Number == cursorFldMcpToolDefToolName {
+				names = append(names, f.String())
+				break
+			}
+		}
+	}
+	return names
 }
 
 // ---------------------------------------------------------------------------
