@@ -458,6 +458,20 @@
             </span>
           </button>
 
+          <!-- 跳转到账号管理页并带上该激活码的深链筛选（quota_key_id）。
+               账号页会自动应用该筛选，这里只负责导航。 -->
+          <div class="mt-2 flex justify-end">
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              data-testid="quota-key-view-all-accounts"
+              @click="goToAllAccounts"
+            >
+              <Icon name="users" size="sm" class="mr-1" />
+              {{ t('admin.quotaKeys.detail.viewAllAccounts') }}
+            </button>
+          </div>
+
           <div v-if="isAccountsExpanded(detail.id)" class="mt-3">
             <!-- P1-B3 两层额度语义：账号层只展示归属与状态，绝不复制 key 级余额数值。 -->
             <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
@@ -791,6 +805,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { formatDateTime, resolveExpiryDisplay } from '@/utils/format'
@@ -829,6 +844,7 @@ import type { Account, AdminGroup, Proxy as AccountProxy } from '@/types'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+const router = useRouter()
 
 // 双轨分流控制：'standard' (非Auto) vs 'auto' (动态号池)
 const activeChannelTab = ref<'standard' | 'auto'>('standard')
@@ -1200,6 +1216,18 @@ async function openDetail(row: QuotaKey) {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.detailLoadError')))
     showDetailDialog.value = false
   }
+}
+
+// 详情弹窗 → 账号管理页：带 quota_key_id 深链筛选，账号页自动应用该筛选。
+// 跳转后关闭详情弹窗，但不清空 detail（沿用详情弹窗既有关闭方式，避免关闭瞬间内容闪烁）。
+function goToAllAccounts() {
+  if (!detail.value) return
+  const quotaKeyID = String(detail.value.id)
+  showDetailDialog.value = false
+  void router.push({
+    path: '/admin/accounts',
+    query: { quota_key_id: quotaKeyID }
+  })
 }
 
 // 详情弹窗翻页：保持弹窗打开，仅重拉当前激活码的该页账号。

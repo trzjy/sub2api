@@ -71,7 +71,8 @@ export default {
       lastRefreshAt: '最近拉号时间',
       lastRefreshError: '最近错误',
       notes: '备注',
-      accountsQuotaHint: '账号层不展示激活码额度：激活码（key 级）额度与账号余额分属两层口径，不复制展示。'
+      accountsQuotaHint: '账号层不展示激活码额度：激活码（key 级）额度与账号余额分属两层口径，不复制展示。',
+      viewAllAccounts: '查看该码的全部账号'
     },
     accountsTitle: '归属账号列表',
     noAccounts: '该激活码下暂无账号',

@@ -71,7 +71,8 @@ export default {
       lastRefreshAt: 'Last Refreshed At',
       lastRefreshError: 'Last Error',
       notes: 'Notes',
-      accountsQuotaHint: 'Account rows never show the quota key quota: key-level quota and account balance are two independent layers and are not copied over.'
+      accountsQuotaHint: 'Account rows never show the quota key quota: key-level quota and account balance are two independent layers and are not copied over.',
+      viewAllAccounts: 'View all accounts of this key'
     },
     accountsTitle: 'Attached Accounts',
     noAccounts: 'No accounts attached to this quota key',

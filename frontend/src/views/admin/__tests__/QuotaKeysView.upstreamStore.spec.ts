@@ -37,6 +37,13 @@ vi.mock('@/api/admin', () => ({
   }
 }))
 
+// QuotaKeysView 详情弹窗新增「查看该码的全部账号」跳转入口后，setup 内会取 router；
+// 既有断言不涉及路由，这里补一个 router 桩避免注入告警（同 DashboardView.spec.ts 写法）。
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+  useRoute: () => ({ path: '/admin/quota-keys', query: {} })
+}))
+
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError: vi.fn(),
