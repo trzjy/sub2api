@@ -32,7 +32,10 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 	// Cursor（shareai 号池中转）：入站已是 Chat Completions 形状，出站是 Cursor
 	// 原生协议端点。必须在 Gemini 转换链之前分流——落到通用路径会先把入站转成
 	// Gemini 形状再发往不支持 Gemini 协议的上游，必然被拒并白耗额度。
-	if isCursorAccount(account) {
+	// 仅「cursor 且非 OpenAI 兼容账号」进 Connect 出站：OpenAI 兼容的 apikey 账号
+	// （kn-cy 等）必须绕过 Cursor 原生协议执行部件，自然落入下方通用 OpenAI 转发管线
+	// （与 openai_gateway_chat_completions.go:143 口径一致）。
+	if isCursorAccount(account) && !isCursorOpenAICompatibleAccount(account) {
 		res, ferr := s.forwardCursorChatCompletions(ctx, c, account, body)
 		if ferr != nil {
 			// 出口先把错误按 Chat Completions 形状写出，避免 handler 回落到

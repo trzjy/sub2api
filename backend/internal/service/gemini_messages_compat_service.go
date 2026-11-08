@@ -654,7 +654,10 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	// Anthropic 形状的 body 转成 Gemini 形状发往 Cursor 端点，必然被拒并白耗额度。
 	// 转换链：Anthropic → Chat Completions（apicompat）→ 契约 0.1 桥接入口
 	// 唯一执行部件，再把其回写的 Chat Completions 回转成 Anthropic。
-	if isCursorAccount(account) {
+	// 仅「cursor 且非 OpenAI 兼容账号」进 Connect 出站；OpenAI 兼容的 apikey 账号
+	// （kn-cy 等）绕过 Cursor 原生协议执行部件，落入通用 OpenAI 转发管线
+	// （与 openai_gateway_chat_completions.go:143 口径一致）。
+	if isCursorAccount(account) && !isCursorOpenAICompatibleAccount(account) {
 		return s.forwardCursorMessages(ctx, c, account, body)
 	}
 
@@ -1235,8 +1238,22 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	// streamGenerateContent 两种文本动作能落到 Cursor 的 AgentRun 通道；其余
 	// 动作（countTokens 等）没有等价能力，**明确报错**而不是伪装成功。
 	// 转换链：Gemini 原生请求 → Chat Completions → 契约 0.1 桥接入口，再回转原生响应。
-	if isCursorAccount(account) {
+	// 仅「cursor 且非 OpenAI 兼容账号」进 Connect 出站；OpenAI 兼容的 apikey 账号
+	// （kn-cy 等）必须绕过 Cursor 原生协议执行部件，改为走下方通用 OpenAI 兼容转发
+	// （Gemini 原生体 → Chat Completions → OpenAI 兼容 /chat/completions，带 Bearer
+	// api_key；与 openai_gateway_chat_completions.go:143 口径一致）。
+	if isCursorAccount(account) && !isCursorOpenAICompatibleAccount(account) {
 		return s.forwardCursorNative(ctx, c, account, originalModel, action, stream, body)
+	}
+
+	// OpenAI 兼容的 cursor apikey 账号（kn-cy 等）：出站目标为 OpenAI 兼容的
+	// /chat/completions 反代端点，与下方通用 Gemini 原生协议转发管线
+	// （x-goog-api-key → AI Studio）不兼容，必须在此单独处理。把 Gemini 原生体转成
+	// Chat Completions 后以 Bearer api_key 打到 OpenAI 兼容端点，再把 OpenAI 响应
+	// 回转成 Gemini 原生形状（与 openai_gateway_chat_completions.go:143 的分派同构：
+	// cursor 平台靠账号类型 api_key 区别于 OAuth Connect 账号）。
+	if isCursorOpenAICompatibleAccount(account) {
+		return s.forwardCursorOpenAICompatibleNative(ctx, c, account, originalModel, action, stream, body)
 	}
 
 	// 过滤掉 parts 为空的消息（Gemini API 不接受空 parts）
@@ -4373,6 +4390,341 @@ func (s *GeminiMessagesCompatService) forwardCursorNative(
 		return nil, s.writeCursorGoogleError(c, account, ferr)
 	}
 	return res, nil
+}
+
+// forwardCursorOpenAICompatibleNative 是 v1beta 原生出口（Gemini 形状）的
+// OpenAI 兼容 cursor apikey 账号分流（kn-cy 等）。
+//
+// 这类账号以 APIKey 形态接入、出站目标为 OpenAI 兼容的 /chat/completions 反代端点，
+// 与下方通用 Gemini 原生协议转发管线（x-goog-api-key → AI Studio）不兼容，必须在此
+// 单独处理：把 Gemini 原生入站转成 Chat Completions，再以 Bearer api_key 打到 OpenAI
+// 兼容端点，最后把 OpenAI Chat Completions 响应回转成 Gemini 原生形状。
+//
+// 与 openai_gateway_chat_completions.go:143 的分派口径同构：cursor 平台靠账号类型
+// （api_key）区别于既有的 OAuth Connect 账号；后者仍走 forwardCursorNative。
+func (s *GeminiMessagesCompatService) forwardCursorOpenAICompatibleNative(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	originalModel string,
+	action string,
+	stream bool,
+	body []byte,
+) (*ForwardResult, error) {
+	if action != "generateContent" && action != "streamGenerateContent" {
+		// 非文本动作 OpenAI 兼容端点无等价能力：明确报错，绝不伪装成功。
+		return nil, s.writeGoogleError(c, http.StatusBadRequest,
+			fmt.Sprintf("cursor openai-compatible: native action %q is not supported", action))
+	}
+
+	apiKey := account.GetCredential("api_key")
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, s.writeGoogleError(c, http.StatusBadGateway, infraerrors.AccountConfigUnsupported)
+	}
+	baseURL := strings.TrimSpace(account.GetOpenAIBaseURL())
+	if baseURL == "" {
+		return nil, s.writeGoogleError(c, http.StatusBadGateway, infraerrors.AccountConfigUnsupported)
+	}
+	mappedModel := originalModel
+	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
+		mappedModel = account.GetMappedModel(originalModel)
+	}
+
+	ccBody, convErr := cursorGeminiRequestToChatCompletions(body, mappedModel, stream)
+	if convErr != nil {
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, convErr.Error())
+	}
+
+	normalizedBaseURL, vErr := s.validateUpstreamBaseURL(baseURL)
+	if vErr != nil {
+		return nil, s.writeGoogleError(c, http.StatusBadGateway, vErr.Error())
+	}
+	fullURL := strings.TrimRight(normalizedBaseURL, "/") + "/chat/completions"
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+
+	startTime := time.Now()
+	upstreamReq, bErr := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(ccBody))
+	if bErr != nil {
+		return nil, s.writeGoogleError(c, http.StatusBadGateway, bErr.Error())
+	}
+	upstreamReq.Header.Set("Content-Type", "application/json")
+	upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, dErr := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+	if dErr != nil {
+		transportErr := s.handleUpstreamTransportError(ctx, c, account, dErr)
+		return nil, transportErr
+	}
+	defer resp.Body.Close()
+
+	requestID := resp.Header.Get("x-request-id")
+	if resp.StatusCode >= 400 {
+		respBody := s.readUpstreamErrorBody(resp)
+		return nil, s.writeGoogleError(c, resp.StatusCode,
+			extractUpstreamErrorMessage(respBody))
+	}
+
+	if stream {
+		return s.writeCursorOpenAICompatibleNativeStream(c, account, resp, originalModel, mappedModel, startTime, requestID)
+	}
+	return s.writeCursorOpenAICompatibleNativeNonStream(c, account, resp, originalModel, mappedModel, startTime, requestID)
+}
+
+// writeCursorOpenAICompatibleNativeNonStream 把 OpenAI Chat Completions 非流式响应
+// 回转成 Gemini generateContent 原生响应（application/json）并写出。
+func (s *GeminiMessagesCompatService) writeCursorOpenAICompatibleNativeNonStream(
+	c *gin.Context,
+	account *Account,
+	resp *http.Response,
+	originalModel string,
+	mappedModel string,
+	startTime time.Time,
+	requestID string,
+) (*ForwardResult, error) {
+	respBody, rErr := io.ReadAll(resp.Body)
+	if rErr != nil {
+		return nil, s.writeGoogleError(c, http.StatusBadGateway, infraerrors.UpstreamRequestFailed)
+	}
+	geminiBody, usage, cErr := openAIChatCompletionsResponseToGemini(respBody)
+	if cErr != nil {
+		// 上游返回了非 Chat Completions 形状：原样透传，避免编造响应。
+		c.Data(resp.StatusCode, "application/json", respBody)
+		return &ForwardResult{
+			RequestID:     requestID,
+			Model:         originalModel,
+			UpstreamModel: mappedModel,
+			Stream:        false,
+			Duration:      time.Since(startTime),
+		}, nil
+	}
+	var usageVal ClaudeUsage
+	if usage != nil {
+		usageVal = *usage
+	}
+	c.Data(http.StatusOK, "application/json", geminiBody)
+	return &ForwardResult{
+		RequestID:     requestID,
+		Usage:         usageVal,
+		Model:         originalModel,
+		UpstreamModel: mappedModel,
+		Stream:        false,
+		Duration:      time.Since(startTime),
+	}, nil
+}
+
+// writeCursorOpenAICompatibleNativeStream 把 OpenAI Chat Completions 流式响应
+// （text/event-stream，data: {...}）逐块回转成 Gemini 原生 SSE 写出。
+func (s *GeminiMessagesCompatService) writeCursorOpenAICompatibleNativeStream(
+	c *gin.Context,
+	account *Account,
+	resp *http.Response,
+	originalModel string,
+	mappedModel string,
+	startTime time.Time,
+	requestID string,
+) (*ForwardResult, error) {
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Status(http.StatusOK)
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		return nil, errors.New("cursor openai-compatible: streaming not supported")
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	usage := &ClaudeUsage{}
+	var firstTokenMs *int
+	sawContent := false
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 && (err == nil || errors.Is(err, io.EOF)) {
+			trimmed := strings.TrimRight(line, "\r\n")
+			if !strings.HasPrefix(trimmed, "data:") {
+				if !sawContent {
+					_, _ = io.WriteString(c.Writer, line)
+					flusher.Flush()
+				}
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if payload == "" || payload == "[DONE]" {
+				continue
+			}
+			geminiChunk, u := openAIChatCompletionsChunkToGemini([]byte(payload))
+			if u != nil {
+				usage = u
+			}
+			if geminiChunk != nil {
+				if firstTokenMs == nil {
+					ms := int(time.Since(startTime).Milliseconds())
+					firstTokenMs = &ms
+				}
+				sawContent = true
+				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(geminiChunk))
+				flusher.Flush()
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			break
+		}
+	}
+	var usageVal ClaudeUsage
+	if usage != nil {
+		usageVal = *usage
+	}
+	return &ForwardResult{
+		RequestID:     requestID,
+		Usage:         usageVal,
+		Model:         originalModel,
+		UpstreamModel: mappedModel,
+		Stream:        true,
+		Duration:      time.Since(startTime),
+		FirstTokenMs:  firstTokenMs,
+	}, nil
+}
+
+// openAIChatCompletionsResponseToGemini 把 OpenAI Chat Completions 非流式响应转成
+// Gemini generateContent 原生响应（与上游真实用量一致，不折算、不补默认值）。
+func openAIChatCompletionsResponseToGemini(body []byte) ([]byte, *ClaudeUsage, error) {
+	var oc struct {
+		Choices []struct {
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &oc); err != nil {
+		return nil, nil, err
+	}
+	candidates := make([]map[string]any, 0, len(oc.Choices))
+	for _, ch := range oc.Choices {
+		candidates = append(candidates, map[string]any{
+			"content": map[string]any{
+				"parts": []map[string]any{{"text": ch.Message.Content}},
+				"role":  "model",
+			},
+			"finishReason": normalizeOpenAIFinishReason(ch.FinishReason),
+		})
+	}
+	if len(candidates) == 0 {
+		candidates = append(candidates, map[string]any{
+			"content":      map[string]any{"parts": []any{}, "role": "model"},
+			"finishReason": "STOP",
+		})
+	}
+	gemini := map[string]any{"candidates": candidates}
+	if oc.Usage != nil {
+		gemini["usageMetadata"] = map[string]any{
+			"promptTokenCount":     oc.Usage.PromptTokens,
+			"candidatesTokenCount": oc.Usage.CompletionTokens,
+			"totalTokenCount":      oc.Usage.TotalTokens,
+		}
+	}
+	out, err := json.Marshal(gemini)
+	if err != nil {
+		return nil, nil, err
+	}
+	var usage *ClaudeUsage
+	if oc.Usage != nil {
+		usage = &ClaudeUsage{
+			InputTokens:  oc.Usage.PromptTokens,
+			OutputTokens: oc.Usage.CompletionTokens,
+		}
+	}
+	return out, usage, nil
+}
+
+// openAIChatCompletionsChunkToGemini 把 OpenAI Chat Completions 流式块（data: {...}）
+// 转成 Gemini 原生 SSE 块；上游未携带增量内容或已结束的块返回 nil chunk（仅更新用量）。
+func openAIChatCompletionsChunkToGemini(chunk []byte) ([]byte, *ClaudeUsage) {
+	var oc struct {
+		Choices []struct {
+			Delta struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(chunk, &oc); err != nil {
+		return nil, nil
+	}
+	candidates := make([]map[string]any, 0, len(oc.Choices))
+	for _, ch := range oc.Choices {
+		part := map[string]any{}
+		if ch.Delta.Content != "" {
+			part["text"] = ch.Delta.Content
+		}
+		cand := map[string]any{
+			"content": map[string]any{
+				"parts": []map[string]any{part},
+				"role":  "model",
+			},
+		}
+		if fr := normalizeOpenAIFinishReason(ch.FinishReason); fr != "" {
+			cand["finishReason"] = fr
+		}
+		candidates = append(candidates, cand)
+	}
+	gemini := map[string]any{"candidates": candidates}
+	if oc.Usage != nil {
+		gemini["usageMetadata"] = map[string]any{
+			"promptTokenCount":     oc.Usage.PromptTokens,
+			"candidatesTokenCount": oc.Usage.CompletionTokens,
+			"totalTokenCount":      oc.Usage.TotalTokens,
+		}
+	}
+	out, err := json.Marshal(gemini)
+	if err != nil {
+		return nil, nil
+	}
+	var usage *ClaudeUsage
+	if oc.Usage != nil {
+		usage = &ClaudeUsage{
+			InputTokens:  oc.Usage.PromptTokens,
+			OutputTokens: oc.Usage.CompletionTokens,
+		}
+	}
+	return out, usage
+}
+
+// normalizeOpenAIFinishReason 把 OpenAI finish_reason 映射为 Gemini finishReason。
+// 未知值回落 STOP（仅 apikey 反代场景，工具调用等罕见）。
+func normalizeOpenAIFinishReason(reason string) string {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "STOP":
+		return "STOP"
+	case "LENGTH":
+		return "MAX_TOKENS"
+	case "CONTENT_FILTER":
+		return "SAFETY"
+	case "TOOL_CALLS", "FUNCTION_CALL":
+		return "STOP"
+	default:
+		return ""
+	}
 }
 
 // cursorClaudeUsageToAnthropicUsage 逐字段搬运真实用量（不折算、不补默认值）。
