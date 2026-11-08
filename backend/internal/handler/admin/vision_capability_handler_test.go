@@ -62,7 +62,7 @@ func (r *fakeAccountRepo) Delete(ctx context.Context, id int64) error { return n
 func (r *fakeAccountRepo) List(ctx context.Context, params pagination.PaginationParams) ([]service.Account, *pagination.PaginationResult, error) {
 	return nil, nil, nil
 }
-func (r *fakeAccountRepo) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, *pagination.PaginationResult, error) {
+func (r *fakeAccountRepo) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string, quotaKeyID int64) ([]service.Account, *pagination.PaginationResult, error) {
 	return nil, nil, nil
 }
 func (r *fakeAccountRepo) ListAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, error) {

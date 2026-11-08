@@ -61,9 +61,20 @@ func (h *AccountHandler) GetUpstreamBillingRates(c *gin.Context) {
 		}
 	}
 
+	// quota_key_id：与账号列表端点同口径（正整数；缺省/空串 = 不过滤）。
+	var quotaKeyID int64
+	if quotaKeyIDStr := strings.TrimSpace(c.Query("quota_key_id")); quotaKeyIDStr != "" {
+		parsed, err := strconv.ParseInt(quotaKeyIDStr, 10, 64)
+		if err != nil || parsed <= 0 {
+			response.BadRequest(c, "invalid quota key filter")
+			return
+		}
+		quotaKeyID = parsed
+	}
+
 	accounts, total, err := h.adminService.ListAccounts(
 		c.Request.Context(), page, pageSize, platform, accountType, status,
-		search, groupID, privacyMode, sortBy, sortOrder,
+		search, groupID, privacyMode, sortBy, sortOrder, quotaKeyID,
 	)
 	if err != nil {
 		response.ErrorFrom(c, err)

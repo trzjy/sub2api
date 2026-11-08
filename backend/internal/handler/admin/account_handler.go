@@ -272,6 +272,8 @@ type BulkUpdateAccountFilters struct {
 	Group       string `json:"group"`
 	Search      string `json:"search"`
 	PrivacyMode string `json:"privacy_mode"`
+	// QuotaKeyID 归属激活码过滤；空串 = 不过滤。
+	QuotaKeyID string `json:"quota_key_id"`
 }
 
 // CheckMixedChannelRequest represents check mixed channel risk request
@@ -886,7 +888,20 @@ func (h *AccountHandler) List(c *gin.Context) {
 		}
 	}
 
-	accounts, total, err := h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder)
+	// quota_key_id：归属激活码过滤（深链 ?quota_key_id=N）。
+	// 仅接受正整数；缺省/空串 = 不过滤；非法值直接 400（与 group 过滤同口径），
+	// 避免把"过滤条件拼错"静默降级成"不过滤"而让用户误判数据范围。
+	var quotaKeyID int64
+	if quotaKeyIDStr := strings.TrimSpace(c.Query("quota_key_id")); quotaKeyIDStr != "" {
+		parsedQuotaKeyID, parseErr := strconv.ParseInt(quotaKeyIDStr, 10, 64)
+		if parseErr != nil || parsedQuotaKeyID <= 0 {
+			response.ErrorFrom(c, infraerrors.BadRequest("INVALID_QUOTA_KEY_FILTER", "invalid quota key filter"))
+			return
+		}
+		quotaKeyID = parsedQuotaKeyID
+	}
+
+	accounts, total, err := h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder, quotaKeyID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -2888,6 +2903,7 @@ func toServiceBulkUpdateAccountFilters(filters *BulkUpdateAccountFilters) *servi
 		Group:       filters.Group,
 		Search:      filters.Search,
 		PrivacyMode: filters.PrivacyMode,
+		QuotaKeyID:  filters.QuotaKeyID,
 	}
 }
 
@@ -4132,7 +4148,7 @@ func (h *AccountHandler) BatchRefreshTier(c *gin.Context) {
 	accounts := make([]*service.Account, 0)
 
 	if len(req.AccountIDs) == 0 {
-		allAccounts, _, err := h.adminService.ListAccounts(ctx, 1, 10000, "gemini", "oauth", "", "", 0, "", "name", "asc")
+		allAccounts, _, err := h.adminService.ListAccounts(ctx, 1, 10000, "gemini", "oauth", "", "", 0, "", "name", "asc", 0)
 		if err != nil {
 			response.ErrorFrom(c, err)
 			return

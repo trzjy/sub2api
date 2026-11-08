@@ -154,7 +154,7 @@ func TestAdminServiceSimpleModeRejectsDirectCompositeGroupAccess(t *testing.T) {
 func TestAdminServiceSimpleModeRejectsAccountListCompositeFilter(t *testing.T) {
 	repo := &groupRepoStubForAdmin{getByID: &Group{ID: 9, Platform: PlatformComposite}}
 	svc := &adminServiceImpl{cfg: &config.Config{RunMode: config.RunModeSimple}, groupRepo: repo}
-	_, _, err := svc.ListAccounts(context.Background(), 1, 20, "", "", "", "", 9, "", "", "")
+	_, _, err := svc.ListAccounts(context.Background(), 1, 20, "", "", "", "", 9, "", "", "", 0)
 	require.Error(t, err)
 }
 

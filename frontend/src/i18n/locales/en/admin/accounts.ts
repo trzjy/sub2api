@@ -187,6 +187,8 @@ export default {
       allTypes: 'All Types',
       allStatus: 'All Status',
       allGroups: 'All Groups',
+      // 「全部」option of the quota-key filter dropdown: empty value = no quota-key filter.
+      allQuotaKeys: 'All Quota Keys',
       ungroupedGroup: 'Ungrouped',
       oauthType: 'OAuth',
       setupToken: 'Setup Token',

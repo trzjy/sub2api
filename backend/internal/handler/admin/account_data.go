@@ -533,12 +533,12 @@ func (h *AccountHandler) listAllProxies(ctx context.Context) ([]service.Proxy, e
 	return out, nil
 }
 
-func (h *AccountHandler) listAccountsFiltered(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode, sortBy, sortOrder string) ([]service.Account, error) {
+func (h *AccountHandler) listAccountsFiltered(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode, sortBy, sortOrder string, quotaKeyID int64) ([]service.Account, error) {
 	page := 1
 	pageSize := dataPageCap
 	var out []service.Account
 	for {
-		items, total, err := h.adminService.ListAccounts(ctx, page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder)
+		items, total, err := h.adminService.ListAccounts(ctx, page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder, quotaKeyID)
 		if err != nil {
 			return nil, err
 		}
@@ -591,7 +591,17 @@ func (h *AccountHandler) resolveExportAccounts(ctx context.Context, ids []int64,
 		}
 	}
 
-	return h.listAccountsFiltered(ctx, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder)
+	// quota_key_id：与账号列表端点同口径（正整数；缺省/空串 = 不过滤）。
+	var quotaKeyID int64
+	if quotaKeyIDStr := strings.TrimSpace(c.Query("quota_key_id")); quotaKeyIDStr != "" {
+		parsedQuotaKeyID, parseErr := strconv.ParseInt(quotaKeyIDStr, 10, 64)
+		if parseErr != nil || parsedQuotaKeyID <= 0 {
+			return nil, infraerrors.BadRequest("INVALID_QUOTA_KEY_FILTER", "invalid quota key filter")
+		}
+		quotaKeyID = parsedQuotaKeyID
+	}
+
+	return h.listAccountsFiltered(ctx, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder, quotaKeyID)
 }
 
 func (h *AccountHandler) resolveExportProxies(ctx context.Context, accounts []service.Account) ([]service.Proxy, error) {

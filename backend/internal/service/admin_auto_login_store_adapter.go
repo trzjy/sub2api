@@ -24,7 +24,7 @@ func NewAdminAutoLoginStoreAdapter(svc AdminService) AutoLoginAccountStore {
 // ListAccounts 拉取全部账号（忽略分页，自动登录恢复用）。
 func (a *adminAutoLoginStoreAdapter) ListAccounts(ctx context.Context) ([]*Account, error) {
 	const pageSize = 100000
-	accounts, _, err := a.svc.ListAccounts(ctx, 1, pageSize, "", "", "", "", 0, "", "", "")
+	accounts, _, err := a.svc.ListAccounts(ctx, 1, pageSize, "", "", "", "", 0, "", "", "", 0)
 	if err != nil {
 		return nil, err
 	}

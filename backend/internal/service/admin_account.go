@@ -24,14 +24,14 @@ import (
 )
 
 // Account management implementations
-func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error) {
+func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string, quotaKeyID int64) ([]Account, int64, error) {
 	if groupID > 0 {
 		if err := s.ValidateAccountGroupBindings(ctx, []int64{groupID}); err != nil {
 			return nil, 0, err
 		}
 	}
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
-	accounts, result, err := s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode)
+	accounts, result, err := s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode, quotaKeyID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1734,11 +1734,21 @@ func (s *adminServiceImpl) resolveBulkUpdateTargetIDs(ctx context.Context, filte
 	case "ungrouped":
 		groupID = AccountListGroupUngrouped
 	default:
-		parsedGroupID, err := strconv.ParseInt(strings.TrimSpace(filters.Group), 10, 64)
+		parsedGroupID, err := strconv.ParseInt(strings.TrimSpace(filters.Group), 10,  64)
 		if err != nil {
 			return nil, fmt.Errorf("invalid group filter: %w", err)
 		}
 		groupID = parsedGroupID
+	}
+
+	// 归属激活码过滤：空串 = 不过滤；非正整数视为非法过滤条件（不静默放宽范围）。
+	var quotaKeyID int64
+	if rawQuotaKeyID := strings.TrimSpace(filters.QuotaKeyID); rawQuotaKeyID != "" {
+		parsedQuotaKeyID, err := strconv.ParseInt(rawQuotaKeyID, 10, 64)
+		if err != nil || parsedQuotaKeyID <= 0 {
+			return nil, fmt.Errorf("invalid quota key filter: %s", rawQuotaKeyID)
+		}
+		quotaKeyID = parsedQuotaKeyID
 	}
 
 	const pageSize = 500
@@ -1758,6 +1768,7 @@ func (s *adminServiceImpl) resolveBulkUpdateTargetIDs(ctx context.Context, filte
 			filters.PrivacyMode,
 			"",
 			"",
+			quotaKeyID,
 		)
 		if err != nil {
 			return nil, err

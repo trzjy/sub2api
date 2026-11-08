@@ -50,7 +50,7 @@ func newWALAdminStub(accounts ...*service.Account) *walAdminStub {
 	return &walAdminStub{accounts: accounts, byID: byID, nextID: maxID}
 }
 
-func (s *walAdminStub) ListAccounts(_ context.Context, _ int, _ int, platform, _, _, _ string, _ int64, _, _, _ string) ([]service.Account, int64, error) {
+func (s *walAdminStub) ListAccounts(_ context.Context, _ int, _ int, platform, _, _, _ string, _ int64, _, _, _ string, _ int64) ([]service.Account, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]service.Account, 0, len(s.accounts))

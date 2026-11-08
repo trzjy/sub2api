@@ -204,6 +204,8 @@ export default {
       allTypes: '全部类型',
       allStatus: '全部状态',
       allGroups: '全部分组',
+      // 激活码筛选下拉的「全部」项：空值 = 不按激活码过滤。
+      allQuotaKeys: '全部激活码',
       ungroupedGroup: '未分配分组',
       oauthType: 'OAuth',
       // Schedulable toggle

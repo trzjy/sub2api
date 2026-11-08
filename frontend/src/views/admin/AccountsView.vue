@@ -7,6 +7,7 @@
             v-model:searchQuery="params.search"
             :filters="params"
             :groups="groups"
+            :quota-keys="quotaKeys"
             @update:filters="(newFilters) => Object.assign(params, newFilters)"
             @change="debouncedReload"
             @update:searchQuery="debouncedReload"
@@ -587,6 +588,7 @@ import { useRoute } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
+import type { QuotaKey } from '@/api/admin/quotaKeys'
 import { CONCRETE_PLATFORM_OPTIONS } from '@/constants/platforms'
 import { useTableLoader } from '@/composables/useTableLoader'
 import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
@@ -645,6 +647,8 @@ const authStore = useAuthStore()
 
 const proxies = ref<AccountProxy[]>([])
 const groups = ref<AdminGroup[]>([])
+// 激活码（quota key）列表：仅用于「所属激活码」下拉的候选项文案（脱敏码）。
+const quotaKeys = ref<QuotaKey[]>([])
 const groupsByID = computed(() => new Map(groups.value.map(group => [group.id, group])))
 const accountGroupsForRow = (account: Pick<AccountListItem, 'group_ids'>): AdminGroup[] => {
   const groupIDs = account.group_ids ?? []
@@ -1204,6 +1208,8 @@ const syncAccountListDerivedParams = () => {
 
 // 支持通过 URL query 初始化筛选（例如从分组页"可用账号数"下钻跳转过来）。
 const route = useRoute()
+// quota_key_id 深链白名单：纯数字正整数（1..9 开头，不允许 0/负号/前导零/非数字）。
+const ACCOUNT_QUOTA_KEY_ID_PATTERN = /^[1-9][0-9]*$/
 const ACCOUNT_STATUS_FILTER_VALUES = new Set([
   'active',
   'inactive',
@@ -1227,13 +1233,17 @@ const resolveAccountFiltersFromQuery = (query: Record<string, any> = {}) => {
   const queryPlatform = getQueryStr('platform')
   const rawStatus = getQueryStr('status')
   const queryStatus = ACCOUNT_STATUS_FILTER_VALUES.has(rawStatus) ? rawStatus : ''
+  // quota_key_id：激活码深链（从激活码页跳到账号页）。只接受正整数；
+  // 脏值（0/负数/非数字/超长）一律忽略，等同"未筛选"，不报错也不打断页面。
+  const rawQuotaKeyID = getQueryStr('quota_key_id')
+  const quotaKeyID = ACCOUNT_QUOTA_KEY_ID_PATTERN.test(rawQuotaKeyID) ? rawQuotaKeyID : ''
 
   // 深链针对性筛选判断：
   // 当 URL 带有 group, search, type, privacy_mode, platform, status 等任一明确筛选意图时，
   // 属于目标下钻/特定查询，未在 URL 指定的维度应保持缺省空值（如全部平台、全部状态），
   // 严禁将 localStorage 历史偏好注入进来，造成跨平台分组（如含 Cursor/Antigravity 的 Gemini 分组）
   // 账号被静默遮蔽；只有在完全没有针对性 URL 参数时，才回落到 localStorage 缓存的平台和状态。
-  const hasTargetedFilter = Boolean(group || search || type || privacy_mode || queryPlatform || queryStatus)
+  const hasTargetedFilter = Boolean(group || search || type || privacy_mode || queryPlatform || queryStatus || quotaKeyID)
 
   const persisted = loadInitialAccountFilterValues()
 
@@ -1242,6 +1252,7 @@ const resolveAccountFiltersFromQuery = (query: Record<string, any> = {}) => {
     search,
     type,
     privacy_mode,
+    quota_key_id: quotaKeyID,
     platform: queryPlatform || (!hasTargetedFilter ? persisted.platform : ''),
     status: queryStatus || (!hasTargetedFilter ? persisted.status : '')
   }
@@ -1267,6 +1278,7 @@ const {
       type: initialFilters.type,
       status: initialFilters.status,
       privacy_mode: initialFilters.privacy_mode,
+      quota_key_id: initialFilters.quota_key_id,
       group: initialFilters.group,
       search: initialFilters.search,
       lite: '1',
@@ -1367,6 +1379,7 @@ const buildUpstreamBillingRateFilters = () => {
     group: typeof rawParams.group === 'string' ? rawParams.group : '',
     search: typeof rawParams.search === 'string' ? rawParams.search : '',
     privacy_mode: typeof rawParams.privacy_mode === 'string' ? rawParams.privacy_mode : '',
+    quota_key_id: typeof rawParams.quota_key_id === 'string' ? rawParams.quota_key_id : '',
     sort_by: sortState.sort_by,
     sort_order: sortState.sort_order
   }
@@ -1505,6 +1518,7 @@ watch(() => route?.query, (newQuery) => {
   requestParams.type = resolved.type
   requestParams.status = resolved.status
   requestParams.privacy_mode = resolved.privacy_mode
+  requestParams.quota_key_id = resolved.quota_key_id
   requestParams.group = resolved.group
   requestParams.search = resolved.search
   debouncedReload()
@@ -1664,6 +1678,7 @@ const refreshAccountsIncrementally = async () => {
         type?: string
         status?: string
         privacy_mode?: string
+        quota_key_id?: string
         group?: string
         search?: string
         sort_by?: string
@@ -1696,6 +1711,19 @@ const handleManualRefresh = async () => {
   await Promise.all([load(), loadUpstreamBillingProbeGlobalState()])
   // Force usage cells to refetch /usage on explicit user refresh.
   usageManualRefreshToken.value += 1
+}
+
+// 加载「所属激活码」下拉的候选项（脱敏码文案）。
+// 该列表只影响下拉可选项，不影响列表主流程：加载失败时降级为空列表，
+// 深链 ?quota_key_id=N 依然生效（后端按 id 过滤）。
+const loadQuotaKeyOptions = async (): Promise<QuotaKey[]> => {
+  try {
+    const response = await adminAPI.quotaKeys.list()
+    return response.items ?? []
+  } catch (error) {
+    console.error('Failed to load quota keys:', error)
+    return []
+  }
 }
 
 const loadUpstreamBillingProbeGlobalState = async () => {
@@ -2396,6 +2424,7 @@ const buildBulkEditFilterSnapshot = () => {
     group: typeof rawParams.group === 'string' ? rawParams.group : '',
     search: typeof rawParams.search === 'string' ? rawParams.search : '',
     privacy_mode: typeof rawParams.privacy_mode === 'string' ? rawParams.privacy_mode : '',
+    quota_key_id: typeof rawParams.quota_key_id === 'string' ? rawParams.quota_key_id : '',
     sort_by: typeof rawParams.sort_by === 'string' ? rawParams.sort_by : '',
     sort_order: sortOrder
   }
@@ -2473,6 +2502,7 @@ const buildAccountQueryFilters = () => ({
   group: params.group || '',
   privacy_mode: params.privacy_mode || '',
   search: params.search || '',
+  quota_key_id: params.quota_key_id || '',
   sort_by: sortState.sort_by,
   sort_order: sortState.sort_order
 })
@@ -2522,6 +2552,11 @@ const accountMatchesCurrentFilters = (account: Account) => {
     } else if (privacyMode !== filters.privacy_mode) {
       return false
     }
+  }
+  if (filters.quota_key_id) {
+    const quotaKeyID = account.quota_key_id
+    if (quotaKeyID === null || quotaKeyID === undefined) return false
+    if (String(quotaKeyID) !== String(filters.quota_key_id)) return false
   }
   const search = String(filters.search || '').trim().toLowerCase()
   if (search && !account.name.toLowerCase().includes(search)) return false
@@ -2939,6 +2974,7 @@ onMounted(async () => {
     adminAPI.proxies.getAll(),
     adminAPI.groups.getAll()
   ])
+  quotaKeys.value = await loadQuotaKeyOptions()
   if (proxiesResult.status === 'fulfilled') {
     proxies.value = proxiesResult.value
   } else {
