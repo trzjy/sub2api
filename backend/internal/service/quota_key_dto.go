@@ -49,4 +49,8 @@ type CreateQuotaKeyInput struct {
 	Notes         *string
 	// Priority 是新建激活码的优先级；0 表示未指定，仓储层按列默认值（1）落库。
 	Priority int
+	// UpstreamKey 是新建激活码所属上游的稳定标识（引用 quota_upstreams.key）。
+	// 空串 = 未指定，由仓储层落列默认值（'shareai'）。非空时必须对应 quota_upstreams
+	// 中存在的、未软删的上游标识；service 层负责校验存在性。
+	UpstreamKey string
 }

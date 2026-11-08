@@ -212,7 +212,7 @@ var (
 func newProbeQuotaKey(t *testing.T, svc *service.QuotaKeyService, client *ent.Client, tag string) *service.QuotaKeyStatus {
 	t.Helper()
 	code := fmt.Sprintf("JG-CF-PROBE-%s-%d", tag, time.Now().UnixNano())
-	status, err := svc.Create(context.Background(), code, nil, nil, 0)
+	status, err := svc.Create(context.Background(), code, nil, nil, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		// 软删以免污染其它用例；唯一索引冲突由上面的逐次唯一 code 规避。

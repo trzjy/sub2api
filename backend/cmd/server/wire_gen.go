@@ -155,7 +155,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	quotaKeyRepository := repository.NewQuotaKeyRepository(client)
 	quotaKeyEncryptor := service.ProvideQuotaKeyEncryptor()
 	cursorAutoEntryService := service.ProvideCursorAutoEntryService(settingRepository, quotaKeyRepository, quotaKeyEncryptor, client)
-	quotaKeyService, err := service.ProvideQuotaKeyService(quotaKeyRepository, quotaKeyEncryptor, client, cursorAutoEntryService)
+	quotaUpstreamRegistry := repository.NewQuotaUpstreamRepository(client)
+	quotaKeyService, err := service.ProvideQuotaKeyService(quotaKeyRepository, quotaKeyEncryptor, client, cursorAutoEntryService, quotaUpstreamRegistry)
 	if err != nil {
 		return nil, err
 	}

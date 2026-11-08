@@ -138,7 +138,7 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 		// 供人工恢复绑定。
 		notes := formatAutoPoolNotes(devCode, devMD5)
 		unselectableUntil := time.Now().Add(-time.Minute)
-		st, createErr := h.svc.Create(c.Request.Context(), cardKey, &unselectableUntil, &notes, 1)
+		st, createErr := h.svc.Create(c.Request.Context(), cardKey, &unselectableUntil, &notes, 1, "")
 		if createErr != nil {
 			res.FailedCount++
 			res.Errors = append(res.Errors, fmt.Sprintf("card %s persist failed: %v", maskCardKey(cardKey), createErr))

@@ -716,6 +716,10 @@ func (r *testDBRepo) Create(ctx context.Context, in CreateQuotaKeyInput) (*ent.Q
 	if in.Notes != nil {
 		q = q.SetNillableNotes(in.Notes)
 	}
+	// UpstreamKey 空串不写，取列默认值（'shareai'）；非空显式写入（与生产仓储同口径）。
+	if in.UpstreamKey != "" {
+		q = q.SetUpstreamKey(in.UpstreamKey)
+	}
 	return q.Save(ctx)
 }
 
@@ -1410,7 +1414,7 @@ func TestQuotaKeyService_CreateEncryptsAndMasks(t *testing.T) {
 	enc := testEncryptor{}
 	svc := NewQuotaKeyService(repo, enc, nil, nil)
 
-	dto, err := svc.Create(context.Background(), plain, nil, nil, 0)
+	dto, err := svc.Create(context.Background(), plain, nil, nil, 0, "")
 	require.NoError(t, err)
 	require.NotNil(t, dto)
 
@@ -1570,7 +1574,7 @@ func TestQuotaKeyService_ShortCodeNeverLeaksPlaintext(t *testing.T) {
 	svc := NewQuotaKeyService(repo, enc, nil, nil)
 
 	for _, code := range shortCodes {
-		dto, err := svc.Create(context.Background(), code, nil, nil, 0)
+		dto, err := svc.Create(context.Background(), code, nil, nil, 0, "")
 		require.NoError(t, err, "Create must accept short code %q without error", code)
 		require.NotNil(t, dto)
 		// 不得包含原文任何字符（逐字符校验，杜绝部分泄露）。

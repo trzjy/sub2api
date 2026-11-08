@@ -127,6 +127,15 @@ type QuotaKeyUpstreamClient interface {
 	PullBatch(ctx context.Context, qk *ent.QuotaKey) (*UpstreamPullResult, error)
 }
 
+// QuotaUpstreamRegistry 是上游注册表（quota_upstreams）的窄依赖：仅用于创建激活码时
+// 校验上游标识是否存在且未软删（防止 kn-cy 卡密被当成 shareai 拉号，正是本卡要消灭的故障）。
+// 由 repository 包的 *quotaUpstreamRepository 实现（service 包不反向导入 repository）。
+type QuotaUpstreamRegistry interface {
+	// ExistsByKey 报告给定上游稳定标识 key 是否存在且未软删。
+	// 找不到（含软删）返回 false, nil；仅有 DB 错误才返回非 nil error。
+	ExistsByKey(ctx context.Context, key string) (bool, error)
+}
+
 // upstreamKey 是 quota_keys.upstream_key 的取值集合（激活码所属上行标识）。
 //
 // 与 KC-16 新建的 quota_upstreams 表中 type 列的取值集合保持一致：
@@ -375,6 +384,11 @@ func (c *upstreamDispatchingClient) PullBatch(ctx context.Context, qk *ent.Quota
 // ErrQuotaKeyNotFound 表示激活码不存在（或已软删，普通查询不可见）。
 var ErrQuotaKeyNotFound = errors.New("quota key not found")
 
+// ErrQuotaKeyUnknownUpstream 在创建激活码时上游标识校验失败（quota_upstreams 中不存在
+// 或已软删）时返回；调用方据以失败关闭，绝不静默落成默认 shareai（否则 kn-cy 卡密会被
+// 当 shareai 拉号，正是本卡要消灭的故障）。
+var ErrQuotaKeyUnknownUpstream = errors.New("quota_key_service: unknown upstream key")
+
 // QuotaKeyService 提供激活码凭据加密落库/读取 + C3.2 拉号状态机 + 软删编排。
 type QuotaKeyService struct {
 	repo     QuotaKeyRepository
@@ -403,6 +417,13 @@ type QuotaKeyService struct {
 	// autoEntry 是 D2-a 入库可配置提供方（窄接口）：挂组前调用 ApplyEntryDefaults 写账号属性，
 	// 并对外提供配置读取。nil 时跳过（向后兼容 D1 既有测试与未装配场景）。
 	autoEntry AutoEntryConfigProvider
+
+	// registry 是上游注册表（quota_upstreams）的窄依赖：创建激活码时校验上游标识
+	// 是否存在且未软删，防止 kn-cy 卡密被当 shareai 拉号（本卡要消灭的故障）。
+	// nil 时 Create 对非空 upstream_key 失败关闭（绝不静默落成默认 shareai）。
+	// 生产由 wire 在 ProvideQuotaKeyService 装配点注入 *quotaUpstreamRepository；
+	// 测试可注入替身或留 nil（nil 仅允许空 upstream_key 的创建路径）。
+	registry QuotaUpstreamRegistry
 }
 
 // AutoEntryConfigProvider 是 D1 挂载点调用的窄接口（D2-a 注入）：提供配置并应用入库默认值。
@@ -439,6 +460,15 @@ func (s *QuotaKeyService) SetAutoEntry(a AutoEntryConfigProvider) {
 		return
 	}
 	s.autoEntry = a
+}
+
+// SetUpstreamRegistry 注入上游注册表窄依赖（QuotaUpstreamRegistry），用于创建激活码时
+// 校验上游标识存在性。生产由 wire 在装配点注入 *quotaUpstreamRepository；测试可注入替身。
+func (s *QuotaKeyService) SetUpstreamRegistry(r QuotaUpstreamRegistry) {
+	if s == nil {
+		return
+	}
+	s.registry = r
 }
 
 // NewQuotaKeyService 构造激活码服务。
@@ -649,9 +679,28 @@ func (s *QuotaKeyService) List(ctx context.Context) ([]*QuotaKeyStatus, error) {
 //
 // priority 为该码的调度优先级（数值越小越优先）；<=0 时按列默认值 1 落库，
 // 该值会成为本码拉出账号的入库优先级（用户裁定 2026-11-03）。
-func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *time.Time, notes *string, priority int) (*QuotaKeyStatus, error) {
+//
+// upstreamKey 是新建激活码所属上游的稳定标识（引用 quota_upstreams.key）：
+//   - 空串 = 未指定，由仓储层落列默认值（'shareai'）；
+//   - 非空 = 必须对应 quota_upstreams 中存在的、未软删的上游标识，否则返回
+//     ErrQuotaKeyUnknownUpstream（绝不静默落成 shareai，那会让 kn-cy 卡密被当
+//     shareai 拉号，正是本卡要消灭的故障）。
+func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *time.Time, notes *string, priority int, upstreamKey string) (*QuotaKeyStatus, error) {
 	if priority < 0 {
 		return nil, errors.New("quota_key_service: priority must not be negative")
+	}
+	// 非空上游标识必须存在且未软删；缺失注册表（nil）时失败关闭，不静默落成 shareai。
+	if upstreamKey != "" {
+		if s.registry == nil {
+			return nil, fmt.Errorf("quota_key_service: upstream registry unavailable, cannot validate upstream_key %q", upstreamKey)
+		}
+		exists, err := s.registry.ExistsByKey(ctx, upstreamKey)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, fmt.Errorf("%w: %q", ErrQuotaKeyUnknownUpstream, upstreamKey)
+		}
 	}
 	enc, err := s.enc.Encrypt([]byte(code))
 	if err != nil {
@@ -668,6 +717,7 @@ func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *ti
 		ExpiresAt:     expiresAt,
 		Notes:         notes,
 		Priority:      priority,
+		UpstreamKey:   upstreamKey,
 	})
 	if err != nil {
 		return nil, err

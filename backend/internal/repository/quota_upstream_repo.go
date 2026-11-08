@@ -23,6 +23,20 @@ func NewQuotaUpstreamRepository(client *dbent.Client) *quotaUpstreamRepository {
 	return &quotaUpstreamRepository{client: client}
 }
 
+// ExistsByKey 报告给定上游稳定标识 key 是否存在且未软删。
+// 找不到（含软删）返回 false, nil；仅有 DB 错误才返回非 nil error。
+// 由 service.QuotaUpstreamRegistry 接口约束（创建激活码时校验上游标识存在性，
+// 防止 kn-cy 卡密被当成 shareai 拉号）。
+func (r *quotaUpstreamRepository) ExistsByKey(ctx context.Context, key string) (bool, error) {
+	n, err := r.client.QuotaUpstream.Query().
+		Where(quotaupstream.Key(key)).
+		Count(ctx)
+	if err != nil {
+		return false, fmt.Errorf("quota_upstream_repo: exists by key %q: %w", key, err)
+	}
+	return n > 0, nil
+}
+
 // GetByKey 按上游稳定标识 key 取单条（软删行自动被 SoftDeleteMixin 过滤）。
 // 找不到返回 (nil, err)；调用方据错误判定是否存在。
 func (r *quotaUpstreamRepository) GetByKey(ctx context.Context, key string) (*dbent.QuotaUpstream, error) {

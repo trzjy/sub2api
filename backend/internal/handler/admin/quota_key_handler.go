@@ -167,6 +167,9 @@ type createQuotaKeyRequest struct {
 	// Priority 是调度优先级（数值越小越优先）；缺省 0 → 服务端按列默认 1 落库。
 	// 该码名下账号的 priority 跟随此值。
 	Priority int `json:"priority"`
+	// UpstreamKey 是新建激活码所属上游的稳定标识（引用 quota_upstreams.key）。
+	// 缺省（omitempty，空串）表示未指定，由仓储层落列默认值（'shareai'）。
+	UpstreamKey string `json:"upstream_key"`
 }
 
 // Create 新建激活码：接 code 原文一次 → 加密落库 → 返回脱敏结果。
@@ -182,7 +185,7 @@ func (h *QuotaKeyHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "code is required")
 		return
 	}
-	st, err := h.svc.Create(c.Request.Context(), req.Code, req.ExpiresAt, req.Notes, req.Priority)
+	st, err := h.svc.Create(c.Request.Context(), req.Code, req.ExpiresAt, req.Notes, req.Priority, req.UpstreamKey)
 	if err != nil {
 		respondQuotaKeyError(c, err)
 		return

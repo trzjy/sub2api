@@ -66,6 +66,11 @@ func (r *quotaKeyRepository) Create(ctx context.Context, input service.CreateQuo
 	if input.Priority > 0 {
 		q = q.SetPriority(input.Priority)
 	}
+	// UpstreamKey 空串 = 未指定，不显式写该列，让它取 ent schema 的 Default("shareai")
+	//（与 Priority 同理：0 不写、取列默认值 1）。非空时显式写入。
+	if input.UpstreamKey != "" {
+		q = q.SetUpstreamKey(input.UpstreamKey)
+	}
 	return q.Save(ctx)
 }
 

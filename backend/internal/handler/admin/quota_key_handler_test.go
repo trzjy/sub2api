@@ -93,6 +93,11 @@ func (r *fakeQuotaKeyRepo) Create(_ context.Context, input service.CreateQuotaKe
 		return nil, r.createErr
 	}
 	r.nextID++
+	// UpstreamKey 空串 = 未指定，照抄生产仓储落列默认值 'shareai'（非空则显式回写）。
+	upstreamKey := input.UpstreamKey
+	if upstreamKey == "" {
+		upstreamKey = "shareai"
+	}
 	qk := &ent.QuotaKey{
 		ID:            r.nextID,
 		CodeEncrypted: input.CodeEncrypted,
@@ -102,6 +107,7 @@ func (r *fakeQuotaKeyRepo) Create(_ context.Context, input service.CreateQuotaKe
 		Exhausted:     input.Exhausted,
 		ExpiresAt:     input.ExpiresAt,
 		Notes:         input.Notes,
+		UpstreamKey:   upstreamKey,
 	}
 	r.keys[qk.ID] = qk
 	return qk, nil
@@ -609,6 +615,74 @@ func TestQuotaKeyHandler_Create_BlankCode(t *testing.T) {
 	rec := doQuotaKeyJSON(router, http.MethodPost, "/api/v1/admin/quota_keys", `{"code":"   "}`)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "code is required")
+}
+
+// fakeUpstreamRegistry 是 KC-24 写入侧单测用的 QuotaUpstreamRegistry 替身。
+type fakeUpstreamRegistry struct {
+	exists map[string]bool
+}
+
+func (f *fakeUpstreamRegistry) ExistsByKey(_ context.Context, key string) (bool, error) {
+	if f == nil || f.exists == nil {
+		return false, nil
+	}
+	return f.exists[key], nil
+}
+
+// TestQuotaKeyHandler_Create_UpstreamKeyEchoes：POST 带 upstream_key 可创建，且响应
+// maskedQuotaKey 的 upstream_key 回显与请求一致（写入侧贯通到读侧投影）。
+func TestQuotaKeyHandler_Create_UpstreamKeyEchoes(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	svc := newQuotaKeyService(repo, nil)
+	svc.SetUpstreamRegistry(&fakeUpstreamRegistry{exists: map[string]bool{"kn_cy": true, "shareai": true}})
+	router := setupQuotaKeyRouter(svc, nil)
+
+	rec := doQuotaKeyJSON(router, http.MethodPost, "/api/v1/admin/quota_keys",
+		`{"code":"`+testQuotaKeyPlain+`","upstream_key":"kn_cy"}`)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	requireNoPlaintext(t, rec.Body.String())
+
+	var payload struct {
+		Data struct {
+			UpstreamKey string `json:"upstream_key"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, "kn_cy", payload.Data.UpstreamKey, "响应 upstream_key 必须回显为 kn_cy")
+}
+
+// TestQuotaKeyHandler_Create_UpstreamKeyUnknownRejected：POST 带未知上游标识 → 创建失败
+// （不静默落成 shareai）。沿用既有错误映射（ErrorFrom → 400/500），这里只断言非 201。
+func TestQuotaKeyHandler_Create_UpstreamKeyUnknownRejected(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	svc := newQuotaKeyService(repo, nil)
+	svc.SetUpstreamRegistry(&fakeUpstreamRegistry{exists: map[string]bool{"shareai": true}}) // 无 unknown_vendor
+	router := setupQuotaKeyRouter(svc, nil)
+
+	rec := doQuotaKeyJSON(router, http.MethodPost, "/api/v1/admin/quota_keys",
+		`{"code":"`+testQuotaKeyPlain+`","upstream_key":"unknown_vendor"}`)
+	require.NotEqual(t, http.StatusCreated, rec.Code, "未知上游标识不得创建成功")
+}
+
+// TestQuotaKeyHandler_Create_UpstreamKeyDefaultWhenOmitted：不带 upstream_key 的请求行为与改动前
+// 一致（落默认 shareai），响应回显 upstream_key='shareai'。
+func TestQuotaKeyHandler_Create_UpstreamKeyDefaultWhenOmitted(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	svc := newQuotaKeyService(repo, nil)
+	svc.SetUpstreamRegistry(&fakeUpstreamRegistry{exists: map[string]bool{"shareai": true}})
+	router := setupQuotaKeyRouter(svc, nil)
+
+	rec := doQuotaKeyJSON(router, http.MethodPost, "/api/v1/admin/quota_keys",
+		`{"code":"`+testQuotaKeyPlain+`"}`)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var payload struct {
+		Data struct {
+			UpstreamKey string `json:"upstream_key"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, "shareai", payload.Data.UpstreamKey, "缺省 upstream_key 必须落默认 shareai")
 }
 
 // ---------------------------------------------------------------------------
