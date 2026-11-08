@@ -23,8 +23,19 @@ func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, 
 	if req == nil {
 		return ResponsesClientToolMapping{}, false, nil
 	}
+	// The flatten layer (responses_namespace.go) owns carrier discovery and
+	// namespace flattening: it surfaces additional_tools carrier declarations
+	// into req["tools"] even when the top-level tools field is empty. Only bail
+	// when both the top-level tools and any carrier declarations are absent, so
+	// the flatten layer still gets a chance to run on official-form requests.
+	// The adapter must not re-lift or re-flatten the carrier itself — that is
+	// the flatten layer's job and doing it here would duplicate the work and
+	// collide on the same flattened name.
 	tools, ok := req["tools"].([]any)
-	if !ok || len(tools) == 0 {
+	if !ok {
+		tools = []any{}
+	}
+	if len(tools) == 0 && !responsesCarrierHasDeclarations(req) {
 		return ResponsesClientToolMapping{}, false, nil
 	}
 	discovered, err := promoteResponsesToolSearchDiscoveries(req)
@@ -214,6 +225,29 @@ func copyClientTool(tool map[string]any) map[string]any {
 		copy[key] = value
 	}
 	return copy
+}
+
+// responsesCarrierHasDeclarations reports whether req carries any
+// additional_tools carrier tool declarations inside input[]. This is a
+// read-only presence probe so the adapter does not early-return before the
+// flatten layer has a chance to surface carrier tools. Carrier *collection* and
+// flattening remain the flatten layer's responsibility; this never re-lifts or
+// re-flattens anything.
+func responsesCarrierHasDeclarations(req map[string]any) bool {
+	input, ok := req["input"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range input {
+		entry, ok := item.(map[string]any)
+		if !ok || strings.TrimSpace(stringValue(entry["type"])) != "additional_tools" {
+			continue
+		}
+		if subTools, ok := entry["tools"].([]any); ok && len(subTools) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func rewriteClientToolHistory(value any, adapter *ResponsesClientToolMapping) (bool, error) {
@@ -516,7 +550,20 @@ func restoreClientToolValue(value any, adapter *ResponsesClientToolMapping) bool
 				retypeResponsesToolCallItemID(typed, "custom_tool_call")
 				typed["input"] = extractCustomToolCallInput(rawObjectString(typed["arguments"]))
 				delete(typed, "arguments")
-				delete(typed, "namespace")
+				// A custom tool flattened out of a namespace (e.g.
+				// functions__exec) must be restored to its bare name plus its
+				// namespace so Codex can route it — "functions" is Codex's
+				// default namespace, and the flattened name alone would not
+				// route. Top-level custom tools carry no namespace and keep
+				// their name as-is. We cannot rely on a flat-name IsCustom flag
+				// (the flatten layer does not set one), so the discriminator is
+				// purely "this flattened name lives in the namespace mapping".
+				if entry, ok := adapter.NamespaceTools[name]; ok {
+					typed["name"] = entry.Name
+					typed["namespace"] = entry.Namespace
+				} else {
+					delete(typed, "namespace")
+				}
 				changed = true
 			} else if adapter.ToolSearch && name == toolSearchProxyName {
 				typed["type"] = "tool_search_call"
@@ -845,7 +892,7 @@ func (r *ResponsesClientToolStreamRestorer) restoreNamespaceEvent(event Response
 	if len(r.adapter.NamespaceTools) == 0 {
 		return event
 	}
-	if event.Item != nil && event.Item.Type == "function_call" {
+	if event.Item != nil && (event.Item.Type == "function_call" || event.Item.Type == "custom_tool_call") {
 		if name, ok := r.adapter.NamespaceTools[event.Item.Name]; ok {
 			event.Item.Name, event.Item.Namespace = name.Name, name.Namespace
 		}
@@ -869,7 +916,15 @@ func restoreResponsesOutputClientTools(outputs []ResponsesOutput, adapter *Respo
 			output.ID = retypedResponsesToolCallItemID(output.ID, output.Type)
 			output.Input = extractCustomToolCallInput(output.Arguments)
 			output.Arguments = ""
-			output.Namespace = ""
+			// Namespace-origin custom tools are restored to bare name + namespace
+			// so Codex can route them; top-level custom tools keep their name
+			// and carry no namespace.
+			if entry, ok := adapter.NamespaceTools[output.Name]; ok {
+				output.Name = entry.Name
+				output.Namespace = entry.Namespace
+			} else {
+				output.Namespace = ""
+			}
 		} else if adapter.ToolSearch && output.Name == toolSearchProxyName {
 			output.Type = "tool_search_call"
 			output.ID = retypedResponsesToolCallItemID(output.ID, output.Type)

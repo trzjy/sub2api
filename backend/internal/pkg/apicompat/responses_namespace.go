@@ -24,13 +24,17 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 	if req == nil {
 		return nil, false, nil
 	}
-	tools, ok := req["tools"].([]any)
-	if !ok || len(tools) == 0 {
+	// 工具声明可能位于顶层 req["tools"]，也可能位于 input[] 的 additional_tools 载体
+	// （codex 0.166 官方形态：顶层 tools 为空，namespace/custom 子工具放在载体里）。
+	// 两个来源都要进入摊平视野，撞名沿用既有检查。载体项本身保留在 req["input"]，
+	// 不被删除（客户端声明保留 + 顶层补充摊平条目，属既有 FlattenResponsesNamespaces 语义）。
+	declared := collectResponsesToolDeclarations(req)
+	if len(declared) == 0 {
 		return nil, false, nil
 	}
 
 	topLevel := make(map[string]bool)
-	for _, raw := range tools {
+	for _, raw := range declared {
 		tool, ok := raw.(map[string]any)
 		if !ok {
 			continue
@@ -43,7 +47,7 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 	}
 
 	names := make(map[string]ResponsesNamespaceName)
-	for _, raw := range tools {
+	for _, raw := range declared {
 		tool, ok := raw.(map[string]any)
 		if !ok || strings.TrimSpace(stringValue(tool["type"])) != "namespace" {
 			continue
@@ -54,7 +58,7 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 		}
 		for _, rawChild := range namespaceChildren(tool) {
 			child, ok := rawChild.(map[string]any)
-			if !ok || strings.TrimSpace(stringValue(child["type"])) != "function" {
+			if !ok || !isFlattenableNamespaceChild(stringValue(child["type"])) {
 				continue
 			}
 			name := strings.TrimSpace(stringValue(child["name"]))
@@ -76,9 +80,9 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 		return nil, false, nil
 	}
 
-	flattened := make([]any, 0, len(tools)+len(names))
+	flattened := make([]any, 0, len(declared)+len(names))
 	seen := make(map[string]bool)
-	for _, raw := range tools {
+	for _, raw := range declared {
 		tool, ok := raw.(map[string]any)
 		if !ok || strings.TrimSpace(stringValue(tool["type"])) != "namespace" {
 			flattened = append(flattened, raw)
@@ -91,7 +95,7 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 		}
 		for _, rawChild := range namespaceChildren(tool) {
 			child, ok := rawChild.(map[string]any)
-			if !ok || strings.TrimSpace(stringValue(child["type"])) != "function" {
+			if !ok || !isFlattenableNamespaceChild(stringValue(child["type"])) {
 				continue
 			}
 			name := strings.TrimSpace(stringValue(child["name"]))
@@ -142,6 +146,52 @@ func RestoreResponsesNamespaceCalls(payload []byte, names map[string]ResponsesNa
 		return payload, false, err
 	}
 	return bytes.TrimSuffix(rebuilt.Bytes(), []byte("\n")), true, nil
+}
+
+// isFlattenableNamespaceChild reports whether a namespace child tool should be
+// flattened into a top-level tool entry. Namespace children of type "function"
+// or "custom" are flattened; any other type is left untouched.
+func isFlattenableNamespaceChild(typ string) bool {
+	switch strings.TrimSpace(typ) {
+	case "function", "custom":
+		return true
+	default:
+		return false
+	}
+}
+
+// collectResponsesToolDeclarations gathers every tool declaration the flatten
+// layer must inspect: the top-level tools field and the official
+// additional_tools carrier items embedded in input[]. Newer Codex clients
+// (0.166) declare their runtime namespace/custom tools in the carrier with an
+// empty top-level tools field, so both sources must be scanned for namespace
+// declarations. The carrier items themselves are left untouched in req["input"];
+// only their flattened children are promoted into req["tools"] by the caller.
+func collectResponsesToolDeclarations(req map[string]any) []any {
+	var declared []any
+	if raw, ok := req["tools"].([]any); ok {
+		for _, item := range raw {
+			if tool, ok := item.(map[string]any); ok {
+				declared = append(declared, tool)
+			}
+		}
+	}
+	if input, ok := req["input"].([]any); ok {
+		for _, item := range input {
+			entry, ok := item.(map[string]any)
+			if !ok || strings.TrimSpace(stringValue(entry["type"])) != "additional_tools" {
+				continue
+			}
+			if subTools, ok := entry["tools"].([]any); ok {
+				for _, child := range subTools {
+					if tool, ok := child.(map[string]any); ok {
+						declared = append(declared, tool)
+					}
+				}
+			}
+		}
+	}
+	return declared
 }
 
 func namespaceChildren(tool map[string]any) []any {
