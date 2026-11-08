@@ -77,6 +77,12 @@ export default {
     noAccounts: '该激活码下暂无账号',
     expandAccounts: '展开账号列表',
     collapseAccounts: '收起账号列表',
+    // 详情弹窗内按行编辑归属账号（复用账号管理页的账号编辑弹窗）
+    accountEdit: {
+      edit: '编辑账号',
+      loading: '正在加载账号详情…',
+      loadError: '加载账号详情失败'
+    },
     emptyTitle: '暂无激活码',
     emptyDescription: '创建第一个 Cursor 激活码后即可在此管理拉号与归属账号。',
     created: '激活码已创建',

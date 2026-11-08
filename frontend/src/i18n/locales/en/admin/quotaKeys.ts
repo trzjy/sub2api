@@ -77,6 +77,12 @@ export default {
     noAccounts: 'No accounts attached to this quota key',
     expandAccounts: 'Expand account list',
     collapseAccounts: 'Collapse account list',
+    // Edit an attached account inline from the detail dialog (reuses the account editor modal)
+    accountEdit: {
+      edit: 'Edit account',
+      loading: 'Loading account details…',
+      loadError: 'Failed to load account details'
+    },
     emptyTitle: 'No quota keys yet',
     emptyDescription: 'Create the first Cursor quota key to manage refreshes and attached accounts here.',
     created: 'Quota key created',

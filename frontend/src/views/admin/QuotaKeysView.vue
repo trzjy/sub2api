@@ -353,10 +353,14 @@
     </BaseDialog>
 
     <!-- 详情：账号列表默认折叠（§0.1 #7），折叠状态按激活码 id 记忆，不随刷新/翻页重置 -->
+    <!-- z-index 45（低于 EditAccountModal 内层 BaseDialog 的默认 50）：两层弹窗嵌套时
+         内层账号编辑弹窗必须压在外层详情弹窗之上，而 BaseDialog 的 zIndex prop 只在
+         != 50 时才以内联样式生效（50 时走 .modal-overlay 的 z-50 类），故这里下调外层。 -->
     <BaseDialog
       :show="showDetailDialog"
       :title="t('admin.quotaKeys.detailTitle')"
       width="wide"
+      :z-index="45"
       @close="showDetailDialog = false"
     >
       <div v-if="detail" class="space-y-4">
@@ -474,7 +478,31 @@
                     #{{ account.id }} · {{ account.platform }}
                   </p>
                 </div>
-                <span class="shrink-0 text-xs text-gray-500 dark:text-gray-400">{{ account.status }}</span>
+                <div class="flex shrink-0 items-center gap-2">
+                  <span class="text-xs text-gray-500 dark:text-gray-400">{{ account.status }}</span>
+                  <!-- 账号编辑入口：复用账号管理页的 EditAccountModal（不复制其表单逻辑）。
+                       激活码与账号是 1:N，故按行给入口（每行一个账号、一个编辑动作）。
+                       点「编辑」到弹窗打开之间有 getById 网络延迟，用行内 loading 态反馈。 -->
+                  <button
+                    type="button"
+                    class="rounded p-1 text-gray-400 transition-colors hover:text-blue-600 disabled:opacity-40 dark:hover:text-blue-400"
+                    :disabled="accountEditLoadingId !== null"
+                    :title="
+                      accountEditLoadingId === account.id
+                        ? t('admin.quotaKeys.accountEdit.loading')
+                        : t('admin.quotaKeys.accountEdit.edit')
+                    "
+                    :aria-label="t('admin.quotaKeys.accountEdit.edit')"
+                    data-testid="quota-key-account-edit"
+                    @click="openAccountEditor(account.id)"
+                  >
+                    <Icon
+                      :name="accountEditLoadingId === account.id ? 'refresh' : 'edit'"
+                      size="sm"
+                      :class="accountEditLoadingId === account.id ? 'animate-spin' : ''"
+                    />
+                  </button>
+                </div>
               </li>
             </ul>
             <Pagination
@@ -496,6 +524,19 @@
         </div>
       </template>
     </BaseDialog>
+
+    <!-- 账号编辑：复用账号管理页的 EditAccountModal（不复制其表单逻辑）。
+         v-if 懒挂载：只有真的要点编辑时才创建该组件，避免每次进激活码页都多打两次
+         settings/proxies/groups 请求。关闭内层只改自己的 show，详情弹窗保持打开。 -->
+    <EditAccountModal
+      v-if="showAccountEditDialog"
+      :show="showAccountEditDialog"
+      :account="editingAccount"
+      :proxies="accountProxies"
+      :groups="accountGroups"
+      @close="closeAccountEditor"
+      @updated="handleAccountUpdated"
+    />
 
     <ConfirmDialog
       :show="showDeleteDialog"
@@ -780,6 +821,11 @@ import AutoEntryConfigModal from '@/components/quotaKeys/AutoEntryConfigModal.vu
 import QuotaKeyUsageCell from '@/components/quotaKeys/QuotaKeyUsageCell.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import PriorityStepper from '@/components/common/PriorityStepper.vue'
+// 账号编辑复用账号管理页的现成表单弹窗（不复制一份账号表单，避免双份漂移）。
+// 直接引用单文件而非 @/components/account 桶文件：桶会连带引入全部账号组件，
+// 激活码页只需要这一个弹窗。
+import EditAccountModal from '@/components/account/EditAccountModal.vue'
+import type { Account, AdminGroup, Proxy as AccountProxy } from '@/types'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -862,6 +908,20 @@ const detail = ref<QuotaKeyDetail | null>(null)
 const detailPage = ref(1)
 const detailPageSize = ref(20)
 const formError = ref('')
+
+// --- 账号编辑（详情弹窗内按行打开账号管理页的 EditAccountModal）------------
+// 详情列表里的账号是脱敏最小投影（只有 id/name/platform/status），编辑需要完整账号，
+// 故点「编辑」时先按 id 取全量账号再打开弹窗。
+const showAccountEditDialog = ref(false)
+// 正在加载详情的账号 id（非空表示该行处于 loading 态，行内按钮禁用并转圈）
+const accountEditLoadingId = ref<number | null>(null)
+// 被编辑的完整账号（null = 未打开编辑弹窗）
+const editingAccount = ref<Account | null>(null)
+// EditAccountModal 必需的 proxies / groups：首次打开编辑前懒加载一次并复用
+const accountProxies = ref<AccountProxy[]>([])
+const accountGroups = ref<AdminGroup[]>([])
+let accountEditRefsLoaded = false
+let accountEditRefsPromise: Promise<void> | null = null
 
 const form = reactive({
   code: '',
@@ -1153,6 +1213,81 @@ async function handleDetailPageChange(nextPage: number) {
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.detailLoadError')))
   }
+}
+
+// --- 账号编辑（复用账号管理页 EditAccountModal）----------------------------
+// 详情弹窗里的账号是脱敏最小投影（只有 id/name/platform/status），不含
+// credentials / extra / group_ids，而 EditAccountModal 的表单要按完整账号回填，
+// 因此点「编辑」时先 GET /admin/accounts/:id 取全量账号再打开弹窗。
+async function openAccountEditor(accountId: number) {
+  if (accountEditLoadingId.value !== null) return
+  accountEditLoadingId.value = accountId
+  try {
+    // proxies / groups 供 GroupSelector 显示挂组选择，与账号详情并行加载；
+    // 两者只随弹窗打开时才需要，故懒加载并缓存（同一页面生命周期内复用）。
+    const [full] = await Promise.all([
+      adminAPI.accounts.getById(accountId),
+      ensureAccountEditorRefs()
+    ])
+    editingAccount.value = full
+    showAccountEditDialog.value = true
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.accountEdit.loadError')))
+  } finally {
+    accountEditLoadingId.value = null
+  }
+}
+
+// 懒加载 EditAccountModal 必需的 proxies / groups（AccountsView 同样依赖这两份数据）。
+// 用 Promise 缓存避免并发点击重复请求；失败不阻断账号编辑本身（分组/代理选择器会空），
+// 且不缓存失败结果，下次点「编辑」可重试。
+async function ensureAccountEditorRefs(): Promise<void> {
+  if (accountEditRefsLoaded) return
+  if (!accountEditRefsPromise) {
+    accountEditRefsPromise = (async () => {
+      const [proxiesResult, groupsResult] = await Promise.allSettled([
+        adminAPI.proxies.getAll(),
+        adminAPI.groups.getAll()
+      ])
+      if (proxiesResult.status === 'fulfilled') {
+        accountProxies.value = proxiesResult.value
+      } else {
+        console.error('Failed to load proxies:', proxiesResult.reason)
+      }
+      if (groupsResult.status === 'fulfilled') {
+        accountGroups.value = groupsResult.value
+      } else {
+        console.error('Failed to load groups:', groupsResult.reason)
+      }
+      // 两份都拿到才算加载完成（失败下次可重试）。
+      accountEditRefsLoaded =
+        proxiesResult.status === 'fulfilled' && groupsResult.status === 'fulfilled'
+    })().catch((err: unknown) => {
+      // 整体失败（如接口形状不符）时不缓存失败态，允许下次重试。
+      accountEditRefsPromise = null
+      console.error('Failed to load account editor dependencies:', err)
+    })
+  }
+  await accountEditRefsPromise
+}
+
+// 账号保存成功：账号 status / schedulable 可能已变 → 重拉激活码详情（账号行）与列表
+// （working_count = 可调度且 active 的账号数，随账号状态变化），与本页 handleProbe 同一口径。
+async function handleAccountUpdated() {
+  const id = detail.value?.id
+  await load()
+  if (id === undefined) return
+  try {
+    detail.value = await adminAPI.quotaKeys.get(id, detailPage.value, detailPageSize.value)
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.detailLoadError')))
+  }
+}
+
+// 关闭编辑弹窗：只关内层，详情弹窗保持打开。
+function closeAccountEditor() {
+  showAccountEditDialog.value = false
+  editingAccount.value = null
 }
 
 // --- 优先级编辑 -----------------------------------------------------------
