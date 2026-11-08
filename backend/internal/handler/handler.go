@@ -54,6 +54,7 @@ type AdminHandlers struct {
 	XianguanjiaPool        *admin.XianguanjiaPoolHandler   // D4d: 闲管家 admin 卡种管理 + 批量推仓入口
 	XianguanjiaSupply      *admin.XianguanjiaSupplyHandler // D6e: 闲管家 admin 货源模式凭证配置入口
 	QuotaKey               *admin.QuotaKeyHandler          // D-CURSOR-021: 激活码管理面（§4.4，8 端点）
+	QuotaUpstream          *admin.QuotaUpstreamHandler     // KC-18B: 上游条目（quota_upstreams）管理面
 }
 
 // Handlers contains all HTTP handlers
@@ -81,9 +82,9 @@ type Handlers struct {
 	BatchImage       *BatchImageHandler
 	XianyuDelivery   *XianyuDeliveryHandler
 	XianguanjiaPush  *XianyuXianguanjiaPushHandler
-	XgjSupply        *XgjSupplyHandler // D6e: 货源模式公开接口（/api/v1/xgj-supply）
+	XgjSupply        *XgjSupplyHandler              // D6e: 货源模式公开接口（/api/v1/xgj-supply）
 	XgjSupplyOrder   *XianguanjiaSupplyOrderHandler // D6d: 卡密订单真实链路
-	SupplyCatalog    *XianguanjiaSupplyHandler // D6c: 货源目录接口（平台/商户/商品）
+	SupplyCatalog    *XianguanjiaSupplyHandler      // D6c: 货源目录接口（平台/商户/商品）
 }
 
 // BuildInfo contains build-time information

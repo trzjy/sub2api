@@ -1863,6 +1863,7 @@ func quotaKeyToStatus(qk *ent.QuotaKey) *QuotaKeyStatus {
 		ExpiresAt:        qk.ExpiresAt,
 		Notes:            qk.Notes,
 		Priority:         qk.Priority,
+		UpstreamKey:      qk.UpstreamKey,
 	}
 }
 

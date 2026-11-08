@@ -23,6 +23,10 @@ type QuotaKeyStatus struct {
 	//（用户裁定 2026-11-03：日限额码取小值优先消耗，月总限额码取大值兜底）。
 	Priority int `json:"priority"`
 
+	// UpstreamKey 是本激活码所属上游的稳定标识（引用 quota_upstreams.key）。
+	// 空串 = 该行未回填（存量数据或读路径未取到）；前端据此回落显示原始标识。
+	UpstreamKey string
+
 	// Usage 是来源额度快照的展示投影（方案 §25.6 消费闭包⑤ / §25.7-B）。
 	//
 	// 只读：来自 quota_keys.usage_snapshot 已提交值，解析/投影唯一实现在

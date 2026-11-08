@@ -158,6 +158,9 @@ func RegisterAdminRoutes(
 		// 激活码（quota key）管理面（§4.4，8 端点）
 		registerQuotaKeyRoutes(admin, h, stepUpAuth)
 
+		// 上游条目（quota_upstreams）管理面（KC-18B）
+		registerQuotaUpstreamRoutes(admin, h, stepUpAuth)
+
 		// 异常调用分析（防中转商薅羊毛）admin 路由
 		registerUsageRiskRoutes(admin, h)
 
@@ -354,6 +357,23 @@ func registerAuditLogRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 		auditLogs.GET("/:id", h.Admin.AuditLog.Get)
 		// 清空需现场 TOTP 校验（在 handler 内强制），不复用 step-up sudo 窗口
 		auditLogs.POST("/clear", h.Admin.AuditLog.Clear)
+	}
+}
+
+// registerQuotaUpstreamRoutes 注册上游条目（quota_upstreams）管理端点（KC-18B）：
+//
+//	GET /admin/quota_upstreams        列表（标识 + 显示名 + 类型 + 续费 URL）
+//	PUT /admin/quota_upstreams/:key   编辑显示名（标识与类型不可改）
+//
+// handler 未接线（如部分部署）时整组不注册，避免空指针（与 registerQuotaKeyRoutes 同风格）。
+func registerQuotaUpstreamRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middleware.StepUpAuthMiddleware) {
+	if h == nil || h.Admin == nil || h.Admin.QuotaUpstream == nil {
+		return
+	}
+	up := admin.Group("/quota_upstreams")
+	{
+		up.GET("", h.Admin.QuotaUpstream.List)
+		up.PUT("/:key", h.Admin.QuotaUpstream.Update)
 	}
 }
 

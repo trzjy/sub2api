@@ -1220,3 +1220,37 @@ func TestAccountList_QuotaKeySummaries_CarryRowMetadata(t *testing.T) {
 	// F1：响应体绝不含激活码原文。
 	require.NotContains(t, rec.Body.String(), testQuotaKeyPlain)
 }
+
+// TestMaskedQuotaKey_UpstreamKey_KC18B 验证激活码列表/详情响应经 maskedQuotaKey 投影后
+// 带回 upstream_key（KC-18B 后端回填缺口补全）：service.QuotaKeyStatus.UpstreamKey 必须落到
+// dto.QuotaKey.UpstreamKey，且序列化后含 upstream_key 键；空值经 omitempty 省略，保持存量响应形态。
+func TestMaskedQuotaKey_UpstreamKey_KC18B(t *testing.T) {
+	st := &service.QuotaKeyStatus{
+		ID:              7,
+		Status:          "active",
+		CodeValueMasked: "XXXX-****-****-1234",
+		Priority:        1,
+		UpstreamKey:     "kn_cy",
+	}
+	dtoKey := maskedQuotaKey(st)
+	require.Equal(t, "kn_cy", dtoKey.UpstreamKey)
+
+	var m map[string]any
+	b, err := json.Marshal(dtoKey)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(b, &m))
+	v, ok := m["upstream_key"]
+	require.True(t, ok, "JSON 应含 upstream_key 键")
+	require.Equal(t, "kn_cy", v)
+
+	// 空 upstream_key 经 omitempty 省略，保持存量响应形态（不输出该键）。
+	st2 := &service.QuotaKeyStatus{ID: 8}
+	dto2 := maskedQuotaKey(st2)
+	require.Empty(t, dto2.UpstreamKey)
+	b2, err := json.Marshal(dto2)
+	require.NoError(t, err)
+	var m2 map[string]any
+	require.NoError(t, json.Unmarshal(b2, &m2))
+	_, ok = m2["upstream_key"]
+	require.False(t, ok, "空 upstream_key 经 omitempty 省略")
+}

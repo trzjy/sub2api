@@ -580,6 +580,10 @@ type QuotaKey struct {
 	// Priority 是激活码优先级（数值越小越优先，与 accounts.priority 同义）。该码名下账号的
 	// priority 跟随此值。不加 omitempty：1 是有效值，前端需要稳定拿到当前档位。
 	Priority int `json:"priority"`
+
+	// UpstreamKey 是激活码所属上游的稳定标识（引用 quota_upstreams.key）。
+	// 前端据此匹配上游显示名（配合 quota_upstreams 列表）；缺失时前端回落显示原始标识。
+	UpstreamKey string `json:"upstream_key,omitempty"`
 }
 
 type AccountGroup struct {

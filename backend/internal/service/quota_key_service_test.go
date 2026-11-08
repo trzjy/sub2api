@@ -3426,3 +3426,19 @@ func TestQuotaKeyGetStatus_CarriesNotes(t *testing.T) {
 		t.Fatalf("expected dto.Notes to be nil, got %q", *dto.Notes)
 	}
 }
+
+// TestQuotaKeyToStatus_UpstreamKey_KC18B 验证 service 层唯一投影 quotaKeyToStatus 把
+// ent.QuotaKey.UpstreamKey 透传到 QuotaKeyStatus.UpstreamKey（KC-18B 后端回填缺口）。
+// 所有对外构造点（List/Create/Update/GetStatus/GetWithAccounts/RotateCredentials）均经此函数，
+// 故此处一处断言即覆盖全部构造路径。
+func TestQuotaKeyToStatus_UpstreamKey_KC18B(t *testing.T) {
+	qk := &ent.QuotaKey{
+		ID:          42,
+		Status:      "active",
+		CodeLast4:   "1234",
+		Priority:    1,
+		UpstreamKey: "shareai",
+	}
+	st := quotaKeyToStatus(qk)
+	require.Equal(t, "shareai", st.UpstreamKey)
+}

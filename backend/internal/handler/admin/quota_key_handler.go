@@ -116,6 +116,7 @@ func maskedQuotaKey(st *service.QuotaKeyStatus) dto.QuotaKey {
 		LastRefreshError: st.LastRefreshError,
 		Notes:            st.Notes,
 		Priority:         st.Priority,
+		UpstreamKey:      st.UpstreamKey,
 	}
 }
 

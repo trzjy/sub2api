@@ -77,6 +77,7 @@ func ProvideAdminHandlers(
 	claudeResetCredits *service.ClaudeResetCreditService, // 上游 v0.2.15 新增（正交吸收）
 	quotaKeyHandler *admin.QuotaKeyHandler, // D-CURSOR-021: 激活码管理面（§4.4，8 端点）
 	quotaKeyService *service.QuotaKeyService, // D-CURSOR-021: accounts 列表/详情脱敏回填数据源
+	quotaUpstreamHandler *admin.QuotaUpstreamHandler, // KC-18B: 上游条目（quota_upstreams）管理面
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
@@ -143,6 +144,7 @@ func ProvideAdminHandlers(
 		UsageRisk:              admin.NewUsageRiskHandler(usageRiskService, settingService),
 		VisionCapability:       visionCapabilityHandler,
 		QuotaKey:               quotaKeyHandler,
+		QuotaUpstream:          quotaUpstreamHandler,
 	}
 	// D3: 闲管家 admin 凭证配置入口——与 D1 的推送验签共享同一份 ConfigStore（252 表）
 	// 与 secretEncryptor；探活客户端为 nil 时 handler 内部用默认 http.Client。
@@ -182,6 +184,17 @@ func ProvideAdminHandlers(
 	cockpitCommitSvc := service.NewCockpitImportCommitServiceWithReceipt(cockpitCommitRepo, cockpitSigner)
 	adminHandlers.CockpitImport = admin.NewCockpitImportHandler(cockpitCommitSvc, cockpitSigner)
 	return adminHandlers
+}
+
+// ProvideQuotaUpstreamHandler 构造 quota_upstreams 管理面 handler（KC-18B 接线）。
+//
+// QuotaUpstreamHandler 依赖 admin 包内未导出的 quotaUpstreamRepository 接口；仓库具体类型
+// repository.quotaUpstreamRepository 也同为非导出，无法跨包经 wire.Bind 绑定。故在此薄包装：
+// 用 KC-16 提供的 repository.NewQuotaUpstreamRepository(client) 注入接口实现，返回
+// *admin.QuotaUpstreamHandler。调用 NewQuotaUpstreamHandler 时传具体类型即可被隐式转为接口，
+// 全程不出现未导出接口名。
+func ProvideQuotaUpstreamHandler(client *dbent.Client) *admin.QuotaUpstreamHandler {
+	return admin.NewQuotaUpstreamHandler(repository.NewQuotaUpstreamRepository(client))
 }
 
 func ProvideGatewayHandler(
@@ -406,6 +419,12 @@ var ProviderSet = wire.NewSet(
 	admin.NewPricingHandler,
 	admin.NewUsageRiskHandler,
 	admin.NewQuotaKeyHandler,
+
+	// KC-18B: quota_upstreams 管理面接线。QuotaUpstreamHandler 依赖 admin 包内未导出
+	// 的 quotaUpstreamRepository 接口，无法直接由 wire 绑定仓库具体类型；此处用薄包装
+	// 把 repository.NewQuotaUpstreamRepository(client)（KC-16 提供）注入为接口实现，
+	// 返回 *admin.QuotaUpstreamHandler 供 ProviderSet 装配（与 QuotaKeyHandler 同装配点）。
+	ProvideQuotaUpstreamHandler,
 
 	// AdminHandlers and Handlers constructors
 	ProvideAdminHandlers,
