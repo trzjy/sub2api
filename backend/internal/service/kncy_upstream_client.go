@@ -338,3 +338,19 @@ func (c *knCyQuotaKeyUpstream) PullBatch(ctx context.Context, qk *ent.QuotaKey) 
 
 // 编译期断言：knCyQuotaKeyUpstream 满足 QuotaKeyUpstreamClient 契约。
 var _ QuotaKeyUpstreamClient = (*knCyQuotaKeyUpstream)(nil)
+
+// RealSupplyModelsFor 返回 kn-cy 上游实供的模型清单：仅其真实供的 3 个
+// （gpt-6.1-sol / claude-fable-5-1 / gemini-4-argon），复用 knCyModelMappingModels
+// （与 knCyIdentityModelMapping 同源，避免与 ShareAI 的 16 个模型混淆）。
+func (c *knCyQuotaKeyUpstream) RealSupplyModelsFor(_ string) ([]string, error) {
+	out := make([]string, len(knCyModelMappingModels))
+	copy(out, knCyModelMappingModels)
+	return out, nil
+}
+
+// TargetAccountsPerKeyFor 返回 kn-cy 上游每码目标账号数：固定 1（1 卡 1 号）。
+// kn-cy 卡密激活后卡密本身即账号凭据，上游每次只给 1 个号；自动补池目标为 1
+// 即可——已有 1 个可用账号就不再补，避免反复打 activation 接口白耗卡密额度。
+func (c *knCyQuotaKeyUpstream) TargetAccountsPerKeyFor(_ string) (int, error) {
+	return 1, nil
+}

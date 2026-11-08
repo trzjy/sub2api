@@ -1029,6 +1029,9 @@ func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService,
 		// 经类型断言调用具体实现的 setter（不污染窄面接口，避免破坏既有测试替身）。
 		if mw, ok := w.(*quotaKeyModelWater); ok {
 			mw.SetRoutingDependencies(gateway, channel, resolver)
+			// KC-26：注入上游分派器，使 ListCandidateKeys 能按激活码的 upstream_key
+			// 取每码目标账号数（shareai=5 / kn-cy=1），未知上游失败关闭。
+			mw.upstream = puller.upstream
 		}
 		svc.SetModelWaterProvider(w)
 	}

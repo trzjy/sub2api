@@ -473,3 +473,42 @@ func TestKnCyQuotaKeyUpstream_PullBatch_NameNoLeak(t *testing.T) {
 		t.Errorf("Account.Name leaks card secret: %q", name)
 	}
 }
+
+// TestKnCyQuotaKeyUpstream_RealSupplyAndTarget 验证 KC-26 的上游自报口径：
+//   - RealSupplyModelsFor 仅返回 kn-cy 实供的 3 个模型（gpt-6.1-sol / claude-fable-5-1 / gemini-4-argon），
+//     不混入 ShareAI 的 16 个静态清单；
+//   - TargetAccountsPerKeyFor 返回 1（1 卡 1 号），与 shareai 的 5 区分。
+func TestKnCyQuotaKeyUpstream_RealSupplyAndTarget(t *testing.T) {
+	up, err := NewKnCyQuotaKeyUpstreamClient(NewKnCyClient(""), fakeQuotaKeyEncryptor{})
+	if err != nil {
+		t.Fatalf("NewKnCyQuotaKeyUpstreamClient() error = %v", err)
+	}
+
+	models, err := up.RealSupplyModelsFor(upstreamKeyKnCy)
+	if err != nil {
+		t.Fatalf("RealSupplyModelsFor() error = %v", err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("RealSupplyModelsFor() returned %d models, want 3: %v", len(models), models)
+	}
+	want := map[string]bool{"gpt-6.1-sol": false, "claude-fable-5-1": false, "gemini-4-argon": false}
+	for _, m := range models {
+		if _, ok := want[m]; !ok {
+			t.Errorf("RealSupplyModelsFor() unexpected model %q", m)
+		}
+		want[m] = true
+	}
+	for m, seen := range want {
+		if !seen {
+			t.Errorf("RealSupplyModelsFor() missing model %q", m)
+		}
+	}
+
+	target, err := up.TargetAccountsPerKeyFor(upstreamKeyKnCy)
+	if err != nil {
+		t.Fatalf("TargetAccountsPerKeyFor() error = %v", err)
+	}
+	if target != 1 {
+		t.Errorf("TargetAccountsPerKeyFor() = %d, want 1 (1 card = 1 account)", target)
+	}
+}

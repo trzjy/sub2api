@@ -125,6 +125,13 @@ type QuotaKeyUpstreamClient interface {
 	// PullBatch 尝试从上游拉取一批账号。
 	// 成功返回待入库账号列表；任意错误必须返回（不得返回假账号）。
 	PullBatch(ctx context.Context, qk *ent.QuotaKey) (*UpstreamPullResult, error)
+	// RealSupplyModelsFor 返回指定上游标识自报的实供模型列表（恒等映射用）。
+	// 上游未自报（返回空切片）时，调用方回落到 CursorStaticEntryModels()；
+	// 未知上游标识返回 error（失败关闭，绝不静默按 shareai 处理）。
+	RealSupplyModelsFor(upstreamKey string) ([]string, error)
+	// TargetAccountsPerKeyFor 返回指定上游标识每张激活码的目标账号数（自动补池口径）。
+	// 未知上游标识返回 error（失败关闭），绝不静默回落到 shareai 的 5。
+	TargetAccountsPerKeyFor(upstreamKey string) (int, error)
 }
 
 // QuotaUpstreamRegistry 是上游注册表（quota_upstreams）的窄依赖：仅用于创建激活码时
@@ -331,6 +338,16 @@ func (NotConnectedUpstreamClient) PullBatch(_ context.Context, _ *ent.QuotaKey) 
 	return nil, ErrUpstreamNotConnected
 }
 
+// RealSupplyModelsFor 返回"未接入上游"错误：未接入时无法自报实供模型，失败关闭。
+func (NotConnectedUpstreamClient) RealSupplyModelsFor(_ string) ([]string, error) {
+	return nil, ErrUpstreamNotConnected
+}
+
+// TargetAccountsPerKeyFor 返回"未接入上游"错误：未接入时无法确定每码目标账号数，失败关闭。
+func (NotConnectedUpstreamClient) TargetAccountsPerKeyFor(_ string) (int, error) {
+	return 0, ErrUpstreamNotConnected
+}
+
 // upstreamDispatchingClient 实现 QuotaKeyUpstreamClient：按 quota_key 的 upstream_key
 // 分派到对应的具体上游客户端（ShareAI / kn-cy），而非单一上游。
 //
@@ -378,6 +395,32 @@ func (c *upstreamDispatchingClient) PullBatch(ctx context.Context, qk *ent.Quota
 		// 未知上游标识 = 失败关闭：返回 error，绝不静默回落到 shareai/knCy。
 		// （回落会让一张 kn-cy 卡密去打 ShareAI 上游，凭据泄露 + 白耗额度。）
 		return nil, fmt.Errorf("quota_key_service: unknown upstream key %q", qk.UpstreamKey)
+	}
+}
+
+// RealSupplyModelsFor 按上游标识分派到对应具体上游实现，取其实供模型清单。
+// 未知上游标识失败关闭（Return error），绝不静默回落到任一已知实现。
+func (c *upstreamDispatchingClient) RealSupplyModelsFor(key string) ([]string, error) {
+	switch key {
+	case upstreamKeyShareAI:
+		return c.shareAI.RealSupplyModelsFor(key)
+	case upstreamKeyKnCy:
+		return c.knCy.RealSupplyModelsFor(key)
+	default:
+		return nil, fmt.Errorf("quota_key_service: unknown upstream key %q", key)
+	}
+}
+
+// TargetAccountsPerKeyFor 按上游标识分派到对应具体上游实现，取其每码目标账号数。
+// 未知上游标识失败关闭（Return error），绝不静默按 shareai 的 5 处理。
+func (c *upstreamDispatchingClient) TargetAccountsPerKeyFor(key string) (int, error) {
+	switch key {
+	case upstreamKeyShareAI:
+		return c.shareAI.TargetAccountsPerKeyFor(key)
+	case upstreamKeyKnCy:
+		return c.knCy.TargetAccountsPerKeyFor(key)
+	default:
+		return 0, fmt.Errorf("quota_key_service: unknown upstream key %q", key)
 	}
 }
 
@@ -1296,7 +1339,16 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		// 容量判定与插入在同一事务/同一 advisory 互斥域内：maxInsert 以插入前读到的
 		// working 为基准，working=4 而上游返 2 时只落 1 条，总数恰好 5（不多不少）。
 		// upstream 溢出的账号直接丢弃：UpstreamPullResult 不带重放字段，不做二次落库。
-		maxInsert := CursorAutoPullAccountsPerKey - working
+		//
+		// 目标账号数按"该卡所属上游"分派（KC-26）：shareai=5、kn-cy=1（1 卡 1 号）。
+		// 未知上游标识失败关闭（不静默按 shareai 的 5 处理）。
+		targetPerKey := CursorAutoPullAccountsPerKey
+		if t, terr := s.upstream.TargetAccountsPerKeyFor(qk3.UpstreamKey); terr != nil {
+			return fmt.Errorf("quota_key_service: resolve target accounts per key %q: %w", qk3.UpstreamKey, terr)
+		} else {
+			targetPerKey = t
+		}
+		maxInsert := targetPerKey - working
 		if maxInsert <= 0 {
 			return nil
 		}
@@ -1320,7 +1372,20 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 				return fmt.Errorf("quota_key_service: load auto entry config: %w: %w", ErrQuotaKeyMountFailed, cerr)
 			}
 			entryCfg = cfg
-			entryModelMapping = CursorAccountModelMapping(CursorStaticEntryModels())
+			// model_mapping 按"该卡所属上游"自报的实供模型写恒等映射（KC-26）：
+			//   - 上游声明了实供模型（kn-cy 返回 3 个）→ 用上游声明的恒等映射；
+			//   - 上游未声明（返回空）→ 回落既有静态清单（shareai 走这条，行为零变化）；
+			//   - 未知上游标识 → 失败关闭，绝不静默按 shareai 处理。
+			// 恒等映射构造复用既有 CursorAccountModelMapping（不另写映射构造器）。
+			models := CursorStaticEntryModels()
+			if s.upstream != nil {
+				if rm, rerr := s.upstream.RealSupplyModelsFor(qk3.UpstreamKey); rerr != nil {
+					return fmt.Errorf("quota_key_service: resolve real supply models for upstream %q: %w", qk3.UpstreamKey, rerr)
+				} else if len(rm) > 0 {
+					models = rm
+				}
+			}
+			entryModelMapping = CursorAccountModelMapping(models)
 		}
 		insertedIDs := make([]int64, 0, len(result.Accounts))
 		for i, ua := range result.Accounts {
@@ -1980,6 +2045,12 @@ type quotaKeyModelWater struct {
 	gateway  *GatewayService
 	channel  *ChannelService
 	resolver *CompositeRouteResolver
+
+	// upstream 是上游客户端分派器（KC-26）：供 ListCandidateKeys 按每张激活码的
+	// upstream_key 取"每码目标账号数"，使 kn-cy（1 卡 1 号）不再反复补池。
+	// 生产由 wire 在 ProvideQuotaKeyReconciler 装配点注入；为 nil 时回落到
+	// CursorAutoPullAccountsPerKey（与既有 shareai 口径一致），不静默按未知上游处理。
+	upstream QuotaKeyUpstreamClient
 }
 
 // SetRoutingDependencies 注入 §18.4 W 所需的真实路由/渠道/网关依赖。生产装配必须提供，
@@ -2487,10 +2558,21 @@ func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, li
 		if werr != nil {
 			return nil, fmt.Errorf("quota_key_model_water: count working for key %d: %w", k.ID, werr)
 		}
-		// 自动补位的目标是每码固定 CursorAutoPullAccountsPerKey 个（用户裁定 2026-11-06）。
+		// 自动补位的目标按"该码所属上游"分派（KC-26）：shareai=5、kn-cy=1（1 卡 1 号）。
+		// upstream 未装配（测试/未注入）时回落到 CursorAutoPullAccountsPerKey（与既有 shareai 口径一致）；
+		// 未知上游标识失败关闭：该码不参与自动补池（跳过），绝不静默按 shareai 的 5 处理。
 		// 注意这里用的是"自动补位目标"而不是 MaxAccountsPerQuotaKey（人工护栏）：
 		// 人工拉到 8 个的码不该被自动逻辑当成"已满"，但也不该继续自动补。
-		if working >= CursorAutoPullAccountsPerKey {
+		target := CursorAutoPullAccountsPerKey
+		if w.upstream != nil {
+			if t, terr := w.upstream.TargetAccountsPerKeyFor(k.UpstreamKey); terr != nil {
+				// 未知上游标识：失败关闭，不参与自动补池。
+				continue
+			} else {
+				target = t
+			}
+		}
+		if working >= target {
 			continue // 自动补位名额已满：跳过
 		}
 		out = append(out, k.ID)

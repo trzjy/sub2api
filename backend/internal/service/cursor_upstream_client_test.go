@@ -430,3 +430,37 @@ func TestParseKeyExpiresAt(t *testing.T) {
 		t.Errorf("parsed date = %d-%d-%d, want 2026-10-14", y, m, d)
 	}
 }
+
+// TestShareAIUpstreamClient_RealSupplyAndTarget 验证 KC-26 的 ShareAI 自报口径：
+//   - RealSupplyModelsFor 返回与改动前一致的静态 16 模型清单（行为零变化）；
+//   - TargetAccountsPerKeyFor 返回 5（CursorAutoPullAccountsPerKey）。
+//
+// 既有 shareai 单测全绿即证落库 model_mapping 与改动前完全一致。
+func TestShareAIUpstreamClient_RealSupplyAndTarget(t *testing.T) {
+	c, err := NewShareAIUpstreamClient(fakeEncryptor{})
+	if err != nil {
+		t.Fatalf("NewShareAIUpstreamClient() error = %v", err)
+	}
+
+	models, err := c.RealSupplyModelsFor(upstreamKeyShareAI)
+	if err != nil {
+		t.Fatalf("RealSupplyModelsFor() error = %v", err)
+	}
+	want := CursorStaticEntryModels()
+	if len(models) != len(want) {
+		t.Fatalf("RealSupplyModelsFor() returned %d models, want %d", len(models), len(want))
+	}
+	for i, m := range want {
+		if models[i] != m {
+			t.Errorf("RealSupplyModelsFor()[%d] = %q, want %q", i, models[i], m)
+		}
+	}
+
+	target, err := c.TargetAccountsPerKeyFor(upstreamKeyShareAI)
+	if err != nil {
+		t.Fatalf("TargetAccountsPerKeyFor() error = %v", err)
+	}
+	if target != CursorAutoPullAccountsPerKey {
+		t.Errorf("TargetAccountsPerKeyFor() = %d, want %d", target, CursorAutoPullAccountsPerKey)
+	}
+}

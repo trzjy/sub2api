@@ -528,6 +528,16 @@ func (f *fakeUpstreamClient) PullBatch(_ context.Context, qk *ent.QuotaKey) (*Up
 	return f.batch, nil
 }
 
+// RealSupplyModelsFor / TargetAccountsPerKeyFor：测试替身默认按 shareai 口径
+// （16 个静态模型 / 目标 5），不干扰既有单测对 shareai 路径的断言。
+func (f *fakeUpstreamClient) RealSupplyModelsFor(_ string) ([]string, error) {
+	return CursorStaticEntryModels(), nil
+}
+
+func (f *fakeUpstreamClient) TargetAccountsPerKeyFor(_ string) (int, error) {
+	return CursorAutoPullAccountsPerKey, nil
+}
+
 // ---------------------------------------------------------------------------
 // KC-17：upstreamDispatchingClient 分派单测（不连 DB、不发起真实上游请求）。
 // 仅验证"按 upstream_key 选路 + 未知标识失败关闭"语义，不触碰既有 shareAI/knCy 行为。
@@ -548,6 +558,16 @@ func (r *recordingUpstreamClient) PullBatch(_ context.Context, qk *ent.QuotaKey)
 		return nil, r.errToReturn
 	}
 	return r.toReturn, nil
+}
+
+// RealSupplyModelsFor / TargetAccountsPerKeyFor：仅用于分派选路断言的替身，
+// 默认按 shareai 口径返回（静态 16 模型 / 目标 5）。
+func (r *recordingUpstreamClient) RealSupplyModelsFor(_ string) ([]string, error) {
+	return CursorStaticEntryModels(), nil
+}
+
+func (r *recordingUpstreamClient) TargetAccountsPerKeyFor(_ string) (int, error) {
+	return CursorAutoPullAccountsPerKey, nil
 }
 
 // entQuotaKeyWithUpstreamKey 构造一个带指定 upstream_key 的激活码对象（仅字段级，不落库）。
@@ -599,6 +619,57 @@ func TestUpstreamDispatchingClient_UnknownKeyFailsClosed(t *testing.T) {
 		require.Equal(t, 0, shareAI.calls, "unknown key must NOT call shareAI client (no fallback)")
 		require.Equal(t, 0, knCy.calls, "unknown key must NOT call knCy client (no fallback)")
 	}
+}
+
+// dispatchProbeClient 是 QuotaKeyUpstreamClient 的测试替身，记录被分派到的上游标识
+// 与被问及的实供模型/每码目标账号数，用于断言分派器的按 key 选路语义（KC-26）。
+type dispatchProbeClient struct {
+	models    []string
+	target    int
+	modelKey  string
+	targetKey string
+}
+
+func (p *dispatchProbeClient) PullBatch(_ context.Context, _ *ent.QuotaKey) (*UpstreamPullResult, error) {
+	return &UpstreamPullResult{}, nil
+}
+
+func (p *dispatchProbeClient) RealSupplyModelsFor(k string) ([]string, error) {
+	p.modelKey = k
+	return p.models, nil
+}
+
+func (p *dispatchProbeClient) TargetAccountsPerKeyFor(k string) (int, error) {
+	p.targetKey = k
+	return p.target, nil
+}
+
+// TestUpstreamDispatchingClient_DispatchesSupplyAndTargetByKey 验证 RealSupplyModelsFor /
+// TargetAccountsPerKeyFor 同样按 upstream_key 选路，且未知标识失败关闭（KC-26）。
+func TestUpstreamDispatchingClient_DispatchesSupplyAndTargetByKey(t *testing.T) {
+	shareAI := &dispatchProbeClient{models: []string{"a"}, target: 5}
+	knCy := &dispatchProbeClient{models: []string{"b", "c"}, target: 1}
+	dc, err := NewUpstreamDispatchingClient(shareAI, knCy)
+	require.NoError(t, err)
+
+	// shareai 路径：只问 shareAI 客户端，不得串路到 knCy。
+	models, err := dc.RealSupplyModelsFor(upstreamKeyShareAI)
+	require.NoError(t, err)
+	require.Equal(t, []string{"a"}, models)
+	require.Equal(t, upstreamKeyShareAI, shareAI.modelKey)
+	require.Empty(t, knCy.modelKey, "shareai key must NOT dispatch to knCy client")
+
+	// kn_cy 路径：只问 knCy 客户端，目标 1。
+	target, err := dc.TargetAccountsPerKeyFor(upstreamKeyKnCy)
+	require.NoError(t, err)
+	require.Equal(t, 1, target)
+	require.Equal(t, upstreamKeyKnCy, knCy.targetKey)
+
+	// 未知标识失败关闭：绝不静默按 shareai 处理。
+	_, err = dc.RealSupplyModelsFor("bogus")
+	require.Error(t, err)
+	_, err = dc.TargetAccountsPerKeyFor("bogus")
+	require.Error(t, err)
 }
 
 // TestUpstreamDispatchingClient_DefaultShareAI 验证存量激活码的默认 upstream_key='shareai'
@@ -663,6 +734,45 @@ func mustCreateAccounts(t *testing.T, client *ent.Client, quotaKeyID int64, n in
 			Save(ctx)
 		require.NoError(t, err)
 	}
+}
+
+// mustCreateQuotaKeyWithUpstream 创建指定上游标识的激活码（默认 mustCreateQuotaKey 不设置，
+// 会落到 NOT NULL DEFAULT 'shareai'，由此可特判 kn-cy 分派路径）。
+func mustCreateQuotaKeyWithUpstream(t *testing.T, client *ent.Client, status string, upstreamKey string) *ent.QuotaKey {
+	t.Helper()
+	qk, err := client.QuotaKey.Create().
+		SetCodeEncrypted("enc:v1:test").
+		SetStatus(status).
+		SetUpstreamKey(upstreamKey).
+		Save(context.Background())
+	require.NoError(t, err)
+	return qk
+}
+
+// knCySupplyFake 是 QuotaKeyUpstreamClient 的测试替身：对 kn_cy 上游返回其实供的
+// 3 个模型与目标 1，对 shareai 回落静态 16 模型与目标 5。PullBatch 复用嵌入的
+// fakeUpstreamClient（按 batch 返回账号）。用于断言 KC-26 落库口径按上游分派。
+type knCySupplyFake struct {
+	fakeUpstreamClient
+}
+
+// knCySupplyModels 是 kn-cy 实供、且应做恒等映射的三个模型（与 knCyModelMappingModels 同集）。
+var knCySupplyModels = []string{"gpt-6.1-sol", "claude-fable-5-1", "gemini-4-argon"}
+
+func (f *knCySupplyFake) RealSupplyModelsFor(k string) ([]string, error) {
+	if k == upstreamKeyKnCy {
+		out := make([]string, len(knCySupplyModels))
+		copy(out, knCySupplyModels)
+		return out, nil
+	}
+	return CursorStaticEntryModels(), nil
+}
+
+func (f *knCySupplyFake) TargetAccountsPerKeyFor(k string) (int, error) {
+	if k == upstreamKeyKnCy {
+		return 1, nil
+	}
+	return CursorAutoPullAccountsPerKey, nil
 }
 
 // quotaKeyTestCredcryptKeyB64 是 qkNewTestService 公共 setup 一次性安装的固定测试主密钥
@@ -1888,6 +1998,15 @@ type fix3CountingUpstream struct {
 func (f *fix3CountingUpstream) PullBatch(_ context.Context, _ *ent.QuotaKey) (*UpstreamPullResult, error) {
 	f.calls.Add(1)
 	return f.batch, nil
+}
+
+// RealSupplyModelsFor / TargetAccountsPerKeyFor：测试替身默认按 shareai 口径。
+func (f *fix3CountingUpstream) RealSupplyModelsFor(_ string) ([]string, error) {
+	return CursorStaticEntryModels(), nil
+}
+
+func (f *fix3CountingUpstream) TargetAccountsPerKeyFor(_ string) (int, error) {
+	return CursorAutoPullAccountsPerKey, nil
 }
 
 // TestQuotaKeyService_PullForModel_ZeroCoverageAfterUpstreamPullCarriesMountFailedSentinel
@@ -3445,4 +3564,68 @@ func TestQuotaKeyToStatus_UpstreamKey_KC18B(t *testing.T) {
 	}
 	st := quotaKeyToStatus(qk)
 	require.Equal(t, "shareai", st.UpstreamKey)
+}
+
+// TestQuotaKeyPull_KnCyModelMappingRespectsUpstreamSupply 验证 KC-26 问题 1：kn-cy 账号落库的
+// model_mapping 恰为上游自报的 3 个模型恒等映射，不含 ShareAI 静态清单里的其它 13 个
+// （Done when #1）。
+func TestQuotaKeyPull_KnCyModelMappingRespectsUpstreamSupply(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	up := &knCySupplyFake{
+		fakeUpstreamClient: fakeUpstreamClient{
+			batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
+				{Name: "kncy-pulled", Platform: "cursor", Type: "apikey", Credentials: map[string]any{"api_key": "s", "base_url": "x"}},
+			}},
+		},
+	}
+	svc, _ := qkNewTestService(t, up)
+	// 生产装配 autoEntry 才写 entryModelMapping；测试注入默认配置以触发落库映射写入。
+	svc.SetAutoEntry(&fakeAutoEntryConfigProvider{cfg: DefaultAutoEntryConfig()})
+
+	qk := mustCreateQuotaKeyWithUpstream(t, client, domain.QuotaKeyStatusActive, upstreamKeyKnCy)
+	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+
+	accts, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).All(ctx)
+	require.NoError(t, err)
+	require.Len(t, accts, 1, "kn-cy 1 卡 1 号：应只落 1 个账号")
+
+	creds := cursorDecryptStoredCredentials(t, accts[0].Credentials)
+	mm, ok := creds["model_mapping"].(map[string]any)
+	require.True(t, ok, "model_mapping 必须以明文 map 落库")
+	require.Len(t, mm, 3, "kn-cy 映射必须恰好 3 个模型")
+	for _, m := range knCySupplyModels {
+		require.Equal(t, m, mm[m], "model_mapping[%s] 必须恒等映射", m)
+		// 反向校验：不含 ShareAI 静态清单里的其它模型。
+	}
+	_, has := mm["claude-opus-5-5"]
+	require.False(t, has, "kn-cy 映射不得包含 shareai-only 模型 claude-opus-5-5")
+	_, has = mm["grok-4.6"]
+	require.False(t, has, "kn-cy 映射不得包含 shareai-only 模型 grok-4.6")
+}
+
+// TestQuotaKeyModelWater_KnCyCandidateStopsAtOne 验证 KC-26 问题 2：kn-cy 卡已有 1 个可用账号后，
+// 自动补池不再把它列为候选（每码目标 1）；而 shareai 卡（目标 5）仍应列为候选（Done when #3 / #4）。
+func TestQuotaKeyModelWater_KnCyCandidateStopsAtOne(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	w := &quotaKeyModelWater{
+		client:   client,
+		upstream: &knCySupplyFake{},
+	}
+
+	// kn-cy 卡：1 个可用账号，目标 1 → 不应再补。
+	knCyKey := mustCreateQuotaKeyWithUpstream(t, client, domain.QuotaKeyStatusActive, upstreamKeyKnCy)
+	mustCreateAccounts(t, client, knCyKey.ID, 1)
+
+	// shareai 卡：1 个可用账号，目标 5 → 仍应补。
+	shareKey := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	mustCreateAccounts(t, client, shareKey.ID, 1)
+
+	cands, err := w.ListCandidateKeys(ctx, "", 0)
+	require.NoError(t, err)
+	require.NotContains(t, cands, knCyKey.ID, "kn-cy 卡已有 1 个账号，不得再入选候选")
+	require.Contains(t, cands, shareKey.ID, "shareai 卡仅有 1 个账号（目标 5），仍应入选候选")
 }

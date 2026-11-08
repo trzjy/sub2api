@@ -243,6 +243,19 @@ func (c *shareAIUpstreamClient) PullBatch(ctx context.Context, qk *ent.QuotaKey)
 	return &UpstreamPullResult{Accounts: []*UpstreamAccount{acct}, ExpiresAt: expiresAt}, nil
 }
 
+// RealSupplyModelsFor 返回 ShareAI 上游实供的模型清单。
+// ShareAI 号池账号统一用静态实供清单（KC-26：与改动前行为零变化），
+// 故直接返回 CursorStaticEntryModels()，不另起一份字符串字面量。
+func (c *shareAIUpstreamClient) RealSupplyModelsFor(_ string) ([]string, error) {
+	return CursorStaticEntryModels(), nil
+}
+
+// TargetAccountsPerKeyFor 返回 ShareAI 上游每码目标账号数：固定 5（CursorAutoPullAccountsPerKey）。
+// 上游每天只允许拉 5 次号（ErrUpstreamDailyRefreshLimit），5 个刚好把当天额度用尽。
+func (c *shareAIUpstreamClient) TargetAccountsPerKeyFor(_ string) (int, error) {
+	return CursorAutoPullAccountsPerKey, nil
+}
+
 // resolveDeviceID 按 P1-B4 设备同源统一解析本次取号（refresh/activate/lookup）所用的 device-id。
 //
 // 解析顺序（方案 §15.4-设备边界、§16.1）：
