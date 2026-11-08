@@ -129,6 +129,11 @@ type CursorAutoEntryService struct {
 	// lookupBaseURL 是 shareai lookup 基址（含 /api 路径前缀）。
 	// 默认 https://cur-api.shareai.pro/quota/api（取证 01-protocol-doc.md）。
 	lookupBaseURL string
+	// knCyClient 是 kn-cy.com 上游客户端（额度观测专用：GetSubscriptionUsage）。
+	// 观测路径按 quota_keys.upstream_key 分派：kn_cy 走这里，shareai 走既有的 lookupQuota。
+	// 构造期由 NewKnCyClient("") 内部创建（baseURL 空即回退默认 api.kn-cy.com），
+	// 不新增构造参数、不扩大装配面；测试可用 SetKnCyClient 注入指向 httptest 的替身。
+	knCyClient *KnCyClient
 	// observeTx 是"每 key 互斥 + 单事务"骨架的可替换执行点（默认 withQuotaKeyLockTx）。
 	// 生产装配恒为 DB advisory 锁 + 真实事务；替身仓储（无 ent client）时退化为直接执行。
 	observeTx func(txCtx, lockCtx context.Context, quotaKeyID int64, fn func(tx *ent.Tx) error) error
@@ -158,6 +163,14 @@ func NewCursorAutoEntryService(settings SettingRepository, quotaKeys QuotaKeyRep
 		writer:        &entAccountFieldWriter{client: client},
 		httpDoer:      httpDoer,
 		lookupBaseURL: lookupBaseURL,
+		knCyClient:    NewKnCyClient(""),
+	}
+}
+
+// SetKnCyClient 注入 kn-cy 上游客户端（测试替身；生产默认走 NewKnCyClient("") 内部实例）。
+func (s *CursorAutoEntryService) SetKnCyClient(c *KnCyClient) {
+	if s != nil {
+		s.knCyClient = c
 	}
 }
 
@@ -525,8 +538,20 @@ func (s *CursorAutoEntryService) ProbeKeyQuota(ctx context.Context, quotaKeyID i
 			return fmt.Errorf("%w: quota key %d device identity changed before observation", errCursorObservationConflict, quotaKeyID)
 		}
 
-		// ── 步骤 3：持锁执行唯一 lookup ────────────────────────────────────────
-		info, lerr := s.lookupQuota(netCtx, code, identity.DeviceID)
+		// ── 步骤 3：持锁执行唯一 lookup（按 upstream_key 分派上游实现）────────────
+		// shareai / 缺省 → 既有 lookupQuota（行为零变化）；kn_cy → kn-cy 订阅用量查询；
+		// 未知上游标识 → 失败关闭（返回 error），绝不回落 ShareAI——回落会让一张 kn-cy
+		// 卡密去打 ShareAI 的 lookup 接口，凭据泄露 + 白耗额度。
+		var info *lookupKeyInfo
+		var lerr error
+		switch qk.UpstreamKey {
+		case upstreamKeyShareAI, "":
+			info, lerr = s.lookupQuota(netCtx, code, identity.DeviceID)
+		case upstreamKeyKnCy:
+			info, lerr = s.lookupKnCyUsage(netCtx, code)
+		default:
+			return fmt.Errorf("cursor_auto_entry: unknown upstream key %q for quota key %d", qk.UpstreamKey, quotaKeyID)
+		}
 
 		// ── 步骤 4/5：上游结果与存储结果分开；写入用 ≤5s 收尾 context ────────────
 		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), cursorObservationCommitBudget)
@@ -771,6 +796,53 @@ func (s *CursorAutoEntryService) lookupQuota(ctx context.Context, activationCode
 	}
 	if ki.StatusCode != nil && *ki.StatusCode >= 0 {
 		info.StatusCode = *ki.StatusCode
+	}
+	return info, nil
+}
+
+// lookupKnCyUsage 向 kn-cy.com 订阅用量接口查询，并把余额/到期转成既有的 lookupKeyInfo
+// 形态，从而复用同一套快照（buildCursorUsageSnapshot）与到期（adoptUpstreamExpiry）写入路径。
+// 观测路径不分叉：两条上游最终都产出 lookupKeyInfo → 都由既有的 buildCursorUsageSnapshot 写
+// quota_keys.usage_snapshot、由既有的 adoptUpstreamExpiry 写 quota_keys.expires_at（唯一快照
+// 列、唯一到期列，没有第二套格式）。
+//
+// kn-cy 订阅用量返回 TotalRemaining / TodayRemaining / ExpiresAt / Unlimited：
+//   - 余额：以 TotalRemaining（整体剩余余额）作为观测"总额"，Used 记为 0 ⇒ 剩余 = 总额 − 已用
+//     = TotalRemaining。这样既有的码级停调（sweepQuotaKeyLevelStops，剩余 < 下限才停）在 kn-cy
+//     余额耗尽（TotalRemaining<=0）时照常触发，无需新增任何停调原因；取 TotalRemaining 而非
+//     TodayRemaining，因为日额度上限每天重置，用它判定会让"当日子额度见底但总余额充足"的码
+//     被误停。
+//   - 到期：ExpiresAt（Unix 秒）经既有的 parseKnCyExpiresAt 解析后写入 info.ExpiredAt（RFC3339），
+//     交给既有的 adoptUpstreamExpiry 判定是否写 quota_keys.expires_at（未带 / 0 / 负 ⇒ 保持原值）。
+//     这里把 StatusCode 置 1（"使用中/权威"），使 adoptUpstreamExpiry 始终采纳上游给出的固定
+//     到期（不落入"未使用滚动期限只接受一次"分支）。
+//
+// 上游任意错误一律如实返回（不伪装成余额 0）：调用方据此走既有的失败观测写入，与 shareai 同形。
+func (s *CursorAutoEntryService) lookupKnCyUsage(ctx context.Context, key string) (*lookupKeyInfo, error) {
+	if s.knCyClient == nil {
+		return nil, fmt.Errorf("cursor_auto_entry: kn-cy client not configured for quota observation")
+	}
+	usage, err := s.knCyClient.GetSubscriptionUsage(ctx, key)
+	if err != nil {
+		// 上游错误（含"额度不足"类 403）如实上抛，留给既有失败观测路径处理；
+		// 绝不把错误回显成余额 0（缺失 ≠ 0）。
+		return nil, err
+	}
+	info := &lookupKeyInfo{
+		Group:      "kn-cy",
+		StatusCode: 1, // 已激活/权威：expires_at 始终采纳（非"未使用"滚动态）。
+		MaxQuota:   0,
+		UsedQuota:  0,
+	}
+	// 余额：整体剩余余额作为上限，Used 置 0 ⇒ 剩余 = TotalRemaining。
+	// Unlimited 也以 TotalRemaining 承载（上游不限量时该值稳定为大值，不会触发耗尽停调）。
+	if usage.TotalRemaining > 0 {
+		info.MaxQuota = int(usage.TotalRemaining)
+	}
+	// 到期：仅当上游给出合法到期时间戳时落地（0/负 ⇒ nil，由既有的 parseKeyExpiresAt 保持原值）。
+	if exp := parseKnCyExpiresAt(usage.ExpiresAt); exp != nil {
+		s := exp.Format(time.RFC3339)
+		info.ExpiredAt = &s
 	}
 	return info, nil
 }

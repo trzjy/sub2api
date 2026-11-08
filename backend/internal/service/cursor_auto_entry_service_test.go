@@ -1045,3 +1045,143 @@ func TestPruneLegacyCursorQuotaSnapshots(t *testing.T) {
 	require.Contains(t, other.Extra, CursorKeyQuotaSnapshotExtraKey,
 		"白名单只清 Cursor 账号，其它厂商账号的 extra 不得被改")
 }
+
+// ---------------------------------------------------------------------------
+// 5. KC-20B：观测路径按 quota_keys.upstream_key 分派（shareai 零变化 / kn_cy 走订阅用量 /
+//    未知标识失败关闭）
+// ---------------------------------------------------------------------------
+
+// newAutoEntryKnCyProbeService 构造观测服务并注入指向 httptest 的 kn-cy 客户端。
+func newAutoEntryKnCyProbeService(knCySrv *httptest.Server, repo *fakeQuotaKeyRepo) *CursorAutoEntryService {
+	svc := NewCursorAutoEntryService(newFakeSettingRepo(), repo, testEncryptor{}, nil, nil, "")
+	svc.SetKnCyClient(NewKnCyClient(knCySrv.URL))
+	svc.SetWriter(&fakeAccountWriter{})
+	return svc
+}
+
+// newKnCyUsageServer 是 kn-cy 订阅用量端点的替身：校验路径/方法并回包。
+func newKnCyUsageServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/usage/subscription/", r.URL.Path, "kn-cy 额度观测必须打订阅用量接口")
+		require.Equal(t, http.MethodGet, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestProbeKeyQuota_KnCyWritesSnapshotAndExpiry：kn_cy 上游读订阅用量，余额以 TotalRemaining
+// 进入同一 usage_snapshot（Used=0 ⇒ 剩余=TotalRemaining），到期写入同一 expires_at。
+func TestProbeKeyQuota_KnCyWritesSnapshotAndExpiry(t *testing.T) {
+	expUnix := time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC).Unix()
+	body := fmt.Sprintf(`{"status":"ok","message":"ok","data":{"total_remaining":1500,`+
+		`"today_remaining":200,"expires_at":%d,"unlimited":false,"unit":"requests"}}`, expUnix)
+	srv := newKnCyUsageServer(t, body)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", UpstreamKey: upstreamKeyKnCy}
+
+	svc := newAutoEntryKnCyProbeService(srv, repo)
+	rec := &observeTxRecord{}
+	svc.SetObserveTx(rec.tx())
+
+	info, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.NoError(t, err)
+	require.Equal(t, 1500, info.Max, "kn-cy 余额须以 TotalRemaining 进入快照总额")
+	require.Equal(t, 0, info.Used, "kn-cy 仅给余额不给已用，Used 须为 0")
+	require.Equal(t, "kn-cy", info.Group)
+
+	// 唯一事实源：同一 quota_keys.usage_snapshot。
+	snapshot, ok := ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
+	require.True(t, ok, "kn-cy 须写入 quota_keys.usage_snapshot（同一快照列）")
+	require.NotNil(t, snapshot.Total)
+	require.Equal(t, 1500, *snapshot.Total)
+	require.NotNil(t, snapshot.Used)
+	require.Equal(t, 0, *snapshot.Used)
+	require.Equal(t, "", snapshot.ErrorCode, "成功观测 error_code 必须为空")
+
+	// 到期只写既有 expires_at（同一到期列）。
+	require.NotNil(t, repo.byID[42].ExpiresAt)
+	require.Equal(t, 2027, repo.byID[42].ExpiresAt.UTC().Year())
+
+	calls, commits, rollbacks := rec.snapshot()
+	require.Equal(t, 1, calls)
+	require.Equal(t, 1, commits)
+	require.Zero(t, rollbacks)
+}
+
+// TestProbeKeyQuota_KnCyExhaustedWritesZeroRemaining：余额耗尽（total_remaining=0）须写入
+// 剩余=0 的快照，使既有码级停调（剩余<下限）照常触发；expires_at=0（未给）⇒ 保持原值、不得
+// 据未知补日期。
+func TestProbeKeyQuota_KnCyExhaustedWritesZeroRemaining(t *testing.T) {
+	body := `{"status":"ok","message":"ok","data":{"total_remaining":0,` +
+		`"today_remaining":0,"expires_at":0,"unlimited":false,"unit":"requests"}}`
+	srv := newKnCyUsageServer(t, body)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", UpstreamKey: upstreamKeyKnCy}
+
+	svc := newAutoEntryKnCyProbeService(srv, repo)
+	info, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.NoError(t, err)
+	require.Equal(t, 0, info.Max)
+	require.Equal(t, 0, info.Used)
+
+	snapshot, ok := ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
+	require.True(t, ok)
+	require.NotNil(t, snapshot.Total)
+	require.Equal(t, 0, *snapshot.Total)
+	// 到期未给 ⇒ 解析为 nil ⇒ 保持原值（本例无原值，ExpiresAt 应为 nil）。
+	require.Nil(t, repo.byID[42].ExpiresAt, "kn-cy 未给到期时不得据未知补日期")
+}
+
+// TestProbeKeyQuota_KnCyUpstreamErrorWritesFailureObservation：kn-cy 上游错误如实上抛，
+// 走既有失败观测写入（不伪装成余额 0、不回落 ShareAI）。
+func TestProbeKeyQuota_KnCyUpstreamErrorWritesFailureObservation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden) // 模拟"额度不足"类非 2xx
+		_, _ = w.Write([]byte(`{"status":"error","message":"quota insufficient"}`))
+	}))
+	defer srv.Close()
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", UpstreamKey: upstreamKeyKnCy}
+
+	svc := newAutoEntryKnCyProbeService(srv, repo)
+	rec := &observeTxRecord{}
+	svc.SetObserveTx(rec.tx())
+
+	_, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.Error(t, err, "kn-cy 上游错误必须如实返错")
+
+	_, commits, rollbacks := rec.snapshot()
+	require.Zero(t, rollbacks, "失败观测不得走回滚分支")
+	require.Equal(t, 1, commits, "失败观测必须随事务提交后才返错")
+
+	snapshot, ok := ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
+	require.True(t, ok, "失败观测必须已落盘")
+	require.NotEmpty(t, snapshot.ErrorCode, "失败须登记脱敏 error_code")
+	require.Nil(t, snapshot.Total, "失败不得写伪造余额 0")
+	require.Nil(t, snapshot.Used)
+}
+
+// TestProbeKeyQuota_UnknownUpstreamKeyFailsClosed：未知上游标识必须失败关闭（返回 error），
+// 绝不回落 ShareAI（回落会让 kn-cy 卡密去打 ShareAI lookup，凭据泄露 + 白耗额度），且不得写任何快照。
+func TestProbeKeyQuota_UnknownUpstreamKeyFailsClosed(t *testing.T) {
+	dummy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer dummy.Close()
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", UpstreamKey: "bogus_vendor"}
+
+	svc := newAutoEntryKnCyProbeService(dummy, repo)
+	rec := &observeTxRecord{}
+	svc.SetObserveTx(rec.tx())
+
+	_, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.Error(t, err, "未知上游标识必须失败关闭")
+	require.Contains(t, err.Error(), "unknown upstream key")
+	require.Nil(t, repo.byID[42].UsageSnapshot, "失败关闭不得写任何快照（不回落 ShareAI）")
+	calls, _, _ := rec.snapshot()
+	require.Equal(t, 1, calls, "未知标识仍进入观测事务骨架，但分派即失败关闭")
+}
