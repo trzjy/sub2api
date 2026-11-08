@@ -128,6 +128,12 @@ type FailoverState struct {
 	ForceCacheBilling     bool
 	hasBoundSession       bool
 
+	// CursorUpstreamFailedAccountIDs 记录本请求内已因 cursor 上游账号级失败而失败的
+	// 不同账号（distinct 去重）。用于判定「上游集体抽风」：本请求已连续失败
+	// >= service.CursorUpstreamFlapThreshold 个不同账号时，后续账号的停调时长
+	// 从 5 分钟降为 30 秒（上游集体劣化时，停那么久会把账号池摘空）。
+	CursorUpstreamFailedAccountIDs map[int64]struct{}
+
 	// profitVetoCount 本次请求累计的利润否决次数，用于 maxProfitVetoAttempts 上限。
 	profitVetoCount int
 }
@@ -143,7 +149,9 @@ func NewFailoverState(hasBoundSession bool) *FailoverState {
 	return &FailoverState{
 		FailedAccountIDs:      make(map[int64]struct{}),
 		SameAccountRetryCount: make(map[int64]int),
-		hasBoundSession:       hasBoundSession,
+		// 必须初始化：漏初始化会在首个 cursor 上游账号级失败时向 nil map 赋值而 panic。
+		CursorUpstreamFailedAccountIDs: make(map[int64]struct{}),
+		hasBoundSession:                hasBoundSession,
 	}
 }
 
@@ -220,6 +228,21 @@ func (s *FailoverState) HandleFailoverError(
 			return FailoverCanceled
 		}
 		return FailoverContinue
+	}
+
+	// cursor 上游账号级失败的集体抽风判定：同一请求内已失败的不同账号数达到
+	// service.CursorUpstreamFlapThreshold 时，判定为上游集体劣化（非账号问题），
+	// 后续账号的停调时长降为 service.CursorUpstreamFlapCooldown。
+	//
+	// 必须在本请求的停号动作之前完成置位，否则 service 侧读到的仍是旧值。
+	if failoverErr.Reason == service.CursorUpstreamAccountFailureReason {
+		if s.CursorUpstreamFailedAccountIDs == nil {
+			s.CursorUpstreamFailedAccountIDs = make(map[int64]struct{})
+		}
+		s.CursorUpstreamFailedAccountIDs[accountID] = struct{}{}
+		if len(s.CursorUpstreamFailedAccountIDs) >= service.CursorUpstreamFlapThreshold {
+			failoverErr.CursorUpstreamFlapDetected = true
+		}
 	}
 
 	// 同账号重试用尽，执行临时封禁。

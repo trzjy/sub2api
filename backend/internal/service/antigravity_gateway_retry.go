@@ -846,6 +846,25 @@ func tempUnscheduleCursorUpstreamFailure(ctx context.Context, repo AccountReposi
 	}
 }
 
+// tempUnscheduleCursorUpstreamFailureWithCooldown 按指定冷却时长与 reason 对 cursor 上游
+// 账号级故障触发临时停调。
+//
+// 与 tempUnscheduleCursorUpstreamFailure 分开的原因（见方案 §3.2）：
+// 既有 helper 被协议污染路径（openai_gateway_service.go 的
+// tempUnscheduleCursorProtocolPollution）共用，那条路径没有上游 code/message，
+// 与「上游集体抽风」无关，必须保持 5 分钟 + 原 reason 不变。
+func tempUnscheduleCursorUpstreamFailureWithCooldown(
+	ctx context.Context, repo AccountRepository, accountID int64, logPrefix string,
+	cooldown time.Duration, reason string,
+) {
+	until := time.Now().Add(cooldown)
+	if err := repo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
+		log.Printf("%s temp_unschedule_failed account=%d error=%v", logPrefix, accountID, err)
+	} else {
+		log.Printf("%s temp_unscheduled account=%d until=%v reason=%q", logPrefix, accountID, until.Format("15:04:05"), reason)
+	}
+}
+
 // CursorQuotaExhaustedReason 是 cursor 账号「当日额度耗尽」的换号原因串
 // （CursorExecutionService 在流内命中「今日额度已用完」模板时写入）。
 //

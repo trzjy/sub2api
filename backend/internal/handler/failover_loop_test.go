@@ -25,10 +25,25 @@ type mockTempUnscheduler struct {
 type tempUnscheduleCall struct {
 	accountID   int64
 	failoverErr *service.UpstreamFailoverError
+
+	// flapDetected 快照调用发生那一刻 failoverErr.CursorUpstreamFlapDetected 的值。
+	//
+	// 必须快照而非事后读 failoverErr 指针：调用方传进来的是同一个指针，
+	// 事后读指针无法区分「标记在停号之前就已置位」与「标记在停号之后才被改上」
+	// （指针别名会让后者也读到 true），时序回归将无法被测出。
+	flapDetected bool
 }
 
 func (m *mockTempUnscheduler) TempUnscheduleRetryableError(_ context.Context, accountID int64, failoverErr *service.UpstreamFailoverError) {
-	m.calls = append(m.calls, tempUnscheduleCall{accountID: accountID, failoverErr: failoverErr})
+	flapDetected := false
+	if failoverErr != nil {
+		flapDetected = failoverErr.CursorUpstreamFlapDetected
+	}
+	m.calls = append(m.calls, tempUnscheduleCall{
+		accountID:    accountID,
+		failoverErr:  failoverErr,
+		flapDetected: flapDetected,
+	})
 }
 
 func TestSameAccountRetryDelayFor(t *testing.T) {
@@ -138,6 +153,8 @@ func TestNewFailoverState(t *testing.T) {
 		require.Empty(t, fs.FailedAccountIDs)
 		require.NotNil(t, fs.SameAccountRetryCount)
 		require.Empty(t, fs.SameAccountRetryCount)
+		require.NotNil(t, fs.CursorUpstreamFailedAccountIDs, "cursor 上游失败账号表必须初始化，否则首个上游账号级失败会向 nil map 赋值而 panic")
+		require.Empty(t, fs.CursorUpstreamFailedAccountIDs)
 		require.Nil(t, fs.LastFailoverErr)
 		require.False(t, fs.ForceCacheBilling)
 		require.True(t, fs.hasBoundSession)

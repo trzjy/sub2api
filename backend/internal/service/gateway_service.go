@@ -716,6 +716,11 @@ type UpstreamFailoverError struct {
 	// 本次请求的候选集。上游按主机整体拒绝（同一供应商的多把 key 共享同一套审核/
 	// 限额策略）时，逐个去撞兄弟账号只会把切换预算耗在同一面墙上。
 	ExcludeUpstreamHost string
+
+	// CursorUpstreamFlapDetected 标记本次 cursor 上游账号级失败是否发生在
+	// 「同一请求已连续失败 >= CursorUpstreamFlapThreshold 个不同账号」之后。
+	// 为真时停调时长从 5 分钟降为 CursorUpstreamFlapCooldown（30 秒）。
+	CursorUpstreamFlapDetected bool
 }
 
 func (e *UpstreamFailoverError) Error() string {
@@ -776,7 +781,15 @@ func (s *GatewayService) TempUnscheduleRetryableError(ctx context.Context, accou
 	// 真实请求会再次命中本分支继续冷却，等价于「冷却→探测→再冷却」的循环，
 	// 不需要引入新的探测状态机。
 	if failoverErr.Reason == CursorUpstreamAccountFailureReason {
-		tempUnscheduleCursorUpstreamFailure(ctx, s.accountRepo, accountID, "[handler]")
+		if failoverErr.CursorUpstreamFlapDetected {
+			tempUnscheduleCursorUpstreamFailureWithCooldown(ctx, s.accountRepo, accountID, "[handler]",
+				CursorUpstreamFlapCooldown,
+				"cursor upstream account failure (upstream flap, auto temp-unschedule 30s)")
+		} else {
+			tempUnscheduleCursorUpstreamFailureWithCooldown(ctx, s.accountRepo, accountID, "[handler]",
+				cursorUpstreamFailureCooldown,
+				"cursor upstream account failure (auto temp-unschedule 5m)")
+		}
 		return
 	}
 	// cursor 账号被上游限流：秒/分钟级瞬时状态，短冷却即可回池。
