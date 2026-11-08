@@ -243,6 +243,22 @@ func (s *FailoverState) HandleFailoverError(
 		if len(s.CursorUpstreamFailedAccountIDs) >= service.CursorUpstreamFlapThreshold {
 			failoverErr.CursorUpstreamFlapDetected = true
 		}
+
+		// 只在「首次达成阈值」时打这一条结构化日志：distinct 计数每失败一个不同
+		// 账号只 +1，故 len 恰好等于阈值在同一请求内只会命中一次；后续账号继续
+		// 失败只会让 len 更大（重复触发同一判定），故不再重复打日志。
+		if len(s.CursorUpstreamFailedAccountIDs) == service.CursorUpstreamFlapThreshold {
+			failedAccountIDs := make([]int64, 0, len(s.CursorUpstreamFailedAccountIDs))
+			for failedID := range s.CursorUpstreamFailedAccountIDs {
+				failedAccountIDs = append(failedAccountIDs, failedID)
+			}
+			logger.FromContext(ctx).Warn("cursor_upstream_flap_detected",
+				zap.Int("distinct_accounts", len(s.CursorUpstreamFailedAccountIDs)),
+				zap.Duration("cooldown", service.CursorUpstreamFlapCooldown),
+				zap.Int64("account_id", accountID),
+				zap.Int64s("failed_account_ids", failedAccountIDs),
+			)
+		}
 	}
 
 	// 同账号重试用尽，执行临时封禁。

@@ -240,3 +240,82 @@ func TestCursorUpstreamAccountFailureLogsEmptyMessage(t *testing.T) {
 	require.NotContains(t, got, "unknown", "不得回填 unknown 之类占位符")
 	require.NotContains(t, got, "N/A", "不得回填 N/A 之类占位符")
 }
+
+// TestTempUnscheduleCursorUpstreamFailureFlapCooldown 覆盖「集体抽风」分支：
+// 同一请求内已连续失败 >= CursorUpstreamFlapThreshold 个不同账号后，
+// 停调时长必须从 5 分钟降到 CursorUpstreamFlapCooldown（30 秒），
+// 且 reason 必须逐字节等于 flap 文案——运维要靠它区分「集体抽风」与「单体故障」。
+func TestTempUnscheduleCursorUpstreamFailureFlapCooldown(t *testing.T) {
+	t.Run("抽风标记为真 → 实际写入 30 秒冷却 + flap reason", func(t *testing.T) {
+		repo := &cursorCooldownRepoStub{}
+		svc := &GatewayService{accountRepo: repo}
+		before := time.Now()
+
+		svc.TempUnscheduleRetryableError(context.Background(), 362, &UpstreamFailoverError{
+			StatusCode:                 502,
+			Scope:                      GatewayFailureScopeAccount,
+			Reason:                     CursorUpstreamAccountFailureReason,
+			NextAccountAction:          NextAccountRetry,
+			CursorUpstreamFlapDetected: true,
+		})
+
+		require.Equal(t, 1, repo.calls)
+		require.WithinDuration(t, before.Add(CursorUpstreamFlapCooldown), repo.until, 5*time.Second,
+			"集体抽风时的冷却窗口必须是 30 秒")
+		require.Equal(t, "cursor upstream account failure (upstream flap, auto temp-unschedule 30s)", repo.reason)
+	})
+}
+
+// TestTempUnscheduleCursorUpstreamFailureSingleFailureCooldown 覆盖「单体故障」分支：
+// 抽风标记为假时，停调时长仍是 5 分钟，且 reason 必须与既有文案逐字节一致
+// （回归保护：文案是运维与数据分析的口径，不得被抽风分支带偏）。
+func TestTempUnscheduleCursorUpstreamFailureSingleFailureCooldown(t *testing.T) {
+	t.Run("抽风标记为假 → 仍是 5 分钟冷却 + 原 reason 逐字节不变", func(t *testing.T) {
+		repo := &cursorCooldownRepoStub{}
+		svc := &GatewayService{accountRepo: repo}
+		before := time.Now()
+
+		svc.TempUnscheduleRetryableError(context.Background(), 362, &UpstreamFailoverError{
+			StatusCode:                 502,
+			Scope:                      GatewayFailureScopeAccount,
+			Reason:                     CursorUpstreamAccountFailureReason,
+			NextAccountAction:          NextAccountRetry,
+			CursorUpstreamFlapDetected: false,
+		})
+
+		require.Equal(t, 1, repo.calls)
+		require.WithinDuration(t, before.Add(cursorUpstreamFailureCooldown), repo.until, 5*time.Second,
+			"单体故障的冷却窗口必须是 5 分钟")
+		require.Equal(t, "cursor upstream account failure (auto temp-unschedule 5m)", repo.reason)
+	})
+}
+
+// TestTempUnscheduleCursorUpstreamFailureProtocolPollutionCooldown 覆盖协议污染路径：
+// 该路径没有上游 code/message，与「上游集体抽风」无关，必须仍是 5 分钟 + 原 reason。
+// 这里直接调用既有 helper（未被抽风改动触碰）与协议污染入口各验一次。
+func TestTempUnscheduleCursorUpstreamFailureProtocolPollutionCooldown(t *testing.T) {
+	t.Run("协议污染路径直接调既有 helper → 仍是 5 分钟 + 原 reason", func(t *testing.T) {
+		repo := &cursorCooldownRepoStub{}
+		before := time.Now()
+
+		tempUnscheduleCursorUpstreamFailure(context.Background(), repo, 362, "[cursor-exec:inline_tool]")
+
+		require.Equal(t, 1, repo.calls)
+		require.WithinDuration(t, before.Add(cursorUpstreamFailureCooldown), repo.until, 5*time.Second,
+			"协议污染路径的冷却窗口必须仍是 5 分钟")
+		require.Equal(t, "cursor upstream account failure (auto temp-unschedule 5m)", repo.reason)
+	})
+
+	t.Run("协议污染入口 → 仍是 5 分钟 + 原 reason", func(t *testing.T) {
+		repo := &cursorCooldownRepoStub{}
+		svc := &OpenAIGatewayService{accountRepo: repo}
+		before := time.Now()
+
+		svc.tempUnscheduleCursorProtocolPollution(context.Background(), 362, "inline_tool")
+
+		require.Equal(t, 1, repo.calls)
+		require.WithinDuration(t, before.Add(cursorUpstreamFailureCooldown), repo.until, 5*time.Second,
+			"协议污染路径的冷却窗口必须仍是 5 分钟")
+		require.Equal(t, "cursor upstream account failure (auto temp-unschedule 5m)", repo.reason)
+	})
+}
