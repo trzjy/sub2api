@@ -876,28 +876,30 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		// 快照，并把唯一结算钩子注册到本次尝试的转交物——会话终结时 settle 把终态真实
 		// *ForwardResult 交给它构造原 RecordUsage 输入并调用原 mandatory usage worker，
 		// 至多一次。快照不闭包 gin.Context、旧 writer 或原正文；非 Cursor 账号不注册。
-		if isCursorPlatformAccount(account) {
-			attemptHandover.RegisterCursorSettlement(h.geminiCursorSettlementFunc(geminiCursorSettlementParams{
-				apiKey:             apiKey,
-				user:               apiKey.User,
-				account:            account,
-				subscription:       subscription,
-				pricingAt:          pricingAt,
-				quotaPlatform:      service.QuotaPlatform(c.Request.Context(), apiKey),
-				inboundEndpoint:    GetInboundEndpoint(c),
-				upstreamEndpoint:   GetUpstreamEndpoint(c, account.Platform),
-				userAgent:          c.GetHeader("User-Agent"),
-				ipAddress:          ip.GetClientIP(c),
-				sessionID:          service.ExtractClientSessionID(c),
-				requestPayloadHash: service.HashUsageRequestPayload(body),
-				forceCacheBilling:  fs.ForceCacheBilling,
-				channelMapping:     channelMapping,
-				requestedModel:     clientRequestedModel(c, reqModel),
-				userID:             authSubject.UserID,
-				groupID:            apiKey.GroupID,
-				reqModel:           reqModel,
-			}, h.submitMandatoryUsageRecordTask))
-		}
+		// §25.17.5 A06 / CARD-KC-28：只有"会话式 Connect 账号"（ShareAI 号池 OAuth）才把
+		// 用量交给会话终态唯一结算；第三方 OpenAI 兼容反代（type=api_key，如 kn-cy.com）没有
+		// Connect 会话可挂结算钩子，必须改由 handler 在 HTTP 返回时直接提交（见下方
+		// geminiV1BetaBillsByDirectSubmit 守卫），否则该账号用量永远不落账（漏账）。
+		h.registerGeminiV1BetaCursorSettlement(attemptHandover, account, geminiCursorSettlementParams{
+			apiKey:             apiKey,
+			user:               apiKey.User,
+			account:            account,
+			subscription:       subscription,
+			pricingAt:          pricingAt,
+			quotaPlatform:      service.QuotaPlatform(c.Request.Context(), apiKey),
+			inboundEndpoint:    GetInboundEndpoint(c),
+			upstreamEndpoint:   GetUpstreamEndpoint(c, account.Platform),
+			userAgent:          c.GetHeader("User-Agent"),
+			ipAddress:          ip.GetClientIP(c),
+			sessionID:          service.ExtractClientSessionID(c),
+			requestPayloadHash: service.HashUsageRequestPayload(body),
+			forceCacheBilling:  fs.ForceCacheBilling,
+			channelMapping:     channelMapping,
+			requestedModel:     clientRequestedModel(c, reqModel),
+			userID:             authSubject.UserID,
+			groupID:            apiKey.GroupID,
+			reqModel:           reqModel,
+		}, h.submitMandatoryUsageRecordTask)
 		requestCtx = bindCursorHandoverForAttempt(requestCtx, account, attemptHandover)
 		c.Request = c.Request.WithContext(requestCtx)
 		if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
@@ -958,10 +960,11 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			}
 		}
 
-		// §25.17.5 A06：Cursor 的唯一结算已在**首次 Execute 与资源转交之前**经
-		// RegisterCursorSettlement 注册到会话，本 HTTP 返回后不得再为 Cursor 另排一次账
-		// （否则首个工具 HTTP 的空 usage 会先落一次账）。非 Cursor 沿用原有计费提交路径。
-		if !isCursorPlatformAccount(account) {
+		// §25.17.5 A06 / CARD-KC-28：Cursor 会话式（OAuth）账号的唯一结算已在**首次
+		// Execute 与资源转交之前**经 RegisterCursorSettlement 注册到会话，本 HTTP 返回后
+		// 不得再为其另排一次账（否则首个工具 HTTP 的空 usage 会先落一次账）。非 Cursor 账号
+		// 与 Cursor+APIKey 反代账号（无 Connect 会话可挂结算钩子）走原有直接提交路径。
+		if geminiV1BetaBillsByDirectSubmit(account) {
 			// 捕获请求信息（用于异步记录，避免在 goroutine 中访问 gin.Context）
 			userAgent := c.GetHeader("User-Agent")
 			clientIP := ip.GetClientIP(c)
@@ -1039,6 +1042,42 @@ type geminiCursorSettlementParams struct {
 	userID   int64
 	groupID  *int64
 	reqModel string
+}
+
+// registerGeminiV1BetaCursorSettlement 在 Gemini 原生入口（/v1beta/models/...:generateContent）
+// 为"会话式 Connect 账号"（ShareAI 号池 OAuth）注册会话终态唯一结算（§25.17.5 A06）。
+//
+// 返回 true 表示已注册：调用方必须在**首次 Execute 与资源转交之前**调用，且此后不得再直接
+// 提交用量（见 geminiV1BetaBillsByDirectSubmit 守卫）。CARD-KC-28：判定改用
+// cursorAccountBilledBySession——cursor 平台**且非** APIKey 形态才走会话结算；APIKey 形态的
+// Cursor 反代（如 kn-cy.com）没有 Connect 会话可挂结算钩子，不得注入空钩子（否则其用量
+// 永远不落账，漏账）。
+//
+// 抽出为独立函数与 registerMessagesGeminiCursorSettlement 同口径：让"是否注册 + 用什么快照"
+// 可被单测直接断言。
+func (h *GatewayHandler) registerGeminiV1BetaCursorSettlement(
+	handover *cursorResourceHandover,
+	account *service.Account,
+	params geminiCursorSettlementParams,
+	submitTask func(context.Context, service.UsageRecordTask),
+) bool {
+	if !cursorAccountBilledBySession(account) || handover == nil {
+		return false
+	}
+	handover.RegisterCursorSettlement(h.geminiCursorSettlementFunc(params, submitTask))
+	return true
+}
+
+// geminiV1BetaBillsByDirectSubmit 判定 Gemini 原生入口是否必须在 HTTP 返回时由 handler 直接
+// 提交用量（而非交给会话终态结算）。
+//
+// 返回 true 当且仅当：非 Cursor 平台账号，**或** Cursor 平台但为 APIKey 形态的反代账号
+// （如 kn-cy.com，type=api_key，无 Connect 会话可挂结算钩子）。Cursor 会话式（OAuth）账号
+// 的用量只由会话终结时的已注册结算钩子提交，本 HTTP 返回后绝对不得再直接提交（否则与终结
+// 结算冲突、重复计费）。CARD-KC-28：与 registerGeminiV1BetaCursorSettlement 共用
+// cursorAccountBilledBySession 判定，避免漏账/重复计费两端不一致。
+func geminiV1BetaBillsByDirectSubmit(account *service.Account) bool {
+	return !cursorAccountBilledBySession(account)
 }
 
 // geminiCursorSettlementFunc 构造 Gemini v1beta 出口 Cursor 分支的**唯一结算输入**闭包
