@@ -52,21 +52,6 @@ type quotaKeyUsageObserver interface {
 	ProbeKeyQuota(ctx context.Context, quotaKeyID int64) (*KeyQuotaLookupInfo, error)
 }
 
-// knCyAccountObserver 是 kn-cy 来源账号额度/到期观测与停调的窄面（kn-cy 接入权威链，
-// 复用 quotaKeyUsageObserver/心跳/失败关闭语义，不新增第二套调度器 / cron / 兜底）。
-//
-// 唯一实现由生产装配注入（kn-cy 适配器包装 *KnCyClient + 账号归属查询）；reconciler 只调用
-// 它，不持有第二套 kn-cy 客户端/解析器，也不自己写账号状态。职责：在一轮内对 kn-cy 归属的
-// cursor/api_key 账号按 quota_key 或既有归属同步余额（剩余额度）与到期（expires_at），
-// 并停止不可用账号（余额耗尽 / 已过期 / 上游不可达）。nil 时本轮跳过 kn-cy 同步
-// （只影响该职责，不影响既有补池行为）。
-type knCyAccountObserver interface {
-	// SyncKnCyAccounts 在一轮内同步 kn-cy 归属账号的余额/到期并停调不可用账号。
-	// 返回的 knCyAccountSync 是如实计数（只入心跳，不参与补池判定）；返回的 error 是
-	// 硬失败（枚举/基础设施错误），reconciler 据此走失败关闭（写失败心跳、停轮、不影响下一轮）。
-	SyncKnCyAccounts(ctx context.Context) (knCyAccountSync, error)
-}
-
 // QuotaKeyModelWaterProvider 是 C10 水位 reconciler 依赖的"补池水位"窄面
 // （真实实现 quotaKeyModelWater 见 quota_key_service.go；reconciler 侧不实现聚合 SQL）。
 //
@@ -125,10 +110,6 @@ type QuotaKeyReconciler struct {
 	// usageObserver 是来源额度观测的窄面（§25.6 / §25.14-C）：nil 时本轮不刷新来源额度
 	// （只影响观测职责，不影响既有补池行为）。
 	usageObserver quotaKeyUsageObserver
-
-	// knCyObserver 是 kn-cy 来源账号额度/到期同步与停调的窄面（kn-cy 接入权威链）：
-	// nil 时本轮跳过 kn-cy 同步（只影响该职责，不影响既有补池行为）。
-	knCyObserver knCyAccountObserver
 
 	// accountStopSink 是码级停调窄面（D9）：激活码额度见底时把名下账号一起停到最近的
 	// 码级恢复点（19:00 / 次日 08:00），恢复后按原因前缀精确清除。nil 时跳过该职责。
@@ -211,15 +192,6 @@ func (r *QuotaKeyReconciler) SetUsageObserver(o quotaKeyUsageObserver) {
 		return
 	}
 	r.usageObserver = o
-}
-
-// SetKnCyAccountObserver 注入 kn-cy 来源账号同步窄面（kn-cy 接入权威链）。
-// 生产由 wire 在既有装配点注入 kn-cy 适配器；nil 时本轮跳过 kn-cy 同步。
-func (r *QuotaKeyReconciler) SetKnCyAccountObserver(o knCyAccountObserver) {
-	if r == nil {
-		return
-	}
-	r.knCyObserver = o
 }
 
 // NotifyAccountRemoved 是 a/b/c 软删提交后的水位快路径唤醒点（C12-v2，收编进 reconciler）。
@@ -348,22 +320,6 @@ func (r *QuotaKeyReconciler) runOnce() {
 	if r.usageObserver != nil {
 		usageRefresh := r.refreshSourceUsage(ctx)
 		sourceUsage = usageRefresh.summary(true)
-	}
-
-	// kn-cy 接入权威链：在来源额度刷新之后、补池之前，对 kn-cy 归属的 cursor/api_key 账号
-	// 同步余额/到期并停止不可用账号（复用心跳/失败关闭语义，不新增调度器 / cron / 兜底）。
-	// 独立于"是否需要补号"——即使池子达标，kn-cy 账号的余额/到期与停调仍需被发现与执行。
-	if r.knCyObserver != nil {
-		knCySync, knErr := r.knCyObserver.SyncKnCyAccounts(ctx)
-		if knErr != nil {
-			// 失败关闭：kn-cy 同步硬失败（枚举/基础设施错误）即写失败心跳并停轮，
-			// 不 panic、不影响下一轮；与 ListAllowedModels 失败的失败关闭语义一致。
-			log.Printf("[QuotaKeyReconcile] kn-cy account sync failed: %v", knErr)
-			r.recordHeartbeat(ctx, runAt, false,
-				fmt.Errorf("quota_key_reconcile: kn-cy account sync: %w", knErr), knErr.Error(), sourceUsage)
-			return
-		}
-		sourceUsage = joinHeartbeatParts(sourceUsage, knCySync.summary(true))
 	}
 
 	// D9：把激活码额度状态同步到名下账号的停调状态（必须在额度刷新之后，用的是本轮新数据）。
@@ -666,33 +622,6 @@ func (s sourceUsageRefresh) summary(configured bool) string {
 	}
 	return fmt.Sprintf("source usage refresh: observed=%d failed=%d not_queried=%d",
 		s.Succeeded, s.Failed, s.NotQueried)
-}
-
-// knCyAccountSync 是一轮"kn-cy 来源账号同步"的如实计数（只用于心跳，不参与补池判定）。
-// 与 sourceUsageRefresh 同型：成功/失败/未查分列，硬失败（ListFailed）单独表征。
-type knCyAccountSync struct {
-	// Synced 是本轮成功同步余额/到期的 kn-cy 账号数。
-	Synced int
-	// Stopped 是本轮因不可用（余额耗尽 / 已过期 / 上游不可达）被停调的 kn-cy 账号数。
-	Stopped int
-	// Failed 是本轮同步失败（失败同步由该入口自己按契约提交/记录）的 kn-cy 账号数。
-	Failed int
-	// NotQueried 是本轮因轮预算耗尽或已 Stop 而未发起同步的 kn-cy 账号数。
-	NotQueried int
-	// ListFailed 表示本轮枚举 kn-cy 账号失败（此时不发起任何同步）。
-	ListFailed bool
-}
-
-// summary 生成心跳可读摘要；未配置观测口时不产生任何文字（心跳保持既有形态）。
-func (s knCyAccountSync) summary(configured bool) string {
-	if !configured {
-		return ""
-	}
-	if s.ListFailed {
-		return "kn-cy account sync: list failed; no sync issued this round"
-	}
-	return fmt.Sprintf("kn-cy account sync: synced=%d stopped=%d failed=%d not_queried=%d",
-		s.Synced, s.Stopped, s.Failed, s.NotQueried)
 }
 
 // refreshSourceUsage 在同一轮内按"未软删的 Cursor 来源"逐个发起额度观测（§25.6 / §25.14-C）。
