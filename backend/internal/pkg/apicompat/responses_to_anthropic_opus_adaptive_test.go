@@ -61,15 +61,38 @@ func TestResponsesToAnthropic_Opus55_AdaptiveThinking(t *testing.T) {
 	}
 }
 
-func TestResponsesToAnthropic_Opus55_LowEffortNoThinking(t *testing.T) {
-	// low effort：不应产生 thinking 块（仅 output_config.effort=low）。
+func TestResponsesToAnthropic_Opus55_LowEffortAdaptiveThinking(t *testing.T) {
+	// 官方契约（Adaptive Thinking, Anthropic 文档）：
+	//   - 是否产出 thinking block 由模型逐请求决定，请求侧无法也不该预设；
+	//     adaptive 模式下没有「完全关闭思考」的开关，"low" 只是「最小化思考」。
+	//   - 对 Opus 5.5：所有 effort（含 low）thinking 恒开，契约形态为
+	//     thinking.type=adaptive + output_config.effort=<effort>，二者配套。
+	// 因此 low effort 仍要发 adaptive（不得发 enabled，也不得带 budget_tokens），
+	// 之前「low 不该有 thinking 块」的断言与官方契约冲突，故改名为 AdaptiveThinking。
 	req := opus55Request("claude-opus-5-5", "low")
 	out, err := ResponsesToAnthropicRequest(req)
 	require.NoError(t, err)
 
 	wire := wireAnthropic(t, out)
-	assert.NotContains(t, wire, "thinking", "low effort must not emit a thinking block")
+
+	// output_config.effort 必须存在且等于 low（mapResponsesEffortToAnthropic("low")）。
 	require.Contains(t, wire, "output_config")
+	var oc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(wire["output_config"], &oc))
+	require.Contains(t, oc, "effort")
+	assert.JSONEq(t, `"`+mapResponsesEffortToAnthropic("low")+`"`, string(oc["effort"]))
+
+	// thinking 必须存在且 type=adaptive（Opus 5.5 在所有 effort 恒发 adaptive）。
+	require.Contains(t, wire, "thinking")
+	var th map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(wire["thinking"], &th))
+	require.Contains(t, th, "type")
+	assert.JSONEq(t, `"adaptive"`, string(th["type"]))
+
+	// adaptive 不接受 budget_tokens，也不应为 enabled 形态（上游按非法组合拒收）。
+	assert.NotContains(t, th, "budget_tokens",
+		"adaptive thinking must not carry budget_tokens (upstream rejects it)")
+	assert.NotContains(t, string(wire["thinking"]), `"enabled"`)
 }
 
 func TestResponsesToAnthropic_NonOpus_KeepsEnabledThinking(t *testing.T) {

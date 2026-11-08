@@ -74,6 +74,72 @@ func TestCodexCatalogGeminiCapabilitiesExcludeNonMixedAntigravityAccounts(t *tes
 	}
 }
 
+// 反向用例：mixed_scheduling=true 的 antigravity 账号与 native Gemini 账号同组时，
+// 能力聚合仍包含该 antigravity 账号的贡献（不被误排除）。结果与「只有 native」一致。
+func TestCodexCatalogGeminiCapabilitiesIncludeMixedEnabledAntigravityAccounts(t *testing.T) {
+	const groupID int64 = 95
+	reasoning := true
+	native := Account{ID: 1, Platform: PlatformGemini, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"model_mapping": map[string]any{"gemini-custom": "gemini-3.8-flash-high"}},
+	}
+	native.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		Models: map[string]UpstreamModelMetadata{"gemini-3.8-flash-high": {
+			ID: "gemini-3.8-flash-high", Reasoning: &reasoning,
+			SupportedReasoningLevels: []string{"high"}, InputModalities: []string{"text", "image"},
+			ContextWindow: 1_048_576,
+		}},
+	})
+	// 启用 mixed_scheduling 的 antigravity 账号，能力与 native 一致。
+	peer := Account{ID: 2, Platform: PlatformAntigravity, Type: AccountTypeOAuth,
+		Extra: map[string]any{"mixed_scheduling": true}, Credentials: native.Credentials}
+	peer.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		Models: map[string]UpstreamModelMetadata{"gemini-3.8-flash-high": {
+			ID: "gemini-3.8-flash-high", Reasoning: &reasoning,
+			SupportedReasoningLevels: []string{"high"}, InputModalities: []string{"text", "image"},
+			ContextWindow: 1_048_576,
+		}},
+	})
+	svc := &GatewayService{accountRepo: codexModelsVisibilityAccountRepo{
+		byGroup: map[int64][]Account{groupID: {native, peer}},
+	}}
+	body, err := svc.BuildCodexModelsManifestForGroup(context.Background(),
+		&Group{ID: groupID, Platform: PlatformGemini}, "", []string{"gemini-custom"})
+	require.NoError(t, err)
+	model := decodeCodexManifestModels(t, body)[0]
+	require.Equal(t, float64(1_048_576), model["context_window"])
+	require.Equal(t, []any{"text", "image"}, model["input_modalities"])
+	require.Equal(t, []string{"high"}, effortsFromManifestModel(t, model))
+
+	// 直接护栏：启用 mixed 的 antigravity 账号服务于该模型；关闭 mixed 的则否。
+	// 这能在滥用排除（连带排除 mixed=true）时立刻失败，弥补 catalog 交集只收窄、
+	// 无法从结果层面正向证明「被包含」的局限。
+	require.True(t, codexAccountServesPlatformModel(&peer, PlatformGemini, "gemini-custom"))
+	disabled := peer
+	disabled.Extra = map[string]any{"mixed_scheduling": false}
+	require.False(t, codexAccountServesPlatformModel(&disabled, PlatformGemini, "gemini-custom"))
+}
+
+// 其它聚合平台（cursor / codebuddy 等）没有 mixed_scheduling 开关，不应被排除。
+// 它们在 gemini 分组中本来就走「platform == platform」分支、不参与跨平台供给，
+// 故此处用直接判定验证：其 catalog 能力判定不受改动影响、且 mixed_scheduling
+// Extra 对其无副作用。
+func TestCodexCatalogCapabilitiesOtherAggregatePlatformsUnaffected(t *testing.T) {
+	for _, platform := range []string{PlatformCursor, PlatformCodeBuddy} {
+		acc := &Account{ID: 1, Platform: platform, Type: AccountTypeOAuth,
+			Credentials: map[string]any{"model_mapping": map[string]any{"x": "x"}},
+			Extra:       map[string]any{"mixed_scheduling": false},
+		}
+		// 自身平台上的 catalog 能力判定与改动前一致（true），且不受 mixed_scheduling Extra 影响。
+		require.True(t, mixedListingAccountCatalogCapable(platform, acc),
+			"aggregate platform %s must remain catalog-capable on its own platform", platform)
+		acc.Extra = map[string]any{"mixed_scheduling": true}
+		require.True(t, mixedListingAccountCatalogCapable(platform, acc),
+			"mixed_scheduling Extra must not affect non-antigravity platform %s", platform)
+		// 在 gemini 分组里不参与跨平台供给（改动前既如此），语义不变。
+		require.False(t, codexAccountServesPlatformModel(acc, PlatformGemini, "gemini-custom"))
+	}
+}
+
 func TestAstraUltraCatalogPreservesWorkflowMetadata(t *testing.T) {
 	// Ultra is a Codex workflow. Its inference effort must survive catalog sync,
 	// aliases and group generation instead of silently falling back to max.

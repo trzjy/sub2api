@@ -125,7 +125,7 @@ func codexModelRoutingAccountIDs(group *Group, modelID string) []int64 {
 
 func codexAccountServesPlatformModel(account *Account, platform, modelID string) bool {
 	return account.Platform == platform ||
-		(account.Platform == PlatformAntigravity && mixedListingAccountAllowed(platform, account) &&
+		(account.Platform == PlatformAntigravity && mixedListingAccountCatalogCapable(platform, account) &&
 			mixedListingModelAllowed(platform, modelID))
 }
 
