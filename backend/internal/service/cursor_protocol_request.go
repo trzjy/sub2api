@@ -26,7 +26,6 @@ package service
 //   - 不新增任何非文本 action（工具/执行/多模态一律不发）。
 
 import (
-	"os"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -548,31 +547,9 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool, wireMap map[string]string, 
 			continue
 		}
 		def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, valBytes)
-		// S8 诊断实验（环境开关，2026-11-08）：上游若按 f6 读 schema，只写 f3 会让它
-		// 读到 undefined → .toString() 崩。开关开启时**同时**写 f6（社区口径 JSON 字符串），
-		// 回程解析路径不变（仍优先读 f3）。
-		//
-		// 这是**诊断用临时开关**，默认关。实验结论出来后本开关连同分支一并撤除。
-		if cursorExperimentalWriteLegacySchema() {
-			def = cursorAppendStringField(def, cursorFldMcpToolDefInputSchemaLegacy, schema)
-		}
 		mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
 	}
 	return mcp, nil
-}
-
-// cursorExperimentalWriteLegacySchema 报告是否在出站 McpToolDefinition 里**额外**写
-// f6（input_schema_json 字符串，社区口径）。
-//
-// 诊断背景（2026-11-08）：生产 cursor 平台「对外零失败但中位耗时 74 秒、单请求内部换号
-// 487 次」，上游错误全部是 `Cannot read properties of undefined (reading 'toString')`。
-// 我们改用 f3 承载 schema 的那次提交（825125837）**没有上游活体证据**，其验证是
-// 「我们自己能解码 f3」——自洽断言。若上游按 f6 读 schema，只写 f3 就会让它读到 undefined。
-//
-// **默认关**。环境变量 `SUB2API_CURSOR_WRITE_F6_SCHEMA=1` 开启。
-// 这是诊断用临时开关，实验结论出来后必须撤除（含此函数与调用点）。
-func cursorExperimentalWriteLegacySchema() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("SUB2API_CURSOR_WRITE_F6_SCHEMA")), "1")
 }
 
 // cursorTurnImage 是一张已解出原始字节的图片（来自 content-part 的 data URI）。

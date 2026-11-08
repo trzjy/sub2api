@@ -501,13 +501,13 @@ type UpdateAccountInput struct {
 // 规则：cursor 平台账号必须归属某个激活码（quota_key_id 必填）；其它平台必须保持 NULL。
 // 这是应用层前置校验，DB CHECK 约束 accounts_cursor_quota_key_required 提供兜底。
 //
-// CARD-KC-02 放宽：第三方 Cursor 网关上游（如 kn-cy.com）是 API Key 认证，不依赖
-// ShareAI 的 quota_key（激活码），因此 cursor + apikey + quota_key_id 为 nil 时放行。
-// OAuth 类型的 cursor 账号继续强制要求绑定激活码。
+// 第二上游（kn-cy 等）的卡密作为 quota_keys 的一类卡密，走既有号池链路建号，账号由
+// 号池落库时自动带 quota_key_id 归属。因此 cursor 平台账号（无论是 ShareAI 号池的
+// OAuth 账号，还是 kn-cy 等第二上游账号）一律要求 quota_key_id 非空，不再对 apikey
+// 类型放行（KC-23 已回退 KC-02 的放宽）。
 //
 // 用于 CreateAccount / UpdateAccount 入口：
-//   - platform 为 cursor 且 quotaKeyID 为 nil 且非 apikey → 400，提示必须绑定激活码
-//   - platform 为 cursor 且 quotaKeyID 为 nil 且 accountType 为 apikey → 放行（网关直连上游）
+//   - platform 为 cursor 且 quotaKeyID 为 nil → 400，提示必须绑定激活码
 //   - platform 非 cursor 且 quotaKeyID 非 nil → 400，拒绝归属（D-CURSOR-035）
 //
 // 反向拒绝的理由（终审 r5 F1）：非 cursor 建号携带 quota_key_id 时不走 ≤15 集中入口
@@ -517,9 +517,6 @@ type UpdateAccountInput struct {
 // （admin API 是唯一写入口；不新增 DB CHECK）。
 func validateAccountQuotaKeyBinding(platform, accountType string, quotaKeyID *int64) error {
 	if platform == domain.PlatformCursor && quotaKeyID == nil {
-		if accountType == domain.AccountTypeAPIKey {
-			return nil
-		}
 		return infraerrors.New(http.StatusBadRequest, "ACCOUNT_QUOTA_KEY_REQUIRED",
 			"cursor platform accounts must be bound to a quota key (quota_key_id is required)")
 	}
