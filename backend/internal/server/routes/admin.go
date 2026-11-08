@@ -401,8 +401,6 @@ func registerQuotaKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 		qk.POST("/auto/batch_import", h.Admin.QuotaKey.BatchImportCards)
 		qk.POST("/auto/refresh_all", h.Admin.QuotaKey.RefreshAutoPool)
 		qk.GET("/auto/status", h.Admin.QuotaKey.GetAutoPoolStatus)
-		// kn-cy.com 卡密激活入口：独立上游链路，与 ShareAI Auto 链（auto_* 路由）完全隔离。
-		qk.POST("/kn_cy/claim_activation", h.Admin.QuotaKey.ClaimKnCyActivation)
 		// 每日额度实测统计（D2 统计设计）：回答"每码每天 400 被几个号烧光"与
 		// "每个号每天多少额度"。静态路径必须注册在 /:id 之前，否则会被当成 id 解析。
 		qk.GET("/daily_stats", h.Admin.QuotaKey.DailyStats)
