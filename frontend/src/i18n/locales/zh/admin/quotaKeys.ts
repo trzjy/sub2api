@@ -22,7 +22,8 @@ export default {
       workingCount: '可用账号数',
       expiresAt: '过期时间',
       lastRefreshError: '最近错误',
-      actions: '操作'
+      actions: '操作',
+      upstream: '上游'
     },
     code: '激活码原文',
     codePlaceholder: '请输入激活码原文（仅提交一次，提交后前端不再持有明文）',
@@ -143,6 +144,24 @@ export default {
     errorText: {
       refreshLimitedHours: '刷新次数达上限（{count}次），约 {hours} 小时后重置。',
       refreshLimitedMinutes: '刷新次数达上限（{count}次），约 {minutes} 分钟后重置。'
+    },
+    upstream: {
+      column: '上游',
+      editTitle: '编辑上游信息',
+      name: '显示名',
+      namePlaceholder: '上游显示名（例如 kn-cy.com 网关）',
+      type: '类型',
+      key: '标识',
+      renewalUrl: '续费链接',
+      renewalUrlPlaceholder: '上游续费/采购外链，留空表示暂未配置',
+      notes: '备注',
+      notesPlaceholder: '可选备注',
+      save: '保存',
+      saved: '上游信息已保存',
+      saveError: '保存上游信息失败',
+      loadError: '加载上游列表失败',
+      edit: '编辑上游',
+      empty: '暂无上游条目'
     }
   }
 }

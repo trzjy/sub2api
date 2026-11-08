@@ -22,7 +22,8 @@ export default {
       workingCount: 'Working',
       expiresAt: 'Expires At',
       lastRefreshError: 'Last Error',
-      actions: 'Actions'
+      actions: 'Actions',
+      upstream: 'Upstream'
     },
     code: 'Activation Code',
     codePlaceholder: 'Enter the raw activation code (submitted once; the plaintext is never retained)',
@@ -143,6 +144,24 @@ export default {
     errorText: {
       refreshLimitedHours: 'Refresh limit reached ({count} times); resets in about {hours} hours.',
       refreshLimitedMinutes: 'Refresh limit reached ({count} times); resets in about {minutes} minutes.'
+    },
+    upstream: {
+      column: 'Upstream',
+      editTitle: 'Edit Upstream',
+      name: 'Display Name',
+      namePlaceholder: 'Upstream display name (e.g. kn-cy.com Gateway)',
+      type: 'Type',
+      key: 'Key',
+      renewalUrl: 'Renewal URL',
+      renewalUrlPlaceholder: 'Upstream renewal/purchase link; leave empty if not configured',
+      notes: 'Notes',
+      notesPlaceholder: 'Optional notes',
+      save: 'Save',
+      saved: 'Upstream info saved',
+      saveError: 'Failed to save upstream info',
+      loadError: 'Failed to load upstream list',
+      edit: 'Edit Upstream',
+      empty: 'No upstream entries'
     }
   }
 }

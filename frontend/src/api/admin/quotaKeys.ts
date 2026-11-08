@@ -46,6 +46,9 @@ export interface QuotaKey {
   // 口径：quota_keys.usage_snapshot 的**已提交**值，列表/详情/probe 与账号行同源同值。
   // 无快照时省略（不是 0）；查询失败时 total/used 是上次成功值，须带时间并标注失败。
   usage?: QuotaKeyUsageProjection
+  // 上游标识（引用 quota_upstreams.key）。列表端点回填后前端据此匹配上游显示名；
+  // 后端尚未在 quota_keys 列表响应中返回该字段时本项为 undefined，前端回落显示原始标识。
+  upstream_key?: string | null
 }
 
 /**
@@ -213,6 +216,50 @@ export interface ProbeQuotaResponse extends KeyQuotaInfo {
   usage?: QuotaKeyUsageProjection
 }
 
+/**
+ * 上游条目（quota_upstreams 注册表）展示投影。
+ * 标识 key 与类型 type 由后端决定、前端只读不可改（改 key 会打断 quota_keys.upstream_key
+ * 引用，改 type 会改变拉号客户端语义）。响应体不含任何凭据。
+ */
+export interface QuotaUpstream {
+  id: number
+  key: string
+  name: string
+  type: string
+  renewal_url?: string | null
+  notes?: string | null
+}
+
+/** 上游条目列表响应：{ items: QuotaUpstream[] }。 */
+export interface QuotaUpstreamListResponse {
+  items: QuotaUpstream[]
+}
+
+/** 编辑上游条目请求：仅 name / renewal_url / notes 可写；key 与 type 不可改。 */
+export interface UpdateQuotaUpstreamRequest {
+  name: string
+  renewal_url?: string | null
+  notes?: string | null
+}
+
+/** 列出全部上游条目（标识 + 显示名 + 类型 + 续费 URL）。 */
+export async function listUpstreams(): Promise<QuotaUpstreamListResponse> {
+  const { data } = await apiClient.get<QuotaUpstreamListResponse>('/admin/quota_upstreams')
+  return data
+}
+
+/** 编辑上游条目（仅显示名 / 续费 URL / 备注；key 与 type 不可改）。 */
+export async function updateUpstream(
+  key: string,
+  payload: UpdateQuotaUpstreamRequest
+): Promise<QuotaUpstream> {
+  const { data } = await apiClient.put<QuotaUpstream>(
+    `/admin/quota_upstreams/${encodeURIComponent(key)}`,
+    payload
+  )
+  return data
+}
+
 /** 读取 cursor 入库可配置（厂商勾选 + 模型清单 + 入库参数）。 */
 export async function getAutoEntryConfig(): Promise<AutoEntryConfig> {
   const { data } = await apiClient.get<AutoEntryConfig>('/admin/quota_keys/auto_entry_config')
@@ -282,7 +329,9 @@ const quotaKeysAPI = {
   updateAutoEntryConfig,
   probeQuota,
   batchImportAutoCards,
-  refreshAutoPool
+  refreshAutoPool,
+  listUpstreams,
+  updateUpstream
 }
 
 export default quotaKeysAPI

@@ -32,6 +32,19 @@
             </button>
           </div>
           <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
+            <!-- 上游显示名编辑入口（CARD-KC-18）：与 KC-09 的「上游续费」入口并列，
+                 但职责不同——本按钮编辑上游注册表的显示名 / 续费链接 / 备注，
+                 不替换 KC-09 既有的 kn-cy.com / ShareAI 静态续费入口。 -->
+            <button
+              class="btn btn-secondary"
+              :disabled="upstreamLoading"
+              data-testid="upstream-edit-toggle"
+              @click="openUpstreamDialog"
+            >
+              <Icon name="edit" size="md" class="mr-1" />
+              {{ t('admin.quotaKeys.upstream.edit') }}
+            </button>
+
             <!-- 上游续费/采购入口（CARD-KC-09）：kn-cy.com 有公开商铺，直开外链；
                  ShareAI 暂无公开商铺，保留占位项并以提示模态框说明。 -->
             <div ref="upstreamStoreRef" class="relative">
@@ -120,6 +133,29 @@
         <DataTable :columns="columns" :data="visibleKeys" :loading="loading">
           <template #cell-code_masked="{ value }">
             <code class="font-mono text-sm text-gray-900 dark:text-gray-100">{{ value || t('admin.quotaKeys.na') }}</code>
+          </template>
+
+          <!-- CARD-KC-18：激活码列表按上游区分显示。匹配到上游条目 → 显示名 (标识)；
+               上游条目缺失但 upstream_key 存在 → 回落显示原始 upstream_key（不空白）；
+               后端尚未回填 upstream_key 时 → 占位符。renewal_url 非空时附上游续费外链。 -->
+          <template #cell-upstream="{ row }">
+            <span
+              v-if="upstreamLabel(row)"
+              class="inline-flex items-center gap-1 text-sm text-gray-700 dark:text-gray-200"
+            >
+              {{ upstreamLabel(row) }}
+              <a
+                v-if="upstreamRenewalUrl(row)"
+                :href="upstreamRenewalUrl(row)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-blue-500 hover:text-blue-600 dark:text-blue-400"
+                :title="t('admin.quotaKeys.upstream.renewalUrl')"
+              >
+                <Icon name="externalLink" size="sm" />
+              </a>
+            </span>
+            <span v-else class="text-sm text-gray-400 dark:text-gray-500">{{ t('admin.quotaKeys.na') }}</span>
           </template>
 
           <!-- §25.6⑦ / §25.7-B：来源额度快照（供应商总额/已用/算术剩余 + 观测时间）。
@@ -502,6 +538,92 @@
       </template>
     </BaseDialog>
 
+    <!-- 入库显示名/续费链接/备注编辑（CARD-KC-18）：与 KC-09 的「上游续费」入口并列，
+         但负责维护 quota_upstreams 注册表的显示名等元数据；不替换 KC-09 既有外链入口。 -->
+    <BaseDialog
+      :show="showUpstreamDialog"
+      :title="t('admin.quotaKeys.upstream.editTitle')"
+      width="wide"
+      @close="showUpstreamDialog = false"
+    >
+      <div v-if="upstreamLoading" class="py-8 text-center text-sm text-gray-500 dark:text-gray-400">
+        {{ t('admin.quotaKeys.upstream.loadError') }}
+      </div>
+      <p v-else-if="!upstreams.length" class="py-6 text-center text-sm text-gray-500 dark:text-gray-400">
+        {{ t('admin.quotaKeys.upstream.empty') }}
+      </p>
+      <ul v-else class="divide-y divide-gray-100 dark:divide-dark-700">
+        <li
+          v-for="u in upstreams"
+          :key="u.key"
+          class="space-y-2 py-3"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-dark-700 dark:text-dark-400">
+              {{ u.key }}
+            </span>
+            <span class="text-xs text-gray-400 dark:text-gray-500">{{ u.type }}</span>
+          </div>
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div>
+              <label class="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">
+                {{ t('admin.quotaKeys.upstream.name') }}
+              </label>
+              <input
+                v-model="upstreamForms[u.key]!.name"
+                type="text"
+                class="input"
+                :placeholder="t('admin.quotaKeys.upstream.namePlaceholder')"
+                :data-testid="`upstream-name-${u.key}`"
+              />
+            </div>
+            <div>
+              <label class="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">
+                {{ t('admin.quotaKeys.upstream.renewalUrl') }}
+              </label>
+              <input
+                v-model="upstreamForms[u.key]!.renewal_url"
+                type="text"
+                class="input"
+                :placeholder="t('admin.quotaKeys.upstream.renewalUrlPlaceholder')"
+                :data-testid="`upstream-renewal-${u.key}`"
+              />
+            </div>
+          </div>
+          <div>
+            <label class="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">
+              {{ t('admin.quotaKeys.upstream.notes') }}
+            </label>
+            <TextArea
+              v-model="upstreamForms[u.key]!.notes"
+              :rows="2"
+              :placeholder="t('admin.quotaKeys.upstream.notesPlaceholder')"
+              :data-testid="`upstream-notes-${u.key}`"
+            />
+          </div>
+          <div class="flex items-center justify-end gap-2">
+            <span v-if="upstreamSavingKey === u.key" class="text-xs text-gray-400">{{ t('common.saving') }}</span>
+            <button
+              class="btn btn-primary"
+              :disabled="upstreamSavingKey === u.key"
+              :data-testid="`upstream-save-${u.key}`"
+              @click="saveUpstream(u.key)"
+            >
+              {{ t('admin.quotaKeys.upstream.save') }}
+            </button>
+          </div>
+        </li>
+      </ul>
+
+      <template #footer>
+        <div class="flex items-center justify-end">
+          <button class="btn btn-secondary" @click="showUpstreamDialog = false">
+            {{ t('common.close') }}
+          </button>
+        </div>
+      </template>
+    </BaseDialog>
+
     <!-- 入库可配置（D2-a） -->
     <AutoEntryConfigModal :show="showConfigModal" @close="showConfigModal = false" />
 
@@ -633,12 +755,17 @@ import { extractApiErrorMessage } from '@/utils/apiError'
 import { formatDateTime, resolveExpiryDisplay } from '@/utils/format'
 import { formatQuotaKeyError } from '@/utils/quotaKeyError'
 import { adminAPI } from '@/api/admin'
+import {
+  listUpstreams,
+  updateUpstream
+} from '@/api/admin/quotaKeys'
 import type {
   QuotaKey,
   QuotaKeyDetail,
   CreateQuotaKeyRequest,
   UpdateQuotaKeyRequest,
-  ProbeQuotaResponse
+  ProbeQuotaResponse,
+  QuotaUpstream
 } from '@/api/admin/quotaKeys'
 import type { Column } from '@/components/common/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -687,6 +814,16 @@ const autoBatchLoading = ref(false)
 
 const keys = ref<QuotaKey[]>([])
 const loading = ref(false)
+
+// --- 上游注册表（CARD-KC-18）-------------------------------------------------
+// 拉取 quota_upstreams 列表，按 quota_key.upstream_key 匹配上游显示名；
+// 不持有任何凭据（上游条目本身也不含凭据）。
+const upstreams = ref<QuotaUpstream[]>([])
+const upstreamLoading = ref(false)
+const showUpstreamDialog = ref(false)
+const upstreamSavingKey = ref<string | null>(null)
+// 编辑表单：按上游 key 存一份可编辑副本（name / renewal_url / notes）。
+const upstreamForms = reactive<Record<string, { name: string; renewal_url: string; notes: string }>>({})
 
 // Auto 卡密在 quota_keys.notes 中的标记前缀（后端 service 层
 // formatAutoPoolNotes 写入 "auto_pool:dev=...;md5=..."）。
@@ -744,6 +881,8 @@ const expandedAccounts = reactive(new Set<number>())
 
 const columns = computed<Column[]>(() => [
   { key: 'code_masked', label: t('admin.quotaKeys.columns.maskedCode'), sortable: false },
+  // CARD-KC-18：按上游区分显示（显示名 + 标识）；上游条目缺失时回落显示原始 upstream_key。
+  { key: 'upstream', label: t('admin.quotaKeys.columns.upstream'), sortable: false },
   // 来源额度快照列（§25.6⑦）：列名沿用「激活码用量」口径，数值为一层（key/来源）快照。
   { key: 'usage', label: t('admin.quotaKeys.probe.title'), sortable: false },
   { key: 'status', label: t('admin.quotaKeys.columns.status'), sortable: false },
@@ -827,6 +966,87 @@ async function load() {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.loadError')))
   } finally {
     loading.value = false
+  }
+}
+
+// 按上游标识建索引：quota_key.upstream_key → 上游条目。
+const upstreamByKey = computed<Record<string, QuotaUpstream>>(() => {
+  const map: Record<string, QuotaUpstream> = {}
+  for (const u of upstreams.value) {
+    map[u.key] = u
+  }
+  return map
+})
+
+// 激活码行展示的上游标签：显示名 (标识)；上游条目缺失但 upstream_key 存在时回落显示
+// 原始标识；后端尚未回填 upstream_key 时返回空串（由模板回落到占位符，不空白）。
+function upstreamLabel(row: QuotaKey): string {
+  const key = row.upstream_key
+  if (!key) return ''
+  const u = upstreamByKey.value[key]
+  if (u) return `${u.name} (${u.key})`
+  return key
+}
+
+// 上游非空续费链接（KC-18 条目级链接，与 KC-09 既有 kn-cy/ShareAI 静态入口共存）。
+function upstreamRenewalUrl(row: QuotaKey): string {
+  const key = row.upstream_key
+  if (!key) return ''
+  const u = upstreamByKey.value[key]
+  return u?.renewal_url || ''
+}
+
+async function loadUpstreams() {
+  upstreamLoading.value = true
+  try {
+    const data = await listUpstreams()
+    upstreams.value = data.items
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.upstream.loadError')))
+  } finally {
+    upstreamLoading.value = false
+  }
+}
+
+// 打开上游编辑弹窗：用当前上游条目回填可编辑表单副本。
+function openUpstreamDialog() {
+  for (const u of upstreams.value) {
+    upstreamForms[u.key] = {
+      name: u.name,
+      renewal_url: u.renewal_url ?? '',
+      notes: u.notes ?? ''
+    }
+  }
+  showUpstreamDialog.value = true
+}
+
+// 保存单个上游条目：仅提交 name / renewal_url / notes（key 与 type 不可改）。
+// 成功后更新本地条目并刷新激活码列表，使按上游区分的显示名立即生效（含激活码列表）。
+async function saveUpstream(key: string) {
+  const form = upstreamForms[key]
+  if (!form || !form.name.trim()) {
+    appStore.showError(t('admin.quotaKeys.upstream.namePlaceholder'))
+    return
+  }
+  upstreamSavingKey.value = key
+  try {
+    const payload = {
+      name: form.name.trim(),
+      renewal_url: form.renewal_url.trim() ? form.renewal_url.trim() : null,
+      notes: form.notes.trim() ? form.notes.trim() : null
+    }
+    const updated = await updateUpstream(key, payload)
+    const idx = upstreams.value.findIndex((u) => u.key === key)
+    if (idx >= 0) {
+      upstreams.value[idx] = updated
+    }
+    appStore.showSuccess(t('admin.quotaKeys.upstream.saved'))
+    // 刷新激活码列表，使按上游区分的显示名立刻生效。
+    await load()
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.upstream.saveError')))
+  } finally {
+    upstreamSavingKey.value = null
   }
 }
 
@@ -1078,6 +1298,7 @@ async function submitAutoBatch() {
 
 onMounted(() => {
   void load()
+  void loadUpstreams()
   document.addEventListener('click', handleUpstreamStoreClickOutside)
 })
 
