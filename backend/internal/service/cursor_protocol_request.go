@@ -26,7 +26,6 @@ package service
 //   - 不新增任何非文本 action（工具/执行/多模态一律不发）。
 
 import (
-	"os"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -63,13 +62,6 @@ const (
 	cursorFldRunConversationState = 1  // ConversationStateStructure
 	cursorFldRunAction            = 2  // ConversationAction
 	cursorFldRunModelDetails      = 3  // ModelDetails（旧；上游真实客户端 2026-10-26 抓包用 f9）
-	// cursorFldRunModelDetailsV9 是上游真实 Cursor 桌面客户端 2026-10-26 抓包里的 model_details 字段号
-	// （/home/zjy/.sub2api-acceptance/sub2api-cursor-desktop-wire-20261026/host-*-request.bin：
-	// 5 份样本的 run 字段完全一致 = [1,2,4,5,9,10,14,19,21,23,25,28,31,34]）。
-	cursorFldRunModelDetailsV9 = 9
-	// ModelDetails 内：f1=model_name / f2=varint 1 / f3=repeated {f1=key, f2=value}（参数）
-	cursorFldModelDetailsEnabled = 2
-	cursorFldModelDetailsParam    = 3
 	cursorFldRunMcpTools          = 4  // McpTools（活体样本里是**空 message**，但仍出现）
 	cursorFldRunConversationID    = 5  // string [opt]
 	cursorFldRunPreFetchedBlobs   = 17 // repeated PreFetchedBlob（多轮历史的 KV 载荷）
@@ -324,20 +316,8 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	//    conversation_id → pre_fetched_blobs…）。
 	run := cursorAppendBytesField(nil, cursorFldRunConversationState, state)
 	run = cursorAppendBytesField(run, cursorFldRunAction, action)
-	if cursorExperimentalRealClientModelDetails() {
-		// 上游真实客户端形态：f9 = {f1:model_name, f2:1, f3:{key:value} x N}
-		md := cursorAppendStringField(nil, cursorFldModelDetailsID, upstreamModel)
-		md = cursorAppendVarintField(md, cursorFldModelDetailsEnabled, 1)
-		for _, kv := range cursorExperimentalModelDetailParams(upstreamModel) {
-			inner := cursorAppendStringField(nil, 1, kv[0])
-			inner = cursorAppendStringField(inner, 2, kv[1])
-			md = cursorAppendBytesField(md, cursorFldModelDetailsParam, inner)
-		}
-		run = cursorAppendBytesField(run, cursorFldRunModelDetailsV9, md)
-	} else {
-		run = cursorAppendBytesField(run, cursorFldRunModelDetails,
-			cursorAppendStringField(nil, cursorFldModelDetailsID, upstreamModel))
-	}
+	run = cursorAppendBytesField(run, cursorFldRunModelDetails,
+		cursorAppendStringField(nil, cursorFldModelDetailsID, upstreamModel))
 	// mcp_tools：请求携带 tools 且 tool_choice != "none" 时，把 function 工具编码进
 	// f4（McpTools）声明给上游；否则保持空 message（f4 字段存在、长度 0，与活体样本
 	// 同形——既满足"无 tools 时零变化"的纯文本链回归保护，也保住 33/63 号黄金字节）。
@@ -423,7 +403,8 @@ func cursorFunctionTools(tools []apicompat.ChatTool) []apicompat.ChatTool {
 // cursorBuiltinToolNames 是 Cursor 上游自带的内置工具名（归一化后比较）。
 // 客户端工具名撞上这些名字 → 上游拒绝整个请求（社区实测），必须改名避开。
 // 取值来自社区 cursor2api/session.py 的 BUILTIN_TOOLS：
-//   read write ls delete grep glob shell web_search web_fetch
+//
+//	read write ls delete grep glob shell web_search web_fetch
 var cursorBuiltinToolNames = map[string]bool{
 	"read": true, "write": true, "ls": true, "delete": true, "grep": true,
 	"glob": true, "shell": true, "web_search": true, "web_fetch": true,
@@ -440,8 +421,9 @@ var cursorBuiltinToolNames = map[string]bool{
 // cursorWireToolName 返回该工具名发给上游时用的 wire name（**纯函数**）。
 //
 // 规则（施工图 W3，与入站映射那张卡逐字一致）：
-//   归一化后不撞内置名 → wire name == 原名（绝大多数工具走这条）；
-//   撞内置名 → 原名后加 "_"，重复直到归一化后不撞内置名。
+//
+//	归一化后不撞内置名 → wire name == 原名（绝大多数工具走这条）；
+//	撞内置名 → 原名后加 "_"，重复直到归一化后不撞内置名。
 //
 // 注意：本纯函数只处理「撞内置名」这一条；「与本批其它工具不重复」的去重（W3 规则 2
 // 的第二段）依赖整批工具集合，由 cursorWireToolNameSet 负责。历史重放与声明改名都从
@@ -570,48 +552,6 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool, wireMap map[string]string, 
 		mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
 	}
 	return mcp, nil
-}
-
-// cursorExperimentalRealClientModelDetails 报告是否按**上游真实 Cursor 桌面客户端**
-// 的 model_details 形态出站（f9 + 参数），而不是我们原来的 f3 + 只有模型名。
-//
-// 依据（真实抓包，非社区实现）：
-// /home/zjy/.sub2api-acceptance/sub2api-cursor-desktop-wire-20261026/host-*-request.bin
-// 5 份上游真实客户端样本的 run 字段完全一致 = [1,2,4,5,9,10,14,19,21,23,25,28,31,34]，
-// 其中 f9 = {f1:model_name, f2:varint 1, f3:{key:value} 重复}，例如
-//   {f1:"claude-fable-5-1", f2:1, f3:{thinking:"true"}, f3:{context:"1m"}, f3:{effort:"high"}}
-//   {f1:"claude-sonnet-5-5", f2:1, f3:{context:"1m"}, f3:{reasoning_effort:"high"}}
-//
-// 诊断背景：生产 cursor 平台对外零失败但中位耗时 74 秒、单请求内部换号 487 次，
-// 上游错误全部是 `Cannot read properties of undefined (reading 'toString')`（code=internal）。
-// 若上游按 f9 读 model_details 并读其中的 params，而我们只发 f3 + 无 params，
-// 就会读到 undefined → 崩。
-//
-// **默认关**（诊断用）。环境变量 `SUB2API_CURSOR_REAL_MODEL_DETAILS=1` 开启。
-// 实验结论出来后本开关与分支一并撤除。
-func cursorExperimentalRealClientModelDetails() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("SUB2API_CURSOR_REAL_MODEL_DETAILS")), "1")
-}
-
-// cursorExperimentalModelDetailParams 返回要写进 model_details 的参数（key,value 对）。
-//
-// 取值来自上游真实客户端 2026-10-26 抓包（host-*-request.bin 的 f9.f3）：
-//   claude-fable-5-1  → thinking=true / context=1m / effort=high
-//   claude-sonnet-5-5 → context=1m / reasoning_effort=high
-//   claude-opus-5-5   → context=1m / effort=medium / fast=false
-// 我们按**同族模型**取对应的一组（模型名去掉尾部 -N 后按前缀匹配）。
-func cursorExperimentalModelDetailParams(upstreamModel string) [][2]string {
-	name := strings.TrimSpace(upstreamModel)
-	switch {
-	case strings.HasPrefix(name, "claude-fable"):
-		return [][2]string{{"thinking", "true"}, {"context", "1m"}, {"effort", "high"}}
-	case strings.HasPrefix(name, "claude-opus"):
-		return [][2]string{{"context", "1m"}, {"effort", "medium"}, {"fast", "false"}}
-	case strings.HasPrefix(name, "claude-sonnet"):
-		return [][2]string{{"context", "1m"}, {"reasoning_effort", "high"}}
-	default:
-		return nil
-	}
 }
 
 // cursorTurnImage 是一张已解出原始字节的图片（来自 content-part 的 data URI）。
