@@ -270,6 +270,23 @@ func TestKnCyClient_GetSubscriptionUsage_Non2xxCredentialEcho(t *testing.T) {
 	}
 }
 
+// TestKnCyClient_DefaultBaseURL 回归测试：防止默认管理端 API 主机再次被写成带
+// api. 前缀的根主机（生产实测该 host 一律 404 Invalid URL）。
+//
+// 正确默认值必须恰好为 https://kn-cy.com（无 api. 前缀）。
+// 与模型出站网关 knCyGatewayBaseURL（https://kn-cy.com/v1）不是同一回事。
+func TestKnCyClient_DefaultBaseURL(t *testing.T) {
+	c := NewKnCyClient("")
+	if c.baseURL != "https://kn-cy.com" {
+		t.Fatalf("NewKnCyClient(\"\").baseURL = %q, want https://kn-cy.com", c.baseURL)
+	}
+	// 显式传入的 baseURL 不应被默认值覆盖。
+	c2 := NewKnCyClient("https://example.test")
+	if c2.baseURL != "https://example.test" {
+		t.Fatalf("NewKnCyClient(override).baseURL = %q, want https://example.test", c2.baseURL)
+	}
+}
+
 // ---- KnCy QuotaKeyUpstreamClient（KC-15）定向测试 ----
 
 // fakeQuotaKeyEncryptor 是测试用占位加密器：明文直通（模拟 credcrypt 未配置主密钥时的

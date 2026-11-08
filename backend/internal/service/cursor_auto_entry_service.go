@@ -131,7 +131,8 @@ type CursorAutoEntryService struct {
 	lookupBaseURL string
 	// knCyClient 是 kn-cy.com 上游客户端（额度观测专用：GetSubscriptionUsage）。
 	// 观测路径按 quota_keys.upstream_key 分派：kn_cy 走这里，shareai 走既有的 lookupQuota。
-	// 构造期由 NewKnCyClient("") 内部创建（baseURL 空即回退默认 api.kn-cy.com），
+	// 构造期由 NewKnCyClient("") 内部创建（baseURL 空即回退默认 https://kn-cy.com，
+	// 管理端 API 主机，无 api. 前缀 —— 见 knCyDefaultAPIBaseURL），
 	// 不新增构造参数、不扩大装配面；测试可用 SetKnCyClient 注入指向 httptest 的替身。
 	knCyClient *KnCyClient
 	// observeTx 是"每 key 互斥 + 单事务"骨架的可替换执行点（默认 withQuotaKeyLockTx）。

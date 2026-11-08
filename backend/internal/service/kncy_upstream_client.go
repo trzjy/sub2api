@@ -26,6 +26,17 @@ import (
 //   - 非 2xx 或业务错误返回明确错误；错误信息不携带密钥/激活码原文，避免凭据落入日志。
 
 const (
+	// knCyDefaultAPIBaseURL 是 kn-cy.com 管理端 API（激活 / 用量查询）的默认主机根地址。
+	//
+	// 注意区分两个 host：
+	//   - 本常量（管理端 API）：https://kn-cy.com（无 api. 前缀）。
+	//     端点：POST /api/activation/claim、GET /api/usage/subscription/。
+	//   - 模型出站网关（OpenAI 兼容）：knCyGatewayBaseURL = "https://kn-cy.com/v1"（两回事，不要动）。
+	//
+	// 实测依据（2026-11-08 生产复现）：带 api. 前缀的根主机一律返回 404 Invalid URL；
+	// 正确主机为 kn-cy.com（无 api. 前缀）。切勿再散落带 api. 前缀的根主机字面量。
+	knCyDefaultAPIBaseURL = "https://kn-cy.com"
+
 	// knCyDefaultHTTPTimeout 是 kn-cy.com 客户端默认 HTTP 超时。
 	knCyDefaultHTTPTimeout = 30 * time.Second
 )
@@ -54,10 +65,11 @@ type KnCyClient struct {
 	httpClient *http.Client
 }
 
-// NewKnCyClient 构造 kn-cy.com 上游客户端。baseURL 为空时回退到默认端点。
+// NewKnCyClient 构造 kn-cy.com 上游客户端。baseURL 为空时回退到默认管理端 API 端点
+// （knCyDefaultAPIBaseURL = "https://kn-cy.com"，无 api. 前缀）。
 func NewKnCyClient(baseURL string) *KnCyClient {
 	if baseURL == "" {
-		baseURL = "https://api.kn-cy.com"
+		baseURL = knCyDefaultAPIBaseURL
 	}
 	return &KnCyClient{
 		baseURL:    strings.TrimRight(baseURL, "/"),
