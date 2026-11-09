@@ -426,6 +426,12 @@ func respondQuotaKeyError(c *gin.Context, err error) {
 		response.ErrorFrom(c, infraerrors.NotFound("QUOTA_KEY_NOT_FOUND", "quota key not found"))
 		return
 	}
+	// 同一张激活码已有未软删记录（code_mac 唯一冲突）：返回 409 + 明确文案，
+	// 不再让用户只看到 internal error（生产实证：重建已删/已存在的卡时无从判断原因）。
+	if errors.Is(err, service.ErrQuotaKeyDuplicateCode) {
+		response.ErrorFrom(c, infraerrors.Conflict("QUOTA_KEY_DUPLICATE_CODE", "该激活码已存在，请勿重复添加"))
+		return
+	}
 	var upe *service.UpstreamPullError
 	if errors.As(err, &upe) {
 		response.ErrorFrom(c, infraerrors.New(http.StatusBadGateway, "QUOTA_KEY_UPSTREAM", upe.Message()))
