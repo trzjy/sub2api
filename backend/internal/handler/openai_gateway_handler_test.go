@@ -3154,7 +3154,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	require.NoError(t, err)
 
 	if tc.closeReason == "" {
-		tc.closeReason = "不在当前分组支持范围内"
+		tc.closeReason = "当前分组不支持模型"
 	}
 	if tc.closeStatus == 0 {
 		tc.closeStatus = coderws.StatusPolicyViolation
@@ -3173,7 +3173,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		require.Equal(t, status, closeErr.Code)
 		reason := tc.closeReason
 		if reason == "" {
-			reason = "不在当前分组支持范围内"
+			reason = "当前分组不支持模型"
 		}
 		require.Contains(t, closeErr.Reason, reason)
 		require.Empty(t, upstreamPayloadCh, "rejected first frame must not reach upstream")
@@ -3230,7 +3230,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 			require.Equal(t, status, closeErr.Code)
 			reason := tc.closeReason
 			if reason == "" {
-				reason = "不在当前分组支持范围内"
+				reason = "当前分组不支持模型"
 			}
 			require.Contains(t, closeErr.Reason, reason)
 			require.Len(t, upstreamPayloadCh, turnCount-1, "rejected turn must not reach upstream")
