@@ -70,6 +70,48 @@ func TestSchedulerCacheSnapshotPreservesMaskUpstreamIdentity(t *testing.T) {
 // 读的同样是 sched:meta 元数据投影。若投影裁掉 masked_input_band，大档专用账号（kiro 中转）
 // 会退化成普通伪装号 → 被小档池收下、反过来抢 1 万以下的小活，而 1 万以上的请求整池
 // 无候选、全部回落星思付费池（两种方向都错，且不报错、只在账单上体现）。
+// TestSchedulerCacheSnapshotPreservesAccountMaxInput 钉死账号级大小门的投影依赖：
+// SizeExcludedIDs 经 ListSchedulableAccounts 的 sched:meta 投影读 extra.max_input_tokens，
+// 若投影裁掉该键，账号声明的上限在生产恒不生效（不报错、只表现为大请求照旧落到该账号）。
+func TestSchedulerCacheSnapshotPreservesAccountMaxInput(t *testing.T) {
+	ctx := context.Background()
+	cache, _ := newSchedulerCacheUnitWithRedis(t)
+
+	bucket := service.SchedulerBucket{
+		GroupID:  57,
+		Platform: "deepseek@agg1",
+		Mode:     service.SchedulerModeSingle,
+	}
+
+	limited := service.Account{
+		ID:          442,
+		Platform:    service.PlatformDeepseek,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Extra: map[string]any{
+			service.AccountMaxInputExtraKey: 256000,
+		},
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"deepseek-flash": "LongCat-2.5"},
+		},
+	}
+
+	token, err := cache.CaptureBucketWriteToken(ctx, bucket)
+	require.NoError(t, err)
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, []service.Account{limited}))
+
+	got, hit, err := cache.GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Len(t, got, 1)
+
+	max, ok := service.AccountMaxInputTokensOf(got[0])
+	require.True(t, ok, "快照投影必须保留 max_input_tokens，否则账号级大小门在生产恒不生效")
+	require.Equal(t, 256000, max)
+}
+
 func TestSchedulerCacheSnapshotPreservesMaskedInputBand(t *testing.T) {
 	ctx := context.Background()
 	cache, _ := newSchedulerCacheUnitWithRedis(t)

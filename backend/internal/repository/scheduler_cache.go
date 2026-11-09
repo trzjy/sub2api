@@ -1340,6 +1340,9 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 裁掉它，大档专用账号（kiro 中转）会被当成未声明区间的普通伪装号，退回小档
 		// 抢 1 万以下的活，而 1 万以上的请求则整池无候选、全部回落星思付费池。
 		service.MaskedInputBandExtraKey,
+		// 账号级单请求估算 input 上限必须进投影：SizeExcludedIDs 经同一
+		// ListSchedulableAccounts 投影消费候选，读 extra.max_input_tokens。
+		service.AccountMaxInputExtraKey,
 		// 身份人设与思考净化必须进投影：转发链（sendCCUpstreamRequest →
 		// injectAccountIdentitySystemMessage）与响应链（IsReasoningStrippedAccount）读的都是
 		// 选号返回的账号对象，而选号返回的正是本投影。裁掉这两个键，伪装账号配的人设永远

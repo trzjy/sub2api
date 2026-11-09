@@ -241,6 +241,31 @@ func MaskedInputBandOf(a *Account) (MaskedInputBand, bool) {
 	return band, true
 }
 
+// AccountMaxInputExtraKey 是账号级「单请求估算 input 上限」的 extra 键。声明后，
+// 估算 input 超过该值的请求不再把此账号列为候选，用于按次计费套餐 / 订阅额度保护。
+const AccountMaxInputExtraKey = "max_input_tokens"
+
+// AccountMaxInputTokensOf 解析账号声明的单请求估算 input 上限（单位 tokens）。
+// 返回 ok=false 表示未声明或声明非法（<=0、非数值），此时账号零行为变化。
+func AccountMaxInputTokensOf(a *Account) (int, bool) {
+	if a == nil {
+		return 0, false
+	}
+	asnap := a.SnapshotExtra()
+	if asnap == nil {
+		return 0, false
+	}
+	raw, ok := asnap[AccountMaxInputExtraKey]
+	if !ok {
+		return 0, false
+	}
+	max := int(parseExtraFloat64(raw))
+	if max <= 0 {
+		return 0, false
+	}
+	return max, true
+}
+
 // maskedInputBandObject 把 extra 里的原始值归一为 map[string]any。
 // DB 读回的 extra 是 jsonb → map[string]any；升级/导入路径可能带 JSON 字符串，
 // 两种形态都接受，其余形态返回 nil（视为未声明）。

@@ -5523,13 +5523,9 @@ func (h *OpenAIGatewayHandler) applySensenovaSizeExclusion(
 		return empty
 	}
 
-	if estimated <= service.SensenovaContextWindowCap {
-		// 中小请求（≤256K）：参与调度，不排除商汤账号（Priority 1 低成本优势保留）。
-		return empty
-	}
-
-	// 超大请求（>256K）：取该分组可调度候选中的商汤账号 id，交由调用方并入 failedAccountIDs。
-	excluded, err := h.gatewayService.SensenovaExcludedIDs(ctx, groupID, platform)
+	// 按本次估算 input 统一计算排除集合：商汤账号的 256K 物理上限 + 任意账号
+	// extra.max_input_tokens 自设上限。未声明上限的账号零行为变化。
+	excluded, err := h.gatewayService.SizeExcludedIDs(ctx, groupID, platform, estimated)
 	if err != nil {
 		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
 		reqLog.Warn("sensenova_size_exclusion_list_failed",

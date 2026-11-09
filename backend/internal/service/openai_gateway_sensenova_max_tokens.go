@@ -102,6 +102,37 @@ func (s *OpenAIGatewayService) SensenovaExcludedIDs(ctx context.Context, groupID
 	return sensenovaAccountIDs(accounts), nil
 }
 
+// accountMaxInputAccountIDs 挑出声明了单请求估算 input 上限、且本次估算超过该上限的账号 id。
+// 纯函数，可单测；未声明或声明非法的账号零行为变化。
+func accountMaxInputAccountIDs(accounts []Account, estimated int) map[int64]struct{} {
+	excluded := make(map[int64]struct{})
+	for i := range accounts {
+		if max, ok := AccountMaxInputTokensOf(&accounts[i]); ok && estimated > max {
+			excluded[accounts[i].ID] = struct{}{}
+		}
+	}
+	return excluded
+}
+
+// SizeExcludedIDs 返回本次请求应排除的账号 id 集合，合并两条按大小的规则：
+//   - 商汤账号：估算 input > SensenovaContextWindowCap（既有 256K 物理上限语义）
+//   - 任意账号：估算 input > 该账号 extra.max_input_tokens（账号自设上限）
+//
+// 复用 listSchedulableAccounts 的候选列举；列举失败返回 error，由调用方失败开放处理。
+func (s *OpenAIGatewayService) SizeExcludedIDs(ctx context.Context, groupID *int64, platform string, estimated int) (map[int64]struct{}, error) {
+	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	if err != nil {
+		return nil, err
+	}
+	excluded := accountMaxInputAccountIDs(accounts, estimated)
+	if estimated > SensenovaContextWindowCap {
+		for id := range sensenovaAccountIDs(accounts) {
+			excluded[id] = struct{}{}
+		}
+	}
+	return excluded, nil
+}
+
 // SensenovaEmptyStreamReason 标记商汤上游返回合法空流（HTTP 200 但正文 0 字符）。
 const SensenovaEmptyStreamReason GatewayFailureReason = "sensenova_empty_stream"
 

@@ -229,6 +229,47 @@ func TestSensenovaAccountIDs(t *testing.T) {
 	require.NotContains(t, got, int64(200), "non-sensenova account must not be excluded")
 }
 
+func TestAccountMaxInputTokensOf(t *testing.T) {
+	t.Parallel()
+	if _, ok := AccountMaxInputTokensOf(nil); ok {
+		t.Fatal("nil 账号应视为未声明")
+	}
+	none := &Account{ID: 1, Extra: map[string]any{}}
+	if _, ok := AccountMaxInputTokensOf(none); ok {
+		t.Fatal("未声明键应视为无上限")
+	}
+	zero := &Account{ID: 2, Extra: map[string]any{AccountMaxInputExtraKey: 0}}
+	if _, ok := AccountMaxInputTokensOf(zero); ok {
+		t.Fatal("上限 <=0 应视为非法")
+	}
+	declared := &Account{ID: 3, Extra: map[string]any{AccountMaxInputExtraKey: 256000}}
+	if max, found := AccountMaxInputTokensOf(declared); !found || max != 256000 {
+		t.Fatalf("期望 256000,true，得 %d,%v", max, found)
+	}
+}
+
+func TestAccountMaxInputAccountIDs(t *testing.T) {
+	t.Parallel()
+	limited := Account{ID: 442, Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+		Extra: map[string]any{AccountMaxInputExtraKey: 256000}}
+	unlimited := Account{ID: 200, Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+		Extra: map[string]any{}}
+	invalid := Account{ID: 201, Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+		Extra: map[string]any{AccountMaxInputExtraKey: -1}}
+	accounts := []Account{limited, unlimited, invalid}
+
+	if got := accountMaxInputAccountIDs(accounts, 256000); len(got) != 0 {
+		t.Fatalf("估算==上限不应排除，得 %v", got)
+	}
+	got := accountMaxInputAccountIDs(accounts, 256001)
+	if _, ok := got[442]; !ok {
+		t.Fatalf("估算>上限必须排除 442，得 %v", got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("未声明/非法值账号零行为变化，只应排除 442，得 %v", got)
+	}
+}
+
 func TestSensenovaExcludedIDs(t *testing.T) {
 	t.Parallel()
 
