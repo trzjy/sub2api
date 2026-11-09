@@ -168,7 +168,11 @@ export default {
       saveError: 'Failed to save upstream info',
       loadError: 'Failed to load upstream list',
       edit: 'Edit Upstream',
-      empty: 'No upstream entries'
+      empty: 'No upstream entries',
+      selectLabel: 'Upstream',
+      selectPlaceholder: 'Select the upstream this key belongs to (determines which account pool pulls it)',
+      selectHint: 'The upstream determines which pull path is used (ShareAI pool / kn-cy.com gateway). It cannot be changed after creation.',
+      selectRequired: 'Please select an upstream'
     }
   }
 }

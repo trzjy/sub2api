@@ -168,7 +168,11 @@ export default {
       saveError: '保存上游信息失败',
       loadError: '加载上游列表失败',
       edit: '编辑上游',
-      empty: '暂无上游条目'
+      empty: '暂无上游条目',
+      selectLabel: '所属上游',
+      selectPlaceholder: '选择该激活码所属的上游（决定用哪个号池拉号）',
+      selectHint: '激活码归属哪个上游，决定拉号时走哪条上游链路（ShareAI 号池 / kn-cy.com 网关）；创建后不可修改。',
+      selectRequired: '请选择所属上游'
     }
   }
 }

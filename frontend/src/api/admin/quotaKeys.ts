@@ -81,9 +81,17 @@ export interface CreateQuotaKeyRequest {
   notes?: string | null
   /** 调度优先级（数值越小越优先）；缺省不传时后端按默认 1 落库。 */
   priority?: number
+  /**
+   * 所属上游的稳定标识（对应 quota_upstreams.key，如 'shareai' / 'kn_cy'）。
+   * 缺省/空串 = 不指定，由后端落列默认值（'shareai'）。
+   * 传非空值时后端会校验该上游存在且未软删，不存在则拒绝创建（失败关闭，不静默回落）。
+   */
+  upstream_key?: string | null
 }
 
 /** 编辑激活码请求（expires_at / notes / priority）。 */
+// 注意：上游归属（upstream_key）创建后不可改——本仓没有改归属的后端能力，
+// 上游决定该码由哪个拉号客户端消费，改归属会让已入库账号与拉号链路语义错配。
 export interface UpdateQuotaKeyRequest {
   expires_at?: string | null
   notes?: string | null

@@ -302,6 +302,21 @@
           <p class="input-hint mt-1">{{ t('admin.quotaKeys.codeHint') }}</p>
         </div>
 
+        <!-- 所属上游：创建时选定，随创建请求提交；创建后不可改（编辑态不渲染）。
+             选项 label 沿用列表「显示名 (标识)」口径（与 upstreamLabel 同源）。 -->
+        <div v-if="!editing">
+          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.quotaKeys.upstream.selectLabel') }}
+          </label>
+          <select v-model="form.upstream_key" class="input" data-testid="upstream-select">
+            <option value="">{{ t('admin.quotaKeys.upstream.selectPlaceholder') }}</option>
+            <option v-for="u in upstreams" :key="u.key" :value="u.key">
+              {{ u.name }} ({{ u.key }})
+            </option>
+          </select>
+          <p class="input-hint mt-1">{{ t('admin.quotaKeys.upstream.selectHint') }}</p>
+        </div>
+
         <div>
           <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
             {{ t('admin.quotaKeys.expiresAt') }}
@@ -945,7 +960,9 @@ const form = reactive({
   notes: '',
   // 激活码优先级：数值越小越优先，与账号 priority 同一语义。该码名下账号的优先级
   // 跟随此值（后端拉号时写入、改优先级时同事务同步）。
-  priority: 1
+  priority: 1,
+  // 所属上游：创建态随请求提交；空串在提交时会被拦截（失败关闭，不再回落 shareai 默认）。
+  upstream_key: ''
 })
 
 /**
@@ -1132,6 +1149,8 @@ function openCreateDialog() {
   form.expires_at = ''
   form.notes = ''
   form.priority = 1
+  // 重置为空串：不默认选第一个上游；提交时若仍为空串会被拦截（失败关闭，不再回落 shareai）。
+  form.upstream_key = ''
   formError.value = ''
   showFormDialog.value = true
 }
@@ -1169,6 +1188,10 @@ function buildPayload(): CreateQuotaKeyRequest | UpdateQuotaKeyRequest {
   if (!editing.value || !isAutoKey(editing.value)) {
     payload.notes = form.notes.trim() ? form.notes.trim() : null
   }
+  // 创建态随请求提交所选上游；编辑态不放（update 接口无该字段，放了亦被忽略且是噪声）。
+  if (!editing.value) {
+    payload.upstream_key = form.upstream_key
+  }
   return payload as UpdateQuotaKeyRequest
 }
 
@@ -1180,6 +1203,13 @@ async function submitForm() {
   // 优先级：正整数，数值越小越优先（与账号 priority 同一口径）。
   if (!Number.isInteger(form.priority) || form.priority < 1) {
     formError.value = t('admin.quotaKeys.priorityInvalid')
+    return
+  }
+  // 创建态必须选定所属上游：不选即拦截，失败关闭。
+  // 上游列表为空（加载失败/被软删）时同样拦截——上游归属无法确认时不得静默落默认 'shareai'，
+  // 否则一张 kn-cy 卡密会被送给 ShareAI 拉号接口。
+  if (!editing.value && !form.upstream_key) {
+    formError.value = t('admin.quotaKeys.upstream.selectRequired')
     return
   }
   saving.value = true
