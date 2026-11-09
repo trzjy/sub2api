@@ -257,6 +257,8 @@ func (s *FailoverState) HandleFailoverError(
 				zap.Duration("cooldown", service.CursorUpstreamFlapCooldown),
 				zap.Int64("account_id", accountID),
 				zap.Int64s("failed_account_ids", failedAccountIDs),
+				zap.String("upstream_code", failoverErr.CursorUpstreamErrorCode),
+				zap.String("upstream_message", failoverErr.CursorUpstreamErrorMessage),
 			)
 		}
 	}

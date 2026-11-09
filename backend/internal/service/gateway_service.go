@@ -721,6 +721,14 @@ type UpstreamFailoverError struct {
 	// 「同一请求已连续失败 >= CursorUpstreamFlapThreshold 个不同账号」之后。
 	// 为真时停调时长从 5 分钟降为 CursorUpstreamFlapCooldown（30 秒）。
 	CursorUpstreamFlapDetected bool
+	// CursorUpstreamErrorCode 是本次 cursor 上游终态错误的传输码（如 internal /
+	// unavailable）。取不到时为空串 —— 「没有」与「有但是空的」要能区分开。
+	CursorUpstreamErrorCode string
+	// CursorUpstreamErrorMessage 是本次 cursor 上游终态错误的原文摘要（已脱敏、
+	// 已按既有 truncateOpenAIWSLogValue 口径归一：上游没带 message 时为 "-"，
+	// 与既有的 cursor_upstream_account_failure 日志同口径）。
+	// 只用于运维观测，不参与错误分类。
+	CursorUpstreamErrorMessage string
 }
 
 func (e *UpstreamFailoverError) Error() string {

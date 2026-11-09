@@ -693,6 +693,12 @@ func (s *CursorExecutionService) Execute(
 					NextAccountAction: NextAccountRetry,
 					ClientStatusCode:  http.StatusBadGateway,
 					ClientMessage:     infraerrors.CursorExecUpstreamProtocol,
+					// 上游错误码与原文摘要带到 handler 层：抽风判定日志要能区分
+					// internal / unavailable 等传输码，并核对上游原文。原文复用既有的
+					// 截断规则（与上方 cursor_upstream_account_failure 日志同口径），
+					// handler 层直接打本字段即可，不必再截断一次。
+					CursorUpstreamErrorCode:    code,
+					CursorUpstreamErrorMessage: truncateOpenAIWSLogValue(upstreamMsg, 240),
 				}
 			}
 			return
