@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMigration298QuotaKeysCodeMacPartialUnique 守护 KD21-01 的修复契约
+// TestMigration299QuotaKeysCodeMacPartialUnique 守护 KD21-01 的修复契约（迁移 299）
 // （与 297 同风格，不连库，对迁移源码做断言）：
 //   - 文件可读（被 embed.FS 嵌入）；
 //   - 无裸事务控制语句（BEGIN/COMMIT/ROLLBACK）——迁移由运行器统一管事务；
@@ -18,9 +18,9 @@ import (
 //   - CREATE UNIQUE INDEX IF NOT EXISTS uq_quota_keys_code_mac 名称保持不变；
 //   - 核心条件 WHERE code_mac IS NOT NULL AND deleted_at IS NULL（排除软删行）；
 //   - 不含 CONCURRENTLY（表小，普通事务迁移足够，无需 _notx 后缀）。
-func TestMigration298QuotaKeysCodeMacPartialUnique(t *testing.T) {
-	content, err := FS.ReadFile("298_quota_keys_code_mac_partial_unique.sql")
-	require.NoError(t, err, "298 迁移文件必须存在且被嵌入（embed.FS 覆盖 *.sql）")
+func TestMigration299QuotaKeysCodeMacPartialUnique(t *testing.T) {
+	content, err := FS.ReadFile("299_quota_keys_code_mac_partial_unique.sql")
+	require.NoError(t, err, "299 迁移文件必须存在且被嵌入（embed.FS 覆盖 *.sql）")
 	sql := string(content)
 
 	// 1) 裸事务控制语句：逐行剔除 SQL 注释后再匹配，避免误伤回滚注释里的 BEGIN/COMMIT。

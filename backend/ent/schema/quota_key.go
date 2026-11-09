@@ -186,7 +186,7 @@ func (QuotaKey) Indexes() []ent.Index {
 	return []ent.Index{
 		// code_mac 唯一索引：仅对未软删行唯一。
 		// 修复软删激活码永久占用唯一坑位、导致同一张卡删掉后无法重建的问题；
-		// 与迁移 298 及 016_soft_delete_partial_unique_indexes.sql 的既有模式一致。
+		// 与迁移 299 及 016_soft_delete_partial_unique_indexes.sql 的既有模式一致。
 		index.Fields("code_mac").
 			Unique().
 			StorageKey("uq_quota_keys_code_mac").

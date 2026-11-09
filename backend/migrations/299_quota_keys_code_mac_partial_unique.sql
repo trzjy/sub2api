@@ -1,4 +1,4 @@
--- 298_quota_keys_code_mac_partial_unique.sql
+-- 299_quota_keys_code_mac_partial_unique.sql
 -- 修复：uq_quota_keys_code_mac 未排除软删行，导致被删除的激活码永久占用唯一坑位，
 -- 同一张卡删掉后无法重建（生产实证：重建报 duplicate key value violates unique constraint）。
 -- 改为部分唯一索引：仅对未软删行（deleted_at IS NULL）保持 code_mac 唯一。
