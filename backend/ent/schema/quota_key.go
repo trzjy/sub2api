@@ -184,10 +184,13 @@ func (QuotaKey) Edges() []ent.Edge {
 // - (status, exhausted, expires_at) 复合部分索引（reconciler §3.4 周期扫表热路径）
 func (QuotaKey) Indexes() []ent.Index {
 	return []ent.Index{
-		// code_mac 唯一索引（NULL 不参与唯一约束，避免多 NULL 互相冲突）
+		// code_mac 唯一索引：仅对未软删行唯一。
+		// 修复软删激活码永久占用唯一坑位、导致同一张卡删掉后无法重建的问题；
+		// 与迁移 298 及 016_soft_delete_partial_unique_indexes.sql 的既有模式一致。
 		index.Fields("code_mac").
 			Unique().
-			StorageKey("uq_quota_keys_code_mac"),
+			StorageKey("uq_quota_keys_code_mac").
+			Annotations(entsql.IndexWhere("code_mac IS NOT NULL AND deleted_at IS NULL")),
 		// status 普通索引
 		index.Fields("status").
 			StorageKey("idx_quota_keys_status"),

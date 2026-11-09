@@ -1628,6 +1628,9 @@ var (
 				Name:    "uq_quota_keys_code_mac",
 				Unique:  true,
 				Columns: []*schema.Column{QuotaKeysColumns[3]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "code_mac IS NOT NULL AND deleted_at IS NULL",
+				},
 			},
 			{
 				Name:    "idx_quota_keys_status",
