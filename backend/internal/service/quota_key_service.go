@@ -427,6 +427,10 @@ func (c *upstreamDispatchingClient) TargetAccountsPerKeyFor(key string) (int, er
 // ErrQuotaKeyNotFound 表示激活码不存在（或已软删，普通查询不可见）。
 var ErrQuotaKeyNotFound = errors.New("quota key not found")
 
+// ErrQuotaKeyDuplicateCode 表示该激活码原文已存在一条未软删的记录（code_mac 唯一冲突）。
+// 由仓储层在 Create 撞 uq_quota_keys_code_mac 时返回，handler 映射为 409 + 明确文案。
+var ErrQuotaKeyDuplicateCode = errors.New("quota key code already exists")
+
 // ErrQuotaKeyUnknownUpstream 在创建激活码时上游标识校验失败（quota_upstreams 中不存在
 // 或已软删）时返回；调用方据以失败关闭，绝不静默落成默认 shareai（否则 kn-cy 卡密会被
 // 当 shareai 拉号，正是本卡要消灭的故障）。

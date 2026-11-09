@@ -71,7 +71,16 @@ func (r *quotaKeyRepository) Create(ctx context.Context, input service.CreateQuo
 	if input.UpstreamKey != "" {
 		q = q.SetUpstreamKey(input.UpstreamKey)
 	}
-	return q.Save(ctx)
+	qk, err := q.Save(ctx)
+	if err != nil {
+		// code_mac 唯一冲突 = 同一张激活码已有未软删记录。
+		// ent 把唯一约束包装为 ConstraintError{wrap: pq 23505}，两种路径都判定。
+		if isUniqueViolation(err) || ent.IsConstraintError(err) {
+			return nil, service.ErrQuotaKeyDuplicateCode
+		}
+		return nil, err
+	}
+	return qk, nil
 }
 
 // UpdatePriority 在同一事务内改写激活码优先级，并把该码名下**未软删**账号的
