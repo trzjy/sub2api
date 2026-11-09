@@ -110,6 +110,10 @@ func ProvideOpenAIGatewayService(
 		// 记录——这是"后台显示 15 个可用号、实际一个都调不出来"的直接成因。限流独立走
 		// 2 分钟短冷却，绝不再动按日停调。
 		cursorExecution.SetAccountRateLimitedHandler(svc.tempUnscheduleCursorAccountRateLimited)
+		// 拒钥永久停用（A4）：上游明确拒付此密钥（过期/额度耗尽）时，走独立拒钥回调
+		// 把账号置为临时不可调度——与额度耗尽/限流同型，但 reason 为 cursor_key_rejected，
+		// 换号链据此识别「拒钥」终态。装配形状照既有三个 cursor 回调一致。
+		cursorExecution.SetAccountKeyRejectedHandler(svc.tempUndisableCursorCredential)
 	}
 	return svc
 }
@@ -873,6 +877,7 @@ func ProvideAccountHealthRecoveryProbeService(
 	tlsFPProfileService *TLSFingerprintProfileService,
 	freshnessAlerts *FreshnessAlertService,
 	monitorService *ChannelMonitorService,
+	cursorExecution *CursorExecutionService,
 ) *AccountHealthRecoveryProbeService {
 	svc := NewAccountHealthRecoveryProbeService(accountRepo, httpUpstream, cfg, rateLimitService, settingService, tlsFPProfileService)
 	// D4 双向接线：探测调度器是账号侧冻结上界的唯一来源（阈值公式读它），也是陈旧评估的
@@ -881,6 +886,10 @@ func ProvideAccountHealthRecoveryProbeService(
 	svc.SetFreshnessAlertService(freshnessAlerts)
 	// E39：账号恢复成功后触发关联渠道维陈旧收敛（窄面注入，最佳努力）。
 	svc.SetChannelFreshnessRefresher(monitorService)
+	// A5 卡：将站内既有 cursor 探针执行部件注入到恢复探针服务，使其能驱动 Connect
+	// 会话型探针（复用该服务既有的 SetFreshnessAlertService / SetChannelFreshnessRefresher
+	// 可选注入形态；构造器签名保持不变，既有测试一行不改）。
+	svc.SetCursorExecutionService(cursorExecution)
 	svc.Start(context.Background())
 	return svc
 }

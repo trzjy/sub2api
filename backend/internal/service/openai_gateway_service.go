@@ -645,6 +645,59 @@ func (s *OpenAIGatewayService) tempUnscheduleCursorProtocolPollution(ctx context
 	tempUnscheduleCursorUpstreamFailure(ctx, s.accountRepo, accountID, "[cursor-exec:"+reason+"]")
 }
 
+// tempUndisableCursorCredential 是 CursorExecutionService 的「上游拒钥」回调实现
+// （由 wire 在唯一组装点 ProvideOpenAIGatewayService 注入；字段名 accountKeyRejectedHandler，
+// setter 为 SetAccountKeyRejectedHandler，与 A3 卡对齐）。
+//
+// 语义（CURSOR-PROBE-001-A4 / 方案 §2.2）：上游明确拒付此密钥（过期/额度耗尽）属于
+// 「账号级不可用 ⇒ 永久判死」，而不是「暂时停调等探针恢复」——拒钥不进熔断、不进探针、
+// 不写任何停调 marker（schedulable=false 即退出候选池，等管理员人工核实后用
+// PUT /api/v1/admin/accounts/:id 恢复）。
+//
+// 实现只做回调转接：直接复用全平台同一既有原子原语 SetError
+// （account_repo.go:1706，单条 SQL 完成 status=error + error_message + schedulable=FALSE
+// + sched_state_revision 自增 + enqueueSchedulerOutbox + syncSchedulerAccountSnapshot），
+// 不自写 SQL、不自造状态字段。reason 仅作为 errorMsg 写进 error_message 供管理员排查，
+// 不含上游原文或密钥值（脱敏，与既有 tempUnscheduleCursorProtocolPollution 同口径）。
+//
+// ⛔ 安全边界：不得改用 Mark403PausedWithRecovery（account_repo.go:3141，403 三振链专用，
+// 带 http_403_recovery 所有权标记 + generation CAS，非通用原语）。
+func (s *OpenAIGatewayService) tempUndisableCursorCredential(ctx context.Context, accountID int64, reason string) {
+	if s == nil || s.accountRepo == nil || accountID <= 0 {
+		return
+	}
+	// 直接调用既有原语 SetError（永久判死）：不写探针 marker、不改 schedulable 之外的状态。
+	s.accountRepo.SetError(ctx, accountID, reason)
+}
+
+// IsCursorPoolUnavailableReasonWithKeyRejected 是换号耗尽后「对外终态文案」判据的扩展版。
+//
+// 复用既有 IsCursorPoolUnavailableReason（antigravity_gateway_retry.go:906，仅用于对外响应），
+// 并把「上游拒钥」(cursorKeyRejectedReason = "cursor_key_rejected") 一并纳入对外映射。
+//
+// 背景（方案 §2.2「换号耗尽后的对外映射」）：拒钥错误被包装成 UpstreamFailoverError 后
+// sentinel 不再保留，普通 handler 走 failover 分支，换号耗尽后进入 handleCCFailoverExhausted
+// （gateway_handler_chat_completions.go:571-642）。该函数把拒钥 reason 纳入 cursor 池耗尽映射，
+// 使换号耗尽时落既有 cursor 池耗尽的对外终态（CUR-RES-11 中文），而非通用 AllAccountsExhausted，
+// 从而不向用户外泄「密钥被拒」语义（U3 ✓）。
+//
+// ⚠️ 安全性复核（方案 §2.2 明确要求逐条验证）：
+//   - IsCursorPoolUnavailableReason 系列函数**只用于对外响应**（文案/状态码判定），
+//     见 antigravity_gateway_retry.go:904 注释——它不参与停调时长的决定。
+//   - 「是否写停调」是**另一套**独立判据（failover_loop.go:276-280 的 Reason 白名单：
+//     CursorUpstreamAccountFailureReason / IsCursorQuotaExhaustedReason / CursorRateLimitedReason）。
+//   - cursorKeyRejectedReason **不在**上述停调白名单内，且本函数不修改该白名单，
+//     因此把拒钥纳入对外映射**不会**让拒钥账号被写任何停调（停调由 SetError 的
+//     schedulable=false 永久判死承担，与对外文案无关）。
+//   ⇒ 两个判据相互独立：本扩展仅影响对外文案，不影响停调/探针行为。
+//
+// 注：本卡不改 antigravity_gateway_retry.go（禁区）。主会话在合并时统一收口：
+//   要么把 IsCursorPoolUnavailableReason 本体改为包含 cursorKeyRejectedReason，
+//   要么在 handler 侧改用本函数 IsCursorPoolUnavailableReasonWithKeyRejected。
+func IsCursorPoolUnavailableReasonWithKeyRejected(reason GatewayFailureReason) bool {
+	return IsCursorPoolUnavailableReason(reason) || reason == cursorKeyRejectedReason
+}
+
 // ResolveChannelMapping 解析渠道级模型映射（代理到 ChannelService）
 func (s *OpenAIGatewayService) ResolveChannelMapping(ctx context.Context, groupID int64, model string) ChannelMappingResult {
 	if s.channelService == nil {

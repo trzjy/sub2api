@@ -217,6 +217,14 @@ type CursorExecutionService struct {
 	// 但账号本身没坏——用短冷却把它移出候选池，让下一次请求换号即可，不能像额度
 	// 耗尽那样长时间摘号，也不能什么都不做（粘性会话会一直粘着它）。
 	accountProtocolFailureHandler func(ctx context.Context, accountID int64, reason string)
+	// accountKeyRejectedHandler 是「上游拒钥」回调（CURSOR-PROBE-001-A3）。
+	//
+	// 拒钥 = 上游明确不要这个号了（凭据过期/额度耗尽被拒，见 *CursorKeyRejectedError）。
+	// 与"账号级上游故障"（临时停调等探针恢复）必须严格区分：拒钥只做永久停用
+	// （schedulable=false，等管理员核实），不写任何停调、不进熔断计数、不被探针恢复。
+	// 本回调由装配层注入 OpenAIGatewayService.tempUndisableCursorCredential 的实现
+	// （内部只转接 accountRepo.SetError），执行层不持有仓储。未注入（nil）时安全 no-op。
+	accountKeyRejectedHandler func(ctx context.Context, accountID int64, reason string)
 }
 
 // cursorWaitingToolsIdleTimeout 是 waiting_tools 状态允许的最长静默时间（方案 §2.5）。
@@ -270,6 +278,17 @@ func (s *CursorExecutionService) SetAccountProtocolFailureHandler(fn func(ctx co
 		return
 	}
 	s.accountProtocolFailureHandler = fn
+}
+
+// SetAccountKeyRejectedHandler 注入「上游拒钥」回调，与 SetAccountExhaustedHandler 同型。
+//
+// 触发场景：普通路径 defer 与续轮路径 cursorResumeRebuildError 命中 *CursorKeyRejectedError。
+// 回调报错（含 panic）只记 Warn，绝不改变返回的错误类型与换号语义。
+func (s *CursorExecutionService) SetAccountKeyRejectedHandler(fn func(ctx context.Context, accountID int64, reason string)) {
+	if s == nil {
+		return
+	}
+	s.accountKeyRejectedHandler = fn
 }
 
 // NewCursorExecutionService 构造唯一执行部件。
@@ -662,6 +681,56 @@ func (s *CursorExecutionService) Execute(
 				}
 			}
 			return
+		}
+		// 拒钥（上游明确不要这个号了）：独立 reason + 独立换号构造 + 永久停用回调。
+		// 只认 *CursorKeyRejectedError（其 Unwrap 使 errors.Is(err, ErrCursorKeyRejectedUpstream)
+		// 成立），绝不按 reason 字符串匹配。不得复用 CursorUpstreamAccountFailureReason
+		// （那样会进 TempUnscheduleRetryableError 写探针 marker，进而被探针清回候选池、
+		// 绕过管理员核实）；也不进任何停调白名单（failover_loop.go:276-280）⇒ 拒钥只做
+		// 永久停用、不写停调。
+		var keyRej *CursorKeyRejectedError
+		if errors.As(err, &keyRej) {
+			cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_key_rejected", originalModel,
+				zap.Int64("account_id", account.ID),
+				zap.String("turn_id", keyRej.TurnID))
+			// 动作 A：永久停用回调（无论是否已发布正文字节，账号确实被拒，必须停用）。
+			// 回调报错（含 panic）只记 Warn，绝不改变返回的错误类型与换号语义。
+			if s.accountKeyRejectedHandler != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_account_key_rejected_handler_panic", originalModel,
+								zap.Int64("account_id", account.ID), zap.Any("panic", r))
+						}
+					}()
+					s.accountKeyRejectedHandler(ctx, account.ID, "cursor upstream rejected the key (expired or quota exhausted)")
+				}()
+			}
+		// 动作 B（外审 B3 加固）：仅当本 HTTP 尚未发布正文字节且会话从未交付过工具批时，
+		// 才叠加为可换号 failover，让既有 handler 换号重试；否则错误原样返回，禁止
+		// mid-stream 换号（锁定项 3）。
+		//
+		// 关键契约（A8 卡修复）：换号构造**不得**用 `err = &UpstreamFailoverError{...}` 把原始
+		// `*CursorKeyRejectedError` 整体替换掉 —— 那样会丢失 sentinel
+		// （ErrCursorKeyRejectedUpstream，由 CursorKeyRejectedError.Unwrap 提供）与 rejected.TurnID，
+		// 导致对外映射 CUR-EXEC-12 失败、既有契约 TestCursorProtocolRejectedKeyFailsClosed 等翻红。
+		// 改用 errors.Join 把「可换号 failover」与「原始拒钥错误链」两条链同时保留：
+		//   - errors.As(err, &fe) 仍能拿到 *UpstreamFailoverError（换号语义不变）；
+		//   - errors.Is(err, ErrCursorKeyRejectedUpstream) 与 errors.As(err, &rejected) 仍成立
+		//     （拒钥 sentinel + TurnID 不丢，对外映射 CUR-EXEC-12 保住）。
+		// 不动 UpstreamFailoverError 的既有字段语义，亦不动其它 36 个构造点。
+		if !session.bodyPublished && session.deliveredBatchSeq == 0 {
+			err = errors.Join(&UpstreamFailoverError{
+				StatusCode:        http.StatusBadGateway,
+				Stage:             GatewayFailureStage("upstream"),
+				Scope:             GatewayFailureScopeAccount,
+				Reason:            cursorKeyRejectedReason,
+				NextAccountAction: NextAccountRetry,
+				ClientStatusCode:  http.StatusBadGateway,
+				ClientMessage:     infraerrors.CursorExecAccountRejected,
+			}, err)
+		}
+		return
 		}
 		// 上游对本账号回吐「非业务码」的终态错误（Connect 传输码：internal / unknown /
 		// unavailable 等，典型报文 internal: Cannot read properties of undefined (reading
@@ -1084,8 +1153,10 @@ func (s *CursorExecutionService) cursorResumeRebuildError(
 		stopReason = "cursor upstream account daily quota exhausted (resume)"
 		matched = true
 	case errors.As(err, &keyErr):
-		reason = CursorUpstreamAccountFailureReason
-		stopReason = "cursor upstream rejected the key (resume)"
+		// 拒钥：独立 reason（不得复用 CursorUpstreamAccountFailureReason，否则会写探针 marker
+		// 进而被探针清回候选池、绕过管理员核实）；独立永久停用动作由下方
+		// reason==cursorKeyRejectedReason 分支触发，不走 notifyAccountExhausted 的停调冷却。
+		reason = cursorKeyRejectedReason
 		matched = true
 	default:
 		if code, ok := cursorUpstreamStreamErrorCode(err); ok && !isCursorBusinessErrorCode(code) {
@@ -1102,6 +1173,19 @@ func (s *CursorExecutionService) cursorResumeRebuildError(
 	accountID := session.spec.accountID
 	requestedModel := session.spec.requestedModel
 	session.mu.Unlock()
+	// 拒钥：永久停用回调（与是否已发布字节无关，账号确实被拒，必须停用）。
+	// 独立于 quota 的 notifyAccountExhausted 停调冷却（拒钥不写任何停调）。
+	if reason == cursorKeyRejectedReason && s.accountKeyRejectedHandler != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					cursorPhaseLog(session.phaseContext(), zapcore.WarnLevel, "cursor_account_key_rejected_handler_panic",
+						requestedModel, zap.Int64("account_id", accountID), zap.Any("panic", r))
+				}
+			}()
+			s.accountKeyRejectedHandler(session.phaseContext(), accountID, "cursor upstream rejected the key (expired or quota exhausted)")
+		}()
+	}
 	// 停号补漏（P1）：续轮路径此前完全绕过 Execute 的 defer，账号 357 在额度耗尽后
 	// 仍被粘性会话选中。这里复用同一个回调，调用一次；**与是否已发布字节无关**
 	// （账号确实 exhausted，必须停），回调 panic 只记 Warn。
@@ -2324,6 +2408,38 @@ func cursorValidateResponsesToolChoice(req *apicompat.ResponsesRequest) error {
 // 探测（AccountTestService 共用同一执行部件，§24.2-9）
 // ---------------------------------------------------------------------------
 
+// cursorKeyRejectedReason 标识「cursor 上游明确拒付此密钥（过期/额度耗尽）」的换号原因。
+//
+// 与 CursorUpstreamAccountFailureReason 必须严格区分：后者是"账号当下不可服务、临时停调等
+// 探针恢复"，会进 TempUnscheduleRetryableError 写探针 marker；前者是"上游明确不要这个号了"，
+// 只做永久停用（schedulable=false），不写任何停调、不进熔断计数、不被探针恢复。
+// 它也不在 failover_loop.go:276-280 的停调白名单里 ⇒ 拒钥不会写停调。
+const cursorKeyRejectedReason = GatewayFailureReason("cursor_key_rejected")
+
+// IsCursorKeyRejectedReason 暴露给 handler 层的拒钥判据：当且仅当 reason 为
+// cursorKeyRejectedReason（"cursor_key_rejected"）时为真。
+//
+// 语义边界（与 failover_loop.go:276-280 停调白名单严格隔离）：拒钥只做永久停用、不写停调，
+// 因此本函数**绝不可**被加进停调白名单；它仅用于「换号耗尽 → 中文终态 CUR-RES-11」等
+// 对外映射判定（见 openai_gateway_handler.go handleFailoverExhausted）。
+//
+// 注：该函数是 A7 卡在 handler 侧引用、却漏定义的导出入口；此处随 A8 卡在常量同文件补齐，
+// 使 `go build ./...` 与 handler 测试恢复可编译，不改动任何禁区文件。
+func IsCursorKeyRejectedReason(reason GatewayFailureReason) bool {
+	return reason == cursorKeyRejectedReason
+}
+
+// resolveProbeMaxTokens 解析 ProbeAgentRun 的输出预算变参。
+//
+// 取值口径（写死）：len==0 ⇒ 16（与历史逐字一致，保持既有账号测试行为）；
+// len>0 ⇒ 取第一个值；传 ≤0 ⇒ 回落 16（防传 0 导致探针无输出）。
+func resolveProbeMaxTokens(maxTokens ...int) int {
+	if len(maxTokens) > 0 && maxTokens[0] > 0 {
+		return maxTokens[0]
+	}
+	return 16
+}
+
 // ProbeAgentRun 用本执行部件的同一 transport / 鉴权 / 转换跑一次最小 AgentRun，
 // 供账号探测复用。调用方负责模型闸门与展示格式；本函数只做真实出站与解析。
 //
@@ -2332,6 +2448,7 @@ func (s *CursorExecutionService) ProbeAgentRun(
 	ctx context.Context,
 	account *Account,
 	upstreamModel string,
+	maxTokens ...int,
 ) (status int, errDetail, text string, err error) {
 	if s == nil {
 		return 0, "", "", ErrCursorExecutionUnavailable
@@ -2350,10 +2467,14 @@ func (s *CursorExecutionService) ProbeAgentRun(
 	if err != nil {
 		return 0, "", "", err
 	}
-	maxTokens := 16
+	// 输出预算：默认 16（与历史逐字一致，保持既有账号测试行为）；探针侧显式传 ≥256
+	// 以避开思考型模型把预算先花在 reasoning 上导致"正文一个字都轮不到"的探针恒失败
+	// （生产实证：16/24/32 → 502 upstream_empty_result，48~256 → 200）。
+	// 传 ≤0 回落 16，防传 0 导致探针无输出。
+	probeMaxTokens := resolveProbeMaxTokens(maxTokens...)
 	chatReq := &apicompat.ChatCompletionsRequest{
 		Model:     upstreamModel,
-		MaxTokens: &maxTokens,
+		MaxTokens: &probeMaxTokens,
 		Messages: []apicompat.ChatMessage{
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
 		},

@@ -28,6 +28,13 @@ import (
 // is small; the cap protects against pathological backlog after a long outage.
 const accountHealthProbeCandidateLimit = 200
 
+// accountHealthProbeBurstConcurrencyLimit 是补探 burst 的在途探测并发上限（进程本地，
+// 单实例生效；多实例部署时不约束合计探测量，见方案 §5 风险 6）。cursor 探针是真实
+// AgentRun 出站（预算 ≥256），单轮补探若一次入队数十账号（候选上限 200）会瞬间打出
+// 数十个真实上游请求 ⇒ 限额有明确必要性（方案 §2.1 / §5 风险 1）。上限作用在补探 burst
+// 的并发探测 goroutine 数上（runProbeRetryBurst 内），首探串行 for 循环不受此限（天然=1）。
+const accountHealthProbeBurstConcurrencyLimit = 8
+
 // 补探（retry burst）默认节奏：首探失败后不再空等一个完整轮次（默认 15s）才再试，
 // 而是在本轮 sweep 内按短间隔连补，把恢复时长从「冷却到期」（cooldown 分钟级）拉回
 // 秒级。补探自 AC-C1 起异步执行（独立 goroutine，纳入 Start 的 wg），同账号补探由
@@ -78,6 +85,9 @@ var probeRecoverableMarkers = []string{
 	openAIAPIKeyHealthBreakerReason,
 	PoolMode401EscalationMarker,
 	oauth401RecoverableMarker,
+	// cursor Connect 会话型 / OpenAI 兼容型账号的探针恢复 marker（CURSOR-PROBE-001-A1）。
+	// 单加一项，全平台共用的 parseHealthBreakerState / isHealthBreakerTrip 一行不改。
+	cursorAccountHealthBreakerMarker,
 }
 
 // accountHealthProbeRepository is the narrow repository surface the recovery probe
@@ -158,6 +168,30 @@ type AccountHealthRecoveryProbeService struct {
 	// 同账号补探重叠。复用既有 wg 模式，不引入新 goroutine 管理机制。
 	retryInFlightMu sync.Mutex
 	retryInFlight   map[int64]struct{}
+
+	// cursorExec 是 cursor Connect 会话型账号的原生 AgentRun 探针执行部件（CURSOR-PROBE-001-A1
+	// 在 cursor_account_health_probe.go 提供 ProbeCursorAccountHealth 封装，本卡的 A5 卡在
+	// wire 装配注入 *CursorExecutionService）。未注入时 Connect 分支安全降级返回 error（不伪造失败）。
+	cursorExec *CursorExecutionService
+
+	// cursorAgentRunProbe 是 cursor Connect 会话型探针的实际执行函数，默认走 A1 的
+	// ProbeCursorAccountHealth（原生 AgentRun）。可被子测试替换以断言分派并跳过真实出站请求。
+	cursorAgentRunProbe func(ctx context.Context, exec *CursorExecutionService, account *Account, upstreamModel string, budget int) (int, string, string, error)
+}
+
+// SetCursorExecutionService 注入 cursor Connect 会话型探针执行部件（A5 卡在 wire 装配；
+// 本卡只提供字段与注入入口，未注入时 Connect 分支安全降级）。未注入时不改变其它平台行为。
+func (p *AccountHealthRecoveryProbeService) SetCursorExecutionService(exec *CursorExecutionService) {
+	if p != nil {
+		p.cursorExec = exec
+	}
+}
+
+// SetCursorAgentRunProbe 注入 cursor Connect 会话型探针执行函数（仅供子测试替换，断言分派）。
+func (p *AccountHealthRecoveryProbeService) SetCursorAgentRunProbe(fn func(ctx context.Context, exec *CursorExecutionService, account *Account, upstreamModel string, budget int) (int, string, string, error)) {
+	if p != nil {
+		p.cursorAgentRunProbe = fn
+	}
 }
 
 // SetChannelFreshnessRefresher 注入 E39 渠道维陈旧收敛窄面（可选）。未注入时不收敛。
@@ -743,6 +777,21 @@ func (p *AccountHealthRecoveryProbeService) clearRetryInFlight(id int64) {
 // temp_unschedulable_until（完整 time.Time，全精度，不可变代际令牌），供条件清除/状态
 // 回写使用（见 probeAccountWithReason / ClearTempUnschedulableIfGeneration /
 // BumpTempUnschedulableReasonIfGeneration）。
+//
+// 在途探测并发上限（CURSOR-PROBE-001-A2 §2.5）：每账号一个 goroutine 探测，但同时在途探测数
+// 受 accountHealthProbeBurstConcurrencyLimit 约束（进程本地，单实例生效，不约束多实例合计；
+// 方案 §5 风险 6）。cursor 探针是真实 AgentRun 出站（预算 ≥256），单轮补探若一次入队数十账号
+// （候选上限 200）会瞬间打出数十个真实上游请求 ⇒ 限额有明确必要性（方案 §2.1 / §5 风险 1）。
+// 复用既有 wg 模式：每轮用局部 roundWG 等待本轮在途探测，并用计数信号量（buffered channel）
+// 限流；不触碰服务级 p.wg（避免与 Stop 的 p.wg.Wait 交错，AC-G2R-3），各账号补探结果经
+// results 切片收集、本轮 roundWG.Wait 后由主循环统一回写 nextAt / next，避免 map 并发写竞争。
+//
+// burstAccountResult 收集单个账号本轮补探的结果，供主循环在 roundWG.Wait 后统一回写。
+type burstAccountResult struct {
+	stillParked bool
+	chosen      time.Duration
+}
+
 func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Context, pending []*Account, untils map[int64]time.Time, stopCh chan struct{}) {
 	if p == nil || p.accountRepo == nil || len(pending) == 0 {
 		return
@@ -800,8 +849,17 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 
 		now := time.Now()
 		next := make([]*Account, 0, len(stay))
-		for _, acc := range stay {
+		// 在途探测并发上限：每账号一个 goroutine，但同时在途数受
+		// accountHealthProbeBurstConcurrencyLimit 约束（进程本地）。复用既有 wg 模式——
+		// 用局部 roundWG 等待本轮在途探测、计数信号量 sem 限流；不触碰服务级 p.wg
+		//（避免与 Stop 的 p.wg.Wait 交错，AC-G2R-3）。results 收集各账号本轮结果，主循环
+		// 在 roundWG.Wait 后统一回写 nextAt / next，避免 map 并发写竞争。
+		results := make([]burstAccountResult, len(stay))
+		sem := make(chan struct{}, accountHealthProbeBurstConcurrencyLimit)
+		var roundWG sync.WaitGroup
+		for i, acc := range stay {
 			if ctx.Err() != nil {
+				roundWG.Wait()
 				return
 			}
 			// 本轮仅探测已到期账号；未到期者保留到后续轮（其 nextAt 不变）。
@@ -833,41 +891,54 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 			if u, ok := untils[acc.ID]; ok {
 				expectedUntil = u
 			}
-			stillParked := p.probeAccountWithReason(ctx, fresh, expectedUntil)
+			// 受并发上限约束地发起在途探测。
+			roundWG.Add(1)
+			sem <- struct{}{}
+			go func(idx int, acc *Account, fresh *Account, attempt int, expectedUntil time.Time) {
+				defer roundWG.Done()
+				defer func() { <-sem }()
+				stillParked := p.probeAccountWithReason(ctx, fresh, expectedUntil)
 
-			// 探测后重读最新 reason，依据本次结果决定该账号下次补探间隔（首成功后加速 /
-			// 429 慢类 5min）：
-			//   - 探测成功且未达恢复阈值：probeAccountWithReason 已把 ConsecutiveSuccesses
-			//     递增回写，重读应见 >0 → 下次 accountHealthProbeRetryInterval（5s，首成功后
-			//     加速确认第二次）；
-			//   - 探测失败：ConsecutiveSuccesses==0，按 isQuotaExhaustedTrip 分类——慢类
-			//     （429）accountHealthProbeQuotaRetryInterval（5min），其余 accountHealthProbeRetryInterval。
-			chosen := p.probeRetryInterval()
-			if stillParked {
-				if reread, rerr := p.accountRepo.GetByID(ctx, acc.ID); rerr == nil && reread != nil {
-					if st, ok := parseHealthBreakerState(reread.TempUnschedulableReason); ok && st != nil {
-						if st.ConsecutiveSuccesses > 0 {
-							chosen = p.probeRetryInterval()
-						} else if p.isQuotaExhaustedTrip(reread) {
-							chosen = accountHealthProbeQuotaRetryInterval
-						} else {
-							chosen = p.probeRetryInterval()
+				// 探测后重读最新 reason，依据本次结果决定该账号下次补探间隔（首成功后加速 /
+				// 429 慢类 5min）：
+				//   - 探测成功且未达恢复阈值：probeAccountWithReason 已把 ConsecutiveSuccesses
+				//     递增回写，重读应见 >0 → 下次 accountHealthProbeRetryInterval（5s，首成功后
+				//     加速确认第二次）；
+				//   - 探测失败：ConsecutiveSuccesses==0，按 isQuotaExhaustedTrip 分类——慢类
+				//     （429）accountHealthProbeQuotaRetryInterval（5min），其余 accountHealthProbeRetryInterval。
+				chosen := p.probeRetryInterval()
+				if stillParked {
+					if reread, rerr := p.accountRepo.GetByID(ctx, acc.ID); rerr == nil && reread != nil {
+						if st, ok := parseHealthBreakerState(reread.TempUnschedulableReason); ok && st != nil {
+							if st.ConsecutiveSuccesses > 0 {
+								chosen = p.probeRetryInterval()
+							} else if p.isQuotaExhaustedTrip(reread) {
+								chosen = accountHealthProbeQuotaRetryInterval
+							} else {
+								chosen = p.probeRetryInterval()
+							}
 						}
 					}
 				}
-			}
-			// 日志 interval 字段改为该账号本次实际采用间隔（chosen）。
-			logger.L().Info("openai.apikey_health_probe_retry",
-				zap.Int64("account_id", acc.ID),
-				zap.Int("round", round),
-				zap.Int("attempt", attempt),
-				zap.Duration("interval", chosen),
-			)
-			if !stillParked {
+				// 日志 interval 字段改为该账号本次实际采用间隔（chosen）。
+				logger.L().Info("openai.apikey_health_probe_retry",
+					zap.Int64("account_id", acc.ID),
+					zap.Int("round", round),
+					zap.Int("attempt", attempt),
+					zap.Duration("interval", chosen),
+				)
+				results[idx] = burstAccountResult{stillParked: stillParked, chosen: chosen}
+			}(i, acc, fresh, attempt, expectedUntil)
+		}
+		roundWG.Wait()
+		// 本轮在途探测全部结束后，统一回写 nextAt / next（主循环串行，无 map 并发写竞争）。
+		for i, acc := range stay {
+			res := results[i]
+			if !res.stillParked {
 				// 恢复/被接管：退出队列（不探测，不安排下次）。
 				continue
 			}
-			nextAt[acc.ID] = time.Now().Add(chosen)
+			nextAt[acc.ID] = time.Now().Add(res.chosen)
 			next = append(next, acc)
 		}
 		stay = next
@@ -901,11 +972,17 @@ func (p *AccountHealthRecoveryProbeService) runProbe(ctx context.Context, acc *A
 	return p.probeUpstream(ctx, acc)
 }
 
-// probeUpstream 按账号归属分派探测：CodeBuddy（影子或直绑）走专用探测分发器，
+// probeUpstream 按账号归属分派探测：cursor 平台账号按形态二分（Connect 会话型走原生
+// AgentRun 探针、OpenAI 兼容型走既有数据面探测）；CodeBuddy（影子或直绑）走专用探测分发器；
 // 其余 OpenAI 协议族账号走真实数据面探测（probeUpstreamDataPlane）。
 func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, acc *Account) (bool, error) {
 	if p.httpUpstream == nil || p.cfg == nil {
 		return false, errors.New("probe transport not configured")
+	}
+	// CURSOR-PROBE-001-A2：cursor 平台账号优先按形态二分，精确限定在 PlatformCursor，
+	// 不抢其它平台账号（非 cursor 账号根本不进本分支）。
+	if acc != nil && acc.Platform == PlatformCursor {
+		return p.probeCursorUpstream(ctx, acc)
 	}
 	// AC-B1：CodeBuddy 平台账号（影子或直绑）有专用探测面——改派 CodeBuddy 探测分发器
 	//（影子走既有 chat 探测、直绑走 billing-meter 探测）。判定用
@@ -917,12 +994,73 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 	return p.probeUpstreamDataPlane(ctx, acc)
 }
 
-// probeUpstreamDataPlane 按账号真实协议发一次最小真实请求。
+// probeCursorUpstream 是 cursor 平台账号的探测分派器（CURSOR-PROBE-001-A2）：
+//   - Connect 会话型（IsCursorConnectSessionAccount，即 type≠apikey 的 ShareAI 号池
+//     OAuth 账号）：走 A1 提供的原生 AgentRun 探针封装 ProbeCursorAccountHealth（它只取
+//     账号自身静态 access_token，不落到 Auto 动态池的另一个身份）。
+//   - OpenAI 兼容型（IsCursorOpenAICompatibleAccount，即 type=apikey 的反代账号）：落回
+//     既有 probeUpstreamDataPlane，并强制 Chat Completions 协议（复用转发侧既有的
+//     shouldForwardOpenAIResponsesViaRawChatCompletions 判据，与真实转发形状一致），
+//     不另写一份 CC 形状探测。
+//
+// 调用方 probeUpstream 已用 acc.Platform == PlatformCursor 收窄，此处只需按形态二分。
+func (p *AccountHealthRecoveryProbeService) probeCursorUpstream(ctx context.Context, acc *Account) (bool, error) {
+	if acc.IsCursorConnectSessionAccount() {
+		return p.runCursorConnectProbe(ctx, acc)
+	}
+	// OpenAI 兼容型（apikey 反代）：落回既有数据面探测；协议判据复用转发侧
+	// shouldForwardOpenAIResponsesViaRawChatCompletions（cursor+apikey ⇒ true），强制 CC。
+	return p.probeUpstreamDataPlaneWithProtocol(ctx, acc, shouldForwardOpenAIResponsesViaRawChatCompletions(acc))
+}
+
+// runCursorConnectProbe 对 cursor Connect 会话型账号发一次最小原生 AgentRun 探测，复用 A1 的
+// ProbeCursorAccountHealth 封装（它内部只取账号自身静态 access_token，不落到 Auto 动态池
+// 的另一个身份——这正是 R2 发现 1 的三个条件之一）。cursorExec 未注入（A5 卡装配前）时安全
+// 降级返回 error（不伪造失败，等装配后生效）。
+func (p *AccountHealthRecoveryProbeService) runCursorConnectProbe(ctx context.Context, acc *Account) (bool, error) {
+	if p.cursorExec == nil {
+		return false, errors.New("cursor execution service not configured for connect-session probe")
+	}
+	upstreamModel := p.cursorProbeOutboundModel(acc)
+	if strings.TrimSpace(upstreamModel) == "" {
+		// 无可用出站模型属配置错误，降级到到期恢复（既有 degraded 语义），不伪造失败。
+		return false, errors.New("cursor connect probe has no model to probe")
+	}
+	fn := p.cursorAgentRunProbe
+	if fn == nil {
+		fn = ProbeCursorAccountHealth
+	}
+	// 预算传 cursorAccountHealthProbeMinBudget（≥256）：思考型模型把预算先花在 reasoning
+	// 上，16 token 会探不出正文 ⇒ 探针恒失败（生产账号 406 实证）。A3 卡改造 ProbeAgentRun
+	// 接纳预算参数后此处即生效；当前 A1 的 ProbeCursorAccountHealth 暂忽略该入参（A3 接线）。
+	status, _, text, err := fn(ctx, p.cursorExec, acc, upstreamModel, cursorAccountHealthProbeMinBudget)
+	if err != nil {
+		// 降级（无可构造的安全探测面）：保持停调，等冷却到期。
+		return false, err
+	}
+	// 成功判定：HTTP 200 且解析出非空文本帧（与账号测试同口径）。
+	return status == http.StatusOK && strings.TrimSpace(text) != "", nil
+}
+
+// probeUpstreamDataPlane 按账号真实协议发一次最小真实请求（协议判据走既有
+// ShouldUseResponsesAPI，不强制 Chat Completions）。它是 probeUpstreamDataPlaneWithProtocol
+// 的薄封装（forceChatCompletions=false），既有调用方与既有测试一行不改。
 //
 // 为什么不再探 /v1/models：中转站的 /models 由轻量前端直接返回模型清单，不与
 // chat/responses 数据面共用链路；上游数据面全挂时 /models 仍可 2xx，会误判健康。
 // 本函数复刻真实转发链的协议选择、模型映射、代理、TLS 指纹与会话头，探的就是故障面本身。
 func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlane(ctx context.Context, acc *Account) (bool, error) {
+	return p.probeUpstreamDataPlaneWithProtocol(ctx, acc, false)
+}
+
+// probeUpstreamDataPlaneWithProtocol 是 probeUpstreamDataPlane 的内部实现，新增可选协议覆盖
+// 参数 forceChatCompletions：为 true 时跳过 ShouldUseResponsesAPI 判据、强制按 Chat
+// Completions 探测（端点 /v1/chat/completions），用于 cursor APIKey 反代账号——其真实转发被
+// 显式固定为 CC（shouldForwardOpenAIResponsesViaRawChatCompletions 对 cursor+apikey 返回
+// true），若沿用 ShouldUseResponsesAPI（标记缺失 ⇒ true）会打向上游不存在的 /v1/responses
+// ⇒ 探针恒失败 ⇒ 账号停到 9999 哨兵永不解封（R4 发现 1）。传入该判据本身（而非字面 true）
+// 即 SSOT 对齐，不另造协议判定。其它平台调用方一律传 false，行为逐字不变。
+func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocol(ctx context.Context, acc *Account, forceChatCompletions bool) (bool, error) {
 	if acc == nil {
 		return false, errors.New("probe account is nil")
 	}
@@ -932,8 +1070,14 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlane(ctx context.C
 		return false, errors.New("probe account has no api key")
 	}
 	// 探测模型：优先用熔断时记录的触发模型（TempUnschedState.Model），
-	// 空则回落平台默认测试模型，再空回落 openai.DefaultTestModel。
+	// 空则回落平台默认测试模型，再空回落 openai.DefaultTestModel。cursor 平台账号额外
+	// 从 model_mapping 全体都有的键（gpt-6.1-sol / claude-fable-5-1）回落，避免落到只有
+	// oauth 型才有的 claude-opus-5-5 / gpt-6-astra（apikey 型 134 个全无）⇒ 探不到可用
+	// 模型 ⇒ 账号永不解封（E12 的 424 同类风险）。非 cursor 账号走既有通用回落，逐字不变。
 	model := p.probeModelForAccount(acc)
+	if acc.Platform == PlatformCursor {
+		model = p.cursorProbeModelKey(acc)
+	}
 	if model == "" {
 		return false, errors.New("probe account has no model to probe")
 	}
@@ -956,11 +1100,16 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlane(ctx context.C
 
 	// base_url 若已经写到具体端点（…/v1/chat/completions、…/v1/responses），它就
 	// 是管理员写死的真实端点，探测必须照用、不得再按能力标记派生别的端点（见
-	// probeConcreteEndpoint 的生产实证）。
+	// probeConcreteEndpoint 的生产实证）。该优先级高于协议判据（R4 发现 1）。
 	concreteEndpoint, concreteIsResponses := probeConcreteEndpoint(normalizedBase)
 	useResponses := concreteIsResponses
 	if !concreteEndpoint {
-		useResponses = openai_compat.ShouldUseResponsesAPI(acc.SnapshotExtra())
+		if forceChatCompletions {
+			// cursor APIKey 反代等：转发侧已固定走原始 Chat Completions，探针须一致。
+			useResponses = false
+		} else {
+			useResponses = openai_compat.ShouldUseResponsesAPI(acc.SnapshotExtra())
+		}
 	}
 	var targetURL string
 	var payload []byte
@@ -1050,6 +1199,49 @@ func (p *AccountHealthRecoveryProbeService) probeModelForAccount(acc *Account) s
 		return m
 	}
 	return strings.TrimSpace(openai.DefaultTestModel)
+}
+
+// cursorProbeModelKey 取 cursor 账号探针的入站模型键（model_mapping 的键），保证落在账号
+// model_mapping 全体账号都有的键上（gpt-6.1-sol / claude-fable-5-1，生产 219/219），避免落到
+// 只有 oauth 型才有的 claude-opus-5-5 / gpt-6-astra（apikey 型 134 个全无）⇒ 该账号探不到
+// 可用模型 ⇒ 探针失败关闭 ⇒ 账号停到 9999 哨兵永不解封（E12 的 424 同类风险）。
+//
+// 优先级：① 熔断 state 记录的触发模型（若该键在 model_mapping 中存在）；② 平台默认测试模型
+// （同样要求命中 mapping）；③ 回落到全体都有的键 gpt-6.1-sol / claude-fable-5-1；④ 兜底走通用
+// 回落（调用方按降级处理）。本函数只补 cursor 分支的回落，不动 probeModelForAccount 的既有
+// 通用逻辑（那会影响其它平台），也不改 model_mapping 解析。
+func (p *AccountHealthRecoveryProbeService) cursorProbeModelKey(acc *Account) string {
+	mapping := acc.GetModelMapping()
+	has := func(k string) bool {
+		_, ok := mapping[k]
+		return ok
+	}
+	if state, ok := parseHealthBreakerState(acc.TempUnschedulableReason); ok && state != nil {
+		if m := strings.TrimSpace(state.Model); m != "" && has(m) {
+			return m
+		}
+	}
+	if m := strings.TrimSpace(acc.providerDefaultTestModel()); m != "" && has(m) {
+		return m
+	}
+	for _, key := range []string{"gpt-6.1-sol", "claude-fable-5-1"} {
+		if has(key) {
+			return key
+		}
+	}
+	return p.probeModelForAccount(acc)
+}
+
+// cursorProbeOutboundModel 取 cursor Connect 会话型探针的出站模型名（ProbeAgentRun 入参）。
+// 先用 cursorProbeModelKey 取入站键，再经 account.ResolveMappedModel 解析为出站值；解析不到
+// 真实上游名时回落该键本身（调用方按降级处理）。出站模型必须是 ResolveMappedModel 的值而非
+// 键名（方案 §2.1 探针模型口径）。
+func (p *AccountHealthRecoveryProbeService) cursorProbeOutboundModel(acc *Account) string {
+	key := p.cursorProbeModelKey(acc)
+	if v, matched := acc.ResolveMappedModel(key); matched && strings.TrimSpace(v) != "" {
+		return v
+	}
+	return key
 }
 
 // probeConcreteEndpoint 判断 base_url 是否已经写到具体端点（而非主机或 /v1 前缀），
