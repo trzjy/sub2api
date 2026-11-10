@@ -66,7 +66,6 @@ function mountView() {
         EmptyState: true,
         TextArea: true,
         Icon: true,
-        AutoEntryConfigModal: true,
         // BaseDialog 按 show 条件渲染，才能拿到对话框内的 DOM（含 upstream-select）。
         BaseDialog: {
           props: ['show', 'title'],

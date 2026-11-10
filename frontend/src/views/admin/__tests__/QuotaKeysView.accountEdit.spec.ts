@@ -134,7 +134,6 @@ function mountView() {
         EmptyState: true,
         TextArea: true,
         Icon: true,
-        AutoEntryConfigModal: true
       }
     }
   })

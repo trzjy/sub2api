@@ -106,7 +106,6 @@ function mountView() {
         EmptyState: true,
         TextArea: true,
         Icon: true,
-        AutoEntryConfigModal: true,
         BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' }
       }
     }
@@ -507,7 +506,6 @@ describe('QuotaKeysView 最近错误展示格式化（QKERR-C）', () => {
           EmptyState: true,
           TextArea: true,
           Icon: true,
-          AutoEntryConfigModal: true,
           BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' }
         }
       }

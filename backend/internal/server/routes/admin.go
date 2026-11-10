@@ -395,10 +395,6 @@ func registerQuotaKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 	}
 	qk := admin.Group("/quota_keys")
 	{
-		// 静态子路径优先于 :id 通配注册（gin 静态优先匹配），auto_entry_config 不会被 :id 吞掉。
-		qk.GET("/auto_entry_config", h.Admin.QuotaKey.GetAutoEntryConfig)
-		qk.PUT("/auto_entry_config", h.Admin.QuotaKey.UpdateAutoEntryConfig)
-		qk.POST("/auto/batch_import", h.Admin.QuotaKey.BatchImportCards)
 		// 每日额度实测统计（D2 统计设计）：回答"每码每天 400 被几个号烧光"与
 		// "每个号每天多少额度"。静态路径必须注册在 /:id 之前，否则会被当成 id 解析。
 		qk.GET("/daily_stats", h.Admin.QuotaKey.DailyStats)

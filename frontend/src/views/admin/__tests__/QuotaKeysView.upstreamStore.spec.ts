@@ -75,7 +75,6 @@ function mountView() {
         EmptyState: true,
         TextArea: true,
         Icon: true,
-        AutoEntryConfigModal: true,
         // BaseDialog 按 show 条件渲染，便于断言提示模态框是否可见。
         BaseDialog: {
           props: ['show', 'title'],
@@ -199,7 +198,6 @@ describe('QuotaKeysView 上游显示名编辑（CARD-KC-18）', () => {
           EmptyState: true,
           TextArea: true,
           Icon: true,
-          AutoEntryConfigModal: true,
           BaseDialog: {
             props: ['show', 'title'],
             template: `<div v-if="show" class="dialog-stub" :data-title="title">

@@ -14,23 +14,6 @@
               {{ t('admin.quotaKeys.description') }}
             </p>
           </div>
-          <!-- 渠道分流 Tab (Standard 扩展节点 vs Auto 极速号池) -->
-          <div class="inline-flex rounded-lg bg-gray-100 p-1 dark:bg-gray-800">
-            <button
-              class="rounded-md px-3 py-1.5 text-xs font-semibold transition-colors"
-              :class="activeChannelTab === 'standard' ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-700 dark:text-blue-400' : 'text-gray-600 hover:text-gray-900 dark:text-gray-400'"
-              @click="activeChannelTab = 'standard'"
-            >
-              Cursor 标准渠道 (12模型/非Auto)
-            </button>
-            <button
-              class="rounded-md px-3 py-1.5 text-xs font-semibold transition-colors"
-              :class="activeChannelTab === 'auto' ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-700 dark:text-blue-400' : 'text-gray-600 hover:text-gray-900 dark:text-gray-400'"
-              @click="activeChannelTab = 'auto'"
-            >
-              Cursor 极速号池 (Auto动态池)
-            </button>
-          </div>
           <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
             <!-- 上游显示名编辑入口（CARD-KC-18）：与 KC-09 的「上游续费」入口并列，
                  但职责不同——本按钮编辑上游注册表的显示名 / 续费链接 / 备注，
@@ -95,38 +78,27 @@
                 </button>
               </div>
             </div>
-            <template v-if="activeChannelTab === 'auto'">
-              <button class="btn btn-primary" @click="showAutoBatchModal = true">
-                <Icon name="plus" size="md" class="mr-1" />
-                批量导入Auto卡密
-              </button>
-            </template>
-            <template v-else>
-              <button
-                class="btn btn-secondary"
-                :disabled="loading"
-                :title="t('common.refresh')"
-                @click="load"
-              >
-                <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
-              </button>
-              <button class="btn btn-secondary" :disabled="sweeping" @click="openSweepDialog">
-                {{ t('admin.quotaKeys.sweepExpired') }}
-              </button>
-              <button class="btn btn-secondary" @click="showConfigModal = true">
-                {{ t('admin.quotaKeys.autoEntry.title') }}
-              </button>
-              <button class="btn btn-primary" @click="openCreateDialog">
-                <Icon name="plus" size="md" class="mr-1" />
-                {{ t('admin.quotaKeys.create') }}
-              </button>
-            </template>
+            <button
+              class="btn btn-secondary"
+              :disabled="loading"
+              :title="t('common.refresh')"
+              @click="load"
+            >
+              <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
+            </button>
+            <button class="btn btn-secondary" :disabled="sweeping" @click="openSweepDialog">
+              {{ t('admin.quotaKeys.sweepExpired') }}
+            </button>
+            <button class="btn btn-primary" @click="openCreateDialog">
+              <Icon name="plus" size="md" class="mr-1" />
+              {{ t('admin.quotaKeys.create') }}
+            </button>
           </div>
         </div>
       </template>
 
       <template #table>
-        <DataTable :columns="columns" :data="visibleKeys" :loading="loading">
+        <DataTable :columns="columns" :data="keys" :loading="loading">
           <template #cell-code_masked="{ value }">
             <code class="font-mono text-sm text-gray-900 dark:text-gray-100">{{ value || t('admin.quotaKeys.na') }}</code>
           </template>
@@ -266,8 +238,8 @@
             <EmptyState
               :title="t('admin.quotaKeys.emptyTitle')"
               :description="t('admin.quotaKeys.emptyDescription')"
-              :action-text="activeChannelTab === 'standard' ? t('admin.quotaKeys.create') : undefined"
-              @action="activeChannelTab === 'standard' ? openCreateDialog : undefined"
+              :action-text="t('admin.quotaKeys.create')"
+              @action="openCreateDialog"
             />
           </template>
         </DataTable>
@@ -344,10 +316,8 @@
           <TextArea
             v-model="form.notes"
             :rows="3"
-            :disabled="editing ? isAutoKey(editing) : false"
             :placeholder="t('admin.quotaKeys.notesPlaceholder')"
           />
-          <p v-if="editing && isAutoKey(editing)" class="input-hint mt-1 text-amber-600 dark:text-amber-400">Auto 动态号池绑定凭据由系统管理，不可直接改写（已锁定保护）。</p>
         </div>
 
         <p v-if="formError" class="text-sm text-red-600 dark:text-red-400">{{ formError }}</p>
@@ -690,9 +660,6 @@
       </template>
     </BaseDialog>
 
-    <!-- 入库可配置（D2-a） -->
-    <AutoEntryConfigModal :show="showConfigModal" @close="showConfigModal = false" />
-
     <!-- 用量查询（D2-a probe_quota）结果 -->
     <BaseDialog
       :show="showProbeDialog"
@@ -773,43 +740,6 @@
         </div>
       </template>
     </BaseDialog>
-
-    <!-- 批量录入 Auto 卡密弹窗 -->
-    <BaseDialog
-      :show="showAutoBatchModal"
-      title="批量导入 Cursor Auto 卡密"
-      width="normal"
-      @close="showAutoBatchModal = false"
-    >
-      <div class="space-y-4">
-        <p class="text-xs text-gray-500 dark:text-gray-400">
-          每行输入一个激活码（例如 sky_cc_xxxx）。系统将自动为每个激活码生成虚拟硬件特征并向上游完成设备绑定，实现 1 对多卡密自动聚合调度。
-        </p>
-        <TextArea
-          v-model="autoBatchText"
-          rows="6"
-          placeholder="sky_cc_xxxxxx&#10;sky_cc_yyyyyy"
-        />
-        <div>
-          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
-            {{ t('admin.quotaKeys.expiresAt') }}（选填）
-          </label>
-          <input v-model="autoBatchExpiresAt" type="datetime-local" class="input" />
-          <p class="input-hint mt-1">选填。设置本批卡密的到期时间；留空表示无固定期限（由卡密剩余额度决定）。</p>
-        </div>
-      </div>
-      <template #footer>
-        <div class="flex items-center justify-end gap-2">
-          <button class="btn btn-secondary" :disabled="autoBatchLoading" @click="showAutoBatchModal = false">
-            {{ t('common.cancel') }}
-          </button>
-          <button class="btn btn-primary" :disabled="autoBatchLoading" @click="submitAutoBatch">
-            <Icon v-if="autoBatchLoading" name="refresh" size="sm" class="mr-1 animate-spin" />
-            开始批量绑定入库
-          </button>
-        </div>
-      </template>
-    </BaseDialog>
   </AppLayout>
 </template>
 
@@ -843,7 +773,6 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import TextArea from '@/components/common/TextArea.vue'
 import Icon from '@/components/icons/Icon.vue'
-import AutoEntryConfigModal from '@/components/quotaKeys/AutoEntryConfigModal.vue'
 import QuotaKeyUsageCell from '@/components/quotaKeys/QuotaKeyUsageCell.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import PriorityStepper from '@/components/common/PriorityStepper.vue'
@@ -856,9 +785,6 @@ import type { Account, AdminGroup, Proxy as AccountProxy } from '@/types'
 const { t } = useI18n()
 const appStore = useAppStore()
 const router = useRouter()
-
-// 双轨分流控制：'standard' (非Auto) vs 'auto' (动态号池)
-const activeChannelTab = ref<'standard' | 'auto'>('standard')
 
 // --- 上游续费/采购入口（CARD-KC-09）-------------------------------------
 // kn-cy.com 已有公开商铺，直达产品列表页；ShareAI 暂无公开商铺，
@@ -880,10 +806,6 @@ function handleUpstreamStoreClickOutside(event: MouseEvent) {
     upstreamStoreOpen.value = false
   }
 }
-const showAutoBatchModal = ref(false)
-const autoBatchText = ref('')
-const autoBatchExpiresAt = ref('')
-const autoBatchLoading = ref(false)
 
 const keys = ref<QuotaKey[]>([])
 const loading = ref(false)
@@ -898,22 +820,6 @@ const upstreamSavingKey = ref<string | null>(null)
 // 编辑表单：按上游 key 存一份可编辑副本（name / renewal_url / notes）。
 const upstreamForms = reactive<Record<string, { name: string; renewal_url: string; notes: string }>>({})
 
-// Auto 卡密在 quota_keys.notes 中的标记前缀（后端 service 层
-// formatAutoPoolNotes 写入 "auto_pool:dev=...;md5=..."）。
-// 列表接口已返回 notes，按前缀把两个渠道的数据分开。
-const AUTO_POOL_NOTES_PREFIX = 'auto_pool:'
-
-// Auto 卡的 notes 不是普通备注：它承载上游绑定的设备凭据（dev + md5），
-// 改掉会让绑定关系不可复原，并让该卡在前端被归到标准渠道。
-// 因此 Auto 行的编辑入口保留（可改 expires_at / priority），但 notes 在弹窗中
-// 被禁用并在 buildPayload 中剔除，确保绑定的虚拟设备凭据绝不被覆盖。
-function isAutoKey(row: QuotaKey): boolean {
-  return (row.notes ?? '').startsWith(AUTO_POOL_NOTES_PREFIX)
-}
-
-const visibleKeys = computed(() =>
-  keys.value.filter((k) => (activeChannelTab.value === 'auto' ? isAutoKey(k) : !isAutoKey(k)))
-)
 const busyId = ref<number | null>(null)
 const saving = ref(false)
 const sweeping = ref(false)
@@ -922,8 +828,7 @@ const showFormDialog = ref(false)
 const showDetailDialog = ref(false)
 const showDeleteDialog = ref(false)
 const showSweepDialog = ref(false)
-// D2-a：入库可配置弹窗 + 用量查询弹窗。
-const showConfigModal = ref(false)
+// D2-a：用量查询弹窗。
 const showProbeDialog = ref(false)
 const probing = ref(false)
 const probeResult = ref<ProbeQuotaResponse | null>(null)
@@ -1181,9 +1086,7 @@ function buildPayload(): CreateQuotaKeyRequest | UpdateQuotaKeyRequest {
     expires_at: expiresAt,
     priority: form.priority
   }
-  if (!editing.value || !isAutoKey(editing.value)) {
-    payload.notes = form.notes.trim() ? form.notes.trim() : null
-  }
+  payload.notes = form.notes.trim() ? form.notes.trim() : null
   // 创建态随请求提交所选上游；编辑态不放（update 接口无该字段，放了亦被忽略且是噪声）。
   if (!editing.value) {
     payload.upstream_key = form.upstream_key
@@ -1442,33 +1345,6 @@ async function confirmSweep() {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.sweepError')))
   } finally {
     sweeping.value = false
-  }
-}
-
-async function submitAutoBatch() {
-  const cards = autoBatchText.value
-    .split('\n')
-    .map(s => s.trim())
-    .filter(Boolean)
-  if (!cards.length) {
-    appStore.showError('请输入至少一个激活码')
-    return
-  }
-  autoBatchLoading.value = true
-  try {
-    const expiresAt = autoBatchExpiresAt.value
-      ? new Date(autoBatchExpiresAt.value).toISOString()
-      : null
-    const res = await adminAPI.quotaKeys.batchImportAutoCards(cards, expiresAt)
-    appStore.showSuccess(`批量导入完成：成功 ${res.success_count ?? 0} 个，失败 ${res.failed_count ?? 0} 个`)
-    showAutoBatchModal.value = false
-    autoBatchText.value = ''
-    autoBatchExpiresAt.value = ''
-    await load()
-  } catch (err: unknown) {
-    appStore.showError(extractApiErrorMessage(err, '批量导入失败'))
-  } finally {
-    autoBatchLoading.value = false
   }
 }
 

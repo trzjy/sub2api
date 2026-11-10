@@ -171,30 +171,6 @@ export async function sweepExpired(): Promise<SweepExpiredResponse> {
   return data
 }
 
-/** 入库可配置（D2-a）：单条模型引用。 */
-export interface AutoEntryModelRef {
-  id: string
-  vendor: string
-  probe_status?: string
-}
-
-/** 入库可配置（D2-a）：入库默认值（priority/rate_multiplier 落 account 列；concurrency 留空=沿用列默认 3）。 */
-export interface AutoEntryDefaults {
-  concurrency: number | null
-  priority: number
-  rate_multiplier: number
-}
-
-/** 入库可配置（D2-a）：完整配置（settings 表 cursor_auto_entry_config 的镜像）。 */
-export interface AutoEntryConfig {
-  vendors: Record<string, boolean>
-  models: AutoEntryModelRef[]
-  entry_defaults: AutoEntryDefaults
-  // 可选模型全集（CUR-F2）：后端实供清单 CursorRealSupplyModels 投影，前端"厂商 → 模型多选"
-  // 的渲染源。只读派生，不回写。取消勾选的模型仍从中渲染，可重新勾回。
-  available_models?: AutoEntryModelRef[]
-}
-
 /**
  * 用量查询（D2-a probe_quota）返回的 key_info 摘要。
  *
@@ -268,47 +244,9 @@ export async function updateUpstream(
   return data
 }
 
-/** 读取 cursor 入库可配置（厂商勾选 + 模型清单 + 入库参数）。 */
-export async function getAutoEntryConfig(): Promise<AutoEntryConfig> {
-  const { data } = await apiClient.get<AutoEntryConfig>('/admin/quota_keys/auto_entry_config')
-  return data
-}
-
-/** 校验并持久化 cursor 入库可配置。 */
-export async function updateAutoEntryConfig(payload: AutoEntryConfig): Promise<AutoEntryConfig> {
-  const { data } = await apiClient.put<AutoEntryConfig>('/admin/quota_keys/auto_entry_config', payload)
-  return data
-}
-
 /** 手动触发某激活码的 key 级用量查询（lookup），返回既有摘要 + 已提交额度快照投影。 */
 export async function probeQuota(id: number): Promise<ProbeQuotaResponse> {
   const { data } = await apiClient.post<ProbeQuotaResponse>(`/admin/quota_keys/${id}/probe_quota`)
-  return data
-}
-
-/** Auto 卡密批量导入结果（POST /admin/quota_keys/auto/batch_import 的 data）。 */
-export interface BatchImportAutoCardsResult {
-  success_count: number
-  failed_count: number
-  errors?: string[]
-}
-
-/**
- * 批量导入 Auto 卡密。
- * 必须走 apiClient：管理端鉴权是 Authorization: Bearer <auth_token>，
- * 裸 fetch 不带该头，生产实测 401。
- */
-export async function batchImportAutoCards(
-  cards: string[],
-  expiresAt?: string | null
-): Promise<BatchImportAutoCardsResult> {
-  const { data } = await apiClient.post<BatchImportAutoCardsResult>(
-    '/admin/quota_keys/auto/batch_import',
-    {
-      cards,
-      expires_at: expiresAt || undefined
-    }
-  )
   return data
 }
 
@@ -321,10 +259,7 @@ const quotaKeysAPI = {
   refresh,
   clearExhausted,
   sweepExpired,
-  getAutoEntryConfig,
-  updateAutoEntryConfig,
   probeQuota,
-  batchImportAutoCards,
   listUpstreams,
   updateUpstream
 }

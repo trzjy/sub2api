@@ -39,7 +39,7 @@ type QuotaKeyHandler struct {
 
 // NewQuotaKeyHandler 构造激活码管理端点处理器。
 // sweeper 为 nil 时 sweep_expired 端点返回 503（未装配清扫器），其余端点不受影响。
-// autoEntry 为 nil 时 auto_entry_config / probe_quota 端点返回 503（未装配入库可配置服务）。
+// autoEntry 为 nil 时 probe_quota 端点返回 503（未装配入库可配置服务）。
 func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper, autoEntry *service.CursorAutoEntryService, adminService service.AdminService) *QuotaKeyHandler {
 	return &QuotaKeyHandler{svc: svc, sweeper: sweeper, autoEntry: autoEntry, adminService: adminService}
 }
@@ -320,17 +320,6 @@ func (h *QuotaKeyHandler) Update(c *gin.Context) {
 	}
 	var notes **string
 	if req.Notes != nil {
-		// 防御校验：Auto 卡密的 notes 由系统自动维护（虚拟设备绑定凭据），
-		// 禁止通过 API 直接改写，否则会导致绑定凭据丢失（外审 P1）。
-		st, err := h.svc.GetStatus(c.Request.Context(), id)
-		if err != nil {
-			respondQuotaKeyError(c, err)
-			return
-		}
-		if st != nil && st.Notes != nil && strings.HasPrefix(*st.Notes, "auto_pool:") {
-			response.BadRequest(c, "auto pool card notes cannot be modified")
-			return
-		}
 		var value *string
 		if err := json.Unmarshal(req.Notes, &value); err != nil {
 			response.BadRequest(c, "Invalid notes: "+err.Error())
@@ -438,52 +427,6 @@ func respondQuotaKeyError(c *gin.Context, err error) {
 		return
 	}
 	response.ErrorFrom(c, err)
-}
-
-// GetAutoEntryConfig 读取 cursor 入库可配置（厂商勾选 + 模型清单 + 入库参数）。
-// GET /api/v1/admin/quota_keys/auto_entry_config
-func (h *QuotaKeyHandler) GetAutoEntryConfig(c *gin.Context) {
-	if h.autoEntry == nil {
-		response.Error(c, http.StatusServiceUnavailable, "Cursor auto-entry service unavailable")
-		return
-	}
-	resp, err := h.autoEntry.GetConfigResponse(c.Request.Context())
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, resp)
-}
-
-type updateAutoEntryConfigRequest struct {
-	Vendors       map[string]bool             `json:"vendors"`
-	Models        []service.CursorModelRef    `json:"models"`
-	EntryDefaults service.CursorEntryDefaults `json:"entry_defaults"`
-}
-
-// UpdateAutoEntryConfig 校验并持久化 cursor 入库可配置。
-// PUT /api/v1/admin/quota_keys/auto_entry_config
-func (h *QuotaKeyHandler) UpdateAutoEntryConfig(c *gin.Context) {
-	if h.autoEntry == nil {
-		response.Error(c, http.StatusServiceUnavailable, "Cursor auto-entry service unavailable")
-		return
-	}
-	var req updateAutoEntryConfigRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "Invalid request: "+err.Error())
-		return
-	}
-	cfg := &service.CursorAutoEntryConfig{
-		Vendors:       req.Vendors,
-		Models:        req.Models,
-		EntryDefaults: req.EntryDefaults,
-	}
-	updated, err := h.autoEntry.UpdateConfig(c.Request.Context(), cfg)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, updated)
 }
 
 // probeQuotaResponse 是 probe 响应：既有 lookup 摘要 + 同一份快照投影（§25.6⑤）。
