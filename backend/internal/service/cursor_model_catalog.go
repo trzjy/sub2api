@@ -123,7 +123,7 @@ func CursorModelIDSet() map[string]struct{} {
 // 继续用官方清单做"勾选侧门控"会把本渠道所有实供模型判为非法、导致补池交集恒为空。
 //
 // 本清单是入库模型的【静态来源】（P1-B2）：ComputeEntryModels 直接以它产出 entry 模型集
-// （恒等，不再与人工勾选取交集），DefaultAutoEntryConfig / GetConfigResponse 同样以它替代
+// （恒等，不再与人工勾选取交集），DefaultAutoEntryConfig 同样以它替代
 // CursorModelCatalog 作为可选模型全集；Validate 的 vendor 校验也因 muse/composer 已纳入
 // cursorKnownVendors 而放行实供模型。
 //

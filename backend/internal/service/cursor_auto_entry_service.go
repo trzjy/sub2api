@@ -20,7 +20,7 @@ import (
 
 // cursor_auto_entry_service.go 实现"入库可配置"域（派发单 D2-a）与**来源额度观测的唯一入口**
 // （派发单 W2-B1 / 方案 §25.6 + §25.14-C）：
-//   - cursor_auto_entry_config 的 Get/Update（存 settings 表新键，JSONB 值）；
+//   - cursor_auto_entry_config 的 Get（存 settings 表新键，JSONB 值）；
 //   - ApplyEntryDefaults：入库时把收口后的 priority/rate_multiplier（并发沿用列默认）
 //     写入 account 列（P1-B2：entry 模型走静态清单 → credentials.model_mapping，
 //     不再写 account.extra.entry_models）；
@@ -241,59 +241,6 @@ func (s *CursorAutoEntryService) GetConfig(ctx context.Context) (*CursorAutoEntr
 	}
 	cfg.Normalize()
 	return &cfg, nil
-}
-
-// UpdateConfig 校验并持久化 cursor_auto_entry_config（走既有 settings.Set，upsert）。
-// 返回规范化后的配置。
-func (s *CursorAutoEntryService) UpdateConfig(ctx context.Context, cfg *CursorAutoEntryConfig) (*CursorAutoEntryConfig, error) {
-	if cfg == nil {
-		return nil, infraerrors.New(http.StatusBadRequest, "CURSOR_AUTO_ENTRY_CONFIG_INVALID",
-			"cursor_auto_entry_config must not be null")
-	}
-	if errStr := cfg.Validate(); errStr != "" {
-		return nil, infraerrors.New(http.StatusBadRequest, "CURSOR_AUTO_ENTRY_CONFIG_INVALID", errStr)
-	}
-	cfg.Normalize()
-	raw, err := json.Marshal(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("cursor_auto_entry: marshal config: %w", err)
-	}
-	if err := s.settings.Set(ctx, CursorAutoEntryConfigSettingKey, string(raw)); err != nil {
-		return nil, fmt.Errorf("cursor_auto_entry: persist config: %w", err)
-	}
-	return cfg, nil
-}
-
-// AutoEntryConfigResponse 是 GET auto_entry_config 端点的响应体：在既有配置字段
-// （vendors/models/entry_defaults）之外附带"可选模型全集" available_models——前端
-// "厂商勾选 → 模型多选"的渲染源。available_models 来自 F1 落地的实供清单
-// CursorRealSupplyModels（绝非官方 catalog：后者会把实供模型全部判为非法），为只读派生
-// 数据，不写入 settings，不新增任何 DB 字段/表。
-type AutoEntryConfigResponse struct {
-	Vendors         map[string]bool     `json:"vendors"`
-	Models          []CursorModelRef    `json:"models"`
-	EntryDefaults   CursorEntryDefaults `json:"entry_defaults"`
-	AvailableModels []CursorModelRef    `json:"available_models"`
-}
-
-// GetConfigResponse 读取配置并返回含"可选模型全集"的 API 响应（供 GetAutoEntryConfig 端点）。
-// available_models 以实供清单 CursorRealSupplyModels 为准（含 muse-spark-1.3 等），与
-// DefaultAutoEntryConfig / ComputeEntryModels 的口径一致，避免前端硬编码一份可能漂移的全集。
-func (s *CursorAutoEntryService) GetConfigResponse(ctx context.Context) (*AutoEntryConfigResponse, error) {
-	cfg, err := s.GetConfig(ctx)
-	if err != nil {
-		return nil, err
-	}
-	available := make([]CursorModelRef, 0, len(CursorRealSupplyModels))
-	for _, m := range CursorRealSupplyModels {
-		available = append(available, CursorModelRef{ID: m.ID, Vendor: m.Vendor, ProbeStatus: ""})
-	}
-	return &AutoEntryConfigResponse{
-		Vendors:         cfg.Vendors,
-		Models:          cfg.Models,
-		EntryDefaults:   cfg.EntryDefaults,
-		AvailableModels: available,
-	}, nil
 }
 
 // Normalize 保证 vendors/models 非 nil（缺省时填零值结构，避免前端 null 崩溃）。
