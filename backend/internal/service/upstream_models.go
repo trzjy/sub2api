@@ -227,11 +227,14 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		return s.syncMuseModelCatalog(ctx, account)
 	}
 
-	// cursor 平台走专属目录同步（P1-B1）：POST AvailableModels（Unary 裸 protobuf）
-	// → 适配（基础 name → server_model_name）→ 原子写同一 model_mapping。
-	// cursor 上游是 Cursor 原生协议端点，无 OpenAI /v1/models 可言，
-	// 与 muse 同款前置分派、与其它平台的通用路径完全隔离。
-	if isCursorAccount(account) {
+	// cursor 平台：oauth 型（shareai 号池）走原生 AvailableModels（Unary 裸 protobuf）
+	// → 适配（基础 name → server_model_name）→ 原子写同一 model_mapping；该路径强制
+	// 要求 Cursor OAuth bearer（cursorResolveAccountBearer），apikey 型账号（第三方
+	// OpenAI 兼容反代，如 kn-cy.com 备用渠道，只有 base_url + api_key）必然失败，故
+	// 必须排除。apikey 型无 Cursor OAuth bearer，落到下方通用 /v1/models 路径
+	// （与 CARD-KC-04 转发分流同款口径），与 muse 同款前置分派、与其它平台的通用
+	// 路径完全隔离。
+	if isCursorAccount(account) && !account.IsCursorOpenAICompatibleAccount() {
 		return s.syncCursorModelCatalog(ctx, account)
 	}
 
@@ -807,11 +810,13 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 		return ids, body, nil, nil
 	}
 
-	// Cursor 平台（P1-B1）：走 AvailableModels（Unary 裸 protobuf），与
-	// SyncUpstreamModelCatalog 的 cursor 分支同源同一份目录来源；上游是 Cursor 原生
-	// 协议端点，没有 OpenAI /v1/models 可言，落到通用路径只会拿到一段非 JSON 报文然后
-	// 报 “not valid JSON”，掩盖真实失败原因。此处只回 ID 列表（不带能力元数据 body）。
-	if isCursorAccount(account) {
+	// Cursor 平台（P1-B1）：oauth 型（shareai 号池）走 AvailableModels（Unary 裸
+	// protobuf），与 SyncUpstreamModelCatalog 的 cursor 分支同源同一份目录来源；上游是
+	// Cursor 原生协议端点，没有 OpenAI /v1/models 可言，落到通用路径只会拿到一段非 JSON
+	// 报文然后报 “not valid JSON”，掩盖真实失败原因。apikey 型（第三方 OpenAI 兼容反代）
+	// 无 Cursor OAuth bearer，必须排除、落到下方通用 /v1/models 探测（与 CARD-KC-04
+	// 转发分流同款口径）。此处只回 ID 列表（不带能力元数据 body）。
+	if isCursorAccount(account) && !account.IsCursorOpenAICompatibleAccount() {
 		entries, cerr := s.fetchCursorCatalog(ctx, account)
 		if cerr != nil {
 			return nil, nil, nil, cerr
@@ -1002,9 +1007,10 @@ func (s *AccountTestService) buildUpstreamModelsRequest(ctx context.Context, acc
 		return s.buildAnthropicUpstreamModelsRequest(ctx, account)
 	case account.IsGemini():
 		return s.buildGeminiUpstreamModelsRequest(ctx, account)
-	case account.UsesOpenAIProtocolSharedBaseURL() || account.IsMultiProtocolAPIKey():
+	case account.UsesOpenAIProtocolSharedBaseURL() || account.IsMultiProtocolAPIKey() || account.IsCursorOpenAICompatibleAccount():
 		// OpenAI 协议账号（api_protocol=chat_completions/responses 的国产 kimi/zhipu/deepseek
-		// 与通用 other）与多协议 API Key 供应商（上游新增聚合平台）复用 OpenAI /v1/models 探测。
+		// 与通用 other）、多协议 API Key 供应商（上游新增聚合平台），以及 Cursor 的 OpenAI
+		// 兼容反代账号（apikey 型，无 Cursor OAuth bearer，走通用 /v1/models 探测）。
 		return s.buildOpenAIUpstreamModelsRequest(ctx, account)
 	default:
 		return nil, newUpstreamModelSyncUnsupportedError(

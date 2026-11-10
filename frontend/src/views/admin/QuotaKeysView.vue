@@ -309,6 +309,153 @@
           <p class="input-hint mt-1">{{ t('admin.quotaKeys.priorityHint') }}</p>
         </div>
 
+        <!-- 并发数（B 批上移，不含余额查询） -->
+        <div>
+          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.quotaKeys.concurrency') }}
+          </label>
+          <input
+            v-model.number="form.concurrency"
+            type="number"
+            min="1"
+            class="input"
+            :placeholder="t('admin.quotaKeys.concurrencyPlaceholder')"
+            @input="formError = ''"
+          />
+          <p class="input-hint mt-1">{{ t('admin.quotaKeys.concurrencyHint') }}</p>
+        </div>
+
+        <!-- 负载因子（B 批上移） -->
+        <div>
+          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.quotaKeys.loadFactor') }}
+          </label>
+          <input
+            v-model.number="form.load_factor"
+            type="number"
+            min="1"
+            max="10000"
+            class="input"
+            :placeholder="t('admin.quotaKeys.loadFactorPlaceholder')"
+            @input="formError = ''"
+          />
+          <p class="input-hint mt-1">{{ t('admin.quotaKeys.loadFactorHint') }}</p>
+        </div>
+
+        <!-- 计费倍率（B 批上移） -->
+        <div>
+          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.quotaKeys.rateMultiplier') }}
+          </label>
+          <input
+            v-model.number="form.rate_multiplier"
+            type="number"
+            min="0"
+            step="0.001"
+            class="input"
+            :placeholder="t('admin.quotaKeys.rateMultiplierPlaceholder')"
+            @input="formError = ''"
+          />
+          <p class="input-hint mt-1">{{ t('admin.quotaKeys.rateMultiplierHint') }}</p>
+        </div>
+
+        <!-- 模型限制（激活码级权威值，白名单/映射双模式） -->
+        <div>
+          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.quotaKeys.modelRestriction') }}
+          </label>
+
+          <div class="mb-4 flex gap-2">
+            <button
+              type="button"
+              :class="[
+                'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+                modelRestrictionMode === 'whitelist'
+                  ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-400'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+              ]"
+              @click="modelRestrictionMode = 'whitelist'; modelRestrictionTouched = true"
+            >
+              {{ t('admin.accounts.modelWhitelist') }}
+            </button>
+            <button
+              type="button"
+              :class="[
+                'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+                modelRestrictionMode === 'mapping'
+                  ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+              ]"
+              @click="modelRestrictionMode = 'mapping'; modelRestrictionTouched = true"
+            >
+              {{ t('admin.accounts.modelMapping') }}
+            </button>
+          </div>
+
+          <!-- 白名单模式 -->
+          <div v-if="modelRestrictionMode === 'whitelist'">
+            <ModelWhitelistSelector
+              v-model="allowedModels"
+              :model-mappings="modelMappings"
+              platform="cursor"
+              :custom-sync="customSyncProp"
+              @update:model-value="modelRestrictionTouched = true"
+            />
+            <p v-if="!editing" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.quotaKeys.syncModelsRequiresSavedKey') }}
+            </p>
+            <p v-else class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.quotaKeys.modelRestrictionHint') }}
+            </p>
+          </div>
+
+          <!-- 映射模式 -->
+          <div v-else class="space-y-3">
+            <div
+              v-for="(mapping, index) in modelMappings"
+              :key="index"
+              class="flex items-center gap-2"
+            >
+              <input
+                v-model="mapping.from"
+                type="text"
+                class="input flex-1"
+                :placeholder="t('admin.accounts.fromModel')"
+                @input="modelRestrictionTouched = true"
+              />
+              <span class="text-gray-400">→</span>
+              <input
+                v-model="mapping.to"
+                type="text"
+                class="input flex-1"
+                :placeholder="t('admin.accounts.toModel')"
+                @input="modelRestrictionTouched = true"
+              />
+              <button
+                type="button"
+                class="text-red-500 hover:text-red-700"
+                @click="removeModelMapping(index)"
+              >
+                <Icon name="trash" size="sm" />
+              </button>
+            </div>
+            <button
+              type="button"
+              class="btn btn-secondary text-sm"
+              @click="addModelMapping"
+            >
+              + {{ t('admin.accounts.addMapping') }}
+            </button>
+            <p class="text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.selectedModels', { count: modelMappings.length }) }}
+              <span v-if="modelMappings.length === 0" class="text-amber-600 dark:text-amber-400">（{{ t('admin.quotaKeys.modelRestrictionRequired') }}）</span>
+            </p>
+            <p v-if="invalidWildcardPatterns.length" class="text-xs text-red-600 dark:text-red-400">
+              {{ t('admin.accounts.wildcardOnlyAtEnd') }}
+            </p>
+          </div>
+        </div>
+
         <div>
           <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
             {{ t('admin.quotaKeys.notes') }}
@@ -780,6 +927,13 @@ import PriorityStepper from '@/components/common/PriorityStepper.vue'
 // 直接引用单文件而非 @/components/account 桶文件：桶会连带引入全部账号组件，
 // 激活码页只需要这一个弹窗。
 import EditAccountModal from '@/components/account/EditAccountModal.vue'
+// 模型限制（白名单/映射）：复用在账号管理页落地的 ModelWhitelistSelector（支持 customSync），
+// 以及 useModelWhitelist 的辅助函数（构建 model_mapping 对象、按平台取模型、通配符校验、解析回填）。
+import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
+import {
+  buildModelMappingObject,
+  isValidWildcardPattern
+} from '@/composables/useModelWhitelist'
 import type { Account, AdminGroup, Proxy as AccountProxy } from '@/types'
 
 const { t } = useI18n()
@@ -863,8 +1017,27 @@ const form = reactive({
   // 跟随此值（后端拉号时写入、改优先级时同事务同步）。
   priority: 1,
   // 所属上游：创建态随请求提交；空串在提交时会被拦截（失败关闭，不再回落 shareai 默认）。
-  upstream_key: ''
+  upstream_key: '',
+  // 并发数（B 批上移，不含余额查询）：null / 空 = 沿用账号列默认 3；正整数（≥ 0）同步名下账号。
+  concurrency: null as number | null,
+  // 负载因子（B 批上移）：null / 空 = 清除；正整数 1..10000。
+  load_factor: null as number | null,
+  // 计费倍率（B 批上移）：≥ 0，默认 1，允许 0；同步名下账号的计费倍率。
+  rate_multiplier: 1
 })
+
+// --- 模型限制（激活码级权威值，与 credentials.model_mapping 同构）----------------
+// Create 与 Edit 共用弹框，均渲染白名单/映射双模式；打开弹窗时重置 touched=false，
+// 用户切换模式 / 改 allowedModels / 改 modelMappings 置 true（用于「禁止空模型落库」判定）。
+const modelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
+const allowedModels = ref<string[]>([])
+const modelMappings = ref<{ from: string; to: string }[]>([])
+const modelRestrictionTouched = ref(false)
+
+// 编辑态才暴露「同步上游支持的模型」自定义接口（码级模型限制预览，不改写单个账号 DB）。
+const customSyncProp = computed(() =>
+  editing.value ? () => adminAPI.quotaKeys.syncUpstreamModels(editing.value!.id) : undefined
+)
 
 /**
  * §0.1 #7 折叠裁定：账号列表默认折叠。
@@ -1052,6 +1225,15 @@ function openCreateDialog() {
   form.priority = 1
   // 重置为空串：不默认选第一个上游；提交时若仍为空串会被拦截（失败关闭，不再回落 shareai）。
   form.upstream_key = ''
+  // B 批上移字段：并发/负载因子默认空（沿用默认/清除），计费倍率默认 1。
+  form.concurrency = null
+  form.load_factor = null
+  form.rate_multiplier = 1
+  // 模型限制：创建态默认白名单模式、空列表、未触碰。
+  modelRestrictionMode.value = 'whitelist'
+  allowedModels.value = []
+  modelMappings.value = []
+  modelRestrictionTouched.value = false
   formError.value = ''
   showFormDialog.value = true
 }
@@ -1062,6 +1244,31 @@ function openEditDialog(row: QuotaKey) {
   form.expires_at = row.expires_at ? toLocalInputValue(row.expires_at) : ''
   form.notes = row.notes ?? ''
   form.priority = row.priority ?? 1
+  // B 批上移字段回填。
+  form.concurrency = row.concurrency ?? null
+  form.load_factor = row.load_factor ?? null
+  form.rate_multiplier = row.rate_multiplier ?? 1
+  // 模型限制回填（用户裁定口径）：
+  // - 非空对象且全部为恒等映射（k === v）→ whitelist 模式，全部填入 allowedModels。
+  // - 非空对象但存在任意非恒等条目 → mapping 模式，全部条目转为 {from, to} 填入 modelMappings
+  //   （含恒等条目也以映射形式保留，避免切换模式后丢模型）。
+  // - 空 / null → 空列表 + whitelist 模式。
+  const mm = row.model_mapping
+  const entries = mm && typeof mm === 'object' ? Object.entries(mm) : []
+  if (entries.length > 0 && entries.every(([k, v]) => k === v)) {
+    modelRestrictionMode.value = 'whitelist'
+    allowedModels.value = entries.map(([k]) => k)
+    modelMappings.value = []
+  } else if (entries.length > 0) {
+    modelRestrictionMode.value = 'mapping'
+    modelMappings.value = entries.map(([k, v]) => ({ from: k, to: v as string }))
+    allowedModels.value = []
+  } else {
+    modelRestrictionMode.value = 'whitelist'
+    allowedModels.value = []
+    modelMappings.value = []
+  }
+  modelRestrictionTouched.value = false
   formError.value = ''
   showFormDialog.value = true
 }
@@ -1071,6 +1278,11 @@ function closeFormDialog() {
   editing.value = null
   // F1：明文激活码用完即弃，绝不驻留前端状态
   form.code = ''
+  // 关闭弹窗一并清空模型限制草稿，避免下次打开残留。
+  modelRestrictionMode.value = 'whitelist'
+  allowedModels.value = []
+  modelMappings.value = []
+  modelRestrictionTouched.value = false
 }
 
 function toLocalInputValue(value: string): string {
@@ -1080,16 +1292,62 @@ function toLocalInputValue(value: string): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-function buildPayload(): CreateQuotaKeyRequest | UpdateQuotaKeyRequest {
+// 将表单里的并发/负载因子空串归一为 null（v-model.number 清空输入会得到 ''）。
+function normalizeInt(v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null
+  const n = Number(v)
+  return Number.isNaN(n) ? null : n
+}
+
+// 计费倍率：空/缺省回落默认 1；非有限数回落 1（非有限值会在 submitForm 校验处拦截）。
+// v-model.number 清空输入会得到 ''，故按 unknown 处理以防类型比较报错。
+function rateMultiplierValue(): number {
+  const v = form.rate_multiplier as unknown
+  if (v === '' || v === null || v === undefined) return 1
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 1
+}
+
+// 映射模式 from 字段通配符校验（* 只能放在末尾；to 不能含 *），用于 UI 实时提示。
+const invalidWildcardPatterns = computed(() => {
+  const bad: string[] = []
+  for (const m of modelMappings.value) {
+    const from = m.from.trim()
+    const to = m.to.trim()
+    if (from && !isValidWildcardPattern(from)) bad.push(from)
+    if (to.includes('*')) bad.push(`${from}→${to}`)
+  }
+  return Array.from(new Set(bad))
+})
+
+function addModelMapping() {
+  modelMappings.value.push({ from: '', to: '' })
+  modelRestrictionTouched.value = true
+}
+
+function removeModelMapping(index: number) {
+  modelMappings.value.splice(index, 1)
+  modelRestrictionTouched.value = true
+}
+
+function buildPayload(modelMapping?: Record<string, string> | null): CreateQuotaKeyRequest | UpdateQuotaKeyRequest {
   const expiresAt = form.expires_at ? new Date(form.expires_at).toISOString() : null
   const payload: Record<string, unknown> = {
     expires_at: expiresAt,
-    priority: form.priority
+    priority: form.priority,
+    // B 批上移字段：空归 null；计费倍率默认 1。
+    concurrency: normalizeInt(form.concurrency),
+    load_factor: normalizeInt(form.load_factor),
+    rate_multiplier: rateMultiplierValue()
   }
   payload.notes = form.notes.trim() ? form.notes.trim() : null
   // 创建态随请求提交所选上游；编辑态不放（update 接口无该字段，放了亦被忽略且是噪声）。
   if (!editing.value) {
     payload.upstream_key = form.upstream_key
+  }
+  // 仅在调用方明确要发送模型限制时带上（避免编辑态「仅改备注/优先级」时覆盖码级模型）。
+  if (modelMapping !== undefined) {
+    payload.model_mapping = modelMapping
   }
   return payload as UpdateQuotaKeyRequest
 }
@@ -1111,14 +1369,68 @@ async function submitForm() {
     formError.value = t('admin.quotaKeys.upstream.selectRequired')
     return
   }
+  // 并发数：非空时必须为 ≥ 0 的整数。
+  const concurrencyVal = normalizeInt(form.concurrency)
+  if (concurrencyVal !== null && (!Number.isInteger(concurrencyVal) || concurrencyVal < 0)) {
+    formError.value = t('admin.quotaKeys.concurrencyInvalid')
+    return
+  }
+  // 负载因子：非空时必须为 1..10000 的整数。
+  const loadFactorVal = normalizeInt(form.load_factor)
+  if (
+    loadFactorVal !== null &&
+    (!Number.isInteger(loadFactorVal) || loadFactorVal < 1 || loadFactorVal > 10000)
+  ) {
+    formError.value = t('admin.quotaKeys.loadFactorInvalid')
+    return
+  }
+  // 计费倍率：必须为 ≥ 0 的有限数。
+  const rateVal = rateMultiplierValue()
+  if (!Number.isFinite(rateVal) || rateVal < 0) {
+    formError.value = t('admin.quotaKeys.rateMultiplierInvalid')
+    return
+  }
+
+  // 模型限制：计算映射对象并应用「禁止空模型落库」裁定（用户裁定 #3）。
+  const modelMapping = buildModelMappingObject(
+    modelRestrictionMode.value,
+    allowedModels.value,
+    modelMappings.value
+  )
+  let sendModelMapping = false
+  if (editing.value) {
+    const orig = editing.value.model_mapping
+    const origHasMapping = !!orig && Object.keys(orig).length > 0
+    // 编辑态：原已有模型限制，或用户已触碰模型，且算出来为空 → 阻断保存。
+    if ((origHasMapping || modelRestrictionTouched.value) && !modelMapping) {
+      formError.value = t('admin.quotaKeys.modelRestrictionRequired')
+      return
+    }
+    // 仅当原 model_mapping 为 null/未设置 且 未触碰模型时，不发送（保持原状，不阻塞仅改备注/优先级）。
+    sendModelMapping = !(orig == null && !modelRestrictionTouched.value)
+  } else {
+    // 创建态：未触碰模型 → 不发送（沿用上游默认实供清单）。
+    if (modelRestrictionTouched.value) {
+      // 触碰后算出为空 → 阻断保存（用户选过/切到映射/删空都不允许落空）。
+      if (!modelMapping) {
+        formError.value = t('admin.quotaKeys.modelRestrictionRequired')
+        return
+      }
+      sendModelMapping = true
+    } else {
+      sendModelMapping = false
+    }
+  }
+
   saving.value = true
   try {
+    const payload = buildPayload(sendModelMapping && modelMapping ? modelMapping : undefined)
     if (editing.value) {
-      await adminAPI.quotaKeys.update(editing.value.id, buildPayload() as UpdateQuotaKeyRequest)
+      await adminAPI.quotaKeys.update(editing.value.id, payload as UpdateQuotaKeyRequest)
       appStore.showSuccess(t('admin.quotaKeys.updated'))
     } else {
-      const payload = { ...(buildPayload() as CreateQuotaKeyRequest), code: form.code.trim() }
-      await adminAPI.quotaKeys.create(payload)
+      const fullPayload = { ...(payload as CreateQuotaKeyRequest), code: form.code.trim() }
+      await adminAPI.quotaKeys.create(fullPayload)
       appStore.showSuccess(t('admin.quotaKeys.created'))
     }
     closeFormDialog()

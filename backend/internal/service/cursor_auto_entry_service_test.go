@@ -181,6 +181,115 @@ func TestApplyEntryDefaultsPersistsClosedParams(t *testing.T) {
 	require.NotContains(t, got.Extra, "entry_models", "extra 不得再有 entry_models 残留")
 }
 
+// mustCreateQuotaKeyWithDefaults 创建带自定义 priority / rate_multiplier / concurrency 的
+// 激活码（用于验证入库参数继承）。concurrency 为 nil 时不写该列（沿用列默认）。
+func mustCreateQuotaKeyWithDefaults(t *testing.T, client *ent.Client, status string, priority int, rateMultiplier float64, concurrency *int) *ent.QuotaKey {
+	t.Helper()
+	builder := client.QuotaKey.Create().
+		SetCodeEncrypted("enc:v1:test").
+		SetStatus(status).
+		SetPriority(priority).
+		SetRateMultiplier(rateMultiplier)
+	if concurrency != nil {
+		builder = builder.SetConcurrency(*concurrency)
+	}
+	qk, err := builder.Save(context.Background())
+	require.NoError(t, err)
+	return qk
+}
+
+// capturingEntAccountWriter 是"记录调用 + 真实落库"的测试 writer：既捕获传给 writer 的
+// 参数（断言 ApplyEntryDefaults 算出的三值），又委托生产 ent writer 真正写库（落库复核）。
+type capturingEntAccountWriter struct {
+	*fakeAccountWriter
+	real AccountFieldWriter
+}
+
+func (w *capturingEntAccountWriter) ApplyEntryDefaults(ctx context.Context, tx *ent.Tx, id int64, priority int, rateMultiplier float64, concurrency *int) error {
+	w.fakeAccountWriter.ApplyEntryDefaults(ctx, tx, id, priority, rateMultiplier, concurrency)
+	return w.real.ApplyEntryDefaults(ctx, tx, id, priority, rateMultiplier, concurrency)
+}
+
+// TestApplyEntryDefaultsInheritsQuotaKeyDefaults：入库参数继承自所属激活码（派发单
+// c1p1-B2-entry）。激活码配了自定义 priority / rate_multiplier / concurrency 时，
+// ApplyEntryDefaults 必须把这些值传给 writer 并回填 account；特别地 rate_multiplier=0
+// 是合法计费倍率，不得被误判成缺省回落 1.0，concurrency=nil 必须沿用 account 列默认 3。
+func TestApplyEntryDefaultsInheritsQuotaKeyDefaults(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	// 情形一：激活码配了自定义 priority=5, rate_multiplier=0, concurrency=7。
+	qk1 := mustCreateQuotaKeyWithDefaults(t, client, domain.QuotaKeyStatusActive, 5, 0, autoEntryPtrInt(7))
+	acc1, err := client.Account.Create().
+		SetName(fmt.Sprintf("entry-inherit-1-%d", time.Now().UnixNano())).
+		SetPlatform(PlatformCursor).
+		SetType("oauth").
+		SetQuotaKeyID(qk1.ID).
+		Save(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		bg := context.Background()
+		_ = client.Account.DeleteOneID(acc1.ID).Exec(bg)
+		_ = client.QuotaKey.DeleteOneID(qk1.ID).Exec(bg)
+	})
+
+	w1 := &capturingEntAccountWriter{real: &entAccountFieldWriter{client: client}, fakeAccountWriter: &fakeAccountWriter{}}
+	svc1 := &CursorAutoEntryService{writer: w1, client: client}
+	updated1, err := svc1.ApplyEntryDefaults(ctx, nil, acc1, DefaultAutoEntryConfig())
+	require.NoError(t, err)
+	require.Len(t, w1.apply, 1)
+	call1 := w1.apply[0]
+	require.Equal(t, 5, call1.priority, "激活码 priority=5 必须继承到账号")
+	require.InDelta(t, 0.0, call1.rateMultiplier, 1e-9, "激活码 rate_multiplier=0 必须继承，且不得被误判缺省回落 1.0")
+	require.NotNil(t, call1.concurrency, "激活码 concurrency=7 必须继承")
+	require.Equal(t, 7, *call1.concurrency)
+	require.Equal(t, 5, updated1.Priority, "account 必须回填 priority=5")
+	require.InDelta(t, 0.0, updated1.RateMultiplier, 1e-9, "account 必须回填 rate_multiplier=0")
+	require.Equal(t, 7, updated1.Concurrency, "account 必须回填 concurrency=7")
+
+	// 落库复核：0 倍率真实落库，不得回落 1.0。
+	got1, err := client.Account.Get(ctx, acc1.ID)
+	require.NoError(t, err)
+	require.Equal(t, 5, got1.Priority)
+	require.InDelta(t, 0.0, got1.RateMultiplier, 1e-9, "落库 rate_multiplier 必须为 0（不得回落 1.0）")
+	require.Equal(t, 7, got1.Concurrency)
+
+	// 情形二：激活码 rate_multiplier=0.5, concurrency=nil → 并发沿用列默认 3。
+	qk2 := mustCreateQuotaKeyWithDefaults(t, client, domain.QuotaKeyStatusActive, 9, 0.5, nil)
+	acc2, err := client.Account.Create().
+		SetName(fmt.Sprintf("entry-inherit-2-%d", time.Now().UnixNano())).
+		SetPlatform(PlatformCursor).
+		SetType("oauth").
+		SetQuotaKeyID(qk2.ID).
+		Save(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		bg := context.Background()
+		_ = client.Account.DeleteOneID(acc2.ID).Exec(bg)
+		_ = client.QuotaKey.DeleteOneID(qk2.ID).Exec(bg)
+	})
+
+	w2 := &capturingEntAccountWriter{real: &entAccountFieldWriter{client: client}, fakeAccountWriter: &fakeAccountWriter{}}
+	svc2 := &CursorAutoEntryService{writer: w2, client: client}
+	updated2, err := svc2.ApplyEntryDefaults(ctx, nil, acc2, DefaultAutoEntryConfig())
+	require.NoError(t, err)
+	require.Len(t, w2.apply, 1)
+	call2 := w2.apply[0]
+	require.Equal(t, 9, call2.priority, "激活码 priority=9 必须继承到账号")
+	require.InDelta(t, 0.5, call2.rateMultiplier, 1e-9, "激活码 rate_multiplier=0.5 必须继承")
+	require.Nil(t, call2.concurrency, "激活码 concurrency=nil 必须沿用列默认（不写列）")
+	require.Equal(t, 9, updated2.Priority)
+	require.InDelta(t, 0.5, updated2.RateMultiplier, 1e-9)
+	require.Equal(t, 3, updated2.Concurrency, "concurrency=nil → 沿用 account 列默认 3，不回填")
+
+	// 落库复核：concurrency 沿列为默认 3。
+	got2, err := client.Account.Get(ctx, acc2.ID)
+	require.NoError(t, err)
+	require.Equal(t, 9, got2.Priority)
+	require.InDelta(t, 0.5, got2.RateMultiplier, 1e-9)
+	require.Equal(t, 3, got2.Concurrency, "落库 concurrency 应为 account 列默认 3")
+}
+
 // ---------------------------------------------------------------------------
 // 3. ProbeKeyQuota：来源额度观测的唯一入口（§25.6 + §25.14-C 六步顺序）
 // ---------------------------------------------------------------------------

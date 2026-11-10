@@ -51,6 +51,14 @@ type QuotaKey struct {
 	Notes *string `json:"notes,omitempty"`
 	// UpstreamKey holds the value of the "upstream_key" field.
 	UpstreamKey string `json:"upstream_key,omitempty"`
+	// Concurrency holds the value of the "concurrency" field.
+	Concurrency *int `json:"concurrency,omitempty"`
+	// LoadFactor holds the value of the "load_factor" field.
+	LoadFactor *int `json:"load_factor,omitempty"`
+	// RateMultiplier holds the value of the "rate_multiplier" field.
+	RateMultiplier float64 `json:"rate_multiplier,omitempty"`
+	// ModelMapping holds the value of the "model_mapping" field.
+	ModelMapping map[string]string `json:"model_mapping,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the QuotaKeyQuery when eager-loading is set.
 	Edges        QuotaKeyEdges `json:"edges"`
@@ -80,11 +88,13 @@ func (*QuotaKey) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case quotakey.FieldUsageSnapshot:
+		case quotakey.FieldUsageSnapshot, quotakey.FieldModelMapping:
 			values[i] = new([]byte)
 		case quotakey.FieldExhausted:
 			values[i] = new(sql.NullBool)
-		case quotakey.FieldID, quotakey.FieldPriority:
+		case quotakey.FieldRateMultiplier:
+			values[i] = new(sql.NullFloat64)
+		case quotakey.FieldID, quotakey.FieldPriority, quotakey.FieldConcurrency, quotakey.FieldLoadFactor:
 			values[i] = new(sql.NullInt64)
 		case quotakey.FieldCodeEncrypted, quotakey.FieldCodeMAC, quotakey.FieldCodeLast4, quotakey.FieldStatus, quotakey.FieldLastRefreshError, quotakey.FieldDeviceID, quotakey.FieldNotes, quotakey.FieldUpstreamKey:
 			values[i] = new(sql.NullString)
@@ -215,6 +225,34 @@ func (_m *QuotaKey) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.UpstreamKey = value.String
 			}
+		case quotakey.FieldConcurrency:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field concurrency", values[i])
+			} else if value.Valid {
+				_m.Concurrency = new(int)
+				*_m.Concurrency = int(value.Int64)
+			}
+		case quotakey.FieldLoadFactor:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field load_factor", values[i])
+			} else if value.Valid {
+				_m.LoadFactor = new(int)
+				*_m.LoadFactor = int(value.Int64)
+			}
+		case quotakey.FieldRateMultiplier:
+			if value, ok := values[i].(*sql.NullFloat64); !ok {
+				return fmt.Errorf("unexpected type %T for field rate_multiplier", values[i])
+			} else if value.Valid {
+				_m.RateMultiplier = value.Float64
+			}
+		case quotakey.FieldModelMapping:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field model_mapping", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.ModelMapping); err != nil {
+					return fmt.Errorf("unmarshal field model_mapping: %w", err)
+				}
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -315,6 +353,22 @@ func (_m *QuotaKey) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("upstream_key=")
 	builder.WriteString(_m.UpstreamKey)
+	builder.WriteString(", ")
+	if v := _m.Concurrency; v != nil {
+		builder.WriteString("concurrency=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.LoadFactor; v != nil {
+		builder.WriteString("load_factor=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("rate_multiplier=")
+	builder.WriteString(fmt.Sprintf("%v", _m.RateMultiplier))
+	builder.WriteString(", ")
+	builder.WriteString("model_mapping=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ModelMapping))
 	builder.WriteByte(')')
 	return builder.String()
 }

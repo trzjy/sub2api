@@ -299,3 +299,418 @@ func TestQuotaKeyPullInsertsAtCapBoundaryRespectsCentralizedEntry(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, 0, overflow, "overflowing upstream accounts must be dropped")
 }
+
+// ---------------------------------------------------------------------------
+// 派发单 c1p1-B2-admin-account：人工建号 / 改绑 / 编辑 cursor 账号继承并跟随激活码设置。
+// 受码管辖的设置（priority / concurrency / load_factor / rate_multiplier /
+// expires_at / 码级非空 model_mapping）必须随激活码，防止账号侧写路径覆盖飘移。
+// ---------------------------------------------------------------------------
+
+// quotaCapManagedSettingsRepo 在假 repo 的内存落库之外，把账号的全部受码管辖列
+// （priority / concurrency / load_factor / rate_multiplier / expires_at /
+// credentials[model_mapping]）同步写入真实 Postgres，使新用例能断言"继承并跟随激活码"
+// 的设置真实落库（不止内存对象）。
+type quotaCapManagedSettingsRepo struct {
+	upstreamBillingProbeAccountRepo
+	client *ent.Client
+}
+
+func (r *quotaCapManagedSettingsRepo) Create(ctx context.Context, a *Account) error {
+	return r.persistManagedAccount(ctx, nil, a)
+}
+
+func (r *quotaCapManagedSettingsRepo) CreateWithTx(ctx context.Context, tx *ent.Tx, a *Account) error {
+	return r.persistManagedAccount(ctx, tx, a)
+}
+
+func (r *quotaCapManagedSettingsRepo) Update(ctx context.Context, a *Account) error {
+	r.upstreamBillingProbeAccountRepo.Update(ctx, a)
+	if a.QuotaKeyID == nil {
+		return nil
+	}
+	execClient := r.client
+	if tx := ent.TxFromContext(ctx); tx != nil {
+		execClient = tx.Client()
+	}
+	update := execClient.Account.UpdateOneID(a.ID).SetQuotaKeyID(*a.QuotaKeyID)
+	update.SetPriority(a.Priority)
+	update.SetConcurrency(a.Concurrency)
+	if a.LoadFactor != nil {
+		update.SetLoadFactor(*a.LoadFactor)
+	}
+	if a.RateMultiplier != nil {
+		update.SetRateMultiplier(*a.RateMultiplier)
+	}
+	if a.ExpiresAt != nil {
+		update.SetExpiresAt(*a.ExpiresAt)
+	}
+	update.SetCredentials(a.Credentials)
+	_, err := update.Save(ctx)
+	return err
+}
+
+func (r *quotaCapManagedSettingsRepo) persistManagedAccount(ctx context.Context, tx *ent.Tx, a *Account) error {
+	if err := r.upstreamBillingProbeAccountRepo.Create(ctx, a); err != nil {
+		return err
+	}
+	if a.QuotaKeyID == nil {
+		return nil
+	}
+	execClient := r.client
+	if tx != nil {
+		execClient = tx.Client()
+	}
+	create := execClient.Account.Create().
+		SetName(a.Name).
+		SetPlatform(a.Platform).
+		SetType(a.Type).
+		SetCredentials(a.Credentials).
+		SetQuotaKeyID(*a.QuotaKeyID).
+		SetPriority(a.Priority).
+		SetConcurrency(a.Concurrency)
+	if a.LoadFactor != nil {
+		create.SetLoadFactor(*a.LoadFactor)
+	}
+	if a.RateMultiplier != nil {
+		create.SetRateMultiplier(*a.RateMultiplier)
+	}
+	if a.ExpiresAt != nil {
+		create.SetExpiresAt(*a.ExpiresAt)
+	}
+	if _, err := create.Save(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// mustCreateManagedQuotaKey 创建带完整受码管辖设置的激活码（供继承测试）。
+func mustCreateManagedQuotaKey(t *testing.T, client *ent.Client, status string, priority, concurrency, loadFactor int, rateMultiplier float64, expiresAt time.Time, modelMapping map[string]string) *ent.QuotaKey {
+	t.Helper()
+	qk, err := client.QuotaKey.Create().
+		SetCodeEncrypted("enc:v1:test").
+		SetStatus(status).
+		SetPriority(priority).
+		SetConcurrency(concurrency).
+		SetLoadFactor(loadFactor).
+		SetRateMultiplier(rateMultiplier).
+		SetExpiresAt(expiresAt).
+		SetModelMapping(modelMapping).
+		Save(context.Background())
+	require.NoError(t, err)
+	return qk
+}
+
+func managedSettingsQKAdminService(t *testing.T) (*adminServiceImpl, *quotaCapManagedSettingsRepo, *ent.Client) {
+	t.Helper()
+	client := quotaKeyTestEntClient(t)
+	repo := &quotaCapManagedSettingsRepo{client: client}
+	repo.upstreamBillingProbeAccountRepo.accounts = map[int64]*Account{}
+	return &adminServiceImpl{accountRepo: repo, entClient: client}, repo, client
+}
+
+// TestCursorCreateAccountInheritsQuotaKeyManagedSettings 锁定人工建号：绑定激活码后新账号
+// 自动继承激活码管辖的 6 项设置（priority / concurrency / load_factor / rate_multiplier /
+// expires_at / model_mapping），且真实落库。
+func TestCursorCreateAccountInheritsQuotaKeyManagedSettings(t *testing.T) {
+	ctx := context.Background()
+	svc, _, client := managedSettingsQKAdminService(t)
+
+	expiresAt := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	qk := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 4, 6, 80, 0.5, expiresAt, map[string]string{"gpt-6": "gpt-6"})
+
+	created, err := svc.CreateAccount(ctx, cursorCreateInput(qk.ID))
+	require.NoError(t, err, "creating under an active quota key must succeed")
+	require.NotNil(t, created.QuotaKeyID)
+	require.Equal(t, qk.ID, *created.QuotaKeyID)
+
+	// 内存对象即应继承激活码管辖的 6 项设置。
+	require.Equal(t, 4, created.Priority)
+	require.Equal(t, 6, created.Concurrency)
+	require.NotNil(t, created.LoadFactor)
+	require.Equal(t, 80, *created.LoadFactor)
+	require.NotNil(t, created.RateMultiplier)
+	require.Equal(t, 0.5, *created.RateMultiplier)
+	require.NotNil(t, created.ExpiresAt)
+	require.Equal(t, expiresAt.Unix(), created.ExpiresAt.Unix())
+	require.Equal(t, map[string]any{"gpt-6": "gpt-6"}, created.Credentials["model_mapping"])
+
+	// 真实 DB 行也应落库这些值。
+	dbAcc, err := client.Account.Query().
+		Where(account.QuotaKeyIDEQ(qk.ID), account.NameEQ("cursor-created")).
+		Only(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 4, dbAcc.Priority)
+	require.Equal(t, 6, dbAcc.Concurrency)
+	require.NotNil(t, dbAcc.LoadFactor)
+	require.Equal(t, 80, *dbAcc.LoadFactor)
+	require.Equal(t, 0.5, dbAcc.RateMultiplier)
+	require.NotNil(t, dbAcc.ExpiresAt)
+	require.Equal(t, expiresAt.Unix(), dbAcc.ExpiresAt.Unix())
+	require.Equal(t, map[string]any{"gpt-6": "gpt-6"}, dbAcc.Credentials["model_mapping"])
+}
+
+// TestCursorRebindInheritsTargetQuotaKeyManagedSettings 锁定人工改绑：改绑到另一激活码后
+// 自动继承目标激活码管辖的 6 项设置（含 expires_at），且真实落库。
+func TestCursorRebindInheritsTargetQuotaKeyManagedSettings(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, client := managedSettingsQKAdminService(t)
+
+	sourceExpiresAt := time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC)
+	source := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 1, 1, 10, 0.1, sourceExpiresAt, map[string]string{"gpt-src": "gpt-src"})
+	targetExpiresAt := time.Date(2031, 5, 6, 7, 8, 9, 0, time.UTC)
+	target := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 7, 9, 55, 2.0, targetExpiresAt, map[string]string{"gpt-7": "gpt-7"})
+
+	existing := mustCreateAccountForRebind(t, client, source.ID)
+	repo.upstreamBillingProbeAccountRepo.accounts[existing.ID] = &Account{
+		ID:         existing.ID,
+		Name:       existing.Name,
+		Platform:   domain.PlatformCursor,
+		Type:       AccountTypeAPIKey,
+		Status:     StatusActive,
+		QuotaKeyID: &source.ID,
+	}
+
+	updated, err := svc.UpdateAccount(ctx, existing.ID, &UpdateAccountInput{
+		QuotaKeyIDSet: true,
+		QuotaKeyID:    &target.ID,
+	})
+	require.NoError(t, err, "rebinding below the cap must succeed")
+	require.NotNil(t, updated.QuotaKeyID)
+	require.Equal(t, target.ID, *updated.QuotaKeyID)
+
+	// 改绑应继承目标激活码管辖的 6 项设置（含 expires_at）。
+	require.Equal(t, 7, updated.Priority)
+	require.Equal(t, 9, updated.Concurrency)
+	require.NotNil(t, updated.LoadFactor)
+	require.Equal(t, 55, *updated.LoadFactor)
+	require.NotNil(t, updated.RateMultiplier)
+	require.Equal(t, 2.0, *updated.RateMultiplier)
+	require.NotNil(t, updated.ExpiresAt)
+	require.Equal(t, targetExpiresAt.Unix(), updated.ExpiresAt.Unix())
+	require.Equal(t, map[string]any{"gpt-7": "gpt-7"}, updated.Credentials["model_mapping"])
+
+	// 真实 DB 行落库值应随目标激活码。
+	dbAcc, err := client.Account.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.Equal(t, target.ID, *dbAcc.QuotaKeyID)
+	require.Equal(t, 7, dbAcc.Priority)
+	require.Equal(t, 9, dbAcc.Concurrency)
+	require.NotNil(t, dbAcc.LoadFactor)
+	require.Equal(t, 55, *dbAcc.LoadFactor)
+	require.Equal(t, 2.0, dbAcc.RateMultiplier)
+	require.NotNil(t, dbAcc.ExpiresAt)
+	require.Equal(t, targetExpiresAt.Unix(), dbAcc.ExpiresAt.Unix())
+	require.Equal(t, map[string]any{"gpt-7": "gpt-7"}, dbAcc.Credentials["model_mapping"])
+}
+
+// TestAdminAccountQuotaKeyBoundUpdateFollowsManagedSettings 锁定已绑定激活码的 cursor 账号
+// 编辑：即便客户端提交了与激活码冲突的 expires_at / priority / rate_multiplier，落库值仍随
+// 激活码不变（受码管辖设置防覆盖飘移）。
+func TestAdminAccountQuotaKeyBoundUpdateFollowsManagedSettings(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, client := managedSettingsQKAdminService(t)
+
+	keyExpiresAt := time.Date(2030, 3, 4, 5, 6, 7, 0, time.UTC)
+	qk := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 4, 6, 80, 0.5, keyExpiresAt, map[string]string{"gpt-6": "gpt-6"})
+
+	existing := mustCreateAccountForRebind(t, client, qk.ID)
+	repo.upstreamBillingProbeAccountRepo.accounts[existing.ID] = &Account{
+		ID:         existing.ID,
+		Name:       existing.Name,
+		Platform:   domain.PlatformCursor,
+		Type:       AccountTypeAPIKey,
+		Status:     StatusActive,
+		QuotaKeyID: &qk.ID,
+	}
+
+	// 客户端企图写入与激活码冲突的值。
+	inputExpiresAt := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	prio := 99
+	exp := inputExpiresAt.Unix()
+	rm := 9.9
+	input := &UpdateAccountInput{
+		Priority:       &prio,
+		ExpiresAt:      &exp,
+		RateMultiplier: &rm,
+	}
+	updated, err := svc.UpdateAccount(ctx, existing.ID, input)
+	require.NoError(t, err, "updating a bound cursor account must succeed")
+
+	// 即便客户端提交了旧字段，内存对象仍随激活码不变。
+	require.Equal(t, 4, updated.Priority, "priority must follow the quota key")
+	require.NotNil(t, updated.ExpiresAt)
+	require.Equal(t, keyExpiresAt.Unix(), updated.ExpiresAt.Unix(), "expires_at must follow the quota key")
+	require.NotNil(t, updated.RateMultiplier)
+	require.Equal(t, 0.5, *updated.RateMultiplier, "rate_multiplier must follow the quota key")
+
+	// 真实 DB 行落库值仍随激活码不变。
+	dbAcc, err := client.Account.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.Equal(t, 4, dbAcc.Priority)
+	require.NotNil(t, dbAcc.ExpiresAt)
+	require.Equal(t, keyExpiresAt.Unix(), dbAcc.ExpiresAt.Unix())
+	require.Equal(t, 0.5, dbAcc.RateMultiplier)
+}
+
+// TestCursorRebindToUnmappedKeyClearsOldMapping 锁定 P1：带 model_mapping 的 cursor 账号
+// 改绑到【未配置】model_mapping（NULL/空）的目标激活码后，账号 credentials 中旧来源码的
+// model_mapping 限制必须被显式清除，重置为无码级限制状态（与目标码语义一致），内存对象与
+// 真实 DB 行均不得残留。
+func TestCursorRebindToUnmappedKeyClearsOldMapping(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, client := managedSettingsQKAdminService(t)
+
+	source := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 1, 1, 10, 0.1, time.Time{}, map[string]string{"gpt-src": "gpt-src"})
+	// 目标激活码：未配置 model_mapping（NULL）。
+	target := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 7, 9, 55, 2.0, time.Time{}, nil)
+
+	// 账号原归属 source，凭据残留来源码的模型映射限制。
+	existing, err := client.Account.Create().
+		SetName("rebind-candidate").
+		SetPlatform(domain.PlatformCursor).
+		SetType(AccountTypeAPIKey).
+		SetCredentials(map[string]any{"api_key": "sk-src", "model_mapping": map[string]any{"gpt-src": "gpt-src"}}).
+		SetQuotaKeyID(source.ID).
+		Save(ctx)
+	require.NoError(t, err)
+	repo.upstreamBillingProbeAccountRepo.accounts[existing.ID] = &Account{
+		ID:         existing.ID,
+		Name:       existing.Name,
+		Platform:   domain.PlatformCursor,
+		Type:       AccountTypeAPIKey,
+		Status:     StatusActive,
+		QuotaKeyID: &source.ID,
+	}
+
+	updated, err := svc.UpdateAccount(ctx, existing.ID, &UpdateAccountInput{
+		QuotaKeyIDSet: true,
+		QuotaKeyID:    &target.ID,
+	})
+	require.NoError(t, err, "rebinding to an unmapped quota key must succeed")
+	require.NotNil(t, updated.QuotaKeyID)
+	require.Equal(t, target.ID, *updated.QuotaKeyID)
+
+	// 改绑后账号内存对象的 model_mapping 必须被清除（不再残留来源码限制）。
+	_, stillHasMapping := updated.Credentials["model_mapping"]
+	require.False(t, stillHasMapping, "model_mapping must be cleared from the account after rebinding to an unmapped quota key")
+
+	// 真实 DB 行也应清除 model_mapping。
+	dbAcc, err := client.Account.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	_, dbHasMapping := dbAcc.Credentials["model_mapping"]
+	require.False(t, dbHasMapping, "model_mapping must be cleared in the persisted row")
+
+	// 反向回归：目标码确实未配 model_mapping（确认不是因为目标码自己也配了）。
+	targetQK, err := client.QuotaKey.Get(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, 0, len(targetQK.ModelMapping), "target quota key must remain unmapped")
+}
+
+// TestAdminAccountQuotaKeyBoundUpdateFollowsManagedSettingsConcurrentLock 锁定 P2：已绑定
+// 激活码的 cursor 账号走普通编辑（非改绑）时，写入被包裹在激活码锁事务内——锁内重读激活码
+// 当前权威值并应用，再于同一事务落库，杜绝 TOCTOU 竞态：管理员并发更新激活码设置时，编辑
+// 不得拿锁外旧设置写回、覆盖刚刚同步的新值。
+//
+// 该用例以"先持同一 advisory 锁更新激活码 priority=99 并提交"模拟并发管理员更新；编辑事务
+// 在锁内重读，必须读到新值 99 并落库，而非把并发更新覆盖回旧值 4。
+func TestAdminAccountQuotaKeyBoundUpdateFollowsManagedSettingsConcurrentLock(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, client := managedSettingsQKAdminService(t)
+
+	keyExpiresAt := time.Date(2030, 3, 4, 5, 6, 7, 0, time.UTC)
+	qk := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 4, 6, 80, 0.5, keyExpiresAt, map[string]string{"gpt-6": "gpt-6"})
+
+	existing := mustCreateAccountForRebind(t, client, qk.ID)
+	repo.upstreamBillingProbeAccountRepo.accounts[existing.ID] = &Account{
+		ID:         existing.ID,
+		Name:       existing.Name,
+		Platform:   domain.PlatformCursor,
+		Type:       AccountTypeAPIKey,
+		Status:     StatusActive,
+		QuotaKeyID: &qk.ID,
+	}
+
+	// 并发：复用同一 advisory 互斥锁先更新激活码设置（priority 4 -> 99）并提交释放；
+	// 编辑在锁外无法读取到该更新，必须于锁内重读才拿得到新值。
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- withQuotaKeyLockTx(ctx, ctx, client, qk.ID, func(tx *ent.Tx) error {
+			_, e := tx.QuotaKey.UpdateOneID(qk.ID).SetPriority(99).Save(ctx)
+			return e
+		})
+	}()
+	// 让并发更新先持锁并提交（advisory 锁串行化：编辑事务在此阻塞直到更新提交）。
+	time.Sleep(100 * time.Millisecond)
+
+	// 普通编辑，不提交任何冲突字段：必须跟随锁内重读到的激活码新设置。
+	updated, err := svc.UpdateAccount(ctx, existing.ID, &UpdateAccountInput{})
+	require.NoError(t, err, "updating a bound cursor account must succeed")
+	require.NoError(t, <-errCh, "concurrent quota key update must commit")
+
+	// 编辑在锁内重读到 priority=99，落库值应随新设置，而非把并发更新覆盖回旧值 4。
+	require.Equal(t, 99, updated.Priority, "edit must pick up the concurrent quota key update inside the lock")
+	dbAcc, err := client.Account.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.Equal(t, 99, dbAcc.Priority, "persisted priority must reflect the concurrent quota key update")
+
+	// 校验激活码侧 priority 确实已被并发更新改为 99（确认不是编辑自己改的）。
+	qkAfter, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.Equal(t, 99, qkAfter.Priority)
+}
+
+// TestAdminAccountQuotaKeyBoundUpdateAppliesClearedConcurrencyDefault3 回归 c1p1-fix-review-r2 P2：
+// 当激活码码级并发数被清空（quota_keys.concurrency = NULL）并把名下账号同步恢复为默认并发 3
+// 后，若有并发的 UpdateAccount 编辑在锁外先读了旧账号快照（Concurrency=7），随后在
+// withQuotaKeyLockTx 锁内虽重读到 qk.Concurrency == nil，applyQuotaKeyManagedAccountSettings
+// 必须显式把 account.Concurrency 重置为默认 3，绝不能把旧值 7 写回 DB，撤销清空操作。
+func TestAdminAccountQuotaKeyBoundUpdateAppliesClearedConcurrencyDefault3(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, client := managedSettingsQKAdminService(t)
+
+	// 激活码先带并发数 7（此时账号随码继承 7），随后管理员清空码级并发数为 NULL。
+	qk := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 4, 7, 80, 0.5, time.Time{}, nil)
+
+	// 账号原快照：Concurrency=7（锁外旧读）；DB 行同样为 7（清空前的同步值）。
+	existing, err := client.Account.Create().
+		SetName("concurrency-cleared-account").
+		SetPlatform(domain.PlatformCursor).
+		SetType(AccountTypeAPIKey).
+		SetCredentials(map[string]any{"api_key": "sk-old"}).
+		SetQuotaKeyID(qk.ID).
+		SetConcurrency(7).
+		Save(ctx)
+	require.NoError(t, err)
+	repo.upstreamBillingProbeAccountRepo.accounts[existing.ID] = &Account{
+		ID:          existing.ID,
+		Name:        existing.Name,
+		Platform:    domain.PlatformCursor,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		QuotaKeyID:  &qk.ID,
+		Concurrency: 7, // 锁外旧快照：编辑前账号仍持旧并发 7。
+	}
+
+	// 模拟激活码清空码级并发数（NULL）：UpdateSettingsAndSyncAccounts 已将该码名下账号
+	// DB 同步为默认并发 3（这里直接清空码并发以刻画"锁内读到 NULL"的权威状态）。
+	_, err = client.QuotaKey.UpdateOneID(qk.ID).ClearConcurrency().Save(ctx)
+	require.NoError(t, err)
+
+	// 并发编辑（如改备注）：必须跟随锁内重读到的"码级并发已清空"，把账号并发重置为默认 3。
+	notes := "tweak notes only"
+	updated, err := svc.UpdateAccount(ctx, existing.ID, &UpdateAccountInput{Notes: &notes})
+	require.NoError(t, err, "editing a bound cursor account after concurrency cleared must succeed")
+	require.Equal(t, 3, updated.Concurrency, "cleared quota key concurrency must reset account to default 3, not write back old 7")
+	require.NotNil(t, updated.Notes, "notes edit must be preserved")
+	require.Equal(t, notes, *updated.Notes, "notes edit must be preserved")
+
+	// 真实 DB 行落库并发必须为 3（旧值 7 绝不可写回）。
+	dbAcc, err := client.Account.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.Equal(t, 3, dbAcc.Concurrency, "persisted concurrency must be the default 3 after code-level concurrency cleared")
+
+	// 反向校验：激活码侧 concurrency 确实为 NULL（确认不是编辑把值写成非零）。
+	qkAfter, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.Nil(t, qkAfter.Concurrency, "quota key concurrency must remain NULL (cleared)")
+}

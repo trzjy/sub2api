@@ -87,6 +87,57 @@ export const CURSOR_NATIVE_GROUP_PLATFORMS: readonly GroupPlatform[] = [
   'muse'
 ]
 
+/**
+ * 由一组模型名推导其所属「家族平台」集合（用户裁定 2026-11-10：模型名单中有哪些
+ * 家族，就显示哪些家族相关的分组）。供多家族平台（如 cursor / antigravity）的
+ * 分组选择器放行项统一复用，取代各组件中重复且不一致的硬编码识别逻辑。
+ *
+ * 规则：每个模型名先 `trim().toLowerCase()`（空串跳过），按下方顺序识别所属家族，
+ * 命中即确定为该家族（多关键词命中同一家族不做重复添加）。整体对家族去重并保持
+ * 首次出现顺序。无任何已知家族时返回 `[]`，绝不插入假平台。
+ *
+ * 关键词与家族映射（子串匹配，大小写不敏感）：
+ *   anthropic: claude / fable / opus / sonnet / haiku
+ *   gemini:    gemini / argon
+ *   openai:    gpt / o1- / o3- / o4- / codex
+ *   grok:      grok
+ *   muse:      muse
+ *   deepseek:  deepseek
+ *   zhipu:     glm / zhipu / chatglm
+ *   kimi:      kimi / moonshot
+ */
+export function inferGroupPlatformsFromModels(models: readonly string[]): GroupPlatform[] {
+  const FAMILY_KEYWORDS: ReadonlyArray<readonly [GroupPlatform, readonly string[]]> = [
+    ['anthropic', ['claude', 'fable', 'opus', 'sonnet', 'haiku']],
+    ['gemini', ['gemini', 'argon']],
+    ['openai', ['gpt', 'o1-', 'o3-', 'o4-', 'codex']],
+    ['grok', ['grok']],
+    ['muse', ['muse']],
+    ['deepseek', ['deepseek']],
+    ['zhipu', ['glm', 'zhipu', 'chatglm']],
+    ['kimi', ['kimi', 'moonshot']],
+  ]
+
+  const seen = new Set<GroupPlatform>()
+  const result: GroupPlatform[] = []
+
+  for (const raw of models) {
+    const model = String(raw ?? '').trim().toLowerCase()
+    if (model === '') continue
+    for (const [platform, keywords] of FAMILY_KEYWORDS) {
+      if (keywords.some((kw) => model.includes(kw))) {
+        if (!seen.has(platform)) {
+          seen.add(platform)
+          result.push(platform)
+        }
+        break
+      }
+    }
+  }
+
+  return result
+}
+
 const isInternalSupplyPlatform = (value: string): boolean =>
   (INTERNAL_SUPPLY_PLATFORMS as readonly string[]).includes(value)
 

@@ -1617,6 +1617,10 @@ var (
 		{Name: "priority", Type: field.TypeInt, Default: 1},
 		{Name: "notes", Type: field.TypeString, Nullable: true, SchemaType: map[string]string{"postgres": "text"}},
 		{Name: "upstream_key", Type: field.TypeString, Size: 64, Default: "shareai"},
+		{Name: "concurrency", Type: field.TypeInt, Nullable: true},
+		{Name: "load_factor", Type: field.TypeInt, Nullable: true},
+		{Name: "rate_multiplier", Type: field.TypeFloat64, Default: 1, SchemaType: map[string]string{"postgres": "decimal(10,4)"}},
+		{Name: "model_mapping", Type: field.TypeJSON, Nullable: true, SchemaType: map[string]string{"postgres": "jsonb"}},
 	}
 	// QuotaKeysTable holds the schema information for the "quota_keys" table.
 	QuotaKeysTable = &schema.Table{

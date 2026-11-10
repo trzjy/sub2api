@@ -322,11 +322,13 @@ func CursorAccountModelMapping(selectedModels []string) map[string]any {
 
 // ApplyEntryDefaults 把收口后的入库参数写入账号的列（D1 挂载点调用）。
 //
-// 仅写账号属性，不动挂组集合计算（D2-a 禁区）：
-//   - priority → account.priority 列，恒为 CursorEntryPriority（=1）；
-//   - rate_multiplier → account.rate_multiplier 列，恒为 CursorEntryRateMultiplier（=1.0，
-//     账号成本中性；不批改存量非 1 的账号）；
-//   - concurrency：入库不写该列（nil）→ 沿用 account 列默认 3。
+// 仅写账号属性，不动挂组集合计算（D2-a 禁区）。三项参数均继承自账号所属激活码
+// （quota_key）的码级值，码未配置（或找不到/读库非 NotFound 错误上抛）时回落入库常量：
+//   - priority → account.priority 列：码 priority > 0 时采用，否则 CursorEntryPriority（=1）；
+//   - rate_multiplier → account.rate_multiplier 列：码 RateMultiplier >= 0 时采用
+//     （**0 是合法计费倍率**，不得回落 1.0），仅 < 0 时回落 CursorEntryRateMultiplier（=1.0）；
+//   - concurrency → account.concurrency 列：码 concurrency 非空且 > 0 时采用拷贝指针，
+//     否则 nil 沿用 account 列默认 3。
 //
 // 参数不再取自 cfg.EntryDefaults（P1-B2 收口）：cfg 保留仅为 AutoEntryConfigProvider 契约兼容。
 //
@@ -336,32 +338,47 @@ func (s *CursorAutoEntryService) ApplyEntryDefaults(ctx context.Context, tx *ent
 	if account == nil {
 		return nil, fmt.Errorf("cursor_auto_entry: nil account")
 	}
-	// 入库优先级跟随所属激活码（用户裁定 2026-11-03）：码的 priority 直接成为账号
-	// 的 accounts.priority，使"日限额码优先消耗、月总限额码兜底"在账号调度层生效。
-	priority, perr := s.entryPriorityFor(ctx, tx, account)
-	if perr != nil {
-		return nil, perr
+	// 入库三项参数均继承自所属激活码（用户裁定 2026-11-03）：码的 priority / rate_multiplier /
+	// concurrency 直接成为账号的对应列值，使"日限额码优先消耗、月总限额码兜底"及码级计费倍率、
+	// 并发在账号调度层生效。
+	priority, rateMultiplier, concurrency, derr := s.entryDefaultsFor(ctx, tx, account)
+	if derr != nil {
+		return nil, derr
 	}
-	if err := s.writer.ApplyEntryDefaults(ctx, tx, account.ID, priority, CursorEntryRateMultiplier, nil); err != nil {
+	if err := s.writer.ApplyEntryDefaults(ctx, tx, account.ID, priority, rateMultiplier, concurrency); err != nil {
 		return nil, fmt.Errorf("cursor_auto_entry: apply entry defaults to account %d: %w", account.ID, err)
 	}
 	// 回填内存实体，便于调用方继续复用（如挂组）。
 	// 注：此处 account 为 *ent.Account（ent ORM 实体，单次请求内新建/加载、随请求结束即弃），
 	// 并非并发收口机制所保护的 service.Account，属请求局部实体，直接写字段为正当保留。
 	account.Priority = priority
-	account.RateMultiplier = CursorEntryRateMultiplier
-	// concurrency 不回填：保留列默认 3，避免以零值覆盖。
+	account.RateMultiplier = rateMultiplier
+	// concurrency 仅在码级显式配置（>0）时回填；否则保留列默认 3，避免以零值覆盖。
+	if concurrency != nil {
+		account.Concurrency = *concurrency
+	}
 	return account, nil
 }
 
-// entryPriorityFor 取账号所属激活码的优先级（数值越小越优先）。
+// entryDefaultsFor 取账号所属激活码的入库三参数（priority / rate_multiplier / concurrency）。
 //
 // 账号强制归属激活码（quota_key_id 非空）；取不到归属或未配置仓储/ent client
-// （单测内存替身装配）时退回入库常量 CursorEntryPriority，行为与接入前一致。
+// （单测内存替身装配）时退回入库常量（CursorEntryPriority / CursorEntryRateMultiplier / nil），
+// 行为与接入前一致。
 // 读库失败（非"不存在"）如实上抛：不得用常量静默顶替未知归属。
-func (s *CursorAutoEntryService) entryPriorityFor(ctx context.Context, tx *ent.Tx, account *ent.Account) (int, error) {
+//
+// 码级值回落规则：
+//   - priority：qk.Priority > 0 时采用，否则回落 CursorEntryPriority；
+//   - rateMultiplier：qk.RateMultiplier >= 0 时采用（**0 为合法计费倍率**，仅 < 0 回落
+//     CursorEntryRateMultiplier），避免把禁用计费（0）误判成缺省回落 1.0；
+//   - concurrency：qk.Concurrency 非空且 > 0 时返回其拷贝指针，否则 nil 沿用 account 列默认 3。
+func (s *CursorAutoEntryService) entryDefaultsFor(ctx context.Context, tx *ent.Tx, account *ent.Account) (int, float64, *int, error) {
+	priority := CursorEntryPriority
+	rateMultiplier := CursorEntryRateMultiplier
+	var concurrency *int
+
 	if account == nil || account.QuotaKeyID == nil {
-		return CursorEntryPriority, nil
+		return priority, rateMultiplier, concurrency, nil
 	}
 	var (
 		qk  *ent.QuotaKey
@@ -373,18 +390,31 @@ func (s *CursorAutoEntryService) entryPriorityFor(ctx context.Context, tx *ent.T
 	case s.client != nil:
 		qk, err = s.client.QuotaKey.Get(ctx, *account.QuotaKeyID)
 	default:
-		return CursorEntryPriority, nil
+		return priority, rateMultiplier, concurrency, nil
 	}
 	if err != nil {
 		if ent.IsNotFound(err) {
-			return CursorEntryPriority, nil
+			return priority, rateMultiplier, concurrency, nil
 		}
-		return 0, fmt.Errorf("cursor_auto_entry: load quota key %d priority: %w", *account.QuotaKeyID, err)
+		return 0, 0, nil, fmt.Errorf("cursor_auto_entry: load quota key %d entry defaults: %w", *account.QuotaKeyID, err)
 	}
-	if qk == nil || qk.Priority <= 0 {
-		return CursorEntryPriority, nil
+	if qk == nil {
+		return priority, rateMultiplier, concurrency, nil
 	}
-	return qk.Priority, nil
+	// 优先级：码的 priority > 0 时采用，否则回落入库常量。
+	if qk.Priority > 0 {
+		priority = qk.Priority
+	}
+	// 计费倍率：0 是合法倍率（如禁用计费），仅 < 0 时回落 1.0。
+	if qk.RateMultiplier >= 0 {
+		rateMultiplier = qk.RateMultiplier
+	}
+	// 并发：码的 concurrency 非空且 > 0 时返回拷贝指针，否则 nil（沿用列默认 3）。
+	if qk.Concurrency != nil && *qk.Concurrency > 0 {
+		v := *qk.Concurrency
+		concurrency = &v
+	}
+	return priority, rateMultiplier, concurrency, nil
 }
 
 // ---------------------------------------------------------------------------

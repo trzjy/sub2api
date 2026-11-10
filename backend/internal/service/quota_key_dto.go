@@ -33,6 +33,24 @@ type QuotaKeyStatus struct {
 	// quota_key_usage_snapshot_dto.go；无快照时为 nil（省略字段），**绝不落成 0**。
 	// Create/Update 等不读快照的返回路径保持 nil，JSON 形态与接入前一致。
 	Usage *QuotaKeyUsageProjection `json:"usage,omitempty"`
+
+	// Concurrency 是码级并发数（B 批上移到激活码管理，不含余额查询）。
+	// nil / 省略表示沿用所属账号列的默认 3；正整数时后端同事务同步该码名下全部账号的并发数。
+	// JSON 字段名与前端 frontend/src/api/admin/quotaKeys.ts 精确对齐。
+	Concurrency *int `json:"concurrency,omitempty"`
+
+	// LoadFactor 是码级负载因子（B 批上移）。
+	// nil / 省略表示清空（卸载）该码名下账号的负载因子；正整数 1..10000。
+	LoadFactor *int `json:"load_factor,omitempty"`
+
+	// RateMultiplier 是码级计费倍率（B 批上移）。
+	// ≥ 0，默认 1.0，允许为 0。不加 omitempty，使 0 也能稳定序列化（区别于未设置语义）。
+	RateMultiplier float64 `json:"rate_multiplier"`
+
+	// ModelMapping 是码级模型限制与映射（码级权威值，与 credentials.model_mapping 同构：
+	// 白名单存恒等映射 {"m":"m"}，映射存 {"from":"to"}）。
+	// nil / 省略表示码级未显式覆盖，沿用上游默认实供清单。
+	ModelMapping map[string]string `json:"model_mapping,omitempty"`
 }
 
 // CreateQuotaKeyInput 是 QuotaKeyRepository.Create 的入参。
@@ -53,4 +71,43 @@ type CreateQuotaKeyInput struct {
 	// 空串 = 未指定，由仓储层落列默认值（'shareai'）。非空时必须对应 quota_upstreams
 	// 中存在的、未软删的上游标识；service 层负责校验存在性。
 	UpstreamKey string
+
+	// Concurrency 是新建激活码的码级并发数（B 批上移，不含余额查询）。
+	// nil 表示沿用所属账号列的默认 3；非 nil 时后端同事务同步该码名下账号的并发数。
+	Concurrency *int
+
+	// LoadFactor 是新建激活码的码级负载因子（B 批上移）。
+	// nil 表示清空（卸载）该码名下账号的负载因子；非 nil 为正整数 1..10000。
+	LoadFactor *int
+
+	// RateMultiplier 是新建激活码的码级计费倍率（B 批上移）。
+	// nil 表示沿用默认 1.0；非 nil 时设为 >= 0（允许 0）。
+	RateMultiplier *float64
+
+	// ModelMapping 是新建激活码的码级模型限制与映射（与 credentials.model_mapping 同构）。
+	// nil 表示沿用上游默认实供清单；非 nil 时必须至少含 1 个有效模型，空映射由服务层拒绝。
+	ModelMapping map[string]string
+}
+
+// UpdateQuotaKeySettingsInput 是激活码设置更新入参（供后续 Update / QuotaKeyRepository 消费，
+// 支持三态清零语义）。与 CreateQuotaKeyInput 不同，本结构体区分"不修改"与"清空/清零"两态。
+//
+// 三态约定：
+//   - Concurrency / LoadFactor 用 **int（双层指针）：
+//     外层 nil = 不修改；内层 nil = 清空（Concurrency 恢复账号默认 3，LoadFactor 卸载）；
+//     非 nil = 设为正值（Concurrency ≥ 1；LoadFactor 1..10000）。
+//   - RateMultiplier 用 *float64：nil = 不修改；非 nil = 设为 >= 0（允许 0）。
+//   - ModelMapping + ModelMappingSet：ModelMappingSet=false = 不修改；
+//     ModelMappingSet=true 时 ModelMapping 必须非空，空映射由服务层拒绝，禁止落库。
+type UpdateQuotaKeySettingsInput struct {
+	// Concurrency 外层 nil=不修改；内层 nil=清空恢复账号默认 3；非 nil=设为正值。
+	Concurrency **int
+	// LoadFactor 外层 nil=不修改；内层 nil=清空/卸载；非 nil=设为 1..10000。
+	LoadFactor **int
+	// RateMultiplier nil=不修改；非 nil=设为 >= 0（允许 0）。
+	RateMultiplier *float64
+	// ModelMapping 与 ModelMappingSet 配合：ModelMappingSet=false=不修改；
+	// 为 true 时 ModelMapping 必须非空，空映射由服务层拒绝，禁止落库。
+	ModelMapping    map[string]string
+	ModelMappingSet bool
 }

@@ -42861,6 +42861,13 @@ type QuotaKeyMutation struct {
 	addpriority          *int
 	notes                *string
 	upstream_key         *string
+	concurrency          *int
+	addconcurrency       *int
+	load_factor          *int
+	addload_factor       *int
+	rate_multiplier      *float64
+	addrate_multiplier   *float64
+	model_mapping        *map[string]string
 	clearedFields        map[string]struct{}
 	accounts             map[int64]struct{}
 	removedaccounts      map[int64]struct{}
@@ -43697,6 +43704,251 @@ func (m *QuotaKeyMutation) ResetUpstreamKey() {
 	m.upstream_key = nil
 }
 
+// SetConcurrency sets the "concurrency" field.
+func (m *QuotaKeyMutation) SetConcurrency(i int) {
+	m.concurrency = &i
+	m.addconcurrency = nil
+}
+
+// Concurrency returns the value of the "concurrency" field in the mutation.
+func (m *QuotaKeyMutation) Concurrency() (r int, exists bool) {
+	v := m.concurrency
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConcurrency returns the old "concurrency" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldConcurrency(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConcurrency is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConcurrency requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConcurrency: %w", err)
+	}
+	return oldValue.Concurrency, nil
+}
+
+// AddConcurrency adds i to the "concurrency" field.
+func (m *QuotaKeyMutation) AddConcurrency(i int) {
+	if m.addconcurrency != nil {
+		*m.addconcurrency += i
+	} else {
+		m.addconcurrency = &i
+	}
+}
+
+// AddedConcurrency returns the value that was added to the "concurrency" field in this mutation.
+func (m *QuotaKeyMutation) AddedConcurrency() (r int, exists bool) {
+	v := m.addconcurrency
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearConcurrency clears the value of the "concurrency" field.
+func (m *QuotaKeyMutation) ClearConcurrency() {
+	m.concurrency = nil
+	m.addconcurrency = nil
+	m.clearedFields[quotakey.FieldConcurrency] = struct{}{}
+}
+
+// ConcurrencyCleared returns if the "concurrency" field was cleared in this mutation.
+func (m *QuotaKeyMutation) ConcurrencyCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldConcurrency]
+	return ok
+}
+
+// ResetConcurrency resets all changes to the "concurrency" field.
+func (m *QuotaKeyMutation) ResetConcurrency() {
+	m.concurrency = nil
+	m.addconcurrency = nil
+	delete(m.clearedFields, quotakey.FieldConcurrency)
+}
+
+// SetLoadFactor sets the "load_factor" field.
+func (m *QuotaKeyMutation) SetLoadFactor(i int) {
+	m.load_factor = &i
+	m.addload_factor = nil
+}
+
+// LoadFactor returns the value of the "load_factor" field in the mutation.
+func (m *QuotaKeyMutation) LoadFactor() (r int, exists bool) {
+	v := m.load_factor
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLoadFactor returns the old "load_factor" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldLoadFactor(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLoadFactor is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLoadFactor requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLoadFactor: %w", err)
+	}
+	return oldValue.LoadFactor, nil
+}
+
+// AddLoadFactor adds i to the "load_factor" field.
+func (m *QuotaKeyMutation) AddLoadFactor(i int) {
+	if m.addload_factor != nil {
+		*m.addload_factor += i
+	} else {
+		m.addload_factor = &i
+	}
+}
+
+// AddedLoadFactor returns the value that was added to the "load_factor" field in this mutation.
+func (m *QuotaKeyMutation) AddedLoadFactor() (r int, exists bool) {
+	v := m.addload_factor
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearLoadFactor clears the value of the "load_factor" field.
+func (m *QuotaKeyMutation) ClearLoadFactor() {
+	m.load_factor = nil
+	m.addload_factor = nil
+	m.clearedFields[quotakey.FieldLoadFactor] = struct{}{}
+}
+
+// LoadFactorCleared returns if the "load_factor" field was cleared in this mutation.
+func (m *QuotaKeyMutation) LoadFactorCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldLoadFactor]
+	return ok
+}
+
+// ResetLoadFactor resets all changes to the "load_factor" field.
+func (m *QuotaKeyMutation) ResetLoadFactor() {
+	m.load_factor = nil
+	m.addload_factor = nil
+	delete(m.clearedFields, quotakey.FieldLoadFactor)
+}
+
+// SetRateMultiplier sets the "rate_multiplier" field.
+func (m *QuotaKeyMutation) SetRateMultiplier(f float64) {
+	m.rate_multiplier = &f
+	m.addrate_multiplier = nil
+}
+
+// RateMultiplier returns the value of the "rate_multiplier" field in the mutation.
+func (m *QuotaKeyMutation) RateMultiplier() (r float64, exists bool) {
+	v := m.rate_multiplier
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRateMultiplier returns the old "rate_multiplier" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldRateMultiplier(ctx context.Context) (v float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRateMultiplier is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRateMultiplier requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRateMultiplier: %w", err)
+	}
+	return oldValue.RateMultiplier, nil
+}
+
+// AddRateMultiplier adds f to the "rate_multiplier" field.
+func (m *QuotaKeyMutation) AddRateMultiplier(f float64) {
+	if m.addrate_multiplier != nil {
+		*m.addrate_multiplier += f
+	} else {
+		m.addrate_multiplier = &f
+	}
+}
+
+// AddedRateMultiplier returns the value that was added to the "rate_multiplier" field in this mutation.
+func (m *QuotaKeyMutation) AddedRateMultiplier() (r float64, exists bool) {
+	v := m.addrate_multiplier
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRateMultiplier resets all changes to the "rate_multiplier" field.
+func (m *QuotaKeyMutation) ResetRateMultiplier() {
+	m.rate_multiplier = nil
+	m.addrate_multiplier = nil
+}
+
+// SetModelMapping sets the "model_mapping" field.
+func (m *QuotaKeyMutation) SetModelMapping(value map[string]string) {
+	m.model_mapping = &value
+}
+
+// ModelMapping returns the value of the "model_mapping" field in the mutation.
+func (m *QuotaKeyMutation) ModelMapping() (r map[string]string, exists bool) {
+	v := m.model_mapping
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldModelMapping returns the old "model_mapping" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldModelMapping(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldModelMapping is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldModelMapping requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldModelMapping: %w", err)
+	}
+	return oldValue.ModelMapping, nil
+}
+
+// ClearModelMapping clears the value of the "model_mapping" field.
+func (m *QuotaKeyMutation) ClearModelMapping() {
+	m.model_mapping = nil
+	m.clearedFields[quotakey.FieldModelMapping] = struct{}{}
+}
+
+// ModelMappingCleared returns if the "model_mapping" field was cleared in this mutation.
+func (m *QuotaKeyMutation) ModelMappingCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldModelMapping]
+	return ok
+}
+
+// ResetModelMapping resets all changes to the "model_mapping" field.
+func (m *QuotaKeyMutation) ResetModelMapping() {
+	m.model_mapping = nil
+	delete(m.clearedFields, quotakey.FieldModelMapping)
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by ids.
 func (m *QuotaKeyMutation) AddAccountIDs(ids ...int64) {
 	if m.accounts == nil {
@@ -43785,7 +44037,7 @@ func (m *QuotaKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *QuotaKeyMutation) Fields() []string {
-	fields := make([]string, 0, 16)
+	fields := make([]string, 0, 20)
 	if m.deleted_at != nil {
 		fields = append(fields, quotakey.FieldDeletedAt)
 	}
@@ -43834,6 +44086,18 @@ func (m *QuotaKeyMutation) Fields() []string {
 	if m.upstream_key != nil {
 		fields = append(fields, quotakey.FieldUpstreamKey)
 	}
+	if m.concurrency != nil {
+		fields = append(fields, quotakey.FieldConcurrency)
+	}
+	if m.load_factor != nil {
+		fields = append(fields, quotakey.FieldLoadFactor)
+	}
+	if m.rate_multiplier != nil {
+		fields = append(fields, quotakey.FieldRateMultiplier)
+	}
+	if m.model_mapping != nil {
+		fields = append(fields, quotakey.FieldModelMapping)
+	}
 	return fields
 }
 
@@ -43874,6 +44138,14 @@ func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.Notes()
 	case quotakey.FieldUpstreamKey:
 		return m.UpstreamKey()
+	case quotakey.FieldConcurrency:
+		return m.Concurrency()
+	case quotakey.FieldLoadFactor:
+		return m.LoadFactor()
+	case quotakey.FieldRateMultiplier:
+		return m.RateMultiplier()
+	case quotakey.FieldModelMapping:
+		return m.ModelMapping()
 	}
 	return nil, false
 }
@@ -43915,6 +44187,14 @@ func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldNotes(ctx)
 	case quotakey.FieldUpstreamKey:
 		return m.OldUpstreamKey(ctx)
+	case quotakey.FieldConcurrency:
+		return m.OldConcurrency(ctx)
+	case quotakey.FieldLoadFactor:
+		return m.OldLoadFactor(ctx)
+	case quotakey.FieldRateMultiplier:
+		return m.OldRateMultiplier(ctx)
+	case quotakey.FieldModelMapping:
+		return m.OldModelMapping(ctx)
 	}
 	return nil, fmt.Errorf("unknown QuotaKey field %s", name)
 }
@@ -44036,6 +44316,34 @@ func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetUpstreamKey(v)
 		return nil
+	case quotakey.FieldConcurrency:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConcurrency(v)
+		return nil
+	case quotakey.FieldLoadFactor:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLoadFactor(v)
+		return nil
+	case quotakey.FieldRateMultiplier:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRateMultiplier(v)
+		return nil
+	case quotakey.FieldModelMapping:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetModelMapping(v)
+		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey field %s", name)
 }
@@ -44047,6 +44355,15 @@ func (m *QuotaKeyMutation) AddedFields() []string {
 	if m.addpriority != nil {
 		fields = append(fields, quotakey.FieldPriority)
 	}
+	if m.addconcurrency != nil {
+		fields = append(fields, quotakey.FieldConcurrency)
+	}
+	if m.addload_factor != nil {
+		fields = append(fields, quotakey.FieldLoadFactor)
+	}
+	if m.addrate_multiplier != nil {
+		fields = append(fields, quotakey.FieldRateMultiplier)
+	}
 	return fields
 }
 
@@ -44057,6 +44374,12 @@ func (m *QuotaKeyMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
 	case quotakey.FieldPriority:
 		return m.AddedPriority()
+	case quotakey.FieldConcurrency:
+		return m.AddedConcurrency()
+	case quotakey.FieldLoadFactor:
+		return m.AddedLoadFactor()
+	case quotakey.FieldRateMultiplier:
+		return m.AddedRateMultiplier()
 	}
 	return nil, false
 }
@@ -44072,6 +44395,27 @@ func (m *QuotaKeyMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddPriority(v)
+		return nil
+	case quotakey.FieldConcurrency:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddConcurrency(v)
+		return nil
+	case quotakey.FieldLoadFactor:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddLoadFactor(v)
+		return nil
+	case quotakey.FieldRateMultiplier:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRateMultiplier(v)
 		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey numeric field %s", name)
@@ -44107,6 +44451,15 @@ func (m *QuotaKeyMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(quotakey.FieldNotes) {
 		fields = append(fields, quotakey.FieldNotes)
+	}
+	if m.FieldCleared(quotakey.FieldConcurrency) {
+		fields = append(fields, quotakey.FieldConcurrency)
+	}
+	if m.FieldCleared(quotakey.FieldLoadFactor) {
+		fields = append(fields, quotakey.FieldLoadFactor)
+	}
+	if m.FieldCleared(quotakey.FieldModelMapping) {
+		fields = append(fields, quotakey.FieldModelMapping)
 	}
 	return fields
 }
@@ -44148,6 +44501,15 @@ func (m *QuotaKeyMutation) ClearField(name string) error {
 		return nil
 	case quotakey.FieldNotes:
 		m.ClearNotes()
+		return nil
+	case quotakey.FieldConcurrency:
+		m.ClearConcurrency()
+		return nil
+	case quotakey.FieldLoadFactor:
+		m.ClearLoadFactor()
+		return nil
+	case quotakey.FieldModelMapping:
+		m.ClearModelMapping()
 		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey nullable field %s", name)
@@ -44204,6 +44566,18 @@ func (m *QuotaKeyMutation) ResetField(name string) error {
 		return nil
 	case quotakey.FieldUpstreamKey:
 		m.ResetUpstreamKey()
+		return nil
+	case quotakey.FieldConcurrency:
+		m.ResetConcurrency()
+		return nil
+	case quotakey.FieldLoadFactor:
+		m.ResetLoadFactor()
+		return nil
+	case quotakey.FieldRateMultiplier:
+		m.ResetRateMultiplier()
+		return nil
+	case quotakey.FieldModelMapping:
+		m.ResetModelMapping()
 		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey field %s", name)

@@ -1242,3 +1242,95 @@ func TestMatchModelsDevProviderOfficialHostsWithoutAPI(t *testing.T) {
 	}}
 	require.False(t, upstreamCatalogNeedsRegistry(capabilitySyncModelIDs([]string{"gpt-6-astra", "gpt-image-2"}), metadata))
 }
+
+// TestSyncUpstreamModelCatalogCursorAPIKeyUsesGenericModels 钉死 c1p1-A1 修复：
+// cursor + apikey（第三方 OpenAI 兼容反代，如 kn-cy.com 备用渠道，只有 base_url + api_key）
+// 走通用 /v1/models，而不是 Cursor 原生 AvailableModels（后者强制要求 OAuth bearer，apikey
+// 型必然报 “Cursor account bearer is unavailable”）。
+func TestSyncUpstreamModelCatalogCursorAPIKeyUsesGenericModels(t *testing.T) {
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"gpt-6.1-sol"}]}`)),
+		},
+		{
+			// models.dev 注册表探测：base_url 不匹配任何 provider，返回空注册表即可
+			// （解析成功后按 base URL 无命中，不补齐能力元数据，不影响模型列表断言）。
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+		},
+	}}
+	svc := &AccountTestService{httpUpstream: upstream, cfg: upstreamModelSyncTestConfig()}
+
+	account := &Account{
+		ID:       201,
+		Platform: PlatformCursor,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "sk-kncy",
+			"base_url": "https://kncy.example/v1",
+		},
+	}
+
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.NoError(t, err)
+	require.Equal(t, []string{"gpt-6.1-sol"}, catalog.Models)
+
+	// 必须打到通用 OpenAI /v1/models，并带 Bearer <api_key>；不得进入 Cursor 原生分支。
+	var modelsReq *http.Request
+	for _, req := range upstream.requests {
+		if strings.HasSuffix(req.URL.Path, "/v1/models") {
+			modelsReq = req
+			break
+		}
+	}
+	require.NotNil(t, modelsReq, "apikey cursor must hit the generic OpenAI /v1/models endpoint")
+	require.Equal(t, "https://kncy.example/v1/models", modelsReq.URL.String())
+	require.Equal(t, "Bearer sk-kncy", modelsReq.Header.Get("Authorization"))
+
+	// 断言全程未触碰 Cursor 原生 AvailableModels（Unary 裸 protobuf）分支：该分支会去
+	// 解析非 JSON 报文，这里只有 /v1/models 与 models.dev 两次请求。
+	require.Len(t, upstream.requests, 2)
+}
+
+// TestSyncUpstreamModelCatalogCursorOAuthStillNative 钉死 c1p1-A1 的不变项：
+// cursor + oauth（shareai 号池）仍走原生 AvailableModels，不受 apikey 型分流影响。
+func TestSyncUpstreamModelCatalogCursorOAuthStillNative(t *testing.T) {
+	svc, repo := cursorModelSyncFixture(t)
+	installCursorModelSyncSource(t, &cursorCatalogSourceStub{entries: cursorModelSyncEntries()})
+	account := cursorModelSyncAccount()
+
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.NoError(t, err)
+	require.NotNil(t, catalog)
+	require.Equal(t, []string{"claude-opus-4-8", "gpt-5.6-sol"}, catalog.Models)
+
+	// 原生分支的原子写链被触发：证明走的是 Cursor 原生 AvailableModels，而非通用 /v1/models。
+	require.Equal(t, 1, repo.writeCalls())
+	require.NotNil(t, repo.writtenMapping())
+	require.Equal(t, "gpt-5.6-sol-codex", repo.writtenMapping()["gpt-5.6-sol"])
+}
+
+// TestSyncUpstreamModelCatalogCursorAPIKeyMissingAPIKeyFailsAtGenericPath 钉死 c1p1-A1 的
+// 分流口径：apikey 型 cursor 账号确实落到了通用 OpenAI 探测路径——缺 api_key 时按该路径
+// 返回 configuration 类错误（而不是原生分支的 bearer 错误），证明分支已被正确排除。
+func TestSyncUpstreamModelCatalogCursorAPIKeyMissingAPIKeyFailsAtGenericPath(t *testing.T) {
+	svc := &AccountTestService{httpUpstream: &httpUpstreamRecorder{}, cfg: upstreamModelSyncTestConfig()}
+	account := &Account{
+		ID:       202,
+		Platform: PlatformCursor,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"base_url": "https://kncy.example/v1",
+		},
+	}
+
+	_, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.Error(t, err)
+	var syncErr *UpstreamModelSyncError
+	require.ErrorAs(t, err, &syncErr)
+	require.Equal(t, UpstreamModelSyncErrorConfiguration, syncErr.Kind)
+	require.Contains(t, syncErr.SafeMessage(), "API key")
+}

@@ -112,10 +112,11 @@ import { flushPromises, mount } from '@vue/test-utils'
 //   resetPlatformCatalog / setPlatformCatalog）。该模块只存在于 b0-upstream ref，工作树没有 ->
 //   引入即整文件 collect 断（机械合并变体 A 实测）。暂缓，证据见顶部 notes 块 (1)。
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode, getQuotaKeyMock } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
-  authIsSimpleMode: { value: true }
+  authIsSimpleMode: { value: true },
+  getQuotaKeyMock: vi.fn()
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -154,6 +155,12 @@ vi.mock('@/api/admin/accounts', () => ({
   getAntigravityDefaultModelMapping: vi.fn()
 }))
 
+vi.mock('@/api/admin/quotaKeys', () => ({
+  default: {
+    get: getQuotaKeyMock
+  }
+}))
+
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
@@ -165,6 +172,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import EditAccountModal from '../EditAccountModal.vue'
+import { formatDateTimeLocalInput } from '@/utils/format'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -185,6 +193,10 @@ const ModelWhitelistSelectorStub = defineComponent({
     modelValue: {
       type: Array,
       default: () => []
+    },
+    disabled: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ['update:modelValue'],
@@ -200,6 +212,7 @@ const ModelWhitelistSelectorStub = defineComponent({
       <span data-testid="model-whitelist-value">
         {{ Array.isArray(modelValue) ? modelValue.join(',') : '' }}
       </span>
+      <span data-testid="model-whitelist-disabled">{{ disabled ? 'yes' : 'no' }}</span>
     </div>
   `
 })
@@ -484,6 +497,353 @@ describe('EditAccountModal', () => {
 
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock.mock.calls[0]?.[1]?.expires_at).toBe(0)
+    wrapper.unmount()
+  })
+
+  // c1p1-A2：cursor 账号绑定激活码时，到期时间复用激活码上游自动获取的值（只读、不写第二份）。
+  describe('cursor quota key managed expiry (c1p1-A2)', () => {
+    const buildCursorKeyAccount = (overrides: Record<string, unknown> = {}) => {
+      const account = buildAccount()
+      return {
+        ...account,
+        platform: 'cursor',
+        type: 'oauth',
+        quota_key_id: 42,
+        credentials: { access_token: 'cursor-token' },
+        ...overrides
+      } as any
+    }
+
+    it('shows the key expiry read-only and omits expires_at on save', async () => {
+      const keyExpiresAt = '2029-05-01T08:30:00Z'
+      const account = buildCursorKeyAccount()
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset().mockResolvedValue({ expires_at: keyExpiresAt })
+
+      const wrapper = mountModal(account)
+      await flushPromises()
+
+      expect(getQuotaKeyMock).toHaveBeenCalledWith(42)
+      const input = wrapper.get<HTMLInputElement>('input[type="datetime-local"]')
+      expect(input.attributes('disabled')).toBeDefined()
+      expect(input.element.value).toBe(formatDateTimeLocalInput(new Date(keyExpiresAt).getTime() / 1000))
+      // 快捷按钮在只读模式下不渲染
+      expect(wrapper.findAll('button').some((b) => b.text() === 'payment.oneMonth')).toBe(false)
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      expect(updateAccountMock.mock.calls[0]?.[1]).not.toHaveProperty('expires_at')
+      wrapper.unmount()
+    })
+
+    it('keeps the expiry editable when cursor account has no quota_key_id', async () => {
+      const account = buildCursorKeyAccount({
+        quota_key_id: null,
+        expires_at: new Date('2030-06-15T09:00:00').getTime() / 1000
+      })
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset()
+
+      const wrapper = mountModal(account)
+      await flushPromises()
+
+      expect(getQuotaKeyMock).not.toHaveBeenCalled()
+      const input = wrapper.get<HTMLInputElement>('input[type="datetime-local"]')
+      expect(input.attributes('disabled')).toBeUndefined()
+      expect(wrapper.findAll('button').some((b) => b.text() === 'payment.oneMonth')).toBe(true)
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      expect(updateAccountMock.mock.calls[0]?.[1]?.expires_at).toBe(new Date('2030-06-15T09:00:00').getTime() / 1000)
+      wrapper.unmount()
+    })
+
+    it('keeps the expiry editable and submits expires_at for non-cursor accounts', async () => {
+      const account = buildAccount()
+      account.expires_at = new Date('2031-01-10T12:00:00').getTime() / 1000
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset()
+
+      const wrapper = mountModal(account)
+      await flushPromises()
+
+      expect(getQuotaKeyMock).not.toHaveBeenCalled()
+      const input = wrapper.get<HTMLInputElement>('input[type="datetime-local"]')
+      expect(input.attributes('disabled')).toBeUndefined()
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      expect(updateAccountMock.mock.calls[0]?.[1]?.expires_at).toBe(new Date('2031-01-10T12:00:00').getTime() / 1000)
+      wrapper.unmount()
+    })
+  })
+
+  // c1p1-C3（1）：cursor OAuth 账号打开弹窗时，从 credentials.model_mapping 回填模型列表，
+  // 且分组只显示模型所属家族（anthropic）与匹配 composite 组，不显示 openai。
+  it('backfills cursor OAuth models and filters groups by model family', async () => {
+    authIsSimpleMode.value = false
+    const account = buildAccount()
+    account.platform = 'cursor'
+    account.type = 'oauth'
+    account.credentials = {
+      access_token: 'cursor-token',
+      model_mapping: { 'claude-fable-5-1': 'claude-fable-5-1' }
+    }
+    const anthropicGroup = { id: 34, name: 'claude-max', platform: 'anthropic', status: 'active' }
+    const openaiGroup = { id: 35, name: 'gpt-max', platform: 'openai', status: 'active' }
+    const compositeGroup = {
+      id: 94,
+      name: 'welfare',
+      platform: 'composite',
+      status: 'active',
+      model_allowlist: { enabled: true, models: ['claude-fable-5-1'] }
+    }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+    getQuotaKeyMock.mockReset()
+
+    const wrapper = mountModal(account, true)
+    await wrapper.setProps({ groups: [anthropicGroup, openaiGroup, compositeGroup] as any })
+    await flushPromises()
+
+    // 模型回填验证：credentials.model_mapping 被回填进账号模型名单（cursorSelectedModels），
+    // 进而驱动分组过滤——composite 组 welfare 仅在账号模型名单覆盖其 allowlist 时才显示，
+    // 故 welfare 可见即证明 model_mapping 已回填；claude-max 因 anthropic 家族可见，
+    // gpt-max（openai 家族）因模型名单里没有 openai 家族而不显示。
+    const selector = wrapper.get('[data-tour="account-form-groups"]')
+    expect(selector.text()).toContain('claude-max')
+    expect(selector.text()).toContain('welfare')
+    expect(selector.text()).not.toContain('gpt-max')
+    wrapper.unmount()
+  })
+
+  // c1p1-C3（2）：绑定激活码的 cursor 账号，6 项全部只读展示且提交 payload 不含这 6 项，
+  // 并保留原有 credentials.model_mapping。
+  it('renders cursor quota-key-managed fields read-only and omits them on save', async () => {
+    const keyExpiresAt = '2029-05-01T08:30:00Z'
+    const account = buildAccount()
+    account.platform = 'cursor'
+    account.type = 'apikey'
+    account.quota_key_id = 42
+    account.credentials = {
+      api_key: 'sk-cursor',
+      model_mapping: { 'claude-fable-5-1': 'claude-fable-5-1' }
+    }
+    account.concurrency = 3
+    account.load_factor = null
+    account.priority = 2
+    account.rate_multiplier = 1
+    account.expires_at = null
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    getQuotaKeyMock.mockReset().mockResolvedValue({ expires_at: keyExpiresAt })
+
+    const wrapper = mountModal(account)
+    await flushPromises()
+
+    expect(getQuotaKeyMock).toHaveBeenCalledWith(42)
+    // 6 项输入框全部 disabled。
+    expect(wrapper.get<HTMLInputElement>('input[type="datetime-local"]').attributes('disabled')).toBeDefined()
+    const concurrency = wrapper.findAll('input[type="number"]')
+    // concurrency / load_factor / priority / rate_multiplier 都在 number 输入里。
+    for (const input of concurrency) {
+      expect(input.attributes('disabled')).toBeDefined()
+    }
+    // 模型选择器 disabled。
+    expect(wrapper.get('[data-testid="model-whitelist-disabled"]').text()).toBe('yes')
+    // 提示横幅可见。
+    expect(wrapper.text()).toContain('admin.quotaKeys.managedByQuotaKeyBanner')
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+    expect(payload).not.toHaveProperty('expires_at')
+    expect(payload).not.toHaveProperty('concurrency')
+    expect(payload).not.toHaveProperty('load_factor')
+    expect(payload).not.toHaveProperty('priority')
+    expect(payload).not.toHaveProperty('rate_multiplier')
+    // 保留原有 credentials.model_mapping（不从表单覆盖）。
+    expect((payload.credentials as Record<string, unknown>)?.model_mapping).toEqual({
+      'claude-fable-5-1': 'claude-fable-5-1'
+    })
+    wrapper.unmount()
+  })
+
+  // c1p1-fix-review-r3：防旧激活码异步响应覆盖当前账号表单（异步竞态回归）。
+  // 旧 quota-key 响应在账号切换/弹窗关闭后才返回时，不得写入当前账号表单或随保存覆盖。
+  describe('cursor quota key managed async race (c1p1-fix-review-r3)', () => {
+    const buildCursorKeyAccount = (overrides: Record<string, unknown> = {}) => {
+      const account = buildAccount()
+      return {
+        ...account,
+        platform: 'cursor',
+        type: 'oauth',
+        quota_key_id: 42,
+        credentials: { access_token: 'cursor-token' },
+        ...overrides
+      } as any
+    }
+
+    const staleResponse = {
+      concurrency: 9,
+      load_factor: 77,
+      priority: 5,
+      rate_multiplier: 0.25,
+      expires_at: '2031-08-01T00:00:00Z'
+    }
+
+    // 受控延迟的 quota-key 响应：open 时发起但暂不 resolve，由测试在切换后手动 resolve。
+    const deferStaleKey = () => {
+      let resolveStaleKey: (value: any) => void = () => {}
+      const staleKeyPromise = new Promise<any>((resolve) => {
+        resolveStaleKey = resolve
+      })
+      return { staleKeyPromise, resolveStaleKey }
+    }
+
+    it('does not let a stale quota-key response overwrite a switched-in normal account', async () => {
+      const { staleKeyPromise, resolveStaleKey } = deferStaleKey()
+
+      const cursorAccount = buildCursorKeyAccount()
+      const normalAccount = buildAccount()
+      normalAccount.id = 99
+      normalAccount.platform = 'openai'
+      normalAccount.concurrency = 3
+      normalAccount.load_factor = 4
+      normalAccount.priority = 2
+      normalAccount.rate_multiplier = 2
+      normalAccount.expires_at = new Date('2030-06-15T09:00:00').getTime() / 1000
+
+      updateAccountMock.mockReset().mockResolvedValue(normalAccount)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset().mockReturnValue(staleKeyPromise)
+
+      const wrapper = mountModal(cursorAccount)
+      await flushPromises()
+      // 旧请求已发出，但仍在途（未 resolve）。
+      expect(getQuotaKeyMock).toHaveBeenCalledTimes(1)
+      expect(getQuotaKeyMock).toHaveBeenCalledWith(42)
+
+      // 在旧响应返回前，切换到普通账号。
+      await wrapper.setProps({ account: normalAccount })
+      await flushPromises()
+
+      // 旧 quota-key 响应此时才返回。
+      resolveStaleKey(staleResponse)
+      await flushPromises()
+      await flushPromises()
+
+      // 普通账号表单可编辑（未被只读横幅接管）。
+      expect(wrapper.get<HTMLInputElement>('input[type="datetime-local"]').attributes('disabled')).toBeUndefined()
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+      // 普通账号保存自身设置，未受旧激活码响应污染。
+      expect(payload.concurrency).toBe(3) // 非 9
+      expect(payload.load_factor).toBe(4) // 非 77
+      expect(payload.priority).toBe(2) // 非 5
+      expect(payload.rate_multiplier).toBe(2) // 非 0.25
+      expect(payload.expires_at).toBe(normalAccount.expires_at) // 非 2031
+      wrapper.unmount()
+    })
+
+    it('does not let a stale quota-key response overwrite a normal account opened after close', async () => {
+      const { staleKeyPromise, resolveStaleKey } = deferStaleKey()
+
+      const cursorAccount = buildCursorKeyAccount()
+      const normalAccount = buildAccount()
+      normalAccount.id = 99
+      normalAccount.platform = 'openai'
+      normalAccount.concurrency = 3
+      normalAccount.load_factor = 4
+      normalAccount.priority = 2
+      normalAccount.rate_multiplier = 2
+      normalAccount.expires_at = new Date('2030-06-15T09:00:00').getTime() / 1000
+
+      updateAccountMock.mockReset().mockResolvedValue(normalAccount)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset().mockReturnValue(staleKeyPromise)
+
+      const wrapper = mountModal(cursorAccount)
+      await flushPromises()
+      expect(getQuotaKeyMock).toHaveBeenCalledTimes(1)
+
+      // 关闭弹窗：在途旧请求应失效。
+      await wrapper.setProps({ show: false })
+      await flushPromises()
+
+      // 重新打开一个普通账号。
+      await wrapper.setProps({ show: true, account: normalAccount })
+      await flushPromises()
+
+      // 旧 quota-key 响应此时才返回。
+      resolveStaleKey(staleResponse)
+      await flushPromises()
+      await flushPromises()
+
+      expect(wrapper.get<HTMLInputElement>('input[type="datetime-local"]').attributes('disabled')).toBeUndefined()
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+      expect(payload.concurrency).toBe(3)
+      expect(payload.load_factor).toBe(4)
+      expect(payload.priority).toBe(2)
+      expect(payload.rate_multiplier).toBe(2)
+      expect(payload.expires_at).toBe(normalAccount.expires_at)
+      wrapper.unmount()
+    })
+  })
+
+  // c1p1-C3（3）：未绑定激活码的 cursor 账号（或非 cursor 账号）仍可正常编辑并提交这 6 项。
+  it('keeps fields editable and submits them for unmanaged (non-cursor or unbound) accounts', async () => {
+    // 未绑定激活码的 cursor 账号：cursorKeyManaged 为 false。
+    const account = buildAccount()
+    account.platform = 'cursor'
+    account.type = 'apikey'
+    account.quota_key_id = null
+    account.credentials = { api_key: 'sk-cursor' }
+    account.concurrency = 1
+    account.priority = 1
+    account.rate_multiplier = 1
+    account.expires_at = null
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    getQuotaKeyMock.mockReset()
+
+    const wrapper = mountModal(account)
+    await flushPromises()
+
+    expect(getQuotaKeyMock).not.toHaveBeenCalled()
+    // 横幅不应出现，输入可编辑。
+    expect(wrapper.text()).not.toContain('admin.quotaKeys.managedByQuotaKeyBanner')
+    expect(wrapper.get<HTMLInputElement>('input[type="datetime-local"]').attributes('disabled')).toBeUndefined()
+
+    // 编辑并发数并提交。
+    const concurrencyInput = wrapper.findAll('input[type="number"]')[0]
+    await concurrencyInput.setValue('7')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+    // 未绑定：6 项均正常写入（expires_at 为 null → 后端约定写 0）。
+    expect(payload.concurrency).toBe(7)
+    expect(payload).toHaveProperty('priority')
+    expect(payload).toHaveProperty('rate_multiplier')
+    expect(payload).toHaveProperty('load_factor')
+    expect(payload.expires_at).toBe(0)
     wrapper.unmount()
   })
 

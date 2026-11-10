@@ -2117,6 +2117,10 @@ func init() {
 	quotakey.DefaultUpstreamKey = quotakeyDescUpstreamKey.Default.(string)
 	// quotakey.UpstreamKeyValidator is a validator for the "upstream_key" field. It is called by the builders before save.
 	quotakey.UpstreamKeyValidator = quotakeyDescUpstreamKey.Validators[0].(func(string) error)
+	// quotakeyDescRateMultiplier is the schema descriptor for rate_multiplier field.
+	quotakeyDescRateMultiplier := quotakeyFields[17].Descriptor()
+	// quotakey.DefaultRateMultiplier holds the default value on creation for the rate_multiplier field.
+	quotakey.DefaultRateMultiplier = quotakeyDescRateMultiplier.Default.(float64)
 	quotaupstreamMixin := schema.QuotaUpstream{}.Mixin()
 	quotaupstreamMixinHooks0 := quotaupstreamMixin[0].Hooks()
 	quotaupstream.Hooks[0] = quotaupstreamMixinHooks0[0]
