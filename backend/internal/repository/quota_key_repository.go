@@ -72,6 +72,21 @@ func (r *quotaKeyRepository) Create(ctx context.Context, input service.CreateQuo
 	if input.UpstreamKey != "" {
 		q = q.SetUpstreamKey(input.UpstreamKey)
 	}
+	// B 批上移：码级并发 / 负载因子 / 计费倍率 / 模型映射。
+	// 仅在显式给出合法值时落地（>0 / >=0 / 非空），其余维持列默认或沿用上游，
+	// 与 quota_key_dto.go 的"省略即不覆盖"约定一致；不触碰 accounts。
+	if input.Concurrency != nil && *input.Concurrency > 0 {
+		q = q.SetConcurrency(*input.Concurrency)
+	}
+	if input.LoadFactor != nil && *input.LoadFactor > 0 {
+		q = q.SetLoadFactor(*input.LoadFactor)
+	}
+	if input.RateMultiplier != nil && *input.RateMultiplier >= 0 {
+		q = q.SetRateMultiplier(*input.RateMultiplier)
+	}
+	if len(input.ModelMapping) > 0 {
+		q = q.SetModelMapping(copyStringMap(input.ModelMapping))
+	}
 	qk, err := q.Save(ctx)
 	if err != nil {
 		// code_mac 唯一冲突 = 同一张激活码已有未软删记录。
@@ -94,6 +109,66 @@ func isQuotaKeyCodeMacUniqueViolation(err error) bool {
 		return pqErr.Code == "23505" && pqErr.Constraint == "uq_quota_keys_code_mac"
 	}
 	return false
+}
+
+// copyStringMap 返回入参 map 的浅拷贝（避免调用方后续修改影响已落库的行）。
+func copyStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// toAnyMap 把 map[string]string 转成 map[string]any（供写入 credentials JSONB）。
+func toAnyMap(in map[string]string) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// syncAccountsExpiry 在给定事务 tx（或默认 client，两者互斥）内把指定激活码名下
+// 未软删账号的 accounts.expires_at 设为给定值（nil 清空），返回受影响账号 ID。
+// 仅负责"写"与"收集 ID"：是否入队调度 outbox 由调用方按各自的 tx 约束决定。
+//
+// 返回 (nil, nil) 当该激活码名下无任何未软删账号（无变更、无需入队）。
+func (r *quotaKeyRepository) syncAccountsExpiry(ctx context.Context, tx *ent.Tx, client *ent.Client, quotaKeyID int64, expiresAt *time.Time) ([]int64, error) {
+	var ids []int64
+	var err error
+	if tx != nil {
+		ids, err = tx.Account.Query().Where(account.QuotaKeyID(quotaKeyID), account.DeletedAtIsNil()).IDs(ctx)
+	} else {
+		ids, err = client.Account.Query().Where(account.QuotaKeyID(quotaKeyID), account.DeletedAtIsNil()).IDs(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	apply := func(u *ent.AccountUpdate) *ent.AccountUpdate {
+		if expiresAt == nil {
+			return u.ClearExpiresAt()
+		}
+		return u.SetExpiresAt(*expiresAt)
+	}
+	if tx != nil {
+		_, err = apply(tx.Account.Update().Where(account.QuotaKeyID(quotaKeyID), account.DeletedAtIsNil())).Save(ctx)
+	} else {
+		_, err = apply(client.Account.Update().Where(account.QuotaKeyID(quotaKeyID), account.DeletedAtIsNil())).Save(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // UpdatePriority 在同一事务内改写激活码优先级，并把该码名下**未软删**账号的
@@ -193,8 +268,28 @@ func (r *quotaKeyRepository) UpdateUsageSnapshot(ctx context.Context, tx *ent.Tx
 	if expiresAt != nil && *expiresAt != nil {
 		q = q.SetExpiresAt(**expiresAt)
 	}
-	_, err := q.Save(ctx)
-	return err
+	if _, err := q.Save(ctx); err != nil {
+		return err
+	}
+	// 账号过期时间随激活码（用户裁定 2026-11-10）：合法期限时同事务（无 tx 时按
+	// r.client）同步名下未软删账号的 accounts.expires_at，并收集受影响账号 ID 入队
+	// 调度 outbox（仅 tx != nil 时入队；无 tx 场景不触发调度重建）。
+	if expiresAt != nil && *expiresAt != nil {
+		var client *ent.Client
+		if tx == nil {
+			client = r.client
+		}
+		ids, err := r.syncAccountsExpiry(ctx, tx, client, id, &(**expiresAt))
+		if err != nil {
+			return err
+		}
+		if tx != nil && len(ids) > 0 {
+			if err := r.EnqueueAccountChangedOutbox(ctx, tx, ids); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // UpdateCredentialsAtomically 在同一事务内写凭据；clearUsageSnapshot 为 true 时同事务清空
@@ -458,11 +553,14 @@ func (r *quotaKeyRepository) UpdateMeta(ctx context.Context, tx *ent.Tx, id int6
 		return errors.New("quota_key_repository: UpdateMeta requires the caller's transaction")
 	}
 	q := tx.QuotaKey.UpdateOneID(id)
+	var expires *time.Time
 	if expiresAt != nil {
 		if *expiresAt == nil {
 			q = q.ClearExpiresAt()
 		} else {
-			q = q.SetExpiresAt(**expiresAt)
+			e := **expiresAt
+			expires = &e
+			q = q.SetExpiresAt(e)
 		}
 	}
 	if notes != nil {
@@ -472,8 +570,161 @@ func (r *quotaKeyRepository) UpdateMeta(ctx context.Context, tx *ent.Tx, id int6
 			q = q.SetNotes(**notes)
 		}
 	}
-	_, err := q.Save(ctx)
-	return err
+	if _, err := q.Save(ctx); err != nil {
+		return err
+	}
+	// 账号过期时间随激活码（手工编辑口径）：同事务同步名下未软删账号的
+	// accounts.expires_at，并对受影响账号入队调度 outbox。
+	if expiresAt != nil {
+		ids, err := r.syncAccountsExpiry(ctx, tx, nil, id, expires)
+		if err != nil {
+			return err
+		}
+		if len(ids) > 0 {
+			if err := r.EnqueueAccountChangedOutbox(ctx, tx, ids); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// SyncAccountsExpiry 在调用方已开启的事务内，把指定激活码名下未软删账号的
+// accounts.expires_at 设为给定值（nil 清空）。仅当实际存在受影响账号（即发生变更）
+// 时才入队调度 outbox；无受影响账号时直接返回，不写入 outbox。
+//
+// tx 必填（与 UpdateMeta 同理：元数据到期编辑必须与来源观测共用同 key 事务），
+// tx 为 nil 时失败关闭。
+func (r *quotaKeyRepository) SyncAccountsExpiry(ctx context.Context, tx *ent.Tx, quotaKeyID int64, expiresAt *time.Time) error {
+	if tx == nil {
+		return errors.New("quota_key_repository: SyncAccountsExpiry requires the caller's transaction")
+	}
+	ids, err := r.syncAccountsExpiry(ctx, tx, nil, quotaKeyID, expiresAt)
+	if err != nil {
+		return err
+	}
+	if len(ids) > 0 {
+		return r.EnqueueAccountChangedOutbox(ctx, tx, ids)
+	}
+	return nil
+}
+
+// UpdateSettingsAndSyncAccounts 在调用方事务内更新激活码设置，并同事务把该码名下
+// 未软删账号的对应字段同步（concurrency / load_factor / rate_multiplier 同步到账号列，
+// model_mapping 同步进各账号 credentials JSONB 并重新加密、维护 credentials_mac /
+// credentials_api_key_mac），最后对受影响账号入队调度 outbox。
+//
+// tx 必填：设置变更与账号同步必须共用同一事务，保证原子性；tx 为 nil 时失败关闭。
+func (r *quotaKeyRepository) UpdateSettingsAndSyncAccounts(ctx context.Context, tx *ent.Tx, id int64, settings service.UpdateQuotaKeySettingsInput) error {
+	if tx == nil {
+		return errors.New("quota_key_repository: UpdateSettingsAndSyncAccounts requires the caller's transaction")
+	}
+	// 防御（defense-in-depth）：ModelMappingSet 但空映射，禁止落库。
+	if settings.ModelMappingSet && len(settings.ModelMapping) == 0 {
+		return errors.New("quota_key_repository: UpdateSettingsAndSyncAccounts refuses empty model_mapping when ModelMappingSet")
+	}
+
+	// 1. 更新 quota_keys 自身设置。
+	q := tx.QuotaKey.UpdateOneID(id)
+	if settings.Concurrency != nil {
+		if *settings.Concurrency == nil {
+			q = q.ClearConcurrency()
+		} else {
+			q = q.SetConcurrency(**settings.Concurrency)
+		}
+	}
+	if settings.LoadFactor != nil {
+		if *settings.LoadFactor == nil {
+			q = q.ClearLoadFactor()
+		} else {
+			q = q.SetLoadFactor(**settings.LoadFactor)
+		}
+	}
+	if settings.RateMultiplier != nil {
+		q = q.SetRateMultiplier(*settings.RateMultiplier)
+	}
+	if settings.ModelMappingSet {
+		q = q.SetModelMapping(copyStringMap(settings.ModelMapping))
+	}
+	if _, err := q.Save(ctx); err != nil {
+		return err
+	}
+
+	// 2. 查询名下未软删账号（同步变更的实际目标）。
+	accs, err := tx.Account.Query().Where(account.QuotaKeyID(id), account.DeletedAtIsNil()).All(ctx)
+	if err != nil {
+		return err
+	}
+	if len(accs) == 0 {
+		return nil
+	}
+	affectedIDs := make([]int64, 0, len(accs))
+	for _, acc := range accs {
+		affectedIDs = append(affectedIDs, acc.ID)
+	}
+
+	// 3. 标量字段（concurrency / load_factor / rate_multiplier）批量同步到账号列。
+	changed := false
+	accUpd := tx.Account.Update().Where(account.QuotaKeyID(id), account.DeletedAtIsNil())
+	if settings.Concurrency != nil {
+		changed = true
+		if *settings.Concurrency == nil {
+			// 清空 = 恢复账号默认并发 3（与账号列默认值一致）。
+			accUpd = accUpd.SetConcurrency(3)
+		} else {
+			accUpd = accUpd.SetConcurrency(**settings.Concurrency)
+		}
+	}
+	if settings.LoadFactor != nil {
+		changed = true
+		if *settings.LoadFactor == nil {
+			accUpd = accUpd.ClearLoadFactor()
+		} else {
+			accUpd = accUpd.SetLoadFactor(**settings.LoadFactor)
+		}
+	}
+	if settings.RateMultiplier != nil {
+		changed = true
+		accUpd = accUpd.SetRateMultiplier(*settings.RateMultiplier)
+	}
+	if changed {
+		if _, err := accUpd.Save(ctx); err != nil {
+			return err
+		}
+	}
+
+	// 4. 模型映射：逐账号解密 credentials → 写入 model_mapping → 重新加密并维护 MAC，
+	//    严禁跳过 prepareCredentialsForStorage 直接改 credentials JSONB（会破坏 credentials_mac）。
+	if settings.ModelMappingSet {
+		for _, acc := range accs {
+			plain, err := decryptCredentialsMap(acc.Credentials)
+			if err != nil {
+				return err
+			}
+			if plain == nil {
+				plain = map[string]any{}
+			}
+			plain["model_mapping"] = toAnyMap(settings.ModelMapping)
+			prepared, err := prepareCredentialsForStorage(plain)
+			if err != nil {
+				return err
+			}
+			u := tx.Account.UpdateOneID(acc.ID).
+				SetCredentials(prepared.storage).
+				SetCredentialsMAC(prepared.mac).
+				SetNillableCredentialsAPIKeyMAC(prepared.apiKeyMAC)
+			if _, err := u.Save(ctx); err != nil {
+				return err
+			}
+		}
+		changed = true
+	}
+
+	// 5. 受影响账号入队调度 outbox（仅当确有变更）。
+	if changed {
+		return r.EnqueueAccountChangedOutbox(ctx, tx, affectedIDs)
+	}
+	return nil
 }
 
 // ListAccountsByQuotaKey 返回归属某激活码的账号（account.QuotaKeyIDEQ），
