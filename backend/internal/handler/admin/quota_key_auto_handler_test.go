@@ -17,22 +17,23 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
 
 // CARD-02：Auto 卡密生命周期管理与批量导入事务闭环的定向测试。
 //
-// 覆盖 Codex 外审抓出的三项缺陷：
+// 覆盖 Codex 外审抓出的两项缺陷：
 //
 //  1. P1 防止孤儿绑定 —— 本地落库必须先于上游设备绑定：
 //     落库失败时上游**一次都不能被调用**（否则卡密在上游已被绑定却无本地记录，
 //     即孤儿绑定），且失败卡密不得进入内存池；单卡失败不影响同批其它卡密。
-//  2. P2 状态保留刷新 —— RefreshAutoPool 走 pool.UpdateCardCounts，
-//     冷却中的卡密刷新额度后 CooldownUntil 必须原样保留（整卡重建会把它抹掉）。
-//  3. P3 安全配置 —— 上游基址只从环境配置读取：未配置 / 非安全端点一律失败关闭，
+//  2. P3 安全配置 —— 上游基址只从环境配置读取：未配置 / 非安全端点一律失败关闭，
 //     绝不回落到硬编码的明文公网地址。
 //
 // 本文件自带仓储替身与 HTTP 辅助（不依赖同包其它测试文件），可独立编译执行。
+//
+// 注：本单（CA-02）已删除 Auto 号池入池逻辑与刷新 / 状态两个管理端点，
+// 故本文件不再装配全局动态池、不再断言入池结果，仅校验导入 / 绑定 /
+// 转可选在本地落库行（expires_at、notes、status）上的语义。
 
 // ---------------------------------------------------------------------------
 // quota_keys 仓储替身
@@ -227,7 +228,7 @@ type autoCardUpstreamCall struct {
 
 // autoCardUpstreamStub 模拟 Cursor Auto 上游服务。
 //
-// validateActivationCode / refreshCount 是明文 JSON；getCredentialsSecure 是 AES 加密
+// validateActivationCode 是明文 JSON；getCredentialsSecure 是 AES 加密
 // （见 internal/pkg/cursorupstream），必须走真实协议才能命中 force_reused 解析分支。
 type autoCardUpstreamStub struct {
 	server *httptest.Server
@@ -261,14 +262,6 @@ func (s *autoCardUpstreamStub) handle(w http.ResponseWriter, r *http.Request) {
 		s.record(r.URL.Path, "")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": s.validateCode, "msg": s.validateMsg})
-	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/refreshCount"):
-		s.record(r.URL.Path, card)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 200,
-			"msg":  "ok",
-			"data": map[string]any{"over_count": s.overCount, "sum_count": s.sumCount},
-		})
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/getCredentialsSecure"):
 		s.record(r.URL.Path, card)
 		// force_reused=true 会让动态池把该卡密置入 60s 冷却。
@@ -308,23 +301,14 @@ func (s *autoCardUpstreamStub) callsTo(suffix string) int {
 // 路由与依赖装配
 // ---------------------------------------------------------------------------
 
-// setupAutoCardRouter 装配 Auto 卡密三个端点的路由。
+// setupAutoCardRouter 装配 Auto 卡密批量导入端点的路由。
 func setupAutoCardRouter(svc *service.QuotaKeyService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	h := NewQuotaKeyHandler(svc, nil, nil, nil)
 	qk := router.Group("/api/v1/admin/quota_keys/auto")
 	qk.POST("/batch_import", h.BatchImportCards)
-	qk.POST("/refresh_all", h.RefreshAutoPool)
-	qk.GET("/status", h.GetAutoPoolStatus)
 	return router
-}
-
-// installAutoCardPool 装配全局动态池并返回清理函数。
-func installAutoCardPool(t *testing.T, pool *service.CursorDynamicPool) {
-	t.Helper()
-	service.SetGlobalCursorDynamicPool(pool)
-	t.Cleanup(func() { service.SetGlobalCursorDynamicPool(nil) })
 }
 
 // newAutoCardQuotaKeyService 构造使用替身仓储的 QuotaKeyService（client 为 nil：
@@ -367,9 +351,8 @@ func parseAutoCardBatchImport(t *testing.T, rec *httptest.ResponseRecorder) auto
 // P3：安全配置（上游基址只来自环境配置，解析口径由 service 层统一覆盖）
 // ---------------------------------------------------------------------------
 
-func TestQuotaKeyAuto_BatchImport_UnconfiguredUpstream_FailsClosed(t *testing.T) {
+func TestBatchImport_UnconfiguredUpstream_FailsClosed(t *testing.T) {
 	repo := newAutoCardQuotaKeyRepo()
-	installAutoCardPool(t, service.NewCursorDynamicPool("", zap.NewNop()))
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, "")
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -384,12 +367,10 @@ func TestQuotaKeyAuto_BatchImport_UnconfiguredUpstream_FailsClosed(t *testing.T)
 // P1：落库与设备绑定的闭环（无孤儿绑定 + 失败隔离）
 // ---------------------------------------------------------------------------
 
-func TestQuotaKeyAuto_BatchImport_PersistFailure_NeverBindsUpstream(t *testing.T) {
+func TestBatchImport_PersistFailure_NeverBindsUpstream(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	repo := newAutoCardQuotaKeyRepo()
 	repo.failLast4["0001"] = true
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -408,14 +389,9 @@ func TestQuotaKeyAuto_BatchImport_PersistFailure_NeverBindsUpstream(t *testing.T
 	// 否则卡密在上游已被绑定却无本地记录 → 孤儿绑定。
 	require.Zero(t, upstream.callsTo("/validateActivationCode"),
 		"落库失败时不得调用上游绑定接口")
-	require.Zero(t, upstream.callsTo("/refreshCount"),
-		"落库失败时不得调用上游额度接口")
-
-	// 失败卡密不得污染内存池。
-	require.Empty(t, pool.ListCards(), "失败卡密不得进入内存池")
 }
 
-// TestQuotaKeyAuto_BatchImport_BindFailure_BornUnselectableAndSkipsPool 锁定 P2 的
+// TestQuotaKeyAuto_BatchImport_BindFailure_BornUnselectable 锁定 P2 的
 // 核心不变量：**绑定失败的行从落库那一刻起就不可选**。
 //
 // 回归背景（终审 CARD-06 P2）：上轮修复只写 notes 标记 + 错误日志，
@@ -425,13 +401,11 @@ func TestQuotaKeyAuto_BatchImport_PersistFailure_NeverBindsUpstream(t *testing.T
 //
 // 本用例断言落库瞬间（Create 返回时）该行就已是不可选态 —— 不是事后靠某个
 // 可能失败的中和写入把它改成不可选的。
-func TestQuotaKeyAuto_BatchImport_BindFailure_BornUnselectableAndSkipsPool(t *testing.T) {
+func TestBatchImport_BindFailure_BornUnselectable(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	upstream.validateCode = 500
 	upstream.validateMsg = "activation code invalid"
 	repo := newAutoCardQuotaKeyRepo()
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -466,9 +440,6 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_BornUnselectableAndSkipsPool(t *te
 	require.Contains(t, *rows[0].Notes, "auto_pool:dev=")
 	require.Contains(t, *rows[0].Notes, "md5=")
 	require.Contains(t, *rows[0].Notes, autoPoolBindFailedMarker)
-
-	// 失败卡密不得污染内存池。
-	require.Empty(t, pool.ListCards(), "绑定失败的卡密不得进入内存池")
 }
 
 // TestQuotaKeyAuto_BatchImport_BindFailure_MarkerWriteFails_StillUnselectable 锁定
@@ -477,14 +448,12 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_BornUnselectableAndSkipsPool(t *te
 // 这是 P2 相对上轮修复的根本改进：上轮把「行不可选」寄托在一次可能失败的
 // 中和写入上，中和失败就留下 active+未过期的行（会被重消费）；现在行从落库起
 // 就不可选，任何后续写入失败都改变不了这一点。
-func TestQuotaKeyAuto_BatchImport_BindFailure_MarkerWriteFails_StillUnselectable(t *testing.T) {
+func TestBatchImport_BindFailure_MarkerWriteFails_StillUnselectable(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	upstream.validateCode = 500
 	upstream.validateMsg = "activation code invalid"
 	repo := newAutoCardQuotaKeyRepo()
 	repo.failUpdateMetaAll = true // DB 完全不可写
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -513,20 +482,16 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_MarkerWriteFails_StillUnselectable
 	// 旧的软性措辞必须已被移除 —— 它正是让失败静默滑过的根源。
 	require.NotContains(t, res.Errors[0], "left active for manual recovery")
 	require.NotContains(t, res.Errors[0], "left ACTIVE and will be re-consumed")
-
-	require.Empty(t, pool.ListCards(), "绑定失败的卡密不得进入内存池")
 }
 
 // TestQuotaKeyAuto_BatchImport_BindSuccess_ActivateFails_StaysUnselectable 锁定
 // P2 阶段 3 的失败语义：绑定成功但「转可选」失败时，该行必须留在不可选安全态
 // （不会被重消费），且按**硬失败**上报并标注需人工处理。
-func TestQuotaKeyAuto_BatchImport_BindSuccess_ActivateFails_StaysUnselectable(t *testing.T) {
+func TestBatchImport_BindSuccess_ActivateFails_StaysUnselectable(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	repo := newAutoCardQuotaKeyRepo()
 	// 带 expires_at 的写（= 转可选那一步）一律失败；只写 notes 的调用仍可用。
 	repo.failUpdateMetaExpireTimes = -1
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -550,20 +515,15 @@ func TestQuotaKeyAuto_BatchImport_BindSuccess_ActivateFails_StaysUnselectable(t 
 	require.NotNil(t, rows[0].ExpiresAt)
 	require.True(t, rows[0].ExpiresAt.Before(time.Now()),
 		"转可选失败后该行的 expires_at 必须仍落在过去（不可选安全态）")
-
-	// 转可选失败 ⇒ 不入池。
-	require.Empty(t, pool.ListCards(), "转可选失败的卡密不得进入内存池")
 }
 
 // TestQuotaKeyAuto_BatchImport_BindSuccess_SweeperRace_NotSelectable 锁定 P2 阶段 3
 // 的清扫器竞态防护：转可选写成功但清扫器已把该行标成 expired 时，必须按硬失败
 // 上报（行确实不可选），绝不能谎报成功。
-func TestQuotaKeyAuto_BatchImport_BindSuccess_SweeperRace_NotSelectable(t *testing.T) {
+func TestBatchImport_BindSuccess_SweeperRace_NotSelectable(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	repo := newAutoCardQuotaKeyRepo()
 	repo.markExpiredOnExpireWrite = true // 模拟清扫器抢先标 expired
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -582,8 +542,6 @@ func TestQuotaKeyAuto_BatchImport_BindSuccess_SweeperRace_NotSelectable(t *testi
 	require.Len(t, rows, 1)
 	require.Equal(t, domain.QuotaKeyStatusExpired, rows[0].Status,
 		"清扫器已把该行标成 expired —— 该行确实不可选")
-
-	require.Empty(t, pool.ListCards(), "不可选的卡密不得进入内存池")
 }
 
 // TestQuotaKeyAuto_BatchImport_BindFailure_NoExpiryWriteAfterCreate 锁定 P2 的
@@ -593,13 +551,11 @@ func TestQuotaKeyAuto_BatchImport_BindSuccess_SweeperRace_NotSelectable(t *testi
 // 该写入是「行不可选」的唯一依据 —— 它失败就留下 active+未过期的可重消费行。
 // 现在行从落库起就不可选，中和步骤被彻底移除，故失败路径上不应再有
 // 任何带 expires_at 的写入（只有一次只写 notes 的失败标记写入）。
-func TestQuotaKeyAuto_BatchImport_BindFailure_NoExpiryWriteAfterCreate(t *testing.T) {
+func TestBatchImport_BindFailure_NoExpiryWriteAfterCreate(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	upstream.validateCode = 500
 	upstream.validateMsg = "activation code invalid"
 	repo := newAutoCardQuotaKeyRepo()
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -617,8 +573,6 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_NoExpiryWriteAfterCreate(t *testin
 	require.Equal(t, 1, repo.updateMetaNotesOnlyCalls,
 		"绑定失败应写一次 bind=failed 标记（notes only）")
 	require.Equal(t, 1, repo.updateMetaCalls)
-
-	require.Empty(t, pool.ListCards(), "绑定失败的卡密不得进入内存池")
 }
 
 // TestQuotaKeyAuto_BatchImport_Success_BornUnselectableThenActivated 锁定 P2 的完整
@@ -626,11 +580,9 @@ func TestQuotaKeyAuto_BatchImport_BindFailure_NoExpiryWriteAfterCreate(t *testin
 //
 // 这条不变量对成功路径同样重要：Create 与 ValidateActivationCode 之间存在时间窗，
 // 若行在落库时即可选，它会在「尚未绑定上游」时被补池候选查询消费。
-func TestQuotaKeyAuto_BatchImport_Success_BornUnselectableThenActivated(t *testing.T) {
+func TestBatchImport_Success_BornUnselectableThenActivated(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	repo := newAutoCardQuotaKeyRepo()
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -656,15 +608,11 @@ func TestQuotaKeyAuto_BatchImport_Success_BornUnselectableThenActivated(t *testi
 
 	// 转可选这一步恰好发生一次。
 	require.Equal(t, 1, repo.updateMetaExpireCalls)
-
-	require.Len(t, pool.ListCards(), 1)
 }
 
-func TestQuotaKeyAuto_BatchImport_Success_PersistsThenBindsThenRegistersInPool(t *testing.T) {
+func TestBatchImport_Success_PersistsThenBinds(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	repo := newAutoCardQuotaKeyRepo()
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -677,18 +625,8 @@ func TestQuotaKeyAuto_BatchImport_Success_PersistsThenBindsThenRegistersInPool(t
 	require.Equal(t, 0, res.FailedCount)
 	require.Empty(t, res.Errors)
 
-	// 两张卡都完成「落库 → 上游绑定 → 入池」。
+	// 两张卡都完成「落库 → 上游绑定」。
 	require.Equal(t, 2, upstream.callsTo("/validateActivationCode"))
-	require.Equal(t, 2, upstream.callsTo("/refreshCount"))
-
-	cards := pool.ListCards()
-	require.Len(t, cards, 2)
-	for _, card := range cards {
-		require.NotEmpty(t, card.DeviceCode)
-		require.NotEmpty(t, card.DeviceCodeMD5)
-		require.Equal(t, 7, card.OverCount)
-		require.Equal(t, 9, card.SumCount)
-	}
 
 	// 本地行落库时即记录完整绑定凭据（dev + md5），绑定关系可复原。
 	rows := repo.snapshot()
@@ -706,12 +644,10 @@ func TestQuotaKeyAuto_BatchImport_Success_PersistsThenBindsThenRegistersInPool(t
 	}
 }
 
-func TestQuotaKeyAuto_BatchImport_FailureIsolation_OneCardFailsOthersSucceed(t *testing.T) {
+func TestBatchImport_FailureIsolation_OneCardFailsOthersSucceed(t *testing.T) {
 	upstream := newAutoCardUpstreamStub(t)
 	repo := newAutoCardQuotaKeyRepo()
 	repo.failLast4["0001"] = true
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
 	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
 
 	router := setupAutoCardRouter(newAutoCardQuotaKeyService(repo))
@@ -725,77 +661,11 @@ func TestQuotaKeyAuto_BatchImport_FailureIsolation_OneCardFailsOthersSucceed(t *
 	require.Len(t, res.Errors, 1)
 	require.Contains(t, res.Errors[0], "persist failed")
 
-	// 只有绑定成功的卡密进入内存池。
-	cards := pool.ListCards()
-	require.Len(t, cards, 1)
-	require.Equal(t, "CARD-KEY-0002", cards[0].CardKey, "入池的应是成功落库的第二张卡")
 	require.Equal(t, 1, upstream.callsTo("/validateActivationCode"),
 		"落库失败的卡不得触发上游绑定")
-}
 
-// ---------------------------------------------------------------------------
-// P2：刷新额度必须保留单卡状态（CooldownUntil / Disabled）
-// ---------------------------------------------------------------------------
-
-func TestQuotaKeyAuto_RefreshAutoPool_UpdatesCountsButPreservesCooldownState(t *testing.T) {
-	upstream := newAutoCardUpstreamStub(t)
-	upstream.forceReused = true
-	pool := service.NewCursorDynamicPool(upstream.server.URL, zap.NewNop())
-	installAutoCardPool(t, pool)
-	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, upstream.server.URL)
-
-	// 先让卡密进入冷却：上游返回 force_reused → 动态池把该卡置入 60s 冷却。
-	pool.RegisterCard(1, "CARD-KEY-0001", "dev-code-1", "dev-md5-1", 5, 10)
-	_, err := pool.AcquireToken(context.Background(), "")
-	require.Error(t, err, "上游 force_reused 时取号应当失败")
-
-	before := pool.ListCards()
-	require.Len(t, before, 1)
-	require.True(t, before[0].CooldownUntil.After(time.Now()), "前置条件：卡密应处于冷却中")
-
-	// 刷新额度：只允许更新 OverCount/SumCount。
-	router := setupAutoCardRouter(newAutoCardQuotaKeyService(newAutoCardQuotaKeyRepo()))
-	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/refresh_all", "")
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	var body struct {
-		Data struct {
-			Refreshed int `json:"refreshed_count"`
-			Failed    int `json:"failed_count"`
-		} `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
-	require.Equal(t, 1, body.Data.Refreshed)
-	require.Equal(t, 0, body.Data.Failed)
-
-	after := pool.ListCards()
-	require.Len(t, after, 1)
-	require.Equal(t, upstream.overCount, after[0].OverCount, "额度必须被刷新")
-	require.Equal(t, upstream.sumCount, after[0].SumCount, "总额必须被刷新")
-	require.True(t, after[0].CooldownUntil.After(time.Now()),
-		"P2：刷新额度不得抹掉单卡的冷却状态（整卡重建会清零 CooldownUntil）")
-	require.False(t, after[0].Disabled, "刷新额度不得改变单卡的禁用状态")
-	require.Equal(t, "dev-code-1", after[0].DeviceCode, "刷新额度不得改写设备码")
-	require.Equal(t, "dev-md5-1", after[0].DeviceCodeMD5, "刷新额度不得改写设备 MD5")
-}
-
-func TestQuotaKeyAuto_RefreshAutoPool_UnconfiguredUpstream_FailsClosed(t *testing.T) {
-	installAutoCardPool(t, service.NewCursorDynamicPool("", zap.NewNop()))
-	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, "")
-
-	router := setupAutoCardRouter(newAutoCardQuotaKeyService(newAutoCardQuotaKeyRepo()))
-	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/refresh_all", "")
-
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-}
-
-func TestQuotaKeyAuto_RefreshAutoPool_PoolNotInitialized(t *testing.T) {
-	installAutoCardPool(t, nil)
-	t.Setenv(service.EnvCursorAutoUpstreamBaseURL, "https://cursor.example.com")
-
-	router := setupAutoCardRouter(newAutoCardQuotaKeyService(newAutoCardQuotaKeyRepo()))
-	rec := doAutoCardJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/auto/refresh_all", "")
-
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.Contains(t, rec.Body.String(), "pool_not_initialized")
+	// 仅成功落库并绑定的卡密写入本地行。
+	rows := repo.snapshot()
+	require.Len(t, rows, 1)
+	require.Equal(t, "0002", rows[0].CodeLast4, "成功落库的应是第二张卡 CARD-KEY-0002 的末 4 位")
 }

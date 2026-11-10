@@ -96,10 +96,6 @@
               </div>
             </div>
             <template v-if="activeChannelTab === 'auto'">
-              <button class="btn btn-secondary" :disabled="loading" @click="refreshAutoPool">
-                <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
-                批量刷新上游额度
-              </button>
               <button class="btn btn-primary" @click="showAutoBatchModal = true">
                 <Icon name="plus" size="md" class="mr-1" />
                 批量导入Auto卡密
@@ -1446,19 +1442,6 @@ async function confirmSweep() {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.sweepError')))
   } finally {
     sweeping.value = false
-  }
-}
-
-async function refreshAutoPool() {
-  loading.value = true
-  try {
-    const res = await adminAPI.quotaKeys.refreshAutoPool()
-    appStore.showSuccess(`刷新完成：成功 ${res.refreshed_count ?? 0} 个，失败 ${res.failed_count ?? 0} 个`)
-    await load()
-  } catch (err: unknown) {
-    appStore.showError(extractApiErrorMessage(err, '批量刷新失败'))
-  } finally {
-    loading.value = false
   }
 }
 

@@ -482,21 +482,7 @@ func (s *CursorExecutionService) Execute(
 	cursorPhaseLog(ctx, zapcore.DebugLevel, "auth_begin", upstreamModel,
 		zap.Int64("account_id", account.ID))
 
-	isAuto := isCursorAutoRequest(account, originalModel)
-	var dynamicTok *DynamicCursorToken
 	var bearer string
-
-	if isAuto {
-		// Auto 路径前置接管：直接从动态池获取可用 Token，无需依赖账号静态凭据（Codex 外审 P1 修复）
-		if pool := GetGlobalCursorDynamicPool(); pool != nil {
-			sessionID := fmt.Sprintf("%d:%d", req.Identity.UserID, req.Identity.APIKeyID)
-			tok, tokErr := pool.AcquireToken(ctx, sessionID)
-			if tokErr == nil && tok != nil {
-				dynamicTok = tok
-				bearer = tok.AccessToken
-			}
-		}
-	}
 
 	if bearer == "" {
 		var err error
@@ -508,18 +494,7 @@ func (s *CursorExecutionService) Execute(
 
 	authProvider, err := newCursorAccountAuthProvider(account, s.quotaKeys, s.enc, s.deviceIDs)
 	if err != nil {
-		// 针对未绑定 quotaKey 的 Auto 动态账号提供合成鉴权，保证通过后续会话登记
-		if isAuto && dynamicTok != nil {
-			authProvider = &cursorAccountAuthProvider{
-				device: dynamicTok.MachineIDs.DevDeviceId,
-				fingerprint: cursorSourceFingerprint{
-					QuotaKeyID: dynamicTok.CardID,
-					CodeMAC:    "auto_dynamic_pool_source",
-				},
-			}
-		} else {
-			return nil, err
-		}
+		return nil, err
 	}
 
 	// ④ 请求转换（带丢弃记账：本层不支持的形状一律丢弃并落日志，不整轮 400）。
@@ -527,10 +502,8 @@ func (s *CursorExecutionService) Execute(
 	if err != nil {
 		return nil, err
 	}
-	if !isAuto {
-		if _, err := authProvider.CursorUpstreamAuth(ctx); err != nil {
-			return nil, err
-		}
+	if _, err := authProvider.CursorUpstreamAuth(ctx); err != nil {
+		return nil, err
 	}
 	// §25.17.3「A05首次来源指纹」：指纹随材料一同传出，取的是**本次生成头那一次**的
 	// 来源行与解密结果。拿不到可靠指纹即失败关闭，绝不以空值登记进会话。
@@ -597,7 +570,6 @@ func (s *CursorExecutionService) Execute(
 		if err == nil {
 			return
 		}
-		isAutoReq := isCursorAutoRequest(account, originalModel)
 		if code, ok := cursorUpstreamStreamErrorCode(err); ok && code == "ERROR_PRO_USER_RATE_LIMIT_EXCEEDED" {
 			// 限流路径：Info 级一条（含 account_id 与 code），正常路径不额外写日志。
 			//
@@ -607,16 +579,6 @@ func (s *CursorExecutionService) Execute(
 			// 否则一次上游抖动就能把整个码清空。
 			cursorPhaseLog(ctx, zapcore.InfoLevel, "cursor_account_rate_limited", originalModel,
 				zap.Int64("account_id", account.ID), zap.String("code", code))
-
-			// 外审 P1 修复：流内限流错误同步标记动态 Token 为冷却并解绑会话
-			if isAutoReq {
-				if pool := GetGlobalCursorDynamicPool(); pool != nil {
-					sessionID := fmt.Sprintf("%d:%d", req.Identity.UserID, req.Identity.APIKeyID)
-					if dynamicTok != nil {
-						pool.MarkTokenError(dynamicTok, sessionID, 60*time.Second)
-					}
-				}
-			}
 
 			// 动作 A：无论是否已发布正文字节，停号回调只调用一次；回调报错（含 panic）只记 Warn，
 			// 绝不改变返回的错误类型与换号语义。
@@ -868,19 +830,6 @@ func (s *CursorExecutionService) Execute(
 	}()
 
 	headers := cursorAgentRunHeaders(bearer, authProvider.device, s.now())
-	if isAuto && dynamicTok != nil {
-		headers["Authorization"] = "Bearer " + dynamicTok.AccessToken
-		headers["x-machine-id"] = dynamicTok.MachineIDs.MachineId
-		headers["x-mac-machine-id"] = dynamicTok.MachineIDs.MacMachineId
-		headers["x-dev-device-id"] = dynamicTok.MachineIDs.DevDeviceId
-	}
-	defer func() {
-		if isAuto && dynamicTok != nil {
-			if pool := GetGlobalCursorDynamicPool(); pool != nil {
-				pool.ReleaseToken(dynamicTok)
-			}
-		}
-	}()
 
 	fwdReq := cursorBuildAgentRunUpstreamRequest(req, payload, authProvider, upstreamModel, delegations, headers)
 
@@ -921,23 +870,6 @@ func (s *CursorExecutionService) Execute(
 		// bearer 作为 secret 传入：上游错误文案可能回显 Authorization 头。
 		code, msg := cursorExtractUpstreamErrorSummary(upstreamBody, bearer)
 		cursorRecordUpstreamError(c, account, resp.StatusCode, code, msg, resp.TargetURL)
-
-		// 站点侧自愈红线：针对 Auto 渠道，429 / 403 / 限额等错误，标记当前 Token 并转为可重试 failover，严禁直接给用户报 4xx
-		if isAuto && dynamicTok != nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden) {
-			if pool := GetGlobalCursorDynamicPool(); pool != nil {
-				sessionID := fmt.Sprintf("%d:%d", req.Identity.UserID, req.Identity.APIKeyID)
-				pool.MarkTokenError(dynamicTok, sessionID, 60*time.Second)
-			}
-			return nil, &UpstreamFailoverError{
-				StatusCode:        resp.StatusCode,
-				Stage:             GatewayFailureStage("upstream"),
-				Scope:             GatewayFailureScopeAccount,
-				Reason:            CursorQuotaExhaustedReason,
-				NextAccountAction: NextAccountRetry,
-				ClientStatusCode:  http.StatusTooManyRequests,
-				ClientMessage:     "cursor upstream rate limit, auto-rebuilding session",
-			}
-		}
 
 		return nil, cursorUpstreamStatusError(resp.StatusCode, upstreamBody, bearer)
 	}
@@ -1909,19 +1841,6 @@ func cursorSafeResponseHeader(resp *CursorUpstreamResponse) http.Header {
 		header.Set("x-request-id", rid)
 	}
 	return header
-}
-
-// isCursorAutoRequest 判断是否为 Cursor Auto 动态号池调度请求
-func isCursorAutoRequest(account *Account, model string) bool {
-	if strings.EqualFold(strings.TrimSpace(model), "cursor-auto") ||
-		strings.EqualFold(strings.TrimSpace(model), "cursor-fast") ||
-		strings.EqualFold(strings.TrimSpace(model), "auto") {
-		return true
-	}
-	if account != nil && account.GetCredential("sub_type") == "auto" {
-		return true
-	}
-	return false
 }
 
 // cursorAgentRunHeaders 组装 AgentRun 出站头（鉴权 + 客户端上下文形态）。

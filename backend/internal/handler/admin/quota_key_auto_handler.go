@@ -15,18 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// CursorAutoCardDTO 是 Auto 卡密在管理端展示与交互的数据传输对象
-type CursorAutoCardDTO struct {
-	ID            int64      `json:"id"`
-	CodeMasked    string     `json:"code_masked"`
-	DeviceCode    string     `json:"device_code"`
-	OverCount     int        `json:"over_count"`
-	SumCount      int        `json:"sum_count"`
-	IsUnlimited   bool       `json:"is_unlimited"`
-	Status        string     `json:"status"` // active, cooling, exhausted, disabled
-	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
-}
-
 type batchImportCardsRequest struct {
 	Cards     []string   `json:"cards" binding:"required"` // 每行一个卡密
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`     // 选填到期时间；提供则落库，未提供则清空为 NULL
@@ -84,11 +72,10 @@ func formatAutoPoolFailedNotes(devCode, devMD5 string) string {
 //	上游绑定是对外部系统的不可逆副作用，本地 quota_keys 行是绑定关系的唯一凭据。
 //	因此**先落库、后绑定**：只有本地已持久化的卡密才会去上游绑定设备码。
 //	这样「上游已绑定但本地无记录」的孤儿绑定在结构上不可能出现——
-//	落库失败时上游尚未被触碰，内存池也不会被污染。
+//	落库失败时上游尚未被触碰。
 //
-//	单卡失败隔离：每张卡密独立走「落库 → 绑定 → 转可选 → 入池」四段，任一段失败
-//	只影响该卡（计入 failed_count 并回写可定位的错误文案），不影响同批其它卡密，
-//	也不会把半成品卡留在内存池里。
+//	单卡失败隔离：每张卡密独立走「落库 → 绑定 → 转可选」三段，任一段失败
+//	只影响该卡（计入 failed_count 并回写可定位的错误文案），不影响同批其它卡密。
 //
 // 不可选不变量（派发单 CARD-06 P2，终审「人工告警不等于关闭」）：
 //
@@ -130,7 +117,7 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 		devCode, devMD5 := cursorupstream.GenerateVirtualDeviceCode()
 
 		// 阶段 1：先落库，且**落库即不可选**。
-		// 失败即结束本卡：上游尚未绑定 → 无孤儿绑定；内存池不写入 → 无池污染。
+		// 失败即结束本卡：上游尚未绑定 → 无孤儿绑定。
 		//
 		// expires_at 置为过去（now-1min）使该行从出生起就被补池候选查询
 		// （status=active AND 未过期）排除：即便后续任一步失败、即便 notes 标记
@@ -169,7 +156,7 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 
 		// 阶段 3：转可选 —— 只有绑成功才把该行放回补池候选集。
 		// 失败 = 卡已绑上游但本地仍不可选：属**可恢复**的硬失败（行不可选、
-		// 不会被重消费），报错并标注需人工处理；该卡不进内存池。
+		// 不会被重消费），报错并标注需人工处理。
 		if activateErr := h.activateAutoCard(c.Request.Context(), st.ID, req.ExpiresAt); activateErr != nil {
 			res.FailedCount++
 			msg := fmt.Sprintf("card %s bound upstream but NOT selectable locally (%v) — 已绑定但未转可选，需人工处理: row %d stays unselectable (expires_at in the past) and will not be re-consumed",
@@ -180,23 +167,6 @@ func (h *QuotaKeyHandler) BatchImportCards(c *gin.Context) {
 			)
 			res.Errors = append(res.Errors, msg)
 			continue
-		}
-
-		// 阶段 4：查一次额度（尽力而为）并入池。
-		// 额度未知不阻断导入：卡密已绑定、已落库且已转可选，后续 refresh_all 会补齐额度。
-		overCount := 0
-		sumCount := 0
-		countResp, countErr := client.RefreshCount(c.Request.Context(), devCode, devMD5)
-		if countErr == nil && countResp != nil {
-			overCount = countResp.OverCount
-			sumCount = countResp.SumCount
-		}
-
-		// 入池。只有「本地已落库 + 上游已绑定 + 本地已转可选」的卡密才允许进入
-		// 内存池，失败卡密永不进池（避免污染池内额度统计与取号候选集）。
-		// st.ID 来自本次新建行，池内不存在同 ID 的旧状态，整卡登记不会覆盖他人状态。
-		if pool := service.GetGlobalCursorDynamicPool(); pool != nil {
-			pool.RegisterCard(st.ID, cardKey, devCode, devMD5, overCount, sumCount)
 		}
 
 		res.SuccessCount++
@@ -253,64 +223,6 @@ func (h *QuotaKeyHandler) markAutoCardBindFailed(ctx context.Context, quotaKeyID
 	notes := &notesValue
 	_, err := h.svc.Update(ctx, quotaKeyID, nil, nil, &notes, nil)
 	return err
-}
-
-// RefreshAutoPool 批量刷新所有 Auto 卡密在上游的剩余额度
-// POST /api/v1/admin/quota_keys/auto/refresh_all
-//
-// 状态保留（派发单 CARD-02 第 2 项，修复刷新覆盖状态 P2）：
-// 刷新只更新额度，必须调用 pool.UpdateCardCounts 只写 OverCount/SumCount。
-// 严禁用 pool.RegisterCard 整卡重建——那会把单卡的 CooldownUntil（冷却中）与
-// Disabled（已禁用）状态抹掉，导致冷却中的卡被立刻重新取号、已禁用的卡被复活。
-func (h *QuotaKeyHandler) RefreshAutoPool(c *gin.Context) {
-	pool := service.GetGlobalCursorDynamicPool()
-	if pool == nil {
-		response.Success(c, gin.H{"status": "pool_not_initialized"})
-		return
-	}
-
-	client, err := newCursorAutoUpstreamClient()
-	if err != nil {
-		response.Error(c, http.StatusServiceUnavailable, "Cursor auto upstream unavailable: "+err.Error())
-		return
-	}
-
-	refreshed := 0
-	failed := 0
-
-	cards := pool.ListCards()
-	for _, card := range cards {
-		countResp, err := client.RefreshCount(c.Request.Context(), card.DeviceCode, card.DeviceCodeMD5)
-		if err != nil || countResp == nil {
-			failed++
-			continue
-		}
-		// 只更新额度，保留单卡的冷却/禁用状态。
-		pool.UpdateCardCounts(card.ID, countResp.OverCount, countResp.SumCount)
-		refreshed++
-	}
-
-	response.Success(c, gin.H{
-		"refreshed_count": refreshed,
-		"failed_count":    failed,
-	})
-}
-
-// GetAutoPoolStatus 查询当前 Auto 动态号池的在线健康指标
-// GET /api/v1/admin/quota_keys/auto/status
-func (h *QuotaKeyHandler) GetAutoPoolStatus(c *gin.Context) {
-	pool := service.GetGlobalCursorDynamicPool()
-	if pool == nil {
-		response.Success(c, gin.H{
-			"active_tokens": 0,
-			"total_cards":   0,
-			"status":        "uninitialized",
-		})
-		return
-	}
-
-	stats := pool.GetStats()
-	response.Success(c, stats)
 }
 
 func maskCardKey(k string) string {

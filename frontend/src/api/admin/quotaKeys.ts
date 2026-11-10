@@ -293,12 +293,6 @@ export interface BatchImportAutoCardsResult {
   errors?: string[]
 }
 
-/** Auto 号池批量刷新结果（POST /admin/quota_keys/auto/refresh_all 的 data）。 */
-export interface RefreshAutoPoolResult {
-  refreshed_count: number
-  failed_count: number
-}
-
 /**
  * 批量导入 Auto 卡密。
  * 必须走 apiClient：管理端鉴权是 Authorization: Bearer <auth_token>，
@@ -318,12 +312,6 @@ export async function batchImportAutoCards(
   return data
 }
 
-/** 批量刷新 Auto 号池上游额度。 */
-export async function refreshAutoPool(): Promise<RefreshAutoPoolResult> {
-  const { data } = await apiClient.post<RefreshAutoPoolResult>('/admin/quota_keys/auto/refresh_all')
-  return data
-}
-
 const quotaKeysAPI = {
   list,
   create,
@@ -337,7 +325,6 @@ const quotaKeysAPI = {
   updateAutoEntryConfig,
   probeQuota,
   batchImportAutoCards,
-  refreshAutoPool,
   listUpstreams,
   updateUpstream
 }
