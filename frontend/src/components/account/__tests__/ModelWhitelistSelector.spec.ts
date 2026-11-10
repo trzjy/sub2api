@@ -236,7 +236,10 @@ describe('ModelWhitelistSelector', () => {
     }
   )
 
-  it('requires a supported request builder for newly registered platforms', async () => {
+  it('requires a static upstream-sync allowlist entry for newly registered platforms', async () => {
+    // w43 冲突裁决（本文件 §5 rule 1）保留我方静态 upstreamSyncPlatforms 白名单，
+    // 不引用上游 platformCatalog.supportsUpstreamModelSync。新增平台若未进入该静态白名单，
+    // 即使 platformCatalog 声明 multi_protocol，也不开放「同步上游模型」入口。
     const wrapper = mountSelector({ platform: 'acme_router', accountId: 46 })
     const platforms = [
       ...BUILTIN_PLATFORM_CATALOG.platforms,
@@ -253,7 +256,7 @@ describe('ModelWhitelistSelector', () => {
         : spec)
     })
     await flushPromises()
-    expect(wrapper.findAll('button').some(button => button.text() === 'admin.accounts.syncUpstreamModels')).toBe(true)
+    expect(wrapper.findAll('button').some(button => button.text() === 'admin.accounts.syncUpstreamModels')).toBe(false)
     wrapper.unmount()
   })
 
@@ -372,6 +375,19 @@ describe('ModelWhitelistSelector', () => {
         }
       }
     })
+
+    const syncButton = wrapper
+      .findAll('button')
+      .find(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    expect(syncButton).toBeDefined()
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['glm-5.3']]])
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsVolcanoPartial')
+    expect(showSuccess).not.toHaveBeenCalled()
+  })
+
   it('shows the backend message when upstream sync is rejected', async () => {
     syncUpstreamModels.mockRejectedValue({
       status: 400,
@@ -387,9 +403,10 @@ describe('ModelWhitelistSelector', () => {
     await syncButton!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.emitted('update:modelValue')).toEqual([[['glm-5.3']]])
-    expect(showWarning).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsVolcanoPartial')
-    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith(
+      'admin.accounts.syncUpstreamModelsError: Vertex API key accounts do not support upstream model listing'
+    )
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
   })
 
   it('does not enter the volcano flow for a same-suffix hostname', async () => {
@@ -438,9 +455,7 @@ describe('ModelWhitelistSelector', () => {
     expect(syncVolcanoPlanModels).toHaveBeenLastCalledWith(101, { apply: true, expected_removals: [] })
     expect(wrapper.emitted('update:modelValue')).toEqual([[['glm-5.3']]])
     expect(showSuccess).toHaveBeenCalled()
-    expect(showError).toHaveBeenCalledWith(
-      'admin.accounts.syncUpstreamModelsError: Vertex API key accounts do not support upstream model listing'
-    )
+    expect(showError).not.toHaveBeenCalled()
   })
 
   it('shows success and a partial warning when some capabilities were saved', async () => {
@@ -703,5 +718,88 @@ describe('ModelWhitelistSelector', () => {
 
     expect(syncButton).toBeDefined()
     expect(syncButton?.exists()).toBe(true)
+  })
+
+  it('uses customSync to fill preview models without calling accountsAPI', async () => {
+    // P1-B3：激活码弹窗传入 customSync 时，「同步上游支持的模型」调用它并把返回模型
+    // 填入 update:modelValue，且不改写单个账号 DB（不调 accountsAPI.syncUpstreamModels）。
+    const customSync = vi.fn().mockResolvedValue({ models: ['gpt-custom-1', 'gpt-custom-2'] })
+    const wrapper = mountSelector({ platform: undefined, customSync })
+
+    const syncButton = wrapper
+      .findAll('button')
+      .find(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    expect(syncButton).toBeDefined()
+
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(customSync).toHaveBeenCalledOnce()
+    expect(syncUpstreamModels).not.toHaveBeenCalled()
+    expect(syncUpstreamModelsPreview).not.toHaveBeenCalled()
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['gpt-custom-1', 'gpt-custom-2']]])
+  })
+
+  it('renders read-only when disabled and suppresses all editing interactions', async () => {
+    // P1-B3：disabled 为 true 时只读展示 modelValue，下拉/移除/同步/填入均被禁用且不触发变更。
+    const wrapper = mountSelector({ disabled: true, modelValue: ['gpt-4o', 'claude-3'] })
+
+    // 只读展示 modelValue。
+    expect(wrapper.text()).toContain('gpt-4o')
+    expect(wrapper.text()).toContain('claude-3')
+
+    // 下拉不展开。
+    await wrapper.get('div.cursor-pointer').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid="model-option"]').length).toBe(0)
+
+    // 同步按钮被抑制（canSyncUpstream 返回 false）。
+    expect(
+      wrapper.findAll('button').some(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    ).toBe(false)
+
+    // 移除按钮（x）禁用且不触发变更。
+    const removeButtons = wrapper
+      .findAll('button')
+      .filter(button => button.attributes('disabled') !== undefined && button.text().trim() === '')
+    expect(removeButtons.length).toBe(2)
+    await removeButtons[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+
+    // 「fillRelated」按钮禁用且不触发变更。
+    const fillButton = wrapper.findAll('button').find(button => button.text() === 'admin.accounts.fillRelatedModels')!
+    expect(fillButton.attributes('disabled')).toBeDefined()
+    await fillButton.trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+
+    // 自定义模型输入框与「填入」按钮禁用且不触发变更。
+    const input = wrapper.get('input[placeholder="admin.accounts.enterCustomModelName"]')
+    expect(input.attributes('disabled')).toBeDefined()
+    const addButton = wrapper.findAll('button').find(button => button.text() === 'admin.accounts.addModel')!
+    expect(addButton.attributes('disabled')).toBeDefined()
+    await input.setValue('new-model')
+    await addButton.trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+  })
+
+  it('keeps legacy behavior when neither customSync nor disabled is passed', async () => {
+    // 回归：未传 customSync / disabled 时，仍以既有 accountId 路径调用 accountsAPI.syncUpstreamModels。
+    syncUpstreamModels.mockResolvedValue({ models: ['gpt-legacy-1'] })
+    const wrapper = mountSelector({ platform: 'openai', accountId: 46 })
+
+    const syncButton = wrapper
+      .findAll('button')
+      .find(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    expect(syncButton).toBeDefined()
+
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(syncUpstreamModels).toHaveBeenCalledWith(46)
+    expect(syncUpstreamModelsPreview).not.toHaveBeenCalled()
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['gpt-legacy-1']]])
   })
 })

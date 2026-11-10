@@ -3867,6 +3867,7 @@
           :platform="form.platform"
           :mixed-scheduling="mixedScheduling"
           :native-platforms="form.platform === 'antigravity' ? antigravitySupportedPlatforms : cursorNativePlatforms"
+          :account-models="form.platform === 'cursor' && cursorSelectedModels.length > 0 ? cursorSelectedModels : undefined"
           data-tour="account-form-groups"
         />
       </div>
@@ -4331,7 +4332,7 @@ import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
-import { CURSOR_NATIVE_GROUP_PLATFORMS } from '@/constants/platforms'
+import { CURSOR_NATIVE_GROUP_PLATFORMS, inferGroupPlatformsFromModels } from '@/constants/platforms'
 import { ACCOUNT_CURRENCY, currencySymbol } from '@/utils/money'
 import {
   OPENAI_WS_MODE_CTX_POOL,
@@ -4946,9 +4947,27 @@ loadQuotaNotifyGlobal()
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
 // cursor 账号是供给端：模型按所属原生平台进组（U7），分组选择器放行模型所属
 // 原生平台组；其他平台保持「同 platform + composite」既有规则，不放开。
-const cursorNativePlatforms = computed(() =>
-  form.platform === 'cursor' ? [...CURSOR_NATIVE_GROUP_PLATFORMS] : []
-)
+// 当前账号在用的模型名单（按用户裁定 2026-11-10：模型名单中有哪些家族，就显示哪些
+// 家族相关的分组）。mapping 模式取 from 段，whitelist 模式取 allowedModels；
+// 非 cursor 或未启用白名单时返回空数组。
+const cursorSelectedModels = computed<string[]>(() => {
+  if (form.platform !== 'cursor') return []
+  if (modelRestrictionMode.value === 'mapping') {
+    return modelMappings.value.map((m) => m.from.trim()).filter(Boolean)
+  }
+  return allowedModels.value.map((m) => m.trim()).filter(Boolean)
+})
+
+const cursorNativePlatforms = computed<GroupPlatform[]>(() => {
+  if (form.platform !== 'cursor') return []
+  // 已选模型时按模型家族推导原生平台；推导结果非空才采用，避免误吞分组。
+  if (cursorSelectedModels.value.length > 0) {
+    const inferred = inferGroupPlatformsFromModels(cursorSelectedModels.value)
+    if (inferred.length > 0) return inferred
+  }
+  // 未选任何模型或全是未知模型：回落全套 cursor 原生平台。
+  return [...CURSOR_NATIVE_GROUP_PLATFORMS]
+})
 
 // antigravity 账号是聚合平台：从表单中的 model_mapping 自动识别支持的原生平台，
 // 分组选择器据此展示对应平台的分组（anthropic、gemini、openai、grok 等）。
@@ -4968,41 +4987,8 @@ const antigravitySupportedPlatforms = computed<GroupPlatform[]>(() => {
 
   if (modelNames.length === 0) return []
 
-  const platforms = new Set<GroupPlatform>()
-
-  // 解析模型名称，识别所属平台
-  for (const modelName of modelNames) {
-    const lowerModel = modelName.toLowerCase()
-
-    // Anthropic 系列：claude、fable、opus、sonnet、haiku
-    if (
-      lowerModel.includes('claude') ||
-      lowerModel.includes('fable') ||
-      lowerModel.includes('opus') ||
-      lowerModel.includes('sonnet') ||
-      lowerModel.includes('haiku')
-    ) {
-      platforms.add('anthropic')
-    }
-    // Gemini 系列：gemini、argon
-    else if (lowerModel.includes('gemini') || lowerModel.includes('argon')) {
-      platforms.add('gemini')
-    }
-    // OpenAI 系列：gpt、o1、o3
-    else if (
-      lowerModel.includes('gpt') ||
-      lowerModel.includes('o1-') ||
-      lowerModel.includes('o3-')
-    ) {
-      platforms.add('openai')
-    }
-    // Grok 系列
-    else if (lowerModel.includes('grok')) {
-      platforms.add('grok')
-    }
-  }
-
-  return Array.from(platforms)
+  // 复用共享的模型家族推导（与 cursor 同口径，取代本地重复关键词判断）。
+  return inferGroupPlatformsFromModels(modelNames)
 })
 
 const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages

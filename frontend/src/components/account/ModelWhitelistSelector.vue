@@ -18,8 +18,9 @@
             </span>
             <button
               type="button"
+              :disabled="props.disabled"
               @click.stop="removeModel(model)"
-              class="shrink-0 rounded-full hover:bg-gray-200 dark:hover:bg-dark-500"
+              class="shrink-0 rounded-full hover:bg-gray-200 dark:hover:bg-dark-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Icon name="x" size="xs" class="h-3.5 w-3.5" :stroke-width="2" />
             </button>
@@ -96,8 +97,9 @@
     <div class="mb-4 flex flex-wrap gap-2">
       <button
         type="button"
+        :disabled="props.disabled"
         @click="fillRelated"
-        class="rounded-lg border border-blue-200 px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/30"
+        class="rounded-lg border border-blue-200 px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/30"
       >
         {{ t('admin.accounts.fillRelatedModels') }}
       </button>
@@ -105,15 +107,16 @@
         v-if="canSyncUpstream"
         type="button"
         @click="syncUpstreamModels"
-        :disabled="isSyncingUpstream"
+        :disabled="isSyncingUpstream || props.disabled"
         class="rounded-lg border border-emerald-200 px-3 py-1.5 text-sm text-emerald-600 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-800 dark:text-emerald-400 dark:hover:bg-emerald-900/30"
       >
         {{ isSyncingUpstream ? t('admin.accounts.syncUpstreamModelsLoading') : t('admin.accounts.syncUpstreamModels') }}
       </button>
       <button
         type="button"
+        :disabled="props.disabled"
         @click="clearAll"
-        class="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30"
+        class="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30"
       >
         {{ t('admin.accounts.clearAllModels') }}
       </button>
@@ -128,14 +131,16 @@
           type="text"
           class="input flex-1"
           :placeholder="t('admin.accounts.enterCustomModelName')"
+          :disabled="props.disabled"
           @keydown.enter.prevent="handleEnter"
           @compositionstart="isComposing = true"
           @compositionend="isComposing = false"
         />
         <button
           type="button"
+          :disabled="props.disabled"
           @click="addCustom"
-          class="rounded-lg bg-primary-50 px-4 py-2 text-sm font-medium text-primary-600 hover:bg-primary-100 dark:bg-primary-900/30 dark:text-primary-400 dark:hover:bg-primary-900/50"
+          class="rounded-lg bg-primary-50 px-4 py-2 text-sm font-medium text-primary-600 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-primary-900/30 dark:text-primary-400 dark:hover:bg-primary-900/50"
         >
           {{ t('admin.accounts.addModel') }}
         </button>
@@ -172,6 +177,10 @@ const props = defineProps<{
     base_url?: string
     api_key: string
   }
+  /** 只读展示模式：禁用下拉展开、移除、同步、填入等所有编辑交互（P1-B3 cursor 绑定激活码）。 */
+  disabled?: boolean
+  /** 自定义同步上游模型预览接口：传入时「同步上游支持的模型」调用它而非改写单个账号 DB。 */
+  customSync?: () => Promise<{ models: string[]; warnings?: { code?: string; message?: string }[] }>
 }>()
 
 const emit = defineEmits<{
@@ -260,6 +269,9 @@ const upstreamSyncPlatforms = new Set([
   'cursor'
 ])
 const canSyncUpstream = computed(() => {
+  // P1-B3：只读模式不暴露同步入口；传入自定义同步接口时一律允许（不再依赖账号/平台判断）。
+  if (props.disabled) return false
+  if (props.customSync) return true
   if (props.accountId) {
     if (normalizedPlatforms.value.length === 0) return true
     return normalizedPlatforms.value.some(platform => upstreamSyncPlatforms.has(platform.toLowerCase()))
@@ -342,15 +354,18 @@ const filteredModels = computed(() => {
 })
 
 const toggleDropdown = () => {
+  if (props.disabled) return
   showDropdown.value = !showDropdown.value
   if (!showDropdown.value) searchQuery.value = ''
 }
 
 const removeModel = (model: string) => {
+  if (props.disabled) return
   emit('update:modelValue', props.modelValue.filter(m => m !== model))
 }
 
 const toggleModel = (model: string) => {
+  if (props.disabled) return
   if (props.modelValue.includes(model)) {
     removeModel(model)
   } else {
@@ -363,6 +378,7 @@ const copyModelId = async (model: string) => {
 }
 
 const addCustom = () => {
+  if (props.disabled) return
   const model = customModel.value.trim()
   if (!model) return
   if (props.modelValue.includes(model)) {
@@ -387,6 +403,7 @@ const handleEnter = () => {
 }
 
 const fillRelated = () => {
+  if (props.disabled) return
   const newModels = [...props.modelValue]
   for (const platform of normalizedPlatforms.value) {
     for (const model of getModelsByPlatform(platform)) {
@@ -399,10 +416,12 @@ const fillRelated = () => {
 }
 
 const syncUpstreamModels = async () => {
+  // P1-B3：只读模式下直接退出，不发起任何同步。
+  if (props.disabled) return
   // w43 吸收上游：除重入守卫外补 canSyncUpstream 守卫，避免按钮被脚本直接触发时
   // 对不支持在线拉取的平台发起请求。
   if (isSyncingUpstream.value || !canSyncUpstream.value) return
-  if (!props.accountId && !props.syncCredentials) return
+  if (!props.customSync && !props.accountId && !props.syncCredentials) return
 
   // 火山订阅号走专用流程：preview 拿分类与差异 → 确认 → apply 落库（非 append-only）。
   if (isVolcanoPlanAccount.value) {
@@ -417,7 +436,10 @@ const syncUpstreamModels = async () => {
   isSyncingUpstream.value = true
   try {
     let result
-    if (props.accountId) {
+    // P1-B3：传入自定义同步接口时直接调用它（激活码级预览），不改写单个账号 DB。
+    if (props.customSync) {
+      result = await props.customSync()
+    } else if (props.accountId) {
       result = await accountsAPI.syncUpstreamModels(props.accountId)
     } else if (props.syncCredentials) {
       result = await accountsAPI.syncUpstreamModelsPreview(props.syncCredentials as SyncUpstreamPreviewParams)
@@ -577,6 +599,7 @@ const syncVolcanoPlan = async () => {
 }
 
 const clearAll = () => {
+  if (props.disabled) return
   emit('update:modelValue', [])
 }
 
