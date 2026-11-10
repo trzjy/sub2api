@@ -90,6 +90,12 @@ export default {
     noAccounts: 'No accounts attached to this quota key',
     expandAccounts: 'Expand account list',
     collapseAccounts: 'Collapse account list',
+    modelRestriction: 'Model Restriction',
+    modelRestrictionHint: 'Saving will overwrite the model whitelist/mapping of all accounts under this quota key; at least 1 supported model must be kept. Saving is forbidden when no supported model remains.',
+    modelRestrictionRequired: 'At least one supported model must be kept; saving is forbidden when no supported model remains.',
+    syncModelsRequiresSavedKey: 'After creating and pulling accounts, you can sync the upstream supported models while editing.',
+    managedByQuotaKeyBanner: 'This account is bound to a quota key: its concurrency, load factor, priority, billing multiplier, expiry and model restriction are all managed with the quota key. Please edit them in Quota Keys management.',
+    managedFieldReadonlyHint: 'Follows the owning quota key; please edit it in Quota Keys management',
     // Edit an attached account inline from the detail dialog (reuses the account editor modal)
     accountEdit: {
       edit: 'Edit account',

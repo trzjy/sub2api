@@ -56,6 +56,10 @@ export interface QuotaKey {
   // 上游标识（引用 quota_upstreams.key）。列表端点回填后前端据此匹配上游显示名；
   // 后端尚未在 quota_keys 列表响应中返回该字段时本项为 undefined，前端回落显示原始标识。
   upstream_key?: string | null
+  // 模型限制与映射（码级权威值，与 credentials.model_mapping 同构：
+  // 白名单存恒等映射 {"m":"m"}，映射存 {"from":"to"}）。
+  // null / 省略表示码级未显式覆盖，沿用上游默认实供清单。
+  model_mapping?: Record<string, string> | null
 }
 
 /**
@@ -101,6 +105,10 @@ export interface CreateQuotaKeyRequest {
   load_factor?: number | null
   // 计费倍率（B 批上移）：≥ 0，默认 1.0，允许 0；后端同事务同步该码名下账号的计费倍率。
   rate_multiplier?: number
+  // 模型限制与映射（码级权威值，与 credentials.model_mapping 同构）：
+  // 不传/undefined = 创建时沿用上游默认实供清单；显式传入则必须至少包含 1 个有效模型，
+  // 空对象 {} 禁止落库（后端校验拒绝）。null 表示显式清空码级覆盖。
+  model_mapping?: Record<string, string> | null
 }
 
 /** 编辑激活码请求（expires_at / notes / priority）。 */
@@ -118,6 +126,10 @@ export interface UpdateQuotaKeyRequest {
   load_factor?: number | null
   // 计费倍率（B 批上移）：不传表示不改；≥ 0，默认 1.0，允许 0；后端同事务同步该码名下账号的计费倍率。
   rate_multiplier?: number
+  // 模型限制与映射（码级权威值，与 credentials.model_mapping 同构）：
+  // 不传/undefined = 编辑时不改模型限制；显式传入则必须至少包含 1 个有效模型，
+  // 空对象 {} 禁止落库（后端校验拒绝）。null 表示显式清空码级覆盖。
+  model_mapping?: Record<string, string> | null
 }
 
 export interface QuotaKeyListResponse {
@@ -271,6 +283,26 @@ export async function probeQuota(id: number): Promise<ProbeQuotaResponse> {
   return data
 }
 
+/**
+ * 同步上游实供模型清单返回（与 accounts.ts 的 syncUpstreamModels 同义，码级模型限制用）。
+ * 复用其结构：models 为上游实供模型 ID 列表；warnings 为同步过程中的非致命告警
+ * （如部分模型探活失败）。前端据此派生码级 model_mapping 权威值
+ * （白名单存恒等映射 {"m":"m"}，映射存 {"from":"to"}）。
+ */
+export interface SyncUpstreamModelsResponse {
+  models: string[]
+  warnings?: { code?: string; message?: string }[]
+}
+
+/**
+ * 同步某激活码名下账号的上游实供模型清单。
+ * 后端路径：POST /admin/quota_keys/:id/models/sync-upstream。
+ */
+export async function syncUpstreamModels(id: number): Promise<SyncUpstreamModelsResponse> {
+  const { data } = await apiClient.post<SyncUpstreamModelsResponse>(`/admin/quota_keys/${id}/models/sync-upstream`)
+  return data
+}
+
 const quotaKeysAPI = {
   list,
   create,
@@ -282,7 +314,8 @@ const quotaKeysAPI = {
   sweepExpired,
   probeQuota,
   listUpstreams,
-  updateUpstream
+  updateUpstream,
+  syncUpstreamModels
 }
 
 export default quotaKeysAPI

@@ -90,6 +90,12 @@ export default {
     noAccounts: '该激活码下暂无账号',
     expandAccounts: '展开账号列表',
     collapseAccounts: '收起账号列表',
+    modelRestriction: '模型限制',
+    modelRestrictionHint: '保存后将同步覆盖该激活码名下全部账号的模型白名单/映射；至少需要保留 1 个支持的模型，没有任何支持模型时禁止保存',
+    modelRestrictionRequired: '至少需要保留一个支持的模型，没有任何支持的模型时禁止保存',
+    syncModelsRequiresSavedKey: '创建并拉号后可在编辑时同步上游支持的模型',
+    managedByQuotaKeyBanner: '该账号已绑定激活码：并发数、负载因子、优先级、计费倍率、过期时间与模型限制均随激活码统一管理，请在「激活码管理」中修改。',
+    managedFieldReadonlyHint: '跟随所属激活码，请在激活码管理中修改',
     // 详情弹窗内按行编辑归属账号（复用账号管理页的账号编辑弹窗）
     accountEdit: {
       edit: '编辑账号',
