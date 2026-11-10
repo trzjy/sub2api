@@ -1959,8 +1959,8 @@
       </div>
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.expiresAt') }}</label>
-        <input v-model="expiresAtInput" type="datetime-local" class="input" />
-        <div class="mt-2 flex gap-2">
+        <input v-model="expiresAtInput" type="datetime-local" class="input" :disabled="cursorKeyManaged" />
+        <div class="mt-2 flex gap-2" v-if="!cursorKeyManaged">
           <button type="button" class="btn btn-secondary btn-sm" @click="form.expires_at = getAccountExpiryTimestamp(1)">
             {{ t('payment.oneMonth') }}
           </button>
@@ -1968,7 +1968,10 @@
             {{ t('payment.oneYear') }}
           </button>
         </div>
-        <p class="input-hint">
+        <p class="input-hint" v-if="cursorKeyManaged">
+          跟随激活码，由上游自动获取
+        </p>
+        <p class="input-hint" v-else>
           {{ t('admin.accounts.expiresAtHint') }}
           {{ t('admin.accounts.expiresAtTimezoneHint', { timezone: browserTimeZone }) }}
         </p>
@@ -3482,6 +3485,7 @@ import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiErro
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
+import quotaKeysAPI from '@/api/admin/quotaKeys'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import { CURSOR_NATIVE_GROUP_PLATFORMS } from '@/constants/platforms'
@@ -3541,6 +3545,30 @@ const isSparkShadow = computed(() => props.account?.parent_account_id != null)
 const cursorNativePlatforms = computed(() =>
   props.account?.platform === 'cursor' ? [...CURSOR_NATIVE_GROUP_PLATFORMS] : []
 )
+
+// cursor 账号绑定了激活码（quota key）：到期时间复用激活码上游自动获取的 expires_at，
+// 账号侧只读展示，不手工填、不写第二份（c1p1-A2）。
+const cursorKeyManaged = computed(
+  () => props.account?.platform === 'cursor' && (props.account?.quota_key_id ?? 0) > 0
+)
+
+// 激活码侧的到期时间（秒级时间戳），由弹窗打开时从 quotaKeys 详情读取（c1p1-A2）。
+const managedExpiresAt = ref<number | null>(null)
+
+const loadManagedExpiry = async () => {
+  const quotaKeyId = props.account?.quota_key_id
+  if (!quotaKeyId) {
+    managedExpiresAt.value = null
+    return
+  }
+  try {
+    const key = await quotaKeysAPI.get(quotaKeyId)
+    const raw = key?.expires_at
+    managedExpiresAt.value = raw ? new Date(raw).getTime() / 1000 : null
+  } catch {
+    managedExpiresAt.value = null
+  }
+}
 
 // antigravity 账号是聚合平台：从账号 model_mapping 中解析实际支持的模型，
 // 自动识别这些模型所属的原生平台（anthropic、gemini、openai、grok 等），
@@ -4514,8 +4542,14 @@ const statusOptions = computed(() => {
 })
 
 const expiresAtInput = computed({
-  get: () => formatDateTimeLocal(form.expires_at),
+  get: () => {
+    if (cursorKeyManaged.value) {
+      return managedExpiresAt.value != null ? formatDateTimeLocal(managedExpiresAt.value) : ''
+    }
+    return formatDateTimeLocal(form.expires_at)
+  },
   set: (value: string) => {
+    if (cursorKeyManaged.value) return
     form.expires_at = parseDateTimeLocal(value)
   }
 })
@@ -5047,6 +5081,9 @@ watch(
     if (!wasShow || newAccount !== previousAccount) {
       syncFormFromAccount(newAccount)
       loadTLSProfiles()
+      if (cursorKeyManaged.value) {
+        loadManagedExpiry()
+      }
     }
   },
   { immediate: true }
@@ -5651,7 +5688,10 @@ const handleSubmit = async () => {
     if (updatePayload.proxy_id === null) {
       updatePayload.proxy_id = 0
     }
-    if (form.expires_at === null) {
+    if (cursorKeyManaged.value) {
+      // 到期时间由激活码上游自动获取，账号侧不写第二份（c1p1-A2）。
+      delete updatePayload.expires_at
+    } else if (form.expires_at === null) {
       updatePayload.expires_at = 0
     }
     // load_factor: 空值/NaN/0/负数 时发送 0（后端约定 <= 0 = 清除）

@@ -112,10 +112,11 @@ import { flushPromises, mount } from '@vue/test-utils'
 //   resetPlatformCatalog / setPlatformCatalog）。该模块只存在于 b0-upstream ref，工作树没有 ->
 //   引入即整文件 collect 断（机械合并变体 A 实测）。暂缓，证据见顶部 notes 块 (1)。
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode, getQuotaKeyMock } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
-  authIsSimpleMode: { value: true }
+  authIsSimpleMode: { value: true },
+  getQuotaKeyMock: vi.fn()
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -154,6 +155,12 @@ vi.mock('@/api/admin/accounts', () => ({
   getAntigravityDefaultModelMapping: vi.fn()
 }))
 
+vi.mock('@/api/admin/quotaKeys', () => ({
+  default: {
+    get: getQuotaKeyMock
+  }
+}))
+
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
@@ -165,6 +172,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import EditAccountModal from '../EditAccountModal.vue'
+import { formatDateTimeLocalInput } from '@/utils/format'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -485,6 +493,90 @@ describe('EditAccountModal', () => {
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock.mock.calls[0]?.[1]?.expires_at).toBe(0)
     wrapper.unmount()
+  })
+
+  // c1p1-A2：cursor 账号绑定激活码时，到期时间复用激活码上游自动获取的值（只读、不写第二份）。
+  describe('cursor quota key managed expiry (c1p1-A2)', () => {
+    const buildCursorKeyAccount = (overrides: Record<string, unknown> = {}) => {
+      const account = buildAccount()
+      return {
+        ...account,
+        platform: 'cursor',
+        type: 'oauth',
+        quota_key_id: 42,
+        credentials: { access_token: 'cursor-token' },
+        ...overrides
+      } as any
+    }
+
+    it('shows the key expiry read-only and omits expires_at on save', async () => {
+      const keyExpiresAt = '2029-05-01T08:30:00Z'
+      const account = buildCursorKeyAccount()
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset().mockResolvedValue({ expires_at: keyExpiresAt })
+
+      const wrapper = mountModal(account)
+      await flushPromises()
+
+      expect(getQuotaKeyMock).toHaveBeenCalledWith(42)
+      const input = wrapper.get<HTMLInputElement>('input[type="datetime-local"]')
+      expect(input.attributes('disabled')).toBeDefined()
+      expect(input.element.value).toBe(formatDateTimeLocalInput(new Date(keyExpiresAt).getTime() / 1000))
+      // 快捷按钮在只读模式下不渲染
+      expect(wrapper.findAll('button').some((b) => b.text() === 'payment.oneMonth')).toBe(false)
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      expect(updateAccountMock.mock.calls[0]?.[1]).not.toHaveProperty('expires_at')
+      wrapper.unmount()
+    })
+
+    it('keeps the expiry editable when cursor account has no quota_key_id', async () => {
+      const account = buildCursorKeyAccount({
+        quota_key_id: null,
+        expires_at: new Date('2030-06-15T09:00:00').getTime() / 1000
+      })
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset()
+
+      const wrapper = mountModal(account)
+      await flushPromises()
+
+      expect(getQuotaKeyMock).not.toHaveBeenCalled()
+      const input = wrapper.get<HTMLInputElement>('input[type="datetime-local"]')
+      expect(input.attributes('disabled')).toBeUndefined()
+      expect(wrapper.findAll('button').some((b) => b.text() === 'payment.oneMonth')).toBe(true)
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      expect(updateAccountMock.mock.calls[0]?.[1]?.expires_at).toBe(new Date('2030-06-15T09:00:00').getTime() / 1000)
+      wrapper.unmount()
+    })
+
+    it('keeps the expiry editable and submits expires_at for non-cursor accounts', async () => {
+      const account = buildAccount()
+      account.expires_at = new Date('2031-01-10T12:00:00').getTime() / 1000
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset()
+
+      const wrapper = mountModal(account)
+      await flushPromises()
+
+      expect(getQuotaKeyMock).not.toHaveBeenCalled()
+      const input = wrapper.get<HTMLInputElement>('input[type="datetime-local"]')
+      expect(input.attributes('disabled')).toBeUndefined()
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      expect(updateAccountMock.mock.calls[0]?.[1]?.expires_at).toBe(new Date('2031-01-10T12:00:00').getTime() / 1000)
+      wrapper.unmount()
+    })
   })
 
   it('allows removing assigned inactive groups and undoing the selection before saving', async () => {
