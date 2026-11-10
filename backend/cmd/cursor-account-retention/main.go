@@ -150,8 +150,13 @@ func loadAccounts(ctx context.Context, db *sql.DB, quotaKeyID int64) ([]retentio
 	return accounts, nil
 }
 
-// loadLastSuccess 取每个账号的最近一次成功时间（usage_logs 的最大 created_at）。
+// loadLastSuccess 取每个账号的最近一次"成功"时间（usage_logs 的最大 created_at）。
 // 无记录时映射为 nil（NULLS LAST 排末尾）。
+//
+// 关键约束：必须排除 request_type = RequestTypeCyberBlocked（=4）的上游拒绝行。
+// 这类行虽带有真实 token 被写入 usage_logs，但本质是上游安全策略拒绝，并非成功。
+// 否则若某账号的失败（拒绝）发生在较早的真正成功之后，max(created_at) 会取到该拒绝行，
+// 使该失败账号在 last_success DESC 排序中排在真正最近成功账号之前，--apply 时可能软删后者。
 func loadLastSuccess(ctx context.Context, db *sql.DB, ids []int64) (map[int64]*time.Time, error) {
 	result := make(map[int64]*time.Time, len(ids))
 	if len(ids) == 0 {
@@ -162,7 +167,8 @@ func loadLastSuccess(ctx context.Context, db *sql.DB, ids []int64) (map[int64]*t
 		SELECT account_id, max(created_at)
 		FROM usage_logs
 		WHERE account_id = ANY($1)
-		GROUP BY account_id`, pq.Array(ids))
+		  AND request_type <> $2
+		GROUP BY account_id`, pq.Array(ids), int16(service.RequestTypeCyberBlocked))
 	if err != nil {
 		return nil, err
 	}

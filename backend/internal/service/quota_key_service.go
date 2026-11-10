@@ -2527,9 +2527,10 @@ func isDeadKeyRefreshError(errStr *string) bool {
 // 历史：2026-11-06 用户裁定数"可用账号"（未软删 + schedulable + active + 无未到期停调）；
 // 2026-11-10 收敛为 total 行数（用户裁定 1 主 1 热备）。
 //
-// 码级额度耗尽门（2026-11-10 新增）：来源额度快照新鲜且真实剩余已触底时，本轮不对该码发起
-// 自动拉号（cursorQuotaKeyPullBlocked，与 sweepQuotaKeyLevelStops / 来源门同源常量与窗口）；
-// 失败关闭——拿不到"有可用剩余"证据时放行，只有明确耗尽才跳过。
+// 码级额度耗尽门（2026-11-10 新增；c1p1-G 修正）：来源额度快照最近一次成功观测确认真实剩余
+// 已触底时，本轮不对该码发起自动拉号（cursorQuotaKeyPullBlocked，与 sweepQuotaKeyLevelStops /
+// 来源门同源常量与窗口）；失败关闭——拿不到"最近成功观测确认耗尽"证据时放行，只有明确耗尽才跳过；
+// 与 sweep 不同，快照陈旧也不放行（沿用最近成功结论，宁可少拉）。
 //
 // 保留的排除项不是"业务条件"，而是"这个码还成立"的前提：
 //   - status 非 active / exhausted / 已软删 / 已过期：这些码拉号必失败；
@@ -2560,12 +2561,14 @@ func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, li
 			// 只会每轮给上游送一次无效请求并把心跳写成失败。等人工换码。
 			continue
 		}
-		// 新增「码级额度耗尽门」（2026-11-10 派发单 c1p1-A）：来源额度快照新鲜且真实剩余已触底
-		// 时，本轮不再对该码发起自动拉号——拉出来的号也跑不动，只会浪费上游每日拉号额度、
+		// 新增「码级额度耗尽门」（2026-11-10 派发单 c1p1-A；2026-11-10 派发单 c1p1-G 修正）：
+		// 来源额度快照一旦最近一次成功观测确认真实剩余已触底（remaining < cursorQuotaKeyRemainingFloor），
+		// 本轮不再对该码发起自动拉号——拉出来的号也跑不动，只会浪费上游每日拉号额度、
 		// 并撞"密钥额度耗尽"失败心跳。与 sweepQuotaKeyLevelStops / cursorSupplySourceUsageVetoReason
-		// 使用同一组常量（cursorQuotaKeyRemainingFloor）与新鲜度窗口
-		// （cursorSupplySourceUsageFreshnessWindow）。失败关闭：任何拿不到"有可用剩余"证据的情形
-		// 都放行（让既有水位/人工路径继续工作），只有明确耗尽才跳过。
+		// 使用同一组常量（cursorQuotaKeyRemainingFloor）。失败关闭：任何拿不到"最近成功观测确认耗尽"
+		// 证据的情形（解析失败、观测失败、字段缺失）都放行（让既有水位/人工路径继续工作），只有明确
+		// 耗尽才跳过。与 sweep 不同，本门不因快照陈旧而放行：宁可少拉、不浪费每日拉号额度，因此沿用
+		// 最近成功结论。
 		if cursorQuotaKeyPullBlocked(k.UsageSnapshot, now) {
 			continue
 		}
@@ -2646,13 +2649,22 @@ func acquireAdvisoryXactLock(ctx context.Context, tx *ent.Tx, lockID int64) erro
 }
 
 // cursorQuotaKeyPullBlocked 返回 true 表示本轮不应对该码发起自动拉号。
-// 与 sweepQuotaKeyLevelStops 使用同一组常量与新鲜度窗口。
+//
+// 与 sweepQuotaKeyLevelStops 的区别（外审 must_fix #3，派发单 c1p1-G）：
+//   - sweep 用新鲜度窗口来“避免变更账号既有停调状态”——它只在能确认新鲜结论时才动账号态，
+//     陈旧快照就保持原状、不做变更；
+//   - 本门只决定“是否发起一次新的自动拉号”。宁可少拉、不浪费上游每日拉号额度，因此沿用
+//     最近一次成功观测的 total/used 结论，陈旧与否不再放行：
+//     陈旧但曾确认耗尽（remaining < floor）→ 继续阻止补池；
+//     陈旧但曾确认健康（remaining >= floor）→ 放行；
+//
+// 失败关闭（不下结论、放行）的情形：解析失败、观测失败（ErrorCode 非空）、关键字段缺失
+// （Total/Used/CheckedAt 任一为 nil）。这些情形下拿不到“最近成功观测确认耗尽”的证据，
+// 留由既有水位/人工路径继续工作，只有明确（曾确认）耗尽才跳过。
 func cursorQuotaKeyPullBlocked(raw json.RawMessage, now time.Time) bool {
+	_ = now // 本门沿用最近成功结论，不再按新鲜度放行，now 仅保留签名兼容。
 	snap, ok := ParseQuotaKeyUsageSnapshot(raw)
 	if !ok || snap.ErrorCode != "" || snap.Total == nil || snap.Used == nil || snap.CheckedAt == nil {
-		return false
-	}
-	if now.Sub(*snap.CheckedAt) > cursorSupplySourceUsageFreshnessWindow {
 		return false
 	}
 	return (*snap.Total - *snap.Used) < cursorQuotaKeyRemainingFloor

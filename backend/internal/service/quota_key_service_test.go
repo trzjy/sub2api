@@ -3256,9 +3256,10 @@ func TestListCandidateKeys_TotalCountNotWorking(t *testing.T) {
 	require.Contains(t, cands, qk1.ID, "total=1 < 2 → 必须补")
 }
 
-// TestListCandidateKeys_QuotaExhaustionGate（c1p1-A 要求 3）：
-// 码级额度耗尽门：新鲜快照 remaining=0 → 跳过；remaining=100 → 不跳过；
-// checked_at 超过 5 分钟（陈旧）→ 不跳过（失败关闭放行）。
+// TestListCandidateKeys_QuotaExhaustionGate（c1p1-A 要求 3；c1p1-G 修正）：
+// 码级额度耗尽门：新鲜快照 remaining=0 → 跳过；remaining=100 → 不跳过（入选）；
+// checked_at 超过 5 分钟（陈旧）但曾确认耗尽（remaining=0）→ 跳过（沿用最近成功结论，不放行）；
+// 陈旧且曾确认健康（remaining=100）→ 不跳过（入选）。
 func TestListCandidateKeys_QuotaExhaustionGate(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -3288,11 +3289,17 @@ func TestListCandidateKeys_QuotaExhaustionGate(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, cands, qk100.ID, "新鲜 remaining=100 → 不跳过（入选）")
 
-	// checked_at 超过 5 分钟（remaining=0 但陈旧）→ 不跳过（入选，失败关闭放行）。
+	// checked_at 超过 5 分钟（remaining=0 且陈旧）→ 跳过（沿用最近成功结论：曾确认耗尽，继续阻止补池）。
 	qkStale := makeKeyWithSnapshot(10, 10, now.Add(-10*time.Minute))
 	cands, err = w.ListCandidateKeys(ctx, "cursor-gate-stale", 0)
 	require.NoError(t, err)
-	require.Contains(t, cands, qkStale.ID, "checked_at 陈旧 → 不跳过（入选）")
+	require.NotContains(t, cands, qkStale.ID, "checked_at 陈旧且 remaining=0 → 跳过（沿用最近成功结论）")
+
+	// checked_at 超过 5 分钟（remaining=100 且陈旧）→ 不跳过（入选，曾确认健康则放行）。
+	qkStaleHealthy := makeKeyWithSnapshot(200, 100, now.Add(-10*time.Minute))
+	cands, err = w.ListCandidateKeys(ctx, "cursor-gate-stale-healthy", 0)
+	require.NoError(t, err)
+	require.Contains(t, cands, qkStaleHealthy.ID, "checked_at 陈旧且 remaining=100 → 不跳过（曾确认健康）")
 }
 
 // TestPull_AutoPathTotalGateZeroInsert（c1p1-A 要求 4）：
