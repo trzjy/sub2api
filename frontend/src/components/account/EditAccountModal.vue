@@ -3606,17 +3606,31 @@ const cursorKeyManaged = computed(
   () => props.account?.platform === 'cursor' && (props.account?.quota_key_id ?? 0) > 0
 )
 
+// 激活码到期/并发等字段请求版本号：防止旧激活码异步响应覆盖当前账号表单（c1p1-fix-review-r3）。
+let managedKeyRequestVersion = 0
+
 // 激活码侧的到期时间（秒级时间戳），由弹窗打开时从 quotaKeys 详情读取（c1p1-A2）。
 const managedExpiresAt = ref<number | null>(null)
 
 const loadManagedExpiry = async () => {
-  const quotaKeyId = props.account?.quota_key_id
-  if (!quotaKeyId) {
+  const requestVersion = ++managedKeyRequestVersion
+  const targetAccountId = props.account?.id
+  const targetQuotaKeyId = props.account?.quota_key_id
+  if (!targetQuotaKeyId) {
     managedExpiresAt.value = null
     return
   }
+  // 局部一致性判定：旧激活码异步响应返回时，必须仍指向同一账号、同一激活码、弹窗仍打开、
+  // 且仍未切到非 cursor/未绑定激活码账号，才允许写入，避免覆盖当前账号表单（c1p1-fix-review-r3）。
+  const isStillCurrent = () =>
+    requestVersion === managedKeyRequestVersion &&
+    props.show &&
+    props.account?.id === targetAccountId &&
+    props.account?.quota_key_id === targetQuotaKeyId &&
+    cursorKeyManaged.value
   try {
-    const key = await quotaKeysAPI.get(quotaKeyId)
+    const key = await quotaKeysAPI.get(targetQuotaKeyId)
+    if (!isStillCurrent()) return
     const raw = key?.expires_at
     managedExpiresAt.value = raw ? new Date(raw).getTime() / 1000 : null
     // 绑定激活码（c1p1-C3）：并发/负载因子/优先级/计费倍率/模型限制随激活码统一管理，
@@ -3630,6 +3644,7 @@ const loadManagedExpiry = async () => {
       loadModelRestrictionFromMapping(key.model_mapping as Record<string, unknown>)
     }
   } catch {
+    if (!isStillCurrent()) return
     managedExpiresAt.value = null
   }
 }
@@ -5108,9 +5123,17 @@ watch(
   [() => props.show, () => props.account],
   ([show, newAccount], [wasShow, previousAccount]) => {
     if (!show || !newAccount) {
+      // 关闭弹窗或清空账号：任何在途旧激活码请求一律失效。
+      managedKeyRequestVersion++
+      managedExpiresAt.value = null
       return
     }
     if (!wasShow || newAccount !== previousAccount) {
+      // 切换到非 cursor 或未绑定激活码账号：在途旧请求失效，避免旧响应污染新表单。
+      if (!cursorKeyManaged.value) {
+        managedKeyRequestVersion++
+        managedExpiresAt.value = null
+      }
       syncFormFromAccount(newAccount)
       loadTLSProfiles()
       if (cursorKeyManaged.value) {

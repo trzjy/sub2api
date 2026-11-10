@@ -678,6 +678,135 @@ describe('EditAccountModal', () => {
     wrapper.unmount()
   })
 
+  // c1p1-fix-review-r3：防旧激活码异步响应覆盖当前账号表单（异步竞态回归）。
+  // 旧 quota-key 响应在账号切换/弹窗关闭后才返回时，不得写入当前账号表单或随保存覆盖。
+  describe('cursor quota key managed async race (c1p1-fix-review-r3)', () => {
+    const buildCursorKeyAccount = (overrides: Record<string, unknown> = {}) => {
+      const account = buildAccount()
+      return {
+        ...account,
+        platform: 'cursor',
+        type: 'oauth',
+        quota_key_id: 42,
+        credentials: { access_token: 'cursor-token' },
+        ...overrides
+      } as any
+    }
+
+    const staleResponse = {
+      concurrency: 9,
+      load_factor: 77,
+      priority: 5,
+      rate_multiplier: 0.25,
+      expires_at: '2031-08-01T00:00:00Z'
+    }
+
+    // 受控延迟的 quota-key 响应：open 时发起但暂不 resolve，由测试在切换后手动 resolve。
+    const deferStaleKey = () => {
+      let resolveStaleKey: (value: any) => void = () => {}
+      const staleKeyPromise = new Promise<any>((resolve) => {
+        resolveStaleKey = resolve
+      })
+      return { staleKeyPromise, resolveStaleKey }
+    }
+
+    it('does not let a stale quota-key response overwrite a switched-in normal account', async () => {
+      const { staleKeyPromise, resolveStaleKey } = deferStaleKey()
+
+      const cursorAccount = buildCursorKeyAccount()
+      const normalAccount = buildAccount()
+      normalAccount.id = 99
+      normalAccount.platform = 'openai'
+      normalAccount.concurrency = 3
+      normalAccount.load_factor = 4
+      normalAccount.priority = 2
+      normalAccount.rate_multiplier = 2
+      normalAccount.expires_at = new Date('2030-06-15T09:00:00').getTime() / 1000
+
+      updateAccountMock.mockReset().mockResolvedValue(normalAccount)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset().mockReturnValue(staleKeyPromise)
+
+      const wrapper = mountModal(cursorAccount)
+      await flushPromises()
+      // 旧请求已发出，但仍在途（未 resolve）。
+      expect(getQuotaKeyMock).toHaveBeenCalledTimes(1)
+      expect(getQuotaKeyMock).toHaveBeenCalledWith(42)
+
+      // 在旧响应返回前，切换到普通账号。
+      await wrapper.setProps({ account: normalAccount })
+      await flushPromises()
+
+      // 旧 quota-key 响应此时才返回。
+      resolveStaleKey(staleResponse)
+      await flushPromises()
+      await flushPromises()
+
+      // 普通账号表单可编辑（未被只读横幅接管）。
+      expect(wrapper.get<HTMLInputElement>('input[type="datetime-local"]').attributes('disabled')).toBeUndefined()
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+      // 普通账号保存自身设置，未受旧激活码响应污染。
+      expect(payload.concurrency).toBe(3) // 非 9
+      expect(payload.load_factor).toBe(4) // 非 77
+      expect(payload.priority).toBe(2) // 非 5
+      expect(payload.rate_multiplier).toBe(2) // 非 0.25
+      expect(payload.expires_at).toBe(normalAccount.expires_at) // 非 2031
+      wrapper.unmount()
+    })
+
+    it('does not let a stale quota-key response overwrite a normal account opened after close', async () => {
+      const { staleKeyPromise, resolveStaleKey } = deferStaleKey()
+
+      const cursorAccount = buildCursorKeyAccount()
+      const normalAccount = buildAccount()
+      normalAccount.id = 99
+      normalAccount.platform = 'openai'
+      normalAccount.concurrency = 3
+      normalAccount.load_factor = 4
+      normalAccount.priority = 2
+      normalAccount.rate_multiplier = 2
+      normalAccount.expires_at = new Date('2030-06-15T09:00:00').getTime() / 1000
+
+      updateAccountMock.mockReset().mockResolvedValue(normalAccount)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset().mockReturnValue(staleKeyPromise)
+
+      const wrapper = mountModal(cursorAccount)
+      await flushPromises()
+      expect(getQuotaKeyMock).toHaveBeenCalledTimes(1)
+
+      // 关闭弹窗：在途旧请求应失效。
+      await wrapper.setProps({ show: false })
+      await flushPromises()
+
+      // 重新打开一个普通账号。
+      await wrapper.setProps({ show: true, account: normalAccount })
+      await flushPromises()
+
+      // 旧 quota-key 响应此时才返回。
+      resolveStaleKey(staleResponse)
+      await flushPromises()
+      await flushPromises()
+
+      expect(wrapper.get<HTMLInputElement>('input[type="datetime-local"]').attributes('disabled')).toBeUndefined()
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+      expect(payload.concurrency).toBe(3)
+      expect(payload.load_factor).toBe(4)
+      expect(payload.priority).toBe(2)
+      expect(payload.rate_multiplier).toBe(2)
+      expect(payload.expires_at).toBe(normalAccount.expires_at)
+      wrapper.unmount()
+    })
+  })
+
   // c1p1-C3（3）：未绑定激活码的 cursor 账号（或非 cursor 账号）仍可正常编辑并提交这 6 项。
   it('keeps fields editable and submits them for unmanaged (non-cursor or unbound) accounts', async () => {
     // 未绑定激活码的 cursor 账号：cursorKeyManaged 为 false。
