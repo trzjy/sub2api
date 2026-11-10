@@ -901,7 +901,7 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		if !ok {
 			return nil, errors.New("admin: account repository does not support in-transaction create")
 		}
-		// 人工建号不受"自动补位固定 5 个"的限制（用户裁定 2026-11-06），但仍保留
+		// 人工建号不受"自动补位固定 2 个（1 主 1 热备）"的限制（用户裁定 2026-11-10），但仍保留
 		// MaxAccountsPerQuotaKey 这道硬护栏：人工是有意为之，不需要替他省拉号额度，
 		// 但也不能因为误操作往一个码底下堆几千个号。
 		if err := withQuotaKeyCapacityTx(ctx, s.entClient, *input.QuotaKeyID, MaxAccountsPerQuotaKey, func(tx *dbent.Tx) error {
@@ -1384,8 +1384,8 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	// 判定（存在/active）与本次写入必须在同一 advisory 互斥域同一事务内完成，
 	// 不再各自取锁计数（修 r4 #1）。
 	//
-	// limit 传 MaxAccountsPerQuotaKey：改绑是人工操作，不受"自动补位固定 5 个"的限制
-	// （用户裁定 2026-11-06），但仍保留硬护栏，防止误操作把号堆到一个码下面。
+	// limit 传 MaxAccountsPerQuotaKey：改绑是人工操作，不受"自动补位固定 2 个（1 主 1 热备）"的限制
+	// （用户裁定 2026-11-10），但仍保留硬护栏，防止误操作把号堆到一个码下面。
 	if rebindViaQuotaKeyCapacity && s.entClient != nil {
 		if err := withQuotaKeyCapacityTx(ctx, s.entClient, *effectiveQuotaKeyID, MaxAccountsPerQuotaKey, func(tx *dbent.Tx) error {
 			return persistAccountWrite(dbent.NewTxContext(ctx, tx))

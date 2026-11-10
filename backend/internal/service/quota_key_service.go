@@ -1024,7 +1024,7 @@ func countWorkingQuotaKeyAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID in
 
 // countUsableQuotaKeyAccounts 统计归属某激活码、且**现在真的能干活**的账号数。
 //
-// "能用"的谓词（用户裁定 2026-11-06："5 个可用账号，不包括停调账号"）：
+// "能用"的谓词（2026-11-06 口径；自动补位目标已于 2026-11-10 收敛为 1 主 1 热备 = 2）：
 //   - 未软删；
 //   - schedulable = true（没被人工/状态机停用）；
 //   - status = active（不是 error / disabled）；
@@ -1056,7 +1056,7 @@ func countUsableQuotaKeyAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int
 //  3. working 必须 < limit（limit <= 0 表示不设上限）。
 //
 // limit 由调用方按"人工 / 自动"两条路分别给：
-//   - 自动补位传 CursorAutoPullAccountsPerKey（固定 5）；
+//   - 自动补位传 CursorAutoPullAccountsPerKey（1 主 1 热备 = 2）；
 //   - 人工建号/改绑传 0（不受限制，用户裁定 2026-11-06）。
 //
 // 调用方必须在【同一 tx】内完成写入：判定与写入分属两个事务时，锁一释放就有并发漏网窗口。

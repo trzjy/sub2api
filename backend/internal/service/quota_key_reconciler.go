@@ -518,8 +518,9 @@ func (r *QuotaKeyReconciler) runOnce() {
 		return
 	}
 	if candidateCount == 0 {
-		// 无候选 key：按 2026-11-06 口径，唯一成因是"每个有效码名下都已有 5 个【可用】号"，
-		// 或剩下的码都是死码。冷却、今日额度、余额这些已不再参与筛选，所以不再罗列。
+		// 无候选 key：按 2026-11-10 口径，唯一成因是"每个有效码名下都已有 2 个非软删账号
+		// （1 主 1 热备）"，或剩下的码都是死码 / 额度已耗尽。冷却、今日额度、余额这些已不再
+		// 参与筛选，所以不再罗列。
 		r.recordHeartbeat(ctx, runAt, true, nil,
 			"no pullable quota key this round (every active key already has its 2 accounts: 1 primary + 1 hot standby)", sourceUsage)
 		return
