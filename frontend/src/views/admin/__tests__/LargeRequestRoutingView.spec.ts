@@ -68,13 +68,14 @@ const GROUPS: AdminGroup[] = [
   makeGroup(49, 'DeepSeek 计量分组', 'deepseek', 'standard'),
   makeGroup(115, 'Deepseek 月卡订阅', 'deepseek', 'subscription'),
   makeGroup(116, 'Glm 月卡订阅', 'zhipu', 'subscription'),
-  makeGroup(117, 'Kimi 月卡订阅', 'kimi', 'subscription')
+  makeGroup(117, 'Kimi 月卡订阅', 'kimi', 'subscription'),
+  makeGroup(118, '聚合月卡订阅', 'composite', 'subscription')
 ]
 
 function accountsByPlatform(): Record<string, AccountListItem[]> {
   return {
     deepseek: [
-      makeAccount(807, 'deepseek', [49, 115]),
+      makeAccount(807, 'deepseek', [49, 115, 118]),
       makeAccount(239, 'deepseek', [49, 115])
     ],
     zhipu: [makeAccount(808, 'zhipu', [116]), makeAccount(240, 'zhipu', [116])],
@@ -145,6 +146,9 @@ describe('LargeRequestRoutingView', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].text()).toContain('DeepSeek 计量分组')
     expect(rows[0].text()).toContain('Deepseek 月卡订阅')
+    // composite 平台（聚合月卡订阅）不属于任何单一家族，必须按账号自身平台归属，
+    // 否则组名会在页面上消失
+    expect(rows[0].text()).toContain('聚合月卡订阅')
   })
 
   it('三态下拉渲染且可用', async () => {

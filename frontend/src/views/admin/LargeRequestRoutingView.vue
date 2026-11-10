@@ -210,9 +210,18 @@ const rowsByFamily = computed(() => {
     const namesByFamily: Record<FamilyPlatform, string[]> = { deepseek: [], zhipu: [], kimi: [] }
     for (const groupID of account.group_ids ?? []) {
       const group = groupsByID.value.get(groupID)
-      if (!group || !isSupportedPlatform(group.platform)) continue
-      if (!namesByFamily[group.platform].includes(group.name)) {
-        namesByFamily[group.platform].push(group.name)
+      if (!group) continue
+      // 分组自身的 platform 决定归属；聚合分组（platform=composite，如「聚合月卡订阅」）
+      // 不属于任何单一家族，按账号自身平台归属，否则该组名会在页面上彻底消失，
+      // 让人误以为账号没绑这个组。
+      const family: FamilyPlatform | null = isSupportedPlatform(group.platform)
+        ? group.platform
+        : isSupportedPlatform(account.platform as GroupPlatform)
+          ? (account.platform as FamilyPlatform)
+          : null
+      if (!family) continue
+      if (!namesByFamily[family].includes(group.name)) {
+        namesByFamily[family].push(group.name)
       }
     }
     for (const family of FAMILIES) {
