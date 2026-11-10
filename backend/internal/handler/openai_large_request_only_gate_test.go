@@ -202,3 +202,50 @@ func TestApplyRequestSizeScopeExclusionSmallRequestSkipsLargeOnly(t *testing.T) 
 	_, ok = excluded[606]
 	require.False(t, ok, "small-only 账号 606 不得在小请求时被排除")
 }
+
+// TestApplyRequestSizeScopeExclusionDirtyDoubleTruePrecedence 验证两个键同时为 true 的
+// 脏数据按 RequestSizeScopeOf 归一化为「只接大请求」：大请求不排除、小请求排除，
+// 绝不能因为另一侧键也被读取而让账号两侧都选不到。
+func TestApplyRequestSizeScopeExclusionDirtyDoubleTruePrecedence(t *testing.T) {
+	t.Parallel()
+
+	dirty := &service.Account{
+		ID:       707,
+		Name:     "dirty-707",
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://api.openai.com",
+		},
+		Extra: map[string]any{
+			service.LargeRequestOnlyExtraKey: true,
+			service.SmallRequestOnlyExtraKey: true,
+		},
+	}
+	plain := newLargeRequestOnlyTestAccount(808, false)
+
+	gw := service.NewOpenAIGatewayService(
+		largeRequestOnlyRepoStub{accounts: []service.Account{*dirty, *plain}},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	h := &OpenAIGatewayHandler{gatewayService: gw}
+	reqLog := zap.NewNop()
+
+	// 小请求：脏数据归一化为 large_only，应被排除。
+	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
+	_, excludedSmall := h.applyRequestSizeScopeExclusion(
+		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, smallBody)
+	_, ok := excludedSmall[707]
+	require.True(t, ok, "小请求必须排除归一化为 large_only 的脏数据账号")
+
+	// 大请求：同一账号不得被 small 键连带排除，否则两侧都选不到。
+	largeBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`,
+		strings.Repeat("word ", 500000)))
+	_, excludedLarge := h.applyRequestSizeScopeExclusion(
+		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, largeBody)
+	_, ok = excludedLarge[707]
+	require.False(t, ok, "大请求不得排除归一化为 large_only 的账号（否则该账号两侧都不可选）")
+}

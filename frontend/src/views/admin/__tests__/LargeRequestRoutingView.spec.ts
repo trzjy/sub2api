@@ -185,16 +185,24 @@ describe('LargeRequestRoutingView', () => {
     expect((select.element as HTMLSelectElement).disabled).toBe(true)
   })
 
-  it('池内最后一个未受限账号不可设置限制', async () => {
-    const byPlatform: Record<string, AccountListItem[]> = {
+  function setAccountsByPlatform(byPlatform: Record<string, AccountListItem[]>) {
+    listAccounts.mockImplementation(async (_page: number, _size: number, opts: { platform: string }) => {
+      const items = byPlatform[opts.platform] ?? []
+      return { items, total: items.length }
+    })
+  }
+
+  function optionDisabled(select: { element: Element }, value: string): boolean {
+    const option = select.element.querySelector(`option[value="${value}"]`)
+    return (option as HTMLOptionElement | null)?.disabled ?? false
+  }
+
+  it('池内唯一账号：两个限制选项都被禁用', async () => {
+    setAccountsByPlatform({
       deepseek: [makeAccount(900, 'deepseek', [49])],
       zhipu: [],
       kimi: [],
       codebuddy: []
-    }
-    listAccounts.mockImplementation(async (_page: number, _size: number, opts: { platform: string }) => {
-      const items = byPlatform[opts.platform] ?? []
-      return { items, total: items.length }
     })
 
     const wrapper = mountView()
@@ -202,6 +210,28 @@ describe('LargeRequestRoutingView', () => {
 
     const select = wrapper.find('[data-testid="lro-scope-900"]')
     expect(select.exists()).toBe(true)
-    expect((select.element as HTMLSelectElement).disabled).toBe(true)
+    expect(optionDisabled(select, 'large_only')).toBe(true)
+    expect(optionDisabled(select, 'small_only')).toBe(true)
+  })
+
+  it('对端为 small_only 时仍允许把本账号设为 large_only', async () => {
+    // 外审发现：对端只要不是同一侧就可以承接，small_only 对端能接小请求，
+    // 因此 large_only 必须可选；只有 small_only 选项会因失去大请求承接而被禁。
+    setAccountsByPlatform({
+      deepseek: [
+        makeAccount(910, 'deepseek', [49]),
+        makeAccount(911, 'deepseek', [49], { extra: { small_request_only: true } })
+      ],
+      zhipu: [],
+      kimi: [],
+      codebuddy: []
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const select = wrapper.find('[data-testid="lro-scope-910"]')
+    expect(optionDisabled(select, 'large_only')).toBe(false)
+    expect(optionDisabled(select, 'small_only')).toBe(true)
   })
 })

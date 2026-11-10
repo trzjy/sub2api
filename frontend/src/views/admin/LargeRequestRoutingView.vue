@@ -120,8 +120,20 @@
                           @change="onScopeChange(row.account, $event)"
                         >
                           <option value="any">{{ t('admin.largeRequestRouting.scopeAny') }}</option>
-                          <option value="large_only">{{ t('admin.largeRequestRouting.scopeLargeOnly') }}</option>
-                          <option value="small_only">{{ t('admin.largeRequestRouting.scopeSmallOnly') }}</option>
+                          <option
+                            value="large_only"
+                            :disabled="isScopeOptionBlocked(row.account, 'large_only')"
+                            :title="isScopeOptionBlocked(row.account, 'large_only') ? t('admin.largeRequestRouting.lastPoolGuard') : ''"
+                          >
+                            {{ t('admin.largeRequestRouting.scopeLargeOnly') }}
+                          </option>
+                          <option
+                            value="small_only"
+                            :disabled="isScopeOptionBlocked(row.account, 'small_only')"
+                            :title="isScopeOptionBlocked(row.account, 'small_only') ? t('admin.largeRequestRouting.lastPoolGuard') : ''"
+                          >
+                            {{ t('admin.largeRequestRouting.scopeSmallOnly') }}
+                          </option>
                         </select>
                       </td>
                     </tr>
@@ -259,13 +271,19 @@ function requestSizeScopeOf(account: AccountListItem): Scope {
 }
 
 /**
- * 池内最后一个禁用：某账号所属任一分组的同 platform 且 schedulable && status==='active'
- * 的账号中，除本账号外没有任何「未设限制」的账号 → 不可设置（下拉禁用）。
- * 每次只允许一侧受限时其余账号仍需承接对侧，因此判断口径与后端池覆盖校验一致。
+ * 判断把账号设为 target 后，是否会让某个所属分组在该规模上失去承接方。
+ *
+ * 口径与后端池覆盖校验逐条一致：排除本账号后，统计同分组、同平台、active 且
+ * schedulable 的账号里，是否存在「不属于 target 这一侧」的账号（即能承接对侧规模：
+ * 设 large_only 时看非 large_only，设 small_only 时看非 small_only）。
+ * 对端只要不是同一侧就算可用——例如目标设 large_only 时，small_only 的对端仍能接
+ * 小请求，必须算作可用，否则前端会禁用掉后端允许的合法配置。
  */
-function isPoolLast(account: AccountListItem): boolean {
-  const groupIDs = account.group_ids ?? []
-  for (const groupID of groupIDs) {
+function isScopeOptionBlocked(account: AccountListItem, target: Scope): boolean {
+  if (target === 'any') {
+    return false
+  }
+  for (const groupID of account.group_ids ?? []) {
     const others = accounts.value.filter(
       (a) =>
         a.id !== account.id &&
@@ -274,8 +292,7 @@ function isPoolLast(account: AccountListItem): boolean {
         a.status === 'active' &&
         (a.group_ids ?? []).includes(groupID)
     )
-    const hasUnrestricted = others.some((a) => requestSizeScopeOf(a) === 'any')
-    if (!hasUnrestricted) {
+    if (!others.some((a) => requestSizeScopeOf(a) !== target)) {
       return true
     }
   }
@@ -284,14 +301,7 @@ function isPoolLast(account: AccountListItem): boolean {
 
 function isScopeDisabled(account: AccountListItem, family: FamilyPlatform): boolean {
   // 跨平台账号不参与本家族调度，开关无意义，禁用。
-  if (account.platform !== family) {
-    return true
-  }
-  // 已受限时始终允许改回不限制。
-  if (requestSizeScopeOf(account) !== 'any') {
-    return false
-  }
-  return isPoolLast(account)
+  return account.platform !== family
 }
 
 function scopeDisabledReason(account: AccountListItem, family: FamilyPlatform): string {

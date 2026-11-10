@@ -116,17 +116,6 @@ func largeRequestOnlyAccountIDs(accounts []Account) map[int64]struct{} {
 	return excluded
 }
 
-// smallRequestOnlyAccountIDs 返回 accounts 中开启「仅接小请求」开关的账号 id 集合。
-func smallRequestOnlyAccountIDs(accounts []Account) map[int64]struct{} {
-	excluded := make(map[int64]struct{})
-	for i := range accounts {
-		if IsSmallRequestOnlyAccount(&accounts[i]) {
-			excluded[accounts[i].ID] = struct{}{}
-		}
-	}
-	return excluded
-}
-
 // RequestSizeScopeExcludedIDs 一次性列举该分组可调度候选，按请求规模返回应当排除的账号 id 集合。
 //
 // 语义：estimated 判为大请求时返回「仅接小请求」账号；判为小请求时返回「仅接大请求」账号。
@@ -137,8 +126,18 @@ func (s *OpenAIGatewayService) RequestSizeScopeExcludedIDs(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
+	// 必须按 RequestSizeScopeOf 归一化后的取值判断，而不是直接读原始键：
+	// 两个键同时为 true 的脏数据会被归一化为 large_only，若这里仍按 small 键排除，
+	// 该账号会在大请求侧被排除、小请求侧又因 large 键被排除，两侧都选不到。
+	want := RequestSizeScopeLargeOnly
 	if isLargeRequest {
-		return smallRequestOnlyAccountIDs(accounts), nil
+		want = RequestSizeScopeSmallOnly
 	}
-	return largeRequestOnlyAccountIDs(accounts), nil
+	excluded := make(map[int64]struct{})
+	for i := range accounts {
+		if RequestSizeScopeOf(&accounts[i]) == want {
+			excluded[accounts[i].ID] = struct{}{}
+		}
+	}
+	return excluded, nil
 }
