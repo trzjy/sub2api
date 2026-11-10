@@ -52,16 +52,19 @@
               </span>
             </button>
 
-            <div v-show="isExpanded(family.platform)" class="border-t border-gray-100 px-4 py-3 dark:border-dark-700">
+            <div v-show="isExpanded(family.platform)" class="border-t border-gray-100 px-4 py-2 dark:border-dark-700">
+              <!-- 固定高度 + 内部滚动：账号多时不再把整页撑长，保证三个平台区块
+                   的标题都能在一屏内看到，各自在框内滚动查看全部账号。 -->
+              <div class="max-h-[30vh] overflow-y-auto">
               <table class="w-full">
-                <thead>
+                <thead class="sticky top-0 z-10 bg-white dark:bg-dark-800">
                   <tr class="border-b border-gray-200 text-left text-xs text-gray-500 dark:border-dark-700 dark:text-gray-400">
                     <th class="w-16 py-2 pr-3 font-medium">#</th>
-                    <th class="py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.name') }}</th>
+                    <th class="py-1.5 pr-3 font-medium">{{ t('admin.largeRequestRouting.name') }}</th>
                     <th class="w-24 py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.platform') }}</th>
                     <th class="w-20 py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.priority') }}</th>
                     <th class="w-40 py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.status') }}</th>
-                    <th class="py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.group') }}</th>
+                    <th class="py-1.5 pr-3 font-medium">{{ t('admin.largeRequestRouting.group') }}</th>
                     <th class="w-44 py-2 font-medium">{{ t('admin.largeRequestRouting.switch') }}</th>
                   </tr>
                 </thead>
@@ -72,9 +75,9 @@
                     class="border-b border-gray-100 text-sm text-gray-700 dark:border-dark-800 dark:text-gray-300"
                     :data-testid="`row-${family.platform}-${row.account.id}`"
                   >
-                    <td class="py-2 pr-3 tabular-nums text-gray-500 dark:text-gray-400">#{{ row.account.id }}</td>
-                    <td class="py-2 pr-3">{{ row.account.name }}</td>
-                    <td class="py-2 pr-3">
+                    <td class="py-1.5 pr-3 tabular-nums text-gray-500 dark:text-gray-400">#{{ row.account.id }}</td>
+                    <td class="py-1.5 pr-3">{{ row.account.name }}</td>
+                    <td class="py-1.5 pr-3">
                       <span
                         class="inline-flex items-center rounded px-1.5 py-0.5 text-xs"
                         :class="row.account.platform === family.platform
@@ -84,8 +87,8 @@
                         {{ row.account.platform }}
                       </span>
                     </td>
-                    <td class="py-2 pr-3 tabular-nums">{{ row.account.priority }}</td>
-                    <td class="py-2 pr-3">
+                    <td class="py-1.5 pr-3 tabular-nums">{{ row.account.priority }}</td>
+                    <td class="py-1.5 pr-3">
                       <span
                         class="mr-1 inline-flex items-center rounded-full px-2 py-0.5 text-xs"
                         :class="statusClass(row.account.status)"
@@ -99,8 +102,8 @@
                         {{ row.account.schedulable ? t('admin.largeRequestRouting.schedulable') : t('admin.largeRequestRouting.unschedulable') }}
                       </span>
                     </td>
-                    <td class="py-2 pr-3">{{ row.groupNames.join('、') }}</td>
-                    <td class="py-2">
+                    <td class="py-1.5 pr-3">{{ row.groupNames.join('、') }}</td>
+                    <td class="py-1.5">
                       <select
                         class="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-sm text-gray-800 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-100 dark:disabled:bg-dark-700"
                         :data-testid="`lro-scope-${row.account.id}`"
@@ -134,6 +137,7 @@
                   </tr>
                 </tbody>
               </table>
+              </div>
             </div>
           </section>
         </div>
