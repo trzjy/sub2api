@@ -2180,7 +2180,7 @@ export default {
     },
 
     largeRequestRouting: {
-      title: '大请求专属账号',
+      title: '请求分流设置',
       description: '按账号设置只承接大请求、只承接小请求，或不限制；避免一类请求消耗另一类套餐',
       switch: '请求规模归属',
       name: '账号',

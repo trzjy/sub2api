@@ -568,7 +568,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
-      title: 'Large Request Routing',
+      title: 'Request Routing Settings',
       titleKey: 'admin.largeRequestRouting.title',
       descriptionKey: 'admin.largeRequestRouting.description'
     }

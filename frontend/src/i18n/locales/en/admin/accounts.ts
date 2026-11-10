@@ -2203,7 +2203,7 @@ export default {
     },
 
     largeRequestRouting: {
-      title: 'Request Size Routing',
+      title: 'Request Routing Settings',
       description: 'Restrict accounts to large requests, small requests, or neither — so one class of traffic does not burn the other plan',
       switch: 'Request size scope',
       name: 'Account',

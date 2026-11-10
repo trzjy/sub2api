@@ -185,7 +185,7 @@ export default {
     modelPlaza: 'Model Plaza',
     subscriptions: 'Subscriptions',
     accounts: 'Accounts',
-    largeRequestRouting: 'Large Request Only Accounts',
+    largeRequestRouting: 'Request Routing Settings',
     plugins: 'Plugins',
     proxies: 'Proxies',
     redeemCodes: 'Redeem Codes',
