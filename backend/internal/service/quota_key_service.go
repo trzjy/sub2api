@@ -579,6 +579,41 @@ func (s *QuotaKeyService) GetStatus(ctx context.Context, id int64) (*QuotaKeySta
 	return quotaKeyToStatus(qk), nil
 }
 
+// ResolvePreviewAccountForModelSync 返回该激活码名下可用于上游模型同步（QuotaKeyHandler.
+// SyncUpstreamModels）的 cursor 账号：优先 active && schedulable，其次任意未软删的 cursor 账号；
+// 该码下无任何未软删 cursor 账号时返回 400 QUOTA_KEY_NO_ACCOUNT_FOR_SYNC（失败关闭，不让
+// 上游模型同步在"无可用账号"时静默成功）。
+//
+// 选择优先级（用户裁定，本卡同步上游模型入口）：先挑健康可调度账号，避免选到已禁用/出错账号去
+// 触发上游模型清单拉取；健康账号为空时退一步用任意一个未软删 cursor 账号兜底；都没有则明确报错。
+func (s *QuotaKeyService) ResolvePreviewAccountForModelSync(ctx context.Context, quotaKeyID int64) (*ent.Account, error) {
+	if s == nil || s.repo == nil {
+		return nil, errors.New("quota_key_service: service not configured")
+	}
+	accounts, err := s.repo.ListAccountsByQuotaKey(ctx, quotaKeyID)
+	if err != nil {
+		return nil, err
+	}
+	var fallback *ent.Account
+	for _, acc := range accounts {
+		if acc == nil || acc.DeletedAt != nil || acc.Platform != domain.PlatformCursor {
+			continue
+		}
+		// 首个未软删 cursor 账号作为兜底。
+		if fallback == nil {
+			fallback = acc
+		}
+		// 健康可调度账号优先返回。
+		if acc.Status == domain.StatusActive && acc.Schedulable {
+			return acc, nil
+		}
+	}
+	if fallback != nil {
+		return fallback, nil
+	}
+	return nil, infraerrors.BadRequest("QUOTA_KEY_NO_ACCOUNT_FOR_SYNC", "no available cursor account under this quota key for model sync")
+}
+
 // CursorQuotaKeyStatus 返回激活码在调度口径下的状态，供 cursor 账号的调度资格门消费
 // （P1-S §15.4-I2：key 终态只约束账号的调度资格，账号本体不动）。
 //
@@ -736,6 +771,23 @@ func (s *QuotaKeyService) List(ctx context.Context) ([]*QuotaKeyStatus, error) {
 //     ErrQuotaKeyUnknownUpstream（绝不静默落成 shareai，那会让 kn-cy 卡密被当
 //     shareai 拉号，正是本卡要消灭的故障）。
 func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *time.Time, notes *string, priority int, upstreamKey string) (*QuotaKeyStatus, error) {
+	return s.CreateWithSettings(ctx, code, expiresAt, notes, priority, upstreamKey, nil)
+}
+
+// CreateWithSettings 是 Create 的扩展入口：在创建激活码时一并落库码级设置（并发数 / 负载因子 /
+// 计费倍率 / 模型映射），新增账号拉取时据此继承。既有的 Create（6 参）直接委托本方法传 nil，
+// 不改动既有调用方签名。
+//
+// 校验口径（与 UpdateWithSettings 同一套 normalizeQuotaKeySettings）：
+//   - ModelMappingSet=true 时规范化后必须至少有 1 个有效（key/value 皆 trim 非空）模型，
+//     空映射 / 空键值一律返回 400 QUOTA_KEY_MODELS_REQUIRED，禁止落库（没有任何支持的模型
+//     就禁止落库，这是本卡模型管控的硬门槛）。
+//   - Concurrency 内层指针 < 0 拒绝；== 0 视为清空/默认（不落库、沿用账号列默认 3）。
+//   - LoadFactor 必须在 1..10000；RateMultiplier 必须 >= 0（允许 0）。
+//
+// 校验在落库前发生，校验失败不触碰任何存储。码级设置经 CreateQuotaKeyInput 同一次插入落库——
+// 新建激活码名下尚无账号，无需账号同步（账号同步是 UpdateWithSettings / pull 的职责）。
+func (s *QuotaKeyService) CreateWithSettings(ctx context.Context, code string, expiresAt *time.Time, notes *string, priority int, upstreamKey string, settings *UpdateQuotaKeySettingsInput) (*QuotaKeyStatus, error) {
 	if priority < 0 {
 		return nil, errors.New("quota_key_service: priority must not be negative")
 	}
@@ -752,6 +804,22 @@ func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *ti
 			return nil, fmt.Errorf("%w: %q", ErrQuotaKeyUnknownUpstream, upstreamKey)
 		}
 	}
+	var (
+		concurrency  *int
+		loadFactor   *int
+		rateMult     *float64
+		modelMapping map[string]string
+	)
+	if settings != nil {
+		norm, err := normalizeQuotaKeySettings(settings)
+		if err != nil {
+			return nil, err
+		}
+		concurrency = norm.concurrency
+		loadFactor = norm.loadFactor
+		rateMult = norm.rateMultiplier
+		modelMapping = norm.modelMapping
+	}
 	enc, err := s.enc.Encrypt([]byte(code))
 	if err != nil {
 		return nil, err
@@ -760,19 +828,108 @@ func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *ti
 	codeMAC := quotaKeyMACOfPlaintext(code)
 	codeLast4 := last4Of(code)
 	qk, err := s.repo.Create(ctx, CreateQuotaKeyInput{
-		CodeEncrypted: codeEncrypted,
-		CodeMAC:       codeMAC,
-		CodeLast4:     codeLast4,
-		Status:        domain.QuotaKeyStatusActive,
-		ExpiresAt:     expiresAt,
-		Notes:         notes,
-		Priority:      priority,
-		UpstreamKey:   upstreamKey,
+		CodeEncrypted:  codeEncrypted,
+		CodeMAC:        codeMAC,
+		CodeLast4:      codeLast4,
+		Status:         domain.QuotaKeyStatusActive,
+		ExpiresAt:      expiresAt,
+		Notes:          notes,
+		Priority:       priority,
+		UpstreamKey:    upstreamKey,
+		Concurrency:    concurrency,
+		LoadFactor:     loadFactor,
+		RateMultiplier: rateMult,
+		ModelMapping:   modelMapping,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return quotaKeyToStatus(qk), nil
+}
+
+// normalizedQuotaKeySettings 是 normalizeQuotaKeySettings 的校验后结果。
+type normalizedQuotaKeySettings struct {
+	concurrency    *int
+	loadFactor     *int
+	rateMultiplier *float64
+	modelMapping   map[string]string
+}
+
+// normalizeQuotaKeySettings 校验并规范化激活码设置输入（CreateWithSettings / UpdateWithSettings
+// 共用）。任何非法值立即返回 fail-closed 错误；合法值规范化后输出可直接落库的形态。
+//
+// 三态语义（详见 UpdateQuotaKeySettingsInput 注释）：
+//   - Concurrency 外层 nil=不修改；内层 nil=清空恢复默认 3；非 nil 时 < 0 拒绝、== 0 视为清空、
+//     正数落库。
+//   - LoadFactor 外层 nil=不修改；内层 nil=清空/卸载；非 nil 时必须在 1..10000（否则拒绝）。
+//   - RateMultiplier nil=不修改；非 nil 时 < 0 拒绝（0 合法，允许把某码计费倍率置 0）。
+//   - ModelMappingSet=false=不修改；为 true 时规范化后必须 >= 1 个有效条目，否则 400 拒绝。
+func normalizeQuotaKeySettings(settings *UpdateQuotaKeySettingsInput) (*normalizedQuotaKeySettings, error) {
+	out := &normalizedQuotaKeySettings{}
+	// Concurrency。
+	if settings.Concurrency != nil {
+		inner := *settings.Concurrency
+		if inner != nil {
+			if *inner < 0 {
+				return nil, infraerrors.BadRequest("QUOTA_KEY_CONCURRENCY_INVALID", "concurrency must be >= 0")
+			}
+			if *inner > 0 {
+				v := *inner
+				out.concurrency = &v
+			}
+			// *inner == 0 → 清空/默认，输出 nil。
+		}
+	}
+	// LoadFactor。
+	if settings.LoadFactor != nil {
+		inner := *settings.LoadFactor
+		if inner != nil {
+			if *inner < 1 || *inner > 10000 {
+				return nil, infraerrors.BadRequest("QUOTA_KEY_LOAD_FACTOR_INVALID", "load_factor must be in 1..10000")
+			}
+			v := *inner
+			out.loadFactor = &v
+		}
+	}
+	// RateMultiplier。
+	if settings.RateMultiplier != nil {
+		if *settings.RateMultiplier < 0 {
+			return nil, infraerrors.BadRequest("QUOTA_KEY_RATE_MULTIPLIER_INVALID", "rate_multiplier must be >= 0")
+		}
+		v := *settings.RateMultiplier
+		out.rateMultiplier = &v
+	}
+	// ModelMapping：ModelMappingSet=true 时必须非空（去空白、去空键空值后）。
+	if settings.ModelMappingSet {
+		cleaned := make(map[string]string, len(settings.ModelMapping))
+		for k, v := range settings.ModelMapping {
+			kk := strings.TrimSpace(k)
+			vv := strings.TrimSpace(v)
+			if kk == "" || vv == "" {
+				continue
+			}
+			cleaned[kk] = vv
+		}
+		if len(cleaned) == 0 {
+			return nil, infraerrors.BadRequest("QUOTA_KEY_MODELS_REQUIRED", "at least one supported model is required")
+		}
+		out.modelMapping = cleaned
+	}
+	return out, nil
+}
+
+// codeLevelModelMappingToAccountMapping 把码级 model_mapping（map[string]string）转换为账号
+// credentials.model_mapping 所需的形态（map[string]any，{"from":"to"} 或白名单恒等 {"m":"m"}）。
+// 码级映射为空时返回 nil（调用方保持无映射，沿用既有闸门）。
+func codeLevelModelMappingToAccountMapping(mm map[string]string) map[string]any {
+	if len(mm) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(mm))
+	for k, v := range mm {
+		out[k] = v
+	}
+	return out
 }
 
 // Update 改激活码：code 非 nil 时重加密写 credentials；expiresAt/notes 外层指针非 nil 时写元数据。
@@ -785,12 +942,33 @@ func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *ti
 // 可以在 Probe 持锁等待 lookup 期间提交，再被 Probe 的旧观测结果覆盖。
 // 凭据写本体复用 writeCredentialsLocked（同 key 锁内），不再嵌套取同 key 锁。
 func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, expiresAt **time.Time, notes **string, priority *int) (*QuotaKeyStatus, error) {
+	return s.UpdateWithSettings(ctx, id, code, expiresAt, notes, priority, nil)
+}
+
+// UpdateWithSettings 是 Update 的扩展入口：在既有 code / 元数据 / 优先级编辑之上，增加码级设置
+// （并发数 / 负载因子 / 计费倍率 / 模型映射）的更新，并在同一 per-key 锁事务内同步名下未软删账号。
+// 既有的 Update（6 参）直接委托本方法传 nil，不改动既有调用方签名。
+//
+// base 字段（code/expiresAt/notes/priority）与 settings 字段在**同一** withQuotaKeyLock 事务内落库：
+//   - base 字段走 updateBaseFieldsLocked（与 Update 行为完全一致）；
+//   - settings 字段经窄可选接口 quotaKeySettingsRepo.UpdateSettingsAndSyncAccounts 落库并同步账号；
+//     仓库未实现该接口时失败关闭（fail-closed），绝不静默绕过。
+//
+// 校验（normalizeQuotaKeySettings）在开事务前完成；ModelMappingSet=true 且规范化后为空立即返回
+// 400 QUOTA_KEY_MODELS_REQUIRED，禁止落库。
+func (s *QuotaKeyService) UpdateWithSettings(ctx context.Context, id int64, code *string, expiresAt **time.Time, notes **string, priority *int, settings *UpdateQuotaKeySettingsInput) (*QuotaKeyStatus, error) {
 	if priority != nil && *priority <= 0 {
 		return nil, errors.New("quota_key_service: priority must be positive")
 	}
-	obs, err := asObservationRepo(s.repo)
-	if err != nil {
-		return nil, err
+	if settings != nil {
+		if _, err := normalizeQuotaKeySettings(settings); err != nil {
+			return nil, err
+		}
+	}
+	baseChanged := code != nil || expiresAt != nil || notes != nil || priority != nil
+	settingsChanged := settings != nil && (settings.Concurrency != nil || settings.LoadFactor != nil || settings.RateMultiplier != nil || settings.ModelMappingSet)
+	if !baseChanged && !settingsChanged {
+		return s.GetStatus(ctx, id)
 	}
 	// 加密在锁外完成：同 key 事务只包住重读、MAC 比对与写入。
 	var codeEncrypted, codeMAC, codeLast4 string
@@ -803,44 +981,67 @@ func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, ex
 		codeMAC = quotaKeyMACOfPlaintext(*code)
 		codeLast4 = last4Of(*code)
 	}
-	if code != nil || expiresAt != nil || notes != nil || priority != nil {
-		lockCtx := ctx
-		if lockCtx == nil {
-			lockCtx = context.Background()
+	lockCtx := ctx
+	if lockCtx == nil {
+		lockCtx = context.Background()
+	}
+	err := s.withQuotaKeyLock(lockCtx, id, func(tx *ent.Tx) error {
+		if baseChanged {
+			if werr := s.updateBaseFieldsLocked(lockCtx, tx, id, code, codeEncrypted, codeMAC, codeLast4, expiresAt, notes, priority); werr != nil {
+				return werr
+			}
 		}
-		err = s.withQuotaKeyLock(lockCtx, id, func(tx *ent.Tx) error {
-			// 锁内重读未删除行：来源已不存在/已软删时不复活、不写任何东西。
-			current, rerr := obs.GetByIDInTx(lockCtx, tx, id)
+		if settingsChanged {
+			sr, rerr := asSettingsRepo(s.repo)
 			if rerr != nil {
 				return rerr
 			}
-			if current == nil {
-				return fmt.Errorf("quota_key_service: quota key %d not found", id)
+			if werr := sr.UpdateSettingsAndSyncAccounts(lockCtx, tx, id, *settings); werr != nil {
+				return werr
 			}
-			if code != nil {
-				if werr := writeCredentialsLocked(lockCtx, obs, tx, id, current, codeEncrypted, codeMAC, codeLast4); werr != nil {
-					return werr
-				}
-			}
-			if expiresAt != nil || notes != nil {
-				if werr := s.repo.UpdateMeta(lockCtx, tx, id, expiresAt, notes); werr != nil {
-					return werr
-				}
-			}
-			// 优先级与名下账号同事务同步：码的优先级即码下账号的优先级（用户裁定 2026-11-03）。
-			// 未软删账号全部改写；软删账号不改（其调度资格已失效）。
-			if priority != nil {
-				if _, werr := s.repo.UpdatePriority(lockCtx, tx, id, *priority); werr != nil {
-					return werr
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return s.GetStatus(ctx, id)
+}
+
+// updateBaseFieldsLocked 在已持 per-key 锁的事务内执行「来源重读 + 凭据重加密 + 元数据 + 优先级同步」。
+// 从既有 Update / UpdateWithSettings 抽出，保证两者行为完全一致、且设置更新与基础字段编辑落在同一事务。
+// codeEncrypted/codeMAC/codeLast4 由调用方在锁外预加密后传入（code 非 nil 时有效）。
+func (s *QuotaKeyService) updateBaseFieldsLocked(ctx context.Context, tx *ent.Tx, id int64, code *string, codeEncrypted, codeMAC, codeLast4 string, expiresAt **time.Time, notes **string, priority *int) error {
+	obs, err := asObservationRepo(s.repo)
+	if err != nil {
+		return err
+	}
+	// 锁内重读未删除行：来源已不存在/已软删时不复活、不写任何东西。
+	current, rerr := obs.GetByIDInTx(ctx, tx, id)
+	if rerr != nil {
+		return rerr
+	}
+	if current == nil {
+		return fmt.Errorf("quota_key_service: quota key %d not found", id)
+	}
+	if code != nil {
+		if werr := writeCredentialsLocked(ctx, obs, tx, id, current, codeEncrypted, codeMAC, codeLast4); werr != nil {
+			return werr
+		}
+	}
+	if expiresAt != nil || notes != nil {
+		if werr := s.repo.UpdateMeta(ctx, tx, id, expiresAt, notes); werr != nil {
+			return werr
+		}
+	}
+	// 优先级与名下账号同事务同步：码的优先级即码下账号的优先级（用户裁定 2026-11-03）。
+	// 未软删账号全部改写；软删账号不改（其调度资格已失效）。
+	if priority != nil {
+		if _, werr := s.repo.UpdatePriority(ctx, tx, id, *priority); werr != nil {
+			return werr
+		}
+	}
+	return nil
 }
 
 // GetWithAccounts 返回脱敏状态 + 该激活码下的账号切片（不嵌套聚合成单一对象，F7）。
@@ -994,6 +1195,34 @@ func asObservationRepo(repo QuotaKeyRepository) (quotaKeyObservationRepo, error)
 		return nil, errors.New("quota_key_service: quota key repository does not support transactional usage observation")
 	}
 	return obs, nil
+}
+
+// quotaKeySettingsRepo 是「激活码设置更新 + 名下账号同步」所需的窄可选仓储能力（本卡 B2）。
+//
+// 与 quotaKeyObservationRepo 同型：单独声明、按需断言，避免无关测试替身被迫实现不相关的写方法。
+// 仅当生产 *repository.quotaKeyRepository 实现本接口时，CreateWithSettings / UpdateWithSettings /
+// pull 才会在既有的 per-key 事务内行使该能力；否则（test stub、未实现方）调用处失败关闭
+// （fail-closed），绝不静默绕过设置落库与账号同步（§25.14-C：绕过即把"没写"当"已提交事实"）。
+type quotaKeySettingsRepo interface {
+	// UpdateSettingsAndSyncAccounts 在调用方已开启的事务内，把激活码级设置
+	// （并发数 / 负载因子 / 计费倍率 / 模型映射）落库到 quota_keys，并同步该码名下未软删账号的
+	// 同名列。tx 必填；仓库未实现本接口时由调用方失败关闭。
+	UpdateSettingsAndSyncAccounts(ctx context.Context, tx *ent.Tx, id int64, settings UpdateQuotaKeySettingsInput) error
+	// SyncAccountsExpiry 在调用方已开启的事务内，把该码名下未软删账号的 expires_at 同步为
+	// 激活码的到期时间（拉号成功路径继承码级到期）。tx 必填。
+	SyncAccountsExpiry(ctx context.Context, tx *ent.Tx, id int64, expiresAt *time.Time) error
+}
+
+// asSettingsRepo 断言仓储是否支持设置更新 + 账号同步能力；不支持即失败关闭。
+func asSettingsRepo(repo QuotaKeyRepository) (quotaKeySettingsRepo, error) {
+	if repo == nil {
+		return nil, errors.New("quota_key_service: quota key repository unavailable")
+	}
+	sr, ok := repo.(quotaKeySettingsRepo)
+	if !ok {
+		return nil, errors.New("quota_key_service: quota key repository does not support settings update and account sync")
+	}
+	return sr, nil
 }
 
 // ErrQuotaKeyAccountLimitReached 是"归属某激活码的 working 账号已达 ≤15 上限"的唯一
@@ -1387,7 +1616,12 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		// （方案审 F1 must_fix，2026-10-18）。
 		var entryCfg *CursorAutoEntryConfig
 		var entryModelMapping map[string]any
-		if s.autoEntry != nil {
+		// 码级模型映射优先：若 quota_keys.model_mapping 非空，直接由它转换生成 entry 映射，
+		// 即使 s.autoEntry == nil 也优先采用码级映射（码级映射 = 该码允许使用的模型权威值）。
+		// 否则回落既有 RealSupplyModelsFor / CursorStaticEntryModels 路径。
+		if len(qk3.ModelMapping) > 0 {
+			entryModelMapping = codeLevelModelMappingToAccountMapping(qk3.ModelMapping)
+		} else if s.autoEntry != nil {
 			cfg, cerr := s.autoEntry.GetConfig(ctx)
 			if cerr != nil {
 				return fmt.Errorf("quota_key_service: load auto entry config: %w: %w", ErrQuotaKeyMountFailed, cerr)
@@ -1447,6 +1681,29 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 				SetQuotaKeyID(quotaKeyID)
 			if ua.Extra != nil {
 				create.SetExtra(ua.Extra)
+			}
+			// 新账号继承码级设置（码级权威值，覆盖账号列默认）：
+			//   - Concurrency / LoadFactor：仅当码级指针非空且为正值时写入（0/负/空 = 沿用账号默认）；
+			//   - RateMultiplier：码级值（float64，>=0）直接继承（含 0，0 是合法计费倍率）；
+			//   - Priority：码级 > 0 时采用，否则回落账号默认；
+			//   - ExpiresAt：优先用上游本次返回的 result.ExpiresAt，其次码级 qk3.ExpiresAt。
+			if qk3.Concurrency != nil && *qk3.Concurrency > 0 {
+				create = create.SetConcurrency(*qk3.Concurrency)
+			}
+			if qk3.LoadFactor != nil && *qk3.LoadFactor > 0 {
+				create = create.SetLoadFactor(*qk3.LoadFactor)
+			}
+			if qk3.RateMultiplier >= 0 {
+				create = create.SetRateMultiplier(qk3.RateMultiplier)
+			}
+			if qk3.Priority > 0 {
+				create = create.SetPriority(qk3.Priority)
+			}
+			switch {
+			case result.ExpiresAt != nil:
+				create = create.SetExpiresAt(*result.ExpiresAt)
+			case qk3.ExpiresAt != nil:
+				create = create.SetExpiresAt(*qk3.ExpiresAt)
 			}
 			acc, err := create.Save(ctx)
 			if err != nil {
@@ -1533,6 +1790,16 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			SetNillableExpiresAt(result.ExpiresAt).
 			Save(ctx); err != nil {
 			return fmt.Errorf("quota_key_service: clear exhausted: %w", err)
+		}
+		// 同步名下存量（未软删）账号的过期时间（继承码级到期）：仅在仓库实现 quotaKeySettingsRepo
+		// 时执行；未实现即跳过（test stub 不实现该窄接口，不强行同步）。result.ExpiresAt 为 nil
+		// 时上游未给到期时间，保持账号原值不动，不同步。
+		if result.ExpiresAt != nil {
+			if sr, ok := s.repo.(quotaKeySettingsRepo); ok {
+				if serr := sr.SyncAccountsExpiry(ctx, tx, quotaKeyID, result.ExpiresAt); serr != nil {
+					return fmt.Errorf("quota_key_service: sync accounts expiry: %w", serr)
+				}
+			}
 		}
 		return nil
 	})
@@ -2000,7 +2267,27 @@ func quotaKeyToStatus(qk *ent.QuotaKey) *QuotaKeyStatus {
 		Notes:            qk.Notes,
 		Priority:         qk.Priority,
 		UpstreamKey:      qk.UpstreamKey,
+		// 码级设置：唯一投影点，自动覆盖 List / ListWithUsageProjections / GetStatus /
+		// GetWithAccounts / Create / Update（它们共用 quotaKeyToStatus）。
+		Concurrency:    qk.Concurrency,
+		LoadFactor:     qk.LoadFactor,
+		RateMultiplier: qk.RateMultiplier,
+		// ModelMapping 深拷贝，避免调用方持有实体内部 map 后被后台 goroutine 修改。
+		ModelMapping: copyStringMap(qk.ModelMapping),
 	}
+}
+
+// copyStringMap 返回 map[string]string 的浅拷贝（值均为不可变字符串）。
+// 传入 nil 时返回 nil，避免把 nil 翻转为空 map（保持"未设置"语义）。
+func copyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // maskCodeValue 仅保留末 4 位，其余以掩码替代，绝不回显原文。
