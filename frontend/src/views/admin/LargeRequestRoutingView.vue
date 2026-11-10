@@ -44,7 +44,7 @@
               <span class="flex items-center gap-3">
                 <h2 class="text-base font-semibold text-gray-800 dark:text-gray-100">{{ family.title }}</h2>
                 <span class="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-dark-700 dark:text-gray-400">
-                  {{ accountCount(family.platform) }}
+                  {{ rowsByFamily[family.platform].length }}
                 </span>
               </span>
               <span class="text-xs text-gray-500 dark:text-gray-400">
@@ -53,98 +53,87 @@
             </button>
 
             <div v-show="isExpanded(family.platform)" class="border-t border-gray-100 px-4 py-3 dark:border-dark-700">
-              <div
-                v-for="segment in SEGMENTS"
-                :key="`${family.platform}-${segment.key}`"
-                class="mb-5 last:mb-0"
-                :data-testid="`segment-${family.platform}-${segment.key}`"
-              >
-                <h3 class="mb-2 text-sm font-medium text-gray-600 dark:text-gray-300">
-                  {{ segment.label }}
-                </h3>
-
-                <table class="w-full">
-                  <thead>
-                    <tr class="border-b border-gray-200 text-left text-xs text-gray-500 dark:border-dark-700 dark:text-gray-400">
-                      <th class="w-16 py-2 pr-3 font-medium">#</th>
-                      <th class="py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.name') }}</th>
-                      <th class="w-24 py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.platform') }}</th>
-                      <th class="w-20 py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.priority') }}</th>
-                      <th class="w-40 py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.status') }}</th>
-                      <th class="py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.group') }}</th>
-                      <th class="w-44 py-2 font-medium">{{ t('admin.largeRequestRouting.switch') }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr
-                      v-for="row in rowsByFamily[family.platform][segment.key]"
-                      :key="`${row.account.id}-${row.account.platform}`"
-                      class="border-b border-gray-100 text-sm text-gray-700 dark:border-dark-800 dark:text-gray-300"
-                      :data-testid="`row-${family.platform}-${segment.key}-${row.account.id}`"
-                    >
-                      <td class="py-2 pr-3 tabular-nums text-gray-500 dark:text-gray-400">#{{ row.account.id }}</td>
-                      <td class="py-2 pr-3">{{ row.account.name }}</td>
-                      <td class="py-2 pr-3">
-                        <span
-                          class="inline-flex items-center rounded px-1.5 py-0.5 text-xs"
-                          :class="row.account.platform === family.platform
-                            ? 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
-                            : 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'"
+              <table class="w-full">
+                <thead>
+                  <tr class="border-b border-gray-200 text-left text-xs text-gray-500 dark:border-dark-700 dark:text-gray-400">
+                    <th class="w-16 py-2 pr-3 font-medium">#</th>
+                    <th class="py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.name') }}</th>
+                    <th class="w-24 py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.platform') }}</th>
+                    <th class="w-20 py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.priority') }}</th>
+                    <th class="w-40 py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.status') }}</th>
+                    <th class="py-2 pr-3 font-medium">{{ t('admin.largeRequestRouting.group') }}</th>
+                    <th class="w-44 py-2 font-medium">{{ t('admin.largeRequestRouting.switch') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="row in rowsByFamily[family.platform]"
+                    :key="row.account.id"
+                    class="border-b border-gray-100 text-sm text-gray-700 dark:border-dark-800 dark:text-gray-300"
+                    :data-testid="`row-${family.platform}-${row.account.id}`"
+                  >
+                    <td class="py-2 pr-3 tabular-nums text-gray-500 dark:text-gray-400">#{{ row.account.id }}</td>
+                    <td class="py-2 pr-3">{{ row.account.name }}</td>
+                    <td class="py-2 pr-3">
+                      <span
+                        class="inline-flex items-center rounded px-1.5 py-0.5 text-xs"
+                        :class="row.account.platform === family.platform
+                          ? 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
+                          : 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'"
+                      >
+                        {{ row.account.platform }}
+                      </span>
+                    </td>
+                    <td class="py-2 pr-3 tabular-nums">{{ row.account.priority }}</td>
+                    <td class="py-2 pr-3">
+                      <span
+                        class="mr-1 inline-flex items-center rounded-full px-2 py-0.5 text-xs"
+                        :class="statusClass(row.account.status)"
+                      >
+                        {{ statusLabel(row.account.status) }}
+                      </span>
+                      <span
+                        class="inline-flex items-center rounded-full px-2 py-0.5 text-xs"
+                        :class="row.account.schedulable ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' : 'bg-gray-100 text-gray-500 dark:bg-dark-700 dark:text-gray-400'"
+                      >
+                        {{ row.account.schedulable ? t('admin.largeRequestRouting.schedulable') : t('admin.largeRequestRouting.unschedulable') }}
+                      </span>
+                    </td>
+                    <td class="py-2 pr-3">{{ row.groupNames.join('、') }}</td>
+                    <td class="py-2">
+                      <select
+                        class="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-sm text-gray-800 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-100 dark:disabled:bg-dark-700"
+                        :data-testid="`lro-scope-${row.account.id}`"
+                        :value="requestSizeScopeOf(row.account)"
+                        :disabled="row.account.platform !== family.platform"
+                        :title="row.account.platform !== family.platform ? t('admin.largeRequestRouting.crossPlatformHint') : ''"
+                        @change="onScopeChange(row.account, $event)"
+                      >
+                        <option value="any">{{ t('admin.largeRequestRouting.scopeAny') }}</option>
+                        <option
+                          value="large_only"
+                          :disabled="isScopeOptionBlocked(row.account, 'large_only')"
+                          :title="isScopeOptionBlocked(row.account, 'large_only') ? t('admin.largeRequestRouting.lastPoolGuard') : ''"
                         >
-                          {{ row.account.platform }}
-                        </span>
-                      </td>
-                      <td class="py-2 pr-3 tabular-nums">{{ row.account.priority }}</td>
-                      <td class="py-2 pr-3">
-                        <span
-                          class="mr-1 inline-flex items-center rounded-full px-2 py-0.5 text-xs"
-                          :class="statusClass(row.account.status)"
+                          {{ t('admin.largeRequestRouting.scopeLargeOnly') }}
+                        </option>
+                        <option
+                          value="small_only"
+                          :disabled="isScopeOptionBlocked(row.account, 'small_only')"
+                          :title="isScopeOptionBlocked(row.account, 'small_only') ? t('admin.largeRequestRouting.lastPoolGuard') : ''"
                         >
-                          {{ statusLabel(row.account.status) }}
-                        </span>
-                        <span
-                          class="inline-flex items-center rounded-full px-2 py-0.5 text-xs"
-                          :class="row.account.schedulable ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' : 'bg-gray-100 text-gray-500 dark:bg-dark-700 dark:text-gray-400'"
-                        >
-                          {{ row.account.schedulable ? t('admin.largeRequestRouting.schedulable') : t('admin.largeRequestRouting.unschedulable') }}
-                        </span>
-                      </td>
-                      <td class="py-2 pr-3">{{ row.groupNames.join('、') }}</td>
-                      <td class="py-2">
-                        <select
-                          class="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-sm text-gray-800 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-100 dark:disabled:bg-dark-700"
-                          :data-testid="`lro-scope-${row.account.id}`"
-                          :value="requestSizeScopeOf(row.account)"
-                          :disabled="isScopeDisabled(row.account, family.platform)"
-                          :title="isScopeDisabled(row.account, family.platform) ? scopeDisabledReason(row.account, family.platform) : ''"
-                          @change="onScopeChange(row.account, $event)"
-                        >
-                          <option value="any">{{ t('admin.largeRequestRouting.scopeAny') }}</option>
-                          <option
-                            value="large_only"
-                            :disabled="isScopeOptionBlocked(row.account, 'large_only')"
-                            :title="isScopeOptionBlocked(row.account, 'large_only') ? t('admin.largeRequestRouting.lastPoolGuard') : ''"
-                          >
-                            {{ t('admin.largeRequestRouting.scopeLargeOnly') }}
-                          </option>
-                          <option
-                            value="small_only"
-                            :disabled="isScopeOptionBlocked(row.account, 'small_only')"
-                            :title="isScopeOptionBlocked(row.account, 'small_only') ? t('admin.largeRequestRouting.lastPoolGuard') : ''"
-                          >
-                            {{ t('admin.largeRequestRouting.scopeSmallOnly') }}
-                          </option>
-                        </select>
-                      </td>
-                    </tr>
-                    <tr v-if="(rowsByFamily[family.platform][segment.key] || []).length === 0">
-                      <td colspan="7" class="py-4 text-center text-xs text-gray-400 dark:text-gray-500">
-                        {{ t('admin.largeRequestRouting.noAccounts') }}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+                          {{ t('admin.largeRequestRouting.scopeSmallOnly') }}
+                        </option>
+                      </select>
+                    </td>
+                  </tr>
+                  <tr v-if="rowsByFamily[family.platform].length === 0">
+                    <td colspan="7" class="py-4 text-center text-xs text-gray-400 dark:text-gray-500">
+                      {{ t('admin.largeRequestRouting.noAccounts') }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </section>
         </div>
@@ -172,18 +161,13 @@ const FAMILIES: Array<{ platform: FamilyPlatform; title: string }> = [
   { platform: 'kimi', title: 'Kimi' }
 ]
 
-const SEGMENTS: Array<{ key: 'standard' | 'subscription'; label: string }> = [
-  { key: 'standard', label: t('admin.largeRequestRouting.meteredGroups') },
-  { key: 'subscription', label: t('admin.largeRequestRouting.subscriptionGroups') }
-]
-
-// 页面只按三个家族分段，但分组里可能绑定其他平台的账号（如 codebuddy），
+// 页面只按三个家族分块，但分组里可能绑定其他平台的账号（如 codebuddy），
 // 必须一并加载并展示，否则会看不到池内真实成员。
 const LOADED_PLATFORMS = ['deepseek', 'zhipu', 'kimi', 'codebuddy'] as const
 
 const ACCOUNT_PAGE_SIZE = 200
 
-interface SegmentRow {
+interface AccountRow {
   account: AccountListItem
   groupNames: string[]
 }
@@ -192,7 +176,8 @@ const loading = ref(false)
 const errorMessage = ref('')
 const accounts = ref<AccountListItem[]>([])
 const groups = ref<AdminGroup[]>([])
-const expanded = ref<Record<FamilyPlatform, boolean>>({ deepseek: true, zhipu: false, kimi: false })
+// 三个平台默认全部展开：折叠隐藏内容会让用户以为平台缺失。
+const expanded = ref<Record<FamilyPlatform, boolean>>({ deepseek: true, zhipu: true, kimi: true })
 
 const groupsByID = computed(() => new Map(groups.value.map((group) => [group.id, group])))
 
@@ -211,57 +196,37 @@ function toggleFamily(platform: FamilyPlatform): void {
 }
 
 /**
- * 账号按 group_ids 落入对应家族的对应段。同一账号挂多段（如同时计量组与订阅组）
- * 时每段各显示一行；同一账号在同一段挂多个分组时合并为一行并列出全部组名。
+ * 每个账号在每个家族只出现一行，分组列合并展示它在该家族下绑定的全部分组名
+ * （与站点既有账号列表的展示方式一致，不再按计量/订阅拆行）。
  * 跨平台账号（如 codebuddy 绑在 deepseek 订阅组）也一并展示，按账号自身平台标注。
  */
 const rowsByFamily = computed(() => {
-  const result: Record<
-    FamilyPlatform,
-    Record<'standard' | 'subscription', SegmentRow[]>
-  > = {
-    deepseek: { standard: [], subscription: [] },
-    zhipu: { standard: [], subscription: [] },
-    kimi: { standard: [], subscription: [] }
+  const result: Record<FamilyPlatform, AccountRow[]> = {
+    deepseek: [],
+    zhipu: [],
+    kimi: []
   }
-  const seen = new Set<string>()
   for (const account of accounts.value) {
+    const namesByFamily: Record<FamilyPlatform, string[]> = { deepseek: [], zhipu: [], kimi: [] }
     for (const groupID of account.group_ids ?? []) {
       const group = groupsByID.value.get(groupID)
-      if (!group) continue
-      if (!isSupportedPlatform(group.platform)) continue
-      const family = group.platform
-      const segment = group.subscription_type === 'subscription' ? 'subscription' : 'standard'
-      const key = `${account.id}:${family}:${segment}`
-      const bucket = result[family][segment]
-      if (seen.has(key)) {
-        const row = bucket.find((r) => r.account.id === account.id)
-        if (row && !row.groupNames.includes(group.name)) {
-          row.groupNames.push(group.name)
-        }
-        continue
+      if (!group || !isSupportedPlatform(group.platform)) continue
+      if (!namesByFamily[group.platform].includes(group.name)) {
+        namesByFamily[group.platform].push(group.name)
       }
-      seen.add(key)
-      bucket.push({ account, groupNames: [group.name] })
+    }
+    for (const family of FAMILIES) {
+      const names = namesByFamily[family.platform]
+      if (names.length > 0) {
+        result[family.platform].push({ account, groupNames: names })
+      }
     }
   }
-  for (const family of Object.keys(result) as FamilyPlatform[]) {
-    for (const segment of Object.keys(result[family]) as Array<'standard' | 'subscription'>) {
-      result[family][segment].sort((a, b) => a.account.id - b.account.id)
-    }
+  for (const family of FAMILIES) {
+    result[family.platform].sort((a, b) => a.account.id - b.account.id)
   }
   return result
 })
-
-function accountCount(platform: FamilyPlatform): number {
-  const seen = new Set<number>()
-  for (const segment of ['standard', 'subscription'] as const) {
-    for (const row of rowsByFamily.value[platform][segment]) {
-      seen.add(row.account.id)
-    }
-  }
-  return seen.size
-}
 
 function requestSizeScopeOf(account: AccountListItem): Scope {
   const extra = account.extra ?? {}
@@ -297,18 +262,6 @@ function isScopeOptionBlocked(account: AccountListItem, target: Scope): boolean 
     }
   }
   return false
-}
-
-function isScopeDisabled(account: AccountListItem, family: FamilyPlatform): boolean {
-  // 跨平台账号不参与本家族调度，开关无意义，禁用。
-  return account.platform !== family
-}
-
-function scopeDisabledReason(account: AccountListItem, family: FamilyPlatform): string {
-  if (account.platform !== family) {
-    return t('admin.largeRequestRouting.crossPlatformHint')
-  }
-  return t('admin.largeRequestRouting.lastPoolGuard')
 }
 
 function statusClass(status: string): string {

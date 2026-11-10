@@ -30,6 +30,8 @@ vi.mock('vue-i18n', async () => {
   }
 })
 
+type GroupPlatformLike = 'deepseek' | 'zhipu' | 'kimi' | 'codebuddy' | string
+
 function makeGroup(
   id: number,
   name: string,
@@ -43,8 +45,6 @@ function makeGroup(
     subscription_type: subscriptionType
   } as unknown as AdminGroup
 }
-
-type GroupPlatformLike = 'deepseek' | 'zhipu' | 'kimi' | 'codebuddy' | string
 
 function makeAccount(
   id: number,
@@ -97,22 +97,22 @@ function mountView() {
   })
 }
 
-async function expandFamily(wrapper: Awaited<ReturnType<typeof mountView>>, platform: string) {
-  const toggle = wrapper.find(`[data-testid="family-toggle-${platform}"]`)
-  if (toggle.exists()) {
-    await toggle.trigger('click')
-    await flushPromises()
-  }
-}
-
-beforeEach(() => {
-  vi.clearAllMocks()
-  const byPlatform = accountsByPlatform()
-  getAllIncludingInactive.mockResolvedValue(GROUPS)
+function setAccountsByPlatform(byPlatform: Record<string, AccountListItem[]>) {
   listAccounts.mockImplementation(async (_page: number, _size: number, opts: { platform: string }) => {
     const items = byPlatform[opts.platform] ?? []
     return { items, total: items.length }
   })
+}
+
+function optionDisabled(select: { element: Element }, value: string): boolean {
+  const option = select.element.querySelector(`option[value="${value}"]`)
+  return (option as HTMLOptionElement | null)?.disabled ?? false
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  getAllIncludingInactive.mockResolvedValue(GROUPS)
+  setAccountsByPlatform(accountsByPlatform())
   setAccountRequestSizeScope.mockImplementation(async (id: number, scope: string) => ({
     id,
     name: `account-${id}`,
@@ -126,24 +126,30 @@ beforeEach(() => {
 })
 
 describe('LargeRequestRoutingView', () => {
-  it('默认只展开第一个家族，其余折叠', async () => {
+  it('三个家族默认全部展开，不会把平台藏起来', async () => {
     const wrapper = mountView()
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="family-deepseek"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="family-zhipu"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="family-kimi"]').exists()).toBe(true)
-
-    // 折叠内容用 v-show 控制，检查计算样式前的 aria-expanded 更稳定
-    expect(wrapper.find('[data-testid="family-toggle-deepseek"]').attributes('aria-expanded')).toBe('true')
-    expect(wrapper.find('[data-testid="family-toggle-zhipu"]').attributes('aria-expanded')).toBe('false')
-    expect(wrapper.find('[data-testid="family-toggle-kimi"]').attributes('aria-expanded')).toBe('false')
+    for (const family of ['deepseek', 'zhipu', 'kimi']) {
+      expect(wrapper.find(`[data-testid="family-${family}"]`).exists()).toBe(true)
+      expect(wrapper.find(`[data-testid="family-toggle-${family}"]`).attributes('aria-expanded')).toBe('true')
+    }
   })
 
-  it('展开后渲染该家族账号，三态下拉可选', async () => {
+  it('每个账号在每个家族只出现一行，分组列合并全部绑定分组', async () => {
     const wrapper = mountView()
     await flushPromises()
-    await expandFamily(wrapper, 'zhipu')
+
+    // 807 同时绑 49(计量) 与 115(订阅)，旧设计会出现两行，现在只应有一行
+    const rows = wrapper.findAll('[data-testid="row-deepseek-807"]')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].text()).toContain('DeepSeek 计量分组')
+    expect(rows[0].text()).toContain('Deepseek 月卡订阅')
+  })
+
+  it('三态下拉渲染且可用', async () => {
+    const wrapper = mountView()
+    await flushPromises()
 
     const select = wrapper.find('[data-testid="lro-scope-808"]')
     expect(select.exists()).toBe(true)
@@ -155,8 +161,7 @@ describe('LargeRequestRoutingView', () => {
     const wrapper = mountView()
     await flushPromises()
 
-    const select = wrapper.find('[data-testid="lro-scope-807"]')
-    await select.setValue('large_only')
+    await wrapper.find('[data-testid="lro-scope-807"]').setValue('large_only')
     await flushPromises()
 
     expect(setAccountRequestSizeScope).toHaveBeenCalledWith(807, 'large_only')
@@ -168,8 +173,7 @@ describe('LargeRequestRoutingView', () => {
     const wrapper = mountView()
     await flushPromises()
 
-    const select = wrapper.find('[data-testid="lro-scope-807"]')
-    await select.setValue('small_only')
+    await wrapper.find('[data-testid="lro-scope-807"]').setValue('small_only')
     await flushPromises()
 
     expect((wrapper.find('[data-testid="lro-scope-807"]').element as HTMLSelectElement).value).toBe('any')
@@ -184,18 +188,6 @@ describe('LargeRequestRoutingView', () => {
     expect(select.exists()).toBe(true)
     expect((select.element as HTMLSelectElement).disabled).toBe(true)
   })
-
-  function setAccountsByPlatform(byPlatform: Record<string, AccountListItem[]>) {
-    listAccounts.mockImplementation(async (_page: number, _size: number, opts: { platform: string }) => {
-      const items = byPlatform[opts.platform] ?? []
-      return { items, total: items.length }
-    })
-  }
-
-  function optionDisabled(select: { element: Element }, value: string): boolean {
-    const option = select.element.querySelector(`option[value="${value}"]`)
-    return (option as HTMLOptionElement | null)?.disabled ?? false
-  }
 
   it('池内唯一账号：两个限制选项都被禁用', async () => {
     setAccountsByPlatform({
@@ -215,8 +207,7 @@ describe('LargeRequestRoutingView', () => {
   })
 
   it('对端为 small_only 时仍允许把本账号设为 large_only', async () => {
-    // 外审发现：对端只要不是同一侧就可以承接，small_only 对端能接小请求，
-    // 因此 large_only 必须可选；只有 small_only 选项会因失去大请求承接而被禁。
+    // 对端只要不是同一侧就可以承接：small_only 对端能接小请求，large_only 必须可选。
     setAccountsByPlatform({
       deepseek: [
         makeAccount(910, 'deepseek', [49]),
