@@ -193,6 +193,10 @@ const ModelWhitelistSelectorStub = defineComponent({
     modelValue: {
       type: Array,
       default: () => []
+    },
+    disabled: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ['update:modelValue'],
@@ -208,6 +212,7 @@ const ModelWhitelistSelectorStub = defineComponent({
       <span data-testid="model-whitelist-value">
         {{ Array.isArray(modelValue) ? modelValue.join(',') : '' }}
       </span>
+      <span data-testid="model-whitelist-disabled">{{ disabled ? 'yes' : 'no' }}</span>
     </div>
   `
 })
@@ -577,6 +582,140 @@ describe('EditAccountModal', () => {
       expect(updateAccountMock.mock.calls[0]?.[1]?.expires_at).toBe(new Date('2031-01-10T12:00:00').getTime() / 1000)
       wrapper.unmount()
     })
+  })
+
+  // c1p1-C3（1）：cursor OAuth 账号打开弹窗时，从 credentials.model_mapping 回填模型列表，
+  // 且分组只显示模型所属家族（anthropic）与匹配 composite 组，不显示 openai。
+  it('backfills cursor OAuth models and filters groups by model family', async () => {
+    authIsSimpleMode.value = false
+    const account = buildAccount()
+    account.platform = 'cursor'
+    account.type = 'oauth'
+    account.credentials = {
+      access_token: 'cursor-token',
+      model_mapping: { 'claude-fable-5-1': 'claude-fable-5-1' }
+    }
+    const anthropicGroup = { id: 34, name: 'claude-max', platform: 'anthropic', status: 'active' }
+    const openaiGroup = { id: 35, name: 'gpt-max', platform: 'openai', status: 'active' }
+    const compositeGroup = {
+      id: 94,
+      name: 'welfare',
+      platform: 'composite',
+      status: 'active',
+      model_allowlist: { enabled: true, models: ['claude-fable-5-1'] }
+    }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+    getQuotaKeyMock.mockReset()
+
+    const wrapper = mountModal(account, true)
+    await wrapper.setProps({ groups: [anthropicGroup, openaiGroup, compositeGroup] as any })
+    await flushPromises()
+
+    // 模型回填验证：credentials.model_mapping 被回填进账号模型名单（cursorSelectedModels），
+    // 进而驱动分组过滤——composite 组 welfare 仅在账号模型名单覆盖其 allowlist 时才显示，
+    // 故 welfare 可见即证明 model_mapping 已回填；claude-max 因 anthropic 家族可见，
+    // gpt-max（openai 家族）因模型名单里没有 openai 家族而不显示。
+    const selector = wrapper.get('[data-tour="account-form-groups"]')
+    expect(selector.text()).toContain('claude-max')
+    expect(selector.text()).toContain('welfare')
+    expect(selector.text()).not.toContain('gpt-max')
+    wrapper.unmount()
+  })
+
+  // c1p1-C3（2）：绑定激活码的 cursor 账号，6 项全部只读展示且提交 payload 不含这 6 项，
+  // 并保留原有 credentials.model_mapping。
+  it('renders cursor quota-key-managed fields read-only and omits them on save', async () => {
+    const keyExpiresAt = '2029-05-01T08:30:00Z'
+    const account = buildAccount()
+    account.platform = 'cursor'
+    account.type = 'apikey'
+    account.quota_key_id = 42
+    account.credentials = {
+      api_key: 'sk-cursor',
+      model_mapping: { 'claude-fable-5-1': 'claude-fable-5-1' }
+    }
+    account.concurrency = 3
+    account.load_factor = null
+    account.priority = 2
+    account.rate_multiplier = 1
+    account.expires_at = null
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    getQuotaKeyMock.mockReset().mockResolvedValue({ expires_at: keyExpiresAt })
+
+    const wrapper = mountModal(account)
+    await flushPromises()
+
+    expect(getQuotaKeyMock).toHaveBeenCalledWith(42)
+    // 6 项输入框全部 disabled。
+    expect(wrapper.get<HTMLInputElement>('input[type="datetime-local"]').attributes('disabled')).toBeDefined()
+    const concurrency = wrapper.findAll('input[type="number"]')
+    // concurrency / load_factor / priority / rate_multiplier 都在 number 输入里。
+    for (const input of concurrency) {
+      expect(input.attributes('disabled')).toBeDefined()
+    }
+    // 模型选择器 disabled。
+    expect(wrapper.get('[data-testid="model-whitelist-disabled"]').text()).toBe('yes')
+    // 提示横幅可见。
+    expect(wrapper.text()).toContain('admin.quotaKeys.managedByQuotaKeyBanner')
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+    expect(payload).not.toHaveProperty('expires_at')
+    expect(payload).not.toHaveProperty('concurrency')
+    expect(payload).not.toHaveProperty('load_factor')
+    expect(payload).not.toHaveProperty('priority')
+    expect(payload).not.toHaveProperty('rate_multiplier')
+    // 保留原有 credentials.model_mapping（不从表单覆盖）。
+    expect((payload.credentials as Record<string, unknown>)?.model_mapping).toEqual({
+      'claude-fable-5-1': 'claude-fable-5-1'
+    })
+    wrapper.unmount()
+  })
+
+  // c1p1-C3（3）：未绑定激活码的 cursor 账号（或非 cursor 账号）仍可正常编辑并提交这 6 项。
+  it('keeps fields editable and submits them for unmanaged (non-cursor or unbound) accounts', async () => {
+    // 未绑定激活码的 cursor 账号：cursorKeyManaged 为 false。
+    const account = buildAccount()
+    account.platform = 'cursor'
+    account.type = 'apikey'
+    account.quota_key_id = null
+    account.credentials = { api_key: 'sk-cursor' }
+    account.concurrency = 1
+    account.priority = 1
+    account.rate_multiplier = 1
+    account.expires_at = null
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    getQuotaKeyMock.mockReset()
+
+    const wrapper = mountModal(account)
+    await flushPromises()
+
+    expect(getQuotaKeyMock).not.toHaveBeenCalled()
+    // 横幅不应出现，输入可编辑。
+    expect(wrapper.text()).not.toContain('admin.quotaKeys.managedByQuotaKeyBanner')
+    expect(wrapper.get<HTMLInputElement>('input[type="datetime-local"]').attributes('disabled')).toBeUndefined()
+
+    // 编辑并发数并提交。
+    const concurrencyInput = wrapper.findAll('input[type="number"]')[0]
+    await concurrencyInput.setValue('7')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+    // 未绑定：6 项均正常写入（expires_at 为 null → 后端约定写 0）。
+    expect(payload.concurrency).toBe(7)
+    expect(payload).toHaveProperty('priority')
+    expect(payload).toHaveProperty('rate_multiplier')
+    expect(payload).toHaveProperty('load_factor')
+    expect(payload.expires_at).toBe(0)
+    wrapper.unmount()
   })
 
   it('allows removing assigned inactive groups and undoing the selection before saving', async () => {

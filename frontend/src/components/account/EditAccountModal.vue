@@ -381,8 +381,10 @@
               <button
                 type="button"
                 @click="modelRestrictionMode = 'whitelist'"
+                :disabled="cursorKeyManaged"
                 :class="[
                   'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+                  'disabled:cursor-not-allowed disabled:opacity-60',
                   modelRestrictionMode === 'whitelist'
                     ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-400'
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
@@ -406,8 +408,10 @@
               <button
                 type="button"
                 @click="modelRestrictionMode = 'mapping'"
+                :disabled="cursorKeyManaged"
                 :class="[
                   'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+                  'disabled:cursor-not-allowed disabled:opacity-60',
                   modelRestrictionMode === 'mapping'
                     ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
@@ -432,7 +436,7 @@
 
             <!-- Whitelist Mode -->
             <div v-if="modelRestrictionMode === 'whitelist'">
-              <ModelWhitelistSelector v-model="allowedModels" :model-mappings="modelMappings" :platform="account?.platform || 'anthropic'" :account-id="account?.id" :base-url="accountCredentialBaseUrl" />
+              <ModelWhitelistSelector v-model="allowedModels" :model-mappings="modelMappings" :platform="account?.platform || 'anthropic'" :account-id="account?.id" :base-url="accountCredentialBaseUrl" :disabled="cursorKeyManaged" />
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
                 <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
@@ -473,6 +477,7 @@
                   v-model="mapping.from"
                   type="text"
                   class="input flex-1"
+                  :disabled="cursorKeyManaged"
                   :placeholder="t('admin.accounts.requestModel')"
                 />
                 <svg
@@ -492,12 +497,14 @@
                   v-model="mapping.to"
                   type="text"
                   class="input flex-1"
+                  :disabled="cursorKeyManaged"
                   :placeholder="t('admin.accounts.actualModel')"
                 />
                 <button
                   type="button"
+                  :disabled="cursorKeyManaged"
                   @click="removeModelMapping(index)"
-                  class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20"
+                  class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-red-900/20"
                 >
                   <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path
@@ -511,11 +518,12 @@
               </div>
             </div>
 
-            <button
-              type="button"
-              @click="addModelMapping"
-              class="mb-3 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 dark:border-dark-500 dark:text-gray-400 dark:hover:border-dark-400 dark:hover:text-gray-300"
-            >
+              <button
+                type="button"
+                :disabled="cursorKeyManaged"
+                @click="addModelMapping"
+                class="mb-3 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-dark-500 dark:text-gray-400 dark:hover:border-dark-400 dark:hover:text-gray-300"
+              >
               <svg
                 class="mr-1 inline h-4 w-4"
                 fill="none"
@@ -538,8 +546,9 @@
                   v-for="preset in presetMappings"
                   :key="preset.label"
                   type="button"
+                  :disabled="cursorKeyManaged"
                   @click="addPresetMapping(preset.from, preset.to)"
-                  :class="['rounded-lg px-3 py-1 text-xs transition-colors', preset.color]"
+                  :class="['rounded-lg px-3 py-1 text-xs transition-colors', preset.color, 'disabled:cursor-not-allowed disabled:opacity-60']"
                 >
                   + {{ preset.label }}
                 </button>
@@ -981,6 +990,7 @@
                   v-model="mapping.from"
                   type="text"
                   class="input flex-1"
+                  :disabled="cursorKeyManaged"
                   :placeholder="t('admin.accounts.requestModel')"
                 />
                 <svg
@@ -1000,12 +1010,14 @@
                   v-model="mapping.to"
                   type="text"
                   class="input flex-1"
+                  :disabled="cursorKeyManaged"
                   :placeholder="t('admin.accounts.actualModel')"
                 />
                 <button
                   type="button"
+                  :disabled="cursorKeyManaged"
                   @click="removeModelMapping(index)"
-                  class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20"
+                  class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-red-900/20"
                 >
                   <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path
@@ -1019,11 +1031,12 @@
               </div>
             </div>
 
-            <button
-              type="button"
-              @click="addModelMapping"
-              class="mb-3 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 dark:border-dark-500 dark:text-gray-400 dark:hover:border-dark-400 dark:hover:text-gray-300"
-            >
+              <button
+                type="button"
+                :disabled="cursorKeyManaged"
+                @click="addModelMapping"
+                class="mb-3 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-dark-500 dark:text-gray-400 dark:hover:border-dark-400 dark:hover:text-gray-300"
+              >
               + {{ t('admin.accounts.addMapping') }}
             </button>
 
@@ -1229,6 +1242,7 @@
                   v-model="mapping.from"
                   type="text"
                   class="input flex-1"
+                  :disabled="cursorKeyManaged"
                   :placeholder="t('admin.accounts.requestModel')"
                 />
                 <svg
@@ -1248,12 +1262,14 @@
                   v-model="mapping.to"
                   type="text"
                   class="input flex-1"
+                  :disabled="cursorKeyManaged"
                   :placeholder="t('admin.accounts.actualModel')"
                 />
                 <button
                   type="button"
+                  :disabled="cursorKeyManaged"
                   @click="removeModelMapping(index)"
-                  class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20"
+                  class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-red-900/20"
                 >
                   <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path
@@ -1267,11 +1283,12 @@
               </div>
             </div>
 
-            <button
-              type="button"
-              @click="addModelMapping"
-              class="mb-3 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 dark:border-dark-500 dark:text-gray-400 dark:hover:border-dark-400 dark:hover:text-gray-300"
-            >
+              <button
+                type="button"
+                :disabled="cursorKeyManaged"
+                @click="addModelMapping"
+                class="mb-3 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-dark-500 dark:text-gray-400 dark:hover:border-dark-400 dark:hover:text-gray-300"
+              >
               <svg
                 class="mr-1 inline h-4 w-4"
                 fill="none"
@@ -1892,16 +1909,27 @@
         :type="account.type"
       />
 
+      <!-- 绑定激活码（cursorKeyManaged）：并发/负载因子/优先级/计费倍率/过期时间/模型限制
+           6 项随激活码统一管理，账号侧只读展示（c1p1-C3）。 -->
+      <div
+        v-if="cursorKeyManaged"
+        class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-400"
+      >
+        {{ t('admin.quotaKeys.managedByQuotaKeyBanner') }}
+      </div>
+
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
           <input v-model.number="form.concurrency" type="number" min="1" class="input"
+            :disabled="cursorKeyManaged"
             @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
           <input v-model.number="form.load_factor" type="number" min="1"
             class="input" :placeholder="String(form.concurrency || 1)"
+            :disabled="cursorKeyManaged"
             @input="form.load_factor = (form.load_factor &amp;&amp; form.load_factor >= 1) ? form.load_factor : null" />
           <p class="input-hint">{{ t('admin.accounts.loadFactorHint') }}</p>
         </div>
@@ -1912,6 +1940,7 @@
             type="number"
             min="1"
             class="input"
+            :disabled="cursorKeyManaged"
             data-tour="account-form-priority"
           />
           <p class="input-hint">{{ t('admin.accounts.priorityHint') }}</p>
@@ -1925,7 +1954,7 @@
             step="0.001"
             class="input disabled:cursor-not-allowed disabled:opacity-60"
             data-testid="account-rate-multiplier"
-            :disabled="upstreamBillingRateSyncEnabled"
+            :disabled="upstreamBillingRateSyncEnabled || cursorKeyManaged"
           />
           <p class="input-hint">
             {{
@@ -1957,6 +1986,12 @@
           </div>
         </div>
       </div>
+      <p
+        v-if="cursorKeyManaged"
+        class="mt-2 text-xs text-amber-600 dark:text-amber-400"
+      >
+        {{ t('admin.quotaKeys.managedFieldReadonlyHint') }}
+      </p>
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.expiresAt') }}</label>
         <input v-model="expiresAtInput" type="datetime-local" class="input" :disabled="cursorKeyManaged" />
@@ -3330,6 +3365,7 @@
         :platform="account?.platform"
         :mixed-scheduling="mixedScheduling"
         :native-platforms="account?.platform === 'antigravity' ? antigravitySupportedPlatforms : cursorNativePlatforms"
+        :account-models="account?.platform === 'cursor' && cursorSelectedModels.length > 0 ? cursorSelectedModels : undefined"
         data-tour="account-form-groups"
       />
 
@@ -3488,7 +3524,7 @@ import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import quotaKeysAPI from '@/api/admin/quotaKeys'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
-import { CURSOR_NATIVE_GROUP_PLATFORMS } from '@/constants/platforms'
+import { CURSOR_NATIVE_GROUP_PLATFORMS, inferGroupPlatformsFromModels } from '@/constants/platforms'
 import { ACCOUNT_CURRENCY, currencySymbol } from '@/utils/money'
 import {
   OPENAI_WS_MODE_CTX_POOL,
@@ -3542,9 +3578,27 @@ const isSparkShadow = computed(() => props.account?.parent_account_id != null)
 
 // cursor 账号是供给端：模型按所属原生平台进组（U7），分组选择器放行模型所属
 // 原生平台组；其他平台保持「同 platform + composite」既有规则，不放开。
-const cursorNativePlatforms = computed(() =>
-  props.account?.platform === 'cursor' ? [...CURSOR_NATIVE_GROUP_PLATFORMS] : []
-)
+// 当前 cursor 账号在用的模型名单（按用户裁定 2026-11-10：模型名单中有哪些家族，
+// 就显示哪些家族相关的分组）。mapping 模式取 from 段，whitelist 模式取 allowedModels；
+// 非 cursor 或未启用模型限制时返回空数组。
+const cursorSelectedModels = computed<string[]>(() => {
+  if (props.account?.platform !== 'cursor') return []
+  if (modelRestrictionMode.value === 'mapping') {
+    return modelMappings.value.map((m) => m.from.trim()).filter(Boolean)
+  }
+  return allowedModels.value.map((m) => m.trim()).filter(Boolean)
+})
+
+const cursorNativePlatforms = computed<GroupPlatform[]>(() => {
+  if (props.account?.platform !== 'cursor') return []
+  // 已选模型时按模型家族推导原生平台；推导结果非空才采用，避免误吞分组。
+  if (cursorSelectedModels.value.length > 0) {
+    const inferred = inferGroupPlatformsFromModels(cursorSelectedModels.value)
+    if (inferred.length > 0) return inferred
+  }
+  // 未选任何模型或全是未知模型：回落全套 cursor 原生平台。
+  return [...CURSOR_NATIVE_GROUP_PLATFORMS]
+})
 
 // cursor 账号绑定了激活码（quota key）：到期时间复用激活码上游自动获取的 expires_at，
 // 账号侧只读展示，不手工填、不写第二份（c1p1-A2）。
@@ -3565,6 +3619,16 @@ const loadManagedExpiry = async () => {
     const key = await quotaKeysAPI.get(quotaKeyId)
     const raw = key?.expires_at
     managedExpiresAt.value = raw ? new Date(raw).getTime() / 1000 : null
+    // 绑定激活码（c1p1-C3）：并发/负载因子/优先级/计费倍率/模型限制随激活码统一管理，
+    // 账号侧只读展示。激活码返回了对应字段才覆盖展示值，未返回时保留账号自身值，
+    // 不冲掉上面的 expires_at 逻辑。
+    if (key?.concurrency != null) form.concurrency = key.concurrency
+    if (key?.load_factor != null) form.load_factor = key.load_factor
+    if (key?.priority != null) form.priority = key.priority
+    if (key?.rate_multiplier != null) form.rate_multiplier = key.rate_multiplier
+    if (key?.model_mapping != null) {
+      loadModelRestrictionFromMapping(key.model_mapping as Record<string, unknown>)
+    }
   } catch {
     managedExpiresAt.value = null
   }
@@ -3572,7 +3636,8 @@ const loadManagedExpiry = async () => {
 
 // antigravity 账号是聚合平台：从账号 model_mapping 中解析实际支持的模型，
 // 自动识别这些模型所属的原生平台（anthropic、gemini、openai、grok 等），
-// 分组选择器据此展示对应平台的分组。
+// 分组选择器据此展示对应平台的分组。复用共享的模型家族推导（与 cursor 同口径，
+// 取代本地重复的硬编码关键词判断）。
 const antigravitySupportedPlatforms = computed<GroupPlatform[]>(() => {
   if (props.account?.platform !== 'antigravity') return []
 
@@ -3580,41 +3645,8 @@ const antigravitySupportedPlatforms = computed<GroupPlatform[]>(() => {
   const modelMapping = props.account?.credentials?.model_mapping as Record<string, string> | undefined
   if (!modelMapping || Object.keys(modelMapping).length === 0) return []
 
-  const platforms = new Set<GroupPlatform>()
-
-  // model_mapping 的 key 是模型名称
-  for (const modelName of Object.keys(modelMapping)) {
-    const lowerModel = modelName.toLowerCase()
-
-    // Anthropic 系列：claude、fable、opus、sonnet、haiku
-    if (
-      lowerModel.includes('claude') ||
-      lowerModel.includes('fable') ||
-      lowerModel.includes('opus') ||
-      lowerModel.includes('sonnet') ||
-      lowerModel.includes('haiku')
-    ) {
-      platforms.add('anthropic')
-    }
-    // Gemini 系列：gemini、argon
-    else if (lowerModel.includes('gemini') || lowerModel.includes('argon')) {
-      platforms.add('gemini')
-    }
-    // OpenAI 系列：gpt、o1、o3
-    else if (
-      lowerModel.includes('gpt') ||
-      lowerModel.includes('o1-') ||
-      lowerModel.includes('o3-')
-    ) {
-      platforms.add('openai')
-    }
-    // Grok 系列
-    else if (lowerModel.includes('grok')) {
-      platforms.add('grok')
-    }
-  }
-
-  return Array.from(platforms)
+  // 复用共享的模型家族推导（与 cursor 同口径，取代本地重复关键词判断）。
+  return inferGroupPlatformsFromModels(Object.keys(modelMapping))
 })
 
 
@@ -5037,8 +5069,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
             : 'https://api.anthropic.com'
     editBaseUrl.value = platformDefaultUrl
 
-    // Load model mappings for OpenAI/Grok OAuth accounts
-    if ((newAccount.platform === 'openai' || newAccount.platform === 'grok') && newAccount.credentials) {
+    // Load model mappings for OpenAI/Grok/Cursor OAuth accounts
+    if ((newAccount.platform === 'openai' || newAccount.platform === 'grok' || newAccount.platform === 'cursor') && newAccount.credentials) {
       const oauthCredentials = newAccount.credentials as Record<string, unknown>
       loadModelRestrictionFromMapping(oauthCredentials.model_mapping as Record<string, unknown> | undefined)
     } else {
@@ -5689,15 +5721,23 @@ const handleSubmit = async () => {
       updatePayload.proxy_id = 0
     }
     if (cursorKeyManaged.value) {
-      // 到期时间由激活码上游自动获取，账号侧不写第二份（c1p1-A2）。
+      // 绑定激活码（c1p1-C3）：并发/负载因子/优先级/计费倍率/过期时间 6 项均随激活码
+      // 统一管理，账号侧只读、保存时不从账号侧覆盖这 6 项（c1p1-A2 的到期时间复用激活码）。
       delete updatePayload.expires_at
+      delete updatePayload.concurrency
+      delete updatePayload.load_factor
+      delete updatePayload.priority
+      delete updatePayload.rate_multiplier
     } else if (form.expires_at === null) {
       updatePayload.expires_at = 0
     }
     // load_factor: 空值/NaN/0/负数 时发送 0（后端约定 <= 0 = 清除）
-    const lf = form.load_factor
-    if (lf == null || Number.isNaN(lf) || lf <= 0) {
-      updatePayload.load_factor = 0
+    // 绑定激活码时此项随激活码统一管理，上面已删除，此处不再写回（c1p1-C3）。
+    if (!cursorKeyManaged.value) {
+      const lf = form.load_factor
+      if (lf == null || Number.isNaN(lf) || lf <= 0) {
+        updatePayload.load_factor = 0
+      }
     }
     updatePayload.auto_pause_on_expired = autoPauseOnExpired.value
     if (
@@ -5838,7 +5878,15 @@ const handleSubmit = async () => {
       }
 
       // Add model mapping if configured（OpenAI 开启自动透传时保留现有映射，不再编辑）
-      if (shouldApplyModelMapping) {
+      if (cursorKeyManaged.value) {
+        // 绑定激活码（c1p1-C3）：模型限制随激活码统一管理，账号侧只读，提交时
+        // 保留原 credentials.model_mapping，不从表单覆盖。
+        if (currentCredentials.model_mapping) {
+          newCredentials.model_mapping = currentCredentials.model_mapping
+        } else {
+          delete newCredentials.model_mapping
+        }
+      } else if (shouldApplyModelMapping) {
         const modelMapping = buildModelRestrictionMapping()
         if (modelMapping) {
           newCredentials.model_mapping = modelMapping
