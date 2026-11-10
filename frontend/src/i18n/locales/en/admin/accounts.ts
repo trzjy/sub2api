@@ -2203,10 +2203,11 @@ export default {
     },
 
     largeRequestRouting: {
-      title: 'Large Request Only Accounts',
-      description: 'Choose which accounts serve large requests only, so small requests do not consume metered plan quota',
-      switch: 'Large request only',
+      title: 'Request Size Routing',
+      description: 'Restrict accounts to large requests, small requests, or neither — so one class of traffic does not burn the other plan',
+      switch: 'Request size scope',
       name: 'Account',
+      platform: 'Platform',
       priority: 'Priority',
       status: 'Status',
       group: 'Groups',
@@ -2218,8 +2219,14 @@ export default {
       statusInactive: 'Inactive',
       statusError: 'Error',
       noAccounts: 'No accounts',
-      lastPoolGuard: 'This is the last schedulable account in the group and cannot be set to large-request-only',
-      poolExhaustedFallback: 'No account in this platform group is left to serve normal requests, so the change was rejected'
+      expand: 'Expand',
+      collapse: 'Collapse',
+      scopeAny: 'Unrestricted',
+      scopeLargeOnly: 'Large only',
+      scopeSmallOnly: 'Small only',
+      lastPoolGuard: 'Last schedulable account in this group; request size restriction is not allowed',
+      poolExhaustedFallback: 'No account would be left for the other request size in this group; rejected',
+      crossPlatformHint: 'This account belongs to another platform and does not serve this family; the control is disabled'
     },
 
     // Scheduled Tests

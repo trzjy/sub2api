@@ -4,17 +4,17 @@ import { flushPromises, mount } from '@vue/test-utils'
 import LargeRequestRoutingView from '../LargeRequestRoutingView.vue'
 import type { AccountListItem, AdminGroup } from '@/types'
 
-const { listAccounts, getAllIncludingInactive, setAccountLargeRequestOnly } = vi.hoisted(() => ({
+const { listAccounts, getAllIncludingInactive, setAccountRequestSizeScope } = vi.hoisted(() => ({
   listAccounts: vi.fn(),
   getAllIncludingInactive: vi.fn(),
-  setAccountLargeRequestOnly: vi.fn()
+  setAccountRequestSizeScope: vi.fn()
 }))
 
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       list: listAccounts,
-      setAccountLargeRequestOnly
+      setAccountRequestSizeScope
     },
     groups: {
       getAllIncludingInactive
@@ -33,7 +33,7 @@ vi.mock('vue-i18n', async () => {
 function makeGroup(
   id: number,
   name: string,
-  platform: 'deepseek' | 'zhipu' | 'kimi',
+  platform: GroupPlatformLike,
   subscriptionType: 'standard' | 'subscription'
 ): AdminGroup {
   return {
@@ -44,9 +44,11 @@ function makeGroup(
   } as unknown as AdminGroup
 }
 
+type GroupPlatformLike = 'deepseek' | 'zhipu' | 'kimi' | 'codebuddy' | string
+
 function makeAccount(
   id: number,
-  platform: 'deepseek' | 'zhipu' | 'kimi',
+  platform: string,
   groupIDs: number[],
   overrides: Partial<AccountListItem> = {}
 ): AccountListItem {
@@ -58,19 +60,28 @@ function makeAccount(
     schedulable: true,
     priority: 10,
     group_ids: groupIDs,
-    extra: {},
     ...overrides
   } as unknown as AccountListItem
 }
 
-function mockBackend(groups: AdminGroup[], accounts: AccountListItem[]): void {
-  getAllIncludingInactive.mockResolvedValue(groups)
-  listAccounts.mockImplementation(
-    async (_page: number, _pageSize: number, filters?: { platform?: string }) => {
-      const items = accounts.filter((account) => account.platform === filters?.platform)
-      return { items, total: items.length, page: 1, page_size: 200, pages: 1 }
-    }
-  )
+const GROUPS: AdminGroup[] = [
+  makeGroup(49, 'DeepSeek 计量分组', 'deepseek', 'standard'),
+  makeGroup(115, 'Deepseek 月卡订阅', 'deepseek', 'subscription'),
+  makeGroup(116, 'Glm 月卡订阅', 'zhipu', 'subscription'),
+  makeGroup(117, 'Kimi 月卡订阅', 'kimi', 'subscription')
+]
+
+function accountsByPlatform(): Record<string, AccountListItem[]> {
+  return {
+    deepseek: [
+      makeAccount(807, 'deepseek', [49, 115]),
+      makeAccount(239, 'deepseek', [49, 115])
+    ],
+    zhipu: [makeAccount(808, 'zhipu', [116]), makeAccount(240, 'zhipu', [116])],
+    kimi: [makeAccount(817, 'kimi', [117]), makeAccount(238, 'kimi', [117])],
+    // 跨平台账号：绑在 deepseek 月卡订阅里，但平台是 codebuddy
+    codebuddy: [makeAccount(386, 'codebuddy', [115])]
+  }
 }
 
 function mountView() {
@@ -86,139 +97,111 @@ function mountView() {
   })
 }
 
-function toggleCheckbox(element: Element, checked: boolean): void {
-  const input = element as HTMLInputElement
-  input.checked = checked
-  input.dispatchEvent(new Event('change'))
+async function expandFamily(wrapper: Awaited<ReturnType<typeof mountView>>, platform: string) {
+  const toggle = wrapper.find(`[data-testid="family-toggle-${platform}"]`)
+  if (toggle.exists()) {
+    await toggle.trigger('click')
+    await flushPromises()
+  }
 }
 
-describe('admin LargeRequestRoutingView', () => {
-  beforeEach(() => {
-    listAccounts.mockReset()
-    getAllIncludingInactive.mockReset()
-    setAccountLargeRequestOnly.mockReset()
+beforeEach(() => {
+  vi.clearAllMocks()
+  const byPlatform = accountsByPlatform()
+  getAllIncludingInactive.mockResolvedValue(GROUPS)
+  listAccounts.mockImplementation(async (_page: number, _size: number, opts: { platform: string }) => {
+    const items = byPlatform[opts.platform] ?? []
+    return { items, total: items.length }
   })
+  setAccountRequestSizeScope.mockImplementation(async (id: number, scope: string) => ({
+    id,
+    name: `account-${id}`,
+    platform: 'deepseek',
+    status: 'active',
+    schedulable: true,
+    priority: 10,
+    group_ids: [],
+    extra: { large_request_only: scope === 'large_only', small_request_only: scope === 'small_only' }
+  }))
+})
 
-  it('renders three families with metered and subscription segments', async () => {
-    mockBackend(
-      [
-        makeGroup(1, 'deepseek-metered', 'deepseek', 'standard'),
-        makeGroup(2, 'deepseek-subscription', 'deepseek', 'subscription'),
-        makeGroup(3, 'glm-metered', 'zhipu', 'standard'),
-        makeGroup(4, 'kimi-metered', 'kimi', 'standard')
-      ],
-      [
-        makeAccount(101, 'deepseek', [1, 2]),
-        makeAccount(102, 'deepseek', [1]),
-        makeAccount(201, 'zhipu', [3]),
-        makeAccount(301, 'kimi', [4])
-      ]
-    )
-
+describe('LargeRequestRoutingView', () => {
+  it('默认只展开第一个家族，其余折叠', async () => {
     const wrapper = mountView()
     await flushPromises()
 
     expect(wrapper.find('[data-testid="family-deepseek"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="family-zhipu"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="family-kimi"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="family-deepseek"] h2').text()).toBe('DeepSeek')
-    expect(wrapper.get('[data-testid="family-zhipu"] h2').text()).toBe('GLM')
-    expect(wrapper.get('[data-testid="family-kimi"] h2').text()).toBe('Kimi')
 
-    for (const platform of ['deepseek', 'zhipu', 'kimi']) {
-      expect(wrapper.find(`[data-testid="segment-${platform}-standard"]`).exists()).toBe(true)
-      expect(wrapper.find(`[data-testid="segment-${platform}-subscription"]`).exists()).toBe(true)
-    }
-
-    // 计量段：同一家族的账号按 group_ids 落位；订阅段只收订阅型分组。
-    expect(
-      wrapper.findAll('[data-testid="segment-deepseek-standard"] [data-testid^="row-deepseek-standard-"]')
-    ).toHaveLength(2)
-    expect(wrapper.find('[data-testid="row-deepseek-standard-101"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="row-deepseek-standard-102"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="row-deepseek-subscription-101"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="row-deepseek-subscription-102"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="row-zhipu-standard-201"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="row-kimi-standard-301"]').exists()).toBe(true)
+    // 折叠内容用 v-show 控制，检查计算样式前的 aria-expanded 更稳定
+    expect(wrapper.find('[data-testid="family-toggle-deepseek"]').attributes('aria-expanded')).toBe('true')
+    expect(wrapper.find('[data-testid="family-toggle-zhipu"]').attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('[data-testid="family-toggle-kimi"]').attributes('aria-expanded')).toBe('false')
   })
 
-  it('calls setAccountLargeRequestOnly and syncs every row of the account', async () => {
-    mockBackend(
-      [
-        makeGroup(1, 'deepseek-metered', 'deepseek', 'standard'),
-        makeGroup(2, 'deepseek-subscription', 'deepseek', 'subscription')
-      ],
-      [
-        makeAccount(101, 'deepseek', [1, 2]),
-        makeAccount(102, 'deepseek', [1]),
-        makeAccount(103, 'deepseek', [2])
-      ]
-    )
-    setAccountLargeRequestOnly.mockResolvedValue({ id: 101, extra: { large_request_only: true } })
+  it('展开后渲染该家族账号，三态下拉可选', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await expandFamily(wrapper, 'zhipu')
 
+    const select = wrapper.find('[data-testid="lro-scope-808"]')
+    expect(select.exists()).toBe(true)
+    expect((select.element as HTMLSelectElement).value).toBe('any')
+    expect((select.element as HTMLSelectElement).disabled).toBe(false)
+  })
+
+  it('切换三态调用接口并更新本地状态', async () => {
     const wrapper = mountView()
     await flushPromises()
 
-    const toggles = wrapper.findAll('[data-testid="lro-toggle-101"]')
-    expect(toggles).toHaveLength(2)
-
-    toggleCheckbox(toggles[0].element, true)
+    const select = wrapper.find('[data-testid="lro-scope-807"]')
+    await select.setValue('large_only')
     await flushPromises()
 
-    expect(setAccountLargeRequestOnly).toHaveBeenCalledTimes(1)
-    expect(setAccountLargeRequestOnly).toHaveBeenCalledWith(101, true)
-
-    for (const toggle of wrapper.findAll('[data-testid="lro-toggle-101"]')) {
-      expect((toggle.element as HTMLInputElement).checked).toBe(true)
-    }
+    expect(setAccountRequestSizeScope).toHaveBeenCalledWith(807, 'large_only')
+    expect((wrapper.find('[data-testid="lro-scope-807"]').element as HTMLSelectElement).value).toBe('large_only')
   })
 
-  it('disables the switch of the last account left in the pool', async () => {
-    mockBackend(
-      [makeGroup(1, 'deepseek-metered', 'deepseek', 'standard')],
-      [
-        makeAccount(101, 'deepseek', [1]),
-        makeAccount(102, 'deepseek', [1], { extra: { large_request_only: true } })
-      ]
-    )
-
+  it('接口失败时回滚选择并显示错误条', async () => {
+    setAccountRequestSizeScope.mockRejectedValueOnce({ code: 'REQUEST_SIZE_SCOPE_POOL_EXHAUSTED', message: 'pool empty' })
     const wrapper = mountView()
     await flushPromises()
 
-    const lastAccount = wrapper.get('[data-testid="lro-toggle-101"]').element as HTMLInputElement
-    expect(lastAccount.disabled).toBe(true)
+    const select = wrapper.find('[data-testid="lro-scope-807"]')
+    await select.setValue('small_only')
+    await flushPromises()
 
-    // 已启用的账号始终允许取消，不受池内最后一个保护限制。
-    const enabledAccount = wrapper.get('[data-testid="lro-toggle-102"]').element as HTMLInputElement
-    expect(enabledAccount.disabled).toBe(false)
-    expect(enabledAccount.checked).toBe(true)
+    expect((wrapper.find('[data-testid="lro-scope-807"]').element as HTMLSelectElement).value).toBe('any')
+    expect(wrapper.find('[data-testid="lro-error-banner"]').text()).toContain('pool empty')
   })
 
-  it('shows the error banner and rolls the toggle back when the pool is exhausted', async () => {
-    mockBackend(
-      [makeGroup(1, 'deepseek-metered', 'deepseek', 'standard')],
-      [makeAccount(101, 'deepseek', [1]), makeAccount(102, 'deepseek', [1])]
-    )
-    setAccountLargeRequestOnly.mockRejectedValue({
-      code: 'LARGE_REQUEST_ONLY_POOL_EXHAUSTED',
-      message: '池内最后一个可用账号不可开启大请求专属'
+  it('跨平台账号显示在所属分组中且开关禁用', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const select = wrapper.find('[data-testid="lro-scope-386"]')
+    expect(select.exists()).toBe(true)
+    expect((select.element as HTMLSelectElement).disabled).toBe(true)
+  })
+
+  it('池内最后一个未受限账号不可设置限制', async () => {
+    const byPlatform: Record<string, AccountListItem[]> = {
+      deepseek: [makeAccount(900, 'deepseek', [49])],
+      zhipu: [],
+      kimi: [],
+      codebuddy: []
+    }
+    listAccounts.mockImplementation(async (_page: number, _size: number, opts: { platform: string }) => {
+      const items = byPlatform[opts.platform] ?? []
+      return { items, total: items.length }
     })
 
     const wrapper = mountView()
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="lro-error-banner"]').exists()).toBe(false)
-
-    const toggle = wrapper.get('[data-testid="lro-toggle-101"]')
-    expect((toggle.element as HTMLInputElement).disabled).toBe(false)
-    toggleCheckbox(toggle.element, true)
-    await flushPromises()
-
-    expect(setAccountLargeRequestOnly).toHaveBeenCalledWith(101, true)
-    const banner = wrapper.get('[data-testid="lro-error-banner"]')
-    expect(banner.text()).toContain('池内最后一个可用账号不可开启大请求专属')
-    expect((wrapper.get('[data-testid="lro-toggle-101"]').element as HTMLInputElement).checked).toBe(
-      false
-    )
+    const select = wrapper.find('[data-testid="lro-scope-900"]')
+    expect(select.exists()).toBe(true)
+    expect((select.element as HTMLSelectElement).disabled).toBe(true)
   })
 })

@@ -772,7 +772,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。
-	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyLargeRequestOnlyExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body)
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body)
 	for id := range largeRequestOnlyAdds {
 		failedAccountIDs[id] = struct{}{}
 	}
@@ -1585,7 +1585,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。估算模型用映射后的 estimateModel（与既有三门派发单同口径）。
-	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyLargeRequestOnlyExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body)
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body)
 	for id := range largeRequestOnlyAdds {
 		failedAccountIDs[id] = struct{}{}
 	}
@@ -3395,7 +3395,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。用连接首帧（firstMessage）估算，模型用 wsForwardModel。
-	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyLargeRequestOnlyExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage)
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage)
 	for id := range largeRequestOnlyAdds {
 		failedAccountIDs[id] = struct{}{}
 	}
@@ -5574,21 +5574,19 @@ func (h *OpenAIGatewayHandler) applySensenovaSizeExclusion(
 	return excluded
 }
 
-// applyLargeRequestOnlyExclusion 实现「只接大请求」账号在小请求上的动态排除（方案 §3.2）。
+// applyRequestSizeScopeExclusion 实现账号级请求规模归属在选号前的动态排除（方案 §3.2）。
 //
 // 在选号循环之前调用：先估算本次请求的 input token（input-only），估算失败 → 失败开放
-// 返回空集（绝不因估算失败拦请求）；估算 <= service.LargeRequestOnlyInputThreshold
-// （256000）视为小请求，调用 GatewayService.LargeRequestOnlyExcludedIDs 取该分组可调度
-// 候选中开启「仅接大请求」开关的账号 id 集合，交由调用方并入 failedAccountIDs——保证
-// 开启该开关的账号只参与估算 input 超过阈值的大请求候选；估算 > 阈值视为大请求，
-// 不排除任何账号。
+// 返回空集（绝不因估算失败拦请求）。估算 <= service.LargeRequestOnlyInputThreshold
+// （256000）视为小请求，排除本组候选中开启「仅接大请求」的账号；估算 > 阈值视为大请求，
+// 排除开启「仅接小请求」的账号。两类账号各自只参与对应规模的候选，互斥由写入入口保证。
 //
 // 返回值：估算 input（供对账落库，失败为 0）与被排除账号 id 集合。失败开放兜底：
 // 估算或列举候选异常一律按空集处理（不缩小候选），与既有选号路径零行为变化。
 //
-// 注：platform 为 LargeRequestOnlyExcludedIDs 列举候选所需的平台维度；ctx/groupID/model/
+// 注：platform 为 RequestSizeScopeExcludedIDs 列举候选所需的平台维度；ctx/groupID/model/
 // protocol/body 与 applySelfHostSizeExclusion 同来源。
-func (h *OpenAIGatewayHandler) applyLargeRequestOnlyExclusion(
+func (h *OpenAIGatewayHandler) applyRequestSizeScopeExclusion(
 	ctx context.Context,
 	reqLog *zap.Logger,
 	groupID *int64,
@@ -5606,7 +5604,7 @@ func (h *OpenAIGatewayHandler) applyLargeRequestOnlyExclusion(
 	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
 	if err != nil {
 		// 估算失败 → 失败开放：不排除任何账号，仅告警，绝不因估算失败拦请求。
-		reqLog.Warn("large_request_only_estimate_failed",
+		reqLog.Warn("request_size_scope_estimate_failed",
 			zap.Int64("group_id", groupIDVal),
 			zap.String("platform", platform),
 			zap.String("model", model),
@@ -5614,20 +5612,17 @@ func (h *OpenAIGatewayHandler) applyLargeRequestOnlyExclusion(
 		return 0, empty
 	}
 
-	if estimated > service.LargeRequestOnlyInputThreshold {
-		// 大请求（>256K）：全部账号参与，不排除「仅接大请求」账号。
-		return estimated, empty
-	}
-
-	// 小请求（≤256K）：取该分组可调度候选中开启「仅接大请求」开关的账号 id，
-	// 交由调用方并入 failedAccountIDs，确保其只参与大请求候选。
-	excluded, err := h.gatewayService.LargeRequestOnlyExcludedIDs(ctx, groupID, platform)
+	// 请求规模三态排除：小请求（<=256K）排除「仅接大请求」账号，
+	// 大请求（>256K）排除「仅接小请求」账号。两类账号各自只参与对应规模的候选。
+	isLargeRequest := estimated > service.LargeRequestOnlyInputThreshold
+	excluded, err := h.gatewayService.RequestSizeScopeExcludedIDs(ctx, groupID, platform, isLargeRequest)
 	if err != nil {
 		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
-		reqLog.Warn("large_request_only_list_failed",
+		reqLog.Warn("request_size_scope_list_failed",
 			zap.Int64("group_id", groupIDVal),
 			zap.String("platform", platform),
 			zap.Int("estimated_input_tokens", estimated),
+			zap.Bool("is_large_request", isLargeRequest),
 			zap.Error(err))
 		return estimated, empty
 	}

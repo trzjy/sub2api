@@ -3508,36 +3508,35 @@ func (h *AccountHandler) SetSchedulable(c *gin.Context) {
 	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
 }
 
-// setLargeRequestOnlyRequest 是「只接大请求」账号开关的请求体。
-// binding:"required" 对 *bool 只保证非 nil，false 是合法取值。
-type setLargeRequestOnlyRequest struct {
-	Enabled *bool `json:"enabled" binding:"required"`
+// setRequestSizeScopeRequest 是账号请求规模三态归属的请求体。
+// scope 取值：any（不限制）/ large_only（只接大请求）/ small_only（只接小请求）。
+type setRequestSizeScopeRequest struct {
+	Scope string `json:"scope" binding:"required"`
 }
 
-// SetLargeRequestOnly 是「只接大请求」账号开关的唯一写入口。
-// POST /api/v1/admin/accounts/:id/large-request-only
-func (h *AccountHandler) SetLargeRequestOnly(c *gin.Context) {
+// SetRequestSizeScope 是账号请求规模三态归属的唯一写入口。
+// POST /api/v1/admin/accounts/:id/request-size-scope
+func (h *AccountHandler) SetRequestSizeScope(c *gin.Context) {
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		response.BadRequest(c, "Invalid account ID")
 		return
 	}
 
-	var req setLargeRequestOnlyRequest
+	var req setRequestSizeScopeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
-	// binding:"required" 已保证非 nil；此处显式校验兜底，语义同
-	// upstreamBillingProbeEnabledRequest（false 合法，仅缺字段才拒绝）。
-	if req.Enabled == nil {
-		response.BadRequest(c, "enabled is required")
+	scope, ok := service.ParseRequestSizeScope(req.Scope)
+	if !ok {
+		response.BadRequest(c, "Invalid scope: must be one of any|large_only|small_only")
 		return
 	}
 
-	account, err := h.adminService.SetAccountLargeRequestOnly(c.Request.Context(), accountID, *req.Enabled)
+	account, err := h.adminService.SetAccountRequestSizeScope(c.Request.Context(), accountID, scope)
 	if err != nil {
-		// response.ErrorFrom 透传 LARGE_REQUEST_ONLY_POOL_EXHAUSTED 的 400 语义
+		// response.ErrorFrom 透传 REQUEST_SIZE_SCOPE_POOL_EXHAUSTED 的 400 语义
 		response.ErrorFrom(c, err)
 		return
 	}

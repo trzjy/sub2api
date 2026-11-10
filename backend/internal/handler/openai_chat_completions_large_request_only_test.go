@@ -6,7 +6,7 @@ package handler
 //
 // 组合论证说明：完整 ChatCompletions 调用链（鉴权 / body 解析 / 产能槽 / 计费预检）不在
 // 单测范围（与 openai_chat_completions_install_guard_test.go 同口径）。下方测试以与本入口
-// 挂门点**完全相同**的调用形态（applyLargeRequestOnlyExclusion + 并入 failedAccountIDs）与
+// 挂门点**完全相同**的调用形态（applyRequestSizeScopeExclusion + 并入 failedAccountIDs）与
 // 对账取值口径（RoutingEstimatedInputTokens / LargeRequestReroute）装配，断言门行为与
 // 传给 OpenAIRecordUsageInput 的两个对账字段值。
 //
@@ -35,7 +35,7 @@ func applyChatCompletionsLargeRequestOnlyForTest(
 	body []byte,
 	failedAccountIDs map[int64]struct{},
 ) (int, bool, map[int64]struct{}) {
-	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyLargeRequestOnlyExclusion(
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(
 		context.Background(), zap.NewNop(), groupID, platform, model,
 		service.TierRoutingProtocolChatCompletions, body)
 	for id := range largeRequestOnlyAdds {

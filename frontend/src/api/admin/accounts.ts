@@ -249,14 +249,16 @@ export async function update(id: number, updates: UpdateAccountRequest): Promise
   return data
 }
 
+export type RequestSizeScope = 'any' | 'large_only' | 'small_only'
+
 /**
- * Toggle the large-request-only flag for an account
+ * Set the request-size scope of an account
  * @param id - Account ID
- * @param enabled - Whether the account only accepts large requests
+ * @param scope - 'any' (unrestricted) | 'large_only' | 'small_only'
  * @returns Updated account
  */
-export async function setAccountLargeRequestOnly(id: number, enabled: boolean): Promise<Account> {
-  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/large-request-only`, { enabled })
+export async function setAccountRequestSizeScope(id: number, scope: RequestSizeScope): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/request-size-scope`, { scope })
   return data
 }
 
@@ -1527,7 +1529,7 @@ export const accountsAPI = {
   create,
   duplicate,
   update,
-  setAccountLargeRequestOnly,
+  setAccountRequestSizeScope,
   getGrokMediaEligibility,
   updateGrokMediaEligibility,
   checkMixedChannelRisk,

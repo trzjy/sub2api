@@ -1358,6 +1358,7 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 账号一律按 false 处理 → 该开关在选号侧恒为 false，大请求专属号会照常抢小单，
 		// 小请求侧则失去"避开大请求专属号"的过滤依据。
 		service.LargeRequestOnlyExtraKey,
+		service.SmallRequestOnlyExtraKey,
 		// HY3 legacy eligibility rechecks the mapped model against this existing
 		// account catalog snapshot. Dropping it makes a valid masked account fail
 		// closed after scheduler snapshot projection.

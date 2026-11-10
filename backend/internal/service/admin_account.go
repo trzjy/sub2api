@@ -137,8 +137,9 @@ var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
 	"drive_storage_limit":                    {},
 	"drive_storage_usage":                    {},
 	"drive_tier_updated_at":                  {},
-	// 仅接大请求开关必须经 SetAccountLargeRequestOnly 的池覆盖校验后设置，复制不继承。
+	// 请求规模三态开关必须经 SetAccountRequestSizeScope 的池覆盖校验后设置，复制不继承。
 	LargeRequestOnlyExtraKey: {},
+	SmallRequestOnlyExtraKey: {},
 	// Codex fingerprint convergence uses a per-account random seed, never copied from another account.
 	codexFingerprintSeedExtraKey:           {},
 	"codex_primary_used_percent":           {},
@@ -685,9 +686,10 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	delete(accountExtra, OllamaCloudUsageSnapshotExtraKey)
 	delete(accountExtra, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(accountExtra, OpenCodeGoUsageSnapshotExtraKey)
-	// 「仅接大请求」开关只能建号后经 SetAccountLargeRequestOnly 设置（该入口有池覆盖校验），
+	// 请求规模三态开关只能建号后经 SetAccountRequestSizeScope 设置（该入口有池覆盖校验），
 	// 建号路径（含复制账号/导入等复用链）不得直接携带，避免绕过池校验。
 	delete(accountExtra, LargeRequestOnlyExtraKey)
+	delete(accountExtra, SmallRequestOnlyExtraKey)
 	accountExtra = prepareCodexFingerprintExtraForCreate(input.Platform, input.Type, accountExtra)
 	account := &Account{
 		Name:        input.Name,
@@ -1150,9 +1152,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		delete(normalizedExtra, OpenCodeGoUsageAutoRefreshExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageSnapshotExtraKey)
 		delete(normalizedExtra, LargeRequestOnlyExtraKey)
+		delete(normalizedExtra, SmallRequestOnlyExtraKey)
 		// 全量编辑为整体替换语义：必须把库中现有值带回，否则已启用账号会被静默清除
-		if v, ok := account.Extra[LargeRequestOnlyExtraKey]; ok {
-			normalizedExtra[LargeRequestOnlyExtraKey] = v
+		for _, key := range []string{LargeRequestOnlyExtraKey, SmallRequestOnlyExtraKey} {
+			if v, ok := account.Extra[key]; ok {
+				normalizedExtra[key] = v
+			}
 		}
 		// 保留配额用量和专用服务受管字段，防止普通账号编辑意外覆盖。
 		for _, key := range []string{
@@ -1428,6 +1433,7 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	delete(updates, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(updates, OpenCodeGoUsageSnapshotExtraKey)
 	delete(updates, LargeRequestOnlyExtraKey)
+	delete(updates, SmallRequestOnlyExtraKey)
 	if _, exists := updates[openAILongContextBillingEnabledKey]; exists {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
@@ -1443,33 +1449,36 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	return s.accountRepo.UpdateExtra(ctx, id, updates)
 }
 
-// setAccountLargeRequestOnlyLockSQL 锁定分组内本平台全部可调度账号（池覆盖校验第一步，
+// setRequestSizeScopeLockSQL 锁定分组内本平台全部可调度账号（池覆盖校验第一步，
 // 与并发的开关变更/账号编辑互斥）。FOR UPDATE OF a 持锁至事务结束（方案 §3.5）。
-const setAccountLargeRequestOnlyLockSQL = `
+const setRequestSizeScopeLockSQL = `
 	SELECT a.id FROM accounts a
 	JOIN account_groups ag ON ag.account_id = a.id
 	WHERE ag.group_id = $1 AND a.platform = $2 AND a.deleted_at IS NULL
 	  AND a.status = 'active' AND a.schedulable = TRUE
 	FOR UPDATE OF a`
 
-// setAccountLargeRequestOnlyCountSQL 统计排除本账号后分组内仍可接小请求的账号数
-// （池覆盖校验第二步；结果 < 1 则拒绝开启）。
-const setAccountLargeRequestOnlyCountSQL = `
+// setRequestSizeScopeCountSQL 统计排除本账号后分组内仍可承接「另一侧规模」请求的账号数
+// （池覆盖校验第二步；结果 < 1 则拒绝）。$4 为需要排除的对侧开关键名：
+// 设为 large_only 时排除 large_request_only，设为 small_only 时排除 small_request_only。
+const setRequestSizeScopeCountSQL = `
 	SELECT count(*) FROM accounts a
 	JOIN account_groups ag ON ag.account_id = a.id
 	WHERE ag.group_id = $1 AND a.platform = $2 AND a.deleted_at IS NULL
 	  AND a.status = 'active' AND a.schedulable = TRUE
 	  AND a.id <> $3
-	  AND COALESCE((a.extra->>'large_request_only')::boolean, FALSE) = FALSE`
+	  AND COALESCE((a.extra->>$4)::boolean, FALSE) = FALSE`
 
-// SetAccountLargeRequestOnly 是「仅接大请求」开关的唯一配置写入口（方案 §3.5）。
+// SetAccountRequestSizeScope 是请求规模三态归属的唯一配置写入口（方案 §3.5）。
 //
 // 通用账号写路径（UpdateAccount / UpdateAccountExtra / BulkUpdateAccounts）均
-// delete 掉 large_request_only 键，开关只能经由本方法变更。disabled 直接落键；
-// enabled 需在同一事务内先对账号所属每个分组 FOR UPDATE 锁定可调度账号集并
-// 统计排除本账号后仍可接小请求的账号数——任一分组不足 1 个则回滚拒绝，防止
-// 开启后该分组小请求无账号可调度（池覆盖校验）。无分组账号跳过校验（不会被调度）。
-func (s *adminServiceImpl) SetAccountLargeRequestOnly(ctx context.Context, id int64, enabled bool) (*Account, error) {
+// delete 掉两个开关键，三态只能经由本方法变更。scope=any 直接落键；large_only /
+// small_only 需在同一事务内先对账号所属每个分组 FOR UPDATE 锁定可调度账号集并统计
+// 排除本账号后仍可承接「对侧规模」请求的账号数——任一分组不足 1 个则回滚拒绝，
+// 防止设置后该分组在该规模上无账号可调度（池覆盖校验）。无分组账号跳过校验（不会被调度）。
+//
+// 两个键互斥写入：设置一侧时另一侧显式置 false，避免出现双 true 的非法状态。
+func (s *adminServiceImpl) SetAccountRequestSizeScope(ctx context.Context, id int64, scope RequestSizeScope) (*Account, error) {
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -1477,17 +1486,33 @@ func (s *adminServiceImpl) SetAccountLargeRequestOnly(ctx context.Context, id in
 	if account == nil {
 		return nil, ErrAccountNotFound
 	}
-	if !enabled {
-		if err := s.accountRepo.UpdateExtra(ctx, id, map[string]any{LargeRequestOnlyExtraKey: false}); err != nil {
+	switch scope {
+	case RequestSizeScopeAny:
+		if err := s.accountRepo.UpdateExtra(ctx, id, map[string]any{
+			LargeRequestOnlyExtraKey: false,
+			SmallRequestOnlyExtraKey: false,
+		}); err != nil {
 			return nil, err
 		}
 		return s.accountRepo.GetByID(ctx, id)
+	case RequestSizeScopeLargeOnly, RequestSizeScopeSmallOnly:
+	default:
+		return nil, infraerrors.Newf(http.StatusBadRequest, "REQUEST_SIZE_SCOPE_INVALID",
+			"unsupported request size scope %q", string(scope))
 	}
 
-	// enabled == true：失败关闭。事务/校验基础设施缺失时直接报错，不静默跳过。
+	// 校验基础设施缺失时失败关闭，不静默跳过。
 	if s.entClient == nil {
 		return nil, errors.New("entClient is nil, cannot validate schedulable pool coverage")
 	}
+	// gateKey 是本次开启的键名，也是池覆盖校验要排除的键名：设置 large_only 要求池内
+	// 还有未被标为 large_only 的账号（能接小请求），设置 small_only 要求还有一个未被标为
+	// small_only 的账号（能接大请求）。scopeLabel 仅用于错误消息。
+	gateKey, scopeLabel := LargeRequestOnlyExtraKey, "small"
+	if scope == RequestSizeScopeSmallOnly {
+		gateKey, scopeLabel = SmallRequestOnlyExtraKey, "large"
+	}
+
 	tx, err := s.entClient.Tx(ctx)
 	if err != nil {
 		return nil, err
@@ -1498,7 +1523,7 @@ func (s *adminServiceImpl) SetAccountLargeRequestOnly(ctx context.Context, id in
 
 	for _, groupID := range account.GroupIDs {
 		// 锁定该分组内本平台全部可调度账号，与并发的开关变更/账号编辑互斥。
-		rows, err := client.QueryContext(txCtx, setAccountLargeRequestOnlyLockSQL, groupID, account.Platform)
+		rows, err := client.QueryContext(txCtx, setRequestSizeScopeLockSQL, groupID, account.Platform)
 		if err != nil {
 			return nil, err
 		}
@@ -1512,8 +1537,8 @@ func (s *adminServiceImpl) SetAccountLargeRequestOnly(ctx context.Context, id in
 			return nil, err
 		}
 
-		// 统计排除本账号后该分组内仍可接小请求的账号数。
-		countRows, err := client.QueryContext(txCtx, setAccountLargeRequestOnlyCountSQL, groupID, account.Platform, id)
+		// 统计排除本账号后该分组内仍可承接对侧规模请求的账号数。
+		countRows, err := client.QueryContext(txCtx, setRequestSizeScopeCountSQL, groupID, account.Platform, id, gateKey)
 		if err != nil {
 			return nil, err
 		}
@@ -1534,12 +1559,19 @@ func (s *adminServiceImpl) SetAccountLargeRequestOnly(ctx context.Context, id in
 			return nil, err
 		}
 		if remaining < 1 {
-			return nil, infraerrors.Newf(http.StatusBadRequest, "LARGE_REQUEST_ONLY_POOL_EXHAUSTED",
-				"group %d platform %s would have no schedulable account left for small requests", groupID, account.Platform)
+			return nil, infraerrors.Newf(http.StatusBadRequest, "REQUEST_SIZE_SCOPE_POOL_EXHAUSTED",
+				"group %d platform %s would have no schedulable account left for %s requests", groupID, account.Platform, scopeLabel)
 		}
 	}
 
-	if err := s.accountRepo.UpdateExtra(txCtx, id, map[string]any{LargeRequestOnlyExtraKey: true}); err != nil {
+	// 互斥写入：本次开启的键置 true，另一侧显式置 false。
+	updates := map[string]any{gateKey: true}
+	if scope == RequestSizeScopeLargeOnly {
+		updates[SmallRequestOnlyExtraKey] = false
+	} else {
+		updates[LargeRequestOnlyExtraKey] = false
+	}
+	if err := s.accountRepo.UpdateExtra(txCtx, id, updates); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1563,6 +1595,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	delete(input.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(input.Extra, OpenCodeGoUsageSnapshotExtraKey)
 	delete(input.Extra, LargeRequestOnlyExtraKey)
+	delete(input.Extra, SmallRequestOnlyExtraKey)
 
 	if len(input.AccountIDs) == 0 && input.Filters != nil {
 		accountIDs, err := s.resolveBulkUpdateTargetIDs(ctx, input.Filters)

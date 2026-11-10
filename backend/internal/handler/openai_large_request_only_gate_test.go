@@ -14,7 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-// largeRequestOnlyRepoStub 是 applyLargeRequestOnlyExclusion 在小请求分支下
+// largeRequestOnlyRepoStub 是 applyRequestSizeScopeExclusion 在小请求分支下
 // 列举可调度候选所需的极简账号仓库桩（仅实现本路径触达的方法）。
 type largeRequestOnlyRepoStub struct {
 	service.AccountRepository
@@ -64,7 +64,7 @@ func TestApplyLargeRequestOnlyExclusionSmallRequest(t *testing.T) {
 
 	// 不含图短请求：估算远低于 256000 阈值。
 	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
-	estimated, excluded := h.applyLargeRequestOnlyExclusion(
+	estimated, excluded := h.applyRequestSizeScopeExclusion(
 		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
 		service.TierRoutingProtocolChatCompletions, smallBody)
 
@@ -95,7 +95,7 @@ func TestApplyLargeRequestOnlyExclusionLargeRequest(t *testing.T) {
 	// 重复短语会被 BPE 高效压缩，放大到与 sensenova 测试同量级确保远超 256000 阈值。
 	huge := strings.Repeat("hello world ", 200000)
 	bigBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`, huge))
-	estimated, excluded := h.applyLargeRequestOnlyExclusion(
+	estimated, excluded := h.applyRequestSizeScopeExclusion(
 		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
 		service.TierRoutingProtocolChatCompletions, bigBody)
 
@@ -118,10 +118,87 @@ func TestApplyLargeRequestOnlyExclusionEstimateFailed(t *testing.T) {
 	reqLog := zap.NewNop()
 
 	badBody := []byte("{not valid json")
-	estimated, excluded := h.applyLargeRequestOnlyExclusion(
+	estimated, excluded := h.applyRequestSizeScopeExclusion(
 		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
 		service.TierRoutingProtocolChatCompletions, badBody)
 
 	require.Zero(t, estimated, "estimate failure must report estimated input as 0")
 	require.Empty(t, excluded, "estimate failure must fail-open with an empty exclusion set")
+}
+
+// TestApplyRequestSizeScopeExclusionLargeRequestSkipsSmallOnly 验证估算 input > 阈值
+// （大请求）时：开启「仅接小请求」开关的账号必须进入排除集合，其余账号保留。
+func TestApplyRequestSizeScopeExclusionLargeRequestSkipsSmallOnly(t *testing.T) {
+	t.Parallel()
+
+	smallOnly := &service.Account{
+		ID:       303,
+		Name:     "sro-303",
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://api.openai.com",
+		},
+		Extra: map[string]any{service.SmallRequestOnlyExtraKey: true},
+	}
+	plain := newLargeRequestOnlyTestAccount(404, false)
+
+	gw := service.NewOpenAIGatewayService(
+		largeRequestOnlyRepoStub{accounts: []service.Account{*smallOnly, *plain}},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	h := &OpenAIGatewayHandler{gatewayService: gw}
+	reqLog := zap.NewNop()
+
+	// 构造超过 256000 阈值的估算：重复长文本。
+	largeBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`,
+		strings.Repeat("word ", 500000)))
+	estimated, excluded := h.applyRequestSizeScopeExclusion(
+		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, largeBody)
+
+	require.Greater(t, estimated, service.LargeRequestOnlyInputThreshold, "用例前提：必须被判为大请求")
+	require.Len(t, excluded, 1, "大请求只能排除仅接小请求的账号")
+	_, ok := excluded[303]
+	require.True(t, ok, "small-only 账号 303 必须在大请求时被排除")
+	_, ok = excluded[404]
+	require.False(t, ok, "普通账号 404 不得被排除")
+}
+
+// TestApplyRequestSizeScopeExclusionSmallRequestSkipsLargeOnly 验证小请求时排除的是
+// 「仅接大请求」账号，而不是「仅接小请求」账号（两侧互不干扰）。
+func TestApplyRequestSizeScopeExclusionSmallRequestSkipsLargeOnly(t *testing.T) {
+	t.Parallel()
+
+	largeOnly := newLargeRequestOnlyTestAccount(505, true)
+	smallOnly := &service.Account{
+		ID:       606,
+		Name:     "sro-606",
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://api.openai.com",
+		},
+		Extra: map[string]any{service.SmallRequestOnlyExtraKey: true},
+	}
+
+	gw := service.NewOpenAIGatewayService(
+		largeRequestOnlyRepoStub{accounts: []service.Account{*largeOnly, *smallOnly}},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	h := &OpenAIGatewayHandler{gatewayService: gw}
+	reqLog := zap.NewNop()
+
+	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
+	_, excluded := h.applyRequestSizeScopeExclusion(
+		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, smallBody)
+
+	require.Len(t, excluded, 1, "小请求只排除仅接大请求的账号")
+	_, ok := excluded[505]
+	require.True(t, ok, "large-only 账号 505 必须在小请求时被排除")
+	_, ok = excluded[606]
+	require.False(t, ok, "small-only 账号 606 不得在小请求时被排除")
 }

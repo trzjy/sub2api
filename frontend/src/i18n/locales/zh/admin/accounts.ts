@@ -2181,9 +2181,10 @@ export default {
 
     largeRequestRouting: {
       title: '大请求专属账号',
-      description: '设置哪些账号只承接大请求，避免小请求消耗按次计费套餐次数',
-      switch: '大请求专属',
+      description: '按账号设置只承接大请求、只承接小请求，或不限制；避免一类请求消耗另一类套餐',
+      switch: '请求规模归属',
       name: '账号',
+      platform: '平台',
       priority: '优先级',
       status: '状态',
       group: '分组',
@@ -2195,8 +2196,14 @@ export default {
       statusInactive: '已停用',
       statusError: '异常',
       noAccounts: '暂无账号',
-      lastPoolGuard: '该分组内最后一个可调度账号，不能开启大请求专属',
-      poolExhaustedFallback: '该平台分组已无可承接普通请求的账号，操作被拒绝'
+      expand: '展开',
+      collapse: '收起',
+      scopeAny: '不限制',
+      scopeLargeOnly: '只接大请求',
+      scopeSmallOnly: '只接小请求',
+      lastPoolGuard: '该分组内最后一个可调度账号，不能设置请求规模限制',
+      poolExhaustedFallback: '该平台分组已无可承接另一侧规模请求的账号，操作被拒绝',
+      crossPlatformHint: '该账号属于其他平台，不承接本家族请求，开关不可设置'
     },
 
     // Scheduled Tests

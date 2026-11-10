@@ -181,13 +181,13 @@ func TestUpdateAccountNilExtraBranchUnaffected(t *testing.T) {
 
 func TestSetAccountLargeRequestOnlyNotFound(t *testing.T) {
 	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{}}
-	_, err := (&adminServiceImpl{accountRepo: repo}).SetAccountLargeRequestOnly(context.Background(), 999, true)
+	_, err := (&adminServiceImpl{accountRepo: repo}).SetAccountRequestSizeScope(context.Background(), 999, RequestSizeScopeLargeOnly)
 	require.ErrorIs(t, err, ErrAccountNotFound)
 }
 
 func TestSetAccountLargeRequestOnlyNilAccountReturnsNotFound(t *testing.T) {
 	repo := &nilAccountRepo{}
-	_, err := (&adminServiceImpl{accountRepo: repo}).SetAccountLargeRequestOnly(context.Background(), 1, true)
+	_, err := (&adminServiceImpl{accountRepo: repo}).SetAccountRequestSizeScope(context.Background(), 1, RequestSizeScopeLargeOnly)
 	require.ErrorIs(t, err, infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found"))
 }
 
@@ -198,7 +198,7 @@ func TestSetAccountLargeRequestOnlyEnableNilEntClientFailsClosed(t *testing.T) {
 	}}
 
 	svc := &adminServiceImpl{accountRepo: repo} // entClient == nil
-	_, err := svc.SetAccountLargeRequestOnly(context.Background(), accountID, true)
+	_, err := svc.SetAccountRequestSizeScope(context.Background(), accountID, RequestSizeScopeLargeOnly)
 
 	require.Error(t, err, "entClient 缺失必须失败关闭，不得静默跳过校验")
 	require.NotContains(t, repo.accounts[accountID].Extra, LargeRequestOnlyExtraKey)
@@ -210,7 +210,7 @@ func TestSetAccountLargeRequestOnlyDisableWritesFalse(t *testing.T) {
 		accountID: {ID: accountID, Platform: PlatformOpenAI, Extra: map[string]any{LargeRequestOnlyExtraKey: true}},
 	}}
 
-	result, err := (&adminServiceImpl{accountRepo: repo}).SetAccountLargeRequestOnly(context.Background(), accountID, false)
+	result, err := (&adminServiceImpl{accountRepo: repo}).SetAccountRequestSizeScope(context.Background(), accountID, RequestSizeScopeAny)
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -230,21 +230,21 @@ func TestSetAccountLargeRequestOnlyEnablePoolExhausted(t *testing.T) {
 	svc := &adminServiceImpl{accountRepo: repo, entClient: entClient}
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(setAccountLargeRequestOnlyLockSQL).
+	mock.ExpectQuery(setRequestSizeScopeLockSQL).
 		WithArgs(groupID, string(PlatformOpenAI)).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(accountID)))
-	mock.ExpectQuery(setAccountLargeRequestOnlyCountSQL).
-		WithArgs(groupID, string(PlatformOpenAI), accountID).
+	mock.ExpectQuery(setRequestSizeScopeCountSQL).
+		WithArgs(groupID, string(PlatformOpenAI), accountID, LargeRequestOnlyExtraKey).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(0)))
 	mock.ExpectRollback()
 
-	_, err := svc.SetAccountLargeRequestOnly(context.Background(), accountID, true)
+	_, err := svc.SetAccountRequestSizeScope(context.Background(), accountID, RequestSizeScopeLargeOnly)
 
 	require.Error(t, err)
 	var appErr *infraerrors.ApplicationError
 	require.True(t, errors.As(err, &appErr), "应返回 ApplicationError，实际：%T %v", err, err)
 	require.Equal(t, int32(http.StatusBadRequest), appErr.Code)
-	require.Equal(t, "LARGE_REQUEST_ONLY_POOL_EXHAUSTED", appErr.Reason)
+	require.Equal(t, "REQUEST_SIZE_SCOPE_POOL_EXHAUSTED", appErr.Reason)
 	require.NotContains(t, repo.accounts[accountID].Extra, LargeRequestOnlyExtraKey, "池耗尽回滚后不得写入开关")
 	require.Nil(t, repo.updates[accountID], "池耗尽回滚后不得调用 UpdateExtra")
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -260,15 +260,15 @@ func TestSetAccountLargeRequestOnlyEnableSuccess(t *testing.T) {
 	svc := &adminServiceImpl{accountRepo: repo, entClient: entClient}
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(setAccountLargeRequestOnlyLockSQL).
+	mock.ExpectQuery(setRequestSizeScopeLockSQL).
 		WithArgs(groupID, string(PlatformOpenAI)).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(accountID)))
-	mock.ExpectQuery(setAccountLargeRequestOnlyCountSQL).
-		WithArgs(groupID, string(PlatformOpenAI), accountID).
+	mock.ExpectQuery(setRequestSizeScopeCountSQL).
+		WithArgs(groupID, string(PlatformOpenAI), accountID, LargeRequestOnlyExtraKey).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(1)))
 	mock.ExpectCommit()
 
-	result, err := svc.SetAccountLargeRequestOnly(context.Background(), accountID, true)
+	result, err := svc.SetAccountRequestSizeScope(context.Background(), accountID, RequestSizeScopeLargeOnly)
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -289,7 +289,7 @@ func TestSetAccountLargeRequestOnlyEnableNoGroupsSkipsValidation(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectCommit()
 
-	result, err := svc.SetAccountLargeRequestOnly(context.Background(), accountID, true)
+	result, err := svc.SetAccountRequestSizeScope(context.Background(), accountID, RequestSizeScopeLargeOnly)
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -324,4 +324,99 @@ type nilAccountRepo struct {
 
 func (r *nilAccountRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
 	return nil, nil
+}
+
+func TestSetAccountRequestSizeScopeSmallOnlyPoolExhausted(t *testing.T) {
+	accountID := int64(311)
+	groupID := int64(11)
+	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
+		accountID: {ID: accountID, Platform: PlatformOpenAI, GroupIDs: []int64{groupID}},
+	}}
+	entClient, mock := newLargeRequestOnlyEntClient(t)
+	svc := &adminServiceImpl{accountRepo: repo, entClient: entClient}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(setRequestSizeScopeLockSQL).
+		WithArgs(groupID, string(PlatformOpenAI)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(accountID)))
+	mock.ExpectQuery(setRequestSizeScopeCountSQL).
+		WithArgs(groupID, string(PlatformOpenAI), accountID, SmallRequestOnlyExtraKey).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(0)))
+	mock.ExpectRollback()
+
+	_, err := svc.SetAccountRequestSizeScope(context.Background(), accountID, RequestSizeScopeSmallOnly)
+
+	require.Error(t, err)
+	var appErr *infraerrors.ApplicationError
+	require.True(t, errors.As(err, &appErr), "应返回 ApplicationError，实际：%T %v", err, err)
+	require.Equal(t, "REQUEST_SIZE_SCOPE_POOL_EXHAUSTED", appErr.Reason)
+	require.NotContains(t, repo.accounts[accountID].Extra, SmallRequestOnlyExtraKey, "池耗尽回滚后不得写入开关")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSetAccountRequestSizeScopeSmallOnlySuccessClosesLargeOnly(t *testing.T) {
+	accountID := int64(312)
+	groupID := int64(12)
+	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
+		accountID: {ID: accountID, Platform: PlatformOpenAI, GroupIDs: []int64{groupID},
+			Extra: map[string]any{LargeRequestOnlyExtraKey: true}},
+	}}
+	entClient, mock := newLargeRequestOnlyEntClient(t)
+	svc := &adminServiceImpl{accountRepo: repo, entClient: entClient}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(setRequestSizeScopeLockSQL).
+		WithArgs(groupID, string(PlatformOpenAI)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(accountID)))
+	mock.ExpectQuery(setRequestSizeScopeCountSQL).
+		WithArgs(groupID, string(PlatformOpenAI), accountID, SmallRequestOnlyExtraKey).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(1)))
+	mock.ExpectCommit()
+
+	result, err := svc.SetAccountRequestSizeScope(context.Background(), accountID, RequestSizeScopeSmallOnly)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, true, result.Extra[SmallRequestOnlyExtraKey])
+	require.Equal(t, false, result.Extra[LargeRequestOnlyExtraKey], "设置 small_only 必须同时关闭 large_only（互斥）")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSetAccountRequestSizeScopeAnyClearsBothKeys(t *testing.T) {
+	accountID := int64(313)
+	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
+		accountID: {ID: accountID, Platform: PlatformOpenAI, Extra: map[string]any{
+			LargeRequestOnlyExtraKey: true,
+		}},
+	}}
+
+	result, err := (&adminServiceImpl{accountRepo: repo}).SetAccountRequestSizeScope(context.Background(), accountID, RequestSizeScopeAny)
+
+	require.NoError(t, err)
+	require.Equal(t, false, result.Extra[LargeRequestOnlyExtraKey])
+	require.Equal(t, false, result.Extra[SmallRequestOnlyExtraKey])
+}
+
+func TestRequestSizeScopeOfPrecedence(t *testing.T) {
+	require.Equal(t, RequestSizeScopeAny, RequestSizeScopeOf(&Account{}))
+	require.Equal(t, RequestSizeScopeAny, RequestSizeScopeOf(&Account{Extra: map[string]any{LargeRequestOnlyExtraKey: false}}))
+	require.Equal(t, RequestSizeScopeLargeOnly, RequestSizeScopeOf(&Account{Extra: map[string]any{LargeRequestOnlyExtraKey: true}}))
+	require.Equal(t, RequestSizeScopeSmallOnly, RequestSizeScopeOf(&Account{Extra: map[string]any{SmallRequestOnlyExtraKey: true}}))
+	// 双 true 属非法脏数据：按「大请求优先」兜底，避免账号被两侧同时排除。
+	require.Equal(t, RequestSizeScopeLargeOnly, RequestSizeScopeOf(&Account{Extra: map[string]any{
+		LargeRequestOnlyExtraKey: true,
+		SmallRequestOnlyExtraKey: true,
+	}}))
+}
+
+func TestParseRequestSizeScope(t *testing.T) {
+	for _, raw := range []string{"any", "large_only", "small_only"} {
+		scope, ok := ParseRequestSizeScope(raw)
+		require.True(t, ok, raw)
+		require.Equal(t, RequestSizeScope(raw), scope)
+	}
+	for _, raw := range []string{"", "medium", "large", "LARGE_ONLY"} {
+		_, ok := ParseRequestSizeScope(raw)
+		require.False(t, ok, "未识别取值必须拒绝：%q", raw)
+	}
 }

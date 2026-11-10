@@ -47,7 +47,8 @@ type stubAdminService struct {
 	lastSetLargeRequestOnly             struct {
 		id      int64
 		enabled bool
-	}
+			scope   service.RequestSizeScope
+}
 	getAccountResult        *service.Account
 	updateAccountCalls      int
 	updateAccountExtraCalls int
@@ -576,10 +577,11 @@ func (s *stubAdminService) SetAccountSchedulable(ctx context.Context, id int64, 
 	return &account, nil
 }
 
-func (s *stubAdminService) SetAccountLargeRequestOnly(ctx context.Context, id int64, enabled bool) (*service.Account, error) {
+func (s *stubAdminService) SetAccountRequestSizeScope(ctx context.Context, id int64, scope service.RequestSizeScope) (*service.Account, error) {
 	s.setLargeRequestOnlyCalls++
 	s.lastSetLargeRequestOnly.id = id
-	s.lastSetLargeRequestOnly.enabled = enabled
+	s.lastSetLargeRequestOnly.enabled = scope == service.RequestSizeScopeLargeOnly
+	s.lastSetLargeRequestOnly.scope = scope
 	if s.setLargeRequestOnlyErr != nil {
 		return nil, s.setLargeRequestOnlyErr
 	}

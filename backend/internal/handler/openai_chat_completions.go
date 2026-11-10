@@ -270,7 +270,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	// 估算失败或列举候选失败（失败开放）时不排除任何账号。每个请求只调一次。
 	// 估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。
-	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyLargeRequestOnlyExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body)
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body)
 	for id := range largeRequestOnlyAdds {
 		failedAccountIDs[id] = struct{}{}
 	}

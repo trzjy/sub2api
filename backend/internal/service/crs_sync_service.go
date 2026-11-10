@@ -368,7 +368,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 			extra = mergeMap(existing.Extra, extra)
 			credentials = mergeMap(existing.Credentials, credentials)
 		}
-		stripCRSLargeRequestOnlyExtra(existing, extra)
+		stripCRSRequestSizeScopeExtra(existing, extra)
 		reconcileCRSUpstreamBillingProbeExtra(existing, PlatformAnthropic, targetType, credentials, extra)
 
 		if existing == nil {
@@ -505,7 +505,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 			extra = mergeMap(existing.Extra, extra)
 			credentials = mergeMap(existing.Credentials, credentials)
 		}
-		stripCRSLargeRequestOnlyExtra(existing, extra)
+		stripCRSRequestSizeScopeExtra(existing, extra)
 		reconcileCRSUpstreamBillingProbeExtra(existing, PlatformAnthropic, AccountTypeAPIKey, credentials, extra)
 
 		if existing == nil {
@@ -658,7 +658,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 			result.Items = append(result.Items, item)
 			continue
 		}
-		stripCRSLargeRequestOnlyExtra(existing, extra)
+		stripCRSRequestSizeScopeExtra(existing, extra)
 		if existing != nil {
 			credentials = mergeMap(existing.Credentials, credentials)
 		}
@@ -810,7 +810,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 			result.Items = append(result.Items, item)
 			continue
 		}
-		stripCRSLargeRequestOnlyExtra(existing, extra)
+		stripCRSRequestSizeScopeExtra(existing, extra)
 		if existing != nil {
 			credentials = mergeMap(existing.Credentials, credentials)
 		}
@@ -944,7 +944,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 			extra = mergeMap(existing.Extra, extra)
 			credentials = mergeMap(existing.Credentials, credentials)
 		}
-		stripCRSLargeRequestOnlyExtra(existing, extra)
+		stripCRSRequestSizeScopeExtra(existing, extra)
 		reconcileCRSUpstreamBillingProbeExtra(existing, PlatformGemini, AccountTypeOAuth, credentials, extra)
 
 		if existing == nil {
@@ -1075,7 +1075,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 			extra = mergeMap(existing.Extra, extra)
 			credentials = mergeMap(existing.Credentials, credentials)
 		}
-		stripCRSLargeRequestOnlyExtra(existing, extra)
+		stripCRSRequestSizeScopeExtra(existing, extra)
 		reconcileCRSUpstreamBillingProbeExtra(existing, PlatformGemini, AccountTypeAPIKey, credentials, extra)
 
 		if existing == nil {
@@ -1151,20 +1151,22 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 
 // stripCRSLargeRequestOnlyExtra 从 CRS 同步的 Extra 合并结果中剥离「仅接大请求」开关。
 // 该路径用 mergeMap(existing.Extra, srcExtra)(来源优先)整体替换本地 Extra 并经 accountRepo.Update
-// 写回,若放行来源值即可绕过 SetAccountLargeRequestOnly 的池覆盖校验(CRS 侧改一下就把账号变成只接大请求)。
+// 写回,若放行来源值即可绕过 SetAccountRequestSizeScope 的池覆盖校验(CRS 侧改一下就把账号变成只接大请求)。
 // 因为写回是整体替换语义,单纯 delete 会在来源同样带该键时连带清掉本地已启用的值(既有合并语义下本地值
 // 会被来源值覆盖,delete 后无处恢复),故与 AdminService.UpdateAccount 同口径:先删除,本地原本存在该键
 // 则回填原值——CRS 既不能打开、也不能关闭本地开关,其余键的合并语义保持现状。
-func stripCRSLargeRequestOnlyExtra(existing *Account, extra map[string]any) {
+func stripCRSRequestSizeScopeExtra(existing *Account, extra map[string]any) {
 	if extra == nil {
 		return
 	}
-	delete(extra, LargeRequestOnlyExtraKey)
-	if existing == nil {
-		return
-	}
-	if v, ok := existing.Extra[LargeRequestOnlyExtraKey]; ok {
-		extra[LargeRequestOnlyExtraKey] = v
+	for _, key := range []string{LargeRequestOnlyExtraKey, SmallRequestOnlyExtraKey} {
+		delete(extra, key)
+		if existing == nil {
+			continue
+		}
+		if v, ok := existing.Extra[key]; ok {
+			extra[key] = v
+		}
 	}
 }
 
