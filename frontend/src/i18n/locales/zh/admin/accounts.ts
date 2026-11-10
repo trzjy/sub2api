@@ -2179,5 +2179,25 @@ export default {
       }
     },
 
+    largeRequestRouting: {
+      title: '大请求专属账号',
+      description: '设置哪些账号只承接大请求，避免小请求消耗按次计费套餐次数',
+      switch: '大请求专属',
+      name: '账号',
+      priority: '优先级',
+      status: '状态',
+      group: '分组',
+      meteredGroups: '按次计费分组',
+      subscriptionGroups: '订阅分组',
+      schedulable: '可调度',
+      unschedulable: '不可调度',
+      statusActive: '正常',
+      statusInactive: '已停用',
+      statusError: '异常',
+      noAccounts: '暂无账号',
+      lastPoolGuard: '该分组内最后一个可调度账号，不能开启大请求专属',
+      poolExhaustedFallback: '该平台分组已无可承接普通请求的账号，操作被拒绝'
+    },
+
     // Scheduled Tests
 }

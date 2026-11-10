@@ -200,6 +200,16 @@ func LongContextBillingApplied(v bool) predicate.UsageLog {
 	return predicate.UsageLog(sql.FieldEQ(FieldLongContextBillingApplied, v))
 }
 
+// EstimatedInputTokens applies equality check predicate on the "estimated_input_tokens" field. It's identical to EstimatedInputTokensEQ.
+func EstimatedInputTokens(v int) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldEQ(FieldEstimatedInputTokens, v))
+}
+
+// LargeRequestReroute applies equality check predicate on the "large_request_reroute" field. It's identical to LargeRequestRerouteEQ.
+func LargeRequestReroute(v bool) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldEQ(FieldLargeRequestReroute, v))
+}
+
 // AccountRateMultiplier applies equality check predicate on the "account_rate_multiplier" field. It's identical to AccountRateMultiplierEQ.
 func AccountRateMultiplier(v float64) predicate.UsageLog {
 	return predicate.UsageLog(sql.FieldEQ(FieldAccountRateMultiplier, v))
@@ -1603,6 +1613,56 @@ func LongContextBillingAppliedEQ(v bool) predicate.UsageLog {
 // LongContextBillingAppliedNEQ applies the NEQ predicate on the "long_context_billing_applied" field.
 func LongContextBillingAppliedNEQ(v bool) predicate.UsageLog {
 	return predicate.UsageLog(sql.FieldNEQ(FieldLongContextBillingApplied, v))
+}
+
+// EstimatedInputTokensEQ applies the EQ predicate on the "estimated_input_tokens" field.
+func EstimatedInputTokensEQ(v int) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldEQ(FieldEstimatedInputTokens, v))
+}
+
+// EstimatedInputTokensNEQ applies the NEQ predicate on the "estimated_input_tokens" field.
+func EstimatedInputTokensNEQ(v int) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldNEQ(FieldEstimatedInputTokens, v))
+}
+
+// EstimatedInputTokensIn applies the In predicate on the "estimated_input_tokens" field.
+func EstimatedInputTokensIn(vs ...int) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldIn(FieldEstimatedInputTokens, vs...))
+}
+
+// EstimatedInputTokensNotIn applies the NotIn predicate on the "estimated_input_tokens" field.
+func EstimatedInputTokensNotIn(vs ...int) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldNotIn(FieldEstimatedInputTokens, vs...))
+}
+
+// EstimatedInputTokensGT applies the GT predicate on the "estimated_input_tokens" field.
+func EstimatedInputTokensGT(v int) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldGT(FieldEstimatedInputTokens, v))
+}
+
+// EstimatedInputTokensGTE applies the GTE predicate on the "estimated_input_tokens" field.
+func EstimatedInputTokensGTE(v int) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldGTE(FieldEstimatedInputTokens, v))
+}
+
+// EstimatedInputTokensLT applies the LT predicate on the "estimated_input_tokens" field.
+func EstimatedInputTokensLT(v int) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldLT(FieldEstimatedInputTokens, v))
+}
+
+// EstimatedInputTokensLTE applies the LTE predicate on the "estimated_input_tokens" field.
+func EstimatedInputTokensLTE(v int) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldLTE(FieldEstimatedInputTokens, v))
+}
+
+// LargeRequestRerouteEQ applies the EQ predicate on the "large_request_reroute" field.
+func LargeRequestRerouteEQ(v bool) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldEQ(FieldLargeRequestReroute, v))
+}
+
+// LargeRequestRerouteNEQ applies the NEQ predicate on the "large_request_reroute" field.
+func LargeRequestRerouteNEQ(v bool) predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldNEQ(FieldLargeRequestReroute, v))
 }
 
 // AccountRateMultiplierEQ applies the EQ predicate on the "account_rate_multiplier" field.

@@ -116,6 +116,12 @@ func (UsageLog) Fields() []ent.Field {
 		field.Bool("long_context_billing_applied").
 			Default(false).
 			Comment("Whether long-context pricing changed token prices for this request"),
+		field.Int("estimated_input_tokens").
+			Default(0).
+			Comment("Local input-token estimate taken before account selection; 0 when not estimated"),
+		field.Bool("large_request_reroute").
+			Default(false).
+			Comment("Whether the large-request-only rule excluded at least one account for this request"),
 
 		// account_rate_multiplier: 账号计费倍率快照（NULL 表示按 1.0 处理）
 		field.Float("account_rate_multiplier").

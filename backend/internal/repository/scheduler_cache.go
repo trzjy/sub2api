@@ -1353,6 +1353,11 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 响应侧身份净化新开关（与 mask_upstream_identity 解耦，见
 		// IsResponseIdentityMaskedAccount）。旧开关在投影里，新开关同样不能少。
 		service.ResponseIdentityMaskExtraKey,
+		// 大请求专属开关必须进投影：候选列举 listSchedulableAccounts 读本投影，
+		// 按 extra.large_request_only 把账号标成"仅接大请求"。裁掉该键，快照解码出的
+		// 账号一律按 false 处理 → 该开关在选号侧恒为 false，大请求专属号会照常抢小单，
+		// 小请求侧则失去"避开大请求专属号"的过滤依据。
+		service.LargeRequestOnlyExtraKey,
 		// HY3 legacy eligibility rechecks the mapped model against this existing
 		// account catalog snapshot. Dropping it makes a valid masked account fail
 		// closed after scheduler snapshot projection.

@@ -562,6 +562,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/large-request-routing',
+    name: 'AdminLargeRequestRouting',
+    component: () => import('@/views/admin/LargeRequestRoutingView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Large Request Routing',
+      titleKey: 'admin.largeRequestRouting.title',
+      descriptionKey: 'admin.largeRequestRouting.description'
+    }
+  },
+  {
     path: '/admin/quota-keys',
     name: 'AdminQuotaKeys',
     component: () => import('@/views/admin/QuotaKeysView.vue'),

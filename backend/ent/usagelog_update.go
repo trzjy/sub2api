@@ -608,6 +608,41 @@ func (_u *UsageLogUpdate) SetNillableLongContextBillingApplied(v *bool) *UsageLo
 	return _u
 }
 
+// SetEstimatedInputTokens sets the "estimated_input_tokens" field.
+func (_u *UsageLogUpdate) SetEstimatedInputTokens(v int) *UsageLogUpdate {
+	_u.mutation.ResetEstimatedInputTokens()
+	_u.mutation.SetEstimatedInputTokens(v)
+	return _u
+}
+
+// SetNillableEstimatedInputTokens sets the "estimated_input_tokens" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableEstimatedInputTokens(v *int) *UsageLogUpdate {
+	if v != nil {
+		_u.SetEstimatedInputTokens(*v)
+	}
+	return _u
+}
+
+// AddEstimatedInputTokens adds value to the "estimated_input_tokens" field.
+func (_u *UsageLogUpdate) AddEstimatedInputTokens(v int) *UsageLogUpdate {
+	_u.mutation.AddEstimatedInputTokens(v)
+	return _u
+}
+
+// SetLargeRequestReroute sets the "large_request_reroute" field.
+func (_u *UsageLogUpdate) SetLargeRequestReroute(v bool) *UsageLogUpdate {
+	_u.mutation.SetLargeRequestReroute(v)
+	return _u
+}
+
+// SetNillableLargeRequestReroute sets the "large_request_reroute" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableLargeRequestReroute(v *bool) *UsageLogUpdate {
+	if v != nil {
+		_u.SetLargeRequestReroute(*v)
+	}
+	return _u
+}
+
 // SetAccountRateMultiplier sets the "account_rate_multiplier" field.
 func (_u *UsageLogUpdate) SetAccountRateMultiplier(v float64) *UsageLogUpdate {
 	_u.mutation.ResetAccountRateMultiplier()
@@ -1278,6 +1313,15 @@ func (_u *UsageLogUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.LongContextBillingApplied(); ok {
 		_spec.SetField(usagelog.FieldLongContextBillingApplied, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.EstimatedInputTokens(); ok {
+		_spec.SetField(usagelog.FieldEstimatedInputTokens, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedEstimatedInputTokens(); ok {
+		_spec.AddField(usagelog.FieldEstimatedInputTokens, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.LargeRequestReroute(); ok {
+		_spec.SetField(usagelog.FieldLargeRequestReroute, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.AccountRateMultiplier(); ok {
 		_spec.SetField(usagelog.FieldAccountRateMultiplier, field.TypeFloat64, value)
@@ -2128,6 +2172,41 @@ func (_u *UsageLogUpdateOne) SetNillableLongContextBillingApplied(v *bool) *Usag
 	return _u
 }
 
+// SetEstimatedInputTokens sets the "estimated_input_tokens" field.
+func (_u *UsageLogUpdateOne) SetEstimatedInputTokens(v int) *UsageLogUpdateOne {
+	_u.mutation.ResetEstimatedInputTokens()
+	_u.mutation.SetEstimatedInputTokens(v)
+	return _u
+}
+
+// SetNillableEstimatedInputTokens sets the "estimated_input_tokens" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableEstimatedInputTokens(v *int) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetEstimatedInputTokens(*v)
+	}
+	return _u
+}
+
+// AddEstimatedInputTokens adds value to the "estimated_input_tokens" field.
+func (_u *UsageLogUpdateOne) AddEstimatedInputTokens(v int) *UsageLogUpdateOne {
+	_u.mutation.AddEstimatedInputTokens(v)
+	return _u
+}
+
+// SetLargeRequestReroute sets the "large_request_reroute" field.
+func (_u *UsageLogUpdateOne) SetLargeRequestReroute(v bool) *UsageLogUpdateOne {
+	_u.mutation.SetLargeRequestReroute(v)
+	return _u
+}
+
+// SetNillableLargeRequestReroute sets the "large_request_reroute" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableLargeRequestReroute(v *bool) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetLargeRequestReroute(*v)
+	}
+	return _u
+}
+
 // SetAccountRateMultiplier sets the "account_rate_multiplier" field.
 func (_u *UsageLogUpdateOne) SetAccountRateMultiplier(v float64) *UsageLogUpdateOne {
 	_u.mutation.ResetAccountRateMultiplier()
@@ -2828,6 +2907,15 @@ func (_u *UsageLogUpdateOne) sqlSave(ctx context.Context) (_node *UsageLog, err 
 	}
 	if value, ok := _u.mutation.LongContextBillingApplied(); ok {
 		_spec.SetField(usagelog.FieldLongContextBillingApplied, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.EstimatedInputTokens(); ok {
+		_spec.SetField(usagelog.FieldEstimatedInputTokens, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedEstimatedInputTokens(); ok {
+		_spec.AddField(usagelog.FieldEstimatedInputTokens, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.LargeRequestReroute(); ok {
+		_spec.SetField(usagelog.FieldLargeRequestReroute, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.AccountRateMultiplier(); ok {
 		_spec.SetField(usagelog.FieldAccountRateMultiplier, field.TypeFloat64, value)

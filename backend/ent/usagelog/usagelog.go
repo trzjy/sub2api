@@ -72,6 +72,10 @@ const (
 	FieldRateMultiplier = "rate_multiplier"
 	// FieldLongContextBillingApplied holds the string denoting the long_context_billing_applied field in the database.
 	FieldLongContextBillingApplied = "long_context_billing_applied"
+	// FieldEstimatedInputTokens holds the string denoting the estimated_input_tokens field in the database.
+	FieldEstimatedInputTokens = "estimated_input_tokens"
+	// FieldLargeRequestReroute holds the string denoting the large_request_reroute field in the database.
+	FieldLargeRequestReroute = "large_request_reroute"
 	// FieldAccountRateMultiplier holds the string denoting the account_rate_multiplier field in the database.
 	FieldAccountRateMultiplier = "account_rate_multiplier"
 	// FieldBillingType holds the string denoting the billing_type field in the database.
@@ -189,6 +193,8 @@ var Columns = []string{
 	FieldActualCost,
 	FieldRateMultiplier,
 	FieldLongContextBillingApplied,
+	FieldEstimatedInputTokens,
+	FieldLargeRequestReroute,
 	FieldAccountRateMultiplier,
 	FieldBillingType,
 	FieldStream,
@@ -264,6 +270,10 @@ var (
 	DefaultRateMultiplier float64
 	// DefaultLongContextBillingApplied holds the default value on creation for the "long_context_billing_applied" field.
 	DefaultLongContextBillingApplied bool
+	// DefaultEstimatedInputTokens holds the default value on creation for the "estimated_input_tokens" field.
+	DefaultEstimatedInputTokens int
+	// DefaultLargeRequestReroute holds the default value on creation for the "large_request_reroute" field.
+	DefaultLargeRequestReroute bool
 	// DefaultBillingType holds the default value on creation for the "billing_type" field.
 	DefaultBillingType int8
 	// DefaultStream holds the default value on creation for the "stream" field.
@@ -443,6 +453,16 @@ func ByRateMultiplier(opts ...sql.OrderTermOption) OrderOption {
 // ByLongContextBillingApplied orders the results by the long_context_billing_applied field.
 func ByLongContextBillingApplied(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLongContextBillingApplied, opts...).ToFunc()
+}
+
+// ByEstimatedInputTokens orders the results by the estimated_input_tokens field.
+func ByEstimatedInputTokens(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldEstimatedInputTokens, opts...).ToFunc()
+}
+
+// ByLargeRequestReroute orders the results by the large_request_reroute field.
+func ByLargeRequestReroute(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLargeRequestReroute, opts...).ToFunc()
 }
 
 // ByAccountRateMultiplier orders the results by the account_rate_multiplier field.

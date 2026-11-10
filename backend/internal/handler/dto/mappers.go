@@ -885,6 +885,8 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		InboundEndpoint:           l.InboundEndpoint,
 		GroupID:                   l.GroupID,
 		SubscriptionID:            l.SubscriptionID,
+		EstimatedInputTokens:      l.EstimatedInputTokens,
+		LargeRequestReroute:       l.LargeRequestReroute,
 		InputTokens:               l.InputTokens,
 		OutputTokens:              l.OutputTokens,
 		CacheCreationTokens:       l.CacheCreationTokens,

@@ -77,6 +77,8 @@ var usageLogInsertArgTypes = [...]string{
 	"text",        // upstream_endpoint
 	"boolean",     // cache_ttl_overridden
 	"boolean",     // long_context_billing_applied
+	"integer",     // estimated_input_tokens
+	"boolean",     // large_request_reroute
 	"bigint",      // channel_id
 	"text",        // model_mapping_chain
 	"text",        // billing_tier
@@ -119,11 +121,13 @@ type usageLogBestEffortRequest struct {
 }
 
 type usageLogInsertPrepared struct {
-	createdAt      time.Time
-	requestID      string
-	rateMultiplier float64
-	requestType    int16
-	args           []any
+	createdAt            time.Time
+	requestID            string
+	rateMultiplier       float64
+	requestType          int16
+	estimatedInputTokens int
+	largeRequestReroute  bool
+	args                 []any
 }
 
 type usageLogBatchState struct {
@@ -278,6 +282,8 @@ func (r *usageLogRepository) createSingle(ctx context.Context, sqlq sqlExecutor,
 			upstream_endpoint,
 			cache_ttl_overridden,
 			long_context_billing_applied,
+			estimated_input_tokens,
+			large_request_reroute,
 			channel_id,
 			model_mapping_chain,
 			billing_tier,
@@ -293,7 +299,7 @@ func (r *usageLogRepository) createSingle(ctx context.Context, sqlq sqlExecutor,
 			$12, $13, $14, $15,
 			$16, $17, $18, $19,
 			$20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64
 		)
 		ON CONFLICT (request_id, api_key_id) DO NOTHING
 		RETURNING id, created_at
@@ -738,6 +744,8 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 			upstream_endpoint,
 			cache_ttl_overridden,
 			long_context_billing_applied,
+			estimated_input_tokens,
+			large_request_reroute,
 			channel_id,
 			model_mapping_chain,
 			billing_tier,
@@ -749,9 +757,9 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 			created_at
 		) AS (VALUES `)
 
-	// Each batch row prepends the synthetic input_index before the 60
+	// Each batch row prepends the synthetic input_index before the 64
 	// usage-log column values.
-	args := make([]any, 0, len(keys)*61)
+	args := make([]any, 0, len(keys)*65)
 	argPos := 1
 	for idx, key := range keys {
 		if idx > 0 {
@@ -833,6 +841,8 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 				upstream_endpoint,
 				cache_ttl_overridden,
 				long_context_billing_applied,
+				estimated_input_tokens,
+				large_request_reroute,
 				channel_id,
 				model_mapping_chain,
 				billing_tier,
@@ -897,6 +907,8 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 				upstream_endpoint,
 				cache_ttl_overridden,
 				long_context_billing_applied,
+				estimated_input_tokens,
+				large_request_reroute,
 				channel_id,
 				model_mapping_chain,
 				billing_tier,
@@ -1001,6 +1013,8 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			upstream_endpoint,
 			cache_ttl_overridden,
 			long_context_billing_applied,
+			estimated_input_tokens,
+			large_request_reroute,
 			channel_id,
 			model_mapping_chain,
 			billing_tier,
@@ -1012,7 +1026,7 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			created_at
 		) AS (VALUES `)
 
-	args := make([]any, 0, len(preparedList)*60)
+	args := make([]any, 0, len(preparedList)*64)
 	argPos := 1
 	for idx, prepared := range preparedList {
 		if idx > 0 {
@@ -1091,6 +1105,8 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			upstream_endpoint,
 			cache_ttl_overridden,
 			long_context_billing_applied,
+			estimated_input_tokens,
+			large_request_reroute,
 			channel_id,
 			model_mapping_chain,
 			billing_tier,
@@ -1155,6 +1171,8 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			upstream_endpoint,
 			cache_ttl_overridden,
 			long_context_billing_applied,
+			estimated_input_tokens,
+			large_request_reroute,
 			channel_id,
 			model_mapping_chain,
 			billing_tier,
@@ -1227,6 +1245,8 @@ func execUsageLogInsertNoResult(ctx context.Context, sqlq sqlExecutor, prepared 
 			upstream_endpoint,
 			cache_ttl_overridden,
 			long_context_billing_applied,
+			estimated_input_tokens,
+			large_request_reroute,
 			channel_id,
 			model_mapping_chain,
 			billing_tier,
@@ -1242,7 +1262,7 @@ func execUsageLogInsertNoResult(ctx context.Context, sqlq sqlExecutor, prepared 
 			$12, $13, $14, $15,
 			$16, $17, $18, $19,
 			$20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64
 		)
 		ON CONFLICT (request_id, api_key_id) DO NOTHING
 	`, prepared.args...)
@@ -1304,76 +1324,81 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 		requestIDArg = requestID
 	}
 
-	return usageLogInsertPrepared{
-		createdAt:      createdAt,
-		requestID:      requestID,
-		rateMultiplier: rateMultiplier,
-		requestType:    requestType,
-		args: []any{
-			userID,
-			apiKeyID,
-			log.AccountID,
-			requestIDArg,
-			log.Model,
-			nullString(&requestedModel),
-			upstreamModel,
-			upstreamResponseModel,
-			upstreamModelMismatch,
-			groupID,
-			subscriptionID,
-			log.InputTokens,
-			log.OutputTokens,
-			log.CacheCreationTokens,
-			log.CacheReadTokens,
-			log.CacheCreation5mTokens,
-			log.CacheCreation1hTokens,
-			log.ImageOutputTokens,
-			log.ImageOutputCost,
-			log.ImageInputTokens,
-			log.ImageInputCost,
-			log.InputCost,
-			log.OutputCost,
-			log.CacheCreationCost,
-			log.CacheReadCost,
-			log.TotalCost,
-			log.ActualCost,
-			rateMultiplier,
-			log.AccountRateMultiplier,
-			log.BillingType,
-			requestType,
-			log.Stream,
-			log.OpenAIWSMode,
-			duration,
-			firstToken,
-			userAgent,
-			ipAddress,
-			log.ImageCount,
-			imageSize,
-			imageInputSize,
-			imageOutputSize,
-			imageSizeSource,
-			imageSizeBreakdown,
-			log.VideoCount,
-			videoResolution,
-			videoDurationSeconds,
-			serviceTier,
-			reasoningEffort,
-			requestedReasoningEffort,
-			inboundEndpoint,
-			upstreamEndpoint,
-			log.CacheTTLOverridden,
-			log.LongContextBillingApplied,
-			channelID,
-			modelMappingChain,
-			billingTier,
-			billingMode,
-			log.AccountStatsCost, // account_stats_cost
-			upstreamRequestID,    // upstream_request_id
-			sessionID,            // session_id
-			log.NativeCompactionV2,
-			createdAt,
-		},
+	prepared := usageLogInsertPrepared{
+		createdAt:            createdAt,
+		requestID:            requestID,
+		rateMultiplier:       rateMultiplier,
+		requestType:          requestType,
+		estimatedInputTokens: log.EstimatedInputTokens,
+		largeRequestReroute:  log.LargeRequestReroute,
 	}
+	prepared.args = []any{
+		userID,
+		apiKeyID,
+		log.AccountID,
+		requestIDArg,
+		log.Model,
+		nullString(&requestedModel),
+		upstreamModel,
+		upstreamResponseModel,
+		upstreamModelMismatch,
+		groupID,
+		subscriptionID,
+		log.InputTokens,
+		log.OutputTokens,
+		log.CacheCreationTokens,
+		log.CacheReadTokens,
+		log.CacheCreation5mTokens,
+		log.CacheCreation1hTokens,
+		log.ImageOutputTokens,
+		log.ImageOutputCost,
+		log.ImageInputTokens,
+		log.ImageInputCost,
+		log.InputCost,
+		log.OutputCost,
+		log.CacheCreationCost,
+		log.CacheReadCost,
+		log.TotalCost,
+		log.ActualCost,
+		rateMultiplier,
+		log.AccountRateMultiplier,
+		log.BillingType,
+		requestType,
+		log.Stream,
+		log.OpenAIWSMode,
+		duration,
+		firstToken,
+		userAgent,
+		ipAddress,
+		log.ImageCount,
+		imageSize,
+		imageInputSize,
+		imageOutputSize,
+		imageSizeSource,
+		imageSizeBreakdown,
+		log.VideoCount,
+		videoResolution,
+		videoDurationSeconds,
+		serviceTier,
+		reasoningEffort,
+		requestedReasoningEffort,
+		inboundEndpoint,
+		upstreamEndpoint,
+		log.CacheTTLOverridden,
+		log.LongContextBillingApplied,
+		prepared.estimatedInputTokens,
+		prepared.largeRequestReroute,
+		channelID,
+		modelMappingChain,
+		billingTier,
+		billingMode,
+		log.AccountStatsCost, // account_stats_cost
+		upstreamRequestID,    // upstream_request_id
+		sessionID,            // session_id
+		log.NativeCompactionV2,
+		createdAt,
+	}
+	return prepared
 }
 
 func usageLogBatchKey(requestID string, apiKeyID int64) string {

@@ -249,6 +249,17 @@ export async function update(id: number, updates: UpdateAccountRequest): Promise
   return data
 }
 
+/**
+ * Toggle the large-request-only flag for an account
+ * @param id - Account ID
+ * @param enabled - Whether the account only accepts large requests
+ * @returns Updated account
+ */
+export async function setAccountLargeRequestOnly(id: number, enabled: boolean): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/large-request-only`, { enabled })
+  return data
+}
+
 export async function getGrokMediaEligibility(id: number): Promise<GrokMediaEligibilityState> {
   const { data } = await apiClient.get<GrokMediaEligibilityState>(
     `/admin/accounts/${id}/grok-media-eligibility`
@@ -1516,6 +1527,7 @@ export const accountsAPI = {
   create,
   duplicate,
   update,
+  setAccountLargeRequestOnly,
   getGrokMediaEligibility,
   updateGrokMediaEligibility,
   checkMixedChannelRisk,

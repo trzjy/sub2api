@@ -409,6 +409,34 @@ func (_c *UsageLogCreate) SetNillableLongContextBillingApplied(v *bool) *UsageLo
 	return _c
 }
 
+// SetEstimatedInputTokens sets the "estimated_input_tokens" field.
+func (_c *UsageLogCreate) SetEstimatedInputTokens(v int) *UsageLogCreate {
+	_c.mutation.SetEstimatedInputTokens(v)
+	return _c
+}
+
+// SetNillableEstimatedInputTokens sets the "estimated_input_tokens" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableEstimatedInputTokens(v *int) *UsageLogCreate {
+	if v != nil {
+		_c.SetEstimatedInputTokens(*v)
+	}
+	return _c
+}
+
+// SetLargeRequestReroute sets the "large_request_reroute" field.
+func (_c *UsageLogCreate) SetLargeRequestReroute(v bool) *UsageLogCreate {
+	_c.mutation.SetLargeRequestReroute(v)
+	return _c
+}
+
+// SetNillableLargeRequestReroute sets the "large_request_reroute" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableLargeRequestReroute(v *bool) *UsageLogCreate {
+	if v != nil {
+		_c.SetLargeRequestReroute(*v)
+	}
+	return _c
+}
+
 // SetAccountRateMultiplier sets the "account_rate_multiplier" field.
 func (_c *UsageLogCreate) SetAccountRateMultiplier(v float64) *UsageLogCreate {
 	_c.mutation.SetAccountRateMultiplier(v)
@@ -769,6 +797,14 @@ func (_c *UsageLogCreate) defaults() {
 		v := usagelog.DefaultLongContextBillingApplied
 		_c.mutation.SetLongContextBillingApplied(v)
 	}
+	if _, ok := _c.mutation.EstimatedInputTokens(); !ok {
+		v := usagelog.DefaultEstimatedInputTokens
+		_c.mutation.SetEstimatedInputTokens(v)
+	}
+	if _, ok := _c.mutation.LargeRequestReroute(); !ok {
+		v := usagelog.DefaultLargeRequestReroute
+		_c.mutation.SetLargeRequestReroute(v)
+	}
 	if _, ok := _c.mutation.BillingType(); !ok {
 		v := usagelog.DefaultBillingType
 		_c.mutation.SetBillingType(v)
@@ -887,6 +923,12 @@ func (_c *UsageLogCreate) check() error {
 	}
 	if _, ok := _c.mutation.LongContextBillingApplied(); !ok {
 		return &ValidationError{Name: "long_context_billing_applied", err: errors.New(`ent: missing required field "UsageLog.long_context_billing_applied"`)}
+	}
+	if _, ok := _c.mutation.EstimatedInputTokens(); !ok {
+		return &ValidationError{Name: "estimated_input_tokens", err: errors.New(`ent: missing required field "UsageLog.estimated_input_tokens"`)}
+	}
+	if _, ok := _c.mutation.LargeRequestReroute(); !ok {
+		return &ValidationError{Name: "large_request_reroute", err: errors.New(`ent: missing required field "UsageLog.large_request_reroute"`)}
 	}
 	if _, ok := _c.mutation.BillingType(); !ok {
 		return &ValidationError{Name: "billing_type", err: errors.New(`ent: missing required field "UsageLog.billing_type"`)}
@@ -1066,6 +1108,14 @@ func (_c *UsageLogCreate) createSpec() (*UsageLog, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.LongContextBillingApplied(); ok {
 		_spec.SetField(usagelog.FieldLongContextBillingApplied, field.TypeBool, value)
 		_node.LongContextBillingApplied = value
+	}
+	if value, ok := _c.mutation.EstimatedInputTokens(); ok {
+		_spec.SetField(usagelog.FieldEstimatedInputTokens, field.TypeInt, value)
+		_node.EstimatedInputTokens = value
+	}
+	if value, ok := _c.mutation.LargeRequestReroute(); ok {
+		_spec.SetField(usagelog.FieldLargeRequestReroute, field.TypeBool, value)
+		_node.LargeRequestReroute = value
 	}
 	if value, ok := _c.mutation.AccountRateMultiplier(); ok {
 		_spec.SetField(usagelog.FieldAccountRateMultiplier, field.TypeFloat64, value)
@@ -1777,6 +1827,36 @@ func (u *UsageLogUpsert) SetLongContextBillingApplied(v bool) *UsageLogUpsert {
 // UpdateLongContextBillingApplied sets the "long_context_billing_applied" field to the value that was provided on create.
 func (u *UsageLogUpsert) UpdateLongContextBillingApplied() *UsageLogUpsert {
 	u.SetExcluded(usagelog.FieldLongContextBillingApplied)
+	return u
+}
+
+// SetEstimatedInputTokens sets the "estimated_input_tokens" field.
+func (u *UsageLogUpsert) SetEstimatedInputTokens(v int) *UsageLogUpsert {
+	u.Set(usagelog.FieldEstimatedInputTokens, v)
+	return u
+}
+
+// UpdateEstimatedInputTokens sets the "estimated_input_tokens" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateEstimatedInputTokens() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldEstimatedInputTokens)
+	return u
+}
+
+// AddEstimatedInputTokens adds v to the "estimated_input_tokens" field.
+func (u *UsageLogUpsert) AddEstimatedInputTokens(v int) *UsageLogUpsert {
+	u.Add(usagelog.FieldEstimatedInputTokens, v)
+	return u
+}
+
+// SetLargeRequestReroute sets the "large_request_reroute" field.
+func (u *UsageLogUpsert) SetLargeRequestReroute(v bool) *UsageLogUpsert {
+	u.Set(usagelog.FieldLargeRequestReroute, v)
+	return u
+}
+
+// UpdateLargeRequestReroute sets the "large_request_reroute" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateLargeRequestReroute() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldLargeRequestReroute)
 	return u
 }
 
@@ -2728,6 +2808,41 @@ func (u *UsageLogUpsertOne) SetLongContextBillingApplied(v bool) *UsageLogUpsert
 func (u *UsageLogUpsertOne) UpdateLongContextBillingApplied() *UsageLogUpsertOne {
 	return u.Update(func(s *UsageLogUpsert) {
 		s.UpdateLongContextBillingApplied()
+	})
+}
+
+// SetEstimatedInputTokens sets the "estimated_input_tokens" field.
+func (u *UsageLogUpsertOne) SetEstimatedInputTokens(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetEstimatedInputTokens(v)
+	})
+}
+
+// AddEstimatedInputTokens adds v to the "estimated_input_tokens" field.
+func (u *UsageLogUpsertOne) AddEstimatedInputTokens(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddEstimatedInputTokens(v)
+	})
+}
+
+// UpdateEstimatedInputTokens sets the "estimated_input_tokens" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateEstimatedInputTokens() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateEstimatedInputTokens()
+	})
+}
+
+// SetLargeRequestReroute sets the "large_request_reroute" field.
+func (u *UsageLogUpsertOne) SetLargeRequestReroute(v bool) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetLargeRequestReroute(v)
+	})
+}
+
+// UpdateLargeRequestReroute sets the "large_request_reroute" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateLargeRequestReroute() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateLargeRequestReroute()
 	})
 }
 
@@ -3898,6 +4013,41 @@ func (u *UsageLogUpsertBulk) SetLongContextBillingApplied(v bool) *UsageLogUpser
 func (u *UsageLogUpsertBulk) UpdateLongContextBillingApplied() *UsageLogUpsertBulk {
 	return u.Update(func(s *UsageLogUpsert) {
 		s.UpdateLongContextBillingApplied()
+	})
+}
+
+// SetEstimatedInputTokens sets the "estimated_input_tokens" field.
+func (u *UsageLogUpsertBulk) SetEstimatedInputTokens(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetEstimatedInputTokens(v)
+	})
+}
+
+// AddEstimatedInputTokens adds v to the "estimated_input_tokens" field.
+func (u *UsageLogUpsertBulk) AddEstimatedInputTokens(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddEstimatedInputTokens(v)
+	})
+}
+
+// UpdateEstimatedInputTokens sets the "estimated_input_tokens" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateEstimatedInputTokens() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateEstimatedInputTokens()
+	})
+}
+
+// SetLargeRequestReroute sets the "large_request_reroute" field.
+func (u *UsageLogUpsertBulk) SetLargeRequestReroute(v bool) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetLargeRequestReroute(v)
+	})
+}
+
+// UpdateLargeRequestReroute sets the "large_request_reroute" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateLargeRequestReroute() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateLargeRequestReroute()
 	})
 }
 

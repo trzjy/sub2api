@@ -3508,6 +3508,43 @@ func (h *AccountHandler) SetSchedulable(c *gin.Context) {
 	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
 }
 
+// setLargeRequestOnlyRequest 是「只接大请求」账号开关的请求体。
+// binding:"required" 对 *bool 只保证非 nil，false 是合法取值。
+type setLargeRequestOnlyRequest struct {
+	Enabled *bool `json:"enabled" binding:"required"`
+}
+
+// SetLargeRequestOnly 是「只接大请求」账号开关的唯一写入口。
+// POST /api/v1/admin/accounts/:id/large-request-only
+func (h *AccountHandler) SetLargeRequestOnly(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+
+	var req setLargeRequestOnlyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	// binding:"required" 已保证非 nil；此处显式校验兜底，语义同
+	// upstreamBillingProbeEnabledRequest（false 合法，仅缺字段才拒绝）。
+	if req.Enabled == nil {
+		response.BadRequest(c, "enabled is required")
+		return
+	}
+
+	account, err := h.adminService.SetAccountLargeRequestOnly(c.Request.Context(), accountID, *req.Enabled)
+	if err != nil {
+		// response.ErrorFrom 透传 LARGE_REQUEST_ONLY_POOL_EXHAUSTED 的 400 语义
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
+}
+
 // GetAvailableModels handles getting available models for an account
 // GET /api/v1/admin/accounts/:id/models
 func (h *AccountHandler) GetAvailableModels(c *gin.Context) {

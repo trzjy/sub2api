@@ -265,6 +265,16 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 	}
 
+	// 订阅组「只接大请求」动态排除（派发单 LRO-06，方案 §3.3）：选号循环前将本分组中
+	// 开启「仅接大请求」开关的账号在小请求上并入 failedAccountIDs；估算 > 阈值（大请求）、
+	// 估算失败或列举候选失败（失败开放）时不排除任何账号。每个请求只调一次。
+	// 估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
+	// LargeRequestReroute）。
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyLargeRequestOnlyExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body)
+	for id := range largeRequestOnlyAdds {
+		failedAccountIDs[id] = struct{}{}
+	}
+
 	for {
 		if failoverClientGone(c) {
 			return
@@ -440,22 +450,24 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			estimatedInputTokens := service.TierRoutingEstimatedInputTokens(c.Request.Context())
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-					Result:               res,
-					APIKey:               apiKey,
-					User:                 apiKey.User,
-					Account:              account,
-					Subscription:         subscription,
-					InboundEndpoint:      inboundEndpoint,
-					UpstreamEndpoint:     upstreamEndpoint,
-					UserAgent:            userAgent,
-					IPAddress:            clientIP,
-					APIKeyService:        h.apiKeyService,
-					QuotaPlatform:        quotaPlatform,
-					SessionID:            sessionID,
-					ChannelUsageFields:   clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
-					PricingAt:            pricingAt,
-					CyberBlocked:         cyberBlocked,
-					EstimatedInputTokens: estimatedInputTokens,
+					Result:                      res,
+					APIKey:                      apiKey,
+					User:                        apiKey.User,
+					Account:                     account,
+					Subscription:                subscription,
+					InboundEndpoint:             inboundEndpoint,
+					UpstreamEndpoint:            upstreamEndpoint,
+					UserAgent:                   userAgent,
+					IPAddress:                   clientIP,
+					APIKeyService:               h.apiKeyService,
+					QuotaPlatform:               quotaPlatform,
+					SessionID:                   sessionID,
+					ChannelUsageFields:          clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
+					PricingAt:                   pricingAt,
+					CyberBlocked:                cyberBlocked,
+					EstimatedInputTokens:        estimatedInputTokens,
+					RoutingEstimatedInputTokens: routingEstimatedInputTokens,
+					LargeRequestReroute:         len(largeRequestOnlyAdds) > 0,
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.openai_gateway.chat_completions"),

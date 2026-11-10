@@ -147,7 +147,12 @@ type UsageLog struct {
 	GroupID        *int64
 	SubscriptionID *int64
 
-	InputTokens         int
+	InputTokens int
+	// EstimatedInputTokens 是选号前本地估算的输入 token（仅对账，不参与计费）。
+	// 与 OpenAIRecordUsageInput.EstimatedInputTokens 不同：后者会覆盖计费 input_tokens。
+	EstimatedInputTokens int
+	// LargeRequestReroute 表示本请求因「只接大请求」规则排除了至少一个账号。
+	LargeRequestReroute bool
 	OutputTokens        int
 	CacheCreationTokens int
 	CacheReadTokens     int

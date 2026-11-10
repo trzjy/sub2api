@@ -185,6 +185,7 @@ export default {
     modelPlaza: '模型广场',
     subscriptions: '订阅管理',
     accounts: '账号管理',
+    largeRequestRouting: '大请求专属账号',
     plugins: '插件管理',
     proxies: 'IP管理',
     redeemCodes: '兑换码',

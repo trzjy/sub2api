@@ -293,6 +293,11 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		}
 	}
 
+	// 「仅接大请求」是受管开关，只能由 admin 建号/专项接口写入；
+	// 通用建号入口必须剥离请求携带的该键，避免绕过管理面授权。
+	extra := prepareCodexFingerprintExtraForCreate(req.Platform, req.Type, req.Extra)
+	delete(extra, LargeRequestOnlyExtraKey)
+
 	// 创建账号
 	account := &Account{
 		Name:        req.Name,
@@ -300,7 +305,7 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		Platform:    req.Platform,
 		Type:        req.Type,
 		Credentials: SanitizeStoredCredentials(req.Platform, req.Credentials),
-		Extra:       prepareCodexFingerprintExtraForCreate(req.Platform, req.Type, req.Extra),
+		Extra:       extra,
 		ProxyID:     req.ProxyID,
 		Concurrency: req.Concurrency,
 		Priority:    req.Priority,

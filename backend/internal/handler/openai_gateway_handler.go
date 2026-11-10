@@ -767,6 +767,16 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 	}
 
+	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
+	// 「仅接大请求」开关的账号从小请求（估算 input <= LargeRequestOnlyInputThreshold）
+	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
+	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
+	// LargeRequestReroute）。
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyLargeRequestOnlyExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body)
+	for id := range largeRequestOnlyAdds {
+		failedAccountIDs[id] = struct{}{}
+	}
+
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
 		// be drained after a disconnect. Re-check the client context before every
@@ -996,24 +1006,26 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			estimatedInputTokens := service.TierRoutingEstimatedInputTokens(c.Request.Context())
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-					Result:               res,
-					APIKey:               apiKey,
-					User:                 apiKey.User,
-					Account:              account,
-					Subscription:         subscription,
-					InboundEndpoint:      inboundEndpoint,
-					UpstreamEndpoint:     upstreamEndpoint,
-					UserAgent:            userAgent,
-					IPAddress:            clientIP,
-					RequestPayloadHash:   requestPayloadHash,
-					APIKeyService:        h.apiKeyService,
-					QuotaPlatform:        quotaPlatform,
-					SessionID:            sessionID,
-					ChannelUsageFields:   clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
-					PricingAt:            pricingAt,
-					CyberBlocked:         cyberBlocked,
-					NativeCompactionV2:   nativeV2,
-					EstimatedInputTokens: estimatedInputTokens,
+					Result:                      res,
+					APIKey:                      apiKey,
+					User:                        apiKey.User,
+					Account:                     account,
+					Subscription:                subscription,
+					InboundEndpoint:             inboundEndpoint,
+					UpstreamEndpoint:            upstreamEndpoint,
+					UserAgent:                   userAgent,
+					IPAddress:                   clientIP,
+					RequestPayloadHash:          requestPayloadHash,
+					APIKeyService:               h.apiKeyService,
+					QuotaPlatform:               quotaPlatform,
+					SessionID:                   sessionID,
+					ChannelUsageFields:          clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
+					PricingAt:                   pricingAt,
+					CyberBlocked:                cyberBlocked,
+					NativeCompactionV2:          nativeV2,
+					EstimatedInputTokens:        estimatedInputTokens,
+					RoutingEstimatedInputTokens: routingEstimatedInputTokens,
+					LargeRequestReroute:         len(largeRequestOnlyAdds) > 0,
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.openai_gateway.responses"),
@@ -1568,6 +1580,16 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		}
 	}
 
+	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
+	// 「仅接大请求」开关的账号从小请求（估算 input <= LargeRequestOnlyInputThreshold）
+	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
+	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
+	// LargeRequestReroute）。估算模型用映射后的 estimateModel（与既有三门派发单同口径）。
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyLargeRequestOnlyExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body)
+	for id := range largeRequestOnlyAdds {
+		failedAccountIDs[id] = struct{}{}
+	}
+
 	for {
 		if failoverClientGone(c) {
 			return
@@ -1752,23 +1774,25 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			estimatedInputTokens := service.TierRoutingEstimatedInputTokens(c.Request.Context())
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-					Result:               res,
-					APIKey:               apiKey,
-					User:                 apiKey.User,
-					Account:              account,
-					Subscription:         subscription,
-					InboundEndpoint:      inboundEndpoint,
-					UpstreamEndpoint:     upstreamEndpoint,
-					UserAgent:            userAgent,
-					IPAddress:            clientIP,
-					RequestPayloadHash:   requestPayloadHash,
-					APIKeyService:        h.apiKeyService,
-					QuotaPlatform:        quotaPlatform,
-					SessionID:            sessionID,
-					ChannelUsageFields:   clientRequestedUsageFields(c, channelMappingMsg, reqModel, res.UpstreamModel),
-					PricingAt:            pricingAt,
-					CyberBlocked:         cyberBlocked,
-					EstimatedInputTokens: estimatedInputTokens,
+					Result:                      res,
+					APIKey:                      apiKey,
+					User:                        apiKey.User,
+					Account:                     account,
+					Subscription:                subscription,
+					InboundEndpoint:             inboundEndpoint,
+					UpstreamEndpoint:            upstreamEndpoint,
+					UserAgent:                   userAgent,
+					IPAddress:                   clientIP,
+					RequestPayloadHash:          requestPayloadHash,
+					APIKeyService:               h.apiKeyService,
+					QuotaPlatform:               quotaPlatform,
+					SessionID:                   sessionID,
+					ChannelUsageFields:          clientRequestedUsageFields(c, channelMappingMsg, reqModel, res.UpstreamModel),
+					PricingAt:                   pricingAt,
+					CyberBlocked:                cyberBlocked,
+					EstimatedInputTokens:        estimatedInputTokens,
+					RoutingEstimatedInputTokens: routingEstimatedInputTokens,
+					LargeRequestReroute:         len(largeRequestOnlyAdds) > 0,
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.openai_gateway.messages"),
@@ -3366,6 +3390,16 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 	}
 
+	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
+	// 「仅接大请求」开关的账号从小请求（估算 input <= LargeRequestOnlyInputThreshold）
+	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
+	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
+	// LargeRequestReroute）。用连接首帧（firstMessage）估算，模型用 wsForwardModel。
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyLargeRequestOnlyExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage)
+	for id := range largeRequestOnlyAdds {
+		failedAccountIDs[id] = struct{}{}
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -3752,22 +3786,24 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				cyberBlocked := service.GetOpsCyberPolicy(c) != nil
 				h.submitOpenAIUsageRecordTask(ctx, result, func(taskCtx context.Context) {
 					if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
-						Result:             result,
-						APIKey:             turnBillingAPIKey,
-						User:               apiKey.User,
-						Account:            account,
-						Subscription:       subscription,
-						InboundEndpoint:    inboundEndpoint,
-						UpstreamEndpoint:   upstreamEndpoint,
-						UserAgent:          userAgent,
-						IPAddress:          clientIP,
-						RequestPayloadHash: requestPayloadHash,
-						APIKeyService:      h.apiKeyService,
-						QuotaPlatform:      quotaPlatform,
-						SessionID:          sessionID,
-						ChannelUsageFields: turnUsageFields,
-						PricingAt:          turnRecordPricingAt,
-						CyberBlocked:       cyberBlocked,
+						Result:                      result,
+						APIKey:                      turnBillingAPIKey,
+						User:                        apiKey.User,
+						Account:                     account,
+						Subscription:                subscription,
+						InboundEndpoint:             inboundEndpoint,
+						UpstreamEndpoint:            upstreamEndpoint,
+						UserAgent:                   userAgent,
+						IPAddress:                   clientIP,
+						RequestPayloadHash:          requestPayloadHash,
+						APIKeyService:               h.apiKeyService,
+						QuotaPlatform:               quotaPlatform,
+						SessionID:                   sessionID,
+						ChannelUsageFields:          turnUsageFields,
+						PricingAt:                   turnRecordPricingAt,
+						CyberBlocked:                cyberBlocked,
+						RoutingEstimatedInputTokens: routingEstimatedInputTokens,
+						LargeRequestReroute:         len(largeRequestOnlyAdds) > 0,
 					}); err != nil {
 						reqLog.Error("openai.websocket_record_usage_failed",
 							zap.Int64("account_id", account.ID),
@@ -5536,6 +5572,66 @@ func (h *OpenAIGatewayHandler) applySensenovaSizeExclusion(
 		return empty
 	}
 	return excluded
+}
+
+// applyLargeRequestOnlyExclusion 实现「只接大请求」账号在小请求上的动态排除（方案 §3.2）。
+//
+// 在选号循环之前调用：先估算本次请求的 input token（input-only），估算失败 → 失败开放
+// 返回空集（绝不因估算失败拦请求）；估算 <= service.LargeRequestOnlyInputThreshold
+// （256000）视为小请求，调用 GatewayService.LargeRequestOnlyExcludedIDs 取该分组可调度
+// 候选中开启「仅接大请求」开关的账号 id 集合，交由调用方并入 failedAccountIDs——保证
+// 开启该开关的账号只参与估算 input 超过阈值的大请求候选；估算 > 阈值视为大请求，
+// 不排除任何账号。
+//
+// 返回值：估算 input（供对账落库，失败为 0）与被排除账号 id 集合。失败开放兜底：
+// 估算或列举候选异常一律按空集处理（不缩小候选），与既有选号路径零行为变化。
+//
+// 注：platform 为 LargeRequestOnlyExcludedIDs 列举候选所需的平台维度；ctx/groupID/model/
+// protocol/body 与 applySelfHostSizeExclusion 同来源。
+func (h *OpenAIGatewayHandler) applyLargeRequestOnlyExclusion(
+	ctx context.Context,
+	reqLog *zap.Logger,
+	groupID *int64,
+	platform string,
+	model string,
+	protocol service.TierRoutingRequestProtocol,
+	body []byte,
+) (int, map[int64]struct{}) {
+	empty := make(map[int64]struct{})
+	groupIDVal := int64(0)
+	if groupID != nil {
+		groupIDVal = *groupID
+	}
+
+	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
+	if err != nil {
+		// 估算失败 → 失败开放：不排除任何账号，仅告警，绝不因估算失败拦请求。
+		reqLog.Warn("large_request_only_estimate_failed",
+			zap.Int64("group_id", groupIDVal),
+			zap.String("platform", platform),
+			zap.String("model", model),
+			zap.Error(err))
+		return 0, empty
+	}
+
+	if estimated > service.LargeRequestOnlyInputThreshold {
+		// 大请求（>256K）：全部账号参与，不排除「仅接大请求」账号。
+		return estimated, empty
+	}
+
+	// 小请求（≤256K）：取该分组可调度候选中开启「仅接大请求」开关的账号 id，
+	// 交由调用方并入 failedAccountIDs，确保其只参与大请求候选。
+	excluded, err := h.gatewayService.LargeRequestOnlyExcludedIDs(ctx, groupID, platform)
+	if err != nil {
+		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
+		reqLog.Warn("large_request_only_list_failed",
+			zap.Int64("group_id", groupIDVal),
+			zap.String("platform", platform),
+			zap.Int("estimated_input_tokens", estimated),
+			zap.Error(err))
+		return estimated, empty
+	}
+	return estimated, excluded
 }
 
 // attachCursorEstimatedInputTokens 对 cursor 平台请求（含 kn-cy 等 OpenAI 兼容反代），

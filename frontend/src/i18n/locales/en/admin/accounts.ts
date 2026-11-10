@@ -2202,5 +2202,25 @@ export default {
       }
     },
 
+    largeRequestRouting: {
+      title: 'Large Request Only Accounts',
+      description: 'Choose which accounts serve large requests only, so small requests do not consume metered plan quota',
+      switch: 'Large request only',
+      name: 'Account',
+      priority: 'Priority',
+      status: 'Status',
+      group: 'Groups',
+      meteredGroups: 'Metered groups',
+      subscriptionGroups: 'Subscription groups',
+      schedulable: 'Schedulable',
+      unschedulable: 'Unschedulable',
+      statusActive: 'Active',
+      statusInactive: 'Inactive',
+      statusError: 'Error',
+      noAccounts: 'No accounts',
+      lastPoolGuard: 'This is the last schedulable account in the group and cannot be set to large-request-only',
+      poolExhaustedFallback: 'No account in this platform group is left to serve normal requests, so the change was rejected'
+    },
+
     // Scheduled Tests
 }

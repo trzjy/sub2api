@@ -42,11 +42,17 @@ type stubAdminService struct {
 	lastUpdateAccountInput              *service.UpdateAccountInput
 	bulkUpdateAccountErr                error
 	lastBulkUpdateAccountInput          *service.BulkUpdateAccountsInput
-	getAccountResult                    *service.Account
-	updateAccountCalls                  int
-	updateAccountExtraCalls             int
-	checkMixedErr                       error
-	lastMixedCheck                      struct {
+	setLargeRequestOnlyErr              error
+	setLargeRequestOnlyCalls            int
+	lastSetLargeRequestOnly             struct {
+		id      int64
+		enabled bool
+	}
+	getAccountResult        *service.Account
+	updateAccountCalls      int
+	updateAccountExtraCalls int
+	checkMixedErr           error
+	lastMixedCheck          struct {
 		accountID int64
 		platform  string
 		groupIDs  []int64
@@ -567,6 +573,17 @@ func (s *stubAdminService) SetAccountError(ctx context.Context, id int64, errorM
 
 func (s *stubAdminService) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*service.Account, error) {
 	account := service.Account{ID: id, Name: "account", Status: service.StatusActive, Schedulable: schedulable}
+	return &account, nil
+}
+
+func (s *stubAdminService) SetAccountLargeRequestOnly(ctx context.Context, id int64, enabled bool) (*service.Account, error) {
+	s.setLargeRequestOnlyCalls++
+	s.lastSetLargeRequestOnly.id = id
+	s.lastSetLargeRequestOnly.enabled = enabled
+	if s.setLargeRequestOnlyErr != nil {
+		return nil, s.setLargeRequestOnlyErr
+	}
+	account := service.Account{ID: id, Name: "account", Status: service.StatusActive}
 	return &account, nil
 }
 

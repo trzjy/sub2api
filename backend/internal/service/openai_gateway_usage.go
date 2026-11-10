@@ -46,6 +46,11 @@ type OpenAIRecordUsageInput struct {
 	// 估算（service.EstimateTierRoutingInputTokens → service.WithTierRouting ctx →
 	// 透传至此）赋值，RecordUsage 不再持有第二份重算实现。
 	EstimatedInputTokens int
+	// RoutingEstimatedInputTokens 是选号前本地估算的输入 token，仅用于对账落库，
+	// 不参与计费（与 EstimatedInputTokens 覆盖计费语义严格区分）。
+	RoutingEstimatedInputTokens int
+	// LargeRequestReroute 表示本请求因「只接大请求」规则排除了至少一个账号。
+	LargeRequestReroute bool
 	// NativeCompactionV2 is an orthogonal semantic flag captured by the
 	// Responses handler from stream=true + compaction_trigger. It never stores
 	// the request payload and does not replace the transport request type.
@@ -463,18 +468,21 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		InboundEndpoint:          optionalTrimmedStringPtr(input.InboundEndpoint),
 		UpstreamEndpoint:         optionalTrimmedStringPtr(input.UpstreamEndpoint),
 		InputTokens:              actualInputTokens,
-		OutputTokens:             result.Usage.OutputTokens,
-		CacheCreationTokens:      result.Usage.CacheCreationInputTokens,
-		CacheReadTokens:          result.Usage.CacheReadInputTokens,
-		ImageInputTokens:         result.Usage.ImageInputTokens,
-		ImageOutputTokens:        result.Usage.ImageOutputTokens,
-		ImageCount:               result.ImageCount,
-		ImageSize:                optionalTrimmedStringPtr(result.ImageSize),
-		ImageInputSize:           optionalTrimmedStringPtr(result.ImageInputSize),
-		ImageOutputSize:          optionalTrimmedStringPtr(result.ImageOutputSize),
-		ImageSizeSource:          optionalTrimmedStringPtr(result.ImageSizeSource),
-		ImageSizeBreakdown:       imageSizeBreakdown,
-		NativeCompactionV2:       input.NativeCompactionV2,
+		// 对账字段：与计费 InputTokens 口径无关，原样透传选号前的本地估算与重路由标记。
+		EstimatedInputTokens: input.RoutingEstimatedInputTokens,
+		LargeRequestReroute:  input.LargeRequestReroute,
+		OutputTokens:         result.Usage.OutputTokens,
+		CacheCreationTokens:  result.Usage.CacheCreationInputTokens,
+		CacheReadTokens:      result.Usage.CacheReadInputTokens,
+		ImageInputTokens:     result.Usage.ImageInputTokens,
+		ImageOutputTokens:    result.Usage.ImageOutputTokens,
+		ImageCount:           result.ImageCount,
+		ImageSize:            optionalTrimmedStringPtr(result.ImageSize),
+		ImageInputSize:       optionalTrimmedStringPtr(result.ImageInputSize),
+		ImageOutputSize:      optionalTrimmedStringPtr(result.ImageOutputSize),
+		ImageSizeSource:      optionalTrimmedStringPtr(result.ImageSizeSource),
+		ImageSizeBreakdown:   imageSizeBreakdown,
+		NativeCompactionV2:   input.NativeCompactionV2,
 	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {

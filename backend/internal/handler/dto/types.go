@@ -776,6 +776,11 @@ type UsageLog struct {
 	GroupID        *int64 `json:"group_id"`
 	SubscriptionID *int64 `json:"subscription_id"`
 
+	// EstimatedInputTokens 是选号前本地估算的输入 token（仅对账，不参与计费）。
+	EstimatedInputTokens int `json:"estimated_input_tokens,omitempty"`
+	// LargeRequestReroute 表示本请求因「只接大请求」规则排除了至少一个账号。
+	LargeRequestReroute bool `json:"large_request_reroute,omitempty"`
+
 	InputTokens         int `json:"input_tokens"`
 	OutputTokens        int `json:"output_tokens"`
 	CacheCreationTokens int `json:"cache_creation_tokens"`
