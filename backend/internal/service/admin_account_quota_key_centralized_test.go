@@ -551,3 +551,110 @@ func TestAdminAccountQuotaKeyBoundUpdateFollowsManagedSettings(t *testing.T) {
 	require.Equal(t, keyExpiresAt.Unix(), dbAcc.ExpiresAt.Unix())
 	require.Equal(t, 0.5, dbAcc.RateMultiplier)
 }
+
+// TestCursorRebindToUnmappedKeyClearsOldMapping 锁定 P1：带 model_mapping 的 cursor 账号
+// 改绑到【未配置】model_mapping（NULL/空）的目标激活码后，账号 credentials 中旧来源码的
+// model_mapping 限制必须被显式清除，重置为无码级限制状态（与目标码语义一致），内存对象与
+// 真实 DB 行均不得残留。
+func TestCursorRebindToUnmappedKeyClearsOldMapping(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, client := managedSettingsQKAdminService(t)
+
+	source := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 1, 1, 10, 0.1, time.Time{}, map[string]string{"gpt-src": "gpt-src"})
+	// 目标激活码：未配置 model_mapping（NULL）。
+	target := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 7, 9, 55, 2.0, time.Time{}, nil)
+
+	// 账号原归属 source，凭据残留来源码的模型映射限制。
+	existing, err := client.Account.Create().
+		SetName("rebind-candidate").
+		SetPlatform(domain.PlatformCursor).
+		SetType(AccountTypeAPIKey).
+		SetCredentials(map[string]any{"api_key": "sk-src", "model_mapping": map[string]any{"gpt-src": "gpt-src"}}).
+		SetQuotaKeyID(source.ID).
+		Save(ctx)
+	require.NoError(t, err)
+	repo.upstreamBillingProbeAccountRepo.accounts[existing.ID] = &Account{
+		ID:         existing.ID,
+		Name:       existing.Name,
+		Platform:   domain.PlatformCursor,
+		Type:       AccountTypeAPIKey,
+		Status:     StatusActive,
+		QuotaKeyID: &source.ID,
+	}
+
+	updated, err := svc.UpdateAccount(ctx, existing.ID, &UpdateAccountInput{
+		QuotaKeyIDSet: true,
+		QuotaKeyID:    &target.ID,
+	})
+	require.NoError(t, err, "rebinding to an unmapped quota key must succeed")
+	require.NotNil(t, updated.QuotaKeyID)
+	require.Equal(t, target.ID, *updated.QuotaKeyID)
+
+	// 改绑后账号内存对象的 model_mapping 必须被清除（不再残留来源码限制）。
+	_, stillHasMapping := updated.Credentials["model_mapping"]
+	require.False(t, stillHasMapping, "model_mapping must be cleared from the account after rebinding to an unmapped quota key")
+
+	// 真实 DB 行也应清除 model_mapping。
+	dbAcc, err := client.Account.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	_, dbHasMapping := dbAcc.Credentials["model_mapping"]
+	require.False(t, dbHasMapping, "model_mapping must be cleared in the persisted row")
+
+	// 反向回归：目标码确实未配 model_mapping（确认不是因为目标码自己也配了）。
+	targetQK, err := client.QuotaKey.Get(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, 0, len(targetQK.ModelMapping), "target quota key must remain unmapped")
+}
+
+// TestAdminAccountQuotaKeyBoundUpdateFollowsManagedSettingsConcurrentLock 锁定 P2：已绑定
+// 激活码的 cursor 账号走普通编辑（非改绑）时，写入被包裹在激活码锁事务内——锁内重读激活码
+// 当前权威值并应用，再于同一事务落库，杜绝 TOCTOU 竞态：管理员并发更新激活码设置时，编辑
+// 不得拿锁外旧设置写回、覆盖刚刚同步的新值。
+//
+// 该用例以"先持同一 advisory 锁更新激活码 priority=99 并提交"模拟并发管理员更新；编辑事务
+// 在锁内重读，必须读到新值 99 并落库，而非把并发更新覆盖回旧值 4。
+func TestAdminAccountQuotaKeyBoundUpdateFollowsManagedSettingsConcurrentLock(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, client := managedSettingsQKAdminService(t)
+
+	keyExpiresAt := time.Date(2030, 3, 4, 5, 6, 7, 0, time.UTC)
+	qk := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 4, 6, 80, 0.5, keyExpiresAt, map[string]string{"gpt-6": "gpt-6"})
+
+	existing := mustCreateAccountForRebind(t, client, qk.ID)
+	repo.upstreamBillingProbeAccountRepo.accounts[existing.ID] = &Account{
+		ID:         existing.ID,
+		Name:       existing.Name,
+		Platform:   domain.PlatformCursor,
+		Type:       AccountTypeAPIKey,
+		Status:     StatusActive,
+		QuotaKeyID: &qk.ID,
+	}
+
+	// 并发：复用同一 advisory 互斥锁先更新激活码设置（priority 4 -> 99）并提交释放；
+	// 编辑在锁外无法读取到该更新，必须于锁内重读才拿得到新值。
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- withQuotaKeyLockTx(ctx, ctx, client, qk.ID, func(tx *ent.Tx) error {
+			_, e := tx.QuotaKey.UpdateOneID(qk.ID).SetPriority(99).Save(ctx)
+			return e
+		})
+	}()
+	// 让并发更新先持锁并提交（advisory 锁串行化：编辑事务在此阻塞直到更新提交）。
+	time.Sleep(100 * time.Millisecond)
+
+	// 普通编辑，不提交任何冲突字段：必须跟随锁内重读到的激活码新设置。
+	updated, err := svc.UpdateAccount(ctx, existing.ID, &UpdateAccountInput{})
+	require.NoError(t, err, "updating a bound cursor account must succeed")
+	require.NoError(t, <-errCh, "concurrent quota key update must commit")
+
+	// 编辑在锁内重读到 priority=99，落库值应随新设置，而非把并发更新覆盖回旧值 4。
+	require.Equal(t, 99, updated.Priority, "edit must pick up the concurrent quota key update inside the lock")
+	dbAcc, err := client.Account.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.Equal(t, 99, dbAcc.Priority, "persisted priority must reflect the concurrent quota key update")
+
+	// 校验激活码侧 priority 确实已被并发更新改为 99（确认不是编辑自己改的）。
+	qkAfter, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.Equal(t, 99, qkAfter.Priority)
+}

@@ -796,12 +796,16 @@ func (s *adminServiceImpl) createViaQuotaKeyCapacity(input *CreateAccountInput) 
 
 // applyQuotaKeyManagedAccountSettings 将激活码管辖的设置同步到账号（人工建号 / 改绑 /
 // 编辑 cursor 账号继承并跟随激活码设置）：priority / concurrency / load_factor /
-// rate_multiplier / expires_at / 码级非空 model_mapping 始终跟随激活码，防止账号侧写路径
+// rate_multiplier / expires_at / 码级 model_mapping 始终跟随激活码，防止账号侧写路径
 // 覆盖飘移。
 //
+// isRebind 标记本次是改绑（或人工建号）到另一激活码：此时若目标激活码未配置 model_mapping
+// （NULL/空），必须显式清除账号侧旧来源码残留的 model_mapping 限制，重置为无码级限制状态，
+// 与"目标码无限制"语义一致；普通编辑（非改绑）若码级未配置映射则保留账号既有值（不触碰）。
+//
 // 入参为 nil 时直接返回（调用方已保证 account/qk 存在时才有意义）；仅当激活码侧显式非零
-// 时才覆盖，码级未覆盖的项（如未配 model_mapping）保留账号既有值。
-func applyQuotaKeyManagedAccountSettings(account *Account, qk *dbent.QuotaKey) {
+// 时才覆盖，码级未覆盖的项（如未配 model_mapping 且非改绑）保留账号既有值。
+func applyQuotaKeyManagedAccountSettings(account *Account, qk *dbent.QuotaKey, isRebind bool) {
 	if account == nil || qk == nil {
 		return
 	}
@@ -840,7 +844,14 @@ func applyQuotaKeyManagedAccountSettings(account *Account, qk *dbent.QuotaKey) {
 		}
 		creds["model_mapping"] = modelMapping
 		account.Credentials = creds
+	} else if isRebind {
+		// 改绑 / 人工建号到未配置 model_mapping 的激活码：显式清除旧来源码残留的模型映射
+		// 限制，重置为无码级限制状态（与目标码"无限制"语义一致）。
+		if account.Credentials != nil {
+			delete(account.Credentials, "model_mapping")
+		}
 	}
+	// 非改绑的普通编辑：码级未配置映射时保留账号既有值，不触碰。
 }
 
 // AccountTxCreator 是账号仓储"在调用方指定的 ent 事务内插入账号行"的窄能力。
@@ -961,7 +972,7 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 			if qkErr != nil {
 				return qkErr
 			}
-			applyQuotaKeyManagedAccountSettings(account, qk)
+			applyQuotaKeyManagedAccountSettings(account, qk, true)
 			return creator.CreateWithTx(ctx, tx, account)
 		}); err != nil {
 			return nil, err
@@ -1444,14 +1455,6 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		return nil
 	}
-	// 已绑定激活码的 cursor 账号编辑（未改绑）：即便客户端提交了旧字段（priority /
-	// concurrency / load_factor / rate_multiplier / expires_at / 码级 model_mapping），
-	// 也始终跟随激活码，防止账号侧写路径覆盖飘移（仅在 err==nil 且 qk 非空时生效）。
-	if !rebindViaQuotaKeyCapacity && account.Platform == PlatformCursor && effectiveQuotaKeyID != nil && s.entClient != nil {
-		if qk, qkErr := s.entClient.QuotaKey.Get(ctx, *effectiveQuotaKeyID); qkErr == nil && qk != nil {
-			applyQuotaKeyManagedAccountSettings(account, qk)
-		}
-	}
 	// ≤15 集中强制（D-CURSOR-034）：改绑到不同 key 时净增目标 key 的 working 计数，
 	// 判定（存在/active）与本次写入必须在同一 advisory 互斥域同一事务内完成，
 	// 不再各自取锁计数（修 r4 #1）。
@@ -1461,12 +1464,28 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if rebindViaQuotaKeyCapacity && s.entClient != nil {
 		if err := withQuotaKeyCapacityTx(ctx, s.entClient, *effectiveQuotaKeyID, MaxAccountsPerQuotaKey, func(tx *dbent.Tx) error {
 			// 改绑到另一激活码：先读取目标激活码（NotFound 按既有容量校验逻辑处理），
-			// 让受码管辖的设置继承并跟随目标激活码。
+			// 让受码管辖的设置继承并跟随目标激活码（isRebind=true：目标码未配 model_mapping
+			// 时清除旧来源码残留限制，重置为无码级限制状态）。
 			qk, qkErr := tx.QuotaKey.Get(ctx, *effectiveQuotaKeyID)
 			if qkErr != nil {
 				return qkErr
 			}
-			applyQuotaKeyManagedAccountSettings(account, qk)
+			applyQuotaKeyManagedAccountSettings(account, qk, true)
+			return persistAccountWrite(dbent.NewTxContext(ctx, tx))
+		}); err != nil {
+			return nil, err
+		}
+	} else if !rebindViaQuotaKeyCapacity && account.Platform == PlatformCursor && effectiveQuotaKeyID != nil && s.entClient != nil {
+		// 已绑定激活码的 cursor 账号编辑（未改绑）：在激活码锁事务内重读并应用受码管辖设置，
+		// 再于同一事务上下文执行 persistAccountWrite，杜绝 TOCTOU 竞态——管理员并发更新
+		// 激活码设置时，锁外读取的旧值不会被写回覆盖刚同步的新值（isRebind=false：码级未配
+		// model_mapping 时保留账号既有值）。
+		if err := withQuotaKeyLockTx(ctx, ctx, s.entClient, *effectiveQuotaKeyID, func(tx *dbent.Tx) error {
+			qk, qkErr := tx.QuotaKey.Get(ctx, *effectiveQuotaKeyID)
+			if qkErr != nil {
+				return qkErr
+			}
+			applyQuotaKeyManagedAccountSettings(account, qk, false)
 			return persistAccountWrite(dbent.NewTxContext(ctx, tx))
 		}); err != nil {
 			return nil, err
