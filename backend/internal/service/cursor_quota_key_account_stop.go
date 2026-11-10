@@ -97,6 +97,17 @@ func (s *QuotaKeyService) StopAccountsUnderExhaustedKey(ctx context.Context, quo
 }
 
 // ClearStopsUnderRecoveredKey 实现 quotaKeyAccountStopSink。
+//
+// 按"码级原因前缀"精确清除该码名下被码级停调了的账号，与写入时并不对称：
+//   - 这里【不】加 TempUnschedulableUntilGT 限制。码级额度恢复后，那些 until 已经过期的
+//     账号（例如停到 19:00、现在 19:15）也必须被清掉 reason——否则后台会一直显示
+//     "cursor quota key exhausted until 19:00" 的旧停调文本，直到下一个恢复点才会被
+//     重新判定。一旦恢复判定来了却因为 until 已过期而清不掉，就会永久卡住；
+//   - 前缀 cursor quota key exhausted 是全仓唯一的常量、且全仓仅本文件（StopAccountsUnderExhaustedKey）
+//     会写入它，所以按前缀清不会误清账号级停调（账号级用的是
+//     cursor account blocked by upstream，二者原因串严格区分）；
+//   - 写入（StopAccountsUnderExhaustedKey）需要回避"账号级到期更晚"的号以不被覆盖，
+//     而清除只需要认前缀、不挑 until——"写入/清除条件不完全对称"是有意的，不是遗漏。
 func (s *QuotaKeyService) ClearStopsUnderRecoveredKey(ctx context.Context, quotaKeyID int64) (int64, error) {
 	if s == nil || s.client == nil {
 		return 0, fmt.Errorf("quota_key_service: ent client unavailable for key-level account stop")
@@ -106,7 +117,6 @@ func (s *QuotaKeyService) ClearStopsUnderRecoveredKey(ctx context.Context, quota
 			account.QuotaKeyID(quotaKeyID),
 			account.DeletedAtIsNil(),
 			account.TempUnschedulableReasonHasPrefix(cursorQuotaKeyExhaustedReasonPrefix),
-			account.TempUnschedulableUntilGT(time.Now()),
 		).
 		ClearTempUnschedulableUntil().
 		ClearTempUnschedulableReason().

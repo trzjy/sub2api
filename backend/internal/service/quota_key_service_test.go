@@ -1181,8 +1181,8 @@ func TestQuotaKeyPull_StopsAtWorkingCount15(t *testing.T) {
 	require.Equal(t, MaxAccountsPerQuotaKey, n, "must not insert beyond the cap")
 }
 
-// TestQuotaKeyPull_TruncatesBatchToRemainingCapacity：14 + 上游返 2 ⇒ 只落 1 条，
-// 总数恰好 15（D-CURSOR-026 #2：≤15 在拉号批次溢出路径不可突破）。
+// TestQuotaKeyPull_TruncatesBatchToRemainingCapacity：1 + 上游返 2 ⇒ 只落 1 条，
+// 总数恰好 CursorAutoPullAccountsPerKey(2)（自动补位目标在拉号批次溢出路径不可突破）。
 func TestQuotaKeyPull_TruncatesBatchToRemainingCapacity(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -1194,13 +1194,13 @@ func TestQuotaKeyPull_TruncatesBatchToRemainingCapacity(t *testing.T) {
 	})
 
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	mustCreateAccounts(t, client, qk.ID, MaxAccountsPerQuotaKey-1) // 14
+	mustCreateAccounts(t, client, qk.ID, CursorAutoPullAccountsPerKey-1) // 1
 
 	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
 
 	n, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).Count(ctx)
 	require.NoError(t, err)
-	require.Equal(t, MaxAccountsPerQuotaKey, n, "14 working + 2 upstream must be truncated to exactly 15")
+	require.Equal(t, CursorAutoPullAccountsPerKey, n, "1 working + 2 upstream must be truncated to exactly CursorAutoPullAccountsPerKey")
 
 	// 溢出条目不落库（UpstreamPullResult 无重放字段，溢出的号按丢弃处理）。
 	overflow, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID), account.NameEQ("ovf-2")).Count(ctx)
@@ -2332,6 +2332,15 @@ func TestQuotaKeyModelWater_WaterLevelIsPoolTotalDedupedAcrossModels(t *testing.
 	})
 
 	holder := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// A04-G 来源门修复（c1p1-I）：countsTowardWaterLevel 现走 cursorSupplySourceAvailabilityVetoReason，
+	// provider 未装配即失败关闭、账号不计（0）。本夹具装齐状态+快照两个窄读取器，使 holder 名下
+	// 账号通过来源门计入水位；断言增量语义不变。
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{holder.ID: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{holder.ID: []byte(fmt.Sprintf(
+			`{"total":400,"used":0,"status_code":200,"checked_at":%q,"error_code":""}`,
+			time.Now().UTC().Format(time.RFC3339)))},
+	})
 	accs := make([]int64, 0, 4)
 	// R10-1（CUR-F13）：复原本用例自建分组与账号，避免残留共享库污染他用例
 	//（如 F10 全等挂载断言、F1 交集断言）。先清挂载链接，再删分组、软删账号。
@@ -2419,6 +2428,13 @@ func TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly(t *testing.T) {
 	grpOther := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
 
 	holder := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// A04-G 来源门修复（c1p1-I）：装齐状态+快照 provider，使 holder 名下账号通过来源门计入水位。
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{holder.ID: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{holder.ID: []byte(fmt.Sprintf(
+			`{"total":400,"used":0,"status_code":200,"checked_at":%q,"error_code":""}`,
+			time.Now().UTC().Format(time.RFC3339)))},
+	})
 	// 两条同规格候选账号（schedulable / active / 未软删 / 非 temp 窗口），仅所属分组平台不同。
 	accCursor := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels())
 	mustLinkAccountToGroup(t, client, accCursor.ID, grpCursor.ID)
@@ -2477,6 +2493,13 @@ func TestQuotaKeyModelWater_WaterLevelExcludesTempWindow(t *testing.T) {
 	grp := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
 
 	holder := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// A04-G 来源门修复（c1p1-I）：装齐状态+快照 provider，使 holder 名下账号通过来源门计入水位。
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{holder.ID: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{holder.ID: []byte(fmt.Sprintf(
+			`{"total":400,"used":0,"status_code":200,"checked_at":%q,"error_code":""}`,
+			time.Now().UTC().Format(time.RFC3339)))},
+	})
 	acc := mustCreateCursorAccount(t, client, holder.ID, withCursorWaterModels(), func(c *ent.AccountCreate) {
 		c.SetTempUnschedulableUntil(time.Now().Add(time.Hour)) // 将来 → 临时不可调度
 	})

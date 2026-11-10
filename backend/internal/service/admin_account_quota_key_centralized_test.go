@@ -272,8 +272,9 @@ func TestCursorCreateAccountSoftDeletedQuotaKeyRejected(t *testing.T) {
 // errUpstreamUnused 是这些用例未走拉号时的占位上游错误（不得返回假账号）。
 var errUpstreamUnused = ErrUpstreamNotConnected
 
-// TestQuotaKeyPullInsertsAtCapBoundaryRespectsCentralizedEntry 回归正常路径：14/15 时拉号上游
-// 返回 2 条，集中入口把我们限制到只落 1 条（总数恰好 15，溢出丢弃）。
+// TestQuotaKeyPullInsertsAtCapBoundaryRespectsCentralizedEntry 回归自动补位截断：1/2 时拉号
+// 上游返回 2 条，集中入口按当前自动目标 CursorAutoPullAccountsPerKey(2) 截断，只落 1 条
+// （总数恰好 2，溢出丢弃）。
 func TestQuotaKeyPullInsertsAtCapBoundaryRespectsCentralizedEntry(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -285,13 +286,13 @@ func TestQuotaKeyPullInsertsAtCapBoundaryRespectsCentralizedEntry(t *testing.T) 
 	})
 
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	mustCreateAccounts(t, client, qk.ID, MaxAccountsPerQuotaKey-1)
+	mustCreateAccounts(t, client, qk.ID, CursorAutoPullAccountsPerKey-1)
 
 	require.NoError(t, pullSvc.PullAccounts(ctx, qk.ID))
 
 	total, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).Count(ctx)
 	require.NoError(t, err)
-	require.Equal(t, MaxAccountsPerQuotaKey, total, "pull through the centralized entry must truncate to the cap")
+	require.Equal(t, CursorAutoPullAccountsPerKey, total, "pull through the centralized entry must truncate to the auto-pull target")
 	overflow, err := client.Account.Query().
 		Where(account.QuotaKeyID(qk.ID), account.NameEQ("edge-2")).
 		Count(ctx)

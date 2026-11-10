@@ -161,6 +161,14 @@ func TestQuotaKeyModelWaterReloadsEligibilityAndCountsOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 10, threshold)
 	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// A04-G 来源门修复（c1p1-I）：装齐状态+快照 provider，使 key 名下账号通过来源门计入水位；
+	// exhausted/过期/凭据清空等闸门仍由 DB 维度（countsTowardWaterLevel）驱动，断言不变。
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{key.ID: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{key.ID: []byte(fmt.Sprintf(
+			`{"total":400,"used":0,"status_code":200,"checked_at":%q,"error_code":""}`,
+			time.Now().UTC().Format(time.RFC3339)))},
+	})
 	g1 := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{"grok-4.7"}})
 	g2 := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{"grok-4.7"}})
 	row := mustCreateCursorAccount(t, client, key.ID, withCursorWaterModels())
