@@ -53,6 +53,8 @@ const (
 	FieldLoadFactor = "load_factor"
 	// FieldRateMultiplier holds the string denoting the rate_multiplier field in the database.
 	FieldRateMultiplier = "rate_multiplier"
+	// FieldModelMapping holds the string denoting the model_mapping field in the database.
+	FieldModelMapping = "model_mapping"
 	// EdgeAccounts holds the string denoting the accounts edge name in mutations.
 	EdgeAccounts = "accounts"
 	// Table holds the table name of the quotakey in the database.
@@ -88,6 +90,7 @@ var Columns = []string{
 	FieldConcurrency,
 	FieldLoadFactor,
 	FieldRateMultiplier,
+	FieldModelMapping,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).

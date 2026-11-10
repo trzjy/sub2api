@@ -184,6 +184,12 @@ func (QuotaKey) Fields() []ent.Field {
 		field.Float("rate_multiplier").
 			SchemaType(map[string]string{dialect.Postgres: "decimal(10,4)"}).
 			Default(1.0),
+		// model_mapping：激活码（码级权威值）模型限制与映射（与 credentials.model_mapping 同构）。
+		// NULL = 码级未覆盖（沿用上游默认清单）；非 NULL = 码级权威，同步名下未软删账号。
+		// （ent 的 JSON 字段本身即可空，Optional + nil 落库为 SQL NULL，不叠 Nillable。）
+		field.JSON("model_mapping", map[string]string{}).
+			Optional().
+			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
 	}
 }
 

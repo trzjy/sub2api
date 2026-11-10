@@ -367,6 +367,18 @@ func (_u *QuotaKeyUpdate) AddRateMultiplier(v float64) *QuotaKeyUpdate {
 	return _u
 }
 
+// SetModelMapping sets the "model_mapping" field.
+func (_u *QuotaKeyUpdate) SetModelMapping(v map[string]string) *QuotaKeyUpdate {
+	_u.mutation.SetModelMapping(v)
+	return _u
+}
+
+// ClearModelMapping clears the value of the "model_mapping" field.
+func (_u *QuotaKeyUpdate) ClearModelMapping() *QuotaKeyUpdate {
+	_u.mutation.ClearModelMapping()
+	return _u
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *QuotaKeyUpdate) AddAccountIDs(ids ...int64) *QuotaKeyUpdate {
 	_u.mutation.AddAccountIDs(ids...)
@@ -610,6 +622,12 @@ func (_u *QuotaKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedRateMultiplier(); ok {
 		_spec.AddField(quotakey.FieldRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.ModelMapping(); ok {
+		_spec.SetField(quotakey.FieldModelMapping, field.TypeJSON, value)
+	}
+	if _u.mutation.ModelMappingCleared() {
+		_spec.ClearField(quotakey.FieldModelMapping, field.TypeJSON)
 	}
 	if _u.mutation.AccountsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -1012,6 +1030,18 @@ func (_u *QuotaKeyUpdateOne) AddRateMultiplier(v float64) *QuotaKeyUpdateOne {
 	return _u
 }
 
+// SetModelMapping sets the "model_mapping" field.
+func (_u *QuotaKeyUpdateOne) SetModelMapping(v map[string]string) *QuotaKeyUpdateOne {
+	_u.mutation.SetModelMapping(v)
+	return _u
+}
+
+// ClearModelMapping clears the value of the "model_mapping" field.
+func (_u *QuotaKeyUpdateOne) ClearModelMapping() *QuotaKeyUpdateOne {
+	_u.mutation.ClearModelMapping()
+	return _u
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *QuotaKeyUpdateOne) AddAccountIDs(ids ...int64) *QuotaKeyUpdateOne {
 	_u.mutation.AddAccountIDs(ids...)
@@ -1285,6 +1315,12 @@ func (_u *QuotaKeyUpdateOne) sqlSave(ctx context.Context) (_node *QuotaKey, err 
 	}
 	if value, ok := _u.mutation.AddedRateMultiplier(); ok {
 		_spec.AddField(quotakey.FieldRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.ModelMapping(); ok {
+		_spec.SetField(quotakey.FieldModelMapping, field.TypeJSON, value)
+	}
+	if _u.mutation.ModelMappingCleared() {
+		_spec.ClearField(quotakey.FieldModelMapping, field.TypeJSON)
 	}
 	if _u.mutation.AccountsCleared() {
 		edge := &sqlgraph.EdgeSpec{

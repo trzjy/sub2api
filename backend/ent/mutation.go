@@ -42867,6 +42867,7 @@ type QuotaKeyMutation struct {
 	addload_factor       *int
 	rate_multiplier      *float64
 	addrate_multiplier   *float64
+	model_mapping        *map[string]string
 	clearedFields        map[string]struct{}
 	accounts             map[int64]struct{}
 	removedaccounts      map[int64]struct{}
@@ -43899,6 +43900,55 @@ func (m *QuotaKeyMutation) ResetRateMultiplier() {
 	m.addrate_multiplier = nil
 }
 
+// SetModelMapping sets the "model_mapping" field.
+func (m *QuotaKeyMutation) SetModelMapping(value map[string]string) {
+	m.model_mapping = &value
+}
+
+// ModelMapping returns the value of the "model_mapping" field in the mutation.
+func (m *QuotaKeyMutation) ModelMapping() (r map[string]string, exists bool) {
+	v := m.model_mapping
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldModelMapping returns the old "model_mapping" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldModelMapping(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldModelMapping is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldModelMapping requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldModelMapping: %w", err)
+	}
+	return oldValue.ModelMapping, nil
+}
+
+// ClearModelMapping clears the value of the "model_mapping" field.
+func (m *QuotaKeyMutation) ClearModelMapping() {
+	m.model_mapping = nil
+	m.clearedFields[quotakey.FieldModelMapping] = struct{}{}
+}
+
+// ModelMappingCleared returns if the "model_mapping" field was cleared in this mutation.
+func (m *QuotaKeyMutation) ModelMappingCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldModelMapping]
+	return ok
+}
+
+// ResetModelMapping resets all changes to the "model_mapping" field.
+func (m *QuotaKeyMutation) ResetModelMapping() {
+	m.model_mapping = nil
+	delete(m.clearedFields, quotakey.FieldModelMapping)
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by ids.
 func (m *QuotaKeyMutation) AddAccountIDs(ids ...int64) {
 	if m.accounts == nil {
@@ -43987,7 +44037,7 @@ func (m *QuotaKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *QuotaKeyMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 20)
 	if m.deleted_at != nil {
 		fields = append(fields, quotakey.FieldDeletedAt)
 	}
@@ -44045,6 +44095,9 @@ func (m *QuotaKeyMutation) Fields() []string {
 	if m.rate_multiplier != nil {
 		fields = append(fields, quotakey.FieldRateMultiplier)
 	}
+	if m.model_mapping != nil {
+		fields = append(fields, quotakey.FieldModelMapping)
+	}
 	return fields
 }
 
@@ -44091,6 +44144,8 @@ func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.LoadFactor()
 	case quotakey.FieldRateMultiplier:
 		return m.RateMultiplier()
+	case quotakey.FieldModelMapping:
+		return m.ModelMapping()
 	}
 	return nil, false
 }
@@ -44138,6 +44193,8 @@ func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldLoadFactor(ctx)
 	case quotakey.FieldRateMultiplier:
 		return m.OldRateMultiplier(ctx)
+	case quotakey.FieldModelMapping:
+		return m.OldModelMapping(ctx)
 	}
 	return nil, fmt.Errorf("unknown QuotaKey field %s", name)
 }
@@ -44280,6 +44337,13 @@ func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRateMultiplier(v)
 		return nil
+	case quotakey.FieldModelMapping:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetModelMapping(v)
+		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey field %s", name)
 }
@@ -44394,6 +44458,9 @@ func (m *QuotaKeyMutation) ClearedFields() []string {
 	if m.FieldCleared(quotakey.FieldLoadFactor) {
 		fields = append(fields, quotakey.FieldLoadFactor)
 	}
+	if m.FieldCleared(quotakey.FieldModelMapping) {
+		fields = append(fields, quotakey.FieldModelMapping)
+	}
 	return fields
 }
 
@@ -44440,6 +44507,9 @@ func (m *QuotaKeyMutation) ClearField(name string) error {
 		return nil
 	case quotakey.FieldLoadFactor:
 		m.ClearLoadFactor()
+		return nil
+	case quotakey.FieldModelMapping:
+		m.ClearModelMapping()
 		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey nullable field %s", name)
@@ -44505,6 +44575,9 @@ func (m *QuotaKeyMutation) ResetField(name string) error {
 		return nil
 	case quotakey.FieldRateMultiplier:
 		m.ResetRateMultiplier()
+		return nil
+	case quotakey.FieldModelMapping:
+		m.ResetModelMapping()
 		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey field %s", name)

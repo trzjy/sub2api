@@ -1145,6 +1145,16 @@ func RateMultiplierLTE(v float64) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldLTE(FieldRateMultiplier, v))
 }
 
+// ModelMappingIsNil applies the IsNil predicate on the "model_mapping" field.
+func ModelMappingIsNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldIsNull(FieldModelMapping))
+}
+
+// ModelMappingNotNil applies the NotNil predicate on the "model_mapping" field.
+func ModelMappingNotNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNotNull(FieldModelMapping))
+}
+
 // HasAccounts applies the HasEdge predicate on the "accounts" edge.
 func HasAccounts() predicate.QuotaKey {
 	return predicate.QuotaKey(func(s *sql.Selector) {

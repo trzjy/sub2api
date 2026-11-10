@@ -274,6 +274,12 @@ func (_c *QuotaKeyCreate) SetNillableRateMultiplier(v *float64) *QuotaKeyCreate 
 	return _c
 }
 
+// SetModelMapping sets the "model_mapping" field.
+func (_c *QuotaKeyCreate) SetModelMapping(v map[string]string) *QuotaKeyCreate {
+	_c.mutation.SetModelMapping(v)
+	return _c
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_c *QuotaKeyCreate) AddAccountIDs(ids ...int64) *QuotaKeyCreate {
 	_c.mutation.AddAccountIDs(ids...)
@@ -531,6 +537,10 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RateMultiplier(); ok {
 		_spec.SetField(quotakey.FieldRateMultiplier, field.TypeFloat64, value)
 		_node.RateMultiplier = value
+	}
+	if value, ok := _c.mutation.ModelMapping(); ok {
+		_spec.SetField(quotakey.FieldModelMapping, field.TypeJSON, value)
+		_node.ModelMapping = value
 	}
 	if nodes := _c.mutation.AccountsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -903,6 +913,24 @@ func (u *QuotaKeyUpsert) UpdateRateMultiplier() *QuotaKeyUpsert {
 // AddRateMultiplier adds v to the "rate_multiplier" field.
 func (u *QuotaKeyUpsert) AddRateMultiplier(v float64) *QuotaKeyUpsert {
 	u.Add(quotakey.FieldRateMultiplier, v)
+	return u
+}
+
+// SetModelMapping sets the "model_mapping" field.
+func (u *QuotaKeyUpsert) SetModelMapping(v map[string]string) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldModelMapping, v)
+	return u
+}
+
+// UpdateModelMapping sets the "model_mapping" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdateModelMapping() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldModelMapping)
+	return u
+}
+
+// ClearModelMapping clears the value of the "model_mapping" field.
+func (u *QuotaKeyUpsert) ClearModelMapping() *QuotaKeyUpsert {
+	u.SetNull(quotakey.FieldModelMapping)
 	return u
 }
 
@@ -1305,6 +1333,27 @@ func (u *QuotaKeyUpsertOne) AddRateMultiplier(v float64) *QuotaKeyUpsertOne {
 func (u *QuotaKeyUpsertOne) UpdateRateMultiplier() *QuotaKeyUpsertOne {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.UpdateRateMultiplier()
+	})
+}
+
+// SetModelMapping sets the "model_mapping" field.
+func (u *QuotaKeyUpsertOne) SetModelMapping(v map[string]string) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetModelMapping(v)
+	})
+}
+
+// UpdateModelMapping sets the "model_mapping" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdateModelMapping() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateModelMapping()
+	})
+}
+
+// ClearModelMapping clears the value of the "model_mapping" field.
+func (u *QuotaKeyUpsertOne) ClearModelMapping() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearModelMapping()
 	})
 }
 
@@ -1873,6 +1922,27 @@ func (u *QuotaKeyUpsertBulk) AddRateMultiplier(v float64) *QuotaKeyUpsertBulk {
 func (u *QuotaKeyUpsertBulk) UpdateRateMultiplier() *QuotaKeyUpsertBulk {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.UpdateRateMultiplier()
+	})
+}
+
+// SetModelMapping sets the "model_mapping" field.
+func (u *QuotaKeyUpsertBulk) SetModelMapping(v map[string]string) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetModelMapping(v)
+	})
+}
+
+// UpdateModelMapping sets the "model_mapping" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdateModelMapping() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateModelMapping()
+	})
+}
+
+// ClearModelMapping clears the value of the "model_mapping" field.
+func (u *QuotaKeyUpsertBulk) ClearModelMapping() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearModelMapping()
 	})
 }
 

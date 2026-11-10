@@ -57,6 +57,8 @@ type QuotaKey struct {
 	LoadFactor *int `json:"load_factor,omitempty"`
 	// RateMultiplier holds the value of the "rate_multiplier" field.
 	RateMultiplier float64 `json:"rate_multiplier,omitempty"`
+	// ModelMapping holds the value of the "model_mapping" field.
+	ModelMapping map[string]string `json:"model_mapping,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the QuotaKeyQuery when eager-loading is set.
 	Edges        QuotaKeyEdges `json:"edges"`
@@ -86,7 +88,7 @@ func (*QuotaKey) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case quotakey.FieldUsageSnapshot:
+		case quotakey.FieldUsageSnapshot, quotakey.FieldModelMapping:
 			values[i] = new([]byte)
 		case quotakey.FieldExhausted:
 			values[i] = new(sql.NullBool)
@@ -243,6 +245,14 @@ func (_m *QuotaKey) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.RateMultiplier = value.Float64
 			}
+		case quotakey.FieldModelMapping:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field model_mapping", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.ModelMapping); err != nil {
+					return fmt.Errorf("unmarshal field model_mapping: %w", err)
+				}
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -356,6 +366,9 @@ func (_m *QuotaKey) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("rate_multiplier=")
 	builder.WriteString(fmt.Sprintf("%v", _m.RateMultiplier))
+	builder.WriteString(", ")
+	builder.WriteString("model_mapping=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ModelMapping))
 	builder.WriteByte(')')
 	return builder.String()
 }
