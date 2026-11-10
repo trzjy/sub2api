@@ -12,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 )
 
 // 编译期守卫：生产仓储必须提供"观测/换码"所需的事务内方法（service.quotaKeyObservationRepo
@@ -74,13 +75,25 @@ func (r *quotaKeyRepository) Create(ctx context.Context, input service.CreateQuo
 	qk, err := q.Save(ctx)
 	if err != nil {
 		// code_mac 唯一冲突 = 同一张激活码已有未软删记录。
-		// ent 把唯一约束包装为 ConstraintError{wrap: pq 23505}，两种路径都判定。
-		if isUniqueViolation(err) || ent.IsConstraintError(err) {
+		// 只认 uq_quota_keys_code_mac 这个唯一索引的冲突；主键冲突（同为 23505，
+		// 约束名 quota_keys_pkey）与 status CHECK 冲突（23514）不得被误译成重复激活码。
+		if isQuotaKeyCodeMacUniqueViolation(err) {
 			return nil, service.ErrQuotaKeyDuplicateCode
 		}
 		return nil, err
 	}
 	return qk, nil
+}
+
+// isQuotaKeyCodeMacUniqueViolation 判定 err 是否为 uq_quota_keys_code_mac 唯一冲突。
+// 只认该索引的约束名：quota_keys 主键冲突（同为 23505）与 status CHECK 冲突（23514）
+// 都不算「重复激活码」，必须放回原样错误，不得误译。
+func isQuotaKeyCodeMacUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr != nil {
+		return pqErr.Code == "23505" && pqErr.Constraint == "uq_quota_keys_code_mac"
+	}
+	return false
 }
 
 // UpdatePriority 在同一事务内改写激活码优先级，并把该码名下**未软删**账号的
