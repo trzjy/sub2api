@@ -78,6 +78,7 @@ func ProvideAdminHandlers(
 	quotaKeyHandler *admin.QuotaKeyHandler, // D-CURSOR-021: 激活码管理面（§4.4，8 端点）
 	quotaKeyService *service.QuotaKeyService, // D-CURSOR-021: accounts 列表/详情脱敏回填数据源
 	quotaUpstreamHandler *admin.QuotaUpstreamHandler, // KC-18B: 上游条目（quota_upstreams）管理面
+	accountTestService *service.AccountTestService, // c1p1-B2-wire: 激活码上游实供模型探测注入
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
@@ -95,6 +96,7 @@ func ProvideAdminHandlers(
 	// D-CURSOR-021: 账号列表/详情回填 quota_key_id + quota_key_label（= code_masked），
 	// 列表顶层一次性填充 quota_key_summaries（§4.4）。未装配时两个脱敏字段保持缺省。
 	accountHandler.SetQuotaKeyService(quotaKeyService)
+	quotaKeyHandler.SetAccountTestService(accountTestService)
 	accountHandler.SetWebLoginCaptchaHelper(service.NewLocalCaptchaHelperHTTPClient(service.LocalCaptchaHelperConfig{
 		BaseURL: cfg.LocalCaptchaHelper.BaseURL,
 		APIKey:  cfg.LocalCaptchaHelper.APIKey,
