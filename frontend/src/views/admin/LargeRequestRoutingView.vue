@@ -23,7 +23,7 @@
           {{ t('common.loading') }}
         </div>
 
-        <div v-else class="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <div v-else class="space-y-6">
           <section
             v-for="family in FAMILIES"
             :key="family.platform"
