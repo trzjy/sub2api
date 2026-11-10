@@ -584,6 +584,13 @@ type QuotaKey struct {
 	// UpstreamKey 是激活码所属上游的稳定标识（引用 quota_upstreams.key）。
 	// 前端据此匹配上游显示名（配合 quota_upstreams 列表）；缺失时前端回落显示原始标识。
 	UpstreamKey string `json:"upstream_key,omitempty"`
+
+	// 行级调度元数据（与详情端点内嵌的 service.QuotaKeyStatus 同名同型）。
+	// 列表/详情读同一份 service 投影，禁止各端点各自挑字段。
+	Concurrency    *int              `json:"concurrency,omitempty"`
+	LoadFactor     *int              `json:"load_factor,omitempty"`
+	RateMultiplier float64           `json:"rate_multiplier"`
+	ModelMapping   map[string]string `json:"model_mapping,omitempty"`
 }
 
 type AccountGroup struct {

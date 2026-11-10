@@ -448,7 +448,7 @@
             </button>
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: modelMappings.length }) }}
-              <span v-if="modelMappings.length === 0">{{ t('admin.accounts.supportsAllModels') }}</span>
+              <span v-if="modelMappings.length === 0" class="text-amber-600 dark:text-amber-400">（{{ t('admin.quotaKeys.modelRestrictionRequired') }}）</span>
             </p>
             <p v-if="invalidWildcardPatterns.length" class="text-xs text-red-600 dark:text-red-400">
               {{ t('admin.accounts.wildcardOnlyAtEnd') }}
