@@ -15,6 +15,10 @@
       </template>
 
       <template #table>
+        <!-- TablePageLayout 的表格槽位是 overflow:hidden 的固定高度容器，
+             内容超出会被裁掉且无法滚动。这里再加一层滚动容器，让全部账号
+             都能靠右侧滚动条下滑查看。 -->
+        <div class="h-full overflow-y-auto pr-1">
         <div
           v-if="errorMessage"
           data-testid="lro-error-banner"
@@ -138,6 +142,7 @@
               </table>
             </div>
           </section>
+        </div>
         </div>
       </template>
     </TablePageLayout>
