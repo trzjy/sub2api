@@ -31,7 +31,7 @@
           <section
             v-for="family in FAMILIES"
             :key="family.platform"
-            class="overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-dark-700 dark:bg-dark-800"
+            class="rounded-xl border border-gray-200 bg-white dark:border-dark-700 dark:bg-dark-800"
             :data-testid="`family-${family.platform}`"
           >
             <button
@@ -53,9 +53,8 @@
             </button>
 
             <div v-show="isExpanded(family.platform)" class="border-t border-gray-100 px-4 py-2 dark:border-dark-700">
-              <!-- 固定高度 + 内部滚动：账号多时不再把整页撑长，保证三个平台区块
-                   的标题都能在一屏内看到，各自在框内滚动查看全部账号。 -->
-              <div class="max-h-[30vh] overflow-y-auto">
+              <!-- 账号全部完整渲染，不做内部限高/裁切：靠页面右侧滚动条往下看，
+                   表头 sticky 在视口顶部，滚动时列名始终可见。 -->
               <table class="w-full">
                 <thead class="sticky top-0 z-10 bg-white dark:bg-dark-800">
                   <tr class="border-b border-gray-200 text-left text-xs text-gray-500 dark:border-dark-700 dark:text-gray-400">
@@ -137,7 +136,6 @@
                   </tr>
                 </tbody>
               </table>
-              </div>
             </div>
           </section>
         </div>
