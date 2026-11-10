@@ -197,8 +197,10 @@ func (s *OpenAIGatewayService) resolveCCFallbackTarget(account *Account) (apiKey
 // 语义：
 //   - 账号为 nil、Extra 为 nil、键缺失或非 string、prompt 空/全空白 → 原样返回 body；
 //   - body 非 JSON、缺 messages 字段、messages 非数组 → 原样返回 body（不注入）；
-//   - 非空 → 在 messages 数组首位插入 {"role":"system","content":<prompt>}，
-//     不覆盖、不改写客户端已有的 system（纯前缀追加），其余字段以原始字节保留。
+//   - 若 messages 首位已是 role=system（含连续多条前导 system），将 prompt 合并到首条
+//     system 的内容最前方（兼容严格要求单条 system 的 vLLM/OpenAI 兼容上游），其余
+//     消息与除 messages 外的字段均以原始字节保留；
+//   - 首位非 system 时在 messages 数组首位插入 {"role":"system","content":<prompt>}。
 //
 // 仅此 helper 一处实现，禁止在其他文件或本文件重复定义第二份逻辑。
 func (s *OpenAIGatewayService) injectAccountIdentitySystemMessage(account *Account, body []byte) []byte {
@@ -224,11 +226,15 @@ func (s *OpenAIGatewayService) injectAccountIdentitySystemMessage(account *Accou
 	if err := json.Unmarshal(msgsRaw, &messages); err != nil {
 		return body
 	}
-	sysMsg, err := json.Marshal(map[string]any{"role": "system", "content": prompt})
-	if err != nil {
-		return body
+	if merged, ok := mergeLeadingIdentitySystemMessage(prompt, messages); ok {
+		messages = merged
+	} else {
+		sysMsg, err := json.Marshal(map[string]any{"role": "system", "content": prompt})
+		if err != nil {
+			return body
+		}
+		messages = append([]json.RawMessage{sysMsg}, messages...)
 	}
-	messages = append([]json.RawMessage{sysMsg}, messages...)
 	newMsgs, err := json.Marshal(messages)
 	if err != nil {
 		return body
@@ -239,6 +245,136 @@ func (s *OpenAIGatewayService) injectAccountIdentitySystemMessage(account *Accou
 		return body
 	}
 	return out
+}
+
+// mergeLeadingIdentitySystemMessage 在 messages 首位已有一条或多条连续 role=system
+// 消息时，将 identity_prompt 前置合并到 messages[0] 并折叠（部分）多余前导 system。
+// 不触碰非前导位置的任何消息；遇到无法解析的 content 形态时返回 false 由调用方回退前置。
+//
+// 折叠边界语义（P2 must_fix：保留后续 system 的对象级元数据）：
+//   - messages[0] 自身的 extra 键（name、cache_control 等）始终原样保留，合并逻辑不变；
+//   - 从 messages[1] 起遍历连续前导 system，仅当某条后续 system 携带除 role/content
+//     之外的额外键时停止折叠；该（及之后）消息原样保留在输出 messages 中，其字段不得
+//     静默丢弃。仅含 role/content 的后续 system 按原逻辑并入 messages[0]。
+func mergeLeadingIdentitySystemMessage(prompt string, messages []json.RawMessage) ([]json.RawMessage, bool) {
+	if len(messages) == 0 {
+		return nil, false
+	}
+	type leadingSystem struct {
+		obj      map[string]json.RawMessage
+		isArray  bool
+		strVal   string
+		parts    []json.RawMessage
+		hasExtra bool // 除 role/content 外的对象级元数据
+	}
+	var leading []leadingSystem
+	for _, mRaw := range messages {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(mRaw, &obj); err != nil || obj == nil {
+			break
+		}
+		var role string
+		if err := json.Unmarshal(obj["role"], &role); err != nil || !strings.EqualFold(role, "system") {
+			break
+		}
+		item := leadingSystem{obj: obj}
+		// 检测除 role/content 外的额外对象级元数据（name、cache_control 等）。
+		for k := range obj {
+			if k != "role" && k != "content" {
+				item.hasExtra = true
+				break
+			}
+		}
+		contentRaw := bytes.TrimSpace(obj["content"])
+		if len(contentRaw) == 0 || bytes.Equal(contentRaw, []byte("null")) {
+			leading = append(leading, item)
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(contentRaw, &s); err == nil {
+			item.strVal = s
+			leading = append(leading, item)
+			continue
+		}
+		var parts []json.RawMessage
+		if err := json.Unmarshal(contentRaw, &parts); err == nil {
+			item.isArray = true
+			item.parts = parts
+			leading = append(leading, item)
+			continue
+		}
+		return nil, false
+	}
+	if len(leading) == 0 {
+		return nil, false
+	}
+
+	// 折叠边界：从 messages[0] 起，遇到第一条携带额外对象级元数据的后续前导
+	// system 消息即停止折叠；该消息及其之后原样保留于输出，不得静默丢弃字段。
+	foldCount := 1
+	for i := 1; i < len(leading); i++ {
+		if leading[i].hasExtra {
+			break
+		}
+		foldCount = i + 1
+	}
+
+	first := leading[0].obj
+	anyArray := false
+	for i := 0; i < foldCount; i++ {
+		if leading[i].isArray {
+			anyArray = true
+			break
+		}
+	}
+	if anyArray {
+		promptPart, err := json.Marshal(map[string]any{"type": "text", "text": prompt})
+		if err != nil {
+			return nil, false
+		}
+		mergedParts := make([]json.RawMessage, 0, 1+foldCount)
+		mergedParts = append(mergedParts, promptPart)
+		for i := 0; i < foldCount; i++ {
+			item := leading[i]
+			if item.isArray {
+				mergedParts = append(mergedParts, item.parts...)
+				continue
+			}
+			if item.strVal != "" {
+				p, err := json.Marshal(map[string]any{"type": "text", "text": item.strVal})
+				if err != nil {
+					return nil, false
+				}
+				mergedParts = append(mergedParts, p)
+			}
+		}
+		encoded, err := json.Marshal(mergedParts)
+		if err != nil {
+			return nil, false
+		}
+		first["content"] = encoded
+	} else {
+		texts := make([]string, 0, 1+foldCount)
+		texts = append(texts, prompt)
+		for i := 0; i < foldCount; i++ {
+			if leading[i].strVal != "" {
+				texts = append(texts, leading[i].strVal)
+			}
+		}
+		encoded, err := json.Marshal(strings.Join(texts, "\n\n"))
+		if err != nil {
+			return nil, false
+		}
+		first["content"] = encoded
+	}
+	firstRaw, err := json.Marshal(first)
+	if err != nil {
+		return nil, false
+	}
+	out := make([]json.RawMessage, 0, len(messages)-foldCount+1)
+	out = append(out, firstRaw)
+	out = append(out, messages[foldCount:]...)
+	return out, true
 }
 
 // sendCCUpstreamRequest 构建并发送 CC 上游请求：分离的上游 context、OpenAI HTTP

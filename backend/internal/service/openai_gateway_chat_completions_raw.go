@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -438,6 +439,19 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			}
 		}
 
+		// 掩码账号：抹除 vLLM 指纹（system_fingerprint / reasoning 字段），
+		// 在模型回写之后读取当前 line，避免旧 payload 覆盖 model 改写结果。
+		if hasSSEData && IsResponseIdentityMaskedAccount(account) {
+			if curPayload, ok := extractOpenAISSEDataLine(line); ok {
+				trimmed := strings.TrimSpace(curPayload)
+				if trimmed != "" && trimmed != "[DONE]" {
+					if mb := maskVLLMFingerprints([]byte(curPayload)); !bytes.Equal(mb, []byte(curPayload)) {
+						line = "data: " + string(mb)
+					}
+				}
+			}
+		}
+
 		// 思考过程剥离：开启 strip_reasoning_content 的账号，删除客户端可见行里的
 		// reasoning_content（防御自建上游思考文本复述竞品名 / 改写系统指令）。
 		if IsReasoningStrippedAccount(account) {
@@ -680,6 +694,11 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 		respBody = s.normalizeResponseModelFamily(respBody, originalModel)
 	}
 
+	// 掩码账号：抹除 vLLM 指纹（system_fingerprint / reasoning 字段）。
+	if IsResponseIdentityMaskedAccount(account) {
+		respBody = maskVLLMFingerprints(respBody)
+	}
+
 	// 思考过程剥离：删除客户端可见响应体里的 reasoning_content。
 	if IsReasoningStrippedAccount(account) {
 		respBody = StripReasoningFromResponseBody(respBody)
@@ -813,6 +832,11 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsRawCC(
 		ccBytes = s.replaceModelInResponseBody(ccBytes, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
 	} else {
 		ccBytes = s.normalizeResponseModelFamily(ccBytes, originalModel)
+	}
+
+	// 掩码账号：抹除 vLLM 指纹（system_fingerprint / reasoning 字段）。
+	if IsResponseIdentityMaskedAccount(account) {
+		ccBytes = maskVLLMFingerprints(ccBytes)
 	}
 
 	// 思考过程剥离：删除客户端可见聚合体里的 reasoning_content。

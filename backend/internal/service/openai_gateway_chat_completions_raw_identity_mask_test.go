@@ -349,3 +349,140 @@ func TestRawChatCompletions_MaskGatePredicate(t *testing.T) {
 	require.False(t, rawChatCompletionsMaskGate(masked, "kimi-k3", ""), "空 upstreamModel 不触发")
 	require.False(t, rawChatCompletionsMaskGate(nil, "kimi-k3", "qwen3.8-flash"), "nil 账号不触发")
 }
+
+// --- 用例 7：response_identity_mask 账号在 raw CC 路径抹除 vLLM system_fingerprint（非流式/流式/converted）与非掩码零影响 ---
+
+func TestRawChatCompletions_MaskedStripsVLLMFingerprint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	responseMaskAcct := &Account{
+		ID:          980,
+		Platform:    PlatformDeepseek,
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{"model_mapping": map[string]any{"deepseek-flash": "Qwen3.8-27B"}},
+		Extra: map[string]any{
+			"response_identity_mask":  true,
+			"strip_reasoning_content": true,
+		},
+	}
+	plainAcct := newPlainTestAccount(981, map[string]any{"deepseek-flash": "Qwen3.8-27B"})
+
+	t.Run("nonstreaming masked strips system_fingerprint and reasoning while keeping rewritten model", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		const upstreamJSON = `{"id":"cmpl_1","object":"chat.completion","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[{"index":0,"message":{"role":"assistant","content":"hi","reasoning":"internal"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(upstreamJSON)),
+		}
+		svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig()}
+		_, err := svc.bufferRawChatCompletions(c, resp, responseMaskAcct, "deepseek-flash", "Qwen3.8-27B", "Qwen3.8-27B", nil, nil, time.Now())
+		require.NoError(t, err)
+
+		downstream := rec.Body.String()
+		require.Equal(t, "deepseek-flash", gjson.Get(downstream, "model").String())
+		require.False(t, gjson.Get(downstream, "system_fingerprint").Exists(), "system_fingerprint must be stripped")
+		require.False(t, gjson.Get(downstream, "choices.0.message.reasoning").Exists(), "reasoning must be stripped")
+		require.False(t, gjson.Get(downstream, "choices.0.message.reasoning_content").Exists(), "folded reasoning_content must be stripped")
+		require.Equal(t, "hi", gjson.Get(downstream, "choices.0.message.content").String())
+	})
+
+	t.Run("streaming masked strips system_fingerprint and reasoning without losing model rewrite", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		upstreamBody := strings.Join([]string{
+			`data: {"id":"cmpl_1","object":"chat.completion.chunk","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[{"index":0,"delta":{"reasoning":"internal"}}]}`,
+			"",
+			`data: {"id":"cmpl_1","object":"chat.completion.chunk","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[{"index":0,"delta":{"content":"hi"}}]}`,
+			"",
+			`data: {"id":"cmpl_1","object":"chat.completion.chunk","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+			"",
+			"data: [DONE]",
+			"",
+		}, "\n")
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+		}
+		svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig()}
+		_, err := svc.streamRawChatCompletions(c, resp, responseMaskAcct, "deepseek-flash", "Qwen3.8-27B", "Qwen3.8-27B", nil, nil, time.Now(), 0)
+		require.NoError(t, err)
+
+		downstream := rec.Body.String()
+		require.NotContains(t, downstream, "vllm-0.27.1")
+		require.NotContains(t, downstream, "system_fingerprint")
+		require.NotContains(t, downstream, "Qwen3.8-27B")
+		require.NotContains(t, downstream, "internal")
+		for _, line := range strings.Split(downstream, "\n") {
+			payload, ok := extractOpenAISSEDataLine(line)
+			if !ok {
+				continue
+			}
+			trimmed := strings.TrimSpace(payload)
+			if trimmed == "" || trimmed == "[DONE]" {
+				continue
+			}
+			require.Equal(t, "deepseek-flash", gjson.Get(payload, "model").String())
+			require.False(t, gjson.Get(payload, "system_fingerprint").Exists())
+		}
+	})
+
+	t.Run("converted masked strips system_fingerprint and reasoning while keeping rewritten model", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		upstreamBody := strings.Join([]string{
+			`data: {"id":"cvt_1","object":"chat.completion.chunk","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+			"",
+			`data: {"id":"cvt_1","object":"chat.completion.chunk","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[{"index":0,"delta":{"reasoning":"internal"}}]}`,
+			"",
+			`data: {"id":"cvt_1","object":"chat.completion.chunk","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[{"index":0,"delta":{"content":"hello world"}}]}`,
+			"",
+			`data: {"id":"cvt_1","object":"chat.completion.chunk","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			"",
+			`data: {"id":"cvt_1","object":"chat.completion.chunk","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+			"",
+			"data: [DONE]",
+			"",
+		}, "\n")
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+		}
+		svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig()}
+		_, err := svc.convertedChatCompletionsAsRawCC(c, resp, responseMaskAcct, "deepseek-flash", "Qwen3.8-27B", "Qwen3.8-27B", nil, nil, time.Now())
+		require.NoError(t, err)
+
+		downstream := rec.Body.String()
+		require.Equal(t, "deepseek-flash", gjson.Get(downstream, "model").String())
+		require.False(t, gjson.Get(downstream, "system_fingerprint").Exists())
+		require.False(t, gjson.Get(downstream, "choices.0.message.reasoning").Exists())
+		require.False(t, gjson.Get(downstream, "choices.0.message.reasoning_content").Exists())
+		require.Equal(t, "hello world", gjson.Get(downstream, "choices.0.message.content").String())
+	})
+
+	t.Run("plain account keeps system_fingerprint byte-for-byte", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		const upstreamJSON = `{"id":"cmpl_1","object":"chat.completion","model":"Qwen3.8-27B","system_fingerprint":"vllm-0.27.1-tp4-71d65f83","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(upstreamJSON)),
+		}
+		svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig()}
+		_, err := svc.bufferRawChatCompletions(c, resp, plainAcct, "deepseek-flash", "Qwen3.8-27B", "Qwen3.8-27B", nil, nil, time.Now())
+		require.NoError(t, err)
+		require.Equal(t, upstreamJSON, rec.Body.String())
+	})
+}
