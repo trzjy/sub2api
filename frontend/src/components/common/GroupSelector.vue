@@ -61,7 +61,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import GroupBadge from './GroupBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
-import type { Group, GroupPlatform } from '@/types'
+import type { Group, GroupPlatform, ModelAllowlist } from '@/types'
 import { useAuthStore } from '@/stores'
 
 const { t } = useI18n()
@@ -76,6 +76,10 @@ interface Props {
   // 模型按所属原生平台进组，U7）——传入后可选中这些平台的分组；不传时保持
   // 「同 platform + composite」的既有规则，不全局放开跨平台绑定。
   nativePlatforms?: GroupPlatform[]
+  // 可选：账号当前支持的模型名单（如 ['claude-fable-5-1', 'gpt-6.1-sol']）。
+  // 传入（非 undefined）时，composite 聚合组仅当启用了白名单且白名单覆盖其中至少一个模型才显示；
+  // 不传时保持既有行为（composite 组全显示），不影响其它页面/平台。
+  accountModels?: string[]
   searchable?: boolean | 'auto'
 }
 
@@ -88,6 +92,27 @@ const emit = defineEmits<{
 }>()
 
 const searchText = ref('')
+
+// 判断 composite 聚合组是否覆盖账号模型名单中的至少一个模型。
+// 规则（按 U5 裁定：模型名单中有哪些家族，就显示模型家族相关的分组）：
+// - 未启用白名单或白名单模型为空 → false（未启用白名单的聚合组不等于匹配了模型家族）；
+// - 账号模型名单为空 → false；
+// - pattern 与 model 均做 trim().toLowerCase()：精确相等，或 pattern 以 '*' 结尾时 model 前缀命中，任一命中返回 true。
+const compositeGroupMatchesAccountModels = (
+  g: Group & { account_count?: number; model_allowlist?: ModelAllowlist },
+  models: string[]
+): boolean => {
+  const allowlist = g.model_allowlist
+  if (!allowlist?.enabled || !allowlist.models?.length) return false
+  if (models.length === 0) return false
+  const normalizedModels = models.map((m) => m.trim().toLowerCase())
+  return allowlist.models.some((pattern: string) => {
+    const p = pattern.trim().toLowerCase()
+    return normalizedModels.some((model) =>
+      p.endsWith('*') ? model.startsWith(p.slice(0, -1)) : model === p
+    )
+  })
+}
 
 const isSearchable = computed(() => {
   if (props.searchable === 'auto') return props.groups.length > 5
@@ -108,12 +133,17 @@ const filteredGroups = computed(() => {
     } else {
       // 默认：只能选择同 platform 的分组；composite 分组可接收任意具体平台账号；
       // nativePlatforms 按调用方声明放行（多模型供给平台按模型所属原生平台选组，U7）。
-      result = result.filter(
-        (g) =>
-          g.platform === props.platform ||
-          g.platform === 'composite' ||
-          props.nativePlatforms.includes(g.platform)
-      )
+      // 传入 accountModels 时，composite 聚合组仅当白名单覆盖账号模型名单中至少一个模型才显示（U5）；
+      // 不传时保持既有行为（composite 组全显示），不影响其它页面/平台。
+      result = result.filter((g) => {
+        if (g.platform === 'composite') {
+          if (props.accountModels !== undefined) {
+            return compositeGroupMatchesAccountModels(g, props.accountModels)
+          }
+          return true
+        }
+        return g.platform === props.platform || props.nativePlatforms.includes(g.platform)
+      })
     }
   }
   // 已绑定组恒可见：无论平台过滤结果如何，当前已选中且存在于 groups 的分组必须显示，

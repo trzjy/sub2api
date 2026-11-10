@@ -7,6 +7,7 @@ import {
   INTERNAL_SUPPLY_PLATFORMS,
   PLAZA_PLATFORM_ORDER,
   filterUpstreamModelsByPlatform,
+  inferGroupPlatformsFromModels,
   modelMatchesPlatform,
 } from '@/constants/platforms'
 import { platformLabel } from '@/utils/platformColors'
@@ -179,5 +180,38 @@ describe('D5 内部供给平台收敛', () => {
 
   it('PLAZA_PLATFORM_ORDER 不含 muse(后端归一后 composite 分组内模型不再出现 muse)', () => {
     expect((PLAZA_PLATFORM_ORDER as readonly string[])).not.toContain('muse')
+  })
+})
+
+describe('inferGroupPlatformsFromModels (C0 共享家族推导)', () => {
+  it('全家族混合名单去重保序', () => {
+    expect(
+      inferGroupPlatformsFromModels(['claude-fable-5-1', 'gpt-6.1-sol', 'gemini-4-argon', 'grok-4'])
+    ).toEqual(['anthropic', 'openai', 'gemini', 'grok'])
+  })
+
+  it('单一家族不漏出其它家族', () => {
+    expect(inferGroupPlatformsFromModels(['gpt-6.1-sol', 'gpt-5.6-sol'])).toEqual(['openai'])
+  })
+
+  it('识别其它常见家族', () => {
+    expect(inferGroupPlatformsFromModels(['o3-pro'])).toEqual(['openai'])
+    expect(inferGroupPlatformsFromModels(['codex-mini'])).toEqual(['openai'])
+    expect(inferGroupPlatformsFromModels(['muse-spark'])).toEqual(['muse'])
+    expect(inferGroupPlatformsFromModels(['deepseek-v4-pro'])).toEqual(['deepseek'])
+    expect(inferGroupPlatformsFromModels(['glm-5.3'])).toEqual(['zhipu'])
+    expect(inferGroupPlatformsFromModels(['kimi-k3'])).toEqual(['kimi'])
+  })
+
+  it('大小写不敏感、自动 trim', () => {
+    expect(inferGroupPlatformsFromModels(['  Claude-Fable-5-1 ', 'GPT-6.1-SOL'])).toEqual(['anthropic', 'openai'])
+  })
+
+  it('未知模型返回空数组', () => {
+    expect(inferGroupPlatformsFromModels(['composer-2.5'])).toEqual([])
+  })
+
+  it('空数组返回空数组', () => {
+    expect(inferGroupPlatformsFromModels([])).toEqual([])
   })
 })

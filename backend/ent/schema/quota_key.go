@@ -164,6 +164,26 @@ func (QuotaKey) Fields() []ent.Field {
 		field.String("upstream_key").
 			Default("shareai").
 			MaxLen(64),
+		// concurrency：激活码（码级权威值）并发上限，账号跟随码。
+		//
+		// 用户裁定（2026-11-10）：并发上移到激活码，账号沿用码值。本列是"码级权威值"，
+		// 拉号入库 / 人工建号 / 改绑时写入名下账号，修改码时同事务同步（与 priority 同一模式）。
+		// NULL = 沿用账号列默认（concurrency 默认 3），不写假值。
+		field.Int("concurrency").
+			Optional().
+			Nillable(),
+		// load_factor：激活码（码级权威值）负载因子，账号跟随码。
+		// NULL = 沿用在账号列（空），不写假值。
+		field.Int("load_factor").
+			Optional().
+			Nillable(),
+		// rate_multiplier：激活码（码级权威值）计费倍率，账号跟随码。
+		// 中性值 1.0 与账号默认一致。NOT NULL + DEFAULT 1.0 保证存量/新行都有中性值。
+		// 类型对齐 accounts.rate_multiplier / groups.rate_multiplier /
+		// usage_logs.account_rate_multiplier 统一为 DECIMAL(10,4)。
+		field.Float("rate_multiplier").
+			SchemaType(map[string]string{dialect.Postgres: "decimal(10,4)"}).
+			Default(1.0),
 	}
 }
 

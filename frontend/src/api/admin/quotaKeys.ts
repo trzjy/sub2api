@@ -42,6 +42,13 @@ export interface QuotaKey {
   // 激活码优先级（数值越小越优先，与账号 priority 同义）。该码名下账号的优先级跟随此值：
   // 拉号入库时写入，修改时后端同事务同步（日限额码取小值优先消耗，月总限额码取大值兜底）。
   priority: number
+  // 并发数（B 批上移到激活码管理，不含余额查询）：null / 省略表示沿用所属账号列的默认 3；
+  // 正整数（≥ 1，或按表单校验 ≥ 0）时后端同事务同步该码名下全部账号的并发数。
+  concurrency?: number | null
+  // 负载因子（B 批上移）：null / 省略表示清空（卸载）该码名下账号的负载因子；正整数 1..10000。
+  load_factor?: number | null
+  // 计费倍率（B 批上移）：≥ 0，默认 1.0，允许 0；后端同事务同步该码名下全部账号的计费倍率。
+  rate_multiplier?: number
   // 来源额度快照投影（方案 §25.6 消费闭包⑤ / §25.7-B）。
   // 口径：quota_keys.usage_snapshot 的**已提交**值，列表/详情/probe 与账号行同源同值。
   // 无快照时省略（不是 0）；查询失败时 total/used 是上次成功值，须带时间并标注失败。
@@ -87,6 +94,13 @@ export interface CreateQuotaKeyRequest {
    * 传非空值时后端会校验该上游存在且未软删，不存在则拒绝创建（失败关闭，不静默回落）。
    */
   upstream_key?: string | null
+  // 并发数（B 批上移）：null / 省略表示沿用账号列默认 3；正整数（≥ 1，或按表单校验 ≥ 0）时
+  // 后端同事务同步该码名下账号的并发数。
+  concurrency?: number | null
+  // 负载因子（B 批上移）：null / 省略表示清空该码名下账号的负载因子；正整数 1..10000。
+  load_factor?: number | null
+  // 计费倍率（B 批上移）：≥ 0，默认 1.0，允许 0；后端同事务同步该码名下账号的计费倍率。
+  rate_multiplier?: number
 }
 
 /** 编辑激活码请求（expires_at / notes / priority）。 */
@@ -97,6 +111,13 @@ export interface UpdateQuotaKeyRequest {
   notes?: string | null
   /** 不传表示不改；传值时后端同事务同步该码名下账号的 priority。 */
   priority?: number
+  // 并发数（B 批上移）：不传表示不改；传 null / 省略表示沿用账号列默认 3；正整数
+  // （≥ 1，或按表单校验 ≥ 0）时后端同事务同步该码名下账号的并发数。
+  concurrency?: number | null
+  // 负载因子（B 批上移）：不传表示不改；传 null / 省略表示清空该码名下账号的负载因子；正整数 1..10000。
+  load_factor?: number | null
+  // 计费倍率（B 批上移）：不传表示不改；≥ 0，默认 1.0，允许 0；后端同事务同步该码名下账号的计费倍率。
+  rate_multiplier?: number
 }
 
 export interface QuotaKeyListResponse {

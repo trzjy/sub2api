@@ -107,3 +107,70 @@ describe('GroupSelector native platforms + bound-group visibility (U7)', () => {
     expect(wrapper.text()).not.toContain('Composite')
   })
 })
+
+describe('GroupSelector composite group filter by accountModels (U5)', () => {
+  beforeEach(() => { authState.isSimpleMode = false })
+
+  const modelFamilyGroups = [
+    { id: 1, name: 'claude-standard', platform: 'anthropic', subscription_type: 'standard', status: 'active' },
+    { id: 2, name: 'claude-subscription', platform: 'anthropic', subscription_type: 'subscription', status: 'active' },
+    { id: 3, name: 'gpt-group', platform: 'openai', status: 'active' },
+    { id: 4, name: 'gemini-group', platform: 'gemini', status: 'active' },
+    { id: 5, name: 'cn-aggregate', platform: 'composite', status: 'active', model_allowlist: { enabled: true, models: ['glm-5.3', 'kimi-k3'] } },
+    { id: 6, name: 'disabled-aggregate', platform: 'composite', status: 'active', model_allowlist: { enabled: false, models: ['claude-fable-5-1'] } },
+    { id: 7, name: 'claude-wildcard-aggregate', platform: 'composite', status: 'active', model_allowlist: { enabled: true, models: ['claude-*'] } },
+    { id: 8, name: 'claude-exact-aggregate', platform: 'composite', status: 'active', model_allowlist: { enabled: true, models: ['claude-fable-5-1'] } },
+    { id: 9, name: 'empty-aggregate', platform: 'composite', status: 'active', model_allowlist: { enabled: true, models: [] } }
+  ] as any
+
+  const mountModelFamilySelector = (modelValue: number[], accountModels?: string[]) =>
+    mount(GroupSelector, {
+      props: {
+        modelValue,
+        groups: modelFamilyGroups,
+        platform: 'cursor',
+        nativePlatforms: ['anthropic'],
+        accountModels
+      },
+      global: { stubs: { GroupBadge: { props: ['name'], template: '<span>{{ name }}</span>' }, Icon: true } }
+    })
+
+  it('shows anthropic groups, hides openai/gemini, filters composite by accountModels', () => {
+    const wrapper = mountModelFamilySelector([], ['claude-fable-5-1'])
+    const text = wrapper.text()
+    // anthropic 组（含 standard 与 subscription）均显示
+    expect(text).toContain('claude-standard')
+    expect(text).toContain('claude-subscription')
+    // openai / gemini 组不显示（未放行）
+    expect(text).not.toContain('gpt-group')
+    expect(text).not.toContain('gemini-group')
+    // composite 组白名单全是 glm/kimi 或 enabled=false 时不显示
+    expect(text).not.toContain('cn-aggregate')
+    expect(text).not.toContain('disabled-aggregate')
+    expect(text).not.toContain('empty-aggregate')
+    // composite 组白名单含 claude-* 或 claude-fable-5-1 时显示
+    expect(text).toContain('claude-wildcard-aggregate')
+    expect(text).toContain('claude-exact-aggregate')
+  })
+
+  it('keeps already-bound non-matching composite groups visible (bound-but-hidden rule)', () => {
+    // 已绑定 cn-aggregate（id 5，白名单 glm/kimi，不匹配）仍受恒可见规则保护显示。
+    const wrapper = mountModelFamilySelector([5], ['claude-fable-5-1'])
+    expect(wrapper.text()).toContain('cn-aggregate')
+  })
+
+  it('shows all composite groups when accountModels is undefined (existing behavior)', () => {
+    // 不传 accountModels：行为与现状完全一致，composite 组全显示。
+    const wrapper = mountModelFamilySelector([])
+    const text = wrapper.text()
+    expect(text).toContain('cn-aggregate')
+    expect(text).toContain('disabled-aggregate')
+    expect(text).toContain('claude-wildcard-aggregate')
+    expect(text).toContain('claude-exact-aggregate')
+    expect(text).toContain('empty-aggregate')
+    expect(text).toContain('claude-standard')
+    expect(text).toContain('claude-subscription')
+    expect(text).not.toContain('gpt-group')
+    expect(text).not.toContain('gemini-group')
+  })
+})

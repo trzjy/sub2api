@@ -292,6 +292,81 @@ func (_u *QuotaKeyUpdate) SetNillableUpstreamKey(v *string) *QuotaKeyUpdate {
 	return _u
 }
 
+// SetConcurrency sets the "concurrency" field.
+func (_u *QuotaKeyUpdate) SetConcurrency(v int) *QuotaKeyUpdate {
+	_u.mutation.ResetConcurrency()
+	_u.mutation.SetConcurrency(v)
+	return _u
+}
+
+// SetNillableConcurrency sets the "concurrency" field if the given value is not nil.
+func (_u *QuotaKeyUpdate) SetNillableConcurrency(v *int) *QuotaKeyUpdate {
+	if v != nil {
+		_u.SetConcurrency(*v)
+	}
+	return _u
+}
+
+// AddConcurrency adds value to the "concurrency" field.
+func (_u *QuotaKeyUpdate) AddConcurrency(v int) *QuotaKeyUpdate {
+	_u.mutation.AddConcurrency(v)
+	return _u
+}
+
+// ClearConcurrency clears the value of the "concurrency" field.
+func (_u *QuotaKeyUpdate) ClearConcurrency() *QuotaKeyUpdate {
+	_u.mutation.ClearConcurrency()
+	return _u
+}
+
+// SetLoadFactor sets the "load_factor" field.
+func (_u *QuotaKeyUpdate) SetLoadFactor(v int) *QuotaKeyUpdate {
+	_u.mutation.ResetLoadFactor()
+	_u.mutation.SetLoadFactor(v)
+	return _u
+}
+
+// SetNillableLoadFactor sets the "load_factor" field if the given value is not nil.
+func (_u *QuotaKeyUpdate) SetNillableLoadFactor(v *int) *QuotaKeyUpdate {
+	if v != nil {
+		_u.SetLoadFactor(*v)
+	}
+	return _u
+}
+
+// AddLoadFactor adds value to the "load_factor" field.
+func (_u *QuotaKeyUpdate) AddLoadFactor(v int) *QuotaKeyUpdate {
+	_u.mutation.AddLoadFactor(v)
+	return _u
+}
+
+// ClearLoadFactor clears the value of the "load_factor" field.
+func (_u *QuotaKeyUpdate) ClearLoadFactor() *QuotaKeyUpdate {
+	_u.mutation.ClearLoadFactor()
+	return _u
+}
+
+// SetRateMultiplier sets the "rate_multiplier" field.
+func (_u *QuotaKeyUpdate) SetRateMultiplier(v float64) *QuotaKeyUpdate {
+	_u.mutation.ResetRateMultiplier()
+	_u.mutation.SetRateMultiplier(v)
+	return _u
+}
+
+// SetNillableRateMultiplier sets the "rate_multiplier" field if the given value is not nil.
+func (_u *QuotaKeyUpdate) SetNillableRateMultiplier(v *float64) *QuotaKeyUpdate {
+	if v != nil {
+		_u.SetRateMultiplier(*v)
+	}
+	return _u
+}
+
+// AddRateMultiplier adds value to the "rate_multiplier" field.
+func (_u *QuotaKeyUpdate) AddRateMultiplier(v float64) *QuotaKeyUpdate {
+	_u.mutation.AddRateMultiplier(v)
+	return _u
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *QuotaKeyUpdate) AddAccountIDs(ids ...int64) *QuotaKeyUpdate {
 	_u.mutation.AddAccountIDs(ids...)
@@ -511,6 +586,30 @@ func (_u *QuotaKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.UpstreamKey(); ok {
 		_spec.SetField(quotakey.FieldUpstreamKey, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Concurrency(); ok {
+		_spec.SetField(quotakey.FieldConcurrency, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedConcurrency(); ok {
+		_spec.AddField(quotakey.FieldConcurrency, field.TypeInt, value)
+	}
+	if _u.mutation.ConcurrencyCleared() {
+		_spec.ClearField(quotakey.FieldConcurrency, field.TypeInt)
+	}
+	if value, ok := _u.mutation.LoadFactor(); ok {
+		_spec.SetField(quotakey.FieldLoadFactor, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedLoadFactor(); ok {
+		_spec.AddField(quotakey.FieldLoadFactor, field.TypeInt, value)
+	}
+	if _u.mutation.LoadFactorCleared() {
+		_spec.ClearField(quotakey.FieldLoadFactor, field.TypeInt)
+	}
+	if value, ok := _u.mutation.RateMultiplier(); ok {
+		_spec.SetField(quotakey.FieldRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedRateMultiplier(); ok {
+		_spec.AddField(quotakey.FieldRateMultiplier, field.TypeFloat64, value)
 	}
 	if _u.mutation.AccountsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -838,6 +937,81 @@ func (_u *QuotaKeyUpdateOne) SetNillableUpstreamKey(v *string) *QuotaKeyUpdateOn
 	return _u
 }
 
+// SetConcurrency sets the "concurrency" field.
+func (_u *QuotaKeyUpdateOne) SetConcurrency(v int) *QuotaKeyUpdateOne {
+	_u.mutation.ResetConcurrency()
+	_u.mutation.SetConcurrency(v)
+	return _u
+}
+
+// SetNillableConcurrency sets the "concurrency" field if the given value is not nil.
+func (_u *QuotaKeyUpdateOne) SetNillableConcurrency(v *int) *QuotaKeyUpdateOne {
+	if v != nil {
+		_u.SetConcurrency(*v)
+	}
+	return _u
+}
+
+// AddConcurrency adds value to the "concurrency" field.
+func (_u *QuotaKeyUpdateOne) AddConcurrency(v int) *QuotaKeyUpdateOne {
+	_u.mutation.AddConcurrency(v)
+	return _u
+}
+
+// ClearConcurrency clears the value of the "concurrency" field.
+func (_u *QuotaKeyUpdateOne) ClearConcurrency() *QuotaKeyUpdateOne {
+	_u.mutation.ClearConcurrency()
+	return _u
+}
+
+// SetLoadFactor sets the "load_factor" field.
+func (_u *QuotaKeyUpdateOne) SetLoadFactor(v int) *QuotaKeyUpdateOne {
+	_u.mutation.ResetLoadFactor()
+	_u.mutation.SetLoadFactor(v)
+	return _u
+}
+
+// SetNillableLoadFactor sets the "load_factor" field if the given value is not nil.
+func (_u *QuotaKeyUpdateOne) SetNillableLoadFactor(v *int) *QuotaKeyUpdateOne {
+	if v != nil {
+		_u.SetLoadFactor(*v)
+	}
+	return _u
+}
+
+// AddLoadFactor adds value to the "load_factor" field.
+func (_u *QuotaKeyUpdateOne) AddLoadFactor(v int) *QuotaKeyUpdateOne {
+	_u.mutation.AddLoadFactor(v)
+	return _u
+}
+
+// ClearLoadFactor clears the value of the "load_factor" field.
+func (_u *QuotaKeyUpdateOne) ClearLoadFactor() *QuotaKeyUpdateOne {
+	_u.mutation.ClearLoadFactor()
+	return _u
+}
+
+// SetRateMultiplier sets the "rate_multiplier" field.
+func (_u *QuotaKeyUpdateOne) SetRateMultiplier(v float64) *QuotaKeyUpdateOne {
+	_u.mutation.ResetRateMultiplier()
+	_u.mutation.SetRateMultiplier(v)
+	return _u
+}
+
+// SetNillableRateMultiplier sets the "rate_multiplier" field if the given value is not nil.
+func (_u *QuotaKeyUpdateOne) SetNillableRateMultiplier(v *float64) *QuotaKeyUpdateOne {
+	if v != nil {
+		_u.SetRateMultiplier(*v)
+	}
+	return _u
+}
+
+// AddRateMultiplier adds value to the "rate_multiplier" field.
+func (_u *QuotaKeyUpdateOne) AddRateMultiplier(v float64) *QuotaKeyUpdateOne {
+	_u.mutation.AddRateMultiplier(v)
+	return _u
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *QuotaKeyUpdateOne) AddAccountIDs(ids ...int64) *QuotaKeyUpdateOne {
 	_u.mutation.AddAccountIDs(ids...)
@@ -1087,6 +1261,30 @@ func (_u *QuotaKeyUpdateOne) sqlSave(ctx context.Context) (_node *QuotaKey, err 
 	}
 	if value, ok := _u.mutation.UpstreamKey(); ok {
 		_spec.SetField(quotakey.FieldUpstreamKey, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Concurrency(); ok {
+		_spec.SetField(quotakey.FieldConcurrency, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedConcurrency(); ok {
+		_spec.AddField(quotakey.FieldConcurrency, field.TypeInt, value)
+	}
+	if _u.mutation.ConcurrencyCleared() {
+		_spec.ClearField(quotakey.FieldConcurrency, field.TypeInt)
+	}
+	if value, ok := _u.mutation.LoadFactor(); ok {
+		_spec.SetField(quotakey.FieldLoadFactor, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedLoadFactor(); ok {
+		_spec.AddField(quotakey.FieldLoadFactor, field.TypeInt, value)
+	}
+	if _u.mutation.LoadFactorCleared() {
+		_spec.ClearField(quotakey.FieldLoadFactor, field.TypeInt)
+	}
+	if value, ok := _u.mutation.RateMultiplier(); ok {
+		_spec.SetField(quotakey.FieldRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedRateMultiplier(); ok {
+		_spec.AddField(quotakey.FieldRateMultiplier, field.TypeFloat64, value)
 	}
 	if _u.mutation.AccountsCleared() {
 		edge := &sqlgraph.EdgeSpec{

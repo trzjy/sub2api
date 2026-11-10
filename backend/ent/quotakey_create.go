@@ -232,6 +232,48 @@ func (_c *QuotaKeyCreate) SetNillableUpstreamKey(v *string) *QuotaKeyCreate {
 	return _c
 }
 
+// SetConcurrency sets the "concurrency" field.
+func (_c *QuotaKeyCreate) SetConcurrency(v int) *QuotaKeyCreate {
+	_c.mutation.SetConcurrency(v)
+	return _c
+}
+
+// SetNillableConcurrency sets the "concurrency" field if the given value is not nil.
+func (_c *QuotaKeyCreate) SetNillableConcurrency(v *int) *QuotaKeyCreate {
+	if v != nil {
+		_c.SetConcurrency(*v)
+	}
+	return _c
+}
+
+// SetLoadFactor sets the "load_factor" field.
+func (_c *QuotaKeyCreate) SetLoadFactor(v int) *QuotaKeyCreate {
+	_c.mutation.SetLoadFactor(v)
+	return _c
+}
+
+// SetNillableLoadFactor sets the "load_factor" field if the given value is not nil.
+func (_c *QuotaKeyCreate) SetNillableLoadFactor(v *int) *QuotaKeyCreate {
+	if v != nil {
+		_c.SetLoadFactor(*v)
+	}
+	return _c
+}
+
+// SetRateMultiplier sets the "rate_multiplier" field.
+func (_c *QuotaKeyCreate) SetRateMultiplier(v float64) *QuotaKeyCreate {
+	_c.mutation.SetRateMultiplier(v)
+	return _c
+}
+
+// SetNillableRateMultiplier sets the "rate_multiplier" field if the given value is not nil.
+func (_c *QuotaKeyCreate) SetNillableRateMultiplier(v *float64) *QuotaKeyCreate {
+	if v != nil {
+		_c.SetRateMultiplier(*v)
+	}
+	return _c
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_c *QuotaKeyCreate) AddAccountIDs(ids ...int64) *QuotaKeyCreate {
 	_c.mutation.AddAccountIDs(ids...)
@@ -314,6 +356,10 @@ func (_c *QuotaKeyCreate) defaults() error {
 		v := quotakey.DefaultUpstreamKey
 		_c.mutation.SetUpstreamKey(v)
 	}
+	if _, ok := _c.mutation.RateMultiplier(); !ok {
+		v := quotakey.DefaultRateMultiplier
+		_c.mutation.SetRateMultiplier(v)
+	}
 	return nil
 }
 
@@ -379,6 +425,9 @@ func (_c *QuotaKeyCreate) check() error {
 		if err := quotakey.UpstreamKeyValidator(v); err != nil {
 			return &ValidationError{Name: "upstream_key", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.upstream_key": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.RateMultiplier(); !ok {
+		return &ValidationError{Name: "rate_multiplier", err: errors.New(`ent: missing required field "QuotaKey.rate_multiplier"`)}
 	}
 	return nil
 }
@@ -470,6 +519,18 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.UpstreamKey(); ok {
 		_spec.SetField(quotakey.FieldUpstreamKey, field.TypeString, value)
 		_node.UpstreamKey = value
+	}
+	if value, ok := _c.mutation.Concurrency(); ok {
+		_spec.SetField(quotakey.FieldConcurrency, field.TypeInt, value)
+		_node.Concurrency = &value
+	}
+	if value, ok := _c.mutation.LoadFactor(); ok {
+		_spec.SetField(quotakey.FieldLoadFactor, field.TypeInt, value)
+		_node.LoadFactor = &value
+	}
+	if value, ok := _c.mutation.RateMultiplier(); ok {
+		_spec.SetField(quotakey.FieldRateMultiplier, field.TypeFloat64, value)
+		_node.RateMultiplier = value
 	}
 	if nodes := _c.mutation.AccountsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -776,6 +837,72 @@ func (u *QuotaKeyUpsert) SetUpstreamKey(v string) *QuotaKeyUpsert {
 // UpdateUpstreamKey sets the "upstream_key" field to the value that was provided on create.
 func (u *QuotaKeyUpsert) UpdateUpstreamKey() *QuotaKeyUpsert {
 	u.SetExcluded(quotakey.FieldUpstreamKey)
+	return u
+}
+
+// SetConcurrency sets the "concurrency" field.
+func (u *QuotaKeyUpsert) SetConcurrency(v int) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldConcurrency, v)
+	return u
+}
+
+// UpdateConcurrency sets the "concurrency" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdateConcurrency() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldConcurrency)
+	return u
+}
+
+// AddConcurrency adds v to the "concurrency" field.
+func (u *QuotaKeyUpsert) AddConcurrency(v int) *QuotaKeyUpsert {
+	u.Add(quotakey.FieldConcurrency, v)
+	return u
+}
+
+// ClearConcurrency clears the value of the "concurrency" field.
+func (u *QuotaKeyUpsert) ClearConcurrency() *QuotaKeyUpsert {
+	u.SetNull(quotakey.FieldConcurrency)
+	return u
+}
+
+// SetLoadFactor sets the "load_factor" field.
+func (u *QuotaKeyUpsert) SetLoadFactor(v int) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldLoadFactor, v)
+	return u
+}
+
+// UpdateLoadFactor sets the "load_factor" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdateLoadFactor() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldLoadFactor)
+	return u
+}
+
+// AddLoadFactor adds v to the "load_factor" field.
+func (u *QuotaKeyUpsert) AddLoadFactor(v int) *QuotaKeyUpsert {
+	u.Add(quotakey.FieldLoadFactor, v)
+	return u
+}
+
+// ClearLoadFactor clears the value of the "load_factor" field.
+func (u *QuotaKeyUpsert) ClearLoadFactor() *QuotaKeyUpsert {
+	u.SetNull(quotakey.FieldLoadFactor)
+	return u
+}
+
+// SetRateMultiplier sets the "rate_multiplier" field.
+func (u *QuotaKeyUpsert) SetRateMultiplier(v float64) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldRateMultiplier, v)
+	return u
+}
+
+// UpdateRateMultiplier sets the "rate_multiplier" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdateRateMultiplier() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldRateMultiplier)
+	return u
+}
+
+// AddRateMultiplier adds v to the "rate_multiplier" field.
+func (u *QuotaKeyUpsert) AddRateMultiplier(v float64) *QuotaKeyUpsert {
+	u.Add(quotakey.FieldRateMultiplier, v)
 	return u
 }
 
@@ -1101,6 +1228,83 @@ func (u *QuotaKeyUpsertOne) SetUpstreamKey(v string) *QuotaKeyUpsertOne {
 func (u *QuotaKeyUpsertOne) UpdateUpstreamKey() *QuotaKeyUpsertOne {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.UpdateUpstreamKey()
+	})
+}
+
+// SetConcurrency sets the "concurrency" field.
+func (u *QuotaKeyUpsertOne) SetConcurrency(v int) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetConcurrency(v)
+	})
+}
+
+// AddConcurrency adds v to the "concurrency" field.
+func (u *QuotaKeyUpsertOne) AddConcurrency(v int) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.AddConcurrency(v)
+	})
+}
+
+// UpdateConcurrency sets the "concurrency" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdateConcurrency() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateConcurrency()
+	})
+}
+
+// ClearConcurrency clears the value of the "concurrency" field.
+func (u *QuotaKeyUpsertOne) ClearConcurrency() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearConcurrency()
+	})
+}
+
+// SetLoadFactor sets the "load_factor" field.
+func (u *QuotaKeyUpsertOne) SetLoadFactor(v int) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetLoadFactor(v)
+	})
+}
+
+// AddLoadFactor adds v to the "load_factor" field.
+func (u *QuotaKeyUpsertOne) AddLoadFactor(v int) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.AddLoadFactor(v)
+	})
+}
+
+// UpdateLoadFactor sets the "load_factor" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdateLoadFactor() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateLoadFactor()
+	})
+}
+
+// ClearLoadFactor clears the value of the "load_factor" field.
+func (u *QuotaKeyUpsertOne) ClearLoadFactor() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearLoadFactor()
+	})
+}
+
+// SetRateMultiplier sets the "rate_multiplier" field.
+func (u *QuotaKeyUpsertOne) SetRateMultiplier(v float64) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetRateMultiplier(v)
+	})
+}
+
+// AddRateMultiplier adds v to the "rate_multiplier" field.
+func (u *QuotaKeyUpsertOne) AddRateMultiplier(v float64) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.AddRateMultiplier(v)
+	})
+}
+
+// UpdateRateMultiplier sets the "rate_multiplier" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdateRateMultiplier() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateRateMultiplier()
 	})
 }
 
@@ -1592,6 +1796,83 @@ func (u *QuotaKeyUpsertBulk) SetUpstreamKey(v string) *QuotaKeyUpsertBulk {
 func (u *QuotaKeyUpsertBulk) UpdateUpstreamKey() *QuotaKeyUpsertBulk {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.UpdateUpstreamKey()
+	})
+}
+
+// SetConcurrency sets the "concurrency" field.
+func (u *QuotaKeyUpsertBulk) SetConcurrency(v int) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetConcurrency(v)
+	})
+}
+
+// AddConcurrency adds v to the "concurrency" field.
+func (u *QuotaKeyUpsertBulk) AddConcurrency(v int) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.AddConcurrency(v)
+	})
+}
+
+// UpdateConcurrency sets the "concurrency" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdateConcurrency() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateConcurrency()
+	})
+}
+
+// ClearConcurrency clears the value of the "concurrency" field.
+func (u *QuotaKeyUpsertBulk) ClearConcurrency() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearConcurrency()
+	})
+}
+
+// SetLoadFactor sets the "load_factor" field.
+func (u *QuotaKeyUpsertBulk) SetLoadFactor(v int) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetLoadFactor(v)
+	})
+}
+
+// AddLoadFactor adds v to the "load_factor" field.
+func (u *QuotaKeyUpsertBulk) AddLoadFactor(v int) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.AddLoadFactor(v)
+	})
+}
+
+// UpdateLoadFactor sets the "load_factor" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdateLoadFactor() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateLoadFactor()
+	})
+}
+
+// ClearLoadFactor clears the value of the "load_factor" field.
+func (u *QuotaKeyUpsertBulk) ClearLoadFactor() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearLoadFactor()
+	})
+}
+
+// SetRateMultiplier sets the "rate_multiplier" field.
+func (u *QuotaKeyUpsertBulk) SetRateMultiplier(v float64) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetRateMultiplier(v)
+	})
+}
+
+// AddRateMultiplier adds v to the "rate_multiplier" field.
+func (u *QuotaKeyUpsertBulk) AddRateMultiplier(v float64) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.AddRateMultiplier(v)
+	})
+}
+
+// UpdateRateMultiplier sets the "rate_multiplier" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdateRateMultiplier() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateRateMultiplier()
 	})
 }
 

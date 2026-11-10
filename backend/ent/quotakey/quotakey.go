@@ -47,6 +47,12 @@ const (
 	FieldNotes = "notes"
 	// FieldUpstreamKey holds the string denoting the upstream_key field in the database.
 	FieldUpstreamKey = "upstream_key"
+	// FieldConcurrency holds the string denoting the concurrency field in the database.
+	FieldConcurrency = "concurrency"
+	// FieldLoadFactor holds the string denoting the load_factor field in the database.
+	FieldLoadFactor = "load_factor"
+	// FieldRateMultiplier holds the string denoting the rate_multiplier field in the database.
+	FieldRateMultiplier = "rate_multiplier"
 	// EdgeAccounts holds the string denoting the accounts edge name in mutations.
 	EdgeAccounts = "accounts"
 	// Table holds the table name of the quotakey in the database.
@@ -79,6 +85,9 @@ var Columns = []string{
 	FieldPriority,
 	FieldNotes,
 	FieldUpstreamKey,
+	FieldConcurrency,
+	FieldLoadFactor,
+	FieldRateMultiplier,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -129,6 +138,8 @@ var (
 	DefaultUpstreamKey string
 	// UpstreamKeyValidator is a validator for the "upstream_key" field. It is called by the builders before save.
 	UpstreamKeyValidator func(string) error
+	// DefaultRateMultiplier holds the default value on creation for the "rate_multiplier" field.
+	DefaultRateMultiplier float64
 )
 
 // OrderOption defines the ordering options for the QuotaKey queries.
@@ -212,6 +223,21 @@ func ByNotes(opts ...sql.OrderTermOption) OrderOption {
 // ByUpstreamKey orders the results by the upstream_key field.
 func ByUpstreamKey(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpstreamKey, opts...).ToFunc()
+}
+
+// ByConcurrency orders the results by the concurrency field.
+func ByConcurrency(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConcurrency, opts...).ToFunc()
+}
+
+// ByLoadFactor orders the results by the load_factor field.
+func ByLoadFactor(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLoadFactor, opts...).ToFunc()
+}
+
+// ByRateMultiplier orders the results by the rate_multiplier field.
+func ByRateMultiplier(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRateMultiplier, opts...).ToFunc()
 }
 
 // ByAccountsCount orders the results by accounts count.
