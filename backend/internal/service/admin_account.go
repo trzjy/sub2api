@@ -814,6 +814,11 @@ func applyQuotaKeyManagedAccountSettings(account *Account, qk *dbent.QuotaKey, i
 	}
 	if qk.Concurrency != nil && *qk.Concurrency > 0 {
 		account.Concurrency = *qk.Concurrency
+	} else {
+		// 码级并发数为空（NULL/未设或已清空）= 账号默认并发 3（与 quota_key_repository.go 一致）。
+		// 必须显式重置为默认，否则锁外旧读（如 concurrency=7）会在编辑写路径被原样写回，
+		// 撤销"清空激活码并发数并把名下账号恢复默认 3"的操作。
+		account.Concurrency = 3
 	}
 	// load_factor：指针拷贝（nil 表示跟随默认）。
 	account.LoadFactor = qk.LoadFactor

@@ -658,3 +658,59 @@ func TestAdminAccountQuotaKeyBoundUpdateFollowsManagedSettingsConcurrentLock(t *
 	require.NoError(t, err)
 	require.Equal(t, 99, qkAfter.Priority)
 }
+
+// TestAdminAccountQuotaKeyBoundUpdateAppliesClearedConcurrencyDefault3 回归 c1p1-fix-review-r2 P2：
+// 当激活码码级并发数被清空（quota_keys.concurrency = NULL）并把名下账号同步恢复为默认并发 3
+// 后，若有并发的 UpdateAccount 编辑在锁外先读了旧账号快照（Concurrency=7），随后在
+// withQuotaKeyLockTx 锁内虽重读到 qk.Concurrency == nil，applyQuotaKeyManagedAccountSettings
+// 必须显式把 account.Concurrency 重置为默认 3，绝不能把旧值 7 写回 DB，撤销清空操作。
+func TestAdminAccountQuotaKeyBoundUpdateAppliesClearedConcurrencyDefault3(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, client := managedSettingsQKAdminService(t)
+
+	// 激活码先带并发数 7（此时账号随码继承 7），随后管理员清空码级并发数为 NULL。
+	qk := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 4, 7, 80, 0.5, time.Time{}, nil)
+
+	// 账号原快照：Concurrency=7（锁外旧读）；DB 行同样为 7（清空前的同步值）。
+	existing, err := client.Account.Create().
+		SetName("concurrency-cleared-account").
+		SetPlatform(domain.PlatformCursor).
+		SetType(AccountTypeAPIKey).
+		SetCredentials(map[string]any{"api_key": "sk-old"}).
+		SetQuotaKeyID(qk.ID).
+		SetConcurrency(7).
+		Save(ctx)
+	require.NoError(t, err)
+	repo.upstreamBillingProbeAccountRepo.accounts[existing.ID] = &Account{
+		ID:          existing.ID,
+		Name:        existing.Name,
+		Platform:    domain.PlatformCursor,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		QuotaKeyID:  &qk.ID,
+		Concurrency: 7, // 锁外旧快照：编辑前账号仍持旧并发 7。
+	}
+
+	// 模拟激活码清空码级并发数（NULL）：UpdateSettingsAndSyncAccounts 已将该码名下账号
+	// DB 同步为默认并发 3（这里直接清空码并发以刻画"锁内读到 NULL"的权威状态）。
+	_, err = client.QuotaKey.UpdateOneID(qk.ID).ClearConcurrency().Save(ctx)
+	require.NoError(t, err)
+
+	// 并发编辑（如改备注）：必须跟随锁内重读到的"码级并发已清空"，把账号并发重置为默认 3。
+	notes := "tweak notes only"
+	updated, err := svc.UpdateAccount(ctx, existing.ID, &UpdateAccountInput{Notes: &notes})
+	require.NoError(t, err, "editing a bound cursor account after concurrency cleared must succeed")
+	require.Equal(t, 3, updated.Concurrency, "cleared quota key concurrency must reset account to default 3, not write back old 7")
+	require.NotNil(t, updated.Notes, "notes edit must be preserved")
+	require.Equal(t, notes, *updated.Notes, "notes edit must be preserved")
+
+	// 真实 DB 行落库并发必须为 3（旧值 7 绝不可写回）。
+	dbAcc, err := client.Account.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.Equal(t, 3, dbAcc.Concurrency, "persisted concurrency must be the default 3 after code-level concurrency cleared")
+
+	// 反向校验：激活码侧 concurrency 确实为 NULL（确认不是编辑把值写成非零）。
+	qkAfter, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.Nil(t, qkAfter.Concurrency, "quota key concurrency must remain NULL (cleared)")
+}
