@@ -35,6 +35,9 @@ type QuotaKeyHandler struct {
 	// adminService 供管理端账号写入复用（kn-cy 旁路激活建号入口已于 KC-21 删除，
 	// kn-cy 卡密改走既有号池链路建号；此依赖暂留以免改动 NewQuotaKeyHandler 签名与装配）。
 	adminService service.AdminService
+	// accountTestService 供 SyncUpstreamModels 借用该激活码名下账号做上游模型预览探测；
+	// 可选依赖，未装配时 SyncUpstreamModels 返回 503。保持 NewQuotaKeyHandler 原 4 参签名不变。
+	accountTestService *service.AccountTestService
 }
 
 // NewQuotaKeyHandler 构造激活码管理端点处理器。
@@ -42,6 +45,12 @@ type QuotaKeyHandler struct {
 // autoEntry 为 nil 时 probe_quota 端点返回 503（未装配入库可配置服务）。
 func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper, autoEntry *service.CursorAutoEntryService, adminService service.AdminService) *QuotaKeyHandler {
 	return &QuotaKeyHandler{svc: svc, sweeper: sweeper, autoEntry: autoEntry, adminService: adminService}
+}
+
+// SetAccountTestService 装配上游模型预览探测服务（SyncUpstreamModels 依赖）。
+// 与 NewQuotaKeyHandler 分离，避免改动既有 4 参构造签名、不破坏现有测试。
+func (h *QuotaKeyHandler) SetAccountTestService(svc *service.AccountTestService) {
+	h.accountTestService = svc
 }
 
 // quotaKeySummaryView 是激活码的展示投影：既有脱敏标量 + 来源额度快照投影
@@ -116,6 +125,12 @@ func maskedQuotaKey(st *service.QuotaKeyStatus) dto.QuotaKey {
 		Notes:            st.Notes,
 		Priority:         st.Priority,
 		UpstreamKey:      st.UpstreamKey,
+		// B 批上移：码级并发数 / 负载因子 / 计费倍率 / 模型映射，与 service.QuotaKeyStatus
+		// 同源回放，供前端编辑弹窗回填（禁多轨投影漂移）。
+		Concurrency:    st.Concurrency,
+		LoadFactor:     st.LoadFactor,
+		RateMultiplier: st.RateMultiplier,
+		ModelMapping:   st.ModelMapping,
 	}
 }
 
@@ -170,6 +185,14 @@ type createQuotaKeyRequest struct {
 	// UpstreamKey 是新建激活码所属上游的稳定标识（引用 quota_upstreams.key）。
 	// 缺省（omitempty，空串）表示未指定，由仓储层落列默认值（'shareai'）。
 	UpstreamKey string `json:"upstream_key"`
+
+	// B 批上移：创建时一并落库的码级设置（并发数 / 负载因子 / 计费倍率 / 模型映射）。
+	// 这些字段缺省表示不覆盖（沿用拉号上游默认实供）。model_mapping 仅在显式给出
+	// 对象（含 {}）时设置 ModelMappingSet=true；空映射由服务层 400 拒绝落库。
+	Concurrency    *int            `json:"concurrency"`
+	LoadFactor     *int            `json:"load_factor"`
+	RateMultiplier *float64        `json:"rate_multiplier"`
+	ModelMapping   json.RawMessage `json:"model_mapping"`
 }
 
 // Create 新建激活码：接 code 原文一次 → 加密落库 → 返回脱敏结果。
@@ -185,7 +208,39 @@ func (h *QuotaKeyHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "code is required")
 		return
 	}
-	st, err := h.svc.Create(c.Request.Context(), req.Code, req.ExpiresAt, req.Notes, req.Priority, req.UpstreamKey)
+
+	// 解析 model_mapping：仅在请求 JSON 显式给出对象（含 {}）时设置 ModelMappingSet=true；
+	// 传 null / 未提供则不设置自定义映射（沿用上游默认实供）。
+	var modelMappingSet bool
+	var modelMapping map[string]string
+	if len(req.ModelMapping) > 0 && string(req.ModelMapping) != "null" {
+		if err := json.Unmarshal(req.ModelMapping, &modelMapping); err != nil {
+			response.BadRequest(c, "Invalid model_mapping: "+err.Error())
+			return
+		}
+		modelMappingSet = true
+	}
+
+	settings := &service.UpdateQuotaKeySettingsInput{
+		ModelMappingSet: modelMappingSet,
+		ModelMapping:    modelMapping,
+	}
+	if req.Concurrency != nil {
+		c := *req.Concurrency
+		cp := &c
+		settings.Concurrency = &cp
+	}
+	if req.LoadFactor != nil {
+		l := *req.LoadFactor
+		lp := &l
+		settings.LoadFactor = &lp
+	}
+	if req.RateMultiplier != nil {
+		r := *req.RateMultiplier
+		settings.RateMultiplier = &r
+	}
+
+	st, err := h.svc.CreateWithSettings(c.Request.Context(), req.Code, req.ExpiresAt, req.Notes, req.Priority, req.UpstreamKey, settings)
 	if err != nil {
 		respondQuotaKeyError(c, err)
 		return
@@ -287,9 +342,50 @@ type updateQuotaKeyRequest struct {
 	// Priority 为 nil 表示本次不改优先级；给出时必须是正整数（数值越小越优先），
 	// 服务端会在同一事务内把该码名下未删除账号的 priority 一并同步。
 	Priority *int `json:"priority"`
+
+	// B 批上移：编辑时一并更新的码级设置（并发数 / 负载因子 / 计费倍率 / 模型映射）。
+	// concurrency / load_factor 用 json.RawMessage 表达三态（未传 / null / 值）；
+	// rate_multiplier / model_mapping 同口径（model_mapping 显式出现即 ModelMappingSet=true）。
+	Concurrency    json.RawMessage `json:"concurrency"`
+	LoadFactor     json.RawMessage `json:"load_factor"`
+	RateMultiplier *float64        `json:"rate_multiplier"`
+	ModelMapping   json.RawMessage `json:"model_mapping"`
 }
 
-// Update 编辑激活码（code / expires_at / notes；status 不允许改）。
+// newNilIntPointer 返回指向 nil *int 的指针（**int 的内层 nil），表达"清空/恢复默认"。
+func newNilIntPointer() **int {
+	var inner *int
+	return &inner
+}
+
+// parseTriStateInt 解析并发数 / 负载因子的三态入参：
+//   - raw == nil（未传）→ 返回 (nil, nil) 表示外层不修改；
+//   - raw == "null" 或 值 <= 0 → 返回 (指向 nil 的 **int, nil) 表示清空；
+//   - 正整数 → 返回 (指向该值的 **int, nil)；
+//   - 解析失败 → 返回 (nil, err)。
+//
+// 超界（如 load_factor > 10000）此处不拦截，交由服务层 normalizeQuotaKeySettings 返回 400，
+// 保证 handler 与 service 的校验口径唯一。
+func parseTriStateInt(raw json.RawMessage) (**int, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if string(raw) == "null" {
+		return newNilIntPointer(), nil
+	}
+	var val int
+	if err := json.Unmarshal(raw, &val); err != nil {
+		return nil, err
+	}
+	if val <= 0 {
+		return newNilIntPointer(), nil
+	}
+	v := val
+	inner := &v
+	return &inner, nil
+}
+
+// Update 编辑激活码（code / expires_at / notes / 码级设置；status 不允许改）。
 // PUT /api/v1/admin/quota_keys/:id
 func (h *QuotaKeyHandler) Update(c *gin.Context) {
 	id, ok := parseQuotaKeyID(c)
@@ -327,7 +423,43 @@ func (h *QuotaKeyHandler) Update(c *gin.Context) {
 		}
 		notes = &value
 	}
-	st, err := h.svc.Update(c.Request.Context(), id, req.Code, expiresAt, notes, req.Priority)
+
+	settings := &service.UpdateQuotaKeySettingsInput{}
+	concurrency, err := parseTriStateInt(req.Concurrency)
+	if err != nil {
+		response.BadRequest(c, "Invalid concurrency: "+err.Error())
+		return
+	}
+	settings.Concurrency = concurrency
+	loadFactor, err := parseTriStateInt(req.LoadFactor)
+	if err != nil {
+		response.BadRequest(c, "Invalid load_factor: "+err.Error())
+		return
+	}
+	settings.LoadFactor = loadFactor
+	if req.RateMultiplier != nil {
+		rateMultiplier := *req.RateMultiplier
+		settings.RateMultiplier = &rateMultiplier
+	}
+	// model_mapping：只要在请求 JSON 中出现（len > 0），一律反序列化为 map[string]string
+	//（null 解析成空 map），并设 ModelMappingSet=true——按用户裁定"没有任何支持的模型就禁止
+	// 落库"，服务层将拒绝空映射并返回 400。
+	if len(req.ModelMapping) > 0 {
+		var parsed map[string]string
+		if string(req.ModelMapping) != "null" {
+			if err := json.Unmarshal(req.ModelMapping, &parsed); err != nil {
+				response.BadRequest(c, "Invalid model_mapping: "+err.Error())
+				return
+			}
+		}
+		if parsed == nil {
+			parsed = map[string]string{}
+		}
+		settings.ModelMappingSet = true
+		settings.ModelMapping = parsed
+	}
+
+	st, err := h.svc.UpdateWithSettings(c.Request.Context(), id, req.Code, expiresAt, notes, req.Priority, settings)
 	if err != nil {
 		respondQuotaKeyError(c, err)
 		return
@@ -555,4 +687,57 @@ func (h *QuotaKeyHandler) DailyStats(c *gin.Context) {
 		ByKey:     byKey,
 		ByAccount: byAccount,
 	})
+}
+
+// SyncUpstreamModels 借用该激活码名下账号做上游模型预览探测，返回 {models, warnings}，
+// 不修改单账号 DB。仅预览：探测用的账号强制 ID=0，绝不回写 quota_keys / accounts。
+// POST /api/v1/admin/quota_keys/:id/models/sync-upstream
+func (h *QuotaKeyHandler) SyncUpstreamModels(c *gin.Context) {
+	id, ok := parseQuotaKeyID(c)
+	if !ok {
+		return
+	}
+	// 依赖未装配（accountTestService / adminService）明确返回 503，不得静默走到上游探测。
+	if h.accountTestService == nil || h.adminService == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Quota key upstream model sync is not configured")
+		return
+	}
+	// 选该激活码名下可用 cursor 账号（健康可调度优先），无可用账号则失败关闭（400）。
+	accRow, err := h.svc.ResolvePreviewAccountForModelSync(c.Request.Context(), id)
+	if err != nil {
+		respondQuotaKeyError(c, err)
+		return
+	}
+	// 加载解密凭据后的完整账号，用于上游模型清单探测。
+	fullAccount, err := h.adminService.GetAccount(c.Request.Context(), accRow.ID)
+	if err != nil {
+		respondQuotaKeyError(c, err)
+		return
+	}
+	// 强制 ID=0：只预览、不写单账号 DB（避免把探测账号落库为新建账号）。
+	previewAcc := *fullAccount
+	previewAcc.ID = 0
+	catalog, err := h.accountTestService.SyncUpstreamModelCatalog(c.Request.Context(), &previewAcc)
+	if err != nil {
+		// 与 AccountHandler.SyncUpstreamModels（account_handler.go:3923-3938）同口径映射上游错误。
+		var syncErr *service.UpstreamModelSyncError
+		if errors.As(err, &syncErr) {
+			switch syncErr.Kind {
+			case service.UpstreamModelSyncErrorConfiguration, service.UpstreamModelSyncErrorUnsupported:
+				response.BadRequest(c, syncErr.SafeMessage())
+			case service.UpstreamModelSyncErrorCredential:
+				response.Error(c, http.StatusUnauthorized, syncErr.SafeMessage())
+			case service.UpstreamModelSyncErrorInternal:
+				response.InternalError(c, syncErr.SafeMessage())
+			default:
+				slog.Warn("quota_key_sync_upstream_models_failed", "quota_key_id", id, "kind", syncErr.Kind)
+				response.Error(c, http.StatusBadGateway, syncErr.SafeMessage())
+			}
+			return
+		}
+		slog.Warn("quota_key_sync_upstream_models_failed", "quota_key_id", id)
+		response.Error(c, http.StatusBadGateway, "Failed to sync upstream models from upstream")
+		return
+	}
+	response.Success(c, catalog)
 }
