@@ -250,8 +250,8 @@ func (c *shareAIUpstreamClient) RealSupplyModelsFor(_ string) ([]string, error) 
 	return CursorStaticEntryModels(), nil
 }
 
-// TargetAccountsPerKeyFor 返回 ShareAI 上游每码目标账号数：固定 5（CursorAutoPullAccountsPerKey）。
-// 上游每天只允许拉 5 次号（ErrUpstreamDailyRefreshLimit），5 个刚好把当天额度用尽。
+// TargetAccountsPerKeyFor 返回 ShareAI 上游每码目标账号数：1 主 1 热备 = 2（CursorAutoPullAccountsPerKey，用户裁定 2026-11-10）。
+// 上游每天只允许拉 5 次号（ErrUpstreamDailyRefreshLimit），2 个（1 主 1 热备）为当前裁定口径。
 func (c *shareAIUpstreamClient) TargetAccountsPerKeyFor(_ string) (int, error) {
 	return CursorAutoPullAccountsPerKey, nil
 }

@@ -3177,48 +3177,191 @@ func TestCURF1_CandidateKeys_CooldownWindow(t *testing.T) {
 		"cooldown marker must not exclude the key regardless of elapsed time")
 }
 
-// TestListCandidateKeys_StoppedAccountsDoNotCount（2026-11-06 用户裁定）：
-// "我说的是 5 个可用账号，不包括停调账号。"
+// TestListCandidateKeys_StoppedAccountsCountTowardTotal（2026-11-10 派发单 c1p1-A）：
+// 候选计数已收敛为「非软删总行数 total」，停调/待恢复的号同样计入水位。
+// 背景：实测单号并发峰值 1，「1 主 1 热备」看的是该码名下所有未软删账号总数，
+// 停调的号也占水位，避免热备码被反复补超过目标数。
 //
-// 码名下 5 个号全部处于停调中时，可用数 = 0 < 5，该码必须重新进入候选补号。
-// 旧口径数的是总行数（5 行），于是"5 个号全废、池子空了、却永远不补号"——
-// 这正是用户反复指出的问题。schedulable=false 的号同样不算可用。
-func TestListCandidateKeys_StoppedAccountsDoNotCount(t *testing.T) {
+// 这与旧口径（只数可用数、停调不算）正好相反——旧口径会让"2 个号 1 个停调"误判为缺口并重补。
+// 旧用例 TestListCandidateKeys_StoppedAccountsDoNotCount（working 口径）随本次收敛作废，
+// 由本用例按 total 口径重新钉死。
+func TestListCandidateKeys_StoppedAccountsCountTowardTotal(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	w := NewQuotaKeyModelWater(client, nil)
+	w := NewQuotaKeyModelWater(client, nil) // 无 upstream：target = CursorAutoPullAccountsPerKey = 2
 
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	mustCreateAccounts(t, client, qk.ID, CursorAutoPullAccountsPerKey) // 表里 5 个号，全部可用
+	mustCreateAccounts(t, client, qk.ID, 2) // 表里 2 个号，全部可用
 
-	// 对照：5 个号都能干活 → 不该入选。
+	// 对照：2 个号都可用 → 已达目标 2 → 不该入选。
 	cands, err := w.ListCandidateKeys(ctx, "cursor-stopped", 0)
 	require.NoError(t, err)
-	require.NotContains(t, cands, qk.ID, "5 个可用号已满，不该再拉")
+	require.NotContains(t, cands, qk.ID, "2 个可用号已达目标，不该再拉")
 
-	// 全部置为"停调中且未到期"（被上游挡住）→ 可用 0 → 必须重新入选。
+	// 其中一个置为"停调中且未到期"：total 仍为 2（停调号计入总行数），不因此出现"缺口"。
 	_, err = client.Account.Update().
-		Where(account.QuotaKeyID(qk.ID)).
+		Where(account.QuotaKeyID(qk.ID), account.NameEQ(fmt.Sprintf("acc-%d-0", qk.ID))).
 		SetTempUnschedulableUntil(time.Now().Add(30 * time.Minute)).
 		Save(ctx)
 	require.NoError(t, err)
 
 	cands, err = w.ListCandidateKeys(ctx, "cursor-stopped", 0)
 	require.NoError(t, err)
-	require.Contains(t, cands, qk.ID,
-		"5 个号全停调 = 0 个可用，必须重新入选补号（用户裁定：停调账号不算数）")
+	require.NotContains(t, cands, qk.ID,
+		"停调号计入 total（2026-11-10）：1 主 1 热备，total=2 已满，不得因停调重补")
 
-	// schedulable=false 同样不算可用号（人工/状态机停用）。
-	_, err = client.Account.Update().
-		Where(account.QuotaKeyID(qk.ID)).
-		SetTempUnschedulableUntil(time.Now().Add(-time.Minute)). // 停调已过期
-		SetSchedulable(false).
-		Save(ctx)
+	// 真正不足：删到 1 个号（total=1 < 2）→ 必须补。
+	_, err = client.Account.Delete().
+		Where(account.QuotaKeyID(qk.ID), account.NameEQ(fmt.Sprintf("acc-%d-1", qk.ID))).
+		Exec(ctx)
 	require.NoError(t, err)
 
 	cands, err = w.ListCandidateKeys(ctx, "cursor-stopped", 0)
 	require.NoError(t, err)
-	require.Contains(t, cands, qk.ID, "schedulable=false 的号也不算可用，仍须补号")
+	require.Contains(t, cands, qk.ID, "total=1 < 2 必须补号")
+}
+
+// TestCursorAutoPullAccountsPerKeyIsTwo（c1p1-A 要求 1）：
+// 自动补位目标收敛为 1 主 1 热备（2），用户裁定 2026-11-10。
+func TestCursorAutoPullAccountsPerKeyIsTwo(t *testing.T) {
+	require.Equal(t, 2, CursorAutoPullAccountsPerKey,
+		"c1p1-A: 自动补位目标应收敛为 1 主 1 热备（2）")
+}
+
+// TestListCandidateKeys_TotalCountNotWorking（c1p1-A 要求 2）：
+// 候选计数收敛为「非软删总行数 total」。total=2 即便其中 1 个停调（working=1）也不入选；
+// total=1 才入选。
+func TestListCandidateKeys_TotalCountNotWorking(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	w := NewQuotaKeyModelWater(client, nil) // 无 upstream：target = CursorAutoPullAccountsPerKey = 2
+
+	// total=2、working=1（一个号停调）→ 不返回。
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	mustCreateAccounts(t, client, qk.ID, 2)
+	_, err := client.Account.Update().
+		Where(account.QuotaKeyID(qk.ID), account.NameEQ(fmt.Sprintf("acc-%d-0", qk.ID))).
+		SetTempUnschedulableUntil(time.Now().Add(30 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+	cands, err := w.ListCandidateKeys(ctx, "cursor-total-2", 0)
+	require.NoError(t, err)
+	require.NotContains(t, cands, qk.ID, "total=2（含 1 停调）→ 不补")
+
+	// total=1 → 返回。
+	qk1 := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	mustCreateAccounts(t, client, qk1.ID, 1)
+	cands, err = w.ListCandidateKeys(ctx, "cursor-total-1", 0)
+	require.NoError(t, err)
+	require.Contains(t, cands, qk1.ID, "total=1 < 2 → 必须补")
+}
+
+// TestListCandidateKeys_QuotaExhaustionGate（c1p1-A 要求 3）：
+// 码级额度耗尽门：新鲜快照 remaining=0 → 跳过；remaining=100 → 不跳过；
+// checked_at 超过 5 分钟（陈旧）→ 不跳过（失败关闭放行）。
+func TestListCandidateKeys_QuotaExhaustionGate(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	w := NewQuotaKeyModelWater(client, nil)
+
+	now := time.Now()
+	makeKeyWithSnapshot := func(total, used int, checkedAt time.Time) *ent.QuotaKey {
+		qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+		snap := fmt.Sprintf(
+			`{"total":%d,"used":%d,"status_code":200,"checked_at":%q,"attempted_at":%q,"error_code":""}`,
+			total, used, checkedAt.Format(time.RFC3339), checkedAt.Format(time.RFC3339))
+		_, err := client.QuotaKey.UpdateOneID(qk.ID).SetUsageSnapshot([]byte(snap)).Save(ctx)
+		require.NoError(t, err)
+		// 该码 0 个账号：total=0 < 2，若未被耗尽门拦下本应入选（用于对照）。
+		return qk
+	}
+
+	// remaining=0（total=10, used=10，新鲜）→ 跳过。
+	qkZero := makeKeyWithSnapshot(10, 10, now)
+	cands, err := w.ListCandidateKeys(ctx, "cursor-gate-0", 0)
+	require.NoError(t, err)
+	require.NotContains(t, cands, qkZero.ID, "新鲜 remaining=0 → 跳过")
+
+	// remaining=100（total=200, used=100，新鲜）→ 不跳过（入选）。
+	qk100 := makeKeyWithSnapshot(200, 100, now)
+	cands, err = w.ListCandidateKeys(ctx, "cursor-gate-100", 0)
+	require.NoError(t, err)
+	require.Contains(t, cands, qk100.ID, "新鲜 remaining=100 → 不跳过（入选）")
+
+	// checked_at 超过 5 分钟（remaining=0 但陈旧）→ 不跳过（入选，失败关闭放行）。
+	qkStale := makeKeyWithSnapshot(10, 10, now.Add(-10*time.Minute))
+	cands, err = w.ListCandidateKeys(ctx, "cursor-gate-stale", 0)
+	require.NoError(t, err)
+	require.Contains(t, cands, qkStale.ID, "checked_at 陈旧 → 不跳过（入选）")
+}
+
+// TestPull_AutoPathTotalGateZeroInsert（c1p1-A 要求 4）：
+// 自动路径（manual=false）以「非软删总行数 total」为基准。total=2、working=1（一个停调）、
+// 上游返回 1 个号 → maxInsert = target(2) - total(2) = 0 → 零插入。
+func TestPull_AutoPathTotalGateZeroInsert(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
+			{Name: "auto-overflow", Platform: "cursor", Type: "oauth", Credentials: map[string]any{}},
+		}},
+	})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	mustCreateAccounts(t, client, qk.ID, 2)
+	// 其中一个停调：working(usable)=1，但 total（非软删）=2。
+	_, err := client.Account.Update().
+		Where(account.QuotaKeyID(qk.ID), account.NameEQ(fmt.Sprintf("acc-%d-0", qk.ID))).
+		SetTempUnschedulableUntil(time.Now().Add(30 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 自动路径（PullAccounts → manual=false）。
+	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+
+	n, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, n, "自动路径 total=2 已达目标：上游的 1 个号必须被零插入丢弃")
+}
+
+// TestPull_ManualPathUnaffectedByTotalGate（c1p1-A 要求 5）：
+// 人工路径（RefreshAccounts，manual=true）仍以 working 为基准，不受 total 闸影响。
+// 同一 key 状态：total=2、working=1、上游返回 1 个号 → 人工路径 base=working=1 →
+// maxInsert = target(2) - 1 = 1 → 插入 1 个（总数变 3）。若误用 total 闸则零插入。
+func TestPull_ManualPathUnaffectedByTotalGate(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	// 手动入口走挂载语义，需一个覆盖实供模型的 composite 聚合组（与既有 RefreshAccounts 用例同型）。
+	grp := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{"claude-sonnet-5-5"},
+	})
+	t.Cleanup(func() {
+		_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(grp.ID)).Exec(ctx)
+		_, _ = client.Group.Delete().Where(entgroup.IDEQ(grp.ID)).Exec(ctx)
+	})
+
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
+			{Name: "manual-1", Platform: "cursor", Type: "oauth", Credentials: map[string]any{"k": "v"}},
+		}},
+	})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	mustCreateAccounts(t, client, qk.ID, 2)
+	_, err := client.Account.Update().
+		Where(account.QuotaKeyID(qk.ID), account.NameEQ(fmt.Sprintf("acc-%d-0", qk.ID))).
+		SetTempUnschedulableUntil(time.Now().Add(30 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 人工路径（RefreshAccounts → manual=true）。
+	require.NoError(t, svc.RefreshAccounts(ctx, qk.ID))
+
+	n, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 3, n, "人工路径以 working=1 为基准：total=2 不应阻止，应插入 1 个（总数 3）")
 }
 
 // TestCURF1_CandidateKeys_NonCooldownNotReinstatedByTime（6，非冷却错误不得因时间被当冷却）：

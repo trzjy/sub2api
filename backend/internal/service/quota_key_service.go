@@ -26,7 +26,7 @@ import (
 
 // MaxAccountsPerQuotaKey 是单个激活码可持有（working）账号的**硬上限**（人工与自动共用）。
 //
-// 2026-11-06 用户裁定（第二次）：自动补位固定 5 个，人工拉取不受限制，存量超出的裁掉。
+// 2026-11-10 用户裁定：自动补位固定 2 个（1 主 1 热备），人工拉取不受限制，存量超出的裁掉。
 // 所以这个常量现在只作为"人工也不能无限堆"的兜底护栏，不再决定自动补位目标——
 // 自动补位的目标值见 CursorAutoPullAccountsPerKey。
 //
@@ -34,16 +34,19 @@ import (
 // 中途调到 50 用于观察，现在回落到 50 只作护栏。
 const MaxAccountsPerQuotaKey = 50
 
-// CursorAutoPullAccountsPerKey 是**自动补位**的每码固定目标账号数（用户裁定 2026-11-06）。
+// CursorAutoPullAccountsPerKey 是**自动补位**的每码固定目标账号数（用户裁定 2026-11-10）。
 //
-// 为什么定 5：上游每个激活码每天只允许拉 5 次号（ErrUpstreamDailyRefreshLimit），
-// 自动补位拉到 5 个刚好把当天额度用干净，多拉也拉不动；而人工拉取（后台手动建号/改绑）
-// 不走这个限制，因为人是有意为之，不需要替他省额度。
+// 1 主 1 热备：实测单号并发峰值 1，2 个号（1 主 1 热备）即可满足调度；多号只增加管理面
+// 与失败轮转面，不增加真实吞吐，故从 5 收敛为 2（用户裁定 2026-11-10）。
+//
+// 历史：上游每个激活码每天只允许拉 5 次号（ErrUpstreamDailyRefreshLimit），曾定 5 刚好用尽
+// 当天额度；2026-11-10 重新裁定为 2。人工拉取（后台手动建号/改绑）不走这个限制，因为人是有
+// 意为之，不需要替他省额度。
 //
 // 为什么不再看"水位缺口"：之前按额度水位算缺口，会在额度满的时候一个都不拉、额度紧张时
-// 一次拉一堆，账号数忽多忽少。固定 5 个后，每码每天稳定消耗 5 个号，
+// 一次拉一堆，账号数忽多忽少。固定目标后，每码每天稳定消耗固定个号，
 // 「400 分到底要几个号」这个账才能算清楚。
-const CursorAutoPullAccountsPerKey = 5
+const CursorAutoPullAccountsPerKey = 2
 
 // quotaKeyCooldownWindow 是 shareai 上游实测的刷新冷却窗口（方案 §10 #26）。
 //
@@ -1341,7 +1344,7 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		}
 
 		// 容量判定与插入在同一事务/同一 advisory 互斥域内：maxInsert 以插入前读到的
-		// working 为基准，working=4 而上游返 2 时只落 1 条，总数恰好 5（不多不少）。
+		// 基准数为准。
 		// upstream 溢出的账号直接丢弃：UpstreamPullResult 不带重放字段，不做二次落库。
 		//
 		// 目标账号数按"该卡所属上游"分派（KC-26）：shareai=5、kn-cy=1（1 卡 1 号）。
@@ -1352,7 +1355,21 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		} else {
 			targetPerKey = t
 		}
-		maxInsert := targetPerKey - working
+		// 2026-11-10 派发单 c1p1-A：自动路径以「非软删总行数」为基准，而非仅 active 可用数
+		// （checkQuotaKeyCapacityLocked 的 working）。理由同上——"1 主 1 热备"看的是该码名下
+		// 所有未软删账号总数，停调/待恢复的号也占水位，避免热备码被补超过目标数。
+		// 人工路径（manual=true，RefreshAccounts）保持现状：仍以 working 为基准，不受总闸影响。
+		base := working
+		if !manual {
+			total, terr := tx.Account.Query().
+				Where(account.QuotaKeyID(quotaKeyID), account.DeletedAtIsNil()).
+				Count(ctx)
+			if terr != nil {
+				return fmt.Errorf("quota_key_service: count total accounts for %d: %w", quotaKeyID, terr)
+			}
+			base = total
+		}
+		maxInsert := targetPerKey - base
 		if maxInsert <= 0 {
 			return nil
 		}
@@ -2501,20 +2518,23 @@ func isDeadKeyRefreshError(errStr *string) bool {
 
 // ListCandidateKeys 返回池级（不按模型收窄）需要补池的候选 quota_key ID。
 //
-// 判据（2026-11-06 用户裁定，二次收敛 —— 唯一一条）：
+// 判据（2026-11-10 派发单 c1p1-A，收敛为「非软删总行数 total」）：
 //
-//	这个码名下还有几个【可用】账号：少于 CursorAutoPullAccountsPerKey(5) 个就入选，
-//	够 5 个就不入选。"可用"= 未软删 + schedulable + status=active + 没有未到期的临时停调。
+//	这个码名下还有几个【未软删】账号：少于 CursorAutoPullAccountsPerKey(2) 个就入选，
+//	够 2 个（1 主 1 热备）就不入选。计数口径为「非软删总行数」（含停调 / 待恢复），
+//	不再数"可用数"——停调号也占水位，避免热备码被反复补超过目标数。
 //
-// 用户两次原话：先"有 5 个号，就不再拉，少于 5 个号就拉，其他条件都不需要设"，
-// 再澄清"我说的是 5 个可用账号，不包括停调账号"——所以数的是能干活的人头，不是墓碑。
+// 历史：2026-11-06 用户裁定数"可用账号"（未软删 + schedulable + active + 无未到期停调）；
+// 2026-11-10 收敛为 total 行数（用户裁定 1 主 1 热备）。
+//
+// 码级额度耗尽门（2026-11-10 新增）：来源额度快照新鲜且真实剩余已触底时，本轮不对该码发起
+// 自动拉号（cursorQuotaKeyPullBlocked，与 sweepQuotaKeyLevelStops / 来源门同源常量与窗口）；
+// 失败关闭——拿不到"有可用剩余"证据时放行，只有明确耗尽才跳过。
 //
 // 保留的排除项不是"业务条件"，而是"这个码还成立"的前提：
 //   - status 非 active / exhausted / 已软删 / 已过期：这些码拉号必失败；
-//   - 密钥级死码（上游明确说该密钥不存在 / 无效 / 已过期）：拉一万次也拉不出号，等人工换码。
-//
-// 优先级顺序（用户裁定 2026-11-03）：候选按 quota_keys.priority 升序（数值越小越优先），
-// 同优先级按 id 升序稳定输出。
+//   - 密钥级死码（上游明确说该密钥不存在 / 无效 / 已过期）：拉一万次也拉不出号，等人工换码；
+//   - 未知上游标识：失败关闭，不参与自动补池。
 //
 // 优先级顺序（用户裁定 2026-11-03）：候选按 quota_keys.priority 升序（数值越小越优先），
 // 同优先级按 id 升序稳定输出。这样补池时先拉"优先码"（日限额码）的号，月总限额码排在后面
@@ -2540,27 +2560,28 @@ func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, li
 			// 只会每轮给上游送一次无效请求并把心跳写成失败。等人工换码。
 			continue
 		}
-		// 2026-11-06 用户裁定（二次收敛）：候选只认一条——这个码名下还有没有满 5 个号。
-		// 原"5 分钟冷却窗口内不入选"的过滤已删除：冷却只是限频状态，不该把"号不够"的码
-		// 挡在候选之外，那正是"号池告急却永远不补号"的成因之一。
-		// 死码过滤保留（上游明确说密钥作废，不是推断状态）。
-		// 数的是"可用账号"（用户裁定 2026-11-06："5 个可用账号，不包括停调账号"）。
-		// 谓词与 countUsableQuotaKeyAccounts 保持一致：未软删 + schedulable + active +
-		// 没有未到期的临时停调。用总行数会让"5 个号全停调"的码永远够数、永远不补号。
-		working, werr := w.client.Account.Query().
+		// 新增「码级额度耗尽门」（2026-11-10 派发单 c1p1-A）：来源额度快照新鲜且真实剩余已触底
+		// 时，本轮不再对该码发起自动拉号——拉出来的号也跑不动，只会浪费上游每日拉号额度、
+		// 并撞"密钥额度耗尽"失败心跳。与 sweepQuotaKeyLevelStops / cursorSupplySourceUsageVetoReason
+		// 使用同一组常量（cursorQuotaKeyRemainingFloor）与新鲜度窗口
+		// （cursorSupplySourceUsageFreshnessWindow）。失败关闭：任何拿不到"有可用剩余"证据的情形
+		// 都放行（让既有水位/人工路径继续工作），只有明确耗尽才跳过。
+		if cursorQuotaKeyPullBlocked(k.UsageSnapshot, now) {
+			continue
+		}
+		// 2026-11-10 派发单 c1p1-A：候选计数由「可用数 working」收敛为「非软删总行数 total」。
+		// 背景：实测单号并发峰值 1，「1 主 1 热备」即可满足，多号只增加管理面与失败轮转面；
+		// 用"非软删总行数"而非"可用数"是把停调/待恢复的号也计入水位，避免热备码被反复补到
+		// 超过目标数。数的是该码名下所有未软删账号（含停调、含待恢复），达到目标即不补。
+		// 原"5 分钟冷却窗口内不入选"过滤此前已删除；死码过滤保留（上游明确说密钥作废，不是推断状态）。
+		total, terr := w.client.Account.Query().
 			Where(
 				account.QuotaKeyID(k.ID),
 				account.DeletedAtIsNil(),
-				account.Schedulable(true),
-				account.StatusEQ(domain.StatusActive),
-				account.Or(
-					account.TempUnschedulableUntilIsNil(),
-					account.TempUnschedulableUntilLTE(now),
-				),
 			).
 			Count(ctx)
-		if werr != nil {
-			return nil, fmt.Errorf("quota_key_model_water: count working for key %d: %w", k.ID, werr)
+		if terr != nil {
+			return nil, fmt.Errorf("quota_key_model_water: count total for key %d: %w", k.ID, terr)
 		}
 		// 自动补位的目标按"该码所属上游"分派（KC-26）：shareai=5、kn-cy=1（1 卡 1 号）。
 		// upstream 未装配（测试/未注入）时回落到 CursorAutoPullAccountsPerKey（与既有 shareai 口径一致）；
@@ -2576,7 +2597,7 @@ func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, li
 				target = t
 			}
 		}
-		if working >= target {
+		if total >= target {
 			continue // 自动补位名额已满：跳过
 		}
 		out = append(out, k.ID)
@@ -2622,4 +2643,17 @@ func acquireAdvisoryXactLock(ctx context.Context, tx *ent.Tx, lockID int64) erro
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+}
+
+// cursorQuotaKeyPullBlocked 返回 true 表示本轮不应对该码发起自动拉号。
+// 与 sweepQuotaKeyLevelStops 使用同一组常量与新鲜度窗口。
+func cursorQuotaKeyPullBlocked(raw json.RawMessage, now time.Time) bool {
+	snap, ok := ParseQuotaKeyUsageSnapshot(raw)
+	if !ok || snap.ErrorCode != "" || snap.Total == nil || snap.Used == nil || snap.CheckedAt == nil {
+		return false
+	}
+	if now.Sub(*snap.CheckedAt) > cursorSupplySourceUsageFreshnessWindow {
+		return false
+	}
+	return (*snap.Total - *snap.Used) < cursorQuotaKeyRemainingFloor
 }
