@@ -114,6 +114,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import AppLayout from '@/components/layout/AppLayout.vue'
+import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 import { adminAPI } from '@/api/admin'
 import type { AccountListItem, AdminGroup, GroupPlatform } from '@/types'
 
