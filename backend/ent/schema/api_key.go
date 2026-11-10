@@ -36,8 +36,7 @@ func (APIKey) Fields() []ent.Field {
 		field.Int64("user_id"),
 		field.String("key").
 			MaxLen(128).
-			NotEmpty().
-			Unique(),
+			NotEmpty(),
 		field.String("name").
 			MaxLen(100).
 			NotEmpty(),
@@ -135,7 +134,13 @@ func (APIKey) Edges() []ent.Edge {
 
 func (APIKey) Indexes() []ent.Index {
 	return []ent.Index{
-		// key 字段已在 Fields() 中声明 Unique()，无需重复索引
+		// key 唯一索引：仅对未软删行唯一。
+		// 软删行不再占用唯一坑位（与迁移 301 一致）；UNIQUE 约束无法带 WHERE，
+		// 故由字段级 Unique() 改为部分唯一索引声明。
+		index.Fields("key").
+			Unique().
+			StorageKey("api_keys_key_active").
+			Annotations(entsql.IndexWhere("deleted_at IS NULL")),
 		index.Fields("user_id"),
 		index.Fields("group_id"),
 		index.Fields("status"),

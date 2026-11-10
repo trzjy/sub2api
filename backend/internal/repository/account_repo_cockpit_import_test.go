@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/DATA-DOG/go-sqlmock"
-	dbaccount "github.com/Wei-Shaw/sub2api/ent/account"
-	dbent "github.com/Wei-Shaw/sub2api/ent"
-	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/DATA-DOG/go-sqlmock"
+	dbent "github.com/Wei-Shaw/sub2api/ent"
+	dbaccount "github.com/Wei-Shaw/sub2api/ent/account"
+	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
@@ -64,14 +64,19 @@ type errPlain string
 func (e errPlain) Error() string { return string(e) }
 
 // TestAccountUIDPartialIndexConflictSQL 断言 ON CONFLICT 冲突目标含部分索引谓词
-// WHERE uid != ''，与迁移 262 的 accounts_platform_uid_active 索引完全一致（零降级）。
+// WHERE uid != '' AND deleted_at IS NULL，与迁移 300 的 accounts_platform_uid_active 索引完全一致（零降级）。
 func TestAccountUIDPartialIndexConflictSQL(t *testing.T) {
 	b := entsql.Dialect(dialect.Postgres).Insert("accounts").
 		Columns("platform", "uid", "name", "type", "credentials", "credentials_mac", "extra").
 		Values("claude", "u1", "n", "oauth", "{}", "mac", "{}").
 		OnConflict(
 			entsql.ConflictColumns(dbaccount.FieldPlatform, dbaccount.FieldUID),
-			entsql.ConflictWhere(entsql.NEQ(dbaccount.FieldUID, "")),
+			// 谓词必须与迁移 300 的部分唯一索引逐字一致：
+			//   WHERE uid != '' AND deleted_at IS NULL
+			entsql.ConflictWhere(entsql.And(
+				entsql.NEQ(dbaccount.FieldUID, ""),
+				entsql.IsNull(dbaccount.FieldDeletedAt),
+			)),
 			entsql.DoNothing(),
 		)
 

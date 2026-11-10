@@ -9,8 +9,8 @@
 // 差值在并发下不可判定；这是唯一最小机制）。DO NOTHING 仍是约束兜底，写入语义不变。
 //
 // 冲突语义（方案 §1.6 钉死，零兜底）：
-//   - 唯一约束由部分唯一索引 accounts_platform_uid_active (platform, uid) WHERE uid != '' 提供；
-//   - INSERT 使用 ON CONFLICT (platform, uid) WHERE uid != '' DO NOTHING，
+//   - 唯一约束由部分唯一索引 accounts_platform_uid_active (platform, uid) WHERE uid != '' AND deleted_at IS NULL 提供（迁移 300）；
+//   - INSERT 使用 ON CONFLICT (platform, uid) WHERE uid != '' AND deleted_at IS NULL DO NOTHING，
 //     冲突目标含部分索引谓词（ent v0.14.5 支持 sql.ConflictWhere，见 account_create.go:2315）；
 //   - 任何非目标索引约束冲突（name 唯一、FK 等）→ 整个事务回滚 + 显式错误返回，
 //     禁止吞成 skipped_existing；目标索引冲突在 DO NOTHING 下不报错，若意外报错按非预期错误回滚；
@@ -25,10 +25,10 @@ import (
 	"errors"
 	"fmt"
 
+	entsql "entgo.io/ent/dialect/sql"
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	dbaccount "github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
-	dbent "github.com/Wei-Shaw/sub2api/ent"
-	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
@@ -114,7 +114,7 @@ func (r *cockpitImportCommitRepository) CommitCockpitImport(ctx context.Context,
 		}
 	}
 
-	// ② 整批 INSERT ... ON CONFLICT (platform, uid) WHERE uid != '' DO NOTHING。
+	// ② 整批 INSERT ... ON CONFLICT (platform, uid) WHERE uid != '' AND deleted_at IS NULL DO NOTHING。
 	builders := make([]*dbent.AccountCreate, 0, len(unique))
 	for i := range unique {
 		p := unique[i]
@@ -137,12 +137,19 @@ func (r *cockpitImportCommitRepository) CommitCockpitImport(ctx context.Context,
 		builders = append(builders, b)
 	}
 
-	// 冲突目标必须含部分索引谓词 WHERE uid != ''（与迁移 262 索引一致）。
+	// 冲突目标必须含部分索引谓词 WHERE uid != '' AND deleted_at IS NULL（与迁移 300 索引一致）。
 	// vendored ent v0.14.5 支持 sql.ConflictWhere，无需降级为无谓词宽泛 DO NOTHING 或裸 SQL。
 	err = txClient.Account.CreateBulk(builders...).
 		OnConflict(
 			entsql.ConflictColumns(dbaccount.FieldPlatform, dbaccount.FieldUID),
-			entsql.ConflictWhere(entsql.NEQ(dbaccount.FieldUID, "")),
+			// 谓词必须与迁移 300 的部分唯一索引逐字一致：
+			//   WHERE uid != '' AND deleted_at IS NULL
+			// 否则 PG 无法为 ON CONFLICT 推断出索引，运行时报
+			// "there is no unique or exclusion constraint matching the ON CONFLICT specification"。
+			entsql.ConflictWhere(entsql.And(
+				entsql.NEQ(dbaccount.FieldUID, ""),
+				entsql.IsNull(dbaccount.FieldDeletedAt),
+			)),
 			entsql.DoNothing(),
 		).
 		Exec(ctx)

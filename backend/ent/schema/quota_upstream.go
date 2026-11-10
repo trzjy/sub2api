@@ -95,10 +95,12 @@ func (QuotaUpstream) Fields() []ent.Field {
 //   - type 单索引（便于按上游类型查，决定拉号客户端）。
 func (QuotaUpstream) Indexes() []ent.Index {
 	return []ent.Index{
-		// key 唯一索引（上游稳定标识，引用目标）
+		// key 唯一索引：仅对未软删行唯一（与迁移 302 一致）。
+		// 软删的上游条目不再占用 key 坑位。
 		index.Fields("key").
 			Unique().
-			StorageKey("uq_quota_upstreams_key"),
+			StorageKey("uq_quota_upstreams_key").
+			Annotations(entsql.IndexWhere("deleted_at IS NULL")),
 		// type 普通索引（按上游类型查）
 		index.Fields("type").
 			StorageKey("idx_quota_upstreams_type"),
