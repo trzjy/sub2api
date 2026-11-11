@@ -48,8 +48,27 @@ TAG=$(git rev-parse --short HEAD)
 
 # 5. 构建带 -w 后缀的部署镜像（sub2api 主镜像 + web-quota-worker sidecar 镜像，
 #    两者同 tag，避免宿主机残留旧 web-quota-worker:local 导致 sidecar 继续跑旧代码）
-docker build -t "sub2api:${TAG}-w" .
-docker build -t "web-quota-worker:${TAG}-w" ./deploy-config/web-quota-worker
+#
+#    幂等（2026-11-12 修）：同一 ref 重跑时同名镜像已存在会让 buildx 导出阶段报
+#    "image ... already exists" 而整个部署失败。改为**先构建到临时 tag、成功后再改
+#    正式 tag**：既不撞名，失败时旧镜像仍在（可回滚），也不需要预先删除镜像。
+build_image_idempotent() {
+  local target="$1" ctx="$2" tmp="${target}-building" built=0
+  # 先清掉可能残留的临时 tag（上次失败留下的）。
+  docker rmi "$tmp" >/dev/null 2>&1 || true
+  if docker build -t "$tmp" "$ctx"; then
+    # 构建成功：把临时 tag 改名为正式 tag（覆盖同名旧镜像）。
+    docker tag "$tmp" "$target" && docker rmi "$tmp" >/dev/null 2>&1 || true
+    built=1
+  else
+    docker rmi "$tmp" >/dev/null 2>&1 || true
+    echo "[$(date '+%F %T')] ERROR: 镜像构建失败: ${target}（旧镜像保留，未做变更）" >&2
+  fi
+  return $((1 - built))
+}
+
+build_image_idempotent "sub2api:${TAG}-w" "." || { echo "[$(date '+%F %T')] ERROR: sub2api 主镜像构建失败" >&2; exit 1; }
+build_image_idempotent "web-quota-worker:${TAG}-w" "./deploy-config/web-quota-worker" || { echo "[$(date '+%F %T')] ERROR: web-quota-worker 镜像构建失败" >&2; exit 1; }
 
 # 6. 幂等更新同目录 .env 中 SUB2API_IMAGE_TAG / WEB_QUOTA_WORKER_IMAGE_TAG（已有原地替换，无则追加；不重建整个文件；compose.yml 的 image 行自带 sub2api: 前缀，故 .env 存裸 tag 不可带前缀）
 ENV_FILE="/opt/sub2api/.env"
