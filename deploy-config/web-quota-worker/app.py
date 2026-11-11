@@ -66,6 +66,25 @@ async def get_browser():
     return _browser
 
 
+def _is_playwright_storage_state(value: dict) -> bool:
+    """判断 dict 是否满足 Playwright storageState 的最小结构约束。
+
+    合法形态：``{"cookies": [...], "origins": [...]}``（两键均可缺省，
+    但存在时必须是 list，且元素必须是 dict）。其它键允许存在
+    （Playwright 忽略），但 cookies/origins 结构错误即视为无效状态。
+    """
+    if not isinstance(value, dict):
+        return False
+    for key in ("cookies", "origins"):
+        if key in value:
+            items = value[key]
+            if not isinstance(items, list):
+                return False
+            if not all(isinstance(item, dict) for item in items):
+                return False
+    return True
+
+
 def _parse_storage_state(
     storage_state: Optional[Union[str, dict]],
 ) -> Optional[dict]:
@@ -76,13 +95,19 @@ def _parse_storage_state(
     因此绝不能把 JSON 字符串原样传下去：这里统一解析成 ``dict``，
     非法值一律丢弃（返回 ``None``），让适配器改走账密重登或
     ``needs_interactive_auth``，而不是在 ``new_context`` 阶段永久失败。
+    除 JSON 语法外，还要求满足 Playwright storageState 的最小结构约束
+    （见 ``_is_playwright_storage_state``）：结构非法的 dict 同样丢弃，
+    否则会以 ``browser_context_init_failed`` 的形式表现为探测永久失败。
 
     日志纪律：失败只记固定文案，绝不打印 storage_state 原文或任何内容。
     """
     if storage_state is None:
         return None
     if isinstance(storage_state, dict):
-        return storage_state
+        if _is_playwright_storage_state(storage_state):
+            return storage_state
+        logger.warning("invalid storage_state json, ignoring")
+        return None
     if isinstance(storage_state, str):
         if not storage_state.strip():
             return None
@@ -91,7 +116,7 @@ def _parse_storage_state(
         except (ValueError, TypeError):
             logger.warning("invalid storage_state json, ignoring")
             return None
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and _is_playwright_storage_state(parsed):
             return parsed
         logger.warning("invalid storage_state json, ignoring")
         return None

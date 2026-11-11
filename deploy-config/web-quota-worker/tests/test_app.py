@@ -115,6 +115,76 @@ def test_proxy_url_still_forwarded(fake_browser):
 
 
 # ---------------------------------------------------------------------------
+# storageState 结构校验：dict 结构非法时不得传给 Playwright
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_state",
+    [
+        {"cookies": "not-a-list"},
+        {"origins": {}},
+        {"cookies": [1, 2]},
+        {"cookies": [], "origins": ["not-a-dict"]},
+        {"cookies": [{"name": "k"}], "origins": "oops"},
+    ],
+    ids=["cookies-str", "origins-dict", "cookies-int-items", "origins-str-items", "mixed"],
+)
+def test_structurally_invalid_dict_is_ignored(fake_browser, bad_state, caplog):
+    """结构非法的 dict 来源必须丢弃，且日志不含任何内容片段。"""
+    bad_state = dict(bad_state)
+    bad_state["marker"] = SECRET
+
+    with caplog.at_level(logging.WARNING, logger="web-quota-worker"):
+        _make_context(storage_state=bad_state)
+
+    assert len(fake_browser.calls) == 1
+    assert "storage_state" not in fake_browser.calls[0]
+    assert SECRET not in caplog.text
+    assert "invalid storage_state json, ignoring" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "good_state",
+    [
+        {"cookies": [], "origins": []},
+        {"cookies": []},
+        {"origins": []},
+        {"cookies": [{"name": "k", "value": "v", "domain": ".x.cn"}], "origins": []},
+        {"cookies": [], "origins": [], "unknown_key": "ignored"},
+    ],
+    ids=["both-empty", "cookies-only", "origins-only", "cookies-items", "extra-key"],
+)
+def test_structurally_valid_dict_is_forwarded(fake_browser, good_state, caplog):
+    """合法 storageState 形态（含缺省键与额外键）必须正常传给 new_context。"""
+    with caplog.at_level(logging.WARNING, logger="web-quota-worker"):
+        _make_context(storage_state=good_state)
+
+    assert len(fake_browser.calls) == 1
+    assert fake_browser.calls[0]["storage_state"] == good_state
+    assert "invalid storage_state json, ignoring" not in caplog.text
+
+
+def test_json_string_with_invalid_structure_is_dropped(fake_browser, caplog):
+    """JSON 字符串能解析成 dict，但结构非法时同样丢弃。"""
+    payload = '{"cookies": "' + SECRET + '"}'
+
+    with caplog.at_level(logging.WARNING, logger="web-quota-worker"):
+        _make_context(storage_state=payload)
+
+    assert len(fake_browser.calls) == 1
+    assert "storage_state" not in fake_browser.calls[0]
+    assert SECRET not in caplog.text
+    assert "invalid storage_state json, ignoring" in caplog.text
+
+
+def test_is_playwright_storage_state_rejects_non_dict():
+    assert app_module._is_playwright_storage_state({}) is True
+    assert app_module._is_playwright_storage_state([]) is False
+    assert app_module._is_playwright_storage_state("x") is False
+
+
+# ---------------------------------------------------------------------------
 # /v1/probe 接口层：鉴权与 provider 白名单
 # ---------------------------------------------------------------------------
 
