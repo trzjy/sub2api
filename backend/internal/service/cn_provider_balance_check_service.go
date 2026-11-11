@@ -47,6 +47,30 @@ const cnQuotaProbeConcurrency = 4
 // 使「重启 → 首轮」的空窗不至于逼近 15 分钟的新鲜度门。
 const cnBalanceStartupFirstRunDelay = 30 * time.Second
 
+// cnBalanceWebConsoleBudgetCap 是 Web 控制台探测链的单轮预算硬上限：留出余量给 10 分钟巡检间隔，
+// 避免一条链跑满整个周期。
+const cnBalanceWebConsoleBudgetCap = 9 * time.Minute
+
+// cnBalanceWebConsoleProbeGrace 是单账号探测在 worker 超时之外的额外余量（HTTP 建连/回传）。
+const cnBalanceWebConsoleProbeGrace = 10 * time.Second
+
+// cnBalanceWebConsoleProbeBudget 计算一轮 Web 控制台探测的独立预算：
+// 串行 N 个账号 × (单账号 worker 超时 + 余量)，并按 cnBalanceWebConsoleBudgetCap 夹住。
+// 返回 0 表示无需探测（N=0）。
+func cnBalanceWebConsoleProbeBudget(accounts int, probeTimeoutSeconds int) time.Duration {
+	if accounts <= 0 {
+		return 0
+	}
+	if probeTimeoutSeconds <= 0 {
+		probeTimeoutSeconds = 60 // 与 config 默认值一致
+	}
+	budget := time.Duration(accounts) * (time.Duration(probeTimeoutSeconds)*time.Second + cnBalanceWebConsoleProbeGrace)
+	if budget > cnBalanceWebConsoleBudgetCap {
+		budget = cnBalanceWebConsoleBudgetCap
+	}
+	return budget
+}
+
 // CNProviderBalanceCheckService 周期性探测国产供应商账号：
 //   - payg（按量付费）：探测余额刷新快照；不再因「余额低于阈值」停调（2026-10-08 用户裁定）。
 //     历史遗留的 cn_balance_low 前缀停调在探测成功时无条件清除（存量清零），不以余额健康为前提；
@@ -486,8 +510,7 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	accountTargets := s.collectAccountProbeTargets()
 	batches := (len(quotaTargets) + len(accountTargets) + cnQuotaProbeConcurrency - 1) / cnQuotaProbeConcurrency
 	timeout := 30*time.Second + time.Duration(batches)*15*time.Second +
-		time.Duration(len(paygTargets)+len(probeTargets)+len(kiraTargets)+len(thTargets)+len(relayTargets))*5*time.Second +
-		time.Duration(len(webConsoleTargets))*8*time.Second
+		time.Duration(len(paygTargets)+len(probeTargets)+len(kiraTargets)+len(thTargets)+len(relayTargets))*5*time.Second
 	if timeout > 300*time.Second {
 		timeout = 300 * time.Second
 	}
@@ -576,10 +599,20 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	// Clear 类动作：失败关闭（err 或 !Success 仅记日志、不动状态），成功无需任何
 	// 额外写动作（快照由 balance service 落库；relay 成功不改写 quota/rate-limit 状态）。
 	// Web 控制台额度采集：串行执行（每条探测要拉起无头浏览器，并发会争用 worker 槽位）。
-	for _, account := range webConsoleTargets {
-		if _, perr := s.webConsoleQuotaService.ProbeLoadedAccount(ctx, account); perr != nil {
-			log.Printf("[CNBalance] web-console quota probe account %d (%s) failed: %v", account.ID, account.Platform, perr)
-			continue
+	// 独立预算：单账号超时远大于主预算的 8s 估值，跑在主 ctx 下会让排在后面的账号每轮被取消（饿死）。
+	if len(webConsoleTargets) > 0 && s.webConsoleQuotaService != nil {
+		probeTimeoutSeconds := 0
+		if s.cfg != nil {
+			probeTimeoutSeconds = s.cfg.WebQuotaWorker.TimeoutSeconds
+		}
+		wcBudget := cnBalanceWebConsoleProbeBudget(len(webConsoleTargets), probeTimeoutSeconds)
+		wcCtx, wcCancel := context.WithTimeout(context.Background(), wcBudget)
+		defer wcCancel()
+		for _, account := range webConsoleTargets {
+			if _, perr := s.webConsoleQuotaService.ProbeLoadedAccount(wcCtx, account); perr != nil {
+				log.Printf("[CNBalance] web-console quota probe account %d (%s) failed: %v", account.ID, account.Platform, perr)
+				continue
+			}
 		}
 	}
 
