@@ -53,7 +53,10 @@ TAG=$(git rev-parse --short HEAD)
 #    "image ... already exists" 而整个部署失败。改为**先构建到临时 tag、成功后再改
 #    正式 tag**：既不撞名，失败时旧镜像仍在（可回滚），也不需要预先删除镜像。
 build_image_idempotent() {
-  local target="$1" ctx="$2" tmp="${target}-building" built=0
+  # 注意：tmp 必须用 $1 拼，不能用同行的 ${target}——set -u 下同行 local 赋值按顺序生效，
+  # ${target} 此时尚未赋值，会报 "target: unbound variable"（2026-11-12 实测）。
+  local target="$1" ctx="$2" built=0
+  local tmp="${1}-building"
   # 先清掉可能残留的临时 tag（上次失败留下的）。
   docker rmi "$tmp" >/dev/null 2>&1 || true
   if docker build -t "$tmp" "$ctx"; then
