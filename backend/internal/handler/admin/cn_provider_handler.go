@@ -18,6 +18,11 @@ import (
 type CNProviderHandler struct {
 	quotaService   *service.CNProviderQuotaService
 	balanceService *service.CNProviderBalanceService
+
+	// webConsoleQuotaService / webConsoleAuthService 为 Web 控制台额度链（compshare/sensenova/longcat）。
+	// 用 Setter 注入，不改既有构造函数签名，避免破坏 wire_gen 既有调用。
+	webConsoleQuotaService *service.WebConsoleQuotaService
+	webConsoleAuthService  *service.WebConsoleAuthService
 }
 
 func NewCNProviderHandler(
@@ -28,6 +33,18 @@ func NewCNProviderHandler(
 		quotaService:   quotaService,
 		balanceService: balanceService,
 	}
+}
+
+// SetWebConsoleServices 注入 Web 控制台额度链（可选；未注入时对应端点返回 not enabled）。
+func (h *CNProviderHandler) SetWebConsoleServices(
+	quota *service.WebConsoleQuotaService,
+	auth *service.WebConsoleAuthService,
+) {
+	if h == nil {
+		return
+	}
+	h.webConsoleQuotaService = quota
+	h.webConsoleAuthService = auth
 }
 
 // QueryQuota 查询 Coding Plan 滚动窗口用量（5h + weekly）。
@@ -61,6 +78,64 @@ func (h *CNProviderHandler) QueryBalance(c *gin.Context) {
 		return
 	}
 	result, err := h.balanceService.QueryBalance(c.Request.Context(), accountID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// ProbeWebConsoleQuota 手动触发一次 Web 控制台额度探测。
+func (h *CNProviderHandler) ProbeWebConsoleQuota(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if h == nil || h.webConsoleQuotaService == nil {
+		response.BadRequest(c, "web console quota service is not enabled")
+		return
+	}
+	result, err := h.webConsoleQuotaService.ProbeAccount(c.Request.Context(), accountID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// StartWebConsoleAuth 发起本地浏览器交互登录（滑块/扫码/短信）。
+func (h *CNProviderHandler) StartWebConsoleAuth(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if h == nil || h.webConsoleAuthService == nil {
+		response.BadRequest(c, "web console auth service is not enabled")
+		return
+	}
+	result, err := h.webConsoleAuthService.StartInteractiveLogin(c.Request.Context(), accountID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// GetWebConsoleAuthStatus 轮询交互登录状态；成功后自动落凭据并触发一次探测。
+func (h *CNProviderHandler) GetWebConsoleAuthStatus(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	sessionID := c.Param("sessionId")
+	if h == nil || h.webConsoleAuthService == nil {
+		response.BadRequest(c, "web console auth service is not enabled")
+		return
+	}
+	result, err := h.webConsoleAuthService.GetInteractiveLoginStatus(c.Request.Context(), accountID, sessionID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
