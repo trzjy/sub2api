@@ -38,7 +38,14 @@ func TestEffectiveResponsesFlatToolsFlattensNamespaceCustomChildren(t *testing.T
 	require.False(t, set.CustomTools["functions__exec"])
 	require.True(t, set.NamespaceCustomTools["functions__exec"])
 	require.True(t, set.FunctionTools["functions__wait"])
-	require.Equal(t, NamespacedToolName{Namespace: "functions", Name: "exec"},
+	// NamespaceTools 里的 IsCustom 必须为 true（namespace 内的 exec 是 custom 子工具）。
+	//
+	// 2026-11-12 修正：此断言原为 IsCustom: false —— 那是**把实现缺陷固化成了期望**
+	// （同一个测试里 NamespaceCustomTools["functions__exec"] 断言为 true，两张表自相矛盾）。
+	// 漏填 IsCustom 的后果：交付侧（读 IsCustom）把 namespace 内 custom 判成 function，
+	// 登记侧（读另一张表）判成 custom → 交付 function_call、登记 custom_tool_call
+	// → codex 续轮 result_type_mismatch → CUR-RES-02（外审通道全线失败）。
+	require.Equal(t, NamespacedToolName{Namespace: "functions", Name: "exec", IsCustom: true},
 		set.NamespaceTools["functions__exec"])
 	// format 必须原样保真：丢掉 grammar 会让 custom 工具在上游退化成无约束工具。
 	require.JSONEq(t, `{"type":"grammar","definition":"start: /.+/"}`,

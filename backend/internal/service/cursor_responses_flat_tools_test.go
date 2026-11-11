@@ -41,10 +41,16 @@ func TestCursorPlanLiftsAdditionalToolsAndFlattensNamespaces(t *testing.T) {
 
 	require.True(t, plan.responsesTools.customTools["exec"],
 		"namespace 内的 custom 子工具必须进入 custom 集合（按裸名），否则回程无法还原成 custom_tool_call")
-	require.True(t, plan.responsesTools.namespaceCustomTools["functions__exec"],
+	// 摊平名要标记为 custom 子工具，回程才能判成 custom_tool_call 而不是 function_call。
+	//
+	// 2026-11-12 修正：断言依据从「另一张 namespaceCustomTools map」改为
+	// **NamespacedToolName.IsCustom 字段**（唯一事实源）。此前交付侧读 IsCustom、
+	// 登记侧读那张 map，两边结论可以相反 —— 那正是 codex 续轮 result_type_mismatch
+	// （CUR-RES-02）的根因。断言语义不变，只是改读同一份事实。
+	require.True(t, plan.responsesTools.namespaceTools["functions__exec"].IsCustom,
 		"摊平名要标记为 custom 子工具，回程才能判成 custom_tool_call 而不是 function_call")
 	require.True(t, plan.responsesTools.functionTools["functions__wait"])
-	require.Equal(t, apicompat.NamespacedToolName{Namespace: "functions", Name: "exec"},
+	require.Equal(t, apicompat.NamespacedToolName{Namespace: "functions", Name: "exec", IsCustom: true},
 		plan.responsesTools.namespaceTools["functions__exec"])
 	require.Equal(t, apicompat.NamespacedToolName{Namespace: "clock", Name: "sleep"},
 		plan.responsesTools.namespaceTools["clock__sleep"])

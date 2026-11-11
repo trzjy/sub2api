@@ -81,10 +81,10 @@ type cursorResponsesToolMeta struct {
 	customTools    map[string]bool
 	functionTools  map[string]bool
 	namespaceTools map[string]apicompat.NamespacedToolName
-	// namespaceCustomTools 标记哪些摊平名属于 namespace 内的 custom 子工具。
-	// 缺这一位时，摊平名一律按普通 function_call 交付；codex 收到 function_call
-	// 而不是 custom_tool_call，会直接把这次工具调用当不认识的工具扔掉。
-	namespaceCustomTools map[string]bool
+	// namespace 内的 custom 子工具信息由 namespaceTools（apicompat.NamespacedToolName）
+	// 的 IsCustom 字段承载 —— 不再另存一张 NamespaceCustomTools map
+	// （2026-11-12 删除：那张表与 NamespacedToolName.IsCustom 是同一份事实的两个副本，
+	//  交付侧读后者、登记侧读前者，结论不一致 → codex 续轮 result_type_mismatch）。
 	toolSearch           bool
 }
 
@@ -118,7 +118,6 @@ func cursorToolMetaFromTools(effective []apicompat.ResponsesTool) (cursorRespons
 		customTools:          flat.CustomTools,
 		functionTools:        flat.FunctionTools,
 		namespaceTools:       flat.NamespaceTools,
-		namespaceCustomTools: flat.NamespaceCustomTools,
 		toolSearch:           flat.ToolSearch,
 	}, nil
 }
@@ -3549,36 +3548,20 @@ func cursorResponsesDeliveredToolCall(name string, meta cursorResponsesToolMeta)
 	return cursorDeliveredToolCall{Kind: "function_call", Name: name}
 }
 
-// cursorCustomToolCallName 与 apicompat.customToolCallName 同源：判定给定摊平名是否为
-// custom 工具并还原其裸名。此处复制决策以保持服务包内可用（不修改 apicompat）。
+// cursorCustomToolCallName 判定给定摊平名是否为 custom 工具并还原其裸名。
+//
+// **不再自带一份复制实现**（2026-11-12 删除）：此前本函数读 meta.namespaceCustomTools
+// 这张**另一张** map，而 chat 桥的交付侧读 apicompat 的 origin.IsCustom ——
+// 同一判定规则两处实现，结论会不一致（namespace 内的 custom 子工具：交付侧判 function、
+// 登记侧判 custom）。
+//
+// 不一致的后果：交付给客户端的是 function_call、登记的是 custom_tool_call →
+// codex 续轮按 function 语义回放、本站按 custom 校验 → result_type_mismatch
+// → CUR-RES-02（codex 外审通道全线失败，2026-11-12 生产实证）。
+//
+// 现在改为直接调 apicompat 的唯一实现，两侧天然同源。
 func cursorCustomToolCallName(name string, meta cursorResponsesToolMeta) (string, bool) {
-	if meta.functionTools[name] {
-		return "", false
-	}
-	if meta.customTools[name] {
-		return name, true
-	}
-	// namespace 子工具占用了这个摊平名：是 custom 子工具就还原成裸名并判 custom_tool_call，
-	// 是 function 子工具则保持"真名优先、别名不生效"的原语义。
-	if origin, ok := meta.namespaceTools[name]; ok {
-		if meta.namespaceCustomTools[name] {
-			return origin.Name, true
-		}
-		return "", false
-	}
-	match := ""
-	for customName := range meta.customTools {
-		for _, namespaceTool := range meta.namespaceTools {
-			if apicompat.FlattenNamespaceToolName(namespaceTool.Namespace, customName) != name {
-				continue
-			}
-			if match != "" && match != customName {
-				return "", false
-			}
-			match = customName
-		}
-	}
-	return match, match != ""
+	return apicompat.CustomToolCallName(name, meta.customTools, meta.functionTools, meta.namespaceTools)
 }
 
 // setLogContext 登记阶段日志用的请求 ctx（不参与取消语义）。

@@ -319,6 +319,22 @@ func NamespaceCustomToolNames(tools []ResponsesTool) map[string]bool {
 // 则保持「真名优先、别名不生效」的原语义（返回 false，按普通 function_call 交付）。
 // 这一位由 NamespacedToolName.IsCustom 承载（避免改动导出 API 签名，也避免动
 // 本包以外的 cursor 侧代码）。
+// CustomToolCallName 判定给定摊平名是否为 custom 工具，并还原其裸名。
+//
+// 这是「摊平名 → 是否 custom_tool_call」判定的**唯一实现**：
+//   - chat 桥回程（announceChatToolItem）用它判交付项类型；
+//   - cursor 协议路径（service.cursorResponsesDeliveredToolCall）登记调用语义时用它。
+//
+// 两侧必须同源：交付成 function_call 而登记成 custom_tool_call（或反之）会让
+// codex 续轮时类型不匹配 → result_type_mismatch → CUR-RES-02。
+//
+// 2026-11-12 实证：cursor 侧曾维护一份**复制实现**（读另一份 NamespaceCustomTools
+// map），与本实现（读 origin.IsCustom）结论不一致 —— 同一规则两处实现 = 认知分裂。
+// 复制实现已删除，本函数是唯一口径。
+func CustomToolCallName(name string, customTools, functionTools map[string]bool, namespaceTools map[string]NamespacedToolName) (string, bool) {
+	return customToolCallName(name, customTools, functionTools, namespaceTools)
+}
+
 func customToolCallName(name string, customTools, functionTools map[string]bool, namespaceTools map[string]NamespacedToolName) (string, bool) {
 	if functionTools[name] {
 		return "", false
@@ -1330,10 +1346,15 @@ func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 			//     回程走 cursorToolDeclaredWithoutSchema 原样交付。
 			// 顶层 custom 不是本阶段的改动对象，保持既有形态（降级壳 + Custom=false）。
 			//
-			// 区分方式：flat.NamespaceCustomTools[摊平名] 命中即为 namespace 内 custom
-			// 子工具（已摊平、名字是 ns__name）；顶层 custom 未经摊平、不在该集合里。
+			// 区分方式：flat.NamespaceTools[摊平名].IsCustom 为真即为 namespace 内 custom
+			// 子工具（已摊平、名字是 ns__name）；顶层 custom 未经摊平、不在该映射里。
 			// 不要靠名字形状猜类型。
-			if flat.NamespaceCustomTools[tool.Name] {
+			//
+			// 读 IsCustom 而不是另一张 NamespaceCustomTools map：同一条判定规则
+			// （「这个摊平名是不是 namespace 内的 custom」）只许有一处事实源
+			// （NamespacedToolName.IsCustom），两处各读一张表迟早会不一致
+			// （2026-11-12 生产实证：交付侧与登记侧结论相反 → 续轮 result_type_mismatch）。
+			if nsOrigin, ok := flat.NamespaceTools[tool.Name]; ok && nsOrigin.IsCustom {
 				// namespace 内 custom 子工具：无 schema，打 Custom 标记，下游不写 f3/f6。
 				out = append(out, ChatTool{
 					Type:   "function",
