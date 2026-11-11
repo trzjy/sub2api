@@ -143,11 +143,25 @@ func classifyOpenAIAPIKeyHealthFailure(err error) (int, []byte, bool) {
 		// 「该分组暂无可用账号」24h 共 1103 条。
 		//
 		// 504 / 503 / 429 / 500 仍是账号慢与挂的主要信号，保持计入不变。
-		if failoverErr.StatusCode == http.StatusTooManyRequests ||
-			(failoverErr.StatusCode >= http.StatusInternalServerError &&
-				failoverErr.StatusCode != http.StatusBadGateway) {
-			return failoverErr.StatusCode, failoverErr.ResponseBody, true
-		}
+	// 429 不再计入账号级熔断。
+	//
+	// 生产事故（2026-11-11）：deepseek 账号 519 撞上游 429（"inference exceeds
+	// tpm/rpm limit"），主链路 handle429 → applyCNProviderReactive429 已经按唯一
+	// 规范给了 61 秒限流冷却，客户侧全程 200（网关自动换号接住了）。但本熔断器
+	// 又对同一个 429 记了一次账号级失败，达阈值后写入 9999-12-31 无限期停用。
+	// 后者在调度过滤里是硬条件，直接覆盖前者的短冷却 —— 账号被自己人永久摘除。
+	// 全库共 8 个 priority=1/2 的分层路由专用号卡在该状态，最早的已搁浅 7 天。
+	//
+	// 归口原则：429 是"请求太快"，不是"账号坏了"，处罚权归主链路 handle429；
+	// 本熔断器只对主链路不处罚的类型（5xx）负责。同一个错误只允许一条处罚路径，
+	// 时长一律由 account_unavailability.go 的 ClassifyAccountUnavailability 决定。
+	if failoverErr.StatusCode == http.StatusTooManyRequests {
+		return failoverErr.StatusCode, failoverErr.ResponseBody, false
+	}
+	if failoverErr.StatusCode >= http.StatusInternalServerError &&
+		failoverErr.StatusCode != http.StatusBadGateway {
+		return failoverErr.StatusCode, failoverErr.ResponseBody, true
+	}
 		return failoverErr.StatusCode, failoverErr.ResponseBody, false
 	}
 
@@ -244,10 +258,21 @@ func (s *RateLimitService) ObserveOpenAIAPIKeyHealthFailure(ctx context.Context,
 // successful call.
 func (s *RateLimitService) tripAccountForHealth(ctx context.Context, account *Account, statusCode int, responseBody []byte, count int64, model string, settings *OpenAIAPIKeyHealthBreakerSettings) bool {
 	now := time.Now()
-	// 熔断型停调不设有限冷却时长：写入无限期哨兵，由恢复探针连续实测成功后才解除。
-	// 时间自动过期会让故障账号在零次成功探测的情况下被重新投放（生产实证：60 秒冷却
-	// 被探针 3-14 秒撤销，两者叠加使熔断失效）。
-	until := tempUnschedIndefiniteUntil
+	// 停用时长统一由 account_unavailability.go 的唯一规范决定，不再写无限期哨兵。
+	//
+	// 旧实现写 9999-12-31（tempUnschedIndefiniteUntil），理由是"有限值会被自动恢复，
+	// 违背探到恢复为止"。该理由在生产中被证伪：恢复探针自身会因上游持续失败而反复
+	// 失败，in-flight 标记长期占位，账号既不被释放、也没有真实探测推进，结果是无限期
+	// 搁浅（2026-11-11 实证 8 个账号，最长 7 天）。而"到点重新投放一次、失败再冷却"
+	// 是自证的：账号真坏了，投放后必然立刻失败并再次进入冷却；成本仅一次失败请求，
+	// 远小于永久丢失一个 priority=1 账号的代价。
+	decision := ClassifyAccountUnavailability(UnavailabilityFact{
+		// 熔断是"累计达阈值"后的判定，已不是单次瞬时错误，故一律按上游故障处理；
+		// 不按状态码映射（504 单独看是 transient，但累计两次 504 说明上游持续不可用）。
+		Kind: UnavailUpstreamFault,
+		Now:  now,
+	})
+	until := decision.Until
 	state := &TempUnschedState{
 		UntilUnix:            until.Unix(),
 		TriggeredAtUnix:      now.Unix(),

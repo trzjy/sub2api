@@ -169,8 +169,12 @@ func TestCodeBuddyFailoverSignal_AccountSoftLimit429(t *testing.T) {
 	require.False(t, sig.RetryableOnSameAccount)
 	require.False(t, sig.RequestScopedTransient)
 	require.False(t, sig.IsCredentialFailure())
+	// 429 不再计入账号级熔断（2026-11-11 起）：处罚权归主链路 handle429，
+	// 熔断器只对主链路不处罚的类型（5xx）负责。旧断言为 eligible=true，
+	// 其后果是同一个 429 被两套路径各罚一次，熔断侧的无限期停用会覆盖
+	// 限流侧的短冷却，账号被永久摘除（生产实证 8 个 priority=1 账号搁浅 7 天）。
 	_, _, eligible := classifyOpenAIAPIKeyHealthFailure(sig)
-	require.True(t, eligible, "account-level 429 must feed the health breaker (T1)")
+	require.False(t, eligible, "account-level 429 must not feed the health breaker")
 	require.Len(t, codeBuddy429OpsEvents(c), 1)
 }
 

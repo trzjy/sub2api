@@ -32,15 +32,19 @@ type TempUnschedState struct {
 	ConsecutiveSuccesses int `json:"consecutive_successes,omitempty"`
 }
 
-// tempUnschedIndefiniteUntil 是"无限期停调"的哨兵截止时间：熔断型停调写入该值，
-// 语义为"无自动过期，等恢复探针确认可用后才解除"。
+// tempUnschedIndefiniteUntil 是无限期停调的哨兵截止时间。
+//
+// 【2026-11-11 重要变更】健康熔断器（openai_apikey_health_breaker.go）已不再使用该值。
+// 停用时长一律由 account_unavailability.go 的 ClassifyAccountUnavailability 唯一决定，
+// 且被 unavailMaxCooldown 硬夹住，任何路径都不允许再写出远期哨兵值。
+// 当前仅 cursor 健康探针链路（cursor_account_health_probe.go）仍在使用，
+// 该链路属同类风险，待按同一规范迁移。
+//
+// 历史设计意图（保留供理解，勿据此复用）：语义为无自动过期，等恢复探针确认可用后才解除。
 //
 // 为什么用远端时间而不是 NULL：temp_unschedulable_until = NULL 在全部读取点都表示
-// "无停调"（IsSchedulable / tempUnschedulablePredicate / ListTempUnschedulableAccounts），
+// 无停调（IsSchedulable / tempUnschedulablePredicate / ListTempUnschedulableAccounts），
 // 写 NULL 等于立刻恢复可调度，与语义相反。
-//
-// 为什么不用较长有限值（如 now+7d）：任何有限值都会在某刻自动恢复，违背"探到恢复为止"，
-// 且会让长期故障账号在无任何一次成功探测的情况下被重新投放。
 //
 // 该值同时充当代际令牌（ClearTempUnschedulableIfGeneration /
 // BumpTempUnschedulableReasonIfGeneration 的等值比较对象），因其恒定不变，条件清除稳定命中。

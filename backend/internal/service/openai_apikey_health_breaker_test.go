@@ -545,11 +545,14 @@ func TestHealthBreakerTripPersistsAndBlocks(t *testing.T) {
 	require.Equal(t, openAIAPIKeyHealthBreakerReason, state.MatchedKeyword)
 }
 
-// TestHealthBreakerTripWritesIndefiniteUntil pins the probe-driven recovery
-// semantics: a trip (429 or 5xx alike) writes the indefinite sentinel until
-// instead of a finite cooldown, so the account stays parked until the recovery
-// probe confirms availability with consecutive real data-plane successes.
-func TestHealthBreakerTripWritesIndefiniteUntil(t *testing.T) {
+// TestHealthBreakerTripWritesFiniteCooldown pins the new contract: a 5xx trip
+// writes a FINITE cooldown decided by the single ClassifyAccountUnavailability
+// spec, never the indefinite 9999 sentinel.
+//
+// 旧契约（429 与 5xx 一律写无限期哨兵、靠恢复探针唯一解除）已被生产证伪：
+// 探针自身会因上游持续失败而反复失败，账号既不被释放也没有真实推进，
+// 结果是无限期搁浅。新契约改为有限冷却 + 到点自动恢复，探针只负责加速。
+func TestHealthBreakerTripWritesFiniteCooldown(t *testing.T) {
 	newTripSvc := func() *RateLimitService {
 		ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
 			Enabled: true, WindowMinutes: 1, FailureThreshold: 3, CooldownMinutes: 5,
@@ -568,17 +571,50 @@ func TestHealthBreakerTripWritesIndefiniteUntil(t *testing.T) {
 		name       string
 		statusCode int
 	}{
-		{"429", http.StatusTooManyRequests},
 		{"504", http.StatusGatewayTimeout},
+		{"503", http.StatusServiceUnavailable},
 	} {
 		svc := newTripSvc()
 		account := healthAccount(domain.PlatformDeepseek)
 		require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, &UpstreamFailoverError{StatusCode: tc.statusCode}), tc.name)
 		require.NotNil(t, account.TempUnschedulableUntil, tc.name)
-		require.True(t, account.TempUnschedulableUntil.Equal(tempUnschedIndefiniteUntil),
-			"%s trip must write the indefinite sentinel until, got %v", tc.name, account.TempUnschedulableUntil)
-		require.Greater(t, time.Until(*account.TempUnschedulableUntil), 100*365*24*time.Hour, tc.name)
+		// 新契约：写入有限冷却，由唯一规范 ClassifyAccountUnavailability 决定时长。
+		cooldown := time.Until(*account.TempUnschedulableUntil)
+		require.Greater(t, cooldown, time.Minute, "%s 停用时长过短，形同未停用", tc.name)
+		require.LessOrEqual(t, cooldown, unavailMaxCooldown, "%s 停用时长超过硬上限", tc.name)
+		require.False(t, account.TempUnschedulableUntil.Equal(tempUnschedIndefiniteUntil),
+			"%s 不允许再写入 9999 年哨兵值", tc.name)
+		require.Less(t, cooldown, 100*365*24*time.Hour, "%s 停用时长不得为年级", tc.name)
 	}
+}
+
+// TestHealthBreaker429NotCounted 锁死"429 不再计入账号级熔断"。
+//
+// 生产事故回归防线（2026-11-11）：deepseek 账号 519 撞 429 后，主链路 handle429
+// 已按唯一规范给了 61 秒限流冷却，本熔断器又对同一 429 记一次账号级失败并写入
+// 9999-12-31，覆盖了主链路的短冷却，导致账号被永久摘除。全库 8 个 priority=1/2
+// 账号因此搁浅，最长 7 天，而客户侧全程 200（网关自动换号接住了）。
+func TestHealthBreaker429NotCounted(t *testing.T) {
+	ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
+		Enabled: true, WindowMinutes: 1, FailureThreshold: 3, CooldownMinutes: 5,
+	})
+	cache := &healthCacheStub{recordResult: OpenAIAPIKeyHealthRecordResult{TrippedTrip: true}}
+	repo := &healthAccountRepoStub{}
+	blocker := &healthRuntimeBlocker{}
+	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
+	svc.SetSettingService(ss)
+	svc.SetOpenAIAPIKeyHealthCache(cache)
+	svc.SetAccountRuntimeBlocker(blocker)
+	account := healthAccount(domain.PlatformDeepseek)
+
+	require.False(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account,
+		&UpstreamFailoverError{StatusCode: http.StatusTooManyRequests}),
+		"429 不应触发账号级熔断")
+
+	require.Zero(t, cache.recordCalls, "429 不得进入熔断累计窗口")
+	require.Zero(t, repo.setTempCalls, "429 不得停用账号（处罚权归主链路 handle429）")
+	require.Zero(t, blocker.blockCalls, "429 不得运行时阻断调度")
+	require.Nil(t, account.TempUnschedulableUntil, "429 不得写任何停用标记")
 }
 
 // ---------------------------------------------------------------------------
