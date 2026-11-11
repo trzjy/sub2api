@@ -716,7 +716,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				if p := effectiveAPIKeyPlatform(c, apiKey); p == service.PlatformAntigravity {
 					diagPlatform = service.PlatformAntigravity
 				}
-				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, modelName, modelName, diagPlatform)
+				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, modelName, modelName, diagPlatform, err)
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}

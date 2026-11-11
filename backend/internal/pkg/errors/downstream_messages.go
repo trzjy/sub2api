@@ -23,7 +23,11 @@ const (
 	UpstreamPaymentRequired = "上游渠道余额不足或计费异常，请联系管理员"
 
 	// 账号池侧（调度/选号失败）。
-	AllAccountsRateLimited           = "当前分组所有账号均处于上游限速状态，请稍后重试"
+	AllAccountsRateLimited = "当前分组所有账号均处于上游限速状态，请稍后重试"
+	// AllAccountsModelCooling 是 AllAccountsRateLimited 的精确化版本：同一种归因
+	// （平台侧供给受限），但把「哪个模型、还要等多久」一并告诉调用方，
+	// 避免客户端只能盲目重试。仅在选号摘要带得出恢复时间时使用。
+	AllAccountsModelCooling          = "当前分组所有账号的 %s 额度均在冷却，最近约 %s 后恢复，请稍后重试"
 	AllAccountsExhausted             = "该分组所有账号均请求失败，请稍后重试"
 	NoAvailableAccounts              = "该分组暂无可用账号，请稍后重试"
 	NoAvailableAccountsProfitControl = "该分组暂无可用账号，请联系管理员"

@@ -227,7 +227,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		return nil, err
 	}
 	if len(accounts) == 0 {
-		return nil, ErrNoAvailableAccounts
+		// 池子为空也要带原因出站：total=0 与「全部冷却」在下游是两种完全不同的处置。
+		return nil, noAvailableAccountsError(requestedModel, selectionFailureStats{})
 	}
 	ctx = s.withWindowCostPrefetch(ctx, accounts)
 	ctx = s.withRPMPrefetch(ctx, accounts)
@@ -752,7 +753,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				"total_accounts", len(accounts))
 			return nil, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
 		}
-		return nil, ErrNoAvailableAccounts
+		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, platform, accounts, excludedIDs, useMixed)
+		return nil, noAvailableAccountsError(requestedModel, stats)
 	}
 
 	// 优先级档位门（全站唯一实现）：候选已过硬门与准入，此处只保留最小 priority 档。
@@ -848,7 +850,13 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			MaxWaiting:     cfg.FallbackMaxWaiting,
 		})
 	}
-	return nil, ErrNoAvailableAccounts
+	// 走到这里说明候选账号都可用，但会话槽位全部占满——原因必须如实带回下游，
+	// 否则会被误报成「该分组暂无可用账号」。
+	return nil, noAvailableAccountsError(requestedModel, selectionFailureStats{
+		Total:            len(accounts),
+		Eligible:         len(candidates),
+		SessionSlotsFull: len(candidates),
+	})
 }
 
 // shouldSwitchAccountOnStickySlotFull 报告粘性账号槽位已满时是否应**直接换号**而不是原地等待。
@@ -2607,10 +2615,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, platform, accounts, excludedIDs, false)
-		if requestedModel != "" {
-			return nil, fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats))
-		}
-		return nil, ErrNoAvailableAccounts
+		return nil, noAvailableAccountsError(requestedModel, stats)
 	}
 
 	// 4. 建立粘性绑定
@@ -2872,10 +2877,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, nativePlatform, accounts, excludedIDs, true)
-		if requestedModel != "" {
-			return nil, fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats))
-		}
-		return nil, ErrNoAvailableAccounts
+		return nil, noAvailableAccountsError(requestedModel, stats)
 	}
 
 	// 4. 建立粘性绑定
@@ -2898,9 +2900,15 @@ type selectionFailureStats struct {
 	ModelRateLimited   int
 	ProfitThreshold    int
 	ProfitInvalidRate  int
+	// SessionSlotsFull 记录「账号本身可用、但会话/并发槽已满」的候选数。
+	// 它与「账号不可用」是两种不同的处置，必须在摘要里分开表达。
+	SessionSlotsFull   int
 	SamplePlatformIDs  []int64
 	SampleMappingIDs   []int64
 	SampleRateLimitIDs []string
+	// NextModelRecovery 是所有「因模型级冷却」被排除的账号里最早解除的那一条剩余时间。
+	// 供下游 503 文案回答「还要等多久」，避免只回一句「暂无可用账号」。
+	NextModelRecovery time.Duration
 }
 
 type selectionFailureDiagnosis struct {
@@ -2970,8 +2978,11 @@ func (s *GatewayService) collectSelectionFailureStats(
 			stats.SampleMappingIDs = appendSelectionFailureSampleID(stats.SampleMappingIDs, acc.ID)
 		case "model_rate_limited":
 			stats.ModelRateLimited++
-			remaining := acc.GetRateLimitRemainingTimeWithContext(ctx, requestedModel).Truncate(time.Second)
-			stats.SampleRateLimitIDs = appendSelectionFailureRateSample(stats.SampleRateLimitIDs, acc.ID, remaining)
+			remaining := acc.GetRateLimitRemainingTimeWithContext(ctx, requestedModel)
+			if remaining > 0 && (stats.NextModelRecovery == 0 || remaining < stats.NextModelRecovery) {
+				stats.NextModelRecovery = remaining
+			}
+			stats.SampleRateLimitIDs = appendSelectionFailureRateSample(stats.SampleRateLimitIDs, acc.ID, remaining.Truncate(time.Second))
 		case openAIProfitFilterReasonThreshold:
 			stats.ProfitThreshold++
 		case openAIProfitFilterReasonInvalidAccountRate:
@@ -3059,8 +3070,8 @@ func appendSelectionFailureRateSample(samples []string, accountID int64, remaini
 }
 
 func summarizeSelectionFailureStats(stats selectionFailureStats) string {
-	return fmt.Sprintf(
-		"total=%d eligible=%d excluded=%d unschedulable=%d platform_filtered=%d model_unsupported=%d model_rate_limited=%d profit_threshold=%d profit_invalid_account_rate=%d",
+	summary := fmt.Sprintf(
+		"total=%d eligible=%d excluded=%d unschedulable=%d platform_filtered=%d model_unsupported=%d model_rate_limited=%d profit_threshold=%d profit_invalid_account_rate=%d session_slots_full=%d",
 		stats.Total,
 		stats.Eligible,
 		stats.Excluded,
@@ -3070,7 +3081,25 @@ func summarizeSelectionFailureStats(stats selectionFailureStats) string {
 		stats.ModelRateLimited,
 		stats.ProfitThreshold,
 		stats.ProfitInvalidRate,
+		stats.SessionSlotsFull,
 	)
+	if stats.NextModelRecovery > 0 {
+		summary += fmt.Sprintf(" next_recovery=%s", stats.NextModelRecovery.Truncate(time.Second))
+	}
+	return summary
+}
+
+// noAvailableAccountsError 是「选不到号」的唯一构造入口。
+//
+// 原因摘要必须随错误一起上抛：下游分类器（handler.classifySelectionFailureError）
+// 靠这段摘要区分「全部账号在模型冷却」和「池里根本没有可用账号」。历史上
+// load-aware 选号路径直接 return 裸 ErrNoAvailableAccounts，导致同一件事在
+// 不同入口上有两套说法，客户端永远只看到「该分组暂无可用账号」。
+func noAvailableAccountsError(requestedModel string, stats selectionFailureStats) error {
+	if trimmed := strings.TrimSpace(requestedModel); trimmed != "" {
+		return fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, trimmed, summarizeSelectionFailureStats(stats))
+	}
+	return ErrNoAvailableAccounts
 }
 
 // isModelSupportedByAccountWithContext 根据账户平台检查模型支持（带 context）

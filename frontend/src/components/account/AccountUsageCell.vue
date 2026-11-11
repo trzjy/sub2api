@@ -289,7 +289,7 @@
       </div>
 
       <!-- Usage data from API -->
-      <div v-else-if="hasAntigravityQuotaFromAPI" class="space-y-1">
+      <div v-else-if="hasAntigravityQuotaFromAPI || hasAntigravityCooling" class="space-y-1">
         <!-- Gemini 4 Argon / Gemini 3 Pro -->
         <UsageProgressBar
           v-if="antigravity4ArgonUsageFromAPI !== null"
@@ -1222,15 +1222,71 @@ interface AntigravityUsageResult {
 
 // ===== Antigravity quota from API (usageInfo.antigravity_quota) =====
 
+// 模型级冷却（与调度同一事实源：account.extra.model_rate_limits）。
+//
+// 用量接口只回答「模型额度池还剩多少」，不回答「这个账号的个人订阅额度是否耗尽」：
+// 上游 429 报 Individual quota reached 时 remainingFraction 仍然是 1，面板于是画出
+// 一个绿色的 0%，而调度层早已把该账号排除，请求全部 503。两个口径冲突时必须让
+// 调度口径优先，否则界面就是在骗人。
+const activeCoolingResetForModels = (modelNames: string[]): string | null => {
+  const extra = props.account?.extra as Record<string, unknown> | undefined
+  const limits = extra?.model_rate_limits as
+    | Record<string, { rate_limit_reset_at?: string }>
+    | undefined
+  if (!limits) return null
+  const now = Date.now()
+  let latest = 0
+  let resetAt: string | null = null
+  for (const [scope, info] of Object.entries(limits)) {
+    const raw = info?.rate_limit_reset_at
+    if (!raw) continue
+    const resetMs = new Date(raw).getTime()
+    if (!Number.isFinite(resetMs) || resetMs <= now) continue
+    // 精确模型键命中，或家族键 antigravity:gemini 命中（该键一挂，整个 gemini
+    // 文本模型家族都不可调度，见后端 modelRateLimitKeysForRequest）。
+    const hit =
+      modelNames.includes(scope) ||
+      (scope === 'antigravity:gemini' && modelNames.some(name => name.startsWith('gemini-')))
+    if (!hit) continue
+    if (resetMs > latest) {
+      latest = resetMs
+      resetAt = raw
+    }
+  }
+  return resetAt
+}
+
 // 检查是否有从 API 获取的配额数据
 const hasAntigravityQuotaFromAPI = computed(() => {
   return usageInfo.value?.antigravity_quota && Object.keys(usageInfo.value.antigravity_quota).length > 0
+})
+
+// 即使配额接口没返回数据，只要调度层记着冷却，也必须把这一行渲染出来，
+// 否则会出现「账号被排除但界面上什么都没有」。
+const hasAntigravityCooling = computed(() => {
+  const extra = props.account?.extra as Record<string, unknown> | undefined
+  const limits = extra?.model_rate_limits as
+    | Record<string, { rate_limit_reset_at?: string }>
+    | undefined
+  if (!limits) return false
+  const now = Date.now()
+  return Object.values(limits).some((info) => {
+    const raw = info?.rate_limit_reset_at
+    return raw ? new Date(raw).getTime() > now : false
+  })
 })
 
 // 从 API 配额数据中获取使用率（多模型取最高使用率）
 const getAntigravityUsageFromAPI = (
   modelNames: string[]
 ): AntigravityUsageResult | null => {
+  // 调度层已判定该模型家族冷却：直接按 100% 呈现并给出真实恢复时间，
+  // 不能被上游返还的 remainingFraction 覆盖成绿色的 0%。
+  const coolingReset = activeCoolingResetForModels(modelNames)
+  if (coolingReset) {
+    return { utilization: 100, resetTime: coolingReset }
+  }
+
   const quota = usageInfo.value?.antigravity_quota
   if (!quota) return null
 

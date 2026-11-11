@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -35,7 +36,12 @@ type noAccountErrorClassification struct {
 	ModelNotFound bool // true when this is a 404 model_not_found classification
 }
 
-var selectionModelRateLimitedPattern = regexp.MustCompile(`(?:model_rate_limited|rate_limited)=(\d+)`)
+var (
+	selectionModelRateLimitedPattern = regexp.MustCompile(`(?:model_rate_limited|rate_limited)=(\d+)`)
+	selectionModelPattern            = regexp.MustCompile(`supporting model:\s*([^\s(]+)`)
+	selectionNextRecoveryPattern     = regexp.MustCompile(`next_recovery=([0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))`)
+	selectionSessionSlotsFullPattern = regexp.MustCompile(`session_slots_full=(\d+)`)
+)
 
 // classifySelectionFailureError preserves the scheduler's compact reason when
 // every model-capable account is temporarily rate limited.
@@ -61,19 +67,68 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	if fallback.ModelNotFound {
 		return fallback
 	}
-	match := selectionModelRateLimitedPattern.FindStringSubmatch(strings.ToLower(err.Error()))
-	if len(match) != 2 {
-		return fallback
+	lowered := strings.ToLower(err.Error())
+	match := selectionModelRateLimitedPattern.FindStringSubmatch(lowered)
+	count := 0
+	if len(match) == 2 {
+		if parsed, parseErr := strconv.Atoi(match[1]); parseErr == nil {
+			count = parsed
+		}
 	}
-	count, parseErr := strconv.Atoi(match[1])
-	if parseErr != nil || count <= 0 {
-		return fallback
+	if count > 0 {
+		return noAccountErrorClassification{
+			Status:  http.StatusServiceUnavailable,
+			ErrType: "service_unavailable",
+			Message: allAccountsCoolingMessage(err.Error()),
+		}
 	}
-	return noAccountErrorClassification{
-		Status:  http.StatusServiceUnavailable,
-		ErrType: "service_unavailable",
-		Message: infraerrors.AllAccountsRateLimited,
+	// 账号本身可用、只是会话/并发槽被占满：与「账号不可用」是两种处置，
+	// 不能共用「暂无可用账号」的说法，否则运维会去查号池而不是查并发。
+	if slots := selectionSessionSlotsFullPattern.FindStringSubmatch(lowered); len(slots) == 2 {
+		if n, convErr := strconv.Atoi(slots[1]); convErr == nil && n > 0 {
+			return noAccountErrorClassification{
+				Status:  http.StatusServiceUnavailable,
+				ErrType: "service_unavailable",
+				Message: infraerrors.AccountSlotConcurrencyLimit,
+			}
+		}
 	}
+	return fallback
+}
+
+// allAccountsCoolingMessage 在选号摘要能给出恢复时间时，把「哪个模型、还要等多久」
+// 写进文案；给不出就退回既有的通用限速文案，行为与历史一致。
+func allAccountsCoolingMessage(loweredError string) string {
+	model := ""
+	if m := selectionModelPattern.FindStringSubmatch(loweredError); len(m) == 2 {
+		model = strings.TrimSpace(m[1])
+	}
+	if model == "" {
+		return infraerrors.AllAccountsRateLimited
+	}
+	if m := selectionNextRecoveryPattern.FindStringSubmatch(loweredError); len(m) == 2 {
+		if d, parseErr := time.ParseDuration(m[1]); parseErr == nil && d > 0 {
+			return fmt.Sprintf(infraerrors.AllAccountsModelCooling, model, humanizeRecoveryWindow(d))
+		}
+	}
+	return infraerrors.AllAccountsRateLimited
+}
+
+// humanizeRecoveryWindow 把剩余时间折算成中文口语单位，避免把 3h20m12.3s 这种
+// 机器格式直接丢给调用方。
+func humanizeRecoveryWindow(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%d 秒", int(d.Seconds()+0.5))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d 分钟", int(d.Minutes()+0.5))
+	}
+	hours := int(d / time.Hour)
+	minutes := int((d % time.Hour) / time.Minute)
+	if minutes == 0 {
+		return fmt.Sprintf("%d 小时", hours)
+	}
+	return fmt.Sprintf("%d 小时 %d 分钟", hours, minutes)
 }
 
 // classifyNoAccountError decides between 404 model_not_found and 503
@@ -140,8 +195,12 @@ func classifyNoAccountError(
 }
 
 // classifyNoAccountErrorFromGin is a thin wrapper that forwards the gin
-// context's underlying request context. Most call sites already have a
-// *gin.Context handy, so this keeps the call sites uncluttered.
+// context's underlying request context.
+//
+// cause 是选号层返回的原始错误。它必须从这里进来而不是由各调用点各自再补一行
+// classifySelectionFailureError：历史上 12 个入口里只有 5 个补了，另外 7 个
+// （含 /v1/messages）拿到的永远是兜底文案「该分组暂无可用账号」，同一件事在
+// 不同协议上说法不一致。收敛到唯一入口后，新增入口不可能再漏。
 func classifyNoAccountErrorFromGin(
 	c *gin.Context,
 	diag service.ModelAvailabilityDiagnoser,
@@ -149,12 +208,14 @@ func classifyNoAccountErrorFromGin(
 	routingModel string,
 	displayModel string,
 	platform string,
+	cause error,
 ) noAccountErrorClassification {
 	ctx := context.Background()
 	if c != nil && c.Request != nil {
 		ctx = c.Request.Context()
 	}
 	classification := classifyNoAccountError(ctx, diag, apiKey, routingModel, displayModel, platform)
+	classification = classifySelectionFailureError(cause, classification)
 	if classification.ModelNotFound {
 		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
 	}
@@ -167,6 +228,7 @@ func classifyOpenAICompatibleNoAccountErrorFromGin(
 	apiKey *service.APIKey,
 	routingModel string,
 	displayModel string,
+	cause error,
 ) noAccountErrorClassification {
 	ctx := context.Background()
 	if c != nil && c.Request != nil {
@@ -179,6 +241,7 @@ func classifyOpenAICompatibleNoAccountErrorFromGin(
 		routingModel,
 		displayModel,
 		openAICompatibleRequestPlatform(ctx, apiKey),
+		cause,
 	)
 }
 
