@@ -19,11 +19,13 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -58,6 +60,11 @@ func (r *settingsFakeRepo) Create(ctx context.Context, input service.CreateQuota
 			m[k] = v
 		}
 		qk.ModelMapping = m
+	}
+	if input.GroupIDsSet {
+		ids := make([]int64, len(input.GroupIDs))
+		copy(ids, input.GroupIDs)
+		qk.GroupIds = ids
 	}
 	return qk, nil
 }
@@ -98,6 +105,11 @@ func (r *settingsFakeRepo) UpdateSettingsAndSyncAccounts(_ context.Context, _ *e
 			m[k] = v
 		}
 		qk.ModelMapping = m
+	}
+	if settings.GroupIDs != nil {
+		ids := make([]int64, len(*settings.GroupIDs))
+		copy(ids, *settings.GroupIDs)
+		qk.GroupIds = ids
 	}
 	return nil
 }
@@ -262,4 +274,129 @@ func TestQuotaKeyHandler_SyncUpstreamModels_NoAccount(t *testing.T) {
 	rec := doQuotaKeyJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/1/models/sync-upstream", "")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "QUOTA_KEY_NO_ACCOUNT_FOR_SYNC")
+}
+
+// TestQuotaKeyHandler_Create_GroupIDsPassedThrough 验证 Create 透传 group_ids: [1,2]。
+// 经 settingsFakeRepo.Create 落到 ent 实体并由 maskedQuotaKey 回放至响应。
+func TestQuotaKeyHandler_Create_GroupIDsPassedThrough(t *testing.T) {
+	router, _ := newSettingsQuotaKeyHandler(false)
+
+	body := `{"code":"` + testQuotaKeyPlain + `","group_ids":[1,2]}`
+	rec := doQuotaKeyJSON(router, http.MethodPost, "/api/v1/admin/quota_keys", body)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	requireNoPlaintext(t, rec.Body.String())
+
+	var payload struct {
+		Data struct {
+			GroupIDs []int64 `json:"group_ids"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, []int64{1, 2}, payload.Data.GroupIDs, "Create 的 group_ids 必须透传到响应")
+}
+
+// TestQuotaKeyHandler_Update_GroupIDsEmptyUnbinds 验证 Update 透传 group_ids: [] 为指向空切片
+// （解绑全部）：响应回放为指向空切片（group_ids 字段存在且为空数组，不得省略）。
+//
+// 说明：service.UpdateWithSettings 的 settingsChanged 判定（禁区：本卡不得改 service 层）当前
+// 未把 GroupIDs 计入，故单独的 group_ids 变更不会落到 settingsChanged。为在 handler 单测内验证
+// 空切片「透传且被应用」，本用例附带一个显式 rate_multiplier 同伴字段以触发 settingsChanged，
+// 从而让 GroupIDs 经由 UpdateSettingsAndSyncAccounts 落到实体并回放。group_ids 自身的三态解析
+// 仍由本用例断言。
+func TestQuotaKeyHandler_Update_GroupIDsEmptyUnbinds(t *testing.T) {
+	router, repo := newSettingsQuotaKeyHandler(false)
+	repo.seed(1, "1234", "active", false)
+
+	// 附带 rate_multiplier 同伴字段触发 settingsChanged，使 GroupIDs 一并被应用回放。
+	rec := doQuotaKeyJSON(router, http.MethodPut, "/api/v1/admin/quota_keys/1", `{"group_ids":[],"rate_multiplier":1.5}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var payload struct {
+		Data struct {
+			GroupIDs       *[]int64 `json:"group_ids"`
+			RateMultiplier float64  `json:"rate_multiplier"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.NotNil(t, payload.Data.GroupIDs, "group_ids:[] 必须透传为指向空切片（字段不得省略）")
+	require.Len(t, *payload.Data.GroupIDs, 0, "group_ids:[] 必须解绑全部（空数组）")
+	require.Equal(t, 1.5, payload.Data.RateMultiplier, "同伴字段 rate_multiplier 必须一并被应用（确认 settingsChanged 触发）")
+}
+
+// TestQuotaKeyHandler_Update_GroupIDsOmitted 验证 Update 不传 group_ids 时保持 nil（不修改，
+// 响应省略 group_ids 字段）。
+func TestQuotaKeyHandler_Update_GroupIDsOmitted(t *testing.T) {
+	router, repo := newSettingsQuotaKeyHandler(false)
+	repo.seed(1, "1234", "active", false)
+
+	rec := doQuotaKeyJSON(router, http.MethodPut, "/api/v1/admin/quota_keys/1", `{"notes":"x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var payload struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	_, ok := payload.Data["group_ids"]
+	require.False(t, ok, "未传 group_ids 必须省略该字段（不修改）")
+}
+
+// TestQuotaKeyHandler_Update_GroupIDsNullNoModify 验证 Update 传 group_ids: null 时视为「不修改」
+// （与 model_mapping 的 null 语义区分：此处 null 不解绑），响应省略 group_ids 字段。
+func TestQuotaKeyHandler_Update_GroupIDsNullNoModify(t *testing.T) {
+	router, repo := newSettingsQuotaKeyHandler(false)
+	repo.seed(1, "1234", "active", false)
+
+	rec := doQuotaKeyJSON(router, http.MethodPut, "/api/v1/admin/quota_keys/1", `{"group_ids":null}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var payload struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	_, ok := payload.Data["group_ids"]
+	require.False(t, ok, "group_ids:null 必须视为不修改（省略该字段）")
+}
+
+// TestQuotaKeyHandler_SetStatus_ThreeStates 验证 SetStatus 三态响应（QKG-B6）：
+//   - 合法（active ↔ disabled）→ 200 且回放新状态；
+//   - 非法（未知 status）→ 400 QUOTA_KEY_STATUS_INVALID；
+//   - 缺失 body（status 为空）→ 400 "status is required"。
+//
+// 该用例命中真实隔离 PostgreSQL（newProbePostgresClient，同型 pg_try_advisory_xact_lock），
+// 走完整 service.SetStatus 链路（含 R3a 过期判定与 account_changed 入队）。
+func TestQuotaKeyHandler_SetStatus_ThreeStates(t *testing.T) {
+	client := newProbePostgresClient(t)
+	quotaKeyRepo := repository.NewQuotaKeyRepository(client)
+	svc := service.NewQuotaKeyService(quotaKeyRepo, service.NewCredcryptEncryptor(), nil, client)
+	h := NewQuotaKeyHandler(svc, nil, nil, nil)
+
+	router := gin.New()
+	qk := router.Group("/api/v1/admin/quota_keys")
+	qk.POST("/:id/status", h.SetStatus)
+
+	ctx := context.Background()
+	// 逐次唯一 code 规避 uq_quota_keys_code_mac 库级唯一索引冲突（清理不依赖 DELETE）。
+	status, err := svc.Create(ctx, fmt.Sprintf("JG-CF-B6-STATUS-%d", time.Now().UnixNano()), nil, nil, 0, "")
+	require.NoError(t, err)
+
+	// 合法：active → disabled。
+	rec := doQuotaKeyJSON(router, http.MethodPost, fmt.Sprintf("/api/v1/admin/quota_keys/%d/status", status.ID), `{"status":"disabled"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var okPayload struct {
+		Data struct {
+			Status string `json:"status"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &okPayload))
+	require.Equal(t, "disabled", okPayload.Data.Status, "合法 SetStatus 必须回放新状态")
+
+	// 非法：未知 status。
+	rec = doQuotaKeyJSON(router, http.MethodPost, fmt.Sprintf("/api/v1/admin/quota_keys/%d/status", status.ID), `{"status":"frobnicate"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "QUOTA_KEY_STATUS_INVALID")
+
+	// 缺失 body：status 为空。
+	rec = doQuotaKeyJSON(router, http.MethodPost, fmt.Sprintf("/api/v1/admin/quota_keys/%d/status", status.ID), `{}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "status is required")
 }

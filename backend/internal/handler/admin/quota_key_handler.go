@@ -131,6 +131,8 @@ func maskedQuotaKey(st *service.QuotaKeyStatus) dto.QuotaKey {
 		LoadFactor:     st.LoadFactor,
 		RateMultiplier: st.RateMultiplier,
 		ModelMapping:   st.ModelMapping,
+		// GroupIDs 码级权威分组：与 service.QuotaKeyStatus 同源回放（nil=未指定，空切片=解绑全部）。
+		GroupIDs: st.GroupIDs,
 	}
 }
 
@@ -193,6 +195,9 @@ type createQuotaKeyRequest struct {
 	LoadFactor     *int            `json:"load_factor"`
 	RateMultiplier *float64        `json:"rate_multiplier"`
 	ModelMapping   json.RawMessage `json:"model_mapping"`
+	// GroupIDs 是新建激活码的码级权威分组：nil / null 表示不设置（GroupIDsSet=false，落 NULL）；
+	// 数组（含 []）表示显式设置（GroupIDsSet=true，空切片 = 解绑全部）。
+	GroupIDs json.RawMessage `json:"group_ids"`
 }
 
 // Create 新建激活码：接 code 原文一次 → 加密落库 → 返回脱敏结果。
@@ -239,6 +244,18 @@ func (h *QuotaKeyHandler) Create(c *gin.Context) {
 		r := *req.RateMultiplier
 		settings.RateMultiplier = &r
 	}
+
+	// 解析 group_ids：nil / null 表示不设置（GroupIDsSet=false，落 NULL）；数组（含 []）表示显式设置。
+	var groupIDs *[]int64
+	if len(req.GroupIDs) > 0 && string(req.GroupIDs) != "null" {
+		var ids []int64
+		if err := json.Unmarshal(req.GroupIDs, &ids); err != nil {
+			response.BadRequest(c, "Invalid group_ids: "+err.Error())
+			return
+		}
+		groupIDs = &ids
+	}
+	settings.GroupIDs = groupIDs
 
 	st, err := h.svc.CreateWithSettings(c.Request.Context(), req.Code, req.ExpiresAt, req.Notes, req.Priority, req.UpstreamKey, settings)
 	if err != nil {
@@ -350,6 +367,9 @@ type updateQuotaKeyRequest struct {
 	LoadFactor     json.RawMessage `json:"load_factor"`
 	RateMultiplier *float64        `json:"rate_multiplier"`
 	ModelMapping   json.RawMessage `json:"model_mapping"`
+	// GroupIDs 三态（与 update 的 concurrency/load_factor 同型，但与 model_mapping 的 null 语义区分）：
+	// 未传（nil）→ 不修改；null → 不修改（清空请传 []）；[] → 解绑全部；[…] → 覆盖。
+	GroupIDs json.RawMessage `json:"group_ids"`
 }
 
 // newNilIntPointer 返回指向 nil *int 的指针（**int 的内层 nil），表达"清空/恢复默认"。
@@ -459,6 +479,19 @@ func (h *QuotaKeyHandler) Update(c *gin.Context) {
 		settings.ModelMapping = parsed
 	}
 
+	// 解析 group_ids 三态：未传（nil）/ null → 不修改（settings.GroupIDs 保持 nil）；
+	// [] → 指向空切片（解绑全部）；[…] → 指向该切片。解析失败 → 400。
+	var groupIDs *[]int64
+	if req.GroupIDs != nil && string(req.GroupIDs) != "null" {
+		var ids []int64
+		if err := json.Unmarshal(req.GroupIDs, &ids); err != nil {
+			response.BadRequest(c, "Invalid group_ids: "+err.Error())
+			return
+		}
+		groupIDs = &ids
+	}
+	settings.GroupIDs = groupIDs
+
 	st, err := h.svc.UpdateWithSettings(c.Request.Context(), id, req.Code, expiresAt, notes, req.Priority, settings)
 	if err != nil {
 		respondQuotaKeyError(c, err)
@@ -507,6 +540,36 @@ func (h *QuotaKeyHandler) ClearExhausted(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"cleared": true})
+}
+
+// SetStatus 启用 / 停用激活码（仅 active ↔ disabled）。
+// POST /api/v1/admin/quota_keys/:id/status
+//
+// body: {"status":"active"|"disabled"}；缺省或空 → 400 status is required。
+// 调用 service.SetStatus 执行状态切换（含 R3a 过期禁止启用判定、名下账号 account_changed 入队），
+// 错误走 respondQuotaKeyError 统一映射，成功回放 maskedQuotaKey(st)。
+func (h *QuotaKeyHandler) SetStatus(c *gin.Context) {
+	id, ok := parseQuotaKeyID(c)
+	if !ok {
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if body.Status == "" {
+		response.BadRequest(c, "status is required")
+		return
+	}
+	st, err := h.svc.SetStatus(c.Request.Context(), id, body.Status)
+	if err != nil {
+		respondQuotaKeyError(c, err)
+		return
+	}
+	response.Success(c, maskedQuotaKey(st))
 }
 
 // SweepExpired 手动触发一轮到期清扫（过期激活码标 expired），返回本轮改写条数。
