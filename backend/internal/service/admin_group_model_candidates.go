@@ -44,7 +44,8 @@ func NewGroupModelCatalogReader(accountTest *AccountTestService, openaiGateway *
 // 分流必须先于任何读取完成（plan §5.1「候选纯读入口必须在调用前准确分流」）：
 //   - 网页凭证账号（Cookie/Token）不是 API key，打上游 /v1/models 既无意义也泄漏凭证形状；
 //   - 火山订阅号走真实对话端点全量探活，禁止弹窗打开时触发生成请求；
-//   - Cursor 的静态初始化和全局目录不证明单账号全支持（P6 缺口），本轮明确不支持；
+//   - Cursor 账号的能力目录直接取自其 credentials.model_mapping 的精确键（请求侧公开名），
+//     不发起任何上游请求（与 IsModelSupported 唯一出口一致）；
 //   - muse 走专属只读目录（fetchMuseUpstreamCatalog），不进入通用 OpenAI /v1/models 分支。
 //
 // 其余接入（grok / anthropic / gemini / antigravity / CN 与 other / codebuddy
@@ -64,9 +65,10 @@ func (r *groupModelCatalogReader) FetchAccountModelCatalog(ctx context.Context, 
 		)
 	}
 	if account.Platform == PlatformCursor {
-		return nil, newUpstreamModelSyncUnsupportedError(
-			"Unsupported platform for allowlist candidates: cursor (no qualified per-account read-only catalog in this round; P6 gap)", nil,
-		)
+		// Cursor 账号的能力目录就是它自己的 credentials.model_mapping 键
+		//（请求侧公开名），不发起任何上游请求——与 IsModelSupported 的唯一出口一致。
+		ids := cursorSupplyPublicModelIDsFromMapping(account.GetModelMapping())
+		return ids, nil
 	}
 	if isMuseAccount(account) {
 		return r.fetchMuseCatalog(ctx, account)
@@ -235,6 +237,17 @@ func (s *adminServiceImpl) collectGroupModelAllowlistCandidates(ctx context.Cont
 			acc := &applicable[i]
 			catalog := catalogs[i]
 			isMixed := acc.Platform != platform
+			// Cursor 账号在目录为空（如映射仅含通配键或为空）时，直接以显式精确
+			// 映射键作为候选，不再要求命中真实目录——与 FetchAccountModelCatalog 的
+			// Cursor 出口一致，且零网络请求。仍受 mixedListingModelAllowed 约束。
+			if acc.Platform == PlatformCursor && len(catalog) == 0 {
+				for key := range explicitExactMappingKeys(acc) {
+					if isMixed && !mixedListingModelAllowed(platform, key) {
+						continue
+					}
+					add(key)
+				}
+			}
 			for id := range catalog {
 				if isMixed && !mixedListingModelAllowed(platform, id) {
 					continue

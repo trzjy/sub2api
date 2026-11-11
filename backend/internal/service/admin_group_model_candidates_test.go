@@ -375,3 +375,68 @@ func (s *accountRepoStubForCompositeModelsList) SetTempUnschedulableIfOwnedOrUnp
 func (s *accountRepoStubForCompositeModelsList) ClearTempUnschedulableIfOwned(context.Context, int64, time.Time, string) (bool, error) {
 	return false, nil
 }
+
+// QKG-C4 用例 1：Cursor 账号候选来自 model_mapping 精确键，零网络请求。
+// anthropic 组：claude 族键（claude-fable-5-1）经 mixedListingModelAllowed 放行；
+// openai 族键（gpt-6.1-sol）被排除。FetchAccountModelCatalog 对 Cursor 直接取自映射键，
+// 不调用 reader（无上游请求）。
+func TestGroupModelAllowlistCandidates_CursorMappingAnthropicGroup(t *testing.T) {
+	// reader 为空：Cursor 分支在 FetchAccountModelCatalog 内短路，绝不触达 reader。
+	reader := &stubGroupModelCatalogReader{byAccount: map[int64][]string{}}
+	accounts := []Account{
+		{ID: 1, Platform: PlatformCursor, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"model_mapping": map[string]any{
+				"claude-fable-5-1": "claude-fable-5-1",
+				"gpt-6.1-sol":      "gpt-6.1-sol",
+			}}},
+	}
+	svc := svcForCandidateTest(reader, nil, accounts)
+	candidates, err := svc.collectGroupModelAllowlistCandidates(context.Background(), 99, PlatformAnthropic, accounts)
+	require.NoError(t, err)
+	require.Contains(t, candidates, "claude-fable-5-1")
+	require.NotContains(t, candidates, "gpt-6.1-sol")
+}
+
+// QKG-C4 用例 2：composite 组下 Cursor 账号映射的两个精确键，经 resolver 解析到各自家族
+// 平台并由对应供给账号（anthropic / openai）校验通过后，两者均在候选中。
+func TestGroupModelAllowlistCandidates_CursorMappingCompositeGroup(t *testing.T) {
+	reader := &stubGroupModelCatalogReader{
+		byAccount: map[int64][]string{
+			2: {"claude-fable-5-1"}, // anthropic 供给账号目录
+			3: {"gpt-6.1-sol"},      // openai 供给账号目录
+		},
+	}
+	accounts := []Account{
+		{ID: 1, Platform: PlatformCursor, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"model_mapping": map[string]any{
+				"claude-fable-5-1": "claude-fable-5-1",
+				"gpt-6.1-sol":      "gpt-6.1-sol",
+			}}},
+		{ID: 2, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Credentials: map[string]any{}},
+		{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{}},
+	}
+	svc := svcForCandidateTest(reader, nil, accounts)
+	candidates, err := svc.collectGroupModelAllowlistCandidates(context.Background(), 99, PlatformComposite, accounts)
+	require.NoError(t, err)
+	require.Contains(t, candidates, "claude-fable-5-1")
+	require.Contains(t, candidates, "gpt-6.1-sol")
+}
+
+// QKG-C4 用例 3：Cursor 映射中的通配键（claude-*）既被 cursorSupplyPublicModelIDsFromMapping
+// 排除出 catalog，也不在 explicitExactMappingKeys，绝不能成为候选；精确键 claude-fable-5-1 仍列出。
+func TestGroupModelAllowlistCandidates_CursorWildcardMappingKeyNotCandidate(t *testing.T) {
+	reader := &stubGroupModelCatalogReader{byAccount: map[int64][]string{}}
+	accounts := []Account{
+		{ID: 1, Platform: PlatformCursor, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"model_mapping": map[string]any{
+				"claude-fable-5-1": "claude-fable-5-1",
+				"claude-*":         "claude-wildcard-target",
+			}}},
+	}
+	svc := svcForCandidateTest(reader, nil, accounts)
+	candidates, err := svc.collectGroupModelAllowlistCandidates(context.Background(), 99, PlatformAnthropic, accounts)
+	require.NoError(t, err)
+	require.Contains(t, candidates, "claude-fable-5-1")
+	require.NotContains(t, candidates, "claude-*")
+	require.NotContains(t, candidates, "claude-wildcard-target")
+}
