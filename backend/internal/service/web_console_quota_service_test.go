@@ -510,7 +510,7 @@ func TestWebConsoleQuotaService_ProbeOK_SnapshotBuildFailureIsFailClosed(t *test
 	require.Equal(t, 0, repo.clearCount())
 }
 
-func TestWebConsoleQuotaService_ProbeOK_UpdateExtraErrorStillAppliesScheduling(t *testing.T) {
+func TestWebConsoleQuotaService_ProbeOK_UpdateExtraErrorSkipsScheduling(t *testing.T) {
 	data := wcqCompsharePlanData(100, 100, time.Now().Add(3*time.Hour).Format(time.RFC3339))
 	worker := wcqNewFakeWorker(t, http.StatusOK, wcqProbeBody(data))
 	repo := &wcqRepoStub{updateErr: errors.New("db down"), setApplied: true}
@@ -519,8 +519,10 @@ func TestWebConsoleQuotaService_ProbeOK_UpdateExtraErrorStillAppliesScheduling(t
 	res, err := svc.ProbeLoadedAccount(context.Background(), wcqCompshareAccount(18))
 	require.NoError(t, err)
 	require.False(t, res.Persisted)
-	// 快照落库失败不影响停调判定（停调权威值独立于 extra 快照）。
-	require.Equal(t, 1, repo.setCount())
+	// 方案 §3.2-C-3 + 外审 must_fix：本次判定无法留痕时不得应用调度结果（失败关闭），
+	// 避免「有停调、无快照」的不可观测状态。上一轮语义（UpdateExtra 失败仍调度）已被取代。
+	require.Equal(t, 0, repo.setCount())
+	require.Equal(t, 0, repo.clearCount())
 }
 
 // ---------------------------------------------------------------------------

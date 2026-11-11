@@ -213,20 +213,31 @@ func (s *WebConsoleQuotaService) ProbeLoadedAccount(ctx context.Context, account
 		}, nil
 	}
 
-	key := s.probeSingleflightKey(provider, account)
+	apiKeySHA256 := sha256Hex([]byte(account.GetCredential(webConsoleQuotaCredentialKeyAPIKey)))
+	timeoutSeconds := webQuotaWorkerDefaultTimeoutSeconds
+	if s.cfg.WebQuotaWorker.TimeoutSeconds > 0 {
+		timeoutSeconds = s.cfg.WebQuotaWorker.TimeoutSeconds
+	}
 
-	v, _, _ := s.flight.Do(key, func() (any, error) {
-		// 同账号调度写入串行化：worker 采集本身因 singleflight 已单飞，
-		// 但同一账号仍可能被不同调用方以不同 key 命中（username 变更竞态），
-		// 这里再按 accountID 加锁，保证停调读-判-写不被同账号并发探测交织。
-		lock := s.accountLock(account.ID)
-		lock.Lock()
-		defer lock.Unlock()
-		return s.probeWithWorker(ctx, account, provider), nil
+	key := s.probeSingleflightKey(provider, account, apiKeySHA256)
+
+	v, err, _ := s.flight.Do(key, func() (any, error) {
+		// 单飞只合并 worker 网络往返；账号级归一/落库/调度必须在 Do 返回后
+		// 由每个调用账号各自执行，否则同控制台兄弟账号会拿到首个账号的编排结果。
+		return s.fetchProbeResponse(ctx, account, provider, apiKeySHA256, timeoutSeconds)
 	})
+	if err != nil {
+		// 传输/协议层失败：失败关闭，不写 extra、不动停调。
+		return &WebConsoleQuotaProbeResult{
+			Provider:  provider,
+			AuthState: webConsoleQuotaAuthStateError,
+			FetchedAt: time.Now().Unix(),
+			Error:     err.Error(),
+		}, nil
+	}
 
-	result, ok := v.(*WebConsoleQuotaProbeResult)
-	if !ok || result == nil {
+	resp, ok := v.(*webConsoleQuotaWorkerResponse)
+	if !ok || resp == nil {
 		return &WebConsoleQuotaProbeResult{
 			Provider:  provider,
 			AuthState: webConsoleQuotaAuthStateError,
@@ -234,18 +245,38 @@ func (s *WebConsoleQuotaService) ProbeLoadedAccount(ctx context.Context, account
 			Error:     "web_quota_worker_probe_failed",
 		}, nil
 	}
-	// singleflight 会把同一指针分发给所有等待者，返回副本避免调用方改写共享结果。
-	out := *result
-	return &out, nil
+
+	// 同账号调度写入串行化：同一账号仍可能被不同调用方以不同 key 命中
+	// （username / api_key 变更竞态），这里按 accountID 加锁，保证停调读-判-写
+	// 不被同账号并发探测交织。兄弟账号 ID 不同，互不阻塞。
+	lock := s.accountLock(account.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.applyProbeResponse(ctx, account, provider, resp, apiKeySHA256, time.Now()), nil
 }
 
-// probeSingleflightKey 构造单飞键：同上游同控制台账号共用一个 key，缺 username 时按账号隔离。
-func (s *WebConsoleQuotaService) probeSingleflightKey(provider string, account *Account) string {
+// probeSingleflightKey 构造单飞键。
+//
+// key 含 provider + lower(username) + api_key 哈希三个维度：同控制台账号的兄弟账号
+// 各自持有不同 api_key，compshare 多套餐需按 key 精确匹配套餐，若只按账号合并，
+// 兄弟账号会拿到首个账号的套餐判定（错配）且只有首个账号被归一/落库/调度。
+// 合并只应发生在「同上游 + 同控制台账号 + 同 API Key」的重复探测（周期 + 手动刷新）。
+// 缺 username 时按 accountID 隔离，不再叠加 key 维度。
+//
+// apiKeySHA256 用可变参数：生产路径（ProbeLoadedAccount）恒传哈希；既有按键用例仍以
+// 两参数调用（等价于「不区分 key」），据此保持既有断言不变。
+func (s *WebConsoleQuotaService) probeSingleflightKey(provider string, account *Account, apiKeySHA256 ...string) string {
 	username := strings.TrimSpace(account.GetCredential(webConsoleQuotaCredentialKeyUsername))
-	if username != "" {
-		return webConsoleQuotaSingleflightKeyPrefix + provider + ":" + strings.ToLower(username)
+	if username == "" {
+		return fmt.Sprintf("%s%d", webConsoleQuotaSingleflightKeyAccountPrefix, account.ID)
 	}
-	return fmt.Sprintf("%s%d", webConsoleQuotaSingleflightKeyAccountPrefix, account.ID)
+	key := webConsoleQuotaSingleflightKeyPrefix + provider + ":" + strings.ToLower(username)
+	if len(apiKeySHA256) > 0 {
+		if hash := strings.TrimSpace(apiKeySHA256[0]); hash != "" {
+			key += ":" + hash
+		}
+	}
+	return key
 }
 
 // accountLock 懒创建并返回 accountID 对应的互斥锁。
@@ -267,39 +298,35 @@ func (s *WebConsoleQuotaService) accountLock(accountID int64) *sync.Mutex {
 // 探测主流程
 // ---------------------------------------------------------------------------
 
-// probeWithWorker 执行「请求 worker → 回写 storage_state → 归一快照 → 调度联动」。
-func (s *WebConsoleQuotaService) probeWithWorker(ctx context.Context, account *Account, provider string) *WebConsoleQuotaProbeResult {
-	now := time.Now()
+// fetchProbeResponse 执行一次 worker 请求（可被 singleflight 合并）。
+// 只做网络往返，不做任何账号级归一/落库/调度动作——后者必须对每个调用账号各自执行。
+func (s *WebConsoleQuotaService) fetchProbeResponse(
+	ctx context.Context, account *Account, provider, apiKeySHA256 string, timeoutSeconds int,
+) (*webConsoleQuotaWorkerResponse, error) {
+	return s.postProbe(ctx, account, provider, apiKeySHA256, timeoutSeconds)
+}
+
+// applyProbeResponse 把 worker 响应应用到「当前账号」：按状态决定是否回写 storage_state，
+// 成功时归一快照、落库并执行调度联动。resp 可能被多个调用方共享，**只读，不得修改**。
+func (s *WebConsoleQuotaService) applyProbeResponse(
+	ctx context.Context, account *Account, provider string, resp *webConsoleQuotaWorkerResponse,
+	apiKeySHA256 string, now time.Time,
+) *WebConsoleQuotaProbeResult {
 	result := &WebConsoleQuotaProbeResult{
 		Provider:  provider,
 		FetchedAt: now.Unix(),
 	}
 
-	apiKeySHA256 := sha256Hex([]byte(account.GetCredential(webConsoleQuotaCredentialKeyAPIKey)))
-
-	timeoutSeconds := webQuotaWorkerDefaultTimeoutSeconds
-	if s.cfg != nil && s.cfg.WebQuotaWorker.TimeoutSeconds > 0 {
-		timeoutSeconds = s.cfg.WebQuotaWorker.TimeoutSeconds
-	}
-
-	resp, err := s.postProbe(ctx, account, provider, apiKeySHA256, timeoutSeconds)
-	if err != nil {
-		// 传输/协议层失败：失败关闭，不写 extra、不动停调。
-		result.AuthState = webConsoleQuotaAuthStateError
-		result.Error = err.Error()
-		return result
-	}
-
-	// 步骤 8：storage_state 回写（失败仅记日志，不中断探测）。
-	s.persistUpdatedStorageState(ctx, account, resp)
-
 	status := strings.TrimSpace(resp.Status)
 	if status == webConsoleQuotaWorkerStatusOK {
+		// 步骤 8：storage_state 回写（失败仅记日志，不中断探测）。
+		// 只有成功响应才刷新会话凭据：需人工登录 / 认证失败 / 未知状态时凭据不可信。
+		s.persistUpdatedStorageState(ctx, account, resp)
 		return s.handleProbeOK(ctx, account, provider, resp, apiKeySHA256, now, result)
 	}
 
 	// 步骤 10：非 ok（needs_interactive_auth / auth_failed / error）——保留历史数值字段，
-	// 只更新认证态；绝不调用任何停调写入/清除原语（失败关闭）。
+	// 只更新认证态；绝不回写凭据，也绝不调用任何停调写入/清除原语（失败关闭）。
 	return s.handleProbeNotOK(ctx, account, provider, resp, status, now, result)
 }
 
@@ -483,9 +510,12 @@ func (s *WebConsoleQuotaService) handleProbeOK(
 	result.SkillSnapshot = snap
 	result.Exhausted = snap.Exhausted
 	result.Until = snap.Until
-	// Persisted 只反映快照落库结果；调度联动按规格无条件执行（停调权威值在 DB，
-	// 与 extra 快照是否写成功无耦合）。
 	result.Persisted = s.persistSnapshot(ctx, account.ID, snap)
+	if !result.Persisted {
+		// 失败关闭：本次判定无法留痕时不得写停调/清除，避免「有停调无快照」的不可观测状态。
+		slog.Warn("web_console_quota_snapshot_persist_failed_skip_scheduling", "account_id", account.ID)
+		return result
+	}
 
 	s.applyScheduling(ctx, account, snap)
 	return result
@@ -509,8 +539,10 @@ func (s *WebConsoleQuotaService) handleProbeNotOK(
 		// 未知/空状态一律归入 error，避免把无意义字符串写进快照。
 		authState = webConsoleQuotaAuthStateError
 	}
-	if authState == webConsoleQuotaAuthStateError && resp.Error == "" {
-		resp.Error = "web_quota_worker_status_" + status
+	// resp 可能被多个调用账号共享：错误文案写本地副本，绝不改写 resp。
+	authError := resp.Error
+	if authState == webConsoleQuotaAuthStateError && authError == "" {
+		authError = "web_quota_worker_status_" + status
 	}
 
 	snap := s.loadExistingSnapshot(account)
@@ -521,7 +553,7 @@ func (s *WebConsoleQuotaService) handleProbeNotOK(
 	snap.Provider = provider
 	snap.AuthState = authState
 	snap.AuthReason = resp.AuthReason
-	snap.AuthError = resp.Error
+	snap.AuthError = authError
 	snap.FetchedAt = now.UTC().Format(time.RFC3339)
 	if label := strings.TrimSpace(resp.AccountLabel); label != "" {
 		snap.AccountLabel = label
@@ -532,7 +564,7 @@ func (s *WebConsoleQuotaService) handleProbeNotOK(
 	result.AuthState = authState
 	result.AuthReason = snap.AuthReason
 	result.AuthError = snap.AuthError
-	result.Error = resp.Error
+	result.Error = authError
 	result.Exhausted = snap.Exhausted
 	result.Until = snap.Until
 	result.SkillSnapshot = snap
