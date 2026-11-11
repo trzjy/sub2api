@@ -144,14 +144,9 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 
 	cacheKey := "gemini:" + sessionHash
 
-	// 2. 尝试粘性会话命中
-	// Try sticky session hit
-	if account := s.tryStickySessionHit(ctx, groupID, sessionHash, cacheKey, requestedModel, excludedIDs, platform, useMixedScheduling); account != nil {
-		return account, nil
-	}
-
-	// 3. 查询可调度账户（强制平台模式：优先按分组查找，找不到再查全部）
-	// Query schedulable accounts (force platform mode: try group first, fallback to all)
+	// 2. 查询可调度账户（强制平台模式：优先按分组查找，找不到再查全部）
+	// 必须先取列表：粘性命中需要用它求出"本请求真正能服务的最小 priority 档"，
+	// 否则一个低档账号一旦被粘住就会长期独占该会话，形成绕开优先级的旁路。
 	accounts, err := s.listSchedulableAccountsOnce(ctx, groupID, platform, hasForcePlatform)
 	if err != nil {
 		return nil, fmt.Errorf("query accounts failed: %w", err)
@@ -162,6 +157,13 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 		if err != nil {
 			return nil, fmt.Errorf("query accounts failed: %w", err)
 		}
+	}
+	tierPriority, hasTier := minPriorityOfAccounts(accountPointers(accounts))
+
+	// 3. 尝试粘性会话命中
+	// Try sticky session hit
+	if account := s.tryStickySessionHit(ctx, groupID, sessionHash, cacheKey, requestedModel, excludedIDs, platform, useMixedScheduling, tierPriority, hasTier); account != nil {
+		return account, nil
 	}
 
 	// 4. 按优先级 + LRU 选择最佳账号
@@ -227,6 +229,8 @@ func (s *GeminiMessagesCompatService) tryStickySessionHit(
 	excludedIDs map[int64]struct{},
 	platform string,
 	useMixedScheduling bool,
+	tierPriority int,
+	hasTier bool,
 ) *Account {
 	if sessionHash == "" {
 		return nil
@@ -256,6 +260,12 @@ func (s *GeminiMessagesCompatService) tryStickySessionHit(
 	// 验证账号是否可用于当前请求
 	// Verify account is usable for current request
 	if !s.isAccountUsableForRequest(ctx, account, requestedModel, platform, useMixedScheduling) {
+		return nil
+	}
+
+	// 优先级档位校验：粘性账号必须属于当前最小 priority 档。
+	// 跨档命中是绕开优先级的旁路；这里只放弃本次粘性命中，不删绑定。
+	if !stickyAccountWithinPriorityTier(account, tierPriority, hasTier) {
 		return nil
 	}
 

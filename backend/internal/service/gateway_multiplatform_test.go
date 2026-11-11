@@ -713,7 +713,8 @@ func TestGatewayService_SelectAccountForModelWithPlatform_StickySession(t *testi
 	t.Run("粘性会话命中-同平台", func(t *testing.T) {
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
-				{ID: 1, Platform: PlatformAnthropic, Priority: 2, Status: StatusActive, Schedulable: true},
+				// 同档（priority 相同）：粘性必须生效，会话亲和优先于"最近未用"。
+				{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
 				{ID: 2, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
 			},
 			accountsByID: map[int64]*Account{},
@@ -736,6 +737,37 @@ func TestGatewayService_SelectAccountForModelWithPlatform_StickySession(t *testi
 		require.NoError(t, err)
 		require.NotNil(t, acc)
 		require.Equal(t, int64(1), acc.ID, "应返回粘性会话绑定的账户")
+	})
+
+	t.Run("粘性会话跨档-改选最小档", func(t *testing.T) {
+		// 粘性绑在 priority=2 的账号上，但同平台存在 priority=1 的可用账号：
+		// 粘性不得成为绕开优先级的旁路，必须改选最小档账号。
+		setPriorityTierStrictForTest(t, true)
+		repo := &mockAccountRepoForPlatform{
+			accounts: []Account{
+				{ID: 1, Platform: PlatformAnthropic, Priority: 2, Status: StatusActive, Schedulable: true},
+				{ID: 2, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
+			},
+			accountsByID: map[int64]*Account{},
+		}
+		for i := range repo.accounts {
+			repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+		}
+
+		cache := &mockGatewayCacheForPlatform{
+			sessionBindings: map[string]int64{"session-123": 1},
+		}
+
+		svc := &GatewayService{
+			accountRepo: repo,
+			cache:       cache,
+			cfg:         testConfig(),
+		}
+
+		acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-123", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+		require.NoError(t, err)
+		require.NotNil(t, acc)
+		require.Equal(t, int64(2), acc.ID, "跨档粘性命中必须放弃，改选最小 priority 档账号")
 	})
 
 	t.Run("粘性会话不匹配平台-降级选择", func(t *testing.T) {
@@ -1810,6 +1842,38 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 	t.Run("混合调度-粘性会话命中启用mixed_scheduling的antigravity账户", func(t *testing.T) {
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
+				// 同档：粘性必须生效（antigravity 启用 mixed_scheduling 可承接原生平台请求）。
+				{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
+				{ID: 2, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true, Extra: map[string]any{"mixed_scheduling": true}},
+			},
+			accountsByID: map[int64]*Account{},
+		}
+		for i := range repo.accounts {
+			repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+		}
+
+		cache := &mockGatewayCacheForPlatform{
+			sessionBindings: map[string]int64{"session-123": 2},
+		}
+
+		svc := &GatewayService{
+			accountRepo: repo,
+			cache:       cache,
+			cfg:         testConfig(),
+		}
+
+		acc, err := svc.selectAccountWithMixedScheduling(ctx, nil, "session-123", "claude-sonnet-4-5", nil, PlatformAnthropic)
+		require.NoError(t, err)
+		require.NotNil(t, acc)
+		require.Equal(t, int64(2), acc.ID, "应返回粘性会话绑定的启用mixed_scheduling的antigravity账户")
+	})
+
+	t.Run("混合调度-粘性会话跨档-改选最小档", func(t *testing.T) {
+		// 粘性绑在 priority=2 的 antigravity 账号上，但存在 priority=1 的原生账号：
+		// 粘性不得绕开优先级，必须改选最小档。
+		setPriorityTierStrictForTest(t, true)
+		repo := &mockAccountRepoForPlatform{
+			accounts: []Account{
 				{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
 				{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true, Extra: map[string]any{"mixed_scheduling": true}},
 			},
@@ -1832,7 +1896,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 		acc, err := svc.selectAccountWithMixedScheduling(ctx, nil, "session-123", "claude-sonnet-4-5", nil, PlatformAnthropic)
 		require.NoError(t, err)
 		require.NotNil(t, acc)
-		require.Equal(t, int64(2), acc.ID, "应返回粘性会话绑定的启用mixed_scheduling的antigravity账户")
+		require.Equal(t, int64(1), acc.ID, "跨档粘性命中必须放弃，改选最小 priority 档账号")
 	})
 
 	t.Run("混合调度-粘性会话命中未启用mixed_scheduling的antigravity账户-降级选择", func(t *testing.T) {

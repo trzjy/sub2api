@@ -1468,17 +1468,19 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 		return nil, false, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
 	}
 
-	// 1. 尝试粘性会话命中
-	// Try sticky session hit
-	if account := s.tryStickySessionHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability); account != nil {
-		return account, true, nil
-	}
-
-	// 2. 获取可调度的 OpenAI 账号
-	// Get schedulable OpenAI accounts
+	// 1. 获取可调度的 OpenAI 账号
+	// 必须先取列表：粘性命中需要用它求出"本请求真正能服务的最小 priority 档"，
+	// 否则一个低档账号一旦被粘住就会长期独占该会话，形成绕开优先级的旁路。
 	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
 	if err != nil {
 		return nil, false, fmt.Errorf("query accounts failed: %w", err)
+	}
+	tierPriority, hasTier := minPriorityOfAccounts(accountPointers(accounts))
+
+	// 2. 尝试粘性会话命中
+	// Try sticky session hit
+	if account := s.tryStickySessionHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, tierPriority, hasTier); account != nil {
+		return account, true, nil
 	}
 
 	// 3. 按优先级 + LRU 选择最佳账号
@@ -1509,7 +1511,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 //
 // tryStickySessionHit attempts to get account from sticky session.
 // Returns account if hit and usable; clears session and returns nil if account is unavailable.
-func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID *int64, platform string, sessionHash, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability) *Account {
+func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID *int64, platform string, sessionHash, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, tierPriority int, hasTier bool) *Account {
 	if sessionHash == "" {
 		return nil
 	}
@@ -1548,6 +1550,21 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 	// Check if sticky session should be cleared
 	if shouldClearStickySession(account, requestedModel) {
 		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+		return nil
+	}
+
+	// 优先级档位校验：粘性账号必须属于当前最小 priority 档。
+	// 跨档命中是绕开优先级的旁路——典型场景是低档账号在高峰被粘住后，即使高档账号
+	// 已空闲也继续吃流量。这里只放弃本次粘性命中，**不删绑定**（档位恢复后会话仍有效），
+	// 由后续选号重新落点并在选中后改写绑定。
+	if !stickyAccountWithinPriorityTier(account, tierPriority, hasTier) {
+		slog.Debug("sticky.cross_priority_tier_miss",
+			"group_id", derefGroupID(groupID),
+			"account_id", accountID,
+			"account_priority", account.Priority,
+			"tier_priority", tierPriority,
+			"session", shortSessionHash(sessionHash),
+		)
 		return nil
 	}
 
@@ -1681,6 +1698,16 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 	if len(eligible) == 0 {
 		return nil, compactBlocked, filterStats
 	}
+	// 优先级档位门（全站唯一实现）：只保留最小 priority 档。
+	//
+	// 位置必须在 eligible 构造完成之后（硬门 + 准入已过）：最小档若整体不可用
+	//（模型不支持 / 限流 / 额度耗尽），仍必须允许降档，否则会出现"有号却 502"。
+	// 该门生效后，下方所有排序（倍率优先 / LRU）只可能在同档内部起作用，物理上无法跨档。
+	tierKept := restrictAccountPtrsToMinPriorityTier(eligible)
+	if removed := len(eligible) - len(tierKept); removed > 0 {
+		filterStats.excludeCount("priority_tier", removed)
+	}
+	eligible = tierKept
 	rateOrder := openAILegacyUpstreamRateOrder{}
 	if preferLowUpstreamRate {
 		rateOrder = newOpenAILegacyUpstreamRateOrder(eligible, time.Now(), s.openAIOAuthSchedulingRateMultiplier(ctx))
@@ -1816,68 +1843,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		return excluded
 	}
 
-	// ============ Layer 1: Sticky session ============
-	// A healthy sticky account whose bounded wait queue is full may be used as a
-	// one-request capacity spillover in Layer 2. Keep that spillover temporary:
-	// rewriting the durable binding here would make a short burst migrate the
-	// whole conversation to a cache-cold account.
-	stickySpillover := false
-	if sessionHash != "" {
-		accountID := stickyAccountID
-		if accountID > 0 && !isExcluded(accountID) {
-			account, err := s.getSchedulableAccount(ctx, accountID)
-			if err == nil {
-				// B3 sticky 不入 Web 池：Web 接入模式账号不得经粘性会话路由，
-				// 清理绑定后回落两级池（与 tryStickySessionHit 同一口径）。
-				if account != nil && account.IsWebAccessMode() {
-					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
-					return nil, nil
-				}
-				clearSticky := shouldClearStickySession(account, requestedModel)
-				if clearSticky {
-					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
-				}
-				if !clearSticky && isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, false, requiredCapability) {
-					account = s.recheckSelectedOpenAIAccountFromDB(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
-					if account == nil {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
-					} else if !s.openAIAccountMatchesSchedulingGroup(account, groupID) {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
-					} else if s.isOpenAIAccountRequestRuntimeBlocked(account, requestedModel) {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
-					} else if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, account, requestedModel, requireCompact) {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
-					} else if !parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
-					} else {
-						result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
-						if err == nil && result != nil && result.Acquired {
-							selection, selectErr := s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
-							if selectErr != nil {
-								return nil, selectErr
-							}
-							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
-							return markStickySessionHit(selection, true), nil
-						}
-
-						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-						if waitingCount < cfg.StickySessionMaxWaiting {
-							selection, selectErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-								AccountID:      accountID,
-								MaxConcurrency: account.Concurrency,
-								Timeout:        cfg.StickySessionWaitTimeout,
-								MaxWaiting:     cfg.StickySessionMaxWaiting,
-							})
-							return markStickySessionHit(selection, true), selectErr
-						}
-						stickySpillover = true
-					}
-				}
-			}
-		}
-	}
-
-	// ============ Layer 2: Load-aware selection ============
+	// ============ 候选构造（Layer 1 档位校验与 Layer 2 共用） ============
 	// Per-pass parent-health cache to avoid repeated DB calls when multiple shadow
 	// accounts share the same parent.
 	parentCacheL2 := make(map[int64]*Account)
@@ -1934,6 +1900,82 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		candidates = append(candidates, acc)
 	}
 
+	// 优先级档位门（全站唯一实现）：候选构造完成（硬门已过）后只保留最小 priority 档。
+	//
+	// 提前到 Layer 1 之前，是为了让粘性会话也受档位约束——否则会话粘在低优先级账号上时
+	// 会长期绕开优先级。注意这里只做档位过滤，不做空集返回：粘性账号可能不在候选集
+	//（被 exclude / 不可调度），空集判定仍留在 Layer 2。
+	tierKept := restrictAccountPtrsToMinPriorityTier(candidates)
+	if removed := len(candidates) - len(tierKept); removed > 0 {
+		filterStats.excludeCount("priority_tier", removed)
+	}
+	candidates = tierKept
+	minTierPriority, hasMinTier := minPriorityOfAccounts(candidates)
+
+	// ============ Layer 1: Sticky session ============
+	// A healthy sticky account whose bounded wait queue is full may be used as a
+	// one-request capacity spillover in Layer 2. Keep that spillover temporary:
+	// rewriting the durable binding here would make a short burst migrate the
+	// whole conversation to a cache-cold account.
+	stickySpillover := false
+	if sessionHash != "" {
+		accountID := stickyAccountID
+		if accountID > 0 && !isExcluded(accountID) {
+			account, err := s.getSchedulableAccount(ctx, accountID)
+			if err == nil {
+				// B3 sticky 不入 Web 池：Web 接入模式账号不得经粘性会话路由，
+				// 清理绑定后回落两级池（与 tryStickySessionHit 同一口径）。
+				if account != nil && account.IsWebAccessMode() {
+					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+					return nil, nil
+				}
+				clearSticky := shouldClearStickySession(account, requestedModel)
+				if clearSticky {
+					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+				}
+				// 档位门：粘性命中的账号必须属于当前最小 priority 档，否则放弃本次粘性
+				//（不删绑定，由 Layer 2 选中后改写）。档位门关闭时该判断恒为 true。
+				if !clearSticky && stickyAccountWithinPriorityTier(account, minTierPriority, hasMinTier) && isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, false, requiredCapability) {
+					account = s.recheckSelectedOpenAIAccountFromDB(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
+					if account == nil {
+						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+					} else if !s.openAIAccountMatchesSchedulingGroup(account, groupID) {
+						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+					} else if s.isOpenAIAccountRequestRuntimeBlocked(account, requestedModel) {
+						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+					} else if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, account, requestedModel, requireCompact) {
+						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+					} else if !parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
+						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+					} else {
+						result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
+						if err == nil && result != nil && result.Acquired {
+							selection, selectErr := s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
+							if selectErr != nil {
+								return nil, selectErr
+							}
+							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
+							return markStickySessionHit(selection, true), nil
+						}
+
+						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
+						if waitingCount < cfg.StickySessionMaxWaiting {
+							selection, selectErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
+								AccountID:      accountID,
+								MaxConcurrency: account.Concurrency,
+								Timeout:        cfg.StickySessionWaitTimeout,
+								MaxWaiting:     cfg.StickySessionMaxWaiting,
+							})
+							return markStickySessionHit(selection, true), selectErr
+						}
+						stickySpillover = true
+					}
+				}
+			}
+		}
+	}
+
+	// ============ Layer 2: Load-aware selection ============
 	if len(candidates) == 0 {
 		return nil, noAvailableOpenAISelectionError(requestedModel, false, filterStats.summary(""))
 	}

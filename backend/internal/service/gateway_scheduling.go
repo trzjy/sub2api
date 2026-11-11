@@ -252,6 +252,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		return needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, account, requestedModel)
 	}
 
+	// 优先级档位下限（供 Layer 1.5 粘性校验使用）。见下方"获取模型路由配置"之后的赋值。
+	var noRoutingTierPriority int
+	var noRoutingHasTier bool
+
 	// 获取模型路由配置（anthropic / openai 目标平台；composite 分组按目标平台判断）
 	var routingAccountIDs []int64
 	if group != nil && requestedModel != "" &&
@@ -273,6 +277,21 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] context group routing miss: group_id=%d model=%s patterns(sample)=%v", group.ID, requestedModel, keys)
 			}
 		}
+	}
+
+	// 优先级档位下限（供 Layer 1.5 粘性校验使用）。
+	//
+	// 这里只做"能不能服务本请求"的静态准入（平台归属 + 模型支持），不做负载/限流判定：
+	// 目的是回答"粘性账号是不是当前最优档的账号"，而不是"现在有没有空位"。负载一类的
+	// 动态判定留给 Layer 2（它按"可用账号"求档位，天然支持降档）。
+	// 有路由配置时档位以路由候选为准（见 Layer 1），此处不参与判定。
+	if len(routingAccountIDs) == 0 {
+		noRoutingTierPriority, noRoutingHasTier = priorityTierFloor(accountPointers(accounts), func(account *Account) bool {
+			if !s.isAccountAdmittedForPlatform(ctx, account, platform, useMixed, requestedModel, groupID) {
+				return false
+			}
+			return requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)
+		})
 	}
 
 	// ============ Layer 1: 模型路由优先选择（优先级高于粘性会话） ============
@@ -342,6 +361,12 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 
 		if len(routingCandidates) > 0 {
+			// 优先级档位门（全站唯一实现）之一：路由候选已经过硬门与准入，此处求得的
+			// 档位下限就是"本请求真正能服务的最小档"。
+			//  1) 只保留最小档 → 下方按负载排序与分区只在同档内起作用；
+			//  2) 路由范围内的粘性命中若不在该档，视为跨档旁路，放弃粘性回落到本层重选。
+			routingTierPriority, hasRoutingTier := minPriorityOfAccounts(routingCandidates)
+			routingCandidates = restrictAccountPtrsToMinPriorityTier(routingCandidates)
 			// 1.5. 在路由账号范围内检查粘性会话
 			if sessionHash != "" && stickyAccountID > 0 {
 				slog.Debug("sticky.layer1_5_checking",
@@ -363,7 +388,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							!isChannelRestricted(stickyAccount) &&
 							s.isAccountSchedulableForModelSelection(ctx, stickyAccount, requestedModel) &&
 							s.isAccountSchedulableForQuota(stickyAccount) &&
-							s.isAccountSchedulableForWindowCost(ctx, stickyAccount, true)
+							s.isAccountSchedulableForWindowCost(ctx, stickyAccount, true) &&
+							stickyAccountWithinPriorityTier(stickyAccount, routingTierPriority, hasRoutingTier)
 
 						rpmPass := gatePass && s.isAccountSchedulableForRPM(ctx, stickyAccount, true)
 
@@ -388,43 +414,43 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								}
 							}
 
-						if stickyCacheMissReason == "" {
-							// 槽位已满（stickyAccount 是当前命中账号，slot 抢不到走到这里）。
-							//
-							// Cursor 平台：**直接换号，不给等待计划**。理由：
-							//  1. Cursor 的用户槽/账号槽跟着会话走（§25.4），会话在客户端按 esc
-							//     中断后要等 waiting_tools 空闲释放（§2.5，120 秒）或 Redis 侧槽 TTL
-							//     （30 分钟）才归还，期间干等只会把整条链路拖成每 2 分钟一次 429
-							//     （2026-11-04 生产实证）；
-							//  2. Cursor 粘性的收益仅"新会话尽量复用同一账号"——真正的续轮是在
-							//     内存会话表里按 call_id 命中的，不依赖这次选号，换号不会打断会话；
-							//  3. 池内同组还有大量空闲账号，让它们闲着而请求等死是最差解。
-							// 其他平台保持既有等待语义（会话亲和 / 上游 prompt cache 收益更确定）。
-							if shouldSwitchAccountOnStickySlotFull(stickyAccount) {
-								stickyCacheMissReason = "slot_full"
-							} else {
-								waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
-								if waitingCount < cfg.StickySessionMaxWaiting {
-									// 会话数量限制检查（等待计划也需要占用会话配额）
-									if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
-										stickyCacheMissReason = "session_limit"
-										// 会话限制已满，继续到负载感知选择
-									} else {
-										// 必须走 newSelectionResult 以 hydrate 账号凭证：
-										// 调度快照中的账号是精简版（OAuth token 等被剥离），
-										// 直接返回会导致后续转发缺少凭证而鉴权失败。
-										return s.newSelectionResult(ctx, stickyAccount, false, nil, &AccountWaitPlan{
-											AccountID:      stickyAccountID,
-											MaxConcurrency: stickyAccount.Concurrency,
-											Timeout:        cfg.StickySessionWaitTimeout,
-											MaxWaiting:     cfg.StickySessionMaxWaiting,
-										})
-									}
+							if stickyCacheMissReason == "" {
+								// 槽位已满（stickyAccount 是当前命中账号，slot 抢不到走到这里）。
+								//
+								// Cursor 平台：**直接换号，不给等待计划**。理由：
+								//  1. Cursor 的用户槽/账号槽跟着会话走（§25.4），会话在客户端按 esc
+								//     中断后要等 waiting_tools 空闲释放（§2.5，120 秒）或 Redis 侧槽 TTL
+								//     （30 分钟）才归还，期间干等只会把整条链路拖成每 2 分钟一次 429
+								//     （2026-11-04 生产实证）；
+								//  2. Cursor 粘性的收益仅"新会话尽量复用同一账号"——真正的续轮是在
+								//     内存会话表里按 call_id 命中的，不依赖这次选号，换号不会打断会话；
+								//  3. 池内同组还有大量空闲账号，让它们闲着而请求等死是最差解。
+								// 其他平台保持既有等待语义（会话亲和 / 上游 prompt cache 收益更确定）。
+								if shouldSwitchAccountOnStickySlotFull(stickyAccount) {
+									stickyCacheMissReason = "slot_full"
 								} else {
-									stickyCacheMissReason = "wait_queue_full"
+									waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
+									if waitingCount < cfg.StickySessionMaxWaiting {
+										// 会话数量限制检查（等待计划也需要占用会话配额）
+										if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
+											stickyCacheMissReason = "session_limit"
+											// 会话限制已满，继续到负载感知选择
+										} else {
+											// 必须走 newSelectionResult 以 hydrate 账号凭证：
+											// 调度快照中的账号是精简版（OAuth token 等被剥离），
+											// 直接返回会导致后续转发缺少凭证而鉴权失败。
+											return s.newSelectionResult(ctx, stickyAccount, false, nil, &AccountWaitPlan{
+												AccountID:      stickyAccountID,
+												MaxConcurrency: stickyAccount.Concurrency,
+												Timeout:        cfg.StickySessionWaitTimeout,
+												MaxWaiting:     cfg.StickySessionMaxWaiting,
+											})
+										}
+									} else {
+										stickyCacheMissReason = "wait_queue_full"
+									}
 								}
 							}
-						}
 							// 粘性账号槽位满且等待队列已满，继续使用负载感知选择
 						} else if !gatePass {
 							stickyCacheMissReason = "gate_check"
@@ -568,6 +594,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				windowCostOK := s.isAccountSchedulableForWindowCost(ctx, account, true)
 				rpmOK := s.isAccountSchedulableForRPM(ctx, account, true)
 				schedulable := s.isAccountSchedulableForSelection(account)
+				// 档位校验：粘性账号必须属于当前最小 priority 档，否则它是绕开优先级的旁路。
+				// 只放弃本次粘性命中（不删绑定），交给 Layer 2 重新选号并在选中后改写绑定。
+				tierOK := stickyAccountWithinPriorityTier(account, noRoutingTierPriority, noRoutingHasTier)
 
 				slog.Debug("sticky.layer1_5_no_routing_checks",
 					"account_id", accountID,
@@ -582,9 +611,11 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					"quota_ok", quotaOK,
 					"window_cost_ok", windowCostOK,
 					"rpm_ok", rpmOK,
+					"tier_ok", tierOK,
+					"tier_priority", noRoutingTierPriority,
 				)
 
-				if !clearSticky && platformOK && profitOK && modelSupported && channelOK && modelSchedulable && quotaOK && windowCostOK && rpmOK && schedulable {
+				if !clearSticky && platformOK && profitOK && modelSupported && channelOK && modelSchedulable && quotaOK && windowCostOK && rpmOK && schedulable && tierOK {
 					result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 					if err == nil && result.Acquired {
 						// 会话数量限制检查
@@ -724,6 +755,14 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		return nil, ErrNoAvailableAccounts
 	}
 
+	// 优先级档位门（全站唯一实现）：候选已过硬门与准入，此处只保留最小 priority 档。
+	//
+	// 位置在"候选就绪之后、负载/排序之前"：这样下方按负载率、按免费额度分区、按 LRU
+	// 的所有次序都只可能发生在同档内部。语义按"高档位满了排队、不许掉到低档"——
+	// 即负载 100% 不视为"不可用"，只有不过硬门（模型不支持 / 被排除 / 不可调度 /
+	// 限流 / 额度耗尽）才允许降档。这是档位门的统一定义，别处不得另写一份。
+	candidates = restrictAccountPtrsToMinPriorityTier(candidates)
+
 	accountLoads := make([]AccountWithConcurrency, 0, len(candidates))
 	for _, acc := range candidates {
 		accountLoads = append(accountLoads, AccountWithConcurrency{
@@ -823,6 +862,9 @@ func shouldSwitchAccountOnStickySlotFull(account *Account) bool {
 }
 
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
+	// 优先级档位门（全站唯一实现）：只保留最小 priority 档，后续"优先级 + 最近使用"
+	// 排序只可能在同档内部起作用。档位门关闭时原样返回。
+	candidates = restrictAccountPtrsToMinPriorityTier(candidates)
 	ordered := append([]*Account(nil), candidates...)
 	sortAccountsByPriorityAndLastUsed(ordered, preferOAuth)
 
@@ -2333,8 +2375,30 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		schedGroup, _ = s.groupRepo.GetByIDLite(ctx, *groupID)
 	}
 
-	var accounts []Account
-	accountsLoaded := false
+	// 账号列表提前加载：粘性会话校验需要知道"本请求真正能服务的最小 priority 档"
+	//（档位下限）。否则一个低档账号一旦被粘住，就会长期独占该会话，形成绕开优先级的旁路。
+	// 这份列表原本在下方各分支各自加载一次，提前后共用一个实例，查询次数不变。
+	forcePlatform, hasForcePlatform := ctx.Value(ctxkey.ForcePlatform).(string)
+	if hasForcePlatform && forcePlatform == "" {
+		hasForcePlatform = false
+	}
+	accounts, _, err := s.listSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
+	if err != nil {
+		return nil, fmt.Errorf("query accounts failed: %w", err)
+	}
+
+	// 批量预取窗口费用+RPM 计数，确保各分支的调度检查调用能命中缓存
+	ctx = s.withWindowCostPrefetch(ctx, accounts)
+	ctx = s.withRPMPrefetch(ctx, accounts)
+
+	// 档位下限只由"本平台且支持本模型"的账号决定：不可服务的账号算进档位会让粘性被
+	// 永久判为跨档（详见 priorityTierFloor 注释）。
+	tierPriority, hasTier := priorityTierFloor(accountPointers(accounts), func(acc *Account) bool {
+		if acc.Platform != platform {
+			return false
+		}
+		return requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, acc, requestedModel)
+	})
 
 	// ============ Model Routing (legacy path): apply before sticky session ============
 	// When load-awareness is disabled (e.g. concurrency service not configured), we still honor model routing
@@ -2368,20 +2432,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		}
 
 		// 2) Select an account from the routed candidates.
-		forcePlatform, hasForcePlatform := ctx.Value(ctxkey.ForcePlatform).(string)
-		if hasForcePlatform && forcePlatform == "" {
-			hasForcePlatform = false
-		}
-		var err error
-		accounts, _, err = s.listSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
-		if err != nil {
-			return nil, fmt.Errorf("query accounts failed: %w", err)
-		}
-		accountsLoaded = true
-
-		// 提前预取窗口费用+RPM 计数，确保 routing 段内的调度检查调用能命中缓存
-		ctx = s.withWindowCostPrefetch(ctx, accounts)
-		ctx = s.withRPMPrefetch(ctx, accounts)
+		// 候选列表已在函数入口加载（与粘性校验共用同一份），此处不再重复查询。
 
 		routingSet := make(map[int64]struct{}, len(routingAccountIDs))
 		for _, id := range routingAccountIDs {
@@ -2478,7 +2529,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 					if clearSticky {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
-					if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && account.Platform == platform && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
+					if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && account.Platform == platform && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) && stickyAccountWithinPriorityTier(account, tierPriority, hasTier) {
 						return account, nil
 					}
 				}
@@ -2486,22 +2537,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		}
 	}
 
-	// 2. 获取可调度账号列表（单平台）
-	if !accountsLoaded {
-		forcePlatform, hasForcePlatform := ctx.Value(ctxkey.ForcePlatform).(string)
-		if hasForcePlatform && forcePlatform == "" {
-			hasForcePlatform = false
-		}
-		var err error
-		accounts, _, err = s.listSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
-		if err != nil {
-			return nil, fmt.Errorf("query accounts failed: %w", err)
-		}
-	}
-
-	// 批量预取窗口费用+RPM 计数，避免逐个账号查询（N+1）
-	ctx = s.withWindowCostPrefetch(ctx, accounts)
-	ctx = s.withRPMPrefetch(ctx, accounts)
+	// 2. 可调度账号列表已在函数入口加载（与粘性校验共用同一份），此处不再重复查询。
 
 	// 3. 按优先级+最久未用选择（考虑模型支持）
 	// needsUpstreamCheck 仅在主选择循环中使用；粘性会话命中时跳过此检查，
@@ -2599,8 +2635,26 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		schedGroup, _ = s.groupRepo.GetByIDLite(ctx, *groupID)
 	}
 
-	var accounts []Account
-	accountsLoaded := false
+	// 账号列表提前加载：粘性会话校验需要知道"本请求真正能服务的最小 priority 档"
+	//（档位下限）。否则一个低档账号一旦被粘住，就会长期独占该会话，形成绕开优先级的旁路。
+	// 这份列表原本在下方各分支各自加载一次，提前后共用一个实例，查询次数不变。
+	accounts, _, err := s.listSchedulableAccounts(ctx, groupID, nativePlatform, false)
+	if err != nil {
+		return nil, fmt.Errorf("query accounts failed: %w", err)
+	}
+
+	// 批量预取窗口费用+RPM 计数，确保各分支的调度检查调用能命中缓存
+	ctx = s.withWindowCostPrefetch(ctx, accounts)
+	ctx = s.withRPMPrefetch(ctx, accounts)
+
+	// 档位下限只由"本请求可承接的账号"决定：原生平台账号，或启用了混合调度的
+	// antigravity 账号，且支持本模型。不可承接的账号算进档位会让粘性被永久判为跨档。
+	tierPriority, hasTier := priorityTierFloor(accountPointers(accounts), func(acc *Account) bool {
+		if acc.Platform != nativePlatform && !(acc.Platform == PlatformAntigravity && acc.IsMixedSchedulingEnabled()) {
+			return false
+		}
+		return requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, acc, requestedModel)
+	})
 
 	// ============ Model Routing (legacy path): apply before sticky session ============
 	if len(routingAccountIDs) > 0 {
@@ -2620,7 +2674,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 						if clearSticky {
 							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 						}
-						if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
+						if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) && stickyAccountWithinPriorityTier(account, tierPriority, hasTier) {
 							if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
 								if s.debugModelRoutingEnabled() {
 									logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy mixed routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
@@ -2634,16 +2688,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		}
 
 		// 2) Select an account from the routed candidates.
-		var err error
-		accounts, _, err = s.listSchedulableAccounts(ctx, groupID, nativePlatform, false)
-		if err != nil {
-			return nil, fmt.Errorf("query accounts failed: %w", err)
-		}
-		accountsLoaded = true
-
-		// 提前预取窗口费用+RPM 计数，确保 routing 段内的调度检查调用能命中缓存
-		ctx = s.withWindowCostPrefetch(ctx, accounts)
-		ctx = s.withRPMPrefetch(ctx, accounts)
+		// 候选列表已在函数入口加载（与粘性校验共用同一份），此处不再重复查询。
 
 		routingSet := make(map[int64]struct{}, len(routingAccountIDs))
 		for _, id := range routingAccountIDs {
@@ -2744,7 +2789,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 					if clearSticky {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
-					if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) && !s.isStickyAccountUpstreamRestricted(ctx, groupID, account, requestedModel) {
+					if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) && !s.isStickyAccountUpstreamRestricted(ctx, groupID, account, requestedModel) && stickyAccountWithinPriorityTier(account, tierPriority, hasTier) {
 						if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
 							return account, nil
 						}
@@ -2754,18 +2799,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		}
 	}
 
-	// 2. 获取可调度账号列表
-	if !accountsLoaded {
-		var err error
-		accounts, _, err = s.listSchedulableAccounts(ctx, groupID, nativePlatform, false)
-		if err != nil {
-			return nil, fmt.Errorf("query accounts failed: %w", err)
-		}
-	}
-
-	// 批量预取窗口费用+RPM 计数，避免逐个账号查询（N+1）
-	ctx = s.withWindowCostPrefetch(ctx, accounts)
-	ctx = s.withRPMPrefetch(ctx, accounts)
+	// 2. 可调度账号列表已在函数入口加载（与粘性校验共用同一份），此处不再重复查询。
 
 	// 3. 按优先级+最久未用选择（考虑模型支持和混合调度）
 	// needsUpstreamCheck 仅在主选择循环中使用；粘性会话命中时跳过此检查。

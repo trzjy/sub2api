@@ -1598,6 +1598,18 @@ func (s *openAISelectionFilterStats) exclude(reason string) {
 	s.reasons[reason]++
 }
 
+// excludeCount 一次性累加 n 个同因排除（批量过滤用），与逐条 exclude 等价。
+// 优先级档位门一次会剔除整档候选，逐条调用会放大热路径开销。
+func (s *openAISelectionFilterStats) excludeCount(reason string, n int) {
+	if n <= 0 {
+		return
+	}
+	if s.reasons == nil {
+		s.reasons = make(map[string]int, 4)
+	}
+	s.reasons[reason] += n
+}
+
 // summary renders deterministic exclusion statistics for scheduling error
 // messages, e.g. "pool=3, filtered: model_not_supported=2 quota_auto_pause_7d=1".
 // Reasons are sorted lexicographically so the output is stable for tests and
@@ -2475,11 +2487,31 @@ func cloneOpenAIAdvancedSchedulerWeightOverrides(in map[string]float64) map[stri
 	return out
 }
 
+// openAIAdvancedSchedulerStrictWarnOnce 保证"高级调度因档位门被强制关闭"只告警一次。
+var openAIAdvancedSchedulerStrictWarnOnce sync.Once
+
 func (s *OpenAIGatewayService) getOpenAIAccountScheduler(ctx context.Context) OpenAIAccountScheduler {
 	if s == nil {
 		return nil
 	}
 	if !s.isOpenAIAdvancedSchedulerEnabled(ctx) {
+		return nil
+	}
+	// 优先级档位门与高级调度互斥。
+	//
+	// 高级调度按 8 因子加权打分（负载、成功率、TTFT、倍率、订阅、免费额度…）决定落点，
+	// "分数高的低档账号可以压过高分档账号"是它的设计前提；档位门要求"只要最小档还有
+	// 可用账号，其他档一律不得参与"。两条规则无法共存——若两者同时开启，等于又回到
+	// "哪里都能改优先级"的多轨状态。
+	//
+	// 因此档位门开启时强制走 legacy 链路（其选号入口已全部装档位门）：宁可少一套加权
+	// 调度，也不允许出现第二套优先级语义。关闭档位门后高级调度按原配置恢复。
+	if priorityTierStrictEnabled() {
+		openAIAdvancedSchedulerStrictWarnOnce.Do(func() {
+			slog.Warn("openai_advanced_scheduler_disabled_by_priority_tier",
+				"reason", "PRIORITY_TIER_STRICT_ENABLED=1 与高级加权调度互斥，已强制走 legacy 选号链路",
+				"env", priorityTierStrictEnvKey)
+		})
 		return nil
 	}
 	s.openaiSchedulerOnce.Do(func() {
