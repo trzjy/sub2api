@@ -47,8 +47,8 @@ type stubAdminService struct {
 	lastSetLargeRequestOnly             struct {
 		id      int64
 		enabled bool
-			scope   service.RequestSizeScope
-}
+		scope   service.RequestSizeScope
+	}
 	getAccountResult        *service.Account
 	updateAccountCalls      int
 	updateAccountExtraCalls int
@@ -506,6 +506,17 @@ func (s *stubAdminService) GetAccount(ctx context.Context, id int64) (*service.A
 	}
 	account := service.Account{ID: id, Name: "account", Status: service.StatusActive}
 	return &account, nil
+}
+
+// GetAccountIdentityDisguise 补齐 service.AdminService 接口（主线 1f79356a5d 新增该方法但未同步本测试桩，
+// 导致 handler/admin 包 vet/测试无法编译）。本桩只返回零值，伪装行为由 service 层各自用例覆盖。
+func (s *stubAdminService) GetAccountIdentityDisguise(ctx context.Context, id int64) (*service.IdentityDisguiseState, error) {
+	return &service.IdentityDisguiseState{}, nil
+}
+
+// SetAccountIdentityDisguise 同上：仅满足接口，写行为由 service 层用例覆盖。
+func (s *stubAdminService) SetAccountIdentityDisguise(ctx context.Context, id int64, update service.IdentityDisguiseUpdate) (*service.IdentityDisguiseState, error) {
+	return &service.IdentityDisguiseState{}, nil
 }
 
 func (s *stubAdminService) GetAccountsByIDs(ctx context.Context, ids []int64) ([]*service.Account, error) {
