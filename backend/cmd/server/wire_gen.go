@@ -155,7 +155,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	quotaKeyRepository := repository.NewQuotaKeyRepository(client)
 	quotaKeyEncryptor := service.ProvideQuotaKeyEncryptor()
 	cursorAutoEntryService := service.ProvideCursorAutoEntryService(settingRepository, quotaKeyRepository, quotaKeyEncryptor, client)
-	quotaUpstreamRegistry := repository.NewQuotaUpstreamRepository(client)
+	quotaUpstreamRegistry := repository.ProvideQuotaUpstreamRegistry(client)
 	quotaKeyService, err := service.ProvideQuotaKeyService(quotaKeyRepository, quotaKeyEncryptor, client, cursorAutoEntryService, quotaUpstreamRegistry)
 	if err != nil {
 		return nil, err
@@ -258,7 +258,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	codeBuddyOAuthHandler := admin.NewCodeBuddyOAuthHandler(codeBuddyOAuthService)
 	cnProviderQuotaService := service.ProvideCNProviderQuotaService(accountRepository, proxyRepository, httpUpstream, configConfig)
 	cnProviderBalanceService := service.ProvideCNProviderBalanceService(accountRepository, proxyRepository, httpUpstream, configConfig)
-	cnProviderHandler := admin.NewCNProviderHandler(cnProviderQuotaService, cnProviderBalanceService)
+	webConsoleQuotaService := service.ProvideWebConsoleQuotaService(accountRepository, configConfig, tempUnschedCache)
+	webConsoleAuthService := service.ProvideWebConsoleAuthService(webConsoleQuotaService, accountRepository, configConfig)
+	cnProviderHandler := admin.ProvideCNProviderHandlerWithWebConsole(cnProviderQuotaService, cnProviderBalanceService, webConsoleQuotaService, webConsoleAuthService)
 	proxyHandler := admin.NewProxyHandler(adminService)
 	adminRedeemHandler := admin.NewRedeemHandler(adminService, redeemService)
 	promoHandler := admin.NewPromoHandler(promoService)
@@ -426,7 +428,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	opsIngressRejectAggregator := service.ProvideOpsIngressRejectAggregator(opsRepository, opsService)
 	accountExpiryService := service.ProvideAccountExpiryService(accountRepository)
 	cnQuotaLifecycleService := service.ProvideCNQuotaLifecycleService(accountRepository, httpUpstream, configConfig, opsService, cnProviderQuotaService, rateLimitService)
-	cnProviderBalanceCheckService := service.ProvideCNProviderBalanceCheckService(accountRepository, cnProviderBalanceService, cnProviderQuotaService, rateLimitService, httpUpstream, proxyRepository, configConfig, channelMonitorService, cnQuotaLifecycleService)
+	cnProviderBalanceCheckService := service.ProvideCNProviderBalanceCheckService(accountRepository, cnProviderBalanceService, cnProviderQuotaService, rateLimitService, httpUpstream, proxyRepository, configConfig, channelMonitorService, cnQuotaLifecycleService, webConsoleQuotaService)
 	codeBuddyQuotaService := service.ProvideCodeBuddyQuotaService(accountRepository, proxyRepository, httpUpstream, configConfig)
 	codeBuddyQuotaCheckService := service.ProvideCodeBuddyQuotaCheckService(accountRepository, codeBuddyQuotaService, rateLimitService, configConfig)
 	accountBalanceProbeCheckService := service.ProvideAccountBalanceProbeCheckService(accountRepository, accountBalanceProbeService, leaderLockCache, db, configConfig)
