@@ -312,37 +312,10 @@ var (
 		return 1
 	`)
 
-	// incrementWaitScript - refreshes TTL on each increment to keep queue depth accurate
-	// KEYS[1] = wait queue key
-	// ARGV[1] = maxWait
-	// ARGV[2] = TTL in seconds
-	// 返回 {是否成功, Redis 当前秒}，供 Go 侧免额外 TIME 往返写活跃索引。
-	incrementWaitScript = redis.NewScript(`
-		-- Redis 3.2-4.x compat: opt into effects replication so redis.call('TIME')
-		-- replicates correctly. No-op on Redis 5.0+ (effects replication is default).
-		redis.replicate_commands()
-		local current = redis.call('GET', KEYS[1])
-		if current == false then
-			current = 0
-		else
-			current = tonumber(current)
-		end
-		local now = tonumber(redis.call('TIME')[1])
-
-		if current >= tonumber(ARGV[1]) then
-			return {0, now}
-		end
-
-		redis.call('INCR', KEYS[1])
-
-		-- Refresh TTL so long-running traffic doesn't expire active queue counters.
-		redis.call('EXPIRE', KEYS[1], ARGV[2])
-
-		return {1, now}
-	`)
-
 	// incrementAccountWaitScript - account-level wait queue count (refresh TTL on each increment)
-	// 返回值同 incrementWaitScript：{是否成功, Redis 当前秒}。
+	// 返回值：{是否成功, Redis 当前秒}，供 Go 侧免额外 TIME 往返写活跃索引。
+	// 注：客户端维度（user / 订阅分组）的等待队列已于 2026-11-11 移除——并发超限改为立即拒绝，
+	// 不再排队，因此不再需要 user/group 侧的入队脚本；只有账号（account）维度保留等待。
 	incrementAccountWaitScript = redis.NewScript(`
 		-- Redis 3.2-4.x compat: opt into effects replication so redis.call('TIME')
 		-- replicates correctly. No-op on Redis 5.0+ (effects replication is default).
@@ -458,10 +431,6 @@ func grpUserSlotKey(groupID, userID int64) string {
 	return fmt.Sprintf("%s%d:%d", grpUserSlotKeyPrefix, groupID, userID)
 }
 
-func grpUserWaitKey(groupID, userID int64) string {
-	return fmt.Sprintf("%s%d:%d", grpUserWaitKeyPrefix, groupID, userID)
-}
-
 func apiKeySlotKey(apiKeyID int64) string {
 	return fmt.Sprintf("%s%d", apiKeySlotKeyPrefix, apiKeyID)
 }
@@ -480,10 +449,6 @@ func liveAPIKeySlotKey(apiKeyID int64) string {
 
 func openAIWSIngressLeaseKey(apiKeyID int64) string {
 	return fmt.Sprintf("%s%d", openAIWSIngressLeaseKeyPrefix, apiKeyID)
-}
-
-func waitQueueKey(userID int64) string {
-	return fmt.Sprintf("%s%d", waitQueueKeyPrefix, userID)
 }
 
 func accountWaitKey(accountID int64) string {
@@ -975,31 +940,6 @@ func (c *concurrencyCache) GetAPIKeyConcurrencyBatch(ctx context.Context, apiKey
 	return result, nil
 }
 
-// Wait queue operations
-
-func (c *concurrencyCache) IncrementWaitCount(ctx context.Context, userID int64, maxWait int) (bool, error) {
-	key := waitQueueKey(userID)
-	result, now, err := runScriptInt64Pair(ctx, c.rdb, incrementWaitScript, []string{key}, maxWait, c.waitQueueTTLSeconds)
-	if err != nil {
-		return false, err
-	}
-	if result == 1 {
-		// 等待队列也会让用户保持“活跃”，否则槽位为 0 时后台任务可能漏看等待计数。
-		c.touchActiveIndexAt(ctx, userActiveIndexKey, strconv.FormatInt(userID, 10), now+int64(c.waitQueueTTLSeconds))
-	}
-	return result == 1, nil
-}
-
-func (c *concurrencyCache) DecrementWaitCount(ctx context.Context, userID int64) error {
-	key := waitQueueKey(userID)
-	_, err := decrementWaitScript.Run(ctx, c.rdb, []string{key}).Result()
-	if err == nil {
-		// 等待数减少后重新判断是否还需要保留索引。
-		c.refreshUserActiveIndex(ctx, userID)
-	}
-	return err
-}
-
 // Account wait queue operations
 
 func (c *concurrencyCache) IncrementAccountWaitCount(ctx context.Context, accountID int64, maxWait int) (bool, error) {
@@ -1098,35 +1038,6 @@ func (c *concurrencyCache) GetUserGroupConcurrency(ctx context.Context, groupID,
 		return 0, err
 	}
 	return result, nil
-}
-
-// IncrementUserGroupWaitCount 订阅分组等待队列计数（单键，复用 incrementWaitScript）。
-func (c *concurrencyCache) IncrementUserGroupWaitCount(ctx context.Context, groupID, userID int64, maxWait int) (bool, error) {
-	if c == nil || c.rdb == nil || groupID <= 0 || userID <= 0 || maxWait <= 0 {
-		return false, nil
-	}
-	key := grpUserWaitKey(groupID, userID)
-	result, now, err := runScriptInt64Pair(ctx, c.rdb, incrementWaitScript, []string{key}, maxWait, c.waitQueueTTLSeconds)
-	if err != nil {
-		return false, err
-	}
-	if result == 1 {
-		c.touchGroupUserActiveIndex(ctx, groupID, userID, now+int64(c.waitQueueTTLSeconds))
-	}
-	return result == 1, nil
-}
-
-// DecrementUserGroupWaitCount 减少订阅分组等待队列计数并刷新活跃索引。
-func (c *concurrencyCache) DecrementUserGroupWaitCount(ctx context.Context, groupID, userID int64) error {
-	if c == nil || c.rdb == nil || groupID <= 0 || userID <= 0 {
-		return nil
-	}
-	key := grpUserWaitKey(groupID, userID)
-	_, err := decrementWaitScript.Run(ctx, c.rdb, []string{key}).Result()
-	if err == nil {
-		c.refreshGroupUserActiveIndex(ctx, groupID, userID)
-	}
-	return err
 }
 
 func (c *concurrencyCache) GetAccountsLoadBatch(ctx context.Context, accounts []service.AccountWithConcurrency) (map[int64]*service.AccountLoadInfo, error) {

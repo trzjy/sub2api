@@ -204,10 +204,10 @@ func TestRenderConcurrencyLimitMessage(t *testing.T) {
 	}
 }
 
-// TestAcquireScopedUserSlotWithWait_GroupScopeBypassesUserConcurrency 验证订阅分组请求按
+// TestAcquireScopedUserSlot_GroupScopeBypassesUserConcurrency 验证订阅分组请求按
 // group 维度占槽：即便用户全局并发（users.concurrency）已耗尽，订阅请求仍可通过分组并发线放行，
 // 且不会去占用户全局并发槽位。这是设计的核心契约①。
-func TestAcquireScopedUserSlotWithWait_GroupScopeBypassesUserConcurrency(t *testing.T) {
+func TestAcquireScopedUserSlot_GroupScopeBypassesUserConcurrency(t *testing.T) {
 	var userAcquireCalls, groupAcquireCalls int32
 	cache := &concurrencyCacheMock{
 		// 用户全局并发已耗尽
@@ -228,7 +228,7 @@ func TestAcquireScopedUserSlotWithWait_GroupScopeBypassesUserConcurrency(t *test
 	scope := resolveConcurrencyScope(c, subject, &service.UserSubscription{})
 	require.Equal(t, "group", scope.Kind)
 
-	release, err := helper.AcquireScopedUserSlotWithWait(c, scope, 1, false, nil)
+	release, err := helper.AcquireScopedUserSlot(c, scope, 1)
 	require.NoError(t, err)
 	require.NotNil(t, release, "subscription request must be admitted via group concurrency despite user concurrency exhaustion")
 	require.Equal(t, int32(1), atomic.LoadInt32(&groupAcquireCalls), "group slot should be acquired once")
@@ -237,10 +237,10 @@ func TestAcquireScopedUserSlotWithWait_GroupScopeBypassesUserConcurrency(t *test
 	release()
 }
 
-// TestAcquireScopedUserSlotWithWait_UserScopeDoesNotUseGroupLine 验证计量（非订阅）请求仍走
+// TestAcquireScopedUserSlot_UserScopeDoesNotUseGroupLine 验证计量（非订阅）请求仍走
 // 用户全局并发线：即便分组并发线有余量，计量请求也绝不会去占分组并发槽位（与订阅路径互不相干）。
 // 与上一测试互为对照，共同证明两条并发线的分流正确性。
-func TestAcquireScopedUserSlotWithWait_UserScopeDoesNotUseGroupLine(t *testing.T) {
+func TestAcquireScopedUserSlot_UserScopeDoesNotUseGroupLine(t *testing.T) {
 	var userAcquireCalls, groupAcquireCalls int32
 	cache := &concurrencyCacheMock{
 		// 用户全局并发有余量
@@ -262,7 +262,7 @@ func TestAcquireScopedUserSlotWithWait_UserScopeDoesNotUseGroupLine(t *testing.T
 	scope := resolveConcurrencyScope(c, subject, &service.UserSubscription{})
 	require.Equal(t, "user", scope.Kind)
 
-	release, err := helper.AcquireScopedUserSlotWithWait(c, scope, 1, false, nil)
+	release, err := helper.AcquireScopedUserSlot(c, scope, 1)
 	require.NoError(t, err)
 	require.NotNil(t, release, "metering request should be admitted via user concurrency line")
 	require.Equal(t, int32(1), atomic.LoadInt32(&userAcquireCalls), "user slot should be acquired once")

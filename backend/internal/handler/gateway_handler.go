@@ -266,7 +266,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 	// 1. 首先获取并发槽位（订阅分组走 group 维度，计量走 user 维度）
 	scope := resolveConcurrencyScope(c, subject, subscription)
-	userReleaseFunc, err := h.concurrencyHelper.AcquireScopedUserSlotWithWait(c, scope, subject.UserID, reqStream, &streamStarted)
+	userReleaseFunc, err := h.concurrencyHelper.AcquireScopedUserSlot(c, scope, subject.UserID)
 	if err != nil {
 		reqLog.Warn("gateway.user_slot_acquire_failed", zap.Error(err))
 		h.handleConcurrencyError(c, err, scope.Kind, streamStarted)
@@ -2181,7 +2181,7 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 		// 状态码沿用既有 504→502 失败关闭映射，仅替换可区分 type 与 M1 文案，不改变关闭语义。
 		status, _, _ := h.mapUpstreamError(statusCode)
 		fbMessage := pkgerrors.UpstreamFirstByteTimeoutJSON
-		if streamStarted {
+		if gatewayResponseCommitted(c, streamStarted) {
 			fbMessage = pkgerrors.UpstreamFirstByteTimeoutStreamFrame
 		}
 		h.handleStreamingAwareError(c, status, service.UpstreamFirstByteTimeoutType, fbMessage, streamStarted)
@@ -2251,7 +2251,10 @@ func (h *GatewayHandler) handleStreamingAwareError(c *gin.Context, status int, e
 }
 
 func (h *GatewayHandler) handleStreamingAwareErrorWithCode(c *gin.Context, status int, errType, code, message string, streamStarted bool) {
-	if streamStarted {
+	// 判据只认唯一事实源 gatewayResponseCommitted：它把「调用方已知流已开始」、
+	// 「writer 已物理写出」（CF524 心跳提交 SSE 200 即属此列）、「service 层已提交」
+	// 三个信号取或。禁止在本函数内就地拼装判定，否则各出口口径必然分裂。
+	if gatewayResponseCommitted(c, streamStarted) {
 		// 响应状态码已固化为 200（ping/部分数据已 flush），错误只能就地以 SSE 帧回传。
 		// 标记本次流内错误，供 ops_error_logger 补记——否则该中间件按 status>=400 采集，
 		// 这类挂在 200 流上的失败（如并发限流回退）不会进错误看板。
@@ -2302,9 +2305,8 @@ func (h *GatewayHandler) ensureForwardErrorResponse(c *gin.Context, streamStarte
 	if service.IsResponseCommitted(c) {
 		return false
 	}
-	if c.Writer.Written() {
-		streamStarted = true
-	}
+	// 不再就地同步 streamStarted：下游 handleStreamingAwareErrorWithCode 会用唯一事实源
+	// gatewayResponseCommitted 自行判定 c.Writer.Written()，此处再拼一次只会制造第二份口径。
 	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", pkgerrors.UpstreamRequestFailed, streamStarted)
 	return true
 }

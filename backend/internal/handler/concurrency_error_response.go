@@ -62,12 +62,6 @@ func renderConcurrencyDefault(kind string, limit int) string {
 }
 
 func concurrencyErrorResponse(err error, slotType string, concurrencyLimitMessage string) (int, string, string, string) {
-	var waitQueueFullErr *WaitQueueFullError
-	if errors.As(err, &waitQueueFullErr) {
-		return http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode,
-			infraerrors.GatewayQueueFull
-	}
-
 	var concurrencyErr *ConcurrencyError
 	if errors.As(err, &concurrencyErr) {
 		if concurrencyErr.SlotType != "" {

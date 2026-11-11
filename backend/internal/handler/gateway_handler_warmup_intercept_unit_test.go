@@ -135,10 +135,6 @@ func (f *fakeConcurrencyCache) AcquireUserSlot(context.Context, int64, int, stri
 }
 func (f *fakeConcurrencyCache) ReleaseUserSlot(context.Context, int64, string) error   { return nil }
 func (f *fakeConcurrencyCache) GetUserConcurrency(context.Context, int64) (int, error) { return 0, nil }
-func (f *fakeConcurrencyCache) IncrementWaitCount(context.Context, int64, int) (bool, error) {
-	return true, nil
-}
-func (f *fakeConcurrencyCache) DecrementWaitCount(context.Context, int64) error { return nil }
 func (f *fakeConcurrencyCache) AcquireUserGroupSlot(context.Context, int64, int64, int, string) (bool, error) {
 	return true, nil
 }
@@ -147,12 +143,6 @@ func (f *fakeConcurrencyCache) ReleaseUserGroupSlot(context.Context, int64, int6
 }
 func (f *fakeConcurrencyCache) GetUserGroupConcurrency(context.Context, int64, int64) (int, error) {
 	return 0, nil
-}
-func (f *fakeConcurrencyCache) IncrementUserGroupWaitCount(context.Context, int64, int64, int) (bool, error) {
-	return true, nil
-}
-func (f *fakeConcurrencyCache) DecrementUserGroupWaitCount(context.Context, int64, int64) error {
-	return nil
 }
 func (f *fakeConcurrencyCache) GetAccountsLoadBatch(context.Context, []service.AccountWithConcurrency) (map[int64]*service.AccountLoadInfo, error) {
 	return map[int64]*service.AccountLoadInfo{}, nil

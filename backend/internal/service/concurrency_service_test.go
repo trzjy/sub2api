@@ -143,12 +143,6 @@ func (c *stubConcurrencyCacheForTest) ReleaseUserGroupSlot(_ context.Context, gr
 func (c *stubConcurrencyCacheForTest) GetUserGroupConcurrency(_ context.Context, _ int64, _ int64) (int, error) {
 	return c.concurrency, c.concurrencyErr
 }
-func (c *stubConcurrencyCacheForTest) IncrementUserGroupWaitCount(_ context.Context, _ int64, _ int64, _ int) (bool, error) {
-	return c.waitAllowed, c.waitErr
-}
-func (c *stubConcurrencyCacheForTest) DecrementUserGroupWaitCount(_ context.Context, _ int64, _ int64) error {
-	return nil
-}
 func (c *stubConcurrencyCacheForTest) TrackAPIKeySlot(_ context.Context, apiKeyID int64, requestID string) error {
 	c.trackedAPIKeyIDs = append(c.trackedAPIKeyIDs, apiKeyID)
 	c.trackedAPIKeyRequestIDs = append(c.trackedAPIKeyRequestIDs, requestID)
@@ -168,12 +162,6 @@ func (c *stubConcurrencyCacheForTest) GetAPIKeyConcurrencyBatch(_ context.Contex
 		result[apiKeyID] = c.apiKeyConcurrency[apiKeyID]
 	}
 	return result, nil
-}
-func (c *stubConcurrencyCacheForTest) IncrementWaitCount(_ context.Context, _ int64, _ int) (bool, error) {
-	return c.waitAllowed, c.waitErr
-}
-func (c *stubConcurrencyCacheForTest) DecrementWaitCount(_ context.Context, _ int64) error {
-	return nil
 }
 func (c *stubConcurrencyCacheForTest) GetAccountsLoadBatch(_ context.Context, _ []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
 	c.loadBatchCalls.Add(1)
@@ -567,58 +555,10 @@ func TestGetAccountsLoadBatchFresh_BypassesShortTTLCache(t *testing.T) {
 	require.Equal(t, int64(2), cache.loadBatchCalls.Load())
 }
 
-func TestIncrementWaitCount_Success(t *testing.T) {
-	cache := &stubConcurrencyCacheForTest{waitAllowed: true}
-	svc := NewConcurrencyService(cache)
 
-	allowed, err := svc.IncrementWaitCount(context.Background(), 1, 25)
-	require.NoError(t, err)
-	require.True(t, allowed)
-}
 
-func TestIncrementWaitCount_QueueFull(t *testing.T) {
-	cache := &stubConcurrencyCacheForTest{waitAllowed: false}
-	svc := NewConcurrencyService(cache)
 
-	allowed, err := svc.IncrementWaitCount(context.Background(), 1, 25)
-	require.NoError(t, err)
-	require.False(t, allowed)
-}
 
-func TestIncrementWaitCount_FailOpen(t *testing.T) {
-	// Redis 错误时应 fail-open（允许请求通过）
-	cache := &stubConcurrencyCacheForTest{waitErr: errors.New("redis timeout")}
-	svc := NewConcurrencyService(cache)
-
-	allowed, err := svc.IncrementWaitCount(context.Background(), 1, 25)
-	require.NoError(t, err, "Redis 错误不应传播")
-	require.True(t, allowed, "Redis 错误时应 fail-open")
-}
-
-func TestIncrementWaitCount_NilCache(t *testing.T) {
-	svc := &ConcurrencyService{cache: nil}
-
-	allowed, err := svc.IncrementWaitCount(context.Background(), 1, 25)
-	require.NoError(t, err)
-	require.True(t, allowed, "nil cache 应 fail-open")
-}
-
-func TestCalculateMaxWait(t *testing.T) {
-	tests := []struct {
-		concurrency int
-		expected    int
-	}{
-		{5, 25},  // 5 + 20
-		{1, 21},  // 1 + 20
-		{0, 21},  // min(1) + 20
-		{-1, 21}, // min(1) + 20
-		{10, 30}, // 10 + 20
-	}
-	for _, tt := range tests {
-		result := CalculateMaxWait(tt.concurrency)
-		require.Equal(t, tt.expected, result, "CalculateMaxWait(%d)", tt.concurrency)
-	}
-}
 
 func TestGetAccountWaitingCount(t *testing.T) {
 	cache := &stubConcurrencyCacheForTest{waitCount: 5}

@@ -20,16 +20,13 @@ type helperConcurrencyCacheStub struct {
 
 	accountSeq []bool
 	userSeq    []bool
+	groupSeq   []bool
 
 	accountAcquireCalls int
 	userAcquireCalls    int
+	groupAcquireCalls   int
 	accountReleaseCalls int
 	userReleaseCalls    int
-	waitAllowed         bool
-	waitIncrementCalls  int
-	waitDecrementCalls  int
-	waitMaxWait         int
-	waitIncrementHook   func()
 	apiKeyTrackCalls    int
 	apiKeyReleaseCalls  int
 	apiKeyTrackIDs      []int64
@@ -124,31 +121,18 @@ func (s *helperConcurrencyCacheStub) GetAPIKeyConcurrencyBatch(ctx context.Conte
 	return out, nil
 }
 
-func (s *helperConcurrencyCacheStub) IncrementWaitCount(ctx context.Context, userID int64, maxWait int) (bool, error) {
-	s.mu.Lock()
-	s.waitIncrementCalls++
-	s.waitMaxWait = maxWait
-	waitAllowed := s.waitAllowed
-	hook := s.waitIncrementHook
-	s.mu.Unlock()
-	if hook != nil {
-		hook()
-	}
-	if !waitAllowed {
-		return false, nil
-	}
-	return true, nil
-}
 
-func (s *helperConcurrencyCacheStub) DecrementWaitCount(ctx context.Context, userID int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.waitDecrementCalls++
-	return nil
-}
 
 func (s *helperConcurrencyCacheStub) AcquireUserGroupSlot(ctx context.Context, groupID, userID int64, maxConcurrency int, requestID string) (bool, error) {
-	return true, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.groupAcquireCalls++
+	if len(s.groupSeq) == 0 {
+		return true, nil
+	}
+	v := s.groupSeq[0]
+	s.groupSeq = s.groupSeq[1:]
+	return v, nil
 }
 
 func (s *helperConcurrencyCacheStub) ReleaseUserGroupSlot(ctx context.Context, groupID, userID int64, requestID string) error {
@@ -159,13 +143,7 @@ func (s *helperConcurrencyCacheStub) GetUserGroupConcurrency(ctx context.Context
 	return 0, nil
 }
 
-func (s *helperConcurrencyCacheStub) IncrementUserGroupWaitCount(ctx context.Context, groupID, userID int64, maxWait int) (bool, error) {
-	return true, nil
-}
 
-func (s *helperConcurrencyCacheStub) DecrementUserGroupWaitCount(ctx context.Context, groupID, userID int64) error {
-	return nil
-}
 
 func (s *helperConcurrencyCacheStub) GetAccountsLoadBatch(ctx context.Context, accounts []service.AccountWithConcurrency) (map[int64]*service.AccountLoadInfo, error) {
 	out := make(map[int64]*service.AccountLoadInfo, len(accounts))
@@ -265,79 +243,27 @@ func TestSetClaudeCodeClientContext_ReuseParsedRequest(t *testing.T) {
 	})
 }
 
-func TestWaitForSlotWithPingTimeout_AccountAndUserAcquire(t *testing.T) {
+// TestWaitForSlotWithPingTimeout_AccountAcquire 账号维度等待路径（保留等待：等站点资源释放）。
+// 2026-11-11 起本函数只服务账号维度——客户端维度已改为并发满立即拒绝。
+func TestWaitForSlotWithPingTimeout_AccountAcquire(t *testing.T) {
 	cache := &helperConcurrencyCacheStub{
 		accountSeq: []bool{false, true},
-		userSeq:    []bool{false, true},
 	}
 	concurrency := service.NewConcurrencyService(cache)
 	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
 
-	t.Run("account_slot_acquired_after_retry", func(t *testing.T) {
-		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-		streamStarted := false
-		release, err := helper.waitForSlotWithPingTimeout(c, "account", 101, 2, time.Second, false, &streamStarted, true)
-		require.NoError(t, err)
-		require.NotNil(t, release)
-		require.False(t, streamStarted)
-		release()
-		require.GreaterOrEqual(t, cache.accountAcquireCalls, 2)
-		require.GreaterOrEqual(t, cache.accountReleaseCalls, 1)
-	})
-
-	t.Run("user_slot_acquired_after_retry", func(t *testing.T) {
-		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-		streamStarted := false
-		release, err := helper.waitForSlotWithPingTimeout(c, "user", 202, 3, time.Second, false, &streamStarted, true)
-		require.NoError(t, err)
-		require.NotNil(t, release)
-		release()
-		require.GreaterOrEqual(t, cache.userAcquireCalls, 2)
-		require.GreaterOrEqual(t, cache.userReleaseCalls, 1)
-	})
-}
-
-func TestAcquireUserSlotWithWait_ImmediateAcquireSkipsWaitQueue(t *testing.T) {
-	cache := &helperConcurrencyCacheStub{
-		userSeq: []bool{true},
-	}
-	concurrency := service.NewConcurrencyService(cache)
-	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
 	c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
 	streamStarted := false
-
-	release, err := helper.acquireUserSlotWithWaitTimeout(c, 202, 3, time.Second, false, &streamStarted)
+	release, err := helper.waitForSlotWithPingTimeout(c, "account", 101, 2, time.Second, false, &streamStarted, true)
 	require.NoError(t, err)
 	require.NotNil(t, release)
+	require.False(t, streamStarted)
 	release()
-
-	require.Equal(t, 1, cache.userAcquireCalls)
-	require.Equal(t, 0, cache.waitIncrementCalls)
-	require.Equal(t, 0, cache.waitDecrementCalls)
-	require.Equal(t, 1, cache.userReleaseCalls)
+	require.GreaterOrEqual(t, cache.accountAcquireCalls, 2)
+	require.GreaterOrEqual(t, cache.accountReleaseCalls, 1)
 }
 
-func TestAcquireUserSlotWithWait_TracksAPIKeySlot(t *testing.T) {
-	cache := &helperConcurrencyCacheStub{
-		userSeq: []bool{true},
-	}
-	concurrency := service.NewConcurrencyService(cache)
-	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
-	c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{ID: 77})
-	streamStarted := false
 
-	release, err := helper.acquireUserSlotWithWaitTimeout(c, 202, 3, time.Second, false, &streamStarted)
-	require.NoError(t, err)
-	require.NotNil(t, release)
-	require.Equal(t, 1, cache.apiKeyTrackCalls)
-	require.Equal(t, []int64{77}, cache.apiKeyTrackIDs)
-
-	release()
-
-	require.Equal(t, 1, cache.userReleaseCalls)
-	require.Equal(t, 1, cache.apiKeyReleaseCalls)
-}
 
 func TestTryAcquireUserSlotForAPIKey_TracksAPIKeySlot(t *testing.T) {
 	cache := &helperConcurrencyCacheStub{
@@ -359,77 +285,8 @@ func TestTryAcquireUserSlotForAPIKey_TracksAPIKeySlot(t *testing.T) {
 	require.Equal(t, 1, cache.apiKeyReleaseCalls)
 }
 
-func TestAcquireUserSlotWithWait_WaitSuccessDecrementsBeforeReturn(t *testing.T) {
-	cache := &helperConcurrencyCacheStub{
-		userSeq:     []bool{false, true},
-		waitAllowed: true,
-	}
-	concurrency := service.NewConcurrencyService(cache)
-	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
-	c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-	streamStarted := false
 
-	release, err := helper.acquireUserSlotWithWaitTimeout(c, 202, 3, time.Second, false, &streamStarted)
-	require.NoError(t, err)
-	require.NotNil(t, release)
 
-	require.Equal(t, 2, cache.userAcquireCalls)
-	require.Equal(t, 1, cache.waitIncrementCalls)
-	require.Equal(t, 20, cache.waitMaxWait)
-	require.Equal(t, 1, cache.waitDecrementCalls)
-
-	release()
-	require.Equal(t, 1, cache.userReleaseCalls)
-}
-
-func TestAcquireUserSlotWithWait_TimeoutDecrementsWaitQueue(t *testing.T) {
-	cache := &helperConcurrencyCacheStub{
-		userSeq:     []bool{false, false, false},
-		waitAllowed: true,
-	}
-	concurrency := service.NewConcurrencyService(cache)
-	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
-	c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-	streamStarted := false
-
-	release, err := helper.acquireUserSlotWithWaitTimeout(c, 202, 3, 30*time.Millisecond, false, &streamStarted)
-	require.Nil(t, release)
-	var cErr *ConcurrencyError
-	require.ErrorAs(t, err, &cErr)
-	require.True(t, cErr.IsTimeout)
-	require.Equal(t, 1, cache.waitIncrementCalls)
-	require.Equal(t, 1, cache.waitDecrementCalls)
-	require.Equal(t, 0, cache.userReleaseCalls)
-}
-
-func TestAcquireUserSlotWithWait_RequestCancelDecrementsWaitQueue(t *testing.T) {
-	cancelled := make(chan struct{})
-	var cancel context.CancelFunc
-	cache := &helperConcurrencyCacheStub{
-		userSeq:     []bool{false, false},
-		waitAllowed: true,
-		waitIncrementHook: func() {
-			cancel()
-			close(cancelled)
-		},
-	}
-	concurrency := service.NewConcurrencyService(cache)
-	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
-	c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
-	reqCtx, cancelFunc := context.WithCancel(c.Request.Context())
-	cancel = cancelFunc
-	defer cancel()
-	c.Request = c.Request.WithContext(reqCtx)
-	streamStarted := false
-
-	release, err := helper.acquireUserSlotWithWaitTimeout(c, 202, 3, time.Second, false, &streamStarted)
-	<-cancelled
-	require.Nil(t, release)
-	require.ErrorIs(t, err, context.Canceled)
-	require.Equal(t, 1, cache.waitIncrementCalls)
-	require.Equal(t, 1, cache.waitDecrementCalls)
-	require.Equal(t, 0, cache.userReleaseCalls)
-}
 
 func TestWaitForSlotWithPingTimeout_TimeoutAndStreamPing(t *testing.T) {
 	cache := &helperConcurrencyCacheStub{
@@ -448,7 +305,11 @@ func TestWaitForSlotWithPingTimeout_TimeoutAndStreamPing(t *testing.T) {
 		require.True(t, cErr.IsTimeout)
 	})
 
-	t.Run("stream_mode_sends_ping_before_timeout", func(t *testing.T) {
+	// 2026-11-11 契约变更：准入等待阶段不再发 SSE 心跳。
+	// 原实现会在等待期间把响应头提交为 200 并写 ping，导致排队超时后只能把 429/503
+	// 塞进「已经开始的流」，客户端拿不到真状态码、运维按状态码统计也看不到拒绝。
+	// 现在准入阶段保持静默：streamStarted 保持 false，响应体为空，调用方能如实返回状态码。
+	t.Run("stream_mode_keeps_admission_silent_before_timeout", func(t *testing.T) {
 		helper := NewConcurrencyHelper(concurrency, SSEPingFormatComment, 10*time.Millisecond)
 		c, rec := newHelperTestContext(http.MethodPost, "/v1/messages")
 		streamStarted := false
@@ -457,8 +318,9 @@ func TestWaitForSlotWithPingTimeout_TimeoutAndStreamPing(t *testing.T) {
 		var cErr *ConcurrencyError
 		require.ErrorAs(t, err, &cErr)
 		require.True(t, cErr.IsTimeout)
-		require.True(t, streamStarted)
-		require.Contains(t, rec.Body.String(), ":\n\n")
+		require.False(t, streamStarted, "准入阶段不得把 streamStarted 置真")
+		require.Empty(t, rec.Body.String(), "准入阶段不得写任何响应字节")
+		require.False(t, c.Writer.Written(), "准入阶段不得提交响应头")
 	})
 }
 
@@ -535,4 +397,78 @@ func TestSetClaudeCodeClientContext_ParsedRequestProbeWithoutSystemPrompt(t *tes
 	c2.Request.Header.Set("User-Agent", "claude-cli/2.1.260 (external, cli)")
 	SetClaudeCodeClientContext(c2, nil, &service.ParsedRequest{Model: "claude-sonnet-4-5", MaxTokens: 64})
 	require.False(t, service.IsClaudeCodeClient(c2.Request.Context()))
+}
+
+// TestAcquireUserSlot_ImmediateAcquire 立即拿到槽位时正常返回并登记 API Key 槽位。
+func TestAcquireUserSlot_ImmediateAcquire(t *testing.T) {
+	cache := &helperConcurrencyCacheStub{
+		userSeq: []bool{true},
+	}
+	concurrency := service.NewConcurrencyService(cache)
+	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
+	c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{ID: 77})
+
+	release, err := helper.AcquireUserSlot(c, 202, 3)
+	require.NoError(t, err)
+	require.NotNil(t, release)
+	require.Equal(t, 1, cache.userAcquireCalls)
+	require.Equal(t, 1, cache.apiKeyTrackCalls)
+	require.Equal(t, []int64{77}, cache.apiKeyTrackIDs)
+
+	release()
+	require.Equal(t, 1, cache.userReleaseCalls)
+	require.Equal(t, 1, cache.apiKeyReleaseCalls)
+}
+
+// TestAcquireUserSlot_RejectsImmediatelyWhenFull 契约锁定（2026-11-11 用户裁定）：
+// 客户端维度并发已满时**立即拒绝**，不排队、不等待、不写任何响应字节。
+// 排队 30 秒是错误设计——并发上限的定义就是"同时最多 N 个"，第 N+1 个进来时
+// 前面请求的完成时间不可控，等的是一个无法承诺的时间。
+func TestAcquireUserSlot_RejectsImmediatelyWhenFull(t *testing.T) {
+	cache := &helperConcurrencyCacheStub{
+		userSeq: []bool{false},
+	}
+	concurrency := service.NewConcurrencyService(cache)
+	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
+	c, rec := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+	start := time.Now()
+	release, err := helper.AcquireUserSlot(c, 202, 3)
+	elapsed := time.Since(start)
+
+	require.Nil(t, release)
+	var cErr *ConcurrencyError
+	require.ErrorAs(t, err, &cErr)
+	require.Equal(t, "user", cErr.SlotType)
+	require.Equal(t, 3, cErr.Limit)
+	require.False(t, cErr.IsTimeout, "立即拒绝不是超时")
+	require.Less(t, elapsed, 50*time.Millisecond, "必须立即返回，不得排队等待")
+	require.Equal(t, 1, cache.userAcquireCalls, "只尝试占用一次")
+	require.Empty(t, rec.Body.String(), "拒绝前不得写响应体")
+	require.False(t, c.Writer.Written(), "拒绝前不得提交响应头")
+}
+
+// TestAcquireUserGroupSlot_RejectsImmediatelyWhenFull 订阅分组维度同上。
+func TestAcquireUserGroupSlot_RejectsImmediatelyWhenFull(t *testing.T) {
+	cache := &helperConcurrencyCacheStub{
+		groupSeq: []bool{false},
+	}
+	concurrency := service.NewConcurrencyService(cache)
+	helper := NewConcurrencyHelper(concurrency, SSEPingFormatNone, 5*time.Millisecond)
+	c, rec := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+	start := time.Now()
+	release, err := helper.AcquireUserGroupSlot(c, 57, 202, 2)
+	elapsed := time.Since(start)
+
+	require.Nil(t, release)
+	var cErr *ConcurrencyError
+	require.ErrorAs(t, err, &cErr)
+	require.Equal(t, "group", cErr.SlotType)
+	require.Equal(t, 2, cErr.Limit)
+	require.False(t, cErr.IsTimeout)
+	require.Less(t, elapsed, 50*time.Millisecond, "必须立即返回，不得排队等待")
+	require.Empty(t, rec.Body.String())
+	require.False(t, c.Writer.Written())
 }

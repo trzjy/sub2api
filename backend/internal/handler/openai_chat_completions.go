@@ -27,9 +27,18 @@ import (
 // 这是 F2-a 的唯一改动，不触及 failover 判定 / 换号 / 账号选择 / 计费相关逻辑。
 // 调用点：本文件 failover 耗尽分支（h.handleFailoverExhausted 调用之前）。这样所有依赖
 // streamStarted 的分支（如 handleStreamingAwareError 的流内/非流式分流）一并正确——不是
-// 只修护栏一处。同文件既有先例见 openai_gateway_handler.go 的 c.Writer.Written() 同步写法。
+// 只修护栏一处。
+//
+// 2026-11-11 根因修复：本 helper 此前自己拼装「c.Writer.Written() → streamStarted = true」，
+// 是同一条规则的第二份口径。现改为调用唯一事实源 gatewayResponseCommittedAsSSE
+// （合并 streamStarted / c.Writer.Written() / service.IsResponseCommitted(c) 三个信号，
+// 并排除「已提交为 JSON 文档」的形态）。函数与调用点保留不动——既有 AST 源码级
+// 回归测试（TestF2bSourceLock_*）锁定的正是它们的位置关系。
 func syncStreamStartedIfResponseCommitted(c *gin.Context, streamStarted *bool) {
-	if c.Writer.Written() {
+	if streamStarted == nil {
+		return
+	}
+	if gatewayResponseCommittedAsSSE(c, *streamStarted) {
 		*streamStarted = true
 	}
 }
@@ -806,9 +815,8 @@ func (h *OpenAIGatewayHandler) writeOpenAIChatCursorUserError(c *gin.Context, re
 	if status >= 400 && status < 500 {
 		errType = "invalid_request_error"
 	}
-	if c.Writer.Written() {
-		streamStarted = true
-	}
+	// 不再就地同步 streamStarted：下游 handleStreamingAwareErrorWithCode 用唯一事实源
+	// gatewayResponseCommittedAsSSE 自行判定（含 c.Writer.Written() 与 SSE 形态排除）。
 	h.handleStreamingAwareError(c, status, errType, message, streamStarted)
 	return true
 }

@@ -344,67 +344,7 @@ func (s *ConcurrencyCacheSuite) TestAPIKeySlot_TrackReleaseAndBatchCount() {
 	require.Equal(s.T(), 0, counts[apiKeyID])
 }
 
-func (s *ConcurrencyCacheSuite) TestWaitQueue_IncrementAndDecrement() {
-	userID := int64(20)
-	waitKey := fmt.Sprintf("%s%d", waitQueueKeyPrefix, userID)
 
-	ok, err := s.cache.IncrementWaitCount(s.ctx, userID, 2)
-	require.NoError(s.T(), err, "IncrementWaitCount 1")
-	require.True(s.T(), ok)
-
-	ok, err = s.cache.IncrementWaitCount(s.ctx, userID, 2)
-	require.NoError(s.T(), err, "IncrementWaitCount 2")
-	require.True(s.T(), ok)
-
-	ok, err = s.cache.IncrementWaitCount(s.ctx, userID, 2)
-	require.NoError(s.T(), err, "IncrementWaitCount 3")
-	require.False(s.T(), ok, "expected wait increment over max to fail")
-
-	ttl, err := s.rdb.TTL(s.ctx, waitKey).Result()
-	require.NoError(s.T(), err, "TTL waitKey")
-	s.AssertTTLWithin(ttl, 1*time.Second, testSlotTTL)
-
-	require.NoError(s.T(), s.cache.DecrementWaitCount(s.ctx, userID), "DecrementWaitCount")
-
-	val, err := s.rdb.Get(s.ctx, waitKey).Int()
-	if !errors.Is(err, redis.Nil) {
-		require.NoError(s.T(), err, "Get waitKey")
-	}
-	require.Equal(s.T(), 1, val, "expected wait count 1")
-}
-
-func (s *ConcurrencyCacheSuite) TestWaitQueue_DecrementNoNegative() {
-	userID := int64(300)
-	waitKey := fmt.Sprintf("%s%d", waitQueueKeyPrefix, userID)
-
-	// Test decrement on non-existent key - should not error and should not create negative value
-	require.NoError(s.T(), s.cache.DecrementWaitCount(s.ctx, userID), "DecrementWaitCount on non-existent key")
-
-	// Verify no key was created or it's not negative
-	val, err := s.rdb.Get(s.ctx, waitKey).Int()
-	if !errors.Is(err, redis.Nil) {
-		require.NoError(s.T(), err, "Get waitKey")
-	}
-	require.GreaterOrEqual(s.T(), val, 0, "expected non-negative wait count after decrement on empty")
-
-	// Set count to 1, then decrement twice
-	ok, err := s.cache.IncrementWaitCount(s.ctx, userID, 5)
-	require.NoError(s.T(), err, "IncrementWaitCount")
-	require.True(s.T(), ok)
-
-	// Decrement once (1 -> 0)
-	require.NoError(s.T(), s.cache.DecrementWaitCount(s.ctx, userID), "DecrementWaitCount")
-
-	// Decrement again on 0 - should not go negative
-	require.NoError(s.T(), s.cache.DecrementWaitCount(s.ctx, userID), "DecrementWaitCount on zero")
-
-	// Verify count is 0, not negative
-	val, err = s.rdb.Get(s.ctx, waitKey).Int()
-	if !errors.Is(err, redis.Nil) {
-		require.NoError(s.T(), err, "Get waitKey after double decrement")
-	}
-	require.GreaterOrEqual(s.T(), val, 0, "expected non-negative wait count")
-}
 
 func (s *ConcurrencyCacheSuite) TestAccountWaitQueue_IncrementAndDecrement() {
 	accountID := int64(30)
@@ -1002,37 +942,6 @@ func (s *ConcurrencyCacheSuite) TestGroupUserActiveIndex_CompositeMember() {
 	require.ErrorIs(s.T(), err, redis.Nil, "grpuser index member should be removed after release")
 }
 
-// TestGroupUserWaitQueue_IncrementAndDecrement 验证分组等待队列计数（复合键）行为。
-func (s *ConcurrencyCacheSuite) TestGroupUserWaitQueue_IncrementAndDecrement() {
-	groupID, userID := int64(8601), int64(8650)
-	waitKey := grpUserWaitKey(groupID, userID)
-
-	ok, err := s.cache.IncrementUserGroupWaitCount(s.ctx, groupID, userID, 2)
-	require.NoError(s.T(), err, "IncrementUserGroupWaitCount 1")
-	require.True(s.T(), ok)
-
-	ok, err = s.cache.IncrementUserGroupWaitCount(s.ctx, groupID, userID, 2)
-	require.NoError(s.T(), err, "IncrementUserGroupWaitCount 2")
-	require.True(s.T(), ok)
-
-	ok, err = s.cache.IncrementUserGroupWaitCount(s.ctx, groupID, userID, 2)
-	require.NoError(s.T(), err, "IncrementUserGroupWaitCount 3")
-	require.False(s.T(), ok, "expected wait increment over max to fail")
-
-	count, err := s.rdb.Get(s.ctx, waitKey).Int()
-	require.NoError(s.T(), err)
-	require.Equal(s.T(), 2, count)
-
-	require.NoError(s.T(), s.cache.DecrementUserGroupWaitCount(s.ctx, groupID, userID))
-	count, err = s.rdb.Get(s.ctx, waitKey).Int()
-	require.NoError(s.T(), err)
-	require.Equal(s.T(), 1, count)
-
-	require.NoError(s.T(), s.cache.DecrementUserGroupWaitCount(s.ctx, groupID, userID))
-	count, err = s.rdb.Get(s.ctx, waitKey).Int()
-	require.NoError(s.T(), err)
-	require.Equal(s.T(), 0, count)
-}
 
 // TestCleanupStaleProcessSlots_PreservesGrpUserCompositeMember 验证清理旧进程遗留槽位时，
 // grpuser 活跃索引的复合成员（groupID:userID）按 score（过期时间）而非整数解析处理——

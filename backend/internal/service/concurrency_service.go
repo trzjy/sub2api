@@ -39,16 +39,10 @@ type ConcurrencyCache interface {
 	ReleaseUserSlot(ctx context.Context, userID int64, requestID string) error
 	GetUserConcurrency(ctx context.Context, userID int64) (int, error)
 
-	// 等待队列计数（每次入队都会刷新 TTL，避免长时间排队时计数提前过期）
-	IncrementWaitCount(ctx context.Context, userID int64, maxWait int) (bool, error)
-	DecrementWaitCount(ctx context.Context, userID int64) error
-
 	// 订阅分组并发线（用户+分组独立计数；与用户全局并发互不干扰）
 	AcquireUserGroupSlot(ctx context.Context, groupID, userID int64, maxConcurrency int, requestID string) (bool, error)
 	ReleaseUserGroupSlot(ctx context.Context, groupID, userID int64, requestID string) error
 	GetUserGroupConcurrency(ctx context.Context, groupID, userID int64) (int, error)
-	IncrementUserGroupWaitCount(ctx context.Context, groupID, userID int64, maxWait int) (bool, error)
-	DecrementUserGroupWaitCount(ctx context.Context, groupID, userID int64) error
 
 	// 批量负载查询（只读）
 	GetAccountsLoadBatch(ctx context.Context, accounts []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error)
@@ -224,9 +218,6 @@ func (s *ConcurrencyService) CleanupStaleProcessSlots(ctx context.Context) error
 }
 
 const (
-	// 默认等待队列额外槽位
-	defaultExtraWaitSlots = 20
-
 	defaultAccountLoadBatchCacheTTL = 200 * time.Millisecond
 	accountLoadBatchFetchTimeout    = 3 * time.Second
 	maxAccountLoadBatchCacheEntries = 256
@@ -534,40 +525,6 @@ func zeroAPIKeyConcurrencyMap(apiKeyIDs []int64) map[int64]int {
 // Wait Queue Count Methods
 // ============================================
 
-// IncrementWaitCount attempts to increment the wait queue counter for a user.
-// Returns true if successful, false if the wait queue is full.
-// maxWait should be user.Concurrency + defaultExtraWaitSlots
-func (s *ConcurrencyService) IncrementWaitCount(ctx context.Context, userID int64, maxWait int) (bool, error) {
-	if s.cache == nil {
-		// Redis not available, allow request
-		return true, nil
-	}
-
-	result, err := s.cache.IncrementWaitCount(ctx, userID, maxWait)
-	if err != nil {
-		// On error, allow the request to proceed (fail open)
-		logger.LegacyPrintf("service.concurrency", "Warning: increment wait count failed for user %d: %v", userID, err)
-		return true, nil
-	}
-	return result, nil
-}
-
-// DecrementWaitCount decrements the wait queue counter for a user.
-// Should be called when a request completes or exits the wait queue.
-func (s *ConcurrencyService) DecrementWaitCount(ctx context.Context, userID int64) {
-	if s.cache == nil {
-		return
-	}
-
-	// Use background context to ensure decrement even if original context is cancelled
-	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := s.cache.DecrementWaitCount(bgCtx, userID); err != nil {
-		logger.LegacyPrintf("service.concurrency", "Warning: decrement wait count failed for user %d: %v", userID, err)
-	}
-}
-
 // IncrementAccountWaitCount increments the wait queue counter for an account.
 func (s *ConcurrencyService) IncrementAccountWaitCount(ctx context.Context, accountID int64, maxWait int) (bool, error) {
 	if s.cache == nil {
@@ -615,41 +572,6 @@ func (s *ConcurrencyService) GetUserGroupConcurrency(ctx context.Context, groupI
 		return 0, nil
 	}
 	return s.cache.GetUserGroupConcurrency(ctx, groupID, userID)
-}
-
-// IncrementUserGroupWaitCount increments the wait queue counter for a (groupID, userID) pair.
-// Returns true if successful, false if the wait queue is full. Fail-open on Redis error.
-func (s *ConcurrencyService) IncrementUserGroupWaitCount(ctx context.Context, groupID, userID int64, maxWait int) (bool, error) {
-	if s.cache == nil {
-		return true, nil
-	}
-	result, err := s.cache.IncrementUserGroupWaitCount(ctx, groupID, userID, maxWait)
-	if err != nil {
-		logger.LegacyPrintf("service.concurrency", "Warning: increment group user wait count failed for group %d user %d: %v", groupID, userID, err)
-		return true, nil
-	}
-	return result, nil
-}
-
-// DecrementUserGroupWaitCount decrements the wait queue counter for a (groupID, userID) pair.
-func (s *ConcurrencyService) DecrementUserGroupWaitCount(ctx context.Context, groupID, userID int64) {
-	if s.cache == nil {
-		return
-	}
-	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := s.cache.DecrementUserGroupWaitCount(bgCtx, groupID, userID); err != nil {
-		logger.LegacyPrintf("service.concurrency", "Warning: decrement group user wait count failed for group %d user %d: %v", groupID, userID, err)
-	}
-}
-
-// CalculateMaxWait calculates the maximum wait queue size for a user
-// maxWait = userConcurrency + defaultExtraWaitSlots
-func CalculateMaxWait(userConcurrency int) int {
-	if userConcurrency <= 0 {
-		userConcurrency = 1
-	}
-	return userConcurrency + defaultExtraWaitSlots
 }
 
 // GetAccountsLoadBatch 批量获取账号负载信息。

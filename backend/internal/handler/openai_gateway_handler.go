@@ -1082,9 +1082,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					}
 					// openAIForwardMayFailover 已确认写出的字节不含语义输出，
 					// 但重试耗尽时仍须按已提交的 SSE 响应返回流内错误。
-					if c.Writer.Written() {
-						streamStarted = true
-					}
+					// 判据交给下游唯一事实源 gatewayResponseCommittedAsSSE
+					// （它合并 c.Writer.Written() / service.IsResponseCommitted(c)）。
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
 					}
@@ -1977,7 +1976,9 @@ func (h *OpenAIGatewayHandler) anthropicErrorResponse(c *gin.Context, status int
 // anthropicStreamingAwareError handles errors that may occur during streaming,
 // using Anthropic SSE error format.
 func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, status int, errType, message string, streamStarted bool) {
-	if streamStarted {
+	// 判据只认唯一事实源：CF524 心跳提交 SSE 200 后不同步 handler 层 streamStarted，
+	// 只看 streamStarted 会把 JSON 错误体塞进已开的 SSE 流。
+	if gatewayResponseCommittedAsSSE(c, streamStarted) {
 		flusher, ok := c.Writer.(http.Flusher)
 		if ok {
 			errPayload, _ := json.Marshal(gin.H{
@@ -2096,9 +2097,6 @@ func openAICursorUserError(c *gin.Context, reqLog *zap.Logger, account *service.
 	if !ok {
 		return 0, "", streamStarted, false
 	}
-	if c.Writer.Written() {
-		streamStarted = true
-	}
 	if reqLog != nil {
 		reqLog.Warn("cursor_user_error", zap.String("error_code", code), zap.Int("status", status))
 	}
@@ -2142,10 +2140,8 @@ func (h *OpenAIGatewayHandler) ensureAnthropicStreamReadErrorResponse(c *gin.Con
 	if c.Request != nil && errors.Is(c.Request.Context().Err(), context.Canceled) {
 		return false
 	}
-	if c.Writer.Written() {
-		streamStarted = true
-	}
-	if streamStarted {
+	// 判据只认唯一事实源：CF524 心跳提交 SSE 200 后不同步 handler 层 streamStarted。
+	if gatewayResponseCommittedAsSSE(c, streamStarted) {
 		service.MarkOpsStreamFailure(c, "upstream_error", code, message, http.StatusBadGateway)
 	}
 	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "upstream_error", message, streamStarted)
@@ -2592,9 +2588,9 @@ func (h *OpenAIGatewayHandler) acquireResponsesUserSlot(
 	var userReleaseFunc func()
 	var err error
 	if scope.Kind == "group" {
-		userReleaseFunc, err = h.concurrencyHelper.AcquireUserGroupSlotWithWait(c, scope.GroupID, userID, scope.Max, reqStream, streamStarted)
+		userReleaseFunc, err = h.concurrencyHelper.AcquireUserGroupSlot(c, scope.GroupID, userID, scope.Max)
 	} else {
-		userReleaseFunc, err = h.concurrencyHelper.AcquireUserSlotWithWait(c, userID, scope.Max, reqStream, streamStarted)
+		userReleaseFunc, err = h.concurrencyHelper.AcquireUserSlot(c, userID, scope.Max)
 	}
 	if err != nil {
 		reqLog.Warn("openai.user_slot_acquire_failed", zap.Error(err))
@@ -4375,7 +4371,12 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		// 或响应已物理提交（c.Writer.Written()，本文件既有先例 1054/1950/1964/4321 等）
 		// 或 service.IsResponseCommitted(c)（service 包既有 helper）任一为真即视为流已开始，
 		// 引用既有 SSOT 常量，保持既有帧形状与失败关闭语义不变。
-		committed := streamStarted || c.Writer.Written() || service.IsResponseCommitted(c)
+		//
+		// 2026-11-11 根因修复：该三合一判定此前在此处就地拼装，与其余 10+ 处口径不一致
+		// （Anthropic 路径只看 streamStarted）。现改为调用唯一事实源
+		// gatewayResponseCommittedAsSSE——它在此基础上额外排除「已提交为 JSON 文档」
+		// 的形态（OpenAI 图片接口非流式空白保活），避免把 SSE 帧塞进 JSON 响应。
+		committed := gatewayResponseCommittedAsSSE(c, streamStarted)
 		message := infraerrors.UpstreamFirstByteTimeoutStreamFrame
 		if !committed {
 			message = infraerrors.UpstreamFirstByteTimeoutJSON
@@ -4389,7 +4390,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	// the body-derived branches (model-not-found-400 passthrough and the
 	// errorPassthrough MatchRule) and fall through to the fixed platform-standard
 	// mapUpstreamError text.
-	if !masked && statusCode == http.StatusBadRequest && service.IsOpenAICompatibleModelNotFound400(responseBody) && !streamStarted {
+	if !masked && statusCode == http.StatusBadRequest && service.IsOpenAICompatibleModelNotFound400(responseBody) && !gatewayResponseCommittedAsSSE(c, streamStarted) {
 		upstreamMsg := service.SanitizeUpstreamErrorMessage(service.ExtractUpstreamErrorMessage(responseBody))
 		service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
 		service.WriteOpenAIUpstreamClientError(c, statusCode, responseBody, upstreamMsg)
@@ -4521,7 +4522,12 @@ func (h *OpenAIGatewayHandler) handleStreamingAwareErrorWithCode(
 	if service.StopOpenAICompactSSEKeepaliveCommitted(c) {
 		streamStarted = true
 	}
-	if streamStarted {
+	// 判据只认唯一事实源：CF524 上游心跳提交 SSE 200 后不会同步 handler 层
+	// streamStarted（chat/completions 路径上它恒为 false），只看 streamStarted 会把
+	// JSON 错误体塞进已开的 SSE 流。gatewayResponseCommittedAsSSE 合并三个信号，
+	// 并排除「已提交为 JSON 文档」的形态（OpenAI 图片接口非流式空白保活）——
+	// 那种响应后续错误仍须写成 JSON 体，塞 SSE 帧会破坏 JSON。
+	if gatewayResponseCommittedAsSSE(c, streamStarted) {
 		if countTowardsSLA {
 			service.MarkOpsStreamFailure(c, errType, code, message, status)
 		} else {
@@ -4571,9 +4577,8 @@ func (h *OpenAIGatewayHandler) ensureOpenAIStreamReadErrorResponse(c *gin.Contex
 	if !ok || c == nil || c.Writer == nil || service.IsResponseCommitted(c) {
 		return false
 	}
-	if c.Writer.Written() {
-		streamStarted = true
-	}
+	// 不再就地同步 streamStarted：下游 handleStreamingAwareErrorWithCode 用唯一事实源
+	// gatewayResponseCommittedAsSSE 自行判定（含 c.Writer.Written() 与 SSE 形态排除）。
 	h.handleStreamingAwareErrorWithCode(
 		c, http.StatusBadGateway, "upstream_error", code, message, streamStarted, true,
 	)
@@ -4596,11 +4601,9 @@ func (h *OpenAIGatewayHandler) ensureForwardErrorResponse(c *gin.Context, stream
 	}
 	imageKeepalivePresent := service.OpenAIImagesJSONKeepalivePresent(c)
 	service.StopOpenAIImagesJSONKeepaliveCommitted(c)
-	imageKeepalivePaddingOnly := false
 	imageKeepaliveResponseWritten := false
 	if imageKeepalivePresent {
 		adjustedSize := service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c)
-		imageKeepalivePaddingOnly = adjustedSize < 0
 		imageKeepaliveResponseWritten = adjustedSize >= 0
 	}
 	compactKeepaliveHasMeaningfulOutput := compactKeepaliveCommitted && service.OpenAICompactKeepaliveAdjustedWrittenSize(c) > 0
@@ -4610,9 +4613,11 @@ func (h *OpenAIGatewayHandler) ensureForwardErrorResponse(c *gin.Context, stream
 	if (service.IsResponseCommitted(c) && (!compactKeepaliveCommitted || compactKeepaliveHasMeaningfulOutput)) || (!compactKeepaliveCommitted && imageKeepaliveResponseWritten) {
 		return false
 	}
-	if c.Writer.Written() && !imageKeepalivePaddingOnly {
-		streamStarted = true
-	}
+	// 不再就地同步 streamStarted：下游 handleStreamingAwareErrorWithCode 用唯一事实源
+	// gatewayResponseCommittedAsSSE 自行判定（合并 c.Writer.Written() /
+	// service.IsResponseCommitted(c)，并排除「已提交为 JSON 文档」的形态——
+	// 图片接口非流式空白保活提交的是 application/json，塞 SSE 帧会破坏 JSON；
+	// 其 padding-only 情形本就该继续写 JSON 错误体）。
 	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed, streamStarted)
 	return true
 }

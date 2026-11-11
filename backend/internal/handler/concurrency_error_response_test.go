@@ -42,13 +42,27 @@ func TestConcurrencyErrorResponse(t *testing.T) {
 			wantMessage: "您的用户并发请求已达上限（5），请降低并发或稍后重试",
 		},
 		{
-			name:        "full local wait queue has gateway code",
-			err:         &WaitQueueFullError{SlotType: "account"},
-			slotType:    "account",
+			// 2026-11-11 生产事故固化：订阅分组并发超限必须返回真 429。
+			// 事故形态是「准入等待期间发了 SSE 心跳 → 200 已提交 → 429 只能塞进流」，
+			// 客户端拿 200 不会按 429 退避，运维按状态码统计也看不到（48h 内 892 次）。
+			// 现已改为准入阶段静默，此处锁定 status/type/message 三件套防回退。
+			name:        "subscription group concurrency keeps 429 rate limit",
+			err:         &ConcurrencyError{SlotType: "group", Limit: 2},
+			slotType:    "group",
 			wantStatus:  http.StatusTooManyRequests,
 			wantType:    "rate_limit_error",
-			wantCode:    gatewayQueueFullCode,
-			wantMessage: infraerrors.GatewayQueueFull,
+			wantCode:    gatewayConcurrencyLimitCode,
+			wantMessage: "您的订阅并发请求已达上限（2），请降低并发或稍后重试",
+		},
+		{
+			// 订阅分组排队超时（等到 30s 仍未拿到槽位）同样是 429，语义与并发瞬时超限一致。
+			name:        "subscription group wait timeout is 429",
+			err:         &ConcurrencyError{SlotType: "group", IsTimeout: true, Limit: 2},
+			slotType:    "group",
+			wantStatus:  http.StatusTooManyRequests,
+			wantType:    "rate_limit_error",
+			wantCode:    gatewayConcurrencyLimitCode,
+			wantMessage: "您的订阅并发请求已达上限（2），请降低并发或稍后重试",
 		},
 		{
 			name:        "client cancellation is not classified as concurrency limit",
@@ -103,11 +117,11 @@ func TestGoogleConcurrencyError(t *testing.T) {
 			wantMessage: "context canceled",
 		},
 		{
-			name:        "full wait queue is 429",
-			err:         &WaitQueueFullError{SlotType: "user"},
+			name:        "slot limit reached is 429",
+			err:         &ConcurrencyError{SlotType: "user", Limit: 5},
 			wantStatus:  http.StatusTooManyRequests,
 			wantGStatus: "RESOURCE_EXHAUSTED",
-			wantMessage: infraerrors.GatewayQueueFull,
+			wantMessage: "您的用户并发请求已达上限（5），请降低并发或稍后重试",
 		},
 		{
 			name:        "slot wait timeout is 429",

@@ -158,7 +158,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 
-	userReleaseFunc, err := h.concurrencyHelper.AcquireScopedUserSlotWithWait(c, scope, subject.UserID, reqStream, &streamStarted)
+	userReleaseFunc, err := h.concurrencyHelper.AcquireScopedUserSlot(c, scope, subject.UserID)
 	if err != nil {
 		reqLog.Warn("gateway.responses.user_slot_acquire_failed", zap.Error(err))
 		h.handleConcurrencyError(c, err, scope.Kind, streamStarted)
@@ -489,9 +489,8 @@ func (h *GatewayHandler) writeResponsesForwardErrorResponse(c *gin.Context, reqL
 	if service.IsResponseCommitted(c) {
 		return false
 	}
-	if c.Writer.Written() {
-		streamStarted = true
-	}
+	// 不再就地同步 streamStarted：下游 handleStreamingAwareErrorWithCode 用唯一事实源
+	// gatewayResponseCommitted 自行判定 c.Writer.Written()。
 	errType := "upstream_error"
 	if status >= 400 && status < 500 {
 		errType = "invalid_request_error"
@@ -522,7 +521,9 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	if lastErr != nil && service.IsCursorQuotaExhaustedReason(lastErr.Reason) {
 		message := cursorPoolExhaustedMessage(c)
 		status := cursorPoolExhaustedStatus(lastErr)
-		if streamStarted {
+		// 判据只认唯一事实源 gatewayResponseCommitted：CF524 心跳可能已提交 SSE 200，
+		// 此时即使 streamStarted 为 false 也只能写流内终止事件，不能再走 JSON 错误体。
+		if gatewayResponseCommitted(c, streamStarted) {
 			service.MarkOpsStreamError(c, "server_error", message, status)
 			writeResponsesFailedSSE(c, "server_error", infraerrors.CursorResPoolExhaustedCode, message)
 			return
@@ -555,12 +556,18 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	} else if lastErr != nil && statusCode == http.StatusTooManyRequests {
 		status, code, message = http.StatusTooManyRequests, "rate_limit_error", infraerrors.AllAccountsRateLimited
 	}
-	if streamStarted {
+	// 判据只认唯一事实源 gatewayResponseCommitted：CF524 心跳可能已提交 SSE 200，
+	// 此时即使 streamStarted 为 false 也只能写流内终止事件，不能再走 JSON 错误体。
+	if gatewayResponseCommitted(c, streamStarted) {
 		// A slot-wait heartbeat commits HTTP 200 before any upstream response.
 		// In that case a terminal frame is still required; once any semantic or
 		// official terminal bytes exist, preserve them without appending a second
 		// generic response.failed.
 		service.MarkOpsStreamError(c, code, message, status)
+		// gatewayStreamHasOnlyHeartbeats 的口径已统一：handler 层准入 ping +
+		// service 层 CF524 心跳字节两处记账相加（此前只算前者，CF524 心跳已写出
+		// keep-alive 帧时会漏判，导致 Codex CLI 报 "stream closed before
+		// response.completed"）。
 		if c != nil && c.Writer != nil && (c.Writer.Size() <= 0 || gatewayStreamHasOnlyHeartbeats(c)) {
 			writeResponsesFailedSSE(c, code, "", message)
 		}

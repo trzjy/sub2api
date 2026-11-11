@@ -503,7 +503,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		return
 	}
 
-	userReleaseFunc, err := geminiConcurrency.AcquireScopedUserSlotWithWait(c, scope, authSubject.UserID, stream, &streamStarted)
+	userReleaseFunc, err := geminiConcurrency.AcquireScopedUserSlot(c, scope, authSubject.UserID)
 	if err != nil {
 		reqLog.Warn("gemini.user_slot_acquire_failed", zap.Error(err))
 		// 默认中文并发文案：account 维度 → 账号槽并发上限；user/group 渲染 {scope}/{limit} 默认模板。

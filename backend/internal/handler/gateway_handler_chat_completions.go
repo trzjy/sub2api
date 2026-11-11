@@ -153,7 +153,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	userReleaseFunc, err := h.concurrencyHelper.AcquireScopedUserSlotWithWait(c, scope, subject.UserID, reqStream, &streamStarted)
+	userReleaseFunc, err := h.concurrencyHelper.AcquireScopedUserSlot(c, scope, subject.UserID)
 	if err != nil {
 		reqLog.Warn("gateway.cc.user_slot_acquire_failed", zap.Error(err))
 		h.handleConcurrencyError(c, err, scope.Kind, streamStarted)
@@ -568,7 +568,9 @@ func isAlreadyRelayedUpstreamErrorEvent(body []byte) bool {
 
 // handleCCFailoverExhausted writes a failover-exhausted error in CC format.
 func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *service.UpstreamFailoverError, streamStarted bool) {
-	if streamStarted {
+	// 判据只认唯一事实源 gatewayResponseCommitted：CF524 心跳可能已提交 SSE 200，
+	// 此时即使 streamStarted 为 false 也只能写流内错误帧，不能再走 JSON 错误体。
+	if gatewayResponseCommitted(c, streamStarted) {
 		// 2026-11-06 修：上游过载等错误事件在流内已经透传给客户端了，此时再补一条网关
 		// 错误帧会让客户端收到两个终止事件；而且网关只能靠猜原因——这里原先一律写
 		// "首字节超时"，把"上游过载"硬说成"超时"，既误导排查，也让计费/重试判定失真。
@@ -666,9 +668,8 @@ func (h *GatewayHandler) writeCCCursorUserError(c *gin.Context, reqLog *zap.Logg
 	if status >= 400 && status < 500 {
 		errType = "invalid_request_error"
 	}
-	if c.Writer.Written() {
-		streamStarted = true
-	}
+	// 不再就地同步 streamStarted：下游 handleStreamingAwareErrorWithCode 用唯一事实源
+	// gatewayResponseCommitted 自行判定 c.Writer.Written()。
 	h.handleStreamingAwareError(c, status, errType, message, streamStarted)
 	return true
 }

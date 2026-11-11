@@ -89,7 +89,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 
 	streamStarted := false
-	userRelease, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, subject.UserID, subject.Concurrency, false, &streamStarted)
+	userRelease, err := h.concurrencyHelper.AcquireUserSlot(c, subject.UserID, subject.Concurrency)
 	if err != nil {
 		reqLog.Warn("systemone.user_slot_acquire_failed", zap.Error(err))
 		h.handleConcurrencyError(c, err, "user", false)

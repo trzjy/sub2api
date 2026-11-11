@@ -32,18 +32,6 @@ func recordGatewayStreamHeartbeat(c *gin.Context, written int) {
 	c.Set(gatewayStreamHeartbeatBytesKey, bytes+written)
 }
 
-func gatewayStreamHasOnlyHeartbeats(c *gin.Context) bool {
-	if c == nil || c.Writer == nil {
-		return false
-	}
-	value, ok := c.Get(gatewayStreamHeartbeatBytesKey)
-	if !ok {
-		return false
-	}
-	heartbeatBytes, _ := value.(int)
-	return heartbeatBytes > 0 && c.Writer.Size() == heartbeatBytes
-}
-
 // claudeCodeValidator is a singleton validator for Claude Code client detection
 var claudeCodeValidator = service.NewClaudeCodeValidator()
 
@@ -123,8 +111,6 @@ func claudeCodeBodyMapFromParsedRequest(parsedReq *service.ParsedRequest) map[st
 // 2. 添加 ±20% 的随机抖动，分散重试时间点
 // 3. 减少 Redis 压力，避免惊群效应
 const (
-	// maxConcurrencyWait 等待并发槽位的最大时间
-	maxConcurrencyWait = 30 * time.Second
 	// defaultPingInterval 流式响应等待时发送 ping 的默认间隔
 	defaultPingInterval = 10 * time.Second
 	// initialBackoff 初始退避时间
@@ -199,23 +185,53 @@ func resolveConcurrencyScope(c *gin.Context, subject middleware2.AuthSubject, su
 	}
 }
 
-// AcquireScopedUserSlotWithWait 按并发作用域分流占槽：订阅走 group 维度，计量走 user 维度。
+// AcquireScopedUserSlot 按并发作用域分流占槽：订阅走 group 维度，计量走 user 维度。
 // 调用方负责用 scope.Kind 作为并发超限出口的 slotType。
-func (h *ConcurrencyHelper) AcquireScopedUserSlotWithWait(c *gin.Context, scope concurrencyScope, userID int64, isStream bool, streamStarted *bool) (func(), error) {
+//
+// 2026-11-11 用户裁定（根因修复）：**客户端维度并发已满时立即拒绝，不排队等待。**
+// 原实现排队最多 30s（maxConcurrencyWait），且排队期间不断发心跳把 200 响应头提交出去，
+// 排队超时后 429 只能塞进「已经开始的流」，客户拿到 200+流内错误、不会按限流退避。
+// 更根本的问题：并发上限的定义就是"同时最多 N 个"，第 N+1 个进来时前面请求的完成时间
+// 不可控，排队等的是一个无法承诺的时间——并发上限的语义本就是"超了就是超了"。
+// 改为立即拒绝后：状态码真实（真 429），客户端能识别这是限流并按自己的策略退避重试。
+// 注意：不写 Retry-After——并发超限的恢复时间取决于别的请求何时结束，我们不知道，
+// 也不该编一个秒数骗客户端（上游 429 的 Retry-After 是抄上游的，那个有事实依据）。
+//
+// 注意与账号（account）维度的区别：那边等的是**站点自己的资源**释放，通常几秒内能等到，
+// 且超时短（WaitPlan.Timeout），属于供给不足（503），保留等待。
+func (h *ConcurrencyHelper) AcquireScopedUserSlot(c *gin.Context, scope concurrencyScope, userID int64) (func(), error) {
 	if scope.Kind == "group" {
-		return h.AcquireUserGroupSlotWithWait(c, scope.GroupID, userID, scope.Max, isStream, streamStarted)
+		return h.AcquireUserGroupSlot(c, scope.GroupID, userID, scope.Max)
 	}
-	return h.AcquireUserSlotWithWait(c, userID, scope.Max, isStream, streamStarted)
+	return h.AcquireUserSlot(c, userID, scope.Max)
 }
 
-type WaitQueueFullError struct {
-	SlotType string
+// AcquireUserSlot 立即获取用户全局并发槽位。
+// 已满即返回 ConcurrencyError（SlotType=user），不排队、不等待。
+func (h *ConcurrencyHelper) AcquireUserSlot(c *gin.Context, userID int64, maxConcurrency int) (func(), error) {
+	ctx := c.Request.Context()
+	releaseFunc, acquired, err := h.TryAcquireUserSlot(ctx, userID, maxConcurrency)
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, &ConcurrencyError{SlotType: "user", Limit: maxConcurrency}
+	}
+	return h.withAPIKeySlotFromGin(c, releaseFunc), nil
 }
 
-func (e *WaitQueueFullError) Error() string {
-	// 内部错误标识文本，与下游可见文案共用同一常量（errors.As 匹配不依赖文本），
-	// 保证全仓不再出现裸英文串。
-	return infraerrors.GatewayQueueFull
+// AcquireUserGroupSlot 立即获取"用户+分组"并发槽位（订阅分组维度，独立于用户全局并发）。
+// 已满即返回 ConcurrencyError（SlotType=group），不排队、不等待。
+func (h *ConcurrencyHelper) AcquireUserGroupSlot(c *gin.Context, groupID, userID int64, maxConcurrency int) (func(), error) {
+	ctx := c.Request.Context()
+	releaseFunc, acquired, err := h.TryAcquireUserGroupSlot(ctx, groupID, userID, maxConcurrency)
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, &ConcurrencyError{SlotType: "group", Limit: maxConcurrency}
+	}
+	return h.withAPIKeySlotFromGin(c, releaseFunc), nil
 }
 
 // ConcurrencyHelper provides common concurrency slot management for gateway handlers
@@ -256,16 +272,6 @@ func wrapReleaseOnDone(ctx context.Context, releaseFunc func()) func() {
 	}
 }
 
-// IncrementWaitCount increments the wait count for a user
-func (h *ConcurrencyHelper) IncrementWaitCount(ctx context.Context, userID int64, maxWait int) (bool, error) {
-	return h.concurrencyService.IncrementWaitCount(ctx, userID, maxWait)
-}
-
-// DecrementWaitCount decrements the wait count for a user
-func (h *ConcurrencyHelper) DecrementWaitCount(ctx context.Context, userID int64) {
-	h.concurrencyService.DecrementWaitCount(ctx, userID)
-}
-
 // IncrementAccountWaitCount increments the wait count for an account
 func (h *ConcurrencyHelper) IncrementAccountWaitCount(ctx context.Context, accountID int64, maxWait int) (bool, error) {
 	return h.concurrencyService.IncrementAccountWaitCount(ctx, accountID, maxWait)
@@ -274,16 +280,6 @@ func (h *ConcurrencyHelper) IncrementAccountWaitCount(ctx context.Context, accou
 // DecrementAccountWaitCount decrements the wait count for an account
 func (h *ConcurrencyHelper) DecrementAccountWaitCount(ctx context.Context, accountID int64) {
 	h.concurrencyService.DecrementAccountWaitCount(ctx, accountID)
-}
-
-// IncrementUserGroupWaitCount increments the wait count for a (groupID, userID) pair
-func (h *ConcurrencyHelper) IncrementUserGroupWaitCount(ctx context.Context, groupID, userID int64, maxWait int) (bool, error) {
-	return h.concurrencyService.IncrementUserGroupWaitCount(ctx, groupID, userID, maxWait)
-}
-
-// DecrementUserGroupWaitCount decrements the wait count for a (groupID, userID) pair
-func (h *ConcurrencyHelper) DecrementUserGroupWaitCount(ctx context.Context, groupID, userID int64) {
-	h.concurrencyService.DecrementUserGroupWaitCount(ctx, groupID, userID)
 }
 
 // TryAcquireUserSlot 尝试立即获取用户并发槽位。
@@ -350,86 +346,8 @@ func (h *ConcurrencyHelper) TryAcquireAccountSlot(ctx context.Context, accountID
 	return result.ReleaseFunc, true, nil
 }
 
-// AcquireUserSlotWithWait acquires a user concurrency slot, waiting if necessary.
-// For streaming requests, sends ping events during the wait.
-// streamStarted is updated if streaming response has begun.
-func (h *ConcurrencyHelper) AcquireUserSlotWithWait(c *gin.Context, userID int64, maxConcurrency int, isStream bool, streamStarted *bool) (func(), error) {
-	return h.acquireUserSlotWithWaitTimeout(c, userID, maxConcurrency, maxConcurrencyWait, isStream, streamStarted)
-}
-
-func (h *ConcurrencyHelper) acquireUserSlotWithWaitTimeout(c *gin.Context, userID int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
-	ctx := c.Request.Context()
-
-	// Try to acquire immediately
-	releaseFunc, acquired, err := h.TryAcquireUserSlot(ctx, userID, maxConcurrency)
-	if err != nil {
-		return nil, err
-	}
-
-	if acquired {
-		return h.withAPIKeySlotFromGin(c, releaseFunc), nil
-	}
-
-	queueLimit := service.CalculateMaxWait(maxConcurrency) - maxConcurrency
-	if queueLimit < 1 {
-		queueLimit = 1
-	}
-	canWait, err := h.IncrementWaitCount(ctx, userID, queueLimit)
-	if err != nil {
-		return nil, err
-	}
-	if !canWait {
-		return nil, &WaitQueueFullError{SlotType: "user"}
-	}
-	defer h.DecrementWaitCount(ctx, userID)
-
-	// Need to wait - handle streaming ping if needed
-	releaseFunc, err = h.waitForSlotWithPingTimeout(c, "user", userID, maxConcurrency, timeout, isStream, streamStarted, false)
-	if err != nil {
-		return nil, err
-	}
-	return h.withAPIKeySlotFromGin(c, releaseFunc), nil
-}
-
-// AcquireUserGroupSlotWithWait 获取"用户+分组"并发槽位，必要时等待（订阅分组维度）。
-// slotType 固定为 "group"，与用户全局并发互不干扰。
-func (h *ConcurrencyHelper) AcquireUserGroupSlotWithWait(c *gin.Context, groupID, userID int64, maxConcurrency int, isStream bool, streamStarted *bool) (func(), error) {
-	return h.acquireUserGroupSlotWithWaitTimeout(c, groupID, userID, maxConcurrency, maxConcurrencyWait, isStream, streamStarted)
-}
-
-func (h *ConcurrencyHelper) acquireUserGroupSlotWithWaitTimeout(c *gin.Context, groupID, userID int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
-	ctx := c.Request.Context()
-
-	// Try to acquire immediately
-	releaseFunc, acquired, err := h.TryAcquireUserGroupSlot(ctx, groupID, userID, maxConcurrency)
-	if err != nil {
-		return nil, err
-	}
-
-	if acquired {
-		return h.withAPIKeySlotFromGin(c, releaseFunc), nil
-	}
-
-	queueLimit := service.CalculateMaxWait(maxConcurrency) - maxConcurrency
-	if queueLimit < 1 {
-		queueLimit = 1
-	}
-	canWait, err := h.IncrementUserGroupWaitCount(ctx, groupID, userID, queueLimit)
-	if err != nil {
-		return nil, err
-	}
-	if !canWait {
-		return nil, &WaitQueueFullError{SlotType: "group"}
-	}
-	defer h.DecrementUserGroupWaitCount(ctx, groupID, userID)
-
-	// Need to wait - handle streaming ping if needed
-	releaseFunc, err = h.waitForUserGroupSlotWithPingTimeout(c, "group", groupID, userID, maxConcurrency, timeout, isStream, streamStarted)
-	if err != nil {
-		return nil, err
-	}
-	return h.withAPIKeySlotFromGin(c, releaseFunc), nil
-}
+// AcquireUserSlotWithWait 已于 2026-11-11 移除：客户端维度并发满改为立即拒绝，不再排队。
+// 现行入口：AcquireUserSlot / AcquireUserGroupSlot / AcquireScopedUserSlot。
 
 func (h *ConcurrencyHelper) withAPIKeySlotFromGin(c *gin.Context, releaseFunc func()) func() {
 	if c == nil {
@@ -457,41 +375,14 @@ func (h *ConcurrencyHelper) withAPIKeySlot(ctx context.Context, apiKeyID int64, 
 	}
 }
 
-// AcquireAccountSlotWithWait acquires an account concurrency slot, waiting if necessary.
-// For streaming requests, sends ping events during the wait.
-// streamStarted is updated if streaming response has begun.
-func (h *ConcurrencyHelper) AcquireAccountSlotWithWait(c *gin.Context, accountID int64, maxConcurrency int, isStream bool, streamStarted *bool) (func(), error) {
-	ctx := c.Request.Context()
-
-	// Try to acquire immediately
-	releaseFunc, acquired, err := h.TryAcquireAccountSlot(ctx, accountID, maxConcurrency)
-	if err != nil {
-		return nil, err
-	}
-
-	if acquired {
-		return releaseFunc, nil
-	}
-
-	// Need to wait - handle streaming ping if needed
-	return h.waitForSlotWithPing(c, "account", accountID, maxConcurrency, isStream, streamStarted)
-}
-
-// waitForSlotWithPing waits for a concurrency slot, sending ping events for streaming requests.
-// streamStarted pointer is updated when streaming begins (for proper error handling by caller).
-func (h *ConcurrencyHelper) waitForSlotWithPing(c *gin.Context, slotType string, id int64, maxConcurrency int, isStream bool, streamStarted *bool) (func(), error) {
-	return h.waitForSlotWithPingTimeout(c, slotType, id, maxConcurrency, maxConcurrencyWait, isStream, streamStarted, false)
-}
-
 // waitForSlotWithPingTimeout waits for a concurrency slot with a custom timeout.
 func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType string, id int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool, tryImmediate bool) (func(), error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	defer cancel()
 
+	// 2026-11-11：客户端维度（user / 订阅分组）已改为并发满立即拒绝，不再走等待路径。
+	// 本函数现仅服务**账号维度**（等站点自己的账号槽位释放，属于供给不足 503）。
 	acquireSlot := func() (*service.AcquireResult, error) {
-		if slotType == "user" {
-			return h.concurrencyService.AcquireUserSlot(ctx, id, maxConcurrency)
-		}
 		return h.concurrencyService.AcquireAccountSlot(ctx, id, maxConcurrency)
 	}
 
@@ -511,40 +402,30 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 	return nil, nil
 }
 
-// waitForUserGroupSlotWithPingTimeout 等待"用户+分组"并发槽位（独立维度，逻辑同 waitForSlotWithPingTimeout）。
-func (h *ConcurrencyHelper) waitForUserGroupSlotWithPingTimeout(c *gin.Context, slotType string, groupID, userID int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
-	defer cancel()
 
-	acquireSlot := func() (*service.AcquireResult, error) {
-		return h.concurrencyService.AcquireUserGroupSlot(ctx, groupID, userID, maxConcurrency)
-	}
-
-	return h.waitForSlotWithRetry(ctx, c, slotType, acquireSlot, maxConcurrency, isStream, streamStarted)
-}
-
-// waitForSlotWithRetry 是 user/account/group 三种维度共用的退避+ping 等待核心实现。
+// waitForSlotWithRetry 是 user/account/group 三种维度共用的退避等待核心实现。
 // acquireSlot 闭包负责按具体维度占槽；slotType 仅用于错误上报与可配文案的 {scope} 占位符。
+//
+// 2026-11-11 根因修复（生产 429 统计失真）：**准入等待阶段不再发送 SSE 心跳**。
+//
+// 准入判断（能否占到一个并发槽位）发生在任何上游工作之前，此时响应尚未开始。
+// 原实现按 isStream 往 c.Writer 写 ping，Gin 会立刻提交 200 响应头并等价地把
+// streamStarted 置真；于是排队超时后被拒绝时只能走「流内错误帧」分支，客户端拿到的是
+// HTTP 200 + SSE event:error，而不是真正的 429。两个后果都实测到了：
+//  1. 客户端（Claude Code / Cline 这类）不按 429 语义退避重试，直接展示报错、
+//     甚至把「流正常结束但零输出」判成用户取消；
+//  2. 运维按 HTTP 状态码统计永远看不到这些拒绝——48 小时内 892 次并发 429 在
+//     access log 里全部记为 200、latency≈30s，真实状态只存在于 ops_error_logs。
+//
+// 准入阶段保持静默后，拒绝路径能如实返回 429（user/group）或 503（account），
+// 客户端可按状态码退避，统计口径也恢复一致。
+// 注意：本函数只负责「准入」，上游转发的保活由 gateway_upstream_heartbeat 那套机制负责，
+// 两者不是一回事，不能互相替代。
+//
+// isStream/streamStarted 参数保留用于稳定各维度调用方签名，准入阶段不再使用。
 func (h *ConcurrencyHelper) waitForSlotWithRetry(ctx context.Context, c *gin.Context, slotType string, acquireSlot func() (*service.AcquireResult, error), maxConcurrency int, isStream bool, streamStarted *bool) (func(), error) {
-	// Determine if ping is needed (streaming + ping format defined)
-	needPing := isStream && h.pingFormat != ""
-
-	var flusher http.Flusher
-	if needPing {
-		var ok bool
-		flusher, ok = c.Writer.(http.Flusher)
-		if !ok {
-			return nil, fmt.Errorf("streaming not supported")
-		}
-	}
-
-	// Only create ping ticker if ping is needed
-	var pingCh <-chan time.Time
-	if needPing {
-		pingTicker := time.NewTicker(h.pingInterval)
-		defer pingTicker.Stop()
-		pingCh = pingTicker.C
-	}
+	// 准入阶段不写响应体：见上方 2026-11-11 根因修复说明。
+	_, _ = isStream, streamStarted
 
 	backoff := initialBackoff
 	timer := time.NewTimer(backoff)
@@ -562,22 +443,6 @@ func (h *ConcurrencyHelper) waitForSlotWithRetry(ctx context.Context, c *gin.Con
 				Limit:     maxConcurrency,
 			}
 
-		case <-pingCh:
-			// Send ping to keep connection alive
-			if !*streamStarted {
-				c.Header("Content-Type", "text/event-stream")
-				c.Header("Cache-Control", "no-cache")
-				c.Header("Connection", "keep-alive")
-				c.Header("X-Accel-Buffering", "no")
-				*streamStarted = true
-			}
-			written, err := fmt.Fprint(c.Writer, string(h.pingFormat))
-			if err != nil {
-				return nil, err
-			}
-			recordGatewayStreamHeartbeat(c, written)
-			flusher.Flush()
-
 		case <-timer.C:
 			// Try to acquire slot
 			result, err := acquireSlot()
@@ -594,7 +459,12 @@ func (h *ConcurrencyHelper) waitForSlotWithRetry(ctx context.Context, c *gin.Con
 	}
 }
 
-// AcquireAccountSlotWithWaitTimeout acquires an account slot with a custom timeout (keeps SSE ping).
+// AcquireAccountSlotWithWaitTimeout acquires an account slot with a custom timeout.
+//
+// 2026-11-11 起：本入口**不再在等待期间发 SSE ping**（原注释为 "keeps SSE ping"）。
+// 准入阶段只要往 c.Writer 写字节，响应头就会被提交成 200，后续 503 只能退化为流内
+// 错误帧，客户端拿不到真状态码、运维按状态码也统计不到。保活职责在 upstream heartbeat。
+// pingFormat/pingInterval 字段仍由构造函数接收，供 UserMsgQueueHelper 等其它等待路径使用。
 func (h *ConcurrencyHelper) AcquireAccountSlotWithWaitTimeout(c *gin.Context, accountID int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
 	return h.waitForSlotWithPingTimeout(c, "account", accountID, maxConcurrency, timeout, isStream, streamStarted, true)
 }

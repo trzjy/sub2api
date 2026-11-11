@@ -73,13 +73,7 @@ func (m *concurrencyCacheMock) GetUserConcurrency(ctx context.Context, userID in
 	return 0, nil
 }
 
-func (m *concurrencyCacheMock) IncrementWaitCount(ctx context.Context, userID int64, maxWait int) (bool, error) {
-	return true, nil
-}
 
-func (m *concurrencyCacheMock) DecrementWaitCount(ctx context.Context, userID int64) error {
-	return nil
-}
 
 func (m *concurrencyCacheMock) AcquireUserGroupSlot(ctx context.Context, groupID, userID int64, maxConcurrency int, requestID string) (bool, error) {
 	if m.acquireUserGroupSlotFn != nil {
@@ -96,13 +90,7 @@ func (m *concurrencyCacheMock) GetUserGroupConcurrency(ctx context.Context, grou
 	return 0, nil
 }
 
-func (m *concurrencyCacheMock) IncrementUserGroupWaitCount(ctx context.Context, groupID, userID int64, maxWait int) (bool, error) {
-	return true, nil
-}
 
-func (m *concurrencyCacheMock) DecrementUserGroupWaitCount(ctx context.Context, groupID, userID int64) error {
-	return nil
-}
 
 func (m *concurrencyCacheMock) GetAccountsLoadBatch(ctx context.Context, accounts []service.AccountWithConcurrency) (map[int64]*service.AccountLoadInfo, error) {
 	return map[int64]*service.AccountLoadInfo{}, nil
