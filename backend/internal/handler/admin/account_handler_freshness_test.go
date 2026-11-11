@@ -249,6 +249,21 @@ func (r *freshNilObsRepo) DeleteModelRateLimitsMetaKeys(context.Context, int64, 
 	return 0, nil
 }
 
+// PatchAccountCredentials 是仓储接口新增方法的 no-op 桩。
+func (r *freshNilObsRepo) PatchAccountCredentials(context.Context, int64, map[string]any, string) error {
+	return nil
+}
+
+// SetTempUnschedulableIfOwnedOrUnpaused 是仓储接口新增方法的 no-op 桩。
+func (r *freshNilObsRepo) SetTempUnschedulableIfOwnedOrUnpaused(context.Context, int64, time.Time, string, string) (bool, error) {
+	return false, nil
+}
+
+// ClearTempUnschedulableIfOwned 是仓储接口新增方法的 no-op 桩。
+func (r *freshNilObsRepo) ClearTempUnschedulableIfOwned(context.Context, int64, time.Time, string) (bool, error) {
+	return false, nil
+}
+
 // TestAccountHandler_GetAccountFreshness_InvalidObservedAtFailsClosed 定向测试（E16 验收）：
 // observed_at 存在但格式非法（权威数据损坏）时，管理端必须失败关闭返回 500，
 // **不得**降级序列化为 waiting_probe/observed 正常态——损坏不得显示为健康。

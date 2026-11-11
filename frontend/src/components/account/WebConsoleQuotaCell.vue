@@ -17,7 +17,7 @@
         {{ snapshot.plan_name }}
       </span>
       <span v-if="expireText" data-test="wcq-expire" class="text-gray-500 dark:text-gray-400">
-        到期 {{ expireText }}
+        {{ t('admin.accounts.subscriptionExpires') }} {{ expireText }}
       </span>
       <span
         v-if="snapshot?.account_label"
@@ -38,20 +38,20 @@
           :resets-at="tier.reset_at"
         />
         <div class="pl-8 text-gray-500 dark:text-gray-400">
-          {{ tier.used }} / {{ tier.limit }}
+          {{ t('admin.accounts.webConsoleQuota.usedOverLimit', { used: tier.used, limit: tier.limit }) }}
         </div>
       </div>
     </div>
 
     <div v-if="currentLot" class="space-y-1" data-test="wcq-lot">
       <UsageProgressBar
-        label="资源包"
+        :label="t('admin.accounts.webConsoleQuota.currentPack')"
         color="emerald"
         :utilization="lotUtilization(currentLot)"
         :resets-at="currentLot.expire_time"
       />
       <div class="pl-8 text-gray-500 dark:text-gray-400">
-        {{ currentLot.remaining_token }} / {{ currentLot.total_token }}
+        {{ t('admin.accounts.webConsoleQuota.usedOverLimit', { used: currentLot.remaining_token, limit: currentLot.total_token }) }}
       </div>
     </div>
 
@@ -61,7 +61,7 @@
       data-test="wcq-queued-lot"
       class="text-gray-500 dark:text-gray-400"
     >
-      排队包：+{{ lotRemaining(lot) }}
+      {{ t('admin.accounts.webConsoleQuota.queuedPack') }}: +{{ lotRemaining(lot) }}
     </div>
 
     <!-- 3. 余额/赠金行 -->
@@ -70,9 +70,9 @@
       data-test="wcq-grant-balance"
       class="flex flex-wrap items-center gap-1 text-gray-600 dark:text-gray-300"
     >
-      <span>赠金余额 {{ grantBalanceText }}</span>
+      <span>{{ t('admin.accounts.webConsoleQuota.grantBalance') }} {{ grantBalanceText }}</span>
       <span v-if="nearestGrantExpiry" class="text-gray-400 dark:text-gray-500">
-        最近过期 {{ formatDate(nearestGrantExpiry) }}
+        {{ t('admin.accounts.webConsoleQuota.grantNearestExpiry', { date: formatDate(nearestGrantExpiry) }) }}
       </span>
     </div>
 
@@ -81,7 +81,7 @@
       data-test="wcq-paygo-balance"
       class="text-gray-600 dark:text-gray-300"
     >
-      按量余额 ¥{{ paygoBalanceText }}
+      {{ t('admin.accounts.webConsoleQuota.paygoBalance') }} ¥{{ paygoBalanceText }}
     </div>
 
     <!-- 4. 状态与操作行 -->
@@ -107,7 +107,7 @@
             d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
           />
         </svg>
-        刷新
+        {{ t('admin.accounts.webConsoleQuota.refresh') }}
       </button>
 
       <template v-if="needsInteractiveAuth">
@@ -115,7 +115,7 @@
           data-test="wcq-auth-needed"
           class="inline-flex items-center rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
         >
-          需要验证登录
+          {{ t('admin.accounts.webConsoleQuota.needLogin') }}
         </span>
         <button
           type="button"
@@ -124,7 +124,7 @@
           :disabled="authStarting || authPolling"
           @click="handleStartAuth"
         >
-          验证登录
+          {{ t('admin.accounts.webConsoleQuota.authStart') }}
         </button>
       </template>
 
@@ -132,18 +132,20 @@
         v-if="snapshot?.exhausted === true"
         data-test="wcq-exhausted"
         class="inline-flex items-center rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300"
-        :title="snapshot.until_indefinite ? '等待上游恢复或补额' : undefined"
+        :title="
+          snapshot.until_indefinite ? t('admin.accounts.webConsoleQuota.exhaustedIndefinite') : undefined
+        "
       >
-        额度已用尽
+        {{ t('admin.accounts.webConsoleQuota.exhausted') }}
       </span>
 
       <span
         v-if="snapshot?.plan_match_status === 'unmatched'"
         data-test="wcq-unmatched"
         class="inline-flex items-center rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300"
-        title="控制台存在多个套餐，当前 API Key 未命中任何套餐"
+        :title="t('admin.accounts.webConsoleQuota.unmatchedHint')"
       >
-        未匹配到对应套餐
+        {{ t('admin.accounts.webConsoleQuota.unmatched') }}
       </span>
 
       <span
@@ -151,7 +153,7 @@
         data-test="wcq-no-plan"
         class="inline-flex items-center rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
       >
-        订阅已到期/无有效套餐
+        {{ t('admin.accounts.webConsoleQuota.noActivePlan') }}
       </span>
     </div>
 
@@ -178,6 +180,7 @@ export default {}
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import {
   pollWebConsoleAuth,
   probeWebConsoleQuota,
@@ -192,6 +195,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ (e: 'updated'): void }>()
+
+const { t } = useI18n()
 
 const SNAPSHOT_STALE_MS = 15 * 60 * 1000
 const AUTO_PROBE_DEBOUNCE_MS = 5 * 60 * 1000
@@ -294,10 +299,12 @@ const paygoBalanceText = computed(() => {
 
 const windowLabel = (window: string): string => {
   const normalized = window.toLowerCase()
-  if (normalized === '5h') return '5h'
-  if (normalized === 'week' || normalized === 'weekly') return '周'
-  if (normalized === 'month' || normalized === 'monthly') return '月'
-  if (normalized === '7d') return '7d'
+  if (normalized === '5h') return t('admin.accounts.webConsoleQuota.window5h')
+  if (normalized === 'week' || normalized === 'weekly')
+    return t('admin.accounts.webConsoleQuota.windowWeek')
+  if (normalized === 'month' || normalized === 'monthly')
+    return t('admin.accounts.webConsoleQuota.windowMonth')
+  if (normalized === '7d') return t('admin.accounts.webConsoleQuota.window7d')
   return window
 }
 
@@ -387,7 +394,7 @@ const startAuthPolling = (sessionId: string) => {
       } else if (result.status === 'failed') {
         stopPolling()
         authStarting.value = false
-        error.value = result.message || '验证登录失败'
+        error.value = result.message || t('admin.accounts.webConsoleQuota.authFailed')
       }
     } catch (e) {
       // 单次轮询失败不终止：继续等待直到上限，避免瞬时网络抖动中断登录流程。

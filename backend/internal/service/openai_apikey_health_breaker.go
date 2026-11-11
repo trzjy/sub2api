@@ -112,34 +112,6 @@ func (s *OpenAIAPIKeyHealthBreakerSettings) computeHealthBreakerThresholds() (wa
 	return watch, warning, trip
 }
 
-// quotaExhaustionMarkers 是上游「额度/配额用满」响应的特征子串（大小写不敏感匹配）。
-// 这类 429 属于有确定恢复时间的可恢复状态，不得计入账号级健康熔断，
-// 否则会写入无限期停调且恢复探针永远无法成功（生产实证：807/808，2026-11-11）。
-var quotaExhaustionMarkers = []string{
-	"weekly call limit exceeded",
-	"monthly call limit exceeded",
-	"daily call limit exceeded",
-	"call limit exceeded",
-	"quota exceeded",
-	"insufficient quota",
-	"exceeded your current quota",
-	"226614",
-}
-
-// isQuotaExhaustionResponse 判定响应体是否命中额度耗尽特征。
-func isQuotaExhaustionResponse(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	lower := strings.ToLower(string(body))
-	for _, m := range quotaExhaustionMarkers {
-		if strings.Contains(lower, m) {
-			return true
-		}
-	}
-	return false
-}
-
 func classifyOpenAIAPIKeyHealthFailure(err error) (int, []byte, bool) {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return 0, nil, false
@@ -170,13 +142,6 @@ func classifyOpenAIAPIKeyHealthFailure(err error) (int, []byte, bool) {
 		// → account_select_failed(pool=N, excluded=N) → 客户端 503
 		// 「该分组暂无可用账号」24h 共 1103 条。
 		//
-		// 额度类 429（周/月/daily 额度用满等）是上游有确定恢复时间的可恢复状态，
-		// 不计入账号级健康熔断（否则 trip 写入无限期停调，恢复探针在额度重置前
-		// 永远无法成功 → 账号永久冻结）。用户裁定 2026-11-11；生产实证 807/808。
-		if failoverErr.StatusCode == http.StatusTooManyRequests &&
-			isQuotaExhaustionResponse(failoverErr.ResponseBody) {
-			return failoverErr.StatusCode, failoverErr.ResponseBody, false
-		}
 		// 504 / 503 / 429 / 500 仍是账号慢与挂的主要信号，保持计入不变。
 	// 429 不再计入账号级熔断。
 	//

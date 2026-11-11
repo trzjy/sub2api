@@ -1154,6 +1154,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 	}
 	wasOveragesEnabled := account.IsOveragesEnabled()
+	// 换控制台账号或换上游后旧快照随即失效：本标记在凭据分支置位，extra 处理结束后
+	// 随同一行 Update 落库（方案 §3.1-4）。
+	var webConsoleSnapshotStale bool
 
 	if input.Name != "" {
 		account.Name = input.Name
@@ -1173,14 +1176,21 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := rejectWebCredentialForNormalUpdate(account, input); err != nil {
 			return nil, infraerrors.New(http.StatusBadRequest, "WEB_CREDENTIAL_ENTRY_REJECTED", err.Error())
 		}
+		// 方案 §3.1-4：合并前先取旧的控制台上游与账号标识，用于判定本次保存是否
+		// 换控制台身份/换上游。
+		prevWebConsoleProvider := ResolveWebConsoleQuotaProvider(account)
+		prevConsoleUsername, _ := account.Credentials[webConsoleQuotaCredentialKeyUsername].(string)
 		// 敏感子键采用"incoming 没提供就保留"的合并语义：前端响应已脱敏，
 		// 全对象 PUT 编辑时不会再带回 token，避免覆盖时清空已有凭证。
 		// 网页登录秘密已纳入全局敏感清单，自动获得缺省保留语义；login_phone 不是认证秘密，
 		// 但编辑回写时前端未携带也不应误清空，因此仅把它作为额外保留键。
+		// console_username 是身份标识（不进 SensitiveCredentialKeys），同样必须显式保留，
+		// 否则编辑弹窗未回传时会被误清空、进而误判为"换控制台账号"。
 		account.Credentials = MergePreservingSensitiveCreds(
 			account.Credentials,
 			input.Credentials,
 			CredKeyLoginPhone,
+			webConsoleQuotaCredentialKeyUsername,
 		)
 		// 校验并规范化请求头覆写配置（header 名小写化、格式检查）
 		if err := NormalizeHeaderOverrideCredentials(account.Credentials); err != nil {
@@ -1199,6 +1209,15 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		// Strip SSO/password residue that must never sit next to OAuth tokens.
 		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
+		if prevWebConsoleProvider != "" {
+			nextWebConsoleProvider := ResolveWebConsoleQuotaProvider(account)
+			nextConsoleUsername, _ := account.Credentials[webConsoleQuotaCredentialKeyUsername].(string)
+			if nextWebConsoleProvider != prevWebConsoleProvider || nextConsoleUsername != prevConsoleUsername {
+				// 方案 §3.1-4：换控制台账号或换上游后，旧 storageState 必失效且不得再被拿去打新上游。
+				delete(account.Credentials, webConsoleQuotaCredentialKeyStorageState)
+				webConsoleSnapshotStale = true
+			}
+		}
 	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
 	// 关闭配额限制时前端会删除 quota_* 键并提交 extra:{}，此时也必须落库。
@@ -1224,6 +1243,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		delete(normalizedExtra, OllamaCloudUsageSnapshotExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageAutoRefreshExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageSnapshotExtraKey)
+		delete(normalizedExtra, webConsoleQuotaSnapshotExtraKey)
 		delete(normalizedExtra, LargeRequestOnlyExtraKey)
 		delete(normalizedExtra, SmallRequestOnlyExtraKey)
 		// 全量编辑为整体替换语义：必须把库中现有值带回，否则已启用账号会被静默清除
@@ -1249,6 +1269,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			OpenAIAutoResetCreditStateExtraKey,
 			OpenCodeGoUsageAutoRefreshExtraKey,
 			OpenCodeGoUsageSnapshotExtraKey,
+			webConsoleQuotaSnapshotExtraKey,
 		} {
 			if v, ok := account.Extra[key]; ok {
 				normalizedExtra[key] = v
@@ -1276,6 +1297,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 	if input.Extra == nil {
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, account.Extra)
+	}
+	// 换控制台账号/换上游：旧快照必须随本次整行 Update 一并清掉（不另开 UpdateExtra
+	// 二次写，避免与同一保存产生两次写）。Extra 为 nil 时 delete 是 no-op。
+	if webConsoleSnapshotStale {
+		delete(account.Extra, webConsoleQuotaSnapshotExtraKey)
 	}
 	if requestedRateSyncEnabledUpdate != nil && *requestedRateSyncEnabledUpdate {
 		if requestedProbeEnabledUpdate != nil && !*requestedProbeEnabledUpdate {

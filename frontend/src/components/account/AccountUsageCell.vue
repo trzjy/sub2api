@@ -493,6 +493,13 @@
          自门控（CNProviderQuotaCell 的 cnQuotaCellVisible 对非 CN 平台为 false，
          不渲染），余额单元格按能力显示——无既有展示损失。
     -->
+    <!-- Web 控制台额度上游（compshare / sensenova / longcat）：
+         后端 ResolveWebConsoleQuotaProvider 唯一投影字段驱动，优先于 CN 子单元格，
+         避免其被误渲染为通用 CN 余额/额度单元格。 -->
+    <template v-else-if="account.web_console_quota_provider">
+      <WebConsoleQuotaCell :account="account" @updated="emit('account-updated', account)" />
+    </template>
+
     <template v-else-if="account.platform === 'kimi' || account.platform === 'zhipu' || account.platform === 'deepseek' || account.platform === 'minimax' || isVolcanoAccount || (cnBalanceCellVisible && account.platform !== 'gemini')">
       <!-- 挂在 CN 平台下的 Ollama Cloud 账号（资格由后端下发 eligible）：用量由
            Ollama 用量窗口负责。这类账号不是国产厂商订阅，CN 的额度/余额探测端点由
@@ -857,6 +864,7 @@ import CNProviderQuotaCell from './CNProviderQuotaCell.vue'
 import CNProviderBalanceCell from './CNProviderBalanceCell.vue'
 import CNQuotaUsageCell from './CNQuotaUsageCell.vue'
 import OllamaCloudUsageCell from './OllamaCloudUsageCell.vue'
+import WebConsoleQuotaCell from './WebConsoleQuotaCell.vue'
 import {
   cnQuotaCellVisible as cnQuotaCellVisibleFn,
   cnBalanceCellVisible as cnBalanceCellVisibleFn,

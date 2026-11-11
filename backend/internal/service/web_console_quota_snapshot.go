@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -77,24 +78,115 @@ type WebConsoleQuotaSnapshot struct {
 // 可见，本文件直接复用，绝不定义第二份。
 
 // ---------------------------------------------------------------------------
+// 时间戳兼容反序列化（Unix 秒/毫秒数字、数字字符串、RFC3339）
+// ---------------------------------------------------------------------------
+
+// webConsoleFlexTimestamp 是输入侧的宽松时间戳类型：上游（Python 适配器透传的
+// 优云智算 API 字段）可能给出 Unix 秒/毫秒整数、纯数字字符串或 RFC3339 字符串。
+// 统一归一为 RFC3339 UTC 字符串；无法解释的非空字符串原样保留（交给后续
+// parseWebConsoleQuotaResetAt 判定或直接透传）。该类型仅用于输入结构，
+// 对外输出结构体字段仍为 string，契约不变。
+type webConsoleFlexTimestamp string
+
+const webConsoleMillisThreshold int64 = 1_000_000_000_000
+
+func webConsoleIsASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// webConsoleFormatEpoch 把 Unix 秒（或毫秒，>= 1e12 视为毫秒）格式化为 RFC3339 UTC。
+// 非正值返回空串，表示"无有效重置时间"。
+func webConsoleFormatEpoch(v int64) string {
+	if v <= 0 {
+		return ""
+	}
+	if v >= webConsoleMillisThreshold {
+		return time.UnixMilli(v).UTC().Format(time.RFC3339)
+	}
+	return time.Unix(v, 0).UTC().Format(time.RFC3339)
+}
+
+// UnmarshalJSON 实现宽松解析。其他 JSON 类型（对象/数组/布尔）返回 json 错误，不静默吞错。
+func (t *webConsoleFlexTimestamp) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*t = ""
+		return nil
+	}
+
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*t = ""
+			return nil
+		}
+		if webConsoleIsASCIIDigits(s) {
+			if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+				*t = webConsoleFlexTimestamp(webConsoleFormatEpoch(v))
+				return nil
+			}
+		}
+		*t = webConsoleFlexTimestamp(s)
+		return nil
+	}
+
+	if trimmed[0] != '-' && (trimmed[0] < '0' || trimmed[0] > '9') {
+		// 布尔/对象/数组等非法类型：交由 json 产生标准错误
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*t = webConsoleFlexTimestamp(s)
+		return nil
+	}
+
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	v, err := strconv.ParseInt(n.String(), 10, 64)
+	if err != nil {
+		f, ferr := n.Float64()
+		if ferr != nil {
+			return ferr
+		}
+		v = int64(f)
+	}
+	*t = webConsoleFlexTimestamp(webConsoleFormatEpoch(v))
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // Worker 返回的 data（rawData）输入结构（仅本文件解析用，不对外暴露）
 // ---------------------------------------------------------------------------
 
 type webConsoleCompsharePlan struct {
-	Code       string   `json:"code"`
-	PlanName   string   `json:"plan_name"`
-	ExpireAt   int64    `json:"expire_at"`
-	PlanStatus int      `json:"plan_status"`
-	Limit5h    float64  `json:"limit_5h"`
-	Used5h     float64  `json:"used_5h"`
-	Reset5h    string   `json:"reset_5h"`
-	LimitWeek  float64  `json:"limit_week"`
-	UsedWeek   float64  `json:"used_week"`
-	ResetWeek  string   `json:"reset_week"`
-	LimitMonth float64  `json:"limit_month"`
-	UsedMonth  float64  `json:"used_month"`
-	ResetMonth string   `json:"reset_month"`
-	KeyHashes  []string `json:"key_hashes"`
+	Code       string                  `json:"code"`
+	PlanName   string                  `json:"plan_name"`
+	ExpireAt   int64                   `json:"expire_at"`
+	PlanStatus int                     `json:"plan_status"`
+	Limit5h    float64                 `json:"limit_5h"`
+	Used5h     float64                 `json:"used_5h"`
+	Reset5h    webConsoleFlexTimestamp `json:"reset_5h"`
+	LimitWeek  float64                 `json:"limit_week"`
+	UsedWeek   float64                 `json:"used_week"`
+	ResetWeek  webConsoleFlexTimestamp `json:"reset_week"`
+	LimitMonth float64                 `json:"limit_month"`
+	UsedMonth  float64                 `json:"used_month"`
+	ResetMonth webConsoleFlexTimestamp `json:"reset_month"`
+	KeyHashes  []string                `json:"key_hashes"`
 }
 
 type webConsoleCompshareData struct {
@@ -106,9 +198,9 @@ type webConsoleCompshareData struct {
 }
 
 type webConsoleSensenovaWindow struct {
-	Limit     float64 `json:"limit"`
-	Remaining float64 `json:"remaining"`
-	ResetAt   string  `json:"reset_at"`
+	Limit     float64                 `json:"limit"`
+	Remaining float64                 `json:"remaining"`
+	ResetAt   webConsoleFlexTimestamp `json:"reset_at"`
 }
 
 type webConsoleSensenovaPool struct {
@@ -118,7 +210,7 @@ type webConsoleSensenovaPool struct {
 	Window7d                    *webConsoleSensenovaWindow `json:"window_7d"`
 	GrantBalance                *float64                   `json:"grant_balance"`
 	NearestGrantExpiringBalance *float64                   `json:"nearest_grant_expiring_balance"`
-	NearestGrantExpiry          string                     `json:"nearest_grant_expiry"`
+	NearestGrantExpiry          webConsoleFlexTimestamp    `json:"nearest_grant_expiry"`
 }
 
 type webConsoleSensenovaData struct {
@@ -253,9 +345,9 @@ func buildCompshareSnapshot(snap *WebConsoleQuotaSnapshot, rawData []byte, apiKe
 func finalizeCompsharePlan(snap *WebConsoleQuotaSnapshot, p webConsoleCompsharePlan, now time.Time) *WebConsoleQuotaSnapshot {
 	// Tiers 始终填三档（5h/week/month）
 	snap.Tiers = []WebConsoleQuotaTier{
-		{Window: "5h", Limit: p.Limit5h, Used: p.Used5h, ResetAt: p.Reset5h},
-		{Window: "week", Limit: p.LimitWeek, Used: p.UsedWeek, ResetAt: p.ResetWeek},
-		{Window: "month", Limit: p.LimitMonth, Used: p.UsedMonth, ResetAt: p.ResetMonth},
+		{Window: "5h", Limit: p.Limit5h, Used: p.Used5h, ResetAt: string(p.Reset5h)},
+		{Window: "week", Limit: p.LimitWeek, Used: p.UsedWeek, ResetAt: string(p.ResetWeek)},
+		{Window: "month", Limit: p.LimitMonth, Used: p.UsedMonth, ResetAt: string(p.ResetMonth)},
 	}
 	snap.ExpireAt = p.ExpireAt
 
@@ -273,9 +365,9 @@ func finalizeCompsharePlan(snap *WebConsoleQuotaSnapshot, p webConsoleCompshareP
 		limit float64
 		reset string
 	}{
-		{p.Used5h, p.Limit5h, p.Reset5h},
-		{p.UsedWeek, p.LimitWeek, p.ResetWeek},
-		{p.UsedMonth, p.LimitMonth, p.ResetMonth},
+		{p.Used5h, p.Limit5h, string(p.Reset5h)},
+		{p.UsedWeek, p.LimitWeek, string(p.ResetWeek)},
+		{p.UsedMonth, p.LimitMonth, string(p.ResetMonth)},
 	}
 
 	exhausted := false
@@ -335,12 +427,12 @@ func sensenovaPoolBlocked(p *webConsoleSensenovaPool, now time.Time) bool {
 func sensenovaPoolRecovery(p *webConsoleSensenovaPool, now time.Time) time.Time {
 	var cands []time.Time
 	if p.Window5h != nil && p.Window5h.Limit > 0 && p.Window5h.Remaining <= 0 {
-		if t, ok := parseWebConsoleQuotaResetAt(p.Window5h.ResetAt); ok && t.After(now) {
+		if t, ok := parseWebConsoleQuotaResetAt(string(p.Window5h.ResetAt)); ok && t.After(now) {
 			cands = append(cands, t)
 		}
 	}
 	if p.Window7d != nil && p.Window7d.Limit > 0 && p.Window7d.Remaining <= 0 {
-		if t, ok := parseWebConsoleQuotaResetAt(p.Window7d.ResetAt); ok && t.After(now) {
+		if t, ok := parseWebConsoleQuotaResetAt(string(p.Window7d.ResetAt)); ok && t.After(now) {
 			cands = append(cands, t)
 		}
 	}
@@ -362,14 +454,14 @@ func toOutputSensenovaPool(p webConsoleSensenovaPool) WebConsoleQuotaPool {
 		PoolType:                    p.PoolType,
 		GrantBalance:                p.GrantBalance,
 		NearestGrantExpiringBalance: p.NearestGrantExpiringBalance,
-		NearestGrantExpiry:          p.NearestGrantExpiry,
+		NearestGrantExpiry:          string(p.NearestGrantExpiry),
 	}
 	if p.Window5h != nil {
 		out.Window5h = &WebConsoleQuotaTier{
 			Window:  "5h",
 			Limit:   p.Window5h.Limit,
 			Used:    p.Window5h.Limit - p.Window5h.Remaining,
-			ResetAt: p.Window5h.ResetAt,
+			ResetAt: string(p.Window5h.ResetAt),
 		}
 	}
 	if p.Window7d != nil {
@@ -377,7 +469,7 @@ func toOutputSensenovaPool(p webConsoleSensenovaPool) WebConsoleQuotaPool {
 			Window:  "7d",
 			Limit:   p.Window7d.Limit,
 			Used:    p.Window7d.Limit - p.Window7d.Remaining,
-			ResetAt: p.Window7d.ResetAt,
+			ResetAt: string(p.Window7d.ResetAt),
 		}
 	}
 	return out
@@ -486,7 +578,7 @@ func buildSensenovaSnapshot(snap *WebConsoleQuotaSnapshot, rawData []byte, model
 				Window:  "5h",
 				Limit:   sel.Window5h.Limit,
 				Used:    sel.Window5h.Limit - sel.Window5h.Remaining,
-				ResetAt: sel.Window5h.ResetAt,
+				ResetAt: string(sel.Window5h.ResetAt),
 			})
 		}
 		if sel.Window7d != nil {
@@ -494,7 +586,7 @@ func buildSensenovaSnapshot(snap *WebConsoleQuotaSnapshot, rawData []byte, model
 				Window:  "7d",
 				Limit:   sel.Window7d.Limit,
 				Used:    sel.Window7d.Limit - sel.Window7d.Remaining,
-				ResetAt: sel.Window7d.ResetAt,
+				ResetAt: string(sel.Window7d.ResetAt),
 			})
 		}
 		snap.Tiers = tiers

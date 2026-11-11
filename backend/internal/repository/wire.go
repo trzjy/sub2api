@@ -48,6 +48,13 @@ func ProvideVisionRoutingGroupAccountsReader(r service.GroupRepository) service.
 	return r
 }
 
+// ProvideQuotaUpstreamRegistry 把 quotaUpstreamRepository（未导出类型）暴露为
+// service.QuotaUpstreamRegistry 接口，补齐 wire 依赖图（85bd97a4cf 曾手工改
+// wire_gen.go 而未在 ProviderSet 登记）。实例构造复用既有 NewQuotaUpstreamRepository。
+func ProvideQuotaUpstreamRegistry(client *ent.Client) service.QuotaUpstreamRegistry {
+	return NewQuotaUpstreamRepository(client)
+}
+
 // ProvidePricingRemoteClient 创建定价数据远程客户端
 // 从配置中读取代理设置，支持国内服务器通过代理访问 GitHub 上的定价数据
 func ProvidePricingRemoteClient(cfg *config.Config) service.PricingRemoteClient {
@@ -120,6 +127,7 @@ var ProviderSet = wire.NewSet(
 	NewOpsRepository,
 	NewAuditLogRepository,
 	NewQuotaKeyRepository,
+	ProvideQuotaUpstreamRegistry, // 适配器：*quotaUpstreamRepository → service.QuotaUpstreamRegistry
 	NewPasskeyRepository,
 	NewPasskeySessionStore,
 	NewUserSubscriptionRepository,

@@ -2,11 +2,20 @@ package admin
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
+
+// webConsoleAuthStartResponse 是 POST /admin/accounts/:id/web-console-auth/start 的响应体，
+// 与前端 frontend/src/api/admin/cnProviders.ts::startWebConsoleAuth 的冻结契约一致。
+// 只回传 session_id 与剩余有效期；Binding / ExpectedUsername 等内部/PII 字段一律不回传。
+type webConsoleAuthStartResponse struct {
+	SessionID string `json:"session_id"`
+	ExpiresIn int64  `json:"expires_in"`
+}
 
 // CNProviderHandler 暴露国产供应商（kimi/zhipu/deepseek）的额度与余额查询端点。
 //
@@ -120,7 +129,13 @@ func (h *CNProviderHandler) StartWebConsoleAuth(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, result)
+	expiresIn := int64(0)
+	if !result.ExpiresAt.IsZero() {
+		if d := time.Until(result.ExpiresAt); d > 0 {
+			expiresIn = int64(d.Seconds())
+		}
+	}
+	response.Success(c, webConsoleAuthStartResponse{SessionID: result.ID, ExpiresIn: expiresIn})
 }
 
 // GetWebConsoleAuthStatus 轮询交互登录状态；成功后自动落凭据并触发一次探测。

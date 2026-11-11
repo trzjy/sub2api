@@ -183,6 +183,21 @@ func (r *fakeAccountRepo) ListShadowsByParent(ctx context.Context, parentID int6
 	return nil, nil
 }
 
+// PatchAccountCredentials 是仓储接口新增方法的 no-op 桩。
+func (r *fakeAccountRepo) PatchAccountCredentials(context.Context, int64, map[string]any, string) error {
+	return nil
+}
+
+// SetTempUnschedulableIfOwnedOrUnpaused 是仓储接口新增方法的 no-op 桩。
+func (r *fakeAccountRepo) SetTempUnschedulableIfOwnedOrUnpaused(context.Context, int64, time.Time, string, string) (bool, error) {
+	return false, nil
+}
+
+// ClearTempUnschedulableIfOwned 是仓储接口新增方法的 no-op 桩。
+func (r *fakeAccountRepo) ClearTempUnschedulableIfOwned(context.Context, int64, time.Time, string) (bool, error) {
+	return false, nil
+}
+
 // fakeCapRepo 记录 Upsert 调用，用于断言落库行为。
 type fakeCapRepo struct {
 	mu      sync.Mutex

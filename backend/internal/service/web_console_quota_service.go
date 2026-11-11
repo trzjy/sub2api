@@ -362,11 +362,13 @@ func (s *WebConsoleQuotaService) postProbe(ctx context.Context, account *Account
 
 // persistUpdatedStorageState 用事务级局部更新原语回写刷新后的 storageState。
 // 仅当 worker 返回非空值时才写；console_username 只在本地为空时补写（绝不覆盖已有非空值）。
+// 本账号写入成功后，若新值确与库内现值不同，再把新会话同步给同控制台账号的兄弟（§3.1-4）。
 func (s *WebConsoleQuotaService) persistUpdatedStorageState(ctx context.Context, account *Account, resp *webConsoleQuotaWorkerResponse) {
 	newState := normalizeWebConsoleQuotaStorageState(resp.UpdatedStorageState)
 	if newState == "" || s.accountRepo == nil {
 		return
 	}
+	currentState := strings.TrimSpace(account.GetCredential(webConsoleQuotaCredentialKeyStorageState))
 	currentUsername := account.GetCredential(webConsoleQuotaCredentialKeyUsername)
 	patch := map[string]any{webConsoleQuotaCredentialKeyStorageState: newState}
 	if strings.TrimSpace(currentUsername) == "" {
@@ -377,6 +379,58 @@ func (s *WebConsoleQuotaService) persistUpdatedStorageState(ctx context.Context,
 	if err := s.accountRepo.PatchAccountCredentials(ctx, account.ID, patch, currentUsername); err != nil {
 		// 只记账号与错误，绝不打印 storage_state / 密码。
 		slog.Warn("web_console_quota_patch_storage_state_failed", "account_id", account.ID, "error", err)
+		return
+	}
+	if currentState == newState {
+		// 会话未变：跳过兄弟同步，避免每轮探测对全表 ListActive 做无谓扫描。
+		return
+	}
+	syncWebConsoleStorageStateToSiblings(ctx, s.accountRepo, account, currentUsername, newState)
+}
+
+// syncWebConsoleStorageStateToSiblings 把新会话补写到同 (provider, lower(console_username))
+// 的活跃兄弟账号（方案 §3.1-4）。仅写 console_storage_state 一个键，绝不触碰
+// api_key / base_url / model_mapping / console_password。失败只记日志，不回滚本账号写入。
+func syncWebConsoleStorageStateToSiblings(
+	ctx context.Context,
+	repo AccountRepository,
+	origin *Account,
+	username string,
+	storageState string,
+) {
+	if repo == nil || origin == nil {
+		return
+	}
+	username = strings.TrimSpace(username)
+	if username == "" || strings.TrimSpace(storageState) == "" {
+		return // 空用户名严格按 account_id 隔离
+	}
+	provider := ResolveWebConsoleQuotaProvider(origin)
+	if provider == "" {
+		return
+	}
+	accounts, err := repo.ListActive(ctx)
+	if err != nil {
+		slog.Warn("web_console_quota_list_siblings_failed", "account_id", origin.ID, "error", err)
+		return
+	}
+	for i := range accounts {
+		sibling := &accounts[i]
+		if sibling.ID == origin.ID {
+			continue
+		}
+		if ResolveWebConsoleQuotaProvider(sibling) != provider {
+			continue
+		}
+		siblingUsername := strings.TrimSpace(sibling.GetCredential(webConsoleQuotaCredentialKeyUsername))
+		if siblingUsername == "" || !strings.EqualFold(siblingUsername, username) {
+			continue
+		}
+		patch := map[string]any{webConsoleQuotaCredentialKeyStorageState: storageState}
+		// expectedUsername 传兄弟账号自己的库内值（大小写可能不同），命中才写。
+		if err := repo.PatchAccountCredentials(ctx, sibling.ID, patch, siblingUsername); err != nil {
+			slog.Warn("web_console_quota_sync_sibling_failed", "account_id", sibling.ID, "error", err)
+		}
 	}
 }
 

@@ -372,3 +372,117 @@ func TestBuildWebConsoleQuotaSnapshot_RoundTrip(t *testing.T) {
 	require.True(t, back.Exhausted)
 	require.Equal(t, wcqFuture, back.Until)
 }
+
+// ---------------------------------------------------------------------------
+// 时间戳兼容：Unix 秒/毫秒数字、纯数字字符串、RFC3339（CARD-WCQ-FLEXTS）
+// ---------------------------------------------------------------------------
+
+func wcqEpochRFC3339(sec int64) string {
+	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
+}
+
+// compshare：Python 适配器透传的 Unix 秒级整数与纯数字字符串。
+func TestWebConsoleQuotaFlexTimestamp_CompshareUnixSeconds(t *testing.T) {
+	data := `{"auth_state":"ok","plans":[{"plan_name":"Basic","expire_at":1893456000,"plan_status":1,` +
+		`"limit_5h":100,"used_5h":10,"reset_5h":1794344400,` +
+		`"limit_week":500,"used_week":100,"reset_week":1794758400,` +
+		`"limit_month":2000,"used_month":500,"reset_month":0}]}`
+
+	s, err := BuildWebConsoleQuotaSnapshot("compshare", []byte(data), "", nil, wcqNow)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+	require.Equal(t, "matched", s.PlanMatchStatus)
+	require.False(t, s.Exhausted)
+	require.Len(t, s.Tiers, 3)
+	require.Equal(t, wcqEpochRFC3339(1794344400), s.Tiers[0].ResetAt)
+	require.Equal(t, "2026-11-10T21:00:00Z", s.Tiers[0].ResetAt)
+	require.Equal(t, wcqEpochRFC3339(1794758400), s.Tiers[1].ResetAt)
+	require.Equal(t, "", s.Tiers[2].ResetAt)
+}
+
+// compshare：纯数字字符串与 RFC3339 字符串混合。
+func TestWebConsoleQuotaFlexTimestamp_CompshareNumericString(t *testing.T) {
+	data := `{"auth_state":"ok","plans":[{"plan_name":"Basic","expire_at":1893456000,"plan_status":1,` +
+		`"limit_5h":100,"used_5h":10,"reset_5h":"1794344400",` +
+		`"limit_week":500,"used_week":100,"reset_week":"2026-11-15T16:00:00Z",` +
+		`"limit_month":2000,"used_month":500,"reset_month":""}]}`
+
+	s, err := BuildWebConsoleQuotaSnapshot("compshare", []byte(data), "", nil, wcqNow)
+	require.NoError(t, err)
+	require.Len(t, s.Tiers, 3)
+	require.Equal(t, "2026-11-10T21:00:00Z", s.Tiers[0].ResetAt)
+	require.Equal(t, "2026-11-15T16:00:00Z", s.Tiers[1].ResetAt)
+	require.Equal(t, "", s.Tiers[2].ResetAt)
+}
+
+// compshare：5h 耗尽且整数 reset_5h 在未来 → Exhausted 且 Until 为该 UTC 时间。
+func TestWebConsoleQuotaFlexTimestamp_CompshareExhaustedIntegerReset(t *testing.T) {
+	// 1794398400 = 2026-11-11T12:00:00Z（= wcqNow），取其后 1 小时
+	const reset5h = int64(1794402000)
+	require.Greater(t, reset5h, wcqNow.Unix())
+
+	data := `{"auth_state":"ok","plans":[{"plan_name":"Basic","expire_at":1893456000,"plan_status":1,` +
+		`"limit_5h":100,"used_5h":120,"reset_5h":1794402000,` +
+		`"limit_week":500,"used_week":100,"reset_week":0,` +
+		`"limit_month":2000,"used_month":500,"reset_month":0}]}`
+
+	s, err := BuildWebConsoleQuotaSnapshot("compshare", []byte(data), "", nil, wcqNow)
+	require.NoError(t, err)
+	require.True(t, s.Exhausted)
+	require.False(t, s.UntilIndefinite)
+	require.Equal(t, wcqEpochRFC3339(reset5h), s.Until)
+	require.Equal(t, "2026-11-11T13:00:00Z", s.Until)
+}
+
+// compshare：毫秒级整数正确换算（不得变成公元 58800 年）。
+func TestWebConsoleQuotaFlexTimestamp_CompshareMillis(t *testing.T) {
+	data := `{"auth_state":"ok","plans":[{"plan_name":"Basic","expire_at":1893456000,"plan_status":1,` +
+		`"limit_5h":100,"used_5h":10,"reset_5h":1794344400000,` +
+		`"limit_week":500,"used_week":100,"reset_week":"1794344400123",` +
+		`"limit_month":2000,"used_month":500,"reset_month":0}]}`
+
+	s, err := BuildWebConsoleQuotaSnapshot("compshare", []byte(data), "", nil, wcqNow)
+	require.NoError(t, err)
+	require.Len(t, s.Tiers, 3)
+	require.Equal(t, "2026-11-10T21:00:00Z", s.Tiers[0].ResetAt)
+	require.Equal(t, "2026-11-10T21:00:00Z", s.Tiers[1].ResetAt)
+	require.Equal(t, "", s.Tiers[2].ResetAt)
+	// 毫秒值若被误当秒会得到 58830 年，这里显式排除
+	for _, tier := range s.Tiers {
+		require.NotContains(t, tier.ResetAt, "5883")
+	}
+}
+
+// sensenova：window_5h.reset_at 与 nearest_grant_expiry 为整数 Unix 秒。
+func TestWebConsoleQuotaFlexTimestamp_SensenovaUnixSeconds(t *testing.T) {
+	const reset5h = int64(1794402000) // 2026-11-11T13:00:00Z
+	const expiry = int64(1794758400)  // 2026-11-15T16:00:00Z
+	data := `{"auth_state":"ok","pools":[{"id":"g","pool_type":"general",` +
+		`"window_5h":{"limit":100,"remaining":0,"reset_at":1794402000},` +
+		`"window_7d":{"limit":0,"remaining":0,"reset_at":0},` +
+		`"grant_balance":0,"nearest_grant_expiry":1794758400}]}`
+
+	s, err := BuildWebConsoleQuotaSnapshot("sensenova", []byte(data), "", map[string]string{"a": "ds-pro"}, wcqNow)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+	require.Len(t, s.Pools, 1)
+	require.Equal(t, wcqEpochRFC3339(expiry), s.Pools[0].NearestGrantExpiry)
+	require.NotNil(t, s.Pools[0].Window5h)
+	require.Equal(t, wcqEpochRFC3339(reset5h), s.Pools[0].Window5h.ResetAt)
+
+	require.True(t, s.Exhausted)
+	require.False(t, s.UntilIndefinite)
+	require.Equal(t, "2026-11-11T13:00:00Z", s.Until)
+	require.Len(t, s.Tiers, 2)
+	require.Equal(t, "2026-11-11T13:00:00Z", s.Tiers[0].ResetAt)
+}
+
+// 非法 JSON 类型（布尔/对象/数组）不得静默吞错。
+func TestWebConsoleQuotaFlexTimestamp_InvalidType(t *testing.T) {
+	for _, bad := range []string{`true`, `{"a":1}`, `[1]`} {
+		data := `{"auth_state":"ok","plans":[{"plan_name":"Basic","expire_at":1893456000,"plan_status":1,` +
+			`"limit_5h":100,"used_5h":10,"reset_5h":` + bad + `}]}`
+		_, err := BuildWebConsoleQuotaSnapshot("compshare", []byte(data), "", nil, wcqNow)
+		require.Error(t, err, "bad payload: %s", bad)
+	}
+}

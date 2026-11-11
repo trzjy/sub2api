@@ -167,7 +167,7 @@ func TestWireBalanceCheckServiceReceivesLifecycleHandover(t *testing.T) {
 	// cfg 零值 BalanceCheckEnabled=false → Start() 直接返回，无后台循环。
 	lifecycle := NewCNQuotaLifecycleService(repo, nil, &config.Config{}, nil)
 
-	svc := ProvideCNProviderBalanceCheckService(repo, balanceSvc, nil, nil, nil, nil, &config.Config{}, nil, lifecycle)
+	svc := ProvideCNProviderBalanceCheckService(repo, balanceSvc, nil, nil, nil, nil, &config.Config{}, nil, lifecycle, nil)
 	require.NotNil(t, svc)
 	require.Same(t, lifecycle, svc.quotaLifecycle, "SetQuotaLifecycleHandover must receive the wired lifecycle service")
 }

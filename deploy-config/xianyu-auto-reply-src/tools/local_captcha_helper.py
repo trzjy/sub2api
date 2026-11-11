@@ -2794,6 +2794,19 @@ class _MockWebAuthContext:
         self.page = _MockWebAuthPage(outcome)
         self._closed = False
 
+    @property
+    def pages(self) -> List["_MockWebAuthPage"]:
+        # Solver._launch_session 的 patchright 分支会读 context.pages 取首页。
+        return [self.page]
+
+    async def new_page(self) -> "_MockWebAuthPage":
+        # Solver._launch_session 的 playwright 分支固定调用 context.new_page()。
+        return self.page
+
+    async def clear_cookies(self, *args: Any, **kwargs: Any) -> None:
+        # patchright 分支求解前清空 cookie，桩无需真实状态。
+        pass
+
     async def cookies(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
         return list(self.outcome.get("cookies", []))
 

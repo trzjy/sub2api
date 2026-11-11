@@ -246,6 +246,9 @@ func (s *WebConsoleAuthService) completeInteractiveLogin(ctx context.Context, se
 		return &WebConsoleAuthStatus{Status: webConsoleAuthStatusFailed, Message: "web console auth storage state persist failed"}, nil
 	}
 
+	// 人工验证刚完成：无论库内值是否有变化，都把新会话同步给同控制台账号的兄弟（§3.1-4）。
+	syncWebConsoleStorageStateToSiblings(ctx, s.accountRepo, account, currentUsername, storageState)
+
 	s.forgetSession(session.ID)
 
 	var probe *WebConsoleQuotaProbeResult

@@ -393,7 +393,9 @@ var ProviderSet = wire.NewSet(
 	admin.NewAntigravityOAuthHandler,
 	admin.NewGrokOAuthHandler,
 	admin.NewCodeBuddyOAuthHandler,
-	admin.NewCNProviderHandler,
+	// Web 控制台额度链接线（CARD-WCQ-W1b）：包装 provider 与 CNProviderHandler 同包
+	// 定义（service 包不得反向依赖 handler/admin），构造后经 Setter 注入 quota/auth 服务。
+	admin.ProvideCNProviderHandlerWithWebConsole,
 	admin.NewProxyHandler,
 	admin.NewRedeemHandler,
 	admin.NewPromoHandler,

@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import time
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -66,18 +66,56 @@ async def get_browser():
     return _browser
 
 
+def _parse_storage_state(
+    storage_state: Optional[Union[str, dict]],
+) -> Optional[dict]:
+    """把上游传来的 storage_state 规整为 Playwright 可接受的 ``dict``。
+
+    Playwright 的 ``browser.new_context(storage_state=...)`` 对 ``str`` 参数
+    会当作**磁盘文件路径**读取（见 ``BrowserType._prepare_browser_context_params``）。
+    因此绝不能把 JSON 字符串原样传下去：这里统一解析成 ``dict``，
+    非法值一律丢弃（返回 ``None``），让适配器改走账密重登或
+    ``needs_interactive_auth``，而不是在 ``new_context`` 阶段永久失败。
+
+    日志纪律：失败只记固定文案，绝不打印 storage_state 原文或任何内容。
+    """
+    if storage_state is None:
+        return None
+    if isinstance(storage_state, dict):
+        return storage_state
+    if isinstance(storage_state, str):
+        if not storage_state.strip():
+            return None
+        try:
+            parsed = json.loads(storage_state)
+        except (ValueError, TypeError):
+            logger.warning("invalid storage_state json, ignoring")
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        logger.warning("invalid storage_state json, ignoring")
+        return None
+    # 其它类型（bytes / list 等）同样不使用，避免误当作文件路径。
+    logger.warning("invalid storage_state json, ignoring")
+    return None
+
+
 async def make_context(
-    storage_state: Optional[str] = None,
+    storage_state: Optional[Union[str, dict]] = None,
     proxy_url: Optional[str] = None,
 ):
     """每请求独立的 BrowserContext 工厂。
 
     由适配器在 ``probe`` 内调用；适配器负责在 ``finally`` 中关闭。
+    ``storage_state`` 可以是 Playwright storageState 的 JSON 字符串或 ``dict``；
+    JSON 字符串会先被解析为 ``dict`` 再传给 ``browser.new_context``，
+    因为 Playwright 会把裸 ``str`` 当成磁盘文件路径。
     """
     browser = await get_browser()
     kwargs: dict = {}
-    if storage_state:
-        kwargs["storage_state"] = storage_state
+    parsed_state = _parse_storage_state(storage_state)
+    if parsed_state is not None:
+        kwargs["storage_state"] = parsed_state
     if proxy_url:
         kwargs["proxy"] = {"server": proxy_url}
     return await browser.new_context(**kwargs)

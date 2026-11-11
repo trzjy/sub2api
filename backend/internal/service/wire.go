@@ -501,6 +501,38 @@ func ProvideCNProviderBalanceService(
 	return NewCNProviderBalanceService(accountRepo, proxyRepo, httpUpstream, cfg)
 }
 
+// ProvideWebConsoleQuotaService 构造 Web 控制台额度采集服务（compshare/sensenova/longcat）。
+func ProvideWebConsoleQuotaService(
+	accountRepo AccountRepository,
+	cfg *config.Config,
+	tempUnschedCache TempUnschedCache,
+) *WebConsoleQuotaService {
+	svc := NewWebConsoleQuotaService(accountRepo, cfg)
+	// 方案 §4.4 不变式 3/4：所属权写入/清除真实生效后必须让 Redis 停调缓存失效。
+	// 缓存为可选依赖（nil 时服务内部跳过），故直接赋值，不做 nil 分支。
+	svc.SetTempUnschedCache(tempUnschedCache)
+	return svc
+}
+
+// ProvideWebConsoleAuthService 构造 Web 控制台交互登录编排服务。
+// helper 按 local_captcha_helper 配置构造；base_url 为空时 helper 为 nil，
+// 交互登录入口返回 not configured（与既有 handler 层装配口径一致）。
+func ProvideWebConsoleAuthService(
+	quota *WebConsoleQuotaService,
+	repo AccountRepository,
+	cfg *config.Config,
+) *WebConsoleAuthService {
+	var helper LocalCaptchaHelperWebAuth
+	if cfg != nil {
+		helper = NewLocalCaptchaHelperWebAuthClient(LocalCaptchaHelperConfig{
+			BaseURL: cfg.LocalCaptchaHelper.BaseURL,
+			APIKey:  cfg.LocalCaptchaHelper.APIKey,
+			Timeout: cfg.LocalCaptchaHelper.Timeout,
+		})
+	}
+	return NewWebConsoleAuthService(quota, helper, repo)
+}
+
 // cnQuotaAlertStoreAdapter 把 OpsService 适配为 CNQuotaLifecycleService 的
 // QuotaAlertStore 窄面（方法集直接满足接口，不新增载体）。
 type cnQuotaAlertStoreAdapter struct {
@@ -590,6 +622,7 @@ func ProvideCNProviderBalanceCheckService(
 	cfg *config.Config,
 	monitorService *ChannelMonitorService,
 	quotaLifecycle *CNQuotaLifecycleService,
+	webConsoleQuotaService *WebConsoleQuotaService,
 ) *CNProviderBalanceCheckService {
 	minutes := 10
 	if cfg != nil && cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes > 0 {
@@ -604,6 +637,10 @@ func ProvideCNProviderBalanceCheckService(
 	// D-TH-04：周期链与手动探针链共用同一 TH 探测实例（同一 6h 会话缓存，
 	// 登录次数减半；懒装配分支因已注入不再触发）。
 	svc.SetTokenHarborPassService(quotaService.THPassService())
+	// Web 控制台额度采集链注入（compshare/sensenova/longcat）。
+	if webConsoleQuotaService != nil {
+		svc.SetWebConsoleQuotaService(webConsoleQuotaService)
+	}
 	svc.Start()
 	return svc
 }
@@ -1534,6 +1571,8 @@ var ProviderSet = wire.NewSet(
 	ProvideCNProviderQuotaService,
 	ProvideCNProviderBalanceService,
 	ProvideCNQuotaLifecycleService,
+	ProvideWebConsoleQuotaService,
+	ProvideWebConsoleAuthService,
 	ProvideCNProviderBalanceCheckService,
 	ProvideCodeBuddyQuotaService,
 	ProvideCodeBuddyQuotaCheckService,

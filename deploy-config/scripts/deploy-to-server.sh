@@ -46,16 +46,25 @@ fi
 # 4. 记录 short SHA
 TAG=$(git rev-parse --short HEAD)
 
-# 5. 构建带 -w 后缀的部署镜像
+# 5. 构建带 -w 后缀的部署镜像（sub2api 主镜像 + web-quota-worker sidecar 镜像，
+#    两者同 tag，避免宿主机残留旧 web-quota-worker:local 导致 sidecar 继续跑旧代码）
 docker build -t "sub2api:${TAG}-w" .
+docker build -t "web-quota-worker:${TAG}-w" ./deploy-config/web-quota-worker
 
-# 6. 幂等更新同目录 .env 中 SUB2API_IMAGE_TAG（已有原地替换，无则追加；不重建整个文件；compose.yml 的 image 行自带 sub2api: 前缀，故 .env 存裸 tag 不可带前缀）
+# 6. 幂等更新同目录 .env 中 SUB2API_IMAGE_TAG / WEB_QUOTA_WORKER_IMAGE_TAG（已有原地替换，无则追加；不重建整个文件；compose.yml 的 image 行自带 sub2api: 前缀，故 .env 存裸 tag 不可带前缀）
 ENV_FILE="/opt/sub2api/.env"
 NEW_VAL="SUB2API_IMAGE_TAG=${TAG}-w"
 if grep -q '^SUB2API_IMAGE_TAG=' "$ENV_FILE"; then
   sed -i "s|^SUB2API_IMAGE_TAG=.*|${NEW_VAL}|" "$ENV_FILE"
 else
   printf '%s\n' "$NEW_VAL" >> "$ENV_FILE"
+fi
+
+NEW_WQ_VAL="WEB_QUOTA_WORKER_IMAGE_TAG=${TAG}-w"
+if grep -q '^WEB_QUOTA_WORKER_IMAGE_TAG=' "$ENV_FILE"; then
+  sed -i "s|^WEB_QUOTA_WORKER_IMAGE_TAG=.*|${NEW_WQ_VAL}|" "$ENV_FILE"
+else
+  printf '%s\n' "$NEW_WQ_VAL" >> "$ENV_FILE"
 fi
 
 # 7. 用更新的镜像标签重建服务（必须全项目 up -d：本项目含 xianyu-worker 等共享 xianyu-internal 网络的服务，单服务 up 会触发网络重建失败导致服务零容器，见 sub2api-ops.md §7.12）
@@ -104,9 +113,24 @@ else
   exit 1
 fi
 
-# 8d. 容器健康检查 healthy（up 后先等待 start_period）
-sleep 35
-HEALTH=$(docker inspect sub2api --format '{{.State.Health.Status}}' 2>/dev/null || true)
+# 8d. 容器健康检查 healthy（有界轮询：最多 24 次 × 5s，总上限 120s）
+#     web-quota-worker start_period 20s，且 sub2api depends_on 它 service_healthy 后才启动
+#     （sub2api 自身 start_period 30s），固定 sleep 必然在 sub2api 仍 starting 时误判失败，
+#     故用轮询等到两容器同时 healthy；命中 unhealthy 立即退出轮询走下方失败分支。
+HEALTH=""
+WQ_HEALTH=""
+for ((i = 0; i < 24; i++)); do
+  HEALTH=$(docker inspect sub2api --format '{{.State.Health.Status}}' 2>/dev/null || true)
+  WQ_HEALTH=$(docker inspect web-quota-worker --format '{{.State.Health.Status}}' 2>/dev/null || true)
+  if [ "$HEALTH" = "healthy" ] && [ "$WQ_HEALTH" = "healthy" ]; then
+    break
+  fi
+  if [ "$HEALTH" = "unhealthy" ] || [ "$WQ_HEALTH" = "unhealthy" ]; then
+    break
+  fi
+  sleep 5
+done
+
 if [ "$HEALTH" = "healthy" ]; then
   echo "断言通过: sub2api 容器状态 healthy"
 else
@@ -115,7 +139,6 @@ else
 fi
 
 # 8e. web-quota-worker 容器健康检查（Playwright Sidecar）
-WQ_HEALTH=$(docker inspect web-quota-worker --format '{{.State.Health.Status}}' 2>/dev/null || true)
 if [ "$WQ_HEALTH" = "healthy" ]; then
   echo "断言通过: web-quota-worker 容器状态 healthy"
 else
