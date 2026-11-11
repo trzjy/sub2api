@@ -203,7 +203,7 @@ describe('QuotaKeysView 创建/编辑弹窗：激活码设置与模型限制', (
       wrapper.unmount()
     })
 
-    it('回填 model_mapping（mapping 模式：存在非恒等条目）', async () => {
+    it('回填 model_mapping（共存：非恒等条目进映射、恒等条目进白名单，模式 whitelist）', async () => {
       const wrapper = mountView()
       await flushPromises()
 
@@ -222,10 +222,11 @@ describe('QuotaKeysView 创建/编辑弹窗：激活码设置与模型限制', (
         allowedModels: string[]
         modelMappings: { from: string; to: string }[]
       }
-      expect(vm.modelRestrictionMode).toBe('mapping')
+      // 方案 §3 C1：恒等与非恒等共存，不再整体切 mapping；仅当没有任何恒等条目时才切 mapping。
+      expect(vm.modelRestrictionMode).toBe('whitelist')
+      expect(vm.allowedModels).toEqual(['gpt-4'])
       expect(vm.modelMappings).toEqual([
-        { from: 'claude-opus-*', to: 'claude-sonnet-4-5' },
-        { from: 'gpt-4', to: 'gpt-4' }
+        { from: 'claude-opus-*', to: 'claude-sonnet-4-5' }
       ])
       wrapper.unmount()
     })
@@ -440,6 +441,185 @@ describe('QuotaKeysView 创建/编辑弹窗：激活码设置与模型限制', (
 
       expect(adminAPI.quotaKeys.create).not.toHaveBeenCalled()
       expect(wrapper.text()).toContain('admin.quotaKeys.modelRestrictionRequired')
+      wrapper.unmount()
+    })
+  })
+
+  describe('模型限制：白名单 + 映射共存（方案 §3 C1）', () => {
+    // 构造 17 条恒等 + 1 条非恒等的存量 model_mapping。
+    function makeMixedMapping(): Record<string, string> {
+      const map: Record<string, string> = {}
+      for (let i = 0; i < 17; i++) {
+        map[`m-${i}`] = `m-${i}`
+      }
+      map['claude-opus-*'] = 'claude-sonnet-4-5'
+      return map
+    }
+
+    it('17 恒等 + 1 非恒等：回填后白名单 17 条、映射 1 条，模式 whitelist', async () => {
+      const wrapper = mountView()
+      await flushPromises()
+
+      const row = {
+        id: 40,
+        status: 'active',
+        exhausted: false,
+        code_masked: '****mix40',
+        model_mapping: makeMixedMapping()
+      }
+      await (wrapper.vm as unknown as { openEditDialog: (r: Record<string, unknown>) => void }).openEditDialog(row)
+      await nextTick()
+
+      const vm = wrapper.vm as unknown as {
+        modelRestrictionMode: string
+        allowedModels: string[]
+        modelMappings: { from: string; to: string }[]
+      }
+      expect(vm.modelRestrictionMode).toBe('whitelist')
+      expect(vm.allowedModels).toHaveLength(17)
+      expect(vm.allowedModels).toEqual(Array.from({ length: 17 }, (_, i) => `m-${i}`))
+      expect(vm.modelMappings).toEqual([
+        { from: 'claude-opus-*', to: 'claude-sonnet-4-5' }
+      ])
+      wrapper.unmount()
+    })
+
+    it('17 恒等 + 1 非恒等：保存提交的 model_mapping 同时含 18 条（恒等 + 映射）', async () => {
+      const wrapper = mountView()
+      await flushPromises()
+
+      const row = {
+        id: 41,
+        status: 'active',
+        exhausted: false,
+        code_masked: '****mix41',
+        model_mapping: makeMixedMapping()
+      }
+      await (wrapper.vm as unknown as { openEditDialog: (r: Record<string, unknown>) => void }).openEditDialog(row)
+      await nextTick()
+
+      const saveBtn = findButtonByText(wrapper, 'common.save')
+      expect(saveBtn).toBeTruthy()
+      await saveBtn!.trigger('click')
+      await flushPromises()
+      await nextTick()
+      await flushPromises()
+
+      expect(adminAPI.quotaKeys.update).toHaveBeenCalledTimes(1)
+      const callArg = vi.mocked(adminAPI.quotaKeys.update).mock.calls[0][1] as Record<string, unknown>
+      const sent = callArg.model_mapping as Record<string, string>
+      expect(Object.keys(sent)).toHaveLength(18)
+      // 17 条恒等
+      for (let i = 0; i < 17; i++) {
+        expect(sent[`m-${i}`]).toBe(`m-${i}`)
+      }
+      // 1 条映射
+      expect(sent['claude-opus-*']).toBe('claude-sonnet-4-5')
+      wrapper.unmount()
+    })
+
+    it('纯映射（0 恒等 + 1 非恒等）：模式 mapping', async () => {
+      const wrapper = mountView()
+      await flushPromises()
+
+      const row = {
+        id: 42,
+        status: 'active',
+        exhausted: false,
+        code_masked: '****map42',
+        model_mapping: { 'claude-opus-*': 'claude-sonnet-4-5' }
+      }
+      await (wrapper.vm as unknown as { openEditDialog: (r: Record<string, unknown>) => void }).openEditDialog(row)
+      await nextTick()
+
+      const vm = wrapper.vm as unknown as {
+        modelRestrictionMode: string
+        allowedModels: string[]
+        modelMappings: { from: string; to: string }[]
+      }
+      expect(vm.modelRestrictionMode).toBe('mapping')
+      expect(vm.allowedModels).toEqual([])
+      expect(vm.modelMappings).toEqual([
+        { from: 'claude-opus-*', to: 'claude-sonnet-4-5' }
+      ])
+      wrapper.unmount()
+    })
+
+    it('空映射 + 未触碰：不发送 model_mapping（回归）', async () => {
+      const wrapper = mountView()
+      await flushPromises()
+
+      const row = {
+        id: 43,
+        status: 'active',
+        exhausted: false,
+        code_masked: '****empty43',
+        model_mapping: null
+      }
+      await (wrapper.vm as unknown as { openEditDialog: (r: Record<string, unknown>) => void }).openEditDialog(row)
+      await nextTick()
+
+      const saveBtn = findButtonByText(wrapper, 'common.save')
+      await saveBtn!.trigger('click')
+      await flushPromises()
+      await nextTick()
+      await flushPromises()
+
+      expect(adminAPI.quotaKeys.update).toHaveBeenCalledTimes(1)
+      const callArg = vi.mocked(adminAPI.quotaKeys.update).mock.calls[0][1] as Record<string, unknown>
+      expect(callArg.model_mapping).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('存量含 foo-* -> foo-*（白名单带通配）：保存被阻断并提示，update 未被调用', async () => {
+      const wrapper = mountView()
+      await flushPromises()
+
+      const row = {
+        id: 44,
+        status: 'active',
+        exhausted: false,
+        code_masked: '****wild44',
+        // foo-* 恒等于自身，回填进白名单；但白名单含 * 无法持久化。
+        model_mapping: { 'foo-*': 'foo-*' }
+      }
+      await (wrapper.vm as unknown as { openEditDialog: (r: Record<string, unknown>) => void }).openEditDialog(row)
+      await nextTick()
+
+      const saveBtn = findButtonByText(wrapper, 'common.save')
+      await saveBtn!.trigger('click')
+      await flushPromises()
+      await nextTick()
+      await flushPromises()
+
+      expect(adminAPI.quotaKeys.update).not.toHaveBeenCalled()
+      expect(wrapper.text()).toContain('admin.quotaKeys.modelEntryNotPersistable')
+      wrapper.unmount()
+    })
+
+    it('存量含 a*b -> b（通配不在末尾）：保存被阻断', async () => {
+      const wrapper = mountView()
+      await flushPromises()
+
+      const row = {
+        id: 45,
+        status: 'active',
+        exhausted: false,
+        code_masked: '****wild45',
+        // from 通配符不在末尾（a*b），buildModelMappingObject 会跳过，静默删减被拦截。
+        model_mapping: { 'a*b': 'b' }
+      }
+      await (wrapper.vm as unknown as { openEditDialog: (r: Record<string, unknown>) => void }).openEditDialog(row)
+      await nextTick()
+
+      const saveBtn = findButtonByText(wrapper, 'common.save')
+      await saveBtn!.trigger('click')
+      await flushPromises()
+      await nextTick()
+      await flushPromises()
+
+      expect(adminAPI.quotaKeys.update).not.toHaveBeenCalled()
+      expect(wrapper.text()).toContain('admin.quotaKeys.modelEntryNotPersistable')
       wrapper.unmount()
     })
   })

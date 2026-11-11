@@ -180,6 +180,7 @@ export default {
     disabledMsg: '激活码已停用',
     statusToggleError: '切换激活码状态失败',
     mappingCoexistHint: '白名单与映射同时生效：白名单决定允许哪些请求名，映射决定发送到上游的实际模型名。',
-    quickMapping: '快速映射'
+    quickMapping: '快速映射',
+    modelEntryNotPersistable: '以下条目无法持久化（白名单条目不能含 *、映射源 * 只能在末尾、映射目标不能含 *）：{models}'
   }
 }

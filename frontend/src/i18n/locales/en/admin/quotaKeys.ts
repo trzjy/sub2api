@@ -180,6 +180,7 @@ export default {
     disabledMsg: 'Quota key disabled',
     statusToggleError: 'Failed to toggle quota key status',
     mappingCoexistHint: 'Whitelist and mapping apply together: the whitelist decides which request models are allowed, the mapping decides the upstream model actually sent.',
-    quickMapping: 'Quick mapping'
+    quickMapping: 'Quick mapping',
+    modelEntryNotPersistable: 'The following entries cannot be persisted (whitelist entries cannot contain *, mapping source * must be at the end, mapping target cannot contain *): {models}'
   }
 }

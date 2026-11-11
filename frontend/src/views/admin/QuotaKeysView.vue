@@ -427,6 +427,29 @@
 
           <!-- 映射模式 -->
           <div v-else class="space-y-3">
+            <!-- 快速映射预设按钮组：按所选模型家族平台提供一键添加映射的预设；
+                 已存在于 modelMappings 或 allowedModels 的 from 自动跳过。 -->
+            <div>
+              <div class="mb-1.5 text-xs font-medium text-gray-600 dark:text-gray-300">
+                + {{ t('admin.quotaKeys.quickMapping') }}
+              </div>
+              <div v-if="quickMappingPresets.length" class="flex flex-wrap gap-1.5">
+                <button
+                  v-for="preset in quickMappingPresets"
+                  :key="preset.from"
+                  type="button"
+                  :class="preset.color"
+                  class="rounded-full px-2.5 py-1 text-xs font-medium transition-colors"
+                  @click="addQuickMapping(preset.from, preset.to)"
+                >
+                  {{ preset.label }}
+                </button>
+              </div>
+              <p v-else class="text-xs text-gray-400 dark:text-gray-500">
+                {{ t('admin.accounts.noMatchingModels') }}
+              </p>
+            </div>
+
             <div
               v-for="(mapping, index) in modelMappings"
               :key="index"
@@ -465,6 +488,10 @@
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: modelMappings.length }) }}
               <span v-if="modelMappings.length === 0" class="text-amber-600 dark:text-amber-400">（{{ t('admin.quotaKeys.modelRestrictionRequired') }}）</span>
+            </p>
+            <!-- 白名单与映射共存说明（方案 §3 C1）。 -->
+            <p class="text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.quotaKeys.mappingCoexistHint') }}
             </p>
             <p v-if="invalidWildcardPatterns.length" class="text-xs text-red-600 dark:text-red-400">
               {{ t('admin.accounts.wildcardOnlyAtEnd') }}
@@ -948,7 +975,9 @@ import EditAccountModal from '@/components/account/EditAccountModal.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
 import {
   buildModelMappingObject,
-  isValidWildcardPattern
+  getPresetMappingsByPlatform,
+  isValidWildcardPattern,
+  splitModelMappingObject
 } from '@/composables/useModelWhitelist'
 // D2a：分组选择器（复用账号管理页的 GroupSelector）与按模型家族推导候选原生平台。
 import GroupSelector from '@/components/common/GroupSelector.vue'
@@ -1088,6 +1117,36 @@ const quotaKeyNativePlatforms = computed<GroupPlatform[]>(() => {
   const inferred = inferGroupPlatformsFromModels(quotaKeySelectedModels.value)
   return inferred.length > 0 ? inferred : [...CURSOR_NATIVE_GROUP_PLATFORMS]
 })
+
+// 映射 Tab 的「快速映射」预设家族平台：取所选模型推导出的第一个家族平台，
+// 推导为空（尚未选模型）时回落 anthropic。
+const quotaKeyFamilyPlatform = computed<string>(() => {
+  const inferred = inferGroupPlatformsFromModels(quotaKeySelectedModels.value)
+  return inferred.length > 0 ? inferred[0] : 'anthropic'
+})
+
+// 「快速映射」预设按钮组：按家族平台取预设映射，已存在于 modelMappings 或 allowedModels
+// 的 from 跳过（避免重复添加 / 与白名单恒等条目冲突）。
+const quickMappingPresets = computed(() => {
+  const existingFroms = new Set<string>()
+  for (const m of modelMappings.value) {
+    const v = m.from.trim()
+    if (v) existingFroms.add(v)
+  }
+  for (const m of allowedModels.value) {
+    const v = m.trim()
+    if (v) existingFroms.add(v)
+  }
+  return getPresetMappingsByPlatform(quotaKeyFamilyPlatform.value).filter((p) =>
+    !existingFroms.has(p.from.trim())
+  )
+})
+
+// 一键添加预设映射：追加到映射列表并标记已触碰模型限制。
+function addQuickMapping(from: string, to: string) {
+  modelMappings.value.push({ from, to })
+  modelRestrictionTouched.value = true
+}
 
 /**
  * §0.1 #7 折叠裁定：账号列表默认折叠。
@@ -1305,26 +1364,16 @@ function openEditDialog(row: QuotaKey) {
   form.concurrency = row.concurrency ?? null
   form.load_factor = row.load_factor ?? null
   form.rate_multiplier = row.rate_multiplier ?? 1
-  // 模型限制回填（用户裁定口径）：
-  // - 非空对象且全部为恒等映射（k === v）→ whitelist 模式，全部填入 allowedModels。
-  // - 非空对象但存在任意非恒等条目 → mapping 模式，全部条目转为 {from, to} 填入 modelMappings
-  //   （含恒等条目也以映射形式保留，避免切换模式后丢模型）。
-  // - 空 / null → 空列表 + whitelist 模式。
-  const mm = row.model_mapping
-  const entries = mm && typeof mm === 'object' ? Object.entries(mm) : []
-  if (entries.length > 0 && entries.every(([k, v]) => k === v)) {
-    modelRestrictionMode.value = 'whitelist'
-    allowedModels.value = entries.map(([k]) => k)
-    modelMappings.value = []
-  } else if (entries.length > 0) {
-    modelRestrictionMode.value = 'mapping'
-    modelMappings.value = entries.map(([k, v]) => ({ from: k, to: v as string }))
-    allowedModels.value = []
-  } else {
-    modelRestrictionMode.value = 'whitelist'
-    allowedModels.value = []
-    modelMappings.value = []
-  }
+  // 模型限制回填（方案 §3 C1：白名单 + 映射共存，不再互抹）：
+  // 用 splitModelMappingObject 把存量 model_mapping 拆成「恒等条目 → 白名单」与
+  // 「非恒等条目 → 映射」两部分，两类同时保留。
+  // 模式判定：仅当存在非恒等映射且没有任何恒等条目时才切到 mapping，否则保持 whitelist
+  // （whitelist 模式下也能渲染映射 Tab，二者共存）。
+  const parsed = splitModelMappingObject(row.model_mapping as Record<string, unknown> | null)
+  allowedModels.value = parsed.allowedModels
+  modelMappings.value = parsed.modelMappings
+  modelRestrictionMode.value =
+    parsed.modelMappings.length > 0 && parsed.allowedModels.length === 0 ? 'mapping' : 'whitelist'
   modelRestrictionTouched.value = false
   // D2a：编辑态回填已有分组绑定（row.group_ids 缺省视为未绑定），未触碰。
   form.group_ids = [...(row.group_ids ?? [])]
@@ -1462,11 +1511,33 @@ async function submitForm() {
   }
 
   // 模型限制：计算映射对象并应用「禁止空模型落库」裁定（用户裁定 #3）。
+  // 统一用 'combined'：白名单恒等条目 + 映射条目共存，不再互抹（方案 §3 C1）。
   const modelMapping = buildModelMappingObject(
-    modelRestrictionMode.value,
+    'combined',
     allowedModels.value,
     modelMappings.value
   )
+
+  // 失败关闭（外审 R2a must_fix）：禁止静默删减存量条目。
+  // buildModelMappingObject('combined') 会跳过三类条目：白名单里含 * 的、
+  // from 通配符不在末尾的、to 含 * 的。后端 normalizeQuotaKeySettings 只做去空白，
+  // 存量里可能存在这三类，若不拦截保存会把它们静默删掉。
+  // 源键集合（表单里所有会被写进 model_mapping 的请求侧名字）。
+  const sourceKeys = new Set<string>()
+  for (const m of allowedModels.value) {
+    const v = m.trim()
+    if (v) sourceKeys.add(v)
+  }
+  for (const m of modelMappings.value) {
+    const v = m.from.trim()
+    if (v && m.to.trim()) sourceKeys.add(v)
+  }
+  const builtKeys = new Set(Object.keys(modelMapping ?? {}))
+  const dropped = [...sourceKeys].filter((k) => !builtKeys.has(k))
+  if (dropped.length > 0) {
+    formError.value = t('admin.quotaKeys.modelEntryNotPersistable', { models: dropped.join(', ') })
+    return
+  }
   let sendModelMapping = false
   if (editing.value) {
     const orig = editing.value.model_mapping
