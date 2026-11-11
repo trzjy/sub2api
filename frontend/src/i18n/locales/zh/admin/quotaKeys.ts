@@ -167,6 +167,19 @@ export default {
       selectPlaceholder: '选择该激活码所属的上游（决定用哪个号池拉号）',
       selectHint: '激活码归属哪个上游，决定拉号时走哪条上游链路（ShareAI 号池 / kn-cy.com 网关）；创建后不可修改。',
       selectRequired: '请选择所属上游'
-    }
+    },
+    groupBinding: '绑定分组',
+    groupBindingHint: '该码服务的站点分组；保存后同步名下全部账号。留空表示暂时不服务任何分组。',
+    enable: '启用',
+    disable: '停用',
+    confirmEnableTitle: '启用激活码',
+    confirmEnableMsg: '启用后该码名下账号将重新参与调度。确定继续？',
+    confirmDisableTitle: '停用激活码',
+    confirmDisableMsg: '停用后该码名下账号立即停止调度，且不再自动拉号；账号与绑定关系保留，可随时恢复。确定继续？',
+    enabled: '激活码已启用',
+    disabledMsg: '激活码已停用',
+    statusToggleError: '切换激活码状态失败',
+    mappingCoexistHint: '白名单与映射同时生效：白名单决定允许哪些请求名，映射决定发送到上游的实际模型名。',
+    quickMapping: '快速映射'
   }
 }

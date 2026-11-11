@@ -3519,6 +3519,7 @@
         :groups="selectableGroups"
         :platform="account?.platform"
         :mixed-scheduling="mixedScheduling"
+        :disabled="cursorKeyManaged"
         :native-platforms="account?.platform === 'antigravity' ? antigravitySupportedPlatforms : cursorNativePlatforms"
         :account-models="account?.platform === 'cursor' && cursorSelectedModels.length > 0 ? cursorSelectedModels : undefined"
         data-tour="account-form-groups"
@@ -3740,10 +3741,10 @@ const isSparkShadow = computed(() => props.account?.parent_account_id != null)
 // 非 cursor 或未启用模型限制时返回空数组。
 const cursorSelectedModels = computed<string[]>(() => {
   if (props.account?.platform !== 'cursor') return []
-  if (modelRestrictionMode.value === 'mapping') {
-    return modelMappings.value.map((m) => m.from.trim()).filter(Boolean)
-  }
-  return allowedModels.value.map((m) => m.trim()).filter(Boolean)
+  const set = new Set<string>()
+  for (const m of allowedModels.value) { const v = m.trim(); if (v) set.add(v) }
+  for (const m of modelMappings.value) { const v = m.from.trim(); if (v) set.add(v) }
+  return Array.from(set)
 })
 
 const cursorNativePlatforms = computed<GroupPlatform[]>(() => {
@@ -3799,6 +3800,10 @@ const loadManagedExpiry = async () => {
     if (key?.rate_multiplier != null) form.rate_multiplier = key.rate_multiplier
     if (key?.model_mapping != null) {
       loadModelRestrictionFromMapping(key.model_mapping as Record<string, unknown>)
+    }
+    // 分组绑定上移激活码后，账号侧分组只读（c1p1-D4）：isStillCurrent 校验通过后回填激活码分组。
+    if (key?.group_ids != null) {
+      form.group_ids = [...key.group_ids]
     }
   } catch {
     if (!isStillCurrent()) return
@@ -6096,6 +6101,8 @@ const handleSubmit = async () => {
       delete updatePayload.load_factor
       delete updatePayload.priority
       delete updatePayload.rate_multiplier
+      // 分组绑定上移激活码后，账号侧分组只读（c1p1-D4）：保存时不从账号侧覆盖分组。
+      delete updatePayload.group_ids
     } else if (form.expires_at === null) {
       updatePayload.expires_at = 0
     }

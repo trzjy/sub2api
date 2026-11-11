@@ -1543,6 +1543,25 @@ func cursorSupplyPublicModelIDsFromMapping(mapping map[string]string) []string {
 	return ids
 }
 
+// cursorSupplyModelBelongsPlatform 判定 Cursor 跨平台供给的某个公开模型名
+// 是否属于分组平台 platform 的模型家族。优先用请求侧模型名判定；判定不出时
+// 回落到映射目标（兼容自定义别名，如 my-claude → claude-sonnet-5-5）。
+// 两者都判定不出 → 不归属（失败关闭，不把未知模型塞进任何原生平台分组）。
+//
+// 聚合平台分组（composite / cursor）没有单一模型家族，一律返回 true（不做家族过滤）。
+func cursorSupplyModelBelongsPlatform(groupPlatform, publicModel, upstreamModel string) bool {
+	if groupPlatform == "" || groupPlatform == PlatformComposite || groupPlatform == PlatformCursor {
+		return true
+	}
+	if detected, ok := DetectModelPlatform(publicModel); ok {
+		return detected == groupPlatform
+	}
+	if detected, ok := DetectModelPlatform(upstreamModel); ok {
+		return detected == groupPlatform
+	}
+	return false
+}
+
 func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64, platform string) []string {
 	cacheKey := modelsListCacheKey(groupID, platform)
 	if s.modelsListCache != nil {
@@ -1618,6 +1637,12 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 			}
 		}
 		for _, model := range candidates {
+			// Cursor 跨平台供给：平台分组须按模型家族过滤，防止把其它平台模型泄漏进本组公开列表。
+			// 聚合平台分组（composite / cursor）无单一家族，由 helper 内部放行，不受本行影响。
+			if cursorListable && platform != "" && acc.Platform != platform &&
+				!cursorSupplyModelBelongsPlatform(platform, model, mapping[model]) {
+				continue
+			}
 			// Accounts pulled in through mixed scheduling only contribute the
 			// models that belong to the listing platform (e.g. an antigravity
 			// account's claude-* mappings must not surface on a gemini group).

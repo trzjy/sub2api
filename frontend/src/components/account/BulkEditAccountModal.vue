@@ -231,6 +231,12 @@
         </p>
       </div>
 
+      <!-- Cursor managed hint -->
+      <div v-if="hasCursorManaged" data-testid="bulk-cursor-managed-banner"
+           class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-400">
+        {{ t('admin.accounts.bulkEdit.cursorManagedHint') }}
+      </div>
+
       <!-- Model restriction -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -241,18 +247,19 @@
           >
             {{ t('admin.accounts.modelRestriction') }}
           </label>
-          <input
-            v-model="enableModelRestriction"
-            id="bulk-edit-model-restriction-enabled"
-            type="checkbox"
-            aria-controls="bulk-edit-model-restriction-body"
-            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-          />
+            <input
+              v-model="enableModelRestriction"
+              id="bulk-edit-model-restriction-enabled"
+              type="checkbox"
+              :disabled="hasCursorManaged"
+              aria-controls="bulk-edit-model-restriction-body"
+              class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+            />
         </div>
 
         <div
           id="bulk-edit-model-restriction-body"
-          :class="!enableModelRestriction && 'pointer-events-none opacity-50'"
+          :class="(!enableModelRestriction || hasCursorManaged) && 'pointer-events-none opacity-50'"
           role="group"
           aria-labelledby="bulk-edit-model-restriction-label"
         >
@@ -695,7 +702,7 @@
 
       <!-- Concurrency & Priority -->
       <div class="grid grid-cols-2 gap-4 border-t border-gray-200 pt-4 dark:border-dark-600 lg:grid-cols-4">
-        <div>
+        <div :class="hasCursorManaged ? 'pointer-events-none opacity-50' : ''">
           <div class="mb-3 flex items-center justify-between">
             <label
               id="bulk-edit-concurrency-label"
@@ -708,6 +715,7 @@
               v-model="enableConcurrency"
               id="bulk-edit-concurrency-enabled"
               type="checkbox"
+              :disabled="hasCursorManaged"
               aria-controls="bulk-edit-concurrency"
               class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
             />
@@ -724,7 +732,7 @@
             @input="concurrency = Math.max(1, concurrency || 1)"
           />
         </div>
-        <div>
+        <div :class="hasCursorManaged ? 'pointer-events-none opacity-50' : ''">
           <div class="mb-3 flex items-center justify-between">
             <label
               id="bulk-edit-load-factor-label"
@@ -737,6 +745,7 @@
               v-model="enableLoadFactor"
               id="bulk-edit-load-factor-enabled"
               type="checkbox"
+              :disabled="hasCursorManaged"
               aria-controls="bulk-edit-load-factor"
               class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
             />
@@ -754,7 +763,7 @@
           />
           <p class="input-hint">{{ t('admin.accounts.loadFactorHint') }}</p>
         </div>
-        <div>
+        <div :class="hasCursorManaged ? 'pointer-events-none opacity-50' : ''">
           <div class="mb-3 flex items-center justify-between">
             <label
               id="bulk-edit-priority-label"
@@ -767,6 +776,7 @@
               v-model="enablePriority"
               id="bulk-edit-priority-enabled"
               type="checkbox"
+              :disabled="hasCursorManaged"
               aria-controls="bulk-edit-priority"
               class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
             />
@@ -782,7 +792,7 @@
             aria-labelledby="bulk-edit-priority-label"
           />
         </div>
-        <div>
+        <div :class="hasCursorManaged ? 'pointer-events-none opacity-50' : ''">
           <div class="mb-3 flex items-center justify-between">
             <label
               id="bulk-edit-rate-multiplier-label"
@@ -795,6 +805,7 @@
               v-model="enableRateMultiplier"
               id="bulk-edit-rate-multiplier-enabled"
               type="checkbox"
+              :disabled="hasCursorManaged"
               aria-controls="bulk-edit-rate-multiplier"
               class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
             />
@@ -1404,18 +1415,20 @@
           >
             {{ t('nav.groups') }}
           </label>
-          <input
-            v-model="enableGroups"
-            id="bulk-edit-groups-enabled"
-            type="checkbox"
-            aria-controls="bulk-edit-groups"
-            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-          />
+            <input
+              v-model="enableGroups"
+              id="bulk-edit-groups-enabled"
+              type="checkbox"
+              :disabled="hasCursorManaged"
+              aria-controls="bulk-edit-groups"
+              class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+            />
         </div>
-        <div id="bulk-edit-groups" :class="!enableGroups && 'pointer-events-none opacity-50'">
+        <div id="bulk-edit-groups" :class="(!enableGroups || hasCursorManaged) && 'pointer-events-none opacity-50'">
           <GroupSelector
             v-model="groupIds"
             :groups="groups"
+            :disabled="hasCursorManaged"
             aria-labelledby="bulk-edit-groups-label"
           />
         </div>
@@ -1532,9 +1545,12 @@ interface Props {
   }
   proxies: ProxyConfig[]
   groups: AdminGroup[]
+  hasCursorManaged?: boolean
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  hasCursorManaged: false
+})
 const emit = defineEmits<{
   close: []
   updated: []
@@ -1949,21 +1965,21 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     updates.proxy_id = proxyId.value === null ? 0 : proxyId.value
   }
 
-  if (enableConcurrency.value) {
+  if (enableConcurrency.value && !props.hasCursorManaged) {
     updates.concurrency = concurrency.value
   }
 
-  if (enableLoadFactor.value) {
+  if (enableLoadFactor.value && !props.hasCursorManaged) {
     // 空值/NaN/0 时发送 0（后端约定 <= 0 表示清除）
     const lf = loadFactor.value
     updates.load_factor = (lf != null && !Number.isNaN(lf) && lf > 0) ? lf : 0
   }
 
-  if (enablePriority.value) {
+  if (enablePriority.value && !props.hasCursorManaged) {
     updates.priority = priority.value
   }
 
-  if (enableRateMultiplier.value) {
+  if (enableRateMultiplier.value && !props.hasCursorManaged) {
     updates.rate_multiplier = rateMultiplier.value
   }
 
@@ -1971,7 +1987,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     updates.status = status.value
   }
 
-  if (enableGroups.value) {
+  if (enableGroups.value && !props.hasCursorManaged) {
     updates.group_ids = groupIds.value
   }
 
@@ -2021,7 +2037,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
         : openAIResponsesMode.value
   }
 
-  if (enableModelRestriction.value && !isOpenAIModelRestrictionDisabled.value) {
+  if (enableModelRestriction.value && !isOpenAIModelRestrictionDisabled.value && !props.hasCursorManaged) {
     // 统一使用 model_mapping 字段
     if (modelRestrictionMode.value === 'whitelist') {
       // 白名单模式：将模型转换为 model_mapping 格式（key=value）

@@ -249,11 +249,16 @@ const GroupSelectorStub = defineComponent({
     modelValue: {
       type: Array,
       default: () => []
+    },
+    disabled: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ['update:modelValue'],
   template: `
-    <div data-testid="group-selector">
+    <div data-testid="group-selector" :data-disabled="disabled ? 'yes' : 'no'">
+      <span data-testid="group-selector-value">{{ Array.isArray(modelValue) ? modelValue.join(',') : '' }}</span>
       <button
         type="button"
         data-testid="set-shadow-group"
@@ -2691,5 +2696,118 @@ describe('EditAccountModal temp-unschedulable rule scope', () => {
 
     expect(checkedScopes(wrapper)).toEqual(['temp-unsched-scope-model'])
     wrapper.unmount()
+  })
+
+  // c1p1-D4：分组绑定上移激活码后，账号侧分组只读并合并模型家族推导。
+  describe('cursor group read-only merge (c1p1-D4)', () => {
+    const buildCursorKeyAccount = (overrides: Record<string, unknown> = {}) => {
+      const account = buildAccount()
+      return {
+        ...account,
+        platform: 'cursor',
+        type: 'oauth',
+        quota_key_id: 42,
+        credentials: { access_token: 'cursor-token' },
+        ...overrides
+      } as any
+    }
+
+    beforeEach(() => {
+      authIsSimpleMode.value = true
+    })
+
+    // (1) 绑定激活码的 Cursor 账号：GroupSelector disabled=true，提交 payload 不含 group_ids。
+    it('disables GroupSelector and omits group_ids on save for cursor quota-key-managed account', async () => {
+      const account = buildCursorKeyAccount({ group_ids: [1, 2] })
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset().mockResolvedValue({ expires_at: '2029-05-01T08:30:00Z' })
+
+      const wrapper = mountModal(account)
+      await flushPromises()
+
+      expect(getQuotaKeyMock).toHaveBeenCalledWith(42)
+      const selector = wrapper.get('[data-testid="group-selector"]')
+      expect(selector.attributes('data-disabled')).toBe('yes')
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+      expect(payload).not.toHaveProperty('group_ids')
+      wrapper.unmount()
+    })
+
+    // (2) key.group_ids 非空时表单回填该值。
+    it('backfills form.group_ids from the managed quota key', async () => {
+      const account = buildCursorKeyAccount({ group_ids: [] })
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset().mockResolvedValue({
+        expires_at: '2029-05-01T08:30:00Z',
+        group_ids: [11, 12]
+      })
+
+      const wrapper = mountModal(account)
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="group-selector-value"]').text()).toBe('11,12')
+      wrapper.unmount()
+    })
+
+    // (3) cursorSelectedModels 同时含白名单模型与映射 from（分组可见性断言）。
+    it('derives cursor selected models as union of whitelist and mapping.from', async () => {
+      authIsSimpleMode.value = false
+      const account = buildAccount()
+      account.platform = 'cursor'
+      account.type = 'oauth'
+      account.credentials = {
+        access_token: 'cursor-token',
+        // 'claude-sonnet-4' 身份映射 -> 白名单；'gpt-5.2' 非身份映射 -> 映射 from。
+        model_mapping: { 'claude-sonnet-4': 'claude-sonnet-4', 'gpt-5.2': 'deepseek-chat' }
+      }
+      const anthropicGroup = { id: 34, name: 'claude-max', platform: 'anthropic', status: 'active' }
+      const openaiGroup = { id: 35, name: 'gpt-max', platform: 'openai', status: 'active' }
+      const geminiGroup = { id: 36, name: 'gem-max', platform: 'gemini', status: 'active' }
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset()
+
+      const wrapper = mountModal(account, true)
+      await wrapper.setProps({ groups: [anthropicGroup, openaiGroup, geminiGroup] as any })
+      await flushPromises()
+
+      const selector = wrapper.get('[data-tour="account-form-groups"]')
+      // 并集同时覆盖 anthropic(claude-sonnet-4) 与 openai(gpt-5.2) 两家族，故两族组均可见；
+      // gemini 不在并集中，故不可见。
+      expect(selector.text()).toContain('claude-max')
+      expect(selector.text()).toContain('gpt-max')
+      expect(selector.text()).not.toContain('gem-max')
+      wrapper.unmount()
+    })
+
+    // (4) 非绑定码的 Cursor 账号：disabled=false，提交仍带 group_ids（回归）。
+    it('keeps GroupSelector editable and submits group_ids for non-key-managed cursor account', async () => {
+      const account = buildCursorKeyAccount({ quota_key_id: null, group_ids: [1] })
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      getQuotaKeyMock.mockReset()
+
+      const wrapper = mountModal(account)
+      await flushPromises()
+
+      expect(getQuotaKeyMock).not.toHaveBeenCalled()
+      const selector = wrapper.get('[data-testid="group-selector"]')
+      expect(selector.attributes('data-disabled')).toBe('no')
+
+      // 模拟用户选择一个分组。
+      await wrapper.get('[data-testid="set-shadow-group"]').trigger('click')
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      const payload = updateAccountMock.mock.calls[0]?.[1] as Record<string, unknown>
+      expect(payload.group_ids).toEqual([7])
+      wrapper.unmount()
+    })
   })
 })

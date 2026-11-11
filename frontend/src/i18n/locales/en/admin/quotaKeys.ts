@@ -167,6 +167,19 @@ export default {
       selectPlaceholder: 'Select the upstream this key belongs to (determines which account pool pulls it)',
       selectHint: 'The upstream determines which pull path is used (ShareAI pool / kn-cy.com gateway). It cannot be changed after creation.',
       selectRequired: 'Please select an upstream'
-    }
+    },
+    groupBinding: 'Bound Groups',
+    groupBindingHint: 'Site groups served by this code; saved groups sync to all accounts under it. Leave empty to serve no group temporarily.',
+    enable: 'Enable',
+    disable: 'Disable',
+    confirmEnableTitle: 'Enable quota key',
+    confirmEnableMsg: 'Accounts under this key will re-enter scheduling. Continue?',
+    confirmDisableTitle: 'Disable quota key',
+    confirmDisableMsg: 'Accounts under this key stop scheduling immediately and auto-pull stops. Accounts and bindings are kept and can be restored. Continue?',
+    enabled: 'Quota key enabled',
+    disabledMsg: 'Quota key disabled',
+    statusToggleError: 'Failed to toggle quota key status',
+    mappingCoexistHint: 'Whitelist and mapping apply together: the whitelist decides which request models are allowed, the mapping decides the upstream model actually sent.',
+    quickMapping: 'Quick mapping'
   }
 }

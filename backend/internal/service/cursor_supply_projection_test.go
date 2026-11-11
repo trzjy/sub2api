@@ -124,6 +124,12 @@ func TestCursorSupplyPublicModelIDsFromMapping(t *testing.T) {
 // TestCursorSupplyProjectionSharedByListModelsAndNarrowEntry 钉死「唯一纯投影」：
 // 公开目录路径（GetAvailableModels）与窄只读入口对同一账号给出同一份 Cursor 名单，
 // 都排除空键/通配键，说明两处调用点共用同一个投影函数而非各写一份算法。
+//
+// 注意：本用例的模型全部属于 gemini 家族。家族过滤（QKG-C1）只让"属于本组平台家族"
+// 的 Cursor 模型进入 /v1/models；窄只读入口（GetCursorSupplyModelIDs）不做家族过滤，
+// 故只有在两者家族一致的分组（此处 gemini 组 + gemini 家族模型）下，listed 与 supplied
+// 才会相等。改用 gemini 家族模型而非无法识别家族的 cursor-* 名称，以在新语义下仍验证
+// "同一份纯投影"的不变量。
 func TestCursorSupplyProjectionSharedByListModelsAndNarrowEntry(t *testing.T) {
 	keyID := int64(9701)
 	now := cursorSupplyProjFreezeNow(t)
@@ -137,12 +143,16 @@ func TestCursorSupplyProjectionSharedByListModelsAndNarrowEntry(t *testing.T) {
 		)},
 	})
 
+	// 两个模型都属于 gemini 家族：在 gemini 分组下 /v1/models（已按家族过滤）与窄只读
+	// 入口给出同一份 Cursor 名单。
+	const geminiModelA = "gemini-2.5-flash"
+	const geminiModelB = "gemini-2.5-pro"
 	account := cursorSupplyProjAccount(8101, &keyID, map[string]any{
 		"":                       "upstream-empty",
 		"*":                      "upstream-star",
-		cursorSupplyProjWildcard: "upstream-wildcard-" + cursorSupplyProjModelA,
-		cursorSupplyProjModelB:   "upstream-b",
-		cursorSupplyProjModelA:   "upstream-a",
+		cursorSupplyProjWildcard: "upstream-wildcard-" + geminiModelA,
+		geminiModelB:             "upstream-b",
+		geminiModelA:             "upstream-a",
 	})
 	groupID := cursorSupplyProjGroupID
 	repo := &modelsListAccountRepoStub{byGroup: map[int64][]Account{groupID: {account}}}
@@ -152,7 +162,7 @@ func TestCursorSupplyProjectionSharedByListModelsAndNarrowEntry(t *testing.T) {
 	listed := svc.GetAvailableModels(ctx, &groupID, PlatformGemini)
 	supplied, err := svc.GetCursorSupplyModelIDs(ctx, &groupID, PlatformGemini)
 	require.NoError(t, err)
-	require.Equal(t, []string{cursorSupplyProjModelA, cursorSupplyProjModelB}, supplied)
+	require.Equal(t, []string{geminiModelA, geminiModelB}, supplied)
 	require.Equal(t, listed, supplied,
 		"/v1/models 与窄只读入口必须共用同一个纯投影（空键/通配键都不外露）")
 }
@@ -334,4 +344,67 @@ func TestCursorSupplyNarrowEntryNoQualifyingAccount(t *testing.T) {
 	models, err = svc.GetCursorSupplyModelIDs(ctx, &groupID, PlatformGemini)
 	require.NoError(t, err)
 	require.Empty(t, models)
+}
+
+// TestCursorSupplyGetAvailableModelsFamilyFilter 钉死 QKG-C1 的修复：Cursor 跨平台供给
+// 账号在原生平台分组的 /v1/models 中必须按模型家族过滤，绝不能把其它平台模型泄漏进本组。
+//
+// 映射覆盖四个家族 + 一个自定义别名（my-claude → claude-sonnet-5-5）+ 一个两端都判定不出的
+// 未知别名：
+//   - anthropic 组仅返回 claude-* 家族（含别名 my-claude：源 my-claude 判定不出，回落到
+//     映射目标 claude-sonnet-5-5 属 anthropic）；
+//   - openai 组仅返回 gpt-*；gemini 组仅返回 gemini-*；grok 组仅返回 grok-*；
+//   - 自定义别名 my-claude 在 openai 组不可见（映射目标属 anthropic，与 openai 不符）；
+//   - 未知别名（源与目标都判定不出）在任何平台组都不可见（失败关闭）。
+func TestCursorSupplyGetAvailableModelsFamilyFilter(t *testing.T) {
+	activeKey := int64(9761)
+	now := cursorSupplyProjFreezeNow(t)
+	freshCheckedAt := now.Add(-time.Minute).Format(time.RFC3339)
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{
+			activeKey: domain.QuotaKeyStatusActive,
+		},
+		snapshots: map[int64][]byte{activeKey: []byte(
+			`{"total":400,"used":86,"status_code":200,"checked_at":"` + freshCheckedAt + `","error_code":""}`,
+		)},
+	})
+
+	account := cursorSupplyProjAccount(8701, &activeKey, map[string]any{
+		"claude-fable-5-1": "anthropic.claude-fable-5-1",
+		"gpt-6.1-sol":      "gpt-6.1-sol",
+		"gemini-3.8-flash": "gemini-3.8-flash",
+		"grok-4.7":         "grok-4.7",
+		"my-claude":        "claude-sonnet-5-5", // 自定义别名：源 my-claude 判定不出，回落到映射目标
+		"zzz-unknown":      "qqq-unknown",       // 源与目标都判定不出 → 任何平台组都不可见
+	})
+	groupID := cursorSupplyProjGroupID
+	repo := &modelsListAccountRepoStub{byGroup: map[int64][]Account{groupID: {account}}}
+	svc := &GatewayService{accountRepo: repo}
+
+	cases := []struct {
+		platform string
+		want     []string
+	}{
+		{PlatformAnthropic, []string{"claude-fable-5-1", "my-claude"}},
+		{PlatformOpenAI, []string{"gpt-6.1-sol"}},
+		{PlatformGemini, []string{"gemini-3.8-flash"}},
+		{PlatformGrok, []string{"grok-4.7"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.platform, func(t *testing.T) {
+			ctx := cursorSupplyProjCtx(tc.platform, nil)
+			got := svc.GetAvailableModels(ctx, &groupID, tc.platform)
+			require.Equal(t, tc.want, got,
+				"平台分组 %s 的 /v1/models 必须只含其模型家族", tc.platform)
+			require.NotContains(t, got, "zzz-unknown",
+				"未知别名在任何平台组都必须失败关闭")
+		})
+	}
+
+	// 自定义别名 my-claude 在 openai 组不可见：映射目标 claude-sonnet-5-5 属 anthropic，
+	// 与 openai 不符 → 被过滤。
+	ctxOpenAI := cursorSupplyProjCtx(PlatformOpenAI, nil)
+	openAIListed := svc.GetAvailableModels(ctxOpenAI, &groupID, PlatformOpenAI)
+	require.NotContains(t, openAIListed, "my-claude",
+		"自定义别名 my-claude 的映射目标属 anthropic，不得泄漏进 openai 组")
 }

@@ -1033,4 +1033,87 @@ describe('BulkEditAccountModal', () => {
       }
     })
   })
+
+  it('hasCursorManaged=true 时六个受管项禁用、提示条渲染且 payload 不含它们', async () => {
+    const wrapper = mountModal({ hasCursorManaged: true })
+
+    // 提示条渲染
+    expect(wrapper.find('[data-testid="bulk-cursor-managed-banner"]').exists()).toBe(true)
+
+    // 六个开关禁用
+    for (const id of [
+      'concurrency',
+      'load-factor',
+      'priority',
+      'rate-multiplier',
+      'model-restriction',
+      'groups'
+    ]) {
+      expect(wrapper.get(`#bulk-edit-${id}-enabled`).attributes('disabled')).toBeDefined()
+    }
+
+    // 即使脚本强制开启受管项，payload 也不得上送（双保险）
+    await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-load-factor-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-priority-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-rate-multiplier-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-groups-enabled').setValue(true)
+    // 开启一个非受管项以便形成有效 payload
+    await wrapper.get('#bulk-edit-status-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledTimes(1)
+    const payload = vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0][1] as Record<string, unknown>
+    expect(payload).toHaveProperty('status')
+    expect(payload).not.toHaveProperty('concurrency')
+    expect(payload).not.toHaveProperty('load_factor')
+    expect(payload).not.toHaveProperty('priority')
+    expect(payload).not.toHaveProperty('rate_multiplier')
+    expect(payload).not.toHaveProperty('group_ids')
+    expect(payload).not.toHaveProperty('credentials')
+  })
+
+  it('hasCursorManaged 不传（默认 false）时受管字段正常上送（回归）', async () => {
+    const wrapper = mountModal()
+
+    // 默认不应渲染提示条
+    expect(wrapper.find('[data-testid="bulk-cursor-managed-banner"]').exists()).toBe(false)
+
+    await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-load-factor-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-priority-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-rate-multiplier-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-groups-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledTimes(1)
+    const payload = vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0][1] as Record<string, unknown>
+    expect(payload).toHaveProperty('concurrency')
+    expect(payload).toHaveProperty('load_factor')
+    expect(payload).toHaveProperty('priority')
+    expect(payload).toHaveProperty('rate_multiplier')
+    expect(payload).toHaveProperty('group_ids')
+  })
+
+  it('hasCursorManaged 不传（默认 false）时 model_mapping 正常上送（回归）', async () => {
+    const wrapper = mountModal({
+      selectedPlatforms: ['anthropic'],
+      selectedTypes: ['apikey']
+    })
+
+    expect(wrapper.find('[data-testid="bulk-cursor-managed-banner"]').exists()).toBe(false)
+
+    await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledTimes(1)
+    const payload = vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0][1] as Record<string, unknown>
+    expect(payload).toHaveProperty('concurrency')
+    expect((payload.credentials as Record<string, unknown>)).toHaveProperty('model_mapping')
+  })
 })
