@@ -1254,7 +1254,7 @@ func (s *QuotaKeyService) UpdateWithSettings(ctx context.Context, id int64, code
 		}
 	}
 	baseChanged := code != nil || expiresAt != nil || notes != nil || priority != nil
-	settingsChanged := settings != nil && (settings.Concurrency != nil || settings.LoadFactor != nil || settings.RateMultiplier != nil || settings.ModelMappingSet)
+	settingsChanged := settings != nil && (settings.Concurrency != nil || settings.LoadFactor != nil || settings.RateMultiplier != nil || settings.ModelMappingSet || settings.GroupIDs != nil)
 	if !baseChanged && !settingsChanged {
 		return s.GetStatus(ctx, id)
 	}
@@ -1292,7 +1292,9 @@ func (s *QuotaKeyService) UpdateWithSettings(ctx context.Context, id int64, code
 		}
 		// 创建/更新路径在锁内（同一 per-key 事务）把白名单追加进已绑定分组；
 		// 提交成功后失效受影响分组的认证缓存（见下方 lockCtx 外层调用）。
-		if settings != nil && settings.ModelMappingSet && len(settings.ModelMapping) > 0 {
+		// nil tx 仅出现在未装配 ent client 的替身装配场景，生产恒有 client：
+		// 该分支下白名单追加无意义直接跳过，但分组绑定落库（走 UpdateSettingsAndSyncAccounts）不受影响。
+		if tx != nil && settings != nil && settings.ModelMappingSet && len(settings.ModelMapping) > 0 {
 			changed, aerr := s.appendModelsToBoundGroupAllowlists(lockCtx, tx, id, settings.ModelMapping)
 			if aerr != nil {
 				return fmt.Errorf("quota_key_service: append group allowlist: %w", aerr)

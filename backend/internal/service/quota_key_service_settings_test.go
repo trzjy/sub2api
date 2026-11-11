@@ -521,3 +521,47 @@ func TestListCandidateKeys_SkipsEmptyGroupIDs(t *testing.T) {
 	require.NotContains(t, cands, qkEmpty, "显式解绑分组(空)的码不得参与自动补池")
 	require.Contains(t, cands, qkNormal.ID, "正常未绑定分组的码应参与自动补池")
 }
+
+// qkgCaptureSettingsRepo 包装 fakeQuotaKeyRepo，额外实现 quotaKeySettingsRepo，用于记录
+// UpdateSettingsAndSyncAccounts 的调用次数与最近一次入参，断言"仅改 group_ids 的 Update 会真正落库"。
+type qkgCaptureSettingsRepo struct {
+	*fakeQuotaKeyRepo
+	updateSettingsCalls int
+	lastSettings        UpdateQuotaKeySettingsInput
+}
+
+func (r *qkgCaptureSettingsRepo) UpdateSettingsAndSyncAccounts(_ context.Context, _ *ent.Tx, _ int64, settings UpdateQuotaKeySettingsInput) error {
+	r.updateSettingsCalls++
+	r.lastSettings = settings
+	return nil
+}
+
+func (r *qkgCaptureSettingsRepo) SyncAccountsExpiry(_ context.Context, _ *ent.Tx, _ int64, _ *time.Time) error {
+	return nil
+}
+
+// TestQuotaKeyServiceSettings_UpdatePersistsGroupIDsOnly 验证缺陷 2 的修复：UpdateWithSettings 的
+// settingsChanged 判定含 GroupIDs，于是"只改分组绑定"的请求不会再被判为无变更而直接 return GetStatus，
+// 而是真正调用仓储 UpdateSettingsAndSyncAccounts 落库，且传入的 GroupIDs 为新值。
+//
+// 该用例在修复前的代码（settingsChanged 不含 GroupIDs）下会失败：UpdateWithSettings 提前返回，
+// UpdateSettingsAndSyncAccounts 调用次数为 0。
+func TestQuotaKeyServiceSettings_UpdatePersistsGroupIDsOnly(t *testing.T) {
+	repo := &qkgCaptureSettingsRepo{fakeQuotaKeyRepo: newFakeQuotaKeyRepo()}
+	// 预置存在的激活码，使 UpdateWithSettings 末尾 GetStatus 能命中（不连库）。
+	repo.byID[1] = &ent.QuotaKey{ID: 1, Status: domain.QuotaKeyStatusActive}
+	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, nil)
+	ctx := context.Background()
+
+	newGroups := []int64{10, 20}
+	settings := &UpdateQuotaKeySettingsInput{GroupIDs: &newGroups}
+	st, err := svc.UpdateWithSettings(ctx, 1, nil, nil, nil, nil, settings)
+	require.NoError(t, err, "仅改 group_ids 的 Update 不应报错")
+	require.NotNil(t, st)
+
+	require.Equal(t, 1, repo.updateSettingsCalls,
+		"仅改 group_ids 的 Update 必须真正落库：UpdateSettingsAndSyncAccounts 应被调用一次")
+	require.NotNil(t, repo.lastSettings.GroupIDs, "传入仓储的 GroupIDs 不应为 nil")
+	require.Equal(t, []int64{10, 20}, *repo.lastSettings.GroupIDs,
+		"传入仓储的 GroupIDs 应为新值 {10,20}")
+}

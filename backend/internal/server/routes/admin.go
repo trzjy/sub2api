@@ -390,6 +390,7 @@ func registerQuotaUpstreamRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ 
 //	POST   /admin/quota_keys/:id/refresh         手动拉号
 //	POST   /admin/quota_keys/:id/clear_exhausted 解除 exhausted
 //	POST   /admin/quota_keys/:id/models/sync-upstream 同步上游实供模型清单预览
+//	POST   /admin/quota_keys/:id/status            启用 / 停用（仅 active ↔ disabled）
 //	POST   /admin/quota_keys/sweep_expired       手动触发一轮到期清扫
 //
 // handler 未接线（如部分部署）时整组不注册，避免空指针。
@@ -411,6 +412,7 @@ func registerQuotaKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 		qk.POST("/:id/clear_exhausted", h.Admin.QuotaKey.ClearExhausted)
 		qk.POST("/:id/probe_quota", h.Admin.QuotaKey.ProbeQuota)
 		qk.POST("/:id/models/sync-upstream", h.Admin.QuotaKey.SyncUpstreamModels)
+		qk.POST("/:id/status", h.Admin.QuotaKey.SetStatus)
 		// 静态子路径置于 :id 通配之后注册（与既有 accounts 路由同型），由 gin
 		// 静态优先匹配，sweep_expired 不会被 :id 吞掉。
 		qk.POST("/sweep_expired", h.Admin.QuotaKey.SweepExpired)

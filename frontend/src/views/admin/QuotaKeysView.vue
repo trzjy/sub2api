@@ -1708,19 +1708,27 @@ async function ensureAccountEditorRefs(): Promise<void> {
 
 // D2a：懒加载分组候选（供创建/编辑弹窗的 GroupSelector 显示）。
 // 与 ensureAccountEditorRefs 同源 adminAPI.groups.getAll()（写入同一个 accountGroups ref），
-// 但独立缓存以避免与账号编辑弹窗的加载互相耦合；失败不缓存，下次可重试。
+// 但独立缓存以避免与账号编辑弹窗的加载互相耦合。
+// 失败处理（QKG-D2-FIX）：捕获方法缺失/网络拒绝等一切失败，候选置为空数组；
+// groupsLoaded 保持 falsy（失败的 Promise 不永久缓存），groupsPromise 清空以便下次打开弹窗可重试；
+// 按组件既有机制（appStore.showError）报错一次；不引入全局兜底、新依赖或新错误通道。
+// 用 IIFE 包裹 try/catch：同步抛错（adminAPI.groups 未提供）与异步 reject 都会被捕获，
+// 返回的 Promise 始终 resolve，避免 void ensureGroups() 产生未捕获 Promise 异常。
 async function ensureGroups() {
   if (groupsLoaded) return
   if (!groupsPromise) {
-    groupsPromise = adminAPI.groups
-      .getAll()
-      .then((list) => {
+    groupsPromise = (async () => {
+      try {
+        const list = await adminAPI.groups.getAll()
         accountGroups.value = list
         groupsLoaded = true
-      })
-      .catch(() => {
+      } catch (err: unknown) {
+        accountGroups.value = []
+        groupsLoaded = false
         groupsPromise = null
-      })
+        appStore.showError(extractApiErrorMessage(err, '分组候选加载失败，可稍后重试'))
+      }
+    })()
   }
   await groupsPromise
 }

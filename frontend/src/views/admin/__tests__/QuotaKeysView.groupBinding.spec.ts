@@ -235,4 +235,61 @@ describe('QuotaKeysView 分组选择器（D2a）', () => {
       wrapper.unmount()
     })
   })
+
+  // QKG-D2-FIX：adminAPI.groups.getAll 失败（未提供/网络拒绝）时，
+  // 打开创建弹窗不得产生未捕获 Promise 异常，分组候选回落空数组，组件仍可正常渲染。
+  describe('分组候选懒加载失败路径（QKG-D2-FIX）', () => {
+    it('getAll reject 时打开创建弹窗无未捕获异常、候选为空、组件可渲染', async () => {
+      vi.mocked(adminAPI.groups.getAll).mockRejectedValue(new Error('groups service unavailable'))
+
+      const unhandled: unknown[] = []
+      const onUnhandled = (e: unknown) => unhandled.push(e)
+      window.addEventListener('unhandledrejection', onUnhandled)
+
+      const wrapper = mountView()
+      await flushPromises()
+
+      await (wrapper.vm as unknown as { openCreateDialog: () => void }).openCreateDialog()
+      await flushPromises()
+      await nextTick()
+      await flushPromises()
+
+      window.removeEventListener('unhandledrejection', onUnhandled)
+
+      expect(unhandled).toHaveLength(0)
+      const vm = wrapper.vm as unknown as { accountGroups: unknown[] }
+      expect(vm.accountGroups).toEqual([])
+      // 创建弹窗正常打开且组件未崩溃（DOM 已渲染）。
+      expect(wrapper.html().length).toBeGreaterThan(0)
+      wrapper.unmount()
+    })
+
+    it('getAll 同步抛错（方法缺失）时打开创建弹窗同样无未捕获异常', async () => {
+      // 模拟派发单复现场景：运行环境未提供可用的 adminAPI.groups.getAll
+      // （与 statusToggle.spec 同源），调用即同步抛错。
+      vi.mocked(adminAPI.groups.getAll).mockImplementation(() => {
+        throw new Error('groups.getAll is not a function')
+      })
+
+      const unhandled: unknown[] = []
+      const onUnhandled = (e: unknown) => unhandled.push(e)
+      window.addEventListener('unhandledrejection', onUnhandled)
+
+      const wrapper = mountView()
+      await flushPromises()
+
+      await (wrapper.vm as unknown as { openCreateDialog: () => void }).openCreateDialog()
+      await flushPromises()
+      await nextTick()
+      await flushPromises()
+
+      window.removeEventListener('unhandledrejection', onUnhandled)
+
+      expect(unhandled).toHaveLength(0)
+      const vm = wrapper.vm as unknown as { accountGroups: unknown[] }
+      expect(vm.accountGroups).toEqual([])
+      expect(wrapper.html().length).toBeGreaterThan(0)
+      wrapper.unmount()
+    })
+  })
 })
