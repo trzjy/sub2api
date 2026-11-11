@@ -156,7 +156,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	quotaKeyEncryptor := service.ProvideQuotaKeyEncryptor()
 	cursorAutoEntryService := service.ProvideCursorAutoEntryService(settingRepository, quotaKeyRepository, quotaKeyEncryptor, client)
 	quotaUpstreamRegistry := repository.ProvideQuotaUpstreamRegistry(client)
-	quotaKeyService, err := service.ProvideQuotaKeyService(quotaKeyRepository, quotaKeyEncryptor, client, cursorAutoEntryService, quotaUpstreamRegistry)
+	quotaKeyService, err := service.ProvideQuotaKeyService(quotaKeyRepository, quotaKeyEncryptor, client, cursorAutoEntryService, quotaUpstreamRegistry, apiKeyAuthCacheInvalidator, configConfig)
 	if err != nil {
 		return nil, err
 	}

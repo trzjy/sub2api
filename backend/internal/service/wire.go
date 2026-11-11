@@ -147,6 +147,8 @@ func ProvideQuotaKeyService(
 	client *dbent.Client,
 	autoEntry *CursorAutoEntryService,
 	upstreamRegistry QuotaUpstreamRegistry,
+	authCache APIKeyAuthCacheInvalidator,
+	cfg *config.Config,
 ) (*QuotaKeyService, error) {
 	// KC-17B：把生产装配从"直接绑 shareAI 客户端"改成"绑分派器"。
 	// 分派器持有 shareAI 与 kn-cy 两个具体实现，按 quota_keys.upstream_key 选路。
@@ -170,6 +172,13 @@ func ProvideQuotaKeyService(
 	// KC-24：注入上游注册表，使 Create 能校验上游标识存在性（非空 upstream_key
 	// 必须存在且未软删，否则失败关闭，绝不静默落成 shareai）。
 	svc.SetUpstreamRegistry(upstreamRegistry)
+	// QKG-B9：注入分组认证缓存失效器（APIKeyService 实现 APIKeyAuthCacheInvalidator），
+	// 使激活码白名单改动后即时失效受影响分组的认证缓存，避免准入最长滞后一个缓存 TTL。
+	svc.SetAuthCacheInvalidator(authCache)
+	// 强制增补（QKG-B9 卡外核实缺陷）：注入 runMode，使 Simple 模式下 composite 分组
+	// 不可绑定的守卫在生产真正生效（否则 runMode 恒为空、守卫成死代码）。cfg 取自 wire
+	// 已有的 config provider，不新造配置来源。
+	svc.SetRunMode(cfg.RunMode)
 	return svc, nil
 }
 
