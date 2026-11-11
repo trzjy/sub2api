@@ -440,13 +440,16 @@ func currentCursorQuotaKeyUsageSnapshotProvider() CursorQuotaKeyUsageSnapshotPro
 
 // quotaKeyStatusBlocksCursorScheduling 判定激活码状态是否构成"停供"。
 //
-// 只有 expired（含其等价语义：expires_at 已到期但 sweeper 尚未落盘）停供。
+// expired 与 disabled 同属明确的停供终态：
+//   - expired：expires_at < now，由 sweeper 自动落盘（含等价语义：expires_at 已到期
+//     但 sweeper 尚未落盘）。
+//   - disabled：管理员手动停用，是明确的停供结论，与 expired 同等停供。
+//
 // exhausted 不是供给终态：它是**拉号失败占位**（任意上游错误即置，可 ClearExhausted
 // 手动解除），代表"这个码没能再拉出新号"，不代表已有账号不能继续服务；把它当停供
 // 等于用拉号侧的瞬时故障反向剥夺账号（且与 I2「不把账号伪标耗尽」反向对称）。
-// disabled 是 admin 手动停用的激活码，语义由 admin 侧写路径承担，不在本门判定。
 func quotaKeyStatusBlocksCursorScheduling(status string) bool {
-	return status == domain.QuotaKeyStatusExpired
+	return status == domain.QuotaKeyStatusExpired || status == domain.QuotaKeyStatusDisabled
 }
 
 // cursorAccountQuotaKeyVetoReason 返回 cursor 账号因归属激活码终态而被剥夺调度资格

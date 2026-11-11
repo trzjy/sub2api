@@ -42868,6 +42868,8 @@ type QuotaKeyMutation struct {
 	rate_multiplier      *float64
 	addrate_multiplier   *float64
 	model_mapping        *map[string]string
+	group_ids            *[]int64
+	appendgroup_ids      []int64
 	clearedFields        map[string]struct{}
 	accounts             map[int64]struct{}
 	removedaccounts      map[int64]struct{}
@@ -43949,6 +43951,71 @@ func (m *QuotaKeyMutation) ResetModelMapping() {
 	delete(m.clearedFields, quotakey.FieldModelMapping)
 }
 
+// SetGroupIds sets the "group_ids" field.
+func (m *QuotaKeyMutation) SetGroupIds(i []int64) {
+	m.group_ids = &i
+	m.appendgroup_ids = nil
+}
+
+// GroupIds returns the value of the "group_ids" field in the mutation.
+func (m *QuotaKeyMutation) GroupIds() (r []int64, exists bool) {
+	v := m.group_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGroupIds returns the old "group_ids" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldGroupIds(ctx context.Context) (v []int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGroupIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGroupIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGroupIds: %w", err)
+	}
+	return oldValue.GroupIds, nil
+}
+
+// AppendGroupIds adds i to the "group_ids" field.
+func (m *QuotaKeyMutation) AppendGroupIds(i []int64) {
+	m.appendgroup_ids = append(m.appendgroup_ids, i...)
+}
+
+// AppendedGroupIds returns the list of values that were appended to the "group_ids" field in this mutation.
+func (m *QuotaKeyMutation) AppendedGroupIds() ([]int64, bool) {
+	if len(m.appendgroup_ids) == 0 {
+		return nil, false
+	}
+	return m.appendgroup_ids, true
+}
+
+// ClearGroupIds clears the value of the "group_ids" field.
+func (m *QuotaKeyMutation) ClearGroupIds() {
+	m.group_ids = nil
+	m.appendgroup_ids = nil
+	m.clearedFields[quotakey.FieldGroupIds] = struct{}{}
+}
+
+// GroupIdsCleared returns if the "group_ids" field was cleared in this mutation.
+func (m *QuotaKeyMutation) GroupIdsCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldGroupIds]
+	return ok
+}
+
+// ResetGroupIds resets all changes to the "group_ids" field.
+func (m *QuotaKeyMutation) ResetGroupIds() {
+	m.group_ids = nil
+	m.appendgroup_ids = nil
+	delete(m.clearedFields, quotakey.FieldGroupIds)
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by ids.
 func (m *QuotaKeyMutation) AddAccountIDs(ids ...int64) {
 	if m.accounts == nil {
@@ -44037,7 +44104,7 @@ func (m *QuotaKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *QuotaKeyMutation) Fields() []string {
-	fields := make([]string, 0, 20)
+	fields := make([]string, 0, 21)
 	if m.deleted_at != nil {
 		fields = append(fields, quotakey.FieldDeletedAt)
 	}
@@ -44098,6 +44165,9 @@ func (m *QuotaKeyMutation) Fields() []string {
 	if m.model_mapping != nil {
 		fields = append(fields, quotakey.FieldModelMapping)
 	}
+	if m.group_ids != nil {
+		fields = append(fields, quotakey.FieldGroupIds)
+	}
 	return fields
 }
 
@@ -44146,6 +44216,8 @@ func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.RateMultiplier()
 	case quotakey.FieldModelMapping:
 		return m.ModelMapping()
+	case quotakey.FieldGroupIds:
+		return m.GroupIds()
 	}
 	return nil, false
 }
@@ -44195,6 +44267,8 @@ func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldRateMultiplier(ctx)
 	case quotakey.FieldModelMapping:
 		return m.OldModelMapping(ctx)
+	case quotakey.FieldGroupIds:
+		return m.OldGroupIds(ctx)
 	}
 	return nil, fmt.Errorf("unknown QuotaKey field %s", name)
 }
@@ -44344,6 +44418,13 @@ func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetModelMapping(v)
 		return nil
+	case quotakey.FieldGroupIds:
+		v, ok := value.([]int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGroupIds(v)
+		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey field %s", name)
 }
@@ -44461,6 +44542,9 @@ func (m *QuotaKeyMutation) ClearedFields() []string {
 	if m.FieldCleared(quotakey.FieldModelMapping) {
 		fields = append(fields, quotakey.FieldModelMapping)
 	}
+	if m.FieldCleared(quotakey.FieldGroupIds) {
+		fields = append(fields, quotakey.FieldGroupIds)
+	}
 	return fields
 }
 
@@ -44510,6 +44594,9 @@ func (m *QuotaKeyMutation) ClearField(name string) error {
 		return nil
 	case quotakey.FieldModelMapping:
 		m.ClearModelMapping()
+		return nil
+	case quotakey.FieldGroupIds:
+		m.ClearGroupIds()
 		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey nullable field %s", name)
@@ -44578,6 +44665,9 @@ func (m *QuotaKeyMutation) ResetField(name string) error {
 		return nil
 	case quotakey.FieldModelMapping:
 		m.ResetModelMapping()
+		return nil
+	case quotakey.FieldGroupIds:
+		m.ResetGroupIds()
 		return nil
 	}
 	return fmt.Errorf("unknown QuotaKey field %s", name)

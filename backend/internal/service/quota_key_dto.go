@@ -51,6 +51,12 @@ type QuotaKeyStatus struct {
 	// 白名单存恒等映射 {"m":"m"}，映射存 {"from":"to"}）。
 	// nil / 省略表示码级未显式覆盖，沿用上游默认实供清单。
 	ModelMapping map[string]string `json:"model_mapping,omitempty"`
+
+	// GroupIDs 是码级权威分组 ID 列表（quota_keys.group_ids）。
+	// nil = 未显式指定（拉号沿用模型推导挂组）；空切片 = 显式解绑全部分组；非空 = 码级权威。
+	// 与 concurrency / load_factor / rate_multiplier / model_mapping 同为码级权威值，
+	// 编辑时在 withQuotaKeyLock 同一事务内同步名下未软删账号。
+	GroupIDs *[]int64 `json:"group_ids,omitempty"`
 }
 
 // CreateQuotaKeyInput 是 QuotaKeyRepository.Create 的入参。
@@ -87,6 +93,11 @@ type CreateQuotaKeyInput struct {
 	// ModelMapping 是新建激活码的码级模型限制与映射（与 credentials.model_mapping 同构）。
 	// nil 表示沿用上游默认实供清单；非 nil 时必须至少含 1 个有效模型，空映射由服务层拒绝。
 	ModelMapping map[string]string
+
+	// GroupIDs 是新建激活码的码级权威分组；GroupIDsSet=false 表示未提供（落 NULL）。
+	// GroupIDsSet=true 且 GroupIDs 为空切片时表示显式解绑全部分组；非空时为码级权威分组。
+	GroupIDs    []int64
+	GroupIDsSet bool
 }
 
 // UpdateQuotaKeySettingsInput 是激活码设置更新入参（供后续 Update / QuotaKeyRepository 消费，
@@ -99,6 +110,9 @@ type CreateQuotaKeyInput struct {
 //   - RateMultiplier 用 *float64：nil = 不修改；非 nil = 设为 >= 0（允许 0）。
 //   - ModelMapping + ModelMappingSet：ModelMappingSet=false = 不修改；
 //     ModelMappingSet=true 时 ModelMapping 必须非空，空映射由服务层拒绝，禁止落库。
+//   - GroupIDs 用 *[]int64：nil = 不修改；非 nil 且指向空切片 = 解绑全部；非 nil 非空 = 覆盖。
+//     group_ids 与 concurrency / load_factor / rate_multiplier / model_mapping 同为码级权威值，
+//     编辑时在 withQuotaKeyLock 同一事务内同步名下未软删账号。
 type UpdateQuotaKeySettingsInput struct {
 	// Concurrency 外层 nil=不修改；内层 nil=清空恢复账号默认 3；非 nil=设为正值。
 	Concurrency **int
@@ -110,4 +124,6 @@ type UpdateQuotaKeySettingsInput struct {
 	// 为 true 时 ModelMapping 必须非空，空映射由服务层拒绝，禁止落库。
 	ModelMapping    map[string]string
 	ModelMappingSet bool
+	// GroupIDs 三态：nil = 不修改；非 nil 且指向空切片 = 解绑全部；非 nil 非空 = 覆盖。
+	GroupIDs *[]int64
 }

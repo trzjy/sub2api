@@ -4,12 +4,14 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/account"
+	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
@@ -548,4 +550,244 @@ func runInTxErr(t *testing.T, client *ent.Client, fn func(tx *ent.Tx) error) err
 		return ferr
 	}
 	return tx.Commit()
+}
+
+// ============================================================================
+// B3 分组同步：UpdateSettingsAndSyncAccounts 的 GroupIDs 三态。
+// ============================================================================
+
+const qkrEventAccountGroupsChanged = service.SchedulerOutboxEventAccountGroupsChanged
+
+// qkrUID 生成进程内唯一后缀，用于分组名等需要唯一约束的对象。
+func qkrUID() string { return fmt.Sprintf("%d", time.Now().UnixNano()) }
+
+// qkrCreateGroup 创建一条测试分组（未软删，满足 lockLiveGroups 的 deleted_at IS NULL 过滤）。
+func qkrCreateGroup(t *testing.T, client *ent.Client, name string) *ent.Group {
+	t.Helper()
+	ctx := context.Background()
+	g, err := client.Group.Create().
+		SetName(name).
+		SetPlatform(service.PlatformAnthropic).
+		SetStatus(service.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+	return g
+}
+
+// qkrScanGroupIdsRaw 读取 quota_keys.group_ids 列的裸文本（绕过 ent 软删拦截与 JSON 解码），
+// 用于断言「空切片落 [] 而非 NULL」。NULL 列返回字面量 "NULL"。
+func qkrScanGroupIdsRaw(t *testing.T, client *ent.Client, id int64) string {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := client.QueryContext(ctx, "SELECT group_ids::text FROM quota_keys WHERE id = $1", id)
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next(), "quota key row must exist, id=%d", id)
+	var s *string
+	require.NoError(t, rows.Scan(&s))
+	if s == nil {
+		return "NULL"
+	}
+	return *s
+}
+
+// qkrAccountGroupRow 是一行 account_groups 绑定（用于断言 priority 与去重）。
+type qkrAccountGroupRow struct {
+	GroupID  int64
+	Priority int
+}
+
+// qkrAccountGroupRows 读取某账号的全部 account_groups 绑定，按 priority 升序。
+func qkrAccountGroupRows(t *testing.T, client *ent.Client, accountID int64) []qkrAccountGroupRow {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := client.QueryContext(ctx, "SELECT group_id, priority FROM account_groups WHERE account_id = $1 ORDER BY priority", accountID)
+	require.NoError(t, err)
+	defer rows.Close()
+	var out []qkrAccountGroupRow
+	for rows.Next() {
+		var r qkrAccountGroupRow
+		require.NoError(t, rows.Scan(&r.GroupID, &r.Priority))
+		out = append(out, r)
+	}
+	return out
+}
+
+// qkrOutboxGroupChangedPayload 读取某账号的 account_groups_changed outbox payload，
+// 返回其中的 group_ids（用于断言「旧∪新」去重并集）。
+func qkrOutboxGroupChangedPayload(t *testing.T, client *ent.Client, accountID int64) []int64 {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := client.QueryContext(ctx, "SELECT payload FROM scheduler_outbox WHERE event_type = $1 AND account_id = $2", qkrEventAccountGroupsChanged, accountID)
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next(), "expected account_groups_changed outbox for account %d", accountID)
+	var raw []byte
+	require.NoError(t, rows.Scan(&raw))
+	var p struct {
+		GroupIDs []int64 `json:"group_ids"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &p))
+	return p.GroupIDs
+}
+
+// TestQuotaKeyRepositoryGroupIDs_OverwriteReplacesBindingsAndEnqueues：
+// GroupIDs=[g1,g2] → 码级列与名下账号 account_groups 均更新；旧分组被删；
+// priority 为 1、2；outbox 有 account_groups_changed 事件且 payload 含旧∪新。
+func TestQuotaKeyRepositoryGroupIDs_OverwriteReplacesBindingsAndEnqueues(t *testing.T) {
+	client := quotaKeyRepositoryTestClient(t)
+	ctx := context.Background()
+	qkr := qkrRepo(t, client)
+	qkrEnsureSchedulerOutbox(t, client)
+	_, _ = client.ExecContext(ctx, "DELETE FROM scheduler_outbox")
+
+	g0 := qkrCreateGroup(t, client, "grp-old-"+qkrUID())
+	g1 := qkrCreateGroup(t, client, "grp-new1-"+qkrUID())
+	g2 := qkrCreateGroup(t, client, "grp-new2-"+qkrUID())
+
+	qk := qkrCreateQuotaKey(t, client, domain.QuotaKeyStatusActive, nil)
+	acc := qkrCreateAccount(t, client, qk.ID, domain.PlatformCursor)
+	// 预置旧绑定：acc -> g0（priority 1）。
+	_, err := client.AccountGroup.Create().SetAccountID(acc.ID).SetGroupID(g0.ID).SetPriority(1).Save(ctx)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_, _ = client.ExecContext(ctx, "DELETE FROM account_groups WHERE account_id = $1", acc.ID)
+		_, _ = client.Group.Delete().Where(group.IDIn(g0.ID, g1.ID, g2.ID)).Exec(ctx)
+		_, _ = client.Account.Delete().Where(account.IDEQ(acc.ID)).Exec(ctx)
+		_ = client.QuotaKey.DeleteOneID(qk.ID).Exec(ctx)
+	})
+
+	newIDs := []int64{g1.ID, g2.ID}
+	runInTx(t, client, func(tx *ent.Tx) error {
+		return qkr.UpdateSettingsAndSyncAccounts(ctx, tx, qk.ID, service.UpdateQuotaKeySettingsInput{
+			GroupIDs: &newIDs,
+		})
+	})
+
+	// 码级列 = [g1, g2]（顺序保持）。Postgres jsonb::text 会在逗号后加空格，故解析后比较。
+	rawGroupIDs := qkrScanGroupIdsRaw(t, client, qk.ID)
+	var gotGroupIDs []int64
+	require.NoError(t, json.Unmarshal([]byte(rawGroupIDs), &gotGroupIDs))
+	require.Equal(t, []int64{g1.ID, g2.ID}, gotGroupIDs)
+
+	// 旧绑定 g0 被删；新绑定 g1(priority 1)、g2(priority 2) 写入。
+	rows := qkrAccountGroupRows(t, client, acc.ID)
+	require.Len(t, rows, 2, "old binding must be removed and two new bindings created")
+	require.Equal(t, g1.ID, rows[0].GroupID)
+	require.Equal(t, 1, rows[0].Priority)
+	require.Equal(t, g2.ID, rows[1].GroupID)
+	require.Equal(t, 2, rows[1].Priority)
+
+	// outbox：account_groups_changed 事件，payload 含旧∪新 = {g0, g1, g2}。
+	outboxIDs := qkrOutboxAccountIDs(t, client, qkrEventAccountGroupsChanged)
+	require.Contains(t, outboxIDs, acc.ID)
+	payload := qkrOutboxGroupChangedPayload(t, client, acc.ID)
+	require.ElementsMatch(t, []int64{g0.ID, g1.ID, g2.ID}, payload,
+		"payload must be the deduped union of old and new group ids")
+}
+
+// TestQuotaKeyRepositoryGroupIDs_EmptySliceClearsBindings：
+// GroupIDs 指向空切片 → 账号绑定全部清空、码级列为 []（非 NULL）。
+func TestQuotaKeyRepositoryGroupIDs_EmptySliceClearsBindings(t *testing.T) {
+	client := quotaKeyRepositoryTestClient(t)
+	ctx := context.Background()
+	qkr := qkrRepo(t, client)
+	qkrEnsureSchedulerOutbox(t, client)
+	_, _ = client.ExecContext(ctx, "DELETE FROM scheduler_outbox")
+
+	g0 := qkrCreateGroup(t, client, "grp-empty-old-"+qkrUID())
+	qk := qkrCreateQuotaKey(t, client, domain.QuotaKeyStatusActive, nil)
+	acc := qkrCreateAccount(t, client, qk.ID, domain.PlatformCursor)
+	_, err := client.AccountGroup.Create().SetAccountID(acc.ID).SetGroupID(g0.ID).SetPriority(1).Save(ctx)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_, _ = client.ExecContext(ctx, "DELETE FROM account_groups WHERE account_id = $1", acc.ID)
+		_, _ = client.Group.Delete().Where(group.IDIn(g0.ID)).Exec(ctx)
+		_, _ = client.Account.Delete().Where(account.IDEQ(acc.ID)).Exec(ctx)
+		_ = client.QuotaKey.DeleteOneID(qk.ID).Exec(ctx)
+	})
+
+	empty := []int64{}
+	runInTx(t, client, func(tx *ent.Tx) error {
+		return qkr.UpdateSettingsAndSyncAccounts(ctx, tx, qk.ID, service.UpdateQuotaKeySettingsInput{
+			GroupIDs: &empty,
+		})
+	})
+
+	// 码级列必须写成 [] 而非 NULL。
+	require.Equal(t, "[]", qkrScanGroupIdsRaw(t, client, qk.ID))
+	// 账号绑定全部清空。
+	require.Empty(t, qkrAccountGroupRows(t, client, acc.ID))
+}
+
+// TestQuotaKeyRepositoryGroupIDs_NilLeavesUnchanged：
+// GroupIDs == nil → 分组与绑定均不变。
+func TestQuotaKeyRepositoryGroupIDs_NilLeavesUnchanged(t *testing.T) {
+	client := quotaKeyRepositoryTestClient(t)
+	ctx := context.Background()
+	qkr := qkrRepo(t, client)
+	qkrEnsureSchedulerOutbox(t, client)
+	_, _ = client.ExecContext(ctx, "DELETE FROM scheduler_outbox")
+
+	g0 := qkrCreateGroup(t, client, "grp-nil-old-"+qkrUID())
+	qk := qkrCreateQuotaKey(t, client, domain.QuotaKeyStatusActive, nil)
+	acc := qkrCreateAccount(t, client, qk.ID, domain.PlatformCursor)
+	_, err := client.AccountGroup.Create().SetAccountID(acc.ID).SetGroupID(g0.ID).SetPriority(7).Save(ctx)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_, _ = client.ExecContext(ctx, "DELETE FROM account_groups WHERE account_id = $1", acc.ID)
+		_, _ = client.Group.Delete().Where(group.IDIn(g0.ID)).Exec(ctx)
+		_, _ = client.Account.Delete().Where(account.IDEQ(acc.ID)).Exec(ctx)
+		_ = client.QuotaKey.DeleteOneID(qk.ID).Exec(ctx)
+	})
+
+	// GroupIDs 不设置（nil）。
+	runInTx(t, client, func(tx *ent.Tx) error {
+		return qkr.UpdateSettingsAndSyncAccounts(ctx, tx, qk.ID, service.UpdateQuotaKeySettingsInput{})
+	})
+
+	// 绑定不变：仍是 g0（priority 7）。
+	rows := qkrAccountGroupRows(t, client, acc.ID)
+	require.Len(t, rows, 1, "binding must be unchanged when GroupIDs is nil")
+	require.Equal(t, g0.ID, rows[0].GroupID)
+	require.Equal(t, 7, rows[0].Priority)
+	// 码级列不变（create 未设 GroupIds → 仍是 NULL）。
+	require.Equal(t, "NULL", qkrScanGroupIdsRaw(t, client, qk.ID))
+}
+
+// ============================================================================
+// B7 唯一冲突翻译：UpdateCredentialsAtomically 撞 code_mac 唯一索引。
+// ============================================================================
+
+// TestUpdateCredentialsAtomically_DuplicateCodeMACReturnsErrQuotaKeyDuplicateCode：
+// 把第二条激活码的 code_mac 改成与第一条相同 → 撞 uq_quota_keys_code_mac →
+// 必须翻译为 service.ErrQuotaKeyDuplicateCode（而非原样 pq 错误）。
+func TestUpdateCredentialsAtomically_DuplicateCodeMACReturnsErrQuotaKeyDuplicateCode(t *testing.T) {
+	client := quotaKeyRepositoryTestClient(t)
+	ctx := context.Background()
+	qkr := qkrRepo(t, client)
+
+	// 两条激活码，code_mac 不同，均活跃、非 NULL（partial unique index 只对非 NULL 生效）。
+	qk1 := qkrCreateQuotaKey(t, client, domain.QuotaKeyStatusActive, nil)
+	_, err := client.QuotaKey.UpdateOneID(qk1.ID).SetCodeMAC("mac-dup").Save(ctx)
+	require.NoError(t, err)
+	qk2 := qkrCreateQuotaKey(t, client, domain.QuotaKeyStatusActive, nil)
+	_, err = client.QuotaKey.UpdateOneID(qk2.ID).SetCodeMAC("mac-other").Save(ctx)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = client.QuotaKey.DeleteOneID(qk1.ID).Exec(ctx)
+		_ = client.QuotaKey.DeleteOneID(qk2.ID).Exec(ctx)
+	})
+
+	// 把 qk2 的 code_mac 改成与 qk1 相同 → 撞唯一索引。
+	err = runInTxErr(t, client, func(tx *ent.Tx) error {
+		return qkr.UpdateCredentialsAtomically(ctx, tx, qk2.ID, "enc:v1:dup", "mac-dup", "last4", false)
+	})
+	require.Error(t, err, "duplicate code_mac must fail")
+	require.ErrorIs(t, err, service.ErrQuotaKeyDuplicateCode,
+		"code_mac unique violation must translate to ErrQuotaKeyDuplicateCode")
 }

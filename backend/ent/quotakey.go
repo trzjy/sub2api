@@ -59,6 +59,8 @@ type QuotaKey struct {
 	RateMultiplier float64 `json:"rate_multiplier,omitempty"`
 	// ModelMapping holds the value of the "model_mapping" field.
 	ModelMapping map[string]string `json:"model_mapping,omitempty"`
+	// GroupIds holds the value of the "group_ids" field.
+	GroupIds []int64 `json:"group_ids,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the QuotaKeyQuery when eager-loading is set.
 	Edges        QuotaKeyEdges `json:"edges"`
@@ -88,7 +90,7 @@ func (*QuotaKey) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case quotakey.FieldUsageSnapshot, quotakey.FieldModelMapping:
+		case quotakey.FieldUsageSnapshot, quotakey.FieldModelMapping, quotakey.FieldGroupIds:
 			values[i] = new([]byte)
 		case quotakey.FieldExhausted:
 			values[i] = new(sql.NullBool)
@@ -253,6 +255,14 @@ func (_m *QuotaKey) assignValues(columns []string, values []any) error {
 					return fmt.Errorf("unmarshal field model_mapping: %w", err)
 				}
 			}
+		case quotakey.FieldGroupIds:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field group_ids", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.GroupIds); err != nil {
+					return fmt.Errorf("unmarshal field group_ids: %w", err)
+				}
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -369,6 +379,9 @@ func (_m *QuotaKey) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("model_mapping=")
 	builder.WriteString(fmt.Sprintf("%v", _m.ModelMapping))
+	builder.WriteString(", ")
+	builder.WriteString("group_ids=")
+	builder.WriteString(fmt.Sprintf("%v", _m.GroupIds))
 	builder.WriteByte(')')
 	return builder.String()
 }

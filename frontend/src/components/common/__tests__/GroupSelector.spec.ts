@@ -174,3 +174,40 @@ describe('GroupSelector composite group filter by accountModels (U5)', () => {
     expect(text).not.toContain('gemini-group')
   })
 })
+
+describe('GroupSelector disabled readonly mode (D3)', () => {
+  beforeEach(() => { authState.isSimpleMode = false })
+
+  const disabledGroups = [
+    { id: 1, name: 'Basic', platform: 'anthropic', status: 'active' },
+    { id: 2, name: 'Composite', platform: 'composite', status: 'active' }
+  ] as any
+
+  const mountDisabledSelector = (modelValue: number[] = [], disabled = true) =>
+    mount(GroupSelector, {
+      props: { modelValue, groups: disabledGroups, disabled },
+      global: { stubs: { GroupBadge: { props: ['name'], template: '<span>{{ name }}</span>' }, Icon: true } }
+    })
+
+  it('disabled=true: all checkboxes disabled and change does not emit update:modelValue', async () => {
+    const wrapper = mountDisabledSelector([1])
+    const checkboxes = wrapper.findAll('input[type=checkbox]')
+    expect(checkboxes.length).toBeGreaterThan(0)
+    checkboxes.forEach((cb) => expect((cb.element as HTMLInputElement).disabled).toBe(true))
+    // 只读兜底：触发 change 仍不应产生 update:modelValue
+    await checkboxes[0].setValue(true)
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+  })
+
+  it('without disabled prop: regression - checkboxes enabled and change emits update:modelValue', async () => {
+    const wrapper = mountDisabledSelector([1], false)
+    const checkboxes = wrapper.findAll('input[type=checkbox]')
+    checkboxes.forEach((cb) => expect((cb.element as HTMLInputElement).disabled).toBe(false))
+    // 未传 disabled：既有行为不变，change 正常触发 update:modelValue
+    const unchecked = checkboxes.find((cb) => !(cb.element as HTMLInputElement).checked)!
+    await unchecked.setValue(true)
+    expect(wrapper.emitted('update:modelValue')).toBeDefined()
+    expect(wrapper.text()).toContain('Basic')
+    expect(wrapper.text()).toContain('Composite')
+  })
+})

@@ -190,6 +190,11 @@ func (QuotaKey) Fields() []ent.Field {
 		field.JSON("model_mapping", map[string]string{}).
 			Optional().
 			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
+		// group_ids：触发码级权威分组（B 段）。NULL = 未显式指定（拉号沿用模型推导挂组）；
+		// 显式 [] = 解绑全部分组；[1,2] = 码级权威，编辑时同事务同步名下账号 account_groups。
+		field.JSON("group_ids", []int64{}).
+			Optional().
+			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
 	}
 }
 

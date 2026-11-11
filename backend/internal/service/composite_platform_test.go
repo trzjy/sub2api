@@ -206,6 +206,11 @@ func TestDetectModelPlatform(t *testing.T) {
 		{name: "moonshot prefix", model: "moonshot/moonshot-v1-32k", platform: PlatformKimi, ok: true},
 		{name: "zhipu", model: "glm-5.2", platform: PlatformZhipu, ok: true},
 		{name: "deepseek", model: "deepseek-v4-pro", platform: PlatformDeepseek, ok: true},
+		// muse 前缀归属 PlatformMuse（方案 QKG-C2，C3 模块的 muse 家族判定补充）。
+		{name: "muse spark 1.3", model: "muse-spark-1.3", platform: PlatformMuse, ok: true},
+		{name: "muse spark 1.2", model: "muse-spark-1.2", platform: PlatformMuse, ok: true},
+		// 前缀必须位于开头：非开头匹配一律不可检测。
+		{name: "muse not at start", model: "x-muse-foo", ok: false},
 		{name: "minimax", model: "MiniMax-M3", platform: PlatformMiniMax, ok: true},
 		{name: "minimax prefix", model: "minimax/MiniMax-M2.5", platform: PlatformMiniMax, ok: true},
 		{name: "abab legacy", model: "abab6.5-chat", platform: PlatformMiniMax, ok: true},

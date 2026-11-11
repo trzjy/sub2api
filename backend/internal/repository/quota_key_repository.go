@@ -308,6 +308,12 @@ func (r *quotaKeyRepository) UpdateCredentialsAtomically(ctx context.Context, tx
 		q = q.ClearUsageSnapshot()
 	}
 	_, err := q.Save(ctx)
+	// code_mac 唯一冲突 = 同一张激活码已有未软删记录；只认 uq_quota_keys_code_mac
+	// 这一唯一索引的冲突（与 Create 同口径），翻译成 ErrQuotaKeyDuplicateCode，
+	// 其余错误原样返回。
+	if isQuotaKeyCodeMacUniqueViolation(err) {
+		return service.ErrQuotaKeyDuplicateCode
+	}
 	return err
 }
 
@@ -650,6 +656,20 @@ func (r *quotaKeyRepository) UpdateSettingsAndSyncAccounts(ctx context.Context, 
 		return err
 	}
 
+	// 1b. 写码级 group_ids 列（B3 分组同步）。
+	//     三态语义：GroupIDs!=nil 才动该列；空切片必须写成 [] 而不是 NULL
+	//     （[] = 显式解绑全部）。归一化保证 *settings.GroupIDs 指向 nil 切片时
+	//     也落 []，避免 ent 的 field.JSON 把 nil 切片写成 null。
+	if settings.GroupIDs != nil {
+		newIDs := *settings.GroupIDs
+		if newIDs == nil {
+			newIDs = []int64{}
+		}
+		if err := tx.QuotaKey.UpdateOneID(id).SetGroupIds(newIDs).Exec(ctx); err != nil {
+			return err
+		}
+	}
+
 	// 2. 查询名下未软删账号（同步变更的实际目标）。
 	accs, err := tx.Account.Query().Where(account.QuotaKeyID(id), account.DeletedAtIsNil()).All(ctx)
 	if err != nil {
@@ -718,6 +738,55 @@ func (r *quotaKeyRepository) UpdateSettingsAndSyncAccounts(ctx context.Context, 
 			}
 		}
 		changed = true
+	}
+
+	// 6. 分组同步（B3）：把名下未软删账号的 account_groups 绑定整体替换为新分组集合，
+	//    并对每个账号入队 account_groups_changed 事件。码级 group_ids 列已在 1b 写入。
+	//
+	//    外审强制口径（2026-11-11 R1b [P2] must_fix，必须照做）：
+	//    - lockLiveGroups 必须在任何 account_groups 的 DELETE/INSERT 之前、且在同一事务内
+	//      调用；不得先删后锁（依据 account_repo.go:2236-2240「先锁目标分组再替换绑定」，
+	//      group_repo.go:44-61 用 ORDER BY id FOR SHARE 并在等待后复核分组有效性；
+	//      删除路径持 FOR UPDATE 清理绑定并软删分组——省略前置锁会插入指向已软删分组的绑定）。
+	//    - outbox 事件类型必须是 SchedulerOutboxEventAccountGroupsChanged；不得复用会发
+	//      AccountChanged 的 EnqueueAccountChangedOutbox。
+	//    - payload 必须是每个账号各自的「旧分组 ∪ 新分组」去重并集，不是全批并集。
+	if settings.GroupIDs != nil {
+		newIDs := *settings.GroupIDs
+		if newIDs == nil {
+			newIDs = []int64{} // 归一化：空切片落 [] 非 NULL（与 1b 同口径）。
+		}
+		// ① 先锁目标分组（必须在任何绑定写之前、同事务内）。
+		if err := lockLiveGroups(ctx, tx.Client(), newIDs); err != nil {
+			return err
+		}
+		// 旧分组归属：在 DELETE 之前一次性批量读取（与 loadAccountGroupIDsByAccount 同型，
+		// 该 helper 为 AccountIDIn 版本，这里直接传 affectedIDs 复用）。
+		oldIDsByAccount, err := loadAccountGroupIDsByAccount(ctx, tx, affectedIDs)
+		if err != nil {
+			return err
+		}
+		for _, acc := range accs {
+			oldIDs := oldIDsByAccount[acc.ID]
+			// 先删后插（同事务内，锁已先行持有）。
+			if _, err := tx.AccountGroup.Delete().Where(accountgroup.AccountIDEQ(acc.ID)).Exec(ctx); err != nil {
+				return err
+			}
+			for i, gid := range newIDs {
+				if _, err := tx.AccountGroup.Create().
+					SetAccountID(acc.ID).
+					SetGroupID(gid).
+					SetPriority(i + 1).
+					Save(ctx); err != nil {
+					return err
+				}
+			}
+			// ② 逐账号 payload = 该账号旧 ∪ 新（去重并集）。
+			payload := buildSchedulerGroupPayload(mergeGroupIDs(oldIDs, newIDs))
+			if err := enqueueSchedulerOutbox(ctx, tx, service.SchedulerOutboxEventAccountGroupsChanged, &acc.ID, nil, payload); err != nil {
+				return err
+			}
+		}
 	}
 
 	// 5. 受影响账号入队调度 outbox（仅当确有变更）。

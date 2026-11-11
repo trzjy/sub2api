@@ -89,6 +89,11 @@ func CompositeRouteSourceFromContext(ctx context.Context) (string, bool) {
 // DetectModelPlatform maps common public model IDs to the concrete provider
 // platform used by sub2api. It intentionally returns false for ambiguous model
 // names so composite groups fail closed instead of guessing.
+//
+// muse 归属：公开模型 ID 以 "muse-" 前缀开头（如 muse-spark-1.3，来自
+// CursorRealSupplyModels）归属 PlatformMuse；该前缀必须严格位于模型名开头，
+// 非开头匹配（如 x-muse-foo）一律不可检测。口径与
+// frontend/src/constants/platforms.ts 的 muse 家族表（muse / muse-spark 正则）一致。
 func DetectModelPlatform(model string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(model))
 	if normalized == "" {
@@ -154,6 +159,8 @@ func DetectModelPlatform(model string) (string, bool) {
 		return PlatformZhipu, true
 	case strings.HasPrefix(normalized, "deepseek-"):
 		return PlatformDeepseek, true
+	case strings.HasPrefix(normalized, "muse-"):
+		return PlatformMuse, true
 	case strings.HasPrefix(normalized, "minimax-"),
 		strings.HasPrefix(normalized, "abab5"),
 		strings.HasPrefix(normalized, "abab6"),

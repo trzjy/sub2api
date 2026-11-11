@@ -602,6 +602,9 @@ type QuotaKey struct {
 	LoadFactor     *int              `json:"load_factor,omitempty"`
 	RateMultiplier float64           `json:"rate_multiplier"`
 	ModelMapping   map[string]string `json:"model_mapping,omitempty"`
+
+	// GroupIDs 码级权威分组；nil = 未显式指定，空切片 = 解绑全部。
+	GroupIDs *[]int64 `json:"group_ids,omitempty"`
 }
 
 type AccountGroup struct {

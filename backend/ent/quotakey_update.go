@@ -379,6 +379,24 @@ func (_u *QuotaKeyUpdate) ClearModelMapping() *QuotaKeyUpdate {
 	return _u
 }
 
+// SetGroupIds sets the "group_ids" field.
+func (_u *QuotaKeyUpdate) SetGroupIds(v []int64) *QuotaKeyUpdate {
+	_u.mutation.SetGroupIds(v)
+	return _u
+}
+
+// AppendGroupIds appends value to the "group_ids" field.
+func (_u *QuotaKeyUpdate) AppendGroupIds(v []int64) *QuotaKeyUpdate {
+	_u.mutation.AppendGroupIds(v)
+	return _u
+}
+
+// ClearGroupIds clears the value of the "group_ids" field.
+func (_u *QuotaKeyUpdate) ClearGroupIds() *QuotaKeyUpdate {
+	_u.mutation.ClearGroupIds()
+	return _u
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *QuotaKeyUpdate) AddAccountIDs(ids ...int64) *QuotaKeyUpdate {
 	_u.mutation.AddAccountIDs(ids...)
@@ -628,6 +646,17 @@ func (_u *QuotaKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.ModelMappingCleared() {
 		_spec.ClearField(quotakey.FieldModelMapping, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.GroupIds(); ok {
+		_spec.SetField(quotakey.FieldGroupIds, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedGroupIds(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, quotakey.FieldGroupIds, value)
+		})
+	}
+	if _u.mutation.GroupIdsCleared() {
+		_spec.ClearField(quotakey.FieldGroupIds, field.TypeJSON)
 	}
 	if _u.mutation.AccountsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -1042,6 +1071,24 @@ func (_u *QuotaKeyUpdateOne) ClearModelMapping() *QuotaKeyUpdateOne {
 	return _u
 }
 
+// SetGroupIds sets the "group_ids" field.
+func (_u *QuotaKeyUpdateOne) SetGroupIds(v []int64) *QuotaKeyUpdateOne {
+	_u.mutation.SetGroupIds(v)
+	return _u
+}
+
+// AppendGroupIds appends value to the "group_ids" field.
+func (_u *QuotaKeyUpdateOne) AppendGroupIds(v []int64) *QuotaKeyUpdateOne {
+	_u.mutation.AppendGroupIds(v)
+	return _u
+}
+
+// ClearGroupIds clears the value of the "group_ids" field.
+func (_u *QuotaKeyUpdateOne) ClearGroupIds() *QuotaKeyUpdateOne {
+	_u.mutation.ClearGroupIds()
+	return _u
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *QuotaKeyUpdateOne) AddAccountIDs(ids ...int64) *QuotaKeyUpdateOne {
 	_u.mutation.AddAccountIDs(ids...)
@@ -1321,6 +1368,17 @@ func (_u *QuotaKeyUpdateOne) sqlSave(ctx context.Context) (_node *QuotaKey, err 
 	}
 	if _u.mutation.ModelMappingCleared() {
 		_spec.ClearField(quotakey.FieldModelMapping, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.GroupIds(); ok {
+		_spec.SetField(quotakey.FieldGroupIds, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedGroupIds(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, quotakey.FieldGroupIds, value)
+		})
+	}
+	if _u.mutation.GroupIdsCleared() {
+		_spec.ClearField(quotakey.FieldGroupIds, field.TypeJSON)
 	}
 	if _u.mutation.AccountsCleared() {
 		edge := &sqlgraph.EdgeSpec{

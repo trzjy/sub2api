@@ -280,6 +280,12 @@ func (_c *QuotaKeyCreate) SetModelMapping(v map[string]string) *QuotaKeyCreate {
 	return _c
 }
 
+// SetGroupIds sets the "group_ids" field.
+func (_c *QuotaKeyCreate) SetGroupIds(v []int64) *QuotaKeyCreate {
+	_c.mutation.SetGroupIds(v)
+	return _c
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_c *QuotaKeyCreate) AddAccountIDs(ids ...int64) *QuotaKeyCreate {
 	_c.mutation.AddAccountIDs(ids...)
@@ -541,6 +547,10 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ModelMapping(); ok {
 		_spec.SetField(quotakey.FieldModelMapping, field.TypeJSON, value)
 		_node.ModelMapping = value
+	}
+	if value, ok := _c.mutation.GroupIds(); ok {
+		_spec.SetField(quotakey.FieldGroupIds, field.TypeJSON, value)
+		_node.GroupIds = value
 	}
 	if nodes := _c.mutation.AccountsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -931,6 +941,24 @@ func (u *QuotaKeyUpsert) UpdateModelMapping() *QuotaKeyUpsert {
 // ClearModelMapping clears the value of the "model_mapping" field.
 func (u *QuotaKeyUpsert) ClearModelMapping() *QuotaKeyUpsert {
 	u.SetNull(quotakey.FieldModelMapping)
+	return u
+}
+
+// SetGroupIds sets the "group_ids" field.
+func (u *QuotaKeyUpsert) SetGroupIds(v []int64) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldGroupIds, v)
+	return u
+}
+
+// UpdateGroupIds sets the "group_ids" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdateGroupIds() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldGroupIds)
+	return u
+}
+
+// ClearGroupIds clears the value of the "group_ids" field.
+func (u *QuotaKeyUpsert) ClearGroupIds() *QuotaKeyUpsert {
+	u.SetNull(quotakey.FieldGroupIds)
 	return u
 }
 
@@ -1354,6 +1382,27 @@ func (u *QuotaKeyUpsertOne) UpdateModelMapping() *QuotaKeyUpsertOne {
 func (u *QuotaKeyUpsertOne) ClearModelMapping() *QuotaKeyUpsertOne {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.ClearModelMapping()
+	})
+}
+
+// SetGroupIds sets the "group_ids" field.
+func (u *QuotaKeyUpsertOne) SetGroupIds(v []int64) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetGroupIds(v)
+	})
+}
+
+// UpdateGroupIds sets the "group_ids" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdateGroupIds() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateGroupIds()
+	})
+}
+
+// ClearGroupIds clears the value of the "group_ids" field.
+func (u *QuotaKeyUpsertOne) ClearGroupIds() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearGroupIds()
 	})
 }
 
@@ -1943,6 +1992,27 @@ func (u *QuotaKeyUpsertBulk) UpdateModelMapping() *QuotaKeyUpsertBulk {
 func (u *QuotaKeyUpsertBulk) ClearModelMapping() *QuotaKeyUpsertBulk {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.ClearModelMapping()
+	})
+}
+
+// SetGroupIds sets the "group_ids" field.
+func (u *QuotaKeyUpsertBulk) SetGroupIds(v []int64) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetGroupIds(v)
+	})
+}
+
+// UpdateGroupIds sets the "group_ids" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdateGroupIds() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateGroupIds()
+	})
+}
+
+// ClearGroupIds clears the value of the "group_ids" field.
+func (u *QuotaKeyUpsertBulk) ClearGroupIds() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearGroupIds()
 	})
 }
 

@@ -60,6 +60,9 @@ export interface QuotaKey {
   // 白名单存恒等映射 {"m":"m"}，映射存 {"from":"to"}）。
   // null / 省略表示码级未显式覆盖，沿用上游默认实供清单。
   model_mapping?: Record<string, string> | null
+  // 码级权威分组 ID 列表。null / 省略 = 未显式指定（拉号按模型家族自动推导挂组）；
+  // [] = 显式解绑全部分组；[1,2] = 码级权威，编辑时后端同事务同步名下账号的 account_groups。
+  group_ids?: number[] | null
 }
 
 /**
@@ -109,6 +112,8 @@ export interface CreateQuotaKeyRequest {
   // 不传/undefined = 创建时沿用上游默认实供清单；显式传入则必须至少包含 1 个有效模型，
   // 空对象 {} 禁止落库（后端校验拒绝）。null 表示显式清空码级覆盖。
   model_mapping?: Record<string, string> | null
+  // 码级权威分组 ID 列表。显式给出即作为码级权威分组，空数组表示不绑定任何分组。
+  group_ids?: number[] | null
 }
 
 /** 编辑激活码请求（expires_at / notes / priority）。 */
@@ -130,6 +135,8 @@ export interface UpdateQuotaKeyRequest {
   // 不传/undefined = 编辑时不改模型限制；显式传入则必须至少包含 1 个有效模型，
   // 空对象 {} 禁止落库（后端校验拒绝）。null 表示显式清空码级覆盖。
   model_mapping?: Record<string, string> | null
+  // 码级权威分组 ID 列表。不传 = 不改；传 null 或数组 = 覆盖；空数组 = 解绑全部。
+  group_ids?: number[] | null
 }
 
 export interface QuotaKeyListResponse {
@@ -201,6 +208,14 @@ export async function clearExhausted(id: number): Promise<QuotaKey> {
 /** 一键清理过期激活码。 */
 export async function sweepExpired(): Promise<SweepExpiredResponse> {
   const { data } = await apiClient.post<SweepExpiredResponse>('/admin/quota_keys/sweep_expired')
+  return data
+}
+
+export type QuotaKeyStatusToggle = 'active' | 'disabled'
+
+/** 启用 / 停用激活码（仅 active ↔ disabled；已过期的码不允许直接启用）。 */
+export async function setStatus(id: number, status: QuotaKeyStatusToggle): Promise<QuotaKey> {
+  const { data } = await apiClient.post<QuotaKey>(`/admin/quota_keys/${id}/status`, { status })
   return data
 }
 
@@ -312,6 +327,7 @@ const quotaKeysAPI = {
   refresh,
   clearExhausted,
   sweepExpired,
+  setStatus,
   probeQuota,
   listUpstreams,
   updateUpstream,

@@ -1155,6 +1155,16 @@ func ModelMappingNotNil() predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldNotNull(FieldModelMapping))
 }
 
+// GroupIdsIsNil applies the IsNil predicate on the "group_ids" field.
+func GroupIdsIsNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldIsNull(FieldGroupIds))
+}
+
+// GroupIdsNotNil applies the NotNil predicate on the "group_ids" field.
+func GroupIdsNotNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNotNull(FieldGroupIds))
+}
+
 // HasAccounts applies the HasEdge predicate on the "accounts" edge.
 func HasAccounts() predicate.QuotaKey {
 	return predicate.QuotaKey(func(s *sql.Selector) {
