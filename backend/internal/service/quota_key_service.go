@@ -23,6 +23,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
+	"log/slog"
 )
 
 // MaxAccountsPerQuotaKey 是单个激活码可持有（working）账号的**硬上限**（人工与自动共用）。
@@ -727,6 +728,58 @@ func (s *QuotaKeyService) RotateCredentials(ctx context.Context, id int64, newPl
 	return s.GetStatus(ctx, id)
 }
 
+// SetStatus 启用 / 停用激活码（B6 停用开关服务端）。
+//
+// 仅允许 active ↔ disabled 两种目标态：
+//   - 非 active/disabled 的 status → 400 QUOTA_KEY_STATUS_INVALID；
+//   - 目标 active 且当前 expires_at 早于当前时刻 → 400 QUOTA_KEY_EXPIRED_CANNOT_ENABLE
+//     （外审 R3a 口径：只看 expires_at 是否早于 now，不看 status 字段——status=expired 是
+//     sweeper 异步落盘结果可能滞后，而管理员"先改 expires_at 到未来再启用"是既有的合法续费
+//     行为，不构成绕过；保护判的就是真实到期，判得准就不会被绕过）；
+//   - 已 soft-delete 的行在 ForUpdate 普通查询中不可见，IsNotFound → ErrQuotaKeyNotFound。
+//
+// 停用不写账号状态：账号的停供判定统一由调度门 quotaKeyStatusBlocksCursorScheduling 按
+// 激活码实时状态否决（本包唯一停供判定）。状态变更后收集名下未软删账号 ID，在 withQuotaKeyLock
+// 同一 durable 事务内入队 account_changed（与 BindGroups 同型；入队失败仅记日志，不阻断返回）。
+func (s *QuotaKeyService) SetStatus(ctx context.Context, id int64, status string) (*QuotaKeyStatus, error) {
+	if status != domain.QuotaKeyStatusActive && status != domain.QuotaKeyStatusDisabled {
+		return nil, infraerrors.BadRequest("QUOTA_KEY_STATUS_INVALID", fmt.Sprintf("invalid quota key status %q", status))
+	}
+	err := s.withQuotaKeyLock(ctx, id, func(tx *ent.Tx) error {
+		current, lerr := tx.QuotaKey.Query().Where(quotakey.IDEQ(id)).ForUpdate().Only(ctx)
+		if lerr != nil {
+			if ent.IsNotFound(lerr) {
+				return ErrQuotaKeyNotFound
+			}
+			return fmt.Errorf("quota_key_service: load quota key for set status: %w", lerr)
+		}
+		// R3a 口径：仅判 expires_at 是否早于 now，不看 status 字段。
+		if status == domain.QuotaKeyStatusActive && current.ExpiresAt != nil && current.ExpiresAt.Before(time.Now()) {
+			return infraerrors.BadRequest("QUOTA_KEY_EXPIRED_CANNOT_ENABLE", "quota key is expired (expires_at in the past); re-enabling is not allowed")
+		}
+		if _, uerr := tx.QuotaKey.UpdateOneID(id).SetStatus(status).Save(ctx); uerr != nil {
+			return fmt.Errorf("quota_key_service: set quota key status: %w", uerr)
+		}
+		ids, ierr := tx.Account.Query().
+			Where(account.QuotaKeyID(id), account.DeletedAtIsNil()).
+			IDs(ctx)
+		if ierr != nil {
+			return fmt.Errorf("quota_key_service: list accounts for status outbox: %w", ierr)
+		}
+		// 入队 account_changed（与 BindGroups 提交后入队同型）；入队失败仅记日志，不阻断返回。
+		if len(ids) > 0 {
+			if eerr := s.repo.EnqueueAccountChangedOutbox(ctx, tx, ids); eerr != nil {
+				qkEnqueueAccountChangedLog(ctx, eerr)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.GetStatus(ctx, id)
+}
+
 // rotateCredentials 是**唯一**的凭据写实现（RotateCredentials / Update(code) 共用）。
 //
 // 原子边界（§25.14-C）：
@@ -760,18 +813,129 @@ func (s *QuotaKeyService) rotateCredentials(ctx context.Context, id int64, newPl
 		if current == nil {
 			return fmt.Errorf("quota_key_service: quota key %d not found", id)
 		}
-		return writeCredentialsLocked(ctx, obs, tx, id, current, string(enc), quotaKeyMACOfPlaintext(newPlain), last4Of(newPlain))
+		accIDs, werr := writeCredentialsLocked(ctx, obs, tx, id, current, string(enc), quotaKeyMACOfPlaintext(newPlain), last4Of(newPlain), newPlain)
+		if werr != nil {
+			return werr
+		}
+		// 入队 account_changed（与 SetStatus 提交后入队同型）；入队失败仅记日志，不阻断返回。
+		if len(accIDs) > 0 {
+			if eerr := s.repo.EnqueueAccountChangedOutbox(ctx, tx, accIDs); eerr != nil {
+				qkEnqueueAccountChangedLog(ctx, eerr)
+			}
+		}
+		return nil
 	})
 }
 
-// writeCredentialsLocked 是**唯一**的锁内凭据写本体：按 MAC 决定是否清空快照。
+// writeCredentialsLocked 是**唯一**的锁内凭据写本体：按 MAC 决定是否清空快照，并在
+// 「来源已变更 + kn_cy 上行」时同步该激活码名下 apikey 账号的 api_key（B7）。
+//
+// newPlain 为本次写入的激活码明文（来源未变时无意义，传 ""）；syncKnCyAccountAPIKeyInTx
+// 仅当"来源已变 + 上行为 kn_cy + 处于事务内"时生效，返回被同步的账号 ID 列表，供调用方
+// 在 withQuotaKeyLock 提交后入队 account_changed（与 SetStatus 同型）。
 //
 // 调用方必须已持有该 key 的 advisory 锁、已在同一事务内重读过来源行，并把该行传进来
 // （current）；本方法不再取锁、也不再重读，故 Update 的同 key 事务不会读两次同一行。
-func writeCredentialsLocked(ctx context.Context, obs quotaKeyObservationRepo, tx *ent.Tx, id int64, current *ent.QuotaKey, codeEncrypted, codeMAC, codeLast4 string) error {
+func writeCredentialsLocked(ctx context.Context, obs quotaKeyObservationRepo, tx *ent.Tx, id int64, current *ent.QuotaKey, codeEncrypted, codeMAC, codeLast4, newPlain string) ([]int64, error) {
 	// 旧 MAC 为空（历史行 / 未落 MAC）无法证明同源，按"来源已变更"保守处理。
 	sameSource := current.CodeMAC != "" && current.CodeMAC == codeMAC
-	return obs.UpdateCredentialsAtomically(ctx, tx, id, codeEncrypted, codeMAC, codeLast4, !sameSource)
+	var syncedAccountIDs []int64
+	// B7：kn_cy 换码（来源已变）时，把新卡密同步到名下 cursor apikey 账号的 credentials.api_key；
+	// shareai 等其他上行不触发（断言语义相等：账号凭证一字未变）。
+	if !sameSource && current.UpstreamKey == upstreamKeyKnCy && tx != nil {
+		synced, serr := syncKnCyAccountAPIKeyInTx(ctx, tx, id, newPlain)
+		if serr != nil {
+			return nil, serr
+		}
+		syncedAccountIDs = synced
+	}
+	if err := obs.UpdateCredentialsAtomically(ctx, tx, id, codeEncrypted, codeMAC, codeLast4, !sameSource); err != nil {
+		return nil, err
+	}
+	return syncedAccountIDs, nil
+}
+
+// syncKnCyAccountAPIKeyInTx 在「换码来源已变 + kn_cy 上行」时，把新卡密同步到该激活码名下
+// 所有未软删的 cursor apikey 账号的 credentials.api_key（B7 kn_cy 换码同步账号密钥）。
+//
+// 不改 accounts.name / status / schedulable（业务标识是 id/quota_key_id）。返回被同步的账号
+// ID 列表，供调用方入队 account_changed。账号凭证其余子键保持原值（先解密回明文、仅改
+// api_key、再按既有口径重加密 + 重算整份指纹与 api_key 指纹）。
+func syncKnCyAccountAPIKeyInTx(ctx context.Context, tx *ent.Tx, quotaKeyID int64, newPlain string) ([]int64, error) {
+	accs, err := tx.Account.Query().
+		Where(
+			account.QuotaKeyID(quotaKeyID),
+			account.PlatformEQ(domain.PlatformCursor),
+			account.TypeEQ(AccountTypeAPIKey),
+			account.DeletedAtIsNil(),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("quota_key_service: load kn_cy apikey accounts: %w", err)
+	}
+	if len(accs) == 0 {
+		return nil, nil
+	}
+	synced := make([]int64, 0, len(accs))
+	for _, acc := range accs {
+		plain, derr := decryptCursorAccountCredentials(acc.Credentials)
+		if derr != nil {
+			return nil, derr
+		}
+		if plain == nil {
+			plain = map[string]any{}
+		}
+		plain["api_key"] = newPlain
+		storage, mac, perr := prepareCursorAccountCredentials(plain)
+		if perr != nil {
+			return nil, fmt.Errorf("quota_key_service: prepare kn_cy account credentials: %w", perr)
+		}
+		var apiKeyMAC *string
+		if newPlain != "" {
+			v := credentialsHMACOfJSON([]byte(newPlain))
+			apiKeyMAC = &v
+		}
+		if _, serr := tx.Account.UpdateOneID(acc.ID).
+			SetCredentials(storage).
+			SetCredentialsMAC(mac).
+			SetNillableCredentialsAPIKeyMAC(apiKeyMAC).
+			Save(ctx); serr != nil {
+			return nil, fmt.Errorf("quota_key_service: sync kn_cy account api_key: %w", serr)
+		}
+		synced = append(synced, acc.ID)
+	}
+	return synced, nil
+}
+
+// decryptCursorAccountCredentials 把读出的账号凭证解密回明文（与 repository.decryptCredentialsMap
+// 同口径：遇 enc:v1: 前缀解密、无前缀原样返回；nil 入参返回 nil）。服务包不反向导入
+// repository，故在此复用既有的 credcrypt + SensitiveCredentialKeys 口径做同型解密。
+func decryptCursorAccountCredentials(in map[string]any) (map[string]any, error) {
+	if in == nil {
+		return nil, nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	for _, key := range SensitiveCredentialKeys {
+		str, ok := out[key].(string)
+		if !ok || !credcrypt.IsEncrypted(str) {
+			continue
+		}
+		plain, derr := credcrypt.Decrypt(str)
+		if derr != nil {
+			return nil, fmt.Errorf("quota_key_service: decrypt credentials key %q: %w", key, derr)
+		}
+		out[key] = plain
+	}
+	return out, nil
+}
+
+// qkEnqueueAccountChangedLog 记录 account_changed outbox 入队失败的日志（仅记日志，
+// 不阻断主流程：reconciler 兜底调度快照）。
+func qkEnqueueAccountChangedLog(_ context.Context, err error) {
+	slog.Error("quota_key_service: enqueue account_changed outbox failed; reconciler will reconcile scheduler snapshot", "err", err)
 }
 
 // withQuotaKeyLock 在"每 key advisory 互斥 + 单事务"骨架上执行 fn（观测/换码共用）。
@@ -1162,8 +1326,15 @@ func (s *QuotaKeyService) updateBaseFieldsLocked(ctx context.Context, tx *ent.Tx
 		return fmt.Errorf("quota_key_service: quota key %d not found", id)
 	}
 	if code != nil {
-		if werr := writeCredentialsLocked(ctx, obs, tx, id, current, codeEncrypted, codeMAC, codeLast4); werr != nil {
+		accIDs, werr := writeCredentialsLocked(ctx, obs, tx, id, current, codeEncrypted, codeMAC, codeLast4, *code)
+		if werr != nil {
 			return werr
+		}
+		// 入队 account_changed（与 SetStatus 提交后入队同型）；入队失败仅记日志，不阻断返回。
+		if len(accIDs) > 0 {
+			if eerr := s.repo.EnqueueAccountChangedOutbox(ctx, tx, accIDs); eerr != nil {
+				qkEnqueueAccountChangedLog(ctx, eerr)
+			}
 		}
 	}
 	if expiresAt != nil || notes != nil {

@@ -26,12 +26,13 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 	"github.com/stretchr/testify/require"
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 // testEncryptor 是 QuotaKeyEncryptor 的测试替身（合同 §5，仅测试代码）：以确定性前缀
@@ -910,7 +911,24 @@ func (r *testDBRepo) UpdateCredentialsAtomically(ctx context.Context, tx *ent.Tx
 		q = q.ClearUsageSnapshot()
 	}
 	_, err := q.Save(ctx)
+	// 镜像 production repository 口径：uq_quota_keys_code_mac 唯一冲突翻译为
+	// ErrQuotaKeyDuplicateCode（其余错误原样返回），使服务层经由 testDBRepo 也能验证
+	// 「撞码 → ErrQuotaKeyDuplicateCode」契约。
+	if isQuotaKeyCodeMacUniqueViolationTest(err) {
+		return ErrQuotaKeyDuplicateCode
+	}
 	return err
+}
+
+// isQuotaKeyCodeMacUniqueViolationTest 镜像 repository.isQuotaKeyCodeMacUniqueViolation：
+// 仅认 uq_quota_keys_code_mac 唯一约束冲突（23505 + 约束名），主键 / CHECK 冲突不误译。
+// 服务包不反向导入 repository，故在此同口径复制。
+func isQuotaKeyCodeMacUniqueViolationTest(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr != nil {
+		return pqErr.Code == "23505" && pqErr.Constraint == "uq_quota_keys_code_mac"
+	}
+	return false
 }
 
 func (r *testDBRepo) ListExpired(ctx context.Context, now time.Time) ([]*ent.QuotaKey, error) {
@@ -3801,4 +3819,249 @@ func TestQuotaKeyModelWater_KnCyCandidateStopsAtOne(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, cands, knCyKey.ID, "kn-cy 卡已有 1 个账号，不得再入选候选")
 	require.Contains(t, cands, shareKey.ID, "shareai 卡仅有 1 个账号（目标 5），仍应入选候选")
+}
+
+// ---------------------------------------------------------------------------
+// QKG-B2c：SetStatus（B6 停用开关）与 kn_cy 换码同步账号密钥（B7）。
+// 以下用例命中真实 Postgres（qkNewTestService），走 withQuotaKeyLock 真实事务。
+// ---------------------------------------------------------------------------
+
+// mustCreateQuotaKeyWithExpiry 创建指定状态 / 上游 / 到期时间的激活码；expiresAt 为 nil
+// 时不设置（沿用列默认，NULL）。不含 code_mac，避免撞 uq_quota_keys_code_mac 唯一索引。
+func mustCreateQuotaKeyWithExpiry(t *testing.T, client *ent.Client, status, upstreamKey string, expiresAt *time.Time) *ent.QuotaKey {
+	t.Helper()
+	q := client.QuotaKey.Create().SetCodeEncrypted("enc:v1:seed").SetStatus(status)
+	if upstreamKey != "" {
+		q = q.SetUpstreamKey(upstreamKey)
+	}
+	if expiresAt != nil {
+		q = q.SetNillableExpiresAt(expiresAt)
+	}
+	qk, err := q.Save(context.Background())
+	require.NoError(t, err)
+	return qk
+}
+
+// mustCreateAPIKeyAccount 在指定激活码下创建一条 cursor apikey 账号（B7 同步目标）。
+// creds 直接落库（不走 prepareCursorAccountCredentials，故可为明文），credMAC /
+// apiKeyMAC 为入参给定值，供断言"刷新后不等于入参"。
+func mustCreateAPIKeyAccount(t *testing.T, client *ent.Client, quotaKeyID int64, creds map[string]any, credMAC, apiKeyMAC string) *ent.Account {
+	t.Helper()
+	b := client.Account.Create().
+		SetName(fmt.Sprintf("apikey-acc-%d-%d", quotaKeyID, time.Now().UnixNano())).
+		SetPlatform(domain.PlatformCursor).
+		SetType(AccountTypeAPIKey).
+		SetCredentials(creds).
+		SetQuotaKeyID(quotaKeyID)
+	if credMAC != "" {
+		b = b.SetCredentialsMAC(credMAC)
+	}
+	if apiKeyMAC != "" {
+		b = b.SetCredentialsAPIKeyMAC(apiKeyMAC)
+	}
+	acc, err := b.Save(context.Background())
+	require.NoError(t, err)
+	return acc
+}
+
+// quotaKeyTestCleanup 软删本测试创建的激活码及其名下账号，释放 uq_quota_keys_code_mac
+// 唯一坑位（测试库跨 go test 调用持久化，不复原会污染后续重复运行，与已知基线红 sk-b2a-3
+// 同类，但本卡用例必须可重复运行）。
+func quotaKeyTestCleanup(t *testing.T, client *ent.Client, qkIDs ...int64) {
+	t.Helper()
+	ctx := context.Background()
+	for _, id := range qkIDs {
+		_ = client.Account.Update().Where(account.QuotaKeyID(id)).SetDeletedAt(time.Now()).Exec(ctx)
+		_ = client.QuotaKey.UpdateOneID(id).SetDeletedAt(time.Now()).Exec(ctx)
+	}
+}
+
+// appErrorReason 从 *infraerrors.ApplicationError 取出 reason 码。
+func appErrorReason(t *testing.T, err error) string {
+	t.Helper()
+	var ae *infraerrors.ApplicationError
+	require.ErrorAs(t, err, &ae)
+	return ae.Reason
+}
+
+// TestSetStatus_ActiveToDisabled_Success：active → disabled 成功，落库状态正确。
+func TestSetStatus_ActiveToDisabled_Success(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	svc, client := qkNewTestService(t, nil)
+	qk := mustCreateQuotaKeyWithExpiry(t, client, domain.QuotaKeyStatusActive, "", nil)
+	t.Cleanup(func() { quotaKeyTestCleanup(t, client, qk.ID) })
+
+	st, err := svc.SetStatus(context.Background(), qk.ID, domain.QuotaKeyStatusDisabled)
+	require.NoError(t, err)
+	require.Equal(t, domain.QuotaKeyStatusDisabled, st.Status)
+	reloaded, rerr := client.QuotaKey.Get(context.Background(), qk.ID)
+	require.NoError(t, rerr)
+	require.Equal(t, domain.QuotaKeyStatusDisabled, reloaded.Status)
+}
+
+// TestSetStatus_DisabledToActive_Success：disabled → active 成功（到期在未来，不触发 R3a 保护）。
+func TestSetStatus_DisabledToActive_Success(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	svc, client := qkNewTestService(t, nil)
+	future := time.Now().Add(24 * time.Hour)
+	qk := mustCreateQuotaKeyWithExpiry(t, client, domain.QuotaKeyStatusDisabled, "", &future)
+	t.Cleanup(func() { quotaKeyTestCleanup(t, client, qk.ID) })
+
+	st, err := svc.SetStatus(context.Background(), qk.ID, domain.QuotaKeyStatusActive)
+	require.NoError(t, err)
+	require.Equal(t, domain.QuotaKeyStatusActive, st.Status)
+}
+
+// TestSetStatus_ExpiredKeyToActive_Rejected：status=expired（expires_at 已过期）→ active 400
+// QUOTA_KEY_EXPIRED_CANNOT_ENABLE（外审 R3a：只看 expires_at 是否早于 now）。
+func TestSetStatus_ExpiredKeyToActive_Rejected(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	svc, client := qkNewTestService(t, nil)
+	past := time.Now().Add(-24 * time.Hour)
+	qk := mustCreateQuotaKeyWithExpiry(t, client, domain.QuotaKeyStatusExpired, "", &past)
+	t.Cleanup(func() { quotaKeyTestCleanup(t, client, qk.ID) })
+
+	_, err := svc.SetStatus(context.Background(), qk.ID, domain.QuotaKeyStatusActive)
+	require.Error(t, err)
+	require.Equal(t, "QUOTA_KEY_EXPIRED_CANNOT_ENABLE", appErrorReason(t, err))
+}
+
+// TestSetStatus_ActiveExpiredCodeToActive_Rejected：仍 active 但 expires_at 已过期 → active 400
+// QUOTA_KEY_EXPIRED_CANNOT_ENABLE（保护判的是真实到期，与 status 字段无关）。
+func TestSetStatus_ActiveExpiredCodeToActive_Rejected(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	svc, client := qkNewTestService(t, nil)
+	past := time.Now().Add(-1 * time.Hour)
+	qk := mustCreateQuotaKeyWithExpiry(t, client, domain.QuotaKeyStatusActive, "", &past)
+	t.Cleanup(func() { quotaKeyTestCleanup(t, client, qk.ID) })
+
+	_, err := svc.SetStatus(context.Background(), qk.ID, domain.QuotaKeyStatusActive)
+	require.Error(t, err)
+	require.Equal(t, "QUOTA_KEY_EXPIRED_CANNOT_ENABLE", appErrorReason(t, err))
+}
+
+// TestSetStatus_InvalidStatus_Rejected：非法状态 → 400 QUOTA_KEY_STATUS_INVALID。
+func TestSetStatus_InvalidStatus_Rejected(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	svc, client := qkNewTestService(t, nil)
+	qk := mustCreateQuotaKeyWithExpiry(t, client, domain.QuotaKeyStatusActive, "", nil)
+	t.Cleanup(func() { quotaKeyTestCleanup(t, client, qk.ID) })
+
+	_, err := svc.SetStatus(context.Background(), qk.ID, "frobnicate")
+	require.Error(t, err)
+	require.Equal(t, "QUOTA_KEY_STATUS_INVALID", appErrorReason(t, err))
+}
+
+// TestSetStatus_NotFound：不存在的 id → ErrQuotaKeyNotFound。
+func TestSetStatus_NotFound(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	svc, _ := qkNewTestService(t, nil)
+	_, err := svc.SetStatus(context.Background(), 987654321, domain.QuotaKeyStatusDisabled)
+	require.ErrorIs(t, err, ErrQuotaKeyNotFound)
+}
+
+// TestKnCyRotateCredentials_SyncsAccountAPIKey：kn_cy 码换新卡密 → 名下 apikey 账号
+// credentials.api_key 变为新值，credentials_mac / credentials_api_key_mac 已刷新，且提交后
+// 入队 account_changed。
+func TestKnCyRotateCredentials_SyncsAccountAPIKey(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	client := quotaKeyTestEntClient(t)
+	_, err := credcrypt.Configure(quotaKeyTestCredcryptKeyB64, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = credcrypt.Configure("", "") })
+	repo := &testDBRepo{client: client}
+	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, client)
+
+	qk := mustCreateQuotaKeyWithUpstream(t, client, domain.QuotaKeyStatusActive, upstreamKeyKnCy)
+	t.Cleanup(func() { quotaKeyTestCleanup(t, client, qk.ID) })
+	acc := mustCreateAPIKeyAccount(t, client, qk.ID, map[string]any{
+		"api_key":       "old-kncy-key",
+		"refresh_token": "old-rt",
+	}, "before-cred-mac", "before-akey-mac")
+
+	newPlain := fmt.Sprintf("new-kncy-card-%d", time.Now().UnixNano())
+	_, err = svc.RotateCredentials(context.Background(), qk.ID, newPlain)
+	require.NoError(t, err)
+
+	reloaded, rerr := client.Account.Get(context.Background(), acc.ID)
+	require.NoError(t, rerr)
+
+	// credentials.api_key 变为新值（存储为密文，解密后比对）。
+	storedAPIKey, ok := reloaded.Credentials["api_key"].(string)
+	require.True(t, ok, "api_key 子键应存在")
+	decrypted, derr := credcrypt.Decrypt(storedAPIKey)
+	require.NoError(t, derr)
+	require.Equal(t, newPlain, decrypted, "kn_cy 换码后账号 api_key 应为新卡密")
+
+	// credentials_mac / credentials_api_key_mac 已刷新。
+	require.NotEqual(t, "before-cred-mac", reloaded.CredentialsMAC, "credentials_mac 应刷新")
+	require.Equal(t, credentialsHMACOfJSON([]byte(newPlain)), reloaded.CredentialsAPIKeyMAC, "credentials_api_key_mac 应按新 api_key 重算")
+
+	// 提交后入队 account_changed（与 SetStatus 同型）。
+	found := false
+	for _, call := range repo.outboxCalls {
+		for _, id := range call {
+			if id == acc.ID {
+				found = true
+			}
+		}
+	}
+	require.True(t, found, "kn_cy 换码应入队 account_changed outbox")
+}
+
+// TestKnCyRotateCredentials_ShareAIAccountAPIKeyUnchanged：shareai 码换码 → 账号凭证一字未变
+// （断言语义相等：shareai 不触发 B7 同步），且不得入队无关账号。
+func TestKnCyRotateCredentials_ShareAIAccountAPIKeyUnchanged(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	client := quotaKeyTestEntClient(t)
+	_, err := credcrypt.Configure(quotaKeyTestCredcryptKeyB64, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = credcrypt.Configure("", "") })
+	repo := &testDBRepo{client: client}
+	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, client)
+
+	// shareai 上行（默认）：不触发账号密钥同步。
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	t.Cleanup(func() { quotaKeyTestCleanup(t, client, qk.ID) })
+	acc := mustCreateAPIKeyAccount(t, client, qk.ID, map[string]any{
+		"api_key": "sk-shareai-keep",
+	}, "keep-cred-mac", "keep-akey-mac")
+
+	_, err = svc.RotateCredentials(context.Background(), qk.ID, fmt.Sprintf("new-shareai-code-%d", time.Now().UnixNano()))
+	require.NoError(t, err)
+
+	reloaded, rerr := client.Account.Get(context.Background(), acc.ID)
+	require.NoError(t, rerr)
+	require.Equal(t, "sk-shareai-keep", reloaded.Credentials["api_key"], "shareai 换码不得改动账号凭证")
+	require.Equal(t, "keep-cred-mac", reloaded.CredentialsMAC, "shareai 换码不得改动 credentials_mac")
+	require.Equal(t, "keep-akey-mac", reloaded.CredentialsAPIKeyMAC, "shareai 换码不得改动 credentials_api_key_mac")
+	require.Empty(t, repo.outboxCalls, "shareai 换码不得入队 account_changed（无账号同步）")
+}
+
+// TestKnCyRotateCredentials_DuplicateCodeAPIKey：换码撞 uq_quota_keys_code_mac → 返回
+// ErrQuotaKeyDuplicateCode（与 Create 同口径，由仓储层翻译）。
+func TestKnCyRotateCredentials_DuplicateCodeAPIKey(t *testing.T) {
+	preserveCursorQuotaKeyStateProvider(t)
+	client := quotaKeyTestEntClient(t)
+	_, err := credcrypt.Configure(quotaKeyTestCredcryptKeyB64, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = credcrypt.Configure("", "") })
+	repo := &testDBRepo{client: client}
+	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, client)
+
+	newPlain := fmt.Sprintf("dup-target-code-%d", time.Now().UnixNano())
+	dupMAC := quotaKeyMACOfPlaintext(newPlain)
+	// 已占用该 code_mac 的未软删激活码（任意上行），使 uq_quota_keys_code_mac 唯一冲突可被触发。
+	occupied, oerr := client.QuotaKey.Create().
+		SetCodeEncrypted("enc:v1:occupied").
+		SetCodeMAC(dupMAC).
+		SetStatus(domain.QuotaKeyStatusActive).
+		Save(context.Background())
+	require.NoError(t, oerr)
+	t.Cleanup(func() { quotaKeyTestCleanup(t, client, occupied.ID) })
+
+	qk := mustCreateQuotaKeyWithUpstream(t, client, domain.QuotaKeyStatusActive, upstreamKeyKnCy)
+	t.Cleanup(func() { quotaKeyTestCleanup(t, client, qk.ID) })
+	_, err = svc.RotateCredentials(context.Background(), qk.ID, newPlain)
+	require.ErrorIs(t, err, ErrQuotaKeyDuplicateCode)
 }
