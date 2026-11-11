@@ -495,6 +495,17 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
 	var blocks []AnthropicContentBlock
 	reasoning := message.reasoningText()
 
+	// DeepSeek 官方 DSML 方言：上游可能把工具调用写成 DSML 文本放在
+	// reasoning_content / content 里。按官方规范还原成标准 tool_use 块，
+	// 并把 DSML 原文摘干净（不让协议标签外泄给客户端）。
+	dsmlCalls := ParseDSMLToolCalls(reasoning)
+	if len(dsmlCalls) == 0 {
+		dsmlCalls = ParseDSMLToolCalls(chatMessageContentText(message.Content))
+	}
+	if len(dsmlCalls) > 0 {
+		reasoning = StripDSML(reasoning)
+	}
+
 	if reasoning != "" {
 		blocks = append(blocks, AnthropicContentBlock{
 			Type:     "thinking",
@@ -503,17 +514,28 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
 	}
 
 	text := chatMessageContentText(message.Content)
+	text = StripDSML(text)
 	// DeepSeek reasoning-only fallback: when there is no text and no tool calls,
 	// surface the reasoning content as visible text so the turn isn't empty.
 	//
 	// 但绝不能把 reasoning 原样当正文（11-03 活体）：上游把推理内联成
 	// "<thinking>(reasoning not retained)</thinking>" 时，客户端会把它当正文打印出来。
 	// 占位串与推理标签都是网关内部产物，必须先清洗再交付。
-	if text == "" && len(message.ToolCalls) == 0 {
+	if text == "" && len(message.ToolCalls) == 0 && len(dsmlCalls) == 0 {
 		text = sanitizeReasoningForVisibleText(reasoning)
 	}
-	if text != "" || len(message.ToolCalls) == 0 {
+	if text != "" || (len(message.ToolCalls) == 0 && len(dsmlCalls) == 0) {
 		blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: text})
+	}
+
+	// 还原出来的 DSML 调用 → 标准 tool_use 块。
+	for i, call := range dsmlCalls {
+		blocks = append(blocks, AnthropicContentBlock{
+			Type:  "tool_use",
+			ID:    fromResponsesCallID("call_dsml_" + itoa(i)),
+			Name:  call.Name,
+			Input: sanitizeAnthropicToolUseInput(call.Name, call.Arguments),
+		})
 	}
 
 	for _, toolCall := range message.ToolCalls {
@@ -655,6 +677,15 @@ type ChatCompletionsToAnthropicStreamState struct {
 	// 把思考内容转成 thinking_delta 事件而非透传到正文。
 	thinkStripper InlineThinkStripper
 
+	// dsmlBuffer 跨帧缓冲 DeepSeek 官方 DSML 工具调用块。
+	// 上游（CodeBuddy /v2/chat/completions）把工具调用写成 DSML 文本放在
+	// reasoning_content / content 里；这里按官方规范还原成标准 tool_use 块，
+	// 并把 DSML 原文从可见内容里摘干净（不让协议标签外泄给客户端）。
+	dsmlBuffer DSMLStreamBuffer
+
+	// dsmlToolIndex 是还原出来的 DSML 工具调用的序号（tool_use index 分配用）。
+	dsmlToolIndex int
+
 	FinishReason string
 
 	InputTokens              int
@@ -712,13 +743,20 @@ func ChatCompletionsChunkToAnthropicEvents(
 
 	for _, choice := range chunk.Choices {
 		// Reasoning content → thinking block.
+		//
+		// DeepSeek 官方 DSML 方言：上游把工具调用写成 DSML 文本放在 reasoning_content
+		// 里。先过 DSML 缓冲：还原出的调用转成标准 tool_use 块；DSML 原文不再透传。
 		reasoning := choice.Delta.reasoningText()
 		if reasoning != nil && *reasoning != "" {
-			events = append(events, ensureCCAnthropicThinkingBlock(state)...)
-			events = append(events, ccAnthropicDelta(state, &AnthropicDelta{
-				Type:     "thinking_delta",
-				Thinking: *reasoning,
-			})...)
+			plain, calls := state.dsmlBuffer.Feed(*reasoning)
+			events = append(events, state.dsmlToolCallEvents(calls)...)
+			if plain != "" {
+				events = append(events, ensureCCAnthropicThinkingBlock(state)...)
+				events = append(events, ccAnthropicDelta(state, &AnthropicDelta{
+					Type:     "thinking_delta",
+					Thinking: plain,
+				})...)
+			}
 		}
 
 		// Text content → text block (closes any open thinking block first),
@@ -741,6 +779,25 @@ func ChatCompletionsChunkToAnthropicEvents(
 	return events
 }
 
+// dsmlToolCallEvents 把还原出来的 DSML 调用转成 Anthropic tool_use 事件。
+//
+// 官方 vLLM 的做法：缓冲到完整 invoke 块出现才一次性吐出结构化参数，
+// 不逐帧贪心解析。本函数由 dsmlBuffer.Calls() 在凑齐时被调用。
+func (s *ChatCompletionsToAnthropicStreamState) dsmlToolCallEvents(calls []DSMLToolCall) []AnthropicStreamEvent {
+	if s == nil || len(calls) == 0 {
+		return nil
+	}
+	var events []AnthropicStreamEvent
+	for _, call := range calls {
+		idx := s.dsmlToolIndex
+		s.dsmlToolIndex++
+		toolCall := DSMLToolCallToChatToolCall(call, idx)
+		events = append(events, closeCCAnthropicBlockIfOpen(s, "thinking")...)
+		events = append(events, handleCCAnthropicToolCall(s, &toolCall)...)
+	}
+	return events
+}
+
 // handleCCAnthropicTextDelta processes a Chat Completions text delta: it first
 // strips any inline <think>/<thinking> segments via the cross-frame
 // InlineThinkStripper so reasoning is routed to thinking_delta and the remaining
@@ -751,10 +808,16 @@ func handleCCAnthropicTextDelta(state *ChatCompletionsToAnthropicStreamState, de
 		return nil
 	}
 
+	// 先过 DSML 缓冲：上游可能把工具调用写成 DSML 文本放在 content 里。
+	// 还原出的调用转成标准 tool_use 块；DSML 原文不会透传到正文。
+	delta, dsmlCalls := state.dsmlBuffer.Feed(delta)
+	events := state.dsmlToolCallEvents(dsmlCalls)
+	if delta == "" {
+		return events
+	}
+
 	// 先过 InlineThinkStripper 剥离内联 <think>/<thinking> 段。
 	reasoning, text := state.thinkStripper.Feed(delta)
-
-	var events []AnthropicStreamEvent
 
 	// reasoning 部分 → thinking_delta 事件
 	if reasoning != "" {
@@ -788,6 +851,11 @@ func FinalizeChatCompletionsAnthropicStream(state *ChatCompletionsToAnthropicStr
 	}
 
 	var events []AnthropicStreamEvent
+
+	// 收口 DSML 缓冲：完整调用还原成 tool_use；残片直接丢弃（不外泄协议标签）。
+	if calls := state.dsmlBuffer.Flush(); len(calls) > 0 {
+		events = append(events, state.dsmlToolCallEvents(calls)...)
+	}
 
 	// 冲出跨帧缓冲里残留的 think 尾段
 	if r, t := state.thinkStripper.Flush(); r != "" || t != "" {

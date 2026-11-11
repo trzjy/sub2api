@@ -1586,9 +1586,62 @@ func chatServiceTier(resp *ChatCompletionsResponse) string {
 	return resp.ServiceTier
 }
 
+// dsmlResponsesToolCallEvents 把还原出来的 DSML 调用转成 Responses 的
+// function_call 输出事件（added → arguments.delta）。
+//
+// DSML 调用参数是完整的一份（官方解析器一次性还原），所以不走增量累积路径：
+// 声明项时一次性带全参数。
+func (s *ChatCompletionsToResponsesStreamState) dsmlResponsesToolCallEvents(calls []DSMLToolCall) []ResponsesStreamEvent {
+	if s == nil || len(calls) == 0 {
+		return nil
+	}
+	var events []ResponsesStreamEvent
+	for _, call := range calls {
+		idx := s.dsmlToolIndex
+		s.dsmlToolIndex++
+		toolCall := DSMLToolCallToChatToolCall(call, idx)
+		// 工具调用先关闭 reasoning 项。
+		events = append(events, closeChatReasoningItem(s)...)
+		events = append(events, s.announceDSMLToolItem(&toolCall)...)
+	}
+	return events
+}
+
+// announceDSMLToolItem 声明一个 DSML 还原出来的工具调用项并一次性下发其参数。
+func (s *ChatCompletionsToResponsesStreamState) announceDSMLToolItem(toolCall *ChatToolCall) []ResponsesStreamEvent {
+	if s == nil || toolCall == nil {
+		return nil
+	}
+	idx := 0
+	if toolCall.Index != nil {
+		idx = *toolCall.Index
+	}
+	stored := *toolCall
+	stored.Type = "function"
+	if stored.ID == "" {
+		stored.ID = generateItemID()
+	}
+	// DSML 还原出来的参数已是完整的一份；声明时一次性带全。
+	s.ToolCalls[idx] = &stored
+	s.ToolItemIDs[idx] = generateItemID()
+	s.ToolOutputIndex[idx] = s.allocOutputIndex()
+	return announceChatToolItem(s, idx, &stored, true)
+}
+
 func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTools map[string]bool, toolSearch bool, namespaceTools map[string]NamespacedToolName) []ResponsesOutput {
 	var outputs []ResponsesOutput
 	reasoning := message.reasoningText()
+
+	// DeepSeek 官方 DSML 方言：上游可能把工具调用写成 DSML 文本。按官方规范
+	// 还原成标准工具调用输出，并把 DSML 原文摘干净（不让协议标签外泄）。
+	dsmlCalls := ParseDSMLToolCalls(reasoning)
+	if len(dsmlCalls) == 0 {
+		dsmlCalls = ParseDSMLToolCalls(chatMessageContentText(message.Content))
+	}
+	if len(dsmlCalls) > 0 {
+		reasoning = StripDSML(reasoning)
+	}
+
 	if reasoning != "" {
 		outputs = append(outputs, ResponsesOutput{
 			Type: "reasoning",
@@ -1600,11 +1653,11 @@ func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTool
 		})
 	}
 
-	text := chatMessageContentText(message.Content)
-	if text == "" && strings.TrimSpace(reasoning) != "" && len(message.ToolCalls) == 0 {
+	text := StripDSML(chatMessageContentText(message.Content))
+	if text == "" && strings.TrimSpace(reasoning) != "" && len(message.ToolCalls) == 0 && len(dsmlCalls) == 0 {
 		text = reasoning
 	}
-	if text != "" || len(message.ToolCalls) == 0 {
+	if text != "" || (len(message.ToolCalls) == 0 && len(dsmlCalls) == 0) {
 		outputs = append(outputs, ResponsesOutput{
 			Type: "message",
 			ID:   generateItemID(),
@@ -1613,6 +1666,18 @@ func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTool
 				Type: "output_text",
 				Text: text,
 			}},
+			Status: "completed",
+		})
+	}
+
+	// 还原出来的 DSML 调用 → 标准 function_call 输出。
+	for i, call := range dsmlCalls {
+		outputs = append(outputs, ResponsesOutput{
+			Type:   "function_call",
+			ID:     generateItemID(),
+			CallID: "call_dsml_" + itoa(i),
+			Name:   call.Name,
+			Arguments: call.Arguments,
 			Status: "completed",
 		})
 	}
@@ -1812,6 +1877,14 @@ type ChatCompletionsToResponsesStreamState struct {
 	// 项类型一致。
 	toolIsCustom map[int]bool
 
+	// dsmlBuffer 跨帧缓冲 DeepSeek 官方 DSML 工具调用块（见 dsml.go）。
+	// 上游把工具调用写成 DSML 文本放在 reasoning_content / content 里；
+	// 这里按官方规范还原成标准 function_call 输出，DSML 原文不外泄。
+	dsmlBuffer DSMLStreamBuffer
+
+	// dsmlToolIndex 是还原出来的 DSML 工具调用序号（tool_call index 分配用）。
+	dsmlToolIndex int
+
 	// toolIsToolSearch 记录工具调用是否判定为 tool_search 代理调用。
 	toolIsToolSearch map[int]bool
 
@@ -1907,26 +1980,38 @@ func ChatCompletionsChunkToResponsesEvents(
 		// empty-string reasoning delta upstreams send is filtered out.
 		reasoning := choice.Delta.reasoningText()
 		if reasoning != nil && *reasoning != "" {
-			events = append(events, ensureChatReasoningItem(state)...)
-			_, _ = state.Reasoning.WriteString(*reasoning)
-			events = append(events, chatToResponsesEvent(state, "response.reasoning_summary_text.delta", &ResponsesStreamEvent{
-				OutputIndex:  state.ReasoningIndex,
-				SummaryIndex: 0,
-				Delta:        *reasoning,
-				ItemID:       state.ReasoningItemID,
-			}))
+			// DeepSeek 官方 DSML 方言：还原出的调用转成标准 function_call 输出，
+			// DSML 原文不再透传。
+			plain, dsmlCalls := state.dsmlBuffer.Feed(*reasoning)
+			events = append(events, state.dsmlResponsesToolCallEvents(dsmlCalls)...)
+			if plain != "" {
+				events = append(events, ensureChatReasoningItem(state)...)
+				_, _ = state.Reasoning.WriteString(plain)
+				events = append(events, chatToResponsesEvent(state, "response.reasoning_summary_text.delta", &ResponsesStreamEvent{
+					OutputIndex:  state.ReasoningIndex,
+					SummaryIndex: 0,
+					Delta:        plain,
+					ItemID:       state.ReasoningItemID,
+				}))
+			}
 		}
 		if choice.Delta.Content != nil && *choice.Delta.Content != "" {
+			// 正文里也可能带 DSML（上游两种位置都出现过）。
+			plain, dsmlCalls := state.dsmlBuffer.Feed(*choice.Delta.Content)
+			events = append(events, state.dsmlResponsesToolCallEvents(dsmlCalls)...)
+			if plain == "" {
+				continue
+			}
 			// First real content closes the reasoning item, then opens the
 			// message item and its output_text content part.
 			events = append(events, closeChatReasoningItem(state)...)
 			events = append(events, ensureChatToResponsesMessageItem(state)...)
 			events = append(events, ensureChatToResponsesTextPart(state)...)
-			_, _ = state.Text.WriteString(*choice.Delta.Content)
+			_, _ = state.Text.WriteString(plain)
 			events = append(events, chatToResponsesEvent(state, "response.output_text.delta", &ResponsesStreamEvent{
 				OutputIndex:  state.MessageIndex,
 				ContentIndex: 0,
-				Delta:        *choice.Delta.Content,
+				Delta:        plain,
 				ItemID:       state.MessageItemID,
 			}))
 		}
@@ -1996,6 +2081,11 @@ func FinalizeChatCompletionsResponsesStream(state *ChatCompletionsToResponsesStr
 	}
 	var events []ResponsesStreamEvent
 	events = append(events, ensureChatToResponsesCreated(state)...)
+
+	// 收口 DSML 缓冲：完整调用还原成 function_call；残片丢弃（不外泄协议标签）。
+	if calls := state.dsmlBuffer.Flush(); len(calls) > 0 {
+		events = append(events, state.dsmlResponsesToolCallEvents(calls)...)
+	}
 
 	// Close a reasoning item that never transitioned to content (reasoning-only
 	// or empty completion).
