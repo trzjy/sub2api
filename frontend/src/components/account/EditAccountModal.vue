@@ -313,6 +313,59 @@
           </div>
         </div>
 
+        <!-- Web 控制台额度上游（compshare/sensenova/longcat）：控制台登录凭据与交互验证 -->
+        <div
+          v-if="account.web_console_quota_provider"
+          class="border-t border-gray-200 pt-4 dark:border-dark-600"
+          data-testid="web-console-quota-section"
+        >
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.webConsoleQuota.title') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.webConsoleQuota.hint', { provider: account.web_console_quota_provider }) }}
+            </p>
+          </div>
+          <div class="mt-3 grid grid-cols-1 gap-3">
+            <div>
+              <label class="input-label mb-1">{{ t('admin.accounts.webConsoleQuota.username') }}</label>
+              <input
+                v-model="webConsoleUsername"
+                data-testid="web-console-username"
+                class="input"
+                :placeholder="t('admin.accounts.webConsoleQuota.usernamePlaceholder')"
+              />
+            </div>
+            <div>
+              <label class="input-label mb-1">{{ t('admin.accounts.webConsoleQuota.password') }}</label>
+              <input
+                v-model="webConsolePassword"
+                type="password"
+                data-testid="web-console-password"
+                class="input"
+                :placeholder="
+                  account.credentials_status?.has_console_password
+                    ? t('admin.accounts.webConsoleQuota.passwordKeepPlaceholder')
+                    : t('admin.accounts.webConsoleQuota.passwordPlaceholder')
+                "
+              />
+            </div>
+          </div>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-testid="web-console-auth-start"
+              class="rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+              :disabled="webConsoleAuthBusy"
+              @click="handleStartWebConsoleAuth"
+            >
+              {{ webConsoleAuthBusy ? t('admin.accounts.webConsoleQuota.authRunning') : t('admin.accounts.webConsoleQuota.authStart') }}
+            </button>
+            <span v-if="webConsoleAuthMessage" class="text-xs" :class="webConsoleAuthError ? 'text-red-600' : 'text-emerald-600'">
+              {{ webConsoleAuthMessage }}
+            </span>
+          </div>
+        </div>
+
         <!-- 网页接入模式（access_mode=web）：编辑登录态凭证；API 专属字段已隐藏 -->
         <div v-if="isWebEditAccount" class="space-y-4">
           <div data-testid="web-edit-risk-warning" class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-900/20">
@@ -3423,7 +3476,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, nextTick, onMounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 
@@ -3755,6 +3808,11 @@ onMounted(() => {
   if (opencodeGoState.value && !opencodeGoState.value.snapshot) void loadOpenCodeGoUsage()
 })
 
+// 卸载时清掉控制台验证登录轮询定时器，避免组件销毁后仍在打接口。
+onUnmounted(() => {
+  stopWebConsoleAuthPolling()
+})
+
 // Platform-specific hint for Base URL
 const baseUrlHint = computed(() => {
   if (!props.account) return t('admin.accounts.baseUrlHint')
@@ -3877,6 +3935,65 @@ const isVolcanoSubscription = computed(() => {
 })
 const volcanoAccessKey = ref('')
 const volcanoSecretKey = ref('')
+// ── Web 控制台额度上游（compshare/sensenova/longcat）控制台登录凭据 ──
+// 是否需要该区块只认 account.web_console_quota_provider（后端唯一事实源投影），
+// 前端不复制 base_url 主机名判定。密码永不回显：留空即保留原值（后端
+// MergePreservingSensitiveCreds 不覆盖）。
+const webConsoleUsername = ref('')
+const webConsolePassword = ref('')
+const webConsoleAuthBusy = ref(false)
+const webConsoleAuthMessage = ref('')
+const webConsoleAuthError = ref(false)
+let webConsoleAuthTimer: number | null = null
+
+const stopWebConsoleAuthPolling = () => {
+  if (webConsoleAuthTimer !== null) {
+    window.clearInterval(webConsoleAuthTimer)
+    webConsoleAuthTimer = null
+  }
+}
+
+// 交互登录：本机浏览器完成滑块/扫码，后端会话轮询最多等 10 分钟；
+// 单次轮询失败不终止（网络抖动/会话仍在），超时或终态才停表。
+const handleStartWebConsoleAuth = async () => {
+  if (!props.account) return
+  webConsoleAuthBusy.value = true
+  webConsoleAuthError.value = false
+  webConsoleAuthMessage.value = ''
+  try {
+    const { session_id } = await adminAPI.cnProviders.startWebConsoleAuth(props.account.id)
+    const deadline = Date.now() + 10 * 60 * 1000
+    stopWebConsoleAuthPolling()
+    webConsoleAuthTimer = window.setInterval(async () => {
+      if (Date.now() > deadline) {
+        stopWebConsoleAuthPolling()
+        webConsoleAuthBusy.value = false
+        webConsoleAuthError.value = true
+        webConsoleAuthMessage.value = t('admin.accounts.webConsoleQuota.authTimeout')
+        return
+      }
+      try {
+        const r = await adminAPI.cnProviders.pollWebConsoleAuth(props.account!.id, session_id)
+        if (r.status === 'succeeded') {
+          stopWebConsoleAuthPolling()
+          webConsoleAuthBusy.value = false
+          webConsoleAuthMessage.value = t('admin.accounts.webConsoleQuota.authSuccess')
+        } else if (r.status === 'failed') {
+          stopWebConsoleAuthPolling()
+          webConsoleAuthBusy.value = false
+          webConsoleAuthError.value = true
+          webConsoleAuthMessage.value = r.message || t('admin.accounts.webConsoleQuota.authFailed')
+        }
+      } catch {
+        /* 单次轮询失败不终止，等下一轮 */
+      }
+    }, 3000)
+  } catch (e) {
+    webConsoleAuthBusy.value = false
+    webConsoleAuthError.value = true
+    webConsoleAuthMessage.value = (e as Error)?.message || t('common.error')
+  }
+}
 // 回填窗口标志：syncFormFromAccount 会同步改写 editAccountMode / editApiProtocol，
 // 而 watcher（pre-flush）在同步代码执行完之后才触发——若不抑制，会把刚恢复的
 // 存储版 base_url（可能是用户自定义/中转地址）覆盖为官方预设并在下次保存时持久化。
@@ -5108,6 +5225,14 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   const creds = (newAccount.credentials as Record<string, unknown>) || {}
   webEditLoginEmail.value = typeof creds.login_email === 'string' ? creds.login_email : ''
   webEditLoginPassword.value = ''
+  // Web 控制台凭据：用户名明文回显，密码永不回显（留空 = 保留原值）。
+  // 每次回填同时复位认证提示，避免上一个账号的结果文案串到新账号。
+  webConsoleUsername.value = String(creds.console_username ?? '')
+  webConsolePassword.value = ''
+  stopWebConsoleAuthPolling()
+  webConsoleAuthBusy.value = false
+  webConsoleAuthMessage.value = ''
+  webConsoleAuthError.value = false
 }
 
 async function loadTLSProfiles() {
@@ -5656,6 +5781,9 @@ const parseDateTimeLocal = parseDateTimeLocalInput
 const handleClose = () => {
   antigravityMixedChannelConfirmed.value = false
   clearMixedChannelDialog()
+  // 关闭弹窗即中止控制台验证登录轮询（会话在后端自然过期，不必再轮询）。
+  stopWebConsoleAuthPolling()
+  webConsoleAuthBusy.value = false
   emit('close')
 }
 
@@ -5842,6 +5970,13 @@ const handleSubmit = async () => {
       if (isVolcanoBaseURL(String(newCredentials.base_url))) {
         if (volcanoAccessKey.value.trim()) newCredentials.access_key = volcanoAccessKey.value.trim()
         if (volcanoSecretKey.value.trim()) newCredentials.secret_key = volcanoSecretKey.value.trim()
+      }
+
+      // Web 控制台凭据：仅非空才写入（密码留空不带该键，后端 MergePreservingSensitiveCreds
+      // 保留原密码；同理用户名留空不覆盖）。判定只认 web_console_quota_provider。
+      if (props.account.web_console_quota_provider) {
+        if (webConsoleUsername.value.trim()) newCredentials.console_username = webConsoleUsername.value.trim()
+        if (webConsolePassword.value.trim()) newCredentials.console_password = webConsolePassword.value.trim()
       }
 
       // Handle API key

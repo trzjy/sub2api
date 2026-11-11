@@ -74,3 +74,12 @@ func TestBuildDetailedAccountSchedulingThresholdReason_IncludesReadableFields(t 
 	require.Contains(t, payload["error_message"], "openai scheduling threshold reached")
 	require.Contains(t, payload["error_message"], "92.5% used >= 90%")
 }
+
+func TestIsWebConsoleQuotaTempUnschedReason(t *testing.T) {
+	require.True(t, IsWebConsoleQuotaTempUnschedReason(
+		BuildTempUnschedReasonPayload("web_console_quota", "week quota exhausted")))
+	require.False(t, IsWebConsoleQuotaTempUnschedReason(
+		BuildTempUnschedReasonPayload("account_scheduling_threshold", "x")))
+	require.False(t, IsWebConsoleQuotaTempUnschedReason("openai_apikey_health_breaker"))
+	require.False(t, IsWebConsoleQuotaTempUnschedReason(""))
+}

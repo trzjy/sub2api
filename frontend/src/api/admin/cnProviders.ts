@@ -169,7 +169,54 @@ export async function queryBalance(id: number): Promise<CNProviderBalanceResult>
   return data
 }
 
+/** Web 控制台额度探测结果（对齐后端 service.WebConsoleQuotaProbeResult）。 */
+export interface WebConsoleQuotaProbeResult {
+  provider: string
+  success: boolean
+  auth_state: 'ok' | 'needs_interactive_auth' | 'auth_failed' | 'error'
+  auth_reason?: string
+  auth_error?: string
+  exhausted: boolean
+  until?: string
+  persisted: boolean
+  fetched_at: number
+  error?: string
+  snapshot?: import('@/types').WebConsoleQuotaSnapshot
+}
+
+/** 手动触发一次 Web 控制台额度探测。 */
+export async function probeWebConsoleQuota(id: number): Promise<WebConsoleQuotaProbeResult> {
+  const { data } = await apiClient.post<WebConsoleQuotaProbeResult>(
+    `/admin/accounts/${id}/web-console-quota/probe`
+  )
+  return data
+}
+
+/** 发起本地浏览器交互登录（需要在用户工作站上完成滑块/扫码）。 */
+export async function startWebConsoleAuth(id: number): Promise<{ session_id: string; expires_in: number }> {
+  const { data } = await apiClient.post<{ session_id: string; expires_in: number }>(
+    `/admin/accounts/${id}/web-console-auth/start`
+  )
+  return data
+}
+
+/** 轮询交互登录进展；成功后后端会自动刷新快照并返回最新结果。 */
+export async function pollWebConsoleAuth(
+  id: number,
+  sessionId: string
+): Promise<{ status: 'pending' | 'succeeded' | 'failed'; probe?: WebConsoleQuotaProbeResult; message?: string }> {
+  const { data } = await apiClient.get<{
+    status: 'pending' | 'succeeded' | 'failed'
+    probe?: WebConsoleQuotaProbeResult
+    message?: string
+  }>(`/admin/accounts/${id}/web-console-auth/${sessionId}`)
+  return data
+}
+
 export default {
   queryQuota,
-  queryBalance
+  queryBalance,
+  probeWebConsoleQuota,
+  startWebConsoleAuth,
+  pollWebConsoleAuth
 }

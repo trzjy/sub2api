@@ -57,6 +57,7 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import sys
 import time
 import uuid
@@ -190,7 +191,11 @@ class Solver:
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
-        self.lock = asyncio.Lock()
+        # 跨流程原子槽位：/solve、/risk、/challenge/*、/web-auth/* 共用一个有头浏览器
+        # 槽位。原两套互不连通的锁（Solver.lock 与 ManualChallengeManager._lock）收敛为
+        # 此处单一守卫：任一流程运行/预约中，其他流程（不同 owner）立即 busy/409，不排队。
+        self._slot_guard = asyncio.Lock()
+        self._slot_owner: Optional[str] = None
         self.pw: Any = None
         # browser_driver: playwright（默认，原生 Playwright）| patchright（反检测
         # fork，消除 CDP Runtime.enable 等自动化泄漏）。显式要求的驱动不可用时
@@ -212,12 +217,32 @@ class Solver:
         else:
             self.pw = await async_playwright().start()
 
+    async def try_acquire_slot(self, owner: str) -> bool:
+        """原子预约跨流程浏览器槽位。
+
+        owner 为调用方唯一标识（如 ``solve:<account_id>``、
+        ``web-auth:<session_id>``、``<login_session_id>``）。已被其他 owner 占用时
+        返回 False（调用方立即回 busy/409），绝不排队等锁；同一 owner 可重入预约。
+        """
+        async with self._slot_guard:
+            if self._slot_owner is not None and self._slot_owner != owner:
+                return False
+            self._slot_owner = owner
+            return True
+
+    async def release_slot(self, owner: str) -> None:
+        """释放槽位；仅当 owner 与当前持有者一致时清空，避免误清他人预约。"""
+        async with self._slot_guard:
+            if self._slot_owner == owner:
+                self._slot_owner = None
+
     async def stop(self) -> None:
         if self.pw:
             await self.pw.stop()
             self.pw = None
 
-    async def _launch_session(self, headless: bool, channel: Optional[str], locale: str) -> tuple:
+    async def _launch_session(self, headless: bool, channel: Optional[str], locale: str,
+                             profile_dir: Optional[str] = None) -> tuple:
         """启动浏览器会话，返回 (browser, context, page)。
 
         - playwright 驱动：launch + new_context（既有行为，browser 非 None）。
@@ -233,7 +258,8 @@ class Solver:
         sandbox = bool(self.cfg.get("browser_sandbox", True))
         if self.driver == "patchright":
             profile_dir = str(
-                self.cfg.get("browser_profile_dir")
+                profile_dir
+                or self.cfg.get("browser_profile_dir")
                 or Path.home() / ".cache" / "xianyu-captcha-helper" / "chrome-profile"
             )
             os.makedirs(profile_dir, exist_ok=True)
@@ -435,9 +461,10 @@ class Solver:
             status: 'ok' / 'fail' / 'busy'
             url_expired 仅契约 A 使用：True 时 Worker 会刷新 URL 重试。
         """
-        if self.lock.locked():
+        owner_id = f"solve:{account_id}"
+        if not await self.try_acquire_slot(owner_id):
             return "busy", {}, None
-        async with self.lock:
+        try:
             if self.pw is None:
                 log("求解器未初始化（未调用 start）")
                 return "fail", {}, None
@@ -571,6 +598,8 @@ class Solver:
                         await context.close()
                     except Exception:
                         pass
+        finally:
+            await self.release_slot(owner_id)
 
 
 # ---------------------------------------------------------------------------
@@ -961,6 +990,11 @@ window.challengeFail('glm_challenge_misrouted_to_local_page');
             await self._release_expired_locked()
             if self._session is not None:
                 raise RuntimeError("已有人工挑战占用单槽位")
+            # 预约跨流程浏览器槽位（owner 用 login_session_id）；已被其他流程占用
+            # 时立即抛 RuntimeError → 路由映射 409，绝不排队。原 _lock 仅保留用于
+            # session 元数据互斥，不再充当浏览器互斥。
+            if not await self.solver.try_acquire_slot(login_session_id):
+                raise RuntimeError("已有人工挑战占用单槽位")
             wait = self.max_wait if timeout is None else max(1, min(int(timeout), self.max_wait))
             session = ChallengeSession(
                 session_id=secrets.token_urlsafe(24), platform=platform,
@@ -968,7 +1002,11 @@ window.challengeFail('glm_challenge_misrouted_to_local_page');
                 deadline=time.monotonic() + wait, sign=sign,
             )
             self._session = session
-            session.task = asyncio.create_task(self._run(session))
+            try:
+                session.task = asyncio.create_task(self._run(session))
+            except Exception:
+                await self.solver.release_slot(login_session_id)
+                raise
             return session
 
     async def _release_expired_locked(self) -> None:
@@ -1298,6 +1336,11 @@ window.challengeFail('glm_challenge_misrouted_to_local_page');
                     await browser.close()
                 except Exception:
                     pass
+            # 释放跨流程浏览器槽位（owner 用 login_session_id），与 start 的预约配对。
+            try:
+                await self.solver.release_slot(session.login_session_id)
+            except Exception:
+                pass
 
     async def status(self, session_id: str, platform: str, login_session_id: str,
                      phone: str) -> Optional[Dict[str, Any]]:
@@ -1365,6 +1408,322 @@ window.challengeFail('glm_challenge_misrouted_to_local_page');
         )
 
 
+# ---------------------------------------------------------------------------
+# Web 控制台交互登录（契约：/web-auth/*）：复用同一有头 Patchright Chrome 槽位，
+# 捕获 storageState。与 ManualChallengeManager 同走 Solver 的跨流程原子槽位器。
+# 绝不把 username/password/storage_state/cookie 写入日志或落盘（临时 profile
+# 目录结束时删除）。
+# ---------------------------------------------------------------------------
+
+
+def _collect_cookies(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """从 storage_state 收集全部 cookie（兼容顶层 cookies 与 origins[].cookies）。"""
+    out: List[Dict[str, Any]] = []
+    for c in (state.get("cookies") or []):
+        if isinstance(c, dict):
+            out.append(c)
+    for origin in (state.get("origins") or []):
+        if isinstance(origin, dict):
+            for c in (origin.get("cookies") or []):
+                if isinstance(c, dict):
+                    out.append(c)
+    return out
+
+
+@dataclass
+class WebAuthSession:
+    session_id: str
+    provider: str
+    session_binding_id: str
+    login_url: str
+    success_url_prefix: str
+    username: str
+    password: str
+    deadline: float
+    status: str = "pending"
+    result: Dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+    context_gap: bool = False
+    message: str = ""
+    task: Optional[asyncio.Task] = None
+    consumed: bool = False
+
+
+class WebAuthManager:
+    """Web 控制台交互登录：复用同一有头 Patchright Chrome 槽位，捕获 storageState。
+
+    支持 provider：compshare / sensenova / longcat。结果一次性消费（读取后 404），
+    与 ManualChallengeManager 同款语义。日志纪律：绝不打印 username/password/
+    storage_state/cookie 值，只记 provider、session_id、状态、耗时（派生量）。
+    """
+
+    SUPPORTED = frozenset({"compshare", "sensenova", "longcat"})
+
+    def __init__(self, solver: Solver, cfg: Dict[str, Any]):
+        self.solver = solver
+        self.cfg = cfg
+        self.max_wait = max(1, min(int(cfg.get("web_auth_max_wait", 300)), 600))
+        self._session: Optional[WebAuthSession] = None
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _valid_binding(value: str, max_length: int) -> bool:
+        return bool(value) and len(value) <= max_length and all(ord(char) >= 32 for char in value)
+
+    @staticmethod
+    def _normalize_provider(provider: str) -> str:
+        return str(provider).strip().lower()
+
+    async def _release_expired_locked(self) -> None:
+        session = self._session
+        if session is None or time.monotonic() < session.deadline:
+            return
+        if session.task and not session.task.done():
+            session.task.cancel()
+        self._session = None
+
+    async def start(self, provider: str, session_binding_id: str, login_url: str,
+                    success_url_prefix: str, username: str, password: str,
+                    timeout: Optional[int] = None) -> WebAuthSession:
+        provider = self._normalize_provider(provider)
+        if provider not in self.SUPPORTED:
+            raise ValueError("provider 必须是 compshare / sensenova / longcat 之一")
+        session_binding_id = str(session_binding_id).strip()
+        if not self._valid_binding(session_binding_id, 256):
+            raise ValueError("session_binding_id 无效")
+        login_url = str(login_url).strip()
+        if not _url_ok(login_url):
+            raise ValueError("login_url 无效（需 http/https，长度 ≤4096）")
+        success_url_prefix = str(success_url_prefix).strip()
+        if not _url_ok(success_url_prefix):
+            raise ValueError("success_url_prefix 无效（需 http/https，长度 ≤4096）")
+        username = str(username or "")
+        password = str(password or "")
+        if provider == "longcat":
+            # longcat 仅支持扫码/短信，不预填账号密码；忽略传入的账密。
+            username = ""
+            password = ""
+        async with self._lock:
+            await self._release_expired_locked()
+            if self._session is not None:
+                raise RuntimeError("已有 web 认证会话占用单槽位")
+            wait = self.max_wait if timeout is None else max(1, min(int(timeout), self.max_wait))
+            session_id = secrets.token_urlsafe(24)
+            # 预约跨流程浏览器槽位（owner 用 web-auth:<session_id>）；已被其他流程
+            # 占用时立即抛 RuntimeError → 路由映射 409，绝不排队。
+            if not await self.solver.try_acquire_slot(f"web-auth:{session_id}"):
+                raise RuntimeError("已有人工挑战占用单槽位")
+            session = WebAuthSession(
+                session_id=session_id, provider=provider,
+                session_binding_id=session_binding_id, login_url=login_url,
+                success_url_prefix=success_url_prefix, username=username, password=password,
+                deadline=time.monotonic() + wait, status="running",
+            )
+            self._session = session
+            try:
+                session.task = asyncio.create_task(self._run(session))
+            except Exception:
+                await self.solver.release_slot(f"web-auth:{session_id}")
+                raise
+            return session
+
+    async def _run(self, session: WebAuthSession) -> None:
+        browser = None
+        context = None
+        profile_dir = None
+        owner = f"web-auth:{session.session_id}"
+        longcat_data: Dict[str, Any] = {}
+        try:
+            if self.solver.pw is None:
+                raise RuntimeError("求解器未初始化（未调用 start）")
+            headless = False  # 交互登录必须有头，弹出浏览器供人工完成滑块/扫码/短信
+            channel = self.solver.cfg.get("browser_channel") or None
+            # 独立临时 profile 目录：避免污染用户日常 Chrome 资料，结束后 rmtree 清理。
+            profile_dir = str(
+                Path.home() / ".cache" / "xianyu-captcha-helper" / f"webauth-{session.session_id}"
+            )
+            browser, context, page = await self.solver._launch_session(
+                headless=headless, channel=channel, locale="zh-CN", profile_dir=profile_dir
+            )
+            remain = max(1, int(session.deadline - time.monotonic()))
+            await self.solver._notify(
+                session.session_binding_id, remain,
+                message=(
+                    f"Web 控制台登录（{session.provider}）：请在弹出的浏览器中完成验证"
+                    f"（限时 {remain}s）"
+                ),
+            )
+            log(f"Web 认证开始 provider={session.provider} session_id={session.session_id} "
+                f"headless={headless} driver={self.solver.driver}")
+            await page.goto(session.login_url, wait_until="domcontentloaded", timeout=30_000)
+            if session.provider == "compshare":
+                # 账号登录：点击「账号登录」Tab，填邮箱/Company ID 与密码，点「登录」。
+                await page.click("text=账号登录")
+                await page.fill("#username", session.username)
+                await page.fill("input[type=password]", session.password)
+                await page.click("text=登录")
+            elif session.provider == "sensenova":
+                # 密码登录：点击「密码登录」Tab，填账号与密码，提交。
+                await page.click("text=密码登录")
+                await page.fill("#login-username", session.username)
+                await page.fill("#login-password", session.password)
+                await page.click("text=登录")
+            else:  # longcat：不预填，弹通知提示人工扫码/短信
+                log(f"Web 认证 longcat 无账密预填，等待人工扫码/短信 session_id={session.session_id}")
+            # 轮询成功判据（每 1s，至 deadline）。
+            success = False
+            while time.monotonic() < session.deadline:
+                if page.is_closed():
+                    log(f"Web 认证页面被关闭 provider={session.provider} session_id={session.session_id}")
+                    break
+                if session.provider == "compshare":
+                    if str(page.url).startswith(session.success_url_prefix):
+                        cookies = await context.cookies()
+                        if any(
+                            str(c.get("name", "")) == "U_JWT_TOKEN"
+                            and ".compshare.cn" in str(c.get("domain", ""))
+                            for c in (cookies or [])
+                        ):
+                            success = True
+                            break
+                elif session.provider == "sensenova":
+                    token = await page.evaluate("localStorage.getItem('access_token')")
+                    if token:
+                        success = True
+                        break
+                else:  # longcat：passport_token_key cookie + /api/v1/user-current code===0
+                    cookies = await context.cookies()
+                    if any(str(c.get("name", "")) == "passport_token_key" for c in (cookies or [])):
+                        try:
+                            data = await page.evaluate(
+                                "async () => { try { const r = await fetch('/api/v1/user-current');"
+                                " const d = await r.json(); return d; } catch (e) { return null; } }"
+                            )
+                        except Exception:
+                            data = None
+                        if isinstance(data, dict) and data.get("code") == 0:
+                            success = True
+                            longcat_data = data
+                            break
+                await asyncio.sleep(1.0)
+            if success:
+                state = await context.storage_state()
+                account_label = ""
+                if session.provider == "sensenova":
+                    account_label = session.username[:120]
+                elif session.provider == "longcat":
+                    account_label = str(
+                        (longcat_data or {}).get("phone")
+                        or (longcat_data or {}).get("userId") or ""
+                    )[:120]
+                else:  # compshare：取 U_USER_EMAIL / U_COMPANY_ID
+                    for c in _collect_cookies(state):
+                        if str(c.get("name", "")) in ("U_USER_EMAIL", "U_COMPANY_ID"):
+                            account_label = str(c.get("value", ""))[:120]
+                            break
+                session.result = {
+                    "storage_state": json.dumps(state, ensure_ascii=False),
+                    "account_label": account_label,
+                }
+                session.status = "ok"
+                session.message = "登录成功，已捕获 storage_state"
+                log(f"Web 认证成功 provider={session.provider} session_id={session.session_id}")
+            else:
+                session.context_gap = True
+                session.status = "context_gap"
+                session.error = "未在限定时间内完成登录或缺少关键凭据（请重试或检查登录链接）"
+                log(f"Web 认证未完成（context_gap） provider={session.provider} "
+                    f"session_id={session.session_id}")
+        except asyncio.CancelledError:
+            session.context_gap = True
+            session.status = "context_gap"
+            session.error = "认证会话已过期"
+            log(f"Web 认证已取消 provider={session.provider} session_id={session.session_id}")
+        except Exception as exc:
+            session.context_gap = True
+            session.status = "context_gap"
+            session.error = f"认证未完成：{type(exc).__name__}"
+            log(f"Web 认证异常 provider={session.provider} session_id={session.session_id}：{type(exc).__name__}")
+        finally:
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+            elif browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            # 清理独立临时 profile 目录，避免污染/残留。
+            if profile_dir and os.path.isdir(profile_dir):
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            # 释放跨流程浏览器槽位，与 start 的预约配对。
+            try:
+                await self.solver.release_slot(owner)
+            except Exception:
+                pass
+
+    async def status(self, session_id: str, provider: str, session_binding_id: str) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            session = self._session
+            if session is None or session.session_id != session_id:
+                return None
+            if not self._matches(session, provider, session_binding_id):
+                raise PermissionError("认证会话绑定不匹配")
+            if time.monotonic() >= session.deadline and session.status not in {"ok", "context_gap"}:
+                session.context_gap = True
+                session.status = "context_gap"
+                session.error = "认证会话已过期"
+                if session.task and not session.task.done():
+                    session.task.cancel()
+            payload: Dict[str, Any] = {
+                "status": session.status, "session_id": session.session_id,
+                "provider": session.provider, "session_binding_id": session.session_binding_id,
+                "expires_in": max(0, int(session.deadline - time.monotonic())),
+            }
+            if session.status == "context_gap":
+                payload["message"] = session.error
+            elif session.status == "ok":
+                payload["message"] = session.message
+            return payload
+
+    async def result(self, session_id: str, provider: str, session_binding_id: str) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            session = self._session
+            if session is None or session.session_id != session_id:
+                return None
+            if not self._matches(session, provider, session_binding_id):
+                raise PermissionError("认证会话绑定不匹配")
+            if time.monotonic() >= session.deadline and session.status not in {"ok", "context_gap"}:
+                session.context_gap = True
+                session.status = "context_gap"
+                session.error = "认证会话已过期"
+                if session.task and not session.task.done():
+                    session.task.cancel()
+            if session.status not in {"ok", "context_gap"}:
+                return {"status": session.status, "session_id": session.session_id}
+            payload: Dict[str, Any] = {
+                "status": session.status, "session_id": session.session_id,
+                "provider": session.provider, "session_binding_id": session.session_binding_id,
+                "message": session.message or session.error,
+            }
+            if session.status == "ok":
+                payload["data"] = dict(session.result)
+            else:
+                payload["context_gap"] = True
+            session.consumed = True
+            self._session = None
+            return payload
+
+    @classmethod
+    def _matches(cls, session: WebAuthSession, provider: str, session_binding_id: str) -> bool:
+        return (
+            cls._normalize_provider(provider) == session.provider
+            and hmac.compare_digest(str(session_binding_id), session.session_binding_id)
+        )
+
+
 def _host_of(url: str) -> str:
     try:
         from urllib.parse import urlsplit
@@ -1402,6 +1761,7 @@ def _url_ok(url: str) -> bool:
 def build_app(cfg: Dict[str, Any], solver: Solver) -> web.Application:
     secret = cfg["secret"]
     challenge_manager = ManualChallengeManager(solver, cfg)
+    web_auth_manager = WebAuthManager(solver, cfg)
 
     async def challenge_start(request: web.Request) -> web.Response:
         # GLM/Kimi 人工挑战：凭证只能来自浏览器真实 SDK 回调。
@@ -1563,12 +1923,89 @@ def build_app(cfg: Dict[str, Any], solver: Solver) -> web.Application:
         qr_path.unlink(missing_ok=True)
         return web.json_response({"success": True, "message": "notified", "data": {}})
 
+    async def web_auth_start(request: web.Request) -> web.Response:
+        # Web 控制台交互登录：复用同一 X-API-Key 校验。
+        if not _check_secret(request.headers.get("X-API-Key", ""), secret):
+            return web.json_response({"success": False, "message": "X-API-Key 校验失败"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "message": "请求体不是合法 JSON"}, status=400)
+        provider = str(body.get("provider") or "").strip()
+        session_binding_id = str(body.get("session_binding_id") or "").strip()
+        login_url = str(body.get("login_url") or "")
+        success_url_prefix = str(body.get("success_url_prefix") or "")
+        username = str(body.get("username") or "")
+        password = str(body.get("password") or "")
+        timeout = body.get("timeout")
+        try:
+            session = await web_auth_manager.start(
+                provider, session_binding_id, login_url, success_url_prefix,
+                username, password, timeout,
+            )
+        except RuntimeError as exc:
+            return web.json_response({"success": False, "message": str(exc)}, status=409)
+        except ValueError as exc:
+            return web.json_response({"success": False, "message": str(exc)}, status=400)
+        return web.json_response({
+            "success": True, "session_id": session.session_id, "provider": session.provider,
+            "status": session.status,
+            "expires_in": max(0, int(session.deadline - time.monotonic())),
+        })
+
+    async def web_auth_status(request: web.Request) -> web.Response:
+        if not _check_secret(request.headers.get("X-API-Key", ""), secret):
+            return web.json_response({"success": False, "message": "X-API-Key 校验失败"}, status=401)
+        try:
+            payload = await web_auth_manager.status(
+                request.match_info["session_id"],
+                str(request.query.get("provider") or ""),
+                str(request.query.get("session_binding_id") or ""),
+            )
+        except PermissionError as exc:
+            return web.json_response({"success": False, "message": str(exc)}, status=409)
+        if payload is None:
+            return web.json_response({"success": False, "message": "认证会话不存在或已消费"}, status=404)
+        out: Dict[str, Any] = {"success": True, "status": payload["status"]}
+        if payload.get("message"):
+            out["message"] = payload["message"]
+        return web.json_response(out)
+
+    async def web_auth_result(request: web.Request) -> web.Response:
+        if not _check_secret(request.headers.get("X-API-Key", ""), secret):
+            return web.json_response({"success": False, "message": "X-API-Key 校验失败"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "message": "请求体不是合法 JSON"}, status=400)
+        try:
+            payload = await web_auth_manager.result(
+                request.match_info["session_id"],
+                str(body.get("provider") or ""),
+                str(body.get("session_binding_id") or ""),
+            )
+        except PermissionError as exc:
+            return web.json_response({"success": False, "message": str(exc)}, status=409)
+        if payload is None:
+            return web.json_response({"success": False, "message": "认证会话不存在或已消费"}, status=404)
+        if payload["status"] == "ok":
+            return web.json_response({"success": True, "data": payload["data"]})
+        if payload["status"] == "context_gap":
+            return web.json_response(
+                {"success": False, "status": "context_gap",
+                 "message": payload.get("message", "")}, status=422,
+            )
+        return web.json_response({"success": False, "status": payload["status"]})
+
     app = web.Application(client_max_size=256 * 1024)
     app.router.add_get("/healthz", healthz)
     app.router.add_post("/challenge/start", challenge_start)
     app.router.add_post("/challenge/sdk-start", challenge_start)
     app.router.add_get("/challenge/{session_id}/status", challenge_status)
     app.router.add_post("/challenge/{session_id}/result", challenge_result)
+    app.router.add_post("/web-auth/start", web_auth_start)
+    app.router.add_get("/web-auth/{session_id}/status", web_auth_status)
+    app.router.add_post("/web-auth/{session_id}/result", web_auth_result)
     app.router.add_post("/solve", solve)
     app.router.add_post("/risk", risk)
     app.router.add_post("/browser-notify", browser_notify)
@@ -2320,6 +2757,224 @@ async def _patchright_chain_selftest(cfg: Dict[str, Any]) -> bool:
         await runner.cleanup()
 
 
+# ---------------------------------------------------------------------------
+# Web 认证（/web-auth/*）自检：全部 mock，零真实浏览器/零外网依赖。覆盖
+# 1) Solver 跨流程原子槽位器单测；2) /solve 占用槽位时立即 busy；3) /challenge 与
+# /web-auth 跨流程并发立即 409（不排队）；4) 三家 provider 成功路径（storage_state
+# 捕获 + account_label 提取 + 结果一次性消费 404）；5) 超时 context_gap。
+# ---------------------------------------------------------------------------
+
+
+class _MockWebAuthPage:
+    def __init__(self, outcome: Dict[str, Any]):
+        self.outcome = outcome
+        self.url = outcome.get("success_url") or outcome.get("login_url", "")
+        self._closed = False
+
+    def is_closed(self) -> bool:
+        return self._closed
+
+    async def goto(self, url: str, **kwargs: Any) -> None:
+        # 模拟登录成功后跳转至 success_url（覆盖 login_url）。
+        self.url = self.outcome.get("success_url") or url
+
+    async def click(self, selector: str, **kwargs: Any) -> None:
+        pass
+
+    async def fill(self, selector: str, value: str, **kwargs: Any) -> None:
+        pass
+
+    async def evaluate(self, script: str, *args: Any, **kwargs: Any) -> Any:
+        return self.outcome.get("evaluate")
+
+
+class _MockWebAuthContext:
+    def __init__(self, outcome: Dict[str, Any]):
+        self.outcome = outcome
+        self.page = _MockWebAuthPage(outcome)
+        self._closed = False
+
+    async def cookies(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+        return list(self.outcome.get("cookies", []))
+
+    async def storage_state(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return dict(self.outcome.get("storage_state", {"cookies": [], "origins": []}))
+
+    async def close(self) -> None:
+        self._closed = True
+
+
+class _MockWebAuthBrowser:
+    def __init__(self, outcome: Dict[str, Any]):
+        self.outcome = outcome
+
+    async def new_context(self, **kwargs: Any) -> "_MockWebAuthContext":
+        return _MockWebAuthContext(self.outcome)
+
+    async def close(self) -> None:
+        pass
+
+
+class _MockWebAuthPlaywright:
+    def __init__(self, outcome: Dict[str, Any]):
+        self.outcome = outcome
+
+    @property
+    def chromium(self) -> Any:
+        class _Chromium:
+            def __init__(self, outcome: Dict[str, Any]):
+                self.outcome = outcome
+
+            async def launch(self, **kwargs: Any) -> "_MockWebAuthBrowser":
+                return _MockWebAuthBrowser(self.outcome)
+        return _Chromium(self.outcome)
+
+
+async def _web_auth_selftest(cfg: Dict[str, Any]) -> bool:
+    # ---- 1) Solver 跨流程原子槽位器单测 ----
+    slot_solver = Solver(cfg)
+    if not await slot_solver.try_acquire_slot("a"):
+        return False
+    if await slot_solver.try_acquire_slot("b"):
+        return False  # 不同 owner 应被拒
+    if not await slot_solver.try_acquire_slot("a"):
+        return False  # 同 owner 可重入
+    await slot_solver.release_slot("a")
+    if not await slot_solver.try_acquire_slot("b"):
+        return False
+    await slot_solver.release_slot("b")
+
+    # ---- 2) /solve 占用槽位时立即 busy（无浏览器）----
+    busy_solver = Solver(cfg)
+    assert await busy_solver.try_acquire_slot("solve:other")
+    status, _cookies, _exp = await busy_solver.solve("https://example.com/x", "selftest-solve", 20)
+    await busy_solver.release_slot("solve:other")
+    if status != "busy":
+        log(f"WEB-AUTH SELFTEST FAIL：槽位占用时 /solve 应返回 busy，实际={status}")
+        return False
+
+    # ---- 3) 跨流程并发立即 409：占用槽位后 /challenge 与 /web-auth 立即 RuntimeError ----
+    cross_solver = Solver(cfg)
+    assert await cross_solver.try_acquire_slot("web-auth:held")
+    cross_challenge = ManualChallengeManager(cross_solver, cfg)
+    try:
+        await cross_challenge.start("kimi", "login-cross", "13800000000", timeout=2)
+        cross_ok = False
+    except RuntimeError:
+        cross_ok = True
+    cross_web = WebAuthManager(cross_solver, cfg)
+    try:
+        await cross_web.start("compshare", "binding-cross", "https://passport.compshare.cn/login",
+                              "https://console.compshare.cn", "", "", None)
+        cross_ok = False
+    except RuntimeError:
+        cross_ok = True
+    await cross_solver.release_slot("web-auth:held")
+    if not cross_ok:
+        log("WEB-AUTH SELFTEST FAIL：跨流程占用槽位时后到请求应抛 RuntimeError（→409）")
+        return False
+
+    # ---- 4) 三家 provider 成功路径（mock 浏览器，零真实浏览器）----
+    async def _run_provider(provider: str, outcome: Dict[str, Any], username: str,
+                            password: str) -> Optional[Dict[str, Any]]:
+        p_solver = Solver(cfg)
+        p_solver.pw = _MockWebAuthPlaywright(outcome)
+        manager = WebAuthManager(p_solver, cfg)
+        session = await manager.start(
+            provider, f"binding-{provider}", outcome.get("login_url", "https://example.com/login"),
+            outcome["success_url_prefix"], username, password, timeout=10,
+        )
+        await session.task  # 等待 _run 完成
+        return await manager.result(session.session_id, provider, f"binding-{provider}")
+
+    # compshare：U_JWT_TOKEN cookie + URL 前缀匹配 + U_USER_EMAIL 标签
+    cs_outcome: Dict[str, Any] = {
+        "success_url_prefix": "https://console.compshare.cn",
+        "success_url": "https://console.compshare.cn/light-gpu/model-manage",
+        "login_url": "https://passport.compshare.cn/login",
+        "cookies": [{"name": "U_JWT_TOKEN", "value": "fake-jwt", "domain": ".compshare.cn"}],
+        "storage_state": {"cookies": [{"name": "U_USER_EMAIL", "value": "user@compshare.cn",
+                                      "domain": ".compshare.cn"}], "origins": []},
+    }
+    cs_result = await _run_provider("compshare", cs_outcome, "user@compshare.cn", "fake-pass")
+    if not cs_result or cs_result.get("status") != "ok":
+        log(f"WEB-AUTH SELFTEST FAIL：compshare 应 ok，实际={cs_result}")
+        return False
+    cs_data = cs_result.get("data") or {}
+    if not cs_data.get("storage_state") or cs_data.get("account_label") != "user@compshare.cn":
+        log(f"WEB-AUTH SELFTEST FAIL：compshare storage_state/account_label 不符：{cs_data}")
+        return False
+    # 一次性消费：再次 result → None（路由映射 404）
+    p_solver_cs = Solver(cfg)
+    p_solver_cs.pw = _MockWebAuthPlaywright(cs_outcome)
+    mgr_cs = WebAuthManager(p_solver_cs, cfg)
+    s_cs = await mgr_cs.start("compshare", "b2", cs_outcome["login_url"],
+                              cs_outcome["success_url_prefix"], "", "", timeout=10)
+    await s_cs.task
+    await mgr_cs.result(s_cs.session_id, "compshare", "b2")  # 消费
+    if await mgr_cs.result(s_cs.session_id, "compshare", "b2") is not None:
+        log("WEB-AUTH SELFTEST FAIL：compshare 已消费后再次 result 应返回 None（404）")
+        return False
+
+    # sensenova：localStorage access_token 非空 + 用户名标签
+    sn_outcome: Dict[str, Any] = {
+        "success_url_prefix": "https://platform.sensenova.cn",
+        "success_url": "https://platform.sensenova.cn/console",
+        "login_url": "https://platform.sensenova.cn/login",
+        "evaluate": "fake-access-token",
+        "storage_state": {"cookies": [], "origins": []},
+    }
+    sn_result = await _run_provider("sensenova", sn_outcome, "sensenova-user", "fake-pass")
+    if not sn_result or sn_result.get("status") != "ok":
+        log(f"WEB-AUTH SELFTEST FAIL：sensenova 应 ok，实际={sn_result}")
+        return False
+    sn_data = sn_result.get("data") or {}
+    if not sn_data.get("storage_state") or sn_data.get("account_label") != "sensenova-user":
+        log(f"WEB-AUTH SELFTEST FAIL：sensenova storage_state/account_label 不符：{sn_data}")
+        return False
+
+    # longcat：passport_token_key cookie + /api/v1/user-current code===0 + phone 标签
+    lc_outcome: Dict[str, Any] = {
+        "success_url_prefix": "https://longcat.chat",
+        "success_url": "https://longcat.chat/platform/usage",
+        "login_url": "https://passport.meituan.com/useraccount/login",
+        "cookies": [{"name": "passport_token_key", "value": "fake", "domain": ".longcat.chat"}],
+        "evaluate": {"code": 0, "phone": "13800000000"},
+        "storage_state": {"cookies": [], "origins": []},
+    }
+    lc_result = await _run_provider("longcat", lc_outcome, "", "")
+    if not lc_result or lc_result.get("status") != "ok":
+        log(f"WEB-AUTH SELFTEST FAIL：longcat 应 ok，实际={lc_result}")
+        return False
+    lc_data = lc_result.get("data") or {}
+    if not lc_data.get("storage_state") or lc_data.get("account_label") != "13800000000":
+        log(f"WEB-AUTH SELFTEST FAIL：longcat storage_state/account_label 不符：{lc_data}")
+        return False
+
+    # ---- 5) 超时 context_gap（provider=sensenova，无 token，短 timeout）----
+    gap_outcome: Dict[str, Any] = {
+        "success_url_prefix": "https://platform.sensenova.cn",
+        "success_url": "https://platform.sensenova.cn/login",
+        "login_url": "https://platform.sensenova.cn/login",
+        "evaluate": None,  # 永不出现 token
+        "storage_state": {"cookies": [], "origins": []},
+    }
+    gap_solver = Solver(cfg)
+    gap_solver.pw = _MockWebAuthPlaywright(gap_outcome)
+    gap_manager = WebAuthManager(gap_solver, cfg)
+    gap_session = await gap_manager.start("sensenova", "binding-gap", gap_outcome["login_url"],
+                                         gap_outcome["success_url_prefix"], "", "", timeout=1)
+    await gap_session.task
+    gap_result = await gap_manager.result(gap_session.session_id, "sensenova", "binding-gap")
+    if not gap_result or gap_result.get("status") != "context_gap":
+        log(f"WEB-AUTH SELFTEST FAIL：超时应为 context_gap，实际={gap_result}")
+        return False
+
+    log("WEB-AUTH SELFTEST PASS：原子槽位器单测 / /solve busy / 跨流程 409 / 三家 provider 成功路径"
+        "（storage_state+account_label+一次性消费 404）/ 超时 context_gap 全部符合预期")
+    return True
+
+
 async def _selftest() -> int:
     """无人工自检：headless 打开本地页面（Set-Cookie x5sec=...），验证成功路径全链。"""
     from aiohttp import web as aio_web
@@ -2364,6 +3019,9 @@ async def _selftest() -> int:
             if not await _patchright_chain_selftest(cfg):
                 log("SELFTEST FAIL：patchright 反检测驱动求解链用例失败")
                 return 1
+            if not await _web_auth_selftest(cfg):
+                log("SELFTEST FAIL：Web 控制台交互登录（/web-auth/*）用例失败")
+                return 1
             log("SELFTEST PASS：kimi SDK 回调、GLM 同会话发码成功/失败关闭（body 非 0、非 2xx、滑块失败）、"
                 "GLM 挂载 JS 轮询（4s 延迟渲染不被误杀、注入短阈值的渲染失败关闭）、"
                 "进一步验证等待门四分支（标记消失取收口轮换凭证/持续标记 deadline 收口/人工关页取最终快照/内容读失败不提前收口）、"
@@ -2386,7 +3044,7 @@ async def _amain(cfg: Dict[str, Any], port_override: Optional[int]) -> None:
     port = port_override or int(cfg.get("port", DEFAULT_PORT))
     site = web.TCPSite(runner, bind, port)
     await site.start()
-    log(f"xianyu-captcha-helper 监听 {bind}:{port}（/healthz /solve /risk /challenge/sdk-start /challenge/{{id}}/status /challenge/{{id}}/result /browser-notify /face-notify）")
+    log(f"xianyu-captcha-helper 监听 {bind}:{port}（/healthz /solve /risk /challenge/sdk-start /challenge/{{id}}/status /challenge/{{id}}/result /web-auth/start /web-auth/{{id}}/status /web-auth/{{id}}/result /browser-notify /face-notify）")
     try:
         while True:
             await asyncio.sleep(3600)

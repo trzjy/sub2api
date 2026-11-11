@@ -111,7 +111,7 @@ type CNProviderBalanceResult struct {
 	// 这是账号的确定性状态（要续费/换号），不是探测故障（HTTP 200、响应结构正常）。
 	// 此时确实取不到余额数字（Success=false），但需要管理端展示为状态而非报错；
 	// 其它分支恒为 false，JSON 里因 omitempty 不出现该键。
-	SubscriptionExpired bool `json:"subscription_expired,omitempty"`
+	SubscriptionExpired bool   `json:"subscription_expired,omitempty"`
 	Error               string `json:"error,omitempty"`
 }
 
@@ -277,6 +277,13 @@ func RelayProbeTargetURL(account *Account) (string, bool) {
 	}
 	// 专用路径优先：TH / Kira 账号不经本助手选路。
 	if accountIsTokenHarborBaseURL(account) || accountIsKiraBaseURL(account) {
+		return "", false
+	}
+	// Web 控制台额度上游（compshare / sensenova / longcat）不走 relay /v1/usage 选路：
+	// 其用量由 WebConsoleQuotaService 经控制台抓取，通用余额端点在线上只会返回
+	// 429/403（生产实证：cp.compshare.cn 808/811/817 持续 429）。
+	// 与 TH / Kira 同构的专用路径优先语义，用户裁定 2026-11-11。
+	if ResolveWebConsoleQuotaProvider(account) != "" {
 		return "", false
 	}
 	probeCfg := account.BalanceProbeConfig()

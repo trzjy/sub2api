@@ -38,10 +38,15 @@ services:
       LOCAL_CAPTCHA_HELPER_BASE_URL: ${LOCAL_CAPTCHA_HELPER_BASE_URL:-}
       LOCAL_CAPTCHA_HELPER_API_KEY: ${LOCAL_CAPTCHA_HELPER_API_KEY:-}
       LOCAL_CAPTCHA_HELPER_TIMEOUT_SECONDS: ${LOCAL_CAPTCHA_HELPER_TIMEOUT_SECONDS:-10}
+      WEB_QUOTA_WORKER_BASE_URL: ${WEB_QUOTA_WORKER_BASE_URL:-http://web-quota-worker:18090}
+      WEB_QUOTA_WORKER_API_KEY: ${WEB_QUOTA_WORKER_TOKEN:-}
+      WEB_QUOTA_WORKER_TIMEOUT_SECONDS: ${WEB_QUOTA_WORKER_TIMEOUT_SECONDS:-60}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      web-quota-worker:
         condition: service_healthy
     networks:
       - sub2api-network
@@ -52,6 +57,32 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # Web 控制台用量采集 Playwright Sidecar（compshare / sensenova / longcat）。
+  # 无状态：不挂任何数据卷，凭据全部由 sub2api 按请求传入、加密只存 Postgres。
+  # 只加入 sub2api-network，不映射宿主机端口（仅内网可达）。
+  web-quota-worker:
+    image: web-quota-worker:${WEB_QUOTA_WORKER_IMAGE_TAG:-local}
+    container_name: web-quota-worker
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    build:
+      context: ./web-quota-worker
+      dockerfile: Dockerfile
+    mem_limit: 1536m
+    shm_size: 512m
+    environment:
+      WEB_QUOTA_WORKER_TOKEN: ${WEB_QUOTA_WORKER_TOKEN:?set WEB_QUOTA_WORKER_TOKEN in .env}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:18090/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   postgres:
     image: postgres:15-alpine

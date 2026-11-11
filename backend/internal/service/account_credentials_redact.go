@@ -20,6 +20,9 @@ var SensitiveCredentialKeys = []string{
 	"th_password", "kira_jwt", "kira_password",
 	// CN 中转账户级余额探测的站点系统访问令牌（New API 系次数包查询）
 	BalanceProbeAccessTokenKey,
+	// Web 控制台用量采集凭据（2026-11 web-console-quota）：控制台登录密码与
+	// Playwright storageState（含 Cookie/localStorage）均为秘密，绝不可回显明文。
+	"console_password", "console_storage_state",
 }
 
 var sensitiveCredentialKeySet = func() map[string]struct{} {

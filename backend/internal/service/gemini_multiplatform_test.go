@@ -37,6 +37,21 @@ func (m *mockAccountRepoForGemini) DeleteModelRateLimitsMetaKeys(context.Context
 	return 0, nil
 }
 
+// PatchAccountCredentials 是仓储接口新增方法的 no-op 桩（本包测试不覆盖凭据局部更新语义）。
+func (m *mockAccountRepoForGemini) PatchAccountCredentials(context.Context, int64, map[string]any, string) error {
+	return nil
+}
+
+// SetTempUnschedulableIfOwnedOrUnpaused 是仓储接口新增方法的 no-op 桩。
+func (m *mockAccountRepoForGemini) SetTempUnschedulableIfOwnedOrUnpaused(context.Context, int64, time.Time, string, string) (bool, error) {
+	return false, nil
+}
+
+// ClearTempUnschedulableIfOwned 是仓储接口新增方法的 no-op 桩。
+func (m *mockAccountRepoForGemini) ClearTempUnschedulableIfOwned(context.Context, int64, time.Time, string) (bool, error) {
+	return false, nil
+}
+
 func (m *mockAccountRepoForGemini) GetByID(ctx context.Context, id int64) (*Account, error) {
 	if acc, ok := m.accountsByID[id]; ok {
 		return acc, nil

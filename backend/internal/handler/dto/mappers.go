@@ -345,6 +345,9 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 	// 本层只投影，不重新推导 URL 规则——单一事实源在 service（禁区本体不动）。
 	// RelayProbeTargetURL 返回 (string, bool)，bool 即"已选中 relay 目标"的有效探测能力。
 	_, out.BalanceProbeCapable = service.RelayProbeTargetURL(a)
+	// Web 控制台额度上游投影（唯一事实源在 service.ResolveWebConsoleQuotaProvider）：
+	// 本层只透传，不在 DTO 层复制主机名规则。
+	out.WebConsoleQuotaProvider = service.ResolveWebConsoleQuotaProvider(a)
 
 	// 提取 5h 窗口费用控制和会话数量控制配置（仅 Anthropic OAuth/SetupToken 账号有效）
 	if a.IsAnthropicOAuthOrSetupToken() {
@@ -675,6 +678,9 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		QuotaDimensions:     a.QuotaDimensions,
 		BalanceLow:          a.BalanceLow,
 		BalanceProbeCapable: a.BalanceProbeCapable,
+		// lite 列表投影不是 AccountFromServiceShallow 的委托关系（它是从完整 DTO 再投影），
+		// 故此处单独透传 WebConsoleQuotaProvider，禁止在此重算主机名规则。
+		WebConsoleQuotaProvider: a.WebConsoleQuotaProvider,
 	}
 }
 

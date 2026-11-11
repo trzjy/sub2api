@@ -419,6 +419,11 @@ type Account struct {
 	// URL 可解析/可推导）；false/缺省省略。本字段为前端是否显示余额探测单元格的唯一
 	// 能力源——配错账号（enabled 但无可解析 URL 且非官方端点）整格不出现。
 	BalanceProbeCapable bool `json:"balance_probe_capable,omitempty"`
+	// WebConsoleQuotaProvider 是 service.ResolveWebConsoleQuotaProvider 的只读投影
+	// （唯一事实源在 service 层）：
+	//   "compshare" | "sensenova" | "longcat"；非该链路账号为空并因 omitempty 省略。
+	// 前端据此判定是否渲染 WebConsoleQuotaCell 与控制台凭据区块。
+	WebConsoleQuotaProvider string `json:"web_console_quota_provider,omitempty"`
 }
 
 // AccountQuotaDimension 是 service.QuotaDimension 的 DTO 投影（方案 §3.4）。枚举以小写
@@ -541,7 +546,13 @@ type AccountListItem struct {
 	BalanceLow bool `json:"balance_low,omitempty"`
 	// BalanceProbeCapable 后端选路事实源 RelayProbeTargetURL 的布尔投影（与完整
 	// Account DTO 同字段同语义）。false/缺省省略。
-	BalanceProbeCapable         bool   `json:"balance_probe_capable,omitempty"`
+	BalanceProbeCapable bool `json:"balance_probe_capable,omitempty"`
+	// WebConsoleQuotaProvider 是 service.ResolveWebConsoleQuotaProvider 的只读投影
+	// （唯一事实源在 service 层）：
+	//   "compshare" | "sensenova" | "longcat"；非该链路账号为空并因 omitempty 省略。
+	// 前端据此判定是否渲染 WebConsoleQuotaCell 与控制台凭据区块。
+	WebConsoleQuotaProvider string `json:"web_console_quota_provider,omitempty"`
+
 	ParentEmail                 string `json:"parent_email,omitempty"`
 	ParentPlanType              string `json:"parent_plan_type,omitempty"`
 	ParentPrivacyMode           string `json:"parent_privacy_mode,omitempty"`

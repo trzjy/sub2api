@@ -850,10 +850,10 @@ func newBalanceProbePlatformAccount(platform string, creds map[string]any) *Acco
 		base[k] = v
 	}
 	return &Account{
-		ID:         201,
-		Platform:   platform,
-		Type:       AccountTypeAPIKey,
-		Status:     StatusActive,
+		ID:          201,
+		Platform:    platform,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
 		Credentials: base,
 	}
 }
@@ -930,8 +930,8 @@ func TestCNProviderBalanceService_RelayProbeDisabledNonEndpointPlatform(t *testi
 // validatePayGAccount 的 CN_BALANCE_CODING_PLAN（零出站）。
 func TestCNProviderBalanceService_RelayProbeCodingOfficialBaseURLEmitsCodingPlan(t *testing.T) {
 	account := newBalanceProbePlatformAccount(PlatformKimi, map[string]any{
-		"account_mode": AccountModeCoding,
-		"base_url":     "https://api.moonshot.cn",
+		"account_mode":                  AccountModeCoding,
+		"base_url":                      "https://api.moonshot.cn",
 		BalanceProbeConfigCredentialKey: map[string]any{"enabled": true, "url": ""},
 	})
 	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{statusCode: http.StatusOK, body: `{}`}}
@@ -946,8 +946,9 @@ func TestCNProviderBalanceService_RelayProbeCodingOfficialBaseURLEmitsCodingPlan
 }
 
 // A1 ② Kira 回归：
-//  (1) 合法 Kira coding 账号探测成功（coding 模式不阻断 Kira 分支）；
-//  (2) 非 CN platform（other）命中 Kira URL → 原错误码 CN_BALANCE_INVALID_PLATFORM 且零出站。
+//
+//	(1) 合法 Kira coding 账号探测成功（coding 模式不阻断 Kira 分支）；
+//	(2) 非 CN platform（other）命中 Kira URL → 原错误码 CN_BALANCE_INVALID_PLATFORM 且零出站。
 func TestCNProviderBalanceService_KiraProbeRegression(t *testing.T) {
 	t.Run("kira coding account succeeds", func(t *testing.T) {
 		upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
@@ -1021,8 +1022,9 @@ func TestCNProviderBalanceService_RelayProbeAllowlistRejected(t *testing.T) {
 }
 
 // A3 鉴权分支：
-//  (1) 令牌级 BearerAuth 缺 api_key → CN_BALANCE_NO_APIKEY 零出站；
-//  (2) 账户级 access_token+count_unit 无 api_key 仍成功（账户级分支不要求 api_key）。
+//
+//	(1) 令牌级 BearerAuth 缺 api_key → CN_BALANCE_NO_APIKEY 零出站；
+//	(2) 账户级 access_token+count_unit 无 api_key 仍成功（账户级分支不要求 api_key）。
 func TestCNProviderBalanceService_RelayProbeAuthBranches(t *testing.T) {
 	t.Run("token level missing api_key rejected zero outbound", func(t *testing.T) {
 		account := newBalanceProbePlatformAccount(PlatformOpenAI, map[string]any{
@@ -1043,7 +1045,7 @@ func TestCNProviderBalanceService_RelayProbeAuthBranches(t *testing.T) {
 	})
 	t.Run("account level access token without api_key succeeds", func(t *testing.T) {
 		account := newBalanceProbePlatformAccount(PlatformOpenAI, map[string]any{
-			"api_key":                 "",
+			"api_key":                  "",
 			BalanceProbeAccessTokenKey: "at-test",
 			BalanceProbeConfigCredentialKey: map[string]any{
 				"enabled": true, "url": "https://relay.example.com/api/usage/token", "count_unit": float64(5000),
@@ -1225,6 +1227,75 @@ func TestRelayProbeTargetURLZhipuExplicitURLEligible(t *testing.T) {
 	require.Equal(t, CNBalanceKindBalance, result.Kind)
 	require.Len(t, repo.extraWrites, 1)
 	require.Equal(t, CNBalanceKindBalance, repo.extraWrites[0]["zhipu_balance_kind"])
+}
+
+// CARD-WCQ-14：Web 控制台额度上游（compshare / sensenova / longcat）不再进入
+// relay /v1/usage 选路，交由 WebConsoleQuotaService 接管。对这三类 base_url，
+// 无论 balance_probe 是否启用，RelayProbeTargetURL 都必须返回 ("", false)。
+// 同时回归保护：TH / Kira 专用路径优先语义不变。
+func TestRelayProbeTargetURLExcludesWebConsoleUpstreams(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform string
+		baseURL  string
+	}{
+		{"compshare root host", PlatformZhipu, "https://cp.compshare.cn"},
+		{"compshare subdomain", PlatformDeepseek, "https://api.compshare.cn"},
+		{"compshare with /v1 suffix", PlatformKimi, "https://cp.compshare.cn/v1"},
+		{"sensenova host", PlatformDeepseek, "https://token.sensenova.cn"},
+		{"sensenova subdomain", PlatformOpenAI, "https://platform.sensenova.cn"},
+		{"longcat host", PlatformDeepseek, "https://api.longcat.chat"},
+		{"longcat subdomain", PlatformOpenAI, "https://longcat.chat"},
+		// 回归：TH / Kira 专用路径优先语义保持不变。
+		{"th tokenharbor unchanged", PlatformKimi, "https://tokenharbor.ai"},
+		{"kira unchanged", PlatformKimi, "https://kiraai.vn"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := newBalanceProbePlatformAccount(tt.platform, map[string]any{
+				"base_url": tt.baseURL,
+				BalanceProbeConfigCredentialKey: map[string]any{
+					"enabled": true, "url": "", "bearer_auth": true,
+				},
+			})
+
+			got, ok := RelayProbeTargetURL(account)
+
+			require.False(t, ok, "Web 控制台上游或 TH/Kira 必须不经 relay 选路")
+			require.Equal(t, "", got)
+		})
+	}
+}
+
+// CARD-WCQ-14 回归保护：普通 relay 账号（非 Web 控制台 / 非 TH / 非 Kira）的
+// RelayProbeTargetURL 行为不被本次改动影响，显式 URL 与 base_url 推导均选路成功。
+func TestRelayProbeTargetURLOrdinaryRelayStillEligible(t *testing.T) {
+	t.Run("explicit url eligible", func(t *testing.T) {
+		account := newBalanceProbePlatformAccount(PlatformOpenAI, map[string]any{
+			"base_url": "https://model.kimitk.top/v1",
+			BalanceProbeConfigCredentialKey: map[string]any{
+				"enabled": true, "url": "https://model.kimitk.top/v1/usage", "bearer_auth": true,
+			},
+		})
+
+		got, ok := RelayProbeTargetURL(account)
+
+		require.True(t, ok, "普通 relay 账号必须保持选路")
+		require.Equal(t, "https://model.kimitk.top/v1/usage", got)
+	})
+	t.Run("derived url from base_url eligible", func(t *testing.T) {
+		account := newBalanceProbePlatformAccount(PlatformZhipu, map[string]any{
+			"base_url": "https://relay.example.com",
+			BalanceProbeConfigCredentialKey: map[string]any{
+				"enabled": true, "url": "", "bearer_auth": true,
+			},
+		})
+
+		got, ok := RelayProbeTargetURL(account)
+
+		require.True(t, ok, "普通 relay 账号按 base_url 推导必须选路")
+		require.Equal(t, "https://relay.example.com/v1/usage", got)
+	})
 }
 
 // ---- 后端 JSON 契约：subscription_expired 的线上 JSON 键名 ↔ 前端读取键 ----

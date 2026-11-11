@@ -83,6 +83,21 @@ func (m *sessionWindowMockRepo) DeleteModelRateLimitsMetaKeys(context.Context, i
 	return 0, nil
 }
 
+// PatchAccountCredentials 是仓储接口新增方法的 no-op 桩（本包测试不覆盖凭据局部更新语义）。
+func (m *sessionWindowMockRepo) PatchAccountCredentials(context.Context, int64, map[string]any, string) error {
+	return nil
+}
+
+// SetTempUnschedulableIfOwnedOrUnpaused 是仓储接口新增方法的 no-op 桩。
+func (m *sessionWindowMockRepo) SetTempUnschedulableIfOwnedOrUnpaused(context.Context, int64, time.Time, string, string) (bool, error) {
+	return false, nil
+}
+
+// ClearTempUnschedulableIfOwned 是仓储接口新增方法的 no-op 桩。
+func (m *sessionWindowMockRepo) ClearTempUnschedulableIfOwned(context.Context, int64, time.Time, string) (bool, error) {
+	return false, nil
+}
+
 // --- Unused interface methods (panic on unexpected call) ---
 
 func (m *sessionWindowMockRepo) Create(context.Context, *Account) error { panic("unexpected") }

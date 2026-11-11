@@ -86,6 +86,9 @@ type CNProviderBalanceCheckService struct {
 	// TODO(wire, 方案 §4.2)：wire.go 装配时调用 SetQuotaLifecycleHandover 注入
 	// CNQuotaLifecycleService，周期探测的耗尽确认/停调/告警即全量交给状态机。
 	quotaLifecycle cnQuotaLifecycleHandover
+	// webConsoleQuotaService Web 控制台额度采集链（compshare/sensenova/longcat）。
+	// 可选注入；未注入时这三家上游不参与周期采集。
+	webConsoleQuotaService *WebConsoleQuotaService
 }
 
 // SetChannelFreshnessRefresher 注入 E39 渠道维陈旧收敛窄面（可选）。未注入时不收敛。
@@ -109,6 +112,13 @@ func (s *CNProviderBalanceCheckService) SetQuotaLifecycleHandover(h cnQuotaLifec
 func (s *CNProviderBalanceCheckService) SetTokenHarborPassService(th *TokenHarborPassService) {
 	if s != nil {
 		s.thPassService = th
+	}
+}
+
+// SetWebConsoleQuotaService 注入 Web 控制台额度采集服务（可选）。
+func (s *CNProviderBalanceCheckService) SetWebConsoleQuotaService(svc *WebConsoleQuotaService) {
+	if s != nil {
+		s.webConsoleQuotaService = svc
 	}
 }
 
@@ -264,6 +274,7 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	// 仅调 QueryBalanceForAccount 刷新快照，不调阈值停调 / payg 探测 / reconcile /
 	// Clear 类动作。与 quota/payg/probe 目标互斥（同轮每账号只进一个余额执行目标）。
 	var relayTargets []*Account
+	var webConsoleTargets []*Account
 	collect := func(platform string, accounts []Account) {
 		for i := range accounts {
 			account := &accounts[i]
@@ -285,6 +296,13 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			// URL 白名单拒绝（CN_BALANCE_URL_REJECTED），不跳过则每个周期都
 			// 白跑并产生告警噪声。
 			if IsOllamaCloudUsageAccount(account) {
+				continue
+			}
+			// Web 控制台额度上游分流（方案 §3.2）：先于 IsCodingPlan / RelayProbeTargetURL / payg 分流，
+			// 避免其通用余额探测被误打。只要求 IsActive()，不要求 Schedulable 且不排除
+			// TempUnschedulable——已被额度停调的账号必须继续采集，否则补额/重置后无法自动恢复。
+			if s.webConsoleQuotaService != nil && ResolveWebConsoleQuotaProvider(account) != "" {
+				webConsoleTargets = append(webConsoleTargets, account)
 				continue
 			}
 			// Kira（kiraai.vn）账号（F5：先于 IsCodingPlan() 短路——coding 模式的
@@ -468,7 +486,8 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	accountTargets := s.collectAccountProbeTargets()
 	batches := (len(quotaTargets) + len(accountTargets) + cnQuotaProbeConcurrency - 1) / cnQuotaProbeConcurrency
 	timeout := 30*time.Second + time.Duration(batches)*15*time.Second +
-		time.Duration(len(paygTargets)+len(probeTargets)+len(kiraTargets)+len(thTargets)+len(relayTargets))*5*time.Second
+		time.Duration(len(paygTargets)+len(probeTargets)+len(kiraTargets)+len(thTargets)+len(relayTargets))*5*time.Second +
+		time.Duration(len(webConsoleTargets))*8*time.Second
 	if timeout > 300*time.Second {
 		timeout = 300 * time.Second
 	}
@@ -556,6 +575,14 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	// 仅调 QueryBalanceForAccount 落快照，不调阈值停调 / payg 探测 / reconcile /
 	// Clear 类动作：失败关闭（err 或 !Success 仅记日志、不动状态），成功无需任何
 	// 额外写动作（快照由 balance service 落库；relay 成功不改写 quota/rate-limit 状态）。
+	// Web 控制台额度采集：串行执行（每条探测要拉起无头浏览器，并发会争用 worker 槽位）。
+	for _, account := range webConsoleTargets {
+		if _, perr := s.webConsoleQuotaService.ProbeLoadedAccount(ctx, account); perr != nil {
+			log.Printf("[CNBalance] web-console quota probe account %d (%s) failed: %v", account.ID, account.Platform, perr)
+			continue
+		}
+	}
+
 	if len(relayTargets) > 0 && s.balanceService != nil {
 		for _, account := range relayTargets {
 			res, err := s.balanceService.QueryBalanceForAccount(ctx, account)

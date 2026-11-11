@@ -1215,6 +1215,55 @@ export interface QuotaDimensionItem {
   observed_at: string
 }
 
+/** Web 控制台额度快照（账号 extra.web_console_quota_snapshot，后端 service.WebConsoleQuotaSnapshot 同构）。 */
+export interface WebConsoleQuotaTier {
+  window: string          // "5h" | "7d" | "week" | "month"
+  limit: number
+  used: number
+  reset_at?: string
+}
+
+export interface WebConsoleQuotaLot {
+  lot_id?: number
+  status: string
+  remaining_token: number
+  total_token: number
+  expire_time?: string
+  is_current?: boolean
+}
+
+export interface WebConsoleQuotaPool {
+  id?: string
+  pool_type?: string
+  window_5h?: WebConsoleQuotaTier
+  window_7d?: WebConsoleQuotaTier
+  grant_balance?: number
+  nearest_grant_expiring_balance?: number
+  nearest_grant_expiry?: string
+}
+
+export interface WebConsoleQuotaSnapshot {
+  provider: string
+  fetched_at?: string
+  auth_state: 'ok' | 'needs_interactive_auth' | 'auth_failed' | 'error'
+  auth_reason?: string
+  auth_error?: string
+  account_label?: string
+  plan_match_status?: 'matched' | 'unmatched' | 'no_active_plan'
+  plan_name?: string
+  expire_at?: number
+  subscription_expired?: boolean
+  tiers?: WebConsoleQuotaTier[]
+  pools?: WebConsoleQuotaPool[]
+  grant_balance?: number
+  lots?: WebConsoleQuotaLot[]
+  paygo_balance_cent?: number
+  paygo_status?: string
+  exhausted?: boolean
+  until?: string
+  until_indefinite?: boolean
+}
+
 export type OpenCodeGoUsageStatus = 'ok' | 'unauthorized' | 'failed'
 
 export interface OpenCodeGoUsageWindow {
@@ -1417,6 +1466,12 @@ export interface Account {
   // 前端是否显示余额探测单元格的唯一能力源：配错账号（enabled 但无可解析 URL 且非
   // 官方端点）整格不出现。false/缺省省略（与后端 DTO 字段逐字对齐，两态兼容）。
   balance_probe_capable?: boolean
+  /**
+   * Web 控制台额度上游标识（后端 service.ResolveWebConsoleQuotaProvider 唯一事实源投影）：
+   * "compshare" | "sensenova" | "longcat"；非该链路账号省略。
+   * 前端据此判定是否渲染 WebConsoleQuotaCell 与控制台凭据区块，禁止在前端复制主机名规则。
+   */
+  web_console_quota_provider?: string
   // 影子账号回填的母账号信息（仅影子非空）
   parent_email?: string
   parent_plan_type?: string

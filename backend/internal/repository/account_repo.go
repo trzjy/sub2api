@@ -3040,6 +3040,199 @@ func (r *accountRepository) ClearTempUnschedulableIfGeneration(ctx context.Conte
 	return true, nil
 }
 
+// PatchAccountCredentials 事务内局部合并更新 credentials：仅覆盖 patch 中出现的键，
+// 其余键保持库内当前值（防并发编辑被旧快照覆盖）。
+// expectedUsername 非空时：若库内 console_username 非空且与 expectedUsername 不同，
+// 跳过 console_storage_state 的写入（其余 patch 键照常写入），返回 nil。
+//
+// 实现：事务内 SELECT credentials ... FOR UPDATE 取行锁 → decryptCredentialsMap 解密
+// 为明文 map → 把 patch 合并进明文 map（必要时剔除 console_storage_state）→
+// prepareCredentialsForStorage 重算加密 storage 与 credentials_mac /
+// credentials_api_key_mac → 单条 UPDATE 写回。凭据变化不涉及调度状态，不发送
+// scheduler outbox。
+func (r *accountRepository) PatchAccountCredentials(ctx context.Context, id int64, patch map[string]any, expectedUsername string) error {
+	baseCtx := ctx
+	contextTx := dbent.TxFromContext(ctx)
+	client := r.client
+	var tx *dbent.Tx
+	if contextTx != nil {
+		client = contextTx.Client()
+	} else if r.client != nil {
+		var txErr error
+		tx, txErr = r.client.Tx(ctx)
+		if txErr != nil && !errors.Is(txErr, dbent.ErrTxStarted) {
+			return txErr
+		}
+		if tx != nil {
+			defer func() { _ = tx.Rollback() }()
+			ctx = dbent.NewTxContext(ctx, tx)
+			client = tx.Client()
+		}
+	}
+
+	rows, err := client.QueryContext(ctx, `
+		SELECT credentials FROM accounts WHERE id = $1 AND deleted_at IS NULL FOR UPDATE
+	`, id)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	var rawCreds []byte
+	hasRow := false
+	if rows.Next() {
+		hasRow = true
+		if err := rows.Scan(&rawCreds); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasRow {
+		return service.ErrAccountNotFound
+	}
+
+	stored := map[string]any{}
+	if len(rawCreds) > 0 && string(rawCreds) != "null" {
+		if err := json.Unmarshal(rawCreds, &stored); err != nil {
+			return err
+		}
+	}
+
+	plain, err := decryptCredentialsMap(stored)
+	if err != nil {
+		return err
+	}
+
+	// expectedUsername 守卫：库内 console_username 已被并发改写成别的非空值，
+	// 跳过 console_storage_state 的写入（其余 patch 键照常写入）。
+	skipStorageState := false
+	if expectedUsername != "" {
+		if existing, ok := plain["console_username"].(string); ok && existing != "" && existing != expectedUsername {
+			skipStorageState = true
+		}
+	}
+
+	merged := make(map[string]any, len(plain)+len(patch))
+	for k, v := range plain {
+		merged[k] = v
+	}
+	for k, v := range patch {
+		if skipStorageState && k == "console_storage_state" {
+			continue
+		}
+		merged[k] = v
+	}
+
+	prepared, err := prepareCredentialsForStorage(merged)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(prepared.storage)
+	if err != nil {
+		return err
+	}
+
+	result, err := client.ExecContext(ctx, `
+		UPDATE accounts
+		SET credentials = $1::jsonb,
+			credentials_mac = $2,
+			credentials_api_key_mac = $3,
+			updated_at = NOW()
+		WHERE id = $4 AND deleted_at IS NULL
+	`, string(payload), prepared.mac, prepared.apiKeyMAC, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return service.ErrAccountNotFound
+	}
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	_ = baseCtx
+	return nil
+}
+
+// SetTempUnschedulableIfOwnedOrUnpaused 仅在「当前无停调 / 停调已过期 / 停调来源属
+// ownedSource」时写入。他因活跃停调（未过期且来源不同）零写入返回 applied=false，绝不覆盖。
+//
+// $4 由调用方传 ownedSource 拼成 `%"source":"<ownedSource>"%` 的匹配模式（在 Go 侧
+// 生成，禁止字符串拼进 SQL 文本）。applied = RowsAffected > 0；applied==true 时发
+// scheduler outbox 并同步调度快照（与 SetTempUnschedulable 同款写法）。
+func (r *accountRepository) SetTempUnschedulableIfOwnedOrUnpaused(ctx context.Context, id int64, until time.Time, reason string, ownedSource string) (bool, error) {
+	sourcePattern := fmt.Sprintf(`%%"source":"%s"%%`, ownedSource)
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET temp_unschedulable_until = $1,
+			temp_unschedulable_reason = $2,
+			extra = `+schedStateRevisionIncrementExpr()+`,
+			updated_at = NOW()
+		WHERE id = $3
+			AND deleted_at IS NULL
+			AND (
+				temp_unschedulable_until IS NULL
+				OR temp_unschedulable_until <= NOW()
+				OR temp_unschedulable_reason LIKE $4
+			)
+	`, until, reason, id, sourcePattern)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue temp unschedulable if owned failed: account=%d err=%v", id, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return true, nil
+}
+
+// ClearTempUnschedulableIfOwned 仅在 until 代际相等且来源属 ownedSource 时清除停调。
+// cleared = RowsAffected > 0；cleared==true 时同样 enqueue outbox + sync snapshot
+// （与 ClearTempUnschedulableIfGeneration 同款写法）。
+func (r *accountRepository) ClearTempUnschedulableIfOwned(ctx context.Context, accountID int64, expectedUntil time.Time, ownedSource string) (bool, error) {
+	sourcePattern := fmt.Sprintf(`%%"source":"%s"%%`, ownedSource)
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET temp_unschedulable_until = NULL,
+			temp_unschedulable_reason = NULL,
+			extra = `+schedStateRevisionIncrementExpr()+`,
+			updated_at = NOW()
+		WHERE id = $1
+			AND deleted_at IS NULL
+			AND temp_unschedulable_until IS NOT NULL
+			AND temp_unschedulable_until = $2
+			AND temp_unschedulable_reason LIKE $3
+	`, accountID, expectedUntil, sourcePattern)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue clear temp unschedulable if owned failed: account=%d err=%v", accountID, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, accountID)
+	return true, nil
+}
+
 // BumpTempUnschedulableReasonIfGeneration 是 attempt 回写的代际守卫原语（AC-G2R6 must_fix）：
 // 仅当该账号当前 temp_unschedulable_until 仍等于 expectedUntil（探测入队时读到的代际令牌，
 // timestamptz 全精度等值）且停调窗口仍有效（> NOW()）时，才把 reason 改写为 newReason（递增

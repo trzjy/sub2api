@@ -112,6 +112,15 @@ type AccountRepository interface {
 	// 已被他人改写（新停调接管，必写更晚 until）则零写入、返回 false，调用方据此保留新停调、不清除。
 	// 原子单语句，杜绝读-改-写两步的并发覆盖。
 	ClearTempUnschedulableIfGeneration(ctx context.Context, accountID int64, expectedUntil time.Time) (bool, error)
+	// PatchAccountCredentials 事务内局部合并更新 credentials：仅覆盖 patch 中出现的键，
+	// 其余键保持库内当前值（防并发编辑被旧快照覆盖）。
+	// expectedUsername 非空且库内 console_username 非空且不相同时，跳过 console_storage_state 写入。
+	PatchAccountCredentials(ctx context.Context, id int64, patch map[string]any, expectedUsername string) error
+	// SetTempUnschedulableIfOwnedOrUnpaused 仅在无停调/已过期/来源属 ownedSource 时写入停调，
+	// 他因活跃停调零写入返回 applied=false。
+	SetTempUnschedulableIfOwnedOrUnpaused(ctx context.Context, id int64, until time.Time, reason string, ownedSource string) (applied bool, err error)
+	// ClearTempUnschedulableIfOwned 仅在 until 代际相等且来源属 ownedSource 时清除停调。
+	ClearTempUnschedulableIfOwned(ctx context.Context, accountID int64, expectedUntil time.Time, ownedSource string) (cleared bool, err error)
 	// BumpTempUnschedulableReasonIfGeneration 是 attempt 回写的代际守卫原语（AC-G2R6 must_fix）：
 	// 仅当当前 temp_unschedulable_until 仍等于 expectedUntil（探测入队时读到的代际令牌，timestamptz
 	// 全精度等值）且停调窗口仍有效（> NOW()）时才改写 reason 返回 true；否则返回 false（已被接管），

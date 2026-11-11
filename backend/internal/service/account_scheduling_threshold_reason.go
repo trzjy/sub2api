@@ -90,6 +90,21 @@ func IsAccountSchedulingThresholdReason(rawReason string) bool {
 	return payload.Source == AccountSchedulingThresholdReasonSource
 }
 
+// IsWebConsoleQuotaTempUnschedReason 判定停调原因是否来自 Web 控制台额度链
+// （source == "web_console_quota"）。缺失/非 JSON/来源不符一律返回 false。
+//
+// 用途（方案 §4.4）：
+//   - GetTempUnschedStatus 在 cache miss 读 DB 后，若为该来源则跳过 Redis 回填，
+//     避免「探针写后失效 → 旧状态被 miss 回填」的脏写竞态；
+//   - service 层在执行所属权写入/清除前的来源校验。
+func IsWebConsoleQuotaTempUnschedReason(rawReason string) bool {
+	payload, ok := parseTempUnschedReasonPayload(rawReason)
+	if !ok {
+		return false
+	}
+	return payload.Source == webConsoleQuotaOwnedSource
+}
+
 func parseTempUnschedReasonPayload(rawReason string) (tempUnschedReasonPayload, bool) {
 	rawReason = strings.TrimSpace(rawReason)
 	if rawReason == "" {

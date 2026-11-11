@@ -114,5 +114,14 @@ else
   exit 1
 fi
 
+# 8e. web-quota-worker 容器健康检查（Playwright Sidecar）
+WQ_HEALTH=$(docker inspect web-quota-worker --format '{{.State.Health.Status}}' 2>/dev/null || true)
+if [ "$WQ_HEALTH" = "healthy" ]; then
+  echo "断言通过: web-quota-worker 容器状态 healthy"
+else
+  echo "断言失败: web-quota-worker 容器健康状态非 healthy (实际: '${WQ_HEALTH}')"
+  exit 1
+fi
+
 # 9. 全部通过
 echo "部署成功: REF=${REF} TAG=${TAG} 镜像 sub2api:${TAG}-w"

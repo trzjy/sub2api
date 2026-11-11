@@ -113,6 +113,7 @@ type Config struct {
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
 	XianyuDelivery          XianyuDeliveryConfig          `mapstructure:"xianyu_delivery"`
 	LocalCaptchaHelper      LocalCaptchaHelperConfig      `mapstructure:"local_captcha_helper"`
+	WebQuotaWorker          WebQuotaWorkerConfig          `mapstructure:"web_quota_worker"`
 
 	// Enforce only API-key spending windows in simple mode.
 	SimpleModeKeyRateLimitEnabled bool `mapstructure:"simple_mode_key_rate_limit_enabled" yaml:"simple_mode_key_rate_limit_enabled"`
@@ -160,6 +161,14 @@ type LocalCaptchaHelperConfig struct {
 	BaseURL string `mapstructure:"base_url"`
 	APIKey  string `mapstructure:"api_key"`
 	Timeout int    `mapstructure:"timeout_seconds"`
+}
+
+// WebQuotaWorkerConfig 是 Web 控制台用量采集 Playwright Sidecar 的连接配置。
+// 未配置 base_url 时整条链路不启用（ResolveWebConsoleQuotaProvider 命中也不探测）。
+type WebQuotaWorkerConfig struct {
+	BaseURL        string `mapstructure:"base_url"`
+	APIKey         string `mapstructure:"api_key"`
+	TimeoutSeconds int    `mapstructure:"timeout_seconds"`
 }
 
 func (c *XianyuDeliveryConfig) setDefaultsFromEnv() {
@@ -2945,6 +2954,9 @@ func setEnvReachableDefaults() {
 	viper.SetDefault("local_captcha_helper.base_url", "")
 	viper.SetDefault("local_captcha_helper.api_key", "")
 	viper.SetDefault("local_captcha_helper.timeout_seconds", 0)
+	viper.SetDefault("web_quota_worker.base_url", "")
+	viper.SetDefault("web_quota_worker.api_key", "")
+	viper.SetDefault("web_quota_worker.timeout_seconds", 60)
 
 	// C2 无流量渠道抽样直连探测调度器（派发单 C2）：默认关闭（零探测），
 	// 每轮最多探测 2 条渠道。

@@ -245,6 +245,21 @@ func (s *accountRepoStub) ListShadowsByParent(ctx context.Context, parentID int6
 	return nil, nil
 }
 
+// PatchAccountCredentials 是仓储接口新增方法的 no-op 桩（本包测试不覆盖凭据局部更新语义）。
+func (s *accountRepoStub) PatchAccountCredentials(context.Context, int64, map[string]any, string) error {
+	return nil
+}
+
+// SetTempUnschedulableIfOwnedOrUnpaused 是仓储接口新增方法的 no-op 桩。
+func (s *accountRepoStub) SetTempUnschedulableIfOwnedOrUnpaused(context.Context, int64, time.Time, string, string) (bool, error) {
+	return false, nil
+}
+
+// ClearTempUnschedulableIfOwned 是仓储接口新增方法的 no-op 桩。
+func (s *accountRepoStub) ClearTempUnschedulableIfOwned(context.Context, int64, time.Time, string) (bool, error) {
+	return false, nil
+}
+
 // TestAccountService_Delete_NotFound 测试删除不存在的账号时返回正确的错误。
 // 预期行为：
 //   - ExistsByID 返回 false（账号不存在）

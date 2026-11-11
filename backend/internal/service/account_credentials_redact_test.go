@@ -184,3 +184,21 @@ func TestBalanceProbeAccessToken_SensitiveKeyChains(t *testing.T) {
 	require.Equal(t, "at-old", out[BalanceProbeAccessTokenKey], "incoming 没传访问令牌，应保留 existing")
 	require.Equal(t, float64(5000), out["balance_probe"].(map[string]any)["count_unit"], "非敏感键由 incoming 决定")
 }
+
+// Web 控制台凭据入敏感清单：merge 回补 + RedactCredentials 脱敏 + 静态加密共用该清单。
+func TestWebConsoleCredentials_SensitiveKeyChains(t *testing.T) {
+	require.True(t, IsSensitiveCredentialKey("console_password"))
+	require.True(t, IsSensitiveCredentialKey("console_storage_state"))
+	// console_username 是身份标识，不是秘密。
+	require.False(t, IsSensitiveCredentialKey("console_username"))
+
+	existing := map[string]any{
+		"console_username":      "u@x.com",
+		"console_password":      "pw-old",
+		"console_storage_state": `{"cookies":[]}`,
+	}
+	incoming := map[string]any{"console_username": "u@x.com"} // 未带秘密
+	out := MergePreservingSensitiveCreds(existing, incoming)
+	require.Equal(t, "pw-old", out["console_password"])
+	require.Equal(t, `{"cookies":[]}`, out["console_storage_state"])
+}

@@ -2748,7 +2748,11 @@ func (s *RateLimitService) GetTempUnschedStatus(ctx context.Context, accountID i
 		}
 	}
 
-	if s.tempUnschedCache != nil {
+	// Web 控制台额度链的停调状态**禁止回填 Redis**（方案 §4.4 不变式 2）：
+	// 该来源的权威状态只在 DB；若此处回填，与并发探针的 DeleteTempUnsched 交错时
+	// 会把旧状态重新写进缓存（GetTempUnschedStatus 优先读缓存 → 返回过期停调）。
+	// 其余来源（401/403/429/人工规则/熔断）保持既有回填行为不变。
+	if s.tempUnschedCache != nil && !IsWebConsoleQuotaTempUnschedReason(account.TempUnschedulableReason) {
 		if err := s.tempUnschedCache.SetTempUnsched(ctx, accountID, state); err != nil {
 			slog.Warn("temp_unsched_cache_set_failed", "account_id", accountID, "error", err)
 		}
