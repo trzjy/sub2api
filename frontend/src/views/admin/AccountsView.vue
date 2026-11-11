@@ -559,6 +559,7 @@
       :selected-platforms="selPlatforms"
       :selected-types="selTypes"
       :target="bulkEditTarget ?? undefined"
+      :has-cursor-managed="bulkEditTarget?.hasCursorManaged ?? false"
       :proxies="proxies"
       :groups="groups"
       @close="showBulkEdit = false"
@@ -663,6 +664,7 @@ type AccountBulkEditTarget =
       accountIds: number[]
       selectedPlatforms: AccountPlatform[]
       selectedTypes: AccountType[]
+      hasCursorManaged: boolean
     }
   | {
       mode: 'filtered'
@@ -679,6 +681,7 @@ type AccountBulkEditTarget =
       previewCount: number
       selectedPlatforms: AccountPlatform[]
       selectedTypes: AccountType[]
+      hasCursorManaged: boolean
     }
 const selPlatforms = computed<AccountPlatform[]>(() => {
   const platforms = new Set(
@@ -2462,12 +2465,17 @@ const collectSelectionMetadata = (rows: Account[]) => {
   return { selectedPlatforms, selectedTypes }
 }
 
+const hasCursorManagedInRows = (rows: Array<{ platform?: string; quota_key_id?: number | null }>) =>
+  rows.some(account => account.platform === 'cursor' && account.quota_key_id != null)
+
 const openBulkEditSelected = () => {
+  const selectedAccounts = accounts.value.filter(account => selIds.value.includes(account.id))
   bulkEditTarget.value = {
     mode: 'selected',
     accountIds: [...selIds.value],
     selectedPlatforms: [...selPlatforms.value],
-    selectedTypes: [...selTypes.value]
+    selectedTypes: [...selTypes.value],
+    hasCursorManaged: hasCursorManagedInRows(selectedAccounts)
   }
   showBulkEdit.value = true
 }
@@ -2476,12 +2484,19 @@ const openBulkEditFiltered = async () => {
   const filters = buildBulkEditFilterSnapshot()
   const preview = await adminAPI.accounts.list(1, 100, filters)
   const { selectedPlatforms, selectedTypes } = collectSelectionMetadata(preview.items)
+  // 保守判定：按筛选条件直接置 true（平台为 cursor 或按 quota_key_id 过滤，后者即 Cursor 受管激活码维度）。
+  const conservative = filters.platform === 'cursor' || Boolean(filters.quota_key_id)
+  // 样本精确复算：preview.items 有数据时以实际样本覆盖保守值。
+  const hasCursorManaged = preview.items.length > 0
+    ? hasCursorManagedInRows(preview.items)
+    : conservative
   bulkEditTarget.value = {
     mode: 'filtered',
     filters,
     previewCount: preview.total,
     selectedPlatforms,
-    selectedTypes
+    selectedTypes,
+    hasCursorManaged
   }
   showBulkEdit.value = true
 }

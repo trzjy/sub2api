@@ -29,6 +29,11 @@ vi.mock('@/api/admin', () => ({
       syncUpstreamModels: vi.fn(),
       refreshAutoPool: vi.fn(),
       batchImportAutoCards: vi.fn()
+    },
+    // D2a：创建/编辑弹窗现在会调 adminAPI.groups.getAll() 懒加载分组候选，
+    // 该测试此前未覆盖此路径，补上桩以免 openCreateDialog/openEditDialog 抛错。
+    groups: {
+      getAll: vi.fn()
     }
   }
 }))
@@ -93,6 +98,9 @@ function mountView() {
         TextArea: true,
         Icon: true,
         ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        // D2a：创建/编辑弹窗内新增 GroupSelector；桩化避免渲染真实组件
+        // （真实组件依赖 Pinia 的 authStore，本测试未安装 Pinia）。
+        GroupSelector: true,
         // BaseDialog 按 show 条件渲染，才能拿到对话框内的 DOM。
         BaseDialog: {
           props: ['show', 'title'],
@@ -135,6 +143,9 @@ describe('QuotaKeysView 创建/编辑弹窗：激活码设置与模型限制', (
     vi.mocked(adminAPI.quotaKeys.syncUpstreamModels).mockResolvedValue({
       models: ['cursor-model-a', 'cursor-model-b']
     } as never)
+    // D2a：创建/编辑弹窗懒加载分组候选（adminAPI.groups.getAll）。
+    vi.mocked(adminAPI.groups.getAll).mockReset()
+    vi.mocked(adminAPI.groups.getAll).mockResolvedValue([] as never)
   })
 
   describe('打开编辑回填', () => {

@@ -359,6 +359,22 @@
           <p class="input-hint mt-1">{{ t('admin.quotaKeys.rateMultiplierHint') }}</p>
         </div>
 
+        <!-- 分组绑定（D2a）：把激活码绑定到分组；候选分组按所选模型家族过滤，
+             并放行 cursor 原生平台分组。未触碰分组时不随更新请求提交。 -->
+        <div>
+          <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.quotaKeys.groupBinding') }}
+          </label>
+          <GroupSelector
+            :groups="accountGroups"
+            v-model="form.group_ids"
+            :account-models="quotaKeySelectedModels.length > 0 ? quotaKeySelectedModels : undefined"
+            :native-platforms="quotaKeyNativePlatforms"
+            @update:model-value="groupTouched = true"
+          />
+          <p class="input-hint mt-1">{{ t('admin.quotaKeys.groupBindingHint') }}</p>
+        </div>
+
         <!-- 模型限制（激活码级权威值，白名单/映射双模式） -->
         <div>
           <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -934,7 +950,10 @@ import {
   buildModelMappingObject,
   isValidWildcardPattern
 } from '@/composables/useModelWhitelist'
-import type { Account, AdminGroup, Proxy as AccountProxy } from '@/types'
+// D2a：分组选择器（复用账号管理页的 GroupSelector）与按模型家族推导候选原生平台。
+import GroupSelector from '@/components/common/GroupSelector.vue'
+import { CURSOR_NATIVE_GROUP_PLATFORMS, inferGroupPlatformsFromModels } from '@/constants/platforms'
+import type { Account, AdminGroup, Proxy as AccountProxy, GroupPlatform } from '@/types'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -1008,11 +1027,20 @@ const accountProxies = ref<AccountProxy[]>([])
 const accountGroups = ref<AdminGroup[]>([])
 let accountEditRefsLoaded = false
 let accountEditRefsPromise: Promise<void> | null = null
+// --- 分组选择器（D2a：激活码绑定分组）---------------------------------
+// 直接复用 accountGroups：该 ref 既供详情弹窗内账号编辑的 GroupSelector 使用，
+// 也供本页创建/编辑弹窗的分组选择器使用；用 Promise 缓存懒加载一次，失败不缓存。
+let groupsLoaded = false
+let groupsPromise: Promise<void> | null = null
+const groupTouched = ref(false)
 
 const form = reactive({
   code: '',
   expires_at: '',
   notes: '',
+  // 分组绑定（D2a）：激活码绑定到哪些分组；创建态默认 []（即不绑定），
+  // 编辑态回填 row.group_ids；未触碰时不随更新请求提交（保持后端既有绑定）。
+  group_ids: [] as number[],
   // 激活码优先级：数值越小越优先，与账号 priority 同一语义。该码名下账号的优先级
   // 跟随此值（后端拉号时写入、改优先级时同事务同步）。
   priority: 1,
@@ -1038,6 +1066,28 @@ const modelRestrictionTouched = ref(false)
 const customSyncProp = computed(() =>
   editing.value ? () => adminAPI.quotaKeys.syncUpstreamModels(editing.value!.id) : undefined
 )
+
+// --- D2a：分组选择器候选推导 --------------------------------------------
+// 当前激活码「选择的模型」集合：白名单模式取 allowedModels，映射模式取各 from 字段，
+// 两者去重；用于驱动 GroupSelector 的 accountModels（按模型家族过滤 composite 聚合组）。
+const quotaKeySelectedModels = computed<string[]>(() => {
+  const set = new Set<string>()
+  for (const m of allowedModels.value) {
+    const v = m.trim()
+    if (v) set.add(v)
+  }
+  for (const m of modelMappings.value) {
+    const v = m.from.trim()
+    if (v) set.add(v)
+  }
+  return Array.from(set)
+})
+// 候选原生平台：由所选模型推导；推导为空（尚未选模型）时回落 cursor 全量原生平台，
+// 保证创建态默认即可选中 cursor 全家族分组。
+const quotaKeyNativePlatforms = computed<GroupPlatform[]>(() => {
+  const inferred = inferGroupPlatformsFromModels(quotaKeySelectedModels.value)
+  return inferred.length > 0 ? inferred : [...CURSOR_NATIVE_GROUP_PLATFORMS]
+})
 
 /**
  * §0.1 #7 折叠裁定：账号列表默认折叠。
@@ -1219,6 +1269,8 @@ async function saveUpstream(key: string) {
 
 function openCreateDialog() {
   editing.value = null
+  // D2a：懒加载分组候选（供 GroupSelector 显示），失败不阻断弹窗打开。
+  void ensureGroups()
   form.code = ''
   form.expires_at = ''
   form.notes = ''
@@ -1229,6 +1281,9 @@ function openCreateDialog() {
   form.concurrency = null
   form.load_factor = null
   form.rate_multiplier = 1
+  // D2a：创建态默认不绑定分组、未触碰。
+  form.group_ids = []
+  groupTouched.value = false
   // 模型限制：创建态默认白名单模式、空列表、未触碰。
   modelRestrictionMode.value = 'whitelist'
   allowedModels.value = []
@@ -1240,6 +1295,8 @@ function openCreateDialog() {
 
 function openEditDialog(row: QuotaKey) {
   editing.value = row
+  // D2a：懒加载分组候选（供 GroupSelector 显示），失败不阻断弹窗打开。
+  void ensureGroups()
   form.code = ''
   form.expires_at = row.expires_at ? toLocalInputValue(row.expires_at) : ''
   form.notes = row.notes ?? ''
@@ -1269,6 +1326,9 @@ function openEditDialog(row: QuotaKey) {
     modelMappings.value = []
   }
   modelRestrictionTouched.value = false
+  // D2a：编辑态回填已有分组绑定（row.group_ids 缺省视为未绑定），未触碰。
+  form.group_ids = [...(row.group_ids ?? [])]
+  groupTouched.value = false
   formError.value = ''
   showFormDialog.value = true
 }
@@ -1283,6 +1343,9 @@ function closeFormDialog() {
   allowedModels.value = []
   modelMappings.value = []
   modelRestrictionTouched.value = false
+  // D2a：关闭弹窗清空分组绑定草稿，避免下次打开残留。
+  form.group_ids = []
+  groupTouched.value = false
 }
 
 function toLocalInputValue(value: string): string {
@@ -1348,6 +1411,13 @@ function buildPayload(modelMapping?: Record<string, string> | null): CreateQuota
   // 仅在调用方明确要发送模型限制时带上（避免编辑态「仅改备注/优先级」时覆盖码级模型）。
   if (modelMapping !== undefined) {
     payload.model_mapping = modelMapping
+  }
+  // D2a：分组绑定提交规则（与模型限制同构的「三态」裁定）：
+  // - 创建态（editing 为空）：必带 group_ids（默认 [] 即不绑定任何分组）；
+  // - 编辑态：仅当 groupTouched（用户改过分组）时才发送，未触碰则不覆盖后端既有绑定，
+  //   以免「仅改备注/优先级」误清空分组。
+  if (!editing.value || groupTouched.value) {
+    payload.group_ids = form.group_ids
   }
   return payload as UpdateQuotaKeyRequest
 }
@@ -1538,6 +1608,25 @@ async function ensureAccountEditorRefs(): Promise<void> {
     })
   }
   await accountEditRefsPromise
+}
+
+// D2a：懒加载分组候选（供创建/编辑弹窗的 GroupSelector 显示）。
+// 与 ensureAccountEditorRefs 同源 adminAPI.groups.getAll()（写入同一个 accountGroups ref），
+// 但独立缓存以避免与账号编辑弹窗的加载互相耦合；失败不缓存，下次可重试。
+async function ensureGroups() {
+  if (groupsLoaded) return
+  if (!groupsPromise) {
+    groupsPromise = adminAPI.groups
+      .getAll()
+      .then((list) => {
+        accountGroups.value = list
+        groupsLoaded = true
+      })
+      .catch(() => {
+        groupsPromise = null
+      })
+  }
+  await groupsPromise
 }
 
 // 账号保存成功：账号 status / schedulable 可能已变 → 重拉激活码详情（账号行）与列表

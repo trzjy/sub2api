@@ -104,10 +104,11 @@ const ProbeDataTableStub = {
 }
 
 const AccountBulkActionsBarStub = {
-  props: ['selectedIds'],
-  emits: ['edit-filtered', 'probe-upstream-billing'],
+  props: ['selectedIds', 'totalResults', 'selectingAll', 'allResultsSelected'],
+  emits: ['edit-selected', 'edit-filtered', 'probe-upstream-billing'],
   template: `
     <div>
+      <button data-test="edit-selected" @click="$emit('edit-selected')">edit selected</button>
       <button data-test="edit-filtered" @click="$emit('edit-filtered')">edit filtered</button>
       <button data-test="probe-upstream-billing" @click="$emit('probe-upstream-billing')">probe</button>
     </div>
@@ -120,8 +121,8 @@ const PaginationStub = {
 }
 
 const BulkEditAccountModalStub = {
-  props: ['show', 'target'],
-  template: '<div data-test="bulk-edit-modal" :data-show="String(show)" :data-target-mode="target?.mode ?? \'\'"></div>'
+  props: ['show', 'target', 'hasCursorManaged'],
+  template: '<div data-test="bulk-edit-modal" :data-show="String(show)" :data-target-mode="target?.mode ?? \'\'" :data-has-cursor-managed="String(hasCursorManaged)"></div>'
 }
 
 describe('admin AccountsView bulk edit scope', () => {
@@ -163,6 +164,76 @@ describe('admin AccountsView bulk edit scope', () => {
     getAllGroups.mockResolvedValue([])
     probeUpstreamBilling.mockResolvedValue({})
     probeUpstreamBillingBatch.mockResolvedValue([])
+  })
+
+  const mountView = (items: any[], overrides: Record<string, any> = {}) => {
+    listAccounts.mockResolvedValue({
+      items,
+      total: items.length,
+      page: 1,
+      page_size: 20,
+      pages: items.length === 0 ? 0 : 1
+    })
+    return mount(AccountsView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          TablePageLayout: {
+            template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
+          },
+          DataTable: DataTableStub,
+          Pagination: true,
+          ConfirmDialog: true,
+          AccountTableActions: { template: '<div><slot name="beforeCreate" /><slot name="after" /></div>' },
+          AccountTableFilters: { template: '<div></div>' },
+          AccountBulkActionsBar: AccountBulkActionsBarStub,
+          AccountActionMenu: true,
+          ImportDataModal: true,
+          ReAuthAccountModal: true,
+          AccountTestModal: true,
+          AccountStatsModal: true,
+          ScheduledTestsPanel: true,
+          SyncFromCrsModal: true,
+          TempUnschedStatusModal: true,
+          ErrorPassthroughRulesModal: true,
+          TLSFingerprintProfilesModal: true,
+          CreateAccountModal: true,
+          EditAccountModal: true,
+          BulkEditAccountModal: BulkEditAccountModalStub,
+          PlatformTypeBadge: true,
+          AccountCapacityCell: true,
+          AccountStatusIndicator: true,
+          AccountTodayStatsCell: true,
+          AccountGroupsCell: true,
+          AccountUsageCell: true,
+          Icon: true,
+          ...overrides
+        }
+      }
+    })
+  }
+
+  const cursorAccount = (id: number) => ({
+    id,
+    name: `cursor-acc-${id}`,
+    platform: 'cursor',
+    type: 'apikey',
+    status: 'active',
+    schedulable: true,
+    quota_key_id: 5,
+    created_at: '2026-03-07T10:00:00Z',
+    updated_at: '2026-03-07T10:00:00Z'
+  })
+
+  const nonCursorAccount = (id: number) => ({
+    id,
+    name: `openai-acc-${id}`,
+    platform: 'openai',
+    type: 'apikey',
+    status: 'active',
+    schedulable: true,
+    created_at: '2026-03-07T10:00:00Z',
+    updated_at: '2026-03-07T10:00:00Z'
   })
 
   it('opens bulk edit in filtered-results mode from the bulk actions dropdown', async () => {
@@ -626,5 +697,31 @@ describe('admin AccountsView bulk edit scope', () => {
     expect(probeUpstreamBilling).toHaveBeenCalledWith(7)
     expect(listAccounts).toHaveBeenCalledTimes(1)
     expect(wrapper.get('[data-test="account-rate"]').text()).toBe('0.065x')
+  })
+
+  it('passes hasCursorManaged=true to the bulk edit modal when a Cursor quota-key-bound account is selected', async () => {
+    const wrapper = mountView([cursorAccount(1), nonCursorAccount(2)])
+    await flushPromises()
+
+    const checkboxes = wrapper.findAll('[data-test="select-row"] input')
+    await checkboxes[0].trigger('change')
+    await wrapper.get('[data-test="edit-selected"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="bulk-edit-modal"]').attributes('data-show')).toBe('true')
+    expect(wrapper.get('[data-test="bulk-edit-modal"]').attributes('data-has-cursor-managed')).toBe('true')
+  })
+
+  it('passes hasCursorManaged=false to the bulk edit modal when only non-Cursor accounts are selected', async () => {
+    const wrapper = mountView([nonCursorAccount(2), cursorAccount(1)])
+    await flushPromises()
+
+    const checkboxes = wrapper.findAll('[data-test="select-row"] input')
+    await checkboxes[0].trigger('change')
+    await wrapper.get('[data-test="edit-selected"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="bulk-edit-modal"]').attributes('data-show')).toBe('true')
+    expect(wrapper.get('[data-test="bulk-edit-modal"]').attributes('data-has-cursor-managed')).toBe('false')
   })
 })
