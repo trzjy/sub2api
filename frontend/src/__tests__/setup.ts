@@ -4,6 +4,8 @@
  */
 import { config } from '@vue/test-utils'
 import { vi } from 'vitest'
+import { beforeEach, afterEach } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
 
 function createMemoryStorage(): Storage {
   const values = new Map<string, string>()
@@ -96,3 +98,15 @@ config.global.stubs = {
 
 // 设置全局测试超时
 vi.setConfig({ testTimeout: 10000 })
+
+// 每个测试用例提供独立的 Pinia 实例（组件树中的 GroupSelector 等会通过
+// useAuthStore / useAppStore 等依赖活跃 Pinia；此前未安装导致挂载即报错）。
+let pinia: ReturnType<typeof createPinia> | undefined
+beforeEach(() => {
+  pinia = createPinia()
+  setActivePinia(pinia)
+})
+afterEach(() => {
+  setActivePinia(undefined)
+  pinia = undefined
+})

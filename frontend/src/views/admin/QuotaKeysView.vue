@@ -225,6 +225,14 @@
                 <Icon name="chart" size="sm" />
               </button>
               <button
+                class="rounded p-1 text-gray-400 transition-colors hover:text-amber-600 disabled:opacity-40 dark:hover:text-amber-400"
+                :disabled="statusTogglingId === row.id"
+                :title="row.status === 'disabled' ? t('admin.quotaKeys.enable') : t('admin.quotaKeys.disable')"
+                @click="openStatusConfirm(row)"
+              >
+                <Icon :name="row.status === 'disabled' ? 'play' : 'ban'" size="sm" />
+              </button>
+              <button
                 class="rounded p-1 text-gray-400 transition-colors hover:text-red-600 dark:hover:text-red-400"
                 :title="t('admin.quotaKeys.actions.delete')"
                 @click="openDeleteDialog(row)"
@@ -745,6 +753,17 @@
       @cancel="showSweepDialog = false"
     />
 
+    <ConfirmDialog
+      :show="statusConfirm.open"
+      :title="statusConfirm.next === 'active' ? t('admin.quotaKeys.confirmEnableTitle') : t('admin.quotaKeys.confirmDisableTitle')"
+      :message="statusConfirm.next === 'active' ? t('admin.quotaKeys.confirmEnableMsg') : t('admin.quotaKeys.confirmDisableMsg')"
+      :confirm-text="t('common.confirm')"
+      :cancel-text="t('common.cancel')"
+      :danger="statusConfirm.next === 'disabled'"
+      @confirm="confirmStatusToggle"
+      @cancel="statusConfirm.open = false"
+    />
+
     <!-- 上游续费占位提示：ShareAI 暂无公开商铺（CARD-KC-09） -->
     <BaseDialog
       :show="showShareaiPlaceholder"
@@ -1026,6 +1045,12 @@ const busyId = ref<number | null>(null)
 const saving = ref(false)
 const sweeping = ref(false)
 
+// D2-c：启用 / 停用（status.active ↔ status.disabled）二次确认状态。
+const statusTogglingId = ref<number | null>(null)
+const statusConfirm = reactive<{ open: boolean; row: QuotaKey | null; next: 'active' | 'disabled' }>({
+  open: false, row: null, next: 'active'
+})
+
 const showFormDialog = ref(false)
 const showDetailDialog = ref(false)
 const showDeleteDialog = ref(false)
@@ -1178,7 +1203,7 @@ function statusLabel(row: QuotaKey | QuotaKeyDetail): string {
       return t('admin.quotaKeys.status.active')
     case 'expired':
       return t('admin.quotaKeys.status.expired')
-    case 'inactive':
+    case 'disabled':
       return t('admin.quotaKeys.status.inactive')
     default:
       return row.status || t('admin.quotaKeys.status.unknown')
@@ -1192,7 +1217,7 @@ function statusBadgeClass(row: QuotaKey | QuotaKeyDetail): string {
       return 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
     case 'expired':
       return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
-    case 'inactive':
+    case 'disabled':
       return 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
     default:
       return 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
@@ -1799,6 +1824,29 @@ async function confirmDelete() {
     await load()
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.deleteError')))
+  }
+}
+
+function openStatusConfirm(row: QuotaKey) {
+  statusConfirm.row = row
+  statusConfirm.next = row.status === 'disabled' ? 'active' : 'disabled'
+  statusConfirm.open = true
+}
+
+async function confirmStatusToggle() {
+  const row = statusConfirm.row
+  if (!row) return
+  statusTogglingId.value = row.id
+  try {
+    await adminAPI.quotaKeys.setStatus(row.id, statusConfirm.next)
+    appStore.showSuccess(statusConfirm.next === 'active'
+      ? t('admin.quotaKeys.enabled') : t('admin.quotaKeys.disabledMsg'))
+    statusConfirm.open = false
+    await load()
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.statusToggleError')))
+  } finally {
+    statusTogglingId.value = null
   }
 }
 

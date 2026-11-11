@@ -18,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -474,6 +475,17 @@ type QuotaKeyService struct {
 	// 生产由 wire 在 ProvideQuotaKeyService 装配点注入 *quotaUpstreamRepository；
 	// 测试可注入替身或留 nil（nil 仅允许空 upstream_key 的创建路径）。
 	registry QuotaUpstreamRegistry
+
+	// runMode 是运行模式（config.RunModeSimple / config.RunModeStandard），用于分组绑定策略：
+	// Simple 模式下 composite 分组不可绑定（复用 IsGroupBindableInSimpleMode 口径）。
+	// 生产由 wire 在 ProvideQuotaKeyService 装配点经 SetRunMode 注入；测试可注入替身。
+	// 空串视为 standard（composite 可绑定），与 cfg == nil 时的既有降级口径一致。
+	runMode string
+
+	// authCache 是分组认证缓存失效的窄依赖（APIKeyService 实现）；
+	// 创建/更新路径提交成功后逐个失效受影响分组的认证缓存。
+	// 未装配（nil）时跳过，不阻断主流程（登记为残余风险）。
+	authCache quotaKeyAuthCacheInvalidator
 }
 
 // AutoEntryConfigProvider 是 D1 挂载点调用的窄接口（D2-a 注入）：提供配置并应用入库默认值。
@@ -519,6 +531,39 @@ func (s *QuotaKeyService) SetUpstreamRegistry(r QuotaUpstreamRegistry) {
 		return
 	}
 	s.registry = r
+}
+
+// SetRunMode 注入运行模式（config.RunModeSimple / config.RunModeStandard），供分组绑定策略
+// 判定 composite 分组在 simple 模式下是否可绑定。空串视为 standard（与 cfg == nil 降级口径一致）。
+func (s *QuotaKeyService) SetRunMode(mode string) {
+	if s == nil {
+		return
+	}
+	s.runMode = mode
+}
+
+// quotaKeyAuthCacheInvalidator 是分组认证缓存的窄依赖（APIKeyService 实现）。
+type quotaKeyAuthCacheInvalidator interface {
+	InvalidateAuthCacheByGroupID(ctx context.Context, groupID int64)
+}
+
+// SetAuthCacheInvalidator 注入分组认证缓存失效器（wire 装配点注入）。
+func (s *QuotaKeyService) SetAuthCacheInvalidator(v quotaKeyAuthCacheInvalidator) {
+	if s == nil {
+		return
+	}
+	s.authCache = v
+}
+
+// invalidateGroupAuthCache 逐个失效受影响分组的认证缓存；未装配（nil）或空列表时跳过
+// （不阻断主流程，登记为残余风险）。
+func (s *QuotaKeyService) invalidateGroupAuthCache(ctx context.Context, groupIDs []int64) {
+	if s.authCache == nil || len(groupIDs) == 0 {
+		return
+	}
+	for _, gid := range groupIDs {
+		s.authCache.InvalidateAuthCacheByGroupID(ctx, gid)
+	}
 }
 
 // NewQuotaKeyService 构造激活码服务。
@@ -820,6 +865,17 @@ func (s *QuotaKeyService) CreateWithSettings(ctx context.Context, code string, e
 		rateMult = norm.rateMultiplier
 		modelMapping = norm.modelMapping
 	}
+	// 落库前若提供了码级分组：去重/正整数校验 + 存在性/软删校验 + simple 模式 composite 拦截。
+	var groupIDs []int64
+	var groupIDsSet bool
+	if settings != nil && settings.GroupIDs != nil {
+		normGroupIDs, gerr := s.normalizeQuotaKeyGroupIDs(ctx, *settings.GroupIDs)
+		if gerr != nil {
+			return nil, gerr
+		}
+		groupIDs = normGroupIDs
+		groupIDsSet = true
+	}
 	enc, err := s.enc.Encrypt([]byte(code))
 	if err != nil {
 		return nil, err
@@ -840,9 +896,29 @@ func (s *QuotaKeyService) CreateWithSettings(ctx context.Context, code string, e
 		LoadFactor:     loadFactor,
 		RateMultiplier: rateMult,
 		ModelMapping:   modelMapping,
+		GroupIDs:       groupIDs,
+		GroupIDsSet:    groupIDsSet,
 	})
 	if err != nil {
 		return nil, err
+	}
+	// 创建路径无既有事务：单独开事务做白名单追加；失败返回错误（码已创建，重新保存可修复）。
+	if groupIDsSet && len(groupIDs) > 0 && len(qk.ModelMapping) > 0 {
+		if s.client != nil {
+			tx, terr := s.client.Tx(ctx)
+			if terr != nil {
+				return nil, terr
+			}
+			changed, aerr := s.appendModelsToBoundGroupAllowlists(ctx, tx, qk.ID, qk.ModelMapping)
+			if aerr != nil {
+				_ = tx.Rollback()
+				return nil, fmt.Errorf("quota_key_service: append group allowlist on create: %w", aerr)
+			}
+			if cerr := tx.Commit(); cerr != nil {
+				return nil, fmt.Errorf("quota_key_service: commit group allowlist on create: %w", cerr)
+			}
+			s.invalidateGroupAuthCache(ctx, changed)
+		}
 	}
 	return quotaKeyToStatus(qk), nil
 }
@@ -918,6 +994,54 @@ func normalizeQuotaKeySettings(settings *UpdateQuotaKeySettingsInput) (*normaliz
 	return out, nil
 }
 
+// normalizeQuotaKeyGroupIDs 去重保序、剔除非正数，并校验全部分组存在且未软删；
+// Simple 模式复用 IsGroupBindableInSimpleMode 口径拦截 composite。
+//
+// 非法（含 ≤0）→ QUOTA_KEY_GROUP_IDS_INVALID。
+// 不存在 / 已软删 → QUOTA_KEY_GROUP_NOT_FOUND。
+// Simple 模式 + composite → 复用既有错误码 SIMPLE_MODE_GROUP_NOT_BINDABLE。
+//
+// s.client == nil（测试替身装配）→ 跳过存在性校验，仅做去重/正整数校验，
+// 与既有 checkQuotaKeyExists 的 nil-client 口径一致。
+func (s *QuotaKeyService) normalizeQuotaKeyGroupIDs(ctx context.Context, ids []int64) ([]int64, error) {
+	// 去重保序，剔除非正数（≤0 视为非法）。
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, infraerrors.BadRequest("QUOTA_KEY_GROUP_IDS_INVALID", "group id must be a positive integer")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if s.client == nil {
+		// 测试替身装配：跳过存在性校验，仅做去重/正整数校验。
+		return out, nil
+	}
+	// 校验全部分组存在且未软删。
+	groups, err := s.client.Group.Query().
+		Where(group.IDIn(out...), group.DeletedAtIsNil()).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(groups) != len(out) {
+		return nil, infraerrors.BadRequest("QUOTA_KEY_GROUP_NOT_FOUND", "one or more groups do not exist or have been soft-deleted")
+	}
+	// Simple 模式：composite 分组不可绑定。
+	if s.runMode == config.RunModeSimple {
+		for _, g := range groups {
+			if g.Platform == PlatformComposite {
+				return nil, infraerrors.BadRequest("SIMPLE_MODE_GROUP_NOT_BINDABLE", "composite groups cannot be bound in simple mode")
+			}
+		}
+	}
+	return out, nil
+}
+
 // codeLevelModelMappingToAccountMapping 把码级 model_mapping（map[string]string）转换为账号
 // credentials.model_mapping 所需的形态（map[string]any，{"from":"to"} 或白名单恒等 {"m":"m"}）。
 // 码级映射为空时返回 nil（调用方保持无映射，沿用既有闸门）。
@@ -985,6 +1109,8 @@ func (s *QuotaKeyService) UpdateWithSettings(ctx context.Context, id int64, code
 	if lockCtx == nil {
 		lockCtx = context.Background()
 	}
+	// 事务提交成功后失效的分组认证缓存（由回调内 appendModelsToBoundGroupAllowlists 返回）。
+	var changedGroupIDs []int64
 	err := s.withQuotaKeyLock(lockCtx, id, func(tx *ent.Tx) error {
 		if baseChanged {
 			if werr := s.updateBaseFieldsLocked(lockCtx, tx, id, code, codeEncrypted, codeMAC, codeLast4, expiresAt, notes, priority); werr != nil {
@@ -1000,11 +1126,22 @@ func (s *QuotaKeyService) UpdateWithSettings(ctx context.Context, id int64, code
 				return werr
 			}
 		}
+		// 创建/更新路径在锁内（同一 per-key 事务）把白名单追加进已绑定分组；
+		// 提交成功后失效受影响分组的认证缓存（见下方 lockCtx 外层调用）。
+		if settings != nil && settings.ModelMappingSet && len(settings.ModelMapping) > 0 {
+			changed, aerr := s.appendModelsToBoundGroupAllowlists(lockCtx, tx, id, settings.ModelMapping)
+			if aerr != nil {
+				return fmt.Errorf("quota_key_service: append group allowlist: %w", aerr)
+			}
+			changedGroupIDs = changed
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	// 事务已提交：逐个失效受影响分组的认证缓存（未装配时 skip，不阻断主流程）。
+	s.invalidateGroupAuthCache(ctx, changedGroupIDs)
 	return s.GetStatus(ctx, id)
 }
 
@@ -1412,9 +1549,18 @@ func (s *QuotaKeyService) PullAccounts(ctx context.Context, quotaKeyID int64) er
 // 其内部复用与 PullAccounts 完全相同的 pull 状态机（同一 advisory 互斥域 + 同一事务 +
 // ≤15 强制），不另造第二拉号机制。
 func (s *QuotaKeyService) PullAccountsForModel(ctx context.Context, quotaKeyID int64, modelM string) error {
-	// 挂载解析器：自动补池与手动挂组同源同判（cursorGroupResolver，U7 唯一判定出口）。
+	// 挂载解析器：自动补池与手动挂组同源同判。GroupIDs==nil 时经 findCursorPlatformGroupsForKey
+	// 按码级 model_mapping → 上游自报实供清单 → 静态实供清单 推导模型族挂载目标（U7 唯一判定出口）；
+	// GroupIDs!=nil 时由 pull 内码级分组分支直接采用码级分组（不进 resolver）。
+	// resolver 在事务内重读 qk，保证读到最新码级设置。
 	_ = modelM // 模型上下文仅作触发语义保留；挂载目标按账号能力全量计算（§20.2-A）。
-	return s.pull(ctx, quotaKeyID, s.cursorGroupResolver, false)
+	return s.pull(ctx, quotaKeyID, func(ctx context.Context, tx *ent.Tx) ([]int64, error) {
+		qk, err := tx.QuotaKey.Get(ctx, quotaKeyID)
+		if err != nil {
+			return nil, fmt.Errorf("quota_key_service: re-read quota key %d in mount resolver: %w", quotaKeyID, err)
+		}
+		return s.findCursorPlatformGroupsForKey(ctx, tx, qk)
+	}, false)
 }
 
 // RefreshAccounts 手动触发拉号（§4.4），与 PullAccountsForModel 共享同一 advisory 互斥域。
@@ -1426,7 +1572,15 @@ func (s *QuotaKeyService) PullAccountsForModel(ctx context.Context, quotaKeyID i
 // （group_count=0）。零目标组 → ErrQuotaKeyModelNoCoverage 失败关闭。
 // PullAccounts(2 参，reconciler 历史内部入口) 保持 mountResolver=nil、不挂载——行为差异在此显式区分。
 func (s *QuotaKeyService) RefreshAccounts(ctx context.Context, quotaKeyID int64) error {
-	return s.pull(ctx, quotaKeyID, s.cursorGroupResolver, true)
+	// 挂载解析器：与 PullAccountsForModel 同源同判。resolver 在事务内重读 qk，
+	// GroupIDs==nil 时按码级 model_mapping → 上游自报实供清单 → 静态实供清单 推导挂载目标。
+	return s.pull(ctx, quotaKeyID, func(ctx context.Context, tx *ent.Tx) ([]int64, error) {
+		qk, err := tx.QuotaKey.Get(ctx, quotaKeyID)
+		if err != nil {
+			return nil, fmt.Errorf("quota_key_service: re-read quota key %d in mount resolver: %w", quotaKeyID, err)
+		}
+		return s.findCursorPlatformGroupsForKey(ctx, tx, qk)
+	}, true)
 }
 
 // pull 是 PullAccounts / PullAccountsForModel / RefreshAccounts 共享的拉号状态机实现。
@@ -1490,6 +1644,28 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		}
 		if qk2.Status != domain.QuotaKeyStatusActive || isExpired(qk2) {
 			return nil
+		}
+
+		// 码级分组是权威值：显式绑定时只挂码级分组；显式 [] 表示不服务任何分组——
+		// 必须在发上游之前拦下，避免白耗每日拉号额度。
+		// 外审 R1c 强制：该分支必须保持在 mountResolver != nil 门控之内——
+		// PullAccounts 传 nil resolver 语义就是"不挂组"，即便码级绑定了分组也不挂
+		// （挂载由触发方另行编排）；同时这也让 reconciler pending wakeup 路径
+		// （绕过 ListCandidateKeys 直进 pull）在发上游前就被拦截。
+		var codeLevelGroupIDs []int64
+		if qk2.GroupIds != nil && mountResolver != nil {
+			if len(qk2.GroupIds) == 0 {
+				return fmt.Errorf("quota_key_service: quota key %d has no bound groups", quotaKeyID)
+			}
+			live, lerr := s.filterLiveGroupIDs(ctx, tx, qk2.GroupIds)
+			if lerr != nil {
+				return fmt.Errorf("quota_key_service: filter live groups: %w", lerr)
+			}
+			if len(live) == 0 {
+				return fmt.Errorf("quota_key_service: no covering group after upstream success: %w: %w",
+					ErrQuotaKeyMountFailed, ErrQuotaKeyModelNoCoverage)
+			}
+			codeLevelGroupIDs = live
 		}
 
 		// 发上游。
@@ -1734,12 +1910,20 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		// mountResolver 非空即代表"触发方要求挂载"——无论携带模型 M（PullAccountsForModel）
 		// 还是手动交集口径挂载（RefreshAccounts，B1，经 cursorGroupResolver → findCursorPlatformGroups）。
 		if mountResolver != nil {
-			groupIDs, err := mountResolver(ctx, tx)
-			if err != nil {
-				// F4：上游已成功发号（号未入库，事务尚未提交），但本地分组解析失败
-				//（shareai 非幂等，上游发号不可回滚）→ 事务将回滚（号不入库）+ 与挂载失败
-				// 同哨兵 ErrQuotaKeyMountFailed 返回，调用方可识别"上游可能已被消耗一次"。
-				return fmt.Errorf("quota_key_service: resolve mount groups: %w: %w", ErrQuotaKeyMountFailed, err)
+			var groupIDs []int64
+			if qk3.GroupIds == nil {
+				var err error
+				groupIDs, err = mountResolver(ctx, tx)
+				if err != nil {
+					// F4：上游已成功发号（号未入库，事务尚未提交），但本地分组解析失败
+					//（shareai 非幂等，上游发号不可回滚）→ 事务将回滚（号不入库）+ 与挂载失败
+					// 同哨兵 ErrQuotaKeyMountFailed 返回，调用方可识别"上游可能已被消耗一次"。
+					return fmt.Errorf("quota_key_service: resolve mount groups: %w: %w", ErrQuotaKeyMountFailed, err)
+				}
+			} else {
+				// 码级分组绑定（qk3.GroupIds != nil）：跳过 mountResolver，直接使用
+				// 发上游前已 filter 过的码级分组（权威值），不再经模型推导。
+				groupIDs = codeLevelGroupIDs
 			}
 			if len(groupIDs) == 0 {
 				// 失败关闭（fail-closed）：解析出零覆盖分组，不得落成裸号；返回错误使事务回滚，
@@ -2220,6 +2404,211 @@ func (s *QuotaKeyService) findCursorPlatformGroups(ctx context.Context, tx *ent.
 	return out, nil
 }
 
+// filterLiveGroupIDs 返回 ids 中"存活"的分组 ID：status='active' 且未软删（deleted_at IS NULL）。
+// 保序：按入参 ids 的顺序输出命中的 id，便于挂载时维持码级分组声明的优先级顺序。
+func (s *QuotaKeyService) filterLiveGroupIDs(ctx context.Context, tx *ent.Tx, ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	groups, err := tx.Group.Query().
+		Where(
+			group.IDIn(ids...),
+			group.DeletedAtIsNil(),
+			group.Status(domain.StatusActive),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("quota_key_service: query live groups: %w", err)
+	}
+	liveSet := make(map[int64]struct{}, len(groups))
+	for _, g := range groups {
+		liveSet[g.ID] = struct{}{}
+	}
+	out := make([]int64, 0, len(groups))
+	for _, id := range ids {
+		if _, ok := liveSet[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+// findCursorPlatformGroupsForKey 是 GroupIDs==nil 路径（自动补池 / 手动挂组）的挂载推导入口。
+//
+// 模型输入优先级：
+//  1. 码级 model_mapping 的精确键（不含通配 *）——码级权威值优先；
+//  2. 上游自报实供清单（RealSupplyModelsFor）；
+//  3. 静态实供清单（CursorStaticEntryModels）。
+//
+// 拿到模型集后，其余判定完全复用 cursorMountTargetGroups（零改动）：按模型真实厂商原生平台
+// ∪ cursor 专属 ∪ composite 计算目标分组，白名单启用且实际覆盖才挂。零覆盖 → ErrQuotaKeyModelNoCoverage。
+func (s *QuotaKeyService) findCursorPlatformGroupsForKey(ctx context.Context, tx *ent.Tx, qk *ent.QuotaKey) ([]int64, error) {
+	// 1. 码级 model_mapping 推导模型集（精确键 + 同厂商实供模型 / 通配键展开）。
+	entryModels := codeLevelEntryModels(qk)
+	// 2/3. 码级模型集为空（无映射键、或键均未解析到已知厂商）时回落：上游自报实供清单 → 静态实供清单。
+	if len(entryModels) == 0 {
+		models := CursorStaticEntryModels()
+		if s.upstream != nil {
+			if rm, rerr := s.upstream.RealSupplyModelsFor(qk.UpstreamKey); rerr != nil {
+				return nil, fmt.Errorf("quota_key_service: resolve real supply models for upstream %q: %w", qk.UpstreamKey, rerr)
+			} else if len(rm) > 0 {
+				models = rm
+			}
+		}
+		entryModels = models
+	}
+	groups, err := tx.Group.Query().
+		Where(
+			group.Status(domain.StatusActive),
+			group.DeletedAtIsNil(),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("quota_key_service: query candidate groups: %w", err)
+	}
+	targets := cursorMountTargetGroupsForCodeLevel(groups, entryModels)
+	out := make([]int64, 0, len(targets))
+	for _, g := range targets {
+		out = append(out, g.ID)
+	}
+	if len(out) == 0 {
+		return nil, ErrQuotaKeyModelNoCoverage
+	}
+	return out, nil
+}
+
+// cursorMountTargetGroupsForCodeLevel 是 findCursorPlatformGroupsForKey（GroupIds==nil 的码级
+// model_mapping 推导路径）专用的分组判定出口。语义与 cursorMountTargetGroups 完全一致：平台边界
+// ∪ 白名单启用 ∪ 实际覆盖；差异仅在"厂商解析"数据源——cursorMountTargetGroups 仅依据实供清单
+// （CursorRealSupplyVendorByID），而码级 model_mapping 的精确键可能是【官方名】（如
+// claude-3-5-sonnet / claude-3-7-sonnet），这些名不在实供清单内、无 real-supply 厂商，
+// cursorMountTargetGroups 据此无法推导平台、命中不了任何平台组。
+//
+// 本函数在实供厂商解析之外补入【官方目录厂商】（CursorModelCatalog），使官方名键也能落到其真实
+// 厂商原生平台组（anthropic 家族官方名 → anthropic 平台组）。实供模型仍优先走实供厂商，故对
+// 实供模型的判定结果与 cursorMountTargetGroups 恒等——零回归、零行为漂移。
+// cursorMountTargetGroups 本身保持零改动（禁区不动）。
+func cursorMountTargetGroupsForCodeLevel(groups []*ent.Group, entryModels []string) []*ent.Group {
+	if len(entryModels) == 0 {
+		return nil
+	}
+	// 厂商解析：实供清单优先，官方目录兜底（覆盖不在实供清单的官方名键）。
+	rsVendor := CursorRealSupplyVendorByID()
+	catalogVendor := make(map[string]string, len(CursorModelCatalog))
+	for _, e := range CursorModelCatalog {
+		if e.ID != "" {
+			catalogVendor[e.ID] = e.Vendor
+		}
+	}
+	resolvePlatform := func(m string) string {
+		if v, ok := rsVendor[m]; ok {
+			return cursorModelPlatformByVendor(v)
+		}
+		if v, ok := catalogVendor[m]; ok {
+			return cursorModelPlatformByVendor(v)
+		}
+		return ""
+	}
+	modelPlatforms := make(map[string]struct{}, len(entryModels))
+	for _, m := range entryModels {
+		if p := resolvePlatform(m); p != "" {
+			modelPlatforms[p] = struct{}{}
+		}
+	}
+	if len(modelPlatforms) == 0 {
+		return nil
+	}
+	out := make([]*ent.Group, 0, len(groups))
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		platform := strings.TrimSpace(g.Platform)
+		// 目标平台边界（U7）：模型真实厂商对应的原生平台组；cursor 专属组与 composite
+		// 聚合组沿用既有承载语义。
+		if platform != PlatformComposite && platform != PlatformCursor {
+			if _, ok := modelPlatforms[platform]; !ok {
+				continue // 不是任一实供/官方模型所属平台的目标分组
+			}
+		}
+		al := GroupModelAllowlistFromDomain(g.ModelAllowlist)
+		if !al.Enabled {
+			continue // allow-all（无对应模型）→ 不挂
+		}
+		hit := false
+		for _, m := range entryModels {
+			if !al.Allows(m) {
+				continue
+			}
+			// U7：只认该模型真实厂商对应的平台组；composite 聚合层按其白名单声明算目标。
+			if platform == PlatformComposite || platform == PlatformCursor || resolvePlatform(m) == platform {
+				hit = true
+				break
+			}
+		}
+		if hit {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// codeLevelEntryModels 把激活码码级 model_mapping 的键展开为"实供模型清单"，供
+// cursorMountTargetGroups 判定挂载目标分组（零改动，仅在此派生模型集）：
+//
+//   - 精确键（不含末尾 *）：原样纳入（供分组白名单 Allows 命中），并补入该键所属厂商在
+//     CursorRealSupplyModels 中的全部实供模型——保证平台推导能落到该厂商原生平台组，即便该
+//     精确键本身不在实供清单内（如官方名 claude-3-5-sonnet 与实供名 claude-opus-5-5 同属
+//     anthropic 厂商，前者不入实供目录、后者入，二者都应只挂 anthropic 家族组）；
+//   - 末尾 * 通配键：按前缀展开到 CursorRealSupplyModels 命中 ID（如 claude-* → 全部 claude
+//     实供模型，归 anthropic 厂商）。
+//
+// 空 model_mapping 返回 nil（调用方回落上游自报 / 静态实供清单）。
+func codeLevelEntryModels(qk *ent.QuotaKey) []string {
+	if len(qk.ModelMapping) == 0 {
+		return nil
+	}
+	// 全量官方目录 → 厂商（覆盖不在实供清单内的官方名，用于把精确键解析到厂商）。
+	catalogVendor := make(map[string]string, len(CursorModelCatalog))
+	for _, e := range CursorModelCatalog {
+		if e.ID != "" {
+			catalogVendor[e.ID] = e.Vendor
+		}
+	}
+	// 厂商 → 实供模型（用于补入同厂商实供模型，确保平台推导命中）。
+	realSupplyByVendor := make(map[string][]string)
+	for id, vendor := range CursorRealSupplyVendorByID() {
+		realSupplyByVendor[vendor] = append(realSupplyByVendor[vendor], id)
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(qk.ModelMapping)*2)
+	add := func(m string) {
+		if _, ok := seen[m]; !ok {
+			seen[m] = struct{}{}
+			out = append(out, m)
+		}
+	}
+	for key := range qk.ModelMapping {
+		if !strings.HasSuffix(key, "*") {
+			add(key) // 精确键本身（供分组白名单 Allows 命中）
+			if v, ok := catalogVendor[key]; ok {
+				for _, rm := range realSupplyByVendor[v] {
+					add(rm) // 同厂商实供模型（供平台推导）
+				}
+			}
+			continue
+		}
+		// 末尾 * 通配：展开到命中实供模型 ID。
+		prefix := key[:len(key)-1]
+		for id := range CursorRealSupplyVendorByID() {
+			if strings.HasPrefix(id, prefix) {
+				add(id)
+			}
+		}
+	}
+	return out
+}
+
 // mountAccountToGroups 在落库事务内把账号挂入指定全部分组（account_groups M2M，默认
 // priority=50，不新造表）。任一分组链接写失败即返回错误，由调用方触发回滚。
 func (s *QuotaKeyService) mountAccountToGroups(ctx context.Context, tx *ent.Tx, accountID int64, groupIDs []int64) error {
@@ -2274,6 +2663,8 @@ func quotaKeyToStatus(qk *ent.QuotaKey) *QuotaKeyStatus {
 		RateMultiplier: qk.RateMultiplier,
 		// ModelMapping 深拷贝，避免调用方持有实体内部 map 后被后台 goroutine 修改。
 		ModelMapping: copyStringMap(qk.ModelMapping),
+		// GroupIDs 投影：深拷贝实体切片，nil 保持 nil，使"未指定"与"空分组"可区分。
+		GroupIDs: copyInt64SlicePtr(qk.GroupIds),
 	}
 }
 
@@ -2288,6 +2679,17 @@ func copyStringMap(m map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// copyInt64SlicePtr 深拷贝 []int64，避免调用方改到实体内部切片；nil 切片保持 nil。
+// 用于 quotaKeyToStatus 投影 group_ids：区分"未指定（nil）"与"显式空分组（空切片）"。
+func copyInt64SlicePtr(v []int64) *[]int64 {
+	if v == nil {
+		return nil
+	}
+	out := make([]int64, len(v))
+	copy(out, v)
+	return &out
 }
 
 // maskCodeValue 仅保留末 4 位，其余以掩码替代，绝不回显原文。
@@ -2846,6 +3248,12 @@ func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, li
 		if isDeadKeyRefreshError(k.LastRefreshError) {
 			// 密钥级死码（上游说这个码不存在/无效/已过期）：拉一万次也拉不出号，
 			// 只会每轮给上游送一次无效请求并把心跳写成失败。等人工换码。
+			continue
+		}
+		// 显式解绑全部分组的码不参与自动补池（拉号必然无目标组，纯浪费每日额度）。
+		// 注意与 pull 内的"发上游前拦截 group_ids==[]"互为双保险：此处减少进入 pull 的候选，
+		// 但 reconciler pending wakeup 可绕过本过滤直进 pull，故 pull 内仍有拦截点。
+		if k.GroupIds != nil && len(k.GroupIds) == 0 {
 			continue
 		}
 		// 新增「码级额度耗尽门」（2026-11-10 派发单 c1p1-A；2026-11-10 派发单 c1p1-G 修正）：
