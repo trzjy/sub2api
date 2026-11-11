@@ -681,6 +681,112 @@ type FetchAvailableModelsResponse struct {
 	DeprecatedModelIDs map[string]DeprecatedModelInfo `json:"deprecatedModelIds,omitempty"`
 }
 
+// UserQuotaBucket retrieveUserQuota 返回的单个配额桶。
+// 同一 modelId 可能有多条（按 tokenType 区分「请求数」与「token 数」两个维度）。
+type UserQuotaBucket struct {
+	ModelID           string  `json:"modelId"`
+	TokenType         string  `json:"tokenType,omitempty"`
+	RemainingFraction float64 `json:"remainingFraction"`
+	ResetTime         string  `json:"resetTime,omitempty"`
+}
+
+// RetrieveUserQuotaRequest retrieveUserQuota 请求。
+// project 为空时按空对象发送，与官方 gemini-cli 行为一致。
+type RetrieveUserQuotaRequest struct {
+	Project string `json:"project,omitempty"`
+}
+
+// RetrieveUserQuotaResponse retrieveUserQuota 响应
+type RetrieveUserQuotaResponse struct {
+	Buckets []UserQuotaBucket `json:"buckets"`
+}
+
+// RetrieveUserQuota 查询该账号本人的订阅配额（gemini-cli 查额度用的就是这个接口）。
+//
+// 与 FetchAvailableModels 的区别：后者的 quotaInfo 是模型目录顺带返回的项目池水位，
+// 不跟随个人订阅消耗（实测：单账号 5 小时 86 次调用后 remainingFraction 仍为 1，
+// 面板据此画出的「0%」是假数据）；真正回答「这个账号用了多少」的是本接口的 buckets。
+// URL fallback 与 fetchAvailableModels 保持一致：prod → daily。
+func (c *Client) RetrieveUserQuota(ctx context.Context, accessToken, projectID string, bodyLimit int64) (*RetrieveUserQuotaResponse, map[string]any, error) {
+	return c.retrieveUserQuota(ctx, BaseURLs, accessToken, projectID, bodyLimit)
+}
+
+func (c *Client) retrieveUserQuota(ctx context.Context, availableURLs []string, accessToken, projectID string, bodyLimit int64) (*RetrieveUserQuotaResponse, map[string]any, error) {
+	if c == nil || c.httpClient == nil {
+		return nil, nil, errors.New("antigravity client is not configured")
+	}
+	if bodyLimit <= 0 {
+		return nil, nil, errors.New("retrieveUserQuota body limit must be positive")
+	}
+
+	bodyBytes, err := json.Marshal(RetrieveUserQuotaRequest{Project: projectID})
+	if err != nil {
+		return nil, nil, fmt.Errorf("序列化请求失败: %w", err)
+	}
+
+	fetchClient := c.fetchAvailableModelsHTTPClient()
+	var lastErr error
+	for urlIdx, baseURL := range availableURLs {
+		apiURL := baseURL + "/v1internal:retrieveUserQuota"
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(string(bodyBytes)))
+		if err != nil {
+			lastErr = fmt.Errorf("创建请求失败: %w", err)
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
+
+		resp, err := servertiming.Do(fetchClient, req)
+		if err != nil {
+			lastErr = fmt.Errorf("retrieveUserQuota 请求失败: %w", err)
+			if shouldFallbackToNextURL(err, 0) && urlIdx < len(availableURLs)-1 {
+				log.Printf("[antigravity] retrieveUserQuota URL fallback: %s -> %s", baseURL, availableURLs[urlIdx+1])
+				continue
+			}
+			return nil, nil, lastErr
+		}
+
+		respBodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, nil, fmt.Errorf("读取响应失败: %w", err)
+		}
+		if int64(len(respBodyBytes)) > bodyLimit {
+			return nil, nil, fmt.Errorf("响应超过 %d 字节", bodyLimit)
+		}
+
+		if shouldFallbackToNextURL(nil, resp.StatusCode) && urlIdx < len(availableURLs)-1 {
+			log.Printf("[antigravity] retrieveUserQuota URL fallback (HTTP %d): %s -> %s", resp.StatusCode, baseURL, availableURLs[urlIdx+1])
+			continue
+		}
+
+		if resp.StatusCode == http.StatusForbidden {
+			return nil, nil, &ForbiddenError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBodyBytes),
+			}
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, nil, fmt.Errorf("retrieveUserQuota 失败 (HTTP %d): %s", resp.StatusCode, string(respBodyBytes))
+		}
+
+		var quotaResp RetrieveUserQuotaResponse
+		if err := json.Unmarshal(respBodyBytes, &quotaResp); err != nil {
+			return nil, nil, fmt.Errorf("响应解析失败: %w", err)
+		}
+
+		var rawResp map[string]any
+		_ = json.Unmarshal(respBodyBytes, &rawResp)
+
+		DefaultURLAvailability.MarkSuccess(baseURL)
+		return &quotaResp, rawResp, nil
+	}
+
+	return nil, nil, lastErr
+}
+
 // FetchAvailableModels 获取可用模型和配额信息，返回解析后的结构体和原始 JSON
 // 保留旧调用的 URL fallback：prod → daily。
 func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectID string, bodyLimit int64) (*FetchAvailableModelsResponse, map[string]any, error) {

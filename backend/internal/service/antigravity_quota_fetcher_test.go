@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -347,7 +348,7 @@ func TestBuildUsageInfo_FullUtilization(t *testing.T) {
 
 	quota := info.AntigravityQuota["claude-sonnet-4-20250514"]
 	require.NotNil(t, quota)
-	require.Equal(t, 100, quota.Utilization)
+	require.Equal(t, 100.0, quota.Utilization)
 }
 
 func TestBuildUsageInfo_ZeroUtilization(t *testing.T) {
@@ -366,7 +367,7 @@ func TestBuildUsageInfo_ZeroUtilization(t *testing.T) {
 	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
 	quota := info.AntigravityQuota["claude-sonnet-4-20250514"]
 	require.NotNil(t, quota)
-	require.Equal(t, 0, quota.Utilization)
+	require.Equal(t, 0.0, quota.Utilization)
 }
 
 func TestBuildUsageInfo_AICredits(t *testing.T) {
@@ -554,4 +555,97 @@ func TestExtractValidationURL(t *testing.T) {
 			require.Equal(t, tt.expected, got)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// applyUserQuota（retrieveUserQuota 覆盖模型目录水位）
+// ---------------------------------------------------------------------------
+
+func TestFetchQuota_UsesRetrieveUserQuotaOverCatalogQuota(t *testing.T) {
+	var sawUserQuotaCall bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1internal:fetchAvailableModels"):
+			// 模型目录顺带返回的项目池水位：永远剩 100%（不打满就不掉），不能当用量用。
+			_, _ = w.Write([]byte(`{"models":{"gemini-3.8-flash":{"quotaInfo":{"remainingFraction":1,"resetTime":"2026-01-01T00:00:00Z"}}}}`))
+		case strings.HasSuffix(r.URL.Path, "/v1internal:retrieveUserQuota"):
+			sawUserQuotaCall = true
+			// 同一模型两个维度（请求数 25% 剩余 / token 数 40% 剩余），取最差的那个。
+			_, _ = w.Write([]byte(`{"buckets":[` +
+				`{"modelId":"gemini-3.8-flash","tokenType":"REQUESTS","remainingFraction":0.25,"resetTime":"2026-01-02T00:00:00Z"},` +
+				`{"modelId":"models/gemini-3.8-flash-high","tokenType":"TOKENS","remainingFraction":0.4}` +
+				`]}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer server.Close()
+
+	oldBaseURLs := append([]string(nil), antigravity.BaseURLs...)
+	oldAvailability := antigravity.DefaultURLAvailability
+	t.Cleanup(func() {
+		antigravity.BaseURLs = oldBaseURLs
+		antigravity.DefaultURLAvailability = oldAvailability
+	})
+	antigravity.BaseURLs = []string{server.URL}
+	antigravity.DefaultURLAvailability = antigravity.NewURLAvailability(time.Minute)
+
+	fetcher := NewAntigravityQuotaFetcher(nil, &config.Config{})
+	result, err := fetcher.FetchQuota(context.Background(), &Account{
+		Platform: PlatformAntigravity,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "token",
+			"project_id":   "project",
+		},
+	}, "")
+	require.NoError(t, err)
+	require.True(t, sawUserQuotaCall, "必须调用 retrieveUserQuota")
+	require.NotNil(t, result)
+	require.NotNil(t, result.UsageInfo)
+
+	flash := result.UsageInfo.AntigravityQuota["gemini-3.8-flash"]
+	require.NotNil(t, flash)
+	require.Equal(t, 75.0, flash.Utilization, "0.25 剩余 = 已用 75%，不能被目录的 100% 剩余覆盖成 0")
+	require.Equal(t, "2026-01-02T00:00:00Z", flash.ResetTime)
+
+	// buckets 里新出现的模型（目录里没有）也要补进配额，否则前端拿不到。
+	flashHigh := result.UsageInfo.AntigravityQuota["gemini-3.8-flash-high"]
+	require.NotNil(t, flashHigh)
+	require.Equal(t, 60.0, flashHigh.Utilization)
+}
+
+func TestFetchQuota_UserQuotaFailureKeepsCatalogQuota(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/v1internal:retrieveUserQuota") {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"boom"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":{"gemini-3.8-flash":{"quotaInfo":{"remainingFraction":0.5,"resetTime":"2026-01-01T00:00:00Z"}}}}`))
+	}))
+	defer server.Close()
+
+	oldBaseURLs := append([]string(nil), antigravity.BaseURLs...)
+	oldAvailability := antigravity.DefaultURLAvailability
+	t.Cleanup(func() {
+		antigravity.BaseURLs = oldBaseURLs
+		antigravity.DefaultURLAvailability = oldAvailability
+	})
+	antigravity.BaseURLs = []string{server.URL}
+	antigravity.DefaultURLAvailability = antigravity.NewURLAvailability(time.Minute)
+
+	fetcher := NewAntigravityQuotaFetcher(nil, &config.Config{})
+	result, err := fetcher.FetchQuota(context.Background(), &Account{
+		Platform: PlatformAntigravity,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "token",
+			"project_id":   "project",
+		},
+	}, "")
+	require.NoError(t, err, "配额接口失败不能拖垮整个刷新")
+	require.Equal(t, 50.0, result.UsageInfo.AntigravityQuota["gemini-3.8-flash"].Utilization)
 }

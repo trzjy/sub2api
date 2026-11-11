@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -86,10 +87,58 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 	// 转换为 UsageInfo
 	usageInfo := f.buildUsageInfo(modelsResp, tierRaw, tierNormalized, loadResp)
 
+	// 用真实的个人订阅配额覆盖模型目录附带的项目池水位。
+	// 非关键路径：失败保留原值，不阻断额度刷新。
+	f.applyUserQuota(ctx, client, accessToken, projectID, usageInfo)
+
 	return &QuotaResult{
 		UsageInfo: usageInfo,
 		Raw:       modelsRaw,
 	}, nil
+}
+
+// applyUserQuota 调 retrieveUserQuota 取该账号本人的订阅配额，覆盖 AntigravityQuota 里的使用率。
+//
+// 为什么必须这一步：fetchAvailableModels 的 quotaInfo 是模型目录顺带返回的项目池水位，
+// 三个账号共用同一个 project 时它不跟随单账号消耗变化（实测单账号 5 小时 86 次调用后
+// remainingFraction 仍为 1），面板据此画出的「已用 0%」是假数据。retrieveUserQuota 的
+// buckets 才是按账号、按模型给出的真实剩余比例（与官方 gemini-cli 查额度同源）。
+func (f *AntigravityQuotaFetcher) applyUserQuota(ctx context.Context, client *antigravity.Client, accessToken, projectID string, usageInfo *UsageInfo) {
+	if client == nil || usageInfo == nil || usageInfo.AntigravityQuota == nil {
+		return
+	}
+
+	quotaResp, _, err := client.RetrieveUserQuota(ctx, accessToken, projectID, resolveModelsListReadLimit(f.cfg))
+	if err != nil {
+		// 上游该接口不可用时保持旧行为（项目池水位），只记录不报错。
+		slog.Debug("antigravity retrieveUserQuota failed, keep catalog quota", "error", err)
+		return
+	}
+	if quotaResp == nil || len(quotaResp.Buckets) == 0 {
+		return
+	}
+
+	// 同一 modelId 可能有多条（请求数 / token 数两个维度），聚合时取剩余最少的作为该模型水位。
+	aggregated := antigravity.AggregateUserQuotaBuckets(quotaResp.Buckets)
+	if len(aggregated) == 0 {
+		return
+	}
+
+	modelIDs := make([]string, 0, len(aggregated))
+	for modelID, bucket := range aggregated {
+		entry, ok := usageInfo.AntigravityQuota[modelID]
+		if !ok || entry == nil {
+			entry = &AntigravityModelQuota{}
+			usageInfo.AntigravityQuota[modelID] = entry
+		}
+		entry.Utilization = bucket.UsagePercent()
+		if bucket.ResetTime != "" {
+			entry.ResetTime = bucket.ResetTime
+		}
+		modelIDs = append(modelIDs, modelID)
+	}
+
+	slog.Debug("antigravity user quota applied", "models", modelIDs)
 }
 
 // fetchSubscriptionTier 获取账号订阅等级，失败返回空字符串。
@@ -144,8 +193,9 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 			continue
 		}
 
-		// remainingFraction 是剩余比例 (0.0-1.0)，转换为使用率百分比
-		utilization := int((1.0 - modelInfo.QuotaInfo.RemainingFraction) * 100)
+		// remainingFraction 是剩余比例 (0.0-1.0)，转换为使用率百分比。
+		// 保留两位小数，避免小比例消耗被取整成 0。
+		utilization := math.Round((1.0-modelInfo.QuotaInfo.RemainingFraction)*100*100) / 100
 
 		info.AntigravityQuota[modelName] = &AntigravityModelQuota{
 			Utilization: utilization,

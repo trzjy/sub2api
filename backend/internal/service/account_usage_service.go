@@ -174,8 +174,11 @@ type UsageProgress struct {
 
 // AntigravityModelQuota Antigravity 单个模型的配额信息
 type AntigravityModelQuota struct {
-	Utilization int    `json:"utilization"` // 使用率 0-100
-	ResetTime   string `json:"reset_time"`  // 重置时间 ISO8601
+	// Utilization 使用率 0-100，保留两位小数：上游 remainingFraction 可能只下降到
+	// 0.9995（大配额池里少量请求），取整会变成 0，面板就把「用了但很少」显示成
+	// 「完全没用」。保留小数后前端可显示「<1%」。
+	Utilization float64 `json:"utilization"`
+	ResetTime   string  `json:"reset_time"` // 重置时间 ISO8601
 }
 
 // AntigravityModelDetail Antigravity 单个模型的详细能力信息
