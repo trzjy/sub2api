@@ -3105,3 +3105,18 @@ func (r *stubAccountRepo) BumpTempUnschedulableReasonIfGeneration(_ context.Cont
 func (r *stubAccountRepo) ClearTempUnschedulableIfGeneration(_ context.Context, _ int64, _ time.Time) (bool, error) {
 	return false, nil
 }
+
+// PatchAccountCredentials 是仓储接口新增方法的 no-op 桩。
+func (s *stubAccountRepo) PatchAccountCredentials(context.Context, int64, map[string]any, string) error {
+	return nil
+}
+
+// SetTempUnschedulableIfOwnedOrUnpaused 是仓储接口新增方法的 no-op 桩。
+func (s *stubAccountRepo) SetTempUnschedulableIfOwnedOrUnpaused(context.Context, int64, time.Time, string, string) (bool, error) {
+	return false, nil
+}
+
+// ClearTempUnschedulableIfOwned 是仓储接口新增方法的 no-op 桩。
+func (s *stubAccountRepo) ClearTempUnschedulableIfOwned(context.Context, int64, time.Time, string) (bool, error) {
+	return false, nil
+}
