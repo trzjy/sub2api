@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,14 @@ import (
 
 // qksPtrInt 是测试内构造 *int 的局部辅助（避免与同包其它 _test.go 中的 ptrInt 重名）。
 func qksPtrInt(v int) *int { return &v }
+
+// qksUniqueCode 生成每次运行唯一的激活码，避免共享测试库中 uq_quota_keys_code_mac 唯一索引冲突
+// （固定码在第二次运行时必然冲突，导致假红）。
+func qksUniqueCode(prefix string) string {
+	return fmt.Sprintf("%s-%d-%d", prefix, atomic.AddInt64(&qksSeq, 1), time.Now().UnixNano())
+}
+
+var qksSeq int64
 
 // TestQuotaKeyServiceSettings_CreateWithSettingsRejectsEmptyModelMapping 验证：
 // CreateWithSettings 在 ModelMappingSet=true 且规范化后为空（空映射 / 仅空键空值）时，
@@ -319,7 +328,7 @@ func TestQuotaKeyServiceSettings_GroupIDsGate(t *testing.T) {
 	t.Run("non-positive group id rejected before create", func(t *testing.T) {
 		svc, _ := qkNewTestService(t, &fakeUpstreamClient{})
 		settings := &UpdateQuotaKeySettingsInput{GroupIDs: &[]int64{1, 0}}
-		st, err := svc.CreateWithSettings(context.Background(), "sk-b2a-1", nil, nil, 0, "", settings)
+		st, err := svc.CreateWithSettings(context.Background(), qksUniqueCode("sk-b2a"), nil, nil, 0, "", settings)
 		require.Error(t, err)
 		require.Nil(t, st)
 		require.Equal(t, "QUOTA_KEY_GROUP_IDS_INVALID", infraerrors.Reason(err))
@@ -329,7 +338,7 @@ func TestQuotaKeyServiceSettings_GroupIDsGate(t *testing.T) {
 		svc, client := qkNewTestService(t, &fakeUpstreamClient{})
 		gID := settingsTestCreateGroup(t, client, PlatformAnthropic)
 		settings := &UpdateQuotaKeySettingsInput{GroupIDs: &[]int64{gID, 987650123}}
-		st, err := svc.CreateWithSettings(context.Background(), "sk-b2a-2", nil, nil, 0, "", settings)
+		st, err := svc.CreateWithSettings(context.Background(), qksUniqueCode("sk-b2a"), nil, nil, 0, "", settings)
 		require.Error(t, err)
 		require.Nil(t, st)
 		require.Equal(t, "QUOTA_KEY_GROUP_NOT_FOUND", infraerrors.Reason(err))
@@ -339,7 +348,7 @@ func TestQuotaKeyServiceSettings_GroupIDsGate(t *testing.T) {
 		svc, client := qkNewTestService(t, &fakeUpstreamClient{})
 		gID := settingsTestCreateGroup(t, client, PlatformAnthropic)
 		settings := &UpdateQuotaKeySettingsInput{GroupIDs: &[]int64{gID, gID}} // 含重复，应去重
-		st, err := svc.CreateWithSettings(context.Background(), "sk-b2a-3", nil, nil, 0, "", settings)
+		st, err := svc.CreateWithSettings(context.Background(), qksUniqueCode("sk-b2a"), nil, nil, 0, "", settings)
 		require.NoError(t, err)
 		require.NotNil(t, st)
 	})
