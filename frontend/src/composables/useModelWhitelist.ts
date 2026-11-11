@@ -609,7 +609,9 @@ export function buildModelMappingObject(
   allowedModels: string[],
   modelMappings: ModelMappingEntry[]
 ): Record<string, string> | null {
-  const mapping: Record<string, string> = {}
+  // 无原型对象：避免 __proto__ / constructor 等键触发原型 setter 而不是创建自有属性，
+  // 导致该条目在提交对象里静默消失。
+  const mapping: Record<string, string> = Object.create(null) as Record<string, string>
 
   if (mode === 'whitelist' || mode === 'combined') {
     for (const model of allowedModels) {

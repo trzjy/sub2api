@@ -11,8 +11,10 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/account"
+	dbaccountgroup "github.com/Wei-Shaw/sub2api/ent/accountgroup"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 	"github.com/stretchr/testify/require"
 )
@@ -713,4 +715,218 @@ func TestAdminAccountQuotaKeyBoundUpdateAppliesClearedConcurrencyDefault3(t *tes
 	qkAfter, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
 	require.Nil(t, qkAfter.Concurrency, "quota key concurrency must remain NULL (cleared)")
+}
+
+// ---------------------------------------------------------------------------
+// 派发单 QKG-C3：批量编辑禁止写穿码级受管字段。
+// 单账号路径（R3b）已用覆盖而非 400 的方式守住码级分组权威；批量路径命中受管字段必须整笔
+// 400 拒绝，且守卫在任何仓储写入之前返回（仓储写计数为 0）。
+// ---------------------------------------------------------------------------
+
+// BindGroups 让 quotaCapManagedSettingsRepo 满足 AccountRepository 接口，并把分组绑定真实落库
+// （删除旧绑定 + 建新绑定），使 QKG-C3 单账号用例能断言"落库分组 = 码级权威 group_ids"。
+func (r *quotaCapManagedSettingsRepo) BindGroups(ctx context.Context, accountID int64, groupIDs []int64) error {
+	execClient := r.client
+	if tx := ent.TxFromContext(ctx); tx != nil {
+		execClient = tx.Client()
+	}
+	if _, err := execClient.AccountGroup.Delete().Where(dbaccountgroup.AccountIDEQ(accountID)).Exec(ctx); err != nil {
+		return err
+	}
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	builders := make([]*ent.AccountGroupCreate, 0, len(groupIDs))
+	for i, gid := range groupIDs {
+		builders = append(builders, execClient.AccountGroup.Create().
+			SetAccountID(accountID).
+			SetGroupID(gid).
+			SetPriority(i+1))
+	}
+	if _, err := execClient.AccountGroup.CreateBulk(builders...).Save(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// quotaKeyTestGroupRepo 是 GroupRepository 的最小测试实现：仅 ExistsByIDs 返回全部存在
+// （让"请求带 group_ids=[g9]"通过分组存在性校验），其余方法返回零值。
+type quotaKeyTestGroupRepo struct{}
+
+func (r *quotaKeyTestGroupRepo) Create(context.Context, *Group) error { return nil }
+func (r *quotaKeyTestGroupRepo) GetByID(context.Context, int64) (*Group, error) {
+	return &Group{}, nil
+}
+func (r *quotaKeyTestGroupRepo) GetByIDLite(context.Context, int64) (*Group, error) {
+	return &Group{}, nil
+}
+func (r *quotaKeyTestGroupRepo) Update(context.Context, *Group) error { return nil }
+func (r *quotaKeyTestGroupRepo) Delete(context.Context, int64) error  { return nil }
+func (r *quotaKeyTestGroupRepo) DeleteCascade(context.Context, int64) ([]int64, error) {
+	return nil, nil
+}
+func (r *quotaKeyTestGroupRepo) List(context.Context, pagination.PaginationParams) ([]Group, *pagination.PaginationResult, error) {
+	return nil, &pagination.PaginationResult{}, nil
+}
+func (r *quotaKeyTestGroupRepo) ListWithFilters(context.Context, pagination.PaginationParams, string, string, string, *bool) ([]Group, *pagination.PaginationResult, error) {
+	return nil, &pagination.PaginationResult{}, nil
+}
+func (r *quotaKeyTestGroupRepo) ListActive(context.Context) ([]Group, error) { return nil, nil }
+func (r *quotaKeyTestGroupRepo) ListActiveByPlatform(context.Context, string) ([]Group, error) {
+	return nil, nil
+}
+func (r *quotaKeyTestGroupRepo) ExistsByName(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (r *quotaKeyTestGroupRepo) GetAccountCount(context.Context, int64) (int64, int64, error) {
+	return 0, 0, nil
+}
+func (r *quotaKeyTestGroupRepo) DeleteAccountGroupsByGroupID(context.Context, int64) (int64, error) {
+	return 0, nil
+}
+func (r *quotaKeyTestGroupRepo) GetAccountIDsByGroupIDs(context.Context, []int64) ([]int64, error) {
+	return nil, nil
+}
+func (r *quotaKeyTestGroupRepo) BindAccountsToGroup(context.Context, int64, []int64) error {
+	return nil
+}
+func (r *quotaKeyTestGroupRepo) UpdateSortOrders(context.Context, []GroupSortOrderUpdate) error {
+	return nil
+}
+func (r *quotaKeyTestGroupRepo) ExistsByIDs(_ context.Context, ids []int64) (map[int64]bool, error) {
+	m := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		m[id] = true
+	}
+	return m, nil
+}
+
+// TestBulkUpdateAccounts_QuotaKeyBoundCursorManagedFieldRejected 锁定派发单 QKG-C3：
+// 批量目标含 Cursor 绑定码账号且请求命中码级受管字段（concurrency）时，必须整笔 400 拒绝，
+// 且守卫在任何仓储写入之前返回（BulkUpdate 调用计数 0）。
+func TestBulkUpdateAccounts_QuotaKeyBoundCursorManagedFieldRejected(t *testing.T) {
+	repo := &accountRepoStubForBulkUpdate{}
+	svc := &adminServiceImpl{accountRepo: repo}
+
+	qkID := int64(42)
+	repo.getByIDsAccounts = []*Account{
+		{ID: 1, Platform: PlatformCursor, QuotaKeyID: &qkID},
+	}
+	conc := 5
+	input := &BulkUpdateAccountsInput{
+		AccountIDs:  []int64{1},
+		Concurrency: &conc,
+	}
+
+	_, err := svc.BulkUpdateAccounts(context.Background(), input)
+	require.Error(t, err, "bulk edit of a quota-key-bound cursor account managed field must be rejected")
+	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+	require.Equal(t, "CURSOR_QUOTA_KEY_MANAGED_BULK_EDIT_FORBIDDEN", infraerrors.Reason(err))
+	require.Equal(t, 0, repo.bulkUpdateCalls, "guard must reject before any repository write")
+	require.Equal(t, 0, len(repo.bindGroupsCalls), "no group binding may occur on rejection")
+}
+
+// TestBulkUpdateAccounts_QuotaKeyBoundCursorNonManagedAllowed 锁定派发单 QKG-C3 反向用例：
+// 同一 Cursor 绑定码账号，仅改非受管字段（Status / Schedulable / ProxyID）时批量必须成功，
+// 守卫不得误伤。
+func TestBulkUpdateAccounts_QuotaKeyBoundCursorNonManagedAllowed(t *testing.T) {
+	repo := &accountRepoStubForBulkUpdate{}
+	svc := &adminServiceImpl{accountRepo: repo}
+
+	qkID := int64(42)
+	repo.getByIDsAccounts = []*Account{
+		{ID: 1, Platform: PlatformCursor, QuotaKeyID: &qkID},
+	}
+	status := StatusActive
+	schedulable := true
+	proxyID := int64(7)
+	input := &BulkUpdateAccountsInput{
+		AccountIDs:  []int64{1},
+		Status:      status,
+		Schedulable: &schedulable,
+		ProxyID:     &proxyID,
+	}
+
+	result, err := svc.BulkUpdateAccounts(context.Background(), input)
+	require.NoError(t, err, "bulk edit of non-managed fields on a quota-key-bound cursor account must succeed")
+	require.Equal(t, 1, repo.bulkUpdateCalls, "non-managed bulk edit must reach the repository write")
+	require.Equal(t, 1, result.Success)
+}
+
+// TestBulkUpdateAccounts_NonCursorConcurrencyAllowed 锁定派发单 QKG-C3 不误伤：
+// 目标全是非 Cursor 账号（如 openai）且请求 concurrency 时批量必须成功，守卫不得误伤。
+func TestBulkUpdateAccounts_NonCursorConcurrencyAllowed(t *testing.T) {
+	repo := &accountRepoStubForBulkUpdate{}
+	svc := &adminServiceImpl{accountRepo: repo}
+
+	repo.getByIDsAccounts = []*Account{
+		{ID: 1, Platform: "openai", QuotaKeyID: nil},
+		{ID: 2, Platform: "openai", QuotaKeyID: nil},
+	}
+	conc := 5
+	input := &BulkUpdateAccountsInput{
+		AccountIDs:  []int64{1, 2},
+		Concurrency: &conc,
+	}
+
+	result, err := svc.BulkUpdateAccounts(context.Background(), input)
+	require.NoError(t, err, "bulk concurrency edit on non-cursor accounts must succeed (no false positive)")
+	require.Equal(t, 1, repo.bulkUpdateCalls)
+	require.Equal(t, 2, result.Success)
+}
+
+// TestAdminAccountQuotaKeyBoundUpdateOverridesRequestGroupIDs 锁定派发单 QKG-C3 单账号路径
+// （外审 R3b）：绑定激活码的 Cursor 账号编辑时，即便请求带 group_ids=[g9]，落库分组必须等于
+// 激活码级权威 group_ids，不得出现 g9——码级分组权威以"覆盖"而非 400 方式守住，避免误伤普通账号编辑。
+func TestAdminAccountQuotaKeyBoundUpdateOverridesRequestGroupIDs(t *testing.T) {
+	ctx := context.Background()
+	client := quotaKeyTestEntClient(t)
+
+	// 创建请求里的 g9 分组（使"分组存在性"校验放行）与激活码级权威分组。
+	g9, err := client.Group.Create().
+		SetName("qkg-c3-g9").
+		SetModelAllowlist(domain.GroupModelAllowlist{}).
+		Save(ctx)
+	require.NoError(t, err)
+	authGrp, err := client.Group.Create().
+		SetName("qkg-c3-auth").
+		SetModelAllowlist(domain.GroupModelAllowlist{}).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 激活码带码级分组（权威值）。
+	qk := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 4, 6, 80, 0.5, time.Time{}, nil)
+	_, err = client.QuotaKey.UpdateOneID(qk.ID).SetGroupIds([]int64{authGrp.ID}).Save(ctx)
+	require.NoError(t, err)
+
+	// 账号绑定该激活码（真实 DB 行 + 内存镜像）。
+	existing := mustCreateAccountForRebind(t, client, qk.ID)
+
+	repo := &quotaCapManagedSettingsRepo{client: client}
+	repo.upstreamBillingProbeAccountRepo.accounts = map[int64]*Account{
+		existing.ID: {
+			ID:         existing.ID,
+			Name:       existing.Name,
+			Platform:   domain.PlatformCursor,
+			Type:       AccountTypeAPIKey,
+			Status:     StatusActive,
+			QuotaKeyID: &qk.ID,
+		},
+	}
+	svc := &adminServiceImpl{accountRepo: repo, entClient: client, groupRepo: &quotaKeyTestGroupRepo{}}
+
+	// 请求带 group_ids=[g9]，企图改写绑定。
+	reqG9 := []int64{g9.ID}
+	_, err = svc.UpdateAccount(ctx, existing.ID, &UpdateAccountInput{GroupIDs: &reqG9})
+	require.NoError(t, err, "editing a bound cursor account with group_ids must succeed (override, not 400)")
+
+	// 落库分组必须等于码级 group_ids（authGrp.ID），且不得出现 g9。
+	bound, err := client.AccountGroup.Query().Where(dbaccountgroup.AccountIDEQ(existing.ID)).All(ctx)
+	require.NoError(t, err)
+	got := make([]int64, 0, len(bound))
+	for _, ag := range bound {
+		got = append(got, ag.GroupID)
+	}
+	require.ElementsMatch(t, []int64{authGrp.ID}, got, "persisted groups must equal the quota-key authoritative group_ids")
+	require.NotContains(t, got, g9.ID, "request group g9 must be overridden by the quota-key group_ids")
 }

@@ -1524,6 +1524,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 				return qkErr
 			}
 			applyQuotaKeyManagedAccountSettings(account, qk, false)
+			// 码级分组是权威值：账号编辑不得改写绑定。用码级 group_ids 覆盖请求值，
+			// 使随后的 BindGroups 写成权威值（与 applyQuotaKeyManagedAccountSettings 同源）。
+			if qk.GroupIds != nil {
+				override := append([]int64(nil), qk.GroupIds...)
+				input.GroupIDs = &override
+			}
 			return persistAccountWrite(dbent.NewTxContext(ctx, tx))
 		}); err != nil {
 			return nil, err
@@ -1763,11 +1769,17 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		return nil, err
 	}
 
+	// 码级受管字段：Cursor 绑定码账号的这些值由激活码权威同步，单账号路径已拦截，
+	// 批量路径此前缺失同款守卫。
+	managedBulk := input.Concurrency != nil || input.LoadFactor != nil || input.Priority != nil ||
+		input.RateMultiplier != nil || input.GroupIDs != nil ||
+		func() bool { _, ok := input.Credentials["model_mapping"]; return ok }()
+
 	needMixedChannelCheck := input.GroupIDs != nil && !input.SkipMixedChannelCheck
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
+	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || managedBulk {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1778,6 +1790,19 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	for _, account := range cachedTargets {
 		if account != nil {
 			targetsByID[account.ID] = account
+		}
+	}
+	// 受码管辖字段守卫（批量路径）：Cursor 绑定激活码的账号，其 concurrency / load_factor /
+	// priority / rate_multiplier / group_ids / model_mapping 由激活码权威同步，批量编辑
+	// 不得写穿。命中即整笔拒绝，不部分放行。放在任何写操作之前。
+	if managedBulk {
+		for _, acc := range cachedTargets {
+			if acc != nil && acc.Platform == PlatformCursor && acc.QuotaKeyID != nil {
+				return nil, infraerrors.Newf(http.StatusBadRequest,
+					"CURSOR_QUOTA_KEY_MANAGED_BULK_EDIT_FORBIDDEN",
+					"account %d is bound to quota key %d; its concurrency/load_factor/priority/rate_multiplier/group_ids/model_mapping are managed by the quota key — edit the quota key instead",
+					acc.ID, *acc.QuotaKeyID)
+			}
 		}
 	}
 	if openAISettings.any() {

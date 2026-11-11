@@ -238,6 +238,24 @@ describe('useModelWhitelist', () => {
     })
   })
 
+  it('buildModelMappingObject 用无原型对象，__proto__ 键在 whitelist 模式可正常保留', () => {
+    const result = buildModelMappingObject('whitelist', ['__proto__'], [])
+
+    expect(result).not.toBeNull()
+    expect(Object.getPrototypeOf(result)).toBeNull()
+    expect(Object.keys(result as Record<string, string>)).toContain('__proto__')
+    expect((result as Record<string, string>)['__proto__']).toBe('__proto__')
+  })
+
+  it('buildModelMappingObject 用无原型对象，__proto__ 键在 mapping 模式可正常保留', () => {
+    const result = buildModelMappingObject('mapping', [], [{ from: '__proto__', to: 'x' }])
+
+    expect(result).not.toBeNull()
+    expect(Object.getPrototypeOf(result)).toBeNull()
+    expect(Object.keys(result as Record<string, string>)).toContain('__proto__')
+    expect((result as Record<string, string>)['__proto__']).toBe('x')
+  })
+
   it('splitModelMappingObject 会把身份映射还原成白名单，其余保留为映射', () => {
     const parsed = splitModelMappingObject({
       'gpt-5.4': 'gpt-5.4',
