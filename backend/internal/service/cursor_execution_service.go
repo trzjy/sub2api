@@ -2964,6 +2964,10 @@ func (w *cursorProtocolWriter) finalize() error {
 	var events []string
 	switch w.mode {
 	case cursorProtocolAnthropic:
+		// DSML 观测：本次流里上游的 DSML 工具调用还原/丢弃情况（统一出口，见 dsml_restore_observability.go）。
+		if restored, dropped := w.anthState.DSMLStats(); restored > 0 || dropped > 0 {
+			logDSMLRestore(context.Background(), w.model, restored, dropped)
+		}
 		for _, event := range apicompat.FinalizeChatCompletionsAnthropicStream(w.anthState) {
 			sse, err := apicompat.ResponsesAnthropicEventToSSE(event)
 			if err != nil {
@@ -2972,6 +2976,9 @@ func (w *cursorProtocolWriter) finalize() error {
 			events = append(events, sse)
 		}
 	case cursorProtocolResponses:
+		if restored, dropped := w.respState.DSMLStats(); restored > 0 || dropped > 0 {
+			logDSMLRestore(context.Background(), w.model, restored, dropped)
+		}
 		respEvents := apicompat.FinalizeChatCompletionsResponsesStream(w.respState)
 		w.noteResponsesEventsItemIDs(respEvents)
 		for _, event := range respEvents {

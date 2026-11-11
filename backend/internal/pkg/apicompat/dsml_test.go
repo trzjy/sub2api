@@ -284,11 +284,16 @@ func TestDSMLStreamBuffer_PassesThroughPlainText(t *testing.T) {
 	}
 }
 
-// TestDSMLStreamBuffer_FragmentDiscardedOnFlush 确认流尾残片被丢弃、不外泄。
+// TestDSMLStreamBuffer_FragmentDiscardedOnFlush 确认流尾残片被丢弃、不外泄，
+// 且丢弃要计数（供观测埋点用）。
 func TestDSMLStreamBuffer_FragmentDiscardedOnFlush(t *testing.T) {
 	var b DSMLStreamBuffer
 	b.Feed("<｜DSML｜tool_calls><｜DSML｜invoke name=\"X\">")
-	if calls := b.Flush(); calls != nil {
+	calls, dropped := b.Flush()
+	if calls != nil {
 		t.Fatalf("残片应被丢弃，实际 %d 个", len(calls))
+	}
+	if dropped != 1 {
+		t.Fatalf("残片应计丢弃 1，实际 %d", dropped)
 	}
 }

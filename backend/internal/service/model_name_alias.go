@@ -84,8 +84,14 @@ func NormalizeModelName(name string) string {
 // 对外展示名（用户裁定 2026-11-05）：族内旧写法对下游一律呈现为这里配置的
 // 官方现行调用名。键是站内统一写法（NormalizeModelName 的结果），值是对外名。
 // 只影响「下游看得见的列表与回显」，不影响准入判定、账号映射键与出站名。
+//
+// 2026-11-12 用户裁定补充：官方现行调用名只有 `deepseek-flash` 与 `deepseek-v4-pro`
+// 两个（api-docs.deepseek.com/quick_start/pricing 核对：DeepSeek-V4.1-Flash-1017 与
+// DeepSeek-V4-Pro-0813 是**版本号**，不是模型名）。故 pro 族也配对外名，
+// 下游不再看到 `deepseek-v4-pro-0813` 这类带版本后缀的写法。
 var publicModelNames = map[string]string{
 	"deepseek-v4.1-flash": "deepseek-flash",
+	"deepseek-v4-pro":     "deepseek-v4-pro",
 }
 
 // PublicModelName 返回对下游展示用的模型名。

@@ -96,8 +96,15 @@ func finalizeWebStream(c *gin.Context, st *webClientStreamState) error {
 		}
 		return nil
 	case webResponseModeResponses:
+		// DSML 观测：本次流里上游的 DSML 工具调用还原/丢弃情况（统一出口，见 dsml_restore_observability.go）。
+		if restored, dropped := st.respState.DSMLStats(); restored > 0 || dropped > 0 {
+			logDSMLRestore(c.Request.Context(), st.model, restored, dropped)
+		}
 		return writeResponsesEvents(c, apicompat.FinalizeChatCompletionsResponsesStream(st.respState))
 	case webResponseModeAnthropic:
+		if restored, dropped := st.anthState.DSMLStats(); restored > 0 || dropped > 0 {
+			logDSMLRestore(c.Request.Context(), st.model, restored, dropped)
+		}
 		return writeAnthropicEvents(c, apicompat.FinalizeChatCompletionsAnthropicStream(st.anthState))
 	}
 	return nil

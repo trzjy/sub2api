@@ -696,6 +696,10 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 
 	// Finalize: close open blocks + emit message_delta/message_stop.
 	finalEvents := apicompat.FinalizeChatCompletionsAnthropicStream(anthropicState)
+	// DSML 观测：本次流里上游的 DSML 工具调用还原/丢弃情况（统一出口，见 dsml_restore_observability.go）。
+	if restored, dropped := anthropicState.DSMLStats(); restored > 0 || dropped > 0 {
+		logDSMLRestore(c.Request.Context(), originalModel, restored, dropped)
+	}
 	// 写侧：Finalize 会补宣布「上游 tool name 迟到/缺失」的 tool_use，这些 id 不
 	// 经过 emitChunk，必须在此补采后才能落缓存。
 	turnCollector.observe(finalEvents)

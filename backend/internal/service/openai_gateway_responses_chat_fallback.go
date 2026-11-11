@@ -388,6 +388,10 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	}
 
 	finalEvents := apicompat.FinalizeChatCompletionsResponsesStream(state)
+	// DSML 观测：本次流里上游的 DSML 工具调用还原/丢弃情况（统一出口，见 dsml_restore_observability.go）。
+	if restored, dropped := state.DSMLStats(); restored > 0 || dropped > 0 {
+		logDSMLRestore(c.Request.Context(), originalModel, restored, dropped)
+	}
 	s.cacheReasoningItemsFromEvents(finalEvents)
 	writeEvents(finalEvents)
 	if !clientDisconnected {

@@ -686,6 +686,12 @@ type ChatCompletionsToAnthropicStreamState struct {
 	// dsmlToolIndex 是还原出来的 DSML 工具调用的序号（tool_use index 分配用）。
 	dsmlToolIndex int
 
+	// dsmlRestored / dsmlDropped 统计本次流里 DSML 的还原与丢弃次数。
+	// 由调用方（service 层）统一出口落日志 —— 转换层是纯函数、不打日志，
+	// 也不在每个调用点各记一遍（那会散成 N 份口径）。
+	dsmlRestored int
+	dsmlDropped  int
+
 	FinishReason string
 
 	InputTokens              int
@@ -791,11 +797,20 @@ func (s *ChatCompletionsToAnthropicStreamState) dsmlToolCallEvents(calls []DSMLT
 	for _, call := range calls {
 		idx := s.dsmlToolIndex
 		s.dsmlToolIndex++
+		s.dsmlRestored++
 		toolCall := DSMLToolCallToChatToolCall(call, idx)
 		events = append(events, closeCCAnthropicBlockIfOpen(s, "thinking")...)
 		events = append(events, handleCCAnthropicToolCall(s, &toolCall)...)
 	}
 	return events
+}
+
+// DSMLStats 返回本次流里 DSML 的还原与丢弃计数（供调用方落日志）。
+func (s *ChatCompletionsToAnthropicStreamState) DSMLStats() (restored, dropped int) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.dsmlRestored, s.dsmlDropped
 }
 
 // handleCCAnthropicTextDelta processes a Chat Completions text delta: it first
@@ -853,7 +868,8 @@ func FinalizeChatCompletionsAnthropicStream(state *ChatCompletionsToAnthropicStr
 	var events []AnthropicStreamEvent
 
 	// 收口 DSML 缓冲：完整调用还原成 tool_use；残片直接丢弃（不外泄协议标签）。
-	if calls := state.dsmlBuffer.Flush(); len(calls) > 0 {
+	if calls, dropped := state.dsmlBuffer.Flush(); len(calls) > 0 || dropped > 0 {
+		state.dsmlDropped += dropped
 		events = append(events, state.dsmlToolCallEvents(calls)...)
 	}
 

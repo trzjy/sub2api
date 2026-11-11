@@ -382,22 +382,33 @@ func dsmlTrailingMarkerPrefix(text string) int {
 }
 
 // Flush 流结束时收口：吐出剩余缓冲并返回攒下的 DSML 调用。
-func (b *DSMLStreamBuffer) Flush() []DSMLToolCall {
+//
+// 返回 (calls, dropped)：dropped 是被丢弃的残片数（标签不闭合、无法还原成调用）。
+// 残片直接丢弃、不外泄协议标签 —— 这是解析器的失败分支，不是兜底。
+func (b *DSMLStreamBuffer) Flush() ([]DSMLToolCall, int) {
 	if b.flushed {
-		return nil
+		return nil, 0
 	}
 	b.flushed = true
+	dropped := 0
 	if b.pending != "" {
 		// 残片：直接丢弃，不外泄。
 		b.pending = ""
+		dropped++
 	}
 	if !b.inDSML {
-		return nil
+		return nil, dropped
 	}
 	text := b.buf.String()
 	b.buf.Reset()
 	b.inDSML = false
-	return ParseDSMLToolCalls(text)
+	calls := ParseDSMLToolCalls(text)
+	if len(calls) == 0 {
+		// 收了 DSML 块却还原不出调用 → 整块丢弃。
+		dropped++
+		return nil, dropped
+	}
+	return calls, dropped
 }
 
 // Calls 返回当前缓冲中已凑齐的 DSML 调用（若有）。

@@ -65,6 +65,11 @@ func filterRetiredModelNames(models []string) []string {
 // 先剔除已下线的名字，再把族内旧写法统一换成对外展示名（PublicModelName），
 // 最后按小写去重保持原顺序。列表是下游唯一能看见模型名的入口，所以新老更迭
 // 只在这里收口：老写法继续可调，但新用户从列表里只会拿到官方现行调用名。
+//
+// **唯一事实源**：分组「实供候选」侧（admin_group_model_candidates.go 的
+// collectGroupModelAllowlistCandidates）也必须走本函数，不得自建第二套归一逻辑
+// ——否则会出现"已保存规则显示 deepseek-flash、实供候选却显示
+// deepseek-v4.1-flash-1017"的口径分裂。
 func presentModelNamesForListing(models []string) []string {
 	if len(models) == 0 {
 		return models

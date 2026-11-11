@@ -190,18 +190,24 @@ func (s *adminServiceImpl) collectGroupModelAllowlistCandidates(ctx context.Cont
 			len(applicable), failedAccounts)
 	}
 
-	seen := make(map[string]struct{})
-	out := make([]string, 0)
+	// 收集原始候选名（上游目录 ID / 账号显式映射键）。
+	//
+	// 归一（对外统一模型名）统一在收尾处做，且走 presentModelNamesForListing
+	// 这一个函数——它同时做"剔除已下线名 + 换对外名 + 小写去重"，
+	// 与已保存规则侧（group_model_allowlist.go）同一实现，杜绝两端口径分裂。
+	//
+	// 归一只发生在"产出候选名"这一步：
+	//   - 上面的供给校验（accountServesPublicModel）与出站模型名一律用原始
+	//     目录 ID / 映射键，绝不改动 —— 削版本后缀会调不通上游；
+	//   - 下游因此只看到官方现行调用名（deepseek-flash / deepseek-v4-pro），
+	//     看不到上游目录里的版本后缀写法（-1017 / -0813）。
+	rawNames := make([]string, 0)
 	add := func(name string) {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return
 		}
-		if _, ok := seen[name]; ok {
-			return
-		}
-		seen[name] = struct{}{}
-		out = append(out, name)
+		rawNames = append(rawNames, name)
 	}
 
 	if platform == PlatformComposite {
@@ -248,6 +254,8 @@ func (s *adminServiceImpl) collectGroupModelAllowlistCandidates(ctx context.Cont
 		}
 	}
 
+	// 归一 + 去重 + 排序（与已保存规则侧同一实现，见 presentModelNamesForListing）。
+	out := presentModelNamesForListing(rawNames)
 	sort.Strings(out)
 	return out, nil
 }

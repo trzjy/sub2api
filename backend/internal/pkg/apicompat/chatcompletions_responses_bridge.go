@@ -1599,12 +1599,21 @@ func (s *ChatCompletionsToResponsesStreamState) dsmlResponsesToolCallEvents(call
 	for _, call := range calls {
 		idx := s.dsmlToolIndex
 		s.dsmlToolIndex++
+		s.dsmlRestored++
 		toolCall := DSMLToolCallToChatToolCall(call, idx)
 		// 工具调用先关闭 reasoning 项。
 		events = append(events, closeChatReasoningItem(s)...)
 		events = append(events, s.announceDSMLToolItem(&toolCall)...)
 	}
 	return events
+}
+
+// DSMLStats 返回本次流里 DSML 的还原与丢弃计数（供调用方落日志）。
+func (s *ChatCompletionsToResponsesStreamState) DSMLStats() (restored, dropped int) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.dsmlRestored, s.dsmlDropped
 }
 
 // announceDSMLToolItem 声明一个 DSML 还原出来的工具调用项并一次性下发其参数。
@@ -1885,6 +1894,12 @@ type ChatCompletionsToResponsesStreamState struct {
 	// dsmlToolIndex 是还原出来的 DSML 工具调用序号（tool_call index 分配用）。
 	dsmlToolIndex int
 
+	// dsmlRestored / dsmlDropped 统计本次流里 DSML 的还原与丢弃次数。
+	// 由调用方（service 层）统一出口落日志 —— 转换层是纯函数、不打日志，
+	// 也不在每个调用点各记一遍（那会散成 N 份口径）。
+	dsmlRestored int
+	dsmlDropped  int
+
 	// toolIsToolSearch 记录工具调用是否判定为 tool_search 代理调用。
 	toolIsToolSearch map[int]bool
 
@@ -2083,7 +2098,8 @@ func FinalizeChatCompletionsResponsesStream(state *ChatCompletionsToResponsesStr
 	events = append(events, ensureChatToResponsesCreated(state)...)
 
 	// 收口 DSML 缓冲：完整调用还原成 function_call；残片丢弃（不外泄协议标签）。
-	if calls := state.dsmlBuffer.Flush(); len(calls) > 0 {
+	if calls, dropped := state.dsmlBuffer.Flush(); len(calls) > 0 || dropped > 0 {
+		state.dsmlDropped += dropped
 		events = append(events, state.dsmlResponsesToolCallEvents(calls)...)
 	}
 

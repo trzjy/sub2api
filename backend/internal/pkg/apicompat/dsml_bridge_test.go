@@ -6,6 +6,49 @@ import (
 	"testing"
 )
 
+// TestChatCompletionsChunkToAnthropicEvents_DSMLStatsCounted 锁死 DSML 观测计数：
+// 还原成功要计数，供 service 层统一出口落日志（dsml_restore_observability.go）。
+func TestChatCompletionsChunkToAnthropicEvents_DSMLStatsCounted(t *testing.T) {
+	state := NewChatCompletionsToAnthropicStreamState("deepseek-v4.1-flash")
+
+	dsml := "<｜DSML｜tool_calls><｜DSML｜invoke name=\"Bash\">" +
+		"<｜DSML｜parameter name=\"command\" string=\"true\">ls</｜DSML｜parameter>" +
+		"</｜DSML｜invoke></｜DSML｜tool_calls>"
+	chunk := &ChatCompletionsChunk{
+		Choices: []ChatChunkChoice{{Delta: ChatDelta{ReasoningContent: &dsml}}},
+	}
+	ChatCompletionsChunkToAnthropicEvents(chunk, state)
+
+	restored, dropped := state.DSMLStats()
+	if restored != 1 {
+		t.Fatalf("还原成功的调用应计数 1，实际 %d", restored)
+	}
+	if dropped != 0 {
+		t.Fatalf("没有残片时不应计丢弃，实际 %d", dropped)
+	}
+}
+
+// TestChatCompletionsChunkToAnthropicEvents_DSMLFragmentCountedAsDropped 锁死：
+// 还原不出的残片要计丢弃（不外泄、也不静默）。
+func TestChatCompletionsChunkToAnthropicEvents_DSMLFragmentCountedAsDropped(t *testing.T) {
+	state := NewChatCompletionsToAnthropicStreamState("deepseek-v4.1-flash")
+
+	fragment := "<｜DSML｜tool_calls><｜DSML｜invoke name=\"X\">"
+	chunk := &ChatCompletionsChunk{
+		Choices: []ChatChunkChoice{{Delta: ChatDelta{ReasoningContent: &fragment}}},
+	}
+	ChatCompletionsChunkToAnthropicEvents(chunk, state)
+	FinalizeChatCompletionsAnthropicStream(state)
+
+	restored, dropped := state.DSMLStats()
+	if restored != 0 {
+		t.Fatalf("残片不应计入还原，实际 %d", restored)
+	}
+	if dropped != 1 {
+		t.Fatalf("还原不出的残片应计丢弃 1，实际 %d", dropped)
+	}
+}
+
 // TestChatCompletionsChunkToAnthropicEvents_DSMLInReasoning 是本次修复的核心端到端用例：
 // 上游把 DSML 工具调用放在 reasoning_content 里（线上真实形态），
 // 转换后必须产出标准 tool_use 事件，且 thinking 里不得残留任何 DSML 标签。
