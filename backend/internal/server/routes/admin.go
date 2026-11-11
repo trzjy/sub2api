@@ -47,6 +47,9 @@ func RegisterAdminRoutes(
 		// 账号管理
 		registerAccountRoutes(admin, h, stepUpAuth)
 
+		// 伪装配置的模板目录（独立静态前缀，gin 路由树不允许与 :id 同级）
+		registerIdentityDisguiseRoutes(admin, h)
+
 		// Cockpit 备份导入 preview/commit（B1c，方案 §1.4-1.8）：复用 admin 边界 + 审计；
 		// Heavy 限流属 preview 专属资源边界（方案 §1.5/验收表），commit 走既有 admin 基础限流。
 		// 不新造权限/限流/指标机制；nil 守卫仅防御未注入情形。
@@ -609,6 +612,17 @@ func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	}
 }
 
+// registerIdentityDisguiseRoutes 注册伪装配置（identity disguise）的模板目录接口。
+//
+// 独立静态前缀（不进 /accounts 组）：gin v1.9 的路由树不允许静态段与 :id 参数
+// 同级（注册即 panic），而账号级读写接口在 /accounts/:id/identity-disguise。
+func registerIdentityDisguiseRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	identityDisguise := admin.Group("/identity-disguise")
+	{
+		identityDisguise.GET("/profiles", h.Admin.Account.GetIdentityDisguiseProfiles)
+	}
+}
+
 func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
 	accounts := admin.Group("/accounts")
 	{
@@ -634,6 +648,11 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.PUT("/:id", h.Admin.Account.Update)
 		accounts.GET("/:id/grok-media-eligibility", h.Admin.Account.GetGrokMediaEligibility)
 		accounts.PUT("/:id/grok-media-eligibility", h.Admin.Account.UpdateGrokMediaEligibility)
+		// 伪装配置（identity disguise）：账号级读写挂在 accounts 组下。
+		// 注：模板目录接口不在此处 —— gin v1.9 的路由树不允许静态段与 :id 参数
+		// 同级（会 panic），故挂在 admin 根的独立前缀下（见下方 identityDisguise 组）。
+		accounts.GET("/:id/identity-disguise", h.Admin.Account.GetAccountIdentityDisguise)
+		accounts.PUT("/:id/identity-disguise", h.Admin.Account.UpdateAccountIdentityDisguise)
 		accounts.PUT("/:id/upstream-billing-probe", h.Admin.Account.SetUpstreamBillingProbeEnabled)
 		accounts.POST("/:id/upstream-billing-probe", h.Admin.Account.ProbeUpstreamBilling)
 		accounts.POST("/:id/request-size-scope", h.Admin.Account.SetRequestSizeScope)

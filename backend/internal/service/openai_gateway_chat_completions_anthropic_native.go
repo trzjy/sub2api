@@ -291,6 +291,12 @@ func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if respBytes, err := json.Marshal(ccResp); err == nil {
 		respBytes = reverseToolNamesIfPresent(c, respBytes)
+		// 伪装 L3 思考剥离：上游 Anthropic 的 thinking 块经 apicompat 转换后
+		// 落在 CC 的 reasoning_content 字段 —— 复用既有剥离实现，不另写一份。
+		// 模型名无需在此处理：ResponsesToChatCompletions 已用 originalModel 覆盖。
+		if _, _, stripReasoning := AccountIdentityDisguiseEffective(account); stripReasoning {
+			respBytes = StripAnthropicThinkingFromCCBody(account, respBytes)
+		}
 		c.Data(http.StatusOK, "application/json; charset=utf-8", respBytes)
 	} else {
 		c.JSON(http.StatusOK, ccResp)
@@ -351,6 +357,12 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 	anthState.Model = originalModel
 	ccState := apicompat.NewResponsesEventToChatState()
 	ccState.Model = originalModel
+
+	// 伪装 L3 思考剥离（流式）：开关在循环外取一次（每帧都会走到）。
+	_, _, stripReasoning := AccountIdentityDisguiseEffective(account)
+	// sawThinkingBlock：是否已见过 thinking 块的 content_block_start ——
+	// 见过则其后配对的 content_block_stop 也要一并丢弃。
+	sawThinkingBlock := false
 	// 出口 usage 帧不按客户端 stream_options.include_usage 播种（与 Anthropic 平台
 	// CC 出口 ForwardAsChatCompletions 同口径）：本路径转换链与该出口完全一致，
 	// 末帧 usage 只由「上游是否给出权威 usage」决定。客户端显式请求而上游从未给
@@ -457,6 +469,21 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 		// 客户端已断开：跳过转换与写出，继续读上游直到流结束（usage 完整、
 		// 连接及时归还），不再提前 return。
 		if clientDisconnected {
+			return false
+		}
+
+		// 伪装 L3 思考剥离：在**事件进入转换之前**丢掉 thinking 相关事件 ——
+		// 上游 Anthropic 的 thinking 块经 AnthropicEventToResponsesEvents 会变成
+		// reasoning item，再转成 CC 的 reasoning_content，客户端就能看到思考内容。
+		// 在此层剥离，两条下游转换链（→Responses / →CC）都自动干净，无需各写一份。
+		if stripReasoning && anthropicStreamEventIsThinking(event) {
+			if anthropicStreamEventIsThinkingStart(event) {
+				sawThinkingBlock = true
+			}
+			return false
+		}
+		if stripReasoning && sawThinkingBlock && event.Type == "content_block_stop" {
+			sawThinkingBlock = false
 			return false
 		}
 

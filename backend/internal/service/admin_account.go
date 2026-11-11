@@ -1252,6 +1252,13 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 				normalizedExtra[key] = v
 			}
 		}
+		// 伪装配置同属「专用接口写入、普通编辑不应清除」的受管键：
+		// 普通编辑（弹窗保存其它字段）走整体替换语义，若不回带该键，
+		// 用户「先配了伪装，再改个备注保存 → 伪装被静默删除」，且无任何报错。
+		delete(normalizedExtra, IdentityDisguiseExtraKey)
+		if v, ok := account.Extra[IdentityDisguiseExtraKey]; ok {
+			normalizedExtra[IdentityDisguiseExtraKey] = v
+		}
 		// 保留配额用量和专用服务受管字段，防止普通账号编辑意外覆盖。
 		for _, key := range []string{
 			"quota_used",

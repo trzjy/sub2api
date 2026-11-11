@@ -155,6 +155,11 @@ func IsResponseIdentityMaskedAccount(a *Account) bool {
 	if a == nil || asnap == nil {
 		return false
 	}
+	// 新写法：统一从 identity_disguise 解析（唯一读侧入口，identity_disguise.go）。
+	if d, ok := parseIdentityDisguiseExtra(asnap); ok {
+		return d.RewriteModel
+	}
+	// 老写法：response_identity_mask 开关。
 	v, ok := asnap[responseIdentityMaskKey]
 	if !ok {
 		return false
@@ -317,6 +322,10 @@ func IsReasoningStrippedAccount(a *Account) bool {
 	asnap := a.SnapshotExtra()
 	if a == nil || asnap == nil {
 		return false
+	}
+	// 新写法：统一从 identity_disguise 解析（唯一读侧入口，identity_disguise.go）。
+	if d, ok := parseIdentityDisguiseExtra(asnap); ok {
+		return d.StripReasoning
 	}
 	v, ok := asnap["strip_reasoning_content"]
 	if !ok {

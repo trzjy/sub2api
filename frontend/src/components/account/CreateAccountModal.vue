@@ -2924,6 +2924,84 @@
         </div>
       </div>
 
+      <!-- 身份伪装（identity disguise）：模板由后端统一维护，前端只选参数 -->
+      <div class="border-t border-gray-200 pt-4 dark:border-dark-600" data-testid="identity-disguise-section">
+        <div class="mb-3">
+          <label class="input-label mb-0">{{ t('admin.accounts.identityDisguise.title') }}</label>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.identityDisguise.hint') }}
+          </p>
+        </div>
+
+        <label class="input-label">{{ t('admin.accounts.identityDisguise.profile') }}</label>
+        <select v-model="identityDisguiseProfile" class="input" data-testid="identity-disguise-profile">
+          <!-- 身份清单全部来自后端目录（含「不伪装」），前端不硬编码任何选项 -->
+          <option v-for="opt in identityDisguiseProfiles" :key="opt.id" :value="opt.id">
+            {{ opt.label }}
+          </option>
+        </select>
+        <p class="input-hint">{{ t('admin.accounts.identityDisguise.profileHint') }}</p>
+
+        <template v-if="identityDisguiseProfile !== 'none'">
+          <div class="mt-3 flex items-center justify-between gap-4">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.identityDisguise.autoDerive') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.identityDisguise.autoDeriveHint') }}
+              </p>
+            </div>
+            <input
+              v-model="identityDisguiseAutoDerive"
+              type="checkbox"
+              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              data-testid="identity-disguise-auto-derive"
+            />
+          </div>
+
+          <label v-if="!identityDisguiseAutoDerive" class="input-label mt-3">
+            {{ t('admin.accounts.identityDisguise.forbiddenNames') }}
+          </label>
+          <textarea
+            v-if="!identityDisguiseAutoDerive"
+            v-model="identityDisguiseForbiddenNamesText"
+            rows="3"
+            class="input font-mono text-xs"
+            data-testid="identity-disguise-forbidden-names"
+          ></textarea>
+          <p class="input-hint">{{ t('admin.accounts.identityDisguise.forbiddenNamesHint') }}</p>
+
+          <div class="mt-3 flex items-center justify-between gap-4">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.identityDisguise.rewriteModel') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.identityDisguise.rewriteModelHint') }}
+              </p>
+            </div>
+            <input
+              v-model="identityDisguiseRewriteModel"
+              type="checkbox"
+              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              data-testid="identity-disguise-rewrite-model"
+            />
+          </div>
+
+          <div class="mt-3 flex items-center justify-between gap-4">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.identityDisguise.stripReasoning') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.identityDisguise.stripReasoningHint') }}
+              </p>
+            </div>
+            <input
+              v-model="identityDisguiseStripReasoning"
+              type="checkbox"
+              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              data-testid="identity-disguise-strip-reasoning"
+            />
+          </div>
+        </template>
+      </div>
+
       <!-- Intercept Warmup Requests (Anthropic/Antigravity) -->
       <div
         v-if="form.platform === 'anthropic' || form.platform === 'antigravity'"
@@ -4274,6 +4352,8 @@ import type {
   Proxy,
   AdminGroup,
   AccountPlatform,
+  IdentityDisguiseProfile,
+  IdentityDisguiseProfileOption,
   AccountType,
   CheckMixedChannelResponse,
   CreateAccountRequest,
@@ -5808,6 +5888,57 @@ const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<v
   }
 }
 
+// ===== 身份伪装（identity disguise）=====
+// 模板与正文由后端统一维护，前端只选参数。
+// 创建时先建账号（拿到 id），再调专用接口写伪装配置 ——
+// 理由：伪装走 extra.identity_disguise 专用接口，与账号创建本身解耦，
+// 伪装保存失败不影响账号已创建成功。
+
+const identityDisguiseProfiles = ref<IdentityDisguiseProfileOption[]>([])
+const identityDisguiseProfile = ref<IdentityDisguiseProfile>('none')
+const identityDisguiseForbiddenNamesText = ref('')
+const identityDisguiseAutoDerive = ref(true)
+const identityDisguiseRewriteModel = ref(true)
+const identityDisguiseStripReasoning = ref(true)
+
+async function loadIdentityDisguiseProfiles() {
+  try {
+    identityDisguiseProfiles.value = await adminAPI.accounts.getIdentityDisguiseProfiles()
+  } catch {
+    appStore.showError(t('admin.accounts.identityDisguise.profilesLoadFailed'))
+  }
+}
+
+// 加载身份模板目录（模板正文由后端维护，前端不硬编码）。
+// 放在函数定义之后注册 —— watch 的 immediate 回调会同步执行，
+// 早于声明会撞 const 的 TDZ。
+watch(
+  () => props.show,
+  () => {
+    void loadIdentityDisguiseProfiles()
+  },
+  { immediate: true }
+)
+
+async function saveIdentityDisguise(accountId: number) {
+  try {
+    await adminAPI.accounts.updateAccountIdentityDisguise(accountId, {
+      profile: identityDisguiseProfile.value,
+      forbidden_names: identityDisguiseForbiddenNamesText.value
+        .split(/[\n,]/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0),
+      auto_derive_forbidden_names: identityDisguiseAutoDerive.value,
+      rewrite_model: identityDisguiseRewriteModel.value,
+      strip_reasoning: identityDisguiseStripReasoning.value
+    })
+    return true
+  } catch {
+    appStore.showError(t('admin.accounts.identityDisguise.saveFailed'))
+    return false
+  }
+}
+
 const submitCreateAccount = async (payload: CreateAccountRequest) => {
   submitting.value = true
   try {
@@ -5841,6 +5972,10 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
       } catch {
         appStore.showWarning(t('admin.accounts.upstreamBilling.probeFailed'))
       }
+    }
+    // 身份伪装配置：账号已创建成功，再写伪装（失败不影响账号已创建）。
+    if (identityDisguiseProfile.value !== 'none') {
+      await saveIdentityDisguise(account.id)
     }
     appStore.showSuccess(t('admin.accounts.accountCreated'))
     emit('created')

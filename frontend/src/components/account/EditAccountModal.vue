@@ -1916,6 +1916,108 @@
         </div>
       </div>
 
+      <!-- 身份伪装（identity disguise）：模板由后端统一维护，前端只选参数 -->
+      <div class="border-t border-gray-200 pt-4 dark:border-dark-600" data-testid="identity-disguise-section">
+        <div class="mb-3 flex items-start justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.identityDisguise.title') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.identityDisguise.hint') }}
+            </p>
+          </div>
+          <span
+            v-if="identityDisguiseUsesLegacyKeys"
+            class="whitespace-nowrap rounded px-2 py-1 text-xs font-medium"
+            :class="'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'"
+            data-testid="identity-disguise-legacy-notice"
+          >
+            {{ t('admin.accounts.identityDisguise.legacyNotice') }}
+          </span>
+        </div>
+
+        <p
+          v-if="identityDisguiseProtocolWarning"
+          class="mb-3 rounded bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300"
+          data-testid="identity-disguise-protocol-warning"
+        >
+          {{ t('admin.accounts.identityDisguise.protocolWarning') }}
+        </p>
+
+        <label class="input-label">{{ t('admin.accounts.identityDisguise.profile') }}</label>
+        <select
+          v-model="identityDisguiseProfile"
+          class="input"
+          :disabled="identityDisguiseProfiles.length === 0"
+          data-testid="identity-disguise-profile"
+          @change="onIdentityDisguiseProfileChange"
+        >
+          <!-- 身份清单全部来自后端目录（含「不伪装」），前端不硬编码任何选项 -->
+          <option v-for="opt in identityDisguiseProfiles" :key="opt.id" :value="opt.id">
+            {{ opt.label }}
+          </option>
+        </select>
+        <p class="input-hint">{{ t('admin.accounts.identityDisguise.profileHint') }}</p>
+
+        <template v-if="identityDisguiseProfile !== 'none'">
+          <div class="mt-3 flex items-center justify-between gap-4">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.identityDisguise.autoDerive') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.identityDisguise.autoDeriveHint') }}
+              </p>
+            </div>
+            <input
+              v-model="identityDisguiseAutoDerive"
+              type="checkbox"
+              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              data-testid="identity-disguise-auto-derive"
+            />
+          </div>
+
+          <label v-if="!identityDisguiseAutoDerive" class="input-label mt-3">
+            {{ t('admin.accounts.identityDisguise.forbiddenNames') }}
+          </label>
+          <textarea
+            v-if="!identityDisguiseAutoDerive"
+            v-model="identityDisguiseForbiddenNamesText"
+            rows="3"
+            class="input font-mono text-xs"
+            data-testid="identity-disguise-forbidden-names"
+          ></textarea>
+          <p class="input-hint">{{ t('admin.accounts.identityDisguise.forbiddenNamesHint') }}</p>
+
+          <div class="mt-3 flex items-center justify-between gap-4">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.identityDisguise.rewriteModel') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.identityDisguise.rewriteModelHint') }}
+              </p>
+            </div>
+            <input
+              v-model="identityDisguiseRewriteModel"
+              type="checkbox"
+              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              data-testid="identity-disguise-rewrite-model"
+            />
+          </div>
+
+          <div class="mt-3 flex items-center justify-between gap-4">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.identityDisguise.stripReasoning') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.identityDisguise.stripReasoningHint') }}
+              </p>
+            </div>
+            <input
+              v-model="identityDisguiseStripReasoning"
+              type="checkbox"
+              class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              data-testid="identity-disguise-strip-reasoning"
+            />
+          </div>
+        </template>
+      </div>
+
       <!-- Intercept Warmup Requests (Anthropic/Antigravity) -->
       <div
         v-if="account?.platform === 'anthropic' || account?.platform === 'antigravity'"
@@ -3484,6 +3586,8 @@ import { adminAPI } from '@/api/admin'
 import { useQuotaNotifyState } from '@/composables/useQuotaNotifyState'
 import type {
   Account,
+  IdentityDisguiseProfile,
+  IdentityDisguiseProfileOption,
   Proxy,
   AdminGroup,
   Group,
@@ -3802,10 +3906,99 @@ const refreshOpenCodeGoUsage = async () => {
 watch(() => props.account?.id, () => {
   opencodeGoState.value = props.account?.opencode_go_usage ?? null
   if (opencodeGoState.value && !opencodeGoState.value.snapshot) void loadOpenCodeGoUsage()
+  // 身份伪装配置：切账号时重新加载。
+  // watch 回调是异步的（flush: 'pre'），不会与下方函数声明撞 TDZ。
+  const accountID = props.account?.id
+  if (accountID) {
+    void (async () => {
+      await loadIdentityDisguiseProfiles()
+      await loadIdentityDisguise(accountID)
+    })()
+  }
 })
+
+// ===== 身份伪装（identity disguise）=====
+// 模板与正文由后端统一维护，前端只选参数（profile / 禁词 / 两个开关）。
+// 保存走**专用接口** PUT /admin/accounts/:id/identity-disguise ——
+// 不混在主表单的账号更新里（主表单的 extra 是整体替换语义，混进去会误删老键）。
+
+const identityDisguiseProfiles = ref<IdentityDisguiseProfileOption[]>([])
+const identityDisguiseProfile = ref<IdentityDisguiseProfile>('none')
+const identityDisguiseForbiddenNamesText = ref('')
+const identityDisguiseAutoDerive = ref(true)
+const identityDisguiseRewriteModel = ref(true)
+const identityDisguiseStripReasoning = ref(true)
+const identityDisguiseUsesLegacyKeys = ref(false)
+
+const identityDisguiseProtocolWarning = computed(() => {
+  const creds = props.account?.credentials as Record<string, unknown> | undefined
+  return creds?.api_protocol === 'anthropic'
+})
+
+function parseForbiddenNamesText(text: string): string[] {
+  return text
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+function onIdentityDisguiseProfileChange() {
+  // 切到「不伪装」时保留其它勾选，切回来时沿用 —— 不做隐式重置，
+  // 避免运营来回切换时丢掉已调好的开关。
+}
+
+async function loadIdentityDisguiseProfiles() {
+  try {
+    identityDisguiseProfiles.value = await adminAPI.accounts.getIdentityDisguiseProfiles()
+  } catch {
+    appStore.showError(t('admin.accounts.identityDisguise.profilesLoadFailed'))
+  }
+}
+
+async function loadIdentityDisguise(accountId: number) {
+  try {
+    const state = await adminAPI.accounts.getAccountIdentityDisguise(accountId)
+    identityDisguiseProfile.value = state.profile
+    identityDisguiseForbiddenNamesText.value = state.forbidden_names.join('\n')
+    identityDisguiseAutoDerive.value = state.forbidden_names.length === 0
+    identityDisguiseRewriteModel.value = state.rewrite_model
+    identityDisguiseStripReasoning.value = state.strip_reasoning
+    identityDisguiseUsesLegacyKeys.value = state.uses_legacy_keys
+  } catch {
+    appStore.showError(t('admin.accounts.identityDisguise.loadFailed'))
+  }
+}
+
+async function saveIdentityDisguise(accountId: number): Promise<boolean> {
+  try {
+    // 兜底：<select> 的 v-model 在当前值匹配不到任何 option 时会被置成 undefined
+    // （目录异步加载、值被外部改写等）。这里按「不伪装」处理，绝不把 undefined 发给后端。
+    const profile = identityDisguiseProfile.value ?? 'none'
+    await adminAPI.accounts.updateAccountIdentityDisguise(accountId, {
+      profile,
+      forbidden_names: parseForbiddenNamesText(identityDisguiseForbiddenNamesText.value),
+      auto_derive_forbidden_names: identityDisguiseAutoDerive.value,
+      rewrite_model: identityDisguiseRewriteModel.value,
+      strip_reasoning: identityDisguiseStripReasoning.value
+    })
+    identityDisguiseUsesLegacyKeys.value = false
+    return true
+  } catch {
+    appStore.showError(t('admin.accounts.identityDisguise.saveFailed'))
+    return false
+  }
+}
 
 onMounted(() => {
   if (opencodeGoState.value && !opencodeGoState.value.snapshot) void loadOpenCodeGoUsage()
+  // 身份伪装：**先**加载模板目录、**再**加载账号配置 ——
+  // <select> 的 v-model 在当前值匹配不到任何 option 时会被置成 undefined，
+  // 目录未到位就赋 profile 会把用户已选的身份清掉。
+  void (async () => {
+    await loadIdentityDisguiseProfiles()
+    const accountID = props.account?.id
+    if (accountID) await loadIdentityDisguise(accountID)
+  })()
 })
 
 // 卸载时清掉控制台验证登录轮询定时器，避免组件销毁后仍在打接口。
@@ -5824,11 +6017,35 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
   return updatedAccount
 }
 
+// 身份伪装配置落库（专用接口，与主账号更新分开）。
+//
+// 为什么不混在主更新里：主更新的 extra 是**整体替换**语义，把伪装键混进去
+// 会与「普通编辑不得清除受管键」的保留契约打架；且伪装是独立语义
+// （模型回写 / 思考剥离 / 人设注入），失败不该连累主更新。
+const persistIdentityDisguise = async (accountID: number, updatedAccount: Account): Promise<Account> => {
+  try {
+    await saveIdentityDisguise(accountID)
+    const state = await adminAPI.accounts.getAccountIdentityDisguise(accountID)
+    const nextExtra = { ...((updatedAccount.extra as Record<string, unknown> | undefined) || {}) }
+    nextExtra.identity_disguise = {
+      profile: state.profile,
+      forbidden_names: state.forbidden_names,
+      rewrite_model: state.rewrite_model,
+      strip_reasoning: state.strip_reasoning
+    }
+    updatedAccount.extra = nextExtra
+  } catch {
+    // 伪装保存失败已在 saveIdentityDisguise 内提示；主更新结果仍然有效。
+  }
+  return updatedAccount
+}
+
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
   submitting.value = true
   try {
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
     updatedAccount = await persistGrokMediaEligibility(accountID, updatedAccount)
+    updatedAccount = await persistIdentityDisguise(accountID, updatedAccount)
     appStore.showSuccess(t('admin.accounts.accountUpdated'))
     emit('updated', updatedAccount)
     handleClose()

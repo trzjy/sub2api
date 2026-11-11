@@ -296,6 +296,12 @@ func (s *OpenAIGatewayService) handleResponsesBufferedFromNativeAnthropic(
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if respBytes, err := json.Marshal(responsesResp); err == nil {
 		respBytes = reverseToolNamesIfPresent(c, respBytes)
+		// 伪装 L3 思考剥离：上游 Anthropic 的 thinking 块经 apicompat 转换后
+		// 落在 Responses 的 output[] reasoning item —— 复用既有剥离实现。
+		// 模型名无需在此处理：responsesResp.Model 已用 originalModel 覆盖。
+		if _, _, stripReasoning := AccountIdentityDisguiseEffective(account); stripReasoning {
+			respBytes = StripAnthropicThinkingFromResponsesBody(account, respBytes)
+		}
 		respBytes, _, err = apicompat.RestoreResponsesClientToolPayload(respBytes, clientToolMapping)
 		if err != nil {
 			return nil, fmt.Errorf("restore responses client tools: %w", err)
@@ -356,6 +362,12 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 	}
 
 	state := apicompat.NewAnthropicEventToResponsesState()
+
+	// 伪装 L3 思考剥离（流式）：开关在循环外取一次（每帧都会走到）。
+	_, _, stripReasoning := AccountIdentityDisguiseEffective(account)
+	// sawThinkingBlock：是否已见过 thinking 块的 content_block_start ——
+	// 见过则其后配对的 content_block_stop 也要一并丢弃。
+	sawThinkingBlock := false
 	state.Model = originalModel
 	state.PreserveThinkingSignatures = isClaude55SignedThinkingModel(upstreamModel)
 	clientToolRestorer := apicompat.NewResponsesClientToolStreamRestorer(clientToolMapping)
@@ -436,6 +448,20 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 		// overwrite the state when message_start/message_delta handlers run.
 		syncAnthropicResponsesUsage(state, usage)
 		normalizeAnthropicEventUsageForResponses(event, usage)
+
+		// 伪装 L3 思考剥离：在事件进入转换之前丢掉 thinking 相关事件 ——
+		// 上游 Anthropic 的 thinking 块经 AnthropicEventToResponsesEvents 会变成
+		// reasoning item，客户端就能看到思考内容（上游常在思考里自曝底座身份）。
+		if stripReasoning && anthropicStreamEventIsThinking(event) {
+			if anthropicStreamEventIsThinkingStart(event) {
+				sawThinkingBlock = true
+			}
+			return
+		}
+		if stripReasoning && sawThinkingBlock && event.Type == "content_block_stop" {
+			sawThinkingBlock = false
+			return
+		}
 
 		events := apicompat.AnthropicEventToResponsesEvents(event, state)
 		if clientDisconnected {

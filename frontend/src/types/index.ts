@@ -1809,6 +1809,44 @@ export interface GrokMediaEligibilityState {
   reason: string
 }
 
+/**
+ * 伪装配置（identity disguise）的目标身份。
+ * 取值来自后端模板目录（/admin/identity-disguise/profiles）——
+ * 前端不硬编码模板正文，正文是后端的唯一事实源。
+ */
+export type IdentityDisguiseProfile = 'none' | 'kimi' | 'deepseek'
+
+export interface IdentityDisguiseProfileOption {
+  id: IdentityDisguiseProfile
+  label: string
+  /** 该模板的禁词句需要按账号填充 */
+  needs_forbidden_names: boolean
+}
+
+export interface IdentityDisguiseState {
+  account_id: number
+  profile: IdentityDisguiseProfile
+  /** 当前生效的禁词列表 */
+  forbidden_names: string[]
+  /** 是否把上游回显的模型名改写回客户端请求名（L1） */
+  rewrite_model: boolean
+  /** 是否剥离客户端可见的思考内容（L3） */
+  strip_reasoning: boolean
+  /** 当前生效的人设正文（供运营核对） */
+  prompt: string
+  /** 该账号是否仍在用老键写法（尚未迁移） */
+  uses_legacy_keys: boolean
+}
+
+export interface UpdateIdentityDisguiseRequest {
+  profile: IdentityDisguiseProfile
+  forbidden_names?: string[]
+  /** 按账号 model_mapping 自动推导禁词（覆盖 forbidden_names） */
+  auto_derive_forbidden_names?: boolean
+  rewrite_model: boolean
+  strip_reasoning: boolean
+}
+
 export interface CheckMixedChannelRequest {
   platform: AccountPlatform
   group_ids: number[]

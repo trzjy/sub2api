@@ -180,6 +180,13 @@ func (s *OpenAIGatewayService) buildNativeAnthropicUpstreamRequest(
 	// 地址而非 CC/Responses 地址），详见 helper 注释。
 	body = clampOllamaCloudAnthropicMessagesMaxTokens(account, account.GetAnthropicProtocolBaseURL(), body)
 
+	// 账号级内容身份注入（伪装 L2）：三条 Anthropic 原生路径共用本函数，
+	// 故此处是**唯一**注入落点（对齐 CC 路径 sendCCUpstreamRequest 的语义）。
+	// 未开启人设注入时原样返回 body（逐字节不变）。
+	if prompt, _, _ := AccountIdentityDisguiseEffective(account); prompt != "" {
+		body = InjectAnthropicIdentityPrompt(body, prompt)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
@@ -277,6 +284,19 @@ func (s *OpenAIGatewayService) handleNativeAnthropicBufferedResponse(
 		contentType = "application/json"
 	}
 	body = reverseToolNamesIfPresent(c, body)
+
+	// 伪装响应侧净化（L1 模型回写 + L3 思考剥离）：
+	// 该路径是字节级透传，上游回显的模型名与 thinking 块会原样到达客户端。
+	// 两个钩子都以账号伪装开关为闸门 —— 未开启时 body 逐字节不变。
+	if _, rewriteModel, stripReasoning := AccountIdentityDisguiseEffective(account); rewriteModel || stripReasoning {
+		if rewriteModel {
+			body = RewriteAnthropicResponseModel(body, originalModel)
+		}
+		if stripReasoning {
+			body = StripAnthropicThinkingBody(account, body)
+		}
+	}
+
 	c.Data(resp.StatusCode, contentType, body)
 
 	return &OpenAIForwardResult{
@@ -425,6 +445,11 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 		keepaliveTimer.Reset(keepaliveInterval)
 	}
 	inPartialEvent := false
+
+	// 伪装流式净化状态：是否已见过 thinking 块的 content_block_start。
+	// 见过则其后配对的 content_block_stop 也要一并丢弃（否则客户端会收到
+	// 一个「没有开始的块结束」事件）。
+	sawThinkingBlock := false
 
 	// 重复 token 循环熔断（docs-local/repetition-loop-breaker-plan.md）：缓冲期静默
 	// failover + 直通期中止。guard 为 nil 表示阈值配置为 0（检测禁用）。
@@ -608,6 +633,33 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 					if !clientDisconnected {
 						flusher.Flush()
 					}
+				}
+			}
+
+			// 伪装响应侧净化（流式）：模型名回写 + 思考剥离。
+			// 该路径逐行透传上游 SSE，故模型名回写要改 message_start 事件的
+			// message.model（嵌套形态，与普通响应体的顶层 model 不同）。
+			if rewriteModel, stripReasoning := nativeStreamDisguiseFlags(account); rewriteModel || stripReasoning {
+				if payload, ok := anthropicSSEDataLine(line); ok {
+					if rewriteModel {
+						payload = string(RewriteAnthropicSSEMessageStartModel([]byte(payload), originalModel))
+					}
+					if stripReasoning {
+						// thinking 块开始 → 记住状态（配对的 content_block_stop 也要丢）
+						if anthropicSSEHasThinkingStart(payload) {
+							sawThinkingBlock = true
+							continue
+						}
+						// thinking 增量 / 配对的块结束 → 丢弃
+						if anthropicSSEIsThinkingDelta(payload) {
+							continue
+						}
+						if sawThinkingBlock && gjson.Get(payload, "type").String() == "content_block_stop" {
+							sawThinkingBlock = false
+							continue
+						}
+					}
+					line = "data: " + payload
 				}
 			}
 

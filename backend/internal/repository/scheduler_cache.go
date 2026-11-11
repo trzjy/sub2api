@@ -1353,6 +1353,12 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 响应侧身份净化新开关（与 mask_upstream_identity 解耦，见
 		// IsResponseIdentityMaskedAccount）。旧开关在投影里，新开关同样不能少。
 		service.ResponseIdentityMaskExtraKey,
+		// 伪装配置新写法（extra.identity_disguise）必须进投影：读侧归一
+		// （IsResponseIdentityMaskedAccount / IsReasoningStrippedAccount /
+		// injectAccountIdentitySystemMessage）读的是本投影里的账号对象。
+		// 裁掉它 → 选号返回的账号恒为「未伪装」→ 模型回写/思考剥离/人设注入
+		// 三项**静默失效**（不报错、只在用户侧体现）。
+		service.IdentityDisguiseExtraKey,
 		// 大请求专属开关必须进投影：候选列举 listSchedulableAccounts 读本投影，
 		// 按 extra.large_request_only 把账号标成"仅接大请求"。裁掉该键，快照解码出的
 		// 账号一律按 false 处理 → 该开关在选号侧恒为 false，大请求专属号会照常抢小单，

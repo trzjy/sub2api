@@ -204,12 +204,13 @@ func (s *OpenAIGatewayService) resolveCCFallbackTarget(account *Account) (apiKey
 //
 // 仅此 helper 一处实现，禁止在其他文件或本文件重复定义第二份逻辑。
 func (s *OpenAIGatewayService) injectAccountIdentitySystemMessage(account *Account, body []byte) []byte {
-	accountsnap := account.SnapshotExtra()
-	if account == nil || accountsnap == nil {
+	if account == nil {
 		return body
 	}
-	prompt, ok := accountsnap["identity_prompt"].(string)
-	if !ok || strings.TrimSpace(prompt) == "" {
+	// 人设正文走统一读侧入口（identity_disguise.go）：新键按模板+禁词渲染，
+	// 老键返回原文（存量账号禁词列表各不相同，不重渲染）。
+	prompt, _, _ := AccountIdentityDisguiseEffective(account)
+	if strings.TrimSpace(prompt) == "" {
 		return body
 	}
 	// 以 map[string]json.RawMessage 解析，使除 messages 外的字段以原始字节原样保留，

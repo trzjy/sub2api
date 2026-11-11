@@ -94,6 +94,10 @@ type AdminService interface {
 	// UpdateAccountExtra 仅对 Extra 做 JSONB 增量合并（key 级覆盖），不会影响其它字段或运行态键。
 	// 用于刷新流程持久化 account_uuid / org_uuid 等少量键，避免被全量快照覆盖。
 	UpdateAccountExtra(ctx context.Context, id int64, updates map[string]any) error
+	// SetAccountIdentityDisguise 设置账号的伪装配置（只写 extra.identity_disguise 一个键）。
+	SetAccountIdentityDisguise(ctx context.Context, id int64, update IdentityDisguiseUpdate) (*IdentityDisguiseState, error)
+	// GetAccountIdentityDisguise 读取账号当前的伪装配置。
+	GetAccountIdentityDisguise(ctx context.Context, id int64) (*IdentityDisguiseState, error)
 	SetAccountRequestSizeScope(ctx context.Context, id int64, scope RequestSizeScope) (*Account, error)
 	DeleteAccount(ctx context.Context, id int64) error
 	RefreshAccountCredentials(ctx context.Context, id int64) (*Account, error)

@@ -473,6 +473,26 @@ export default {
       antigravityProjectIdPlaceholder: 'your-gcp-project-id',
       antigravityProjectIdHint:
         'Antigravity standard-tier accounts that do not receive an automatic project_id need a user-owned GCP project.',
+      identityDisguise: {
+        title: 'Identity disguise',
+        hint: 'Make the upstream model present itself as the selected identity (templates are maintained by the backend).',
+        profile: 'Target identity',
+        profileHint: 'The identity this account presents to clients; "None" disables every disguise surface.',
+        profileNone: 'None',
+        forbiddenNames: 'Forbidden names',
+        forbiddenNamesHint: 'Model names the model should not call itself. Derived from the account model mapping by default.',
+        autoDerive: 'Auto-derive',
+        autoDeriveHint: 'Derive forbidden names from the account model mapping, covering every exposed model name.',
+        rewriteModel: 'Rewrite model name',
+        rewriteModelHint: 'Rewrite the upstream echoed model name back to the name the client requested.',
+        stripReasoning: 'Strip reasoning',
+        stripReasoningHint: 'Remove client-visible reasoning text (it often reveals the upstream identity).',
+        protocolWarning: 'This account uses the Anthropic native protocol; the disguise config has no effect until it is enabled.',
+        legacyNotice: 'This account still uses the legacy config format and has not been migrated; changes here only affect the new format.',
+        saveFailed: 'Failed to save identity disguise config',
+        loadFailed: 'Failed to load identity disguise config',
+        profilesLoadFailed: 'Failed to load identity profile catalog'
+      },
       accountSchedulingThresholdOverride: 'Account Auto-Pause Threshold Override',
       accountSchedulingThresholdOverrideHint:
         'Override the platform auto-pause threshold for this account only. Disable to use platform settings.',

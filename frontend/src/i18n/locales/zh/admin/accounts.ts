@@ -707,6 +707,26 @@ export default {
       antigravityProjectIdPlaceholder: 'your-gcp-project-id',
       antigravityProjectIdHint:
         'standard-tier 且未自动返回 project_id 的 Antigravity 账号需要填写用户自带 GCP project。',
+      identityDisguise: {
+        title: '身份伪装',
+        hint: '让上游模型对外呈现为指定身份（模板由后端统一维护）。',
+        profile: '目标身份',
+        profileHint: '选择该账号对外呈现的身份；「不伪装」表示关闭全部伪装能力。',
+        profileNone: '不伪装',
+        forbiddenNames: '禁词列表',
+        forbiddenNamesHint: '模型被问起时不应自称的模型名。默认按该账号对外暴露的模型名自动生成。',
+        autoDerive: '自动生成',
+        autoDeriveHint: '按账号的模型映射自动推导禁词，覆盖全部对外暴露的模型名。',
+        rewriteModel: '回写模型名',
+        rewriteModelHint: '把上游回显的模型名改写回客户端请求的名字。',
+        stripReasoning: '剥离思考内容',
+        stripReasoningHint: '删除客户端可见的思考过程（思考里常自曝上游身份）。',
+        protocolWarning: '该账号走 Anthropic 原生协议；未开启伪装时这套配置不生效。',
+        legacyNotice: '该账号仍在用旧写法配置，尚未迁移；本面板的修改只影响新写法。',
+        saveFailed: '保存身份伪装配置失败',
+        loadFailed: '加载身份伪装配置失败',
+        profilesLoadFailed: '加载身份模板列表失败'
+      },
       accountSchedulingThresholdOverride: '账号自动停调阈值覆盖',
       accountSchedulingThresholdOverrideHint:
         '仅对当前账号覆盖平台级自动停调阈值；关闭后使用平台设置。',

@@ -29,6 +29,9 @@ import type {
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
   GrokMediaEligibilityState,
+  IdentityDisguiseProfileOption,
+  IdentityDisguiseState,
+  UpdateIdentityDisguiseRequest,
   OpenCodeGoUsageState,
   OpenCodeGoUsageSettings
 } from '@/types'
@@ -259,6 +262,36 @@ export type RequestSizeScope = 'any' | 'large_only' | 'small_only'
  */
 export async function setAccountRequestSizeScope(id: number, scope: RequestSizeScope): Promise<Account> {
   const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/request-size-scope`, { scope })
+  return data
+}
+
+/**
+ * Get the identity-disguise profile catalog (for the admin UI dropdown).
+ *
+ * The catalog deliberately carries no prompt text — templates are the backend's
+ * single source of truth, so the UI must not hardcode any wording.
+ */
+export async function getIdentityDisguiseProfiles(): Promise<IdentityDisguiseProfileOption[]> {
+  const { data } = await apiClient.get<IdentityDisguiseProfileOption[]>('/admin/identity-disguise/profiles')
+  return data
+}
+
+/** Get an account's current identity-disguise configuration. */
+export async function getAccountIdentityDisguise(id: number): Promise<IdentityDisguiseState> {
+  const { data } = await apiClient.get<IdentityDisguiseState>(`/admin/accounts/${id}/identity-disguise`)
+  return data
+}
+
+/**
+ * Update an account's identity-disguise configuration.
+ *
+ * Writes only extra.identity_disguise; legacy keys stay untouched.
+ */
+export async function updateAccountIdentityDisguise(
+  id: number,
+  payload: UpdateIdentityDisguiseRequest
+): Promise<IdentityDisguiseState> {
+  const { data } = await apiClient.put<IdentityDisguiseState>(`/admin/accounts/${id}/identity-disguise`, payload)
   return data
 }
 
@@ -1530,6 +1563,9 @@ export const accountsAPI = {
   duplicate,
   update,
   setAccountRequestSizeScope,
+  getIdentityDisguiseProfiles,
+  getAccountIdentityDisguise,
+  updateAccountIdentityDisguise,
   getGrokMediaEligibility,
   updateGrokMediaEligibility,
   checkMixedChannelRisk,
