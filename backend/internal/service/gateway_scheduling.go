@@ -2891,15 +2891,15 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 }
 
 type selectionFailureStats struct {
-	Total              int
-	Eligible           int
-	Excluded           int
-	Unschedulable      int
-	PlatformFiltered   int
-	ModelUnsupported   int
-	ModelRateLimited   int
-	ProfitThreshold    int
-	ProfitInvalidRate  int
+	Total             int
+	Eligible          int
+	Excluded          int
+	Unschedulable     int
+	PlatformFiltered  int
+	ModelUnsupported  int
+	ModelRateLimited  int
+	ProfitThreshold   int
+	ProfitInvalidRate int
 	// SessionSlotsFull 记录「账号本身可用、但会话/并发槽已满」的候选数。
 	// 它与「账号不可用」是两种不同的处置，必须在摘要里分开表达。
 	SessionSlotsFull   int
@@ -3089,17 +3089,53 @@ func summarizeSelectionFailureStats(stats selectionFailureStats) string {
 	return summary
 }
 
+// NoAvailableAccountsError 是「选不到号」的结构化原因。
+//
+// 分类器（handler.classifySelectionFailureError）要判断的是「全部账号都在模型冷却」
+// 还是「账号可用但并发槽占满」，这是两个字段级事实，必须直接读字段。
+// 早期版本把这些事实拼进 Error() 文案，再由下游用正则反解回来——文案是给人读日志的，
+// 一旦措辞调整分类就静默失效，且 Go 的 "3h20m12s" 会被逐段正则只截到 "3h"，
+// 文案对客户说「约 3 小时后恢复」而真实值接近 3.5 小时。文案与事实从此各归各位：
+// Error() 只负责可读性，分类只看字段。
+type NoAvailableAccountsError struct {
+	// Model 是本次选号实际比对的模型名（分组映射之后）。空表示调用方没给模型，
+	// 此时保持历史行为：只回裸 ErrNoAvailableAccounts。
+	Model string
+	// ModelRateLimited 是因模型级冷却被排除的候选数。
+	ModelRateLimited int
+	// SessionSlotsFull 是账号本身可用、但会话/并发槽已满的候选数。
+	SessionSlotsFull int
+	// NextModelRecovery 是所有冷却账号里最早解除的那一条剩余时间。
+	NextModelRecovery time.Duration
+	// Summary 是给日志阅读的原始摘要（total=/eligible=/...），分类器不解析它。
+	Summary string
+}
+
+func (e *NoAvailableAccountsError) Error() string {
+	if e.Model == "" {
+		return ErrNoAvailableAccounts.Error()
+	}
+	if e.Summary == "" {
+		return fmt.Sprintf("%s supporting model: %s", ErrNoAvailableAccounts.Error(), e.Model)
+	}
+	return fmt.Sprintf("%s supporting model: %s (%s)", ErrNoAvailableAccounts.Error(), e.Model, e.Summary)
+}
+
+// Unwrap 让 errors.Is(err, ErrNoAvailableAccounts) 在所有既有调用点继续成立。
+func (e *NoAvailableAccountsError) Unwrap() error { return ErrNoAvailableAccounts }
+
 // noAvailableAccountsError 是「选不到号」的唯一构造入口。
 //
-// 原因摘要必须随错误一起上抛：下游分类器（handler.classifySelectionFailureError）
-// 靠这段摘要区分「全部账号在模型冷却」和「池里根本没有可用账号」。历史上
-// load-aware 选号路径直接 return 裸 ErrNoAvailableAccounts，导致同一件事在
+// 历史上 load-aware 选号路径直接 return 裸 ErrNoAvailableAccounts，导致同一件事在
 // 不同入口上有两套说法，客户端永远只看到「该分组暂无可用账号」。
 func noAvailableAccountsError(requestedModel string, stats selectionFailureStats) error {
-	if trimmed := strings.TrimSpace(requestedModel); trimmed != "" {
-		return fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, trimmed, summarizeSelectionFailureStats(stats))
+	return &NoAvailableAccountsError{
+		Model:             strings.TrimSpace(requestedModel),
+		ModelRateLimited:  stats.ModelRateLimited,
+		SessionSlotsFull:  stats.SessionSlotsFull,
+		NextModelRecovery: stats.NextModelRecovery,
+		Summary:           summarizeSelectionFailureStats(stats),
 	}
-	return ErrNoAvailableAccounts
 }
 
 // isModelSupportedByAccountWithContext 根据账户平台检查模型支持（带 context）

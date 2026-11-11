@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -66,24 +67,33 @@ func TestClassifySelectionFailureError_RateLimitedPool(t *testing.T) {
 	fallback := noAccountErrorClassification{Status: http.StatusServiceUnavailable, ErrType: "api_error", Message: infraerrors.NoAvailableAccounts}
 
 	got := classifySelectionFailureError(
-		fmt.Errorf("no available accounts supporting model: gpt-5.6-sol (total=3 eligible=0 model_rate_limited=3)"),
+		&service.NoAvailableAccountsError{Model: "gpt-5.6-sol", ModelRateLimited: 3, Summary: "total=3 eligible=0 model_rate_limited=3"},
 		fallback,
 	)
 
 	require.Equal(t, http.StatusServiceUnavailable, got.Status)
 	require.Equal(t, "service_unavailable", got.ErrType)
 	require.Contains(t, got.Message, infraerrors.AllAccountsRateLimited)
-	require.Equal(t, fallback, classifySelectionFailureError(fmt.Errorf("model_rate_limited=0"), fallback))
+	// 结构化原因之外的错误（裸 ErrNoAvailableAccounts、纯字符串包装）必须保持 fallback：
+	// 分类器只信 *service.NoAvailableAccountsError，不从文案里猜。
+	require.Equal(t, fallback, classifySelectionFailureError(service.ErrNoAvailableAccounts, fallback))
 	require.Equal(t, fallback, classifySelectionFailureError(fmt.Errorf("no available accounts"), fallback))
 }
 
-// 选号摘要带得出恢复时间时，503 文案要说出「哪个模型、还要等多久」，
+// 选号原因带得出恢复时间时，503 文案要说出「哪个模型、还要等多久」，
 // 而不是继续回一句「该分组暂无可用账号」。
+//
+// 关键是分钟不能被吞掉：历史实现用正则从 "next_recovery=3h20m12s" 里逐段取值，
+// 只截到 "3h"，客户看到「约 3 小时后恢复」而真实值接近 3.5 小时。
 func TestClassifySelectionFailureError_ModelCoolingCarriesRecovery(t *testing.T) {
 	fallback := noAccountErrorClassification{Status: http.StatusServiceUnavailable, ErrType: "api_error", Message: infraerrors.NoAvailableAccounts}
 
 	got := classifySelectionFailureError(
-		fmt.Errorf("no available accounts supporting model: gemini-3.8-flash (total=2 eligible=0 excluded=0 unschedulable=0 platform_filtered=0 model_unsupported=0 model_rate_limited=2 profit_threshold=0 profit_invalid_account_rate=0 session_slots_full=0 next_recovery=3h20m12s)"),
+		&service.NoAvailableAccountsError{
+			Model:             "gemini-3.8-flash",
+			ModelRateLimited:  2,
+			NextModelRecovery: 3*time.Hour + 20*time.Minute + 12*time.Second,
+		},
 		fallback,
 	)
 
@@ -97,7 +107,7 @@ func TestClassifySelectionFailureError_SessionSlotsFull(t *testing.T) {
 	fallback := noAccountErrorClassification{Status: http.StatusServiceUnavailable, ErrType: "api_error", Message: infraerrors.NoAvailableAccounts}
 
 	got := classifySelectionFailureError(
-		fmt.Errorf("no available accounts supporting model: gemini-3.8-flash (total=2 eligible=2 excluded=0 unschedulable=0 platform_filtered=0 model_unsupported=0 model_rate_limited=0 profit_threshold=0 profit_invalid_account_rate=0 session_slots_full=2)"),
+		&service.NoAvailableAccountsError{Model: "gemini-3.8-flash", SessionSlotsFull: 2},
 		fallback,
 	)
 
@@ -325,7 +335,7 @@ func TestClassifySelectionFailureError_StillUpgradesNonModelNotFoundFallback(t *
 	}
 
 	got := classifySelectionFailureError(
-		fmt.Errorf("no available accounts supporting model: gpt-5.6-sol (total=3 eligible=0 model_rate_limited=3)"),
+		&service.NoAvailableAccountsError{Model: "gpt-5.6-sol", ModelRateLimited: 3},
 		fallback,
 	)
 

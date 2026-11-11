@@ -2,10 +2,9 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -36,15 +35,12 @@ type noAccountErrorClassification struct {
 	ModelNotFound bool // true when this is a 404 model_not_found classification
 }
 
-var (
-	selectionModelRateLimitedPattern = regexp.MustCompile(`(?:model_rate_limited|rate_limited)=(\d+)`)
-	selectionModelPattern            = regexp.MustCompile(`supporting model:\s*([^\s(]+)`)
-	selectionNextRecoveryPattern     = regexp.MustCompile(`next_recovery=([0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))`)
-	selectionSessionSlotsFullPattern = regexp.MustCompile(`session_slots_full=(\d+)`)
-)
-
 // classifySelectionFailureError preserves the scheduler's compact reason when
 // every model-capable account is temporarily rate limited.
+//
+// 原因只从 *service.NoAvailableAccountsError 的字段读取。历史实现用正则反解
+// Error() 文案，那等于把「给人看的日志文本」当成「给机器看的协议」：措辞一改
+// 分类就地失效，且 Go duration 的 "3h20m12s" 会被逐段正则只截到 "3h"。
 func classifySelectionFailureError(err error, fallback noAccountErrorClassification) noAccountErrorClassification {
 	if err == nil {
 		return fallback
@@ -67,49 +63,37 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	if fallback.ModelNotFound {
 		return fallback
 	}
-	lowered := strings.ToLower(err.Error())
-	match := selectionModelRateLimitedPattern.FindStringSubmatch(lowered)
-	count := 0
-	if len(match) == 2 {
-		if parsed, parseErr := strconv.Atoi(match[1]); parseErr == nil {
-			count = parsed
-		}
+	var selectionErr *service.NoAvailableAccountsError
+	if !errors.As(err, &selectionErr) {
+		return fallback
 	}
-	if count > 0 {
+	if selectionErr.ModelRateLimited > 0 {
 		return noAccountErrorClassification{
 			Status:  http.StatusServiceUnavailable,
 			ErrType: "service_unavailable",
-			Message: allAccountsCoolingMessage(err.Error()),
+			Message: allAccountsCoolingMessage(selectionErr),
 		}
 	}
 	// 账号本身可用、只是会话/并发槽被占满：与「账号不可用」是两种处置，
 	// 不能共用「暂无可用账号」的说法，否则运维会去查号池而不是查并发。
-	if slots := selectionSessionSlotsFullPattern.FindStringSubmatch(lowered); len(slots) == 2 {
-		if n, convErr := strconv.Atoi(slots[1]); convErr == nil && n > 0 {
-			return noAccountErrorClassification{
-				Status:  http.StatusServiceUnavailable,
-				ErrType: "service_unavailable",
-				Message: infraerrors.AccountSlotConcurrencyLimit,
-			}
+	if selectionErr.SessionSlotsFull > 0 {
+		return noAccountErrorClassification{
+			Status:  http.StatusServiceUnavailable,
+			ErrType: "service_unavailable",
+			Message: infraerrors.AccountSlotConcurrencyLimit,
 		}
 	}
 	return fallback
 }
 
-// allAccountsCoolingMessage 在选号摘要能给出恢复时间时，把「哪个模型、还要等多久」
+// allAccountsCoolingMessage 在选号原因能给出恢复时间时，把「哪个模型、还要等多久」
 // 写进文案；给不出就退回既有的通用限速文案，行为与历史一致。
-func allAccountsCoolingMessage(loweredError string) string {
-	model := ""
-	if m := selectionModelPattern.FindStringSubmatch(loweredError); len(m) == 2 {
-		model = strings.TrimSpace(m[1])
-	}
-	if model == "" {
+func allAccountsCoolingMessage(selectionErr *service.NoAvailableAccountsError) string {
+	if selectionErr.Model == "" {
 		return infraerrors.AllAccountsRateLimited
 	}
-	if m := selectionNextRecoveryPattern.FindStringSubmatch(loweredError); len(m) == 2 {
-		if d, parseErr := time.ParseDuration(m[1]); parseErr == nil && d > 0 {
-			return fmt.Sprintf(infraerrors.AllAccountsModelCooling, model, humanizeRecoveryWindow(d))
-		}
+	if selectionErr.NextModelRecovery > 0 {
+		return fmt.Sprintf(infraerrors.AllAccountsModelCooling, selectionErr.Model, humanizeRecoveryWindow(selectionErr.NextModelRecovery))
 	}
 	return infraerrors.AllAccountsRateLimited
 }
