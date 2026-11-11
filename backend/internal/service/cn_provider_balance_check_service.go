@@ -54,6 +54,25 @@ const cnBalanceWebConsoleBudgetCap = 9 * time.Minute
 // cnBalanceWebConsoleProbeGrace 是单账号探测在 worker 超时之外的额外余量（HTTP 建连/回传）。
 const cnBalanceWebConsoleProbeGrace = 10 * time.Second
 
+// cnBalanceWebConsoleCycleTailGuard 是给「本轮剩余周期」预留的收尾余量：把 Web 控制台探测
+// 控制在巡检间隔内结束，避免单轮跨过下一次 tick 造成背靠背运行。
+const cnBalanceWebConsoleCycleTailGuard = 30 * time.Second
+
+// cnBalanceWebConsoleBudgetWithinCycle 把 Web 控制台探测的独立预算夹进「本轮剩余周期」：
+// 返回 min(uncapped, interval - elapsed - cnBalanceWebConsoleCycleTailGuard)。
+// interval <= 0（测试构造未设巡检间隔）时不夹，直接返回 uncapped。
+// 返回值 <= 0 表示剩余周期已耗尽，调用方据此跳过本轮探测并记日志。
+func cnBalanceWebConsoleBudgetWithinCycle(interval, elapsed, uncapped time.Duration) time.Duration {
+	if interval <= 0 {
+		return uncapped
+	}
+	remaining := interval - elapsed - cnBalanceWebConsoleCycleTailGuard
+	if remaining < uncapped {
+		return remaining
+	}
+	return uncapped
+}
+
 // cnBalanceWebConsoleProbeBudget 计算一轮 Web 控制台探测的独立预算：
 // 串行 N 个账号 × (单账号 worker 超时 + 余量)，并按 cnBalanceWebConsoleBudgetCap 夹住。
 // 返回 0 表示无需探测（N=0）。
@@ -272,6 +291,7 @@ func (s *CNProviderBalanceCheckService) Stop() {
 }
 
 func (s *CNProviderBalanceCheckService) runOnce() {
+	runStart := time.Now()
 	now := time.Now()
 	// 收集 coding 探测目标（kimi/deepseek + 智谱）与 payg 检查队列。
 	// coding 探测统一在收集完成后按 4 并发执行：单账号探测 15-20s，串行 ×
@@ -606,13 +626,24 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			probeTimeoutSeconds = s.cfg.WebQuotaWorker.TimeoutSeconds
 		}
 		wcBudget := cnBalanceWebConsoleProbeBudget(len(webConsoleTargets), probeTimeoutSeconds)
-		wcCtx, wcCancel := context.WithTimeout(context.Background(), wcBudget)
-		defer wcCancel()
-		for _, account := range webConsoleTargets {
-			if _, perr := s.webConsoleQuotaService.ProbeLoadedAccount(wcCtx, account); perr != nil {
-				log.Printf("[CNBalance] web-console quota probe account %d (%s) failed: %v", account.ID, account.Platform, perr)
-				continue
+		// 外审 must_fix：独立预算不得让单轮超过巡检间隔。interval<=0（测试构造）时不夹。
+		wcBudget = cnBalanceWebConsoleBudgetWithinCycle(s.interval, time.Since(runStart), wcBudget)
+		switch {
+		case wcBudget <= 0:
+			log.Printf("[CNBalance] web-console quota probe skipped: cycle budget exhausted (targets=%d interval=%s)", len(webConsoleTargets), s.interval)
+		default:
+			if capped := cnBalanceWebConsoleProbeBudget(len(webConsoleTargets), probeTimeoutSeconds); wcBudget < capped {
+				// 被周期夹住：显式暴露，避免「静默截断」看不见。
+				log.Printf("[CNBalance] web-console quota probe budget capped by cycle: targets=%d budget=%s (uncapped=%s)", len(webConsoleTargets), wcBudget, capped)
 			}
+			wcCtx, wcCancel := context.WithTimeout(context.Background(), wcBudget)
+			for _, account := range webConsoleTargets {
+				if _, perr := s.webConsoleQuotaService.ProbeLoadedAccount(wcCtx, account); perr != nil {
+					log.Printf("[CNBalance] web-console quota probe account %d (%s) failed: %v", account.ID, account.Platform, perr)
+					continue
+				}
+			}
+			wcCancel()
 		}
 	}
 
