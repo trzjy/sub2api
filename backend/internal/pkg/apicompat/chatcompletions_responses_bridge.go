@@ -242,6 +242,22 @@ type NamespacedToolName struct {
 	IsCustom bool
 }
 
+// newNamespacedToolName 构造 namespace 子工具的映射项。
+//
+// 「namespace 内子工具是不是 custom」这条判定**只此一处**：
+// 本函数与 FlattenResponsesToolList 都调它，两处派生出的映射逐项一致。
+//
+// 2026-11-12：此前 FlattenResponsesToolList 自己写了一遍填法且**漏了 IsCustom**，
+// 与本函数结论相反 → 交付侧判 function、登记侧判 custom → codex 续轮
+// result_type_mismatch → CUR-RES-02（根因修复见提交 14662d995b）。
+func newNamespacedToolName(namespace, name, childType string) NamespacedToolName {
+	return NamespacedToolName{
+		Namespace: namespace,
+		Name:      name,
+		IsCustom:  childType == "custom",
+	}
+}
+
 // NamespaceToolNames 收集 Responses 请求中 namespace 子工具的摊平名 →（namespace,
 // 子工具名）映射。chat 桥回程时需据此把模型对摊平工具的调用还原为带 namespace 字段
 // 的 function_call 项：codex 按 namespace+name 路由，平铺名会被判为 unsupported
@@ -265,11 +281,8 @@ func NamespaceToolNames(tools []ResponsesTool) map[string]NamespacedToolName {
 			if out == nil {
 				out = make(map[string]NamespacedToolName)
 			}
-			out[FlattenNamespaceToolName(tool.Name, child.Name)] = NamespacedToolName{
-				Namespace: tool.Name,
-				Name:      child.Name,
-				IsCustom:  child.Type == "custom",
-			}
+			out[FlattenNamespaceToolName(tool.Name, child.Name)] =
+				newNamespacedToolName(tool.Name, child.Name, child.Type)
 		}
 	}
 	return out

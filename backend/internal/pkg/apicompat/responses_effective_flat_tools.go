@@ -98,22 +98,16 @@ func FlattenResponsesToolList(tools []ResponsesTool) (ResponsesFlatToolSet, erro
 			if prev, exists := set.NamespaceTools[name]; exists && prev.Namespace == namespace && prev.Name == childName {
 				continue
 			}
-			set.NamespaceTools[name] = NamespacedToolName{
-				Namespace: namespace,
-				Name:      childName,
-				// IsCustom 必须与 NamespaceToolNames（chatcompletions_responses_bridge.go）
-				// 同源填法：**namespace 内的 custom 子工具在这里也要标出来**。
-				//
-				// 漏填的后果（2026-11-12 生产实证）：交付侧判定（customToolCallName 读
-				// origin.IsCustom）把 namespace 内的 custom 判成 function → 交付
-				// function_call；而登记侧（service.cursorCustomToolCallName 读另一个
-				// NamespaceCustomTools map）判成 custom → 登记 custom_tool_call。
-				// 两侧结论不一致 → codex 续轮时按 function 语义回放，本站按 custom 校验
-				// → result_type_mismatch → CUR-RES-02（codex 外审通道全线失败）。
-				//
-				// 同一份 tools 派生出的两份映射（NamespaceToolNames / 本函数）必须逐项一致。
-				IsCustom: childType == "custom",
-			}
+			// IsCustom 的判定走共同构造 newNamespacedToolName（与 chat 桥的
+			// NamespaceToolNames 同一处实现）—— **不自己写一遍填法**。
+			//
+			// 本函数此前漏填 IsCustom（2026-11-12 根因）：交付侧（customToolCallName 读
+			// origin.IsCustom）把 namespace 内的 custom 判成 function → 交付
+			// function_call；登记侧（service.cursorCustomToolCallName 读另一个
+			// NamespaceCustomTools map）判成 custom → 登记 custom_tool_call。
+			// 两侧结论不一致 → codex 续轮时按 function 语义回放，本站按 custom 校验
+			// → result_type_mismatch → CUR-RES-02（codex 外审通道全线失败）。
+			set.NamespaceTools[name] = newNamespacedToolName(namespace, childName, childType)
 			if childType == "custom" {
 				if set.NamespaceCustomTools == nil {
 					set.NamespaceCustomTools = make(map[string]bool)
