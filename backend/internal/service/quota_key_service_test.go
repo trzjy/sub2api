@@ -2493,6 +2493,52 @@ func TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly(t *testing.T) {
 	require.GreaterOrEqual(t, cur, 1, "model covered only by a non-cursor group must have water level > 0 (裁定 1)")
 }
 
+// TestQuotaKeyModelWater_SoftDeletedKeySkippedNotFatal 覆盖派发单 QKG-ORPHAN-FIX §改动范围 1：
+// 活账号挂在一个已软删的激活码上时，WaterLevel 不得整池失败（不返回 error），且该账号因失去
+// 服务资格而不计入水位（返回 false）。这正是共享测试库里"未软删账号 → 已软删激活码"悬挂行
+// 过去毒死整池的原因；修复后该账号被安全跳过，其余账号照常计数。
+func TestQuotaKeyModelWater_SoftDeletedKeySkippedNotFatal(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	w := newRoutedWater(t, client, stubResolverAllCursor(), stubChannelServiceNoChannel(), &GatewayService{})
+
+	modelM := "grok-4.7"
+	grp := mustCreateCompositeGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
+
+	key := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// A04-G 来源门修复（c1p1-I）：装齐状态+快照 provider，使 holder 名下账号通过来源门计入水位。
+	installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+		statuses: map[int64]string{key.ID: domain.QuotaKeyStatusActive},
+		snapshots: map[int64][]byte{key.ID: []byte(fmt.Sprintf(
+			`{"total":400,"used":0,"status_code":200,"checked_at":%q,"error_code":""}`,
+			time.Now().UTC().Format(time.RFC3339)))},
+	})
+	acc := mustCreateCursorAccount(t, client, key.ID, withCursorWaterModels())
+	mustLinkAccountToGroup(t, client, acc.ID, grp.ID)
+
+	// R10-1：复原本用例自建分组/账号/激活码，避免污染共享库与他用例的总量基数。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = client.AccountGroup.Delete().Where(accountgroup.AccountID(acc.ID)).Exec(cctx)
+		_, _ = client.Account.Delete().Where(account.ID(acc.ID)).Exec(cctx)
+		_, _ = client.Group.Delete().Where(entgroup.IDEQ(grp.ID)).Exec(cctx)
+		_, _ = client.QuotaKey.Delete().Where(quotakey.ID(key.ID)).Exec(cctx)
+	})
+
+	// 基线：活账号绑定【活跃】码 → 计入，水位至少为 1（共享库可能另有覆盖 grok-4.7 的账号）。
+	base, _, err := w.WaterLevel(ctx, modelM)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, base, 1)
+
+	// 软删该激活码（模拟悬挂态：活账号 → 已软删码）。
+	require.NoError(t, client.QuotaKey.UpdateOneID(key.ID).SetDeletedAt(time.Now()).Exec(ctx))
+
+	// 软删后：WaterLevel 整池不得失败；因码已软删，该账号不计入，水位恰好回落 base-1。
+	cur, _, err := w.WaterLevel(ctx, modelM)
+	require.NoError(t, err, "soft-deleted key must NOT poison the whole WaterLevel pool")
+	require.Equal(t, base-1, cur, "account under soft-deleted key must not count; pool total drops by exactly the orphaned account")
+}
+
 // TestQuotaKeyModelWater_WaterLevelExcludesTempWindow 验证 temp 窗口排除：
 // temp_unschedulable_until 在将来 → 排除（水位 0）；置为过去 → 计入（水位 1）。
 func TestQuotaKeyModelWater_WaterLevelExcludesTempWindow(t *testing.T) {

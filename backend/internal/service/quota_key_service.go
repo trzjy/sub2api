@@ -18,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
+	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -447,13 +448,15 @@ type QuotaKeyService struct {
 	enc      QuotaKeyEncryptor
 	upstream QuotaKeyUpstreamClient
 	client   *ent.Client
-	// cursorGroupResolver 解析挂载目标分组 ID（U7 挂载事实源，§20.2-A）。同时服务两个入口：
-	// 手动 RefreshAccounts 与自动补池 PullAccountsForModel（reconciler）——两者同源同判，
-	// 挂载目标 = 【静态实供清单 CursorStaticEntryModels】∩【模型所属平台的目标分组】∩【白名单
-	// 实际覆盖】（findCursorPlatformGroups → cursorMountTargetGroups U7 口径：模型真实厂商
-	// 原生平台组 ∪ cursor 专属 ∪ composite，allow-all（无对应模型）不挂）。
-	// 零目标组 → ErrQuotaKeyModelNoCoverage 失败关闭（号不入库）。
-	// 生产默认走 findCursorPlatformGroups；测试可替换以注入边界。
+	// cursorGroupResolver 是【测试 seam】：测试可注入以制造挂载失败 / 零覆盖 / 解析错误等边界
+	// （见 TestQuotaKeyService_PullForModel_MountFailureRollback 等回归用例）。
+	// 生产路径恒为 nil —— 构造函数不再赋默认实现（旧默认赋值 s.findCursorPlatformGroups 已在
+	// B2b 内联闭包改造后成为无人调用的死链，已删除），由 PullAccountsForModel / RefreshAccounts
+	// 入口统一消费：非 nil 时优先走它；nil 时走码级推导 findCursorPlatformGroupsForKey（U7 唯一
+	// 判定出口）。挂载目标 = 【静态实供清单 CursorStaticEntryModels】∩【模型所属平台的目标分组】
+	// ∩【白名单实际覆盖】（cursorMountTargetGroups 口径：模型真实厂商原生平台组 ∪ cursor 专属
+	// ∪ composite，allow-all（无对应模型）不挂）。零目标组 → ErrQuotaKeyModelNoCoverage 失败关闭。
+	// 禁止再出现「生产赋值但无人调用」的死链；如需保留生产默认实现，须显式由入口 seam 逻辑消费。
 	cursorGroupResolver func(ctx context.Context, tx *ent.Tx) ([]int64, error)
 
 	// insertFailureMarkerWriter 是 R5-1 插入失败后"独立事务补写 last_refresh_error 标记"
@@ -579,7 +582,9 @@ func NewQuotaKeyService(repo QuotaKeyRepository, enc QuotaKeyEncryptor, upstream
 		upstream = NotConnectedUpstreamClient{}
 	}
 	s := &QuotaKeyService{repo: repo, enc: enc, upstream: upstream, client: client}
-	s.cursorGroupResolver = s.findCursorPlatformGroups
+	// 注：cursorGroupResolver 不再赋默认实现（旧默认 s.findCursorPlatformGroups 在 B2b 内联
+	// 闭包改造后已成为生产路径上无人调用的死链，已删除）。它仅作测试 seam，由
+	// PullAccountsForModel / RefreshAccounts 入口在 s.cursorGroupResolver != nil 时消费。
 	s.insertFailureMarkerWriter = s.writeInsertFailureMarker
 	// P1-B4 设备同源闭环：真实拉号客户端需要反查本服务才能分流"存量派生值 / DeviceIDFor"，
 	// 构造顺序天然成环（客户端先建 → 服务后建），故在此回填本服务自身作为设备解析器
@@ -1728,6 +1733,11 @@ func (s *QuotaKeyService) PullAccountsForModel(ctx context.Context, quotaKeyID i
 	// resolver 在事务内重读 qk，保证读到最新码级设置。
 	_ = modelM // 模型上下文仅作触发语义保留；挂载目标按账号能力全量计算（§20.2-A）。
 	return s.pull(ctx, quotaKeyID, func(ctx context.Context, tx *ent.Tx) ([]int64, error) {
+		// 测试 seam：s.cursorGroupResolver 注入时优先走它（制造挂载失败/零覆盖/解析错误等边界）；
+		// 生产恒为 nil，走码级推导 findCursorPlatformGroupsForKey（U7 唯一判定出口）。
+		if s.cursorGroupResolver != nil {
+			return s.cursorGroupResolver(ctx, tx)
+		}
 		qk, err := tx.QuotaKey.Get(ctx, quotaKeyID)
 		if err != nil {
 			return nil, fmt.Errorf("quota_key_service: re-read quota key %d in mount resolver: %w", quotaKeyID, err)
@@ -1748,6 +1758,11 @@ func (s *QuotaKeyService) RefreshAccounts(ctx context.Context, quotaKeyID int64)
 	// 挂载解析器：与 PullAccountsForModel 同源同判。resolver 在事务内重读 qk，
 	// GroupIDs==nil 时按码级 model_mapping → 上游自报实供清单 → 静态实供清单 推导挂载目标。
 	return s.pull(ctx, quotaKeyID, func(ctx context.Context, tx *ent.Tx) ([]int64, error) {
+		// 测试 seam：s.cursorGroupResolver 注入时优先走它（制造挂载失败/零覆盖/解析错误等边界）；
+		// 生产恒为 nil，走码级推导 findCursorPlatformGroupsForKey（U7 唯一判定出口）。
+		if s.cursorGroupResolver != nil {
+			return s.cursorGroupResolver(ctx, tx)
+		}
 		qk, err := tx.QuotaKey.Get(ctx, quotaKeyID)
 		if err != nil {
 			return nil, fmt.Errorf("quota_key_service: re-read quota key %d in mount resolver: %w", quotaKeyID, err)
@@ -2081,7 +2096,10 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		// §13.3 新号挂载：mountResolver 由触发方在落库事务内执行，提交前挂入其解析出的
 		// 全部分组。mountResolver 为 nil（reconciler 内部入口 PullAccounts）时跳过挂载。
 		// mountResolver 非空即代表"触发方要求挂载"——无论携带模型 M（PullAccountsForModel）
-		// 还是手动交集口径挂载（RefreshAccounts，B1，经 cursorGroupResolver → findCursorPlatformGroups）。
+		// 还是手动交集口径挂载（RefreshAccounts，B1）。二者传入的闭包统一消费测试 seam
+		// s.cursorGroupResolver（注入时优先），否则走码级推导 findCursorPlatformGroupsForKey
+		//（U7 唯一判定出口）；生产路径 s.cursorGroupResolver 恒为 nil，不存在"经 cursorGroupResolver
+		// → findCursorPlatformGroups"的默认链路（旧默认赋值已在 B2b 内联闭包改造后删除，死链消除）。
 		if mountResolver != nil {
 			var groupIDs []int64
 			if qk3.GroupIds == nil {
@@ -3053,8 +3071,15 @@ func (w *quotaKeyModelWater) WaterLevel(ctx context.Context, _ string) (int, int
 		WithGroups(func(q *ent.GroupQuery) {
 			q.Where(group.Status(domain.StatusActive), group.DeletedAtIsNil())
 		}).
+		// 关键：用 SkipSoftDelete 让 QuotaKey 边把【已软删】的激活码也加载进 Edges.QuotaKey，
+		// 否则软删拦截器会给边查询附加 deleted_at IS NULL，使活账号挂在已软删码上时
+		// Edges.QuotaKey 直接为 nil，落到"边未加载"的整次错误分支毒死整池。
+		// 账号/分组仍由上面的显式 DeletedAtIsNil() 过滤（SkipSoftDelete 只影响边的默认过滤，
+		// 不影响已写明的谓词），故只有 QuotaKey 边会包含软删行；countsTowardWaterLevel 内
+		// 对 key.DeletedAt != nil 返回 false,nil（派发单 §改动范围 1），对真正 keyless 的
+		// 账号（Edges.QuotaKey 仍为 nil）保持返回 error。
 		WithQuotaKey().
-		All(ctx)
+		All(mixins.SkipSoftDelete(ctx))
 	if err != nil {
 		return 0, 0, fmt.Errorf("quota_key_model_water: list total water level accounts: %w", err)
 	}
@@ -3099,8 +3124,15 @@ func (w *quotaKeyModelWater) countsTowardWaterLevel(ctx context.Context, row *en
 		return false, nil
 	}
 	key := row.Edges.QuotaKey
-	if key == nil || key.DeletedAt != nil {
+	// key == nil 表示边未加载（属编程/查询错误），必须显式失败，不得静默。
+	if key == nil {
 		return false, fmt.Errorf("quota_key_model_water: account %d quota key unavailable", row.ID)
+	}
+	// key.DeletedAt != nil：账号归属的激活码已软删。该账号本就不具备服务资格，
+	// 不计入水位是正确结论而非降级（生产删码路径同事务软删账号，悬挂态本不应出现）；
+	// 此处不得因数据不一致而"毒死整池"，故返回 false,nil 跳过该账号。
+	if key.DeletedAt != nil {
+		return false, nil
 	}
 	if quotaKeyStatusBlocksCursorScheduling(key.Status) || isExpired(key) {
 		return false, nil

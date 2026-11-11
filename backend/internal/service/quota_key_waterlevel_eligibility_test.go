@@ -149,6 +149,17 @@ func TestCursorWaterLevelEligibilityMatchesKnownSchedulingGates(t *testing.T) {
 		require.ErrorContains(t, err, "quota key unavailable")
 		require.False(t, got)
 	})
+	t.Run("soft-deleted key skipped not fatal", func(t *testing.T) {
+		// 派发单 QKG-ORPHAN-FIX §改动范围 1：活账号挂在已软删激活码上时，
+		// 边已加载（key != nil）但 key.DeletedAt != nil → 不计入且不返回错误，
+		// 绝不能像过去那样毒死整池（quota key unavailable）。
+		past := time.Now().Add(-time.Hour)
+		row := newAccount()
+		row.Edges.QuotaKey.DeletedAt = &past
+		got, err := wiredWaterAllCursor().countsTowardWaterLevel(context.Background(), row)
+		require.NoError(t, err, "soft-deleted key must not poison the pool")
+		require.False(t, got, "account under soft-deleted key must not count toward water level")
+	})
 }
 
 func TestQuotaKeyModelWaterReloadsEligibilityAndCountsOnce(t *testing.T) {
