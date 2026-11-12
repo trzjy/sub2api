@@ -12,13 +12,20 @@ func TestRecordConcurrencySlotFailure(t *testing.T) {
 	failed := map[int64]struct{}{}
 	attempts := 0
 
-	require.True(t, recordConcurrencySlotFailure(failed, 1, &attempts), "第一次槽位失败应换号")
-	require.Contains(t, failed, int64(1), "满载账号要记入本请求排除集合")
-	require.True(t, recordConcurrencySlotFailure(failed, 2, &attempts), "第二次槽位失败应换号")
-	require.Contains(t, failed, int64(2))
-	require.False(t, recordConcurrencySlotFailure(failed, 3, &attempts),
-		"达到上限后不再换号，避免延迟被放大成 N × WaitPlan.Timeout")
-	require.Contains(t, failed, int64(3), "最后一次失败也要排除，否则会选回同一个账号")
+	// 外审第三轮 must_fix #1 整改后的语义：**次数上限不再是「候选耗尽」的判据**，
+	// 只做死循环兜底。因此在上限之前，调用方必须一直收到「继续换号」。
+	// 候选耗尽由「选号返回无候选」判定（排除集合把所有候选排完）。
+	for i := 1; i < maxConcurrencySlotFailoverAttempts; i++ {
+		require.True(t, recordConcurrencySlotFailure(failed, int64(i), &attempts),
+			"第 %d 次槽位失败必须继续换号（次数上限不是候选耗尽判据）", i)
+		require.Contains(t, failed, int64(i), "满载账号要记入本请求排除集合")
+	}
+
+	// 达到兜底上限后停止（防止某个入口漏写排除动作导致死循环）。
+	require.False(t, recordConcurrencySlotFailure(failed, int64(maxConcurrencySlotFailoverAttempts), &attempts),
+		"达到兜底上限后不再换号")
+	require.Contains(t, failed, int64(maxConcurrencySlotFailoverAttempts),
+		"最后一次失败也要排除，否则会选回同一个账号")
 
 	// 防御：nil 集合 / nil 计数不得 panic，直接判定不再换号。
 	require.False(t, recordConcurrencySlotFailure(nil, 1, &attempts))
