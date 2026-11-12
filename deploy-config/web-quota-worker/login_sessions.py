@@ -16,9 +16,19 @@ longcat 只有扫码 / 短信登录，compshare / sensenova 的默认页也是�
 设计纪律
 --------
 - 无状态：会话只存内存，进程重启即失效；绝不落盘 cookie / 截图。
-- 不猜站点结构：不写任何站点 selector，所有交互按坐标与键盘事件转发，
-  上游改版不需要改本模块（这是「不为每家写一套登录脚本」的唯一做法）。
+- 不猜站点结构：不写任何**站点** selector。文字输入走「运行时给页面上的
+  input 打自己的标记（``data-wq-field`` / ``data-wq-btn``）再按标记填写」，
+  标记由本模块现场生成、下一帧即失效，因此上游改版不需要改本模块。
+  坐标点击只用于二维码 / 图形验证码这类无法用文字表达的控件。
 - 日志只记 session 前缀 / provider / status，绝不打印画面、URL 参数与 cookie。
+
+为什么不再「一切靠坐标点击」（2026-11-12 线上实证）
+--------------------------------------------------
+第一版让用户点缩略图坐标来聚焦输入框、再按键输入。实测 longcat 的美团
+passport 登录页里，「动态码」输入框只有 **176×18 CSS 像素**，缩到管理端
+面板（约 0.38 倍）后只剩 7 像素高，鼠标几乎不可能点中；点不中就相当于
+没聚焦，后续输入全部丢失——用户看到的现象就是「根本登录不上」。
+所以文字输入改为按字段填写（``fill_field``），坐标只保留作兜底。
 """
 
 from __future__ import annotations
@@ -43,6 +53,15 @@ LOGIN_SHOT_QUALITY = 62
 
 # 连续无操作的自动释放时间（秒）：防止浏览器上下文长期占用内存。
 LOGIN_SESSION_IDLE_SECONDS = 300
+
+# 读取页面表单结构的超时（秒）：页面卡住时不能让整帧请求被拖死。
+LOGIN_INVENTORY_TIMEOUT = 3.0
+
+# 打开登录页：容器出口网络偶发不通（实测出现过 chrome-error://chromewebdata/），
+# 一次失败就给用户错误页等于「登录不上」，所以重试一次。
+# 注意总耗时必须留在 Go 侧 45s 超时之内：2 次 × 18s + 退避 + 首帧等待 ≈ 40s。
+LOGIN_OPEN_ATTEMPTS = 2
+LOGIN_GOTO_TIMEOUT_MS = 18000
 
 ContextFactory = Callable[[Optional[str], Optional[str]], Awaitable[Any]]
 
@@ -139,13 +158,23 @@ class LoginSessionRegistry:
             success_url_prefix=success_url_prefix,
             login_url=login_url,
         )
+        # 打开页面：容器出口网络偶发不通（实测出现过 chrome-error://chromewebdata/），
+        # 一次失败就给用户一个错误页等于「登录不上」，所以重试两次再放弃。
+        for attempt in range(LOGIN_OPEN_ATTEMPTS):
+            try:
+                await page.goto(login_url, wait_until="domcontentloaded", timeout=LOGIN_GOTO_TIMEOUT_MS)
+                break
+            except Exception:
+                if attempt == LOGIN_OPEN_ATTEMPTS - 1:
+                    # 打开失败也要让用户看到当前画面（可能是空白页），
+                    # 由前端「刷新画面」重试；这里不抛，避免整条链路 5xx。
+                    break
+                await page.wait_for_timeout(1200)
         try:
-            await page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
             # SPA 登录页在 domcontentloaded 之后才渲染并跳转（实测 longcat 首帧
             # 仍停在 /platform/usage 的骨架页），稍等再截首帧，否则用户看到白屏。
             await page.wait_for_timeout(1500)
         except Exception:
-            # 打开失败也要让用户看到当前画面（可能是空白页），由前端「重新加载」重试。
             pass
 
         async with self._lock:
@@ -215,10 +244,18 @@ class LoginSessionRegistry:
 
 
 async def capture(session: LoginSession) -> str:
-    """截当前视口，返回 base64 JPEG（不带 data: 前缀）。"""
-    raw = await session.page.screenshot(
-        type="jpeg", quality=LOGIN_SHOT_QUALITY, full_page=False
-    )
+    """截当前视口，返回 base64 JPEG（不带 data: 前缀）。
+
+    截图失败不抛异常：页面卡住或正在跳转时截图可能超时，抛出去就变成前端看到的
+    5xx（正是被投诉的那种「一点就报错」）。返回空串，前端显示「正在打开登录页…」
+    并在下一轮轮询自然恢复。
+    """
+    try:
+        raw = await session.page.screenshot(
+            type="jpeg", quality=LOGIN_SHOT_QUALITY, full_page=False, timeout=10000
+        )
+    except Exception:  # noqa: BLE001
+        return ""
     return base64.b64encode(raw).decode("ascii")
 
 
@@ -269,6 +306,215 @@ async def snapshot_storage_state(session: LoginSession) -> str:
 
     state = await session.context.storage_state()
     return json.dumps(state)
+
+
+# ---------------------------------------------------------------------------
+# 通用表单识别：把页面上的输入框与按钮报给前端，让用户像填普通表单一样填
+# ---------------------------------------------------------------------------
+
+# 为什么要遍历影子树：美团 passport 把登录表单放在 shadow root 里，
+# document.querySelectorAll('input') 返回空数组（2026-11-12 线上实测）。
+# 遍历时给命中的元素打上本模块自己的标记，之后按标记定位——标记是现场生成的，
+# 不依赖任何站点结构，也不写站点选择器。
+_LOGIN_INVENTORY_JS = r"""() => {
+  const MAX_FIELDS = 12;
+  const MAX_BUTTONS = 24;
+  const SHORT = 18;
+
+  const clean = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width <= 2 || r.height <= 2) return false;
+    const cs = getComputedStyle(el);
+    if (!cs || cs.visibility === 'hidden' || cs.display === 'none') return false;
+    return Number(cs.opacity || 1) > 0.05;
+  };
+  const stamp = (el, attr, i) => { try { el.setAttribute(attr, String(i)); } catch (e) {} };
+
+  const fields = [];
+  const buttons = [];
+  const seen = new Set();
+
+  // 输入框：可填的文本框只在可见时报；勾选框/单选框即使被样式藏起来（0×0 自定义
+  // 圆圈）也要报 —— 「请先阅读并勾选用户协议」是登录必经项，漏了就等于登不进去。
+  const collectInput = (el) => {
+    const type = String(el.type || 'text').toLowerCase();
+    if (type === 'hidden') return;
+    const isChoice = type === 'checkbox' || type === 'radio';
+    const shown = visible(el);
+    if (!shown && !isChoice) return;
+    if (fields.length >= MAX_FIELDS) return;
+
+    // 名字优先级：勾选项优先取它旁边的人类可读文字（「我已阅读并同意…」），
+    // 文本框才用 placeholder。绝不把 name/id 当成给用户看的名字
+    // （那会显示成 inputChecked 这种机器名）。
+    let label = '';
+    if (isChoice) {
+      const box = el.closest ? el.closest('label') : null;
+      if (box) label = clean(box.textContent);
+      if (!label) {
+        let anc = el.parentElement;
+        for (let depth = 0; depth < 3 && anc && !label; depth += 1) {
+          const t = clean(anc.textContent);
+          // 只认「这个容器里就我一个控件」的文字；否则会抓到一整块表单的拼接文字。
+          let peers = 0;
+          try { peers = anc.querySelectorAll('input,textarea,select').length; } catch (e) { peers = 9; }
+          if (peers <= 1 && t.length > 0 && t.length <= 40) label = t;
+          anc = anc.parentElement;
+        }
+      }
+    }
+    if (!label) {
+      label = clean(el.placeholder) || clean(el.getAttribute('aria-label'));
+    }
+    if (!label && isChoice) label = '勾选项 ' + (fields.length + 1);
+    if (!label) label = clean(el.name) || clean(el.id);
+    if (!label && !shown) return;
+
+    stamp(el, 'data-wq-field', fields.length);
+    fields.push({
+      index: fields.length,
+      type: type,
+      label: (label || ('输入框 ' + (fields.length + 1))).slice(0, 40),
+      filled: isChoice ? !!el.checked : clean(el.value).length > 0,
+      masked: type === 'password',
+    });
+  };
+
+  const collectButton = (el) => {
+    if (buttons.length >= MAX_BUTTONS) return;
+    let clickable = el.tagName === 'BUTTON' || el.tagName === 'A'
+      || el.getAttribute('role') === 'button';
+    if (!clickable) {
+      const cs = getComputedStyle(el);
+      clickable = !!cs && cs.cursor === 'pointer';
+    }
+    if (!clickable || !visible(el)) return;
+    // 只认「自己直接持有文字」的最内层元素，避免把整块容器当按钮。
+    const own = clean(Array.from(el.childNodes)
+      .filter((n) => n.nodeType === 3)
+      .map((n) => n.textContent).join(''));
+    if (!own || own.length > SHORT || seen.has(own)) return;
+    seen.add(own);
+    stamp(el, 'data-wq-btn', buttons.length);
+    buttons.push({ index: buttons.length, text: own.slice(0, 40) });
+  };
+
+  const walk = (root) => {
+    let nodes;
+    try { nodes = root.querySelectorAll('*'); } catch (e) { return; }
+    for (const el of nodes) {
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') collectInput(el);
+      else collectButton(el);
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  };
+
+  walk(document);
+  return { fields: fields, buttons: buttons };
+}"""
+
+
+async def describe_form(session: "LoginSession") -> dict:
+    """返回当前页面的可见输入框与可点按钮（字段顺序即 DOM 顺序）。
+
+    每次调用都会重新给元素打标记，因此返回的 index 只对「紧随其后」的一次
+    填写/点击有效；调用方应把 label / text 一起带回来校验，防止页面重排后
+    点错元素。
+    """
+    try:
+        # 页面跳转/卡死时 evaluate 可能长时间不返回，这里必须设上限：
+        # 否则整帧请求（截图 + 表单）会被一个卡住的页面拖死，用户看到画面不刷新。
+        result = await asyncio.wait_for(
+            session.page.evaluate(_LOGIN_INVENTORY_JS), timeout=LOGIN_INVENTORY_TIMEOUT
+        )
+    except Exception:  # noqa: BLE001 - 页面跳转中读不到就当没有表单
+        return {"fields": [], "buttons": []}
+    if not isinstance(result, dict):
+        return {"fields": [], "buttons": []}
+    fields = result.get("fields") or []
+    buttons = result.get("buttons") or []
+    return {
+        "fields": fields if isinstance(fields, list) else [],
+        "buttons": buttons if isinstance(buttons, list) else [],
+    }
+
+
+def _pick_inventory(items: list, index: int, expected: str, key: str) -> Optional[int]:
+    """在清单里挑出目标元素的下标。
+
+    优先按 label / text 精确匹配（页面重绘后下标会变，文字不会），
+    只有匹配不到且没给文字时才退回下标。返回 None 表示清单里已经没有它。
+    """
+    if expected:
+        for pos, item in enumerate(items):
+            if str(item.get(key) or "") == expected:
+                return pos
+        return None
+    if 0 <= index < len(items):
+        return index
+    return None
+
+
+async def fill_field(
+    session: "LoginSession", index: int, text: str, expected_label: str = ""
+) -> bool:
+    """把文字填进指定的可见输入框，返回是否真的填进去了。
+
+    用 ``locator.fill`` 而不是 ``keyboard.type``：后者要求元素已获得焦点，
+    而让用户点中 7 像素高的缩略图去聚焦本身就不可靠（2026-11-12 线上已踩）。
+    ``fill`` 会先聚焦再整体赋值并派发 input 事件，React 受控组件同样生效。
+    """
+    inventory = await describe_form(session)
+    pos = _pick_inventory(inventory["fields"], index, expected_label, "label")
+    if pos is None:
+        return False
+    locator = session.page.locator('[data-wq-field="%d"]' % pos).first
+    await locator.fill(text, timeout=10000)
+    return True
+
+
+async def click_button(session: "LoginSession", index: int, expected_text: str = "") -> bool:
+    """点击指定的可见按钮，返回是否真的点到了（点之前按文字核对过）。"""
+    inventory = await describe_form(session)
+    pos = _pick_inventory(inventory["buttons"], index, expected_text, "text")
+    if pos is None:
+        return False
+    locator = session.page.locator('[data-wq-btn="%d"]' % pos).first
+    await locator.click(timeout=10000)
+    return True
+
+
+# 勾选/取消勾选一个 checkbox / radio。
+# 为什么不用 locator.check()：这类元素常被样式做成 0×0 的自定义圆圈，
+# Playwright 的可操作性检查会判它不可见而直接失败；原生 click 不受此限制。
+_LOGIN_TOGGLE_JS = r"""(idx) => {
+  const find = (root) => {
+    let hit = null;
+    try { hit = root.querySelector('[data-wq-field="' + idx + '"]'); } catch (e) { hit = null; }
+    if (hit) return hit;
+    let nodes;
+    try { nodes = root.querySelectorAll('*'); } catch (e) { return null; }
+    for (const el of nodes) {
+      if (el.shadowRoot) { const r = find(el.shadowRoot); if (r) return r; }
+    }
+    return null;
+  };
+  const el = find(document);
+  if (!el) return null;
+  el.click();
+  return !!el.checked;
+}"""
+
+
+async def toggle_field(session: "LoginSession", index: int, expected_label: str = "") -> bool:
+    """勾选 / 取消勾选指定项，返回是否真的操作到了。"""
+    inventory = await describe_form(session)
+    pos = _pick_inventory(inventory["fields"], index, expected_label, "label")
+    if pos is None:
+        return False
+    await session.page.evaluate(_LOGIN_TOGGLE_JS, pos)
+    return True
 
 
 def account_label(session: LoginSession, fallback: str = "") -> str:

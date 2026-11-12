@@ -217,7 +217,10 @@ func (h *CNProviderHandler) GetWebConsoleLoginFrame(c *gin.Context) {
 }
 
 // webConsoleLoginActionRequest 是一次远程操作的请求体。
-// kind 决定使用哪个字段：tap(x,y) / type(text) / key(key) / scroll(delta_y) / reload。
+// kind 决定使用哪个字段：tap(x,y) / type(text) / key(key) / scroll(delta_y) / reload /
+// fill(index,label,text) / click(index,text)。
+// fill 与 click 用 label / text 定位元素，index 只是兜底提示 —— 页面重绘会让
+// 下标整体位移，只认下标就会操作到错误的元素。
 type webConsoleLoginActionRequest struct {
 	Kind   string  `json:"kind"`
 	X      float64 `json:"x"`
@@ -225,6 +228,8 @@ type webConsoleLoginActionRequest struct {
 	Text   string  `json:"text"`
 	Key    string  `json:"key"`
 	DeltaY float64 `json:"delta_y"`
+	Index  int     `json:"index"`
+	Label  string  `json:"label"`
 }
 
 // PostWebConsoleLoginAction 把点击 / 输入 / 回车 / 滚动 / 重载转发到登录页面。
@@ -246,6 +251,8 @@ func (h *CNProviderHandler) PostWebConsoleLoginAction(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	sessionID := c.Param("sessionId")
+	// fill / click 由 worker 回传刷新后的整帧，前端可直接更新表单与画面。
+	var frame *service.WebConsoleRemoteLoginFrame
 	switch req.Kind {
 	case "tap":
 		err = h.webConsoleRemoteLoginService.Tap(ctx, accountID, sessionID, req.X, req.Y)
@@ -257,12 +264,22 @@ func (h *CNProviderHandler) PostWebConsoleLoginAction(c *gin.Context) {
 		err = h.webConsoleRemoteLoginService.Scroll(ctx, accountID, sessionID, req.DeltaY)
 	case "reload":
 		err = h.webConsoleRemoteLoginService.Reload(ctx, accountID, sessionID)
+	case "fill":
+		frame, err = h.webConsoleRemoteLoginService.FillField(ctx, accountID, sessionID, req.Label, req.Text, req.Index)
+	case "click":
+		frame, err = h.webConsoleRemoteLoginService.ClickButton(ctx, accountID, sessionID, req.Text, req.Index)
+	case "toggle":
+		frame, err = h.webConsoleRemoteLoginService.ToggleField(ctx, accountID, sessionID, req.Label, req.Index)
 	default:
 		response.BadRequest(c, "Unknown action kind")
 		return
 	}
 	if err != nil {
 		writeWebConsoleRemoteLoginError(c, err)
+		return
+	}
+	if frame != nil {
+		response.Success(c, frame)
 		return
 	}
 	response.Success(c, gin.H{"ok": true})

@@ -28,6 +28,11 @@ from adapters.base import PROVIDERS, BaseAdapter, ProbeRequest, ProbeResult
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("web-quota-worker")
 
+# 动作完成后的沉淀时间（秒）：点按钮 / 填字段之后，页面往往还要再渲染一拍
+# （美团 passport 切到短信表单要几百毫秒）。等不及就回一帧空画面，
+# 用户会以为「点了没反应」。
+LOGIN_ACTION_SETTLE_SECONDS = 0.9
+
 # 仅记录非敏感字段，绝不打印 storage_state / 密码 / cookie。
 logging.getLogger("web-quota-worker").addFilter(
     lambda record: True  # 保留默认；敏感字段由代码层永不构造进日志
@@ -261,11 +266,15 @@ from login_sessions import (  # noqa: E402  (路由段集中在此，便于审�
     LoginSessionError,
     LoginSessionRegistry,
     capture,
+    click_button,
+    describe_form,
+    fill_field,
     press_key,
     reload as reload_login_page,
     scroll as scroll_login_page,
     snapshot_storage_state,
     tap as tap_login_page,
+    toggle_field,
     type_text,
 )
 
@@ -302,9 +311,20 @@ def _login_view(session) -> dict:
         "provider": session.provider,
         "status": "authenticated" if session.authenticated() else "pending",
         "url": session.page.url,
-        "viewport": {"width": LOGIN_VIEWPORT_WIDTH, "height": LOGIN_VIEWPORT_HEIGHT},
+        "viewport_width": LOGIN_VIEWPORT_WIDTH,
+        "viewport_height": LOGIN_VIEWPORT_HEIGHT,
         "expires_in": LOGIN_SESSION_TTL_SECONDS,
     }
+
+
+async def _login_view_with_form(session) -> dict:
+    """在会话视图上附带当前页面的输入框 / 按钮清单。
+
+    前端的表单区直接按这两份清单渲染，用户填真表单即可，不必去点缩略图坐标。
+    """
+    view = _login_view(session)
+    view.update(await describe_form(session))
+    return view
 
 
 @app.post("/v1/login/start")
@@ -331,7 +351,7 @@ async def login_start(request: Request):
         logger.warning("login provider=%s status=start_failed error=%s", provider, type(exc).__name__)
         return JSONResponse(status_code=502, content={"error": "login_session_start_failed"})
 
-    view = _login_view(session)
+    view = await _login_view_with_form(session)
     view["screenshot"] = screenshot
     logger.info("login provider=%s status=started", provider)
     return view
@@ -349,7 +369,7 @@ async def login_state(session_id: str, request: Request):
         logger.warning("login status=frame_failed error=%s", type(exc).__name__)
         return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
 
-    view = _login_view(session)
+    view = await _login_view_with_form(session)
     view["screenshot"] = screenshot
     return view
 
@@ -384,6 +404,118 @@ async def login_type(session_id: str, request: Request):
     except LoginSessionError as exc:
         return _session_error_response(exc)
     return {"ok": True}
+
+
+@app.post("/v1/login/{session_id}/fill")
+async def login_fill(session_id: str, request: Request):
+    """把文字填进页面上的某个输入框（按 label 定位，不依赖坐标）。
+
+    返回刷新后的整帧，前端据此立刻更新表单与画面，不必等下一次轮询。
+    """
+    _require_token(request)
+    payload = await _json_body(request)
+    text = payload.get("text")
+    if not isinstance(text, str) or len(text) > 512:
+        raise HTTPException(status_code=422, detail="text must be a string under 512 chars")
+    label = str(payload.get("label") or "")
+    try:
+        index = int(payload.get("index") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="index must be an integer")
+
+    applied = False
+    try:
+        session = await _login_registry.get(session_id)
+        applied = await fill_field(session, index, text, label)
+        if applied:
+            # 填完稍等一拍：框架要把值回写到 UI，立刻截图会拍到旧状态。
+            await asyncio.sleep(LOGIN_ACTION_SETTLE_SECONDS)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+    except Exception as exc:  # noqa: BLE001 - 不把内部异常抛给前端
+        logger.warning("login status=fill_failed error=%s", type(exc).__name__)
+    logger.info("login status=fill applied=%s", applied)
+
+    try:
+        view = await _login_view_with_form(session)
+        view["screenshot"] = await capture(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("login status=frame_failed error=%s", type(exc).__name__)
+        return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
+    view["applied"] = applied
+    return view
+
+
+@app.post("/v1/login/{session_id}/click")
+async def login_click(session_id: str, request: Request):
+    """点击页面上的某个按钮（按按钮文字定位）。"""
+    _require_token(request)
+    payload = await _json_body(request)
+    text = str(payload.get("text") or "")
+    try:
+        index = int(payload.get("index") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="index must be an integer")
+
+    applied = False
+    try:
+        session = await _login_registry.get(session_id)
+        applied = await click_button(session, index, text)
+        if applied:
+            # 点完要等页面完成切换：美团 passport 切到短信表单有明显延迟，
+            # 等不及就回一帧「没有任何输入框」，用户会以为点坏了。
+            await asyncio.sleep(LOGIN_ACTION_SETTLE_SECONDS)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("login status=click_failed error=%s", type(exc).__name__)
+    logger.info("login status=click applied=%s", applied)
+
+    try:
+        view = await _login_view_with_form(session)
+        view["screenshot"] = await capture(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("login status=frame_failed error=%s", type(exc).__name__)
+        return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
+    view["applied"] = applied
+    return view
+
+
+@app.post("/v1/login/{session_id}/toggle")
+async def login_toggle(session_id: str, request: Request):
+    """勾选 / 取消勾选页面上的勾选项（如「我已阅读并同意用户协议」）。
+
+    这一项漏了会直接把登录拦死：点登录只弹一句「请先阅读并勾选用户协议」。
+    页面上这个勾选框通常是个十几像素的小圆圈，缩到面板里更小，点不中。
+    """
+    _require_token(request)
+    payload = await _json_body(request)
+    label = str(payload.get("label") or "")
+    try:
+        index = int(payload.get("index") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="index must be an integer")
+
+    applied = False
+    try:
+        session = await _login_registry.get(session_id)
+        applied = await toggle_field(session, index, label)
+        if applied:
+            await asyncio.sleep(LOGIN_ACTION_SETTLE_SECONDS)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("login status=toggle_failed error=%s", type(exc).__name__)
+    logger.info("login status=toggle applied=%s", applied)
+
+    try:
+        view = await _login_view_with_form(session)
+        view["screenshot"] = await capture(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("login status=frame_failed error=%s", type(exc).__name__)
+        return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
+    view["applied"] = applied
+    return view
 
 
 @app.post("/v1/login/{session_id}/key")

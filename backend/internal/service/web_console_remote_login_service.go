@@ -66,6 +66,29 @@ type WebConsoleRemoteLoginFrame struct {
 	ViewportWidth  int    `json:"viewport_width"`
 	ViewportHeight int    `json:"viewport_height"`
 	ExpiresIn      int64  `json:"expires_in"`
+	// Fields / Buttons 是页面上的可见输入框与按钮清单。
+	// 存在的理由：让用户点缩略图坐标去聚焦输入框不可靠（美团 passport 的
+	// 「动态码」框只有 176×18 CSS 像素，缩到面板后约 7 像素高），
+	// 改为把页面表单报给前端，由用户按字段填写。
+	Fields  []WebConsoleRemoteLoginField  `json:"fields,omitempty"`
+	Buttons []WebConsoleRemoteLoginButton `json:"buttons,omitempty"`
+	// Applied 表示本次动作是否真的落到了目标元素上（仅 fill / click 返回）。
+	Applied *bool `json:"applied,omitempty"`
+}
+
+// WebConsoleRemoteLoginField 是页面上的一个可见输入框。
+type WebConsoleRemoteLoginField struct {
+	Index  int    `json:"index"`
+	Type   string `json:"type"`
+	Label  string `json:"label"`
+	Filled bool   `json:"filled"`
+	Masked bool   `json:"masked"`
+}
+
+// WebConsoleRemoteLoginButton 是页面上的一个可点按钮。
+type WebConsoleRemoteLoginButton struct {
+	Index int    `json:"index"`
+	Text  string `json:"text"`
 }
 
 // WebConsoleRemoteLoginResult 是 Finish 的结果：登录成功并已落库，附带一次探测。
@@ -199,6 +222,60 @@ func (s *WebConsoleRemoteLoginService) Type(ctx context.Context, accountID int64
 		return err
 	}
 	return s.workerAction(ctx, sessionID, "type", map[string]any{"text": text})
+}
+
+// FillField 把文字填进页面上的指定输入框（按 label 定位，不依赖坐标）。
+//
+// 为什么不是「先点坐标聚焦再打字」：登录取证页的输入框可能只有十几像素高，
+// 缩放到管理端面板后鼠标几乎点不中，点不中就等于没聚焦、输入全部丢失
+// （2026-11-12 线上故障）。按字段填写与元素大小无关。
+func (s *WebConsoleRemoteLoginService) FillField(ctx context.Context, accountID int64, sessionID, label, text string, index int) (*WebConsoleRemoteLoginFrame, error) {
+	if len(text) > 512 {
+		return nil, fmt.Errorf("web console remote login: text too long")
+	}
+	if _, err := s.boundSession(accountID, sessionID); err != nil {
+		return nil, err
+	}
+	return s.workerActionFrame(ctx, sessionID, "fill", map[string]any{
+		"index": index,
+		"label": label,
+		"text":  text,
+	})
+}
+
+// ClickButton 点击页面上的指定按钮（按按钮文字定位，index 仅作兜底提示）。
+func (s *WebConsoleRemoteLoginService) ClickButton(ctx context.Context, accountID int64, sessionID, text string, index int) (*WebConsoleRemoteLoginFrame, error) {
+	if _, err := s.boundSession(accountID, sessionID); err != nil {
+		return nil, err
+	}
+	return s.workerActionFrame(ctx, sessionID, "click", map[string]any{
+		"index": index,
+		"text":  text,
+	})
+}
+
+// ToggleField 勾选 / 取消勾选页面上的勾选项（如「我已阅读并同意用户协议」）。
+//
+// 这一项漏了会直接把登录拦死：点登录只弹「请先阅读并勾选用户协议」。
+// 页面上这个勾选框往往是个十几像素的小圆圈，缩到面板里点不中，故必须由后端代点。
+func (s *WebConsoleRemoteLoginService) ToggleField(ctx context.Context, accountID int64, sessionID, label string, index int) (*WebConsoleRemoteLoginFrame, error) {
+	if _, err := s.boundSession(accountID, sessionID); err != nil {
+		return nil, err
+	}
+	return s.workerActionFrame(ctx, sessionID, "toggle", map[string]any{
+		"index": index,
+		"label": label,
+	})
+}
+
+// workerActionFrame 执行一次动作并取回 worker 刷新后的整帧。
+func (s *WebConsoleRemoteLoginService) workerActionFrame(ctx context.Context, sessionID, action string, payload map[string]any) (*WebConsoleRemoteLoginFrame, error) {
+	var frame WebConsoleRemoteLoginFrame
+	path := fmt.Sprintf("%s/%s/%s", webConsoleRemoteLoginPathPrefix, sessionID, action)
+	if err := s.callWorker(ctx, http.MethodPost, path, payload, &frame); err != nil {
+		return nil, err
+	}
+	return &frame, nil
 }
 
 // PressKey 发送一个白名单按键（Enter / Backspace / Tab 等）。
