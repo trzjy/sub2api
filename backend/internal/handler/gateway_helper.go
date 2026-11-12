@@ -377,7 +377,14 @@ func (h *ConcurrencyHelper) withAPIKeySlot(ctx context.Context, apiKeyID int64, 
 
 // waitForSlotWithPingTimeout waits for a concurrency slot with a custom timeout.
 func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType string, id int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool, tryImmediate bool) (func(), error) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	// timeout <= 0 表示「不等，只立即抢一次」（换号后不等，父会话 2026-11-12 裁定）。
+	// 此时**不能**给 ctx 设过期 deadline —— 过期 ctx 会让下面 tryImmediate 的
+	// 抢槽请求直接被拒（ctx 已取消），反而拿不到刚释放的槽位（外审第五轮 must_fix #3）。
+	ctx := c.Request.Context()
+	cancel := func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	}
 	defer cancel()
 
 	// 2026-11-11：客户端维度（user / 订阅分组）已改为并发满立即拒绝，不再走等待路径。

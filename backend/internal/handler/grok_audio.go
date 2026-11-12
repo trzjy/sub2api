@@ -328,9 +328,10 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 	if last != nil && slotFullCount == 0 {
 		h.handleFailoverExhausted(c, last, false)
 	} else if slotFullCount > 0 {
-		// 纯槽位失败（无上游错误）走到循环末尾：必须写出账号维度并发终态，
-		// 不能什么都不写（外审第三轮 must_fix #1：漏写响应 = 客户端挂死）。
-		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.AccountSlotConcurrencyLimit)
+		// 走到循环末尾说明是**固定次数上限用尽**，不是「选号确认无候选」——
+		// 此时写「无可用账号」而不是「并发已满」，避免把次数上限误报成候选耗尽
+		// （外审第五轮 must_fix #1）；但**必须写响应**，否则客户端挂死。
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 	}
 }
 

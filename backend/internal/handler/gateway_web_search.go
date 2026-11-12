@@ -151,6 +151,12 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		}
 	}()
 
+	// lastFailureWasSlot：最后一次失败是否来自账号槽位（而非上游错误）。
+	lastFailureWasSlot := false
+	// exhaustedByNoCandidate：选号是否明确返回「无候选」。
+	// 只有它为真时，槽位终态才成立——固定次数上限用尽**不是**候选耗尽
+	// （外审第五轮 must_fix #1）。
+	exhaustedByNoCandidate := false
 	// First attempt + failover accounts. 上限只是死循环兜底：**候选耗尽由「选号无候选」判定**
 	// （failedAccounts 排除集合把所有候选排完），不以尝试次数代替耗尽——
 	// 否则池里 4 个以上账号时，前 3 个满、第 4 个空闲也会被误报成耗尽（外审第三轮 must_fix #1）。
@@ -159,6 +165,8 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 			c.Request.Context(), groupID, "", searchModel, failedAccounts, "", 0,
 		)
 		if selectErr != nil {
+			// 选号明确返回无候选 → 这才是「候选耗尽」。
+			exhaustedByNoCandidate = true
 			if attempt == 0 {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{
 					"type":    "scheduling_error",
@@ -187,6 +195,8 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 			if acquireErr != nil {
 				// 标记「本次请求已经等过一次且没等到」：后续候选只做立即抢槽，不再排队等待。
 				markConcurrencySlotWaitExhausted(c)
+				// 本次失败是槽位失败（终态判定用）。
+				lastFailureWasSlot = true
 				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
 				if recordConcurrencySlotFailure(failedAccounts, selected.Account.ID, &slotFullCount) {
@@ -209,6 +219,9 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		if err == nil {
 			break
 		}
+		// 本账号已成功占槽、失败来自上游：终态要反映这个真实错误，
+		// 不能被**更早**的槽位失败遮蔽成「并发已满」（外审第五轮 must_fix #4）。
+		lastFailureWasSlot = false
 		var failoverErr *service.UpstreamFailoverError
 		if !errors.As(err, &failoverErr) || !failoverErr.ShouldRetryNextAccount() {
 			break
@@ -221,7 +234,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		account = nil
 	}
 	if err != nil || nativeResp == nil {
-		if slotFullCount > 0 {
+		if lastFailureWasSlot && exhaustedByNoCandidate && slotFullCount > 0 {
 			// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 			// 不能落到下面的 502 分支——那会破坏账号并发终点契约。
 			c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{
@@ -334,11 +347,19 @@ func (h *GatewayHandler) acquireWebSearchAccountSlot(
 		}
 	}
 	streamStarted := false
+	waitTimeout := selected.WaitPlan.Timeout
+	if concurrencySlotWaitExhausted(c) {
+		// 换号后不等（用户 2026-11-12 裁定）：等待超时设为 0 —— 底层
+		// waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
+		// （刚被排除的账号可能刚好释放了槽位），抢不到就立刻失败换下一个。
+		// 否则多个满槽候选会**逐个累加等待时间**（外审第四轮 must_fix #2）。
+		waitTimeout = 0
+	}
 	slotRelease, err := h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
 		c,
 		account.ID,
 		selected.WaitPlan.MaxConcurrency,
-		selected.WaitPlan.Timeout,
+		waitTimeout,
 		false,
 		&streamStarted,
 	)

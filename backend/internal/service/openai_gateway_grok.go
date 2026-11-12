@@ -169,8 +169,13 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		// （见上方 upstreamModel := account.GetMappedModel(originalModel)）。
 		// 上游拒绝时若不换号，改写造成的不兼容会被当成客户自己的错误直接透传。
 		// 内容审核拒绝仍按既有规则不换号（先判，保留该例外）。
+		// AllowMappingInducedRetry 有副作用（占用一次请求级预算），必须放在最后：
+		// 只有确实判定为改写归因时才消耗预算。该路径由 OpenAI Responses 主循环转发，
+		// 不走 failoverOpenAIUpstreamHTTPError，因此预算检查必须在这里补上，
+		// 否则带映射的客户参数 400 会绕过预算扇出到整个账号池（外审第五轮 must_fix #5）。
 		mappingInduced := !isGrokContentPolicyRejection(resp.StatusCode, respBody) &&
-			IsMappingInducedRejection(account, originalModel, resp.StatusCode)
+			IsMappingInducedRejection(account, originalModel, resp.StatusCode) &&
+			AllowMappingInducedRetry(c)
 		grokFailover := s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody)
 
 		kind := "http_error"
