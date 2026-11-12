@@ -75,3 +75,22 @@ func ResolveWebConsoleQuotaProvider(account *Account) string {
 	}
 	return ""
 }
+
+// ResolveWebConsoleQuotaLoginModes 返回该账号控制台上游实际支持的登录方式
+// （按优先推荐顺序）。返回空切片表示非本链路或不支持任何交互登录。
+//
+// 唯一事实源：webConsoleQuotaProviderEndpointTable[provider].loginModes。
+// 适配器与管理端从此处取，禁止各自按 provider 名字再写一份判断。
+func ResolveWebConsoleQuotaLoginModes(account *Account) []string {
+	provider := ResolveWebConsoleQuotaProvider(account)
+	if provider == "" {
+		return nil
+	}
+	endpoints, ok := webConsoleQuotaProviderEndpointTable[provider]
+	if !ok || len(endpoints.loginModes) == 0 {
+		return nil
+	}
+	out := make([]string, len(endpoints.loginModes))
+	copy(out, endpoints.loginModes)
+	return out
+}

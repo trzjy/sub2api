@@ -113,18 +113,17 @@
       <template v-if="needsInteractiveAuth">
         <span
           data-test="wcq-auth-needed"
-          class="inline-flex items-center rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+          class="inline-flex items-center rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300"
         >
           {{ t('admin.accounts.webConsoleQuota.needLogin') }}
         </span>
         <button
           type="button"
           data-test="wcq-auth"
-          class="rounded px-1.5 py-0.5 text-[10px] font-medium leading-4 text-amber-700 transition-colors hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-amber-300 dark:hover:bg-amber-900/30"
-          :disabled="authStarting || authPolling"
-          @click="handleStartAuth"
+          class="rounded px-1.5 py-0.5 text-[10px] font-medium leading-4 text-red-700 transition-colors hover:bg-red-50 dark:text-red-300 dark:hover:bg-red-900/30"
+          @click="emit('relogin')"
         >
-          {{ t('admin.accounts.webConsoleQuota.authStart') }}
+          {{ t('admin.accounts.webConsoleQuota.relogin') }}
         </button>
       </template>
 
@@ -179,14 +178,9 @@ export default {}
 </script>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import {
-  pollWebConsoleAuth,
-  probeWebConsoleQuota,
-  startWebConsoleAuth,
-  type WebConsoleQuotaProbeResult
-} from '@/api/admin/cnProviders'
+import { probeWebConsoleQuota, type WebConsoleQuotaProbeResult } from '@/api/admin/cnProviders'
 import type { Account, WebConsoleQuotaLot, WebConsoleQuotaSnapshot, WebConsoleQuotaTier } from '@/types'
 import UsageProgressBar from './UsageProgressBar.vue'
 
@@ -194,14 +188,17 @@ const props = defineProps<{
   account: Account
 }>()
 
-const emit = defineEmits<{ (e: 'updated'): void }>()
+const emit = defineEmits<{
+  (e: 'updated'): void
+  // 登录失效时由外层打开编辑弹窗重新登录：登录画面在服务端，
+  // 单元格这一行放不下画面，跳转到编辑面板是唯一合理入口。
+  (e: 'relogin'): void
+}>()
 
 const { t } = useI18n()
 
 const SNAPSHOT_STALE_MS = 15 * 60 * 1000
 const AUTO_PROBE_DEBOUNCE_MS = 5 * 60 * 1000
-const AUTH_POLL_INTERVAL_MS = 3 * 1000
-const AUTH_POLL_MAX_MS = 10 * 60 * 1000
 
 const provider = computed(() => props.account.web_console_quota_provider ?? '')
 
@@ -218,19 +215,6 @@ const snapshot = computed<WebConsoleQuotaSnapshot | undefined>(
 
 const loading = ref(false)
 const error = ref<string | null>(null)
-const authStarting = ref(false)
-const authPolling = ref(false)
-
-let pollTimer: ReturnType<typeof setInterval> | null = null
-let pollStartedAt = 0
-
-const stopPolling = () => {
-  if (pollTimer !== null) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-  authPolling.value = false
-}
 
 const extractErrorMessage = (e: unknown): string => {
   const err = e as {
@@ -371,51 +355,6 @@ const handleProbe = async () => {
   }
 }
 
-// ---- 交互登录轮询 ----
-
-const startAuthPolling = (sessionId: string) => {
-  stopPolling()
-  authPolling.value = true
-  pollStartedAt = Date.now()
-  pollTimer = setInterval(async () => {
-    if (Date.now() - pollStartedAt > AUTH_POLL_MAX_MS) {
-      stopPolling()
-      error.value = '验证登录超时，请重新发起'
-      return
-    }
-    try {
-      const result = await pollWebConsoleAuth(props.account.id, sessionId)
-      if (result.status === 'succeeded') {
-        stopPolling()
-        authStarting.value = false
-        applyProbeResult(result.probe)
-        error.value = null
-        emit('updated')
-      } else if (result.status === 'failed') {
-        stopPolling()
-        authStarting.value = false
-        error.value = result.message || t('admin.accounts.webConsoleQuota.authFailed')
-      }
-    } catch (e) {
-      // 单次轮询失败不终止：继续等待直到上限，避免瞬时网络抖动中断登录流程。
-      error.value = extractErrorMessage(e)
-    }
-  }, AUTH_POLL_INTERVAL_MS)
-}
-
-const handleStartAuth = async () => {
-  if (authStarting.value || authPolling.value) return
-  authStarting.value = true
-  error.value = null
-  try {
-    const { session_id } = await startWebConsoleAuth(props.account.id)
-    startAuthPolling(session_id)
-  } catch (e) {
-    error.value = extractErrorMessage(e)
-    authStarting.value = false
-  }
-}
-
 // ---- 生命周期 ----
 
 const snapshotIsStale = computed(() => {
@@ -435,16 +374,10 @@ onMounted(() => {
   handleProbe()
 })
 
-onUnmounted(() => {
-  stopPolling()
-})
-
-// 账号 id 变化：清理轮询与本地态，避免旧会话结果污染新账号。
+// 账号 id 变化：清理本地态，避免旧会话结果污染新账号。
 watch(
   () => props.account.id,
   () => {
-    stopPolling()
-    authStarting.value = false
     snapshotOverride.value = null
     error.value = null
     loading.value = false

@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"errors"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -32,6 +34,9 @@ type CNProviderHandler struct {
 	// 用 Setter 注入，不改既有构造函数签名，避免破坏 wire_gen 既有调用。
 	webConsoleQuotaService *service.WebConsoleQuotaService
 	webConsoleAuthService  *service.WebConsoleAuthService
+	// webConsoleRemoteLoginService 是服务端登录会话（扫码/短信）编排；
+	// 与 webConsoleAuthService 的本机 helper 通道并存，未注入时对应端点返回 not enabled。
+	webConsoleRemoteLoginService *service.WebConsoleRemoteLoginService
 }
 
 func NewCNProviderHandler(
@@ -156,4 +161,163 @@ func (h *CNProviderHandler) GetWebConsoleAuthStatus(c *gin.Context) {
 		return
 	}
 	response.Success(c, result)
+}
+
+// ---------------------------------------------------------------------------
+// 服务端登录会话（扫码 / 短信 / 滑块）
+//
+// 与 /web-console-auth/*（本机 helper 弹窗）并存：本组接口把登录画面搬到
+// 服务端，管理端网页直接显示画面并转发点击/输入，不要求用户在本机装工具。
+// ---------------------------------------------------------------------------
+
+// SetWebConsoleRemoteLoginService 注入服务端登录会话编排（可选）。
+func (h *CNProviderHandler) SetWebConsoleRemoteLoginService(svc *service.WebConsoleRemoteLoginService) {
+	if h == nil {
+		return
+	}
+	h.webConsoleRemoteLoginService = svc
+}
+
+// StartWebConsoleLogin 打开一扇服务端登录画面，返回首帧截图。
+func (h *CNProviderHandler) StartWebConsoleLogin(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if h == nil || h.webConsoleRemoteLoginService == nil {
+		response.BadRequest(c, "web console remote login service is not enabled")
+		return
+	}
+	frame, err := h.webConsoleRemoteLoginService.Start(c.Request.Context(), accountID)
+	if err != nil {
+		writeWebConsoleRemoteLoginError(c, err)
+		return
+	}
+	response.Success(c, frame)
+}
+
+// GetWebConsoleLoginFrame 拉取最新画面。
+func (h *CNProviderHandler) GetWebConsoleLoginFrame(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if h == nil || h.webConsoleRemoteLoginService == nil {
+		response.BadRequest(c, "web console remote login service is not enabled")
+		return
+	}
+	frame, err := h.webConsoleRemoteLoginService.Frame(c.Request.Context(), accountID, c.Param("sessionId"))
+	if err != nil {
+		writeWebConsoleRemoteLoginError(c, err)
+		return
+	}
+	response.Success(c, frame)
+}
+
+// webConsoleLoginActionRequest 是一次远程操作的请求体。
+// kind 决定使用哪个字段：tap(x,y) / type(text) / key(key) / scroll(delta_y) / reload。
+type webConsoleLoginActionRequest struct {
+	Kind   string  `json:"kind"`
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Text   string  `json:"text"`
+	Key    string  `json:"key"`
+	DeltaY float64 `json:"delta_y"`
+}
+
+// PostWebConsoleLoginAction 把点击 / 输入 / 回车 / 滚动 / 重载转发到登录页面。
+func (h *CNProviderHandler) PostWebConsoleLoginAction(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if h == nil || h.webConsoleRemoteLoginService == nil {
+		response.BadRequest(c, "web console remote login service is not enabled")
+		return
+	}
+	var req webConsoleLoginActionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid action payload")
+		return
+	}
+
+	ctx := c.Request.Context()
+	sessionID := c.Param("sessionId")
+	switch req.Kind {
+	case "tap":
+		err = h.webConsoleRemoteLoginService.Tap(ctx, accountID, sessionID, req.X, req.Y)
+	case "type":
+		err = h.webConsoleRemoteLoginService.Type(ctx, accountID, sessionID, req.Text)
+	case "key":
+		err = h.webConsoleRemoteLoginService.PressKey(ctx, accountID, sessionID, req.Key)
+	case "scroll":
+		err = h.webConsoleRemoteLoginService.Scroll(ctx, accountID, sessionID, req.DeltaY)
+	case "reload":
+		err = h.webConsoleRemoteLoginService.Reload(ctx, accountID, sessionID)
+	default:
+		response.BadRequest(c, "Unknown action kind")
+		return
+	}
+	if err != nil {
+		writeWebConsoleRemoteLoginError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"ok": true})
+}
+
+// FinishWebConsoleLogin 取回登录后的会话凭据并立即探测一次。
+func (h *CNProviderHandler) FinishWebConsoleLogin(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if h == nil || h.webConsoleRemoteLoginService == nil {
+		response.BadRequest(c, "web console remote login service is not enabled")
+		return
+	}
+	result, err := h.webConsoleRemoteLoginService.Finish(c.Request.Context(), accountID, c.Param("sessionId"))
+	if err != nil {
+		writeWebConsoleRemoteLoginError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// DeleteWebConsoleLogin 取消登录并释放服务端浏览器上下文。
+func (h *CNProviderHandler) DeleteWebConsoleLogin(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if h == nil || h.webConsoleRemoteLoginService == nil {
+		response.BadRequest(c, "web console remote login service is not enabled")
+		return
+	}
+	if err := h.webConsoleRemoteLoginService.Close(c.Request.Context(), accountID, c.Param("sessionId")); err != nil {
+		writeWebConsoleRemoteLoginError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"ok": true})
+}
+
+// writeWebConsoleRemoteLoginError 把服务层错误映射成明确状态码，
+// 让前端能区分「等用户操作」「会话过期」「通道未配置」。
+func writeWebConsoleRemoteLoginError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, service.ErrRemoteLoginNotApplicable):
+		response.BadRequest(c, "web console remote login not applicable")
+	case errors.Is(err, service.ErrRemoteLoginNotConfigured):
+		response.BadRequest(c, "web quota worker is not configured")
+	case errors.Is(err, service.ErrRemoteLoginSessionUnknown):
+		c.JSON(http.StatusGone, gin.H{"error": "login session expired or not found"})
+	case errors.Is(err, service.ErrRemoteLoginStepFailed):
+		c.JSON(http.StatusBadGateway, gin.H{"error": "login step failed"})
+	default:
+		response.ErrorFrom(c, err)
+	}
 }

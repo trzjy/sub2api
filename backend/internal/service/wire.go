@@ -542,6 +542,18 @@ func ProvideWebConsoleAuthService(
 	return NewWebConsoleAuthService(quota, helper, repo)
 }
 
+// ProvideWebConsoleRemoteLoginService 构造服务端登录会话编排（扫码 / 短信 / 滑块）。
+//
+// 与本机 helper 通道（ProvideWebConsoleAuthService）并存：本服务是常规路径，
+// 不依赖用户在电脑上装任何东西；helper 通道保留给强风控场景兜底。
+func ProvideWebConsoleRemoteLoginService(
+	quota *WebConsoleQuotaService,
+	repo AccountRepository,
+	cfg *config.Config,
+) *WebConsoleRemoteLoginService {
+	return NewWebConsoleRemoteLoginService(repo, quota, cfg, nil)
+}
+
 // cnQuotaAlertStoreAdapter 把 OpsService 适配为 CNQuotaLifecycleService 的
 // QuotaAlertStore 窄面（方法集直接满足接口，不新增载体）。
 type cnQuotaAlertStoreAdapter struct {
@@ -1582,6 +1594,7 @@ var ProviderSet = wire.NewSet(
 	ProvideCNQuotaLifecycleService,
 	ProvideWebConsoleQuotaService,
 	ProvideWebConsoleAuthService,
+	ProvideWebConsoleRemoteLoginService,
 	ProvideCNProviderBalanceCheckService,
 	ProvideCodeBuddyQuotaService,
 	ProvideCodeBuddyQuotaCheckService,

@@ -424,6 +424,11 @@ type Account struct {
 	//   "compshare" | "sensenova" | "longcat"；非该链路账号为空并因 omitempty 省略。
 	// 前端据此判定是否渲染 WebConsoleQuotaCell 与控制台凭据区块。
 	WebConsoleQuotaProvider string `json:"web_console_quota_provider,omitempty"`
+	// WebConsoleLoginModes 是该上游实际支持的登录方式（service.ResolveWebConsoleQuotaLoginModes
+	// 的只读投影，取值 password / qrcode / sms，按优先推荐顺序）。
+	// 前端据此决定渲染密码框、扫码面板还是短信验证码面板——无密码登录的上游
+	// 不再显示填了也无效的密码框。非该链路账号为空并因 omitempty 省略。
+	WebConsoleLoginModes []string `json:"web_console_login_modes,omitempty"`
 }
 
 // AccountQuotaDimension 是 service.QuotaDimension 的 DTO 投影（方案 §3.4）。枚举以小写
@@ -552,6 +557,8 @@ type AccountListItem struct {
 	//   "compshare" | "sensenova" | "longcat"；非该链路账号为空并因 omitempty 省略。
 	// 前端据此判定是否渲染 WebConsoleQuotaCell 与控制台凭据区块。
 	WebConsoleQuotaProvider string `json:"web_console_quota_provider,omitempty"`
+	// WebConsoleLoginModes 与完整 Account DTO 同字段同语义（该上游支持的登录方式）。
+	WebConsoleLoginModes []string `json:"web_console_login_modes,omitempty"`
 
 	ParentEmail                 string `json:"parent_email,omitempty"`
 	ParentPlanType              string `json:"parent_plan_type,omitempty"`

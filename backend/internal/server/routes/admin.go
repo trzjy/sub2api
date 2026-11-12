@@ -664,6 +664,13 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/:id/web-console-quota/probe", h.Admin.CNProvider.ProbeWebConsoleQuota)
 		accounts.POST("/:id/web-console-auth/start", h.Admin.CNProvider.StartWebConsoleAuth)
 		accounts.GET("/:id/web-console-auth/:sessionId", h.Admin.CNProvider.GetWebConsoleAuthStatus)
+		// 服务端登录会话（扫码 / 短信 / 滑块）：画面与操作全在服务端完成，
+		// 不要求用户本机安装 helper。与上面 web-console-auth/*（本机弹窗）并存。
+		accounts.POST("/:id/web-console-login/start", h.Admin.CNProvider.StartWebConsoleLogin)
+		accounts.GET("/:id/web-console-login/:sessionId/frame", h.Admin.CNProvider.GetWebConsoleLoginFrame)
+		accounts.POST("/:id/web-console-login/:sessionId/action", h.Admin.CNProvider.PostWebConsoleLoginAction)
+		accounts.POST("/:id/web-console-login/:sessionId/finish", h.Admin.CNProvider.FinishWebConsoleLogin)
+		accounts.DELETE("/:id/web-console-login/:sessionId", h.Admin.CNProvider.DeleteWebConsoleLogin)
 		accounts.GET("/:id/ollama-cloud-usage", h.Admin.Account.GetOllamaCloudUsage)
 		accounts.PUT("/:id/ollama-cloud-usage/session", h.Admin.Account.SaveOllamaCloudUsageSession)
 		accounts.DELETE("/:id/ollama-cloud-usage/session", h.Admin.Account.DeleteOllamaCloudUsageSession)

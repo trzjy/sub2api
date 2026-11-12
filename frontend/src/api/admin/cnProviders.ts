@@ -218,5 +218,90 @@ export default {
   queryBalance,
   probeWebConsoleQuota,
   startWebConsoleAuth,
-  pollWebConsoleAuth
+  pollWebConsoleAuth,
+  startWebConsoleLogin,
+  getWebConsoleLoginFrame,
+  postWebConsoleLoginAction,
+  finishWebConsoleLogin,
+  cancelWebConsoleLogin
+}
+
+// ---------------------------------------------------------------------------
+// 服务端登录会话（扫码 / 短信 / 滑块）
+//
+// 与 startWebConsoleAuth（本机 helper 弹窗）并存：本组接口把登录页搬到服务端，
+// 管理端网页直接显示画面并转发点击/输入，用户不需要在自己电脑上装任何工具。
+// ---------------------------------------------------------------------------
+
+/** 一帧登录画面（后端 service.WebConsoleRemoteLoginFrame）。 */
+export interface WebConsoleLoginFrame {
+  session_id: string
+  /** pending = 还在登录页；authenticated = 已进入控制台，可点「完成」落库。 */
+  status: 'pending' | 'authenticated'
+  /** base64 JPEG（不带 data: 前缀）。 */
+  screenshot?: string
+  url?: string
+  viewport_width: number
+  viewport_height: number
+  expires_in: number
+}
+
+/** 远程操作动作：坐标点击 / 打字 / 按键 / 滚动 / 重载。 */
+export type WebConsoleLoginAction =
+  | { kind: 'tap'; x: number; y: number }
+  | { kind: 'type'; text: string }
+  | { kind: 'key'; key: string }
+  | { kind: 'scroll'; delta_y: number }
+  | { kind: 'reload' }
+
+/** 打开一扇服务端登录画面。 */
+export async function startWebConsoleLogin(id: number): Promise<WebConsoleLoginFrame> {
+  const { data } = await apiClient.post<WebConsoleLoginFrame>(
+    `/admin/accounts/${id}/web-console-login/start`
+  )
+  return data
+}
+
+/** 拉取最新画面（前端定时轮询）。 */
+export async function getWebConsoleLoginFrame(
+  id: number,
+  sessionId: string
+): Promise<WebConsoleLoginFrame> {
+  const { data } = await apiClient.get<WebConsoleLoginFrame>(
+    `/admin/accounts/${id}/web-console-login/${sessionId}/frame`
+  )
+  return data
+}
+
+/** 把点击 / 输入 / 回车 / 滚动转发到登录页面。 */
+export async function postWebConsoleLoginAction(
+  id: number,
+  sessionId: string,
+  action: WebConsoleLoginAction
+): Promise<void> {
+  await apiClient.post(`/admin/accounts/${id}/web-console-login/${sessionId}/action`, action)
+}
+
+/** 登录完成后取回票据并立即探测；未登录时返回 status=pending。 */
+export async function finishWebConsoleLogin(
+  id: number,
+  sessionId: string
+): Promise<{
+  status: 'succeeded' | 'pending'
+  probe?: WebConsoleQuotaProbeResult
+  account_label?: string
+  message?: string
+}> {
+  const { data } = await apiClient.post<{
+    status: 'succeeded' | 'pending'
+    probe?: WebConsoleQuotaProbeResult
+    account_label?: string
+    message?: string
+  }>(`/admin/accounts/${id}/web-console-login/${sessionId}/finish`)
+  return data
+}
+
+/** 取消登录并释放服务端浏览器。 */
+export async function cancelWebConsoleLogin(id: number, sessionId: string): Promise<void> {
+  await apiClient.delete(`/admin/accounts/${id}/web-console-login/${sessionId}`)
 }

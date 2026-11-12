@@ -13,6 +13,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app.py /app/app.py
+COPY login_sessions.py /app/login_sessions.py
 COPY adapters/ /app/adapters/
 
 # 以非 root 用户运行（playwright 官方镜像内置 pwuser）
