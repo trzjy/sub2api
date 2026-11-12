@@ -367,6 +367,14 @@
             class="mt-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600"
             data-testid="web-console-login-panel"
           >
+            <!-- 打不开时先说清楚：此时画面里往往只有浏览器自己的错误页，不解释会让人以为是我们坏了 -->
+            <p
+              v-if="remoteLoginPhase === 'failed'"
+              class="mb-2 rounded-md bg-red-50 px-2 py-1.5 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300"
+              data-testid="web-console-login-failed"
+            >
+              {{ t('admin.accounts.webConsoleQuota.frameFailed') }}：{{ t('admin.accounts.webConsoleQuota.frameFailedHint') }}
+            </p>
             <div class="relative overflow-hidden rounded-md bg-gray-100 dark:bg-dark-700">
               <img
                 v-if="remoteLoginShotSrc"
@@ -376,8 +384,15 @@
                 data-testid="web-console-login-frame"
                 @click="handleRemoteLoginTap"
               />
-              <div v-else class="flex h-40 items-center justify-center text-xs text-gray-500">
-                {{ t('admin.accounts.webConsoleQuota.frameLoading') }}
+              <div v-else class="flex h-40 flex-col items-center justify-center gap-1 text-xs">
+                <!-- 打开中 / 打不开要分开说：笼统的「加载中」会让人一直等一个永远不来的画面 -->
+                <template v-if="remoteLoginPhase === 'failed'">
+                  <span class="text-red-600">{{ t('admin.accounts.webConsoleQuota.frameFailed') }}</span>
+                  <span class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.webConsoleQuota.frameFailedHint') }}</span>
+                </template>
+                <span v-else class="text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.webConsoleQuota.frameLoading') }}
+                </span>
               </div>
             </div>
             <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
@@ -391,6 +406,7 @@
               点不中就等于没聚焦、输入全丢（线上真实故障）。
             -->
             <div
+              v-if="remoteLoginPhase === 'ready'"
               class="mt-3 rounded-md bg-gray-50 p-2 dark:bg-dark-700/40"
               data-testid="web-console-login-form"
             >
@@ -4385,6 +4401,12 @@ const remoteLoginViewport = reactive({ width: 1280, height: 800 })
 const remoteLoginTyped = ref('')
 const remoteLoginMessage = ref('')
 const remoteLoginError = ref(false)
+// 页面生命周期：opening（服务端正在打开登录页）→ ready（可操作）/ failed（打不开）。
+// 与「是否已登录」是两件事：登录要人来完成，页面能不能显示是服务端的事。
+// 分开上报的原因：打开登录页要启动浏览器并等 SPA 首帧，实测 16~30 秒，
+// 早期把它塞在一个请求里同步等，前端 30 秒超时先掐断，用户看到假的
+// 「网络错误」，而且登录面板永远不出现（2026-11-13 线上故障）。
+const remoteLoginPhase = ref<'opening' | 'ready' | 'failed'>('opening')
 // 服务端页面上的输入框 / 按钮清单：用来渲染真表单。
 // 不给用户点缩略图坐标填字 —— 页面上有的输入框只有 18 CSS 像素高，
 // 缩到面板后约 7 像素，鼠标点不中就等于没聚焦、输入全丢（线上真实故障）。
@@ -4431,11 +4453,14 @@ const applyRemoteLoginFrame = (frame: {
   viewport_width?: number
   viewport_height?: number
   status?: string
+  phase?: 'opening' | 'ready' | 'failed'
+  message?: string
   fields?: Array<{ index: number; type: string; label: string; filled: boolean; masked: boolean }>
   buttons?: Array<{ index: number; text: string }>
   applied?: boolean
 }) => {
   if (frame.session_id) remoteLoginSessionId.value = frame.session_id
+  if (frame.phase) remoteLoginPhase.value = frame.phase
   remoteLoginScreenshot.value = frame.screenshot ?? ''
   remoteLoginViewport.width = frame.viewport_width || 1280
   remoteLoginViewport.height = frame.viewport_height || 800
@@ -4477,21 +4502,50 @@ const scheduleRemoteLoginPoll = () => {
 
 const handleOpenRemoteLogin = async () => {
   if (!props.account) return
+  // 先把面板打开，再去要画面。
+  // 顺序很关键：面板能不能出现，不能取决于「打开页面」那次请求成不成功——
+  // 服务端打开登录页要启动浏览器并等 SPA 首帧（实测 16~30 秒），一旦请求超时，
+  // 旧写法连面板都不会出现，用户看到的是「登录功能没了」（2026-11-13 线上故障）。
+  if (remoteLoginSessionId.value) {
+    remoteLoginOpen.value = false
+    await closeRemoteLogin()
+  }
+  remoteLoginOpen.value = true
   remoteLoginStarting.value = true
+  remoteLoginPhase.value = 'opening'
   remoteLoginMessage.value = ''
   remoteLoginError.value = false
+  remoteLoginScreenshot.value = ''
+  remoteLoginFields.value = []
+  remoteLoginButtons.value = []
+  for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
   try {
-    if (remoteLoginSessionId.value) await closeRemoteLogin()
+    // 这个请求只负责「建会话」，应当秒回；页面在后台打开，进度由轮询给。
     const frame = await adminAPI.cnProviders.startWebConsoleLogin(props.account.id)
-    remoteLoginOpen.value = true
-    applyRemoteLoginFrame(frame)
+    if (frame) applyRemoteLoginFrame(frame)
     scheduleRemoteLoginPoll()
   } catch (e) {
     remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    remoteLoginPhase.value = 'failed'
+    remoteLoginMessage.value = describeRemoteLoginError(e)
   } finally {
     remoteLoginStarting.value = false
   }
+}
+
+// 请求失败要说人话：axios 的默认文案是「Network error」，会把人骗去查网络，
+// 而真实原因通常是服务没响应 / 超时。
+const describeRemoteLoginError = (e: unknown): string => {
+  const err = e as { message?: string; code?: string; response?: { status?: number } }
+  const code = (err?.code || '').toUpperCase()
+  if (code === 'ECONNABORTED' || /timeout/i.test(err?.message || '')) {
+    return t('admin.accounts.webConsoleQuota.errorTimeout')
+  }
+  const status = err?.response?.status
+  if (status === 502 || status === 503) {
+    return t('admin.accounts.webConsoleQuota.errorWorkerUnavailable')
+  }
+  return err?.message || t('common.error')
 }
 
 const handleRemoteLoginTap = async (event: MouseEvent) => {
@@ -4709,6 +4763,7 @@ async function closeRemoteLogin() {
   remoteLoginTyped.value = ''
   remoteLoginFields.value = []
   remoteLoginButtons.value = []
+  remoteLoginPhase.value = 'opening'
   for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
   if (sessionId && accountID) {
     try {
@@ -5966,6 +6021,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   remoteLoginTyped.value = ''
   remoteLoginFields.value = []
   remoteLoginButtons.value = []
+  remoteLoginPhase.value = 'opening'
   for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
   remoteLoginMessage.value = ''
   remoteLoginError.value = false

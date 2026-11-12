@@ -15,6 +15,9 @@ import base64
 import pytest
 
 from login_sessions import (
+    LOGIN_PHASE_FAILED,
+    LOGIN_PHASE_OPENING,
+    LOGIN_PHASE_READY,
     LOGIN_SESSION_TTL_SECONDS,
     LoginSessionError,
     LoginSessionRegistry,
@@ -34,6 +37,7 @@ class FakePage:
         self.mouse = _Recorder()
         self.keyboard = _Recorder()
         self.screenshot = _async_mock(return_value=FAKE_JPEG)
+        self.wait_for_timeout = _async_mock()
 
     def title(self):
         return "Console"
@@ -116,12 +120,102 @@ async def _start(registry, provider="longcat", success_prefix="https://console.e
     )
 
 
+async def _await_open(session):
+    """等后台「打开页面」任务跑完（start 现在不等页面，见下方用例说明）。"""
+    task = session.open_task
+    assert task is not None, "start 必须把打开页面的任务挂在 session.open_task 上"
+    await task
+
+
+def test_start_returns_immediately_with_opening_phase():
+    """start 只建会话就必须返回：打开登录页要几十秒，同步等会把前端请求拖超时。
+
+    这是 2026-11-13 线上故障的回归用例——用户看到「网络错误」、登录面板永不出现，
+    根因就是 start 等页面打开等过了前端 30s 超时。
+    """
+
+    async def case():
+        page = FakePage()
+
+        async def _slow_goto(*_args, **_kwargs):
+            await asyncio.sleep(5)
+
+        page.goto = _async_mock(side_effect=_slow_goto)
+        registry = LoginSessionRegistry(_factory(FakeContext(page)))
+
+        started = asyncio.get_running_loop().time()
+        session = await _start(registry)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert elapsed < 1.0, f"start 必须秒回，实际耗时 {elapsed:.2f}s"
+        assert session.phase == LOGIN_PHASE_OPENING
+        assert session.open_task is not None
+        session.open_task.cancel()
+
+    asyncio.run(case())
+
+
+def test_open_page_sets_ready_phase():
+    async def case():
+        page = FakePage()
+        registry = LoginSessionRegistry(_factory(FakeContext(page)))
+        session = await _start(registry)
+        await _await_open(session)
+        assert session.phase == LOGIN_PHASE_READY
+        assert session.phase_error == ""
+        assert page.goto.calls[0][0][0] == "https://passport.example.com/login"
+
+    asyncio.run(case())
+
+
+def test_open_page_failure_sets_failed_phase_without_raising():
+    """打不开页面不能把后台任务抛崩，也不能让 state 接口 5xx：写进 phase 报给前端。"""
+
+    async def case():
+        page = FakePage()
+
+        async def _boom(*_args, **_kwargs):
+            raise RuntimeError("net down")
+
+        page.goto = _async_mock(side_effect=_boom)
+        registry = LoginSessionRegistry(_factory(FakeContext(page)))
+        session = await _start(registry)
+        await _await_open(session)
+        assert session.phase == LOGIN_PHASE_FAILED
+        assert session.phase_error == "login_page_unreachable"
+
+    asyncio.run(case())
+
+
+def test_close_cancels_pending_open_task():
+    async def case():
+        page = FakePage()
+
+        async def _slow_goto(*_args, **_kwargs):
+            await asyncio.sleep(30)
+
+        page.goto = _async_mock(side_effect=_slow_goto)
+        context = FakeContext(page)
+        registry = LoginSessionRegistry(_factory(context))
+        session = await _start(registry)
+        task = session.open_task
+
+        await registry.close(session.id)
+        assert context.closed is True
+        await asyncio.sleep(0)
+        assert task.cancelled() or task.done()
+
+    asyncio.run(case())
+
+
 def test_start_uses_fixed_viewport():
     async def case():
         page = FakePage()
         factory = _factory(FakeContext(page))
         registry = LoginSessionRegistry(factory)
         session = await _start(registry)
+        # 打开页面在后台任务里跑，断言前先等它完成
+        await _await_open(session)
         assert factory.calls[0] == {"width": 1280, "height": 800}
         assert page.goto.calls and page.goto.calls[0][0][0] == "https://passport.example.com/login"
         assert session.authenticated() is False

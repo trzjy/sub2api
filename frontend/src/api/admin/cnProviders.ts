@@ -255,6 +255,14 @@ export interface WebConsoleLoginFrame {
   session_id: string
   /** pending = 还在登录页；authenticated = 已进入控制台，可点「完成」落库。 */
   status: 'pending' | 'authenticated'
+  /**
+   * 页面生命周期，与 status 是两个独立事实：
+   * opening = 服务端正在打开登录页；ready = 可操作；failed = 打不开。
+   * 打开登录页要几十秒，所以 start 只建会话立即返回，进度靠这个字段给。
+   */
+  phase?: 'opening' | 'ready' | 'failed'
+  /** phase=failed 时的原因码（仅供界面显示人话，不要拿来做逻辑判断）。 */
+  message?: string
   /** base64 JPEG（不带 data: 前缀）。 */
   screenshot?: string
   url?: string

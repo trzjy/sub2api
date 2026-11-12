@@ -59,8 +59,17 @@ var (
 // WebConsoleRemoteLoginFrame 是一帧登录画面（base64 JPEG）与会话状态。
 // 不回传任何 cookie / storageState —— 凭据只在 Finish 成功时由内部消费。
 type WebConsoleRemoteLoginFrame struct {
-	SessionID      string `json:"session_id"`
-	Status         string `json:"status"` // pending | authenticated
+	SessionID string `json:"session_id"`
+	Status    string `json:"status"` // pending | authenticated
+	// Phase 是页面生命周期（opening | ready | failed），与 Status 互相独立：
+	// Status 说「人登进去了没有」，Phase 说「页面能不能看」。
+	//
+	// 为什么需要它：打开登录页要启动浏览器并等 SPA 首帧，实测 16~30 秒，
+	// 超过前端请求超时。start 因此改成只建会话立即返回，页面在后台打开，
+	// 由 Phase 告诉前端「还在开」还是「打不开」，不再用一个长请求硬等。
+	Phase string `json:"phase,omitempty"`
+	// Message 是 Phase=failed 时的原因码（worker 侧常量，仅供前端显示人话）。
+	Message        string `json:"message,omitempty"`
 	Screenshot     string `json:"screenshot,omitempty"`
 	URL            string `json:"url,omitempty"`
 	ViewportWidth  int    `json:"viewport_width"`
