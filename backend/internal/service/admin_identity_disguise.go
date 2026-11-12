@@ -101,9 +101,16 @@ func buildIdentityDisguiseState(account *Account) *IdentityDisguiseState {
 	extra := account.SnapshotExtra()
 	d, isNew := parseIdentityDisguiseExtra(extra)
 	if !isNew {
-		// 老键分支：报告出来，让运营知道这个账号还没迁到新写法。
-		state.UsesLegacyKeys = true
+		// 老键分支：先用既有的 legacyIdentityDisguiseOf 复用老键解析（不另立键名清单）。
+		// 仅当账号 extra 中确实还带着某个老键时，才把 UsesLegacyKeys 置真 ——
+		// 否则既无新键、也无老键的普通账号会被误报为「正在使用旧配置」。
 		d = legacyIdentityDisguiseOf(account)
+		hasLegacy := d.RawPrompt != "" || d.RewriteModel || d.StripReasoning
+		state.UsesLegacyKeys = hasLegacy
+		if !hasLegacy {
+			// 一个老键都没有 → 视为未配置：Profile 保持 none，其余字段取零值。
+			d = IdentityDisguise{Profile: IdentityDisguiseProfileNone}
+		}
 	}
 	state.Profile = d.Profile
 	state.ForbiddenNames = d.ForbiddenNames
