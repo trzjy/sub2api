@@ -2873,9 +2873,6 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	// 换号后不等（用户 2026-11-12 裁定）：本次请求已经等过一次账号槽位且没等到，
 	// 后续候选**直接换**，不再排队等待 —— 下一个账号多半是空闲的（刚被排除的那个
 	// 才是满的），等它是白等；且总等待时长 = 一次超时，不会放大成 N 倍。
-	if concurrencySlotWaitExhausted(c) {
-		return nil, openAISlotAcquireSlotFull
-	}
 	if selection.WaitPlan == nil {
 		markOpsRoutingCapacityLimited(c)
 		writeError(http.StatusServiceUnavailable, "api_error", "", infraerrors.NoAvailableAccounts)
@@ -2914,6 +2911,13 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 			return handle.Release, openAISlotAcquireOK
 		}
 		return nil, openAISlotAcquireOK
+	}
+	// 换号后不等（用户 2026-11-12 裁定）：本次请求已经等过一次账号槽位且没等到，
+	// 后续候选**不再排队等待** —— 但上面已经**立即抢过一次槽**了
+	// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
+	// 抢不到才换下一个。总等待时长 = 一次超时，不会放大成 N 倍。
+	if concurrencySlotWaitExhausted(c) {
+		return nil, openAISlotAcquireSlotFull
 	}
 
 	canWait, waitErr := h.concurrencyHelper.IncrementAccountWaitCount(ctx, account.ID, selection.WaitPlan.MaxWaiting)

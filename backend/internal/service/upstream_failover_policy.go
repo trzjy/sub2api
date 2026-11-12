@@ -65,6 +65,16 @@ func IsMappingInducedRejection(account *Account, mappingLookupModel string, stat
 	if statusCode < 400 || statusCode >= 500 {
 		return false
 	}
+	// 已经有明确换号语义的状态码（401 凭证失效、402 欠费、403 封禁、405 方法不对、
+	// 429 限流、529 过载）**不走改写归因**：
+	//   - 它们本来就该换号，不该被说成「是映射导致的拒绝」；
+	//   - 它们也不该消耗改写归因那份额外的换号预算（外审第三轮 must_fix #4：
+	//     原实现把任何 4xx 都算改写归因，导致账号配了非恒等映射时，401/429 也会
+	//     消耗「映射归因」预算，预算用尽后连这些既有可换号错误都不再换号）。
+	// 剩下未被专门识别的 4xx（典型是 400）才可能来自「上游拒绝了我们改写过去的模型」。
+	if shouldFailoverUpstreamStatusCode(statusCode) {
+		return false
+	}
 	lookup := strings.TrimSpace(mappingLookupModel)
 	if lookup == "" {
 		return false

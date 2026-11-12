@@ -274,7 +274,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			service.PlatformGrok,
 		)
 		if selectErr != nil || selection == nil || selection.Account == nil {
-			if last != nil {
+			if last != nil && slotFullCount == 0 {
 				h.handleFailoverExhausted(c, last, false)
 			} else if slotFullCount > 0 {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
@@ -325,8 +325,12 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		// Non-failover errors: handleGrokMediaErrorResponse / transport already wrote response.
 		return
 	}
-	if last != nil {
+	if last != nil && slotFullCount == 0 {
 		h.handleFailoverExhausted(c, last, false)
+	} else if slotFullCount > 0 {
+		// 纯槽位失败（无上游错误）走到循环末尾：必须写出账号维度并发终态，
+		// 不能什么都不写（外审第三轮 must_fix #1：漏写响应 = 客户端挂死）。
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.AccountSlotConcurrencyLimit)
 	}
 }
 

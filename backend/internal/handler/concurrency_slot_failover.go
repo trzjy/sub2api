@@ -19,17 +19,6 @@ import "github.com/gin-gonic/gin"
 // 判定与计数收敛在本文件，Anthropic 链（FailoverState.FailedAccountIDs）与
 // OpenAI 链（failedAccountIDs map）共用同一份实现，不各写一条分支。
 
-// maxConcurrencySlotFailoverAttempts 是槽位失败换号的**兜底**上限，
-// 不是「候选耗尽」的判定依据。
-//
-// 为什么不再用固定次数判定耗尽（外审第三轮 must_fix #1）：池里有 4 个以上账号时，
-// 前 3 个正被别人占满、第 4 个空闲，若按「尝试 3 次」就返回 503，会把
-// **尝试次数上限**误报成**候选耗尽**——客户白白拿到一个 503，而明明还有空闲账号。
-//
-// 现在真正的耗尽判定是「选号返回无候选」（排除集合把所有候选排完），
-// 本上限只是死循环兜底（防止某个入口漏写排除动作）。
-const maxConcurrencySlotFailoverAttempts = 50
-
 // concurrencySlotWaitExhaustedKey 标记「本次请求已经等过一次账号槽位且没等到」。
 //
 // 用户 2026-11-12 裁定：**换号后不等**。等满一次（sticky 45s / fallback 30s）之后，
@@ -56,7 +45,7 @@ func concurrencySlotWaitExhausted(c *gin.Context) bool {
 }
 
 // recordConcurrencySlotFailure 把槽位等不到的账号记入本请求排除集合，
-// 返回是否应继续换同组下一个账号。
+// 返回是否应继续换同组下一个账号（恒 true —— 耗尽由「选号返回无候选」判定）。
 //
 // 排除集合的写入与传递链路是既有的：Anthropic 链用 FailoverState.FailedAccountIDs，
 // OpenAI 链用各自的 failedAccountIDs map，两者都已在选号内部逐层过滤
@@ -70,7 +59,9 @@ func recordConcurrencySlotFailure(failedAccountIDs map[int64]struct{}, accountID
 	}
 	failedAccountIDs[accountID] = struct{}{}
 	*attempts++
-	return *attempts < maxConcurrencySlotFailoverAttempts
+	// 恒返回 true：候选耗尽由「选号返回无候选」判定，不以尝试次数代替耗尽
+	// （外审第三轮 must_fix #1）。attempts 只作死循环兜底计数。
+	return true
 }
 
 // concurrencySlotExhaustedResponse 给出槽位换号耗尽后的终态错误三元组。

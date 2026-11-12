@@ -151,8 +151,10 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		}
 	}()
 
-	// First attempt + up to 3 failover accounts (max 4 total).
-	for attempt := 0; attempt < 4; attempt++ {
+	// First attempt + failover accounts. 上限只是死循环兜底：**候选耗尽由「选号无候选」判定**
+	// （failedAccounts 排除集合把所有候选排完），不以尝试次数代替耗尽——
+	// 否则池里 4 个以上账号时，前 3 个满、第 4 个空闲也会被误报成耗尽（外审第三轮 must_fix #1）。
+	for attempt := 0; attempt < 20; attempt++ {
 		selected, selectErr := h.gatewayService.SelectAccountWithLoadAwareness(
 			c.Request.Context(), groupID, "", searchModel, failedAccounts, "", 0,
 		)
@@ -179,8 +181,10 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 
 		release, acquireOK, acquireErr := h.acquireWebSearchAccountSlot(c, selected)
 		if !acquireOK {
-			// First hop: surface concurrency errors; later hops try another account.
-			if attempt == 0 && acquireErr != nil {
+			// 槽位等不到：排除该账号，换同组下一个账号再试。
+			// 注意**每次**槽位失败都要记账（不只 attempt==0）——否则「先上游失败、
+			// 后槽位失败」的混合场景会漏记，终态会被先前的上游错误遮蔽（外审第三轮 must_fix #2）。
+			if acquireErr != nil {
 				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
 				if recordConcurrencySlotFailure(failedAccounts, selected.Account.ID, &slotFullCount) {
