@@ -324,7 +324,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			} else {
-				if lastFailoverErr != nil {
+				if lastFailoverErr != nil && slotFullCount == 0 {
 					// F2-b：与下方耗尽分支同型——响应已提交时先对齐 streamStarted，
 					// 否则会把 JSON 错误体塞进已开的 SSE 流。
 					syncStreamStartedIfResponseCommitted(c, &streamStarted)

@@ -810,7 +810,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// 处理重试耗尽的情况
 	if resp.StatusCode >= 400 && s.shouldRetryUpstreamError(account, resp.StatusCode) {
-		if s.shouldFailoverUpstreamError(account, resp.StatusCode, mappingLookupModel) {
+		if s.shouldFailoverUpstreamError(account, resp.StatusCode, mappingLookupModel) &&
+			!(IsMappingInducedRejection(account, mappingLookupModel, resp.StatusCode) && !AllowMappingInducedRetry(c)) {
 			respBody, _ := s.readUpstreamErrorBody(resp)
 			_ = resp.Body.Close()
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
@@ -849,7 +850,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	}
 
 	// 处理可切换账号的错误
-	if resp.StatusCode >= 400 && s.shouldFailoverUpstreamError(account, resp.StatusCode, mappingLookupModel) {
+	if resp.StatusCode >= 400 && s.shouldFailoverUpstreamError(account, resp.StatusCode, mappingLookupModel) &&
+		!(IsMappingInducedRejection(account, mappingLookupModel, resp.StatusCode) && !AllowMappingInducedRetry(c)) {
 		respBody, _ := s.readUpstreamErrorBody(resp)
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))

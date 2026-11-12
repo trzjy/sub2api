@@ -703,7 +703,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				return
 			}
 			if cachedContentBinding != nil {
-				if fs.LastFailoverErr != nil {
+				if fs.LastFailoverErr != nil && slotFullCount == 0 {
 					h.handleGeminiCachedContentFailoverExhausted(c, fs.LastFailoverErr)
 					return
 				}
@@ -780,6 +780,13 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				googleError(c, http.StatusServiceUnavailable, infraerrors.NoAvailableAccounts)
 				return
 			}
+		if slotFullCount > 0 {
+			// 换号后不等（用户 2026-11-12 裁定）：本次请求已经等过一次账号槽位且没等到，
+			// 后续候选**直接换**，不再排队等待 —— 下一个账号多半是空闲的（刚被排除的那个
+			// 才是满的），等它是白等；且总等待时长 = 一次超时，不会放大成 N 倍。
+			fs.FailedAccountIDs[account.ID] = struct{}{}
+			continue
+		}
 			accountWaitCounted := false
 			canWait, err := geminiConcurrency.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
 			if err != nil {

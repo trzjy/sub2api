@@ -19,11 +19,41 @@ import "github.com/gin-gonic/gin"
 // 判定与计数收敛在本文件，Anthropic 链（FailoverState.FailedAccountIDs）与
 // OpenAI 链（failedAccountIDs map）共用同一份实现，不各写一条分支。
 
-// maxConcurrencySlotFailoverAttempts 是槽位失败换号的上限。
+// maxConcurrencySlotFailoverAttempts 是槽位失败换号的**兜底**上限，
+// 不是「候选耗尽」的判定依据。
 //
-// 与 maxProfitVetoAttempts 同构：没有上限时，单次请求可能把延迟放大到
-// N × WaitPlan.Timeout（sticky 45s / fallback 30s）。
-const maxConcurrencySlotFailoverAttempts = 3
+// 为什么不再用固定次数判定耗尽（外审第三轮 must_fix #1）：池里有 4 个以上账号时，
+// 前 3 个正被别人占满、第 4 个空闲，若按「尝试 3 次」就返回 503，会把
+// **尝试次数上限**误报成**候选耗尽**——客户白白拿到一个 503，而明明还有空闲账号。
+//
+// 现在真正的耗尽判定是「选号返回无候选」（排除集合把所有候选排完），
+// 本上限只是死循环兜底（防止某个入口漏写排除动作）。
+const maxConcurrencySlotFailoverAttempts = 50
+
+// concurrencySlotWaitExhaustedKey 标记「本次请求已经等过一次账号槽位且没等到」。
+//
+// 用户 2026-11-12 裁定：**换号后不等**。等满一次（sticky 45s / fallback 30s）之后，
+// 换到下一个账号就**不再排队等待**——下一个账号多半是空闲的（刚被排除的那个才是满的），
+// 等它是白等；而且这样总等待时长 = 一次超时，不会放大成 N 倍。
+//
+// 用请求级标记而不是逐入口传参：所有入口共用一份语义，不会各写一遍。
+const concurrencySlotWaitExhaustedKey = "concurrency_slot_wait_exhausted"
+
+// markConcurrencySlotWaitExhausted 标记「本次请求已经等过一次且没等到」。
+func markConcurrencySlotWaitExhausted(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(concurrencySlotWaitExhaustedKey, true)
+}
+
+// concurrencySlotWaitExhausted 读「本次请求是否已经等过一次账号槽位且没等到」。
+func concurrencySlotWaitExhausted(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	return c.GetBool(concurrencySlotWaitExhaustedKey)
+}
 
 // recordConcurrencySlotFailure 把槽位等不到的账号记入本请求排除集合，
 // 返回是否应继续换同组下一个账号。

@@ -2,6 +2,8 @@ package service
 
 import (
 	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
 // 上游失败换号策略 —— 全站唯一事实源。
@@ -79,6 +81,41 @@ func IsMappingInducedRejection(account *Account, mappingLookupModel string, stat
 // 不原地重试，只换下一个账号；换号耗尽时按上游不可用告知客户端，
 // 不让客户去修一个我们自己改写出来的问题。
 const modelMappingInducedRejectionReason = GatewayFailureReason("model_mapping_induced_rejection")
+
+// ModelMappingInducedRejectionReason 是 modelMappingInducedRejectionReason 的导出别名，
+// 供 handler 层识别改写归因的换号预算。
+const ModelMappingInducedRejectionReason = modelMappingInducedRejectionReason
+
+// mappingInducedRetryBudget 是改写归因的**换号预算**（请求级）。
+//
+// 为什么必须有预算（外审第三轮 must_fix #4）：OpenAI 家族链**没有通用切换上限**
+// （见 handler/failover_loop.go 的说明：OpenAI 家族链的固定切换上限已删除）。
+// 若不加预算，客户一个写错的请求（temperature 非法之类）会扇出到池内**每一个**
+// 带非恒等映射的账号，每个都发一次上游请求才把原始 400 透传回去——
+// 上游配额被白白消耗，延迟被放大成 O(池大小) 倍。
+//
+// 预算用尽后不再换号：客户最终看到的仍是**准确的上游原始错误**。
+const mappingInducedRetryBudget = 2
+
+// mappingInducedRetryBudgetKey 是请求级预算计数的 context key。
+const mappingInducedRetryBudgetKey = "mapping_induced_retry_budget"
+
+// AllowMappingInducedRetry 判定「本次改写归因的换号是否还在预算内」，
+// 并在允许时占用一次预算。
+//
+// 只有**改写归因**的换号走这个预算；其它换号原因（401/429/5xx 等）不受影响。
+func AllowMappingInducedRetry(c *gin.Context) bool {
+	if c == nil {
+		return true
+	}
+	v, _ := c.Get(mappingInducedRetryBudgetKey)
+	used, _ := v.(int)
+	if used >= mappingInducedRetryBudget {
+		return false
+	}
+	c.Set(mappingInducedRetryBudgetKey, used+1)
+	return true
+}
 
 // applyMappingInducedRejection 把「改写归因」的换号语义写进错误对象。
 //

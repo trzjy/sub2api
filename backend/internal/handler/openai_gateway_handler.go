@@ -826,7 +826,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			}
-			if lastFailoverErr != nil {
+			if lastFailoverErr != nil && slotFullCount == 0 {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 			} else if slotFullCount > 0 {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
@@ -1648,7 +1648,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 			} else {
-				if lastFailoverErr != nil {
+				if lastFailoverErr != nil && slotFullCount == 0 {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else if slotFullCount > 0 {
 					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
@@ -2870,6 +2870,12 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		}
 		return nil, openAISlotAcquireOK
 	}
+	// 换号后不等（用户 2026-11-12 裁定）：本次请求已经等过一次账号槽位且没等到，
+	// 后续候选**直接换**，不再排队等待 —— 下一个账号多半是空闲的（刚被排除的那个
+	// 才是满的），等它是白等；且总等待时长 = 一次超时，不会放大成 N 倍。
+	if concurrencySlotWaitExhausted(c) {
+		return nil, openAISlotAcquireSlotFull
+	}
 	if selection.WaitPlan == nil {
 		markOpsRoutingCapacityLimited(c)
 		writeError(http.StatusServiceUnavailable, "api_error", "", infraerrors.NoAvailableAccounts)
@@ -2944,6 +2950,8 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		// 槽位等不到：响应尚未写出，交给调用方决定「换同组下一个账号」还是终止。
 		// 换号耗尽时的终态错误由调用方用 writeConcurrencySlotExhausted 写出，
 		// 与既有出口逐字节一致（503 + 同一文案 + 同一 code）。
+		// 标记「本次请求已经等过一次且没等到」：后续候选直接换，不再排队等待。
+		markConcurrencySlotWaitExhausted(c)
 		return nil, openAISlotAcquireSlotFull
 	}
 
