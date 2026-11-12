@@ -7029,6 +7029,37 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 			}
 			continue
 		}
+		// system / developer 角色的消息是**客户端的系统设定**（agent 人设、工具使用指引、
+		// 环境说明），必须提到**系统位**（config.system），不能当成对话历史。
+		//
+		// 与 Chat 路径（cursorPlanFromChat 的 case "system","developer"）**同源同义**：
+		// 提到 config.system 后 `continue` —— **不进历史**，避免同一段文本既在系统位
+		// 又在历史里各出现一次（续轮骨架比对会看出项数不符）。
+		// 文本提取复用同一个 cursorChatContentText，不另写一份。
+		//
+		// 2026-11-12 生产实证（codex）：Responses 路径此前**从不**写 config.system，
+		// codex 那 6 条 role=developer 消息（含 **14KB** agent 设定与工具指引）被
+		// cursorResponsesItemItem 降级成 responses.message.developer **历史项** ——
+		// 上游 cursor 模型把它当成「对话里的一段话」而不是系统指令，于是按 cursor
+		// 生态惯性去试原生 shell/read/grep，被本站按设计拒绝后要试错几轮才学会用
+		// 客户端工具（抓包原话："every tool call I attempt is rejected"）。
+		//
+		// Chat / Messages / Gemini 三条路径都写 config.system ——
+		// **Responses 是唯一漏网的一条**，本改动把四条路径对齐到同一语义。
+		if t := strings.ToLower(strings.TrimSpace(item.Type)); t == "" || t == "message" {
+			if role := strings.ToLower(strings.TrimSpace(item.Role)); role == "system" || role == "developer" {
+				text, err := cursorChatContentText(item.Content, plan.skippedItems)
+				if err != nil {
+					plan.noteSkippedItem("responses_system_undecodable")
+					continue
+				}
+				builder.in(cursorConfigSystem)
+				if err := builder.text("config.system", text); err != nil {
+					return nil, err
+				}
+				continue
+			}
+		}
 		if callID := cursorResponsesItemCallID(item); callID != "" {
 			// §25.17.4 行 1：该调用的声明就在同一正文里 → 与之配对的尾部 output 属于
 			// 「历史中已完成工具对」，不构成对本站待完成关联的声明。
