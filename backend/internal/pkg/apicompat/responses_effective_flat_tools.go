@@ -25,10 +25,12 @@ type ResponsesFlatToolSet struct {
 	// NamespaceTools 记录 摊平名 → (namespace, 子工具原名)，
 	// 供回程把上游的调用还原成带 namespace 的形式。
 	NamespaceTools map[string]NamespacedToolName
-	// NamespaceCustomTools 标记哪些摊平名对应的是 namespace 内的 **custom** 子工具
-	// （而不是 function）。没有这一位，回程只能把摊平名当普通 function_call 交付，
-	// codex 收到 function_call 而不是 custom_tool_call 会直接不认这个工具调用。
-	NamespaceCustomTools map[string]bool
+	// namespace 内的 custom 子工具由 NamespaceTools[...].IsCustom 标记 ——
+	// **不再另存一张 NamespaceCustomTools map**（2026-11-12 外审 MEDIUM 整改）。
+	//
+	// 那张表与 IsCustom 是同一份事实的两个副本：交付侧读 IsCustom、登记侧读那张表，
+	// 结论可以相反 → 交付 function_call、登记 custom_tool_call → codex 续轮
+	// result_type_mismatch → CUR-RES-02（根因，见提交 14662d995b）。
 	// ToolSearch 表示声明了服务端 tool_search。
 	ToolSearch bool
 }
@@ -108,12 +110,6 @@ func FlattenResponsesToolList(tools []ResponsesTool) (ResponsesFlatToolSet, erro
 			// 两侧结论不一致 → codex 续轮时按 function 语义回放，本站按 custom 校验
 			// → result_type_mismatch → CUR-RES-02（codex 外审通道全线失败）。
 			set.NamespaceTools[name] = newNamespacedToolName(namespace, childName, childType)
-			if childType == "custom" {
-				if set.NamespaceCustomTools == nil {
-					set.NamespaceCustomTools = make(map[string]bool)
-				}
-				set.NamespaceCustomTools[name] = true
-			}
 			child.Type = childType
 			child.Name = name
 			flat = append(flat, child)
@@ -124,7 +120,7 @@ func FlattenResponsesToolList(tools []ResponsesTool) (ResponsesFlatToolSet, erro
 	// 名字集合按"回程怎么用"来记，而不是统一记摊平名：
 	//   - function 按摊平名比对（上游就是按这个名字回调的）；
 	//   - custom 按裸名记（回程要还原成客户端的 custom_tool_call 名字），
-	//     摊平名到裸名的关系另由 NamespaceTools / NamespaceCustomTools 承载。
+	//     摊平名到裸名的关系由 NamespaceTools 承载（IsCustom 标记 custom 子工具）。
 	for _, tool := range flat {
 		name := strings.TrimSpace(tool.Name)
 		switch strings.TrimSpace(tool.Type) {
@@ -148,17 +144,16 @@ func FlattenResponsesToolList(tools []ResponsesTool) (ResponsesFlatToolSet, erro
 	}
 	// namespace 内的 custom 子工具：把**裸名**补进 custom 集合（摊平名已在上面被当成裸名记过一次，
 	// 需要替换成原文的名字），并标记该摊平名的类型，供回程区分 custom / function。
+	//
+	// 判据读 origin.IsCustom（唯一事实源），不读另一张表。
 	for flatName, origin := range set.NamespaceTools {
-		if set.NamespaceCustomTools[flatName] {
+		if origin.IsCustom {
 			delete(set.CustomTools, flatName)
 			set.CustomTools[origin.Name] = true
 		}
 	}
 	if len(set.NamespaceTools) == 0 {
 		set.NamespaceTools = nil
-	}
-	if len(set.NamespaceCustomTools) == 0 {
-		set.NamespaceCustomTools = nil
 	}
 	return set, nil
 }

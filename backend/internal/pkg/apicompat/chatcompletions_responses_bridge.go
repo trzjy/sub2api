@@ -288,8 +288,6 @@ func NamespaceToolNames(tools []ResponsesTool) map[string]NamespacedToolName {
 	return out
 }
 
-// NamespaceCustomToolNames 收集 namespace 内 **custom 类型** 子工具的摊平名集合。
-//
 // 与 NamespaceToolNames 的关系：NamespaceToolNames 说「这个摊平名属于哪个 namespace 的
 // 哪个子工具」，本集合说「这个摊平名的子工具是 custom 类型」——
 // 回程要靠这一位把 namespace 内的 custom 判成 custom_tool_call 并还原成裸名。
@@ -304,23 +302,6 @@ func NamespaceToolNames(tools []ResponsesTool) map[string]NamespacedToolName {
 // 本函数的回程判定已收敛到 NamespacedToolName.IsCustom 字段（见 customToolCallName），
 // 故此处直接基于 NamespaceToolNames 的结果筛出 custom 子集，口径与下游 FlattenResponsesToolList
 // 的 NamespaceCustomTools 一致（都收 function + custom，都按 FlattenNamespaceToolName 摊平）。
-func NamespaceCustomToolNames(tools []ResponsesTool) map[string]bool {
-	ns := NamespaceToolNames(tools)
-	if len(ns) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(ns))
-	for flat, origin := range ns {
-		if origin.IsCustom {
-			out[flat] = true
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 // customToolCallName restores both the exact downgraded custom-tool name and
 // namespace-prefixed aliases that chat models sometimes infer from neighboring
 // flattened namespace tools (for example functions__exec beside

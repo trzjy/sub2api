@@ -867,8 +867,12 @@ func TestNamespaceToolNames_MapsFlattenedNames(t *testing.T) {
 
 // 修复前 NamespaceToolNames 只收 function 子工具，custom 子工具的摊平名不在集合里，
 // 导致回程判不成 custom_tool_call。这条用例锁定：namespace 内 custom 子工具的摊平名
-// 既在 NamespaceToolNames 里，也在 NamespaceCustomToolNames 里（且 IsCustom=true）。
-func TestNamespaceCustomToolNames_MarksCustomChildren(t *testing.T) {
+// 在 NamespaceToolNames 里，且 **IsCustom=true**。
+//
+// 2026-11-12 外审 MEDIUM 整改：独立的 NamespaceCustomToolNames 表已删除
+// （与 NamespacedToolName.IsCustom 是同一份事实的两个副本），
+// 「哪些摊平名是 namespace 内 custom」一律按 IsCustom 筛。
+func TestNamespaceToolNames_MarksCustomChildren(t *testing.T) {
 	tools := []ResponsesTool{
 		{Type: "namespace", Name: "functions", Tools: []ResponsesTool{
 			{Type: "custom", Name: "run"},
@@ -886,17 +890,17 @@ func TestNamespaceCustomToolNames_MarksCustomChildren(t *testing.T) {
 	require.Contains(t, ns, "functions__wait", "namespace 内 function 子工具必须被收集")
 	require.False(t, ns["functions__wait"].IsCustom, "namespace 内 function 子工具不标记 IsCustom")
 
-	custom := NamespaceCustomToolNames(tools)
+	// 「namespace 内 custom 子工具的摊平名集合」一律按 IsCustom 筛（唯一事实源）。
+	custom := map[string]bool{}
+	for flat, origin := range ns {
+		if origin.IsCustom {
+			custom[flat] = true
+		}
+	}
 	require.Contains(t, custom, "functions__run", "namespace 内 custom 子工具的摊平名必须在集合里")
 	require.NotContains(t, custom, "functions__wait", "namespace 内 function 子工具不在集合里")
 	require.NotContains(t, custom, "crm__query", "namespace 内 function 子工具不在集合里")
 	require.NotContains(t, custom, "exec", "顶层 custom 不在 namespace 集合里")
-
-	// 没有任何 namespace 内 custom 子工具时返回 nil。
-	noCustom := NamespaceCustomToolNames([]ResponsesTool{
-		{Type: "namespace", Name: "crm", Children: []ResponsesTool{{Type: "function", Name: "query"}}},
-	})
-	assert.Nil(t, noCustom)
 }
 
 // 回程核心修复：namespace 内 custom 子工具必须判成 custom_tool_call 并还原成裸名，

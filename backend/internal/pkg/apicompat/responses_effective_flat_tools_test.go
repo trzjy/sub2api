@@ -36,12 +36,14 @@ func TestEffectiveResponsesFlatToolsFlattensNamespaceCustomChildren(t *testing.T
 	// custom 按裸名记（回程要还原成客户端声明的名字），摊平名到裸名的关系由 namespace 表承载。
 	require.True(t, set.CustomTools["exec"])
 	require.False(t, set.CustomTools["functions__exec"])
-	require.True(t, set.NamespaceCustomTools["functions__exec"])
+	// 2026-11-12 外审 MEDIUM 整改：独立的 NamespaceCustomTools 表已删除，
+	// 「namespace 内 custom」一律按 NamespacedToolName.IsCustom 判（唯一事实源）。
+	require.True(t, set.NamespaceTools["functions__exec"].IsCustom)
 	require.True(t, set.FunctionTools["functions__wait"])
 	// NamespaceTools 里的 IsCustom 必须为 true（namespace 内的 exec 是 custom 子工具）。
 	//
 	// 2026-11-12 修正：此断言原为 IsCustom: false —— 那是**把实现缺陷固化成了期望**
-	// （同一个测试里 NamespaceCustomTools["functions__exec"] 断言为 true，两张表自相矛盾）。
+	// （同一个测试里 custom 子工具被断言为 custom，两张表自相矛盾）。
 	// 漏填 IsCustom 的后果：交付侧（读 IsCustom）把 namespace 内 custom 判成 function，
 	// 登记侧（读另一张表）判成 custom → 交付 function_call、登记 custom_tool_call
 	// → codex 续轮 result_type_mismatch → CUR-RES-02（外审通道全线失败）。
@@ -128,5 +130,5 @@ func TestEffectiveResponsesFlatToolsDedupesIdenticalNamespaceCustomChildren(t *t
 	set, err := EffectiveResponsesFlatTools(req)
 	require.NoError(t, err)
 	require.Equal(t, []string{"functions__exec"}, toolNames(set.Tools), "重复的 custom 子工具只下发一份")
-	require.True(t, set.NamespaceCustomTools["functions__exec"], "去重后仍标记为 namespace 内 custom")
+	require.True(t, set.NamespaceTools["functions__exec"].IsCustom, "去重后仍标记为 namespace 内 custom")
 }
