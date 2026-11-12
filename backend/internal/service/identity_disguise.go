@@ -259,26 +259,35 @@ func DeriveIdentityDisguiseForbiddenNames(mapping map[string]string) []string {
 	}
 	sort.Strings(keys)
 
+	// 自动推导的禁词**不做条数上限截断**（DSG-G2：全部保留，不静默丢弃）。
+	// 仅保留既有清洗：TrimSpace、空串剔除、超长剔除、含换行/控制字符剔除、大小写去重，
+	// 顺序与原 sanitizeForbiddenNames 完全一致（没有那条 break）。
+	// 条数上限 IdentityDisguiseForbiddenNamesMaxCount 仍服务于显式输入校验路径
+	// （SanitizeIdentityDisguiseForbiddenNames），不在此处复用。
 	seen := make(map[string]struct{})
 	out := make([]string, 0, len(keys))
-	add := func(name string) {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			return
-		}
-		key := strings.ToLower(name)
-		if _, dup := seen[key]; dup {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, name)
-	}
 	for _, k := range keys {
 		for _, alias := range ModelNameAliases(k) {
-			add(alias)
+			n := strings.TrimSpace(alias)
+			if n == "" {
+				continue
+			}
+			if len(n) > IdentityDisguiseForbiddenNameMaxLen {
+				continue
+			}
+			// 含换行/控制字符的禁词会破坏 system prompt 的句子结构，直接丢弃。
+			if strings.ContainsAny(n, "\n\r\t") {
+				continue
+			}
+			key := strings.ToLower(n)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, n)
 		}
 	}
-	return sanitizeForbiddenNames(out)
+	return out
 }
 
 // AccountIdentityDisguise 解析账号的伪装配置（归一解析）。
