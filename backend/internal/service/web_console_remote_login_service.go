@@ -187,6 +187,12 @@ func (s *WebConsoleRemoteLoginService) Start(ctx context.Context, accountID int6
 		"login_url":          endpoints.loginURL,
 		"success_url_prefix": endpoints.successURLPrefix,
 	}
+	// 首选登录方式：取 loginModes 的第一个（顺序即优先级，唯一事实源在上游端点表）。
+	// worker 打开页面后会替用户点这一下，因为「先落到哪个 Tab」本来就是产品决策，
+	// 不该让每个用户进来手动切一次（longcat 默认页是二维码，而扫码在服务端会话里过不了）。
+	if len(endpoints.loginModes) > 0 {
+		payload["login_mode"] = endpoints.loginModes[0]
+	}
 	if account.Proxy != nil {
 		payload["proxy_url"] = account.Proxy.URL()
 	}

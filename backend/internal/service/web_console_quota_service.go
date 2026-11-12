@@ -113,7 +113,15 @@ var webConsoleQuotaProviderEndpointTable = map[string]webConsoleQuotaProviderEnd
 	providerLongcat: {
 		loginURL:         "https://longcat.chat/platform/usage",
 		successURLPrefix: "https://longcat.chat/platform/",
-		loginModes:       []string{webConsoleQuotaLoginModeQRCode, webConsoleQuotaLoginModeSMS},
+		// 短信优先，二维码退居备选。
+		//
+		// 实测（2026-11-13，生产环境连续多次）：在服务端浏览器会话里走扫码，
+		// 上游一律回「抱歉，登录失败，请点击右上角切换登录方式」——二维码是渲染在
+		// 服务器那台浏览器里的，风控按会话/IP 判据拒绝，重扫也过不去。
+		// 短信登录这条路径实测能进到表单（手机号 + 动态码 + 协议勾选），所以默认落到它，
+		// 让用户一打开就是能填的表单，而不是先卡在一张永远失败的二维码上。
+		// 顺序即优先级：Start 取第一个作为 worker 自动切换的目标（唯一事实源）。
+		loginModes: []string{webConsoleQuotaLoginModeSMS, webConsoleQuotaLoginModeQRCode},
 	},
 }
 

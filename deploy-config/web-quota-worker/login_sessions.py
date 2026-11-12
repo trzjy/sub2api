@@ -71,6 +71,10 @@ LOGIN_SETTLE_TIMEOUT_MS = 3000
 LOGIN_SETTLE_QUIET_MS = 400
 LOGIN_SETTLE_POLL_MS = 100
 
+# 首屏切登录方式的重试次数：登录页刚渲染时可能还没挂出切换入口，
+# 等一拍再看一次；再读不到就放弃（保持页面原样，不阻塞面板出现）。
+LOGIN_MODE_SWITCH_ATTEMPTS = 3
+
 # 打开登录页：容器出口网络偶发不通（实测出现过 chrome-error://chromewebdata/），
 # 一次失败就给用户错误页等于「登录不上」，所以重试一次。
 # 注意总耗时必须留在 Go 侧 45s 超时之内：2 次 × 18s + 退避 + 首帧等待 ≈ 40s。
@@ -110,6 +114,7 @@ class LoginSession:
         page: Any,
         success_url_prefix: str,
         login_url: str,
+        prefer_login_mode: str = "",
     ) -> None:
         self.id = session_id
         self.provider = provider
@@ -117,6 +122,10 @@ class LoginSession:
         self.page = page
         self.success_url_prefix = success_url_prefix
         self.login_url = login_url
+        # 首选登录方式（sms / qrcode / password）。打开页面后由本模块替用户先切过去：
+        # 「进来先落在哪个登录 Tab」是产品决策，不该让每个用户手动切一次。
+        # 空串表示不干预，页面默认落哪就是哪。
+        self.prefer_login_mode = (prefer_login_mode or "").strip().lower()
         self.created_at = time.monotonic()
         self.last_touch = self.created_at
         self.closed = False
@@ -174,6 +183,7 @@ class LoginSessionRegistry:
         proxy_url: Optional[str] = None,
         storage_state: Optional[str] = None,
         context_factory: Optional[Callable[..., Awaitable[Any]]] = None,
+        login_mode: str = "",
     ) -> LoginSession:
         # 登录画面必须固定视口：坐标换算的前端逻辑依赖「截图像素 = CSS 像素」。
         factory = context_factory or self._context_factory
@@ -187,6 +197,7 @@ class LoginSessionRegistry:
             page=page,
             success_url_prefix=success_url_prefix,
             login_url=login_url,
+            prefer_login_mode=login_mode,
         )
 
         async with self._lock:
@@ -230,6 +241,10 @@ class LoginSessionRegistry:
             # 表单清单也因此读成空 —— 用户看到「没有可填的输入框」却毫无办法。
             if not session.closed:
                 await settle(session)
+            # 首屏直接落到用户要的登录方式（longcat 默认是二维码，而扫码在服务端
+            # 会话里过不了风控）。失败不影响任何事，页面保持原样。
+            if not session.closed and session.prefer_login_mode:
+                await select_login_mode(session, session.prefer_login_mode)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - 失败降级，不向上抛
@@ -555,14 +570,37 @@ _LOGIN_INVENTORY_JS = r"""() => {
       clickable = !!cs && cs.cursor === 'pointer';
     }
     if (!clickable || !visible(el)) return;
-    // 只认「自己直接持有文字」的最内层元素，避免把整块容器当按钮。
-    const own = clean(Array.from(el.childNodes)
+
+    // 文字来源：优先「自己直接持有的文本节点」；没有就看整块 innerText。
+    //
+    // 为什么必须回退到 innerText：美团登录取证页的「手机验证码登录」是个 div，
+    // 文字包在子节点里，只认直接文本节点就会得到空串并把整个入口丢掉 ——
+    // 用户看到画面里明明有这行字，面板里却没有能点它的地方（2026-11-13 线上截图）。
+    let label = clean(Array.from(el.childNodes)
       .filter((n) => n.nodeType === 3)
       .map((n) => n.textContent).join(''));
-    if (!own || own.length > SHORT || seen.has(own)) return;
-    seen.add(own);
+    if (!label) label = clean(el.innerText || el.textContent);
+    if (!label || label.length > SHORT || seen.has(label)) return;
+
+    // 最内层优先：如果自己内部还有「可点的、带文字的」元素，交给它上报。
+    // 必要性：外层容器的中心点常常不在按钮上（实测点 314×80 的 wrapper 中心点
+    // 落在按钮外 8 像素，点了等于没点），只有最内层元素的中心点才可靠。
+    let innerClickable = false;
+    let kids;
+    try { kids = el.querySelectorAll('*'); } catch (e) { kids = []; }
+    for (const kid of kids) {
+      if (!clean(kid.innerText || '')) continue;
+      const kcs = getComputedStyle(kid);
+      if (kcs && (kcs.cursor === 'pointer' || kid.tagName === 'BUTTON' || kid.tagName === 'A')) {
+        innerClickable = true;
+        break;
+      }
+    }
+    if (innerClickable) return;
+
+    seen.add(label);
     stamp(el, 'data-wq-btn', buttons.length);
-    buttons.push({ index: buttons.length, text: own.slice(0, 40) });
+    buttons.push({ index: buttons.length, text: label.slice(0, 40) });
   };
 
   const walk = (root) => {
@@ -629,6 +667,90 @@ def _pick_inventory(items: list, index: int, expected: str, key: str) -> Optiona
     if 0 <= index < len(items):
         return index
     return None
+
+
+# ---------------------------------------------------------------------------
+# 首屏登录方式：进来先落在哪个 Tab
+# ---------------------------------------------------------------------------
+
+# 「切到短信登录」这个入口在不同站点/不同页面状态下叫法不同，按关键词认，
+# 不认 DOM 结构 —— 上游改版换个 class 不影响这里。
+LOGIN_SMS_BUTTON_HINTS = (
+    "验证码登录",
+    "验证码登陆",
+    "短信登录",
+    "短信登陆",
+    "短信验证码",
+    "手机验证码",
+    "手机号登录",
+    "手机登录",
+)
+# 已经在短信表单上：看得见手机号和/或验证码输入框（按类型 + 名字认，不认选择器）。
+_LOGIN_PHONE_LABEL_HINTS = ("手机", "电话", "号码", "phone", "mobile")
+_LOGIN_CODE_LABEL_HINTS = ("验证码", "动态码", "code", "captcha")
+
+
+def _looks_like_sms_form(fields: list) -> bool:
+    """当前页面是不是「短信登录」表单。
+
+    判据：有可见文本框，且名字命中手机号或验证码；或者有 type=tel 的输入框。
+    宁可判错放过（返回 False 只是少点一下），也不要把别的表单当成短信表单。
+    """
+    for field in fields or []:
+        kind = str(field.get("type") or "").lower()
+        label = str(field.get("label") or "").lower()
+        if kind == "tel":
+            return True
+        if kind not in ("text", "number", "tel"):
+            continue
+        if any(h in label for h in _LOGIN_PHONE_LABEL_HINTS):
+            return True
+        if any(h in label for h in _LOGIN_CODE_LABEL_HINTS):
+            return True
+    return False
+
+
+async def select_login_mode(session: "LoginSession", mode: str) -> bool:
+    """把页面切到指定登录方式，返回是否已经切到位。
+
+    为什么要替用户点这一下：longcat 的登录页默认是二维码，而在服务端浏览器会话里
+    扫码一律被上游判「抱歉，登录失败」（2026-11-13 生产连续实测），画面上的
+    「手机验证码登录」又因为结构差异不一定能被枚举成按钮，用户就被关在扫码页里出不来。
+    先把页面切到短信表单，用户打开面板第一眼就是能填的手机号框。
+
+    只用「页面把什么报给了我们」来判定（字段名/按钮文字），不写站点选择器；
+    切不过去也不抛异常，保持页面原样，用户仍可自己点。
+    """
+    wanted = (mode or "").strip().lower()
+    if wanted != "sms":
+        # 其余方式（qrcode / password）不做自动切换：页面默认落点已经够用。
+        return False
+
+    for _ in range(LOGIN_MODE_SWITCH_ATTEMPTS):
+        inventory = await describe_form(session)
+        if not inventory.get("available"):
+            await settle(session)
+            continue
+        if _looks_like_sms_form(inventory["fields"]):
+            return True
+        target = None
+        for button in inventory["buttons"]:
+            text = str(button.get("text") or "")
+            if any(hint in text for hint in LOGIN_SMS_BUTTON_HINTS):
+                target = button
+                break
+        if target is None:
+            return False
+        try:
+            clicked = await click_button(session, target["index"], target["text"])
+        except Exception:  # noqa: BLE001 - 点不到就放弃，别让登录面板打不开
+            clicked = False
+        if not clicked:
+            return False
+        await settle(session)
+
+    inventory = await describe_form(session)
+    return _looks_like_sms_form(inventory["fields"])
 
 
 async def fill_field(

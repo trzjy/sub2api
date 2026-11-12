@@ -488,6 +488,8 @@ async def login_start(request: Request):
             login_url=login_url,
             success_url_prefix=success_url_prefix,
             proxy_url=payload.get("proxy_url") or None,
+            # 首屏落在哪个登录 Tab：由后端的 loginModes 优先级决定（唯一事实源）。
+            login_mode=str(payload.get("login_mode") or ""),
         )
     except Exception as exc:  # noqa: BLE001 - 统一降级，不泄漏内部细节
         logger.warning("login provider=%s status=start_failed error=%s", provider, type(exc).__name__)
