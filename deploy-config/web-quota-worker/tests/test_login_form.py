@@ -79,9 +79,44 @@ def test_describe_form_returns_fields_and_buttons():
 
 
 def test_describe_form_degrades_to_empty_on_navigation():
-    """页面正在跳转时读不到结构，应返回空清单而不是抛错。"""
+    """页面正在跳转时读不到结构：不抛错，但必须标记 available=False。
+
+    这条是 2026-11-13 线上投诉的核心：读失败和「这页确实没有输入框」在旧实现里
+    返回值一模一样，前端只能把空清单当事实显示「这个页面没有可填的输入框」，
+    用户既不知道怎么回事也没有下一步。两者必须分得开。
+    """
     out = asyncio.run(describe_form(FakeSession(FakePage(boom=True))))
-    assert out == {"fields": [], "buttons": []}
+    assert out["fields"] == []
+    assert out["buttons"] == []
+    assert out["available"] is False
+
+
+def test_describe_form_reports_available_when_page_really_empty():
+    """页面确实没有输入框：available=True，前端才可以说「这页没有可填的框」。"""
+    page = FakePage(inventory={"fields": [], "buttons": [{"index": 0, "text": "手机验证码登录"}]})
+    out = asyncio.run(describe_form(FakeSession(page)))
+    assert out["available"] is True
+    assert [b["text"] for b in out["buttons"]] == ["手机验证码登录"]
+
+
+def test_describe_form_retries_once_before_giving_up():
+    """跳转中的那一下读不到就重试，别把一次抖动当成页面事实。"""
+
+    class FlakyPage(FakePage):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def evaluate(self, js, arg=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("page is navigating")
+            return await super().evaluate(js, arg)
+
+    page = FlakyPage()
+    out = asyncio.run(describe_form(FakeSession(page)))
+    assert out["available"] is True
+    assert [b["text"] for b in out["buttons"]] == ["获取验证码", "登录"]
 
 
 def test_fill_matches_by_label_not_index():

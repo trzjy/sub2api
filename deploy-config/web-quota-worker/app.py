@@ -28,10 +28,9 @@ from adapters.base import PROVIDERS, BaseAdapter, ProbeRequest, ProbeResult
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("web-quota-worker")
 
-# 动作完成后的沉淀时间（秒）：点按钮 / 填字段之后，页面往往还要再渲染一拍
-# （美团 passport 切到短信表单要几百毫秒）。等不及就回一帧空画面，
-# 用户会以为「点了没反应」。
-LOGIN_ACTION_SETTLE_SECONDS = 0.9
+# 动作完成后不再用「睡固定时长」凑效果，改为等页面稳定（login_sessions.settle）：
+# 固定 0.9 秒对慢页面仍然太短（回一帧动作前的画面），对快页面又白等。
+# 判据必须来自页面本身，不能来自我们猜的秒数。
 
 # 仅记录非敏感字段，绝不打印 storage_state / 密码 / cookie。
 logging.getLogger("web-quota-worker").addFilter(
@@ -246,6 +245,32 @@ async def make_context(
     return context
 
 
+def _resolve_adapter_class(module):
+    """从适配器模块里找出那个 BaseAdapter 子类。
+
+    唯一事实源是「这个模块实现了 BaseAdapter」，不是「类必须叫 Adapter」。
+    旧实现按固定名字 ``getattr(module, "Adapter")`` 取，而三个模块里分别叫
+    ``LongcatAdapter`` / ``CompshareAdapter`` / ``SensenovaAdapter``，
+    结果 longcat / compshare / sensenova 全部 503 adapter not implemented
+    （2026-11-13 实测确认）——名字约定属于实现细节，不该成为加载契约。
+    """
+    for name in dir(module):
+        obj = getattr(module, name)
+        if (
+            isinstance(obj, type)
+            and issubclass(obj, BaseAdapter)
+            and obj is not BaseAdapter
+            and getattr(obj, "provider", "") == _provider_of(module)
+        ):
+            return obj
+    raise AttributeError(f"no BaseAdapter subclass in {module.__name__}")
+
+
+def _provider_of(module) -> str:
+    """模块对应的 provider 名（adapters.longcat -> longcat）。"""
+    return module.__name__.rsplit(".", 1)[-1]
+
+
 async def get_adapter(provider: str) -> BaseAdapter:
     """按 provider 加载并缓存对应适配器实例（注入 context 工厂）。"""
     cached = _adapters.get(provider)
@@ -257,7 +282,7 @@ async def get_adapter(provider: str) -> BaseAdapter:
             return cached
         try:
             module = importlib.import_module(f"adapters.{provider}")
-            adapter_cls = getattr(module, "Adapter")
+            adapter_cls = _resolve_adapter_class(module)
         except (ImportError, AttributeError) as exc:
             raise AdapterNotImplemented(provider, str(exc)) from exc
         adapter = adapter_cls(make_context)
@@ -349,6 +374,7 @@ from login_sessions import (  # noqa: E402  (路由段集中在此，便于审�
     press_key,
     reload as reload_login_page,
     scroll as scroll_login_page,
+    settle as settle_login_page,
     snapshot_storage_state,
     tap as tap_login_page,
     toggle_field,
@@ -404,13 +430,43 @@ async def _login_view_with_form(session) -> dict:
 
     前端的表单区直接按这两份清单渲染，用户填真表单即可，不必去点缩略图坐标。
     页面还没打开时不做枚举：那 3 秒超时对用户毫无价值，还会拖慢首帧。
+
+    ``form_state`` 说的是「这份清单可不可信」，不是「页面有没有表单」：
+    - ok          读到结构了，清单就是页面事实（空也表示这页确实没有输入框）；
+    - unavailable 没读到（超时 / 跳转中），此时清单为空是「不知道」，不是「没有」。
+    前端据此决定说「这页没有输入框」还是「没读到，重试」——两者不能混为一谈，
+    混了就等于替页面下一个错误的结论，用户只会被卡住（2026-11-13 线上投诉）。
     """
     view = _login_view(session)
     if session.phase != LOGIN_PHASE_READY:
         view["fields"] = []
         view["buttons"] = []
+        view["form_state"] = "opening" if session.phase == LOGIN_PHASE_OPENING else "unavailable"
         return view
-    view.update(await describe_form(session))
+    form = await describe_form(session)
+    view["fields"] = form["fields"]
+    view["buttons"] = form["buttons"]
+    view["form_state"] = "ok" if form.get("available") else "unavailable"
+    return view
+
+
+async def _action_frame(session, applied: Optional[bool] = None):
+    """动作之后的统一出帧口径：先等页面稳定，再读表单 + 截图。
+
+    所有动作端点都必须走这里。理由：动作端点各写一套「睡一会儿 + 截图」，
+    每个端点的等待时长和截图时机都不一样，慢站点就回一帧动作之前的画面，
+    用户看到「点了没反应」，于是反复点、点错地方（2026-11-13 线上投诉）。
+    只有把口径收成一处，才不会再出现「这个端点修了、那个端点还犯」。
+    """
+    await settle_login_page(session)
+    try:
+        view = await _login_view_with_form(session)
+        view["screenshot"] = await capture(session)
+    except Exception as exc:  # noqa: BLE001 - 出帧失败不伪装成成功
+        logger.warning("login status=frame_failed error=%s", type(exc).__name__)
+        return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
+    if applied is not None:
+        view["applied"] = applied
     return view
 
 
@@ -478,7 +534,9 @@ async def login_tap(session_id: str, request: Request):
         await tap_login_page(session, x, y)
     except LoginSessionError as exc:
         return _session_error_response(exc)
-    return {"ok": True}
+    # 坐标点了之后同样要回一帧「动作生效后」的画面：用户点的是截图上的字，
+    # 如果回的是点击前的画面，他只会认为「点不到」。
+    return await _action_frame(session)
 
 
 @app.post("/v1/login/{session_id}/type")
@@ -493,7 +551,7 @@ async def login_type(session_id: str, request: Request):
         await type_text(session, text)
     except LoginSessionError as exc:
         return _session_error_response(exc)
-    return {"ok": True}
+    return await _action_frame(session)
 
 
 @app.post("/v1/login/{session_id}/fill")
@@ -517,23 +575,12 @@ async def login_fill(session_id: str, request: Request):
     try:
         session = await _login_registry.get(session_id)
         applied = await fill_field(session, index, text, label)
-        if applied:
-            # 填完稍等一拍：框架要把值回写到 UI，立刻截图会拍到旧状态。
-            await asyncio.sleep(LOGIN_ACTION_SETTLE_SECONDS)
     except LoginSessionError as exc:
         return _session_error_response(exc)
     except Exception as exc:  # noqa: BLE001 - 不把内部异常抛给前端
         logger.warning("login status=fill_failed error=%s", type(exc).__name__)
     logger.info("login status=fill applied=%s", applied)
-
-    try:
-        view = await _login_view_with_form(session)
-        view["screenshot"] = await capture(session)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("login status=frame_failed error=%s", type(exc).__name__)
-        return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
-    view["applied"] = applied
-    return view
+    return await _action_frame(session, applied)
 
 
 @app.post("/v1/login/{session_id}/click")
@@ -551,24 +598,12 @@ async def login_click(session_id: str, request: Request):
     try:
         session = await _login_registry.get(session_id)
         applied = await click_button(session, index, text)
-        if applied:
-            # 点完要等页面完成切换：美团 passport 切到短信表单有明显延迟，
-            # 等不及就回一帧「没有任何输入框」，用户会以为点坏了。
-            await asyncio.sleep(LOGIN_ACTION_SETTLE_SECONDS)
     except LoginSessionError as exc:
         return _session_error_response(exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("login status=click_failed error=%s", type(exc).__name__)
     logger.info("login status=click applied=%s", applied)
-
-    try:
-        view = await _login_view_with_form(session)
-        view["screenshot"] = await capture(session)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("login status=frame_failed error=%s", type(exc).__name__)
-        return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
-    view["applied"] = applied
-    return view
+    return await _action_frame(session, applied)
 
 
 @app.post("/v1/login/{session_id}/toggle")
@@ -590,22 +625,12 @@ async def login_toggle(session_id: str, request: Request):
     try:
         session = await _login_registry.get(session_id)
         applied = await toggle_field(session, index, label)
-        if applied:
-            await asyncio.sleep(LOGIN_ACTION_SETTLE_SECONDS)
     except LoginSessionError as exc:
         return _session_error_response(exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("login status=toggle_failed error=%s", type(exc).__name__)
     logger.info("login status=toggle applied=%s", applied)
-
-    try:
-        view = await _login_view_with_form(session)
-        view["screenshot"] = await capture(session)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("login status=frame_failed error=%s", type(exc).__name__)
-        return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
-    view["applied"] = applied
-    return view
+    return await _action_frame(session, applied)
 
 
 @app.post("/v1/login/{session_id}/key")
@@ -618,7 +643,7 @@ async def login_key(session_id: str, request: Request):
         await press_key(session, key)
     except LoginSessionError as exc:
         return _session_error_response(exc)
-    return {"ok": True}
+    return await _action_frame(session)
 
 
 @app.post("/v1/login/{session_id}/scroll")
@@ -634,7 +659,7 @@ async def login_scroll(session_id: str, request: Request):
         await scroll_login_page(session, delta_y)
     except LoginSessionError as exc:
         return _session_error_response(exc)
-    return {"ok": True}
+    return await _action_frame(session)
 
 
 @app.post("/v1/login/{session_id}/reload")
@@ -645,7 +670,12 @@ async def login_reload(session_id: str, request: Request):
         await reload_login_page(session)
     except LoginSessionError as exc:
         return _session_error_response(exc)
-    return {"ok": True}
+    # 重新加载之后要把 phase 推回 ready：reload 是「页面卡住了」的逃生口，
+    # 页面已经重新打开了，还停在 failed 就等于告诉用户「还是打不开」。
+    if not session.closed:
+        session.phase = LOGIN_PHASE_READY
+        session.phase_error = ""
+    return await _action_frame(session)
 
 
 @app.post("/v1/login/{session_id}/finish")

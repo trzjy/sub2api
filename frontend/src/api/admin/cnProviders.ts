@@ -263,6 +263,12 @@ export interface WebConsoleLoginFrame {
   phase?: 'opening' | 'ready' | 'failed'
   /** phase=failed 时的原因码（仅供界面显示人话，不要拿来做逻辑判断）。 */
   message?: string
+  /**
+   * fields / buttons 这份清单可不可信。
+   * ok = 读到了（空也表示页面确实没有输入框）；unavailable = 没读到（页面跳转中/超时）。
+   * 这两种情况数组都可能是空，界面上必须说不同的话，否则等于替页面下错结论。
+   */
+  form_state?: 'ok' | 'unavailable' | 'opening'
   /** base64 JPEG（不带 data: 前缀）。 */
   screenshot?: string
   url?: string

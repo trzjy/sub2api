@@ -464,15 +464,39 @@
                   </template>
                 </div>
               </div>
-              <p v-else class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              <!--
+                读不到表单 ≠ 这页没有表单：读失败（页面跳转中 / 超时）时清单也是空的，
+                旧写法把空清单直接当成「页面事实」显示「没有可填的输入框」，
+                用户既不知道怎么回事也没有下一步（2026-11-13 线上投诉）。
+              -->
+              <div
+                v-if="remoteLoginFormUnavailable"
+                class="mt-2 rounded-md bg-amber-50 px-2 py-1.5 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300"
+                data-testid="web-console-login-form-unavailable"
+              >
+                <p>{{ t('admin.accounts.webConsoleQuota.formUnavailable') }}</p>
+                <p class="mt-1">{{ t('admin.accounts.webConsoleQuota.formUnavailableHint') }}</p>
+                <button
+                  type="button"
+                  class="btn btn-secondary btn-sm mt-2"
+                  data-testid="web-console-login-form-retry"
+                  :disabled="remoteLoginBusy"
+                  @click="refreshRemoteFrame"
+                >
+                  {{ t('admin.accounts.webConsoleQuota.frameReload') }}
+                </button>
+              </div>
+              <p v-else-if="!remoteLoginFields.length" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.webConsoleQuota.formEmpty') }}
               </p>
 
-              <div v-if="remoteLoginButtons.length" class="mt-3">
+              <!-- 按钮区始终渲染（哪怕为空）：这是「切换登录方式」的唯一入口，
+                   藏起来等于把用户关在扫码页里出不来。 -->
+              <div class="mt-3">
                 <p class="text-xs font-medium text-gray-600 dark:text-gray-300">
                   {{ t('admin.accounts.webConsoleQuota.buttonsTitle') }}
                 </p>
-                <div class="mt-2 flex flex-wrap gap-2">
+                <div v-if="remoteLoginButtons.length" class="mt-2 flex flex-wrap gap-2">
                   <button
                     v-for="b in remoteLoginButtons"
                     :key="`${b.index}-${b.text}`"
@@ -485,6 +509,9 @@
                     {{ b.text }}
                   </button>
                 </div>
+                <p v-else class="mt-2 text-xs text-gray-500 dark:text-gray-400" data-testid="web-console-login-buttons-empty">
+                  {{ t('admin.accounts.webConsoleQuota.formUnavailableHint') }}
+                </p>
               </div>
             </div>
 
@@ -4412,6 +4439,9 @@ const remoteLoginPhase = ref<'opening' | 'ready' | 'failed'>('opening')
 // 缩到面板后约 7 像素，鼠标点不中就等于没聚焦、输入全丢（线上真实故障）。
 const remoteLoginFields = ref<Array<{ index: number; type: string; label: string; filled: boolean; masked: boolean }>>([])
 const remoteLoginButtons = ref<Array<{ index: number; text: string }>>([])
+// 'ok' = 这份表单清单可信；'unavailable' = 没读到（不是「页面真的没有」）。
+// 两者在界面上必须说不同的话，否则用户会被一句假结论卡死。
+const remoteLoginFormState = ref<'ok' | 'unavailable' | 'opening'>('opening')
 const remoteLoginFieldValues = reactive<Record<string, string>>({})
 let remoteLoginTimer: number | null = null
 
@@ -4436,6 +4466,8 @@ const webConsoleLoginModeHint = computed(() => {
   return t('admin.accounts.webConsoleQuota.modePassword')
 })
 
+const remoteLoginFormUnavailable = computed(() => remoteLoginFormState.value === 'unavailable')
+
 const remoteLoginShotSrc = computed(() =>
   remoteLoginScreenshot.value ? `data:image/jpeg;base64,${remoteLoginScreenshot.value}` : ''
 )
@@ -4457,6 +4489,7 @@ const applyRemoteLoginFrame = (frame: {
   message?: string
   fields?: Array<{ index: number; type: string; label: string; filled: boolean; masked: boolean }>
   buttons?: Array<{ index: number; text: string }>
+  form_state?: 'ok' | 'unavailable' | 'opening'
   applied?: boolean
 }) => {
   if (frame.session_id) remoteLoginSessionId.value = frame.session_id
@@ -4466,6 +4499,8 @@ const applyRemoteLoginFrame = (frame: {
   remoteLoginViewport.height = frame.viewport_height || 800
   remoteLoginFields.value = frame.fields ?? []
   remoteLoginButtons.value = frame.buttons ?? []
+  // 后端没给 form_state 时按「读到」处理：老版本 worker 没有这个字段。
+  remoteLoginFormState.value = frame.form_state ?? 'ok'
   // 已填过的字段清掉本地草稿，避免把旧值再发一遍。
   for (const field of remoteLoginFields.value) {
     if (field.filled) delete remoteLoginFieldValues[field.label]
@@ -4513,6 +4548,7 @@ const handleOpenRemoteLogin = async () => {
   remoteLoginOpen.value = true
   remoteLoginStarting.value = true
   remoteLoginPhase.value = 'opening'
+  remoteLoginFormState.value = 'opening'
   remoteLoginMessage.value = ''
   remoteLoginError.value = false
   remoteLoginScreenshot.value = ''
@@ -4557,12 +4593,15 @@ const handleRemoteLoginTap = async (event: MouseEvent) => {
   const x = ((event.clientX - rect.left) / rect.width) * remoteLoginViewport.width
   const y = ((event.clientY - rect.top) / rect.height) * remoteLoginViewport.height
   try {
-    await adminAPI.cnProviders.postWebConsoleLoginAction(props.account.id, remoteLoginSessionId.value, {
-      kind: 'tap',
-      x,
-      y
-    })
-    await refreshRemoteFrame()
+    // 后端在动作之后会等页面稳定再截图，这一帧就是「点下去的结果」。
+    // 不再补一次 refresh：补的那次经常还是点击前的画面，用户会以为「点不到」。
+    const frame = await adminAPI.cnProviders.postWebConsoleLoginAction(
+      props.account.id,
+      remoteLoginSessionId.value,
+      { kind: 'tap', x, y }
+    )
+    if (frame) applyRemoteLoginFrame(frame)
+    else await refreshRemoteFrame()
   } catch (e) {
     remoteLoginError.value = true
     remoteLoginMessage.value = (e as Error)?.message || t('common.error')
@@ -4677,11 +4716,13 @@ const handleRemoteLoginToggle = async (field: { index: number; label: string }) 
 const handleRemoteLoginKey = async (key: string) => {
   if (!props.account || !remoteLoginSessionId.value) return
   try {
-    await adminAPI.cnProviders.postWebConsoleLoginAction(props.account.id, remoteLoginSessionId.value, {
-      kind: 'key',
-      key
-    })
-    await refreshRemoteFrame()
+    const frame = await adminAPI.cnProviders.postWebConsoleLoginAction(
+      props.account.id,
+      remoteLoginSessionId.value,
+      { kind: 'key', key }
+    )
+    if (frame) applyRemoteLoginFrame(frame)
+    else await refreshRemoteFrame()
   } catch (e) {
     remoteLoginError.value = true
     remoteLoginMessage.value = (e as Error)?.message || t('common.error')
@@ -4691,11 +4732,13 @@ const handleRemoteLoginKey = async (key: string) => {
 const handleRemoteLoginScroll = async (deltaY: number) => {
   if (!props.account || !remoteLoginSessionId.value) return
   try {
-    await adminAPI.cnProviders.postWebConsoleLoginAction(props.account.id, remoteLoginSessionId.value, {
-      kind: 'scroll',
-      delta_y: deltaY
-    })
-    await refreshRemoteFrame()
+    const frame = await adminAPI.cnProviders.postWebConsoleLoginAction(
+      props.account.id,
+      remoteLoginSessionId.value,
+      { kind: 'scroll', delta_y: deltaY }
+    )
+    if (frame) applyRemoteLoginFrame(frame)
+    else await refreshRemoteFrame()
   } catch (e) {
     remoteLoginError.value = true
     remoteLoginMessage.value = (e as Error)?.message || t('common.error')
@@ -4705,10 +4748,13 @@ const handleRemoteLoginScroll = async (deltaY: number) => {
 const handleRemoteLoginReload = async () => {
   if (!props.account || !remoteLoginSessionId.value) return
   try {
-    await adminAPI.cnProviders.postWebConsoleLoginAction(props.account.id, remoteLoginSessionId.value, {
-      kind: 'reload'
-    })
-    await refreshRemoteFrame()
+    const frame = await adminAPI.cnProviders.postWebConsoleLoginAction(
+      props.account.id,
+      remoteLoginSessionId.value,
+      { kind: 'reload' }
+    )
+    if (frame) applyRemoteLoginFrame(frame)
+    else await refreshRemoteFrame()
   } catch (e) {
     remoteLoginError.value = true
     remoteLoginMessage.value = (e as Error)?.message || t('common.error')
@@ -4771,6 +4817,7 @@ async function closeRemoteLogin() {
   remoteLoginFields.value = []
   remoteLoginButtons.value = []
   remoteLoginPhase.value = 'opening'
+  remoteLoginFormState.value = 'opening'
   for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
   if (sessionId && accountID) {
     try {
@@ -6029,6 +6076,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   remoteLoginFields.value = []
   remoteLoginButtons.value = []
   remoteLoginPhase.value = 'opening'
+  remoteLoginFormState.value = 'opening'
   for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
   remoteLoginMessage.value = ''
   remoteLoginError.value = false

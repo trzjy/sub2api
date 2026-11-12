@@ -251,19 +251,21 @@ func (h *CNProviderHandler) PostWebConsoleLoginAction(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	sessionID := c.Param("sessionId")
-	// fill / click 由 worker 回传刷新后的整帧，前端可直接更新表单与画面。
+	// 每种动作都回一帧「动作生效之后」的画面：worker 侧在动作后等页面稳定再截图，
+	// 所以这一帧就是用户该看到的结果。前端直接用它，不再补一次 GET ——
+	// 补的那一次经常还是动作前的画面，用户看到的就是「点了没反应」（2026-11-13）。
 	var frame *service.WebConsoleRemoteLoginFrame
 	switch req.Kind {
 	case "tap":
-		err = h.webConsoleRemoteLoginService.Tap(ctx, accountID, sessionID, req.X, req.Y)
+		frame, err = h.webConsoleRemoteLoginService.Tap(ctx, accountID, sessionID, req.X, req.Y)
 	case "type":
-		err = h.webConsoleRemoteLoginService.Type(ctx, accountID, sessionID, req.Text)
+		frame, err = h.webConsoleRemoteLoginService.Type(ctx, accountID, sessionID, req.Text)
 	case "key":
-		err = h.webConsoleRemoteLoginService.PressKey(ctx, accountID, sessionID, req.Key)
+		frame, err = h.webConsoleRemoteLoginService.PressKey(ctx, accountID, sessionID, req.Key)
 	case "scroll":
-		err = h.webConsoleRemoteLoginService.Scroll(ctx, accountID, sessionID, req.DeltaY)
+		frame, err = h.webConsoleRemoteLoginService.Scroll(ctx, accountID, sessionID, req.DeltaY)
 	case "reload":
-		err = h.webConsoleRemoteLoginService.Reload(ctx, accountID, sessionID)
+		frame, err = h.webConsoleRemoteLoginService.Reload(ctx, accountID, sessionID)
 	case "fill":
 		frame, err = h.webConsoleRemoteLoginService.FillField(ctx, accountID, sessionID, req.Label, req.Text, req.Index)
 	case "click":

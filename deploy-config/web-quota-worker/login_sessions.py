@@ -56,6 +56,20 @@ LOGIN_SESSION_IDLE_SECONDS = 300
 
 # 读取页面表单结构的超时（秒）：页面卡住时不能让整帧请求被拖死。
 LOGIN_INVENTORY_TIMEOUT = 3.0
+# 读失败时重试一次：登录页在跳转完成的瞬间常读不到结构，一次失败就报
+# 「这个页面没有可填的输入框」是错的（那是读失败，不是页面事实）。
+LOGIN_INVENTORY_ATTEMPTS = 2
+LOGIN_INVENTORY_RETRY_WAIT = 0.35
+
+# 动作之后等页面「停下来」再截图。
+#
+# 为什么必须等：点一下「手机验证码登录」后，SPA 要到下一帧才把短信表单渲染出来。
+# 动作一返回就截图，截到的是动作生效前的画面 —— 用户看到的是「点了没反应」，
+# 于是反复点、点到别的地方，最后结论是「这个破玩意儿点不到」（2026-11-13 线上投诉）。
+# 判定「停下来」用页面形状指纹（元素数 + 输入框数 + URL）：连续 QUIET 毫秒不变即稳定。
+LOGIN_SETTLE_TIMEOUT_MS = 3000
+LOGIN_SETTLE_QUIET_MS = 400
+LOGIN_SETTLE_POLL_MS = 100
 
 # 打开登录页：容器出口网络偶发不通（实测出现过 chrome-error://chromewebdata/），
 # 一次失败就给用户错误页等于「登录不上」，所以重试一次。
@@ -211,6 +225,11 @@ class LoginSessionRegistry:
             # SPA 登录页在 domcontentloaded 之后才渲染并跳转（实测 longcat 首帧
             # 仍停在 /platform/usage 的骨架页），稍等再让前端截首帧，否则是白屏。
             await page.wait_for_timeout(1500)
+            # 再等页面稳定才置 ready：ready 的含义是「这扇页面已经能看、能操作」，
+            # 不是「导航请求回来了」。不等就绪就报 ready，首帧会是半渲染的空壳，
+            # 表单清单也因此读成空 —— 用户看到「没有可填的输入框」却毫无办法。
+            if not session.closed:
+                await settle(session)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - 失败降级，不向上抛
@@ -351,6 +370,55 @@ async def reload(session: LoginSession) -> None:
         )
     except Exception:  # noqa: BLE001 - 重新加载失败保留当前画面
         pass
+
+
+# 页面「形状指纹」：元素数（穿透开放影子树）+ 输入框数 + 当前 URL。
+# 只用来判断「页面还在变吗」，不参与任何业务判定 —— 具体是什么元素由各站点自己决定。
+_PAGE_SIGNATURE_JS = r"""() => {
+  let n = 0;
+  let inputs = 0;
+  const walk = (root) => {
+    let nodes;
+    try { nodes = root.querySelectorAll('*'); } catch (e) { return; }
+    for (const el of nodes) {
+      n += 1;
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') inputs += 1;
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  };
+  walk(document);
+  return n + '|' + inputs + '|' + location.href;
+}"""
+
+
+async def settle(
+    session: LoginSession,
+    timeout_ms: int = LOGIN_SETTLE_TIMEOUT_MS,
+    quiet_ms: int = LOGIN_SETTLE_QUIET_MS,
+) -> None:
+    """等页面停止变化（最多 timeout_ms），动作之后的截图必须在它之后。
+
+    不抛异常：这里只是「尽量等到画面稳定」，等不到也要照常截图，
+    让用户至少能看到当前画面，而不是拿到一个错误。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_ms / 1000.0
+    quiet = quiet_ms / 1000.0
+    last = None
+    last_change = loop.time()
+    while loop.time() < deadline:
+        try:
+            sig = await asyncio.wait_for(session.page.evaluate(_PAGE_SIGNATURE_JS), timeout=2.0)
+        except Exception:  # noqa: BLE001 - 读不到指纹就当页面仍在变，继续等
+            sig = None
+        now = loop.time()
+        if sig != last:
+            last = sig
+            last_change = now
+        elif now - last_change >= quiet:
+            return
+        await asyncio.sleep(LOGIN_SETTLE_POLL_MS / 1000.0)
 
 
 async def snapshot_storage_state(session: LoginSession) -> str:
@@ -518,23 +586,33 @@ async def describe_form(session: "LoginSession") -> dict:
     每次调用都会重新给元素打标记，因此返回的 index 只对「紧随其后」的一次
     填写/点击有效；调用方应把 label / text 一起带回来校验，防止页面重排后
     点错元素。
+
+    ``available`` 是「这次到底读到了没有」，不是「页面上有没有表单」：
+    读失败（跳转中 / 超时 / 主线程卡住）与「这页确实没有输入框」在旧实现里
+    都返回空清单，前端只能把后者当事实显示「这个页面没有可填的输入框」，
+    用户既不知道怎么回事也没有下一步（2026-11-13 线上投诉）。
+    两者必须分开表达：读失败要说「没读到，重试」，不能替页面下结论。
     """
-    try:
-        # 页面跳转/卡死时 evaluate 可能长时间不返回，这里必须设上限：
-        # 否则整帧请求（截图 + 表单）会被一个卡住的页面拖死，用户看到画面不刷新。
-        result = await asyncio.wait_for(
-            session.page.evaluate(_LOGIN_INVENTORY_JS), timeout=LOGIN_INVENTORY_TIMEOUT
-        )
-    except Exception:  # noqa: BLE001 - 页面跳转中读不到就当没有表单
-        return {"fields": [], "buttons": []}
-    if not isinstance(result, dict):
-        return {"fields": [], "buttons": []}
-    fields = result.get("fields") or []
-    buttons = result.get("buttons") or []
-    return {
-        "fields": fields if isinstance(fields, list) else [],
-        "buttons": buttons if isinstance(buttons, list) else [],
-    }
+    for attempt in range(LOGIN_INVENTORY_ATTEMPTS):
+        try:
+            # 页面跳转/卡死时 evaluate 可能长时间不返回，这里必须设上限：
+            # 否则整帧请求（截图 + 表单）会被一个卡住的页面拖死，用户看到画面不刷新。
+            result = await asyncio.wait_for(
+                session.page.evaluate(_LOGIN_INVENTORY_JS), timeout=LOGIN_INVENTORY_TIMEOUT
+            )
+        except Exception:  # noqa: BLE001 - 跳转中读不到：稍等重试，仍失败才认输
+            result = None
+        if isinstance(result, dict):
+            fields = result.get("fields") or []
+            buttons = result.get("buttons") or []
+            return {
+                "fields": fields if isinstance(fields, list) else [],
+                "buttons": buttons if isinstance(buttons, list) else [],
+                "available": True,
+            }
+        if attempt < LOGIN_INVENTORY_ATTEMPTS - 1:
+            await asyncio.sleep(LOGIN_INVENTORY_RETRY_WAIT)
+    return {"fields": [], "buttons": [], "available": False}
 
 
 def _pick_inventory(items: list, index: int, expected: str, key: str) -> Optional[int]:

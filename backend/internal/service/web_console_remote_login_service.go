@@ -84,6 +84,13 @@ type WebConsoleRemoteLoginFrame struct {
 	// 改为把页面表单报给前端，由用户按字段填写。
 	Fields  []WebConsoleRemoteLoginField  `json:"fields,omitempty"`
 	Buttons []WebConsoleRemoteLoginButton `json:"buttons,omitempty"`
+	// FormState 说明 Fields/Buttons 这份清单可不可信，取值 ok / unavailable / opening。
+	//
+	// 为什么不能只看两个数组是否为空：读失败（页面跳转中、主线程卡住、超时）与
+	// 「这页确实没有输入框」在空数组上长得一模一样，前端只能把后者当事实显示
+	// 「这个页面没有可填的输入框」，用户被卡死且无从下手（2026-11-13 线上投诉）。
+	// 读不到就说读不到，让用户点「刷新画面」重试，而不是替页面下结论。
+	FormState string `json:"form_state,omitempty"`
 	// Applied 表示本次动作是否真的落到了目标元素上（仅 fill / click 返回）。
 	Applied *bool `json:"applied,omitempty"`
 }
@@ -217,23 +224,23 @@ func (s *WebConsoleRemoteLoginService) Frame(ctx context.Context, accountID int6
 	return &frame, nil
 }
 
-// Tap 把一次点击转发到页面（坐标为视口 CSS 像素）。
-func (s *WebConsoleRemoteLoginService) Tap(ctx context.Context, accountID int64, sessionID string, x, y float64) error {
+// Tap 把一次点击转发到页面（坐标为视口 CSS 像素），返回点击之后的一帧。
+func (s *WebConsoleRemoteLoginService) Tap(ctx context.Context, accountID int64, sessionID string, x, y float64) (*WebConsoleRemoteLoginFrame, error) {
 	if _, err := s.boundSession(accountID, sessionID); err != nil {
-		return err
+		return nil, err
 	}
-	return s.workerAction(ctx, sessionID, "tap", map[string]any{"x": x, "y": y})
+	return s.workerActionFrame(ctx, sessionID, "tap", map[string]any{"x": x, "y": y})
 }
 
-// Type 把一段文字打到当前焦点元素。
-func (s *WebConsoleRemoteLoginService) Type(ctx context.Context, accountID int64, sessionID, text string) error {
+// Type 把一段文字打到当前焦点元素，返回输入之后的一帧。
+func (s *WebConsoleRemoteLoginService) Type(ctx context.Context, accountID int64, sessionID, text string) (*WebConsoleRemoteLoginFrame, error) {
 	if len(text) > 512 {
-		return fmt.Errorf("web console remote login: text too long")
+		return nil, fmt.Errorf("web console remote login: text too long")
 	}
 	if _, err := s.boundSession(accountID, sessionID); err != nil {
-		return err
+		return nil, err
 	}
-	return s.workerAction(ctx, sessionID, "type", map[string]any{"text": text})
+	return s.workerActionFrame(ctx, sessionID, "type", map[string]any{"text": text})
 }
 
 // FillField 把文字填进页面上的指定输入框（按 label 定位，不依赖坐标）。
@@ -281,6 +288,10 @@ func (s *WebConsoleRemoteLoginService) ToggleField(ctx context.Context, accountI
 }
 
 // workerActionFrame 执行一次动作并取回 worker 刷新后的整帧。
+
+// 所有动作都走这里：worker 在动作之后会等页面稳定再截图 + 读表单，因此这一帧
+// 就是「动作生效之后」的画面。前端直接用，不必再补一次 GET —— 补的那一次
+// 只在动作刚生效的瞬间截图，经常还是旧画面，用户看到的就是「点了没反应」。
 func (s *WebConsoleRemoteLoginService) workerActionFrame(ctx context.Context, sessionID, action string, payload map[string]any) (*WebConsoleRemoteLoginFrame, error) {
 	var frame WebConsoleRemoteLoginFrame
 	path := fmt.Sprintf("%s/%s/%s", webConsoleRemoteLoginPathPrefix, sessionID, action)
@@ -291,27 +302,27 @@ func (s *WebConsoleRemoteLoginService) workerActionFrame(ctx context.Context, se
 }
 
 // PressKey 发送一个白名单按键（Enter / Backspace / Tab 等）。
-func (s *WebConsoleRemoteLoginService) PressKey(ctx context.Context, accountID int64, sessionID, key string) error {
+func (s *WebConsoleRemoteLoginService) PressKey(ctx context.Context, accountID int64, sessionID, key string) (*WebConsoleRemoteLoginFrame, error) {
 	if _, err := s.boundSession(accountID, sessionID); err != nil {
-		return err
+		return nil, err
 	}
-	return s.workerAction(ctx, sessionID, "key", map[string]any{"key": key})
+	return s.workerActionFrame(ctx, sessionID, "key", map[string]any{"key": key})
 }
 
 // Scroll 滚动画面。
-func (s *WebConsoleRemoteLoginService) Scroll(ctx context.Context, accountID int64, sessionID string, deltaY float64) error {
+func (s *WebConsoleRemoteLoginService) Scroll(ctx context.Context, accountID int64, sessionID string, deltaY float64) (*WebConsoleRemoteLoginFrame, error) {
 	if _, err := s.boundSession(accountID, sessionID); err != nil {
-		return err
+		return nil, err
 	}
-	return s.workerAction(ctx, sessionID, "scroll", map[string]any{"delta_y": deltaY})
+	return s.workerActionFrame(ctx, sessionID, "scroll", map[string]any{"delta_y": deltaY})
 }
 
 // Reload 重新打开登录页（页面卡住时的逃生口）。
-func (s *WebConsoleRemoteLoginService) Reload(ctx context.Context, accountID int64, sessionID string) error {
+func (s *WebConsoleRemoteLoginService) Reload(ctx context.Context, accountID int64, sessionID string) (*WebConsoleRemoteLoginFrame, error) {
 	if _, err := s.boundSession(accountID, sessionID); err != nil {
-		return err
+		return nil, err
 	}
-	return s.workerAction(ctx, sessionID, "reload", nil)
+	return s.workerActionFrame(ctx, sessionID, "reload", nil)
 }
 
 // Close 主动关闭会话（用户取消时释放服务端浏览器上下文）。

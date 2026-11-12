@@ -172,4 +172,51 @@ describe('EditAccountModal 控制台登录面板', () => {
     expect(wrapper.text()).toContain('手机号')
     wrapper.unmount()
   })
+
+  it('「手机验证码登录」必须出现在按钮区（这是切换登录方式的唯一入口）', async () => {
+    // 线上投诉现场：用户看到的是二维码页，页面上明明写着「手机验证码登录」，
+    // 面板里却没有能点它的地方，于是被永远关在扫码页里（2026-11-13）。
+    startLoginMock.mockResolvedValue({
+      session_id: 'sid-2',
+      status: 'pending',
+      phase: 'ready',
+      screenshot: 'AAAA',
+      fields: [],
+      buttons: [
+        { index: 0, text: '《用户协议》' },
+        { index: 1, text: '手机验证码登录' }
+      ],
+      form_state: 'ok'
+    })
+    const wrapper = mountModal(buildConsoleAccount())
+    await wrapper.get('[data-testid="web-console-login-start"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="web-console-login-button-1"]').text()).toBe('手机验证码登录')
+    wrapper.unmount()
+  })
+
+  it('读不到表单时说「没读到」，不能替页面下结论说「没有输入框」', async () => {
+    // 读失败（页面跳转中 / 超时）与「这页确实没有输入框」返回值都是空数组，
+    // 旧界面把后者当事实显示，用户既不知道怎么回事也没有下一步。
+    startLoginMock.mockResolvedValue({
+      session_id: 'sid-3',
+      status: 'pending',
+      phase: 'ready',
+      screenshot: 'AAAA',
+      fields: [],
+      buttons: [],
+      form_state: 'unavailable'
+    })
+    const wrapper = mountModal(buildConsoleAccount())
+    await wrapper.get('[data-testid="web-console-login-start"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="web-console-login-form-unavailable"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('admin.accounts.webConsoleQuota.formUnavailable')
+    expect(wrapper.text()).not.toContain('admin.accounts.webConsoleQuota.formEmpty')
+    // 必须给一个能自己救回来的按钮
+    expect(wrapper.find('[data-testid="web-console-login-form-retry"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
 })
