@@ -752,9 +752,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		}
 	}()
 
+	// slotFullCount 提升到**请求级**（外层 fallback 循环之外）：同一请求若先在主分组
+	// 等超时、之后因 PromptTooLong 触发 fallback 重启外层循环，计数被清零会让
+	// fallback 分组**又等满一次**，总等待时间超过一次超时（外审第四轮 medium）。
+	slotFullCount := 0
 	for {
 		fs := NewFailoverState(hasBoundSession)
-	slotFullCount := 0
 		retryWithFallback := false
 
 		for {

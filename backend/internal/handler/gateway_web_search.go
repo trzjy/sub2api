@@ -185,6 +185,8 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 			// 注意**每次**槽位失败都要记账（不只 attempt==0）——否则「先上游失败、
 			// 后槽位失败」的混合场景会漏记，终态会被先前的上游错误遮蔽（外审第三轮 must_fix #2）。
 			if acquireErr != nil {
+				// 标记「本次请求已经等过一次且没等到」：后续候选只做立即抢槽，不再排队等待。
+				markConcurrencySlotWaitExhausted(c)
 				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
 				if recordConcurrencySlotFailure(failedAccounts, selected.Account.ID, &slotFullCount) {
