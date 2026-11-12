@@ -239,4 +239,67 @@ describe('EditAccountModal identity disguise', () => {
     expect(id).toBe(12)
     expect(payload.profile).toBe('kimi')
   })
+
+  // DSG-C4F：首次读取失败后，关闭再打开同一账号应重试读取，成功后保存恢复可用。
+  it('retries the disguise read on reopen after a failed read, then allows save (DSG-C4F)', async () => {
+    // 首次读取失败（仅第一次 reject，之后回落到默认 resolve）
+    getDisguiseMock.mockRejectedValueOnce(new Error('disguise read failed'))
+    const wrapper = mountModal()
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalledTimes(1))
+
+    // 关闭再打开同一账号（id 不变，不会触发 account.id watch）
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+
+    // 重新打开后应再次发起读取请求
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalledTimes(2))
+
+    // 第二次读取恢复成功 → loaded 置 true，保存恢复可用
+    await wrapper.get('[data-testid="identity-disguise-profile"]').setValue('deepseek')
+    await wrapper.vm.$nextTick()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await vi.waitFor(() => expect(updateDisguiseMock).toHaveBeenCalledTimes(1))
+    const [id, payload] = updateDisguiseMock.mock.calls[0]
+    expect(id).toBe(12)
+    expect(payload.profile).toBe('deepseek')
+  })
+
+  // DSG-C4F（回归）：读取成功后关闭再打开同一账号，不应重复发起读取请求。
+  it('does not re-read the disguise when reopened after a successful read (regression DSG-C4F)', async () => {
+    const wrapper = mountModal()
+    // 首次读取成功，且 UI 已反映加载结果（确保 loaded = true）
+    await vi.waitFor(() =>
+      expect(wrapper.get('[data-testid="identity-disguise-profile"]').element.value).toBe('none')
+    )
+    expect(getDisguiseMock).toHaveBeenCalledTimes(1)
+
+    // 关闭再打开同一账号
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+
+    // 已加载成功时不再发起读取请求
+    expect(getDisguiseMock).toHaveBeenCalledTimes(1)
+  })
+
+  // DSG-C4F（回归）：首次读取失败且重开仍失败，保存仍被守卫拦住。
+  it('still blocks the disguise save when a reopened read keeps failing (regression DSG-C4F)', async () => {
+    // 所有读取都失败
+    getDisguiseMock.mockRejectedValue(new Error('disguise read failed'))
+    const wrapper = mountModal()
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalledTimes(1))
+
+    // 关闭再打开同一账号 → 会再次发起读取（仍失败）
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalledTimes(2))
+
+    // 改个备注后保存：主更新照常，但伪装写回仍被守卫拦住
+    await wrapper.get('[data-testid="account-notes"]').setValue('changed note')
+    await wrapper.vm.$nextTick()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await vi.waitFor(() => expect(updateAccountMock).toHaveBeenCalled())
+    expect(updateDisguiseMock).not.toHaveBeenCalled()
+    // 读取失败提示仍然出现（既有行为不变）
+    expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.identityDisguise.loadFailed')
+  })
 })

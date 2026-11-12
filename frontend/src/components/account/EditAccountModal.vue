@@ -4110,7 +4110,25 @@ onMounted(() => {
   })()
 })
 
-// 卸载时清掉轮询定时器，避免组件销毁后仍在打接口。
+// DSG-C4F：弹窗由关闭变为打开时，重试伪装配置读取。
+// 该组件在 AccountsView 中始终挂载、仅用 show 隐藏（:547），而读取只在组件挂载与账号 ID 变化时触发
+// （:3912 的 account.id watch、:4006 的 onMounted）。因此「首次读取失败后关闭再打开同一账号」不会重试，
+// 伪装配置会一直无法保存，直到刷新页面。
+// 这里监听 show 的「关闭→打开」跳变：若当前账号伪装尚未成功加载，则重新调用 loadIdentityDisguise
+// （幂等，成功即置 identityDisguiseLoaded = true）；已加载成功时跳过，避免每次打开多打一次接口。
+// 不引入定时重试 / 轮询 / 新配置项；读取失败时的既有行为（提示错误、禁止写回）保持不变。
+watch(
+  () => props.show,
+  (show, wasShow) => {
+    if (!show || wasShow) return
+    const accountID = props.account?.id
+    if (!accountID) return
+    if (identityDisguiseLoaded.value) return
+    void loadIdentityDisguise(accountID)
+  }
+)
+
+// 卸载时清掉控制台验证登录轮询定时器，避免组件销毁后仍在打接口。
 onUnmounted(() => {
   stopWebConsoleAuthPolling()
   stopRemoteLoginPolling()
