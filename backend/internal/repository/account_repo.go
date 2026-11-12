@@ -1164,7 +1164,7 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 }
 
 func (r *accountRepository) Delete(ctx context.Context, id int64) error {
-	groupIDs, err := r.loadAccountGroupIDs(ctx, id)
+	groupIDs, err := r.loadAccountGroupIDs(ctx, r.client, id)
 	if err != nil {
 		return err
 	}
@@ -2214,24 +2214,39 @@ func (r *accountRepository) GetGroups(ctx context.Context, accountID int64) ([]s
 	return outGroups, nil
 }
 
+// BindGroups 绑定账号到指定分组（先删旧绑定再建新绑定）。
+//
+// 事务感知（QKG-FIX-6）：先查 dbent.TxFromContext(ctx)——
+//   - 命中：复用调用方已持有的事务 client 读+写，且**不自行开新事务 / 不提交**；
+//     scheduler outbox 也用该事务的 client 写入，与账号/分组写入落在同一事务，
+//     由调用方（码级锁事务）统一提交或回滚。这正是修复"事务外绑定读到旧码级分组、
+//     把事务内刚同步的新值覆盖回去"导致 quota_keys.group_ids 与 account_groups 分叉的根因。
+//   - 未命中：维持既有行为（自开事务 + 提交；或 ErrTxStarted 注入式 client 复用）完全不变。
 func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, groupIDs []int64) error {
-	existingGroupIDs, err := r.loadAccountGroupIDs(ctx, accountID)
-	if err != nil {
-		return err
-	}
-	// 使用事务保证删除旧绑定与创建新绑定的原子性
-	tx, err := r.client.Tx(ctx)
-	if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
-		return err
-	}
-
 	var txClient *dbent.Client
-	if err == nil {
+	var sqlExec sqlExecutor
+	var ownedTx *dbent.Tx // 仅自开事务时非 nil；命中外部事务或 ErrTxStarted 时为 nil
+
+	if existingTx := dbent.TxFromContext(ctx); existingTx != nil {
+		// 调用方已持有事务（含 NewTxContext 注入或上游 client.Tx 触发的 ErrTxStarted）：
+		// 复用其 client 读+写，不自开事务、不提交、不写 r.sql；outbox 也落在同一事务。
+		txClient = existingTx.Client()
+		sqlExec = txClient
+	} else {
+		// 既有行为：自开事务 + 提交，完全不变（此分支上下文无事务，故不会触发 ErrTxStarted）。
+		tx, err := r.client.Tx(ctx)
+		if err != nil {
+			return err
+		}
+		ownedTx = tx
 		defer func() { _ = tx.Rollback() }()
 		txClient = tx.Client()
-	} else {
-		// 已处于外部事务中（ErrTxStarted），复用当前 client
-		txClient = r.client
+		sqlExec = txClient
+	}
+
+	existingGroupIDs, err := r.loadAccountGroupIDs(ctx, txClient, accountID)
+	if err != nil {
+		return err
 	}
 	if err := lockLiveGroups(ctx, txClient, groupIDs); err != nil {
 		return err
@@ -2242,8 +2257,9 @@ func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, gro
 	}
 
 	if len(groupIDs) == 0 {
-		if tx != nil {
-			return tx.Commit()
+		// 与原行为一致：解绑全部时不写 outbox，自开事务则提交。
+		if ownedTx != nil {
+			return ownedTx.Commit()
 		}
 		return nil
 	}
@@ -2261,14 +2277,16 @@ func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, gro
 		return err
 	}
 
-	if tx != nil {
-		if err := tx.Commit(); err != nil {
+	// outbox 必须与分组写入落在同一事务、且在提交之前入队（QKG-FIX-6）：
+	// 调用方事务由调用方统一提交；自开事务在此先入队再提交。
+	payload := buildSchedulerGroupPayload(mergeGroupIDs(existingGroupIDs, groupIDs))
+	if err := enqueueSchedulerOutbox(ctx, sqlExec, service.SchedulerOutboxEventAccountGroupsChanged, &accountID, nil, payload); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue bind groups failed: account=%d err=%v", accountID, err)
+	}
+	if ownedTx != nil {
+		if err := ownedTx.Commit(); err != nil {
 			return err
 		}
-	}
-	payload := buildSchedulerGroupPayload(mergeGroupIDs(existingGroupIDs, groupIDs))
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountGroupsChanged, &accountID, nil, payload); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue bind groups failed: account=%d err=%v", accountID, err)
 	}
 	return nil
 }
@@ -5232,8 +5250,11 @@ func uniquePositiveInt64s(ids []int64) []int64 {
 	return out
 }
 
-func (r *accountRepository) loadAccountGroupIDs(ctx context.Context, accountID int64) ([]int64, error) {
-	entries, err := r.client.AccountGroup.
+// loadAccountGroupIDs 读取账号当前绑定的分组 ID。client 由调用方传入：事务内绑定走
+// 事务 client（读到的旧值才能保证与随后写入落在同一事务、读到事务内刚同步的新值），
+// 事务外绑定走 r.client（QKG-FIX-6）。
+func (r *accountRepository) loadAccountGroupIDs(ctx context.Context, client *dbent.Client, accountID int64) ([]int64, error) {
+	entries, err := client.AccountGroup.
 		Query().
 		Where(dbaccountgroup.AccountIDEQ(accountID)).
 		All(ctx)

@@ -994,7 +994,17 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 			// 人工建号绑定码账号分组权威：落库分组以码级 GroupIds 为准（QKG 外审 P2），
 			// 覆盖请求/默认分组，使随后的 BindGroups 写成码级权威值。
 			groupIDs = *resolveQuotaKeyGroupAuthority(qk, &groupIDs)
-			return creator.CreateWithTx(ctx, tx, account)
+			if err := creator.CreateWithTx(ctx, tx, account); err != nil {
+				return err
+			}
+			// QKG-FIX-6：分组绑定收进码级锁事务，与建号/码级分组同步原子一致，
+			// 避免事务外读到旧码级分组、把事务内刚同步的新值覆盖回去（数据分叉）。
+			if len(groupIDs) > 0 {
+				if err := s.accountRepo.BindGroups(dbent.NewTxContext(ctx, tx), account.ID, groupIDs); err != nil {
+					return err
+				}
+			}
+			return nil
 		}); err != nil {
 			return nil, err
 		}
@@ -1002,8 +1012,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		return nil, err
 	}
 
-	// 绑定分组
-	if len(groupIDs) > 0 {
+	// 绑定分组：仅未走码级锁事务（非 cursor / 未绑码 / 无 ent 客户端）时在此事务外绑定；
+	// 走码级锁事务的建号已在事务内完成绑定，此处不得重复绑定。
+	if !s.createViaQuotaKeyCapacity(input) && len(groupIDs) > 0 {
 		if err := s.accountRepo.BindGroups(ctx, account.ID, groupIDs); err != nil {
 			return nil, err
 		}
@@ -1515,6 +1526,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	//
 	// limit 传 MaxAccountsPerQuotaKey：改绑是人工操作，不受"自动补位固定 2 个（1 主 1 热备）"的限制
 	// （用户裁定 2026-11-10），但仍保留硬护栏，防止误操作把号堆到一个码下面。
+	// boundInTx 标记分组绑定是否已在码级锁事务内完成：改绑与已绑码 cursor 编辑走事务内
+	// 绑定（QKG-FIX-6），其余路径（非 cursor / 未绑码 / 无 ent 客户端）在下方事务外绑定。
+	boundInTx := false
 	if rebindViaQuotaKeyCapacity && s.entClient != nil {
 		if err := withQuotaKeyCapacityTx(ctx, s.entClient, *effectiveQuotaKeyID, MaxAccountsPerQuotaKey, func(tx *dbent.Tx) error {
 			// 改绑到另一激活码：先读取目标激活码（NotFound 按既有容量校验逻辑处理），
@@ -1528,10 +1542,20 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			// 改绑到另一激活码：落库分组以目标码级 GroupIds 为准（QKG 外审 P2），
 			// 覆盖请求/默认分组，使随后的 BindGroups 写成目标码级权威值。
 			input.GroupIDs = resolveQuotaKeyGroupAuthority(qk, input.GroupIDs)
-			return persistAccountWrite(dbent.NewTxContext(ctx, tx))
+			if err := persistAccountWrite(dbent.NewTxContext(ctx, tx)); err != nil {
+				return err
+			}
+			// QKG-FIX-6：改绑路径的分组绑定收进码级锁事务，与改绑/码级分组同步原子一致。
+			if input.GroupIDs != nil {
+				if err := s.accountRepo.BindGroups(dbent.NewTxContext(ctx, tx), account.ID, *input.GroupIDs); err != nil {
+					return err
+				}
+			}
+			return nil
 		}); err != nil {
 			return nil, err
 		}
+		boundInTx = true
 	} else if !rebindViaQuotaKeyCapacity && account.Platform == PlatformCursor && effectiveQuotaKeyID != nil && s.entClient != nil {
 		// 已绑定激活码的 cursor 账号编辑（未改绑）：在激活码锁事务内重读并应用受码管辖设置，
 		// 再于同一事务上下文执行 persistAccountWrite，杜绝 TOCTOU 竞态——管理员并发更新
@@ -1546,10 +1570,20 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			// 码级分组是权威值：账号编辑不得改写绑定。用码级 group_ids 覆盖请求值，
 			// 使随后的 BindGroups 写成权威值（与 applyQuotaKeyManagedAccountSettings 同源）。
 			input.GroupIDs = resolveQuotaKeyGroupAuthority(qk, input.GroupIDs)
-			return persistAccountWrite(dbent.NewTxContext(ctx, tx))
+			if err := persistAccountWrite(dbent.NewTxContext(ctx, tx)); err != nil {
+				return err
+			}
+			// QKG-FIX-6：已绑码 cursor 编辑的分组绑定收进码级锁事务，与编辑/码级分组同步原子一致。
+			if input.GroupIDs != nil {
+				if err := s.accountRepo.BindGroups(dbent.NewTxContext(ctx, tx), account.ID, *input.GroupIDs); err != nil {
+					return err
+				}
+			}
+			return nil
 		}); err != nil {
 			return nil, err
 		}
+		boundInTx = true
 	} else if err := persistAccountWrite(ctx); err != nil {
 		return nil, err
 	}
@@ -1562,8 +1596,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 	}
 
-	// 绑定分组
-	if input.GroupIDs != nil {
+	// 绑定分组：仅未走码级锁事务（非 cursor / 未绑码 / 无 ent 客户端）时在此事务外绑定；
+	// 走码级锁事务的改绑与 cursor 编辑已在事务内完成绑定，此处不得重复绑定（否则事务外旧值
+	// 会把事务内刚同步的码级权威值覆盖回去，回归数据分叉）。
+	if !boundInTx && input.GroupIDs != nil {
 		if err := s.accountRepo.BindGroups(ctx, account.ID, *input.GroupIDs); err != nil {
 			return nil, err
 		}
