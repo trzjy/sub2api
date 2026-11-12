@@ -58,11 +58,17 @@ func (s *adminServiceImpl) SetAccountIdentityDisguise(ctx context.Context, id in
 		return nil, err
 	}
 
-	names := update.ForbiddenNames
+	// 写入路径区分两种来源：
+	//   - 自动派生（AutoDeriveForbidden=true）：派生函数 DeriveIdentityDisguiseForbiddenNames
+	//     内部已完成清洗（去空/去重/超长剔除/控制字符剔除），且按外审裁定不设条数上限，
+	//     直接落库，禁止再经 sanitizeForbiddenNames 截断。
+	//   - 显式输入：维持既有 sanitizeForbiddenNames 行为完全不变（含 16 项上限）。
+	var names []string
 	if update.AutoDeriveForbidden {
 		names = DeriveIdentityDisguiseForbiddenNames(account.GetModelMapping())
+	} else {
+		names = sanitizeForbiddenNames(update.ForbiddenNames)
 	}
-	names = sanitizeForbiddenNames(names)
 
 	payload := map[string]any{
 		"profile":         string(update.Profile),
