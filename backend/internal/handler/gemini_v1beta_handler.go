@@ -679,6 +679,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		}
 	}
 	fs := NewFailoverStateCapped(maxAccountSwitches, hasBoundSession)
+	slotFullCount := 0
 
 	// 单账号分组首次 503 就不设模型限流标记，避免设 29s 限流导致后续请求连续快速失败；
 	// 是否单账号分组在 antigravity 账号遇到 503 或模型限流预检查时才判定。
@@ -804,6 +805,12 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			)
 			if err != nil {
 				reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+				// 上限见 maxConcurrencySlotFailoverAttempts；用尽后仍走本端点既有终态
+				// （Google 错误格式 + 账号槽并发文案），本端点的状态码口径不变。
+				if recordConcurrencySlotFailure(fs.FailedAccountIDs, account.ID, &slotFullCount) {
+					continue
+				}
 				// ConcurrencyError.Error() 是内部英文标识，不得直接写给下游：
 				// 按类型断言取固定中文文案；HTTP 429 与 googleError 输出格式不变。
 				var slotErr *ConcurrencyError

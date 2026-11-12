@@ -329,6 +329,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					// 否则会把 JSON 错误体塞进已开的 SSE 流。
 					syncStreamStartedIfResponseCommitted(c, &streamStarted)
 					h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
+				} else if slotFullCount > 0 {
+					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
+					// 不能落到下面的 502 分支——那会破坏账号并发终点契约。
+					writeConcurrencySlotExhausted(c, h, streamStarted)
 				} else {
 					h.handleStreamingAwareError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed, streamStarted)
 				}

@@ -1,7 +1,6 @@
 package service
 
 import (
-	"net/http"
 	"strings"
 )
 
@@ -82,8 +81,21 @@ func IsMappingInducedRejection(account *Account, mappingLookupModel string, stat
 const modelMappingInducedRejectionReason = GatewayFailureReason("model_mapping_induced_rejection")
 
 // applyMappingInducedRejection 把「改写归因」的换号语义写进错误对象。
-// 与既有 isOpenAIUpstreamSafetyRejection 同款处置：换号、不停号、耗尽时告知
-// 「上游不可用」。
+//
+// 与既有 isOpenAIUpstreamSafetyRejection 同款处置：换号、不停号、不原地重试。
+//
+// **刻意不覆盖客户端可见状态码与文案**（外审 must_fix #1 的整改）：
+// 上游拒绝的原因无法从错误体可靠区分——讯飞 10005「用户参数值有错误」既可能是
+// 客户参数写错，也可能是目标模型不认这个请求。若把 400 改写成 502「上游服务
+// 暂时不可用」，客户自己的参数错误就会被说成「上游挂了」，那是误导，且违反锁定项
+// 「不要把客户自己的错丢给客户」。
+//
+// 因此本机制的边界划在「要不要换号」这一侧：
+//   - 换号成功 → 客户拿到正常响应（改造前是 400，这是本轮的全部收益）；
+//   - 换号也失败 → 候选耗尽，**仍透传上游原始 400**，与改造前逐字节一致。
+//
+// 误判代价（客户请求本身有错时多换几次号、多几次上游调用）是有界且可接受的；
+// 误判成「上游不可用」则是不可接受的误导。
 func applyMappingInducedRejection(failoverErr *UpstreamFailoverError, mappingInduced bool) {
 	if failoverErr == nil || !mappingInduced {
 		return
@@ -93,6 +105,4 @@ func applyMappingInducedRejection(failoverErr *UpstreamFailoverError, mappingInd
 	failoverErr.Scope = GatewayFailureScopeAccount
 	failoverErr.Reason = modelMappingInducedRejectionReason
 	failoverErr.NextAccountAction = NextAccountRetry
-	failoverErr.ClientStatusCode = http.StatusBadGateway
-	failoverErr.ClientMessage = "上游服务暂时不可用，请稍后重试"
 }

@@ -169,6 +169,9 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 			}
 			if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, false)
+			} else if slotFullCount > 0 {
+				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
+				writeConcurrencySlotExhausted(c, h, streamStarted)
 			} else {
 				h.errorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 			}

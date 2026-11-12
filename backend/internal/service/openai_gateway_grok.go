@@ -165,8 +165,16 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		if upstreamMsg == "" {
 			upstreamMsg = fmt.Sprintf("xAI upstream returned status %d", resp.StatusCode)
 		}
+		// 映射归因：Grok Responses 在转发前会按账号 model_mapping 改写模型名
+		// （见上方 upstreamModel := account.GetMappedModel(originalModel)）。
+		// 上游拒绝时若不换号，改写造成的不兼容会被当成客户自己的错误直接透传。
+		// 内容审核拒绝仍按既有规则不换号（先判，保留该例外）。
+		mappingInduced := !isGrokContentPolicyRejection(resp.StatusCode, respBody) &&
+			IsMappingInducedRejection(account, originalModel, resp.StatusCode)
+		grokFailover := s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody)
+
 		kind := "http_error"
-		if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
+		if grokFailover || mappingInduced {
 			kind = "failover"
 		}
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -187,9 +195,9 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		if shouldMarkGrokTeamModelRateLimit(resp.StatusCode, respBody) {
 			markGrokTeamModelRateLimit(account, upstreamModel, resolveGrokTeamRateLimitUntil(time.Now().Add(grokTeamRateLimitDefaultTTL), time.Now()))
 		}
-		if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
+		if grokFailover || mappingInduced {
 			retryable, retryDelay, retryDeadline, retryMax := grokSameAccountRetryMetadata(account, resp.StatusCode, respBody)
-			return nil, &UpstreamFailoverError{
+			failoverErr := &UpstreamFailoverError{
 				StatusCode:               resp.StatusCode,
 				ResponseBody:             respBody,
 				ResponseHeaders:          resp.Header.Clone(),
@@ -199,6 +207,10 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 				SameAccountRetryDeadline: retryDeadline,
 				SameAccountRetryMax:      retryMax,
 			}
+			// 改写归因：换号、不原地重试；客户端可见状态码与文案保持上游原样
+			// （见 applyMappingInducedRejection 的边界说明）。
+			applyMappingInducedRejection(failoverErr, mappingInduced)
+			return nil, failoverErr
 		}
 		return s.handleErrorResponse(ctx, resp, c, account, patchedBody, upstreamModel)
 	}

@@ -82,12 +82,15 @@ func TestNewOpenAIAccountFailoverError_MappingInduced(t *testing.T) {
 	require.NotNil(t, err)
 	require.True(t, err.ShouldRetryNextAccount(), "必须换号")
 	require.Equal(t, modelMappingInducedRejectionReason, err.Reason)
-	require.Equal(t, http.StatusBadGateway, err.ClientStatusCode,
-		"换号耗尽时按上游不可用告知，不把上游原文当成客户的错")
-	require.NotEmpty(t, err.ClientMessage)
 	require.False(t, err.RetryableOnSameAccount, "同一账号再试只会撞同一面墙")
+	// 外审 must_fix #1 的整改：改写归因**不得**改写客户端可见状态码与文案。
+	// 上游拒绝的原因无法从错误体可靠区分（讯飞 10005 既可能是参数错、也可能是
+	// 目标模型不认），若把 400 改写成 502，客户自己的参数错误就会被说成
+	// 「上游挂了」。换号耗尽时仍透传上游原始 400。
+	require.Zero(t, err.ClientStatusCode, "不得改写客户端可见状态码")
+	require.Empty(t, err.ClientMessage, "不得改写客户端可见文案")
 
-	// 未改写：既有行为不变（不改归因、不设 502 文案）。
+	// 未改写：既有行为不变（不改归因、不设状态码）。
 	// 注意「要不要换号」由判定层 shouldFailoverOpenAIUpstreamResponse 决定，
 	// 构造层只负责把「已判定为改写归因」翻译成错误对象的字段。
 	err2 := svc.newOpenAIAccountFailoverError(acc, http.StatusBadRequest, http.Header{}, body, "invalid request", false, false, "deepseek-v4-pro")
@@ -96,6 +99,33 @@ func TestNewOpenAIAccountFailoverError_MappingInduced(t *testing.T) {
 	require.Zero(t, err2.ClientStatusCode,
 		"未改写时不得改写客户端可见状态码")
 	require.Empty(t, err2.ClientMessage)
+}
+
+// TestMappingInducedRejection_ClientParameterErrorKeepsOriginal400 锁定外审
+// must_fix #1 的整改：账号配了非恒等映射、但这次请求是**客户自己参数写错**时，
+// 归因判据仍可成立（换号是一次「换条路试试」），但**绝不能**把 400 改写成 502。
+//
+// 真实场景：客户发 temperature=invalid，账号恰好配了 deepseek-flash → spark-x2.6-4b。
+// 若把错误说成「上游服务暂时不可用」，客户会去查上游，而问题在他自己的请求里。
+func TestMappingInducedRejection_ClientParameterErrorKeepsOriginal400(t *testing.T) {
+	acc := newMappingTestAccount(map[string]string{"deepseek-flash": "spark-x2.6-4b"})
+	svc := &OpenAIGatewayService{}
+	// 客户参数错误（上游回 400 invalid_request_error），不是模型不认。
+	body := []byte(`{"error":{"code":"invalid_request_error","message":"Invalid value for temperature"}}`)
+
+	// 判定层：会换号（换条路试试，成本有界）。
+	require.True(t,
+		svc.shouldFailoverOpenAIUpstreamResponse(acc, http.StatusBadRequest, "Invalid value for temperature", body, "deepseek-flash"),
+		"换号仍应发生：换条路试试的代价有界")
+
+	// 构造层：客户端可见状态码与文案**必须保持上游原样**。
+	err := svc.newOpenAIAccountFailoverError(acc, http.StatusBadRequest, http.Header{}, body, "Invalid value for temperature", false, false, "deepseek-flash")
+	require.Zero(t, err.ClientStatusCode,
+		"客户自己的参数错误不得被改写成 502「上游服务暂时不可用」")
+	require.Empty(t, err.ClientMessage,
+		"客户自己的参数错误不得被改写成「上游不可用」文案")
+	require.Equal(t, http.StatusBadRequest, err.StatusCode,
+		"上游状态码必须原样透传")
 }
 
 func TestShouldFailoverUpstreamStatusCode(t *testing.T) {

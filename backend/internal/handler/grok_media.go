@@ -293,6 +293,9 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			}
 			if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, false)
+			} else if slotFullCount > 0 {
+				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
+				writeConcurrencySlotExhausted(c, h, streamStarted)
 			} else {
 				h.errorResponse(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed)
 			}

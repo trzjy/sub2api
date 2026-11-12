@@ -76,6 +76,16 @@ func setConcurrencySlotWriteError(c *gin.Context, writeError func(status int, er
 // 优先用本端点自己的 writeError（与该端点其它错误的格式一致），
 // 没有暂存时退回 OpenAI 链的默认写法。
 func writeConcurrencySlotExhausted(c *gin.Context, h *OpenAIGatewayHandler, streamStarted bool) {
+	writeConcurrencySlotExhaustedWith(c, func(status int, errType, code, message string) {
+		h.handleStreamingAwareErrorWithCode(c, status, errType, code, message, streamStarted, false)
+	})
+}
+
+// writeConcurrencySlotExhaustedWith 用调用方给定的写出方式写槽位换号耗尽终态。
+//
+// 供不走统一流式错误出口的端点使用（如 alpha_search / embeddings / grok_media
+// 走 h.errorResponse），保证终态格式与该端点其它错误一致。
+func writeConcurrencySlotExhaustedWith(c *gin.Context, writeError func(status int, errType, code, message string)) {
 	status, errType, code, message := concurrencySlotExhaustedResponse()
 	if c != nil {
 		if v, ok := c.Get(concurrencySlotWriteErrorKey); ok {
@@ -85,5 +95,7 @@ func writeConcurrencySlotExhausted(c *gin.Context, h *OpenAIGatewayHandler, stre
 			}
 		}
 	}
-	h.handleStreamingAwareErrorWithCode(c, status, errType, code, message, streamStarted, false)
+	if writeError != nil {
+		writeError(status, errType, code, message)
+	}
 }

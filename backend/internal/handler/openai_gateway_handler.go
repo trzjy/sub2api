@@ -828,6 +828,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}
 			if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
+			} else if slotFullCount > 0 {
+				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
+				// 不能落到下面的 502 分支——那会破坏账号并发终点契约。
+				writeConcurrencySlotExhausted(c, h, streamStarted)
 			} else {
 				h.handleFailoverExhaustedSimple(c, 502, streamStarted)
 			}
@@ -1646,6 +1650,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			} else {
 				if lastFailoverErr != nil {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
+				} else if slotFullCount > 0 {
+					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
+					writeConcurrencySlotExhausted(c, h, streamStarted)
 				} else {
 					h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed, streamStarted)
 				}
