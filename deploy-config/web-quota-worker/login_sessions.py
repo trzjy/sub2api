@@ -63,6 +63,17 @@ LOGIN_INVENTORY_TIMEOUT = 3.0
 LOGIN_OPEN_ATTEMPTS = 2
 LOGIN_GOTO_TIMEOUT_MS = 18000
 
+# 页面生命周期阶段（与「是否已登录」是两个互相独立的事实，不要塞进同一个字段）。
+#
+# 为什么必须分开上报：打开登录页要经过「启动浏览器 → 导航 → SPA 首帧」，
+# 实测 longcat 单次要 16~30 秒，超过前端 30s 请求超时。早期把这段慢操作放在
+# /v1/login/start 里同步等待，结果就是前端先掐断（用户看到假的「网络错误」），
+# 会话号还没拿到，登录面板永远不出现（2026-11-13 线上故障）。
+# 现在 start 只创建会话即返回，页面在后台打开，前端轮询拿 phase 显示进度。
+LOGIN_PHASE_OPENING = "opening"
+LOGIN_PHASE_READY = "ready"
+LOGIN_PHASE_FAILED = "failed"
+
 ContextFactory = Callable[[Optional[str], Optional[str]], Awaitable[Any]]
 
 
@@ -95,6 +106,11 @@ class LoginSession:
         self.created_at = time.monotonic()
         self.last_touch = self.created_at
         self.closed = False
+        # 页面生命周期：opening（正在打开）→ ready / failed。与 authenticated() 无关。
+        self.phase = LOGIN_PHASE_OPENING
+        # 打不开时的原因码（给前端显示人话用，不当作协议解析）。
+        self.phase_error = ""
+        self.open_task: Optional[asyncio.Task] = None
         # 是否曾离开过控制台成功前缀（= 真的跳过登录页）。
         # 必要性：longcat 的 login_url 本身就落在 success_url_prefix 内
         # （/platform/usage 属于 /platform/），只看「当前 URL 命中前缀」会在
@@ -158,29 +174,55 @@ class LoginSessionRegistry:
             success_url_prefix=success_url_prefix,
             login_url=login_url,
         )
-        # 打开页面：容器出口网络偶发不通（实测出现过 chrome-error://chromewebdata/），
-        # 一次失败就给用户一个错误页等于「登录不上」，所以重试两次再放弃。
-        for attempt in range(LOGIN_OPEN_ATTEMPTS):
-            try:
-                await page.goto(login_url, wait_until="domcontentloaded", timeout=LOGIN_GOTO_TIMEOUT_MS)
-                break
-            except Exception:
-                if attempt == LOGIN_OPEN_ATTEMPTS - 1:
-                    # 打开失败也要让用户看到当前画面（可能是空白页），
-                    # 由前端「刷新画面」重试；这里不抛，避免整条链路 5xx。
-                    break
-                await page.wait_for_timeout(1200)
-        try:
-            # SPA 登录页在 domcontentloaded 之后才渲染并跳转（实测 longcat 首帧
-            # 仍停在 /platform/usage 的骨架页），稍等再截首帧，否则用户看到白屏。
-            await page.wait_for_timeout(1500)
-        except Exception:
-            pass
 
         async with self._lock:
             await self._prune_locked(time.monotonic())
             self._sessions[session.id] = session
+        # 关键：不在这里等页面打开。打开登录页最慢要几十秒，同步等就会把
+        # 前端请求拖过它的超时阈值，用户拿到的是「网络错误」而不是登录画面。
+        # 会话号先返回，页面在后台打开，前端靠 phase 显示「正在打开」。
+        session.open_task = asyncio.create_task(self._open_login_page(session))
         return session
+
+    async def _open_login_page(self, session: LoginSession) -> None:
+        """在后台把登录页导航到可交互状态，并推进 session.phase。
+
+        不抛异常：后台任务抛出去没人接，只会变成一条噪音日志；失败写进
+        phase/phase_error，由 state 轮询报给前端。
+        """
+        page = session.page
+        navigated = False
+        try:
+            # 容器出口网络偶发不通（实测出现过 chrome-error://chromewebdata/），
+            # 一次失败就给用户一个错误页等于「登录不上」，所以重试一次。
+            for attempt in range(LOGIN_OPEN_ATTEMPTS):
+                try:
+                    await page.goto(
+                        session.login_url,
+                        wait_until="domcontentloaded",
+                        timeout=LOGIN_GOTO_TIMEOUT_MS,
+                    )
+                    navigated = True
+                    break
+                except Exception:
+                    if attempt == LOGIN_OPEN_ATTEMPTS - 1:
+                        break
+                    await page.wait_for_timeout(1200)
+            # SPA 登录页在 domcontentloaded 之后才渲染并跳转（实测 longcat 首帧
+            # 仍停在 /platform/usage 的骨架页），稍等再让前端截首帧，否则是白屏。
+            await page.wait_for_timeout(1500)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 失败降级，不向上抛
+            navigated = False
+        if session.closed:
+            return
+        if navigated:
+            session.phase = LOGIN_PHASE_READY
+        else:
+            # 打不开也让用户看到当前画面（可能是错误页），由前端「刷新画面」重试。
+            session.phase = LOGIN_PHASE_FAILED
+            session.phase_error = "login_page_unreachable"
 
     async def get(self, session_id: str) -> LoginSession:
         async with self._lock:
@@ -206,12 +248,22 @@ class LoginSessionRegistry:
         if session is None:
             return
         session.closed = True
+        self._cancel_open_task(session)
         try:
             await session.context.close()
         except Exception:  # noqa: BLE001 - 关闭失败不向上抛
             pass
 
+    @staticmethod
+    def _cancel_open_task(session: LoginSession) -> None:
+        """关会话时取消还没跑完的「打开页面」任务，避免它继续摸已关闭的页面。"""
+        task = session.open_task
+        session.open_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
     async def _close_context(self, session: LoginSession) -> None:
+        self._cancel_open_task(session)
         try:
             await session.context.close()
         except Exception:  # noqa: BLE001 - 关闭失败不向上抛
@@ -232,6 +284,7 @@ class LoginSessionRegistry:
             self._sessions.clear()
         for session in sessions:
             session.closed = True
+            self._cancel_open_task(session)
             try:
                 await session.context.close()
             except Exception:  # noqa: BLE001

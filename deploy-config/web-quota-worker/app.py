@@ -260,6 +260,8 @@ async def probe(request: Request):
 # ---------------------------------------------------------------------------
 
 from login_sessions import (  # noqa: E402  (路由段集中在此，便于审阅)
+    LOGIN_PHASE_OPENING,
+    LOGIN_PHASE_READY,
     LOGIN_SESSION_TTL_SECONDS,
     LOGIN_VIEWPORT_HEIGHT,
     LOGIN_VIEWPORT_WIDTH,
@@ -310,6 +312,10 @@ def _login_view(session) -> dict:
         "session_id": session.id,
         "provider": session.provider,
         "status": "authenticated" if session.authenticated() else "pending",
+        # phase 是页面生命周期（opening/ready/failed），与 status（是否已登录）
+        # 是两个独立事实：一个说「页面能不能看」，一个说「人有没有登进去」。
+        "phase": session.phase,
+        "message": session.phase_error,
         "url": session.page.url,
         "viewport_width": LOGIN_VIEWPORT_WIDTH,
         "viewport_height": LOGIN_VIEWPORT_HEIGHT,
@@ -321,8 +327,13 @@ async def _login_view_with_form(session) -> dict:
     """在会话视图上附带当前页面的输入框 / 按钮清单。
 
     前端的表单区直接按这两份清单渲染，用户填真表单即可，不必去点缩略图坐标。
+    页面还没打开时不做枚举：那 3 秒超时对用户毫无价值，还会拖慢首帧。
     """
     view = _login_view(session)
+    if session.phase != LOGIN_PHASE_READY:
+        view["fields"] = []
+        view["buttons"] = []
+        return view
     view.update(await describe_form(session))
     return view
 
@@ -346,14 +357,15 @@ async def login_start(request: Request):
             success_url_prefix=success_url_prefix,
             proxy_url=payload.get("proxy_url") or None,
         )
-        screenshot = await capture(session)
     except Exception as exc:  # noqa: BLE001 - 统一降级，不泄漏内部细节
         logger.warning("login provider=%s status=start_failed error=%s", provider, type(exc).__name__)
         return JSONResponse(status_code=502, content={"error": "login_session_start_failed"})
 
+    # 立刻返回会话号：页面在后台打开，前端靠 phase 显示「正在打开登录页…」。
+    # 这里绝不能等页面打开——最慢要几十秒，会把前端请求拖过超时阈值，
+    # 用户看到的是「网络错误」，而且拿不到会话号，登录面板永远不出现。
     view = await _login_view_with_form(session)
-    view["screenshot"] = screenshot
-    logger.info("login provider=%s status=started", provider)
+    logger.info("login provider=%s status=started phase=%s", provider, session.phase)
     return view
 
 
@@ -362,9 +374,11 @@ async def login_state(session_id: str, request: Request):
     _require_token(request)
     try:
         session = await _login_registry.get(session_id)
-        screenshot = await capture(session)
     except LoginSessionError as exc:
         return _session_error_response(exc)
+    try:
+        # 还在打开页面时不做截图：截到的只会是空白页，白花一次截图时间。
+        screenshot = "" if session.phase == LOGIN_PHASE_OPENING else await capture(session)
     except Exception as exc:  # noqa: BLE001
         logger.warning("login status=frame_failed error=%s", type(exc).__name__)
         return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
