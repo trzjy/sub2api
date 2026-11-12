@@ -451,6 +451,15 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	// 一个「没有开始的块结束」事件）。
 	sawThinkingBlock := false
 
+	// 伪装流式净化开关（循环外取一次，见 nativeStreamDisguiseFlags 注释）。
+	// 两个开关均为 false 时逐字节行为不变。DSG-G1：把净化前移到守卫/缓冲之前，
+	// 使缓冲释放与 EOF flush 两条路径都输出净化后的行。
+	disguiseRewriteModel, disguiseStripReasoning := nativeStreamDisguiseFlags(account)
+	// 剥离 thinking 后的连续块序号：content_block_start 分配新序号，配对的
+	// delta/stop 改写为同一新序号（方案 §2.5）。
+	nextBlockIndex := 0
+	blockIndexRemap := map[int]int{}
+
 	// 重复 token 循环熔断（docs-local/repetition-loop-breaker-plan.md）：缓冲期静默
 	// failover + 直通期中止。guard 为 nil 表示阈值配置为 0（检测禁用）。
 	guard := newStreamRepetitionGuard()
@@ -600,8 +609,43 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				}
 			}
 
+			// 伪装响应侧净化（流式，前移至守卫/缓冲之前）：模型名回写 + 思考剥离 +
+			// 剥离后重编号。与缓冲释放、EOF flush 共用同一变换，保证两条路径都净化。
+			// 仅作用于 data: 载荷行；非数据行（event: 等）原样透传。被剥离的行直接
+			// 丢弃，不进入守卫判定、不进入缓冲（DSG-G1 缺陷 1）。无伪装账号
+			// （disguiseRewriteModel/disguiseStripReasoning 均 false）逐字节行为不变。
+			if disguiseRewriteModel || disguiseStripReasoning {
+				if payload, ok := anthropicSSEDataLine(line); ok {
+					if disguiseStripReasoning {
+						// thinking 块开始 → 记住状态（配对的 content_block_stop 也要丢）
+						if anthropicSSEHasThinkingStart(payload) {
+							sawThinkingBlock = true
+							continue
+						}
+						// thinking 增量 → 丢弃
+						if anthropicSSEIsThinkingDelta(payload) {
+							continue
+						}
+						// 配对的 thinking 块结束 → 丢弃
+						if sawThinkingBlock && gjson.Get(payload, "type").String() == "content_block_stop" {
+							sawThinkingBlock = false
+							continue
+						}
+					}
+					if disguiseRewriteModel {
+						payload = string(RewriteAnthropicSSEMessageStartModel([]byte(payload), originalModel))
+					}
+					if disguiseStripReasoning {
+						// 剥离 thinking 后剩余块从 0 连续重编号（方案 §2.5）。
+						payload = rewriteAnthropicContentBlockIndex(payload, &nextBlockIndex, blockIndexRemap)
+					}
+					line = "data: " + payload
+				}
+			}
+
 			// 重复循环熔断裁决：缓冲期命中→静默 failover；缓冲满→flush 转直通；
 			// 直通期命中→掐上游并向客户端下发可识别 error 事件。
+			// 守卫语义（hold/release/failover/abort）保持不变，仅其输入已是净化后行。
 			if guard != nil {
 				switch guard.onLine(line) {
 				case repGuardHold:
@@ -633,33 +677,6 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 					if !clientDisconnected {
 						flusher.Flush()
 					}
-				}
-			}
-
-			// 伪装响应侧净化（流式）：模型名回写 + 思考剥离。
-			// 该路径逐行透传上游 SSE，故模型名回写要改 message_start 事件的
-			// message.model（嵌套形态，与普通响应体的顶层 model 不同）。
-			if rewriteModel, stripReasoning := nativeStreamDisguiseFlags(account); rewriteModel || stripReasoning {
-				if payload, ok := anthropicSSEDataLine(line); ok {
-					if rewriteModel {
-						payload = string(RewriteAnthropicSSEMessageStartModel([]byte(payload), originalModel))
-					}
-					if stripReasoning {
-						// thinking 块开始 → 记住状态（配对的 content_block_stop 也要丢）
-						if anthropicSSEHasThinkingStart(payload) {
-							sawThinkingBlock = true
-							continue
-						}
-						// thinking 增量 / 配对的块结束 → 丢弃
-						if anthropicSSEIsThinkingDelta(payload) {
-							continue
-						}
-						if sawThinkingBlock && gjson.Get(payload, "type").String() == "content_block_stop" {
-							sawThinkingBlock = false
-							continue
-						}
-					}
-					line = "data: " + payload
 				}
 			}
 
@@ -737,6 +754,49 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			resetKeepaliveTimer()
 		}
 	}
+}
+
+// rewriteAnthropicContentBlockIndex 在剥离 thinking 块后对剩余 content block
+// 重新编号，使输出索引连续且从 0 起算（方案 §2.5）。
+//
+// 维护「已输出块序号」nextIndex 与上游 index → 新 index 的映射 remap：
+//   - content_block_start：分配 nextIndex 作为新序号，记录 remap[上游index]=新序号，
+//     随后 nextIndex++；
+//   - content_block_delta / content_block_stop：按 remap 将自身 index 改写为同一新序号；
+//   - message_delta / message_stop 等非 content-block 事件原样返回。
+//
+// 仅作用于 data: 载荷 JSON；非 content-block 事件（message_start 等）原样返回，
+// 因此可与「模型名回写」在同一伪装变换里顺序调用而互不影响。
+// 无 thinking 被剥离（remap 退化为恒等）时逐字节不变。
+func rewriteAnthropicContentBlockIndex(payload string, nextIndex *int, remap map[int]int) string {
+	if !gjson.Valid(payload) {
+		return payload
+	}
+	switch gjson.Get(payload, "type").String() {
+	case "content_block_start", "content_block_delta", "content_block_stop":
+	default:
+		return payload
+	}
+	origIndex := int(gjson.Get(payload, "index").Int())
+	newIndex := origIndex
+	switch gjson.Get(payload, "type").String() {
+	case "content_block_start":
+		newIndex = *nextIndex
+		remap[origIndex] = newIndex
+		*nextIndex++
+	case "content_block_delta", "content_block_stop":
+		if mapped, ok := remap[origIndex]; ok {
+			newIndex = mapped
+		}
+	}
+	if newIndex == origIndex {
+		return payload
+	}
+	out, err := sjson.SetBytes([]byte(payload), "index", newIndex)
+	if err != nil {
+		return payload
+	}
+	return string(out)
 }
 
 // nativeAnthropicStreamResult 组装流式直通结果；流中断时同样返回已观测到的
