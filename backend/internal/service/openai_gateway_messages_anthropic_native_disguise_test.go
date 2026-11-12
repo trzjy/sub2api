@@ -188,3 +188,94 @@ func TestNativeStreamDisguise_NoDisguiseByteIdentical(t *testing.T) {
 	require.Contains(t, out, "我是词元星火")
 	require.Contains(t, out, `"index":1`)
 }
+
+// assertNoDanglingEventFrames 断言输出中不存在「没有 data 的悬空事件帧」：
+// 每个 event: 行之后都必须紧跟一个同类型的 data: 行（按完整 SSE 帧配对）。
+// 这是 DSG-C1F 的核心不变量 —— thinking 整帧丢弃后不得残留缺 data 的 event 行。
+func assertNoDanglingEventFrames(t *testing.T, out string) {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	for i := 0; i < len(lines); i++ {
+		l := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(l, "event:") {
+			continue
+		}
+		// 跳过紧跟的空行，定位下一个非空行。
+		j := i + 1
+		for j < len(lines) && strings.TrimSpace(lines[j]) == "" {
+			j++
+		}
+		require.Less(t, j, len(lines), "悬空事件帧：%q 之后没有任何非空行", l)
+		next := strings.TrimSpace(lines[j])
+		require.True(t, strings.HasPrefix(next, "data:"),
+			"悬空事件帧：%q 之后紧跟的不是 data 行而是 %q", l, next)
+		evName := strings.TrimSpace(strings.TrimPrefix(l, "event:"))
+		dataPayload := strings.TrimSpace(strings.TrimPrefix(next, "data:"))
+		if gjson.Valid(dataPayload) {
+			dt := gjson.Get(dataPayload, "type").String()
+			require.Equal(t, evName, dt,
+				"事件名 %q 必须与 data.type %q 配对", evName, dt)
+		}
+	}
+}
+
+// countBlankLines 统计输出中的空行（帧分隔）数量，用于断言非 thinking 帧的
+// 空行数量逐字节不变。
+func countBlankLines(out string) int {
+	n := 0
+	for _, l := range strings.Split(out, "\n") {
+		if strings.TrimSpace(l) == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// DSG-C1F：整帧剥离 thinking —— 缓冲释放路径。thinking 块（event 行 + data + 空行）
+// 必须被整帧丢弃，输出中不得存在无 data 的 event: content_block_* 悬空帧，且每个
+// event 行都与同类型 data 行配对。
+func TestNativeStreamDisguise_BufferReleaseNoDanglingFrame(t *testing.T) {
+	t.Setenv("REPETITION_LOOP_THRESHOLD", "3")
+
+	out, res, err := runNativeDisguiseStream(t, disguiseRewriteStripAccount(),
+		thinkingThenTextStream("A", "B", "C"), "deepseek-flash")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	// thinking 内容彻底消失（含其 event 行）。
+	require.NotContains(t, out, "我是词元星火", "缓冲释放路径 thinking 必须被剥离")
+	require.NotContains(t, out, "thinking_delta", "缓冲释放路径 thinking delta 必须被剥离")
+	// 核心不变量：任何 event 行都必须与同类型 data 行成对（thinking 整帧丢弃后
+	// 不得残留缺 data 的悬空 event 帧；text 块的 event 行则正常配对保留）。
+	assertNoDanglingEventFrames(t, out)
+}
+
+// DSG-C1F：整帧剥离 thinking —— EOF flush 路径。短流缓冲未达阈值，EOF 时
+// flushGuardBuffer 写出的同样必须是净化后的整帧（含 event 行一并丢弃）。
+func TestNativeStreamDisguise_EOFFlushNoDanglingFrame(t *testing.T) {
+	t.Setenv("REPETITION_LOOP_THRESHOLD", "1000")
+
+	out, res, err := runNativeDisguiseStream(t, disguiseRewriteStripAccount(),
+		thinkingThenTextStream("Hello"), "deepseek-flash")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	require.NotContains(t, out, "我是词元星火", "EOF flush 路径 thinking 必须被剥离")
+	require.NotContains(t, out, "thinking_delta", "EOF flush 路径 thinking delta 必须被剥离")
+	assertNoDanglingEventFrames(t, out)
+}
+
+// 回归：非伪装账号逐字节透传（含空行数量）。剥离 thinking 只会减少空行（thinking
+// 帧的尾随空行被一并丢弃）；非伪装账号必须连空行数量都不变。
+func TestNativeStreamDisguise_NoDisguiseBlankCountIdentical(t *testing.T) {
+	t.Setenv("REPETITION_LOOP_THRESHOLD", "1000")
+
+	account := &Account{ID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey}
+	stream := thinkingThenTextStream("Hello")
+
+	out, _, err := runNativeDisguiseStream(t, account, stream, "deepseek-flash")
+	require.NoError(t, err)
+
+	require.Equal(t, countBlankLines(stream), countBlankLines(out),
+		"非伪装账号空行数量必须逐字节不变")
+}

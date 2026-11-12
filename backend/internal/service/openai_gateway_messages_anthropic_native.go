@@ -451,6 +451,16 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	// 一个「没有开始的块结束」事件）。
 	sawThinkingBlock := false
 
+	// 按完整 SSE 帧剥离 thinking 的状态（DSG-C1F）：
+	//   - heldEventLine/heldEvent：上一行若为 event: 行则持有之，等待其 data
+	//     行判定该帧是否整帧丢弃；本行暂不写出，避免 data 被丢弃后残留悬空
+	//     event 帧。
+	//   - discardNextBlank：刚丢弃的 thinking 帧尾随空行（帧分隔）也要一并跳过，
+	//     使客户端不会收到缺少 data 的 event 帧。
+	var heldEventLine string
+	heldEvent := false
+	discardNextBlank := false
+
 	// 伪装流式净化开关（循环外取一次，见 nativeStreamDisguiseFlags 注释）。
 	// 两个开关均为 false 时逐字节行为不变。DSG-G1：把净化前移到守卫/缓冲之前，
 	// 使缓冲释放与 EOF flush 两条路径都输出净化后的行。
@@ -609,78 +619,130 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				}
 			}
 
-			// 伪装响应侧净化（流式，前移至守卫/缓冲之前）：模型名回写 + 思考剥离 +
-			// 剥离后重编号。与缓冲释放、EOF flush 共用同一变换，保证两条路径都净化。
-			// 仅作用于 data: 载荷行；非数据行（event: 等）原样透传。被剥离的行直接
-			// 丢弃，不进入守卫判定、不进入缓冲（DSG-G1 缺陷 1）。无伪装账号
+			// 伪装响应侧净化（流式，前移至守卫/缓冲之前）：按完整 SSE 帧剥离 thinking——
+			// 维护「上一行是否为 event: 行」状态，当判定某个 data: 行属于 thinking 并要
+			// 丢弃时，连带丢弃该帧的 event: 行与紧随的空行，使客户端不会收到缺少 data
+			// 的悬空事件帧（DSG-C1F）。非 thinking 帧逐字节不变。无伪装账号
 			// （disguiseRewriteModel/disguiseStripReasoning 均 false）逐字节行为不变。
+			//
+			// emitLines 为本行经净化后应写出的有序行集合（nil 表示整行跳过，不写出）：
+			// 保留帧时可能是 [event 行, data 行] 两行，其余为单行。逐行复用与原来
+			// 完全一致的守卫 + 写出管线，保证顺序与守卫语义不变。
+			emitLines := []string{line}
 			if disguiseRewriteModel || disguiseStripReasoning {
-				if payload, ok := anthropicSSEDataLine(line); ok {
-					if disguiseStripReasoning {
-						// thinking 块开始 → 记住状态（配对的 content_block_stop 也要丢）
-						if anthropicSSEHasThinkingStart(payload) {
-							sawThinkingBlock = true
-							continue
+				trimmedLine := strings.TrimSpace(line)
+				switch {
+				case strings.HasPrefix(trimmedLine, "event:"):
+					// 持有 event 行，等待其 data 行确定该帧是否整帧丢弃；本行暂不写出。
+					heldEventLine = line
+					heldEvent = true
+					emitLines = nil
+				case discardNextBlank && trimmedLine == "":
+					// 刚丢弃的 thinking 帧尾随空行（帧分隔）一并跳过，避免悬空帧。
+					discardNextBlank = false
+					heldEvent = false
+					heldEventLine = ""
+					emitLines = nil
+				default:
+					if payload, ok := anthropicSSEDataLine(line); ok {
+						if disguiseStripReasoning {
+							// thinking 块开始 → 整帧（含已持有的 event 行与尾随空行）丢弃。
+							if anthropicSSEHasThinkingStart(payload) {
+								sawThinkingBlock = true
+								heldEvent = false
+								heldEventLine = ""
+								discardNextBlank = true
+								emitLines = nil
+							} else if anthropicSSEIsThinkingDelta(payload) {
+								// thinking 增量 → 整帧丢弃。
+								heldEvent = false
+								heldEventLine = ""
+								discardNextBlank = true
+								emitLines = nil
+							} else if sawThinkingBlock && gjson.Get(payload, "type").String() == "content_block_stop" {
+								// 配对的 thinking 块结束 → 整帧丢弃。
+								sawThinkingBlock = false
+								heldEvent = false
+								heldEventLine = ""
+								discardNextBlank = true
+								emitLines = nil
+							}
 						}
-						// thinking 增量 → 丢弃
-						if anthropicSSEIsThinkingDelta(payload) {
-							continue
+						// 未被丢弃的 data 行：模型名回写 + 剥离后重编号，再写出
+						// （若本帧有前置 event 行，先写出 event 行，逐字节不变）。
+						if emitLines != nil {
+							if disguiseRewriteModel {
+								payload = string(RewriteAnthropicSSEMessageStartModel([]byte(payload), originalModel))
+							}
+							if disguiseStripReasoning {
+								payload = rewriteAnthropicContentBlockIndex(payload, &nextBlockIndex, blockIndexRemap)
+							}
+							dataLine := "data: " + payload
+							if heldEvent {
+								emitLines = []string{heldEventLine, dataLine}
+								heldEvent = false
+								heldEventLine = ""
+							} else {
+								emitLines = []string{dataLine}
+							}
 						}
-						// 配对的 thinking 块结束 → 丢弃
-						if sawThinkingBlock && gjson.Get(payload, "type").String() == "content_block_stop" {
-							sawThinkingBlock = false
-							continue
+					} else {
+						// 非 data 非 event 行（注释行、独立空行）：原样透传；若持有未配对
+						// 的 event 行（畸形流）则先落 event 行，再落本行，保持顺序。
+						if heldEvent {
+							emitLines = []string{heldEventLine, line}
+							heldEvent = false
+							heldEventLine = ""
+						} else {
+							emitLines = []string{line}
 						}
 					}
-					if disguiseRewriteModel {
-						payload = string(RewriteAnthropicSSEMessageStartModel([]byte(payload), originalModel))
-					}
-					if disguiseStripReasoning {
-						// 剥离 thinking 后剩余块从 0 连续重编号（方案 §2.5）。
-						payload = rewriteAnthropicContentBlockIndex(payload, &nextBlockIndex, blockIndexRemap)
-					}
-					line = "data: " + payload
 				}
 			}
 
 			// 重复循环熔断裁决：缓冲期命中→静默 failover；缓冲满→flush 转直通；
 			// 直通期命中→掐上游并向客户端下发可识别 error 事件。
 			// 守卫语义（hold/release/failover/abort）保持不变，仅其输入已是净化后行。
-			if guard != nil {
-				switch guard.onLine(line) {
-				case repGuardHold:
-					continue
-				case repGuardFailover:
-					message := "upstream repetition loop detected before stream passthrough"
-					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Repetition loop detected (buffering, failover): account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
-					s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, repetitionLoopErrorCode, message)
-					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
-						newRepetitionLoopFailoverError()
-				case repGuardAbort:
-					message := "upstream repetition loop detected after stream passthrough started"
-					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Repetition loop detected (passthrough, abort): account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
-					guardErr := fmt.Errorf("%s (error_code=%s)", message, repetitionLoopErrorCode)
-					if !clientDisconnected {
-						sse := buildAnthropicStreamErrorCodeSSE("api_error", repetitionLoopErrorCode, "Upstream output entered a repetition loop; please retry the request")
-						if _, err := io.WriteString(w, sse); err == nil {
+			// 逐行复用同一管线：整帧剥离的 thinking 帧（event+data+空行）不会进入
+			// 此处，非 thinking 帧逐字节不变。
+			for _, outLine := range emitLines {
+				line = outLine
+				if guard != nil {
+					switch guard.onLine(line) {
+					case repGuardHold:
+						continue
+					case repGuardFailover:
+						message := "upstream repetition loop detected before stream passthrough"
+						logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Repetition loop detected (buffering, failover): account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
+						s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, repetitionLoopErrorCode, message)
+						return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
+							newRepetitionLoopFailoverError()
+					case repGuardAbort:
+						message := "upstream repetition loop detected after stream passthrough started"
+						logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Repetition loop detected (passthrough, abort): account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
+						guardErr := fmt.Errorf("%s (error_code=%s)", message, repetitionLoopErrorCode)
+						if !clientDisconnected {
+							sse := buildAnthropicStreamErrorCodeSSE("api_error", repetitionLoopErrorCode, "Upstream output entered a repetition loop; please retry the request")
+							if _, err := io.WriteString(w, sse); err == nil {
+								flusher.Flush()
+							}
+						}
+						s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, repetitionLoopErrorCode, message)
+						s.ObserveOpenAIAccountHealthFailure(ctx, account, guardErr)
+						if resp.Body != nil {
+							_ = resp.Body.Close()
+						}
+						return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), guardErr
+					case repGuardRelease:
+						flushGuardBuffer()
+						if !clientDisconnected {
 							flusher.Flush()
 						}
 					}
-					s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, repetitionLoopErrorCode, message)
-					s.ObserveOpenAIAccountHealthFailure(ctx, account, guardErr)
-					if resp.Body != nil {
-						_ = resp.Body.Close()
-					}
-					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), guardErr
-				case repGuardRelease:
-					flushGuardBuffer()
-					if !clientDisconnected {
-						flusher.Flush()
-					}
 				}
-			}
 
-			writeStreamLine(line)
+				writeStreamLine(line)
+			}
 
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
