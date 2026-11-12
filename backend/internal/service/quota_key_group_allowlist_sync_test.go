@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -256,4 +257,77 @@ func TestAppendModelsToBoundGroupAllowlists(t *testing.T) {
 		cursorAL := qkSyncAllowlist(t, client, cursorID)
 		require.ElementsMatch(t, want, cursorAL.Models)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// QKG-FIX-4：并发追加写入串行化（无丢更新）。
+//
+// 两个 goroutine 各自在**独立事务**里、对同一分组（同一 qk.GroupIds 指向它）调用
+// appendModelsToBoundGroupAllowlists 追加**不同**模型名，两笔都提交成功；
+// 最终该分组 model_allowlist.models 必须同时包含两个模型名。
+//
+// 用真实隔离 PostgreSQL（quotaKeyTestEntClient，QUOTA_TEST_DSN 覆盖），不走假仓储。
+// 多轮（rounds）重复以放大读到同一基线、交叉提交的概率，稳定复现「后提交者覆盖」的丢更新。
+// 分组用 composite 平台：两条映射（claude-sonnet-4-6 / gpt-6.1-sol）均被判定出家族，都会追加。
+// ---------------------------------------------------------------------------
+func TestAppendModelsToBoundGroupAllowlists_ConcurrentNoLostUpdate(t *testing.T) {
+	svc, client := qkNewTestService(t, &fakeUpstreamClient{})
+	ctx := context.Background()
+
+	const rounds = 50
+	for r := 0; r < rounds; r++ {
+		gID := qkSyncCreateGroup(t, client, fmt.Sprintf("sync-conc-g-%d", r), PlatformComposite, domain.GroupModelAllowlist{
+			Enabled: true, Models: []string{},
+		})
+		// 两个激活码都绑定同一分组。
+		qkA := qkSyncCreateQuotaKey(t, client, []int64{gID})
+		qkB := qkSyncCreateQuotaKey(t, client, []int64{gID})
+		t.Cleanup(func() {
+			_ = client.QuotaKey.DeleteOneID(qkA).Exec(ctx)
+			_ = client.QuotaKey.DeleteOneID(qkB).Exec(ctx)
+			_ = client.Group.DeleteOneID(gID).Exec(ctx)
+		})
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		errCh := make(chan error, 2)
+		go func(qkID int64, mapping map[string]string) {
+			defer wg.Done()
+			tx, e := client.Tx(ctx)
+			if e != nil {
+				errCh <- e
+				return
+			}
+			if _, runErr := svc.appendModelsToBoundGroupAllowlists(ctx, tx, qkID, mapping); runErr != nil {
+				_ = tx.Rollback()
+				errCh <- runErr
+				return
+			}
+			errCh <- tx.Commit()
+		}(qkA, map[string]string{"claude-sonnet-4-6": "x"})
+		go func(qkID int64, mapping map[string]string) {
+			defer wg.Done()
+			tx, e := client.Tx(ctx)
+			if e != nil {
+				errCh <- e
+				return
+			}
+			if _, runErr := svc.appendModelsToBoundGroupAllowlists(ctx, tx, qkID, mapping); runErr != nil {
+				_ = tx.Rollback()
+				errCh <- runErr
+				return
+			}
+			errCh <- tx.Commit()
+		}(qkB, map[string]string{"gpt-6.1-sol": "y"})
+
+		wg.Wait()
+		close(errCh)
+		for e := range errCh {
+			require.NoError(t, e, "round %d: 并发追加应全部提交成功", r)
+		}
+
+		al := qkSyncAllowlist(t, client, gID)
+		require.ElementsMatch(t, []string{"claude-sonnet-4-6", "gpt-6.1-sol"}, al.Models,
+			"round %d: 并发追加不可丢更新（两模型必须同时存在于分组白名单）", r)
+	}
 }
