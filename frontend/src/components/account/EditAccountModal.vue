@@ -383,24 +383,120 @@
             <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.webConsoleQuota.panelHint') }}
             </p>
-            <div class="mt-2 flex flex-wrap items-center gap-2">
-              <input
-                v-model="remoteLoginTyped"
-                class="input min-w-[8rem] flex-1"
-                data-testid="web-console-login-type"
-                :placeholder="t('admin.accounts.webConsoleQuota.typePlaceholder')"
-                @keyup.enter="handleRemoteLoginType"
-              />
-              <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginType">
-                {{ t('admin.accounts.webConsoleQuota.typeSend') }}
-              </button>
-              <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginKey('Enter')">
-                {{ t('admin.accounts.webConsoleQuota.keyEnter') }}
-              </button>
-              <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginKey('Backspace')">
-                {{ t('admin.accounts.webConsoleQuota.keyBackspace') }}
-              </button>
+
+            <!--
+              登录表单：这里不是「让用户点缩略图坐标」，而是把服务端页面上的
+              输入框原样报回来渲染成真表单。原因：美团 passport 的「动态码」框
+              只有 176×18 CSS 像素，缩到面板后约 7 像素高，鼠标根本点不中，
+              点不中就等于没聚焦、输入全丢（线上真实故障）。
+            -->
+            <div
+              class="mt-3 rounded-md bg-gray-50 p-2 dark:bg-dark-700/40"
+              data-testid="web-console-login-form"
+            >
+              <p class="text-xs font-medium text-gray-600 dark:text-gray-300">
+                {{ t('admin.accounts.webConsoleQuota.formTitle') }}
+              </p>
+              <div v-if="remoteLoginFields.length" class="mt-2 space-y-2">
+                <div
+                  v-for="f in remoteLoginFields"
+                  :key="`${f.index}-${f.label}`"
+                  class="flex items-center gap-2"
+                >
+                  <!-- 勾选项：登录协议（「我已阅读并同意…」）几乎都是登录必经项，
+                       页面上的圆圈只有十几像素，缩到面板里更小，必须由这里代勾。 -->
+                  <template v-if="f.type === 'checkbox' || f.type === 'radio'">
+                    <label
+                      class="flex flex-1 cursor-pointer items-center gap-2 text-xs text-gray-600 dark:text-gray-300"
+                      :title="f.label"
+                    >
+                      <input
+                        type="checkbox"
+                        class="h-4 w-4 shrink-0"
+                        :checked="f.filled"
+                        :disabled="remoteLoginBusy"
+                        :data-testid="`web-console-login-check-${f.index}`"
+                        @change="handleRemoteLoginToggle(f)"
+                      />
+                      <span class="truncate">{{ f.label }}</span>
+                    </label>
+                  </template>
+                  <template v-else>
+                    <label
+                      class="w-24 shrink-0 truncate text-xs text-gray-500 dark:text-gray-400"
+                      :title="f.label"
+                    >
+                      {{ f.label }}
+                    </label>
+                    <input
+                      v-model="remoteLoginFieldValues[f.label]"
+                      class="input h-8 flex-1 text-sm"
+                      :type="f.masked ? 'password' : 'text'"
+                      :inputmode="f.type === 'tel' ? 'tel' : f.type === 'number' ? 'numeric' : 'text'"
+                      :placeholder="f.filled ? t('admin.accounts.webConsoleQuota.fillApplied') : ''"
+                      :data-testid="`web-console-login-field-${f.index}`"
+                      @keyup.enter="handleRemoteLoginFill(f)"
+                    />
+                    <button
+                      type="button"
+                      class="btn btn-secondary btn-sm shrink-0"
+                      :disabled="remoteLoginBusy"
+                      @click="handleRemoteLoginFill(f)"
+                    >
+                      {{ t('admin.accounts.webConsoleQuota.typeSend') }}
+                    </button>
+                  </template>
+                </div>
+              </div>
+              <p v-else class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.webConsoleQuota.formEmpty') }}
+              </p>
+
+              <div v-if="remoteLoginButtons.length" class="mt-3">
+                <p class="text-xs font-medium text-gray-600 dark:text-gray-300">
+                  {{ t('admin.accounts.webConsoleQuota.buttonsTitle') }}
+                </p>
+                <div class="mt-2 flex flex-wrap gap-2">
+                  <button
+                    v-for="b in remoteLoginButtons"
+                    :key="`${b.index}-${b.text}`"
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    :disabled="remoteLoginBusy"
+                    :data-testid="`web-console-login-button-${b.index}`"
+                    @click="handleRemoteLoginClickButton(b)"
+                  >
+                    {{ b.text }}
+                  </button>
+                </div>
+              </div>
             </div>
+
+            <!-- 备用通道：画面点不准（滑块 / 图形验证码 / 特殊控件）时再用坐标 -->
+            <details class="mt-2">
+              <summary class="cursor-pointer text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.webConsoleQuota.fallbackTitle') }}
+              </summary>
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <input
+                  v-model="remoteLoginTyped"
+                  class="input min-w-[8rem] flex-1"
+                  data-testid="web-console-login-type"
+                  :placeholder="t('admin.accounts.webConsoleQuota.typePlaceholder')"
+                  @keyup.enter="handleRemoteLoginType"
+                />
+                <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginType">
+                  {{ t('admin.accounts.webConsoleQuota.typeSend') }}
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginKey('Enter')">
+                  {{ t('admin.accounts.webConsoleQuota.keyEnter') }}
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginKey('Backspace')">
+                  {{ t('admin.accounts.webConsoleQuota.keyBackspace') }}
+                </button>
+              </div>
+            </details>
+
             <div class="mt-2 flex flex-wrap items-center gap-2">
               <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginScroll(-400)">
                 {{ t('admin.accounts.webConsoleQuota.scrollUp') }}
@@ -4282,12 +4378,19 @@ const stopWebConsoleAuthPolling = () => {
 const remoteLoginOpen = ref(false)
 const remoteLoginStarting = ref(false)
 const remoteLoginFinishing = ref(false)
+const remoteLoginBusy = ref(false)
 const remoteLoginSessionId = ref('')
 const remoteLoginScreenshot = ref('')
 const remoteLoginViewport = reactive({ width: 1280, height: 800 })
 const remoteLoginTyped = ref('')
 const remoteLoginMessage = ref('')
 const remoteLoginError = ref(false)
+// 服务端页面上的输入框 / 按钮清单：用来渲染真表单。
+// 不给用户点缩略图坐标填字 —— 页面上有的输入框只有 18 CSS 像素高，
+// 缩到面板后约 7 像素，鼠标点不中就等于没聚焦、输入全丢（线上真实故障）。
+const remoteLoginFields = ref<Array<{ index: number; type: string; label: string; filled: boolean; masked: boolean }>>([])
+const remoteLoginButtons = ref<Array<{ index: number; text: string }>>([])
+const remoteLoginFieldValues = reactive<Record<string, string>>({})
 let remoteLoginTimer: number | null = null
 
 // 该上游支持的登录方式由后端下发（web_console_login_modes），
@@ -4328,11 +4431,20 @@ const applyRemoteLoginFrame = (frame: {
   viewport_width?: number
   viewport_height?: number
   status?: string
+  fields?: Array<{ index: number; type: string; label: string; filled: boolean; masked: boolean }>
+  buttons?: Array<{ index: number; text: string }>
+  applied?: boolean
 }) => {
   if (frame.session_id) remoteLoginSessionId.value = frame.session_id
   remoteLoginScreenshot.value = frame.screenshot ?? ''
   remoteLoginViewport.width = frame.viewport_width || 1280
   remoteLoginViewport.height = frame.viewport_height || 800
+  remoteLoginFields.value = frame.fields ?? []
+  remoteLoginButtons.value = frame.buttons ?? []
+  // 已填过的字段清掉本地草稿，避免把旧值再发一遍。
+  for (const field of remoteLoginFields.value) {
+    if (field.filled) delete remoteLoginFieldValues[field.label]
+  }
   if (frame.status === 'authenticated') {
     remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginDetected')
     remoteLoginError.value = false
@@ -4412,10 +4524,99 @@ const handleRemoteLoginType = async () => {
       text
     })
     remoteLoginTyped.value = ''
+    remoteLoginFields.value = []
+    remoteLoginButtons.value = []
+    for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
     await refreshRemoteFrame()
   } catch (e) {
     remoteLoginError.value = true
     remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  }
+}
+
+// 按字段填写：不发坐标，直接告诉服务端「填进哪个标签的框」。
+// 服务端按标签重新定位元素，因此页面重绘（如「获取验证码」变倒计时）也不会填错。
+const handleRemoteLoginFill = async (field: { index: number; label: string }) => {
+  if (!props.account || !remoteLoginSessionId.value || remoteLoginBusy.value) return
+  const text = remoteLoginFieldValues[field.label] ?? ''
+  if (!text) return
+  remoteLoginBusy.value = true
+  try {
+    const frame = await adminAPI.cnProviders.postWebConsoleLoginAction(
+      props.account.id,
+      remoteLoginSessionId.value,
+      { kind: 'fill', index: field.index, label: field.label, text }
+    )
+    if (frame) {
+      applyRemoteLoginFrame(frame)
+    } else {
+      await refreshRemoteFrame()
+    }
+    if (frame && frame.applied === false) {
+      remoteLoginError.value = true
+      remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.fillMissed')
+    } else {
+      remoteLoginError.value = false
+      remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.fillApplied')
+    }
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  } finally {
+    remoteLoginBusy.value = false
+  }
+}
+
+// 点按钮：按按钮文字点，不按坐标。
+const handleRemoteLoginClickButton = async (button: { index: number; text: string }) => {
+  if (!props.account || !remoteLoginSessionId.value || remoteLoginBusy.value) return
+  remoteLoginBusy.value = true
+  try {
+    const frame = await adminAPI.cnProviders.postWebConsoleLoginAction(
+      props.account.id,
+      remoteLoginSessionId.value,
+      { kind: 'click', index: button.index, text: button.text }
+    )
+    if (frame) {
+      applyRemoteLoginFrame(frame)
+    } else {
+      await refreshRemoteFrame()
+    }
+    if (frame && frame.applied === false) {
+      remoteLoginError.value = true
+      remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.fillMissed')
+    } else {
+      remoteLoginError.value = false
+      remoteLoginMessage.value = ''
+    }
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  } finally {
+    remoteLoginBusy.value = false
+  }
+}
+
+// 勾选 / 取消勾选（登录协议）。页面上是个十几像素的小圆圈，只能由后端代点。
+const handleRemoteLoginToggle = async (field: { index: number; label: string }) => {
+  if (!props.account || !remoteLoginSessionId.value || remoteLoginBusy.value) return
+  remoteLoginBusy.value = true
+  try {
+    const frame = await adminAPI.cnProviders.postWebConsoleLoginAction(
+      props.account.id,
+      remoteLoginSessionId.value,
+      { kind: 'toggle', index: field.index, label: field.label }
+    )
+    if (frame) {
+      applyRemoteLoginFrame(frame)
+    } else {
+      await refreshRemoteFrame()
+    }
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  } finally {
+    remoteLoginBusy.value = false
   }
 }
 
@@ -4482,6 +4683,9 @@ const handleRemoteLoginFinish = async () => {
     remoteLoginSessionId.value = ''
     remoteLoginScreenshot.value = ''
     remoteLoginTyped.value = ''
+    remoteLoginFields.value = []
+    remoteLoginButtons.value = []
+    for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
     emit('updated', {
       ...props.account,
       credentials_status: { ...(props.account.credentials_status ?? {}), has_console_storage_state: true }
@@ -4503,6 +4707,9 @@ async function closeRemoteLogin() {
   remoteLoginSessionId.value = ''
   remoteLoginScreenshot.value = ''
   remoteLoginTyped.value = ''
+  remoteLoginFields.value = []
+  remoteLoginButtons.value = []
+  for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
   if (sessionId && accountID) {
     try {
       await adminAPI.cnProviders.cancelWebConsoleLogin(accountID, sessionId)
@@ -5757,6 +5964,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   remoteLoginSessionId.value = ''
   remoteLoginScreenshot.value = ''
   remoteLoginTyped.value = ''
+  remoteLoginFields.value = []
+  remoteLoginButtons.value = []
+  for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
   remoteLoginMessage.value = ''
   remoteLoginError.value = false
 }

@@ -233,6 +233,23 @@ export default {
 // 管理端网页直接显示画面并转发点击/输入，用户不需要在自己电脑上装任何工具。
 // ---------------------------------------------------------------------------
 
+/** 页面上的一个可见输入框（worker 现场枚举得到，不是写死的站点结构）。 */
+export interface WebConsoleLoginField {
+  index: number
+  /** tel / number / text / password ... */
+  type: string
+  /** 优先取 placeholder，其次是 aria-label / name；保底「输入框 N」。 */
+  label: string
+  filled: boolean
+  masked: boolean
+}
+
+/** 页面上的一个可点按钮。 */
+export interface WebConsoleLoginButton {
+  index: number
+  text: string
+}
+
 /** 一帧登录画面（后端 service.WebConsoleRemoteLoginFrame）。 */
 export interface WebConsoleLoginFrame {
   session_id: string
@@ -244,15 +261,23 @@ export interface WebConsoleLoginFrame {
   viewport_width: number
   viewport_height: number
   expires_in: number
+  /** 当前页面上的输入框与按钮，用来渲染真表单（避免让用户点缩略图坐标）。 */
+  fields?: WebConsoleLoginField[]
+  buttons?: WebConsoleLoginButton[]
+  /** 仅 fill / click 返回：动作是否真的落到了目标元素上。 */
+  applied?: boolean
 }
 
-/** 远程操作动作：坐标点击 / 打字 / 按键 / 滚动 / 重载。 */
+/** 远程操作动作：坐标点击 / 打字 / 按键 / 滚动 / 重载 / 按字段填写 / 按文字点按钮。 */
 export type WebConsoleLoginAction =
   | { kind: 'tap'; x: number; y: number }
   | { kind: 'type'; text: string }
   | { kind: 'key'; key: string }
   | { kind: 'scroll'; delta_y: number }
   | { kind: 'reload' }
+  | { kind: 'fill'; index: number; label: string; text: string }
+  | { kind: 'click'; index: number; text: string }
+  | { kind: 'toggle'; index: number; label: string }
 
 /** 打开一扇服务端登录画面。 */
 export async function startWebConsoleLogin(id: number): Promise<WebConsoleLoginFrame> {
@@ -273,13 +298,24 @@ export async function getWebConsoleLoginFrame(
   return data
 }
 
-/** 把点击 / 输入 / 回车 / 滚动转发到登录页面。 */
+/** 把点击 / 输入 / 回车 / 滚动转发到登录页面。
+ *
+ * fill / click 会让 worker 回传刷新后的整帧，直接拿去更新表单，不必等下一次轮询；
+ * 其他动作没有回帧，返回 null。
+ */
 export async function postWebConsoleLoginAction(
   id: number,
   sessionId: string,
   action: WebConsoleLoginAction
-): Promise<void> {
-  await apiClient.post(`/admin/accounts/${id}/web-console-login/${sessionId}/action`, action)
+): Promise<WebConsoleLoginFrame | null> {
+  const { data } = await apiClient.post<WebConsoleLoginFrame | { ok: boolean }>(
+    `/admin/accounts/${id}/web-console-login/${sessionId}/action`,
+    action
+  )
+  if (data && typeof data === 'object' && 'session_id' in data) {
+    return data as WebConsoleLoginFrame
+  }
+  return null
 }
 
 /** 登录完成后取回票据并立即探测；未登录时返回 status=pending。 */
