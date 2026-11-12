@@ -53,8 +53,8 @@ const BaseDialogStub = defineComponent({
   template: '<div v-if="show"><slot /><slot name="footer" /></div>'
 })
 
-const account = (platform = 'deepseek', extra: Record<string, unknown> = {}, credentials: Record<string, unknown> = {}) => ({
-  id: 12, name: 'Account', notes: '', platform, type: 'apikey',
+const account = (platform = 'deepseek', extra: Record<string, unknown> = {}, credentials: Record<string, unknown> = {}, id = 12) => ({
+  id, name: 'Account', notes: '', platform, type: 'apikey',
   credentials: { api_key: 'k', model_mapping: { 'deepseek-flash': 'x' }, ...credentials },
   credentials_status: { has_access_token: true, has_refresh_token: true }, extra,
   proxy_id: null, concurrency: 1, priority: 1, rate_multiplier: 1, status: 'active',
@@ -179,5 +179,64 @@ describe('EditAccountModal identity disguise', () => {
     await wrapper.vm.$nextTick()
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     await vi.waitFor(() => expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.identityDisguise.saveFailed'))
+  })
+
+  // DSG-F1：读取失败的伪装配置不得被保存覆盖。
+  it('does NOT persist disguise when the disguise read failed (DSG-F1)', async () => {
+    // 读取伪装接口 reject（模拟网络/后端异常），UI 仅持有初值 none。
+    getDisguiseMock.mockRejectedValueOnce(new Error('disguise read failed'))
+    const wrapper = mountModal()
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalled())
+    // 改个备注（其它字段）后保存
+    await wrapper.get('[data-testid="account-notes"]').setValue('changed note')
+    await wrapper.vm.$nextTick()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    // 主更新仍正常发生
+    await vi.waitFor(() => expect(updateAccountMock).toHaveBeenCalled())
+    // 关键断言：专用伪装接口绝不被调用，不会把 none 写回后端清空已有伪装。
+    expect(updateDisguiseMock).not.toHaveBeenCalled()
+  })
+
+  it('still persists disguise exactly once on a successful read (regression)', async () => {
+    // 读取成功（默认 mock 即 resolve emptyState），保存后应按原逻辑调用一次专用接口。
+    const wrapper = mountModal()
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalled())
+    await wrapper.get('[data-testid="identity-disguise-profile"]').setValue('deepseek')
+    await wrapper.vm.$nextTick()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await vi.waitFor(() => expect(updateDisguiseMock).toHaveBeenCalledTimes(1))
+    const [id, payload] = updateDisguiseMock.mock.calls[0]
+    expect(id).toBe(12)
+    expect(payload.profile).toBe('deepseek')
+    // 不得混进主账号更新载荷
+    const mainPayload = updateAccountMock.mock.calls[0][1] as Record<string, unknown>
+    expect(JSON.stringify(mainPayload)).not.toContain('identity_disguise')
+  })
+
+  it('recovers: a later successful reload allows the disguise to be saved (DSG-F1 state recovery)', async () => {
+    // 第一次读取失败 → loaded 保持 false，保存不写伪装
+    getDisguiseMock.mockRejectedValueOnce(new Error('disguise read failed'))
+    const wrapper = mountModal()
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalled())
+    await wrapper.get('[data-testid="account-notes"]').setValue('note before recovery')
+    await wrapper.vm.$nextTick()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await vi.waitFor(() => expect(updateAccountMock).toHaveBeenCalled())
+    expect(updateDisguiseMock).not.toHaveBeenCalled()
+    updateAccountMock.mockClear()
+
+    // 读取恢复成功：改回 resolve，并切换账号 id 触发 watch 重新加载
+    getDisguiseMock.mockResolvedValue({ ...emptyState, profile: 'kimi' })
+    await wrapper.setProps({ account: account('deepseek', {}, {}, 99) })
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalledWith(99))
+    await wrapper.setProps({ account: account('deepseek', {}, {}, 12) })
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalledWith(12))
+
+    // 此时 loaded 已恢复为 true，再次保存应正常写入伪装
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await vi.waitFor(() => expect(updateDisguiseMock).toHaveBeenCalledTimes(1))
+    const [id, payload] = updateDisguiseMock.mock.calls[0]
+    expect(id).toBe(12)
+    expect(payload.profile).toBe('kimi')
   })
 })

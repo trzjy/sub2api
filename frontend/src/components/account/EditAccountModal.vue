@@ -21,6 +21,7 @@
           v-model="form.notes"
           rows="3"
           class="input"
+          data-testid="account-notes"
           :placeholder="t('admin.accounts.notesPlaceholder')"
         ></textarea>
         <p class="input-hint">{{ t('admin.accounts.notesHint') }}</p>
@@ -4029,6 +4030,9 @@ const identityDisguiseAutoDerive = ref(true)
 const identityDisguiseRewriteModel = ref(true)
 const identityDisguiseStripReasoning = ref(true)
 const identityDisguiseUsesLegacyKeys = ref(false)
+// 「伪装配置已成功加载」状态：仅当读取成功才置 true。
+// 读取失败时保持 false，用于阻止保存把 UI 初值（none）写回专用接口、清掉账号上已配好的伪装。
+const identityDisguiseLoaded = ref(false)
 
 const identityDisguiseProtocolWarning = computed(() => {
   const creds = props.account?.credentials as Record<string, unknown> | undefined
@@ -4056,6 +4060,9 @@ async function loadIdentityDisguiseProfiles() {
 }
 
 async function loadIdentityDisguise(accountId: number) {
+  // 复位：切换账号或重新加载前先标记为「未加载成功」，
+  // 避免上一次成功加载的状态在本次读取失败时残留，导致保存把 none 写回后端清空已有伪装。
+  identityDisguiseLoaded.value = false
   try {
     const state = await adminAPI.accounts.getAccountIdentityDisguise(accountId)
     identityDisguiseProfile.value = state.profile
@@ -4064,7 +4071,9 @@ async function loadIdentityDisguise(accountId: number) {
     identityDisguiseRewriteModel.value = state.rewrite_model
     identityDisguiseStripReasoning.value = state.strip_reasoning
     identityDisguiseUsesLegacyKeys.value = state.uses_legacy_keys
+    identityDisguiseLoaded.value = true
   } catch {
+    // 读取失败：保持 identityDisguiseLoaded = false，禁止后续保存写回伪装。
     appStore.showError(t('admin.accounts.identityDisguise.loadFailed'))
   }
 }
@@ -6329,6 +6338,12 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
 // 会与「普通编辑不得清除受管键」的保留契约打架；且伪装是独立语义
 // （模型回写 / 思考剥离 / 人设注入），失败不该连累主更新。
 const persistIdentityDisguise = async (accountID: number, updatedAccount: Account): Promise<Account> => {
+  // 读取失败（未成功加载）时不得写回伪装：UI 仅持有初值（none），写回会把账号上
+  // 已配好的伪装清空。直接返回原 updatedAccount，不报警、不改其它字段。
+  // 读取成功后按原逻辑保存（用户显式修改过的设置也照常写入）。
+  if (!identityDisguiseLoaded.value) {
+    return updatedAccount
+  }
   try {
     await saveIdentityDisguise(accountID)
     const state = await adminAPI.accounts.getAccountIdentityDisguise(accountID)
