@@ -96,11 +96,11 @@ func TestShouldFailoverOpenAIUpstreamResponse_SafetyRejection(t *testing.T) {
 
 	body := `{"error":{"code":"9","message":"safety check failed","type":"failed_precondition_error"}}`
 	assert.True(t,
-		s.shouldFailoverOpenAIUpstreamResponse(account, http.StatusBadRequest, "safety check failed", []byte(body), ""),
+		s.shouldFailoverOpenAIUpstreamResponse(nil, account, http.StatusBadRequest, "safety check failed", []byte(body), ""),
 		"审核拒绝必须换号")
 
 	assert.False(t,
-		s.shouldFailoverOpenAIUpstreamResponse(account, http.StatusBadRequest, "invalid temperature", []byte(`{"error":{"message":"invalid temperature"}}`), ""),
+		s.shouldFailoverOpenAIUpstreamResponse(nil, account, http.StatusBadRequest, "invalid temperature", []byte(`{"error":{"message":"invalid temperature"}}`), ""),
 		"普通 400 仍按客户端错误透传")
 }
 

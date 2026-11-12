@@ -826,7 +826,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			}
-			if lastFailoverErr != nil && slotFullCount == 0 {
+			if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 			} else if slotFullCount > 0 {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
@@ -875,6 +875,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				ClientStatusCode: http.StatusBadRequest,
 				ClientMessage:    infraerrors.PreviousResponseIDUnsupported,
 			}
+			// 这次失败来自上游：清「最后一次失败来自槽位」标记（外审 R8 must_fix #2）。
+			markFailoverUpstreamFailure(c)
 			reqLog.Debug("openai.account_skipped_http_continuation_unsupported",
 				zap.Int64("account_id", account.ID),
 				zap.String("account_type", account.Type),
@@ -898,7 +900,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if slotResult == openAISlotAcquireSlotFull {
 			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
-			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+			if !recordConcurrencySlotFailure(c, failedAccountIDs, account.ID, &slotFullCount) {
 				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
@@ -1151,6 +1153,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					// 候选又落回同一家，切换预算全耗在同一面墙上。
 					h.excludeUpstreamSiblings(c.Request.Context(), apiKey, failoverErr, failedAccountIDs, excludedUpstreamHosts, reqLog)
 					lastFailoverErr = failoverErr
+					markFailoverUpstreamFailure(c)
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
@@ -1648,7 +1651,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 			} else {
-				if lastFailoverErr != nil && slotFullCount == 0 {
+				if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else if slotFullCount > 0 {
 					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
@@ -1686,7 +1689,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		if slotResult == openAISlotAcquireSlotFull {
 			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
-			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+			if !recordConcurrencySlotFailure(c, failedAccountIDs, account.ID, &slotFullCount) {
 				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
@@ -1901,6 +1904,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					// 同一套策略），只排除当前账号会 419→416→426 连撞三面同一堵墙。
 					h.excludeUpstreamSiblings(c.Request.Context(), apiKey, failoverErr, failedAccountIDs, excludedUpstreamHosts, reqLog)
 					lastFailoverErr = failoverErr
+					// 这次失败来自上游：清「最后一次失败来自槽位」标记（外审 R8 must_fix #2）。
+					markFailoverUpstreamFailure(c)
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），
@@ -3362,6 +3367,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		lastFailoverErr = failoverErr
+		// 这次失败来自上游：清「最后一次失败来自槽位」标记（外审 R8 must_fix #2）。
+		markFailoverUpstreamFailure(c)
 		switchCount++
 		if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)

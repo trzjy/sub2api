@@ -291,7 +291,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
 				return
 			}
-			if lastFailoverErr != nil && slotFullCount == 0 {
+			if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 				h.handleFailoverExhausted(c, lastFailoverErr, false)
 			} else if slotFullCount > 0 {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
@@ -376,7 +376,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		if slotResult == openAISlotAcquireSlotFull {
 			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
-			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+			if !recordConcurrencySlotFailure(c, failedAccountIDs, account.ID, &slotFullCount) {
 				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
@@ -453,6 +453,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				h.gatewayService.RecordOpenAIAccountSwitch()
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr
+				markFailoverUpstreamFailure(c)
 				switchCount++
 				if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 					h.handleFailoverExhausted(c, failoverErr, false)

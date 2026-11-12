@@ -53,12 +53,16 @@ func concurrencySlotWaitExhausted(c *gin.Context) bool {
 //
 // 注意语义边界：槽位满是**瞬时**状态（几十秒后可能就空了），把它写进「已失败账号」
 // 集合只影响**本次请求**的候选集，不停号、不改账号状态。
-func recordConcurrencySlotFailure(failedAccountIDs map[int64]struct{}, accountID int64, attempts *int) bool {
+func recordConcurrencySlotFailure(c *gin.Context, failedAccountIDs map[int64]struct{}, accountID int64, attempts *int) bool {
 	if failedAccountIDs == nil || attempts == nil {
 		return false
 	}
 	failedAccountIDs[accountID] = struct{}{}
 	*attempts++
+	// 标记「这一次失败来自账号槽位」（外审 R8 must_fix #2）：
+	// 终态必须反映**最后一次**失败，若不记这一笔，后面真实的上游错误
+	// 会被更早的槽位失败遮蔽（客户拿到错误的并发原因）。
+	markFailoverSlotFailure(c)
 	// 恒返回 true：候选耗尽由「选号返回无候选」判定，不以尝试次数代替耗尽
 	// （外审第三轮 must_fix #1）。attempts 只作死循环兜底计数。
 	return true
@@ -119,4 +123,56 @@ func writeConcurrencySlotExhaustedWith(c *gin.Context, writeError func(status in
 	if writeError != nil {
 		writeError(status, errType, code, message)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────
+// 「最后一次失败是什么」的唯一事实源（外审 R8 must_fix #2 根因收口）
+// ─────────────────────────────────────────────────────────────
+//
+// 问题（外审 R8）：终态判定「该给客户说并发已满还是上游错误」这条规则，
+// 此前在 16 个接入点各写一遍，而且都写成了「lastFailoverErr != nil && slotFullCount == 0」
+// —— 用**历史累计计数**去推断「最后一次失败是什么」：
+// 只要本次请求早先撞过一次槽位失败，后面即使真的拿到了上游错误，
+// 终态仍会写「并发已满」，把真实错误遮蔽掉。
+//
+// 为什么不能靠计数推断（这是本条规则以前写错的根）：
+//   槽位失败与上游错误在换号循环里交替发生。
+//   - 先上游错误、后槽位失败：最后一次是槽位 → 该说「并发已满」。
+//   - 先槽位失败、后上游错误：最后一次是上游 → 该说上游错误。
+//   两种情况下 slotFullCount 都 > 0，计数区分不了，必须显式记「最后一次是谁」。
+//
+// 收口：标记挂在请求上下文上（跨函数共享），所有接入点只调这两个 setter + 一个 getter，
+// 不再各写一条判断分支。新增接入点默认就遵守这条规则。
+
+// failoverLastFailureWasSlotKey 记录「本次请求最后一次失败是否来自账号槽位」。
+const failoverLastFailureWasSlotKey = "failover_last_failure_was_slot"
+
+// markFailoverSlotFailure 标记「这一次失败来自账号槽位」。
+//
+// 唯一的写入点：recordConcurrencySlotFailure（槽位失败唯一入口）。
+func markFailoverSlotFailure(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(failoverLastFailureWasSlotKey, true)
+}
+
+// markFailoverUpstreamFailure 标记「这一次失败来自上游」。
+//
+// 唯一的写入点：产生可换号上游错误的赋值处（lastFailoverErr / fs.LastFailoverErr）。
+func markFailoverUpstreamFailure(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(failoverLastFailureWasSlotKey, false)
+}
+
+// lastFailureWasSlot 读「本次请求最后一次失败是否来自账号槽位」。
+//
+// 终态判定只认这一个标记，不再用计数推断。
+func lastFailureWasSlot(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	return c.GetBool(failoverLastFailureWasSlotKey)
 }

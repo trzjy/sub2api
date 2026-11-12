@@ -1,9 +1,9 @@
 package handler
 
 import (
-	"fmt"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -165,7 +165,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
 				return
 			}
-			if lastFailoverErr != nil && slotFullCount == 0 {
+			if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 				h.handleFailoverExhausted(c, lastFailoverErr, false)
 			} else if slotFullCount > 0 {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
@@ -198,7 +198,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 		if slotResult == openAISlotAcquireSlotFull {
 			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
-			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+			if !recordConcurrencySlotFailure(c, failedAccountIDs, account.ID, &slotFullCount) {
 				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
@@ -251,6 +251,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				h.gatewayService.RecordOpenAIAccountSwitch()
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr
+				markFailoverUpstreamFailure(c)
 				switchCount++
 				reqLog.Warn("openai_embeddings.upstream_failover_switching",
 					zap.Int64("account_id", account.ID),

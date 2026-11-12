@@ -63,13 +63,13 @@ func TestOpenAICompatibleModelNotFound400FailoverScope(t *testing.T) {
 		{name: "missing account", account: nil, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, svc.shouldFailoverOpenAIUpstreamResponse(
+			require.Equal(t, tc.want, svc.shouldFailoverOpenAIUpstreamResponse(nil,
 				tc.account, http.StatusBadRequest, "model not found", body, "",
 			))
 		})
 	}
 
-	require.False(t, svc.shouldFailoverOpenAIUpstreamResponse(
+	require.False(t, svc.shouldFailoverOpenAIUpstreamResponse(nil,
 		&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
 		http.StatusBadRequest,
 		"Invalid value for temperature",
@@ -82,7 +82,7 @@ func TestOpenAICompatibleModelNotFound400WithoutManagedCandidatesRemainsTerminal
 	svc := &OpenAIGatewayService{}
 	body := []byte(`{"error":{"code":"model_not_found","message":"model not found"}}`)
 
-	require.False(t, svc.shouldFailoverOpenAIUpstreamResponse(
+	require.False(t, svc.shouldFailoverOpenAIUpstreamResponse(nil,
 		&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth},
 		http.StatusBadRequest,
 		"model not found",

@@ -151,8 +151,9 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		}
 	}()
 
-	// lastFailureWasSlot：最后一次失败是否来自账号槽位（而非上游错误）。
-	lastFailureWasSlot := false
+	// 「最后一次失败是否来自账号槽位」由请求级统一事实源维护
+	// （markFailoverSlotFailure / markFailoverUpstreamFailure / lastFailureWasSlot，
+	// 见 concurrency_slot_failover.go）——所有接入点共用一份实现，不各写一条分支。
 	// exhaustedByNoCandidate：选号是否明确返回「无候选」。
 	// 只有它为真时，槽位终态才成立——固定次数上限用尽**不是**候选耗尽
 	// （外审第五轮 must_fix #1）。
@@ -195,11 +196,11 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 			if acquireErr != nil {
 				// 标记「本次请求已经等过一次且没等到」：后续候选只做立即抢槽，不再排队等待。
 				markConcurrencySlotWaitExhausted(c)
-				// 本次失败是槽位失败（终态判定用）。
-				lastFailureWasSlot = true
+				// 本次失败是槽位失败（终态判定用）：
+				// recordConcurrencySlotFailure 内部统一打「最后一次失败来自槽位」标记。
 				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-				if recordConcurrencySlotFailure(failedAccounts, selected.Account.ID, &slotFullCount) {
+				if recordConcurrencySlotFailure(c, failedAccounts, selected.Account.ID, &slotFullCount) {
 					continue
 				}
 				h.handleConcurrencyError(c, acquireErr, "account", false)
@@ -221,7 +222,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		}
 		// 本账号已成功占槽、失败来自上游：终态要反映这个真实错误，
 		// 不能被**更早**的槽位失败遮蔽成「并发已满」（外审第五轮 must_fix #4）。
-		lastFailureWasSlot = false
+		markFailoverUpstreamFailure(c)
 		var failoverErr *service.UpstreamFailoverError
 		if !errors.As(err, &failoverErr) || !failoverErr.ShouldRetryNextAccount() {
 			break
@@ -234,7 +235,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		account = nil
 	}
 	if err != nil || nativeResp == nil {
-		if lastFailureWasSlot && exhaustedByNoCandidate && slotFullCount > 0 {
+		if lastFailureWasSlot(c) && exhaustedByNoCandidate && slotFullCount > 0 {
 			// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 			// 不能落到下面的 502 分支——那会破坏账号并发终点契约。
 			c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{

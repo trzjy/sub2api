@@ -122,7 +122,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 	}
 	defer inflightRelease()
 
-	fs := NewFailoverState(false)
+	fs := NewFailoverState(false).BindRequest(c)
 	slotFullCount := 0
 	for {
 		if failoverClientGone(c) {
@@ -153,7 +153,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 				failoverClientGone(c)
 				return
 			default:
-				if fs.LastFailoverErr != nil && slotFullCount == 0 {
+				if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 					h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformTypeSafe, false)
 				} else if slotFullCount > 0 {
 					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
@@ -173,21 +173,21 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 				return
 			}
-		waitTimeout := selection.WaitPlan.Timeout
-		if slotFullCount > 0 {{
-			// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-			// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-			// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-			// 抢不到就立刻失败、走下面的排除分支换下一个。
-			// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-			waitTimeout = 0
-		}}
+			waitTimeout := selection.WaitPlan.Timeout
+			if slotFullCount > 0 {
+				// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
+				// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
+				// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
+				// 抢不到就立刻失败、走下面的排除分支换下一个。
+				// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
+				waitTimeout = 0
+			}
 			accountRelease, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(c, account.ID, selection.WaitPlan.MaxConcurrency, waitTimeout, false, &streamStarted)
 			if err != nil {
 				reqLog.Warn("systemone.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-				if recordConcurrencySlotFailure(fs.FailedAccountIDs, account.ID, &slotFullCount) {
+				if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
 					continue
 				}
 				h.handleConcurrencyError(c, err, "account", false)

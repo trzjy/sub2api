@@ -120,6 +120,9 @@ func effectiveSameAccountRetryLimit(failoverErr *service.UpstreamFailoverError, 
 
 // FailoverState 跨循环迭代共享的 failover 状态
 type FailoverState struct {
+	// C 本次请求的上下文：用于统一维护「最后一次失败来自槽位还是上游」的标记
+	// （外审 R8 must_fix #2）。nil 表示不在 HTTP 请求上下文中（如单测）。
+	C                     *gin.Context
 	SwitchCount           int
 	MaxSwitches           int
 	FailedAccountIDs      map[int64]struct{}
@@ -167,6 +170,17 @@ func NewFailoverStateCapped(maxSwitches int, hasBoundSession bool) *FailoverStat
 	return fs
 }
 
+// BindRequest 绑定请求上下文。
+//
+// 用于让 FailoverState 能维护「最后一次失败来自槽位还是上游」的统一标记，
+// 从而与 OpenAI 家族链共用同一份终态判定事实源（外审 R8 must_fix #2）。
+func (s *FailoverState) BindRequest(c *gin.Context) *FailoverState {
+	if s != nil {
+		s.C = c
+	}
+	return s
+}
+
 // RecordProfitVeto 记录一次分组利润门终检否决：把账号加入排除列表并递增否决
 // 计数。无退避语义下排除列表在整个请求内只增不减，被否决账号不会重新回池。
 //
@@ -201,6 +215,8 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverCanceled
 	}
 	s.LastFailoverErr = failoverErr
+	// 清「最后一次失败来自槽位」的标记：这次失败是上游错误（外审 R8 must_fix #2）。
+	markFailoverUpstreamFailure(s.C)
 	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() {
 		return FailoverExhausted
 	}

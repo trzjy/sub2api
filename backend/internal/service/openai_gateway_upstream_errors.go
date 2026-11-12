@@ -307,7 +307,7 @@ func (s *OpenAIGatewayService) shouldFailoverUpstreamError(statusCode int) bool 
 	return shouldFailoverUpstreamStatusCode(statusCode)
 }
 
-func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(account *Account, statusCode int, upstreamMsg string, upstreamBody []byte, mappingLookupModel string) bool {
+func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(c *gin.Context, account *Account, statusCode int, upstreamMsg string, upstreamBody []byte, mappingLookupModel string) bool {
 	// cyber_policy is request-scoped even when an intermediary wraps the
 	// provider response in a retryable 5xx status. Never punish or rotate the
 	// selected credential for it.
@@ -317,7 +317,17 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(account *Acc
 	// 模型名被改写后上游拒绝的，请求本身对客户是合法的 —— 责任在账号/上游侧，
 	// 换号才有机会通过。判据见 upstream_failover_policy.go。
 	if IsMappingInducedRejection(account, mappingLookupModel, statusCode) {
-		return true
+		// 预算收口（外审 R8 must_fix #3）：本函数是 OpenAI 家族「要不要换号」的唯一
+		// 判定入口，改写归因的换号预算必须在这里统一扣。
+		// 之前预算只挂在 failoverOpenAIUpstreamHTTPError / cc_pipeline 两处，
+		// 而 forward / embeddings / alpha_search / images / live / ws_bridge
+		// 这些**直接调用本函数**的路径完全绕过预算 —— 客户一个写错的请求
+		// 能扇出到池内每个带非恒等映射的账号。
+		// 预算耗尽 → 不再换号，客户拿到准确的上游原始错误（不是「上游挂了」）。
+		//
+		// 401 / 429 不走这个分支（IsMappingInducedRejection 已把它们排除），
+		// 仍按既有规则换号且不消耗映射预算。
+		return AllowMappingInducedRetry(c)
 	}
 	if isOpenAIContextWindowError(upstreamMsg, upstreamBody) {
 		return false

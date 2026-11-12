@@ -65,11 +65,11 @@ func TestShouldFailoverOpenAIUpstreamResponse_MappingInduced(t *testing.T) {
 	body := []byte(`{"error":{"code":10005,"message":"invalid request","type":"invalid_request_error"}}`)
 
 	require.True(t,
-		svc.shouldFailoverOpenAIUpstreamResponse(acc, http.StatusBadRequest, "invalid request", body, "deepseek-flash"),
+		svc.shouldFailoverOpenAIUpstreamResponse(nil, acc, http.StatusBadRequest, "invalid request", body, "deepseek-flash"),
 		"改写归因的 400 必须换号，否则客户会一直吃到同一句他改不动的报错")
 
 	require.False(t,
-		svc.shouldFailoverOpenAIUpstreamResponse(acc, http.StatusBadRequest, "invalid request", body, "deepseek-v4-pro"),
+		svc.shouldFailoverOpenAIUpstreamResponse(nil, acc, http.StatusBadRequest, "invalid request", body, "deepseek-v4-pro"),
 		"客户自己的 400 保持既有行为：不换号")
 }
 
@@ -115,7 +115,7 @@ func TestMappingInducedRejection_ClientParameterErrorKeepsOriginal400(t *testing
 
 	// 判定层：会换号（换条路试试，成本有界）。
 	require.True(t,
-		svc.shouldFailoverOpenAIUpstreamResponse(acc, http.StatusBadRequest, "Invalid value for temperature", body, "deepseek-flash"),
+		svc.shouldFailoverOpenAIUpstreamResponse(nil, acc, http.StatusBadRequest, "Invalid value for temperature", body, "deepseek-flash"),
 		"换号仍应发生：换条路试试的代价有界")
 
 	// 构造层：客户端可见状态码与文案**必须保持上游原样**。

@@ -360,8 +360,8 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	hasBoundSession := sessionKey != "" && sessionBoundAccountID > 0
 
 	if platform == service.PlatformGemini {
-		fs := NewFailoverStateCapped(h.maxAccountSwitchesGemini, hasBoundSession)
-	slotFullCount := 0
+		fs := NewFailoverStateCapped(h.maxAccountSwitchesGemini, hasBoundSession).BindRequest(c)
+		slotFullCount := 0
 
 		// 单账号分组首次 503 就不设模型限流标记，避免设 29s 限流导致后续请求连续快速失败；
 		// 是否单账号分组在 antigravity 账号遇到 503 或模型限流预检查时才判定。
@@ -400,7 +400,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					failoverClientGone(c)
 					return
 				default: // FailoverExhausted
-					if fs.LastFailoverErr != nil && slotFullCount == 0 {
+					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 						h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformGemini, streamStarted)
 					} else if slotFullCount > 0 {
 						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
@@ -444,15 +444,15 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts, streamStarted)
 					return
 				}
-			waitTimeout := selection.WaitPlan.Timeout
-			if slotFullCount > 0 {{
-				// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-				// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-				// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-				// 抢不到就立刻失败、走下面的排除分支换下一个。
-				// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-				waitTimeout = 0
-			}}
+				waitTimeout := selection.WaitPlan.Timeout
+				if slotFullCount > 0 {
+					// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
+					// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
+					// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
+					// 抢不到就立刻失败、走下面的排除分支换下一个。
+					// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
+					waitTimeout = 0
+				}
 				accountWaitCounted := false
 				canWait, err := h.concurrencyHelper.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
 				if err != nil {
@@ -488,7 +488,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					releaseWait()
 					// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 					// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-					if recordConcurrencySlotFailure(fs.FailedAccountIDs, account.ID, &slotFullCount) {
+					if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
 						continue
 					}
 					h.handleConcurrencyError(c, err, "account", streamStarted)
@@ -757,7 +757,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	// fallback 分组**又等满一次**，总等待时间超过一次超时（外审第四轮 medium）。
 	slotFullCount := 0
 	for {
-		fs := NewFailoverState(hasBoundSession)
+		fs := NewFailoverState(hasBoundSession).BindRequest(c)
 		retryWithFallback := false
 
 		for {
@@ -807,7 +807,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					failoverClientGone(c)
 					return
 				default: // FailoverExhausted
-					if fs.LastFailoverErr != nil && slotFullCount == 0 {
+					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 						h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
 					} else if slotFullCount > 0 {
 						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
@@ -860,15 +860,15 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts, streamStarted)
 					return
 				}
-			waitTimeout := selection.WaitPlan.Timeout
-			if slotFullCount > 0 {{
-				// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-				// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-				// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-				// 抢不到就立刻失败、走下面的排除分支换下一个。
-				// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-				waitTimeout = 0
-			}}
+				waitTimeout := selection.WaitPlan.Timeout
+				if slotFullCount > 0 {
+					// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
+					// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
+					// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
+					// 抢不到就立刻失败、走下面的排除分支换下一个。
+					// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
+					waitTimeout = 0
+				}
 				accountWaitCounted := false
 				canWait, err := h.concurrencyHelper.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
 				if err != nil {
@@ -904,7 +904,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					releaseWait()
 					// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 					// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-					if recordConcurrencySlotFailure(fs.FailedAccountIDs, account.ID, &slotFullCount) {
+					if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
 						continue
 					}
 					h.handleConcurrencyError(c, err, "account", streamStarted)

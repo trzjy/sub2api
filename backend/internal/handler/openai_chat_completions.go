@@ -324,7 +324,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			} else {
-				if lastFailoverErr != nil && slotFullCount == 0 {
+				if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 					// F2-b：与下方耗尽分支同型——响应已提交时先对齐 streamStarted，
 					// 否则会把 JSON 错误体塞进已开的 SSE 流。
 					syncStreamStartedIfResponseCommitted(c, &streamStarted)
@@ -365,7 +365,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		if slotResult == openAISlotAcquireSlotFull {
 			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
-			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+			if !recordConcurrencySlotFailure(c, failedAccountIDs, account.ID, &slotFullCount) {
 				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
@@ -577,6 +577,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					// 候选又落回同一家，切换预算全耗在同一面墙上。
 					h.excludeUpstreamSiblings(c.Request.Context(), apiKey, failoverErr, failedAccountIDs, excludedUpstreamHosts, reqLog)
 					lastFailoverErr = failoverErr
+					markFailoverUpstreamFailure(c)
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 						// 2026-10-20 实证：容量降载与账号强相关（同负载 231 零降载），

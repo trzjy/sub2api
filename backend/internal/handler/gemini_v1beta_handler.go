@@ -678,7 +678,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			return
 		}
 	}
-	fs := NewFailoverStateCapped(maxAccountSwitches, hasBoundSession)
+	fs := NewFailoverStateCapped(maxAccountSwitches, hasBoundSession).BindRequest(c)
 	slotFullCount := 0
 
 	// 单账号分组首次 503 就不设模型限流标记，避免设 29s 限流导致后续请求连续快速失败；
@@ -703,7 +703,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				return
 			}
 			if cachedContentBinding != nil {
-				if fs.LastFailoverErr != nil && slotFullCount == 0 {
+				if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 					h.handleGeminiCachedContentFailoverExhausted(c, fs.LastFailoverErr)
 					return
 				}
@@ -780,15 +780,15 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				googleError(c, http.StatusServiceUnavailable, infraerrors.NoAvailableAccounts)
 				return
 			}
-		waitTimeout := selection.WaitPlan.Timeout
-		if slotFullCount > 0 {{
-			// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-			// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-			// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-			// 抢不到就立刻失败、走下面的排除分支换下一个。
-			// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-			waitTimeout = 0
-		}}
+			waitTimeout := selection.WaitPlan.Timeout
+			if slotFullCount > 0 {
+				// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
+				// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
+				// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
+				// 抢不到就立刻失败、走下面的排除分支换下一个。
+				// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
+				waitTimeout = 0
+			}
 			accountWaitCounted := false
 			canWait, err := geminiConcurrency.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
 			if err != nil {
@@ -823,7 +823,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 				// 上限见 maxConcurrencySlotFailoverAttempts；用尽后仍走本端点既有终态
 				// （Google 错误格式 + 账号槽并发文案），本端点的状态码口径不变。
-				if recordConcurrencySlotFailure(fs.FailedAccountIDs, account.ID, &slotFullCount) {
+				if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
 					continue
 				}
 				// ConcurrencyError.Error() 是内部英文标识，不得直接写给下游：

@@ -252,7 +252,11 @@ func (s *OpenAIGatewayService) shouldFailoverLiveCreateError(account *Account, e
 		// 凭证读取和网络传输错误都可能只影响当前账号或代理。
 		return true
 	}
-	return s.shouldFailoverOpenAIUpstreamResponse(account,
+	// c 传 nil：live 链只有 context.Context，没有请求上下文。
+	// 这里 mappingLookupModel 恒为空串 —— 查不到非恒等映射，
+	// IsMappingInducedRejection 不可能判为「改写归因」，映射归因预算对它本就不适用
+	// （nil 时 AllowMappingInducedRetry 视为不限预算）。
+	return s.shouldFailoverOpenAIUpstreamResponse(nil, account,
 		upstreamErr.StatusCode,
 		"",
 		upstreamErr.ResponseBody,

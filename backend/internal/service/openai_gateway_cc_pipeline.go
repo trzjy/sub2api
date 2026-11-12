@@ -106,12 +106,14 @@ func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
 	if c != nil {
 		c.Set(MaskedAccountFailoverKey, account != nil && IsResponseIdentityMaskedAccount(account))
 	}
-	shouldFailover := s.shouldFailoverOpenAIUpstreamResponse(account, resp.StatusCode, upstreamMsg, respBody, mappingLookupModel)
+	shouldFailover := s.shouldFailoverOpenAIUpstreamResponse(c, account, resp.StatusCode, upstreamMsg, respBody, mappingLookupModel)
 	// 改写归因的换号预算：OpenAI 家族链没有通用切换上限，若不封顶，客户一个
 	// 写错的请求会扇出到池内每一个带非恒等映射的账号。预算用尽后不再换号，
 	// 客户看到的仍是准确的上游原始错误。
 	if shouldFailover && IsMappingInducedRejection(account, mappingLookupModel, resp.StatusCode) &&
 		!AllowMappingInducedRetry(c) {
+		// 预算已在 shouldFailoverOpenAIUpstreamResponse 内统一扣除（外审 R8 must_fix #3），
+		// 这里只做「不换号」的分支判定，不再二次扣预算。
 		return nil
 	}
 	tempUnscheduled := false

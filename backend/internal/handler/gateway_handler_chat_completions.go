@@ -210,7 +210,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		selectionSessionHash = "gemini:" + selectionSessionHash
 	}
 	// 3. Account selection + failover loop
-	fs := newChatCompletionsFailoverState(groupPlatform, h.maxAccountSwitchesGemini)
+	fs := newChatCompletionsFailoverState(c, groupPlatform, h.maxAccountSwitchesGemini)
 	slotFullCount := 0
 
 	for {
@@ -240,7 +240,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				failoverClientGone(c)
 				return
 			default:
-				if fs.LastFailoverErr != nil && slotFullCount == 0 {
+				if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 				} else if slotFullCount > 0 {
 					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
@@ -263,15 +263,15 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 				return
 			}
-		waitTimeout := selection.WaitPlan.Timeout
-		if slotFullCount > 0 {{
-			// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-			// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-			// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-			// 抢不到就立刻失败、走下面的排除分支换下一个。
-			// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-			waitTimeout = 0
-		}}
+			waitTimeout := selection.WaitPlan.Timeout
+			if slotFullCount > 0 {
+				// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
+				// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
+				// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
+				// 抢不到就立刻失败、走下面的排除分支换下一个。
+				// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
+				waitTimeout = 0
+			}
 			accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
 				c,
 				account.ID,
@@ -284,7 +284,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				reqLog.Warn("gateway.cc.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
 				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-				if recordConcurrencySlotFailure(fs.FailedAccountIDs, account.ID, &slotFullCount) {
+				if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
 					continue
 				}
 				h.handleConcurrencyError(c, err, "account", streamStarted)
@@ -551,11 +551,11 @@ func geminiGroupAdmitsAccount(groupPlatform string, account *service.Account) bo
 // gemini 平台使用带固定切换上限的 NewFailoverStateCapped（默认 3、配置
 // max_account_switches_gemini 覆盖，闸②终审整改恢复上限）；其余平台使用无
 // 固定上限的 NewFailoverState（候选集合边界判定耗尽）。
-func newChatCompletionsFailoverState(groupPlatform string, maxSwitchesGemini int) *FailoverState {
+func newChatCompletionsFailoverState(c *gin.Context, groupPlatform string, maxSwitchesGemini int) *FailoverState {
 	if groupPlatform == service.PlatformGemini {
-		return NewFailoverStateCapped(maxSwitchesGemini, false)
+		return NewFailoverStateCapped(maxSwitchesGemini, false).BindRequest(c)
 	}
-	return NewFailoverState(false)
+	return NewFailoverState(false).BindRequest(c)
 }
 
 // chatCompletionsErrorResponse writes an error in OpenAI Chat Completions format.

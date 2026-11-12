@@ -98,7 +98,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 			}
 			if slotStatus == openAISlotAcquireSlotFull {
 				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
-				if !recordConcurrencySlotFailure(failed, account.ID, &slotFullCount) {
+				if !recordConcurrencySlotFailure(c, failed, account.ID, &slotFullCount) {
 					writeConcurrencySlotExhausted(c, h, streamStarted)
 					return
 				}
@@ -274,7 +274,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			service.PlatformGrok,
 		)
 		if selectErr != nil || selection == nil || selection.Account == nil {
-			if last != nil && slotFullCount == 0 {
+			if last != nil && !lastFailureWasSlot(c) {
 				h.handleFailoverExhausted(c, last, false)
 			} else if slotFullCount > 0 {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
@@ -299,7 +299,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			}
 			if status == openAISlotAcquireSlotFull {
 				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
-				if !recordConcurrencySlotFailure(failed, account.ID, &slotFullCount) {
+				if !recordConcurrencySlotFailure(c, failed, account.ID, &slotFullCount) {
 					writeConcurrencySlotExhausted(c, h, started)
 					return
 				}
@@ -320,12 +320,13 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		if errors.As(forwardErr, &failoverErr) && failoverErr.ShouldRetryNextAccount() {
 			failed[account.ID] = struct{}{}
 			last = failoverErr
+			markFailoverUpstreamFailure(c)
 			continue
 		}
 		// Non-failover errors: handleGrokMediaErrorResponse / transport already wrote response.
 		return
 	}
-	if last != nil && slotFullCount == 0 {
+	if last != nil && !lastFailureWasSlot(c) {
 		h.handleFailoverExhausted(c, last, false)
 	} else if slotFullCount > 0 {
 		// 走到循环末尾说明是**固定次数上限用尽**，不是「选号确认无候选」——

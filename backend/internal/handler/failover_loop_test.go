@@ -200,7 +200,7 @@ func TestFailoverStateCapSemantics(t *testing.T) {
 // NewFailoverState(false) 时上限丢失。
 func TestChatCompletionsGeminiFailoverStateCapped(t *testing.T) {
 	t.Run("gemini 平台带上限", func(t *testing.T) {
-		fs := newChatCompletionsFailoverState(service.PlatformGemini, 3)
+		fs := newChatCompletionsFailoverState(nil, service.PlatformGemini, 3)
 		require.Equal(t, 3, fs.MaxSwitches)
 		// 达上限即耗尽（gemini 旧语义）。
 		mock := &mockTempUnscheduler{}
@@ -214,7 +214,7 @@ func TestChatCompletionsGeminiFailoverStateCapped(t *testing.T) {
 	})
 
 	t.Run("gemini 平台按配置值生效", func(t *testing.T) {
-		fs := newChatCompletionsFailoverState(service.PlatformGemini, 1)
+		fs := newChatCompletionsFailoverState(nil, service.PlatformGemini, 1)
 		require.Equal(t, 1, fs.MaxSwitches)
 		mock := &mockTempUnscheduler{}
 		retryableErr := &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway}
@@ -225,7 +225,7 @@ func TestChatCompletionsGeminiFailoverStateCapped(t *testing.T) {
 	})
 
 	t.Run("非 gemini 平台无固定上限", func(t *testing.T) {
-		fs := newChatCompletionsFailoverState(service.PlatformOpenAI, 3)
+		fs := newChatCompletionsFailoverState(nil, service.PlatformOpenAI, 3)
 		require.Equal(t, 0, fs.MaxSwitches)
 		mock := &mockTempUnscheduler{}
 		retryableErr := &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway}
