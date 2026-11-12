@@ -1697,12 +1697,12 @@ func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTool
 	// 还原出来的 DSML 调用 → 标准 function_call 输出。
 	for i, call := range dsmlCalls {
 		outputs = append(outputs, ResponsesOutput{
-			Type:   "function_call",
-			ID:     generateItemID(),
-			CallID: "call_dsml_" + itoa(i),
-			Name:   call.Name,
+			Type:      "function_call",
+			ID:        generateItemID(),
+			CallID:    "call_dsml_" + itoa(i),
+			Name:      call.Name,
 			Arguments: call.Arguments,
-			Status: "completed",
+			Status:    "completed",
 		})
 	}
 

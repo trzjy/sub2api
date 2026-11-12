@@ -88,7 +88,8 @@ func TestCursorDeliveredCall_MatchesApicompatCustomJudgement(t *testing.T) {
 //
 // 判据：cursorResponsesToolMeta 里不得再有独立的 namespaceCustomTools 字段
 // （那张表与 NamespacedToolName.IsCustom 是同一份事实的两个副本，
-//  2026-11-12 已删除）；namespace 内 custom 的信息只能来自 namespaceTools[...].IsCustom。
+//
+//	2026-11-12 已删除）；namespace 内 custom 的信息只能来自 namespaceTools[...].IsCustom。
 func TestCursorDeliveredCall_NoSecondCustomSource(t *testing.T) {
 	var req apicompat.ResponsesRequest
 	require.NoError(t, json.Unmarshal([]byte(`{"model":"gpt-6-astra","input":`+codexNamespaceToolInput+`}`), &req))

@@ -85,7 +85,7 @@ type cursorResponsesToolMeta struct {
 	// 的 IsCustom 字段承载 —— 不再另存一张 NamespaceCustomTools map
 	// （2026-11-12 删除：那张表与 NamespacedToolName.IsCustom 是同一份事实的两个副本，
 	//  交付侧读后者、登记侧读前者，结论不一致 → codex 续轮 result_type_mismatch）。
-	toolSearch           bool
+	toolSearch bool
 }
 
 // cursorToolMetaFromResponses 从原始 Responses 请求派生回桥工具元数据。
@@ -115,10 +115,10 @@ func cursorToolMetaFromTools(effective []apicompat.ResponsesTool) (cursorRespons
 		return cursorResponsesToolMeta{}, fmt.Errorf("%w: responses tools: %v", ErrCursorResumeUnsupportedContent, err)
 	}
 	return cursorResponsesToolMeta{
-		customTools:          flat.CustomTools,
-		functionTools:        flat.FunctionTools,
-		namespaceTools:       flat.NamespaceTools,
-		toolSearch:           flat.ToolSearch,
+		customTools:    flat.CustomTools,
+		functionTools:  flat.FunctionTools,
+		namespaceTools: flat.NamespaceTools,
+		toolSearch:     flat.ToolSearch,
 	}, nil
 }
 
@@ -667,31 +667,31 @@ func (s *CursorExecutionService) Execute(
 					s.accountKeyRejectedHandler(ctx, account.ID, "cursor upstream rejected the key (expired or quota exhausted)")
 				}()
 			}
-		// 动作 B（外审 B3 加固）：仅当本 HTTP 尚未发布正文字节且会话从未交付过工具批时，
-		// 才叠加为可换号 failover，让既有 handler 换号重试；否则错误原样返回，禁止
-		// mid-stream 换号（锁定项 3）。
-		//
-		// 关键契约（A8 卡修复）：换号构造**不得**用 `err = &UpstreamFailoverError{...}` 把原始
-		// `*CursorKeyRejectedError` 整体替换掉 —— 那样会丢失 sentinel
-		// （ErrCursorKeyRejectedUpstream，由 CursorKeyRejectedError.Unwrap 提供）与 rejected.TurnID，
-		// 导致对外映射 CUR-EXEC-12 失败、既有契约 TestCursorProtocolRejectedKeyFailsClosed 等翻红。
-		// 改用 errors.Join 把「可换号 failover」与「原始拒钥错误链」两条链同时保留：
-		//   - errors.As(err, &fe) 仍能拿到 *UpstreamFailoverError（换号语义不变）；
-		//   - errors.Is(err, ErrCursorKeyRejectedUpstream) 与 errors.As(err, &rejected) 仍成立
-		//     （拒钥 sentinel + TurnID 不丢，对外映射 CUR-EXEC-12 保住）。
-		// 不动 UpstreamFailoverError 的既有字段语义，亦不动其它 36 个构造点。
-		if !session.bodyPublished && session.deliveredBatchSeq == 0 {
-			err = errors.Join(&UpstreamFailoverError{
-				StatusCode:        http.StatusBadGateway,
-				Stage:             GatewayFailureStage("upstream"),
-				Scope:             GatewayFailureScopeAccount,
-				Reason:            cursorKeyRejectedReason,
-				NextAccountAction: NextAccountRetry,
-				ClientStatusCode:  http.StatusBadGateway,
-				ClientMessage:     infraerrors.CursorExecAccountRejected,
-			}, err)
-		}
-		return
+			// 动作 B（外审 B3 加固）：仅当本 HTTP 尚未发布正文字节且会话从未交付过工具批时，
+			// 才叠加为可换号 failover，让既有 handler 换号重试；否则错误原样返回，禁止
+			// mid-stream 换号（锁定项 3）。
+			//
+			// 关键契约（A8 卡修复）：换号构造**不得**用 `err = &UpstreamFailoverError{...}` 把原始
+			// `*CursorKeyRejectedError` 整体替换掉 —— 那样会丢失 sentinel
+			// （ErrCursorKeyRejectedUpstream，由 CursorKeyRejectedError.Unwrap 提供）与 rejected.TurnID，
+			// 导致对外映射 CUR-EXEC-12 失败、既有契约 TestCursorProtocolRejectedKeyFailsClosed 等翻红。
+			// 改用 errors.Join 把「可换号 failover」与「原始拒钥错误链」两条链同时保留：
+			//   - errors.As(err, &fe) 仍能拿到 *UpstreamFailoverError（换号语义不变）；
+			//   - errors.Is(err, ErrCursorKeyRejectedUpstream) 与 errors.As(err, &rejected) 仍成立
+			//     （拒钥 sentinel + TurnID 不丢，对外映射 CUR-EXEC-12 保住）。
+			// 不动 UpstreamFailoverError 的既有字段语义，亦不动其它 36 个构造点。
+			if !session.bodyPublished && session.deliveredBatchSeq == 0 {
+				err = errors.Join(&UpstreamFailoverError{
+					StatusCode:        http.StatusBadGateway,
+					Stage:             GatewayFailureStage("upstream"),
+					Scope:             GatewayFailureScopeAccount,
+					Reason:            cursorKeyRejectedReason,
+					NextAccountAction: NextAccountRetry,
+					ClientStatusCode:  http.StatusBadGateway,
+					ClientMessage:     infraerrors.CursorExecAccountRejected,
+				}, err)
+			}
+			return
 		}
 		// 上游对本账号回吐「非业务码」的终态错误（Connect 传输码：internal / unknown /
 		// unavailable 等，典型报文 internal: Cannot read properties of undefined (reading
@@ -1220,7 +1220,6 @@ func (s *CursorExecutionService) resumeModelChangedOutcome(
 		Err:           newCursorResumeError(http.StatusBadRequest, "model_changed", ErrCursorResumeConfigChanged),
 	}
 }
-
 
 // cursorSessionIDOf 取会话 ID（nil 安全，只用于日志）。
 func cursorSessionIDOf(record *cursorSessionRecord) string {
@@ -9599,7 +9598,6 @@ func cursorDeclaredOriginalToolNames(chat *apicompat.ChatCompletionsRequest) []s
 	}
 	return out
 }
-
 
 // cursorBuildAgentRunUpstreamRequest 构造 AgentRun 的出站请求描述。
 //
