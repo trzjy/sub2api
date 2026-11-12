@@ -21,6 +21,7 @@
           v-model="form.notes"
           rows="3"
           class="input"
+          data-testid="account-notes"
           :placeholder="t('admin.accounts.notesPlaceholder')"
         ></textarea>
         <p class="input-hint">{{ t('admin.accounts.notesHint') }}</p>
@@ -313,7 +314,7 @@
           </div>
         </div>
 
-        <!-- Web 控制台额度上游（compshare/sensenova/longcat）：控制台登录凭据与交互验证 -->
+        <!-- Web 控制台额度上游（compshare/sensenova/longcat）：控制台登录与用量同步 -->
         <div
           v-if="account.web_console_quota_provider"
           class="border-t border-gray-200 pt-4 dark:border-dark-600"
@@ -325,44 +326,139 @@
               {{ t('admin.accounts.webConsoleQuota.hint', { provider: account.web_console_quota_provider }) }}
             </p>
           </div>
-          <div class="mt-3 grid grid-cols-1 gap-3">
-            <div>
-              <label class="input-label mb-1">{{ t('admin.accounts.webConsoleQuota.username') }}</label>
-              <input
-                v-model="webConsoleUsername"
-                data-testid="web-console-username"
-                class="input"
-                :placeholder="t('admin.accounts.webConsoleQuota.usernamePlaceholder')"
-              />
-            </div>
-            <div>
-              <label class="input-label mb-1">{{ t('admin.accounts.webConsoleQuota.password') }}</label>
-              <input
-                v-model="webConsolePassword"
-                type="password"
-                data-testid="web-console-password"
-                class="input"
-                :placeholder="
-                  account.credentials_status?.has_console_password
-                    ? t('admin.accounts.webConsoleQuota.passwordKeepPlaceholder')
-                    : t('admin.accounts.webConsoleQuota.passwordPlaceholder')
-                "
-              />
-            </div>
+
+          <div class="mt-3 flex flex-wrap items-center gap-2 text-xs">
+            <span
+              class="inline-flex items-center rounded-full px-2 py-0.5 font-medium"
+              :class="
+                webConsoleHasSession
+                  ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                  : 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+              "
+              data-testid="web-console-login-state"
+            >
+              {{ webConsoleHasSession ? t('admin.accounts.webConsoleQuota.stateSaved') : t('admin.accounts.webConsoleQuota.stateNone') }}
+            </span>
+            <span class="text-gray-500 dark:text-gray-400">{{ webConsoleLoginModeHint }}</span>
           </div>
+
           <div class="mt-3 flex flex-wrap items-center gap-2">
             <button
               type="button"
-              data-testid="web-console-auth-start"
+              data-testid="web-console-login-start"
               class="rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
-              :disabled="webConsoleAuthBusy"
-              @click="handleStartWebConsoleAuth"
+              :disabled="remoteLoginStarting"
+              @click="handleOpenRemoteLogin"
             >
-              {{ webConsoleAuthBusy ? t('admin.accounts.webConsoleQuota.authRunning') : t('admin.accounts.webConsoleQuota.authStart') }}
+              {{ remoteLoginOpen ? t('admin.accounts.webConsoleQuota.loginRestart') : t('admin.accounts.webConsoleQuota.loginStart') }}
             </button>
-            <span v-if="webConsoleAuthMessage" class="text-xs" :class="webConsoleAuthError ? 'text-red-600' : 'text-emerald-600'">
-              {{ webConsoleAuthMessage }}
+            <span
+              v-if="remoteLoginMessage"
+              class="text-xs"
+              :class="remoteLoginError ? 'text-red-600' : 'text-emerald-600'"
+            >
+              {{ remoteLoginMessage }}
             </span>
+          </div>
+
+          <!-- 服务端登录画面：在网页上点、输入，动作转发到服务端浏览器 -->
+          <div
+            v-if="remoteLoginOpen"
+            class="mt-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+            data-testid="web-console-login-panel"
+          >
+            <div class="relative overflow-hidden rounded-md bg-gray-100 dark:bg-dark-700">
+              <img
+                v-if="remoteLoginShotSrc"
+                :src="remoteLoginShotSrc"
+                alt=""
+                class="block w-full cursor-crosshair select-none"
+                data-testid="web-console-login-frame"
+                @click="handleRemoteLoginTap"
+              />
+              <div v-else class="flex h-40 items-center justify-center text-xs text-gray-500">
+                {{ t('admin.accounts.webConsoleQuota.frameLoading') }}
+              </div>
+            </div>
+            <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.webConsoleQuota.panelHint') }}
+            </p>
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <input
+                v-model="remoteLoginTyped"
+                class="input min-w-[8rem] flex-1"
+                data-testid="web-console-login-type"
+                :placeholder="t('admin.accounts.webConsoleQuota.typePlaceholder')"
+                @keyup.enter="handleRemoteLoginType"
+              />
+              <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginType">
+                {{ t('admin.accounts.webConsoleQuota.typeSend') }}
+              </button>
+              <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginKey('Enter')">
+                {{ t('admin.accounts.webConsoleQuota.keyEnter') }}
+              </button>
+              <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginKey('Backspace')">
+                {{ t('admin.accounts.webConsoleQuota.keyBackspace') }}
+              </button>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginScroll(-400)">
+                {{ t('admin.accounts.webConsoleQuota.scrollUp') }}
+              </button>
+              <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginScroll(400)">
+                {{ t('admin.accounts.webConsoleQuota.scrollDown') }}
+              </button>
+              <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginReload">
+                {{ t('admin.accounts.webConsoleQuota.frameReload') }}
+              </button>
+              <button
+                type="button"
+                data-testid="web-console-login-finish"
+                class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+                :disabled="remoteLoginFinishing"
+                @click="handleRemoteLoginFinish"
+              >
+                {{ t('admin.accounts.webConsoleQuota.loginDone') }}
+              </button>
+              <button type="button" class="btn btn-secondary btn-sm" @click="closeRemoteLogin">
+                {{ t('common.cancel') }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 密码凭据：只有该上游支持密码登录时才出现（longcat 仅扫码/短信，不显示） -->
+          <div
+            v-if="webConsoleSupportsPassword"
+            class="mt-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+          >
+            <p class="text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.webConsoleQuota.passwordHint') }}
+            </p>
+            <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label class="input-label mb-1">{{ t('admin.accounts.webConsoleQuota.username') }}</label>
+                <input
+                  v-model="webConsoleUsername"
+                  data-testid="web-console-username"
+                  class="input"
+                  :placeholder="t('admin.accounts.webConsoleQuota.usernamePlaceholder')"
+                />
+              </div>
+              <div>
+                <label class="input-label mb-1">{{ t('admin.accounts.webConsoleQuota.password') }}</label>
+                <input
+                  v-model="webConsolePassword"
+                  type="password"
+                  data-testid="web-console-password"
+                  class="input"
+                  :placeholder="
+                    account.credentials_status?.has_console_password
+                      ? t('admin.accounts.webConsoleQuota.passwordKeepPlaceholder')
+                      : t('admin.accounts.webConsoleQuota.passwordPlaceholder')
+                  "
+                />
+              </div>
+            </div>
           </div>
         </div>
 
@@ -3934,6 +4030,9 @@ const identityDisguiseAutoDerive = ref(true)
 const identityDisguiseRewriteModel = ref(true)
 const identityDisguiseStripReasoning = ref(true)
 const identityDisguiseUsesLegacyKeys = ref(false)
+// 「伪装配置已成功加载」状态：仅当读取成功才置 true。
+// 读取失败时保持 false，用于阻止保存把 UI 初值（none）写回专用接口、清掉账号上已配好的伪装。
+const identityDisguiseLoaded = ref(false)
 
 const identityDisguiseProtocolWarning = computed(() => {
   const creds = props.account?.credentials as Record<string, unknown> | undefined
@@ -3961,6 +4060,9 @@ async function loadIdentityDisguiseProfiles() {
 }
 
 async function loadIdentityDisguise(accountId: number) {
+  // 复位：切换账号或重新加载前先标记为「未加载成功」，
+  // 避免上一次成功加载的状态在本次读取失败时残留，导致保存把 none 写回后端清空已有伪装。
+  identityDisguiseLoaded.value = false
   try {
     const state = await adminAPI.accounts.getAccountIdentityDisguise(accountId)
     identityDisguiseProfile.value = state.profile
@@ -3969,7 +4071,9 @@ async function loadIdentityDisguise(accountId: number) {
     identityDisguiseRewriteModel.value = state.rewrite_model
     identityDisguiseStripReasoning.value = state.strip_reasoning
     identityDisguiseUsesLegacyKeys.value = state.uses_legacy_keys
+    identityDisguiseLoaded.value = true
   } catch {
+    // 读取失败：保持 identityDisguiseLoaded = false，禁止后续保存写回伪装。
     appStore.showError(t('admin.accounts.identityDisguise.loadFailed'))
   }
 }
@@ -4006,9 +4110,28 @@ onMounted(() => {
   })()
 })
 
+// DSG-C4F：弹窗由关闭变为打开时，重试伪装配置读取。
+// 该组件在 AccountsView 中始终挂载、仅用 show 隐藏（:547），而读取只在组件挂载与账号 ID 变化时触发
+// （:3912 的 account.id watch、:4006 的 onMounted）。因此「首次读取失败后关闭再打开同一账号」不会重试，
+// 伪装配置会一直无法保存，直到刷新页面。
+// 这里监听 show 的「关闭→打开」跳变：若当前账号伪装尚未成功加载，则重新调用 loadIdentityDisguise
+// （幂等，成功即置 identityDisguiseLoaded = true）；已加载成功时跳过，避免每次打开多打一次接口。
+// 不引入定时重试 / 轮询 / 新配置项；读取失败时的既有行为（提示错误、禁止写回）保持不变。
+watch(
+  () => props.show,
+  (show, wasShow) => {
+    if (!show || wasShow) return
+    const accountID = props.account?.id
+    if (!accountID) return
+    if (identityDisguiseLoaded.value) return
+    void loadIdentityDisguise(accountID)
+  }
+)
+
 // 卸载时清掉控制台验证登录轮询定时器，避免组件销毁后仍在打接口。
 onUnmounted(() => {
   stopWebConsoleAuthPolling()
+  stopRemoteLoginPolling()
 })
 
 // Platform-specific hint for Base URL
@@ -4151,47 +4274,244 @@ const stopWebConsoleAuthPolling = () => {
   }
 }
 
-// 交互登录：本机浏览器完成滑块/扫码，后端会话轮询最多等 10 分钟；
-// 单次轮询失败不终止（网络抖动/会话仍在），超时或终态才停表。
-const handleStartWebConsoleAuth = async () => {
-  if (!props.account) return
-  webConsoleAuthBusy.value = true
-  webConsoleAuthError.value = false
-  webConsoleAuthMessage.value = ''
-  try {
-    const { session_id } = await adminAPI.cnProviders.startWebConsoleAuth(props.account.id)
-    const deadline = Date.now() + 10 * 60 * 1000
-    stopWebConsoleAuthPolling()
-    webConsoleAuthTimer = window.setInterval(async () => {
-      if (Date.now() > deadline) {
-        stopWebConsoleAuthPolling()
-        webConsoleAuthBusy.value = false
-        webConsoleAuthError.value = true
-        webConsoleAuthMessage.value = t('admin.accounts.webConsoleQuota.authTimeout')
-        return
-      }
-      try {
-        const r = await adminAPI.cnProviders.pollWebConsoleAuth(props.account!.id, session_id)
-        if (r.status === 'succeeded') {
-          stopWebConsoleAuthPolling()
-          webConsoleAuthBusy.value = false
-          webConsoleAuthMessage.value = t('admin.accounts.webConsoleQuota.authSuccess')
-        } else if (r.status === 'failed') {
-          stopWebConsoleAuthPolling()
-          webConsoleAuthBusy.value = false
-          webConsoleAuthError.value = true
-          webConsoleAuthMessage.value = r.message || t('admin.accounts.webConsoleQuota.authFailed')
-        }
-      } catch {
-        /* 单次轮询失败不终止，等下一轮 */
-      }
-    }, 3000)
-  } catch (e) {
-    webConsoleAuthBusy.value = false
-    webConsoleAuthError.value = true
-    webConsoleAuthMessage.value = (e as Error)?.message || t('common.error')
+// ── 服务端登录画面（扫码 / 短信 / 滑块） ──
+//
+// 登录页跑在服务端 worker 里：这里只显示画面、把点击与键盘转发过去。
+// 用户不需要在自己电脑上装任何工具，也不需要知道自己用的是扫码还是短信——
+// 画面里是什么就操作什么。登录成功后由后端一次性取回票据并落库。
+const remoteLoginOpen = ref(false)
+const remoteLoginStarting = ref(false)
+const remoteLoginFinishing = ref(false)
+const remoteLoginSessionId = ref('')
+const remoteLoginScreenshot = ref('')
+const remoteLoginViewport = reactive({ width: 1280, height: 800 })
+const remoteLoginTyped = ref('')
+const remoteLoginMessage = ref('')
+const remoteLoginError = ref(false)
+let remoteLoginTimer: number | null = null
+
+// 该上游支持的登录方式由后端下发（web_console_login_modes），
+// 前端不按 provider 名字判断「谁有密码」——longcat 只有扫码/短信。
+const webConsoleLoginModes = computed<string[]>(() => props.account?.web_console_login_modes ?? [])
+const webConsoleSupportsPassword = computed(() => webConsoleLoginModes.value.includes('password'))
+const webConsoleHasSession = computed(() =>
+  Boolean(props.account?.credentials_status?.has_console_storage_state)
+)
+
+const webConsoleLoginModeHint = computed(() => {
+  const modes = webConsoleLoginModes.value
+  if (modes.includes('qrcode') && modes.includes('sms')) {
+    return t('admin.accounts.webConsoleQuota.modeQrAndSms')
+  }
+  if (modes.includes('qrcode')) return t('admin.accounts.webConsoleQuota.modeQr')
+  if (modes.includes('sms') && modes.includes('password')) {
+    return t('admin.accounts.webConsoleQuota.modeSmsOrPassword')
+  }
+  if (modes.includes('sms')) return t('admin.accounts.webConsoleQuota.modeSms')
+  return t('admin.accounts.webConsoleQuota.modePassword')
+})
+
+const remoteLoginShotSrc = computed(() =>
+  remoteLoginScreenshot.value ? `data:image/jpeg;base64,${remoteLoginScreenshot.value}` : ''
+)
+
+const stopRemoteLoginPolling = () => {
+  if (remoteLoginTimer !== null) {
+    window.clearTimeout(remoteLoginTimer)
+    remoteLoginTimer = null
   }
 }
+
+const applyRemoteLoginFrame = (frame: {
+  session_id?: string
+  screenshot?: string
+  viewport_width?: number
+  viewport_height?: number
+  status?: string
+}) => {
+  if (frame.session_id) remoteLoginSessionId.value = frame.session_id
+  remoteLoginScreenshot.value = frame.screenshot ?? ''
+  remoteLoginViewport.width = frame.viewport_width || 1280
+  remoteLoginViewport.height = frame.viewport_height || 800
+  if (frame.status === 'authenticated') {
+    remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginDetected')
+    remoteLoginError.value = false
+  }
+}
+
+const refreshRemoteFrame = async () => {
+  if (!props.account || !remoteLoginSessionId.value) return
+  const frame = await adminAPI.cnProviders.getWebConsoleLoginFrame(
+    props.account.id,
+    remoteLoginSessionId.value
+  )
+  applyRemoteLoginFrame(frame)
+}
+
+// 递归 setTimeout 而不是 setInterval：上一帧没回来就不叠请求，
+// 服务端截图慢时不会堆积成几十个并发。
+const scheduleRemoteLoginPoll = () => {
+  stopRemoteLoginPolling()
+  remoteLoginTimer = window.setTimeout(async () => {
+    if (!remoteLoginOpen.value || !remoteLoginSessionId.value || !props.account) return
+    try {
+      await refreshRemoteFrame()
+    } catch {
+      /* 单次失败不终止，等下一轮 */
+    }
+    scheduleRemoteLoginPoll()
+  }, 1200)
+}
+
+const handleOpenRemoteLogin = async () => {
+  if (!props.account) return
+  remoteLoginStarting.value = true
+  remoteLoginMessage.value = ''
+  remoteLoginError.value = false
+  try {
+    if (remoteLoginSessionId.value) await closeRemoteLogin()
+    const frame = await adminAPI.cnProviders.startWebConsoleLogin(props.account.id)
+    remoteLoginOpen.value = true
+    applyRemoteLoginFrame(frame)
+    scheduleRemoteLoginPoll()
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  } finally {
+    remoteLoginStarting.value = false
+  }
+}
+
+const handleRemoteLoginTap = async (event: MouseEvent) => {
+  if (!props.account || !remoteLoginSessionId.value) return
+  const img = event.currentTarget as HTMLImageElement | null
+  const rect = img?.getBoundingClientRect()
+  if (!rect || !rect.width || !rect.height) return
+  // 画面按容器宽度缩放，坐标要换算回服务端视口坐标再发。
+  const x = ((event.clientX - rect.left) / rect.width) * remoteLoginViewport.width
+  const y = ((event.clientY - rect.top) / rect.height) * remoteLoginViewport.height
+  try {
+    await adminAPI.cnProviders.postWebConsoleLoginAction(props.account.id, remoteLoginSessionId.value, {
+      kind: 'tap',
+      x,
+      y
+    })
+    await refreshRemoteFrame()
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  }
+}
+
+const handleRemoteLoginType = async () => {
+  if (!props.account || !remoteLoginSessionId.value || !remoteLoginTyped.value) return
+  const text = remoteLoginTyped.value
+  try {
+    await adminAPI.cnProviders.postWebConsoleLoginAction(props.account.id, remoteLoginSessionId.value, {
+      kind: 'type',
+      text
+    })
+    remoteLoginTyped.value = ''
+    await refreshRemoteFrame()
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  }
+}
+
+const handleRemoteLoginKey = async (key: string) => {
+  if (!props.account || !remoteLoginSessionId.value) return
+  try {
+    await adminAPI.cnProviders.postWebConsoleLoginAction(props.account.id, remoteLoginSessionId.value, {
+      kind: 'key',
+      key
+    })
+    await refreshRemoteFrame()
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  }
+}
+
+const handleRemoteLoginScroll = async (deltaY: number) => {
+  if (!props.account || !remoteLoginSessionId.value) return
+  try {
+    await adminAPI.cnProviders.postWebConsoleLoginAction(props.account.id, remoteLoginSessionId.value, {
+      kind: 'scroll',
+      delta_y: deltaY
+    })
+    await refreshRemoteFrame()
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  }
+}
+
+const handleRemoteLoginReload = async () => {
+  if (!props.account || !remoteLoginSessionId.value) return
+  try {
+    await adminAPI.cnProviders.postWebConsoleLoginAction(props.account.id, remoteLoginSessionId.value, {
+      kind: 'reload'
+    })
+    await refreshRemoteFrame()
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  }
+}
+
+const handleRemoteLoginFinish = async () => {
+  if (!props.account || !remoteLoginSessionId.value || remoteLoginFinishing.value) return
+  remoteLoginFinishing.value = true
+  remoteLoginMessage.value = ''
+  remoteLoginError.value = false
+  try {
+    const result = await adminAPI.cnProviders.finishWebConsoleLogin(
+      props.account.id,
+      remoteLoginSessionId.value
+    )
+    if (result.status === 'pending') {
+      remoteLoginError.value = true
+      remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginNotDetected')
+      return
+    }
+    remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginSuccess')
+    // 服务端在 finish 时已经释放会话，这里只收面板，不再发一次取消请求。
+    stopRemoteLoginPolling()
+    remoteLoginOpen.value = false
+    remoteLoginSessionId.value = ''
+    remoteLoginScreenshot.value = ''
+    remoteLoginTyped.value = ''
+    emit('updated', {
+      ...props.account,
+      credentials_status: { ...(props.account.credentials_status ?? {}), has_console_storage_state: true }
+    })
+  } catch (e) {
+    remoteLoginError.value = true
+    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  } finally {
+    remoteLoginFinishing.value = false
+  }
+}
+
+// 取消/关闭：结束轮询并让服务端释放浏览器上下文（失败也不阻塞界面）。
+async function closeRemoteLogin() {
+  stopRemoteLoginPolling()
+  const sessionId = remoteLoginSessionId.value
+  const accountID = props.account?.id
+  remoteLoginOpen.value = false
+  remoteLoginSessionId.value = ''
+  remoteLoginScreenshot.value = ''
+  remoteLoginTyped.value = ''
+  if (sessionId && accountID) {
+    try {
+      await adminAPI.cnProviders.cancelWebConsoleLogin(accountID, sessionId)
+    } catch {
+      /* 服务端有 TTL 兜底，取消失败不提示 */
+    }
+  }
+}
+
 // 回填窗口标志：syncFormFromAccount 会同步改写 editAccountMode / editApiProtocol，
 // 而 watcher（pre-flush）在同步代码执行完之后才触发——若不抑制，会把刚恢复的
 // 存储版 base_url（可能是用户自定义/中转地址）覆盖为官方预设并在下次保存时持久化。
@@ -5431,6 +5751,14 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   webConsoleAuthBusy.value = false
   webConsoleAuthMessage.value = ''
   webConsoleAuthError.value = false
+  // 服务端登录画面同样复位：上一个账号的截图与提示不能串到新账号。
+  stopRemoteLoginPolling()
+  remoteLoginOpen.value = false
+  remoteLoginSessionId.value = ''
+  remoteLoginScreenshot.value = ''
+  remoteLoginTyped.value = ''
+  remoteLoginMessage.value = ''
+  remoteLoginError.value = false
 }
 
 async function loadTLSProfiles() {
@@ -6028,6 +6356,12 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
 // 会与「普通编辑不得清除受管键」的保留契约打架；且伪装是独立语义
 // （模型回写 / 思考剥离 / 人设注入），失败不该连累主更新。
 const persistIdentityDisguise = async (accountID: number, updatedAccount: Account): Promise<Account> => {
+  // 读取失败（未成功加载）时不得写回伪装：UI 仅持有初值（none），写回会把账号上
+  // 已配好的伪装清空。直接返回原 updatedAccount，不报警、不改其它字段。
+  // 读取成功后按原逻辑保存（用户显式修改过的设置也照常写入）。
+  if (!identityDisguiseLoaded.value) {
+    return updatedAccount
+  }
   try {
     await saveIdentityDisguise(accountID)
     const state = await adminAPI.accounts.getAccountIdentityDisguise(accountID)

@@ -6118,6 +6118,14 @@ const resetForm = () => {
   antigravityMixedChannelConfirmed.value = false
   upstreamModelsPreviewed.value = false
   clearMixedChannelDialog()
+  // 重置身份伪装状态：关闭弹窗后必须清空，否则下次创建会继承上一次的伪装配置。
+  // 模板目录 identityDisguiseProfiles 属于全局静态数据，按打开时 watch 重新拉取，
+  // 此处只重置选中值，不清除缓存。
+  identityDisguiseProfile.value = 'none'
+  identityDisguiseForbiddenNamesText.value = ''
+  identityDisguiseAutoDerive.value = true
+  identityDisguiseRewriteModel.value = true
+  identityDisguiseStripReasoning.value = true
 }
 
 const handleClose = () => {

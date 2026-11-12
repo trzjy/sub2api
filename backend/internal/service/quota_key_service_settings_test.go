@@ -565,3 +565,116 @@ func TestQuotaKeyServiceSettings_UpdatePersistsGroupIDsOnly(t *testing.T) {
 	require.Equal(t, []int64{10, 20}, *repo.lastSettings.GroupIDs,
 		"传入仓储的 GroupIDs 应为新值 {10,20}")
 }
+
+// qkgDBSettingRepo 在 testDBRepo（真实 ent client）之上实现设置仓储窄接口，
+// 记录最近一次入参，用于断言更新路径落库的是 normalizeQuotaKeyGroupIDs 的规范化结果。
+type qkgDBSettingRepo struct {
+	*testDBRepo
+	calls int
+	last  UpdateQuotaKeySettingsInput
+}
+
+func (r *qkgDBSettingRepo) UpdateSettingsAndSyncAccounts(ctx context.Context, tx *ent.Tx, id int64, settings UpdateQuotaKeySettingsInput) error {
+	r.calls++
+	r.last = settings
+	if settings.GroupIDs == nil {
+		return nil
+	}
+	ids := *settings.GroupIDs
+	if ids == nil {
+		ids = []int64{}
+	}
+	return tx.QuotaKey.UpdateOneID(id).SetGroupIds(ids).Exec(ctx)
+}
+
+func (r *qkgDBSettingRepo) SyncAccountsExpiry(_ context.Context, _ *ent.Tx, _ int64, _ *time.Time) error {
+	return nil
+}
+
+// qkgNewDBSettingService 装配 qkgDBSettingRepo + 真实 ent client（含乐观可写分组列）。
+func qkgNewDBSettingService(t *testing.T, repo *qkgDBSettingRepo) (*QuotaKeyService, *ent.Client) {
+	t.Helper()
+	client := quotaKeyTestEntClient(t)
+	repo.testDBRepo = &testDBRepo{client: client}
+	return NewQuotaKeyService(repo, NewCredcryptEncryptor(), &fakeUpstreamClient{}, client), client
+}
+
+// TestPullAccounts_NilResolver_EmptyGroupIDsNoUpstream 验证缺陷 1 的修复：
+// PullAccounts（mountResolver=nil 的 reconciler 历史入口）遇到显式解绑（group_ids=[]）的码时，
+// 必须在【发上游之前】失败关闭——空分组拦截已提到 resolver 门控之外，不再因 nil resolver 被跳过。
+func TestPullAccounts_NilResolver_EmptyGroupIDsNoUpstream(t *testing.T) {
+	var calls int32
+	svc, client := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
+			{Name: "pulled", Platform: "cursor", Type: "oauth", Credentials: map[string]any{"access_token": "t"}},
+		}},
+		onPull: func(*ent.QuotaKey) { atomic.AddInt32(&calls, 1) },
+	})
+	ctx := context.Background()
+	qkID := qkgB2bCreateKeyWithGroupIDs(t, client, []int64{})
+
+	err := svc.PullAccounts(ctx, qkID)
+	require.Error(t, err, "显式解绑的码在任何入口都必须失败关闭")
+	require.Contains(t, err.Error(), fmt.Sprintf("quota key %d has no bound groups", qkID),
+		"报错文案须与既有拦截保持一致")
+	require.Equal(t, int32(0), atomic.LoadInt32(&calls), "nil resolver 入口也不得在发上游前被放行（上游调用次数必须为 0）")
+
+	accs, qerr := client.Account.Query().Where(account.QuotaKeyID(qkID)).All(ctx)
+	require.NoError(t, qerr)
+	require.Len(t, accs, 0, "失败关闭时不得落号")
+}
+
+// TestUpdateWithSettings_GroupIDsGate 验证缺陷 2 的修复：更新路径在落库前经
+// normalizeQuotaKeyGroupIDs 门控，错误码与创建路径完全一致，且落库写的是规范化结果。
+func TestUpdateWithSettings_GroupIDsGate(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("simple mode rejects composite", func(t *testing.T) {
+		repo := &qkgDBSettingRepo{}
+		svc, client := qkgNewDBSettingService(t, repo)
+		svc.SetRunMode(config.RunModeSimple)
+		compositeID := settingsTestCreateGroup(t, client, PlatformComposite)
+		qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+
+		_, err := svc.UpdateWithSettings(ctx, qk.ID, nil, nil, nil, nil,
+			&UpdateQuotaKeySettingsInput{GroupIDs: &[]int64{compositeID}})
+		require.Error(t, err, "Simple 模式下经更新接口绑定 composite 分组必须被拦截")
+		require.Equal(t, "SIMPLE_MODE_GROUP_NOT_BINDABLE", infraerrors.Reason(err),
+			"错误码须与创建路径同源，不得另造")
+		require.Equal(t, 0, repo.calls, "校验失败必须在落库前失败关闭，不触碰仓储")
+
+		reloaded, gerr := client.QuotaKey.Get(ctx, qk.ID)
+		require.NoError(t, gerr)
+		require.Nil(t, reloaded.GroupIds, "校验失败不得写入任何分组绑定")
+	})
+
+	t.Run("non-existent group rejected", func(t *testing.T) {
+		repo := &qkgDBSettingRepo{}
+		svc, client := qkgNewDBSettingService(t, repo)
+		qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+
+		_, err := svc.UpdateWithSettings(ctx, qk.ID, nil, nil, nil, nil,
+			&UpdateQuotaKeySettingsInput{GroupIDs: &[]int64{987654321}})
+		require.Error(t, err)
+		require.Equal(t, "QUOTA_KEY_GROUP_NOT_FOUND", infraerrors.Reason(err))
+		require.Equal(t, 0, repo.calls, "校验失败必须在落库前失败关闭，不触碰仓储")
+	})
+
+	t.Run("normalized ids persisted", func(t *testing.T) {
+		repo := &qkgDBSettingRepo{}
+		svc, client := qkgNewDBSettingService(t, repo)
+		gID := settingsTestCreateGroup(t, client, PlatformAnthropic)
+		qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+
+		_, err := svc.UpdateWithSettings(ctx, qk.ID, nil, nil, nil, nil,
+			&UpdateQuotaKeySettingsInput{GroupIDs: &[]int64{gID, gID}})
+		require.NoError(t, err)
+		require.Equal(t, 1, repo.calls)
+		require.NotNil(t, repo.last.GroupIDs)
+		require.Equal(t, []int64{gID}, *repo.last.GroupIDs, "落库必须使用规范化结果（去重）")
+
+		reloaded, gerr := client.QuotaKey.Get(ctx, qk.ID)
+		require.NoError(t, gerr)
+		require.Equal(t, []int64{gID}, reloaded.GroupIds)
+	})
+}

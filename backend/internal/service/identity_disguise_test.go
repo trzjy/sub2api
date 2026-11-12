@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -216,6 +217,52 @@ func TestDeriveIdentityDisguiseForbiddenNames(t *testing.T) {
 
 	t.Run("空映射返回空", func(t *testing.T) {
 		require.Empty(t, DeriveIdentityDisguiseForbiddenNames(nil))
+	})
+
+	// DSG-G2：自动派生不再因条数上限静默截断，超过 16 项时全部保留。
+	t.Run("超过上限时全部保留不截断", func(t *testing.T) {
+		mapping := make(map[string]string, 20)
+		for i := 0; i < 20; i++ {
+			// 互不在别名族内的键，每个展开后产出唯一一项，共 20 项（>16）。
+			mapping[fmt.Sprintf("derive-model-%02d", i)] = "x"
+		}
+		got := DeriveIdentityDisguiseForbiddenNames(mapping)
+		require.Len(t, got, 20, "派生结果必须完整保留全部 20 项，不得被 16 条上限截断")
+		for i := 0; i < 20; i++ {
+			want := fmt.Sprintf("derive-model-%02d", i)
+			require.Contains(t, got, want, "派生结果必须包含全部键："+want)
+		}
+	})
+
+	t.Run("顺序稳定且按映射键排序", func(t *testing.T) {
+		mapping := map[string]string{
+			"g": "x", "a": "x", "m": "x", "b": "x", "z": "x",
+		}
+		first := DeriveIdentityDisguiseForbiddenNames(mapping)
+		second := DeriveIdentityDisguiseForbiddenNames(mapping)
+		require.Equal(t, first, second, "相同映射的两次派生必须顺序一致")
+		require.Equal(t, []string{"a", "b", "g", "m", "z"}, first,
+			"派生结果应按映射键排序后展开（键均在别名族外，原样保留）")
+	})
+
+	// 派生路径的清洗回归：与 sanitizeForbiddenNames 同口径，仅去掉条数截断。
+	t.Run("清洗回归：空白/重复(大小写不同)/控制字符", func(t *testing.T) {
+		// " DUP " 与 "dup" 经 TrimSpace + 大小写去重合并为一项；含 \t 的项被剔除。
+		got := DeriveIdentityDisguiseForbiddenNames(map[string]string{
+			" DUP ": "x",
+			"dup":   "x",
+			"bad\tkey": "x",
+			"keep":  "x",
+		})
+		require.Contains(t, got, "DUP", "TrimSpace 后保留")
+		require.Contains(t, got, "keep")
+		require.NotContains(t, got, "bad", "含控制字符的项必须被剔除")
+		// 大小写去重：DUP/dup 只应出现一次（不区分大小写过后的键）。
+		lower := map[string]bool{}
+		for _, n := range got {
+			require.False(t, lower[strings.ToLower(n)], "不应有大小写重复的禁词："+n)
+			lower[strings.ToLower(n)] = true
+		}
 	})
 }
 

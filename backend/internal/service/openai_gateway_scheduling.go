@@ -636,15 +636,25 @@ func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (s
 // 包装器（cursorSupplySourceAvailabilityVetoReasonString 等）只能投影，不能另加放行条件，
 // 也不再需要"窄目录入口单独加严、普通调度仍放行"的双轨——加严部分已并入本门本体。
 func cursorSupplySourceAvailabilityVetoReason(ctx context.Context, account *Account) (string, error) {
-	// 第三方 Cursor APIKey 账号不依赖 ShareAI 激活码号池（无 QuotaKeyID、无 key 终态与
-	// 快照可判），来源门必须整体放行；否则它会在下面的"无有效归属激活码"规则处被永久
-	// 否决。注意放行仅限于 APIKey 类型：号池 OAuth 账号仍严格检查 QuotaKeyID 与快照可用性。
-	if account == nil || account.Platform != PlatformCursor || account.IsCursorOpenAICompatibleAccount() {
+	if account == nil || account.Platform != PlatformCursor {
 		return "", nil
 	}
 	// 无有效归属激活码：来源不可判定即不可用（与 usage 子谓词同一结论，先于依赖检查，
 	// 以便"未绑定来源"永远给出确定 reason 而不是被误报成装配错误）。
-	if account.QuotaKeyID == nil || *account.QuotaKeyID <= 0 {
+	//
+	// 唯一例外是第三方 Cursor APIKey 账号（OpenAI 兼容反代，如 kn_cy 上游拉出的
+	// type=apikey 账号）：其上游额度由账号自身凭据承载，未绑码时无 key 终态与快照可判，
+	// 来源门整体放行；否则它会被下面的"无有效归属激活码"规则永久判为
+	// quota_key_source_unbound 而无法参与调度。
+	//
+	// 但这类账号**一旦绑定了激活码就必须先过停供终态门**：kn_cy 等上游拉号同样会写入
+	// QuotaKeyID，若按"兼容型即放行"整体豁免，admin 停用（disabled）与到期（expired）
+	// 对这批账号不生效——disabled 与 expired 同属停供终态，不得因账号类型绕过。
+	unbound := account.QuotaKeyID == nil || *account.QuotaKeyID <= 0
+	if unbound {
+		if account.IsCursorOpenAICompatibleAccount() {
+			return "", nil
+		}
 		return quotaKeySourceUnbound, nil
 	}
 	if currentCursorQuotaKeyStateProvider() == nil {
@@ -653,6 +663,11 @@ func cursorSupplySourceAvailabilityVetoReason(ctx context.Context, account *Acco
 	reason, err := cursorAccountQuotaKeyVetoReasonWithError(ctx, account)
 	if err != nil || reason != "" {
 		return reason, err
+	}
+	// 绑码的兼容型账号到此已过 key 终态门：其额度不来自 ShareAI 号池快照，
+	// 故不再进入 usage 子谓词（保持"不依赖号池快照"的既有放行意图）。
+	if account.IsCursorOpenAICompatibleAccount() {
+		return "", nil
 	}
 	return cursorSupplySourceUsageVetoReason(ctx, account)
 }

@@ -12,8 +12,10 @@ func ProvideCNProviderHandlerWithWebConsole(
 	balance *service.CNProviderBalanceService,
 	wcq *service.WebConsoleQuotaService,
 	wca *service.WebConsoleAuthService,
+	wcrl *service.WebConsoleRemoteLoginService,
 ) *CNProviderHandler {
 	h := NewCNProviderHandler(quota, balance)
 	h.SetWebConsoleServices(wcq, wca)
+	h.SetWebConsoleRemoteLoginService(wcrl)
 	return h
 }

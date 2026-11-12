@@ -1472,6 +1472,14 @@ export interface Account {
    * 前端据此判定是否渲染 WebConsoleQuotaCell 与控制台凭据区块，禁止在前端复制主机名规则。
    */
   web_console_quota_provider?: string
+  /**
+   * 该上游实际支持的登录方式（后端 service.ResolveWebConsoleQuotaLoginModes 唯一事实源投影）：
+   * "password" | "qrcode" | "sms"，按优先推荐顺序；非该链路账号省略。
+   *
+   * 前端据此决定渲染密码框还是扫码/短信面板——不要在前端按 provider 名字判断
+   * 「谁有密码」，longcat 只有扫码/短信，给密码框是填了也不会生效的假输入。
+   */
+  web_console_login_modes?: string[]
   // 影子账号回填的母账号信息（仅影子非空）
   parent_email?: string
   parent_plan_type?: string

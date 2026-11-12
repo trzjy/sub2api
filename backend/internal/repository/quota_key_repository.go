@@ -757,7 +757,12 @@ func (r *quotaKeyRepository) UpdateSettingsAndSyncAccounts(ctx context.Context, 
 			newIDs = []int64{} // 归一化：空切片落 [] 非 NULL（与 1b 同口径）。
 		}
 		// ① 先锁目标分组（必须在任何绑定写之前、同事务内）。
-		if err := lockLiveGroups(ctx, tx.Client(), newIDs); err != nil {
+		//    取写锁（FOR UPDATE）而非既有 lockLiveGroups 的 FOR SHARE：本事务随后
+		//    由 appendModelsToBoundGroupAllowlists 对同一批分组取 FOR UPDATE，若此处
+		//    先取 SHARE 即成"共享锁 → 写锁"的锁升级，两个不同激活码的事务可同时持
+		//    同分组 SHARE 再请求 UPDATE，被 Postgres 判定死锁回滚其一。首次即取写锁
+		//    则后续 FOR UPDATE 是同事务内既有更强锁的重取，不再升级（QKG-FIX-5）。
+		if err := lockLiveGroupsForUpdate(ctx, tx.Client(), newIDs); err != nil {
 			return err
 		}
 		// 旧分组归属：在 DELETE 之前一次性批量读取（与 loadAccountGroupIDsByAccount 同型，

@@ -1247,8 +1247,10 @@ func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, ex
 //   - settings 字段经窄可选接口 quotaKeySettingsRepo.UpdateSettingsAndSyncAccounts 落库并同步账号；
 //     仓库未实现该接口时失败关闭（fail-closed），绝不静默绕过。
 //
-// 校验（normalizeQuotaKeySettings）在开事务前完成；ModelMappingSet=true 且规范化后为空立即返回
-// 400 QUOTA_KEY_MODELS_REQUIRED，禁止落库。
+// 校验在开事务前完成（失败即失败关闭，不触碰仓储）：
+//   - normalizeQuotaKeySettings：ModelMappingSet=true 且规范化后为空 → 400 QUOTA_KEY_MODELS_REQUIRED；
+//   - normalizeQuotaKeyGroupIDs（GroupIDs != nil 时，与创建路径同一实现、同一错误码）：
+//     非法 / 不存在或已软删 / Simple 模式 composite 一律拒绝；落库使用其规范化结果。
 func (s *QuotaKeyService) UpdateWithSettings(ctx context.Context, id int64, code *string, expiresAt **time.Time, notes **string, priority *int, settings *UpdateQuotaKeySettingsInput) (*QuotaKeyStatus, error) {
 	if priority != nil && *priority <= 0 {
 		return nil, errors.New("quota_key_service: priority must be positive")
@@ -1256,6 +1258,21 @@ func (s *QuotaKeyService) UpdateWithSettings(ctx context.Context, id int64, code
 	if settings != nil {
 		if _, err := normalizeQuotaKeySettings(settings); err != nil {
 			return nil, err
+		}
+		// 码级分组与创建路径共用同一校验（normalizeQuotaKeyGroupIDs）：去重/正整数 +
+		// 存在且未软删 + Simple 模式 composite 拦截。仓储侧只做 lockLiveGroups（存在性 + 行锁），
+		// 不判 Simple 模式，故更新路径若不自校验，就能绕过创建路径的 composite 限制。
+		// 失败即失败关闭（错误码与创建路径完全同源，不另造），不触碰仓储；
+		// 落库写入的是规范化结果，不是原始入参。
+		if settings.GroupIDs != nil {
+			normGroupIDs, gerr := s.normalizeQuotaKeyGroupIDs(ctx, *settings.GroupIDs)
+			if gerr != nil {
+				return nil, gerr
+			}
+			// 不改动调用方结构：浅拷贝后只替换 GroupIDs（指向规范化切片）。
+			settingsCopy := *settings
+			settingsCopy.GroupIDs = &normGroupIDs
+			settings = &settingsCopy
 		}
 	}
 	baseChanged := code != nil || expiresAt != nil || notes != nil || priority != nil
@@ -1834,17 +1851,20 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 			return nil
 		}
 
-		// 码级分组是权威值：显式绑定时只挂码级分组；显式 [] 表示不服务任何分组——
-		// 必须在发上游之前拦下，避免白耗每日拉号额度。
-		// 外审 R1c 强制：该分支必须保持在 mountResolver != nil 门控之内——
-		// PullAccounts 传 nil resolver 语义就是"不挂组"，即便码级绑定了分组也不挂
-		// （挂载由触发方另行编排）；同时这也让 reconciler pending wakeup 路径
-		// （绕过 ListCandidateKeys 直进 pull）在发上游前就被拦截。
+		// 码级分组是权威值：显式绑定时只挂码级分组；显式 [] 表示不服务任何分组
+		// （锁定语义：显式解绑 = 不服务任何分组）——必须在发上游之前拦下，避免白耗
+		// 每日拉号额度。
+		//
+		// 该拦截必须位于 mountResolver 门控【之外】：PullAccounts 传 nil resolver 的语义
+		// 只是"不挂组"（挂载由触发方另行编排），并不豁免"这个码已被显式解绑、根本不该
+		// 服务"这一事实——否则 reconciler 历史入口（nil resolver）会照常调用上游、白耗额度。
+		if qk2.GroupIds != nil && len(qk2.GroupIds) == 0 {
+			return fmt.Errorf("quota_key_service: quota key %d has no bound groups", quotaKeyID)
+		}
+		// 存活分组过滤与码级挂载仍留在 mountResolver != nil 门控内：nil resolver 入口
+		// 不挂组，也就无需（且不应）在此消耗分组快照。
 		var codeLevelGroupIDs []int64
 		if qk2.GroupIds != nil && mountResolver != nil {
-			if len(qk2.GroupIds) == 0 {
-				return fmt.Errorf("quota_key_service: quota key %d has no bound groups", quotaKeyID)
-			}
 			live, lerr := s.filterLiveGroupIDs(ctx, tx, qk2.GroupIds)
 			if lerr != nil {
 				return fmt.Errorf("quota_key_service: filter live groups: %w", lerr)

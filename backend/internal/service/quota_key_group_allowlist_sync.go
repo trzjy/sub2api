@@ -35,8 +35,13 @@ func (s *QuotaKeyService) appendModelsToBoundGroupAllowlists(
 		return nil, nil
 	}
 
+	// 规则 5 落库段串行化：在调用方事务内对本事务将要 UPDATE 的分组行取写锁，
+	// 并固定加锁顺序（按 id 升序），避免多分组交叉加锁引发死锁。
+	// 并发事务在读到最新已提交值之前阻塞，杜绝「读到同一旧列表 → 后提交者覆盖」的丢更新。
 	groups, err := tx.Group.Query().
 		Where(group.IDIn(qk.GroupIds...), group.DeletedAtIsNil()).
+		Order(ent.Asc(group.FieldID)).
+		ForUpdate().
 		All(ctx)
 	if err != nil {
 		return nil, err

@@ -21,20 +21,23 @@ func TestProvideCNProviderHandlerWithWebConsole_InjectsServices(t *testing.T) {
 	balance := service.NewCNProviderBalanceService(nil, nil, nil, cfg)
 	wcQuota := service.NewWebConsoleQuotaService(nil, cfg)
 	wcAuth := service.NewWebConsoleAuthService(wcQuota, nil, nil)
+	wcRemote := service.NewWebConsoleRemoteLoginService(nil, wcQuota, cfg, nil)
 
-	h := ProvideCNProviderHandlerWithWebConsole(quota, balance, wcQuota, wcAuth)
+	h := ProvideCNProviderHandlerWithWebConsole(quota, balance, wcQuota, wcAuth, wcRemote)
 
 	require.NotNil(t, h)
 	require.Same(t, quota, h.quotaService, "legacy constructor args must be forwarded unchanged")
 	require.Same(t, balance, h.balanceService, "legacy constructor args must be forwarded unchanged")
 	require.Same(t, wcQuota, h.webConsoleQuotaService, "SetWebConsoleServices must inject the quota service")
 	require.Same(t, wcAuth, h.webConsoleAuthService, "SetWebConsoleServices must inject the auth service")
+	require.Same(t, wcRemote, h.webConsoleRemoteLoginService, "remote login service must be injected")
 }
 
 func TestProvideCNProviderHandlerWithWebConsole_NilServicesStillBuildsHandler(t *testing.T) {
-	h := ProvideCNProviderHandlerWithWebConsole(nil, nil, nil, nil)
+	h := ProvideCNProviderHandlerWithWebConsole(nil, nil, nil, nil, nil)
 
 	require.NotNil(t, h)
 	require.Nil(t, h.webConsoleQuotaService)
 	require.Nil(t, h.webConsoleAuthService)
+	require.Nil(t, h.webConsoleRemoteLoginService)
 }

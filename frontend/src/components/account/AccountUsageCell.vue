@@ -497,7 +497,11 @@
          后端 ResolveWebConsoleQuotaProvider 唯一投影字段驱动，优先于 CN 子单元格，
          避免其被误渲染为通用 CN 余额/额度单元格。 -->
     <template v-else-if="account.web_console_quota_provider">
-      <WebConsoleQuotaCell :account="account" @updated="emit('account-updated', account)" />
+      <WebConsoleQuotaCell
+        :account="account"
+        @updated="emit('account-updated', account)"
+        @relogin="emit('relogin', account)"
+      />
     </template>
 
     <template v-else-if="account.platform === 'kimi' || account.platform === 'zhipu' || account.platform === 'deepseek' || account.platform === 'minimax' || isVolcanoAccount || (cnBalanceCellVisible && account.platform !== 'gemini')">
@@ -1007,6 +1011,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   'account-updated': [account: Account]
   'usage-loaded': [usage: AccountUsageInfo]
+  // 控制台登录失效时冒泡到列表页：登录画面在服务端，需要打开编辑弹窗重新登录。
+  relogin: [account: Account]
 }>()
 
 const { t } = useI18n()

@@ -70,25 +70,50 @@ const (
 	webConsoleQuotaSingleflightKeyPrefix        = "wcq:"
 )
 
-// webConsoleQuotaProviderEndpoints 是 provider → 登录页 / 控制台成功跳转前缀的内置常量表。
+// webConsoleQuotaProviderEndpoints 是 provider → 登录页 / 控制台成功跳转前缀 / 该上游
+// 实际支持的登录方式的内置常量表。
 // 与 worker 侧适配器一一对应；Go 侧只做透传，不在本地推导页面结构。
+//
+// loginModes 是「这家上游有没有密码登录」的唯一事实源：worker 适配器据此分支，
+// 管理端据此决定渲染哪些输入框。此前该事实只存在于三份 Python 适配器的 if 分支里，
+// 管理端拿不到，只能对三家统一渲染「账号 + 密码」，导致 longcat（仅扫码/短信）
+// 显示一个填了也不会被使用的密码框。
 type webConsoleQuotaProviderEndpoints struct {
 	loginURL         string
 	successURLPrefix string
+	// loginModes 取值见 webConsoleQuotaLoginMode* 常量，按「优先推荐」顺序排列。
+	loginModes []string
 }
+
+// webConsoleQuotaLoginMode* 是上游登录方式枚举。新增上游时在此扩枚举，
+// 不得由消费方各自识别新取值。
+const (
+	// webConsoleQuotaLoginModePassword 账号 + 密码，worker 可自动登录并续期。
+	webConsoleQuotaLoginModePassword = "password"
+	// webConsoleQuotaLoginModeQRCode 手机扫码（含 App 确认），必须在会话内人工完成。
+	webConsoleQuotaLoginModeQRCode = "qrcode"
+	// webConsoleQuotaLoginModeSMS 手机号 + 短信验证码，必须在会话内人工完成。
+	webConsoleQuotaLoginModeSMS = "sms"
+)
 
 var webConsoleQuotaProviderEndpointTable = map[string]webConsoleQuotaProviderEndpoints{
 	providerCompshare: {
 		loginURL:         "https://passport.compshare.cn/login",
 		successURLPrefix: "https://console.compshare.cn/",
+		// 联网实测（2026-11-12）：默认落在「短信登录」，右上角才切「账号登录」；
+		// 适配器 _do_login 会先点该 Tab 再填密码，故密码是可选加速项而非唯一入口。
+		loginModes: []string{webConsoleQuotaLoginModeSMS, webConsoleQuotaLoginModePassword},
 	},
 	providerSensenova: {
 		loginURL:         "https://platform.sensenova.cn/login",
 		successURLPrefix: "https://platform.sensenova.cn/console",
+		// 联网实测（2026-11-12）：默认「手机号登录/注册」，另有「账号密码登录」Tab。
+		loginModes: []string{webConsoleQuotaLoginModeSMS, webConsoleQuotaLoginModePassword},
 	},
 	providerLongcat: {
 		loginURL:         "https://longcat.chat/platform/usage",
 		successURLPrefix: "https://longcat.chat/platform/",
+		loginModes:       []string{webConsoleQuotaLoginModeQRCode, webConsoleQuotaLoginModeSMS},
 	},
 }
 

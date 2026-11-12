@@ -348,6 +348,8 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 	// Web 控制台额度上游投影（唯一事实源在 service.ResolveWebConsoleQuotaProvider）：
 	// 本层只透传，不在 DTO 层复制主机名规则。
 	out.WebConsoleQuotaProvider = service.ResolveWebConsoleQuotaProvider(a)
+	// 上游支持的登录方式同样由 service 单一事实源投影：本层不判断「谁有密码」。
+	out.WebConsoleLoginModes = service.ResolveWebConsoleQuotaLoginModes(a)
 
 	// 提取 5h 窗口费用控制和会话数量控制配置（仅 Anthropic OAuth/SetupToken 账号有效）
 	if a.IsAnthropicOAuthOrSetupToken() {
@@ -681,6 +683,7 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		// lite 列表投影不是 AccountFromServiceShallow 的委托关系（它是从完整 DTO 再投影），
 		// 故此处单独透传 WebConsoleQuotaProvider，禁止在此重算主机名规则。
 		WebConsoleQuotaProvider: a.WebConsoleQuotaProvider,
+		WebConsoleLoginModes:    a.WebConsoleLoginModes,
 	}
 }
 

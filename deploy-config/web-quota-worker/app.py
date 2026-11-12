@@ -36,6 +36,9 @@ logging.getLogger("web-quota-worker").addFilter(
 # 单进程复用的 Chromium 浏览器实例与启动锁。
 _browser = None
 _browser_lock = asyncio.Lock()
+# async_playwright().start() 返回的驱动对象；必须与 browser 同生命周期，
+# 提前停止会让 Browser/Context 全部失效。
+_playwright = None
 
 # 已实例化适配器的缓存（provider -> adapter）。
 _adapters: dict[str, BaseAdapter] = {}
@@ -54,15 +57,24 @@ class AdapterNotImplemented(Exception):
 
 
 async def get_browser():
-    """惰性启动并复用单个 Chromium 实例。"""
-    global _browser
+    """惰性启动并复用单个 Chromium 实例。
+
+    注意：``playwright.async_api`` 并不导出 ``chromium``（只有 ``async_playwright``）。
+    此前这里是 ``from playwright.async_api import chromium``，任何调用都会
+    ImportError —— 也就是说整条采集链路在真正启动浏览器这一步必然失败，
+    只是过去没有请求走到这里（2026-11-12 登录接口上线后暴露）。
+    正确入口是 ``async_playwright().start()`` 之后取 ``.chromium``。
+    """
+    global _browser, _playwright
     if _browser is not None:
         return _browser
     async with _browser_lock:
         if _browser is None:
-            from playwright.async_api import chromium
+            from playwright.async_api import async_playwright
 
-            _browser = await chromium.launch()
+            if _playwright is None:
+                _playwright = await async_playwright().start()
+            _browser = await _playwright.chromium.launch()
     return _browser
 
 
@@ -128,6 +140,7 @@ def _parse_storage_state(
 async def make_context(
     storage_state: Optional[Union[str, dict]] = None,
     proxy_url: Optional[str] = None,
+    viewport: Optional[dict] = None,
 ):
     """每请求独立的 BrowserContext 工厂。
 
@@ -135,6 +148,9 @@ async def make_context(
     ``storage_state`` 可以是 Playwright storageState 的 JSON 字符串或 ``dict``；
     JSON 字符串会先被解析为 ``dict`` 再传给 ``browser.new_context``，
     因为 Playwright 会把裸 ``str`` 当成磁盘文件路径。
+
+    ``viewport`` 仅登录会话使用（固定尺寸才能把前端点击坐标等比换算）；
+    探测路径不传，保持浏览器默认尺寸，行为不变。
     """
     browser = await get_browser()
     kwargs: dict = {}
@@ -143,6 +159,10 @@ async def make_context(
         kwargs["storage_state"] = parsed_state
     if proxy_url:
         kwargs["proxy"] = {"server": proxy_url}
+    if viewport:
+        kwargs["viewport"] = viewport
+        # 截图像素必须与 CSS 像素一致，否则前端坐标会偏移。
+        kwargs["device_scale_factor"] = 1
     return await browser.new_context(**kwargs)
 
 
@@ -219,3 +239,231 @@ async def probe(request: Request):
     # 日志纪律：仅记录 provider / status / elapsed_ms。
     logger.info("provider=%s status=%s elapsed_ms=%d", req.provider, result.status, elapsed_ms)
     return result.__dict__
+
+
+# ---------------------------------------------------------------------------
+# 服务端登录会话（扫码 / 短信 / 滑块）
+#
+# 为什么要这一层：longcat 只有扫码与短信登录，compshare / sensenova 的默认页
+# 也是短信登录。它们都必须由真人完成，worker 无法静默登录。既有实现把这件事
+# 推给用户本机的 local_captcha_helper；本层把它搬回服务端——worker 打开登录页，
+# 管理端网页显示画面，点击 / 输入 / 回车全部转发回同一个页面上下文，登录成功后
+# 一次性回传 storageState。
+#
+# 纪律：不写任何站点 selector（上游改版无需改本层），会话只存内存，
+# 日志只记 session 前缀与 provider，绝不打印画面与 cookie。
+# ---------------------------------------------------------------------------
+
+from login_sessions import (  # noqa: E402  (路由段集中在此，便于审阅)
+    LOGIN_SESSION_TTL_SECONDS,
+    LOGIN_VIEWPORT_HEIGHT,
+    LOGIN_VIEWPORT_WIDTH,
+    LoginSessionError,
+    LoginSessionRegistry,
+    capture,
+    press_key,
+    reload as reload_login_page,
+    scroll as scroll_login_page,
+    snapshot_storage_state,
+    tap as tap_login_page,
+    type_text,
+)
+
+_login_registry = LoginSessionRegistry(make_context)
+
+
+def _require_token(request: Request) -> None:
+    expected_token = os.environ.get("WEB_QUOTA_WORKER_TOKEN", "")
+    provided_token = request.headers.get("X-Worker-Token", "")
+    if not provided_token or provided_token != expected_token:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+async def _json_body(request: Request) -> dict:
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body or b"{}")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid request body: {exc}")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="request body must be an object")
+    return payload
+
+
+def _session_error_response(exc: LoginSessionError) -> JSONResponse:
+    status = 404 if exc.code == "session_not_found" else 410
+    return JSONResponse(status_code=status, content={"error": exc.code})
+
+
+def _login_view(session) -> dict:
+    """会话对外视图：不含 cookie，不含 storageState。"""
+    return {
+        "session_id": session.id,
+        "provider": session.provider,
+        "status": "authenticated" if session.authenticated() else "pending",
+        "url": session.page.url,
+        "viewport": {"width": LOGIN_VIEWPORT_WIDTH, "height": LOGIN_VIEWPORT_HEIGHT},
+        "expires_in": LOGIN_SESSION_TTL_SECONDS,
+    }
+
+
+@app.post("/v1/login/start")
+async def login_start(request: Request):
+    _require_token(request)
+    payload = await _json_body(request)
+    provider = str(payload.get("provider") or "")
+    if provider not in PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"unknown provider: {provider}")
+    login_url = str(payload.get("login_url") or "").strip()
+    if not login_url:
+        raise HTTPException(status_code=400, detail="login_url is required")
+    success_url_prefix = str(payload.get("success_url_prefix") or "").strip()
+
+    try:
+        session = await _login_registry.start(
+            provider=provider,
+            login_url=login_url,
+            success_url_prefix=success_url_prefix,
+            proxy_url=payload.get("proxy_url") or None,
+        )
+        screenshot = await capture(session)
+    except Exception as exc:  # noqa: BLE001 - 统一降级，不泄漏内部细节
+        logger.warning("login provider=%s status=start_failed error=%s", provider, type(exc).__name__)
+        return JSONResponse(status_code=502, content={"error": "login_session_start_failed"})
+
+    view = _login_view(session)
+    view["screenshot"] = screenshot
+    logger.info("login provider=%s status=started", provider)
+    return view
+
+
+@app.get("/v1/login/{session_id}/state")
+async def login_state(session_id: str, request: Request):
+    _require_token(request)
+    try:
+        session = await _login_registry.get(session_id)
+        screenshot = await capture(session)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("login status=frame_failed error=%s", type(exc).__name__)
+        return JSONResponse(status_code=502, content={"error": "login_frame_failed"})
+
+    view = _login_view(session)
+    view["screenshot"] = screenshot
+    return view
+
+
+@app.post("/v1/login/{session_id}/tap")
+async def login_tap(session_id: str, request: Request):
+    _require_token(request)
+    payload = await _json_body(request)
+    try:
+        x = float(payload.get("x"))
+        y = float(payload.get("y"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="x and y must be numbers")
+    try:
+        session = await _login_registry.get(session_id)
+        await tap_login_page(session, x, y)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+    return {"ok": True}
+
+
+@app.post("/v1/login/{session_id}/type")
+async def login_type(session_id: str, request: Request):
+    _require_token(request)
+    payload = await _json_body(request)
+    text = payload.get("text")
+    if not isinstance(text, str) or len(text) > 512:
+        raise HTTPException(status_code=422, detail="text must be a string under 512 chars")
+    try:
+        session = await _login_registry.get(session_id)
+        await type_text(session, text)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+    return {"ok": True}
+
+
+@app.post("/v1/login/{session_id}/key")
+async def login_key(session_id: str, request: Request):
+    _require_token(request)
+    payload = await _json_body(request)
+    key = str(payload.get("key") or "")
+    try:
+        session = await _login_registry.get(session_id)
+        await press_key(session, key)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+    return {"ok": True}
+
+
+@app.post("/v1/login/{session_id}/scroll")
+async def login_scroll(session_id: str, request: Request):
+    _require_token(request)
+    payload = await _json_body(request)
+    try:
+        delta_y = float(payload.get("delta_y"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="delta_y must be a number")
+    try:
+        session = await _login_registry.get(session_id)
+        await scroll_login_page(session, delta_y)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+    return {"ok": True}
+
+
+@app.post("/v1/login/{session_id}/reload")
+async def login_reload(session_id: str, request: Request):
+    _require_token(request)
+    try:
+        session = await _login_registry.get(session_id)
+        await reload_login_page(session)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+    return {"ok": True}
+
+
+@app.post("/v1/login/{session_id}/finish")
+async def login_finish(session_id: str, request: Request):
+    """登录成功后回传 storageState。
+
+    未登录（仍在登录页）时返回 409 + status=pending，由前端继续等待；
+    绝不伪造成功——这是本链路唯一允许产生凭据的出口。
+    """
+    _require_token(request)
+    try:
+        session = await _login_registry.get(session_id)
+    except LoginSessionError as exc:
+        return _session_error_response(exc)
+
+    if not session.authenticated():
+        return JSONResponse(
+            status_code=409,
+            content={"status": "pending", "error": "not_authenticated"},
+        )
+
+    try:
+        storage_state = await snapshot_storage_state(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("login status=storage_state_failed error=%s", type(exc).__name__)
+        return JSONResponse(status_code=502, content={"error": "storage_state_failed"})
+
+    label = ""
+    try:
+        label = (await session.page.title() or "").strip()[:120]
+    except Exception:  # noqa: BLE001
+        label = ""
+
+    logger.info("login provider=%s status=finished", session.provider)
+    await _login_registry.close(session_id)
+    return {"status": "authenticated", "storage_state": storage_state, "account_label": label}
+
+
+@app.delete("/v1/login/{session_id}")
+async def login_close(session_id: str, request: Request):
+    _require_token(request)
+    await _login_registry.close(session_id)
+    return {"ok": True}

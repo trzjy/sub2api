@@ -168,6 +168,10 @@ type IdentityDisguise struct {
 	// 老键分支必须原样返回原文：存量账号的禁词列表各不相同（5 个版本），
 	// 重渲染会改写它们的行为，违反「存量零变化」。
 	RawPrompt string
+	// HasLegacyKeys 报告账号 extra 中是否携带任一老键。仅供「是否使用旧配置」判定，
+	// 与键的有效值无关（空串 / false 也算存在）。由 legacyIdentityDisguiseOf 单一来源
+	// 填充；新键分支恒为 false。
+	HasLegacyKeys bool
 }
 
 // IsEnabled 报告该配置是否启用了任何伪装面。
@@ -259,26 +263,35 @@ func DeriveIdentityDisguiseForbiddenNames(mapping map[string]string) []string {
 	}
 	sort.Strings(keys)
 
+	// 自动推导的禁词**不做条数上限截断**（DSG-G2：全部保留，不静默丢弃）。
+	// 仅保留既有清洗：TrimSpace、空串剔除、超长剔除、含换行/控制字符剔除、大小写去重，
+	// 顺序与原 sanitizeForbiddenNames 完全一致（没有那条 break）。
+	// 条数上限 IdentityDisguiseForbiddenNamesMaxCount 仍服务于显式输入校验路径
+	// （SanitizeIdentityDisguiseForbiddenNames），不在此处复用。
 	seen := make(map[string]struct{})
 	out := make([]string, 0, len(keys))
-	add := func(name string) {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			return
-		}
-		key := strings.ToLower(name)
-		if _, dup := seen[key]; dup {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, name)
-	}
 	for _, k := range keys {
 		for _, alias := range ModelNameAliases(k) {
-			add(alias)
+			n := strings.TrimSpace(alias)
+			if n == "" {
+				continue
+			}
+			if len(n) > IdentityDisguiseForbiddenNameMaxLen {
+				continue
+			}
+			// 含换行/控制字符的禁词会破坏 system prompt 的句子结构，直接丢弃。
+			if strings.ContainsAny(n, "\n\r\t") {
+				continue
+			}
+			key := strings.ToLower(n)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, n)
 		}
 	}
-	return sanitizeForbiddenNames(out)
+	return out
 }
 
 // AccountIdentityDisguise 解析账号的伪装配置（归一解析）。
@@ -343,6 +356,26 @@ func parseIdentityDisguiseExtra(extra map[string]any) (IdentityDisguise, bool) {
 	return d, true
 }
 
+// 老键（身份伪装旧配置）的键名 —— 解析与「是否存在老键」判定的唯一来源。
+//
+// 不得在此之外另立键名清单：legacyIdentityDisguiseOf 解析时直接引用本常量，
+// 存在性判定（hasAnyLegacyKey）也复用本清单，全代码库只有一处书写这些键名。
+const (
+	legacyKeyIdentityPrompt        = "identity_prompt"
+	legacyKeyMaskUpstreamIdentity  = "mask_upstream_identity"
+	legacyKeyResponseIdentityMask  = "response_identity_mask"
+	legacyKeyStripReasoningContent = "strip_reasoning_content"
+)
+
+// legacyIdentityDisguiseKeys 是老键清单的切片形态，供存在性遍历使用。
+// 由上面的常量构造，确保键名只在常量块里书写一次。
+var legacyIdentityDisguiseKeys = []string{
+	legacyKeyIdentityPrompt,
+	legacyKeyMaskUpstreamIdentity,
+	legacyKeyResponseIdentityMask,
+	legacyKeyStripReasoningContent,
+}
+
 // legacyIdentityDisguiseOf 从老键回退解析伪装配置。
 //
 // 语义对应（存量账号的既有行为，逐项保持）：
@@ -358,13 +391,29 @@ func legacyIdentityDisguiseOf(a *Account) IdentityDisguise {
 		return IdentityDisguise{}
 	}
 	d := IdentityDisguise{Profile: IdentityDisguiseProfileNone}
-	if p, ok := extra["identity_prompt"].(string); ok && strings.TrimSpace(p) != "" {
+	if p, ok := extra[legacyKeyIdentityPrompt].(string); ok && strings.TrimSpace(p) != "" {
 		d.Profile = legacyProfileFromPrompt(p)
 		d.RawPrompt = p
 	}
-	d.RewriteModel = legacyBoolExtra(extra, "mask_upstream_identity") || legacyBoolExtra(extra, "response_identity_mask")
-	d.StripReasoning = legacyBoolExtra(extra, "strip_reasoning_content")
+	d.RewriteModel = legacyBoolExtra(extra, legacyKeyMaskUpstreamIdentity) || legacyBoolExtra(extra, legacyKeyResponseIdentityMask)
+	d.StripReasoning = legacyBoolExtra(extra, legacyKeyStripReasoningContent)
+	// 存在性：任一老键在 extra 中出现即视为「使用旧配置」，与值是否有效无关
+	//（空串 / false 的旧键仍须提示迁移）。这是 UsesLegacyKeys 的唯一来源。
+	d.HasLegacyKeys = hasAnyLegacyKey(extra)
 	return d
+}
+
+// hasAnyLegacyKey 报告 extra 中是否存在任一老键（只看键是否存在，不看值）。
+func hasAnyLegacyKey(extra map[string]any) bool {
+	if extra == nil {
+		return false
+	}
+	for _, k := range legacyIdentityDisguiseKeys {
+		if _, ok := extra[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // legacyProfileFromPrompt 从老版人设正文首句识别目标身份。

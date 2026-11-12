@@ -63,6 +63,46 @@ func lockLiveGroups(ctx context.Context, exec sqlExecutor, groupIDs []int64) err
 	return nil
 }
 
+// lockLiveGroupsForUpdate is the write-lock variant of lockLiveGroups. It keeps
+// the identical SQL shape (id ascending, deleted_at IS NULL, row-count
+// reconciliation) but takes FOR UPDATE instead of FOR SHARE.
+//
+// Callers that will mutate the locked group rows inside the same transaction
+// (e.g. the settings-sync path that later issues its own FOR UPDATE on the same
+// groups via appendModelsToBoundGroupAllowlists) MUST take this up front, so the
+// first lock already carries write strength. That removes the SHARE→UPDATE lock
+// upgrade that let two different quota keys each hold a SHARE on the same group
+// and then deadlock when both requested UPDATE (管理员保存设置报错).
+func lockLiveGroupsForUpdate(ctx context.Context, exec sqlExecutor, groupIDs []int64) error {
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	unique := make(map[int64]struct{}, len(groupIDs))
+	for _, id := range groupIDs {
+		unique[id] = struct{}{}
+	}
+	rows, err := exec.QueryContext(ctx, `/* account_group_live_group_lock_for_update */
+		SELECT id FROM groups
+		WHERE id = ANY($1) AND deleted_at IS NULL
+		ORDER BY id
+		FOR UPDATE`, pq.Array(groupIDs))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	locked := 0
+	for rows.Next() {
+		locked++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if locked != len(unique) {
+		return service.ErrGroupNotFound
+	}
+	return nil
+}
+
 func NewGroupRepository(client *dbent.Client, sqlDB *sql.DB) service.GroupRepository {
 	return newGroupRepositoryWithSQL(client, sqlDB)
 }

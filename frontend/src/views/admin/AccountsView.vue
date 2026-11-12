@@ -359,6 +359,7 @@
                 :batched-usage-loading="usageBatchLoadingByAccountId[String(row.id)] === true"
                 :request-batched-usage="isDesktopViewport ? queueBatchedUsage : null"
                 @account-updated="handleAccountUpdated"
+                @relogin="handleRelogin(row)"
                 @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
               />
               <!-- 方案 §25.6⑥⑦ / §25.7-B：两层额度在账号页分开表达。
@@ -2213,6 +2214,10 @@ const handleEdit = async (a: AccountListItem) => {
   if (!account) return
   edAcc.value = account
   showEdit.value = true
+}
+// 控制台登录失效：登录画面在服务端，只能在编辑弹窗里重新登录。
+const handleRelogin = async (a: AccountListItem) => {
+  await handleEdit(a)
 }
 const openMenu = (a: Account, e: MouseEvent) => {
   menu.acc = a
