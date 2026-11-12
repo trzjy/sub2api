@@ -160,6 +160,36 @@ var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
 	"codex_7d_reset_at":                    {},
 }
 
+// managedExtraKeys 是「提交时按库中当前值合并、普通编辑不得静默覆盖」的受管键权威清单。
+//
+// 普通编辑（UpdateAccount）在整行 Extra 落库前，会把这些键从「写入事务内现读的数据库当前行」
+// 回填，而非从请求开始时的 account.Extra 快照回填——消除与专用接口（如
+// UpdateAccountIdentityDisguise → UpdateExtra、配额用量写入等）之间的同型竞态（外审 must_fix /
+// 用户裁定 2026-11-12）。
+//
+// 该清单为既有受管键的集合，严禁扩充或缩减（不得新增/删除受管键）。新增受管语义请走专用接口。
+var managedExtraKeys = []string{
+	LargeRequestOnlyExtraKey,
+	SmallRequestOnlyExtraKey,
+	IdentityDisguiseExtraKey,
+	"quota_used",
+	"quota_daily_used",
+	"quota_daily_start",
+	"quota_weekly_used",
+	"quota_weekly_start",
+	grokBillingExtraKey,
+	UpstreamBillingProbeEnabledExtraKey,
+	UpstreamBillingRateSyncEnabledExtraKey,
+	UpstreamBillingProbeExtraKey,
+	OllamaCloudUsageSessionExtraKey,
+	OllamaCloudUsageAutoRefreshExtraKey,
+	OllamaCloudUsageSnapshotExtraKey,
+	OpenAIAutoResetCreditStateExtraKey,
+	OpenCodeGoUsageAutoRefreshExtraKey,
+	OpenCodeGoUsageSnapshotExtraKey,
+	webConsoleQuotaSnapshotExtraKey,
+}
+
 func duplicateAccountExtra(value map[string]any) (map[string]any, error) {
 	cloned, err := cloneAccountJSONMap(value)
 	if err != nil {
@@ -1184,6 +1214,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	// 换控制台账号或换上游后旧快照随即失效：本标记在凭据分支置位，extra 处理结束后
 	// 随同一行 Update 落库（方案 §3.1-4）。
 	var webConsoleSnapshotStale bool
+	// managedKeysToDrop 记录本次请求「主动删除」的受管键（身份/资格变化或旧快照失效）。
+	// mergeManagedExtraFromCurrentRow 按库当前值回填受管键时，不得把已主动删除的键复活。
+	managedKeysToDrop := make(map[string]struct{})
 
 	if input.Name != "" {
 		account.Name = input.Name
@@ -1273,38 +1306,13 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		delete(normalizedExtra, webConsoleQuotaSnapshotExtraKey)
 		delete(normalizedExtra, LargeRequestOnlyExtraKey)
 		delete(normalizedExtra, SmallRequestOnlyExtraKey)
-		// 全量编辑为整体替换语义：必须把库中现有值带回，否则已启用账号会被静默清除
-		for _, key := range []string{LargeRequestOnlyExtraKey, SmallRequestOnlyExtraKey} {
-			if v, ok := account.Extra[key]; ok {
-				normalizedExtra[key] = v
-			}
-		}
-		// 伪装配置同属「专用接口写入、普通编辑不应清除」的受管键：
-		// 普通编辑（弹窗保存其它字段）走整体替换语义，若不回带该键，
-		// 用户「先配了伪装，再改个备注保存 → 伪装被静默删除」，且无任何报错。
 		delete(normalizedExtra, IdentityDisguiseExtraKey)
-		if v, ok := account.Extra[IdentityDisguiseExtraKey]; ok {
-			normalizedExtra[IdentityDisguiseExtraKey] = v
-		}
-		// 保留配额用量和专用服务受管字段，防止普通账号编辑意外覆盖。
-		for _, key := range []string{
-			"quota_used",
-			"quota_daily_used",
-			"quota_daily_start",
-			"quota_weekly_used",
-			"quota_weekly_start",
-			grokBillingExtraKey,
-			UpstreamBillingProbeEnabledExtraKey,
-			UpstreamBillingRateSyncEnabledExtraKey,
-			UpstreamBillingProbeExtraKey,
-			OllamaCloudUsageSessionExtraKey,
-			OllamaCloudUsageAutoRefreshExtraKey,
-			OllamaCloudUsageSnapshotExtraKey,
-			OpenAIAutoResetCreditStateExtraKey,
-			OpenCodeGoUsageAutoRefreshExtraKey,
-			OpenCodeGoUsageSnapshotExtraKey,
-			webConsoleQuotaSnapshotExtraKey,
-		} {
+		// 受管键先从请求开始时的 account.Extra 快照回带，以保证本函数内其余基于 account.Extra
+		// 的不变量校验（探针开关、身份比较等）正确取值；其最终取值会在落库事务内被数据库当前行
+		// 覆盖（mergeManagedExtraFromCurrentRow），从而消除与专用接口（如
+		// UpdateAccountIdentityDisguise → UpdateExtra、配额用量写入等）并发写入时的旧快照覆盖。
+		// 非受管键维持整份替换语义不变。
+		for _, key := range managedExtraKeys {
 			if v, ok := account.Extra[key]; ok {
 				normalizedExtra[key] = v
 			}
@@ -1330,11 +1338,14 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		NormalizeFixedQuotaWindows(account.Extra)
 	}
 	if input.Extra == nil {
+		// 保留请求开始时的 account.Extra 快照（含受管键），以供本函数内基于 account.Extra 的
+		// 不变量校验正确取值；受管键最终会在落库事务内被数据库当前行覆盖（mergeManagedExtraFromCurrentRow）。
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, account.Extra)
 	}
 	// 换控制台账号/换上游：旧快照必须随本次整行 Update 一并清掉（不另开 UpdateExtra
 	// 二次写，避免与同一保存产生两次写）。Extra 为 nil 时 delete 是 no-op。
 	if webConsoleSnapshotStale {
+		managedKeysToDrop[webConsoleQuotaSnapshotExtraKey] = struct{}{}
 		delete(account.Extra, webConsoleQuotaSnapshotExtraKey)
 	}
 	if requestedRateSyncEnabledUpdate != nil && *requestedRateSyncEnabledUpdate {
@@ -1365,6 +1376,15 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		probeUpdates[UpstreamBillingRateSyncEnabledExtraKey] = *requestedRateSyncEnabledUpdate
 	}
 	account.MergeExtra(probeUpdates)
+	// explicitlySetManagedKeys 记录本次请求「显式提交」的受管键（探针开关）。这些键的取值由请求
+	// 决定，mergeManagedExtraFromCurrentRow 不得用数据库当前行覆盖它们（请求优先于当前行）。
+	explicitlySetManagedKeys := map[string]struct{}{}
+	if requestedProbeEnabledUpdate != nil {
+		explicitlySetManagedKeys[UpstreamBillingProbeEnabledExtraKey] = struct{}{}
+	}
+	if requestedRateSyncEnabledUpdate != nil {
+		explicitlySetManagedKeys[UpstreamBillingRateSyncEnabledExtraKey] = struct{}{}
+	}
 	// 影子代理恒继承母账号(由 propagateProxyToShadows 同步),不接受独立编辑——外审 B/P1;
 	// 否则要等母账号下次改 proxy 才被覆盖,期间影子会出现"有时继承、有时独立"的漂移。
 	if input.ProxyID != nil && !account.IsCredentialShadow() {
@@ -1382,19 +1402,36 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if !isUpstreamBillingProbeAccount(account) {
 			keys = append(keys, UpstreamBillingProbeEnabledExtraKey, UpstreamBillingRateSyncEnabledExtraKey)
 		}
+		for _, k := range keys {
+			managedKeysToDrop[k] = struct{}{}
+		}
 		account.DeleteExtra(keys...)
 	}
+	ollamaUsageKeys := []string{OllamaCloudUsageSessionExtraKey, OllamaCloudUsageAutoRefreshExtraKey, OllamaCloudUsageSnapshotExtraKey}
 	if !IsOllamaCloudUsageAccount(account) {
-		account.DeleteExtra(OllamaCloudUsageSessionExtraKey, OllamaCloudUsageAutoRefreshExtraKey, OllamaCloudUsageSnapshotExtraKey)
+		for _, k := range ollamaUsageKeys {
+			managedKeysToDrop[k] = struct{}{}
+		}
+		account.DeleteExtra(ollamaUsageKeys...)
 	} else if !reflect.DeepEqual(previousOllamaUsageIdentity, ollamaCloudUsageIdentity(account)) {
-		account.DeleteExtra(OllamaCloudUsageSessionExtraKey, OllamaCloudUsageAutoRefreshExtraKey, OllamaCloudUsageSnapshotExtraKey)
+		for _, k := range ollamaUsageKeys {
+			managedKeysToDrop[k] = struct{}{}
+		}
+		account.DeleteExtra(ollamaUsageKeys...)
 	}
 	// OpenCode Go 受管键：身份改变或不再 eligible 时随本次写入清除，防止跨组污染。
 	// （代理变化只失效快照而保留开关，由 repository 合并层在锁定的 DB 行上裁决。）
+	openCodeGoUsageKeys := []string{OpenCodeGoUsageAutoRefreshExtraKey, OpenCodeGoUsageSnapshotExtraKey}
 	if !IsOpenCodeGoUsageAccount(account) {
-		account.DeleteExtra(OpenCodeGoUsageAutoRefreshExtraKey, OpenCodeGoUsageSnapshotExtraKey)
+		for _, k := range openCodeGoUsageKeys {
+			managedKeysToDrop[k] = struct{}{}
+		}
+		account.DeleteExtra(openCodeGoUsageKeys...)
 	} else if !reflect.DeepEqual(previousOpenCodeUsageIdentity, openCodeGoUsageIdentity(account)) {
-		account.DeleteExtra(OpenCodeGoUsageAutoRefreshExtraKey, OpenCodeGoUsageSnapshotExtraKey)
+		for _, k := range openCodeGoUsageKeys {
+			managedKeysToDrop[k] = struct{}{}
+		}
+		account.DeleteExtra(openCodeGoUsageKeys...)
 	}
 	// 只在指针非 nil 时更新 Concurrency（支持设置为 0）
 	if input.Concurrency != nil {
@@ -1481,6 +1518,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	// 得 ctx 上的既有事务（dbent.TxFromContext），故把入口的 tx 挂进 ctx 即可让写入
 	// 与 ≤15 判定共处同一事务，不必再复制一份写入分支。
 	persistAccountWrite := func(writeCtx context.Context) error {
+		// 受管键在写入事务内从数据库当前行覆盖：消除请求开始时的快照覆盖专用接口
+		// （UpdateAccountIdentityDisguise → UpdateExtra、配额用量写入等）并发写入的新值。
+		if err := s.mergeManagedExtraFromCurrentRow(writeCtx, account, managedKeysToDrop, explicitlySetManagedKeys); err != nil {
+			return err
+		}
 		// 已绑定激活码的 cursor 账号，rate_multiplier 列必须真实随激活码落库：用账号
 		// （已被 applyQuotaKeyManagedAccountSettings 设为码值）的 RateMultiplier 作为
 		// explicitRateMultiplier，覆盖客户端可能提交的旧值；其余账号沿用输入值（既有行为）。
@@ -1584,7 +1626,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, err
 		}
 		boundInTx = true
-	} else if err := persistAccountWrite(ctx); err != nil {
+	} else if err := s.withAccountWriteTx(ctx, func(txCtx context.Context) error {
+		return persistAccountWrite(txCtx)
+	}); err != nil {
 		return nil, err
 	}
 
@@ -1611,6 +1655,69 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		return nil, err
 	}
 	return updated, nil
+}
+
+// mergeManagedExtraFromCurrentRow 在写入事务内重新读取数据库当前行，将受管键的取值覆盖为「当前库值」：
+// 对每一受管键，若本次请求主动删除（managedKeysToDrop）或显式提交（explicitlySetManagedKeys），
+// 则保持 account.Extra 现状；否则用数据库当前行的值覆盖 account.Extra 中的快照值（当前行缺失则该键移除）。
+//
+// 这样普通编辑在整行 Extra 落库时，受管键取值来自写入事务内现读的数据库当前行，而非请求开始时的快照，
+// 消除与专用接口（如 UpdateAccountIdentityDisguise → UpdateExtra、配额用量写入等）并发写入时的旧快照覆盖。
+// 非受管键维持既有整份替换语义不变。
+func (s *adminServiceImpl) mergeManagedExtraFromCurrentRow(ctx context.Context, account *Account, managedKeysToDrop, explicitlySetManagedKeys map[string]struct{}) error {
+	if account.Extra == nil {
+		account.Extra = make(map[string]any)
+	}
+	current, err := s.accountRepo.GetByID(ctx, account.ID)
+	if err != nil {
+		return err
+	}
+	currentExtra := current.Extra
+	for _, key := range managedExtraKeys {
+		if _, dropped := managedKeysToDrop[key]; dropped {
+			continue
+		}
+		if _, explicit := explicitlySetManagedKeys[key]; explicit {
+			// 请求显式提交的值优先（如探针开关），不被当前行覆盖。
+			continue
+		}
+		if currentExtra != nil {
+			if v, ok := currentExtra[key]; ok {
+				account.Extra[key] = v
+				continue
+			}
+		}
+		// 当前行没有该受管键（并发删除或本就缺失）：以当前行状态为准，移除快照残留。
+		delete(account.Extra, key)
+	}
+	return nil
+}
+
+// withAccountWriteTx 在「无既有事务」的普通编辑路径上开启一个事务，把读当前行 → 合并受管键 → 写回
+// 收敛进同一事务（用户裁定 2026-11-12）。entClient 未注入（单测替身、窄内部调用方）时退化为直接执行，
+// 由 mock 仓储在内存中模拟当前行。
+func (s *adminServiceImpl) withAccountWriteTx(ctx context.Context, fn func(context.Context) error) error {
+	if s.entClient == nil {
+		return fn(ctx)
+	}
+	tx, err := s.entClient.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("admin: begin account write tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := fn(dbent.NewTxContext(ctx, tx)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin: commit account write tx: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // UpdateAccountExtra 仅对 Extra JSONB 做 key 级合并，避免覆盖其它运行态键
