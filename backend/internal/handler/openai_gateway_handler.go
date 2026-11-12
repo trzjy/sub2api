@@ -1188,6 +1188,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				if service.IsOpenAICapacityShedError(err) {
 					h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 				}
+				// 客户端断开不是上游故障：写响应必然失败，且不得让主动取消冷却健康账号。
+				if failoverClientGone(c) {
+					reqLog.Info("openai.client_disconnected",
+						zap.Int64("account_id", account.ID),
+						zap.Error(err),
+					)
+					submitResponsesUsage(result)
+					return
+				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), false, nil, err)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false
@@ -1923,7 +1932,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					)
 					continue
 				}
-				if result != nil && result.ClientDisconnect {
+				if (result != nil && result.ClientDisconnect) || failoverClientGone(c) {
 					reqLog.Info("openai_messages.client_disconnected",
 						zap.Int64("account_id", account.ID),
 						zap.Error(err),

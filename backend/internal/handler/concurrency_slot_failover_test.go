@@ -16,14 +16,14 @@ func TestRecordConcurrencySlotFailure(t *testing.T) {
 	// 而由「选号返回无候选」判定。因此调用方必须一直收到「继续换号」——
 	// 否则池里 4 个以上账号时，前 3 个满、第 4 个空闲也会被误报成耗尽。
 	for i := 1; i <= 60; i++ {
-		require.True(t, recordConcurrencySlotFailure(c, failed, int64(i), &attempts),
+		require.True(t, recordConcurrencySlotFailure(nil, failed, int64(i), &attempts),
 			"第 %d 次槽位失败必须继续换号（耗尽由选号无候选判定，不以次数代替）", i)
 		require.Contains(t, failed, int64(i), "满载账号要记入本请求排除集合")
 	}
 
 	// 防御：nil 集合 / nil 计数不得 panic，直接判定不再换号。
-	require.False(t, recordConcurrencySlotFailure(nil, 1, &attempts))
-	require.False(t, recordConcurrencySlotFailure(c, failed, 9, nil))
+	require.False(t, recordConcurrencySlotFailure(nil, nil, 1, &attempts))
+	require.False(t, recordConcurrencySlotFailure(nil, failed, 9, nil))
 }
 
 func TestConcurrencySlotExhaustedResponse(t *testing.T) {

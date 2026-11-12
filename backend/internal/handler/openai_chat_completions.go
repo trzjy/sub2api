@@ -604,6 +604,17 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				if service.IsOpenAICapacityShedError(err) {
 					h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 				}
+				// 客户端断开不是上游故障：写响应必然失败（连接已断），而把账号记成
+				// 调度失败会让客户端的主动取消去冷却一个健康账号。只记客户端断开，
+				// 已完成的上游用量照常入账（非流式聚合失败时 result 为 nil，无用量）。
+				if failoverClientGone(c) {
+					reqLog.Info("openai_chat_completions.client_disconnected",
+						zap.Int64("account_id", account.ID),
+						zap.Error(err),
+					)
+					submitChatUsage(result)
+					return
+				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false
