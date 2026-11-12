@@ -155,6 +155,9 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 			default:
 				if fs.LastFailoverErr != nil {
 					h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformTypeSafe, false)
+				} else if slotFullCount > 0 {
+					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
+					h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", false)
 				} else {
 					h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, false)
 				}

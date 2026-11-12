@@ -735,6 +735,12 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				failoverClientGone(c)
 				return
 			default: // FailoverExhausted
+				if slotFullCount > 0 {
+					// 槽位失败导致候选耗尽：走本端点既有的账号槽终态
+					// （Google 错误格式 + 账号槽并发文案），状态码口径不变。
+					googleError(c, http.StatusTooManyRequests, infraerrors.AccountSlotConcurrencyLimit)
+					return
+				}
 				h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
 				return
 			}

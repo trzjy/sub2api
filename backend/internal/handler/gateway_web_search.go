@@ -215,6 +215,15 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		account = nil
 	}
 	if err != nil || nativeResp == nil {
+		if slotFullCount > 0 {
+			// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
+			// 不能落到下面的 502 分支——那会破坏账号并发终点契约。
+			c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{
+				"type":    gatewayConcurrencyLimitCode,
+				"message": infraerrors.AccountSlotConcurrencyLimit,
+			}})
+			return
+		}
 		msg := infraerrors.WebSearchFailed
 		c.JSON(http.StatusBadGateway, gin.H{"type": "error", "error": gin.H{"type": "web_search_error", "message": msg}})
 		return

@@ -402,6 +402,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				default: // FailoverExhausted
 					if fs.LastFailoverErr != nil {
 						h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformGemini, streamStarted)
+					} else if slotFullCount > 0 {
+						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
+						// 不能落到 502 分支——那会破坏账号并发终点契约。
+						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
 					} else {
 						h.handleFailoverExhaustedSimple(c, 502, streamStarted)
 					}
@@ -793,6 +797,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				default: // FailoverExhausted
 					if fs.LastFailoverErr != nil {
 						h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
+					} else if slotFullCount > 0 {
+						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
+						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
 					} else {
 						h.handleFailoverExhaustedSimple(c, 502, streamStarted)
 					}

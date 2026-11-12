@@ -204,6 +204,9 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			}
 			if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
+			} else if slotFullCount > 0 {
+				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
+				writeConcurrencySlotExhausted(c, h, streamStarted)
 			} else {
 				h.handleFailoverExhaustedSimple(c, 502, streamStarted)
 			}

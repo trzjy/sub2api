@@ -276,6 +276,9 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		if selectErr != nil || selection == nil || selection.Account == nil {
 			if last != nil {
 				h.handleFailoverExhausted(c, last, false)
+			} else if slotFullCount > 0 {
+				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
+				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.AccountSlotConcurrencyLimit)
 			} else {
 				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 			}
