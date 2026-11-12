@@ -162,3 +162,91 @@ func TestCursorSupplySourceGate_APIKeyAllowed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, quotaKeySourceUnbound, reason, "用量子谓词对号池 OAuth 账号同样不放宽")
 }
+
+// TestCursorSupplySourceGate_CompatibleAccountWithQuotaKeyHonorsTerminalStatus 钉死
+// QKG-FIX-1：第三方 Cursor APIKey 账号（OpenAI 兼容反代）**一旦绑定了激活码**，就必须先过
+// 停供终态门——disabled 与 expired 同属停供终态，不得因账号类型被整体豁免。
+//
+// 背景：kn_cy 上游拉出的 type=apikey 账号同样写入 QuotaKeyID；修复前本函数第一行对
+// IsCursorOpenAICompatibleAccount() 直接放行，早于任何码状态判定，导致 admin 停用/到期对
+// 这批账号不生效。
+//
+// 三条断言同时钉住「收紧」与「不放宽」：
+//  1. 绑 disabled 码 → 否决（quota_key_expired）；
+//  2. 绑 active 码 → 放行（且不因缺号池快照被 usage 子谓词否决）；
+//  3. 未绑码的兼容账号 → 维持原放行意图。
+func TestCursorSupplySourceGate_CompatibleAccountWithQuotaKeyHonorsTerminalStatus(t *testing.T) {
+	ctx := context.Background()
+
+	compatAccount := func(id, quotaKeyID int64) *Account {
+		acc := &Account{
+			ID:          id,
+			Platform:    PlatformCursor,
+			Type:        AccountTypeAPIKey,
+			Status:      StatusActive,
+			Schedulable: true,
+			Credentials: map[string]any{
+				"api_key":  "sk-kn-cy-secret",
+				"base_url": "https://kn-cy.example/v1",
+			},
+		}
+		if quotaKeyID > 0 {
+			acc.QuotaKeyID = &quotaKeyID
+		}
+		return acc
+	}
+
+	t.Run("disabled key vetoes compatible account", func(t *testing.T) {
+		const qkID int64 = 9911
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses: map[int64]string{qkID: domain.QuotaKeyStatusDisabled},
+		})
+		account := compatAccount(9911, qkID)
+		require.True(t, account.IsCursorOpenAICompatibleAccount(), "前置：type=api_key 判定为兼容反代账号")
+
+		reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, account)
+		require.NoError(t, err)
+		require.Equal(t, quotaKeyExpired, reason, "绑 disabled 码的兼容型账号必须被否决")
+		require.Equal(t, quotaKeyExpired, cursorSupplySourceAvailabilityVetoReasonString(ctx, account),
+			"既有调度路径的 string 投影同样否决")
+	})
+
+	t.Run("expired key vetoes compatible account", func(t *testing.T) {
+		const qkID int64 = 9912
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses: map[int64]string{qkID: domain.QuotaKeyStatusExpired},
+		})
+		account := compatAccount(9912, qkID)
+
+		reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, account)
+		require.NoError(t, err)
+		require.Equal(t, quotaKeyExpired, reason, "绑 expired 码的兼容型账号必须被否决")
+	})
+
+	t.Run("active key passes compatible account without pool snapshot", func(t *testing.T) {
+		const qkID int64 = 9913
+		// 只装状态读取、不装额度快照：兼容型账号的额度不走 ShareAI 号池快照，
+		// 放行不得依赖快照装配。
+		clearCursorQuotaKeySourceProvidersForTest(t)
+		InstallCursorQuotaKeyStateProvider(cursorQuotaKeySourceStub{
+			statuses: map[int64]string{qkID: domain.QuotaKeyStatusActive},
+		})
+		account := compatAccount(9913, qkID)
+
+		reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, account)
+		require.NoError(t, err)
+		require.Empty(t, reason, "绑 active 码的兼容型账号必须放行")
+	})
+
+	t.Run("unbound compatible account still passes", func(t *testing.T) {
+		// 未绑码的兼容账号没有可判的码状态：维持既有放行意图（不得退化为
+		// quota_key_source_unbound）。
+		clearCursorQuotaKeySourceProvidersForTest(t)
+		account := compatAccount(9914, 0)
+
+		reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, account)
+		require.NoError(t, err)
+		require.Empty(t, reason, "未绑码的兼容型账号维持放行")
+		require.NotEqual(t, quotaKeySourceUnbound, reason)
+	})
+}
