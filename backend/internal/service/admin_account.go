@@ -859,6 +859,19 @@ func applyQuotaKeyManagedAccountSettings(account *Account, qk *dbent.QuotaKey, i
 	// 非改绑的普通编辑：码级未配置映射时保留账号既有值，不触碰。
 }
 
+// resolveQuotaKeyGroupAuthority 是「绑定码账号分组权威」的唯一判定点（QKG 外审 P2）。
+// 规则：账号归属激活码且该码显式配置了码级分组（qk.GroupIds != nil）→ 返回码级分组的拷贝；
+// 否则原样返回 requested（nil 仍是 nil = 未显式指定，不覆盖账号既有绑定）。
+// 不在此处拒绝请求：与既有 C3 口径一致，用「覆盖为权威值」收口，避免误伤普通编辑。
+func resolveQuotaKeyGroupAuthority(qk *dbent.QuotaKey, requested *[]int64) *[]int64 {
+	if qk == nil || qk.GroupIds == nil {
+		return requested
+	}
+	out := make([]int64, len(qk.GroupIds))
+	copy(out, qk.GroupIds)
+	return &out
+}
+
 // AccountTxCreator 是账号仓储"在调用方指定的 ent 事务内插入账号行"的窄能力。
 // ≤15 集中强制要求"计数判定"与"账号写入"落在同一事务 / 同一 advisory 互斥域内，
 // 故 cursor 建号必须经此事务版写入口；未实现该窄接口的仓储（窄测试替身）fail-closed 拒绝，
@@ -978,6 +991,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 				return qkErr
 			}
 			applyQuotaKeyManagedAccountSettings(account, qk, true)
+			// 人工建号绑定码账号分组权威：落库分组以码级 GroupIds 为准（QKG 外审 P2），
+			// 覆盖请求/默认分组，使随后的 BindGroups 写成码级权威值。
+			groupIDs = *resolveQuotaKeyGroupAuthority(qk, &groupIDs)
 			return creator.CreateWithTx(ctx, tx, account)
 		}); err != nil {
 			return nil, err
@@ -1509,6 +1525,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 				return qkErr
 			}
 			applyQuotaKeyManagedAccountSettings(account, qk, true)
+			// 改绑到另一激活码：落库分组以目标码级 GroupIds 为准（QKG 外审 P2），
+			// 覆盖请求/默认分组，使随后的 BindGroups 写成目标码级权威值。
+			input.GroupIDs = resolveQuotaKeyGroupAuthority(qk, input.GroupIDs)
 			return persistAccountWrite(dbent.NewTxContext(ctx, tx))
 		}); err != nil {
 			return nil, err
@@ -1526,10 +1545,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			applyQuotaKeyManagedAccountSettings(account, qk, false)
 			// 码级分组是权威值：账号编辑不得改写绑定。用码级 group_ids 覆盖请求值，
 			// 使随后的 BindGroups 写成权威值（与 applyQuotaKeyManagedAccountSettings 同源）。
-			if qk.GroupIds != nil {
-				override := append([]int64(nil), qk.GroupIds...)
-				input.GroupIDs = &override
-			}
+			input.GroupIDs = resolveQuotaKeyGroupAuthority(qk, input.GroupIDs)
 			return persistAccountWrite(dbent.NewTxContext(ctx, tx))
 		}); err != nil {
 			return nil, err

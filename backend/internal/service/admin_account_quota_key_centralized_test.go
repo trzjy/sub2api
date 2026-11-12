@@ -379,9 +379,12 @@ func (r *quotaCapManagedSettingsRepo) persistManagedAccount(ctx context.Context,
 	if a.ExpiresAt != nil {
 		create.SetExpiresAt(*a.ExpiresAt)
 	}
-	if _, err := create.Save(ctx); err != nil {
+	saved, err := create.Save(ctx)
+	if err != nil {
 		return err
 	}
+	// 与生产 createAccountRecord 行为一致：落库后回填主键，使随后的 BindGroups(account.ID) 落在真账号上。
+	a.ID = saved.ID
 	return nil
 }
 
@@ -929,4 +932,155 @@ func TestAdminAccountQuotaKeyBoundUpdateOverridesRequestGroupIDs(t *testing.T) {
 	}
 	require.ElementsMatch(t, []int64{authGrp.ID}, got, "persisted groups must equal the quota-key authoritative group_ids")
 	require.NotContains(t, got, g9.ID, "request group g9 must be overridden by the quota-key group_ids")
+}
+
+// TestAdminAccountQuotaKeyCreateOverridesRequestGroupIDs 锁定派发单 QKG-FIX-3（人工建号路径）：
+// 激活码带码级 GroupIds=[g1]，CreateAccount 请求带 group_ids=[g9] 时，落库 account_groups
+// 必须等于码级权威 [g1]，且不得出现 g9——码级分组权威以"覆盖"方式守住。
+func TestAdminAccountQuotaKeyCreateOverridesRequestGroupIDs(t *testing.T) {
+	ctx := context.Background()
+	client := quotaKeyTestEntClient(t)
+	svc, _, _ := managedSettingsQKAdminService(t)
+
+	// 创建请求里的 g9 分组（使"分组存在性"校验放行）与激活码级权威分组 g1。
+	g9, err := client.Group.Create().
+		SetName("qkg-fix3-create-g9").
+		SetModelAllowlist(domain.GroupModelAllowlist{}).
+		Save(ctx)
+	require.NoError(t, err)
+	g1, err := client.Group.Create().
+		SetName("qkg-fix3-create-g1").
+		SetModelAllowlist(domain.GroupModelAllowlist{}).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 激活码带码级分组（权威值 [g1]）。
+	qk := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 4, 6, 80, 0.5, time.Time{}, nil)
+	_, err = client.QuotaKey.UpdateOneID(qk.ID).SetGroupIds([]int64{g1.ID}).Save(ctx)
+	require.NoError(t, err)
+
+	// 请求带 group_ids=[g9]，企图改写绑定。
+	reqG9 := []int64{g9.ID}
+	created, err := svc.CreateAccount(ctx, &CreateAccountInput{
+		Name:                  "qkg-fix3-created",
+		Platform:              domain.PlatformCursor,
+		Type:                  AccountTypeAPIKey,
+		Credentials:           map[string]any{"api_key": "sk-fix3-create"},
+		SkipDefaultGroupBind:  true,
+		SkipMixedChannelCheck: true,
+		QuotaKeyID:            &qk.ID,
+		GroupIDs:              reqG9,
+	})
+	require.NoError(t, err, "creating under a quota key with group_ids request must succeed (override, not 400)")
+	require.NotZero(t, created.ID, "created account must have a real ID for group back-query")
+
+	// 落库分组必须等于码级 group_ids（g1.ID），且不得出现 g9。
+	bound, err := client.AccountGroup.Query().Where(dbaccountgroup.AccountIDEQ(created.ID)).All(ctx)
+	require.NoError(t, err)
+	got := make([]int64, 0, len(bound))
+	for _, ag := range bound {
+		got = append(got, ag.GroupID)
+	}
+	require.ElementsMatch(t, []int64{g1.ID}, got, "persisted groups must equal the quota-key authoritative group_ids")
+	require.NotContains(t, got, g9.ID, "request group g9 must be overridden by the quota-key group_ids")
+}
+
+// TestAdminAccountQuotaKeyRebindOverridesRequestGroupIDs 锁定派发单 QKG-FIX-3（改绑路径）：
+// 账号原绑码 A，UpdateAccount 改绑到码 B（B.GroupIds=[g1]），请求带 group_ids=[g9] 时，
+// 落库 account_groups 必须等于码 B 级权威 [g1]。
+func TestAdminAccountQuotaKeyRebindOverridesRequestGroupIDs(t *testing.T) {
+	ctx := context.Background()
+	client := quotaKeyTestEntClient(t)
+	svc, repo, _ := managedSettingsQKAdminService(t)
+	svc.groupRepo = &quotaKeyTestGroupRepo{} // 改绑路径的 validateGroupIDsExist 需要 groupRepo
+
+	// 创建请求里的 g9 分组（使"分组存在性"校验放行）与码 B 级权威分组 g1。
+	g9, err := client.Group.Create().
+		SetName("qkg-fix3-rebind-g9").
+		SetModelAllowlist(domain.GroupModelAllowlist{}).
+		Save(ctx)
+	require.NoError(t, err)
+	g1, err := client.Group.Create().
+		SetName("qkg-fix3-rebind-g1").
+		SetModelAllowlist(domain.GroupModelAllowlist{}).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 源码 A（账号原绑）与目标码 B（带码级权威 [g1]）。
+	src := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 1, 1, 10, 0.1, time.Time{}, nil)
+	dst := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 7, 9, 55, 2.0, time.Time{}, nil)
+	_, err = client.QuotaKey.UpdateOneID(dst.ID).SetGroupIds([]int64{g1.ID}).Save(ctx)
+	require.NoError(t, err)
+
+	existing := mustCreateAccountForRebind(t, client, src.ID)
+	repo.upstreamBillingProbeAccountRepo.accounts[existing.ID] = &Account{
+		ID:         existing.ID,
+		Name:       existing.Name,
+		Platform:   domain.PlatformCursor,
+		Type:       AccountTypeAPIKey,
+		Status:     StatusActive,
+		QuotaKeyID: &src.ID,
+	}
+
+	// 改绑到码 B，请求带 group_ids=[g9]，企图改写绑定。
+	reqG9 := []int64{g9.ID}
+	_, err = svc.UpdateAccount(ctx, existing.ID, &UpdateAccountInput{
+		QuotaKeyIDSet: true,
+		QuotaKeyID:    &dst.ID,
+		GroupIDs:      &reqG9,
+	})
+	require.NoError(t, err, "rebinding to another quota key with group_ids must succeed (override, not 400)")
+
+	// 落库分组必须等于目标码 B 级 group_ids（g1.ID），且不得出现 g9。
+	bound, err := client.AccountGroup.Query().Where(dbaccountgroup.AccountIDEQ(existing.ID)).All(ctx)
+	require.NoError(t, err)
+	got := make([]int64, 0, len(bound))
+	for _, ag := range bound {
+		got = append(got, ag.GroupID)
+	}
+	require.ElementsMatch(t, []int64{g1.ID}, got, "persisted groups must equal the target quota-key authoritative group_ids")
+	require.NotContains(t, got, g9.ID, "request group g9 must be overridden by the target quota-key group_ids")
+}
+
+// TestAdminAccountQuotaKeyNilGroupIdsFallsBackToRequest 锁定派发单 QKG-FIX-3（回归）：
+// 码级 GroupIds=nil（未显式配置）时，即便 CreateAccount 请求带 group_ids=[g9]，也必须按请求值
+// 落库——既不得被清空，也不得被改写。
+func TestAdminAccountQuotaKeyNilGroupIdsFallsBackToRequest(t *testing.T) {
+	ctx := context.Background()
+	client := quotaKeyTestEntClient(t)
+	svc, _, _ := managedSettingsQKAdminService(t)
+
+	g9, err := client.Group.Create().
+		SetName("qkg-fix3-nil-g9").
+		SetModelAllowlist(domain.GroupModelAllowlist{}).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 激活码未显式配置码级分组（GroupIds=nil）。
+	qk := mustCreateManagedQuotaKey(t, client, domain.QuotaKeyStatusActive, 4, 6, 80, 0.5, time.Time{}, nil)
+
+	// 请求带 group_ids=[g9]，应原样落库。
+	reqG9 := []int64{g9.ID}
+	created, err := svc.CreateAccount(ctx, &CreateAccountInput{
+		Name:                  "qkg-fix3-nil-created",
+		Platform:              domain.PlatformCursor,
+		Type:                  AccountTypeAPIKey,
+		Credentials:           map[string]any{"api_key": "sk-fix3-nil"},
+		SkipDefaultGroupBind:  true,
+		SkipMixedChannelCheck: true,
+		QuotaKeyID:            &qk.ID,
+		GroupIDs:              reqG9,
+	})
+	require.NoError(t, err, "creating with nil quota-key group_ids must persist the requested group_ids")
+	require.NotZero(t, created.ID)
+
+	// 落库分组必须等于请求值 [g9]，且不得被清空。
+	bound, err := client.AccountGroup.Query().Where(dbaccountgroup.AccountIDEQ(created.ID)).All(ctx)
+	require.NoError(t, err)
+	got := make([]int64, 0, len(bound))
+	for _, ag := range bound {
+		got = append(got, ag.GroupID)
+	}
+	require.ElementsMatch(t, []int64{g9.ID}, got, "with nil quota-key group_ids, persisted groups must equal the request group_ids")
+	require.Len(t, got, 1, "nil quota-key group_ids must not clear or rewrite the requested group_ids")
 }
