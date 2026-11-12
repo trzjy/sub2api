@@ -58,17 +58,11 @@ func (s *adminServiceImpl) SetAccountIdentityDisguise(ctx context.Context, id in
 		return nil, err
 	}
 
-	// 写入路径区分两种来源：
-	//   - 自动派生（AutoDeriveForbidden=true）：派生函数 DeriveIdentityDisguiseForbiddenNames
-	//     内部已完成清洗（去空/去重/超长剔除/控制字符剔除），且按外审裁定不设条数上限，
-	//     直接落库，禁止再经 sanitizeForbiddenNames 截断。
-	//   - 显式输入：维持既有 sanitizeForbiddenNames 行为完全不变（含 16 项上限）。
-	var names []string
+	names := update.ForbiddenNames
 	if update.AutoDeriveForbidden {
 		names = DeriveIdentityDisguiseForbiddenNames(account.GetModelMapping())
-	} else {
-		names = sanitizeForbiddenNames(update.ForbiddenNames)
 	}
+	names = sanitizeForbiddenNames(names)
 
 	payload := map[string]any{
 		"profile":         string(update.Profile),
@@ -108,12 +102,12 @@ func buildIdentityDisguiseState(account *Account) *IdentityDisguiseState {
 	d, isNew := parseIdentityDisguiseExtra(extra)
 	if !isNew {
 		// 老键分支：先用既有的 legacyIdentityDisguiseOf 复用老键解析（不另立键名清单）。
-		// 仅当账号 extra 中确实还带着某个老键时，才把 UsesLegacyKeys 置真 ——
+		// 存在性由 legacyIdentityDisguiseOf 单一来源给出（d.HasLegacyKeys）：
+		// 只要账号 extra 中确实带着某个老键（哪怕值为空串 / false），就报「使用旧配置」，
 		// 否则既无新键、也无老键的普通账号会被误报为「正在使用旧配置」。
 		d = legacyIdentityDisguiseOf(account)
-		hasLegacy := d.RawPrompt != "" || d.RewriteModel || d.StripReasoning
-		state.UsesLegacyKeys = hasLegacy
-		if !hasLegacy {
+		state.UsesLegacyKeys = d.HasLegacyKeys
+		if !d.HasLegacyKeys {
 			// 一个老键都没有 → 视为未配置：Profile 保持 none，其余字段取零值。
 			d = IdentityDisguise{Profile: IdentityDisguiseProfileNone}
 		}
