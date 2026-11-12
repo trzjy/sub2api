@@ -106,8 +106,6 @@ func TestCustomToolCallName_NamespaceCustomIsCustom(t *testing.T) {
 	require.Empty(t, name)
 }
 
-// TestCustomToolCallName_SingleSourceAcrossConsumers 是「交付侧 vs 登记侧」的一致性护栏。
-//
 // 背景：service 包的 cursorCustomToolCallName 曾是 apicompat.customToolCallName 的
 // **复制实现**（读另一张 namespaceCustomTools map），与交付侧（读 origin.IsCustom）
 // 结论可以相反 —— 交付 function_call、登记 custom_tool_call → codex 续轮
