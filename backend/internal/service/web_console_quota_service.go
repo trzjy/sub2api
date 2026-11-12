@@ -215,6 +215,54 @@ func (s *WebConsoleQuotaService) ProbeAccount(ctx context.Context, accountID int
 	return s.ProbeLoadedAccount(ctx, account)
 }
 
+// ProbeWithStorageState 用「尚未落库」的 storageState 跑一次完整探测（含快照落库）。
+//
+// 存在的理由：判断「人是不是真的登进去了」，唯一可靠的判据是**能不能读到用量**。
+// 早期用「当前网址落在控制台前缀内」来判断，会被上游「登录失败后跳回原页」骗过，
+// 把一份未登录的会话当成有效票据存下来（2026-11-13 线上：美团扫码失败，界面却提示
+// 「已检测到登录完成」）。所以登录链路必须先拿候选会话探一次，读到用量才落库。
+func (s *WebConsoleQuotaService) ProbeWithStorageState(
+	ctx context.Context, account *Account, storageState string,
+) (*WebConsoleQuotaProbeResult, error) {
+	if s == nil || account == nil {
+		return nil, nil
+	}
+	provider := ResolveWebConsoleQuotaProvider(account)
+	if provider == "" {
+		return nil, nil
+	}
+	if s.cfg == nil || strings.TrimSpace(s.cfg.WebQuotaWorker.BaseURL) == "" {
+		return &WebConsoleQuotaProbeResult{
+			Provider:  provider,
+			Success:   false,
+			AuthState: webConsoleQuotaAuthStateError,
+			FetchedAt: time.Now().Unix(),
+			Error:     webConsoleQuotaNotConfiguredError,
+		}, nil
+	}
+
+	apiKeySHA256 := sha256Hex([]byte(account.GetCredential(webConsoleQuotaCredentialKeyAPIKey)))
+	timeoutSeconds := webQuotaWorkerDefaultTimeoutSeconds
+	if s.cfg.WebQuotaWorker.TimeoutSeconds > 0 {
+		timeoutSeconds = s.cfg.WebQuotaWorker.TimeoutSeconds
+	}
+
+	resp, err := s.postProbeWithState(ctx, account, provider, apiKeySHA256, timeoutSeconds, storageState)
+	if err != nil {
+		return &WebConsoleQuotaProbeResult{
+			Provider:  provider,
+			AuthState: webConsoleQuotaAuthStateError,
+			FetchedAt: time.Now().Unix(),
+			Error:     err.Error(),
+		}, nil
+	}
+
+	lock := s.accountLock(account.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.applyProbeResponse(ctx, account, provider, resp, apiKeySHA256, time.Now()), nil
+}
+
 // ProbeLoadedAccount 对已加载账号执行一次探测。
 // provider 不适用时返回 (nil, nil)：这不是错误，调用方据此跳过。
 func (s *WebConsoleQuotaService) ProbeLoadedAccount(ctx context.Context, account *Account) (*WebConsoleQuotaProbeResult, error) {
@@ -357,9 +405,21 @@ func (s *WebConsoleQuotaService) applyProbeResponse(
 
 // postProbe 调用 worker 的 POST /v1/probe。
 func (s *WebConsoleQuotaService) postProbe(ctx context.Context, account *Account, provider, apiKeySHA256 string, timeoutSeconds int) (*webConsoleQuotaWorkerResponse, error) {
+	return s.postProbeWithState(ctx, account, provider, apiKeySHA256, timeoutSeconds, "")
+}
+
+// postProbeWithState 同上，但允许用「候选 storageState」覆盖账号里已保存的那份。
+// storageState 为空时仍取账号凭据（生产探测路径行为不变）。
+func (s *WebConsoleQuotaService) postProbeWithState(
+	ctx context.Context, account *Account, provider, apiKeySHA256 string, timeoutSeconds int, storageState string,
+) (*webConsoleQuotaWorkerResponse, error) {
+	stateToUse := strings.TrimSpace(storageState)
+	if stateToUse == "" {
+		stateToUse = account.GetCredential(webConsoleQuotaCredentialKeyStorageState)
+	}
 	payload := webConsoleQuotaWorkerRequest{
 		Provider:        provider,
-		StorageState:    account.GetCredential(webConsoleQuotaCredentialKeyStorageState),
+		StorageState:    stateToUse,
 		ConsoleUsername: account.GetCredential(webConsoleQuotaCredentialKeyUsername),
 		ConsolePassword: account.GetCredential(webConsoleQuotaCredentialKeyPassword),
 		APIKeySHA256:    apiKeySHA256,

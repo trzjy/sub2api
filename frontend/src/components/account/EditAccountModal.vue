@@ -4730,6 +4730,13 @@ const handleRemoteLoginFinish = async () => {
       remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginNotDetected')
       return
     }
+    // 页面看起来登上了，但服务端用这份会话读不到用量 —— 不保存、不关面板，
+    // 让用户换「手机验证码登录」再来一次（2026-11-13 美团扫码失败实测）。
+    if (result.status === 'verify_failed') {
+      remoteLoginError.value = true
+      remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginVerifyFailed')
+      return
+    }
     remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginSuccess')
     // 服务端在 finish 时已经释放会话，这里只收面板，不再发一次取消请求。
     stopRemoteLoginPolling()

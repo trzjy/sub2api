@@ -40,6 +40,9 @@ const (
 	// webConsoleRemoteLoginStatusPending / Authenticated 是 worker 回传的会话状态。
 	webConsoleRemoteLoginStatusPending       = "pending"
 	webConsoleRemoteLoginStatusAuthenticated = "authenticated"
+	// webConsoleRemoteLoginStatusVerifyFailed 表示「页面看起来登上了，但拿这份会话
+	// 读不到用量」——不落库，让用户换登录方式重来，绝不保存成有效票据。
+	webConsoleRemoteLoginStatusVerifyFailed = "verify_failed"
 )
 
 // 对外错误：调用方据此区分「不适用」「未配置」「还在等用户操作」。
@@ -362,6 +365,26 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 	if err != nil {
 		return nil, err
 	}
+
+	// 关键：先验证，再落库。
+	//
+	// 「当前网址落在控制台前缀内」只是页面位置，不是身份证据 —— 上游登录失败后
+	// 常常跳回原页面，这个判据会把未登录的会话当成成功（2026-11-13 线上：
+	// 美团扫码失败，界面却提示「已检测到登录完成」）。
+	// 唯一可靠的判据是：用这份会话能不能真的读到用量。
+	var verifiedProbe *WebConsoleQuotaProbeResult
+	if s.quotaService != nil {
+		probe, probeErr := s.quotaService.ProbeWithStorageState(ctx, account, storageState)
+		if probeErr == nil && probe != nil && probe.AuthState != webConsoleQuotaAuthStateOK {
+			// 不落库、不关会话：用户可以直接换「手机验证码登录」再来一次。
+			return &WebConsoleRemoteLoginResult{
+				Status:  webConsoleRemoteLoginStatusVerifyFailed,
+				Message: probe.AuthState,
+			}, nil
+		}
+		verifiedProbe = probe
+	}
+
 	currentUsername := account.GetCredential(webConsoleQuotaCredentialKeyUsername)
 	// 只写 login 产物（storage_state）。不把页面标题写进 console_username：
 	// 该字段是「控制台账号」语义，参与同级账号匹配与探测合并键，写标题会污染匹配。
@@ -379,8 +402,11 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 		Status:       "succeeded",
 		AccountLabel: strings.TrimSpace(finish.AccountLabel),
 	}
-	if s.quotaService != nil {
-		// 探测失败不影响「登录成功」这个事实。
+	// 验证阶段已经探过一次并落库快照，这里直接复用，不再重复打上游。
+	if verifiedProbe != nil {
+		result.Probe = verifiedProbe
+	} else if s.quotaService != nil {
+		// 未做验证（quotaService 未配置）时保留原有行为：探测失败不影响「登录成功」。
 		result.Probe, _ = s.quotaService.ProbeAccount(ctx, binding.AccountID)
 	}
 	return result, nil

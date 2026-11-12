@@ -69,6 +69,10 @@ async def get_browser():
     ImportError —— 也就是说整条采集链路在真正启动浏览器这一步必然失败，
     只是过去没有请求走到这里（2026-11-12 登录接口上线后暴露）。
     正确入口是 ``async_playwright().start()`` 之后取 ``.chromium``。
+
+    启动参数说明：``--enable-automation`` 会让页面看到 ``navigator.webdriver``，
+    ``--disable-blink-features=AutomationControlled`` 则把它关掉。上游风控
+    一看到这个标记就会判「机器人」（美团扫码登录实测直接返回登录失败）。
     """
     global _browser, _playwright
     if _browser is not None:
@@ -79,7 +83,12 @@ async def get_browser():
 
             if _playwright is None:
                 _playwright = await async_playwright().start()
-            _browser = await _playwright.chromium.launch()
+            _browser = await _playwright.chromium.launch(
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                # 默认参数里带 --enable-automation，它会打开自动化提示并让
+                # navigator.webdriver=true；这里显式去掉。
+                ignore_default_args=["--enable-automation"],
+            )
     return _browser
 
 
@@ -142,6 +151,54 @@ def _parse_storage_state(
     return None
 
 
+# ---------------------------------------------------------------------------
+# 浏览器环境对齐：让容器里的 Chromium 看起来像一台正常的中文电脑
+# ---------------------------------------------------------------------------
+#
+# 为什么必须做（2026-11-13 线上实测）：裸 Playwright 在容器里对外暴露的是
+#   webdriver=true / UA 里明写 HeadlessChrome / languages=en-US@posix /
+#   timezone=UTC / window.chrome=undefined / plugins=0
+# 美团扫码在「手机确认」那一刻看环境，直接返回「抱歉，登录失败」。
+# 用户自己的浏览器能登进去，差别就在这里。
+#
+# 这不是伪装身份：用的是账号主自己的账号、账号主自己发起的登录，
+# 只是把自动化环境缺失的部分补齐（时区/语言/UA/浏览器对象），
+# 让上游看到的是一台真实的浏览器而不是机器人。
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+BROWSER_LOCALE = "zh-CN"
+BROWSER_TIMEZONE = "Asia/Shanghai"
+BROWSER_LANGUAGES = ("zh-CN", "zh")
+
+# 在页面脚本执行前注入，补齐 navigator 与 window 上缺失的浏览器特征。
+_BROWSER_PATCH_JS = """
+(() => {
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, 'languages', { get: () => %LANGUAGES%, configurable: true });
+  } catch (e) {}
+  try {
+    const mk = (name, filename) => ({ name, filename, description: 'Portable Document Format', length: 1, item: () => null, namedItem: () => null });
+    const plugins = [
+      mk('PDF Viewer', 'internal-pdf-viewer'),
+      mk('Chrome PDF Viewer', 'internal-pdf-viewer'),
+      mk('Chromium PDF Viewer', 'internal-pdf-viewer'),
+    ];
+    Object.defineProperty(navigator, 'plugins', { get: () => plugins, configurable: true });
+  } catch (e) {}
+  try {
+    if (!window.chrome) {
+      window.chrome = { runtime: {}, app: { isInstalled: false }, csi: () => ({}), loadTimes: () => ({}) };
+    }
+  } catch (e) {}
+})();
+"""
+
+
 async def make_context(
     storage_state: Optional[Union[str, dict]] = None,
     proxy_url: Optional[str] = None,
@@ -164,11 +221,24 @@ async def make_context(
         kwargs["storage_state"] = parsed_state
     if proxy_url:
         kwargs["proxy"] = {"server": proxy_url}
+    # 环境对齐（见上方常量处的说明）：语言/时区/UA 必须像一个中文用户，
+    # 否则上游风控在登录确认环节直接拒绝。
+    kwargs["user_agent"] = BROWSER_UA
+    kwargs["locale"] = BROWSER_LOCALE
+    kwargs["timezone_id"] = BROWSER_TIMEZONE
+    kwargs["extra_http_headers"] = {"Accept-Language": "zh-CN,zh;q=0.9"}
     if viewport:
         kwargs["viewport"] = viewport
         # 截图像素必须与 CSS 像素一致，否则前端坐标会偏移。
         kwargs["device_scale_factor"] = 1
-    return await browser.new_context(**kwargs)
+    context = await browser.new_context(**kwargs)
+    try:
+        await context.add_init_script(
+            _BROWSER_PATCH_JS.replace("%LANGUAGES%", json.dumps(list(BROWSER_LANGUAGES)))
+        )
+    except Exception:  # noqa: BLE001 - 注入失败不影响主流程
+        logger.warning("browser patch script injection failed")
+    return context
 
 
 async def get_adapter(provider: str) -> BaseAdapter:

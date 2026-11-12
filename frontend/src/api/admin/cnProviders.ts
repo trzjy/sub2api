@@ -331,13 +331,13 @@ export async function finishWebConsoleLogin(
   id: number,
   sessionId: string
 ): Promise<{
-  status: 'succeeded' | 'pending'
+  status: 'succeeded' | 'pending' | 'verify_failed'
   probe?: WebConsoleQuotaProbeResult
   account_label?: string
   message?: string
 }> {
   const { data } = await apiClient.post<{
-    status: 'succeeded' | 'pending'
+    status: 'succeeded' | 'pending' | 'verify_failed'
     probe?: WebConsoleQuotaProbeResult
     account_label?: string
     message?: string
