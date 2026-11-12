@@ -141,6 +141,9 @@ class LoginSessionRegistry:
         )
         try:
             await page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
+            # SPA 登录页在 domcontentloaded 之后才渲染并跳转（实测 longcat 首帧
+            # 仍停在 /platform/usage 的骨架页），稍等再截首帧，否则用户看到白屏。
+            await page.wait_for_timeout(1500)
         except Exception:
             # 打开失败也要让用户看到当前画面（可能是空白页），由前端「重新加载」重试。
             pass

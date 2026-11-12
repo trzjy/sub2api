@@ -36,6 +36,9 @@ logging.getLogger("web-quota-worker").addFilter(
 # 单进程复用的 Chromium 浏览器实例与启动锁。
 _browser = None
 _browser_lock = asyncio.Lock()
+# async_playwright().start() 返回的驱动对象；必须与 browser 同生命周期，
+# 提前停止会让 Browser/Context 全部失效。
+_playwright = None
 
 # 已实例化适配器的缓存（provider -> adapter）。
 _adapters: dict[str, BaseAdapter] = {}
@@ -54,15 +57,24 @@ class AdapterNotImplemented(Exception):
 
 
 async def get_browser():
-    """惰性启动并复用单个 Chromium 实例。"""
-    global _browser
+    """惰性启动并复用单个 Chromium 实例。
+
+    注意：``playwright.async_api`` 并不导出 ``chromium``（只有 ``async_playwright``）。
+    此前这里是 ``from playwright.async_api import chromium``，任何调用都会
+    ImportError —— 也就是说整条采集链路在真正启动浏览器这一步必然失败，
+    只是过去没有请求走到这里（2026-11-12 登录接口上线后暴露）。
+    正确入口是 ``async_playwright().start()`` 之后取 ``.chromium``。
+    """
+    global _browser, _playwright
     if _browser is not None:
         return _browser
     async with _browser_lock:
         if _browser is None:
-            from playwright.async_api import chromium
+            from playwright.async_api import async_playwright
 
-            _browser = await chromium.launch()
+            if _playwright is None:
+                _playwright = await async_playwright().start()
+            _browser = await _playwright.chromium.launch()
     return _browser
 
 
