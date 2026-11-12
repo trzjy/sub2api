@@ -13,6 +13,7 @@
 
 import asyncio
 import json
+import logging
 import time
 
 from .base import BaseAdapter, ProbeRequest, ProbeResult
@@ -22,8 +23,22 @@ _LONGCAT_USAGE_URL = "https://longcat.chat/platform/usage"
 _PASSPORT_HOST = "passport.meituan.com"
 
 
+logger = logging.getLogger("web-quota-worker.longcat")
+
+
 class _SessionExpired(Exception):
-    """内部信号：同源用量接口返回未登录 / 非 2xx，表明会话失效。"""
+    """内部信号：**明确**的未登录（401/403，或被弹回登录页），会话确实失效。"""
+
+
+class _ProbeUnavailable(Exception):
+    """内部信号：这一次读不到用量（404/405/5xx/业务码异常等），但**不能**据此
+    判定会话失效。
+
+    为什么必须分开（2026-11-13 线上）：旧实现把所有非 2xx 都当成「登录失效」，
+    于是用户刚登成功、会话明明有效，只要某个用量接口返回 404/403 就被判死，
+    会话直接被丢掉，界面提示「登录已失效，请重新登录」——用户重登一次还是同样结果。
+    「读不到」和「没登录」是两件事，不能混成一个结论。
+    """
 
 
 class LongcatAdapter(BaseAdapter):
@@ -55,11 +70,23 @@ class LongcatAdapter(BaseAdapter):
                     error="timeout",
                 )
             return result
-        except _SessionExpired:
+        except _SessionExpired as exc:
+            # 只记「哪个接口、什么状态」——这是判断上游到底怎么拒绝的唯一线索，
+            # 不带 cookie / token。线上排查「明明登上了却提示失效」就靠这一行。
+            logger.warning("longcat session rejected: %s", exc)
             return ProbeResult(
                 status="needs_interactive_auth",
                 provider=self.provider,
                 auth_reason="session_expired",
+            )
+        except _ProbeUnavailable as exc:
+            # 判不了：不是登录问题，交给调用方决定（Go 侧视为「无结论」放行落库）。
+            # 只记路径与状态码，不含任何 cookie / token。
+            logger.warning("longcat probe unavailable: %s", exc)
+            return ProbeResult(
+                status="error",
+                provider=self.provider,
+                error="probe_unavailable",
             )
         except Exception:
             # 脱敏：不向外暴露任何内部异常细节或凭据。
@@ -82,7 +109,11 @@ class LongcatAdapter(BaseAdapter):
         )
 
         # 被重定向到美团 passport 登录页：仅扫码 / 短信登录，绝不做自动登录。
+        # 记主机名（不带 query / cookie）：区分「被弹回登录页」与「接口拒绝」两种失效。
         if _PASSPORT_HOST in (page.url or ""):
+            logger.info(
+                "longcat bounced to login page host=%s", page.url.split("?", 1)[0][:80]
+            )
             return ProbeResult(
                 status="needs_interactive_auth",
                 provider=self.provider,
@@ -135,12 +166,22 @@ class LongcatAdapter(BaseAdapter):
         if not isinstance(payload, dict):
             payload = {}
 
+        # 只有 401「未认证」才算会话失效。
+        #
+        # 403 不列入：它更多是权限/风控/网关拦的，和「没登录」不是一回事；
+        # 把它当失效，会把刚登好的会话判死（2026-11-13 线上就是这么丢的）。
+        if status == 401:
+            raise _SessionExpired(f"{path} status={status}")
+        # 其余非 2xx 一律是「这次读不到」：接口改路径、限流、网关 502 都可能，
+        # 拿它判死会话就是把用户刚登好的东西扔掉（2026-11-13 线上）。
         if status < 200 or status >= 300:
-            raise _SessionExpired(f"non-2xx status={status}")
-        # 部分接口即便返回 2xx，也会在 body 中以 code 字段表明登录失效。
+            raise _ProbeUnavailable(f"{path} status={status}")
+        # 部分接口即便返回 2xx，也会在 body 里用 code 表明登录态；同样只认 401/403。
         code = payload.get("code")
+        if isinstance(code, int) and code == 401:
+            raise _SessionExpired(f"{path} body code={code}")
         if isinstance(code, int) and code >= 400:
-            raise _SessionExpired(f"body code={code}")
+            raise _ProbeUnavailable(f"{path} body code={code}")
 
         return payload
 

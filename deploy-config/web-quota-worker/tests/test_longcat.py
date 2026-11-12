@@ -235,3 +235,81 @@ def test_missing_paygo_fields():
     assert "paygo_status" not in result.data
     assert "paygo_currency" not in result.data
     assert "paygo_amount" not in result.data
+
+
+# 测试 6：404/403 只算「这次读不到」，不能判会话失效 -----------------------
+#
+# 2026-11-13 线上故障：旧实现把所有非 2xx 都当成 session_expired，用户刚登成功、
+# 会话明明有效（worker 的跳转校验都过了），只因为某个用量接口非 2xx 就被判死，
+# 会话被丢掉，界面一直提示「登录已失效，请重新登录」，重登多少次都一样。
+#
+# 契约：只有 401（以及 body code 401）算「明确没登录」；其余一律是「判不了」，
+# 由调用方决定，适配器不许冒充「你没登录」。
+
+def _usage_ok():
+    return (200, API_USAGE)
+
+
+def _user_ok():
+    return (200, USER_CURRENT)
+
+
+@pytest.mark.parametrize("bad_status", [400, 403, 404, 405, 429, 500, 502, 503])
+def test_non_auth_failures_are_probe_unavailable(bad_status):
+    api_map = {
+        "/api/pay/quota/metering/token-packs/summary": (bad_status, {"code": bad_status}),
+        "/api/pay/quota/metering/api-usage/summary": _usage_ok(),
+        "/api/v1/user-current": _user_ok(),
+    }
+    page = _make_page("https://longcat.chat/platform/usage", api_map)
+    factory, _ = _make_factory(page)
+    result = asyncio.run(LongcatAdapter(factory).probe(_make_request()))
+
+    assert result.status == "error"
+    assert result.error == "probe_unavailable"
+    # 关键：不许变成 needs_interactive_auth —— 那会让上层把会话丢掉。
+    assert result.auth_reason != "session_expired"
+
+
+def test_body_code_not_401_is_probe_unavailable():
+    api_map = {
+        "/api/pay/quota/metering/token-packs/summary": (200, {"code": 500, "msg": "boom"}),
+        "/api/pay/quota/metering/api-usage/summary": _usage_ok(),
+        "/api/v1/user-current": _user_ok(),
+    }
+    page = _make_page("https://longcat.chat/platform/usage", api_map)
+    factory, _ = _make_factory(page)
+    result = asyncio.run(LongcatAdapter(factory).probe(_make_request()))
+
+    assert result.status == "error"
+    assert result.error == "probe_unavailable"
+
+
+def test_status_401_is_session_expired():
+    """明确 401 才判失效：这是「真的没登录」的唯一凭据。"""
+    api_map = {
+        "/api/pay/quota/metering/token-packs/summary": (401, {"code": 401, "msg": "未登录"}),
+        "/api/pay/quota/metering/api-usage/summary": _usage_ok(),
+        "/api/v1/user-current": _user_ok(),
+    }
+    page = _make_page("https://longcat.chat/platform/usage", api_map)
+    factory, _ = _make_factory(page)
+    result = asyncio.run(LongcatAdapter(factory).probe(_make_request()))
+
+    assert result.status == "needs_interactive_auth"
+    assert result.auth_reason == "session_expired"
+
+
+def test_body_code_401_is_session_expired():
+    """2xx 但 body 说 401，同样算失效。"""
+    api_map = {
+        "/api/pay/quota/metering/token-packs/summary": (200, {"code": 401, "msg": "未登录"}),
+        "/api/pay/quota/metering/api-usage/summary": _usage_ok(),
+        "/api/v1/user-current": _user_ok(),
+    }
+    page = _make_page("https://longcat.chat/platform/usage", api_map)
+    factory, _ = _make_factory(page)
+    result = asyncio.run(LongcatAdapter(factory).probe(_make_request()))
+
+    assert result.status == "needs_interactive_auth"
+    assert result.auth_reason == "session_expired"

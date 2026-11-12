@@ -4783,7 +4783,13 @@ const handleRemoteLoginFinish = async () => {
       remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginVerifyFailed')
       return
     }
-    remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginSuccess')
+    // 会话已经存下了；用量读没读到是另一回事。读不到就照实说一句，
+    // 不能让用户以为用量也刷新了（2026-11-13 线上：会话被误判丢掉，
+    // 用户看到的是「登录已失效，请重新登录」，而真相只是用量接口没读通）。
+    remoteLoginError.value = Boolean(result.message)
+    remoteLoginMessage.value = result.message
+      ? t('admin.accounts.webConsoleQuota.loginSavedButProbe', { reason: result.message })
+      : t('admin.accounts.webConsoleQuota.loginSuccess')
     // 服务端在 finish 时已经释放会话，这里只收面板，不再发一次取消请求。
     stopRemoteLoginPolling()
     remoteLoginOpen.value = false

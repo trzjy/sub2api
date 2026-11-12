@@ -391,27 +391,27 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 		return nil, err
 	}
 
-	// 关键：先验证，再落库。
+	// 会话是否可信，只认一件事：**能不能真的打开控制台**。
 	//
-	// 「当前网址落在控制台前缀内」只是页面位置，不是身份证据 —— 上游登录失败后
-	// 常常跳回原页面，这个判据会把未登录的会话当成成功（2026-11-13 线上：
-	// 美团扫码失败，界面却提示「已检测到登录完成」）。
+	// 这个判据在 worker 的 finish 里已经做过了（verify_effective：另开一页访问
+	// 控制台，看会不会被弹回登录页），能走到这里说明已经通过。所以这里不再用
+	// 探测结果给会话判死。
 	//
-	// 只有**明确的否定**才拦：worker 说 needs_interactive_auth / auth_failed。
-	// 探测报 error（如该上游适配器还没实现）属于「判不了」，不能据此判死，
-	// 否则一条链路永远登不上——判不了就交给 worker 的跳转校验和用户自己判断。
+	// 探测（读用量）**不参与**保存判定：读不到用量有无数原因——接口改路径、
+	// 限流、风控、适配器还没实现——任何一条都不足以推翻「控制台能打开」这个事实。
+	// 旧实现在这里拿探测结果否决落库，结果用户刚登好的会话被反复丢掉，
+	// 界面一直提示「登录已失效，请重新登录」，重登多少次都一样（2026-11-13 线上）。
+	// 判不了就如实说「用量这次没读到」，不许拿它冒充「你没登录」。
 	var verifiedProbe *WebConsoleQuotaProbeResult
+	var probeWarning string
 	if s.quotaService != nil {
 		probe, probeErr := s.quotaService.ProbeWithStorageState(ctx, account, storageState)
-		if probeErr == nil && probe != nil && webConsoleProbeSaysNotLoggedIn(probe.AuthState) {
-			// 不落库、不关会话：用户可以直接换「手机验证码登录」再来一次。
-			return &WebConsoleRemoteLoginResult{
-				Status:  webConsoleRemoteLoginStatusVerifyFailed,
-				Message: probe.AuthState,
-			}, nil
-		}
-		if probeErr == nil && probe != nil && probe.AuthState == webConsoleQuotaAuthStateOK {
-			verifiedProbe = probe
+		if probeErr == nil && probe != nil {
+			if probe.AuthState == webConsoleQuotaAuthStateOK {
+				verifiedProbe = probe
+			} else {
+				probeWarning = webConsoleProbeAuthStateReason(probe.AuthState)
+			}
 		}
 	}
 
@@ -431,6 +431,8 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 	result := &WebConsoleRemoteLoginResult{
 		Status:       "succeeded",
 		AccountLabel: strings.TrimSpace(finish.AccountLabel),
+		// 会话已保存；用量读没读到是另一件事，如实带一句，别让用户误以为用量也好了。
+		Message: probeWarning,
 	}
 	// 验证阶段已经探过一次并落库快照，这里直接复用，不再重复打上游。
 	if verifiedProbe != nil {
@@ -446,17 +448,20 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 // 内部：会话绑定与 worker 调用
 // ---------------------------------------------------------------------------
 
-// webConsoleProbeSaysNotLoggedIn 判断探测结果是否**明确**表示「没登录」。
+// webConsoleProbeAuthStateReason 把探测的 auth state 翻成给前端的一个稳定标签
+// （不是给人看的句子；前端按标签显示人话）。
 //
-// 只认 needs_interactive_auth / auth_failed 两个否定态：这两种是适配器真的
-// 走到上游、看到「要登录」才得出的结论。error 代表「没探成」（适配器未实现、
-// worker 不可用、超时），不能当未登录——否则该上游永远无法完成登录。
-func webConsoleProbeSaysNotLoggedIn(authState string) bool {
+// 只用于「会话已保存但用量没读到」的提示，绝不用于判死会话。
+func webConsoleProbeAuthStateReason(authState string) string {
 	switch strings.TrimSpace(authState) {
-	case webConsoleQuotaAuthStateNeedsInteractive, webConsoleQuotaAuthStateAuthFailed:
-		return true
+	case webConsoleQuotaAuthStateNeedsInteractive:
+		return "probe_needs_interactive"
+	case webConsoleQuotaAuthStateAuthFailed:
+		return "probe_auth_failed"
+	case "":
+		return "probe_unavailable"
 	default:
-		return false
+		return "probe_" + strings.TrimSpace(authState)
 	}
 }
 

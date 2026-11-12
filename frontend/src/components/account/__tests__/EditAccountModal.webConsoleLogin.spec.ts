@@ -2,8 +2,10 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { defineComponent } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 
-const { startLoginMock } = vi.hoisted(() => ({
-  startLoginMock: vi.fn()
+const { startLoginMock, finishMock, actionMock } = vi.hoisted(() => ({
+  startLoginMock: vi.fn(),
+  finishMock: vi.fn(),
+  actionMock: vi.fn()
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -38,8 +40,8 @@ vi.mock('@/api/admin', () => ({
     cnProviders: {
       startWebConsoleLogin: startLoginMock,
       getWebConsoleLoginFrame: vi.fn(),
-      postWebConsoleLoginAction: vi.fn(),
-      finishWebConsoleLogin: vi.fn(),
+      postWebConsoleLoginAction: actionMock,
+      finishWebConsoleLogin: finishMock,
       cancelWebConsoleLogin: vi.fn().mockResolvedValue(undefined)
     }
   }
@@ -193,6 +195,35 @@ describe('EditAccountModal 控制台登录面板', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="web-console-login-button-1"]').text()).toBe('手机验证码登录')
+    wrapper.unmount()
+  })
+
+  it('会话存下来了，但用量没读到：照实说，不冒充成功', async () => {
+    // 2026-11-13 线上：探测把「读不到用量」当成「没登录」，会话被反复丢掉，
+    // 用户看到的是「登录已失效，请重新登录」。现在会话照存，只把实话说清楚。
+    actionMock.mockReset()
+    actionMock.mockResolvedValue(null)
+    startLoginMock.mockResolvedValue({
+      session_id: 'sid-4',
+      status: 'pending',
+      phase: 'ready',
+      screenshot: 'AAAA',
+      fields: [{ index: 0, type: 'tel', label: '手机号', filled: false, masked: false }],
+      buttons: [],
+      form_state: 'ok'
+    })
+    finishMock.mockReset()
+    finishMock.mockResolvedValue({ status: 'succeeded', message: 'probe_needs_interactive' })
+    const wrapper = mountModal(buildConsoleAccount())
+    await wrapper.get('[data-testid="web-console-login-start"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="web-console-login-finish"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.webConsoleQuota.loginSavedButProbe')
+    // 注意：本文件的 i18n mock 只回 key、不做插值，所以断言不到具体 reason；
+    // 真实文案会把 {reason} 换成后端给的标签。
     wrapper.unmount()
   })
 

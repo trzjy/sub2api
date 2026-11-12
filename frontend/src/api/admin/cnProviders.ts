@@ -337,6 +337,10 @@ export async function finishWebConsoleLogin(
   id: number,
   sessionId: string
 ): Promise<{
+  // succeeded：会话已保存（message 为空表示用量也读到了；
+  // 非空表示「存了但用量没读到」，前端照实提示，不冒充成功）。
+  // verify_failed：只有 worker 判定「打开控制台仍被弹回登录页」才会出现 ——
+  // 用量读不到**不会**导致这个状态（2026-11-13 修：不再拿用量探测给会话判死）。
   status: 'succeeded' | 'pending' | 'verify_failed'
   probe?: WebConsoleQuotaProbeResult
   account_label?: string
