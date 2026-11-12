@@ -222,6 +222,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	switchCount := 0
 	profitVetoCount := 0
+	slotFullCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
@@ -353,6 +354,15 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			// 利润终检否决：排除该账号重新选号；否决次数达上限则按无可用账号终止。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
 				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
+				return
+			}
+			continue
+		}
+		if slotResult == openAISlotAcquireSlotFull {
+			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
+			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
 			continue

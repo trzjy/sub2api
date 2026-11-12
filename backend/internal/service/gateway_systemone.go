@@ -145,7 +145,7 @@ func (s *GatewayService) handleSystemOneErrorResponse(ctx context.Context, c *gi
 	if s.rateLimitService != nil {
 		shouldDisable = s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody, typesafe.JevLatestModel)
 	}
-	if !shouldDisable && !s.shouldFailoverUpstreamError(resp.StatusCode) {
+	if !shouldDisable && !s.shouldFailoverUpstreamError(account, resp.StatusCode, "") {
 		appendOpsUpstreamError(c, event)
 		return &SystemOneUpstreamError{StatusCode: resp.StatusCode}
 	}

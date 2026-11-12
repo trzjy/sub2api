@@ -31,7 +31,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -362,6 +361,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 	if platform == service.PlatformGemini {
 		fs := NewFailoverStateCapped(h.maxAccountSwitchesGemini, hasBoundSession)
+	slotFullCount := 0
 
 		// 单账号分组首次 503 就不设模型限流标记，避免设 29s 限流导致后续请求连续快速失败；
 		// 是否单账号分组在 antigravity 账号遇到 503 或模型限流预检查时才判定。
@@ -473,6 +473,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				if err != nil {
 					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 					releaseWait()
+					// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+					// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
+					if recordConcurrencySlotFailure(fs.FailedAccountIDs, account.ID, &slotFullCount) {
+						continue
+					}
 					h.handleConcurrencyError(c, err, "account", streamStarted)
 					return
 				}
@@ -736,6 +741,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 	for {
 		fs := NewFailoverState(hasBoundSession)
+	slotFullCount := 0
 		retryWithFallback := false
 
 		for {
@@ -868,6 +874,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				if err != nil {
 					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 					releaseWait()
+					// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+					// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
+					if recordConcurrencySlotFailure(fs.FailedAccountIDs, account.ID, &slotFullCount) {
+						continue
+					}
 					h.handleConcurrencyError(c, err, "account", streamStarted)
 					return
 				}
@@ -2175,9 +2186,10 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 
 	// 首字节护栏超时（网关合成 504）是本案重点关注类失败：必须向客户端写出携带可区分
 	// type 且不含类取消触发词的流内错误帧/JSON 错误体，避免被客户端翻译成「用户已取消」
-	// （方案文档 §1.4）。该失败由 newUpstreamFirstByteTimeoutError 合成，响应体 error.type
-	// 恒为 service.UpstreamFirstByteTimeoutType，据此识别并换用 M1 文案 SSOT。
-	if gjson.GetBytes(responseBody, "error.type").String() == service.UpstreamFirstByteTimeoutType {
+	// （方案文档 §1.4）。判定收口到 service.IsUpstreamFirstByteTimeout：优先认结构化
+	// 标记 Reason（覆盖 CN 家族首包超时——那条路径的响应体 type 是 upstream_error，
+	// 按字符串匹配压根判不到），Reason 缺失时回退响应体 error.type（历史构造点）。
+	if service.IsUpstreamFirstByteTimeout(failoverErr, responseBody) {
 		// 状态码沿用既有 504→502 失败关闭映射，仅替换可区分 type 与 M1 文案，不改变关闭语义。
 		status, _, _ := h.mapUpstreamError(statusCode)
 		fbMessage := pkgerrors.UpstreamFirstByteTimeoutJSON

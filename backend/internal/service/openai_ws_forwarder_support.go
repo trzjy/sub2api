@@ -724,6 +724,7 @@ func (s *OpenAIGatewayService) newOpenAIWSRateLimitFailoverError(account *Accoun
 		strings.TrimSpace(message),
 		false,
 		false,
+		"",
 	)
 }
 

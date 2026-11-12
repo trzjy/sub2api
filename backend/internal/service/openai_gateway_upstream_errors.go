@@ -304,20 +304,20 @@ func isOpenAIContextWindowError(upstreamMsg string, upstreamBody []byte) bool {
 }
 
 func (s *OpenAIGatewayService) shouldFailoverUpstreamError(statusCode int) bool {
-	switch statusCode {
-	case 401, 402, 403, 405, 429, 529:
-		return true
-	default:
-		return statusCode >= 500
-	}
+	return shouldFailoverUpstreamStatusCode(statusCode)
 }
 
-func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(account *Account, statusCode int, upstreamMsg string, upstreamBody []byte) bool {
+func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(account *Account, statusCode int, upstreamMsg string, upstreamBody []byte, mappingLookupModel string) bool {
 	// cyber_policy is request-scoped even when an intermediary wraps the
 	// provider response in a retryable 5xx status. Never punish or rotate the
 	// selected credential for it.
 	if hit, _, _ := detectOpenAICyberPolicy(upstreamBody); hit {
 		return false
+	}
+	// 模型名被改写后上游拒绝的，请求本身对客户是合法的 —— 责任在账号/上游侧，
+	// 换号才有机会通过。判据见 upstream_failover_policy.go。
+	if IsMappingInducedRejection(account, mappingLookupModel, statusCode) {
+		return true
 	}
 	if isOpenAIContextWindowError(upstreamMsg, upstreamBody) {
 		return false
@@ -502,8 +502,9 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverError(
 	upstreamMsg string,
 	shouldDisable bool,
 	retryableOnSameAccount bool,
+	mappingLookupModel string,
 ) *UpstreamFailoverError {
-	return s.newOpenAIAccountFailoverErrorWithClassificationHeaders(account, statusCode, responseHeaders, responseHeaders, responseBody, upstreamMsg, shouldDisable, retryableOnSameAccount)
+	return s.newOpenAIAccountFailoverErrorWithClassificationHeaders(account, statusCode, responseHeaders, responseHeaders, responseBody, upstreamMsg, shouldDisable, retryableOnSameAccount, mappingLookupModel)
 }
 
 func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHeaders(
@@ -515,6 +516,7 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHe
 	upstreamMsg string,
 	shouldDisable bool,
 	retryableOnSameAccount bool,
+	mappingLookupModel string,
 ) *UpstreamFailoverError {
 	oauth429Retry := s.shouldRetryOpenAIOAuth429OnSameAccountWithResponse(account, statusCode, shouldDisable, classificationHeaders, responseBody)
 	failoverErr := newOpenAIUpstreamFailoverError(
@@ -533,6 +535,9 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHe
 	if failoverErr.IsOpenAIUpstreamSafetyRejection() {
 		failoverErr.ExcludeUpstreamHost = upstreamHostOfAccount(account)
 	}
+	// 模型名被改写导致的上游拒绝：责任在账号侧，换号、不停号，耗尽时告知
+	// 「上游不可用」而不是把上游原文（客户改不动的报错）透传出去。
+	applyMappingInducedRejection(failoverErr, IsMappingInducedRejection(account, mappingLookupModel, statusCode))
 	return failoverErr
 }
 

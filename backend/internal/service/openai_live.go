@@ -256,6 +256,7 @@ func (s *OpenAIGatewayService) shouldFailoverLiveCreateError(account *Account, e
 		upstreamErr.StatusCode,
 		"",
 		upstreamErr.ResponseBody,
+		"",
 	)
 }
 

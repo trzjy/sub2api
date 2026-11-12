@@ -698,6 +698,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	switchCount := 0
 	firstOutputTimeoutSwitchCount := 0
 	profitVetoCount := 0
+	slotFullCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
@@ -886,6 +887,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
 				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
+				return
+			}
+			continue
+		}
+		if slotResult == openAISlotAcquireSlotFull {
+			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
+			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
 			continue
@@ -1514,6 +1524,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	switchCount := 0
 	profitVetoCount := 0
+	slotFullCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
@@ -1661,6 +1672,15 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
 				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
+				return
+			}
+			continue
+		}
+		if slotResult == openAISlotAcquireSlotFull {
+			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
+			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
 			continue
@@ -2617,6 +2637,11 @@ const (
 	// 未写任何响应；调用方应经 recordOpenAIProfitVeto 把该账号加入本请求排除集
 	// 后重新选号，全池耗尽由下一轮选号返回标准 no available accounts。
 	openAISlotAcquireProfitVetoed
+	// openAISlotAcquireSlotFull：账号槽位等不到（等待超时）。**响应尚未写出**，
+	// 调用方应经 recordConcurrencySlotFailure 把该账号加入本请求排除集后换同组
+	// 下一个账号再试；候选耗尽时由调用方用 writeConcurrencySlotExhausted 写出
+	// 终态 503（与既有「槽位等不到」出口逐字节一致）。
+	openAISlotAcquireSlotFull
 )
 
 // openAIWSTurnPricing 持有 WebSocket 连接内「当前 turn」的计费定价时刻。
@@ -2802,6 +2827,8 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 			h.handleStreamingAwareErrorWithCode(c, status, errType, code, message, *streamStarted, false)
 		}
 	}
+	// 暂存本端点的错误写出回调：槽位换号耗尽时要沿用同一格式写出终态 503。
+	setConcurrencySlotWriteError(c, writeError)
 	if selection == nil || selection.Account == nil {
 		markOpsRoutingCapacityLimited(c)
 		writeError(http.StatusServiceUnavailable, "api_error", "", infraerrors.NoAvailableAccounts)
@@ -2907,9 +2934,10 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	)
 	if err != nil {
 		reqLog.Warn("openai.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-		status, errType, code, message := concurrencyErrorResponse(err, "account", "")
-		writeError(status, errType, code, message)
-		return nil, openAISlotAcquireFailed
+		// 槽位等不到：响应尚未写出，交给调用方决定「换同组下一个账号」还是终止。
+		// 换号耗尽时的终态错误由调用方用 writeConcurrencySlotExhausted 写出，
+		// 与既有出口逐字节一致（503 + 同一文案 + 同一 code）。
+		return nil, openAISlotAcquireSlotFull
 	}
 
 	// Slot acquired: no longer waiting in queue.
@@ -4360,8 +4388,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	// failoverErr.Reason == service.GatewayFirstByteTimeoutReason 判定（该常量由 G1-a 在
 	// service 包新增，handler 包只引用不重复定义）；同时保留 StatusCode==504 作为辅助条件，
 	// 两者同时满足才走专门分支，避免把其它 504 误判为首字节超时。文案引用既有 SSOT 常量。
-	if failoverErr != nil &&
-		failoverErr.Reason == service.GatewayFirstByteTimeoutReason &&
+	if service.IsUpstreamFirstByteTimeout(failoverErr, responseBody) &&
 		statusCode == http.StatusGatewayTimeout {
 		errType := service.UpstreamFirstByteTimeoutType
 		// 流是否已开始应以「响应是否已提交」为准，而非仅看传入的 streamStarted：

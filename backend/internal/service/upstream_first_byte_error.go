@@ -3,6 +3,8 @@ package service
 import (
 	"net/http"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 // UpstreamFirstByteTimeoutType 是首字节护栏超时的错误类型标识（SSOT）。
@@ -38,6 +40,24 @@ var upstreamFirstByteTimeoutBody = []byte(`{"error":{"type":"` + UpstreamFirstBy
 // 剩余预算 ≥ 该阈值才允许换号；低于则视为预算耗尽，交由既有 FailoverExhausted
 // 路径消费（handleFailoverExhausted(streamStarted)），与已接受设计一致。
 const upstreamFirstByteMinViableWindow = 5 * time.Second
+
+// IsUpstreamFirstByteTimeout 判定「本次失败是首字节 / 首包 / 首输出超时」。
+//
+// 这是该判定的**唯一事实源**。此前两侧 handler 各自解释、各自漏判：
+//   - OpenAI 侧只认结构化标记 Reason，覆盖通用护栏与 CN 家族首包超时，
+//     但 OpenAI 自己的首输出超时没设 Reason → 被降级成 502「上游服务暂时不可用」，
+//     客户看到的不是「上游没在时限内返回」，排障时被误导；
+//   - Anthropic 侧只认响应体的 error.type 字符串，CN 家族首包超时的响应体 type
+//     是 upstream_error，压根判不到（该路径的客户走的是另一条分支）。
+//
+// 判定顺序：先认结构化标记 Reason（事实，不受文案调整影响）；Reason 缺失时回退到
+// 响应体 error.type（历史构造点与既有契约测试以响应体为准）。
+func IsUpstreamFirstByteTimeout(failoverErr *UpstreamFailoverError, responseBody []byte) bool {
+	if failoverErr != nil && failoverErr.Reason == GatewayFirstByteTimeoutReason {
+		return true
+	}
+	return gjson.GetBytes(responseBody, "error.type").String() == UpstreamFirstByteTimeoutType
+}
 
 // newUpstreamFirstByteTimeoutError 产出平台无关的首字节护栏超时错误。
 //

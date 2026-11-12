@@ -566,7 +566,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 				return s.ForwardAsAnthropic(markGrokEncryptedContentStripRetried(ctx), c, account, strippedBody, promptCacheKey, defaultMappedModel)
 			}
 		}
-		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
+		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel, normalizedModel); foErr != nil {
 			return nil, foErr
 		}
 		// Non-failover error: return Anthropic-formatted error to client

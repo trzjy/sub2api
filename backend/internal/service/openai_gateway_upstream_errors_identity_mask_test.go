@@ -252,7 +252,7 @@ func TestMaskedFailoverStash_HTTPError(t *testing.T) {
 				Body:       io.NopCloser(bytes.NewReader(body)),
 				Header:     http.Header{},
 			}
-			ferr := svc.failoverOpenAIUpstreamHTTPError(context.Background(), c, acct, resp, body, upstreamMsg, upstreamModel)
+			ferr := svc.failoverOpenAIUpstreamHTTPError(context.Background(), c, acct, resp, body, upstreamMsg, upstreamModel, "")
 
 			// 500 is unconditionally failover-eligible, so the producer path
 			// must yield an *UpstreamFailoverError for both account kinds.

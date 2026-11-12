@@ -282,6 +282,12 @@ func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 		StatusCode:      http.StatusGatewayTimeout,
 		ResponseBody:    []byte(`{"error":{"type":"first_output_timeout","message":"Upstream produced no output before the deadline"}}`),
 		ResponseHeaders: responseHeaders.Clone(), SafeToFailoverAfterWrite: true,
+		// 结构化标记：让 handler 能识别这是「上游未在时限内返回」，而不是把它
+		// 当成普通 5xx 降级成 502「上游服务暂时不可用」。此前本条没设 Reason，
+		// OpenAI 侧 504 专属分支要求 Reason == GatewayFirstByteTimeoutReason，
+		// 于是首输出超时被统一映射成 502，客户看到的是「上游挂了」而非「没回话」，
+		// 排障方向被带偏。
+		Reason: GatewayFirstByteTimeoutReason,
 	}
 }
 

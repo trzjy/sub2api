@@ -137,6 +137,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 	}
 
 	failedAccounts := make(map[int64]struct{})
+	slotFullCount := 0
 	var account *service.Account
 	var accountReleaseFunc func()
 	var nativeResp *websearch.SearchResponse
@@ -180,6 +181,11 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		if !acquireOK {
 			// First hop: surface concurrency errors; later hops try another account.
 			if attempt == 0 && acquireErr != nil {
+				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
+				if recordConcurrencySlotFailure(failedAccounts, selected.Account.ID, &slotFullCount) {
+					continue
+				}
 				h.handleConcurrencyError(c, acquireErr, "account", false)
 				return
 			}

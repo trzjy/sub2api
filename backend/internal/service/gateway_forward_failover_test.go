@@ -12,10 +12,10 @@ func TestShouldFailoverUpstreamError_Includes402(t *testing.T) {
 	svc := &GatewayService{}
 
 	for _, code := range []int{401, 402, 403, 405, 429, 529, 500, 502, 503, 504} {
-		assert.True(t, svc.shouldFailoverUpstreamError(code), "status %d should trigger failover", code)
+		assert.True(t, svc.shouldFailoverUpstreamError(nil, code, ""), "status %d should trigger failover", code)
 	}
 
 	for _, code := range []int{200, 201, 400, 404, 408, 422} {
-		assert.False(t, svc.shouldFailoverUpstreamError(code), "status %d should NOT trigger failover", code)
+		assert.False(t, svc.shouldFailoverUpstreamError(nil, code, ""), "status %d should NOT trigger failover", code)
 	}
 }

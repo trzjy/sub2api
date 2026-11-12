@@ -163,6 +163,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	switchCount := 0
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	slotFullCount := 0
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	stopJSONKeepalive := func() {}
@@ -240,6 +241,15 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			// Images 调度不装利润门，此分支实际不可达；防御性排除重选并受同一否决上限约束。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
 				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
+				return
+			}
+			continue
+		}
+		if slotResult == openAISlotAcquireSlotFull {
+			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
+			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
 			continue

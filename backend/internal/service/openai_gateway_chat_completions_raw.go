@@ -287,7 +287,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 			}
 			return s.handleChatCompletionsErrorResponse(resp, c, account, billingModel)
 		}
-		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
+		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel, originalModel); foErr != nil {
 			return nil, foErr
 		}
 		return s.handleChatCompletionsErrorResponse(resp, c, account, billingModel)

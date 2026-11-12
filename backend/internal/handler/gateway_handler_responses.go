@@ -213,6 +213,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 
 	// 3. Account selection + failover loop
 	fs := NewFailoverState(false)
+	slotFullCount := 0
 
 	for {
 		if failoverClientGone(c) {
@@ -270,6 +271,11 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			)
 			if err != nil {
 				reqLog.Warn("gateway.responses.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
+				if recordConcurrencySlotFailure(fs.FailedAccountIDs, account.ID, &slotFullCount) {
+					continue
+				}
 				h.handleConcurrencyError(c, err, "account", streamStarted)
 				return
 			}

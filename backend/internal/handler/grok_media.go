@@ -209,6 +209,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	requestCtx := service.WithOpenAIProfitControlSuppressed(c.Request.Context())
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	slotFullCount := 0
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
@@ -365,6 +366,15 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			// 同样受否决上限约束。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
 				h.handleOpenAIProfitVetoExhausted(c, streamStarted, reqLog, profitVetoCount)
+				return
+			}
+			continue
+		}
+		if slotResult == openAISlotAcquireSlotFull {
+			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时写出与既有出口一致的 503。
+			if !recordConcurrencySlotFailure(failedAccountIDs, account.ID, &slotFullCount) {
+				writeConcurrencySlotExhausted(c, h, streamStarted)
 				return
 			}
 			continue

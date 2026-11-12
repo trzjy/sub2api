@@ -64,7 +64,7 @@ func TestOpenAICompatibleModelNotFound400FailoverScope(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, svc.shouldFailoverOpenAIUpstreamResponse(
-				tc.account, http.StatusBadRequest, "model not found", body,
+				tc.account, http.StatusBadRequest, "model not found", body, "",
 			))
 		})
 	}
@@ -74,6 +74,7 @@ func TestOpenAICompatibleModelNotFound400FailoverScope(t *testing.T) {
 		http.StatusBadRequest,
 		"Invalid value for temperature",
 		[]byte(`{"error":{"code":"invalid_request_error","message":"Invalid value for temperature"}}`),
+		"",
 	))
 }
 
@@ -86,6 +87,7 @@ func TestOpenAICompatibleModelNotFound400WithoutManagedCandidatesRemainsTerminal
 		http.StatusBadRequest,
 		"model not found",
 		body,
+		"",
 	))
 }
 
@@ -97,7 +99,7 @@ func TestFailoverOpenAIUpstreamHTTPError_ModelNotFoundIsNextAccountEligible(t *t
 	resp := newOpenAIUpstreamErrorResponse(http.StatusBadRequest, string(body))
 
 	failoverErr := svc.failoverOpenAIUpstreamHTTPError(
-		context.Background(), c, account, resp, body, "model not found", "missing-model",
+		context.Background(), c, account, resp, body, "model not found", "missing-model", "",
 	)
 
 	require.NotNil(t, failoverErr)

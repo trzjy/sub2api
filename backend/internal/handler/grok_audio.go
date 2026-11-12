@@ -66,6 +66,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	// Realtime is not an HTTP streaming response; using reqStream=true here would
 	// let the wait queue flush an SSE ping before the WebSocket handshake succeeds.
 	failed := map[int64]struct{}{}
+	slotFullCount := 0
 	var selection *service.AccountSelectionResult
 	var release func()
 	var token string
@@ -94,6 +95,14 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		if slotStatus != openAISlotAcquireOK {
 			if slotStatus == openAISlotAcquireFailed {
 				return
+			}
+			if slotStatus == openAISlotAcquireSlotFull {
+				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+				if !recordConcurrencySlotFailure(failed, account.ID, &slotFullCount) {
+					writeConcurrencySlotExhausted(c, h, streamStarted)
+					return
+				}
+				continue
 			}
 			failed[account.ID] = struct{}{}
 			continue
@@ -243,6 +252,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 	}
 
 	failed := map[int64]struct{}{}
+	slotFullCount := 0
 	var last *service.UpstreamFailoverError
 	reqLog := requestLogger(c, "handler.openai_gateway.grok_voice", zap.String("endpoint", endpoint))
 	selectionModel := "grok-4.5"
@@ -283,6 +293,14 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			if status == openAISlotAcquireFailed && len(failed) == 0 {
 				// Slot path wrote the response; stop.
 				return
+			}
+			if status == openAISlotAcquireSlotFull {
+				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+				if !recordConcurrencySlotFailure(failed, account.ID, &slotFullCount) {
+					writeConcurrencySlotExhausted(c, h, started)
+					return
+				}
+				continue
 			}
 			failed[account.ID] = struct{}{}
 			continue

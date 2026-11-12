@@ -50,13 +50,15 @@ func (s *GatewayService) shouldRetryUpstreamError(account *Account, statusCode i
 
 // shouldFailoverUpstreamError determines whether an upstream error should trigger account failover.
 // 402 与 OpenAI 网关口径一致：上游"余额/额度耗尽"即该账号当前不可服务，应切换而非透传。
-func (s *GatewayService) shouldFailoverUpstreamError(statusCode int) bool {
-	switch statusCode {
-	case 401, 402, 403, 405, 429, 529:
+//
+// mappingLookupModel 是「本次请求实际用于账号模型映射查表的模型名」：模型名被改写后
+// 上游拒绝的，请求本身对客户是合法的，责任在账号/上游侧，换号才有机会通过。
+// 判据见 upstream_failover_policy.go（与 OpenAI 网关共用同一份）。
+func (s *GatewayService) shouldFailoverUpstreamError(account *Account, statusCode int, mappingLookupModel string) bool {
+	if IsMappingInducedRejection(account, mappingLookupModel, statusCode) {
 		return true
-	default:
-		return statusCode >= 500
 	}
+	return shouldFailoverUpstreamStatusCode(statusCode)
 }
 
 func retryBackoffDelay(attempt int) time.Duration {
@@ -367,6 +369,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// - APIKey 账号：使用账号级别的显式映射（如果配置），否则透传原始模型名
 	// - OAuth/SetupToken 账号：使用 Anthropic 标准映射（短ID → 长ID）
 	mappedModel := reqModel
+	// mappingLookupModel 快照「本次实际用于查表的模型名」：reqModel 在下方 :401 会被
+	// 覆写成映射后的名字，错误判定处需要的是查表时的那一个。
+	mappingLookupModel := reqModel
 	mappingSource := ""
 	if account.Type == AccountTypeAPIKey {
 		mappedModel = account.GetMappedModel(reqModel)
@@ -805,7 +810,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// 处理重试耗尽的情况
 	if resp.StatusCode >= 400 && s.shouldRetryUpstreamError(account, resp.StatusCode) {
-		if s.shouldFailoverUpstreamError(resp.StatusCode) {
+		if s.shouldFailoverUpstreamError(account, resp.StatusCode, mappingLookupModel) {
 			respBody, _ := s.readUpstreamErrorBody(resp)
 			_ = resp.Body.Close()
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
@@ -832,17 +837,19 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 					return ""
 				}(),
 			})
-			return nil, &UpstreamFailoverError{
+			failoverErr := &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,
 				RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
 			}
+			applyMappingInducedRejection(failoverErr, IsMappingInducedRejection(account, mappingLookupModel, resp.StatusCode))
+			return nil, failoverErr
 		}
 		return s.handleRetryExhaustedError(ctx, resp, c, account, reqModel)
 	}
 
 	// 处理可切换账号的错误
-	if resp.StatusCode >= 400 && s.shouldFailoverUpstreamError(resp.StatusCode) {
+	if resp.StatusCode >= 400 && s.shouldFailoverUpstreamError(account, resp.StatusCode, mappingLookupModel) {
 		respBody, _ := s.readUpstreamErrorBody(resp)
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
@@ -868,11 +875,13 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				return ""
 			}(),
 		})
-		return nil, &UpstreamFailoverError{
+		failoverErr := &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           respBody,
 			RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
 		}
+		applyMappingInducedRejection(failoverErr, IsMappingInducedRejection(account, mappingLookupModel, resp.StatusCode))
+		return nil, failoverErr
 	}
 	if resp.StatusCode >= 400 {
 		// 可选：对部分 400 触发 failover（默认关闭以保持语义）

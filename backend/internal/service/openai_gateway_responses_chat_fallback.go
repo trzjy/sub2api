@@ -137,7 +137,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
 		// 临时取证：sensenova 400 inference request is invalid，取证结束后删除
 		observeSensenovaInvalidRequest(account, "responses_chat_fallback", resp.StatusCode, chatBody, respBody)
-		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
+		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel, originalModel); foErr != nil {
 			return nil, foErr
 		}
 		return s.handleErrorResponse(ctx, resp, c, account, chatBody, billingModel)

@@ -25,7 +25,7 @@ func TestOpenAICCBodyLimit413_FailsOverWithoutTransientCooldown(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		c := codeBuddy429TestContext()
 		failoverErr := svc.failoverOpenAIUpstreamHTTPError(context.Background(), c, account,
-			codeBuddy429UpstreamResponse(http.StatusRequestEntityTooLarge), body, "", model)
+			codeBuddy429UpstreamResponse(http.StatusRequestEntityTooLarge), body, "", model, "")
 		require.NotNil(t, failoverErr)
 		require.True(t, failoverErr.IsOpenAIRequestBodyTooLarge())
 		require.True(t, failoverErr.ShouldRetryNextAccount())
@@ -38,7 +38,7 @@ func TestOpenAICCBodyLimit413_FailsOverWithoutTransientCooldown(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		c := codeBuddy429TestContext()
 		require.NotNil(t, svc.failoverOpenAIUpstreamHTTPError(context.Background(), c, control,
-			codeBuddy429UpstreamResponse(http.StatusBadGateway), []byte(`{"error":{"message":"internal server error"}}`), "", model))
+			codeBuddy429UpstreamResponse(http.StatusBadGateway), []byte(`{"error":{"message":"internal server error"}}`), "", model, ""))
 	}
 	require.True(t, svc.isOpenAIAccountRequestRuntimeBlocked(control, model), "502 keeps the existing cooldown behavior")
 }

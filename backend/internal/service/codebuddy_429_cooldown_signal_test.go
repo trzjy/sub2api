@@ -195,7 +195,7 @@ func TestCodeBuddyFailoverSignal_Non429ReturnsNilAndFallbackKeepsGenericHelper(t
 	require.Empty(t, codeBuddy429OpsEvents(c), "no ops event when signal misses")
 
 	// /responses nil 回退：既有通用 helper 仍产生 failover（R4-F2 回归，不得因新分流丢失）。
-	helperErr := s.failoverOpenAIUpstreamHTTPError(context.Background(), c, account, resp, body, "rate limit exceeded", "deepseek-chat")
+	helperErr := s.failoverOpenAIUpstreamHTTPError(context.Background(), c, account, resp, body, "rate limit exceeded", "deepseek-chat", "")
 	require.NotNil(t, helperErr)
 	require.True(t, helperErr.ShouldRetryNextAccount())
 }

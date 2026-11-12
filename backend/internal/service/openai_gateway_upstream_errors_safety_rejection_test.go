@@ -96,11 +96,11 @@ func TestShouldFailoverOpenAIUpstreamResponse_SafetyRejection(t *testing.T) {
 
 	body := `{"error":{"code":"9","message":"safety check failed","type":"failed_precondition_error"}}`
 	assert.True(t,
-		s.shouldFailoverOpenAIUpstreamResponse(account, http.StatusBadRequest, "safety check failed", []byte(body)),
+		s.shouldFailoverOpenAIUpstreamResponse(account, http.StatusBadRequest, "safety check failed", []byte(body), ""),
 		"审核拒绝必须换号")
 
 	assert.False(t,
-		s.shouldFailoverOpenAIUpstreamResponse(account, http.StatusBadRequest, "invalid temperature", []byte(`{"error":{"message":"invalid temperature"}}`)),
+		s.shouldFailoverOpenAIUpstreamResponse(account, http.StatusBadRequest, "invalid temperature", []byte(`{"error":{"message":"invalid temperature"}}`), ""),
 		"普通 400 仍按客户端错误透传")
 }
 
@@ -233,13 +233,13 @@ func TestNewOpenAIAccountFailoverError_CarriesUpstreamHostForSafety(t *testing.T
 	}
 
 	safetyBody := []byte(`{"error":{"code":"9","message":"safety check failed","type":"failed_precondition_error"}}`)
-	foErr := s.newOpenAIAccountFailoverError(account, http.StatusBadRequest, http.Header{}, safetyBody, "safety check failed", false, false)
+	foErr := s.newOpenAIAccountFailoverError(account, http.StatusBadRequest, http.Header{}, safetyBody, "safety check failed", false, false, "")
 	require.NotNil(t, foErr)
 	assert.True(t, foErr.IsOpenAIUpstreamSafetyRejection())
 	assert.Equal(t, "token.sensenova.cn", foErr.ExcludeUpstreamHost)
 
 	plainBody := []byte(`{"error":{"message":"invalid temperature","type":"invalid_request_error"}}`)
-	plainErr := s.newOpenAIAccountFailoverError(account, http.StatusBadRequest, http.Header{}, plainBody, "invalid temperature", false, false)
+	plainErr := s.newOpenAIAccountFailoverError(account, http.StatusBadRequest, http.Header{}, plainBody, "invalid temperature", false, false, "")
 	require.NotNil(t, plainErr)
 	assert.Empty(t, plainErr.ExcludeUpstreamHost, "普通 400 不应触发同源排除")
 }
