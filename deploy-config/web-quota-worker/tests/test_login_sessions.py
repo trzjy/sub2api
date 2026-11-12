@@ -25,6 +25,7 @@ from login_sessions import (
     press_key,
     tap,
     type_text,
+    verify_effective,
 )
 
 FAKE_JPEG = b"\xff\xd8jpegbytes"
@@ -324,5 +325,83 @@ def test_unknown_session_id_raises_not_found():
         with pytest.raises(LoginSessionError) as excinfo:
             await registry.get("nope")
         assert excinfo.value.code == "session_not_found"
+
+    asyncio.run(case())
+
+
+# ---------------------------------------------------------------------------
+# 生效性校验：网址看着对不代表真的登上了（2026-11-13 美团扫码失败实证）
+# ---------------------------------------------------------------------------
+
+
+class _VerifyPage:
+    """用于 verify_effective 的验证页替身：goto 之后停在 land_on。"""
+
+    def __init__(self, land_on, raise_on_goto=False):
+        self.url = "about:blank"
+        self._land_on = land_on
+        self._raise = raise_on_goto
+        self.closed = False
+
+    async def goto(self, url, **_kwargs):
+        if self._raise:
+            raise RuntimeError("net down")
+        self.url = self._land_on
+
+    async def wait_for_timeout(self, _ms):
+        return None
+
+    async def close(self):
+        self.closed = True
+
+
+async def _verify(session, verify_page):
+    context = session.context
+    context.new_page = _async_mock(return_value=verify_page)
+    return await verify_effective(session)
+
+
+def test_verify_effective_rejects_session_bounced_back_to_login():
+    """被弹回登录域名 = 这次登录没生效，必须判失败（否则会存垃圾凭据）。"""
+
+    async def case():
+        registry = LoginSessionRegistry(_factory(FakeContext(FakePage())))
+        session = await _start(registry, success_prefix="https://console.example.com/")
+        page = _VerifyPage("https://passport.example.com/login")
+        assert await _verify(session, page) is False
+        assert page.closed is True
+
+    asyncio.run(case())
+
+
+def test_verify_effective_accepts_session_that_stays_on_console():
+    async def case():
+        registry = LoginSessionRegistry(_factory(FakeContext(FakePage())))
+        session = await _start(registry, success_prefix="https://console.example.com/")
+        page = _VerifyPage("https://console.example.com/usage")
+        assert await _verify(session, page) is True
+
+    asyncio.run(case())
+
+
+def test_verify_effective_fails_open_when_check_itself_errors():
+    """校验过程本身出错（网络抖动）不能把好登录判死。"""
+
+    async def case():
+        registry = LoginSessionRegistry(_factory(FakeContext(FakePage())))
+        session = await _start(registry, success_prefix="https://console.example.com/")
+        page = _VerifyPage("", raise_on_goto=True)
+        assert await _verify(session, page) is True
+
+    asyncio.run(case())
+
+
+def test_verify_effective_skips_when_no_prefix_declared():
+    async def case():
+        registry = LoginSessionRegistry(_factory(FakeContext(FakePage())))
+        session = await _start(registry, success_prefix="")
+        page = _VerifyPage("https://passport.example.com/login")
+        assert await _verify(session, page) is True
+        assert page.closed is False
 
     asyncio.run(case())

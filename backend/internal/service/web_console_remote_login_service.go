@@ -350,6 +350,14 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 		return nil, err
 	}
 	if statusCode == http.StatusConflict || finish.Status == webConsoleRemoteLoginStatusPending {
+		// 「页面看着像登上了、实际没生效」要单独告诉用户，而不是笼统说「还没登录」：
+		// 前者要换登录方式，后者只是继续操作。
+		if strings.TrimSpace(finish.Error) == "login_not_effective" {
+			return &WebConsoleRemoteLoginResult{
+				Status:  webConsoleRemoteLoginStatusVerifyFailed,
+				Message: finish.Error,
+			}, nil
+		}
 		return &WebConsoleRemoteLoginResult{Status: webConsoleRemoteLoginStatusPending}, nil
 	}
 	if statusCode < 200 || statusCode >= 300 {
@@ -371,18 +379,23 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 	// 「当前网址落在控制台前缀内」只是页面位置，不是身份证据 —— 上游登录失败后
 	// 常常跳回原页面，这个判据会把未登录的会话当成成功（2026-11-13 线上：
 	// 美团扫码失败，界面却提示「已检测到登录完成」）。
-	// 唯一可靠的判据是：用这份会话能不能真的读到用量。
+	//
+	// 只有**明确的否定**才拦：worker 说 needs_interactive_auth / auth_failed。
+	// 探测报 error（如该上游适配器还没实现）属于「判不了」，不能据此判死，
+	// 否则一条链路永远登不上——判不了就交给 worker 的跳转校验和用户自己判断。
 	var verifiedProbe *WebConsoleQuotaProbeResult
 	if s.quotaService != nil {
 		probe, probeErr := s.quotaService.ProbeWithStorageState(ctx, account, storageState)
-		if probeErr == nil && probe != nil && probe.AuthState != webConsoleQuotaAuthStateOK {
+		if probeErr == nil && probe != nil && webConsoleProbeSaysNotLoggedIn(probe.AuthState) {
 			// 不落库、不关会话：用户可以直接换「手机验证码登录」再来一次。
 			return &WebConsoleRemoteLoginResult{
 				Status:  webConsoleRemoteLoginStatusVerifyFailed,
 				Message: probe.AuthState,
 			}, nil
 		}
-		verifiedProbe = probe
+		if probeErr == nil && probe != nil && probe.AuthState == webConsoleQuotaAuthStateOK {
+			verifiedProbe = probe
+		}
 	}
 
 	currentUsername := account.GetCredential(webConsoleQuotaCredentialKeyUsername)
@@ -415,6 +428,20 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 // ---------------------------------------------------------------------------
 // 内部：会话绑定与 worker 调用
 // ---------------------------------------------------------------------------
+
+// webConsoleProbeSaysNotLoggedIn 判断探测结果是否**明确**表示「没登录」。
+//
+// 只认 needs_interactive_auth / auth_failed 两个否定态：这两种是适配器真的
+// 走到上游、看到「要登录」才得出的结论。error 代表「没探成」（适配器未实现、
+// worker 不可用、超时），不能当未登录——否则该上游永远无法完成登录。
+func webConsoleProbeSaysNotLoggedIn(authState string) bool {
+	switch strings.TrimSpace(authState) {
+	case webConsoleQuotaAuthStateNeedsInteractive, webConsoleQuotaAuthStateAuthFailed:
+		return true
+	default:
+		return false
+	}
+}
 
 func (s *WebConsoleRemoteLoginService) boundSession(accountID int64, sessionID string) (*remoteLoginBinding, error) {
 	trimmed := strings.TrimSpace(sessionID)

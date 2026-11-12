@@ -361,6 +361,50 @@ async def snapshot_storage_state(session: LoginSession) -> str:
     return json.dumps(state)
 
 
+# 生效性校验的导航超时：比首帧短，校验失败不该把 finish 拖成超时。
+LOGIN_VERIFY_TIMEOUT_MS = 25000
+
+
+async def verify_effective(session: LoginSession) -> bool:
+    """另开一页访问控制台入口，看「没登录的会话」会不会被弹回登录页。
+
+    为什么不能只看当前网址：上游登录失败后常常跳回原页面，网址落在控制台
+    前缀内，就被误判成「登录成功」——2026-11-13 美团扫码失败，界面却提示
+    「已检测到登录完成」，正是这个误判。
+
+    改判据为**跳转落点**：拿同一个 context 新开一页访问控制台入口。
+    没登录 → 被重定向到登录域名（如 passport.*）；登录有效 → 停在控制台。
+    这只依赖「会不会被踢走」这个结构性事实，不猜任何站点文案。
+
+    返回值语义：
+    - True：校验通过，或压根没法校验（跳过）
+    - False：明确被弹回别的域名 = 这次登录没生效
+    校验过程本身出错（网络抖动）不误伤，按通过处理，避免把好登录判死。
+    """
+    prefix = (session.success_url_prefix or "").strip()
+    if not prefix:
+        return True
+    probe_page = None
+    try:
+        probe_page = await session.context.new_page()
+        await probe_page.goto(
+            prefix, wait_until="domcontentloaded", timeout=LOGIN_VERIFY_TIMEOUT_MS
+        )
+        await probe_page.wait_for_timeout(1000)
+        landed = (probe_page.url or "").strip()
+        if not landed:
+            return True
+        return landed.startswith(prefix)
+    except Exception:  # noqa: BLE001 - 校验失败不误伤
+        return True
+    finally:
+        if probe_page is not None:
+            try:
+                await probe_page.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 # ---------------------------------------------------------------------------
 # 通用表单识别：把页面上的输入框与按钮报给前端，让用户像填普通表单一样填
 # ---------------------------------------------------------------------------

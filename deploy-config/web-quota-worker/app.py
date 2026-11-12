@@ -179,6 +179,11 @@ _BROWSER_PATCH_JS = """
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
   } catch (e) {}
   try {
+    // platform 必须和 UA 一致：UA 写 Windows、platform 却是 Linux x86_64，
+    // 这种自相矛盾本身就是风控特征。
+    Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
+  } catch (e) {}
+  try {
     Object.defineProperty(navigator, 'languages', { get: () => %LANGUAGES%, configurable: true });
   } catch (e) {}
   try {
@@ -348,6 +353,7 @@ from login_sessions import (  # noqa: E402  (路由段集中在此，便于审�
     tap as tap_login_page,
     toggle_field,
     type_text,
+    verify_effective,
 )
 
 _login_registry = LoginSessionRegistry(make_context)
@@ -659,6 +665,15 @@ async def login_finish(session_id: str, request: Request):
         return JSONResponse(
             status_code=409,
             content={"status": "pending", "error": "not_authenticated"},
+        )
+
+    # 网址看起来对不代表真的登上了：上游登录失败后常跳回原页面。
+    # 用「新开一页访问控制台、看会不会被弹回登录页」来确认（2026-11-13 美团扫码失败）。
+    if not await verify_effective(session):
+        logger.info("login provider=%s status=verify_failed", session.provider)
+        return JSONResponse(
+            status_code=409,
+            content={"status": "pending", "error": "login_not_effective"},
         )
 
     try:

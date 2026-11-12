@@ -673,7 +673,7 @@ export default {
         loginSuccess: '登录成功，已保存票据并刷新用量',
         loginDetected: '看起来已进入控制台，点「我已完成登录」由服务端确认并保存',
         loginNotDetected: '还没检测到登录完成，请先扫码或收短信验证',
-        loginVerifyFailed: '上游判定这次登录没生效（用这份会话读不到用量），没有保存。请换「手机验证码登录」再试一次。',
+        loginVerifyFailed: '这次登录没真的生效：拿刚拿到的会话去访问控制台，又被弹回登录页了，所以没有保存。请点下方「手机验证码登录」再试一次。',
         frameLoading: '正在打开登录页…（首次打开约 10~30 秒）',
         frameFailed: '登录页打不开',
         frameFailedHint: '上游站点没有响应，点上方按钮重试；仍失败请检查服务器出网或账号代理。',

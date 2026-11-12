@@ -439,7 +439,7 @@ export default {
         loginSuccess: 'Signed in — session saved and usage refreshed',
         loginDetected: 'Looks signed in — click "I have signed in" so the server can verify and save',
         loginNotDetected: 'Sign-in not detected yet; finish the QR or SMS step first',
-        loginVerifyFailed: 'The upstream rejected this session (usage cannot be read with it), so nothing was saved. Please try "phone code sign-in" instead.',
+        loginVerifyFailed: 'This sign-in did not take effect: the new session was bounced back to the login page when opening the console, so nothing was saved. Please try "phone code sign-in" below.',
         frameLoading: 'Opening the login page… (usually 10–30s on first open)',
         frameFailed: 'Login page did not open',
         frameFailedHint: 'The upstream site did not respond. Retry with the button above; if it keeps failing, check server egress or the account proxy.',
