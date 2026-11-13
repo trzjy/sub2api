@@ -111,8 +111,6 @@
                         class="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-sm text-gray-800 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-100 dark:disabled:bg-dark-700"
                         :data-testid="`lro-scope-${row.account.id}`"
                         :value="requestSizeScopeOf(row.account)"
-                        :disabled="row.account.platform !== family.platform"
-                        :title="row.account.platform !== family.platform ? t('admin.largeRequestRouting.crossPlatformHint') : ''"
                         @change="onScopeChange(row.account, $event)"
                       >
                         <option value="any">{{ t('admin.largeRequestRouting.scopeAny') }}</option>
