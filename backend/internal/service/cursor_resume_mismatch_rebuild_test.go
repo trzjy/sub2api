@@ -21,13 +21,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// 续轮历史与已登记历史对不上（工具调用入参被改写）+ 完整历史：
-// 不得回 400，必须给出"另开一局"的信号，且旧会话已终结、零上游写入。
-func TestCursorResumeHistoryMismatchWithTamperedArgsRejected(t *testing.T) {
+// 续轮回传的 tool_use 入参与交付侧登记的不同（hz → sh）：**不再拒绝**（2026-11-14 旧契约下线）。
+//
+// 原契约要求「同一个 call_id 换了参数必须拒（防篡改）」。下线理由（生产取证）：
+// 续轮回写上游的帧只带 capture 的上游委托锚点（ExecID / IDField / ID）+ 结果正文，
+// 客户端 replay 的 args 从不发给上游；上游早已按它自己的参数执行完。
+//
+// 结果侧真正的防护（call_id 归属 / 结果类型 / 完整性）一字未动，见同文件其余用例。
+func TestCursorResumeTamperedArgsAccepted(t *testing.T) {
 	fixture := newCursorResumeFixture(t, CursorResumeProtocolMessages, []byte(cursorResumeTestMessagesFirst), "cursor-test-model",
 		[]cursorToolCallCapture{{ID: "toolu_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "hm-1", "")
 
-	// 续轮回传的 tool_use 入参与交付侧登记的不同（hz → sh）：骨架链对不上 = history_mismatch。
 	mismatched := []byte(`{
   "model": "cursor-test-model",
   "max_tokens": 64,
@@ -40,16 +44,8 @@ func TestCursorResumeHistoryMismatchWithTamperedArgsRejected(t *testing.T) {
 }`)
 
 	_, err := fixture.resume(t, CursorResumeProtocolMessages, mismatched, false)
-
-	// ⚠️ 本用例的「历史对不上」是通过**改 tool_use 的 input**（hz → sh）实现的 ——
-	// 那是**篡改**，不是「客户端裁剪正文」。所以它**必须被拒**：
-	//   - 跨轮比对退役了（客户端裁剪 assistant 可见正文是合法行为），
-	//     但「同一个 call_id 换了参数」是**防篡改**，拆出来单做（结果侧参数一致性校验，
-	//     见 cursorValidateResumeResultArgs）——这条能力不随跨轮比对一起退役。
-	// 零上游写入：校验不过不得把结果写给上游。
-	require.ErrorIs(t, err, ErrCursorResumeHistoryMismatch,
-		"同一个调用改了参数必须拒绝（防篡改，不随跨轮比对退役）")
-	require.Equal(t, 0, fixture.intake.callCount(), "校验未过时零上游写入")
+	require.NoError(t, err, "参数表示差异不再拒绝（旧防篡改契约已下线：客户端参数从不发给上游）")
+	require.Equal(t, 1, fixture.intake.callCount(), "本批结果照常整批写回上游一次")
 }
 
 // 续轮比首轮少声明一个工具（生产实测 36 次的真实形态）+ 完整历史：
@@ -117,8 +113,8 @@ func TestResumeIncompleteHistoryStillAccepted(t *testing.T) {
 // TestCursorResumePrunedProseAccepted 覆盖「客户端裁剪 assistant 可见正文」：
 // 参数**没变**，只是正文被裁短 → 这是合法行为，必须放行（本轮按本次正文构造）。
 //
-// 与 TestCursorResumeHistoryMismatchWithTamperedArgsRejected 的区别：
-// 那条改的是**参数**（篡改 → 拒）；这条只裁正文（合法 → 放行）。
+// 与 TestCursorResumeTamperedArgsAccepted 的区别：
+// 那条改了参数表示（同样放行）；这条连参数都没动，只裁正文。
 func TestCursorResumePrunedProseAccepted(t *testing.T) {
 	fixture := newCursorResumeFixture(t, CursorResumeProtocolMessages, []byte(cursorResumeTestMessagesFirst), "cursor-test-model",
 		[]cursorToolCallCapture{{ID: "toolu_1", Name: "get_weather", ArgsJSON: `{"city": "hz"}`}}, "hm-1", "")

@@ -4530,94 +4530,6 @@ func (d *cursorToolDelegations) upstreamCallIDLocked(wireID string) (string, boo
 	return "", false
 }
 
-// deliveredCallArgs 是「客户端可见 call_id → 交付时登记的规范化参数」的只读查询。
-//
-// 与 upstreamCallIDLocked 同形状、同遍历（客户端可见 id 可能是改写后的 WireID，
-// 也可能是上游原 id —— 上游会在会话内复用同一个 tool_call_id，故两种都要认）。
-//
-// 用途（2026-11-07 五道闸退役后拆出防篡改）：续轮回传的 arguments 必须与当初交付
-// 给客户端时登记的一致 —— 同一个 call_id 换了参数是篡改，必须拒。
-//
-// 交付时没有参数的工具（部分工具无 arguments）→ 返回空串且 ok=false：
-// 无基线可比，比对时跳过（不误拒）。
-func (d *cursorToolDelegations) deliveredCallArgs(wireID string) (string, bool) {
-	if d == nil {
-		return "", false
-	}
-	wireID = strings.TrimSpace(wireID)
-	if wireID == "" {
-		return "", false
-	}
-	for _, batch := range d.all {
-		if batch == nil {
-			continue
-		}
-		for _, tc := range batch.delegations {
-			if tc.WireID != wireID && !(tc.WireID == "" && tc.ID == wireID) {
-				continue
-			}
-			args := strings.TrimSpace(tc.ArgsJSON)
-			if args == "" {
-				return "", false
-			}
-			// custom/freeform 工具的交付参数是**抽取后的自由文本**
-			// （client 收到/回传的是 custom_tool_call 项的 input 字段），
-			// 与写出侧 cursorResponsesToolCallHistoryCanonical 的取值口径完全一致
-			// —— 两侧形态必须一样，否则永远比对不上。
-			// 用与写出侧同一个判定（cursorResponsesDeliveredToolCall，同源工具元数据），
-			// 不自己另写一份「怎么算 custom 工具」。
-			if dt := cursorResponsesDeliveredToolCall(tc.Name, d.responsesTools); dt.Kind == "custom_tool_call" {
-				args = strings.TrimSpace(apicompat.ExtractCustomToolCallInput(args))
-				if args == "" {
-					return "", false
-				}
-				return args, true
-			}
-			canonical, err := cursorCanonicalToolArgs(args)
-			if err != nil {
-				return "", false
-			}
-			return string(canonical), true
-		}
-	}
-	return "", false
-}
-
-// cursorValidateResumeResultArgs 校验：续轮正文里每条工具调用的 parameters，
-// 必须与当初交付给客户端时登记的 parameters 一致。
-//
-// 为什么要有这条（2026-11-07 五道闸退役后拆出）：「同一个 call_id 换了参数」是**篡改**
-// （上游会把结果关联到某个具体调用，参数变了就等于让上游按另一组参数执行），
-// 必须拒。但这条能力原先寄生在「历史骨架逐字节跨轮比对」上，而那道比对同时挡着
-// 「客户端工具集变了 / 换模型 / 换配置摘要」（这些是**合法**行为，该退役）。
-// 一并退役时把防篡改一起带走了 → 现在拆成**结果侧**校验：
-// 只看「本批已交付记录」vs「本次正文」，与跨轮配置/工具集/历史骨架无关。
-//
-// 三种情况：
-//   - 两侧都有参数且不一致 → 拒（篡改）。
-//   - 交付时无参数（无基线）→ 跳过，不误拒。
-//   - 本次正文里没有该调用的参数（客户端没回传）→ 跳过，不误拒
-//     （Responses 官方用法本就不重放 function_call）。
-func cursorValidateResumeResultArgs(
-	plan *cursorContextPlan,
-	delegations *cursorToolDelegations,
-) error {
-	if plan == nil || len(plan.historyCallArgs) == 0 || delegations == nil {
-		return nil
-	}
-	for callID, requestArgs := range plan.historyCallArgs {
-		deliveredArgs, ok := delegations.deliveredCallArgs(callID)
-		if !ok {
-			// 交付侧没有这条调用的参数（未交付 / 无参数 / 解析失败）→ 无基线可比，跳过。
-			continue
-		}
-		if deliveredArgs != requestArgs {
-			return newCursorResumeError(http.StatusBadRequest, "tool_args_changed", ErrCursorResumeHistoryMismatch)
-		}
-	}
-	return nil
-}
-
 // sealable 是 seal 的**只读**版本：判定全部未封口批次当前是否已可封口（不改状态）。
 //
 // 用途（§25.3）：读循环在吐工具交接（tool_calls + finish）之前先问"本批是否已齐"，
@@ -5449,8 +5361,6 @@ var (
 	ErrCursorResumeIdentityMismatch = errors.New("cursor: session owner does not match the authenticated caller")
 	// ErrCursorResumeConfigChanged 表示固定生成配置（system/模型/工具/schema/推理等）被改动。
 	ErrCursorResumeConfigChanged = errors.New("cursor: fixed generation config changed in continuation")
-	// ErrCursorResumeHistoryMismatch 表示重复前缀历史摘要或逻辑项数与已交付历史不符。
-	ErrCursorResumeHistoryMismatch = errors.New("cursor: repeated history prefix does not match the delivered history")
 	// ErrCursorResumeInstructionsWithdrawn 表示首轮非空 instructions/instructions 被省略，
 	// 即"撤换原 instructions"：本适配不支持，明确入参错误（不偷偷继承）。
 	ErrCursorResumeInstructionsWithdrawn = errors.New("cursor: instructions cannot be withdrawn by a continuation")
@@ -5952,18 +5862,6 @@ type cursorContextPlan struct {
 	// function_call 条目也在同一正文中时，这是一个**客户端自带完整两端**的已完成工具对，
 	// 不是在向本站声明某条待完成关联（见 resultsReplayHistory）。
 	historyCallIDs map[string]struct{}
-	// historyCallArgs 是本请求正文**历史前缀里已声明**的工具调用 ID → 其规范化参数
-	// （canonical JSON 字符串）。
-	//
-	// 用途（2026-11-07 五道闸退役后拆出）：续轮回传的 arguments 必须与当初交付给
-	// 客户端时登记的 arguments 一致 —— 同一个 call_id 换了参数是**篡改**，必须拒。
-	// 这条能力原先寄生在「历史骨架逐字节跨轮比对」上，而那道比对同时挡着
-	// 「客户端工具集变了」（合法行为）—— 一并退役时把防篡改一起带走了。
-	// 现在拆成**结果侧**校验：只看本批已交付记录 vs 本次正文，与跨轮配置/工具集无关。
-	//
-	// 只收有参数的工具调用；无参数的（部分工具没有 arguments）不在此集合里，
-	// 比对时跳过（无基线可比，不误拒）。
-	historyCallArgs map[string]string
 	// historyComplete 标记本次请求正文是否携带**可独立重建 AgentRun 的完整历史**
 	// （2026-11-04 续轮额度耗尽换号重建方案 §2.3）。
 	//
@@ -6430,9 +6328,6 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 				if id := strings.TrimSpace(call.ID); id != "" {
 					historyCalls[id] = struct{}{}
 				}
-				// 同时登记该调用的规范化参数：续轮回传的 arguments 必须与这里登记的
-				// 一致（同一个 call_id 换了参数 = 篡改 → 拒）。见 noteHistoryCallArgs。
-				plan.noteHistoryCallArgs(call.ID, call.Function.Arguments)
 			}
 		}
 	}
@@ -6781,8 +6676,6 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 				if id := strings.TrimSpace(block.ID); id != "" {
 					historyCalls[id] = struct{}{}
 				}
-				// 同时登记该调用的规范化参数（防篡改，见 noteHistoryCallArgs）。
-				plan.noteHistoryCallArgs(block.ID, string(block.Input))
 			}
 		}
 	}
@@ -7067,14 +6960,6 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 				plan.historyCallIDs = make(map[string]struct{}, 4)
 			}
 			plan.historyCallIDs[callID] = struct{}{}
-			// 同时登记该调用的规范化参数（防篡改，见 noteHistoryCallArgs）。
-			// Responses 的 arguments 与 input 互不覆盖（types.go：两者各取各的），
-			// 哪个有值用哪个。
-			if args := strings.TrimSpace(item.Arguments); args != "" {
-				plan.noteHistoryCallArgs(callID, args)
-			} else if len(item.Input) > 0 {
-				plan.noteHistoryCallArgs(callID, string(item.Input))
-			}
 		}
 		digestItem, ierr := cursorResponsesItemItem(item, plan.skippedItems)
 		if ierr != nil {
@@ -7110,45 +6995,6 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 	// 而无历史时 false —— 重建会丢上下文，必须维持原失败关闭（方案 §2.3 / V6）。
 	plan.historyComplete = cursorHistoryComplete(plan.results, plan.historyCallIDs)
 	return plan, nil
-}
-
-// noteHistoryCallArgs 登记本请求正文历史前缀里某条工具调用的**规范化参数**。
-//
-// 用途（2026-11-07 五道闸退役后拆出防篡改）：续轮回传的 arguments 必须与当初
-// 交付给客户端时登记的一致 —— 同一个 call_id 换了参数是篡改，必须拒。
-//
-// 规范化用 cursorCanonicalToolArgs（复用 CursorCanonicalToolArgsJSON）：
-// 只把空白/键序差异视为同值，且**不用 float64**（大整数会丢精度）。
-//
-// args 为空（无参数的工具）→ 不登记：没有基线可比，比对时跳过，不误拒。
-func (p *cursorContextPlan) noteHistoryCallArgs(callID, args string) {
-	if p == nil {
-		return
-	}
-	callID = strings.TrimSpace(callID)
-	if callID == "" {
-		return
-	}
-	trimmed := strings.TrimSpace(args)
-	if trimmed == "" {
-		return
-	}
-	// 两种形态：
-	//   - function 类工具的 arguments 是 JSON 对象 → 规范化后比对
-	//     （空白/键序差异视为同值；不用 float64，大整数不丢精度）。
-	//   - custom/freeform 工具的 input 是**自由文本**（如 codex 的 exec："text(42)"），
-	//     不是 JSON → 原样登记、原样比对。
-	//     ⚠️ 不能对它做 JSON 规范化：自由文本不是合法 JSON，规范化会失败。
-	canonical := trimmed
-	if json.Valid([]byte(trimmed)) {
-		if c, err := cursorCanonicalToolArgs(trimmed); err == nil {
-			canonical = string(c)
-		}
-	}
-	if p.historyCallArgs == nil {
-		p.historyCallArgs = make(map[string]string, 4)
-	}
-	p.historyCallArgs[callID] = canonical
 }
 
 // cursorHistoryComplete 判定请求正文是否携带可独立重建的完整历史。
@@ -7958,15 +7804,18 @@ func (s *CursorExecutionService) ResumeCursorSession(
 		}
 		return nil, err
 	}
-	// 参数一致性（2026-11-07 五道闸退役后拆出）：本次正文里每条工具调用的 parameters
-	// 必须与当初交付给客户端时登记的一致 —— 同一个 call_id 换了参数是篡改。
-	// 这条能力原先寄生在「历史骨架逐字节跨轮比对」上，一并退役时被带走了。
-	if err := cursorValidateResumeResultArgs(plan, record.delegations); err != nil {
-		if record.batchConsumed() {
-			return nil, newCursorResumeError(http.StatusConflict, "already_consumed", ErrCursorResumeAlreadyConsumed)
-		}
-		return nil, err
-	}
+	// 2026-11-14 旧契约下线：这里原有一道「同一 call_id 回传参数必须与交付侧登记逐字节
+	// 一致，否则 400 tool_args_changed」的续轮工具参数一致性校验（已整条删除）。
+	//
+	// 它守的是一个**不存在的威胁**，已整条删除，理由（生产取证）：
+	//   - 续轮回写上游的帧只带 capture 的上游委托锚点（ExecID / IDField / ID）+ 结果正文，
+	//     客户端 replay 的 args 一个字节都不会到达上游（见 cursorAgentRunIntake.
+	//     DeliverToolResults 的 frame 构造）；上游早已按**它自己的**参数执行完。
+	//   - 客户端回放长会话时按自身结构重建历史（VSCode 扩展会重排/重放 thinking 块、重写
+	//     input 表示），这些差异与"本批结果回填给哪条调用"无关，却被判成篡改 → 整轮 400。
+	//     生产实证：2026-11-13 单日 159 次 CUR-RES-99，内部 reason 全部是 tool_args_changed。
+	//
+	// call_id 归属、结果类型、数量完整性这三道结果侧校验仍在下方照常执行。
 	// 续轮回传的结果项类型必须与已交付工具调用的实际语义（kind）一致：
 	// function_call_output ↔ function_call、custom_tool_call_output ↔ custom_tool_call、
 	// tool_search_output ↔ tool_search_call。否则即"交付 custom 却回传 function_call_output"

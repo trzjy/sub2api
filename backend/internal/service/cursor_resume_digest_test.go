@@ -162,19 +162,13 @@ func newCursorResumeFixture(
 	delegations.all = append(delegations.all, batch)
 	delegations.mu.Unlock()
 	// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
-	// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
-	// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
-	// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+	// 续轮的 call_id 解析与归属判定要读它。
 	record.attachDelegations(delegations)
 	// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
-	// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
-	// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
-	// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+	// 续轮的 call_id 解析与归属判定要读它。
 	record.attachDelegations(delegations)
 	// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
-	// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
-	// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
-	// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+	// 续轮的 call_id 解析与归属判定要读它。
 	record.attachDelegations(delegations)
 
 	require.NoError(t, svc.recordDeliveredBatch(record, &CursorExecutionRequest{
@@ -525,25 +519,6 @@ func TestCursorResumeJSONWhitespaceAndKeyOrder(t *testing.T) {
 	_, err := fixture.resume(t, CursorResumeProtocolChat, []byte(reordered), false)
 	require.NoError(t, err, "仅空白/键序差异必须视为同值")
 	require.Equal(t, 1, fixture.intake.callCount())
-}
-
-// TestCursorResumeBigIntegerPrecision 覆盖清单第 2 条：大整数精度不失真。
-func TestCursorResumeBigIntegerPrecision(t *testing.T) {
-	fixture := newCursorResumeFixture(t, CursorResumeProtocolChat, []byte(cursorResumeTestChatFirst), "cursor-test-model",
-		[]cursorToolCallCapture{{ID: "call_1", Name: "get_weather", ArgsJSON: `{"n": 9007199254740993}`}}, "mc-1", "")
-
-	const roundedArg = `{
-  "model": "cursor-test-model",
-  "messages": [
-    {"role": "user", "content": "weather please"},
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"n\": 9007199254740992}"}}]},
-    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
-  ],
-  "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
-}`
-	_, err := fixture.resume(t, CursorResumeProtocolChat, []byte(roundedArg), false)
-	require.ErrorIs(t, err, ErrCursorResumeHistoryMismatch, "相邻大整数不得被折叠成同一个值")
-	require.Equal(t, 0, fixture.intake.callCount())
 }
 
 // TestCursorResumeConfigChangesRejected 覆盖清单第 3 条：改**硬组**配置（工具声明与 schema）
@@ -1543,9 +1518,7 @@ func TestCursorDeliveredHistoryMatchesResumePrefix(t *testing.T) {
 			delegations.all = append(delegations.all, batch)
 			delegations.mu.Unlock()
 			// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
-			// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
-			// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
-			// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+			// 续轮的 call_id 解析与归属判定要读它。
 			record.attachDelegations(delegations)
 
 			callIDs := make([]string, 0, len(tc.calls))
@@ -1602,9 +1575,7 @@ func TestCursorResumePrunedAssistantProseAccepted(t *testing.T) {
 		delegations.all = append(delegations.all, batch)
 		delegations.mu.Unlock()
 		// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
-		// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
-		// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
-		// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+		// 续轮的 call_id 解析与归属判定要读它。
 		record.attachDelegations(delegations)
 
 		// 关键：按生产同一路径交付，且**带正文**（这正是修复前造成 17 vs 16 的那一项）。
@@ -1644,21 +1615,39 @@ func TestCursorResumePrunedAssistantProseAccepted(t *testing.T) {
 		require.Equal(t, string(CursorResumeProtocolMessages), fields["protocol"])
 	})
 
-	t.Run("正文裁剪但工具参数被改仍拒绝", func(t *testing.T) {
-		fixture := newFixture(t)
-		// 同样省略正文，但把 tool_use 的 input 改掉 —— 这是真正的篡改，必须失败关闭。
-		const tamperedArgs = `{
+	// 回归：2026-11-13 生产 CUR-RES-99（reason=tool_args_changed）—— 该 reason 已随旧契约
+	// 整条下线（2026-11-14）。下线理由见 cursor_execution_service.go 续轮 serve 处的注释：
+	// 客户端回传的 args 从不发给上游，上游早已按自己的参数执行完。
+	t.Run("客户端回放改写历史工具参数不拦续轮", func(t *testing.T) {
+		const historicalRewritten = `{
   "model": "cursor-test-model",
   "max_tokens": 64,
   "messages": [
     {"role": "user", "content": [{"type": "text", "text": "weather please"}]},
-    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "sh"}}]},
+    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_old", "name": "get_weather", "input": {"city": "bj"}}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_old", "content": [{"type": "text", "text": "cloudy"}]}]},
+    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "hz"}}]},
     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "sunny"}]}]}
   ],
   "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]
 }`
-		_, err := fixture.resume(t, CursorResumeProtocolMessages, []byte(tamperedArgs), false)
-		require.ErrorIs(t, err, ErrCursorResumeHistoryMismatch, "改动工具参数必须仍然拒绝（防篡改强度不降）")
-		require.Equal(t, 0, fixture.intake.callCount())
+		fixture := newFixture(t)
+		// 给"上一轮"补一条交付基线：toolu_old 当初交付时参数是 {"city":"sh"}，
+		// 请求正文回放时写成了 {"city":"bj"} —— 生产上客户端重建历史的真实形态。
+		fixture.record.mu.Lock()
+		delegations := fixture.record.delegations
+		fixture.record.mu.Unlock()
+		require.NotNil(t, delegations)
+		delegations.mu.Lock()
+		delegations.all = append(delegations.all, &cursorToolBatch{
+			modelCallID: "mc-0", sealed: true,
+			delegations: []cursorToolCallCapture{{ID: "toolu_old", Name: "get_weather", ArgsJSON: `{"city":"sh"}`}},
+			started:     []string{"toolu_old"},
+		})
+		delegations.mu.Unlock()
+
+		_, err := fixture.resume(t, CursorResumeProtocolMessages, []byte(historicalRewritten), false)
+		require.NoError(t, err, "客户端回放改写历史参数不得拒绝（旧防篡改契约已下线）")
+		require.Equal(t, 1, fixture.intake.callCount(), "本批结果必须照常整批写回上游一次")
 	})
 }

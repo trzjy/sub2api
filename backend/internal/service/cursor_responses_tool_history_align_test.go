@@ -13,7 +13,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -134,10 +133,12 @@ func TestCursorResumeNamespaceToolHistoryAligned(t *testing.T) {
 	require.Equal(t, []string{"spawned"}, fixture.intake.results[0][0].Text)
 }
 
-// TestCursorResumeCustomToolInputAligned：custom 工具 input 原样回传 → 续轮成功、写入 1；
-// 同一调用不同 input 必须得到不同摘要（证明输入不再坍缩）。
+// TestCursorResumeCustomToolInputAligned：custom 工具 input 原样回传 → 续轮成功、写入 1。
+//
+// 2026-11-14 旧契约下线：原先此处还有一段反例「同一调用不同 input 必须拒绝（防篡改）」，
+// 随旧续轮参数一致性校验一起删除 —— 客户端回传的 args 从不发给上游，
+// 参数一致性校验守的是不存在的威胁（生产实证见 cursor_execution_service.go 续轮 serve 处注释）。
 func TestCursorResumeCustomToolInputAligned(t *testing.T) {
-	// 同一调用、不同 input：两条 fixture 各自独立，互不干扰。
 	fixed := newCursorResumeFixture(t, CursorResumeProtocolResponses, []byte(cursorAlignCustomFirst), "cursor-test-model",
 		[]cursorToolCallCapture{{ID: "call_1", Name: "exec", ArgsJSON: "text(42)"}},
 		"mc-1", "resp_1")
@@ -145,13 +146,13 @@ func TestCursorResumeCustomToolInputAligned(t *testing.T) {
 	require.NoError(t, err, "custom 工具 input 原样回传必须成功")
 	require.Equal(t, 1, fixed.intake.callCount())
 
-	// 同一调用、不同 input（text(999)）：摘要必须不同 → 被拒，证明输入不再坍缩。
+	// 同一调用、不同 input（text(999)）：不再拒绝（旧参数一致性契约已下线），结果照常写回。
 	other := newCursorResumeFixture(t, CursorResumeProtocolResponses, []byte(cursorAlignCustomFirst), "cursor-test-model",
 		[]cursorToolCallCapture{{ID: "call_1", Name: "exec", ArgsJSON: "text(42)"}},
 		"mc-1", "resp_1")
 	_, err = other.resume(t, CursorResumeProtocolResponses, []byte(cursorAlignCustomResumeAltInput), false)
-	require.Error(t, err, "同一调用不同 input 必须得到不同摘要（不得坍缩成同一项）")
-	require.Equal(t, 0, other.intake.callCount(), "摘要不符时零上游写入")
+	require.NoError(t, err, "参数表示差异不再拒绝（旧防篡改契约已下线）")
+	require.Equal(t, 1, other.intake.callCount(), "结果照常整批写回上游一次")
 }
 
 // TestCursorResumeToolSearchOutputTypeAligned：tool_search 调用 + tool_search_output 结果 → 续轮成功。
@@ -253,10 +254,8 @@ func newCursorResumeMultiBatchFixture(
 		delegations.mu.Lock()
 		delegations.all = append(delegations.all, batch)
 		delegations.mu.Unlock()
-		// 会话必须绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
-		// 续轮时「交付时登记的参数 vs 客户端回传的参数」的一致性校验要读它
-		// （cursorValidateResumeResultArgs → record.delegations.deliveredCallArgs）。
-		// 不绑定的话该校验拿不到交付侧基线，会静默跳过 → 防篡改形同虚设。
+		// 会话绑定本轮委托记录（生产路径 Execute 里 session.attachDelegations 做同一件事）：
+		// 续轮的结果归位（DeliverToolResults 按上下游原 id 反查 capture）要读它。
 		record.attachDelegations(delegations)
 	}
 
@@ -507,22 +506,13 @@ func TestCursorResumeOmittedHistoryValidResultTypeStillSucceeds(t *testing.T) {
 	require.Equal(t, []string{"call_1"}, []string{fixture.intake.results[0][0].CallID})
 }
 
-// TestCursorResumeCustomToolWrappedInputAligned 是生产 history_first_divergence 直接
-// 定位到的缺陷的回归用例：
+// TestCursorResumeCustomToolWrappedInputAligned：模型输出 {"input":...} 包裹形态时，
 //
-//	history_first_divergence: idx=1 stored=responses.custom_tool_call(d54a7d85)
-//	                               request=responses.custom_tool_call(6d8ec87d)
-//	protocol=responses, model=gpt-6.1-sol
+//	交付侧必须按抽取后的自由文本登记，与客户端回传的裸文本得到同一摘要。
 //
-// 根因：模型按降级 function 的形状输出 `{"input":"<自由文本>"}` 作为 arguments。
-// 写出侧 apicompat 用 extractCustomToolCallInput 取出**自由文本**放进 custom_tool_call
-// 的 input 字段（客户端收到/回传的就是这段文本）；而交付侧历史登记却拿**原始
-// arguments 包**参与摘要 → 同一逻辑调用两侧 canonical 不同 → 续轮必拒。
-//
-// 本用例断言：包裹形态与裸文本形态（客户端回传的 input）必须得到同一摘要。
+// 2026-11-14 旧契约下线：原末尾的「篡改必须拒绝」反例段随之删除。
 func TestCursorResumeCustomToolWrappedInputAligned(t *testing.T) {
 	const wrappedArgs = `{"input":"*** Begin Patch\n*** End Patch"}`
-	const plainInput = "*** Begin Patch\n*** End Patch"
 
 	fixture := newCursorResumeFixture(t, CursorResumeProtocolResponses, []byte(cursorAlignCustomFirst), "cursor-test-model",
 		[]cursorToolCallCapture{{ID: "call_1", Name: "exec", ArgsJSON: wrappedArgs}},
@@ -541,14 +531,4 @@ func TestCursorResumeCustomToolWrappedInputAligned(t *testing.T) {
 	_, err := fixture.resume(t, CursorResumeProtocolResponses, []byte(body), false)
 	require.NoError(t, err, "模型输出 {\"input\":...} 包裹形态时，交付侧必须按抽取后的自由文本登记")
 	require.Equal(t, 1, fixture.intake.callCount())
-
-	// 反例：客户端回传的 input 与交付侧抽取结果不同 → 必须拒绝（防篡改不降）。
-	other := newCursorResumeFixture(t, CursorResumeProtocolResponses, []byte(cursorAlignCustomFirst), "cursor-test-model",
-		[]cursorToolCallCapture{{ID: "call_1", Name: "exec", ArgsJSON: wrappedArgs}},
-		"mc-1", "resp_1")
-	tampered := strings.Replace(body, "*** Begin Patch\\n*** End Patch", "*** Begin Patch\\n*** EVIL *** End Patch", 1)
-	_, err = other.resume(t, CursorResumeProtocolResponses, []byte(tampered), false)
-	require.Error(t, err, "input 被改必须得到不同摘要并拒绝")
-	require.Equal(t, 0, other.intake.callCount())
-	_ = plainInput
 }
