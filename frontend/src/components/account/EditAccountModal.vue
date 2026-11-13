@@ -4587,8 +4587,18 @@ const refreshRemoteFrame = async () => {
 // 这不是「服务器坏了」——是这次登录会话的寿命到了（2026-11-13 线上：用户操作到
 // 第 10 分钟被无故踢下线，登录成果随浏览器一起消失，界面还一直说「未登录」）。
 // 必须和「网络失败」「服务不可用」分开说，否则用户只会以为是自己点错了。
+// 错误状态码要同时认两种形状：api/client.ts 的响应拦截器抛的是扁平
+// { status, message }（没有 response），只有未包装的原生 AxiosError 才有
+// response.status。只读 response.status 会让 410/404 判断永远不成立
+// （2026-11-14 线上：界面只显示 axios 英文原文，面板停在 opening，"我已完成登录"
+// 不出现，用户被卡死）。
+const remoteLoginErrorStatus = (e: unknown): number | undefined => {
+  const err = e as { status?: number; response?: { status?: number } }
+  return err?.status ?? err?.response?.status
+}
+
 const isRemoteLoginSessionGone = (e: unknown): boolean => {
-  const status = (e as { response?: { status?: number } })?.response?.status
+  const status = remoteLoginErrorStatus(e)
   return status === 410 || status === 404
 }
 
@@ -4676,12 +4686,12 @@ const handleOpenRemoteLogin = async () => {
 // 请求失败要说人话：axios 的默认文案是「Network error」，会把人骗去查网络，
 // 而真实原因通常是服务没响应 / 超时。
 const describeRemoteLoginError = (e: unknown): string => {
-  const err = e as { message?: string; code?: string; response?: { status?: number } }
+  const err = e as { message?: string; code?: string }
   const code = (err?.code || '').toUpperCase()
   if (code === 'ECONNABORTED' || /timeout/i.test(err?.message || '')) {
     return t('admin.accounts.webConsoleQuota.errorTimeout')
   }
-  const status = err?.response?.status
+  const status = remoteLoginErrorStatus(e)
   if (status === 410 || status === 404) {
     return t('admin.accounts.webConsoleQuota.loginSessionExpired')
   }

@@ -3109,6 +3109,15 @@ func (r *accountRepository) PatchAccountCredentials(ctx context.Context, id int6
 	if !hasRow {
 		return service.ErrAccountNotFound
 	}
+	// 必须先把结果集收干净，再在同一条连接上发下一条语句。
+	// 2026-11-14 生产事故：rows.Next() 只读到 DataRow 就返回，SELECT 的
+	// CommandComplete('C')/ReadyForQuery('Z') 仍在连接里；紧接着的 UPDATE 走
+	// 扩展协议（Parse），读到的却是这个残留的 'C'，lib/pq 报
+	// `unexpected Parse response 'C'` 并把连接判坏——同事务内无法重连，
+	// 落库因此每次都失败。Close 会把残留消息排空到 ReadyForQuery。
+	if err := rows.Close(); err != nil {
+		return err
+	}
 
 	stored := map[string]any{}
 	if len(rawCreds) > 0 && string(rawCreds) != "null" {
