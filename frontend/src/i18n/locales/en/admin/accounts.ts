@@ -439,6 +439,8 @@ export default {
         loginSuccess: 'Signed in — session saved and usage refreshed',
         loginDetected: 'Sign-in detected, saving automatically… (no need to click anything)',
         loginDoneHint: 'It normally saves itself; click here only if it did not.',
+        loginSessionExpired: 'This sign-in session timed out (it happens if you take too long). It has been reopened — please sign in again.',
+        loginSessionExpiredButSaved: 'The sign-in session timed out, but your sign-in state was kept. No need to sign in again.',
         loginNotDetected: 'Sign-in not detected yet; finish the QR or SMS step first',
         loginSavedButProbe: 'Session saved. Usage could not be read this time ({reason}); the usage column keeps the previous value. Sign-in itself is fine.',
         loginVerifyFailed: 'This sign-in did not actually take effect: using the session we got, the console bounced us back to the login page, so nothing was saved. Go through the login flow in the panel again.',

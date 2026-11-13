@@ -362,7 +362,8 @@ async def probe(request: Request):
 from login_sessions import (  # noqa: E402  (路由段集中在此，便于审阅)
     LOGIN_PHASE_OPENING,
     LOGIN_PHASE_READY,
-    LOGIN_SESSION_TTL_SECONDS,
+    LOGIN_SESSION_IDLE_SECONDS,
+    LOGIN_SESSION_MAX_AGE_SECONDS,
     LOGIN_VIEWPORT_HEIGHT,
     LOGIN_VIEWPORT_WIDTH,
     LoginSessionError,
@@ -405,11 +406,20 @@ async def _json_body(request: Request) -> dict:
 
 def _session_error_response(exc: LoginSessionError) -> JSONResponse:
     status = 404 if exc.code == "session_not_found" else 410
-    return JSONResponse(status_code=status, content={"error": exc.code})
+    content = {"error": exc.code}
+    # 会话过期时可能带着抢救到的登录成果（页面确实是登录态才带）。
+    # 后端拿到就能照样落库——用户登进去过就是登进去过。
+    if exc.payload:
+        content.update(exc.payload)
+    return JSONResponse(status_code=status, content=content)
 
 
 def _login_view(session) -> dict:
     """会话对外视图：不含 cookie，不含 storageState。"""
+    # expires_in 报「还能用多久」：会话寿命是滑动的（每次交互都续期），
+    # 所以这个值随用户操作变化；Go 侧拿它当会话有效期，避免两边各写一份数字
+    # 然后慢慢漂移（漂移过一次，线上表现为用户操作到第 10 分钟被无故踢下线）。
+    idle_left = max(0, int(LOGIN_SESSION_IDLE_SECONDS - (time.monotonic() - session.last_touch)))
     return {
         "session_id": session.id,
         "provider": session.provider,
@@ -421,7 +431,10 @@ def _login_view(session) -> dict:
         "url": session.page.url,
         "viewport_width": LOGIN_VIEWPORT_WIDTH,
         "viewport_height": LOGIN_VIEWPORT_HEIGHT,
-        "expires_in": LOGIN_SESSION_TTL_SECONDS,
+        "expires_in": idle_left,
+        # max_age_in 是绝对上限（从创建起算）：滑动窗口再宽也不能超过它，
+        # 保证浏览器上下文一定被释放。Go 侧同样按这个值兜底。
+        "max_age_in": LOGIN_SESSION_MAX_AGE_SECONDS,
     }
 
 

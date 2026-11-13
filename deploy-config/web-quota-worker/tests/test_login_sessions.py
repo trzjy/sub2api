@@ -11,6 +11,7 @@
 
 import asyncio
 import base64
+import time
 
 import pytest
 
@@ -18,7 +19,8 @@ from login_sessions import (
     LOGIN_PHASE_FAILED,
     LOGIN_PHASE_OPENING,
     LOGIN_PHASE_READY,
-    LOGIN_SESSION_TTL_SECONDS,
+    LOGIN_SESSION_IDLE_SECONDS,
+    LOGIN_SESSION_MAX_AGE_SECONDS,
     LoginSessionError,
     LoginSessionRegistry,
     capture,
@@ -310,11 +312,50 @@ def test_expired_session_is_rejected_and_context_closed():
         registry = LoginSessionRegistry(_factory(context))
         session = await _start(registry)
 
-        session.created_at -= LOGIN_SESSION_TTL_SECONDS + 1
+        session.created_at -= LOGIN_SESSION_MAX_AGE_SECONDS + 1
         with pytest.raises(LoginSessionError) as excinfo:
             await registry.get(session.id)
         assert excinfo.value.code == "session_expired"
         assert context.closed is True
+
+    asyncio.run(case())
+
+
+def test_session_survives_long_usage_but_not_the_absolute_cap():
+    """会话寿命必须是「滑动的」：用户一直在操作，就不能被到期踢下线。
+
+    旧实现把寿命写死成「从打开面板起算 600 秒」，任何操作都不延长它，
+    于是用户操作到第 10 分钟会话连同浏览器一起被删，登录成果全丢
+    （2026-11-13 线上：用户操作了 9 分多钟，跨线后 finish 全部 404/502）。
+    """
+
+    async def case():
+        context = FakeContext(FakePage())
+        registry = LoginSessionRegistry(_factory(context))
+        session = await _start(registry)
+
+        # 模拟「用了很久」：创建时间很老，但刚刚还有交互（last_touch 是新的）。
+        session.created_at -= LOGIN_SESSION_MAX_AGE_SECONDS - 10
+        session.last_touch = time.monotonic()
+        assert session.expired() is False
+
+        # 但绝对上限仍然生效：到了就必须回收（内存不能无限占）。
+        session.created_at -= LOGIN_SESSION_MAX_AGE_SECONDS + 1
+        assert session.expired() is True
+
+    asyncio.run(case())
+
+
+def test_idle_session_expires_after_idle_window():
+    """长时间没有任何交互（面板开着、人走开了）到期要回收。"""
+
+    async def case():
+        context = FakeContext(FakePage())
+        registry = LoginSessionRegistry(_factory(context))
+        session = await _start(registry)
+
+        session.last_touch -= LOGIN_SESSION_IDLE_SECONDS + 1
+        assert session.expired() is True
 
     asyncio.run(case())
 

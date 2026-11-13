@@ -4541,6 +4541,26 @@ const applyRemoteLoginFrame = (frame: {
     if (field.filled) delete remoteLoginFieldValues[field.label]
   }
   if (frame.status === 'authenticated') {
+    // 「会话过期了，但登录成果被后端抢救下来并落库」：
+    // 这是好消息 —— 不用再登一次。跟普通的「检测到登录」分开处理，
+    // 否则会又去调一次 finish（会话已经没了，必然失败），把好消息变成报错。
+    if (frame.message === 'session_expired_but_saved') {
+      remoteLoginAutoSaved.value = true
+      remoteLoginError.value = false
+      remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginSessionExpiredButSaved')
+      stopRemoteLoginPolling()
+      remoteLoginOpen.value = false
+      remoteLoginSessionId.value = ''
+      remoteLoginScreenshot.value = ''
+      const account = props.account
+      if (account) {
+        emit('updated', {
+          ...account,
+          credentials_status: { ...(account.credentials_status ?? {}), has_console_storage_state: true }
+        })
+      }
+      return
+    }
     remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginDetected')
     remoteLoginError.value = false
     // 登录生效 → 自动保存。完成登录这件事不该依赖用户找到一个按钮。
@@ -4563,6 +4583,26 @@ const refreshRemoteFrame = async () => {
   applyRemoteLoginFrame(frame)
 }
 
+// 会话失效（410 Gone / 404 Not Found）：worker 把登录会话连同浏览器回收了。
+// 这不是「服务器坏了」——是这次登录会话的寿命到了（2026-11-13 线上：用户操作到
+// 第 10 分钟被无故踢下线，登录成果随浏览器一起消失，界面还一直说「未登录」）。
+// 必须和「网络失败」「服务不可用」分开说，否则用户只会以为是自己点错了。
+const isRemoteLoginSessionGone = (e: unknown): boolean => {
+  const status = (e as { response?: { status?: number } })?.response?.status
+  return status === 410 || status === 404
+}
+
+// 会话没了就说人话，并且自动把登录面板重新开好。
+// 让用户「重新点一次登录控制台」是多余的一步 —— 面板本来就是为这件事开的。
+const handleRemoteLoginSessionGone = async () => {
+  stopRemoteLoginPolling()
+  remoteLoginSessionId.value = ''
+  remoteLoginError.value = false
+  remoteLoginAutoSaved.value = false
+  await handleOpenRemoteLogin()
+  remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginSessionExpired')
+}
+
 // 递归 setTimeout 而不是 setInterval：上一帧没回来就不叠请求，
 // 服务端截图慢时不会堆积成几十个并发。
 const scheduleRemoteLoginPoll = () => {
@@ -4571,7 +4611,13 @@ const scheduleRemoteLoginPoll = () => {
     if (!remoteLoginOpen.value || !remoteLoginSessionId.value || !props.account) return
     try {
       await refreshRemoteFrame()
-    } catch {
+    } catch (e) {
+      // 会话没了不是「单次失败」：旧实现把它当普通失败静默吞掉，
+      // 于是面板一直停在旧画面，用户看着「未登录」反复重登（2026-11-13 线上）。
+      if (isRemoteLoginSessionGone(e)) {
+        await handleRemoteLoginSessionGone()
+        return
+      }
       /* 单次失败不终止，等下一轮 */
     }
     scheduleRemoteLoginPoll()
@@ -4834,7 +4880,11 @@ const handleRemoteLoginFinish = async () => {
     remoteLoginMessage.value = result.message
       ? t('admin.accounts.webConsoleQuota.loginSavedButProbe', { reason: result.message })
       : t('admin.accounts.webConsoleQuota.loginSuccess')
-    // 服务端在 finish 时已经释放会话，这里只收面板，不再发一次取消请求。
+    // 「会话过期但成果保住了」不是用量问题，要说人话：不用再登一次。
+    if (result.message === 'session_expired_but_saved') {
+      remoteLoginError.value = false
+      remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginSessionExpiredButSaved')
+    }    // 服务端在 finish 时已经释放会话，这里只收面板，不再发一次取消请求。
     stopRemoteLoginPolling()
     remoteLoginOpen.value = false
     remoteLoginSessionId.value = ''
@@ -4848,6 +4898,11 @@ const handleRemoteLoginFinish = async () => {
       credentials_status: { ...(props.account.credentials_status ?? {}), has_console_storage_state: true }
     })
   } catch (e) {
+    // 会话没了：说人话 + 自动重开面板，别让用户对着一句「未登录」反复重登。
+    if (isRemoteLoginSessionGone(e)) {
+      await handleRemoteLoginSessionGone()
+      return
+    }
     remoteLoginError.value = true
     remoteLoginMessage.value = (e as Error)?.message || t('common.error')
   } finally {

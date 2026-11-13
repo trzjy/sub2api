@@ -304,4 +304,34 @@ describe('EditAccountModal 控制台登录面板', () => {
     expect(wrapper.find('[data-testid="web-console-login-form-retry"]').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  it('登录会话到期：说人话并自动重开面板，不让用户对着「未登录」反复重登', async () => {
+    // 线上实录（2026-11-13）：会话寿命写死 10 分钟且不因操作延长，用户操作到
+    // 第 10 分钟被踢下线 → 后续保存全部 404/502 → 界面一直说「未登录」。
+    // 现在会话寿命是滑动的；万一还是到期了，界面必须说清楚发生了什么，
+    // 并自动把面板重开好（不该让用户再点一次「登录控制台」）。
+    startLoginMock.mockResolvedValue({
+      session_id: 'sid-4',
+      status: 'pending',
+      phase: 'ready',
+      screenshot: 'AAAA',
+      fields: [],
+      buttons: [],
+      form_state: 'ok'
+    })
+    const expired = Object.assign(new Error('gone'), { response: { status: 410 } })
+    frameMock.mockRejectedValue(expired)
+
+    const wrapper = mountModal(buildConsoleAccount())
+    await wrapper.get('[data-testid="web-console-login-start"]').trigger('click')
+    await flushPromises()
+
+    // 轮询拿到 410 → 自动重新建会话（start 被再次调用），并显示人话提示
+    await new Promise((resolve) => setTimeout(resolve, 1400))
+    await flushPromises()
+
+    expect(startLoginMock.mock.calls.length).toBeGreaterThan(1)
+    expect(wrapper.text()).toContain('admin.accounts.webConsoleQuota.loginSessionExpired')
+    wrapper.unmount()
+  })
 })

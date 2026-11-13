@@ -35,12 +35,27 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import secrets
 import time
 from typing import Any, Awaitable, Callable, Optional
 
-# 会话总寿命（秒）：与 Go 侧会话绑定有效期一致，超时后 context 必须释放。
-LOGIN_SESSION_TTL_SECONDS = 600
+# 会话寿命（秒）：两条规则，都按「滑动」计算——用户一直在用就一直有效。
+#
+# 为什么不能是「从打开面板起算的固定窗口」：
+# 真人完成一次登录要等短信验证码、可能切到别的标签页查资料、可能改错一次重来，
+# 10 分钟是常态而不是异常。旧规则把会话寿命写死 600 秒且**任何操作都不延长它**，
+# 于是用户在面板上操作到第 9 分 59 秒时，会话连同浏览器一起被删：
+# 登录成果（cookie）当场蒸发，界面还一直说「未登录」，用户重登多少次都一样
+# （2026-11-13 线上实录：用户操作了 9 分多钟，跨线后 finish 全部 404/502）。
+#
+# 现在两条规则：
+# - 空闲超时：距上一次有效交互（轮询或任何动作）超过这个时间才回收。
+#   面板开着、人在等短信或思考，都算「还在用」。
+# - 绝对上限：从创建起最多存活这么久，保证浏览器上下文一定被释放
+#   （内存不能无限占）。到点必收，与用户是否还在用无关。
+LOGIN_SESSION_IDLE_SECONDS = 900
+LOGIN_SESSION_MAX_AGE_SECONDS = 1800
 
 # 固定视口：前端把点击坐标按「显示宽度 / 视口宽度」等比换算，
 # 视口一旦可变，坐标就会错位，故这里写死。deviceScaleFactor 固定 1，
@@ -50,9 +65,6 @@ LOGIN_VIEWPORT_HEIGHT = 800
 
 # 截图压缩参数：JPEG 质量越低体积越小，但短信验证码 / 二维码仍需可辨认。
 LOGIN_SHOT_QUALITY = 62
-
-# 连续无操作的自动释放时间（秒）：防止浏览器上下文长期占用内存。
-LOGIN_SESSION_IDLE_SECONDS = 300
 
 # 读取页面表单结构的超时（秒）：页面卡住时不能让整帧请求被拖死。
 LOGIN_INVENTORY_TIMEOUT = 3.0
@@ -96,10 +108,16 @@ ContextFactory = Callable[[Optional[str], Optional[str]], Awaitable[Any]]
 
 
 class LoginSessionError(Exception):
-    """会话不存在 / 已过期 / 内部失败。"""
+    """会话不存在 / 已过期 / 内部失败。
 
-    def __init__(self, code: str):
+    ``payload`` 用来把「会话没了但登录成果还在」这件事带出去：
+    会话过期回收前会抢救一次 storage_state（页面已经是登录态的话），
+    由后端决定要不要落库——不能因为会话到点就把用户刚登进去的成果扔掉。
+    """
+
+    def __init__(self, code: str, payload: Optional[dict] = None):
         self.code = code
+        self.payload = payload or {}
         super().__init__(code)
 
 
@@ -144,8 +162,15 @@ class LoginSession:
         self.last_touch = time.monotonic()
 
     def expired(self, now: Optional[float] = None) -> bool:
+        """会话是否该被回收。
+
+        两条规则都跟「用户还在不在用」有关：
+        - 绝对上限：从创建起超过 LOGIN_SESSION_MAX_AGE_SECONDS 必收（保证内存释放）；
+        - 空闲超时：距上一次有效交互超过 LOGIN_SESSION_IDLE_SECONDS 才收。
+          ``last_touch`` 由每次请求刷新，所以「一直有人在用」= 一直不过期。
+        """
         now = time.monotonic() if now is None else now
-        if now - self.created_at > LOGIN_SESSION_TTL_SECONDS:
+        if now - self.created_at > LOGIN_SESSION_MAX_AGE_SECONDS:
             return True
         return now - self.last_touch > LOGIN_SESSION_IDLE_SECONDS
 
@@ -270,8 +295,12 @@ class LoginSessionRegistry:
                 # 后者通常意味着前端拿着旧会话号在轮询，两者提示语不同。
                 self._sessions.pop(session_id, None)
                 session.closed = True
+                # 回收浏览器之前先抢救一次登录成果：页面已经是登录态的话，
+                # 把 cookie 抓下来交给后端。用户登进去过就是登进去过，
+                # 不能因为会话到点就把成果一起扔掉，逼他重收一遍短信验证码。
+                rescued = await self._rescue_storage_state(session)
                 await self._close_context(session)
-                raise LoginSessionError("session_expired")
+                raise LoginSessionError("session_expired", payload=rescued)
             await self._prune_locked(now)
         session.touch()
         return session
@@ -302,6 +331,25 @@ class LoginSessionRegistry:
             await session.context.close()
         except Exception:  # noqa: BLE001 - 关闭失败不向上抛
             pass
+
+    @staticmethod
+    async def _rescue_storage_state(session: LoginSession) -> dict:
+        """会话回收前抢救登录成果。
+
+        只在「页面确实是登录态」时才有东西可抢：``authenticated()`` 要求先离开过
+        登录页、再回到控制台成功落点内，游客会话抢了也是白抢（存下来反而是脏数据）。
+        抢不到就返回空 dict，让后端按「会话没了」正常处理。
+        """
+        try:
+            if not session.authenticated():
+                return {}
+            state = await session.context.storage_state()
+            raw = json.dumps(state)
+        except Exception:  # noqa: BLE001 - 抢救失败不能挡住过期回收流程
+            return {}
+        if not raw:
+            return {}
+        return {"status": "authenticated", "storage_state": raw}
 
     async def _prune_locked(self, now: float) -> None:
         stale = [sid for sid, s in self._sessions.items() if s.expired(now) or s.closed]

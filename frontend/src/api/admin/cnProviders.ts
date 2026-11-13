@@ -274,7 +274,15 @@ export interface WebConsoleLoginFrame {
   url?: string
   viewport_width: number
   viewport_height: number
+  /** 还剩多少秒可以空闲着不管（滑动窗口，每次操作都会续）。 */
   expires_in: number
+  /** 绝对上限（秒，从会话创建算起）：无论用户是否在用，到点必收。 */
+  max_age_in?: number
+  /**
+   * 会话过期时后端抢救回来的登录态（仅「会话没了但页面确实登录过」时出现）。
+   * 前端不用自己解析它：后端已经落库，这里只是让人知道「成果保住了」。
+   */
+  storage_state?: string
   /** 当前页面上的输入框与按钮，用来渲染真表单（避免让用户点缩略图坐标）。 */
   fields?: WebConsoleLoginField[]
   buttons?: WebConsoleLoginButton[]

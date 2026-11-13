@@ -28,8 +28,10 @@ import (
 // 等强风控场景的兜底，本服务是常规路径。
 
 const (
-	// webConsoleRemoteLoginSessionTTL 与 worker 侧会话寿命一致（10 分钟）加少量冗余。
-	webConsoleRemoteLoginSessionTTL = 11 * time.Minute
+	// webConsoleRemoteLoginSessionGrace 是 Go 侧会话有效期相对 worker 的冗余。
+	// 会话寿命的唯一事实源是 worker（它报 expires_in / max_age_in）；
+	// Go 侧只多给一点余量，避免两边同一秒到期时 Go 先把会话删了。
+	webConsoleRemoteLoginSessionGrace = 60 * time.Second
 	// webConsoleRemoteLoginHTTPTimeout 是单次画面/动作请求的超时（截图需等页面稳定）。
 	webConsoleRemoteLoginHTTPTimeout = 45 * time.Second
 	// webConsoleRemoteLoginMaxResponseBytes 限制 worker 响应体（base64 JPEG）。
@@ -77,7 +79,13 @@ type WebConsoleRemoteLoginFrame struct {
 	URL            string `json:"url,omitempty"`
 	ViewportWidth  int    `json:"viewport_width"`
 	ViewportHeight int    `json:"viewport_height"`
-	ExpiresIn      int64  `json:"expires_in"`
+	// ExpiresIn 是 worker 报的「还能空闲多久」（秒），滑动窗口，Go 侧据此设有效期。
+	ExpiresIn int64 `json:"expires_in"`
+	// MaxAgeIn 是 worker 报的绝对上限（秒，从创建起算）。
+	MaxAgeIn int64 `json:"max_age_in"`
+	// StorageState 只在「会话过期但登录成果被抢救到」时出现，
+	// 正常流程里由 worker 的 finish 单独返回，这里不参与常规画面回传。
+	StorageState string `json:"storage_state,omitempty"`
 	// Fields / Buttons 是页面上的可见输入框与按钮清单。
 	// 存在的理由：让用户点缩略图坐标去聚焦输入框不可靠（美团 passport 的
 	// 「动态码」框只有 176×18 CSS 像素，缩到面板后约 7 像素高），
@@ -121,7 +129,15 @@ type WebConsoleRemoteLoginResult struct {
 type remoteLoginBinding struct {
 	AccountID int64
 	Provider  string
+	// CreatedAt 是会话创建时刻：绝对上限用它算，到点必收，与用户是否还在用无关。
+	CreatedAt time.Time
+	// ExpiresAt 是「空闲超时」截止点。每次交互都往后推（滑动窗口），
+	// 所以只要用户还在面板上操作，Go 侧就不会先一步把会话删了。
 	ExpiresAt time.Time
+	// Idle 是空闲窗口的长度（每次交互后重新起算）。
+	Idle time.Duration
+	// MaxAge 是绝对上限的时长（来自 worker），用来限制滑动窗口最多能滑多远。
+	MaxAge time.Duration
 }
 
 // WebConsoleRemoteLoginService 编排「服务端打开登录页 → 用户远程操作 → 落库 → 探测」。
@@ -207,10 +223,26 @@ func (s *WebConsoleRemoteLoginService) Start(ctx context.Context, accountID int6
 
 	s.mu.Lock()
 	s.pruneExpiredLocked(s.now())
+	now := s.now()
+	// 会话寿命以 worker 报回来的值为准（唯一事实源），Go 侧只加冗余。
+	// 旧实现两边各写一个数字（worker 10 分钟 / Go 11 分钟），而且都是
+	// 「从创建起算的固定窗口」：用户在面板上操作多久都不能延长它，跨线即被删，
+	// 登录成果随浏览器一起蒸发，界面还一直说「未登录」（2026-11-13 线上实录）。
+	idle := time.Duration(frame.ExpiresIn)*time.Second + webConsoleRemoteLoginSessionGrace
+	maxAge := time.Duration(frame.MaxAgeIn)*time.Second + webConsoleRemoteLoginSessionGrace
+	if idle <= 0 {
+		idle = 15 * time.Minute
+	}
+	if maxAge < idle {
+		maxAge = idle
+	}
 	s.sessions[frame.SessionID] = remoteLoginBinding{
 		AccountID: accountID,
 		Provider:  provider,
-		ExpiresAt: s.now().Add(webConsoleRemoteLoginSessionTTL),
+		CreatedAt: now,
+		ExpiresAt: now.Add(idle),
+		Idle:      idle,
+		MaxAge:    maxAge,
 	}
 	s.mu.Unlock()
 
@@ -224,10 +256,55 @@ func (s *WebConsoleRemoteLoginService) Frame(ctx context.Context, accountID int6
 	}
 	var frame WebConsoleRemoteLoginFrame
 	path := fmt.Sprintf("%s/%s/state", webConsoleRemoteLoginPathPrefix, sessionID)
-	if err := s.callWorker(ctx, http.MethodGet, path, nil, &frame); err != nil {
+	statusCode, err := s.callWorkerRaw(ctx, http.MethodGet, path, nil, &frame)
+	if err != nil {
 		return nil, err
 	}
+	if statusCode == http.StatusGone || statusCode == http.StatusNotFound {
+		// 会话没了（过期 / 被回收）。但 worker 在关浏览器之前可能已经抢救到了
+		// 登录成果——用户登进去过就是登进去过，不能因为会话到点把成果扔掉，
+		// 逼他重收一遍短信验证码。这里照常落库，然后如实告诉前端：
+		// 「会话过期了，但登录状态已经保住了」。
+		if saved, saveErr := s.saveRescuedStorageState(ctx, accountID, &frame); saveErr != nil {
+			slog.Warn("web_console_remote_login_rescue_persist_failed", "account_id", accountID, "error", saveErr)
+		} else if saved {
+			frame.Status = webConsoleRemoteLoginStatusAuthenticated
+			frame.Message = "session_expired_but_saved"
+			return &frame, nil
+		}
+		return nil, ErrRemoteLoginSessionUnknown
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return nil, ErrRemoteLoginStepFailed
+	}
 	return &frame, nil
+}
+
+// saveRescuedStorageState 把 worker 抢救回来的登录态落库。
+// 只有 worker 明确说「页面确实是登录态」且带回了 storage_state 才算；
+// 拿不到就返回 false，由调用方按「会话没了」正常处理。
+func (s *WebConsoleRemoteLoginService) saveRescuedStorageState(
+	ctx context.Context,
+	accountID int64,
+	frame *WebConsoleRemoteLoginFrame,
+) (bool, error) {
+	storageState := strings.TrimSpace(frame.StorageState)
+	if storageState == "" || frame.Status != webConsoleRemoteLoginStatusAuthenticated {
+		return false, nil
+	}
+	if s.accountRepo == nil {
+		return false, ErrRemoteLoginNotConfigured
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return false, err
+	}
+	currentUsername := account.GetCredential(webConsoleQuotaCredentialKeyUsername)
+	if err := s.persistStorageState(ctx, accountID, account, currentUsername, storageState); err != nil {
+		return false, err
+	}
+	s.forgetSession(frame.SessionID)
+	return true, nil
 }
 
 // Tap 把一次点击转发到页面（坐标为视口 CSS 像素），返回点击之后的一帧。
@@ -377,6 +454,24 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 		}
 		return &WebConsoleRemoteLoginResult{Status: webConsoleRemoteLoginStatusPending}, nil
 	}
+	if statusCode == http.StatusGone || statusCode == http.StatusNotFound {
+		// 会话没了：这是「登录会话过期」，不是「服务器故障」。
+		// 旧实现在这里一律当 StepFailed（502），前端只能显示成一句含糊的失败，
+		// 用户看不出是自己操作太慢、还是系统坏了（2026-11-13 线上）。
+		if saved, saveErr := s.saveRescuedStorageState(ctx, accountID, &WebConsoleRemoteLoginFrame{
+			SessionID:    sessionID,
+			Status:       finish.Status,
+			StorageState: finish.StorageState,
+		}); saveErr != nil {
+			slog.Warn("web_console_remote_login_rescue_persist_failed", "account_id", accountID, "error", saveErr)
+		} else if saved {
+			return &WebConsoleRemoteLoginResult{
+				Status:  "succeeded",
+				Message: "session_expired_but_saved",
+			}, nil
+		}
+		return nil, ErrRemoteLoginSessionUnknown
+	}
 	if statusCode < 200 || statusCode >= 300 {
 		return nil, ErrRemoteLoginStepFailed
 	}
@@ -418,13 +513,9 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 	currentUsername := account.GetCredential(webConsoleQuotaCredentialKeyUsername)
 	// 只写 login 产物（storage_state）。不把页面标题写进 console_username：
 	// 该字段是「控制台账号」语义，参与同级账号匹配与探测合并键，写标题会污染匹配。
-	patch := map[string]any{webConsoleQuotaCredentialKeyStorageState: storageState}
-	if err := s.accountRepo.PatchAccountCredentials(ctx, binding.AccountID, patch, currentUsername); err != nil {
-		// 只记账号与错误类型，绝不打印 storage_state。
-		slog.Warn("web_console_remote_login_persist_failed", "account_id", binding.AccountID, "error", err)
-		return nil, fmt.Errorf("web console remote login: persist storage state: %w", err)
+	if err := s.persistStorageState(ctx, binding.AccountID, account, currentUsername, storageState); err != nil {
+		return nil, err
 	}
-	syncWebConsoleStorageStateToSiblings(ctx, s.accountRepo, account, currentUsername, storageState)
 
 	s.forgetSession(sessionID)
 
@@ -447,6 +538,29 @@ func (s *WebConsoleRemoteLoginService) Finish(ctx context.Context, accountID int
 // ---------------------------------------------------------------------------
 // 内部：会话绑定与 worker 调用
 // ---------------------------------------------------------------------------
+
+// persistStorageState 把一份登录态写进账号凭据，并同步给同级账号。
+//
+// 抽出来是因为「保存登录态」现在有两个入口，但必须是同一件事、同一条路：
+// - 正常流程：用户点「我已完成登录」/ 登录一生效，worker 的 finish 回传 storage_state；
+// - 抢救流程：会话超时被回收，worker 在关浏览器前把成果抢救回来随 410 带出。
+// 两个入口如果各写一份保存逻辑，迟早会漂移成「有的能存有的不能存」。
+func (s *WebConsoleRemoteLoginService) persistStorageState(
+	ctx context.Context,
+	accountID int64,
+	account *Account,
+	currentUsername string,
+	storageState string,
+) error {
+	patch := map[string]any{webConsoleQuotaCredentialKeyStorageState: storageState}
+	if err := s.accountRepo.PatchAccountCredentials(ctx, accountID, patch, currentUsername); err != nil {
+		// 只记账号与错误类型，绝不打印 storage_state。
+		slog.Warn("web_console_remote_login_persist_failed", "account_id", accountID, "error", err)
+		return fmt.Errorf("web console remote login: persist storage state: %w", err)
+	}
+	syncWebConsoleStorageStateToSiblings(ctx, s.accountRepo, account, currentUsername, storageState)
+	return nil
+}
 
 // webConsoleProbeAuthStateReason 把探测的 auth state 翻成给前端的一个稳定标签
 // （不是给人看的句子；前端按标签显示人话）。
@@ -482,6 +596,13 @@ func (s *WebConsoleRemoteLoginService) boundSession(accountID int64, sessionID s
 		// 会话与账号不匹配：不删除（可能属于另一账号），直接拒绝。
 		return nil, ErrRemoteLoginSessionUnknown
 	}
+	// 滑动续期：只要用户还在这个面板上操作，空闲截止点就往后推。
+	// 但绝不越过绝对上限（CreatedAt + MaxAge）——窗口可以滑，寿命不能无限长。
+	binding.ExpiresAt = now.Add(binding.Idle)
+	if hardLimit := binding.CreatedAt.Add(binding.MaxAge); binding.ExpiresAt.After(hardLimit) {
+		binding.ExpiresAt = hardLimit
+	}
+	s.sessions[trimmed] = binding
 	out := binding
 	return &out, nil
 }
@@ -494,7 +615,9 @@ func (s *WebConsoleRemoteLoginService) forgetSession(sessionID string) {
 
 func (s *WebConsoleRemoteLoginService) pruneExpiredLocked(now time.Time) {
 	for id, binding := range s.sessions {
-		if !now.Before(binding.ExpiresAt) {
+		// 两条规则：空闲到期（滑动窗口没人续）或者绝对上限到了（到点必收）。
+		hardLimit := binding.CreatedAt.Add(binding.MaxAge)
+		if !now.Before(binding.ExpiresAt) || !now.Before(hardLimit) {
 			delete(s.sessions, id)
 		}
 	}

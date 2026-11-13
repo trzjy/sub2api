@@ -673,6 +673,8 @@ export default {
         loginSuccess: '登录成功，已保存票据并刷新用量',
         loginDetected: '已检测到登录成功，正在自动保存…（不用你点任何按钮）',
         loginDoneHint: '一般会自动保存；没自动存时点这里补一下。',
+        loginSessionExpired: '这次登录会话到期了（操作太久就会这样），已自动重新打开，请再登录一次。',
+        loginSessionExpiredButSaved: '登录会话到期了，但登录状态已经保住了，不用再登一次。',
         loginNotDetected: '还没检测到登录完成，请先扫码或收短信验证',
         loginSavedButProbe: '会话已保存。用量这次没读到（{reason}），用量列先按旧值显示，不影响登录本身。',
         loginVerifyFailed: '这次登录没真的生效：拿刚拿到的会话去访问控制台，又被弹回登录页了，所以没有保存。请在面板里重新走一遍登录。',
