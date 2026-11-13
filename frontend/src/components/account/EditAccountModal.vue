@@ -400,6 +400,31 @@
             </p>
 
             <!--
+              登录成功的主操作，放在面板最上方：绝不能让它随滚动跑到视野外。
+              2026-11-13 线上：用户明明登录成功了，这个按钮埋在面板底部看不见，
+              他只看见弹窗那个绿色的「更新」（保存账号配置用的），点了不保存登录，
+              于是会话一直存不进去，界面反复提示重新登录。
+              现在默认自动保存，这个按钮只是兜底（自动保存没过时，用户自己点一下）。
+            -->
+            <div
+              class="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-emerald-50 px-2 py-1.5 dark:bg-emerald-900/20"
+              data-testid="web-console-login-done-row"
+            >
+              <button
+                type="button"
+                data-testid="web-console-login-finish"
+                class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+                :disabled="remoteLoginFinishing"
+                @click="handleRemoteLoginFinish"
+              >
+                {{ t('admin.accounts.webConsoleQuota.loginDone') }}
+              </button>
+              <span class="text-xs text-emerald-700 dark:text-emerald-300">
+                {{ t('admin.accounts.webConsoleQuota.loginDoneHint') }}
+              </span>
+            </div>
+
+            <!--
               登录表单：这里不是「让用户点缩略图坐标」，而是把服务端页面上的
               输入框原样报回来渲染成真表单。原因：美团 passport 的「动态码」框
               只有 176×18 CSS 像素，缩到面板后约 7 像素高，鼠标根本点不中，
@@ -549,15 +574,6 @@
               </button>
               <button type="button" class="btn btn-secondary btn-sm" @click="handleRemoteLoginReload">
                 {{ t('admin.accounts.webConsoleQuota.frameReload') }}
-              </button>
-              <button
-                type="button"
-                data-testid="web-console-login-finish"
-                class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
-                :disabled="remoteLoginFinishing"
-                @click="handleRemoteLoginFinish"
-              >
-                {{ t('admin.accounts.webConsoleQuota.loginDone') }}
               </button>
               <button type="button" class="btn btn-secondary btn-sm" @click="closeRemoteLogin">
                 {{ t('common.cancel') }}
@@ -4442,6 +4458,11 @@ const remoteLoginButtons = ref<Array<{ index: number; text: string }>>([])
 // 'ok' = 这份表单清单可信；'unavailable' = 没读到（不是「页面真的没有」）。
 // 两者在界面上必须说不同的话，否则用户会被一句假结论卡死。
 const remoteLoginFormState = ref<'ok' | 'unavailable' | 'opening'>('opening')
+// 是否已自动保存过一次。登录生效就该自动存，不要求用户找按钮（2026-11-13 线上：
+// 用户登录成功了，但「我已完成登录」埋在面板下面看不见，只看见绿色的「更新」
+// ——那是保存账号配置的，于是登录白做、会话存不进去）。
+// 自动保存失败（verify_failed）后复位，用户改完可以再来一次。
+const remoteLoginAutoSaved = ref(false)
 const remoteLoginFieldValues = reactive<Record<string, string>>({})
 let remoteLoginTimer: number | null = null
 
@@ -4508,6 +4529,14 @@ const applyRemoteLoginFrame = (frame: {
   if (frame.status === 'authenticated') {
     remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.loginDetected')
     remoteLoginError.value = false
+    // 登录生效 → 自动保存。完成登录这件事不该依赖用户找到一个按钮。
+    if (!remoteLoginAutoSaved.value && !remoteLoginFinishing.value && remoteLoginOpen.value) {
+      remoteLoginAutoSaved.value = true
+      void handleRemoteLoginFinish()
+    }
+  } else if (remoteLoginAutoSaved.value && !remoteLoginFinishing.value) {
+    // 上一轮自动保存没过（服务端说还没生效），复位让下一轮可以再试。
+    remoteLoginAutoSaved.value = false
   }
 }
 
@@ -4549,6 +4578,7 @@ const handleOpenRemoteLogin = async () => {
   remoteLoginStarting.value = true
   remoteLoginPhase.value = 'opening'
   remoteLoginFormState.value = 'opening'
+  remoteLoginAutoSaved.value = false
   remoteLoginMessage.value = ''
   remoteLoginError.value = false
   remoteLoginScreenshot.value = ''
@@ -4824,6 +4854,7 @@ async function closeRemoteLogin() {
   remoteLoginButtons.value = []
   remoteLoginPhase.value = 'opening'
   remoteLoginFormState.value = 'opening'
+  remoteLoginAutoSaved.value = false
   for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
   if (sessionId && accountID) {
     try {
@@ -6083,6 +6114,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   remoteLoginButtons.value = []
   remoteLoginPhase.value = 'opening'
   remoteLoginFormState.value = 'opening'
+  remoteLoginAutoSaved.value = false
   for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
   remoteLoginMessage.value = ''
   remoteLoginError.value = false

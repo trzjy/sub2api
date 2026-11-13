@@ -2,10 +2,11 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { defineComponent } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 
-const { startLoginMock, finishMock, actionMock } = vi.hoisted(() => ({
+const { startLoginMock, finishMock, actionMock, frameMock } = vi.hoisted(() => ({
   startLoginMock: vi.fn(),
   finishMock: vi.fn(),
-  actionMock: vi.fn()
+  actionMock: vi.fn(),
+  frameMock: vi.fn()
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -39,7 +40,7 @@ vi.mock('@/api/admin', () => ({
     },
     cnProviders: {
       startWebConsoleLogin: startLoginMock,
-      getWebConsoleLoginFrame: vi.fn(),
+      getWebConsoleLoginFrame: frameMock,
       postWebConsoleLoginAction: actionMock,
       finishWebConsoleLogin: finishMock,
       cancelWebConsoleLogin: vi.fn().mockResolvedValue(undefined)
@@ -224,6 +225,59 @@ describe('EditAccountModal 控制台登录面板', () => {
     expect(wrapper.text()).toContain('admin.accounts.webConsoleQuota.loginSavedButProbe')
     // 注意：本文件的 i18n mock 只回 key、不做插值，所以断言不到具体 reason；
     // 真实文案会把 {reason} 换成后端给的标签。
+    wrapper.unmount()
+  })
+
+  it('登录一生效就自动保存，不要求用户去找「我已完成登录」', async () => {
+    // 2026-11-13 线上：用户登录成功了，但那个按钮埋在面板底部看不见，
+    // 他只看见弹窗的绿色「更新」（那是保存账号配置的），于是会话一直存不进去。
+    // 契约：看到 status=authenticated 就必须自动走一遍保存流程。
+    frameMock.mockReset()
+    frameMock.mockResolvedValue({
+      session_id: 'sid-5',
+      status: 'authenticated',
+      phase: 'ready',
+      screenshot: 'AAAA',
+      fields: [],
+      buttons: [],
+      form_state: 'ok'
+    })
+    finishMock.mockReset()
+    finishMock.mockResolvedValue({ status: 'succeeded' })
+    startLoginMock.mockResolvedValue({
+      session_id: 'sid-5',
+      status: 'pending',
+      phase: 'opening'
+    })
+
+    const wrapper = mountModal(buildConsoleAccount())
+    await wrapper.get('[data-testid="web-console-login-start"]').trigger('click')
+    await flushPromises()
+    // 等一轮轮询（1.2s）把 authenticated 帧拿回来
+    await new Promise((resolve) => setTimeout(resolve, 1400))
+    await flushPromises()
+
+    expect(finishMock).toHaveBeenCalled()
+    expect(finishMock.mock.calls[0][1]).toBe('sid-5')
+    wrapper.unmount()
+  })
+
+  it('「我已完成登录」必须在面板最上方就能看见（兜底）', async () => {
+    startLoginMock.mockResolvedValue({
+      session_id: 'sid-6',
+      status: 'pending',
+      phase: 'ready',
+      screenshot: 'AAAA',
+      fields: [],
+      buttons: [],
+      form_state: 'ok'
+    })
+    const wrapper = mountModal(buildConsoleAccount())
+    await wrapper.get('[data-testid="web-console-login-start"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="web-console-login-done-row"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="web-console-login-finish"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
