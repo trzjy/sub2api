@@ -28,7 +28,11 @@ type identityDisguiseResponse struct {
 	AccountID int64  `json:"account_id"`
 	Profile   string `json:"profile"`
 	// ForbiddenNames 是当前生效的禁词列表。
+	// 必须是**数组**（空时为 []，不得为 null）—— 前端按 string[] 使用，
+	// null 会让调用方的 join/遍历直接抛错。
 	ForbiddenNames []string `json:"forbidden_names"`
+	// AutoDeriveForbidden 报告禁词列表是否由账号 model_mapping 自动推导。
+	AutoDeriveForbidden bool `json:"auto_derive_forbidden_names"`
 	RewriteModel   bool     `json:"rewrite_model"`
 	StripReasoning bool     `json:"strip_reasoning"`
 	// Prompt 是当前生效的人设正文（供运营核对）。
@@ -127,9 +131,14 @@ func buildIdentityDisguiseResponse(accountID int64, state *service.IdentityDisgu
 		return out
 	}
 	out.Profile = string(state.Profile)
+	// 空列表规范成 [] —— Go 的 nil 切片会被序列化成 null，前端按 string[] 使用会崩。
 	out.ForbiddenNames = state.ForbiddenNames
+	if out.ForbiddenNames == nil {
+		out.ForbiddenNames = []string{}
+	}
 	out.RewriteModel = state.RewriteModel
 	out.StripReasoning = state.StripReasoning
+	out.AutoDeriveForbidden = state.AutoDeriveForbidden
 	out.Prompt = state.Prompt
 	out.UsesLegacyKeys = state.UsesLegacyKeys
 	return out

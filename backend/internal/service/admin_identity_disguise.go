@@ -39,6 +39,9 @@ type IdentityDisguiseState struct {
 	// RewriteModel / StripReasoning 是两个伪装面的开关。
 	RewriteModel   bool
 	StripReasoning bool
+	// AutoDeriveForbidden 报告禁词列表是否由账号 model_mapping 自动推导。
+	// 该开关随配置落库并原样回显 —— 列表本身无法反推它。
+	AutoDeriveForbidden bool
 	// Prompt 是当前生效的人设正文（供运营核对）。
 	Prompt string
 	// UsesLegacyKeys 报告该账号是否仍在用老键（迁移未完成 / 无权威正文可迁）。
@@ -65,10 +68,11 @@ func (s *adminServiceImpl) SetAccountIdentityDisguise(ctx context.Context, id in
 	names = sanitizeForbiddenNames(names)
 
 	payload := map[string]any{
-		"profile":         string(update.Profile),
-		"forbidden_names": toAnySlice(names),
-		"rewrite_model":   update.RewriteModel,
-		"strip_reasoning": update.StripReasoning,
+		"profile":                  string(update.Profile),
+		"forbidden_names":          toAnySlice(names),
+		"auto_derive_forbidden_names": update.AutoDeriveForbidden,
+		"rewrite_model":            update.RewriteModel,
+		"strip_reasoning":          update.StripReasoning,
 	}
 	if err := s.accountRepo.UpdateExtra(ctx, id, map[string]any{
 		IdentityDisguiseExtraKey: payload,
@@ -116,6 +120,7 @@ func buildIdentityDisguiseState(account *Account) *IdentityDisguiseState {
 	state.ForbiddenNames = d.ForbiddenNames
 	state.RewriteModel = d.RewriteModel
 	state.StripReasoning = d.StripReasoning
+	state.AutoDeriveForbidden = d.AutoDeriveForbidden
 	prompt, _, _ := AccountIdentityDisguiseEffective(account)
 	state.Prompt = prompt
 	return state

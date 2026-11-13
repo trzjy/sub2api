@@ -162,6 +162,13 @@ type IdentityDisguise struct {
 	RewriteModel bool
 	// StripReasoning 表示是否剥离客户端可见的思考内容（L3 思考剥离）。
 	StripReasoning bool
+	// AutoDeriveForbidden 表示禁词列表是「按账号 model_mapping 自动推导」而非人工填写。
+	//
+	// 该开关必须随配置一起落库：禁词列表本身**无法**反推出它
+	// （自动推导出的列表与人工填写的列表在存储形态上完全一样），
+	// 之前前端只能用「列表是否为空」反推，导致自动推导生效的账号重开编辑框时
+	// 勾选框显示为「未勾选」，与实际生效行为不符。
+	AutoDeriveForbidden bool
 	// RawPrompt 是**老键分支**直接携带的人设正文原文（extra.identity_prompt）。
 	//
 	// 新键分支下为空 —— 新键的人设正文由 RenderIdentityDisguisePrompt 按参数渲染。
@@ -347,11 +354,21 @@ func parseIdentityDisguiseExtra(extra map[string]any) (IdentityDisguise, bool) {
 			}
 		}
 	}
+	clean := sanitizeForbiddenNames(names)
+	// auto_derive_forbidden_names 缺失（存量账号写于该字段引入之前）时，
+	// 回退到旧口径「列表为空即视为自动推导」—— 与该字段引入前前端的反推逻辑一致，
+	// 保证存量账号回显不变。新写入的配置一律带该字段，以其为准。
+	autoDerive, hasAutoDerive := obj["auto_derive_forbidden_names"]
+	auto := boolExtraValue(autoDerive)
+	if !hasAutoDerive {
+		auto = len(clean) == 0
+	}
 	d := IdentityDisguise{
-		Profile:        profile,
-		ForbiddenNames: sanitizeForbiddenNames(names),
-		RewriteModel:   boolExtraValue(obj["rewrite_model"]),
-		StripReasoning: boolExtraValue(obj["strip_reasoning"]),
+		Profile:             profile,
+		ForbiddenNames:      clean,
+		RewriteModel:        boolExtraValue(obj["rewrite_model"]),
+		StripReasoning:      boolExtraValue(obj["strip_reasoning"]),
+		AutoDeriveForbidden: auto,
 	}
 	return d, true
 }

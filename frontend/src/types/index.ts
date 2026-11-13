@@ -1834,8 +1834,10 @@ export interface IdentityDisguiseProfileOption {
 export interface IdentityDisguiseState {
   account_id: number
   profile: IdentityDisguiseProfile
-  /** 当前生效的禁词列表 */
+  /** 当前生效的禁词列表（空时为 []，不会是 null） */
   forbidden_names: string[]
+  /** 禁词列表是否由账号 model_mapping 自动推导（随配置落库，原样回显） */
+  auto_derive_forbidden_names: boolean
   /** 是否把上游回显的模型名改写回客户端请求名（L1） */
   rewrite_model: boolean
   /** 是否剥离客户端可见的思考内容（L3） */

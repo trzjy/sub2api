@@ -2204,7 +2204,7 @@
         >
           <!-- 身份清单全部来自后端目录（含「不伪装」），前端不硬编码任何选项 -->
           <option v-for="opt in identityDisguiseProfiles" :key="opt.id" :value="opt.id">
-            {{ opt.label }}
+            {{ identityDisguiseProfileLabel(opt) }}
           </option>
         </select>
         <p class="input-hint">{{ t('admin.accounts.identityDisguise.profileHint') }}</p>
@@ -4206,6 +4206,15 @@ function onIdentityDisguiseProfileChange() {
   // 避免运营来回切换时丢掉已调好的开关。
 }
 
+// 「不伪装」这一项的显示名走前端文案表（i18n），其余模板名用后端目录里的 label。
+//
+// 后端目录里 none 项的 label 是内部标识 "none"（后端是唯一事实源，不编造展示文案），
+// 直接透出会给运营看英文；这里只在 none 这一项上做映射，不改后端目录语义。
+function identityDisguiseProfileLabel(opt: IdentityDisguiseProfileOption): string {
+  if (opt.id === 'none') return t('admin.accounts.identityDisguise.profileNone')
+  return opt.label
+}
+
 async function loadIdentityDisguiseProfiles() {
   try {
     identityDisguiseProfiles.value = await adminAPI.accounts.getIdentityDisguiseProfiles()
@@ -4220,9 +4229,14 @@ async function loadIdentityDisguise(accountId: number) {
   identityDisguiseLoaded.value = false
   try {
     const state = await adminAPI.accounts.getAccountIdentityDisguise(accountId)
+    // 后端保证 forbidden_names 是数组（空时为 []）；这里再兜一层，
+    // 避免任何 null 落到下面的 join 上（历史后端版本返回过 null）。
+    const names = Array.isArray(state.forbidden_names) ? state.forbidden_names : []
     identityDisguiseProfile.value = state.profile
-    identityDisguiseForbiddenNamesText.value = state.forbidden_names.join('\n')
-    identityDisguiseAutoDerive.value = state.forbidden_names.length === 0
+    identityDisguiseForbiddenNamesText.value = names.join('\n')
+    // 「自动生成」开关由后端随配置落库并回显 —— 不再从列表是否为空反推
+    // （自动推导出的列表与人工填写的列表在存储上无法区分，反推必错）。
+    identityDisguiseAutoDerive.value = state.auto_derive_forbidden_names ?? names.length === 0
     identityDisguiseRewriteModel.value = state.rewrite_model
     identityDisguiseStripReasoning.value = state.strip_reasoning
     identityDisguiseUsesLegacyKeys.value = state.uses_legacy_keys

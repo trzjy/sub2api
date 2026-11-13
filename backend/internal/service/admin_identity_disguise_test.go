@@ -111,6 +111,59 @@ func TestBuildIdentityDisguiseState_UsesLegacyKeysOnlyWhenLegacyPresent(t *testi
 	})
 }
 
+// 「自动生成」开关必须随配置落库并原样回显 ——
+// 禁词列表本身无法反推它（自动推导出的列表与人工填写的列表存储形态完全一样）。
+func TestBuildIdentityDisguiseState_AutoDeriveFlag(t *testing.T) {
+	t.Run("新键带 auto_derive_forbidden_names=true → 原样回显", func(t *testing.T) {
+		a := &Account{Extra: map[string]any{
+			IdentityDisguiseExtraKey: map[string]any{
+				"profile":                    "kimi",
+				"forbidden_names":            []any{"kimi-k2"},
+				"auto_derive_forbidden_names": true,
+				"rewrite_model":              true,
+				"strip_reasoning":            true,
+			},
+		}}
+		state := buildIdentityDisguiseState(a)
+		require.True(t, state.AutoDeriveForbidden, "列表非空但开关为自动生成时必须回显 true")
+		require.Len(t, state.ForbiddenNames, 1)
+	})
+
+	t.Run("新键带 auto_derive_forbidden_names=false 且列表非空 → 回显 false", func(t *testing.T) {
+		a := &Account{Extra: map[string]any{
+			IdentityDisguiseExtraKey: map[string]any{
+				"profile":                    "kimi",
+				"forbidden_names":            []any{"kimi-k2"},
+				"auto_derive_forbidden_names": false,
+			},
+		}}
+		state := buildIdentityDisguiseState(a)
+		require.False(t, state.AutoDeriveForbidden, "人工填写的列表必须回显 false")
+	})
+
+	t.Run("存量账号缺该字段 → 回退旧口径（列表为空即自动推导）", func(t *testing.T) {
+		a := &Account{Extra: map[string]any{
+			IdentityDisguiseExtraKey: map[string]any{
+				"profile":         "kimi",
+				"forbidden_names": []any{},
+			},
+		}}
+		state := buildIdentityDisguiseState(a)
+		require.True(t, state.AutoDeriveForbidden, "存量账号回显口径必须与引入前一致")
+	})
+
+	t.Run("存量账号缺该字段且列表非空 → 回退为 false", func(t *testing.T) {
+		a := &Account{Extra: map[string]any{
+			IdentityDisguiseExtraKey: map[string]any{
+				"profile":         "kimi",
+				"forbidden_names": []any{"kimi-k2"},
+			},
+		}}
+		state := buildIdentityDisguiseState(a)
+		require.False(t, state.AutoDeriveForbidden)
+	})
+}
+
 // DSG-C3F：UsesLegacyKeys 按「老键是否存在」判断，而非解析后的有效值。
 // 老键存在但值为空串 / false 时仍须报「使用旧配置」，否则前端不提示迁移。
 func TestBuildIdentityDisguiseState_UsesLegacyKeysByKeyPresence(t *testing.T) {

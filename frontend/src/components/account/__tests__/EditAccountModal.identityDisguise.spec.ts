@@ -75,6 +75,7 @@ const emptyState = {
   account_id: 12,
   profile: 'none' as const,
   forbidden_names: [] as string[],
+  auto_derive_forbidden_names: true,
   rewrite_model: true,
   strip_reasoning: true,
   prompt: '',
@@ -100,6 +101,7 @@ describe('EditAccountModal identity disguise', () => {
       ...emptyState,
       profile: payload.profile as 'none',
       forbidden_names: payload.forbidden_names as string[],
+      auto_derive_forbidden_names: payload.auto_derive_forbidden_names as boolean,
       rewrite_model: payload.rewrite_model as boolean,
       strip_reasoning: payload.strip_reasoning as boolean
     }))
@@ -301,5 +303,81 @@ describe('EditAccountModal identity disguise', () => {
     expect(updateDisguiseMock).not.toHaveBeenCalled()
     // 读取失败提示仍然出现（既有行为不变）
     expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.identityDisguise.loadFailed')
+  })
+
+  // 回归：后端历史上返回过 forbidden_names: null，前端 join 会抛错并把整个读取
+  // 判为失败 → 伪装既不显示也不保存。必须容忍 null 并照常加载。
+  it('tolerates a null forbidden_names from the backend', async () => {
+    getDisguiseMock.mockResolvedValue({ ...emptyState, forbidden_names: null } as never)
+    const wrapper = mountModal()
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalled())
+    // 读取没有被判为失败
+    expect(showErrorMock).not.toHaveBeenCalledWith('admin.accounts.identityDisguise.loadFailed')
+    // 且伪装配置仍可保存（读取已标记为成功）
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await vi.waitFor(() => expect(updateDisguiseMock).toHaveBeenCalled())
+  })
+
+  // 「自动生成」开关由后端随配置落库并回显 —— 不再从「列表是否为空」反推。
+  it('restores the auto-derive switch from the backend flag, not from the list length', async () => {
+    // 自动推导出的禁词列表非空，但开关是「自动生成」
+    getDisguiseMock.mockResolvedValue({
+      ...emptyState,
+      profile: 'kimi',
+      forbidden_names: ['kimi-k2'],
+      auto_derive_forbidden_names: true
+    })
+    const wrapper = mountModal()
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalled())
+    await vi.waitFor(() =>
+      expect(
+        (wrapper.get('[data-testid="identity-disguise-auto-derive"]').element as HTMLInputElement).checked
+      ).toBe(true)
+    )
+  })
+
+  it('restores the auto-derive switch as unchecked for a manually filled list', async () => {
+    getDisguiseMock.mockResolvedValue({
+      ...emptyState,
+      profile: 'kimi',
+      forbidden_names: ['kimi-k2'],
+      auto_derive_forbidden_names: false
+    })
+    const wrapper = mountModal()
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalled())
+    await vi.waitFor(() =>
+      expect(
+        (wrapper.get('[data-testid="identity-disguise-auto-derive"]').element as HTMLInputElement).checked
+      ).toBe(false)
+    )
+  })
+
+  it('sends the auto-derive flag to the dedicated endpoint', async () => {
+    getDisguiseMock.mockResolvedValue({
+      ...emptyState,
+      profile: 'kimi',
+      forbidden_names: ['kimi-k2'],
+      auto_derive_forbidden_names: false
+    })
+    const wrapper = mountModal()
+    await vi.waitFor(() => expect(getDisguiseMock).toHaveBeenCalled())
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await vi.waitFor(() => expect(updateDisguiseMock).toHaveBeenCalled())
+    const [, payload] = updateDisguiseMock.mock.calls[0]
+    expect(payload.auto_derive_forbidden_names).toBe(false)
+    expect(payload.forbidden_names).toEqual(['kimi-k2'])
+  })
+
+  // 「不伪装」选项的显示名走 i18n，而不是后端目录里的内部标识 "none"。
+  it('labels the none option with the localized label', async () => {
+    const wrapper = mountModal()
+    await vi.waitFor(() =>
+      expect(wrapper.findAll('[data-testid="identity-disguise-profile"] option').length).toBe(3)
+    )
+    const options = wrapper.findAll('[data-testid="identity-disguise-profile"] option')
+    expect(options[0].text()).toBe('admin.accounts.identityDisguise.profileNone')
+    // 其余模板名仍用后端目录的 label
+    expect(options[1].text()).toBe('Kimi')
+    expect(options[2].text()).toBe('DeepSeek')
   })
 })

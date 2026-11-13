@@ -50,6 +50,7 @@ type stubAdminService struct {
 		scope   service.RequestSizeScope
 	}
 	getAccountResult        *service.Account
+	identityDisguiseState   *service.IdentityDisguiseState
 	updateAccountCalls      int
 	updateAccountExtraCalls int
 	checkMixedErr           error
@@ -510,7 +511,11 @@ func (s *stubAdminService) GetAccount(ctx context.Context, id int64) (*service.A
 
 // GetAccountIdentityDisguise 补齐 service.AdminService 接口（主线 1f79356a5d 新增该方法但未同步本测试桩，
 // 导致 handler/admin 包 vet/测试无法编译）。本桩只返回零值，伪装行为由 service 层各自用例覆盖。
+// identityDisguiseState 非 nil 时原样返回，供 handler 层响应格式用例设置。
 func (s *stubAdminService) GetAccountIdentityDisguise(ctx context.Context, id int64) (*service.IdentityDisguiseState, error) {
+	if s.identityDisguiseState != nil {
+		return s.identityDisguiseState, nil
+	}
 	return &service.IdentityDisguiseState{}, nil
 }
 
