@@ -246,10 +246,12 @@ _BROWSER_PATCH_JS = """
   // 注入轻微噪声改变结果，但不影响视觉效果。
   //
   // 噪声必须是**确定性**的：同一张 canvas 每次、每个会话都要算出同一个指纹。
-  // 旧实现每个像素调用一次 Math.random()，等于同一页面内两次读取都不一致、
-  // 每次登录都是「一台新设备」——上游据此触发加验（同一账号在用户自己的浏览器
-  // 一次验证码即过，经本 worker 反复要验证码/语音验证，2026-11-14 线上）。
-  // 现改为只依赖像素下标的固定扰动：输入相同 => 输出恒定。
+  //
+  // 实测记录（2026-11-14，容器内 fp_check.py 对照实验）：旧实现的
+  // `data[i] + Math.random()*0.2 - 0.1` 写在 Uint8ClampedArray 上会被四舍五入
+  // 归零，Canvas 指纹其实一直是稳定的 —— 这段随机数从来没生效过，不是加验原因。
+  // 真正不稳定的是 Audio 指纹（Float32Array 不取整，旧实现两次读取相差 1e-8 量级），
+  // 已同批改为确定性扰动。Canvas 这里保留确定性写法：语义正确，且不受数组类型影响。
   try {
     const toDataURL = HTMLCanvasElement.prototype.toDataURL;
     const getImageData = CanvasRenderingContext2D.prototype.getImageData;
