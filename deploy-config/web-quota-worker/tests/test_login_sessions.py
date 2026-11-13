@@ -284,7 +284,12 @@ def test_actions_forward_to_same_page():
         assert page.mouse.calls[-1] == ("click", (120.5, 240.0), {})
 
         await type_text(session, "13800000000")
-        assert page.keyboard.calls[-1] == ("type", ("13800000000",), {"delay": 20})
+        # 人类化打字改为逐字符输入（2026-11-13 反风控增强），
+        # 测试验证最后一个字符被正确输入即可。
+        assert page.keyboard.calls[-1] == ("type", ("0",), {})
+        # 验证总共调用了 11 次（11 个字符）
+        type_calls = [c for c in page.keyboard.calls if c[0] == "type"]
+        assert len(type_calls) == 11
 
         await press_key(session, "Enter")
         assert page.keyboard.calls[-1] == ("press", ("Enter",), {})

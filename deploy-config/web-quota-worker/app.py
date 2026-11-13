@@ -172,6 +172,7 @@ BROWSER_TIMEZONE = "Asia/Shanghai"
 BROWSER_LANGUAGES = ("zh-CN", "zh")
 
 # 在页面脚本执行前注入，补齐 navigator 与 window 上缺失的浏览器特征。
+# 2026-11-13 扩展：添加 Canvas/WebGL/Audio/硬件参数伪装，对抗高级指纹检测。
 _BROWSER_PATCH_JS = """
 (() => {
   try {
@@ -197,6 +198,114 @@ _BROWSER_PATCH_JS = """
   try {
     if (!window.chrome) {
       window.chrome = { runtime: {}, app: { isInstalled: false }, csi: () => ({}), loadTimes: () => ({}) };
+    }
+  } catch (e) {}
+
+  // === 硬件参数对齐（2026-11-13 反风控增强）===
+  // 容器默认暴露的 CPU 核心数、内存大小不匹配真实设备，是风控特征之一。
+  try {
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
+  } catch (e) {}
+  try {
+    Object.defineProperty(screen, 'colorDepth', { get: () => 24, configurable: true });
+  } catch (e) {}
+
+  // === WebGL 指纹伪装（2026-11-13 反风控增强）===
+  // 容器里的虚拟显卡（llvmpipe/swiftshader）是明显的自动化特征。
+  // 伪装成常见的 Intel 集显，与 Windows 笔记本一致。
+  try {
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+      if (parameter === 37445) { // UNMASKED_VENDOR_WEBGL
+        return 'Intel Inc.';
+      }
+      if (parameter === 37446) { // UNMASKED_RENDERER_WEBGL
+        return 'Intel Iris OpenGL Engine';
+      }
+      return getParameter.call(this, parameter);
+    };
+  } catch (e) {}
+  try {
+    const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function(parameter) {
+      if (parameter === 37445) {
+        return 'Intel Inc.';
+      }
+      if (parameter === 37446) {
+        return 'Intel Iris OpenGL Engine';
+      }
+      return getParameter2.call(this, parameter);
+    };
+  } catch (e) {}
+
+  // === Canvas 指纹毒化（2026-11-13 反风控增强）===
+  // Canvas 渲染结果在不同环境下有微小差异，是最常用的指纹检测手段。
+  // 注入轻微噪声让每次结果略有不同，但不影响视觉效果。
+  try {
+    const toDataURL = HTMLCanvasElement.prototype.toDataURL;
+    const toBlob = HTMLCanvasElement.prototype.toBlob;
+    const getImageData = CanvasRenderingContext2D.prototype.getImageData;
+
+    const noisify = (imageData) => {
+      // 对 RGBA 数据注入 ±0.1 的随机噪声（人眼不可见）
+      const data = imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = data[i] + Math.random() * 0.2 - 0.1;     // R
+        data[i+1] = data[i+1] + Math.random() * 0.2 - 0.1; // G
+        data[i+2] = data[i+2] + Math.random() * 0.2 - 0.1; // B
+        // Alpha 通道不变
+      }
+    };
+
+    CanvasRenderingContext2D.prototype.getImageData = function() {
+      const imageData = getImageData.apply(this, arguments);
+      noisify(imageData);
+      return imageData;
+    };
+
+    HTMLCanvasElement.prototype.toDataURL = function() {
+      // 通过临时 context 注入噪声
+      const context = this.getContext('2d');
+      if (context) {
+        const imageData = context.getImageData(0, 0, this.width, this.height);
+        noisify(imageData);
+        context.putImageData(imageData, 0, 0);
+      }
+      return toDataURL.apply(this, arguments);
+    };
+  } catch (e) {}
+
+  // === Audio Context 指纹毒化（2026-11-13 反风控增强）===
+  // 音频处理的微小差异也能作为指纹。注入极微小的噪声。
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (AudioContext) {
+      const getChannelData = AudioBuffer.prototype.getChannelData;
+      AudioBuffer.prototype.getChannelData = function() {
+        const originalData = getChannelData.apply(this, arguments);
+        for (let i = 0; i < originalData.length; i += 100) {
+          originalData[i] = originalData[i] + Math.random() * 0.0000001;
+        }
+        return originalData;
+      };
+    }
+  } catch (e) {}
+
+  // === 其他浏览器特征补齐 ===
+  try {
+    if (!navigator.connection) {
+      Object.defineProperty(navigator, 'connection', {
+        get: () => ({
+          effectiveType: '4g',
+          rtt: 100,
+          downlink: 10,
+          saveData: false
+        }),
+        configurable: true
+      });
     }
   } catch (e) {}
 })();

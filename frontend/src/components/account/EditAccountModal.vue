@@ -4592,6 +4592,20 @@ const isRemoteLoginSessionGone = (e: unknown): boolean => {
   return status === 410 || status === 404
 }
 
+// 统一处理远程登录操作的错误：会话过期时自动重开，其他错误显示原始信息。
+// 避免在每个操作函数中重复相同的 410 处理逻辑（2026-11-13 修复）。
+const handleRemoteLoginActionError = async (e: unknown): Promise<boolean> => {
+  if (isRemoteLoginSessionGone(e)) {
+    remoteLoginError.value = false
+    remoteLoginMessage.value = ''
+    await handleRemoteLoginSessionGone()
+    return true // 已处理，调用方应 return
+  }
+  remoteLoginError.value = true
+  remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+  return false // 未特殊处理，调用方继续
+}
+
 // 会话没了就说人话，并且自动把登录面板重新开好。
 // 让用户「重新点一次登录控制台」是多余的一步 —— 面板本来就是为这件事开的。
 const handleRemoteLoginSessionGone = async () => {
@@ -4668,6 +4682,9 @@ const describeRemoteLoginError = (e: unknown): string => {
     return t('admin.accounts.webConsoleQuota.errorTimeout')
   }
   const status = err?.response?.status
+  if (status === 410 || status === 404) {
+    return t('admin.accounts.webConsoleQuota.loginSessionExpired')
+  }
   if (status === 502 || status === 503) {
     return t('admin.accounts.webConsoleQuota.errorWorkerUnavailable')
   }
@@ -4693,8 +4710,7 @@ const handleRemoteLoginTap = async (event: MouseEvent) => {
     if (frame) applyRemoteLoginFrame(frame)
     else await refreshRemoteFrame()
   } catch (e) {
-    remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    if (await handleRemoteLoginActionError(e)) return
   }
 }
 
@@ -4712,8 +4728,7 @@ const handleRemoteLoginType = async () => {
     for (const key of Object.keys(remoteLoginFieldValues)) delete remoteLoginFieldValues[key]
     await refreshRemoteFrame()
   } catch (e) {
-    remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    if (await handleRemoteLoginActionError(e)) return
   }
 }
 
@@ -4743,8 +4758,7 @@ const handleRemoteLoginFill = async (field: { index: number; label: string }) =>
       remoteLoginMessage.value = t('admin.accounts.webConsoleQuota.fillApplied')
     }
   } catch (e) {
-    remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    if (await handleRemoteLoginActionError(e)) return
   } finally {
     remoteLoginBusy.value = false
   }
@@ -4773,8 +4787,7 @@ const handleRemoteLoginClickButton = async (button: { index: number; text: strin
       remoteLoginMessage.value = ''
     }
   } catch (e) {
-    remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    if (await handleRemoteLoginActionError(e)) return
   } finally {
     remoteLoginBusy.value = false
   }
@@ -4796,8 +4809,7 @@ const handleRemoteLoginToggle = async (field: { index: number; label: string }) 
       await refreshRemoteFrame()
     }
   } catch (e) {
-    remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    if (await handleRemoteLoginActionError(e)) return
   } finally {
     remoteLoginBusy.value = false
   }
@@ -4814,8 +4826,7 @@ const handleRemoteLoginKey = async (key: string) => {
     if (frame) applyRemoteLoginFrame(frame)
     else await refreshRemoteFrame()
   } catch (e) {
-    remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    if (await handleRemoteLoginActionError(e)) return
   }
 }
 
@@ -4830,8 +4841,7 @@ const handleRemoteLoginScroll = async (deltaY: number) => {
     if (frame) applyRemoteLoginFrame(frame)
     else await refreshRemoteFrame()
   } catch (e) {
-    remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    if (await handleRemoteLoginActionError(e)) return
   }
 }
 
@@ -4846,8 +4856,7 @@ const handleRemoteLoginReload = async () => {
     if (frame) applyRemoteLoginFrame(frame)
     else await refreshRemoteFrame()
   } catch (e) {
-    remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    if (await handleRemoteLoginActionError(e)) return
   }
 }
 
@@ -4898,13 +4907,7 @@ const handleRemoteLoginFinish = async () => {
       credentials_status: { ...(props.account.credentials_status ?? {}), has_console_storage_state: true }
     })
   } catch (e) {
-    // 会话没了：说人话 + 自动重开面板，别让用户对着一句「未登录」反复重登。
-    if (isRemoteLoginSessionGone(e)) {
-      await handleRemoteLoginSessionGone()
-      return
-    }
-    remoteLoginError.value = true
-    remoteLoginMessage.value = (e as Error)?.message || t('common.error')
+    if (await handleRemoteLoginActionError(e)) return
   } finally {
     remoteLoginFinishing.value = false
   }

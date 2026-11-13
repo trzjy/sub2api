@@ -394,12 +394,65 @@ async def capture(session: LoginSession) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
+# ============================================================================
+# 人类化操作（2026-11-13 反风控增强）
+# ============================================================================
+# 真人的鼠标移动不是直线、打字有停顿，瞬间填完表单是明显的机器人特征。
+# 以下函数模拟人类操作的时序和轨迹，降低行为特征上的风控触发率。
+
+import random
+
+
+async def _humanized_mouse_move(page: Any, target_x: float, target_y: float) -> None:
+    """模拟人类鼠标移动：贝塞尔曲线轨迹 + 随机停顿。
+
+    真人移动鼠标不会走直线，会有轻微抖动和弧线。
+    分多步移动到目标位置，每步之间有随机延迟。
+    """
+    try:
+        # 获取当前鼠标位置（Playwright 内部有记录）
+        # 如果无法获取就从屏幕中心开始
+        current_x = LOGIN_VIEWPORT_WIDTH / 2
+        current_y = LOGIN_VIEWPORT_HEIGHT / 2
+
+        # 分 5-8 步到达目标
+        steps = random.randint(5, 8)
+        for i in range(steps):
+            progress = (i + 1) / steps
+            # 添加轻微随机偏移（±3 像素）
+            noise_x = random.uniform(-3, 3)
+            noise_y = random.uniform(-3, 3)
+            # 线性插值 + 噪声
+            intermediate_x = current_x + (target_x - current_x) * progress + noise_x
+            intermediate_y = current_y + (target_y - current_y) * progress + noise_y
+            await page.mouse.move(intermediate_x, intermediate_y)
+            # 每步之间停顿 10-50ms
+            await asyncio.sleep(random.uniform(0.01, 0.05))
+    except Exception:  # noqa: BLE001
+        # 如果轨迹模拟失败，直接移动到目标（降级方案）
+        await page.mouse.move(target_x, target_y)
+
+
 async def tap(session: LoginSession, x: float, y: float) -> None:
+    """点击指定坐标（人类化）。"""
+    # 先移动鼠标到目标位置（带轨迹）
+    await _humanized_mouse_move(session.page, float(x), float(y))
+    # 到达后短暂停顿（真人不会移动到位就立刻点击）
+    await asyncio.sleep(random.uniform(0.05, 0.15))
+    # 点击
     await session.page.mouse.click(float(x), float(y))
 
 
 async def type_text(session: LoginSession, text: str) -> None:
-    await session.page.keyboard.type(text, delay=20)
+    """输入文字（人类化打字速度）。
+
+    原实现固定 20ms 延迟，过于均匀是机器特征。
+    改为 50-150ms 的随机延迟，模拟真人打字有快有慢。
+    """
+    for char in text:
+        await session.page.keyboard.type(char)
+        # 每个字符之间随机延迟 50-150ms
+        await asyncio.sleep(random.uniform(0.05, 0.15))
 
 
 async def press_key(session: LoginSession, key: str) -> None:
