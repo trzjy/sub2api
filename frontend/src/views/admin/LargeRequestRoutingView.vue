@@ -168,9 +168,9 @@ const FAMILIES: Array<{ platform: FamilyPlatform; title: string }> = [
   { platform: 'kimi', title: 'Kimi' }
 ]
 
-// 页面只按三个家族分块，但分组里可能绑定其他平台的账号（如 codebuddy），
+// 页面只按三个家族分块，但分组里可能绑定其他平台的账号（如 codebuddy、cursor），
 // 必须一并加载并展示，否则会看不到池内真实成员。
-const LOADED_PLATFORMS = ['deepseek', 'zhipu', 'kimi', 'codebuddy'] as const
+const LOADED_PLATFORMS = ['deepseek', 'zhipu', 'kimi', 'codebuddy', 'cursor'] as const
 
 const ACCOUNT_PAGE_SIZE = 200
 
