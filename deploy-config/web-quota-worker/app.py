@@ -241,21 +241,27 @@ _BROWSER_PATCH_JS = """
     };
   } catch (e) {}
 
-  // === Canvas 指纹毒化（2026-11-13 反风控增强）===
+  // === Canvas 指纹毒化（2026-11-13 反风控增强 / 2026-11-14 改为确定性）===
   // Canvas 渲染结果在不同环境下有微小差异，是最常用的指纹检测手段。
-  // 注入轻微噪声让每次结果略有不同，但不影响视觉效果。
+  // 注入轻微噪声改变结果，但不影响视觉效果。
+  //
+  // 噪声必须是**确定性**的：同一张 canvas 每次、每个会话都要算出同一个指纹。
+  // 旧实现每个像素调用一次 Math.random()，等于同一页面内两次读取都不一致、
+  // 每次登录都是「一台新设备」——上游据此触发加验（同一账号在用户自己的浏览器
+  // 一次验证码即过，经本 worker 反复要验证码/语音验证，2026-11-14 线上）。
+  // 现改为只依赖像素下标的固定扰动：输入相同 => 输出恒定。
   try {
     const toDataURL = HTMLCanvasElement.prototype.toDataURL;
-    const toBlob = HTMLCanvasElement.prototype.toBlob;
     const getImageData = CanvasRenderingContext2D.prototype.getImageData;
 
     const noisify = (imageData) => {
-      // 对 RGBA 数据注入 ±0.1 的随机噪声（人眼不可见）
       const data = imageData.data;
       for (let i = 0; i < data.length; i += 4) {
-        data[i] = data[i] + Math.random() * 0.2 - 0.1;     // R
-        data[i+1] = data[i+1] + Math.random() * 0.2 - 0.1; // G
-        data[i+2] = data[i+2] + Math.random() * 0.2 - 0.1; // B
+        // (i*31)%3 ∈ {0,1,2} => delta ∈ {-1,0,1}，只与像素下标有关。
+        const delta = ((i * 31) % 3) - 1;
+        data[i] = data[i] + delta;     // R
+        data[i+1] = data[i+1] + delta; // G
+        data[i+2] = data[i+2] + delta; // B
         // Alpha 通道不变
       }
     };
@@ -287,7 +293,8 @@ _BROWSER_PATCH_JS = """
       AudioBuffer.prototype.getChannelData = function() {
         const originalData = getChannelData.apply(this, arguments);
         for (let i = 0; i < originalData.length; i += 100) {
-          originalData[i] = originalData[i] + Math.random() * 0.0000001;
+          // 同 Canvas：确定性扰动，保证同一音频每次得到同一指纹。
+          originalData[i] = originalData[i] + ((((i * 31) % 3) - 1) * 1e-7);
         }
         return originalData;
       };
