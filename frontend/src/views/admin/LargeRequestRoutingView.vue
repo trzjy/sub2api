@@ -159,20 +159,18 @@ import type { AccountListItem, AdminGroup, GroupPlatform } from '@/types'
 
 const { t } = useI18n()
 
-type FamilyPlatform = 'deepseek' | 'zhipu' | 'kimi' | 'cursor'
+type FamilyPlatform = 'deepseek' | 'zhipu' | 'kimi'
 type Scope = 'any' | 'large_only' | 'small_only'
 
 const FAMILIES: Array<{ platform: FamilyPlatform; title: string }> = [
   { platform: 'deepseek', title: 'DeepSeek' },
   { platform: 'zhipu', title: 'GLM' },
-  { platform: 'kimi', title: 'Kimi' },
-  { platform: 'cursor', title: 'Cursor' }
+  { platform: 'kimi', title: 'Kimi' }
 ]
 
-// 页面只按四个家族分块，但分组里可能绑定其他平台的账号（如 codebuddy），
+// 页面只按三个家族分块，但分组里可能绑定其他平台的账号（如 codebuddy），
 // 必须一并加载并展示，否则会看不到池内真实成员。
-// Cursor 账号不通过分组归属，直接按 platform 展示。
-const LOADED_PLATFORMS = ['deepseek', 'zhipu', 'kimi', 'codebuddy', 'cursor'] as const
+const LOADED_PLATFORMS = ['deepseek', 'zhipu', 'kimi', 'codebuddy'] as const
 
 const ACCOUNT_PAGE_SIZE = 200
 
@@ -185,8 +183,8 @@ const loading = ref(false)
 const errorMessage = ref('')
 const accounts = ref<AccountListItem[]>([])
 const groups = ref<AdminGroup[]>([])
-// 四个平台默认全部展开：折叠隐藏内容会让用户以为平台缺失。
-const expanded = ref<Record<FamilyPlatform, boolean>>({ deepseek: true, zhipu: true, kimi: true, cursor: true })
+// 三个平台默认全部展开：折叠隐藏内容会让用户以为平台缺失。
+const expanded = ref<Record<FamilyPlatform, boolean>>({ deepseek: true, zhipu: true, kimi: true })
 
 const groupsByID = computed(() => new Map(groups.value.map((group) => [group.id, group])))
 
@@ -213,16 +211,10 @@ const rowsByFamily = computed(() => {
   const result: Record<FamilyPlatform, AccountRow[]> = {
     deepseek: [],
     zhipu: [],
-    kimi: [],
-    cursor: []
+    kimi: []
   }
   for (const account of accounts.value) {
-    // Cursor 账号不通过分组归属，直接按 platform 收录。
-    if (account.platform === 'cursor') {
-      result.cursor.push({ account, groupNames: [] })
-      continue
-    }
-    const namesByFamily: Record<FamilyPlatform, string[]> = { deepseek: [], zhipu: [], kimi: [], cursor: [] }
+    const namesByFamily: Record<FamilyPlatform, string[]> = { deepseek: [], zhipu: [], kimi: [] }
     for (const groupID of account.group_ids ?? []) {
       const group = groupsByID.value.get(groupID)
       if (!group) continue
@@ -240,7 +232,6 @@ const rowsByFamily = computed(() => {
       }
     }
     for (const family of FAMILIES) {
-      if (family.platform === 'cursor') continue
       const names = namesByFamily[family.platform]
       if (names.length > 0) {
         result[family.platform].push({ account, groupNames: names })
