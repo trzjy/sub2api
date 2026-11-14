@@ -482,6 +482,7 @@ export default {
         unmatched: 'No matching plan found',
         unmatchedHint: 'Multiple plans exist on the console; the current API key matched none of them',
         noActivePlan: 'Subscription expired or no active plan',
+        teamPlanTag: 'Team plan',
         needLogin: 'Session expired — sign in again',
         relogin: 'Sign in again',
         currentPack: 'Pack',

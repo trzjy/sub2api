@@ -1251,6 +1251,7 @@ export interface WebConsoleQuotaSnapshot {
   account_label?: string
   plan_match_status?: 'matched' | 'unmatched' | 'no_active_plan'
   plan_name?: string
+  plan_is_team?: boolean
   expire_at?: number
   subscription_expired?: boolean
   tiers?: WebConsoleQuotaTier[]

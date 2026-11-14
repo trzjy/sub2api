@@ -57,6 +57,7 @@ type WebConsoleQuotaSnapshot struct {
 	// compshare
 	PlanMatchStatus     string                `json:"plan_match_status,omitempty"` // "matched" | "unmatched" | "no_active_plan"
 	PlanName            string                `json:"plan_name,omitempty"`
+	PlanIsTeam          bool                  `json:"plan_is_team,omitempty"` // 命中的是团队套餐（同一接口 IsTeam 作用域）
 	ExpireAt            int64                 `json:"expire_at,omitempty"`
 	SubscriptionExpired bool                  `json:"subscription_expired,omitempty"`
 	Tiers               []WebConsoleQuotaTier `json:"tiers,omitempty"` // compshare 5h/week/month 或 sensenova 选定池的 5h/7d
@@ -175,6 +176,7 @@ func (t *webConsoleFlexTimestamp) UnmarshalJSON(data []byte) error {
 type webConsoleCompsharePlan struct {
 	Code       string                  `json:"code"`
 	PlanName   string                  `json:"plan_name"`
+	IsTeam     bool                    `json:"is_team"`
 	ExpireAt   int64                   `json:"expire_at"`
 	PlanStatus int                     `json:"plan_status"`
 	Limit5h    float64                 `json:"limit_5h"`
@@ -315,6 +317,7 @@ func buildCompshareSnapshot(snap *WebConsoleQuotaSnapshot, rawData []byte, apiKe
 		p := plans[0]
 		snap.PlanMatchStatus = "matched"
 		snap.PlanName = p.PlanName
+		snap.PlanIsTeam = p.IsTeam
 		return finalizeCompsharePlan(snap, p, now), nil
 	default:
 		// 多套餐：按 apiKeySHA256 精确匹配 key_hashes
@@ -338,6 +341,7 @@ func buildCompshareSnapshot(snap *WebConsoleQuotaSnapshot, rawData []byte, apiKe
 		}
 		snap.PlanMatchStatus = "matched"
 		snap.PlanName = matched.PlanName
+		snap.PlanIsTeam = matched.IsTeam
 		return finalizeCompsharePlan(snap, *matched, now), nil
 	}
 }

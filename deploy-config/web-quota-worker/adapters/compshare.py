@@ -31,6 +31,10 @@ _EMAIL_COOKIE = "U_USER_EMAIL"
 _LOGIN_WAIT_SECONDS = 10
 
 
+class _TeamScopeUnavailable(Exception):
+    """个人侧与团队侧都没拿到套餐数据：不能用空结果判定「没有套餐」。"""
+
+
 class CompshareAdapter(BaseAdapter):
     """compshare 上游适配器。"""
 
@@ -75,7 +79,12 @@ class CompshareAdapter(BaseAdapter):
                     pass
 
     async def _probe_inner(self, req: ProbeRequest, context) -> ProbeResult:
-        ok, payload = await self._try_direct_fetch(context)
+        try:
+            ok, payload = await self._try_direct_fetch(context)
+        except _TeamScopeUnavailable:
+            return ProbeResult(
+                status="error", provider=self.provider, error="plans_scope_unavailable"
+            )
         if ok:
             return await self._build_ok(context, payload)
 
@@ -95,7 +104,14 @@ class CompshareAdapter(BaseAdapter):
                     auth_reason="password_rejected",
                 )
             if outcome == "ok":
-                ok2, payload2 = await self._try_direct_fetch(context)
+                try:
+                    ok2, payload2 = await self._try_direct_fetch(context)
+                except _TeamScopeUnavailable:
+                    return ProbeResult(
+                        status="error",
+                        provider=self.provider,
+                        error="plans_scope_unavailable",
+                    )
                 if ok2:
                     return await self._build_ok(context, payload2)
                 return ProbeResult(
@@ -112,11 +128,44 @@ class CompshareAdapter(BaseAdapter):
         )
 
     async def _try_direct_fetch(self, context):
-        """在页面上下文内直接请求用量接口。
+        """在页面上下文内直接请求用量接口，个人 + 团队两个作用域合并返回。
 
         返回 ``(ok, payload)``：``ok`` 为 True 表示成功取到含 ``UserPlans`` 的
         合法响应；否则为 False（含网络异常 / 非 200 / RetCode!=0）。
+
+        团队套餐必须单独查（2026-11-14 线上实测）：同一个 ``GetOpenAPIUserPlans``
+        带 ``IsTeam=true`` 才返回团队作用域的套餐；不带时只返回个人套餐，团队套餐
+        账号会拿到空列表，被后端判成「无有效订阅」并停调账号。个人 + 团队合并后
+        再交给上层判定，避免任一侧的空结果冒充「没有套餐」。
+
+        团队作用域失败时的语义：个人侧已有数据就按个人结果判定（团队侧缺失不影响
+        既有判定能力，仅记日志）；个人侧也为空则抛 ``_TeamScopeUnavailable``，
+        由上层按「探测失败」处理——绝不用一次失败的空结果去停调账号。
         """
+        ok, payload = await self._fetch_user_plans(context, is_team=False)
+        if not ok or not isinstance(payload, dict):
+            return False, None
+
+        team_ok, team_payload = await self._fetch_user_plans(context, is_team=True)
+        if not team_ok or not isinstance(team_payload, dict):
+            if payload.get("UserPlans"):
+                return True, payload
+            raise _TeamScopeUnavailable()
+
+        merged = list(payload.get("UserPlans") or []) + list(
+            team_payload.get("UserPlans") or []
+        )
+        payload["UserPlans"] = merged
+        return True, payload
+
+    async def _fetch_user_plans(self, context, is_team: bool):
+        """按作用域取一次套餐列表。``is_team`` 为 True 时带 IsTeam 参数。"""
+        body = {
+            "Action": "GetOpenAPIUserPlans",
+            "_timestamp": int(time.time() * 1000),
+        }
+        if is_team:
+            body["IsTeam"] = True
         try:
             resp = await context.request.post(
                 _API_URL,
@@ -125,12 +174,7 @@ class CompshareAdapter(BaseAdapter):
                     "Origin": _ORIGIN,
                     "Referer": _REFERER,
                 },
-                data=json.dumps(
-                    {
-                        "Action": "GetOpenAPIUserPlans",
-                        "_timestamp": int(time.time() * 1000),
-                    }
-                ),
+                data=json.dumps(body),
             )
         except Exception:
             return False, None
@@ -253,6 +297,11 @@ class CompshareAdapter(BaseAdapter):
         plan_status = pick("Status", "plan_status")
         if plan_status is not None:
             obj["plan_status"] = plan_status
+
+        # 个人套餐与团队套餐共用同一结构，靠 IsTeam 区分（2026-11-14）。
+        is_team = pick("IsTeam", "is_team")
+        if is_team is not None:
+            obj["is_team"] = bool(is_team)
 
         expire_at = pick("ExpireAt", "expire_at")
         if expire_at is not None:

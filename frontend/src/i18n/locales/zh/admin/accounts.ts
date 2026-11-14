@@ -716,6 +716,7 @@ export default {
         unmatched: '未匹配到对应套餐',
         unmatchedHint: '控制台存在多个套餐，当前 API Key 未命中任何套餐',
         noActivePlan: '订阅已到期或无有效套餐',
+        teamPlanTag: '团队套餐',
         needLogin: '登录已失效，请重新登录',
         relogin: '重新登录',
         currentPack: '资源包',

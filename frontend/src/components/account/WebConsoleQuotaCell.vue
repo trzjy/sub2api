@@ -16,6 +16,13 @@
       >
         {{ snapshot.plan_name }}
       </span>
+      <span
+        v-if="snapshot?.plan_is_team"
+        data-test="wcq-team-plan"
+        class="inline-flex items-center rounded bg-blue-100 px-1 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+      >
+        {{ t('admin.accounts.webConsoleQuota.teamPlanTag') }}
+      </span>
       <span v-if="expireText" data-test="wcq-expire" class="text-gray-500 dark:text-gray-400">
         {{ t('admin.accounts.subscriptionExpires') }} {{ expireText }}
       </span>
