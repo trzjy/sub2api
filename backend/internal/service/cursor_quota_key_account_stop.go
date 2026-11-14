@@ -49,6 +49,9 @@ type quotaKeyAccountStopSink interface {
 	StopAccountsUnderExhaustedKey(ctx context.Context, quotaKeyID int64, until time.Time) (int64, error)
 	// ClearStopsUnderRecoveredKey 精确清除该码名下"由码级原因停着"的账号停调，返回受影响行数。
 	ClearStopsUnderRecoveredKey(ctx context.Context, quotaKeyID int64) (int64, error)
+	// HasKeyLevelStop 返回该码名下是否仍有"因码级原因停着"的账号。用在观测失败/快照过期时
+	// 的续停门禁：没有既有的码级停调就不凭空停号（首次观测失败不应停号）。
+	HasKeyLevelStop(ctx context.Context, quotaKeyID int64) (bool, error)
 }
 
 // StopAccountsUnderExhaustedKey 实现 quotaKeyAccountStopSink。
@@ -110,6 +113,26 @@ func (s *QuotaKeyService) ClearStopsUnderRecoveredKey(ctx context.Context, quota
 	return int64(n), nil
 }
 
+// HasKeyLevelStop 实现 quotaKeyAccountStopSink：该码名下是否仍有"因码级原因停着"的账号。
+// 只认码级原因前缀，不挑 until——与 ClearStopsUnderRecoveredKey 同口径（见其注释），
+// 这样即使已停到未来的号也被算作"仍有码级停调"，续停门禁不会漏判。
+func (s *QuotaKeyService) HasKeyLevelStop(ctx context.Context, quotaKeyID int64) (bool, error) {
+	if s == nil || s.client == nil {
+		return false, fmt.Errorf("quota_key_service: ent client unavailable for key-level stop query")
+	}
+	n, err := s.client.Account.Query().
+		Where(
+			account.QuotaKeyID(quotaKeyID),
+			account.DeletedAtIsNil(),
+			account.TempUnschedulableReasonHasPrefix(cursorQuotaKeyExhaustedReasonPrefix),
+		).
+		Count(ctx)
+	if err != nil {
+		return false, fmt.Errorf("quota_key_service: count key-level stops under quota key %d: %w", quotaKeyID, err)
+	}
+	return n > 0, nil
+}
+
 // SetAccountStopSink 注入码级停调窄面（wire 在构造 reconc 时注入 *QuotaKeyService）。
 func (r *QuotaKeyReconciler) SetAccountStopSink(sink quotaKeyAccountStopSink) {
 	if r == nil {
@@ -132,12 +155,15 @@ func (r *QuotaKeyReconciler) SetAccountStopSink(sink quotaKeyAccountStopSink) {
 
 // sweepQuotaKeyLevelStops 每轮把激活码额度状态同步到它名下账号的停调状态。
 //
-// 三条硬规则：
-//  1. 只认新鲜快照。快照过期时什么都不做——既不停也不清，保持上一轮结论，
-//     避免刷新滞后导致账号在"停/放"之间来回弹；
-//  2. 只认确定的"额度见底"（观测成功 + 剩余 < 调度下限）。观测失败（密钥无效等）
-//     不在这里处理：那不是额度问题，账号停掉也修不好，交给后台显示 key_invalid；
-//  3. 恢复后按前缀精确清除，绝不把账号级停调一起清掉。
+// 四条硬规则：
+//  1. 只认确定的"额度见底"（观测成功 + 剩余 < 调度下限）→ 停到下一个 5 分钟点；
+//  2. 观测成功且已恢复到下限之上 → 按前缀精确清除码级停调，绝不把账号级停调一起清掉；
+//  3. 观测失败 / 字段不全 / 快照过期：无法得到新的成功结论。此时不放行——
+//     若该码名下已有码级停调，续停 5 分钟（失败关闭），避免 5 分钟一到自然过期后
+//     回到池子又撞"派单→403→再停"的死循环；没有码级停调记录时保持原状
+//     （首次观测失败不凭空停号，交给后台显示 key_invalid）；
+//  4. 续停每次仍是 5 分钟滚动写入（StopAccountsUnderExhaustedKey 写入条件天然只命中
+//     码级停调，不会覆盖账号级更晚的停调），非一次性长停。
 func (r *QuotaKeyReconciler) sweepQuotaKeyLevelStops(ctx context.Context) {
 	if r == nil || r.repo == nil || r.accountStopSink == nil {
 		return
@@ -156,11 +182,16 @@ func (r *QuotaKeyReconciler) sweepQuotaKeyLevelStops(ctx context.Context) {
 			return
 		}
 		snapshot, ok := ParseQuotaKeyUsageSnapshot(qk.UsageSnapshot)
-		if !ok || snapshot.ErrorCode != "" || snapshot.Total == nil || snapshot.Used == nil {
-			continue // 未观测 / 观测失败 / 字段不全：不下结论，保持现状
-		}
-		if snapshot.CheckedAt == nil || now.Sub(*snapshot.CheckedAt) > cursorSupplySourceUsageFreshnessWindow {
-			continue // 快照过期：不基于旧数据动账号
+		// 观测失败 / 字段不全 / 快照过期：无法得到新的成功结论。
+		// 此时不放行：若该码名下已有码级停调，续停 5 分钟（失败关闭）；
+		// 没有停调记录时保持原状（首次观测失败不凭空停号）。
+		switch {
+		case !ok || snapshot.ErrorCode != "" || snapshot.Total == nil || snapshot.Used == nil:
+			r.extendQuotaKeyLevelStops(ctx, qk.ID)
+			continue
+		case snapshot.CheckedAt == nil || now.Sub(*snapshot.CheckedAt) > cursorSupplySourceUsageFreshnessWindow:
+			r.extendQuotaKeyLevelStops(ctx, qk.ID)
+			continue
 		}
 		if QuotaKeyUsageExhausted(snapshot) {
 			until, band := cursorQuotaKeyRecoveryUntil(now)
@@ -185,5 +216,34 @@ func (r *QuotaKeyReconciler) sweepQuotaKeyLevelStops(ctx context.Context) {
 			log.Printf("[QuotaKeyReconcile] key %d quota recovered (remaining=%d) -> released %d account(s)",
 				qk.ID, *snapshot.Total-*snapshot.Used, n)
 		}
+	}
+}
+
+// extendQuotaKeyLevelStops 在无法取得新的成功结论（观测失败 / 字段不全 / 快照过期）时，
+// 把该码名下仍在码级停调中的账号继续停到下一个 5 分钟点。
+//
+// 门禁：仅当该码名下已有码级停调时才续停（HasKeyLevelStop 为真）。没有码级停调记录时不写入，
+// 满足"首次观测失败不凭空停号"——观测失败不是额度问题，账号停掉也修不好，交给后台显示
+// key_invalid。续停仍走 StopAccountsUnderExhaustedKey，其写入条件（无停调 / 已过期 /
+// 已是码级原因）天然只会命中码级停调、不会覆盖账号级更晚的停调；每次 5 分钟滚动、不做成
+// 一次性长停。
+func (r *QuotaKeyReconciler) extendQuotaKeyLevelStops(ctx context.Context, quotaKeyID int64) {
+	if r == nil || r.accountStopSink == nil {
+		return
+	}
+	// 门禁：没有既有的码级停调就不凭空停号。
+	has, herr := r.accountStopSink.HasKeyLevelStop(ctx, quotaKeyID)
+	if herr != nil {
+		log.Printf("[QuotaKeyReconcile] key %d check existing key-level stop failed: %v", quotaKeyID, herr)
+		return
+	}
+	if !has {
+		return
+	}
+	until, _ := cursorQuotaKeyRecoveryUntil(timezone.Now())
+	if n, err := r.accountStopSink.StopAccountsUnderExhaustedKey(ctx, quotaKeyID, until); err != nil {
+		log.Printf("[QuotaKeyReconcile] key %d extend stop on stale/failed observation failed: %v", quotaKeyID, err)
+	} else if n > 0 {
+		log.Printf("[QuotaKeyReconcile] key %d observation unavailable -> extended %d account stop(s) until %s", quotaKeyID, n, until.Format("15:04"))
 	}
 }

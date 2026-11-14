@@ -577,3 +577,79 @@ func TestCursorWaterLevelConsumesSameSourceGate(t *testing.T) {
 		require.True(t, got, "来源新鲜可用的账号计入水位（与调度同谓词）")
 	})
 }
+
+// TestCursorSupplySource_CompatibleAccountQuotaPredicate 钉死 KNCY-I 变更：绑码的兼容型反代
+// 账号（platform=cursor && type=apikey，如 kn_cy 上游拉号）额度已落在
+// quota_keys.usage_snapshot（unit=usd_cent），须与 OAuth 账号走同一来源门——**有快照即受门控、
+// 无快照沿用放行**，且 key 终态门（disabled）不因本变更被跳过。
+func TestCursorSupplySource_CompatibleAccountQuotaPredicate(t *testing.T) {
+	const qkID int64 = 42
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	prevNow := cursorSupplySourceUsageNow
+	cursorSupplySourceUsageNow = func() time.Time { return now }
+	t.Cleanup(func() { cursorSupplySourceUsageNow = prevNow })
+
+	makeUSD := func(todayRemainingCent int) []byte {
+		// total/used 必须齐全，否则会先触发规则⑧（缺失 → quotaKeyUsageIncomplete）
+		// 而无法落到 usd_cent 耗尽判定；checked_at 取新鲜值，避免被规则⑦否决。
+		return []byte(fmt.Sprintf(
+			`{"unit":"usd_cent","total":1000,"used":100,"today_remaining_cent":%d,"status_code":200,"checked_at":%q,"error_code":""}`,
+			todayRemainingCent, now.Add(-time.Minute).Format(time.RFC3339),
+		))
+	}
+
+	compatAccount := func() *Account {
+		id := qkID
+		return &Account{
+			ID:          qkID,
+			Platform:    PlatformCursor,
+			Type:        AccountTypeAPIKey,
+			Status:      StatusActive,
+			Schedulable: true,
+			QuotaKeyID:  &id,
+		}
+	}
+
+	t.Run("bound compatible with snapshot today remaining 48 cents vetoes", func(t *testing.T) {
+		// 已绑码、key 有效、快照今日剩余 48 分（<0.5 USD）→ 按用量子谓词否决。
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses:  map[int64]string{qkID: domain.QuotaKeyStatusActive},
+			snapshots: map[int64][]byte{qkID: makeUSD(48)},
+		})
+		reason, err := cursorSupplySourceAvailabilityVetoReason(context.Background(), compatAccount())
+		require.NoError(t, err)
+		require.Equal(t, quotaKeyUsageExhausted, reason, "今日剩余 48 分（<0.5 USD）必须按用量子谓词否决")
+	})
+
+	t.Run("bound compatible with snapshot today remaining 50 cents passes", func(t *testing.T) {
+		// 已绑码、key 有效、快照今日剩余 50 分（=0.5 USD 下限）→ 放行。
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses:  map[int64]string{qkID: domain.QuotaKeyStatusActive},
+			snapshots: map[int64][]byte{qkID: makeUSD(50)},
+		})
+		reason, err := cursorSupplySourceAvailabilityVetoReason(context.Background(), compatAccount())
+		require.NoError(t, err)
+		require.Empty(t, reason, "今日剩余等于下限 50 分（0.5 USD）放行")
+	})
+
+	t.Run("bound compatible without snapshot passes", func(t *testing.T) {
+		// 已绑码、key 有效、但无额度快照（stub 未装该 key 的快照，返回 nil）：
+		// 沿用既有兼容型放行，不被 quota_key_usage_unobserved 永久否决。
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses: map[int64]string{qkID: domain.QuotaKeyStatusActive},
+		})
+		reason, err := cursorSupplySourceAvailabilityVetoReason(context.Background(), compatAccount())
+		require.NoError(t, err)
+		require.Empty(t, reason, "无快照的绑码兼容型账号维持放行，不被用量子谓词否决")
+	})
+
+	t.Run("bound compatible key disabled still vetoed", func(t *testing.T) {
+		// 绑 disabled 码：先过停供终态门，按既有 key 终态否决，不因本变更跳过。
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses: map[int64]string{qkID: domain.QuotaKeyStatusDisabled},
+		})
+		reason, err := cursorSupplySourceAvailabilityVetoReason(context.Background(), compatAccount())
+		require.NoError(t, err)
+		require.Equal(t, quotaKeyExpired, reason, "绑 disabled 码的兼容型账号仍须被 key 终态否决")
+	})
+}

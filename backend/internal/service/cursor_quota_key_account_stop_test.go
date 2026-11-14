@@ -137,6 +137,10 @@ func (s *recordingKeyLevelStopSink) ClearStopsUnderRecoveredKey(ctx context.Cont
 	return s.inner.ClearStopsUnderRecoveredKey(ctx, quotaKeyID)
 }
 
+func (s *recordingKeyLevelStopSink) HasKeyLevelStop(ctx context.Context, quotaKeyID int64) (bool, error) {
+	return s.inner.HasKeyLevelStop(ctx, quotaKeyID)
+}
+
 // cleanupQuotaKey 清掉测试码及其名下账号，避免污染共享测试库。
 func cleanupQuotaKey(t *testing.T, client *ent.Client, id int64) {
 	t.Helper()
@@ -246,4 +250,184 @@ func TestSweepQuotaKeyLevelStops_UsdCentRecovered_ClearsStops(t *testing.T) {
 	require.Len(t, accs, 1)
 	require.Nil(t, accs[0].TempUnschedulableUntil, "key-level stop must be cleared")
 	require.Empty(t, accs[0].TempUnschedulableReason, "key-level stop reason must be cleared")
+}
+
+// ---------------------------------------------------------------------------
+// KNCY-J（外审 must_fix #5，2026-11-14）：刷新失败时续停，避免停调 5 分钟后自然过期。
+//
+// 旧实现：观测失败 / 字段不全 / 快照过期时直接 continue，既不续停也不放行；5 分钟一到
+// TempUnschedulableUntil 自然过期，账号回池；额度仍耗尽就陷入「派单→403→再停 5 分钟」循环。
+// 新实现：上述情形不再放行，若该码名下已有码级停调则续停 5 分钟（失败关闭）；没有码级停调
+// 记录时保持原状（首次观测失败不凭空停号）。
+// ---------------------------------------------------------------------------
+
+// buildErrorSnapshot 拼一份观测失败快照：error_code 非空（解析后 ok=true）、total/used 非 nil、
+// checked_at 新鲜。用于断言「观测失败 → 续停门禁」。
+func buildErrorSnapshot(errorCode string) []byte {
+	checkedAt := time.Now().UTC().Add(-10 * time.Second).Format(time.RFC3339)
+	return []byte(fmt.Sprintf(`{"unit":"usd_cent","total":1000,"used":0,"today_remaining_cent":50,"error_code":%q,"checked_at":%q}`, errorCode, checkedAt))
+}
+
+// buildStaleSnapshot 拼一份字段完整但 checked_at 已超新鲜窗口（10 分钟前）的快照。
+// 用于断言「快照过期 → 续停门禁」（不基于旧数据放号，但已有码级停调则续停）。
+func buildStaleSnapshot(todayRemainingCent int) []byte {
+	checkedAt := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	return []byte(fmt.Sprintf(`{"unit":"usd_cent","total":1000,"used":0,"today_remaining_cent":%d,"checked_at":%q}`, todayRemainingCent, checkedAt))
+}
+
+// TestSweepQuotaKeyLevelStops_FailedObservation_ExtendsExistingKeyLevelStop：
+// 该码名下已有码级停调 + 本轮快照 error_code:"lookup_failed" → 调用续停，
+// 停调终点 = now+5min，仓库 reason 仍带码级前缀（不重复计为首次停号）。
+func TestSweepQuotaKeyLevelStops_FailedObservation_ExtendsExistingKeyLevelStop(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	t.Cleanup(func() { cleanupQuotaKey(t, client, qk.ID) })
+
+	// 一个被码级停调的账号（将来到期），用于验证"失败续停"。
+	futureUntil := time.Now().Add(1 * time.Hour)
+	futureReason := fmt.Sprintf("%s until %s", cursorQuotaKeyExhaustedReasonPrefix, futureUntil.Format("01-02 15:04"))
+	mustCreateKeyLevelStoppedAccount(t, client, qk.ID, futureUntil, futureReason)
+
+	qk.UsageSnapshot = buildErrorSnapshot("lookup_failed")
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[qk.ID] = qk
+
+	svc := &QuotaKeyService{client: client}
+	sink := &recordingKeyLevelStopSink{inner: svc}
+	r := &QuotaKeyReconciler{repo: repo}
+	r.SetAccountStopSink(sink)
+
+	r.sweepQuotaKeyLevelStops(ctx)
+
+	require.Equal(t, 1, sink.stopCalls, "failed observation with existing key-level stop must trigger extend")
+	require.Equal(t, 0, sink.clearCalls, "no recovery clear on failed observation")
+	require.Equal(t, qk.ID, sink.stopQuotaID)
+
+	// 续停终点 = now + quotaKeyReconcileInterval（5min）。
+	expectedUntil := time.Now().Add(quotaKeyReconcileInterval)
+	require.InDelta(t, expectedUntil.Unix(), sink.stopUntil.Unix(), 3,
+		"extend until must equal now+5min, got diff %ds", expectedUntil.Unix()-sink.stopUntil.Unix())
+
+	// 仓库落库：仍带码级前缀，且被续停到新的 5 分钟点。
+	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).All(ctx)
+	require.NoError(t, err)
+	require.Len(t, accs, 1)
+	require.NotNil(t, accs[0].TempUnschedulableReason, "stop reason must remain")
+	require.True(t, strings.HasPrefix(*accs[0].TempUnschedulableReason, cursorQuotaKeyExhaustedReasonPrefix),
+		"reason must keep %q prefix, got %q", cursorQuotaKeyExhaustedReasonPrefix, *accs[0].TempUnschedulableReason)
+	require.NotNil(t, accs[0].TempUnschedulableUntil, "stop until must be written")
+}
+
+// TestSweepQuotaKeyLevelStops_FailedObservation_NoStop_WhenNoKeyLevelStop：
+// 该码名下无停调记录 + 本轮观测失败 → 不调用停调（首次观测失败不凭空停号）。
+func TestSweepQuotaKeyLevelStops_FailedObservation_NoStop_WhenNoKeyLevelStop(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	t.Cleanup(func() { cleanupQuotaKey(t, client, qk.ID) })
+
+	// 一个尚未被任何理由停着的账号（until/reason 均为 nil）。
+	mustCreateAccounts(t, client, qk.ID, 1)
+
+	qk.UsageSnapshot = buildErrorSnapshot("lookup_failed")
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[qk.ID] = qk
+
+	svc := &QuotaKeyService{client: client}
+	sink := &recordingKeyLevelStopSink{inner: svc}
+	r := &QuotaKeyReconciler{repo: repo}
+	r.SetAccountStopSink(sink)
+
+	r.sweepQuotaKeyLevelStops(ctx)
+
+	require.Equal(t, 0, sink.stopCalls, "failed observation with NO key-level stop must NOT add a stop")
+	require.Equal(t, 0, sink.clearCalls, "no recovery clear on failed observation")
+
+	// 仓库落库：账号仍未被停（until/reason 保持 nil）。
+	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).All(ctx)
+	require.NoError(t, err)
+	require.Len(t, accs, 1)
+	require.Nil(t, accs[0].TempUnschedulableUntil, "account must NOT be stopped on first observation failure")
+	require.Empty(t, accs[0].TempUnschedulableReason, "account must NOT gain a stop reason on first observation failure")
+}
+
+// TestSweepQuotaKeyLevelStops_StaleSnapshot_ExtendsExistingKeyLevelStop：
+// 快照过期（checked_at 超过 5 分钟）+ 已有码级停调 → 续停 5 分钟（不基于旧数据放号，但续停已停的号）。
+func TestSweepQuotaKeyLevelStops_StaleSnapshot_ExtendsExistingKeyLevelStop(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	t.Cleanup(func() { cleanupQuotaKey(t, client, qk.ID) })
+
+	// 一个被码级停调的账号（将来到期），用于验证"过期续停"。
+	futureUntil := time.Now().Add(1 * time.Hour)
+	futureReason := fmt.Sprintf("%s until %s", cursorQuotaKeyExhaustedReasonPrefix, futureUntil.Format("01-02 15:04"))
+	mustCreateKeyLevelStoppedAccount(t, client, qk.ID, futureUntil, futureReason)
+
+	qk.UsageSnapshot = buildStaleSnapshot(50)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[qk.ID] = qk
+
+	svc := &QuotaKeyService{client: client}
+	sink := &recordingKeyLevelStopSink{inner: svc}
+	r := &QuotaKeyReconciler{repo: repo}
+	r.SetAccountStopSink(sink)
+
+	r.sweepQuotaKeyLevelStops(ctx)
+
+	require.Equal(t, 1, sink.stopCalls, "stale snapshot with existing key-level stop must trigger extend")
+	require.Equal(t, 0, sink.clearCalls, "no recovery clear on stale snapshot")
+	require.Equal(t, qk.ID, sink.stopQuotaID)
+
+	// 续停终点 = now + quotaKeyReconcileInterval（5min）。
+	expectedUntil := time.Now().Add(quotaKeyReconcileInterval)
+	require.InDelta(t, expectedUntil.Unix(), sink.stopUntil.Unix(), 3,
+		"extend until must equal now+5min, got diff %ds", expectedUntil.Unix()-sink.stopUntil.Unix())
+}
+
+// TestSweepQuotaKeyLevelStops_FreshSuccessExhausted_NotCountedAsExtend：
+// 新鲜成功且 today<50 → 走原「耗尽停调」路径（直接 StopAccountsUnderExhaustedKey），
+// 不重复计为续停（续停只在观测失败/过期且已有码级停调时触发，此处停调仅 1 次）。
+func TestSweepQuotaKeyLevelStops_FreshSuccessExhausted_NotCountedAsExtend(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	t.Cleanup(func() { cleanupQuotaKey(t, client, qk.ID) })
+
+	// 名下已有一个码级停调的账号（验证"新鲜成功 + 已停"走原路径、只停一次）。
+	futureUntil := time.Now().Add(1 * time.Hour)
+	futureReason := fmt.Sprintf("%s until %s", cursorQuotaKeyExhaustedReasonPrefix, futureUntil.Format("01-02 15:04"))
+	mustCreateKeyLevelStoppedAccount(t, client, qk.ID, futureUntil, futureReason)
+
+	qk.UsageSnapshot = buildUsdCentSnapshot(48) // 新鲜、成功、today_remaining<50 → 耗尽
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[qk.ID] = qk
+
+	svc := &QuotaKeyService{client: client}
+	sink := &recordingKeyLevelStopSink{inner: svc}
+	r := &QuotaKeyReconciler{repo: repo}
+	r.SetAccountStopSink(sink)
+
+	r.sweepQuotaKeyLevelStops(ctx)
+
+	// 只停一次（直接耗尽路径），不重复计为续停；且不走恢复清除。
+	require.Equal(t, 1, sink.stopCalls, "fresh success exhausted must stop exactly once (not double-counted as extend)")
+	require.Equal(t, 0, sink.clearCalls, "no recovery clear when still exhausted")
+
+	// 停调终点 = now + quotaKeyReconcileInterval（5min），reason 带码级前缀。
+	expectedUntil := time.Now().Add(quotaKeyReconcileInterval)
+	require.InDelta(t, expectedUntil.Unix(), sink.stopUntil.Unix(), 3,
+		"until must equal now+5min, got diff %ds", expectedUntil.Unix()-sink.stopUntil.Unix())
+
+	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).All(ctx)
+	require.NoError(t, err)
+	require.Len(t, accs, 1)
+	require.NotNil(t, accs[0].TempUnschedulableReason, "stop reason must be written")
+	require.True(t, strings.HasPrefix(*accs[0].TempUnschedulableReason, cursorQuotaKeyExhaustedReasonPrefix),
+		"reason must start with %q, got %q", cursorQuotaKeyExhaustedReasonPrefix, *accs[0].TempUnschedulableReason)
 }

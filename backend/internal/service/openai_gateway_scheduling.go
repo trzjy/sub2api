@@ -4,6 +4,7 @@ package service
 // 负载感知调度、配额自动暂停判定、并发槽位获取。仅做代码搬迁，无任何行为变更。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -559,6 +560,13 @@ var cursorSupplySourceUsageNow = time.Now
 // cursorSupplySourceUsageVetoReason 是「真实来源剩余」维度的**唯一**消费判断入口
 // （方案 §25.6 同一来源门 / §25.17.3 来源门五规则）。
 //
+// 第三方 Cursor APIKey 账号（OpenAI 兼容反代，如 kn_cy） historically 整体豁免本谓词；
+// 2026-11-14 起规则收紧为「未绑码放行、已绑码受门控」：未绑激活码时无 key 终态与快照可判，
+// 整体放行；一旦绑定激活码，其额度事实已落在 quota_keys.usage_snapshot（unit=usd_cent），
+// 须与 OAuth 账号走同一真实来源剩余谓词。可用性门（cursorSupplySourceAvailabilityVetoReason）
+// 在把已绑码兼容型账号交予本函数前，已先读其快照：无快照（空 / JSON null）直接放行，有快照
+// 才进入本谓词——故这里只额外豁免「未绑码」的兼容型账号，已绑码者一律按下方规则判定。
+//
 // 解析一律走 ParseQuotaKeyUsageSnapshot，不自建第二份解析。语义是**失败关闭**：来源侧只要
 // 不能证明"有可用剩余"，本次就不放行。逐条：
 //  1. 无有效归属激活码（QuotaKeyID 为 nil 或 ≤0）→ 否决（来源不可判定即不可用）；
@@ -575,10 +583,15 @@ var cursorSupplySourceUsageNow = time.Now
 // 非 cursor 平台恒返回 ("", nil)（无 Cursor 否决）。本函数不区分"窄目录入口"与"普通调度"：
 // 两种消费方看到完全相同的结论，调用方只能投影 bool/string，不得另加放行条件。
 func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (string, error) {
-	// 第三方 Cursor APIKey 账号（OpenAI 兼容反代）不依赖 ShareAI 激活码号池快照，
-	// 其上游额度由账号自身凭据承载，故不受本来源门约束——否则这类账号会因无
-	// QuotaKeyID 被永久判为 quota_key_source_unbound 而无法参与调度。
-	if account == nil || account.Platform != PlatformCursor || account.IsCursorOpenAICompatibleAccount() {
+	// 非 cursor 平台恒放行（无 Cursor 否决）。
+	if account == nil || account.Platform != PlatformCursor {
+		return "", nil
+	}
+	// 第三方 Cursor APIKey 账号（OpenAI 兼容反代，如 kn_cy）：未绑码时无 key 终态与
+	// 快照可判，整体放行（与可用性门对 unbound 兼容账号处理一致）；一旦绑定激活码，
+	// 其额度事实已落在 quota_keys.usage_snapshot（unit=usd_cent），须与 OAuth 账号
+	// 走同一「真实来源剩余」谓词，不得因账号类型被整体豁免。
+	if account.IsCursorOpenAICompatibleAccount() && (account.QuotaKeyID == nil || *account.QuotaKeyID <= 0) {
 		return "", nil
 	}
 	// 规则①：无有效归属激活码——来源不可判定即不可用。
@@ -634,6 +647,15 @@ func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (s
 //     字段不完整 / 已耗尽 / key 终态过期）；
 //   - err != nil：依赖未装配或读取/解析失败，调用方必须失败关闭并如实上抛，不能当空目录。
 //
+// 兼容型账号（platform=cursor && type=apikey，如 kn_cy 上游拉号）的额度门控规则（2026-11-14 变更）：
+//   - 未绑激活码：无 key 终态与快照可判，整体放行（历史豁免意图）；
+//   - 已绑激活码但 key 终态 disabled/expired：先过停供终态门，按既有否决；
+//   - 已绑激活码且 key 有效、但额度快照**缺失（空 / JSON null / provider 未装配）**：沿用放行，
+//     以免非 kn_cy 的兼容型反代账号被 quota_key_usage_unobserved 永久否决；
+//   - 已绑激活码且 key 有效、**额度快照存在**：交由 cursorSupplySourceUsageVetoReason 与 OAuth
+//     账号走同一谓词（kn_cy 的 USD 额度已落在 quota_keys.usage_snapshot，unit=usd_cent），
+//     故"有快照即受门控、无快照沿用放行"。
+//
 // 该门对所有消费方（调度粗筛、粘性/DB 复核、水位、公开目录、续轮）语义一致：bool/string
 // 包装器（cursorSupplySourceAvailabilityVetoReasonString 等）只能投影，不能另加放行条件，
 // 也不再需要"窄目录入口单独加严、普通调度仍放行"的双轨——加严部分已并入本门本体。
@@ -666,10 +688,27 @@ func cursorSupplySourceAvailabilityVetoReason(ctx context.Context, account *Acco
 	if err != nil || reason != "" {
 		return reason, err
 	}
-	// 绑码的兼容型账号到此已过 key 终态门：其额度不来自 ShareAI 号池快照，
-	// 故不再进入 usage 子谓词（保持"不依赖号池快照"的既有放行意图）。
+	// 绑码的兼容型账号到此已过 key 终态门。
 	if account.IsCursorOpenAICompatibleAccount() {
-		return "", nil
+		// 兼容型反代账号的额度不来自 ShareAI 号池快照，历史上整体豁免 usage 谓词。
+		// 2026-11-14 起 kn_cy 的额度事实已落在 quota_keys.usage_snapshot（unit=usd_cent），
+		// 若该码**有快照**就必须与 OAuth 账号走同一谓词；无快照时保持既有放行，
+		// 以免非 kn_cy 的兼容型反代账号被 quota_key_usage_unobserved 永久否决。
+		provider := currentCursorQuotaKeyUsageSnapshotProvider()
+		if provider == nil {
+			// 快照读取依赖未装配：兼容型反代账号的额度非来自号池快照，维持既有无条件放行。
+			return "", nil
+		}
+		raw, rerr := provider.CursorQuotaKeyUsageSnapshot(ctx, *account.QuotaKeyID)
+		if rerr != nil {
+			return "", fmt.Errorf("cursor quota key %d usage snapshot read failed: %w", *account.QuotaKeyID, rerr)
+		}
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+			// 无快照（空 / JSON null）：维持既有放行，不进入 usage 子谓词。
+			return "", nil
+		}
+		return cursorSupplySourceUsageVetoReason(ctx, account)
 	}
 	return cursorSupplySourceUsageVetoReason(ctx, account)
 }

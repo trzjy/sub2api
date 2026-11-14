@@ -1265,6 +1265,121 @@ func TestProbeKeyQuota_KnCyUpstreamErrorWritesFailureObservation(t *testing.T) {
 	require.Nil(t, snapshot.Used)
 }
 
+// TestProbeKeyQuota_KnCyMissingTodayRemainingFailsClosed：上游省略 today_remaining ⇒ 字段
+// 缺失 ≠ 0 ⇒ 观测失败写 error_code，快照不得出现 today_remaining_cent（nil），不得误判耗尽。
+func TestProbeKeyQuota_KnCyMissingTodayRemainingFailsClosed(t *testing.T) {
+	expUnix := time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC).Unix()
+	// 缺 today_remaining，但给 total_remaining。
+	body := fmt.Sprintf(`{"status":"ok","message":"ok","data":{"total_remaining":1500,`+
+		`"expires_at":%d,"unlimited":false,"unit":"requests"}}`, expUnix)
+	srv := newKnCyUsageServer(t, body)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", UpstreamKey: upstreamKeyKnCy}
+
+	svc := newAutoEntryKnCyProbeService(srv, repo)
+	rec := &observeTxRecord{}
+	svc.SetObserveTx(rec.tx())
+
+	_, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.Error(t, err, "缺 today_remaining 必须按观测失败处理，不得补 0")
+	require.ErrorIs(t, err, errKnCyUsageFieldsMissing, "必须返回 errKnCyUsageFieldsMissing")
+
+	_, commits, rollbacks := rec.snapshot()
+	require.Equal(t, 1, commits, "失败观测必须随事务提交后才返错")
+	require.Zero(t, rollbacks)
+
+	snapshot, ok := ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
+	require.True(t, ok, "失败观测必须已落盘")
+	require.NotEmpty(t, snapshot.ErrorCode, "失败须登记脱敏 error_code")
+	require.Nil(t, snapshot.Total, "缺失字段不得写伪造余额 0")
+	require.Nil(t, snapshot.Used)
+	require.Nil(t, snapshot.TodayRemainingCent, "缺 today_remaining ⇒ 快照不得出现 today_remaining_cent")
+	require.NotEqual(t, "usd_cent", snapshot.Unit, "缺失时单位不得误带 usd_cent（应为份额制默认 count）")
+}
+
+// TestProbeKeyQuota_KnCyMissingTotalRemainingFailsClosed：上游省略 total_remaining ⇒ 字段
+// 缺失 ≠ 0 ⇒ 观测失败写 error_code，快照不得出现 today_remaining_cent / total。
+func TestProbeKeyQuota_KnCyMissingTotalRemainingFailsClosed(t *testing.T) {
+	expUnix := time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC).Unix()
+	// 缺 total_remaining，但给 today_remaining。
+	body := fmt.Sprintf(`{"status":"ok","message":"ok","data":{"today_remaining":200,`+
+		`"expires_at":%d,"unlimited":false,"unit":"requests"}}`, expUnix)
+	srv := newKnCyUsageServer(t, body)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", UpstreamKey: upstreamKeyKnCy}
+
+	svc := newAutoEntryKnCyProbeService(srv, repo)
+	rec := &observeTxRecord{}
+	svc.SetObserveTx(rec.tx())
+
+	_, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.Error(t, err, "缺 total_remaining 必须按观测失败处理，不得补 0")
+	require.ErrorIs(t, err, errKnCyUsageFieldsMissing)
+
+	_, commits, rollbacks := rec.snapshot()
+	require.Equal(t, 1, commits)
+	require.Zero(t, rollbacks)
+
+	snapshot, ok := ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
+	require.True(t, ok)
+	require.NotEmpty(t, snapshot.ErrorCode)
+	require.Nil(t, snapshot.Total, "缺 total_remaining ⇒ 快照不得出现伪造 total")
+	require.Nil(t, snapshot.Used)
+	require.Nil(t, snapshot.TodayRemainingCent, "缺 total_remaining ⇒ 快照不得出现 today_remaining_cent")
+}
+
+// TestProbeKeyQuota_KnCyFailureKeepsUnitAndTodayCent：先成功写 usd_cent 快照，再让上游报错
+// ⇒ 失败分支必须保留上一轮的 unit=="usd_cent" 与旧 today_remaining_cent（外审 must_fix #2），
+// 不得丢失单位被当成份额制解释。
+func TestProbeKeyQuota_KnCyFailureKeepsUnitAndTodayCent(t *testing.T) {
+	expUnix := time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC).Unix()
+	successBody := fmt.Sprintf(`{"status":"ok","message":"ok","data":{"total_remaining":290.48,`+
+		`"today_remaining":0.48,"expires_at":%d,"unlimited":false,"unit":"requests"}}`, expUnix)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", UpstreamKey: upstreamKeyKnCy}
+
+	// 第一轮：成功写 usd_cent 快照。
+	successSrv := newKnCyUsageServer(t, successBody)
+	svc := newAutoEntryKnCyProbeService(successSrv, repo)
+	rec := &observeTxRecord{}
+	svc.SetObserveTx(rec.tx())
+
+	info, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.NoError(t, err)
+	require.Equal(t, 29048, info.Max)
+	snapshot, ok := ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
+	require.True(t, ok)
+	require.Equal(t, "usd_cent", snapshot.Unit, "成功轮必须写 usd_cent")
+	require.NotNil(t, snapshot.TodayRemainingCent)
+	require.Equal(t, 48, *snapshot.TodayRemainingCent)
+
+	// 第二轮：上游报错（指向返回 403 的服务器）。
+	errorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"status":"error","message":"quota insufficient"}`))
+	}))
+	t.Cleanup(errorSrv.Close)
+	svc.SetKnCyClient(NewKnCyClient(errorSrv.URL))
+
+	_, err = svc.ProbeKeyQuota(context.Background(), 42)
+	require.Error(t, err, "第二轮上游报错必须如实返错")
+
+	_, commits, rollbacks := rec.snapshot()
+	require.Equal(t, 2, commits)
+	require.Zero(t, rollbacks)
+
+	snapshot, ok = ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
+	require.True(t, ok, "失败观测必须已落盘")
+	require.NotEmpty(t, snapshot.ErrorCode, "失败须登记脱敏 error_code")
+	// 失败轮保留上一轮成功值用于历史展示（不改写数值），但单位/今日剩余分必须保持上一轮的
+	// usd_cent（外审 must_fix #2：不得丢失单位被当成份额制解释）。
+	require.NotNil(t, snapshot.Total, "失败轮保留上一轮成功总额用于展示")
+	require.Equal(t, 29048, *snapshot.Total)
+	require.Equal(t, "usd_cent", snapshot.Unit, "失败轮必须保留上一轮的 usd_cent 单位")
+	require.NotNil(t, snapshot.TodayRemainingCent, "失败轮必须保留上一轮的 today_remaining_cent")
+	require.Equal(t, 48, *snapshot.TodayRemainingCent, "失败轮 today_remaining_cent 必须等于上一轮值 48")
+}
+
 // TestProbeKeyQuota_UnknownUpstreamKeyFailsClosed：未知上游标识必须失败关闭（返回 error），
 // 绝不回落 ShareAI（回落会让 kn-cy 卡密去打 ShareAI lookup，凭据泄露 + 白耗额度），且不得写任何快照。
 func TestProbeKeyQuota_UnknownUpstreamKeyFailsClosed(t *testing.T) {

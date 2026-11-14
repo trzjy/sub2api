@@ -170,10 +170,10 @@ func TestKnCyClient_GetSubscriptionUsage_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSubscriptionUsage() error = %v", err)
 	}
-	if got.TotalRemaining != 9800 {
+	if got.TotalRemaining == nil || *got.TotalRemaining != 9800 {
 		t.Errorf("GetSubscriptionUsage().TotalRemaining = %v, want 9800", got.TotalRemaining)
 	}
-	if got.TodayRemaining != 1900 {
+	if got.TodayRemaining == nil || *got.TodayRemaining != 1900 {
 		t.Errorf("GetSubscriptionUsage().TodayRemaining = %v, want 1900", got.TodayRemaining)
 	}
 	if got.ExpiresAt != 1767225600 {
@@ -184,6 +184,39 @@ func TestKnCyClient_GetSubscriptionUsage_Success(t *testing.T) {
 	}
 	if got.Unit != "tokens" {
 		t.Errorf("GetSubscriptionUsage().Unit = %q, want tokens", got.Unit)
+	}
+}
+
+// TestKnCyClient_GetSubscriptionUsage_MissingRemainingFieldsAreNil 是字段存在性的回归测试
+// （外审 must_fix #1）：上游省略 total_remaining / today_remaining 时，二者必须解码为 nil
+// （指针零值），绝不可被 Go 补成真实 0 —— 缺失 ≠ 0，否则会误判耗尽停调全部账号。
+func TestKnCyClient_GetSubscriptionUsage_MissingRemainingFieldsAreNil(t *testing.T) {
+	srv := newKnCyTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"data": map[string]any{
+				// 故意省略 total_remaining / today_remaining。
+				"expires_at": 1767225600,
+				"unlimited":  false,
+				"unit":       "tokens",
+			},
+		})
+	})
+
+	c := NewKnCyClient(srv.URL)
+	got, err := c.GetSubscriptionUsage(context.Background(), "fake-subscription-key")
+	if err != nil {
+		t.Fatalf("GetSubscriptionUsage() error = %v", err)
+	}
+	if got.TotalRemaining != nil {
+		t.Errorf("GetSubscriptionUsage().TotalRemaining = %v, want nil (missing field)", got.TotalRemaining)
+	}
+	if got.TodayRemaining != nil {
+		t.Errorf("GetSubscriptionUsage().TodayRemaining = %v, want nil (missing field)", got.TodayRemaining)
+	}
+	if got.ExpiresAt != 1767225600 {
+		t.Errorf("GetSubscriptionUsage().ExpiresAt = %d, want 1767225600", got.ExpiresAt)
 	}
 }
 

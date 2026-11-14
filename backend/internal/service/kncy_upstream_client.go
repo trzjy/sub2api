@@ -51,12 +51,17 @@ type KnCyActivationData struct {
 }
 
 // KnCySubscriptionUsage 是订阅用量接口 data 字段（剩余额度/到期时间/是否不限量）。
+//
+// 字段存在性纪律（外审 must_fix #1）：TotalRemaining / TodayRemaining 必须是**指针**。
+// 上游省略这两个字段时 JSON 解码得到 nil，调用方据此走"失败观测"路径，绝不把缺失补成
+// 真实 0 写进快照（缺失 ≠ 0，否则会误判 QuotaKeyUsageExhausted 停调全部账号）。
+// ExpiresAt / Unlimited / Unit 保持原样，不改语义。
 type KnCySubscriptionUsage struct {
-	TotalRemaining float64 `json:"total_remaining"`
-	TodayRemaining float64 `json:"today_remaining"`
-	ExpiresAt      int64   `json:"expires_at"`
-	Unlimited      bool    `json:"unlimited"`
-	Unit           string  `json:"unit"`
+	TotalRemaining *float64 `json:"total_remaining"`
+	TodayRemaining *float64 `json:"today_remaining"`
+	ExpiresAt      int64    `json:"expires_at"`
+	Unlimited      bool     `json:"unlimited"`
+	Unit           string   `json:"unit"`
 }
 
 // KnCyClient 是 kn-cy.com 上游客户端，供管理端拉号、激活与定时额度探活使用。

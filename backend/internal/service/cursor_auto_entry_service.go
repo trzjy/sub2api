@@ -436,6 +436,10 @@ const (
 var (
 	errCursorObservationStorage  = errors.New("cursor_auto_entry: usage observation storage failure")
 	errCursorObservationConflict = errors.New("cursor_auto_entry: quota key source identity changed during observation")
+	// errKnCyUsageFieldsMissing 是 kn-cy 上游响应缺 total_remaining / today_remaining 字段。
+	// 字段缺失 ≠ 额度 0：必须按"观测失败"处理，让既有的失败观测路径写 error_code，
+	// 绝不把缺失补成 0 写进快照（缺失字段会被 Go 零值误判成"真实耗尽"而停调全部账号）。
+	errKnCyUsageFieldsMissing = errors.New("cursor_auto_entry: kn-cy subscription usage missing remaining fields")
 )
 
 // ProbeKeyQuota 是对外暴露的**唯一**来源额度观测入口：管理员额度探测与 reconciler 周期
@@ -647,6 +651,10 @@ func buildCursorUsageSnapshot(previous []byte, success *lookupKeyInfo, observedA
 			checked := prev.CheckedAt.UTC().Format(time.RFC3339)
 			doc.CheckedAt = &checked
 		}
+		// 失败分支保留单位与今日剩余分（外审 must_fix #2）：否则上一轮 kn-cy 的
+		// usd_cent 值会在失败轮丢失，被按份额制错误解释。成功分支会按需覆盖。
+		doc.TodayRemainingCent = prev.TodayRemainingCent
+		doc.Unit = prev.Unit
 	}
 	attempted := observedAt.UTC().Format(time.RFC3339)
 	doc.AttemptedAt = &attempted
@@ -654,10 +662,15 @@ func buildCursorUsageSnapshot(previous []byte, success *lookupKeyInfo, observedA
 	if doc.ErrorCode == "" && success != nil {
 		total, used, status := success.MaxQuota, success.UsedQuota, success.StatusCode
 		doc.Total, doc.Used, doc.StatusCode = &total, &used, &status
-		// 今日剩余与计量单位仅成功分支写入；失败分支与 shareai 路径保持 nil/空，
-		// 由解析侧按 "count"（份额制）处理。
-		doc.TodayRemainingCent = success.TodayRemainingCent
-		doc.Unit = success.Unit
+		// 今日剩余与计量单位仅成功分支写入。shareai 等份额制（success.Unit == ""）复用同一
+		// 函数时，必须显式置空，不得沿用上一轮的 usd_cent 值（缺失 ≠ 0 / 单位错配）。
+		if success.Unit == "" {
+			doc.TodayRemainingCent = nil
+			doc.Unit = ""
+		} else {
+			doc.TodayRemainingCent = success.TodayRemainingCent
+			doc.Unit = success.Unit
+		}
 		checked := attempted
 		doc.CheckedAt = &checked
 	}
@@ -815,11 +828,17 @@ func (s *CursorAutoEntryService) lookupKnCyUsage(ctx context.Context, key string
 		// 绝不把错误回显成余额 0（缺失 ≠ 0）。
 		return nil, err
 	}
+	// 字段存在性纪律（外审 must_fix #1）：TotalRemaining / TodayRemaining 是**指针**。
+	// 上游省略任一余额字段 ⇒ 缺失 ≠ 0 ⇒ 不写任何额度数值，按观测失败处理，让既有失败
+	// 观测路径写 error_code，绝不补成真实 0（否则误判 QuotaKeyUsageExhausted 停调全部账号）。
+	if usage.TotalRemaining == nil || usage.TodayRemaining == nil {
+		return nil, errKnCyUsageFieldsMissing
+	}
 	// 余额：整体剩余余额作为上限（单位分，USD*100），Used 置 0 ⇒ 剩余 = TotalRemaining。
 	// Unlimited 也以 TotalRemaining 承载（上游不限量时该值稳定为大值，不会触发耗尽停调）。
 	// 耗尽（TotalRemaining==0）也必须写 0，使"今日额度已用尽"可见，故不再用「>0 才写」。
-	maxQuota := int(math.Round(usage.TotalRemaining * 100))
-	todayCent := int(math.Round(usage.TodayRemaining * 100))
+	maxQuota := int(math.Round(*usage.TotalRemaining * 100))
+	todayCent := int(math.Round(*usage.TodayRemaining * 100))
 	info := &lookupKeyInfo{
 		Group:              "kn-cy",
 		StatusCode:         1, // 已激活/权威：expires_at 始终采纳（非"未使用"滚动态）。
