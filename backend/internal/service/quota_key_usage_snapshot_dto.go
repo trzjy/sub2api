@@ -210,14 +210,23 @@ const quotaKeyTodayRemainingFloorCent = 50
 
 // QuotaKeyUsageExhausted 判定快照是否已不可用（额度触底）。
 //
+//   - Unit=="usd_cent"：USD 口径只有「今日剩余」(TodayRemainingCent) 能证明今日额度可用。
+//     该值缺失（nil，含上游负数被归一化的情形）一律按"今日额度不可用"失败关闭（返回 true），
+//     绝不回落到 total-used（整卡余额不能证明今天的额度——正整卡余额 + 负今日余额这种
+//     上游无效组合不得用来放行码级停调）；
 //   - Unit=="usd_cent" 且 TodayRemainingCent != nil：低于 50 分（0.5 USD）即耗尽；
-//   - 其余情况（含份额制）：维持既有 (*Total - *Used) < cursorQuotaKeyRemainingFloor；
-//   - Total/Used 缺失时返回 false：缺失否决由调用方的既有规则⑧承担，本函数不重复。
+//   - 其余情况（份额制，含非 usd_cent 的任意 unit）：维持既有
+//     (*Total - *Used) < cursorQuotaKeyRemainingFloor，行为零变化。
 //
 // cursorQuotaKeyRemainingFloor 定义在同包 openai_gateway_scheduling.go，直接引用，
 // 本文件不复制该常量。
 func QuotaKeyUsageExhausted(snapshot QuotaKeyUsageSnapshot) bool {
-	if snapshot.Unit == "usd_cent" && snapshot.TodayRemainingCent != nil {
+	if snapshot.Unit == "usd_cent" {
+		// USD 口径只有「今日剩余」能证明今日额度可用；该值缺失/无效时失败关闭，
+		// 绝不回落到 total-used（整卡余额不能证明今天的额度）。
+		if snapshot.TodayRemainingCent == nil {
+			return true
+		}
 		return *snapshot.TodayRemainingCent < quotaKeyTodayRemainingFloorCent
 	}
 	if snapshot.Total == nil || snapshot.Used == nil {

@@ -288,6 +288,47 @@ func TestQuotaKeyUsageExhaustedCount(t *testing.T) {
 	require.True(t, QuotaKeyUsageExhausted(exhausted), "份额制剩余 9 < 10 → 耗尽")
 }
 
+// TestQuotaKeyUsageExhaustedUSDFailsClosedWhenTodayMissingOrZero 钉死 KNCY-M 修复：
+// USD 口径（unit=usd_cent）一律不回落份额制判定——「今日剩余」缺失或归零时按"今日额度
+// 不可用"失败关闭，绝不允许用整卡余额（total-used）证明今天可用。
+//
+// 对应派发单断言：
+//   - usd_cent 且 today_remaining_cent 缺失 → 耗尽 = true；
+//   - usd_cent 且 today_remaining_cent:0 → 耗尽 = true；
+//   - usd_cent 且 today_remaining_cent:50 → 耗尽 = false（下限）。
+func TestQuotaKeyUsageExhaustedUSDFailsClosedWhenTodayMissingOrZero(t *testing.T) {
+	// 缺失今日剩余：即便整卡余额充足（total=29048），也不得回落 total-used 放行，
+	// 必须失败关闭（返回 true）。这是 KNCY-M 修复前会误判"未耗尽"的漏洞。
+	missing := parseUsageSnapshot(t, `{"total":29048,"used":0,"unit":"usd_cent"}`)
+	require.True(t, QuotaKeyUsageExhausted(missing),
+		"usd_cent 缺失今日剩余必须失败关闭，不得回落整卡余额")
+
+	// 今日剩余 = 0：今日额度已归零，必须耗尽。
+	zero := parseUsageSnapshot(t, `{"total":29048,"used":0,"today_remaining_cent":0,"unit":"usd_cent"}`)
+	require.True(t, QuotaKeyUsageExhausted(zero), "usd_cent 今日剩余=0 必须耗尽")
+
+	// 今日剩余 = 50（下限）：等于下限，未耗尽（回落分支不触发，本就走今日剩余判定）。
+	floor := parseUsageSnapshot(t, `{"total":29048,"used":0,"today_remaining_cent":50,"unit":"usd_cent"}`)
+	require.False(t, QuotaKeyUsageExhausted(floor), "usd_cent 今日剩余=50 == 下限 → 未耗尽")
+}
+
+// TestQuotaKeyUsageExhaustedUSDNegativeNormalizedFailsClosed 钉死"上游负今日余额"端到端处理：
+// 负 today_remaining_cent 经 normalizeQuotaCounter 归一化为 nil，usd_cent 口径缺失 → 失败关闭。
+// 即便整卡余额为正（total=29048），负今日余额绝不参与判定、绝不证明今日可用。
+func TestQuotaKeyUsageExhaustedUSDNegativeNormalizedFailsClosed(t *testing.T) {
+	// 直接构造一份"负值被归一化为 nil"的快照：today_remaining_cent 字段为 -1 在解析时被丢弃。
+	negativeInDoc := BuildQuotaKeyUsageProjection([]byte(`{"total":29048,"used":0,"today_remaining_cent":-1,"unit":"usd_cent"}`))
+	require.NotNil(t, negativeInDoc, "负数计数字段按缺失处理，不抹掉整卡展示值")
+	require.Nil(t, negativeInDoc.TodayRemaining, "负今日剩余必须按缺失处理（不出现今日 USD 展示）")
+
+	snapshot, ok := ParseQuotaKeyUsageSnapshot([]byte(`{"total":29048,"used":0,"today_remaining_cent":-1,"unit":"usd_cent"}`))
+	require.True(t, ok)
+	require.Nil(t, snapshot.TodayRemainingCent, "负 today_remaining_cent 必须归一化为 nil（缺失）")
+	require.Equal(t, "usd_cent", snapshot.Unit)
+	require.True(t, QuotaKeyUsageExhausted(snapshot),
+		"usd_cent 负今日余额归一化后缺失 → 失败关闭，绝不用整卡余额放行")
+}
+
 // TestQuotaKeyUsageProjectionUSD 覆盖 usd_cent 快照的 USD 展示投影。
 func TestQuotaKeyUsageProjectionUSD(t *testing.T) {
 	projection := BuildQuotaKeyUsageProjection([]byte(`{"total":29048,"used":0,"today_remaining_cent":48,"unit":"usd_cent"}`))

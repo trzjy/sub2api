@@ -834,6 +834,14 @@ func (s *CursorAutoEntryService) lookupKnCyUsage(ctx context.Context, key string
 	if usage.TotalRemaining == nil || usage.TodayRemaining == nil {
 		return nil, errKnCyUsageFieldsMissing
 	}
+	// 负数校验：上游可能返回"正整卡余额 + 负今日余额"（如 total_remaining=100,
+	// today_remaining=-0.01）。负数是无效值，按"观测失败"处理——复用量缺失的失败观测语义
+	// （errKnCyUsageFieldsMissing），绝不新增错误类型，也绝不参与判定。负 today 在下游会被
+	// normalizeQuotaCounter 归一化为 nil，从而落入 usd_cent 缺失 → 失败关闭分支；此处提前在
+	// 观测入口拦截，使 ProbeKeyQuota 失败关闭、写 error_code，不写 today_remaining_cent。
+	if *usage.TotalRemaining < 0 || *usage.TodayRemaining < 0 {
+		return nil, errKnCyUsageFieldsMissing
+	}
 	// 余额：整体剩余余额作为上限（单位分，USD*100），Used 置 0 ⇒ 剩余 = TotalRemaining。
 	// Unlimited 也以 TotalRemaining 承载（上游不限量时该值稳定为大值，不会触发耗尽停调）。
 	// 耗尽（TotalRemaining==0）也必须写 0，使"今日额度已用尽"可见，故不再用「>0 才写」。
