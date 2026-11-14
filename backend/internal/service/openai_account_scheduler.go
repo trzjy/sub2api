@@ -696,10 +696,16 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	}
 
 	accountID := req.StickyAccountID
-	clearBinding := func() {
-		if !req.PreserveStickyBinding {
-			_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, sessionHash)
+	// clearBinding 只在「永久失效」时才真正销毁绑定；临时原因由
+	// releaseStickyBindingOnMiss 自动保留（本次借道，下一轮回原账号）。
+	// 返回值表示「绑定是否仍被保留」，调用方用它决定能否改写绑定；
+	// 这样「删不删」和「能不能改写」由同一个判定回答，不会两处打架。
+	clearBinding := func(reason stickyBindingMissReason) bool {
+		if req.PreserveStickyBinding {
+			return true
 		}
+		s.service.releaseStickyBindingOnMiss(ctx, req.GroupID, sessionHash, reason)
+		return !stickyBindingDroppedOnMiss(reason)
 	}
 	if accountID <= 0 {
 		var err error
@@ -719,56 +725,63 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 
 	account, err := s.service.getSchedulableAccount(ctx, accountID)
 	if err != nil || account == nil {
-		clearBinding()
-		return nil, false, nil
+		return nil, clearBinding(stickyMissAccountGone), nil
 	}
 	// B3 sticky 不入 Web 池：Web 接入模式账号不得经粘性会话路由，清理绑定后回落两级池。
 	if account.IsWebAccessMode() {
-		clearBinding()
-		return nil, false, nil
+		return nil, clearBinding(stickyMissWebAccessMode), nil
 	}
 	// 显式非法 access_mode fail-closed：粘性命中也判为不可选（§5.1 规则 2）。
 	if openAIAccessModeExcludeReason(account) != "" {
-		clearBinding()
-		return nil, false, nil
+		return nil, clearBinding(stickyMissIllegalAccessMode), nil
 	}
-	if shouldClearStickySession(account, req.RequestedModel) || account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() || !account.IsSchedulable() {
-		clearBinding()
-		return nil, false, nil
+	// 限流 / 临时不可调度是临时态：保留绑定，本次借道。
+	if reason := stickySessionClearReason(account, req.RequestedModel); reason != "" {
+		return nil, clearBinding(reason), nil
+	}
+	if account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) {
+		return nil, clearBinding(stickyMissPlatformMismatch), nil
+	}
+	if !account.IsOpenAICompatible() || !account.IsSchedulable() {
+		return nil, clearBinding(stickyMissModelUnsupported), nil
 	}
 	if !s.isAccountRequestCompatible(ctx, account, req) {
 		return nil, false, nil
 	}
 	if !s.isAccountTransportCompatible(account, req.RequiredTransport) {
-		clearBinding()
-		return nil, false, nil
+		return nil, clearBinding(stickyMissTransportUnsupported), nil
 	}
 	account = s.service.recheckSelectedOpenAIAccountFromDB(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
-	if account == nil || !s.service.openAIAccountMatchesSchedulingGroup(account, req.GroupID) || !s.isAccountRequestCompatible(ctx, account, req) || !s.isAccountTransportCompatible(account, req.RequiredTransport) {
-		clearBinding()
+	if account == nil {
+		return nil, clearBinding(stickyMissAccountGone), nil
+	}
+	if !s.service.openAIAccountMatchesSchedulingGroup(account, req.GroupID) {
+		return nil, clearBinding(stickyMissGroupMismatch), nil
+	}
+	if !s.isAccountRequestCompatible(ctx, account, req) {
 		return nil, false, nil
 	}
+	if !s.isAccountTransportCompatible(account, req.RequiredTransport) {
+		return nil, clearBinding(stickyMissTransportUnsupported), nil
+	}
 	// CodeBuddy 平台默认 RPM：粘性允许黄区（StickyOnly），红区才清绑定换号。
+	// 红区是临时态 —— 保留绑定，本次借道。
 	if !s.codeBuddyRPMAllowsSticky(ctx, account) {
-		clearBinding()
-		return nil, false, nil
+		return nil, clearBinding(stickyMissRPMRed), nil
 	}
 	// Free-tier soft gate: sticky session must not pin an over-quota free OAuth account.
 	// Admin QueryQuota / import probes do not use this path.
 	if account != nil && len(s.filterGrokFreeQuotaAccounts(ctx, []Account{*account})) == 0 {
-		clearBinding()
-		return nil, false, nil
+		return nil, clearBinding(stickyMissFreeQuotaOver), nil
 	}
 	// Team+model cool: sticky must not pin a sibling under the same team 429 window.
 	now := time.Now()
 	upstreamModel := canonicalOpenAIAccountSchedulingModel(account, req.RequestedModel)
 	if account != nil && isGrokTeamModelRateLimited(account, upstreamModel, now) {
-		clearBinding()
-		return nil, false, nil
+		return nil, clearBinding(stickyMissTeamRateLimited), nil
 	}
 	if account != nil && isGrokModelQuotaBlocked(account.ID, upstreamModel, now) {
-		clearBinding()
-		return nil, false, nil
+		return nil, clearBinding(stickyMissModelQuotaBlocked), nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
 	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape && !req.DisableStickyEscape {
@@ -1522,13 +1535,13 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 		account = s.service.recheckSelectedOpenAIAccountFromDB(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
 		if account == nil {
 			if accountID == req.StickyAccountID && strings.TrimSpace(req.SessionHash) != "" {
-				_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, req.SessionHash)
+				s.service.releaseStickyBindingOnMiss(ctx, req.GroupID, req.SessionHash, stickyMissAccountGone)
 			}
 			continue
 		}
 		if !s.service.openAIAccountMatchesSchedulingGroup(account, req.GroupID) {
 			if accountID == req.StickyAccountID && strings.TrimSpace(req.SessionHash) != "" {
-				_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, req.SessionHash)
+				s.service.releaseStickyBindingOnMiss(ctx, req.GroupID, req.SessionHash, stickyMissGroupMismatch)
 			}
 			continue
 		}

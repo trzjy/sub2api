@@ -1516,8 +1516,9 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 
 	// 4. 设置粘性会话绑定（利润门下推迟到 handler 终检通过后再绑定，
 	// 终检否决的账号不得成为新的粘性目标；无门保持既有 eager 绑定与 TTL）
+	// 原绑定账号仍存在时（临时不可用）只借道，不改写绑定，下一轮仍回原账号。
 	// Set sticky session binding (deferred until terminal admission under a profit gate)
-	if sessionHash != "" && !gatewayProfitControlGateActive(ctx) {
+	if sessionHash != "" && !gatewayProfitControlGateActive(ctx) && !s.stickyBindingMustSurviveFallback(ctx, groupID, sessionHash) {
 		_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, selected.ID, openaiStickySessionTTL)
 	}
 
@@ -1555,19 +1556,20 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 
 	// B3 sticky 不入 Web 池：Web 接入模式账号不得经粘性会话路由，清理绑定后回落两级池。
 	if account != nil && account.IsWebAccessMode() {
-		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+		s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissWebAccessMode)
 		return nil
 	}
 	// 显式非法 access_mode fail-closed：粘性命中也判为不可选（§5.1 规则 2）。
 	if account != nil && openAIAccessModeExcludeReason(account) != "" {
-		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+		s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissIllegalAccessMode)
 		return nil
 	}
 
 	// 检查账号是否需要清理粘性会话
 	// Check if sticky session should be cleared
-	if shouldClearStickySession(account, requestedModel) {
-		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+	if clearReason := stickySessionClearReason(account, requestedModel); clearReason != "" {
+		// 限流 / 临时不可调度是临时态：保留绑定，本次借道，恢复后自动回原账号。
+		s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, clearReason)
 		return nil
 	}
 
@@ -1592,16 +1594,22 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 		return nil
 	}
 	if !parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
-		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+		// 母体临时不健康：保留绑定，本次借道。
+		s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissShadowParentUnhealthy)
 		return nil
 	}
 	if s.isOpenAIAccountRequestRuntimeBlocked(account, requestedModel) {
-		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+		// 运行时阻塞是临时态：保留绑定。
+		s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissRuntimeBlocked)
 		return nil
 	}
 	account = s.recheckSelectedOpenAIAccountFromDB(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
-	if account == nil || !s.openAIAccountMatchesSchedulingGroup(account, groupID) {
-		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+	if account == nil {
+		s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissAccountGone)
+		return nil
+	}
+	if !s.openAIAccountMatchesSchedulingGroup(account, groupID) {
+		s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissGroupMismatch)
 		return nil
 	}
 	// CodeBuddy 平台默认 RPM：粘性允许黄区，红区才清绑定换号。
@@ -1614,13 +1622,15 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 			}
 		}
 		if !s.codeBuddyRPMSchedulable(ctx, account, currentRPM, true) {
-			_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+			// RPM 红区是临时态：保留绑定，本次借道。
+			s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissRPMRed)
 			return nil
 		}
 	}
 	if groupID != nil && s.needsUpstreamChannelRestrictionCheck(ctx, groupID) &&
 		s.isUpstreamModelRestrictedByChannel(ctx, *groupID, account, requestedModel, requireCompact) {
-		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+		// 渠道限制是临时态：保留绑定。
+		s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissChannelRestricted)
 		return nil
 	}
 
@@ -1931,40 +1941,62 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	minTierPriority, hasMinTier := minPriorityOfAccounts(candidates)
 
 	// ============ Layer 1: Sticky session ============
-	// A healthy sticky account whose bounded wait queue is full may be used as a
-	// one-request capacity spillover in Layer 2. Keep that spillover temporary:
-	// rewriting the durable binding here would make a short burst migrate the
-	// whole conversation to a cache-cold account.
-	stickySpillover := false
+	// 只要会话原本绑定的账号仍然存在，本次回退就只能是「借道」：绑定保持不变，
+	// 下一轮仍回原账号。旧实现只对「等待队列满」一种情形保住绑定，限流、档位漂移、
+	// RPM 红区、渠道限制等临时情形一律删绑定或改写绑定，会话于是被永久迁到
+	// 缓存冷的新账号上（生产实测：换号率 14.8%，其中 47.6% 跨 priority 档）。
+	// 「这条原因该不该销毁绑定」统一由 stickyBindingDroppedOnMiss 回答
+	//（openai_sticky_binding_lifecycle.go），此处只维护「是否已判死」。
+	stickyBindingKept := sessionHash != "" && stickyAccountID > 0
 	if sessionHash != "" {
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, err := s.getSchedulableAccount(ctx, accountID)
+			if err != nil {
+				// 查询失败要区分「账号已被删除」与「数据库瞬时故障」：
+				// 前者必须销毁绑定，否则会话永远卡在一个死号上；
+				// 后者保留绑定，下一次请求自然重试。
+				if s.accountRepo != nil {
+					if gone, lookupErr := s.accountRepo.GetByID(ctx, accountID); lookupErr == nil && gone == nil {
+						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissAccountGone)
+						stickyBindingKept = false
+					}
+				}
+			}
 			if err == nil {
 				// B3 sticky 不入 Web 池：Web 接入模式账号不得经粘性会话路由，
 				// 清理绑定后回落两级池（与 tryStickySessionHit 同一口径）。
 				if account != nil && account.IsWebAccessMode() {
-					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+					s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissWebAccessMode)
+					stickyBindingKept = false
 					return nil, nil
 				}
-				clearSticky := shouldClearStickySession(account, requestedModel)
-				if clearSticky {
-					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+				// 临时不可用（限流 / 临时不可调度）不再销毁绑定：本次借道，下一轮回原账号；
+				// 只有永久失效（账号停用/删除）才允许后续重新绑定。
+				clearReason := stickySessionClearReason(account, requestedModel)
+				clearSticky := clearReason != ""
+				if clearSticky && s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, clearReason) {
+					stickyBindingKept = false
 				}
 				// 档位门：粘性命中的账号必须属于当前最小 priority 档，否则放弃本次粘性
 				//（不删绑定，由 Layer 2 选中后改写）。档位门关闭时该判断恒为 true。
 				if !clearSticky && stickyAccountWithinPriorityTier(account, minTierPriority, hasMinTier) && isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, false, requiredCapability) {
 					account = s.recheckSelectedOpenAIAccountFromDB(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
 					if account == nil {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissAccountGone)
+						stickyBindingKept = false
 					} else if !s.openAIAccountMatchesSchedulingGroup(account, groupID) {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissGroupMismatch)
+						stickyBindingKept = false
 					} else if s.isOpenAIAccountRequestRuntimeBlocked(account, requestedModel) {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+						// 运行时阻塞是临时态：保留绑定，本次借道。
+						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissRuntimeBlocked)
 					} else if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, account, requestedModel, requireCompact) {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+						// 渠道限制是临时态：保留绑定，本次借道。
+						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissChannelRestricted)
 					} else if !parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
-						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+						// 母体临时不健康：保留绑定，本次借道。
+						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissShadowParentUnhealthy)
 					} else {
 						result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 						if err == nil && result != nil && result.Acquired {
@@ -1986,7 +2018,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 							})
 							return markStickySessionHit(selection, true), selectErr
 						}
-						stickySpillover = true
+						// 队列满同样是临时态：本次借道，绑定保持不动。
+						stickyBindingKept = true
 					}
 				}
 			}
@@ -2100,7 +2133,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if selectErr != nil {
 					return nil, true, selectErr
 				}
-				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
+				if sessionHash != "" && !stickyBindingKept && !gatewayProfitControlGateActive(ctx) {
 					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
 				}
 				return selection, true, nil
@@ -2143,7 +2176,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if selectErr != nil {
 					return nil, selectErr
 				}
-				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
+				if sessionHash != "" && !stickyBindingKept && !gatewayProfitControlGateActive(ctx) {
 					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
 				}
 				return selection, nil

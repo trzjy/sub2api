@@ -562,16 +562,31 @@ func prefetchedStickyAccountIDFromContext(ctx context.Context, groupID *int64) i
 // and the sticky session binding should be cleared.
 // Delegates to IsSchedulable() for account-level checks, plus model-level rate limiting.
 func shouldClearStickySession(account *Account, requestedModel string) bool {
+	return stickySessionClearReason(account, requestedModel) != ""
+}
+
+// stickySessionClearReason 返回「粘性账号这一轮不能继续服务」的原因，空字符串表示可以继续。
+//
+// 该函数是 shouldClearStickySession 的唯一实现来源：判定逻辑只在这里写一份，
+// 「要不要连带销毁绑定」由 stickyBindingDroppedOnMiss 决定 —— 限流与临时不可调度
+// 属于临时状态，必须保留绑定（见 openai_sticky_binding_lifecycle.go）。
+func stickySessionClearReason(account *Account, requestedModel string) stickyBindingMissReason {
 	if account == nil {
-		return false
+		return ""
 	}
+	// 账号被禁用/删除是永久失效：必须销毁绑定，否则会话永远卡在一个死号上。
+	if !account.IsActive() {
+		return stickyMissAccountGone
+	}
+	// 其余「不可调度」都是窗口类（schedulable 开关、过期、过载、限流重置、临时停调、
+	// 配额用尽）：账号本身还在，属于临时态，必须保留绑定。
 	if !account.IsSchedulable() {
-		return true
+		return stickyMissUnschedulable
 	}
 	if remaining := account.GetRateLimitRemainingTimeWithContext(context.Background(), requestedModel); remaining > 0 {
-		return true
+		return stickyMissRateLimited
 	}
-	return false
+	return ""
 }
 
 type AccountWaitPlan struct {
