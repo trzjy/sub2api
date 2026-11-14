@@ -619,6 +619,10 @@ async def login_start(request: Request):
             login_url=login_url,
             success_url_prefix=success_url_prefix,
             proxy_url=payload.get("proxy_url") or None,
+            # 设备连续性：后端会带上该账号已保存的 storageState，登录页因此带着
+            # 历史 cookie 打开，上游看到的是「同一台设备回来」而不是全新设备
+            # （新设备=二次/语音验证的常见触发条件，2026-11-14）。
+            storage_state=payload.get("storage_state") or None,
             # 首屏落在哪个登录 Tab：由后端的 loginModes 优先级决定（唯一事实源）。
             login_mode=str(payload.get("login_mode") or ""),
         )

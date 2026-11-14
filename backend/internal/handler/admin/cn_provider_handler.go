@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -298,7 +299,13 @@ func (h *CNProviderHandler) FinishWebConsoleLogin(c *gin.Context) {
 		response.BadRequest(c, "web console remote login service is not enabled")
 		return
 	}
-	result, err := h.webConsoleRemoteLoginService.Finish(c.Request.Context(), accountID, c.Param("sessionId"))
+	// 保存登录成果不能跟着浏览器请求一起死：前端超时/关面板都会 abort 请求，
+	// ctx 一取消写库就失败，而 worker 侧会话在 finish 时已销毁 —— 这次登录成果
+	// 永久丢失（2026-11-14 线上，09:40:57 `ent: starting a transaction: context canceled`）。
+	// 这里把上下文从请求生命周期解绑，另给独立上限。
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 2*time.Minute)
+	defer cancel()
+	result, err := h.webConsoleRemoteLoginService.Finish(finishCtx, accountID, c.Param("sessionId"))
 	if err != nil {
 		writeWebConsoleRemoteLoginError(c, err)
 		return

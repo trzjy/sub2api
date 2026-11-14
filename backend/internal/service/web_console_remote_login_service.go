@@ -212,6 +212,13 @@ func (s *WebConsoleRemoteLoginService) Start(ctx context.Context, accountID int6
 	if account.Proxy != nil {
 		payload["proxy_url"] = account.Proxy.URL()
 	}
+	// 设备连续性：把该账号已保存的控制台票据带进登录上下文。
+	// 不带的话每次登录都是全新浏览器（无任何历史 cookie），上游把每次登录都当成
+	// 陌生设备，触发二次/语音验证；带上后返回用户看到的是「同一台设备回来」。
+	// 票据无效时最多被上游忽略，不会导致登录失败。
+	if state := strings.TrimSpace(account.GetCredential(webConsoleQuotaCredentialKeyStorageState)); state != "" {
+		payload["storage_state"] = state
+	}
 
 	var frame WebConsoleRemoteLoginFrame
 	if err := s.callWorker(ctx, http.MethodPost, webConsoleRemoteLoginPathPrefix+"/start", payload, &frame); err != nil {

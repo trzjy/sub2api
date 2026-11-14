@@ -359,7 +359,14 @@ export async function finishWebConsoleLogin(
     probe?: WebConsoleQuotaProbeResult
     account_label?: string
     message?: string
-  }>(`/admin/accounts/${id}/web-console-login/${sessionId}/finish`)
+  }>(
+    `/admin/accounts/${id}/web-console-login/${sessionId}/finish`,
+    undefined,
+    // finish 要等 worker 校验登录态 + 抓 storageState，实测可能超过全局 30s：
+    // 全局超时一到浏览器就 abort，后端 ctx 被取消、票据写不进去，
+    // 而 worker 已销毁会话 → 这次登录成果直接丢失（2026-11-14 线上）。
+    { timeout: 120000 }
+  )
   return data
 }
 
