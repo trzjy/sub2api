@@ -256,3 +256,54 @@ func TestQuotaKeyDtoProjectionFailsClosedWithoutRepository(t *testing.T) {
 	_, err = svc.ListWithUsageProjections(context.Background())
 	require.Error(t, err)
 }
+
+// parseUsageSnapshot 是新增用例的便捷封装：把原始 JSON 解析为类型化快照。
+func parseUsageSnapshot(t *testing.T, raw string) QuotaKeyUsageSnapshot {
+	t.Helper()
+	snapshot, ok := ParseQuotaKeyUsageSnapshot([]byte(raw))
+	require.True(t, ok, "新增用例的快照应当可被解析为有效快照")
+	return snapshot
+}
+
+// TestQuotaKeyUsageExhaustedUSD 覆盖 usd_cent 口径的耗尽判定：
+// 今日剩余低于 0.5 USD（50 分）即耗尽，等于或高于下限则不耗尽。
+func TestQuotaKeyUsageExhaustedUSD(t *testing.T) {
+	below := parseUsageSnapshot(t, `{"total":29048,"used":0,"today_remaining_cent":48,"unit":"usd_cent"}`)
+	require.True(t, QuotaKeyUsageExhausted(below), "today_remaining_cent=48 < 50 → 耗尽")
+
+	floor := parseUsageSnapshot(t, `{"total":29048,"used":0,"today_remaining_cent":50,"unit":"usd_cent"}`)
+	require.False(t, QuotaKeyUsageExhausted(floor), "today_remaining_cent=50 == 下限 → 未耗尽")
+
+	above := parseUsageSnapshot(t, `{"total":29048,"used":0,"today_remaining_cent":51,"unit":"usd_cent"}`)
+	require.False(t, QuotaKeyUsageExhausted(above), "today_remaining_cent=51 > 下限 → 未耗尽")
+}
+
+// TestQuotaKeyUsageExhaustedCount 覆盖份额制（默认/count）口径的耗尽判定：
+// 仍按既有 (*Total - *Used) < cursorQuotaKeyRemainingFloor（绝对值 10）。
+func TestQuotaKeyUsageExhaustedCount(t *testing.T) {
+	notExhausted := parseUsageSnapshot(t, `{"total":100,"used":90}`)
+	require.False(t, QuotaKeyUsageExhausted(notExhausted), "份额制剩余 10 不小于 10 → 未耗尽")
+
+	exhausted := parseUsageSnapshot(t, `{"total":100,"used":91}`)
+	require.True(t, QuotaKeyUsageExhausted(exhausted), "份额制剩余 9 < 10 → 耗尽")
+}
+
+// TestQuotaKeyUsageProjectionUSD 覆盖 usd_cent 快照的 USD 展示投影。
+func TestQuotaKeyUsageProjectionUSD(t *testing.T) {
+	projection := BuildQuotaKeyUsageProjection([]byte(`{"total":29048,"used":0,"today_remaining_cent":48,"unit":"usd_cent"}`))
+	require.NotNil(t, projection)
+	require.NotNil(t, projection.TodayRemaining, "usd_cent 应给出今日剩余 USD")
+	require.Equal(t, 0.48, *projection.TodayRemaining)
+	require.NotNil(t, projection.TotalRemaining, "usd_cent 应给出总额剩余 USD")
+	require.Equal(t, 290.48, *projection.TotalRemaining)
+	require.Equal(t, "usd", projection.RemainingUnit)
+}
+
+// TestQuotaKeyUsageProjectionCountOmitsUSD 覆盖份额制快照：不出现 USD 展示字段。
+func TestQuotaKeyUsageProjectionCountOmitsUSD(t *testing.T) {
+	projection := BuildQuotaKeyUsageProjection([]byte(`{"total":100,"used":90}`))
+	require.NotNil(t, projection)
+	require.Nil(t, projection.TodayRemaining, "份额制不出现 today_remaining")
+	require.Nil(t, projection.TotalRemaining, "份额制不出现 total_remaining")
+	require.Empty(t, projection.RemainingUnit, "份额制不出现 remaining_unit")
+}

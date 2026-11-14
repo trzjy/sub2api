@@ -55,6 +55,11 @@ type quotaKeyUsageSnapshotJSON struct {
 	CheckedAt   *string `json:"checked_at"`
 	AttemptedAt *string `json:"attempted_at"`
 	ErrorCode   string  `json:"error_code"`
+
+	// TodayRemainingCent 是今日剩余，单位「分」(USD*100)；nil = 没有该值。
+	TodayRemainingCent *int `json:"today_remaining_cent"`
+	// Unit 是额度计量单位："count"（默认/份额制）| "usd_cent"。
+	Unit string `json:"unit"`
 }
 
 // QuotaKeyUsageSnapshot 是快照的类型化表示（读侧 DTO）。
@@ -76,6 +81,11 @@ type QuotaKeyUsageSnapshot struct {
 	// ParseFailed 表示"记录存在但无法按钉死形态解析"。此时不产生任何数值，
 	// 只按失败语义登记 error_code（缺失容错，不返回错误、不返回 0 值）。
 	ParseFailed bool
+
+	// TodayRemainingCent 是今日剩余，单位「分」(USD*100)；nil = 没有该值。
+	TodayRemainingCent *int
+	// Unit 是额度计量单位："count"（默认/份额制）| "usd_cent"。
+	Unit string
 }
 
 // HasSuccessValues 报告是否存在最近一次成功观测的数值。
@@ -104,6 +114,13 @@ type QuotaKeyUsageProjection struct {
 	AttemptedAt *time.Time `json:"attempted_at,omitempty"`
 	ErrorCode   string     `json:"error_code,omitempty"`
 
+	// TodayRemaining 是今日剩余的 USD 展示值（= today_remaining_cent/100），仅 usd_cent。
+	TodayRemaining *float64 `json:"today_remaining,omitempty"`
+	// TotalRemaining 是总额剩余的 USD 展示值（= (total-used)/100），仅 usd_cent。
+	TotalRemaining *float64 `json:"total_remaining,omitempty"`
+	// RemainingUnit 标记剩余量的计量口径："usd"（usd_cent）| ""（份额制，omitempty 不出现）。
+	RemainingUnit string `json:"remaining_unit,omitempty"`
+
 	// HasSnapshot 表示该激活码是否已有可用的快照记录（含只有失败观测的情形）。
 	HasSnapshot bool `json:"has_snapshot"`
 	// QueryFailed 表示最近一次观测失败（error_code 非空，或记录无法解析）。
@@ -130,12 +147,14 @@ func ParseQuotaKeyUsageSnapshot(raw []byte) (QuotaKeyUsageSnapshot, bool) {
 		}, false
 	}
 	snapshot := QuotaKeyUsageSnapshot{
-		Total:       normalizeQuotaCounter(doc.Total),
-		Used:        normalizeQuotaCounter(doc.Used),
-		StatusCode:  doc.StatusCode,
-		CheckedAt:   parseQuotaSnapshotTime(doc.CheckedAt),
-		AttemptedAt: parseQuotaSnapshotTime(doc.AttemptedAt),
-		ErrorCode:   strings.TrimSpace(doc.ErrorCode),
+		Total:              normalizeQuotaCounter(doc.Total),
+		Used:               normalizeQuotaCounter(doc.Used),
+		StatusCode:         doc.StatusCode,
+		CheckedAt:          parseQuotaSnapshotTime(doc.CheckedAt),
+		AttemptedAt:        parseQuotaSnapshotTime(doc.AttemptedAt),
+		ErrorCode:          strings.TrimSpace(doc.ErrorCode),
+		TodayRemainingCent: normalizeQuotaCounter(doc.TodayRemainingCent),
+		Unit:               normalizeQuotaUnit(doc.Unit),
 	}
 	// 空对象（或全部字段缺失/为 null）等价于"尚未观测"，不产出伪造的成功值。
 	if !snapshot.HasSuccessValues() && snapshot.CheckedAt == nil && snapshot.AttemptedAt == nil && snapshot.ErrorCode == "" {
@@ -168,10 +187,43 @@ func ProjectQuotaKeyUsageSnapshot(snapshot QuotaKeyUsageSnapshot, ok bool) *Quot
 		remaining := *snapshot.Total - *snapshot.Used
 		projection.Remaining = &remaining
 	}
+	if snapshot.Unit == "usd_cent" {
+		// usd_cent 计量口径：额外给出 USD 展示值；份额制快照不填（omitempty 不出现）。
+		projection.RemainingUnit = "usd"
+		if snapshot.TodayRemainingCent != nil {
+			today := float64(*snapshot.TodayRemainingCent) / 100
+			projection.TodayRemaining = &today
+		}
+		if snapshot.Total != nil && snapshot.Used != nil {
+			total := float64(*snapshot.Total-*snapshot.Used) / 100
+			projection.TotalRemaining = &total
+		}
+	}
 	projection.StatusCode = snapshot.StatusCode
 	projection.CheckedAt = snapshot.CheckedAt
 	projection.AttemptedAt = snapshot.AttemptedAt
 	return projection
+}
+
+// quotaKeyTodayRemainingFloorCent 是「今日剩余」的调度下限：0.5 USD。
+const quotaKeyTodayRemainingFloorCent = 50
+
+// QuotaKeyUsageExhausted 判定快照是否已不可用（额度触底）。
+//
+//   - Unit=="usd_cent" 且 TodayRemainingCent != nil：低于 50 分（0.5 USD）即耗尽；
+//   - 其余情况（含份额制）：维持既有 (*Total - *Used) < cursorQuotaKeyRemainingFloor；
+//   - Total/Used 缺失时返回 false：缺失否决由调用方的既有规则⑧承担，本函数不重复。
+//
+// cursorQuotaKeyRemainingFloor 定义在同包 openai_gateway_scheduling.go，直接引用，
+// 本文件不复制该常量。
+func QuotaKeyUsageExhausted(snapshot QuotaKeyUsageSnapshot) bool {
+	if snapshot.Unit == "usd_cent" && snapshot.TodayRemainingCent != nil {
+		return *snapshot.TodayRemainingCent < quotaKeyTodayRemainingFloorCent
+	}
+	if snapshot.Total == nil || snapshot.Used == nil {
+		return false
+	}
+	return (*snapshot.Total - *snapshot.Used) < cursorQuotaKeyRemainingFloor
 }
 
 // BuildQuotaKeyUsageProjection 是 []byte → 展示投影的一步封装（列表/详情/probe 与账号行共用）。
@@ -276,6 +328,16 @@ func normalizeQuotaCounter(value *int) *int {
 	}
 	normalized := *value
 	return &normalized
+}
+
+// normalizeQuotaUnit 把上游 unit 字段统一成内部约定的两种取值之一：
+// 仅 "usd_cent"（大小写/空白不敏感）被识别，其余（含空串、未知串）一律归为
+// "count"（份额制/默认）。该值只描述计量口径，绝不触发额度补值。
+func normalizeQuotaUnit(value string) string {
+	if strings.ToLower(strings.TrimSpace(value)) == "usd_cent" {
+		return "usd_cent"
+	}
+	return "count"
 }
 
 // parseQuotaSnapshotTime 解析快照时间戳（RFC3339 / RFC3339Nano）。
