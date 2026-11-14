@@ -538,6 +538,8 @@ const (
 
 // cursorQuotaKeyRemainingFloor 是 Cursor 激活码**剩余额度**的调度下限（绝对值，不是百分比）。
 //
+// 仅用于份额制（unit!="usd_cent"）快照；kn_cy 的 USD 快照看 quotaKeyTodayRemainingFloorCent
+// （定义在 quota_key_usage_snapshot_dto.go）。
 // 语义：激活码的 total/used/remaining 是**名下所有账号共享的总额度池**（第一层额度），
 // 与账号自身的日额度（第二层）是 AND 关系——只要激活码侧不可用，其名下账号一律不可用，
 // 哪怕账号自身还有额度。因此这里用绝对值门槛而非占比：一个 total=1000 的码剩 5 次，
@@ -567,8 +569,8 @@ var cursorSupplySourceUsageNow = time.Now
 //  6. 最近一次观测失败（error_code 非空）→ 否决（失败关闭，不使用保留数值放行）；
 //  7. 成功值 checked_at 缺失或距今 > 5 分钟 → 否决（等待 reconciler/管理员刷新）；
 //  8. total 或 used 任一缺失 → 否决（剩余额度不可计算）；
-//  9. 真实剩余 total−used 低于调度下限 cursorQuotaKeyRemainingFloor（绝对值 10，含
-//     total−used == 0 的真实耗尽）→ 否决。剩余回到下限之上即自动放行。
+//  9. 真实来源已耗尽（按 QuotaKeyUsageExhausted 统一判定）→ 否决：usd_cent 快照看今日剩余
+//     （低于 0.5 USD 即耗尽），份额制看 total−used（下限 10）。耗尽解除即自动放行。
 //
 // 非 cursor 平台恒返回 ("", nil)（无 Cursor 否决）。本函数不区分"窄目录入口"与"普通调度"：
 // 两种消费方看到完全相同的结论，调用方只能投影 bool/string，不得另加放行条件。
@@ -616,9 +618,9 @@ func cursorSupplySourceUsageVetoReason(ctx context.Context, account *Account) (s
 	if snapshot.Total == nil || snapshot.Used == nil {
 		return quotaKeyUsageIncomplete, nil
 	}
-	// 规则⑨：真实剩余 total-used 低于调度下限 → 否决（真实 0 保持为 0：total=0 不等于字段
-	// 缺失；剩余 10 放行、剩余 9 否决——下限是绝对值，不按 total 占比折算）。
-	if (*snapshot.Total - *snapshot.Used) < cursorQuotaKeyRemainingFloor {
+	// 规则⑨：真实来源已耗尽（按 QuotaKeyUsageExhausted 统一判定）→ 否决：usd_cent 快照看
+	// 今日剩余（低于 0.5 USD 即耗尽），份额制看 total−used（下限 10）。耗尽解除即自动放行。
+	if QuotaKeyUsageExhausted(snapshot) {
 		return quotaKeyUsageExhausted, nil
 	}
 	return "", nil

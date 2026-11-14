@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1440,12 +1441,22 @@ const (
 //
 // 刻意不判快照新鲜度：宁可显示上一轮的确定结论，也不要因为刷新滞后在"耗尽/可用"之间
 // 来回跳。真实恢复后 5 分钟内一定会有新一轮探测把它翻过来。
+//
+// 单位分派：USD 口径（kn_cy，RemainingUnit=="usd"）按"今日剩余"判定（today_remaining
+// 折算成分后低于 0.5 USD 即耗尽）；份额制沿用算术 remaining 下限。
 func QuotaKeySourceBlockReason(usage *QuotaKeyUsageProjection) string {
 	if usage == nil || !usage.HasSnapshot {
 		return ""
 	}
 	if usage.QueryFailed {
 		return QuotaKeySourceBlockKeyInvalid
+	}
+	// USD 口径（kn_cy）：看今日剩余；份额制：维持原 remaining 下限。
+	if usage.RemainingUnit == "usd" && usage.TodayRemaining != nil {
+		if int(math.Round(*usage.TodayRemaining*100)) < quotaKeyTodayRemainingFloorCent {
+			return QuotaKeySourceBlockExhausted
+		}
+		return ""
 	}
 	if usage.Remaining == nil {
 		return ""
@@ -3587,5 +3598,5 @@ func cursorQuotaKeyPullBlocked(raw json.RawMessage, now time.Time) bool {
 	if !ok || snap.ErrorCode != "" || snap.Total == nil || snap.Used == nil || snap.CheckedAt == nil {
 		return false
 	}
-	return (*snap.Total - *snap.Used) < cursorQuotaKeyRemainingFloor
+	return QuotaKeyUsageExhausted(snap)
 }

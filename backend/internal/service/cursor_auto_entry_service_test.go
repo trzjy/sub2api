@@ -1148,7 +1148,7 @@ func TestProbeKeyQuota_KnCyWritesSnapshotAndExpiry(t *testing.T) {
 
 	info, err := svc.ProbeKeyQuota(context.Background(), 42)
 	require.NoError(t, err)
-	require.Equal(t, 1500, info.Max, "kn-cy 余额须以 TotalRemaining 进入快照总额")
+	require.Equal(t, 150000, info.Max, "kn-cy 余额须以 TotalRemaining*100（分）进入快照总额")
 	require.Equal(t, 0, info.Used, "kn-cy 仅给余额不给已用，Used 须为 0")
 	require.Equal(t, "kn-cy", info.Group)
 
@@ -1156,7 +1156,7 @@ func TestProbeKeyQuota_KnCyWritesSnapshotAndExpiry(t *testing.T) {
 	snapshot, ok := ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
 	require.True(t, ok, "kn-cy 须写入 quota_keys.usage_snapshot（同一快照列）")
 	require.NotNil(t, snapshot.Total)
-	require.Equal(t, 1500, *snapshot.Total)
+	require.Equal(t, 150000, *snapshot.Total)
 	require.NotNil(t, snapshot.Used)
 	require.Equal(t, 0, *snapshot.Used)
 	require.Equal(t, "", snapshot.ErrorCode, "成功观测 error_code 必须为空")
@@ -1193,6 +1193,47 @@ func TestProbeKeyQuota_KnCyExhaustedWritesZeroRemaining(t *testing.T) {
 	require.Equal(t, 0, *snapshot.Total)
 	// 到期未给 ⇒ 解析为 nil ⇒ 保持原值（本例无原值，ExpiresAt 应为 nil）。
 	require.Nil(t, repo.byID[42].ExpiresAt, "kn-cy 未给到期时不得据未知补日期")
+}
+
+// TestProbeKeyQuota_KnCyWritesTodayRemainingCent：kn-cy 同时把 TodayRemaining（今日剩余，USD）
+// 与 TotalRemaining（整卡总量，USD）以「分」(USD*100) 写进快照，供今日耗尽判定与展示分别使用。
+func TestProbeKeyQuota_KnCyWritesTodayRemainingCent(t *testing.T) {
+	expUnix := time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC).Unix()
+	body := fmt.Sprintf(`{"status":"ok","message":"ok","data":{"total_remaining":290.48,`+
+		`"today_remaining":0.48,"expires_at":%d,"unlimited":false,"unit":"requests"}}`, expUnix)
+	srv := newKnCyUsageServer(t, body)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST", UpstreamKey: upstreamKeyKnCy}
+
+	svc := newAutoEntryKnCyProbeService(srv, repo)
+	rec := &observeTxRecord{}
+	svc.SetObserveTx(rec.tx())
+
+	info, err := svc.ProbeKeyQuota(context.Background(), 42)
+	require.NoError(t, err)
+	require.Equal(t, 29048, info.Max, "kn-cy 整卡总量须以 total_remaining*100（分）进入快照总额")
+	require.Equal(t, 0, info.Used, "kn-cy 仅给余额不给已用，Used 须为 0")
+	require.Equal(t, "kn-cy", info.Group)
+
+	// 同一 quota_keys.usage_snapshot：today_remaining_cent 与 unit 一并落盘（usd_cent）。
+	snapshot, ok := ParseQuotaKeyUsageSnapshot(repo.byID[42].UsageSnapshot)
+	require.True(t, ok, "kn-cy 须写入 quota_keys.usage_snapshot（同一快照列）")
+	require.NotNil(t, snapshot.Total)
+	require.Equal(t, 29048, *snapshot.Total, "整卡总量（分）须等于 total_remaining*100")
+	require.NotNil(t, snapshot.Used)
+	require.Equal(t, 0, *snapshot.Used)
+	require.Equal(t, "usd_cent", snapshot.Unit, "kn-cy 须标记计量单位 usd_cent")
+	require.NotNil(t, snapshot.TodayRemainingCent, "kn-cy 须写入今日剩余（分）")
+	require.Equal(t, 48, *snapshot.TodayRemainingCent, "今日剩余须为 today_remaining*100 = 0.48*100 = 48")
+
+	// 到期只写既有 expires_at（同一到期列）。
+	require.NotNil(t, repo.byID[42].ExpiresAt)
+	require.Equal(t, 2027, repo.byID[42].ExpiresAt.UTC().Year())
+
+	calls, commits, rollbacks := rec.snapshot()
+	require.Equal(t, 1, calls)
+	require.Equal(t, 1, commits)
+	require.Zero(t, rollbacks)
 }
 
 // TestProbeKeyQuota_KnCyUpstreamErrorWritesFailureObservation：kn-cy 上游错误如实上抛，

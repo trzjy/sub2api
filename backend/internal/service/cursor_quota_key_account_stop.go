@@ -2,8 +2,8 @@ package service
 
 // 本文件实现「激活码额度耗尽 → 名下账号一起停调」的码级停调域（用户裁定 D9，2026-11-06）。
 //
-// 为什么要这一层：账号自己的日额度（08:00 重置）和激活码的共享额度池（每天 08:00 与 19:00
-// 各恢复一次）是两套完全不同的恢复机制。原来的代码只有账号级停调，激活码额度见底时
+// 为什么要这一层：账号自己的日额度（08:00 重置）与激活码的共享额度池（停调终点由每轮快照
+// 刷新驱动，不依赖上游刷新时点）是两套不同的处置。原来的代码只有账号级停调，激活码额度见底时
 // 只是调度侧逐个账号被来源门否决——号还挂在池子里、后台还显示"可用"，实际一个都跑不动。
 //
 // 设计要点：
@@ -12,7 +12,8 @@ package service
 //     改名，因为后者是误报）严格区分；
 //   - 恢复后按前缀精确清除，绝不误清账号级停调（两者到期时刻不同，混清会把还在冷却的号
 //     放回池子，让它立刻再撞一次上游）；
-//   - 停调目标 = 最近的码级恢复点（19:00 或次日 08:00），不是账号级的 08:05。
+//   - 停调终点 = 固定 5 分钟（quotaKeyReconcileInterval），下一轮快照刷新后再判定，
+//     不是账号级的 08:05，也不假设上游在 19:00/次日 08:00 恢复。
 
 import (
 	"context"
@@ -27,33 +28,15 @@ import (
 const (
 	// cursorQuotaKeyExhaustedReasonPrefix 是码级停调的固定原因前缀（精确清除的锚点）。
 	cursorQuotaKeyExhaustedReasonPrefix = "cursor quota key exhausted"
-
-	// 激活码额度池每天恢复两次：早上 08:00 与晚上 19:00（用户 2026-11-06 提供的运行事实）。
-	cursorQuotaKeyResetHourMorning = 8
-	cursorQuotaKeyResetHourEvening = 19
 )
 
-// cursorQuotaKeyRecoveryUntil 计算"此刻码级额度耗尽"应该停到什么时候。
-//
-//	00:00–08:00 → 当天 08:00
-//	08:00–19:00 → 当天 19:00
-//	19:00–24:00 → 次日 08:00
-//
-// 直接停在恢复整点而不是加宽限：码级额度是整点恢复的确定事件，加宽限只会白白少用几分钟。
-// band 只用于日志。
+// cursorQuotaKeyRecoveryUntil 返回「此刻额度见底」的停调终点。
+// 2026-11-14 用户裁定：不再假设上游在 08:00/19:00 刷新；固定停 5 分钟
+// （= quotaKeyReconcileInterval，与 reconciler 周期、快照新鲜窗口一致），
+// 下一轮 reconciler 刷新快照后：额度已恢复则由 ClearStopsUnderRecoveredKey 放行，
+// 仍见底则续停 5 分钟。
 func cursorQuotaKeyRecoveryUntil(now time.Time) (until time.Time, band string) {
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	morning := dayStart.Add(cursorQuotaKeyResetHourMorning * time.Hour)
-	evening := dayStart.Add(cursorQuotaKeyResetHourEvening * time.Hour)
-
-	switch {
-	case now.Before(morning):
-		return morning, "before-08:00"
-	case now.Before(evening):
-		return evening, "before-19:00"
-	default:
-		return morning.AddDate(0, 0, 1), "after-19:00"
-	}
+	return now.Add(quotaKeyReconcileInterval), "rolling-5m"
 }
 
 // quotaKeyAccountStopSink 是"码级停调"所需的窄面（实现为 *QuotaKeyService）。
@@ -179,7 +162,7 @@ func (r *QuotaKeyReconciler) sweepQuotaKeyLevelStops(ctx context.Context) {
 		if snapshot.CheckedAt == nil || now.Sub(*snapshot.CheckedAt) > cursorSupplySourceUsageFreshnessWindow {
 			continue // 快照过期：不基于旧数据动账号
 		}
-		if (*snapshot.Total - *snapshot.Used) < cursorQuotaKeyRemainingFloor {
+		if QuotaKeyUsageExhausted(snapshot) {
 			until, band := cursorQuotaKeyRecoveryUntil(now)
 			n, serr := r.accountStopSink.StopAccountsUnderExhaustedKey(ctx, qk.ID, until)
 			if serr != nil {

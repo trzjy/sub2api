@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
@@ -4110,4 +4111,127 @@ func TestKnCyRotateCredentials_DuplicateCodeAPIKey(t *testing.T) {
 	t.Cleanup(func() { quotaKeyTestCleanup(t, client, qk.ID) })
 	_, err = svc.RotateCredentials(context.Background(), qk.ID, newPlain)
 	require.ErrorIs(t, err, ErrQuotaKeyDuplicateCode)
+}
+
+// ---------------------------------------------------------------------------
+// KNCY-E：激活码额度耗尽判定改用统一函数后的定向测试（派发单 KNCY-E）。
+// ---------------------------------------------------------------------------
+
+// TestQuotaKeySourceBlockReason 覆盖派发单 KNCY-E 的新增用例：USD 口径（kn_cy）按「今日剩余」
+// 判定（today_remaining 折算成分后低于 0.5 USD 即耗尽），份额制沿用算术 remaining 下限
+// （行为不变）。既有 nil/HasSnapshot/QueryFailed 早退逻辑逐字保留。
+func TestQuotaKeySourceBlockReason(t *testing.T) {
+	f64 := func(v float64) *float64 { return &v }
+	i64 := func(v int) *int { return &v }
+
+	cases := []struct {
+		name  string
+		usage *QuotaKeyUsageProjection
+		want  string
+	}{
+		{
+			name: "usd today_remaining=0.48 折算 48 分 < 50 → 耗尽",
+			usage: &QuotaKeyUsageProjection{
+				HasSnapshot:    true,
+				RemainingUnit:  "usd",
+				TodayRemaining: f64(0.48),
+			},
+			want: QuotaKeySourceBlockExhausted,
+		},
+		{
+			name: "usd today_remaining=0.50 折算 50 分 == 下限 → 可用",
+			usage: &QuotaKeyUsageProjection{
+				HasSnapshot:    true,
+				RemainingUnit:  "usd",
+				TodayRemaining: f64(0.50),
+			},
+			want: "",
+		},
+		{
+			name: "份额制 remaining=9 低于下限 10 → 耗尽",
+			usage: &QuotaKeyUsageProjection{
+				HasSnapshot: true,
+				Remaining:   i64(9),
+			},
+			want: QuotaKeySourceBlockExhausted,
+		},
+		{
+			name: "份额制 remaining=10 等于下限 → 可用",
+			usage: &QuotaKeyUsageProjection{
+				HasSnapshot: true,
+				Remaining:   i64(10),
+			},
+			want: "",
+		},
+		{
+			name:  "nil 投影 → 可用",
+			usage: nil,
+			want:  "",
+		},
+		{
+			name: "查询失败 QueryFailed → key_invalid（而非耗尽判定）",
+			usage: &QuotaKeyUsageProjection{
+				HasSnapshot: true,
+				QueryFailed: true,
+			},
+			want: QuotaKeySourceBlockKeyInvalid,
+		},
+		{
+			name: "usd 但今日剩余缺失 → 退回份额制下限（remaining 缺失 → 可用）",
+			usage: &QuotaKeyUsageProjection{
+				HasSnapshot:   true,
+				RemainingUnit: "usd",
+			},
+			want: "",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := QuotaKeySourceBlockReason(c.usage)
+			require.Equal(t, c.want, got)
+		})
+	}
+}
+
+// TestCursorQuotaKeyPullBlocked 覆盖派发单 KNCY-E 第二处改动：改用 QuotaKeyUsageExhausted
+// 统一判定（USD 看今日剩余、份额制看算术剩余）。失败关闭条件（解析失败 / ErrorCode 非空 /
+// Total/Used/CheckedAt 任一为 nil）逐字不变。
+func TestCursorQuotaKeyPullBlocked(t *testing.T) {
+	now := time.Now()
+	raw := func(body string) json.RawMessage { return json.RawMessage(body) }
+
+	cases := []struct {
+		name string
+		doc  string
+		want bool
+	}{
+		{
+			name: "usd_cent 今日剩余 48 分 → 耗尽封停",
+			doc:  `{"total":29048,"used":0,"today_remaining_cent":48,"unit":"usd_cent","checked_at":"2026-11-14T00:00:00Z"}`,
+			want: true,
+		},
+		{
+			name: "usd_cent 今日剩余 50 分 == 下限 → 不封停",
+			doc:  `{"total":29048,"used":0,"today_remaining_cent":50,"unit":"usd_cent","checked_at":"2026-11-14T00:00:00Z"}`,
+			want: false,
+		},
+		{
+			name: "份额制 remaining=9 → 耗尽封停",
+			doc:  `{"total":9,"used":0,"checked_at":"2026-11-14T00:00:00Z"}`,
+			want: true,
+		},
+		{
+			name: "份额制 remaining=10 → 不封停",
+			doc:  `{"total":10,"used":0,"checked_at":"2026-11-14T00:00:00Z"}`,
+			want: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := cursorQuotaKeyPullBlocked(raw(c.doc), now)
+			require.Equal(t, c.want, got)
+		})
+	}
 }

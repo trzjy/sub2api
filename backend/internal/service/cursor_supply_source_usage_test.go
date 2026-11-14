@@ -471,6 +471,56 @@ func TestCursorSupplyAvailability_SourceRecoveryDoesNotClearAccountTempPause(t *
 	require.False(t, account.IsSchedulable(), "来源恢复不得清除账号自身临停冷却")
 }
 
+// TestCursorSupplySource_USDCentExhaustion 钉死「usd_cent 快照按今日剩余（0.5 USD 下限）统一
+// 判定」：来源门规则⑨现在调用 QuotaKeyUsageExhausted，USD 计量下看 today_remaining_cent 而非
+// total−used。低于 50 分（含 48）否决，等于/高于 50 分（含 50）放行。
+func TestCursorSupplySource_USDCentExhaustion(t *testing.T) {
+	const qkID int64 = 42
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	prevNow := cursorSupplySourceUsageNow
+	cursorSupplySourceUsageNow = func() time.Time { return now }
+	t.Cleanup(func() { cursorSupplySourceUsageNow = prevNow })
+
+	makeUSD := func(todayRemainingCent int) []byte {
+		// total/used 必须齐全，否则会先触发规则⑧（缺失 → quotaKeyUsageIncomplete）
+		// 而无法落到规则⑨的 usd_cent 判定分支。
+		return []byte(fmt.Sprintf(
+			`{"unit":"usd_cent","total":1000,"used":100,"today_remaining_cent":%d,"status_code":200,"checked_at":%q,"error_code":""}`,
+			todayRemainingCent, now.Add(-time.Minute).Format(time.RFC3339),
+		))
+	}
+
+	t.Run("today remaining 48 cents vetoes as exhausted", func(t *testing.T) {
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses:  map[int64]string{qkID: domain.QuotaKeyStatusActive},
+			snapshots: map[int64][]byte{qkID: makeUSD(48)},
+		})
+		reason, err := cursorSupplySourceAvailabilityVetoReason(context.Background(), cursorSourceTestAccount(qkID))
+		require.NoError(t, err)
+		require.Equal(t, quotaKeyUsageExhausted, reason, "今日剩余 48 分（<0.5 USD）必须否决")
+	})
+
+	t.Run("today remaining 50 cents passes", func(t *testing.T) {
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses:  map[int64]string{qkID: domain.QuotaKeyStatusActive},
+			snapshots: map[int64][]byte{qkID: makeUSD(50)},
+		})
+		reason, err := cursorSupplySourceAvailabilityVetoReason(context.Background(), cursorSourceTestAccount(qkID))
+		require.NoError(t, err)
+		require.Empty(t, reason, "今日剩余等于下限 50 分（0.5 USD）放行")
+	})
+
+	t.Run("today remaining 51 cents passes", func(t *testing.T) {
+		installCursorQuotaKeySourceForTest(t, cursorQuotaKeySourceStub{
+			statuses:  map[int64]string{qkID: domain.QuotaKeyStatusActive},
+			snapshots: map[int64][]byte{qkID: makeUSD(51)},
+		})
+		reason, err := cursorSupplySourceAvailabilityVetoReason(context.Background(), cursorSourceTestAccount(qkID))
+		require.NoError(t, err)
+		require.Empty(t, reason, "今日剩余高于下限 51 分放行")
+	})
+}
+
 // TestCursorWaterLevelConsumesSameSourceGate 钉死「水位与调度消费同一来源门」：来源耗尽的
 // 账号在水位计数路径上不计入（与调度候选粗筛走同一 cursorSupplySourceAvailabilityVetoReason
 // 谓词），来源未被否决的同一账号则计入——两路径共享唯一来源门，无第二实现。

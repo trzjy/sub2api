@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,4 +103,147 @@ func mustCreateKeyLevelStoppedAccount(t *testing.T, client *ent.Client, quotaKey
 		Save(context.Background())
 	require.NoError(t, err)
 	return acc
+}
+
+// ---------------------------------------------------------------------------
+// KNCY-D（2026-11-14 用户裁定）：码级停调改为「5 分钟重判」+ 统一耗尽判定。
+//
+// 旧实现把停调终点写死在 08:00 / 19:00（对 kn_cy 的刷新点无依据），且判定用
+// (*Total - *Used) < cursorQuotaKeyRemainingFloor（对 kn_cy 的 usd_cent 口径恒不触发）。
+// 本组用例验证：耗尽判定改走 QuotaKeyUsageExhausted(snapshot)；停调终点改为 now+5min
+// （rolling-5m），下一轮快照刷新后再判定放行/续停。
+// ---------------------------------------------------------------------------
+
+// recordingKeyLevelStopSink 包裹真实 *QuotaKeyService（落库写入 reason/until），
+// 同时记录 StopAccountsUnderExhaustedKey / ClearStopsUnderRecoveredKey 的调用，
+// 便于断言「是否新增停调」「是否执行恢复清除」以及停调终点。
+type recordingKeyLevelStopSink struct {
+	inner       quotaKeyAccountStopSink
+	stopCalls   int
+	stopUntil   time.Time
+	stopQuotaID int64
+	clearCalls  int
+}
+
+func (s *recordingKeyLevelStopSink) StopAccountsUnderExhaustedKey(ctx context.Context, quotaKeyID int64, until time.Time) (int64, error) {
+	s.stopCalls++
+	s.stopQuotaID = quotaKeyID
+	s.stopUntil = until
+	return s.inner.StopAccountsUnderExhaustedKey(ctx, quotaKeyID, until)
+}
+
+func (s *recordingKeyLevelStopSink) ClearStopsUnderRecoveredKey(ctx context.Context, quotaKeyID int64) (int64, error) {
+	s.clearCalls++
+	return s.inner.ClearStopsUnderRecoveredKey(ctx, quotaKeyID)
+}
+
+// cleanupQuotaKey 清掉测试码及其名下账号，避免污染共享测试库。
+func cleanupQuotaKey(t *testing.T, client *ent.Client, id int64) {
+	t.Helper()
+	_, _ = client.Account.Delete().Where(account.QuotaKeyID(id)).Exec(context.Background())
+	_ = client.QuotaKey.DeleteOneID(id).Exec(context.Background())
+}
+
+// buildUsdCentSnapshot 拼一份新鲜（10s 内）、观测成功、指定今日剩余的 usd_cent 快照。
+//
+// 同时带 total/used（非 nil）以满足 sweepQuotaKeyLevelStops 不变的「字段完整」前置
+// （Total == nil || Used == nil 则不下结论）。usd_cent 口径的耗尽判定走 TodayRemainingCent，
+// 与 total/used 取值无关。
+func buildUsdCentSnapshot(todayRemainingCent int) []byte {
+	checkedAt := time.Now().UTC().Add(-10 * time.Second).Format(time.RFC3339)
+	return []byte(fmt.Sprintf(`{"unit":"usd_cent","total":1000,"used":0,"today_remaining_cent":%d,"checked_at":%q}`, todayRemainingCent, checkedAt))
+}
+
+// TestCursorQuotaKeyRecoveryUntil_Rolling5m：停调终点不再依赖 08:00/19:00，恒为 now+5min、
+// band "rolling-5m"（覆盖原 08:00 前/08:00–19:00/19:00 后三个分支）。
+func TestCursorQuotaKeyRecoveryUntil_Rolling5m(t *testing.T) {
+	for _, now := range []time.Time{
+		time.Date(2026, 11, 14, 3, 17, 0, 0, time.UTC),  // 原 before-08:00 分支
+		time.Date(2026, 11, 14, 11, 0, 0, 0, time.UTC),  // 原 before-19:00 分支
+		time.Date(2026, 11, 14, 21, 30, 0, 0, time.UTC), // 原 after-19:00 分支
+	} {
+		until, band := cursorQuotaKeyRecoveryUntil(now)
+		require.Equal(t, now.Add(quotaKeyReconcileInterval), until, "until must be now+5m at %s", now)
+		require.Equal(t, "rolling-5m", band, "band must be rolling-5m at %s", now)
+	}
+}
+
+// TestSweepQuotaKeyLevelStops_UsdCentExhausted_StopsFor5m：
+// unit=usd_cent、today_remaining_cent=48（< 50 下限）→ 判定耗尽 → 新增停调，
+// 停调终点 = now+5min，写入 reason 前缀 "cursor quota key exhausted"。
+func TestSweepQuotaKeyLevelStops_UsdCentExhausted_StopsFor5m(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	t.Cleanup(func() { cleanupQuotaKey(t, client, qk.ID) })
+
+	// 一个尚未被停的账号（until/reason 均为 nil），应被码级停调命中。
+	mustCreateAccounts(t, client, qk.ID, 1)
+
+	qk.UsageSnapshot = buildUsdCentSnapshot(48)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[qk.ID] = qk
+
+	svc := &QuotaKeyService{client: client}
+	sink := &recordingKeyLevelStopSink{inner: svc}
+	r := &QuotaKeyReconciler{repo: repo}
+	r.SetAccountStopSink(sink)
+
+	r.sweepQuotaKeyLevelStops(ctx)
+
+	require.Equal(t, 1, sink.stopCalls, "exhausted key must trigger a stop")
+	require.Equal(t, 0, sink.clearCalls, "no recovery clear when still exhausted")
+	require.Equal(t, qk.ID, sink.stopQuotaID)
+
+	// 停调终点 = now + quotaKeyReconcileInterval（5min），按 Unix 秒比对以忽略时区。
+	expectedUntil := time.Now().Add(quotaKeyReconcileInterval)
+	require.InDelta(t, expectedUntil.Unix(), sink.stopUntil.Unix(), 3,
+		"until must equal now+5min, got diff %ds", expectedUntil.Unix()-sink.stopUntil.Unix())
+
+	// reason 前缀 + until 已落库。
+	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).All(ctx)
+	require.NoError(t, err)
+	require.Len(t, accs, 1)
+	require.NotNil(t, accs[0].TempUnschedulableReason, "stop reason must be written")
+	require.True(t, strings.HasPrefix(*accs[0].TempUnschedulableReason, cursorQuotaKeyExhaustedReasonPrefix),
+		"reason must start with %q, got %q", cursorQuotaKeyExhaustedReasonPrefix, *accs[0].TempUnschedulableReason)
+	require.NotNil(t, accs[0].TempUnschedulableUntil, "stop until must be written")
+}
+
+// TestSweepQuotaKeyLevelStops_UsdCentRecovered_ClearsStops：
+// unit=usd_cent、today_remaining_cent=50（>= 50 下限）→ 判定未耗尽 → 不新增停调，
+// 且对名下既有的码级停调执行恢复清除。
+func TestSweepQuotaKeyLevelStops_UsdCentRecovered_ClearsStops(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	t.Cleanup(func() { cleanupQuotaKey(t, client, qk.ID) })
+
+	// 先放一个被码级停调的账号（将来到期），用于验证"恢复清除"。
+	futureUntil := time.Now().Add(1 * time.Hour)
+	futureReason := fmt.Sprintf("%s until %s", cursorQuotaKeyExhaustedReasonPrefix, futureUntil.Format("01-02 15:04"))
+	mustCreateKeyLevelStoppedAccount(t, client, qk.ID, futureUntil, futureReason)
+
+	qk.UsageSnapshot = buildUsdCentSnapshot(50)
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[qk.ID] = qk
+
+	svc := &QuotaKeyService{client: client}
+	sink := &recordingKeyLevelStopSink{inner: svc}
+	r := &QuotaKeyReconciler{repo: repo}
+	r.SetAccountStopSink(sink)
+
+	r.sweepQuotaKeyLevelStops(ctx)
+
+	require.Equal(t, 0, sink.stopCalls, "recovered key must NOT add a new stop")
+	require.Equal(t, 1, sink.clearCalls, "recovered key must trigger recovery clear")
+
+	// 码级停调被按前缀精确清除。
+	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).All(ctx)
+	require.NoError(t, err)
+	require.Len(t, accs, 1)
+	require.Nil(t, accs[0].TempUnschedulableUntil, "key-level stop must be cleared")
+	require.Empty(t, accs[0].TempUnschedulableReason, "key-level stop reason must be cleared")
 }

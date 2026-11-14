@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -653,6 +654,10 @@ func buildCursorUsageSnapshot(previous []byte, success *lookupKeyInfo, observedA
 	if doc.ErrorCode == "" && success != nil {
 		total, used, status := success.MaxQuota, success.UsedQuota, success.StatusCode
 		doc.Total, doc.Used, doc.StatusCode = &total, &used, &status
+		// 今日剩余与计量单位仅成功分支写入；失败分支与 shareai 路径保持 nil/空，
+		// 由解析侧按 "count"（份额制）处理。
+		doc.TodayRemainingCent = success.TodayRemainingCent
+		doc.Unit = success.Unit
 		checked := attempted
 		doc.CheckedAt = &checked
 	}
@@ -705,6 +710,10 @@ type lookupKeyInfo struct {
 	DeviceMaxCount int
 	Mode           int
 	ExpiredAt      *string
+	// TodayRemainingCent 是今日剩余，单位「分」(USD*100)；nil = 上游未给。
+	TodayRemainingCent *int
+	// Unit 是额度计量单位："usd_cent"（kn_cy）| ""（shareai 等份额制）。
+	Unit string
 }
 
 // lookupQuota 向 shareai lookup 端点发起查询并解析 key_info（唯一实现，不发第二套请求）。
@@ -785,11 +794,11 @@ func (s *CursorAutoEntryService) lookupQuota(ctx context.Context, activationCode
 // 列、唯一到期列，没有第二套格式）。
 //
 // kn-cy 订阅用量返回 TotalRemaining / TodayRemaining / ExpiresAt / Unlimited：
-//   - 余额：以 TotalRemaining（整体剩余余额）作为观测"总额"，Used 记为 0 ⇒ 剩余 = 总额 − 已用
-//     = TotalRemaining。这样既有的码级停调（sweepQuotaKeyLevelStops，剩余 < 下限才停）在 kn-cy
-//     余额耗尽（TotalRemaining<=0）时照常触发，无需新增任何停调原因；取 TotalRemaining 而非
-//     TodayRemaining，因为日额度上限每天重置，用它判定会让"当日子额度见底但总余额充足"的码
-//     被误停。
+//   - 余额：同时写入 today_remaining_cent（今日剩余，判定用）与 total_remaining（总量，展示用）。
+//     二者都转成「分」(USD*100) 整数：MaxQuota = round(TotalRemaining*100)，
+//     TodayRemainingCent = round(TodayRemaining*100)；Used 记为 0 ⇒ 剩余 = 总额 − 已用。
+//     2026-11-14 实测总额卡的 today_remaining 恒等于 total_remaining，不存在日额度误停；
+//     既有的码级停调（sweepQuotaKeyLevelStops）改用 today_remaining_cent 判定今日是否耗尽。
 //   - 到期：ExpiresAt（Unix 秒）经既有的 parseKnCyExpiresAt 解析后写入 info.ExpiredAt（RFC3339），
 //     交给既有的 adoptUpstreamExpiry 判定是否写 quota_keys.expires_at（未带 / 0 / 负 ⇒ 保持原值）。
 //     这里把 StatusCode 置 1（"使用中/权威"），使 adoptUpstreamExpiry 始终采纳上游给出的固定
@@ -806,16 +815,18 @@ func (s *CursorAutoEntryService) lookupKnCyUsage(ctx context.Context, key string
 		// 绝不把错误回显成余额 0（缺失 ≠ 0）。
 		return nil, err
 	}
-	info := &lookupKeyInfo{
-		Group:      "kn-cy",
-		StatusCode: 1, // 已激活/权威：expires_at 始终采纳（非"未使用"滚动态）。
-		MaxQuota:   0,
-		UsedQuota:  0,
-	}
-	// 余额：整体剩余余额作为上限，Used 置 0 ⇒ 剩余 = TotalRemaining。
+	// 余额：整体剩余余额作为上限（单位分，USD*100），Used 置 0 ⇒ 剩余 = TotalRemaining。
 	// Unlimited 也以 TotalRemaining 承载（上游不限量时该值稳定为大值，不会触发耗尽停调）。
-	if usage.TotalRemaining > 0 {
-		info.MaxQuota = int(usage.TotalRemaining)
+	// 耗尽（TotalRemaining==0）也必须写 0，使"今日额度已用尽"可见，故不再用「>0 才写」。
+	maxQuota := int(math.Round(usage.TotalRemaining * 100))
+	todayCent := int(math.Round(usage.TodayRemaining * 100))
+	info := &lookupKeyInfo{
+		Group:              "kn-cy",
+		StatusCode:         1, // 已激活/权威：expires_at 始终采纳（非"未使用"滚动态）。
+		MaxQuota:           maxQuota,
+		UsedQuota:          0,
+		TodayRemainingCent: &todayCent,
+		Unit:               "usd_cent",
 	}
 	// 到期：仅当上游给出合法到期时间戳时落地（0/负 ⇒ nil，由既有的 parseKeyExpiresAt 保持原值）。
 	if exp := parseKnCyExpiresAt(usage.ExpiresAt); exp != nil {

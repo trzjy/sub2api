@@ -730,6 +730,13 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			upstreamMsg,
 			truncateForLog(responseBody, 1024),
 		)
+		// KNCY-F：cursor 平台上游「额度不足」是「今天花完了」而非「账号坏了」，
+		// 只做 5 分钟临时停调、额度刷新后由下一轮调度自然恢复，绝不 SetError 永久摘除。
+		if isCursorUpstreamQuotaInsufficient403(account, upstreamMsg, responseBody) {
+			s.handleCursorUpstreamQuotaInsufficient(ctx, account, upstreamMsg)
+			shouldDisable = true // 本次请求换号，账号本身不判死
+			break
+		}
 		shouldDisable = s.handle403(ctx, account, upstreamMsg, responseBody)
 	case 429:
 		// 证据留存：403 有原文日志，429 之前没有，导致免费档这类报错只能靠人工
@@ -1250,6 +1257,42 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 	)
 	s.handleAuthError(ctx, account, msg)
 	return true
+}
+
+const (
+	cursorUpstreamQuotaInsufficientReason   = "cursor upstream quota insufficient"
+	cursorUpstreamQuotaInsufficientCooldown = 5 * time.Minute
+)
+
+// isCursorUpstreamQuotaInsufficient403 只认 cursor 平台 + 上游明确的「额度不足」措辞。
+// 实测原文（2026-11-14，kn-cy/New API）："用户额度不足, 剩余额度: ＄0.000000"。
+// 其它 403（账号封禁、权限不足、CF 拦截）一律不命中，保持既有处置。
+func isCursorUpstreamQuotaInsufficient403(account *Account, upstreamMsg string, body []byte) bool {
+	if account == nil || account.Platform != PlatformCursor {
+		return false
+	}
+	hay := upstreamMsg + " " + string(body)
+	return strings.Contains(hay, "额度不足")
+}
+
+// handleCursorUpstreamQuotaInsufficient 把「上游余额不足」写成 5 分钟临时停调，
+// 不 SetError、不清 schedulable：额度刷新后由下一轮调度自然恢复。
+func (s *RateLimitService) handleCursorUpstreamQuotaInsufficient(
+	ctx context.Context, account *Account, upstreamMsg string,
+) {
+	until := time.Now().UTC().Add(cursorUpstreamQuotaInsufficientCooldown)
+	account.TempUnschedulableUntil = &until
+	account.TempUnschedulableReason = cursorUpstreamQuotaInsufficientReason
+	if s.accountRepo == nil {
+		return
+	}
+	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, cursorUpstreamQuotaInsufficientReason); err != nil {
+		slog.Warn("cursor_quota_insufficient_temp_unsched_failed",
+			"account_id", account.ID, "error", err)
+		return
+	}
+	slog.Info("cursor_quota_insufficient_temp_unschedulable",
+		"account_id", account.ID, "until", until, "msg", truncateForLog([]byte(upstreamMsg), 200))
 }
 
 func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte) (shouldDisable bool) {
