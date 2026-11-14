@@ -1335,9 +1335,10 @@ func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 			//     发 {"input":"<自由文本>"}，回程 extractCustomToolCallInput 从中抽回纯文本
 			//     （chatcompletions_responses_bridge.go 的 extractCustomToolCallInput）。
 			//     没有这个壳，模型可能直接发裸文本或发别的形状，抽不出纯文本。
-			//   - namespace 内 custom 由 Responses 摊平而来，本来就没有 input_schema
-			//     （Responses 的 custom 类型无 parameters），按「无 schema」原样下发，
-			//     回程走 cursorToolDeclaredWithoutSchema 原样交付。
+			//   - namespace 内 custom 由 Responses 摊平而来（Responses 的 custom 类型
+			//     本身无 parameters），同样补同一个降级壳（2026-11-14 根因修复），
+			//     但打 Custom 标记；下游据此写 f3，回程仍按 IsCustom 判成
+			//     custom_tool_call（判定不依赖 Parameters 是否存在）。
 			// 顶层 custom 不是本阶段的改动对象，保持既有形态（降级壳 + Custom=false）。
 			//
 			// 区分方式：flat.NamespaceTools[摊平名].IsCustom 为真即为 namespace 内 custom
@@ -1349,14 +1350,20 @@ func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 			// （NamespacedToolName.IsCustom），两处各读一张表迟早会不一致
 			// （2026-11-12 生产实证：交付侧与登记侧结论相反 → 续轮 result_type_mismatch）。
 			if nsOrigin, ok := flat.NamespaceTools[tool.Name]; ok && nsOrigin.IsCustom {
-				// namespace 内 custom 子工具：无 schema，打 Custom 标记，下游不写 f3/f6。
+				// namespace 内 custom 子工具：同样带 {"input":string} 降级壳。
+				//
+				// 2026-11-14 根因修复：原实现 Parameters 为 nil（不给 schema），上游模型没有
+				// 形状约束，自行发明 {"code":"..."} 等包装；回程 extractCustomToolCallInput
+				// 只认 input 键，抽不出来就把整个 JSON 交给客户端，codex 的 exec 要求裸
+				// JavaScript，直接 SyntaxError（生产实测：外审/评审全链路拿不到 shell）。
+				// 顶层 custom 一直带这个壳所以从没出过问题，本分支漏了同一步。
 				out = append(out, ChatTool{
 					Type:   "function",
 					Custom: true,
 					Function: &ChatFunction{
 						Name:        tool.Name,
 						Description: tool.Description,
-						Parameters:  nil,
+						Parameters:  json.RawMessage(customToolInputSchema),
 					},
 				})
 				continue

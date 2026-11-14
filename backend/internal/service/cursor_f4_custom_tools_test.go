@@ -11,7 +11,8 @@ package service
 //
 // 本文件用 codex 真实抓包形状过一遍 请求→f4 与 回程 两条链路，并钉住：
 //   - f4 里 functions__exec 必须出现（改造前没有——已实证）；
-//   - 它的 McpToolDefinition 不带 f3（input_schema）/ f6（旧 input_schema_json）；
+//   - 它的 McpToolDefinition 带 f3（{"input":string} 降级壳，2026-11-14 根因修复），
+//     不写 f6（旧 input_schema_json 字符串）；
 //   - 同 namespace 内 function 子工具（functions__wait）依旧带 f3（schema 保留）；
 //   - 回程把 functions__exec 判成 custom_tool_call + 裸名 exec，自由文本参数原样交付；
 //   - namespace 摊平名与顶层工具撞名时必须报错（歧义不可消除）。
@@ -67,7 +68,8 @@ func TestCursorF4Custom_RealCodexShape(t *testing.T) {
 	}
 	require.Contains(t, byName, "functions__exec", "functions__exec 必须出现在转换结果里（改造前被丢弃）")
 	require.True(t, byName["functions__exec"].Custom, "functions__exec 是 custom 子工具，必须打 Custom 标记")
-	require.Empty(t, byName["functions__exec"].Function.Parameters, "custom 子工具不携带 schema")
+	require.JSONEq(t, apicompat.CustomToolInputSchema, string(byName["functions__exec"].Function.Parameters),
+		"custom 子工具必须带 {\"input\":string} 降级壳（2026-11-14 根因修复）")
 
 	// 2) 编码出 f4 并逐项解析 McpToolDefinition。
 	body, err := cursorConvertRequest(chatReq, "codex-x")
@@ -91,13 +93,15 @@ func TestCursorF4Custom_RealCodexShape(t *testing.T) {
 		defByName[name] = fields
 	}
 
-	// 3) functions__exec 的 McpToolDefinition 不带 f3（input_schema）/ f6（旧 input_schema_json）。
+	// 3) functions__exec 的 McpToolDefinition 带 f3（降级壳 schema），不带 f6（旧字段）。
 	execDef, ok := defByName["functions__exec"]
 	require.True(t, ok, "f4 里必须有 functions__exec")
 	_, hasF3 := cursorFindField(execDef, cursorFldMcpToolDefInputSchemaValue)
 	_, hasF6 := cursorFindField(execDef, cursorFldMcpToolDefInputSchemaLegacy)
-	assert.False(t, hasF3, "custom 工具（functions__exec）的 f4 不得写 f3 input_schema")
+	assert.True(t, hasF3, "custom 工具（functions__exec）的 f4 必须写 f3 input_schema：没有形状约束时模型会自行发明 {\"code\":...} 包装")
 	assert.False(t, hasF6, "custom 工具（functions__exec）的 f4 不得写 f6")
+	assert.JSONEq(t, apicompat.CustomToolInputSchema, cursorTestRestoreF3Schema(t, execDef),
+		"f3 必须是 {\"input\":string} 降级壳")
 	// 身份字段仍齐全（f1 name / f2 description / f4 provider / f5 tool_name）。
 	assert.Equal(t, "functions__exec", cursorTestFieldString(execDef, cursorFldMcpToolDefName))
 	assert.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(execDef, cursorFldMcpToolDefProvider))
@@ -118,9 +122,10 @@ func TestCursorF4Custom_RealCodexShape(t *testing.T) {
 	}
 }
 
-// TestCursorF4Custom_NamespaceCustomNoSchema 单独钉住：namespace 内 custom 子工具的
-// f4 形态——McpToolDefinition 不带 f3 / f6。用最简形状隔离验证。
-func TestCursorF4Custom_NamespaceCustomNoSchema(t *testing.T) {
+// TestCursorF4Custom_NamespaceCustomGetsDowngradeShell 单独钉住：namespace 内 custom
+// 子工具的 f4 形态——McpToolDefinition 带 f3（{"input":string} 降级壳）、不写 f6。
+// 用最简形状隔离验证（2026-11-14 根因修复前这里断言「不带 f3」，正是崩因）。
+func TestCursorF4Custom_NamespaceCustomGetsDowngradeShell(t *testing.T) {
 	req := &apicompat.ResponsesRequest{
 		Model: "codex-x",
 		Input: json.RawMessage(`[
@@ -142,9 +147,9 @@ func TestCursorF4Custom_NamespaceCustomNoSchema(t *testing.T) {
 	require.Len(t, defs, 1)
 	fields, e := cursorDecodeProtobuf(defs[0])
 	require.NoError(t, e)
-	_, hasF3 := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
 	_, hasF6 := cursorFindField(fields, cursorFldMcpToolDefInputSchemaLegacy)
-	assert.False(t, hasF3, "namespace custom 子工具不得写 f3")
+	assert.JSONEq(t, apicompat.CustomToolInputSchema, cursorTestRestoreF3Schema(t, fields),
+		"namespace custom 子工具必须写 f3 降级壳，否则模型自行发明包装、回程抽不出裸文本")
 	assert.False(t, hasF6, "namespace custom 子工具不得写 f6")
 }
 
@@ -198,16 +203,26 @@ func TestCursorF4Custom_ReturnPathDeliversBareName(t *testing.T) {
 	assert.Equal(t, "function_call", waitDelivered.Kind)
 	assert.Equal(t, "wait", waitDelivered.Name)
 
-	// 2) functions__exec 在 f4 里无 schema → cursorToolDeclaredWithoutSchema 判 true，
-	//    自由文本参数原样交付（不被判"参数残缺"）。
+	// 2) functions__exec 在 f4 里带的是本站合成的 {"input":string} 降级壳
+	//    （2026-11-14 根因修复）：它不是客户端真实参数契约，required 不参与校验，
+	//    自由文本原样保留在 input 里、不判 missing_required。
 	chatReq, err := apicompat.ResponsesToChatCompletionsRequest(respReq)
 	require.NoError(t, err)
 	defs := cursorTestDeclaredToolDefs(t, chatReq)
-	assert.True(t, cursorToolDeclaredWithoutSchema(defs, "functions__exec"),
-		"functions__exec 已声明但无 schema：自由文本参数必须原样交付")
-	// function 子工具有 schema，不应被判成"无 schema"。
+	assert.False(t, cursorToolDeclaredWithoutSchema(defs, "functions__exec"),
+		"修复后 functions__exec 带降级壳，不再走「无 schema」原样交付分支")
+	idx := cursorToolSchemaIndex(defs)
+	require.Contains(t, idx, "functions__exec")
+	assert.True(t, cursorIsSyntheticDowngradeShell(idx["functions__exec"]),
+		"functions__exec 的 f3 必须是合成降级壳，不得据此判上游参数残缺")
+	retyped, err := cursorRetypeArgsByToolDefs("call_exec", "functions__exec", `{"input":"run dir"}`, defs, nil)
+	require.NoError(t, err, "合成降级壳不得触发 missing_required")
+	assert.JSONEq(t, `{"input":"run dir"}`, retyped, "自由文本必须原样保留在 input 壳里")
+	// function 子工具有客户端真实 schema，不应被判成"无 schema"或合成壳。
 	assert.False(t, cursorToolDeclaredWithoutSchema(defs, "functions__wait"),
 		"functions__wait 有 schema，不得被判成无 schema 自由文本工具")
+	assert.False(t, cursorIsSyntheticDowngradeShell(idx["functions__wait"]),
+		"functions__wait 是客户端真实 schema，不是本站合成壳")
 }
 
 // TestCursorF4Custom_FlattenCollisionErrors 钉住冲突语义：namespace 子工具摊平名与顶层

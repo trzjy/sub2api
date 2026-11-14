@@ -525,11 +525,33 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool, wireMap map[string]string, 
 		def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, t.Function.Description)
 		def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
 		def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, wireName)
-		// custom/freeform 工具（如 codex 的 exec）没有 schema：写了 input_schema
-		// 上游就会按 JSON 对象发参，与自由文本语义冲突（模型期望一段自由文本 JS）。
-		// 这种工具按「纯文本自由工具」下发——不写 f3（input_schema），也不写 f6
-		// （旧 input_schema_json 字符串），仅保留 f1/f2/f4/f5 的身份字段。
+		// custom/freeform 工具（如 codex 的 exec）：有降级壳 schema 时必须写进 f3。
+		//
+		// 2026-11-14 根因修复：原实现一律不写 f3，上游模型没有形状约束 →
+		// 自行发明 {"code":"..."} 包装 → 回程抽不出裸文本 → codex 的 exec 报
+		// SyntaxError（见 apicompat.responsesToolsToChatTools 同源注释）。
+		// 仍保留"schema 为空则不写 f3"的分支：客户端真的没给 schema 时，
+		// 硬写一个空 schema 反而会误导模型。
 		if t.Custom {
+			schema := ""
+			if t.Function != nil {
+				schema = string(t.Function.Parameters)
+			}
+			if strings.TrimSpace(schema) == "" || schema == "null" {
+				mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
+				continue
+			}
+			value := &structpb.Value{}
+			if err := protojson.Unmarshal([]byte(schema), value); err != nil {
+				skipped.note(cursorSkipToolSchemaInvalid)
+				continue
+			}
+			valBytes, err := proto.Marshal(value)
+			if err != nil {
+				skipped.note(cursorSkipToolSchemaInvalid)
+				continue
+			}
+			def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, valBytes)
 			mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
 			continue
 		}

@@ -39,9 +39,11 @@ func TestResponsesToChatCompletionsRequest_CustomToolBecomesFunctionTool(t *test
 //   - 顶层 custom 走 chat 桥降级，必须带 {"input":string} 降级壳。回程
 //     extractCustomToolCallInput 从 {"input":"<自由文本>"} 里抽回纯文本交给客户端
 //     （custom_tool_call 项的 input 字段）。没有这个壳，模型发别的形状就抽不出来。
-//   - namespace 内 custom 由 Responses 摊平而来，本来就没有 input_schema
-//     （Responses 的 custom 类型无 parameters），按「无 schema」原样下发，
-//     回程走 cursorToolDeclaredWithoutSchema 原样交付。
+//   - namespace 内 custom 由 Responses 摊平而来，Responses 的 custom 类型本来就没有
+//     input_schema；同样补 {"input":string} 降级壳（2026-11-14 根因修复：没有壳时
+//     模型自行发明 {"code":"..."}，回程抽不出裸文本 → codex 的 exec 报 SyntaxError）。
+//     它仍打 Custom 标记，下游据此把壳写进 f3；回程类型判定只看 IsCustom，
+//     不依赖 Parameters 是否存在。
 //
 // 顶层 custom 不是阶段 0 的改动对象：它当前在生产服役（codex 0.14x 的 exec）。
 // 统一两者形态的那次改动会让顶层 custom 的回程抽不出自由文本，**不许再发生**。
@@ -75,11 +77,12 @@ func TestResponsesToChatCompletionsRequest_TopLevelCustomKeepsDowngradeShell(t *
 	assert.JSONEq(t, customToolInputSchema, string(top.Function.Parameters),
 		"顶层 custom 必须保留 {\"input\":string} 降级壳，否则回程抽不出自由文本")
 
-	// namespace 内 custom：无 schema、打 Custom 标记。
+	// namespace 内 custom：同样带降级壳、打 Custom 标记（下游据此写 f3）。
 	ns, ok := byName["functions__run"]
 	require.True(t, ok, "namespace 内 custom 必须被摊平")
 	assert.True(t, ns.Custom, "namespace 内 custom 打 Custom 标记")
-	assert.Empty(t, ns.Function.Parameters, "namespace 内 custom 不携带 schema")
+	assert.JSONEq(t, customToolInputSchema, string(ns.Function.Parameters),
+		"namespace 内 custom 也必须带 {\"input\":string} 降级壳，否则模型自行发明包装、回程抽不出裸文本")
 
 	// namespace 内 function：schema 保留、不打 Custom 标记。
 	fn, ok := byName["functions__wait"]
@@ -622,7 +625,8 @@ func TestResponsesToChatCompletionsRequest_NamespaceToolFlattensChildren(t *test
 	compose, ok := byName["gmail__compose"]
 	require.True(t, ok, "custom 子工具必须被摊平（本阶段核心目标：不再被丢弃）")
 	assert.True(t, compose.Custom, "custom 子工具打 Custom 标记")
-	assert.Empty(t, compose.Function.Parameters, "custom 子工具无 schema")
+	assert.JSONEq(t, customToolInputSchema, string(compose.Function.Parameters),
+		"custom 子工具同样带 {\"input\":string} 降级壳（2026-11-14 根因修复）")
 }
 
 func TestResponsesToolsParsing_StringToolBecomesCustom(t *testing.T) {
