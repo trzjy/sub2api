@@ -894,15 +894,27 @@
         </div>
         <div>
           <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
-            {{ t('admin.quotaKeys.probe.used') }}
+            {{
+              probeIsUSD
+                ? t('admin.quotaKeys.probe.todayRemaining')
+                : t('admin.quotaKeys.probe.used')
+            }}
           </dt>
-          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.used }}</dd>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">
+            {{ probeIsUSD ? probeTodayRemainingText : probeResult.used }}
+          </dd>
         </div>
         <div>
           <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
-            {{ t('admin.quotaKeys.probe.max') }}
+            {{
+              probeIsUSD
+                ? t('admin.quotaKeys.probe.totalRemaining')
+                : t('admin.quotaKeys.probe.max')
+            }}
           </dt>
-          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.max }}</dd>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">
+            {{ probeIsUSD ? probeTotalRemainingText : probeResult.max }}
+          </dd>
         </div>
         <div>
           <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
@@ -1060,6 +1072,20 @@ const showProbeDialog = ref(false)
 const probing = ref(false)
 const probeResult = ref<ProbeQuotaResponse | null>(null)
 const probeError = ref('')
+// KNCY-O：探测弹窗「已用/总额度」按 usage 投影投影展示美元额度。
+// 当 usage.remaining_unit === 'usd' 时，分值（used/max）会被美元口径的
+// 今日剩余 / 总量剩余取代；其它情况（无 usage 或非 usd）逐字保持原分值展示。
+const probeIsUSD = computed(() => probeResult.value?.usage?.remaining_unit === 'usd')
+const probeTodayRemainingText = computed(() =>
+  formatUSD(probeResult.value?.usage?.today_remaining)
+)
+const probeTotalRemainingText = computed(() =>
+  formatUSD(probeResult.value?.usage?.total_remaining)
+)
+function formatUSD(v?: number | null): string {
+  if (v === undefined || v === null || !Number.isFinite(v)) return '—'
+  return t('admin.quotaKeys.probe.usdAmount', { amount: v.toFixed(2) })
+}
 const editing = ref<QuotaKey | null>(null)
 const deleting = ref<QuotaKey | null>(null)
 const detail = ref<QuotaKeyDetail | null>(null)
