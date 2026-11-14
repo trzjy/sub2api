@@ -50,6 +50,9 @@ _adapters_lock = asyncio.Lock()
 
 app = FastAPI(title="web-quota-worker")
 
+# finish 是同步 HTTP 调用，Go 侧对该请求的总超时是 45 秒；探测超时必须明显小于它。
+LOGIN_VERIFY_PROBE_TIMEOUT_SECONDS = 20
+
 
 class AdapterNotImplemented(Exception):
     """请求的上游适配器尚未实现（模块缺失或缺少 Adapter 类）。"""
@@ -406,6 +409,41 @@ async def get_adapter(provider: str) -> BaseAdapter:
         adapter = adapter_cls(make_context)
         _adapters[provider] = adapter
         return adapter
+
+
+async def _verify_credentials_usable(session, storage_state: str) -> bool:
+    """finish 阶段唯一的凭据可用性出口判定。
+
+    用候选凭据在**全新 context** 实跑一次适配器 probe：只有 ``status == "ok"``
+    才代表「保存下来的凭据真能取到数」。任何非 ok（``needs_interactive_auth`` /
+    ``auth_failed`` / ``error``）都视为登录未生效，失败关闭，绝不保存。
+
+    这是 finish 唯一的凭据出口判定——调用方据此决定是否保存：非 ok 时返回
+    409 ``login_not_effective``，且不关闭会话、不回传 storage_state，用户可继续
+    在面板里操作或换登录方式。
+    """
+    try:
+        adapter = await get_adapter(session.provider)
+    except AdapterNotImplemented:
+        # 适配器缺失 → 无法证明凭据可用，按失败关闭处理。
+        return False
+
+    req = ProbeRequest(
+        provider=session.provider,
+        storage_state=storage_state,
+        console_login_url=session.login_url,
+        success_url_prefix=session.success_url_prefix,
+        proxy_url=getattr(session, "proxy_url", ""),
+        timeout_seconds=LOGIN_VERIFY_PROBE_TIMEOUT_SECONDS,
+    )
+    try:
+        result = await asyncio.wait_for(
+            adapter.probe(req),
+            timeout=LOGIN_VERIFY_PROBE_TIMEOUT_SECONDS + 5,
+        )
+    except Exception:  # noqa: BLE001 - 任何异常都视为凭据不可用
+        return False
+    return result.status == "ok"
 
 
 @app.get("/healthz")
@@ -848,6 +886,17 @@ async def login_finish(session_id: str, request: Request):
     except Exception as exc:  # noqa: BLE001
         logger.warning("login status=storage_state_failed error=%s", type(exc).__name__)
         return JSONResponse(status_code=502, content={"error": "storage_state_failed"})
+
+    # 只凭 URL 判定会放过「看起来登上、实际未登录」的会话（2026-11-15 讯飞实例）：
+    # 保存的 storage_state 其实是未登录态，根路径 4 秒内都不校验登录，verify_effective
+    # 恒通过。这里用候选凭据在全新 context 实跑一次适配器 probe 作为最终出口判定。
+    # 非 ok 时不关闭会话、不回传 storage_state——用户可直接在面板继续操作或换登录方式。
+    if not await _verify_credentials_usable(session, storage_state):
+        logger.info("login provider=%s status=verify_failed reason=probe_not_ok", session.provider)
+        return JSONResponse(
+            status_code=409,
+            content={"status": "pending", "error": "login_not_effective"},
+        )
 
     label = ""
     try:

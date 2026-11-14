@@ -133,6 +133,7 @@ class LoginSession:
         success_url_prefix: str,
         login_url: str,
         prefer_login_mode: str = "",
+        proxy_url: str = "",
     ) -> None:
         self.id = session_id
         self.provider = provider
@@ -144,6 +145,8 @@ class LoginSession:
         # 「进来先落在哪个登录 Tab」是产品决策，不该让每个用户手动切一次。
         # 空串表示不干预，页面默认落哪就是哪。
         self.prefer_login_mode = (prefer_login_mode or "").strip().lower()
+        # finish 阶段的凭据可用性校验必须复用同一出口，否则绑了代理的账号会因直连被误判。
+        self.proxy_url = (proxy_url or "").strip()
         self.created_at = time.monotonic()
         self.last_touch = self.created_at
         self.closed = False
@@ -223,6 +226,7 @@ class LoginSessionRegistry:
             success_url_prefix=success_url_prefix,
             login_url=login_url,
             prefer_login_mode=login_mode,
+            proxy_url=proxy_url,
         )
 
         async with self._lock:

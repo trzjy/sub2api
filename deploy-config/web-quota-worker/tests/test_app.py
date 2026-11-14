@@ -220,3 +220,130 @@ def test_probe_unknown_provider_returns_400(client):
     )
     assert resp.status_code == 400
     assert "unknown provider" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# finish 阶段凭据可用性校验（实跑 probe）：WCQ-LV-2
+#
+# 根因（2026-11-15 讯飞星辰实测）：verify_effective 只访问根路径并等 1 秒，
+# 而根路径 4 秒内不校验登录，于是「看起来登上、实际未登录」的会话恒通过。
+# 修复：finish 保存前用候选凭据在全新 context 实跑适配器 probe，
+# status == "ok" 才保存；非 ok 返回 409 login_not_effective，且不关闭会话。
+# ---------------------------------------------------------------------------
+
+from adapters.base import ProbeResult  # noqa: E402
+
+
+class _FakePage:
+    def __init__(self, url):
+        self.url = url
+
+    async def title(self):
+        return "Acct"
+
+
+class _FakeContext:
+    async def storage_state(self):
+        return {"cookies": [], "origins": []}
+
+
+class FakeSession:
+    """可驱动 login_finish 走到 probe 判定的假会话。"""
+
+    def __init__(self):
+        self.id = "sid-fake"
+        self.provider = "iflytek"
+        self.login_url = "https://passport.xfyun.cn/login"
+        self.success_url_prefix = "https://maas.xfyun.cn/account"
+        self.proxy_url = "http://proxy.local:8080"
+        self.page = _FakePage(self.success_url_prefix)
+        self.context = _FakeContext()
+
+    def authenticated(self):
+        return True
+
+
+class FakeRegistry:
+    """记录 close 调用、返回固定假会话的假 registry。"""
+
+    def __init__(self, session):
+        self._session = session
+        self.closed = []
+
+    async def get(self, session_id):
+        return self._session
+
+    async def close(self, session_id):
+        self.closed.append(session_id)
+
+
+class FakeAdapter:
+    """记录收到的 ProbeRequest 并返回指定 ProbeResult 的假适配器。"""
+
+    def __init__(self, result):
+        self.result = result
+        self.received = None
+
+    async def probe(self, req):
+        self.received = req
+        return self.result
+
+
+async def _verify_effective_always_true(_session):
+    return True
+
+
+def _build_scenario(monkeypatch, probe_result):
+    """装好假 registry / adapter / verify_effective，返回 (session, registry, adapter)。"""
+    session = FakeSession()
+    registry = FakeRegistry(session)
+    monkeypatch.setattr(app_module, "_login_registry", registry)
+    monkeypatch.setattr(app_module, "verify_effective", _verify_effective_always_true)
+
+    adapter = FakeAdapter(probe_result)
+
+    async def _fake_get_adapter(provider):
+        return adapter
+
+    monkeypatch.setattr(app_module, "get_adapter", _fake_get_adapter)
+    return session, registry, adapter
+
+
+def test_finish_probe_needs_interactive_auth_returns_409(client, monkeypatch):
+    """probe 返回 needs_interactive_auth → 409 login_not_effective，且不关闭会话。"""
+    result = ProbeResult(status="needs_interactive_auth", provider="iflytek", error="needs login")
+    session, registry, adapter = _build_scenario(monkeypatch, result)
+
+    resp = client.post(
+        "/v1/login/sid-fake/finish",
+        headers={"X-Worker-Token": "test-token"},
+    )
+    assert resp.status_code == 409
+    assert resp.json() == {"status": "pending", "error": "login_not_effective"}
+
+    # 失败关闭：不关闭会话、不回传 storage_state。
+    assert registry.closed == []
+
+    # probe 确实用了候选凭据，且 proxy_url 透传正确。
+    assert adapter.received is not None
+    assert adapter.received.proxy_url == session.proxy_url
+    expected_state = json.dumps({"cookies": [], "origins": []})
+    assert adapter.received.storage_state == expected_state
+
+
+def test_finish_probe_ok_returns_200(client, monkeypatch):
+    """probe 返回 ok → 200 authenticated，且带非空 storage_state、关闭会话。"""
+    result = ProbeResult(status="ok", provider="iflytek", account_label="Acct")
+    session, registry, adapter = _build_scenario(monkeypatch, result)
+
+    resp = client.post(
+        "/v1/login/sid-fake/finish",
+        headers={"X-Worker-Token": "test-token"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "authenticated"
+    assert body["storage_state"]
+
+    # 通过后关闭会话。
+    assert registry.closed == ["sid-fake"]

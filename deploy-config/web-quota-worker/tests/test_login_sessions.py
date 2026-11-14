@@ -451,3 +451,41 @@ def test_verify_effective_skips_when_no_prefix_declared():
         assert page.closed is False
 
     asyncio.run(case())
+
+
+# ---------------------------------------------------------------------------
+# 代理出口透传：finish 阶段的凭据可用性校验必须复用同一网络出口
+# ---------------------------------------------------------------------------
+
+
+def test_start_records_proxy_url_when_passed():
+    """start 传入的 proxy_url 必须保存到 session，供 finish 阶段复用同一出口。"""
+
+    async def case():
+        registry = LoginSessionRegistry(_factory(FakeContext(FakePage())))
+        session = await registry.start(
+            provider="longcat",
+            login_url="https://passport.example.com/login",
+            success_url_prefix="https://console.example.com/",
+            proxy_url="http://127.0.0.1:9/",
+        )
+        assert session.proxy_url == "http://127.0.0.1:9/"
+        await session.open_task
+
+    asyncio.run(case())
+
+
+def test_start_defaults_proxy_url_to_empty():
+    """不传 proxy_url 时，session.proxy_url 应为空串。"""
+
+    async def case():
+        registry = LoginSessionRegistry(_factory(FakeContext(FakePage())))
+        session = await registry.start(
+            provider="longcat",
+            login_url="https://passport.example.com/login",
+            success_url_prefix="https://console.example.com/",
+        )
+        assert session.proxy_url == ""
+        await session.open_task
+
+    asyncio.run(case())
