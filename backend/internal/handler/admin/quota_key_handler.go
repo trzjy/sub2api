@@ -655,10 +655,13 @@ func (h *QuotaKeyHandler) ProbeQuota(c *gin.Context) {
 	if h.svc != nil {
 		usage, usageErr := h.svc.QuotaKeyUsageProjectionFor(c.Request.Context(), id)
 		if usageErr != nil {
+			// 失败关闭：探测结果的单位由 usage 投影承载（kn_cy 的 max/used 已改为「分」）。
+			// 拿不到投影就无法安全展示额度，返回明确错误而不是可能误导的原始分值。
 			slog.Warn("admin_quota_key_probe_usage_projection_failed", "quota_key_id", id, "error", usageErr)
-		} else {
-			body.Usage = usage
+			response.Error(c, http.StatusServiceUnavailable, "quota key usage projection unavailable")
+			return
 		}
+		body.Usage = usage
 	}
 	response.Success(c, body)
 }
