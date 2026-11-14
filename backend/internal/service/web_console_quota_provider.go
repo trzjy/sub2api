@@ -18,6 +18,9 @@ const (
 	providerSensenova = "sensenova"
 	// providerLongcat 美团 LongCat（api.longcat.chat 推理 + longcat.chat 控制台）
 	providerLongcat = "longcat"
+	// providerIflytek 讯飞星辰 MaaS（推理 maas-api.cn-huabei-1.xf-yun.com、
+	// maas-coding-api.cn-huabei-1.xf-yun.com；控制台 maas.xfyun.cn）
+	providerIflytek = "iflytek"
 
 	// webConsoleQuotaOwnedSource 是本链路写入 temp_unschedulable_reason 的 source 标识，
 	// 用于停调所属权校验（仅该来源可被本链路覆盖或清除）。
@@ -33,15 +36,19 @@ type webConsoleQuotaProviderRoot struct {
 	provider string // 命中返回的上游标识
 }
 
-// webConsoleQuotaProviderRoots 是三家的根域映射，按 base_url 主机名后缀匹配。
+// webConsoleQuotaProviderRoots 是四家的根域映射，按 base_url 主机名后缀匹配。
 //   - compshare：cp.compshare.cn / compshare.cn 同属优云智算（推理网关 + 控制台）
 //   - sensenova：sensenova.cn 含 token.sensenova.cn、platform.sensenova.cn
 //   - longcat：longcat.chat 含 api.longcat.chat
+//   - iflytek：xf-yun.com 覆盖讯飞星辰 MaaS 推理网关（maas-api.*.xf-yun.com）
+//     与编码网关（maas-coding-api.*.xf-yun.com）；控制台 maas.xfyun.cn 同属此根域。
+//     注意 xfyun.cn（开放平台域）与 xf-yun.com 不同根，不会被误命中。
 var webConsoleQuotaProviderRoots = []webConsoleQuotaProviderRoot{
 	{"cp.compshare.cn", providerCompshare},
 	{"compshare.cn", providerCompshare},
 	{"sensenova.cn", providerSensenova},
 	{"longcat.chat", providerLongcat},
+	{"xf-yun.com", providerIflytek},
 }
 
 // webConsoleHostMatches 报告 host 是否精确等于根域 root，或以 ".root" 结尾。

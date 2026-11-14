@@ -489,6 +489,8 @@ export default {
         queuedPack: 'Queued pack',
         paygoBalance: 'Pay-as-you-go balance',
         grantBalance: 'Activity credits',
+        balance: 'Balance',
+        tokenPlan: 'Token plan remaining',
         grantNearestExpiry: 'Nearest expiry {date}',
         accountLabel: 'Console account',
         window5h: '5h',

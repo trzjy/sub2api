@@ -123,6 +123,16 @@ var webConsoleQuotaProviderEndpointTable = map[string]webConsoleQuotaProviderEnd
 		// 顺序即优先级：Start 取第一个作为 worker 自动切换的目标（唯一事实源）。
 		loginModes: []string{webConsoleQuotaLoginModeSMS, webConsoleQuotaLoginModeQRCode},
 	},
+	providerIflytek: {
+		loginURL:         "https://maas.xfyun.cn/account",
+		successURLPrefix: "https://maas.xfyun.cn/",
+		// 实测（2026-11-14）：未登录访问 /account 会 302 到 passport.xfyun.cn/login，
+		// 手机快捷登录为现有账号主路径；账号设过密码时可走密码登录。
+		// 入口必须从 /account 进（而不是直接开 passport），这样 SSO 登录后回跳
+		// maas 域，命中 successURLPrefix —— 登录会话的 authenticated() 以
+		// 「离开过且在成功前缀内」判定，直开 passport 会落到 www.xfyun.cn 而判不出成功。
+		loginModes: []string{webConsoleQuotaLoginModeSMS, webConsoleQuotaLoginModePassword},
+	},
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """统一适配器基类与探测契约。
 
-本模块定义 web-quota-worker 与三家上游具体适配器之间的契约。
-后续适配器卡（compshare / sensenova / longcat）必须继承 ``BaseAdapter``
+本模块定义 web-quota-worker 与上游具体适配器之间的契约。
+后续适配器卡（compshare / sensenova / longcat / iflytek）必须继承 ``BaseAdapter``
 并严格遵循下面的数据模型。
 
 设计纪律（与方案 §3.1 一致）：
@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 # 受支持的上游标识。顺序固定，app.py 据此校验与分派。
-PROVIDERS = ("compshare", "sensenova", "longcat")
+# 已注册：compshare / sensenova / longcat / iflytek（讯飞星辰 MaaS，见方案 §3.2 ③）。
+PROVIDERS = ("compshare", "sensenova", "longcat", "iflytek")
 
 # browser_context_factory 类型：给定可选 storage_state 与 proxy，
 # 返回一个可用的 Playwright BrowserContext（调用方负责关闭）。

@@ -179,6 +179,62 @@ func TestResolveWebConsoleQuotaProvider(t *testing.T) {
 			account:  Account{},
 			expected: "",
 		},
+		// --- iflytek 命中（第四家）---
+		{
+			name: "iflytek maas api chat completions hits",
+			account: Account{
+				Type:     AccountTypeAPIKey,
+				Platform: PlatformOpenAI,
+				Credentials: map[string]any{
+					"base_url": "https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions",
+				},
+			},
+			expected: providerIflytek,
+		},
+		{
+			name: "iflytek maas api anthropic hits",
+			account: Account{
+				Type:     AccountTypeAPIKey,
+				Platform: PlatformOpenAI,
+				Credentials: map[string]any{
+					"base_url": "https://maas-api.cn-huabei-1.xf-yun.com/anthropic/v1/messages",
+				},
+			},
+			expected: providerIflytek,
+		},
+		{
+			name: "iflytek maas coding api responses hits",
+			account: Account{
+				Type:     AccountTypeAPIKey,
+				Platform: PlatformOpenAI,
+				Credentials: map[string]any{
+					"base_url": "https://maas-coding-api.cn-huabei-1.xf-yun.com/v1/responses",
+				},
+			},
+			expected: providerIflytek,
+		},
+		{
+			name: "iflytek evil suffix does not hit",
+			account: Account{
+				Type:     AccountTypeAPIKey,
+				Platform: PlatformOpenAI,
+				Credentials: map[string]any{
+					"base_url": "https://xf-yun.com.evil.com/v1/chat/completions",
+				},
+			},
+			expected: "",
+		},
+		{
+			name: "iflytek xfyun cn open platform does not hit",
+			account: Account{
+				Type:     AccountTypeAPIKey,
+				Platform: PlatformOpenAI,
+				Credentials: map[string]any{
+					"base_url": "https://www.xfyun.cn/",
+				},
+			},
+			expected: "",
+		},
 	}
 
 	for _, tt := range tests {

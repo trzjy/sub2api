@@ -723,6 +723,8 @@ export default {
         queuedPack: '排队包',
         paygoBalance: '按量余额',
         grantBalance: '赠金余额',
+        balance: '余额',
+        tokenPlan: 'Token Plan 剩余',
         grantNearestExpiry: '最近过期 {date}',
         accountLabel: '控制台账号',
         window5h: '5h',

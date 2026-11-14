@@ -1242,6 +1242,27 @@ export interface WebConsoleQuotaPool {
   nearest_grant_expiry?: string
 }
 
+/** 讯飞星辰 MaaS 控制台（iflytek）Token Plan 单个席位额度。 */
+export interface WebConsoleQuotaTokenPlanSeat {
+  seat_type: number
+  seat_type_name: string
+  total_count: number
+  assigned_count: number
+  remaining_count: number
+}
+
+/** 讯飞星辰 MaaS 控制台（iflytek）Token Plan 额度（来自后端 token-plan/quota 抓取）。 */
+export interface WebConsoleQuotaTokenPlan {
+  total_count: number
+  assigned_count: number
+  remaining_count: number
+  by_seat?: WebConsoleQuotaTokenPlanSeat[]
+}
+
+/**
+ * Web 控制台额度快照（账号 extra.web_console_quota_snapshot，后端 service.WebConsoleQuotaSnapshot 同构）。
+ * iflytek 专属字段来源：讯飞星辰 MaaS 控制台（balance / token-plan / coding-plan 抓取）。
+ */
 export interface WebConsoleQuotaSnapshot {
   provider: string
   fetched_at?: string
@@ -1263,6 +1284,13 @@ export interface WebConsoleQuotaSnapshot {
   exhausted?: boolean
   until?: string
   until_indefinite?: boolean
+  // iflytek（讯飞星辰 MaaS）
+  balance?: number
+  balance_currency?: string
+  delinquent?: number
+  virtual_balance?: number
+  token_plan?: WebConsoleQuotaTokenPlan
+  coding_plan_tiers?: WebConsoleQuotaTier[]
 }
 
 export type OpenCodeGoUsageStatus = 'ok' | 'unauthorized' | 'failed'

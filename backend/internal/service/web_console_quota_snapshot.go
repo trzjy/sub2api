@@ -45,6 +45,23 @@ type WebConsoleQuotaPool struct {
 	NearestGrantExpiry          string               `json:"nearest_grant_expiry,omitempty"`
 }
 
+// WebConsoleQuotaTokenPlanSeat Token Plan 单档席位配额（讯飞）。
+type WebConsoleQuotaTokenPlanSeat struct {
+	SeatType       float64 `json:"seat_type"`
+	SeatTypeName   string  `json:"seat_type_name"`
+	TotalCount     float64 `json:"total_count"`
+	AssignedCount  float64 `json:"assigned_count"`
+	RemainingCount float64 `json:"remaining_count"`
+}
+
+// WebConsoleQuotaTokenPlan Token Plan 席位汇总（讯飞）。
+type WebConsoleQuotaTokenPlan struct {
+	TotalCount     float64                        `json:"total_count"`
+	AssignedCount  float64                        `json:"assigned_count"`
+	RemainingCount float64                        `json:"remaining_count"`
+	BySeat         []WebConsoleQuotaTokenPlanSeat `json:"by_seat,omitempty"`
+}
+
 // WebConsoleQuotaSnapshot 统一快照。
 type WebConsoleQuotaSnapshot struct {
 	Provider  string `json:"provider"`
@@ -68,6 +85,13 @@ type WebConsoleQuotaSnapshot struct {
 	Lots             []WebConsoleQuotaLot `json:"lots,omitempty"`
 	PaygoBalanceCent *int64               `json:"paygo_balance_cent,omitempty"`
 	PaygoStatus      string               `json:"paygo_status,omitempty"`
+	// iflytek（讯飞星辰 MaaS）
+	Balance         *float64                  `json:"balance,omitempty"`
+	BalanceCurrency string                    `json:"balance_currency,omitempty"`
+	Delinquent      *float64                  `json:"delinquent,omitempty"`
+	VirtualBalance  *float64                  `json:"virtual_balance,omitempty"`
+	TokenPlan       *WebConsoleQuotaTokenPlan `json:"token_plan,omitempty"`
+	CodingPlanTiers []WebConsoleQuotaTier     `json:"coding_plan_tiers,omitempty"`
 	// 判定结果
 	Exhausted       bool   `json:"exhausted"`
 	Until           string `json:"until,omitempty"` // RFC3339；无限期哨兵时写 "9999-12-31T00:00:00Z"
@@ -242,6 +266,66 @@ type webConsoleLongcatData struct {
 	PaygoStatus      string                 `json:"paygo_status"`
 }
 
+// webConsoleIflytekUsage 是 Coding Plan 窗口用量字段的承载类型：既可能出现在
+// row 顶层，也可能嵌套在 codingPlanUsageDTO 中。用指针以便区分"字段缺失"与"值为 0"。
+type webConsoleIflytekUsage struct {
+	RP5hLimit  *float64 `json:"rp5hLimit"`
+	RP5hUsage  *float64 `json:"rp5hUsage"`
+	RPwLimit   *float64 `json:"rpwLimit"`
+	RPwUsage   *float64 `json:"rpwUsage"`
+	PackageLimit *float64 `json:"packageLimit"`
+	PackageUsage *float64 `json:"packageUsage"`
+	PackageLeft  *float64 `json:"packageLeft"`
+}
+
+// webConsoleIflytekCodingRow 是 coding_plan_list.rows[] 的单条。取值规则：
+// 先读 row 顶层字段，缺失（nil）时回退到 codingPlanUsageDTO 的同名字段。
+type webConsoleIflytekCodingRow struct {
+	RP5hLimit     *float64                  `json:"rp5hLimit"`
+	RP5hUsage     *float64                  `json:"rp5hUsage"`
+	RPwLimit      *float64                  `json:"rpwLimit"`
+	RPwUsage      *float64                  `json:"rpwUsage"`
+	PackageLimit  *float64                  `json:"packageLimit"`
+	PackageUsage  *float64                  `json:"packageUsage"`
+	PackageLeft   *float64                  `json:"packageLeft"`
+	CodingPlanUsageDTO *webConsoleIflytekUsage `json:"codingPlanUsageDTO"`
+}
+
+type webConsoleIflytekCodingList struct {
+	Page  int                         `json:"page"`
+	Size  int                         `json:"size"`
+	Total int                         `json:"total"`
+	Rows  []webConsoleIflytekCodingRow `json:"rows"`
+}
+
+type webConsoleIflytekSeat struct {
+	SeatType       float64 `json:"seatType"`
+	SeatTypeName   string  `json:"seatTypeName"`
+	TotalCount     float64 `json:"totalCount"`
+	AssignedCount  float64 `json:"assignedCount"`
+	RemainingCount float64 `json:"remainingCount"`
+}
+
+type webConsoleIflytekTokenPlanQuota struct {
+	Quotas []webConsoleIflytekSeat `json:"quotas"`
+}
+
+type webConsoleIflytekBalance struct {
+	Balance        float64 `json:"balance"`
+	Delinquent     float64 `json:"delinquent"`
+	VirtualBalance float64 `json:"virtualBalance"`
+}
+
+type webConsoleIflytekData struct {
+	AuthState      string                       `json:"auth_state"`
+	AuthReason     string                       `json:"auth_reason"`
+	AuthError      string                       `json:"auth_error"`
+	AccountLabel   string                       `json:"account_label"`
+	Balance        webConsoleIflytekBalance     `json:"balance"`
+	TokenPlanQuota webConsoleIflytekTokenPlanQuota `json:"token_plan_quota"`
+	CodingPlanList webConsoleIflytekCodingList  `json:"coding_plan_list"`
+}
+
 // ---------------------------------------------------------------------------
 // 主入口
 // ---------------------------------------------------------------------------
@@ -263,6 +347,8 @@ func BuildWebConsoleQuotaSnapshot(provider string, rawData []byte, apiKeySHA256 
 		return buildSensenovaSnapshot(snap, rawData, modelMapping, now)
 	case "longcat":
 		return buildLongcatSnapshot(snap, rawData, now)
+	case providerIflytek:
+		return buildIflytekSnapshot(snap, rawData, now)
 	default:
 		return nil, fmt.Errorf("unsupported web console quota provider: %q", provider)
 	}
@@ -641,4 +727,134 @@ func buildLongcatSnapshot(snap *WebConsoleQuotaSnapshot, rawData []byte, now tim
 		snap.UntilIndefinite = true
 	}
 	return snap, nil
+}
+
+// ---------------------------------------------------------------------------
+// iflytek（讯飞星辰 MaaS，方案 §3.2 ④⑤）
+// ---------------------------------------------------------------------------
+
+// webConsoleIflytekPick 取值规则：优先返回顶层字段 top（非 nil 即视为有值，含 0）；
+// 顶层缺失时回退到嵌套 codingPlanUsageDTO 的字段 dto；两者皆缺失返回 0。
+// 用指针区分"字段缺失"与"值为 0"，避免把真实 0 误判为未提供而错误回退。
+func webConsoleIflytekPick(top *float64, dto *float64) float64 {
+	if top != nil {
+		return *top
+	}
+	if dto != nil {
+		return *dto
+	}
+	return 0
+}
+
+// buildIflytekSnapshot 解析讯飞星辰 MaaS worker 回传的 data 为统一快照。
+//
+// 关于 Exhausted：本函数恒置 Exhausted=false。原因（见方案 §3.2 ⑤，实测 §2.6）：
+// 讯飞生产账号（如 982/984 的 flash-free 免费模型）余额/套餐全为 0 但服务正常可用，
+// 余额 0 不代表耗尽。判定"是否仍有免费额度"需要采集 free-quota，而本轮明确不做。
+// 因此首版只展示、不停调：不得改成"余额 0 即耗尽"，否则会误杀正常账号。后续若要接
+// 自动停调，须先采集免费额度或明确的欠费字段（delinquent>0 可作为强信号），并按新裁定
+// 另行设计。
+func buildIflytekSnapshot(snap *WebConsoleQuotaSnapshot, rawData []byte, now time.Time) (*WebConsoleQuotaSnapshot, error) {
+	var d webConsoleIflytekData
+	// JSON 解析失败返回 error（fail-closed），不 panic。
+	if err := json.Unmarshal(rawData, &d); err != nil {
+		return nil, err
+	}
+	snap.AuthState = defaultAuthState(d.AuthState)
+	snap.AuthReason = d.AuthReason
+	snap.AuthError = d.AuthError
+	snap.AccountLabel = d.AccountLabel
+
+	// 余额（指针，0 也保留）；币种固定 CNY。
+	bal := d.Balance.Balance
+	del := d.Balance.Delinquent
+	vb := d.Balance.VirtualBalance
+	snap.Balance = &bal
+	snap.Delinquent = &del
+	snap.VirtualBalance = &vb
+	snap.BalanceCurrency = "CNY"
+
+	// Token Plan 席位汇总：累加三项计数 + 保留 by_seat 明细。
+	var total, assigned, remaining float64
+	seats := make([]WebConsoleQuotaTokenPlanSeat, 0, len(d.TokenPlanQuota.Quotas))
+	for _, q := range d.TokenPlanQuota.Quotas {
+		total += q.TotalCount
+		assigned += q.AssignedCount
+		remaining += q.RemainingCount
+		seats = append(seats, WebConsoleQuotaTokenPlanSeat{
+			SeatType:       q.SeatType,
+			SeatTypeName:   q.SeatTypeName,
+			TotalCount:     q.TotalCount,
+			AssignedCount:  q.AssignedCount,
+			RemainingCount: q.RemainingCount,
+		})
+	}
+	snap.TokenPlan = &WebConsoleQuotaTokenPlan{
+		TotalCount:     total,
+		AssignedCount:  assigned,
+		RemainingCount: remaining,
+		BySeat:         seats,
+	}
+
+	// Coding Plan 行 → 三个滚动窗口 tier；limit 为 0 的窗口不输出。
+	// 仅取 rows[0]（账号级绑定，快照共享兄弟账号，见方案 §4.2）。
+	if len(d.CodingPlanList.Rows) > 0 {
+		row := d.CodingPlanList.Rows[0]
+		var dto *webConsoleIflytekUsage
+		if row.CodingPlanUsageDTO != nil {
+			dto = row.CodingPlanUsageDTO
+		}
+		var tiers []WebConsoleQuotaTier
+
+		// 5h 窗口：limit>0 才输出，used 取 rp5hUsage
+		if l5 := webConsoleIflytekPick(row.RP5hLimit, nilIfFloat(dto, func(u webConsoleIflytekUsage) *float64 { return u.RP5hLimit })); l5 > 0 {
+			tiers = append(tiers, WebConsoleQuotaTier{
+				Window: "5h",
+				Limit:  l5,
+				Used:   webConsoleIflytekPick(row.RP5hUsage, nilIfFloat(dto, func(u webConsoleIflytekUsage) *float64 { return u.RP5hUsage })),
+			})
+		}
+		// week 窗口：limit>0 才输出，used 取 rpwUsage
+		if lw := webConsoleIflytekPick(row.RPwLimit, nilIfFloat(dto, func(u webConsoleIflytekUsage) *float64 { return u.RPwLimit })); lw > 0 {
+			tiers = append(tiers, WebConsoleQuotaTier{
+				Window: "week",
+				Limit:  lw,
+				Used:   webConsoleIflytekPick(row.RPwUsage, nilIfFloat(dto, func(u webConsoleIflytekUsage) *float64 { return u.RPwUsage })),
+			})
+		}
+		// month（package）窗口：limit>0 才输出；
+		// used 规则：packageUsage>0 用 packageUsage，否则用 max(packageLimit-packageLeft, 0)
+		if pl := webConsoleIflytekPick(row.PackageLimit, nilIfFloat(dto, func(u webConsoleIflytekUsage) *float64 { return u.PackageLimit })); pl > 0 {
+			pu := webConsoleIflytekPick(row.PackageUsage, nilIfFloat(dto, func(u webConsoleIflytekUsage) *float64 { return u.PackageUsage }))
+			if pu <= 0 {
+				left := webConsoleIflytekPick(row.PackageLeft, nilIfFloat(dto, func(u webConsoleIflytekUsage) *float64 { return u.PackageLeft }))
+				used := pl - left
+				if used < 0 {
+					used = 0
+				}
+				pu = used
+			}
+			tiers = append(tiers, WebConsoleQuotaTier{
+				Window: "month",
+				Limit:  pl,
+				Used:   pu,
+			})
+		}
+
+		if len(tiers) > 0 {
+			snap.CodingPlanTiers = tiers
+		}
+	}
+
+	// 恒不耗尽（见函数顶部注释）。
+	snap.Exhausted = false
+	return snap, nil
+}
+
+// nilIfFloat 当 u 非 nil 时返回其字段访问器结果，否则返回 nil。
+func nilIfFloat(u *webConsoleIflytekUsage, get func(webConsoleIflytekUsage) *float64) *float64 {
+	if u == nil {
+		return nil
+	}
+	return get(*u)
 }

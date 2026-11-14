@@ -486,3 +486,182 @@ func TestWebConsoleQuotaFlexTimestamp_InvalidType(t *testing.T) {
 		require.Error(t, err, "bad payload: %s", bad)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// iflytek（讯飞星辰 MaaS，方案 §3.2 ④⑤）
+// ---------------------------------------------------------------------------
+
+// 零值样本（派发单输入契约）：余额 0、Token Plan 全 0、无 Coding Plan。
+func TestBuildWebConsoleQuotaSnapshot_Iflytek_ZeroBalanceNoPlan(t *testing.T) {
+	data := `{
+		"auth_state":"ok",
+		"auth_reason":"",
+		"auth_error":"",
+		"account_label":"139****877",
+		"balance":{"balance":0,"delinquent":0,"virtualBalance":0},
+		"token_plan_quota":{"quotas":[{"seatType":1,"seatTypeName":"标准成员","totalCount":0,"assignedCount":0,"remainingCount":0}]},
+		"token_plan_seats":{"seats":[],"total":0},
+		"coding_plan_list":{"page":1,"size":10,"total":0,"rows":[]}
+	}`
+	s, err := BuildWebConsoleQuotaSnapshot(providerIflytek, []byte(data), "", nil, wcqNow)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+
+	require.NotNil(t, s.Balance)
+	require.Equal(t, 0.0, *s.Balance)
+	require.Equal(t, "CNY", s.BalanceCurrency)
+	require.NotNil(t, s.Delinquent)
+	require.Equal(t, 0.0, *s.Delinquent)
+	require.NotNil(t, s.VirtualBalance)
+	require.Equal(t, 0.0, *s.VirtualBalance)
+
+	require.NotNil(t, s.TokenPlan)
+	require.Equal(t, 0.0, s.TokenPlan.RemainingCount)
+	require.Len(t, s.TokenPlan.BySeat, 1)
+
+	require.Empty(t, s.CodingPlanTiers)
+	require.False(t, s.Exhausted)
+}
+
+// 余额非零、Token Plan 多档席位：字段与汇总正确。
+func TestBuildWebConsoleQuotaSnapshot_Iflytek_BalanceAndTokenPlan(t *testing.T) {
+	data := `{
+		"auth_state":"ok",
+		"account_label":"139****877",
+		"balance":{"balance":12.5,"delinquent":0,"virtualBalance":3.0},
+		"token_plan_quota":{"quotas":[
+			{"seatType":1,"seatTypeName":"标准成员","totalCount":10,"assignedCount":4,"remainingCount":6},
+			{"seatType":2,"seatTypeName":"高级成员","totalCount":5,"assignedCount":2,"remainingCount":3}
+		]},
+		"token_plan_seats":{"seats":[],"total":0},
+		"coding_plan_list":{"page":1,"size":10,"total":0,"rows":[]}
+	}`
+	s, err := BuildWebConsoleQuotaSnapshot(providerIflytek, []byte(data), "", nil, wcqNow)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+
+	require.NotNil(t, s.Balance)
+	require.Equal(t, 12.5, *s.Balance)
+	require.Equal(t, "CNY", s.BalanceCurrency)
+	require.NotNil(t, s.Delinquent)
+	require.Equal(t, 0.0, *s.Delinquent)
+	require.NotNil(t, s.VirtualBalance)
+	require.Equal(t, 3.0, *s.VirtualBalance)
+
+	require.NotNil(t, s.TokenPlan)
+	require.Equal(t, 15.0, s.TokenPlan.TotalCount)
+	require.Equal(t, 6.0, s.TokenPlan.AssignedCount)
+	require.Equal(t, 9.0, s.TokenPlan.RemainingCount)
+	require.Len(t, s.TokenPlan.BySeat, 2)
+
+	require.Empty(t, s.CodingPlanTiers)
+	require.False(t, s.Exhausted)
+}
+
+// Coding Plan 一条含 rp5h/rpw/package：3 条 tier，窗口名与 used 正确。
+// 另测嵌套 codingPlanUsageDTO 回退路径。
+func TestBuildWebConsoleQuotaSnapshot_Iflytek_CodingPlanTiers(t *testing.T) {
+	t.Run("top_level_fields", func(t *testing.T) {
+		data := `{
+			"auth_state":"ok",
+			"balance":{"balance":0,"delinquent":0,"virtualBalance":0},
+			"token_plan_quota":{"quotas":[]},
+			"coding_plan_list":{"page":1,"size":10,"total":1,"rows":[
+				{
+					"rp5hLimit":100,"rp5hUsage":30,
+					"rpwLimit":500,"rpwUsage":200,
+					"packageLimit":1000,"packageUsage":0,"packageLeft":700
+				}
+			]}
+		}`
+		s, err := BuildWebConsoleQuotaSnapshot(providerIflytek, []byte(data), "", nil, wcqNow)
+		require.NoError(t, err)
+		require.NotNil(t, s)
+		require.Len(t, s.CodingPlanTiers, 3)
+
+		byWindow := map[string]WebConsoleQuotaTier{}
+		for _, tr := range s.CodingPlanTiers {
+			byWindow[tr.Window] = tr
+		}
+		require.Contains(t, byWindow, "5h")
+		require.Equal(t, 100.0, byWindow["5h"].Limit)
+		require.Equal(t, 30.0, byWindow["5h"].Used)
+		require.Contains(t, byWindow, "week")
+		require.Equal(t, 500.0, byWindow["week"].Limit)
+		require.Equal(t, 200.0, byWindow["week"].Used)
+		require.Contains(t, byWindow, "month")
+		require.Equal(t, 1000.0, byWindow["month"].Limit)
+		// packageUsage=0 → used = max(packageLimit-packageLeft,0) = 300
+		require.Equal(t, 300.0, byWindow["month"].Used)
+		require.False(t, s.Exhausted)
+	})
+
+	t.Run("nested_dto_fallback", func(t *testing.T) {
+		data := `{
+			"auth_state":"ok",
+			"balance":{"balance":0,"delinquent":0,"virtualBalance":0},
+			"token_plan_quota":{"quotas":[]},
+			"coding_plan_list":{"page":1,"size":10,"total":1,"rows":[
+				{
+					"codingPlanUsageDTO":{
+						"rp5hLimit":100,"rp5hUsage":30,
+						"rpwLimit":500,"rpwUsage":200,
+						"packageLimit":1000,"packageUsage":0,"packageLeft":700
+					}
+				}
+			]}
+		}`
+		s, err := BuildWebConsoleQuotaSnapshot(providerIflytek, []byte(data), "", nil, wcqNow)
+		require.NoError(t, err)
+		require.NotNil(t, s)
+		require.Len(t, s.CodingPlanTiers, 3)
+
+		byWindow := map[string]WebConsoleQuotaTier{}
+		for _, tr := range s.CodingPlanTiers {
+			byWindow[tr.Window] = tr
+		}
+		require.Equal(t, 100.0, byWindow["5h"].Limit)
+		require.Equal(t, 30.0, byWindow["5h"].Used)
+		require.Equal(t, 500.0, byWindow["week"].Limit)
+		require.Equal(t, 200.0, byWindow["week"].Used)
+		require.Equal(t, 1000.0, byWindow["month"].Limit)
+		require.Equal(t, 300.0, byWindow["month"].Used)
+	})
+
+	t.Run("zero_limit_window_omitted", func(t *testing.T) {
+		data := `{
+			"auth_state":"ok",
+			"balance":{"balance":0,"delinquent":0,"virtualBalance":0},
+			"token_plan_quota":{"quotas":[]},
+			"coding_plan_list":{"page":1,"size":10,"total":1,"rows":[
+				{
+					"rp5hLimit":0,"rp5hUsage":0,
+					"rpwLimit":500,"rpwUsage":200,
+					"packageLimit":1000,"packageUsage":400,"packageLeft":600
+				}
+			]}
+		}`
+		s, err := BuildWebConsoleQuotaSnapshot(providerIflytek, []byte(data), "", nil, wcqNow)
+		require.NoError(t, err)
+		require.NotNil(t, s)
+		// 5h limit=0 不输出；week、month 输出
+		require.Len(t, s.CodingPlanTiers, 2)
+		for _, tr := range s.CodingPlanTiers {
+			require.NotEqual(t, "5h", tr.Window)
+		}
+		// packageUsage=400>0 → used=400
+		var month WebConsoleQuotaTier
+		for _, tr := range s.CodingPlanTiers {
+			if tr.Window == "month" {
+				month = tr
+			}
+		}
+		require.Equal(t, 400.0, month.Used)
+	})
+}
+
+// 非法 JSON 返回 error 且不 panic。
+func TestBuildWebConsoleQuotaSnapshot_Iflytek_BadJSON(t *testing.T) {
+	_, err := BuildWebConsoleQuotaSnapshot(providerIflytek, []byte("not-json"), "", nil, wcqNow)
+	require.Error(t, err)
+}

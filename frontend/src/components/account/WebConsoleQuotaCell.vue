@@ -91,6 +91,24 @@
       {{ t('admin.accounts.webConsoleQuota.paygoBalance') }} ¥{{ paygoBalanceText }}
     </div>
 
+    <!-- iflytek（讯飞星辰 MaaS）：余额与 Token Plan（首版只展示、不停调） -->
+    <div
+      v-if="provider === 'iflytek' && iflytekBalanceText !== null"
+      data-test="wcq-iflytek-balance"
+      class="text-gray-600 dark:text-gray-300"
+    >
+      {{ t('admin.accounts.webConsoleQuota.balance') }} {{ iflytekBalanceText }}
+    </div>
+
+    <div
+      v-if="provider === 'iflytek' && iflytekTokenPlan && iflytekTokenPlan.total_count > 0"
+      data-test="wcq-iflytek-token-plan"
+      class="text-gray-600 dark:text-gray-300"
+    >
+      {{ t('admin.accounts.webConsoleQuota.tokenPlan') }}
+      {{ iflytekTokenPlan.remaining_count }} / {{ iflytekTokenPlan.total_count }}
+    </div>
+
     <!-- 4. 状态与操作行 -->
     <div class="flex flex-wrap items-center gap-1.5">
       <button
@@ -188,7 +206,7 @@ export default {}
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { probeWebConsoleQuota, type WebConsoleQuotaProbeResult } from '@/api/admin/cnProviders'
-import type { Account, WebConsoleQuotaLot, WebConsoleQuotaSnapshot, WebConsoleQuotaTier } from '@/types'
+import type { Account, WebConsoleQuotaLot, WebConsoleQuotaSnapshot, WebConsoleQuotaTier, WebConsoleQuotaTokenPlan } from '@/types'
 import UsageProgressBar from './UsageProgressBar.vue'
 
 const props = defineProps<{
@@ -255,6 +273,7 @@ const formatDate = (value?: string | number | null): string => {
 const expireText = computed(() => formatDate(snapshot.value?.expire_at ?? null))
 
 const rollingTiers = computed<WebConsoleQuotaTier[]>(() => {
+  if (provider.value === 'iflytek') return snapshot.value?.coding_plan_tiers ?? []
   if (provider.value !== 'compshare' && provider.value !== 'sensenova') return []
   return snapshot.value?.tiers ?? []
 })
@@ -286,6 +305,28 @@ const paygoBalanceText = computed(() => {
   const cent = snapshot.value?.paygo_balance_cent
   if (cent === null || cent === undefined) return ''
   return (cent / 100).toFixed(2)
+})
+
+// ---- iflytek（讯飞星辰 MaaS）余额与套餐 ----
+// 首版只展示、不停调：余额 0 对免费号是正常态，不显示「已耗尽」红字（方案 §3.2 ⑤）。
+
+const iflytekBalance = computed<number | null>(() => {
+  if (provider.value !== 'iflytek') return null
+  const bal = snapshot.value?.balance
+  return typeof bal === 'number' ? bal : null
+})
+
+const iflytekBalanceText = computed<string | null>(() => {
+  if (iflytekBalance.value === null) return null
+  const amount = iflytekBalance.value.toFixed(2)
+  // 币种字段为 CNY 时固定 ¥，其它币种直接显示 balance_currency。
+  if (snapshot.value?.balance_currency === 'CNY') return `¥${amount}`
+  return `${snapshot.value?.balance_currency ?? ''}${amount}`
+})
+
+const iflytekTokenPlan = computed<WebConsoleQuotaTokenPlan | null>(() => {
+  if (provider.value !== 'iflytek') return null
+  return snapshot.value?.token_plan ?? null
 })
 
 const windowLabel = (window: string): string => {

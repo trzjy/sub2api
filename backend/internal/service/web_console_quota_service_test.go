@@ -846,6 +846,36 @@ func TestWebConsoleQuotaService_WorkerUnreachableIsFailClosed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 用例：ResolveWebConsoleQuotaLoginModes（iflytek 首版端点）
+// ---------------------------------------------------------------------------
+
+func TestResolveWebConsoleQuotaLoginModes_Iflytek(t *testing.T) {
+	// 生产账号 982/984 的 base_url 形态（maas-api.cn-huabei-1.xf-yun.com）。
+	account := &Account{
+		ID:       980,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"base_url": "https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions",
+			"api_key":  "sk-iflytek",
+		},
+	}
+
+	require.Equal(t, providerIflytek, ResolveWebConsoleQuotaProvider(account),
+		"xf-yun.com 根域必须命中 iflytek provider")
+
+	modes := ResolveWebConsoleQuotaLoginModes(account)
+	require.Equal(t, []string{webConsoleQuotaLoginModeSMS, webConsoleQuotaLoginModePassword}, modes,
+		"iflytek 首版登录方式必须为 短信优先 + 密码备选")
+
+	// 端点表透传：loginURL / successURLPrefix 经 worker 请求体带走（实现不变，仅验证事实源）。
+	endpoints, ok := webConsoleQuotaProviderEndpointTable[providerIflytek]
+	require.True(t, ok)
+	require.Equal(t, "https://maas.xfyun.cn/account", endpoints.loginURL)
+	require.Equal(t, "https://maas.xfyun.cn/", endpoints.successURLPrefix)
+}
+
+// ---------------------------------------------------------------------------
 // 用例：ProbeAccount / 单飞键 / detail
 // ---------------------------------------------------------------------------
 
