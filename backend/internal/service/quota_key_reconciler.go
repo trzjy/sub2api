@@ -21,6 +21,10 @@ const (
 	quotaKeyReconcileInterval = 5 * time.Minute
 	// quotaKeyReconcileTimeout 单轮超时（含枚举模型 + 全量串行拉号）。
 	quotaKeyReconcileTimeout = 30 * time.Second
+	// quotaKeySourceRefreshPerKeyBudget 是单次来源额度查询的独立预算。
+	// 与全轮预算分开：一个慢来源只损失自己这一次观测，不再吃掉后续来源的刷新机会
+	// （2026-11-14：串行共用全轮 context 会让后续健康来源的快照长期过期，被 stale 门持续剔除）。
+	quotaKeySourceRefreshPerKeyBudget = 10 * time.Second
 	// quotaKeyReconcileHeartbeatTimeout 写心跳的超时（照 quota_key_sweep 同型）。
 	quotaKeyReconcileHeartbeatTimeout = 5 * time.Second
 	// quotaKeyWaterLevelThreshold 是统一补池目标（C10 硬口径，P1-D2 转总量语义，数值不变）：
@@ -654,7 +658,13 @@ func (r *QuotaKeyReconciler) refreshSourceUsage(ctx context.Context) sourceUsage
 			return out
 		}
 		out.Attempted++
-		if _, perr := r.usageObserver.ProbeKeyQuota(ctx, qk.ID); perr != nil {
+		// 单次来源额度查询使用【独立子 context】：预算只约束这一次观测本身，
+		// 一个慢来源超时不吃掉后续来源的全轮预算（2026-11-14 修复）。
+		// 全轮 context（轮预算/停机早退）仍在外层判定，未变。
+		keyCtx, keyCancel := context.WithTimeout(ctx, quotaKeySourceRefreshPerKeyBudget)
+		_, perr := r.usageObserver.ProbeKeyQuota(keyCtx, qk.ID)
+		keyCancel()
+		if perr != nil {
 			out.Failed++
 			log.Printf("[QuotaKeyReconcile] source usage refresh for quota key %d failed: %v", qk.ID, perr)
 			continue

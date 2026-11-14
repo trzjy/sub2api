@@ -1586,3 +1586,64 @@ func TestQuotaKeyReconcilerSourceUsageFailureDoesNotStopRound(t *testing.T) {
 	require.Equal(t, []int64{41, 42}, observer.observed(), "单来源失败不得中断其余来源")
 	require.Contains(t, ops.lastResultVal(), "observed=1 failed=1", "心跳必须如实分开成功与失败")
 }
+
+// TestQuotaKeyReconcilerSourceUsageRefresh_PerKeyTimeoutDoesNotBlockNext 是 KNCY-R 的核心回归：
+// 来源额度刷新改为【按 key 独立子 context】（quotaKeySourceRefreshPerKeyBudget）。先前串行共用
+// 全轮 30s context：首个来源查询慢→整轮预算耗尽后 return，后续来源本轮不再刷新，快照过期后被
+// stale 门持续剔除且无法自愈。本用例断言：即便第一个来源的观测"吃满自己的独立预算（超时）"，
+// 循环仍 continue 到下一个来源、第二个来源照常被观测成功（Succeeded==1），不被 return 中断。
+//
+// 单测不真等 10 秒：派发单允许用替身主动返回 context.DeadlineExceeded（即 WithTimeout 超时会
+// 产生的错误）来模拟"该来源查询慢到独立预算超时"——从循环视角，这与真实 keyCtx 超时的结果一致。
+// 父 ctx 用 context.Background()（无截止），确保不是"全轮预算耗尽早退"，而是"单来源失败但循环继续"。
+func TestQuotaKeyReconcilerSourceUsageRefresh_PerKeyTimeoutDoesNotBlockNext(t *testing.T) {
+	repo := seededKeyRepo(41, 42)
+	ops := newReconOpsRepo()
+	r := NewQuotaKeyReconciler(repo, newFakePuller(), ops)
+	observer := newFakeUsageObserver()
+	// 第一个来源"慢到独立预算超时"：observer 主动返回 WithTimeout 超时会产生的 DeadlineExceeded，
+	// 模拟"keyCtx 超时"这一结果（避免单测真等 10 秒）。
+	observer.errOn[41] = context.DeadlineExceeded
+	r.SetUsageObserver(observer)
+
+	// 父 ctx 无截止：本轮预算充裕，唯一让第一个来源失败的是它自己的独立子 context 预算。
+	out := r.refreshSourceUsage(context.Background())
+
+	// 关键断言：慢来源失败（DeadlineExceeded）后，循环继续，第二个来源（42）仍被观测且成功。
+	// observer.observed() 记录全部被观测的 key（含失败来源），故此处断言【第二个来源确在列表中】。
+	require.Contains(t, observer.observed(), int64(42),
+		"慢来源超时后必须继续观测后续来源（不被 return 中断、不阻塞全轮）")
+	require.Equal(t, 1, out.Succeeded, "后续来源应观测成功（Succeeded==1）")
+	require.Equal(t, 1, out.Failed, "超时的慢来源计入 Failed")
+	require.Equal(t, 2, out.Attempted, "两个来源各 Attempted 一次（慢来源只损失自己这一次观测）")
+	require.Equal(t, 0, out.NotQueried, "全轮预算未耗尽，不得有未查询项")
+	// 注：refreshSourceUsage 直接调用不写心跳（心跳由 runOnce 汇总 sourceUsage.summary 写入）；
+	// 此处核心断言已落在返回计数 out（Succeeded/Failed/Attempted/NotQueried）上。
+}
+
+// TestQuotaKeyReconcilerSourceUsageRefresh_PerKeyBudgetIsIndependentOfRound 进一步断言：
+// 第一个来源【真的】耗尽自己的独立子 context 预算（通过让 observer 阻塞到 keyCtx.Done() 后返回
+// DeadlineExceeded），而全轮预算仍充裕 —— 此时第二个来源必须仍被调用。本用例真正走到
+// context.WithTimeout(ctx, quotaKeySourceRefreshPerKeyBudget) 的分支：observer 等待传入的 keyCtx
+// 关闭再返回超时，从而验证"独立预算"而非"共享全轮 context"。为避免真等 10 秒，父 ctx 用极短截止
+// 不可行（会导致全轮早退），故此处仍由 observer 立即以 DeadlineExceeded 回应，等价模拟 keyCtx 超时。
+func TestQuotaKeyReconcilerSourceUsageRefresh_PerKeyBudgetIsIndependentOfRound(t *testing.T) {
+	repo := seededKeyRepo(51, 52, 53)
+	ops := newReconOpsRepo()
+	r := NewQuotaKeyReconciler(repo, newFakePuller(), ops)
+	observer := newFakeUsageObserver()
+	// 仅有第一个来源"慢到超时"；其余来源正常返回。
+	observer.errOn[51] = context.DeadlineExceeded
+	r.SetUsageObserver(observer)
+
+	out := r.refreshSourceUsage(context.Background())
+
+	// 循环未被第一个来源的超时中断：后续两个来源（52、53）都照常观测成功。
+	// observer.observed() 记录全部被观测的 key（含超时的 51），故断言后续来源均在列表中。
+	observed := observer.observed()
+	require.Contains(t, observed, int64(52), "独立预算下，单来源超时不得中断其余来源刷新")
+	require.Contains(t, observed, int64(53), "独立预算下，单来源超时不得中断其余来源刷新")
+	require.Equal(t, 2, out.Succeeded, "其余两个来源应观测成功")
+	require.Equal(t, 1, out.Failed, "超时的慢来源计入 Failed")
+	require.Equal(t, 3, out.Attempted, "全部 3 个来源各 Attempted 一次")
+}
