@@ -140,6 +140,9 @@ export default {
       expiredAt: 'Expires At',
       accountsWritten: 'Accounts Written',
       error: 'Failed to probe quota',
+      todayRemaining: 'Today Remaining',
+      totalRemaining: 'Total Remaining',
+      usdAmount: '${amount} USD',
       keyLevelHint: 'The values above are the quota key (key-level) snapshot: total quota, expiry, devices and take-number results are key-level and do not equal any single account balance.'
     },
     errorText: {

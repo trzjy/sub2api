@@ -140,6 +140,9 @@ export default {
       expiredAt: '到期时间',
       accountsWritten: '已写入账号数',
       error: '用量查询失败',
+      todayRemaining: '今日剩余',
+      totalRemaining: '总量剩余',
+      usdAmount: '{amount} 美元',
       keyLevelHint: '以上为激活码（key 级）额度快照：总额度、期限、设备、取号结果均为 key 层口径，不等于单个账号余额。'
     },
     errorText: {

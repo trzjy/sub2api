@@ -29,24 +29,39 @@
           data-test="quota-key-usage-label"
         >{{ label }}</span>
         <template v-if="showNumbers">
-          <span
-            class="font-mono text-gray-700 dark:text-gray-300"
-            :title="t('admin.quotaKeys.probe.max')"
-            data-test="quota-key-usage-total"
-          >{{ totalText ?? '—' }}</span>
-          <span class="text-gray-300 dark:text-dark-600">/</span>
-          <span
-            class="font-mono text-gray-700 dark:text-gray-300"
-            :title="t('admin.quotaKeys.probe.used')"
-            data-test="quota-key-usage-used"
-          >{{ usedText ?? '—' }}</span>
-          <template v-if="remainingText !== null">
-            <span class="text-gray-300 dark:text-dark-600">/</span>
+          <template v-if="isUSD">
             <span
               class="font-mono text-emerald-700 dark:text-emerald-300"
-              :title="t('admin.accounts.cnProviders.dimensionStatusRemaining')"
-              data-test="quota-key-usage-remaining"
-            >{{ remainingText }}</span>
+              :title="t('admin.quotaKeys.probe.todayRemaining')"
+              data-test="quota-key-usage-today-remaining"
+            >{{ todayRemainingText ?? '—' }}</span>
+            <span class="text-gray-300 dark:text-dark-600">/</span>
+            <span
+              class="font-mono text-gray-700 dark:text-gray-300"
+              :title="t('admin.quotaKeys.probe.totalRemaining')"
+              data-test="quota-key-usage-total-remaining"
+            >{{ totalRemainingText ?? '—' }}</span>
+          </template>
+          <template v-else>
+            <span
+              class="font-mono text-gray-700 dark:text-gray-300"
+              :title="t('admin.quotaKeys.probe.max')"
+              data-test="quota-key-usage-total"
+            >{{ totalText ?? '—' }}</span>
+            <span class="text-gray-300 dark:text-dark-600">/</span>
+            <span
+              class="font-mono text-gray-700 dark:text-gray-300"
+              :title="t('admin.quotaKeys.probe.used')"
+              data-test="quota-key-usage-used"
+            >{{ usedText ?? '—' }}</span>
+            <template v-if="remainingText !== null">
+              <span class="text-gray-300 dark:text-dark-600">/</span>
+              <span
+                class="font-mono text-emerald-700 dark:text-emerald-300"
+                :title="t('admin.accounts.cnProviders.dimensionStatusRemaining')"
+                data-test="quota-key-usage-remaining"
+              >{{ remainingText }}</span>
+            </template>
           </template>
         </template>
         <span
@@ -136,9 +151,25 @@ const totalText = computed(() => toCountText(props.usage?.total))
 const usedText = computed(() => toCountText(props.usage?.used))
 const remainingText = computed(() => toCountText(props.usage?.remaining))
 
-/** 三数任一存在即渲染数值行；缺失位显示占位符，绝不补 0、绝不编造。 */
+/** USD 口径（如 kn_cy 等上游按美元计量）：分值不应被当作份额渲染。 */
+const isUSD = computed(() => props.usage?.remaining_unit === 'usd')
+
+function toUSDText(value: number | undefined | null): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return t('admin.quotaKeys.probe.usdAmount', { amount: value.toFixed(2) })
+}
+
+const todayRemainingText = computed(() => toUSDText(props.usage?.today_remaining))
+const totalRemainingText = computed(() => toUSDText(props.usage?.total_remaining))
+
+/** 三数任一存在即渲染数值行；或 USD 口径下任一 USD 剩余位存在时渲染。缺失位显示占位符，绝不补 0、绝不编造。 */
 const showNumbers = computed(
-  () => totalText.value !== null || usedText.value !== null || remainingText.value !== null
+  () =>
+    totalText.value !== null ||
+    usedText.value !== null ||
+    remainingText.value !== null ||
+    (isUSD.value && (todayRemainingText.value !== null || totalRemainingText.value !== null))
 )
 
 const statusText = computed(() => {

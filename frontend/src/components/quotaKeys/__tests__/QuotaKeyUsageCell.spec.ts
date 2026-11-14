@@ -12,7 +12,12 @@ vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
     ...actual,
-    useI18n: () => ({ t: (key: string) => key })
+    useI18n: () => ({
+      t: (key: string, params?: Record<string, unknown>) => {
+        if (params && typeof params.amount === 'string') return `${key}:${params.amount}`
+        return key
+      }
+    })
   }
 })
 
@@ -146,5 +151,54 @@ describe('QuotaKeyUsageCell 账号页供应商额度口径（§25.7-B）', () =>
 
     expect(wrapper.find('[data-test="quota-key-usage-cell"]').exists()).toBe(false)
     expect(wrapper.text().trim()).toBe('')
+  })
+})
+
+describe('QuotaKeyUsageCell USD 口径（KNCY-L）', () => {
+  /** USD 上游（如 kn_cy）：剩余按美元给出，分值（total/used/remaining）不应被当作份额渲染。 */
+  const usdUsage: QuotaKeyUsageProjection = {
+    scope: 'quota_key',
+    label: '所属激活码额度',
+    total: 29048,
+    used: 0,
+    remaining: 29048,
+    today_remaining: 0.48,
+    total_remaining: 290.48,
+    remaining_unit: 'usd',
+    status_code: 200,
+    checked_at: '2026-10-22T02:00:00Z',
+    attempted_at: '2026-10-22T02:00:00Z',
+    has_snapshot: true,
+    query_failed: false
+  }
+
+  it('USD 口径渲染今日/总额剩余（美金额），不渲染分值的 total/used/remaining', () => {
+    const wrapper = mount(QuotaKeyUsageCell, { props: { usage: usdUsage } })
+
+    // USD 分支：今日剩余含 0.48，总额剩余含 290.48。
+    expect(wrapper.get('[data-test="quota-key-usage-today-remaining"]').text()).toContain('0.48')
+    expect(wrapper.get('[data-test="quota-key-usage-total-remaining"]').text()).toContain('290.48')
+
+    // 绝不把分（29048）当份额渲染：既有三个分值 data-test 节点不存在。
+    expect(wrapper.find('[data-test="quota-key-usage-total"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="quota-key-usage-used"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="quota-key-usage-remaining"]').exists()).toBe(false)
+  })
+
+  it('USD 口径下 today_remaining 缺失：该位渲染占位符「—」，不补 0', () => {
+    const wrapper = mount(QuotaKeyUsageCell, {
+      props: { usage: { ...usdUsage, today_remaining: undefined } }
+    })
+
+    // 数值行仍渲染（因 total_remaining 存在）。
+    expect(wrapper.get('[data-test="quota-key-usage-today-remaining"]').exists()).toBe(true)
+    // 缺失位只给占位符，绝不补 0 或编造金额。
+    expect(wrapper.get('[data-test="quota-key-usage-today-remaining"]').text()).toBe('—')
+    expect(wrapper.get('[data-test="quota-key-usage-total-remaining"]').text()).toContain('290.48')
+
+    // 分值节点依然不渲染。
+    expect(wrapper.find('[data-test="quota-key-usage-total"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="quota-key-usage-used"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="quota-key-usage-remaining"]').exists()).toBe(false)
   })
 })

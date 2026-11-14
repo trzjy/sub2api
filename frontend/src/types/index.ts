@@ -1554,6 +1554,12 @@ export interface QuotaKeyUsageProjection {
   error_code?: string
   has_snapshot: boolean
   query_failed: boolean
+  /** 今日剩余（USD，仅 remaining_unit==='usd' 时给出；缺失≠0）。 */
+  today_remaining?: number
+  /** 总额剩余（USD，仅 remaining_unit==='usd' 时给出）。 */
+  total_remaining?: number
+  /** 计量口径：'usd'（kn_cy 等 USD 上游）| 缺失（份额制）。 */
+  remaining_unit?: string
 }
 
 /**
