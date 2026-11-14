@@ -1384,6 +1384,60 @@ func TestQuotaKeyHandler_ProbeQuota_UsageProjectionUnavailable_FailsClosed(t *te
 	require.Nil(t, payload.Data, "失败关闭时不得返回 KeyQuotaLookupInfo / usage")
 }
 
+// TestQuotaKeyHandler_ProbeQuota_UsageProjectionEmpty_NilNil_FailsClosed 钉死 KNCY-Q 的空投影失败关闭语义：
+// 探测提交与读取投影之间若发生换码，writeCredentialsLocked 会清空快照，使
+// QuotaKeyUsageProjectionFor 返回 (nil, nil)（绕过 usageErr != nil 分支）。
+// 此时投影缺失即无法安全展示（kn_cy 的 max/used 是「分」），必须与读取失败同等 503 失败关闭，
+// 而非带着本次原始分值（如 max=29048）返回成功信封。
+//
+// 装配要点：autoEntry 用真实 PostgreSQL 仓储（ProbeKeyQuota 必须成功返回 lookup 摘要并落库），
+// handler 的 svc（仅承载 QuotaKeyUsageProjectionFor）读取同一 id 的快照，但快照为空（nil,nil）。
+func TestQuotaKeyHandler_ProbeQuota_UsageProjectionEmpty_NilNil_FailsClosed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"key_info":{` +
+			`"group":"Pro","key_status_code":1,"quota_key_max_quota":400,` +
+			`"quota_key_used_quota":37,"device_count":1,"device_max_count":3,` +
+			`"mode":1,"expired_at":"2026-12-31T00:00:00Z"}}}`))
+	}))
+	defer srv.Close()
+
+	gin.SetMode(gin.TestMode)
+	client := newProbePostgresClient(t)
+	settingRepo := repository.NewSettingRepository(client)
+	quotaKeyRepo := repository.NewQuotaKeyRepository(client)
+
+	// autoEntry 用真实 PostgreSQL 仓储：ProbeKeyQuota 必须成功返回 lookup 摘要并落库快照。
+	autoEntry := service.NewCursorAutoEntryService(settingRepo, quotaKeyRepo, service.NewCredcryptEncryptor(), client, &http.Client{Timeout: 5 * time.Second}, srv.URL)
+
+	// 预置一个真实激活码（落在 autoEntry 读取/写入的同一 PostgreSQL 仓储里）。
+	createSvc := service.NewQuotaKeyService(quotaKeyRepo, service.NewCredcryptEncryptor(), nil, client)
+	status := newProbeQuotaKey(t, createSvc, client, "NILNIL")
+
+	// 关键：handler 的 svc（仅承载 QuotaKeyUsageProjectionFor）读取投影时返回 (nil, nil)。
+	// 模拟「探测提交与读取投影之间快照被换码清空」——同一 id、但快照列为空（无 UsageSnapshot）。
+	projRepo := newFakeQuotaKeyRepo()
+	projRepo.seed(status.ID, "1234", "active", false) // 未设置 UsageSnapshot → BuildQuotaKeyUsageProjection 返回 nil。
+	projSvc := newQuotaKeyService(projRepo, nil)
+
+	handler := NewQuotaKeyHandler(projSvc, nil, autoEntry, nil)
+	router := gin.New()
+	qk := router.Group("/api/v1/admin/quota_keys")
+	qk.POST("/:id/probe_quota", handler.ProbeQuota)
+
+	rec := doQuotaKeyJSON(router, http.MethodPost, "/api/v1/admin/quota_keys/"+itoa(status.ID)+"/probe_quota", "")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "quota key usage projection unavailable")
+
+	// 失败关闭：不得返回成功信封，亦不得返回 KeyQuotaLookupInfo（原始分值 max/used）。
+	var payload struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Nil(t, payload.Data, "空投影失败关闭时不得返回 KeyQuotaLookupInfo / usage")
+}
+
 // TestQuotaKeyHandler_ProbeQuota_UsageProjectionSuccess_ReturnsUsage 钉死投影成功时行为不变（含 usage）：
 // 置于 ProbeQuota 过滤下，证明 KNCY-P 未破坏成功路径（与既有 Probe_UsageProjectionFromCommittedSnapshot 同语义）。
 func TestQuotaKeyHandler_ProbeQuota_UsageProjectionSuccess_ReturnsUsage(t *testing.T) {

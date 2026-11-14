@@ -661,6 +661,13 @@ func (h *QuotaKeyHandler) ProbeQuota(c *gin.Context) {
 			response.Error(c, http.StatusServiceUnavailable, "quota key usage projection unavailable")
 			return
 		}
+		if usage == nil {
+			// 快照可能在探测提交与读取投影之间被换码清空（QuotaKeyUsageProjectionFor 返回 nil,nil）。
+			// 投影缺失即无法安全展示（kn_cy 的 max/used 是「分」），与读取失败同等失败关闭。
+			slog.Warn("admin_quota_key_probe_usage_projection_empty", "quota_key_id", id)
+			response.Error(c, http.StatusServiceUnavailable, "quota key usage projection unavailable")
+			return
+		}
 		body.Usage = usage
 	}
 	response.Success(c, body)
