@@ -773,7 +773,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。
-	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body)
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(c.Request.Context(), c, reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, sessionHash, body)
 	for id := range largeRequestOnlyAdds {
 		failedAccountIDs[id] = struct{}{}
 	}
@@ -1610,7 +1610,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。估算模型用映射后的 estimateModel（与既有三门派发单同口径）。
-	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body)
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(c.Request.Context(), c, reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, sessionHash, body)
 	for id := range largeRequestOnlyAdds {
 		failedAccountIDs[id] = struct{}{}
 	}
@@ -3453,7 +3453,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。用连接首帧（firstMessage）估算，模型用 wsForwardModel。
-	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage)
+	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(ctx, c, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, sessionHash, firstMessage)
 	for id := range largeRequestOnlyAdds {
 		failedAccountIDs[id] = struct{}{}
 	}
@@ -5654,11 +5654,13 @@ func (h *OpenAIGatewayHandler) applySensenovaSizeExclusion(
 // protocol/body 与 applySelfHostSizeExclusion 同来源。
 func (h *OpenAIGatewayHandler) applyRequestSizeScopeExclusion(
 	ctx context.Context,
+	c *gin.Context,
 	reqLog *zap.Logger,
 	groupID *int64,
 	platform string,
 	model string,
 	protocol service.TierRoutingRequestProtocol,
+	sessionHash string,
 	body []byte,
 ) (int, map[int64]struct{}) {
 	empty := make(map[int64]struct{})
@@ -5678,21 +5680,42 @@ func (h *OpenAIGatewayHandler) applyRequestSizeScopeExclusion(
 		return 0, empty
 	}
 
+	// 用「同一会话上一单上游回报的真实输入 token」校正本地估算（根因修复，2026-11-15）。
+	// 本地估算用 tiktoken，与上游分词器不同源且系统性偏低（生产实测 984 只有实际的 63%、
+	// goaichat 系列 72~75%），只靠它会把 30 万 token 的活判成 15~25 万的小活，
+	// 长活于是落进 small_request_only 账号（11-12 起 3 天漏判 463 次，是误判的 33 倍）。
+	// 完整判定与滞回规则见 service.ResolveRequestSizeRouting。
+	lastReal, hasLast := h.gatewayService.LastSessionInputTokens(ctx, groupID, sessionHash)
+	effective, isLargeRequest := service.ResolveRequestSizeRouting(estimated, lastReal, hasLast)
+	if effective != estimated {
+		reqLog.Debug("request_size_scope_corrected_by_last_turn",
+			zap.Int64("group_id", groupIDVal),
+			zap.Int("local_estimate", estimated),
+			zap.Int("last_real_input_tokens", lastReal),
+			zap.Int("effective", effective),
+			zap.Bool("is_large_request", isLargeRequest))
+	}
+
+	// 把会话哈希装进请求 ctx：RecordUsage 拿到上游真实 token 后据此记回该会话，
+	// 形成「每单写回真实值 → 下一单用它兜底估算」的闭环。
+	if sessionHash != "" {
+		c.Request = c.Request.WithContext(service.WithRequestSizeSessionHash(ctx, sessionHash))
+	}
+
 	// 请求规模三态排除：小请求（<=256K）排除「仅接大请求」账号，
 	// 大请求（>256K）排除「仅接小请求」账号。两类账号各自只参与对应规模的候选。
-	isLargeRequest := estimated > service.LargeRequestOnlyInputThreshold
 	excluded, err := h.gatewayService.RequestSizeScopeExcludedIDs(ctx, groupID, platform, isLargeRequest)
 	if err != nil {
 		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
 		reqLog.Warn("request_size_scope_list_failed",
 			zap.Int64("group_id", groupIDVal),
 			zap.String("platform", platform),
-			zap.Int("estimated_input_tokens", estimated),
+			zap.Int("estimated_input_tokens", effective),
 			zap.Bool("is_large_request", isLargeRequest),
 			zap.Error(err))
-		return estimated, empty
+		return effective, empty
 	}
-	return estimated, excluded
+	return effective, excluded
 }
 
 // attachCursorEstimatedInputTokens 对 cursor 平台请求（含 kn-cy 等 OpenAI 兼容反代），

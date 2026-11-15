@@ -260,6 +260,15 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageOutputTokens:    result.Usage.ImageOutputTokens,
 	}
 
+	// 把本单上游回报的真实输入 token 记回会话 —— 这是请求规模分流预判的下界来源
+	//（见 openai_request_size_gate.go）。本地 tiktoken 估算对上游分词器系统性偏低，
+	// 用「上一单真实值」兜住它，才不会把 30 万 token 的长活判成小活。
+	// 会话哈希由 handler 在选号前装入 ctx；未装（图片/异步/非网关路径）时跳过，失败开放。
+	if gateSessionHash := RequestSizeSessionHash(ctx); gateSessionHash != "" {
+		s.rememberSessionInputTokens(ctx, apiKey.GroupID, gateSessionHash,
+			tokens.InputTokens+tokens.CacheCreationTokens+tokens.CacheReadTokens)
+	}
+
 	// Get rate multiplier
 	multiplier := 1.0
 	if s.cfg != nil {

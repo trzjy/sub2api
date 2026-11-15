@@ -18,6 +18,11 @@ const stickySessionPrefix = "sticky_session:"
 const openAIResponsesSessionWindowPrefix = "openai_responses_session_window:"
 const liveCallPrefix = "live:call:"
 
+// sessionInputTokensPrefix 存「同一会话上一单上游回报的真实输入 token」，
+// 供请求规模分流做下界预判（见 service/openai_request_size_gate.go）。
+// 与 sticky_session 同 groupID 隔离、同 TTL 滑动。
+const sessionInputTokensPrefix = "session_input_tokens:"
+
 type gatewayCache struct {
 	rdb *redis.Client
 }
@@ -34,6 +39,35 @@ func buildSessionKey(groupID int64, sessionHash string) string {
 
 func buildOpenAIResponsesSessionWindowKey(groupID int64, sessionHash string) string {
 	return fmt.Sprintf("%s%d:%s", openAIResponsesSessionWindowPrefix, groupID, sessionHash)
+}
+
+func buildSessionInputTokensKey(groupID int64, sessionHash string) string {
+	return fmt.Sprintf("%s%d:%s", sessionInputTokensPrefix, groupID, sessionHash)
+}
+
+// GetSessionInputTokens 读取会话上一单的真实输入 token。
+// 未记录（redis.Nil）返回 0 且无错误 —— 语义是「没有上一单」，不是故障。
+func (c *gatewayCache) GetSessionInputTokens(ctx context.Context, groupID int64, sessionHash string) (int, error) {
+	if c == nil || c.rdb == nil || strings.TrimSpace(sessionHash) == "" {
+		return 0, nil
+	}
+	tokens, err := c.rdb.Get(ctx, buildSessionInputTokensKey(groupID, sessionHash)).Int()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return tokens, nil
+}
+
+// SetSessionInputTokens 记录会话上一单的真实输入 token，TTL 由调用方给
+//（与粘性会话同步滑动，保证「会话还粘着」时预判值一定还在）。
+func (c *gatewayCache) SetSessionInputTokens(ctx context.Context, groupID int64, sessionHash string, tokens int, ttl time.Duration) error {
+	if c == nil || c.rdb == nil || strings.TrimSpace(sessionHash) == "" || tokens <= 0 || ttl <= 0 {
+		return nil
+	}
+	return c.rdb.Set(ctx, buildSessionInputTokensKey(groupID, sessionHash), tokens, ttl).Err()
 }
 
 func (c *gatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
