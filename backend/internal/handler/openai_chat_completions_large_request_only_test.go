@@ -36,8 +36,8 @@ func applyChatCompletionsLargeRequestOnlyForTest(
 	failedAccountIDs map[int64]struct{},
 ) (int, bool, map[int64]struct{}) {
 	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(
-		context.Background(), zap.NewNop(), groupID, platform, model,
-		service.TierRoutingProtocolChatCompletions, body)
+		context.Background(), nil, zap.NewNop(), groupID, platform, model,
+		service.TierRoutingProtocolChatCompletions, "", body)
 	for id := range largeRequestOnlyAdds {
 		failedAccountIDs[id] = struct{}{}
 	}

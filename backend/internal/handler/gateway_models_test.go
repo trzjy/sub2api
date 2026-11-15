@@ -1008,7 +1008,9 @@ func TestDefaultModelIDsForPlatform_CNProvidersKeepClaudeDefaults(t *testing.T) 
 }
 
 func TestDefaultCodexModelIDsForPlatform_DeepSeekUsesDeepSeekModels(t *testing.T) {
-	require.Equal(t, []string{"deepseek-v4-pro", "deepseek-v4-flash", "deepseek-flash"}, defaultCodexModelIDsForPlatform(service.PlatformDeepseek))
+	// deepseek-v4-flash 已于 2026-11-05 永久下线，兜底清单里不再包含它
+	// （口径见 gateway_handler.go defaultCodexModelIDsForPlatform 的注释）。
+	require.Equal(t, []string{"deepseek-v4-pro", "deepseek-flash"}, defaultCodexModelIDsForPlatform(service.PlatformDeepseek))
 	require.Equal(t, []string{"MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5"}, defaultCodexModelIDsForPlatform(service.PlatformMiniMax))
 	require.Equal(t, defaultModelIDsForPlatform(service.PlatformAnthropic), defaultCodexModelIDsForPlatform(service.PlatformAnthropic))
 }
@@ -1051,7 +1053,8 @@ func TestGatewayCodexModels_DeepSeekWithoutMappingUsesDeepSeekDefaults(t *testin
 		slugs = append(slugs, model.Slug)
 	}
 	require.Contains(t, slugs, "deepseek-v4-pro")
-	require.Contains(t, slugs, "deepseek-v4-flash")
+	// 下线的模型不能借兜底清单复活（2026-11-05 裁定）。
+	require.NotContains(t, slugs, "deepseek-v4-flash")
 	require.NotContains(t, slugs, "claude-sonnet-4-6")
 	require.NotContains(t, slugs, "claude-opus-4-6")
 }
@@ -1533,8 +1536,13 @@ func TestGatewayModels_GeminiGroupIncludesAntigravityGeminiMappings(t *testing.T
 	require.Contains(t, ids, "gemini-synced-custom")
 	require.Contains(t, ids, "gemini-3.8-flash-low")
 	require.Contains(t, ids, "gemini-native-only")
-	require.NotContains(t, ids, "gemini-disabled-only")
-	require.NotContains(t, ids, "gemini-unset-only")
+	// 模型列表口径 = 静态配置口径，不再受 mixed_scheduling 运行时开关控制
+	// （见 service.mixedListingAccountAllowed 注释：混合调度已自动启用，
+	// 候选展示不应随调度开关抖动）。因此「开关关着」和「没写开关」的账号
+	// 配置的模型同样出现——真正会随开关收窄的是 catalog 能力交集，
+	// 那由 mixedListingAccountCatalogCapable 负责，不在本列表断言范围。
+	require.Contains(t, ids, "gemini-disabled-only")
+	require.Contains(t, ids, "gemini-unset-only")
 	// antigravity 账号的 claude-* 映射与 anthropic 账号的映射都不应出现在 gemini 分组。
 	require.NotContains(t, ids, "claude-sonnet-4-6")
 	require.NotContains(t, ids, "claude-opus-4-6")

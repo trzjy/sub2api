@@ -338,16 +338,30 @@ func (s *OpsAlertEvaluatorService) pruneRuleStates(rules []*OpsAlertRule) {
 	}
 }
 
+// ensureRuleStatesLocked 保证 ruleStates 可写。调用方必须已持 s.mu。
+//
+// 字段是 map 时「零值可用」不能依赖构造函数：字面量构造（单元测试、局部装配、
+// 未来重构）拿到的是 nil map，写入即 panic（2026-11-15 单测实证：
+// assignment to entry in nil map @本次 resetRuleState）。写入口统一兜底，
+// 比要求每个调用方记得 make 更可靠——这也是懒初始化的唯一入口。
+func (s *OpsAlertEvaluatorService) ensureRuleStatesLocked() map[int64]*opsAlertRuleState {
+	if s.ruleStates == nil {
+		s.ruleStates = make(map[int64]*opsAlertRuleState)
+	}
+	return s.ruleStates
+}
+
 func (s *OpsAlertEvaluatorService) resetRuleState(ruleID int64, now time.Time) {
 	if ruleID <= 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state, ok := s.ruleStates[ruleID]
+	states := s.ensureRuleStatesLocked()
+	state, ok := states[ruleID]
 	if !ok {
 		state = &opsAlertRuleState{}
-		s.ruleStates[ruleID] = state
+		states[ruleID] = state
 	}
 	state.LastEvaluatedAt = now
 	state.ConsecutiveBreaches = 0
@@ -360,10 +374,11 @@ func (s *OpsAlertEvaluatorService) updateRuleBreaches(ruleID int64, now time.Tim
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	state, ok := s.ruleStates[ruleID]
+	states := s.ensureRuleStatesLocked()
+	state, ok := states[ruleID]
 	if !ok {
 		state = &opsAlertRuleState{}
-		s.ruleStates[ruleID] = state
+		states[ruleID] = state
 	}
 
 	if !state.LastEvaluatedAt.IsZero() && interval > 0 {

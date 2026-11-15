@@ -110,8 +110,13 @@ func TestTierRoutingApplyRoutingGateErrorPassthrough(t *testing.T) {
 }
 
 // TestTierRoutingApplyRoutingTargetModelGateOpen 验证目标模型且门开启时装门返回新 ctx，
-// 并输出一行结构化日志（request_id + 估算 input + 分档 small/big）。=3000 判小的精确边界
-// 由 TestTierRoutingClassForEstimate 在纯分档函数层确定性覆盖（派发单 OC-T1，测试 #2 + #1）。
+// 并输出一行结构化日志（request_id + 估算 input + 分档 small/big）。
+// 判小的精确边界由 TestTierRoutingClassForEstimate 在纯分档函数层确定性覆盖
+// （派发单 OC-T1，测试 #2 + #1）。
+//
+// 注意：大/小档的用例必须相对 service.TierRoutingInputThreshold 取值，不要写死词数——
+// 阈值在 40066cd4fd 已从 3000 提到 1 万，历史上写死的 3500 词于是被判成 small，
+// 让本用例长期带着「测试没跟上实现」的假失败。
 func TestTierRoutingApplyRoutingTargetModelGateOpen(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -120,7 +125,7 @@ func TestTierRoutingApplyRoutingTargetModelGateOpen(t *testing.T) {
 	}{
 		{"small_below", "hello world", "small"},
 		{"small_above_old_threshold", repeatWords(1500), "small"},
-		{"big_above", repeatWords(3500), "big"},
+		{"big_above", repeatWords(service.TierRoutingInputThreshold * 2), "big"},
 	}
 	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "glm-5.3-flash"} {
 		for _, tc := range cases {
