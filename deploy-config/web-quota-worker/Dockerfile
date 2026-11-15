@@ -7,6 +7,13 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PW_BROWSERS_PATH=/ms-playwright
 
+# pip 抗抖（2026-11-15 两次实证）：这个镜像每次部署都要现从外网拉 Python 包，
+# pip 默认 timeout=15s / retries=5，服务器出口只要抖一下（Read timed out）
+# 整个部署就整体中止（deploy-to-server.sh 是「任一镜像失败即 exit 1」）。
+# 本镜像与业务代码无关的构建失败不该阻断主服务发布，故放宽到 120s × 10 次。
+ENV PIP_TIMEOUT=120 \
+    PIP_RETRIES=10
+
 WORKDIR /app
 
 # 安装中文字体（2026-11-13 反风控增强）：字体列表是指纹检测点之一，
