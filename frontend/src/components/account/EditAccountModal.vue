@@ -6087,7 +6087,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
               ? 'https://api.typesafe.ai'
             : isMultiProtocolApiKeyPlatform(newAccount.platform)
               ? defaultCNBaseUrl(newAccount.platform, currentOpenCodeOrCNMode(), editApiProtocol.value)
-              : 'https://api.anthropic.com'
+              : newAccount.platform === 'devin'
+                ? ''
+                : 'https://api.anthropic.com'
     editBaseUrl.value = isCNApiKeyAccount.value && editApiProtocol.value === 'adaptive'
       ? editAdaptiveBaseUrls.value.chat_completions
       : (credentials.base_url as string) || platformDefaultUrl
@@ -6937,6 +6939,11 @@ const handleSubmit = async () => {
         ...currentCredentials,
         base_url: newBaseUrl
       }
+      // devin（Cascade）后端固定走 server.codeium.com，不使用 base_url：
+      // 既不写入新值，也清掉历史遗留值，避免污染凭据并误导管理员。
+      if (props.account.platform === 'devin') {
+        delete newCredentials.base_url
+      }
 
       // 国产供应商：模式与协议写入凭据（决定额度/余额探测与转发端点/格式）。
       // 网页接入账号不适用：access_mode=web 是唯一判定源，account_mode/api_protocol
@@ -7136,7 +7143,12 @@ const handleSubmit = async () => {
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
 
-      newCredentials.base_url = editBaseUrl.value.trim()
+      // devin 不使用 base_url：不写入并清掉旧值（与 apikey 分支保持一致）。
+      if (props.account.platform === 'devin') {
+        delete newCredentials.base_url
+      } else {
+        newCredentials.base_url = editBaseUrl.value.trim()
+      }
 
       if (editApiKey.value.trim()) {
         newCredentials.api_key = editApiKey.value.trim()
