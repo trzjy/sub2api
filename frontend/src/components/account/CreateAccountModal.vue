@@ -252,6 +252,18 @@
           >
             Muse
           </button>
+          <button
+            type="button"
+            @click="selectDevinPlatform"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'devin'
+                ? 'bg-white text-emerald-600 shadow-sm dark:bg-dark-600 dark:text-emerald-400'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            Devin
+          </button>
         </div>
       </div>
 
@@ -4795,6 +4807,14 @@ function selectMusePlatform() {
   form.type = 'apikey'
   accountCategory.value = 'apikey'
   apiKeyBaseUrl.value = 'https://opencode.ai/zen/go/v1'
+}
+
+// Devin：国际（非国产）平台，仅有 apikey 一种类型，无 OAuth / setup-token /
+// cookie / 网页接入 / 协议选择器。与后续 watch 默认值一致，显式设 type 避免竞态。
+function selectDevinPlatform() {
+  form.platform = 'devin'
+  form.type = 'apikey'
+  accountCategory.value = 'apikey'
 }
 
 // 网页接入为 CN 平台的账号模式（平台归并 PR-3）：platform 保持官方值，
