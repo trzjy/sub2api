@@ -1187,8 +1187,15 @@ func TestOpenAICNFirstByteTimeout_CCNativeStreamingAfterHeadersEmitsErrorEvent(t
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	// 首个 SSE 事件写出（提交响应头）后，读取再以内部超时中断。
+	// 夹具必须带正文块：只有 message_start 的流经 CC 转换后只剩 role 帧，
+	// 空回答闸门会把它扣在手里不写出（保持可换号窗口），响应头就不会提交，
+	// 本用例要验的「响应头已提交后的超时」路径也就走不到。
 	prefix := "event: message_start\n" +
-		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"kimi-k3","usage":{"input_tokens":10}}}` + "\n\n"
+		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"kimi-k3","usage":{"input_tokens":10}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"pong"}}` + "\n\n"
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},

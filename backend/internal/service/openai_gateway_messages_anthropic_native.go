@@ -30,6 +30,70 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// emptyAnthropicContentErrorCode 是「上游 200 但整条流没有任何可渲染内容」的
+// error_code，用于 ops_error_logs 事后统计与客户端识别。
+const emptyAnthropicContentErrorCode = "upstream_empty_content"
+
+// anthropicSSELineCarriesPayloadContent 判断一条 Anthropic SSE data 行是否携带
+// 客户端能看见的语义内容（正文 / 工具调用 / 图片等）。
+//
+// 判据只认「会被渲染的块」：thinking / redacted_thinking 及其增量不算 —— 上下文
+// 预算被思考吃光时上游会正常收尾但正文为空，客户看到的就是一个空白回答。
+// 纯工具调用（content_block_start type=tool_use / input_json_delta）算内容，
+// 因为 Claude Code 那类客户端确实会执行它，不是空回答。
+func anthropicSSELineCarriesPayloadContent(payload string) bool {
+	if payload == "" {
+		return false
+	}
+	switch gjson.Get(payload, "type").String() {
+	case "content_block_start":
+		blockType := gjson.Get(payload, "content_block.type").String()
+		return blockType != "" && blockType != "thinking" && blockType != "redacted_thinking"
+	case "content_block_delta":
+		switch gjson.Get(payload, "delta.type").String() {
+		case "thinking_delta", "signature_delta":
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// anthropicResponseHasRenderableContent 判断非流式 Anthropic 响应体里有没有
+// 客户端能渲染的内容。与流式判据同源：thinking / redacted_thinking 不算，
+// 其它内容块（text / tool_use / image …）都算。
+//
+// 结构不可识别（content 缺失或不是数组）时返回 true —— 未知形态保持原样透传，
+// 只拦「明确是空 content 数组」这一种。
+func anthropicResponseHasRenderableContent(body []byte) bool {
+	content := gjson.GetBytes(body, "content")
+	if !content.Exists() || !content.IsArray() {
+		return true
+	}
+	renderable := false
+	content.ForEach(func(_, block gjson.Result) bool {
+		switch block.Get("type").String() {
+		case "thinking", "redacted_thinking":
+		default:
+			renderable = true
+			return false
+		}
+		return true
+	})
+	return renderable
+}
+
+// newEmptyAnthropicContentFailoverError 构造「上游空回答」的 failover 错误：
+// 走既有 upstream-error 换号路径，让本次请求换到下一个账号重试。
+// SafeToFailoverAfterWrite=true —— 判定成立的前提是客户端一个语义字节都没收到
+// （与缓冲期循环命中同一语义，见 newRepetitionLoopFailoverError）。
+func newEmptyAnthropicContentFailoverError() *UpstreamFailoverError {
+	return &UpstreamFailoverError{
+		StatusCode:               http.StatusBadGateway,
+		SafeToFailoverAfterWrite: true,
+	}
+}
+
 // forwardAnthropicViaNativeAnthropicEndpoint 将 Anthropic Messages 请求零转换
 // 直通到国产供应商的原生 Anthropic 端点。仅做模型名映射与少量 body 清洗
 // （空文本块 / web-search 历史块），协议本身不转换。
@@ -297,6 +361,19 @@ func (s *OpenAIGatewayService) handleNativeAnthropicBufferedResponse(
 		}
 	}
 
+	// 空回答闸门（非流式）：上游 200 但 content 里没有任何可渲染内容时，
+	// 客户拿到的是一份空白答案。此处响应尚未写出，可安全换号重试（冷却该账号）；
+	// stop_reason=max_tokens 属客户端预算不足的预期截断，不判账号故障。
+	if !anthropicResponseHasRenderableContent(body) && gjson.GetBytes(body, "stop_reason").String() != "max_tokens" {
+		message := "upstream returned 200 without any renderable content (buffered)"
+		logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Empty content response, failover: account=%d model=%s request_id=%s", account.ID, upstreamModel, resp.Header.Get("x-request-id"))
+		s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, emptyAnthropicContentErrorCode, message)
+		if s.accountRepo != nil {
+			tempUnscheduleEmptyResponse(ctx, s.accountRepo, account.ID, "[CN Anthropic 直通] empty_content")
+		}
+		return nil, newEmptyAnthropicContentFailoverError()
+	}
+
 	c.Data(resp.StatusCode, contentType, body)
 
 	return &OpenAIForwardResult{
@@ -364,6 +441,13 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	clientDisconnected := false
 	clientOutputStarted := false
 	sawTerminalEvent := false
+	// payloadContentSeen 表示上游真的吐出了客户端能渲染的内容（正文/工具调用）。
+	// 只在收流结束时仍为 false，才可能是「200 但空白回答」。
+	payloadContentSeen := false
+	// upstreamStopReason 是上游终态给的停止原因（message_delta.delta.stop_reason）。
+	// stop_reason=max_tokens 时空正文是客户端把输出预算给小了，属预期截断，
+	// 换号与冷却账号都没意义，不能据此判账号故障。
+	upstreamStopReason := ""
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -535,10 +619,48 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 		}
 	}
 
+	// failoverOnEmptyContent 是「上游 200 但空白回答」的闸门。
+	//
+	// 场景：上游正常收流（HTTP 200 + message_stop），但整条流只有 thinking 或
+	// 什么都没有。此时客户拿到的就是一个空白回答 —— 这正是「接了长活却答不出」
+	// 的客户体验，绝不能当成功交给下游。
+	//
+	// 判定成立的前提是「客户端一个语义字节都没收到」（openAIStreamClientOutputStarted
+	// 为假）：只有这样换号重发才对客户完全透明。响应一旦开始写出就返回 nil 走原
+	// 语义，绝不中途改写已经发出去的流。
+	//
+	// 命中后按全平台同一个停调原语冷却该账号（tempUnscheduleEmptyResponse），
+	// 冷却到期自动回池，不引入新状态机。
+	failoverOnEmptyContent := func(stage string) error {
+		if payloadContentSeen || clientDisconnected {
+			return nil
+		}
+		if openAIStreamClientOutputStarted(c, clientOutputStarted) {
+			return nil
+		}
+		if upstreamStopReason == "max_tokens" {
+			// 客户端把 max_tokens 给小了：空正文是预期截断，不是账号故障。
+			logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Empty content with stop_reason=max_tokens, pass through: account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
+			return nil
+		}
+		message := "upstream stream ended without any renderable content (stage=" + stage + ")"
+		logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Empty content stream, failover: account=%d model=%s request_id=%s stage=%s", account.ID, upstreamModel, requestID, stage)
+		s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, emptyAnthropicContentErrorCode, message)
+		if s != nil && s.accountRepo != nil {
+			tempUnscheduleEmptyResponse(ctx, s.accountRepo, account.ID, "[CN Anthropic 直通] empty_content")
+		}
+		return newEmptyAnthropicContentFailoverError()
+	}
+
 	for {
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				// 空内容闸门必须先于 flushGuardBuffer：缓冲一旦放行，客户端就
+				// 收到（空的）200 流，换号窗口关闭。
+				if err := failoverOnEmptyContent("eof"); err != nil {
+					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), err
+				}
 				flushGuardBuffer()
 				if !clientDisconnected {
 					flusher.Flush()
@@ -560,10 +682,17 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), nil
 			}
 			if ev.err != nil {
-				flushGuardBuffer()
 				if sawTerminalEvent {
+					// 终态已收到但读出错：同样可能是「有终态、无正文」。闸门先于
+					// 任何放行，避免把空回答当成功；闸门未命中时仍按既有语义放行
+					// 缓冲，不丢已收到的内容。
+					if err := failoverOnEmptyContent("terminal_read_error"); err != nil {
+						return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), err
+					}
+					flushGuardBuffer()
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), nil
 				}
+				flushGuardBuffer()
 				if clientDisconnected {
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
 						fmt.Errorf("stream usage incomplete after disconnect: %w", ev.err)
@@ -604,6 +733,12 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				trimmed := strings.TrimSpace(data)
 				observer.ObserveAnthropic([]byte(trimmed))
+				if !payloadContentSeen && anthropicSSELineCarriesPayloadContent(trimmed) {
+					payloadContentSeen = true
+				}
+				if sr := gjson.Get(trimmed, "delta.stop_reason").String(); sr != "" {
+					upstreamStopReason = sr
+				}
 				if anthropicStreamEventIsTerminal("", trimmed) {
 					sawTerminalEvent = true
 				}

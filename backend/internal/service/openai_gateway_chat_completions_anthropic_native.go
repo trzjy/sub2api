@@ -338,6 +338,7 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 	// 提交 200 后让客户端拿到成功空流。响应头已提交后才到的超时按既有流
 	// 中断语义处理（发错误事件，不 finalize 冒充成功）。
 	clientOutputStarted := false
+	upstreamStopReason := ""
 	writeStreamHeaders := func() {
 		if clientOutputStarted {
 			return
@@ -427,6 +428,35 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 		return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 	}
 
+	writeChunkRaw := func(out string) bool {
+		if clientDisconnected {
+			return false
+		}
+		// 首个 SSE 事件写出前才提交响应头（CN 首包超时整改：首字节前不提交，
+		// 保持可切换窗口）。
+		writeStreamHeaders()
+		if _, err := fmt.Fprint(c.Writer, out); err != nil {
+			clientDisconnected = true
+			return false
+		}
+		return false
+	}
+
+	// 空回答闸门（流式）：上游可能回 200、流也正常收尾，却没有任何正文（只有
+	// 思考）。此时若已把 role 帧写出去，响应头就提交了，客户只能收到一个空白
+	// 回答。这里把「还没有可渲染增量」的 chunk 先扣在手里不写出，保持可换号
+	// 窗口；一旦出现正文/工具调用/拒答就放行缓冲转直通。
+	// 缓冲超上限即放弃换号窗口直接放行，避免长思考流把内存撑住。
+	const maxPendingCCChunks = 64
+	var pendingCC []string
+	payloadContentSeen := false
+	emptyGateGivenUp := false
+	flushPendingCC := func() {
+		for _, out := range pendingCC {
+			writeChunkRaw(out)
+		}
+		pendingCC = nil
+	}
 	writeChunk := func(chunk apicompat.ChatCompletionsChunk) bool {
 		if clientDisconnected {
 			return false // 已断开：不再写客户端，只排水上游累计 usage
@@ -436,12 +466,26 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			return false
 		}
 		out := string(reverseToolNamesIfPresent(c, []byte(sse)))
-		// 首个 SSE 事件写出前才提交响应头（CN 首包超时整改：首字节前不提交，
-		// 保持可切换窗口）。
-		writeStreamHeaders()
-		if _, err := fmt.Fprint(c.Writer, out); err != nil {
-			clientDisconnected = true
-			return false
+		if payloadContentSeen || emptyGateGivenUp {
+			return writeChunkRaw(out)
+		}
+		if chatChunkCarriesPayloadContent(chunk) {
+			payloadContentSeen = true
+			flushPendingCC()
+			return writeChunkRaw(out)
+		}
+		if chatChunkCarriesReasoning(chunk) {
+			// 上游已经在吐思考内容：客户端能看到进展了，不能继续扣着（扣着会把
+			// 「逐字出现的思考」变成「长时间空白后一次性刷出」）。放行缓冲并放弃
+			// 换号窗口 —— 此时响应头提交，换号已不可能。
+			emptyGateGivenUp = true
+			flushPendingCC()
+			return writeChunkRaw(out)
+		}
+		pendingCC = append(pendingCC, out)
+		if len(pendingCC) >= maxPendingCCChunks {
+			emptyGateGivenUp = true
+			flushPendingCC()
 		}
 		return false
 	}
@@ -456,6 +500,9 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 		// usage 恒累计（含客户端断开后的排水阶段，payg 上游照常计费）。
 		if event.Type == "message_delta" && event.Usage != nil {
 			mergeAnthropicUsage(&usage, *event.Usage)
+		}
+		if event.Type == "message_delta" && event.Delta != nil && event.Delta.StopReason != "" {
+			upstreamStopReason = event.Delta.StopReason
 		}
 		if event.Type == "message_start" && event.Message != nil {
 			mergeAnthropicUsage(&usage, event.Message.Usage)
@@ -575,6 +622,21 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 		writeChunk(chunk) //nolint:errcheck
 	}
 
+	// 收尾闸门：整条流没有任何可渲染内容，且尚未向客户端提交任何字节 →
+	// 判成上游空回答，冷却该账号并换号重试（客户无感）。stop_reason=max_tokens
+	// 属客户端输出预算不足的预期截断，不判账号故障、不重试。
+	if !payloadContentSeen && !emptyGateGivenUp && !clientDisconnected && !clientOutputStarted &&
+		upstreamStopReason != "max_tokens" {
+		message := "upstream returned 200 without any renderable content (chat stream)"
+		logger.LegacyPrintf("service.gateway", "[CC→CN Anthropic 直通] Empty content stream, failover: account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
+		s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, emptyAnthropicContentErrorCode, message)
+		if s.accountRepo != nil {
+			tempUnscheduleEmptyResponse(ctx, s.accountRepo, account.ID, "[CC→CN Anthropic 直通] empty_content")
+		}
+		return nil, newEmptyAnthropicContentFailoverError()
+	}
+	flushPendingCC()
+
 	if !clientDisconnected {
 		// 空流正常收尾也要提交响应头（上游未发任何事件即 EOF 时 [DONE] 即首字节）。
 		writeStreamHeaders()
@@ -583,4 +645,39 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 	}
 
 	return resultWithUsage(), nil
+}
+
+// chatChunkCarriesPayloadContent 判断一个 Chat Completions chunk 是否携带客户端
+// 能看见的内容（正文 / 工具调用 / 拒答）。
+//
+// 只有 role 帧、reasoning_content（思考）、finish_reason、usage 的 chunk 都不算：
+// 它们在「上游只思考没正文」时会全部发出，但客户端看到的是一个空白回答。
+func chatChunkCarriesPayloadContent(chunk apicompat.ChatCompletionsChunk) bool {
+	for _, choice := range chunk.Choices {
+		if choice.Delta.Content != nil && *choice.Delta.Content != "" {
+			return true
+		}
+		if choice.Delta.Refusal != nil && *choice.Delta.Refusal != "" {
+			return true
+		}
+		if len(choice.Delta.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// chatChunkCarriesReasoning 判断 chunk 是否携带思考增量（reasoning_content /
+// reasoning）。它不算「内容」（客户端不该据此认为答案来了），但只要它在流动，
+// 就说明上游在正常产出，扣着不发给用户看是不对的。
+func chatChunkCarriesReasoning(chunk apicompat.ChatCompletionsChunk) bool {
+	for _, choice := range chunk.Choices {
+		if choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
+			return true
+		}
+		if choice.Delta.Reasoning != nil && *choice.Delta.Reasoning != "" {
+			return true
+		}
+	}
+	return false
 }

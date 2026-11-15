@@ -320,12 +320,23 @@ func generateSessionString() (string, error) {
 	return FormatMetadataUserID(hex64, "", sessionUUID, uaVersion), nil
 }
 
+// testPayloadMessageSeparator 让测试问题可以拆成多条 user/assistant 消息。
+//
+// 为什么需要：真实客户的长上下文是几十条消息累积出来的，单条消息通常只有几千字。
+// 若把几十万字塞进「一条」user 消息，会与生产形态不符，可能触发上游对单条消息长度的
+// 特殊处理，从而得出「上游处理不了长上下文」的错误结论（2026-11-15 实测撞到：
+// 984 单条 1 万字返回 200 空正文，但生产上 20 万 token 的请求输出正常）。
+const testPayloadMessageSeparator = "\n[[TEST-MSG]]\n"
+
 // createTestPayload creates a Claude Code style test request payload.
 //
 // prompt 为调用方传入的测试问题；为空时退化为历史上的固定探测串 "hi"
 // （保持所有既有调用点的行为逐字节不变）。
 // 之所以要支持外部 prompt：anthropic 原生探活此前恒发 "hi"，导致这类账号
 // 无法做内容级对照实验（2026-11-15 实证：用它判断模型是否「跑偏」全是误判）。
+//
+// prompt 内含 testPayloadMessageSeparator 时按段拆成多轮 user/assistant 对话，
+// 以贴近真实长上下文形态；不含分隔符时仍是单条 user 消息。
 func createTestPayload(modelID string, prompt string) (map[string]any, error) {
 	sessionID, err := generateSessionString()
 	if err != nil {
@@ -337,22 +348,11 @@ func createTestPayload(modelID string, prompt string) (map[string]any, error) {
 		text = "hi"
 	}
 
+	messages := buildTestMessages(text)
+
 	return map[string]any{
-		"model": modelID,
-		"messages": []map[string]any{
-			{
-				"role": "user",
-				"content": []map[string]any{
-					{
-						"type": "text",
-						"text": text,
-						"cache_control": map[string]string{
-							"type": "ephemeral",
-						},
-					},
-				},
-			},
-		},
+		"model":    modelID,
+		"messages": messages,
 		"system": []map[string]any{
 			{
 				"type": "text",
@@ -369,6 +369,55 @@ func createTestPayload(modelID string, prompt string) (map[string]any, error) {
 		"temperature": 1,
 		"stream":      true,
 	}, nil
+}
+
+// buildTestMessages 把测试文本组装成 messages 数组。
+//
+// 不含分隔符：单条 user 消息（历史行为，逐字节不变）。
+// 含分隔符：按段拆成 user / assistant 交替的多轮对话，最后一条一定是 user
+// （避免「以助手消息结尾」这种真实网关会拒绝的形态）。
+// cache_control 只挂在最后一条 user 上，避免一次请求里出现多个缓存断点。
+func buildTestMessages(text string) []map[string]any {
+	parts := strings.Split(text, testPayloadMessageSeparator)
+	if len(parts) == 1 {
+		return []map[string]any{buildTestMessage("user", parts[0], true)}
+	}
+
+	// 过滤掉拆出来的空段（连续分隔符会产生空串），空段没有意义。
+	cleaned := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			cleaned = append(cleaned, s)
+		}
+	}
+	if len(cleaned) == 0 {
+		return []map[string]any{buildTestMessage("user", "hi", true)}
+	}
+
+	messages := make([]map[string]any, 0, len(cleaned)*2)
+	for i, p := range cleaned {
+		last := i == len(cleaned)-1
+		messages = append(messages, buildTestMessage("user", p, last))
+		if !last {
+			messages = append(messages, buildTestMessage("assistant", "已阅读，请继续。", false))
+		}
+	}
+	return messages
+}
+
+// buildTestMessage 组装单条消息；withCacheControl 决定是否挂 prompt cache 断点。
+func buildTestMessage(role, text string, withCacheControl bool) map[string]any {
+	block := map[string]any{
+		"type": "text",
+		"text": text,
+	}
+	if withCacheControl {
+		block["cache_control"] = map[string]string{"type": "ephemeral"}
+	}
+	return map[string]any{
+		"role":    role,
+		"content": []map[string]any{block},
+	}
 }
 
 // TestAccountConnection tests an account's connection by sending a test request
@@ -3685,10 +3734,42 @@ func createOpenAIChatCompletionsTestPayload(modelID string, prompt string) map[s
 func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader) error {
 	reader := bufio.NewReader(body)
 
+	// 零正文留证（2026-11-15）：上游可能回 HTTP 200、流也正常收尾，却一个正文
+	// 事件都不给（典型成因：思考把 max_tokens 吃光，或上游内部失败后静默收流）。
+	// 旧行为是「test_start → test_complete{success:true}」，看后台像是测试通过，
+	// 实际什么也没测到 —— 运维会据此把坏账号判成好账号。这里把原始响应的开头
+	// 一并带回，让失败原因可定位，而不是只报一句「空」。
+	const rawHeadLimit = 512
+	var rawHead strings.Builder
+	contentEvents := 0
+	thinkingEvents := 0
+	noteRaw := func(line string) {
+		if rawHead.Len() >= rawHeadLimit {
+			return
+		}
+		rawHead.WriteString(line)
+		rawHead.WriteString("\n")
+	}
+	emptyStreamError := func() error {
+		head := strings.TrimSpace(rawHead.String())
+		if len(head) > rawHeadLimit {
+			head = head[:rawHeadLimit] + "…"
+		}
+		if head == "" {
+			head = "(上游连一行 SSE 都没有返回)"
+		}
+		return s.sendErrorAndEnd(c, fmt.Sprintf(
+			"上游返回 HTTP 200，但流里没有任何正文（content 事件 0 个，思考事件 %d 个）。原始响应开头：%s",
+			thinkingEvents, head))
+	}
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
+				if contentEvents == 0 {
+					return emptyStreamError()
+				}
 				s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 				return nil
 			}
@@ -3697,17 +3778,22 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 
 		line = strings.TrimSpace(line)
 		if line == "" || !sseDataPrefix.MatchString(line) {
+			noteRaw(line)
 			continue
 		}
 
 		jsonStr := sseDataPrefix.ReplaceAllString(line, "")
 		if jsonStr == "[DONE]" {
+			if contentEvents == 0 {
+				return emptyStreamError()
+			}
 			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 			return nil
 		}
 
 		var data map[string]any
 		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+			noteRaw(line)
 			continue
 		}
 
@@ -3717,10 +3803,18 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 		case "content_block_delta":
 			if delta, ok := data["delta"].(map[string]any); ok {
 				if text, ok := delta["text"].(string); ok {
+					contentEvents++
 					s.sendEvent(c, TestEvent{Type: "content", Text: text})
+				} else if _, isThinking := delta["thinking"].(string); isThinking {
+					// 思考增量不计入正文：只统计并留在失败原因里，便于区分
+					// 「预算被思考吃光」和「上游什么都没给」。
+					thinkingEvents++
 				}
 			}
 		case "message_stop":
+			if contentEvents == 0 {
+				return emptyStreamError()
+			}
 			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 			return nil
 		case "error":

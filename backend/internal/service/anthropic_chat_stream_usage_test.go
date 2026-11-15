@@ -41,7 +41,15 @@ func TestAnthropicChatStreamAuthoritativeUsage(t *testing.T) {
 			} {
 				for _, terminal := range []string{"stop", "eof"} {
 					t.Run(adapter+"/"+options+"/"+tc.name+"/"+terminal, func(t *testing.T) {
-						sse := fmt.Sprintf("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"k3\",\"content\":[]%s}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}%s}\n\n", tc.start, tc.delta)
+						// 夹具必须是一条真实形态的 Anthropic 流：除 message_start /
+						// message_delta 之外至少有一个正文块。没有正文块的流在真实
+						// 上游等价于「200 + 空白回答」，会被空回答闸门判成上游故障
+						// 并换号（见 native_anthropic_empty_content_stream_test.go），
+						// 本用例只关心 usage 口径，不该落在那个分支上。
+						sse := fmt.Sprintf("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"k3\",\"content\":[]%s}}\n\n", tc.start) +
+							"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+							"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\n" +
+							fmt.Sprintf("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}%s}\n\n", tc.delta)
 						if tc.repeatDelta != "" {
 							sse += fmt.Sprintf("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}%s}\n\n", tc.repeatDelta)
 						}
