@@ -273,10 +273,14 @@ func newCursorResponsesRegressionFixture(t *testing.T) (*OpenAIGatewayHandler, *
 
 	quotaKeyID := cursorResponsesRegressionQuotaKeyID
 	account := service.Account{
-		ID:            cursorResponsesRegressionAccountID,
-		Name:          "cursor-responses-regression",
-		Platform:      service.PlatformCursor,
-		Type:          service.AccountTypeAPIKey,
+		ID:       cursorResponsesRegressionAccountID,
+		Name:     "cursor-responses-regression",
+		Platform: service.PlatformCursor,
+		// 本夹具锁定的是「Cursor 执行部件（AgentRun）链路」：Responses 形状必须被转换成
+		// Chat messages 并真实出站。这条链路只属于非 APIKey 型 cursor 号；APIKey 型
+		// （kn-cy 等第三方 OpenAI 兼容反代）自 CARD-KC-05（2026-11-07）起在 Responses
+		// 入站一律直通 ChatCompletions，由该单自己的用例覆盖，不走 AgentRun。
+		Type:          service.AccountTypeOAuth,
 		Status:        service.StatusActive,
 		Schedulable:   true,
 		Concurrency:   0,

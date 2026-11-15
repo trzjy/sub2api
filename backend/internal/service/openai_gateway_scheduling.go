@@ -2317,6 +2317,70 @@ func (s *OpenAIGatewayService) listSchedulableAccounts(ctx context.Context, grou
 	return accounts, nil
 }
 
+// sizeExclusionCandidateSnapshot 是「选号前按规模排除」在一次请求内的共享候选快照。
+//
+// 背景：按规模的排除有三条规则（自建站点大请求 SHS-001、商汤/账号自设 256K 上限
+// SENSENOVA-256K-01、仅接大/仅接小 LRO），三条规则都只需要「该分组当前可调度账号」，
+// 却各自调用 listSchedulableAccounts 读一遍全量候选：一个请求要读三遍，而且三份结果
+// 来自不同快照，中间可能夹着账号状态变化（同一个账号在第一份里可调度、第二份里不可
+// 调度），三条规则于是各按「不同的世界」判断该排除谁。
+//
+// 收口：请求入口装一次快照（WithSizeExclusionCandidateCache），三条规则共用同一次
+// 列举结果，首次列举后按 (groupID, platform) 命中，后续规则零额外读取。
+//
+// 边界：只服务「选号前的排除判断」。选号本身仍走 listSchedulableAccounts 取新鲜候选
+// ——failover 重选必须看到刚被标记失败的账号，所以本快照刻意不参与选号。
+type sizeExclusionCandidateSnapshot struct {
+	mu      sync.Mutex
+	byQuery map[string][]Account
+}
+
+type sizeExclusionCandidateSnapshotKey struct{}
+
+// WithSizeExclusionCandidateCache 给 ctx 装上「本次请求的排除候选快照」。
+//
+// 装了快照：同一 ctx 上并发的、串行的按规模排除规则只读一次候选。没装快照（单测
+// 直接调用等场景）：每条规则各读一次，与引入快照前逐字节一致。
+func WithSizeExclusionCandidateCache(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	if _, ok := ctx.Value(sizeExclusionCandidateSnapshotKey{}).(*sizeExclusionCandidateSnapshot); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, sizeExclusionCandidateSnapshotKey{}, &sizeExclusionCandidateSnapshot{
+		byQuery: make(map[string][]Account),
+	})
+}
+
+// listSchedulableAccountsForSizeExclusion 取「按规模排除」用的候选：请求内命中快照则
+// 共用，无快照等价于 listSchedulableAccounts。
+func (s *OpenAIGatewayService) listSchedulableAccountsForSizeExclusion(ctx context.Context, groupID *int64, platform string) ([]Account, error) {
+	if ctx == nil {
+		return s.listSchedulableAccounts(ctx, groupID, platform)
+	}
+	snapshot, _ := ctx.Value(sizeExclusionCandidateSnapshotKey{}).(*sizeExclusionCandidateSnapshot)
+	if snapshot == nil {
+		return s.listSchedulableAccounts(ctx, groupID, platform)
+	}
+	key := "ungrouped|" + platform
+	if groupID != nil {
+		key = fmt.Sprintf("group:%d|%s", *groupID, platform)
+	}
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	if accounts, ok := snapshot.byQuery[key]; ok {
+		return accounts, nil
+	}
+	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	if err != nil {
+		// 列举失败不写快照：失败开放的处置留在调用方，下一条规则可以再试。
+		return nil, err
+	}
+	snapshot.byQuery[key] = accounts
+	return accounts, nil
+}
+
 // SelfHostedExcludedIDs 列举该分组可调度候选中自建站点账号 id 集合（派发单 D-SHS-001）。
 //
 // 语义：复用 OpenAIGatewayService.listSchedulableAccounts 的候选列举，返回
@@ -2324,7 +2388,7 @@ func (s *OpenAIGatewayService) listSchedulableAccounts(ctx context.Context, grou
 // 大请求动态排除使用，不改任何既有选号/调度函数签名与行为；列举候选失败返回 error，
 // 由调用方失败开放处理。
 func (s *OpenAIGatewayService) SelfHostedExcludedIDs(ctx context.Context, groupID *int64, platform string) (map[int64]struct{}, error) {
-	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	accounts, err := s.listSchedulableAccountsForSizeExclusion(ctx, groupID, platform)
 	if err != nil {
 		return nil, err
 	}

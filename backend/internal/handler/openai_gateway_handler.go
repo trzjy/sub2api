@@ -751,6 +751,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 装好估算 input，供 RecordUsage 透传为 EstimatedInputTokens 以对冲上游 prompt_tokens 虚高。
 	attachCursorEstimatedInputTokens(c, reqLog, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body)
 
+	// 下面三条按规模的排除规则（自建站点大请求 / 商汤与账号自设上限 / 仅接大或仅接小）
+	// 共用同一份候选快照：以前每条规则各读一遍全量候选，一次请求读三遍，而且三份结果
+	// 可能来自不同快照。快照只服务排除判断，选号本身仍取新鲜候选（failover 重选必须
+	// 看见刚被标记失败的账号）。
+	c.Request = c.Request.WithContext(service.WithSizeExclusionCandidateCache(c.Request.Context()))
+
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
 	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body); len(adds) > 0 {
@@ -1586,6 +1592,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// KC-19B：cursor 平台（kn-cy 等 OpenAI 兼容反代）请求在选号前用既有本地估算 SSOT
 	// 装好估算 input，供 RecordUsage 透传为 EstimatedInputTokens 以对冲上游 prompt_tokens 虚高。
 	attachCursorEstimatedInputTokens(c, reqLog, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body)
+
+	// 下面三条按规模的排除规则（自建站点大请求 / 商汤与账号自设上限 / 仅接大或仅接小）
+	// 共用同一份候选快照：以前每条规则各读一遍全量候选，一次请求读三遍，而且三份结果
+	// 可能来自不同快照。快照只服务排除判断，选号本身仍取新鲜候选（failover 重选必须
+	// 看见刚被标记失败的账号）。
+	c.Request = c.Request.WithContext(service.WithSizeExclusionCandidateCache(c.Request.Context()))
 
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
@@ -3430,6 +3442,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	} else {
 		ctx = tierCtx
 	}
+
+	// 下面三条按规模的排除规则（自建站点大请求 / 商汤与账号自设上限 / 仅接大或仅接小）
+	// 共用同一份候选快照：以前每条规则各读一遍全量候选，一次请求读三遍，而且三份结果
+	// 可能来自不同快照。快照只服务排除判断，选号本身仍取新鲜候选（failover 重选必须
+	// 看见刚被标记失败的账号）。WS 路径用的是局部 ctx 变量，不是 c.Request。
+	ctx = service.WithSizeExclusionCandidateCache(ctx)
 
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
@@ -5528,6 +5546,16 @@ func isTierRoutingTargetModel(model string) bool {
 // failedAccountIDs。阈值只允许集中常量（禁区：不新增字段/配置项/环境变量）。
 const selfHostSizeExcludeThresholdTokens = service.TierRoutingInputThreshold
 
+// requestAborted 报告本次请求的上下文是否已结束（客户端断开 / 超时 / 被取消）。
+//
+// 三个「按规模排除候选」的入口都用它做前置短路：这类排除的唯一产出是「候选账号 id
+// 集合」，而集合算出来也是交给随后必然同样结束的选号循环，属于纯白读——请求已取消时
+// 列举一次全量候选没有任何用处。实测（2026-11-16 单测）一个已取消的请求在完全不做
+// 事的情况下仍会列举两遍全量候选。
+func requestAborted(ctx context.Context) bool {
+	return ctx != nil && ctx.Err() != nil
+}
+
 // applySelfHostSizeExclusion 实现订阅组大请求动态排除自建账号（派发单 D-SHS-001）。
 //
 // 在选号循环之前调用：先估算本次请求的 input token（input-only），估算失败 → 失败开放
@@ -5554,6 +5582,9 @@ func (h *OpenAIGatewayHandler) applySelfHostSizeExclusion(
 	groupIDVal := int64(0)
 	if groupID != nil {
 		groupIDVal = *groupID
+	}
+	if requestAborted(ctx) {
+		return empty
 	}
 
 	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
@@ -5613,6 +5644,9 @@ func (h *OpenAIGatewayHandler) applySensenovaSizeExclusion(
 	if groupID != nil {
 		groupIDVal = *groupID
 	}
+	if requestAborted(ctx) {
+		return empty
+	}
 
 	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
 	if err != nil {
@@ -5667,6 +5701,9 @@ func (h *OpenAIGatewayHandler) applyRequestSizeScopeExclusion(
 	groupIDVal := int64(0)
 	if groupID != nil {
 		groupIDVal = *groupID
+	}
+	if requestAborted(ctx) {
+		return 0, empty
 	}
 
 	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
