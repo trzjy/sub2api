@@ -180,3 +180,56 @@ func TestDevinStreamNewDevinChatFrame(t *testing.T) {
 	config2 := scanFields(t, fieldsOfNum(scanFields(t, raw2), 8)[0].data)
 	require.InDelta(t, 0.01, fieldsOfNum(config2, 5)[0].dbl, 1e-9, "temperature=0 应钳到 0.01")
 }
+
+// eofWithDataReader 模拟一次 Read 同时返回完整数据与 io.EOF 的上游。
+type eofWithDataReader struct {
+	data []byte
+	done bool
+}
+
+func (r *eofWithDataReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	n := copy(p, r.data)
+	return n, io.EOF
+}
+
+// TestDevinStreamReaderFullFrameWithEOF 覆盖 (n>0, io.EOF)：一次读到完整帧+EOF 仍须成功切帧。
+func TestDevinStreamReaderFullFrameWithEOF(t *testing.T) {
+	frame := makeDevinFrame(t, ConnectCompressedFlag, gzipDevinBytes(t, []byte("complete-with-eof")))
+
+	r := NewDevinStreamReader(&eofWithDataReader{data: frame})
+	payload, end, err := r.Next()
+	require.NoError(t, err)
+	require.False(t, end)
+	require.Equal(t, "complete-with-eof", string(payload))
+
+	// 帧消费完毕后，下一次 Next 应正常返回 io.EOF。
+	_, _, err = r.Next()
+	require.ErrorIs(t, err, io.EOF)
+}
+
+// TestDevinStreamReaderEOFWithResidual 覆盖 (n>0, io.EOF) 后残留半帧仍按 UnexpectedEOF 处理。
+func TestDevinStreamReaderEOFWithResidual(t *testing.T) {
+	partial := []byte{0, 0, 0, 0, 10, 'a', 'b'}
+	r := NewDevinStreamReader(&eofWithDataReader{data: partial})
+	_, _, err := r.Next()
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+// TestDevinStreamChatFrameRejectsImage 图片输入在帧构造层失败关闭，不发送帧。
+func TestDevinStreamChatFrameRejectsImage(t *testing.T) {
+	params := &DevinChatParams{
+		Prompts: []ChatMessagePrompt{{
+			MessageID: "m1",
+			Prompt:    "see image",
+			Images:    []ImageData{{Base64Data: "AAAA", MimeType: "image/png"}},
+		}},
+	}
+	frame, _, err := NewDevinChatFrame(params, "jwt", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "image input is not supported")
+	require.Nil(t, frame)
+}

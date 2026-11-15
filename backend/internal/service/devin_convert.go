@@ -228,9 +228,9 @@ func parseDevinStop(r gjson.Result) []string {
 	return []string{r.String()}
 }
 
-// parseDevinOptionalInt 优先 max_tokens，其次 max_completion_tokens。
+// parseDevinOptionalInt 优先 max_completion_tokens，其次 max_tokens。
 func parseDevinOptionalInt(body []byte) *int {
-	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+	for _, key := range []string{"max_completion_tokens", "max_tokens"} {
 		r := gjson.GetBytes(body, key)
 		if r.Exists() && r.Type != gjson.Null {
 			v := int(r.Int())

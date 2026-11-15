@@ -117,12 +117,23 @@ func NewDevinChatFrame(params *DevinChatParams, userJWT, overrideBaseURL string)
 	if params == nil {
 		return nil, base, fmt.Errorf("devin: nil chat params")
 	}
+	for _, p := range params.Prompts {
+		if len(p.Images) > 0 {
+			return nil, base, fmt.Errorf("devin: image input is not supported")
+		}
+	}
 
 	cascadeID := params.CascadeID
 	if cascadeID == "" {
-		cascadeID = newDevinUUID()
+		cascadeID, err = newDevinUUID()
+		if err != nil {
+			return nil, base, fmt.Errorf("devin cascade id: %w", err)
+		}
 	}
-	executionID := newDevinUUID()
+	executionID, err := newDevinUUID()
+	if err != nil {
+		return nil, base, fmt.Errorf("devin execution id: %w", err)
+	}
 
 	stopPatterns := []string{
 		"\n\nUSER:", "\n\nASSISTANT:", "<|context_request|>", "<|end_of_turn|>",
@@ -208,6 +219,7 @@ type DevinStreamReader struct {
 	r       io.Reader
 	pending []byte
 	buf     [32 * 1024]byte
+	eof     bool
 }
 
 func NewDevinStreamReader(r io.Reader) *DevinStreamReader {
@@ -241,32 +253,35 @@ func (r *DevinStreamReader) Next() (payload []byte, endStream bool, err error) {
 			}
 		}
 
+		// 已到 EOF 仍未切出完整帧：残留数据按半帧处理，否则正常结束。
+		if r.eof {
+			if len(r.pending) > 0 {
+				return nil, false, io.ErrUnexpectedEOF // 残留半帧
+			}
+			return nil, false, io.EOF
+		}
+
 		n, readErr := r.r.Read(r.buf[:])
 		if n > 0 {
 			r.pending = append(r.pending, r.buf[:n]...)
 		}
 		if readErr != nil {
 			if readErr == io.EOF {
-				if len(r.pending) > 0 {
-					return nil, false, io.ErrUnexpectedEOF // 残留半帧
-				}
-				return nil, false, io.EOF
+				r.eof = true
+				continue // 回到循环顶部，先尝试切帧再处理 EOF
 			}
 			return nil, false, readErr
 		}
 	}
 }
 
-// newDevinUUID 用 crypto/rand 生成 v4 UUID；rand 不可用时以时间戳兜底（仅防返回空值）。
-func newDevinUUID() string {
+// newDevinUUID 用 crypto/rand 生成 v4 UUID；rand 不可用时失败关闭。
+func newDevinUUID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		n := uint64(time.Now().UnixNano())
-		for i := range b {
-			b[i] = byte(n >> (uint(i%8) * 8))
-		}
+		return "", fmt.Errorf("devin uuid: %w", err)
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

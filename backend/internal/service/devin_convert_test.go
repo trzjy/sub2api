@@ -152,6 +152,38 @@ func TestDevinConvert_BuildParams_NumericParamsDistinguishUnsetFromZero(t *testi
 	require.Equal(t, 321, *pNonZero.MaxTokens)
 }
 
+func TestDevinConvert_BuildParams_MaxCompletionTokensPriority(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{
+			name: "both present prefer max_completion_tokens",
+			body: `{"messages":[],"max_tokens":100,"max_completion_tokens":50}`,
+			want: 50,
+		},
+		{
+			name: "only max_tokens",
+			body: `{"messages":[],"max_tokens":100}`,
+			want: 100,
+		},
+		{
+			name: "only max_completion_tokens",
+			body: `{"messages":[],"max_completion_tokens":50}`,
+			want: 50,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := BuildDevinChatParams([]byte(tc.body), "m", "c")
+			require.NoError(t, err)
+			require.NotNil(t, p.MaxTokens)
+			require.Equal(t, tc.want, *p.MaxTokens)
+		})
+	}
+}
+
 func TestDevinConvert_BuildParams_StopAndTools(t *testing.T) {
 	body := []byte(`{"messages":[],"stop":["END","STOP"],` +
 		`"tools":[{"type":"function","function":{"name":"f","description":"desc",` +
