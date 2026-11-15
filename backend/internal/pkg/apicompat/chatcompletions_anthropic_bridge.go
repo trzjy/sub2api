@@ -150,7 +150,18 @@ func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage, re
 		messages = append(messages, converted...)
 	}
 
-	return normalizeChatMessages(messages), nil
+	// Anthropic 客户端（Claude Code 一类 agent）会在 messages 数组中间插入 role=system
+	// 的条目（例如工具轮之间、切换模型时的系统通知）。转换后它们会留在原来的中间位置，
+	// 而严格上游（Qwen / vLLM 系）只接受开头的 system，直接 400
+	// "System message must be at the beginning."。
+	//
+	// 生产实测（2026-11-15，账号 980，近 3 天）：该错误 398 次，全部在 /v1/messages
+	// 路径上；上游回 400 而客户端拿到 200（流已开始），客户看到的是任务失败。
+	//
+	// 处理方式与 Responses→Chat 路径共用同一实现（normalizeChatInstructionsToHead）：
+	// 前导 system 合并为一条，中途的 system 降级为 user 消息以保留文本。
+	// 不在这里另写一份判定 —— 两条入站路径必须收敛到同一个函数。
+	return normalizeChatInstructionsToHead(normalizeChatMessages(messages)), nil
 }
 
 // anthropicMsgToChatMessages converts one Anthropic message into one or more

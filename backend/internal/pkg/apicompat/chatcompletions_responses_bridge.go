@@ -429,14 +429,15 @@ func responsesInputToChatMessagesWithOptions(instructions string, inputRaw json.
 		return nil, err
 	}
 	normalized := normalizeChatMessagesWithToolOutputMedia(built, mediaByCallID)
-	return normalizeResponsesDerivedChatMessageRoles(normalized), nil
+	return normalizeChatInstructionsToHead(normalized), nil
 }
 
-// normalizeResponsesDerivedChatMessageRoles rewrites the Chat Completions
-// message list produced by the Responses bridge so that strict upstreams which
-// only accept system content at the very start of the conversation accept it.
+// normalizeChatInstructionsToHead rewrites a Chat Completions message list so
+// strict upstreams which only accept system content at the very start of the
+// conversation accept it. It is the SINGLE implementation for both inbound
+// bridges (Responses → Chat and Anthropic → Chat); do not add a second copy.
 //
-// The bridge turns the Responses `instructions` field and every role:"developer"
+// The Responses bridge turns the Responses `instructions` field and every role:"developer"
 // item into a system message. Codex always sends both instructions and a leading
 // developer item, and it also injects developer notices into the middle of the
 // message history (for example when the user switches models). Forwarded as-is
@@ -447,7 +448,7 @@ func responsesInputToChatMessagesWithOptions(instructions string, inputRaw json.
 // Leading system/developer messages are therefore merged into a single leading
 // system message, while later ones keep their position but are downgraded to
 // user messages so the same text still reaches the model.
-func normalizeResponsesDerivedChatMessageRoles(messages []ChatMessage) []ChatMessage {
+func normalizeChatInstructionsToHead(messages []ChatMessage) []ChatMessage {
 	isInstructionRole := func(role string) bool {
 		return role == "system" || role == "developer"
 	}
