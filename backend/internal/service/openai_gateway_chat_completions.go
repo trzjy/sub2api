@@ -902,6 +902,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	firstChunk := true
 	clientDisconnected := false
 	clientOutputStarted := false
+	// openAIRawPendingChunkLimit 是这条链路扣留输出的上限（chunk 数）。与 raw 直转的
+	// 行数上限同口径：只防缓冲无限增长，不是业务阈值。
+	const openAIRawPendingChunkLimit = 128
 	pendingSSE := make([]string, 0, 4)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var streamFailoverErr *UpstreamFailoverError
@@ -1077,7 +1080,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 					)
 					continue
 				}
-				if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
+				// 扣留上限见 openAIRawPendingLineLimit 的注释：判据认不出的内容形态
+				// 不能让缓冲无限长，也不能让客户端一直收不到字节。
+				if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() && len(pendingSSE) < openAIRawPendingChunkLimit {
 					pendingSSE = append(pendingSSE, sse)
 					continue
 				}
@@ -1130,7 +1135,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				if err != nil {
 					continue
 				}
-				if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
+				// 扣留上限见 openAIRawPendingLineLimit 的注释：判据认不出的内容形态
+				// 不能让缓冲无限长，也不能让客户端一直收不到字节。
+				if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() && len(pendingSSE) < openAIRawPendingChunkLimit {
 					pendingSSE = append(pendingSSE, sse)
 					continue
 				}

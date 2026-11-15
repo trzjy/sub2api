@@ -326,28 +326,35 @@ func TestComputeInfraHealth_RecordedErrorWins(t *testing.T) {
 func TestOpsBusinessSubScore_TransitionBandIsContinuous(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	// 关键点一律由曲线自身的 good/bad/floorScore/zero 推出，不在这里抄一份数字。
+	//
+	// 教训（2026-11-15）：这张表原先写死 good=1000 / bad=3000 / zero=15000，
+	// 而 2026-10-27 已把 TTFT 曲线改成 good=3000 / bad=10000 / zero=120000
+	// （缓存密集型长上下文业务，P99 实测 69042ms）。改阈值时没人回来改这张表，
+	// 于是 6 条断言长期失败，失败信息还指向「实现坏了」——其实断言的语义全对，
+	// 只是数字过期了。曲线是唯一事实源，测试只能引用它，不能再存第二份。
+	type point struct {
 		name  string
 		curve opsBusinessCurve
 		v     float64
 		want  float64
-	}{
-		{"at good is perfect", opsErrRateCurve, 1.0, 100.0},
-		{"below good is perfect", opsErrRateCurve, 0.2, 100.0},
-		{"mid ramp", opsErrRateCurve, 5.0, 68.88888888888889},
-		{"at bad equals floor", opsErrRateCurve, 10.0, 30.0},
-		{"just past bad decays smoothly", opsErrRateCurve, 10.0001, 29.99994},
-		{"mid decay tail", opsErrRateCurve, 30.0, 15.0},
-		{"at zero", opsErrRateCurve, 50.0, 0.0},
-		{"beyond zero pinned", opsErrRateCurve, 99.0, 0.0},
-		{"ttft at good", opsTTFTCurve, 1000.0, 100.0},
-		{"ttft mid ramp", opsTTFTCurve, 2000.0, 65.0},
-		{"ttft at bad equals floor", opsTTFTCurve, 3000.0, 30.0},
-		{"ttft just past bad decays smoothly", opsTTFTCurve, 3000.001, 29.99999},
-		{"ttft mid decay tail", opsTTFTCurve, 9000.0, 15.0},
-		{"ttft at zero", opsTTFTCurve, 15000.0, 0.0},
-		{"ttft beyond zero pinned", opsTTFTCurve, 60000.0, 0.0},
 	}
+
+	band := func(tag string, curve opsBusinessCurve) []point {
+		tail := curve.zero - curve.bad
+		return []point{
+			{tag + " at good is perfect", curve, curve.good, 100.0},
+			{tag + " below good is perfect", curve, curve.good / 2, 100.0},
+			{tag + " mid ramp", curve, (curve.good + curve.bad) / 2, 100 - (100-curve.floorScore)/2},
+			{tag + " at bad equals floor", curve, curve.bad, curve.floorScore},
+			{tag + " just past bad decays smoothly", curve, curve.bad + tail*1e-6, curve.floorScore * (1 - 1e-6)},
+			{tag + " mid decay tail", curve, (curve.bad + curve.zero) / 2, curve.floorScore / 2},
+			{tag + " at zero", curve, curve.zero, 0.0},
+			{tag + " beyond zero pinned", curve, curve.zero * 2, 0.0},
+		}
+	}
+
+	tests := append(band("error rate", opsErrRateCurve), band("ttft", opsTTFTCurve)...)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -404,25 +411,28 @@ func TestComputeBusinessHealth_SingleBadComponentKeepsResolution(t *testing.T) {
 	t.Parallel()
 
 	// Errors perfect, TTFT degrading: business = 100*0.5 + ttft*0.5.
-	business := func(p99ms int) float64 {
+	// 采样点按曲线取（理由同 TestOpsBusinessSubScore_TransitionBandIsContinuous）。
+	business := func(p99ms float64) float64 {
 		return computeBusinessHealth(&OpsDashboardOverview{
 			ErrorRate: 0,
-			TTFT:      OpsPercentiles{P99: intPtr(p99ms)},
+			TTFT:      OpsPercentiles{P99: intPtr(int(p99ms))},
 		})
 	}
 
-	justOver := business(3_100) // just past bad=3000, still deep in the tail
-	midTail := business(9_000)  // middle of the tail
-	atZero := business(15_000)  // tail end: sub-score 0
-	worse := business(60_000)   // far past zero: sub-score 0
+	curve := opsTTFTCurve
+	tail := curve.zero - curve.bad
+	justOver := business(curve.bad + tail*0.01) // 刚进尾段，余量还很足
+	midTail := business(curve.bad + tail*0.50)  // 尾段中点
+	atZero := business(curve.zero)              // 尾段终点：分项归零
+	worse := business(curve.zero * 4)           // 远超终点：仍归零
 
-	require.Greater(t, justOver, midTail, "3.1s must score above 9s")
-	require.Greater(t, midTail, atZero, "9s must score above 15s")
-	require.Equal(t, atZero, worse, "both are total outages, both pin to 0")
+	require.Greater(t, justOver, midTail, "尾段顶部必须高于中点")
+	require.Greater(t, midTail, atZero, "尾段中点必须高于终点")
+	require.Equal(t, atZero, worse, "两个都算彻底超时，都钉在 0")
 
 	require.Greater(t, justOver, 50.0,
-		"3.1s pre-fix scored exactly 50; the tail must keep partial credit")
-	require.Equal(t, 50.0, atZero, "a fully timed-out stream leaves only the perfect half")
+		"刚好越过 bad 时旧实现直接给 0 分（业务分只剩完美的另一半 50），尾段必须保留部分信用")
+	require.Equal(t, 50.0, atZero, "彻底超时的流只剩完美的那一半")
 }
 
 // Errors bad, TTFT perfect: mirrors the assertion above on the other axis.

@@ -65,8 +65,8 @@ func TestApplyLargeRequestOnlyExclusionSmallRequest(t *testing.T) {
 	// 不含图短请求：估算远低于 256000 阈值。
 	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
 	estimated, excluded := h.applyRequestSizeScopeExclusion(
-		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
-		service.TierRoutingProtocolChatCompletions, smallBody)
+		context.Background(), nil, reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, "", smallBody)
 
 	require.Greater(t, estimated, 0, "estimate must succeed for a small request")
 	require.LessOrEqual(t, estimated, service.LargeRequestOnlyInputThreshold, "small request estimate must stay below the threshold")
@@ -96,8 +96,8 @@ func TestApplyLargeRequestOnlyExclusionLargeRequest(t *testing.T) {
 	huge := strings.Repeat("hello world ", 200000)
 	bigBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`, huge))
 	estimated, excluded := h.applyRequestSizeScopeExclusion(
-		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
-		service.TierRoutingProtocolChatCompletions, bigBody)
+		context.Background(), nil, reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, "", bigBody)
 
 	require.Greater(t, estimated, service.LargeRequestOnlyInputThreshold, "large request estimate must exceed the threshold")
 	require.Empty(t, excluded, "large request must not exclude any large-request-only account")
@@ -119,8 +119,8 @@ func TestApplyLargeRequestOnlyExclusionEstimateFailed(t *testing.T) {
 
 	badBody := []byte("{not valid json")
 	estimated, excluded := h.applyRequestSizeScopeExclusion(
-		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
-		service.TierRoutingProtocolChatCompletions, badBody)
+		context.Background(), nil, reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, "", badBody)
 
 	require.Zero(t, estimated, "estimate failure must report estimated input as 0")
 	require.Empty(t, excluded, "estimate failure must fail-open with an empty exclusion set")
@@ -155,8 +155,8 @@ func TestApplyRequestSizeScopeExclusionLargeRequestSkipsSmallOnly(t *testing.T) 
 	largeBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`,
 		strings.Repeat("word ", 500000)))
 	estimated, excluded := h.applyRequestSizeScopeExclusion(
-		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
-		service.TierRoutingProtocolChatCompletions, largeBody)
+		context.Background(), nil, reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, "", largeBody)
 
 	require.Greater(t, estimated, service.LargeRequestOnlyInputThreshold, "用例前提：必须被判为大请求")
 	require.Len(t, excluded, 1, "大请求只能排除仅接小请求的账号")
@@ -193,8 +193,8 @@ func TestApplyRequestSizeScopeExclusionSmallRequestSkipsLargeOnly(t *testing.T) 
 
 	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
 	_, excluded := h.applyRequestSizeScopeExclusion(
-		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
-		service.TierRoutingProtocolChatCompletions, smallBody)
+		context.Background(), nil, reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, "", smallBody)
 
 	require.Len(t, excluded, 1, "小请求只排除仅接大请求的账号")
 	_, ok := excluded[505]
@@ -235,8 +235,8 @@ func TestApplyRequestSizeScopeExclusionDirtyDoubleTruePrecedence(t *testing.T) {
 	// 小请求：脏数据归一化为 large_only，应被排除。
 	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
 	_, excludedSmall := h.applyRequestSizeScopeExclusion(
-		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
-		service.TierRoutingProtocolChatCompletions, smallBody)
+		context.Background(), nil, reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, "", smallBody)
 	_, ok := excludedSmall[707]
 	require.True(t, ok, "小请求必须排除归一化为 large_only 的脏数据账号")
 
@@ -244,8 +244,8 @@ func TestApplyRequestSizeScopeExclusionDirtyDoubleTruePrecedence(t *testing.T) {
 	largeBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`,
 		strings.Repeat("word ", 500000)))
 	_, excludedLarge := h.applyRequestSizeScopeExclusion(
-		context.Background(), reqLog, nil, service.PlatformOpenAI, "gpt-4o",
-		service.TierRoutingProtocolChatCompletions, largeBody)
+		context.Background(), nil, reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, "", largeBody)
 	_, ok = excludedLarge[707]
 	require.False(t, ok, "大请求不得排除归一化为 large_only 的账号（否则该账号两侧都不可选）")
 }

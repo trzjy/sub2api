@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"net/http"
 	"net/url"
 	"strings"
 
@@ -133,19 +132,8 @@ func (s *OpenAIGatewayService) SizeExcludedIDs(ctx context.Context, groupID *int
 	return excluded, nil
 }
 
-// SensenovaEmptyStreamReason 标记商汤上游返回合法空流（HTTP 200 但正文 0 字符）。
-const SensenovaEmptyStreamReason GatewayFailureReason = "sensenova_empty_stream"
-
-// failoverSensenovaEmptyStream 处理商汤上游返回合法空流的情形：请求被上游承接且
-// 响应头正常（HTTP 200），但剥离 reasoning 后可见正文为 0 字符（outputStarted 仍为
-// false）。这是商汤逼近 256K 物理上限时的典型表现（reasoning 被网关剥离后正文空）。
-// 返回 NextAccountRetry 让 handler 自动把当前商汤账号并入 failedAccountIDs 并换号；
-// 不走账号冷却（该账号对更小请求仍健康），Scope 设为请求级瞬时。
-func (s *OpenAIGatewayService) failoverSensenovaEmptyStream(ctx context.Context, account *Account, upstreamModel string) *UpstreamFailoverError {
-	return &UpstreamFailoverError{
-		StatusCode:        http.StatusOK,
-		NextAccountAction: NextAccountRetry,
-		Scope:             GatewayFailureScopeRequest,
-		Reason:            SensenovaEmptyStreamReason,
-	}
-}
+// 商汤空流原先在这里有一套专用换号实现（failoverSensenovaEmptyStream）：不记账、
+// 不冷却，只换号。它与 Anthropic 原生链路、聊天补全链路对同一件事（上游 200 但
+// 零正文）的处置不一致，已收口到 reportEmptyContent（见 openai_empty_content_gate.go）
+// ——商汤只是最早被发现的那一个，判据本身与供应商无关。
+// 超大请求的排除仍由上方 SizeExcludedIDs 按上下文估算在选号前完成，与空流处置正交。

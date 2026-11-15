@@ -52,8 +52,11 @@ func TestCursorUserFacingError_Table(t *testing.T) {
 		{"3_deadline_wrapped", fmt.Errorf("cursor: run: %w", context.DeadlineExceeded),
 			http.StatusGatewayTimeout, infraerrors.CursorExecDeadlineExceededCode, infraerrors.CursorExecDeadlineExceeded},
 		// 4. 认证类
+		// 注：ErrCursorKeyRejectedUpstream（上游注入「密钥已过期或额度耗尽，请续费」）
+		// 2026-11-06 起单独给 CUR-EXEC-12（账号被上游拒付、密钥级终态），不再并到
+		// CUR-EXEC-06（上游鉴权失败）。理由见 cursor_user_facing_error.go 该分支注释。
 		{"4_key_rejected", ErrCursorKeyRejectedUpstream,
-			http.StatusBadGateway, infraerrors.CursorExecUpstreamAuthFailedCode, infraerrors.CursorExecUpstreamAuthFailed},
+			http.StatusBadGateway, infraerrors.CursorExecAccountRejectedCode, infraerrors.CursorExecAccountRejected},
 		{"4_relay_auth_wrapped", fmt.Errorf("forward: %w", ErrCursorRelayAuthRejected),
 			http.StatusBadGateway, infraerrors.CursorExecUpstreamAuthFailedCode, infraerrors.CursorExecUpstreamAuthFailed},
 		{"4_auth_material", ErrCursorAuthMaterialUnavailable,
@@ -142,15 +145,16 @@ func TestCursorUserFacingError_OrderRequestErrorBeforeProtocol(t *testing.T) {
 	}
 }
 
-// 第 4 条认证类在 4a 模型不可用之前：同时满足时必须仍是 CUR-EXEC-06，不被新 case 截走。
+// 第 4 条认证类在 4a 模型不可用之前：同时满足时必须仍走认证类分支（CUR-EXEC-12，
+// 2026-11-06 起「密钥被上游拒付」从 CUR-EXEC-06 拆出），不被 4a 的模型不可用截走。
 func TestCursorUserFacingError_OrderAuthBeforeModelUnavailable(t *testing.T) {
 	for _, err := range []error{
 		ErrCursorKeyRejectedUpstream,
 		errors.Join(ErrCursorKeyRejectedUpstream, ErrCursorUpstreamModelUnavailable),
 	} {
 		status, code, _, ok := CursorUserFacingError(cursorUserFacingTestCtx(), err)
-		if !ok || status != http.StatusBadGateway || code != infraerrors.CursorExecUpstreamAuthFailedCode {
-			t.Fatalf("err=%v got (%d, %s, %v), want (502, %s)", err, status, code, ok, infraerrors.CursorExecUpstreamAuthFailedCode)
+		if !ok || status != http.StatusBadGateway || code != infraerrors.CursorExecAccountRejectedCode {
+			t.Fatalf("err=%v got (%d, %s, %v), want (502, %s)", err, status, code, ok, infraerrors.CursorExecAccountRejectedCode)
 		}
 	}
 }

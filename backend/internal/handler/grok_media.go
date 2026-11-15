@@ -235,6 +235,18 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		if failoverClientGone(c) {
 			return
 		}
+		// 绑定查询（视频任务状态/内容）只有唯一候选：任务属主账号，选号口径写死了
+		// DisableStickyEscape。唯一那个号槽满之后再循环，拿回的必然还是它、撞的还是
+		// 同一个满槽，于是 for 里空转——不产出、不返回、CPU 打满（2026-11-16 单测
+		// TestGrokMediaLookupSlotLifecycle/full 转满 10 分钟实证）。「槽满换号」的
+		// 语义前提是还有别的号可换，绑定查询不成立，所以在**选号之前**收口，按账号
+		// 并发上限如实回报（503），让客户端自己重试。
+		// 位置刻意放在 failoverClientGone 之后：客户端断开/取消的退出路径必须与
+		// 原来逐字节一致，不新增清理分支差异。
+		if boundLookupAccountID > 0 && slotFullCount > 0 {
+			writeConcurrencySlotExhausted(c, h, streamStarted)
+			return
+		}
 		var selection *service.AccountSelectionResult
 		var scheduleDecision service.OpenAIAccountScheduleDecision
 		if boundLookupAccountID > 0 {

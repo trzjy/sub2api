@@ -5698,7 +5698,9 @@ func (h *OpenAIGatewayHandler) applyRequestSizeScopeExclusion(
 
 	// 把会话哈希装进请求 ctx：RecordUsage 拿到上游真实 token 后据此记回该会话，
 	// 形成「每单写回真实值 → 下一单用它兜底估算」的闭环。
-	if sessionHash != "" {
+	// c 判空：本函数是失败开放的纯估算路径，调用方可能没有 gin 上下文（单元测试/复用），
+	// 缺上下文时跳过写回即可，不能因为装 session hash 而 panic 掉整个选号。
+	if sessionHash != "" && c != nil && c.Request != nil {
 		c.Request = c.Request.WithContext(service.WithRequestSizeSessionHash(ctx, sessionHash))
 	}
 

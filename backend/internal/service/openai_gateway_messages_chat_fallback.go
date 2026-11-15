@@ -607,9 +607,13 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	// （content_block_start 的 tool_use ID，即客户端下一轮会回传的 ID）。
 	var turnCollector messagesToolTurnCollector
 
+	// 空回答闸门：与其余出站链路共用同一份判据与同一个执法点。
+	var emptyGate openAIEmptyContentGate
+
 	// 与 responses 兄弟不同：客户端断开后仍继续做事件转换（喂 anthropicState），
 	// 仅跳过写出，保证 finalize 阶段的 usage 汇总不受断开影响。
 	emitChunk := func(chunk *apicompat.ChatCompletionsChunk) {
+		emptyGate.ObserveChatChunk(chunk)
 		// 读侧（L3 reasoning 剥离）：开启 strip_reasoning_content 的掩码账号，先
 		// 剥离 chunk 的 reasoning 明文，再转换，使客户端可见事件流不含 thinking。
 		//
@@ -686,12 +690,25 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		}, newOpenAIUpstreamStreamReadError(streamErr)
 	}
 
-	// 商汤空流兜底（派发单 SENSENOVA-256K-01 第 3 项）：上游 HTTP 200 正常结束、客户端
-	// 未断连，但剥离 reasoning 后可见正文为 0 字符（outputStarted 仍为 false）。这是商汤
-	// 逼近 256K 物理上限时的典型空流，触发换号重试，避免向客户端回显空回复。
-	if scan.Err == nil && !clientDisconnected && c.Request.Context().Err() == nil && !outputStarted && isSensenovaBaseURL(account.GetOpenAIBaseURL()) {
-		logger.L().Warn("openai messages chat fallback: sensenova returned empty stream without visible text, triggering failover")
-		return nil, s.failoverSensenovaEmptyStream(context.Background(), account, upstreamModel)
+	// 空回答闸门：上游 HTTP 200 正常收尾、客户端未断连，但整条流没有可渲染内容。
+	//
+	// 这里原先是商汤专用分支（256K 上限时上游回合法空流）。商汤只是最早被发现，
+	// 判据本身与供应商无关，故收敛到全链路同一执法点：记账 + 冷却 + 能换号时换号。
+	// 商汤多出来的行为只有「记一笔账 + 停调一分钟」，换号语义不变。
+	if scan.Err == nil && !clientDisconnected && c.Request.Context().Err() == nil && emptyGate.Empty() {
+		if err := s.reportEmptyContent(emptyContentRequestContext(c), c, emptyContentReport{
+			Account:           account,
+			Resp:              resp,
+			UpstreamModel:     upstreamModel,
+			UpstreamRequestID: requestID,
+			LogPrefix:         "openai messages chat fallback",
+			Stage:             "complete",
+			SawContent:        !emptyGate.Empty(),
+			FinishReason:      emptyGate.FinishReason(),
+			CanFailover:       !outputStarted,
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	// Finalize: close open blocks + emit message_delta/message_stop.

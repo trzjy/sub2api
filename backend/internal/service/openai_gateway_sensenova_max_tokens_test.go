@@ -298,17 +298,18 @@ func TestSensenovaExcludedIDs(t *testing.T) {
 	require.False(t, ok, "non-sensenova account 200 must not be excluded")
 }
 
-func TestSensenovaEmptyStreamFailover(t *testing.T) {
+// 商汤空流原先有专用换号实现，已收口到 reportEmptyContent。这里钉死收口后仍然
+// 保留的三条语义（判据换了实现，换号契约不能变）。
+func TestSensenovaEmptyStreamStillFailsOver(t *testing.T) {
 	t.Parallel()
 
-	svc := &OpenAIGatewayService{}
-	account := sensenovaTestAccount(PlatformDeepseek, 416)
-	fe := svc.failoverSensenovaEmptyStream(context.Background(), account, "sensenova-6.8-flash-lite")
+	fe := newEmptyContentFailoverError()
 	require.NotNil(t, fe)
-	// 必须触发换号重试（handler 会把当前商汤账号并入 failedAccountIDs）。
+	// 必须触发换号重试（handler 会把当前账号并入 failedAccountIDs）。
 	require.True(t, fe.ShouldRetryNextAccount(), "empty stream must trigger next-account failover")
-	require.Equal(t, SensenovaEmptyStreamReason, fe.Reason)
+	require.Equal(t, upstreamEmptyContentReason, fe.Reason)
 	require.Equal(t, GatewayFailureScopeRequest, fe.Scope)
 	require.False(t, fe.RequestScopedTransient, "must switch account, not retry on same account")
 	require.False(t, fe.RetryableOnSameAccount, "must switch account, not retry on same account")
+	require.True(t, fe.SafeToFailoverAfterWrite, "nothing semantic was written to the client")
 }
