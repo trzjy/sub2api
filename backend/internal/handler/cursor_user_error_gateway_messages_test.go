@@ -3,7 +3,6 @@
 package handler
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -11,11 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Wei-Shaw/sub2api/ent"
-	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	middleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -23,97 +19,41 @@ import (
 )
 
 // 本文件覆盖方案 §2.3 M3（M3f）：/v1/messages（GatewayHandler.Messages）走 Cursor 账号时，
-// Forward 返回的 Cursor 链路错误按 service.CursorUserFacingError 写回中文与正确状态码
-// （活体 74-messages-unknown：未知关联此前被兜底成 502「上游请求失败」）。
+// Forward 返回的 Cursor 链路错误按 service.CursorUserFacingError 写回中文、错误码、
+// 请求号与正确状态码。
+//
+// 2026-11-16 订正：本文件原先两条用例都走端到端（真实选号 + 真实链路，输入是「孤儿
+// tool_result」），但产品口径 2026-11-06 起改成「能丢就丢」——续轮历史里对不上的
+// tool_result 直接丢弃并记账（chat 路径 chat_messages_dropped / Responses 路径
+// responses_items_skipped），不再整轮拒绝。允许的拒绝只剩 CUR-REQ-01 缺 model、
+// CUR-REQ-06 整轮无可发送内容、CUR-REQ-07 以助手消息结尾的续写。
+//
+// 输入源消失后，请求会真的出站、打不通上游、回裸 502，于是断言长期红着，报错信息
+// 却指向「翻译官坏了」——实际是断言过期。
+//
+// 因此改为直接对写回函数断言：验的是稳定契约（翻译 + 写回 + 状态码），不验易变输入。
+// 这样以后再调一次丢弃策略，本文件不用跟着改。
 
 const (
-	m3fGroupID    = int64(781010)
-	m3fAccountID  = int64(781011)
-	m3fQuotaKeyID = int64(781001)
-	m3fModel      = "claude-sonnet-4-5"
-	m3fRequestID  = "req-m3f-messages"
+	m3fAccountID = int64(781011)
+	m3fRequestID = "req-m3f-messages"
 )
 
-// 只带 tool_result、正文里没有对应 tool_use：声明续轮但本站无任何关联 → unknown_association。
-const m3fOrphanToolResultBody = `{
-  "model": "claude-sonnet-4-5",
-  "max_tokens": 32,
-  "messages": [
-    {"role": "user", "content": [{"type": "text", "text": "hi"}]},
-    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_m3f_orphan", "content": [{"type": "text", "text": "sunny"}]}]}
-  ]
-}`
-
-// newM3fCursorMessagesHandler 装配 Messages 真实链路：快照调度命中 Cursor 账号，网关带唯一
-// 执行部件（鉴权替身复用 Responses 回归夹具；本用例在出站前即被准入断言拒绝，不会出站）。
-func newM3fCursorMessagesHandler(t *testing.T, group *service.Group, account *service.Account) *GatewayHandler {
-	t.Helper()
-	installCursorResponsesRegressionSourceGate(t)
-
-	forwarder := service.NewCursorUpstreamForwarder()
-	deviceID := "m3f-device-id"
-	cursorExec, err := service.NewCursorExecutionService(
-		cursorResponsesRegressionQuotaKeys{key: &ent.QuotaKey{ID: m3fQuotaKeyID, CodeEncrypted: "enc", DeviceID: &deviceID}},
-		cursorResponsesRegressionQuotaKeyEnc{},
-		cursorResponsesRegressionDeviceIDs{},
-		forwarder,
-	)
-	require.NoError(t, err)
-	t.Cleanup(cursorExec.Stop)
-
-	schedulerSnapshot := service.NewSchedulerSnapshotService(&fakeSchedulerCache{accounts: []*service.Account{account}}, nil, nil, nil, nil)
-	gwSvc := service.NewGatewayService(
-		nil, &fakeGroupRepo{group: group}, nil, nil, nil, nil, nil, nil, nil,
-		schedulerSnapshot,
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		cursorExec,
-	)
-	cfg := &config.Config{RunMode: config.RunModeSimple}
-	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
-	t.Cleanup(billingCacheSvc.Stop)
-	return &GatewayHandler{
-		gatewayService:           gwSvc,
-		billingCacheService:      billingCacheSvc,
-		concurrencyHelper:        NewConcurrencyHelper(service.NewConcurrencyService(&fakeConcurrencyCache{}), SSEPingFormatClaude, 0),
-		maxAccountSwitchesGemini: 1,
-	}
-}
-
+// Cursor 账号：续轮错误必须翻成中文 + 错误码 + 请求号，并按错误自身状态码写出，
+// 不能落回通用的 502「上游请求失败」。
 func TestCursorUserErrorGatewayMessagesUnknownAssociation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	group := &service.Group{ID: m3fGroupID, Hydrated: true, Platform: service.PlatformAnthropic, Status: service.StatusActive}
-	quotaKeyID := m3fQuotaKeyID
-	account := &service.Account{
-		ID: m3fAccountID, Name: "cursor-m3f", Platform: service.PlatformCursor, Type: service.AccountTypeAPIKey,
-		Status: service.StatusActive, Schedulable: true, Concurrency: 1, Priority: 1,
-		QuotaKeyID: &quotaKeyID,
-		Credentials: map[string]any{
-			"access_token":  "cursor-m3f-token",
-			"model_mapping": map[string]any{m3fModel: m3fModel},
-		},
-		AccountGroups: []service.AccountGroup{{AccountID: m3fAccountID, GroupID: m3fGroupID}},
-	}
-	h := newM3fCursorMessagesHandler(t, group, account)
-
+	h := &GatewayHandler{}
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	ctx := context.WithValue(context.Background(), ctxkey.Group, group)
-	ctx = context.WithValue(ctx, ctxkey.RequestID, m3fRequestID)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(m3fOrphanToolResultBody)).WithContext(ctx)
-	c.Request.Header.Set("Content-Type", "application/json")
-	groupID := m3fGroupID
-	apiKey := &service.APIKey{
-		ID: 781012, UserID: 781013, GroupID: &groupID, Group: group, Status: service.StatusActive,
-		User: &service.User{ID: 781013, Concurrency: 10, Balance: 100},
-	}
-	c.Set(string(middleware.ContextKeyAPIKey), apiKey)
-	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.UserID, Concurrency: 10})
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil).
+		WithContext(context.WithValue(context.Background(), ctxkey.RequestID, m3fRequestID))
+	account := &service.Account{ID: m3fAccountID, Platform: service.PlatformCursor, Type: service.AccountTypeAPIKey}
 
-	h.Messages(c)
+	wrote := h.writeCCCursorUserError(c, zap.NewNop(), account,
+		&service.CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"}, false)
+	require.True(t, wrote, "Cursor 账号的续轮错误必须由写回函数处理，不能落回通用 502")
 
-	selected, ok := c.Get(opsAccountIDKey)
-	require.True(t, ok, "必须走到选号")
-	require.Equal(t, m3fAccountID, selected, "必须选中 Cursor 账号")
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	var body struct {
 		Type  string `json:"type"`
@@ -131,8 +71,7 @@ func TestCursorUserErrorGatewayMessagesUnknownAssociation(t *testing.T) {
 	require.NotEqual(t, infraerrors.UpstreamRequestFailed, body.Error.Message)
 }
 
-// 非 Cursor 账号：Messages 出口同一错误仍走原 502 兜底。非 Cursor 账号的 Forward 不会产出
-// CursorResumeError，无法经 Messages 端到端制造，故按出口分支的写回顺序做最小单元断言。
+// 非 Cursor 账号：同一错误仍走原 502 兜底，不得被 Cursor 文案接管。
 func TestCursorUserErrorGatewayMessagesNonCursorUnchanged(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	err := &service.CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"}

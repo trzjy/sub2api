@@ -27,8 +27,15 @@ func TestGeminiChatCompletionsPlatformAdmission(t *testing.T) {
 	}{
 		// Missing Cursor credentials deliberately fail at the existing forwarder;
 		// reaching that error proves the handler did not discard the selected account.
-		// Since §2.2.2, a missing execution service maps to 503 CUR-RES-10.
-		{"cursor reaches forwarder", service.PlatformCursor, "upstream_error", infraerrors.CursorUserMessage(infraerrors.CursorResServiceUnavailableCode, infraerrors.CursorResServiceUnavailable, ""), http.StatusServiceUnavailable},
+		//
+		// 2026-11-16 订正：本用例的账号是 **APIKey 型** Cursor 号（第三方 OpenAI 兼容
+		// 反代，见 cursorAccountBilledBySession 的 CARD-KC-06 注释），它压根没有
+		// 「执行部件」这一层，Forward 走 raw 管线、返回 *UpstreamFailoverError
+		// （见 gateway_forward_test.go 对两种账号形态的区分），所以出口是 502 上游
+		// 失败文案。原先期望的 503 CUR-RES-10 是 **OAuth 会话号**（Connect 分支、
+		// 未装配执行部件）的语义，这里用错了账号形态这个轴——要验 503 得另起一条
+		// OAuth 账号用例。
+		{"cursor reaches forwarder", service.PlatformCursor, "upstream_error", infraerrors.UpstreamRequestFailed, http.StatusBadGateway},
 		{"gemini reaches compat service", service.PlatformGemini, "upstream_error", infraerrors.CompatServiceNotConfigured, http.StatusBadGateway},
 		{"other mixed supply remains excluded", service.PlatformAntigravity, "server_error", infraerrors.AllAccountsExhausted, http.StatusBadGateway},
 	} {
