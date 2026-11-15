@@ -18,6 +18,7 @@ var (
 		PlatformCodeBuddy,
 		PlatformMuse,
 		PlatformCursor,
+		PlatformDevin,
 	}
 	legacyCompositePrecedence = []string{
 		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
@@ -27,6 +28,7 @@ var (
 		PlatformCodeBuddy,
 		PlatformMuse,
 		PlatformCursor,
+		PlatformDevin,
 	}
 	legacyOpenAIGateway = []string{
 		PlatformOpenAI, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo,
@@ -35,6 +37,7 @@ var (
 		PlatformCodeBuddy,
 		PlatformMuse,
 		PlatformCursor,
+		PlatformDevin,
 	}
 	legacyCNProviders    = []string{PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax}
 	legacyLiteLLMByPlatf = map[string]string{

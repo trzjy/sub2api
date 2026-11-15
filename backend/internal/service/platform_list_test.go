@@ -22,13 +22,13 @@ var (
 		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
 		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformTypeSafe,
 		PlatformCommandCode,
-		PlatformCline, PlatformCodeBuddy, PlatformMuse, PlatformCursor, PlatformOther,
+		PlatformCline, PlatformCodeBuddy, PlatformMuse, PlatformCursor, PlatformDevin, PlatformOther,
 	}
 	legacyCompositeMatchingPlatforms = []string{
 		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
 		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformTypeSafe,
 		PlatformCommandCode,
-		PlatformCline, PlatformCodeBuddy, PlatformMuse, PlatformCursor,
+		PlatformCline, PlatformCodeBuddy, PlatformMuse, PlatformCursor, PlatformDevin,
 	}
 	legacyMultiProtocolProviders = []string{PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformCommandCode, PlatformCline}
 	platformProbeValues          = append(append([]string{}, legacyAllPlatforms...), PlatformComposite, "", "moonshot", "Kimi", "openai ", "glm", "bogus")

@@ -12,7 +12,7 @@ import {
 } from '@/constants/platforms'
 import { platformLabel } from '@/utils/platformColors'
 
-// ours 现状：含 other / codebuddy / muse / cursor（cursor 为内部供给平台，
+// ours 现状：含 other / codebuddy / muse / cursor / devin（cursor、devin 为内部供给平台，
 // 由上游 D 卡并入 CONCRETE_PLATFORM_OPTIONS；此处补齐锁定现状）。
 const concretePlatforms = [
   'anthropic',
@@ -27,7 +27,8 @@ const concretePlatforms = [
   'minimax',
   'codebuddy',
   'muse',
-  'cursor'
+  'cursor',
+  'devin'
 ]
 
 describe('platform option catalogs', () => {
@@ -154,8 +155,8 @@ describe('filterUpstreamModelsByPlatform', () => {
 })
 
 describe('D5 内部供给平台收敛', () => {
-  it('INTERNAL_SUPPLY_PLATFORMS 恰为 codebuddy / muse / cursor 三平台', () => {
-    expect(INTERNAL_SUPPLY_PLATFORMS).toEqual(['codebuddy', 'muse', 'cursor'])
+  it('INTERNAL_SUPPLY_PLATFORMS 恰为 codebuddy / muse / cursor / devin 四平台', () => {
+    expect(INTERNAL_SUPPLY_PLATFORMS).toEqual(['codebuddy', 'muse', 'cursor', 'devin'])
   })
 
   it('GROUP_PLATFORM_CREATABLE_OPTIONS 剔除内部供给平台,保留 composite 与其余平台', () => {
@@ -165,7 +166,7 @@ describe('D5 内部供给平台收敛', () => {
     expect(values).not.toContain('cursor')
     expect(values).toContain('composite')
     for (const p of concretePlatforms) {
-      if (!['codebuddy', 'muse', 'cursor'].includes(p)) {
+      if (!['codebuddy', 'muse', 'cursor', 'devin'].includes(p)) {
         expect(values).toContain(p)
       }
     }
