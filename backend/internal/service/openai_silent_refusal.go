@@ -108,11 +108,19 @@ func (d *openAIChatSilentRefusalDetector) ObserveChatChunk(chunk apicompat.ChatC
 	}
 }
 
+// ShouldReleaseClientOutput 判定是否可以放行扣留中的输出（放行即提交响应头、
+// 关闭换号窗口）。
+//
+// 纯 usage 帧**不再**作为放行理由：它只证明上游讲完了，不证明客户端看到了内容
+// （网关强制 include_usage，空回答的上游同样会在 [DONE] 前发一帧 usage）。此前
+// 把 usage 当放行信号，结果是空回答的换号窗口被自己提前关掉——每一条空流都会先
+// 放行 role/finish 帧，再走到「响应已提交」分支，只能把空白回答交给客户。
+// 现在空回答会一直扣着，直到确认有内容或流结束，由空回答闸门决定换号。
 func (d *openAIChatSilentRefusalDetector) ShouldReleaseClientOutput() bool {
 	if d == nil || !d.enabled {
 		return true
 	}
-	if d.sawContent || d.sawToolCall || d.sawFunctionCall || d.sawUsage || d.sawError || d.sawReasoning {
+	if d.sawContent || d.sawToolCall || d.sawFunctionCall || d.sawError || d.sawReasoning {
 		return true
 	}
 	return d.sawFinish && d.finishReason != "" && d.finishReason != "stop"

@@ -328,6 +328,11 @@ func (s *OpenAIGatewayService) rawChatCompletionsURL(account *Account) (string, 
 	return s.openAIChatCompletionsTargetURL(account)
 }
 
+// openAIRawPendingLineLimit 是 raw 直转链路扣留输出的上限（行数，含事件之间的空行，
+// 约合 128 个 SSE 事件）。作用只有一个：判据认不出的内容形态不会让缓冲无限增长，
+// 也不会让客户端长时间一个字节都收不到。
+const openAIRawPendingLineLimit = 256
+
 // streamRawChatCompletions 透传上游 CC SSE 流到客户端，并提取 usage（包括
 // 末尾 [DONE] 之前的 chunk 中的 usage 字段，按 OpenAI CC 协议）。
 //
@@ -361,12 +366,17 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	pendingLines := make([]string, 0, 8)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var terminal openAIRawStreamTerminalState
+	// 空回答闸门：与其他出站链路共用 openAIEmptyContentGate 判据，这里只负责
+	// 逐帧喂数据（raw 直转刻意不反序列化，走 gjson 版判据）。
+	emptyGate := &openAIEmptyContentGate{}
 
 	writeLine := func(line string) {
 		if clientDisconnected {
 			return
 		}
-		if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
+		// 扣留上限：判据认不出的内容形态（上游自定义 delta 字段）不能让缓冲无限长，
+		// 超过上限即放行并放弃换号窗口——此时上游显然在持续产出，不是空回答。
+		if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() && len(pendingLines) < openAIRawPendingLineLimit {
 			pendingLines = append(pendingLines, line)
 			return
 		}
@@ -407,6 +417,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		if hasSSEData {
 			trimmedPayload := strings.TrimSpace(ssePayload)
 			terminal.ObserveDataLine(trimmedPayload)
+			emptyGate.ObserveChunkPayload([]byte(trimmedPayload))
 			if trimmedPayload != "[DONE]" {
 				observer.ObserveOpenAI([]byte(ssePayload), strings.TrimSpace(gjson.Get(ssePayload, "type").String()))
 				usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(ssePayload)
@@ -538,6 +549,37 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		// 补发 SSE error 帧并把本次请求计入 SLA 失败。
 		recordOpenAIRawStreamTruncation(c, account, requestID, cause, "http_error")
 		return resultWithUsage(), newOpenAIUpstreamStreamReadError(cause)
+	}
+
+	if scanErr == nil && !clientDisconnected {
+		// 空回答闸门（P0+P1 收口）：流已正常收尾（[DONE]/finish_reason/usage 都收到
+		// 过），但一个可渲染字节都没有——客户拿到的是空白回答。
+		//
+		// 判定顺序刻意放在静默拒答之后：拒答是更具体的分类（无 usage + finish=stop），
+		// 有专属客户端文案，不能被这里抢走。
+		//
+		// 以前这种流被当成成功收尾，后台一条记录都没有；现在即使换不了号（我们自己的
+		// role 帧已经把响应头提交出去），也记一笔账并冷却该账号一分钟，让下一个请求
+		// 绕开它。
+		if emptyGate.Empty() && !refusalDetector.IsSilentRefusal() {
+			reportCtx := context.Background()
+			if c != nil && c.Request != nil {
+				reportCtx = c.Request.Context()
+			}
+			if err := s.reportEmptyContent(reportCtx, c, emptyContentReport{
+				Account:           account,
+				Resp:              resp,
+				UpstreamModel:     upstreamModel,
+				UpstreamRequestID: requestID,
+				LogPrefix:         "openai chat_completions raw",
+				Stage:             "complete",
+				SawContent:        !emptyGate.Empty(),
+				FinishReason:      emptyGate.FinishReason(),
+				CanFailover:       !clientOutputStarted,
+			}); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	if scanErr == nil && !clientDisconnected && !clientOutputStarted {

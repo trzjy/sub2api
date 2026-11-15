@@ -30,10 +30,6 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// emptyAnthropicContentErrorCode 是「上游 200 但整条流没有任何可渲染内容」的
-// error_code，用于 ops_error_logs 事后统计与客户端识别。
-const emptyAnthropicContentErrorCode = "upstream_empty_content"
-
 // anthropicSSELineCarriesPayloadContent 判断一条 Anthropic SSE data 行是否携带
 // 客户端能看见的语义内容（正文 / 工具调用 / 图片等）。
 //
@@ -104,17 +100,6 @@ func anthropicResponseHasRenderableContent(body []byte) bool {
 		return true
 	})
 	return renderable
-}
-
-// newEmptyAnthropicContentFailoverError 构造「上游空回答」的 failover 错误：
-// 走既有 upstream-error 换号路径，让本次请求换到下一个账号重试。
-// SafeToFailoverAfterWrite=true —— 判定成立的前提是客户端一个语义字节都没收到
-// （与缓冲期循环命中同一语义，见 newRepetitionLoopFailoverError）。
-func newEmptyAnthropicContentFailoverError() *UpstreamFailoverError {
-	return &UpstreamFailoverError{
-		StatusCode:               http.StatusBadGateway,
-		SafeToFailoverAfterWrite: true,
-	}
 }
 
 // forwardAnthropicViaNativeAnthropicEndpoint 将 Anthropic Messages 请求零转换
@@ -386,15 +371,21 @@ func (s *OpenAIGatewayService) handleNativeAnthropicBufferedResponse(
 
 	// 空回答闸门（非流式）：上游 200 但 content 里没有任何可渲染内容时，
 	// 客户拿到的是一份空白答案。此处响应尚未写出，可安全换号重试（冷却该账号）；
-	// stop_reason=max_tokens 属客户端预算不足的预期截断，不判账号故障。
-	if !anthropicResponseHasRenderableContent(body) && gjson.GetBytes(body, "stop_reason").String() != "max_tokens" {
-		message := "upstream returned 200 without any renderable content (buffered)"
-		logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Empty content response, failover: account=%d model=%s request_id=%s", account.ID, upstreamModel, resp.Header.Get("x-request-id"))
-		s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, emptyAnthropicContentErrorCode, message)
-		if s.accountRepo != nil {
-			tempUnscheduleEmptyResponse(ctx, s.accountRepo, account.ID, "[CN Anthropic 直通] empty_content")
+	// stop_reason=max_tokens 属客户端预算不足的预期截断，由 shared 执法点放行。
+	if !anthropicResponseHasRenderableContent(body) {
+		if err := s.reportEmptyContent(ctx, c, emptyContentReport{
+			Account:           account,
+			Resp:              resp,
+			UpstreamModel:     upstreamModel,
+			UpstreamRequestID: resp.Header.Get("x-request-id"),
+			LogPrefix:         "CN Anthropic 直通",
+			Stage:             "buffered",
+			SawContent:        false,
+			FinishReason:      gjson.GetBytes(body, "stop_reason").String(),
+			CanFailover:       true,
+		}); err != nil {
+			return nil, err
 		}
-		return nil, newEmptyAnthropicContentFailoverError()
 	}
 
 	c.Data(resp.StatusCode, contentType, body)
@@ -642,37 +633,29 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 		}
 	}
 
-	// failoverOnEmptyContent 是「上游 200 但空白回答」的闸门。
+	// failoverOnEmptyContent 是「上游 200 但空白回答」的闸门，处置全部委托给
+	// reportEmptyContent（全链路唯一执法点）：记账、停调、能换号时换号。
 	//
 	// 场景：上游正常收流（HTTP 200 + message_stop），但整条流只有 thinking 或
 	// 什么都没有。此时客户拿到的就是一个空白回答 —— 这正是「接了长活却答不出」
 	// 的客户体验，绝不能当成功交给下游。
 	//
-	// 判定成立的前提是「客户端一个语义字节都没收到」（openAIStreamClientOutputStarted
-	// 为假）：只有这样换号重发才对客户完全透明。响应一旦开始写出就返回 nil 走原
-	// 语义，绝不中途改写已经发出去的流。
-	//
-	// 命中后按全平台同一个停调原语冷却该账号（tempUnscheduleEmptyResponse），
-	// 冷却到期自动回池，不引入新状态机。
+	// 客户端自己断开的场景不记账：那是客户端行为，不是上游故障。
 	failoverOnEmptyContent := func(stage string) error {
-		if payloadContentSeen || clientDisconnected {
+		if clientDisconnected {
 			return nil
 		}
-		if openAIStreamClientOutputStarted(c, clientOutputStarted) {
-			return nil
-		}
-		if upstreamStopReason == "max_tokens" {
-			// 客户端把 max_tokens 给小了：空正文是预期截断，不是账号故障。
-			logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Empty content with stop_reason=max_tokens, pass through: account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
-			return nil
-		}
-		message := "upstream stream ended without any renderable content (stage=" + stage + ")"
-		logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Empty content stream, failover: account=%d model=%s request_id=%s stage=%s", account.ID, upstreamModel, requestID, stage)
-		s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, emptyAnthropicContentErrorCode, message)
-		if s != nil && s.accountRepo != nil {
-			tempUnscheduleEmptyResponse(ctx, s.accountRepo, account.ID, "[CN Anthropic 直通] empty_content")
-		}
-		return newEmptyAnthropicContentFailoverError()
+		return s.reportEmptyContent(ctx, c, emptyContentReport{
+			Account:           account,
+			Resp:              resp,
+			UpstreamModel:     upstreamModel,
+			UpstreamRequestID: requestID,
+			LogPrefix:         "CN Anthropic 直通",
+			Stage:             stage,
+			SawContent:        payloadContentSeen,
+			FinishReason:      upstreamStopReason,
+			CanFailover:       !openAIStreamClientOutputStarted(c, clientOutputStarted),
+		})
 	}
 
 	for {

@@ -70,8 +70,8 @@ func TestAnthropicResponseHasRenderableContent(t *testing.T) {
 
 // 空回答换号错误必须带 SafeToFailoverAfterWrite —— 判定成立的前提就是客户端
 // 一个语义字节都没收到，同流换号安全；漏掉这个标志上层会拒绝对已提交响应换号。
-func TestNewEmptyAnthropicContentFailoverError(t *testing.T) {
-	err := newEmptyAnthropicContentFailoverError()
+func TestNewEmptyContentFailoverError(t *testing.T) {
+	err := newEmptyContentFailoverError()
 	if err == nil {
 		t.Fatal("expected non-nil failover error")
 	}

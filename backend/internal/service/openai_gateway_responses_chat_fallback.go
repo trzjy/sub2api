@@ -329,7 +329,11 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 		c.Writer.Flush()
 	}
 
+	// 空回答闸门：与其余出站链路共用同一份判据与同一个执法点。
+	var emptyGate openAIEmptyContentGate
+
 	scan := s.scanCCStream(c, resp, "openai responses chat fallback", requestID, startTime, func(chunk *apicompat.ChatCompletionsChunk) {
+		emptyGate.ObserveChatChunk(chunk)
 		// L3 思考层剥离：开启 strip_reasoning_content 的账号，在 CC chunk→Responses
 		// 事件转换前就地清空上游 reasoning 明文。下游 ensureChatReasoningItem 仅在
 		// 收到非空 reasoning delta 时开启 reasoning item，剥离后不会产生 reasoning
@@ -370,6 +374,25 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			FirstTokenMs:                scan.FirstTokenMs,
 		}, newOpenAIUpstreamStreamReadError(streamErr)
 	}
+	// 空回答闸门：上游 HTTP 200 正常收尾、客户端未断连，但整条流没有可渲染内容。
+	// 判定放在 finalize 之前：一旦 finalize 补出 response.completed，客户端就拿到一份
+	// 「成功但空白」的回答，后台也不会留下任何痕迹。
+	if scan.Err == nil && !clientDisconnected && c.Request.Context().Err() == nil && emptyGate.Empty() {
+		if err := s.reportEmptyContent(emptyContentRequestContext(c), c, emptyContentReport{
+			Account:           account,
+			Resp:              resp,
+			UpstreamModel:     upstreamModel,
+			UpstreamRequestID: requestID,
+			LogPrefix:         "openai responses chat fallback",
+			Stage:             "complete",
+			SawContent:        !emptyGate.Empty(),
+			FinishReason:      emptyGate.FinishReason(),
+			CanFailover:       !clientOutputStarted,
+		}); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := state.ValidateToolCallArguments(); err != nil {
 		return &OpenAIForwardResult{
 			RequestID:                   requestID,

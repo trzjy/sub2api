@@ -622,18 +622,27 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 		writeChunk(chunk) //nolint:errcheck
 	}
 
-	// 收尾闸门：整条流没有任何可渲染内容，且尚未向客户端提交任何字节 →
-	// 判成上游空回答，冷却该账号并换号重试（客户无感）。stop_reason=max_tokens
-	// 属客户端输出预算不足的预期截断，不判账号故障、不重试。
-	if !payloadContentSeen && !emptyGateGivenUp && !clientDisconnected && !clientOutputStarted &&
-		upstreamStopReason != "max_tokens" {
-		message := "upstream returned 200 without any renderable content (chat stream)"
-		logger.LegacyPrintf("service.gateway", "[CC→CN Anthropic 直通] Empty content stream, failover: account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
-		s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, emptyAnthropicContentErrorCode, message)
-		if s.accountRepo != nil {
-			tempUnscheduleEmptyResponse(ctx, s.accountRepo, account.ID, "[CC→CN Anthropic 直通] empty_content")
+	// 收尾闸门：整条流没有任何可渲染内容 → 交给 reportEmptyContent 统一处置
+	// （记账 + 停调 + 能换号时换号）。stop_reason=max_tokens 属客户端输出预算不足，
+	// 由执法点放行，不判账号故障。
+	//
+	// 这里刻意不看 emptyGateGivenUp：它只表示「换号窗口已关」（思考已放行或缓冲
+	// 溢出），不代表不记账——客户照样拿到空白回答，后台必须留痕。能不能换号由
+	// CanFailover（真实提交状态）决定。
+	if !clientDisconnected && !payloadContentSeen {
+		if err := s.reportEmptyContent(ctx, c, emptyContentReport{
+			Account:           account,
+			Resp:              resp,
+			UpstreamModel:     upstreamModel,
+			UpstreamRequestID: requestID,
+			LogPrefix:         "CC→CN Anthropic 直通",
+			Stage:             "chat stream",
+			SawContent:        payloadContentSeen,
+			FinishReason:      upstreamStopReason,
+			CanFailover:       !clientOutputStarted,
+		}); err != nil {
+			return nil, err
 		}
-		return nil, newEmptyAnthropicContentFailoverError()
 	}
 	flushPendingCC()
 
