@@ -344,6 +344,8 @@ func (a *Account) IsCNProvider() bool {
 // Responses 协议，转发链与 openai responses 账号同轨，故同样走 OpenAI 网关并经
 // 调度器平台精确匹配选中；上游新增的多协议聚合平台（opencode_go / command_code /
 // cline）同样经 OpenAI 网关按模型分流。
+// devin 是 Codeium Cascade 多模型聚合平台，经 OpenAI 网关的 forwardDevin 分支转发，
+// 模型名由账号 model_mapping 提供（上游只接受内部 Cascade 模型 UID）。
 // 网页逆向接入账号（官方平台 + access_mode=web）经 OpenAI 网关由各自适配器
 // （forwardWebZhipu / forwardWebDeepseek / forwardWebKimi）转换为官方网页端协议。
 // 调度器的平台匹配谓词依赖本判定（openai_account_scheduler.go），漏加会导致
@@ -351,7 +353,7 @@ func (a *Account) IsCNProvider() bool {
 func (a *Account) IsOpenAICompatible() bool {
 	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.IsMultiProtocolAPIKey() ||
 		a.Platform == PlatformOther || a.Platform == PlatformCodeBuddy || a.Platform == PlatformMuse ||
-		a.Platform == PlatformCursor ||
+		a.Platform == PlatformCursor || a.Platform == PlatformDevin ||
 		a.IsWebAccessMode())
 }
 
@@ -1043,6 +1045,13 @@ func (a *Account) isModelMappingSupported(requestedModel string) bool {
 			// cursor 出站是 Cursor 原生端点（/aiserver.v1.AIServiceService/*），把任意
 			// OpenAI 模型名原样发过去必然被上游拒绝；空映射放行等于让 cursor 号在任何
 			// 模型请求下都被选中，白耗 shareai 额度并回吐上游错误。
+			return false
+		}
+		if a.Platform == PlatformDevin {
+			// devin 无内置模型目录：模型完全来自账号 model_mapping。空映射 = 无可服务
+			// 模型（与 other / muse / cursor 同契约）。此处失败关闭是**必需**的：
+			// devin 出站只认 Cascade 模型 UID，原样透传任意模型名必被上游拒绝；
+			// 空映射放行等于让 devin 号在任何模型请求下都被选中，白耗订阅额度并回吐错误。
 			return false
 		}
 		return true // 无映射 = 允许所有

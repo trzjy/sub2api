@@ -168,7 +168,8 @@ func IsCNProviderPlatform(id string) bool {
 // 但管理端账号管理继续识别和管理它们；调度、快照与出站能力不受影响。
 func IsInternalSupplyPlatform(id string) bool {
 	switch id {
-	case PlatformCodeBuddy, PlatformMuse, PlatformCursor:
+	// PlatformDevin 同为内部上游供给平台，与前端 INTERNAL_SUPPLY_PLATFORMS 边界保持一致。
+	case PlatformCodeBuddy, PlatformMuse, PlatformCursor, PlatformDevin:
 		return true
 	}
 	return false

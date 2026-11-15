@@ -7,12 +7,17 @@ func (a *Account) IsDevin() bool {
 	return a != nil && a.Platform == PlatformDevin
 }
 
-// GetDevinSessionToken 获取 Devin session token（存储在 credentials["token"]）
-func (a *Account) GetDevinSessionToken() string {
+// GetDevinToken 获取 Devin token（存储在 credentials["api_key"]）
+func (a *Account) GetDevinToken() string {
 	if a == nil {
 		return ""
 	}
-	return a.GetCredential("token")
+	return a.GetCredential("api_key")
+}
+
+// GetDevinSessionToken 获取 Devin session token（兼容旧调用方，委托 GetDevinToken）
+func (a *Account) GetDevinSessionToken() string {
+	return a.GetDevinToken()
 }
 
 // NormalizeDevinToken 规范化 Devin token（确保有 devin-session-token$ 前缀）

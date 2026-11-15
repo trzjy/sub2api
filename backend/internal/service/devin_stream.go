@@ -1,412 +1,150 @@
 package service
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
-// Devin Connect Protocol 常量
+// Devin Connect Protocol 常量。
 const (
-	ConnectCompressedFlag  = 0x01
-	ConnectEndStreamFlag   = 0x02
-	MaxFramePayload        = 16 * 1024 * 1024
-	DefaultIdleTimeoutMs   = 120000 // 2 分钟
-	AuthTimeoutMs          = 30000  // 30 秒
+	DevinAPIURL           = "https://server.codeium.com"
+	DevinAuthPath         = "/exa.auth_pb.AuthService/GetUserJwt"
+	DevinChatMessagePath  = "/exa.api_server_pb.ApiServerService/GetChatMessage"
+	DevinClientName       = "chisel"
+	DevinIDEVersion       = "3.2.23"
+	DevinExtensionVersion = "1.48.2"
+
+	ConnectCompressedFlag = 0x01
+	ConnectEndStreamFlag  = 0x02
+	MaxFramePayload       = 16 << 20 // 16 MiB
+
+	DevinDefaultTimeout = 15 * time.Second
 )
 
-// ConnectFrame 是 Connect Protocol 的 frame 结构
-type ConnectFrame struct {
-	Flags   byte
-	Payload []byte
+// DevinUpstreamClient 封装 Devin 鉴权请求。
+type DevinUpstreamClient struct {
+	BaseURL    string
+	HTTPClient *http.Client
 }
 
-// encodeConnectFrame 编码一个 Connect frame
-func encodeConnectFrame(payload []byte, compressed bool) []byte {
-	var flags byte
-	actualPayload := payload
-
-	if compressed {
-		flags |= ConnectCompressedFlag
-		var buf bytes.Buffer
-		gw := gzip.NewWriter(&buf)
-		gw.Write(payload)
-		gw.Close()
-		actualPayload = buf.Bytes()
+func NewDevinUpstreamClient() *DevinUpstreamClient {
+	return &DevinUpstreamClient{
+		BaseURL:    DevinAPIURL,
+		HTTPClient: &http.Client{Timeout: DevinDefaultTimeout},
 	}
-
-	frame := make([]byte, 5+len(actualPayload))
-	frame[0] = flags
-	binary.BigEndian.PutUint32(frame[1:5], uint32(len(actualPayload)))
-	copy(frame[5:], actualPayload)
-
-	return frame
 }
 
-// decodeConnectFrame 解码 Connect frame
-func decodeConnectFrame(data []byte) (*ConnectFrame, int, error) {
-	if len(data) < 5 {
-		return nil, 0, fmt.Errorf("frame too short: %d bytes", len(data))
+// GetUserJwt 用 session token 换取本请求的 user JWT。
+// 非 200（含空 JWT）一律失败关闭；响应支持 gzip 兜底解压。
+func (c *DevinUpstreamClient) GetUserJwt(ctx context.Context, sessionToken string) (*GetUserJwtResponse, error) {
+	meta := &Metadata{
+		IDEName:          DevinClientName,
+		IDEVersion:       DevinIDEVersion,
+		ExtensionName:    DevinClientName,
+		ExtensionVersion: DevinExtensionVersion,
+		APIKey:           NormalizeDevinToken(sessionToken),
+		Locale:           "en",
 	}
+	reqBody := encodeGetUserJwtRequest(meta)
 
-	flags := data[0]
-	length := binary.BigEndian.Uint32(data[1:5])
-
-	if length > MaxFramePayload {
-		return nil, 0, fmt.Errorf("frame payload too large: %d bytes", length)
-	}
-
-	frameSize := 5 + int(length)
-	if len(data) < frameSize {
-		return nil, 0, io.ErrUnexpectedEOF
-	}
-
-	payload := data[5:frameSize]
-
-	// 解压缩
-	if flags&ConnectCompressedFlag != 0 {
-		gr, err := gzip.NewReader(bytes.NewReader(payload))
-		if err != nil {
-			return nil, 0, fmt.Errorf("gzip decompress: %w", err)
-		}
-		defer gr.Close()
-
-		uncompressed, err := io.ReadAll(gr)
-		if err != nil {
-			return nil, 0, fmt.Errorf("gzip read: %w", err)
-		}
-		payload = uncompressed
-	}
-
-	return &ConnectFrame{
-		Flags:   flags,
-		Payload: payload,
-	}, frameSize, nil
-}
-
-// ChatMessagePrompt 是 Devin 的消息结构（简化版）
-type ChatMessagePrompt struct {
-	Role    string
-	Content string
-}
-
-// ChatToolDefinition 是 Devin 的工具定义（简化版）
-type ChatToolDefinition struct {
-	Name        string
-	Description string
-	Parameters  string // JSON schema
-}
-
-// ChatToolChoice 是 Devin 的工具选择策略
-type ChatToolChoice struct {
-	OptionName string // "auto", "none", "required"
-}
-
-// CompletionConfiguration 是 Devin 的生成配置
-type CompletionConfiguration struct {
-	NumCompletions        uint64
-	MaxTokens             uint64
-	MaxNewlines           uint64
-	Temperature           float64
-	FirstTemperature      float64
-	TopK                  uint64
-	TopP                  float64
-	StopPatterns          []string
-	FimEotProbThreshold   float64
-}
-
-// GetChatMessageRequest 是 Devin GetChatMessage 请求
-type GetChatMessageRequest struct {
-	Metadata                *DevinMetadata
-	Prompt                  string // system prompt
-	ChatMessagePrompts      []ChatMessagePrompt
-	ChatModelUID            string
-	Configuration           *CompletionConfiguration
-	Tools                   []ChatToolDefinition
-	DisableParallelToolCalls bool
-	ToolChoice              *ChatToolChoice
-	CascadeID               string
-	ExecutionID             string
-}
-
-// GetChatMessageResponse 是 Devin GetChatMessage 响应
-type GetChatMessageResponse struct {
-	ChatMessage   string
-	Thinking      string
-	StopReason    int32
-	ToolCalls     []ChatToolCall
-	Usage         *ChatUsage
-}
-
-// ChatToolCall 是工具调用
-type ChatToolCall struct {
-	ID           string
-	Name         string
-	ArgumentsJSON string
-}
-
-// ChatUsage 是用量统计
-type ChatUsage struct {
-	InputTokens      int64
-	OutputTokens     int64
-	CacheReadTokens  int64
-	CacheWriteTokens int64
-}
-
-// ChatStreamEvent 是流式事件
-type ChatStreamEvent struct {
-	Type           string // "text", "thinking", "toolcall", "usage", "done", "error"
-	DeltaText      string
-	DeltaThinking  string
-	ToolCalls      []ChatToolCallDelta
-	StopReason     int32
-	Usage          *ChatUsage
-	Error          string
-	Code           string
-}
-
-// ChatToolCallDelta 是工具调用增量
-type ChatToolCallDelta struct {
-	Index         int
-	ID            string
-	Name          string
-	ArgumentsJSON string
-}
-
-// encodeGetChatMessageRequest 编码 GetChatMessage 请求（简化版）
-func encodeGetChatMessageRequest(req *GetChatMessageRequest) []byte {
-	e := &ProtoEncoder{}
-
-	// Field 1: metadata
-	e.Message(1, func(sub *ProtoEncoder) {
-		encodeDevinMetadata(sub, req.Metadata)
-	})
-
-	// Field 2: prompt (system)
-	e.String(2, req.Prompt)
-
-	// Field 3: chatMessagePrompts
-	for _, msg := range req.ChatMessagePrompts {
-		e.Message(3, func(sub *ProtoEncoder) {
-			sub.String(1, msg.Role)
-			sub.String(2, msg.Content)
-		})
-	}
-
-	// Field 4: chatModelUid
-	e.String(4, req.ChatModelUID)
-
-	// Field 5: configuration
-	if req.Configuration != nil {
-		e.Message(5, func(sub *ProtoEncoder) {
-			sub.Uint64(1, req.Configuration.NumCompletions)
-			sub.Uint64(2, req.Configuration.MaxTokens)
-			sub.Uint64(3, req.Configuration.MaxNewlines)
-			sub.Double(4, req.Configuration.Temperature)
-			sub.Double(5, req.Configuration.FirstTemperature)
-			sub.Uint64(6, req.Configuration.TopK)
-			sub.Double(7, req.Configuration.TopP)
-			sub.RepeatedString(8, req.Configuration.StopPatterns)
-			sub.Double(9, req.Configuration.FimEotProbThreshold)
-		})
-	}
-
-	// Field 10: tools
-	for _, tool := range req.Tools {
-		e.Message(10, func(sub *ProtoEncoder) {
-			sub.String(1, tool.Name)
-			sub.String(2, tool.Description)
-			sub.String(3, tool.Parameters)
-		})
-	}
-
-	// Field 11: disableParallelToolCalls
-	e.Bool(11, req.DisableParallelToolCalls)
-
-	// Field 12: toolChoice
-	if req.ToolChoice != nil {
-		e.Message(12, func(sub *ProtoEncoder) {
-			sub.String(1, req.ToolChoice.OptionName)
-		})
-	}
-
-	// Field 20: cascadeId
-	e.String(20, req.CascadeID)
-
-	// Field 21: executionId
-	e.String(21, req.ExecutionID)
-
-	return e.Bytes()
-}
-
-// decodeGetChatMessageResponse 解码 GetChatMessage 响应（简化版）
-func decodeGetChatMessageResponse(data []byte) (*GetChatMessageResponse, error) {
-	d := NewProtoDecoder(data)
-	res := &GetChatMessageResponse{}
-
-	for !d.Done() {
-		field, wire := d.ReadTag()
-		switch field {
-		case 1: // chatMessage
-			if wire == 2 {
-				res.ChatMessage = d.ReadString()
-			} else {
-				d.Skip(wire)
-			}
-		case 2: // thinking
-			if wire == 2 {
-				res.Thinking = d.ReadString()
-			} else {
-				d.Skip(wire)
-			}
-		case 3: // stopReason
-			if wire == 0 {
-				res.StopReason = int32(d.ReadUint32())
-			} else {
-				d.Skip(wire)
-			}
-		case 4: // toolCalls (repeated message)
-			if wire == 2 {
-				toolCallData := d.ReadBytes()
-				tc := decodeToolCall(toolCallData)
-				res.ToolCalls = append(res.ToolCalls, tc)
-			} else {
-				d.Skip(wire)
-			}
-		case 5: // usage
-			if wire == 2 {
-				usageData := d.ReadBytes()
-				res.Usage = decodeUsage(usageData)
-			} else {
-				d.Skip(wire)
-			}
-		default:
-			d.Skip(wire)
-		}
-	}
-
-	return res, nil
-}
-
-func decodeToolCall(data []byte) ChatToolCall {
-	d := NewProtoDecoder(data)
-	tc := ChatToolCall{}
-
-	for !d.Done() {
-		field, wire := d.ReadTag()
-		switch field {
-		case 1:
-			tc.ID = d.ReadString()
-		case 2:
-			tc.Name = d.ReadString()
-		case 3:
-			tc.ArgumentsJSON = d.ReadString()
-		default:
-			d.Skip(wire)
-		}
-	}
-
-	return tc
-}
-
-func decodeUsage(data []byte) *ChatUsage {
-	d := NewProtoDecoder(data)
-	usage := &ChatUsage{}
-
-	for !d.Done() {
-		field, wire := d.ReadTag()
-		switch field {
-		case 1:
-			usage.InputTokens = int64(d.ReadUint64())
-		case 2:
-			usage.OutputTokens = int64(d.ReadUint64())
-		case 3:
-			usage.CacheReadTokens = int64(d.ReadUint64())
-		case 4:
-			usage.CacheWriteTokens = int64(d.ReadUint64())
-		default:
-			d.Skip(wire)
-		}
-	}
-
-	return usage
-}
-
-// StreamChatParams 是流式对话参数
-type StreamChatParams struct {
-	APIKey                string
-	ModelUID              string
-	SystemPrompt          string
-	Messages              []ChatMessagePrompt
-	Tools                 []ChatToolDefinition
-	MaxTokens             int
-	Temperature           float64
-	TopP                  float64
-	StopSequences         []string
-	CascadeID             string
-	BaseURL               string
-	UpstreamIdleTimeoutMs int
-	ToolChoice            *ChatToolChoice
-}
-
-// StreamChat 流式对话（简化实现，返回完整响应而非真正流式）
-func (c *DevinUpstreamClient) StreamChat(ctx context.Context, params *StreamChatParams) (*GetChatMessageResponse, error) {
-	// 1. 获取 JWT
-	authCtx, authCancel := context.WithTimeout(ctx, time.Duration(AuthTimeoutMs)*time.Millisecond)
-	defer authCancel()
-
-	auth, err := c.GetUserJwt(authCtx, params.APIKey)
+	url := strings.TrimRight(c.BaseURL, "/") + DevinAuthPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("auth failed: %w", err)
+		return nil, fmt.Errorf("devin auth create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/proto")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("devin auth http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("devin auth read body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("devin auth %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	chatBaseURL := c.BaseURL
-	if auth.CustomAPIServerURL != "" {
-		chatBaseURL = auth.CustomAPIServerURL
+	decoded, err := decodeGetUserJwtResponse(respBody)
+	if err != nil || decoded.UserJWT == "" {
+		if uncompressed, gzErr := tryGunzipResponse(respBody); gzErr == nil {
+			if decoded2, err2 := decodeGetUserJwtResponse(uncompressed); err2 == nil {
+				decoded = decoded2
+			}
+		}
 	}
-	if params.BaseURL != "" {
-		chatBaseURL = params.BaseURL
+	if decoded == nil || decoded.UserJWT == "" {
+		return nil, fmt.Errorf("devin auth: empty user JWT")
+	}
+	return decoded, nil
+}
+
+// DevinChatParams 是构造 GetChatMessage 请求的输入参数（由 devin_convert.go 填充）。
+type DevinChatParams struct {
+	ModelUID     string
+	SystemPrompt string
+	Prompts      []ChatMessagePrompt
+	Tools        []ChatToolDefinition
+	ToolChoice   *ChatToolChoice
+	MaxTokens    *int
+	Temperature  *float64
+	TopP         *float64
+	Stop         []string
+	CascadeID    string
+}
+
+// NewDevinChatFrame 纯函数：组装 GetChatMessageRequest → protobuf → gzip →
+// 5 字节 Connect 帧头（flags=ConnectCompressedFlag）。不联网。
+func NewDevinChatFrame(params *DevinChatParams, userJWT, overrideBaseURL string) (frame []byte, chatBaseURL string, err error) {
+	base := DevinAPIURL
+	if overrideBaseURL != "" {
+		base = strings.TrimRight(overrideBaseURL, "/")
+	}
+	if params == nil {
+		return nil, base, fmt.Errorf("devin: nil chat params")
 	}
 
-	// 2. 构造请求
 	cascadeID := params.CascadeID
 	if cascadeID == "" {
-		cascadeID = generateUUID()
+		cascadeID = newDevinUUID()
+	}
+	executionID := newDevinUUID()
+
+	stopPatterns := []string{
+		"\n\nUSER:", "\n\nASSISTANT:", "<|context_request|>", "<|end_of_turn|>",
+	}
+	stopPatterns = append(stopPatterns, params.Stop...)
+
+	maxTokens := 64000
+	if params.MaxTokens != nil && *params.MaxTokens > 0 {
+		maxTokens = *params.MaxTokens
 	}
 
-	defaultStopPatterns := []string{"\n\nUSER:", "\n\nASSISTANT:", "<|context_request|>", "<|end_of_turn|>"}
-	stopPatterns := append(defaultStopPatterns, params.StopSequences...)
-
-	maxTokens := params.MaxTokens
-	if maxTokens == 0 {
-		maxTokens = 64000
+	temperature := 0.4
+	if params.Temperature != nil {
+		if *params.Temperature == 0 {
+			temperature = 0.01 // 上游拒绝 temperature=0
+		} else {
+			temperature = *params.Temperature
+		}
 	}
 
-	temperature := params.Temperature
-	if temperature == 0 {
-		temperature = 0.01 // Devin 不接受 0
-	}
-
-	configuration := &CompletionConfiguration{
-		NumCompletions:      1,
-		MaxTokens:           uint64(maxTokens),
-		MaxNewlines:         200,
-		Temperature:         temperature,
-		FirstTemperature:    temperature,
-		TopK:                50,
-		TopP:                params.TopP,
-		StopPatterns:        stopPatterns,
-		FimEotProbThreshold: 1,
-	}
-
-	if configuration.TopP == 0 {
-		configuration.TopP = 1
+	topP := 1.0
+	if params.TopP != nil {
+		topP = *params.TopP
 	}
 
 	toolChoice := params.ToolChoice
@@ -414,118 +152,119 @@ func (c *DevinUpstreamClient) StreamChat(ctx context.Context, params *StreamChat
 		toolChoice = &ChatToolChoice{OptionName: "auto"}
 	}
 
-	request := &GetChatMessageRequest{
-		Metadata:                 &DevinMetadata{
+	req := &GetChatMessageRequest{
+		Metadata: &Metadata{
 			IDEName:          DevinClientName,
 			IDEVersion:       DevinIDEVersion,
 			ExtensionName:    DevinClientName,
 			ExtensionVersion: DevinExtensionVersion,
-			APIKey:           NormalizeDevinToken(params.APIKey),
 			Locale:           "en",
-			UserJWT:          auth.UserJWT,
+			UserJWT:          userJWT,
 		},
-		Prompt:                   params.SystemPrompt,
-		ChatMessagePrompts:       params.Messages,
-		ChatModelUID:             params.ModelUID,
-		Configuration:            configuration,
+		Prompt:             params.SystemPrompt,
+		ChatMessagePrompts: params.Prompts,
+		ChatModelUID:       params.ModelUID,
+		Configuration: &CompletionConfiguration{
+			NumCompletions:      1,
+			MaxTokens:           uint64(maxTokens),
+			MaxNewlines:         200,
+			Temperature:         temperature,
+			FirstTemperature:    temperature,
+			TopK:                50,
+			TopP:                topP,
+			StopPatterns:        stopPatterns,
+			FimEotProbThreshold: 1,
+		},
 		Tools:                    params.Tools,
 		DisableParallelToolCalls: true,
 		ToolChoice:               toolChoice,
 		CascadeID:                cascadeID,
-		ExecutionID:              generateUUID(),
+		ExecutionID:              executionID,
 	}
 
-	// 3. 编码并压缩请求
-	reqBytes := encodeGetChatMessageRequest(request)
-	frame := encodeConnectFrame(reqBytes, true)
-
-	// 4. 发送请求
-	url := chatBaseURL + DevinChatMessagePath
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(frame))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+	reqBytes := encodeGetChatMessageRequest(req)
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(reqBytes); err != nil {
+		return nil, base, fmt.Errorf("devin gzip request: %w", err)
 	}
-
-	req.Header.Set("Content-Type", "application/connect+proto")
-	req.Header.Set("Connect-Protocol-Version", "1")
-	req.Header.Set("Connect-Content-Encoding", "gzip")
-	req.Header.Set("Accept-Encoding", "identity")
-	req.Header.Set("User-Agent", "connect-go/1.18.1 (go1.26.3)")
-	req.Header.Set("Connect-Accept-Encoding", "gzip")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
+	if err := gw.Close(); err != nil {
+		return nil, base, fmt.Errorf("devin gzip close: %w", err)
 	}
-	defer resp.Body.Close()
+	compressed := buf.Bytes()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("devin api %d: %s", resp.StatusCode, string(body))
-	}
-
-	// 5. 读取流式响应
-	result := &GetChatMessageResponse{}
-	reader := bufio.NewReader(resp.Body)
-	pending := []byte{}
-
-	for {
-		chunk, err := reader.ReadBytes('\n')
-		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("read stream: %w", err)
-		}
-
-		if len(chunk) > 0 {
-			pending = append(pending, chunk...)
-		}
-
-		// 尝试解码 frame
-		for len(pending) >= 5 {
-			frame, consumed, err := decodeConnectFrame(pending)
-			if err == io.ErrUnexpectedEOF {
-				break // 需要更多数据
-			}
-			if err != nil {
-				return nil, fmt.Errorf("decode frame: %w", err)
-			}
-
-			pending = pending[consumed:]
-
-			// 解码消息
-			msg, err := decodeGetChatMessageResponse(frame.Payload)
-			if err != nil {
-				return nil, fmt.Errorf("decode message: %w", err)
-			}
-
-			// 累积结果
-			result.ChatMessage += msg.ChatMessage
-			result.Thinking += msg.Thinking
-			result.StopReason = msg.StopReason
-			result.ToolCalls = append(result.ToolCalls, msg.ToolCalls...)
-			if msg.Usage != nil {
-				result.Usage = msg.Usage
-			}
-
-			// END_STREAM flag
-			if frame.Flags&ConnectEndStreamFlag != 0 {
-				return result, nil
-			}
-		}
-
-		if err == io.EOF {
-			break
-		}
-	}
-
-	return result, nil
+	frame = make([]byte, 5+len(compressed))
+	frame[0] = ConnectCompressedFlag
+	binary.BigEndian.PutUint32(frame[1:5], uint32(len(compressed)))
+	copy(frame[5:], compressed)
+	return frame, base, nil
 }
 
-// generateUUID 生成简单的 UUID（生产环境应使用 google/uuid）
-func generateUUID() string {
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		time.Now().UnixNano()&0xffffffff,
-		(time.Now().UnixNano()>>32)&0xffff,
-		0x4000|(time.Now().UnixNano()&0x0fff),
-		0x8000|(time.Now().UnixNano()&0x3fff),
-		time.Now().UnixNano()&0xffffffffffff)
+// DevinStreamReader 按 Connect 帧头（1 字节 flags + 4 字节大端长度）从任意 io.Reader 切帧。
+// 不使用按换行符切片的读取方式：二进制帧体可能包含换行字节。
+type DevinStreamReader struct {
+	r       io.Reader
+	pending []byte
+	buf     [32 * 1024]byte
+}
+
+func NewDevinStreamReader(r io.Reader) *DevinStreamReader {
+	return &DevinStreamReader{r: r}
+}
+
+// Next 返回下一帧解压后的 payload 与 endStream 标志。
+// 帧未读全时继续 Read；len > MaxFramePayload 直接报错；流正常结束返回 io.EOF。
+func (r *DevinStreamReader) Next() (payload []byte, endStream bool, err error) {
+	for {
+		if len(r.pending) >= 5 {
+			flags := r.pending[0]
+			length := binary.BigEndian.Uint32(r.pending[1:5])
+			if length > MaxFramePayload {
+				return nil, false, fmt.Errorf("connect frame length %d exceeds %d", length, MaxFramePayload)
+			}
+			frameLen := 5 + int(length)
+			if len(r.pending) >= frameLen {
+				payload = make([]byte, int(length))
+				copy(payload, r.pending[5:frameLen])
+				r.pending = r.pending[frameLen:]
+
+				if flags&ConnectCompressedFlag != 0 {
+					decoded, gzErr := tryGunzipResponse(payload)
+					if gzErr != nil {
+						return nil, false, fmt.Errorf("gunzip frame: %w", gzErr)
+					}
+					payload = decoded
+				}
+				return payload, flags&ConnectEndStreamFlag != 0, nil
+			}
+		}
+
+		n, readErr := r.r.Read(r.buf[:])
+		if n > 0 {
+			r.pending = append(r.pending, r.buf[:n]...)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				if len(r.pending) > 0 {
+					return nil, false, io.ErrUnexpectedEOF // 残留半帧
+				}
+				return nil, false, io.EOF
+			}
+			return nil, false, readErr
+		}
+	}
+}
+
+// newDevinUUID 用 crypto/rand 生成 v4 UUID；rand 不可用时以时间戳兜底（仅防返回空值）。
+func newDevinUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		n := uint64(time.Now().UnixNano())
+		for i := range b {
+			b[i] = byte(n >> (uint(i%8) * 8))
+		}
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

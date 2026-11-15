@@ -27,6 +27,8 @@ import (
 // 网页接入账号（官方平台 + access_mode=web）经官方平台键进入：转发链按账号接入
 // 模式分派 forwardWebZhipu / forwardWebDeepseek / forwardWebKimi（平台归并 PR-4 后
 // web-* 平台值退役）。
+// devin 也经 OpenAI 网关转发（Connect+Protobuf 转 chat）：三个入口分流必须登记，
+// 否则会落到 Anthropic 旧网关。
 var openAICompatibleGatewayPlatforms = map[string]struct{}{
 	service.PlatformOpenAI:    {},
 	service.PlatformGrok:      {},
@@ -36,6 +38,7 @@ var openAICompatibleGatewayPlatforms = map[string]struct{}{
 	service.PlatformMiniMax:   {},
 	service.PlatformMuse:      {},
 	service.PlatformCodeBuddy: {},
+	service.PlatformDevin:     {},
 	service.PlatformOther:     {},
 	service.PlatformCursor:    {},
 }

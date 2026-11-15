@@ -29,7 +29,7 @@
 
       <!-- API Key fields (only for apikey type) -->
       <div v-if="account.type === 'apikey'" class="space-y-4">
-        <div v-if="!isWebEditAccount && (!isCNApiKeyAccount || editApiProtocol !== 'adaptive')">
+        <div v-if="!isDevinAccount && !isWebEditAccount && (!isCNApiKeyAccount || editApiProtocol !== 'adaptive')">
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
           <input
             v-model="editBaseUrl"
@@ -63,7 +63,7 @@
             @select="onCnPresetSelect"
           />
         </div>
-        <div v-else-if="!isWebEditAccount">
+        <div v-else-if="!isDevinAccount && !isWebEditAccount">
           <label class="input-label">{{ t('admin.accounts.cnProviders.apiProtocol.endpoints') }}</label>
           <div class="mt-2 space-y-3">
             <div v-for="item in editAdaptiveProtocolOptions" :key="item.value">
@@ -249,7 +249,22 @@
           </div>
           <p class="input-hint mt-2">{{ t('admin.accounts.cnProviders.zhipuTeam.hint') }}</p>
         </div>
-        <div v-if="!isWebEditAccount">
+        <!-- Devin（Cascade）：session token 写入 credentials.api_key，脱敏不回显，留空保留原值 -->
+        <div v-if="isDevinAccount && !isWebEditAccount">
+          <label class="input-label">Devin Session Token</label>
+          <input
+            v-model="editApiKey"
+            type="password"
+            class="input font-mono"
+            autocomplete="new-password"
+            data-1p-ignore
+            data-lpignore="true"
+            data-bwignore="true"
+            placeholder="devin-session-token$..."
+          />
+          <p class="input-hint">留空保留原值</p>
+        </div>
+        <div v-else-if="!isWebEditAccount">
           <label class="input-label">{{ t('admin.accounts.apiKey') }}</label>
           <input
             v-model="editApiKey"
@@ -4342,6 +4357,9 @@ const editApiKey = ref('')
 const isCNApiKeyAccount = computed(
   () => props.account?.type === 'apikey' && isMultiProtocolApiKeyPlatform(props.account.platform)
 )
+// Devin（Cascade）订阅账号：session token 存 credentials.api_key，
+// 编辑时脱敏不回显，留空表示保留原值。
+const isDevinAccount = computed(() => props.account?.platform === 'devin')
 // 网页接入账号（平台归并 PR-3）：平台为官方值（zhipu/deepseek/kimi）且
 // credentials["access_mode"]="web"。access_mode 是 Web/API 唯一判定源——
 // 平台相同的一类账号里 API 账号与 Web 账号共存，必须双条件判定，避免

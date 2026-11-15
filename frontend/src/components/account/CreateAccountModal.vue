@@ -1587,7 +1587,7 @@
 
       <!-- API Key input (only for apikey type, excluding Antigravity which has its own fields) -->
       <div v-if="form.type === 'apikey' && form.platform !== 'antigravity' && form.platform !== 'codebuddy' && !isWebAccessModePlatform" class="space-y-4">
-        <div v-if="!isCNPlatform || apiProtocol !== 'adaptive'">
+        <div v-if="form.platform !== 'devin' && (!isCNPlatform || apiProtocol !== 'adaptive')">
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
           <input
             v-model="apiKeyBaseUrl"
@@ -4507,6 +4507,8 @@ const apiKeyBaseUrlPlaceholder = computed(() => {
 
 const apiKeyValuePlaceholder = computed(() => {
   switch (form.platform) {
+    case 'devin':
+      return 'devin-session-token$...'
     case 'openai':
       return 'sk-proj-...'
     case 'gemini':
@@ -5484,7 +5486,9 @@ watch(
               ? 'https://api.x.ai/v1'
               : newPlatform === 'muse'
                 ? 'https://opencode.ai/zen/go/v1'
-                : 'https://api.anthropic.com'
+                : newPlatform === 'devin'
+                  ? ''
+                  : 'https://api.anthropic.com'
     }
     // Clear model-related settings
     allowedModels.value = []
@@ -6552,9 +6556,12 @@ const handleSubmit = async () => {
               : 'https://api.anthropic.com'
 
   // Build credentials with optional model mapping
+  // devin 平台不落 base_url：session token 由后端走 devin 固定上游，写入 base_url 会被误用。
   const credentials: Record<string, unknown> = {
-    base_url: apiKeyBaseUrl.value.trim() || defaultBaseUrl,
     api_key: apiKeyValue.value.trim()
+  }
+  if (form.platform !== 'devin') {
+    credentials.base_url = apiKeyBaseUrl.value.trim() || defaultBaseUrl
   }
   if (form.platform === 'gemini' && isOfficialGeminiBaseUrl(apiKeyBaseUrl.value)) {
     credentials.tier_id = geminiTierAIStudio.value
