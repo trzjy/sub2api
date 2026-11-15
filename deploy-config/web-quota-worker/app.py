@@ -53,6 +53,9 @@ app = FastAPI(title="web-quota-worker")
 # finish 是同步 HTTP 调用，Go 侧对该请求的总超时是 45 秒；探测超时必须明显小于它。
 LOGIN_VERIFY_PROBE_TIMEOUT_SECONDS = 20
 
+# finish 是同步 HTTP 调用，Go 侧对该请求的总超时是 45 秒；worker 内部预算留 5 秒余量。
+LOGIN_FINISH_BUDGET_SECONDS = 40
+
 
 class AdapterNotImplemented(Exception):
     """请求的上游适配器尚未实现（模块缺失或缺少 Adapter 类）。"""
@@ -411,7 +414,9 @@ async def get_adapter(provider: str) -> BaseAdapter:
         return adapter
 
 
-async def _verify_credentials_usable(session, storage_state: str) -> bool:
+async def _verify_credentials_usable(
+    session, storage_state: str, timeout_seconds: float = LOGIN_VERIFY_PROBE_TIMEOUT_SECONDS
+) -> bool:
     """finish 阶段唯一的凭据可用性出口判定。
 
     用候选凭据在**全新 context** 实跑一次适配器 probe：只有 ``status == "ok"``
@@ -434,12 +439,12 @@ async def _verify_credentials_usable(session, storage_state: str) -> bool:
         console_login_url=session.login_url,
         success_url_prefix=session.success_url_prefix,
         proxy_url=getattr(session, "proxy_url", ""),
-        timeout_seconds=LOGIN_VERIFY_PROBE_TIMEOUT_SECONDS,
+        timeout_seconds=int(max(1, timeout_seconds)),
     )
     try:
         result = await asyncio.wait_for(
             adapter.probe(req),
-            timeout=LOGIN_VERIFY_PROBE_TIMEOUT_SECONDS + 5,
+            timeout=timeout_seconds + 2,
         )
     except Exception:  # noqa: BLE001 - 任何异常都视为凭据不可用
         return False
@@ -539,7 +544,9 @@ from login_sessions import (  # noqa: E402  (路由段集中在此，便于审�
     verify_effective,
 )
 
-_login_registry = LoginSessionRegistry(make_context)
+# 会话过期抢救与 finish 必须走同一凭据校验：注入 _verify_credentials_usable，
+# 会话被回收前若页面是登录态会先实跑一次 probe，无效凭据直接丢弃不落库。
+_login_registry = LoginSessionRegistry(make_context, credential_verifier=_verify_credentials_usable)
 
 
 def _require_token(request: Request) -> None:
@@ -872,9 +879,14 @@ async def login_finish(session_id: str, request: Request):
             content={"status": "pending", "error": "not_authenticated"},
         )
 
+    # 两阶段（verify_effective + 凭据 probe）共享同一个截止时间，避免慢站点
+    # 把整个 finish 拖过 Go 侧 45 秒总超时。worker 内部预算留 5 秒余量。
+    deadline = time.monotonic() + LOGIN_FINISH_BUDGET_SECONDS
+
     # 网址看起来对不代表真的登上了：上游登录失败后常跳回原页面。
     # 用「新开一页访问控制台、看会不会被弹回登录页」来确认（2026-11-13 美团扫码失败）。
-    if not await verify_effective(session):
+    remaining_ms = max(1000, int((deadline - time.monotonic()) * 1000))
+    if not await verify_effective(session, timeout_ms=remaining_ms):
         logger.info("login provider=%s status=verify_failed", session.provider)
         return JSONResponse(
             status_code=409,
@@ -891,7 +903,8 @@ async def login_finish(session_id: str, request: Request):
     # 保存的 storage_state 其实是未登录态，根路径 4 秒内都不校验登录，verify_effective
     # 恒通过。这里用候选凭据在全新 context 实跑一次适配器 probe 作为最终出口判定。
     # 非 ok 时不关闭会话、不回传 storage_state——用户可直接在面板继续操作或换登录方式。
-    if not await _verify_credentials_usable(session, storage_state):
+    remaining_seconds = max(1.0, deadline - time.monotonic())
+    if not await _verify_credentials_usable(session, storage_state, timeout_seconds=remaining_seconds):
         logger.info("login provider=%s status=verify_failed reason=probe_not_ok", session.provider)
         return JSONResponse(
             status_code=409,

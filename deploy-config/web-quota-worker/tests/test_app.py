@@ -289,7 +289,7 @@ class FakeAdapter:
         return self.result
 
 
-async def _verify_effective_always_true(_session):
+async def _verify_effective_always_true(_session, timeout_ms=0):
     return True
 
 
@@ -347,3 +347,44 @@ def test_finish_probe_ok_returns_200(client, monkeypatch):
 
     # 通过后关闭会话。
     assert registry.closed == ["sid-fake"]
+
+
+class _VerifyEffectiveRecorder:
+    """记录 login_finish 传给 verify_effective 的 timeout_ms 的假回调。"""
+
+    def __init__(self, result=True):
+        self.result = result
+        self.timeout_ms = None
+
+    async def __call__(self, _session, timeout_ms=0):
+        self.timeout_ms = timeout_ms
+        return self.result
+
+
+def test_finish_passes_budget_bounded_timeouts(client, monkeypatch):
+    """finish 传给 verify_effective 与 probe 的超时都不超过 40 秒总预算。
+
+    两阶段必须共享 deadline：慢站点下若各自取满额（verify 25s + 等 1s +
+    probe 20s + 余量），合计会越过 Go 侧 45 秒总超时，把请求拖死。
+    """
+    result = ProbeResult(status="ok", provider="iflytek", account_label="Acct")
+    _, registry, adapter = _build_scenario(monkeypatch, result)
+
+    # 用记录参数的假 verify_effective 覆盖 _build_scenario 里默认注入的版本。
+    recorder = _VerifyEffectiveRecorder(result=True)
+    monkeypatch.setattr(app_module, "verify_effective", recorder)
+
+    resp = client.post(
+        "/v1/login/sid-fake/finish",
+        headers={"X-Worker-Token": "test-token"},
+    )
+    assert resp.status_code == 200
+
+    budget_ms = app_module.LOGIN_FINISH_BUDGET_SECONDS * 1000
+    # verify_effective 收到的 timeout_ms 不得超过总预算。
+    assert recorder.timeout_ms is not None
+    assert recorder.timeout_ms <= budget_ms
+
+    # probe 收到的 ProbeRequest.timeout_seconds 不得超过同一预算。
+    assert adapter.received is not None
+    assert adapter.received.timeout_seconds <= app_module.LOGIN_FINISH_BUDGET_SECONDS

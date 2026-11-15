@@ -489,3 +489,81 @@ def test_start_defaults_proxy_url_to_empty():
         await session.open_task
 
     asyncio.run(case())
+
+
+# ---------------------------------------------------------------------------
+# 抢救复用凭据校验：authenticated() 只看 URL，会放过「看起来登上、实际未登录」的会话
+# （2026-11-15 讯飞实例），抢救成果必须与 finish 走同一凭据校验。
+# ---------------------------------------------------------------------------
+
+
+def test_rescue_runs_credential_verifier_and_drops_when_false():
+    """verifier 返回 False：即便 URL 判定已登录，抢救成果也须丢弃（payload 为空）。"""
+
+    async def case():
+        context = FakeContext(FakePage())
+        calls = []
+
+        async def verifier(_session, raw):
+            calls.append(raw)
+            return False
+
+        registry = LoginSessionRegistry(
+            _factory(context), credential_verifier=verifier
+        )
+        session = await registry.start(
+            provider="iflytek",
+            login_url="https://passport.example.com/login",
+            success_url_prefix="https://console.example.com/",
+        )
+        # 构造「已登录 URL」状态：先离开过登录页，再回到成功前缀。
+        session.page.url = "https://passport.example.com/login"
+        assert session.authenticated() is False
+        session.page.url = "https://console.example.com/usage"
+        assert session.authenticated() is True
+        # 让其过期，触发回收 + 抢救。
+        session.created_at -= LOGIN_SESSION_MAX_AGE_SECONDS + 1
+        with pytest.raises(LoginSessionError) as excinfo:
+            await registry.get(session.id)
+        assert excinfo.value.code == "session_expired"
+        assert excinfo.value.payload == {}
+        # verifier 确实被调用过，且收到的是非空 storage_state 字符串。
+        assert len(calls) == 1
+        assert isinstance(calls[0], str) and calls[0] != ""
+
+    asyncio.run(case())
+
+
+def test_rescue_keeps_storage_state_when_verifier_true():
+    """verifier 返回 True：URL 判定已登录且凭据校验通过，抢救成果应含非空 storage_state。"""
+
+    async def case():
+        context = FakeContext(FakePage())
+        calls = []
+
+        async def verifier(_session, raw):
+            calls.append(raw)
+            return True
+
+        registry = LoginSessionRegistry(
+            _factory(context), credential_verifier=verifier
+        )
+        session = await registry.start(
+            provider="iflytek",
+            login_url="https://passport.example.com/login",
+            success_url_prefix="https://console.example.com/",
+        )
+        session.page.url = "https://passport.example.com/login"
+        assert session.authenticated() is False
+        session.page.url = "https://console.example.com/usage"
+        assert session.authenticated() is True
+        session.created_at -= LOGIN_SESSION_MAX_AGE_SECONDS + 1
+        with pytest.raises(LoginSessionError) as excinfo:
+            await registry.get(session.id)
+        assert excinfo.value.code == "session_expired"
+        payload = excinfo.value.payload
+        assert isinstance(payload.get("storage_state"), str)
+        assert payload["storage_state"] != ""
+        assert len(calls) == 1
+
+    asyncio.run(case())

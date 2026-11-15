@@ -196,10 +196,20 @@ class LoginSession:
 
 
 class LoginSessionRegistry:
-    """进程内会话表。所有方法都做惰性过期清理。"""
+    """进程内会话表。所有方法都做惰性过期清理。
 
-    def __init__(self, context_factory: ContextFactory) -> None:
+    ``credential_verifier`` 是 ``async def (session, storage_state: str) -> bool``，
+    用于「抢救登录成果」前确认凭据真的可用；``None`` 表示不校验（保持旧行为，
+    供测试与无适配器场景使用）。
+    """
+
+    def __init__(
+        self,
+        context_factory: ContextFactory,
+        credential_verifier=None,
+    ) -> None:
         self._context_factory = context_factory
+        self._credential_verifier = credential_verifier
         self._sessions: dict[str, LoginSession] = {}
         self._lock = asyncio.Lock()
 
@@ -336,13 +346,16 @@ class LoginSessionRegistry:
         except Exception:  # noqa: BLE001 - 关闭失败不向上抛
             pass
 
-    @staticmethod
-    async def _rescue_storage_state(session: LoginSession) -> dict:
+    async def _rescue_storage_state(self, session: LoginSession) -> dict:
         """会话回收前抢救登录成果。
 
         只在「页面确实是登录态」时才有东西可抢：``authenticated()`` 要求先离开过
         登录页、再回到控制台成功落点内，游客会话抢了也是白抢（存下来反而是脏数据）。
         抢不到就返回空 dict，让后端按「会话没了」正常处理。
+
+        ``authenticated()`` 只凭 URL 判定，会放过「看起来登上、实际未登录」的会话
+        （2026-11-15 讯飞实例），所以抢救成果必须与 finish 走同一凭据校验：
+        注入的 ``_credential_verifier`` 返回 False 时直接丢弃，不把无效凭据落库。
         """
         try:
             if not session.authenticated():
@@ -353,6 +366,12 @@ class LoginSessionRegistry:
             return {}
         if not raw:
             return {}
+        if self._credential_verifier is not None:
+            try:
+                if not await self._credential_verifier(session, raw):
+                    return {}
+            except Exception:  # noqa: BLE001 - 校验失败不能让回收流程抛错
+                return {}
         return {"status": "authenticated", "storage_state": raw}
 
     async def _prune_locked(self, now: float) -> None:
@@ -553,7 +572,7 @@ async def snapshot_storage_state(session: LoginSession) -> str:
 LOGIN_VERIFY_TIMEOUT_MS = 25000
 
 
-async def verify_effective(session: LoginSession) -> bool:
+async def verify_effective(session: LoginSession, timeout_ms: int = LOGIN_VERIFY_TIMEOUT_MS) -> bool:
     """另开一页访问控制台入口，看「没登录的会话」会不会被弹回登录页。
 
     为什么不能只看当前网址：上游登录失败后常常跳回原页面，网址落在控制台
@@ -568,6 +587,9 @@ async def verify_effective(session: LoginSession) -> bool:
     - True：校验通过，或压根没法校验（跳过）
     - False：明确被弹回别的域名 = 这次登录没生效
     校验过程本身出错（网络抖动）不误伤，按通过处理，避免把好登录判死。
+
+    ``timeout_ms`` 可调：调用方（finish）会按 Go 侧 45 秒预算的剩余量
+    传入更小的值，避免「先做 URL 前置校验、再做凭据 probe」的总时长越界。
     """
     prefix = (session.success_url_prefix or "").strip()
     if not prefix:
@@ -576,7 +598,7 @@ async def verify_effective(session: LoginSession) -> bool:
     try:
         probe_page = await session.context.new_page()
         await probe_page.goto(
-            prefix, wait_until="domcontentloaded", timeout=LOGIN_VERIFY_TIMEOUT_MS
+            prefix, wait_until="domcontentloaded", timeout=timeout_ms
         )
         await probe_page.wait_for_timeout(1000)
         landed = (probe_page.url or "").strip()
