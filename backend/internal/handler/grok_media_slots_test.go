@@ -307,8 +307,15 @@ func TestGrokMediaLookupSlotLifecycle(t *testing.T) {
 				if scenario == "normal" || scenario == "wait then acquired" {
 					require.Equal(t, 200, w.Code)
 				}
-				if scenario == "full" || scenario == "queue full" {
+				if scenario == "queue full" {
 					require.Equal(t, http.StatusTooManyRequests, w.Code)
+				}
+				if scenario == "full" {
+					// 绑定查询的唯一候选就是任务属主账号：槽满即使再「换号」也只会
+					// 拿回同一个号，所以一次失败即终态——账号槽打满属站点供给不足，
+					// 按既有契约写 503（见 concurrencyErrorResponse），让客户端重试。
+					// 这里原先是 429：那是「用户/分组并发超限」的语义，用错了轴。
+					require.Equal(t, http.StatusServiceUnavailable, w.Code)
 				}
 			}
 			require.Zero(t, bindings.writes, "lookups must preserve owner and TTL")
