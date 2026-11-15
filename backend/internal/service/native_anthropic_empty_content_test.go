@@ -17,12 +17,15 @@ func TestAnthropicSSELineCarriesPayloadContent(t *testing.T) {
 		payload string
 		want    bool
 	}{
-		{"正文块开始", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`, true},
+		{"空壳文本块开始", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`, false},
+		{"文本块开始带正文", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"答案"}}`, true},
 		{"思考块开始", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`, false},
 		{"脱敏思考块开始", `{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking"}}`, false},
 		{"工具调用块开始", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_1","name":"Read"}}`, true},
 		{"文本增量", `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"你好"}}`, true},
+		{"空文本增量", `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":""}}`, false},
 		{"工具参数增量", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\""}}`, true},
+		{"空工具参数增量", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}}`, false},
 		{"思考增量", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"嗯"}}`, false},
 		{"签名增量", `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}`, false},
 		{"块结束", `{"type":"content_block_stop","index":1}`, false},
@@ -49,6 +52,8 @@ func TestAnthropicResponseHasRenderableContent(t *testing.T) {
 	}{
 		{"空内容数组", `{"type":"message","content":[],"stop_reason":"end_turn"}`, false},
 		{"只有思考块", `{"type":"message","content":[{"type":"thinking","thinking":"嗯"}],"stop_reason":"end_turn"}`, false},
+		{"只有空文本块", `{"type":"message","content":[{"type":"text","text":""}],"stop_reason":"max_tokens"}`, false},
+		{"思考加空文本块", `{"type":"message","content":[{"type":"thinking","thinking":"嗯"},{"type":"text","text":""}],"stop_reason":"max_tokens"}`, false},
 		{"正文加思考", `{"type":"message","content":[{"type":"thinking","thinking":"嗯"},{"type":"text","text":"答案"}]}`, true},
 		{"只有工具调用", `{"type":"message","content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{}}]}`, true},
 		{"content 缺失", `{"type":"message","id":"msg_1"}`, true},

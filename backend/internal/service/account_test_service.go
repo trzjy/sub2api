@@ -3739,13 +3739,22 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 	// 旧行为是「test_start → test_complete{success:true}」，看后台像是测试通过，
 	// 实际什么也没测到 —— 运维会据此把坏账号判成好账号。这里把原始响应的开头
 	// 一并带回，让失败原因可定位，而不是只报一句「空」。
+	//
+	// 原始开头必须包含 data 行：只留 `event:` 标签等于什么都没留（2026-11-15
+	// 线上实测教训：首版只记非 data 行，报出来是 18 个空的 event: 标签，
+	// 看不出是「只有思考」还是「上游回了个空壳」）。
 	const rawHeadLimit = 512
+	const rawLineLimit = 200
 	var rawHead strings.Builder
 	contentEvents := 0
 	thinkingEvents := 0
+	stopReason := ""
 	noteRaw := func(line string) {
-		if rawHead.Len() >= rawHeadLimit {
+		if rawHead.Len() >= rawHeadLimit || strings.TrimSpace(line) == "" {
 			return
+		}
+		if len(line) > rawLineLimit {
+			line = line[:rawLineLimit] + "…"
 		}
 		rawHead.WriteString(line)
 		rawHead.WriteString("\n")
@@ -3758,9 +3767,13 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 		if head == "" {
 			head = "(上游连一行 SSE 都没有返回)"
 		}
+		reason := ""
+		if stopReason != "" {
+			reason = "，stop_reason=" + stopReason
+		}
 		return s.sendErrorAndEnd(c, fmt.Sprintf(
-			"上游返回 HTTP 200，但流里没有任何正文（content 事件 0 个，思考事件 %d 个）。原始响应开头：%s",
-			thinkingEvents, head))
+			"上游返回 HTTP 200，但流里没有任何正文（content 事件 0 个，思考事件 %d 个%s）。原始响应开头：%s",
+			thinkingEvents, reason, head))
 	}
 
 	for {
@@ -3777,8 +3790,9 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 		}
 
 		line = strings.TrimSpace(line)
+		// 原始开头要留 data 行（见上方 noteRaw 注释），所以进门先记，不只记非 data 行。
+		noteRaw(line)
 		if line == "" || !sseDataPrefix.MatchString(line) {
-			noteRaw(line)
 			continue
 		}
 
@@ -3793,7 +3807,6 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 
 		var data map[string]any
 		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-			noteRaw(line)
 			continue
 		}
 
@@ -3803,12 +3816,24 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 		case "content_block_delta":
 			if delta, ok := data["delta"].(map[string]any); ok {
 				if text, ok := delta["text"].(string); ok {
-					contentEvents++
-					s.sendEvent(c, TestEvent{Type: "content", Text: text})
+					// 空串增量不算正文：与网关侧判据（空 text_delta 不算内容）
+					// 保持同一口径，否则空壳增量会让面板误判成测试通过。
+					if text != "" {
+						contentEvents++
+						s.sendEvent(c, TestEvent{Type: "content", Text: text})
+					}
 				} else if _, isThinking := delta["thinking"].(string); isThinking {
 					// 思考增量不计入正文：只统计并留在失败原因里，便于区分
 					// 「预算被思考吃光」和「上游什么都没给」。
 					thinkingEvents++
+				}
+			}
+		case "message_delta":
+			// stop_reason 只出现在 message_delta 里，是判断「预算被 max_tokens
+			// 截断」还是「上游自己收尾」的唯一依据，失败原因里要带上。
+			if delta, ok := data["delta"].(map[string]any); ok {
+				if sr, ok := delta["stop_reason"].(string); ok && sr != "" {
+					stopReason = sr
 				}
 			}
 		case "message_stop":

@@ -41,18 +41,35 @@ const emptyAnthropicContentErrorCode = "upstream_empty_content"
 // 预算被思考吃光时上游会正常收尾但正文为空，客户看到的就是一个空白回答。
 // 纯工具调用（content_block_start type=tool_use / input_json_delta）算内容，
 // 因为 Claude Code 那类客户端确实会执行它，不是空回答。
+//
+// 「有块」不等于「有内容」：文本块固定以 {"type":"text","text":""} 开场，正文由
+// 后续 text_delta 带来；空串增量同理（部分上游会发空 ping 式增量）。这类空壳
+// 必须判成「没有内容」，否则闸门会被一个空壳文本块骗过去，客户照样收到空白回答
+// —— 判据要和 chat 出站侧 chatChunkCarriesPayloadContent 对「空串」的判断一致。
 func anthropicSSELineCarriesPayloadContent(payload string) bool {
 	if payload == "" {
 		return false
 	}
 	switch gjson.Get(payload, "type").String() {
 	case "content_block_start":
-		blockType := gjson.Get(payload, "content_block.type").String()
-		return blockType != "" && blockType != "thinking" && blockType != "redacted_thinking"
+		block := gjson.Get(payload, "content_block")
+		switch block.Get("type").String() {
+		case "", "thinking", "redacted_thinking":
+			return false
+		case "text":
+			// 少数兼容实现把整段正文直接塞在 start 里，非空才算。
+			return block.Get("text").String() != ""
+		}
+		return true
 	case "content_block_delta":
-		switch gjson.Get(payload, "delta.type").String() {
+		delta := gjson.Get(payload, "delta")
+		switch delta.Get("type").String() {
 		case "thinking_delta", "signature_delta":
 			return false
+		case "text_delta":
+			return delta.Get("text").String() != ""
+		case "input_json_delta":
+			return delta.Get("partial_json").String() != ""
 		}
 		return true
 	}
@@ -61,10 +78,11 @@ func anthropicSSELineCarriesPayloadContent(payload string) bool {
 
 // anthropicResponseHasRenderableContent 判断非流式 Anthropic 响应体里有没有
 // 客户端能渲染的内容。与流式判据同源：thinking / redacted_thinking 不算，
-// 其它内容块（text / tool_use / image …）都算。
+// 其它内容块（text / tool_use / image …）都算；但**空的 text 块不算**——
+// {"type":"text","text":""} 渲染出来是空白，与流式的判据保持一致。
 //
 // 结构不可识别（content 缺失或不是数组）时返回 true —— 未知形态保持原样透传，
-// 只拦「明确是空 content 数组」这一种。
+// 只拦「明确是空 content 数组」和「只有思考 + 空文本块」这两种。
 func anthropicResponseHasRenderableContent(body []byte) bool {
 	content := gjson.GetBytes(body, "content")
 	if !content.Exists() || !content.IsArray() {
@@ -74,6 +92,11 @@ func anthropicResponseHasRenderableContent(body []byte) bool {
 	content.ForEach(func(_, block gjson.Result) bool {
 		switch block.Get("type").String() {
 		case "thinking", "redacted_thinking":
+		case "text":
+			if block.Get("text").String() != "" {
+				renderable = true
+				return false
+			}
 		default:
 			renderable = true
 			return false
