@@ -298,6 +298,7 @@ class LoginSessionRegistry:
             session.phase_error = "login_page_unreachable"
 
     async def get(self, session_id: str) -> LoginSession:
+        expired_session = None
         async with self._lock:
             now = time.monotonic()
             session = self._sessions.get(session_id)
@@ -309,13 +310,17 @@ class LoginSessionRegistry:
                 # 后者通常意味着前端拿着旧会话号在轮询，两者提示语不同。
                 self._sessions.pop(session_id, None)
                 session.closed = True
-                # 回收浏览器之前先抢救一次登录成果：页面已经是登录态的话，
-                # 把 cookie 抓下来交给后端。用户登进去过就是登进去过，
-                # 不能因为会话到点就把成果一起扔掉，逼他重收一遍短信验证码。
-                rescued = await self._rescue_storage_state(session)
-                await self._close_context(session)
-                raise LoginSessionError("session_expired", payload=rescued)
-            await self._prune_locked(now)
+                # 抢救要实跑一次凭据 probe（最长约 20 秒），绝不能放在全局锁内：
+                # 否则其它会话的 get/close/start 全排在锁后，finish 预算与
+                # Go 侧 45 秒总超时会被挤爆（2026-11-15 外审 P1）。
+                # 锁只保证「摘除会话 + 标记关闭」的原子性。
+                expired_session = session
+            else:
+                await self._prune_locked(now)
+        if expired_session is not None:
+            rescued = await self._rescue_storage_state(expired_session)
+            await self._close_context(expired_session)
+            raise LoginSessionError("session_expired", payload=rescued)
         session.touch()
         return session
 

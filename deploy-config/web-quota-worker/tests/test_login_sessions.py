@@ -567,3 +567,56 @@ def test_rescue_keeps_storage_state_when_verifier_true():
         assert len(calls) == 1
 
     asyncio.run(case())
+
+
+def test_expired_rescue_does_not_block_other_sessions():
+    """过期会话触发抢救（实跑凭据 probe，最长约 20 秒）时，绝不能持有全局锁，
+    否则其它会话的 get/close/start 全排在锁后，挤爆 finish 预算与 Go 侧 45 秒总超时。
+
+    这里用一个会阻塞的 verifier（gate 事件）模拟「probe 卡住」，证明另一会话的
+    get 能在 1 秒内返回，从而证明锁没有被抢救持有（2026-11-15 外审 P1）。"""
+
+    async def case():
+        page = FakePage()
+        context = FakeContext(page)
+        # factory 复用同一个 FakeContext：两个会话共享浏览器上下文。
+        factory = _factory(context)
+        gate = asyncio.Event()
+
+        async def verifier(_session, _raw):
+            # 模拟凭据 probe 卡住（网络等待最长约 20 秒）。
+            await gate.wait()
+            return True
+
+        registry = LoginSessionRegistry(factory, credential_verifier=verifier)
+
+        s1 = await _start(registry)
+        s2 = await _start(registry)
+
+        # 让 s1 进入「已登录 + 已过期」状态：
+        # 先离开过登录页，再回到控制台成功前缀（标记 left_success_prefix），
+        # 最后把创建时间推过绝对上限触发过期。
+        s1.page.url = "https://passport.example.com/login"
+        assert s1.authenticated() is False
+        s1.page.url = "https://console.example.com/usage"
+        assert s1.authenticated() is True
+        s1.created_at -= LOGIN_SESSION_MAX_AGE_SECONDS + 1
+
+        # 触发 s1 的抢救：会在 verifier 处卡住。
+        task = asyncio.create_task(registry.get(s1.id))
+        await asyncio.sleep(0)  # 让 task 进入等待（锁已释放）
+
+        # 关键断言：s2 的 get 不应被 s1 的抢救阻塞，1 秒内正常返回。
+        returned = await asyncio.wait_for(registry.get(s2.id), timeout=1.0)
+        assert returned is s2
+
+        # 放行 verifier，s1 的 get 应抛出 session_expired 且 payload 含非空 storage_state。
+        gate.set()
+        with pytest.raises(LoginSessionError) as excinfo:
+            await task
+        assert excinfo.value.code == "session_expired"
+        payload = excinfo.value.payload
+        assert isinstance(payload.get("storage_state"), str)
+        assert payload["storage_state"] != ""
+
+    asyncio.run(case())
