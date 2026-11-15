@@ -180,6 +180,22 @@ func devinUsageFrame(responseID, originalModel string, usage *OpenAIUsage) gin.H
 	}
 }
 
+// devinShouldEmitUsage 判定流式收尾是否写独立 usage 帧：入站 stream_options.include_usage
+// 仅对 chat 模式生效；responses / anthropic 回桥需要 usage 填充，故无条件回传一帧。
+func devinShouldEmitUsage(mode webResponseMode, includeUsage bool) bool {
+	return includeUsage || mode != webResponseModeChat
+}
+
+// devinNonStreamMessage 构造非流式 message 的 content / reasoning_content：使用未 Trim
+// 的原文以保留上游空白（缩进、换行），仅用 Trim 后的副本判断是否有实际内容。
+func devinNonStreamMessage(text, reasoning string) gin.H {
+	message := gin.H{"role": "assistant", "content": text}
+	if strings.TrimSpace(reasoning) != "" {
+		message["reasoning_content"] = reasoning
+	}
+	return message
+}
+
 // devinUsageFromStats 把上游 ModelUsageStats 归一为 ChatUsage（C3），再由
 // DevinUsageToOpenAI 转成 OpenAIUsage。nil 输入返回全零。抽成纯函数便于单测。
 func devinUsageFromStats(s *ModelUsageStats) ChatUsage {
@@ -476,22 +492,36 @@ streamLoop:
 		}
 	}
 
-	// 流中段错误收口：不伪造正常 finish_reason+usage 终止帧。
-	if midstreamErr {
-		if err := writeWebStreamMidstreamError(c, st, midstreamErrMsg); err != nil {
-			return nil, err
-		}
+	// 收口用量统一归一（nil → 全零）：midstream trailer 错误、客户端断开、终帧写失败
+	// 三条收口路径都必须带上已采集的 Usage，故在此计算，供各收口共用（计费不得丢）。
+	finalUsage := usage
+	if finalUsage == nil {
+		finalUsage = &OpenAIUsage{}
+	}
+	// committedResult 构造"响应已提交"的收口结果：让"客户端断开 / midstream 错误 /
+	// 终帧写失败"三条路径计费口径一致，统一带 Usage 并按连接状态标注 ClientDisconnect。
+	committedResult := func(disconnected bool) (*OpenAIForwardResult, error) {
 		MarkResponseCommitted(c)
 		return &OpenAIForwardResult{
 			UpstreamHeaders:  resp.Header,
 			ResponseID:       responseID,
+			Usage:            *finalUsage,
 			Model:            originalModel,
 			UpstreamModel:    upstreamModel,
 			UpstreamEndpoint: DevinChatMessagePath,
 			Stream:           true,
 			ResponseHeaders:  resp.Header.Clone(),
 			Duration:         time.Since(startTime),
+			ClientDisconnect: disconnected,
 		}, nil
+	}
+
+	// 流中段错误收口：不伪造正常 finish_reason+usage 终止帧。
+	if midstreamErr {
+		if err := writeWebStreamMidstreamError(c, st, midstreamErrMsg); err != nil {
+			return nil, err
+		}
+		return committedResult(clientDisconnected)
 	}
 
 	// 空回答闸门：上游 200 但无正文/思考/工具调用 → 失败关闭。
@@ -514,42 +544,27 @@ streamLoop:
 		}
 	}
 
-	finalUsage := usage
-	if finalUsage == nil {
-		finalUsage = &OpenAIUsage{}
-	}
 	finishReason := DevinStopReasonToOpenAI(lastStopReason, len(toolHeaderSent) > 0)
 
 	// 客户端断开：不再向下游写，但必须继续走完收口并返回带 usage 的结果（不得丢计费）。
 	if clientDisconnected {
-		MarkResponseCommitted(c)
-		return &OpenAIForwardResult{
-			UpstreamHeaders:  resp.Header,
-			ResponseID:       responseID,
-			Usage:            *finalUsage,
-			Model:            originalModel,
-			UpstreamModel:    upstreamModel,
-			UpstreamEndpoint: DevinChatMessagePath,
-			Stream:           true,
-			ResponseHeaders:  resp.Header.Clone(),
-			Duration:         time.Since(startTime),
-			ClientDisconnect: true,
-		}, nil
+		return committedResult(true)
 	}
 
 	// 终帧 finish_reason + （可选）独立 usage 帧 + finalizeWebStream。
 	if err := writeWebStreamChunk(c, st, devinChunkEnvelope(
 		responseID, originalModel, gin.H{}, finishReason, nil,
 	)); err != nil {
-		return nil, err
+		return committedResult(true)
 	}
-	if includeUsage {
+	// include_usage 仅对 chat 生效；responses/anthropic 必须无条件回传 usage 帧供回桥填充。
+	if devinShouldEmitUsage(mode, includeUsage) {
 		if err := writeWebStreamChunk(c, st, devinUsageFrame(responseID, originalModel, finalUsage)); err != nil {
-			return nil, err
+			return committedResult(true)
 		}
 	}
 	if err := finalizeWebStream(c, st); err != nil {
-		return nil, err
+		return committedResult(true)
 	}
 	MarkResponseCommitted(c)
 
@@ -659,10 +674,7 @@ func (s *OpenAIGatewayService) handleDevinNonStreamingResponse(
 	}
 	appendDevinToolDeltas(&assembled, finalToolDeltas)
 
-	message := gin.H{"role": "assistant", "content": strings.TrimSpace(textAggregated.String())}
-	if reasoning := strings.TrimSpace(reasoningAggregated.String()); reasoning != "" {
-		message["reasoning_content"] = reasoning
-	}
+	message := devinNonStreamMessage(textAggregated.String(), reasoningAggregated.String())
 	if len(assembled) > 0 {
 		toolCalls := make([]gin.H, 0, len(assembled))
 		for _, call := range assembled {

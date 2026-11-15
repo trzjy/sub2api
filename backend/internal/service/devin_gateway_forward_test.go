@@ -85,6 +85,34 @@ func TestDevinForwardUsageFrame(t *testing.T) {
 	require.Empty(t, choices)
 }
 
+// TestDevinForwardShouldEmitUsage 覆盖三协议 usage 帧策略：include_usage 仅对 chat 生效，
+// responses / anthropic 无条件回传 usage 帧供回桥填充（外审 R3 改动 3）。
+func TestDevinForwardShouldEmitUsage(t *testing.T) {
+	// chat：仅 include_usage=true 才写 usage 帧。
+	require.True(t, devinShouldEmitUsage(webResponseModeChat, true))
+	require.False(t, devinShouldEmitUsage(webResponseModeChat, false))
+
+	// responses / anthropic：无论 include_usage 都为真。
+	require.True(t, devinShouldEmitUsage(webResponseModeResponses, true))
+	require.True(t, devinShouldEmitUsage(webResponseModeResponses, false))
+	require.True(t, devinShouldEmitUsage(webResponseModeAnthropic, true))
+	require.True(t, devinShouldEmitUsage(webResponseModeAnthropic, false))
+}
+
+// TestDevinForwardNonStreamMessage 覆盖非流式原文空白保留：content / reasoning 均为未
+// Trim 原文，仅用 Trim 副本判断 reasoning 是否有实际内容（外审 R3 改动 4）。
+func TestDevinForwardNonStreamMessage(t *testing.T) {
+	msg := devinNonStreamMessage("  hello \n", "  think\n  ")
+	require.Equal(t, "assistant", msg["role"])
+	require.Equal(t, "  hello \n", msg["content"])
+	require.Equal(t, "  think\n  ", msg["reasoning_content"])
+
+	// reasoning 全为空白：不写入该键；content 原文空白依旧保留。
+	blank := devinNonStreamMessage(" \tline \n", "  \n\t ")
+	require.Equal(t, " \tline \n", blank["content"])
+	require.NotContains(t, blank, "reasoning_content")
+}
+
 // TestDevinForwardTrailerError 覆盖 END_STREAM trailer 解析：数字/字符串 code、
 // 正常 trailer、非法 JSON。
 func TestDevinForwardTrailerError(t *testing.T) {
