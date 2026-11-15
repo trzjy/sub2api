@@ -222,3 +222,89 @@ func TestDevinProtoUsageDecode(t *testing.T) {
 	require.Equal(t, "usage-msg", got.Usage.MessageID)
 	require.Equal(t, "usage-model", got.Usage.ModelUID)
 }
+
+// TestDevinProtoRejectsVarintField1 断言：字段 1（期望 string/wire 2）被编成
+// varint（wire 0）时失败关闭且不 panic。这是外审 R1 的畸形 payload：
+// 旧实现无条件 ReadString()，把 uint64 最大值经 int() 转成 -1 后切片越界 panic。
+func TestDevinProtoRejectsVarintField1(t *testing.T) {
+	// 0x08 = field 1 / wire 0；后随 10 字节 varint = uint64 最大值。
+	payload := []byte{0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01}
+
+	t.Run("chat message response", func(t *testing.T) {
+		var got *GetChatMessageResponse
+		var err error
+		require.NotPanics(t, func() {
+			got, err = decodeGetChatMessageResponse(payload)
+		}, "畸形 wire 类型不得 panic")
+		require.Error(t, err, "wire 类型不符须返回错误")
+		require.Nil(t, got)
+	})
+
+	t.Run("user jwt response", func(t *testing.T) {
+		var got *GetUserJwtResponse
+		var err error
+		require.NotPanics(t, func() {
+			got, err = decodeGetUserJwtResponse(payload)
+		}, "畸形 wire 类型不得 panic")
+		require.Error(t, err, "wire 类型不符须返回错误")
+		require.Nil(t, got)
+	})
+}
+
+// TestDevinProtoRejectsOverlongLength 断言：字符串声明长度超过剩余字节（含
+// uint64 最大值转成负 int）时返回 error 且不 panic。
+func TestDevinProtoRejectsOverlongLength(t *testing.T) {
+	// field 1 / wire 2，声明长度 100，但仅 3 字节内容。
+	overlong := []byte{0x0a, 0x64, 'a', 'b', 'c'}
+	var got *GetChatMessageResponse
+	var err error
+	require.NotPanics(t, func() {
+		got, err = decodeGetChatMessageResponse(overlong)
+	}, "声明长度越界不得 panic")
+	require.Error(t, err, "长度越界须返回错误")
+	require.Nil(t, got)
+
+	// 声明长度为 uint64 最大值（int() 后为 -1），wire 2 tag。
+	negative := []byte{0x0a, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01}
+	require.NotPanics(t, func() {
+		got, err = decodeGetChatMessageResponse(negative)
+	}, "负长度不得 panic")
+	require.Error(t, err, "负长度须返回错误")
+	require.Nil(t, got)
+}
+
+// TestDevinProtoRejectsTruncatedTag 断言：截断的 tag（varint 继续位置起但无后续
+// 字节）返回 error 且不 panic。
+func TestDevinProtoRejectsTruncatedTag(t *testing.T) {
+	truncated := []byte{0x80}
+	var got *GetChatMessageResponse
+	var err error
+	require.NotPanics(t, func() {
+		got, err = decodeGetChatMessageResponse(truncated)
+	}, "截断的 tag 不得 panic")
+	require.Error(t, err, "截断的 tag 须返回错误")
+	require.Nil(t, got)
+}
+
+// TestDevinProtoMalformedNestedFailClosed 断言：嵌套消息字段类型不符或内部损坏
+// 时，错误向上传播并失败关闭。
+func TestDevinProtoMalformedNestedFailClosed(t *testing.T) {
+	// field 6（repeated message，期望 wire 2）被编成 varint：须 Skip 并失败关闭。
+	badToolCallWire := []byte{0x30, 0x01} // field 6 / wire 0
+	var got *GetChatMessageResponse
+	var err error
+	require.NotPanics(t, func() {
+		got, err = decodeGetChatMessageResponse(badToolCallWire)
+	})
+	require.Error(t, err, "嵌套字段 wire 类型不符须返回错误")
+	require.Nil(t, got)
+
+	// field 6 是消息，但内部 field 1 声明长度越界。
+	inner := []byte{0x0a, 0x64, 'x'} // 内部 field1 声明 100 字节，实际仅 1 字节
+	outer := append([]byte{0x32, byte(len(inner))}, inner...)
+	require.NotPanics(t, func() {
+		got, err = decodeGetChatMessageResponse(outer)
+	}, "嵌套消息畸形不得 panic")
+	require.Error(t, err, "嵌套消息内部损坏须返回错误")
+	require.Nil(t, got)
+}

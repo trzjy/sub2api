@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -113,14 +114,35 @@ func (e *ProtoEncoder) Bytes() []byte {
 	return e.buf
 }
 
-// ProtoDecoder 最小 Protobuf 解码器
+// 解码失败时记录的错误。解码器不 panic，出错后通过 Err() 失败关闭。
+var (
+	errInvalidLength = errors.New("proto: invalid length")
+	errInvalidVarint = errors.New("proto: truncated or overflowing varint")
+	errWireType      = errors.New("proto: unexpected wire type")
+)
+
+// ProtoDecoder 最小 Protobuf 解码器。
+// err 记录解码过程中遇到的第一个错误；任何长度/线类型异常都只记录错误并
+// 把 pos 推进到末尾，绝不 panic，调用方须在解码结束后检查 Err()。
 type ProtoDecoder struct {
 	buf []byte
 	pos int
+	err error
 }
 
 func NewProtoDecoder(data []byte) *ProtoDecoder {
 	return &ProtoDecoder{buf: data, pos: 0}
+}
+
+// Err 返回解码过程中记录的第一个错误；nil 表示迄今无错。
+func (d *ProtoDecoder) Err() error {
+	return d.err
+}
+
+func (d *ProtoDecoder) setErr(err error) {
+	if d.err == nil {
+		d.err = err
+	}
 }
 
 func (d *ProtoDecoder) varint() uint64 {
@@ -131,10 +153,17 @@ func (d *ProtoDecoder) varint() uint64 {
 		d.pos++
 		result |= uint64(b&0x7f) << shift
 		if (b & 0x80) == 0 {
-			break
+			return result
 		}
 		shift += 7
+		if shift > 63 {
+			// 超过 uint64 所需的 10 字节，视为畸形 varint。
+			d.setErr(errInvalidVarint)
+			return result
+		}
 	}
+	// 缓冲区耗尽仍未读到终止字节：截断的 varint（如截断的 tag）。
+	d.setErr(errInvalidVarint)
 	return result
 }
 
@@ -143,34 +172,37 @@ func (d *ProtoDecoder) ReadTag() (field int, wire int) {
 	return int(tag >> 3), int(tag & 0x07)
 }
 
+// requireWire 校验字段线类型。不符时记录 errWireType 并跳过整段字段，
+// 返回 false 让调用方 continue；绝不把 varint 当字符串读。
+func (d *ProtoDecoder) requireWire(wire, want int) bool {
+	if wire == want {
+		return true
+	}
+	d.setErr(errWireType)
+	d.Skip(wire)
+	return false
+}
+
 func (d *ProtoDecoder) ReadString() string {
-	length := int(d.varint())
-	start := d.pos
-	d.pos += length
-	if start > len(d.buf) {
-		start = len(d.buf)
-	}
-	if d.pos > len(d.buf) {
-		d.pos = len(d.buf)
-	}
-	return string(d.buf[start:d.pos])
+	return string(d.ReadBytes())
 }
 
 func (d *ProtoDecoder) ReadBytes() []byte {
 	length := int(d.varint())
+	// uint64 最大值转 int 会变成负数；正数越界同样非法。
+	if length < 0 || length > len(d.buf)-d.pos {
+		d.setErr(errInvalidLength)
+		d.pos = len(d.buf) // 失败关闭：推进到末尾，避免循环空转
+		return nil
+	}
 	start := d.pos
 	d.pos += length
-	if start > len(d.buf) {
-		start = len(d.buf)
-	}
-	if d.pos > len(d.buf) {
-		d.pos = len(d.buf)
-	}
 	return d.buf[start:d.pos]
 }
 
 func (d *ProtoDecoder) ReadDouble() float64 {
 	if d.pos+8 > len(d.buf) {
+		d.setErr(errInvalidLength)
 		d.pos = len(d.buf)
 		return 0
 	}
@@ -196,13 +228,23 @@ func (d *ProtoDecoder) Skip(wire int) {
 	case 0: // varint
 		d.varint()
 	case 1: // 64-bit
+		if d.pos+8 > len(d.buf) {
+			d.setErr(errInvalidLength)
+			d.pos = len(d.buf)
+			return
+		}
 		d.pos += 8
 	case 2: // length-delimited
-		d.pos += int(d.varint())
+		d.ReadBytes()
 	case 5: // 32-bit
+		if d.pos+4 > len(d.buf) {
+			d.setErr(errInvalidLength)
+			d.pos = len(d.buf)
+			return
+		}
 		d.pos += 4
-	}
-	if d.pos > len(d.buf) {
+	default: // 3/4/6/7 非法线类型，无法安全跳过
+		d.setErr(errWireType)
 		d.pos = len(d.buf)
 	}
 }
@@ -258,18 +300,23 @@ func decodeGetUserJwtResponse(data []byte) (*GetUserJwtResponse, error) {
 	res := &GetUserJwtResponse{}
 	for !d.Done() {
 		field, wire := d.ReadTag()
-		if wire != 2 {
-			d.Skip(wire)
-			continue
-		}
 		switch field {
 		case 1:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.UserJWT = d.ReadString()
 		case 2:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.CustomAPIServerURL = d.ReadString()
-		default:
+		default: // 未知字段按 proto3 语义跳过
 			d.Skip(wire)
 		}
+	}
+	if err := d.Err(); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
@@ -328,28 +375,49 @@ func encodeChatToolCall(e *ProtoEncoder, tc *ChatToolCall) {
 	e.Bool(6, tc.IsCustomToolCall)
 }
 
-func decodeChatToolCall(d *ProtoDecoder) ChatToolCall {
+func decodeChatToolCall(d *ProtoDecoder) (ChatToolCall, error) {
 	tc := ChatToolCall{}
 	for !d.Done() {
 		field, wire := d.ReadTag()
 		switch field {
 		case 1:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			tc.ID = d.ReadString()
 		case 2:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			tc.Name = d.ReadString()
 		case 3:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			tc.ArgumentsJSON = d.ReadString()
 		case 4:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			tc.InvalidJSONStr = d.ReadString()
 		case 5:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			tc.InvalidJSONErr = d.ReadString()
 		case 6:
+			if !d.requireWire(wire, 0) {
+				continue
+			}
 			tc.IsCustomToolCall = d.ReadBool()
 		default:
 			d.Skip(wire)
 		}
 	}
-	return tc
+	if err := d.Err(); err != nil {
+		return ChatToolCall{}, err
+	}
+	return tc, nil
 }
 
 // ─── ChatMessagePrompt ───────────────────────────────────────────────────────
@@ -521,28 +589,49 @@ type ModelUsageStats struct {
 	ModelUID         string // field 9
 }
 
-func decodeModelUsageStats(d *ProtoDecoder) *ModelUsageStats {
+func decodeModelUsageStats(d *ProtoDecoder) (*ModelUsageStats, error) {
 	s := &ModelUsageStats{}
 	for !d.Done() {
 		field, wire := d.ReadTag()
 		switch field {
 		case 2:
+			if !d.requireWire(wire, 0) {
+				continue
+			}
 			s.InputTokens = int64(d.ReadUint64())
 		case 3:
+			if !d.requireWire(wire, 0) {
+				continue
+			}
 			s.OutputTokens = int64(d.ReadUint64())
 		case 4:
+			if !d.requireWire(wire, 0) {
+				continue
+			}
 			s.CacheWriteTokens = int64(d.ReadUint64())
 		case 5:
+			if !d.requireWire(wire, 0) {
+				continue
+			}
 			s.CacheReadTokens = int64(d.ReadUint64())
 		case 7:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			s.MessageID = d.ReadString()
 		case 9:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			s.ModelUID = d.ReadString()
 		default:
 			d.Skip(wire)
 		}
 	}
-	return s
+	if err := d.Err(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // GetChatMessageResponse 是 Devin GetChatMessage 的单个流式响应帧解码结果。
@@ -570,45 +659,89 @@ func decodeGetChatMessageResponse(data []byte) (*GetChatMessageResponse, error) 
 		field, wire := d.ReadTag()
 		switch field {
 		case 1:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.MessageID = d.ReadString()
 		case 3:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.DeltaText = d.ReadString()
 		case 5:
+			if !d.requireWire(wire, 0) {
+				continue
+			}
 			res.StopReason = int32(d.ReadUint64())
 		case 6:
-			if wire == 2 {
-				res.DeltaToolCalls = append(res.DeltaToolCalls,
-					decodeChatToolCall(NewProtoDecoder(d.ReadBytes())))
-			} else {
-				d.Skip(wire)
+			if !d.requireWire(wire, 2) {
+				continue
 			}
+			tc, err := decodeChatToolCall(NewProtoDecoder(d.ReadBytes()))
+			if err != nil {
+				return nil, err
+			}
+			res.DeltaToolCalls = append(res.DeltaToolCalls, tc)
 		case 7:
-			if wire == 2 {
-				res.Usage = decodeModelUsageStats(NewProtoDecoder(d.ReadBytes()))
-			} else {
-				d.Skip(wire)
+			if !d.requireWire(wire, 2) {
+				continue
 			}
+			usage, err := decodeModelUsageStats(NewProtoDecoder(d.ReadBytes()))
+			if err != nil {
+				return nil, err
+			}
+			res.Usage = usage
 		case 8:
+			if !d.requireWire(wire, 0) {
+				continue
+			}
 			res.Redact = d.ReadBool()
 		case 9:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.DeltaThinking = d.ReadString()
 		case 10:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.DeltaSignature = d.ReadString()
 		case 11:
+			if !d.requireWire(wire, 0) {
+				continue
+			}
 			res.ThinkingRedacted = d.ReadBool()
 		case 14:
+			if !d.requireWire(wire, 0) {
+				continue
+			}
 			res.CreditCost = int64(d.ReadUint64())
 		case 15:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.OutputID = d.ReadString()
 		case 17:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.RequestID = d.ReadString()
 		case 21:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.DeltaSignatureType = d.ReadString()
 		case 23:
+			if !d.requireWire(wire, 2) {
+				continue
+			}
 			res.ActualModelUID = d.ReadString()
 		default:
 			d.Skip(wire)
 		}
+	}
+	if err := d.Err(); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
