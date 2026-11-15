@@ -71,6 +71,10 @@ var platformList = []PlatformSpec{
 	// 能力体系；其模型无内置目录（模型完全来自账号 model_mapping），故不参与
 	// 定价目录模型同步。
 	{ID: PlatformCursor, DisplayName: "Cursor", Gateway: PlatformGatewayOpenAI},
+	// PlatformDevin 是 Devin / Codeium Cascade 多模型聚合平台（server.codeium.com），
+	// 使用 Connect Protocol + Protobuf 协议。经 OpenAI 网关转发（协议转换层）。
+	// 账号通过 OAuth 获取 session token，支持多模型家族（Anthropic/OpenAI/Gemini/xAI）。
+	{ID: PlatformDevin, DisplayName: "Devin", Gateway: PlatformGatewayOpenAI},
 }
 
 var platformIndex = func() map[string]int {

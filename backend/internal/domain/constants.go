@@ -49,6 +49,9 @@ const (
 	// PlatformCursor 是 Cursor 站点渠道接入（v3.1/v3.3）新增的平台常量。
 	// Cursor 引入新主体 quota_key（激活码），账号强制归属激活码。
 	PlatformCursor = "cursor"
+	// PlatformDevin 是 Devin / Codeium Cascade 多模型聚合平台（server.codeium.com）。
+	// 使用 Connect Protocol + Protobuf，账号通过 OAuth 获取 session token。
+	PlatformDevin = "devin"
 )
 
 // IsWebLoginPlatform 报告 platform 是否为支持网页登录的官方平台（kimi/zhipu/deepseek）。

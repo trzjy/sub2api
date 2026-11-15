@@ -67,6 +67,9 @@ const (
 	// 已登记进 domain 平台清单，故 IsGroupPlatform / IsConcretePlatform 对其为真，
 	// 可建 cursor 分组、可开 target_platform=cursor 的 composite 路由。
 	PlatformCursor = domain.PlatformCursor
+	// PlatformDevin 是 Devin / Codeium Cascade 多模型聚合平台（server.codeium.com）。
+	// 使用 Connect Protocol + Protobuf，账号通过 OAuth 获取 session token。
+	PlatformDevin = domain.PlatformDevin
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
 	PlatformKiro = "kiro"

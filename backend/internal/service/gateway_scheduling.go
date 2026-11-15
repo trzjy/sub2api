@@ -1177,6 +1177,7 @@ func (s *GatewayService) listSchedulableAccounts(ctx context.Context, groupID *i
 			PlatformOpenCodeGo,
 			PlatformCommandCode,
 			PlatformCline,
+			PlatformDevin,
 			PlatformOther,
 		}
 		basePlatforms := append([]string{platform}, aggregatePlatforms...)

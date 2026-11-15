@@ -1510,6 +1510,7 @@ func isAggregatePlatformAccount(platform string) bool {
 		PlatformOpenCodeGo,
 		PlatformCommandCode,
 		PlatformCline,
+		PlatformDevin,
 		PlatformOther:
 		return true
 	default:

@@ -38,7 +38,8 @@ export const CONCRETE_PLATFORM_OPTIONS = [
   { value: 'minimax', label: 'MiniMax' },
   { value: 'codebuddy', label: 'CodeBuddy' },
   { value: 'muse', label: 'Muse' },
-  { value: 'cursor', label: 'Cursor' }
+  { value: 'cursor', label: 'Cursor' },
+  { value: 'devin', label: 'Devin' }
 ] as const satisfies readonly PlatformOption<AccountPlatform>[]
 
 /** Platforms that can own a group. */
@@ -66,7 +67,7 @@ export const COMPOSITE_TARGET_PLATFORM_OPTIONS = CONCRETE_PLATFORM_OPTIONS.filte
  * 可用渠道、订阅购买和订阅展示；管理端账号管理继续识别和管理。
  * 分组创建选择器用 GROUP_PLATFORM_CREATABLE_OPTIONS 派生清单，不得新增内部供给分组入口。
  */
-export const INTERNAL_SUPPLY_PLATFORMS: readonly string[] = ['codebuddy', 'muse', 'cursor']
+export const INTERNAL_SUPPLY_PLATFORMS: readonly string[] = ['codebuddy', 'muse', 'cursor', 'devin']
 
 /**
  * cursor 账号可挂载的原生平台集合（U7 挂组判据的前端镜像）。
