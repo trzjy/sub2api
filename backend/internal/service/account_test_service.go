@@ -320,11 +320,21 @@ func generateSessionString() (string, error) {
 	return FormatMetadataUserID(hex64, "", sessionUUID, uaVersion), nil
 }
 
-// createTestPayload creates a Claude Code style test request payload
-func createTestPayload(modelID string) (map[string]any, error) {
+// createTestPayload creates a Claude Code style test request payload.
+//
+// prompt 为调用方传入的测试问题；为空时退化为历史上的固定探测串 "hi"
+// （保持所有既有调用点的行为逐字节不变）。
+// 之所以要支持外部 prompt：anthropic 原生探活此前恒发 "hi"，导致这类账号
+// 无法做内容级对照实验（2026-11-15 实证：用它判断模型是否「跑偏」全是误判）。
+func createTestPayload(modelID string, prompt string) (map[string]any, error) {
 	sessionID, err := generateSessionString()
 	if err != nil {
 		return nil, err
+	}
+
+	text := strings.TrimSpace(prompt)
+	if text == "" {
+		text = "hi"
 	}
 
 	return map[string]any{
@@ -335,7 +345,7 @@ func createTestPayload(modelID string) (map[string]any, error) {
 				"content": []map[string]any{
 					{
 						"type": "text",
-						"text": "hi",
+						"text": text,
 						"cache_control": map[string]string{
 							"type": "ephemeral",
 						},
@@ -416,7 +426,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		// other 双协议（chat_completions | anthropic），复用国产供应商的通用
 		// 探活（其内部经 GetOpenAIBaseURL/GetOpenAIProtocolAPIKey 取上游 base 与密钥）。
 		if credentialAccount.GetAPIProtocol() == APIProtocolAnthropic {
-			return s.testCNProviderAnthropicConnection(c, credentialAccount, modelID)
+			return s.testCNProviderAnthropicConnection(c, credentialAccount, modelID, prompt)
 		}
 		return s.testCNProviderChatCompletionsConnection(c, credentialAccount, modelID, prompt)
 	}
@@ -431,7 +441,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		case APIProtocolChatCompletions:
 			return s.testCNProviderChatCompletionsConnection(c, credentialAccount, modelID, prompt)
 		case APIProtocolAnthropic:
-			return s.testCNProviderAnthropicConnection(c, credentialAccount, modelID)
+			return s.testCNProviderAnthropicConnection(c, credentialAccount, modelID, prompt)
 		}
 	}
 
@@ -810,7 +820,7 @@ func (s *AccountTestService) testModelRoutedAccountConnection(c *gin.Context, ac
 	}
 	switch protocol {
 	case APIProtocolAnthropic:
-		return s.testCNProviderAnthropicConnection(c, account, testModelID)
+		return s.testCNProviderAnthropicConnection(c, account, testModelID, prompt)
 	case APIProtocolResponses:
 		return s.testModelRoutedResponsesConnection(c, account, testModelID)
 	default:
@@ -1372,7 +1382,7 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	c.Writer.Flush()
 
 	// Create Claude Code style payload (same for all account types)
-	payload, err := createTestPayload(testModelID)
+	payload, err := createTestPayload(testModelID, "")
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create test payload")
 	}
@@ -1450,7 +1460,7 @@ func (s *AccountTestService) testClaudeVertexServiceAccountConnection(c *gin.Con
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	payload, err := createTestPayload(testModelID)
+	payload, err := createTestPayload(testModelID, "")
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create test payload")
 	}
