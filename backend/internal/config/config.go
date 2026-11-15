@@ -2851,7 +2851,16 @@ func setDefaults() {
 	viper.SetDefault("gateway.image_nonstream_keepalive_interval", 0)
 	viper.SetDefault("gateway.max_line_size", 500*1024*1024)
 	viper.SetDefault("gateway.scheduling.sticky_session_max_waiting", 3)
-	viper.SetDefault("gateway.scheduling.sticky_session_wait_timeout", 120*time.Second)
+	// 60s 的依据是「墙内留出上游余量」，不是拍脑袋：
+	//   1. Cloudflare 对首字节有 ~125s 双墙，排队时间计入请求总耗时；
+	//   2. 排队期间请求尚未发往上游（上游没在思考），排队结束后才产生首字节；
+	//   3. 实测正常首字节 2~15s（日志 upstream_headers_received_ms 6.2s / 11.4s），
+	//      留 60s 给上游已比实测慢 4 倍，大请求也不会被误杀。
+	// 原值 120s 会把 125s 墙吃光，排队结束只剩 5s 给上游，必然 524
+	// （2026-11-15 账号 986 线上实证：排队 120s + 上游 125s 超时，客户端白等两分钟）。
+	// 注意：Cursor 平台槽满已改为直接换号、不排队（见 shouldSwitchAccountOnStickySlotFull），
+	// 本值只对保持等待语义的平台（anthropic / antigravity / gemini 等）生效。
+	viper.SetDefault("gateway.scheduling.sticky_session_wait_timeout", 60*time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_wait_timeout", 30*time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_max_waiting", 100)
 	viper.SetDefault("gateway.scheduling.fallback_selection_mode", "last_used")

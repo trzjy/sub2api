@@ -597,8 +597,8 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 	if cfg.Gateway.Scheduling.StickySessionMaxWaiting != 3 {
 		t.Fatalf("StickySessionMaxWaiting = %d, want 3", cfg.Gateway.Scheduling.StickySessionMaxWaiting)
 	}
-	if cfg.Gateway.Scheduling.StickySessionWaitTimeout != 120*time.Second {
-		t.Fatalf("StickySessionWaitTimeout = %v, want 120s", cfg.Gateway.Scheduling.StickySessionWaitTimeout)
+	if cfg.Gateway.Scheduling.StickySessionWaitTimeout != 60*time.Second {
+		t.Fatalf("StickySessionWaitTimeout = %v, want 60s（必须给 125s 墙留出上游首字节余量）", cfg.Gateway.Scheduling.StickySessionWaitTimeout)
 	}
 	if cfg.Gateway.Scheduling.FallbackWaitTimeout != 30*time.Second {
 		t.Fatalf("FallbackWaitTimeout = %v, want 30s", cfg.Gateway.Scheduling.FallbackWaitTimeout)
