@@ -117,6 +117,19 @@ const (
 	WSAccountNotEligible  = "该账号不再适用于此连接，请重新连接"
 	// UpstreamWebSocketPrewarmFailed: openai WS 预热错误事件且上游未给出错误消息时的回退文案。
 	UpstreamWebSocketPrewarmFailed = "上游 WebSocket 预热失败"
+	// 客户自身参数问题：上游正常收尾（finish_reason=length/max_tokens）但正文 0 字，
+	// 即「输出上限被思考过程吃光，正文还没开始就到上限了」。
+	//
+	// 这类不是故障，不能报 400 / 502（客户会以为是站点不稳定），也不能悄悄放行
+	// （客户看到空白回答同样会怪站点）；做法是把这段说明作为**正常回答内容**发给客户，
+	// HTTP 200、原有协议帧一概不变。文案三要素：责任（你设的上限）+ 状态（回答为空）
+	// + 动作（调大后重试），并点出「思考也占额度」，否则客户看不懂为什么设小了就没字。
+	//
+	// 防泄露：只回显客户自己请求里的字段名和数值，不出现上游厂商、账号类型、内部模型映射。
+	OutputBudgetTooSmallNotice = "[站点提示] 本次回答是空的：你设置的输出上限 %s=%d 太小，模型还没开始写正文就到达了上限。该模型的思考过程也会占用这个额度，请把 %s 调大（建议 1024 以上）后重试。"
+	// OutputBudgetTooSmallNoticeNoValue：请求形状里取不到上限数值时的兜底（不写占位符给客户看）。
+	OutputBudgetTooSmallNoticeNoValue = "[站点提示] 本次回答是空的：输出上限设置得太小，模型还没开始写正文就到达了上限。该模型的思考过程也会占用这个额度，请把上限调大（建议 1024 以上）后重试。"
+
 	// UpstreamWebSocketError: openai WS v2 错误事件且上游未给出错误消息时的回退文案。
 	UpstreamWebSocketError = "上游 WebSocket 连接错误"
 

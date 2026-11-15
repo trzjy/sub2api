@@ -109,21 +109,24 @@ func (d *openAIChatSilentRefusalDetector) ObserveChatChunk(chunk apicompat.ChatC
 }
 
 // ShouldReleaseClientOutput 判定是否可以放行扣留中的输出（放行即提交响应头、
-// 关闭换号窗口）。
+// 关闭换号窗口与「把空白回答换成一句说明」的窗口）。
 //
-// 纯 usage 帧**不再**作为放行理由：它只证明上游讲完了，不证明客户端看到了内容
-// （网关强制 include_usage，空回答的上游同样会在 [DONE] 前发一帧 usage）。此前
-// 把 usage 当放行信号，结果是空回答的换号窗口被自己提前关掉——每一条空流都会先
-// 放行 role/finish 帧，再走到「响应已提交」分支，只能把空白回答交给客户。
-// 现在空回答会一直扣着，直到确认有内容或流结束，由空回答闸门决定换号。
+// 放行条件**只认「客户能看见的内容」**：正文、工具调用、拒答、错误帧、思考增量。
+// 像 usage、finish_reason 这类「流状态」信号一概不算——它们只说明上游讲完了或
+// 被截断了，不说明客户看到了东西。
+//
+// 这个边界被踩过两次：
+//  1. 网关强制 include_usage，空回答的上游同样会在 [DONE] 前发 usage；
+//  2. 客户 max_tokens 给小时上游发 finish_reason=length，同样一个正文字都没有。
+//
+// 两次都是「闸门还没跑到，缓冲先自己放行」，结果响应头提交、客户拿到空白回答，
+// 既换不了号也给不了提示。缓冲上限（raw 256 行 / 另一条 128 chunk）负责兜住
+// 判据认不出的内容形态，所以这里可以严格只等真内容。
 func (d *openAIChatSilentRefusalDetector) ShouldReleaseClientOutput() bool {
 	if d == nil || !d.enabled {
 		return true
 	}
-	if d.sawContent || d.sawToolCall || d.sawFunctionCall || d.sawError || d.sawReasoning {
-		return true
-	}
-	return d.sawFinish && d.finishReason != "" && d.finishReason != "stop"
+	return d.sawContent || d.sawToolCall || d.sawFunctionCall || d.sawError || d.sawReasoning
 }
 
 func (d *openAIChatSilentRefusalDetector) IsSilentRefusal() bool {
