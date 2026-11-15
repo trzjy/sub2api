@@ -1989,6 +1989,13 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	// 「这条原因该不该销毁绑定」统一由 stickyBindingDroppedOnMiss 回答
 	//（openai_sticky_binding_lifecycle.go），此处只维护「是否已判死」。
 	stickyBindingKept := sessionHash != "" && stickyAccountID > 0
+	if stickyAccountID > 0 && isExcluded(stickyAccountID) {
+		// 尺寸池不匹配（例如 256k 以上的任务必须走「只接大请求」账号，反之小活不进大请求池）：
+		// 这一单注定要换到另一个池，属于「换池」而不是「原号临时接不了」，必须允许把绑定
+		// 改写到目标池的账号，否则该池每一轮都要重新选号，缓存每轮作废。
+		// 临时故障（限流/档位漂移/渠道限制等）不在此列，那些仍然保留绑定。
+		stickyBindingKept = false
+	}
 	if sessionHash != "" {
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
