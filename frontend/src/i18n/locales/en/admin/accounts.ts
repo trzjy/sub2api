@@ -497,7 +497,9 @@ export default {
         windowWeek: 'week',
         windowMonth: 'month',
         window7d: '7d',
-        usedOverLimit: '{used} / {limit}'
+        usedOverLimit: '{used} / {limit}',
+        prepaidQuota: 'Prepaid quota',
+        prepaidRemaining: 'Remaining {remaining} · expires {date}'
       },
       types: {
         oauth: 'OAuth',

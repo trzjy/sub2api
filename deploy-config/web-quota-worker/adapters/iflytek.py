@@ -17,6 +17,8 @@
 import asyncio
 import json
 import time
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from .base import BaseAdapter, ProbeRequest, ProbeResult
 
@@ -36,7 +38,10 @@ _ENDPOINTS = [
 # 作 Authorization，头带 x-auth-source:""（与前端同款）。每个接口独立 try/catch，
 # 网络异常标记 ok=False，由 Python 侧统一判定（绝不在 JS 内拼装最终 data，
 # 也不把任何响应正文带出脱敏边界）。
-_FETCH_JS = """
+#
+# 模板中的 __ENDPOINTS__ 占位符在 _build_fetch_js 内被替换为实际端点列表；
+# 当 req.console_model 非空时，额外追加 free-quota 端点（channel 即模型名）。
+_FETCH_JS_TEMPLATE = """
 (async () => {
   const token = (localStorage.getItem('token') || '');
   const headers = {'x-auth-source': '', 'Authorization': token};
@@ -55,7 +60,27 @@ _FETCH_JS = """
   }
   return out;
 })()
-""".replace("__ENDPOINTS__", json.dumps(_ENDPOINTS, ensure_ascii=False))
+"""
+
+
+def _build_fetch_js(console_model: str) -> str:
+    """按 console_model 构造页面内 fetch JS。
+
+    console_model 为空时只请求 _ENDPOINTS 五条（与原行为一致）；
+    非空时追加 free-quota 端点，channel 参数取模型名并做 URL 编码。
+    """
+    endpoints = list(_ENDPOINTS)
+    if console_model:
+        endpoints.append(
+            (
+                "free_quota",
+                "/api/v1/gpt-finetune/api-services/free-quota?channel="
+                + quote(console_model),
+            )
+        )
+    return _FETCH_JS_TEMPLATE.replace(
+        "__ENDPOINTS__", json.dumps(endpoints, ensure_ascii=False)
+    )
 
 
 def _mask_account_label(user) -> str:
@@ -82,7 +107,14 @@ def _mask_account_label(user) -> str:
     return ""
 
 
-def build_probe_data(balance, token_plan_quota, token_plan_seats, coding_plan_list, user) -> dict:
+def build_probe_data(
+    balance,
+    token_plan_quota,
+    token_plan_seats,
+    coding_plan_list,
+    user,
+    prepaid_quota=None,
+) -> dict:
     """模块级纯函数：把 5 个接口的**内层 data** 映射为统一 data 结构。
 
     不触网、不启动浏览器，便于单测。仅做结构映射，不判定 code（4001 等
@@ -94,8 +126,9 @@ def build_probe_data(balance, token_plan_quota, token_plan_seats, coding_plan_li
     :param token_plan_seats: token-plan/seats 的 data → {seats:[], total}
     :param coding_plan_list: coding-plan/list 的 data → {page,size,total,rows}
     :param user: user 的 data → {id, uid, mobile, login, nickname, email, ...}
+    :param prepaid_quota: 预授权额度（free-quota 映射结果），None 表示无。
     """
-    return {
+    data = {
         "auth_state": "ok",
         "account_label": _mask_account_label(user),
         "balance": balance if isinstance(balance, dict) else {},
@@ -112,6 +145,73 @@ def build_probe_data(balance, token_plan_quota, token_plan_seats, coding_plan_li
             if isinstance(coding_plan_list, dict)
             else {"page": 1, "size": 10, "total": 0, "rows": []}
         ),
+    }
+    if prepaid_quota is not None:
+        data["prepaid_quota"] = prepaid_quota
+    return data
+
+
+def _to_float(value) -> float:
+    """非数值字段一律容错：缺失/不可解析按 0.0。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _parse_beijing_time(s) -> str:
+    """北京时间字符串 → UTC RFC3339；解析失败返回空串。
+
+    输入形如 "2026-12-13 17:09:37"，按 UTC+8 解析后转 UTC 输出
+    "2026-12-13T09:09:37Z"。
+    """
+    if not isinstance(s, str) or not s:
+        return ""
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone(timedelta(hours=8))
+        )
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, TypeError):
+        return ""
+
+
+def build_prepaid_quota(model: str, entry) -> dict | None:
+    """把 free-quota 的 data 映射为 prepaid_quota；无有效额度返回 None。
+
+    :param model: 控制台模型名（对应 free-quota 的 channel）。
+    :param entry: 页面取数得到的 ``{"ok": true, "code": 0, "data": {...}}``。
+    :return: 统一 prepaid_quota dict，结构不符或 totalTokens<=0 时返回 None。
+    """
+    if not isinstance(entry, dict) or not entry.get("ok"):
+        return None
+    if entry.get("code") != 0:
+        return None
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        return None
+    claim = data.get("claim")
+    if not isinstance(claim, dict):
+        return None
+    free_quota = claim.get("freeQuota")
+    if not isinstance(free_quota, dict):
+        return None
+    total = _to_float(free_quota.get("totalTokens"))
+    if total <= 0:
+        return None
+    used = _to_float(free_quota.get("usedTokens"))
+    remaining = _to_float(free_quota.get("remainingTokens"))
+    status = free_quota.get("quotaStatus")
+    available = bool(free_quota.get("usageAvailable"))
+    expires_at = _parse_beijing_time(free_quota.get("expiresAt"))
+    return {
+        "model": model,
+        "total_tokens": total,
+        "used_tokens": used,
+        "remaining_tokens": remaining,
+        "expires_at": expires_at,
+        "status": status if isinstance(status, str) else "",
+        "available": available,
     }
 
 
@@ -173,9 +273,10 @@ class IflytekAdapter(BaseAdapter):
                     auth_reason="login_required",
                 )
 
-            raw = await page.evaluate(_FETCH_JS)
+            raw = await page.evaluate(_build_fetch_js(req.console_model))
 
             # 逐个接口判定：网络异常 → error；code==4001 → 需交互登录；非 0 → error。
+            # 注意 free_quota 不在 _ENDPOINTS 内，不参与此处的失败判定（见下方单独处理）。
             parts = {}
             for key, _path in _ENDPOINTS:
                 entry = raw.get(key) if isinstance(raw, dict) else None
@@ -200,12 +301,20 @@ class IflytekAdapter(BaseAdapter):
                     )
                 parts[key] = entry.get("data")
 
+            # free_quota 单独处理：网络异常或 code!=0 一律忽略（该字段缺失），
+            # 不影响整次探测结果。
+            prepaid_quota = build_prepaid_quota(
+                req.console_model,
+                raw.get("free_quota") if isinstance(raw, dict) else None,
+            )
+
             data = build_probe_data(
                 parts.get("balance"),
                 parts.get("token_plan_quota"),
                 parts.get("token_plan_seats"),
                 parts.get("coding_plan_list"),
                 parts.get("user"),
+                prepaid_quota=prepaid_quota,
             )
 
             try:

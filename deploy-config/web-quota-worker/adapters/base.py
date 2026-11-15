@@ -34,6 +34,8 @@ class ProbeRequest:
     console_password: Optional[str] = None
     console_login_url: str = ""
     success_url_prefix: str = ""
+    # 控制台侧模型名（讯飞 free-quota 接口需要 channel 参数）；空串表示不需要。
+    console_model: str = ""
     api_key_sha256: str = ""  # 仅哈希，绝不传明文 api_key
     proxy_url: Optional[str] = None
     timeout_seconds: int = 60

@@ -968,3 +968,59 @@ func TestWebConsoleQuotaService_ResolveUntil(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, got.Equal(want))
 }
+
+// ---------------------------------------------------------------------------
+// 用例：webConsoleQuotaProbeModel（随探测下发的控制台模型名）
+// ---------------------------------------------------------------------------
+
+// wcqAccountWithModelMapping 构造带 model_mapping 的账号。
+func wcqAccountWithModelMapping(id int64, mapping map[string]any) *Account {
+	creds := map[string]any{
+		"base_url": "https://maas-api.cn-huabei-1.xf-yun.com/v1/chat/completions",
+		"api_key":  "sk-iflytek",
+	}
+	if mapping != nil {
+		creds["model_mapping"] = mapping
+	}
+	return &Account{
+		ID:           id,
+		Platform:     PlatformOpenAI,
+		Type:         AccountTypeAPIKey,
+		Credentials:  creds,
+	}
+}
+
+func TestWebConsoleQuotaProbeModel(t *testing.T) {
+	// 多键映射到同一目标：去重后返回唯一目标。
+	acc := wcqAccountWithModelMapping(901, map[string]any{
+		"a": "spark-x2.6",
+		"b": "spark-x2.6",
+	})
+	require.Equal(t, "spark-x2.6", webConsoleQuotaProbeModel(acc))
+
+	// 多目标：排序后取第一个。
+	acc = wcqAccountWithModelMapping(902, map[string]any{
+		"a": "zeta",
+		"b": "alpha",
+	})
+	require.Equal(t, "alpha", webConsoleQuotaProbeModel(acc))
+
+	// 无映射：返回空串。
+	acc = wcqAccountWithModelMapping(903, nil)
+	require.Equal(t, "", webConsoleQuotaProbeModel(acc))
+
+	// 映射值为空白：忽略空白值，返回空串。
+	acc = wcqAccountWithModelMapping(904, map[string]any{
+		"a": "   ",
+		"b": "",
+	})
+	require.Equal(t, "", webConsoleQuotaProbeModel(acc))
+
+	// 空白值被忽略、保留有效目标：排序后取第一个。
+	acc = wcqAccountWithModelMapping(905, map[string]any{
+		"a": "   ",
+		"b": "gpt-4",
+		"c": "alpha",
+	})
+	require.Equal(t, "alpha", webConsoleQuotaProbeModel(acc))
+}

@@ -1259,6 +1259,17 @@ export interface WebConsoleQuotaTokenPlan {
   by_seat?: WebConsoleQuotaTokenPlanSeat[]
 }
 
+/** 讯飞「预授权额度」（free-quota）：模型级额度，与 Token Plan 席位无关 */
+export interface WebConsoleQuotaPrepaidQuota {
+  model?: string
+  total_tokens: number
+  used_tokens: number
+  remaining_tokens: number
+  expires_at?: string
+  status?: string
+  available: boolean
+}
+
 /**
  * Web 控制台额度快照（账号 extra.web_console_quota_snapshot，后端 service.WebConsoleQuotaSnapshot 同构）。
  * iflytek 专属字段来源：讯飞星辰 MaaS 控制台（balance / token-plan / coding-plan 抓取）。
@@ -1290,6 +1301,7 @@ export interface WebConsoleQuotaSnapshot {
   delinquent?: number
   virtual_balance?: number
   token_plan?: WebConsoleQuotaTokenPlan
+  prepaid_quota?: WebConsoleQuotaPrepaidQuota | null
   coding_plan_tiers?: WebConsoleQuotaTier[]
 }
 

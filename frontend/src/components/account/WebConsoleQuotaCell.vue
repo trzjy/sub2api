@@ -109,6 +109,31 @@
       {{ iflytekTokenPlan.remaining_count }} / {{ iflytekTokenPlan.total_count }}
     </div>
 
+    <div
+      v-if="provider === 'iflytek' && iflytekPrepaidQuota"
+      data-test="wcq-iflytek-prepaid"
+      class="space-y-0.5"
+    >
+      <UsageProgressBar
+        :label="t('admin.accounts.webConsoleQuota.prepaidQuota')"
+        color="emerald"
+        :utilization="prepaidUtilization"
+        :resets-at="iflytekPrepaidQuota.expires_at ?? null"
+      />
+      <div class="pl-8 text-gray-500 dark:text-gray-400">
+        {{ t('admin.accounts.webConsoleQuota.usedOverLimit', {
+          used: formatTokenCount(iflytekPrepaidQuota.used_tokens),
+          limit: formatTokenCount(iflytekPrepaidQuota.total_tokens),
+        }) }}
+        <span v-if="iflytekPrepaidQuota.expires_at" class="text-gray-400 dark:text-gray-500">
+          · {{ t('admin.accounts.webConsoleQuota.prepaidRemaining', {
+            remaining: formatTokenCount(iflytekPrepaidQuota.remaining_tokens),
+            date: formatDate(iflytekPrepaidQuota.expires_at),
+          }) }}
+        </span>
+      </div>
+    </div>
+
     <!-- 4. 状态与操作行 -->
     <div class="flex flex-wrap items-center gap-1.5">
       <button
@@ -206,7 +231,7 @@ export default {}
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { probeWebConsoleQuota, type WebConsoleQuotaProbeResult } from '@/api/admin/cnProviders'
-import type { Account, WebConsoleQuotaLot, WebConsoleQuotaSnapshot, WebConsoleQuotaTier, WebConsoleQuotaTokenPlan } from '@/types'
+import type { Account, WebConsoleQuotaLot, WebConsoleQuotaPrepaidQuota, WebConsoleQuotaSnapshot, WebConsoleQuotaTier, WebConsoleQuotaTokenPlan } from '@/types'
 import UsageProgressBar from './UsageProgressBar.vue'
 
 const props = defineProps<{
@@ -328,6 +353,29 @@ const iflytekTokenPlan = computed<WebConsoleQuotaTokenPlan | null>(() => {
   if (provider.value !== 'iflytek') return null
   return snapshot.value?.token_plan ?? null
 })
+
+// 讯飞「预授权额度」：模型级额度，是这类账号的真实用量来源；首版只展示、不停调。
+const iflytekPrepaidQuota = computed<WebConsoleQuotaPrepaidQuota | null>(() => {
+  if (provider.value !== 'iflytek') return null
+  const q = snapshot.value?.prepaid_quota
+  if (!q || !(q.total_tokens > 0)) return null
+  return q
+})
+
+const prepaidUtilization = computed<number>(() => {
+  const q = iflytekPrepaidQuota.value
+  if (!q || !(q.total_tokens > 0)) return 0
+  return (q.used_tokens / q.total_tokens) * 100
+})
+
+// token 计数人类可读：1.00B / 761.60M / 12.30K
+const formatTokenCount = (n: number): string => {
+  if (!Number.isFinite(n)) return '0'
+  if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(2)}B`
+  if (Math.abs(n) >= 1e6) return `${(n / 1e6).toFixed(2)}M`
+  if (Math.abs(n) >= 1e3) return `${(n / 1e3).toFixed(2)}K`
+  return String(Math.round(n))
+}
 
 const windowLabel = (window: string): string => {
   const normalized = window.toLowerCase()

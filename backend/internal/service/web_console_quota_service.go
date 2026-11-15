@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -202,6 +203,7 @@ type webConsoleQuotaWorkerRequest struct {
 	APIKeySHA256     string `json:"api_key_sha256,omitempty"`
 	ProxyURL         string `json:"proxy_url,omitempty"`
 	TimeoutSeconds   int    `json:"timeout_seconds"`
+	ConsoleModel     string `json:"console_model,omitempty"`
 }
 
 // webConsoleQuotaWorkerResponse 是 worker 的采集响应。
@@ -426,6 +428,34 @@ func (s *WebConsoleQuotaService) postProbe(ctx context.Context, account *Account
 	return s.postProbeWithState(ctx, account, provider, apiKeySHA256, timeoutSeconds, "")
 }
 
+// webConsoleQuotaProbeModel 返回随探测下发的控制台模型名（讯飞 free-quota 的 channel 参数）。
+// 取账号 model_mapping 的目标值：去重、排序后取第一个；映射为空返回空串。
+// 该字段只影响需要模型维度的上游（目前仅 iflytek），其它 provider 忽略。
+func webConsoleQuotaProbeModel(account *Account) string {
+	mapping := account.GetModelMapping()
+	if len(mapping) == 0 {
+		return ""
+	}
+	models := make([]string, 0, len(mapping))
+	seen := make(map[string]struct{}, len(mapping))
+	for _, value := range mapping {
+		target := strings.TrimSpace(value)
+		if target == "" {
+			continue
+		}
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		models = append(models, target)
+	}
+	if len(models) == 0 {
+		return ""
+	}
+	sort.Strings(models)
+	return models[0]
+}
+
 // postProbeWithState 同上，但允许用「候选 storageState」覆盖账号里已保存的那份。
 // storageState 为空时仍取账号凭据（生产探测路径行为不变）。
 func (s *WebConsoleQuotaService) postProbeWithState(
@@ -442,6 +472,7 @@ func (s *WebConsoleQuotaService) postProbeWithState(
 		ConsolePassword: account.GetCredential(webConsoleQuotaCredentialKeyPassword),
 		APIKeySHA256:    apiKeySHA256,
 		TimeoutSeconds:  timeoutSeconds,
+		ConsoleModel:    webConsoleQuotaProbeModel(account),
 	}
 	if endpoints, ok := webConsoleQuotaProviderEndpointTable[provider]; ok {
 		payload.ConsoleLoginURL = endpoints.loginURL

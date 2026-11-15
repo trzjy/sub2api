@@ -62,6 +62,17 @@ type WebConsoleQuotaTokenPlan struct {
 	BySeat         []WebConsoleQuotaTokenPlanSeat `json:"by_seat,omitempty"`
 }
 
+// WebConsoleQuotaPrepaidQuota 是讯飞「预授权额度」（free-quota）快照。
+type WebConsoleQuotaPrepaidQuota struct {
+	Model           string  `json:"model,omitempty"`
+	TotalTokens     float64 `json:"total_tokens"`
+	UsedTokens      float64 `json:"used_tokens"`
+	RemainingTokens float64 `json:"remaining_tokens"`
+	ExpiresAt       string  `json:"expires_at,omitempty"`
+	Status          string  `json:"status,omitempty"`
+	Available       bool    `json:"available"`
+}
+
 // WebConsoleQuotaSnapshot 统一快照。
 type WebConsoleQuotaSnapshot struct {
 	Provider  string `json:"provider"`
@@ -92,6 +103,7 @@ type WebConsoleQuotaSnapshot struct {
 	VirtualBalance  *float64                  `json:"virtual_balance,omitempty"`
 	TokenPlan       *WebConsoleQuotaTokenPlan `json:"token_plan,omitempty"`
 	CodingPlanTiers []WebConsoleQuotaTier     `json:"coding_plan_tiers,omitempty"`
+	PrepaidQuota    *WebConsoleQuotaPrepaidQuota `json:"prepaid_quota,omitempty"`
 	// 判定结果
 	Exhausted       bool   `json:"exhausted"`
 	Until           string `json:"until,omitempty"` // RFC3339；无限期哨兵时写 "9999-12-31T00:00:00Z"
@@ -324,6 +336,19 @@ type webConsoleIflytekData struct {
 	Balance        webConsoleIflytekBalance     `json:"balance"`
 	TokenPlanQuota webConsoleIflytekTokenPlanQuota `json:"token_plan_quota"`
 	CodingPlanList webConsoleIflytekCodingList  `json:"coding_plan_list"`
+	PrepaidQuota   *webConsoleIflytekPrepaidQuota `json:"prepaid_quota"`
+}
+
+// webConsoleIflytekPrepaidQuota 是讯飞「预授权额度」（free-quota）输入结构：
+// 数值统一 float64，expires_at 为字符串，全部容错（字段缺失即零值/空）。
+type webConsoleIflytekPrepaidQuota struct {
+	Model           string  `json:"model"`
+	TotalTokens     float64 `json:"total_tokens"`
+	UsedTokens      float64 `json:"used_tokens"`
+	RemainingTokens float64 `json:"remaining_tokens"`
+	ExpiresAt       string  `json:"expires_at"`
+	Status          string  `json:"status"`
+	Available       bool    `json:"available"`
 }
 
 // ---------------------------------------------------------------------------
@@ -794,6 +819,19 @@ func buildIflytekSnapshot(snap *WebConsoleQuotaSnapshot, rawData []byte, now tim
 		AssignedCount:  assigned,
 		RemainingCount: remaining,
 		BySeat:         seats,
+	}
+
+	// 预授权额度（free-quota）：仅当存在且 total_tokens>0 时展示，首版只展示、不停调。
+	if d.PrepaidQuota != nil && d.PrepaidQuota.TotalTokens > 0 {
+		snap.PrepaidQuota = &WebConsoleQuotaPrepaidQuota{
+			Model:           d.PrepaidQuota.Model,
+			TotalTokens:     d.PrepaidQuota.TotalTokens,
+			UsedTokens:      d.PrepaidQuota.UsedTokens,
+			RemainingTokens: d.PrepaidQuota.RemainingTokens,
+			ExpiresAt:       d.PrepaidQuota.ExpiresAt,
+			Status:          d.PrepaidQuota.Status,
+			Available:       d.PrepaidQuota.Available,
+		}
 	}
 
 	// Coding Plan 行 → 三个滚动窗口 tier；limit 为 0 的窗口不输出。

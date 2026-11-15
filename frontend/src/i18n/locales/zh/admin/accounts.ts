@@ -725,6 +725,8 @@ export default {
         grantBalance: '赠金余额',
         balance: '余额',
         tokenPlan: 'Token Plan 剩余',
+        prepaidQuota: '预授权额度',
+        prepaidRemaining: '剩余 {remaining} · {date} 到期',
         grantNearestExpiry: '最近过期 {date}',
         accountLabel: '控制台账号',
         window5h: '5h',

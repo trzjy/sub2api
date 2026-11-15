@@ -665,3 +665,69 @@ func TestBuildWebConsoleQuotaSnapshot_Iflytek_BadJSON(t *testing.T) {
 	_, err := BuildWebConsoleQuotaSnapshot(providerIflytek, []byte("not-json"), "", nil, wcqNow)
 	require.Error(t, err)
 }
+
+// 含 prepaid_quota：快照 PrepaidQuota 非 nil，数值与 expires_at 正确，Exhausted 仍为 false。
+func TestBuildWebConsoleQuotaSnapshot_Iflytek_PrepaidQuotaPresent(t *testing.T) {
+	data := `{
+		"auth_state":"ok",
+		"account_label":"139****877",
+		"balance":{"balance":0,"delinquent":0,"virtualBalance":0},
+		"token_plan_quota":{"quotas":[]},
+		"coding_plan_list":{"page":1,"size":10,"total":0,"rows":[]},
+		"prepaid_quota":{"model":"spark-x2.6","total_tokens":1000000000,"used_tokens":761604433,"remaining_tokens":238395567,"expires_at":"2026-12-13T09:09:37Z","status":"ACTIVE","available":true}
+	}`
+	s, err := BuildWebConsoleQuotaSnapshot(providerIflytek, []byte(data), "", nil, wcqNow)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+
+	require.NotNil(t, s.PrepaidQuota)
+	require.Equal(t, "spark-x2.6", s.PrepaidQuota.Model)
+	require.Equal(t, 1000000000.0, s.PrepaidQuota.TotalTokens)
+	require.Equal(t, 761604433.0, s.PrepaidQuota.UsedTokens)
+	require.Equal(t, 238395567.0, s.PrepaidQuota.RemainingTokens)
+	require.Equal(t, "2026-12-13T09:09:37Z", s.PrepaidQuota.ExpiresAt)
+	require.Equal(t, "ACTIVE", s.PrepaidQuota.Status)
+	require.True(t, s.PrepaidQuota.Available)
+
+	// 首版只展示，不参与耗尽判定。
+	require.False(t, s.Exhausted)
+}
+
+// 无 prepaid_quota（字段缺失或 total_tokens=0）：快照 PrepaidQuota 为 nil。
+func TestBuildWebConsoleQuotaSnapshot_Iflytek_PrepaidQuotaAbsent(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "field_missing",
+			data: `{
+				"auth_state":"ok",
+				"account_label":"139****877",
+				"balance":{"balance":0,"delinquent":0,"virtualBalance":0},
+				"token_plan_quota":{"quotas":[]},
+				"coding_plan_list":{"page":1,"size":10,"total":0,"rows":[]}
+			}`,
+		},
+		{
+			name: "total_tokens_zero",
+			data: `{
+				"auth_state":"ok",
+				"account_label":"139****877",
+				"balance":{"balance":0,"delinquent":0,"virtualBalance":0},
+				"token_plan_quota":{"quotas":[]},
+				"coding_plan_list":{"page":1,"size":10,"total":0,"rows":[]},
+				"prepaid_quota":{"model":"spark-x2.6","total_tokens":0,"used_tokens":0,"remaining_tokens":0,"expires_at":"","status":"","available":false}
+			}`,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, err := BuildWebConsoleQuotaSnapshot(providerIflytek, []byte(c.data), "", nil, wcqNow)
+			require.NoError(t, err)
+			require.NotNil(t, s)
+			require.Nil(t, s.PrepaidQuota)
+		})
+	}
+}

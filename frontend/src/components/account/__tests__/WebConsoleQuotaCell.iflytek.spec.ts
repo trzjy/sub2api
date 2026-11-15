@@ -17,9 +17,22 @@ vi.mock('@/api/admin/cnProviders', () => ({
 
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
+  // 桩：i18n 文案由 IFQ-7/IFQ-8 同批写入，此处用带占位符的模板字符串做桩，
+  // 以便断言能校验组件把计算值（token 计数、日期）插值进了模板。未知键回退为键本身。
+  const TEMPLATES: Record<string, string> = {
+    'admin.accounts.webConsoleQuota.usedOverLimit': 'used {used} / {limit}',
+    'admin.accounts.webConsoleQuota.prepaidRemaining': 'remaining {remaining} {date}'
+  }
+  const t = (key: string, args?: Record<string, unknown>): string => {
+    const template = TEMPLATES[key] ?? key
+    if (!args) return template
+    return template.replace(/\{(\w+)\}/g, (_, name: string) =>
+      args[name] === undefined || args[name] === null ? '' : String(args[name])
+    )
+  }
   return {
     ...actual,
-    useI18n: () => ({ t: (key: string) => key })
+    useI18n: () => ({ t })
   }
 })
 
@@ -177,5 +190,31 @@ describe('WebConsoleQuotaCell — iflytek 余额与套餐', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-test="wcq-iflytek-balance"]').exists()).toBe(false)
+  })
+
+  it('prepaid_quota 有额度 → 渲染 wcq-iflytek-prepaid 且文本含 761.60M 与 1.00B', async () => {
+    const wrapper = mount(WebConsoleQuotaCell, {
+      props: {
+        account: makeIflytekAccount({
+          balance: 0,
+          prepaid_quota: {
+            model: 'spark-x2.6',
+            total_tokens: 1000000000,
+            used_tokens: 761604433,
+            remaining_tokens: 238395567,
+            expires_at: '2026-12-13T09:09:37Z',
+            status: 'ACTIVE',
+            available: true
+          }
+        })
+      },
+      global: { stubs: { UsageProgressBar: true } }
+    })
+    await flushPromises()
+
+    const prepaid = wrapper.find('[data-test="wcq-iflytek-prepaid"]')
+    expect(prepaid.exists()).toBe(true)
+    expect(prepaid.text()).toContain('761.60M')
+    expect(prepaid.text()).toContain('1.00B')
   })
 })
