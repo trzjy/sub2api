@@ -1327,6 +1327,25 @@ func (s *GatewayService) isAccountAllowedForPlatform(account *Account, platform 
 	return account.Platform == platform
 }
 
+// isAccountPlatformEligible 是「平台资格」的唯一出口（不依赖 ctx）：账号平台与请求
+// 平台一致，或账号属于任意聚合平台（antigravity / cursor / codebuddy / devin / other
+// 等），即具备承接该平台请求的资格。语义等同 isAccountAllowedForPlatform(account,
+// platform, true)。
+//
+// 旧调度路径的粘性复用、档位下限计算，与失败诊断 isPlatformFilteredForSelection
+// 必须统一走这里，避免「聚合账号能被选中但不保持粘性 / 被误记为 platform_filtered
+// 而丢失 model_rate_limited 与恢复建议」的口径再次漂移。此处只判平台资格，不含
+// cursor 供给等 ctx 相关的跨平台准入（那条链走 isAccountAdmittedForPlatform）。
+func isAccountPlatformEligible(account *Account, platform string) bool {
+	if account == nil {
+		return false
+	}
+	if account.Platform == platform {
+		return true
+	}
+	return isAggregatePlatformAccount(account.Platform)
+}
+
 // isAccountAdmittedForPlatform 在既有平台精确匹配之外追加 cursor 供给的跨平台准入，
 // 是原生（Claude/Gemini）链唯一的准入判定出口，取代原先散落的
 // isAccountAllowedForPlatform 直接调用。
@@ -2701,10 +2720,10 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 	ctx = s.withWindowCostPrefetch(ctx, accounts)
 	ctx = s.withRPMPrefetch(ctx, accounts)
 
-	// 档位下限只由"本请求可承接的账号"决定：原生平台账号，或启用了混合调度的
-	// antigravity 账号，且支持本模型。不可承接的账号算进档位会让粘性被永久判为跨档。
+	// 档位下限只由"本请求可承接的账号"决定：平台资格统一走 isAccountPlatformEligible
+	//（同平台或任意聚合平台），且支持本模型。不可承接的账号算进档位会让粘性被永久判为跨档。
 	tierPriority, hasTier := priorityTierFloor(accountPointers(accounts), func(acc *Account) bool {
-		if acc.Platform != nativePlatform && !(acc.Platform == PlatformAntigravity && acc.IsMixedSchedulingEnabled()) {
+		if !isAccountPlatformEligible(acc, nativePlatform) {
 			return false
 		}
 		return requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, acc, requestedModel)
@@ -2722,14 +2741,14 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 			if err == nil && accountID > 0 && containsInt64(routingAccountIDs, accountID) {
 				if _, excluded := excludedIDs[accountID]; !excluded {
 					account, err := s.getSchedulableAccount(ctx, accountID)
-					// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
+					// 检查账号分组归属和有效性：平台资格统一走 isAccountPlatformEligible
 					if err == nil {
 						clearSticky := shouldClearStickySession(account, requestedModel)
 						if clearSticky {
 							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 						}
 						if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) && stickyAccountWithinPriorityTier(account, tierPriority, hasTier) {
-							if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
+							if isAccountPlatformEligible(account, nativePlatform) {
 								if s.debugModelRoutingEnabled() {
 									logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy mixed routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
 								}
@@ -2837,14 +2856,14 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		if err == nil && accountID > 0 {
 			if _, excluded := excludedIDs[accountID]; !excluded {
 				account, err := s.getSchedulableAccount(ctx, accountID)
-				// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
+				// 检查账号分组归属和有效性：平台资格统一走 isAccountPlatformEligible
 				if err == nil {
 					clearSticky := shouldClearStickySession(account, requestedModel)
 					if clearSticky {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
 					if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) && !s.isStickyAccountUpstreamRestricted(ctx, groupID, account, requestedModel) && stickyAccountWithinPriorityTier(account, tierPriority, hasTier) {
-						if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
+						if isAccountPlatformEligible(account, nativePlatform) {
 							return account, nil
 						}
 					}
@@ -3091,10 +3110,17 @@ func isPlatformFilteredForSelection(acc *Account, platform string, allowMixedSch
 		return true
 	}
 	if allowMixedScheduling {
-		if acc.Platform == PlatformAntigravity {
-			return !acc.IsMixedSchedulingEnabled()
+		// 与调度准入同一口径（isAccountPlatformEligible）：同平台、任意聚合平台，
+		// 以及启用混合调度的 Antigravity 都不算被平台过滤。此前把聚合候选一律判为
+		// platform_filtered，会吞掉 model_rate_limited 与恢复建议；这里复用同一出口，
+		// 避免诊断与准入再次漂移。
+		if isAccountPlatformEligible(acc, platform) {
+			return false
 		}
-		return acc.Platform != platform
+		if acc.Platform == PlatformAntigravity && acc.IsMixedSchedulingEnabled() {
+			return false
+		}
+		return true
 	}
 	if strings.TrimSpace(platform) == "" {
 		return false
