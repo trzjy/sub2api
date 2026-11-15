@@ -1623,7 +1623,7 @@
             @select="onCnPresetSelect"
           />
         </div>
-        <div v-else>
+        <div v-else-if="form.platform !== 'devin'">
           <label class="input-label">{{ t('admin.accounts.cnProviders.apiProtocol.endpoints') }}</label>
           <div class="mt-2 space-y-3">
             <div v-for="item in cnAdaptiveProtocolOptions" :key="item.value">
