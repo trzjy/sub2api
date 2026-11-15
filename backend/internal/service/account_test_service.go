@@ -536,6 +536,14 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.testCursorAccountConnection(c, credentialAccount, modelID)
 	}
 
+	// devin 平台（Cascade）：走 DevinUpstreamClient 的 connect 非流式探活（session
+	// token 换 JWT + GetChatMessage connect 帧），成功判定必须收到非空正文。此前无此
+	// 分支会落入下方 claude 兜底，把 Devin 账号当 Anthropic OAuth 对 api.anthropic.com
+	// 发 /v1/messages——出站目标与凭证形态全错（plan §3.6，同 §20.2-C 缺陷）。
+	if credentialAccount.Platform == PlatformDevin {
+		return s.testDevinAccountConnection(c, credentialAccount, modelID)
+	}
+
 	// 按模型分流的多模型聚合平台（OpenCode、Command Code 等）。
 	if account.routesByModel() {
 		return s.testModelRoutedAccountConnection(c, account, modelID, prompt)
@@ -838,6 +846,147 @@ func (s *AccountTestService) testCursorAccountConnection(c *gin.Context, account
 		Model: testModelID,
 		Text:  text,
 	})
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
+}
+
+// testDevinAccountConnection 对 devin（Cascade）账号做真实探活：session token 经
+// GetUserJwt 换取本请求 JWT，再走 GetChatMessage connect 帧完成一次最小非流式对话。
+// 与正式转发 forwardDevin 共用同一底层部件（NewDevinUpstreamClient / BuildDevinChatParams /
+// NewDevinChatFrame / DevinStreamReader / decodeGetChatMessageResponse），只把请求收敛到
+// max_tokens=16 + 固定 system/user 提示；成功判定 = 解析出非空正文，空流/空正文按失败
+// 关闭，绝不冒充成功（plan §3.6，同 §20.2-C 红线）。
+func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, account *Account, modelID string) error {
+	ctx := c.Request.Context()
+
+	// 凭证：devin token 存于 credentials["api_key"]，空则失败关闭。
+	token := strings.TrimSpace(account.GetDevinToken())
+	if token == "" {
+		return s.sendErrorAndEnd(c, "devin account is missing api_key credential")
+	}
+
+	// 模型：与可测试模型列表同源（model_mapping 请求侧键，排除通配），排序后取首个。
+	mapping := account.GetModelMapping()
+	keys := make([]string, 0, len(mapping))
+	for requestedModel := range mapping {
+		trimmed := strings.TrimSpace(requestedModel)
+		if trimmed == "" || strings.Contains(trimmed, "*") {
+			continue
+		}
+		keys = append(keys, trimmed)
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return s.sendErrorAndEnd(c, "devin account has no testable models (model_mapping has no concrete keys)")
+	}
+	testModelID := strings.TrimSpace(modelID)
+	if testModelID == "" {
+		testModelID = keys[0]
+	}
+	upstreamUID, matched := account.ResolveMappedModel(testModelID)
+	if !matched || strings.TrimSpace(upstreamUID) == "" {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("devin account does not map model %q (fail closed)", testModelID))
+	}
+
+	if s.httpUpstream == nil {
+		return s.sendErrorAndEnd(c, "devin account test unavailable: http upstream not wired")
+	}
+
+	// 最小非流式对话：max_tokens=16 + 固定 system/user 提示。复用 C3 转换把 OpenAI
+	// chat body 归一为 Devin 参数（system 进 SystemPrompt、user 进 Prompts）。
+	probeBody, _ := json.Marshal(map[string]any{
+		"model": upstreamUID,
+		"messages": []map[string]string{
+			{"role": "system", "content": "You are a helpful assistant."},
+			{"role": "user", "content": "Reply with: ok"},
+		},
+		"max_tokens": 16,
+		"stream":     false,
+	})
+	params, err := BuildDevinChatParams(probeBody, upstreamUID, "")
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("devin account test: build params failed: %s", err.Error()))
+	}
+	params.APIKey = token
+
+	// 鉴权：GetUserJwt 独立超时；base 取 CustomAPIServerURL，缺省 DevinAPIURL。
+	authCtx, cancelAuth := context.WithTimeout(ctx, devinAuthTimeout)
+	defer cancelAuth()
+	authResp, err := NewDevinUpstreamClient().GetUserJwt(authCtx, token)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("devin account test: get user jwt failed: %s", err.Error()))
+	}
+	base := strings.TrimSpace(authResp.CustomAPIServerURL)
+	if base == "" {
+		base = DevinAPIURL
+	}
+
+	// 请求：复用 C2 帧构造，头族与 forwardDevin 完全一致。
+	frame, chatBaseURL, err := NewDevinChatFrame(params, authResp.UserJWT, base)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("devin account test: build chat frame failed: %s", err.Error()))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(chatBaseURL, "/")+DevinChatMessagePath, bytes.NewReader(frame))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "devin account test: create request failed")
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	req.Header.Set("Content-Type", "application/connect+proto")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("Connect-Content-Encoding", "gzip")
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Connect-Accept-Encoding", "gzip")
+	req.Header.Set("User-Agent", devinClientUA)
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("devin account test: request failed: %s", err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("devin account test: upstream status %d", resp.StatusCode))
+	}
+
+	// 聚合所有正文增量；END_STREAM trailer 含 error 视为失败。空流/空正文按失败关闭。
+	reader := NewDevinStreamReader(resp.Body)
+	var text strings.Builder
+	for {
+		payload, endStream, rerr := reader.Next()
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return s.sendErrorAndEnd(c, fmt.Sprintf("devin account test: stream read failed: %s", rerr.Error()))
+		}
+		if endStream {
+			if code, msg := devinTrailerError(payload); code != "" {
+				detail := code
+				if msg != "" {
+					detail += ": " + msg
+				}
+				return s.sendErrorAndEnd(c, "devin account test: upstream trailer error: "+detail)
+			}
+			break
+		}
+		msg, derr := decodeGetChatMessageResponse(payload)
+		if derr != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("devin account test: decode frame failed: %s", derr.Error()))
+		}
+		if msg.DeltaText != "" {
+			text.WriteString(msg.DeltaText)
+		}
+	}
+	answer := strings.TrimSpace(text.String())
+	if answer == "" {
+		return s.sendErrorAndEnd(c, "devin account test: upstream returned no text")
+	}
+
+	s.sendEvent(c, TestEvent{Type: "content", Model: testModelID, Text: answer})
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil
 }

@@ -212,6 +212,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return s.forwardCursorResponsesEntry(ctx, c, account, body)
 	}
 
+	// Devin（Cascade）订阅账号（方案 §3.5）：入站 OpenAI/Responses 协议经 Devin 专有
+	// protobuf 管线出站（server.codeium.com 的 Auth/GetChatMessage），与通用 OpenAI
+	// Responses 管线完全不兼容。必须在下方通用 Responses / 网页逆向管线之前分流，
+	// 否则 Devin 账号会被通用路径按 API Key 账号处理，把请求打到错误上游。
+	if account.Platform == PlatformDevin {
+		return s.forwardDevin(ctx, c, account, body, originalModel, reqStream, startTime, webResponseModeResponses)
+	}
+
 	// 网页逆向平台（W3 方案任务 1）：入站 OpenAI 协议经各自适配器转换为官方网页端
 	// 协议出站（Zhipu SSE / DeepSeek SSE / Kimi Connect RPC）。必须先于下方通用
 	// OpenAI 路径分流——网页账号为 apikey 类型，会命中

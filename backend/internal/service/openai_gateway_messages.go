@@ -101,6 +101,28 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		}
 	}
 
+	// devin（Codeium Cascade 多模型聚合平台）：入站 Anthropic Messages，出站 devin
+	// Chat 协议；必须先于通用 OpenAI/Responses 管线分流，否则会落到 OAuth token
+	// provider。归一复用 C3 的 AnthropicBodyToChatBody（与 web 平台入口同一实现），
+	// 再把生成的 Chat body 交给 forwardDevin，响应按 Anthropic 模式回写 /v1/messages。
+	if account.Platform == PlatformDevin {
+		var anthropicReq apicompat.AnthropicRequest
+		if err := json.Unmarshal(body, &anthropicReq); err != nil {
+			return nil, fmt.Errorf("devin: parse anthropic messages request: %w", err)
+		}
+		ccBody, err := AnthropicBodyToChatBody(body)
+		if err != nil {
+			return nil, err
+		}
+		startTime := time.Now()
+		reqModel := gjson.GetBytes(ccBody, "model").String()
+		if strings.TrimSpace(reqModel) == "" {
+			reqModel = anthropicReq.Model
+		}
+		reqStream := gjson.GetBytes(ccBody, "stream").Bool()
+		return s.forwardDevin(ctx, c, account, ccBody, reqModel, reqStream, startTime, webResponseModeAnthropic)
+	}
+
 	// Cursor 号池：入站 Anthropic Messages，出站 Cursor 原生协议；与 chat/responses 同口径，
 	// 必须先在通用 OpenAI 路径之前分流，否则会落到 OAuth token provider 并 502。
 	// 仅 Connect 会话账号（cursor + 非 api_key）进入原生分支；Cursor APIKey 账号

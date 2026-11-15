@@ -144,6 +144,12 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		return s.forwardCursorChatCompletionsEntry(ctx, c, account, body)
 	}
 
+	// devin 出站为 Connect+Protobuf，必须在通用 OpenAI 路径前分流。
+	if account.Platform == PlatformDevin {
+		view := newOpenAIRequestView(body)
+		return s.forwardDevin(ctx, c, account, body, view.Model, view.Stream, time.Now(), webResponseModeChat)
+	}
+
 	// 网页逆向平台（W3 方案任务 1）：归并后由账号级接入模式（access_mode=web）决定
 	// 适配器选择（docs-local/platform-merge-refactor-plan.md §5.3），与 OpenAIGatewayService
 	// .Forward 保持同一分发口径。兼容旧 web-* 平台常量（形状推断兜底）。
