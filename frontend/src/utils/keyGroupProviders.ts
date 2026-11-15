@@ -22,7 +22,8 @@ const PROVIDER_BY_PLATFORM: Record<GroupPlatform, KeyGroupProvider> = {
   cline: 'other',
   codebuddy: 'other',
   muse: 'other',
-  cursor: 'other'
+  cursor: 'other',
+  devin: 'other'
 }
 
 export function getKeyGroupProvider(platform: GroupPlatform): KeyGroupProvider {

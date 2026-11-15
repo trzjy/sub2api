@@ -94,6 +94,7 @@ func (c *DevinUpstreamClient) GetUserJwt(ctx context.Context, sessionToken strin
 
 // DevinChatParams 是构造 GetChatMessage 请求的输入参数（由 devin_convert.go 填充）。
 type DevinChatParams struct {
+	APIKey       string // 订阅 session token
 	ModelUID     string
 	SystemPrompt string
 	Prompts      []ChatMessagePrompt
@@ -158,6 +159,7 @@ func NewDevinChatFrame(params *DevinChatParams, userJWT, overrideBaseURL string)
 			IDEVersion:       DevinIDEVersion,
 			ExtensionName:    DevinClientName,
 			ExtensionVersion: DevinExtensionVersion,
+			APIKey:           NormalizeDevinToken(params.APIKey),
 			Locale:           "en",
 			UserJWT:          userJWT,
 		},

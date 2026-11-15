@@ -1296,7 +1296,8 @@ function generateRoutedCodexFiles(
     typesafe: 'TypeSafe',
     command_code: 'Command Code',
     cline: 'Cline',
-    cursor: 'Cursor'
+    cursor: 'Cursor',
+    devin: 'Devin'
   }
   // 已绑定内部供给分组的 Key（platform=''，身份已在用户 DTO 边界剥离）走中性名
   // 回退：标题只写 Sub2API，不暴露供给平台身份（user-visibility-closure 2026-10-18）。
