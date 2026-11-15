@@ -780,7 +780,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					reqLog.Info("gateway.account_select_aborted_client_disconnected", zap.Error(err))
 					return
 				}
-				if len(fs.FailedAccountIDs) == 0 {
+				// 「号池无可用账号」必须如实报给客户端——包括「已试过若干账号之后才把池子耗空」
+				// 的情况。2026-11-15 线上：失败列表非空时直接落到 handleFailoverExhausted，
+				// 把上一个账号的上游 524 原样翻成 502，客户端只看到「上游错误」、看不到
+				// 「池子里没号了」，于是照着 502 一直重试（9 次 × 每次 2 分钟）。
+				if len(fs.FailedAccountIDs) == 0 || errors.Is(err, service.ErrNoAvailableAccounts) {
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform, err)
 					if !cls.ModelNotFound {
 						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
