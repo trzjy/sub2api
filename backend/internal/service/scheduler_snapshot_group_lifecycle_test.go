@@ -357,18 +357,6 @@ func schedulerCanonicalGroupZeroAccountQueryCount() int {
 	return schedulerCanonicalAccountQueryCount()
 }
 
-// schedulerCanonicalGroupZeroAccountQueryCountSimpleMode 统计 simple 模式未分组
-// 桶的账号查询数：simple 分支保留 codebuddy 补入（每聚合平台一次查询）。
-func schedulerCanonicalGroupZeroAccountQueryCountSimpleMode() int {
-	count := schedulerCanonicalAccountQueryCount()
-	for _, platform := range schedulerSnapshotPlatforms() {
-		if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy {
-			count++
-		}
-	}
-	return count
-}
-
 func bucketStrings(buckets []SchedulerBucket) map[string]struct{} {
 	out := make(map[string]struct{}, len(buckets))
 	for _, bucket := range buckets {
@@ -855,7 +843,7 @@ func (r *aggregatedSupersetAccountRepo) groupQuery(platform string) ([]Account, 
 	r.groupQueries = append(r.groupQueries, platform)
 	enabled := r.enabled
 	r.mu.Unlock()
-	if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy && enabled {
+	if platform != PlatformCodeBuddy && enabled {
 		// 开关开启：repo 层候选池已并入 codebuddy（方案 §2.1-3 唯一纳入点）。
 		return []Account{
 			{ID: 9101, Platform: platform, Status: StatusActive, Schedulable: true},

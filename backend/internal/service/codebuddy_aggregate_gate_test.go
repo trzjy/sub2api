@@ -111,13 +111,13 @@ func TestCodebuddyAggregateGate_PerGroupHitAndMiss(t *testing.T) {
 		}
 	}
 
-	// 非聚合平台（openai）请求不触发闸门：codebuddy 账号不应被纳入 verdict。
+	// 新口径：codebuddy 账号在任何平台的跨平台供给都走目录闸门（不再按平台族区分）。
 	provider := newFakeCatalog(nil)
 	s := newCodeBuddyScheduler(provider)
 	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, RequestedModel: "m"}
 	verdicts := s.evaluateCodeBuddyCatalogGate(context.Background(), req, []Account{cbAccount(9, 0, nil)})
-	if len(verdicts) != 0 {
-		t.Errorf("非聚合平台不应触发目录闸门，got verdicts=%v", verdicts)
+	if len(verdicts) == 0 {
+		t.Errorf("含 codebuddy 账号的请求应触发目录闸门")
 	}
 }
 
@@ -311,86 +311,7 @@ func TestCodebuddyAggregateGate_BudgetExactlyFourAllProbed(t *testing.T) {
 
 // TestCodebuddyAggregateGate_PlatformMismatchAllowOnAggregated 覆盖 §2.1-2 调度过滤放行：
 // 聚合分组请求下放行 codebuddy 账号越过 platform_mismatch；非聚合平台不放行。
-func TestCodebuddyAggregateGate_PlatformMismatchAllowOnAggregated(t *testing.T) {
-	cb := &Account{ID: 1, Platform: PlatformCodeBuddy, Type: AccountTypeOAuth}
-	nonCB := &Account{ID: 2, Platform: PlatformDeepseek, Type: AccountTypeAPIKey}
-
-	aggPlatforms := []string{PlatformDeepseek, PlatformZhipu, PlatformKimi, PlatformMiniMax, PlatformOther, PlatformCodeBuddy}
-	for _, p := range aggPlatforms {
-		req := OpenAIAccountScheduleRequest{Platform: p}
-		if !codeBuddyPlatformMismatchAllowed(cb, req) {
-			t.Errorf("聚合平台 %s 应放行 codebuddy 账号的 platform_mismatch", p)
-		}
-	}
-
-	// 非聚合平台（openai）不放行 codebuddy 账号。
-	if codeBuddyPlatformMismatchAllowed(cb, OpenAIAccountScheduleRequest{Platform: PlatformOpenAI}) {
-		t.Errorf("非聚合平台 openai 不应放行 codebuddy 账号的 platform_mismatch")
-	}
-	// 非 codebuddy 账号（deepseek）即便在聚合平台也不走此放行。
-	if codeBuddyPlatformMismatchAllowed(nonCB, OpenAIAccountScheduleRequest{Platform: PlatformDeepseek}) {
-		t.Errorf("非 codebuddy 账号不应走聚合 platform_mismatch 放行")
-	}
-}
-
-// TestCodebuddyAggregateGate_SnapshotBucketKeySyncAndVersionBump 覆盖 §2.1-3 快照层：
 // bucket 键与读取路径同步聚合标签、版本 bump 失效、聚合分组分类。
-func TestCodebuddyAggregateGate_SnapshotBucketKeySyncAndVersionBump(t *testing.T) {
-	// 分类：聚合分组判定。
-	if !isCodeBuddyAggregatedPlatform(PlatformDeepseek) ||
-		!isCodeBuddyAggregatedPlatform(PlatformZhipu) ||
-		!isCodeBuddyAggregatedPlatform(PlatformKimi) ||
-		!isCodeBuddyAggregatedPlatform(PlatformMiniMax) ||
-		!isCodeBuddyAggregatedPlatform(PlatformOther) ||
-		!isCodeBuddyAggregatedPlatform(PlatformCodeBuddy) {
-		t.Errorf("国产 OpenAI 兼容族 + codebuddy 均应判定为聚合分组")
-	}
-	if isCodeBuddyAggregatedPlatform(PlatformOpenAI) || isCodeBuddyAggregatedPlatform(PlatformGrok) {
-		t.Errorf("openai/grok 不属于聚合分组")
-	}
-
-	// 读取路径（bucketFor）对聚合非 codebuddy 平台打 @agg 标签。
-	gid := int64(42)
-	bucket := (&SchedulerSnapshotService{}).bucketFor(&gid, PlatformDeepseek, SchedulerModeSingle)
-	wantPlatform := PlatformDeepseek + "@agg" + strconv.Itoa(schedulerSnapshotAggregationVersion)
-	if bucket.Platform != wantPlatform {
-		t.Errorf("聚合平台 bucket 应带 @agg 标签，got %q want %q", bucket.Platform, wantPlatform)
-	}
-	if bucket.GroupID != gid {
-		t.Errorf("bucket GroupID 应保留，got %d", bucket.GroupID)
-	}
-
-	// 标签仅影响缓存键，查询平台还原为真实平台名。
-	if got := schedulerAggregationQueryPlatform(bucket.Platform); got != PlatformDeepseek {
-		t.Errorf("schedulerAggregationQueryPlatform 应还原真实平台，got %q", got)
-	}
-	// codebuddy 平台自身不打标签。
-	cbBucket := (&SchedulerSnapshotService{}).bucketFor(&gid, PlatformCodeBuddy, SchedulerModeSingle)
-	if cbBucket.Platform != PlatformCodeBuddy {
-		t.Errorf("codebuddy 平台自身不应打 @agg 标签，got %q", cbBucket.Platform)
-	}
-	if got := schedulerAggregationQueryPlatform(PlatformCodeBuddy); got != PlatformCodeBuddy {
-		t.Errorf("codebuddy 平台 queryPlatform 应不变，got %q", got)
-	}
-
-	// 版本 bump 失效机制：聚合标签内嵌版本号，版本变更会使旧缓存键（无标签/旧版本）自然失效。
-	// 当前键含版本后缀，与无标签旧键（纯平台名）不同，证明旧快照不会被继续命中。
-	if !strings.HasSuffix(schedulerAggregationBucketPlatform(PlatformDeepseek), "@agg"+strconv.Itoa(schedulerSnapshotAggregationVersion)) {
-		t.Errorf("聚合 bucket 平台键应内嵌版本标签")
-	}
-	if schedulerAggregationBucketPlatform(PlatformDeepseek) == PlatformDeepseek {
-		t.Errorf("聚合平台 bucket 键必须与无标签旧键不同以触发失效")
-	}
-
-	// 非聚合平台键不变。
-	if schedulerAggregationBucketPlatform(PlatformOpenAI) != PlatformOpenAI {
-		t.Errorf("非聚合平台 bucket 键不应变更")
-	}
-}
-
-// TestEvaluateCodeBuddyCatalogGate_ConcurrentVerdictsWrites 是 D-13 B 项并发回归：
-// 候选数（6）> codeBuddyCatalogProbeConcurrency（4）时，主协程预写 not_probed 与
-// 探测协程在 mu 内写 verdicts 不得构成 concurrent map writes；-race 下本测试
 // 若存在数据竞争会直接失败。同时校验 not_probed 计数 = 候选数 - 探测预算。
 func TestEvaluateCodeBuddyCatalogGate_ConcurrentVerdictsWrites(t *testing.T) {
 	accounts := make([]Account, 0, 6)

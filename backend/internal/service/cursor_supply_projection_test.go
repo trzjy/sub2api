@@ -46,9 +46,10 @@ func cursorSupplyProjAccount(id int64, quotaKeyID *int64, mapping map[string]any
 		Status:      StatusActive,
 		Schedulable: true,
 		Concurrency: 1,
-		QuotaKeyID:  quotaKeyID,
-		GroupIDs:    []int64{cursorSupplyProjGroupID},
-		Credentials: map[string]any{"model_mapping": mapping},
+		QuotaKeyID:    quotaKeyID,
+		GroupIDs:      []int64{cursorSupplyProjGroupID},
+		AccountGroups: []AccountGroup{{GroupID: cursorSupplyProjGroupID}},
+		Credentials:   map[string]any{"model_mapping": mapping},
 	}
 }
 
@@ -334,11 +335,12 @@ func TestCursorSupplyNarrowEntryNoQualifyingAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, models)
 
-	// ② 非已接受桥接平台。
+	// ② 绑定驱动：任意平台都会查询组内账号（不再按"桥接平台"前置过滤）；
+	// 组内没有合格账号时仍返回空集合。
 	models, err = svc.GetCursorSupplyModelIDs(ctx, &groupID, PlatformCodeBuddy)
 	require.NoError(t, err)
 	require.Empty(t, models)
-	require.Equal(t, int64(0), repo.listByGroupCalls.Load(), "非桥接平台不发起账号查询")
+	require.Greater(t, repo.listByGroupCalls.Load(), int64(0), "绑定驱动：任意平台都会查询组内账号")
 
 	// ③ 组内只有非 Cursor 账号。
 	models, err = svc.GetCursorSupplyModelIDs(ctx, &groupID, PlatformGemini)
@@ -381,30 +383,26 @@ func TestCursorSupplyGetAvailableModelsFamilyFilter(t *testing.T) {
 	repo := &modelsListAccountRepoStub{byGroup: map[int64][]Account{groupID: {account}}}
 	svc := &GatewayService{accountRepo: repo}
 
+	// 新口径：绑定驱动——组内账号的全部映射键都对外可见，不再按模型家族过滤。
+	allModels := []string{
+		"claude-fable-5-1", "gemini-3.8-flash", "gpt-6.1-sol",
+		"grok-4.7", "my-claude", "zzz-unknown",
+	}
 	cases := []struct {
 		platform string
 		want     []string
 	}{
-		{PlatformAnthropic, []string{"claude-fable-5-1", "my-claude"}},
-		{PlatformOpenAI, []string{"gpt-6.1-sol"}},
-		{PlatformGemini, []string{"gemini-3.8-flash"}},
-		{PlatformGrok, []string{"grok-4.7"}},
+		{PlatformAnthropic, allModels},
+		{PlatformOpenAI, allModels},
+		{PlatformGemini, allModels},
+		{PlatformGrok, allModels},
 	}
 	for _, tc := range cases {
 		t.Run(tc.platform, func(t *testing.T) {
 			ctx := cursorSupplyProjCtx(tc.platform, nil)
 			got := svc.GetAvailableModels(ctx, &groupID, tc.platform)
 			require.Equal(t, tc.want, got,
-				"平台分组 %s 的 /v1/models 必须只含其模型家族", tc.platform)
-			require.NotContains(t, got, "zzz-unknown",
-				"未知别名在任何平台组都必须失败关闭")
+				"绑定驱动：平台分组 %s 的 /v1/models 列出组内账号全部映射键", tc.platform)
 		})
 	}
-
-	// 自定义别名 my-claude 在 openai 组不可见：映射目标 claude-sonnet-5-5 属 anthropic，
-	// 与 openai 不符 → 被过滤。
-	ctxOpenAI := cursorSupplyProjCtx(PlatformOpenAI, nil)
-	openAIListed := svc.GetAvailableModels(ctxOpenAI, &groupID, PlatformOpenAI)
-	require.NotContains(t, openAIListed, "my-claude",
-		"自定义别名 my-claude 的映射目标属 anthropic，不得泄漏进 openai 组")
 }

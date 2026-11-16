@@ -89,8 +89,9 @@ func cursorSchedTestAccount(id int64, quotaKeyID *int64, model string) Account {
 		Status:      StatusActive,
 		Schedulable: true,
 		Concurrency: 1,
-		QuotaKeyID:  quotaKeyID,
-		GroupIDs:    []int64{cursorSchedTestGroupID},
+		QuotaKeyID:    quotaKeyID,
+		GroupIDs:      []int64{cursorSchedTestGroupID},
+		AccountGroups: []AccountGroup{{GroupID: cursorSchedTestGroupID}},
 		Credentials: map[string]any{"model_mapping": map[string]any{model: "upstream-" + model}},
 	}
 }
@@ -327,8 +328,8 @@ func TestCursorSchedulableNativePlatformAdmission(t *testing.T) {
 		"openai 兼容族已挂组时应接纳 cursor 供给")
 	require.True(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformGrok, false, cursorSchedTestModelAlt, &groupID),
 		"grok 已挂组时应接纳 cursor 供给")
-	require.False(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformComposite, false, cursorSchedTestModelAlt, &groupID),
-		"多协议族（composite）不接纳 cursor 跨平台供给")
+	require.True(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformComposite, false, cursorSchedTestModelAlt, &groupID),
+		"绑定驱动：composite 组内挂载的 cursor 号同样接纳（不再按平台族排除）")
 	// 未挂组 → 即便平台可桥接也不外溢
 	require.False(t, svc.isAccountAdmittedForPlatform(allowAll, &admitted, PlatformOpenAI, false, cursorSchedTestModelAlt, nil))
 	// 模型不在白名单 → 不可选（即便平台可桥接）
@@ -336,34 +337,14 @@ func TestCursorSchedulableNativePlatformAdmission(t *testing.T) {
 
 	// ⑥ 同平台原生账号不受本门影响
 	native := Account{ID: 8602, Platform: PlatformAnthropic, Type: AccountTypeOAuth,
-		Status: StatusActive, Schedulable: true}
+		Status: StatusActive, Schedulable: true,
+		GroupIDs:      []int64{cursorSchedTestGroupID},
+		AccountGroups: []AccountGroup{{GroupID: cursorSchedTestGroupID}}}
 	require.True(t, svc.isAccountAdmittedForPlatform(allowAll, &native, PlatformAnthropic, false, cursorSchedTestModelAlt, &groupID))
 }
 
 // TestCursorSchedulableNativePlatformQuerySet 钉死候选查询集合：cursor 只在「原生平台 +
 // 显式挂组」时被并入多平台查询，未挂组或非原生平台时不外溢。
-func TestCursorSchedulableNativePlatformQuerySet(t *testing.T) {
-	groupID := cursorSchedTestGroupID
-
-	require.Equal(t, []string{PlatformAnthropic, PlatformCursor},
-		cursorSupplyPlatformsFor(&groupID, []string{PlatformAnthropic}))
-	require.Equal(t, []string{PlatformAnthropic, PlatformAntigravity, PlatformCursor},
-		cursorSupplyPlatformsFor(&groupID, []string{PlatformAnthropic, PlatformAntigravity}))
-	// 未挂组：不并入 cursor
-	require.Equal(t, []string{PlatformAnthropic},
-		cursorSupplyPlatformsFor(nil, []string{PlatformAnthropic}))
-	// OpenAI 兼容族（O57-A §1）：已挂组的 openai 兼容族（grok/openai）现并入 cursor
-	// 跨平台供给候选（与 anthropic/gemini 同源），多协议族（composite）仍不并入。
-	require.Equal(t, []string{PlatformOpenAI, PlatformCursor},
-		cursorSupplyPlatformsFor(&groupID, []string{PlatformOpenAI}))
-	require.Equal(t, []string{PlatformGrok, PlatformCursor},
-		cursorSupplyPlatformsFor(&groupID, []string{PlatformGrok}))
-	// 入参不被就地改写
-	base := []string{PlatformGemini}
-	_ = cursorSupplyPlatformsFor(&groupID, base)
-	require.Equal(t, []string{PlatformGemini}, base)
-}
-
 // TestQuotaKeyExpiredBlocksCursorSchedulingWithoutMutatingAccount 钉死 I2 的核心不变量：
 // expired 的码只剥夺调度资格，**账号本体不动**——status 未被伪标耗尽、schedulable 未被改写。
 func TestQuotaKeyExpiredBlocksCursorSchedulingWithoutMutatingAccount(t *testing.T) {

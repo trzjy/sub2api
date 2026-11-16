@@ -123,23 +123,6 @@ func TestCodexCatalogGeminiCapabilitiesIncludeMixedEnabledAntigravityAccounts(t 
 // 它们在 gemini 分组中本来就走「platform == platform」分支、不参与跨平台供给，
 // 故此处用直接判定验证：其 catalog 能力判定不受改动影响、且 mixed_scheduling
 // Extra 对其无副作用。
-func TestCodexCatalogCapabilitiesOtherAggregatePlatformsUnaffected(t *testing.T) {
-	for _, platform := range []string{PlatformCursor, PlatformCodeBuddy} {
-		acc := &Account{ID: 1, Platform: platform, Type: AccountTypeOAuth,
-			Credentials: map[string]any{"model_mapping": map[string]any{"x": "x"}},
-			Extra:       map[string]any{"mixed_scheduling": false},
-		}
-		// 自身平台上的 catalog 能力判定与改动前一致（true），且不受 mixed_scheduling Extra 影响。
-		require.True(t, mixedListingAccountCatalogCapable(platform, acc),
-			"aggregate platform %s must remain catalog-capable on its own platform", platform)
-		acc.Extra = map[string]any{"mixed_scheduling": true}
-		require.True(t, mixedListingAccountCatalogCapable(platform, acc),
-			"mixed_scheduling Extra must not affect non-antigravity platform %s", platform)
-		// 在 gemini 分组里不参与跨平台供给（改动前既如此），语义不变。
-		require.False(t, codexAccountServesPlatformModel(acc, PlatformGemini, "gemini-custom"))
-	}
-}
-
 func TestAstraUltraCatalogPreservesWorkflowMetadata(t *testing.T) {
 	// Ultra is a Codex workflow. Its inference effort must survive catalog sync,
 	// aliases and group generation instead of silently falling back to max.

@@ -51,7 +51,7 @@ func (r hy3LegacyAggregateAccountRepo) ListSchedulableByGroupIDAndPlatform(_ con
 		if !openAIStickyAccountMatchesGroup(&account, &groupID) {
 			continue
 		}
-		if account.Platform == platform || (groupID == r.groupID && r.aggregate && account.Platform == PlatformCodeBuddy && isCodeBuddyAggregatedPlatform(platform)) {
+		if account.Platform == platform || (groupID == r.groupID && r.aggregate && account.Platform == PlatformCodeBuddy) {
 			accounts = append(accounts, account)
 		}
 	}

@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"strconv"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -274,29 +273,21 @@ func TestCompositeGroupSchedulerHasAllCanonicalPlatformBuckets(t *testing.T) {
 	nonAggPlatforms := []string{
 		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
 		PlatformOpenCodeGo, PlatformTypeSafe, PlatformCommandCode, PlatformCline,
-		PlatformCodeBuddy, PlatformMuse, PlatformCursor,
+		PlatformCodeBuddy, PlatformMuse, PlatformCursor, PlatformDevin,
 	}
-	// 聚合族五平台：裸名 + "@agg" + schedulerSnapshotAggregationVersion（用常量拼，不硬编码版本号）。
+	// 聚合族五平台：@agg 标签已废弃，平台键原样返回。
 	aggPlatforms := []string{
 		PlatformDeepseek, PlatformZhipu, PlatformKimi, PlatformOther, PlatformMiniMax,
 	}
 	expected := make([]string, 0, len(nonAggPlatforms)+len(aggPlatforms))
 	expected = append(expected, nonAggPlatforms...)
-	for _, p := range aggPlatforms {
-		expected = append(expected, p+"@agg"+strconv.Itoa(schedulerSnapshotAggregationVersion))
-	}
+	expected = append(expected, aggPlatforms...)
 
 	platforms := make([]string, 0, len(seen))
 	for platform := range seen {
 		platforms = append(platforms, platform)
 	}
 	require.ElementsMatch(t, expected, platforms)
-
-	// 防回归：聚合族裸平台名不得出现在任何 bucket（标签缺失即回退到无标签键，违反 §2.1-3）。
-	for _, p := range aggPlatforms {
-		_, ok := seen[p]
-		require.False(t, ok, "聚合族裸平台名 %q 不应出现在 bucket（§2.1-3 契约要求 @agg 标签）", p)
-	}
 }
 
 func TestCompositeConcretePlatformsIncludeCNProviders(t *testing.T) {
