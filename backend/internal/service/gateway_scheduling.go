@@ -1293,39 +1293,6 @@ func (s *GatewayService) isSingleAntigravityAccountGroup(ctx context.Context, gr
 	return len(accounts) == 1
 }
 
-func (s *GatewayService) isAccountAllowedForPlatform(account *Account, platform string, useMixed bool) bool {
-	if account == nil {
-		return false
-	}
-	if useMixed {
-		if account.Platform == platform {
-			return true
-		}
-		// 所有聚合平台账号都可承接任意原生平台请求（不再依赖 mixed_scheduling 开关）
-		return isAggregatePlatformAccount(account.Platform)
-	}
-	return account.Platform == platform
-}
-
-// isAccountPlatformEligible 是「平台资格」的唯一出口（不依赖 ctx）：账号平台与请求
-// 平台一致，或账号属于任意聚合平台（antigravity / cursor / codebuddy / devin / other
-// 等），即具备承接该平台请求的资格。语义等同 isAccountAllowedForPlatform(account,
-// platform, true)。
-//
-// 旧调度路径的粘性复用、档位下限计算，与失败诊断 isPlatformFilteredForSelection
-// 必须统一走这里，避免「聚合账号能被选中但不保持粘性 / 被误记为 platform_filtered
-// 而丢失 model_rate_limited 与恢复建议」的口径再次漂移。此处只判平台资格，不含
-// cursor 供给等 ctx 相关的跨平台准入（那条链走 isAccountAdmittedForPlatform）。
-func isAccountPlatformEligible(account *Account, platform string) bool {
-	if account == nil {
-		return false
-	}
-	if account.Platform == platform {
-		return true
-	}
-	return isAggregatePlatformAccount(account.Platform)
-}
-
 // isAccountAdmittedForPlatform 统一走绑定驱动的唯一准入判定本体 accountAdmissionDecision。
 // 平台归属、模型映射、分组白名单与来源可用性均在该函数内裁决，本处只负责解析分组并消费结果。
 func (s *GatewayService) isAccountAdmittedForPlatform(ctx context.Context, account *Account, platform string, useMixed bool, requestedModel string, groupID *int64) bool {
@@ -2631,29 +2598,6 @@ func (s *GatewayService) diagnoseSelectionFailure(
 		return selectionFailureDiagnosis{Category: reason}
 	}
 	return selectionFailureDiagnosis{Category: "eligible"}
-}
-
-func isPlatformFilteredForSelection(acc *Account, platform string, allowMixedScheduling bool) bool {
-	if acc == nil {
-		return true
-	}
-	if allowMixedScheduling {
-		// 与调度准入同一口径（isAccountPlatformEligible）：同平台、任意聚合平台，
-		// 以及启用混合调度的 Antigravity 都不算被平台过滤。此前把聚合候选一律判为
-		// platform_filtered，会吞掉 model_rate_limited 与恢复建议；这里复用同一出口，
-		// 避免诊断与准入再次漂移。
-		if isAccountPlatformEligible(acc, platform) {
-			return false
-		}
-		if acc.Platform == PlatformAntigravity && acc.IsMixedSchedulingEnabled() {
-			return false
-		}
-		return true
-	}
-	if strings.TrimSpace(platform) == "" {
-		return false
-	}
-	return acc.Platform != platform
 }
 
 func appendSelectionFailureSampleID(samples []int64, id int64) []int64 {

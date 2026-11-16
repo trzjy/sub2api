@@ -383,37 +383,11 @@ func (s *defaultOpenAIAccountScheduler) catalogProvider() codeBuddyCatalogProvid
 	return codeBuddySnapshotCatalogProvider{}
 }
 
-// codeBuddyPlatformMismatchAllowed 判断 codebuddy 账号在聚合分组请求下是否能越过
-// platform_mismatch：聚合平台（deepseek/zhipu/kimi/minimax/other/codebuddy）请求下的
-// codebuddy OpenAI 兼容账号可纳入候选（§2.1-2）。非聚合平台（openai/grok 等）不放行。
-func codeBuddyPlatformMismatchAllowed(account *Account, req OpenAIAccountScheduleRequest) bool {
-	if account == nil || account.Platform != PlatformCodeBuddy || !account.IsOpenAICompatible() {
-		return false
-	}
-	return isCodeBuddyAggregatedPlatform(req.Platform)
-}
-
-// aggregatePlatformFamilyAllowed 判定聚合平台账号能否按模型家族承接本次请求：
-// 请求模型（优先账号映射后的上游模型）的家族必须与分组平台一致。
-func aggregatePlatformFamilyAllowed(account *Account, req OpenAIAccountScheduleRequest) bool {
-	if account == nil || !isAggregatePlatformAccount(account.Platform) {
-		return false
-	}
-	if strings.TrimSpace(req.RequestedModel) == "" {
-		return false // 无模型名无法判定家族，失败关闭
-	}
-	upstream := account.GetMappedModel(req.RequestedModel)
-	if strings.TrimSpace(upstream) == "" {
-		upstream = req.RequestedModel
-	}
-	return mixedListingModelAllowed(req.Platform, upstream) || mixedListingModelAllowed(req.Platform, req.RequestedModel)
-}
-
 // codeBuddyAggregatedCatalogGated 判断该账号是否由聚合逐模型目录闸门接管模型校验：
 // 聚合分组请求下的 codebuddy 账号跳过客户端名白名单（IsModelSupported），
 // 改由目录闸门（先 GetMappedModel 映射为上游名再精确比较）判定（§2.1-1）。
 func codeBuddyAggregatedCatalogGated(account *Account, req OpenAIAccountScheduleRequest) bool {
-	return account != nil && account.Platform == PlatformCodeBuddy && isCodeBuddyAggregatedPlatform(req.Platform)
+	return account != nil && account.Platform == PlatformCodeBuddy
 }
 
 // evaluateCodeBuddyCatalogGate 计算聚合分组请求下 codebuddy 候选账号的目录闸门判定。
@@ -431,7 +405,7 @@ func (s *defaultOpenAIAccountScheduler) evaluateCodeBuddyCatalogGate(
 	req OpenAIAccountScheduleRequest,
 	accounts []Account,
 ) map[int64]codeBuddyCatalogVerdict {
-	if !isCodeBuddyAggregatedPlatform(req.Platform) || req.RequestedModel == "" {
+	if req.RequestedModel == "" {
 		return nil
 	}
 	candidates := make([]*Account, 0, len(accounts))
