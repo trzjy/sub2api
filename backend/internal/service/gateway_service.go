@@ -1603,25 +1603,6 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		return nil
 	}
 
-	// Filter by platform if specified. Mixed scheduling (a gemini group routing
-	// to antigravity accounts) is honoured here as well, so the advertised list
-	// stays in sync with what the request path can actually serve. Cursor 跨平台
-	// 供给账号（已显式挂组、key 终态正常）也在其桥接的原生平台列表中出现，使公开列表
-	// 与调度候选同源（scheduling-same-source）。
-	if platform != "" {
-		filtered := make([]Account, 0)
-		for _, acc := range accounts {
-			if acc.Platform == platform || mixedListingAccountAllowed(platform, &acc) {
-				filtered = append(filtered, acc)
-				continue
-			}
-			if acc.Platform == PlatformCursor && s.cursorSupplyAccountListableForPlatform(ctx, &acc, platform, groupID) {
-				filtered = append(filtered, acc)
-			}
-		}
-		accounts = filtered
-	}
-
 	// Collect unique models from all accounts
 	modelSet := make(map[string]struct{})
 	hasAnyMapping := false
@@ -1637,10 +1618,6 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		}
 
 		mapping := acc.GetModelMapping()
-		// Cursor 跨平台供给账号（已并入候选）的映射键即其在桥接平台上的请求侧模型名，
-		// 不受下方 mixedListingModelAllowed（仅 gemini 混排 antigravity）限制，应直接暴露
-		// 其具体映射键（与调度候选同源）。提前判定一次，避免重复调用。
-		cursorListable := acc.Platform == PlatformCursor && s.cursorSupplyAccountListableForPlatform(ctx, &acc, platform, groupID)
 		candidates := make([]string, 0, len(mapping))
 		if acc.Platform == PlatformCursor {
 			// 键枚举统一走唯一纯投影 cursorSupplyPublicModelIDsFromMapping：排除空键与
@@ -1653,19 +1630,6 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 			}
 		}
 		for _, model := range candidates {
-			// Cursor 跨平台供给：平台分组须按模型家族过滤，防止把其它平台模型泄漏进本组公开列表。
-			// 聚合平台分组（composite / cursor）无单一家族，由 helper 内部放行，不受本行影响。
-			if cursorListable && platform != "" && acc.Platform != platform &&
-				!cursorSupplyModelBelongsPlatform(platform, model, mapping[model]) {
-				continue
-			}
-			// Accounts pulled in through mixed scheduling only contribute the
-			// models that belong to the listing platform (e.g. an antigravity
-			// account's claude-* mappings must not surface on a gemini group).
-			// Cursor 跨平台供给账号豁免此限制（其映射键本就属于桥接平台）。
-			if !cursorListable && platform != "" && acc.Platform != platform && !mixedListingModelAllowed(platform, model) {
-				continue
-			}
 			modelSet[model] = struct{}{}
 			hasAnyMapping = true
 		}
@@ -1745,23 +1709,23 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 //
 // 数据来源与真实调度同源，不另造第二套判定：
 //   - 账号：已绑定该组、现有可调度查询（accountRepo.ListSchedulableByGroupID）返回的
-//     Cursor 账号——不读全局 AvailableModels、不做全站扫描；
-//   - 账号级准入：cursorSupplyAccountGate（桥接平台 + 显式挂组 + 来源可用性 §25.6）；
-//   - 逐模型准入：既有分组模型白名单 cursorGroupModelAllowedWithError（Allows 原语义，
-//     不改名、不猜厂商）；
+//     可调度账号——不读全局 AvailableModels、不做全站扫描；
+//   - 逐模型准入：对每个账号的每个映射模型调用唯一判定本体 accountAdmissionDecision
+//     （归属 + 来源可用性 + 能力判定 + 分组模型白名单），不再另设账号级/分组级重复判定；
 //   - 名单：与已发布 /v1/models 共用的唯一纯投影
 //     cursorSupplyPublicModelIDsFromMapping（排除空键/通配键、不取 mapping 值、不补静态清单）。
 //
 // 错误契约（与"空目录"严格区分）：
-//   - 无组 ID、非已接受桥接平台、或组内无合格 Cursor 账号 → 返回 ([]string{}, nil)：
+//   - 无组 ID、或组内无账号贡献模型 → 返回 ([]string{}, nil)：
 //     这是确定的空集合，不是故障；
-//   - 账号列表读取失败、来源可用性读取失败、分组白名单读取失败 → 返回 (nil, err)：
+//   - 账号列表读取失败、或 accountAdmissionDecision 读取失败 → 返回 (nil, err)：
 //     调用方必须失败关闭（如 Gemini 侧返回 503 目录读取失败），不得当空目录；
-//   - 来源明确被拒绝（如归属激活码已过期）的账号不贡献模型，也不报错。
+//   - 被 accountAdmissionDecision 明确拒绝（归属不符、来源被拒、能力/白名单不匹配）的
+//     账号/模型不贡献模型，也不报错。
 //
 // 不发起任何模型请求、不写缓存（Cursor 目录无缓存）、不改其它平台的目录契约。
 func (s *GatewayService) GetCursorSupplyModelIDs(ctx context.Context, groupID *int64, platform string) ([]string, error) {
-	if groupID == nil || *groupID <= 0 || !cursorNativeBridgePlatforms(platform) {
+	if groupID == nil || *groupID <= 0 {
 		return []string{}, nil
 	}
 	if s == nil || s.accountRepo == nil {
@@ -1776,19 +1740,12 @@ func (s *GatewayService) GetCursorSupplyModelIDs(ctx context.Context, groupID *i
 	modelSet := make(map[string]struct{})
 	for i := range accounts {
 		account := &accounts[i]
-		admitted, err := s.cursorSupplyAccountAdmittedWithError(ctx, account, platform, groupID)
-		if err != nil {
-			return nil, err
-		}
-		if !admitted {
-			continue
-		}
 		for _, model := range cursorSupplyPublicModelIDsFromMapping(account.GetModelMapping()) {
-			allowed, err := s.cursorGroupModelAllowedWithError(ctx, *groupID, model)
+			admitted, _, err := s.accountAdmissionDecision(ctx, account, platform, model, groupID)
 			if err != nil {
-				return nil, fmt.Errorf("cursor supply: group %d model allowlist read failed: %w", *groupID, err)
+				return nil, err
 			}
-			if !allowed {
+			if !admitted {
 				continue
 			}
 			modelSet[model] = struct{}{}

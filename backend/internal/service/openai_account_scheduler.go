@@ -755,7 +755,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	if reason := stickySessionClearReason(account, req.RequestedModel); reason != "" {
 		return nil, clearBinding(reason), nil
 	}
-	if account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) {
+	if reason := openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx, account, req.Platform, req.RequestedModel, false, req.RequiredCapability); reason != "" {
 		return nil, clearBinding(stickyMissPlatformMismatch), nil
 	}
 	if !account.IsOpenAICompatible() || !account.IsSchedulable() {
@@ -1733,7 +1733,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		// 平台名校验进入候选（§2.1-2）；聚合平台账号按模型家族承接对应家族分组
 		// 时同样放行；其余仍按既有规则排除。
 		if account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() {
-			if !codeBuddyPlatformMismatchAllowed(account, req) && !aggregatePlatformFamilyAllowed(account, req) {
+			if reason := openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx, account, req.Platform, req.RequestedModel, false, req.RequiredCapability); reason != "" {
 				filterStats.exclude("platform_mismatch")
 				continue
 			}

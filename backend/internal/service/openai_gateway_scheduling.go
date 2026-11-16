@@ -786,33 +786,24 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	}
 	if account.Platform != platform {
 		requirement, ok := ctx.Value(openAIGroupPrivacyRequirementContextKey{}).(openAIGroupPrivacyRequirement)
-		groupID := requirement.groupID // 仅当 ok 时有效；否则为零值，下面会拒绝 cursor 例外。
-		// Cursor 跨平台供给例外：已挂组的 grok/openai 兼容族请求可由 cursor 账号承接。
-		// 准入口径与 cursorSupplyAdmittedForNativePlatform 一致（显式挂组 + 账号 model_mapping
-		// 声明请求模型）；key 终态门在本函数下游统一裁决，此处不重复探测。
-		isCursorBridgeable := account.Platform == PlatformCursor && cursorNativeBridgePlatforms(requestPlatform)
-		cursorConsidered := isCursorBridgeable && ok && groupID > 0
-		cursorAdmitted := cursorConsidered && account.IsModelSupported(requestedModel)
-		// CodeBuddy 特例（既有）：仅 CodeBuddy 账号在开放分层下允许平台错配并需探测上游目录。
-		// cursor 账号即便平台不可桥接也绝不借道本路径——codebuddy 目录探测是 codebuddy 专用，
-		// 走此路径会误把 cursor 账号按 codebuddy 上游接纳（O57-A §3 钉死：composite 等非桥接
-		// 平台上的 cursor 账号须给 platform_mismatch，不经 codebuddy 探测）。
-		codeBuddyAdmitted := ok && account.Platform != PlatformCursor && codeBuddyTierPlatformMismatchAllowed(account, platform, requestedModel, requirement.groupID, requirement.group, tierRoutingPoolFromContext(ctx))
-		if !cursorAdmitted && !codeBuddyAdmitted {
-			// cursor 账号在可桥接平台上因模型不匹配被拒时，给出 model_mismatch
-			// （与调度准入口径一致），而非 platform_mismatch，避免误导为平台错配。
-			if cursorConsidered {
-				return "model_mismatch"
-			}
-			return "platform_mismatch"
+		var groupID int64
+		var group *Group
+		if ok {
+			groupID, group = requirement.groupID, requirement.group
 		}
-		if !cursorAdmitted {
-			// 非 cursor 例外命中：仍按既有 CodeBuddy 路径探测上游目录。
+		admitted, reason, err := accountAdmissionDecision(ctx, account, requestPlatform, requestedModel, &groupID, group)
+		if err != nil {
+			return "admission_read_failed"
+		}
+		if !admitted {
+			return reason
+		}
+		// codebuddy 跨平台仍必须通过真实目录校验（能力事实源，不得删除）。
+		if account.Platform == PlatformCodeBuddy {
 			if probeCodeBuddyCatalog(ctx, codeBuddySnapshotCatalogProvider{}, account, requestedModel) != codeBuddyCatalogAllowed {
 				return "upstream_catalog_unavailable_or_missing"
 			}
 		}
-		// cursor 例外命中：跳过 codebuddy 目录探测，继续走下游 key 终态/模型门。
 	}
 	if !account.IsOpenAICompatible() {
 		return "platform_mismatch"
@@ -891,7 +882,7 @@ func codeBuddyTierPlatformMismatchAllowed(account *Account, platform string, req
 		return false
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
-	if !isCodeBuddyAggregatedPlatform(platform) || group.ID != groupID || NormalizeOpenAICompatiblePlatform(group.Platform) != platform || !group.AggregateCodeBuddyEnabled {
+	if group.ID != groupID || NormalizeOpenAICompatiblePlatform(group.Platform) != platform {
 		return false
 	}
 	// 伪装号（mask_upstream_identity=true）只允许在小档（masked 池）承接：未装门（pool=""）
@@ -2305,7 +2296,7 @@ func (s *OpenAIGatewayService) listSchedulableAccounts(ctx context.Context, grou
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
 		accounts, err = s.accountRepo.ListSchedulableByPlatform(ctx, platform)
 	} else if groupID != nil {
-		accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, *groupID, platform)
+		accounts, err = s.accountRepo.ListSchedulableByGroupID(ctx, *groupID)
 	} else {
 		accounts, err = s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, platform)
 	}

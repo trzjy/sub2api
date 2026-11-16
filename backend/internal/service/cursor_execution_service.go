@@ -5594,7 +5594,8 @@ var (
 // 的终结与资源释放仍由调用方沿既有 finalizer 语义处理。
 //
 //	① 原账号存在未删除且仍是 cursor 账号（403）
-//	② 请求平台准入：本会话协议所属原生平台仍须允许 cursor 供给（403）
+//	② 请求平台准入：绑定驱动——协议形态可识别即可，不按平台白名单拦截；
+//	   无分组上下文时改由③附的同平台归属把关（403）
 //	③ 当前组关系：本次读取的账号仍挂在原会话所属分组（403）
 //	④ 现有调度门 Account.IsSchedulableForModelWithContext：停用/临停/到期/模型级临停（403）
 //	⑤ 当前 QuotaKeyID 必须等于首次来源 QuotaKeyID（400，改绑定/换码）
@@ -5627,13 +5628,20 @@ func (s *CursorExecutionService) verifyResumeEligibility(
 		return newCursorResumeRebuildDenial(http.StatusForbidden, "account_unavailable",
 			CursorUpstreamAccountFailureReason, ErrCursorResumeAccountIneligible)
 	}
-	// ② 请求平台准入：只复用既有平台纯谓词，不按模型名猜归属。
-	if platform := cursorResumeRequestPlatform(spec); platform == "" || !cursorNativeBridgePlatforms(platform) {
+	// ② 请求平台准入：绑定驱动——只看本次读取的账号是否仍挂在请求所属分组，
+	// 不再按平台白名单拦截。无分组上下文（spec.identity.GroupID <= 0）时拒绝跨平台复用。
+	platform := cursorResumeRequestPlatform(spec)
+	if platform == "" {
+		// 协议形态无法识别（能力判定，不是平台清单）：仍明确 403。
 		return newCursorResumeError(http.StatusForbidden, "platform_not_admitted", ErrCursorResumeAccountIneligible)
 	}
 	// ③ 当前组关系：以**本次读取**的账号组为准，不用首 HTTP 缓存的 ctx 组关系替代。
 	if groupID := spec.identity.GroupID; groupID > 0 && !cursorAccountInGroupID(account, groupID) {
 		return newCursorResumeError(http.StatusForbidden, "group_not_allowed", ErrCursorResumeAccountIneligible)
+	}
+	// ③附：无分组上下文时无法用挂组证明跨平台归属，要求账号平台与请求平台一致（同平台复用）。
+	if spec.identity.GroupID <= 0 && account.Platform != platform {
+		return newCursorResumeError(http.StatusForbidden, "platform_not_admitted", ErrCursorResumeAccountIneligible)
 	}
 	// ④ 现有调度门（停用/临停/到期/模型级临停）：复用既有判定，不另写一套。
 	if !account.IsSchedulableForModelWithContext(ctx, spec.requestedModel) {

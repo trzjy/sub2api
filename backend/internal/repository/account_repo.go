@@ -4997,20 +4997,10 @@ func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID in
 	if opts.status != "" {
 		preds = append(preds, dbaccount.StatusEQ(opts.status))
 	}
-	if len(opts.platforms) > 0 {
-		platforms := opts.platforms
-		// 方案 §1.2：当 platforms 与聚合族相交时，同一查询边界内按 PK 读取 groups 行
-		// 取 aggregate_codebuddy_enabled，据此决定是否并入 codebuddy；非聚合族平台集合
-		// 零额外读取、行为逐位不变。读取失败 → 查询报错失败关闭，不静默取默认。
-		// 未分组（groupID<=0，如标准模式未分组桶）无绑定授权，不补入 codebuddy。
-		if groupID > 0 && intersectsAggregateFamily(opts.platforms) {
-			grp, gerr := r.client.Group.Get(ctx, groupID)
-			if gerr != nil {
-				return nil, fmt.Errorf("queryAccountsByGroup: read aggregate_codebuddy_enabled for group %d: %w", groupID, gerr)
-			}
-			platforms = expandPlatformsForAggregatePool(opts.platforms, grp.AggregateCodebuddyEnabled)
-		}
-		preds = append(preds, dbaccount.PlatformIn(platforms...))
+	// 有分组：绑定即准入，不按平台过滤（组内全部可调度账号都是候选）。
+	// 无分组（groupID<=0）：保持按平台过滤，未挂组不得跨平台外溢。
+	if groupID <= 0 && len(opts.platforms) > 0 {
+		preds = append(preds, dbaccount.PlatformIn(opts.platforms...))
 	}
 	if opts.schedulable {
 		preds = append(preds, dbaccount.SchedulableEQ(true))

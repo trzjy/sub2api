@@ -3151,6 +3151,13 @@ func (w *quotaKeyModelWater) countsTowardWaterLevel(ctx context.Context, row *en
 		OverloadUntil: row.OverloadUntil, RateLimitResetAt: row.RateLimitResetAt,
 		TempUnschedulableUntil: row.TempUnschedulableUntil, QuotaKeyID: row.QuotaKeyID,
 	}
+	// 绑定判定读 AccountGroups：从本次已加载的组边投影，不新增查询。
+	for _, g := range row.Edges.Groups {
+		if g == nil {
+			continue
+		}
+		candidate.AccountGroups = append(candidate.AccountGroups, AccountGroup{GroupID: g.ID})
+	}
 	if !candidate.IsSchedulable() || len(candidate.GetModelMapping()) == 0 {
 		return false, nil
 	}
@@ -3258,9 +3265,6 @@ func (w *quotaKeyModelWater) countsTowardWaterLevelRouted(ctx context.Context, c
 		}
 		for _, g := range row.Edges.Groups {
 			if g == nil || g.DeletedAt != nil || g.Status != StatusActive {
-				continue
-			}
-			if g.Platform != PlatformCursor && g.Platform != PlatformComposite && !cursorNativeBridgePlatforms(g.Platform) {
 				continue
 			}
 			gid := g.ID

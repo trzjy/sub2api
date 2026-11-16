@@ -26,13 +26,14 @@ var (
 )
 
 // schedulerSnapshotAggregationVersion 是聚合直绑（§2.1）调度契约的快照版本标签。
-// 聚合规则（候选池纳入 codebuddy 账号 / 聚合分组集合）属调度契约：一旦变更必须 bump
-// 本版本，使所有带 @agg 标签的分桶缓存键自然失效并强制重载（§2.1-3）。
+// 保留：codebuddy_aggregate_gate_test.go / composite_platform_test.go 仍有引用
+// （跨文件，本卡不改测试）；生产代码已不再生成 @agg 标签分桶。
 const schedulerSnapshotAggregationVersion = 1
 
 // isCodeBuddyAggregatedPlatform 报告某平台是否属于国产 OpenAI 兼容聚合分组
 // （deepseek/zhipu/kimi/minimax/other + codebuddy 自身参与 codebuddy 聚合）。
 // 这些分组的请求下，codebuddy 账号作为国产模型账号被纳入候选并按逐模型目录闸门判定。
+// 保留：openai_account_scheduler.go 的调度判定仍在使用（跨文件引用，本卡不改该文件）。
 func isCodeBuddyAggregatedPlatform(platform string) bool {
 	switch NormalizeOpenAICompatiblePlatform(platform) {
 	case PlatformDeepseek, PlatformZhipu, PlatformKimi, PlatformMiniMax, PlatformOther, PlatformCodeBuddy:
@@ -41,13 +42,9 @@ func isCodeBuddyAggregatedPlatform(platform string) bool {
 	return false
 }
 
-// schedulerAggregationBucketPlatform 为聚合分组（非 codebuddy 自身）的 bucket 平台键
-// 追加 @agg<version> 标签，使聚合规则变更（version bump）时旧分桶缓存键自然失效。
-// codebuddy 平台自身不追加标签（其候选即原生 codebuddy 账号，无需跨平台 join）。
+// schedulerAggregationBucketPlatform 返回 bucket 平台键。
+// 历史聚合 @agg 标签分桶已废弃，平台键原样返回；旧 @agg 分桶由部署时 full rebuild 清理。
 func schedulerAggregationBucketPlatform(platform string) string {
-	if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy {
-		return platform + "@agg" + strconv.Itoa(schedulerSnapshotAggregationVersion)
-	}
 	return platform
 }
 
@@ -660,16 +657,6 @@ func (s *SchedulerSnapshotService) handleBulkAccountEvent(ctx context.Context, p
 		default:
 			return s.rebuildByGroupIDs(ctx, rebuildGroupIDs, "account_bulk_change", seen)
 		}
-		if account.Platform == PlatformCursor {
-			affectedGroupIDs := append(append([]int64(nil), accountGroupIDs...), preloadGroupIDs...)
-			for _, groupID := range s.normalizeGroupIDs(affectedGroupIDs) {
-				for _, platform := range schedulerSnapshotPlatforms() {
-					if len(cursorSupplyPlatformsFor(&groupID, []string{platform})) > 1 {
-						addPlatformGroups(platform, []int64{groupID})
-					}
-				}
-			}
-		}
 	}
 
 	// payload 携带更新前的组；只扩散到本事件实际涉及的平台，避免平台间交叉重建。
@@ -881,15 +868,6 @@ func (s *SchedulerSnapshotService) rebuildByAccount(ctx context.Context, account
 		buckets = append(buckets, s.bucketsForPlatform(PlatformAnthropic, groupIDs, seen)...)
 		buckets = append(buckets, s.bucketsForPlatform(PlatformGemini, groupIDs, seen)...)
 	}
-	if account.Platform == PlatformCursor {
-		for _, groupID := range groupIDs {
-			for _, platform := range schedulerSnapshotPlatforms() {
-				if len(cursorSupplyPlatformsFor(&groupID, []string{platform})) > 1 {
-					buckets = append(buckets, s.bucketsForPlatform(platform, []int64{groupID}, seen)...)
-				}
-			}
-		}
-	}
 	return s.rebuildBuckets(ctx, buckets, reason)
 }
 
@@ -927,8 +905,7 @@ func schedulerCanonicalBuckets(groupID int64) []SchedulerBucket {
 	platforms := schedulerSnapshotPlatforms()
 	buckets := make([]SchedulerBucket, 0, len(platforms)*2+2)
 	for _, platform := range platforms {
-		// 聚合分组（非 codebuddy 自身）的 bucket 平台键追加 @agg 标签，
-		// 使聚合规则变更（version bump）时旧键自然失效（§2.1-3）。
+		// 平台键原样返回；历史 @agg 标签分桶已废弃。
 		bucketPlatform := schedulerAggregationBucketPlatform(platform)
 		buckets = append(buckets,
 			SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeSingle},
@@ -957,8 +934,7 @@ func (s *SchedulerSnapshotService) bucketsForPlatform(platform string, groupIDs 
 	if platform == "" {
 		return nil
 	}
-	// 聚合分组（非 codebuddy 自身）的 bucket 平台键追加 @agg 标签，
-	// 与读取路径（bucketFor）保持一致的缓存键；seen 去重仍用真实平台名。
+	// 平台键原样返回，与读取路径（bucketFor）保持一致的缓存键；seen 去重仍用真实平台名。
 	bucketPlatform := schedulerAggregationBucketPlatform(platform)
 	buckets := make([]SchedulerBucket, 0, len(groupIDs)*3)
 	for _, gid := range groupIDs {
@@ -1559,18 +1535,8 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 		groupID = 0
 	}
 
-	// 聚合平台账号按模型家族绑定到原生家族分组，必须一并纳入候选池；
-	// 否则绑定原生 openai/anthropic 分组的聚合账号不会进入快照候选（pool=0）。
-	// 清单从 domain 动态派生，避免写死平台清单再次漂移。
-	var aggregatePlatforms []string
-	for _, p := range domain.ConcretePlatformIDs() {
-		if isAggregatePlatformAccount(p) {
-			aggregatePlatforms = append(aggregatePlatforms, p)
-		}
-	}
-
 	if useMixed {
-		platforms := cursorSupplyPlatformsFor(&groupID, append([]string{queryPlatform}, aggregatePlatforms...))
+		platforms := []string{queryPlatform}
 		var accounts []Account
 		var err error
 		if groupID > 0 {
@@ -1583,24 +1549,13 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 		if err != nil {
 			return nil, err
 		}
-		filtered := make([]Account, 0, len(accounts))
-		for _, acc := range accounts {
-			if acc.Platform == PlatformAntigravity && !acc.IsMixedSchedulingEnabled() {
-				continue
-			}
-			filtered = append(filtered, acc)
-		}
-		return s.withAggregatedCodeBuddy(ctx, bucket, filtered)
+		return accounts, nil
 	}
 
 	var accounts []Account
 	var err error
 	if groupID > 0 {
-		if platforms := cursorSupplyPlatformsFor(&groupID, append([]string{queryPlatform}, aggregatePlatforms...)); len(platforms) > 1 {
-			accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatforms(ctx, groupID, platforms)
-		} else {
-			accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, groupID, queryPlatform)
-		}
+		accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, groupID, queryPlatform)
 	} else if s.isRunModeSimple() {
 		accounts, err = s.accountRepo.ListSchedulableByPlatform(ctx, queryPlatform)
 	} else {
@@ -1609,55 +1564,7 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 	if err != nil {
 		return nil, err
 	}
-	return s.withAggregatedCodeBuddy(ctx, bucket, accounts)
-}
-
-// withAggregatedCodeBuddy 按聚合规则把 codebuddy 账号补入聚合分组的候选超集
-// （§2.1-3：快照只存候选超集，不缓存目录判定）。仅当分桶平台为聚合分组（非 codebuddy 自身）
-// 时，向原生平台账号集合追加同分组可调度 codebuddy 账号。codebuddy 平台自身候选即原生
-// codebuddy 账号，不重复 join。
-//
-// 候选超集单链（v16 §2.1-3）：分组路径（groupID>0）的主查询
-// ListSchedulableByGroupIDAndPlatform(s) 已经 repo 层 expandPlatformsForAggregatePool
-// （account_repo.go，方案钉死的唯一纳入点）自动并入 codebuddy 候选，快照层再补会把同一
-// codebuddy 账号 append 两次，扭曲负载选择并挤占目录探测名额，故分组路径跳过本层补入。
-// 非分组路径（groupID=0 未分组 / simple 模式）不经过 queryAccountsByGroup，快照层补入是
-// 唯一链，必须保留。
-func (s *SchedulerSnapshotService) withAggregatedCodeBuddy(ctx context.Context, bucket SchedulerBucket, accounts []Account) ([]Account, error) {
-	queryPlatform := schedulerAggregationQueryPlatform(bucket.Platform)
-	if queryPlatform == PlatformCodeBuddy || !isCodeBuddyAggregatedPlatform(queryPlatform) {
-		return accounts, nil
-	}
-	groupID := bucket.GroupID
-	if s.isRunModeSimple() {
-		groupID = 0
-	}
-	if groupID > 0 {
-		// 候选超集单链（v16 §2.1-3）：分组候选池已在 repo 层纳入 codebuddy，快照层补入即重复。
-		return accounts, nil
-	}
-	// 走到这里 groupID 必为 0（分组路径已在上方按候选超集单链契约短路返回）。
-	var extra []Account
-	var err error
-	if s.isRunModeSimple() {
-		// simple 模式无分组概念，绑定无法表达；保持既有补入语义（派发单禁区：
-		// 不为 simple 模式新增失败关闭/开关语义——无权威依据，过度设计）。
-		extra, err = s.accountRepo.ListSchedulableByPlatform(ctx, PlatformCodeBuddy)
-	} else {
-		// 标准模式未分组桶（groupID=0）：无分组即无绑定授权，失败关闭，不补入 codebuddy。
-		// 该分支是 withAggregatedCodeBuddy 唯一允许的本卡生产改动（派发单 B2-B 第 1 条）。
-		return accounts, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if len(extra) == 0 {
-		return accounts, nil
-	}
-	merged := make([]Account, 0, len(accounts)+len(extra))
-	merged = append(merged, accounts...)
-	merged = append(merged, extra...)
-	return merged, nil
+	return accounts, nil
 }
 
 func (s *SchedulerSnapshotService) loadAccountsForRebuild(

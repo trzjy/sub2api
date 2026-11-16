@@ -123,10 +123,10 @@ func codexModelRoutingAccountIDs(group *Group, modelID string) []int64 {
 	return group.GetRoutingAccountIDs(strings.TrimSpace(modelID))
 }
 
+// 新口径下不再按平台或模型家族筛选候选账号：组内账号由绑定关系（组 + 显式路由）决定，
+// 因此这里对传入的组内账号全部放行。
 func codexAccountServesPlatformModel(account *Account, platform, modelID string) bool {
-	return account.Platform == platform ||
-		(account.Platform == PlatformAntigravity && mixedListingAccountCatalogCapable(platform, account) &&
-			mixedListingModelAllowed(platform, modelID))
+	return true
 }
 
 func groupCodexModelMetadata(

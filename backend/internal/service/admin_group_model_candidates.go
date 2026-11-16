@@ -124,7 +124,7 @@ func (r *groupModelCatalogReader) fetchOpenAICatalog(ctx context.Context, accoun
 
 // collectGroupModelAllowlistCandidates 聚合组内适用账号的真实供给候选（plan §5.2）。
 //
-//  1. 适用账号 = 组内既存 schedulable 账号按平台过滤（composite 取具体平台账号）；
+//  1. 适用账号 = 组内全部账号（不做平台过滤，能力由映射与目录决定）；
 //  2. 每个适用账号读取真实目录；单账号读取失败跳过并记 Warn（slog），
 //     继续聚合其余账号的候选，仅全部适用账号都失败时返回错误；
 //  3. 可枚举公开名只来自：真实目录 ID、账号显式精确 alias、组内已保存的精确
@@ -137,18 +137,6 @@ func (s *adminServiceImpl) collectGroupModelAllowlistCandidates(ctx context.Cont
 	applicable := make([]Account, 0, len(accounts))
 	for i := range accounts {
 		acc := &accounts[i]
-		if platform == PlatformComposite {
-			if !isConcreteRequestPlatform(acc.Platform) {
-				continue
-			}
-		} else if acc.Platform != platform {
-			// 复用既有混合供给规则：Gemini 组可纳入启用 mixed_scheduling 的
-			// Antigravity 账号（与 gateway_service.go:1387 mixedListingAccountAllowed
-			// 同源），不新开其他跨平台组合。
-			if !mixedListingAccountAllowed(platform, acc) {
-				continue
-			}
-		}
 		applicable = append(applicable, *acc)
 	}
 	if len(applicable) == 0 {
@@ -229,37 +217,25 @@ func (s *adminServiceImpl) collectGroupModelAllowlistCandidates(ctx context.Cont
 	} else {
 		// 非 composite：逐账号既有准入语义（无组路由可查），语义不变。
 		// 来源一：真实目录 ID（透传候选）；来源二：账号显式精确 alias。
-		// mixed 账号（platform 为 antigravity）经既有混合规则纳入后，其产出的候选公开名
-		// 须过 mixedListingModelAllowed（与运行时 gateway_service.go:1393 同源：仅 gemini-
-		// 前缀的 wire ID 在 Gemini 组上有意义），不自行发明别的跨平台口径。纯平台账号
-		// （acc.Platform == platform）语义不变。
+		// 新口径下模型是否可用由账号能力（映射/目录）决定，不再按模型家族是否匹配
+		// 分组平台做过滤；混合平台账号产出的候选公开名与纯平台账号一视同仁。
 		for i := range applicable {
 			acc := &applicable[i]
 			catalog := catalogs[i]
-			isMixed := acc.Platform != platform
 			// Cursor 账号在目录为空（如映射仅含通配键或为空）时，直接以显式精确
 			// 映射键作为候选，不再要求命中真实目录——与 FetchAccountModelCatalog 的
-			// Cursor 出口一致，且零网络请求。仍受 mixedListingModelAllowed 约束。
+			// Cursor 出口一致，且零网络请求。
 			if acc.Platform == PlatformCursor && len(catalog) == 0 {
 				for key := range explicitExactMappingKeys(acc) {
-					if isMixed && !mixedListingModelAllowed(platform, key) {
-						continue
-					}
 					add(key)
 				}
 			}
 			for id := range catalog {
-				if isMixed && !mixedListingModelAllowed(platform, id) {
-					continue
-				}
 				if accountServesPublicModel(acc, id, catalog) {
 					add(id)
 				}
 			}
 			for key := range explicitExactMappingKeys(acc) {
-				if isMixed && !mixedListingModelAllowed(platform, key) {
-					continue
-				}
 				if accountServesPublicModel(acc, key, catalog) {
 					add(key)
 				}
