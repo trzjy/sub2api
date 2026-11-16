@@ -307,3 +307,60 @@ func TestCleanJSONSchema_DropsItemsAfterEnumForcesString(t *testing.T) {
 	_, hasItems := cleaned["items"]
 	assert.False(t, hasItems, "type 被 enum 规则改成 string 后，items 必须删除")
 }
+
+func TestCleanJSONSchema_RemovesPropertyNamesUnconditionally(t *testing.T) {
+	// propertyNames 必须在任意层级、任意节点形态（含无 type 节点）被无条件清除。
+	t.Run("nested object property", func(t *testing.T) {
+		input := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"a": map[string]any{
+					"propertyNames": map[string]any{"type": "string"},
+					"type":          "object",
+				},
+			},
+		}
+
+		cleaned := CleanJSONSchema(input)
+		require.NotNil(t, cleaned)
+		props, ok := cleaned["properties"].(map[string]any)
+		require.True(t, ok)
+		a, ok := props["a"].(map[string]any)
+		require.True(t, ok)
+		_, hasPropertyNames := a["propertyNames"]
+		assert.False(t, hasPropertyNames, "嵌套 object 节点的 propertyNames 必须被清除")
+	})
+
+	t.Run("node without type", func(t *testing.T) {
+		input := map[string]any{
+			"propertyNames": map[string]any{"type": "string"},
+		}
+
+		cleaned := CleanJSONSchema(input)
+		require.NotNil(t, cleaned)
+		_, hasPropertyNames := cleaned["propertyNames"]
+		assert.False(t, hasPropertyNames, "无 type 节点的 propertyNames 也必须被清除")
+	})
+
+	t.Run("constraint hint preserved in description", func(t *testing.T) {
+		// migrateConstraints 的既有行为必须保留：propertyNames 仍作为 description 提示。
+		input := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"a": map[string]any{
+					"type":          "object",
+					"propertyNames": map[string]any{"type": "string"},
+				},
+			},
+		}
+
+		cleaned := CleanJSONSchema(input)
+		require.NotNil(t, cleaned)
+		props, ok := cleaned["properties"].(map[string]any)
+		require.True(t, ok)
+		a, ok := props["a"].(map[string]any)
+		require.True(t, ok)
+		desc, _ := a["description"].(string)
+		assert.Contains(t, desc, "propertyNames", "migrateConstraints 仍应把 propertyNames 转成 description 提示")
+	})
+}

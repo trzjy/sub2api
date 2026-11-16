@@ -463,6 +463,12 @@ func cleanJSONSchemaRecursive(value any) any {
 		}
 	}
 
+	// propertyNames 在 Antigravity/Gemini v1internal 中不受支持，残留会触发上游 400。
+	// migrateConstraints 已把它转成 description 提示，这里在出口无条件删除原关键字，
+	// 使任意层级、任意节点形态（含不会进入 looksLikeSchema 分支的无 type 节点）都被清除。
+	// 不能只依赖上述白名单过滤：无 type 的节点不进入该分支，propertyNames 会残留。
+	delete(schemaMap, "propertyNames")
+
 	return schemaMap
 }
 
