@@ -4,10 +4,12 @@ package handler
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -89,12 +91,42 @@ func TestForwardResultFromOpenAIResult(t *testing.T) {
 		require.Same(t, in.ServiceTier, got.ServiceTier)
 		require.Same(t, in.FirstTokenMs, got.FirstTokenMs)
 
-		// Usage 四个字段按同名直搬，不折算；ClaudeUsage 与 OpenAIUsage
-		// 同名的 ImageOutputTokens 也一并搬。
-		require.Equal(t, in.Usage.InputTokens, got.Usage.InputTokens)
+		// Usage 的 InputTokens 按总输入契约拆互斥桶：100 - 7 - 5 = 88；
+		// 其余 usage 字段同名直搬，ImageOutputTokens 同名一并搬。
+		require.Equal(t, 88, got.Usage.InputTokens)
 		require.Equal(t, in.Usage.OutputTokens, got.Usage.OutputTokens)
 		require.Equal(t, in.Usage.CacheCreationInputTokens, got.Usage.CacheCreationInputTokens)
 		require.Equal(t, in.Usage.CacheReadInputTokens, got.Usage.CacheReadInputTokens)
 		require.Equal(t, in.Usage.ImageOutputTokens, got.Usage.ImageOutputTokens)
 	})
+
+	t.Run("input tokens exclude cache buckets", func(t *testing.T) {
+		got := forwardResultFromOpenAIResult(&service.OpenAIForwardResult{
+			Usage: service.OpenAIUsage{
+				InputTokens:              100,
+				CacheReadInputTokens:     7,
+				CacheCreationInputTokens: 5,
+			},
+		})
+		require.Equal(t, 88, got.Usage.InputTokens)
+		require.Equal(t, 7, got.Usage.CacheReadInputTokens)
+		require.Equal(t, 5, got.Usage.CacheCreationInputTokens)
+	})
+
+	t.Run("input tokens clamp negative to zero", func(t *testing.T) {
+		got := forwardResultFromOpenAIResult(&service.OpenAIForwardResult{
+			Usage: service.OpenAIUsage{
+				InputTokens:              10,
+				CacheReadInputTokens:     7,
+				CacheCreationInputTokens: 5,
+			},
+		})
+		require.Equal(t, 0, got.Usage.InputTokens)
+	})
+}
+
+func TestDevinUpstreamEndpointStamped(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	setActualUpstreamEndpoint(c, service.DevinChatMessagePath)
+	require.Equal(t, service.DevinChatMessagePath, GetUpstreamEndpoint(c, service.PlatformDevin))
 }

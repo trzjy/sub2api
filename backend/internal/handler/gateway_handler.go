@@ -594,6 +594,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 				oaRes, oaErr := h.openAIGatewayService.ForwardAsAnthropic(requestCtx, c, account, body, "", "")
+				if oaRes != nil && strings.TrimSpace(oaRes.UpstreamEndpoint) != "" {
+					setActualUpstreamEndpoint(c, oaRes.UpstreamEndpoint)
+				}
 				result = forwardResultFromOpenAIResult(oaRes)
 				err = oaErr
 			case "antigravity":
@@ -1355,11 +1358,19 @@ func messagesAccountForwardPath(account *service.Account) string {
 }
 
 // forwardResultFromOpenAIResult 把 OpenAIGatewayService 的转发结果转成 handler
-// 复用的 ForwardResult，供既有 usage 提交 / 结算钩子消费。字段按同名直搬，
-// Usage 不折算、不补默认值；指针字段保持同一性。
+// 复用的 ForwardResult，供既有 usage 提交 / 结算钩子消费。顶层字段按同名直搬，
+// 指针字段保持同一性；Usage 的 InputTokens 按总输入契约拆成互斥桶（见下方），
+// 其余 usage 字段同名直搬、不补默认值。
 func forwardResultFromOpenAIResult(r *service.OpenAIForwardResult) *service.ForwardResult {
 	if r == nil {
 		return nil
+	}
+	// OpenAI input_tokens 是含缓存读/写的总输入（service/openai_gateway_usage.go:233
+	// 契约；apicompat/chatcompletions_anthropic_bridge.go:637 同口径做减法）。缓存读与
+	// 缓存写是总输入的明细，必须拆成互斥桶，否则会同时按普通输入与 cache 重复计费。
+	inputTokens := r.Usage.InputTokens - r.Usage.CacheReadInputTokens - r.Usage.CacheCreationInputTokens
+	if inputTokens < 0 {
+		inputTokens = 0
 	}
 	return &service.ForwardResult{
 		RequestID:                     r.RequestID,
@@ -1377,7 +1388,7 @@ func forwardResultFromOpenAIResult(r *service.OpenAIForwardResult) *service.Forw
 		RequestedReasoningEffort:      r.RequestedReasoningEffort,
 		ServiceTier:                   r.ServiceTier,
 		Usage: service.ClaudeUsage{
-			InputTokens:              r.Usage.InputTokens,
+			InputTokens:              inputTokens,
 			OutputTokens:             r.Usage.OutputTokens,
 			CacheCreationInputTokens: r.Usage.CacheCreationInputTokens,
 			CacheReadInputTokens:     r.Usage.CacheReadInputTokens,
