@@ -339,18 +339,22 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 	// (IsCNProvider 被上游谓词覆盖,保留为显式等价项,无行为差异)。
 	// CodeBuddy 同理显式保留:其账号是 OAuth 型,/v1/messages 经 CC 出站管线转发到
 	// copilot.tencent.com,开关对其恒 false(2026-10-15 生产实证 group 109 成功数 0)。
+	// Devin 三协议同源(/v1/messages、/v1/chat/completions、/v1/responses 均经 OpenAI
+	// 网关转发到 server.codeium.com),/v1/messages 同为其主要服务形态,开关对其恒
+	// false,不豁免将直接 403,故与 grok/CN/muse/codebuddy 一并豁免。
 	if service.IsCNProvider(apiKey.Group.Platform) || apiKey.Group.Platform == service.PlatformOther ||
 		apiKey.Group.Platform == service.PlatformMuse || apiKey.Group.Platform == service.PlatformCodeBuddy ||
+		apiKey.Group.Platform == service.PlatformDevin ||
 		service.IsMultiProtocolAPIKeyProvider(apiKey.Group.Platform) {
 		return true
 	}
-	// composite 分组解析到 grok/CN/OpenCode Go/codebuddy/muse 目标时与对应独立分组同语义豁免；
+	// composite 分组解析到 grok/CN/OpenCode Go/codebuddy/muse/devin 目标时与对应独立分组同语义豁免；
 	// 解析到 openai 目标则受 composite 分组自身的可配置开关控制。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
 			(platform == service.PlatformGrok || service.IsCNProvider(platform) ||
 				platform == service.PlatformOther || platform == service.PlatformMuse ||
-				platform == service.PlatformCodeBuddy ||
+				platform == service.PlatformCodeBuddy || platform == service.PlatformDevin ||
 				service.IsMultiProtocolAPIKeyProvider(platform)) {
 			return true
 		}

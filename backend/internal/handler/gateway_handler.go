@@ -1375,11 +1375,13 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 
-	if platform == service.PlatformOther || platform == service.PlatformCodeBuddy {
+	if platform == service.PlatformOther || platform == service.PlatformCodeBuddy || platform == service.PlatformDevin {
 		// other 无平台默认模型目录：空 mapping 时公开模型列表为空，不回落到
 		// Claude 默认模型（落地外审-1），与调度层空 mapping 拒绝保持同一契约。
 		// codebuddy 同理：模型目录来自上游快照，账号无可用目录时不得对外声称
 		// 提供 Claude 默认模型。
+		// devin 模型全部来自账号 model_mapping，无平台默认目录，空 mapping 时
+		// 不得对外声称提供 Claude 默认模型（与调度层空映射失败关闭同一契约）。
 		writeModelsList(c, platform, nil)
 		return
 	}
