@@ -883,6 +883,7 @@ const accountSupportsBatchUsage = (account: Account) => {
   if (account.platform === 'grok') return account.type === 'oauth'
   if (account.platform === 'muse') return account.type === 'apikey'
   if (account.type === 'apikey' && account.credentials?.usage_probe === 'opencode_zen') return true
+  if (account.platform === 'devin') return true
   return false
 }
 

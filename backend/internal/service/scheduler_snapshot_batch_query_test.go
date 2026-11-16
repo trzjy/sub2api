@@ -278,7 +278,7 @@ func TestSchedulerRebuildBatchReusesSingleForcedQueryAndKeepsSnapshotsIndependen
 	svc := newBatchQueryTestService(cache, repo, config.RunModeStandard)
 
 	require.NoError(t, svc.rebuildBuckets(context.Background(), []SchedulerBucket{single, forced}, "first"))
-	queryKey := batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}
+	queryKey := batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI, mixed: true}
 	require.Equal(t, 1, repo.callCount(queryKey))
 	for _, bucket := range []SchedulerBucket{single, forced} {
 		locks, attempts, version, writes := cache.bucketState(bucket)
@@ -322,7 +322,7 @@ func TestSchedulerRebuildBatchReusesAccountPayloadForSingleForced(t *testing.T) 
 		require.Zero(t, full)
 		require.Equal(t, run, idOnly)
 	}
-	require.Equal(t, 2, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}), "账号载荷不得跨重建批次复用")
+	require.Equal(t, 2, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI, mixed: true}), "账号载荷不得跨重建批次复用")
 }
 
 func TestSchedulerRebuildBatchDoesNotReuseAccountPayloadAfterFirstWriterFailure(t *testing.T) {
@@ -501,10 +501,12 @@ func TestSchedulerRebuildBatchKeepsMixedAndDifferentKeysIndependent(t *testing.T
 	svc := newBatchQueryTestService(cache, repo, config.RunModeStandard)
 
 	require.NoError(t, svc.rebuildBuckets(context.Background(), buckets, "test"))
-	require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformAnthropic}))
-	require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformAnthropic, mixed: true}))
-	require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID + 1, platform: PlatformAnthropic}))
-	require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformGemini}))
+	// S1 后 single/forced 对与 mixed 桶都走"原生+聚合"多平台查询，二者都计入
+	// mixed:true 键：合计 2 次证明 mixed 桶没有复用 single/forced 的查询结果。
+	require.Equal(t, 2, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformAnthropic, mixed: true}))
+	require.Zero(t, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformAnthropic}), "单平台查询路径不应再被使用")
+	require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID + 1, platform: PlatformAnthropic, mixed: true}))
+	require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformGemini, mixed: true}))
 	require.Equal(t, 2, repo.callCount(batchAccountQueryKey{platform: PlatformOpenAI}), "group0 and a negative historical group must not share")
 	for _, bucket := range buckets {
 		locks, attempts, version, _ := cache.bucketState(bucket)
@@ -539,7 +541,7 @@ func TestSchedulerRebuildBatchDoesNotCacheMixedOrHistoricalQueries(t *testing.T)
 		{
 			name:   "historical",
 			bucket: SchedulerBucket{GroupID: 204, Platform: PlatformOpenAI, Mode: "unknown"},
-			key:    batchAccountQueryKey{groupID: 204, platform: PlatformOpenAI},
+			key:    batchAccountQueryKey{groupID: 204, platform: PlatformOpenAI, mixed: true},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -570,7 +572,7 @@ func TestSchedulerRebuildBatchRetriesQueryFailureForFollowingBucket(t *testing.T
 	single := SchedulerBucket{GroupID: groupID, Platform: PlatformOpenAI, Mode: SchedulerModeSingle}
 	forced := SchedulerBucket{GroupID: groupID, Platform: PlatformOpenAI, Mode: SchedulerModeForced}
 	wantErr := errors.New("first query failed")
-	key := batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}
+	key := batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI, mixed: true}
 	repo := newBatchAccountQueryRepo()
 	repo.results[key] = []batchAccountQueryResult{
 		{err: wantErr},
@@ -612,7 +614,7 @@ func TestSchedulerFullRebuildSharesSuccessfulQueryAcrossStrictAndOrdinarySegment
 		"test",
 	)
 	require.ErrorIs(t, err, ErrSchedulerBucketWriteFenced)
-	require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}), "SetSnapshot failure must not discard a successful query")
+	require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI, mixed: true}), "SetSnapshot failure must not discard a successful query")
 	_, singleAttempts, singleVersion, _ := cache.bucketState(single)
 	_, forcedAttempts, forcedVersion, _ := cache.bucketState(forced)
 	require.Equal(t, 1, singleAttempts)
@@ -633,7 +635,7 @@ func TestSchedulerRebuildBatchPreservesLockBusyAndFencingPolicy(t *testing.T) {
 		svc := newBatchQueryTestService(cache, repo, config.RunModeStandard)
 
 		require.NoError(t, svc.rebuildBuckets(context.Background(), []SchedulerBucket{single, forced}, "test"))
-		require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}))
+		require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI, mixed: true}))
 		_, singleAttempts, _, _ := cache.bucketState(single)
 		_, forcedAttempts, forcedVersion, _ := cache.bucketState(forced)
 		require.Zero(t, singleAttempts)
@@ -659,7 +661,7 @@ func TestSchedulerRebuildBatchPreservesLockBusyAndFencingPolicy(t *testing.T) {
 			"test",
 		)
 		require.ErrorIs(t, err, ErrSchedulerBucketRebuildBusy)
-		require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}))
+		require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI, mixed: true}))
 		_, forcedAttempts, forcedVersion, _ := cache.bucketState(forced)
 		require.Equal(t, 1, forcedAttempts)
 		require.Equal(t, 1, forcedVersion)
@@ -672,7 +674,7 @@ func TestSchedulerRebuildBatchPreservesLockBusyAndFencingPolicy(t *testing.T) {
 		svc := newBatchQueryTestService(cache, repo, config.RunModeStandard)
 
 		require.NoError(t, svc.rebuildBuckets(context.Background(), []SchedulerBucket{single, forced}, "test"))
-		require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI}))
+		require.Equal(t, 1, repo.callCount(batchAccountQueryKey{groupID: groupID, platform: PlatformOpenAI, mixed: true}))
 		_, singleAttempts, singleVersion, _ := cache.bucketState(single)
 		_, forcedAttempts, forcedVersion, _ := cache.bucketState(forced)
 		require.Equal(t, 1, singleAttempts)
@@ -719,7 +721,7 @@ func TestSchedulerRebuildBatchReleasesResultsAfterLastConsumer(t *testing.T) {
 	require.Empty(t, queries.accounts)
 	require.Empty(t, queries.remaining)
 	for i := 1; i <= groups; i++ {
-		key := batchAccountQueryKey{groupID: int64(300 + i), platform: PlatformOpenAI}
+		key := batchAccountQueryKey{groupID: int64(300 + i), platform: PlatformOpenAI, mixed: true}
 		require.Equal(t, 1, repo.callCount(key), key)
 	}
 }
@@ -730,6 +732,10 @@ type batchQueryBenchmarkRepo struct {
 }
 
 func (r *batchQueryBenchmarkRepo) ListSchedulableByGroupIDAndPlatform(context.Context, int64, string) ([]Account, error) {
+	return r.accounts, nil
+}
+
+func (r *batchQueryBenchmarkRepo) ListSchedulableByGroupIDAndPlatforms(context.Context, int64, []string) ([]Account, error) {
 	return r.accounts, nil
 }
 

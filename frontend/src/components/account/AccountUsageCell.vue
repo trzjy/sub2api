@@ -481,6 +481,27 @@
       </div>
     </template>
 
+    <!-- Devin accounts: plan / balance / daily & weekly quota reset times (usageInfo.devin_usage) -->
+    <template v-else-if="account.platform === 'devin' && usageInfo?.devin_usage">
+      <div class="space-y-1">
+        <span
+          v-if="devinPlan"
+          class="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300"
+        >
+          {{ devinPlan }}
+        </span>
+        <div class="text-[10px] text-gray-500 dark:text-gray-400">
+          {{ devinBalance }}
+        </div>
+        <div v-if="devinDailyReset" class="text-[10px] text-gray-500 dark:text-gray-400">
+          Daily reset: {{ devinDailyReset }}
+        </div>
+        <div v-if="devinWeeklyReset" class="text-[10px] text-gray-500 dark:text-gray-400">
+          Weekly reset: {{ devinWeeklyReset }}
+        </div>
+      </div>
+    </template>
+
     <!-- CN providers (Kimi / Zhipu / DeepSeek / MiniMax / 火山方舟订阅号 base_url 命中 volces): coding-plan quota or payg balance -->
     <!--
       F01（BAL-GATE-D4）：父门（showUsageWindows）已按能力放行 probe 账号，此处
@@ -1409,6 +1430,22 @@ const aiCreditsDisplay = computed(() => {
 
 // ===== Muse 三窗口额度（后端透传 usageInfo.muse_usage） =====
 const museUsage = computed(() => usageInfo.value?.muse_usage ?? null)
+
+// ===== Devin 用量（后端透传 usageInfo.devin_usage） =====
+const devinUsage = computed(() => usageInfo.value?.devin_usage ?? null)
+const devinPlan = computed(() => devinUsage.value?.plan || '')
+const devinBalance = computed(() => {
+  const balance = devinUsage.value?.balance_usd
+  return balance != null ? `$${balance.toFixed(2)}` : '—'
+})
+const devinDailyReset = computed(() => {
+  const value = devinUsage.value?.daily_reset_at
+  return value ? new Date(value).toLocaleString() : ''
+})
+const devinWeeklyReset = computed(() => {
+  const value = devinUsage.value?.weekly_reset_at
+  return value ? new Date(value).toLocaleString() : ''
+})
 
 // ===== CodeBuddy 积分额度（后端周期探测写入 account.Extra） =====
 // 解析逻辑抽到 @/utils/codebuddyCredit：影子行的「母账号余额」指示（AccountsView，方案 N6）
