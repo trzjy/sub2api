@@ -393,6 +393,22 @@ func codeBuddyPlatformMismatchAllowed(account *Account, req OpenAIAccountSchedul
 	return isCodeBuddyAggregatedPlatform(req.Platform)
 }
 
+// aggregatePlatformFamilyAllowed 判定聚合平台账号能否按模型家族承接本次请求：
+// 请求模型（优先账号映射后的上游模型）的家族必须与分组平台一致。
+func aggregatePlatformFamilyAllowed(account *Account, req OpenAIAccountScheduleRequest) bool {
+	if account == nil || !isAggregatePlatformAccount(account.Platform) {
+		return false
+	}
+	if strings.TrimSpace(req.RequestedModel) == "" {
+		return false // 无模型名无法判定家族，失败关闭
+	}
+	upstream := account.GetMappedModel(req.RequestedModel)
+	if strings.TrimSpace(upstream) == "" {
+		upstream = req.RequestedModel
+	}
+	return mixedListingModelAllowed(req.Platform, upstream) || mixedListingModelAllowed(req.Platform, req.RequestedModel)
+}
+
 // codeBuddyAggregatedCatalogGated 判断该账号是否由聚合逐模型目录闸门接管模型校验：
 // 聚合分组请求下的 codebuddy 账号跳过客户端名白名单（IsModelSupported），
 // 改由目录闸门（先 GetMappedModel 映射为上游名再精确比较）判定（§2.1-1）。
@@ -1714,9 +1730,10 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			continue
 		}
 		// platform_mismatch：聚合分组请求下的 codebuddy OpenAI 兼容账号越过
-		// 平台名校验进入候选（§2.1-2）；其余仍按既有规则排除。
+		// 平台名校验进入候选（§2.1-2）；聚合平台账号按模型家族承接对应家族分组
+		// 时同样放行；其余仍按既有规则排除。
 		if account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() {
-			if !codeBuddyPlatformMismatchAllowed(account, req) {
+			if !codeBuddyPlatformMismatchAllowed(account, req) && !aggregatePlatformFamilyAllowed(account, req) {
 				filterStats.exclude("platform_mismatch")
 				continue
 			}

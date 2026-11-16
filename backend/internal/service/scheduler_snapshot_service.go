@@ -1559,8 +1559,18 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 		groupID = 0
 	}
 
+	// 聚合平台账号按模型家族绑定到原生家族分组，必须一并纳入候选池；
+	// 否则绑定原生 openai/anthropic 分组的聚合账号不会进入快照候选（pool=0）。
+	// 清单从 domain 动态派生，避免写死平台清单再次漂移。
+	var aggregatePlatforms []string
+	for _, p := range domain.ConcretePlatformIDs() {
+		if isAggregatePlatformAccount(p) {
+			aggregatePlatforms = append(aggregatePlatforms, p)
+		}
+	}
+
 	if useMixed {
-		platforms := cursorSupplyPlatformsFor(&groupID, []string{queryPlatform, PlatformAntigravity})
+		platforms := cursorSupplyPlatformsFor(&groupID, append([]string{queryPlatform}, aggregatePlatforms...))
 		var accounts []Account
 		var err error
 		if groupID > 0 {
@@ -1586,7 +1596,7 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 	var accounts []Account
 	var err error
 	if groupID > 0 {
-		if platforms := cursorSupplyPlatformsFor(&groupID, []string{queryPlatform}); len(platforms) > 1 {
+		if platforms := cursorSupplyPlatformsFor(&groupID, append([]string{queryPlatform}, aggregatePlatforms...)); len(platforms) > 1 {
 			accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatforms(ctx, groupID, platforms)
 		} else {
 			accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, groupID, queryPlatform)

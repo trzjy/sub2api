@@ -4000,6 +4000,12 @@ const selectableGroups = computed(() => {
 // 故隐藏代理选择器。
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
 
+// devin 是聚合平台，不显示独立分组，账号按模型家族绑定原生家族分组。文件内定义
+// fallback 清单：模型名单为空或全是未知模型时，放行全套 devin 原生平台，避免误吞分组。
+const DEVIN_NATIVE_GROUP_PLATFORMS: GroupPlatform[] = [
+  'anthropic', 'openai', 'gemini', 'grok', 'muse', 'deepseek', 'zhipu', 'kimi', 'minimax'
+]
+
 // cursor 账号是供给端：模型按所属原生平台进组（U7），分组选择器放行模型所属
 // 原生平台组；其他平台保持「同 platform + composite」既有规则，不放开。
 // 当前 cursor 账号在用的模型名单（按用户裁定 2026-11-10：模型名单中有哪些家族，
@@ -4014,6 +4020,16 @@ const cursorSelectedModels = computed<string[]>(() => {
 })
 
 const cursorNativePlatforms = computed<GroupPlatform[]>(() => {
+  // devin 聚合平台：与 cursor 同源取模型集合（whitelist 的 allowedModels + mapping 的 from 段），
+  // 按模型家族推导原生分组；推导非空则采用，否则回落全套 devin 原生平台。
+  if (props.account?.platform === 'devin') {
+    const devinModels = new Set<string>()
+    for (const m of allowedModels.value) { const v = m.trim(); if (v) devinModels.add(v) }
+    for (const m of modelMappings.value) { const v = m.from.trim(); if (v) devinModels.add(v) }
+    const inferred = inferGroupPlatformsFromModels(Array.from(devinModels))
+    if (inferred.length > 0) return inferred
+    return [...DEVIN_NATIVE_GROUP_PLATFORMS]
+  }
   if (props.account?.platform !== 'cursor') return []
   // 已选模型时按模型家族推导原生平台；推导结果非空才采用，避免误吞分组。
   if (cursorSelectedModels.value.length > 0) {

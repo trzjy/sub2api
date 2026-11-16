@@ -5060,7 +5060,32 @@ const cursorSelectedModels = computed<string[]>(() => {
   return allowedModels.value.map((m) => m.trim()).filter(Boolean)
 })
 
+// devin 为多家族平台：无已知家族模型时回落的全套原生平台分组清单。
+// 平台值取 GroupPlatform 既有定义，不引入新 key。
+const DEVIN_NATIVE_GROUP_PLATFORMS: GroupPlatform[] = [
+  'anthropic',
+  'openai',
+  'gemini',
+  'grok',
+  'muse',
+  'deepseek',
+  'zhipu',
+  'kimi',
+  'minimax'
+]
+
 const cursorNativePlatforms = computed<GroupPlatform[]>(() => {
+  // devin 账号按已选模型家族放行原生分组；推导结果非空才采用，避免误吞分组；
+  // 未选模型或全是未知模型时回落 devin 全量原生平台。与 cursor 共用本 computed
+  // 供 GroupSelector 的 native-platforms 复用。
+  if (form.platform === 'devin') {
+    const devinModels = modelRestrictionMode.value === 'mapping'
+      ? modelMappings.value.map((m) => m.from.trim()).filter(Boolean)
+      : allowedModels.value.map((m) => m.trim()).filter(Boolean)
+    const inferred = inferGroupPlatformsFromModels(devinModels)
+    if (inferred.length > 0) return inferred
+    return [...DEVIN_NATIVE_GROUP_PLATFORMS]
+  }
   if (form.platform !== 'cursor') return []
   // 已选模型时按模型家族推导原生平台；推导结果非空才采用，避免误吞分组。
   if (cursorSelectedModels.value.length > 0) {
