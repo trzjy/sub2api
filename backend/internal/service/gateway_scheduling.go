@@ -1336,12 +1336,20 @@ func accountInGroup(account *Account, groupID *int64) bool {
 	if account == nil {
 		return false
 	}
+	// 账号的组关系有 AccountGroups（完整边）与 GroupIDs（精简投影）两种表示：
+	// DB 读取两者都填充，但快照/精简账号与部分调用方可能只带其中一种。
+	// 两者任一命中即视为绑定，避免"同一绑定因表示不同被判成未挂组"。
 	if groupID == nil {
 		// 无分组的 API Key 只能使用未分组的账号
-		return len(account.AccountGroups) == 0
+		return len(account.AccountGroups) == 0 && len(account.GroupIDs) == 0
 	}
 	for _, ag := range account.AccountGroups {
 		if ag.GroupID == *groupID {
+			return true
+		}
+	}
+	for _, id := range account.GroupIDs {
+		if id == *groupID {
 			return true
 		}
 	}
