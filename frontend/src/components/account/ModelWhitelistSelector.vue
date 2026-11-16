@@ -266,7 +266,9 @@ const upstreamSyncPlatforms = new Set([
   // 与后端 /admin/accounts/:id/models/sync-upstream 的探测口径一致；后端对不支持的
   // 平台会回 UpstreamModelSyncErrorUnsupported（400 + 安全文案），前端开放入口不会
   // 造成静默错误。
-  'cursor'
+  'cursor',
+  // devin 目录由 GetCliModelConfigs 拉取，后端平台分支由 D1b 提供。
+  'devin'
 ])
 const canSyncUpstream = computed(() => {
   // P1-B3：只读模式不暴露同步入口；传入自定义同步接口时一律允许（不再依赖账号/平台判断）。

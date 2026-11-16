@@ -1753,6 +1753,15 @@ export interface AccountUsageInfo {
   // 后端 MuseQuotaFetcher 透传：percent = 已用比例（0-100），paused/unschedulable_until
   // 由三窗口 status 推导，供调度冷却恢复（muse-2 消费）。
   muse_usage?: MuseUsageInfo | null
+
+  // Devin 用量快照（后端 UsageInfo.devin_usage 透传），供用量单元格渲染。
+  devin_usage?: {
+    plan?: string
+    balance_usd?: number | null
+    daily_reset_at?: string | null
+    weekly_reset_at?: string | null
+    fetched_at?: string | null
+  } | null
 }
 
 // Muse 单个额度窗口（已固化语义，照后端 MuseWindow）。
