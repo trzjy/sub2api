@@ -664,10 +664,14 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	// Anthropic 形状的 body 转成 Gemini 形状发往 Cursor 端点，必然被拒并白耗额度。
 	// 转换链：Anthropic → Chat Completions（apicompat）→ 契约 0.1 桥接入口
 	// 唯一执行部件，再把其回写的 Chat Completions 回转成 Anthropic。
-	// 仅「cursor 且非 OpenAI 兼容账号」进 Connect 出站；OpenAI 兼容的 apikey 账号
-	// （kn-cy 等）绕过 Cursor 原生协议执行部件，落入通用 OpenAI 转发管线
-	// （与 openai_gateway_chat_completions.go:143 口径一致）。
-	if isCursorAccount(account) && !isCursorOpenAICompatibleAccount(account) {
+	// 分派口径：OpenAI 兼容的 apikey 账号（kn-cy 等，出站为 OpenAI 兼容的
+	// /chat/completions 反代端点）走 forwardCursorOpenAICompatibleMessages；
+	// 其余 cursor 账号（ShareAI 号池 OAuth 等）仍走 forwardCursorMessages 的
+	// Cursor 原生协议执行部件（与 forwardCursorOpenAICompatibleNative 分派同构）。
+	if isCursorAccount(account) {
+		if isCursorOpenAICompatibleAccount(account) {
+			return s.forwardCursorOpenAICompatibleMessages(ctx, c, account, body)
+		}
 		return s.forwardCursorMessages(ctx, c, account, body)
 	}
 
@@ -1218,6 +1222,200 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		ImageCount:                    imageCount,
 		ImageSize:                     imageSize,
 		ImageInputSize:                imageInputSize,
+	}, nil
+}
+
+// forwardCursorOpenAICompatibleMessages 是 /v1/messages（Anthropic Messages）入口
+// 的 OpenAI 兼容 cursor apikey 账号分流（cursor/acpikey，base https://kn-cy.com/v1）。
+//
+// 这类账号以 APIKey 形态接入、出站目标为 OpenAI 兼容的 /chat/completions 反代端点，
+// 与通用 AI Studio（Gemini 原生）管线不兼容。本函数把 Anthropic Messages 入站经
+// apicompat 转成 Chat Completions，以 Bearer api_key 打到 OpenAI 兼容端点，再把上游
+// 的 Chat Completions 响应（流式/非流式）回转成 Anthropic 形状写回客户端。
+// 与 forwardCursorOpenAICompatibleNative 的 v1beta 原生出口分派口径同构。
+func (s *GeminiMessagesCompatService) forwardCursorOpenAICompatibleMessages(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+) (*ForwardResult, error) {
+	var anthropicReq apicompat.AnthropicRequest
+	if err := json.Unmarshal(body, &anthropicReq); err != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "parse request: "+err.Error())
+	}
+	originalModel := anthropicReq.Model
+	if strings.TrimSpace(originalModel) == "" {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "missing model")
+	}
+
+	apiKey := account.GetCredential("api_key")
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "cursor openai-compatible: api_key not configured")
+	}
+	baseURL := strings.TrimSpace(account.GetOpenAIBaseURL())
+	if baseURL == "" {
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "cursor openai-compatible: base_url not configured")
+	}
+	mappedModel := originalModel
+	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
+		mappedModel = account.GetMappedModel(originalModel)
+	}
+
+	chatReq, convErr := apicompat.AnthropicToChatCompletionsRequestWithMinOutputTokens(&anthropicReq, configuredMinOutputTokens(s.cfg))
+	if convErr != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", convErr.Error())
+	}
+	chatReq.Model = mappedModel
+	chatReq.Stream = anthropicReq.Stream
+	if anthropicReq.Stream {
+		chatReq.StreamOptions = &apicompat.ChatStreamOptions{IncludeUsage: true}
+	}
+	ccBody, marshalErr := json.Marshal(chatReq)
+	if marshalErr != nil {
+		return nil, s.writeClaudeError(c, http.StatusInternalServerError, "upstream_error", marshalErr.Error())
+	}
+
+	normalizedBaseURL, vErr := s.validateUpstreamBaseURL(baseURL)
+	if vErr != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", vErr.Error())
+	}
+	fullURL := strings.TrimRight(normalizedBaseURL, "/") + "/chat/completions"
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+
+	startTime := time.Now()
+	upstreamReq, bErr := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(ccBody))
+	if bErr != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", bErr.Error())
+	}
+	upstreamReq.Header.Set("Content-Type", "application/json")
+	upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, dErr := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+	if dErr != nil {
+		return nil, s.handleUpstreamTransportError(ctx, c, account, dErr)
+	}
+	defer resp.Body.Close()
+
+	requestID := resp.Header.Get("x-request-id")
+	if resp.StatusCode >= 400 {
+		respBody := s.readUpstreamErrorBody(resp)
+		return nil, s.writeClaudeError(c, resp.StatusCode, "upstream_error", extractUpstreamErrorMessage(respBody))
+	}
+
+	if anthropicReq.Stream {
+		return s.writeCursorOpenAICompatibleMessagesStream(c, resp, originalModel, mappedModel, startTime, requestID)
+	}
+	return s.writeCursorOpenAICompatibleMessagesNonStream(c, resp, originalModel, mappedModel, startTime, requestID)
+}
+
+// writeCursorOpenAICompatibleMessagesNonStream 把 OpenAI Chat Completions 非流式响应
+// 回转成 Anthropic Messages 响应（application/json）并写出。
+func (s *GeminiMessagesCompatService) writeCursorOpenAICompatibleMessagesNonStream(
+	c *gin.Context,
+	resp *http.Response,
+	originalModel string,
+	mappedModel string,
+	startTime time.Time,
+	requestID string,
+) (*ForwardResult, error) {
+	respBody, rErr := io.ReadAll(resp.Body)
+	if rErr != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "read upstream response: "+rErr.Error())
+	}
+	var ccResp apicompat.ChatCompletionsResponse
+	if err := json.Unmarshal(respBody, &ccResp); err != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "parse upstream response: "+err.Error())
+	}
+	anthropicResp := apicompat.ChatCompletionsResponseToAnthropic(&ccResp, originalModel)
+	c.JSON(http.StatusOK, anthropicResp)
+
+	// AnthropicResponse.Usage 由桥接包从 ccResp.Usage 转换而来（prompt/completion/
+	// cached/cache_write|cache_creation），直接搬运即与桥接包口径一致。
+	u := anthropicResp.Usage
+	return &ForwardResult{
+		RequestID: requestID,
+		Usage: ClaudeUsage{
+			InputTokens:              u.InputTokens,
+			OutputTokens:             u.OutputTokens,
+			CacheCreationInputTokens: u.CacheCreationInputTokens,
+			CacheReadInputTokens:     u.CacheReadInputTokens,
+		},
+		Model:         originalModel,
+		UpstreamModel: mappedModel,
+		Stream:        false,
+		Duration:      time.Since(startTime),
+	}, nil
+}
+
+// writeCursorOpenAICompatibleMessagesStream 把 OpenAI Chat Completions 流式响应
+// （text/event-stream，data: {...}）逐帧回转成 Anthropic SSE 写出。
+func (s *GeminiMessagesCompatService) writeCursorOpenAICompatibleMessagesStream(
+	c *gin.Context,
+	resp *http.Response,
+	originalModel string,
+	mappedModel string,
+	startTime time.Time,
+	requestID string,
+) (*ForwardResult, error) {
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Status(http.StatusOK)
+
+	state := apicompat.NewChatCompletionsToAnthropicStreamState(originalModel)
+	reader := bufio.NewReader(resp.Body)
+	var firstTokenMs *int
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 && (err == nil || errors.Is(err, io.EOF)) {
+			trimmed := strings.TrimRight(line, "\r\n")
+			if strings.HasPrefix(trimmed, "data:") {
+				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+				if payload != "" && payload != "[DONE]" {
+					var chunk apicompat.ChatCompletionsChunk
+					if jsonErr := json.Unmarshal([]byte(payload), &chunk); jsonErr == nil {
+						events := apicompat.ChatCompletionsChunkToAnthropicEvents(&chunk, state)
+						if len(events) > 0 {
+							if firstTokenMs == nil {
+								ms := int(time.Since(startTime).Milliseconds())
+								firstTokenMs = &ms
+							}
+							if wErr := writeAnthropicEvents(c, events); wErr != nil {
+								return nil, wErr
+							}
+						}
+					}
+				}
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			break
+		}
+	}
+	if err := writeAnthropicEvents(c, apicompat.FinalizeChatCompletionsAnthropicStream(state)); err != nil {
+		return nil, err
+	}
+	return &ForwardResult{
+		RequestID: requestID,
+		Usage: ClaudeUsage{
+			InputTokens:              state.InputTokens,
+			OutputTokens:             state.OutputTokens,
+			CacheCreationInputTokens: state.CacheCreationInputTokens,
+			CacheReadInputTokens:     state.CacheReadInputTokens,
+		},
+		Model:         originalModel,
+		UpstreamModel: mappedModel,
+		Stream:        true,
+		Duration:      time.Since(startTime),
+		FirstTokenMs:  firstTokenMs,
 	}, nil
 }
 
