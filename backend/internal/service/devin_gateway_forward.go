@@ -54,6 +54,10 @@ func (s *OpenAIGatewayService) forwardDevin(
 		return nil, errors.New("forwardDevin requires a non-nil account")
 	}
 
+	// 工具身份只在 Responses→Chat 摊平入口（openai_gateway_forward.go 的 devin 分支）
+	// 写入 gin context；chat / messages 入口从不写入，这里读到 nil，行为零变化。
+	ident := devinResponsesToolIdentityFrom(c)
+
 	// 1. 凭证（失败关闭）。
 	token := strings.TrimSpace(account.GetDevinToken())
 	if token == "" {
@@ -144,9 +148,9 @@ func (s *OpenAIGatewayService) forwardDevin(
 	// 8/9. 流式 / 非流式回程。
 	includeUsage := gjson.GetBytes(body, "stream_options.include_usage").Bool()
 	if reqStream {
-		return s.handleDevinStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode, includeUsage)
+		return s.handleDevinStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode, includeUsage, ident)
 	}
-	return s.handleDevinNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode)
+	return s.handleDevinNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode, ident)
 }
 
 // stripDevinUnsupportedToolSchemaKeywords 剥离 devin 上游不支持的 JSON Schema
@@ -468,6 +472,7 @@ func (s *OpenAIGatewayService) handleDevinStreamingResponse(
 	startTime time.Time,
 	mode webResponseMode,
 	includeUsage bool,
+	ident *devinResponsesToolIdentity,
 ) (*OpenAIForwardResult, error) {
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -485,7 +490,7 @@ func (s *OpenAIGatewayService) handleDevinStreamingResponse(
 	lastStopReason := int32(StopReasonUnspecified)
 	midstreamErr := false
 	midstreamErrMsg := ""
-	st := newWebClientStreamState(mode, originalModel)
+	st := newWebClientStreamStateWithIdentity(mode, originalModel, ident)
 
 	toolAcc := &ToolCallAccumulator{}
 	toolHeaderSent := make(map[int]bool)
@@ -759,6 +764,7 @@ func (s *OpenAIGatewayService) handleDevinNonStreamingResponse(
 	upstreamModel string,
 	startTime time.Time,
 	mode webResponseMode,
+	ident *devinResponsesToolIdentity,
 ) (*OpenAIForwardResult, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
@@ -877,7 +883,7 @@ func (s *OpenAIGatewayService) handleDevinNonStreamingResponse(
 		}},
 		"usage": finalUsage,
 	}
-	if err := writeWebCompletion(c, newWebClientStreamState(mode, originalModel), completion); err != nil {
+	if err := writeWebCompletion(c, newWebClientStreamStateWithIdentity(mode, originalModel, ident), completion); err != nil {
 		return nil, err
 	}
 	MarkResponseCommitted(c)

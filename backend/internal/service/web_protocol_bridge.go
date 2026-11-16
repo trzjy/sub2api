@@ -47,6 +47,11 @@ type webClientStreamState struct {
 	model     string
 	respState *apicompat.ChatCompletionsToResponsesStreamState
 	anthState *apicompat.ChatCompletionsToAnthropicStreamState
+
+	// identity 是 Responses→Chat 摊平时保留的工具身份（仅 devin Responses 入口写入）。
+	// 流式与非流式回桥都从这里取四集合；chat / messages 及其它 web 平台恒为 nil，
+	// 回桥行为保持不变。
+	identity *devinResponsesToolIdentity
 }
 
 // newWebClientStreamState 按出站协议创建流式状态；chat 模式状态机置空（直出）。
@@ -57,6 +62,21 @@ func newWebClientStreamState(mode webResponseMode, model string) *webClientStrea
 		st.respState = apicompat.NewChatCompletionsToResponsesStreamState(model)
 	case webResponseModeAnthropic:
 		st.anthState = apicompat.NewChatCompletionsToAnthropicStreamState(model)
+	}
+	return st
+}
+
+// newWebClientStreamStateWithIdentity 在 newWebClientStreamState 基础上把工具身份灌入
+// 回桥状态：Responses 模式写入 respState 的四个导出字段（流式回桥逐帧据此还原项类型），
+// 非流式回桥在 writeWebCompletion 里从 st.identity 取同一份四集合。其它模式忽略身份。
+func newWebClientStreamStateWithIdentity(mode webResponseMode, model string, ident *devinResponsesToolIdentity) *webClientStreamState {
+	st := newWebClientStreamState(mode, model)
+	st.identity = ident
+	if mode == webResponseModeResponses && ident != nil && st.respState != nil {
+		st.respState.CustomTools = ident.custom
+		st.respState.FunctionTools = ident.function
+		st.respState.ToolSearchDeclared = ident.toolSearch
+		st.respState.NamespaceTools = ident.namespace
 	}
 	return st
 }
@@ -122,7 +142,14 @@ func writeWebCompletion(c *gin.Context, st *webClientStreamState, completion map
 		c.Data(http.StatusOK, "application/json", data)
 		return nil
 	case webResponseModeResponses:
-		out := apicompat.ChatCompletionsResponseToResponses(webEnvelopeToChatResponse(completion), st.model, nil, nil, false, nil)
+		var customTools, functionTools map[string]bool
+		var toolSearch bool
+		var namespaceTools map[string]apicompat.NamespacedToolName
+		if st.identity != nil {
+			customTools, functionTools = st.identity.custom, st.identity.function
+			toolSearch, namespaceTools = st.identity.toolSearch, st.identity.namespace
+		}
+		out := apicompat.ChatCompletionsResponseToResponses(webEnvelopeToChatResponse(completion), st.model, customTools, functionTools, toolSearch, namespaceTools)
 		data, err := json.Marshal(out)
 		if err != nil {
 			return err

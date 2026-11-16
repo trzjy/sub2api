@@ -217,7 +217,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// Responses 管线完全不兼容。必须在下方通用 Responses / 网页逆向管线之前分流，
 	// 否则 Devin 账号会被通用路径按 API Key 账号处理，把请求打到错误上游。
 	if account.Platform == PlatformDevin {
-		devinBody, err := normalizeDevinResponsesBody(body)
+		// Responses→Chat 摊平会丢失 custom / namespace / tool_search 工具的身份，
+		// 转换时把身份写入 gin context，回程（web_protocol_bridge 的 Responses 模式）
+		// 据此还原 custom_tool_call / tool_search_call / 带 namespace 的 function_call。
+		// 任何转换失败都按既有 Responses 400 口径回写，绝不落到 502 upstream_error。
+		devinBody, err := s.normalizeDevinResponsesBodyWithIdentity(c, body)
 		if err != nil {
 			return nil, err
 		}
@@ -1570,6 +1574,90 @@ func normalizeDevinResponsesBody(body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("devin responses: marshal chat completions: %w", err)
 	}
+	return converted, nil
+}
+
+// devinResponsesToolIdentity 是 Responses→Chat 摊平后保留的工具身份集合，供回程
+// （web_protocol_bridge 的 Responses 模式）把摊平后的普通 function_call 还原为
+// custom_tool_call / tool_search_call / 带 namespace 字段的 function_call。
+// 与 openai_gateway_responses_chat_fallback.go 里同名四集合口径一致。
+type devinResponsesToolIdentity struct {
+	custom     map[string]bool
+	function   map[string]bool
+	toolSearch bool
+	namespace  map[string]apicompat.NamespacedToolName
+}
+
+// devinResponsesToolIdentityKey 是身份在 gin 上下文中的键名。
+const devinResponsesToolIdentityKey = "devin_responses_tool_identity"
+
+// setDevinResponsesToolIdentity 把工具身份写入请求级 gin 上下文。
+func setDevinResponsesToolIdentity(c *gin.Context, ident *devinResponsesToolIdentity) {
+	if c == nil {
+		return
+	}
+	c.Set(devinResponsesToolIdentityKey, ident)
+}
+
+// devinResponsesToolIdentityFrom 读取请求级工具身份；缺失或类型不符返回 nil，
+// 使 chat / messages 入口（从不写入身份）保持零变化。
+func devinResponsesToolIdentityFrom(c *gin.Context) *devinResponsesToolIdentity {
+	if c == nil {
+		return nil
+	}
+	v, ok := c.Get(devinResponsesToolIdentityKey)
+	if !ok {
+		return nil
+	}
+	ident, _ := v.(*devinResponsesToolIdentity)
+	return ident
+}
+
+// normalizeDevinResponsesBodyWithIdentity 把 Responses 形状请求转为 Chat 形状，并在
+// 转换前解析出工具身份写入 gin context。已是 Chat 形状或非 Responses 形状时原样返回、
+// 不写身份（与 normalizeDevinResponsesBody 的短路语义一致，chat/messages 入口不受影响）。
+//
+// 失败关闭口径与 openai responses chat fallback 完全一致：解析/校验/转换任一步失败
+// 都写 400 invalid_request_error 并返回错误，绝不让 handler 误判成 502 upstream_error。
+func (s *OpenAIGatewayService) normalizeDevinResponsesBodyWithIdentity(c *gin.Context, body []byte) ([]byte, error) {
+	if gjson.GetBytes(body, "messages").Exists() || !gjson.GetBytes(body, "input").Exists() {
+		return body, nil
+	}
+
+	var respReq apicompat.ResponsesRequest
+	if err := json.Unmarshal(body, &respReq); err != nil {
+		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
+		return nil, fmt.Errorf("devin responses: parse request: %w", err)
+	}
+	if strings.TrimSpace(respReq.Model) == "" {
+		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
+		return nil, fmt.Errorf("devin responses: missing model in request")
+	}
+	effectiveTools, err := apicompat.EffectiveResponsesTools(&respReq)
+	if err != nil {
+		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return nil, fmt.Errorf("devin responses: resolve responses tools: %w", err)
+	}
+
+	chatReq, err := apicompat.ResponsesToChatCompletionsRequestWithOptions(&respReq, &apicompat.ResponsesToChatOptions{
+		ReasoningContentByID: s.reasoningContentByID,
+	})
+	if err != nil {
+		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return nil, fmt.Errorf("devin responses: convert to chat completions: %w", err)
+	}
+	converted, err := json.Marshal(chatReq)
+	if err != nil {
+		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return nil, fmt.Errorf("devin responses: marshal chat completions: %w", err)
+	}
+
+	setDevinResponsesToolIdentity(c, &devinResponsesToolIdentity{
+		custom:     apicompat.CustomToolNames(effectiveTools),
+		function:   apicompat.FunctionToolNames(effectiveTools),
+		toolSearch: apicompat.HasToolSearchTool(effectiveTools),
+		namespace:  apicompat.NamespaceToolNames(effectiveTools),
+	})
 	return converted, nil
 }
 
