@@ -378,7 +378,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	// 判定放在 finalize 之前：一旦 finalize 补出 response.completed，客户端就拿到一份
 	// 「成功但空白」的回答，后台也不会留下任何痕迹。
 	if scan.Err == nil && !clientDisconnected && c.Request.Context().Err() == nil && emptyGate.Empty() {
-		if err := s.reportEmptyContent(emptyContentRequestContext(c), c, emptyContentReport{
+		noticeWritten, err := s.reportEmptyContent(emptyContentRequestContext(c), c, emptyContentReport{
 			Account:           account,
 			Resp:              resp,
 			UpstreamModel:     upstreamModel,
@@ -388,8 +388,26 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			SawContent:        !emptyGate.Empty(),
 			FinishReason:      emptyGate.FinishReason(),
 			CanFailover:       !clientOutputStarted,
-		}); err != nil {
+			WriteHeaders:      writeStreamHeaders,
+		})
+		if err != nil {
 			return nil, err
+		}
+		if noticeWritten {
+			return &OpenAIForwardResult{
+				RequestID:                   requestID,
+				UpstreamHeaders:             resp.Header,
+				Usage:                       scan.Usage,
+				Model:                       originalModel,
+				BillingModel:                billingModel,
+				UpstreamModel:               upstreamModel,
+				ReasoningEffort:             reasoningEffort,
+				UpstreamResponseServiceTier: observedUpstreamResponseServiceTier(c),
+				ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+				Stream:                      true,
+				Duration:                    time.Since(startTime),
+				FirstTokenMs:                scan.FirstTokenMs,
+			}, nil
 		}
 	}
 

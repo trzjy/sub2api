@@ -566,7 +566,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			if c != nil && c.Request != nil {
 				reportCtx = c.Request.Context()
 			}
-			if err := s.reportEmptyContent(reportCtx, c, emptyContentReport{
+			noticeWritten, err := s.reportEmptyContent(reportCtx, c, emptyContentReport{
 				Account:           account,
 				Resp:              resp,
 				UpstreamModel:     upstreamModel,
@@ -576,8 +576,14 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 				SawContent:        !emptyGate.Empty(),
 				FinishReason:      emptyGate.FinishReason(),
 				CanFailover:       !clientOutputStarted,
-			}); err != nil {
+				WriteHeaders:      writeStreamHeaders,
+			})
+			if err != nil {
 				return nil, err
+			}
+			if noticeWritten {
+				// 提示已作为一段完整回答发给客户，上游那条空流不能再放行。
+				return resultWithUsage(), nil
 			}
 		}
 	}

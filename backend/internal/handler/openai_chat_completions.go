@@ -258,6 +258,12 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	// 装好估算 input，供 RecordUsage 透传为 EstimatedInputTokens 以对冲上游 prompt_tokens 虚高。
 	attachCursorEstimatedInputTokens(c, reqLog, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body)
 
+	// 下面三条按规模的排除规则（自建站点大请求 / 商汤与账号自设上限 / 仅接大或仅接小）
+	// 共用同一份候选快照：以前每条规则各读一遍全量候选，一次请求读三遍，而且三份结果
+	// 可能来自不同快照。快照只服务排除判断，选号本身仍取新鲜候选（failover 重选必须
+	// 看见刚被标记失败的账号）。
+	c.Request = c.Request.WithContext(service.WithSizeExclusionCandidateCache(c.Request.Context()))
+
 	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
 	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
 	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body); len(adds) > 0 {

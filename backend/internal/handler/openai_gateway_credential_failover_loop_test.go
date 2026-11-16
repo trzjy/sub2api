@@ -33,16 +33,18 @@ type grokCredentialHandlerRepo struct {
 	setTempIDs     []int64
 	rateLimitIDs   []int64
 	updateExtraIDs []int64
-	selectionCalls int
-	setErrorErr    error
-	setTempErr     error
-	missingOnGet   map[int64]bool
+	// candidateListCalls 统计「列候选账号」被调用的次数（不是「选号次数」）。
+	// 一次请求的固定开销见 listCallsPerSelectionRound；重选会让它按轮次增长。
+	candidateListCount int
+	setErrorErr        error
+	setTempErr         error
+	missingOnGet       map[int64]bool
 }
 
 func (r *grokCredentialHandlerRepo) ListSchedulableByPlatform(_ context.Context, platform string) ([]service.Account, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.selectionCalls++
+	r.candidateListCount++
 	out := make([]service.Account, 0, len(r.accounts))
 	for _, account := range r.accounts {
 		if account.Platform == platform && account.IsSchedulable() {
@@ -227,10 +229,13 @@ func (r *grokCredentialHandlerRepo) errorIDs() []int64 {
 	return append([]int64(nil), r.setErrorIDs...)
 }
 
-func (r *grokCredentialHandlerRepo) selectorCalls() int {
+// candidateListCalls 返回「列候选账号」被调用次数。名字刻意不叫 selectorCalls：
+// 它统计的是 repo 层列举次数，其中包含选号前的按规模排除列举（三条规则共用一次，
+// 见 service.WithSizeExclusionCandidateCache），并不等价于「选了几次号」。
+func (r *grokCredentialHandlerRepo) candidateListCalls() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.selectionCalls
+	return r.candidateListCount
 }
 
 func (r *grokCredentialHandlerRepo) rateLimitedAccountIDs() []int64 {
@@ -402,6 +407,18 @@ func (u *grokCredentialHandlerUpstream) requests() ([]string, []string) {
 	return append([]string(nil), u.requestURLs...), append([]string(nil), u.authorization...)
 }
 
+// listCallsPerSelectionRound 是一次「选号轮」在 repo 层产生的候选列举次数：
+//
+//	1 次 —— 选号前按规模的排除（自建站点大请求 / 商汤与账号自设上限 / 仅接大或仅接小
+//	        三条规则共用同一份候选快照，见 service.WithSizeExclusionCandidateCache）
+//	1 次 —— 选号自身列举候选
+//
+// 断言「列举次数 == 这个值」表达的是「credential 失败后又来了一轮选号」这个回归：
+// 多选一轮就多出这份开销。旧断言固定写 1，在补上按规模排除功能后就永远不可能成立，
+// 属于把实现细节（当时恰好只列一次）当契约。以后新增按规模的排除规则不会再改变这个
+// 数字——新规则挂在同一次列举上，不额外读候选。
+const listCallsPerSelectionRound = 2
+
 func TestResponsesCredentialFailoverLoop(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -437,7 +454,7 @@ func TestResponsesCredentialFailoverLoop(t *testing.T) {
 		require.Contains(t, recorder.Body.String(), service.GrokCredentialUnavailableClientMessage)
 		require.Empty(t, repo.errorIDs())
 		require.Empty(t, upstream.accountHits())
-		require.Equal(t, 1, repo.selectorCalls())
+		require.Equal(t, listCallsPerSelectionRound, repo.candidateListCalls())
 		require.Zero(t, h.gatewayService.SnapshotOpenAIAccountSchedulerMetrics().RuntimeStatsAccountCount,
 			"provider-scoped auth failure must not penalize the selected account")
 	})
@@ -488,7 +505,7 @@ func TestResponsesCredentialFailoverLoop(t *testing.T) {
 
 		require.Equal(t, []int64{801}, upstream.accountHits())
 		require.Empty(t, repo.errorIDs())
-		require.Equal(t, 1, repo.selectorCalls())
+		require.Equal(t, listCallsPerSelectionRound, repo.candidateListCalls())
 		require.Zero(t, h.gatewayService.SnapshotOpenAIAccountSchedulerMetrics().RuntimeStatsAccountCount)
 	})
 
@@ -516,7 +533,7 @@ func TestResponsesCredentialFailoverLoop(t *testing.T) {
 
 				router.ServeHTTP(recorder, req)
 
-				require.Zero(t, repo.selectorCalls())
+				require.Zero(t, repo.candidateListCalls())
 				require.Empty(t, upstream.accountHits())
 			})
 		}
@@ -536,7 +553,7 @@ func TestResponsesCredentialFailoverLoop(t *testing.T) {
 				require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
 				require.Contains(t, recorder.Body.String(), service.GrokCredentialUnavailableClientMessage)
 				require.Empty(t, upstream.accountHits())
-				require.Equal(t, 1, repo.selectorCalls())
+				require.Equal(t, listCallsPerSelectionRound, repo.candidateListCalls())
 			})
 		}
 	})
@@ -552,7 +569,7 @@ func TestResponsesCredentialFailoverLoop(t *testing.T) {
 
 		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
 		require.Contains(t, recorder.Body.String(), service.GrokCredentialUnavailableClientMessage)
-		require.Equal(t, 1, repo.selectorCalls())
+		require.Equal(t, listCallsPerSelectionRound, repo.candidateListCalls())
 		require.Empty(t, upstream.accountHits())
 		require.Empty(t, repo.errorIDs())
 	})
@@ -608,7 +625,7 @@ func TestResponsesGrok402FailoverCooldown(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), "resp_healthy")
 	require.Equal(t, []int64{801, 802}, upstream.accountHits())
 	require.Equal(t, []int64{801}, repo.setTempIDs)
-	before := repo.selectorCalls()
+	before := repo.candidateListCalls()
 
 	second := httptest.NewRecorder()
 	secondReq := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", bytes.NewBufferString(`{"model":"grok","input":"again","stream":false}`))
@@ -616,7 +633,7 @@ func TestResponsesGrok402FailoverCooldown(t *testing.T) {
 	router.ServeHTTP(second, secondReq)
 
 	require.Equal(t, http.StatusOK, second.Code, second.Body.String())
-	require.Equal(t, before+1, repo.selectorCalls())
+	require.Equal(t, before+listCallsPerSelectionRound, repo.candidateListCalls())
 	require.Equal(t, []int64{801, 802, 802}, upstream.accountHits(), "cooldown must exclude the 402 account from later requests")
 }
 
@@ -793,7 +810,9 @@ func TestResponsesWebSocketCredentialFailoverLoop(t *testing.T) {
 		require.NoError(t, err)
 		require.Contains(t, string(payload), "resp_healthy")
 		require.Equal(t, []int64{801}, repo.errorIDs())
-		require.Equal(t, 2, repo.selectorCalls())
+		// 两轮选号（801 凭据失效被替换成 802）再加一次选号前的按规模排除列举：
+		// 排除对整条请求只列一次（快照复用），所以不是 2×listCallsPerSelectionRound。
+		require.Equal(t, listCallsPerSelectionRound+1, repo.candidateListCalls())
 		require.Equal(t, []int64{802}, upstream.accountHits())
 	})
 
@@ -810,7 +829,7 @@ func TestResponsesWebSocketCredentialFailoverLoop(t *testing.T) {
 		var closeErr coderws.CloseError
 		require.ErrorAs(t, err, &closeErr)
 		require.Contains(t, closeErr.Reason, service.GrokCredentialUnavailableClientMessage)
-		require.Equal(t, 1, repo.selectorCalls())
+		require.Equal(t, listCallsPerSelectionRound, repo.candidateListCalls())
 		require.Empty(t, upstream.accountHits())
 	})
 
@@ -826,7 +845,7 @@ func TestResponsesWebSocketCredentialFailoverLoop(t *testing.T) {
 		}
 		closeConn()
 
-		require.Eventually(t, func() bool { return repo.selectorCalls() == 1 }, 2*time.Second, 20*time.Millisecond)
+		require.Eventually(t, func() bool { return repo.candidateListCalls() == listCallsPerSelectionRound }, 2*time.Second, 20*time.Millisecond)
 		require.Empty(t, repo.errorIDs())
 		require.Empty(t, upstream.accountHits())
 	})

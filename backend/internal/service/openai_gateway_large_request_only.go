@@ -122,7 +122,7 @@ func largeRequestOnlyAccountIDs(accounts []Account) map[int64]struct{} {
 // 复用 listSchedulableAccounts 的候选列举，不改任何既有选号/调度函数签名与行为；
 // 列举候选失败返回 error，由调用方失败开放处理。
 func (s *OpenAIGatewayService) RequestSizeScopeExcludedIDs(ctx context.Context, groupID *int64, platform string, isLargeRequest bool) (map[int64]struct{}, error) {
-	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	accounts, err := s.listSchedulableAccountsForSizeExclusion(ctx, groupID, platform)
 	if err != nil {
 		return nil, err
 	}

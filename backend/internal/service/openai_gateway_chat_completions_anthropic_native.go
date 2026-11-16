@@ -630,7 +630,9 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 	// 溢出），不代表不记账——客户照样拿到空白回答，后台必须留痕。能不能换号由
 	// CanFailover（真实提交状态）决定。
 	if !clientDisconnected && !payloadContentSeen {
-		if err := s.reportEmptyContent(ctx, c, emptyContentReport{
+		// WriteHeaders 会把本地 clientOutputStarted 置位；下面命中提示后立即 return，
+		// 不会再走到 flushPendingCC / 补 [DONE]，故该标志变化无副作用。
+		noticeWritten, err := s.reportEmptyContent(ctx, c, emptyContentReport{
 			Account:           account,
 			Resp:              resp,
 			UpstreamModel:     upstreamModel,
@@ -640,8 +642,13 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			SawContent:        payloadContentSeen,
 			FinishReason:      upstreamStopReason,
 			CanFailover:       !clientOutputStarted,
-		}); err != nil {
+			WriteHeaders:      writeStreamHeaders,
+		})
+		if err != nil {
 			return nil, err
+		}
+		if noticeWritten {
+			return resultWithUsage(), nil
 		}
 	}
 	flushPendingCC()

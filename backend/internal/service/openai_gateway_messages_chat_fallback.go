@@ -696,7 +696,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	// 判据本身与供应商无关，故收敛到全链路同一执法点：记账 + 冷却 + 能换号时换号。
 	// 商汤多出来的行为只有「记一笔账 + 停调一分钟」，换号语义不变。
 	if scan.Err == nil && !clientDisconnected && c.Request.Context().Err() == nil && emptyGate.Empty() {
-		if err := s.reportEmptyContent(emptyContentRequestContext(c), c, emptyContentReport{
+		noticeWritten, err := s.reportEmptyContent(emptyContentRequestContext(c), c, emptyContentReport{
 			Account:           account,
 			Resp:              resp,
 			UpstreamModel:     upstreamModel,
@@ -706,8 +706,27 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 			SawContent:        !emptyGate.Empty(),
 			FinishReason:      emptyGate.FinishReason(),
 			CanFailover:       !outputStarted,
-		}); err != nil {
+			WriteHeaders:      writeStreamHeaders,
+		})
+		if err != nil {
 			return nil, err
+		}
+		if noticeWritten {
+			return &OpenAIForwardResult{
+				RequestID:                   requestID,
+				UpstreamHeaders:             resp.Header,
+				Usage:                       usage,
+				Model:                       originalModel,
+				BillingModel:                billingModel,
+				UpstreamModel:               upstreamModel,
+				ReasoningEffort:             reasoningEffort,
+				UpstreamResponseServiceTier: observedUpstreamResponseServiceTier(c),
+				ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+				Stream:                      true,
+				Duration:                    time.Since(startTime),
+				FirstTokenMs:                scan.FirstTokenMs,
+				ClientDisconnect:            clientDisconnected,
+			}, nil
 		}
 	}
 

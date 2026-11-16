@@ -370,10 +370,12 @@ func (s *OpenAIGatewayService) handleNativeAnthropicBufferedResponse(
 	}
 
 	// 空回答闸门（非流式）：上游 200 但 content 里没有任何可渲染内容时，
-	// 客户拿到的是一份空白答案。此处响应尚未写出，可安全换号重试（冷却该账号）；
-	// stop_reason=max_tokens 属客户端预算不足的预期截断，由 shared 执法点放行。
+	// 客户拿到的是一份空白答案。此处响应尚未写出，可安全换号重试（冷却该账号）。
+	//
+	// 判定、文案、日志全在统一闸门里；这里只告诉闸门「非流式该把提示写进 JSON」。
+	// 流式链路走 SSE 通道，两条链路共用同一句话、同一套判定，照常 200 返回。
 	if !anthropicResponseHasRenderableContent(body) {
-		if err := s.reportEmptyContent(ctx, c, emptyContentReport{
+		_, err := s.reportEmptyContent(ctx, c, emptyContentReport{
 			Account:           account,
 			Resp:              resp,
 			UpstreamModel:     upstreamModel,
@@ -383,7 +385,16 @@ func (s *OpenAIGatewayService) handleNativeAnthropicBufferedResponse(
 			SawContent:        false,
 			FinishReason:      gjson.GetBytes(body, "stop_reason").String(),
 			CanFailover:       true,
-		}); err != nil {
+			WriteBufferedNotice: func(text string) bool {
+				rewritten, rewriteErr := sjson.SetBytes(body, "content", []map[string]string{{"type": "text", "text": text}})
+				if rewriteErr != nil {
+					return false
+				}
+				body = rewritten
+				return true
+			},
+		})
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -641,9 +652,9 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	// 的客户体验，绝不能当成功交给下游。
 	//
 	// 客户端自己断开的场景不记账：那是客户端行为，不是上游故障。
-	failoverOnEmptyContent := func(stage string) error {
+	failoverOnEmptyContent := func(stage string) (bool, error) {
 		if clientDisconnected {
-			return nil
+			return false, nil
 		}
 		return s.reportEmptyContent(ctx, c, emptyContentReport{
 			Account:           account,
@@ -655,6 +666,9 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			SawContent:        payloadContentSeen,
 			FinishReason:      upstreamStopReason,
 			CanFailover:       !openAIStreamClientOutputStarted(c, clientOutputStarted),
+			// 响应头在进流循环前已用 c.Header 设好（Content-Type / X-Accel-Buffering
+			// 等），首次 Write 自动提交，这里无需也不能再显式 WriteHeader。
+			WriteHeaders: func() {},
 		})
 	}
 
@@ -664,8 +678,12 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			if !ok {
 				// 空内容闸门必须先于 flushGuardBuffer：缓冲一旦放行，客户端就
 				// 收到（空的）200 流，换号窗口关闭。
-				if err := failoverOnEmptyContent("eof"); err != nil {
-					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), err
+				noticeWritten, gateErr := failoverOnEmptyContent("eof")
+				if gateErr != nil {
+					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), gateErr
+				}
+				if noticeWritten {
+					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), nil
 				}
 				flushGuardBuffer()
 				if !clientDisconnected {
@@ -692,8 +710,12 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 					// 终态已收到但读出错：同样可能是「有终态、无正文」。闸门先于
 					// 任何放行，避免把空回答当成功；闸门未命中时仍按既有语义放行
 					// 缓冲，不丢已收到的内容。
-					if err := failoverOnEmptyContent("terminal_read_error"); err != nil {
-						return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), err
+					noticeWritten, gateErr := failoverOnEmptyContent("terminal_read_error")
+					if gateErr != nil {
+						return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), gateErr
+					}
+					if noticeWritten {
+						return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), nil
 					}
 					flushGuardBuffer()
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), nil
