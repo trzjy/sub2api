@@ -29,13 +29,16 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 	account *Account,
 	body []byte,
 ) (*ForwardResult, error) {
-	// Cursor（shareai 号池中转）：入站已是 Chat Completions 形状，出站是 Cursor
-	// 原生协议端点。必须在 Gemini 转换链之前分流——落到通用路径会先把入站转成
-	// Gemini 形状再发往不支持 Gemini 协议的上游，必然被拒并白耗额度。
-	// 仅「cursor 且非 OpenAI 兼容账号」进 Connect 出站：OpenAI 兼容的 apikey 账号
-	// （kn-cy 等）必须绕过 Cursor 原生协议执行部件，自然落入下方通用 OpenAI 转发管线
-	// （与 openai_gateway_chat_completions.go:143 口径一致）。
-	if isCursorAccount(account) && !isCursorOpenAICompatibleAccount(account) {
+	// Cursor 账号必须在 Gemini 转换链之前分流——落到通用路径会先把入站 Chat
+	// Completions 转成 Gemini 形状再发往只支持 /chat/completions 的上游，必然失败。
+	//   - OpenAI 兼容账号（platform=cursor + type=apikey，如 kn-cy）：出站本身就是
+	//     OpenAI 兼容 /chat/completions 反代端点，必须以 Bearer api_key 直连转发，
+	//     绝不能再经 Cursor 原生协议执行部件或 Gemini 转换链。
+	//   - 其余 cursor 账号（OAuth Connect 号池）：沿用原 forwardCursorChatCompletions。
+	if isCursorAccount(account) {
+		if isCursorOpenAICompatibleAccount(account) {
+			return s.forwardCursorOpenAICompatibleChat(ctx, c, account, body)
+		}
 		res, ferr := s.forwardCursorChatCompletions(ctx, c, account, body)
 		if ferr != nil {
 			// 出口先把错误按 Chat Completions 形状写出，避免 handler 回落到
@@ -85,6 +88,215 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 	}
 
 	return s.forwardClaudeBodyAsChatCompletions(ctx, c, account, claudeBody, originalModel, clientStream, includeUsage, startTime)
+}
+
+// forwardCursorOpenAICompatibleChat 处理 platform=cursor + type=apikey 的 OpenAI
+// 兼容反代账号（kn-cy 等）。这类账号出站本身就是 OpenAI 兼容 /chat/completions
+// 端点，入站已是 Chat Completions 形状，直接改 model 后以 Bearer api_key 转发，
+// 响应原样回传客户端；绝不落入 Gemini 转换链或 Cursor 原生协议执行部件。
+func (s *GeminiMessagesCompatService) forwardCursorOpenAICompatibleChat(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+) (*ForwardResult, error) {
+	startTime := time.Now()
+
+	var ccReq apicompat.ChatCompletionsRequest
+	if err := json.Unmarshal(body, &ccReq); err != nil {
+		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
+	}
+	originalModel := ccReq.Model
+	if strings.TrimSpace(originalModel) == "" {
+		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
+	}
+	// 记录客户端是否显式要求 usage。流式分支会强制上游 include_usage 用于计费，
+	// 但客户端未要求时不把纯 usage 帧回写，保持客户端可见的流形状不变。
+	clientWantsUsage := ccReq.StreamOptions != nil && ccReq.StreamOptions.IncludeUsage
+
+	apiKey := account.GetCredential("api_key")
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", infraerrors.AccountConfigUnsupported)
+	}
+	baseURL := strings.TrimSpace(account.GetOpenAIBaseURL())
+	if baseURL == "" {
+		return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", infraerrors.AccountConfigUnsupported)
+	}
+	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
+	if err != nil {
+		return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", err.Error())
+	}
+	fullURL := strings.TrimRight(normalizedBaseURL, "/") + "/chat/completions"
+
+	mappedModel := originalModel
+	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
+		mappedModel = account.GetMappedModel(originalModel)
+	}
+	ccReq.Model = mappedModel
+	if ccReq.Stream {
+		// 兼容上游只在请求显式带 stream_options.include_usage 时才在末帧回 usage。
+		// 流式强制打开，否则本路径会把 usage 计成 0（少计费），口径同
+		// openai_gateway_messages_chat_fallback.go:84。
+		ccReq.StreamOptions = &apicompat.ChatStreamOptions{IncludeUsage: true}
+	}
+	upstreamBody, err := json.Marshal(&ccReq)
+	if err != nil {
+		return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", err.Error())
+	}
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+
+	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(upstreamBody))
+	if err != nil {
+		return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", err.Error())
+	}
+	upstreamReq.Header.Set("Content-Type", "application/json")
+	upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+	if err != nil {
+		return nil, s.handleUpstreamTransportError(ctx, c, account, err)
+	}
+	defer resp.Body.Close()
+
+	requestID := resp.Header.Get("x-request-id")
+	if resp.StatusCode >= 400 {
+		respBody := s.readUpstreamErrorBody(resp)
+		return nil, s.writeChatCompletionsError(c, resp.StatusCode, "upstream_error", extractUpstreamErrorMessage(respBody))
+	}
+
+	var usage ClaudeUsage
+	if ccReq.Stream {
+		usage, err = s.writeCursorOpenAICompatibleChatStream(c, resp, !clientWantsUsage)
+	} else {
+		usage, err = s.writeCursorOpenAICompatibleChatNonStream(c, resp)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &ForwardResult{
+		RequestID:     requestID,
+		Usage:         usage,
+		Model:         originalModel,
+		UpstreamModel: mappedModel,
+		Stream:        ccReq.Stream,
+		Duration:      time.Since(startTime),
+	}, nil
+}
+
+// writeCursorOpenAICompatibleChatStream 逐帧透传 OpenAI Chat Completions SSE，
+// 并从各帧 usage 累计出 ClaudeUsage。
+// dropUsageOnlyChunk 为真（客户端未要求 usage）时，纯 usage 帧（choices 为空且
+// usage 非空）不回写客户端，只累计 usage——避免把为计费而强制打开的 usage 帧
+// 暴露给未请求的客户端。
+func (s *GeminiMessagesCompatService) writeCursorOpenAICompatibleChatStream(
+	c *gin.Context,
+	resp *http.Response,
+	dropUsageOnlyChunk bool,
+) (ClaudeUsage, error) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		return ClaudeUsage{}, s.writeChatCompletionsError(c, http.StatusInternalServerError, "api_error", infraerrors.UpstreamStreamReadFailed)
+	}
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+
+	reader := bufio.NewReader(resp.Body)
+	var usage ClaudeUsage
+	for {
+		line, readErr := reader.ReadString('\n')
+		if len(line) > 0 {
+			trimmed := strings.TrimRight(line, "\r\n")
+			if strings.HasPrefix(trimmed, "data:") {
+				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+				// 空 payload 不写 data: 帧，也不参与 usage 解析。
+				if payload != "" {
+					var chunk apicompat.ChatCompletionsChunk
+					chunkParsed := payload != "[DONE]" && json.Unmarshal([]byte(payload), &chunk) == nil
+					// 纯 usage 帧：choices 为空且 usage 非空。
+					usageOnlyChunk := chunkParsed && len(chunk.Choices) == 0 && chunk.Usage != nil
+					// 客户端未要求 usage 时丢弃纯 usage 帧，仅累计 usage，不回写客户端。
+					if !(dropUsageOnlyChunk && usageOnlyChunk) {
+						if _, werr := fmt.Fprintf(c.Writer, "data: %s\n\n", payload); werr != nil {
+							break
+						}
+						flusher.Flush()
+					}
+					if chunkParsed && chunk.Usage != nil {
+						u := cursorOpenAICompatibleChatUsage(chunk.Usage)
+						usage.InputTokens += u.InputTokens
+						usage.OutputTokens += u.OutputTokens
+						usage.CacheReadInputTokens += u.CacheReadInputTokens
+						usage.CacheCreationInputTokens += u.CacheCreationInputTokens
+					}
+				}
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	return usage, nil
+}
+
+// writeCursorOpenAICompatibleChatNonStream 把上游 chat.completion 响应体原样写回客户端，
+// 并从 usage 字段解析出 ClaudeUsage。
+func (s *GeminiMessagesCompatService) writeCursorOpenAICompatibleChatNonStream(
+	c *gin.Context,
+	resp *http.Response,
+) (ClaudeUsage, error) {
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ClaudeUsage{}, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
+	}
+	var usage ClaudeUsage
+	var ccResp apicompat.ChatCompletionsResponse
+	if json.Unmarshal(respBody, &ccResp) == nil {
+		usage = cursorOpenAICompatibleChatUsage(ccResp.Usage)
+	}
+	c.Data(resp.StatusCode, "application/json", respBody)
+	return usage, nil
+}
+
+// cursorOpenAICompatibleChatUsage 按 apicompat.chatUsageToAnthropicUsage 的口径把
+// OpenAI Chat Completions usage 落到 ClaudeUsage：缓存读写 token 单列，InputTokens
+// 扣除缓存命中与缓存写入，不折算、不补默认值。
+func cursorOpenAICompatibleChatUsage(u *apicompat.ChatUsage) ClaudeUsage {
+	if u == nil {
+		return ClaudeUsage{}
+	}
+	cachedTokens := 0
+	cacheCreationTokens := 0
+	if u.PromptTokensDetails != nil {
+		cachedTokens = u.PromptTokensDetails.CachedTokens
+		// cache_write_tokens 与 cache_creation_tokens 是同一数量的两种拼写，
+		// 优先 write、回落 creation，不相加（口径同 chatUsageToAnthropicUsage）。
+		if u.PromptTokensDetails.CacheWriteTokens > 0 {
+			cacheCreationTokens = u.PromptTokensDetails.CacheWriteTokens
+		} else {
+			cacheCreationTokens = u.PromptTokensDetails.CacheCreationTokens
+		}
+	}
+	inputTokens := u.PromptTokens - cachedTokens - cacheCreationTokens
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	return ClaudeUsage{
+		InputTokens:              inputTokens,
+		OutputTokens:             u.CompletionTokens,
+		CacheReadInputTokens:     cachedTokens,
+		CacheCreationInputTokens: cacheCreationTokens,
+	}
 }
 
 func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
