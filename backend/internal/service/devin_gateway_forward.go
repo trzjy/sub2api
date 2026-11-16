@@ -160,7 +160,11 @@ func stripDevinUnsupportedToolSchemaKeywords(body []byte) []byte {
 		return body
 	}
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	// UseNumber 让数字按原文保留（json.Number），避免整份 body 重序列化时
+	// 大整数经 float64 丢精度（如 9007199254740993 被改写成 9007199254740992）。
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&payload); err != nil {
 		return body
 	}
 	tools, ok := payload["tools"].([]any)
@@ -197,37 +201,61 @@ func stripDevinUnsupportedToolSchemaKeywords(body []byte) []byte {
 
 // stripDevinSchemaNode 递归清理单个 schema 节点（原地修改 map/slice），
 // 通过 changed 汇总是否发生过改动。
+//
+// 只下钻 JSON Schema 的 schema 承载位置（properties/patternProperties/$defs/
+// definitions/dependentSchemas 的 map 值，additionalProperties/items/contains/
+// if/then/else/not/unevaluatedItems/unevaluatedProperties 单值，以及
+// anyOf/oneOf/allOf/prefixItems 数组元素），绝不进入 enum/const/default/examples
+// 等数据字段；任何承载位置命中 propertyNames 一律删除。
 func stripDevinSchemaNode(node any, changed *bool) {
 	switch v := node.(type) {
 	case map[string]any:
+		// prefixItems：先递归各元素清理其内嵌脏关键字，再按既有逻辑折叠为 items
+		// 并删除。回退的 items 使用小写 "string"，不做 type 大小写规范化。
 		if rawPrefix, exists := v["prefixItems"]; exists {
-			if prefixItems, ok := rawPrefix.([]any); ok && len(prefixItems) > 0 {
-				itemsValue, hasItems := v["items"]
-				_, itemsIsBool := itemsValue.(bool)
-				if !hasItems || itemsValue == nil || itemsIsBool {
-					best := devinBestPrefixItem(prefixItems)
-					if best == nil {
-						best = map[string]any{"type": "string"}
+			if prefixItems, ok := rawPrefix.([]any); ok {
+				for _, elem := range prefixItems {
+					stripDevinSchemaNode(elem, changed)
+				}
+				if len(prefixItems) > 0 {
+					itemsValue, hasItems := v["items"]
+					_, itemsIsBool := itemsValue.(bool)
+					if !hasItems || itemsValue == nil || itemsIsBool {
+						best := devinBestPrefixItem(prefixItems)
+						if best == nil {
+							best = map[string]any{"type": "string"}
+						}
+						v["items"] = best
 					}
-					v["items"] = best
 				}
 			}
 			delete(v, "prefixItems")
 			*changed = true
 		}
+
+		// 任何 schema 承载位置命中 propertyNames 一律删除。
 		if _, exists := v["propertyNames"]; exists {
 			delete(v, "propertyNames")
 			*changed = true
 		}
 
-		if properties, ok := v["properties"].(map[string]any); ok {
-			for _, property := range properties {
-				stripDevinSchemaNode(property, changed)
+		// map 承载位置：值逐个递归。
+		for _, key := range []string{"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"} {
+			if children, ok := v[key].(map[string]any); ok {
+				for _, child := range children {
+					stripDevinSchemaNode(child, changed)
+				}
 			}
 		}
-		if items, ok := v["items"]; ok {
-			stripDevinSchemaNode(items, changed)
+
+		// 单值承载位置；items 为数组形态时进入 []any 分支逐元素递归。
+		for _, key := range []string{"additionalProperties", "items", "contains", "if", "then", "else", "not", "unevaluatedItems", "unevaluatedProperties"} {
+			if child, ok := v[key]; ok {
+				stripDevinSchemaNode(child, changed)
+			}
 		}
+
+		// 数组承载位置。
 		for _, key := range []string{"anyOf", "oneOf", "allOf"} {
 			if branches, ok := v[key].([]any); ok {
 				for _, branch := range branches {
