@@ -1384,7 +1384,7 @@ func (s *GeminiMessagesCompatService) writeCursorOpenAICompatibleMessagesStream(
 					var chunk apicompat.ChatCompletionsChunk
 					if jsonErr := json.Unmarshal([]byte(payload), &chunk); jsonErr == nil {
 						for i := range chunk.Choices {
-							if chunk.Choices[i].FinishReason != nil {
+							if chunk.Choices[i].FinishReason != nil && strings.TrimSpace(*chunk.Choices[i].FinishReason) != "" {
 								sawTerminal = true
 							}
 						}

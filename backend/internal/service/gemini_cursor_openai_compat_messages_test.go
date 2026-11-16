@@ -255,6 +255,39 @@ func TestForwardCursorOpenAICompatibleMessages(t *testing.T) {
 		require.NotContains(t, out, "event: message_stop", "truncated stream must not gain a synthetic message_stop")
 	})
 
+	t.Run("empty finish_reason then EOF returns error without message_stop", func(t *testing.T) {
+		// 首帧带内容但 finish_reason 为空字符串，随后正常 EOF。
+		// 空 finish_reason 不得算终态：必须报错而非补发 message_stop 把截断流包装成功。
+		upstreamBody := `data: {"id":"chatcmpl-5","object":"chat.completion.chunk","created":1,"model":"gemini-3.8-flash-mapped","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":""}]}` + "\n"
+		httpStub := &geminiCompatHTTPUpstreamStub{
+			response: &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type": []string{"text/event-stream; charset=utf-8"},
+				},
+				Body: io.NopCloser(strings.NewReader(upstreamBody)),
+			},
+		}
+		svc := &GeminiMessagesCompatService{
+			httpUpstream: httpStub,
+			cfg:          &config.Config{},
+		}
+
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		body := []byte(`{"model":"gemini-3.8-flash","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+		result, err := svc.Forward(context.Background(), c, cursorOpenAICompatAccount(), body)
+		require.Error(t, err)
+		require.Nil(t, result)
+		require.Contains(t, err.Error(), "truncated before terminal chunk")
+
+		out := rec.Body.String()
+		require.Contains(t, out, `"text":"partial"`, "first frame delta should still reach the client")
+		require.NotContains(t, out, "event: message_stop", "empty finish_reason must not count as terminal")
+	})
+
 	t.Run("non-compatible cursor account stays on cursor native path", func(t *testing.T) {
 		// 非兼容 cursor 账号（OAuth）必须仍进 forwardCursorMessages，不触碰 httpUpstream。
 		// cursorExecution 故意留 nil：该分支会在 requireCursorExecution 处失败关闭，
