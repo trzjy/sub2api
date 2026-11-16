@@ -1553,30 +1553,6 @@ func normalizeWebRequestBodyForAdapter(body []byte) ([]byte, error) {
 	return json.Marshal(cc)
 }
 
-// normalizeDevinResponsesBody 把 OpenAI Responses 形状（顶层 "input"）的请求体归一为
-// Chat Completions 形状（顶层 "messages"），使 Devin 的 BuildDevinChatParams（只读
-// messages）能正确读取消息与工具。复用既有 Responses→ChatCompletions 转换，不新增
-// 转换实现。已是 Chat 形状（含 messages）或非 Responses 形状（无 input）时原样返回；
-// 转换失败失败关闭（返回 error），不回落原 Responses body。
-func normalizeDevinResponsesBody(body []byte) ([]byte, error) {
-	if gjson.GetBytes(body, "messages").Exists() || !gjson.GetBytes(body, "input").Exists() {
-		return body, nil
-	}
-	var respReq apicompat.ResponsesRequest
-	if err := json.Unmarshal(body, &respReq); err != nil {
-		return nil, fmt.Errorf("devin responses: parse request: %w", err)
-	}
-	ccReq, err := apicompat.ResponsesToChatCompletionsRequest(&respReq)
-	if err != nil {
-		return nil, fmt.Errorf("devin responses: convert to chat completions: %w", err)
-	}
-	converted, err := json.Marshal(ccReq)
-	if err != nil {
-		return nil, fmt.Errorf("devin responses: marshal chat completions: %w", err)
-	}
-	return converted, nil
-}
-
 // devinResponsesToolIdentity 是 Responses→Chat 摊平后保留的工具身份集合，供回程
 // （web_protocol_bridge 的 Responses 模式）把摊平后的普通 function_call 还原为
 // custom_tool_call / tool_search_call / 带 namespace 字段的 function_call。
@@ -1615,10 +1591,12 @@ func devinResponsesToolIdentityFrom(c *gin.Context) *devinResponsesToolIdentity 
 
 // normalizeDevinResponsesBodyWithIdentity 把 Responses 形状请求转为 Chat 形状，并在
 // 转换前解析出工具身份写入 gin context。已是 Chat 形状或非 Responses 形状时原样返回、
-// 不写身份（与 normalizeDevinResponsesBody 的短路语义一致，chat/messages 入口不受影响）。
+// 不写身份（chat/messages 入口不受影响）。
 //
 // 失败关闭口径与 openai responses chat fallback 完全一致：解析/校验/转换任一步失败
 // 都写 400 invalid_request_error 并返回错误，绝不让 handler 误判成 502 upstream_error。
+// 每个错误出口在 writeOpenAIResponsesFallbackError 之后立即 MarkResponseCommitted，
+// 阻止 handler 收尾把已写出的 JSON 误判成 SSE 并追加 response.failed（外审 r8 must_fix）。
 func (s *OpenAIGatewayService) normalizeDevinResponsesBodyWithIdentity(c *gin.Context, body []byte) ([]byte, error) {
 	if gjson.GetBytes(body, "messages").Exists() || !gjson.GetBytes(body, "input").Exists() {
 		return body, nil
@@ -1627,15 +1605,18 @@ func (s *OpenAIGatewayService) normalizeDevinResponsesBodyWithIdentity(c *gin.Co
 	var respReq apicompat.ResponsesRequest
 	if err := json.Unmarshal(body, &respReq); err != nil {
 		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
+		MarkResponseCommitted(c)
 		return nil, fmt.Errorf("devin responses: parse request: %w", err)
 	}
 	if strings.TrimSpace(respReq.Model) == "" {
 		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
+		MarkResponseCommitted(c)
 		return nil, fmt.Errorf("devin responses: missing model in request")
 	}
 	effectiveTools, err := apicompat.EffectiveResponsesTools(&respReq)
 	if err != nil {
 		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		MarkResponseCommitted(c)
 		return nil, fmt.Errorf("devin responses: resolve responses tools: %w", err)
 	}
 
@@ -1644,11 +1625,13 @@ func (s *OpenAIGatewayService) normalizeDevinResponsesBodyWithIdentity(c *gin.Co
 	})
 	if err != nil {
 		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		MarkResponseCommitted(c)
 		return nil, fmt.Errorf("devin responses: convert to chat completions: %w", err)
 	}
 	converted, err := json.Marshal(chatReq)
 	if err != nil {
 		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		MarkResponseCommitted(c)
 		return nil, fmt.Errorf("devin responses: marshal chat completions: %w", err)
 	}
 

@@ -3,12 +3,16 @@
 package service
 
 import (
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
+// 以下三个形状用例走生产入口 normalizeDevinResponsesBodyWithIdentity（旧的无身份
+// 转换函数已随外审 r8 must_fix 删除），断言保持等价。
 func TestNormalizeDevinResponsesBody(t *testing.T) {
 	// ① Responses 形状（input + tools[].type=function + max_output_tokens）→
 	// 输出含 messages、tools[].function.name，不含顶层 input。
@@ -26,7 +30,10 @@ func TestNormalizeDevinResponsesBody(t *testing.T) {
 			"max_output_tokens": 256
 		}`)
 
-		out, err := normalizeDevinResponsesBody(responsesBody)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		svc := &OpenAIGatewayService{}
+		out, err := svc.normalizeDevinResponsesBodyWithIdentity(c, responsesBody)
 		require.NoError(t, err)
 
 		require.True(t, gjson.GetBytes(out, "messages").Exists(), "输出应含 messages")
@@ -41,7 +48,10 @@ func TestNormalizeDevinResponsesBody(t *testing.T) {
 	// ② 已是 Chat 形状（含 messages）→ 字节不变。
 	t.Run("chat shape stays byte-identical", func(t *testing.T) {
 		chatBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
-		out, err := normalizeDevinResponsesBody(chatBody)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		svc := &OpenAIGatewayService{}
+		out, err := svc.normalizeDevinResponsesBodyWithIdentity(c, chatBody)
 		require.NoError(t, err)
 		require.Equal(t, chatBody, out, "已是 Chat 形状应字节不变")
 	})
@@ -52,8 +62,12 @@ func TestNormalizeDevinResponsesBody(t *testing.T) {
 		require.True(t, gjson.GetBytes(malformed, "input").Exists(),
 			"前置条件：该报文应被 gjson 判定为像 Responses（含 input）")
 
-		out, err := normalizeDevinResponsesBody(malformed)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		svc := &OpenAIGatewayService{}
+		out, err := svc.normalizeDevinResponsesBodyWithIdentity(c, malformed)
 		require.Error(t, err, "非法 JSON 且像 Responses 时应返回错误")
 		require.Nil(t, out, "失败时不得回落原 Responses body")
+		require.True(t, IsResponseCommitted(c), "错误出口必须标记响应已提交，阻止 handler 补 SSE")
 	})
 }
