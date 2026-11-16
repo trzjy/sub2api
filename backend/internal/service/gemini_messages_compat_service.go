@@ -4008,11 +4008,29 @@ func cleanToolSchemaNode(schema any, schemaNode bool) any {
 		}
 
 		cleaned := make(map[string]any)
+		// Draft 2020-12 的 prefixItems 元组在 Gemini Schema 中不存在。若缺少可用的
+		// items，先从 prefixItems 中选出最佳元素作为 items 候选；prefixItems 键本身
+		// 始终不会写入 cleaned。
+		var tupleItems any
+		var useTupleItems bool
+		if prefixItems, ok := v["prefixItems"].([]any); ok && len(prefixItems) > 0 {
+			itemsValue, hasItems := v["items"]
+			_, itemsIsBool := itemsValue.(bool)
+			if !hasItems || itemsValue == nil || itemsIsBool {
+				best := bestToolSchemaOption(prefixItems)
+				if best == nil {
+					best = map[string]any{"type": "STRING"}
+				}
+				tupleItems = cleanToolSchemaNode(best, true)
+				useTupleItems = true
+			}
+		}
 		for key, value := range v {
 			// 跳过不支持的字段
 			if key == "$schema" || key == "$id" || key == "$ref" ||
 				key == "$defs" || key == "definitions" ||
-				key == "additionalProperties" || key == "patternProperties" || key == "minLength" ||
+				key == "additionalProperties" || key == "patternProperties" || key == "propertyNames" ||
+				key == "prefixItems" || key == "minLength" ||
 				key == "maxLength" || key == "minItems" || key == "maxItems" || key == "exclusiveMinimum" ||
 				key == "deprecated" || key == "examples" {
 				continue
@@ -4029,7 +4047,7 @@ func cleanToolSchemaNode(schema any, schemaNode bool) any {
 				} else {
 					cleaned[key] = cleanToolSchemaNode(value, false)
 				}
-			case "items", "contains", "propertyNames", "if", "then", "else", "not", "contentSchema",
+			case "items", "contains", "if", "then", "else", "not", "contentSchema",
 				"additionalItems", "unevaluatedItems", "unevaluatedProperties":
 				cleaned[key] = cleanToolSchemaNode(value, true)
 			case "dependencies":
@@ -4046,7 +4064,7 @@ func cleanToolSchemaNode(schema any, schemaNode bool) any {
 				} else {
 					cleaned[key] = cleanToolSchemaNode(value, false)
 				}
-			case "anyOf", "allOf", "oneOf", "prefixItems":
+			case "anyOf", "allOf", "oneOf":
 				if schemas, ok := value.([]any); ok {
 					cleanedSchemas := make([]any, len(schemas))
 					for i, childSchema := range schemas {
@@ -4059,6 +4077,9 @@ func cleanToolSchemaNode(schema any, schemaNode bool) any {
 			default:
 				cleaned[key] = cleanToolSchemaNode(value, false)
 			}
+		}
+		if useTupleItems {
+			cleaned["items"] = tupleItems
 		}
 		if constValue, exists := v["const"]; exists {
 			if stringValue, ok := constValue.(string); ok {
@@ -4121,6 +4142,44 @@ func cleanToolSchemaNode(schema any, schemaNode bool) any {
 	default:
 		return v
 	}
+}
+
+// bestToolSchemaOption 从候选 Schema 列表中选出评分最高的第一个；全部为 0 分时
+// 返回 nil（由调用方回退到 STRING），评分口径与 antigravity 包的 scoreSchemaOption 一致。
+func bestToolSchemaOption(options []any) any {
+	var best any
+	bestScore := 0
+	for _, option := range options {
+		if score := toolSchemaOptionScore(option); score > bestScore {
+			bestScore = score
+			best = option
+		}
+	}
+	return best
+}
+
+func toolSchemaOptionScore(val any) int {
+	m, ok := val.(map[string]any)
+	if !ok {
+		return 0
+	}
+	typeStr, _ := m["type"].(string)
+	if _, hasProps := m["properties"]; hasProps || typeStr == "object" {
+		return 3
+	}
+	if _, hasItems := m["items"]; hasItems || typeStr == "array" {
+		return 2
+	}
+	if _, hasEnum := m["enum"]; hasEnum {
+		return 1
+	}
+	if _, hasConst := m["const"]; hasConst {
+		return 1
+	}
+	if typeStr != "" && typeStr != "null" {
+		return 1
+	}
+	return 0
 }
 
 func normalizeGeminiEnum(values []any) ([]any, bool) {
