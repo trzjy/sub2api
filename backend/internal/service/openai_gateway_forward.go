@@ -217,7 +217,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// Responses 管线完全不兼容。必须在下方通用 Responses / 网页逆向管线之前分流，
 	// 否则 Devin 账号会被通用路径按 API Key 账号处理，把请求打到错误上游。
 	if account.Platform == PlatformDevin {
-		return s.forwardDevin(ctx, c, account, body, originalModel, reqStream, startTime, webResponseModeResponses)
+		devinBody, err := normalizeDevinResponsesBody(body)
+		if err != nil {
+			return nil, err
+		}
+		return s.forwardDevin(ctx, c, account, devinBody, originalModel, reqStream, startTime, webResponseModeResponses)
 	}
 
 	// 网页逆向平台（W3 方案任务 1）：入站 OpenAI 协议经各自适配器转换为官方网页端
@@ -1543,6 +1547,30 @@ func normalizeWebRequestBodyForAdapter(body []byte) ([]byte, error) {
 		return body, fmt.Errorf("normalize web Responses request to chat completions: %w", err)
 	}
 	return json.Marshal(cc)
+}
+
+// normalizeDevinResponsesBody 把 OpenAI Responses 形状（顶层 "input"）的请求体归一为
+// Chat Completions 形状（顶层 "messages"），使 Devin 的 BuildDevinChatParams（只读
+// messages）能正确读取消息与工具。复用既有 Responses→ChatCompletions 转换，不新增
+// 转换实现。已是 Chat 形状（含 messages）或非 Responses 形状（无 input）时原样返回；
+// 转换失败失败关闭（返回 error），不回落原 Responses body。
+func normalizeDevinResponsesBody(body []byte) ([]byte, error) {
+	if gjson.GetBytes(body, "messages").Exists() || !gjson.GetBytes(body, "input").Exists() {
+		return body, nil
+	}
+	var respReq apicompat.ResponsesRequest
+	if err := json.Unmarshal(body, &respReq); err != nil {
+		return nil, fmt.Errorf("devin responses: parse request: %w", err)
+	}
+	ccReq, err := apicompat.ResponsesToChatCompletionsRequest(&respReq)
+	if err != nil {
+		return nil, fmt.Errorf("devin responses: convert to chat completions: %w", err)
+	}
+	converted, err := json.Marshal(ccReq)
+	if err != nil {
+		return nil, fmt.Errorf("devin responses: marshal chat completions: %w", err)
+	}
+	return converted, nil
 }
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
