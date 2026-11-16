@@ -66,7 +66,23 @@ export default {
       edit: 'Edit',
       refresh: 'Refresh',
       clearExhausted: 'Clear Exhausted',
-      delete: 'Delete'
+      delete: 'Delete',
+      copy: 'Copy config'
+    },
+    copy: {
+      title: 'Copy quota key config',
+      source: 'Source',
+      fields: 'Copies: priority, concurrency, load factor, account billing multiplier, group binding, model restriction (whitelist/mapping). Expiry and notes are not copied.',
+      targets: 'Target keys (same upstream)',
+      noTargets: 'No other keys under this upstream',
+      selectAll: 'Select all',
+      hint: "Copy saves immediately and syncs the target keys' accounts. If the source has no model restriction, targets keep theirs; if the source has no explicit group binding, targets keep theirs.",
+      confirm: 'Copy to {count} keys',
+      saving: 'Copying…',
+      success: 'Config copied to {count} keys',
+      partial: 'Copied to {ok}, {failed} failed',
+      itemError: 'Copy failed',
+      needTarget: 'Select at least one target key'
     },
     sweepExpired: 'Sweep Expired',
     confirmDeleteTitle: 'Delete Quota Key',

@@ -199,6 +199,16 @@
               >
                 <Icon name="edit" size="sm" />
               </button>
+              <!-- QKCOPY-FE01：一键复制配置（同上游多目标），入口紧随「编辑」之后；
+                   不复制 expires_at / notes，字段口径见弹窗 fields 文案。 -->
+              <button
+                class="rounded p-1 text-gray-400 transition-colors hover:text-blue-600 disabled:opacity-40 dark:hover:text-blue-400"
+                :title="t('admin.quotaKeys.actions.copy')"
+                data-testid="quota-key-copy"
+                @click="openCopyDialog(row)"
+              >
+                <Icon name="copy" size="sm" />
+              </button>
               <button
                 class="rounded p-1 text-gray-400 transition-colors hover:text-gray-600 disabled:opacity-40 dark:hover:text-gray-200"
                 :disabled="busyId === row.id"
@@ -961,6 +971,86 @@
         </div>
       </template>
     </BaseDialog>
+
+    <!-- QKCOPY-FE01：复制配置弹窗。把源码激活码的 priority/concurrency/load_factor/
+         rate_multiplier/model_mapping/group_ids 一键写入同 upstream_key 的其它激活码
+         （目标可多选），沿用既有 update 逐个保存（后端同事务同步目标码名下账号）；
+         不复制 expires_at / notes。 -->
+    <BaseDialog
+      :show="showCopyDialog"
+      :title="t('admin.quotaKeys.copy.title')"
+      width="normal"
+      :close-on-escape="!copySaving"
+      :show-close-button="!copySaving"
+      @close="closeCopyDialog"
+    >
+      <div v-if="copySource" class="space-y-4">
+        <p class="text-sm text-gray-700 dark:text-gray-300">
+          {{ t('admin.quotaKeys.copy.source') }}
+          <code class="ml-1 rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-900 dark:bg-dark-600 dark:text-gray-100">
+            {{ copySource.code_masked }}
+          </code>
+        </p>
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.quotaKeys.copy.fields') }}
+        </p>
+
+        <div>
+          <p class="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t('admin.quotaKeys.copy.targets') }}
+          </p>
+          <p v-if="copyTargets.length === 0" class="text-sm text-gray-500 dark:text-gray-400">
+            {{ t('admin.quotaKeys.copy.noTargets') }}
+          </p>
+          <template v-else>
+            <label class="mb-1 flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+              <input
+                type="checkbox"
+                class="h-4 w-4 rounded border-gray-300 text-blue-600"
+                :checked="allCopyTargetsSelected"
+                @change="toggleAllCopyTargets"
+              />
+              {{ t('admin.quotaKeys.copy.selectAll') }}
+            </label>
+            <div class="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-gray-200 p-2 dark:border-dark-600">
+              <label
+                v-for="row in copyTargets"
+                :key="row.id"
+                class="flex items-center gap-2 rounded px-1 py-0.5 text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-dark-700"
+              >
+                <input type="checkbox" v-model="copyTargetIds" :value="row.id" class="h-4 w-4 rounded border-gray-300 text-blue-600" />
+                <code class="font-mono text-xs text-gray-900 dark:text-gray-100">{{ row.code_masked }}</code>
+              </label>
+            </div>
+          </template>
+        </div>
+
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.quotaKeys.copy.hint') }}
+        </p>
+
+        <p v-if="copyError" class="text-sm text-red-600 dark:text-red-400">{{ copyError }}</p>
+      </div>
+
+      <template #footer>
+        <div class="flex items-center justify-end gap-2">
+          <button class="btn btn-secondary" :disabled="copySaving" @click="closeCopyDialog">
+            {{ t('common.cancel') }}
+          </button>
+          <button
+            class="btn btn-primary"
+            :disabled="copySaving || copyTargetIds.length === 0"
+            @click="submitCopy"
+          >
+            {{
+              copySaving
+                ? t('admin.quotaKeys.copy.saving')
+                : t('admin.quotaKeys.copy.confirm', { count: copyTargetIds.length })
+            }}
+          </button>
+        </div>
+      </template>
+    </BaseDialog>
   </AppLayout>
 </template>
 
@@ -1072,6 +1162,129 @@ const showProbeDialog = ref(false)
 const probing = ref(false)
 const probeResult = ref<ProbeQuotaResponse | null>(null)
 const probeError = ref('')
+
+// --- 复制配置（QKCOPY-FE01）-------------------------------------------
+// 把源码激活码的 priority/concurrency/load_factor/rate_multiplier/model_mapping/group_ids
+// 一键写入同 upstream_key 的其它激活码（目标可多选），不复制 expires_at / notes。
+const showCopyDialog = ref(false)
+// 被复制配置的「源码」行（打开弹窗时取整行，弹窗内展示 code_masked 与字段口径）。
+const copySource = ref<QuotaKey | null>(null)
+// 已勾选的目标激活码 id（可多选）。
+const copyTargetIds = ref<number[]>([])
+// 串行逐个 update 期间的提交态（禁用确认按钮并切换文案）。
+const copySaving = ref(false)
+// 弹窗内错误提示（needTarget / partial + 失败明细），空串不展示。
+const copyError = ref('')
+
+// 候选目标 = 同上游（upstream_key 相同）的其它激活码；源码自身排除；
+// 源码 upstream_key 为空（后端未回填）时无候选 → 返回空数组。
+const copyTargets = computed(() => {
+  const src = copySource.value
+  if (!src || !src.upstream_key) return []
+  return keys.value.filter((k) => k.id !== src.id && k.upstream_key === src.upstream_key)
+})
+
+// 全选态：候选非空且每个候选都被勾选。
+const allCopyTargetsSelected = computed(() =>
+  copyTargets.value.length > 0 &&
+  copyTargets.value.every((row) => copyTargetIds.value.includes(row.id))
+)
+
+// 全选 / 取消全选切换。
+function toggleAllCopyTargets() {
+  if (allCopyTargetsSelected.value) {
+    copyTargetIds.value = []
+  } else {
+    copyTargetIds.value = copyTargets.value.map((row) => row.id)
+  }
+}
+
+// 打开复制弹窗：重置选中/错误/提交态，以当前行为源码。
+// 保存期间禁止重新打开：弹窗无焦点圈定，键盘 Tab 仍可到达背景行按钮；
+// 若此时覆盖来源并重置 copySaving，旧批次完成会清空/误关新弹窗。
+function openCopyDialog(row: QuotaKey) {
+  if (copySaving.value) return
+  copySource.value = row
+  copyTargetIds.value = []
+  copySaving.value = false
+  copyError.value = ''
+  showCopyDialog.value = true
+}
+
+// 关闭复制弹窗并清空全部复制态，避免下次打开残留。
+// 保存期间禁止关闭：旧批次完成时会清理/覆盖弹窗状态，若中途关闭再重开，
+// 旧批次会清空新选择甚至误关新弹窗。BaseDialog 的关闭按钮与 Escape 已按
+// copySaving 禁用，这里再兜一层，防止其它入口触发 close。
+function closeCopyDialog() {
+  if (copySaving.value) return
+  showCopyDialog.value = false
+  copySource.value = null
+  copyTargetIds.value = []
+  copySaving.value = false
+  copyError.value = ''
+}
+
+// 从源码行构建 update payload（QKCOPY-FE01 字段复制映射，见方案 §4）：
+// - priority / rate_multiplier：缺省回落 1（后端默认口径）；
+// - concurrency / load_factor：缺省显式传 null（清空目标回默认）；
+// - model_mapping：仅在源码有值（非空对象）时提交，否则不携带该键（目标保持原状，
+//   因为 model_mapping:null/{} 会被后端 400 拒绝，无清空路径）；
+// - group_ids：仅在源码非 null 时提交（[] 也提交 = 显式解绑全部；null = 目标保持原状）。
+function buildCopyPayload(source: QuotaKey): UpdateQuotaKeyRequest {
+  const payload: UpdateQuotaKeyRequest = {
+    priority: source.priority ?? 1,
+    concurrency: source.concurrency ?? null,
+    load_factor: source.load_factor ?? null,
+    rate_multiplier: source.rate_multiplier ?? 1
+  }
+  if (source.model_mapping && Object.keys(source.model_mapping).length > 0) {
+    payload.model_mapping = { ...source.model_mapping }
+  }
+  if (source.group_ids) {
+    payload.group_ids = [...source.group_ids]
+  }
+  return payload
+}
+
+// 提交复制：无目标 → needTarget 提示并返回；否则串行逐个 update，
+// 统计成功数与失败明细。全部成功 → showSuccess 并关闭；有失败 → partial + 明细，
+// 弹窗保持打开；两种情况都重新 load() 刷新列表（目标配置已写入，行值需同步）。
+async function submitCopy() {
+  // 保存期间禁止重复提交（按钮已禁用，这里再兜一层）。
+  if (copySaving.value) return
+  const src = copySource.value
+  if (!src) return
+  const targets = copyTargets.value.filter((row) => copyTargetIds.value.includes(row.id))
+  if (targets.length === 0) {
+    copyError.value = t('admin.quotaKeys.copy.needTarget')
+    return
+  }
+  copySaving.value = true
+  copyError.value = ''
+  let ok = 0
+  const failures: string[] = []
+  for (const target of targets) {
+    try {
+      await adminAPI.quotaKeys.update(target.id, buildCopyPayload(src))
+      ok++
+    } catch (err: unknown) {
+      failures.push(
+        `${target.code_masked}：${extractApiErrorMessage(err, t('admin.quotaKeys.copy.itemError'))}`
+      )
+    }
+  }
+  if (failures.length === 0) {
+    appStore.showSuccess(t('admin.quotaKeys.copy.success', { count: ok }))
+    showCopyDialog.value = false
+    copySource.value = null
+    copyTargetIds.value = []
+  } else {
+    copyError.value =
+      t('admin.quotaKeys.copy.partial', { ok, failed: failures.length }) + ' ' + failures.join('；')
+  }
+  copySaving.value = false
+  await load()
+}
 // KNCY-O：探测弹窗「已用/总额度」按 usage 投影投影展示美元额度。
 // 当 usage.remaining_unit === 'usd' 时，分值（used/max）会被美元口径的
 // 今日剩余 / 总量剩余取代；其它情况（无 usage 或非 usd）逐字保持原分值展示。
