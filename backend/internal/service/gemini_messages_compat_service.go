@@ -1370,15 +1370,24 @@ func (s *GeminiMessagesCompatService) writeCursorOpenAICompatibleMessagesStream(
 	state := apicompat.NewChatCompletionsToAnthropicStreamState(originalModel)
 	reader := bufio.NewReader(resp.Body)
 	var firstTokenMs *int
+	var sawTerminal bool
+	var readErr error
 	for {
 		line, err := reader.ReadString('\n')
 		if len(line) > 0 && (err == nil || errors.Is(err, io.EOF)) {
 			trimmed := strings.TrimRight(line, "\r\n")
 			if strings.HasPrefix(trimmed, "data:") {
 				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-				if payload != "" && payload != "[DONE]" {
+				if payload == "[DONE]" {
+					sawTerminal = true
+				} else if payload != "" {
 					var chunk apicompat.ChatCompletionsChunk
 					if jsonErr := json.Unmarshal([]byte(payload), &chunk); jsonErr == nil {
+						for i := range chunk.Choices {
+							if chunk.Choices[i].FinishReason != nil {
+								sawTerminal = true
+							}
+						}
 						events := apicompat.ChatCompletionsChunkToAnthropicEvents(&chunk, state)
 						if len(events) > 0 {
 							if firstTokenMs == nil {
@@ -1394,11 +1403,22 @@ func (s *GeminiMessagesCompatService) writeCursorOpenAICompatibleMessagesStream(
 			}
 		}
 		if errors.Is(err, io.EOF) {
+			readErr = err
 			break
 		}
 		if err != nil {
+			readErr = err
 			break
 		}
+	}
+	// 只有完整收到终态帧的上游流才允许 finalize 补发 message_stop；
+	// 残缺流（非 EOF 读取错误，或 EOF 但无 finish_reason/[DONE]）必须报错，
+	// 不能被包装成正常完成。
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return nil, fmt.Errorf("cursor openai-compatible: upstream stream read: %w", readErr)
+	}
+	if !sawTerminal {
+		return nil, errors.New("cursor openai-compatible: upstream stream truncated before terminal chunk")
 	}
 	if err := writeAnthropicEvents(c, apicompat.FinalizeChatCompletionsAnthropicStream(state)); err != nil {
 		return nil, err

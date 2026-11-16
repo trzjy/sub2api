@@ -15,6 +15,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// cursorCompatErrAfterReader 先吐出首帧数据，随后返回 err，用于模拟上游中途断流。
+type cursorCompatErrAfterReader struct {
+	firstFrame []byte
+	err        error
+	sent       bool
+}
+
+func (r *cursorCompatErrAfterReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, r.firstFrame), nil
+	}
+	return 0, r.err
+}
+
+func (r *cursorCompatErrAfterReader) Close() error { return nil }
+
 // cursorOpenAICompatAccount 构造「cursor 平台 + APIKey + OpenAI 兼容反代」账号，
 // 与生产故障账号（cursor/acpikey，base https://kn-cy.com/v1）同形态。
 func cursorOpenAICompatAccount() *Account {
@@ -172,6 +189,70 @@ func TestForwardCursorOpenAICompatibleMessages(t *testing.T) {
 		require.Equal(t, 1, result.Usage.CacheReadInputTokens)
 		require.Equal(t, 4, result.Usage.CacheCreationInputTokens)
 		require.NotNil(t, result.FirstTokenMs)
+	})
+
+	t.Run("stream read error after first frame returns error without message_stop", func(t *testing.T) {
+		// 首帧是一个非终态文本 delta（finish_reason:null），之后上游返回非 EOF 读取错误。
+		firstFrame := `data: {"id":"chatcmpl-3","object":"chat.completion.chunk","created":1,"model":"gemini-3.8-flash-mapped","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n"
+		httpStub := &geminiCompatHTTPUpstreamStub{
+			response: &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type": []string{"text/event-stream; charset=utf-8"},
+				},
+				Body: &cursorCompatErrAfterReader{firstFrame: []byte(firstFrame), err: io.ErrUnexpectedEOF},
+			},
+		}
+		svc := &GeminiMessagesCompatService{
+			httpUpstream: httpStub,
+			cfg:          &config.Config{},
+		}
+
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		body := []byte(`{"model":"gemini-3.8-flash","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+		result, err := svc.Forward(context.Background(), c, cursorOpenAICompatAccount(), body)
+		require.Error(t, err)
+		require.Nil(t, result)
+		require.Contains(t, err.Error(), "upstream stream read")
+
+		out := rec.Body.String()
+		require.Contains(t, out, `"text":"partial"`, "first frame delta should still reach the client")
+		require.NotContains(t, out, "event: message_stop", "incomplete stream must not gain a synthetic message_stop")
+	})
+
+	t.Run("stream EOF without terminal chunk returns error without message_stop", func(t *testing.T) {
+		// 流正常 EOF，但从未出现 finish_reason 或 [DONE]，属于截断流。
+		upstreamBody := `data: {"id":"chatcmpl-4","object":"chat.completion.chunk","created":1,"model":"gemini-3.8-flash-mapped","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n"
+		httpStub := &geminiCompatHTTPUpstreamStub{
+			response: &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type": []string{"text/event-stream; charset=utf-8"},
+				},
+				Body: io.NopCloser(strings.NewReader(upstreamBody)),
+			},
+		}
+		svc := &GeminiMessagesCompatService{
+			httpUpstream: httpStub,
+			cfg:          &config.Config{},
+		}
+
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		body := []byte(`{"model":"gemini-3.8-flash","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+		result, err := svc.Forward(context.Background(), c, cursorOpenAICompatAccount(), body)
+		require.Error(t, err)
+		require.Nil(t, result)
+		require.Contains(t, err.Error(), "truncated before terminal chunk")
+
+		out := rec.Body.String()
+		require.Contains(t, out, `"text":"partial"`, "first frame delta should still reach the client")
+		require.NotContains(t, out, "event: message_stop", "truncated stream must not gain a synthetic message_stop")
 	})
 
 	t.Run("non-compatible cursor account stays on cursor native path", func(t *testing.T) {
