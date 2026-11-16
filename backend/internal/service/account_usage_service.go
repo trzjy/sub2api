@@ -279,6 +279,9 @@ type UsageInfo struct {
 	// 非 force 时由 extra 聚合键构造（无快照则省略）。此前该平台无分支，落到
 	// Anthropic OAuth 用量链，固定 401（codebuddy 无 /api/oauth/usage）。
 	CodeBuddyCredit *CodeBuddyQuotaProbeResult `json:"codebuddy_credit,omitempty"`
+
+	// DevinUsage 是 Devin / Codeium Cascade 账号额度快照（GetUserStatus 实时探测）。
+	DevinUsage *DevinAccountStatus `json:"devin_usage,omitempty"`
 }
 
 // ClaudeUsageWindow Anthropic /api/oauth/usage 返回的单个用量窗口
@@ -395,6 +398,14 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 	// passive snapshot that the account table loads on mount.
 	if account.IsSyntheticUITest() && account.IsAnthropicOAuthOrSetupToken() {
 		return s.getPassiveUsageForAccount(ctx, account)
+	}
+
+	if account.Platform == PlatformDevin {
+		st, err := NewDevinStatusClient().Fetch(ctx, account.GetDevinToken())
+		if err != nil {
+			return &UsageInfo{Source: "active", Error: err.Error()}, nil
+		}
+		return &UsageInfo{Source: "active", UpdatedAt: &st.FetchedAt, DevinUsage: st}, nil
 	}
 
 	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {

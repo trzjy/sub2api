@@ -828,6 +828,24 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 		return adapted.Models, nil, nil, nil
 	}
 
+	// Devin 平台（D1b）：上游是 GetCliModelConfigs（Connect RPC）端点，没有
+	// OpenAI /v1/models 可言，落到通用路径只会拿到非 JSON 报文并掩盖真实失败
+	// 原因。此处直接拉取 Devin 模型目录，取每个模型的 selector 作为同步的 ID。
+	if account.Platform == PlatformDevin {
+		entries, err := FetchDevinModelCatalog(ctx, account.GetDevinToken(), DevinAPIURL)
+		if err != nil {
+			return nil, nil, nil, newUpstreamModelSyncUpstreamError("Devin model catalog request failed", err)
+		}
+		models := make([]string, 0, len(entries))
+		for _, e := range entries {
+			models = append(models, e.Selector)
+		}
+		if len(models) == 0 {
+			return nil, nil, nil, newUpstreamModelSyncUpstreamError("Devin upstream returned no models", nil)
+		}
+		return models, nil, nil, nil
+	}
+
 	if s.httpUpstream == nil {
 		return nil, nil, nil, newUpstreamModelSyncConfigError("Upstream HTTP client is not configured", nil)
 	}
