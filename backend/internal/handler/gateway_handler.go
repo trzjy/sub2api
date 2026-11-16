@@ -579,7 +579,24 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			})
 			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 			requestCtx = c.Request.Context()
-			if account.Platform == service.PlatformAntigravity {
+			switch messagesAccountForwardPath(account) {
+			case "devin":
+				// Gemini 分组里的 Devin 账号没有 base_url：geminiCompatService 的
+				// APIKey 分支会回落到 Google AI Studio 并携带 Devin 会话 JWT，上游
+				// 400 "API key not valid"。Devin 的正确出口是 OpenAIGatewayService
+				// 的 ForwardAsAnthropic（内部 Anthropic→Chat→forwardDevin，支持 tool_calls）。
+				// 服务未装配时失败关闭，收尾写法与 geminiCompat 为 nil 的现有分支一致。
+				if h.openAIGatewayService == nil {
+					h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", pkgerrors.CompatServiceNotConfigured, streamStarted)
+					if accountReleaseFunc != nil {
+						accountReleaseFunc()
+					}
+					return
+				}
+				oaRes, oaErr := h.openAIGatewayService.ForwardAsAnthropic(requestCtx, c, account, body, "", "")
+				result = forwardResultFromOpenAIResult(oaRes)
+				err = oaErr
+			case "antigravity":
 				// Gemini 分组里的 Antigravity 账号：ForwardGemini 是原生 Gemini 形状的
 				// 透传通道（只做身份注入 / schema 清理 / v1internal 包装），既不吃
 				// Anthropic 入参，也不产出 Anthropic 出参。/v1/messages 走它会先撞
@@ -594,7 +611,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					body,
 					hasBoundSession,
 				)
-			} else {
+			default: // gemini-compat
 				result, err = h.geminiCompatService.Forward(requestCtx, c, account, body)
 			}
 			if accountReleaseFunc != nil {
@@ -1317,6 +1334,55 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		if !retryWithFallback {
 			return
 		}
+	}
+}
+
+// messagesAccountForwardPath 决定 Gemini 分组内 /v1/messages 账号的转发出口。
+// 它是三分支分派的单一来源，避免再次漏掉某个平台分支。nil 账号按空安全处理，
+// 返回 "gemini-compat"（交由既有转发器处理）。
+func messagesAccountForwardPath(account *service.Account) string {
+	if account == nil {
+		return "gemini-compat"
+	}
+	switch account.Platform {
+	case service.PlatformDevin:
+		return "devin"
+	case service.PlatformAntigravity:
+		return "antigravity"
+	default:
+		return "gemini-compat"
+	}
+}
+
+// forwardResultFromOpenAIResult 把 OpenAIGatewayService 的转发结果转成 handler
+// 复用的 ForwardResult，供既有 usage 提交 / 结算钩子消费。字段按同名直搬，
+// Usage 不折算、不补默认值；指针字段保持同一性。
+func forwardResultFromOpenAIResult(r *service.OpenAIForwardResult) *service.ForwardResult {
+	if r == nil {
+		return nil
+	}
+	return &service.ForwardResult{
+		RequestID:                     r.RequestID,
+		UpstreamHeaders:               r.UpstreamHeaders,
+		Model:                         r.Model,
+		UpstreamModel:                 r.UpstreamModel,
+		UpstreamResponseModel:         r.UpstreamResponseModel,
+		UpstreamResponseModelConflict: r.UpstreamResponseModelConflict,
+		UpstreamResponseServiceTier:   r.UpstreamResponseServiceTier,
+		Stream:                        r.Stream,
+		Duration:                      r.Duration,
+		FirstTokenMs:                  r.FirstTokenMs,
+		ClientDisconnect:              r.ClientDisconnect,
+		ReasoningEffort:               r.ReasoningEffort,
+		RequestedReasoningEffort:      r.RequestedReasoningEffort,
+		ServiceTier:                   r.ServiceTier,
+		Usage: service.ClaudeUsage{
+			InputTokens:              r.Usage.InputTokens,
+			OutputTokens:             r.Usage.OutputTokens,
+			CacheCreationInputTokens: r.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     r.Usage.CacheReadInputTokens,
+			ImageOutputTokens:        r.Usage.ImageOutputTokens,
+		},
 	}
 }
 
