@@ -1465,71 +1465,6 @@ func (s *GatewayService) DoGrokNativeResponsesJSON(ctx context.Context, account 
 	return respBytes, nil
 }
 
-// mixedListingAccountAllowed 判定账号能否作为「跨平台聚合供给账号」进入某平台的
-// 候选/模型列表（候选展示口径）：所有聚合平台账号（antigravity / cursor / codebuddy /
-// muse / opencode_go / command_code / cline / other）都可以为任意具体平台分组提供候选，
-// 具体是否展示某个模型由 mixedListingModelAllowed（按模型家族匹配）负责。
-//
-// 该判定不再依赖 mixed_scheduling 开关：候选展示是管理端静态配置口径，不应受
-// 运行时调度开关控制（混合调度已自动启用，无需手动开启）。因此「列出所有聚合平台
-// 账号（不管能否被调度）」的用途（如 admin 候选收集、公开模型列表）使用本函数。
-func mixedListingAccountAllowed(groupPlatform string, account *Account) bool {
-	return isAggregatePlatformAccount(account.Platform)
-}
-
-// mixedListingAccountCatalogCapable 判定聚合平台账号能否为某分组平台的 catalog
-// 能力聚合贡献能力（对外声明的上下文窗口 / 输入模态 / reasoning 等）。
-//
-// 与 mixedListingAccountAllowed 的区别：antigravity 账号若未启用 mixed_scheduling，
-// 永远不会被调度到该分组（见 gateway_scheduling.go 的排除逻辑，口径一致的
-// account.IsMixedSchedulingEnabled()），因此它不能参与能力交集——否则会把整个 catalog
-// 的能力拉低到 fallback 值，使对外声明与实际可服务能力不一致。
-//
-// 只有 antigravity 施加该约束；其它聚合平台（cursor / codebuddy / muse / opencode_go /
-// command_code / cline / other）没有 mixed_scheduling 开关，行为不变。
-// 调用前应先判 platform（IsMixedSchedulingEnabled 对非 antigravity 一律返回 false，
-// 若先判开关会把所有聚合平台账号误排除）。
-func mixedListingAccountCatalogCapable(groupPlatform string, account *Account) bool {
-	if !mixedListingAccountAllowed(groupPlatform, account) {
-		return false
-	}
-	if account.Platform == PlatformAntigravity && !account.IsMixedSchedulingEnabled() {
-		return false
-	}
-	return true
-}
-
-// isAggregatePlatformAccount 判定账号平台是否为多模型家族聚合平台。
-// 聚合平台账号的 model_mapping 可包含多个家族的模型，能为多个平台分组提供候选。
-func isAggregatePlatformAccount(platform string) bool {
-	switch platform {
-	case PlatformAntigravity,
-		PlatformCursor,
-		PlatformCodeBuddy,
-		PlatformMuse,
-		PlatformOpenCodeGo,
-		PlatformCommandCode,
-		PlatformCline,
-		PlatformDevin,
-		PlatformOther:
-		return true
-	default:
-		return false
-	}
-}
-
-// mixedListingModelAllowed 判定聚合平台账号能否在分组平台上展示该模型：
-// 用 DetectModelPlatform 检测模型家族，只有家族与分组平台一致时才展示。
-// 无法识别家族的模型失败关闭（不展示）——自定义/未知厂商模型无法保证可调度。
-func mixedListingModelAllowed(groupPlatform, model string) bool {
-	detectedPlatform, ok := DetectModelPlatform(model)
-	if !ok {
-		// 无法检测家族的模型不进入候选（fail closed）。
-		return false
-	}
-	return detectedPlatform == groupPlatform
-}
-
 // cursorSupplyPublicModelIDsFromMapping 是 Cursor 供给账号 model_mapping 键 → 公开模型名
 // 的**唯一纯投影**（方案 §25.14-B）。
 //
@@ -1557,25 +1492,6 @@ func cursorSupplyPublicModelIDsFromMapping(mapping map[string]string) []string {
 	}
 	sort.Strings(ids)
 	return ids
-}
-
-// cursorSupplyModelBelongsPlatform 判定 Cursor 跨平台供给的某个公开模型名
-// 是否属于分组平台 platform 的模型家族。优先用请求侧模型名判定；判定不出时
-// 回落到映射目标（兼容自定义别名，如 my-claude → claude-sonnet-5-5）。
-// 两者都判定不出 → 不归属（失败关闭，不把未知模型塞进任何原生平台分组）。
-//
-// 聚合平台分组（composite / cursor）没有单一模型家族，一律返回 true（不做家族过滤）。
-func cursorSupplyModelBelongsPlatform(groupPlatform, publicModel, upstreamModel string) bool {
-	if groupPlatform == "" || groupPlatform == PlatformComposite || groupPlatform == PlatformCursor {
-		return true
-	}
-	if detected, ok := DetectModelPlatform(publicModel); ok {
-		return detected == groupPlatform
-	}
-	if detected, ok := DetectModelPlatform(upstreamModel); ok {
-		return detected == groupPlatform
-	}
-	return false
 }
 
 func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64, platform string) []string {

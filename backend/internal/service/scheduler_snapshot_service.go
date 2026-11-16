@@ -25,23 +25,6 @@ var (
 	ErrSchedulerBucketRebuildBusy       = errors.New("scheduler bucket rebuild busy")
 )
 
-// schedulerSnapshotAggregationVersion 是聚合直绑（§2.1）调度契约的快照版本标签。
-// 保留：codebuddy_aggregate_gate_test.go / composite_platform_test.go 仍有引用
-// （跨文件，本卡不改测试）；生产代码已不再生成 @agg 标签分桶。
-const schedulerSnapshotAggregationVersion = 1
-
-// isCodeBuddyAggregatedPlatform 报告某平台是否属于国产 OpenAI 兼容聚合分组
-// （deepseek/zhipu/kimi/minimax/other + codebuddy 自身参与 codebuddy 聚合）。
-// 这些分组的请求下，codebuddy 账号作为国产模型账号被纳入候选并按逐模型目录闸门判定。
-// 保留：openai_account_scheduler.go 的调度判定仍在使用（跨文件引用，本卡不改该文件）。
-func isCodeBuddyAggregatedPlatform(platform string) bool {
-	switch NormalizeOpenAICompatiblePlatform(platform) {
-	case PlatformDeepseek, PlatformZhipu, PlatformKimi, PlatformMiniMax, PlatformOther, PlatformCodeBuddy:
-		return true
-	}
-	return false
-}
-
 // schedulerAggregationBucketPlatform 返回 bucket 平台键。
 // 历史聚合 @agg 标签分桶已废弃，平台键原样返回；旧 @agg 分桶由部署时 full rebuild 清理。
 func schedulerAggregationBucketPlatform(platform string) string {
