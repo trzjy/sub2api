@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -58,6 +59,10 @@ func (s *OpenAIGatewayService) forwardDevin(
 	if token == "" {
 		return nil, errors.New("devin account is missing api_key credential")
 	}
+
+	// 剥离 devin 不支持的 JSON Schema 关键字（propertyNames / prefixItems）。
+	// 三个入口（chat / responses / messages）最终都汇合到这里，一次清洗即可全覆盖。
+	body = stripDevinUnsupportedToolSchemaKeywords(body)
 
 	// 2. 模型映射：空回退原名；设置 ops 观测的上游模型。
 	upstreamModel := account.GetMappedModel(originalModel)
@@ -142,6 +147,139 @@ func (s *OpenAIGatewayService) forwardDevin(
 		return s.handleDevinStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode, includeUsage)
 	}
 	return s.handleDevinNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode)
+}
+
+// stripDevinUnsupportedToolSchemaKeywords 剥离 devin 上游不支持的 JSON Schema
+// 关键字：propertyNames 直接删除；prefixItems 在缺少可用 items 时先取数组中
+// 评分最高的元素补成 items，随后无论是否补齐都删除 prefixItems。
+//
+// 解析失败、无 tools 键、tools 非数组、或没有任何改动时原样返回 body（字节不变）。
+// 注意：这里不做 type 大小写规范化，缺失时补的 items 使用小写 "string"。
+func stripDevinUnsupportedToolSchemaKeywords(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	tools, ok := payload["tools"].([]any)
+	if !ok {
+		return body
+	}
+
+	changed := false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := tool["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		params, ok := fn["parameters"]
+		if !ok {
+			continue
+		}
+		stripDevinSchemaNode(params, &changed)
+	}
+
+	if !changed {
+		return body
+	}
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return normalized
+}
+
+// stripDevinSchemaNode 递归清理单个 schema 节点（原地修改 map/slice），
+// 通过 changed 汇总是否发生过改动。
+func stripDevinSchemaNode(node any, changed *bool) {
+	switch v := node.(type) {
+	case map[string]any:
+		if rawPrefix, exists := v["prefixItems"]; exists {
+			if prefixItems, ok := rawPrefix.([]any); ok && len(prefixItems) > 0 {
+				itemsValue, hasItems := v["items"]
+				_, itemsIsBool := itemsValue.(bool)
+				if !hasItems || itemsValue == nil || itemsIsBool {
+					best := devinBestPrefixItem(prefixItems)
+					if best == nil {
+						best = map[string]any{"type": "string"}
+					}
+					v["items"] = best
+				}
+			}
+			delete(v, "prefixItems")
+			*changed = true
+		}
+		if _, exists := v["propertyNames"]; exists {
+			delete(v, "propertyNames")
+			*changed = true
+		}
+
+		if properties, ok := v["properties"].(map[string]any); ok {
+			for _, property := range properties {
+				stripDevinSchemaNode(property, changed)
+			}
+		}
+		if items, ok := v["items"]; ok {
+			stripDevinSchemaNode(items, changed)
+		}
+		for _, key := range []string{"anyOf", "oneOf", "allOf"} {
+			if branches, ok := v[key].([]any); ok {
+				for _, branch := range branches {
+					stripDevinSchemaNode(branch, changed)
+				}
+			}
+		}
+	case []any:
+		for _, elem := range v {
+			stripDevinSchemaNode(elem, changed)
+		}
+	}
+}
+
+// devinBestPrefixItem 从 prefixItems 候选中选出评分最高的第一个；全部 0 分
+// 返回 nil（由调用方回退到小写 "string"）。
+func devinBestPrefixItem(options []any) any {
+	var best any
+	bestScore := 0
+	for _, option := range options {
+		if score := devinSchemaOptionScore(option); score > bestScore {
+			bestScore = score
+			best = option
+		}
+	}
+	return best
+}
+
+// devinSchemaOptionScore 评分：含 properties 或 type=="object" → 3；含 items
+// 或 type=="array" → 2；含 enum/const 或非空标量 type → 1；否则 0。
+func devinSchemaOptionScore(val any) int {
+	m, ok := val.(map[string]any)
+	if !ok {
+		return 0
+	}
+	typeStr, _ := m["type"].(string)
+	if _, hasProps := m["properties"]; hasProps || typeStr == "object" {
+		return 3
+	}
+	if _, hasItems := m["items"]; hasItems || typeStr == "array" {
+		return 2
+	}
+	if _, hasEnum := m["enum"]; hasEnum {
+		return 1
+	}
+	if _, hasConst := m["const"]; hasConst {
+		return 1
+	}
+	if typeStr != "" && typeStr != "null" {
+		return 1
+	}
+	return 0
 }
 
 // devinChunkEnvelope 以 OpenAI chat.completion.chunk 形状构造一帧回客户端包络。
