@@ -390,8 +390,8 @@ func codeBuddyAggregatedCatalogGated(account *Account, req OpenAIAccountSchedule
 	return account != nil && account.Platform == PlatformCodeBuddy
 }
 
-// evaluateCodeBuddyCatalogGate 计算聚合分组请求下 codebuddy 候选账号的目录闸门判定。
-// 仅在 isCodeBuddyAggregatedPlatform(req.Platform) 且 RequestedModel 非空时生效；
+// evaluateCodeBuddyCatalogGate 计算 codebuddy 候选账号的目录闸门判定。
+// 仅在 RequestedModel 非空且候选集合含 codebuddy 账号时生效；
 // 其余情况返回 nil（不参与排除）。返回 map[accountID]verdict。
 //
 // 预算（§2.1-1，防热路径放大）：候选 codebuddy 账号按 Priority 降序、并列 ID 升序

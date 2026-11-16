@@ -894,9 +894,6 @@ func schedulerCanonicalBuckets(groupID int64) []SchedulerBucket {
 			SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeSingle},
 			SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeForced},
 		)
-		if platform == PlatformAnthropic || platform == PlatformGemini {
-			buckets = append(buckets, SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeMixed})
-		}
 	}
 	return buckets
 }
@@ -934,9 +931,6 @@ func (s *SchedulerSnapshotService) bucketsForPlatform(platform string, groupIDs 
 		}
 		buckets = append(buckets, SchedulerBucket{GroupID: gid, Platform: bucketPlatform, Mode: SchedulerModeSingle})
 		buckets = append(buckets, SchedulerBucket{GroupID: gid, Platform: bucketPlatform, Mode: SchedulerModeForced})
-		if platform == PlatformAnthropic || platform == PlatformGemini {
-			buckets = append(buckets, SchedulerBucket{GroupID: gid, Platform: bucketPlatform, Mode: SchedulerModeMixed})
-		}
 	}
 	return buckets
 }
@@ -1620,9 +1614,6 @@ func (s *SchedulerSnapshotService) normalizeGroupIDs(groupIDs []int64) []int64 {
 func (s *SchedulerSnapshotService) resolveMode(platform string, hasForcePlatform bool) string {
 	if hasForcePlatform {
 		return SchedulerModeForced
-	}
-	if platform == PlatformAnthropic || platform == PlatformGemini {
-		return SchedulerModeMixed
 	}
 	return SchedulerModeSingle
 }

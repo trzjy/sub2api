@@ -533,7 +533,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 // Cursor、Devin 等聚合平台，以及 antigravity OAuth 账号——后者由本文件 §5 的
 // shouldUseAntigravityCompat 分支以 streamGenerateContent 转发，与 /v1/messages
 // 入口的放行范围保持一致。聚合平台（Cursor/Devin）的准入与调度层
-// isAccountAllowedForPlatform 保持同口径，避免 handler 层误拒调度层已放行的账号。
+// accountAdmissionDecision 保持同口径，避免 handler 层误拒调度层已放行的账号。
 func geminiGroupAdmitsAccount(groupPlatform string, account *service.Account) bool {
 	if groupPlatform != service.PlatformGemini {
 		return true
