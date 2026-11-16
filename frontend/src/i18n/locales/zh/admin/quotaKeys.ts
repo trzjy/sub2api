@@ -66,7 +66,23 @@ export default {
       edit: '编辑',
       refresh: '手动拉号',
       clearExhausted: '解除耗尽',
-      delete: '删除'
+      delete: '删除',
+      copy: '复制配置'
+    },
+    copy: {
+      title: '复制激活码配置',
+      source: '配置来源',
+      fields: '将复制：优先级、并发数、负载因子、账号计费倍率、绑定分组、模型限制（白名单/映射）。不复制到期时间与备注。',
+      targets: '目标激活码（同一上游）',
+      noTargets: '该上游下没有其他激活码可复制',
+      selectAll: '全选',
+      hint: '复制会立即保存并同步目标码名下账号。源码未设置模型限制时，目标码的模型限制保持不变；源码未显式绑定分组时，目标码的分组保持不变。',
+      confirm: '复制到 {count} 个激活码',
+      saving: '复制中…',
+      success: '已复制配置到 {count} 个激活码',
+      partial: '已复制 {ok} 个，{failed} 个失败',
+      itemError: '复制失败',
+      needTarget: '请至少选择一个目标激活码'
     },
     sweepExpired: '一键清理过期',
     confirmDeleteTitle: '删除激活码',
