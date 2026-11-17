@@ -122,7 +122,8 @@ type GeminiToolConfig struct {
 
 // GeminiFunctionCallingConfig 函数调用配置
 type GeminiFunctionCallingConfig struct {
-	Mode string `json:"mode,omitempty"` // VALIDATED, AUTO, NONE
+	Mode                 string   `json:"mode,omitempty"`                 // VALIDATED, AUTO, NONE, ANY
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"` // ANY 模式下限制可调用的函数名
 }
 
 // GeminiSafetySetting Gemini 安全设置

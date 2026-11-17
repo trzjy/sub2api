@@ -781,3 +781,91 @@ func TestTransformClaudeToGemini_ToolResultImagesReachUpstream(t *testing.T) {
 	require.Equal(t, "image/jpeg", userParts[3].InlineData.MimeType)
 	require.Equal(t, "d29ybGQ=", userParts[3].InlineData.Data)
 }
+
+// TestTransformClaudeToolChoice 验证 antigravity Claude→Gemini 路径保留 tool_choice：
+// none/any/tool/默认四种映射到 toolConfig.functionCallingConfig，具名工具空名/未声明名失败关闭。
+func TestTransformClaudeToolChoice(t *testing.T) {
+	functionTool := ClaudeTool{
+		Name:        "get_weather",
+		Description: "Get weather",
+		InputSchema: map[string]any{"type": "object"},
+	}
+
+	transform := func(t *testing.T, toolChoice json.RawMessage, tools []ClaudeTool) (V1InternalRequest, error) {
+		t.Helper()
+		body, err := TransformClaudeToGeminiWithOptions(&ClaudeRequest{
+			Model:      "claude-sonnet-4-6",
+			Messages:   []ClaudeMessage{{Role: "user", Content: json.RawMessage(`"hello"`)}},
+			Tools:      tools,
+			ToolChoice: toolChoice,
+		}, "project-1", "claude-sonnet-4-6", DefaultTransformOptions())
+		if err != nil {
+			return V1InternalRequest{}, err
+		}
+		var req V1InternalRequest
+		require.NoError(t, json.Unmarshal(body, &req))
+		return req, nil
+	}
+
+	t.Run("none maps to NONE", func(t *testing.T) {
+		req, err := transform(t, json.RawMessage(`{"type":"none"}`), []ClaudeTool{functionTool})
+		require.NoError(t, err)
+		require.NotNil(t, req.Request.ToolConfig)
+		require.NotNil(t, req.Request.ToolConfig.FunctionCallingConfig)
+		require.Equal(t, "NONE", req.Request.ToolConfig.FunctionCallingConfig.Mode)
+		require.Empty(t, req.Request.ToolConfig.FunctionCallingConfig.AllowedFunctionNames)
+	})
+
+	t.Run("any object maps to ANY", func(t *testing.T) {
+		req, err := transform(t, json.RawMessage(`{"type":"any"}`), []ClaudeTool{functionTool})
+		require.NoError(t, err)
+		require.Equal(t, "ANY", req.Request.ToolConfig.FunctionCallingConfig.Mode)
+		require.Empty(t, req.Request.ToolConfig.FunctionCallingConfig.AllowedFunctionNames)
+	})
+
+	t.Run("required string maps to ANY", func(t *testing.T) {
+		req, err := transform(t, json.RawMessage(`"required"`), []ClaudeTool{functionTool})
+		require.NoError(t, err)
+		require.Equal(t, "ANY", req.Request.ToolConfig.FunctionCallingConfig.Mode)
+	})
+
+	t.Run("tool maps to ANY with allowed function name", func(t *testing.T) {
+		req, err := transform(t, json.RawMessage(`{"type":"tool","name":"get_weather"}`), []ClaudeTool{functionTool})
+		require.NoError(t, err)
+		fcc := req.Request.ToolConfig.FunctionCallingConfig
+		require.Equal(t, "ANY", fcc.Mode)
+		require.Equal(t, []string{"get_weather"}, fcc.AllowedFunctionNames)
+	})
+
+	t.Run("auto keeps VALIDATED", func(t *testing.T) {
+		req, err := transform(t, json.RawMessage(`{"type":"auto"}`), []ClaudeTool{functionTool})
+		require.NoError(t, err)
+		require.Equal(t, "VALIDATED", req.Request.ToolConfig.FunctionCallingConfig.Mode)
+		require.Empty(t, req.Request.ToolConfig.FunctionCallingConfig.AllowedFunctionNames)
+	})
+
+	t.Run("missing tool_choice keeps VALIDATED", func(t *testing.T) {
+		req, err := transform(t, nil, []ClaudeTool{functionTool})
+		require.NoError(t, err)
+		require.Equal(t, "VALIDATED", req.Request.ToolConfig.FunctionCallingConfig.Mode)
+		require.Empty(t, req.Request.ToolConfig.FunctionCallingConfig.AllowedFunctionNames)
+	})
+
+	t.Run("auto and missing produce identical toolConfig (zero regression)", func(t *testing.T) {
+		autoReq, err := transform(t, json.RawMessage(`{"type":"auto"}`), []ClaudeTool{functionTool})
+		require.NoError(t, err)
+		missingReq, err := transform(t, nil, []ClaudeTool{functionTool})
+		require.NoError(t, err)
+		require.Equal(t, missingReq.Request.ToolConfig, autoReq.Request.ToolConfig)
+	})
+
+	t.Run("tool with missing name returns error", func(t *testing.T) {
+		_, err := transform(t, json.RawMessage(`{"type":"tool"}`), []ClaudeTool{functionTool})
+		require.Error(t, err)
+	})
+
+	t.Run("tool with undeclared name returns error", func(t *testing.T) {
+		_, err := transform(t, json.RawMessage(`{"type":"tool","name":"ghost"}`), []ClaudeTool{functionTool})
+		require.Error(t, err)
+	})
+}

@@ -79,6 +79,73 @@ func ensureMaxTokensGreaterThanBudget(maxTokens, budgetTokens int) (int, bool) {
 	return maxTokens, false
 }
 
+// declaredClaudeToolNames 收集请求中声明的工具名，用于校验 tool_choice 指定的
+// 具体工具名是否真实存在（失败关闭：避免静默放宽为「调用任意工具」）。
+func declaredClaudeToolNames(tools []ClaudeTool) map[string]struct{} {
+	names := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		if name := strings.TrimSpace(tool.Name); name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names
+}
+
+// claudeToolChoiceToFunctionCalling 把 Claude 的 tool_choice 转换为 Gemini
+// functionCallingConfig 的 Mode 与 AllowedFunctionNames。
+//
+// 映射规则：
+//
+//	{"type":"none"}  /  "none"            -> NONE
+//	{"type":"any"}   /  "required" 字符串 -> ANY
+//	{"type":"tool","name":"x"}            -> ANY + AllowedFunctionNames ["x"]
+//	{"type":"auto"}  /  缺失              -> VALIDATED（零回归，保持原硬编码行为）
+//
+// 具名工具（type=tool）的名字为空或未在 tools 中声明时返回错误（失败关闭，
+// 与 GF-40 一致），避免放宽为「调用任意工具」。
+func claudeToolChoiceToFunctionCalling(raw json.RawMessage, declared map[string]struct{}) (mode string, allowed []string, err error) {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return "VALIDATED", nil, nil
+	}
+
+	// 字符串形式："none" / "any" / "required" / "auto"。
+	var choiceStr string
+	if json.Unmarshal(raw, &choiceStr) == nil {
+		switch strings.ToLower(strings.TrimSpace(choiceStr)) {
+		case "none":
+			return "NONE", nil, nil
+		case "any", "required":
+			return "ANY", nil, nil
+		default: // "auto" 及其它未知值保持默认，零回归
+			return "VALIDATED", nil, nil
+		}
+	}
+
+	// 对象形式：{"type":"none"|"any"|"tool"|"auto", "name":"x"}。
+	var choice struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if unmarshalErr := json.Unmarshal(raw, &choice); unmarshalErr != nil {
+		return "", nil, fmt.Errorf("parse tool_choice: %w", unmarshalErr)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(choice.Type)) {
+	case "none":
+		return "NONE", nil, nil
+	case "any", "required":
+		return "ANY", nil, nil
+	case "tool":
+		name := strings.TrimSpace(choice.Name)
+		if _, ok := declared[name]; !ok {
+			return "", nil, fmt.Errorf("tool_choice references unknown tool %q", name)
+		}
+		return "ANY", []string{name}, nil
+	default: // "auto"、空 type 及其它未知值保持默认，零回归
+		return "VALIDATED", nil, nil
+	}
+}
+
 // TransformClaudeToGemini 将 Claude 请求转换为 v1internal Gemini 格式
 func TransformClaudeToGemini(claudeReq *ClaudeRequest, projectID, mappedModel string) ([]byte, error) {
 	return TransformClaudeToGeminiWithOptions(claudeReq, projectID, mappedModel, DefaultTransformOptions())
@@ -156,9 +223,16 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	// 总是设置 toolConfig，与官方客户端一致。
 	// 注意：buildTools 会在客户端 function tools 存在时丢弃 googleSearch/codeExecution
 	// （issue #6464），因此这里不再注入 includeServerSideToolInvocations。
+	// 保留 Claude tool_choice：none/any/tool/auto 映射到 functionCallingConfig，
+	// 避免 tool_choice:"none" 仍返回 tool_calls（生产实证 2026-11-17）。
+	toolChoiceMode, allowedNames, err := claudeToolChoiceToFunctionCalling(claudeReq.ToolChoice, declaredClaudeToolNames(claudeReq.Tools))
+	if err != nil {
+		return nil, err
+	}
 	innerRequest.ToolConfig = &GeminiToolConfig{
 		FunctionCallingConfig: &GeminiFunctionCallingConfig{
-			Mode: "VALIDATED",
+			Mode:                 toolChoiceMode,
+			AllowedFunctionNames: allowedNames,
 		},
 	}
 
