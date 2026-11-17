@@ -74,17 +74,47 @@ func TestDevinConvert_BuildParams_InvalidArgumentsRejected(t *testing.T) {
 	require.Contains(t, err.Error(), "arguments")
 }
 
-func TestDevinConvert_BuildParams_ImageInputRejected(t *testing.T) {
-	cases := []string{
-		`{"messages":[{"role":"user","content":[{"type":"text","text":"a"},` +
-			`{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]}]}`,
-		`{"messages":[{"role":"user","content":[{"type":"image","image":"..."}]}]}`,
-	}
-	for _, raw := range cases {
+func TestDevinConvertImageDataURIParsed(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"看这张图"},` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD"}}]}]}`)
+	p, err := BuildDevinChatParams(body, "m", "c")
+	require.NoError(t, err)
+	require.Len(t, p.Prompts, 1)
+	got := p.Prompts[0]
+	require.Equal(t, "看这张图", got.Prompt)
+	require.Len(t, got.Images, 1)
+	require.Equal(t, "image/png", got.Images[0].MimeType)
+	require.Equal(t, "QUJD", got.Images[0].Base64Data)
+}
+
+func TestDevinConvertImageAnthropicSourceParsed(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"anthropic"},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"aGVsbG8="}}]}]}`)
+	p, err := BuildDevinChatParams(body, "m", "c")
+	require.NoError(t, err)
+	require.Len(t, p.Prompts, 1)
+	got := p.Prompts[0]
+	require.Equal(t, "anthropic", got.Prompt)
+	require.Len(t, got.Images, 1)
+	require.Equal(t, "image/jpeg", got.Images[0].MimeType)
+	require.Equal(t, "aGVsbG8=", got.Images[0].Base64Data)
+}
+
+func TestDevinConvertImageRemoteURLRejected(t *testing.T) {
+	for _, raw := range []string{
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"http://example.com/a.png"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]}]}`,
+	} {
 		_, err := BuildDevinChatParams([]byte(raw), "m", "c")
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "devin: image input is not supported")
+		require.Contains(t, err.Error(), "devin: remote image url is not supported (only base64 data uris)")
 	}
+	// 无法识别的图片形状同样失败关闭，不静默丢弃。
+	_, err := BuildDevinChatParams([]byte(`{"messages":[{"role":"user","content":[{"type":"image","image":"..."}]}]}`), "m", "c")
+	require.Error(t, err)
 }
 
 func TestDevinConvert_BuildParams_ContentArrayTextJoined(t *testing.T) {

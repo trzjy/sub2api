@@ -117,11 +117,6 @@ func NewDevinChatFrame(params *DevinChatParams, userJWT, overrideBaseURL string)
 	if params == nil {
 		return nil, base, fmt.Errorf("devin: nil chat params")
 	}
-	for _, p := range params.Prompts {
-		if len(p.Images) > 0 {
-			return nil, base, fmt.Errorf("devin: image input is not supported")
-		}
-	}
 
 	cascadeID := params.CascadeID
 	if cascadeID == "" {

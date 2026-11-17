@@ -51,7 +51,8 @@ func BuildDevinChatParams(body []byte, modelUID, cascadeID string) (*DevinChatPa
 			role := m.Get("role").String()
 			switch role {
 			case "system", "developer":
-				text, err := devinMessageText(m)
+				// system/developer 只拼入 SystemPrompt（纯文本），无 ChatMessagePrompt 承载图片。
+				text, _, err := devinMessageText(m)
 				if err != nil {
 					return nil, err
 				}
@@ -59,7 +60,7 @@ func BuildDevinChatParams(body []byte, modelUID, cascadeID string) (*DevinChatPa
 					systemParts = append(systemParts, text)
 				}
 			case "user":
-				text, err := devinMessageText(m)
+				text, images, err := devinMessageText(m)
 				if err != nil {
 					return nil, err
 				}
@@ -67,6 +68,7 @@ func BuildDevinChatParams(body []byte, modelUID, cascadeID string) (*DevinChatPa
 					MessageID: devinMessageID(cascadeID, i, role),
 					Source:    ChatMessageSourceUser,
 					Prompt:    text,
+					Images:    images,
 				})
 			case "assistant":
 				prompt, err := devinAssistantPrompt(m, cascadeID, i, role)
@@ -75,7 +77,7 @@ func BuildDevinChatParams(body []byte, modelUID, cascadeID string) (*DevinChatPa
 				}
 				params.Prompts = append(params.Prompts, prompt)
 			case "tool":
-				text, err := devinMessageText(m)
+				text, images, err := devinMessageText(m)
 				if err != nil {
 					return nil, err
 				}
@@ -85,6 +87,7 @@ func BuildDevinChatParams(body []byte, modelUID, cascadeID string) (*DevinChatPa
 					Prompt:            text,
 					ToolCallId:        m.Get("tool_call_id").String(),
 					ToolResultIsError: devinBoolField(m, "is_error", "tool_result_is_error"),
+					Images:            images,
 				})
 			}
 		}
@@ -128,7 +131,7 @@ func BuildDevinChatParams(body []byte, modelUID, cascadeID string) (*DevinChatPa
 
 // devinAssistantPrompt 构造 assistant prompt：文本内容、thinking 与 tool_calls。
 func devinAssistantPrompt(m gjson.Result, cascadeID string, index int, role string) (ChatMessagePrompt, error) {
-	text, err := devinMessageText(m)
+	text, images, err := devinMessageText(m)
 	if err != nil {
 		return ChatMessagePrompt{}, err
 	}
@@ -136,6 +139,7 @@ func devinAssistantPrompt(m gjson.Result, cascadeID string, index int, role stri
 		MessageID: "bot-" + devinMessageID(cascadeID, index, role),
 		Source:    ChatMessageSourceSystem,
 		Prompt:    text,
+		Images:    images,
 		Thinking:  m.Get("reasoning_content").String(),
 	}
 	if prompt.Thinking == "" {
@@ -165,15 +169,16 @@ func devinAssistantPrompt(m gjson.Result, cascadeID string, index int, role stri
 	return prompt, nil
 }
 
-// devinMessageText 提取消息文本。content 为数组时拼接所有 type=="text" 的片段；
-// 出现 image_url / image 块返回错误（v1 图片输入失败关闭，不静默丢弃）。
-func devinMessageText(m gjson.Result) (string, error) {
+// devinMessageText 提取消息文本与图片。content 为数组时拼接所有 type=="text" 的片段；
+// data URI 图片（OpenAI image_url 形状或 Anthropic base64 source 形状）解析为 ImageData；
+// 远程 URL（http/https）与非 data URI 图片失败关闭，不静默丢弃。
+func devinMessageText(m gjson.Result) (text string, images []ImageData, err error) {
 	content := m.Get("content")
 	if !content.Exists() || content.Type == gjson.Null {
-		return "", nil
+		return "", nil, nil
 	}
 	if content.Type == gjson.String {
-		return content.String(), nil
+		return content.String(), nil, nil
 	}
 	if content.IsArray() {
 		var b strings.Builder
@@ -181,18 +186,69 @@ func devinMessageText(m gjson.Result) (string, error) {
 			switch part.Get("type").String() {
 			case "text":
 				b.WriteString(part.Get("text").String())
-			case "image_url", "image":
-				return "", fmt.Errorf("devin: image input is not supported")
+			case "image_url":
+				img, imgErr := devinImageFromURL(part.Get("image_url.url").String())
+				if imgErr != nil {
+					return "", nil, imgErr
+				}
+				images = append(images, img)
+			case "image":
+				img, imgErr := devinImageFromAnthropic(part)
+				if imgErr != nil {
+					return "", nil, imgErr
+				}
+				images = append(images, img)
 			default:
-				if part.Get("image_url").Exists() || part.Get("image").Exists() {
-					return "", fmt.Errorf("devin: image input is not supported")
+				if u := part.Get("image_url.url"); u.Exists() {
+					img, imgErr := devinImageFromURL(u.String())
+					if imgErr != nil {
+						return "", nil, imgErr
+					}
+					images = append(images, img)
+				} else if part.Get("image_url").Exists() || part.Get("image").Exists() || part.Get("source.type").Exists() {
+					return "", nil, fmt.Errorf("devin: image input is not supported")
 				}
 			}
 		}
-		return b.String(), nil
+		return b.String(), images, nil
 	}
 	// 非字符串非数组（如对象）按原始 JSON 文本透传，与参考实现 tool 分支一致。
-	return content.Raw, nil
+	return content.Raw, nil, nil
+}
+
+// devinImageFromURL 解析 OpenAI image_url.url：仅接受 data:<mime>;base64,<b64>；
+// http/https 远程 URL 与其他形状一律失败关闭，不静默丢弃。
+func devinImageFromURL(raw string) (ImageData, error) {
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return ImageData{}, fmt.Errorf("devin: remote image url is not supported (only base64 data uris)")
+	}
+	if strings.HasPrefix(raw, "data:") {
+		rest := strings.TrimPrefix(raw, "data:")
+		if i := strings.Index(rest, ";base64,"); i >= 0 {
+			mime, b64 := rest[:i], rest[i+len(";base64,"):]
+			if mime != "" && b64 != "" {
+				return ImageData{Base64Data: b64, MimeType: mime}, nil
+			}
+		}
+	}
+	return ImageData{}, fmt.Errorf("devin: image url is not a base64 data uri")
+}
+
+// devinImageFromAnthropic 解析 Anthropic image 块：source.type=="base64" 时取
+// media_type 与 data；远程 url source 失败关闭。
+func devinImageFromAnthropic(part gjson.Result) (ImageData, error) {
+	src := part.Get("source")
+	if src.Get("type").String() == "base64" {
+		mime := src.Get("media_type").String()
+		data := src.Get("data").String()
+		if mime != "" && data != "" {
+			return ImageData{Base64Data: data, MimeType: mime}, nil
+		}
+	}
+	if u := src.Get("url").String(); strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+		return ImageData{}, fmt.Errorf("devin: remote image url is not supported (only base64 data uris)")
+	}
+	return ImageData{}, fmt.Errorf("devin: image source is not a base64 data uri")
 }
 
 // devinMessageID 用 FNV-1a 32 位生成稳定 id：seed=cascadeID\0index\0role。
