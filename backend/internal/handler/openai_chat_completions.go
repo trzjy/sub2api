@@ -621,6 +621,19 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					submitChatUsage(result)
 					return
 				}
+				// Devin system/developer 图片拒绝是确定的入参不支持：在账号失败上报
+				// （ReportOpenAIAccountScheduleResult，即下方 502/冷却链路）之前立即返回，
+				// 不记账号失败、不进 failover。OpenAI/Devin 分组的 Chat 走本 handler，
+				// GF-37 的 Messages 分支拦不到这里（外审 r28）。
+				// 未提交写协议 400；已提交走流内终止错误事件。
+				if st, m, ok := devinClientFacingError(err); ok {
+					if gatewayResponseCommittedAsSSE(c, streamStarted) {
+						h.handleStreamingAwareError(c, st, "invalid_request_error", m, streamStarted)
+					} else {
+						h.errorResponse(c, st, "invalid_request_error", m)
+					}
+					return
+				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false

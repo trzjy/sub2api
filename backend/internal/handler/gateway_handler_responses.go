@@ -446,10 +446,15 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		}
 
 		if err != nil {
-			// Devin system/developer 图片拒绝是确定的入参不支持：映射为 400 后立即返回，
+			// Devin system/developer 图片拒绝是确定的入参不支持：立即返回，
 			// 不进入 failover、不记账号失败（不调用 HandleFailoverError/冷却）。
+			// 未提交写协议 400；已提交走流内终止错误事件，避免把 JSON 塞进已 flush 的 SSE 200。
 			if st, m, ok := devinClientFacingError(err); ok {
-				h.responsesErrorResponse(c, st, "invalid_request_error", m)
+				if gatewayResponseCommitted(c, streamStarted) {
+					h.handleStreamingAwareError(c, st, "invalid_request_error", m, streamStarted)
+				} else {
+					h.responsesErrorResponse(c, st, "invalid_request_error", m)
+				}
 				return
 			}
 			var failoverErr *service.UpstreamFailoverError
