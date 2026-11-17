@@ -1447,10 +1447,24 @@ func isGeminiSignatureRelatedError(respBody []byte) bool {
 	return strings.Contains(msg, "thought_signature") || strings.Contains(msg, "signature")
 }
 
+// isDevinExcludedFromGeminiNative 判定账号是否必须被排除在 Gemini 原生
+// /v1beta/...:generateContent|streamGenerateContent|countTokens 管线之外。
+// devin（Cascade）只支持 Connect 协议的 chat/anthropic/responses 出口，不支持 Gemini
+// 原生端点；放行会拿 devin 的 session token 以 x-goog-api-key 打 AI Studio，得到 401
+// invalid x-api-key 并把账号打成 error。
+func isDevinExcludedFromGeminiNative(account *Account) bool {
+	return account != nil && account.Platform == PlatformDevin
+}
+
 func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.Context, account *Account, originalModel string, action string, stream bool, body []byte) (*ForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	beginGeminiImageOutputObservation(c)
 	startTime := time.Now()
+
+	// 防御门禁：devin 账号绝不进入下方 AI Studio / Cursor 原生转发管线。
+	if isDevinExcludedFromGeminiNative(account) {
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, "devin account does not support Gemini native endpoints")
+	}
 
 	if strings.TrimSpace(originalModel) == "" {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.ModelMissingInURL)

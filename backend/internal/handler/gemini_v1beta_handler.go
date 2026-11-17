@@ -685,10 +685,19 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	// 是否单账号分组在 antigravity 账号遇到 503 或模型限流预检查时才判定。
 	c.Request = c.Request.WithContext(h.gatewayService.WithSingleAntigravityAccountGroupProbe(c.Request.Context(), apiKey.GroupID))
 
+	// devin（Cascade）只支持 Connect 协议的 chat/anthropic/responses 出口，不支持 Gemini
+	// 原生 /v1beta/...:generateContent|streamGenerateContent|countTokens 端点。选号时持续
+	// 排除已命中的 devin 账号，避免拿其 session token 以 x-goog-api-key 打 AI Studio 得到
+	// 401 invalid x-api-key 并把账号打成 error。与 cursor 跨平台账号剔除同理。
+	devinExcludedIDs := make(map[int64]struct{})
+
 	for {
 		excludedAccountIDs := fs.FailedAccountIDs
 		if cachedContentExclusions != nil {
-			excludedAccountIDs = mergeAccountIDSets(cachedContentExclusions, fs.FailedAccountIDs)
+			excludedAccountIDs = mergeAccountIDSets(cachedContentExclusions, excludedAccountIDs)
+		}
+		if len(devinExcludedIDs) > 0 {
+			excludedAccountIDs = mergeAccountIDSets(excludedAccountIDs, devinExcludedIDs)
 		}
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, excludedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
 		if err == nil && cachedContentBinding != nil && selection.Account.ID != cachedContentBinding.AccountID {
@@ -746,6 +755,16 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			}
 		}
 		account := selection.Account
+		if account.Platform == service.PlatformDevin {
+			// devin 账号不支持 Gemini 原生端点：释放本次选号持有的槽位，永久排除该账号后重试。
+			// 全部候选被排除后 SelectAccountWithLoadAwareness 返回 no-account，走下方既有错误路径。
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			devinExcludedIDs[account.ID] = struct{}{}
+			reqLog.Info("gemini.skip_devin_account", zap.Int64("account_id", account.ID))
+			continue
+		}
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		// 检测账号切换：如果粘性会话绑定的账号与当前选择的账号不同，清除 thoughtSignature

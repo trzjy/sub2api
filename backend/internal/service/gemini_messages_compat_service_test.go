@@ -1521,3 +1521,39 @@ func parseAnthropicContentBlockEvents(t *testing.T, raw string) []anthropicConte
 	}
 	return events
 }
+
+func TestIsDevinExcludedFromGeminiNative(t *testing.T) {
+	require.False(t, isDevinExcludedFromGeminiNative(nil), "nil account must be allowed through (no exclusion)")
+	require.False(t, isDevinExcludedFromGeminiNative(&Account{Platform: PlatformGemini}), "gemini account must not be excluded")
+	require.False(t, isDevinExcludedFromGeminiNative(&Account{Platform: PlatformCursor}), "cursor account is handled by its own Connect branch")
+	require.True(t, isDevinExcludedFromGeminiNative(&Account{Platform: PlatformDevin}), "devin account must be excluded from native endpoints")
+}
+
+func TestForwardNativeRejectsDevin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-flash:generateContent", nil)
+
+	// 若防御失效，请求会落到这个 stub 上并增加 calls；用它断言"绝不发起上游请求"。
+	httpStub := &geminiCompatHTTPUpstreamStub{
+		response: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"candidates":[{"content":{"parts":[{"text":"unexpected"}]}}]}`)),
+		},
+	}
+	svc := &GeminiMessagesCompatService{httpUpstream: httpStub, cfg: &config.Config{}}
+	account := &Account{ID: 1, Platform: PlatformDevin, Type: AccountTypeOAuth}
+
+	// 传入合法 model/action/body：确保触发点确实是 devin 防御，而非其它早退校验。
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+	result, err := svc.ForwardNative(context.Background(), c, account, "gemini-2.5-flash", "generateContent", false, body)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Equal(t, 0, httpStub.calls, "devin account must never reach the upstream AI Studio pipeline")
+	require.Nil(t, httpStub.lastReq)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "devin account does not support Gemini native endpoints")
+}

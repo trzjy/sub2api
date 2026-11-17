@@ -2682,6 +2682,12 @@ func (h *GatewayHandler) errorResponseWithCode(c *gin.Context, status int, errTy
 	})
 }
 
+// isDevinCountTokensUnsupported 判断账号是否为不支持 count_tokens 的 devin 账号。
+// devin 账号没有 Anthropic 兼容的 count_tokens 端点，nil 账号按“非 devin”处理。
+func isDevinCountTokensUnsupported(account *service.Account) bool {
+	return account != nil && account.Platform == service.PlatformDevin
+}
+
 // CountTokens handles token counting endpoint
 // POST /v1/messages/count_tokens
 // 特点：校验订阅/余额，但不计算并发、不记录使用量
@@ -2789,6 +2795,15 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 		return
 	}
 	setOpsSelectedAccount(c, account.ID, account.Platform)
+
+	// devin 账号没有 count_tokens 兼容端点，不能被错误转发到上游
+	// （否则上游返回 401/403，并可能把账号打成 error）。选号已占用会话槽，
+	// 此处提前返回需沿用失败路径的释放写法。
+	if isDevinCountTokensUnsupported(account) {
+		h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionHash)
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "devin account does not support count_tokens")
+		return
+	}
 
 	// 转发请求（不记录使用量）
 	if err := h.gatewayService.ForwardCountTokens(c.Request.Context(), c, account, parsedReq); err != nil {

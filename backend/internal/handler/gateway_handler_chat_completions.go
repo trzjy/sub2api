@@ -400,7 +400,26 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			})
 			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, handover))
 		}
-		if account.Platform == service.PlatformGemini {
+		switch chatCompletionsAccountForwardPath(account) {
+		case "devin":
+			// devin 出站为 Connect+Protobuf，只有 OpenAIGatewayService 实现了正确的
+			// 鉴权与协议（forwardDevin）。沿用兼容分支的失败关闭口径：服务未注入时
+			// 立即 502 并释放账号槽，绝不回落到通用 gatewayService（后者会用错误
+			// 协议/鉴权打上游，实证 401 invalid x-api-key）。
+			if h.openAIGatewayService == nil {
+				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				return
+			}
+			oaRes, oaErr := h.openAIGatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, "", "")
+			if oaErr == nil && oaRes != nil && oaRes.UpstreamEndpoint != "" {
+				setActualUpstreamEndpoint(c, oaRes.UpstreamEndpoint)
+			}
+			result = forwardResultFromOpenAIResult(oaRes)
+			err = oaErr
+		case "gemini":
 			if h.geminiCompatService == nil {
 				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
 				if accountReleaseFunc != nil {
@@ -409,7 +428,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			}
 			result, err = h.geminiCompatService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody)
-		} else if shouldUseAntigravityCompat(account) {
+		case "antigravity":
 			if h.antigravityGatewayService == nil {
 				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
 				if accountReleaseFunc != nil {
@@ -419,7 +438,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			}
 			setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
 			result, err = h.antigravityGatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
-		} else {
+		default:
 			result, err = h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
 		}
 
@@ -526,6 +545,28 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		return
 	}
+}
+
+// chatCompletionsAccountForwardPath 选择账号级 chat completions 转发路径。
+// devin 优先判定并走 OpenAIGatewayService（其内部按 PlatformDevin 分流到
+// forwardDevin 的 Connect 出口）；漏判会落到通用 gatewayService，用错误协议/
+// 鉴权打上游（实证：同一 devin 账号 /v1/messages 200 但本端点 401
+// invalid x-api-key 并被 account_disabled_auth_error 置 error）。
+// gemini/antigravity 判定与历史条件逐字一致，nil 与其余平台走 gateway。
+func chatCompletionsAccountForwardPath(account *service.Account) string {
+	if account == nil {
+		return "gateway"
+	}
+	if account.Platform == service.PlatformDevin {
+		return "devin"
+	}
+	if account.Platform == service.PlatformGemini {
+		return "gemini"
+	}
+	if shouldUseAntigravityCompat(account) {
+		return "antigravity"
+	}
+	return "gateway"
 }
 
 // geminiGroupAdmitsAccount 判定 gemini 分组是否放行该账号进入转发阶段。
