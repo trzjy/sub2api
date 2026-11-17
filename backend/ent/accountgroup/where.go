@@ -20,11 +20,6 @@ func GroupID(v int64) predicate.AccountGroup {
 	return predicate.AccountGroup(sql.FieldEQ(FieldGroupID, v))
 }
 
-// Priority applies equality check predicate on the "priority" field. It's identical to PriorityEQ.
-func Priority(v int) predicate.AccountGroup {
-	return predicate.AccountGroup(sql.FieldEQ(FieldPriority, v))
-}
-
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.AccountGroup {
 	return predicate.AccountGroup(sql.FieldEQ(FieldCreatedAt, v))
@@ -68,46 +63,6 @@ func GroupIDIn(vs ...int64) predicate.AccountGroup {
 // GroupIDNotIn applies the NotIn predicate on the "group_id" field.
 func GroupIDNotIn(vs ...int64) predicate.AccountGroup {
 	return predicate.AccountGroup(sql.FieldNotIn(FieldGroupID, vs...))
-}
-
-// PriorityEQ applies the EQ predicate on the "priority" field.
-func PriorityEQ(v int) predicate.AccountGroup {
-	return predicate.AccountGroup(sql.FieldEQ(FieldPriority, v))
-}
-
-// PriorityNEQ applies the NEQ predicate on the "priority" field.
-func PriorityNEQ(v int) predicate.AccountGroup {
-	return predicate.AccountGroup(sql.FieldNEQ(FieldPriority, v))
-}
-
-// PriorityIn applies the In predicate on the "priority" field.
-func PriorityIn(vs ...int) predicate.AccountGroup {
-	return predicate.AccountGroup(sql.FieldIn(FieldPriority, vs...))
-}
-
-// PriorityNotIn applies the NotIn predicate on the "priority" field.
-func PriorityNotIn(vs ...int) predicate.AccountGroup {
-	return predicate.AccountGroup(sql.FieldNotIn(FieldPriority, vs...))
-}
-
-// PriorityGT applies the GT predicate on the "priority" field.
-func PriorityGT(v int) predicate.AccountGroup {
-	return predicate.AccountGroup(sql.FieldGT(FieldPriority, v))
-}
-
-// PriorityGTE applies the GTE predicate on the "priority" field.
-func PriorityGTE(v int) predicate.AccountGroup {
-	return predicate.AccountGroup(sql.FieldGTE(FieldPriority, v))
-}
-
-// PriorityLT applies the LT predicate on the "priority" field.
-func PriorityLT(v int) predicate.AccountGroup {
-	return predicate.AccountGroup(sql.FieldLT(FieldPriority, v))
-}
-
-// PriorityLTE applies the LTE predicate on the "priority" field.
-func PriorityLTE(v int) predicate.AccountGroup {
-	return predicate.AccountGroup(sql.FieldLTE(FieldPriority, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

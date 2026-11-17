@@ -648,7 +648,7 @@ func TestQuotaKeyRepositoryGroupIDs_OverwriteReplacesBindingsAndEnqueues(t *test
 	qk := qkrCreateQuotaKey(t, client, domain.QuotaKeyStatusActive, nil)
 	acc := qkrCreateAccount(t, client, qk.ID, domain.PlatformCursor)
 	// 预置旧绑定：acc -> g0（priority 1）。
-	_, err := client.AccountGroup.Create().SetAccountID(acc.ID).SetGroupID(g0.ID).SetPriority(1).Save(ctx)
+	_, err := client.AccountGroup.Create().SetAccountID(acc.ID).SetGroupID(g0.ID).Save(ctx)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -699,7 +699,7 @@ func TestQuotaKeyRepositoryGroupIDs_EmptySliceClearsBindings(t *testing.T) {
 	g0 := qkrCreateGroup(t, client, "grp-empty-old-"+qkrUID())
 	qk := qkrCreateQuotaKey(t, client, domain.QuotaKeyStatusActive, nil)
 	acc := qkrCreateAccount(t, client, qk.ID, domain.PlatformCursor)
-	_, err := client.AccountGroup.Create().SetAccountID(acc.ID).SetGroupID(g0.ID).SetPriority(1).Save(ctx)
+	_, err := client.AccountGroup.Create().SetAccountID(acc.ID).SetGroupID(g0.ID).Save(ctx)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -734,7 +734,7 @@ func TestQuotaKeyRepositoryGroupIDs_NilLeavesUnchanged(t *testing.T) {
 	g0 := qkrCreateGroup(t, client, "grp-nil-old-"+qkrUID())
 	qk := qkrCreateQuotaKey(t, client, domain.QuotaKeyStatusActive, nil)
 	acc := qkrCreateAccount(t, client, qk.ID, domain.PlatformCursor)
-	_, err := client.AccountGroup.Create().SetAccountID(acc.ID).SetGroupID(g0.ID).SetPriority(7).Save(ctx)
+	_, err := client.AccountGroup.Create().SetAccountID(acc.ID).SetGroupID(g0.ID).Save(ctx)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {

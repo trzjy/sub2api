@@ -5431,8 +5431,6 @@ type AccountGroupMutation struct {
 	config
 	op             Op
 	typ            string
-	priority       *int
-	addpriority    *int
 	created_at     *time.Time
 	clearedFields  map[string]struct{}
 	account        *int64
@@ -5518,45 +5516,6 @@ func (m *AccountGroupMutation) GroupID() (r int64, exists bool) {
 // ResetGroupID resets all changes to the "group_id" field.
 func (m *AccountGroupMutation) ResetGroupID() {
 	m.group = nil
-}
-
-// SetPriority sets the "priority" field.
-func (m *AccountGroupMutation) SetPriority(i int) {
-	m.priority = &i
-	m.addpriority = nil
-}
-
-// Priority returns the value of the "priority" field in the mutation.
-func (m *AccountGroupMutation) Priority() (r int, exists bool) {
-	v := m.priority
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// AddPriority adds i to the "priority" field.
-func (m *AccountGroupMutation) AddPriority(i int) {
-	if m.addpriority != nil {
-		*m.addpriority += i
-	} else {
-		m.addpriority = &i
-	}
-}
-
-// AddedPriority returns the value that was added to the "priority" field in this mutation.
-func (m *AccountGroupMutation) AddedPriority() (r int, exists bool) {
-	v := m.addpriority
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// ResetPriority resets all changes to the "priority" field.
-func (m *AccountGroupMutation) ResetPriority() {
-	m.priority = nil
-	m.addpriority = nil
 }
 
 // SetCreatedAt sets the "created_at" field.
@@ -5666,15 +5625,12 @@ func (m *AccountGroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccountGroupMutation) Fields() []string {
-	fields := make([]string, 0, 4)
+	fields := make([]string, 0, 3)
 	if m.account != nil {
 		fields = append(fields, accountgroup.FieldAccountID)
 	}
 	if m.group != nil {
 		fields = append(fields, accountgroup.FieldGroupID)
-	}
-	if m.priority != nil {
-		fields = append(fields, accountgroup.FieldPriority)
 	}
 	if m.created_at != nil {
 		fields = append(fields, accountgroup.FieldCreatedAt)
@@ -5691,8 +5647,6 @@ func (m *AccountGroupMutation) Field(name string) (ent.Value, bool) {
 		return m.AccountID()
 	case accountgroup.FieldGroupID:
 		return m.GroupID()
-	case accountgroup.FieldPriority:
-		return m.Priority()
 	case accountgroup.FieldCreatedAt:
 		return m.CreatedAt()
 	}
@@ -5725,13 +5679,6 @@ func (m *AccountGroupMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetGroupID(v)
 		return nil
-	case accountgroup.FieldPriority:
-		v, ok := value.(int)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetPriority(v)
-		return nil
 	case accountgroup.FieldCreatedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -5747,9 +5694,6 @@ func (m *AccountGroupMutation) SetField(name string, value ent.Value) error {
 // this mutation.
 func (m *AccountGroupMutation) AddedFields() []string {
 	var fields []string
-	if m.addpriority != nil {
-		fields = append(fields, accountgroup.FieldPriority)
-	}
 	return fields
 }
 
@@ -5758,8 +5702,6 @@ func (m *AccountGroupMutation) AddedFields() []string {
 // was not set, or was not defined in the schema.
 func (m *AccountGroupMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
-	case accountgroup.FieldPriority:
-		return m.AddedPriority()
 	}
 	return nil, false
 }
@@ -5769,13 +5711,6 @@ func (m *AccountGroupMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *AccountGroupMutation) AddField(name string, value ent.Value) error {
 	switch name {
-	case accountgroup.FieldPriority:
-		v, ok := value.(int)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.AddPriority(v)
-		return nil
 	}
 	return fmt.Errorf("unknown AccountGroup numeric field %s", name)
 }
@@ -5808,9 +5743,6 @@ func (m *AccountGroupMutation) ResetField(name string) error {
 		return nil
 	case accountgroup.FieldGroupID:
 		m.ResetGroupID()
-		return nil
-	case accountgroup.FieldPriority:
-		m.ResetPriority()
 		return nil
 	case accountgroup.FieldCreatedAt:
 		m.ResetCreatedAt()

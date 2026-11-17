@@ -30,8 +30,6 @@ func (AccountGroup) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("account_id"),
 		field.Int64("group_id"),
-		field.Int("priority").
-			Default(50),
 		field.Time("created_at").
 			Immutable().
 			Default(time.Now).
@@ -55,6 +53,5 @@ func (AccountGroup) Edges() []ent.Edge {
 func (AccountGroup) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("group_id"),
-		index.Fields("priority"),
 	}
 }

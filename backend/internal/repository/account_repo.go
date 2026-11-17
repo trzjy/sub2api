@@ -404,8 +404,7 @@ func (r *accountRepository) CreateWithAccountGroups(ctx context.Context, account
 			groups[i].AccountID = account.ID
 			builders = append(builders, txClient.AccountGroup.Create().
 				SetAccountID(account.ID).
-				SetGroupID(groups[i].GroupID).
-				SetPriority(groups[i].Priority),
+				SetGroupID(groups[i].GroupID),
 			)
 		}
 		if _, err := txClient.AccountGroup.CreateBulk(builders...).Save(ctx); err != nil {
@@ -2163,7 +2162,6 @@ func (r *accountRepository) AddToGroup(ctx context.Context, accountID, groupID i
 	_, err = client.AccountGroup.Create().
 		SetAccountID(accountID).
 		SetGroupID(groupID).
-		SetPriority(priority).
 		Save(ctx)
 	if err != nil {
 		return err
@@ -2265,11 +2263,10 @@ func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, gro
 	}
 
 	builders := make([]*dbent.AccountGroupCreate, 0, len(groupIDs))
-	for i, groupID := range groupIDs {
+	for _, groupID := range groupIDs {
 		builders = append(builders, txClient.AccountGroup.Create().
 			SetAccountID(accountID).
-			SetGroupID(groupID).
-			SetPriority(i+1),
+			SetGroupID(groupID),
 		)
 	}
 
@@ -4964,8 +4961,10 @@ func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID in
 
 	groups, err := q.
 		Order(
-			dbaccountgroup.ByPriority(),
+			// 只按账号优先级排序（2026-11-17 用户裁定：取消隐藏的组内优先级）。
+			// 账号优先级相同时按账号 ID 稳定排序，避免结果抖动。
 			dbaccountgroup.ByAccountField(dbaccount.FieldPriority),
+			dbaccountgroup.ByAccountID(),
 		).
 		WithAccount().
 		All(ctx)
@@ -5116,7 +5115,7 @@ func (r *accountRepository) loadAccountGroups(ctx context.Context, accountIDs []
 		}
 		entries, err := r.client.AccountGroup.Query().
 			Where(dbaccountgroup.AccountIDIn(accountIDs[start:end]...)).
-			Order(dbaccountgroup.ByAccountID(), dbaccountgroup.ByPriority()).
+			Order(dbaccountgroup.ByAccountID()).
 			All(ctx)
 		if err != nil {
 			return nil, nil, nil, err
@@ -5135,7 +5134,6 @@ func (r *accountRepository) loadAccountGroups(ctx context.Context, accountIDs []
 			agSvc := service.AccountGroup{
 				AccountID: ag.AccountID,
 				GroupID:   ag.GroupID,
-				Priority:  ag.Priority,
 				CreatedAt: ag.CreatedAt,
 				Group:     groupSvc,
 			}

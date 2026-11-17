@@ -335,7 +335,7 @@ func (r *quotaCapManagedSettingsRepo) Update(ctx context.Context, a *Account) er
 		execClient = tx.Client()
 	}
 	update := execClient.Account.UpdateOneID(a.ID).SetQuotaKeyID(*a.QuotaKeyID)
-	update.SetPriority(a.Priority)
+	update
 	update.SetConcurrency(a.Concurrency)
 	if a.LoadFactor != nil {
 		update.SetLoadFactor(*a.LoadFactor)
@@ -640,7 +640,7 @@ func TestAdminAccountQuotaKeyBoundUpdateFollowsManagedSettingsConcurrentLock(t *
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- withQuotaKeyLockTx(ctx, ctx, client, qk.ID, func(tx *ent.Tx) error {
-			_, e := tx.QuotaKey.UpdateOneID(qk.ID).SetPriority(99).Save(ctx)
+			_, e := tx.QuotaKey.UpdateOneID(qk.ID).Save(ctx)
 			return e
 		})
 	}()
@@ -743,8 +743,7 @@ func (r *quotaCapManagedSettingsRepo) BindGroups(ctx context.Context, accountID 
 	for i, gid := range groupIDs {
 		builders = append(builders, execClient.AccountGroup.Create().
 			SetAccountID(accountID).
-			SetGroupID(gid).
-			SetPriority(i+1))
+			SetGroupID(gid))
 	}
 	if _, err := execClient.AccountGroup.CreateBulk(builders...).Save(ctx); err != nil {
 		return err

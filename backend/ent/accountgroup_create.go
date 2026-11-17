@@ -36,20 +36,6 @@ func (_c *AccountGroupCreate) SetGroupID(v int64) *AccountGroupCreate {
 	return _c
 }
 
-// SetPriority sets the "priority" field.
-func (_c *AccountGroupCreate) SetPriority(v int) *AccountGroupCreate {
-	_c.mutation.SetPriority(v)
-	return _c
-}
-
-// SetNillablePriority sets the "priority" field if the given value is not nil.
-func (_c *AccountGroupCreate) SetNillablePriority(v *int) *AccountGroupCreate {
-	if v != nil {
-		_c.SetPriority(*v)
-	}
-	return _c
-}
-
 // SetCreatedAt sets the "created_at" field.
 func (_c *AccountGroupCreate) SetCreatedAt(v time.Time) *AccountGroupCreate {
 	_c.mutation.SetCreatedAt(v)
@@ -109,10 +95,6 @@ func (_c *AccountGroupCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *AccountGroupCreate) defaults() {
-	if _, ok := _c.mutation.Priority(); !ok {
-		v := accountgroup.DefaultPriority
-		_c.mutation.SetPriority(v)
-	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := accountgroup.DefaultCreatedAt()
 		_c.mutation.SetCreatedAt(v)
@@ -126,9 +108,6 @@ func (_c *AccountGroupCreate) check() error {
 	}
 	if _, ok := _c.mutation.GroupID(); !ok {
 		return &ValidationError{Name: "group_id", err: errors.New(`ent: missing required field "AccountGroup.group_id"`)}
-	}
-	if _, ok := _c.mutation.Priority(); !ok {
-		return &ValidationError{Name: "priority", err: errors.New(`ent: missing required field "AccountGroup.priority"`)}
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "AccountGroup.created_at"`)}
@@ -162,10 +141,6 @@ func (_c *AccountGroupCreate) createSpec() (*AccountGroup, *sqlgraph.CreateSpec)
 		_spec = sqlgraph.NewCreateSpec(accountgroup.Table, nil)
 	)
 	_spec.OnConflict = _c.conflict
-	if value, ok := _c.mutation.Priority(); ok {
-		_spec.SetField(accountgroup.FieldPriority, field.TypeInt, value)
-		_node.Priority = value
-	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(accountgroup.FieldCreatedAt, field.TypeTime, value)
 		_node.CreatedAt = value
@@ -280,24 +255,6 @@ func (u *AccountGroupUpsert) UpdateGroupID() *AccountGroupUpsert {
 	return u
 }
 
-// SetPriority sets the "priority" field.
-func (u *AccountGroupUpsert) SetPriority(v int) *AccountGroupUpsert {
-	u.Set(accountgroup.FieldPriority, v)
-	return u
-}
-
-// UpdatePriority sets the "priority" field to the value that was provided on create.
-func (u *AccountGroupUpsert) UpdatePriority() *AccountGroupUpsert {
-	u.SetExcluded(accountgroup.FieldPriority)
-	return u
-}
-
-// AddPriority adds v to the "priority" field.
-func (u *AccountGroupUpsert) AddPriority(v int) *AccountGroupUpsert {
-	u.Add(accountgroup.FieldPriority, v)
-	return u
-}
-
 // UpdateNewValues updates the mutable fields using the new values that were set on create.
 // Using this option is equivalent to using:
 //
@@ -368,27 +325,6 @@ func (u *AccountGroupUpsertOne) SetGroupID(v int64) *AccountGroupUpsertOne {
 func (u *AccountGroupUpsertOne) UpdateGroupID() *AccountGroupUpsertOne {
 	return u.Update(func(s *AccountGroupUpsert) {
 		s.UpdateGroupID()
-	})
-}
-
-// SetPriority sets the "priority" field.
-func (u *AccountGroupUpsertOne) SetPriority(v int) *AccountGroupUpsertOne {
-	return u.Update(func(s *AccountGroupUpsert) {
-		s.SetPriority(v)
-	})
-}
-
-// AddPriority adds v to the "priority" field.
-func (u *AccountGroupUpsertOne) AddPriority(v int) *AccountGroupUpsertOne {
-	return u.Update(func(s *AccountGroupUpsert) {
-		s.AddPriority(v)
-	})
-}
-
-// UpdatePriority sets the "priority" field to the value that was provided on create.
-func (u *AccountGroupUpsertOne) UpdatePriority() *AccountGroupUpsertOne {
-	return u.Update(func(s *AccountGroupUpsert) {
-		s.UpdatePriority()
 	})
 }
 
@@ -605,27 +541,6 @@ func (u *AccountGroupUpsertBulk) SetGroupID(v int64) *AccountGroupUpsertBulk {
 func (u *AccountGroupUpsertBulk) UpdateGroupID() *AccountGroupUpsertBulk {
 	return u.Update(func(s *AccountGroupUpsert) {
 		s.UpdateGroupID()
-	})
-}
-
-// SetPriority sets the "priority" field.
-func (u *AccountGroupUpsertBulk) SetPriority(v int) *AccountGroupUpsertBulk {
-	return u.Update(func(s *AccountGroupUpsert) {
-		s.SetPriority(v)
-	})
-}
-
-// AddPriority adds v to the "priority" field.
-func (u *AccountGroupUpsertBulk) AddPriority(v int) *AccountGroupUpsertBulk {
-	return u.Update(func(s *AccountGroupUpsert) {
-		s.AddPriority(v)
-	})
-}
-
-// UpdatePriority sets the "priority" field to the value that was provided on create.
-func (u *AccountGroupUpsertBulk) UpdatePriority() *AccountGroupUpsertBulk {
-	return u.Update(func(s *AccountGroupUpsert) {
-		s.UpdatePriority()
 	})
 }
 

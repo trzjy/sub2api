@@ -406,7 +406,7 @@ func (a AccountWithConcurrency) MarshalJSON() ([]byte, error) {
 			continue
 		}
 		accountGroups = append(accountGroups, simpleModeAccountGroupReference{
-			AccountID: accountGroup.AccountID, GroupID: accountGroup.GroupID, Priority: accountGroup.Priority,
+			AccountID: accountGroup.AccountID, GroupID: accountGroup.GroupID,
 			CreatedAt: accountGroup.CreatedAt, Group: simpleModeGroupReferenceFromDTO(accountGroup.Group),
 		})
 	}
@@ -692,7 +692,6 @@ func (h *AccountHandler) buildOpenAIAccountSchedulerScores(
 				if accountGroup.GroupID != gid {
 					continue
 				}
-				groupPriorityByAccount[account.ID] = accountGroup.Priority
 				if accountGroup.Group != nil {
 					groupNameByID[gid] = accountGroup.Group.Name
 				}

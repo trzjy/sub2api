@@ -16,8 +16,6 @@ const (
 	FieldAccountID = "account_id"
 	// FieldGroupID holds the string denoting the group_id field in the database.
 	FieldGroupID = "group_id"
-	// FieldPriority holds the string denoting the priority field in the database.
-	FieldPriority = "priority"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// EdgeAccount holds the string denoting the account edge name in mutations.
@@ -50,7 +48,6 @@ const (
 var Columns = []string{
 	FieldAccountID,
 	FieldGroupID,
-	FieldPriority,
 	FieldCreatedAt,
 }
 
@@ -65,8 +62,6 @@ func ValidColumn(column string) bool {
 }
 
 var (
-	// DefaultPriority holds the default value on creation for the "priority" field.
-	DefaultPriority int
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 )
@@ -82,11 +77,6 @@ func ByAccountID(opts ...sql.OrderTermOption) OrderOption {
 // ByGroupID orders the results by the group_id field.
 func ByGroupID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGroupID, opts...).ToFunc()
-}
-
-// ByPriority orders the results by the priority field.
-func ByPriority(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldPriority, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

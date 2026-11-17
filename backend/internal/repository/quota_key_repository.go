@@ -777,11 +777,10 @@ func (r *quotaKeyRepository) UpdateSettingsAndSyncAccounts(ctx context.Context, 
 			if _, err := tx.AccountGroup.Delete().Where(accountgroup.AccountIDEQ(acc.ID)).Exec(ctx); err != nil {
 				return err
 			}
-			for i, gid := range newIDs {
+			for _, gid := range newIDs {
 				if _, err := tx.AccountGroup.Create().
 					SetAccountID(acc.ID).
 					SetGroupID(gid).
-					SetPriority(i + 1).
 					Save(ctx); err != nil {
 					return err
 				}

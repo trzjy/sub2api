@@ -57,27 +57,6 @@ func (_u *AccountGroupUpdate) SetNillableGroupID(v *int64) *AccountGroupUpdate {
 	return _u
 }
 
-// SetPriority sets the "priority" field.
-func (_u *AccountGroupUpdate) SetPriority(v int) *AccountGroupUpdate {
-	_u.mutation.ResetPriority()
-	_u.mutation.SetPriority(v)
-	return _u
-}
-
-// SetNillablePriority sets the "priority" field if the given value is not nil.
-func (_u *AccountGroupUpdate) SetNillablePriority(v *int) *AccountGroupUpdate {
-	if v != nil {
-		_u.SetPriority(*v)
-	}
-	return _u
-}
-
-// AddPriority adds value to the "priority" field.
-func (_u *AccountGroupUpdate) AddPriority(v int) *AccountGroupUpdate {
-	_u.mutation.AddPriority(v)
-	return _u
-}
-
 // SetAccount sets the "account" edge to the Account entity.
 func (_u *AccountGroupUpdate) SetAccount(v *Account) *AccountGroupUpdate {
 	return _u.SetAccountID(v.ID)
@@ -154,12 +133,6 @@ func (_u *AccountGroupUpdate) sqlSave(ctx context.Context) (_node int, err error
 				ps[i](selector)
 			}
 		}
-	}
-	if value, ok := _u.mutation.Priority(); ok {
-		_spec.SetField(accountgroup.FieldPriority, field.TypeInt, value)
-	}
-	if value, ok := _u.mutation.AddedPriority(); ok {
-		_spec.AddField(accountgroup.FieldPriority, field.TypeInt, value)
 	}
 	if _u.mutation.AccountCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -264,27 +237,6 @@ func (_u *AccountGroupUpdateOne) SetNillableGroupID(v *int64) *AccountGroupUpdat
 	if v != nil {
 		_u.SetGroupID(*v)
 	}
-	return _u
-}
-
-// SetPriority sets the "priority" field.
-func (_u *AccountGroupUpdateOne) SetPriority(v int) *AccountGroupUpdateOne {
-	_u.mutation.ResetPriority()
-	_u.mutation.SetPriority(v)
-	return _u
-}
-
-// SetNillablePriority sets the "priority" field if the given value is not nil.
-func (_u *AccountGroupUpdateOne) SetNillablePriority(v *int) *AccountGroupUpdateOne {
-	if v != nil {
-		_u.SetPriority(*v)
-	}
-	return _u
-}
-
-// AddPriority adds value to the "priority" field.
-func (_u *AccountGroupUpdateOne) AddPriority(v int) *AccountGroupUpdateOne {
-	_u.mutation.AddPriority(v)
 	return _u
 }
 
@@ -396,12 +348,6 @@ func (_u *AccountGroupUpdateOne) sqlSave(ctx context.Context) (_node *AccountGro
 				ps[i](selector)
 			}
 		}
-	}
-	if value, ok := _u.mutation.Priority(); ok {
-		_spec.SetField(accountgroup.FieldPriority, field.TypeInt, value)
-	}
-	if value, ok := _u.mutation.AddedPriority(); ok {
-		_spec.AddField(accountgroup.FieldPriority, field.TypeInt, value)
 	}
 	if _u.mutation.AccountCleared() {
 		edge := &sqlgraph.EdgeSpec{
