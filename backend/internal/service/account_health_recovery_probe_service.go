@@ -1008,7 +1008,7 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 
 // probeDevinUpstream 对 devin（Cascade）平台账号做真实数据面探活：session token 经
 // GetUserJwt 换取本请求 JWT，再走 GetChatMessage connect 帧发最小非流式对话
-// （max_tokens=16）。与账号测试 testDevinAccountConnection 共用同一底层部件
+// （max_tokens=128）。与账号测试 testDevinAccountConnection 共用同一底层部件
 // （NewDevinUpstreamClient / BuildDevinChatParams / NewDevinChatFrame / DevinStreamReader /
 // decodeGetChatMessageResponse），成功判定 = 解析出非空正文。
 //
@@ -1072,7 +1072,7 @@ func (p *AccountHealthRecoveryProbeService) probeDevinUpstream(ctx context.Conte
 
 	// tryCandidate 用给定上游 uid 发一次最小非流式对话并按原判定规则给结论。
 	tryCandidate := func(upstreamUID string) (bool, error) {
-		// 最小非流式对话：max_tokens=16 + 固定 system/user 提示。复用 C3 转换把 OpenAI
+		// 最小非流式对话：max_tokens=128 + 固定 system/user 提示。复用 C3 转换把 OpenAI
 		// chat body 归一为 Devin 参数（system 进 SystemPrompt、user 进 Prompts）。
 		probeBody, _ := json.Marshal(map[string]any{
 			"model": upstreamUID,

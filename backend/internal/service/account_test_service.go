@@ -854,7 +854,7 @@ func (s *AccountTestService) testCursorAccountConnection(c *gin.Context, account
 // GetUserJwt 换取本请求 JWT，再走 GetChatMessage connect 帧完成一次最小非流式对话。
 // 与正式转发 forwardDevin 共用同一底层部件（NewDevinUpstreamClient / BuildDevinChatParams /
 // NewDevinChatFrame / DevinStreamReader / decodeGetChatMessageResponse），只把请求收敛到
-// max_tokens=16 + 固定 system/user 提示；成功判定 = 解析出非空正文，空流/空正文按失败
+// max_tokens=128 + 固定 system/user 提示（思考型模型需留足思考预算）；成功判定 = 解析出非空正文，空流/空正文按失败
 // 关闭，绝不冒充成功（plan §3.6，同 §20.2-C 红线）。
 func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, account *Account, modelID string) error {
 	ctx := c.Request.Context()
@@ -892,7 +892,7 @@ func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, account 
 		return s.sendErrorAndEnd(c, "devin account test unavailable: http upstream not wired")
 	}
 
-	// 最小非流式对话：max_tokens=16 + 固定 system/user 提示。复用 C3 转换把 OpenAI
+	// 最小非流式对话：max_tokens=128 + 固定 system/user 提示。复用 C3 转换把 OpenAI
 	// chat body 归一为 Devin 参数（system 进 SystemPrompt、user 进 Prompts）。
 	probeBody, _ := json.Marshal(map[string]any{
 		"model": upstreamUID,
