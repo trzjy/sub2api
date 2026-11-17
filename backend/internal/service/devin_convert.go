@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"strconv"
@@ -11,6 +12,10 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/tidwall/gjson"
 )
+
+// ErrDevinSystemImageUnsupported 表示 system/developer 消息带有图片：
+// 这些角色只拼入 SystemPrompt（纯文本），无图片承载位，显式拒绝而非静默丢弃。
+var ErrDevinSystemImageUnsupported = errors.New("devin: system/developer 消息不支持图片")
 
 // ChatUsage 是 Devin 响应用量的归一表示，四个计数分别对应上游 usage 的
 // input / output / cacheWrite / cacheRead，由 DevinUsageToOpenAI 转成 OpenAIUsage。
@@ -51,10 +56,14 @@ func BuildDevinChatParams(body []byte, modelUID, cascadeID string) (*DevinChatPa
 			role := m.Get("role").String()
 			switch role {
 			case "system", "developer":
-				// system/developer 只拼入 SystemPrompt（纯文本），无 ChatMessagePrompt 承载图片。
-				text, _, err := devinMessageText(m)
+				// system/developer 只拼入 SystemPrompt（纯文本），无 ChatMessagePrompt 承载图片；
+				// 若含图片则显式失败关闭，恢复基准行为，绝不静默丢弃。
+				text, images, err := devinMessageText(m)
 				if err != nil {
 					return nil, err
+				}
+				if len(images) > 0 {
+					return nil, ErrDevinSystemImageUnsupported
 				}
 				if text != "" {
 					systemParts = append(systemParts, text)

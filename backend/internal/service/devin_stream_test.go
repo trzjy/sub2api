@@ -219,17 +219,41 @@ func TestDevinStreamReaderEOFWithResidual(t *testing.T) {
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
 
-// TestDevinStreamChatFrameRejectsImage 图片输入在帧构造层失败关闭，不发送帧。
-func TestDevinStreamChatFrameRejectsImage(t *testing.T) {
+// TestDevinChatFrameEncodesImage 带 Images 的 params 成功编码进帧，
+// 解帧后 prompts[0].images[0] 的 base64 与 MIME 正确。
+func TestDevinChatFrameEncodesImage(t *testing.T) {
 	params := &DevinChatParams{
 		Prompts: []ChatMessagePrompt{{
 			MessageID: "m1",
+			Source:    ChatMessageSourceUser,
 			Prompt:    "see image",
-			Images:    []ImageData{{Base64Data: "AAAA", MimeType: "image/png"}},
+			Images:    []ImageData{{Base64Data: "aGk=", MimeType: "image/png"}},
 		}},
 	}
 	frame, _, err := NewDevinChatFrame(params, "jwt", "")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "image input is not supported")
-	require.Nil(t, frame)
+	require.NoError(t, err)
+	require.NotEmpty(t, frame)
+
+	raw, err := tryGunzipResponse(frame[5:])
+	require.NoError(t, err)
+	top := scanFields(t, raw)
+	prompts := fieldsOfNum(top, 3) // GetChatMessageRequest.ChatMessagePrompts = field 3
+	require.Len(t, prompts, 1)
+	promptFields := scanFields(t, prompts[0].data)
+	images := fieldsOfNum(promptFields, 10) // ChatMessagePrompt.Images = field 10
+	require.Len(t, images, 1)
+	imgFields := scanFields(t, images[0].data)
+	require.Equal(t, "aGk=", string(fieldsOfNum(imgFields, 1)[0].data))      // ImageData.Base64Data = field 1
+	require.Equal(t, "image/png", string(fieldsOfNum(imgFields, 2)[0].data)) // ImageData.MimeType = field 2
+}
+
+// TestDevinChatFrameSystemImageRejected system/developer 消息含图片时显式拒绝，不静默丢弃。
+func TestDevinChatFrameSystemImageRejected(t *testing.T) {
+	for _, role := range []string{"system", "developer"} {
+		body := []byte(`{"messages":[{"role":"` + role + `","content":[` +
+			`{"type":"text","text":"sys"},` +
+			`{"type":"image_url","image_url":{"url":"data:image/png;base64,aGk="}}]}]}`)
+		_, err := BuildDevinChatParams(body, "m", "c")
+		require.ErrorIs(t, err, ErrDevinSystemImageUnsupported, "role=%s", role)
+	}
 }
