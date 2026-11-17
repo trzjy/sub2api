@@ -19,13 +19,14 @@ const maxDevinBalanceMicro uint64 = 1_000_000_000_000
 
 // DevinAccountStatus 是 Devin 账号额度快照。
 type DevinAccountStatus struct {
-	Plan                   string     `json:"plan,omitempty"`
-	BalanceUSD             *float64   `json:"balance_usd,omitempty"`
-	DailyRemainingPercent  *int       `json:"daily_remaining_percent,omitempty"`
-	WeeklyRemainingPercent *int       `json:"weekly_remaining_percent,omitempty"`
-	DailyResetAt           *time.Time `json:"daily_reset_at,omitempty"`
-	WeeklyResetAt          *time.Time `json:"weekly_reset_at,omitempty"`
-	FetchedAt              time.Time  `json:"fetched_at"`
+	Plan                   string          `json:"plan,omitempty"`
+	BalanceUSD             *float64        `json:"balance_usd,omitempty"`
+	DailyRemainingPercent  *int            `json:"daily_remaining_percent,omitempty"`
+	WeeklyRemainingPercent *int            `json:"weekly_remaining_percent,omitempty"`
+	DailyResetAt           *time.Time      `json:"daily_reset_at,omitempty"`
+	WeeklyResetAt          *time.Time      `json:"weekly_reset_at,omitempty"`
+	FetchedAt              time.Time       `json:"fetched_at"`
+	LocalCost              *DevinLocalCost `json:"local_cost,omitempty"`
 }
 
 // DevinStatusClient 封装 GetUserStatus 查询。

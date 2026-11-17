@@ -1,0 +1,5342 @@
+{
+ "captured_at": "2026-11-17",
+ "prices": {
+  "adaptive": {
+   "cached_input": 0.1,
+   "input": 0.5,
+   "output": 2.0
+  },
+  "claude-5-fable-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-5-fable-low": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-5-fable-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-5-fable-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-5-fable-xhigh": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-fable-5-1-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-fable-5-1-low": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-fable-5-1-max": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-fable-5-1-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-fable-5-1-xhigh": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-fable-5-2-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-fable-5-2-high-fast": {
+   "cached_input": 0.4,
+   "input": 16.0,
+   "output": 80.0
+  },
+  "claude-fable-5-2-low": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-fable-5-2-low-fast": {
+   "cached_input": 0.4,
+   "input": 16.0,
+   "output": 80.0
+  },
+  "claude-fable-5-2-max": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-fable-5-2-max-fast": {
+   "cached_input": 0.4,
+   "input": 16.0,
+   "output": 80.0
+  },
+  "claude-fable-5-2-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-fable-5-2-medium-fast": {
+   "cached_input": 0.4,
+   "input": 16.0,
+   "output": 80.0
+  },
+  "claude-fable-5-2-xhigh": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-fable-5-2-xhigh-fast": {
+   "cached_input": 0.4,
+   "input": 16.0,
+   "output": 80.0
+  },
+  "claude-haiku-5-5-high": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "claude-haiku-5-5-low": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "claude-haiku-5-5-max": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "claude-haiku-5-5-medium": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "claude-haiku-5-5-xhigh": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "claude-opus-4-6": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-6-1m": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-6-thinking": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-6-thinking-1m": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-7-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-7-low": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-7-max": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-7-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-7-xhigh": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-8-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-8-high-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-opus-4-8-low": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-8-low-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-opus-4-8-max": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-8-max-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-opus-4-8-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-8-medium-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-opus-4-8-xhigh": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-4-8-xhigh-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-opus-5-5-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "claude-opus-5-5-high-fast": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-opus-5-5-low": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "claude-opus-5-5-low-fast": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-opus-5-5-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "claude-opus-5-5-max-fast": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-opus-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "claude-opus-5-5-medium-fast": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-opus-5-5-xhigh": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "claude-opus-5-5-xhigh-fast": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "claude-opus-5-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-5-high-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-opus-5-low": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-5-low-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-opus-5-max": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-5-max-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-opus-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-5-medium-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-opus-5-xhigh": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "claude-opus-5-xhigh-fast": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "claude-sonnet-4-6": {
+   "cached_input": 0.3,
+   "input": 3.0,
+   "output": 15.0
+  },
+  "claude-sonnet-4-6-1m": {
+   "cached_input": 0.3,
+   "input": 3.0,
+   "output": 15.0
+  },
+  "claude-sonnet-4-6-thinking": {
+   "cached_input": 0.3,
+   "input": 3.0,
+   "output": 15.0
+  },
+  "claude-sonnet-4-6-thinking-1m": {
+   "cached_input": 0.3,
+   "input": 3.0,
+   "output": 15.0
+  },
+  "claude-sonnet-5-5-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "claude-sonnet-5-5-low": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "claude-sonnet-5-5-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "claude-sonnet-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "claude-sonnet-5-5-xhigh": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "claude-sonnet-5-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "claude-sonnet-5-low": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "claude-sonnet-5-max": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "claude-sonnet-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "claude-sonnet-5-xhigh": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "deepseek-v4-1-flash-1017-high": {
+   "cached_input": 0.01,
+   "input": 0.22,
+   "output": 0.66
+  },
+  "deepseek-v4-1-flash-1017-low": {
+   "cached_input": 0.01,
+   "input": 0.22,
+   "output": 0.66
+  },
+  "deepseek-v4-1-flash-1017-max": {
+   "cached_input": 0.01,
+   "input": 0.22,
+   "output": 0.66
+  },
+  "deepseek-v4-1-flash-1017-none": {
+   "cached_input": 0.01,
+   "input": 0.22,
+   "output": 0.66
+  },
+  "deepseek-v4-flash-high": {
+   "cached_input": 0.03,
+   "input": 0.14,
+   "output": 0.28
+  },
+  "deepseek-v4-flash-max": {
+   "cached_input": 0.03,
+   "input": 0.14,
+   "output": 0.28
+  },
+  "deepseek-v4-pro-high": {
+   "cached_input": 0.04,
+   "input": 1.32,
+   "output": 3.96
+  },
+  "deepseek-v4-pro-max": {
+   "cached_input": 0.04,
+   "input": 1.32,
+   "output": 3.96
+  },
+  "fusion-claude-fable-5-1-high-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-glm-5-2": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-swe-2-flash-max": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-swe-2-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-high-sidekick-swe-2-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-glm-5-2": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-swe-2-flash-max": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-swe-2-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-low-sidekick-swe-2-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-glm-5-2": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-swe-2-flash-max": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-swe-2-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-max-sidekick-swe-2-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-glm-5-2": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-swe-2-flash-max": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-swe-2-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-medium-sidekick-swe-2-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-glm-5-2": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-swe-2-flash-max": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-swe-2-high": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-1-xhigh-sidekick-swe-2-medium": {
+   "cached_input": 0.25,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-fable-5-2-high-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-high-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-low-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-max-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-medium-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-fable-5-2-xhigh-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-high-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-low-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-max-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-medium-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-5-xhigh-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-fast-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-high-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-high-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-high-sidekick-glm-5-2": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-high-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-high-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-high-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-high-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-high-sidekick-swe-2-flash-max": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-high-sidekick-swe-2-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-high-sidekick-swe-2-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-fast-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-low-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-sidekick-glm-5-2": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-sidekick-swe-2-flash-max": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-sidekick-swe-2-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-low-sidekick-swe-2-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-fast-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-max-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-sidekick-glm-5-2": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-sidekick-swe-2-flash-max": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-sidekick-swe-2-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-max-sidekick-swe-2-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-fast-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-glm-5-2": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-swe-2-flash-max": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-swe-2-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-medium-sidekick-swe-2-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-fast-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-glm-5-2": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-swe-2-flash-max": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-swe-2-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-opus-5-xhigh-sidekick-swe-2-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 25.0
+  },
+  "fusion-claude-sonnet-5-5-high-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-high-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-low-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-max-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-medium-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-claude-sonnet-5-5-xhigh-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-5-6-sol-high-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-high-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-high-fast-sidekick-glm-5-2": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-high-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-high-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-high-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-high-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-high-fast-sidekick-swe-2-high": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-high-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-high-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-high-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-high-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-high-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-high-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-high-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-high-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-high-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-high-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-low-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-low-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-low-fast-sidekick-glm-5-2": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-low-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-low-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-low-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-low-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-low-fast-sidekick-swe-2-high": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-low-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-low-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-low-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-low-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-low-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-low-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-low-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-low-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-low-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-low-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-max-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-max-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-max-fast-sidekick-glm-5-2": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-max-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-max-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-max-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-max-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-max-fast-sidekick-swe-2-high": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-max-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-max-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-max-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-max-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-max-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-max-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-max-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-max-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-max-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-max-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-medium-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-medium-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-medium-fast-sidekick-glm-5-2": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-medium-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-medium-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-medium-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-medium-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-medium-fast-sidekick-swe-2-high": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-medium-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-medium-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-medium-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-medium-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-medium-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-medium-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-medium-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-medium-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-medium-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-medium-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-fast-sidekick-glm-5-2": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-fast-sidekick-swe-2-high": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-5-6-sol-xhigh-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-high-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-low-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-max-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-medium-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-glm-5-2": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-swe-2-flash-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-swe-2-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-1-sol-xhigh-sidekick-swe-2-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-glm-5-2": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-swe-2-high": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-fast-sidekick-swe-2-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-gpt-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-high-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-glm-5-2": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-swe-2-high": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-fast-sidekick-swe-2-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-gpt-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-low-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-glm-5-2": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-swe-2-high": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-fast-sidekick-swe-2-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-gpt-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-max-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-glm-5-2": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-swe-2-high": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-fast-sidekick-swe-2-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-gpt-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-medium-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-glm-5-2": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-swe-2-high": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-fast-sidekick-swe-2-medium": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-glm-5-2": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-gpt-6-luna-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-swe-2-flash-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-swe-2-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-astra-xhigh-sidekick-swe-2-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-high-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-low-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-max-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-medium-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-glm-5-2": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-gpt-5-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-gpt-5-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-gpt-6-1-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-gpt-6-luna-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-swe-2-flash-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-swe-2-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-fast-sidekick-swe-2-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-claude-haiku-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-claude-sonnet-5-5-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-glm-5-2": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-gpt-5-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-gpt-5-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-gpt-6-1-terra-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-gpt-6-luna-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-swe-2-flash-max": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-swe-2-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "fusion-gpt-6-sol-xhigh-sidekick-swe-2-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gemini-3-5-flash-high": {
+   "cached_input": 0.15,
+   "input": 1.5,
+   "output": 9.0
+  },
+  "gemini-3-5-flash-low": {
+   "cached_input": 0.15,
+   "input": 1.5,
+   "output": 9.0
+  },
+  "gemini-3-5-flash-medium": {
+   "cached_input": 0.15,
+   "input": 1.5,
+   "output": 9.0
+  },
+  "gemini-3-5-flash-minimal": {
+   "cached_input": 0.15,
+   "input": 1.5,
+   "output": 9.0
+  },
+  "gemini-3-6-flash-high": {
+   "cached_input": 0.15,
+   "input": 1.5,
+   "output": 7.5
+  },
+  "gemini-3-6-flash-low": {
+   "cached_input": 0.15,
+   "input": 1.5,
+   "output": 7.5
+  },
+  "gemini-3-6-flash-medium": {
+   "cached_input": 0.15,
+   "input": 1.5,
+   "output": 7.5
+  },
+  "gemini-3-6-flash-minimal": {
+   "cached_input": 0.15,
+   "input": 1.5,
+   "output": 7.5
+  },
+  "gemini-3-7-flash-high": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 3.75
+  },
+  "gemini-3-7-flash-low": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 3.75
+  },
+  "gemini-3-7-flash-medium": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 3.75
+  },
+  "gemini-3-8-flash-high": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 3.75
+  },
+  "gemini-3-8-flash-low": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 3.75
+  },
+  "gemini-3-8-flash-medium": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 3.75
+  },
+  "gemini-4-argon-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gemini-4-argon-low": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gemini-4-argon-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gemini-4-carbon-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gemini-4-carbon-low": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gemini-4-carbon-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gemini-4-hydrogen-high": {
+   "cached_input": 0.08,
+   "input": 1.5,
+   "output": 7.5
+  },
+  "gemini-4-hydrogen-low": {
+   "cached_input": 0.08,
+   "input": 1.5,
+   "output": 7.5
+  },
+  "gemini-4-hydrogen-medium": {
+   "cached_input": 0.08,
+   "input": 1.5,
+   "output": 7.5
+  },
+  "gemini-4-hydrogen-xhigh": {
+   "cached_input": 0.08,
+   "input": 1.5,
+   "output": 7.5
+  },
+  "glm-5-2": {
+   "cached_input": 0.26,
+   "input": 1.4,
+   "output": 4.4
+  },
+  "glm-5-2-1m": {
+   "cached_input": 0.26,
+   "input": 1.4,
+   "output": 4.4
+  },
+  "glm-5-2-max": {
+   "cached_input": 0.26,
+   "input": 1.4,
+   "output": 4.4
+  },
+  "glm-5-2-max-1m": {
+   "cached_input": 0.26,
+   "input": 1.4,
+   "output": 4.4
+  },
+  "glm-5-2-none": {
+   "cached_input": 0.26,
+   "input": 1.4,
+   "output": 4.4
+  },
+  "glm-5-2-none-1m": {
+   "cached_input": 0.26,
+   "input": 1.4,
+   "output": 4.4
+  },
+  "glm-5-3-flash-high": {
+   "cached_input": 0.03,
+   "input": 0.15,
+   "output": 0.5
+  },
+  "glm-5-3-flash-low": {
+   "cached_input": 0.03,
+   "input": 0.15,
+   "output": 0.5
+  },
+  "glm-5-3-flash-max": {
+   "cached_input": 0.03,
+   "input": 0.15,
+   "output": 0.5
+  },
+  "glm-5-3-high": {
+   "cached_input": 0.26,
+   "input": 1.4,
+   "output": 4.4
+  },
+  "glm-5-3-low": {
+   "cached_input": 0.26,
+   "input": 1.4,
+   "output": 4.4
+  },
+  "glm-5-3-max": {
+   "cached_input": 0.26,
+   "input": 1.4,
+   "output": 4.4
+  },
+  "gpt-5-4-high": {
+   "cached_input": 0.25,
+   "input": 2.5,
+   "output": 15.0
+  },
+  "gpt-5-4-high-priority": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-4-low": {
+   "cached_input": 0.25,
+   "input": 2.5,
+   "output": 15.0
+  },
+  "gpt-5-4-low-priority": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-4-medium": {
+   "cached_input": 0.25,
+   "input": 2.5,
+   "output": 15.0
+  },
+  "gpt-5-4-medium-priority": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-4-mini-high": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 4.5
+  },
+  "gpt-5-4-mini-low": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 4.5
+  },
+  "gpt-5-4-mini-medium": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 4.5
+  },
+  "gpt-5-4-mini-xhigh": {
+   "cached_input": 0.08,
+   "input": 0.75,
+   "output": 4.5
+  },
+  "gpt-5-4-none": {
+   "cached_input": 0.25,
+   "input": 2.5,
+   "output": 15.0
+  },
+  "gpt-5-4-none-priority": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-4-xhigh": {
+   "cached_input": 0.25,
+   "input": 2.5,
+   "output": 15.0
+  },
+  "gpt-5-4-xhigh-priority": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-5-high": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-5-high-priority": {
+   "cached_input": 1.25,
+   "input": 12.5,
+   "output": 75.0
+  },
+  "gpt-5-5-low": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-5-low-priority": {
+   "cached_input": 1.25,
+   "input": 12.5,
+   "output": 75.0
+  },
+  "gpt-5-5-medium": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-5-medium-priority": {
+   "cached_input": 1.25,
+   "input": 12.5,
+   "output": 75.0
+  },
+  "gpt-5-5-none": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-5-none-priority": {
+   "cached_input": 1.25,
+   "input": 12.5,
+   "output": 75.0
+  },
+  "gpt-5-5-xhigh": {
+   "cached_input": 0.5,
+   "input": 5.0,
+   "output": 30.0
+  },
+  "gpt-5-5-xhigh-priority": {
+   "cached_input": 1.25,
+   "input": 12.5,
+   "output": 75.0
+  },
+  "gpt-5-6-luna-high": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.2
+  },
+  "gpt-5-6-luna-high-priority": {
+   "cached_input": 0.04,
+   "input": 0.4,
+   "output": 2.4
+  },
+  "gpt-5-6-luna-low": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.2
+  },
+  "gpt-5-6-luna-low-priority": {
+   "cached_input": 0.04,
+   "input": 0.4,
+   "output": 2.4
+  },
+  "gpt-5-6-luna-max": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.2
+  },
+  "gpt-5-6-luna-max-priority": {
+   "cached_input": 0.04,
+   "input": 0.4,
+   "output": 2.4
+  },
+  "gpt-5-6-luna-medium": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.2
+  },
+  "gpt-5-6-luna-medium-priority": {
+   "cached_input": 0.04,
+   "input": 0.4,
+   "output": 2.4
+  },
+  "gpt-5-6-luna-none": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.2
+  },
+  "gpt-5-6-luna-none-priority": {
+   "cached_input": 0.04,
+   "input": 0.4,
+   "output": 2.4
+  },
+  "gpt-5-6-luna-xhigh": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.2
+  },
+  "gpt-5-6-luna-xhigh-priority": {
+   "cached_input": 0.04,
+   "input": 0.4,
+   "output": 2.4
+  },
+  "gpt-5-6-sol-high": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-5-6-sol-high-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "gpt-5-6-sol-low": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-5-6-sol-low-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "gpt-5-6-sol-max": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-5-6-sol-max-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "gpt-5-6-sol-medium": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-5-6-sol-medium-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "gpt-5-6-sol-none": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-5-6-sol-none-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "gpt-5-6-sol-xhigh": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-5-6-sol-xhigh-priority": {
+   "cached_input": 0.8,
+   "input": 8.0,
+   "output": 40.0
+  },
+  "gpt-5-6-terra-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 12.0
+  },
+  "gpt-5-6-terra-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 24.0
+  },
+  "gpt-5-6-terra-low": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 12.0
+  },
+  "gpt-5-6-terra-low-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 24.0
+  },
+  "gpt-5-6-terra-max": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 12.0
+  },
+  "gpt-5-6-terra-max-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 24.0
+  },
+  "gpt-5-6-terra-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 12.0
+  },
+  "gpt-5-6-terra-medium-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 24.0
+  },
+  "gpt-5-6-terra-none": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 12.0
+  },
+  "gpt-5-6-terra-none-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 24.0
+  },
+  "gpt-5-6-terra-xhigh": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 12.0
+  },
+  "gpt-5-6-terra-xhigh-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 24.0
+  },
+  "gpt-6-1-sol-high": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-1-sol-high-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-1-sol-low": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-1-sol-low-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-1-sol-max": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-1-sol-max-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-1-sol-medium": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-1-sol-medium-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-1-sol-xhigh": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-1-sol-xhigh-priority": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-1-terra-high": {
+   "cached_input": 0.05,
+   "input": 1.0,
+   "output": 5.0
+  },
+  "gpt-6-1-terra-high-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-1-terra-low": {
+   "cached_input": 0.05,
+   "input": 1.0,
+   "output": 5.0
+  },
+  "gpt-6-1-terra-low-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-1-terra-max": {
+   "cached_input": 0.05,
+   "input": 1.0,
+   "output": 5.0
+  },
+  "gpt-6-1-terra-max-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-1-terra-medium": {
+   "cached_input": 0.05,
+   "input": 1.0,
+   "output": 5.0
+  },
+  "gpt-6-1-terra-medium-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-1-terra-xhigh": {
+   "cached_input": 0.05,
+   "input": 1.0,
+   "output": 5.0
+  },
+  "gpt-6-1-terra-xhigh-priority": {
+   "cached_input": 0.1,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-astra-high": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "gpt-6-astra-high-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "gpt-6-astra-low": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "gpt-6-astra-low-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "gpt-6-astra-max": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "gpt-6-astra-max-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "gpt-6-astra-medium": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "gpt-6-astra-medium-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "gpt-6-astra-xhigh": {
+   "cached_input": 1.0,
+   "input": 10.0,
+   "output": 50.0
+  },
+  "gpt-6-astra-xhigh-priority": {
+   "cached_input": 2.0,
+   "input": 20.0,
+   "output": 100.0
+  },
+  "gpt-6-luna-high": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "gpt-6-luna-high-priority": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.0
+  },
+  "gpt-6-luna-low": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "gpt-6-luna-low-priority": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.0
+  },
+  "gpt-6-luna-max": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "gpt-6-luna-max-priority": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.0
+  },
+  "gpt-6-luna-medium": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "gpt-6-luna-medium-priority": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.0
+  },
+  "gpt-6-luna-none": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "gpt-6-luna-none-priority": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.0
+  },
+  "gpt-6-luna-xhigh": {
+   "cached_input": 0.01,
+   "input": 0.1,
+   "output": 0.5
+  },
+  "gpt-6-luna-xhigh-priority": {
+   "cached_input": 0.02,
+   "input": 0.2,
+   "output": 1.0
+  },
+  "gpt-6-sol-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-sol-high-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-sol-low": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-sol-low-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-sol-max": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-sol-max-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-sol-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-sol-medium-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-sol-none": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-sol-none-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "gpt-6-sol-xhigh": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "gpt-6-sol-xhigh-priority": {
+   "cached_input": 0.4,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "grok-4-6-high": {
+   "cached_input": 0.3,
+   "input": 2.0,
+   "output": 6.0
+  },
+  "grok-4-6-low": {
+   "cached_input": 0.3,
+   "input": 2.0,
+   "output": 6.0
+  },
+  "grok-4-6-medium": {
+   "cached_input": 0.3,
+   "input": 2.0,
+   "output": 6.0
+  },
+  "grok-4-6-xhigh": {
+   "cached_input": 0.3,
+   "input": 2.0,
+   "output": 6.0
+  },
+  "grok-4-7-high": {
+   "cached_input": 0.5,
+   "input": 2.0,
+   "output": 6.0
+  },
+  "grok-4-7-low": {
+   "cached_input": 0.5,
+   "input": 2.0,
+   "output": 6.0
+  },
+  "grok-4-7-medium": {
+   "cached_input": 0.5,
+   "input": 2.0,
+   "output": 6.0
+  },
+  "grok-4-7-xhigh": {
+   "cached_input": 0.5,
+   "input": 2.0,
+   "output": 6.0
+  },
+  "kimi-k2-6": {
+   "cached_input": 0.16,
+   "input": 0.95,
+   "output": 4.0
+  },
+  "kimi-k2-7": {
+   "cached_input": 0.19,
+   "input": 0.95,
+   "output": 4.0
+  },
+  "kimi-k3-1-pro-high": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "kimi-k3-1-pro-low": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "kimi-k3-1-pro-max": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "kimi-k3-1-pro-medium": {
+   "cached_input": 0.2,
+   "input": 2.0,
+   "output": 10.0
+  },
+  "kimi-k3-high": {
+   "cached_input": 0.3,
+   "input": 3.0,
+   "output": 15.0
+  },
+  "kimi-k3-low": {
+   "cached_input": 0.3,
+   "input": 3.0,
+   "output": 15.0
+  },
+  "kimi-k3-max": {
+   "cached_input": 0.3,
+   "input": 3.0,
+   "output": 15.0
+  },
+  "muse-wonder-1-0-high": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "muse-wonder-1-0-low": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "muse-wonder-1-0-max": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "muse-wonder-1-0-medium": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "muse-wonder-1-0-minimal": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "muse-wonder-1-0-xhigh": {
+   "cached_input": 0.2,
+   "input": 4.0,
+   "output": 20.0
+  },
+  "nemotron-3-5-super-high": {
+   "cached_input": 0.04,
+   "input": 0.2,
+   "output": 0.5
+  },
+  "nemotron-3-5-super-medium": {
+   "cached_input": 0.04,
+   "input": 0.2,
+   "output": 0.5
+  },
+  "nemotron-3-5-super-none": {
+   "cached_input": 0.04,
+   "input": 0.2,
+   "output": 0.5
+  },
+  "nemotron-3-ultra-high": {
+   "cached_input": 0.12,
+   "input": 0.6,
+   "output": 2.4
+  },
+  "nemotron-3-ultra-medium": {
+   "cached_input": 0.12,
+   "input": 0.6,
+   "output": 2.4
+  },
+  "nemotron-3-ultra-none": {
+   "cached_input": 0.12,
+   "input": 0.6,
+   "output": 2.4
+  },
+  "swe-1-6": {
+   "cached_input": 0.2,
+   "input": 0.5,
+   "output": 2.5
+  },
+  "swe-1-7": {
+   "cached_input": 0.2,
+   "input": 0.5,
+   "output": 2.5
+  },
+  "swe-1-7-medium": {
+   "cached_input": 0.2,
+   "input": 0.5,
+   "output": 2.5
+  },
+  "swe-2-high-lightning": {
+   "cached_input": 0.1,
+   "input": 1.0,
+   "output": 5.0
+  },
+  "swe-2-max-lightning": {
+   "cached_input": 0.1,
+   "input": 1.0,
+   "output": 5.0
+  },
+  "swe-2-medium-lightning": {
+   "cached_input": 0.1,
+   "input": 1.0,
+   "output": 5.0
+  }
+ },
+ "source": "devin models list --format json",
+ "unit": "usd_per_1m_tokens"
+}

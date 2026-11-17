@@ -405,6 +405,8 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 		if err != nil {
 			return &UsageInfo{Source: "active", Error: err.Error()}, nil
 		}
+		// 按 Devin 官方单价 × 本网关 token 折算本站费用；失败返回 nil，不影响主流程。
+		st.LocalCost = s.computeDevinLocalCost(ctx, account, st)
 		return &UsageInfo{Source: "active", UpdatedAt: &st.FetchedAt, DevinUsage: st}, nil
 	}
 
