@@ -180,3 +180,101 @@ func TestProbeDevinUpstreamChatOutcome(t *testing.T) {
 		})
 	}
 }
+
+// devinSeqResp 是按调用顺序返回的一次上游响应预置。
+type devinSeqResp struct {
+	status int
+	body   []byte
+}
+
+// devinSeqUpstream 按 Do/DoWithTLS 调用顺序弹出预置响应，用于验证候选逐个重试。
+// calls 记录实际发出的 chat 请求次数。
+type devinSeqUpstream struct {
+	responses []devinSeqResp
+	calls     int
+}
+
+func (u *devinSeqUpstream) next() *http.Response {
+	idx := u.calls
+	u.calls++
+	if idx >= len(u.responses) {
+		idx = len(u.responses) - 1
+	}
+	r := u.responses[idx]
+	return &http.Response{
+		StatusCode: r.status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(r.body)),
+	}
+}
+
+func (u *devinSeqUpstream) Do(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	return u.next(), nil
+}
+
+func (u *devinSeqUpstream) DoWithTLS(_ *http.Request, _ string, _ int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.next(), nil
+}
+
+// devinCountingAuthTransport 在 devinAuthTransport 之上记录 GetUserJwt 出站次数，
+// 用于断言候选重试时只鉴权一次（不重复取 JWT）。
+type devinCountingAuthTransport struct {
+	inner devinAuthTransport
+	calls int
+}
+
+func (rt *devinCountingAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.calls++
+	return rt.inner.RoundTrip(req)
+}
+
+func devinProbeWithCountingAuth(t *testing.T, jwt, base string) *devinCountingAuthTransport {
+	t.Helper()
+	rt := &devinCountingAuthTransport{inner: devinAuthTransport{jwt: jwt, base: base}}
+	old := http.DefaultTransport
+	http.DefaultTransport = rt
+	t.Cleanup(func() { http.DefaultTransport = old })
+	return rt
+}
+
+// 首候选 403（模型级 forbidden），第二个候选成功：应返回 (true, nil)，
+// 且两个候选都被尝试、JWT 只取一次。
+func TestProbeDevinUpstreamRetryOn403(t *testing.T) {
+	auth := devinProbeWithCountingAuth(t, "jwt-test", "https://chat.example.com")
+	up := &devinSeqUpstream{responses: []devinSeqResp{
+		{status: http.StatusForbidden, body: []byte(`{"type":"forbidden","message":"Request not allowed"}`)},
+		{status: http.StatusOK, body: devinOKStream()},
+	}}
+	p := newDevinProbeService(up)
+	// map 迭代无序，但排序后 "a-flash" 在 "b-hydrogen" 前：先 403 后成功。
+	acc := newDevinProbeAccount(20, "session-token", map[string]any{
+		"b-hydrogen": "uid-hydrogen",
+		"a-flash":    "uid-flash",
+	})
+	ok, err := p.probeDevinUpstream(context.Background(), acc)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, 2, up.calls, "应逐个试两个候选")
+	require.Equal(t, 1, auth.calls, "JWT 只应取一次，重发 chat 帧不重新鉴权")
+}
+
+// 全部候选 403：应返回 (false, err)，错误含尝试的候选数与最后的 403 原因。
+func TestProbeDevinUpstreamAllCandidatesFailed(t *testing.T) {
+	auth := devinProbeWithCountingAuth(t, "jwt-test", "https://chat.example.com")
+	up := &devinSeqUpstream{responses: []devinSeqResp{
+		{status: http.StatusForbidden, body: []byte(`{"type":"forbidden","message":"Request not allowed"}`)},
+		{status: http.StatusForbidden, body: []byte(`{"type":"forbidden","message":"Request not allowed"}`)},
+	}}
+	p := newDevinProbeService(up)
+	acc := newDevinProbeAccount(21, "session-token", map[string]any{
+		"a-flash":    "uid-flash",
+		"b-hydrogen": "uid-hydrogen",
+	})
+	ok, err := p.probeDevinUpstream(context.Background(), acc)
+	require.False(t, ok)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "tried 2 candidate")
+	require.ErrorContains(t, err, "403")
+	require.Equal(t, 2, up.calls, "全部失败应逐个试完")
+	require.Equal(t, 1, auth.calls, "JWT 只应取一次")
+}

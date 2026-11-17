@@ -1002,19 +1002,23 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 }
 
 // probeDevinUpstream 对 devin（Cascade）平台账号做真实数据面探活：session token 经
-// GetUserJwt 换取本请求 JWT，再走 GetChatMessage connect 帧发一次最小非流式对话
+// GetUserJwt 换取本请求 JWT，再走 GetChatMessage connect 帧发最小非流式对话
 // （max_tokens=16）。与账号测试 testDevinAccountConnection 共用同一底层部件
 // （NewDevinUpstreamClient / BuildDevinChatParams / NewDevinChatFrame / DevinStreamReader /
-// decodeGetChatMessageResponse），成功判定 = 解析出非空正文；非 200 / 读取错误 /
-// END_STREAM trailer error / 空流空正文一律失败关闭（保持停调，等冷却到期恢复）。
+// decodeGetChatMessageResponse），成功判定 = 解析出非空正文。
+//
+// 403 是模型级拒绝而非账号失效：按 model_mapping 排序后的 concrete 键逐个试（最多 5 个），
+// 复用同一次 GetUserJwt 结果，只换模型重发 chat 帧。遇到 403（forbidden / "Request not
+// allowed"）或其它任何失败（非 200 / 读取错误 / trailer error / 空正文 / 构造错误）都
+// 继续下一个候选，逐个试完；全部失败才返回错误（含尝试数与最后一个错误原因），避免
+// 某个模型被禁就误判整账号 status=error。
 func (p *AccountHealthRecoveryProbeService) probeDevinUpstream(ctx context.Context, acc *Account) (bool, error) {
 	token := strings.TrimSpace(acc.GetDevinToken())
 	if token == "" {
 		return false, errors.New("devin account has no api key")
 	}
 
-	// 模型：与可测试模型列表同源（model_mapping 请求侧键，排除通配），排序后取首个，
-	// 再经 ResolveMappedModel 解析为上游 uid。无 concrete 键或解析不到上游 uid 均失败关闭。
+	// 候选：与可测试模型列表同源（model_mapping 请求侧键，排除通配），排序后取前 5 个。
 	mapping := acc.GetModelMapping()
 	keys := make([]string, 0, len(mapping))
 	for requestedModel := range mapping {
@@ -1028,30 +1032,26 @@ func (p *AccountHealthRecoveryProbeService) probeDevinUpstream(ctx context.Conte
 	if len(keys) == 0 {
 		return false, errors.New("devin account has no testable model")
 	}
-	upstreamUID, matched := acc.ResolveMappedModel(keys[0])
-	if !matched || strings.TrimSpace(upstreamUID) == "" {
+	if len(keys) > 5 {
+		keys = keys[:5]
+	}
+
+	// 每个候选经 ResolveMappedModel 解析为上游 uid；解析不到或为空则跳过。
+	// 全部解析不到则在鉴权前失败关闭（保持既有失败关闭语义）。
+	upstreamUIDs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		uid, matched := acc.ResolveMappedModel(key)
+		if !matched || strings.TrimSpace(uid) == "" {
+			continue
+		}
+		upstreamUIDs = append(upstreamUIDs, uid)
+	}
+	if len(upstreamUIDs) == 0 {
 		return false, errors.New("devin account has no mapped upstream model")
 	}
 
-	// 最小非流式对话：max_tokens=16 + 固定 system/user 提示。复用 C3 转换把 OpenAI
-	// chat body 归一为 Devin 参数（system 进 SystemPrompt、user 进 Prompts）。
-	probeBody, _ := json.Marshal(map[string]any{
-		"model": upstreamUID,
-		"messages": []map[string]string{
-			{"role": "system", "content": "You are a helpful assistant."},
-			{"role": "user", "content": "Reply with: ok"},
-		},
-		"max_tokens": 16,
-		"stream":     false,
-	})
-	params, err := BuildDevinChatParams(probeBody, upstreamUID, "")
-	if err != nil {
-		return false, fmt.Errorf("devin probe build params: %w", err)
-	}
-	params.APIKey = token
-
-	// 鉴权：GetUserJwt 独立 30s 超时（devinAuthTimeout）；base 取 CustomAPIServerURL，
-	// 缺省 DevinAPIURL。
+	// 鉴权：GetUserJwt 只取一次，所有候选复用其 JWT/base（只换模型重发 chat 帧）。
+	// 独立 30s 超时（devinAuthTimeout）；base 取 CustomAPIServerURL，缺省 DevinAPIURL。
 	authCtx, cancelAuth := context.WithTimeout(ctx, devinAuthTimeout)
 	defer cancelAuth()
 	authResp, err := NewDevinUpstreamClient().GetUserJwt(authCtx, token)
@@ -1063,71 +1063,106 @@ func (p *AccountHealthRecoveryProbeService) probeDevinUpstream(ctx context.Conte
 		base = DevinAPIURL
 	}
 
-	// 请求：复用 C2 帧构造，头族与 forwardDevin / 账号测试完全一致。
-	frame, chatBaseURL, err := NewDevinChatFrame(params, authResp.UserJWT, base)
-	if err != nil {
-		return false, fmt.Errorf("devin probe build chat frame: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(chatBaseURL, "/")+DevinChatMessagePath, bytes.NewReader(frame))
-	if err != nil {
-		return false, fmt.Errorf("devin probe create request: %w", err)
-	}
-	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
-	req.Header.Set("Content-Type", "application/connect+proto")
-	req.Header.Set("Connect-Protocol-Version", "1")
-	req.Header.Set("Connect-Content-Encoding", "gzip")
-	req.Header.Set("Accept-Encoding", "identity")
-	req.Header.Set("Connect-Accept-Encoding", "gzip")
-	req.Header.Set("User-Agent", devinClientUA)
+	// tryCandidate 用给定上游 uid 发一次最小非流式对话并按原判定规则给结论。
+	tryCandidate := func(upstreamUID string) (bool, error) {
+		// 最小非流式对话：max_tokens=16 + 固定 system/user 提示。复用 C3 转换把 OpenAI
+		// chat body 归一为 Devin 参数（system 进 SystemPrompt、user 进 Prompts）。
+		probeBody, _ := json.Marshal(map[string]any{
+			"model": upstreamUID,
+			"messages": []map[string]string{
+				{"role": "system", "content": "You are a helpful assistant."},
+				{"role": "user", "content": "Reply with: ok"},
+			},
+			"max_tokens": 16,
+			"stream":     false,
+		})
+		params, err := BuildDevinChatParams(probeBody, upstreamUID, "")
+		if err != nil {
+			return false, fmt.Errorf("devin probe build params: %w", err)
+		}
+		params.APIKey = token
 
-	proxyURL := ""
-	if acc.ProxyID != nil && acc.Proxy != nil {
-		proxyURL = acc.Proxy.URL()
-	}
-	resp, err := p.httpUpstream.DoWithTLS(req, proxyURL, acc.ID, acc.Concurrency,
-		p.tlsFPProfileService.ResolveTLSProfile(acc))
-	if err != nil {
-		return false, fmt.Errorf("devin probe request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("devin probe upstream status %d", resp.StatusCode)
-	}
+		// 请求：复用 C2 帧构造，头族与 forwardDevin / 账号测试完全一致。
+		frame, chatBaseURL, err := NewDevinChatFrame(params, authResp.UserJWT, base)
+		if err != nil {
+			return false, fmt.Errorf("devin probe build chat frame: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			strings.TrimRight(chatBaseURL, "/")+DevinChatMessagePath, bytes.NewReader(frame))
+		if err != nil {
+			return false, fmt.Errorf("devin probe create request: %w", err)
+		}
+		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+		req.Header.Set("Content-Type", "application/connect+proto")
+		req.Header.Set("Connect-Protocol-Version", "1")
+		req.Header.Set("Connect-Content-Encoding", "gzip")
+		req.Header.Set("Accept-Encoding", "identity")
+		req.Header.Set("Connect-Accept-Encoding", "gzip")
+		req.Header.Set("User-Agent", devinClientUA)
 
-	// 聚合所有正文增量；END_STREAM trailer 含 error 视为失败。空流/空正文按失败关闭。
-	reader := NewDevinStreamReader(resp.Body)
-	var text strings.Builder
-	for {
-		payload, endStream, rerr := reader.Next()
-		if rerr != nil {
-			if rerr == io.EOF {
+		proxyURL := ""
+		if acc.ProxyID != nil && acc.Proxy != nil {
+			proxyURL = acc.Proxy.URL()
+		}
+		resp, err := p.httpUpstream.DoWithTLS(req, proxyURL, acc.ID, acc.Concurrency,
+			p.tlsFPProfileService.ResolveTLSProfile(acc))
+		if err != nil {
+			return false, fmt.Errorf("devin probe request: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			// 403（forbidden / "Request not allowed"）是模型级拒绝，由调用方继续下一个候选。
+			return false, fmt.Errorf("devin probe upstream status %d", resp.StatusCode)
+		}
+
+		// 聚合所有正文增量；END_STREAM trailer 含 error 视为失败。空流/空正文按失败关闭。
+		reader := NewDevinStreamReader(resp.Body)
+		var text strings.Builder
+		for {
+			payload, endStream, rerr := reader.Next()
+			if rerr != nil {
+				if rerr == io.EOF {
+					break
+				}
+				return false, fmt.Errorf("devin probe stream read: %w", rerr)
+			}
+			if endStream {
+				if code, msg := devinTrailerError(payload); code != "" {
+					detail := code
+					if msg != "" {
+						detail += ": " + msg
+					}
+					return false, fmt.Errorf("devin probe upstream trailer error: %s", detail)
+				}
 				break
 			}
-			return false, fmt.Errorf("devin probe stream read: %w", rerr)
-		}
-		if endStream {
-			if code, msg := devinTrailerError(payload); code != "" {
-				detail := code
-				if msg != "" {
-					detail += ": " + msg
-				}
-				return false, fmt.Errorf("devin probe upstream trailer error: %s", detail)
+			msg, derr := decodeGetChatMessageResponse(payload)
+			if derr != nil {
+				return false, fmt.Errorf("devin probe decode frame: %w", derr)
 			}
-			break
+			if msg.DeltaText != "" {
+				text.WriteString(msg.DeltaText)
+			}
 		}
-		msg, derr := decodeGetChatMessageResponse(payload)
-		if derr != nil {
-			return false, fmt.Errorf("devin probe decode frame: %w", derr)
+		if strings.TrimSpace(text.String()) == "" {
+			return false, errors.New("devin probe upstream returned no text")
 		}
-		if msg.DeltaText != "" {
-			text.WriteString(msg.DeltaText)
+		return true, nil
+	}
+
+	// 逐个候选探活：任一成功即返回；403 及其它失败都继续下一个（保守试完）。
+	var lastErr error
+	for _, uid := range upstreamUIDs {
+		ok, err := tryCandidate(uid)
+		if ok {
+			return true, nil
+		}
+		if err != nil {
+			lastErr = err
 		}
 	}
-	if strings.TrimSpace(text.String()) == "" {
-		return false, errors.New("devin probe upstream returned no text")
-	}
-	return true, nil
+	return false, fmt.Errorf("devin probe tried %d candidate(s), all failed: last error: %v",
+		len(upstreamUIDs), lastErr)
 }
 
 // probeCursorUpstream 是 cursor 平台账号的探测分派器（CURSOR-PROBE-001-A2）：
