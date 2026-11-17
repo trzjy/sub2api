@@ -2797,8 +2797,8 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 
 	// devin 账号没有 count_tokens 兼容端点，不能被错误转发到上游
-	// （否则上游返回 401/403，并可能把账号打成 error）。选号已占用会话槽，
-	// 此处提前返回需沿用失败路径的释放写法。
+	// （否则上游返回 401/403，并可能把账号打成 error）。此处提前返回，
+	// 仍沿用失败路径的释放调用（devin 非会话型账号，释放为幂等空操作）。
 	if isDevinCountTokensUnsupported(account) {
 		h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionHash)
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "devin account does not support count_tokens")
