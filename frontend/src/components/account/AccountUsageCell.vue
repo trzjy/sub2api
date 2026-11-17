@@ -484,11 +484,11 @@
     <!-- Devin accounts: error → amber text; else devin_usage → plan / balance / resets; else placeholder -->
     <template v-else-if="account.platform === 'devin'">
       <div
-        v-if="usageInfo?.error"
+        v-if="error || usageInfo?.error"
         class="truncate text-xs text-amber-600 dark:text-amber-400 max-w-[200px]"
-        :title="usageInfo.error"
+        :title="error || usageInfo?.error"
       >
-        {{ usageInfo.error }}
+        {{ error || usageInfo?.error }}
       </div>
       <div v-else-if="usageInfo?.devin_usage" class="space-y-1">
         <span

@@ -173,4 +173,56 @@ describe('AccountUsageCell devin 用量放行', () => {
     expect(text).not.toContain('Daily reset:')
     expect(text).not.toContain('Weekly reset:')
   })
+
+  it('devin apikey + batchedUsageError（batchedUsage 为 null）→ 渲染组件级请求错误文本，不渲染 plan/重置', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 997, platform: 'devin', type: 'apikey' }),
+        requestBatchedUsage,
+        batchedUsage: null,
+        batchedUsageError: 'devin batch usage request failed'
+      },
+      global: { stubs: devinStubs }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    // 组件级请求错误（batchedUsageError → error）优先渲染，不渲染 devin plan / 重置
+    expect(text).toContain('devin batch usage request failed')
+    expect(text).not.toContain('pro')
+    expect(text).not.toContain('Daily reset:')
+    expect(text).not.toContain('Weekly reset:')
+  })
+
+  it('devin apikey + 已有成功快照 + batchedUsageError → 优先显示请求错误文本而非旧余额', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 998, platform: 'devin', type: 'apikey' }),
+        requestBatchedUsage,
+        batchedUsage: {
+          devin_usage: {
+            plan: 'pro',
+            balance_usd: 10,
+            daily_reset_at: '2026-11-18T00:00:00Z',
+            weekly_reset_at: '2026-11-24T00:00:00Z'
+          }
+        },
+        batchedUsageError: 'devin refresh failed; stale balance hidden'
+      },
+      global: { stubs: devinStubs }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    // 即使存在旧的成功快照，组件级请求错误也要优先显示，不再展示旧 plan/余额/重置
+    expect(text).toContain('devin refresh failed; stale balance hidden')
+    expect(text).not.toContain('pro')
+    expect(text).not.toContain('$10.00')
+    expect(text).not.toContain('Daily reset:')
+    expect(text).not.toContain('Weekly reset:')
+  })
 })
