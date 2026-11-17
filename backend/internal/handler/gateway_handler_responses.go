@@ -369,7 +369,27 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		}
 		var result *service.ForwardResult
 		setActualUpstreamEndpoint(c, "")
-		if shouldUseAntigravityCompat(account) {
+		switch responsesAccountForwardPath(account) {
+		case "devin":
+			// Gemini 分组里的 Devin 账号没有 base_url：gatewayService.ForwardAsResponses
+			// 的普通出口会打到 Devin 边缘并返回 403 "Request not allowed"，账号随后被置
+			// error。Devin 的正确出口是 OpenAIGatewayService.Forward（内部含 Responses→Chat
+			// 归一、identity 回桥与 schema 清洗）。服务未装配时失败关闭，收尾写法与
+			// antigravity 兼容服务为 nil 的现有分支一致。
+			if h.openAIGatewayService == nil {
+				h.responsesErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				return
+			}
+			oaRes, oaErr := h.openAIGatewayService.Forward(forwardCtx, c, account, forwardBody)
+			if oaRes != nil && strings.TrimSpace(oaRes.UpstreamEndpoint) != "" {
+				setActualUpstreamEndpoint(c, oaRes.UpstreamEndpoint)
+			}
+			result = forwardResultFromOpenAIResult(oaRes)
+			err = oaErr
+		case "antigravity":
 			if h.antigravityGatewayService == nil {
 				h.responsesErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
 				if accountReleaseFunc != nil {
@@ -379,7 +399,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			}
 			setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
 			result, err = h.antigravityGatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
-		} else {
+		default: // gateway
 			result, err = h.gatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
 		}
 
@@ -484,6 +504,29 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		}
 		submitForwardUsage(result)
 		return
+	}
+}
+
+// responsesAccountForwardPath 决定 /v1/responses 端口账号的转发出口。
+// 它是 devin / antigravity / gateway 三分支分派的单一来源，避免再次漏掉某个平台分支。
+// nil 账号按空安全处理，返回 "gateway"（交由既有 gatewayService 兜底）。
+func responsesAccountForwardPath(account *service.Account) string {
+	if account == nil {
+		return "gateway"
+	}
+	switch account.Platform {
+	case service.PlatformDevin:
+		return "devin"
+	case service.PlatformAntigravity:
+		// 仅 OAuth 类型的 antigravity 账号走 OAuth 专用兼容通道；
+		// API Key / setup-token / upstream 等非 OAuth 账号必须回落 gateway，
+		// 否则会被 antigravity_gateway_compat 直接 400（基线行为必须保留）。
+		if shouldUseAntigravityCompat(account) {
+			return "antigravity"
+		}
+		return "gateway"
+	default:
+		return "gateway"
 	}
 }
 
