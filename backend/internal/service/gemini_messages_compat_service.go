@@ -3850,7 +3850,11 @@ func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 	// leaving the client with an empty final answer. Emit only when tools are
 	// present, since Gemini rejects toolConfig without tools.
 	if tools, ok := out["tools"].([]any); ok && len(tools) > 0 {
-		if toolConfig := convertClaudeToolChoiceToGeminiToolConfig(req["tool_choice"]); toolConfig != nil {
+		toolConfig, err := convertClaudeToolChoiceToGeminiToolConfig(req["tool_choice"], claudeDeclaredToolNames(req["tools"]))
+		if err != nil {
+			return nil, err
+		}
+		if toolConfig != nil {
 			out["toolConfig"] = toolConfig
 		}
 	}
@@ -3875,9 +3879,12 @@ func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 //	"required" / "any" / {"type":"any"}          -> {"mode":"ANY"} (+ optional allowedFunctionNames)
 //	{"type":"tool","name":"x"}                   -> {"mode":"ANY","allowedFunctionNames":["x"]}
 //	{"type":"function","function":{"name":"x"}}  -> {"mode":"ANY","allowedFunctionNames":["x"]}
-func convertClaudeToolChoiceToGeminiToolConfig(raw any) map[string]any {
+//
+// A {"type":"tool"} choice whose name is missing, blank, or not among the
+// declared tools is rejected instead of silently widening to "call any tool".
+func convertClaudeToolChoiceToGeminiToolConfig(raw any, declared map[string]struct{}) (map[string]any, error) {
 	if raw == nil {
-		return nil
+		return nil, nil
 	}
 
 	mode := ""
@@ -3889,11 +3896,11 @@ func convertClaudeToolChoiceToGeminiToolConfig(raw any) map[string]any {
 		case "none":
 			mode = "NONE"
 		case "auto":
-			return nil
+			return nil, nil
 		case "required", "any":
 			mode = "ANY"
 		default:
-			return nil
+			return nil, nil
 		}
 	case map[string]any:
 		choiceType := strings.ToLower(strings.TrimSpace(stringValue(tc["type"])))
@@ -3901,10 +3908,19 @@ func convertClaudeToolChoiceToGeminiToolConfig(raw any) map[string]any {
 		case "none":
 			mode = "NONE"
 		case "auto":
-			return nil
+			return nil, nil
 		case "any", "required":
 			mode = "ANY"
-		case "tool", "function":
+		case "tool":
+			mode = "ANY"
+			name := strings.TrimSpace(stringValue(tc["name"]))
+			if _, ok := declared[name]; !ok {
+				// Fail closed: a tool choice that does not resolve to a declared
+				// tool must not be widened to "call any tool" (ANY with no names).
+				return nil, fmt.Errorf("tool_choice references unknown tool %q", name)
+			}
+			allowed = append(allowed, name)
+		case "function":
 			mode = "ANY"
 			name := strings.TrimSpace(stringValue(tc["name"]))
 			if name == "" {
@@ -3916,7 +3932,7 @@ func convertClaudeToolChoiceToGeminiToolConfig(raw any) map[string]any {
 				allowed = append(allowed, name)
 			}
 		default:
-			return nil
+			return nil, nil
 		}
 		if mode == "ANY" && len(allowed) == 0 {
 			switch names := tc["allowed_function_names"].(type) {
@@ -3935,17 +3951,37 @@ func convertClaudeToolChoiceToGeminiToolConfig(raw any) map[string]any {
 			}
 		}
 	default:
-		return nil
+		return nil, nil
 	}
 
 	if mode == "" {
-		return nil
+		return nil, nil
 	}
 	cfg := map[string]any{"mode": mode}
 	if mode == "ANY" && len(allowed) > 0 {
 		cfg["allowedFunctionNames"] = allowed
 	}
-	return map[string]any{"functionCallingConfig": cfg}
+	return map[string]any{"functionCallingConfig": cfg}, nil
+}
+
+// claudeDeclaredToolNames collects the tool names declared in a Claude request's
+// "tools" array so a tool_choice naming a specific tool can be validated.
+func claudeDeclaredToolNames(tools any) map[string]struct{} {
+	names := make(map[string]struct{})
+	arr, ok := tools.([]any)
+	if !ok {
+		return names
+	}
+	for _, t := range arr {
+		tm, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name := strings.TrimSpace(stringValue(tm["name"])); name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names
 }
 
 func stripGeminiFunctionIDs(req map[string]any) {

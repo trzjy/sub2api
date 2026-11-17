@@ -1662,4 +1662,31 @@ func TestConvertClaudeMessagesToGeminiToolChoice(t *testing.T) {
 		require.Equal(t, baseline, autoString)
 		require.Equal(t, baseline, autoObject)
 	})
+
+	t.Run("tool choice with unresolved name fails closed", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			choice  string
+			wantErr string
+		}{
+			{"missing name", `,"tool_choice":{"type":"tool"}`, `tool_choice references unknown tool ""`},
+			{"blank name", `,"tool_choice":{"type":"tool","name":"   "}`, `tool_choice references unknown tool ""`},
+			{"undeclared name", `,"tool_choice":{"type":"tool","name":"nope"}`, `tool_choice references unknown tool "nope"`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				raw, err := convertClaudeMessagesToGeminiGenerateContent([]byte(bodyWithTools(tc.choice)))
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.wantErr)
+				require.Nil(t, raw)
+			})
+		}
+
+		t.Run("declared name still maps to ANY with allowedFunctionNames", func(t *testing.T) {
+			out := convert(t, bodyWithTools(`,"tool_choice":{"type":"tool","name":"lookup"}`))
+			require.Equal(t, map[string]any{"functionCallingConfig": map[string]any{
+				"mode": "ANY", "allowedFunctionNames": []any{"lookup"},
+			}}, out["toolConfig"])
+		})
+	})
 }
