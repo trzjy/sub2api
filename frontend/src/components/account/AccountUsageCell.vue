@@ -520,6 +520,13 @@
         <div v-else-if="devinWeeklyReset" class="text-[10px] text-gray-500 dark:text-gray-400">
           Weekly reset: {{ devinWeeklyReset }}
         </div>
+        <div
+          v-if="devinLocalCost"
+          class="text-[10px] text-gray-500 dark:text-gray-400"
+          :title="devinLocalCost.title"
+        >
+          {{ devinLocalCost.text }}{{ devinLocalCost.unpricedText }}
+        </div>
       </div>
       <div v-else class="text-xs text-gray-400">-</div>
     </template>
@@ -1488,6 +1495,22 @@ const devinDailyReset = computed(() => {
 const devinWeeklyReset = computed(() => {
   const value = devinUsage.value?.weekly_reset_at
   return value ? new Date(value).toLocaleString() : ''
+})
+
+// 本站折算费用：官方单价 × 本网关记录 token（后端 devin_usage.local_cost 透传）。
+// 仅当 usd 为有限数时渲染；unpriced_models 非空时追加名单并在 title 说明未定价模型不计入。
+const devinLocalCost = computed(() => {
+  const cost = devinUsage.value?.local_cost
+  if (!cost || typeof cost.usd !== 'number' || !Number.isFinite(cost.usd)) return null
+  const unpriced = cost.unpriced_models ?? []
+  const hasUnpriced = unpriced.length > 0
+  const windowStart = cost.window_start ?? ''
+  const windowEnd = cost.window_end ?? ''
+  return {
+    text: `本站折算 ≈ $${cost.usd.toFixed(4)}`,
+    unpricedText: hasUnpriced ? `（未定价: ${unpriced.join('、')}）` : '',
+    title: `官方单价 × 本网关记录 token（窗口：${windowStart} → ${windowEnd}）${hasUnpriced ? '；未定价模型不计入' : ''}`
+  }
 })
 
 // ===== CodeBuddy 积分额度（后端周期探测写入 account.Extra） =====

@@ -1763,6 +1763,14 @@ export interface AccountUsageInfo {
     daily_reset_at?: string | null
     weekly_reset_at?: string | null
     fetched_at?: string | null
+    // 本站折算费用：官方单价 × 本网关记录 token（后端 devin_usage.local_cost 透传）。
+    local_cost?: {
+      window_start?: string
+      window_end?: string
+      usd?: number
+      priced_models?: string[] | null
+      unpriced_models?: string[] | null
+    }
   } | null
 }
 

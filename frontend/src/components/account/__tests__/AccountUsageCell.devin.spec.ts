@@ -281,4 +281,101 @@ describe('AccountUsageCell devin 用量放行', () => {
     expect(text).not.toContain('Daily reset:')
     expect(text).not.toContain('Weekly reset:')
   })
+
+  it('devin apikey + local_cost（有 usd）→ 渲染本站折算费用（toFixed(4)）与窗口口径 title', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1001, platform: 'devin', type: 'apikey' }),
+        requestBatchedUsage,
+        batchedUsage: {
+          devin_usage: {
+            plan: 'pro',
+            balance_usd: 10,
+            local_cost: {
+              window_start: '2026-11-17T00:00:00Z',
+              window_end: '2026-11-17T23:59:59Z',
+              usd: 0.0112665,
+              priced_models: ['gemini-4-hydrogen-xhigh'],
+              unpriced_models: null
+            }
+          }
+        }
+      },
+      global: { stubs: devinStubs }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('本站折算 ≈ $0.0113')
+    const costEl = wrapper.findAll('[title]').find((el) =>
+      el.attributes('title')?.includes('官方单价 × 本网关记录 token')
+    )
+    expect(costEl).toBeDefined()
+    expect(costEl!.attributes('title')).toContain(
+      '窗口：2026-11-17T00:00:00Z → 2026-11-17T23:59:59Z'
+    )
+    // unpriced_models 为 null → 不显示未定价
+    expect(text).not.toContain('未定价')
+  })
+
+  it('devin apikey + local_cost.unpriced_models 非空 → 显示未定价名单，title 说明未定价模型不计入', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1002, platform: 'devin', type: 'apikey' }),
+        requestBatchedUsage,
+        batchedUsage: {
+          devin_usage: {
+            local_cost: {
+              window_start: '2026-11-17T00:00:00Z',
+              window_end: '2026-11-17T23:59:59Z',
+              usd: 0.5,
+              priced_models: ['gemini-4-hydrogen-xhigh'],
+              unpriced_models: ['unpriced-a', 'unpriced-b']
+            }
+          }
+        }
+      },
+      global: { stubs: devinStubs }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('本站折算 ≈ $0.5000')
+    expect(text).toContain('未定价')
+    expect(text).toContain('unpriced-a')
+    expect(text).toContain('unpriced-b')
+    const costEl = wrapper.findAll('[title]').find((el) =>
+      el.attributes('title')?.includes('官方单价 × 本网关记录 token')
+    )
+    expect(costEl!.attributes('title')).toContain('未定价模型不计入')
+  })
+
+  it('devin apikey 无 local_cost → 不渲染本站折算行（旧快照不回归）', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1003, platform: 'devin', type: 'apikey' }),
+        requestBatchedUsage,
+        batchedUsage: {
+          devin_usage: {
+            plan: 'pro',
+            balance_usd: 10,
+            daily_reset_at: '2026-11-18T00:00:00Z',
+            weekly_reset_at: '2026-11-24T00:00:00Z'
+          }
+        }
+      },
+      global: { stubs: devinStubs }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('$10.00')
+    expect(text).not.toContain('本站折算')
+  })
 })
