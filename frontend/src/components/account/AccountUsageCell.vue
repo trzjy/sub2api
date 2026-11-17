@@ -1100,6 +1100,9 @@ const hasOpenCodeGoUsageProbe = computed(() =>
 )
 
 const showUsageWindows = computed(() => {
+  // Devin（apikey）：plan/余额/日周重置由后端 devin_usage 下发，
+  // 列表用量单元格恒定放行展示（不改变其它平台分支）。
+  if (props.account.platform === 'devin') return true
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
   // 第三方上游 API Key 没有模拟配额，按普通 Key 账号展示今日统计与额度进度条。
   if (props.account.platform === 'gemini') return !isGeminiThirdPartyApiKey.value
@@ -1130,6 +1133,8 @@ const showUsageWindows = computed(() => {
 })
 
 const shouldFetchUsage = computed(() => {
+  // Devin：与后端 GetUsageForAccount 的 devin 分支一致（批量接口已覆盖，此为单账号兜底）。
+  if (props.account.platform === 'devin') return props.account.type === 'apikey'
   if (props.account.platform === 'anthropic') {
     return props.account.type === 'oauth' || props.account.type === 'setup-token'
   }
