@@ -1466,11 +1466,11 @@ const devinBalance = computed(() => {
   return balance != null ? `$${balance.toFixed(2)}` : '—'
 })
 
-// 订阅型窗口条：后端下发的是「剩余百分比」，进度条消费「已用比例」(0..1)。
+// 订阅型窗口条：后端下发的是「剩余百分比」，utilization 为 0–100 百分数（共享组件契约）。
 // percent 缺失（undefined / 非有限数）时不渲染，由模板回退到重置时间文本行。
 function devinWindowBar(remainingPercent: number | undefined, resetsAt: string | null | undefined) {
   if (typeof remainingPercent !== 'number' || !Number.isFinite(remainingPercent)) return null
-  const utilization = Math.min(1, Math.max(0, (100 - remainingPercent) / 100))
+  const utilization = Math.min(100, Math.max(0, 100 - remainingPercent))
   return { utilization, resetsAt: resetsAt ?? null }
 }
 

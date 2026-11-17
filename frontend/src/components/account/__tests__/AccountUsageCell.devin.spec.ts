@@ -85,7 +85,7 @@ describe('AccountUsageCell devin 用量放行', () => {
     })
   })
 
-  it('devin apikey + devin_usage percent → 渲染 Daily/Weekly 两条窗口进度条（含 utilization）与 plan/余额，不再重复重置文本', async () => {
+  it('devin apikey + devin_usage percent → 真实进度条按 0–100 百分数渲染（remaining=100→0%、50→50%）与 plan/余额，不再重复重置文本', async () => {
     const requestBatchedUsage = vi.fn()
     const wrapper = mount(AccountUsageCell, {
       props: {
@@ -95,15 +95,14 @@ describe('AccountUsageCell devin 用量放行', () => {
           devin_usage: {
             plan: 'pro',
             balance_usd: 10,
-            // 已用比例 = (100 - 剩余)/100，夹 0..1 → daily 0、weekly 0.5
+            // utilization 为 0–100 百分数：remaining=100→0、remaining=50→50
             daily_remaining_percent: 100,
             weekly_remaining_percent: 50,
             daily_reset_at: '2026-11-18T00:00:00Z',
             weekly_reset_at: '2026-11-24T00:00:00Z'
           }
         }
-      },
-      global: { stubs: devinStubs }
+      }
     })
 
     await flushPromises()
@@ -112,18 +111,40 @@ describe('AccountUsageCell devin 用量放行', () => {
     // showUsageWindows 放行 devin → 根节点渲染 → devin 专用分支呈现 plan/余额
     expect(text).toContain('pro')
     expect(text).toContain('$10.00')
-    // 渲染两条订阅型窗口进度条，stub 文本形如 "Daily|0|...|indigo"
-    const bars = wrapper.findAll('.usage-bar')
-    expect(bars.length).toBe(2)
-    expect(bars[0].text()).toContain('Daily')
-    expect(bars[0].text()).toContain('|0|')
-    expect(bars[1].text()).toContain('Weekly')
-    expect(bars[1].text()).toContain('|0.5|')
+    // 真实 UsageProgressBar（不 stub）：label 与百分比列（span.text-right）按 Daily/Weekly 顺序渲染
+    expect(text).toContain('Daily')
+    expect(text).toContain('Weekly')
+    const percents = wrapper.findAll('span.text-right').map((s) => s.text())
+    expect(percents).toEqual(['0%', '50%'])
     // percent 存在时不再重复显示对应重置时间文本行
     expect(text).not.toContain('Daily reset:')
     expect(text).not.toContain('Weekly reset:')
     // shouldFetchUsage 放行 devin apikey（批量模式触发父级拉取）
     expect(requestBatchedUsage).toHaveBeenCalled()
+  })
+
+  it('devin 剩余 0% → 真实进度条显示 100%（0–100 百分数契约）', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 999, platform: 'devin', type: 'apikey' }),
+        requestBatchedUsage,
+        batchedUsage: {
+          devin_usage: {
+            plan: 'pro',
+            balance_usd: 10,
+            daily_remaining_percent: 0,
+            weekly_remaining_percent: 0
+          }
+        }
+      }
+    })
+
+    await flushPromises()
+
+    // remaining=0 → utilization=100；resetsAt 缺省，不渲染重置时间，百分比列仍来自真实组件
+    const percents = wrapper.findAll('span.text-right').map((s) => s.text())
+    expect(percents).toEqual(['100%', '100%'])
   })
 
   it('devin apikey + devin_usage percent 缺失 → 回退渲染 Daily/Weekly 重置文本，不渲染窗口进度条', async () => {
