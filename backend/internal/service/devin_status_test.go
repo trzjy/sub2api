@@ -15,12 +15,21 @@ import (
 
 // encodeDevinStatusResponseForTest 用生产编码器组装合成响应字节，模拟：
 //
+//	#1.13.14 dailyPct, #1.13.15 weeklyPct (剩余百分比),
 //	#1.13.16 balanceMicro, #1.13.17 dailyReset, #1.13.18 weeklyReset,
 //	#1.13.1.2 plan, fallback #2.2 plan
-func encodeDevinStatusResponseForTest(balanceMicro, dailySec, weeklySec uint64, plan, fallbackPlan string) []byte {
+//
+// dailyPct/weeklyPct 为 nil 表示该字段不写入（模拟缺失）。
+func encodeDevinStatusResponseForTest(balanceMicro, dailySec, weeklySec uint64, plan, fallbackPlan string, dailyPct, weeklyPct *uint64) []byte {
 	e := &ProtoEncoder{}
 	e.Message(1, func(lvl1 *ProtoEncoder) {
 		lvl1.Message(13, func(billing *ProtoEncoder) {
+			if dailyPct != nil {
+				billing.Uint64(14, *dailyPct)
+			}
+			if weeklyPct != nil {
+				billing.Uint64(15, *weeklyPct)
+			}
 			if balanceMicro != 0 {
 				billing.Uint64(16, balanceMicro)
 			}
@@ -52,7 +61,7 @@ func TestDevinStatusDecodeBilling(t *testing.T) {
 		dailySec  = uint64(1_700_000_000)
 		weeklySec = uint64(1_700_604_800)
 	)
-	data := encodeDevinStatusResponseForTest(balance, dailySec, weeklySec, "  PRO  ", "")
+	data := encodeDevinStatusResponseForTest(balance, dailySec, weeklySec, "  PRO  ", "", nil, nil)
 
 	got, err := decodeGetUserStatusResponse(data)
 	require.NoError(t, err)
@@ -67,7 +76,7 @@ func TestDevinStatusDecodeBilling(t *testing.T) {
 
 // TestDevinStatusPlanFallback 断言主 plan 缺失时回退到 #2.2。
 func TestDevinStatusPlanFallback(t *testing.T) {
-	data := encodeDevinStatusResponseForTest(0, 0, 0, "", "  Free_Tier ")
+	data := encodeDevinStatusResponseForTest(0, 0, 0, "", "  Free_Tier ", nil, nil)
 	got, err := decodeGetUserStatusResponse(data)
 	require.NoError(t, err)
 	require.Equal(t, "free_tier", got.Plan)
@@ -87,7 +96,7 @@ func TestDevinStatusBalanceBounds(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			data := encodeDevinStatusResponseForTest(tc.micro, 0, 0, "", "")
+			data := encodeDevinStatusResponseForTest(tc.micro, 0, 0, "", "", nil, nil)
 			got, err := decodeGetUserStatusResponse(data)
 			require.NoError(t, err)
 			if tc.wantKnown {
@@ -100,12 +109,43 @@ func TestDevinStatusBalanceBounds(t *testing.T) {
 	}
 }
 
+// TestDevinStatusQuotaRemaining 断言 #1.13.14/15 剩余百分比在 0..100 时解码为指针。
+func TestDevinStatusQuotaRemaining(t *testing.T) {
+	daily, weekly := uint64(100), uint64(42)
+	data := encodeDevinStatusResponseForTest(0, 0, 0, "", "", &daily, &weekly)
+	got, err := decodeGetUserStatusResponse(data)
+	require.NoError(t, err)
+	require.NotNil(t, got.DailyRemainingPercent)
+	require.Equal(t, 100, *got.DailyRemainingPercent)
+	require.NotNil(t, got.WeeklyRemainingPercent)
+	require.Equal(t, 42, *got.WeeklyRemainingPercent)
+}
+
+// TestDevinStatusQuotaRemainingMissing 断言字段 14/15 缺失时保持双 nil。
+func TestDevinStatusQuotaRemainingMissing(t *testing.T) {
+	data := encodeDevinStatusResponseForTest(0, 0, 0, "", "", nil, nil)
+	got, err := decodeGetUserStatusResponse(data)
+	require.NoError(t, err)
+	require.Nil(t, got.DailyRemainingPercent)
+	require.Nil(t, got.WeeklyRemainingPercent)
+}
+
+// TestDevinStatusQuotaRemainingOutOfRange 断言字段 14/15 超出 0..100 时保持 nil（不猜测、不夹取）。
+func TestDevinStatusQuotaRemainingOutOfRange(t *testing.T) {
+	daily, weekly := uint64(150), uint64(101)
+	data := encodeDevinStatusResponseForTest(0, 0, 0, "", "", &daily, &weekly)
+	got, err := decodeGetUserStatusResponse(data)
+	require.NoError(t, err)
+	require.Nil(t, got.DailyRemainingPercent)
+	require.Nil(t, got.WeeklyRemainingPercent)
+}
+
 // TestDevinStatusFetchSuccess 断言请求构造（body/headers）与成功响应解码。
 func TestDevinStatusFetchSuccess(t *testing.T) {
 	const token = "mytoken"
 	const normalized = "devin-session-token$mytoken"
 
-	payload := encodeDevinStatusResponseForTest(15_000_000, 1_700_000_000, 0, "Pro", "")
+	payload := encodeDevinStatusResponseForTest(15_000_000, 1_700_000_000, 0, "Pro", "", nil, nil)
 	var gotMethod, gotPath, gotBody string
 	var gotHeader http.Header
 

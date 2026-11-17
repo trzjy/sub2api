@@ -19,11 +19,13 @@ const maxDevinBalanceMicro uint64 = 1_000_000_000_000
 
 // DevinAccountStatus 是 Devin 账号额度快照。
 type DevinAccountStatus struct {
-	Plan          string     `json:"plan,omitempty"`
-	BalanceUSD    *float64   `json:"balance_usd,omitempty"`
-	DailyResetAt  *time.Time `json:"daily_reset_at,omitempty"`
-	WeeklyResetAt *time.Time `json:"weekly_reset_at,omitempty"`
-	FetchedAt     time.Time  `json:"fetched_at"`
+	Plan                   string     `json:"plan,omitempty"`
+	BalanceUSD             *float64   `json:"balance_usd,omitempty"`
+	DailyRemainingPercent  *int       `json:"daily_remaining_percent,omitempty"`
+	WeeklyRemainingPercent *int       `json:"weekly_remaining_percent,omitempty"`
+	DailyResetAt           *time.Time `json:"daily_reset_at,omitempty"`
+	WeeklyResetAt          *time.Time `json:"weekly_reset_at,omitempty"`
+	FetchedAt              time.Time  `json:"fetched_at"`
 }
 
 // DevinStatusClient 封装 GetUserStatus 查询。
@@ -144,6 +146,7 @@ func normalizeDevinPlan(s string) string {
 }
 
 // decodeGetUserStatusResponse 按字段路径解码：
+//   - #1.13.14 dailyQuotaRemainingPercent / #1.13.15 weeklyQuotaRemainingPercent (varint, 0..100)
 //   - #1.13.16 balanceMicro (varint, 微美元)
 //   - #1.13.17 dailyReset / #1.13.18 weeklyReset (epoch 秒)
 //   - #1.13.1.2 plan (string)，fallback 到 #2.2
@@ -187,6 +190,14 @@ func decodeDevinBillingBlock(data []byte, status *DevinAccountStatus) error {
 		return err
 	}
 
+	if pct, ok := firstVarintField(fields, 14); ok && pct <= 100 {
+		v := int(pct)
+		status.DailyRemainingPercent = &v
+	}
+	if pct, ok := firstVarintField(fields, 15); ok && pct <= 100 {
+		v := int(pct)
+		status.WeeklyRemainingPercent = &v
+	}
 	if micro, ok := firstVarintField(fields, 16); ok && int64(micro) >= 0 && micro <= maxDevinBalanceMicro {
 		usd := float64(micro) / 1e6
 		status.BalanceUSD = &usd
