@@ -79,13 +79,16 @@ func ensureMaxTokensGreaterThanBudget(maxTokens, budgetTokens int) (int, bool) {
 	return maxTokens, false
 }
 
-// declaredClaudeToolNames 收集请求中声明的工具名，用于校验 tool_choice 指定的
-// 具体工具名是否真实存在（失败关闭：避免静默放宽为「调用任意工具」）。
-func declaredClaudeToolNames(tools []ClaudeTool) map[string]struct{} {
-	names := make(map[string]struct{}, len(tools))
-	for _, tool := range tools {
-		if name := strings.TrimSpace(tool.Name); name != "" {
-			names[name] = struct{}{}
+// builtFunctionToolNames 收集 buildTools 最终输出的 functionDeclarations 名称，
+// 用于校验 tool_choice 指定的具体工具名是否真实存在于最终声明中（失败关闭：
+// 避免约束指向被 buildTools 过滤掉的内置工具或不存在的名字）。
+func builtFunctionToolNames(declarations []GeminiToolDeclaration) map[string]struct{} {
+	names := make(map[string]struct{})
+	for _, declaration := range declarations {
+		for _, fn := range declaration.FunctionDeclarations {
+			if name := strings.TrimSpace(fn.Name); name != "" {
+				names[name] = struct{}{}
+			}
 		}
 	}
 	return names
@@ -101,8 +104,9 @@ func declaredClaudeToolNames(tools []ClaudeTool) map[string]struct{} {
 //	{"type":"tool","name":"x"}            -> ANY + AllowedFunctionNames ["x"]
 //	{"type":"auto"}  /  缺失              -> VALIDATED（零回归，保持原硬编码行为）
 //
-// 具名工具（type=tool）的名字为空或未在 tools 中声明时返回错误（失败关闭，
-// 与 GF-40 一致），避免放宽为「调用任意工具」。
+// 具名工具（type=tool）的名字为空或未出现在最终 functionDeclarations 中时返回错误
+// （失败关闭，与 GF-40 一致），避免放宽为「调用任意工具」或指向被 buildTools
+// 过滤掉的内置工具（如 web_search/code_execution）。
 func claudeToolChoiceToFunctionCalling(raw json.RawMessage, declared map[string]struct{}) (mode string, allowed []string, err error) {
 	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
 		return "VALIDATED", nil, nil
@@ -225,7 +229,7 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	// （issue #6464），因此这里不再注入 includeServerSideToolInvocations。
 	// 保留 Claude tool_choice：none/any/tool/auto 映射到 functionCallingConfig，
 	// 避免 tool_choice:"none" 仍返回 tool_calls（生产实证 2026-11-17）。
-	toolChoiceMode, allowedNames, err := claudeToolChoiceToFunctionCalling(claudeReq.ToolChoice, declaredClaudeToolNames(claudeReq.Tools))
+	toolChoiceMode, allowedNames, err := claudeToolChoiceToFunctionCalling(claudeReq.ToolChoice, builtFunctionToolNames(tools))
 	if err != nil {
 		return nil, err
 	}

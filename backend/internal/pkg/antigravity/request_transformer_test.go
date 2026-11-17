@@ -868,4 +868,33 @@ func TestTransformClaudeToolChoice(t *testing.T) {
 		_, err := transform(t, json.RawMessage(`{"type":"tool","name":"ghost"}`), []ClaudeTool{functionTool})
 		require.Error(t, err)
 	})
+
+	t.Run("named built-in web_search filtered from final declarations returns error", func(t *testing.T) {
+		// 同时声明内置 web_search 与普通函数 lookup：buildTools 会丢弃内置工具，
+		// 最终只声明 lookup。指定 tool_choice.name=web_search 必须失败关闭，
+		// 不得生成指向不存在工具的 ANY + allowedFunctionNames。
+		tools := []ClaudeTool{
+			{Name: "web_search"},
+			{Name: "lookup", Description: "Lookup", InputSchema: map[string]any{"type": "object"}},
+		}
+		_, err := transform(t, json.RawMessage(`{"type":"tool","name":"web_search"}`), tools)
+		require.Error(t, err)
+	})
+
+	t.Run("named client function alongside built-in web_search maps to ANY with allowed name", func(t *testing.T) {
+		tools := []ClaudeTool{
+			{Name: "web_search"},
+			{Name: "lookup", Description: "Lookup", InputSchema: map[string]any{"type": "object"}},
+		}
+		req, err := transform(t, json.RawMessage(`{"type":"tool","name":"lookup"}`), tools)
+		require.NoError(t, err)
+		// 内置 web_search 被 buildTools 过滤，最终只声明 lookup 的 functionDeclaration。
+		require.Len(t, req.Request.Tools, 1)
+		require.Len(t, req.Request.Tools[0].FunctionDeclarations, 1)
+		require.Equal(t, "lookup", req.Request.Tools[0].FunctionDeclarations[0].Name)
+		require.Nil(t, req.Request.Tools[0].GoogleSearch)
+		fcc := req.Request.ToolConfig.FunctionCallingConfig
+		require.Equal(t, "ANY", fcc.Mode)
+		require.Equal(t, []string{"lookup"}, fcc.AllowedFunctionNames)
+	})
 }
