@@ -100,8 +100,10 @@ func (s *OpenAIGatewayService) forwardDevin(
 	defer cancelAuth()
 	authResp, err := NewDevinUpstreamClient().GetUserJwt(authCtx, token)
 	if err != nil {
+		slog.Info("devin_diag", "account_id", account.ID, "stage", "auth_err", "err", err.Error())
 		return nil, fmt.Errorf("devin get user jwt: %w", err)
 	}
+	slog.Info("devin_diag", "account_id", account.ID, "stage", "auth_ok", "jwt_len", len(authResp.UserJWT), "custom_base", authResp.CustomAPIServerURL)
 	base := strings.TrimSpace(authResp.CustomAPIServerURL)
 	if base == "" {
 		base = DevinAPIURL
@@ -133,6 +135,16 @@ func (s *OpenAIGatewayService) forwardDevin(
 	req.Header.Set("User-Agent", devinClientUA)
 
 	resp, err := s.doOpenAIUpstream(ctx, req, proxyURL, account)
+	// TEMP-DIAG(2026-11-17): 只读诊断，验证后立即回滚。
+	if err != nil {
+		slog.Info("devin_diag", "account_id", account.ID, "stage", "transport_err", "err", err.Error(),
+			"model", upstreamModel, "frame_bytes", len(frame), "url", req.URL.String(), "ua", req.Header.Get("User-Agent"))
+	} else {
+		slog.Info("devin_diag", "account_id", account.ID, "stage", "chat_resp", "status", resp.StatusCode,
+			"proto", resp.Proto, "cf_ray", resp.Header.Get("Cf-Ray"), "server", resp.Header.Get("Server"),
+			"model", upstreamModel, "frame_bytes", len(frame), "url", req.URL.String(),
+			"ua", req.Header.Get("User-Agent"), "jwt_len", len(authResp.UserJWT), "proxy", proxyURL)
+	}
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(startTime).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false, upstreamModel)
