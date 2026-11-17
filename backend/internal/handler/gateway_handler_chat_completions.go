@@ -485,6 +485,12 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 
 		if err != nil {
+			// Devin system/developer 图片拒绝是确定的入参不支持：映射为 400 后立即返回，
+			// 不进入 failover、不记账号失败（不调用 HandleFailoverError/冷却）。
+			if st, m, ok := devinClientFacingError(err); ok {
+				h.chatCompletionsErrorResponse(c, st, "invalid_request_error", m)
+				return
+			}
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
 				// CF524（v5）：心跳注释帧非语义写出——防线改用心跳基线例外判定，

@@ -446,6 +446,12 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		}
 
 		if err != nil {
+			// Devin system/developer 图片拒绝是确定的入参不支持：映射为 400 后立即返回，
+			// 不进入 failover、不记账号失败（不调用 HandleFailoverError/冷却）。
+			if st, m, ok := devinClientFacingError(err); ok {
+				h.responsesErrorResponse(c, st, "invalid_request_error", m)
+				return
+			}
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
 				// Can't failover if streaming content already sent.

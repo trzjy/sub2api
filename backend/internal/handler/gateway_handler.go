@@ -621,6 +621,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				accountReleaseFunc()
 			}
 			if err != nil {
+				// Devin system/developer 图片拒绝是确定的入参不支持：映射为 400 后立即返回，
+				// 不进入 failover、不记账号失败（不调用 HandleFailoverError/冷却）。
+				if st, m, ok := devinClientFacingError(err); ok {
+					h.errorResponse(c, st, "invalid_request_error", m)
+					return
+				}
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
 					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化。
@@ -1192,6 +1198,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 
 			if err != nil {
+				// Devin system/developer 图片拒绝是确定的入参不支持：映射为 400 后立即返回，
+				// 不进入 failover、不记账号失败（不调用 HandleFailoverError/冷却）。
+				if st, m, ok := devinClientFacingError(err); ok {
+					h.errorResponse(c, st, "invalid_request_error", m)
+					return
+				}
 				// Beta policy block: return 400 immediately, no failover
 				var betaBlockedErr *service.BetaBlockedError
 				if errors.As(err, &betaBlockedErr) {
@@ -2664,6 +2676,19 @@ func (h *GatewayHandler) checkClaudeCodeVersion(c *gin.Context) bool {
 	}
 
 	return true
+}
+
+// devinClientFacingError 把 service 层的 Devin 入参拒绝映射为客户端可理解的
+// 400 invalid_request_error，避免落到通用 502 upstream_error（带可重试提示）。
+//
+// 只映射 service.ErrDevinSystemImageUnsupported 这一个 sentinel：system/developer
+// 消息携带图片时 Devin 无承载位，属于确定的「该输入不支持」。用户消息图片已由
+// GF-35 支持，不得在此拦截；其它平台错误映射也不受此函数影响。
+func devinClientFacingError(err error) (status int, msg string, ok bool) {
+	if errors.Is(err, service.ErrDevinSystemImageUnsupported) {
+		return http.StatusBadRequest, err.Error(), true
+	}
+	return 0, "", false
 }
 
 // errorResponse 返回Claude API格式的错误响应
