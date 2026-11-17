@@ -29,6 +29,11 @@ import (
 // is small; the cap protects against pathological backlog after a long outage.
 const accountHealthProbeCandidateLimit = 200
 
+// devinProbeMaxCandidates 是单次 devin 账号探测尝试的候选模型上限。GF-20：候选从旧上限
+// 5 扩到全部 concrete 键（可用模型可能排在很后面，如第 11 位），但为避免异常账号拖长
+// 探测仍设硬上限 20。
+const devinProbeMaxCandidates = 20
+
 // accountHealthProbeBurstConcurrencyLimit 是补探 burst 的在途探测并发上限（进程本地，
 // 单实例生效；多实例部署时不约束合计探测量，见方案 §5 风险 6）。cursor 探针是真实
 // AgentRun 出站（预算 ≥256），单轮补探若一次入队数十账号（候选上限 200）会瞬间打出
@@ -1007,8 +1012,9 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 // （NewDevinUpstreamClient / BuildDevinChatParams / NewDevinChatFrame / DevinStreamReader /
 // decodeGetChatMessageResponse），成功判定 = 解析出非空正文。
 //
-// 403 是模型级拒绝而非账号失效：按 model_mapping 排序后的 concrete 键逐个试（最多 5 个），
-// 复用同一次 GetUserJwt 结果，只换模型重发 chat 帧。遇到 403（forbidden / "Request not
+// 403 是模型级拒绝而非账号失效：按 model_mapping 排序后的 concrete 键逐个试（最多
+// devinProbeMaxCandidates 个），复用同一次 GetUserJwt 结果，只换模型重发 chat 帧。
+// 遇到 403（forbidden / "Request not
 // allowed"）或其它任何失败（非 200 / 读取错误 / trailer error / 空正文 / 构造错误）都
 // 继续下一个候选，逐个试完；全部失败才返回错误（含尝试数与最后一个错误原因），避免
 // 某个模型被禁就误判整账号 status=error。
@@ -1018,7 +1024,8 @@ func (p *AccountHealthRecoveryProbeService) probeDevinUpstream(ctx context.Conte
 		return false, errors.New("devin account has no api key")
 	}
 
-	// 候选：与可测试模型列表同源（model_mapping 请求侧键，排除通配），排序后取前 5 个。
+	// 候选：与可测试模型列表同源（model_mapping 请求侧键，排除通配），排序后取前
+	// devinProbeMaxCandidates 个（GF-20：不再固定取前 5 个，避免可用模型排在后面轮不到）。
 	mapping := acc.GetModelMapping()
 	keys := make([]string, 0, len(mapping))
 	for requestedModel := range mapping {
@@ -1032,8 +1039,8 @@ func (p *AccountHealthRecoveryProbeService) probeDevinUpstream(ctx context.Conte
 	if len(keys) == 0 {
 		return false, errors.New("devin account has no testable model")
 	}
-	if len(keys) > 5 {
-		keys = keys[:5]
+	if len(keys) > devinProbeMaxCandidates {
+		keys = keys[:devinProbeMaxCandidates]
 	}
 
 	// 每个候选经 ResolveMappedModel 解析为上游 uid；解析不到或为空则跳过。

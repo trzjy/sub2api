@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -256,6 +257,33 @@ func TestProbeDevinUpstreamRetryOn403(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 2, up.calls, "应逐个试两个候选")
 	require.Equal(t, 1, auth.calls, "JWT 只应取一次，重发 chat 帧不重新鉴权")
+}
+
+// GF-20：前 5 个候选均 403、第 6 个成功 → (true, nil)。证明候选不再被旧上限 5 截断，
+// 超过旧上限仍会继续；旧实现只试前 5 个会误判整账号 error。
+func TestProbeDevinUpstreamRetryBeyondOldLimit(t *testing.T) {
+	auth := devinProbeWithCountingAuth(t, "jwt-test", "https://chat.example.com")
+	forbidden := []byte(`{"type":"forbidden","message":"Request not allowed"}`)
+	up := &devinSeqUpstream{responses: []devinSeqResp{
+		{status: http.StatusForbidden, body: forbidden},
+		{status: http.StatusForbidden, body: forbidden},
+		{status: http.StatusForbidden, body: forbidden},
+		{status: http.StatusForbidden, body: forbidden},
+		{status: http.StatusForbidden, body: forbidden},
+		{status: http.StatusOK, body: devinOKStream()},
+	}}
+	p := newDevinProbeService(up)
+	// 6 个键排序后为 m01..m06：前五全 403，第六个成功。
+	mapping := map[string]any{}
+	for i := 1; i <= 6; i++ {
+		mapping[fmt.Sprintf("m%02d", i)] = fmt.Sprintf("uid-%02d", i)
+	}
+	acc := newDevinProbeAccount(22, "session-token", mapping)
+	ok, err := p.probeDevinUpstream(context.Background(), acc)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, 6, up.calls, "应逐个试到第 6 个候选，不能止步于旧上限 5")
+	require.Equal(t, 1, auth.calls, "JWT 只应取一次")
 }
 
 // 全部候选 403：应返回 (false, err)，错误含尝试的候选数与最后的 403 原因。
