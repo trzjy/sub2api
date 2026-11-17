@@ -3,11 +3,39 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"github.com/stretchr/testify/require"
 )
+
+// devinUpstreamStatsStub 实现窄接口 upstreamModelStatsProvider。
+// 嵌入 UsageLogRepository 仅用于满足 s.usageLogRepo 的完整接口约束，
+// 其余方法在测试中不会被调用。
+type devinUpstreamStatsStub struct {
+	UsageLogRepository
+	stats     []usagestats.ModelStat
+	err       error
+	gotSource string
+	gotStart  time.Time
+	gotEnd    time.Time
+	gotAcctID int64
+}
+
+func (s *devinUpstreamStatsStub) GetModelStatsWithFiltersBySource(
+	ctx context.Context, startTime, endTime time.Time,
+	userID, apiKeyID, accountID, groupID int64,
+	requestType *int16, stream *bool, billingType *int8, source string,
+) ([]usagestats.ModelStat, error) {
+	s.gotStart = startTime
+	s.gotEnd = endTime
+	s.gotAcctID = accountID
+	s.gotSource = source
+	return s.stats, s.err
+}
 
 // TestDevinLocalCostPriceLookup 验证官方单价查表：
 //  1. gemini-4-hydrogen-xhigh 命中官方单价 input1.5 / cached0.08 / output7.5；
@@ -80,4 +108,80 @@ func TestDevinLocalCostForStats(t *testing.T) {
 	require.InDelta(t, 10.58, got.USD, 1e-9)
 	require.Equal(t, []string{"gemini-4-hydrogen-xhigh", "swe-2-max"}, got.PricedModels)
 	require.Equal(t, []string{"unknown-model"}, got.UnpricedModels)
+}
+
+// TestDevinLocalCostUsesUpstreamModel 验证 r22 must_fix #1：按 upstream_model 计价。
+// 构造“requested 名与 upstream 名不同”的反例：账号 model_mapping 会把 upstream
+// 真名 claude-5-fable-high($10/M) 改写成廉价的 gemini-4-hydrogen-xhigh($1.5/M)。
+// 正确实现必须忽略该映射、直接用 upstream 名计价（$10），且 source 必须为 "upstream"。
+func TestDevinLocalCostUsesUpstreamModel(t *testing.T) {
+	stub := &devinUpstreamStatsStub{
+		stats: []usagestats.ModelStat{
+			{Model: "claude-5-fable-high", InputTokens: 1_000_000},
+		},
+	}
+	account := &Account{
+		ID: 123,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"claude-5-fable-high": "gemini-4-hydrogen-xhigh",
+			},
+		},
+	}
+	reset := time.Date(2026, 11, 17, 9, 0, 0, 0, time.UTC)
+	svc := &AccountUsageService{usageLogRepo: stub}
+	beforeCall := time.Now().UTC()
+
+	lc, err := svc.computeDevinLocalCost(context.Background(), account, &DevinAccountStatus{DailyResetAt: &reset})
+	require.NoError(t, err)
+	require.NotNil(t, lc)
+
+	// 聚合维度必须是 upstream，且按 accountID 过滤。
+	require.Equal(t, "upstream", stub.gotSource)
+	require.Equal(t, int64(123), stub.gotAcctID)
+
+	// 计价用 upstream 返回的模型名，而非被映射后的 requested 名。
+	require.Equal(t, []string{"claude-5-fable-high"}, lc.PricedModels)
+	require.InDelta(t, 10.0, lc.USD, 1e-9) // 若误按 gemini 价则为 1.5
+
+	// 窗口：起点 = reset-24h，终点 = now（不是 reset），且传给 repo 的窗口与结果一致。
+	require.Equal(t, reset.Add(-24*time.Hour), lc.WindowStart)
+	require.False(t, lc.WindowEnd.Before(beforeCall.Add(-time.Minute)), "windowEnd must be ~now, not reset")
+	require.False(t, lc.WindowEnd.After(time.Now().UTC().Add(time.Minute)))
+	require.Equal(t, lc.WindowStart, stub.gotStart)
+	require.Equal(t, lc.WindowEnd, stub.gotEnd)
+}
+
+// TestDevinLocalCostQueryErrorPropagates 验证 r22 must_fix #2：
+// 用量库查询失败必须返回 error（且结果为空），由上层负责对外暴露。
+func TestDevinLocalCostQueryErrorPropagates(t *testing.T) {
+	stub := &devinUpstreamStatsStub{err: errors.New("usage db down")}
+	svc := &AccountUsageService{usageLogRepo: stub}
+
+	lc, err := svc.computeDevinLocalCost(context.Background(), &Account{ID: 1}, &DevinAccountStatus{})
+	require.Error(t, err)
+	require.Nil(t, lc)
+	require.Contains(t, err.Error(), "usage db down")
+}
+
+// TestDevinLocalCostWindowWithoutDailyReset 验证 DailyResetAt=nil 时窗口恰好为 24h，
+// 不得对 now 双重减 24h（旧缺陷会算成 48h）。
+func TestDevinLocalCostWindowWithoutDailyReset(t *testing.T) {
+	stub := &devinUpstreamStatsStub{
+		stats: []usagestats.ModelStat{{Model: "claude-5-fable-high", InputTokens: 1_000}},
+	}
+	svc := &AccountUsageService{usageLogRepo: stub}
+	before := time.Now().UTC().Add(-24 * time.Hour)
+
+	lc, err := svc.computeDevinLocalCost(context.Background(), &Account{ID: 1}, &DevinAccountStatus{})
+	require.NoError(t, err)
+	require.NotNil(t, lc)
+
+	// 跨度 ≈ 24h（双重减 24h 会变成 48h）。
+	require.InDelta(t, float64(24*time.Hour), float64(lc.WindowEnd.Sub(lc.WindowStart)), float64(time.Second))
+	// 起点不得早于“调用前 now-24h”一分钟以上，进一步排除多减一日。
+	require.False(t, lc.WindowStart.Before(before.Add(-time.Minute)),
+		"window start %s is more than a day before now", lc.WindowStart)
+	require.Equal(t, lc.WindowStart, stub.gotStart)
+	require.Equal(t, lc.WindowEnd, stub.gotEnd)
 }

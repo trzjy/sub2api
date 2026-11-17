@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
@@ -79,38 +80,44 @@ func devinLocalCostForStats(stats []usagestats.ModelStat, priceLookup func(strin
 	return result
 }
 
+// upstreamModelStatsProvider 是按 upstream_model 维度聚合用量的窄接口。
+// UsageLogRepository 本身未暴露 GetModelStatsWithFiltersBySource，因此这里对
+// 具体仓库实现做类型断言；断言失败即失败关闭，绝不回落到 requested 口径。
+type upstreamModelStatsProvider interface {
+	GetModelStatsWithFiltersBySource(ctx context.Context, startTime, endTime time.Time, userID, apiKeyID, accountID, groupID int64, requestType *int16, stream *bool, billingType *int8, source string) ([]usagestats.ModelStat, error)
+}
+
 // computeDevinLocalCost 查询本网关在统计窗口内的 token 用量并按官方单价折算费用。
-// 任何失败都返回 nil（不影响 Devin 状态查询主流程，LocalCost 为 omitempty）。
-func (s *AccountUsageService) computeDevinLocalCost(ctx context.Context, account *Account, status *DevinAccountStatus) *DevinLocalCost {
+// 统计按日志的 upstream_model 维度聚合，返回的模型名即 upstream 真名（SQL 侧
+// COALESCE 到 model），直接用于计价，不再经过账号 model_mapping 重映射。
+// 任何失败都返回 error，由调用方经 UsageInfo.Error 通道对外暴露（失败关闭）。
+func (s *AccountUsageService) computeDevinLocalCost(ctx context.Context, account *Account, status *DevinAccountStatus) (*DevinLocalCost, error) {
 	if s == nil || s.usageLogRepo == nil || account == nil {
-		return nil
+		return nil, fmt.Errorf("usage repository or account unavailable")
+	}
+	provider, ok := s.usageLogRepo.(upstreamModelStatsProvider)
+	if !ok {
+		return nil, fmt.Errorf("usage repo does not implement upstream model stats")
 	}
 
 	now := time.Now().UTC()
-	// 窗口起点基准：优先用官方 DailyResetAt，缺失时退化为 now-24h；
-	// 再减 24h 作为统计窗口起点，窗口终点为 now。
-	base := now.Add(-24 * time.Hour)
+	windowEnd := now
+	// 窗口起点：优先用官方 DailyResetAt 减 24h；缺失时退化为 now-24h。
+	// 注意只在缺失分支算一次 -24h，禁止对 now 双重减 24h（否则窗口变 48h）。
+	windowStart := now.Add(-24 * time.Hour)
 	if status != nil && status.DailyResetAt != nil {
-		base = *status.DailyResetAt
+		windowStart = status.DailyResetAt.Add(-24 * time.Hour)
 	}
-	windowStart := base.Add(-24 * time.Hour)
 
-	stats, err := s.usageLogRepo.GetModelStatsWithFilters(ctx, windowStart, now, 0, 0, account.ID, 0, nil, nil, nil)
+	stats, err := provider.GetModelStatsWithFiltersBySource(ctx, windowStart, windowEnd, 0, 0, account.ID, 0, nil, nil, nil, "upstream")
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("query upstream model stats: %w", err)
 	}
 
-	// 模型名先按原名查；查不到时用账号级 model_mapping 映射后再查。
-	resolved := make([]usagestats.ModelStat, 0, len(stats))
-	for _, st := range stats {
-		if _, ok := devinLocalPrices.lookup(st.Model); !ok {
-			st.Model = account.GetMappedModel(st.Model)
-		}
-		resolved = append(resolved, st)
-	}
-
-	result := devinLocalCostForStats(resolved, devinLocalPrices.lookup)
+	// stats 中的 Model 已是日志的 upstream_model，直接查表计价即可；
+	// 不得再经 account.GetMappedModel 映射，否则会按 requested 名算错价。
+	result := devinLocalCostForStats(stats, devinLocalPrices.lookup)
 	result.WindowStart = windowStart
-	result.WindowEnd = now
-	return result
+	result.WindowEnd = windowEnd
+	return result, nil
 }

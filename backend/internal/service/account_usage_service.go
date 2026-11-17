@@ -405,8 +405,12 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 		if err != nil {
 			return &UsageInfo{Source: "active", Error: err.Error()}, nil
 		}
-		// 按 Devin 官方单价 × 本网关 token 折算本站费用；失败返回 nil，不影响主流程。
-		st.LocalCost = s.computeDevinLocalCost(ctx, account, st)
+		// 按 Devin 官方单价 × 本网关 token 折算本站费用；查询失败经 UsageInfo.Error 暴露（失败关闭）。
+		lc, lcErr := s.computeDevinLocalCost(ctx, account, st)
+		if lcErr != nil {
+			return &UsageInfo{Source: "active", UpdatedAt: &st.FetchedAt, DevinUsage: st, Error: "devin local cost: " + lcErr.Error()}, nil
+		}
+		st.LocalCost = lc
 		return &UsageInfo{Source: "active", UpdatedAt: &st.FetchedAt, DevinUsage: st}, nil
 	}
 
