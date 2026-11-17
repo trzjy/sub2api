@@ -481,9 +481,16 @@
       </div>
     </template>
 
-    <!-- Devin accounts: plan / balance / daily & weekly quota reset times (usageInfo.devin_usage) -->
-    <template v-else-if="account.platform === 'devin' && usageInfo?.devin_usage">
-      <div class="space-y-1">
+    <!-- Devin accounts: error → amber text; else devin_usage → plan / balance / resets; else placeholder -->
+    <template v-else-if="account.platform === 'devin'">
+      <div
+        v-if="usageInfo?.error"
+        class="truncate text-xs text-amber-600 dark:text-amber-400 max-w-[200px]"
+        :title="usageInfo.error"
+      >
+        {{ usageInfo.error }}
+      </div>
+      <div v-else-if="usageInfo?.devin_usage" class="space-y-1">
         <span
           v-if="devinPlan"
           class="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300"
@@ -500,6 +507,7 @@
           Weekly reset: {{ devinWeeklyReset }}
         </div>
       </div>
+      <div v-else class="text-xs text-gray-400">-</div>
     </template>
 
     <!-- CN providers (Kimi / Zhipu / DeepSeek / MiniMax / 火山方舟订阅号 base_url 命中 volces): coding-plan quota or payg balance -->

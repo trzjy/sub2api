@@ -149,4 +149,28 @@ describe('AccountUsageCell devin 用量放行', () => {
     await flushPromises()
     expect(getUsage).not.toHaveBeenCalled()
   })
+
+  it('devin apikey + batchedUsage 仅 error（无 devin_usage）→ 渲染错误文本、不渲染 plan', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 996, platform: 'devin', type: 'apikey' }),
+        requestBatchedUsage,
+        batchedUsage: {
+          source: 'active',
+          error: 'devin upstream query failed'
+        }
+      },
+      global: { stubs: devinStubs }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    // error 分支：amber 文本展示后端 error（含 title），且不渲染 devin plan / 重置
+    expect(text).toContain('devin upstream query failed')
+    expect(text).not.toContain('pro')
+    expect(text).not.toContain('Daily reset:')
+    expect(text).not.toContain('Weekly reset:')
+  })
 })
