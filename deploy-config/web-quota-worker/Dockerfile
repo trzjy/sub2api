@@ -20,7 +20,10 @@ WORKDIR /app
 # 容器默认只有基础拉丁字体，与真实 Windows 中文环境不匹配。
 # 安装常见的中文字体让 document.fonts 看起来更真实。
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt 走国内镜像：服务器到 archive.ubuntu.com 实测约 150KB/s，321MB 字体包反复超时重试
+# （2026-11-17 部署实测卡住一小时以上）；换阿里云源后稳定可完成。仅影响构建拉包速度。
+RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.aliyun.com|g; s|http://security.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
     fonts-wqy-zenhei \
     fonts-wqy-microhei \
     fonts-noto-cjk \
