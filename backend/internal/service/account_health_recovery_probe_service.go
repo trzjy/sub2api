@@ -1080,7 +1080,7 @@ func (p *AccountHealthRecoveryProbeService) probeDevinUpstream(ctx context.Conte
 				{"role": "system", "content": "You are a helpful assistant."},
 				{"role": "user", "content": "Reply with: ok"},
 			},
-			"max_tokens": 16,
+			"max_tokens": 128,
 			"stream":     false,
 		})
 		params, err := BuildDevinChatParams(probeBody, upstreamUID, "")
