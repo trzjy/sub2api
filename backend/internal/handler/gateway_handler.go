@@ -1093,9 +1093,30 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 			requestCtx = c.Request.Context()
-			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
+			switch messagesNonGeminiForwardPath(account) {
+			case "devin":
+				// 非 Gemini 分组里的 Devin 账号没有可用的 GatewayService 出口：
+				// 直接 Forward 会把 Anthropic 请求发到 Devin 边缘并被 CF 403
+				// "Request not allowed" 拒绝，进而把账号置为
+				// account_disabled_auth_error。改走 OpenAIGatewayService 的
+				// ForwardAsAnthropic（内部 Anthropic→Chat→forwardDevin）。服务未
+				// 装配时失败关闭，收尾写法与相邻分支一致。
+				if h.openAIGatewayService == nil {
+					h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", pkgerrors.CompatServiceNotConfigured, streamStarted)
+					if accountReleaseFunc != nil {
+						accountReleaseFunc()
+					}
+					return
+				}
+				oaRes, oaErr := h.openAIGatewayService.ForwardAsAnthropic(requestCtx, c, account, attemptBody, "", "")
+				if oaRes != nil && strings.TrimSpace(oaRes.UpstreamEndpoint) != "" {
+					setActualUpstreamEndpoint(c, oaRes.UpstreamEndpoint)
+				}
+				result = forwardResultFromOpenAIResult(oaRes)
+				err = oaErr
+			case "antigravity":
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
-			} else {
+			default: // gateway
 				result, err = h.gatewayService.Forward(requestCtx, c, account, attemptParsedReq)
 			}
 
@@ -1337,6 +1358,25 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		if !retryWithFallback {
 			return
 		}
+	}
+}
+
+// messagesNonGeminiForwardPath 决定非 Gemini 分组内 /v1/messages 账号的转发出口。
+// 它是三分支分派的单一来源，避免再次漏掉某个平台分支：Devin 走
+// OpenAIGatewayService.ForwardAsAnthropic；Antigravity 判定须与现有条件一致
+// （PlatformAntigravity 且非 APIKey），仍走 antigravityGatewayService；其余账号
+// 走 gatewayService。nil 账号按空安全处理，返回 "gateway"。
+func messagesNonGeminiForwardPath(account *service.Account) string {
+	if account == nil {
+		return "gateway"
+	}
+	switch {
+	case account.Platform == service.PlatformDevin:
+		return "devin"
+	case account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey:
+		return "antigravity"
+	default:
+		return "gateway"
 	}
 }
 
