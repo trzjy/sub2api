@@ -110,6 +110,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if err := json.Unmarshal(body, &anthropicReq); err != nil {
 			return nil, fmt.Errorf("devin: parse anthropic messages request: %w", err)
 		}
+		if err := validateDevinAnthropicImages(&anthropicReq); err != nil {
+			return nil, err
+		}
 		ccBody, err := AnthropicBodyToChatBody(body)
 		if err != nil {
 			return nil, err

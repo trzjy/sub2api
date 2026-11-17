@@ -2691,11 +2691,15 @@ func (h *GatewayHandler) checkClaudeCodeVersion(c *gin.Context) bool {
 // devinClientFacingError 把 service 层的 Devin 入参拒绝映射为客户端可理解的
 // 400 invalid_request_error，避免落到通用 502 upstream_error（带可重试提示）。
 //
-// 只映射 service.ErrDevinSystemImageUnsupported 这一个 sentinel：system/developer
-// 消息携带图片时 Devin 无承载位，属于确定的「该输入不支持」。用户消息图片已由
-// GF-35 支持，不得在此拦截；其它平台错误映射也不受此函数影响。
+// 映射 service.ErrDevinSystemImageUnsupported（system/developer 消息携带图片，
+// Devin 无承载位）与 service.ErrDevinRemoteImageUnsupported（远程 URL 图片在归一
+// 为 Chat 格式时会被静默丢弃）两个 sentinel，均属确定的「该输入不支持」。
+// 合法 base64 用户图片不得在此拦截；其它平台错误映射也不受此函数影响。
 func devinClientFacingError(err error) (status int, msg string, ok bool) {
 	if errors.Is(err, service.ErrDevinSystemImageUnsupported) {
+		return http.StatusBadRequest, err.Error(), true
+	}
+	if errors.Is(err, service.ErrDevinRemoteImageUnsupported) {
 		return http.StatusBadRequest, err.Error(), true
 	}
 	return 0, "", false

@@ -102,6 +102,7 @@ func BuildDevinChatParams(body []byte, modelUID, cascadeID string) (*DevinChatPa
 		}
 	}
 	params.SystemPrompt = strings.Join(systemParts, "\n\n")
+	params.SystemPrompt = normalizeDevinSystemPrompt(params.SystemPrompt)
 
 	// tools：parameters 序列化为字符串 JSON；缺省 {} 时用 {"type":"object"}。
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
