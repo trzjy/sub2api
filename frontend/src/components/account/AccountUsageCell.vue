@@ -500,10 +500,24 @@
         <div class="text-[10px] text-gray-500 dark:text-gray-400">
           {{ devinBalance }}
         </div>
-        <div v-if="devinDailyReset" class="text-[10px] text-gray-500 dark:text-gray-400">
+        <UsageProgressBar
+          v-if="devinDailyBar"
+          label="Daily"
+          :utilization="devinDailyBar.utilization"
+          :resets-at="devinDailyBar.resetsAt"
+          color="indigo"
+        />
+        <div v-else-if="devinDailyReset" class="text-[10px] text-gray-500 dark:text-gray-400">
           Daily reset: {{ devinDailyReset }}
         </div>
-        <div v-if="devinWeeklyReset" class="text-[10px] text-gray-500 dark:text-gray-400">
+        <UsageProgressBar
+          v-if="devinWeeklyBar"
+          label="Weekly"
+          :utilization="devinWeeklyBar.utilization"
+          :resets-at="devinWeeklyBar.resetsAt"
+          color="emerald"
+        />
+        <div v-else-if="devinWeeklyReset" class="text-[10px] text-gray-500 dark:text-gray-400">
           Weekly reset: {{ devinWeeklyReset }}
         </div>
       </div>
@@ -1451,6 +1465,22 @@ const devinBalance = computed(() => {
   const balance = devinUsage.value?.balance_usd
   return balance != null ? `$${balance.toFixed(2)}` : '—'
 })
+
+// 订阅型窗口条：后端下发的是「剩余百分比」，进度条消费「已用比例」(0..1)。
+// percent 缺失（undefined / 非有限数）时不渲染，由模板回退到重置时间文本行。
+function devinWindowBar(remainingPercent: number | undefined, resetsAt: string | null | undefined) {
+  if (typeof remainingPercent !== 'number' || !Number.isFinite(remainingPercent)) return null
+  const utilization = Math.min(1, Math.max(0, (100 - remainingPercent) / 100))
+  return { utilization, resetsAt: resetsAt ?? null }
+}
+
+const devinDailyBar = computed(() =>
+  devinWindowBar(devinUsage.value?.daily_remaining_percent, devinUsage.value?.daily_reset_at)
+)
+const devinWeeklyBar = computed(() =>
+  devinWindowBar(devinUsage.value?.weekly_remaining_percent, devinUsage.value?.weekly_reset_at)
+)
+
 const devinDailyReset = computed(() => {
   const value = devinUsage.value?.daily_reset_at
   return value ? new Date(value).toLocaleString() : ''

@@ -85,11 +85,52 @@ describe('AccountUsageCell devin 用量放行', () => {
     })
   })
 
-  it('devin apikey + batchedUsage.devin_usage 渲染 plan/余额/日周重置，且不渲染通用 5h/7d 进度条', async () => {
+  it('devin apikey + devin_usage percent → 渲染 Daily/Weekly 两条窗口进度条（含 utilization）与 plan/余额，不再重复重置文本', async () => {
     const requestBatchedUsage = vi.fn()
     const wrapper = mount(AccountUsageCell, {
       props: {
         account: makeAccount({ id: 992, platform: 'devin', type: 'apikey' }),
+        requestBatchedUsage,
+        batchedUsage: {
+          devin_usage: {
+            plan: 'pro',
+            balance_usd: 10,
+            // 已用比例 = (100 - 剩余)/100，夹 0..1 → daily 0、weekly 0.5
+            daily_remaining_percent: 100,
+            weekly_remaining_percent: 50,
+            daily_reset_at: '2026-11-18T00:00:00Z',
+            weekly_reset_at: '2026-11-24T00:00:00Z'
+          }
+        }
+      },
+      global: { stubs: devinStubs }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    // showUsageWindows 放行 devin → 根节点渲染 → devin 专用分支呈现 plan/余额
+    expect(text).toContain('pro')
+    expect(text).toContain('$10.00')
+    // 渲染两条订阅型窗口进度条，stub 文本形如 "Daily|0|...|indigo"
+    const bars = wrapper.findAll('.usage-bar')
+    expect(bars.length).toBe(2)
+    expect(bars[0].text()).toContain('Daily')
+    expect(bars[0].text()).toContain('|0|')
+    expect(bars[1].text()).toContain('Weekly')
+    expect(bars[1].text()).toContain('|0.5|')
+    // percent 存在时不再重复显示对应重置时间文本行
+    expect(text).not.toContain('Daily reset:')
+    expect(text).not.toContain('Weekly reset:')
+    // shouldFetchUsage 放行 devin apikey（批量模式触发父级拉取）
+    expect(requestBatchedUsage).toHaveBeenCalled()
+  })
+
+  it('devin apikey + devin_usage percent 缺失 → 回退渲染 Daily/Weekly 重置文本，不渲染窗口进度条', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 991, platform: 'devin', type: 'apikey' }),
         requestBatchedUsage,
         batchedUsage: {
           devin_usage: {
@@ -106,15 +147,9 @@ describe('AccountUsageCell devin 用量放行', () => {
     await flushPromises()
 
     const text = wrapper.text()
-    // showUsageWindows 放行 devin → 根节点渲染 → devin 专用分支呈现 plan/余额/重置
-    expect(text).toContain('pro')
-    expect(text).toContain('$10.00')
     expect(text).toContain('Daily reset:')
     expect(text).toContain('Weekly reset:')
-    // devin 专用分支不走通用 5h/7d 进度条
     expect(wrapper.findAll('.usage-bar').length).toBe(0)
-    // shouldFetchUsage 放行 devin apikey（批量模式触发父级拉取）
-    expect(requestBatchedUsage).toHaveBeenCalled()
   })
 
   it('devin 非 apikey（oauth）shouldFetchUsage=false，不触发用量拉取', async () => {

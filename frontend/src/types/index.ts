@@ -1757,6 +1757,9 @@ export interface AccountUsageInfo {
   devin_usage?: {
     plan?: string
     balance_usd?: number | null
+    // 日/周剩余百分比（0-100），后端下发时以订阅型进度条渲染；缺失则回退重置时间文本。
+    daily_remaining_percent?: number
+    weekly_remaining_percent?: number
     daily_reset_at?: string | null
     weekly_reset_at?: string | null
     fetched_at?: string | null
