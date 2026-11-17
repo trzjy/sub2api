@@ -87,7 +87,7 @@ func newHy3LegacyTestService(group *Group, accounts []Account, groupErr error) *
 	groupID := int64(5001)
 	repo := hy3LegacyAggregateAccountRepo{
 		accounts: accounts, groupID: groupID,
-		aggregate: group != nil && group.AggregateCodeBuddyEnabled,
+		aggregate: group != nil,
 	}
 	snapshot := &SchedulerSnapshotService{
 		accountRepo: repo,
@@ -114,7 +114,7 @@ func TestLegacyTierRoutingCodeBuddySelectsMappedAccountByPool(t *testing.T) {
 	} {
 		t.Run(route.platform, func(t *testing.T) {
 			groupID := int64(5001)
-			group := &Group{ID: groupID, Platform: route.platform, AggregateCodeBuddyEnabled: true}
+			group := &Group{ID: groupID, Platform: route.platform}
 			accounts := []Account{
 				hy3LegacyTestAccount(5010, PlatformCodeBuddy, groupID, 0),
 				hy3LegacyTestAccount(5011, route.platform, groupID, 1),
@@ -148,7 +148,7 @@ func TestLegacyTierRoutingCodeBuddySelectsMappedAccountByPool(t *testing.T) {
 
 func TestLegacyTierRoutingCodeBuddyStickySmallThenBig(t *testing.T) {
 	groupID := int64(5001)
-	group := &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}
+	group := &Group{ID: groupID, Platform: PlatformKimi}
 	accounts := []Account{
 		hy3LegacyTestAccount(5020, PlatformCodeBuddy, groupID, 0),
 		hy3LegacyTestAccount(5021, PlatformKimi, groupID, 1),
@@ -191,13 +191,13 @@ func TestLegacyTierRoutingCodeBuddyRejectsOutsideQualification(t *testing.T) {
 		catalog  map[string]UpstreamModelMetadata
 	}{
 		{name: "group disabled", group: &Group{ID: groupID, Platform: PlatformKimi}, model: "kimi-k3", withTier: true},
-		{name: "group lookup failed", group: &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}, groupErr: errors.New("group lookup failed"), model: "kimi-k3", withTier: true},
-		{name: "wrong group id", group: &Group{ID: groupID + 1, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}, model: "kimi-k3", withTier: true},
-		{name: "wrong group platform", group: &Group{ID: groupID, Platform: PlatformDeepseek, AggregateCodeBuddyEnabled: true}, model: "kimi-k3", withTier: true},
-		{name: "missing tier", group: &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}, model: "kimi-k3"},
-		{name: "unmapped public model", group: &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}, model: "kimi-k2", withTier: true},
-		{name: "empty catalog", group: &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}, model: "kimi-k3", withTier: true, catalog: map[string]UpstreamModelMetadata{}},
-		{name: "mapped model absent from catalog", group: &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}, model: "kimi-k3", withTier: true, catalog: map[string]UpstreamModelMetadata{"other-model": {ID: "other-model"}}},
+		{name: "group lookup failed", group: &Group{ID: groupID, Platform: PlatformKimi}, groupErr: errors.New("group lookup failed"), model: "kimi-k3", withTier: true},
+		{name: "wrong group id", group: &Group{ID: groupID + 1, Platform: PlatformKimi}, model: "kimi-k3", withTier: true},
+		{name: "wrong group platform", group: &Group{ID: groupID, Platform: PlatformDeepseek}, model: "kimi-k3", withTier: true},
+		{name: "missing tier", group: &Group{ID: groupID, Platform: PlatformKimi}, model: "kimi-k3"},
+		{name: "unmapped public model", group: &Group{ID: groupID, Platform: PlatformKimi}, model: "kimi-k2", withTier: true},
+		{name: "empty catalog", group: &Group{ID: groupID, Platform: PlatformKimi}, model: "kimi-k3", withTier: true, catalog: map[string]UpstreamModelMetadata{}},
+		{name: "mapped model absent from catalog", group: &Group{ID: groupID, Platform: PlatformKimi}, model: "kimi-k3", withTier: true, catalog: map[string]UpstreamModelMetadata{"other-model": {ID: "other-model"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			accounts := []Account{
@@ -254,7 +254,7 @@ func TestLegacyTierRoutingCodeBuddyClosedGroupRejectsStickyAccount(t *testing.T)
 
 func TestLegacyTierRoutingCodeBuddySmallPoolExhaustionUsesExistingCrossPool(t *testing.T) {
 	groupID := int64(5001)
-	group := &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}
+	group := &Group{ID: groupID, Platform: PlatformKimi}
 	accounts := []Account{
 		hy3LegacyTestAccount(5050, PlatformCodeBuddy, groupID, 0),
 		hy3LegacyTestAccount(5051, PlatformKimi, groupID, 1),
@@ -274,7 +274,7 @@ func TestLegacyTierRoutingCodeBuddySmallPoolExhaustionUsesExistingCrossPool(t *t
 
 func TestLegacyTierRoutingCodeBuddyDBRecheckUsesFreshCatalog(t *testing.T) {
 	groupID := int64(5001)
-	group := &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}
+	group := &Group{ID: groupID, Platform: PlatformKimi}
 	snapshotAccount := hy3LegacyTestAccount(5060, PlatformCodeBuddy, groupID, 0)
 	nativeMasked := hy3LegacyTestAccount(5061, PlatformKimi, groupID, 1)
 	nativeMasked.Extra = map[string]any{"mask_upstream_identity": true}
@@ -308,7 +308,7 @@ func TestLegacyTierRoutingCodeBuddyDBRecheckUsesFreshCatalog(t *testing.T) {
 
 func TestLegacyTierRoutingCodeBuddySnapshotFreshAccountCatalog(t *testing.T) {
 	groupID := int64(5001)
-	group := &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}
+	group := &Group{ID: groupID, Platform: PlatformKimi}
 	staleCandidate := hy3LegacyTestAccount(5070, PlatformCodeBuddy, groupID, 0)
 	snapshotFresh := staleCandidate
 	snapshotFresh.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{Models: map[string]UpstreamModelMetadata{"different-model": {ID: "different-model"}}})
@@ -342,7 +342,7 @@ func TestLegacyTierRoutingCodeBuddySnapshotFreshAccountCatalog(t *testing.T) {
 
 func TestCodeBuddyTierPlatformMismatchRequiresMatchingBoundGroup(t *testing.T) {
 	const groupID = int64(5080)
-	group := &Group{ID: groupID, Platform: PlatformKimi, AggregateCodeBuddyEnabled: true}
+	group := &Group{ID: groupID, Platform: PlatformKimi}
 	account := hy3LegacyTestAccount(5081, PlatformCodeBuddy, groupID, 0)
 	require.True(t, codeBuddyTierPlatformMismatchAllowed(&account, PlatformKimi, "kimi-k3", groupID, group, tierRoutingPoolMasked))
 

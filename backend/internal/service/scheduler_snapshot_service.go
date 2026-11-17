@@ -1551,7 +1551,7 @@ func (s *SchedulerSnapshotService) loadAccountsForRebuild(
 ) ([]Account, error) {
 	key, cacheable := schedulerAccountQueryKeyForBucket(bucket)
 	if queries == nil || !cacheable {
-		return s.loadAccountsFromDB(ctx, bucket, bucket.Mode == SchedulerModeMixed)
+		return s.loadAccountsFromDB(ctx, bucket, false)
 	}
 
 	if accounts, ok := queries.accounts[key]; ok {

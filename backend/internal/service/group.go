@@ -112,12 +112,6 @@ type Group struct {
 	FreeOpenAIFast              bool // OpenAI Fast 请求按 Standard 价格向用户计费
 	RequireOAuthOnly            bool // 仅允许非 apikey 类型账号关联（OpenAI/Antigravity/Anthropic/Gemini）
 	RequirePrivacySet           bool // 调度时仅允许 privacy 已成功设置的账号（OpenAI/Antigravity/Anthropic/Gemini）
-	// AggregateCodeBuddyEnabled 是聚合直绑开关（方案 §1.1）：true=该聚合族分组候选池
-	// 并入 codebuddy；false=关闭（默认），该分组任何生产选号路径都看不到 codebuddy 账号。
-	// 平台权威 = 分组自身的 Platform 字段（与 NormalizeProfitControlConfig 同源），
-	// 仅聚合族平台（deepseek/zhipu/kimi/minimax/other/codebuddy）可置 true，否则创建/更新被拒
-	//（400 AGGREGATE_BINDING_NOT_SUPPORTED）。
-	AggregateCodeBuddyEnabled   bool
 	DefaultMappedModel          string
 	MessagesDispatchModelConfig OpenAIMessagesDispatchModelConfig
 	ModelAllowlist              GroupModelAllowlist
@@ -282,7 +276,7 @@ func (g *Group) GetRoutingAccountIDs(requestedModel string) []int64 {
 }
 
 // GetVisionRoutingAccountIDs 返回请求模型的视觉分流目标账号 ID 列表
-//（docs-local/capability-routing-plan.md §3.7）。
+// （docs-local/capability-routing-plan.md §3.7）。
 //
 // 语义与 GetRoutingAccountIDs 一致：精确匹配优先，其次通配符前缀匹配；
 // 未命中返回 nil。命中结果仅收窄候选池，不豁免 3.4 的能力校验（被标为

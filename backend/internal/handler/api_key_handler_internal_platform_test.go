@@ -84,13 +84,12 @@ func (r *keyVisStubGroupRepo) GetByID(_ context.Context, id int64) (*service.Gro
 
 // keyVisFixtures 构造五个分组：三个内部供给平台 + composite + anthropic 公开组。
 func keyVisFixtures() (keys []service.APIKey, byID map[int64]*service.APIKey, groups map[int64]*service.Group) {
-	mkGroup := func(id int64, platform string, aggregate bool) *service.Group {
+	mkGroup := func(id int64, platform string, _ bool) *service.Group {
 		return &service.Group{
-			ID:                        id,
-			Name:                      "group-" + platform + "-fixture",
-			Platform:                  platform,
-			Status:                    "active",
-			AggregateCodeBuddyEnabled: aggregate,
+			ID:       id,
+			Name:     "group-" + platform + "-fixture",
+			Platform: platform,
+			Status:   "active",
 		}
 	}
 	groups = map[int64]*service.Group{

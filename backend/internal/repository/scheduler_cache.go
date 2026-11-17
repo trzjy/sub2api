@@ -464,9 +464,6 @@ func schedulerSnapshotTagKeys(bucket service.SchedulerBucket) []string {
 		schedulerAccountMetaRevisionKey,
 		schedulerAccountMetaRevisionKeyForPlatform(bucket.Platform),
 	)
-	if bucket.Mode == service.SchedulerModeMixed && bucket.Platform != service.PlatformAntigravity {
-		keys = append(keys, schedulerAccountMetaRevisionKeyForPlatform(service.PlatformAntigravity))
-	}
 	return keys
 }
 

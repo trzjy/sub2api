@@ -672,7 +672,6 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		ProfitControlEnabled:            profitControlEnabled,
 		ProfitMinMargin:                 profitMinMargin,
 		ProfitSafetyBuffer:              profitSafetyBuffer,
-		AggregateCodeBuddyEnabled:       input.AggregateCodeBuddyEnabled,
 		ImagePrice1K:                    imagePrice1K,
 		ImagePrice2K:                    imagePrice2K,
 		ImagePrice4K:                    imagePrice4K,
@@ -1134,9 +1133,6 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 			return nil, infraerrors.Newf(http.StatusBadRequest, "INVALID_REASONING_EFFORT_MAPPING", "%v", err)
 		}
 		group.ReasoningEffortMappings = reasoningEffortMappings
-	}
-	if input.AggregateCodeBuddyEnabled != nil {
-		group.AggregateCodeBuddyEnabled = *input.AggregateCodeBuddyEnabled
 	}
 	sanitizeGroupMessagesDispatchFields(group)
 	sanitizeGroupOpenAIFast(group)

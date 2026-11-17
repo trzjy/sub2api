@@ -767,20 +767,6 @@ func (_c *GroupCreate) SetNillableRequirePrivacySet(v *bool) *GroupCreate {
 	return _c
 }
 
-// SetAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field.
-func (_c *GroupCreate) SetAggregateCodebuddyEnabled(v bool) *GroupCreate {
-	_c.mutation.SetAggregateCodebuddyEnabled(v)
-	return _c
-}
-
-// SetNillableAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field if the given value is not nil.
-func (_c *GroupCreate) SetNillableAggregateCodebuddyEnabled(v *bool) *GroupCreate {
-	if v != nil {
-		_c.SetAggregateCodebuddyEnabled(*v)
-	}
-	return _c
-}
-
 // SetDefaultMappedModel sets the "default_mapped_model" field.
 func (_c *GroupCreate) SetDefaultMappedModel(v string) *GroupCreate {
 	_c.mutation.SetDefaultMappedModel(v)
@@ -1221,10 +1207,6 @@ func (_c *GroupCreate) defaults() error {
 		v := group.DefaultRequirePrivacySet
 		_c.mutation.SetRequirePrivacySet(v)
 	}
-	if _, ok := _c.mutation.AggregateCodebuddyEnabled(); !ok {
-		v := group.DefaultAggregateCodebuddyEnabled
-		_c.mutation.SetAggregateCodebuddyEnabled(v)
-	}
 	if _, ok := _c.mutation.DefaultMappedModel(); !ok {
 		v := group.DefaultDefaultMappedModel
 		_c.mutation.SetDefaultMappedModel(v)
@@ -1434,9 +1416,6 @@ func (_c *GroupCreate) check() error {
 	}
 	if _, ok := _c.mutation.RequirePrivacySet(); !ok {
 		return &ValidationError{Name: "require_privacy_set", err: errors.New(`ent: missing required field "Group.require_privacy_set"`)}
-	}
-	if _, ok := _c.mutation.AggregateCodebuddyEnabled(); !ok {
-		return &ValidationError{Name: "aggregate_codebuddy_enabled", err: errors.New(`ent: missing required field "Group.aggregate_codebuddy_enabled"`)}
 	}
 	if _, ok := _c.mutation.DefaultMappedModel(); !ok {
 		return &ValidationError{Name: "default_mapped_model", err: errors.New(`ent: missing required field "Group.default_mapped_model"`)}
@@ -1739,10 +1718,6 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RequirePrivacySet(); ok {
 		_spec.SetField(group.FieldRequirePrivacySet, field.TypeBool, value)
 		_node.RequirePrivacySet = value
-	}
-	if value, ok := _c.mutation.AggregateCodebuddyEnabled(); ok {
-		_spec.SetField(group.FieldAggregateCodebuddyEnabled, field.TypeBool, value)
-		_node.AggregateCodebuddyEnabled = value
 	}
 	if value, ok := _c.mutation.DefaultMappedModel(); ok {
 		_spec.SetField(group.FieldDefaultMappedModel, field.TypeString, value)
@@ -2879,18 +2854,6 @@ func (u *GroupUpsert) SetRequirePrivacySet(v bool) *GroupUpsert {
 // UpdateRequirePrivacySet sets the "require_privacy_set" field to the value that was provided on create.
 func (u *GroupUpsert) UpdateRequirePrivacySet() *GroupUpsert {
 	u.SetExcluded(group.FieldRequirePrivacySet)
-	return u
-}
-
-// SetAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field.
-func (u *GroupUpsert) SetAggregateCodebuddyEnabled(v bool) *GroupUpsert {
-	u.Set(group.FieldAggregateCodebuddyEnabled, v)
-	return u
-}
-
-// UpdateAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field to the value that was provided on create.
-func (u *GroupUpsert) UpdateAggregateCodebuddyEnabled() *GroupUpsert {
-	u.SetExcluded(group.FieldAggregateCodebuddyEnabled)
 	return u
 }
 
@@ -4178,20 +4141,6 @@ func (u *GroupUpsertOne) SetRequirePrivacySet(v bool) *GroupUpsertOne {
 func (u *GroupUpsertOne) UpdateRequirePrivacySet() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateRequirePrivacySet()
-	})
-}
-
-// SetAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field.
-func (u *GroupUpsertOne) SetAggregateCodebuddyEnabled(v bool) *GroupUpsertOne {
-	return u.Update(func(s *GroupUpsert) {
-		s.SetAggregateCodebuddyEnabled(v)
-	})
-}
-
-// UpdateAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field to the value that was provided on create.
-func (u *GroupUpsertOne) UpdateAggregateCodebuddyEnabled() *GroupUpsertOne {
-	return u.Update(func(s *GroupUpsert) {
-		s.UpdateAggregateCodebuddyEnabled()
 	})
 }
 
@@ -5673,20 +5622,6 @@ func (u *GroupUpsertBulk) SetRequirePrivacySet(v bool) *GroupUpsertBulk {
 func (u *GroupUpsertBulk) UpdateRequirePrivacySet() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateRequirePrivacySet()
-	})
-}
-
-// SetAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field.
-func (u *GroupUpsertBulk) SetAggregateCodebuddyEnabled(v bool) *GroupUpsertBulk {
-	return u.Update(func(s *GroupUpsert) {
-		s.SetAggregateCodebuddyEnabled(v)
-	})
-}
-
-// UpdateAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field to the value that was provided on create.
-func (u *GroupUpsertBulk) UpdateAggregateCodebuddyEnabled() *GroupUpsertBulk {
-	return u.Update(func(s *GroupUpsert) {
-		s.UpdateAggregateCodebuddyEnabled()
 	})
 }
 

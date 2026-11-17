@@ -38,7 +38,7 @@ func requireNoAggregateKey(t *testing.T, v any) {
 
 func TestAPIKeyFromServiceForUserStripsInternalSupplyPlatform(t *testing.T) {
 	for _, platform := range []string{"codebuddy", "muse", "cursor"} {
-		group := &service.Group{ID: 10, Name: "supply-g", Platform: platform, AggregateCodeBuddyEnabled: platform == "codebuddy"}
+		group := &service.Group{ID: 10, Name: "supply-g", Platform: platform}
 		out := APIKeyFromServiceForUser(apiKeyFixture(group))
 		require.NotNil(t, out)
 		require.NotNil(t, out.Group, "group object must be kept: key stays bound, not 'ungrouped'")
@@ -53,12 +53,11 @@ func TestAPIKeyFromServiceForUserStripsInternalSupplyPlatform(t *testing.T) {
 
 func TestAPIKeyFromServiceForUserKeepsVisibleGroups(t *testing.T) {
 	for _, platform := range []string{"composite", "anthropic", "openai"} {
-		group := &service.Group{ID: 20, Name: "visible-g", Platform: platform, AggregateCodeBuddyEnabled: platform == "composite"}
+		group := &service.Group{ID: 20, Name: "visible-g", Platform: platform}
 		out := APIKeyFromServiceForUser(apiKeyFixture(group))
 		require.NotNil(t, out)
 		require.NotNil(t, out.Group)
 		require.Equal(t, platform, out.Group.Platform, "non-internal platform must pass through unchanged")
-		// composite 组即使聚合直绑开启，用户响应也不得携带该字段（2026-10-18 用户裁定）。
 		requireNoAggregateKey(t, out)
 	}
 }
@@ -82,18 +81,12 @@ func TestAPIKeyFromServiceAdminKeepsRealPlatform(t *testing.T) {
 		require.Equal(t, platform, out.Group.Platform)
 	}
 
-	adminOut := GroupFromServiceAdmin(&service.Group{ID: 10, Name: "supply-g", Platform: "codebuddy", AggregateCodeBuddyEnabled: true})
-	require.True(t, adminOut.AggregateDirectEnabled, "admin mapper must keep the real aggregate flag")
-	raw, err := json.Marshal(adminOut)
-	require.NoError(t, err)
-	require.Contains(t, string(raw), `"aggregate_direct_enabled":true`, "admin response carries the renamed neutral tag")
-	require.NotContains(t, string(raw), "aggregate_codebuddy_enabled", "old supplier-named tag must be gone")
 }
 
 func TestAPIKeyFromServiceForUserDoesNotMutateServiceObjects(t *testing.T) {
 	// 副本独立性锚（R3 外审残余风险闭合）：ForUser 只变异 DTO 副本，绝不回写
 	// service 层对象——否则同一对象复用会给管理端响应带来串味风险。
-	group := &service.Group{ID: 10, Name: "supply-g", Platform: "codebuddy", AggregateCodeBuddyEnabled: true}
+	group := &service.Group{ID: 10, Name: "supply-g", Platform: "codebuddy"}
 	key := apiKeyFixture(group)
 
 	out := APIKeyFromServiceForUser(key)
@@ -101,7 +94,6 @@ func TestAPIKeyFromServiceForUserDoesNotMutateServiceObjects(t *testing.T) {
 	require.Empty(t, out.Group.Platform)
 
 	require.Equal(t, "codebuddy", group.Platform, "service.Group must be untouched by user mapper")
-	require.True(t, group.AggregateCodeBuddyEnabled, "service.Group aggregate flag must be untouched")
 	require.Equal(t, "codebuddy", key.Group.Platform, "source key's nested group must be untouched")
 }
 
@@ -111,7 +103,7 @@ func TestAPIKeyFromServiceOmitsAggregateKeys(t *testing.T) {
 	// APIKeyFromService）不含任何 aggregate_* 键；开关的管理功能由分组管理端点
 	// （GroupFromServiceAdmin → aggregate_direct_enabled）完整承担，读写语义零损失。
 	// 这是 2026-10-18 字段迁移裁定的有意结果，不是字段丢失缺陷。
-	group := &service.Group{ID: 10, Name: "supply-g", Platform: "codebuddy", AggregateCodeBuddyEnabled: true}
+	group := &service.Group{ID: 10, Name: "supply-g", Platform: "codebuddy"}
 	out := APIKeyFromService(apiKeyFixture(group))
 	requireNoAggregateKey(t, out)
 }

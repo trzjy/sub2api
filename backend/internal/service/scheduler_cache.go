@@ -11,6 +11,7 @@ import (
 
 const (
 	SchedulerModeSingle = "single"
+	// 仅测试夹具与历史数据使用；生产路径不再生成 mixed 桶（2026-11-17）。
 	SchedulerModeMixed  = "mixed"
 	SchedulerModeForced = "forced"
 )
