@@ -1557,3 +1557,109 @@ func TestForwardNativeRejectsDevin(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "devin account does not support Gemini native endpoints")
 }
+
+// TestConvertClaudeMessagesToGeminiToolChoice verifies that tool_choice is
+// carried into Gemini's toolConfig.functionCallingConfig, and that auto/missing
+// choices are dropped with zero output regression.
+func TestConvertClaudeMessagesToGeminiToolChoice(t *testing.T) {
+	const toolsDecl = `"tools":[{"name":"lookup","description":"lookup","input_schema":{"type":"object","properties":{}}}]`
+	bodyWithTools := func(extra string) string {
+		return `{"model":"claude-3","max_tokens":64,"messages":[{"role":"user","content":"hello"}],` + toolsDecl + extra + `}`
+	}
+	bodyWithoutTools := func(extra string) string {
+		return `{"model":"claude-3","max_tokens":64,"messages":[{"role":"user","content":"hello"}]` + extra + `}`
+	}
+	convert := func(t *testing.T, body string) map[string]any {
+		t.Helper()
+		raw, err := convertClaudeMessagesToGeminiGenerateContent([]byte(body))
+		require.NoError(t, err)
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(raw, &out))
+		return out
+	}
+
+	tests := []struct {
+		name string
+		body string
+		want map[string]any // expected toolConfig; nil means it must be absent
+	}{
+		{
+			name: "none string maps to NONE",
+			body: bodyWithTools(`,"tool_choice":"none"`),
+			want: map[string]any{"functionCallingConfig": map[string]any{"mode": "NONE"}},
+		},
+		{
+			name: "none object maps to NONE",
+			body: bodyWithTools(`,"tool_choice":{"type":"none"}`),
+			want: map[string]any{"functionCallingConfig": map[string]any{"mode": "NONE"}},
+		},
+		{
+			name: "auto string emits no toolConfig",
+			body: bodyWithTools(`,"tool_choice":"auto"`),
+		},
+		{
+			name: "auto object emits no toolConfig",
+			body: bodyWithTools(`,"tool_choice":{"type":"auto"}`),
+		},
+		{
+			name: "missing emits no toolConfig",
+			body: bodyWithTools(""),
+		},
+		{
+			name: "required string maps to ANY",
+			body: bodyWithTools(`,"tool_choice":"required"`),
+			want: map[string]any{"functionCallingConfig": map[string]any{"mode": "ANY"}},
+		},
+		{
+			name: "any object maps to ANY",
+			body: bodyWithTools(`,"tool_choice":{"type":"any"}`),
+			want: map[string]any{"functionCallingConfig": map[string]any{"mode": "ANY"}},
+		},
+		{
+			name: "any with allowed_function_names",
+			body: bodyWithTools(`,"tool_choice":{"type":"any","allowed_function_names":["lookup","other"]}`),
+			want: map[string]any{"functionCallingConfig": map[string]any{
+				"mode": "ANY", "allowedFunctionNames": []any{"lookup", "other"},
+			}},
+		},
+		{
+			name: "tool object maps to ANY with name",
+			body: bodyWithTools(`,"tool_choice":{"type":"tool","name":"lookup"}`),
+			want: map[string]any{"functionCallingConfig": map[string]any{
+				"mode": "ANY", "allowedFunctionNames": []any{"lookup"},
+			}},
+		},
+		{
+			name: "function object maps to ANY with name",
+			body: bodyWithTools(`,"tool_choice":{"type":"function","function":{"name":"lookup"}}`),
+			want: map[string]any{"functionCallingConfig": map[string]any{
+				"mode": "ANY", "allowedFunctionNames": []any{"lookup"},
+			}},
+		},
+		{
+			name: "no tools ignores none choice",
+			body: bodyWithoutTools(`,"tool_choice":"none"`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := convert(t, tt.body)
+			if tt.want == nil {
+				_, exists := out["toolConfig"]
+				require.False(t, exists, "toolConfig must be absent, got %#v", out["toolConfig"])
+				return
+			}
+			require.Equal(t, tt.want, out["toolConfig"])
+		})
+	}
+
+	t.Run("auto and missing are byte-identical zero regression", func(t *testing.T) {
+		baseline := convert(t, bodyWithTools(""))
+		autoString := convert(t, bodyWithTools(`,"tool_choice":"auto"`))
+		autoObject := convert(t, bodyWithTools(`,"tool_choice":{"type":"auto"}`))
+		require.NotContains(t, baseline, "toolConfig")
+		require.Equal(t, baseline, autoString)
+		require.Equal(t, baseline, autoObject)
+	})
+}

@@ -3844,6 +3844,17 @@ func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 		out["tools"] = tools
 	}
 
+	// A tool_choice that survived the Claude->Gemini conversion must be carried
+	// into Gemini's toolConfig. Otherwise upstream ignores the caller's
+	// "none"/"required" preference and may return tool_calls even for "none",
+	// leaving the client with an empty final answer. Emit only when tools are
+	// present, since Gemini rejects toolConfig without tools.
+	if tools, ok := out["tools"].([]any); ok && len(tools) > 0 {
+		if toolConfig := convertClaudeToolChoiceToGeminiToolConfig(req["tool_choice"]); toolConfig != nil {
+			out["toolConfig"] = toolConfig
+		}
+	}
+
 	generationConfig := convertClaudeGenerationConfig(req)
 	if generationConfig != nil {
 		out["generationConfig"] = generationConfig
@@ -3851,6 +3862,90 @@ func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 
 	stripGeminiFunctionIDs(out)
 	return json.Marshal(out)
+}
+
+// convertClaudeToolChoiceToGeminiToolConfig maps a Claude/Chat tool_choice to
+// Gemini's toolConfig.functionCallingConfig. A nil result tells the caller to
+// omit toolConfig entirely, preserving Gemini's default AUTO behaviour.
+// Both the string form (from the Chat->Anthropic bridge) and the Claude object
+// form are accepted:
+//
+//	"none" / {"type":"none"}                     -> {"mode":"NONE"}
+//	"auto" / {"type":"auto"} / missing           -> nil (default AUTO, zero regression)
+//	"required" / "any" / {"type":"any"}          -> {"mode":"ANY"} (+ optional allowedFunctionNames)
+//	{"type":"tool","name":"x"}                   -> {"mode":"ANY","allowedFunctionNames":["x"]}
+//	{"type":"function","function":{"name":"x"}}  -> {"mode":"ANY","allowedFunctionNames":["x"]}
+func convertClaudeToolChoiceToGeminiToolConfig(raw any) map[string]any {
+	if raw == nil {
+		return nil
+	}
+
+	mode := ""
+	allowed := make([]string, 0, 1)
+
+	switch tc := raw.(type) {
+	case string:
+		switch strings.ToLower(strings.TrimSpace(tc)) {
+		case "none":
+			mode = "NONE"
+		case "auto":
+			return nil
+		case "required", "any":
+			mode = "ANY"
+		default:
+			return nil
+		}
+	case map[string]any:
+		choiceType := strings.ToLower(strings.TrimSpace(stringValue(tc["type"])))
+		switch choiceType {
+		case "none":
+			mode = "NONE"
+		case "auto":
+			return nil
+		case "any", "required":
+			mode = "ANY"
+		case "tool", "function":
+			mode = "ANY"
+			name := strings.TrimSpace(stringValue(tc["name"]))
+			if name == "" {
+				if fn, ok := tc["function"].(map[string]any); ok {
+					name = strings.TrimSpace(stringValue(fn["name"]))
+				}
+			}
+			if name != "" {
+				allowed = append(allowed, name)
+			}
+		default:
+			return nil
+		}
+		if mode == "ANY" && len(allowed) == 0 {
+			switch names := tc["allowed_function_names"].(type) {
+			case []any:
+				for _, n := range names {
+					if s := strings.TrimSpace(stringValue(n)); s != "" {
+						allowed = append(allowed, s)
+					}
+				}
+			case []string:
+				for _, n := range names {
+					if s := strings.TrimSpace(n); s != "" {
+						allowed = append(allowed, s)
+					}
+				}
+			}
+		}
+	default:
+		return nil
+	}
+
+	if mode == "" {
+		return nil
+	}
+	cfg := map[string]any{"mode": mode}
+	if mode == "ANY" && len(allowed) > 0 {
+		cfg["allowedFunctionNames"] = allowed
+	}
+	return map[string]any{"functionCallingConfig": cfg}
 }
 
 func stripGeminiFunctionIDs(req map[string]any) {
