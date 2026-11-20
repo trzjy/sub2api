@@ -3263,6 +3263,7 @@ func (r *accountRepository) ClearTempUnschedulableIfOwned(ctx context.Context, a
 // probe_attempts 计数）；否则 WHERE 失配、零写入、返回 false —— 表示停调已被他因接管（必写更晚
 // until），本次回写属于「已不属于本代的旧停调」，调用方据此终止该账号本轮补探、保留接管者写入的
 // reason。单语句原子，杜绝读-改-写两步的并发覆盖。reason 改写不改调度状态，不写 scheduler_outbox。
+// Devin 额度耗尽停调按 marker 持续待恢复，until 过期不回写（temp_unschedulable_until = $2 代际令牌仍保证不误写他人新停调）。
 func (r *accountRepository) BumpTempUnschedulableReasonIfGeneration(ctx context.Context, accountID int64, expectedUntil time.Time, newReason string) (bool, error) {
 	result, err := r.sql.ExecContext(ctx, `
 		UPDATE accounts
@@ -3271,7 +3272,10 @@ func (r *accountRepository) BumpTempUnschedulableReasonIfGeneration(ctx context.
 		WHERE id = $1
 			AND deleted_at IS NULL
 			AND temp_unschedulable_until = $2
-			AND temp_unschedulable_until > NOW()
+			AND (
+				temp_unschedulable_until > NOW()
+				OR temp_unschedulable_reason LIKE '%devin_upstream_quota_exhausted%'
+			)
 	`, accountID, expectedUntil, newReason)
 	if err != nil {
 		return false, err
