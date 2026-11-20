@@ -71,6 +71,21 @@ build_image_idempotent() {
 }
 
 build_image_idempotent "sub2api:${TAG}-w" "." || { echo "[$(date '+%F %T')] ERROR: sub2api 主镜像构建失败" >&2; exit 1; }
+
+# web-quota-worker 基础镜像（2026-11-20 用户裁定「根治部署重复下载」）：
+# 字体 + Python 依赖固化在 web-quota-worker-base:v1，业务镜像只 COPY 代码，部署构建秒级。
+# 基础镜像缺失时（首次部署或新机器）自动构建一次；重建时机见 Dockerfile.base 头部。
+WEB_QUOTA_BASE_IMAGE="web-quota-worker-base:v1"
+if ! docker image inspect "${WEB_QUOTA_BASE_IMAGE}" >/dev/null 2>&1; then
+  echo "[$(date '+%F %T')] 基础镜像 ${WEB_QUOTA_BASE_IMAGE} 不存在，开始构建（含字体与 Python 依赖，仅此一次）"
+  if ! docker build -f ./deploy-config/web-quota-worker/Dockerfile.base \
+       -t "${WEB_QUOTA_BASE_IMAGE}" ./deploy-config/web-quota-worker; then
+    echo "[$(date '+%F %T')] ERROR: 基础镜像 ${WEB_QUOTA_BASE_IMAGE} 构建失败" >&2
+    exit 1
+  fi
+  echo "[$(date '+%F %T')] 基础镜像 ${WEB_QUOTA_BASE_IMAGE} 构建完成"
+fi
+
 build_image_idempotent "web-quota-worker:${TAG}-w" "./deploy-config/web-quota-worker" || { echo "[$(date '+%F %T')] ERROR: web-quota-worker 镜像构建失败" >&2; exit 1; }
 
 # 6. 幂等更新同目录 .env 中 SUB2API_IMAGE_TAG / WEB_QUOTA_WORKER_IMAGE_TAG（已有原地替换，无则追加；不重建整个文件；compose.yml 的 image 行自带 sub2api: 前缀，故 .env 存裸 tag 不可带前缀）

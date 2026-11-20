@@ -1,0 +1,46 @@
+# web-quota-worker 基础镜像：Playwright 运行时 + 中文字体 + Python 依赖。
+#
+# 为什么单独固化（2026-11-20 用户裁定：根治部署重复下载）：
+#   原单文件 Dockerfile 里，中文字体层（fonts-noto-cjk 61MB + fonts-noto-cjk-extra 145MB）
+#   的 Docker 层缓存经常不命中，每次部署都要重下 210MB；服务器到 apt 源的速度在
+#   176KB/s ~ 1.1MB/s 之间波动，实测两轮部署分别耗时 13 分钟与卡死 8 分钟以上。
+#   把这段环境构建固化成本地基础镜像后，业务镜像每次部署只 COPY 代码，秒级完成。
+#
+# 重建时机（仅以下情况需要重建，人工执行一次）：
+#   - 字体清单变化
+#   - requirements.txt 变化
+#   - Playwright 基础镜像版本升级
+#
+# 重建命令：
+#   docker build -f Dockerfile.base -t web-quota-worker-base:v1 ./deploy-config/web-quota-worker
+FROM mcr.microsoft.com/playwright/python:v1.49.1-jammy
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PW_BROWSERS_PATH=/ms-playwright
+
+# pip 抗抖（2026-11-15 两次实证）：pip 默认 timeout=15s / retries=5，服务器出口抖动时
+# 整个部署会因 Read timed out 中止。本镜像与业务代码无关的构建失败不该阻断主服务发布。
+ENV PIP_TIMEOUT=120 \
+    PIP_RETRIES=10
+
+WORKDIR /app
+
+# 安装中文字体（2026-11-13 反风控增强）：字体列表是指纹检测点之一，容器默认只有
+# 基础拉丁字体，与真实 Windows 中文环境不匹配。apt 走国内镜像（2026-11-17 实测
+# archive.ubuntu.com 约 150KB/s 会反复超时）。
+USER root
+RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.aliyun.com|g; s|http://security.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    fonts-wqy-zenhei \
+    fonts-wqy-microhei \
+    fonts-noto-cjk \
+    fonts-noto-cjk-extra \
+    fonts-liberation \
+    fonts-dejavu-core \
+    fonts-freefont-ttf \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
