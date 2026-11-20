@@ -323,6 +323,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		OverloadUntil:           a.OverloadUntil,
 		TempUnschedulableUntil:  a.TempUnschedulableUntil,
 		TempUnschedulableReason: a.TempUnschedulableReason,
+		TempUnschedulableActive: tempUnschedulableActive(a),
 		SessionWindowStart:      a.SessionWindowStart,
 		SessionWindowEnd:        a.SessionWindowEnd,
 		SessionWindowStatus:     a.SessionWindowStatus,
@@ -611,6 +612,18 @@ func accountBalanceLowFromExtra(account *service.Account) bool {
 	return ok && marked
 }
 
+// tempUnschedulableActive 与调度判定同口径：until 未过期，或账号因 Devin
+// 额度耗尽处于「等待探针恢复」的持续停调（until 已过期但 marker 未清除）。
+func tempUnschedulableActive(a *service.Account) bool {
+	if a == nil {
+		return false
+	}
+	if a.TempUnschedulableUntil != nil && time.Now().Before(*a.TempUnschedulableUntil) {
+		return true
+	}
+	return a.IsParkedPendingDevinQuotaRecovery()
+}
+
 func AccountFromService(a *service.Account) *Account {
 	if a == nil {
 		return nil
@@ -650,7 +663,7 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		AutoPauseOnExpired: a.AutoPauseOnExpired, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 		Schedulable: a.Schedulable, RateLimitedAt: a.RateLimitedAt, RateLimitResetAt: a.RateLimitResetAt,
 		OverloadUntil: a.OverloadUntil, TempUnschedulableUntil: a.TempUnschedulableUntil,
-		TempUnschedulableReason: a.TempUnschedulableReason, SessionWindowStart: a.SessionWindowStart,
+		TempUnschedulableReason: a.TempUnschedulableReason, TempUnschedulableActive: a.TempUnschedulableActive, SessionWindowStart: a.SessionWindowStart,
 		SessionWindowEnd: a.SessionWindowEnd, SessionWindowStatus: a.SessionWindowStatus,
 		WindowCostLimit: a.WindowCostLimit, WindowCostStickyReserve: a.WindowCostStickyReserve,
 		MaxSessions: a.MaxSessions, SessionIdleTimeoutMin: a.SessionIdleTimeoutMin, BaseRPM: a.BaseRPM,

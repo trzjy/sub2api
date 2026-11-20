@@ -491,6 +491,14 @@
         {{ error || usageInfo?.error }}
       </div>
       <div v-else-if="usageInfo?.devin_usage" class="space-y-1">
+        <div
+          v-if="account.temp_unschedulable_active"
+          class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+          :title="account.temp_unschedulable_reason || undefined"
+        >
+          <span class="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
+          {{ t('admin.accounts.status.tempUnschedulable') }} · {{ t('admin.accounts.status.tempUnschedulableProbing') }}
+        </div>
         <span
           v-if="devinPlan"
           class="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300"

@@ -1435,6 +1435,9 @@ export interface Account {
   overload_until: string | null
   temp_unschedulable_until: string | null
   temp_unschedulable_reason: string | null
+  // 派生自后端：账号当前是否处于有效停调（until 未过期，或 Devin 额度耗尽
+  // marker 未清除）。用于管理端如实展示「停调中」，与 schedulable（管理员开关）区分。
+  temp_unschedulable_active?: boolean
 
   // Session window fields (5-hour window)
   session_window_start: string | null

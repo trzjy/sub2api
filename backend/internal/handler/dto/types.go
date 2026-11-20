@@ -311,6 +311,10 @@ type Account struct {
 
 	TempUnschedulableUntil  *time.Time `json:"temp_unschedulable_until"`
 	TempUnschedulableReason string     `json:"temp_unschedulable_reason"`
+	// TempUnschedulableActive 报告账号当前是否处于**有效停调**：
+	// until 未过期，或 reason 带 Devin 额度耗尽 marker（持续停调到探针恢复）。
+	// 与调度判定同口径（IsSchedulable），供管理端如实展示停调状态。
+	TempUnschedulableActive bool `json:"temp_unschedulable_active"`
 
 	SessionWindowStart  *time.Time `json:"session_window_start"`
 	SessionWindowEnd    *time.Time `json:"session_window_end"`
@@ -483,6 +487,10 @@ type AccountListItem struct {
 
 	TempUnschedulableUntil  *time.Time `json:"temp_unschedulable_until"`
 	TempUnschedulableReason string     `json:"temp_unschedulable_reason"`
+	// TempUnschedulableActive 报告账号当前是否处于**有效停调**：
+	// until 未过期，或 reason 带 Devin 额度耗尽 marker（持续停调到探针恢复）。
+	// 与调度判定同口径（IsSchedulable），供管理端如实展示停调状态。
+	TempUnschedulableActive bool `json:"temp_unschedulable_active"`
 
 	SessionWindowStart  *time.Time `json:"session_window_start"`
 	SessionWindowEnd    *time.Time `json:"session_window_end"`

@@ -320,8 +320,14 @@ const isOverloaded = computed(() => {
 
 // Computed: is temp unschedulable
 const isTempUnschedulable = computed(() => {
-  if (!props.account.temp_unschedulable_until) return false
-  return new Date(props.account.temp_unschedulable_until) > new Date()
+  const acc = props.account
+  // 后端派生字段优先（与调度判定同口径：until 未过期，或 Devin 额度耗尽
+  // marker 待探针恢复）。旧响应缺该字段时回落到 until 时间判断。
+  if (typeof acc.temp_unschedulable_active === 'boolean') {
+    return acc.temp_unschedulable_active
+  }
+  if (!acc.temp_unschedulable_until) return false
+  return new Date(acc.temp_unschedulable_until) > new Date()
 })
 
 // Computed: has error status
@@ -368,13 +374,18 @@ const isProbeDrivenTempUnschedulable = computed(() => {
 })
 
 const tempUnschedRecoveryText = computed(() => {
+  const acc = props.account
   if (!isTempUnschedulable.value) return ''
   if (isProbeDrivenTempUnschedulable.value) {
     return t('admin.accounts.status.tempUnschedulableProbing')
   }
-  if (!props.account.temp_unschedulable_until) return ''
+  // until 已过期但仍处于停调（后端派生 active=true，等待探针恢复）→ 探测恢复中文案
+  const untilExpired = !acc.temp_unschedulable_until || new Date(acc.temp_unschedulable_until) <= new Date()
+  if (untilExpired) {
+    return t('admin.accounts.status.tempUnschedulableProbing')
+  }
   return t('admin.accounts.status.tempUnschedulableUntil', {
-    time: formatDateTime(props.account.temp_unschedulable_until)
+    time: formatDateTime(acc.temp_unschedulable_until!)
   })
 })
 
