@@ -12,12 +12,22 @@ vi.mock('@/api/admin/quotaKeys', () => ({
   updateUpstream: vi.fn()
 }))
 
-// CARD-KC-09：激活码页顶部操作栏的上游续费/采购入口。
+// CARD-KC-09 / KC-18：激活码页顶部操作栏的上游续费/采购入口。
 //   - 入口按钮位于【入库配置】【添加激活码】所在的操作栏；
-//   - 展开后 kn-cy.com 项是新标签页外链（shop.kn-cy.com/products）；
-//   - ShareAI 暂无公开商铺，点击给出「尚未配置续费链接」提示模态框。
+//   - kn-cy.com / ShareAI 项统一读取上游注册表 renewal_url：有配置则新标签页外链，
+//     无配置则渲染占位按钮并提示通用「待配置」。
 
-const KNCY_STORE_URL = 'https://shop.kn-cy.com/products'
+const KNCY_STORE_URL = 'https://renew.kn-cy.example/cards'
+const SHAREAI_STORE_URL = 'https://renew.shareai.example/cards'
+
+function upstreamsWithRenewal(kncyUrl: string | null, shareaiUrl: string | null) {
+  return {
+    items: [
+      { id: 1, key: 'kn_cy', name: 'kn-cy.com 网关', type: 'kncy', renewal_url: kncyUrl, notes: null },
+      { id: 2, key: 'shareai', name: 'ShareAI 号池', type: 'shareai', renewal_url: shareaiUrl, notes: null }
+    ]
+  } as never
+}
 
 vi.mock('@/api/admin', () => ({
   adminAPI: {
@@ -92,10 +102,15 @@ function listEmpty() {
   return { items: [], total: 0, page: 1, page_size: 20, pages: 1 } as never
 }
 
-describe('QuotaKeysView 上游续费入口（CARD-KC-09）', () => {
+describe('QuotaKeysView 上游续费入口（CARD-KC-09 / KC-18）', () => {
   beforeEach(() => {
     vi.mocked(adminAPI.quotaKeys.list).mockReset()
     vi.mocked(adminAPI.quotaKeys.list).mockResolvedValue(listEmpty())
+    // 默认两项都配置了续费链接；各用例按需覆盖为未配置。
+    vi.mocked(adminUpstreams.listUpstreams).mockReset()
+    vi.mocked(adminUpstreams.listUpstreams).mockResolvedValue(
+      upstreamsWithRenewal(KNCY_STORE_URL, SHAREAI_STORE_URL)
+    )
   })
 
   it('操作栏渲染上游续费下拉按钮', async () => {
@@ -108,7 +123,7 @@ describe('QuotaKeysView 上游续费入口（CARD-KC-09）', () => {
     wrapper.unmount()
   })
 
-  it('展开后 kn-cy.com 项为 _blank 外链且指向公开商铺', async () => {
+  it('kn_cy 配置续费链接后渲染 _blank 外链，指向注册表 renewal_url', async () => {
     const wrapper = mountView()
     await flushPromises()
 
@@ -117,6 +132,7 @@ describe('QuotaKeysView 上游续费入口（CARD-KC-09）', () => {
 
     const kncy = wrapper.find('[data-testid="upstream-store-kncy"]')
     expect(kncy.exists()).toBe(true)
+    expect(kncy.element.tagName).toBe('A')
     expect(kncy.attributes('href')).toBe(KNCY_STORE_URL)
     expect(kncy.attributes('target')).toBe('_blank')
     expect(kncy.attributes('rel')).toContain('noopener')
@@ -124,27 +140,73 @@ describe('QuotaKeysView 上游续费入口（CARD-KC-09）', () => {
     wrapper.unmount()
   })
 
-  it('ShareAI 占位项点击后弹出「尚未配置」提示模态框', async () => {
+  it('kn_cy 未配置续费链接时渲染占位按钮（不渲染外链）', async () => {
+    vi.mocked(adminUpstreams.listUpstreams).mockResolvedValue(
+      upstreamsWithRenewal(null, SHAREAI_STORE_URL)
+    )
     const wrapper = mountView()
     await flushPromises()
 
     await wrapper.find('[data-testid="upstream-store-toggle"]').trigger('click')
     await nextTick()
 
-    // 初始不渲染任何提示弹窗（只有 BaseDialog 的 show=false 被过滤后剩余的表单/详情弹窗）。
+    const kncy = wrapper.find('[data-testid="upstream-store-kncy"]')
+    expect(kncy.exists()).toBe(true)
+    expect(kncy.element.tagName).toBe('BUTTON')
+    expect(kncy.attributes('href')).toBeUndefined()
+    expect(kncy.text()).toContain('admin.quotaKeys.upstreamStore.pending')
+    // 触发占位提示后收起下拉，弹出通用「待配置」模态框。
+    await kncy.trigger('click')
+    await nextTick()
+    const titles = wrapper.findAll('.dialog-stub').map((d) => d.attributes('data-title'))
+    expect(titles).toContain('admin.quotaKeys.upstreamStore.pending')
+    wrapper.unmount()
+  })
+
+  it('shareai 配置续费链接后渲染 _blank 外链，指向注册表 renewal_url', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.find('[data-testid="upstream-store-toggle"]').trigger('click')
+    await nextTick()
+
+    const shareai = wrapper.find('[data-testid="upstream-store-shareai"]')
+    expect(shareai.exists()).toBe(true)
+    expect(shareai.element.tagName).toBe('A')
+    expect(shareai.attributes('href')).toBe(SHAREAI_STORE_URL)
+    expect(shareai.attributes('target')).toBe('_blank')
+    expect(shareai.attributes('rel')).toContain('noopener')
+    expect(shareai.text()).toContain('admin.quotaKeys.upstreamStore.shareai')
+    wrapper.unmount()
+  })
+
+  it('shareai 未配置续费链接时渲染占位按钮，点击后弹出通用「待配置」提示', async () => {
+    vi.mocked(adminUpstreams.listUpstreams).mockResolvedValue(
+      upstreamsWithRenewal(KNCY_STORE_URL, null)
+    )
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.find('[data-testid="upstream-store-toggle"]').trigger('click')
+    await nextTick()
+
+    const shareai = wrapper.find('[data-testid="upstream-store-shareai"]')
+    expect(shareai.exists()).toBe(true)
+    expect(shareai.element.tagName).toBe('BUTTON')
+    expect(shareai.attributes('href')).toBeUndefined()
+    expect(shareai.text()).toContain('admin.quotaKeys.upstreamStore.pending')
+
     const dialogTitlesBefore = wrapper
       .findAll('.dialog-stub')
       .map((d) => d.attributes('data-title'))
-    expect(dialogTitlesBefore).not.toContain(
-      'admin.quotaKeys.upstreamStore.shareaiUnconfiguredTitle'
-    )
+    expect(dialogTitlesBefore).not.toContain('admin.quotaKeys.upstreamStore.pending')
 
-    await wrapper.find('[data-testid="upstream-store-shareai"]').trigger('click')
+    await shareai.trigger('click')
     await nextTick()
 
     const titles = wrapper.findAll('.dialog-stub').map((d) => d.attributes('data-title'))
-    expect(titles).toContain('admin.quotaKeys.upstreamStore.shareaiUnconfiguredTitle')
-    expect(wrapper.text()).toContain('admin.quotaKeys.upstreamStore.shareaiUnconfigured')
+    expect(titles).toContain('admin.quotaKeys.upstreamStore.pending')
+    expect(wrapper.text()).toContain('admin.quotaKeys.upstreamStore.pending')
 
     // 点击后下拉菜单收起，避免遮挡弹窗。
     expect(wrapper.find('[data-testid="upstream-store-shareai"]').exists()).toBe(false)

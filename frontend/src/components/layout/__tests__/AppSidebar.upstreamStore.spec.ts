@@ -13,15 +13,16 @@ import zh from '../../../i18n/locales/zh'
 const componentPath = resolve(dirname(fileURLToPath(import.meta.url)), '../AppSidebar.vue')
 const componentSource = readFileSync(componentPath, 'utf8')
 
-const KNCY_STORE_URL = 'https://shop.kn-cy.com/products'
-
 function navItem(): Record<string, unknown> {
   return (zh as Record<string, any>).nav ?? {}
 }
 
-describe('AppSidebar 上游续费入口（CARD-KC-09）', () => {
-  it('声明 kn-cy.com 公开商铺地址常量', () => {
-    expect(componentSource).toContain(`const KNCY_STORE_URL = '${KNCY_STORE_URL}'`)
+describe('AppSidebar 上游续费入口（CARD-KC-09 / KC-18）', () => {
+  it('从上游注册表读取续费链接（单一事实源），不再硬编码常量', () => {
+    expect(componentSource).toContain("import { listUpstreams } from '@/api/admin/quotaKeys'")
+    expect(componentSource).toContain('const data = await listUpstreams()')
+    expect(componentSource).toMatch(/if \(u\.renewal_url\) map\[u\.key\] = u\.renewal_url/)
+    expect(componentSource).not.toContain('KNCY_STORE_URL')
   })
 
   it('在激活码管理旁新增「上游续费」分组入口', () => {
@@ -30,16 +31,22 @@ describe('AppSidebar 上游续费入口（CARD-KC-09）', () => {
     expect(componentSource).toMatch(/path: '\/admin\/quota-keys-upstream'/)
   })
 
-  it('外链子项以新标签页打开并带 noreferrer 防护', () => {
-    expect(componentSource).toMatch(/href: KNCY_STORE_URL/)
+  it('两个子项的 href 均来自 upstreamRenewalUrls 且以新标签页打开', () => {
+    expect(componentSource).toMatch(/href: upstreamRenewalUrls\.value\['kn_cy'\]/)
+    expect(componentSource).toMatch(/href: upstreamRenewalUrls\.value\['shareai'\]/)
     expect(componentSource).toContain('target="_blank"')
     expect(componentSource).toContain('rel="noopener noreferrer"')
   })
 
-  it('ShareAI 保留占位子项并给出未配置提示', () => {
-    expect(componentSource).toMatch(/placeholder: true/)
+  it('未配置续费链接的子项退化为占位（placeholder 由缺失 url 推导）', () => {
+    expect(componentSource).toMatch(/placeholder: !upstreamRenewalUrls\.value\['kn_cy'\]/)
+    expect(componentSource).toMatch(/placeholder: !upstreamRenewalUrls\.value\['shareai'\]/)
     expect(componentSource).toContain('handlePlaceholderNav')
-    expect(componentSource).toContain("t('admin.quotaKeys.upstreamStore.shareaiUnconfigured')")
+  })
+
+  it('占位提示使用通用「待配置」文案（不写死 ShareAI）', () => {
+    expect(componentSource).toContain("t('admin.quotaKeys.upstreamStore.pending')")
+    expect(componentSource).not.toContain("t('admin.quotaKeys.upstreamStore.shareaiUnconfigured')")
   })
 
   it('外链/占位子项不落成 router-link（避免跳转到不存在的路由）', () => {

@@ -223,6 +223,7 @@ import { sanitizeUrl } from '@/utils/url'
 import { FeatureFlags, makeSidebarFlag } from '@/utils/featureFlags'
 import { resolveSiteBillingMode } from '@/utils/siteBillingMode'
 import { useBatchImageAccess } from '@/composables/useBatchImageAccess'
+import { listUpstreams } from '@/api/admin/quotaKeys'
 
 interface NavItem {
   path: string
@@ -753,9 +754,23 @@ const flagAdminPayment = () => adminSettingsStore.paymentEnabled
 const flagXianyuDelivery = () => adminSettingsStore.xianyuDeliveryEnabled
 const flagBatchImageAccess = () => canUseBatchImage.value
 
-// 上游采购商铺地址（CARD-KC-09）。kn-cy.com 已有公开商铺；
-// ShareAI 暂无公开商铺，菜单项保留占位。
-const KNCY_STORE_URL = 'https://shop.kn-cy.com/products'
+// 上游续费链接来自上游注册表（KC-18 单一事实源），不再硬编码。
+const upstreamRenewalUrls = ref<Record<string, string>>({})
+
+async function loadUpstreamRenewalUrls() {
+  try {
+    const data = await listUpstreams()
+    const map: Record<string, string> = {}
+    for (const u of data.items) {
+      if (u.renewal_url) map[u.key] = u.renewal_url
+    }
+    upstreamRenewalUrls.value = map
+  } catch {
+    // 管理端接口失败不影响侧边栏渲染：入口退化为占位提示。
+  }
+}
+
+watch(isAdmin, (v) => { if (v) void loadUpstreamRenewalUrls() }, { immediate: true })
 
 // buildSelfNavItems 构造用户自己的导航项（用户端主菜单和管理员的"我的账户"子菜单共享这组声明）。
 // withDashboard=true 时包含仪表盘（用户端），false 时不含（管理员的个人区已经有独立仪表盘入口）。
@@ -844,8 +859,8 @@ const adminNavItems = computed((): NavItem[] => {
     // Cursor 站点渠道激活码管理入口（/admin/quota-keys）。
     // 复用 KeyIcon 与管理菜单样式；激活码为高级运营功能，简单模式下隐藏。
     { path: '/admin/quota-keys', label: t('nav.quotaKeys'), icon: KeyIcon, hideInSimpleMode: true },
-    // 上游续费/采购快捷入口（CARD-KC-09）：kn-cy.com 直达公开商铺，
-    // ShareAI 暂无公开商铺，作为占位子项保留，点击给出提示。
+    // 上游续费/采购快捷入口（CARD-KC-09）：续费外链来自上游注册表，
+    // 未配置的上游保留占位子项，点击给出通用「待配置」提示。
     {
       path: '/admin/quota-keys-upstream',
       label: t('nav.upstreamStore'),
@@ -858,15 +873,17 @@ const adminNavItems = computed((): NavItem[] => {
           path: 'kncy-store',
           label: t('nav.kncyStore'),
           icon: CreditCardIcon,
-          href: KNCY_STORE_URL
+          href: upstreamRenewalUrls.value['kn_cy'],
+          placeholder: !upstreamRenewalUrls.value['kn_cy'],
         },
         {
           path: 'shareai-store',
           label: t('nav.shareaiStore'),
           icon: CreditCardIcon,
-          placeholder: true
-        }
-      ]
+          href: upstreamRenewalUrls.value['shareai'],
+          placeholder: !upstreamRenewalUrls.value['shareai'],
+        },
+      ],
     },
     { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon },
@@ -998,9 +1015,7 @@ function handlePlaceholderNav(item: NavItem) {
       appStore.setMobileOpen(false)
     }, 150)
   }
-  appStore.showInfo(
-    `${item.label}：${t('admin.quotaKeys.upstreamStore.shareaiUnconfigured')}`
-  )
+  appStore.showInfo(`${item.label}：${t('admin.quotaKeys.upstreamStore.pending')}`)
 }
 
 function isGroupActive(item: NavItem): boolean {

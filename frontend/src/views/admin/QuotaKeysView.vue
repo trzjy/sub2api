@@ -28,8 +28,8 @@
               {{ t('admin.quotaKeys.upstream.edit') }}
             </button>
 
-            <!-- 上游续费/采购入口（CARD-KC-09）：kn-cy.com 有公开商铺，直开外链；
-                 ShareAI 暂无公开商铺，保留占位项并以提示模态框说明。 -->
+            <!-- 上游续费/采购入口（CARD-KC-09 / KC-18）：统一读取上游注册表 renewal_url；
+                 有配置渲染外链，无配置保留占位按钮并提示「待配置」。 -->
             <div ref="upstreamStoreRef" class="relative">
               <button
                 class="btn btn-secondary"
@@ -53,7 +53,8 @@
                 role="menu"
               >
                 <a
-                  :href="KNCY_STORE_URL"
+                  v-if="kncyStoreUrl"
+                  :href="kncyStoreUrl"
                   target="_blank"
                   rel="noopener noreferrer"
                   class="flex items-center justify-between gap-2 px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-dark-200 dark:hover:bg-dark-700"
@@ -66,6 +67,33 @@
                   <Icon name="externalLink" size="sm" class="shrink-0 text-gray-400" />
                 </a>
                 <button
+                  v-else
+                  class="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-dark-200 dark:hover:bg-dark-700"
+                  role="menuitem"
+                  data-testid="upstream-store-kncy"
+                  @click="openShareaiPlaceholder"
+                >
+                  <span class="truncate">{{ t('admin.quotaKeys.upstreamStore.kncy') }}</span>
+                  <span class="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-dark-700 dark:text-dark-400">
+                    {{ t('admin.quotaKeys.upstreamStore.pending') }}
+                  </span>
+                </button>
+                <a
+                  v-if="shareaiStoreUrl"
+                  :href="shareaiStoreUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="flex items-center justify-between gap-2 px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-dark-200 dark:hover:bg-dark-700"
+                  role="menuitem"
+                  data-testid="upstream-store-shareai"
+                  :title="t('admin.quotaKeys.upstreamStore.openExternal')"
+                  @click="upstreamStoreOpen = false"
+                >
+                  <span class="truncate">{{ t('admin.quotaKeys.upstreamStore.shareai') }}</span>
+                  <Icon name="externalLink" size="sm" class="shrink-0 text-gray-400" />
+                </a>
+                <button
+                  v-else
                   class="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-dark-200 dark:hover:bg-dark-700"
                   role="menuitem"
                   data-testid="upstream-store-shareai"
@@ -774,15 +802,15 @@
       @cancel="statusConfirm.open = false"
     />
 
-    <!-- 上游续费占位提示：ShareAI 暂无公开商铺（CARD-KC-09） -->
+    <!-- 上游续费占位提示：注册表未配置续费链接时给出通用「待配置」提示（KC-18） -->
     <BaseDialog
       :show="showShareaiPlaceholder"
-      :title="t('admin.quotaKeys.upstreamStore.shareaiUnconfiguredTitle')"
+      :title="t('admin.quotaKeys.upstreamStore.pending')"
       width="normal"
       @close="showShareaiPlaceholder = false"
     >
       <p class="text-sm text-gray-600 dark:text-gray-300">
-        {{ t('admin.quotaKeys.upstreamStore.shareaiUnconfigured') }}
+        {{ t('admin.quotaKeys.upstreamStore.pending') }}
       </p>
       <template #footer>
         <div class="flex items-center justify-end">
@@ -1109,17 +1137,16 @@ const { t } = useI18n()
 const appStore = useAppStore()
 const router = useRouter()
 
-// --- 上游续费/采购入口（CARD-KC-09）-------------------------------------
-// kn-cy.com 已有公开商铺，直达产品列表页；ShareAI 暂无公开商铺，
-// 菜单项保留为占位（配置项留待后端/设置页落地），点击给出友好提示而非静默失败。
-const KNCY_STORE_URL = 'https://shop.kn-cy.com/products'
+// --- 上游续费/采购入口（CARD-KC-09 / KC-18）-------------------------------------
+// 续费链接统一读取上游注册表 renewal_url（单一事实源）：有配置渲染外链，
+// 无配置保留占位按钮，点击给出通用「待配置」提示。
 const upstreamStoreOpen = ref(false)
 const upstreamStoreRef = ref<HTMLElement | null>(null)
 const showShareaiPlaceholder = ref(false)
 
 function openShareaiPlaceholder() {
   upstreamStoreOpen.value = false
-  // 配置项接入后此处可直接跳转；当前无链接，必须明确告知用户。
+  // 注册表无续费链接配置时，明确告知用户「待配置」。
   showShareaiPlaceholder.value = true
 }
 
@@ -1517,6 +1544,10 @@ const upstreamByKey = computed<Record<string, QuotaUpstream>>(() => {
   }
   return map
 })
+
+// 上游续费链接统一读取注册表（KC-18 单一事实源）。
+const kncyStoreUrl = computed(() => upstreamByKey.value['kn_cy']?.renewal_url || '')
+const shareaiStoreUrl = computed(() => upstreamByKey.value['shareai']?.renewal_url || '')
 
 // 激活码行展示的上游标签：显示名 (标识)；上游条目缺失但 upstream_key 存在时回落显示
 // 原始标识；后端尚未回填 upstream_key 时返回空串（由模板回落到占位符，不空白）。
