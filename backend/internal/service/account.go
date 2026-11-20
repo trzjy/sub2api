@@ -216,6 +216,25 @@ func (a *Account) EffectiveLoadFactor() int {
 	return 1
 }
 
+// DevinUpstreamQuotaExhaustedMarker 是 Devin 额度耗尽停调的 marker 值，
+// 与 openai_account_runtime_block_fastpath.go 的包内常量同源。
+const DevinUpstreamQuotaExhaustedMarker = devinUpstreamQuotaExhaustedMarker
+
+// IsParkedPendingDevinQuotaRecovery 报告账号是否因 Devin 额度耗尽而处于
+// 「等待探针恢复」的持续停调。该状态由 TempUnschedulableReason 中的 marker
+// 决定，与 temp_unschedulable_until 是否到期无关；唯一解除路径是探针连续成功
+// 后清除停调（marker 随之消失）。
+func (a *Account) IsParkedPendingDevinQuotaRecovery() bool {
+	if a == nil || a.Platform != PlatformDevin || a.TempUnschedulableReason == "" {
+		return false
+	}
+	var state TempUnschedState
+	if err := json.Unmarshal([]byte(a.TempUnschedulableReason), &state); err != nil {
+		return false
+	}
+	return state.MatchedKeyword == devinUpstreamQuotaExhaustedMarker
+}
+
 func (a *Account) IsSchedulable() bool {
 	if !a.IsActive() || !a.Schedulable {
 		return false
@@ -231,6 +250,9 @@ func (a *Account) IsSchedulable() bool {
 		return false
 	}
 	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
+		return false
+	}
+	if a.IsParkedPendingDevinQuotaRecovery() {
 		return false
 	}
 	if a.SupportsAccountQuota() && a.IsQuotaExceeded() {

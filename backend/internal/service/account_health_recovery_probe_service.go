@@ -465,7 +465,11 @@ func (p *AccountHealthRecoveryProbeService) isHealthBreakerTrip(acc *Account, no
 		return false
 	}
 	if acc.TempUnschedulableUntil == nil || !acc.TempUnschedulableUntil.After(now) {
-		return false
+		// Devin 额度耗尽属「探针驱动恢复」的持续停调：until 到期不解除扫描资格，
+		// 唯一解除路径是探针连续成功清除停调（marker 随之消失）。
+		if !acc.IsParkedPendingDevinQuotaRecovery() {
+			return false
+		}
 	}
 	state, ok := parseHealthBreakerState(acc.TempUnschedulableReason)
 	if !ok || state == nil {

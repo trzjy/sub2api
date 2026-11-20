@@ -3297,7 +3297,10 @@ func (r *accountRepository) ListTempUnschedulableAccounts(ctx context.Context, n
 	accounts, err := r.client.Account.Query().
 		Where(
 			dbaccount.TempUnschedulableUntilNotNil(),
-			dbaccount.TempUnschedulableUntilGT(now),
+			dbaccount.Or(
+				dbaccount.TempUnschedulableUntilGT(now),
+				devinQuotaMarkerReasonPredicate(),
+			),
 			dbaccount.SchedulableEQ(true),
 			dbaccount.DeletedAtIsNil(),
 		).
@@ -3316,6 +3319,13 @@ func (r *accountRepository) ListTempUnschedulableAccounts(ctx context.Context, n
 		out = append(out, &mapped[i])
 	}
 	return out, nil
+}
+
+// devinQuotaMarkerReasonPredicate 匹配 reason 中带 Devin 额度耗尽 marker 的账号，
+// 使其在 temp_unschedulable_until 到期后仍进入探针候选。字面量与 service 包内的
+// devinUpstreamQuotaExhaustedMarker 同值（跨包引用会形成循环依赖，故用字面量）。
+func devinQuotaMarkerReasonPredicate() dbpredicate.Account {
+	return dbaccount.TempUnschedulableReasonContains("devin_upstream_quota_exhausted")
 }
 
 // ============================================================================
