@@ -31,7 +31,6 @@ type grokMediaSlotsCache struct {
 	acquired, released, userAcquired, userReleased int
 	waiting, denied                                int
 	full                                           bool
-	queueFull                                      bool
 	onWait                                         func()
 	duplicateRelease                               bool
 	peak                                           int
@@ -86,10 +85,6 @@ func (s *grokMediaSlotsCache) ReleaseUserSlot(_ context.Context, _ int64, reques
 
 func (s *grokMediaSlotsCache) IncrementAccountWaitCount(context.Context, int64, int) (bool, error) {
 	s.mu.Lock()
-	if s.queueFull {
-		s.mu.Unlock()
-		return false, nil
-	}
 	s.waiting++
 	onWait := s.onWait
 	s.mu.Unlock()
@@ -274,9 +269,8 @@ func TestGrokMediaLookupSlotLifecycle(t *testing.T) {
 			if scenario == "full" || scenario == "mismatch wait" || scenario == "queue full" || scenario == "cancel while waiting" {
 				slots.full = true
 			}
-			if scenario == "queue full" {
-				slots.queueFull = true
-			}
+			// "queue full" 场景：排队路径已删除，本场景等价于 "full" 槽满，
+			// 上方已令 slots.full = true，不再设置任何等待队列状态。
 			if scenario == "cancel while waiting" {
 				slots.onWait = cancel
 			}
@@ -308,7 +302,10 @@ func TestGrokMediaLookupSlotLifecycle(t *testing.T) {
 					require.Equal(t, 200, w.Code)
 				}
 				if scenario == "queue full" {
-					require.Equal(t, http.StatusTooManyRequests, w.Code)
+					// 排队路径已删除（2026-11-20 裁定：槽满即换号，不再进入等待队列）。
+					// 该场景现在与 "full" 同路：唯一的任务属主账号槽满即终态，
+					// 按账号槽满契约写 503，不再是旧的「等待队列满 → 429」。
+					require.Equal(t, http.StatusServiceUnavailable, w.Code)
 				}
 				if scenario == "full" {
 					// 绑定查询的唯一候选就是任务属主账号：槽满即使再「换号」也只会

@@ -2,11 +2,14 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -90,6 +93,62 @@ func isOpenAIAccount(account *Account) bool {
 	return account != nil && (account.Platform == PlatformOpenAI || account.Platform == PlatformGrok)
 }
 
+// devinUpstreamQuotaExhaustedMarker 是 Devin 上游「每日额度耗尽」停调的匹配关键字，
+// 同时是恢复探针（probeRecoverableMarkers）的可恢复标记。
+const devinUpstreamQuotaExhaustedMarker = "devin_upstream_quota_exhausted"
+
+// isDevinUpstreamQuotaExhausted 只认上游结构化错误，不做自由文本猜词：
+//
+//	{"error":{"code":"failed_precondition","message":"...quota has been exhausted..."}}
+//
+// 两个条件同时成立才返回 true。
+func isDevinUpstreamQuotaExhausted(account *Account, body []byte) bool {
+	if account == nil || account.Platform != PlatformDevin || len(body) == 0 || !gjson.ValidBytes(body) {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	msg := strings.ToLower(gjson.GetBytes(body, "error.message").String())
+	return code == "failed_precondition" && strings.Contains(msg, "quota has been exhausted")
+}
+
+// devinQuotaExhaustedProbeWindowUntil 返回额度耗尽停调的**探测重试窗口**，不是恢复时长。
+// Devin 额度是否恢复完全由 AccountHealthRecoveryProbeService 的真实对话探针判定：
+// 探针成功即提前解除停调；探针失败则本轮补探结束后按 5 分钟额度档再次探测。
+// 该值受 unavailMaxCooldown 硬上限约束，不出现任何远期哨兵或跨日兜底。
+func devinQuotaExhaustedProbeWindowUntil(now time.Time) time.Time {
+	return now.Add(unavailQuotaUnknownCooldown)
+}
+
+// parkDevinQuotaExhausted 把 Devin 额度耗尽账号写入停调。
+// 停调窗口只是下一次探测的时间点，恢复完全由 AccountHealthRecoveryProbeService
+// 的真实对话探针判定（探针成功即解除）。调用方负责决定是否同时 failover。
+func (s *OpenAIGatewayService) parkDevinQuotaExhausted(ctx context.Context, account *Account) {
+	if s == nil || account == nil || s.accountRepo == nil {
+		return
+	}
+	now := time.Now()
+	until := devinQuotaExhaustedProbeWindowUntil(now)
+	state := TempUnschedState{
+		UntilUnix:       until.Unix(),
+		TriggeredAtUnix: now.Unix(),
+		StatusCode:      http.StatusOK,
+		MatchedKeyword:  devinUpstreamQuotaExhaustedMarker,
+		ErrorMessage:    "devin upstream daily usage quota exhausted",
+	}
+	payload, err := json.Marshal(state)
+	if err != nil {
+		slog.Warn("devin_quota_park_marshal_failed", "account_id", account.ID, "error", err)
+		return
+	}
+	// 停调写入必须独立于请求上下文：流式排水阶段客户端断开后 ctx 已取消，
+	// 若沿用该 ctx，SetTempUnschedulable 会被中止而丢失停调。
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAIAccountStateUpdateTimeout)
+	defer cancel()
+	if err := s.accountRepo.SetTempUnschedulable(writeCtx, account.ID, until, string(payload)); err != nil {
+		slog.Warn("devin_upstream_quota_set_temp_unsched_failed", "account_id", account.ID, "error", err)
+	}
+}
+
 // isCNFamilyFastpathAccount reports whether account belongs to an explicitly
 // enumerated CN provider family (kimi/deepseek/zhipu/minimax) eligible for the
 // fastpath transient cooldown and account scheduling-block gate. It deliberately
@@ -126,6 +185,10 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	}
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
+	if isDevinUpstreamQuotaExhausted(account, responseBody) {
+		s.parkDevinQuotaExhausted(stateCtx, account)
+		return true
+	}
 	if account != nil && account.Platform == PlatformOpenAI && isOpenAIHTTPUpstreamAccessStateError(statusCode, "", responseBody) {
 		message := "OpenAI upstream account or workspace is unavailable"
 		if upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(responseBody)); upstreamMsg != "" {

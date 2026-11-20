@@ -1096,7 +1096,9 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	}
 
 	// Check custom error codes
-	if !account.ShouldHandleErrorCode(resp.StatusCode) {
+	// Devin 的额度耗尽用 HTTP 200 表达，custom_error_codes 是按状态码的通用筛选，
+	// 不该拦下这类结构化业务错误（否则停调/failover 被静默跳过）。
+	if !account.ShouldHandleErrorCode(resp.StatusCode) && !isDevinUpstreamQuotaExhausted(account, body) {
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 			ProxyID:            opsUpstreamProxyID(account),
 			ProxyName:          opsUpstreamProxyName(account),

@@ -2674,10 +2674,10 @@ const (
 	// 未写任何响应；调用方应经 recordOpenAIProfitVeto 把该账号加入本请求排除集
 	// 后重新选号，全池耗尽由下一轮选号返回标准 no available accounts。
 	openAISlotAcquireProfitVetoed
-	// openAISlotAcquireSlotFull：账号槽位等不到（等待超时）。**响应尚未写出**，
-	// 调用方应经 recordConcurrencySlotFailure 把该账号加入本请求排除集后换同组
-	// 下一个账号再试；候选耗尽时由调用方用 writeConcurrencySlotExhausted 写出
-	// 终态 503（与既有「槽位等不到」出口逐字节一致）。
+	// openAISlotAcquireSlotFull：账号并发槽已满（快速抢槽失败，不排队等待）。
+	// **响应尚未写出**，调用方应经 recordConcurrencySlotFailure 把该账号加入本请求
+	// 排除集后换同组下一个账号再试；候选耗尽时由调用方用 writeConcurrencySlotExhausted
+	// 写出终态 503（与既有槽满出口逐字节一致）。
 	openAISlotAcquireSlotFull
 )
 
@@ -2809,9 +2809,9 @@ func withOpenAIWSTurnBillingGroup(ctx context.Context, turnKey *service.APIKey) 
 // maxProfitVetoAttempts，调用方必须停止重选并按「无可用账号」终止。
 //
 // OpenAI 路径用的是各自的 failedAccountIDs map + for 循环（不是 FailoverState），
-// 这里用一个独立计数器复用同一上限语义。上限是必需的：WaitPlan 分支先阻塞
-// 排队（sticky 45s / fallback 30s）拿到槽位才终检，无上限重选会把单次请求的
-// 延迟放大到 N × WaitPlan.Timeout。
+// 这里用一个独立计数器复用同一上限语义。上限是必需的：每次重选都会经历一次
+// 选号 + 快速抢槽 + 利润终检，无上限重选会放大单次请求的选号开销并可能长时间
+// 占用请求处理，因此与 FailoverState 保持同一上限。
 func recordOpenAIProfitVeto(failedAccountIDs map[int64]struct{}, accountID int64, vetoCount *int) bool {
 	failedAccountIDs[accountID] = struct{}{}
 	*vetoCount++
@@ -2900,9 +2900,8 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		}
 		return nil, openAISlotAcquireOK
 	}
-	// 换号后不等（用户 2026-11-12 裁定）：本次请求已经等过一次账号槽位且没等到，
-	// 后续候选**直接换**，不再排队等待 —— 下一个账号多半是空闲的（刚被排除的那个
-	// 才是满的），等它是白等；且总等待时长 = 一次超时，不会放大成 N 倍。
+	// 槽满即换号（2026-11-20 用户裁定）：快速抢槽失败直接返回槽满，由调用方排除
+	// 该账号并换同组下一个候选，任何候选都不再在账号上排队等待。
 	if selection.WaitPlan == nil {
 		markOpsRoutingCapacityLimited(c)
 		writeError(http.StatusServiceUnavailable, "api_error", "", infraerrors.NoAvailableAccounts)
@@ -2942,75 +2941,10 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		}
 		return nil, openAISlotAcquireOK
 	}
-	// 换号后不等（用户 2026-11-12 裁定）：本次请求已经等过一次账号槽位且没等到，
-	// 后续候选**不再排队等待** —— 但上面已经**立即抢过一次槽**了
-	// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-	// 抢不到才换下一个。总等待时长 = 一次超时，不会放大成 N 倍。
-	if concurrencySlotWaitExhausted(c) {
-		return nil, openAISlotAcquireSlotFull
-	}
-
-	canWait, waitErr := h.concurrencyHelper.IncrementAccountWaitCount(ctx, account.ID, selection.WaitPlan.MaxWaiting)
-	if waitErr != nil {
-		reqLog.Warn("openai.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(waitErr))
-	} else if !canWait {
-		reqLog.Info("openai.account_wait_queue_full",
-			zap.Int64("account_id", account.ID),
-			zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
-		)
-		writeError(http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, infraerrors.GatewayQueueFull)
-		return nil, openAISlotAcquireFailed
-	}
-
-	accountWaitCounted := waitErr == nil && canWait
-	releaseWait := func() {
-		if accountWaitCounted {
-			h.concurrencyHelper.DecrementAccountWaitCount(ctx, account.ID)
-			accountWaitCounted = false
-		}
-	}
-	defer releaseWait()
-
-	accountReleaseFunc, err := h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
-		c,
-		account.ID,
-		selection.WaitPlan.MaxConcurrency,
-		selection.WaitPlan.Timeout,
-		reqStream,
-		streamStarted,
-	)
-	if err != nil {
-		reqLog.Warn("openai.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-		// 槽位等不到：响应尚未写出，交给调用方决定「换同组下一个账号」还是终止。
-		// 换号耗尽时的终态错误由调用方用 writeConcurrencySlotExhausted 写出，
-		// 与既有出口逐字节一致（503 + 同一文案 + 同一 code）。
-		// 标记「本次请求已经等过一次且没等到」：后续候选直接换，不再排队等待。
-		markConcurrencySlotWaitExhausted(c)
-		return nil, openAISlotAcquireSlotFull
-	}
-
-	// Slot acquired: no longer waiting in queue.
-	releaseWait()
-	// 分组利润控制：WaitPlan 排队成功后终检。排队期间账号倍率
-	// 可能上调，越线则释放槽位交由调用方排除重选，不绑定粘连。
-	latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
-	if vetoed {
-		if accountReleaseFunc != nil {
-			accountReleaseFunc()
-		}
-		reqLog.Debug("openai.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
-		return nil, openAISlotAcquireProfitVetoed
-	}
-	account = latest
-	selection.Account = latest
-	if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, groupID, sessionHash, account.ID); err != nil {
-		reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-	}
-	if handle := newTransferableRelease(ctx, "account_slot", accountReleaseFunc); handle != nil {
-		trackTransferableSlot(c, cursorSlotHandleAccountKey, handle)
-		return handle.Release, openAISlotAcquireOK
-	}
-	return nil, openAISlotAcquireOK
+	// 槽满即分流（2026-11-20 用户裁定）：组内还有候选时立即换号，不在满载账号上排队等待。
+	// 排队成功的旧路径（AcquireAccountSlotWithWaitTimeout 及其后的终检/绑定/转交）与
+	// 快速抢槽路径（fastAcquired 分支）语义重复，删除后由调用方循环排除该账号并换下一个候选。
+	return nil, openAISlotAcquireSlotFull
 }
 
 // ResponsesWebSocket handles OpenAI Responses API WebSocket ingress endpoint

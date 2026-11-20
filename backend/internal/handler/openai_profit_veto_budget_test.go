@@ -9,9 +9,9 @@ import (
 // TestRecordOpenAIProfitVetoBounded 钉死 OpenAI 侧选号循环的利润否决预算：
 // 账号被加入排除集，且第 maxProfitVetoAttempts 次否决返回 false 要求终止。
 //
-// 上限是必需的：acquireResponsesAccountSlot 的 WaitPlan 分支先阻塞排队
-// （sticky 45s / fallback 30s）拿到槽位才做利润终检，无上限重选会把单次请求
-// 的延迟放大到 N × WaitPlan.Timeout。
+// 上限是必需的：Responses 现在是「选号 → 立即快速抢槽 → 抢槽成功才做利润终检，
+// 抢不到即换号」，不再阻塞排队（WaitPlan 路径已删除）。但每轮抢槽与利润终检
+// 仍有开销，无上限重选会把单次请求放大到 N 次抢槽/否决，故须用否决预算封顶。
 func TestRecordOpenAIProfitVetoBounded(t *testing.T) {
 	failed := make(map[int64]struct{})
 	count := 0

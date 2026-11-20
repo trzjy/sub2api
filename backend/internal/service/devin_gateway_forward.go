@@ -550,6 +550,11 @@ streamLoop:
 						}
 						return s.handleErrorResponse(ctx, errResp, c, account, payload, upstreamModel)
 					}
+					// 响应已写出，无法换号；额度耗尽仍是账号级事实，必须停调，
+					// 让后续请求不再命中该账号（恢复由恢复探针判定）。
+					if isDevinUpstreamQuotaExhausted(account, payload) {
+						s.parkDevinQuotaExhausted(ctx, account)
+					}
 					opsMsg := sanitizeUpstreamErrorMessage(msg)
 					if opsMsg == "" {
 						opsMsg = "devin upstream trailer error: " + code

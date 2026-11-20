@@ -94,6 +94,8 @@ var probeRecoverableMarkers = []string{
 	// cursor Connect 会话型 / OpenAI 兼容型账号的探针恢复 marker（CURSOR-PROBE-001-A1）。
 	// 单加一项，全平台共用的 parseHealthBreakerState / isHealthBreakerTrip 一行不改。
 	cursorAccountHealthBreakerMarker,
+	// Devin 上游额度耗尽停调的探针恢复标记，额度恢复后探测成功可提前解除停调。
+	devinUpstreamQuotaExhaustedMarker,
 }
 
 // accountHealthProbeRepository is the narrow repository surface the recovery probe
@@ -700,6 +702,9 @@ func (p *AccountHealthRecoveryProbeService) probeRetryInterval() time.Duration {
 // isQuotaExhaustedTrip 判定一次可探测停调是否属 429/额度耗尽类（慢类，长间隔补探）。
 // 健康熔断仅把 429/500/503/504 计入（openai_apikey_health_breaker.go），401 冷却与
 // oauth401/pool401 的 StatusCode=401 均不属慢类，保持秒级现状。
+// 除 429 外，Devin 额度耗尽停调（HTTP 200 + trailer error，MatchedKeyword 为
+// devinUpstreamQuotaExhaustedMarker）同样归入慢类：其本质是上游额度耗尽，必须走
+// 5 分钟额度补探节奏，避免对真实对话探针做 5 秒级高频重试而持续消耗上游额度。
 func (p *AccountHealthRecoveryProbeService) isQuotaExhaustedTrip(acc *Account) bool {
 	if acc == nil {
 		return false
@@ -708,7 +713,12 @@ func (p *AccountHealthRecoveryProbeService) isQuotaExhaustedTrip(acc *Account) b
 	if !ok || state == nil {
 		return false
 	}
-	return state.StatusCode == http.StatusTooManyRequests
+	if state.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	// Devin 用 HTTP 200 + trailer error 表达额度耗尽；该停调同样属慢类，
+	// 必须走 5 分钟额度补探节奏，避免对真实对话探针做 5 秒级高频重试。
+	return state.MatchedKeyword == devinUpstreamQuotaExhaustedMarker
 }
 
 // probeIntervalFromSettings 解析探测 sweep 间隔（AC-C1：旧默认 60s → 15s）。
