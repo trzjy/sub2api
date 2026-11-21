@@ -573,15 +573,6 @@ func (s *OpenCodeGoUsageService) SetAutoRefresh(ctx context.Context, accountID i
 }
 
 func (s *OpenCodeGoUsageService) Refresh(ctx context.Context, accountID int64) (*OpenCodeGoUsageState, error) {
-	// 批4：手动刷新与周期 RunDue 走同一把账号锁（外审 #4）；争锁则以明确错误拒绝。
-	release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
-	if lockErr != nil {
-		return nil, lockErr
-	}
-	if !ok {
-		return nil, ErrRecoveryProbeAccountBusy
-	}
-	defer release()
 	settings, err := s.GetSettings(ctx)
 	if err != nil {
 		return nil, err

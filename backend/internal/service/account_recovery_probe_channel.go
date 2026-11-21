@@ -14,8 +14,6 @@ const (
 	accountRecoveryLeaderLockKey = "recovery:probe:leader"
 	// accountRecoveryLeaderTTL 覆盖单轮预算（300s）+ 余量。
 	accountRecoveryLeaderTTL = 360 * time.Second
-	// accountRecoveryProbeLockTTL 覆盖最慢组合：cursor 额度查询 180s + 数据面 45s。
-	accountRecoveryProbeLockTTL = 240 * time.Second
 	// accountRecoveryRoundBudget 是单轮墙钟预算；用完停止派发新探测。
 	accountRecoveryRoundBudget = 300 * time.Second
 	// accountRecoveryLockContentionDelay 是争锁失败时 probe_due_at 的确定重排间隔。
@@ -23,6 +21,21 @@ const (
 	// accountRecoveryChannelConcurrency 是新通道的并发上限。
 	accountRecoveryChannelConcurrency = 8
 )
+
+// accountRecoveryProbeLockTTL 覆盖单账号临界区上界并留余量：
+//   - cursor 额度查询 225s；
+//   - 余额快照持久化；
+//   - CodeBuddy / Web Console 探测 TimeoutSeconds + 10s（HTTP grace）。
+//
+// 默认 330s，可由装配期推导通过 SetRecoveryAccountLockTTL 覆盖。
+var accountRecoveryProbeLockTTL = 330 * time.Second
+
+// SetRecoveryAccountLockTTL 在 d>0 时覆盖账号探测锁 TTL，供装配期推导注入。
+func SetRecoveryAccountLockTTL(d time.Duration) {
+	if d > 0 {
+		accountRecoveryProbeLockTTL = d
+	}
+}
 
 // RunRecoveryChannel 是批1 的通用恢复通道：按 probe_due_at 取候选，逐账号加锁，
 // 按 extra 分量执行额度/实际调用探测，成功后按分量代际清除。
@@ -70,6 +83,7 @@ func (p *AccountHealthRecoveryProbeService) RunRecoveryChannel(ctx context.Conte
 		if len(sem) >= limit {
 			select {
 			case <-roundCtx.Done():
+				continue
 			case sem <- struct{}{}:
 			}
 		} else {

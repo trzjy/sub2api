@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,34 +29,6 @@ func (r *startupCountingRepo) ListActive(_ context.Context) ([]Account, error) {
 	return nil, nil
 }
 
-// startupTestLock 是测试内的可获取 LeaderLockCache（单实例）。
-type startupTestLock struct {
-	mu   sync.Mutex
-	held map[string]string
-}
-
-func (l *startupTestLock) TryAcquireLeaderLock(_ context.Context, key, owner string, _ time.Duration) (bool, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.held == nil {
-		l.held = map[string]string{}
-	}
-	if cur, ok := l.held[key]; ok && cur != owner {
-		return false, nil
-	}
-	l.held[key] = owner
-	return true, nil
-}
-
-func (l *startupTestLock) ReleaseLeaderLock(_ context.Context, key, owner string) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.held[key] == owner {
-		delete(l.held, key)
-	}
-	return nil
-}
-
 func newStartupTestService(repo AccountRepository, interval time.Duration) *CNProviderBalanceCheckService {
 	cfg := &config.Config{}
 	cfg.Gateway.CNProviders.BalanceCheckEnabled = true
@@ -77,7 +48,6 @@ func newStartupTestService(repo AccountRepository, interval time.Duration) *CNPr
 func installStartupTestRegistry(t *testing.T) *BackgroundTickRegistry {
 	t.Helper()
 	r := NewBackgroundTickRegistry()
-	r.SetLeader(&startupTestLock{}, "startup-test")
 	prev := SetDefaultBackgroundTickRegistry(r)
 	t.Cleanup(func() { SetDefaultBackgroundTickRegistry(prev) })
 	return r

@@ -19,9 +19,6 @@ import (
 // tryAcquireSingletonLeaderLock 的 PG 兜底，也不沿用“无协调即放行”。
 var ErrRecoveryLockUnavailable = errors.New("recovery probe lock backend unavailable")
 
-// ErrRecoveryProbeAccountBusy 表示该账号正被另一条探测路径持锁，手动入口本轮拒绝。
-var ErrRecoveryProbeAccountBusy = errors.New("account recovery probe already in progress")
-
 var recoveryLockOwnerSeq atomic.Uint64
 
 // newRecoveryLockOwner 生成跨实例唯一的锁持有者标识。

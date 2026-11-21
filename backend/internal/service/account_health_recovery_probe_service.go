@@ -34,6 +34,11 @@ const accountHealthProbeCandidateLimit = 200
 // 探测仍设硬上限 20。
 const devinProbeMaxCandidates = 20
 
+// accountRecoveryDevinMarkerBudget 是 marker sweep 在单账号锁临界区内跑 Devin 探针的
+// 串行预算：最多约 20 个模型 × 每个约 20s ≈ 400s。账号锁必须覆盖完整单账号临界区，
+// 故 TTL 至少取本预算 + 30s 余量，避免探针仍在跑时锁提前过期导致临界区重叠。
+const accountRecoveryDevinMarkerBudget = 400 * time.Second
+
 // accountHealthProbeBurstConcurrencyLimit 是补探 burst 的在途探测并发上限（进程本地，
 // 单实例生效；多实例部署时不约束合计探测量，见方案 §5 风险 6）。cursor 探针是真实
 // AgentRun 出站（预算 ≥256），单轮补探若一次入队数十账号（候选上限 200）会瞬间打出
@@ -245,8 +250,23 @@ func (p *AccountHealthRecoveryProbeService) SetRecoveryProbeDependencies(
 	// 批4：统一 tick 注册表复用同一把 Redis 锁（跨副本 leader），六源单账号探测点
 	// 复用同一把账号锁（recovery:probe:<id>）。lock 为 nil 时注册表失败关闭、账号锁
 	// 退回无锁执行（与批 1 单实例语义一致）。
-	DefaultBackgroundTickRegistry().SetLeader(lock, newRecoveryLockOwner())
 	SetRecoveryAccountLockCache(lock)
+
+	// 账号锁 TTL 按本轮装配的实际预算推导：默认 330s 覆盖 cursor 额度查询 225s；
+	// Web Console 探测预算为 TimeoutSeconds + 10s（HTTP grace），再加 30s 余量；
+	// Devin marker sweep 串行约 20 模型 × ~20s ≈ 400s，同样加 30s 余量。
+	// 取三者较大值，避免配置放大预算时锁提前过期导致同账号临界区重叠。
+	if p.cfg != nil {
+		webBudget := time.Duration(p.cfg.WebQuotaWorker.TimeoutSeconds)*time.Second + 10*time.Second
+		ttl := 330 * time.Second
+		if margin := webBudget + 30*time.Second; margin > ttl {
+			ttl = margin
+		}
+		if margin := accountRecoveryDevinMarkerBudget + 30*time.Second; margin > ttl {
+			ttl = margin
+		}
+		SetRecoveryAccountLockTTL(ttl)
+	}
 }
 
 func (p *AccountHealthRecoveryProbeService) SetFreshnessAlertService(svc *FreshnessAlertService) {
@@ -276,11 +296,10 @@ func NewAccountHealthRecoveryProbeService(
 	}
 }
 
-// Start launches the probe sweep loop. The loop runs continuously and re-reads
-// the probe switch on every tick (see RunOnce's per-class enable checks), so toggling
-// the switch in admin settings takes effect within one interval (<= IntervalSeconds,
-// default 15s, AC-C1: 旧 60s) without a process restart. It is safe to call multiple
-// times (only the first effective start spawns a goroutine) and terminates via Stop.
+// Start 把健康探测登记为统一 tick 注册表的两个周期任务（marker sweep 与通用恢复通道），
+// 由注册表唯一的自持 ticker 按配置的 interval 驱动；本服务不再自持 ticker。RunOnce 每轮
+// 重读探测开关（见其 per-class enable 检查），故后台切换开关在一个 interval 内生效，无需
+// 重启进程。重复调用安全（注册表按任务名幂等、仅首次有效启动），通过 Stop 终止。
 func (p *AccountHealthRecoveryProbeService) Start(ctx context.Context) {
 	// settingService 为 nil 时失败关闭安全返回（不启动探测循环），与旧 probeEnabled
 	// 的 `p == nil || p.settingService == nil → return` 同款：重构使能门禁时该保护被
@@ -303,41 +322,33 @@ func (p *AccountHealthRecoveryProbeService) Start(ctx context.Context) {
 	interval := p.probeIntervalFromSettings(settings, serr)
 
 	p.stopCh = make(chan struct{})
-	// 捕获当时有效的 stop channel 引用（AC-G2R-3）：主循环全程使用此局部引用，不再每轮
-	// 重读 p.stopCh 字段。Stop 在锁内置 nil 仅用于防止新等待者读到已关闭的 channel，而
-	// 已启动的主循环持有本处捕获的引用，故 Stop 置 nil 后运行中循环仍能收到关闭信号。
-	stopCh := p.stopCh
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
-		// 批4：唯一 tick 的驱动分辨率必须不慢于六源最短 cadence；否则健康探测间隔
-		// 配到 600s 时，1 分钟任务会被粗化到约 10 分钟。健康探测自身仍按配置的
-		// probe interval 运行（下方 elapsed 门控），ticker 只是更细的驱动基频。
-		base := backgroundTickBaseInterval(interval, DefaultBackgroundTickRegistry().MinCadence())
-		ticker := time.NewTicker(base)
-		defer ticker.Stop()
-		logger.L().Info("openai.apikey_health_probe_started",
-			zap.Duration("interval", interval), zap.Duration("tick_base", base))
-		// 启动时立即派发一次，保证 immediate 首轮任务不必等第一个 tick。
-		DefaultBackgroundTickRegistry().DispatchDue(ctx)
-		lastProbe := time.Now()
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if time.Since(lastProbe) >= interval {
-					lastProbe = time.Now()
-					p.RunOnce(ctx)
-					p.RunRecoveryChannel(ctx)
-				}
-				// 批4：六源周期调度，按唯一 tick 的细分辨率派发（DispatchDue 立即返回）。
-				DefaultBackgroundTickRegistry().DispatchDue(ctx)
-			}
-		}
-	}()
+
+	// 批4 B 卡：健康探测不再自持 ticker，改为向统一 tick 注册表登记两个周期任务，
+	// 由注册表唯一的自持 ticker 驱动。两个任务自身已持有内部租约/预算。
+	reg := DefaultBackgroundTickRegistry()
+	reg.Register(backgroundTickTask{
+		name:     "health_marker_sweep",
+		cadence:  interval,
+		maxRun:   accountHealthProbeDataPlaneTimeout,
+		firstRun: tickFirstRunAfterCadence,
+		run: func(c context.Context) error {
+			p.RunOnce(c)
+			return nil
+		},
+	})
+	reg.Register(backgroundTickTask{
+		name:     "health_recovery_channel",
+		cadence:  interval,
+		maxRun:   accountRecoveryRoundBudget,
+		firstRun: tickFirstRunAfterCadence,
+		run: func(c context.Context) error {
+			p.RunRecoveryChannel(c)
+			return nil
+		},
+	})
+	reg.Start(ctx)
+	logger.L().Info("openai.apikey_health_probe_started",
+		zap.Duration("interval", interval))
 }
 
 // Stop terminates the probe loop if running. It must be called from the process
@@ -365,6 +376,17 @@ func (p *AccountHealthRecoveryProbeService) Stop() {
 	// 不受此处置 nil 影响，仍能由下方 close 唤醒。
 	p.stopCh = nil
 	p.startMu.Unlock()
+	// 批4 B 卡 / B4V2-N R3 must_fix：先停掉统一 tick 注册表的自持 ticker（Stop 立即
+	// 取消驱动 ctx 并等待 tick goroutine 退出，返回后不再有新的自动派发），再摘除本
+	// 服务的两个任务（Unregister 取消任务 ctx 并有界排空在途 registry run）。三者均
+	// 幂等。必须在 close(stopCh)/wg.Wait 之前完成：否则 stopCh 关闭与 wg.Wait 期间
+	// registry 仍按 15s cadence 派发已到期健康任务（其 ctx 与 stopCh 无关），借
+	// p.RunOnce/RunRecoveryChannel 触发新补探；补探信号须待派发窗口关闭、在途 run
+	// 排空后才可安全关闭。
+	reg := DefaultBackgroundTickRegistry()
+	reg.Stop()
+	reg.Unregister("health_marker_sweep")
+	reg.Unregister("health_recovery_channel")
 	if stopCh != nil {
 		// 拿到关闭权的调用在锁外 close（不持锁关闭），随后等待 goroutine 退出。
 		close(stopCh)

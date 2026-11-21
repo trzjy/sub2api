@@ -76,22 +76,20 @@ func TestBackgroundTickRegistryRegisterIdempotent(t *testing.T) {
 	}
 }
 
+// 去多副本后 registry 不再依赖 leader 后端：无 leader 也必须直接执行 run。
 func TestBackgroundTickRegistryFailClosedWithoutLeader(t *testing.T) {
 	r := newTestRegistry(nil)
 	var calls atomic.Int32
 	r.Register(backgroundTickTask{name: "a", cadence: time.Minute, maxRun: time.Second,
 		firstRun: tickFirstRunImmediate, run: func(context.Context) error { calls.Add(1); return nil }})
 	r.DispatchDue(context.Background())
-	time.Sleep(80 * time.Millisecond)
-	if calls.Load() != 0 {
-		t.Fatalf("run called %d times without leader backend; want 0 (fail closed)", calls.Load())
+	if !waitCond(t, func() bool { return calls.Load() == 1 }, time.Second) {
+		t.Fatalf("run did not execute without leader backend; calls=%d", calls.Load())
 	}
 }
 
 func TestBackgroundTickRegistryImmediateFirstRun(t *testing.T) {
-	lock := &tickFakeLock{}
 	r := newTestRegistry(nil)
-	r.SetLeader(lock, "owner-test")
 	var calls atomic.Int32
 	r.Register(backgroundTickTask{name: "a", cadence: time.Minute, maxRun: time.Second,
 		firstRun: tickFirstRunImmediate, run: func(context.Context) error { calls.Add(1); return nil }})
@@ -102,12 +100,10 @@ func TestBackgroundTickRegistryImmediateFirstRun(t *testing.T) {
 }
 
 func TestBackgroundTickRegistryAfterCadence(t *testing.T) {
-	lock := &tickFakeLock{}
 	base := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	var nowVal atomic.Value
 	nowVal.Store(base)
 	r := newTestRegistry(func() time.Time { return nowVal.Load().(time.Time) })
-	r.SetLeader(lock, "owner-test")
 	var calls atomic.Int32
 	r.Register(backgroundTickTask{name: "a", cadence: time.Minute, maxRun: time.Second,
 		firstRun: tickFirstRunAfterCadence, run: func(context.Context) error { calls.Add(1); return nil }})
@@ -126,9 +122,7 @@ func TestBackgroundTickRegistryAfterCadence(t *testing.T) {
 }
 
 func TestBackgroundTickRegistryDispatchNonBlocking(t *testing.T) {
-	lock := &tickFakeLock{}
 	r := newTestRegistry(nil)
-	r.SetLeader(lock, "owner-test")
 	block := make(chan struct{})
 	defer close(block)
 	r.Register(backgroundTickTask{name: "a", cadence: time.Minute, maxRun: time.Second,
@@ -144,9 +138,7 @@ func TestBackgroundTickRegistryDispatchNonBlocking(t *testing.T) {
 }
 
 func TestBackgroundTickRegistrySingleRound(t *testing.T) {
-	lock := &tickFakeLock{}
 	r := newTestRegistry(nil)
-	r.SetLeader(lock, "owner-test")
 	block := make(chan struct{})
 	var calls atomic.Int32
 	r.Register(backgroundTickTask{name: "a", cadence: time.Minute, maxRun: time.Second,
@@ -166,9 +158,7 @@ func TestBackgroundTickRegistrySingleRound(t *testing.T) {
 }
 
 func TestBackgroundTickRegistryUnregister(t *testing.T) {
-	lock := &tickFakeLock{}
 	r := newTestRegistry(nil)
-	r.SetLeader(lock, "owner-test")
 	var calls atomic.Int32
 	r.Register(backgroundTickTask{name: "a", cadence: time.Minute, maxRun: time.Second,
 		firstRun: tickFirstRunImmediate, run: func(context.Context) error { calls.Add(1); return nil }})
@@ -181,6 +171,44 @@ func TestBackgroundTickRegistryUnregister(t *testing.T) {
 	if r.RegisteredCount() != 0 {
 		t.Fatalf("RegisteredCount=%d want 0", r.RegisteredCount())
 	}
+}
+
+func TestBackgroundTickRegistryUnregisterDrainsInFlight(t *testing.T) {
+	r := newTestRegistry(nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	// run 占用在途执行直到 ctx 取消或 release。
+	r.Register(backgroundTickTask{name: "a", cadence: time.Minute, maxRun: time.Second,
+		firstRun: tickFirstRunImmediate,
+		run: func(ctx context.Context) error {
+			close(started)
+			select {
+			case <-ctx.Done():
+			case <-release:
+			}
+			return nil
+		}})
+	r.DispatchDue(context.Background())
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight run did not start")
+	}
+	// Unregister 应取消 ctx 并在远小于有界上限内排空返回，而不是无界等待。
+	done := make(chan struct{})
+	go func() {
+		r.Unregister("a")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Unregister blocked instead of bounded drain")
+	}
+	if r.RegisteredCount() != 0 {
+		t.Fatalf("RegisteredCount=%d want 0", r.RegisteredCount())
+	}
+	close(release) // 幂等清理：run 已因 ctx 取消退出
 }
 
 func TestWithRecoveryAccountProbeLockSkipsWhenHeld(t *testing.T) {
@@ -206,29 +234,73 @@ func TestWithRecoveryAccountProbeLockSkipsWhenHeld(t *testing.T) {
 	}
 }
 
-// 外审第3轮：健康探测间隔可配到 600s 时，唯一 tick 的驱动分辨率不得慢于六源最短
-// cadence（1 分钟），否则 1 分钟任务会退化为约 10 分钟。
-func TestBackgroundTickBaseInterval(t *testing.T) {
-	if got := backgroundTickBaseInterval(600*time.Second, time.Minute); got != time.Minute {
-		t.Fatalf("probe=600s cadence=1m => base=%s want 1m", got)
+func TestBackgroundTickRegistryStartStopIdempotent(t *testing.T) {
+	r := newTestRegistry(nil)
+	var calls atomic.Int32
+	// cadence 远小于 tick 间隔：每个自持 tick 都应到期一次。
+	r.Register(backgroundTickTask{name: "a", cadence: 10 * time.Millisecond, maxRun: time.Second,
+		firstRun: tickFirstRunImmediate,
+		run:      func(context.Context) error { calls.Add(1); return nil }})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 多次 Start 必须幂等：只启动一个驱动循环。
+	r.Start(ctx)
+	r.Start(ctx)
+	r.Start(ctx)
+
+	// 启动先派发一次。
+	if !waitCond(t, func() bool { return calls.Load() == 1 }, time.Second) {
+		t.Fatalf("Start initial dispatch failed; calls=%d", calls.Load())
 	}
-	if got := backgroundTickBaseInterval(15*time.Second, time.Minute); got != 15*time.Second {
-		t.Fatalf("probe=15s cadence=1m => base=%s want 15s", got)
+	// 跨过 tick 间隔后自持 ticker 应继续派发。
+	if !waitCond(t, func() bool { return calls.Load() >= 2 }, backgroundTickDispatchInterval*3) {
+		t.Fatalf("self-driven ticker did not dispatch; calls=%d", calls.Load())
 	}
-	if got := backgroundTickBaseInterval(0, 0); got != 15*time.Second {
-		t.Fatalf("zero => base=%s want 15s", got)
+
+	// Stop 幂等，且停止后不再有自动派发（非幂等泄漏的 goroutine 会在此暴露）。
+	r.Stop()
+	r.Stop()
+	before := calls.Load()
+	time.Sleep(backgroundTickDispatchInterval * 2)
+	if after := calls.Load(); after != before {
+		t.Fatalf("dispatch continued after Stop: before=%d after=%d", before, after)
 	}
 }
 
-func TestBackgroundTickRegistryMinCadence(t *testing.T) {
+func TestBackgroundTickRegistryStartStopRestart(t *testing.T) {
 	r := newTestRegistry(nil)
-	r.Register(backgroundTickTask{name: "a", cadence: 5 * time.Minute, run: func(context.Context) error { return nil }})
-	r.Register(backgroundTickTask{name: "b", cadence: time.Minute, run: func(context.Context) error { return nil }})
-	if got := r.MinCadence(); got != time.Minute {
-		t.Fatalf("MinCadence=%s want 1m", got)
+	var calls atomic.Int32
+	// cadence 远小于 tick 间隔：每个自持 tick 都应到期一次。
+	r.Register(backgroundTickTask{name: "a", cadence: 10 * time.Millisecond, maxRun: time.Second,
+		firstRun: tickFirstRunImmediate,
+		run:      func(context.Context) error { calls.Add(1); return nil }})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 第一次启动：先立即派发一次，随后自持 ticker 持续派发。
+	r.Start(ctx)
+	if !waitCond(t, func() bool { return calls.Load() >= 1 }, time.Second) {
+		t.Fatalf("first Start initial dispatch failed; calls=%d", calls.Load())
 	}
-	r.Unregister("b")
-	if got := r.MinCadence(); got != 5*time.Minute {
-		t.Fatalf("MinCadence after unregister=%s want 5m", got)
+
+	// 停止：Stop 取消并等待 tick goroutine 退出后不再有自动派发。
+	r.Stop()
+	// Stop 仅等待 tick goroutine，不停在途 task goroutine；稍等其归零后取稳定基线。
+	time.Sleep(50 * time.Millisecond)
+	stopped := calls.Load()
+	time.Sleep(backgroundTickDispatchInterval * 2)
+	if after := calls.Load(); after != stopped {
+		t.Fatalf("dispatch continued after Stop: before=%d after=%d", stopped, after)
 	}
+
+	// 再次启动：应重建 ticker 并重新派发（旧实现因 stopped 门闩会停在此处）。
+	r.Start(ctx)
+	if !waitCond(t, func() bool { return calls.Load() > stopped }, time.Second) {
+		t.Fatalf("Start after Stop did not re-dispatch; stopped=%d now=%d", stopped, calls.Load())
+	}
+	// 连续第二次 Stop 仍幂等。
+	r.Stop()
+	r.Stop()
 }

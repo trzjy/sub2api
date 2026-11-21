@@ -11,30 +11,29 @@ import (
 
 // 停调恢复整改 批4：六源探测 tick 收编。
 //
-// 全仓「探测域」只保留一处周期 ticker —— AccountHealthRecoveryProbeService.Start
-// 的主循环。它每 tick 调一次本注册表的 DispatchDue；六源（CN 额度生命周期、余额快照、
+// 全仓「探测域」只保留一处周期 ticker —— 本注册表自持的唯一 ticker，由
+// BackgroundTickRegistry.Start 启动并按 backgroundTickDispatchInterval 间隔调用
+// DispatchDue；健康恢复服务不再自持 ticker 主循环。六源（CN 额度生命周期、余额快照、
 // CN provider、CodeBuddy、Ollama 周期 RunDue、OpenCode Go、Upstream Billing）在各自
-// Start() 里向注册表登记，不再自持 ticker。
+// Start() 里向注册表登记，由该唯一 ticker 统一驱动，不再自持 ticker。Start/Stop 幂等，
+// Stop 后可再次 Start 重建 ticker 并恢复派发。
 //
 // 设计约束（对应 proposal 外审 6 条 must_fix）：
-//   - DispatchDue 非阻塞：只做到期判定并为每个到期任务起独立 goroutine，不阻塞健康恢复主循环。
+//   - DispatchDue 非阻塞：只做到期判定并为每个到期任务起独立 goroutine，不阻塞注册表 ticker。
 //   - 不引入硬 deadline：只提供可取消的 roundCtx（仅进程关停/Stop 取消），各任务沿用
-//     自身既有内部预算；绝不把 leader 租约当业务 timeout。
+//     自身既有内部预算；不设置统一的业务 timeout。
 //   - Register 按 name 幂等；Unregister 供各服务 Stop() 关闭派发窗口。
 //   - nextDue 用固定 cadence 锚点（不按完成时间重算）；运行中到期记为 pending，
 //     完成后下一 tick 立即补跑。
-//   - 跨副本：每个任务由持有该任务 leader 锁的机器执行；锁后端不可用时不执行（失败关闭）。
+//   - 去多副本：每个到期任务直接执行 run，不再获取跨副本 leader 租约。
 //   - 逐任务独立执行（互不阻塞），避免长周期任务饿死短周期任务。
 const (
-	// backgroundTickLeaderKeyPrefix 是逐任务跨副本 leader 键前缀（键 = 前缀 + 任务名）。
-	//
-	// 采用逐任务 leader 而非「整轮单 leader + 等待全部任务完成」：后者会让一个 5 分钟
-	// 长任务（CN 生命周期/CodeBuddy）把 1 分钟短任务（Ollama/OpenCode/Upstream）饿死
-	// 数分钟。逐任务 leader 使每个任务按自身 cadence 独立执行、互不阻塞，同时仍满足
-	// 「跨副本加锁去重 + 失败关闭」。
-	backgroundTickLeaderKeyPrefix = "background:tick:leader:"
-	// backgroundTickLeaseMargin 是逐任务 leader 租约在任务 maxRun 之上的余量。
-	backgroundTickLeaseMargin = 60 * time.Second
+	// backgroundTickDispatchInterval 是注册表自持唯一 ticker 的派发间隔。注册表在无外部
+	// 探测主循环驱动时按此间隔自行调用 DispatchDue（1 秒，不慢于最短 1 分钟 cadence）。
+	backgroundTickDispatchInterval = time.Second
+	// backgroundTickDrainMargin 是 Unregister 有界排空时在任务 maxRun 之上的等待余量，
+	// 避免忽略 ctx 的在途任务阻塞关停。
+	backgroundTickDrainMargin = 60 * time.Second
 )
 
 type backgroundTickFirstRun int
@@ -50,10 +49,10 @@ const (
 
 // backgroundTickTask 是一个被注册的周期任务定义。
 //
-// maxRun 是该任务单次运行的最长墙钟（用于逐任务 leader 租约 = maxRun + 余量，以及
-// 文档），**不作为硬 deadline**：任务的真实取消边界由任务自身既有预算或进程关停决定。
-// cadence 是该任务的调度周期；唯一 tick 的驱动分辨率必须不慢于最短 cadence
-// （见 backgroundTickBaseInterval）。
+// maxRun 是该任务单次运行的最长墙钟估计，用于 Unregister 有界排空的等待上限
+// （maxRun + backgroundTickDrainMargin），**不作为硬 deadline**：任务的真实取消
+// 边界由任务自身既有预算或进程关停决定。
+// cadence 是该任务的调度周期；唯一 tick 的驱动分辨率固定为 backgroundTickDispatchInterval。
 type backgroundTickTask struct {
 	name     string
 	cadence  time.Duration
@@ -71,8 +70,8 @@ type registeredTickTask struct {
 	registeredAt time.Time
 
 	// ctx/cancel 是该任务的生命周期：Unregister 时 cancel，使仍持有该 ctx 的在途
-	// run 能尽快返回；wg 统计在途 run，Unregister 等待其归零，保证 service.Stop()
-	// 返回后不再遗留该服务的探测任务（外审 #2）。
+	// run 能尽快返回；wg 统计在途 run，Unregister 有界等待其归零（超时告警），
+	// 避免忽略 ctx 的任务让 service.Stop() 无限等待（外审 #2）。
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -85,8 +84,12 @@ type BackgroundTickRegistry struct {
 	order []string
 	now   func() time.Time
 
-	lock  LeaderLockCache
-	owner string
+	// startMu 保护自持 ticker 的启停生命周期；started 使 Start/Stop 幂等，
+	// Stop 清零 started 以支持再次 Start 重建 ticker（不保留永久 stopped 门闩）。
+	startMu    sync.Mutex
+	started    bool
+	tickCancel context.CancelFunc
+	tickWG     sync.WaitGroup
 }
 
 // NewBackgroundTickRegistry 构造注册表。
@@ -103,7 +106,7 @@ var defaultBackgroundTicks = NewBackgroundTickRegistry()
 func DefaultBackgroundTickRegistry() *BackgroundTickRegistry { return defaultBackgroundTicks }
 
 // SetDefaultBackgroundTickRegistry 替换进程级默认注册表并返回旧值（测试用；
-// 生产仅在装配期经 SetRecoveryProbeDependencies 设置 leader，不替换实例）。
+// 生产不替换实例）。
 func SetDefaultBackgroundTickRegistry(r *BackgroundTickRegistry) *BackgroundTickRegistry {
 	prev := defaultBackgroundTicks
 	if r == nil {
@@ -123,15 +126,64 @@ func (r *BackgroundTickRegistry) SetNow(now func() time.Time) {
 	r.mu.Unlock()
 }
 
-// SetLeader 注入跨副本 leader 锁（复用批 1 的 Redis-only 锁）。
-func (r *BackgroundTickRegistry) SetLeader(lock LeaderLockCache, owner string) {
+// Start 启动注册表自持的唯一 ticker（幂等）。首次调用起一个 goroutine：先立即
+// DispatchDue 一次，随后每 backgroundTickDispatchInterval 派发一次，直到 Stop 或
+// 传入 ctx 取消。重复调用不产生额外 goroutine；Stop 之后可再次 Start 重建 ticker
+// 并恢复派发。
+func (r *BackgroundTickRegistry) Start(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	r.mu.Lock()
-	r.lock = lock
-	r.owner = owner
-	r.mu.Unlock()
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	if r.started {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.started = true
+	tickCtx, cancel := context.WithCancel(ctx)
+	r.tickCancel = cancel
+	r.tickWG.Add(1)
+	go func() {
+		defer r.tickWG.Done()
+		ticker := time.NewTicker(backgroundTickDispatchInterval)
+		defer ticker.Stop()
+		// 启动先派发一次，随后按固定间隔派发。
+		r.DispatchDue(tickCtx)
+		for {
+			select {
+			case <-tickCtx.Done():
+				return
+			case <-ticker.C:
+				r.DispatchDue(tickCtx)
+			}
+		}
+	}()
+}
+
+// Stop 停止自持 ticker（幂等）：取消驱动 ctx 并等待 tick goroutine 退出。返回后
+// 不再有新的自动派发；重复调用安全。Stop 清零 started，使随后再次 Start 能重建
+// ticker 并恢复派发。
+func (r *BackgroundTickRegistry) Stop() {
+	if r == nil {
+		return
+	}
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	if !r.started {
+		return
+	}
+	r.started = false
+	if r.tickCancel != nil {
+		r.tickCancel()
+		r.tickCancel = nil
+	}
+	// 持 startMu 等待旧 tick goroutine 完全退出：确保并发 Start 不会在旧 Wait 仍
+	// 进行时 Add 到同一 tickWG（WaitGroup 计数归零后不可再并发 Add），也保证新
+	// ticker 不会被上一次 Stop 的 Wait 顺带等待。tick goroutine 不取 startMu，无死锁。
+	r.tickWG.Wait()
 }
 
 // Register 登记（或更新）一个周期任务。按 name 幂等：重复 Start() 不产生第二条，
@@ -168,8 +220,8 @@ func (r *BackgroundTickRegistry) Register(task backgroundTickTask) {
 }
 
 // Unregister 移除一个任务（幂等）并与其在途执行建立关闭同步；供各服务 Stop()
-// 调用。返回前会 cancel 该任务 ctx 并等待在途 run 退出，保证 Stop() 返回后不再
-// 遗留该服务的探测任务。
+// 调用。返回前会 cancel 该任务 ctx 并有界等待在途 run 退出：最多等待
+// maxRun + backgroundTickDrainMargin，超时则告警返回，不无限阻塞关停。
 func (r *BackgroundTickRegistry) Unregister(name string) {
 	if r == nil || name == "" {
 		return
@@ -192,39 +244,27 @@ func (r *BackgroundTickRegistry) Unregister(name string) {
 	if t.cancel != nil {
 		t.cancel()
 	}
-	// 等待在途 run 退出（可能受自身内部预算约束，最多一个任务周期）。此后该任务
-	// 不会再被派发。
-	t.wg.Wait()
-}
-
-// MinCadence 返回当前已登记任务的最短 cadence（无任务返回 0）。唯一 tick 以其为
-// 分辨率上界，保证 1 分钟任务不会被更大的健康探测间隔（最长 600s）粗化。
-func (r *BackgroundTickRegistry) MinCadence() time.Duration {
-	if r == nil {
-		return 0
+	// 有界排空：在途 run 已无法再被派发（任务已移出表），只等其自然退出。
+	// DispatchDue 的 wg.Add 均在持锁期间完成，删除完成后不再有新的 Add，
+	// 故此处在锁外起 goroutine 等待不会与 Add 并发误用。
+	done := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		close(done)
+	}()
+	wait := t.task.maxRun + backgroundTickDrainMargin
+	if wait <= 0 {
+		wait = backgroundTickDrainMargin
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var min time.Duration
-	for _, t := range r.tasks {
-		if t.task.cadence > 0 && (min == 0 || t.task.cadence < min) {
-			min = t.task.cadence
-		}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		// 忽略 ctx 的在途任务（如先枚举再建预算 ctx 的 provider）可能不响应取消，
+		// 超时后不再等待，避免 service.Stop() 无限挂起。
+		logger.L().Warn("background_tick_stop_drain_timeout", zap.String("task", name))
 	}
-	return min
-}
-
-// backgroundTickBaseInterval 计算唯一 tick 的驱动间隔：在不慢于最短注册 cadence 的
-// 前提下，尽量沿用健康探测周期；无注册任务时沿用探测周期。
-func backgroundTickBaseInterval(probeInterval, minCadence time.Duration) time.Duration {
-	base := probeInterval
-	if base <= 0 {
-		base = 15 * time.Second
-	}
-	if minCadence > 0 && minCadence < base {
-		base = minCadence
-	}
-	return base
 }
 
 // RegisteredCount 返回当前已登记任务数（测试/观测用）。
@@ -245,16 +285,14 @@ func (r *BackgroundTickRegistry) nowLocked() time.Time {
 }
 
 // DispatchDue 由唯一 tick 每 tick 调用。立即返回，绝不阻塞调用方：只做到期判定并为
-// 每个到期任务起一个独立 goroutine（逐任务独立 leader + 独立生命周期），不同任务之间
-// 互不阻塞（避免长任务饿死短任务）。
+// 每个到期任务起一个独立 goroutine（独立生命周期），不同任务之间互不阻塞（避免长任务
+// 饿死短任务）。
 func (r *BackgroundTickRegistry) DispatchDue(ctx context.Context) {
 	if r == nil {
 		return
 	}
 	now := r.nowLocked()
 	r.mu.Lock()
-	lock := r.lock
-	owner := r.owner
 	var batch []*registeredTickTask
 	for _, name := range r.order {
 		t := r.tasks[name]
@@ -283,13 +321,13 @@ func (r *BackgroundTickRegistry) DispatchDue(ctx context.Context) {
 
 	for _, t := range batch {
 		t := t
-		go r.runTask(t, lock, owner)
+		go r.runTask(t)
 	}
 }
 
-// runTask 执行单个任务：先取该任务的跨副本 leader（TTL = maxRun + 余量），失败关闭；
-// 任务结束后无论成败都清 running（允许下一个 cadence 再次派发）。
-func (r *BackgroundTickRegistry) runTask(t *registeredTickTask, lock LeaderLockCache, owner string) {
+// runTask 直接执行单个任务（去多副本：不再获取跨副本 leader 租约）。任务结束后
+// 无论成败都清 running（允许下一个 cadence 再次派发）。
+func (r *BackgroundTickRegistry) runTask(t *registeredTickTask) {
 	defer t.wg.Done()
 	defer func() {
 		r.mu.Lock()
@@ -300,22 +338,11 @@ func (r *BackgroundTickRegistry) runTask(t *registeredTickTask, lock LeaderLockC
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if lock == nil {
-		// 失败关闭：无协调后端不执行，避免多副本重复探测。
-		return
-	}
-	key := backgroundTickLeaderKeyPrefix + t.task.name
-	ttl := t.task.maxRun + backgroundTickLeaseMargin
-	ok, err := tryAcquireRedisLeaderLock(ctx, lock, key, owner, ttl)
-	if err != nil || !ok {
-		if err != nil {
-			logger.L().Warn("background_tick_leader_unavailable",
-				zap.String("task", t.task.name), zap.Error(err))
-		}
-		return
-	}
-	defer releaseRecoveryLock(lock, key, owner)
+	r.executeTask(t, ctx)
+}
 
+// executeTask 执行单个 run，隔离 panic 并记录失败。
+func (r *BackgroundTickRegistry) executeTask(t *registeredTickTask, ctx context.Context) {
 	func() {
 		defer func() {
 			if rec := recover(); rec != nil {

@@ -232,9 +232,10 @@ func (s *CNProviderBalanceCheckService) Start() {
 	DefaultBackgroundTickRegistry().Register(backgroundTickTask{
 		name:    "cn_provider_balance",
 		cadence: s.interval,
-		// runOnce 的单轮预算上限为 300s（见 runOnce 内 timeout 的 300s clamp）；
-		// 逐任务租约 = maxRun + 60s 必须覆盖该上限，否则长轮次会被另一副本重复取得。
-		maxRun:   300 * time.Second,
+		// runOnce 单轮含两段串行预算：外层 ctx 的 300s clamp（见 runOnce 内 timeout）
+		// + Web 控制台探测链独立预算 cnBalanceWebConsoleBudgetCap（9min=540s）。
+		// 两者串行，maxRun 必须覆盖其和 300s+540s=840s，否则长轮次会被另一副本重复取得。
+		maxRun:   840 * time.Second,
 		firstRun: tickFirstRunAfterDelay,
 		delay:    delay,
 		run: func(context.Context) error {

@@ -464,15 +464,6 @@ func (s *UpstreamBillingProbeService) ProbeAccount(ctx context.Context, accountI
 	if s == nil || s.accountRepo == nil {
 		return nil, ErrUpstreamBillingProbeUnavailable
 	}
-	// 批4：手动探测与周期 RunDue 走同一把账号锁（外审 #4）；争锁则以明确错误拒绝。
-	release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
-	if lockErr != nil {
-		return nil, lockErr
-	}
-	if !ok {
-		return nil, ErrRecoveryProbeAccountBusy
-	}
-	defer release()
 	settings, err := s.getSettings(ctx)
 	if err != nil {
 		return nil, err
@@ -552,13 +543,6 @@ func (s *UpstreamBillingProbeService) ProbeAccounts(ctx context.Context, account
 		i, accountID := i, accountID
 		results[i].AccountID = accountID
 		group.Go(func() error {
-			// 批4：手动批量探测与周期 RunDue 走同一把账号锁（外审 #4）。
-			release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
-			if lockErr != nil || !ok {
-				results[i].Error = safeProbeError(ErrRecoveryProbeAccountBusy)
-				return nil
-			}
-			defer release()
 			snapshot, err := s.probeAccount(ctx, accountID, settings.IntervalMinutes)
 			if err != nil {
 				results[i].Error = safeProbeError(err)
