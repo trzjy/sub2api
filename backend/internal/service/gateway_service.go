@@ -583,7 +583,7 @@ func stickySessionClearReason(account *Account, requestedModel string) stickyBin
 	if !account.IsSchedulable() {
 		return stickyMissUnschedulable
 	}
-	if remaining := account.GetRateLimitRemainingTimeWithContext(context.Background(), requestedModel); remaining > 0 {
+	if account.isModelRateLimitedWithContext(context.Background(), requestedModel) {
 		return stickyMissRateLimited
 	}
 	return ""

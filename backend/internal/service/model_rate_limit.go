@@ -34,12 +34,107 @@ const (
 	// anthropicFableRateLimitKey 是 Anthropic 7d_oi（Fable 专属 7d 窗口）限流的
 	// 家族级 scope：命中后所有 Fable 变体（含 [1m] 等后缀）都不再调度到该账号。
 	anthropicFableRateLimitKey = "claude-fable-5"
+	// 模型级限流恢复探测的排程字段（extra.model_rate_limits[scope] 条目内）。
+	// 导出别名供写入/候选侧复用，语义与内部常量逐字一致。
+	modelRateLimitProbeDueKey = "probe_due_at"
+	modelRateLimitProbeGenKey = "probe_gen"
+	ModelRateLimitProbeDueKey = modelRateLimitProbeDueKey
+	ModelRateLimitProbeGenKey = modelRateLimitProbeGenKey
 )
 
 // isRateLimitActiveForKey 检查指定 key 的限流是否生效
 func (a *Account) isRateLimitActiveForKey(key string) bool {
 	resetAt := a.modelRateLimitResetAt(key)
 	return resetAt != nil && time.Now().Before(*resetAt)
+}
+
+// modelRateLimitEntry 返回指定 scope 的 model_rate_limits 条目；不存在（或无该键）时为 nil。
+func (a *Account) modelRateLimitEntry(scope string) map[string]any {
+	asnap := a.SnapshotExtra()
+	if asnap == nil || scope == "" {
+		return nil
+	}
+	rawLimits, ok := asnap[modelRateLimitsKey].(map[string]any)
+	if !ok {
+		return nil
+	}
+	entry, ok := rawLimits[scope].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return entry
+}
+
+// isRateLimitBlockingForKey 判定指定 key 是否仍应被调度门阻断：
+// reset_at 未到期，或条目仍有非空 probe_due_at（恢复探测未完成）。
+func (a *Account) isRateLimitBlockingForKey(key string) bool {
+	if a.isRateLimitActiveForKey(key) {
+		return true
+	}
+	entry := a.modelRateLimitEntry(key)
+	if entry == nil {
+		return false
+	}
+	due, exists := entry[modelRateLimitProbeDueKey]
+	if !exists || due == nil {
+		return false
+	}
+	if s, ok := due.(string); ok {
+		return strings.TrimSpace(s) != ""
+	}
+	return true
+}
+
+// ModelProbeReasonExcluded 报告该 (scope, reason) 是否**仅凭 reason** 即可判定
+// 不属于批 2 探测链（404/401/plan-gated 模型不支持、TokenHarbor 免费档）。
+// 返回 true 表示写入路径无需读取账号即可跳过排程、照常提交条目。
+// 判定与 isModelProbeOwned 中的 reason 分支逐字一致（复用同一组常量与前缀）。
+// scope 参与签名但不参与判定：是否排除完全由 reason 决定，与 scope/账号无关；
+// 生图 scope 能否接管取决于账号余额探测开关，无法仅凭 reason 判定，故返回 false。
+func ModelProbeReasonExcluded(scope, reason string) bool {
+	switch reason {
+	case upstreamModelNotFoundReason, upstreamModelNotFound401Reason, upstreamCodexPlanGatedModelReason:
+		return true
+	}
+	if strings.HasPrefix(reason, tokenHarborFreeTierReasonPrefix) {
+		return true
+	}
+	return false
+}
+
+// isModelProbeOwned 判定某条模型限流是否由本模型恢复探测链负责：
+// 404/401/plan-gated 与 tokenharbor 免费档由其它状态机负责；生图在无余额入口时不接管。
+func isModelProbeOwned(scope string, entry map[string]any, account *Account) bool {
+	reason, _ := entry["reason"].(string)
+	if ModelProbeReasonExcluded(scope, reason) {
+		return false
+	}
+	if scope == openAIImageGenerationRateLimitKey && (account == nil || !account.BalanceProbeConfig().Enabled) {
+		return false
+	}
+	return true
+}
+
+// ModelProbeDue 计算模型级限流恢复探测的下一次排程（是否排程 + 到期时刻）。
+// 有额度入口：precise 用上游 resetAt，否则 5min 兜底；无额度入口：precise 用
+// resetAt，否则 30s 快探。非本探测链负责（或无账号）时不排程。
+func ModelProbeDue(acc *Account, scope, reason string, resetAt time.Time, precise bool, now time.Time) (bool, time.Time) {
+	if acc == nil || !isModelProbeOwned(scope, map[string]any{"reason": reason}, acc) {
+		return false, time.Time{}
+	}
+	hasQuota := acc.BalanceProbeConfig().Enabled ||
+		acc.Platform == PlatformAntigravity ||
+		(acc.Platform == PlatformCursor && acc.QuotaKeyID != nil && *acc.QuotaKeyID > 0)
+	switch {
+	case hasQuota && precise:
+		return true, resetAt
+	case hasQuota:
+		return true, now.Add(5 * time.Minute)
+	case precise:
+		return true, resetAt
+	default:
+		return true, now.Add(30 * time.Second)
+	}
 }
 
 // getRateLimitRemainingForKey 获取指定 key 的限流剩余时间，0 表示未限流或已过期
@@ -57,7 +152,7 @@ func (a *Account) getRateLimitRemainingForKey(key string) time.Duration {
 
 func (a *Account) isModelRateLimitedWithContext(ctx context.Context, requestedModel string) bool {
 	for _, key := range a.modelRateLimitKeysForRequest(ctx, requestedModel) {
-		if a.isRateLimitActiveForKey(key) {
+		if a.isRateLimitBlockingForKey(key) {
 			return true
 		}
 	}

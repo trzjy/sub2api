@@ -730,6 +730,9 @@ func (r *probeRateLimitRepo) GetModelRateLimitMeta(_ context.Context, _ int64, _
 func (r *probeRateLimitRepo) CommitModelRateLimitObservation(_ context.Context, _ int64, _ string, _ map[string]any, _ bool, _ time.Time, _ int64) error {
 	return nil
 }
+func (r *probeRateLimitRepo) CommitModelRateLimitObservationIfVersion(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64, expectedLastEventAt string) (bool, error) {
+	return true, r.CommitModelRateLimitObservation(ctx, id, scope, entry, clear, lastEventAt, revision)
+}
 func (r *probeRateLimitRepo) WithObservationTx(ctx context.Context, fn func(txCtx context.Context) error) error {
 	return fn(ctx)
 }

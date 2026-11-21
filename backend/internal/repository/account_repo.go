@@ -2820,12 +2820,71 @@ func (r *accountRepository) commitModelRateLimitSet(ctx context.Context, id int6
 		if has && now.Before(lastEventAt) {
 			return nil
 		}
+		// 解除：resetAt 不晚于 now 时直接删除该 scope 条目（不写 probe、不排程），
+		// 避免产生「已解除却仍被 probe_due_at 阻塞」的状态（方案 §2.4 / §3-4）。
+		// 沿用同一事件裁决 revision，保证与业务 SET/探测写入的事件序一致。
+		if !resetAt.After(now) {
+			return r.CommitModelRateLimitObservation(ctx, id, scope, nil, true, now, rev+1)
+		}
 		payload := modelRateLimitPayload(resetAt, reason)
 		for k, v := range extra {
 			payload[k] = v
 		}
+		// 探测排程：归属本探测链时写入 probe_due_at / probe_gen（方案 §2.4）。
+		// 仅凭 reason 即可判定非探测链时（404/401/plan-gated/tokenharbor）跳过账号读取，
+		// 不排程、照常提交条目；其余（受管条目）仍走失败关闭：读账号失败或账号不存在时
+		// 整笔写入失败（不提交条目）——否则会持久化「无 probe_due_at」的限流条目，
+		// reset_at 到期即放行，违反「到期不放行」。
+		if service.ModelProbeReasonExcluded(scope, reason) {
+			// 仅凭 reason 判定非探测链（404/401/plan-gated/tokenharbor）：不排程、照常提交，无需读账号。
+		} else {
+			acc, aerr := r.GetByID(ctx, id)
+			if aerr != nil {
+				return fmt.Errorf("model probe schedule: load account %d: %w", id, aerr)
+			}
+			if acc == nil {
+				return fmt.Errorf("model probe schedule: account %d not found", id)
+			}
+			precise, _ := payload["precise_reset"].(bool)
+			if owned, due := service.ModelProbeDue(acc, scope, reason, resetAt, precise, now); owned {
+				// due/gen 必须原子成对写入：先取 gen，失败时整笔写入失败（不提交条目），
+				// 避免持久化「无 probe_due_at」的限流条目——否则 reset_at 到期即放行，
+				// 违反「到期不放行」；同时避免「有 due 无 gen」导致候选取到后因缺 gen 返回。
+				gen, gerr := r.nextRecoveryProbeGen(ctx)
+				if gerr != nil {
+					return fmt.Errorf("model probe gen unavailable: %w", gerr)
+				}
+				payload[service.ModelRateLimitProbeDueKey] = due.UTC().Format(time.RFC3339Nano)
+				payload[service.ModelRateLimitProbeGenKey] = gen
+			}
+		}
 		return r.CommitModelRateLimitObservation(ctx, id, scope, payload, false, now, rev+1)
 	})
+}
+
+// nextRecoveryProbeGen 从 accounts_recovery_probe_gen_seq 取一个单调递增的探测代际令牌
+// （与批 1 共用同一序列）。失败则返回明确错误，由调用方返回错误，整笔写入不提交
+// （不落无 probe_due_at 的限流条目，避免 reset_at 到期即放行）。
+func (r *accountRepository) nextRecoveryProbeGen(ctx context.Context) (int64, error) {
+	if r.sql == nil {
+		return 0, fmt.Errorf("account repository SQL executor is not configured")
+	}
+	rows, err := r.sql.QueryContext(ctx, `SELECT nextval('accounts_recovery_probe_gen_seq')`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("nextval('accounts_recovery_probe_gen_seq') returned no rows")
+	}
+	var gen int64
+	if err := rows.Scan(&gen); err != nil {
+		return 0, err
+	}
+	return gen, nil
 }
 
 // modelRateLimitPayload 构造模型级限流条目的写入载荷（rate_limited_at 取当前时刻，
@@ -3020,7 +3079,7 @@ func (r *accountRepository) ClearTempUnschedulableIfGeneration(ctx context.Conte
 		SET temp_unschedulable_until = NULL,
 			temp_unschedulable_reason = NULL,
 			probe_due_at = NULL,
-			extra = jsonb_set(COALESCE(extra, '{}'::jsonb) - 'account_recovery_probe', '{` + SchedStateRevisionExtraKey + `}', ` + schedStateRevisionNextValueExpr() + `, true),
+			extra = jsonb_set(COALESCE(extra, '{}'::jsonb) - 'account_recovery_probe', '{`+SchedStateRevisionExtraKey+`}', `+schedStateRevisionNextValueExpr()+`, true),
 			updated_at = NOW()
 		WHERE id = $1
 			AND deleted_at IS NULL
@@ -3987,6 +4046,88 @@ func (r *accountRepository) CommitModelRateLimitObservation(ctx context.Context,
 		logger.LegacyPrintf("repository.account", "[Scheduler] sync account snapshot after commit failed: id=%d err=%v", id, err)
 	}
 	return nil
+}
+
+// CommitModelRateLimitObservationIfVersion 是 CommitModelRateLimitObservation 的事件版本
+// （CAS）变体：与既有方法同构（同一条 UPDATE 写条目+meta、同事务边界、outbox、提交后快照
+// 同步），仅在 meta 的 last_event_at 仍等于 expectedLastEventAt 时落笔（空串期望无 meta）；
+// 期间有新事件接管则 WHERE 失配、零写入，返回 (false, nil)，调用方据此不记恢复、不执行副作用
+// （方案 §2.7 / §3-1）。
+func (r *accountRepository) CommitModelRateLimitObservationIfVersion(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64, expectedLastEventAt string) (bool, error) {
+	var raw []byte = []byte("{}")
+	var err error
+	if !clear {
+		raw, err = json.Marshal(entry)
+		if err != nil {
+			return false, err
+		}
+	}
+	meta := map[string]any{
+		"last_event_at": lastEventAt.UTC().Format(time.RFC3339Nano),
+		"revision":      revision,
+	}
+	metaRaw, err := json.Marshal(meta)
+	if err != nil {
+		return false, err
+	}
+	applied := false
+	commitObservation := func(txCtx context.Context) error {
+		client := clientFromContext(txCtx, r.client)
+		// WHERE 额外比较旧行的 meta.last_event_at（UPDATE 的表达式读取写前行值，
+		// 故不受同一语句 SET 中 jsonb_set 改写 meta 的影响）：$6 为期望值。
+		result, err := client.ExecContext(txCtx, `
+			UPDATE accounts SET
+				extra = jsonb_set(
+					jsonb_set(
+						COALESCE(extra, '{}'::jsonb),
+						ARRAY['model_rate_limits'],
+						CASE WHEN $3::boolean
+							THEN COALESCE(extra->'model_rate_limits', '{}'::jsonb) - $1
+							ELSE jsonb_set(COALESCE(extra->'model_rate_limits', '{}'::jsonb), ARRAY[$1]::text[], $4::jsonb, true)
+						END,
+						true
+					),
+					ARRAY['model_rate_limits_meta'],
+					jsonb_set(COALESCE(extra->'model_rate_limits_meta', '{}'::jsonb), ARRAY[$1]::text[], $5::jsonb, true),
+					true
+				),
+				updated_at = NOW()
+			WHERE id = $2 AND deleted_at IS NULL
+				AND COALESCE(extra->'model_rate_limits_meta'->$1::text->>'last_event_at', '') = $6
+		`, scope, id, clear, raw, metaRaw, expectedLastEventAt)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return nil
+		}
+		applied = true
+		if err := enqueueSchedulerOutbox(txCtx, txAwareSQLExecutor(txCtx, r.sql, r.client), service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if dbent.TxFromContext(ctx) != nil {
+		if err := commitObservation(ctx); err != nil {
+			return false, err
+		}
+		return applied, nil
+	}
+	if err := r.WithObservationTx(ctx, commitObservation); err != nil {
+		return false, err
+	}
+	// 仅落笔成功才同步快照（plan §2.7：失配时零写入、不执行副作用）。
+	if applied {
+		if err := r.SyncSchedulerAccountSnapshot(ctx, id); err != nil {
+			logger.LegacyPrintf("repository.account", "[Scheduler] sync account snapshot after versioned commit failed: id=%d err=%v", id, err)
+		}
+	}
+	return applied, nil
 }
 
 // SyncSchedulerAccountSnapshot 暴露快照同步的薄导出，供两处补做（事务内不预览未提交状态，

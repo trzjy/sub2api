@@ -351,7 +351,7 @@ func (s *RateLimitService) applyAnthropicFableSchedulingThreshold(ctx context.Co
 	if !decision.ShouldPause || decision.Until == nil || !decision.Until.After(now) {
 		return
 	}
-	if account.isRateLimitActiveForKey(anthropicFableRateLimitKey) {
+	if account.isRateLimitBlockingForKey(anthropicFableRateLimitKey) {
 		return
 	}
 
@@ -3498,6 +3498,9 @@ type modelRateLimitObservationRepository interface {
 	// （clear=true 时清除该 scope，否则写入 entry）与 meta（last_event_at/revision）。
 	// 任一部分失败两者都不变（E1 原子性）。
 	CommitModelRateLimitObservation(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64) error
+	// CommitModelRateLimitObservationIfVersion 额外要求当前 meta.last_event_at 原文等于
+	// expectedLastEventAt（空串=期望无 meta）；applied=false 表示事件版本已被接管。
+	CommitModelRateLimitObservationIfVersion(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64, expectedLastEventAt string) (bool, error)
 	// WithModelRateLimitAccountLock 暴露 per-account 模型级限流写锁窄面（E38 下沉）：fn 在
 	// 持锁期间执行，用于包裹多步读改写。锁已在仓库层实现，service 层不再重复持锁；锁不可重入，
 	// CommitModelRateLimitObservation 本身绝不在此加锁。

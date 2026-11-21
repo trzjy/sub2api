@@ -54,7 +54,7 @@ func (a *Account) isCreditsExhausted() bool {
 	if a == nil {
 		return false
 	}
-	return a.isRateLimitActiveForKey(creditsExhaustedKey)
+	return a.isRateLimitBlockingForKey(creditsExhaustedKey)
 }
 
 // setCreditsExhausted 标记账号积分耗尽：写入 model_rate_limits["AICredits"] + 更新缓存。
@@ -83,15 +83,39 @@ func (s *AntigravityGatewayService) clearCreditsExhausted(ctx context.Context, a
 	if !ok {
 		return
 	}
-	if _, exists := rawLimits[creditsExhaustedKey]; !exists {
+	creditsValue, exists := rawLimits[creditsExhaustedKey]
+	if !exists {
 		return
 	}
+	// 批 2 管理的探针排程条目才带 probe_gen；不存在或非数字时保持原有行为：
+	// 仅本地删除，不调 DB（该条目不属于本探测链）。
+	creditsEntry, _ := creditsValue.(map[string]any)
+	var expectedGen int64
+	switch g := creditsEntry[modelRateLimitProbeGenKey].(type) {
+	case int64:
+		expectedGen = g
+	case float64:
+		expectedGen = int64(g)
+	default:
+		delete(rawLimits, creditsExhaustedKey)
+		account.MergeExtra(map[string]any{modelRateLimitsKey: rawLimits})
+		return
+	}
+	// 同请求内可见：无论 DB 结果如何，先更新本地账号对象。
 	delete(rawLimits, creditsExhaustedKey)
 	account.MergeExtra(map[string]any{modelRateLimitsKey: rawLimits})
-	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
-		modelRateLimitsKey: rawLimits,
-	}); err != nil {
-		logger.LegacyPrintf("service.antigravity_gateway", "clear credits exhausted failed: account=%d err=%v", account.ID, err)
+	// 按 gen 做条目级删除，避免整桶旧值覆盖并发写入的新条目。
+	patcher, ok := s.accountRepo.(interface {
+		PatchModelRateLimitEntry(ctx context.Context, accountID int64, scope string, expectedGen int64, patch ModelProbePatch) (bool, error)
+	})
+	if !ok {
+		logger.S().Warnw("clear credits exhausted: accountRepo lacks PatchModelRateLimitEntry, skip DB writeback",
+			"account_id", account.ID, "scope", creditsExhaustedKey, "probe_gen", expectedGen)
+		return
+	}
+	if _, err := patcher.PatchModelRateLimitEntry(ctx, account.ID, creditsExhaustedKey, expectedGen, ModelProbePatch{Op: ModelProbePatchDeleteScope}); err != nil {
+		logger.S().Warnw("clear credits exhausted: PatchModelRateLimitEntry failed",
+			"account_id", account.ID, "scope", creditsExhaustedKey, "probe_gen", expectedGen, "err", err)
 	}
 }
 

@@ -15,6 +15,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// creditsPatchCall 记录一次条目级限流 patch 调用。
+type creditsPatchCall struct {
+	accountID   int64
+	scope       string
+	expectedGen int64
+	patch       ModelProbePatch
+}
+
+// creditsPatchRepo 为 clearCreditsExhausted 的条目级删除提供 PatchModelRateLimitEntry；
+// 复用 unit build 中 stubAntigravityAccountRepo 的 UpdateExtra/SetModelRateLimit 调用记录。
+// 不改动 stubAntigravityAccountRepo 本体，避免触碰派发单范围外的测试文件。
+type creditsPatchRepo struct {
+	*stubAntigravityAccountRepo
+	patchCalls []creditsPatchCall
+}
+
+func (r *creditsPatchRepo) PatchModelRateLimitEntry(_ context.Context, accountID int64, scope string, expectedGen int64, patch ModelProbePatch) (bool, error) {
+	r.patchCalls = append(r.patchCalls, creditsPatchCall{
+		accountID:   accountID,
+		scope:       scope,
+		expectedGen: expectedGen,
+		patch:       patch,
+	})
+	return true, nil
+}
+
 func TestClassifyAntigravity429(t *testing.T) {
 	t.Run("明确配额耗尽", func(t *testing.T) {
 		body := []byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`)
@@ -84,6 +110,27 @@ func TestIsCreditsExhausted_UsesAICreditsKey(t *testing.T) {
 			},
 		}
 		require.False(t, account.isCreditsExhausted())
+	})
+
+	t.Run("AICredits key reset 已过期但带 probe_due_at 则仍阻断（区分新旧谓词）", func(t *testing.T) {
+		// 新谓词 isRateLimitBlockingForKey 在 reset_at 已过期但 probe_due_at 非空时仍返回 true
+		// （恢复探测未完成）；旧谓词 isRateLimitActiveForKey 仅看 reset_at，在此输入下会返回 false。
+		// 这是 D6 将 isCreditsExhausted 从旧谓词切到新谓词后，两种实现唯一可区分的边界输入。
+		account := &Account{
+			ID:       4,
+			Platform: PlatformAntigravity,
+			Extra: map[string]any{
+				"allow_overages": true,
+				modelRateLimitsKey: map[string]any{
+					creditsExhaustedKey: map[string]any{
+						"rate_limited_at":         time.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+						"rate_limit_reset_at":     time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339),
+						modelRateLimitProbeDueKey: "2030-01-01T00:00:00Z",
+					},
+				},
+			},
+		}
+		require.True(t, account.isCreditsExhausted())
 	})
 }
 
@@ -513,8 +560,8 @@ func TestClearCreditsExhausted(t *testing.T) {
 		require.Empty(t, repo.extraUpdateCalls)
 	})
 
-	t.Run("有 AICredits key 时删除并调用 UpdateExtra", func(t *testing.T) {
-		repo := &stubAntigravityAccountRepo{}
+	t.Run("有 AICredits key 但无 probe_gen 时仅本地删除不写 DB", func(t *testing.T) {
+		repo := &creditsPatchRepo{stubAntigravityAccountRepo: &stubAntigravityAccountRepo{}}
 		svc := &AntigravityGatewayService{accountRepo: repo}
 		account := &Account{
 			ID: 1,
@@ -532,12 +579,48 @@ func TestClearCreditsExhausted(t *testing.T) {
 			},
 		}
 		svc.clearCreditsExhausted(context.Background(), account)
-		require.Len(t, repo.extraUpdateCalls, 1)
+		// 无 probe_gen：仅本地删除，不写 DB（既无整桶 UpdateExtra，也无条目级 patch）。
+		require.Empty(t, repo.extraUpdateCalls)
+		require.Empty(t, repo.patchCalls)
 		// AICredits key 应被删除
 		rawLimits := account.Extra[modelRateLimitsKey].(map[string]any)
 		_, exists := rawLimits[creditsExhaustedKey]
 		require.False(t, exists, "AICredits key 应被删除")
 		// 普通模型限流应保留
+		_, exists = rawLimits["claude-sonnet-4-5"]
+		require.True(t, exists, "普通模型限流应保留")
+	})
+
+	t.Run("有 AICredits key 且带 probe_gen 时按 gen 条目级删除", func(t *testing.T) {
+		repo := &creditsPatchRepo{stubAntigravityAccountRepo: &stubAntigravityAccountRepo{}}
+		svc := &AntigravityGatewayService{accountRepo: repo}
+		account := &Account{
+			ID: 2,
+			Extra: map[string]any{
+				modelRateLimitsKey: map[string]any{
+					"claude-sonnet-4-5": map[string]any{
+						"rate_limited_at":     "2026-03-15T00:00:00Z",
+						"rate_limit_reset_at": "2099-03-15T00:00:00Z",
+					},
+					creditsExhaustedKey: map[string]any{
+						"rate_limited_at":         "2026-03-15T00:00:00Z",
+						"rate_limit_reset_at":     time.Now().Add(5 * time.Hour).UTC().Format(time.RFC3339),
+						modelRateLimitProbeGenKey: int64(42),
+					},
+				},
+			},
+		}
+		svc.clearCreditsExhausted(context.Background(), account)
+		// 带 probe_gen：恰好一次条目级删除 patch，携带正确的 gen 与 scope，不写整桶。
+		require.Len(t, repo.patchCalls, 1)
+		require.Equal(t, creditsExhaustedKey, repo.patchCalls[0].scope)
+		require.Equal(t, int64(42), repo.patchCalls[0].expectedGen)
+		require.Equal(t, ModelProbePatchDeleteScope, repo.patchCalls[0].patch.Op)
+		require.Empty(t, repo.extraUpdateCalls)
+		// AICredits key 本地已删除，普通模型限流保留。
+		rawLimits := account.Extra[modelRateLimitsKey].(map[string]any)
+		_, exists := rawLimits[creditsExhaustedKey]
+		require.False(t, exists, "AICredits key 应被删除")
 		_, exists = rawLimits["claude-sonnet-4-5"]
 		require.True(t, exists, "普通模型限流应保留")
 	})

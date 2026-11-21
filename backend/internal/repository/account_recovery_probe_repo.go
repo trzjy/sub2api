@@ -271,6 +271,143 @@ func (r *accountRepository) ListProbeDueAccounts(ctx context.Context, now time.T
 	return out, nil
 }
 
+// ListModelRateLimitProbeDue 返回模型级限流条目探测时刻已到的 (accountID, scope) 候选
+// （按 probe_due_at 升序、有界）。单条 SQL 同时带出 meta 的 last_event_at 原文作为事件
+// 版本基线（空串 = 无 meta）；归属过滤由调用方在 Go 侧用 isModelProbeOwned 做一次。
+func (r *accountRepository) ListModelRateLimitProbeDue(ctx context.Context, now time.Time, limit int) ([]service.ModelProbeTask, error) {
+	if r.sql == nil {
+		return nil, fmt.Errorf("account repository SQL executor is not configured")
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := r.sql.QueryContext(ctx, `
+		SELECT a.id, e.key, e.value,
+			COALESCE(a.extra->'model_rate_limits_meta'->e.key->>'last_event_at', '') AS meta_last_event_at
+		FROM accounts a
+		CROSS JOIN LATERAL jsonb_each(COALESCE(a.extra->'model_rate_limits', '{}'::jsonb)) AS e(key, value)
+		WHERE a.deleted_at IS NULL AND a.schedulable AND a.status = 'active'
+			AND e.value->>'probe_due_at' IS NOT NULL
+			AND (e.value->>'probe_due_at')::timestamptz <= $1
+		ORDER BY (e.value->>'probe_due_at')::timestamptz
+		LIMIT $2
+	`, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]service.ModelProbeTask, 0)
+	for rows.Next() {
+		var (
+			accountID int64
+			scope     string
+			raw       []byte
+			metaAt    string
+		)
+		if err := rows.Scan(&accountID, &scope, &raw, &metaAt); err != nil {
+			return nil, err
+		}
+		var entry map[string]any
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			return nil, err
+		}
+		out = append(out, service.ModelProbeTask{
+			AccountID:       accountID,
+			Scope:           scope,
+			Entry:           entry,
+			MetaLastEventAt: metaAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// modelProbePatchGuardCTE 是 PatchModelRateLimitEntry 三分支共用的来源守卫：仅当目标行
+// 未删除、且目标 scope 条目的 probe_gen 仍等于 expectedGen（FOR UPDATE 锁定读）时，
+// 才在数据库当前行上落笔。任一支均只动目标 scope，不写 meta、不碰兄弟 scope。
+const modelProbePatchGuardCTE = `WITH cur AS (
+		SELECT id FROM accounts
+		WHERE id = $1 AND deleted_at IS NULL
+			AND (extra->'model_rate_limits'->$2::text->>'probe_gen')::bigint = $3
+		FOR UPDATE
+	)
+	UPDATE accounts AS a
+	SET extra = %s, updated_at = NOW()
+	FROM cur WHERE a.id = cur.id`
+
+// PatchModelRateLimitEntry 在代际匹配时对单个 (accountID, scope) 条目做最小改动：
+//   - reschedule：合并 probe_due_at/probe_gen（失败重排，gen 取新值）；
+//   - observe：合并 {$4: $5}（ObserveKey/Observe，观测写回）；
+//   - delete-scope：从 model_rate_limits 桶移除该 scope（不清除 meta）。
+//
+// 零写入返回 (false, nil)；成功落笔后复用批 1 的调度副作用并返回 (true, nil)。
+func (r *accountRepository) PatchModelRateLimitEntry(ctx context.Context, accountID int64, scope string, expectedGen int64, patch service.ModelProbePatch) (bool, error) {
+	if r.sql == nil {
+		return false, fmt.Errorf("account repository SQL executor is not configured")
+	}
+
+	var extraExpr string
+	var args []any
+	switch patch.Op {
+	case service.ModelProbePatchReschedule:
+		extraExpr = `jsonb_set(
+				COALESCE(a.extra, '{}'::jsonb),
+				ARRAY['model_rate_limits'],
+				jsonb_set(
+					COALESCE(a.extra->'model_rate_limits', '{}'::jsonb),
+					ARRAY[$2]::text[],
+					COALESCE(a.extra->'model_rate_limits'->$2::text, '{}'::jsonb) || jsonb_build_object(
+						'probe_due_at', to_jsonb($4::timestamptz),
+						'probe_gen', nextval('accounts_recovery_probe_gen_seq')
+					),
+					true
+				),
+				true
+			)`
+		args = []any{accountID, scope, expectedGen, patch.Due}
+	case service.ModelProbePatchObserve:
+		extraExpr = `jsonb_set(
+				COALESCE(a.extra, '{}'::jsonb),
+				ARRAY['model_rate_limits'],
+				jsonb_set(
+					COALESCE(a.extra->'model_rate_limits', '{}'::jsonb),
+					ARRAY[$2]::text[],
+					COALESCE(a.extra->'model_rate_limits'->$2::text, '{}'::jsonb) || jsonb_build_object($4::text, $5::text),
+					true
+				),
+				true
+			)`
+		args = []any{accountID, scope, expectedGen, patch.ObserveKey, patch.Observe}
+	case service.ModelProbePatchDeleteScope:
+		extraExpr = `jsonb_set(
+				COALESCE(a.extra, '{}'::jsonb),
+				ARRAY['model_rate_limits'],
+				COALESCE(a.extra->'model_rate_limits', '{}'::jsonb) - $2::text,
+				true
+			)`
+		args = []any{accountID, scope, expectedGen}
+	default:
+		return false, fmt.Errorf("unknown model probe patch op %q", patch.Op)
+	}
+
+	result, err := r.sql.ExecContext(ctx, fmt.Sprintf(modelProbePatchGuardCTE, extraExpr), args...)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	r.afterRecoveryStateChange(ctx, accountID)
+	return true, nil
+}
+
 // afterRecoveryStateChange 复用既有调度副作用：outbox + 单账号快照同步。
 func (r *accountRepository) afterRecoveryStateChange(ctx context.Context, accountID int64) {
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {

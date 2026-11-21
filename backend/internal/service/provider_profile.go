@@ -56,7 +56,7 @@ func (a *Account) providerDefaultTestModel() string {
 	}
 	// Cline 订阅了 ClinePass 的账号用订阅模型测试，不消耗积分；ClinePass 钱包冷却中
 	// （窗口用满等）时改用按量模型，否则测试必然失败，而积分模型照常可用。
-	if a.IsCline() && a.clinePassSubscribed() && !a.isRateLimitActiveForKey(clinePassRateLimitKey) {
+	if a.IsCline() && a.clinePassSubscribed() && !a.isRateLimitBlockingForKey(clinePassRateLimitKey) {
 		return DefaultClinePassTestModel
 	}
 	return profile.DefaultTestModel

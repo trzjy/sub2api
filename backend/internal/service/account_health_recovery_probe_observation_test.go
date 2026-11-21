@@ -128,6 +128,11 @@ func (r *d2ProbeObsRepo) CommitModelRateLimitObservation(_ context.Context, id i
 	return nil
 }
 
+// CommitModelRateLimitObservationIfVersion 委托既有 Commit 并返回 applied=true（桩不模拟 CAS 失配）。
+func (r *d2ProbeObsRepo) CommitModelRateLimitObservationIfVersion(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64, expectedLastEventAt string) (bool, error) {
+	return true, r.CommitModelRateLimitObservation(ctx, id, scope, entry, clear, lastEventAt, revision)
+}
+
 // WithModelRateLimitAccountLock 实现 modelRateLimitObservationRepository 的写锁窄面（E38 下沉）：
 // 测试替身直接执行 fn（E30/E33 惯例），不再重复加锁——否则会与 CommitModelRateLimitObservation
 // 内部的 r.mu 自死锁。真实仓库由 accountRepository 持锁，保证并发串行化。

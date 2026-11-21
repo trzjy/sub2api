@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -160,6 +161,9 @@ type AccountHealthRecoveryProbeService struct {
 	// 禁止在 Wait 仍挂起时并发 Add）。Stop 完成 wg.Wait 后在锁内清 stopping，恢复 Start 可用。
 	stopping bool
 	wg       sync.WaitGroup
+
+	// 批 2：模型级恢复通道的进程内单轮保护（分布式去重由 leader/账号锁负责）。
+	modelProbeRunning atomic.Bool
 
 	// probeOverride, when set, replaces the real upstream probe (used by tests).
 	probeOverride func(ctx context.Context, account *Account) (ok bool, err error)
@@ -349,6 +353,24 @@ func (p *AccountHealthRecoveryProbeService) Start(ctx context.Context) {
 	reg.Start(ctx)
 	logger.L().Info("openai.apikey_health_probe_started",
 		zap.Duration("interval", interval))
+
+	// 批2：模型级限流恢复通道登记到同一注册表（独立 cadence 15s）；进程内 atomic
+	// 防轮次叠加，跨副本去重由通道内 leader/账号锁负责。
+	reg.Register(backgroundTickTask{
+		name:     "model_rate_limit_recovery_channel",
+		cadence:  15 * time.Second,
+		maxRun:   modelRateLimitProbeRoundBudget,
+		firstRun: tickFirstRunAfterCadence,
+		run: func(c context.Context) error {
+			if !p.modelProbeRunning.CompareAndSwap(false, true) {
+				return nil
+			}
+			defer p.modelProbeRunning.Store(false)
+			p.RunModelRateLimitRecoveryChannel(c)
+			return nil
+		},
+	})
+
 }
 
 // Stop terminates the probe loop if running. It must be called from the process
@@ -387,6 +409,8 @@ func (p *AccountHealthRecoveryProbeService) Stop() {
 	reg.Stop()
 	reg.Unregister("health_marker_sweep")
 	reg.Unregister("health_recovery_channel")
+	// 批2：模型级恢复通道同样关闭派发窗口。
+	reg.Unregister("model_rate_limit_recovery_channel")
 	if stopCh != nil {
 		// 拿到关闭权的调用在锁外 close（不持锁关闭），随后等待 goroutine 退出。
 		close(stopCh)
@@ -1351,7 +1375,15 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlane(ctx context.C
 // true），若沿用 ShouldUseResponsesAPI（标记缺失 ⇒ true）会打向上游不存在的 /v1/responses
 // ⇒ 探针恒失败 ⇒ 账号停到 9999 哨兵永不解封（R4 发现 1）。传入该判据本身（而非字面 true）
 // 即 SSOT 对齐，不另造协议判定。其它平台调用方一律传 false，行为逐字不变。
+//
+// 批 2：模型参数化后本函数仅作薄委托；传空 model 表示沿用既有取模型逻辑（行为逐字不变）。
 func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocol(ctx context.Context, acc *Account, forceChatCompletions bool) (bool, error) {
+	return p.probeUpstreamDataPlaneWithProtocolForModel(ctx, acc, "", forceChatCompletions)
+}
+
+// probeUpstreamDataPlaneWithProtocolForModel 是数据面探测的实际实现：model 非空时直接使用
+// 传入模型（跳过 probeModelForAccount 与 cursor 分支回落）；为空时沿用既有取值逻辑。
+func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolForModel(ctx context.Context, acc *Account, model string, forceChatCompletions bool) (bool, error) {
 	if acc == nil {
 		return false, errors.New("probe account is nil")
 	}
@@ -1365,9 +1397,12 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocol(c
 	// 从 model_mapping 全体都有的键（gpt-6.1-sol / claude-fable-5-1）回落，避免落到只有
 	// oauth 型才有的 claude-opus-5-5 / gpt-6-astra（apikey 型 134 个全无）⇒ 探不到可用
 	// 模型 ⇒ 账号永不解封（E12 的 424 同类风险）。非 cursor 账号走既有通用回落，逐字不变。
-	model := p.probeModelForAccount(acc)
-	if acc.Platform == PlatformCursor {
-		model = p.cursorProbeModelKey(acc)
+	// 批 2：调用方显式传入非空 model 时直接采用，不再执行下列回落（含 cursor 分支）。
+	if model == "" {
+		model = p.probeModelForAccount(acc)
+		if acc.Platform == PlatformCursor {
+			model = p.cursorProbeModelKey(acc)
+		}
 	}
 	if model == "" {
 		return false, errors.New("probe account has no model to probe")

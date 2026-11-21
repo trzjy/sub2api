@@ -80,6 +80,9 @@ func (r *freshFailObsRepo) GetModelRateLimitMeta(context.Context, int64, string)
 func (r *freshFailObsRepo) CommitModelRateLimitObservation(context.Context, int64, string, map[string]any, bool, time.Time, int64) error {
 	return nil
 }
+func (r *freshFailObsRepo) CommitModelRateLimitObservationIfVersion(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64, expectedLastEventAt string) (bool, error) {
+	return true, r.CommitModelRateLimitObservation(ctx, id, scope, entry, clear, lastEventAt, revision)
+}
 
 // TestAccountHandler_GetAccountFreshness_ReadErrorFailsClosed 定向测试（E11 验收）：
 // 任一 scope 观测读取失败（DB 故障）时整体失败关闭，返回明确错误响应（500），
@@ -219,6 +222,9 @@ func (r *freshCorruptObsRepo) GetModelRateLimitMeta(context.Context, int64, stri
 func (r *freshCorruptObsRepo) CommitModelRateLimitObservation(context.Context, int64, string, map[string]any, bool, time.Time, int64) error {
 	return nil
 }
+func (r *freshCorruptObsRepo) CommitModelRateLimitObservationIfVersion(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64, expectedLastEventAt string) (bool, error) {
+	return true, r.CommitModelRateLimitObservation(ctx, id, scope, entry, clear, lastEventAt, revision)
+}
 func (r *freshCorruptObsRepo) WithModelRateLimitAccountLock(ctx context.Context, _ int64, fn func(ctx context.Context) error) error {
 	return fn(ctx)
 }
@@ -239,6 +245,9 @@ func (r *freshNilObsRepo) GetModelRateLimitMeta(context.Context, int64, string) 
 }
 func (r *freshNilObsRepo) CommitModelRateLimitObservation(context.Context, int64, string, map[string]any, bool, time.Time, int64) error {
 	return nil
+}
+func (r *freshNilObsRepo) CommitModelRateLimitObservationIfVersion(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64, expectedLastEventAt string) (bool, error) {
+	return true, r.CommitModelRateLimitObservation(ctx, id, scope, entry, clear, lastEventAt, revision)
 }
 func (r *freshNilObsRepo) WithModelRateLimitAccountLock(ctx context.Context, _ int64, fn func(ctx context.Context) error) error {
 	return fn(ctx)

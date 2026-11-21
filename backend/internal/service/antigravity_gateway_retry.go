@@ -476,21 +476,21 @@ func (s *AntigravityGatewayService) antigravityRetryLoop(p antigravityRetryLoopP
 
 	// 预检查：如果账号已限流，直接返回切换信号
 	if p.requestedModel != "" {
-		if remaining := p.account.GetRateLimitRemainingTimeWithContext(p.ctx, p.requestedModel); remaining > 0 {
+		if p.account.isModelRateLimitedWithContext(p.ctx, p.requestedModel) {
 			// 已注入积分的请求不再受普通模型限流预检查阻断。
 			if overagesInjected {
-				logger.LegacyPrintf("service.antigravity_gateway", "%s pre_check: credits_injected_ignore_rate_limit remaining=%v model=%s account=%d",
-					p.prefix, remaining.Truncate(time.Millisecond), p.requestedModel, p.account.ID)
+				logger.LegacyPrintf("service.antigravity_gateway", "%s pre_check: credits_injected_ignore_rate_limit model=%s account=%d",
+					p.prefix, p.requestedModel, p.account.ID)
 			} else if isSingleAccountRetry(p.ctx) {
 				// 单账号 503 退避重试模式：跳过限流预检查，直接发请求。
 				// 首次请求设的限流是为了多账号调度器跳过该账号，在单账号模式下无意义。
 				// 如果上游确实还不可用，handleSmartRetry → handleSingleAccountRetryInPlace
 				// 会在 Service 层原地等待+重试，不需要在预检查这里等。
-				logger.LegacyPrintf("service.antigravity_gateway", "%s pre_check: single_account_retry skipping rate_limit remaining=%v model=%s account=%d (will retry in-place if 503)",
-					p.prefix, remaining.Truncate(time.Millisecond), p.requestedModel, p.account.ID)
+				logger.LegacyPrintf("service.antigravity_gateway", "%s pre_check: single_account_retry skipping rate_limit model=%s account=%d (will retry in-place if 503)",
+					p.prefix, p.requestedModel, p.account.ID)
 			} else {
-				logger.LegacyPrintf("service.antigravity_gateway", "%s pre_check: rate_limit_switch remaining=%v model=%s account=%d",
-					p.prefix, remaining.Truncate(time.Millisecond), p.requestedModel, p.account.ID)
+				logger.LegacyPrintf("service.antigravity_gateway", "%s pre_check: rate_limit_switch model=%s account=%d",
+					p.prefix, p.requestedModel, p.account.ID)
 				return nil, &AntigravityAccountSwitchError{
 					OriginalAccountID: p.account.ID,
 					RateLimitedModel:  p.requestedModel,
@@ -1351,11 +1351,8 @@ func (s *AntigravityGatewayService) updateAccountModelRateLimitInCache(ctx conte
 		"rate_limit_reset_at": resetAt.UTC().Format(time.RFC3339),
 	}
 
-	// 更新 Redis 快照
+	// 更新账号本地 Extra，保证同请求内可见；调度缓存由 SyncSchedulerAccountSnapshot 在 DB 提交后统一同步
 	account.MergeExtra(map[string]any{"model_rate_limits": limits})
-	if err := s.schedulerSnapshot.UpdateAccountInCache(ctx, account); err != nil {
-		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] cache_update_failed account=%d model=%s err=%v", account.ID, modelKey, err)
-	}
 }
 
 func (s *AntigravityGatewayService) handleUpstreamError(
