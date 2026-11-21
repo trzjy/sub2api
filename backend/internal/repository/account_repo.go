@@ -2544,6 +2544,7 @@ func (r *accountRepository) ListModelAvailabilityCandidates(
 			schedulable:          true,
 			ignoreTransientState: true,
 			platforms:            platforms,
+			forcePlatformFilter:  true,
 		})
 	}
 
@@ -4927,6 +4928,10 @@ type accountGroupQueryOptions struct {
 	schedulable          bool
 	ignoreTransientState bool
 	platforms            []string // 允许的多个平台，空切片表示不进行平台过滤
+	// forcePlatformFilter 为 true 时，即使 groupID>0 也按 platforms 过滤。
+	// 调度入口的“有分组则绑定即准入、不按平台过滤”只适用于选号；模型可用性诊断
+	// 等按平台判定用途必须仍按平台收窄。
+	forcePlatformFilter bool
 }
 
 func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID int64, opts accountGroupQueryOptions) ([]service.Account, error) {
@@ -4941,7 +4946,7 @@ func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID in
 	}
 	// 有分组：绑定即准入，不按平台过滤（组内全部可调度账号都是候选）。
 	// 无分组（groupID<=0）：保持按平台过滤，未挂组不得跨平台外溢。
-	if groupID <= 0 && len(opts.platforms) > 0 {
+	if len(opts.platforms) > 0 && (groupID <= 0 || opts.forcePlatformFilter) {
 		preds = append(preds, dbaccount.PlatformIn(opts.platforms...))
 	}
 	if opts.schedulable {

@@ -51,12 +51,16 @@ func (r *accountRepository) SetQuotaProbeSchedule(ctx context.Context, accountID
 			WHERE id = $1 AND `+recoveryWriteGuardSQL+`
 			FOR UPDATE
 		), next AS (
-			SELECT id, jsonb_set(e, '{account_recovery_probe,quota}',
-				jsonb_build_object(
-					'gen', nextval('accounts_recovery_probe_gen_seq'),
-					'due', to_jsonb($2::timestamptz),
-					'mode', $3::text,
-					'kind', $4::text), true) AS e2
+			-- 注意：jsonb_set 的 create_missing 不会创建多级路径中的中间对象，
+			-- 因此先在根层写入 account_recovery_probe（用 || 合并保留另一分量），
+			-- 再写入本分量。嵌套多级 set 在没有父对象时会静默不生效。
+			SELECT id, jsonb_set(e, '{account_recovery_probe}',
+				COALESCE(e->'account_recovery_probe', '{}'::jsonb) || jsonb_build_object('quota',
+					jsonb_build_object(
+						'gen', nextval('accounts_recovery_probe_gen_seq'),
+						'due', to_jsonb($2::timestamptz),
+						'mode', $3::text,
+						'kind', $4::text)), true) AS e2
 			FROM base
 		), fin AS (
 			SELECT id, jsonb_set(e2, '{sched_state_revision}',
@@ -97,11 +101,12 @@ func (r *accountRepository) SetTransportRecoveryStop(ctx context.Context, accoun
 			WHERE id = $1 AND `+recoveryWriteGuardSQL+`
 			FOR UPDATE
 		), next AS (
-			SELECT id, jsonb_set(e, '{account_recovery_probe,transport}',
-				jsonb_build_object(
-					'gen', nextval('accounts_recovery_probe_gen_seq'),
-					'due', to_jsonb($2::timestamptz),
-					'mode', $3::text), true) AS e2,
+			SELECT id, jsonb_set(e, '{account_recovery_probe}',
+				COALESCE(e->'account_recovery_probe', '{}'::jsonb) || jsonb_build_object('transport',
+					jsonb_build_object(
+						'gen', nextval('accounts_recovery_probe_gen_seq'),
+						'due', to_jsonb($2::timestamptz),
+						'mode', $3::text)), true) AS e2,
 				CASE WHEN temp_unschedulable_until IS NULL OR temp_unschedulable_until < $4::timestamptz
 					THEN $4::timestamptz ELSE temp_unschedulable_until END AS u2
 			FROM base
@@ -150,8 +155,10 @@ func (r *accountRepository) RescheduleRecoveryProbeComponent(ctx context.Context
 				AND (COALESCE(extra, '{}'::jsonb) #>> ARRAY['account_recovery_probe', $2, 'gen']) = $3::text
 			FOR UPDATE
 		), next AS (
-			SELECT id, jsonb_set(e, ARRAY['account_recovery_probe', $2, 'due'],
-				to_jsonb($4::timestamptz), false) AS e2
+			SELECT id, jsonb_set(e, '{account_recovery_probe}',
+				COALESCE(e->'account_recovery_probe', '{}'::jsonb) || jsonb_build_object($2,
+					COALESCE(e->'account_recovery_probe'->$2, '{}'::jsonb) || jsonb_build_object('due', to_jsonb($4::timestamptz))),
+				true) AS e2
 			FROM base
 		), fin AS (
 			SELECT id, jsonb_set(e2, '{sched_state_revision}',

@@ -879,6 +879,13 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 	nextAt := make(map[int64]time.Time, len(pending))
 	stay := make([]*Account, 0, len(pending))
 	stay = append(stay, pending...)
+	// 首轮补探先等一个补探间隔：入队发生在首探刚失败之后，立即重探等于对同一上游
+	// 连打两次（生产上多数是同一故障面）。后续轮次按探测结果再细分 5s / 5min。
+	if first := time.Now().Add(p.probeRetryInterval()); !first.IsZero() {
+		for _, acc := range pending {
+			nextAt[acc.ID] = first
+		}
+	}
 	round := 0
 	for len(stay) > 0 {
 		round++

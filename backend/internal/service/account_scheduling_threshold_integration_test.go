@@ -80,7 +80,9 @@ func TestGatewayService_ListSchedulableAccounts_DoesNotFilterUnsupportedThreshol
 	accounts, useMixed, err := svc.listSchedulableAccounts(context.Background(), nil, PlatformKiro, false)
 
 	require.NoError(t, err)
-	require.False(t, useMixed)
+	// 无调度快照时回退路径按设计一律 useMixed=!hasForcePlatform；
+	// 本用例只验证“阈值平台不被过滤”，与混合调度开关无关。
+	require.True(t, useMixed)
 	require.Len(t, accounts, 2)
 	require.Equal(t, int64(3101), accounts[0].ID)
 	require.Equal(t, int64(3102), accounts[1].ID)
