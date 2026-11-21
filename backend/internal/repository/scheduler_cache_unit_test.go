@@ -382,20 +382,17 @@ func TestBuildSchedulerMetadataAccount_KeepsSlimGroupMembership(t *testing.T) {
 			{
 				AccountID: 42,
 				GroupID:   7,
-				Priority:  2,
 				Account:   &service.Account{ID: 42, Name: "drop-from-metadata"},
 				Group:     &service.Group{ID: 7, Name: "drop-from-metadata"},
 			},
 			{
 				AccountID: 42,
 				GroupID:   11,
-				Priority:  3,
 				Group:     &service.Group{ID: 11, Name: "drop-from-metadata"},
 			},
 			{
 				AccountID: 42,
 				GroupID:   0,
-				Priority:  4,
 			},
 		},
 	}
@@ -406,7 +403,6 @@ func TestBuildSchedulerMetadataAccount_KeepsSlimGroupMembership(t *testing.T) {
 	require.Len(t, got.AccountGroups, 2)
 	require.Equal(t, int64(42), got.AccountGroups[0].AccountID)
 	require.Equal(t, int64(7), got.AccountGroups[0].GroupID)
-	require.Equal(t, 2, got.AccountGroups[0].Priority)
 	require.Nil(t, got.AccountGroups[0].Account)
 	require.Nil(t, got.AccountGroups[0].Group)
 	require.Equal(t, int64(11), got.AccountGroups[1].GroupID)
@@ -1113,8 +1109,8 @@ func schedulerCacheBenchmarkAccounts(size int) []service.Account {
 			Extra:       extra,
 			GroupIDs:    []int64{7, 9},
 			AccountGroups: []service.AccountGroup{
-				{AccountID: id, GroupID: 7, Priority: 1},
-				{AccountID: id, GroupID: 9, Priority: 2},
+				{AccountID: id, GroupID: 7},
+				{AccountID: id, GroupID: 9},
 			},
 		}
 	}

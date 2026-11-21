@@ -2907,7 +2907,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_UsesAccountPriorityWith
 			Concurrency: 1,
 			Priority:    1,
 			AccountGroups: []AccountGroup{
-				{AccountID: 21631, GroupID: groupID, Priority: 100},
+				{AccountID: 21631, GroupID: groupID},
 			},
 			GroupIDs: []int64{groupID},
 		},
@@ -2920,7 +2920,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_UsesAccountPriorityWith
 			Concurrency: 1,
 			Priority:    100000,
 			AccountGroups: []AccountGroup{
-				{AccountID: 21632, GroupID: groupID, Priority: 1},
+				{AccountID: 21632, GroupID: groupID},
 			},
 			GroupIDs: []int64{groupID},
 		},

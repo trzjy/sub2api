@@ -73,6 +73,10 @@ type Account struct {
 
 	TempUnschedulableUntil  *time.Time
 	TempUnschedulableReason string
+	// ProbeDueAt 非空表示该账号仍有待确认恢复的探测（批1 账号级停调恢复闭环）。
+	// 停调判定 = TempUnschedulableUntil > now OR ProbeDueAt != nil。
+	// 恒等于 Extra["account_recovery_probe"] 各分量 due 的最小值。
+	ProbeDueAt *time.Time
 
 	SessionWindowStart  *time.Time
 	SessionWindowEnd    *time.Time
@@ -252,6 +256,9 @@ func (a *Account) IsSchedulable() bool {
 	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
 		return false
 	}
+	if a.ProbeDueAt != nil {
+		return false
+	}
 	if a.IsParkedPendingDevinQuotaRecovery() {
 		return false
 	}
@@ -282,6 +289,12 @@ func (a *Account) IsCredentialUsableForShadow() bool {
 		return false
 	}
 	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
+		return false
+	}
+	// transport 类停调（503/5xx 等共享凭据或传输故障）在 until 到期后仍需等探测
+	// 确认恢复；此期间影子共享母账号同一被动通道，必须继续连坐（quota 类不写
+	// until 也不写 transport 分量，因此 global 429 不受影响）。
+	if a.HasPendingTransportProbe() {
 		return false
 	}
 	return true

@@ -97,6 +97,60 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 	}, nil
 }
 
+// ProbeUserQuota 是批1 恢复探测的**唯一**个人额度查询入口。
+//
+// 与 FetchQuota 的区别（外审第 4 轮 #4）：
+//   - 先用 AntigravityTokenProvider 取有效 token（必要时刷新），不直接读
+//     账号里可能已过期的 access_token；
+//   - 只调 RetrieveUserQuota 并聚合，不经过 applyUserQuota 的“目录额度”降级——
+//     FetchQuota 在个人额度失败时会保留项目池目录额度并返回成功，不能作为恢复判据。
+//
+// 返回：(recovered, err)。err != nil 表示“不确定”（保持停调）；
+// (false, nil) 表示确定无剩余额度。
+func (f *AntigravityQuotaFetcher) ProbeUserQuota(ctx context.Context, account *Account, proxyURL, model string, tokens *AntigravityTokenProvider) (bool, error) {
+	if f == nil || account == nil {
+		return false, fmt.Errorf("antigravity quota probe: account is nil")
+	}
+	if tokens == nil {
+		return false, fmt.Errorf("antigravity quota probe: token provider is nil")
+	}
+	accessToken, err := tokens.GetAccessToken(ctx, account)
+	if err != nil {
+		return false, fmt.Errorf("antigravity quota probe: get access token: %w", err)
+	}
+	if strings.TrimSpace(accessToken) == "" {
+		return false, fmt.Errorf("antigravity quota probe: empty access token")
+	}
+	client, err := antigravity.NewClient(proxyURL)
+	if err != nil {
+		return false, fmt.Errorf("antigravity quota probe: create client: %w", err)
+	}
+	projectID := account.GetCredential("project_id")
+	quotaResp, _, err := client.RetrieveUserQuota(ctx, accessToken, projectID, resolveModelsListReadLimit(f.cfg))
+	if err != nil {
+		return false, fmt.Errorf("antigravity quota probe: retrieve user quota: %w", err)
+	}
+	if quotaResp == nil || len(quotaResp.Buckets) == 0 {
+		return false, fmt.Errorf("antigravity quota probe: empty buckets")
+	}
+	aggregated := antigravity.AggregateUserQuotaBuckets(quotaResp.Buckets)
+	if len(aggregated) == 0 {
+		return false, fmt.Errorf("antigravity quota probe: empty aggregated buckets")
+	}
+	target := normalizeAntigravityModelName(strings.TrimSpace(model))
+	if target != "" {
+		if bucket, ok := aggregated[target]; ok {
+			return bucket.RemainingFraction > 0, nil
+		}
+	}
+	for _, bucket := range aggregated {
+		if bucket.RemainingFraction > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // applyUserQuota 调 retrieveUserQuota 取该账号本人的订阅配额，覆盖 AntigravityQuota 里的使用率。
 //
 // 为什么必须这一步：fetchAvailableModels 的 quotaInfo 是模型目录顺带返回的项目池水位，

@@ -150,12 +150,17 @@ func accountSideAnomalies(a *Account, now time.Time) []AccountSideAnomaly {
 		return nil
 	}
 	var out []AccountSideAnomaly
-	if a.TempUnschedulableUntil != nil && a.TempUnschedulableUntil.After(now) {
-		kind := "temp_unschedulable"
-		if isAccountCircuitBreakerTrip(a) {
-			kind = "circuit_breaker"
+	rateLimited := a.RateLimitResetAt != nil && a.RateLimitResetAt.After(now)
+	pendingProbe := a.ProbeDueAt != nil
+	if (a.TempUnschedulableUntil != nil && a.TempUnschedulableUntil.After(now)) || pendingProbe {
+		// 429 已单独走限流口径，不计入临时停调，避免同一状态被双计（批1）。
+		if !rateLimited {
+			kind := "temp_unschedulable"
+			if isAccountCircuitBreakerTrip(a) {
+				kind = "circuit_breaker"
+			}
+			out = append(out, AccountSideAnomaly{Kind: kind, Active: true})
 		}
-		out = append(out, AccountSideAnomaly{Kind: kind, Active: true})
 	}
 	if accountHasActiveModelRateLimit(a, now) {
 		out = append(out, AccountSideAnomaly{Kind: "model_rate_limited", Active: true})

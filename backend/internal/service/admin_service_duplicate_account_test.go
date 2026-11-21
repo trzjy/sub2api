@@ -131,7 +131,7 @@ func TestDuplicateAccountCopiesConfigurationAndResetsRuntimeState(t *testing.T) 
 			"crs_synced_at":                   "2026-07-15T00:00:00Z",
 		},
 		GroupIDs:                []int64{7, 3},
-		AccountGroups:           []AccountGroup{{GroupID: 7, Priority: 50}, {GroupID: 3, Priority: 7}},
+		AccountGroups:           []AccountGroup{{GroupID: 7}, {GroupID: 3}},
 		RateLimitedAt:           &rateLimitedAt,
 		RateLimitResetAt:        &rateLimitResetAt,
 		OverloadUntil:           &overloadUntil,
@@ -173,8 +173,8 @@ func TestDuplicateAccountCopiesConfigurationAndResetsRuntimeState(t *testing.T) 
 	require.Equal(t, source.LoadFactor, duplicate.LoadFactor)
 	require.Equal(t, source.GroupIDs, repo.groupsOf[duplicate.ID])
 	require.Equal(t, []AccountGroup{
-		{AccountID: duplicate.ID, GroupID: 7, Priority: 50},
-		{AccountID: duplicate.ID, GroupID: 3, Priority: 7},
+		{AccountID: duplicate.ID, GroupID: 7},
+		{AccountID: duplicate.ID, GroupID: 3},
 	}, repo.accountGroupsOf[duplicate.ID])
 
 	require.Equal(t, StatusActive, duplicate.Status)
@@ -299,7 +299,7 @@ func TestDuplicateAccountAtomicCreateFailureLeavesNoOrphan(t *testing.T) {
 		Type:          AccountTypeAPIKey,
 		Credentials:   map[string]any{"api_key": "secret"},
 		GroupIDs:      []int64{7},
-		AccountGroups: []AccountGroup{{GroupID: 7, Priority: 25}},
+		AccountGroups: []AccountGroup{{GroupID: 7}},
 	}
 	require.NoError(t, repo.Create(ctx, source))
 	repo.atomicCreateErr = errors.New("group binding failed")

@@ -335,7 +335,6 @@ func (r *quotaCapManagedSettingsRepo) Update(ctx context.Context, a *Account) er
 		execClient = tx.Client()
 	}
 	update := execClient.Account.UpdateOneID(a.ID).SetQuotaKeyID(*a.QuotaKeyID)
-	update
 	update.SetConcurrency(a.Concurrency)
 	if a.LoadFactor != nil {
 		update.SetLoadFactor(*a.LoadFactor)
@@ -740,7 +739,7 @@ func (r *quotaCapManagedSettingsRepo) BindGroups(ctx context.Context, accountID 
 		return nil
 	}
 	builders := make([]*ent.AccountGroupCreate, 0, len(groupIDs))
-	for i, gid := range groupIDs {
+	for _, gid := range groupIDs {
 		builders = append(builders, execClient.AccountGroup.Create().
 			SetAccountID(accountID).
 			SetGroupID(gid))

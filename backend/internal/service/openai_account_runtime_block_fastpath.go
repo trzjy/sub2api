@@ -574,6 +574,11 @@ func accountPersistedSchedulingCooldownActive(account *Account) bool {
 	if account.OverloadUntil != nil && now.Before(*account.OverloadUntil) {
 		return true
 	}
+	// 待确认恢复的探测同样属于「持久停调」：reset 到期不代表账号已可服务，
+	// 此时不得清掉本地运行时阻断（批1）。
+	if account.ProbeDueAt != nil {
+		return true
+	}
 	return false
 }
 

@@ -54,6 +54,19 @@ type d2ProbeObsRepo struct {
 	initialSetCalls []d2InitialSetCall
 }
 
+// 批1 通用恢复通道的桩实现：这些用例只验证既有 marker 相位，新通道不启用。
+func (r *d2ProbeObsRepo) ListProbeDueAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
+	return nil, nil
+}
+
+func (r *d2ProbeObsRepo) ClearRecoveryProbeComponent(_ context.Context, _ int64, _ string, _ int64) (bool, error) {
+	return false, nil
+}
+
+func (r *d2ProbeObsRepo) RescheduleRecoveryProbeComponent(_ context.Context, _ int64, _ string, _ int64, _ time.Time) (bool, error) {
+	return false, nil
+}
+
 func newD2ProbeObsRepo() *d2ProbeObsRepo {
 	return &d2ProbeObsRepo{
 		// accountsByID 由嵌入的 mockAccountRepoForGemini 提供 GetByID；

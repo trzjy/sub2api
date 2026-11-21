@@ -116,6 +116,11 @@ type accountHealthProbeRepository interface {
 	// 仅当当前 until 仍等于 expectedUntil 且仍处有效停调窗口时才改写 reason 并返回 true；否则
 	// 返回 false（已被接管），调用方据此终止本轮补探、保留接管者 reason。
 	BumpTempUnschedulableReasonIfGeneration(ctx context.Context, accountID int64, expectedUntil time.Time, newReason string) (bool, error)
+
+	// —— 批1 通用恢复通道（账号级停调恢复闭环）——
+	ListProbeDueAccounts(ctx context.Context, now time.Time, limit int) ([]*Account, error)
+	ClearRecoveryProbeComponent(ctx context.Context, accountID int64, component string, expectedGen int64) (bool, error)
+	RescheduleRecoveryProbeComponent(ctx context.Context, accountID int64, component string, expectedGen int64, newDue time.Time) (bool, error)
 }
 
 // AccountHealthRecoveryProbeService implements the optional Phase C probe-based
@@ -171,6 +176,15 @@ type AccountHealthRecoveryProbeService struct {
 	// 渠道陈旧收敛；未注入时不收敛。
 	channelFreshness ChannelFreshnessRefresher
 
+	// —— 批1 通用恢复通道依赖（可选注入；未注入时对应探测记 uncertain，失败关闭）——
+	// recoveryLock 是 Redis-only 的跨副本锁（leader + 账号级）。为 nil 时新通道整轮
+	// 不探测；既有 marker 路径保持原行为（仅在其非 nil 时加锁）。
+	recoveryLock      LeaderLockCache
+	balanceProbe      *AccountBalanceProbeService
+	antigravityQuota  *AntigravityQuotaFetcher
+	antigravityTokens *AntigravityTokenProvider
+	cursorEntry       *CursorAutoEntryService
+
 	// retryInFlightMu / retryInFlight 是补探账号级 in-flight 去重集合（AC-C1 异步化后
 	// 必需）：同一账号的补探正在异步执行时，新一轮 sweep 跳过该账号的本轮补探，避免
 	// 同账号补探重叠。复用既有 wg 模式，不引入新 goroutine 管理机制。
@@ -210,6 +224,25 @@ func (p *AccountHealthRecoveryProbeService) SetChannelFreshnessRefresher(r Chann
 }
 
 // SetFreshnessAlertService 注入 D4 陈旧告警服务（可选）。未注入时不做陈旧评估。
+// SetRecoveryProbeDependencies 注入批1 通用恢复通道所需的锁与额度探测依赖。
+// 全部可选：未注入时对应探测返回 uncertain（保持停调），不会误判恢复。
+func (p *AccountHealthRecoveryProbeService) SetRecoveryProbeDependencies(
+	lock LeaderLockCache,
+	balance *AccountBalanceProbeService,
+	antigravityQuota *AntigravityQuotaFetcher,
+	antigravityTokens *AntigravityTokenProvider,
+	cursor *CursorAutoEntryService,
+) {
+	if p == nil {
+		return
+	}
+	p.recoveryLock = lock
+	p.balanceProbe = balance
+	p.antigravityQuota = antigravityQuota
+	p.antigravityTokens = antigravityTokens
+	p.cursorEntry = cursor
+}
+
 func (p *AccountHealthRecoveryProbeService) SetFreshnessAlertService(svc *FreshnessAlertService) {
 	if p != nil {
 		p.freshnessAlerts = svc
@@ -282,6 +315,7 @@ func (p *AccountHealthRecoveryProbeService) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 				p.RunOnce(ctx)
+				p.RunRecoveryChannel(ctx)
 			}
 		}
 	}()
@@ -371,6 +405,7 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 		// 入队时读到的令牌。
 		pendingUntils := make(map[int64]time.Time)
 		retryInterval := p.probeRetryInterval()
+		owner := newRecoveryLockOwner()
 		for _, acc := range candidates {
 			if !p.isHealthBreakerTrip(acc, now) {
 				continue
@@ -393,8 +428,17 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 			// 账号级计数冻结的公平旋转口径已随相位退役。冻结值生命周期由
 			// clearCandidateBound（probeAccount 恢复路径 :365）负责清除，"首冻结
 			// 不覆盖"语义保持。
+			unlock, lockOK, lockErr := p.acquireAccountProbeLock(ctx, acc.ID, owner)
+			if lockErr != nil {
+				logger.L().Warn("account_probe_lock_unavailable", zap.Int64("account_id", acc.ID), zap.Error(lockErr))
+			}
+			if !lockOK {
+				continue
+			}
 			p.freezeCandidateBound(acc.ID, "", 1)
-			if stillParked := p.probeAccount(ctx, acc); stillParked {
+			stillParked := p.probeAccount(ctx, acc)
+			unlock()
+			if stillParked {
 				// 账号级 in-flight 去重（AC-C1 异步化后必需）：首探失败后才标记该账号
 				// 补探在途并入队；markRetryInFlight 返回 false（理论上方已先查
 				// isRetryInFlight，此处不会发生）仅作防御性跳过，避免同账号补探重叠。
@@ -816,6 +860,7 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 	if p == nil || p.accountRepo == nil || len(pending) == 0 {
 		return
 	}
+	owner := newRecoveryLockOwner()
 	// 入队时固定原始账号集合快照，供 defer 清理使用：pending 每轮被重赋值为仅含仍需补探
 	// 账号的 next，恢复/回读后不再停调/回读失败的账号退出队列后若仍按 pending 清理则标记
 	// 永不清，后续 sweep 凭 in-flight 标记永久跳过该账号、永不再对其探测。改为遍历入队时
@@ -917,7 +962,13 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 			go func(idx int, acc *Account, fresh *Account, attempt int, expectedUntil time.Time) {
 				defer roundWG.Done()
 				defer func() { <-sem }()
-				stillParked := p.probeAccountWithReason(ctx, fresh, expectedUntil)
+				stillParked := true
+				if unlock, lockOK, lockErr := p.acquireAccountProbeLock(ctx, acc.ID, owner); lockOK {
+					stillParked = p.probeAccountWithReason(ctx, fresh, expectedUntil)
+					unlock()
+				} else if lockErr != nil {
+					logger.L().Warn("account_probe_lock_unavailable", zap.Int64("account_id", acc.ID), zap.Error(lockErr))
+				}
 
 				// 探测后重读最新 reason，依据本次结果决定该账号下次补探间隔（首成功后加速 /
 				// 429 慢类 5min）：

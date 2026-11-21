@@ -30,6 +30,11 @@ type TempUnschedState struct {
 	// ConsecutiveSuccesses 探针恢复链的连续成功轮次计数（探针 service 专属读写，
 	// 首轮 success 置 1，第二轮 success 执行恢复并随停调清除消失；失败重置为 0）。
 	ConsecutiveSuccesses int `json:"consecutive_successes,omitempty"`
+	// Source 是该停调的所有权来源。通用恢复写 "recovery_probe"，
+	// 与 ClearTempUnschedulableIfOwned 的 LIKE 来源约束一一对应。
+	Source string `json:"source,omitempty"`
+	// RecoveryMode 是通用恢复的探测模式：echo / noecho / overload / transient / unavailable。
+	RecoveryMode string `json:"recovery_mode,omitempty"`
 }
 
 // tempUnschedIndefiniteUntil 是无限期停调的哨兵截止时间。

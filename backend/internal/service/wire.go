@@ -926,8 +926,13 @@ func ProvideAccountHealthRecoveryProbeService(
 	freshnessAlerts *FreshnessAlertService,
 	monitorService *ChannelMonitorService,
 	cursorExecution *CursorExecutionService,
+	lockCache LeaderLockCache,
+	balanceProbe *AccountBalanceProbeService,
+	antigravityQuota *AntigravityQuotaFetcher,
+	antigravityTokens *AntigravityTokenProvider,
+	cursorEntry *CursorAutoEntryService,
 ) *AccountHealthRecoveryProbeService {
-	svc := NewAccountHealthRecoveryProbeService(accountRepo, httpUpstream, cfg, rateLimitService, settingService, tlsFPProfileService)
+	svc := NewAccountHealthRecoveryProbeService(accountRecoveryProbeRepoAdapter{AccountRepository: accountRepo}, httpUpstream, cfg, rateLimitService, settingService, tlsFPProfileService)
 	// D4 双向接线：探测调度器是账号侧冻结上界的唯一来源（阈值公式读它），也是陈旧评估的
 	// 触发方（候选集合即当前异常候选）。
 	rateLimitService.SetFreshnessBoundsProvider(svc)
@@ -938,6 +943,9 @@ func ProvideAccountHealthRecoveryProbeService(
 	// 会话型探针（复用该服务既有的 SetFreshnessAlertService / SetChannelFreshnessRefresher
 	// 可选注入形态；构造器签名保持不变，既有测试一行不改）。
 	svc.SetCursorExecutionService(cursorExecution)
+	// 批1：通用恢复通道依赖（Redis-only 跨副本锁 + 三条路径共用的账号锁；
+	// 底层真实额度查询入口）。未注入时通道失败关闭，不会误判恢复。
+	svc.SetRecoveryProbeDependencies(lockCache, balanceProbe, antigravityQuota, antigravityTokens, cursorEntry)
 	svc.Start(context.Background())
 	return svc
 }

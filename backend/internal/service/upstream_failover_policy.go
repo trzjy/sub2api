@@ -1,6 +1,7 @@
 package service
 
 import (
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -152,4 +153,80 @@ func applyMappingInducedRejection(failoverErr *UpstreamFailoverError, mappingInd
 	failoverErr.Scope = GatewayFailureScopeAccount
 	failoverErr.Reason = modelMappingInducedRejectionReason
 	failoverErr.NextAccountAction = NextAccountRetry
+}
+
+// IsAccountScopedUpstreamUnavailable 判定「本次 503 是账号级不可用」，
+// 用于把这类失败登记进账号级停调池并排一次恢复探测（批1，用户裁定 3/5）。
+//
+// 判据四要素（全部来自入参，不依赖 UpstreamFailoverError 是否已填 Scope）：
+//  1. statusCode == 503；
+//  2. 不是请求级容量语义（复用 isOpenAIRequestScopedCapacityShed，同一函数，
+//     不写第二套分类）；
+//  3. 显式排除 MODEL_CAPACITY_EXHAUSTED；
+//  4. body/msg 命中账号级不可用词表。
+//
+// 不成立的 503 按请求级处理：不登记、不罚账号。
+func IsAccountScopedUpstreamUnavailable(statusCode int, responseBody []byte, upstreamMsg string) bool {
+	if statusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	msg := strings.TrimSpace(upstreamMsg)
+	if msg == "" {
+		msg = strings.TrimSpace(extractUpstreamErrorMessage(responseBody))
+	}
+	if isOpenAIRequestScopedCapacityShed(msg, responseBody) {
+		return false
+	}
+	lowerBody := strings.ToLower(string(responseBody))
+	if strings.Contains(lowerBody, "model_capacity_exhausted") {
+		return false
+	}
+	haystack := strings.ToLower(msg + " " + lowerBody)
+	for _, marker := range accountScopedUnavailableMarkers {
+		if strings.Contains(haystack, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// accountScopedUnavailableMarkers 是「账号级不可用」的固定词表。
+// 只收明确的账号/余额/额度语义，避免把共享容量或请求参数问题误判为账号故障。
+var accountScopedUnavailableMarkers = []string{
+	"no available accounts",
+	"no available account",
+	"no accounts available",
+	"account is not available",
+	"account unavailable",
+	"insufficient_quota",
+	"insufficient balance",
+	"insufficient_balance",
+	"quota exhausted",
+	"credit balance",
+	"额度不足",
+	"余额不足",
+	"额度已用尽",
+	"账号不可用",
+}
+
+// IsAccountScopedTransientUpstreamError 判定「账号级临时故障」（批1 R5）：
+// 5xx 非 503（500/502/504/520..524）或上游返回非 JSON 的 5xx / 协议错误。
+// 请求级瞬时故障（容量降载等）不登记。
+func IsAccountScopedTransientUpstreamError(statusCode int, responseBody []byte, upstreamMsg string) bool {
+	if statusCode == http.StatusServiceUnavailable {
+		return false
+	}
+	transient := false
+	switch statusCode {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout, 520, 521, 522, 523, 524:
+		transient = true
+	}
+	if !transient {
+		return false
+	}
+	msg := strings.TrimSpace(upstreamMsg)
+	if msg == "" {
+		msg = strings.TrimSpace(extractUpstreamErrorMessage(responseBody))
+	}
+	return !isOpenAIRequestScopedCapacityShed(msg, responseBody)
 }

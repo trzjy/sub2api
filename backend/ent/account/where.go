@@ -195,6 +195,11 @@ func TempUnschedulableReason(v string) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldTempUnschedulableReason, v))
 }
 
+// ProbeDueAt applies equality check predicate on the "probe_due_at" field. It's identical to ProbeDueAtEQ.
+func ProbeDueAt(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldProbeDueAt, v))
+}
+
 // SessionWindowStart applies equality check predicate on the "session_window_start" field. It's identical to SessionWindowStartEQ.
 func SessionWindowStart(v time.Time) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldSessionWindowStart, v))
@@ -1643,6 +1648,56 @@ func TempUnschedulableReasonEqualFold(v string) predicate.Account {
 // TempUnschedulableReasonContainsFold applies the ContainsFold predicate on the "temp_unschedulable_reason" field.
 func TempUnschedulableReasonContainsFold(v string) predicate.Account {
 	return predicate.Account(sql.FieldContainsFold(FieldTempUnschedulableReason, v))
+}
+
+// ProbeDueAtEQ applies the EQ predicate on the "probe_due_at" field.
+func ProbeDueAtEQ(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldProbeDueAt, v))
+}
+
+// ProbeDueAtNEQ applies the NEQ predicate on the "probe_due_at" field.
+func ProbeDueAtNEQ(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldNEQ(FieldProbeDueAt, v))
+}
+
+// ProbeDueAtIn applies the In predicate on the "probe_due_at" field.
+func ProbeDueAtIn(vs ...time.Time) predicate.Account {
+	return predicate.Account(sql.FieldIn(FieldProbeDueAt, vs...))
+}
+
+// ProbeDueAtNotIn applies the NotIn predicate on the "probe_due_at" field.
+func ProbeDueAtNotIn(vs ...time.Time) predicate.Account {
+	return predicate.Account(sql.FieldNotIn(FieldProbeDueAt, vs...))
+}
+
+// ProbeDueAtGT applies the GT predicate on the "probe_due_at" field.
+func ProbeDueAtGT(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldGT(FieldProbeDueAt, v))
+}
+
+// ProbeDueAtGTE applies the GTE predicate on the "probe_due_at" field.
+func ProbeDueAtGTE(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldGTE(FieldProbeDueAt, v))
+}
+
+// ProbeDueAtLT applies the LT predicate on the "probe_due_at" field.
+func ProbeDueAtLT(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldLT(FieldProbeDueAt, v))
+}
+
+// ProbeDueAtLTE applies the LTE predicate on the "probe_due_at" field.
+func ProbeDueAtLTE(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldLTE(FieldProbeDueAt, v))
+}
+
+// ProbeDueAtIsNil applies the IsNil predicate on the "probe_due_at" field.
+func ProbeDueAtIsNil() predicate.Account {
+	return predicate.Account(sql.FieldIsNull(FieldProbeDueAt))
+}
+
+// ProbeDueAtNotNil applies the NotNil predicate on the "probe_due_at" field.
+func ProbeDueAtNotNil() predicate.Account {
+	return predicate.Account(sql.FieldNotNull(FieldProbeDueAt))
 }
 
 // SessionWindowStartEQ applies the EQ predicate on the "session_window_start" field.

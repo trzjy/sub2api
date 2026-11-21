@@ -26,7 +26,7 @@ func TestAccountHandlerListLiteUsesCompactDTOAndETag(t *testing.T) {
 		Extra:       map[string]any{"privacy_mode": "training_off"}, Status: service.StatusActive,
 		Schedulable: true, Concurrency: 4, GroupIDs: []int64{groupID},
 		Groups:        []*service.Group{{ID: groupID, Name: "codex", Platform: service.PlatformOpenAI}},
-		AccountGroups: []service.AccountGroup{{AccountID: 501, GroupID: groupID, Priority: 2, Group: &service.Group{ID: groupID, Name: "codex", Platform: service.PlatformOpenAI}}},
+		AccountGroups: []service.AccountGroup{{AccountID: 501, GroupID: groupID, Group: &service.Group{ID: groupID, Name: "codex", Platform: service.PlatformOpenAI}}},
 		CreatedAt:     now, UpdatedAt: now,
 	}}
 
@@ -165,7 +165,7 @@ func TestAccountHandlerListReturnsSchedulerScoresPerGroup(t *testing.T) {
 			Concurrency: 10,
 			Priority:    1,
 			AccountGroups: []service.AccountGroup{
-				{AccountID: 101, GroupID: groupID, Priority: 100, Group: &service.Group{ID: groupID, Name: "openai"}},
+				{AccountID: 101, GroupID: groupID, Group: &service.Group{ID: groupID, Name: "openai"}},
 			},
 			GroupIDs:  []int64{groupID},
 			CreatedAt: now,
@@ -181,7 +181,7 @@ func TestAccountHandlerListReturnsSchedulerScoresPerGroup(t *testing.T) {
 			Concurrency: 10,
 			Priority:    100000,
 			AccountGroups: []service.AccountGroup{
-				{AccountID: 102, GroupID: groupID, Priority: 1, Group: &service.Group{ID: groupID, Name: "openai"}},
+				{AccountID: 102, GroupID: groupID, Group: &service.Group{ID: groupID, Name: "openai"}},
 			},
 			GroupIDs:  []int64{groupID},
 			CreatedAt: now,
@@ -296,7 +296,7 @@ func TestAccountHandlerListKeepsSchedulerScoreScopedToFilter(t *testing.T) {
 		Concurrency: 10,
 		Priority:    100000,
 		AccountGroups: []service.AccountGroup{
-			{AccountID: 201, GroupID: groupID, Priority: 1, Group: &service.Group{ID: groupID, Name: "openai"}},
+			{AccountID: 201, GroupID: groupID, Group: &service.Group{ID: groupID, Name: "openai"}},
 		},
 		GroupIDs:  []int64{groupID},
 		CreatedAt: now,
@@ -312,7 +312,7 @@ func TestAccountHandlerListKeepsSchedulerScoreScopedToFilter(t *testing.T) {
 		Concurrency: 10,
 		Priority:    1,
 		AccountGroups: []service.AccountGroup{
-			{AccountID: 202, GroupID: groupID, Priority: 2, Group: &service.Group{ID: groupID, Name: "openai"}},
+			{AccountID: 202, GroupID: groupID, Group: &service.Group{ID: groupID, Name: "openai"}},
 		},
 		GroupIDs:  []int64{groupID},
 		CreatedAt: now,

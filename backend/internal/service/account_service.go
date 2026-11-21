@@ -131,6 +131,7 @@ type AccountRepository interface {
 	// temp-unschedulable block whose expiry is still in the future, ordered by
 	// soonest expiry first. Used by the health-breaker recovery probe sweep.
 	ListTempUnschedulableAccounts(ctx context.Context, now time.Time, limit int) ([]*Account, error)
+
 	ClearRateLimit(ctx context.Context, id int64) error
 	ClearAntigravityQuotaScopes(ctx context.Context, id int64) error
 	ClearModelRateLimits(ctx context.Context, id int64) error

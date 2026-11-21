@@ -406,6 +406,20 @@ func (_c *AccountCreate) SetNillableTempUnschedulableReason(v *string) *AccountC
 	return _c
 }
 
+// SetProbeDueAt sets the "probe_due_at" field.
+func (_c *AccountCreate) SetProbeDueAt(v time.Time) *AccountCreate {
+	_c.mutation.SetProbeDueAt(v)
+	return _c
+}
+
+// SetNillableProbeDueAt sets the "probe_due_at" field if the given value is not nil.
+func (_c *AccountCreate) SetNillableProbeDueAt(v *time.Time) *AccountCreate {
+	if v != nil {
+		_c.SetProbeDueAt(*v)
+	}
+	return _c
+}
+
 // SetSessionWindowStart sets the "session_window_start" field.
 func (_c *AccountCreate) SetSessionWindowStart(v time.Time) *AccountCreate {
 	_c.mutation.SetSessionWindowStart(v)
@@ -880,6 +894,10 @@ func (_c *AccountCreate) createSpec() (*Account, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.TempUnschedulableReason(); ok {
 		_spec.SetField(account.FieldTempUnschedulableReason, field.TypeString, value)
 		_node.TempUnschedulableReason = &value
+	}
+	if value, ok := _c.mutation.ProbeDueAt(); ok {
+		_spec.SetField(account.FieldProbeDueAt, field.TypeTime, value)
+		_node.ProbeDueAt = &value
 	}
 	if value, ok := _c.mutation.SessionWindowStart(); ok {
 		_spec.SetField(account.FieldSessionWindowStart, field.TypeTime, value)
@@ -1523,6 +1541,24 @@ func (u *AccountUpsert) UpdateTempUnschedulableReason() *AccountUpsert {
 // ClearTempUnschedulableReason clears the value of the "temp_unschedulable_reason" field.
 func (u *AccountUpsert) ClearTempUnschedulableReason() *AccountUpsert {
 	u.SetNull(account.FieldTempUnschedulableReason)
+	return u
+}
+
+// SetProbeDueAt sets the "probe_due_at" field.
+func (u *AccountUpsert) SetProbeDueAt(v time.Time) *AccountUpsert {
+	u.Set(account.FieldProbeDueAt, v)
+	return u
+}
+
+// UpdateProbeDueAt sets the "probe_due_at" field to the value that was provided on create.
+func (u *AccountUpsert) UpdateProbeDueAt() *AccountUpsert {
+	u.SetExcluded(account.FieldProbeDueAt)
+	return u
+}
+
+// ClearProbeDueAt clears the value of the "probe_due_at" field.
+func (u *AccountUpsert) ClearProbeDueAt() *AccountUpsert {
+	u.SetNull(account.FieldProbeDueAt)
 	return u
 }
 
@@ -2205,6 +2241,27 @@ func (u *AccountUpsertOne) UpdateTempUnschedulableReason() *AccountUpsertOne {
 func (u *AccountUpsertOne) ClearTempUnschedulableReason() *AccountUpsertOne {
 	return u.Update(func(s *AccountUpsert) {
 		s.ClearTempUnschedulableReason()
+	})
+}
+
+// SetProbeDueAt sets the "probe_due_at" field.
+func (u *AccountUpsertOne) SetProbeDueAt(v time.Time) *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetProbeDueAt(v)
+	})
+}
+
+// UpdateProbeDueAt sets the "probe_due_at" field to the value that was provided on create.
+func (u *AccountUpsertOne) UpdateProbeDueAt() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateProbeDueAt()
+	})
+}
+
+// ClearProbeDueAt clears the value of the "probe_due_at" field.
+func (u *AccountUpsertOne) ClearProbeDueAt() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearProbeDueAt()
 	})
 }
 
@@ -3067,6 +3124,27 @@ func (u *AccountUpsertBulk) UpdateTempUnschedulableReason() *AccountUpsertBulk {
 func (u *AccountUpsertBulk) ClearTempUnschedulableReason() *AccountUpsertBulk {
 	return u.Update(func(s *AccountUpsert) {
 		s.ClearTempUnschedulableReason()
+	})
+}
+
+// SetProbeDueAt sets the "probe_due_at" field.
+func (u *AccountUpsertBulk) SetProbeDueAt(v time.Time) *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetProbeDueAt(v)
+	})
+}
+
+// UpdateProbeDueAt sets the "probe_due_at" field to the value that was provided on create.
+func (u *AccountUpsertBulk) UpdateProbeDueAt() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateProbeDueAt()
+	})
+}
+
+// ClearProbeDueAt clears the value of the "probe_due_at" field.
+func (u *AccountUpsertBulk) ClearProbeDueAt() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearProbeDueAt()
 	})
 }
 

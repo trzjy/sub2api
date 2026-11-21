@@ -35,6 +35,7 @@ func probeCandidateAccountRow(id int64, schedulable bool, tempUnschedulableUntil
 		id, now, now, nil, "test", nil, "openai", "", "api-key",
 		[]byte(`{"api_key":"sk-test"}`), nil, nil, []byte(`{}`), nil, nil, nil, 1, nil, 1, 1.0,
 		"active", nil, nil, nil, false, schedulable, nil, nil, nil, tempUnschedulableUntil, nil,
+		nil, /* probe_due_at */
 		nil, nil, nil, nil, "global",
 	)
 }

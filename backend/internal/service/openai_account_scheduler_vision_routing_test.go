@@ -59,13 +59,13 @@ func visionRoutingTestAccounts(groupID int64) (target, other Account) {
 	target = Account{
 		ID: 21651, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
 		Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 100,
-		AccountGroups: []AccountGroup{{AccountID: 21651, GroupID: groupID, Priority: 100}},
+		AccountGroups: []AccountGroup{{AccountID: 21651, GroupID: groupID}},
 		GroupIDs:      []int64{groupID},
 	}
 	other = Account{
 		ID: 21652, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
 		Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 1,
-		AccountGroups: []AccountGroup{{AccountID: 21652, GroupID: groupID, Priority: 1}},
+		AccountGroups: []AccountGroup{{AccountID: 21652, GroupID: groupID}},
 		GroupIDs:      []int64{groupID},
 	}
 	return target, other
@@ -323,7 +323,7 @@ func TestOpenAIAccountScheduler_VisionRouting_KillSwitchUnsetDefaultsToEnabled(t
 	repo := &fakeVisionRoutingRepository{routing: map[string][]int64{"gpt-5.1": {target.ID}}}
 	svc := newVisionRoutingTestServiceWithKillSwitch([]Account{other, target}, repo, "") // 未配置
 
-		selection, _, err := selectVisionRoutingForTest(t, svc, groupID, "gpt-5.1", true)
+	selection, _, err := selectVisionRoutingForTest(t, svc, groupID, "gpt-5.1", true)
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
@@ -417,7 +417,7 @@ func TestOpenAIGatewayService_VisionKillSwitchReadsInjectedSettingService(t *tes
 		return &openAIAdvancedSchedulerSettingRepoStub{
 			values: map[string]string{
 				openAIAdvancedSchedulerSettingKey: "true",
-				SettingKeyVisionRoutingEnabled:     "false",
+				SettingKeyVisionRoutingEnabled:    "false",
 			},
 		}
 	}
@@ -454,4 +454,3 @@ func TestOpenAIGatewayService_VisionKillSwitchReadsInjectedSettingService(t *tes
 		require.True(t, svc.isVisionRoutingEnabled(ctx), "false 只写入旁路且权威为 nil 时必须保持默认开启")
 	})
 }
-

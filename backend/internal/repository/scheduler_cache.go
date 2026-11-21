@@ -1172,6 +1172,7 @@ func buildSchedulerMetadataAccount(account service.Account) service.Account {
 		OverloadUntil:           account.OverloadUntil,
 		TempUnschedulableUntil:  account.TempUnschedulableUntil,
 		TempUnschedulableReason: account.TempUnschedulableReason,
+		ProbeDueAt:              account.ProbeDueAt,
 		SessionWindowStart:      account.SessionWindowStart,
 		SessionWindowEnd:        account.SessionWindowEnd,
 		SessionWindowStatus:     account.SessionWindowStatus,

@@ -213,6 +213,16 @@ func (Account) Fields() []ent.Field {
 			Nillable().
 			SchemaType(map[string]string{dialect.Postgres: "text"}),
 
+		// probe_due_at: 恢复探测的下次执行时刻（批1「账号级停调恢复闭环」）。
+		// 非 NULL 即表示该账号仍有待确认恢复的探测，停调判定为
+		// `temp_unschedulable_until > now() OR probe_due_at IS NOT NULL`。
+		// 值恒等于 extra.account_recovery_probe 各分量 due 的最小值（唯一不变量，
+		// 由 account_repo 的写原语在同一 UPDATE 内重算）。
+		field.Time("probe_due_at").
+			Optional().
+			Nillable().
+			SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),
+
 		// session_window_*: 会话窗口相关字段
 		// 用于管理某些需要会话时间窗口的 API（如 Claude Pro）
 		field.Time("session_window_start").

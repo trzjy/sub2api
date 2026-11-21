@@ -621,6 +621,9 @@ func tempUnschedulableActive(a *service.Account) bool {
 	if a.TempUnschedulableUntil != nil && time.Now().Before(*a.TempUnschedulableUntil) {
 		return true
 	}
+	if a.ProbeDueAt != nil {
+		return true
+	}
 	return a.IsParkedPendingDevinQuotaRecovery()
 }
 

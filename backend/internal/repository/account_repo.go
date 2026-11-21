@@ -1227,13 +1227,7 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 					dbaccount.RateLimitResetAtIsNil(),
 					dbaccount.RateLimitResetAtLTE(time.Now()),
 				),
-				dbpredicate.Account(func(s *entsql.Selector) {
-					col := s.C("temp_unschedulable_until")
-					s.Where(entsql.Or(
-						entsql.IsNull(col),
-						entsql.LTE(col, entsql.Expr("NOW()")),
-					))
-				}),
+				tempUnschedulablePredicate(),
 			)
 		// available / temp_limited 与分组列表"可用/限流账号数"的统计口径
 		// （group_repo.go 的 groupAccountAvailableSQL / groupAccountTemporarilyLimitedSQL）保持一致，
@@ -1264,28 +1258,26 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 					dbaccount.RateLimitResetAtGT(now),
 					dbaccount.OverloadUntilGT(now),
 					dbaccount.TempUnschedulableUntilGT(now),
+					dbaccount.ProbeDueAtNotNil(),
 				),
 			)
 		case "rate_limited":
 			q = q.Where(
 				dbaccount.StatusEQ(service.StatusActive),
 				dbaccount.RateLimitResetAtGT(time.Now()),
-				dbpredicate.Account(func(s *entsql.Selector) {
-					col := s.C("temp_unschedulable_until")
-					s.Where(entsql.Or(
-						entsql.IsNull(col),
-						entsql.LTE(col, entsql.Expr("NOW()")),
-					))
-				}),
+				tempUnschedulableUntilExpiredPredicate(),
 			)
 		case "temp_unschedulable":
 			q = q.Where(
 				dbaccount.StatusEQ(service.StatusActive),
 				dbpredicate.Account(func(s *entsql.Selector) {
 					col := s.C("temp_unschedulable_until")
-					s.Where(entsql.And(
-						entsql.Not(entsql.IsNull(col)),
-						entsql.GT(col, entsql.Expr("NOW()")),
+					s.Where(entsql.Or(
+						entsql.And(
+							entsql.Not(entsql.IsNull(col)),
+							entsql.GT(col, entsql.Expr("NOW()")),
+						),
+						entsql.NotNull(s.C("probe_due_at")),
 					))
 				}),
 			)
@@ -1297,13 +1289,7 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 					dbaccount.RateLimitResetAtIsNil(),
 					dbaccount.RateLimitResetAtLTE(time.Now()),
 				),
-				dbpredicate.Account(func(s *entsql.Selector) {
-					col := s.C("temp_unschedulable_until")
-					s.Where(entsql.Or(
-						entsql.IsNull(col),
-						entsql.LTE(col, entsql.Expr("NOW()")),
-					))
-				}),
+				tempUnschedulableUntilExpiredPredicate(),
 			)
 		default:
 			q = q.Where(dbaccount.StatusEQ(status))
@@ -2387,6 +2373,7 @@ func (r *accountRepository) ListSchedulableCapacityByGroupIDs(ctx context.Contex
 			AND a.status = $2
 			AND a.schedulable = TRUE
 			AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until <= $3)
+			AND a.probe_due_at IS NULL
 			AND (a.expires_at IS NULL OR a.expires_at > $3 OR a.auto_pause_on_expired = FALSE)
 			AND (a.overload_until IS NULL OR a.overload_until <= $3)
 			AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= $3)
@@ -3031,7 +3018,8 @@ func (r *accountRepository) ClearTempUnschedulableIfGeneration(ctx context.Conte
 		UPDATE accounts
 		SET temp_unschedulable_until = NULL,
 			temp_unschedulable_reason = NULL,
-			extra = `+schedStateRevisionIncrementExpr()+`,
+			probe_due_at = NULL,
+			extra = jsonb_set(COALESCE(extra, '{}'::jsonb) - 'account_recovery_probe', '{` + SchedStateRevisionExtraKey + `}', ` + schedStateRevisionNextValueExpr() + `, true),
 			updated_at = NOW()
 		WHERE id = $1
 			AND deleted_at IS NULL
@@ -5071,12 +5059,35 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 	return outAccounts, nil
 }
 
-func tempUnschedulablePredicate() dbpredicate.Account {
+// tempUnschedulableUntilExpiredPredicate 只看 temp_unschedulable_until 是否已过期
+// （不含 probe_due_at）。保留给 rate_limited / unschedulable 两个只关心人工停用与
+// 限流口径的筛选桶，避免探测排程改变它们的既有含义。
+func tempUnschedulableUntilExpiredPredicate() dbpredicate.Account {
 	return dbpredicate.Account(func(s *entsql.Selector) {
 		col := s.C("temp_unschedulable_until")
 		s.Where(entsql.Or(
 			entsql.IsNull(col),
 			entsql.LTE(col, entsql.Expr("NOW()")),
+		))
+	})
+}
+
+// tempUnschedulablePredicate 是「未被停调拦住」的统一谓词（批1）：
+//
+//	NOT (temp_unschedulable_until > now() OR probe_due_at IS NOT NULL)
+//
+// probe_due_at 非空表示仍有待确认恢复的探测，即使 until 已到期也不得回到候选池
+// （R4：到期不自动放行）。
+func tempUnschedulablePredicate() dbpredicate.Account {
+	return dbpredicate.Account(func(s *entsql.Selector) {
+		until := s.C("temp_unschedulable_until")
+		due := s.C("probe_due_at")
+		s.Where(entsql.And(
+			entsql.Or(
+				entsql.IsNull(until),
+				entsql.LTE(until, entsql.Expr("NOW()")),
+			),
+			entsql.IsNull(due),
 		))
 	})
 }
@@ -5300,6 +5311,7 @@ func accountEntityToService(m *dbent.Account) (*service.Account, error) {
 		OverloadUntil:           m.OverloadUntil,
 		TempUnschedulableUntil:  m.TempUnschedulableUntil,
 		TempUnschedulableReason: derefString(m.TempUnschedulableReason),
+		ProbeDueAt:              m.ProbeDueAt,
 		SessionWindowStart:      m.SessionWindowStart,
 		SessionWindowEnd:        m.SessionWindowEnd,
 		SessionWindowStatus:     derefString(m.SessionWindowStatus),

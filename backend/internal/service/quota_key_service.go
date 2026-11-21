@@ -1617,6 +1617,7 @@ func countUsableQuotaKeyAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int
 				account.TempUnschedulableUntilIsNil(),
 				account.TempUnschedulableUntilLTE(now),
 			),
+			account.ProbeDueAtIsNil(),
 		).
 		Count(ctx)
 }
@@ -3150,6 +3151,7 @@ func (w *quotaKeyModelWater) countsTowardWaterLevel(ctx context.Context, row *en
 		Credentials: row.Credentials, Extra: row.Extra, ExpiresAt: row.ExpiresAt, AutoPauseOnExpired: row.AutoPauseOnExpired,
 		OverloadUntil: row.OverloadUntil, RateLimitResetAt: row.RateLimitResetAt,
 		TempUnschedulableUntil: row.TempUnschedulableUntil, QuotaKeyID: row.QuotaKeyID,
+		ProbeDueAt: row.ProbeDueAt,
 	}
 	// 绑定判定读 AccountGroups：从本次已加载的组边投影，不新增查询。
 	for _, g := range row.Edges.Groups {

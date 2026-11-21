@@ -558,7 +558,13 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 		}
 		now := time.Now().UTC()
 		return float64(countAccountsByCondition(availability.Accounts, func(acc *AccountAvailability) bool {
-			return acc.TempUnschedulableUntil != nil && now.Before(*acc.TempUnschedulableUntil)
+			if acc.IsRateLimited {
+				return false
+			}
+			if acc.TempUnschedulableUntil != nil && now.Before(*acc.TempUnschedulableUntil) {
+				return true
+			}
+			return acc.ProbeDueAt != nil
 		})), true
 	case "group_rate_limit_ratio":
 		if groupID == nil || *groupID <= 0 {

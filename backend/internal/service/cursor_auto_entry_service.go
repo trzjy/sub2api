@@ -99,6 +99,11 @@ type KeyQuotaLookupInfo struct {
 	Mode            int     `json:"mode"`
 	ExpiredAt       *string `json:"expired_at"`
 	AccountsWritten int     `json:"accounts_written"`
+	// TodayRemainingCent 是今日剩余（单位：分）。nil = 上游未给。
+	// 批1 恢复探测用它判定额度是否恢复；只增字段，不改既有行为。
+	TodayRemainingCent *int `json:"today_remaining_cent,omitempty"`
+	// Unit 是额度计量单位："usd_cent"（kn_cy）| ""（shareai 等份额制）。
+	Unit string `json:"unit,omitempty"`
 }
 
 // HTTPDoer 抽象 HTTP 客户端（便于单测以替身/httptest 注入）。
@@ -581,14 +586,16 @@ func (s *CursorAutoEntryService) ProbeKeyQuota(ctx context.Context, quotaKeyID i
 		return nil, fmt.Errorf("%w: quota key %d observation produced no result", errCursorObservationStorage, quotaKeyID)
 	}
 	return &KeyQuotaLookupInfo{
-		Group:          observed.Group,
-		StatusCode:     observed.StatusCode,
-		Max:            observed.MaxQuota,
-		Used:           observed.UsedQuota,
-		DeviceCount:    observed.DeviceCount,
-		DeviceMaxCount: observed.DeviceMaxCount,
-		Mode:           observed.Mode,
-		ExpiredAt:      observed.ExpiredAt,
+		Group:              observed.Group,
+		StatusCode:         observed.StatusCode,
+		Max:                observed.MaxQuota,
+		Used:               observed.UsedQuota,
+		DeviceCount:        observed.DeviceCount,
+		DeviceMaxCount:     observed.DeviceMaxCount,
+		Mode:               observed.Mode,
+		ExpiredAt:          observed.ExpiredAt,
+		TodayRemainingCent: observed.TodayRemainingCent,
+		Unit:               observed.Unit,
 	}, nil
 }
 

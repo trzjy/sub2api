@@ -2340,6 +2340,7 @@ type AccountMutation struct {
 	overload_until              *time.Time
 	temp_unschedulable_until    *time.Time
 	temp_unschedulable_reason   *string
+	probe_due_at                *time.Time
 	session_window_start        *time.Time
 	session_window_end          *time.Time
 	session_window_status       *string
@@ -3853,6 +3854,55 @@ func (m *AccountMutation) ResetTempUnschedulableReason() {
 	delete(m.clearedFields, account.FieldTempUnschedulableReason)
 }
 
+// SetProbeDueAt sets the "probe_due_at" field.
+func (m *AccountMutation) SetProbeDueAt(t time.Time) {
+	m.probe_due_at = &t
+}
+
+// ProbeDueAt returns the value of the "probe_due_at" field in the mutation.
+func (m *AccountMutation) ProbeDueAt() (r time.Time, exists bool) {
+	v := m.probe_due_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProbeDueAt returns the old "probe_due_at" field's value of the Account entity.
+// If the Account object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccountMutation) OldProbeDueAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProbeDueAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProbeDueAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProbeDueAt: %w", err)
+	}
+	return oldValue.ProbeDueAt, nil
+}
+
+// ClearProbeDueAt clears the value of the "probe_due_at" field.
+func (m *AccountMutation) ClearProbeDueAt() {
+	m.probe_due_at = nil
+	m.clearedFields[account.FieldProbeDueAt] = struct{}{}
+}
+
+// ProbeDueAtCleared returns if the "probe_due_at" field was cleared in this mutation.
+func (m *AccountMutation) ProbeDueAtCleared() bool {
+	_, ok := m.clearedFields[account.FieldProbeDueAt]
+	return ok
+}
+
+// ResetProbeDueAt resets all changes to the "probe_due_at" field.
+func (m *AccountMutation) ResetProbeDueAt() {
+	m.probe_due_at = nil
+	delete(m.clearedFields, account.FieldProbeDueAt)
+}
+
 // SetSessionWindowStart sets the "session_window_start" field.
 func (m *AccountMutation) SetSessionWindowStart(t time.Time) {
 	m.session_window_start = &t
@@ -4375,7 +4425,7 @@ func (m *AccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccountMutation) Fields() []string {
-	fields := make([]string, 0, 35)
+	fields := make([]string, 0, 36)
 	if m.created_at != nil {
 		fields = append(fields, account.FieldCreatedAt)
 	}
@@ -4466,6 +4516,9 @@ func (m *AccountMutation) Fields() []string {
 	if m.temp_unschedulable_reason != nil {
 		fields = append(fields, account.FieldTempUnschedulableReason)
 	}
+	if m.probe_due_at != nil {
+		fields = append(fields, account.FieldProbeDueAt)
+	}
 	if m.session_window_start != nil {
 		fields = append(fields, account.FieldSessionWindowStart)
 	}
@@ -4549,6 +4602,8 @@ func (m *AccountMutation) Field(name string) (ent.Value, bool) {
 		return m.TempUnschedulableUntil()
 	case account.FieldTempUnschedulableReason:
 		return m.TempUnschedulableReason()
+	case account.FieldProbeDueAt:
+		return m.ProbeDueAt()
 	case account.FieldSessionWindowStart:
 		return m.SessionWindowStart()
 	case account.FieldSessionWindowEnd:
@@ -4628,6 +4683,8 @@ func (m *AccountMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldTempUnschedulableUntil(ctx)
 	case account.FieldTempUnschedulableReason:
 		return m.OldTempUnschedulableReason(ctx)
+	case account.FieldProbeDueAt:
+		return m.OldProbeDueAt(ctx)
 	case account.FieldSessionWindowStart:
 		return m.OldSessionWindowStart(ctx)
 	case account.FieldSessionWindowEnd:
@@ -4857,6 +4914,13 @@ func (m *AccountMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetTempUnschedulableReason(v)
 		return nil
+	case account.FieldProbeDueAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProbeDueAt(v)
+		return nil
 	case account.FieldSessionWindowStart:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -5033,6 +5097,9 @@ func (m *AccountMutation) ClearedFields() []string {
 	if m.FieldCleared(account.FieldTempUnschedulableReason) {
 		fields = append(fields, account.FieldTempUnschedulableReason)
 	}
+	if m.FieldCleared(account.FieldProbeDueAt) {
+		fields = append(fields, account.FieldProbeDueAt)
+	}
 	if m.FieldCleared(account.FieldSessionWindowStart) {
 		fields = append(fields, account.FieldSessionWindowStart)
 	}
@@ -5106,6 +5173,9 @@ func (m *AccountMutation) ClearField(name string) error {
 		return nil
 	case account.FieldTempUnschedulableReason:
 		m.ClearTempUnschedulableReason()
+		return nil
+	case account.FieldProbeDueAt:
+		m.ClearProbeDueAt()
 		return nil
 	case account.FieldSessionWindowStart:
 		m.ClearSessionWindowStart()
@@ -5216,6 +5286,9 @@ func (m *AccountMutation) ResetField(name string) error {
 		return nil
 	case account.FieldTempUnschedulableReason:
 		m.ResetTempUnschedulableReason()
+		return nil
+	case account.FieldProbeDueAt:
+		m.ResetProbeDueAt()
 		return nil
 	case account.FieldSessionWindowStart:
 		m.ResetSessionWindowStart()

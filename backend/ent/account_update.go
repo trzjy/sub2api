@@ -545,6 +545,26 @@ func (_u *AccountUpdate) ClearTempUnschedulableReason() *AccountUpdate {
 	return _u
 }
 
+// SetProbeDueAt sets the "probe_due_at" field.
+func (_u *AccountUpdate) SetProbeDueAt(v time.Time) *AccountUpdate {
+	_u.mutation.SetProbeDueAt(v)
+	return _u
+}
+
+// SetNillableProbeDueAt sets the "probe_due_at" field if the given value is not nil.
+func (_u *AccountUpdate) SetNillableProbeDueAt(v *time.Time) *AccountUpdate {
+	if v != nil {
+		_u.SetProbeDueAt(*v)
+	}
+	return _u
+}
+
+// ClearProbeDueAt clears the value of the "probe_due_at" field.
+func (_u *AccountUpdate) ClearProbeDueAt() *AccountUpdate {
+	_u.mutation.ClearProbeDueAt()
+	return _u
+}
+
 // SetSessionWindowStart sets the "session_window_start" field.
 func (_u *AccountUpdate) SetSessionWindowStart(v time.Time) *AccountUpdate {
 	_u.mutation.SetSessionWindowStart(v)
@@ -1040,6 +1060,12 @@ func (_u *AccountUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.TempUnschedulableReasonCleared() {
 		_spec.ClearField(account.FieldTempUnschedulableReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.ProbeDueAt(); ok {
+		_spec.SetField(account.FieldProbeDueAt, field.TypeTime, value)
+	}
+	if _u.mutation.ProbeDueAtCleared() {
+		_spec.ClearField(account.FieldProbeDueAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.SessionWindowStart(); ok {
 		_spec.SetField(account.FieldSessionWindowStart, field.TypeTime, value)
@@ -1829,6 +1855,26 @@ func (_u *AccountUpdateOne) ClearTempUnschedulableReason() *AccountUpdateOne {
 	return _u
 }
 
+// SetProbeDueAt sets the "probe_due_at" field.
+func (_u *AccountUpdateOne) SetProbeDueAt(v time.Time) *AccountUpdateOne {
+	_u.mutation.SetProbeDueAt(v)
+	return _u
+}
+
+// SetNillableProbeDueAt sets the "probe_due_at" field if the given value is not nil.
+func (_u *AccountUpdateOne) SetNillableProbeDueAt(v *time.Time) *AccountUpdateOne {
+	if v != nil {
+		_u.SetProbeDueAt(*v)
+	}
+	return _u
+}
+
+// ClearProbeDueAt clears the value of the "probe_due_at" field.
+func (_u *AccountUpdateOne) ClearProbeDueAt() *AccountUpdateOne {
+	_u.mutation.ClearProbeDueAt()
+	return _u
+}
+
 // SetSessionWindowStart sets the "session_window_start" field.
 func (_u *AccountUpdateOne) SetSessionWindowStart(v time.Time) *AccountUpdateOne {
 	_u.mutation.SetSessionWindowStart(v)
@@ -2354,6 +2400,12 @@ func (_u *AccountUpdateOne) sqlSave(ctx context.Context) (_node *Account, err er
 	}
 	if _u.mutation.TempUnschedulableReasonCleared() {
 		_spec.ClearField(account.FieldTempUnschedulableReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.ProbeDueAt(); ok {
+		_spec.SetField(account.FieldProbeDueAt, field.TypeTime, value)
+	}
+	if _u.mutation.ProbeDueAtCleared() {
+		_spec.ClearField(account.FieldProbeDueAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.SessionWindowStart(); ok {
 		_spec.SetField(account.FieldSessionWindowStart, field.TypeTime, value)

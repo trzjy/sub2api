@@ -50,12 +50,20 @@ func (s *OpsService) GetAccountAvailabilityStats(ctx context.Context, platformFi
 			continue
 		}
 
+		isRateLimited := acc.RateLimitResetAt != nil && now.Before(*acc.RateLimitResetAt)
+
+		// 临时停调口径（批1）：until 未到期或有待确认恢复的探测；429 仍只走
+		// 限流口径（!isRateLimited），避免同一账号被两类指标双计。
 		isTempUnsched := false
 		if acc.TempUnschedulableUntil != nil && now.Before(*acc.TempUnschedulableUntil) {
 			isTempUnsched = true
 		}
-
-		isRateLimited := acc.RateLimitResetAt != nil && now.Before(*acc.RateLimitResetAt)
+		if acc.ProbeDueAt != nil {
+			isTempUnsched = true
+		}
+		if isRateLimited {
+			isTempUnsched = false
+		}
 		isOverloaded := acc.OverloadUntil != nil && now.Before(*acc.OverloadUntil)
 		hasError := acc.Status == StatusError
 
@@ -150,6 +158,7 @@ func (s *OpsService) GetAccountAvailabilityStats(ctx context.Context, platformFi
 		if isTempUnsched && acc.TempUnschedulableUntil != nil {
 			item.TempUnschedulableUntil = acc.TempUnschedulableUntil
 		}
+		item.ProbeDueAt = acc.ProbeDueAt
 
 		account[acc.ID] = item
 	}

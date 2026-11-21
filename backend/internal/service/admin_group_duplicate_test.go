@@ -188,12 +188,12 @@ func TestDuplicateGroupCopiesConfigurationDeeplyAndResetsRuntimeState(t *testing
 		ActiveAccountCount:          8,
 		RateLimitedAccountCount:     2,
 		DuplicateOperationID:        "old-operation-must-not-copy",
-		AccountGroups:               []AccountGroup{{AccountID: 13, GroupID: 41, Priority: 37}},
+		AccountGroups:               []AccountGroup{{AccountID: 13, GroupID: 41}},
 	}
 	repo := newDuplicateGroupRepoStub(source)
 	repo.sourceBindings[source.ID] = []AccountGroup{
-		{AccountID: 13, GroupID: source.ID, Priority: 37},
-		{AccountID: 17, GroupID: source.ID, Priority: 8},
+		{AccountID: 13, GroupID: source.ID},
+		{AccountID: 17, GroupID: source.ID},
 	}
 	svc := &adminServiceImpl{groupRepo: repo, groupDuplicateRepo: repo}
 
@@ -227,8 +227,8 @@ func TestDuplicateGroupCopiesConfigurationDeeplyAndResetsRuntimeState(t *testing
 	require.NotEmpty(t, duplicate.DuplicateOperationID)
 	require.Equal(t, []int64{source.ID}, repo.createdFromSources)
 	require.Equal(t, []AccountGroup{
-		{AccountID: 13, GroupID: duplicate.ID, Priority: 37},
-		{AccountID: 17, GroupID: duplicate.ID, Priority: 8},
+		{AccountID: 13, GroupID: duplicate.ID},
+		{AccountID: 17, GroupID: duplicate.ID},
 	}, repo.createdBindings[duplicate.ID])
 
 	duplicate.ModelRouting["gpt-*"][0] = 999

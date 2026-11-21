@@ -89,4 +89,6 @@ type AccountAvailability struct {
 	OverloadRemainingSec   *int64     `json:"overload_remaining_sec"`
 	ErrorMessage           string     `json:"error_message"`
 	TempUnschedulableUntil *time.Time `json:"temp_unschedulable_until,omitempty"`
+	// ProbeDueAt 非空表示仍待确认恢复的探测（批1）。
+	ProbeDueAt *time.Time `json:"probe_due_at,omitempty"`
 }

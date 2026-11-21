@@ -76,6 +76,8 @@ const (
 	FieldTempUnschedulableUntil = "temp_unschedulable_until"
 	// FieldTempUnschedulableReason holds the string denoting the temp_unschedulable_reason field in the database.
 	FieldTempUnschedulableReason = "temp_unschedulable_reason"
+	// FieldProbeDueAt holds the string denoting the probe_due_at field in the database.
+	FieldProbeDueAt = "probe_due_at"
 	// FieldSessionWindowStart holds the string denoting the session_window_start field in the database.
 	FieldSessionWindowStart = "session_window_start"
 	// FieldSessionWindowEnd holds the string denoting the session_window_end field in the database.
@@ -178,6 +180,7 @@ var Columns = []string{
 	FieldOverloadUntil,
 	FieldTempUnschedulableUntil,
 	FieldTempUnschedulableReason,
+	FieldProbeDueAt,
 	FieldSessionWindowStart,
 	FieldSessionWindowEnd,
 	FieldSessionWindowStatus,
@@ -424,6 +427,11 @@ func ByTempUnschedulableUntil(opts ...sql.OrderTermOption) OrderOption {
 // ByTempUnschedulableReason orders the results by the temp_unschedulable_reason field.
 func ByTempUnschedulableReason(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTempUnschedulableReason, opts...).ToFunc()
+}
+
+// ByProbeDueAt orders the results by the probe_due_at field.
+func ByProbeDueAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldProbeDueAt, opts...).ToFunc()
 }
 
 // BySessionWindowStart orders the results by the session_window_start field.

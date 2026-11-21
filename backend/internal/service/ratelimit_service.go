@@ -449,6 +449,10 @@ func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Accoun
 // HandleUpstreamError 处理上游错误响应，标记账号状态
 // 返回是否应该停止该账号的调度
 func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) (shouldDisable bool) {
+	// 批1：5xx 的账号级停调登记（503 5 分钟 / 其它 5xx 30 秒）。
+	// 必须早于池模式与自定义错误码早退：这两类账号同样需要进入停调池。
+	// 判据不以 RetryableOnSameAccount 为前置。
+	s.registerAccountScopedStop(ctx, account, statusCode, responseBody)
 	ctx = withTempUnschedulableModel(ctx, requestedModel)
 	// Team 联动熔断必须先于池模式/自定义错误码/临时不可调度的各类早退；
 	// 同请求内与 fastpath 调用点的重复触发由方法内去重吸收。
@@ -1618,6 +1622,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 				return
 			}
+			s.scheduleQuotaRecoveryProbe(ctx, account, *resetAt, recoveryModeEcho)
 			slog.Info("openai_account_rate_limited", "account_id", account.ID, "reset_at", *resetAt)
 			return
 		}
@@ -1641,6 +1646,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			slog.Warn("rate_limit_update_session_window_failed", "account_id", account.ID, "error", err)
 		}
 
+		s.scheduleQuotaRecoveryProbe(ctx, account, result.resetAt, recoveryModeEcho)
 		slog.Info("anthropic_account_rate_limited", "account_id", account.ID, "reset_at", result.resetAt, "reset_in", time.Until(result.resetAt).Truncate(time.Second))
 		return
 	}
@@ -1735,6 +1741,7 @@ func (s *RateLimitService) apply429FallbackRateLimit(ctx context.Context, accoun
 	if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetAt); err != nil {
 		slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 	}
+	s.scheduleQuotaRecoveryProbe(ctx, account, resetAt, recoveryModeNoEcho)
 }
 
 func (s *RateLimitService) get429FallbackCooldown(ctx context.Context, account *Account) (time.Duration, bool) {
@@ -2501,6 +2508,7 @@ func (s *RateLimitService) handle529(ctx context.Context, account *Account) {
 		return
 	}
 
+	s.scheduleQuotaRecoveryProbe(ctx, account, until, recoveryModeOverload)
 	slog.Info("account_overloaded", "account_id", account.ID, "until", until)
 }
 
