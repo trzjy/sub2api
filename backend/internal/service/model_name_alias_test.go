@@ -31,8 +31,8 @@ func TestNormalizeModelName(t *testing.T) {
 		"deepseek-flash":            "deepseek-flash",
 		"deepseek-v4-pro-0813":      "deepseek-v4-pro",
 		"deepseek-v4-pro-ga-260813": "deepseek-v4-pro",
-		// 规则三：缺版本段（用户确认一并归一）
-		"claude-sonnet-5": "claude-sonnet-5-5",
+		// claude-sonnet-5 与 claude-sonnet-5-5 是不同模型，不做归一（2026-11-21 裁定）
+		"claude-sonnet-5": "claude-sonnet-5",
 		// 缺分隔横线
 		"claude-fable5": "claude-fable-5",
 
@@ -109,7 +109,7 @@ func TestSameModelNameFamily(t *testing.T) {
 	require.True(t, SameModelNameFamily("claude-fable-5.1", "claude-fable-5-1"))
 	require.True(t, SameModelNameFamily("deepseek-v4.1-flash", "deepseek-v4.1-flash-1017"))
 	require.True(t, SameModelNameFamily("deepseek-v4-pro", "deepseek-v4-pro-0813"))
-	require.True(t, SameModelNameFamily("claude-sonnet-5", "claude-sonnet-5-5"))
+	require.False(t, SameModelNameFamily("claude-sonnet-5", "claude-sonnet-5-5"))
 
 	// 不同模型绝不能判成一家。
 	require.False(t, SameModelNameFamily("claude-fable-5", "claude-fable-5-1"))

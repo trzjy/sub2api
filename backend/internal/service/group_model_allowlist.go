@@ -39,8 +39,6 @@ var retiredModelNames = map[string]struct{}{
 	"deepseek-v4-1-flash": {},
 	// 2026-11-21 Claude 裁定：claude-fable-5.1 统一使用 claude-fable-5-1。
 	"claude-fable-5.1": {},
-	// 既有裁定（model_name_alias.go）：claude-sonnet-5 归到 claude-sonnet-5-5。
-	"claude-sonnet-5": {},
 	// 2026-11-05 二次裁定：`deepseek-v4-flash` 是官方已退役的 legacy 名（模型已停，
 	// 由 V4.1-Flash-1017 承接）。爹要求「哪怕上游还提供，也不再请求、从清单永久删除」。
 	// 实测：全站近 7 天零调用、分组 60 零 key，下线零影响。
@@ -227,8 +225,10 @@ func groupAllowlistPatternMatches(pattern, model string) bool {
 }
 
 // groupModelAllowlistCandidates 返回客户端模型名在白名单匹配中的候选形式（均已小写）。
-// 准入只按配置写法匹配（含协议级等价规则：models/ 前缀、-thinking 后缀、OpenAI
-// 推理后缀、Claude Code [1m] 长上下文档），模型别名族仅用于账号映射查找与响应回显。
+// 准入匹配包含协议级等价规则（models/ 前缀、-thinking 后缀、OpenAI 推理后缀、
+// Claude Code [1m] 长上下文档）与既有模型别名族（Claude 点号/缺版本段等历史写法）。
+// DeepSeek 旧写法不受别名族影响——它们在 retiredModelNames 里由 Allows 首行
+// 优先拦截（RejectsRetiredModel 不走别名展开）。
 func groupModelAllowlistCandidates(model string) []string {
 	candidates := make([]string, 0, 4)
 	add := func(value string) {
@@ -245,6 +245,12 @@ func groupModelAllowlistCandidates(model string) []string {
 	}
 
 	for _, candidateModel := range []string{model, normalizeClaudeCodeLongContextModel(model)} {
+		// 模型名别名族（见 model_name_alias.go）：保留既有历史写法兼容
+		// （Claude 点号/缺版本段等）。DeepSeek 旧写法不依赖本展开——它们在
+		// retiredModelNames 里由 Allows 首行优先拦截，不受白名单别名影响。
+		for _, alias := range ModelNameAliases(candidateModel) {
+			add(alias)
+		}
 		add(strings.TrimPrefix(candidateModel, "models/"))
 		add(claude.NormalizeModelID(strings.TrimSuffix(candidateModel, "-thinking")))
 		add(NormalizeOpenAICompatRequestedModel(candidateModel))
@@ -252,12 +258,30 @@ func groupModelAllowlistCandidates(model string) []string {
 	return candidates
 }
 
-// RejectsRetiredModel 报告该模型名是否命中已下线名单（覆盖其各协议候选形式）。
-// 与 Allows 的准入判定共用候选生成，保证 `models/` 前缀、`[1m]`、`-thinking`
-// 等写法无法通过变体绕过下线裁定。
+// RejectsRetiredModel 报告该模型名是否命中已下线名单（覆盖其各协议候选形式：
+// models/ 前缀、[1m] 长上下文、-thinking 后缀、OpenAI 兼容归一）。
+// **不含模型别名族展开**：否则官方名会展开出族内旧名，被自己的旧名连带拒掉。
 func RejectsRetiredModel(model string) bool {
-	for _, candidate := range groupModelAllowlistCandidates(model) {
-		if IsRetiredModelName(candidate) {
+	checked := make(map[string]struct{}, 6)
+	check := func(value string) bool {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			return false
+		}
+		if _, ok := checked[value]; ok {
+			return false
+		}
+		checked[value] = struct{}{}
+		return IsRetiredModelName(value)
+	}
+	if check(model) {
+		return true
+	}
+	for _, candidateModel := range []string{model, normalizeClaudeCodeLongContextModel(model)} {
+		if check(candidateModel) ||
+			check(strings.TrimPrefix(candidateModel, "models/")) ||
+			check(claude.NormalizeModelID(strings.TrimSuffix(candidateModel, "-thinking"))) ||
+			check(NormalizeOpenAICompatRequestedModel(candidateModel)) {
 			return true
 		}
 	}

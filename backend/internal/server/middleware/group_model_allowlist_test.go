@@ -612,10 +612,10 @@ func TestGroupModelAllowlistWildcardEnforcesRetired(t *testing.T) {
 	})
 }
 
-// 精确白名单下的下线别名写法也必须拒绝（retired 优先于白名单匹配）。
+// 精确白名单下的下线写法也必须拒绝（retired 优先于白名单匹配）。
 func TestGroupModelAllowlistExactListRejectsRetiredAlias(t *testing.T) {
-	router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(true, "claude-fable-5-1"), "/v1")
-	w := doJSON(t, router, http.MethodPost, "/v1/messages", `{"model":"claude-fable-5.1"}`)
+	router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(true, "deepseek-flash"), "/v1")
+	w := doJSON(t, router, http.MethodPost, "/v1/messages", `{"model":"deepseek-v4.1-flash"}`)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for retired alias form, got %d: %s", w.Code, w.Body.String())
 	}

@@ -168,7 +168,9 @@ func TestGroupModelAllowlistRetiredModels(t *testing.T) {
 		// retired 优先于通配：即便白名单用 deepseek-* 通配，旧名仍被拒。
 		{name: "retired beats wildcard", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-*"}}, model: "deepseek-v4.1-flash", want: false},
 		{name: "claude-fable-5.1 retired", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"claude-fable-5-1"}}, model: "claude-fable-5.1", want: false},
-		{name: "claude-sonnet-5 retired", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"claude-sonnet-5-5"}}, model: "claude-sonnet-5", want: false},
+		// claude-sonnet-5 与 claude-sonnet-5-5 是不同模型：白名单只写 sonnet-5-5 时
+		// sonnet-5 不命中（不再走别名归一）。
+		{name: "claude-sonnet-5 not sonnet-5-5", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"claude-sonnet-5-5"}}, model: "claude-sonnet-5", want: false},
 	}
 
 	for _, tt := range tests {

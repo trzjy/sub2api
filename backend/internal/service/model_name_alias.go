@@ -16,7 +16,7 @@ import "strings"
 // 用户裁定：
 //   - Claude 版本号统一用 `-`，不用 `.`；
 //   - DeepSeek 去掉尾部版本后缀，归到 `deepseek-v4-pro` / `deepseek-flash`；
-//   - `claude-sonnet-5`（缺版本段）一并归到 `claude-sonnet-5-5`。
+//   - `claude-sonnet-5` 与 `claude-sonnet-5-5` 是两个不同模型，不做归一。
 //
 // 关键设计：**只归一"用于查找的名字"，绝不改发给上游的 model**。
 // 账号映射里配的上游真名（例如 `deepseek-v4.1-flash-1017`、`hy3`、
@@ -47,8 +47,8 @@ var modelAliasFamilies = []modelAliasFamily{
 	// Claude：版本号点号 → 横线（用户裁定：统一用 -）。
 	{canonical: "claude-fable-5-1", aliases: []string{"claude-fable-5.1"}},
 	{canonical: "claude-haiku-5-5", aliases: []string{"claude-haiku-5.5"}},
-	// Claude：缺版本段（用户裁定：claude-sonnet-5 一并归到 claude-sonnet-5-5）。
-	{canonical: "claude-sonnet-5-5", aliases: []string{"claude-sonnet-5"}},
+	// 注意：`claude-sonnet-5` 与 `claude-sonnet-5-5` 是两个不同模型，不是别名关系
+	// （2026-11-21 用户裁定），不得互相归一。
 	// Claude：缺分隔横线的写法。
 	{canonical: "claude-fable-5", aliases: []string{"claude-fable5"}},
 	// DeepSeek flash：对外统一写法为官方现行调用名 `deepseek-flash`
@@ -131,9 +131,15 @@ func responseModelName(name string) string {
 	return PublicModelName(trimmed)
 }
 
-// responseModelForClient 在已知"客户端请求名"时决定回显名。
-// 请求名参数保留以兼容既有调用方；回显一律走 responseModelName 归一到对外名。
+// responseModelForClient 在已知"客户端请求名"时决定回显名：
+// 请求名与上游回显同族、且请求名未被下线时沿用请求名；否则走 responseModelName。
+// 这样非 DeepSeek 家族（如 Claude 点号写法）保持原有回显行为，DeepSeek 旧名
+// 因已下线一律折到对外名。
 func responseModelForClient(echoed, requestedModel string) string {
+	requested := strings.TrimSpace(requestedModel)
+	if requested != "" && !IsRetiredModelName(requested) && SameModelNameFamily(echoed, requested) {
+		return requested
+	}
 	return responseModelName(echoed)
 }
 
