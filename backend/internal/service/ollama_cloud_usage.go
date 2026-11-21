@@ -456,10 +456,18 @@ func (s *OllamaCloudUsageService) Start() {
 		return
 	}
 	s.started = true
-	s.wg.Add(2)
+	s.wg.Add(1)
 	s.mu.Unlock()
-	go s.runLoop()
+	// probeLoop（429 响应式探测，定义在 ollama_cloud_usage_rate_limit_probe.go）保留自持
+	// goroutine；周期 RunDue 改由统一 tick 驱动。
 	go s.probeLoop()
+	DefaultBackgroundTickRegistry().Register(backgroundTickTask{
+		name:     "ollama_cloud_usage",
+		cadence:  ollamaCloudUsageCycleInterval,
+		maxRun:   ollamaCloudUsageLeaderLockTTL,
+		firstRun: tickFirstRunImmediate,
+		run:      func(ctx context.Context) error { return s.RunDue(ctx) },
+	})
 }
 
 func (s *OllamaCloudUsageService) Stop() {
@@ -472,26 +480,10 @@ func (s *OllamaCloudUsageService) Stop() {
 		return
 	}
 	s.stopped = true
+	DefaultBackgroundTickRegistry().Unregister("ollama_cloud_usage")
 	s.parentCancel()
 	s.mu.Unlock()
 	s.wg.Wait()
-}
-
-func (s *OllamaCloudUsageService) runLoop() {
-	defer s.wg.Done()
-	_ = s.RunDue(s.parentCtx)
-	ticker := time.NewTicker(ollamaCloudUsageCycleInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.parentCtx.Done():
-			return
-		case <-ticker.C:
-			if err := s.RunDue(s.parentCtx); err != nil {
-				logger.LegacyPrintf("service.ollama_cloud_usage", "run_due_failed: err=%v", err)
-			}
-		}
-	}
 }
 
 func (s *OllamaCloudUsageService) GetSettings(ctx context.Context) (*OllamaCloudUsageSettings, error) {
@@ -717,6 +709,15 @@ func (s *OllamaCloudUsageService) SetAutoRefresh(ctx context.Context, accountID 
 }
 
 func (s *OllamaCloudUsageService) Refresh(ctx context.Context, accountID int64) (*OllamaCloudUsageState, error) {
+	// 批4：手动刷新与周期 RunDue 走同一把账号锁（外审 #4）；争锁则以明确错误拒绝。
+	release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	if !ok {
+		return nil, ErrRecoveryProbeAccountBusy
+	}
+	defer release()
 	settings, err := s.GetSettings(ctx)
 	if err != nil {
 		return nil, err
@@ -776,6 +777,12 @@ func (s *OllamaCloudUsageService) RunDue(ctx context.Context) error {
 		accountID := account.ID
 		expected := account
 		group.Go(func() error {
+			// 批4：单账号探测包裹批1账号锁，争锁/后端不可用则本轮跳过该账号。
+			release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
+			if lockErr != nil || !ok {
+				return nil
+			}
+			defer release()
 			if _, refreshErr := s.refreshAccount(ctx, accountID, settings, true); refreshErr != nil {
 				if errors.Is(refreshErr, ErrOllamaCloudUsageIdentityChanged) {
 					if disableErr := writer.DisableOllamaCloudUsageAutoRefresh(ctx, &expected); disableErr != nil {

@@ -101,30 +101,20 @@ func (s *AccountBalanceProbeCheckService) Start() {
 	if s == nil || s.accountRepo == nil || s.probe == nil || s.interval <= 0 {
 		return
 	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-s.parentCtx.Done():
-				return
-			case <-s.stopCh:
-				return
-			case <-ticker.C:
-				if err := s.RunDue(s.parentCtx); err != nil {
-					log.Printf("[APIKeyBalanceProbe] run due failed: %v", err)
-				}
-			}
-		}
-	}()
+	DefaultBackgroundTickRegistry().Register(backgroundTickTask{
+		name:     "account_balance_snapshot",
+		cadence:  s.interval,
+		maxRun:   balanceProbeLeaderLockTTL,
+		firstRun: tickFirstRunAfterCadence,
+		run:      func(ctx context.Context) error { return s.RunDue(ctx) },
+	})
 }
 
 func (s *AccountBalanceProbeCheckService) Stop() {
 	if s == nil {
 		return
 	}
+	DefaultBackgroundTickRegistry().Unregister("account_balance_snapshot")
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 		s.parentCancel()
@@ -151,6 +141,12 @@ func (s *AccountBalanceProbeCheckService) RunDue(ctx context.Context) error {
 	for i := range accounts {
 		accountID := accounts[i].ID
 		group.Go(func() error {
+			// 批4：单账号探测包裹批1账号锁，争锁/后端不可用则本轮跳过该账号。
+			release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
+			if lockErr != nil || !ok {
+				return nil
+			}
+			defer release()
 			if probeErr := s.probeAndPersist(ctx, accountID); probeErr != nil {
 				log.Printf("[APIKeyBalanceProbe] probe failed: account_id=%d err=%v", accountID, probeErr)
 			}

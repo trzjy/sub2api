@@ -17,15 +17,15 @@ import (
 // 配置 gate.codebuddy.quota_check_enabled 关闭时不启动（默认关闭——计费字段需真实 token
 // 抓包确认后再生产启用，见 PR3 计划 §7.1）；interval<=0 同样不启动。
 type CodeBuddyQuotaCheckService struct {
-	accountRepo   AccountRepository
-	quotaService  *CodeBuddyQuotaService
-	rateLimitSvc  *RateLimitService
-	cfg           *config.Config
-	interval      time.Duration
-	stopCh        chan struct{}
-	stopOnce      sync.Once
-	wg            sync.WaitGroup
-	mu            sync.Mutex
+	accountRepo    AccountRepository
+	quotaService   *CodeBuddyQuotaService
+	rateLimitSvc   *RateLimitService
+	cfg            *config.Config
+	interval       time.Duration
+	stopCh         chan struct{}
+	stopOnce       sync.Once
+	wg             sync.WaitGroup
+	mu             sync.Mutex
 	lastCheckinDay map[int64]string
 }
 
@@ -59,22 +59,17 @@ func (s *CodeBuddyQuotaCheckService) Start() {
 	if s.interval <= 0 {
 		return
 	}
-	log.Printf("[CodeBuddyQuota] started (interval=%s)", s.interval)
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
-		// 启动后先等一个周期再首次探测，避免与进程启动峰重叠。
-		for {
-			select {
-			case <-ticker.C:
-				s.runOnce()
-			case <-s.stopCh:
-				return
-			}
-		}
-	}()
+	log.Printf("[CodeBuddyQuota] registered unified tick (interval=%s)", s.interval)
+	DefaultBackgroundTickRegistry().Register(backgroundTickTask{
+		name:     "codebuddy_quota",
+		cadence:  s.interval,
+		maxRun:   5 * time.Minute,
+		firstRun: tickFirstRunAfterCadence, // 启动后先等一个周期再首次探测，避免与启动峰重叠
+		run: func(context.Context) error {
+			s.runOnce()
+			return nil
+		},
+	})
 }
 
 // Stop 停止周期探测并等待在途任务完成。
@@ -82,6 +77,7 @@ func (s *CodeBuddyQuotaCheckService) Stop() {
 	if s == nil {
 		return
 	}
+	DefaultBackgroundTickRegistry().Unregister("codebuddy_quota")
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 	})
@@ -102,23 +98,32 @@ func (s *CodeBuddyQuotaCheckService) runOnce() {
 		if !account.IsActive() || account.Type != AccountTypeOAuth {
 			continue
 		}
-		// 探测积分额度并落 Extra 快照（失败不阻断后续账号）。
-		if _, qErr := s.quotaService.QueryUsage(ctx, account.ID); qErr != nil {
-			log.Printf("[CodeBuddyQuota] probe account %d failed: %v", account.ID, qErr)
-		}
-		// 每日签到（默认关；避免重复签到按自然日去重）。
-		if s.cfg.Gateway.CodeBuddy.DailyCheckinEnabled {
-			s.maybeDailyCheckin(ctx, account)
-		}
-		// 重新载入（快照已落库）后应用阈值停调。
-		fresh, getErr := s.accountRepo.GetByID(ctx, account.ID)
-		if getErr != nil {
-			log.Printf("[CodeBuddyQuota] reload account %d failed: %v", account.ID, getErr)
+		// 批4：账号锁覆盖该账号的整个探测块（探测/签到/重载/阈值停调）；争锁或
+		// 后端不可用则本轮跳过该账号。
+		release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, account.ID)
+		if lockErr != nil || !ok {
 			continue
 		}
-		if s.rateLimitSvc.ApplyAccountSchedulingThreshold(ctx, fresh) {
-			log.Printf("[CodeBuddyQuota] account %d paused by scheduling threshold", account.ID)
-		}
+		func() {
+			defer release()
+			// 探测积分额度并落 Extra 快照（失败不阻断后续账号）。
+			if _, qErr := s.quotaService.QueryUsage(ctx, account.ID); qErr != nil {
+				log.Printf("[CodeBuddyQuota] probe account %d failed: %v", account.ID, qErr)
+			}
+			// 每日签到（默认关；避免重复签到按自然日去重）。
+			if s.cfg.Gateway.CodeBuddy.DailyCheckinEnabled {
+				s.maybeDailyCheckin(ctx, account)
+			}
+			// 重新载入（快照已落库）后应用阈值停调。
+			fresh, getErr := s.accountRepo.GetByID(ctx, account.ID)
+			if getErr != nil {
+				log.Printf("[CodeBuddyQuota] reload account %d failed: %v", account.ID, getErr)
+				return
+			}
+			if s.rateLimitSvc.ApplyAccountSchedulingThreshold(ctx, fresh) {
+				log.Printf("[CodeBuddyQuota] account %d paused by scheduling threshold", account.ID)
+			}
+		}()
 	}
 }
 

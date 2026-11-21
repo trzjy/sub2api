@@ -400,20 +400,18 @@ func (s *CNQuotaLifecycleService) Start() {
 	if s == nil || s.accountRepo == nil {
 		return
 	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		ticker := time.NewTicker(quotaLifecycleSweepInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				s.sweepOnce()
-			case <-s.stopCh:
-				return
-			}
-		}
-	}()
+	DefaultBackgroundTickRegistry().Register(backgroundTickTask{
+		name:     "cn_quota_lifecycle",
+		cadence:  quotaLifecycleSweepInterval,
+		maxRun:   quotaLifecycleSweepInterval,
+		firstRun: tickFirstRunAfterCadence,
+		run: func(context.Context) error {
+			// sweepOnce 自建 5 分钟背景 ctx 并记录 RunRecoverySweep 聚合错误，保持既有
+			// 错误可见性与超时封装（不走注册表静默）。
+			s.sweepOnce()
+			return nil
+		},
+	})
 }
 
 // Stop 停止后台循环。
@@ -421,6 +419,9 @@ func (s *CNQuotaLifecycleService) Stop() {
 	if s == nil {
 		return
 	}
+	// 批4：先关闭统一 tick 对该任务的派发窗口（关停竞态：cmd/server 停止顺序为六源
+	// 先停、健康服务后停，注册表仍可能派发）。
+	DefaultBackgroundTickRegistry().Unregister("cn_quota_lifecycle")
 	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.wg.Wait()
 }
@@ -835,33 +836,42 @@ func (s *CNQuotaLifecycleService) RunRecoverySweep(ctx context.Context) error {
 		if account == nil || ctx.Err() != nil {
 			continue
 		}
-		// 每账号一次快照，函数内沿用，避免反复加锁拷贝（崩溃面：sweep 与并发写交错）。
-		extra := account.SnapshotExtra()
-		// F3 恢复链候选：独立处理分支，不受 cnQuotaLifecycleProviderOf 过滤影响，
-		// 不与 lifecycle 状态机混用（F3 键与 cnQuota_lifecycle 状态键互斥消费）。
-		if rec, ok := http403RecoveryFromExtra(extra); ok {
-			if s.f3Repo != nil {
-				if err := s.sweepF3RecoveryAccount(ctx, account, rec, now); err != nil && firstErr == nil {
-					firstErr = err
-				}
+		// 批4：单账号探测包裹批1账号锁（含 F3 分支与 TH/Kira 确认探针）；争锁或
+		// 后端不可用则本轮跳过该账号，其余账号照常。
+		func() {
+			release, locked, lockErr := acquireRecoveryAccountProbeLock(ctx, account.ID)
+			if lockErr != nil || !locked {
+				return
 			}
-			continue
-		}
-		if cnQuotaLifecycleProviderOf(account) == "" {
-			continue
-		}
-		state, ok := cnQuotaLifecycleStateFromExtra(extra)
-		if !ok || state.State == cnQuotaLifecycleStateRecovered {
-			// 已恢复/无状态记录：退出循环跟踪（恢复路径负责清停调，这里只兜孤儿跟踪项）。
-			s.untrack(account.ID)
-			continue
-		}
-		if !state.probeDue(now, quotaLifecycleSweepInterval) && !s.sweepTHResidualRecoveryDue(account, state, now) {
-			continue
-		}
-		if err := s.sweepProbeAccount(ctx, account, state, now); err != nil && firstErr == nil {
-			firstErr = err
-		}
+			defer release()
+			// 每账号一次快照，函数内沿用，避免反复加锁拷贝（崩溃面：sweep 与并发写交错）。
+			extra := account.SnapshotExtra()
+			// F3 恢复链候选：独立处理分支，不受 cnQuotaLifecycleProviderOf 过滤影响，
+			// 不与 lifecycle 状态机混用（F3 键与 cnQuota_lifecycle 状态键互斥消费）。
+			if rec, ok := http403RecoveryFromExtra(extra); ok {
+				if s.f3Repo != nil {
+					if err := s.sweepF3RecoveryAccount(ctx, account, rec, now); err != nil && firstErr == nil {
+						firstErr = err
+					}
+				}
+				return
+			}
+			if cnQuotaLifecycleProviderOf(account) == "" {
+				return
+			}
+			state, ok := cnQuotaLifecycleStateFromExtra(extra)
+			if !ok || state.State == cnQuotaLifecycleStateRecovered {
+				// 已恢复/无状态记录：退出循环跟踪（恢复路径负责清停调，这里只兜孤儿跟踪项）。
+				s.untrack(account.ID)
+				return
+			}
+			if !state.probeDue(now, quotaLifecycleSweepInterval) && !s.sweepTHResidualRecoveryDue(account, state, now) {
+				return
+			}
+			if err := s.sweepProbeAccount(ctx, account, state, now); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}()
 	}
 	// 存量初始化（R8-F1）：一次性、幂等的存量 403 error 解析收编（每轮都跑该查询，
 	// 查不到即空转；候选查询排除已持有 http_403_recovery 键的账号，天然幂等）。

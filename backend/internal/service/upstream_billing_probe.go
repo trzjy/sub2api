@@ -316,9 +316,14 @@ func (s *UpstreamBillingProbeService) Start() {
 		return
 	}
 	s.started = true
-	s.wg.Add(1)
 	s.mu.Unlock()
-	go s.runLoop()
+	DefaultBackgroundTickRegistry().Register(backgroundTickTask{
+		name:     "upstream_billing_probe",
+		cadence:  upstreamBillingProbeCycleInterval,
+		maxRun:   upstreamBillingProbeLeaderLockTTL,
+		firstRun: tickFirstRunImmediate,
+		run:      func(ctx context.Context) error { return s.RunDue(ctx) },
+	})
 }
 
 func (s *UpstreamBillingProbeService) Stop() {
@@ -331,26 +336,10 @@ func (s *UpstreamBillingProbeService) Stop() {
 		return
 	}
 	s.stopped = true
+	DefaultBackgroundTickRegistry().Unregister("upstream_billing_probe")
 	s.parentCancel()
 	s.mu.Unlock()
 	s.wg.Wait()
-}
-
-func (s *UpstreamBillingProbeService) runLoop() {
-	defer s.wg.Done()
-	_ = s.RunDue(s.parentCtx)
-	ticker := time.NewTicker(upstreamBillingProbeCycleInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.parentCtx.Done():
-			return
-		case <-ticker.C:
-			if err := s.RunDue(s.parentCtx); err != nil {
-				logger.LegacyPrintf("service.upstream_billing_probe", "run_due_failed: err=%v", err)
-			}
-		}
-	}
 }
 
 // RunDue executes at most one bounded batch of due accounts.
@@ -428,6 +417,12 @@ func (s *UpstreamBillingProbeService) RunDue(ctx context.Context) error {
 	for i := range due {
 		accountID := due[i].ID
 		group.Go(func() error {
+			// 批4：单账号探测包裹批1账号锁，争锁/后端不可用则本轮跳过该账号。
+			release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
+			if lockErr != nil || !ok {
+				return nil
+			}
+			defer release()
 			if _, probeErr := s.probeScheduledAccount(ctx, accountID, settings.IntervalMinutes); probeErr != nil {
 				logger.LegacyPrintf("service.upstream_billing_probe", "probe_due_failed: account_id=%d err=%v", accountID, probeErr)
 			}
@@ -469,6 +464,15 @@ func (s *UpstreamBillingProbeService) ProbeAccount(ctx context.Context, accountI
 	if s == nil || s.accountRepo == nil {
 		return nil, ErrUpstreamBillingProbeUnavailable
 	}
+	// 批4：手动探测与周期 RunDue 走同一把账号锁（外审 #4）；争锁则以明确错误拒绝。
+	release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	if !ok {
+		return nil, ErrRecoveryProbeAccountBusy
+	}
+	defer release()
 	settings, err := s.getSettings(ctx)
 	if err != nil {
 		return nil, err
@@ -548,6 +552,13 @@ func (s *UpstreamBillingProbeService) ProbeAccounts(ctx context.Context, account
 		i, accountID := i, accountID
 		results[i].AccountID = accountID
 		group.Go(func() error {
+			// 批4：手动批量探测与周期 RunDue 走同一把账号锁（外审 #4）。
+			release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
+			if lockErr != nil || !ok {
+				results[i].Error = safeProbeError(ErrRecoveryProbeAccountBusy)
+				return nil
+			}
+			defer release()
 			snapshot, err := s.probeAccount(ctx, accountID, settings.IntervalMinutes)
 			if err != nil {
 				results[i].Error = safeProbeError(err)

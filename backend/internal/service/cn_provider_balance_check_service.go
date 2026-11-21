@@ -216,74 +216,40 @@ func (s *CNProviderBalanceCheckService) Start() {
 	if s.interval <= 0 {
 		return
 	}
-	log.Printf("[CNBalance] started (interval=%s balance_threshold=%.2f alert-only)", s.interval, s.cfg.Gateway.CNProviders.BalanceThreshold)
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-
-		// 启动补采：进程重启后先做一轮快照刷新，再进入周期 tick。
-		//
-		// 为什么必须有这一轮（2026-11-03 生产实证）：余额/额度快照的新鲜度门是 15 分钟
-		// （cnQuotaBalanceFreshnessThresholdMinutes），巡检间隔是 10 分钟。若首轮探测
-		// 推迟整整一个 interval，「重启 → 首轮」这段窗口里全部账号的快照都必然越过
-		// 新鲜度门 → 维度状态翻 unknown → 管理端余额单元格按单轨口径隐藏金额、只显示
-		// 「未知」。每次部署都会重启进程，本仓库部署频繁时该窗口几乎不间断出现，
-		// 表现为「所有账号余额一起变成未知」，而数据其实一会儿就回来了。
-		//
-		// 延迟 cnBalanceStartupFirstRunDelay 而不是立刻执行，保留原设计意图：不与进程
-		// 启动峰（迁移、连接池预热、首波请求）重叠。
-		if !s.waitStartupFirstRun(s.startupFirstRunDelayOrDefault()) {
-			return
-		}
-		s.runOnce()
-
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				s.runOnce()
-			case <-s.stopCh:
-				return
-			}
-		}
-	}()
-}
-
-// waitStartupFirstRun 等待启动补采延迟；返回 false 表示等待期间已收到停止信号
-// （此时调用方应直接返回，不得再跑探测）。
-func (s *CNProviderBalanceCheckService) waitStartupFirstRun(delay time.Duration) bool {
+	// 启动补采：进程重启后先做一轮快照刷新，再进入周期 tick。
+	//
+	// 为什么必须有这一轮（2026-11-03 生产实证）：余额/额度快照的新鲜度门是 15 分钟
+	// （cnQuotaBalanceFreshnessThresholdMinutes），巡检间隔是 10 分钟。若首轮探测
+	// 推迟整整一个 interval，「重启 → 首轮」这段窗口里全部账号的快照都必然越过
+	// 新鲜度门 → 维度状态翻 unknown → 管理端余额单元格按单轨口径隐藏金额、只显示
+	// 「未知」。故首轮相位保持「启动延迟 cnBalanceStartupFirstRunDelay 后立即补采」，
+	// 由统一 tick 注册表的 afterDelay 相位照抄，不与进程启动峰重叠。
+	delay := s.startupFirstRunDelay
 	if delay <= 0 {
-		select {
-		case <-s.stopCh:
-			return false
-		default:
-			return true
-		}
+		delay = cnBalanceStartupFirstRunDelay
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-s.stopCh:
-		return false
-	}
-}
-
-// startupFirstRunDelayOrDefault 返回启动补采延迟；未显式设置（含测试直接构造结构体
-// 的零值）时取默认值。
-func (s *CNProviderBalanceCheckService) startupFirstRunDelayOrDefault() time.Duration {
-	if s.startupFirstRunDelay > 0 {
-		return s.startupFirstRunDelay
-	}
-	return cnBalanceStartupFirstRunDelay
+	log.Printf("[CNBalance] registered unified tick (interval=%s first_run_delay=%s balance_threshold=%.2f alert-only)", s.interval, delay, s.cfg.Gateway.CNProviders.BalanceThreshold)
+	DefaultBackgroundTickRegistry().Register(backgroundTickTask{
+		name:    "cn_provider_balance",
+		cadence: s.interval,
+		// runOnce 的单轮预算上限为 300s（见 runOnce 内 timeout 的 300s clamp）；
+		// 逐任务租约 = maxRun + 60s 必须覆盖该上限，否则长轮次会被另一副本重复取得。
+		maxRun:   300 * time.Second,
+		firstRun: tickFirstRunAfterDelay,
+		delay:    delay,
+		run: func(context.Context) error {
+			// runOnce 自建 ctx 与 120s 预算，保持原样。
+			s.runOnce()
+			return nil
+		},
+	})
 }
 
 func (s *CNProviderBalanceCheckService) Stop() {
 	if s == nil {
 		return
 	}
+	DefaultBackgroundTickRegistry().Unregister("cn_provider_balance")
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 	})
@@ -541,37 +507,45 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	paused := 0
 	cleared := 0
 	for _, account := range paygTargets {
-		switch s.checkOne(ctx, account, threshold) {
-		case cnBalanceCleared:
-			cleared++
-		case cnBalanceNativeFailed:
-			// kimi/deepseek payg 原生 /user/balance 不可用（中转未实现该端点）：
-			// 同周期转最小完成请求探测，覆盖该人群。
-			s.probeOne(ctx, account)
-		}
+		// 批4：单账号探测包裹批1账号锁。
+		withRecoveryAccountProbeLock(ctx, account.ID, func() {
+			switch s.checkOne(ctx, account, threshold) {
+			case cnBalanceCleared:
+				cleared++
+			case cnBalanceNativeFailed:
+				// kimi/deepseek payg 原生 /user/balance 不可用（中转未实现该端点）：
+				// 同周期转最小完成请求探测，覆盖该人群。
+				s.probeOne(ctx, account)
+			}
+		})
 	}
 
 	// 智谱 / MiniMax payg：最小完成请求探测（无公开余额端点）。
 	for _, account := range probeTargets {
-		s.probeOne(ctx, account)
+		account := account
+		withRecoveryAccountProbeLock(ctx, account.ID, func() { s.probeOne(ctx, account) })
 	}
 
 	// Kira / TH：快照刷新 + 耗尽信号交状态机（打摆源退役，不做独立周期停调/清除）。
 	for _, account := range kiraTargets {
-		s.refreshKiraAccount(ctx, account)
+		account := account
+		withRecoveryAccountProbeLock(ctx, account.ID, func() { s.refreshKiraAccount(ctx, account) })
 	}
 	for _, account := range thTargets {
-		// 竞态收口（方案 §9.1，2026-10-08 用户裁定）：快照加载到探测之间响应式路径
-		// 可能已写入退避，探测前以库内最新态复核收集门。
-		fresh, err := s.accountRepo.GetByID(ctx, account.ID)
-		if err != nil {
-			log.Printf("[CNBalance] th collect re-check account=%d failed, skip this round: %v", account.ID, err)
-			continue
-		}
-		if s.shouldSkipTokenHarborCollect(now, fresh) {
-			continue
-		}
-		s.refreshTokenHarborAccount(ctx, fresh)
+		account := account
+		withRecoveryAccountProbeLock(ctx, account.ID, func() {
+			// 竞态收口（方案 §9.1，2026-10-08 用户裁定）：快照加载到探测之间响应式路径
+			// 可能已写入退避，探测前以库内最新态复核收集门。
+			fresh, err := s.accountRepo.GetByID(ctx, account.ID)
+			if err != nil {
+				log.Printf("[CNBalance] th collect re-check account=%d failed, skip this round: %v", account.ID, err)
+				return
+			}
+			if s.shouldSkipTokenHarborCollect(now, fresh) {
+				return
+			}
+			s.refreshTokenHarborAccount(ctx, fresh)
+		})
 	}
 
 	if len(quotaTargets) > 0 && s.quotaService != nil {
@@ -583,7 +557,7 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				s.probeQuota(ctx, t.id, t.platform)
+				withRecoveryAccountProbeLock(ctx, t.id, func() { s.probeQuota(ctx, t.id, t.platform) })
 			}(target)
 		}
 		wg.Wait()
@@ -599,16 +573,18 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				switch t.check(ctx, t.account, threshold) {
-				case cnBalancePaused:
-					mu.Lock()
-					paused++
-					mu.Unlock()
-				case cnBalanceCleared:
-					mu.Lock()
-					cleared++
-					mu.Unlock()
-				}
+				withRecoveryAccountProbeLock(ctx, t.account.ID, func() {
+					switch t.check(ctx, t.account, threshold) {
+					case cnBalancePaused:
+						mu.Lock()
+						paused++
+						mu.Unlock()
+					case cnBalanceCleared:
+						mu.Lock()
+						cleared++
+						mu.Unlock()
+					}
+				})
 			}(target)
 		}
 		wg.Wait()
@@ -638,10 +614,12 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			}
 			wcCtx, wcCancel := context.WithTimeout(context.Background(), wcBudget)
 			for _, account := range webConsoleTargets {
-				if _, perr := s.webConsoleQuotaService.ProbeLoadedAccount(wcCtx, account); perr != nil {
-					log.Printf("[CNBalance] web-console quota probe account %d (%s) failed: %v", account.ID, account.Platform, perr)
-					continue
-				}
+				account := account
+				withRecoveryAccountProbeLock(wcCtx, account.ID, func() {
+					if _, perr := s.webConsoleQuotaService.ProbeLoadedAccount(wcCtx, account); perr != nil {
+						log.Printf("[CNBalance] web-console quota probe account %d (%s) failed: %v", account.ID, account.Platform, perr)
+					}
+				})
 			}
 			wcCancel()
 		}
@@ -649,18 +627,21 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 
 	if len(relayTargets) > 0 && s.balanceService != nil {
 		for _, account := range relayTargets {
-			res, err := s.balanceService.QueryBalanceForAccount(ctx, account)
-			if err != nil {
-				log.Printf("[CNBalance] relay refresh account %d (%s) failed: %v", account.ID, account.Platform, err)
-				continue
-			}
-			if res == nil || !res.Success {
-				if res != nil {
-					log.Printf("[CNBalance] relay refresh account %d (%s) error: %s", account.ID, account.Platform, res.Error)
+			account := account
+			withRecoveryAccountProbeLock(ctx, account.ID, func() {
+				res, err := s.balanceService.QueryBalanceForAccount(ctx, account)
+				if err != nil {
+					log.Printf("[CNBalance] relay refresh account %d (%s) failed: %v", account.ID, account.Platform, err)
+					return
 				}
-				continue
-			}
-			// 快照已由 balance service 落库，无额外写动作（不动 quota/rate-limit 状态）。
+				if res == nil || !res.Success {
+					if res != nil {
+						log.Printf("[CNBalance] relay refresh account %d (%s) error: %s", account.ID, account.Platform, res.Error)
+					}
+					return
+				}
+				// 快照已由 balance service 落库，无额外写动作（不动 quota/rate-limit 状态）。
+			})
 		}
 	}
 

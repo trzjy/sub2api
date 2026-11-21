@@ -241,6 +241,12 @@ func (p *AccountHealthRecoveryProbeService) SetRecoveryProbeDependencies(
 	p.antigravityQuota = antigravityQuota
 	p.antigravityTokens = antigravityTokens
 	p.cursorEntry = cursor
+
+	// 批4：统一 tick 注册表复用同一把 Redis 锁（跨副本 leader），六源单账号探测点
+	// 复用同一把账号锁（recovery:probe:<id>）。lock 为 nil 时注册表失败关闭、账号锁
+	// 退回无锁执行（与批 1 单实例语义一致）。
+	DefaultBackgroundTickRegistry().SetLeader(lock, newRecoveryLockOwner())
+	SetRecoveryAccountLockCache(lock)
 }
 
 func (p *AccountHealthRecoveryProbeService) SetFreshnessAlertService(svc *FreshnessAlertService) {
@@ -304,9 +310,17 @@ func (p *AccountHealthRecoveryProbeService) Start(ctx context.Context) {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		ticker := time.NewTicker(interval)
+		// 批4：唯一 tick 的驱动分辨率必须不慢于六源最短 cadence；否则健康探测间隔
+		// 配到 600s 时，1 分钟任务会被粗化到约 10 分钟。健康探测自身仍按配置的
+		// probe interval 运行（下方 elapsed 门控），ticker 只是更细的驱动基频。
+		base := backgroundTickBaseInterval(interval, DefaultBackgroundTickRegistry().MinCadence())
+		ticker := time.NewTicker(base)
 		defer ticker.Stop()
-		logger.L().Info("openai.apikey_health_probe_started", zap.Duration("interval", interval))
+		logger.L().Info("openai.apikey_health_probe_started",
+			zap.Duration("interval", interval), zap.Duration("tick_base", base))
+		// 启动时立即派发一次，保证 immediate 首轮任务不必等第一个 tick。
+		DefaultBackgroundTickRegistry().DispatchDue(ctx)
+		lastProbe := time.Now()
 		for {
 			select {
 			case <-stopCh:
@@ -314,8 +328,13 @@ func (p *AccountHealthRecoveryProbeService) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				p.RunOnce(ctx)
-				p.RunRecoveryChannel(ctx)
+				if time.Since(lastProbe) >= interval {
+					lastProbe = time.Now()
+					p.RunOnce(ctx)
+					p.RunRecoveryChannel(ctx)
+				}
+				// 批4：六源周期调度，按唯一 tick 的细分辨率派发（DispatchDue 立即返回）。
+				DefaultBackgroundTickRegistry().DispatchDue(ctx)
 			}
 		}
 	}()

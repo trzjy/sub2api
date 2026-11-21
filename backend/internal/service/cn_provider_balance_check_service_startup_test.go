@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,11 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// 2026-11-03 生产实证回归：余额巡检 Start() 必须在首个 interval 之前做一轮补采。
+// 2026-11-03 生产实证回归：余额巡检首轮补采必须在首个 interval 之前发生。
 //
-// 背景：快照新鲜度门 15 分钟 < 巡检间隔 10 分钟之外没有余量——若首轮探测推迟整整
-// 一个 interval，进程重启（每次部署都会重启）后到首轮到来之前，全部账号快照都越过
-// 新鲜度门，管理端余额单元格按单轨口径隐藏金额、统一显示「未知」。
+// 批4 起，该服务的周期调度改由统一 tick 注册表驱动（Start() 只登记，不再自持
+// ticker）。故测试改为：把进程级注册表换成可驱动的实例，模拟健康服务唯一 tick
+// 反复调用 DispatchDue。
 type startupCountingRepo struct {
 	AccountRepository
 	listCalls atomic.Int64
@@ -27,6 +28,34 @@ func (r *startupCountingRepo) ListByPlatform(_ context.Context, _ string) ([]Acc
 
 func (r *startupCountingRepo) ListActive(_ context.Context) ([]Account, error) {
 	return nil, nil
+}
+
+// startupTestLock 是测试内的可获取 LeaderLockCache（单实例）。
+type startupTestLock struct {
+	mu   sync.Mutex
+	held map[string]string
+}
+
+func (l *startupTestLock) TryAcquireLeaderLock(_ context.Context, key, owner string, _ time.Duration) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held == nil {
+		l.held = map[string]string{}
+	}
+	if cur, ok := l.held[key]; ok && cur != owner {
+		return false, nil
+	}
+	l.held[key] = owner
+	return true, nil
+}
+
+func (l *startupTestLock) ReleaseLeaderLock(_ context.Context, key, owner string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held[key] == owner {
+		delete(l.held, key)
+	}
+	return nil
 }
 
 func newStartupTestService(repo AccountRepository, interval time.Duration) *CNProviderBalanceCheckService {
@@ -44,16 +73,37 @@ func newStartupTestService(repo AccountRepository, interval time.Duration) *CNPr
 	)
 }
 
+// installStartupTestRegistry 用可驱动的注册表替换默认实例，并在测试结束后还原。
+func installStartupTestRegistry(t *testing.T) *BackgroundTickRegistry {
+	t.Helper()
+	r := NewBackgroundTickRegistry()
+	r.SetLeader(&startupTestLock{}, "startup-test")
+	prev := SetDefaultBackgroundTickRegistry(r)
+	t.Cleanup(func() { SetDefaultBackgroundTickRegistry(prev) })
+	return r
+}
+
+// driveTicks 模拟健康服务唯一 tick 反复派发。
+func driveTicks(ctx context.Context, r *BackgroundTickRegistry, d time.Duration) {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		r.DispatchDue(ctx)
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 func TestCNProviderBalanceCheckStartRunsCatchUpBeforeFirstInterval(t *testing.T) {
 	repo := &startupCountingRepo{}
-	// interval 取 1 小时：任何在 200ms 内发生的采集只可能来自启动补采。
+	// interval 取 1 小时：任何在 300ms 内发生的采集只可能来自启动补采。
 	svc := newStartupTestService(repo, time.Hour)
 	svc.startupFirstRunDelay = time.Millisecond
+	r := installStartupTestRegistry(t)
 
 	svc.Start()
-	defer svc.Stop()
+	t.Cleanup(svc.Stop)
 
-	require.Eventually(t, func() bool { return repo.listCalls.Load() > 0 }, 2*time.Second, 5*time.Millisecond,
+	driveTicks(context.Background(), r, 300*time.Millisecond)
+	require.Greater(t, repo.listCalls.Load(), int64(0),
 		"启动补采未在首个 interval 之前执行：重启窗口内余额快照会集体过期并显示「未知」")
 }
 
@@ -62,11 +112,12 @@ func TestCNProviderBalanceCheckStartHonorsStartupDelay(t *testing.T) {
 	svc := newStartupTestService(repo, time.Hour)
 	// 默认 30s 延迟：启动瞬间不得探测（不与启动峰重叠）。
 	svc.startupFirstRunDelay = 300 * time.Millisecond
+	r := installStartupTestRegistry(t)
 
 	svc.Start()
-	defer svc.Stop()
+	t.Cleanup(svc.Stop)
 
-	time.Sleep(50 * time.Millisecond)
+	driveTicks(context.Background(), r, 50*time.Millisecond)
 	require.EqualValues(t, 0, repo.listCalls.Load(), "启动补采必须等延迟到点，不得在进程启动峰立即探测")
 }
 
@@ -74,10 +125,11 @@ func TestCNProviderBalanceCheckStopDuringStartupDelaySkipsCollection(t *testing.
 	repo := &startupCountingRepo{}
 	svc := newStartupTestService(repo, time.Hour)
 	svc.startupFirstRunDelay = 60 * time.Millisecond
+	r := installStartupTestRegistry(t)
 
 	svc.Start()
 	svc.Stop()
 
-	time.Sleep(150 * time.Millisecond)
+	driveTicks(context.Background(), r, 150*time.Millisecond)
 	require.EqualValues(t, 0, repo.listCalls.Load(), "停止后不得再跑启动补采")
 }

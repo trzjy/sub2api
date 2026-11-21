@@ -404,9 +404,14 @@ func (s *OpenCodeGoUsageService) Start() {
 		return
 	}
 	s.started = true
-	s.wg.Add(1)
 	s.mu.Unlock()
-	go s.runLoop()
+	DefaultBackgroundTickRegistry().Register(backgroundTickTask{
+		name:     "opencode_go_usage",
+		cadence:  opencodeGoUsageCycleInterval,
+		maxRun:   opencodeGoUsageLeaderLockTTL,
+		firstRun: tickFirstRunImmediate,
+		run:      func(ctx context.Context) error { return s.RunDue(ctx) },
+	})
 }
 
 func (s *OpenCodeGoUsageService) Stop() {
@@ -419,26 +424,10 @@ func (s *OpenCodeGoUsageService) Stop() {
 		return
 	}
 	s.stopped = true
+	DefaultBackgroundTickRegistry().Unregister("opencode_go_usage")
 	s.parentCancel()
 	s.mu.Unlock()
 	s.wg.Wait()
-}
-
-func (s *OpenCodeGoUsageService) runLoop() {
-	defer s.wg.Done()
-	_ = s.RunDue(s.parentCtx)
-	ticker := time.NewTicker(opencodeGoUsageCycleInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.parentCtx.Done():
-			return
-		case <-ticker.C:
-			if err := s.RunDue(s.parentCtx); err != nil {
-				logger.LegacyPrintf("service.opencode_go_usage", "run_due_failed: err=%v", err)
-			}
-		}
-	}
 }
 
 func (s *OpenCodeGoUsageService) GetSettings(ctx context.Context) (*OpenCodeGoUsageSettings, error) {
@@ -584,6 +573,15 @@ func (s *OpenCodeGoUsageService) SetAutoRefresh(ctx context.Context, accountID i
 }
 
 func (s *OpenCodeGoUsageService) Refresh(ctx context.Context, accountID int64) (*OpenCodeGoUsageState, error) {
+	// 批4：手动刷新与周期 RunDue 走同一把账号锁（外审 #4）；争锁则以明确错误拒绝。
+	release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	if !ok {
+		return nil, ErrRecoveryProbeAccountBusy
+	}
+	defer release()
 	settings, err := s.GetSettings(ctx)
 	if err != nil {
 		return nil, err
@@ -643,6 +641,12 @@ func (s *OpenCodeGoUsageService) RunDue(ctx context.Context) error {
 		accountID := account.ID
 		expected := account
 		group.Go(func() error {
+			// 批4：单账号探测包裹批1账号锁，争锁/后端不可用则本轮跳过该账号。
+			release, ok, lockErr := acquireRecoveryAccountProbeLock(ctx, accountID)
+			if lockErr != nil || !ok {
+				return nil
+			}
+			defer release()
 			if _, refreshErr := s.refreshAccount(ctx, accountID, settings, true); refreshErr != nil {
 				if errors.Is(refreshErr, ErrOpenCodeGoUsageIdentityChanged) {
 					if disableErr := writer.DisableOpenCodeGoUsageAutoRefresh(ctx, &expected); disableErr != nil {
