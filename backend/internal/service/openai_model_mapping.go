@@ -90,17 +90,14 @@ func isOpenAIOAuthServableModel(requestedModel string) bool {
 // 永久移除：官方已停这两个模型，爹要求「哪怕上游还提供也不再请求」，故未配映射
 // 的账号也不得再把它们发出去。
 //
-// 自研模型（DeepSeek-V4.1-Flash 系，如 deepseek-v4.1-flash / deepseek-v4.1-pro）
-// 由我方自研渠道目录授权，与上游官方目录并存：生产实证 deepseek-v4.1-flash
-// 业务成功率 100%，平台清单保持我方自研设计，不得被上游官方目录卡死
-// （门一裁定 2026-10-15）。上游官方目录只作「防未知模型静默兜底」参考，
-// 不得整段删除白名单（会丢掉该防兜底收益），仅做增量补齐。
+// `deepseek-v4.1-flash` 已按 2026-11-21 裁定对下游停止提供，同样从未配映射账号
+// 的可服务清单移除：保留该旧名会与官方现行名 deepseek-flash 形成第二事实源。
+// `deepseek-v4.1-pro` 是与之不同的模型，继续保留：自研模型由我方渠道目录授权、
+// 与上游官方目录并存（门一裁定 2026-10-15），上游官方目录只作防兜底参考。
 var deepseekServableModels = []string{
 	"deepseek-flash",
 	"deepseek-v4-pro",
 	"deepseek-v4-pro-0813",
-	// 自研模型：由我方渠道目录授权，与上游官方目录并存（详见上面注释）。
-	"deepseek-v4.1-flash",
 	"deepseek-v4.1-pro",
 }
 

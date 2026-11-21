@@ -44,8 +44,11 @@ func TestDeepSeekV4FlashFullyRetired(t *testing.T) {
 	// 未配映射时也不许把旧名发给上游。
 	require.False(t, isDeepseekServableModel("deepseek-v4-flash"))
 	require.True(t, isDeepseekServableModel("deepseek-flash"))
-	require.True(t, isDeepseekServableModel("deepseek-v4.1-flash"))
+	// deepseek-v4.1-flash 已按 2026-11-21 裁定对下游停供，未配映射账号不得再发出。
+	require.False(t, isDeepseekServableModel("deepseek-v4.1-flash"))
 	require.True(t, isDeepseekServableModel("deepseek-v4-pro"))
+	// deepseek-v4.1-pro 是不同模型，仍须保留。
+	require.True(t, isDeepseekServableModel("deepseek-v4.1-pro"))
 }
 
 // TestDeepSeekVisionExpRetired 锁死 2026-11-05 三次裁定：视觉变体也停止提供。

@@ -43,6 +43,7 @@ func closedGate(model string) (bool, error) { return false, nil }
 func TestTierRoutingTargetModelsAliasCoverage(t *testing.T) {
 	require.True(t, isTierRoutingTargetModel("deepseek-v4.1-flash-1017"), "1017 alias must be a routing target")
 	require.True(t, isTierRoutingTargetModel("deepseek-v4.1-flash"), "canonical deepseek flash must stay a routing target")
+	require.True(t, isTierRoutingTargetModel("deepseek-flash"), "official deepseek-flash name must be a routing target")
 	require.False(t, isTierRoutingTargetModel("deepseek-v3-2-volc"), "unsold model must stay out of the target set")
 }
 
@@ -231,4 +232,24 @@ func TestTierRoutingApplyRoutingRoutingVsEstimateModelSplit(t *testing.T) {
 	require.NoError(t, errR)
 	require.NotEqual(t, expEstimate, expRouting, "映射名与请求侧名走不同 tokenizer，估算值应可确定区分")
 	require.Equal(t, expEstimate, gotEstimated, "token 估算必须使用映射名 gpt-4（而非请求侧 glm-5.3-flash）")
+}
+
+// TestTierRoutingBlockedModelAllowlistCandidateRetiredPriority 锁定 retired 优先于分组白名单：
+// 白名单关闭（group 为 nil 或未开启）时已下线旧名及其 models/ 协议变体仍须被拦截，
+// 官方现行名 deepseek-flash 放行；WS 首帧与后续帧共用同一判定入口。
+func TestTierRoutingBlockedModelAllowlistCandidateRetiredPriority(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		group     *service.Group
+		candidate string
+		wantBlock string
+	}{
+		{"nil_group_retired", nil, "deepseek-v4.1-flash", "deepseek-v4.1-flash"},
+		{"disabled_allowlist_retired", &service.Group{}, "deepseek-v4.1-flash", "deepseek-v4.1-flash"},
+		{"disabled_allowlist_protocol_variant", &service.Group{}, "models/deepseek-v4.1-flash", "models/deepseek-v4.1-flash"},
+		{"disabled_allowlist_current_name", &service.Group{}, "deepseek-flash", ""},
+	} {
+		require.Equal(t, tc.wantBlock,
+			blockedModelAllowlistCandidate(tc.group, []string{tc.candidate}), tc.name)
+	}
 }

@@ -79,10 +79,31 @@ func (b *readTrackingBody) Read(p []byte) (int, error) {
 
 func (b *readTrackingBody) Close() error { return nil }
 
-func TestGroupModelAllowlistDisabledDoesNotReadBody(t *testing.T) {
-	router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(false, "claude-sonnet-4.5"), "/v1")
+// 白名单关闭时不再早退：仍读请求体做 retired 检查（body.read 应为 true），
+// 读后必须完整回填，让下游 handler 零拷贝重读（PrereadBody 机制）。
+func TestGroupModelAllowlistDisabledReadsBodyAndRestoresIt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(string(ContextKeyAPIKey), allowlistAPIKey(false, "claude-sonnet-4.5"))
+		c.Next()
+	})
+	router.Use(GroupModelAllowlist())
+	router.POST("/v1/messages", func(c *gin.Context) {
+		body, err := httputil.ReadRequestBodyWithPrealloc(c.Request)
+		if err != nil {
+			t.Errorf("handler reread body: %v", err)
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		if string(body) != `{"model":"claude-opus-4.6"}` {
+			t.Errorf("handler saw wrong body: %s", body)
+		}
+		c.Status(http.StatusOK)
+	})
 
-	body := &readTrackingBody{Reader: strings.NewReader(`{"model":"claude-opus-4.6"}`)}
+	rawBody := `{"model":"claude-opus-4.6"}`
+	body := &readTrackingBody{Reader: strings.NewReader(rawBody)}
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -91,11 +112,8 @@ func TestGroupModelAllowlistDisabledDoesNotReadBody(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(*calls) != 1 {
-		t.Fatalf("expected handler to run once, got %v", *calls)
-	}
-	if body.read {
-		t.Fatal("allowlist disabled: middleware must not read the request body")
+	if !body.read {
+		t.Fatal("allowlist disabled: middleware must still read body for retired check")
 	}
 }
 
@@ -163,7 +181,8 @@ func TestGroupModelAllowlistJSONBodyAllowed(t *testing.T) {
 }
 
 func TestGroupModelAllowlistClaudeCodeLongContextModel(t *testing.T) {
-	baseModel := "deepseek-v4.1-flash"
+	// 2026-11-21 起 deepseek-v4.1-flash 旧写法已对下游下线，长上下文归一用例改用官方名。
+	baseModel := "deepseek-flash"
 	for _, model := range []string{baseModel + "[1M]", baseModel + "[1m][1M]"} {
 		t.Run(model, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
@@ -540,5 +559,67 @@ func TestGroupModelAllowlistDuplicateIdenticalModelsAllowed(t *testing.T) {
 	}
 	if len(*calls) != 1 {
 		t.Fatalf("expected handler to run once, got %v", *calls)
+	}
+}
+
+// 白名单关闭时也必须拦截已下线模型名（retired），现行名照常放行。
+func TestGroupModelAllowlistDisabledEnforcesRetired(t *testing.T) {
+	t.Run("retired name rejected", func(t *testing.T) {
+		router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(false), "/v1")
+		w := doJSON(t, router, http.MethodPost, "/v1/messages", `{"model":"deepseek-v4.1-flash"}`)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for retired model with allowlist disabled, got %d: %s", w.Code, w.Body.String())
+		}
+		if len(*calls) != 0 {
+			t.Fatalf("expected denied model not to reach handler, got %v", *calls)
+		}
+	})
+
+	t.Run("current name allowed", func(t *testing.T) {
+		router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(false), "/v1")
+		w := doJSON(t, router, http.MethodPost, "/v1/messages", `{"model":"deepseek-flash"}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 for current model with allowlist disabled, got %d: %s", w.Code, w.Body.String())
+		}
+		if len(*calls) != 1 {
+			t.Fatalf("expected handler to run once, got %v", *calls)
+		}
+	})
+}
+
+// 通配白名单下 retired 优先于白名单匹配：即便通配能命中，下线名仍拒绝。
+func TestGroupModelAllowlistWildcardEnforcesRetired(t *testing.T) {
+	t.Run("retired name rejected despite wildcard match", func(t *testing.T) {
+		router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(true, "deepseek-*"), "/v1")
+		w := doJSON(t, router, http.MethodPost, "/v1/messages", `{"model":"deepseek-v4.1-flash"}`)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for retired model despite wildcard, got %d: %s", w.Code, w.Body.String())
+		}
+		if len(*calls) != 0 {
+			t.Fatalf("expected denied model not to reach handler, got %v", *calls)
+		}
+	})
+
+	t.Run("current name allowed by wildcard", func(t *testing.T) {
+		router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(true, "deepseek-*"), "/v1")
+		w := doJSON(t, router, http.MethodPost, "/v1/messages", `{"model":"deepseek-flash"}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 for current model matched by wildcard, got %d: %s", w.Code, w.Body.String())
+		}
+		if len(*calls) != 1 {
+			t.Fatalf("expected handler to run once, got %v", *calls)
+		}
+	})
+}
+
+// 精确白名单下的下线别名写法也必须拒绝（retired 优先于白名单匹配）。
+func TestGroupModelAllowlistExactListRejectsRetiredAlias(t *testing.T) {
+	router, calls := newGroupModelAllowlistTestRouter(allowlistAPIKey(true, "claude-fable-5-1"), "/v1")
+	w := doJSON(t, router, http.MethodPost, "/v1/messages", `{"model":"claude-fable-5.1"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for retired alias form, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("expected denied model not to reach handler, got %v", *calls)
 	}
 }

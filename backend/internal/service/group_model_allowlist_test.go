@@ -154,8 +154,36 @@ func TestGroupModelAllowlistAllows(t *testing.T) {
 	})
 }
 
+func TestGroupModelAllowlistRetiredModels(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowlist GroupModelAllowlist
+		model     string
+		want      bool
+	}{
+		{name: "canonical deepseek-flash allowed", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-flash"}}, model: "deepseek-flash", want: true},
+		{name: "deepseek-v4.1-flash retired", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-flash"}}, model: "deepseek-v4.1-flash", want: false},
+		{name: "deepseek-v4.1-flash-1017 retired", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-flash"}}, model: "deepseek-v4.1-flash-1017", want: false},
+		{name: "deepseek-v4-1-flash retired", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-flash"}}, model: "deepseek-v4-1-flash", want: false},
+		// retired 优先于通配：即便白名单用 deepseek-* 通配，旧名仍被拒。
+		{name: "retired beats wildcard", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"deepseek-*"}}, model: "deepseek-v4.1-flash", want: false},
+		{name: "claude-fable-5.1 retired", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"claude-fable-5-1"}}, model: "claude-fable-5.1", want: false},
+		{name: "claude-sonnet-5 retired", allowlist: GroupModelAllowlist{Enabled: true, Models: []string{"claude-sonnet-5-5"}}, model: "claude-sonnet-5", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.allowlist.Allows(tt.model); got != tt.want {
+				t.Fatalf("Allows(%q) = %v, want %v", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGroupModelAllowlistClaudeCodeLongContextModel(t *testing.T) {
-	baseModel := "deepseek-v4.1-flash"
+	// [1M] 长上下文与 -thinking 属协议级等价，须继续放行；基准名用现行对外名
+	// deepseek-flash（2026-11-21 起 deepseek-v4.1-flash 旧写法已对下游下线）。
+	baseModel := "deepseek-flash"
 	allowlist := GroupModelAllowlist{Enabled: true, Models: []string{baseModel}}
 	for _, model := range []string{
 		baseModel,

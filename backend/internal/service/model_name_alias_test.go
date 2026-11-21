@@ -2,12 +2,14 @@
 
 package service
 
-// 模型名别名族的定向测试（2026-11-04 用户裁定）。
+// 模型名别名族的定向测试（2026-11-04 / 2026-11-21 用户裁定）。
 //
-// 钉死三件事：
-//  1. 用户定的三条归一化规则真按他说的走（点→横线、去尾部版本后缀、sonnet-5 缺版本段）；
-//  2. 明确不该动的一律不动（官方日期快照名、参数后缀、不同代模型）；
-//  3. 查找命中别名后，**发给上游的仍是账号里配的真名**，不会被改写成统一名。
+// 钉死四件事：
+//  1. 用户定的归一化规则真按他说的走（点→横线、去尾部版本后缀、sonnet-5 缺版本段）；
+//  2. DeepSeek flash 族 canonical 已翻转为对外现行名 deepseek-flash，
+//     旧写法仅留在族内供映射查找与响应归一；
+//  3. 明确不该动的一律不动（官方日期快照名、参数后缀、不同代模型）；
+//  4. 查找命中别名后，**发给上游的仍是账号里配的真名**，不会被改写成统一名。
 
 import (
 	"strings"
@@ -21,14 +23,14 @@ func TestNormalizeModelName(t *testing.T) {
 		// 规则一：Claude 版本号点号 → 横线
 		"claude-fable-5.1": "claude-fable-5-1",
 		"claude-haiku-5.5": "claude-haiku-5-5",
-		// 规则二：DeepSeek 去掉尾部版本后缀
-		"deepseek-v4.1-flash-1017":  "deepseek-v4.1-flash",
+		// 规则二：DeepSeek flash 族 canonical 翻转为对外现行名 deepseek-flash
+		// （2026-11-21 用户裁定）；旧写法全部归一到它。
+		"deepseek-v4.1-flash-1017":  "deepseek-flash",
+		"deepseek-v4-1-flash":       "deepseek-flash",
+		"deepseek-v4.1-flash":       "deepseek-flash",
+		"deepseek-flash":            "deepseek-flash",
 		"deepseek-v4-pro-0813":      "deepseek-v4-pro",
 		"deepseek-v4-pro-ga-260813": "deepseek-v4-pro",
-		"deepseek-v4-1-flash":       "deepseek-v4.1-flash",
-		// 官方现行调用名并入同一族（2026-11-05）：站内统一写法仍是带版本段的
-		// v4.1-flash，对外展示名另由 PublicModelName 决定。
-		"deepseek-flash":            "deepseek-v4.1-flash",
 		// 规则三：缺版本段（用户确认一并归一）
 		"claude-sonnet-5": "claude-sonnet-5-5",
 		// 缺分隔横线
@@ -40,7 +42,6 @@ func TestNormalizeModelName(t *testing.T) {
 		"claude-opus-5":              "claude-opus-5",  // 与 opus-5-5 是不同模型
 		"claude-fable-5":             "claude-fable-5", // 与 fable-5-1 是不同模型
 		"deepseek-v4-flash":          "deepseek-v4-flash",
-		"deepseek-v4.1-flash":        "deepseek-v4.1-flash",
 		"deepseek-chat":              "deepseek-chat",
 		"deepseek-reasoner":          "deepseek-reasoner",
 		"claude-opus-4-20250514":     "claude-opus-4-20250514", // 官方快照名，日期是名字的一部分
@@ -55,11 +56,40 @@ func TestNormalizeModelName(t *testing.T) {
 	}
 }
 
+func TestPublicModelName(t *testing.T) {
+	// canonical 翻转后，官方现行名经 PublicModelName 仍是它自己。
+	require.Equal(t, "deepseek-flash", PublicModelName("deepseek-flash"))
+	// 族内旧写法对外一律呈现为官方现行名。
+	require.Equal(t, "deepseek-flash", PublicModelName("deepseek-v4.1-flash"))
+	require.Equal(t, "deepseek-flash", PublicModelName("deepseek-v4.1-flash-1017"))
+	require.Equal(t, "deepseek-flash", PublicModelName("deepseek-v4-1-flash"))
+
+	// 目录反查不能断链：对外名 deepseek-flash 仍回查到站内历史键。
+	internal, ok := internalModelNameForPublic("deepseek-flash")
+	require.True(t, ok)
+	require.Equal(t, "deepseek-v4.1-flash", internal)
+}
+
+func TestResponseModelName(t *testing.T) {
+	// 回显统一走对外名，旧写法与已下线名都不外露。
+	require.Equal(t, "deepseek-flash", responseModelName("deepseek-v4.1-flash-1017"))
+	require.Equal(t, "deepseek-flash", responseModelName("deepseek-v4.1-flash"))
+	require.Equal(t, "deepseek-flash", responseModelName("deepseek-flash"))
+	require.Equal(t, "deepseek-flash", responseModelName("  deepseek-v4.1-flash  "))
+	require.Equal(t, "", responseModelName("  "))
+
+	// responseModelForClient 保留签名，回显同样归一到对外名。
+	require.Equal(t, "deepseek-flash", responseModelForClient("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017"))
+}
+
 func TestModelNameAliasesOrder(t *testing.T) {
 	// 输入本身必须排第一：账号里正好配了客户端原写法时，优先用它。
+	// 族内必须含 canonical deepseek-flash 及其余三种旧写法。
 	aliases := ModelNameAliases("deepseek-v4.1-flash-1017")
 	require.Equal(t, "deepseek-v4.1-flash-1017", aliases[0])
+	require.Contains(t, aliases, "deepseek-flash")
 	require.Contains(t, aliases, "deepseek-v4.1-flash")
+	require.Contains(t, aliases, "deepseek-v4-1-flash")
 
 	// 族外名字只返回自己。
 	require.Equal(t, []string{"claude-opus-5-5"}, ModelNameAliases("claude-opus-5-5"))

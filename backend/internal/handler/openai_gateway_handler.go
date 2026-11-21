@@ -4865,10 +4865,16 @@ func isOpenAIWSUpgradeRequest(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(r.Header.Get("Connection"))), "upgrade")
 }
 
-// blockedModelAllowlistCandidate 对全部候选模型逐一校验分组白名单，返回第一个
-// 未命中的值（全部命中或白名单未开启返回空串）。WS 帧与 HTTP 请求体共用该
-// 规则：重复 model 键/大小写变体可能被上游按末值绑定，任一未命中即拒绝。
+// blockedModelAllowlistCandidate 对全部候选模型先看是否已下线（retired 优先），
+// 再逐一校验分组白名单，返回第一个被拦截的值（全部通过返回空串）。
+// 白名单关闭时也必须拦截已下线模型名；WS 首帧与后续帧（及 HTTP 请求体）共用
+// 该规则：重复 model 键/大小写变体可能被上游按末值绑定，任一命中即拒绝。
 func blockedModelAllowlistCandidate(group *service.Group, candidates []string) string {
+	for _, candidate := range candidates {
+		if service.RejectsRetiredModel(candidate) {
+			return candidate
+		}
+	}
 	if group == nil || !group.ModelAllowlistEnabled() {
 		return ""
 	}
@@ -5444,6 +5450,7 @@ var tierRoutingTargetModels = map[string]struct{}{
 	"kimi-k2.7-code":           {},
 	"deepseek-v4.1-flash":      {},
 	"deepseek-v4.1-flash-1017": {},
+	"deepseek-flash":           {},
 	"deepseek-v4-pro":          {},
 	"deepseek-v4-pro-0813":     {},
 	"glm-5.3-flash":            {},

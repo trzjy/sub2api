@@ -15,7 +15,7 @@ import "strings"
 //
 // 用户裁定：
 //   - Claude 版本号统一用 `-`，不用 `.`；
-//   - DeepSeek 去掉尾部版本后缀，归到 `deepseek-v4-pro` / `deepseek-v4.1-flash`；
+//   - DeepSeek 去掉尾部版本后缀，归到 `deepseek-v4-pro` / `deepseek-flash`；
 //   - `claude-sonnet-5`（缺版本段）一并归到 `claude-sonnet-5-5`。
 //
 // 关键设计：**只归一"用于查找的名字"，绝不改发给上游的 model**。
@@ -51,15 +51,13 @@ var modelAliasFamilies = []modelAliasFamily{
 	{canonical: "claude-sonnet-5-5", aliases: []string{"claude-sonnet-5"}},
 	// Claude：缺分隔横线的写法。
 	{canonical: "claude-fable-5", aliases: []string{"claude-fable5"}},
-	// DeepSeek：去掉尾部版本后缀（用户裁定）；并入官方现行调用名。
-	// 官方文档（api-docs.deepseek.com/quick_start/pricing，2026-11-05 核对）现只有
-	// `deepseek-flash` 与 `deepseek-v4-pro` 两个调用名，`DeepSeek-V4.1-Flash-1017`
-	// 是前者的版本号而非模型名。此处把官方名并进同一族：老写法继续可用，
-	// 新写法直接命中既有账号映射键，出站名不受影响。
-	{canonical: "deepseek-v4.1-flash", aliases: []string{
+	// DeepSeek flash：对外统一写法为官方现行调用名 `deepseek-flash`
+	// （用户裁定 2026-11-21：所有 deepseek-v4.1-flash 名称归一化为 deepseek-flash）。
+	// 旧写法仅保留在族内供账号映射查找与响应归一，出站真名不受影响。
+	{canonical: "deepseek-flash", aliases: []string{
+		"deepseek-v4.1-flash",
 		"deepseek-v4.1-flash-1017",
 		"deepseek-v4-1-flash",
-		"deepseek-flash",
 	}},
 	{canonical: "deepseek-v4-pro", aliases: []string{
 		"deepseek-v4-pro-0813",
@@ -82,8 +80,8 @@ func NormalizeModelName(name string) string {
 }
 
 // 对外展示名（用户裁定 2026-11-05）：族内旧写法对下游一律呈现为这里配置的
-// 官方现行调用名。键是站内统一写法（NormalizeModelName 的结果），值是对外名。
-// 只影响「下游看得见的列表与回显」，不影响准入判定、账号映射键与出站名。
+// 官方现行调用名。键是站内历史写法（同时用于展示归一与 /v1/models 目录反查），
+// 值是对外名。只影响「下游看得见的列表与回显」，不影响准入判定、账号映射键与出站名。
 //
 // 2026-11-12 用户裁定补充：官方现行调用名只有 `deepseek-flash` 与 `deepseek-v4-pro`
 // 两个（api-docs.deepseek.com/quick_start/pricing 核对：DeepSeek-V4.1-Flash-1017 与
@@ -122,35 +120,20 @@ func internalModelNameForPublic(name string) (string, bool) {
 	return "", false
 }
 
-// responseModelName 决定"回显给客户端的模型名"。
-//
-// 与 NormalizeModelName 的区别：已配置对外展示名的族（deepseek）保留客户端自己的
-// 书写（写官方名回官方名、写旧名回旧名），不再折回站内统一写法——这样新老用户
-// 都能无缝更迭（用户裁定 2026-11-05）。已下线的名字一律折回，绝不外露。
-// 未配置对外展示名的族（claude 等）维持原有归一行为，零变化。
+// responseModelName 决定"回显给客户端的模型名"：统一返回对外展示名。
+// 族内写法（含已下线名与旧写法）一律折到 PublicModelName 给出的官方现行调用名，
+// 绝不外露旧写法（用户裁定 2026-11-21）。族外名字由 PublicModelName 原样返回。
 func responseModelName(name string) string {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
 		return ""
 	}
-	normalized := NormalizeModelName(trimmed)
-	if IsRetiredModelName(trimmed) {
-		return normalized
-	}
-	if _, configured := publicModelNames[strings.ToLower(normalized)]; configured {
-		return trimmed
-	}
-	return normalized
+	return PublicModelName(trimmed)
 }
 
-// responseModelForClient 在已知"客户端请求名"时决定回显名：
-// 请求名与上游回显同族就用请求名，否则退回 responseModelName 的规则。
-// 跨族映射（如 flash 被路由到别家模型）因此仍如实显示上游真实模型。
+// responseModelForClient 在已知"客户端请求名"时决定回显名。
+// 请求名参数保留以兼容既有调用方；回显一律走 responseModelName 归一到对外名。
 func responseModelForClient(echoed, requestedModel string) string {
-	requested := strings.TrimSpace(requestedModel)
-	if requested != "" && !IsRetiredModelName(requested) && SameModelNameFamily(echoed, requested) {
-		return requested
-	}
 	return responseModelName(echoed)
 }
 

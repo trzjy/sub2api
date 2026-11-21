@@ -18,11 +18,12 @@ type GroupModelAllowlist struct {
 	Models  []string `json:"models,omitempty"`
 }
 
-// retiredModelNames 是对下游下线的模型名（2026-11-05 用户裁定）。
+// retiredModelNames 是对下游下线的模型名（2026-11-05 / 2026-11-21 用户裁定）。
 //
 // `deepseek-v4.1-flash-1017` 只是上游真名，产品上对下游只提供
-// `deepseek-v4.1-flash`：账号映射负责把下游标准名翻译成上游真名
-// （`deepseek-v4.1-flash` → `deepseek-v4.1-flash-1017`），响应侧把上游真名
+// `deepseek-flash`（2026-11-21 起 `deepseek-v4.1-flash` 旧写法一并下线）：
+// 账号映射负责把下游标准名翻译成上游真名
+// （`deepseek-flash` → `deepseek-v4.1-flash-1017`），响应侧把上游真名
 // 归一回标准名。别名族（model_name_alias.go）保留该别名用于映射查找与响应归一
 // ——那些链路只读名字，不构成"对下游提供"。
 //
@@ -31,6 +32,15 @@ type GroupModelAllowlist struct {
 // 1017 映射键直接失效。
 var retiredModelNames = map[string]struct{}{
 	"deepseek-v4.1-flash-1017": {},
+	// 2026-11-21 裁定：所有 deepseek-v4.1-flash 写法归一为 deepseek-flash，
+	// 旧写法对下游下线（事实源＝分组白名单 + 账号 model_mapping）。
+	"deepseek-v4.1-flash": {},
+	// 同一裁定的写法变体：版本号分隔符用横线，同样归一为 deepseek-flash。
+	"deepseek-v4-1-flash": {},
+	// 2026-11-21 Claude 裁定：claude-fable-5.1 统一使用 claude-fable-5-1。
+	"claude-fable-5.1": {},
+	// 既有裁定（model_name_alias.go）：claude-sonnet-5 归到 claude-sonnet-5-5。
+	"claude-sonnet-5": {},
 	// 2026-11-05 二次裁定：`deepseek-v4-flash` 是官方已退役的 legacy 名（模型已停，
 	// 由 V4.1-Flash-1017 承接）。爹要求「哪怕上游还提供，也不再请求、从清单永久删除」。
 	// 实测：全站近 7 天零调用、分组 60 零 key，下线零影响。
@@ -166,9 +176,9 @@ func (g *Group) ModelAllowlistEnabled() bool {
 // Antigravity/Claude -thinking 宽容规则、OpenAI 推理后缀），不做模糊匹配。
 func (a GroupModelAllowlist) Allows(model string) bool {
 	// 已对下游下线的模型名一律拒绝：白名单未开启也要拦（见 retiredModelNames）。
-	// 必须先于别名族展开判断，否则 `deepseek-v4.1-flash-1017` 会以
-	// `deepseek-v4.1-flash` 的别名身份混进白名单。
-	if IsRetiredModelName(model) {
+	// 走候选形式判断，覆盖 models/ 前缀、[1m]、-thinking 等协议变体；
+	// 用户裁定 2026-11-21 起这些写法一律不按别名放行。
+	if RejectsRetiredModel(model) {
 		return false
 	}
 	if !a.Enabled {
@@ -217,6 +227,8 @@ func groupAllowlistPatternMatches(pattern, model string) bool {
 }
 
 // groupModelAllowlistCandidates 返回客户端模型名在白名单匹配中的候选形式（均已小写）。
+// 准入只按配置写法匹配（含协议级等价规则：models/ 前缀、-thinking 后缀、OpenAI
+// 推理后缀、Claude Code [1m] 长上下文档），模型别名族仅用于账号映射查找与响应回显。
 func groupModelAllowlistCandidates(model string) []string {
 	candidates := make([]string, 0, 4)
 	add := func(value string) {
@@ -233,17 +245,23 @@ func groupModelAllowlistCandidates(model string) []string {
 	}
 
 	for _, candidateModel := range []string{model, normalizeClaudeCodeLongContextModel(model)} {
-		// 模型名别名族（见 model_name_alias.go）：白名单里写 claude-fable-5-1、
-		// 客户端发 claude-fable-5.1（或 DeepSeek 带不带尾部版本后缀）时，
-		// 两者应视为同一模型，否则准入与账号映射的判定会打架。
-		for _, alias := range ModelNameAliases(candidateModel) {
-			add(alias)
-		}
 		add(strings.TrimPrefix(candidateModel, "models/"))
 		add(claude.NormalizeModelID(strings.TrimSuffix(candidateModel, "-thinking")))
 		add(NormalizeOpenAICompatRequestedModel(candidateModel))
 	}
 	return candidates
+}
+
+// RejectsRetiredModel 报告该模型名是否命中已下线名单（覆盖其各协议候选形式）。
+// 与 Allows 的准入判定共用候选生成，保证 `models/` 前缀、`[1m]`、`-thinking`
+// 等写法无法通过变体绕过下线裁定。
+func RejectsRetiredModel(model string) bool {
+	for _, candidate := range groupModelAllowlistCandidates(model) {
+		if IsRetiredModelName(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // FilterForListing 按白名单条目顺序生成模型列表输出。
