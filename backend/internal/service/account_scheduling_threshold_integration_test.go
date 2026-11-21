@@ -34,6 +34,34 @@ func (r *thresholdSelectionAccountRepoStub) ListSchedulableUngroupedByPlatform(c
 	return r.ListSchedulableByPlatform(ctx, platform)
 }
 
+// 混合调度路径（无调度快照时的回退实现）按平台集合查询；本桩按集合过滤，
+// 保持用例只验证“阈值平台不被过滤”，不改变混合调度语义。
+func (r *thresholdSelectionAccountRepoStub) ListSchedulableByPlatforms(ctx context.Context, platforms []string) ([]Account, error) {
+	return r.listByPlatformSet(ctx, platforms)
+}
+
+func (r *thresholdSelectionAccountRepoStub) ListSchedulableUngroupedByPlatforms(ctx context.Context, platforms []string) ([]Account, error) {
+	return r.listByPlatformSet(ctx, platforms)
+}
+
+func (r *thresholdSelectionAccountRepoStub) ListSchedulableByGroupIDAndPlatforms(ctx context.Context, _ int64, platforms []string) ([]Account, error) {
+	return r.listByPlatformSet(ctx, platforms)
+}
+
+func (r *thresholdSelectionAccountRepoStub) listByPlatformSet(_ context.Context, platforms []string) ([]Account, error) {
+	want := make(map[string]struct{}, len(platforms))
+	for _, p := range platforms {
+		want[p] = struct{}{}
+	}
+	filtered := make([]Account, 0, len(r.accounts))
+	for _, account := range r.accounts {
+		if _, ok := want[account.Platform]; ok {
+			filtered = append(filtered, account)
+		}
+	}
+	return filtered, nil
+}
+
 func TestGatewayService_ListSchedulableAccounts_DoesNotFilterUnsupportedThresholdPlatforms(t *testing.T) {
 	accountSchedulingThresholdsSF.Forget(SettingKeyAccountSchedulingThresholds)
 	accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
