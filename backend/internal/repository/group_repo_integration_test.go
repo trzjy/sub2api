@@ -441,6 +441,49 @@ func (s *GroupRepoSuite) TestDeleteCascadePreservesMalformedModerationConfig() {
 	}
 }
 
+// TestDeleteCascadeUnbindsDeletedGroupFromQuotaKeyGroupIDs 验证分组级联删除会同步
+// 解除激活码上的码级绑定：既覆盖"过滤后保序保留仍存在的分组"，也覆盖"清空落 [] 而非 NULL"。
+func TestDeleteCascadeUnbindsDeletedGroupFromQuotaKeyGroupIDs(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := newGroupRepositoryWithSQL(client, integrationDB)
+
+	deleted := &service.Group{Name: "qk-unbind-deleted", Platform: service.PlatformAnthropic, RateMultiplier: 1, Status: service.StatusActive, SubscriptionType: service.SubscriptionTypeStandard}
+	kept := &service.Group{Name: "qk-unbind-kept", Platform: service.PlatformAnthropic, RateMultiplier: 1, Status: service.StatusActive, SubscriptionType: service.SubscriptionTypeStandard}
+	require.NoError(t, repo.Create(ctx, deleted))
+	require.NoError(t, repo.Create(ctx, kept))
+	t.Cleanup(func() {
+		_, _ = integrationDB.ExecContext(ctx, "DELETE FROM groups WHERE id = $1 OR id = $2", deleted.ID, kept.ID)
+	})
+
+	createKey := func(code string, groupIDs []int64) int64 {
+		q := client.QuotaKey.Create().SetCodeEncrypted(code)
+		if groupIDs != nil {
+			q = q.SetGroupIds(groupIDs)
+		}
+		key, err := q.Save(ctx)
+		require.NoError(t, err)
+		t.Cleanup(func() { _, _ = integrationDB.ExecContext(ctx, "DELETE FROM quota_keys WHERE id = $1", key.ID) })
+		return key.ID
+	}
+	multi := createKey("qk-unbind-multi", []int64{deleted.ID, kept.ID})
+	single := createKey("qk-unbind-single", []int64{deleted.ID})
+
+	_, err := repo.DeleteCascade(ctx, deleted.ID)
+	require.NoError(t, err)
+
+	readRaw := func(id int64) string {
+		var raw *string
+		require.NoError(t, scanSingleRow(ctx, integrationDB, "SELECT group_ids::text FROM quota_keys WHERE id = $1", []any{id}, &raw))
+		if raw == nil {
+			return "NULL"
+		}
+		return *raw
+	}
+	require.JSONEq(t, fmt.Sprintf("[%d]", kept.ID), readRaw(multi), "过滤后应保序只剩仍存在的分组")
+	require.JSONEq(t, "[]", readRaw(single), "数组清空应写 []，不能回退成 NULL")
+}
+
 func (s *GroupRepoSuite) TestDeleteCascadeIfEmptyIgnoresBindingsToSoftDeletedAccounts() {
 	group := &service.Group{Name: "guarded-soft-deleted-account", Platform: service.PlatformAnthropic, RateMultiplier: 1, Status: service.StatusActive, SubscriptionType: service.SubscriptionTypeStandard}
 	s.Require().NoError(s.repo.Create(s.ctx, group))

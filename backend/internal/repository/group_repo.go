@@ -1007,6 +1007,23 @@ func (r *groupRepository) deleteCascade(ctx context.Context, id int64, requireEm
 		return nil, err
 	}
 
+	// 配额码分组解绑：group_ids 是码级权威绑定，已删分组 ID 残留会让「复制配置」
+	// 把失效分组带给目标码。从所有未软删、group_ids 为数组且确实包含该 ID 的码中剔除。
+	// WITH ORDINALITY 保序；数组清空时写 '[]'（显式解绑）而非 NULL（NULL 会回退到自动推导挂组）。
+	// 失败返回错误让整个级联事务回滚；@> 条件保证重复删除幂等。
+	if _, err := exec.ExecContext(ctx, `UPDATE quota_keys
+		SET group_ids = COALESCE((
+				SELECT jsonb_agg(elem ORDER BY ord)
+				FROM jsonb_array_elements(group_ids) WITH ORDINALITY AS elems(elem, ord)
+				WHERE elem <> to_jsonb($1::bigint)
+			), '[]'::jsonb),
+			updated_at = NOW()
+		WHERE deleted_at IS NULL
+			AND jsonb_typeof(group_ids) = 'array'
+			AND group_ids @> jsonb_build_array($1::bigint)`, id); err != nil {
+		return nil, err
+	}
+
 	// 5. Soft-delete group itself.
 	// 软隐藏该分组名对应的渠道监控探针：避免分组删除后，用户渠道监控卡片仍展示。
 	// 与 groups 软删除风格一致（enabled=false 软隐藏，可逆、保留历史），使用被删分组名精确匹配。

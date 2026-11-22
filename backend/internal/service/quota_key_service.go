@@ -1164,11 +1164,14 @@ func normalizeQuotaKeySettings(settings *UpdateQuotaKeySettingsInput) (*normaliz
 	return out, nil
 }
 
-// normalizeQuotaKeyGroupIDs 去重保序、剔除非正数，并校验全部分组存在且未软删；
+// normalizeQuotaKeyGroupIDs 去重保序、剔除非正数，并自愈失效分组绑定：
+// 查到的存活（未软删）分组构成 liveSet，不在 liveSet 中的 ID（已软删或根本不存在）直接丢弃，
+// 不再报错。调用方 CreateWithSettings / UpdateWithSettings 会用返回的自愈结果替换
+// settings.GroupIDs 并落库，从而自动解除已删除分组的绑定。
 // Simple 模式复用 IsGroupBindableInSimpleMode 口径拦截 composite。
 //
 // 非法（含 ≤0）→ QUOTA_KEY_GROUP_IDS_INVALID。
-// 不存在 / 已软删 → QUOTA_KEY_GROUP_NOT_FOUND。
+// 已软删 / 不存在的分组 → 自动解除绑定（从返回切片中剔除），不报错。
 // Simple 模式 + composite → 复用既有错误码 SIMPLE_MODE_GROUP_NOT_BINDABLE。
 //
 // s.client == nil（测试替身装配）→ 跳过存在性校验，仅做去重/正整数校验，
@@ -1191,17 +1194,25 @@ func (s *QuotaKeyService) normalizeQuotaKeyGroupIDs(ctx context.Context, ids []i
 		// 测试替身装配：跳过存在性校验，仅做去重/正整数校验。
 		return out, nil
 	}
-	// 校验全部分组存在且未软删。
+	// 查存活（未软删）分组；已软删 / 不存在的 ID 自动解除绑定，不报错。
 	groups, err := s.client.Group.Query().
 		Where(group.IDIn(out...), group.DeletedAtIsNil()).
 		All(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(groups) != len(out) {
-		return nil, infraerrors.BadRequest("QUOTA_KEY_GROUP_NOT_FOUND", "one or more groups do not exist or have been soft-deleted")
+	liveSet := make(map[int64]struct{}, len(groups))
+	for _, g := range groups {
+		liveSet[g.ID] = struct{}{}
 	}
-	// Simple 模式：composite 分组不可绑定。
+	// 仅保留存活分组，按入参顺序输出（自愈：剔除已软删 / 不存在的 ID）。
+	cleaned := make([]int64, 0, len(liveSet))
+	for _, id := range out {
+		if _, ok := liveSet[id]; ok {
+			cleaned = append(cleaned, id)
+		}
+	}
+	// Simple 模式：composite 分组不可绑定（基于查到的存活组判断，已删组已被剔除）。
 	if s.runMode == config.RunModeSimple {
 		for _, g := range groups {
 			if g.Platform == PlatformComposite {
@@ -1209,7 +1220,7 @@ func (s *QuotaKeyService) normalizeQuotaKeyGroupIDs(ctx context.Context, ids []i
 			}
 		}
 	}
-	return out, nil
+	return cleaned, nil
 }
 
 // codeLevelModelMappingToAccountMapping 把码级 model_mapping（map[string]string）转换为账号
@@ -1877,7 +1888,7 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		// 不挂组，也就无需（且不应）在此消耗分组快照。
 		var codeLevelGroupIDs []int64
 		if qk2.GroupIds != nil && mountResolver != nil {
-			live, lerr := s.filterLiveGroupIDs(ctx, tx, qk2.GroupIds)
+			live, lerr := s.filterLiveGroupIDs(ctx, tx, qk2.ID, qk2.GroupIds)
 			if lerr != nil {
 				return fmt.Errorf("quota_key_service: filter live groups: %w", lerr)
 			}
@@ -2629,10 +2640,20 @@ func (s *QuotaKeyService) findCursorPlatformGroups(ctx context.Context, tx *ent.
 
 // filterLiveGroupIDs 返回 ids 中"存活"的分组 ID：status='active' 且未软删（deleted_at IS NULL）。
 // 保序：按入参 ids 的顺序输出命中的 id，便于挂载时维持码级分组声明的优先级顺序。
-func (s *QuotaKeyService) filterLiveGroupIDs(ctx context.Context, tx *ent.Tx, ids []int64) ([]int64, error) {
+//
+// 自愈：区分「禁用」与「已删除」。再查一次未软删分组（含 disabled）构建 existingSet：
+//   - 不在 existingSet 中的 ID = 已软删 / 不存在 → 需要解除绑定；
+//   - 在 existingSet 但 status 非 active 的 ID = 只是禁用 → 挂载时过滤掉，但必须保留在
+//     存储的 group_ids 中（用户裁定解除的是「被删除」，不是「被禁用」）。
+//
+// 存在需解除的 ID 且 tx != nil 时，在同一事务内用 ent 回写 quota_keys.group_ids
+// （从原始 ids 保序剔除失效 ID），落库失败向上冒泡。返回值仍只含 active 且未软删的 ID，
+// 挂载口径不变。
+func (s *QuotaKeyService) filterLiveGroupIDs(ctx context.Context, tx *ent.Tx, quotaKeyID int64, ids []int64) ([]int64, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	// 挂载口径：active 且未软删。
 	groups, err := tx.Group.Query().
 		Where(
 			group.IDIn(ids...),
@@ -2651,6 +2672,32 @@ func (s *QuotaKeyService) filterLiveGroupIDs(ctx context.Context, tx *ent.Tx, id
 	for _, id := range ids {
 		if _, ok := liveSet[id]; ok {
 			out = append(out, id)
+		}
+	}
+
+	// 自愈口径：未软删分组（含 disabled）构成 existingSet，用于区分「禁用」与「已删除」。
+	existing, err := tx.Group.Query().
+		Where(
+			group.IDIn(ids...),
+			group.DeletedAtIsNil(),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("quota_key_service: query existing groups: %w", err)
+	}
+	existingSet := make(map[int64]struct{}, len(existing))
+	for _, g := range existing {
+		existingSet[g.ID] = struct{}{}
+	}
+	cleaned := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := existingSet[id]; ok {
+			cleaned = append(cleaned, id)
+		}
+	}
+	if len(cleaned) != len(ids) && tx != nil {
+		if err := tx.QuotaKey.UpdateOneID(quotaKeyID).SetGroupIds(cleaned).Exec(ctx); err != nil {
+			return nil, fmt.Errorf("quota_key_service: self-heal quota key group ids: %w", err)
 		}
 	}
 	return out, nil

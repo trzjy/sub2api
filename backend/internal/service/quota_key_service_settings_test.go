@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -225,7 +226,7 @@ func settingsTestCreateGroup(t *testing.T, client *ent.Client, platform string) 
 }
 
 // TestNormalizeQuotaKeyGroupIDs 覆盖 normalizeQuotaKeyGroupIDs：去重保序 / 非正数拒绝 /
-// 不存在拒绝 / simple 模式 composite 拒绝 / 标准模式允许 composite / 测试替身（nil client）跳过存在性。
+// 已删除分组自动解绑 / simple 模式 composite 拒绝 / 标准模式允许 composite / 测试替身（nil client）跳过存在性。
 func TestNormalizeQuotaKeyGroupIDs(t *testing.T) {
 	t.Run("dedup preserves order and drops duplicates", func(t *testing.T) {
 		svc := NewQuotaKeyService(&testDBRepo{}, NewCredcryptEncryptor(), &fakeUpstreamClient{}, nil)
@@ -252,13 +253,16 @@ func TestNormalizeQuotaKeyGroupIDs(t *testing.T) {
 		require.Equal(t, []int64{42, 43}, out)
 	})
 
-	t.Run("not found rejected", func(t *testing.T) {
+	t.Run("deleted/non-existent ids are auto-unbound", func(t *testing.T) {
 		svc, client := qkNewTestService(t, &fakeUpstreamClient{})
+		ctx := context.Background()
 		gID := settingsTestCreateGroup(t, client, PlatformAnthropic)
-		out, err := svc.normalizeQuotaKeyGroupIDs(context.Background(), []int64{gID, 987654321})
-		require.Error(t, err)
-		require.Nil(t, out)
-		require.Equal(t, "QUOTA_KEY_GROUP_NOT_FOUND", infraerrors.Reason(err))
+		softDeletedID := settingsTestCreateGroup(t, client, PlatformAnthropic)
+		require.NoError(t, client.Group.UpdateOneID(softDeletedID).SetDeletedAt(time.Now()).Exec(ctx))
+		// 已软删的分组与根本不存在的 ID 都应被自动剔除，仍存在的 gID 按序保留。
+		out, err := svc.normalizeQuotaKeyGroupIDs(ctx, []int64{gID, softDeletedID, 987654321})
+		require.NoError(t, err)
+		require.Equal(t, []int64{gID}, out)
 	})
 
 	t.Run("existing groups accepted", func(t *testing.T) {
@@ -322,8 +326,45 @@ func TestQuotaKeyToStatus_GroupIDs(t *testing.T) {
 	})
 }
 
+// qkgCreateCaptureRepo 在 testDBRepo 之上捕获 CreateWithSettings 传给仓储的 GroupIDs，
+// 并真实写入 quota_keys.group_ids。用于断言创建路径落库的是 normalizeQuotaKeyGroupIDs
+// 的自愈结果（与 qkgDBSettingRepo 对更新路径的作用对称）。
+type qkgCreateCaptureRepo struct {
+	*testDBRepo
+	createdGroupIDs []int64
+	createdSet      bool
+}
+
+func (r *qkgCreateCaptureRepo) Create(ctx context.Context, in CreateQuotaKeyInput) (*ent.QuotaKey, error) {
+	qk, err := r.testDBRepo.Create(ctx, in)
+	if err != nil {
+		return qk, err
+	}
+	r.createdGroupIDs = in.GroupIDs
+	r.createdSet = in.GroupIDsSet
+	if in.GroupIDsSet {
+		if err := r.client.QuotaKey.UpdateOneID(qk.ID).SetGroupIds(in.GroupIDs).Exec(ctx); err != nil {
+			return nil, err
+		}
+		qk.GroupIds = in.GroupIDs
+	}
+	return qk, nil
+}
+
+// qkgNewCreateCaptureService 装配 qkgCreateCaptureRepo + 真实 ent client，沿用 qkNewTestService
+// 的 credcrypt setup（创建路径的加密写依赖固定测试主密钥）。
+func qkgNewCreateCaptureService(t *testing.T, repo *qkgCreateCaptureRepo) (*QuotaKeyService, *ent.Client) {
+	t.Helper()
+	client := quotaKeyTestEntClient(t)
+	_, err := credcrypt.Configure(quotaKeyTestCredcryptKeyB64, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = credcrypt.Configure("", "") })
+	repo.testDBRepo = &testDBRepo{client: client}
+	return NewQuotaKeyService(repo, NewCredcryptEncryptor(), &fakeUpstreamClient{}, client), client
+}
+
 // TestQuotaKeyServiceSettings_GroupIDsGate 验证 CreateWithSettings 在落库前经
-// normalizeQuotaKeyGroupIDs 门控：非法 / 不存在的分组直接失败关闭，不触碰仓储。
+// normalizeQuotaKeyGroupIDs 门控：非法分组直接失败关闭；已删除 / 不存在的分组自动解绑后正常创建。
 func TestQuotaKeyServiceSettings_GroupIDsGate(t *testing.T) {
 	t.Run("non-positive group id rejected before create", func(t *testing.T) {
 		svc, _ := qkNewTestService(t, &fakeUpstreamClient{})
@@ -334,14 +375,23 @@ func TestQuotaKeyServiceSettings_GroupIDsGate(t *testing.T) {
 		require.Equal(t, "QUOTA_KEY_GROUP_IDS_INVALID", infraerrors.Reason(err))
 	})
 
-	t.Run("non-existent group id rejected before create", func(t *testing.T) {
-		svc, client := qkNewTestService(t, &fakeUpstreamClient{})
+	t.Run("non-existent group id is auto-unbound before create", func(t *testing.T) {
+		ctx := context.Background()
+		repo := &qkgCreateCaptureRepo{}
+		svc, client := qkgNewCreateCaptureService(t, repo)
 		gID := settingsTestCreateGroup(t, client, PlatformAnthropic)
 		settings := &UpdateQuotaKeySettingsInput{GroupIDs: &[]int64{gID, 987650123}}
-		st, err := svc.CreateWithSettings(context.Background(), qksUniqueCode("sk-b2a"), nil, nil, 0, "", settings)
-		require.Error(t, err)
-		require.Nil(t, st)
-		require.Equal(t, "QUOTA_KEY_GROUP_NOT_FOUND", infraerrors.Reason(err))
+		st, err := svc.CreateWithSettings(ctx, qksUniqueCode("sk-b2a"), nil, nil, 0, "", settings)
+		require.NoError(t, err, "已删除/不存在的分组应自动解绑，不再阻断创建")
+		require.NotNil(t, st)
+		require.True(t, repo.createdSet)
+		require.Equal(t, []int64{gID}, repo.createdGroupIDs, "落库应使用自愈后的规范化结果")
+		require.NotNil(t, st.GroupIDs)
+		require.Equal(t, []int64{gID}, *st.GroupIDs)
+		// 从 DB 重新读取，确认真正落库的 group_ids 只剩有效 gID。
+		reloaded, gerr := client.QuotaKey.Get(ctx, st.ID)
+		require.NoError(t, gerr)
+		require.Equal(t, []int64{gID}, reloaded.GroupIds)
 	})
 
 	t.Run("valid group ids pass normalization gate", func(t *testing.T) {
@@ -648,16 +698,22 @@ func TestUpdateWithSettings_GroupIDsGate(t *testing.T) {
 		require.Nil(t, reloaded.GroupIds, "校验失败不得写入任何分组绑定")
 	})
 
-	t.Run("non-existent group rejected", func(t *testing.T) {
+	t.Run("deleted/non-existent group auto-unbound and persisted", func(t *testing.T) {
 		repo := &qkgDBSettingRepo{}
 		svc, client := qkgNewDBSettingService(t, repo)
+		gID := settingsTestCreateGroup(t, client, PlatformAnthropic)
 		qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
 
 		_, err := svc.UpdateWithSettings(ctx, qk.ID, nil, nil, nil, nil,
-			&UpdateQuotaKeySettingsInput{GroupIDs: &[]int64{987654321}})
-		require.Error(t, err)
-		require.Equal(t, "QUOTA_KEY_GROUP_NOT_FOUND", infraerrors.Reason(err))
-		require.Equal(t, 0, repo.calls, "校验失败必须在落库前失败关闭，不触碰仓储")
+			&UpdateQuotaKeySettingsInput{GroupIDs: &[]int64{gID, 987654321}})
+		require.NoError(t, err, "已删除/不存在的分组应自动解绑，不再阻断更新")
+		require.Equal(t, 1, repo.calls, "自愈结果需要落库，仓储必须被触碰")
+		require.NotNil(t, repo.last.GroupIDs)
+		require.Equal(t, []int64{gID}, *repo.last.GroupIDs, "传入仓储的应是自愈后的结果")
+
+		reloaded, gerr := client.QuotaKey.Get(ctx, qk.ID)
+		require.NoError(t, gerr)
+		require.Equal(t, []int64{gID}, reloaded.GroupIds, "落库的 group_ids 应为自愈后的值")
 	})
 
 	t.Run("normalized ids persisted", func(t *testing.T) {
@@ -677,4 +733,33 @@ func TestUpdateWithSettings_GroupIDsGate(t *testing.T) {
 		require.NoError(t, gerr)
 		require.Equal(t, []int64{gID}, reloaded.GroupIds)
 	})
+}
+
+// TestFilterLiveGroupIDs_SelfHealDeletedBinding 验证拉号挂组路径的自愈语义：
+// 已软删 / 不存在的分组 ID 从 quota_keys.group_ids 中剔除并落库；仅禁用（未软删但 status
+// 非 active）的分组保留在存储中，只是不出现在挂载返回值里。
+func TestFilterLiveGroupIDs_SelfHealDeletedBinding(t *testing.T) {
+	svc, client := qkNewTestService(t, &fakeUpstreamClient{})
+	ctx := context.Background()
+
+	activeID := qkgB2bCreateGroup(t, client, domain.PlatformAnthropic, domain.GroupModelAllowlist{Enabled: false})
+	deletedID := qkgB2bCreateGroup(t, client, domain.PlatformAnthropic, domain.GroupModelAllowlist{Enabled: false})
+	disabledID := qkgB2bCreateGroup(t, client, domain.PlatformAnthropic, domain.GroupModelAllowlist{Enabled: false})
+	require.NoError(t, client.Group.UpdateOneID(deletedID).SetDeletedAt(time.Now()).Exec(ctx))
+	require.NoError(t, client.Group.UpdateOneID(disabledID).SetStatus(domain.StatusDisabled).Exec(ctx))
+
+	ids := []int64{activeID, deletedID, disabledID, 987654321} // 含软删、禁用、不存在
+	qkID := qkgB2bCreateKeyWithGroupIDs(t, client, ids)
+
+	tx, err := client.Tx(ctx)
+	require.NoError(t, err)
+	out, err := svc.filterLiveGroupIDs(ctx, tx, qkID, ids)
+	require.NoError(t, err)
+	require.Equal(t, []int64{activeID}, out, "返回值只含 active 且未软删的分组（禁用组被过滤）")
+	require.NoError(t, tx.Commit())
+
+	reloaded, err := client.QuotaKey.Get(ctx, qkID)
+	require.NoError(t, err)
+	require.Equal(t, []int64{activeID, disabledID}, reloaded.GroupIds,
+		"已软删 / 不存在的 ID 被自愈剔除；仅禁用的分组仍保留在存储中")
 }
