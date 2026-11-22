@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"go.uber.org/zap"
 )
 
 // CursorUserFacingError 把 Cursor 链路错误映射为面向用户的 HTTP 状态、错误码与中文提示（方案 §2.2.2）。
@@ -75,10 +72,9 @@ func CursorUserFacingError(ctx context.Context, err error) (status int, code, me
 		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecUpstreamProtocolCode, infraerrors.CursorExecUpstreamProtocol
 	case errors.Is(err, ErrCursorExecutionUnavailable), errors.Is(err, ErrCursorSourceFingerprintUnavailable):
 		status, code, zh = http.StatusServiceUnavailable, infraerrors.CursorResServiceUnavailableCode, infraerrors.CursorResServiceUnavailable
-	case strings.HasPrefix(err.Error(), "cursor"):
-		// 识别本链路错误命名约定（"cursor:" 前缀），不是按内容猜类别；只记分类不记原文。
-		logger.FromContext(ctx).Warn("cursor_user_error_unmapped", zap.String("error_class", cursorStreamErrClass(err)))
-		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecInternalErrorCode, infraerrors.CursorExecInternalError
+	case errors.Is(err, ErrCursorResumeNotWaiting), errors.Is(err, ErrCursorContentWhileWaitingTools):
+		// 上游在工具结果关联前结束会话（2026-11-22 用户裁定：不兜底，如实返回）。
+		status, code, zh = http.StatusBadGateway, infraerrors.CursorExecSessionNotWaitingCode, infraerrors.CursorExecSessionNotWaiting
 	default:
 		return 0, "", "", false
 	}
@@ -111,6 +107,7 @@ func cursorRequestCodeMessage(code string) string {
 	case infraerrors.CursorExecModelMappingInvalidCode:
 		return infraerrors.CursorExecModelMappingInvalid
 	default:
-		return infraerrors.CursorExecInternalError
+		// 2026-11-22 用户裁定：不再把未登记的码兜底成"内部错误"，按明确的上游异常类别返回。
+		return infraerrors.CursorExecUpstreamProtocol
 	}
 }

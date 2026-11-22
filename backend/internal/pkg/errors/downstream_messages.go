@@ -555,6 +555,11 @@ const (
 	// 触发条件（500）：内部调用方不变量破坏（nil 请求 / typed 请求缺失 / marshal history blob 失败）
 	CursorExecInternalErrorCode = "CUR-EXEC-08"
 	CursorExecInternalError     = "服务内部错误，请稍后重试或联系管理员"
+	// CursorExecSessionNotWaitingCode（CUR-EXEC-13）：上游在工具结果关联前就结束了会话，
+	// 本地按「会话已不在等待工具结果」失败关闭。2026-11-22 用户裁定：不得再兜底成内部错误，
+	// 如实告诉客户端让用户反馈。
+	CursorExecSessionNotWaitingCode = "CUR-EXEC-13"
+	CursorExecSessionNotWaiting     = "上游会话提前终止（工具结果返回前会话已结束），本轮已终止，请重新发起请求"
 
 	// 触发条件（502）：上游正文注入「当前模型暂不可用，请发送 继续 或新开对话 (ts-hex)」
 	// （哨兵=ErrCursorUpstreamModelUnavailable，换号重试不成立或已用尽时）

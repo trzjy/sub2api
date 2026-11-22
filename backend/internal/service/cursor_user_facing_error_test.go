@@ -19,6 +19,16 @@ import (
 
 const cursorUserFacingTestRequestID = "req-s1-test-0001"
 
+// TestCursorUserFacingError_UnmappedHasNoFallback 锁定 2026-11-22 用户裁定：
+// 未知的 "cursor:" 前缀错误不得再兜底成 CUR-EXEC-08，必须返回 ok=false 交上层如实处理。
+func TestCursorUserFacingError_UnmappedHasNoFallback(t *testing.T) {
+	t.Parallel()
+	_, _, _, ok := CursorUserFacingError(cursorUserFacingTestCtx(), errors.New("cursor: something new happened"))
+	if ok {
+		t.Fatalf("unmapped cursor error must not be mapped (fallback removed)")
+	}
+}
+
 func cursorUserFacingTestCtx() context.Context {
 	return context.WithValue(context.Background(), ctxkey.RequestID, cursorUserFacingTestRequestID)
 }
@@ -87,9 +97,13 @@ func TestCursorUserFacingError_Table(t *testing.T) {
 			http.StatusServiceUnavailable, infraerrors.CursorResServiceUnavailableCode, infraerrors.CursorResServiceUnavailable},
 		{"8_fingerprint_wrapped", fmt.Errorf("gate: %w", ErrCursorSourceFingerprintUnavailable),
 			http.StatusServiceUnavailable, infraerrors.CursorResServiceUnavailableCode, infraerrors.CursorResServiceUnavailable},
-		// 9. 带 cursor 前缀的未命中错误
-		{"9_unmapped_cursor_prefix", errors.New("cursor: something new happened"),
-			http.StatusBadGateway, infraerrors.CursorExecInternalErrorCode, infraerrors.CursorExecInternalError},
+		// 9. 上游会话提前终止（2026-11-22 用户裁定：不兜底，如实返回 CUR-EXEC-13）
+		{"9a_resume_not_waiting", ErrCursorResumeNotWaiting,
+			http.StatusBadGateway, infraerrors.CursorExecSessionNotWaitingCode, infraerrors.CursorExecSessionNotWaiting},
+		{"9b_resume_not_waiting_wrapped", fmt.Errorf("continuation: %w", ErrCursorResumeNotWaiting),
+			http.StatusBadGateway, infraerrors.CursorExecSessionNotWaitingCode, infraerrors.CursorExecSessionNotWaiting},
+		{"9c_content_while_waiting_tools", ErrCursorContentWhileWaitingTools,
+			http.StatusBadGateway, infraerrors.CursorExecSessionNotWaitingCode, infraerrors.CursorExecSessionNotWaiting},
 	}
 
 	for _, tc := range cases {

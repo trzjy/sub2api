@@ -266,6 +266,8 @@ func cursorStreamErrClass(err error) string {
 		return "unsupported_execution"
 	case errors.Is(err, ErrCursorContentWhileWaitingTools):
 		return "content_while_waiting_tools"
+	case errors.Is(err, ErrCursorResumeNotWaiting):
+		return "resume_not_waiting"
 	case errors.Is(err, ErrCursorBatchIncomplete):
 		return "batch_incomplete"
 	case errors.Is(err, ErrCursorBatchAmbiguous):
