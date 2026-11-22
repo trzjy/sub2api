@@ -5104,9 +5104,14 @@ func (s *CursorExecutionService) finishCursorSessionIf(record *cursorSessionReco
 	stopWaitingToolsIdleTimerLocked(record)
 	record.mu.Unlock()
 
-	cursorPhaseLog(context.Background(), zapcore.InfoLevel, "session_finalize_begin", record.spec.requestedModel,
+	// 2026-11-22 用户要求：finalize reason 必须可检索（此前用 Background ctx 的 Info 级日志，生产拿不到）。
+	// 统一走全局 logger 的 Warn 级，带 session_id/terminal_reason/model/account，供事后归因
+	// 「谁结束了会话」（idle 超时 / 上游终态 / 客户端取消 等）。
+	logger.L().Warn("cursor_session_finalize",
 		zap.String("session_id", record.id),
-		zap.String("terminal_reason", reason))
+		zap.String("terminal_reason", reason),
+		zap.String("model", record.spec.requestedModel),
+		zap.Int64("account_id", record.spec.accountID))
 
 	// ① 停止接新结果：拒绝新的工具调用登记与新的 HTTP 附着。
 	if record.beginStep(&record.steps.intakeStopped) {
