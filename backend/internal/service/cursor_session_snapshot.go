@@ -6,14 +6,21 @@ import "time"
 //
 // 只包含导出字段，便于 JSON 序列化到 Redis；不含任何正文、参数或凭据。
 type cursorSessionSnapshot struct {
-	SessionID      string
-	Protocol       string // 客户端可见协议名
+	SessionID string
+	// ProtocolValue 是 cursorProtocol 枚举原值（int）：恢复时直接转回枚举，
+	// 不经字符串映射（避免第二套协议映射）；ProtocolName 仅供日志。
+	ProtocolValue  int
+	ProtocolName   string
 	IndexProtocol  string // 统一索引的协议命名空间
 	RequestedModel string
 	UpstreamModel  string
 	AccountID      int64
 	QuotaKeyID     int64
 	Identity       CursorSessionIdentity
+	// 来源指纹（首次生成 x-jg-auth 时记录）；恢复记录必须带回，否则重建分支会以
+	// source_fingerprint_unavailable 失败（cursorSessionSourceFingerprint）。
+	SourceQuotaKeyID int64
+	SourceCodeMAC    string
 
 	ConfigHex            string
 	ConfigItems          int
@@ -66,14 +73,17 @@ func cursorSnapshotFromRecord(record *cursorSessionRecord) (*cursorSessionSnapsh
 	itemIDs, _ := cursorSnapshotItemIDsFromRecord(record)
 
 	return &cursorSessionSnapshot{
-		SessionID:      record.id,
-		Protocol:       cursorProtocolIndexName(record.spec.protocol),
-		IndexProtocol:  cursorSessionIndexProtocol(record.spec),
-		RequestedModel: record.spec.requestedModel,
-		UpstreamModel:  record.spec.upstreamModel,
-		AccountID:      record.spec.accountID,
-		QuotaKeyID:     record.spec.quotaKeyID,
-		Identity:       record.identity,
+		SessionID:        record.id,
+		ProtocolValue:    int(record.spec.protocol),
+		ProtocolName:     cursorProtocolIndexName(record.spec.protocol),
+		IndexProtocol:    cursorSessionIndexProtocol(record.spec),
+		RequestedModel:   record.spec.requestedModel,
+		UpstreamModel:    record.spec.upstreamModel,
+		AccountID:        record.spec.accountID,
+		QuotaKeyID:       record.spec.quotaKeyID,
+		Identity:         record.identity,
+		SourceQuotaKeyID: record.spec.sourceQuotaKeyID,
+		SourceCodeMAC:    record.spec.sourceCodeMAC,
 
 		ConfigHex:            record.configDigest.HexString(),
 		ConfigItems:          record.configDigest.ItemCount(),
