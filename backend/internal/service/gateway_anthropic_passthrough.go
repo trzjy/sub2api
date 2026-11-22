@@ -458,11 +458,12 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	}
 
 	// 提醒插在完整 message_delta 事件之前：只跟踪已见的最大 content block 索引与
-	// 是否出现 tool_use。message_delta 整段缓冲到事件边界后用最终累计 usage 判定，
-	// 先写提醒再原样写出整段事件；message_stop 不再注入，上游事件保持零改写。
+	// 是否出现 tool_use。每个上游事件从首行起整段缓冲到事件边界空行后再判定，
+	// 事件名或 data.type 任一命中 message_delta 即先写提醒再原样写出整段事件，
+	// 兼容 event: 在 data: 之前、之后以及缺失 event: 三种行序；message_stop 不再注入。
 	warnMaxIndex := -1
 	warnSawToolUse := false
-	deltaGate := &contextWarnDeltaGate{}
+	eventBuffer := &contextWarnEventBuffer{}
 
 	usage := &ClaudeUsage{}
 	audit := &upstreamCompletionAudit{}
@@ -562,13 +563,13 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		return result, s.noteEmptyUpstreamCompletion(ctx, account, model, usage, audit)
 	}
 
-	// drainDeltaGate 在流异常结束、message_delta 尚未收到事件边界空行时，把缓冲
-	// 的行原样写出（不注入提醒），随后照常返回给调用方既有的错误/断连处置。
-	drainDeltaGate := func() {
-		if clientDisconnected || !deltaGate.bufferingDelta {
+	// drainEventBuffer 在流异常结束、当前事件尚未收到边界空行时，把未闭合缓冲
+	// 原样写出（不注入提醒），随后照常返回给调用方既有的错误/断连处置。
+	drainEventBuffer := func() {
+		if clientDisconnected || !eventBuffer.active() {
 			return
 		}
-		for _, buffered := range deltaGate.flush() {
+		for _, buffered := range eventBuffer.flush() {
 			if _, werr := io.WriteString(w, buffered); werr != nil {
 				return
 			}
@@ -604,8 +605,8 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					flusher.Flush()
 				}
 				if !sawTerminalEvent {
-					// 缓冲未闭合即结束：把 message_delta 原样补出，不注入提醒。
-					drainDeltaGate()
+					// 缓冲未闭合即结束：把未闭合事件原样补出，不注入提醒。
+					drainEventBuffer()
 					if clientDisconnected && streamInterval > 0 {
 						lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
 						if time.Since(lastRead) >= streamInterval {
@@ -621,7 +622,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					return finishUpstreamStream()
 				}
 				// 缓冲未闭合即读错误：原样补出已缓冲行，再沿用既有错误处置。
-				drainDeltaGate()
+				drainEventBuffer()
 				if clientDisconnected {
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after disconnect: %w", ev.err)
 				}
@@ -665,52 +666,37 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			}
 
 			if !clientDisconnected {
-				switch {
-				case deltaGate.active():
-					// 缓冲期间：所有行（含收尾空行）先收进 buf，不写出。
-					if deltaGate.add(line) {
-						// 事件边界：用最终累计 usage 判定，先写提醒再原样写出整段 message_delta。
-						if !warnSawToolUse {
-							ctxTokens := usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
-							d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
-							if d.Text != "" {
-								if _, werr := io.WriteString(w, BuildContextWarningSSEAt(warnMaxIndex+1, d.Text)); werr != nil {
-									clientDisconnected = true
-									logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during context warning injection, continue draining upstream for usage: account=%d", account.ID)
-								}
-								flusher.Flush()
+				// 整事件缓冲：每条上游行从事件首行起收进缓冲，直到边界空行再统一
+				// 判定并写出，保证 data: 在 event: 之前/之后以及缺 event: 时都能在
+				// 写出前命中提醒，且写出的事件内部行序与上游完全一致。
+				if eventBuffer.add(line) {
+					// 事件边界：事件名或 data.type 任一命中 message_delta 即在整段
+					// 事件之前注入提醒；message_stop 及其余事件零改写原样写出。
+					isMessageDelta := eventBuffer.eventName() == "message_delta" || eventBuffer.dataType() == "message_delta"
+					if isMessageDelta && !warnSawToolUse {
+						ctxTokens := usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
+						d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
+						if d.Text != "" {
+							if _, werr := io.WriteString(w, BuildContextWarningSSEAt(warnMaxIndex+1, d.Text)); werr != nil {
+								clientDisconnected = true
+								logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during context warning injection, continue draining upstream for usage: account=%d", account.ID)
 							}
-						}
-						for _, buffered := range deltaGate.flush() {
-							if !writePassthroughLine(buffered) {
-								break
-							}
-						}
-						if !clientDisconnected {
 							flusher.Flush()
-							lastDataAt = time.Now()
-							resetKeepaliveTimer()
 						}
+					}
+					for _, buffered := range eventBuffer.flush() {
+						if !writePassthroughLine(string(reverseToolNamesIfPresent(c, []byte(buffered)))) {
+							break
+						}
+					}
+					if !clientDisconnected {
+						flusher.Flush()
+						lastDataAt = time.Now()
+						resetKeepaliveTimer()
 						inPartialEvent = false
-					} else {
-						inPartialEvent = true
 					}
-				case deltaGate.begin(line):
-					// message_delta 事件名行：开启缓冲，不写出。
+				} else {
 					inPartialEvent = true
-				default:
-					// 其余上游行原样透传，不做 index+1 改写。
-					if writePassthroughLine(string(reverseToolNamesIfPresent(c, []byte(line)))) {
-						if line == "" {
-							// 按 SSE 事件边界刷出，减少每行 flush 带来的 syscall 开销。
-							flusher.Flush()
-							lastDataAt = time.Now()
-							resetKeepaliveTimer()
-							inPartialEvent = false
-						} else {
-							inPartialEvent = true
-						}
-					}
 				}
 			}
 
@@ -720,7 +706,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 				continue
 			}
 			// 缓冲未闭合即超时：原样补出已缓冲行，再沿用既有超时处置。
-			drainDeltaGate()
+			drainEventBuffer()
 			if clientDisconnected {
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after timeout")
 			}
@@ -754,45 +740,54 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	}
 }
 
-// contextWarnDeltaGate 是逐行驱动的 message_delta 事件缓冲状态机：遇到
-// message_delta 事件名行时开启缓冲，缓冲期间的所有行（含收尾空行）先收进
-// deltaBuf，直到事件边界空行由调用方先注入提醒、再原样写出整段事件，从而
-// 不拆散 message_delta 与其后的 message_stop。
-type contextWarnDeltaGate struct {
-	bufferingDelta bool
-	deltaBuf       []string
+// contextWarnEventBuffer 是逐行驱动的整事件缓冲状态机：从事件首行起缓冲全部行，
+// 直到事件边界空行一次性交还调用方判定。调用方按"事件名或 data.type 任一命中"
+// 决定是否先注入提醒，再按原顺序写出整段事件。这样无论 data: 在 event: 之前、
+// 之后，还是缺失 event: 行，都能在写出前完成判定，不拆散事件内部行序。
+type contextWarnEventBuffer struct {
+	buffering bool
+	lines     []string
 }
 
-// begin 尝试以 line 开启 message_delta 缓冲；仅当尚未缓冲且 line 是
-// message_delta 事件名行时成功，并把该行收进缓冲。
-func (g *contextWarnDeltaGate) begin(line string) bool {
-	if g.bufferingDelta {
-		return false
+// add 收下一行；若当前不在缓冲中则以该行开启新事件缓冲。返回该行是否为事件
+// 边界空行（此时整段事件已缓冲完毕，等待调用方判定与写出）。
+func (g *contextWarnEventBuffer) add(line string) bool {
+	if !g.buffering {
+		g.buffering = true
+		g.lines = nil
 	}
-	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "event:") ||
-		strings.TrimSpace(strings.TrimPrefix(trimmed, "event:")) != "message_delta" {
-		return false
-	}
-	g.bufferingDelta = true
-	g.deltaBuf = append(g.deltaBuf, line)
-	return true
-}
-
-// active 报告当前是否处于缓冲中。
-func (g *contextWarnDeltaGate) active() bool { return g.bufferingDelta }
-
-// add 在缓冲期间收下一行，返回该行是否为事件边界空行。
-func (g *contextWarnDeltaGate) add(line string) bool {
-	g.deltaBuf = append(g.deltaBuf, line)
+	g.lines = append(g.lines, line)
 	return line == ""
 }
 
+// active 报告当前是否有未闭合的事件缓冲。
+func (g *contextWarnEventBuffer) active() bool { return g.buffering }
+
+// eventName 返回缓冲行中首个 event: 行的事件名；不存在时返回空串。
+func (g *contextWarnEventBuffer) eventName() string {
+	for _, line := range g.lines {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "event:") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+		}
+	}
+	return ""
+}
+
+// dataType 返回缓冲行中首个 data 行的 type 字段；不存在时返回空串。
+func (g *contextWarnEventBuffer) dataType() string {
+	for _, line := range g.lines {
+		if data, ok := extractAnthropicSSEDataLine(line); ok {
+			return gjson.Get(data, "type").String()
+		}
+	}
+	return ""
+}
+
 // flush 返回缓冲的全部行并复位状态。
-func (g *contextWarnDeltaGate) flush() []string {
-	lines := g.deltaBuf
-	g.bufferingDelta = false
-	g.deltaBuf = nil
+func (g *contextWarnEventBuffer) flush() []string {
+	lines := g.lines
+	g.buffering = false
+	g.lines = nil
 	return lines
 }
 

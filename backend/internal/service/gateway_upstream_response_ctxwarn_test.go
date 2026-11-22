@@ -129,7 +129,8 @@ func TestContextWarnDeltaGateOrder(t *testing.T) {
 	}
 	warningText := "⚠️ [corealgos] 本会话上下文已达 80 万，即将超过可靠区间，可能返回异常短回复；请压缩上下文或开新会话接力。"
 
-	ordered := orderedContextWarningDeltaBlocks(4, warningText, deltaBlocks)
+	// 入参是已见最大块索引 2，提醒块索引应为 maxIndex+1 = 3。
+	ordered := orderedContextWarningDeltaBlocks(2, warningText, deltaBlocks)
 	if len(ordered) != len(deltaBlocks)+1 {
 		t.Fatalf("block count = %d, want %d", len(ordered), len(deltaBlocks)+1)
 	}
@@ -145,10 +146,10 @@ func TestContextWarnDeltaGateOrder(t *testing.T) {
 			t.Fatalf("event[%d].event = %q, want %q", i, events[i].eventType, want)
 		}
 	}
-	// 三个提醒事件使用 maxIndex+1 = 5 作为块索引。
+	// 三个提醒事件使用 maxIndex+1 = 3 作为块索引。
 	for i := 0; i < 3; i++ {
-		if got := gjson.Get(events[i].data, "index").Int(); got != 5 {
-			t.Fatalf("warning event[%d] index = %d, want 5", i, got)
+		if got := gjson.Get(events[i].data, "index").Int(); got != 3 {
+			t.Fatalf("warning event[%d] index = %d, want 3", i, got)
 		}
 	}
 	// 提醒文案落在 content_block_delta 的 text_delta 中。
@@ -163,8 +164,35 @@ func TestContextWarnDeltaGateOrder(t *testing.T) {
 	}
 
 	// 未命中提醒时，outputBlocks 原样返回，顺序不被改变。
-	unchanged := orderedContextWarningDeltaBlocks(4, "", deltaBlocks)
+	unchanged := orderedContextWarningDeltaBlocks(2, "", deltaBlocks)
 	if len(unchanged) != len(deltaBlocks) || unchanged[0] != deltaBlocks[0] {
 		t.Fatalf("no-warning path changed output blocks: %+v", unchanged)
+	}
+}
+
+// TestContextWarnDeltaBlockIndexAtZero 验证尚未见到任何内容块（maxIndex == -1）
+// 时，提醒块索引为 maxIndex+1 = 0，且顺序仍为"提醒三事件 → 原 delta 块"。
+func TestContextWarnDeltaBlockIndexAtZero(t *testing.T) {
+	deltaBlocks := []string{
+		"event: message_delta\n" +
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":900}}` + "\n\n",
+	}
+	warningText := "WARN"
+
+	ordered := orderedContextWarningDeltaBlocks(-1, warningText, deltaBlocks)
+	events := parseSSEEventsForTest(t, strings.Join(ordered, ""))
+	wantTypes := []string{"content_block_start", "content_block_delta", "content_block_stop", "message_delta"}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("SSE event count = %d, want %d: %+v", len(events), len(wantTypes), events)
+	}
+	for i, want := range wantTypes {
+		if events[i].eventType != want {
+			t.Fatalf("event[%d].event = %q, want %q", i, events[i].eventType, want)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if got := gjson.Get(events[i].data, "index").Int(); got != 0 {
+			t.Fatalf("warning event[%d] index = %d, want 0", i, got)
+		}
 	}
 }

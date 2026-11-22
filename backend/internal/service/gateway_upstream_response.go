@@ -741,8 +741,9 @@ func contextWarnDeltaUsage(usage *ClaudeUsage, patch *sseUsagePatch) ClaudeUsage
 }
 
 // orderedContextWarningDeltaBlocks 组装 message_delta 事件的写出顺序：
-// 命中提醒时，把 content_block_start/delta/stop 三个提醒 SSE 事件放在完整
-// message_delta 输出块之前；未命中则原样返回。message_delta 事件体始终原样
+// 入参 maxIndex 是已见最大块索引（可为 -1，表示尚未见到任何内容块）。命中提醒时，
+// 把 content_block_start/delta/stop 三个提醒 SSE 事件放在完整 message_delta 输出块
+// 之前，提醒块索引为 maxIndex+1；未命中则原样返回。message_delta 事件体始终原样
 // 保留，因此解析后的事件顺序恒为"提醒 → 完整 message_delta 事件"。
 func orderedContextWarningDeltaBlocks(maxIndex int, warningText string, deltaBlocks []string) []string {
 	if warningText == "" {
@@ -1159,7 +1160,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 						d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
 						warningText = d.Text
 					}
-					orderedBlocks = orderedContextWarningDeltaBlocks(warnState.maxIndex+1, warningText, outputBlocks)
+					orderedBlocks = orderedContextWarningDeltaBlocks(warnState.maxIndex, warningText, outputBlocks)
 				}
 
 				for _, block := range orderedBlocks {
