@@ -82,14 +82,6 @@ func buildClaudeCodeNoopDeltaKeepalive(index int, deltaType string) (string, boo
 	return fmt.Sprintf("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"%s\",\"%s\":\"\"}}\n\n", index, deltaType, fieldName), true
 }
 
-// contextWarnKeepaliveIndex 返回保活事件应使用的块索引：注入提醒后上游块整体 +1。
-func contextWarnKeepaliveIndex(idx int, st *contextWarnStreamState) int {
-	if st != nil && st.needShift() {
-		return idx + 1
-	}
-	return idx
-}
-
 func sseEventIndex(event map[string]any) (int, bool) {
 	switch v := event["index"].(type) {
 	case float64:
@@ -715,14 +707,26 @@ func partialStreamUsageResult(c *gin.Context, resp *http.Response, streamResult 
 	}
 }
 
-// observeContextWarnEvent 在 message_start 事件上判定一次水位；只解析该 data，不影响计费 usage。
-func (s *GatewayService) observeContextWarnEvent(ctx context.Context, st *contextWarnStreamState, data string) {
-	if data == "" || gjson.Get(data, "type").String() != "message_start" {
+// contextWarnAppendState 记录流结尾追加提醒所需的块索引与 tool_use 标记。
+// 与 anthropic passthrough 路径的状态相互独立。
+type contextWarnAppendState struct {
+	maxIndex   int // 初始 -1
+	sawToolUse bool
+}
+
+// observe 从单个事件的 data 原文更新最大块索引与 tool_use 标记。
+func (st *contextWarnAppendState) observe(data string) {
+	if data == "" || gjson.Get(data, "type").String() != "content_block_start" {
 		return
 	}
-	var u ClaudeUsage
-	s.parseSSEUsage(data, &u)
-	st.observeUsage(ctx, &u)
+	if idx := gjson.Get(data, "index"); idx.Exists() {
+		if i := int(idx.Int()); i > st.maxIndex {
+			st.maxIndex = i
+		}
+	}
+	if gjson.Get(data, "content_block.type").String() == "tool_use" {
+		st.sawToolUse = true
+	}
 }
 
 func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string, mimicClaudeCode bool) (*streamingResult, error) {
@@ -755,7 +759,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	}
 
 	usage := &ClaudeUsage{}
-	warnState := newContextWarnStreamState(RequestSizeSessionHash(ctx), account.ID)
+	warnState := &contextWarnAppendState{maxIndex: -1}
 	var firstTokenMs *int
 	scanner := bufio.NewScanner(resp.Body)
 	// 设置更大的buffer以处理长行
@@ -1115,15 +1119,21 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 					return nil, err
 				}
 
-				// 在 message_start 上判定一次水位；只解析该 data，不影响计费 usage。
-				s.observeContextWarnEvent(ctx, warnState, data)
+				warnState.observe(data)
+
+				// 流结尾：message_stop 且本回合无 tool_use 时，按最终 usage 判定一次，
+				// 在该事件的 outputBlocks 写出之前先追加提醒块。
+				if gjson.Get(data, "type").String() == "message_stop" && !warnState.sawToolUse {
+					ctxTokens := usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
+					d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
+					if d.Text != "" {
+						fmt.Fprint(w, BuildContextWarningSSEAt(warnState.maxIndex+1, d.Text))
+						flusher.Flush()
+					}
+				}
 
 				for _, block := range outputBlocks {
 					if !clientDisconnected {
-						// 提醒块注入后，上游 content_block_* 事件的 index 需整体 +1；注入块自身不再 shift。
-						if warnState.needShift() {
-							block = warnState.shiftEventBlock(block)
-						}
 						restored := reverseToolNamesIfPresent(c, []byte(block))
 						if _, werr := fmt.Fprint(w, string(restored)); werr != nil {
 							clientDisconnected = true
@@ -1146,11 +1156,6 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 							mergeSSEUsagePatch(usage, usagePatch)
 						}
 					}
-				}
-				// 所有 outputBlocks 写完之后注入提醒块（自身不经 shift）。
-				if inj := warnState.takeInjection(); inj != "" {
-					fmt.Fprint(w, inj)
-					flusher.Flush()
 				}
 				continue
 			}
@@ -1183,7 +1188,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			}
 			keepaliveBlock := "event: ping\ndata: {\"type\": \"ping\"}\n\n"
 			if useNoopDeltaKeepalive && noopDeltaKeepaliveBlockIndex >= 0 {
-				if block, ok := buildClaudeCodeNoopDeltaKeepalive(contextWarnKeepaliveIndex(noopDeltaKeepaliveBlockIndex, warnState), noopDeltaKeepaliveDeltaType); ok {
+				if block, ok := buildClaudeCodeNoopDeltaKeepalive(noopDeltaKeepaliveBlockIndex, noopDeltaKeepaliveDeltaType); ok {
 					keepaliveBlock = block
 				}
 			}
@@ -1506,12 +1511,26 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 		}
 	}
 
-	// 上下文水位提醒（通用非流式路径）：仅 2xx 响应注入；注入失败静默跳过，不改其它字段。
+	// 上下文水位提醒（通用非流式路径）：仅 2xx 响应、且 content 无 tool_use 时注入。
+	// 先判 tool_use 再判定水位：带 tool_use 的回合跳过且不推进水位。
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, response.Usage.InputTokens+response.Usage.CacheReadInputTokens+response.Usage.CacheCreationInputTokens)
-		if d.Text != "" {
-			if next, err := PrependContextWarningToJSON(body, d.Text); err == nil {
-				body = next
+		hasToolUse := false
+		for _, block := range gjson.GetBytes(body, "content").Array() {
+			if block.Get("type").String() == "tool_use" {
+				hasToolUse = true
+				break
+			}
+		}
+		if !hasToolUse {
+			ctxTokens := response.Usage.InputTokens + response.Usage.CacheReadInputTokens + response.Usage.CacheCreationInputTokens
+			d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
+			if d.Text != "" {
+				if next, err := AppendContextWarningToJSON(body, d.Text); err == nil {
+					body = next
+				} else {
+					// 追加失败保留原 body；水位已推进属可接受残余。
+					logger.LegacyPrintf("service.gateway", "[ContextWarn] append to non-streaming body failed: account=%d err=%v", account.ID, err)
+				}
 			}
 		}
 	}

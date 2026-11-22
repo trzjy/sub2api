@@ -511,7 +511,10 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		return nil, errors.New("streaming not supported")
 	}
 
-	warnState := newContextWarnStreamState(RequestSizeSessionHash(ctx), account.ID)
+	// 提醒改为流结尾追加：只跟踪已见的最大 content block 索引与是否出现 tool_use。
+	// 水位判定推迟到 message_stop，用最终累计 usage，且不再改写任何上游事件。
+	warnMaxIndex := -1
+	warnSawToolUse := false
 
 	usage := &ClaudeUsage{}
 	audit := &upstreamCompletionAudit{}
@@ -659,11 +662,28 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					firstTokenMs = &ms
 				}
 				parseSSEUsagePassthrough(data, usage)
-				if gjson.Get(data, "type").String() == "message_start" {
-					// 用临时 usage 再解析一次该 data，判定一次水位；不改动计费用量。
-					var u ClaudeUsage
-					parseSSEUsagePassthrough(data, &u)
-					warnState.observeUsage(ctx, &u)
+				typ := gjson.Get(data, "type").String()
+				if typ == "content_block_start" {
+					if idx := int(gjson.Get(data, "index").Int()); idx > warnMaxIndex {
+						warnMaxIndex = idx
+					}
+					if gjson.Get(data, "content_block.type").String() == "tool_use" {
+						warnSawToolUse = true
+					}
+				}
+				if typ == "message_stop" && !warnSawToolUse {
+					// 流结尾用最终累计 usage 判定；带 tool_use 的回合跳过、不推进水位。
+					ctxTokens := usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
+					d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
+					if d.Text != "" {
+						// 作为最后一个 content block 追加在该 data 行写出之前，索引取已见最大块 +1；
+						// 上游事件本身保持零改写。写出失败沿用既有 clientDisconnected 处置。
+						if _, err := io.WriteString(w, BuildContextWarningSSEAt(warnMaxIndex+1, d.Text)); err != nil {
+							clientDisconnected = true
+							logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during context warning injection, continue draining upstream for usage: account=%d", account.ID)
+						}
+						flusher.Flush()
+					}
 				}
 				audit.observeAnthropicSSE(trimmed)
 			} else {
@@ -674,9 +694,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			}
 
 			if !clientDisconnected {
-				if warnState.needShift() {
-					line, _ = ShiftContentBlockIndex(line)
-				}
+				// 上游事件原样透传，不再做 index+1 改写。
 				restored := string(reverseToolNamesIfPresent(c, []byte(line)))
 				if _, err := io.WriteString(w, restored); err != nil {
 					clientDisconnected = true
@@ -686,14 +704,6 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
 				} else if line == "" {
 					// 按 SSE 事件边界刷出，减少每行 flush 带来的 syscall 开销。
-					// 提醒块在 message_start 之后的第一个空行写出，位于首个 content block 之前；
-					// 注入块自身不再经过 shift。
-					if block := warnState.takeInjection(); block != "" {
-						if _, err := io.WriteString(w, block); err != nil {
-							clientDisconnected = true
-							logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during context warning injection, continue draining upstream for usage: account=%d", account.ID)
-						}
-					}
 					flusher.Flush()
 					lastDataAt = time.Now()
 					resetKeepaliveTimer()
@@ -1022,14 +1032,26 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 		}
 	}
 
-	// 水位提醒在 2xx 响应上前置到 content 数组头部；必须早于
-	// reverseToolNamesIfPresent，且失败时跳过注入、不改动其它字段。
+	// 水位提醒按"流结尾追加"语义追加到 2xx 响应 content 数组尾部；必须早于
+	// reverseToolNamesIfPresent。含 tool_use 的回合直接跳过（不判定、不推进水位）；
+	// append 失败记一条日志并保留原 body（水位已推进属可接受残余）。
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID,
-			usage.InputTokens+usage.CacheReadInputTokens+usage.CacheCreationInputTokens)
-		if d.Text != "" {
-			if next, err := PrependContextWarningToJSON(body, d.Text); err == nil {
-				body = next
+		hasToolUse := false
+		for _, block := range gjson.GetBytes(body, "content").Array() {
+			if block.Get("type").String() == "tool_use" {
+				hasToolUse = true
+				break
+			}
+		}
+		if !hasToolUse {
+			d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID,
+				usage.InputTokens+usage.CacheReadInputTokens+usage.CacheCreationInputTokens)
+			if d.Text != "" {
+				if next, err := AppendContextWarningToJSON(body, d.Text); err == nil {
+					body = next
+				} else {
+					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Append context warning to JSON failed, keep original body: account=%d error=%v", account.ID, err)
+				}
 			}
 		}
 	}
