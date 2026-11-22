@@ -148,25 +148,6 @@ func TestContextWarnZeroValue(t *testing.T) {
 	}
 }
 
-func TestBuildContextWarningSSE(t *testing.T) {
-	text := "⚠️ 上下文 \"已达\" 85 万\n第二行"
-	out := BuildContextWarningSSE(text)
-
-	textJSON, _ := json.Marshal(text)
-	want := "event: content_block_start\n" +
-		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
-		"event: content_block_delta\n" +
-		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + string(textJSON) + `}}` + "\n\n" +
-		"event: content_block_stop\n" +
-		`data: {"type":"content_block_stop","index":0}` + "\n\n"
-	if out != want {
-		t.Fatalf("SSE mismatch:\n got: %q\nwant: %q", out, want)
-	}
-	if n := strings.Count(out, "\n\n"); n != 3 {
-		t.Fatalf("want 3 event terminators, got %d", n)
-	}
-}
-
 func TestBuildContextWarningSSEAt(t *testing.T) {
 	text := "⚠️ 上下文 \"已达\" 85 万\n第二行"
 	out := BuildContextWarningSSEAt(3, text)
@@ -252,88 +233,6 @@ func TestAppendContextWarningToJSON(t *testing.T) {
 	}
 }
 
-func TestShiftContentBlockIndex(t *testing.T) {
-	for _, typ := range []string{"content_block_start", "content_block_delta", "content_block_stop"} {
-		in := `data: {"type":"` + typ + `","index":2,"delta":{"type":"text_delta","text":"hi"}}`
-		out, ok := ShiftContentBlockIndex(in)
-		if !ok {
-			t.Fatalf("%s: want shifted=true", typ)
-		}
-		if !strings.HasPrefix(out, "data: ") {
-			t.Fatalf("%s: lost prefix: %q", typ, out)
-		}
-		var obj map[string]interface{}
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(out, "data: ")), &obj); err != nil {
-			t.Fatalf("%s: bad json: %v", typ, err)
-		}
-		if obj["index"] != float64(3) {
-			t.Fatalf("%s: index=%v, want 3", typ, obj["index"])
-		}
-		if obj["type"] != typ {
-			t.Fatalf("%s: type changed: %v", typ, obj["type"])
-		}
-		if _, ok := obj["delta"]; !ok {
-			t.Fatalf("%s: lost delta field: %v", typ, obj)
-		}
-	}
-
-	unchanged := []string{
-		"event: content_block_start",
-		`data: {"type":"ping","index":0}`,
-		"data: not-json",
-		`{"type":"content_block_start","index":0}`,
-	}
-	for _, in := range unchanged {
-		out, ok := ShiftContentBlockIndex(in)
-		if ok || out != in {
-			t.Fatalf("should be unchanged: in=%q out=%q ok=%v", in, out, ok)
-		}
-	}
-}
-
-func TestPrependContextWarningToJSON(t *testing.T) {
-	warnText := "⚠️ 提醒 \"85\" 万"
-	body := []byte(`{"model":"x","content":[{"type":"text","text":"old"}],"stream":true}`)
-	out, err := PrependContextWarningToJSON(body, warnText)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(out, &obj); err != nil {
-		t.Fatal(err)
-	}
-	var content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(obj["content"], &content); err != nil {
-		t.Fatal(err)
-	}
-	if len(content) != 2 {
-		t.Fatalf("want 2 content blocks, got %d: %s", len(content), out)
-	}
-	if content[0].Type != "text" || content[0].Text != warnText {
-		t.Fatalf("warning block wrong: %+v", content[0])
-	}
-	if content[1].Text != "old" {
-		t.Fatalf("existing block shifted wrong: %+v", content[1])
-	}
-
-	var model string
-	if err := json.Unmarshal(obj["model"], &model); err != nil || model != "x" {
-		t.Fatalf("model lost: %q err=%v body=%s", model, err, out)
-	}
-	var stream bool
-	if err := json.Unmarshal(obj["stream"], &stream); err != nil || !stream {
-		t.Fatalf("stream lost: %v err=%v body=%s", stream, err, out)
-	}
-
-	if _, err := PrependContextWarningToJSON([]byte("not-json"), "x"); err == nil {
-		t.Fatal("want error for invalid json")
-	}
-}
-
 func TestContextWarnWatermarkNoExpiration(t *testing.T) {
 	resetContextWarnState(t)
 	ctx := testWarnContext()
@@ -358,35 +257,5 @@ func TestContextWarnWatermarkNoExpiration(t *testing.T) {
 	}
 	if v, _ := item.Object.(int); v != contextWarnBand3 {
 		t.Fatalf("watermark value=%v, want band3", v)
-	}
-}
-
-func TestShiftContentBlockIndexPreservesPayload(t *testing.T) {
-	const bigInt = "9007199254740993" // 2^53+1，经 float64 会丢精度
-	in := `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","n":` + bigInt + `}}`
-
-	out, ok := ShiftContentBlockIndex(in)
-	if !ok {
-		t.Fatalf("want shifted=true, out=%q", out)
-	}
-	if !strings.HasPrefix(out, "data: ") {
-		t.Fatalf("lost prefix: %q", out)
-	}
-
-	payload := strings.TrimPrefix(out, "data: ")
-	var obj struct {
-		Index int `json:"index"`
-	}
-	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
-		t.Fatalf("bad json: %v, out=%q", err, out)
-	}
-	if obj.Index != 1 {
-		t.Fatalf("index=%d, want 1; out=%q", obj.Index, out)
-	}
-	if !strings.Contains(out, bigInt) {
-		t.Fatalf("big integer not preserved byte-for-byte:\n got: %q\nwant to contain: %q", out, bigInt)
-	}
-	if !strings.Contains(payload, `"n":`+bigInt) {
-		t.Fatalf("n field changed: %q", payload)
 	}
 }

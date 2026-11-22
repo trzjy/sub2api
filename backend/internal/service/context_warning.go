@@ -6,14 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	gocache "github.com/patrickmn/go-cache"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 )
 
@@ -122,73 +120,7 @@ func contextWarnBandOf(ctxTokens int) int {
 	}
 }
 
-// BuildContextWarningSSE 构造三个完整的 SSE 事件，每个事件以空行结尾。
-func BuildContextWarningSSE(text string) string {
-	textJSON, _ := json.Marshal(text)
-	return "event: content_block_start\n" +
-		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
-		"event: content_block_delta\n" +
-		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + string(textJSON) + `}}` + "\n\n" +
-		"event: content_block_stop\n" +
-		`data: {"type":"content_block_stop","index":0}` + "\n\n"
-}
-
-// ShiftContentBlockIndex 将 content_block 类 data 行的顶层 index 加一。
-// 仅修改 index 字段，载荷其余字节原样保留（避免整体解码导致大整数精度丢失）。
-// 非 data 行、type 不匹配、缺少 index 或解析失败时原样返回。
-func ShiftContentBlockIndex(line string) (string, bool) {
-	if !strings.HasPrefix(line, "data:") {
-		return line, false
-	}
-
-	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-	typ := gjson.Get(payload, "type").String()
-	if typ != "content_block_start" && typ != "content_block_delta" && typ != "content_block_stop" {
-		return line, false
-	}
-	indexResult := gjson.Get(payload, "index")
-	if !indexResult.Exists() {
-		return line, false
-	}
-
-	newPayload, err := sjson.Set(payload, "index", indexResult.Int()+1)
-	if err != nil {
-		return line, false
-	}
-	return "data: " + newPayload, true
-}
-
-// PrependContextWarningToJSON 在 {"content":[...]} 的数组头部插入一个 text block，
-// 其余字段保持原样。
-func PrependContextWarningToJSON(body []byte, text string) ([]byte, error) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return nil, err
-	}
-
-	var content []json.RawMessage
-	if raw, ok := obj["content"]; ok {
-		if err := json.Unmarshal(raw, &content); err != nil {
-			return nil, err
-		}
-	}
-
-	warning, err := json.Marshal(map[string]string{"type": "text", "text": text})
-	if err != nil {
-		return nil, err
-	}
-	content = append([]json.RawMessage{warning}, content...)
-
-	newContent, err := json.Marshal(content)
-	if err != nil {
-		return nil, err
-	}
-	obj["content"] = newContent
-
-	return json.Marshal(obj)
-}
-
-// BuildContextWarningSSEAt 与 BuildContextWarningSSE 同形，但使用入参 index 作为块索引，
+// BuildContextWarningSSEAt 构造三个完整的 SSE 事件，使用入参 index 作为块索引，
 // 便于在流结尾按实际 content block 数量追加提醒。三个事件均以空行结尾。
 func BuildContextWarningSSEAt(index int, text string) string {
 	textJSON, _ := json.Marshal(text)
