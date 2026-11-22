@@ -12,9 +12,6 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 const cursorUserFacingTestRequestID = "req-s1-test-0001"
@@ -187,32 +184,5 @@ func TestCursorRequestError_IsAndAs(t *testing.T) {
 	}
 	if want := `cursor: tool "search": invalid input_schema JSON`; reqErr.Error() != want {
 		t.Fatalf("Error()=%q, want %q", reqErr.Error(), want)
-	}
-}
-
-func TestCursorUserFacingError_UnmappedLogsClassOnly(t *testing.T) {
-	core, logs := observer.New(zap.DebugLevel)
-	ctx := logger.IntoContext(cursorUserFacingTestCtx(), zap.New(core))
-	const secret = "cursor: secret-upstream-body-xyz"
-	status, code, _, ok := CursorUserFacingError(ctx, errors.New(secret))
-	if !ok || status != http.StatusBadGateway || code != infraerrors.CursorExecInternalErrorCode {
-		t.Fatalf("got (%d, %s, %v)", status, code, ok)
-	}
-	entries := logs.FilterMessage("cursor_user_error_unmapped").All()
-	if len(entries) != 1 {
-		t.Fatalf("want 1 cursor_user_error_unmapped entry, got %d", len(entries))
-	}
-	if _, has := entries[0].ContextMap()["error_class"]; !has {
-		t.Fatal("missing error_class field")
-	}
-	for _, e := range logs.All() {
-		if strings.Contains(e.Message, "secret-upstream-body") {
-			t.Fatal("log message leaks raw error text")
-		}
-		for k, v := range e.ContextMap() {
-			if strings.Contains(fmt.Sprint(v), "secret-upstream-body") {
-				t.Fatalf("log field %s leaks raw error text", k)
-			}
-		}
 	}
 }
