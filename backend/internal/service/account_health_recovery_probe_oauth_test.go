@@ -21,8 +21,10 @@ import (
 // chatgptCodexURL 的 /backend-api/codex/responses，因此可在不修改固定端点常量的
 // 前提下让探针真发一次请求到假 Codex 端点并校验请求形状。
 func TestAccountHealthRecoveryProbeOAuthDataPlaneRouting(t *testing.T) {
+	// 正例必须是**有真实输出或真实 usage** 的终态帧：只有 id/status 的空 completed 帧
+	// 是上游静默拒绝的形状（站内转发侧据此 failover，issue #5009），不得当成健康正例。
 	completedSSE := "event: response.completed\n" +
-		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_probe\",\"status\":\"completed\"}}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_probe\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":11,\"output_tokens\":5,\"total_tokens\":16}}}\n\n" +
 		"data: [DONE]\n\n"
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, completedSSE)
 	p := &AccountHealthRecoveryProbeService{
@@ -31,10 +33,19 @@ func TestAccountHealthRecoveryProbeOAuthDataPlaneRouting(t *testing.T) {
 		accountRepo:  &oauthProbeFakeRepo{},
 	}
 	acc := &Account{
-		ID:          990,
-		Platform:    PlatformOpenAI,
-		Type:        AccountTypeOAuth,
-		Credentials: map[string]any{"access_token": "oauth-probe-token"},
+		ID:       990,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		// model_mapping 与生产 OAuth 号形态一致（生产 990/991 各带 10 条「键=值」映射）。
+		// 探针模型必须取自账号真实可服务模型，取不到时按 degraded 语义（无模型可探），
+		// 绝回落上游不支持的占位模型 gpt-5.4（生产实证 400 model_not_found）。
+		Credentials: map[string]any{
+			"access_token": "oauth-probe-token",
+			"model_mapping": map[string]any{
+				"gpt-6-astra": "gpt-6-astra",
+				"gpt-6.1-sol": "gpt-6.1-sol",
+			},
+		},
 		Concurrency: 1,
 	}
 
@@ -52,4 +63,36 @@ func TestAccountHealthRecoveryProbeOAuthDataPlaneRouting(t *testing.T) {
 		"必须走 OAuth Codex 端点，不是 /v1/chat/completions")
 	require.Equal(t, "Bearer oauth-probe-token", rec.Header.Get("Authorization"),
 		"必须用 access_token 凭据，不是 api_key")
+}
+
+// TestAccountHealthRecoveryProbeOAuthEmptyCompletedFrameIsUnhealthy 是 BLOCKER-2 的
+// 承重用例：上游回一个「只有 id/status、无 output/usage/error」的空 completed 帧时，
+// 探针必须判不健康（不解除停调）——站内转发对这种流明确判定为上游静默拒绝并
+// failover（issue #5009），探针若当成健康，一次探测即可清除额度/传输分量停调。
+func TestAccountHealthRecoveryProbeOAuthEmptyCompletedFrameIsUnhealthy(t *testing.T) {
+	emptyCompletedSSE := "event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_probe\",\"status\":\"completed\"}}\n\n" +
+		"data: [DONE]\n\n"
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, emptyCompletedSSE)
+	p := &AccountHealthRecoveryProbeService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+		accountRepo:  &oauthProbeFakeRepo{},
+	}
+	acc := &Account{
+		ID:       990,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "oauth-probe-token",
+			"model_mapping": map[string]any{
+				"gpt-6-astra": "gpt-6-astra",
+			},
+		},
+		Concurrency: 1,
+	}
+
+	ok, err := p.probeUpstreamDataPlaneWithProtocol(context.Background(), acc, false)
+	require.NoError(t, err, "空 completed 帧是响应内容问题，不是传输/配置错误")
+	require.False(t, ok, "空 completed 帧（上游静默拒绝）必须判不健康，不得解除停调")
 }
