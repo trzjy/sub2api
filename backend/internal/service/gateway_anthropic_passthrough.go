@@ -25,6 +25,60 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// contextWarnStreamState 在一次流式响应内维护水位提醒的注入状态。
+type contextWarnStreamState struct {
+	sessionHash string
+	accountID   int64
+	decided     bool
+	block       string
+	injected    bool
+	shift       bool
+}
+
+func newContextWarnStreamState(sessionHash string, accountID int64) *contextWarnStreamState {
+	return &contextWarnStreamState{sessionHash: sessionHash, accountID: accountID}
+}
+
+// observeUsage 在 message_start 的 usage 解析后调用一次；只判定一次。
+func (st *contextWarnStreamState) observeUsage(ctx context.Context, u *ClaudeUsage) {
+	if st.decided || u == nil {
+		return
+	}
+	st.decided = true
+	ctxTokens := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+	d := DecideContextWarning(ctx, st.sessionHash, st.accountID, ctxTokens)
+	if d.Text != "" {
+		st.block = BuildContextWarningSSE(d.Text)
+		st.shift = true
+	}
+}
+
+// takeInjection 返回待注入的完整 SSE 块（BuildContextWarningSSE 的结果），只返回一次。
+func (st *contextWarnStreamState) takeInjection() string {
+	if st.injected || st.block == "" {
+		return ""
+	}
+	st.injected = true
+	return st.block
+}
+
+// needShift 注入后为 true：上游 content_block_* 事件的 index 需要 +1。
+func (st *contextWarnStreamState) needShift() bool {
+	return st.injected && st.shift
+}
+
+// shiftEventBlock 对一整段 SSE 事件（可能多行）中 content_block_* 的 data 行做
+// ShiftContentBlockIndex，其余行原样；供通用路径复用。
+func (st *contextWarnStreamState) shiftEventBlock(block string) string {
+	lines := strings.Split(block, "\n")
+	for i, line := range lines {
+		if shifted, ok := ShiftContentBlockIndex(line); ok {
+			lines[i] = shifted
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 type anthropicPassthroughForwardInput struct {
 	Body          []byte
 	Parsed        *ParsedRequest
@@ -457,6 +511,8 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		return nil, errors.New("streaming not supported")
 	}
 
+	warnState := newContextWarnStreamState(RequestSizeSessionHash(ctx), account.ID)
+
 	usage := &ClaudeUsage{}
 	audit := &upstreamCompletionAudit{}
 	var firstTokenMs *int
@@ -603,6 +659,12 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					firstTokenMs = &ms
 				}
 				parseSSEUsagePassthrough(data, usage)
+				if gjson.Get(data, "type").String() == "message_start" {
+					// 用临时 usage 再解析一次该 data，判定一次水位；不改动计费用量。
+					var u ClaudeUsage
+					parseSSEUsagePassthrough(data, &u)
+					warnState.observeUsage(ctx, &u)
+				}
 				audit.observeAnthropicSSE(trimmed)
 			} else {
 				trimmed := strings.TrimSpace(line)
@@ -612,6 +674,9 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			}
 
 			if !clientDisconnected {
+				if warnState.needShift() {
+					line, _ = ShiftContentBlockIndex(line)
+				}
 				restored := string(reverseToolNamesIfPresent(c, []byte(line)))
 				if _, err := io.WriteString(w, restored); err != nil {
 					clientDisconnected = true
@@ -621,6 +686,14 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
 				} else if line == "" {
 					// 按 SSE 事件边界刷出，减少每行 flush 带来的 syscall 开销。
+					// 提醒块在 message_start 之后的第一个空行写出，位于首个 content block 之前；
+					// 注入块自身不再经过 shift。
+					if block := warnState.takeInjection(); block != "" {
+						if _, err := io.WriteString(w, block); err != nil {
+							clientDisconnected = true
+							logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during context warning injection, continue draining upstream for usage: account=%d", account.ID)
+						}
+					}
 					flusher.Flush()
 					lastDataAt = time.Now()
 					resetKeepaliveTimer()
@@ -946,6 +1019,18 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 		body, err = classifyAnthropicResponseInputAsCacheRead(body, usage)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	// 水位提醒在 2xx 响应上前置到 content 数组头部；必须早于
+	// reverseToolNamesIfPresent，且失败时跳过注入、不改动其它字段。
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID,
+			usage.InputTokens+usage.CacheReadInputTokens+usage.CacheCreationInputTokens)
+		if d.Text != "" {
+			if next, err := PrependContextWarningToJSON(body, d.Text); err == nil {
+				body = next
+			}
 		}
 	}
 
