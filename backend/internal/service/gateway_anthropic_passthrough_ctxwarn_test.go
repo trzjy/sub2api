@@ -12,6 +12,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -217,5 +218,191 @@ func TestContextWarnPassthroughNonStreamSkipsToolUse(t *testing.T) {
 	}
 	if len(obj.Content) != 2 {
 		t.Fatalf("content changed on tool_use turn: %+v\n%s", obj.Content, out)
+	}
+}
+
+// ---------- F1 整改：提醒插在完整 message_delta 之前 ----------
+
+// ctxWarnSSEEvent 是一条按空行边界解析出的 SSE 事件；保留原始行顺序，
+// 便于断言 event: 行后紧跟的是它自己的 data 行（事件边界未被拆开）。
+type ctxWarnSSEEvent struct {
+	lines []string
+}
+
+func ctxWarnParseSSEEvents(stream string) []ctxWarnSSEEvent {
+	var events []ctxWarnSSEEvent
+	var cur []string
+	for _, line := range strings.Split(stream, "\n") {
+		if line == "" {
+			if len(cur) > 0 {
+				events = append(events, ctxWarnSSEEvent{lines: cur})
+				cur = nil
+			}
+			continue
+		}
+		cur = append(cur, line)
+	}
+	if len(cur) > 0 {
+		events = append(events, ctxWarnSSEEvent{lines: cur})
+	}
+	return events
+}
+
+func (e ctxWarnSSEEvent) eventName() string {
+	for _, line := range e.lines {
+		if strings.HasPrefix(line, "event:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		}
+	}
+	return ""
+}
+
+func (e ctxWarnSSEEvent) dataType() string {
+	for _, line := range e.lines {
+		if data, ok := extractAnthropicSSEDataLine(line); ok {
+			return gjson.Get(data, "type").String()
+		}
+	}
+	return ""
+}
+
+// ctxWarnDriveDeltaGate 以与生产一致的写出语义驱动缓冲状态机：遇到边界空行时
+// 先写 warn、再原样写出整段缓冲；流结束时若缓冲未闭合则原样补出、不注入。
+func ctxWarnDriveDeltaGate(lines []string, warn string) string {
+	var out strings.Builder
+	gate := &contextWarnDeltaGate{}
+	for _, line := range lines {
+		switch {
+		case gate.active():
+			if gate.add(line) {
+				out.WriteString(warn)
+				for _, buffered := range gate.flush() {
+					out.WriteString(buffered)
+					out.WriteString("\n")
+				}
+			}
+		case gate.begin(line):
+			// 缓冲首行，暂不写出。
+		default:
+			out.WriteString(line)
+			out.WriteString("\n")
+		}
+	}
+	if gate.active() {
+		for _, buffered := range gate.flush() {
+			out.WriteString(buffered)
+			out.WriteString("\n")
+		}
+	}
+	return out.String()
+}
+
+func TestContextWarnDeltaGate(t *testing.T) {
+	lines := []string{
+		"event: message_delta",
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+	}
+	warn := BuildContextWarningSSEAt(1, "WARN")
+	out := ctxWarnDriveDeltaGate(lines, warn)
+
+	events := ctxWarnParseSSEEvents(out)
+	// 提醒块 3 个事件 + message_delta + message_stop = 5 个。
+	if len(events) != 5 {
+		t.Fatalf("want 5 events (warn x3 + delta + stop), got %d:\n%s", len(events), out)
+	}
+	// 顺序：提醒块 → 完整 message_delta → 完整 message_stop。
+	wantNames := []string{"content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"}
+	for i, ev := range events {
+		if got := ev.eventName(); got != wantNames[i] {
+			t.Fatalf("event[%d] = %q, want %q:\n%s", i, got, wantNames[i], out)
+		}
+	}
+	// 两个上游事件整体原样：event 行后紧跟自己的 data 行，且仅含这两行。
+	delta := events[3]
+	if len(delta.lines) != 2 || delta.lines[0] != "event: message_delta" ||
+		delta.dataType() != "message_delta" {
+		t.Fatalf("message_delta event not intact:\n%q", delta.lines)
+	}
+	stop := events[4]
+	if len(stop.lines) != 2 || stop.lines[0] != "event: message_stop" ||
+		stop.dataType() != "message_stop" {
+		t.Fatalf("event: message_stop not followed by its own data line:\n%q", stop.lines)
+	}
+
+	// 异常收尾：message_delta 未闭合时原样补出，不注入提醒。
+	unclosed := ctxWarnDriveDeltaGate([]string{
+		"event: message_delta",
+		`data: {"type":"message_delta","usage":{}}`,
+	}, warn)
+	unclosedEvents := ctxWarnParseSSEEvents(unclosed)
+	if len(unclosedEvents) != 1 || unclosedEvents[0].eventName() != "message_delta" {
+		t.Fatalf("unclosed buffer must be flushed as-is, no warning injected:\n%s", unclosed)
+	}
+}
+
+func TestContextWarnPassthroughStreamWarningBeforeMessageDelta(t *testing.T) {
+	ctxWarnResetState(t)
+	sse := ctxWarnPassthroughSSE(
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":800000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
+		"",
+		"event: content_block_start",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		"",
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		"",
+		"event: content_block_stop",
+		`data: {"type":"content_block_stop","index":0}`,
+		"",
+		"event: message_delta",
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+	)
+	out := ctxWarnRunPassthroughStream(t, sse, "sess-pt-stream-before-delta", 9005)
+
+	events := ctxWarnParseSSEEvents(out)
+	deltaIdx, stopIdx := -1, -1
+	for i, ev := range events {
+		switch ev.eventName() {
+		case "message_delta":
+			deltaIdx = i
+		case "message_stop":
+			stopIdx = i
+		}
+	}
+	if deltaIdx < 0 || stopIdx < 0 || stopIdx != deltaIdx+1 {
+		t.Fatalf("message_delta/message_stop order or boundary wrong: delta=%d stop=%d\n%s", deltaIdx, stopIdx, out)
+	}
+	// 两个事件都整体原样：仅含 event 行与其 data 行。
+	for _, idx := range []int{deltaIdx, stopIdx} {
+		ev := events[idx]
+		if len(ev.lines) != 2 ||
+			ev.lines[0] != "event: "+ev.eventName() ||
+			!strings.Contains(ev.lines[1], `"type":"`+ev.dataType()+`"`) {
+			t.Fatalf("event %q not intact: %q", ev.eventName(), ev.lines)
+		}
+	}
+	// 提醒块（index 1 的 content_block_start）整体位于 message_delta 之前。
+	warnBefore := false
+	for i := 0; i < deltaIdx; i++ {
+		ev := events[i]
+		if ev.eventName() == "content_block_start" && ev.dataType() == "content_block_start" {
+			for _, line := range ev.lines {
+				if strings.Contains(line, `"index":1`) {
+					warnBefore = true
+				}
+			}
+		}
+	}
+	if !warnBefore {
+		t.Fatalf("warning block (index 1) not found before message_delta:\n%s", out)
 	}
 }

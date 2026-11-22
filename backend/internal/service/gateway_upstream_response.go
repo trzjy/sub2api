@@ -729,6 +729,31 @@ func (st *contextWarnAppendState) observe(data string) {
 	}
 }
 
+// contextWarnDeltaUsage 返回 message_delta 事件用于水位判定的临时最终用量：
+// 在 usage 的副本上合并本事件携带的 usage patch，绝不写回真实 usage。
+// 真实 usage 的合并仍由流式主循环按原有时机完成。
+func contextWarnDeltaUsage(usage *ClaudeUsage, patch *sseUsagePatch) ClaudeUsage {
+	tmp := *usage
+	if patch != nil {
+		mergeSSEUsagePatch(&tmp, patch)
+	}
+	return tmp
+}
+
+// orderedContextWarningDeltaBlocks 组装 message_delta 事件的写出顺序：
+// 命中提醒时，把 content_block_start/delta/stop 三个提醒 SSE 事件放在完整
+// message_delta 输出块之前；未命中则原样返回。message_delta 事件体始终原样
+// 保留，因此解析后的事件顺序恒为"提醒 → 完整 message_delta 事件"。
+func orderedContextWarningDeltaBlocks(maxIndex int, warningText string, deltaBlocks []string) []string {
+	if warningText == "" {
+		return deltaBlocks
+	}
+	blocks := make([]string, 0, len(deltaBlocks)+1)
+	blocks = append(blocks, BuildContextWarningSSEAt(maxIndex+1, warningText))
+	blocks = append(blocks, deltaBlocks...)
+	return blocks
+}
+
 func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string, mimicClaudeCode bool) (*streamingResult, error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
@@ -1121,18 +1146,23 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 
 				warnState.observe(data)
 
-				// 流结尾：message_stop 且本回合无 tool_use 时，按最终 usage 判定一次，
-				// 在该事件的 outputBlocks 写出之前先追加提醒块。
-				if gjson.Get(data, "type").String() == "message_stop" && !warnState.sawToolUse {
-					ctxTokens := usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
-					d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
-					if d.Text != "" {
-						fmt.Fprint(w, BuildContextWarningSSEAt(warnState.maxIndex+1, d.Text))
-						flusher.Flush()
+				// 通用路径按整事件缓冲：在 message_delta 的 outputBlocks 写出之前，
+				// 用"当前 usage 合并本事件 patch"的临时最终用量判定一次水位；命中则把
+				// 提醒块排在该事件之前。message_delta 与 message_stop 事件体均原样写出，
+				// 不再在 message_stop 处注入。真实 usage 的合并时机保持不变。
+				orderedBlocks := outputBlocks
+				if gjson.Get(data, "type").String() == "message_delta" {
+					tmp := contextWarnDeltaUsage(usage, usagePatch)
+					warningText := ""
+					if !warnState.sawToolUse {
+						ctxTokens := tmp.InputTokens + tmp.CacheReadInputTokens + tmp.CacheCreationInputTokens
+						d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
+						warningText = d.Text
 					}
+					orderedBlocks = orderedContextWarningDeltaBlocks(warnState.maxIndex+1, warningText, outputBlocks)
 				}
 
-				for _, block := range outputBlocks {
+				for _, block := range orderedBlocks {
 					if !clientDisconnected {
 						restored := reverseToolNamesIfPresent(c, []byte(block))
 						if _, werr := fmt.Fprint(w, string(restored)); werr != nil {

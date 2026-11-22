@@ -457,10 +457,12 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		return nil, errors.New("streaming not supported")
 	}
 
-	// 提醒改为流结尾追加：只跟踪已见的最大 content block 索引与是否出现 tool_use。
-	// 水位判定推迟到 message_stop，用最终累计 usage，且不再改写任何上游事件。
+	// 提醒插在完整 message_delta 事件之前：只跟踪已见的最大 content block 索引与
+	// 是否出现 tool_use。message_delta 整段缓冲到事件边界后用最终累计 usage 判定，
+	// 先写提醒再原样写出整段事件；message_stop 不再注入，上游事件保持零改写。
 	warnMaxIndex := -1
 	warnSawToolUse := false
+	deltaGate := &contextWarnDeltaGate{}
 
 	usage := &ClaudeUsage{}
 	audit := &upstreamCompletionAudit{}
@@ -560,6 +562,39 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		return result, s.noteEmptyUpstreamCompletion(ctx, account, model, usage, audit)
 	}
 
+	// drainDeltaGate 在流异常结束、message_delta 尚未收到事件边界空行时，把缓冲
+	// 的行原样写出（不注入提醒），随后照常返回给调用方既有的错误/断连处置。
+	drainDeltaGate := func() {
+		if clientDisconnected || !deltaGate.bufferingDelta {
+			return
+		}
+		for _, buffered := range deltaGate.flush() {
+			if _, werr := io.WriteString(w, buffered); werr != nil {
+				return
+			}
+			if _, werr := io.WriteString(w, "\n"); werr != nil {
+				return
+			}
+		}
+		flusher.Flush()
+	}
+
+	// writePassthroughLine 原样写出一行（含换行）；写出失败置 clientDisconnected
+	// 并沿用既有日志，返回是否写出成功。
+	writePassthroughLine := func(raw string) bool {
+		if _, werr := io.WriteString(w, raw); werr != nil {
+			clientDisconnected = true
+			logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
+			return false
+		}
+		if _, werr := io.WriteString(w, "\n"); werr != nil {
+			clientDisconnected = true
+			logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
+			return false
+		}
+		return true
+	}
+
 	for {
 		select {
 		case ev, ok := <-events:
@@ -569,6 +604,8 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					flusher.Flush()
 				}
 				if !sawTerminalEvent {
+					// 缓冲未闭合即结束：把 message_delta 原样补出，不注入提醒。
+					drainDeltaGate()
 					if clientDisconnected && streamInterval > 0 {
 						lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
 						if time.Since(lastRead) >= streamInterval {
@@ -583,6 +620,8 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 				if sawTerminalEvent {
 					return finishUpstreamStream()
 				}
+				// 缓冲未闭合即读错误：原样补出已缓冲行，再沿用既有错误处置。
+				drainDeltaGate()
 				if clientDisconnected {
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after disconnect: %w", ev.err)
 				}
@@ -617,20 +656,6 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 						warnSawToolUse = true
 					}
 				}
-				if typ == "message_stop" && !warnSawToolUse {
-					// 流结尾用最终累计 usage 判定；带 tool_use 的回合跳过、不推进水位。
-					ctxTokens := usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
-					d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
-					if d.Text != "" {
-						// 作为最后一个 content block 追加在该 data 行写出之前，索引取已见最大块 +1；
-						// 上游事件本身保持零改写。写出失败沿用既有 clientDisconnected 处置。
-						if _, err := io.WriteString(w, BuildContextWarningSSEAt(warnMaxIndex+1, d.Text)); err != nil {
-							clientDisconnected = true
-							logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during context warning injection, continue draining upstream for usage: account=%d", account.ID)
-						}
-						flusher.Flush()
-					}
-				}
 				audit.observeAnthropicSSE(trimmed)
 			} else {
 				trimmed := strings.TrimSpace(line)
@@ -640,22 +665,52 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			}
 
 			if !clientDisconnected {
-				// 上游事件原样透传，不再做 index+1 改写。
-				restored := string(reverseToolNamesIfPresent(c, []byte(line)))
-				if _, err := io.WriteString(w, restored); err != nil {
-					clientDisconnected = true
-					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
-				} else if _, err := io.WriteString(w, "\n"); err != nil {
-					clientDisconnected = true
-					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
-				} else if line == "" {
-					// 按 SSE 事件边界刷出，减少每行 flush 带来的 syscall 开销。
-					flusher.Flush()
-					lastDataAt = time.Now()
-					resetKeepaliveTimer()
-					inPartialEvent = false
-				} else {
+				switch {
+				case deltaGate.active():
+					// 缓冲期间：所有行（含收尾空行）先收进 buf，不写出。
+					if deltaGate.add(line) {
+						// 事件边界：用最终累计 usage 判定，先写提醒再原样写出整段 message_delta。
+						if !warnSawToolUse {
+							ctxTokens := usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
+							d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, ctxTokens)
+							if d.Text != "" {
+								if _, werr := io.WriteString(w, BuildContextWarningSSEAt(warnMaxIndex+1, d.Text)); werr != nil {
+									clientDisconnected = true
+									logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during context warning injection, continue draining upstream for usage: account=%d", account.ID)
+								}
+								flusher.Flush()
+							}
+						}
+						for _, buffered := range deltaGate.flush() {
+							if !writePassthroughLine(buffered) {
+								break
+							}
+						}
+						if !clientDisconnected {
+							flusher.Flush()
+							lastDataAt = time.Now()
+							resetKeepaliveTimer()
+						}
+						inPartialEvent = false
+					} else {
+						inPartialEvent = true
+					}
+				case deltaGate.begin(line):
+					// message_delta 事件名行：开启缓冲，不写出。
 					inPartialEvent = true
+				default:
+					// 其余上游行原样透传，不做 index+1 改写。
+					if writePassthroughLine(string(reverseToolNamesIfPresent(c, []byte(line)))) {
+						if line == "" {
+							// 按 SSE 事件边界刷出，减少每行 flush 带来的 syscall 开销。
+							flusher.Flush()
+							lastDataAt = time.Now()
+							resetKeepaliveTimer()
+							inPartialEvent = false
+						} else {
+							inPartialEvent = true
+						}
+					}
 				}
 			}
 
@@ -664,6 +719,8 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			if time.Since(lastRead) < streamInterval {
 				continue
 			}
+			// 缓冲未闭合即超时：原样补出已缓冲行，再沿用既有超时处置。
+			drainDeltaGate()
 			if clientDisconnected {
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after timeout")
 			}
@@ -695,6 +752,48 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			resetKeepaliveTimer()
 		}
 	}
+}
+
+// contextWarnDeltaGate 是逐行驱动的 message_delta 事件缓冲状态机：遇到
+// message_delta 事件名行时开启缓冲，缓冲期间的所有行（含收尾空行）先收进
+// deltaBuf，直到事件边界空行由调用方先注入提醒、再原样写出整段事件，从而
+// 不拆散 message_delta 与其后的 message_stop。
+type contextWarnDeltaGate struct {
+	bufferingDelta bool
+	deltaBuf       []string
+}
+
+// begin 尝试以 line 开启 message_delta 缓冲；仅当尚未缓冲且 line 是
+// message_delta 事件名行时成功，并把该行收进缓冲。
+func (g *contextWarnDeltaGate) begin(line string) bool {
+	if g.bufferingDelta {
+		return false
+	}
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "event:") ||
+		strings.TrimSpace(strings.TrimPrefix(trimmed, "event:")) != "message_delta" {
+		return false
+	}
+	g.bufferingDelta = true
+	g.deltaBuf = append(g.deltaBuf, line)
+	return true
+}
+
+// active 报告当前是否处于缓冲中。
+func (g *contextWarnDeltaGate) active() bool { return g.bufferingDelta }
+
+// add 在缓冲期间收下一行，返回该行是否为事件边界空行。
+func (g *contextWarnDeltaGate) add(line string) bool {
+	g.deltaBuf = append(g.deltaBuf, line)
+	return line == ""
+}
+
+// flush 返回缓冲的全部行并复位状态。
+func (g *contextWarnDeltaGate) flush() []string {
+	lines := g.deltaBuf
+	g.bufferingDelta = false
+	g.deltaBuf = nil
+	return lines
 }
 
 func extractAnthropicSSEDataLine(line string) (string, bool) {
