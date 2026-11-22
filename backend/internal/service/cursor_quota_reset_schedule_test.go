@@ -44,24 +44,6 @@ func (r *cursorQuotaStopRepoStub) GetByID(_ context.Context, id int64) (*Account
 	return &Account{ID: id, Platform: PlatformCursor, QuotaKeyID: &qk}, nil
 }
 
-func (r *cursorQuotaStopRepoStub) SetTempUnschedulable(_ context.Context, _ int64, until time.Time, reason string) error {
-	r.calls++
-	r.until = until
-	r.reason = reason
-	return nil
-}
-
-// TestTempUnscheduleCursorQuotaExhaustedUsesShortCooldown 锁定 2026-11-06 的退档结论。
-//
-// 背景（生产数据三重排他）：「今日额度已用完」不是余额判定——命中时累计用量从 0 到
-// 405 万 token 不等（差 16 倍）；同码同日 340 号跑 49 次 / 405 万 token 从未命中，
-// 343 号只跑 3 次 / 14 万就命中；且 343 命中那一刻同码 340 号正在连续成功。
-// 故停调时长必须退回到与普通上游故障同级的分钟级，绝不能再按日停到次日 08:05。
-//
-// 本用例同时防止两件事回归：
-//  1. 有人把冷却改回按日（断言上限 24 小时）；
-//  2. 有人把停调原因改成码级前缀（那会让码级清除逻辑误清账号级停调）。
-//
 // TestTempUnscheduleCursorQuotaExhaustedUsesUnifiedProbe 锁定 2026-11-22 用户裁定：
 // cursor 额度耗尽必须走全局统一的恢复探测（quota 分量、noecho、5 分钟），
 // 不再写固定 until 到点无条件回池。
