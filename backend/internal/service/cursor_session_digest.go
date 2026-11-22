@@ -224,6 +224,50 @@ func (d *CursorHistoryDigest) Clone() *CursorHistoryDigest {
 	return c
 }
 
+// RestoreFromSnapshot 从快照恢复主链与骨架链（常规请求路径不会调用）。
+//
+// hex 长度非法或解码失败返回明确错误，不静默把损坏快照当成空摘要。两条 hex 都先在
+// 临时变量里解码、全部成功后才写入接收者：因此任何失败都不会破坏 digest 的既有状态
+// （未初始化的零值 digest 在失败后仍未初始化）。trace/traceHash 属于排查用途，不进快照，
+// 还原时清空。
+func (d *CursorHistoryDigest) RestoreFromSnapshot(hexStr string, items int, skeletonHex string, skeletonItems int) error {
+	if d == nil {
+		return errors.New("cursor session digest: nil digest")
+	}
+	state, err := cursorDecodeDigestHex(hexStr)
+	if err != nil {
+		return fmt.Errorf("cursor session digest: restore main chain: %w", err)
+	}
+	skeletonState, err := cursorDecodeDigestHex(skeletonHex)
+	if err != nil {
+		return fmt.Errorf("cursor session digest: restore skeleton chain: %w", err)
+	}
+	d.state = state
+	d.initialized = true
+	d.items = items
+	d.skeletonState = skeletonState
+	d.skeletonItems = skeletonItems
+	d.trace = nil
+	d.traceHash = nil
+	return nil
+}
+
+// cursorDecodeDigestHex 把 32 字节摘要的 64 字符 hex 解码为定长数组。
+// 长度不符或含非 hex 字符都明确报错，不做截断/补零。
+func cursorDecodeDigestHex(hexStr string) ([sha256.Size]byte, error) {
+	var out [sha256.Size]byte
+	wantLen := hex.EncodedLen(sha256.Size)
+	if len(hexStr) != wantLen {
+		return out, fmt.Errorf("invalid digest hex length %d, want %d", len(hexStr), wantLen)
+	}
+	decoded, err := hex.DecodeString(hexStr)
+	if err != nil {
+		return out, fmt.Errorf("invalid digest hex: %w", err)
+	}
+	copy(out[:], decoded)
+	return out, nil
+}
+
 // Trace 返回项类型序列的副本（仅用于日志排查；不含任何正文）。
 func (d *CursorHistoryDigest) Trace() []string {
 	if d == nil || len(d.trace) == 0 {
