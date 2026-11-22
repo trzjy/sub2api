@@ -837,13 +837,8 @@ const cursorUpstreamFailureCooldown = 5 * time.Minute
 // tempUnscheduleCursorUpstreamFailure 对 cursor 上游账号级故障触发 5 分钟临时停调，
 // 让本次请求立刻换到本组下一个 cursor 账号，避免用户连续吃到同一账号的 502。
 func tempUnscheduleCursorUpstreamFailure(ctx context.Context, repo AccountRepository, accountID int64, logPrefix string) {
-	until := time.Now().Add(cursorUpstreamFailureCooldown)
-	reason := "cursor upstream account failure (auto temp-unschedule 5m)"
-	if err := repo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
-		log.Printf("%s temp_unschedule_failed account=%d error=%v", logPrefix, accountID, err)
-	} else {
-		log.Printf("%s temp_unscheduled account=%d until=%v reason=%q", logPrefix, accountID, until.Format("15:04:05"), reason)
-	}
+	tempUnscheduleCursorUpstreamFailureWithCooldown(ctx, repo, accountID, logPrefix,
+		cursorUpstreamFailureCooldown, "cursor upstream account failure (auto temp-unschedule 5m)")
 }
 
 // tempUnscheduleCursorUpstreamFailureWithCooldown 按指定冷却时长与 reason 对 cursor 上游
@@ -857,12 +852,26 @@ func tempUnscheduleCursorUpstreamFailureWithCooldown(
 	ctx context.Context, repo AccountRepository, accountID int64, logPrefix string,
 	cooldown time.Duration, reason string,
 ) {
-	until := time.Now().Add(cooldown)
-	if err := repo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
-		log.Printf("%s temp_unschedule_failed account=%d error=%v", logPrefix, accountID, err)
-	} else {
-		log.Printf("%s temp_unscheduled account=%d until=%v reason=%q", logPrefix, accountID, until.Format("15:04:05"), reason)
+	if repo == nil || accountID <= 0 {
+		return
 	}
+	// 2026-11-22 用户裁定：cursor 上游账号级故障同走全局统一恢复探测（transport 分量：
+	// until + probe，探测确认恢复才放行），不再写一次性的 until 到点无条件回池。
+	stopRepo, ok := repo.(interface {
+		SetTransportRecoveryStop(ctx context.Context, accountID int64, until, due time.Time, mode, reasonJSON string) (bool, error)
+	})
+	if !ok {
+		log.Printf("%s recovery_probe_repo_unavailable account=%d", logPrefix, accountID)
+		return
+	}
+	now := time.Now()
+	until := now.Add(cooldown)
+	reasonJSON := buildAccountRecoveryReasonJSON(recoveryModeUnavailable, 0, []byte(reason), now)
+	if _, err := stopRepo.SetTransportRecoveryStop(ctx, accountID, until, until, recoveryModeUnavailable, reasonJSON); err != nil {
+		log.Printf("%s recovery_probe_schedule_failed account=%d error=%v", logPrefix, accountID, err)
+		return
+	}
+	log.Printf("%s recovery_probe_scheduled account=%d until=%v mode=unavailable", logPrefix, accountID, until.Format("15:04:05"))
 }
 
 // CursorQuotaExhaustedReason 是 cursor 账号「当日额度耗尽」的换号原因串
@@ -880,16 +889,6 @@ const CursorQuotaExhaustedReason = GatewayFailureReason("cursor_quota_exhausted"
 // "后台显示 15 个可用号、实际一个都调度不出来"的成因。
 const CursorRateLimitedReason = GatewayFailureReason("cursor_rate_limited")
 
-// cursorRateLimitedCooldown 是账号被上游限流后的冷却时长。
-//
-// 定 2 分钟而不是按日：全站峰值仅 75 请求/小时，分摊到数十个账号后平均每分钟请求不足
-// 2 次，2 分钟足以让同一账号的并发窗口自然错开；即便再次撞上，代价也只是再等 2 分钟，
-// 而不是丢掉一整天。原先 20 分钟的定长冷却已属过重，按日停调则是把好号直接清空。
-const cursorRateLimitedCooldown = 2 * time.Minute
-
-// cursorRateLimitedReasonPrefix 是限流停调的原因前缀，恢复时按前缀精确清除。
-const cursorRateLimitedReasonPrefix = "cursor account rate limited"
-
 // IsCursorQuotaExhaustedReason 判定换号原因是否为 cursor 账号当日额度耗尽。
 // 该原因属账号级终态（时长卡每日用量上限按账号计），必须停号，不能只换号。
 func IsCursorQuotaExhaustedReason(reason GatewayFailureReason) bool {
@@ -906,33 +905,6 @@ func IsCursorQuotaExhaustedReason(reason GatewayFailureReason) bool {
 func IsCursorPoolUnavailableReason(reason GatewayFailureReason) bool {
 	return reason == CursorQuotaExhaustedReason || reason == CursorRateLimitedReason
 }
-
-// cursorAccountQuotaExhaustedReasonPrefix 是 cursor 账号级「上游声称额度用完」停调原因的
-// 固定前缀。停调原因按前缀区分层级，恢复后据此精确清除：
-//   - 账号级（本常量）：上游对这一个账号说了「今日额度已用完」；
-//   - 码级（cursorQuotaKeyExhaustedReasonPrefix）：激活码共享额度池见底（这个是真的，
-//     有 400 积分的硬计数），名下所有账号一起停，属于"娘没钱了"而不是"儿子花完了"。
-//
-// 两者必须分开：码级停调依赖真实计数，账号级只依赖上游一句话，处置完全不同。
-//
-// 2026-11-06 文案同步更正：前缀值从 "cursor account daily quota exhausted" 改为
-// "cursor account blocked by upstream"。原因是这句 reason 会原样出现在后台账号列表里，
-// 旧文案会让运营看到"额度耗尽"进而误判（而它其实是上游挡板话术，见下方冷却注释）。
-// 旧前缀只在历史数据里存在，当前没有任何清除逻辑依赖它，故改值无兼容负担。
-const cursorAccountQuotaExhaustedReasonPrefix = "cursor account blocked by upstream"
-
-// cursorQuotaExhaustedCooldown 是「上游声称当日额度已用完」后的停调时长（2026-11-06 退档）。
-//
-// 为什么从「停到次日 08:05」退成 5 分钟：生产数据证明这个文案不是余额判定。
-// 30 天内 5 次命中，其中一次该号 24 小时零请求、上次成功在 30 小时前，照样报"用完"；
-// 撞"上限"时的累计用量从 0 到 405 万 token 不等（差 16 倍）；同一天同码的 340 号跑
-// 49 次 / 405 万 token 从未报过，343 号只跑 3 次 / 14 万就报"用完"；更关键的是 343 在
-// 15:38 报用完的同一小时里，同码 340 号正在跑 28 次 / 241 万 token 并全部成功。
-// 三重排他（每号独立额度 / 同码共享额度 / 按次上限）全部不成立，故它只能是上游对单个
-// 账号状态异常的挡板话术。按"钱花完了"停一整天，等于让好号白躺，代价远大于收益。
-//
-// 5 分钟的取值与 cursorUpstreamFailureCooldown 对齐：把这类账号当普通上游故障处理。
-const cursorQuotaExhaustedCooldown = 5 * time.Minute
 
 // cursorQuotaProbeWindows / cursorQuotaExhaustedUntil 已于 2026-11-06 删除。
 //
@@ -961,34 +933,57 @@ func tempUnscheduleCursorQuotaExhausted(ctx context.Context, repo AccountReposit
 	if repo == nil || accountID <= 0 {
 		return
 	}
-	now := timezone.Now()
-	until := now.Add(cursorQuotaExhaustedCooldown)
-	reason := fmt.Sprintf("%s (auto temp-unschedule %s)", cursorAccountQuotaExhaustedReasonPrefix, cursorQuotaExhaustedCooldown)
-	if err := repo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
-		log.Printf("%s temp_unschedule_failed account=%d error=%v", logPrefix, accountID, err)
+	// 2026-11-22 用户裁定：额度耗尽必须走全局统一的恢复探测设计（批1 quota 分量：
+	// 只写 probe_due_at、5 分钟一次额度探测，探测确认恢复才放行），不再写固定的
+	// temp_unschedulable_until 让账号到点无条件回池。
+	probeRepo, ok := repo.(interface {
+		SetQuotaProbeSchedule(ctx context.Context, accountID int64, due time.Time, mode, kind string) (bool, error)
+	})
+	if !ok {
+		log.Printf("%s recovery_probe_repo_unavailable account=%d", logPrefix, accountID)
 		return
 	}
-	log.Printf("%s temp_unscheduled account=%d until=%v cooldown=%s reason=%q", logPrefix, accountID, until.Format("15:04:05"), cursorQuotaExhaustedCooldown, reason)
+	kind := recoveryKindActual
+	if acc, err := repo.GetByID(ctx, accountID); err == nil && acc != nil {
+		kind = quotaProbeKindForAccount(acc)
+	}
+	due := timezone.Now().Add(recoveryQuotaProbeCadence)
+	applied, err := probeRepo.SetQuotaProbeSchedule(ctx, accountID, due, "noecho", kind)
+	if err != nil {
+		log.Printf("%s recovery_probe_schedule_failed account=%d error=%v", logPrefix, accountID, err)
+		return
+	}
+	log.Printf("%s recovery_probe_scheduled account=%d due=%v cadence=%s mode=noecho kind=%s applied=%v",
+		logPrefix, accountID, due.Format("15:04:05"), recoveryQuotaProbeCadence, kind, applied)
 }
 
-// tempUnscheduleCursorRateLimited 对 cursor 账号被上游限流触发短冷却。
+// tempUnscheduleCursorRateLimited 处理 cursor 账号被上游限流。
 //
-// 与 tempUnscheduleCursorQuotaExhausted 分开是有意的：限流几分钟就过去，额度耗尽要等
-// 次日 8:00。混成一个函数会让每一次 429 都按日摘号（2026-11-06 生产事故成因）。
-// 这里只停 cursorRateLimitedCooldown（2 分钟），不写任何"额度"观测字段，
-// 后台也不会把这类账号显示成"今日额度已耗尽"。
+// 2026-11-22 用户裁定：与额度耗尽同走全局统一恢复探测（quota 分量，noecho 5 分钟），
+// 函数名保留以兼容既有调用点，行为不再写固定 2 分钟 until。
 func tempUnscheduleCursorRateLimited(ctx context.Context, repo AccountRepository, accountID int64, logPrefix string) {
 	if repo == nil || accountID <= 0 {
 		return
 	}
-	forStart := timezone.Now()
-	until := forStart.Add(cursorRateLimitedCooldown)
-	reason := fmt.Sprintf("%s (auto temp-unschedule %s)", cursorRateLimitedReasonPrefix, cursorRateLimitedCooldown)
-	if err := repo.SetTempUnschedulable(ctx, accountID, until, reason); err != nil {
-		log.Printf("%s temp_unschedule_failed account=%d error=%v", logPrefix, accountID, err)
+	// 2026-11-22 用户裁定：限流与额度耗尽同走全局统一恢复探测（quota 分量，noecho 5 分钟），
+	// 不再写固定 2 分钟 until 到点无条件回池；探测确认上游恢复后才放行。
+	probeRepo, ok := repo.(interface {
+		SetQuotaProbeSchedule(ctx context.Context, accountID int64, due time.Time, mode, kind string) (bool, error)
+	})
+	if !ok {
+		log.Printf("%s recovery_probe_repo_unavailable account=%d", logPrefix, accountID)
 		return
 	}
-	log.Printf("%s temp_unscheduled account=%d until=%v cooldown=%s reason=%q", logPrefix, accountID, until.Format("15:04:05"), cursorRateLimitedCooldown, reason)
+	kind := recoveryKindActual
+	if acc, err := repo.GetByID(ctx, accountID); err == nil && acc != nil {
+		kind = quotaProbeKindForAccount(acc)
+	}
+	due := timezone.Now().Add(recoveryQuotaProbeCadence)
+	if _, err := probeRepo.SetQuotaProbeSchedule(ctx, accountID, due, "noecho", kind); err != nil {
+		log.Printf("%s recovery_probe_schedule_failed account=%d error=%v", logPrefix, accountID, err)
+		return
+	}
+	log.Printf("%s recovery_probe_scheduled account=%d due=%v cadence=%s mode=noecho kind=%s", logPrefix, accountID, due.Format("15:04:05"), recoveryQuotaProbeCadence, kind)
 }
 
 // sleepAntigravityBackoffWithContext 带 context 取消检查的退避等待

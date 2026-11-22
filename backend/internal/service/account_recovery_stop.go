@@ -101,6 +101,13 @@ func (s *RateLimitService) scheduleQuotaRecoveryProbe(ctx context.Context, accou
 // quotaProbeKindFor 决定额度类停调用哪种探测：有底层真实额度入口走 quota，
 // 否则退化为实际调用（用户裁定 5）。
 func (s *RateLimitService) quotaProbeKindFor(account *Account) string {
+	return quotaProbeKindForAccount(account)
+}
+
+// quotaProbeKindForAccount 是额度探测类型的唯一判定实现（单一事实源）：
+// 有底层真实额度入口走 quota，否则退化为实际调用（用户裁定 5）。
+// 供 RateLimitService 方法与 cursor 额度写入等跨部件调用。
+func quotaProbeKindForAccount(account *Account) string {
 	if account == nil {
 		return recoveryKindActual
 	}

@@ -113,10 +113,19 @@ func TestIsCursorBusinessErrorCode(t *testing.T) {
 // cursorCooldownRepoStub 只记录临时停调写入的 (until, reason)，其余方法不应被调用。
 type cursorCooldownRepoStub struct {
 	AccountRepository // 嵌入接口：未实现的方法会 panic（不应被调用）
+	mode              string
 
 	calls  int
 	until  time.Time
 	reason string
+}
+
+func (r *cursorCooldownRepoStub) SetTransportRecoveryStop(_ context.Context, _ int64, until, _ time.Time, mode, reasonJSON string) (bool, error) {
+	r.calls++
+	r.until = until
+	r.mode = mode
+	r.reason = reasonJSON
+	return true, nil
 }
 
 func (r *cursorCooldownRepoStub) SetTempUnschedulable(_ context.Context, _ int64, until time.Time, reason string) error {

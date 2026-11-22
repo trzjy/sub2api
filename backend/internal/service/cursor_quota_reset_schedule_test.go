@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,9 +25,23 @@ func mustTime(t *testing.T, layout string) time.Time {
 type cursorQuotaStopRepoStub struct {
 	AccountRepository // 嵌入接口：未实现的方法会 panic（不应被调用）
 
-	calls  int
-	until  time.Time
-	reason string
+	calls int
+	due   time.Time
+	mode  string
+	kind  string
+}
+
+func (r *cursorQuotaStopRepoStub) SetQuotaProbeSchedule(_ context.Context, _ int64, due time.Time, mode, kind string) (bool, error) {
+	r.calls++
+	r.due = due
+	r.mode = mode
+	r.kind = kind
+	return true, nil
+}
+
+func (r *cursorQuotaStopRepoStub) GetByID(_ context.Context, id int64) (*Account, error) {
+	qk := int64(1)
+	return &Account{ID: id, Platform: PlatformCursor, QuotaKeyID: &qk}, nil
 }
 
 func (r *cursorQuotaStopRepoStub) SetTempUnschedulable(_ context.Context, _ int64, until time.Time, reason string) error {
@@ -48,28 +61,28 @@ func (r *cursorQuotaStopRepoStub) SetTempUnschedulable(_ context.Context, _ int6
 // 本用例同时防止两件事回归：
 //  1. 有人把冷却改回按日（断言上限 24 小时）；
 //  2. 有人把停调原因改成码级前缀（那会让码级清除逻辑误清账号级停调）。
-func TestTempUnscheduleCursorQuotaExhaustedUsesShortCooldown(t *testing.T) {
+//
+// TestTempUnscheduleCursorQuotaExhaustedUsesUnifiedProbe 锁定 2026-11-22 用户裁定：
+// cursor 额度耗尽必须走全局统一的恢复探测（quota 分量、noecho、5 分钟），
+// 不再写固定 until 到点无条件回池。
+func TestTempUnscheduleCursorQuotaExhaustedUsesUnifiedProbe(t *testing.T) {
 	repo := &cursorQuotaStopRepoStub{}
 	before := timezone.Now()
 
 	tempUnscheduleCursorQuotaExhausted(context.Background(), repo, 358, "[test]")
 
 	if repo.calls != 1 {
-		t.Fatalf("停调写入次数 = %d，want 1", repo.calls)
+		t.Fatalf("恢复探测写入次数 = %d，want 1", repo.calls)
 	}
-	got := repo.until.Sub(before)
-	if got < cursorQuotaExhaustedCooldown-2*time.Second || got > cursorQuotaExhaustedCooldown+2*time.Minute {
-		t.Fatalf("停调时长 = %s，want 约 %s", got, cursorQuotaExhaustedCooldown)
+	got := repo.due.Sub(before)
+	if got < recoveryQuotaProbeCadence-2*time.Second || got > recoveryQuotaProbeCadence+2*time.Minute {
+		t.Fatalf("探测到期 = %s，want 约 %s", got, recoveryQuotaProbeCadence)
 	}
-	if got > 24*time.Hour {
-		t.Fatalf("停调时长 = %s，越过一天：按日停调会把好号白躺一整天", got)
+	if repo.mode != "noecho" {
+		t.Fatalf("探测模式 = %q，want noecho", repo.mode)
 	}
-	if !strings.HasPrefix(repo.reason, cursorAccountQuotaExhaustedReasonPrefix) {
-		t.Fatalf("停调原因 = %q，必须以账号级前缀 %q 开头（码级前缀会被码级清除逻辑误清）",
-			repo.reason, cursorAccountQuotaExhaustedReasonPrefix)
-	}
-	if repo.until.Before(before) {
-		t.Fatalf("停调目标 %s 早于当前时刻 %s", repo.until, before)
+	if repo.kind != recoveryKindQuota {
+		t.Fatalf("探测类型 = %q，want %q（cursor 有激活码额度入口）", repo.kind, recoveryKindQuota)
 	}
 
 	// 停调只写一次性状态，不得再往 accounts.extra 塞"额度耗尽时刻"这种散字段：
@@ -84,17 +97,17 @@ func TestTempUnscheduleCursorQuotaExhaustedUsesShortCooldown(t *testing.T) {
 // 提醒他去看 cursorQuotaExhaustedCooldown 的注释（为什么不能按日停）。
 //
 // 当前实现下，任何时候命中都只停固定 5 分钟，与时刻无关，故三个时段结果一致。
-func TestCursorQuotaExhaustedUntilRemoved(t *testing.T) {
+func TestCursorQuotaExhaustedProbeCadenceIsClockIndependent(t *testing.T) {
 	for _, at := range []string{"2026-11-06 03:00", "2026-11-06 09:40", "2026-11-06 23:59"} {
 		repo := &cursorQuotaStopRepoStub{}
 		before := timezone.Now()
 		tempUnscheduleCursorQuotaExhausted(context.Background(), repo, 1, "[test]")
 		if repo.calls != 1 {
-			t.Fatalf("at=%s 停调写入次数 = %d，want 1", at, repo.calls)
+			t.Fatalf("at=%s 恢复探测写入次数 = %d，want 1", at, repo.calls)
 		}
-		// 与时刻无关：停调目标相对当前时刻的偏移必须恒定。
-		if d := repo.until.Sub(before); d > cursorQuotaExhaustedCooldown+2*time.Minute {
-			t.Fatalf("at=%s 停调时长 = %s，不再是固定冷却（疑似恢复成按时刻分档）", at, d)
+		// 与时刻无关：探测到期相对当前时刻的偏移必须恒定（noecho 5 分钟）。
+		if d := repo.due.Sub(before); d > recoveryQuotaProbeCadence+2*time.Minute || d < recoveryQuotaProbeCadence-2*time.Second {
+			t.Fatalf("at=%s 探测到期 = %s，不是固定 5 分钟（疑似恢复成按时刻分档）", at, d)
 		}
 	}
 }
