@@ -628,6 +628,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if !equalAccountSchedulingThresholds(before.AccountSchedulingThresholds, after.AccountSchedulingThresholds) {
 		changed = append(changed, service.SettingKeyAccountSchedulingThresholds)
 	}
+	if before.RequestSizeRoutingThreshold != after.RequestSizeRoutingThreshold {
+		changed = append(changed, service.SettingKeyRequestSizeRoutingThreshold)
+	}
 	changed = appendAuthSourceDefaultChanges(changed, beforeAuthSourceDefaults, afterAuthSourceDefaults)
 	return changed
 }

@@ -779,7 +779,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 
 	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
-	// 「仅接大请求」开关的账号从小请求（估算 input <= LargeRequestOnlyInputThreshold）
+	// 「仅接大请求」开关的账号从小请求（估算 input <= 运行时阈值（默认 256000，后台可配置））
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。
@@ -1622,7 +1622,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	}
 
 	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
-	// 「仅接大请求」开关的账号从小请求（估算 input <= LargeRequestOnlyInputThreshold）
+	// 「仅接大请求」开关的账号从小请求（估算 input <= 运行时阈值（默认 256000，后台可配置））
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。估算模型用映射后的 estimateModel（与既有三门派发单同口径）。
@@ -3405,7 +3405,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 
 	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
-	// 「仅接大请求」开关的账号从小请求（估算 input <= LargeRequestOnlyInputThreshold）
+	// 「仅接大请求」开关的账号从小请求（估算 input <= 运行时阈值（默认 256000，后台可配置））
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。用连接首帧（firstMessage）估算，模型用 wsForwardModel。
@@ -5621,11 +5621,23 @@ func (h *OpenAIGatewayHandler) applySensenovaSizeExclusion(
 	return excluded
 }
 
+// isRequestSizeRoutingExemptPlatform 判断平台是否豁免请求规模分流（L5）。
+// anthropic/openai/gemini 保持原模型质量，不参与大小请求账号排除；
+// 其余平台（如 cursor）按运行时阈值正常分流。
+func isRequestSizeRoutingExemptPlatform(platform string) bool {
+	switch platform {
+	case domain.PlatformAnthropic, domain.PlatformOpenAI, domain.PlatformGemini:
+		return true
+	default:
+		return false
+	}
+}
+
 // applyRequestSizeScopeExclusion 实现账号级请求规模归属在选号前的动态排除（方案 §3.2）。
 //
 // 在选号循环之前调用：先估算本次请求的 input token（input-only），估算失败 → 失败开放
-// 返回空集（绝不因估算失败拦请求）。估算 <= service.LargeRequestOnlyInputThreshold
-// （256000）视为小请求，排除本组候选中开启「仅接大请求」的账号；估算 > 阈值视为大请求，
+// 返回空集（绝不因估算失败拦请求）。估算 <= 运行时阈值（默认 256000，后台可配置）
+// 视为小请求，排除本组候选中开启「仅接大请求」的账号；估算 > 阈值视为大请求，
 // 排除开启「仅接小请求」的账号。两类账号各自只参与对应规模的候选，互斥由写入入口保证。
 //
 // 返回值：估算 input（供对账落库，失败为 0）与被排除账号 id 集合。失败开放兜底：
@@ -5670,7 +5682,13 @@ func (h *OpenAIGatewayHandler) applyRequestSizeScopeExclusion(
 	// 长活于是落进 small_request_only 账号（11-12 起 3 天漏判 463 次，是误判的 33 倍）。
 	// 完整判定与滞回规则见 service.ResolveRequestSizeRouting。
 	lastReal, hasLast := h.gatewayService.LastSessionInputTokens(ctx, groupID, sessionHash)
-	effective, isLargeRequest := service.ResolveRequestSizeRouting(estimated, lastReal, hasLast)
+	// 分流阈值由后台运行时配置注入；SettingService 缺席（测试桩/降级）时回退默认常量，
+	// 与既有行为零变化。
+	threshold := service.LargeRequestOnlyInputThreshold
+	if h.settingService != nil {
+		threshold = h.settingService.GetRequestSizeRoutingThreshold(ctx)
+	}
+	effective, isLargeRequest := service.ResolveRequestSizeRouting(estimated, lastReal, hasLast, threshold)
 	if effective != estimated {
 		reqLog.Debug("request_size_scope_corrected_by_last_turn",
 			zap.Int64("group_id", groupIDVal),
@@ -5686,6 +5704,11 @@ func (h *OpenAIGatewayHandler) applyRequestSizeScopeExclusion(
 	// 缺上下文时跳过写回即可，不能因为装 session hash 而 panic 掉整个选号。
 	if sessionHash != "" && c != nil && c.Request != nil {
 		c.Request = c.Request.WithContext(service.WithRequestSizeSessionHash(ctx, sessionHash))
+	}
+
+	// L5：anthropic/openai/gemini 请求不参与大小请求分流，保持原模型质量。
+	if isRequestSizeRoutingExemptPlatform(platform) {
+		return effective, empty
 	}
 
 	// 请求规模三态排除：小请求（<=256K）排除「仅接大请求」账号，

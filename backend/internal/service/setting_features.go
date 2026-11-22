@@ -11,7 +11,10 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // IsRegistrationEnabled 检查是否开放注册
@@ -1247,6 +1250,87 @@ func (s *SettingService) GetDefaultPlatformQuotas(ctx context.Context) (map[stri
 		}
 	}
 	return out, nil // 补齐全部允许 platform key，保持与旧实现一致的下游契约
+}
+
+// requestSizeRoutingThresholdCache / requestSizeRoutingThresholdSF 缓存请求规模分流阈值。
+// 缓存值为 *cachedRequestSizeRoutingThreshold，失败/非法一律回退 LargeRequestOnlyInputThreshold。
+var (
+	requestSizeRoutingThresholdCache atomic.Value // *cachedRequestSizeRoutingThreshold
+	requestSizeRoutingThresholdSF    singleflight.Group
+)
+
+const (
+	requestSizeRoutingThresholdCacheTTL  = 60 * time.Second
+	requestSizeRoutingThresholdErrorTTL  = 30 * time.Second
+	requestSizeRoutingThresholdDBTimeout = 3 * time.Second
+)
+
+type cachedRequestSizeRoutingThreshold struct {
+	value     int
+	expiresAt int64
+}
+
+// GetRequestSizeRoutingThreshold 返回请求规模分流阈值（整数 token）。
+// 热路径读取：atomic.Value 缓存 + singleflight 合并回源 + TTL；失败/非法回退默认值。
+func (s *SettingService) GetRequestSizeRoutingThreshold(ctx context.Context) int {
+	if s == nil || s.settingRepo == nil {
+		return LargeRequestOnlyInputThreshold
+	}
+	if cached, ok := requestSizeRoutingThresholdCache.Load().(*cachedRequestSizeRoutingThreshold); ok {
+		if cached != nil && time.Now().UnixNano() < cached.expiresAt {
+			return cached.value
+		}
+	}
+
+	result, err, _ := requestSizeRoutingThresholdSF.Do(SettingKeyRequestSizeRoutingThreshold, func() (any, error) {
+		if cached, ok := requestSizeRoutingThresholdCache.Load().(*cachedRequestSizeRoutingThreshold); ok {
+			if cached != nil && time.Now().UnixNano() < cached.expiresAt {
+				return cached.value, nil
+			}
+		}
+
+		threshold := LargeRequestOnlyInputThreshold
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requestSizeRoutingThresholdDBTimeout)
+		defer cancel()
+
+		raw, err := s.settingRepo.GetValue(dbCtx, SettingKeyRequestSizeRoutingThreshold)
+		if err != nil {
+			if errors.Is(err, ErrSettingNotFound) {
+				requestSizeRoutingThresholdCache.Store(&cachedRequestSizeRoutingThreshold{
+					value:     threshold,
+					expiresAt: time.Now().Add(requestSizeRoutingThresholdCacheTTL).UnixNano(),
+				})
+				return threshold, nil
+			}
+			slog.Warn("failed to get request size routing threshold, falling back to default", "error", err)
+			requestSizeRoutingThresholdCache.Store(&cachedRequestSizeRoutingThreshold{
+				value:     threshold,
+				expiresAt: time.Now().Add(requestSizeRoutingThresholdErrorTTL).UnixNano(),
+			})
+			return threshold, nil
+		}
+
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			if parsed, parseErr := strconv.Atoi(trimmed); parseErr == nil && parsed > 0 {
+				threshold = parsed
+			} else {
+				slog.Warn("invalid request size routing threshold, falling back to default", "raw", trimmed)
+			}
+		}
+
+		requestSizeRoutingThresholdCache.Store(&cachedRequestSizeRoutingThreshold{
+			value:     threshold,
+			expiresAt: time.Now().Add(requestSizeRoutingThresholdCacheTTL).UnixNano(),
+		})
+		return threshold, nil
+	})
+	if err != nil {
+		return LargeRequestOnlyInputThreshold
+	}
+	if value, ok := result.(int); ok {
+		return value
+	}
+	return LargeRequestOnlyInputThreshold
 }
 
 // GetAccountSchedulingThresholds returns per-platform auto-pause thresholds (1..100).

@@ -578,6 +578,12 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		updates[SettingKeyAccountSchedulingThresholds] = string(blob)
 	}
 
+	threshold := settings.RequestSizeRoutingThreshold
+	if threshold <= 0 {
+		threshold = LargeRequestOnlyInputThreshold
+	}
+	updates[SettingKeyRequestSizeRoutingThreshold] = strconv.Itoa(threshold)
+
 	updates[SettingKeyAllowUserViewErrorRequests] = strconv.FormatBool(settings.AllowUserViewErrorRequests)
 
 	// 全局视觉路由 kill-switch：指针语义，仅当请求显式携带（非 nil）时写入，

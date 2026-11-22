@@ -332,6 +332,9 @@ type SystemSettings struct {
 	// 系统全局账号自动停调阈值（key = platform，100 = disabled）
 	AccountSchedulingThresholds map[string]int `json:"account_scheduling_thresholds"`
 
+	// RequestSizeRoutingThreshold 是请求规模分流阈值（整数 token），默认 256000。
+	RequestSizeRoutingThreshold int `json:"request_size_routing_threshold"`
+
 	// 允许终端用户在用量页查看自己的失败请求
 	AllowUserViewErrorRequests bool
 }

@@ -37,20 +37,20 @@ func (c *fileSessionInputCache) SetSessionInputTokens(_ context.Context, groupID
 // 这两条是「长活被判成小活」（3 天漏判 463 次）的修复本体。
 func TestResolveRequestSizeRouting(t *testing.T) {
 	cases := []struct {
-		name        string
-		estimated   int
-		lastReal    int
-		hasLast     bool
-		wantLarge   bool
+		name          string
+		estimated     int
+		lastReal      int
+		hasLast       bool
+		wantLarge     bool
 		wantEffective int
 	}{
 		{
-			name: "没有上一单时保持既有行为_纯本地估算_小活",
+			name:      "没有上一单时保持既有行为_纯本地估算_小活",
 			estimated: 150000, hasLast: false,
 			wantLarge: false, wantEffective: 150000,
 		},
 		{
-			name: "没有上一单时保持既有行为_纯本地估算_大活",
+			name:      "没有上一单时保持既有行为_纯本地估算_大活",
 			estimated: 300000, hasLast: false,
 			wantLarge: true, wantEffective: 300000,
 		},
@@ -69,25 +69,25 @@ func TestResolveRequestSizeRouting(t *testing.T) {
 			wantLarge: false, wantEffective: 238524,
 		},
 		{
-			name: "上一单真实值兜底_超过阈值判大",
+			name:      "上一单真实值兜底_超过阈值判大",
 			estimated: 150000, lastReal: 300000, hasLast: true,
 			wantLarge: true, wantEffective: 300000,
 		},
 		{
 			// 滞回：上一单在大活池，本轮估算掉到 21 万（仍在 256k 线下），
 			// 不得立刻回小池，否则会在阈值线上反复换号、清缓存。
-			name: "滞回_大活池内小幅回落仍留大池",
+			name:      "滞回_大活池内小幅回落仍留大池",
 			estimated: 210000, lastReal: 300000, hasLast: true,
 			wantLarge: true, wantEffective: 300000,
 		},
 		{
 			// 真实压缩（客户端把历史压掉）后才允许回小池。
-			name: "滞回_真实回落到下沿以下才回小池",
+			name:      "滞回_真实回落到下沿以下才回小池",
 			estimated: 80000, lastReal: 80000, hasLast: true,
 			wantLarge: false, wantEffective: 80000,
 		},
 		{
-			name: "小活涨成大活_正常分流",
+			name:      "小活涨成大活_正常分流",
 			estimated: 260000, lastReal: 90000, hasLast: true,
 			wantLarge: true, wantEffective: 260000,
 		},
@@ -95,7 +95,52 @@ func TestResolveRequestSizeRouting(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			effective, isLarge := ResolveRequestSizeRouting(tc.estimated, tc.lastReal, tc.hasLast)
+			effective, isLarge := ResolveRequestSizeRouting(tc.estimated, tc.lastReal, tc.hasLast, LargeRequestOnlyInputThreshold)
+			if effective != tc.wantEffective {
+				t.Fatalf("effective = %d, want %d", effective, tc.wantEffective)
+			}
+			if isLarge != tc.wantLarge {
+				t.Fatalf("isLarge = %v, want %v", isLarge, tc.wantLarge)
+			}
+		})
+	}
+}
+
+// TestResolveRequestSizeRouting_ThresholdBoundary 钉死阈值作为入参后的边界语义：
+// 严格大于才判大（等于阈值判小）；上一单真实值落在阈值与滞回下沿之间时，
+// 不触发滞回提前返回，最终仍由 effective > threshold 判大。
+func TestResolveRequestSizeRouting_ThresholdBoundary(t *testing.T) {
+	const threshold = 128000
+	cases := []struct {
+		name          string
+		estimated     int
+		lastReal      int
+		hasLast       bool
+		wantLarge     bool
+		wantEffective int
+	}{
+		{
+			name:      "估算等于阈值判小",
+			estimated: 128000, hasLast: false,
+			wantLarge: false, wantEffective: 128000,
+		},
+		{
+			name:      "估算大于阈值判大",
+			estimated: 128001, hasLast: false,
+			wantLarge: true, wantEffective: 128001,
+		},
+		{
+			// 上一单真实值 15 万：高于阈值但未达滞回下沿 20 万，
+			// 不走「已在大活池」的提前返回，最终按 effective > threshold 判大。
+			name:      "上一单真实值落在阈值与滞回下沿之间_仍按阈值判大",
+			estimated: 150000, lastReal: 150000, hasLast: true,
+			wantLarge: true, wantEffective: 150000,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			effective, isLarge := ResolveRequestSizeRouting(tc.estimated, tc.lastReal, tc.hasLast, threshold)
 			if effective != tc.wantEffective {
 				t.Fatalf("effective = %d, want %d", effective, tc.wantEffective)
 			}

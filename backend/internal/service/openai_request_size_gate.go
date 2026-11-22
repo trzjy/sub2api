@@ -85,6 +85,7 @@ func RequestSizeSessionHash(ctx context.Context) string {
 // 入参：
 //   - estimated：本地 tiktoken 估算的输入 token（既有唯一估算来源）
 //   - lastRealTokens / hasLastReal：同一会话上一单上游回报的真实输入 token（含缓存读写）
+//   - threshold：本轮判定用的大活阈值（由调用方按配置注入，默认 LargeRequestOnlyInputThreshold）
 //
 // 规则（两条，缺一不可）：
 //  1. 上一单真实值是本轮的下界。上下文在同一会话内只会增长，本地估算又系统性偏低，
@@ -93,18 +94,18 @@ func RequestSizeSessionHash(ctx context.Context) string {
 //     避免估算在 256k 线附近 ±1% 抖动导致来回换号（换号 = prompt cache 全废）。
 //
 // 返回：用于对账落库的 effective 估算值，以及是否按大活处理。
-func ResolveRequestSizeRouting(estimated, lastRealTokens int, hasLastReal bool) (int, bool) {
+func ResolveRequestSizeRouting(estimated, lastRealTokens int, hasLastReal bool, threshold int) (int, bool) {
 	effective := estimated
 	if hasLastReal && lastRealTokens > effective {
 		effective = lastRealTokens
 	}
-	if hasLastReal && lastRealTokens > LargeRequestOnlyInputThreshold {
+	if hasLastReal && lastRealTokens > threshold {
 		// 上一单已在大活池：除非真实回落到滞回下沿以下（客户端压缩/换子任务），否则留在大活池。
 		if effective >= requestSizeHysteresisFloorTokens {
 			return effective, true
 		}
 	}
-	return effective, effective > LargeRequestOnlyInputThreshold
+	return effective, effective > threshold
 }
 
 // rememberSessionInputTokens 把本单上游回报的真实输入 token 记到会话上。

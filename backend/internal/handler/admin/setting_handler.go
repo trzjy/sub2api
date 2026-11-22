@@ -403,6 +403,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		AffiliateEnabled: settings.AffiliateEnabled,
 
 		AccountSchedulingThresholds: settings.AccountSchedulingThresholds,
+		RequestSizeRoutingThreshold: settings.RequestSizeRoutingThreshold,
 		AllowUserViewErrorRequests:  settings.AllowUserViewErrorRequests,
 		VisionRoutingEnabled:        settings.VisionRoutingEnabled,
 	}

@@ -62,7 +62,7 @@ func TestChatCompletionsLargeRequestOnlySmallRequestExcludesEnabledAccount(t *te
 	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
 	failedAccountIDs := make(map[int64]struct{})
 	estimated, reroute, adds := applyChatCompletionsLargeRequestOnlyForTest(
-		h, nil, service.PlatformOpenAI, "gpt-4o", smallBody, failedAccountIDs)
+		h, nil, service.PlatformCursor, "gpt-4o", smallBody, failedAccountIDs)
 
 	require.Len(t, adds, 1, "小请求只应排除唯一一个开启「仅接大请求」的账号")
 	_, enabledExcluded := failedAccountIDs[101]

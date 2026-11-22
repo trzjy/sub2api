@@ -5388,6 +5388,27 @@
                     />
                   </div>
                 </div>
+                <div class="mt-4 border-t border-gray-100 pt-4 dark:border-dark-700">
+                  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div class="min-w-0">
+                      <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                        请求规模分流阈值（token）
+                      </label>
+                      <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                        估算 input ≤ 阈值判小请求，> 阈值判大请求
+                      </p>
+                    </div>
+                    <input
+                      v-model.number="form.request_size_routing_threshold"
+                      type="number"
+                      min="1"
+                      step="1"
+                      class="input sm:w-56"
+                      data-testid="request-size-routing-threshold"
+                      placeholder="256000"
+                    />
+                  </div>
+                </div>
               </div>
 
               <div
@@ -10309,6 +10330,7 @@ type SettingsForm = Omit<
   // 系统全局平台限额 map；form 内始终归一化为全部平台对象（模板非空绑定依赖此不变量）
   default_platform_quotas: DefaultPlatformQuotasMap;
   account_scheduling_thresholds: ReturnType<typeof normalizeAccountSchedulingThresholdsMap>;
+  request_size_routing_threshold: number;
 };
 
 const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
@@ -10343,6 +10365,7 @@ const form = reactive<SettingsForm>({
   default_balance: 0,
   default_platform_quotas: normalizePlatformQuotasMap() as DefaultPlatformQuotasMap,
   account_scheduling_thresholds: normalizeAccountSchedulingThresholdsMap(),
+  request_size_routing_threshold: 256000,
   affiliate_rebate_rate: 20,
   affiliate_rebate_freeze_hours: 0,
   affiliate_rebate_duration_days: 0,
@@ -11692,6 +11715,9 @@ async function loadSettings() {
     form.account_scheduling_thresholds = normalizeAccountSchedulingThresholdsMap(
       settings.account_scheduling_thresholds,
     );
+    form.request_size_routing_threshold = Number(
+      settings.request_size_routing_threshold ?? 256000,
+    );
     form.backend_mode_enabled = settings.backend_mode_enabled;
     form.default_subscriptions = normalizeDefaultSubscriptionSettings(
       settings.default_subscriptions,
@@ -12081,6 +12107,22 @@ async function saveSettings() {
       return;
     }
 
+    const requestSizeRoutingThreshold = Math.trunc(
+      Number(form.request_size_routing_threshold),
+    );
+    if (
+      !Number.isFinite(requestSizeRoutingThreshold) ||
+      requestSizeRoutingThreshold <= 0
+    ) {
+      appStore.showError(
+        localText(
+          "请求规模分流阈值必须是大于 0 的整数。",
+          "Request size routing threshold must be a positive integer.",
+        ),
+      );
+      return;
+    }
+
     const payload: UpdateSettingsRequest = {
       registration_enabled: form.registration_enabled,
       email_verify_enabled: form.email_verify_enabled,
@@ -12448,6 +12490,9 @@ async function saveSettings() {
     payload.default_platform_quotas = sanitizePlatformQuotasMap(form.default_platform_quotas);
     payload.account_scheduling_thresholds = sanitizeAccountSchedulingThresholdsMap(
       form.account_scheduling_thresholds,
+    );
+    payload.request_size_routing_threshold = Math.trunc(
+      Number(form.request_size_routing_threshold) || 0,
     );
     appendAuthSourceDefaultsToUpdateRequest(payload, authSourceDefaults);
 

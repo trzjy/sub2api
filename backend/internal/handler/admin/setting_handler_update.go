@@ -387,6 +387,9 @@ type UpdateSettingsRequest struct {
 	// 各平台账号自动停调阈值（整体替换语义：nil = 不修改，non-nil = 整体覆盖）。
 	AccountSchedulingThresholds map[string]int `json:"account_scheduling_thresholds"`
 
+	// 请求规模分流阈值（value 类型；省略 = 保留当前值，显式传值必须 > 0）。
+	RequestSizeRoutingThreshold int `json:"request_size_routing_threshold"`
+
 	// auth-source 层 platform quota 覆盖（override 语义：nil = 不修改，non-nil = 整体覆盖该 source 的 quota 配置）。
 	AuthSourceEmailPlatformQuotas    map[string]*service.DefaultPlatformQuotaSetting `json:"auth_source_default_email_platform_quotas"`
 	AuthSourceLinuxDoPlatformQuotas  map[string]*service.DefaultPlatformQuotaSetting `json:"auth_source_default_linuxdo_platform_quotas"`
@@ -511,6 +514,11 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	}
 	auditReq := settingsAuditRequest(req)
 	omitted := omittedSettingKeys(sentFields)
+
+	if _, sent := sentFields["request_size_routing_threshold"]; sent && req.RequestSizeRoutingThreshold <= 0 {
+		response.BadRequest(c, "request_size_routing_threshold must be positive")
+		return
+	}
 
 	previousSettings, err := h.settingService.GetAllSettings(c.Request.Context())
 	if err != nil {
@@ -1603,6 +1611,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		// 系统全局 platform quota 默认值（整体替换语义）
 		DefaultPlatformQuotas:       req.DefaultPlatformQuotas,
 		AccountSchedulingThresholds: req.AccountSchedulingThresholds,
+		RequestSizeRoutingThreshold: func() int {
+			if _, sent := sentFields["request_size_routing_threshold"]; !sent {
+				return previousSettings.RequestSizeRoutingThreshold
+			}
+			return req.RequestSizeRoutingThreshold
+		}(),
 
 		RegistrationEnabled:                 req.RegistrationEnabled,
 		EmailVerifyEnabled:                  req.EmailVerifyEnabled,
@@ -2557,6 +2571,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		CyberPolicyUserAllowlist:    updatedSettings.CyberPolicyUserAllowlist,
 		CyberSessionBlockTTLSeconds: updatedSettings.CyberSessionBlockTTLSeconds,
 		AccountSchedulingThresholds: updatedSettings.AccountSchedulingThresholds,
+		RequestSizeRoutingThreshold: updatedSettings.RequestSizeRoutingThreshold,
 		AllowUserViewErrorRequests:  updatedSettings.AllowUserViewErrorRequests,
 	}
 	if fastPolicy, err := h.settingService.GetOpenAIFastPolicySettings(c.Request.Context()); err != nil {

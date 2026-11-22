@@ -1013,6 +1013,15 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		}
 	}
 
+	result.RequestSizeRoutingThreshold = LargeRequestOnlyInputThreshold
+	if raw := strings.TrimSpace(settings[SettingKeyRequestSizeRoutingThreshold]); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			result.RequestSizeRoutingThreshold = v
+		} else {
+			slog.Warn("[Setting] parseSettings: invalid request_size_routing_threshold, keep default", "raw", raw)
+		}
+	}
+
 	result.AllowUserViewErrorRequests = settings[SettingKeyAllowUserViewErrorRequests] == "true" // default false
 
 	// Publish Grok default model_mapping options for accounts with empty mapping.
