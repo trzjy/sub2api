@@ -707,6 +707,16 @@ func partialStreamUsageResult(c *gin.Context, resp *http.Response, streamResult 
 	}
 }
 
+// observeContextWarnEvent 在 message_start 事件上判定一次水位；只解析该 data，不影响计费 usage。
+func (s *GatewayService) observeContextWarnEvent(ctx context.Context, st *contextWarnStreamState, data string) {
+	if data == "" || gjson.Get(data, "type").String() != "message_start" {
+		return
+	}
+	var u ClaudeUsage
+	s.parseSSEUsage(data, &u)
+	st.observeUsage(ctx, &u)
+}
+
 func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string, mimicClaudeCode bool) (*streamingResult, error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
@@ -737,6 +747,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	}
 
 	usage := &ClaudeUsage{}
+	warnState := newContextWarnStreamState(RequestSizeSessionHash(ctx), account.ID)
 	var firstTokenMs *int
 	scanner := bufio.NewScanner(resp.Body)
 	// 设置更大的buffer以处理长行
@@ -1096,8 +1107,15 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 					return nil, err
 				}
 
+				// 在 message_start 上判定一次水位；只解析该 data，不影响计费 usage。
+				s.observeContextWarnEvent(ctx, warnState, data)
+
 				for _, block := range outputBlocks {
 					if !clientDisconnected {
+						// 提醒块注入后，上游 content_block_* 事件的 index 需整体 +1；注入块自身不再 shift。
+						if warnState.needShift() {
+							block = warnState.shiftEventBlock(block)
+						}
 						restored := reverseToolNamesIfPresent(c, []byte(block))
 						if _, werr := fmt.Fprint(w, string(restored)); werr != nil {
 							clientDisconnected = true
@@ -1120,6 +1138,11 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 							mergeSSEUsagePatch(usage, usagePatch)
 						}
 					}
+				}
+				// 所有 outputBlocks 写完之后注入提醒块（自身不经 shift）。
+				if inj := warnState.takeInjection(); inj != "" {
+					fmt.Fprint(w, inj)
+					flusher.Flush()
 				}
 				continue
 			}
@@ -1472,6 +1495,16 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 	if s.cfg != nil && !s.cfg.Security.ResponseHeaders.Enabled {
 		if upstreamType := resp.Header.Get("Content-Type"); upstreamType != "" {
 			contentType = upstreamType
+		}
+	}
+
+	// 上下文水位提醒（通用非流式路径）：仅 2xx 响应注入；注入失败静默跳过，不改其它字段。
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		d := DecideContextWarning(ctx, RequestSizeSessionHash(ctx), account.ID, response.Usage.InputTokens+response.Usage.CacheReadInputTokens+response.Usage.CacheCreationInputTokens)
+		if d.Text != "" {
+			if next, err := PrependContextWarningToJSON(body, d.Text); err == nil {
+				body = next
+			}
 		}
 	}
 
