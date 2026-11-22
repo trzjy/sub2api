@@ -25,60 +25,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// contextWarnStreamState 在一次流式响应内维护水位提醒的注入状态。
-type contextWarnStreamState struct {
-	sessionHash string
-	accountID   int64
-	decided     bool
-	block       string
-	injected    bool
-	shift       bool
-}
-
-func newContextWarnStreamState(sessionHash string, accountID int64) *contextWarnStreamState {
-	return &contextWarnStreamState{sessionHash: sessionHash, accountID: accountID}
-}
-
-// observeUsage 在 message_start 的 usage 解析后调用一次；只判定一次。
-func (st *contextWarnStreamState) observeUsage(ctx context.Context, u *ClaudeUsage) {
-	if st.decided || u == nil {
-		return
-	}
-	st.decided = true
-	ctxTokens := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
-	d := DecideContextWarning(ctx, st.sessionHash, st.accountID, ctxTokens)
-	if d.Text != "" {
-		st.block = BuildContextWarningSSE(d.Text)
-		st.shift = true
-	}
-}
-
-// takeInjection 返回待注入的完整 SSE 块（BuildContextWarningSSE 的结果），只返回一次。
-func (st *contextWarnStreamState) takeInjection() string {
-	if st.injected || st.block == "" {
-		return ""
-	}
-	st.injected = true
-	return st.block
-}
-
-// needShift 注入后为 true：上游 content_block_* 事件的 index 需要 +1。
-func (st *contextWarnStreamState) needShift() bool {
-	return st.injected && st.shift
-}
-
-// shiftEventBlock 对一整段 SSE 事件（可能多行）中 content_block_* 的 data 行做
-// ShiftContentBlockIndex，其余行原样；供通用路径复用。
-func (st *contextWarnStreamState) shiftEventBlock(block string) string {
-	lines := strings.Split(block, "\n")
-	for i, line := range lines {
-		if shifted, ok := ShiftContentBlockIndex(line); ok {
-			lines[i] = shifted
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
 type anthropicPassthroughForwardInput struct {
 	Body          []byte
 	Parsed        *ParsedRequest
