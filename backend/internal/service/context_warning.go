@@ -1,0 +1,191 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	gocache "github.com/patrickmn/go-cache"
+	"go.uber.org/zap"
+)
+
+// 上下文水位提醒档位与回落阈值。
+const (
+	contextWarnBand1     = 650000
+	contextWarnBand2     = 750000
+	contextWarnBand3     = 800000
+	contextWarnBand4     = 850000
+	contextWarnDropFloor = 600000
+
+	contextWarnWatermarkTTL = 30 * time.Minute
+	contextWarnThrottleTTL  = 10 * time.Minute
+)
+
+// 进程内的水位与抑制状态。水位与抑制共用同一 cache，但 key 前缀不同。
+var (
+	contextWarnMu    sync.Mutex
+	contextWarnCache = gocache.New(gocache.NoExpiration, time.Minute)
+)
+
+const (
+	warnTextApproaching = "⚠️ [corealgos] 本会话上下文已达 %d 万，即将超过可靠区间，可能返回异常短回复；请压缩上下文或开新会话接力。"
+	warnTextExceeded    = "⚠️ [corealgos] 本会话上下文已达 %d 万，已经超过可靠区间，可能返回异常短回复；请压缩上下文或开新会话接力。"
+)
+
+// ContextWarning 承载一次命中后的提醒结果；Text 为空表示不注入。
+type ContextWarning struct {
+	Text      string
+	Band      int
+	CtxTokens int
+}
+
+// DecideContextWarning 依据会话上下文 token 水位与账号抑制状态决定是否注入提醒。
+// 所有共享状态的读写都在包级互斥锁内完成。
+func DecideContextWarning(ctx context.Context, sessionHash string, accountID int64, ctxTokens int) ContextWarning {
+	contextWarnMu.Lock()
+	defer contextWarnMu.Unlock()
+
+	if sessionHash == "" || ctxTokens <= 0 {
+		return ContextWarning{}
+	}
+
+	band := contextWarnBandOf(ctxTokens)
+	wmKey := "wm:" + sessionHash
+
+	if band == 0 {
+		if ctxTokens < contextWarnDropFloor {
+			contextWarnCache.Delete(wmKey)
+		}
+		return ContextWarning{}
+	}
+
+	var watermark int
+	if v, ok := contextWarnCache.Get(wmKey); ok {
+		watermark, _ = v.(int)
+	}
+	if band <= watermark {
+		return ContextWarning{}
+	}
+
+	thrKey := ""
+	if accountID != 0 {
+		thrKey = "thr:" + strconv.FormatInt(accountID, 10) + ":" + strconv.Itoa(band)
+		if _, ok := contextWarnCache.Get(thrKey); ok {
+			return ContextWarning{}
+		}
+	}
+
+	if accountID != 0 {
+		contextWarnCache.Set(thrKey, true, contextWarnThrottleTTL)
+	}
+	contextWarnCache.Set(wmKey, band, contextWarnWatermarkTTL)
+
+	logger.FromContext(ctx).Info("gateway.context_warning",
+		zap.Int64("account_id", accountID),
+		zap.String("session_hash", sessionHash),
+		zap.Int("band", band),
+		zap.Int("ctx_tokens", ctxTokens),
+	)
+
+	tmpl := warnTextApproaching
+	if band == contextWarnBand3 || band == contextWarnBand4 {
+		tmpl = warnTextExceeded
+	}
+	return ContextWarning{
+		Text:      fmt.Sprintf(tmpl, ctxTokens/10000),
+		Band:      band,
+		CtxTokens: ctxTokens,
+	}
+}
+
+// contextWarnBandOf 返回不超过 ctxTokens 的最高档位，低于最低档返回 0。
+func contextWarnBandOf(ctxTokens int) int {
+	switch {
+	case ctxTokens >= contextWarnBand4:
+		return contextWarnBand4
+	case ctxTokens >= contextWarnBand3:
+		return contextWarnBand3
+	case ctxTokens >= contextWarnBand2:
+		return contextWarnBand2
+	case ctxTokens >= contextWarnBand1:
+		return contextWarnBand1
+	default:
+		return 0
+	}
+}
+
+// BuildContextWarningSSE 构造三个完整的 SSE 事件，每个事件以空行结尾。
+func BuildContextWarningSSE(text string) string {
+	textJSON, _ := json.Marshal(text)
+	return "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + string(textJSON) + `}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n"
+}
+
+// ShiftContentBlockIndex 将 content_block 类 data 行的 index 加一后重编码。
+// 非 data 行、type 不匹配或解析失败时原样返回。
+func ShiftContentBlockIndex(line string) (string, bool) {
+	if !strings.HasPrefix(line, "data:") {
+		return line, false
+	}
+
+	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+		return line, false
+	}
+
+	typ, _ := obj["type"].(string)
+	if typ != "content_block_start" && typ != "content_block_delta" && typ != "content_block_stop" {
+		return line, false
+	}
+	idx, ok := obj["index"].(float64)
+	if !ok {
+		return line, false
+	}
+	obj["index"] = int(idx) + 1
+
+	newPayload, err := json.Marshal(obj)
+	if err != nil {
+		return line, false
+	}
+	return "data: " + string(newPayload), true
+}
+
+// PrependContextWarningToJSON 在 {"content":[...]} 的数组头部插入一个 text block，
+// 其余字段保持原样。
+func PrependContextWarningToJSON(body []byte, text string) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, err
+	}
+
+	var content []json.RawMessage
+	if raw, ok := obj["content"]; ok {
+		if err := json.Unmarshal(raw, &content); err != nil {
+			return nil, err
+		}
+	}
+
+	warning, err := json.Marshal(map[string]string{"type": "text", "text": text})
+	if err != nil {
+		return nil, err
+	}
+	content = append([]json.RawMessage{warning}, content...)
+
+	newContent, err := json.Marshal(content)
+	if err != nil {
+		return nil, err
+	}
+	obj["content"] = newContent
+
+	return json.Marshal(obj)
+}

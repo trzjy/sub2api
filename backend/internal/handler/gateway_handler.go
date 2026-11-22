@@ -114,6 +114,14 @@ func NewGatewayHandler(
 	}
 }
 
+// bindContextWarningSession 把会话哈希装入请求 context，供 service 层上下文水位提醒读取。
+func bindContextWarningSession(c *gin.Context, sessionHash string) {
+	if c == nil || c.Request == nil || sessionHash == "" {
+		return
+	}
+	c.Request = c.Request.WithContext(service.WithRequestSizeSessionHash(c.Request.Context(), sessionHash))
+}
+
 // Messages handles Claude API compatible messages endpoint
 // POST /v1/messages
 func (h *GatewayHandler) Messages(c *gin.Context) {
@@ -315,6 +323,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		APIKeyID:  apiKey.ID,
 	}
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
+
+	// 把会话哈希装入请求 context，供 service 层上下文水位提醒读取。
+	bindContextWarningSession(c, sessionHash)
 
 	// [DEBUG-STICKY] 打印会话 hash 生成结果
 	reqLog.Info("sticky.session_hash_generated",
