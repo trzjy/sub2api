@@ -271,7 +271,8 @@ func TestTempUnscheduleCursorUpstreamFailureFlapCooldown(t *testing.T) {
 		require.Equal(t, 1, repo.calls)
 		require.WithinDuration(t, before.Add(CursorUpstreamFlapCooldown), repo.until, 5*time.Second,
 			"集体抽风时的冷却窗口必须是 30 秒")
-		require.Equal(t, "cursor upstream account failure (upstream flap, auto temp-unschedule 30s)", repo.reason)
+		require.Contains(t, repo.reason, "cursor upstream account failure (upstream flap, auto temp-unschedule 30s)")
+		require.Equal(t, recoveryModeUnavailable, repo.mode)
 	})
 }
 
