@@ -65,3 +65,27 @@ func TestUpdateSettingsRequestSizeRoutingThresholdRejectsNonPositive(t *testing.
 		})
 	}
 }
+
+// 审计断言：仅 request_size_routing_threshold 从 256000 变为 128000 时，
+// diffSettings 必须把该键登记进变更列表。
+func TestDiffSettingsRequestSizeRoutingThresholdChanged(t *testing.T) {
+	before := &service.SystemSettings{RequestSizeRoutingThreshold: 256000}
+	after := &service.SystemSettings{RequestSizeRoutingThreshold: 128000}
+
+	changed := diffSettings(before, after, nil, nil, UpdateSettingsRequest{})
+
+	require.Contains(t, changed, service.SettingKeyRequestSizeRoutingThreshold,
+		"阈值发生变化时，审计结果必须登记该键")
+	require.Len(t, changed, 1, "仅阈值字段变化时，审计结果应只含这一个键")
+}
+
+// 审计断言：前后阈值相同时，diffSettings 不得登记该键。
+func TestDiffSettingsRequestSizeRoutingThresholdUnchanged(t *testing.T) {
+	before := &service.SystemSettings{RequestSizeRoutingThreshold: 256000}
+	after := &service.SystemSettings{RequestSizeRoutingThreshold: 256000}
+
+	changed := diffSettings(before, after, nil, nil, UpdateSettingsRequest{})
+
+	require.NotContains(t, changed, service.SettingKeyRequestSizeRoutingThreshold,
+		"前后阈值相同时，审计结果不得登记该键")
+}

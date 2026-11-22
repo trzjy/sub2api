@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -286,4 +287,102 @@ func TestApplyRequestSizeScopeExclusionExemptPlatforms(t *testing.T) {
 			require.Empty(t, excluded, "exempt platform %s must return an empty exclusion set", platform)
 		})
 	}
+}
+
+// fixedSessionInputTokenCache 是 effective 对账用的 SessionInputTokenCache 桩：
+// 恒返回预置的「上一单真实输入 token」。内嵌 service.GatewayCache 只为满足
+// NewOpenAIGatewayService 第 7 个参数的静态类型，本测试只触达下面两个方法。
+type fixedSessionInputTokenCache struct {
+	service.GatewayCache
+	tokens int
+}
+
+func (c *fixedSessionInputTokenCache) GetSessionInputTokens(_ context.Context, _ int64, _ string) (int, error) {
+	return c.tokens, nil
+}
+
+func (c *fixedSessionInputTokenCache) SetSessionInputTokens(_ context.Context, _ int64, _ string, _ int, _ time.Duration) error {
+	return nil
+}
+
+// TestApplyRequestSizeScopeExclusionExemptPlatformsLargeSmallOnly 验证 L5 三平台豁免
+// 对 small_only 账号同样生效：大请求下 anthropic/openai/gemini 一律不排除
+// 「仅接小请求」账号；同输入以 cursor（非豁免平台）调用则必须排除该账号（对照组）。
+func TestApplyRequestSizeScopeExclusionExemptPlatformsLargeSmallOnly(t *testing.T) {
+	t.Parallel()
+
+	smallOnly := &service.Account{
+		ID:       909,
+		Name:     "sro-l5-909",
+		Platform: service.PlatformCursor,
+		Type:     service.AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://api.openai.com",
+		},
+		Extra: map[string]any{service.SmallRequestOnlyExtraKey: true},
+	}
+	gw := service.NewOpenAIGatewayService(
+		largeRequestOnlyRepoStub{accounts: []service.Account{*smallOnly}},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	h := &OpenAIGatewayHandler{gatewayService: gw}
+	reqLog := zap.NewNop()
+
+	// 复用现有大请求构造量级：估算远超 256000 阈值，确保判为大请求。
+	largeBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`,
+		strings.Repeat("word ", 500000)))
+
+	for _, platform := range []string{
+		service.PlatformAnthropic,
+		service.PlatformOpenAI,
+		service.PlatformGemini,
+	} {
+		estimated, excluded := h.applyRequestSizeScopeExclusion(
+			context.Background(), nil, reqLog, nil, platform, "gpt-4o",
+			service.TierRoutingProtocolChatCompletions, "", largeBody)
+
+		require.Greater(t, estimated, service.LargeRequestOnlyInputThreshold,
+			"用例前提：平台 %s 必须把该请求判为大请求", platform)
+		require.Empty(t, excluded, "豁免平台 %s 在大请求下不得排除 small-only 账号", platform)
+	}
+
+	// 对照组：同一大请求、同一账号，cursor（非豁免平台）必须排除 small-only 账号。
+	_, excludedCursor := h.applyRequestSizeScopeExclusion(
+		context.Background(), nil, reqLog, nil, service.PlatformCursor, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, "", largeBody)
+	_, ok := excludedCursor[909]
+	require.True(t, ok, "cursor 对照组：大请求必须排除 small-only 账号 909")
+}
+
+// TestApplyRequestSizeScopeExclusionEffectiveReconciliation 验证 effective 对账：
+// 预置会话上一单真实输入 180000 后，即便本地估算仅约 2 万，返回值也必须被校正为
+// 180000；平台 openai 属 L5 豁免，排除集必须为空。缓存能力可经
+// NewOpenAIGatewayService 第 7 个参数（cache）注入，无需改动生产代码。
+func TestApplyRequestSizeScopeExclusionEffectiveReconciliation(t *testing.T) {
+	t.Parallel()
+
+	cache := &fixedSessionInputTokenCache{tokens: 180000}
+	// cache 是 NewOpenAIGatewayService 第 7 个参数：repo 后 5 个 nil 再传桩。
+	gw := service.NewOpenAIGatewayService(
+		largeRequestOnlyRepoStub{},
+		nil, nil, nil, nil, nil,
+		cache,
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil,
+		nil, nil,
+	)
+	h := &OpenAIGatewayHandler{gatewayService: gw}
+	reqLog := zap.NewNop()
+
+	// 本地估算约 2 万（远低于真实值 180000），确保 effective 必须用真实值校正。
+	body := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`,
+		strings.Repeat("hello world ", 15000)))
+	effective, excluded := h.applyRequestSizeScopeExclusion(
+		context.Background(), nil, reqLog, nil, service.PlatformOpenAI, "gpt-4o",
+		service.TierRoutingProtocolChatCompletions, "session-hash-effective", body)
+
+	require.Equal(t, 180000, effective, "effective 必须被上一单真实输入 180000 校正")
+	require.Empty(t, excluded, "豁免平台 openai 不得返回排除集合")
 }

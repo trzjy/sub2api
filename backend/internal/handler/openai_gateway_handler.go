@@ -5711,8 +5711,9 @@ func (h *OpenAIGatewayHandler) applyRequestSizeScopeExclusion(
 		return effective, empty
 	}
 
-	// 请求规模三态排除：小请求（<=256K）排除「仅接大请求」账号，
-	// 大请求（>256K）排除「仅接小请求」账号。两类账号各自只参与对应规模的候选。
+	// 请求规模三态排除：估算 <= 运行时阈值（默认 256000，后台可配置）视为小请求，
+	// 排除「仅接大请求」账号；估算 > 阈值视为大请求，排除「仅接小请求」账号。
+	// 两类账号各自只参与对应规模的候选。
 	excluded, err := h.gatewayService.RequestSizeScopeExcludedIDs(ctx, groupID, platform, isLargeRequest)
 	if err != nil {
 		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
