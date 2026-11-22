@@ -183,6 +183,16 @@ type CursorExecutionRequest struct {
 	ToolChoiceName string
 }
 
+// cursorSessionSnapshotStore 是会话快照的最小持久化接口（方案 §2.4 / §2.5）。
+//
+// 由装配层注入（S4）；未注入（nil）时写入/恢复都安全跳过，行为与本卡之前完全一致。
+// TTL 由实现方按 cursorSessionSnapshotTTL 施加，本层只负责键与值。
+type cursorSessionSnapshotStore interface {
+	Set(ctx context.Context, id string, value any) error
+	Get(ctx context.Context, id string, dest any) (bool, error)
+	Del(ctx context.Context, id string) error
+}
+
 // CursorExecutionService 是 Cursor 平台的唯一执行部件与会话状态所有者。
 type CursorExecutionService struct {
 	quotaKeys QuotaKeyRepository
@@ -190,7 +200,10 @@ type CursorExecutionService struct {
 	deviceIDs CursorDeviceIDResolver
 	forwarder *CursorUpstreamForwarder
 	sessions  *cursorSessionStore
-	now       func() time.Time
+	// sessionSnapshots 是跨 HTTP 会话快照存储：nil 表示未装配，finalize 不写、
+	// IdentifyResume 不尝试恢复（失败关闭）。
+	sessionSnapshots cursorSessionSnapshotStore
+	now              func() time.Time
 	// httpResponseOwnerBinder 是 HTTP 续轮归属登记回调（由装配层注入 OpenAIGatewayService 的实现）。
 	// Cursor 供给此前从不写 owner 绑定，导致 /v1/responses 带 previous_response_id 续轮必然 400。
 	// 未注入（nil）时跳过登记，行为与本卡之前完全一致；登记失败只记 warn，绝不影响请求。
@@ -301,6 +314,7 @@ func NewCursorExecutionService(
 	enc QuotaKeyEncryptor,
 	deviceIDs CursorDeviceIDResolver,
 	forwarder *CursorUpstreamForwarder,
+	opts ...CursorExecutionOption,
 ) (*CursorExecutionService, error) {
 	if quotaKeys == nil {
 		return nil, fmt.Errorf("%w: quota key repository missing", ErrCursorExecutionUnavailable)
@@ -314,14 +328,34 @@ func NewCursorExecutionService(
 	if forwarder == nil {
 		return nil, fmt.Errorf("%w: upstream forwarder missing", ErrCursorExecutionUnavailable)
 	}
-	return &CursorExecutionService{
+	svc := &CursorExecutionService{
 		quotaKeys: quotaKeys,
 		enc:       enc,
 		deviceIDs: deviceIDs,
 		forwarder: forwarder,
 		sessions:  newCursorSessionStore(),
 		now:       time.Now,
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(svc)
+		}
+	}
+	return svc, nil
+}
+
+// CursorExecutionOption 是 NewCursorExecutionService 的可选配置。
+//
+// 既有四参调用点零改动；新依赖只通过选项注入。
+type CursorExecutionOption func(*CursorExecutionService)
+
+// WithCursorSessionSnapshots 注入跨 HTTP 会话快照存储（方案 §2.4 / §2.5）。
+func WithCursorSessionSnapshots(store cursorSessionSnapshotStore) CursorExecutionOption {
+	return func(s *CursorExecutionService) {
+		if s != nil {
+			s.sessionSnapshots = store
+		}
+	}
 }
 
 // AuthProviderForAccount 返回该账号的**设备级**鉴权材料提供者。
@@ -5066,6 +5100,69 @@ func (s *CursorExecutionService) onWaitingToolsIdle(record *cursorSessionRecord)
 	}
 }
 
+// cursorSessionSnapshotTTL 是会话快照的保留时长（方案 §2.3，用户裁定 4 小时）。
+//
+// 本层只定义口径；实际 TTL 由注入的 cursorSessionSnapshotStore 实现施加。
+const cursorSessionSnapshotTTL = 4 * time.Hour
+
+// cursorSessionSnapshotKey 是快照主键：cursor:session:<sessionID>。
+func cursorSessionSnapshotKey(sessionID string) string {
+	return "cursor:session:" + sessionID
+}
+
+// cursorSessionSnapshotRespKey 是按 previous_response_id 定位快照的检索键：
+// cursor:session:resp:<protocol>:<responseID>。
+func cursorSessionSnapshotRespKey(protocol, responseID string) string {
+	return "cursor:session:resp:" + protocol + ":" + responseID
+}
+
+// cursorSessionSnapshotRecoverableReason 判断一次 finalize 是否值得写恢复快照。
+//
+// 判据（派发单 B2-S3 / 方案 §2.4）：
+//   - "waiting_tools_idle"：10 分钟空闲释放（用户长工具场景的主要目标）；
+//   - cursorPumpTerminalReason 产生的"非用户取消、非正常完成"类：
+//     "deadline_exceeded"、"stream_error"。
+//
+// 明确排除："completed"（正常完成）、"cancelled"（用户主动取消），以及
+// attach_* / service_stop / resume_* 等其它终态——它们不该续跑或由既有语义处理。
+func cursorSessionSnapshotRecoverableReason(reason string) bool {
+	switch reason {
+	case "waiting_tools_idle", "deadline_exceeded", "stream_error":
+		return true
+	default:
+		return false
+	}
+}
+
+// writeCursorSessionSnapshot 在 finalize 收口前保存可恢复最小状态（失败只告警）。
+//
+// 只在 store 已注入时调用；主键先写、检索键后写（有 responseID 时）。任一键写入失败
+// 都不改变 finalize 顺序——快照只是"尽力而为"的恢复机会。
+func (s *CursorExecutionService) writeCursorSessionSnapshot(snap *cursorSessionSnapshot) {
+	if s == nil || s.sessionSnapshots == nil || snap == nil {
+		return
+	}
+	ctx := context.Background()
+	if err := s.sessionSnapshots.Set(ctx, cursorSessionSnapshotKey(snap.SessionID), snap); err != nil {
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_session_snapshot_write_failed", snap.RequestedModel,
+			zap.String("session_id", snap.SessionID),
+			zap.String("snapshot_key", "primary"),
+			zap.Error(err))
+		return
+	}
+	if snap.PendingResponseID == "" {
+		return
+	}
+	if err := s.sessionSnapshots.Set(ctx,
+		cursorSessionSnapshotRespKey(snap.IndexProtocol, snap.PendingResponseID), snap.SessionID); err != nil {
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_session_snapshot_write_failed", snap.RequestedModel,
+			zap.String("session_id", snap.SessionID),
+			zap.String("snapshot_key", "response_index"),
+			zap.String("response_id", snap.PendingResponseID),
+			zap.Error(err))
+	}
+}
+
 // finishCursorSession 是**唯一 finalizer**（§25.4 末段）。
 //
 // 固定顺序：停止接新结果 → 关闭原生流/取消读写 → 已获完整真实 usage 则提交唯一结算
@@ -5103,7 +5200,17 @@ func (s *CursorExecutionService) finishCursorSessionIf(record *cursorSessionReco
 	record.interruptReason = reason
 	// 已经进入 finalizer：空闲释放计时器没有意义，先停掉避免重复进入。
 	stopWaitingToolsIdleTimerLocked(record)
+	// 快照在 finishing 已置位、索引尚未清理时取（方案 §2.4）：摘要与 pending 在锁内
+	// 读成独立拷贝，落盘在锁外做——绝不把网络写入放进 record.mu 临界区。
+	var snapshot *cursorSessionSnapshot
+	if s.sessionSnapshots != nil && cursorSessionSnapshotRecoverableReason(reason) {
+		snapshot, _ = cursorSnapshotFromRecord(record)
+	}
 	record.mu.Unlock()
+
+	if snapshot != nil {
+		s.writeCursorSessionSnapshot(snapshot)
+	}
 
 	// 2026-11-22 用户要求：finalize reason 必须可检索（此前用 Background ctx 的 Info 级日志，生产拿不到）。
 	// 统一走全局 logger 的 Warn 级，带 session_id/terminal_reason/model/account，供事后归因
@@ -7390,6 +7497,163 @@ type CursorResumeTicket struct {
 	probe   *CursorResumeProbe
 }
 
+// restoreSessionFromSnapshot 在一次「previous_response_id 未命中内存索引」的续轮里，
+// 尝试从快照重建仍可续跑的会话（方案 §2.5）。
+//
+// 任一步失败都返回 nil：调用方仍按原 unknown_association 400 处理，不猜、不跨协议复用。
+// 成功时会话已在 sessions 表中重建为 waiting_tools，response/call/item 索引已重登记，
+// 且两个快照键已一次性删除（防重放）。
+func (s *CursorExecutionService) restoreSessionFromSnapshot(
+	ctx context.Context, protocol, prevID string, identity CursorSessionIdentity,
+) *cursorSessionRecord {
+	if s == nil || s.sessionSnapshots == nil || prevID == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	model := ""
+	fail := func(phase string, fields ...zap.Field) *cursorSessionRecord {
+		logFields := append([]zap.Field{
+			zap.String("phase", phase),
+			zap.String("protocol", protocol),
+			zap.String("previous_response_id", prevID),
+		}, fields...)
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_session_snapshot_restore_failed", model, logFields...)
+		return nil
+	}
+
+	// ① 检索键 → sessionID → 主键 → 快照。
+	var sessionID string
+	found, err := s.sessionSnapshots.Get(ctx, cursorSessionSnapshotRespKey(protocol, prevID), &sessionID)
+	if err != nil || !found || sessionID == "" {
+		return fail("lookup")
+	}
+	var snap cursorSessionSnapshot
+	found, err = s.sessionSnapshots.Get(ctx, cursorSessionSnapshotKey(sessionID), &snap)
+	if err != nil || !found {
+		return fail("load")
+	}
+	model = snap.RequestedModel
+
+	// ② 校验：协议命名空间必须一致；身份可用时比对。probe 未携带身份时 incoming 为零值，
+	// compatibleWith 把零值当「未声明」不参与比较；真正的身份闸门在 Serve 侧按
+	// CursorResumeServeInput.Identity 执行（见 cursorResumeIdentityDenial）。
+	if snap.ProtocolName != protocol {
+		return fail("protocol_mismatch", zap.String("snapshot_protocol", snap.ProtocolName))
+	}
+	if !snap.Identity.compatibleWith(identity) {
+		return fail("identity_mismatch")
+	}
+	if snap.ProtocolValue < 0 || snap.ProtocolValue > int(cursorProtocolGemini) ||
+		cursorProtocolIndexName(cursorProtocol(snap.ProtocolValue)) != snap.ProtocolName {
+		return fail("malformed_protocol", zap.Int("snapshot_protocol_value", snap.ProtocolValue))
+	}
+
+	// ③ 重建 spec：协议直接用快照存下的枚举原值还原（不再做第二套字符串映射）；
+	// 来源指纹（首次生成 x-jg-auth 的 quota key / code MAC）必须带回，否则续轮重建
+	// 分支会以 source_fingerprint_unavailable 失败。
+	spec := cursorSessionSpec{
+		protocol:         cursorProtocol(snap.ProtocolValue),
+		requestedModel:   snap.RequestedModel,
+		upstreamModel:    snap.UpstreamModel,
+		accountID:        snap.AccountID,
+		quotaKeyID:       snap.QuotaKeyID,
+		indexProtocol:    snap.IndexProtocol,
+		identity:         snap.Identity,
+		sourceQuotaKeyID: snap.SourceQuotaKeyID,
+		sourceCodeMAC:    snap.SourceCodeMAC,
+	}
+	// 三摘要只有主链有快照值：RestoreFromSnapshot 要求两条 hex 都合法，故配置组把
+	// 主链 hex 同时作为骨架 hex 传入（配置比对只用 Equal 主链，骨架值不参与判定）；
+	// history 则用快照里独立保存的骨架 hex/项数，SkeletonEqual 的准入口径保持不变。
+	config := &CursorHistoryDigest{}
+	if err := config.RestoreFromSnapshot(snap.ConfigHex, snap.ConfigItems, snap.ConfigHex, snap.ConfigItems); err != nil {
+		return fail("config_digest", zap.Error(err))
+	}
+	configSystem := &CursorHistoryDigest{}
+	if err := configSystem.RestoreFromSnapshot(snap.ConfigSystemHex, snap.ConfigSystemItems, snap.ConfigSystemHex, snap.ConfigSystemItems); err != nil {
+		return fail("config_system_digest", zap.Error(err))
+	}
+	configSampling := &CursorHistoryDigest{}
+	if err := configSampling.RestoreFromSnapshot(snap.ConfigSamplingHex, snap.ConfigSamplingItems, snap.ConfigSamplingHex, snap.ConfigSamplingItems); err != nil {
+		return fail("config_sampling_digest", zap.Error(err))
+	}
+	history := &CursorHistoryDigest{}
+	if err := history.RestoreFromSnapshot(snap.HistoryHex, snap.HistoryItems, snap.HistorySkeletonHex, snap.HistorySkeletonItems); err != nil {
+		return fail("history_digest", zap.Error(err))
+	}
+
+	record := s.sessions.start(spec)
+	if record == nil {
+		return fail("session_start")
+	}
+	batchID := snap.PendingBatchID
+	if batchID == "" {
+		batchID = cursorSessionLevelBatchID
+	}
+	record.mu.Lock()
+	record.state = cursorSessionWaitingTools
+	// 四个摘要必须一并挂回记录：续轮流程直接读 record.configDigest/historyDigest
+	// （cursor_execution_service.go:7959/7962/8191），漏挂会让恢复后的会话在续轮校验时
+	// 空指针。快照里的 hex/items 就是这些摘要的唯一还原来源。
+	record.configDigest = config
+	record.configSystemDigest = configSystem
+	record.configSamplingDigest = configSampling
+	record.historyDigest = history
+	record.exposedTools = append([]string(nil), snap.Tools...)
+	record.pending = &cursorPendingBatch{
+		batchID:    batchID,
+		responseID: snap.PendingResponseID,
+		callIDs:    append([]string(nil), snap.PendingCallIDs...),
+		delivered:  true,
+	}
+	record.mu.Unlock()
+
+	// ④ 重登记 response/call/item 索引：复用 registerSessionID（内部按
+	// cursorSessionIndexKeyForSpec 构造键），绝不新建平行索引；item 为空时跳过。
+	// 任一键冲突即整体回退（关掉刚建的记录），不留下可被命中的半成品关联。
+	register := func(kind CursorIDKind, id string) bool {
+		if err := s.sessions.registerSessionID(record.id, batchID, kind, id); err != nil {
+			s.sessions.close(record.id)
+			fail("register_"+string(kind), zap.String("id", id), zap.Error(err))
+			return false
+		}
+		return true
+	}
+	if snap.PendingResponseID != "" && !register(CursorIDKindResponse, snap.PendingResponseID) {
+		return nil
+	}
+	for _, callID := range snap.PendingCallIDs {
+		if strings.TrimSpace(callID) == "" {
+			continue
+		}
+		if !register(CursorIDKindCall, callID) {
+			return nil
+		}
+	}
+	for _, itemID := range snap.ItemIDs {
+		if strings.TrimSpace(itemID) == "" {
+			continue
+		}
+		if !register(CursorIDKindItem, itemID) {
+			return nil
+		}
+	}
+
+	// ⑤ 一次性消费：先主键后检索键；Del 报错只告警，不撤销已重建的会话
+	// （最坏只是留下重放窗口，恢复侧的协议/身份校验仍在）。
+	if err := s.sessionSnapshots.Del(ctx, cursorSessionSnapshotKey(sessionID)); err != nil {
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_session_snapshot_restore_failed", model,
+			zap.String("phase", "delete_primary"), zap.String("session_id", sessionID), zap.Error(err))
+	}
+	if err := s.sessionSnapshots.Del(ctx, cursorSessionSnapshotRespKey(protocol, prevID)); err != nil {
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "cursor_session_snapshot_restore_failed", model,
+			zap.String("phase", "delete_index"), zap.String("session_id", sessionID), zap.Error(err))
+	}
+	return record
+}
+
 // IdentifyResume 用统一索引把探针定位到唯一会话与唯一待完成批次。
 //
 // 失败关闭语义（§25.2 / §25.14-D / §25.17.4 A08）：
@@ -7437,6 +7701,16 @@ func (s *CursorExecutionService) IdentifyResume(probe *CursorResumeProbe) (*Curs
 			}
 			prevRecord = record
 			prevBatchID = currentBatchID
+		} else if record := s.restoreSessionFromSnapshot(context.Background(), protocol, prevID, CursorSessionIdentity{}); record != nil {
+			// 内存索引未命中：尝试从 finalize 前写下的快照重建（方案 §2.5）。
+			// CursorResumeProbe 不携带身份，故传入零值（probe 未提供即不参与比对）；
+			// 身份闸门仍在 ServeCursorResume 侧按本 HTTP 的 Identity 执行。
+			record.mu.Lock()
+			if pending := record.pending; pending != nil {
+				prevBatchID = pending.batchID
+			}
+			record.mu.Unlock()
+			prevRecord = record
 		}
 	}
 
