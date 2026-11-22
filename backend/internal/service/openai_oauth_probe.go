@@ -34,16 +34,18 @@ func isOpenAIOAuthProbeAccount(acc *Account) bool {
 //     → 直接采用，不做任何回落。
 //  2. 熔断 state 记录的模型（parseHealthBreakerState(acc.TempUnschedulableReason).Model）
 //     非空 → 采用（它就是触发本次停调的上游模型，探它才是真实故障面）。
-//  3. 从账号 model_mapping 里挑一个上游真实存在的模型：账号 model_mapping 是
-//     本账号「可服务模型 → 上游真名」的唯一 SSOT（见 Account.IsModelSupported），映射的
-//     值即上游真名；逐条经账号级 model_mapping 解析出站名（与 cursor 分支
+//  3. 管理员维护的账号模型名单（credentials.model_mapping）解析出的上游真名：
+//     **探针模型取自管理员维护的账号模型名单**（前端「模型限制 → 模型白名单」写的就是
+//     它，键=值恒等映射）；管理员随时维护该名单，探针用它选一个可用模型做文本探测。
+//     名单是本账号「可服务模型 → 上游真名」的唯一 SSOT（见 Account.IsModelSupported），
+//     映射的值即上游真名；逐条经账号级 model_mapping 解析出站名（与 cursor 分支
 //     cursorProbeOutboundModel 同口径：命中且非空才用，解析不到则跳过该候选）。
-//     图片/媒体模型（isOpenAIImageGenerationModel）不能做文本探针，直接排除。
-//     候选**只接受 `gpt-` 前缀的通用文本模型**（在候选收集时过滤）：映射目标本身
-//     是账号配置，不能独立证明它仍在上游实时目录里；已下架/非文本的取值
-//     （含 codex-auto-review 一类非 `gpt-` 命名的账号自定义模型）拿去做文本探针
-//     只会恒失败或压根不是文本模型 ⇒ 宁可视为无候选，也不探一个证明不了可服务的模型。
-//     命中多个 `gpt-` 候选时按字典序取首个以保证可复现（与 selectResponsesProbeModel 同口径）。
+//     只排除**物理上不可探**的候选：含 `*` 的通配符（不是具体模型）、图片/媒体模型
+//     （isOpenAIImageGenerationModel —— 图片模型无法做文本探测）。
+//     **刻意不做任何基于模型名形态的猜测性过滤**：名单里非 `gpt-` 命名的模型
+//     （如 codex-auto-review 一类管理员自定义模型）同样是管理员认定可服务的上游模型，
+//     按名字丢弃它会把「明明有可用模型」变成「无模型可探」⇒ 账号永远回不了池。
+//     命中多个候选时按字典序取首个以保证可复现（与 selectResponsesProbeModel 同口径）。
 //  4. 仍无候选 → 返回空串，由调用方按既有 degraded 语义处理（"no model to probe"
 //     ⇒ 到期恢复，不伪造失败）。
 //
@@ -54,9 +56,10 @@ func isOpenAIOAuthProbeAccount(acc *Account) bool {
 // 明确断言「上游清单里没有的模型可以出现在落库快照」
 // （backend/internal/service/upstream_models_test.go:1165 附近）。
 // 于是「映射已移除、快照仍留 gpt-5.4 与 gpt-5.6-luna」时，枚举快照键排序取首个
-// `gpt-` 候选必定选中 `gpt-5.4`（字典序小于 `gpt-5.6-luna`）⇒ 上游恒 400
+// 候选必定选中 `gpt-5.4`（字典序小于 `gpt-5.6-luna`）⇒ 上游恒 400
 // model_not_found（生产实证）⇒ 账号恒判不健康。故快照只作「能力描述」目录，
-// 不得作「可服务模型」目录；探针模型只能来自账号自己的 model_mapping。
+// 不得作「可服务模型」目录；探针模型只能来自管理员维护的账号模型名单
+// （credentials.model_mapping）。
 //
 // **绝不回落占位默认模型（= "gpt-5.4"）**：该模型在 ChatGPT 订阅号的
 // Codex 上游不存在（生产实证：400 model_not_found "The 'gpt-5.4' model is not
@@ -81,7 +84,7 @@ func selectOpenAIOAuthProbeModel(acc *Account, explicitModel string) string {
 		}
 	}
 
-	// 3) 账号 model_mapping 解析出的上游真名（只接受 gpt- 前缀的通用文本模型）。
+	// 3) 管理员维护的账号模型名单（credentials.model_mapping）解析出的上游真名。
 	if model := pickOpenAIOAuthProbeCandidate(openAIOAuthProbeMappingCandidates(acc)); model != "" {
 		return model
 	}
@@ -91,12 +94,21 @@ func selectOpenAIOAuthProbeModel(acc *Account, explicitModel string) string {
 	return ""
 }
 
-// openAIOAuthProbeMappingCandidates 收集账号 model_mapping 解析出的上游真名候选
-// （去重 + 排除不可探的模型）。
+// openAIOAuthProbeMappingCandidates 收集管理员维护的账号模型名单
+// （credentials.model_mapping）解析出的上游真名候选（去重 + 排除物理上不可探的模型）。
 //
-// 只收 `gpt-` 前缀的通用文本模型：映射目标是账号配置，不能独立证明它仍在上游
-// 实时目录；非 `gpt-` 命名的取值（codex-auto-review 一类账号自定义模型、以及
-// 任何含 `*` 的通配符）不作为文本探针目标。
+// 名单来源即管理员随时维护的「模型限制 → 模型白名单」（前端写回
+// credentials.model_mapping），是管理员认定该账号可服务的模型集合；探针从里面
+// 选一个做文本探测。
+//
+// 只排除**物理上不可探**的候选：
+//   - 解析不到 / 为空（不是可发出的模型名）；
+//   - 含 `*` 的通配符（不是具体模型名）；
+//   - 图片/媒体模型（isOpenAIImageGenerationModel —— 图片模型无法做文本探测）。
+//
+// **不做任何基于模型名形态的过滤**：名单里的模型名一律可用（管理员可自定义命名，
+// 例如 codex-auto-review 一类非 `gpt-` 命名的模型）。按名字形态丢弃候选会把
+// 「明明有可用模型」变成「无模型可探」⇒ 账号永远回不了池。
 func openAIOAuthProbeMappingCandidates(acc *Account) []string {
 	mapping := acc.GetModelMapping()
 	candidates := make([]string, 0, len(mapping))
@@ -110,9 +122,6 @@ func openAIOAuthProbeMappingCandidates(acc *Account) []string {
 		if isOpenAIImageGenerationModel(upstream) {
 			continue
 		}
-		if !strings.HasPrefix(upstream, "gpt-") {
-			continue
-		}
 		if _, dup := seen[upstream]; dup {
 			continue
 		}
@@ -122,22 +131,17 @@ func openAIOAuthProbeMappingCandidates(acc *Account) []string {
 	return candidates
 }
 
-// pickOpenAIOAuthProbeCandidate 在候选里挑一个通用 GPT 文本模型：优先 gpt- 前缀，
-// 同类按字典序取首个以保证可复现（与 selectResponsesProbeModel 同口径）。
+// pickOpenAIOAuthProbeCandidate 在候选里挑一个模型：按字典序取首个以保证可复现
+// （与 selectResponsesProbeModel 同口径）。
 //
-// 候选收集处（openAIOAuthProbeMappingCandidates）已只放行 `gpt-` 前缀候选，故此处
-// 无 gpt- 候选时返回空串（不返回任意非 gpt- 取值）。
+// 候选收集处（openAIOAuthProbeMappingCandidates）已排除物理上不可探的取值，
+// 故此处对任何候选一视同仁，不再按模型名形态二次筛选，也不丢弃任何候选。
 func pickOpenAIOAuthProbeCandidate(candidates []string) string {
 	if len(candidates) == 0 {
 		return ""
 	}
 	sort.Strings(candidates)
-	for _, candidate := range candidates {
-		if strings.HasPrefix(candidate, "gpt-") {
-			return candidate
-		}
-	}
-	return ""
+	return candidates[0]
 }
 
 // buildOpenAIOAuthProbeRequest 为 OpenAI OAuth/SetupToken 订阅号构造一次最小

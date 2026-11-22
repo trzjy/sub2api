@@ -413,31 +413,68 @@ func TestOpenAIOAuthProbeSelectModelIgnoresStaleUpstreamSnapshot(t *testing.T) {
 	}
 }
 
-// TestOpenAIOAuthProbeSelectModelRejectsNonGPTMappingTargets 验证 c) 分支只接受 `gpt-`
-// 前缀的通用文本模型：映射目标是账号配置，不能独立证明它仍在上游实时目录；
-// 非 `gpt-` 命名的取值（codex-auto-review 一类账号自定义模型）不得被选为探针模型。
-func TestOpenAIOAuthProbeSelectModelRejectsNonGPTMappingTargets(t *testing.T) {
-	// 映射里全是非 gpt- 取值 ⇒ 视为无候选（返回空串，绝不回落默认模型）。
+// TestOpenAIOAuthProbeSelectModelNonGPTMappingTargetSelected 是本卡承重用例：
+// 管理员维护的账号模型名单（credentials.model_mapping，即前端「模型限制 → 模型白名单」）
+// 里的**非 `gpt-` 命名模型**（如 codex-auto-review）必须被选中作探针模型。
+//
+// 修复前的缺陷：候选收集处有 `if !strings.HasPrefix(upstream, "gpt-") { continue }`，
+// 挑选处也只在 `gpt-` 前缀里挑 ⇒ 名单里的非 gpt- 命名模型被直接丢弃 ⇒ 明明有可用
+// 模型却返回「无模型可探」⇒ 走既有 degraded ⇒ **账号回不了池**（卡在"探测中"）。
+//
+// 修复后：候选收集只排除物理上不可探的取值（通配符 / 图片模型 / 解析不到），
+// 挑选按字典序取首个，**任何候选都不得被丢弃**。
+func TestOpenAIOAuthProbeSelectModelNonGPTMappingTargetSelected(t *testing.T) {
+	// 名单里全是非 gpt- 命名的模型 ⇒ 修复前必然返回空串，修复后必须选中其中一个。
 	acc := oauthProbeAccountWithMapping(map[string]any{
 		"client-alias-a": "codex-auto-review",
 		"client-alias-b": "my-custom-text-model",
 	})
+	allowed := map[string]bool{"codex-auto-review": true, "my-custom-text-model": true}
 
 	got := selectOpenAIOAuthProbeModel(acc, "")
-	if got != "" {
-		t.Fatalf("selectOpenAIOAuthProbeModel = %q, want \"\" when every mapping target lacks the gpt- prefix", got)
+	if got == "" {
+		t.Fatalf("selectOpenAIOAuthProbeModel = \"\", want a model from the admin-maintained model list (non gpt- named models must not be dropped)")
+	}
+	if !allowed[got] {
+		t.Fatalf("selectOpenAIOAuthProbeModel = %q, want one of the model_mapping upstream values %v", got, allowed)
 	}
 	if got == openai.DefaultTestModel || got == "gpt-5.4" {
-		t.Fatalf("selectOpenAIOAuthProbeModel = %q, must never fall back to the unsupported placeholder %q", got, openai.DefaultTestModel)
+		t.Fatalf("selectOpenAIOAuthProbeModel = %q, must not fall back to the unsupported placeholder %q", got, openai.DefaultTestModel)
 	}
 
-	// 混合映射：非 gpt- 取值不得入选，选中的必须是 gpt- 那个。
+	// 混合名单：非 gpt- 命名模型同样在候选集合内，选中结果必须落在名单解析出的
+	// 上游模型集合里（不得被丢弃、不得跳到名单之外）。
 	acc2 := oauthProbeAccountWithMapping(map[string]any{
 		"client-alias-a": "codex-auto-review",
 		"client-alias-b": "gpt-6-astra",
 	})
-	if got2 := selectOpenAIOAuthProbeModel(acc2, ""); got2 != "gpt-6-astra" {
-		t.Fatalf("selectOpenAIOAuthProbeModel = %q, want %q (non gpt- mapping targets must be skipped)", got2, "gpt-6-astra")
+	allowed2 := map[string]bool{"codex-auto-review": true, "gpt-6-astra": true}
+	got2 := selectOpenAIOAuthProbeModel(acc2, "")
+	if got2 == "" {
+		t.Fatalf("selectOpenAIOAuthProbeModel = \"\", want a model from the admin-maintained model list")
+	}
+	if !allowed2[got2] {
+		t.Fatalf("selectOpenAIOAuthProbeModel = %q, want one of the model_mapping upstream values %v", got2, allowed2)
+	}
+	if got2 == openai.DefaultTestModel || got2 == "gpt-5.4" {
+		t.Fatalf("selectOpenAIOAuthProbeModel = %q, must not fall back to the unsupported placeholder %q", got2, openai.DefaultTestModel)
+	}
+}
+
+// TestOpenAIOAuthProbeSelectModelSkipsWildcardMappingTargets 验证名单里的通配符
+// 条目（`gpt-6.*`）被跳过：通配符不是具体模型名，发给上游必然 400。
+func TestOpenAIOAuthProbeSelectModelSkipsWildcardMappingTargets(t *testing.T) {
+	acc := oauthProbeAccountWithMapping(map[string]any{
+		"client-wildcard": "gpt-6.*",
+		"client-text":     "gpt-6-astra",
+	})
+
+	got := selectOpenAIOAuthProbeModel(acc, "")
+	if got != "gpt-6-astra" {
+		t.Fatalf("selectOpenAIOAuthProbeModel = %q, want %q (wildcard mapping target must be skipped)", got, "gpt-6-astra")
+	}
+	if strings.Contains(got, "*") {
+		t.Fatalf("selectOpenAIOAuthProbeModel = %q, must never pick a wildcard model name", got)
 	}
 }
 
