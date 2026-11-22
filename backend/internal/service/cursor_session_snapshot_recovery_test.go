@@ -81,9 +81,6 @@ func buildWaitingToolsRecord(t *testing.T, svc *CursorExecutionService) *cursorS
 		requestedModel: "gpt-6.1-sol",
 		accountID:      7,
 		identity:       CursorSessionIdentity{UserID: 3, APIKeyID: 9},
-		plan: &cursorContextPlan{
-			tools: []string{"search"},
-		},
 	}
 	record := svc.sessions.start(spec)
 	require.NotNil(t, record)
