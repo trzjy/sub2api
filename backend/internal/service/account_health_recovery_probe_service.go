@@ -1387,6 +1387,13 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolFo
 	if acc == nil {
 		return false, errors.New("probe account is nil")
 	}
+	// OpenAI OAuth/SetupToken 订阅号的 GetOpenAIProtocolAPIKey() 恒为空（type!=apikey），
+	// 落原 APIKey 分支会报 "probe account has no api key" 走 degraded 到期恢复，账号
+	// 永远探不通。在取 apiKey 前分流到 OAuth 凭据路径（access_token + Codex 端点）。
+	// 其余账号（APIKey/cursor/CodeBuddy/devin 等）继续走下方原有路径，逐字不变。
+	if isOpenAIOAuthProbeAccount(acc) {
+		return p.probeOpenAIOAuthDataPlane(ctx, acc, model)
+	}
 	apiKey := strings.TrimSpace(acc.GetOpenAIProtocolAPIKey())
 	if apiKey == "" {
 		// 无可用凭据属配置错误，降级到到期恢复（既有 degraded 语义），不伪造失败。
@@ -1508,6 +1515,53 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolFo
 
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
 	return evaluateProbeDataPlaneResponse(resp.StatusCode, raw, useResponses), nil
+}
+
+// probeOpenAIOAuthDataPlane 对 OpenAI OAuth/SetupToken 订阅号做真实数据面探测。
+//
+// 与 APIKey 路径的差异只在凭据与端点：用 access_token（影子账号取母账号凭据）+
+// 转发侧 chatgptCodexURL 的 Codex /responses 流式端点。发送路径（DoWithTLS +
+// acc.Proxy + tlsProfile + accountHealthProbeDataPlaneTimeout）与响应读取上限均沿用
+// 本服务既有数据面探测，逐字同源，不新造传输逻辑。
+//
+// 配置类错误（无 model、凭据/影子解析失败）按既有 degraded 语义返回 error（到期
+// 恢复，不伪造失败）；传输失败按「不可达即不健康」返回 (false, nil)，保持停调。
+func (p *AccountHealthRecoveryProbeService) probeOpenAIOAuthDataPlane(ctx context.Context, acc *Account, model string) (bool, error) {
+	// 模型选取：调用方显式传入的 model 优先（模型级限流恢复通道据此探活具体 model，避免被
+	// "另一个模型"的探活误清）；否则用熔断 state 记录的触发模型；再否则从账号
+	// model_mapping 里挑一个上游真实存在的模型（见 selectOpenAIOAuthProbeModel）。
+	//
+	// 这里不再回落 openai.DefaultTestModel（= "gpt-5.4"）：Codex 上游不支持该模型，用它探测
+	// 恒得 400 model-not-found ⇒ 账号恒判不健康 ⇒ 永远卡在"探测中，无法自动回池"。
+	model = selectOpenAIOAuthProbeModel(acc, model)
+	if model == "" {
+		return false, errors.New("probe account has no model to probe")
+	}
+	req, err := buildOpenAIOAuthProbeRequest(ctx, p.accountRepo, acc, model)
+	if err != nil {
+		return false, err
+	}
+
+	proxyURL := ""
+	if acc.ProxyID != nil && acc.Proxy != nil {
+		proxyURL = acc.Proxy.URL()
+	}
+	var tlsProfile *tlsfingerprint.Profile
+	if p.tlsFPProfileService != nil {
+		tlsProfile = p.tlsFPProfileService.ResolveTLSProfile(acc)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, accountHealthProbeDataPlaneTimeout)
+	defer cancel()
+	resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
+	if err != nil {
+		// 传输失败与既有数据面探测同语义：上游不可达即不健康，保持停调（非降级）。
+		return false, nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
+	return probeOpenAIOAuthResponseOK(resp.StatusCode, raw), nil
 }
 
 // probeModelForAccount 取探测模型：熔断 state 记录的 Model 优先，其次平台默认测试模型，
