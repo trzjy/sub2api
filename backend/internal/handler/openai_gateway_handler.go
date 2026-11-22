@@ -4514,6 +4514,8 @@ func (h *OpenAIGatewayHandler) mapUpstreamError(statusCode int) (int, string, st
 		return http.StatusTooManyRequests, "rate_limit_error", infraerrors.UpstreamRateLimited
 	case 529:
 		return http.StatusServiceUnavailable, "upstream_error", infraerrors.UpstreamOverloaded
+	case http.StatusNotFound:
+		return http.StatusNotFound, "model_not_found", infraerrors.UpstreamModelNotFound
 	case 500, 502, 503, 504:
 		return http.StatusBadGateway, "upstream_error", infraerrors.UpstreamUnavailable
 	default:

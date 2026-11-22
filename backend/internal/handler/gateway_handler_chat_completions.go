@@ -711,7 +711,11 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 		h.chatCompletionsErrorResponse(c, status, "server_error", lastErr.ClientMessage)
 		return
 	}
-	h.chatCompletionsErrorResponse(c, statusCode, "server_error", infraerrors.AllAccountsExhausted)
+	finalMessage := infraerrors.AllAccountsExhausted
+	if statusCode == http.StatusNotFound {
+		finalMessage = infraerrors.UpstreamModelNotFound
+	}
+	h.chatCompletionsErrorResponse(c, statusCode, "server_error", finalMessage)
 }
 
 // writeCCCursorUserError 在 Cursor 账号的 Execute 错误上按 service.CursorUserFacingError

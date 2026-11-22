@@ -2429,6 +2429,9 @@ func (h *GatewayHandler) mapUpstreamError(statusCode int) (int, string, string) 
 		return http.StatusTooManyRequests, "rate_limit_error", pkgerrors.UpstreamRateLimited
 	case 529:
 		return http.StatusServiceUnavailable, "overloaded_error", pkgerrors.UpstreamOverloaded
+	case http.StatusNotFound:
+		// 2026-11-22 用户裁定：上游明确说没有该模型时如实返回 404，不做摘映射/冷却改写。
+		return http.StatusNotFound, "model_not_found", pkgerrors.UpstreamModelNotFound
 	case 500, 502, 503, 504:
 		return http.StatusBadGateway, "upstream_error", pkgerrors.UpstreamUnavailable
 	default:

@@ -50,9 +50,9 @@ const (
 	PlatformMonthlyQuota      = "该平台本月用量配额已用完，请稍后重试或联系管理员提升配额"
 	// 订阅口径的日/周/月使用额度上限（写入订阅哨兵错误稳定 code 不变，仅换 message）。
 	// 与平台口径的 Platform*Quota 区分锚点：本族锚点为订阅自身用量窗口耗尽。
-	SubscriptionDailyLimit    = "当前订阅今日使用额度已达上限，请明日重试"
-	SubscriptionWeeklyLimit   = "当前订阅本周使用额度已达上限，请下周重试"
-	SubscriptionMonthlyLimit  = "当前订阅本月使用额度已达上限，请下月重试"
+	SubscriptionDailyLimit   = "当前订阅今日使用额度已达上限，请明日重试"
+	SubscriptionWeeklyLimit  = "当前订阅本周使用额度已达上限，请下周重试"
+	SubscriptionMonthlyLimit = "当前订阅本月使用额度已达上限，请下月重试"
 
 	// 并发/排队。
 	GatewayQueueFull    = "当前排队请求已满，请稍后重试"
@@ -79,6 +79,9 @@ const (
 	// 分组内有账号但无模型支持时的专属文案（上游 v0.2.18 引入 HasRetiredSubscriptionModel
 	// 判定；本仓库按二期中文化口径落中文）。责任归属=上游渠道策略退役，动作=换模型或换上游。
 	ModelRetiredSubscription = "模型 %s 已从 Codex（ChatGPT 登录方式）上游退役，请改用可用的替代模型，或配置支持该模型的 API Key 上游"
+	// UpstreamModelNotFound 是上游明确返回 404/模型不存在且所有候选账号都不支持该模型时的
+	// 终态文案（2026-11-22 用户裁定：不摘映射、不造假，如实返回给客户端以便反馈）。
+	UpstreamModelNotFound = "上游账号均不支持所请求的模型，请确认模型名称或反馈管理员"
 
 	// WebSearchFailed 为网络搜索后端（grok native search 等）全链路失败后的下游占位文案，
 	// 替代原先直接拼接上游 err.Error() 的内部错误明细（裁项 2 全仓排查发现的一处泄漏）。
@@ -163,11 +166,11 @@ const (
 	ModelDiscoveryUnavailable = "模型列表服务暂不可用，请联系管理员"
 
 	// 请求校验（400 invalid_request_error 固定文案；err.Error() 详情直传点除外）。
-	RequestBodyReadFailed             = "读取请求体失败"
-	RequestBodyEmpty                  = "请求体为空"
-	RequestBodyParseFailed            = "请求体解析失败"
-	RequestBodyTooLargeFormat         = "请求体过大，上限为 %s"
-	ModelRequired                     = "缺少 model 字段"
+	RequestBodyReadFailed     = "读取请求体失败"
+	RequestBodyEmpty          = "请求体为空"
+	RequestBodyParseFailed    = "请求体解析失败"
+	RequestBodyTooLargeFormat = "请求体过大，上限为 %s"
+	ModelRequired             = "缺少 model 字段"
 	// ModelNotSupportedByComposite：CARD-01 保留的废弃别名（deprecated alias）。
 	// 历史调用方仍可能引用，故保留常量但不再新增引用；新文案统一走
 	// ModelNotInGroup。禁止删除，避免破坏既有引用方编译。
