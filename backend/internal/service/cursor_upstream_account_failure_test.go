@@ -295,7 +295,9 @@ func TestTempUnscheduleCursorUpstreamFailureSingleFailureCooldown(t *testing.T) 
 		require.Equal(t, 1, repo.calls)
 		require.WithinDuration(t, before.Add(cursorUpstreamFailureCooldown), repo.until, 5*time.Second,
 			"单体故障的冷却窗口必须是 5 分钟")
-		require.Equal(t, "cursor upstream account failure (auto temp-unschedule 5m)", repo.reason)
+		// 统一后写入的是 transport 结构化 reasonJSON，原 reason 文本在 error_message 内。
+		require.Contains(t, repo.reason, "cursor upstream account failure (auto temp-unschedule 5m)")
+		require.Equal(t, recoveryModeUnavailable, repo.mode)
 	})
 }
 
@@ -312,7 +314,9 @@ func TestTempUnscheduleCursorUpstreamFailureProtocolPollutionCooldown(t *testing
 		require.Equal(t, 1, repo.calls)
 		require.WithinDuration(t, before.Add(cursorUpstreamFailureCooldown), repo.until, 5*time.Second,
 			"协议污染路径的冷却窗口必须仍是 5 分钟")
-		require.Equal(t, "cursor upstream account failure (auto temp-unschedule 5m)", repo.reason)
+		// 统一后写入的是 transport 结构化 reasonJSON，原 reason 文本在 error_message 内。
+		require.Contains(t, repo.reason, "cursor upstream account failure (auto temp-unschedule 5m)")
+		require.Equal(t, recoveryModeUnavailable, repo.mode)
 	})
 
 	t.Run("协议污染入口 → 仍是 5 分钟 + 原 reason", func(t *testing.T) {
@@ -325,6 +329,8 @@ func TestTempUnscheduleCursorUpstreamFailureProtocolPollutionCooldown(t *testing
 		require.Equal(t, 1, repo.calls)
 		require.WithinDuration(t, before.Add(cursorUpstreamFailureCooldown), repo.until, 5*time.Second,
 			"协议污染路径的冷却窗口必须仍是 5 分钟")
-		require.Equal(t, "cursor upstream account failure (auto temp-unschedule 5m)", repo.reason)
+		// 统一后写入的是 transport 结构化 reasonJSON，原 reason 文本在 error_message 内。
+		require.Contains(t, repo.reason, "cursor upstream account failure (auto temp-unschedule 5m)")
+		require.Equal(t, recoveryModeUnavailable, repo.mode)
 	})
 }
