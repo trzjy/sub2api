@@ -122,9 +122,7 @@ func ModelProbeDue(acc *Account, scope, reason string, resetAt time.Time, precis
 	if acc == nil || !isModelProbeOwned(scope, map[string]any{"reason": reason}, acc) {
 		return false, time.Time{}
 	}
-	hasQuota := acc.BalanceProbeConfig().Enabled ||
-		acc.Platform == PlatformAntigravity ||
-		(acc.Platform == PlatformCursor && acc.QuotaKeyID != nil && *acc.QuotaKeyID > 0)
+	hasQuota := accountHasQuotaEntrance(acc)
 	switch {
 	case hasQuota && precise:
 		return true, resetAt
