@@ -11,6 +11,8 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	gocache "github.com/patrickmn/go-cache"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 )
 
@@ -22,8 +24,7 @@ const (
 	contextWarnBand4     = 850000
 	contextWarnDropFloor = 600000
 
-	contextWarnWatermarkTTL = 30 * time.Minute
-	contextWarnThrottleTTL  = 10 * time.Minute
+	contextWarnThrottleTTL = 10 * time.Minute
 )
 
 // 进程内的水位与抑制状态。水位与抑制共用同一 cache，但 key 前缀不同。
@@ -83,7 +84,8 @@ func DecideContextWarning(ctx context.Context, sessionHash string, accountID int
 	if accountID != 0 {
 		contextWarnCache.Set(thrKey, true, contextWarnThrottleTTL)
 	}
-	contextWarnCache.Set(wmKey, band, contextWarnWatermarkTTL)
+	// 水位永不过期：只由"上下文回落到 600000 以下"清除，保证同会话同档只提醒一次。
+	contextWarnCache.Set(wmKey, band, gocache.NoExpiration)
 
 	logger.FromContext(ctx).Info("gateway.context_warning",
 		zap.Int64("account_id", accountID),
@@ -130,34 +132,29 @@ func BuildContextWarningSSE(text string) string {
 		`data: {"type":"content_block_stop","index":0}` + "\n\n"
 }
 
-// ShiftContentBlockIndex 将 content_block 类 data 行的 index 加一后重编码。
-// 非 data 行、type 不匹配或解析失败时原样返回。
+// ShiftContentBlockIndex 将 content_block 类 data 行的顶层 index 加一。
+// 仅修改 index 字段，载荷其余字节原样保留（避免整体解码导致大整数精度丢失）。
+// 非 data 行、type 不匹配、缺少 index 或解析失败时原样返回。
 func ShiftContentBlockIndex(line string) (string, bool) {
 	if !strings.HasPrefix(line, "data:") {
 		return line, false
 	}
 
 	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-	var obj map[string]interface{}
-	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
-		return line, false
-	}
-
-	typ, _ := obj["type"].(string)
+	typ := gjson.Get(payload, "type").String()
 	if typ != "content_block_start" && typ != "content_block_delta" && typ != "content_block_stop" {
 		return line, false
 	}
-	idx, ok := obj["index"].(float64)
-	if !ok {
+	indexResult := gjson.Get(payload, "index")
+	if !indexResult.Exists() {
 		return line, false
 	}
-	obj["index"] = int(idx) + 1
 
-	newPayload, err := json.Marshal(obj)
+	newPayload, err := sjson.Set(payload, "index", indexResult.Int()+1)
 	if err != nil {
 		return line, false
 	}
-	return "data: " + string(newPayload), true
+	return "data: " + newPayload, true
 }
 
 // PrependContextWarningToJSON 在 {"content":[...]} 的数组头部插入一个 text block，

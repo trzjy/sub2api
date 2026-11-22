@@ -133,3 +133,32 @@ func TestContextWarnGenericShiftBlock(t *testing.T) {
 		}
 	}
 }
+
+func TestContextWarnKeepaliveIndex(t *testing.T) {
+	// 未注入（无 state 或 needShift 为 false）时返回原索引。
+	if got := contextWarnKeepaliveIndex(3, nil); got != 3 {
+		t.Fatalf("nil state: got %d, want 3", got)
+	}
+	stNoInjection := newContextWarnStreamState("sess-generic-keepalive-noinj", 0)
+	if got := contextWarnKeepaliveIndex(2, stNoInjection); got != 2 {
+		t.Fatalf("no injection: got %d, want 2", got)
+	}
+
+	// observeUsage 命中（800000）后 takeInjection，needShift 为 true，索引 +1。
+	ctxWarnGenericResetState(t)
+	ctx := ctxWarnGenericContext()
+	st := newContextWarnStreamState("sess-generic-keepalive-hit", 0)
+	st.observeUsage(ctx, &ClaudeUsage{InputTokens: 800000})
+	if inj := st.takeInjection(); inj == "" {
+		t.Fatal("expected injection after 800000 usage")
+	}
+	if !st.needShift() {
+		t.Fatal("needShift must be true after injection")
+	}
+	if got := contextWarnKeepaliveIndex(0, st); got != 1 {
+		t.Fatalf("shifted index 0: got %d, want 1", got)
+	}
+	if got := contextWarnKeepaliveIndex(5, st); got != 6 {
+		t.Fatalf("shifted index 5: got %d, want 6", got)
+	}
+}

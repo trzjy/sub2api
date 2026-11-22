@@ -82,6 +82,14 @@ func buildClaudeCodeNoopDeltaKeepalive(index int, deltaType string) (string, boo
 	return fmt.Sprintf("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"%s\",\"%s\":\"\"}}\n\n", index, deltaType, fieldName), true
 }
 
+// contextWarnKeepaliveIndex 返回保活事件应使用的块索引：注入提醒后上游块整体 +1。
+func contextWarnKeepaliveIndex(idx int, st *contextWarnStreamState) int {
+	if st != nil && st.needShift() {
+		return idx + 1
+	}
+	return idx
+}
+
 func sseEventIndex(event map[string]any) (int, bool) {
 	switch v := event["index"].(type) {
 	case float64:
@@ -1175,7 +1183,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			}
 			keepaliveBlock := "event: ping\ndata: {\"type\": \"ping\"}\n\n"
 			if useNoopDeltaKeepalive && noopDeltaKeepaliveBlockIndex >= 0 {
-				if block, ok := buildClaudeCodeNoopDeltaKeepalive(noopDeltaKeepaliveBlockIndex, noopDeltaKeepaliveDeltaType); ok {
+				if block, ok := buildClaudeCodeNoopDeltaKeepalive(contextWarnKeepaliveIndex(noopDeltaKeepaliveBlockIndex, warnState), noopDeltaKeepaliveDeltaType); ok {
 					keepaliveBlock = block
 				}
 			}

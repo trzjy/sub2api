@@ -247,3 +247,60 @@ func TestPrependContextWarningToJSON(t *testing.T) {
 		t.Fatal("want error for invalid json")
 	}
 }
+
+func TestContextWarnWatermarkNoExpiration(t *testing.T) {
+	resetContextWarnState(t)
+	ctx := testWarnContext()
+	const sess = "sess-wm-forever"
+
+	if got := DecideContextWarning(ctx, sess, 0, 800000); got.Band != contextWarnBand3 {
+		t.Fatalf("initial: want band3, got %+v", got)
+	}
+
+	wmKey := "wm:" + sess
+	item, ok := contextWarnCache.Items()[wmKey]
+	if !ok {
+		t.Fatalf("watermark key %q missing", wmKey)
+	}
+	// go-cache v2.1.0: Set(..., gocache.NoExpiration) 落库为 Item.Expiration==0，
+	// 这正是 go-cache 表示"永不过期"的标记（item.Expired() 恒为 false）。
+	if item.Expiration != 0 {
+		t.Fatalf("watermark Expiration=%d, want 0 (gocache.NoExpiration)", item.Expiration)
+	}
+	if item.Expired() {
+		t.Fatal("watermark item must never expire")
+	}
+	if v, _ := item.Object.(int); v != contextWarnBand3 {
+		t.Fatalf("watermark value=%v, want band3", v)
+	}
+}
+
+func TestShiftContentBlockIndexPreservesPayload(t *testing.T) {
+	const bigInt = "9007199254740993" // 2^53+1，经 float64 会丢精度
+	in := `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","n":` + bigInt + `}}`
+
+	out, ok := ShiftContentBlockIndex(in)
+	if !ok {
+		t.Fatalf("want shifted=true, out=%q", out)
+	}
+	if !strings.HasPrefix(out, "data: ") {
+		t.Fatalf("lost prefix: %q", out)
+	}
+
+	payload := strings.TrimPrefix(out, "data: ")
+	var obj struct {
+		Index int `json:"index"`
+	}
+	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+		t.Fatalf("bad json: %v, out=%q", err, out)
+	}
+	if obj.Index != 1 {
+		t.Fatalf("index=%d, want 1; out=%q", obj.Index, out)
+	}
+	if !strings.Contains(out, bigInt) {
+		t.Fatalf("big integer not preserved byte-for-byte:\n got: %q\nwant to contain: %q", out, bigInt)
+	}
+	if !strings.Contains(payload, `"n":`+bigInt) {
+		t.Fatalf("n field changed: %q", payload)
+	}
+}
