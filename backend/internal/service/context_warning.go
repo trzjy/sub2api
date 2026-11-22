@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -177,6 +178,57 @@ func PrependContextWarningToJSON(body []byte, text string) ([]byte, error) {
 		return nil, err
 	}
 	content = append([]json.RawMessage{warning}, content...)
+
+	newContent, err := json.Marshal(content)
+	if err != nil {
+		return nil, err
+	}
+	obj["content"] = newContent
+
+	return json.Marshal(obj)
+}
+
+// BuildContextWarningSSEAt 与 BuildContextWarningSSE 同形，但使用入参 index 作为块索引，
+// 便于在流结尾按实际 content block 数量追加提醒。三个事件均以空行结尾。
+func BuildContextWarningSSEAt(index int, text string) string {
+	textJSON, _ := json.Marshal(text)
+	idx := strconv.Itoa(index)
+	return "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":` + idx + `,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":` + idx + `,"delta":{"type":"text_delta","text":` + string(textJSON) + `}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":` + idx + `}` + "\n\n"
+}
+
+// errToolUsePresent 表示 content 中存在 tool_use 块；调用方据此跳过提醒注入且不推进水位。
+var errToolUsePresent = errors.New("context warning: tool_use present in content")
+
+// AppendContextWarningToJSON 在 {"content":[...]} 的数组尾部追加一个 text block，
+// 其余字段保持原样。若任一元素为 tool_use，则返回原 body 与 errToolUsePresent。
+func AppendContextWarningToJSON(body []byte, text string) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, err
+	}
+
+	var content []json.RawMessage
+	if raw, ok := obj["content"]; ok {
+		if err := json.Unmarshal(raw, &content); err != nil {
+			return nil, err
+		}
+		for _, block := range content {
+			if gjson.GetBytes(block, "type").String() == "tool_use" {
+				return body, errToolUsePresent
+			}
+		}
+	}
+
+	warning, err := json.Marshal(map[string]string{"type": "text", "text": text})
+	if err != nil {
+		return nil, err
+	}
+	content = append(content, warning)
 
 	newContent, err := json.Marshal(content)
 	if err != nil {

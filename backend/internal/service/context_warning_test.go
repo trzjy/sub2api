@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -163,6 +164,91 @@ func TestBuildContextWarningSSE(t *testing.T) {
 	}
 	if n := strings.Count(out, "\n\n"); n != 3 {
 		t.Fatalf("want 3 event terminators, got %d", n)
+	}
+}
+
+func TestBuildContextWarningSSEAt(t *testing.T) {
+	text := "⚠️ 上下文 \"已达\" 85 万\n第二行"
+	out := BuildContextWarningSSEAt(3, text)
+
+	textJSON, _ := json.Marshal(text)
+	want := "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":` + string(textJSON) + `}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":3}` + "\n\n"
+	if out != want {
+		t.Fatalf("SSE mismatch:\n got: %q\nwant: %q", out, want)
+	}
+	if n := strings.Count(out, "\n\n"); n != 3 {
+		t.Fatalf("want 3 event terminators, got %d", n)
+	}
+	if n := strings.Count(out, `"index":3`); n != 3 {
+		t.Fatalf("want 3 events with index=3, got %d", n)
+	}
+	// 文本经 json.Marshal 转义：换行与引号不得原样出现在 data 行里。
+	if strings.Contains(out, "\n第二行") || !strings.Contains(out, `\n第二行`) {
+		t.Fatalf("text not escaped correctly: %q", out)
+	}
+	if !strings.Contains(out, `\"已达\"`) {
+		t.Fatalf("quotes not escaped correctly: %q", out)
+	}
+}
+
+func TestAppendContextWarningToJSON(t *testing.T) {
+	warnText := "⚠️ 提醒 \"85\" 万"
+	body := []byte(`{"model":"x","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}],"stream":true}`)
+	out, err := AppendContextWarningToJSON(body, warnText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	var content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(obj["content"], &content); err != nil {
+		t.Fatal(err)
+	}
+	if len(content) != 3 {
+		t.Fatalf("want 3 content blocks, got %d: %s", len(content), out)
+	}
+	if content[0].Text != "first" || content[1].Text != "second" {
+		t.Fatalf("existing blocks order changed: %+v", content)
+	}
+	if content[2].Type != "text" || content[2].Text != warnText {
+		t.Fatalf("warning block wrong (want tail): %+v", content[2])
+	}
+
+	var model string
+	if err := json.Unmarshal(obj["model"], &model); err != nil || model != "x" {
+		t.Fatalf("model lost: %q err=%v body=%s", model, err, out)
+	}
+	var stream bool
+	if err := json.Unmarshal(obj["stream"], &stream); err != nil || !stream {
+		t.Fatalf("stream lost: %v err=%v body=%s", stream, err, out)
+	}
+
+	// 含 tool_use：返回可判定错误且 body 原样不变。
+	toolBody := []byte(`{"content":[{"type":"text","text":"hi"},{"type":"tool_use","name":"t"}]}`)
+	got, err := AppendContextWarningToJSON(toolBody, warnText)
+	if err == nil {
+		t.Fatal("want error for tool_use content")
+	}
+	if !errors.Is(err, errToolUsePresent) {
+		t.Fatalf("want errToolUsePresent, got %v", err)
+	}
+	if string(got) != string(toolBody) {
+		t.Fatalf("body must be unchanged on tool_use:\n got: %s\nwant: %s", got, toolBody)
+	}
+
+	if _, err := AppendContextWarningToJSON([]byte("not-json"), "x"); err == nil {
+		t.Fatal("want error for invalid json")
 	}
 }
 
