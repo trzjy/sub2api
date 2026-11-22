@@ -35,6 +35,14 @@ const accountHealthProbeCandidateLimit = 200
 // 探测仍设硬上限 20。
 const devinProbeMaxCandidates = 20
 
+// openAIOAuthProbeMaxCandidates 是单次 OpenAI OAuth 账号探测尝试的候选模型上限。
+//
+// 与 devinProbeMaxCandidates 同型（探测侧硬上限，名单更长时只试字典序前 N 个），但
+// OAuth/Codex 上游更贵：每个候选探测都是一次真实的 ChatGPT 订阅出站请求（还带 Codex
+// 鉴权头与 SSE 流式响应）。故取 5：足以覆盖「管理员维护的名单里靠前的模型被上游禁掉、
+// 后面还有可用模型」这一主要形态，又不至于把单账号探测拖成分钟级。
+const openAIOAuthProbeMaxCandidates = 5
+
 // accountRecoveryDevinMarkerBudget 是 marker sweep 在单账号锁临界区内跑 Devin 探针的
 // 串行预算：最多约 20 个模型 × 每个约 20s ≈ 400s。账号锁必须覆盖完整单账号临界区，
 // 故 TTL 至少取本预算 + 30s 余量，避免探针仍在跑时锁提前过期导致临界区重叠。
@@ -1524,22 +1532,33 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolFo
 // acc.Proxy + tlsProfile + accountHealthProbeDataPlaneTimeout）与响应读取上限均沿用
 // 本服务既有数据面探测，逐字同源，不新造传输逻辑。
 //
-// 配置类错误（无 model、凭据/影子解析失败）按既有 degraded 语义返回 error（到期
-// 恢复，不伪造失败）；传输失败按「不可达即不健康」返回 (false, nil)，保持停调。
+// 候选回退（OAUTH-PROBE-CANDIDATE-FALLBACK）：管理员随时维护账号模型名单
+// （credentials.model_mapping），名单里靠前的模型随时可能被上游禁掉（400
+// model_not_found / 403 forbidden）。只押一个模型 ⇒ 探针恒失败 ⇒ 账号永远回不了池。
+// 故按候选列表（openAIOAuthProbeCandidates，字典序可复现）逐个试：
+//   - **模型级失败**（上游只拒绝这个模型：HTTP 400/403/404，或响应体含模型级拒绝
+//     文案）⇒ 换下一个候选继续试（与 devin 恢复探针同思路）；
+//   - **账号级失败**（HTTP 401/429/5xx、传输错误、配置类错误）⇒ 换模型也没用 ⇒
+//     立即结束，不再试其它候选。
+//
+// 配置类错误（无 model、凭据/影子解析失败、请求构造失败）按既有 degraded 语义返回 error
+// （到期恢复，不伪造失败）；传输失败与上游拒绝按「不可达即不健康」返回 (false, nil)，
+// 保持停调（非降级）。
 func (p *AccountHealthRecoveryProbeService) probeOpenAIOAuthDataPlane(ctx context.Context, acc *Account, model string) (bool, error) {
-	// 模型选取：调用方显式传入的 model 优先（模型级限流恢复通道据此探活具体 model，避免被
-	// "另一个模型"的探活误清）；否则用熔断 state 记录的触发模型；再否则从账号
-	// model_mapping 里挑一个上游真实存在的模型（见 selectOpenAIOAuthProbeModel）。
+	// 候选列表：调用方显式传入的 model 优先（模型级限流恢复通道据此探活具体 model，避免被
+	// "另一个模型"的探活误清）；其次熔断 state 记录的触发模型；再否则取管理员维护的账号
+	// model_mapping 解析出的全部候选（见 openAIOAuthProbeCandidates）。
 	//
 	// 这里不再回落 openai.DefaultTestModel（= "gpt-5.4"）：Codex 上游不支持该模型，用它探测
 	// 恒得 400 model-not-found ⇒ 账号恒判不健康 ⇒ 永远卡在"探测中，无法自动回池"。
-	model = selectOpenAIOAuthProbeModel(acc, model)
-	if model == "" {
+	candidates := openAIOAuthProbeCandidates(acc, model)
+	if len(candidates) == 0 {
 		return false, errors.New("probe account has no model to probe")
 	}
-	req, err := buildOpenAIOAuthProbeRequest(ctx, p.accountRepo, acc, model)
-	if err != nil {
-		return false, err
+	// 候选上限：OAuth/Codex 上游每个候选都是一次真实订阅出站请求（比 devin 贵），按字典序
+	// 取前 openAIOAuthProbeMaxCandidates 个试（名单里更靠后的模型本轮轮不到）。
+	if len(candidates) > openAIOAuthProbeMaxCandidates {
+		candidates = candidates[:openAIOAuthProbeMaxCandidates]
 	}
 
 	proxyURL := ""
@@ -1551,17 +1570,49 @@ func (p *AccountHealthRecoveryProbeService) probeOpenAIOAuthDataPlane(ctx contex
 		tlsProfile = p.tlsFPProfileService.ResolveTLSProfile(acc)
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, accountHealthProbeDataPlaneTimeout)
-	defer cancel()
-	resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
-	if err != nil {
-		// 传输失败与既有数据面探测同语义：上游不可达即不健康，保持停调（非降级）。
-		return false, nil
-	}
-	defer func() { _ = resp.Body.Close() }()
+	var lastReason string
+	attempted := 0
+	for _, candidate := range candidates {
+		attempted++
+		// 请求构造失败属于配置类错误（凭据缺失 / 影子解析失败 / 构造失败）：换模型也没用 ⇒
+		// 不试下一个候选，走既有 degraded 语义（返回 error ⇒ 到期恢复，不伪造失败）。
+		req, err := buildOpenAIOAuthProbeRequest(ctx, p.accountRepo, acc, candidate)
+		if err != nil {
+			return false, err
+		}
 
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
-	return probeOpenAIOAuthResponseOK(resp.StatusCode, raw), nil
+		callCtx, cancel := context.WithTimeout(ctx, accountHealthProbeDataPlaneTimeout)
+		resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
+		if err != nil {
+			cancel()
+			// 传输失败与既有数据面探测同语义：上游不可达即不健康，保持停调（非降级）。
+			// 传输错误是账号级失败（换模型也没用）⇒ 不再试其它候选。
+			return false, nil
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
+		_ = resp.Body.Close()
+		cancel()
+
+		if probeOpenAIOAuthResponseOK(resp.StatusCode, raw) {
+			return true, nil
+		}
+
+		lastReason = fmt.Sprintf("model %q: status %d", candidate, resp.StatusCode)
+		if classifyOpenAIOAuthProbeFailure(resp.StatusCode, raw) != openAIOAuthProbeFailureModelLevel {
+			// 账号级失败（401/429/5xx 等）⇒ 换模型也没用 ⇒ 立即结束，保持停调。
+			return false, nil
+		}
+		// 模型级失败（上游禁掉了这个模型）⇒ 换下一个候选继续试。
+	}
+
+	// 全部候选都失败 ⇒ 保持停调（不伪造成功），并带上尝试过的候选数与最后一个失败原因
+	// （与 devin 恢复探针同口径）。
+	logger.L().Warn("openai.apikey_health_probe_oauth_candidates_failed",
+		zap.Int64("account_id", acc.ID),
+		zap.Int("candidates", attempted),
+		zap.String("last_failure", lastReason),
+	)
+	return false, nil
 }
 
 // probeModelForAccount 取探测模型：熔断 state 记录的 Model 优先，其次平台默认测试模型，

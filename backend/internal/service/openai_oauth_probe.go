@@ -45,7 +45,8 @@ func isOpenAIOAuthProbeAccount(acc *Account) bool {
 //     **刻意不做任何基于模型名形态的猜测性过滤**：名单里非 `gpt-` 命名的模型
 //     （如 codex-auto-review 一类管理员自定义模型）同样是管理员认定可服务的上游模型，
 //     按名字丢弃它会把「明明有可用模型」变成「无模型可探」⇒ 账号永远回不了池。
-//     命中多个候选时按字典序取首个以保证可复现（与 selectResponsesProbeModel 同口径）。
+//     命中多个候选时按字典序取首个以保证可复现（与 selectResponsesProbeModel 同口径）；
+//     **要逐个试其它候选**请用 openAIOAuthProbeCandidates（探测侧用它回退）。
 //  4. 仍无候选 → 返回空串，由调用方按既有 degraded 语义处理（"no model to probe"
 //     ⇒ 到期恢复，不伪造失败）。
 //
@@ -72,26 +73,118 @@ func isOpenAIOAuthProbeAccount(acc *Account) bool {
 // 非 OpenAI OAuth/SetupToken 账号（isOpenAIOAuthProbeAccount 为假）返回空串：调用方按
 // 无模型处理，不得借此放宽 OAuth 分流谓词。
 func selectOpenAIOAuthProbeModel(acc *Account, explicitModel string) string {
+	// 「选一个」语义 = 候选列表的首个（候选列表已按字典序排好 ⇒ 取首个即可复现）。
+	return pickOpenAIOAuthProbeCandidate(openAIOAuthProbeCandidates(acc, explicitModel))
+}
+
+// openAIOAuthProbeFailureKind 分类一次候选模型探测失败的性质。
+type openAIOAuthProbeFailureKind int
+
+const (
+	// openAIOAuthProbeFailureModelLevel 表示失败只针对被探测的那个模型（上游禁掉了它），
+	// 换一个模型可能成功 ⇒ 探测侧继续试下一个候选。
+	openAIOAuthProbeFailureModelLevel openAIOAuthProbeFailureKind = iota
+	// openAIOAuthProbeFailureAccountLevel 表示失败与具体模型无关（凭据/限流/上游故障），
+	// 换模型也没用 ⇒ 探测侧立即结束，不再试其它候选。
+	openAIOAuthProbeFailureAccountLevel
+)
+
+// openAIOAuthProbeModelRejectionMarkers 是「模型级拒绝」的响应体文案特征（归一化后
+// 比较：站内既有 normalizeModelNotFoundBody 把 "_"/"-" 折成空格并小写，故
+// "model_not_found" 与 "model not found" 两种写法都命中）。
+//
+// 站内既有口径（复用，不新造）：Codex 上游对不可用模型回 400
+// model_not_found / "The 'x' model is not supported when using Codex with a ChatGPT
+// account."（见 openAICodexPlanGatedModelPhrase 与 model_not_found_error.go 的
+// normalizeModelNotFoundBody），devin 恢复探针则按 403 forbidden / "Request not
+// allowed" 判模型级拒绝（见 account_health_recovery_probe_service.go 的
+// probeDevinUpstream）。
+var openAIOAuthProbeModelRejectionMarkers = []string{
+	"model not found",
+	"not supported",
+	"forbidden",
+	"not allowed",
+}
+
+// classifyOpenAIOAuthProbeFailure 判定一次候选探测失败是模型级还是账号级。
+//
+// 模型级（换模型可能成功 ⇒ 继续试下一个候选）：
+//   - HTTP 400（含 model_not_found）、403、404：上游对「这个模型」的拒绝；
+//   - 响应体含模型级拒绝文案（model_not_found / not supported / forbidden /
+//     not allowed）：覆盖 2xx 携带 error 帧、以及其它状态码（如 422）的形态。
+//
+// 账号级（换模型也没用 ⇒ 立即结束）：
+//   - HTTP 401（OAuth 凭据失效）、429（限流/额度）、5xx（上游故障）；
+//   - 其余未命中模型级特征的失败（含 2xx 但终态不健康：空 completed 帧、无终态帧）。
+//
+// 状态码优先于文案：401/429/5xx 一律账号级（凭据/额度/上游故障换个模型同样失败）。
+func classifyOpenAIOAuthProbeFailure(status int, body []byte) openAIOAuthProbeFailureKind {
+	switch status {
+	case http.StatusUnauthorized, http.StatusTooManyRequests:
+		return openAIOAuthProbeFailureAccountLevel
+	}
+	if status >= http.StatusInternalServerError {
+		return openAIOAuthProbeFailureAccountLevel
+	}
+	switch status {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound:
+		return openAIOAuthProbeFailureModelLevel
+	}
+	// 其余状态码（2xx 携带 error 帧、422 等）：看响应体有没有模型级拒绝文案。
+	if openAIOAuthProbeBodyHasModelRejection(body) {
+		return openAIOAuthProbeFailureModelLevel
+	}
+	return openAIOAuthProbeFailureAccountLevel
+}
+
+// openAIOAuthProbeBodyHasModelRejection 判断响应体是否含模型级拒绝文案。
+func openAIOAuthProbeBodyHasModelRejection(body []byte) bool {
+	normalized := normalizeModelNotFoundBody(body)
+	if normalized == "" {
+		return false
+	}
+	for _, marker := range openAIOAuthProbeModelRejectionMarkers {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// openAIOAuthProbeCandidates 返回 OpenAI OAuth/SetupToken 订阅号恢复探针要试的**全部**
+// 候选模型（顺序确定：字典序 ⇒ 可复现）。
+//
+// 候选来源与 selectOpenAIOAuthProbeModel 完全同源（同一份口径、同一处注释）：
+//  1. explicitModel 非空 ⇒ 候选列表只有它一个（显式模型优先，不回退到名单）。
+//  2. 否则熔断 state 记录的模型非空 ⇒ 候选列表只有它一个（它就是真实故障面）。
+//  3. 否则 ⇒ 管理员维护的账号模型名单（credentials.model_mapping）解析出的全部候选，
+//     按字典序排好（候选收集处已排除物理上不可探的取值：解析不到/为空、含 `*` 通配符、
+//     图片/媒体模型；**不做任何按模型名形态的过滤**）。
+//
+// 探针侧（probeOpenAIOAuthDataPlane）拿它逐个试：模型级失败（上游禁掉这个模型）才换
+// 下一个候选；账号级失败（凭据/限流/上游故障）立即结束。上限由
+// openAIOAuthProbeMaxCandidates 约束（探测侧截断，不在此处截断：本函数的口径是
+// 「管理员维护的名单解析出的全部候选」）。
+//
+// 非 OpenAI OAuth/SetupToken 账号返回空切片（调用方按无模型处理，不得借此放宽
+// OAuth 分流谓词）。
+func openAIOAuthProbeCandidates(acc *Account, explicitModel string) []string {
 	if acc == nil || !isOpenAIOAuthProbeAccount(acc) {
-		return ""
+		return nil
 	}
 	if m := strings.TrimSpace(explicitModel); m != "" {
-		return m
+		return []string{m}
 	}
 	if state, ok := parseHealthBreakerState(acc.TempUnschedulableReason); ok && state != nil {
 		if m := strings.TrimSpace(state.Model); m != "" {
-			return m
+			return []string{m}
 		}
 	}
-
-	// 3) 管理员维护的账号模型名单（credentials.model_mapping）解析出的上游真名。
-	if model := pickOpenAIOAuthProbeCandidate(openAIOAuthProbeMappingCandidates(acc)); model != "" {
-		return model
-	}
-	// 4) 无模型可探：返回空串，交调用方走既有 degraded 语义。
-	//    绝不使用 extra.upstream_model_metadata 快照兜底（快照 ≠ 上游实时目录，
-	//    可能含已下架模型，见本函数注释）。
-	return ""
+	// 管理员维护的账号模型名单解析出的全部候选（去重 + 排除物理上不可探的模型），
+	// 按字典序排好以保证候选顺序可复现。
+	candidates := openAIOAuthProbeMappingCandidates(acc)
+	sort.Strings(candidates)
+	return candidates
 }
 
 // openAIOAuthProbeMappingCandidates 收集管理员维护的账号模型名单

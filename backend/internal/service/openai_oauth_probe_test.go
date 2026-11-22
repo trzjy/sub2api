@@ -5,13 +5,20 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
+	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 // oauthProbeFakeRepo 只实现恢复探针的窄接口；GetByID 返回预置母账号，其余方法
@@ -515,5 +522,329 @@ func TestOpenAIOAuthProbeSelectModelNonOpenAIOAuthAccount(t *testing.T) {
 
 	if got := selectOpenAIOAuthProbeModel(acc, ""); got != "" {
 		t.Fatalf("selectOpenAIOAuthProbeModel = %q, want \"\" for a non-OpenAI OAuth account", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 候选列表（openAIOAuthProbeCandidates）：显式/熔断优先，其余取名单全部候选（字典序）
+// ---------------------------------------------------------------------------
+
+// TestOpenAIOAuthProbeCandidatesExplicitModelOnly 验证显式模型优先：候选列表只有它一个
+// （不回退到管理员名单），与 selectOpenAIOAuthProbeModel 的既有优先级一致。
+func TestOpenAIOAuthProbeCandidatesExplicitModelOnly(t *testing.T) {
+	acc := oauthProbeAccountWithMapping(map[string]any{
+		"client-alias-a": "gpt-6-astra",
+		"client-alias-b": "gpt-5.6-sol",
+	})
+
+	got := openAIOAuthProbeCandidates(acc, "gpt-6.1-sol")
+	require.Equal(t, []string{"gpt-6.1-sol"}, got,
+		"显式模型优先：候选列表只有它一个，不回退到管理员名单")
+}
+
+// TestOpenAIOAuthProbeCandidatesBreakerStateModelOnly 验证熔断 state 记录的触发模型优先：
+// 候选列表只有它一个（它就是真实故障面）。
+func TestOpenAIOAuthProbeCandidatesBreakerStateModelOnly(t *testing.T) {
+	acc := oauthProbeAccountWithMapping(map[string]any{
+		"client-alias-a": "gpt-6-astra",
+	})
+	acc.TempUnschedulableReason = `{"model":"gpt-6.1-sol"}`
+
+	got := openAIOAuthProbeCandidates(acc, "")
+	require.Equal(t, []string{"gpt-6.1-sol"}, got,
+		"熔断 state 模型优先：候选列表只有它一个")
+}
+
+// TestOpenAIOAuthProbeCandidatesReturnsWholeMappingSorted 验证既无显式模型、也无熔断 state
+// 模型时，候选列表 = 管理员维护的名单解析出的**全部**候选，按字典序排好（可复现）。
+//
+// 这一条是本卡的核心前提：探针必须能逐个试名单里的其它模型（而不是只押字典序首个）。
+func TestOpenAIOAuthProbeCandidatesReturnsWholeMappingSorted(t *testing.T) {
+	acc := oauthProbeAccountWithMapping(map[string]any{
+		"client-alias-a": "gpt-6-astra",
+		"client-alias-b": "gpt-5.6-sol",
+		"client-alias-c": "codex-auto-review",
+	})
+
+	got := openAIOAuthProbeCandidates(acc, "")
+	require.Equal(t, []string{"codex-auto-review", "gpt-5.6-sol", "gpt-6-astra"}, got,
+		"无显式/熔断模型时：候选列表必须是名单解析出的全部候选（字典序）")
+}
+
+// TestOpenAIOAuthProbeCandidatesEmptyWithoutMapping 验证无名单时候选列表为空（调用方按
+// 既有 degraded 语义处理「no model to probe」）。
+func TestOpenAIOAuthProbeCandidatesEmptyWithoutMapping(t *testing.T) {
+	acc := oauthProbeDirectAccount()
+	require.Empty(t, openAIOAuthProbeCandidates(acc, ""),
+		"无管理员名单时不得凭空造候选")
+}
+
+// ---------------------------------------------------------------------------
+// 探测侧逐个候选回退（probeOpenAIOAuthDataPlane）
+// ---------------------------------------------------------------------------
+
+// oauthProbeCompletedSSE 是 Codex /responses 的健康终态帧（真实输出 + usage）。
+const oauthProbeCompletedSSE = "event: response.completed\n" +
+	"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":11,\"output_tokens\":5,\"total_tokens\":16}}}\n\n" +
+	"data: [DONE]\n\n"
+
+// oauthProbeModelNotFoundBody 是上游对「这个模型不存在/不被支持」的回答（生产实证：
+// 400 model_not_found "The 'gpt-5.4' model is not supported when using Codex with a
+// ChatGPT account."）。
+const oauthProbeModelNotFoundBody = `{"error":{"message":"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.","type":"invalid_request_error","code":"model_not_found"}}`
+
+// oauthProbeScriptedUpstream 是「按顺序回放不同响应」的探测上游桩：第 n 个请求返回脚本
+// 里的第 n 个响应（脚本用尽后重复最后一个），并记录收到的请求体（供断言探针依次试了
+// 哪些上游模型、试了几次）。
+type oauthProbeScriptedUpstream struct {
+	serverURL string
+	client    *http.Client
+
+	mu       sync.Mutex
+	scripts  []oauthProbeScriptedResponse
+	requests []oauthProbeScriptedRequest
+}
+
+type oauthProbeScriptedResponse struct {
+	status int
+	body   string
+}
+
+type oauthProbeScriptedRequest struct {
+	path string
+	body string
+}
+
+func newOAuthProbeScriptedUpstream(t *testing.T, scripts ...oauthProbeScriptedResponse) *oauthProbeScriptedUpstream {
+	t.Helper()
+	stub := &oauthProbeScriptedUpstream{scripts: scripts}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		stub.mu.Lock()
+		index := len(stub.requests)
+		stub.requests = append(stub.requests, oauthProbeScriptedRequest{
+			path: r.URL.Path,
+			body: string(body),
+		})
+		stub.mu.Unlock()
+
+		script := stub.scripts[len(stub.scripts)-1]
+		if index < len(stub.scripts) {
+			script = stub.scripts[index]
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(script.status)
+		_, _ = w.Write([]byte(script.body))
+	}))
+	t.Cleanup(server.Close)
+	stub.serverURL = strings.TrimPrefix(server.URL, "http://")
+	stub.client = server.Client()
+	return stub
+}
+
+func (s *oauthProbeScriptedUpstream) Do(req *http.Request, proxyURL string, accountID int64, concurrency int) (*http.Response, error) {
+	return s.DoWithTLS(req, proxyURL, accountID, concurrency, nil)
+}
+
+func (s *oauthProbeScriptedUpstream) DoWithTLS(req *http.Request, _ string, _ int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	out := req.Clone(req.Context())
+	out.URL.Scheme = "http"
+	out.URL.Host = s.serverURL
+	out.RequestURI = ""
+	out.Close = true
+	return s.client.Do(out)
+}
+
+// requestCount 返回桩收到的请求数（探针实际发出的上游请求数）。
+func (s *oauthProbeScriptedUpstream) requestCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.requests)
+}
+
+// requestedModels 返回桩收到的请求里的上游模型名（按请求顺序）。
+func (s *oauthProbeScriptedUpstream) requestedModels() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	models := make([]string, 0, len(s.requests))
+	for _, req := range s.requests {
+		models = append(models, gjson.Get(req.body, "model").String())
+	}
+	return models
+}
+
+// oauthProbeFallbackAccount 造一个带管理员名单（键=值恒等映射）的 OAuth 号。
+func oauthProbeFallbackAccount(models ...string) *Account {
+	mapping := make(map[string]any, len(models))
+	for _, model := range models {
+		mapping[model] = model
+	}
+	acc := oauthProbeDirectAccount()
+	acc.Credentials["model_mapping"] = mapping
+	return acc
+}
+
+// TestOpenAIOAuthProbeFallsBackToNextCandidateOnModelRejection 是本卡**承重用例**：
+// 第一个候选被上游拒绝（400 model_not_found），第二个候选成功 ⇒ 探针必须判**健康**。
+//
+// 旧实现只试字典序首个候选 ⇒ 上游恒 400 model_not_found ⇒ 账号恒判不健康 ⇒ 永远卡在
+// 「探测中」，永远回不了池。
+func TestOpenAIOAuthProbeFallsBackToNextCandidateOnModelRejection(t *testing.T) {
+	acc := oauthProbeFallbackAccount("gpt-5.6-sol", "gpt-6-astra")
+	upstream := newOAuthProbeScriptedUpstream(t,
+		oauthProbeScriptedResponse{status: http.StatusBadRequest, body: oauthProbeModelNotFoundBody},
+		oauthProbeScriptedResponse{status: http.StatusOK, body: oauthProbeCompletedSSE},
+	)
+	p := &AccountHealthRecoveryProbeService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+		accountRepo:  &oauthProbeFakeRepo{},
+	}
+
+	ok, err := p.probeOpenAIOAuthDataPlane(context.Background(), acc, "")
+	require.NoError(t, err, "模型级拒绝不得走 degraded 语义")
+	require.True(t, ok, "第一个候选被模型级拒绝后必须换下一个候选并判健康（旧实现恒失败）")
+
+	require.Equal(t, 2, upstream.requestCount(), "必须恰好试两个候选（首个被拒 → 换第二个）")
+	require.Equal(t, []string{"gpt-5.6-sol", "gpt-6-astra"}, upstream.requestedModels(),
+		"必须按字典序依次试候选（换模型而不是重试同一个）")
+}
+
+// TestOpenAIOAuthProbeAccountLevelFailureStopsImmediately 验证账号级失败（401）立即结束：
+// 只发一次请求，不再试其它候选（换模型对凭据失效同样无效）。
+func TestOpenAIOAuthProbeAccountLevelFailureStopsImmediately(t *testing.T) {
+	acc := oauthProbeFallbackAccount("gpt-5.6-sol", "gpt-6-astra")
+	upstream := newOAuthProbeScriptedUpstream(t,
+		oauthProbeScriptedResponse{status: http.StatusUnauthorized, body: `{"error":{"message":"invalid token"}}`},
+	)
+	p := &AccountHealthRecoveryProbeService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+		accountRepo:  &oauthProbeFakeRepo{},
+	}
+
+	ok, err := p.probeOpenAIOAuthDataPlane(context.Background(), acc, "")
+	require.NoError(t, err, "401 是账号级失败，不是配置错误")
+	require.False(t, ok, "401 后不得判健康")
+	require.Equal(t, 1, upstream.requestCount(), "账号级失败必须立即结束（不得再试其它候选）")
+}
+
+// TestOpenAIOAuthProbeTransportErrorStopsImmediately 验证传输错误立即结束：只发一次请求。
+func TestOpenAIOAuthProbeTransportErrorStopsImmediately(t *testing.T) {
+	acc := oauthProbeFallbackAccount("gpt-5.6-sol", "gpt-6-astra")
+	p := &AccountHealthRecoveryProbeService{
+		cfg:          &config.Config{},
+		httpUpstream: &failingProbeUpstream{err: errors.New("dial tcp: connection refused")},
+		accountRepo:  &oauthProbeFakeRepo{},
+	}
+
+	ok, err := p.probeOpenAIOAuthDataPlane(context.Background(), acc, "")
+	require.NoError(t, err, "传输失败与既有数据面探测同语义：非降级")
+	require.False(t, ok, "传输失败不得判健康")
+}
+
+// TestOpenAIOAuthProbeAllCandidatesFailKeepsAccountUnhealthy 验证全部候选都失败时保持
+// 不健康（不伪造成功、不误清停调）。
+func TestOpenAIOAuthProbeAllCandidatesFailKeepsAccountUnhealthy(t *testing.T) {
+	acc := oauthProbeFallbackAccount("gpt-5.6-sol", "gpt-6-astra")
+	upstream := newOAuthProbeScriptedUpstream(t,
+		oauthProbeScriptedResponse{status: http.StatusBadRequest, body: oauthProbeModelNotFoundBody},
+	)
+	p := &AccountHealthRecoveryProbeService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+		accountRepo:  &oauthProbeFakeRepo{},
+	}
+
+	ok, err := p.probeOpenAIOAuthDataPlane(context.Background(), acc, "")
+	require.NoError(t, err, "候选全部被模型级拒绝不是配置错误")
+	require.False(t, ok, "全部候选失败必须保持不健康（不得伪造成功）")
+	require.Equal(t, 2, upstream.requestCount(), "两个候选都试过")
+}
+
+// TestOpenAIOAuthProbeCandidateLimit 验证候选上限生效：名单有 10 个模型时，实际最多试
+// openAIOAuthProbeMaxCandidates 个（OAuth 上游每次候选都是一次真实出站请求，不能无限试）。
+func TestOpenAIOAuthProbeCandidateLimit(t *testing.T) {
+	models := make([]string, 0, 10)
+	for i := 0; i < 10; i++ {
+		models = append(models, fmt.Sprintf("gpt-6-model-%02d", i))
+	}
+	acc := oauthProbeFallbackAccount(models...)
+	upstream := newOAuthProbeScriptedUpstream(t,
+		oauthProbeScriptedResponse{status: http.StatusBadRequest, body: oauthProbeModelNotFoundBody},
+	)
+	p := &AccountHealthRecoveryProbeService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+		accountRepo:  &oauthProbeFakeRepo{},
+	}
+
+	ok, err := p.probeOpenAIOAuthDataPlane(context.Background(), acc, "")
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.LessOrEqual(t, upstream.requestCount(), openAIOAuthProbeMaxCandidates,
+		"候选数必须受硬上限约束")
+	require.Equal(t, openAIOAuthProbeMaxCandidates, upstream.requestCount(),
+		"名单更长时也只试上限内的候选数")
+}
+
+// TestOpenAIOAuthProbeConfigErrorStopsImmediately 验证配置类错误（凭据缺失）立即结束：
+// 走既有 degraded 语义（返回 error），不试其它候选（凭据坏了换模型也没用）。
+func TestOpenAIOAuthProbeConfigErrorStopsImmediately(t *testing.T) {
+	acc := oauthProbeFallbackAccount("gpt-5.6-sol", "gpt-6-astra")
+	delete(acc.Credentials, "access_token")
+	upstream := newOAuthProbeScriptedUpstream(t)
+	p := &AccountHealthRecoveryProbeService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+		accountRepo:  &oauthProbeFakeRepo{},
+	}
+
+	ok, err := p.probeOpenAIOAuthDataPlane(context.Background(), acc, "")
+	require.Error(t, err, "凭据缺失必须走既有 degraded 语义（返回 error）")
+	require.False(t, ok)
+	require.Equal(t, 0, upstream.requestCount(), "配置类错误不得发出任何上游请求")
+}
+
+// TestOpenAIOAuthProbeNoCandidateReturnsDegraded 验证无候选（无名单）时走既有 degraded
+// 语义（返回 error ⇒ 到期恢复，不伪造失败）。
+func TestOpenAIOAuthProbeNoCandidateReturnsDegraded(t *testing.T) {
+	acc := oauthProbeDirectAccount()
+	upstream := newOAuthProbeScriptedUpstream(t)
+	p := &AccountHealthRecoveryProbeService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+		accountRepo:  &oauthProbeFakeRepo{},
+	}
+
+	ok, err := p.probeOpenAIOAuthDataPlane(context.Background(), acc, "")
+	require.Error(t, err, "无模型可探必须走 degraded 语义")
+	require.False(t, ok)
+	require.Equal(t, 0, upstream.requestCount())
+}
+
+// TestClassifyOpenAIOAuthProbeFailure 验证失败分类口径：模型级失败（换模型可能成功）
+// 与账号级失败（换模型也没用）的分界。
+func TestClassifyOpenAIOAuthProbeFailure(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   openAIOAuthProbeFailureKind
+	}{
+		{name: "400 model_not_found", status: http.StatusBadRequest, body: oauthProbeModelNotFoundBody, want: openAIOAuthProbeFailureModelLevel},
+		{name: "403 forbidden", status: http.StatusForbidden, body: `{"error":{"message":"forbidden"}}`, want: openAIOAuthProbeFailureModelLevel},
+		{name: "404", status: http.StatusNotFound, body: `{"error":{"message":"not found"}}`, want: openAIOAuthProbeFailureModelLevel},
+		{name: "422 model not supported", status: http.StatusUnprocessableEntity, body: `{"error":{"message":"model is not supported"}}`, want: openAIOAuthProbeFailureModelLevel},
+		{name: "401 unauthorized", status: http.StatusUnauthorized, body: `{"error":{"message":"invalid token"}}`, want: openAIOAuthProbeFailureAccountLevel},
+		{name: "429 rate limited", status: http.StatusTooManyRequests, body: `{"error":{"message":"slow down"}}`, want: openAIOAuthProbeFailureAccountLevel},
+		{name: "500 upstream error", status: http.StatusInternalServerError, body: `{"error":{"message":"boom"}}`, want: openAIOAuthProbeFailureAccountLevel},
+		{name: "200 with model rejection text", status: http.StatusOK, body: `{"error":{"message":"model is not supported"}}`, want: openAIOAuthProbeFailureModelLevel},
+		{name: "200 empty completed frame", status: http.StatusOK, body: `{"type":"response.completed","response":{"id":"resp_empty","status":"completed"}}`, want: openAIOAuthProbeFailureAccountLevel},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, classifyOpenAIOAuthProbeFailure(tc.status, []byte(tc.body)))
+		})
 	}
 }
