@@ -194,9 +194,17 @@ func ProvideCursorExecutionService(
 	quotaKeys QuotaKeyRepository,
 	enc QuotaKeyEncryptor,
 	deviceIDs CursorDeviceIDResolver,
+	rdb *redis.Client,
 ) (*CursorExecutionService, error) {
 	forwarder := NewCursorUpstreamForwarder(WithCursorUpstreamNodes(cursorUpstreamNodesSingleton()))
-	svc, err := NewCursorExecutionService(quotaKeys, enc, deviceIDs, forwarder)
+	// 2026-11-22 用户裁定：会话释放前保存可恢复快照（Redis，4 小时），
+	// 客户端工具结果回来时可重建续跑。rdb 为 nil 时降级为不写快照（fail closed：
+	// 恢复不可用，但会话释放行为与既有完全一致）。
+	var opts []CursorExecutionOption
+	if rdb != nil {
+		opts = append(opts, WithCursorSessionSnapshots(newCursorSessionSnapshotRedisStore(rdb)))
+	}
+	svc, err := NewCursorExecutionService(quotaKeys, enc, deviceIDs, forwarder, opts...)
 	if err != nil {
 		return nil, err
 	}

@@ -163,7 +163,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
-	cursorExecutionService, err := service.ProvideCursorExecutionService(quotaKeyRepository, quotaKeyEncryptor, quotaKeyService)
+	cursorExecutionService, err := service.ProvideCursorExecutionService(quotaKeyRepository, quotaKeyEncryptor, quotaKeyService, redisClient)
 	if err != nil {
 		return nil, err
 	}
