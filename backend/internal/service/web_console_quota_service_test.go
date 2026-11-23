@@ -772,11 +772,11 @@ func TestWebConsoleQuotaService_AuthFailedKeepsHistoricalValues(t *testing.T) {
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeAPIKey,
 		Credentials: map[string]any{
-			"base_url": "https://token.sensenova.cn/v1",
+			"base_url": "https://cp.compshare.cn",
 			"api_key":  "sk-sn",
 		},
 		Extra: map[string]any{webConsoleQuotaSnapshotExtraKey: &WebConsoleQuotaSnapshot{
-			Provider:  providerSensenova,
+			Provider:  providerCompshare,
 			AuthState: webConsoleQuotaAuthStateOK,
 			Pools: []WebConsoleQuotaPool{{
 				ID: "p1", PoolType: "general",
@@ -983,10 +983,10 @@ func wcqAccountWithModelMapping(id int64, mapping map[string]any) *Account {
 		creds["model_mapping"] = mapping
 	}
 	return &Account{
-		ID:           id,
-		Platform:     PlatformOpenAI,
-		Type:         AccountTypeAPIKey,
-		Credentials:  creds,
+		ID:          id,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Credentials: creds,
 	}
 }
 
