@@ -9,9 +9,10 @@ const LargeRequestOnlyExtraKey = "large_request_only"
 
 // SmallRequestOnlyExtraKey 是「仅接小请求」账号级开关（extra 键名），与
 // LargeRequestOnlyExtraKey 对称且互斥：开启的账号从大请求候选池中排除，
-// 只参与被判为小请求的候选。大/小的分界阈值默认取 LargeRequestOnlyInputThreshold
-// （256000），运行时可由设置键 request_size_routing_threshold 覆盖；本机制只区分
-// 大/小两个池，不把阈值写死。
+// 只参与被判为小请求的候选。大/小的分界阈值只有一个来源：设置键
+// request_size_routing_threshold（存 settings 表）。系统不保留任何硬编码阈值常量：
+// 兜底常量一旦与线上真实配置漂移，就会在配置读取失败的瞬间把分界悄悄改成另一个数，
+// 让大请求被误判成小请求落进只接小请求的账号（11-12 事故形态）。
 // 两个键同时为 true 属非法状态，由写入入口互斥保证；读取时按「大请求优先」
 // 兜底，避免脏数据把账号从两个池子里同时排除而彻底失去候选资格。
 const SmallRequestOnlyExtraKey = "small_request_only"
@@ -75,15 +76,17 @@ func IsSmallRequestOnlyAccount(a *Account) bool {
 	}
 }
 
-// LargeRequestOnlyInputThreshold 是大/小请求分流阈值的默认值（单位 tokens），
-// 作为默认值的来源保留，不是写死的唯一分界线。运行时实际阈值可由设置键
-// request_size_routing_threshold 覆盖，未配置或取值非法时回退到本默认值；具体
-// 判定逻辑见 ResolveRequestSizeRouting。本机制本身只区分大/小两个池。
-const LargeRequestOnlyInputThreshold = 256000
+// RequestSizeRoutingThresholdUnknown 表示「当前没有可信的大/小请求分界阈值」。
+//
+// 阈值只有一个来源：设置键 request_size_routing_threshold（存 settings 表）。
+// 系统不再保留任何硬编码阈值常量——兜底常量与线上真实配置一旦漂移，就会在配置
+// 读取失败的瞬间把分界悄悄改成另一个数，让大请求被误判成小请求落进只接小请求的
+// 账号（11-12 事故形态）。读不到阈值就是读不到，由调用方按「不做规模分流」处理。
+const RequestSizeRoutingThresholdUnknown = 0
 
 // IsLargeRequestOnlyAccount reports whether the account is configured to accept
-// only large requests. 这里的大/小分界取运行时分流阈值（默认 LargeRequestOnlyInputThreshold，
-// 运行时可由设置键 request_size_routing_threshold 覆盖）。
+// only large requests. 这里的大/小分界取运行时分流阈值（设置键
+// request_size_routing_threshold），阈值不可用时不做规模分流。
 //
 // The flag is read from a.Extra[LargeRequestOnlyExtraKey] as a boolean. Missing,
 // empty, non-bool, or false values — as well as a nil account or an account

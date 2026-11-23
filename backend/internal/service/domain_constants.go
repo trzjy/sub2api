@@ -910,7 +910,8 @@ const SettingKeyDefaultPlatformQuotas = "default_platform_quotas"
 const SettingKeyAccountSchedulingThresholds = "account_scheduling_thresholds"
 
 // SettingKeyRequestSizeRoutingThreshold —— 系统全局：请求规模分流阈值（整数 token）。
-// 估算 input <= 阈值判小请求；> 阈值判大请求。默认值 256000 由 service 层提供。
+// 估算 input <= 阈值判小请求；> 阈值判大请求。这是该阈值的唯一事实源，
+// 系统不保留任何硬编码默认值：读不到有效值即「阈值不可知」，本轮不做规模分流。
 const SettingKeyRequestSizeRoutingThreshold = "request_size_routing_threshold"
 
 // SettingKeyAuthSourcePlatformQuotas 返回某 auth source 的 platform quota JSON key。

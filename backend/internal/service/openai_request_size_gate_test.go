@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+// testRequestSizeRoutingThreshold 是测试用的大/小请求分界阈值。
+// 生产阈值的唯一事实源是 settings 表（见 SettingKeyRequestSizeRoutingThreshold），
+// 代码内不再有默认常量；测试必须自带确定值，断言才不会随线上配置漂移。
+const testRequestSizeRoutingThreshold = 128000
+
 // fileSessionInputCache 是 SessionInputTokenCache 的最小实现，用于验证「写回 → 下一单读回」闭环。
 // 内嵌 GatewayCache 接口只为满足 s.cache 的静态类型；本测试只调到下面两个方法。
 type fileSessionInputCache struct {
@@ -32,9 +37,13 @@ func (c *fileSessionInputCache) SetSessionInputTokens(_ context.Context, groupID
 	return nil
 }
 
-// TestResolveRequestSizeRouting 钉死分流判定的两条规则：
-// ① 上一单真实值是本轮下界；② 已在大活池的会话要跌破滞回下沿才回小池。
-// 这两条是「长活被判成小活」（3 天漏判 463 次）的修复本体。
+// TestResolveRequestSizeRouting 钉死分流判定的核心规则：
+// 上一单真实值是本轮下界（effective 取两者较大），最终由 effective > threshold 判大活。
+// 这是「长活被判成小活」（3 天漏判 463 次）的修复本体。
+//
+// 注：原先这里还有一条「滞回下沿」规则（硬编码 200000），实测该规则在
+// 「上一单真实值 > threshold」的前提下与 effective > threshold 恒等（返回值相同），
+// 属于不影响任何结果的死代码，已随阈值常量一并删除。
 func TestResolveRequestSizeRouting(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -46,8 +55,8 @@ func TestResolveRequestSizeRouting(t *testing.T) {
 	}{
 		{
 			name:      "没有上一单时保持既有行为_纯本地估算_小活",
-			estimated: 150000, hasLast: false,
-			wantLarge: false, wantEffective: 150000,
+			estimated: 100000, hasLast: false,
+			wantLarge: false, wantEffective: 100000,
 		},
 		{
 			name:      "没有上一单时保持既有行为_纯本地估算_大活",
@@ -59,14 +68,14 @@ func TestResolveRequestSizeRouting(t *testing.T) {
 			//（984 上那 463 单的平均实际值）。修复前判成小活派给「仅接小请求」的 984；
 			// 修复后必须判大。
 			name:      "上一单真实值兜底_估算偏低不再漏判",
-			estimated: 151024, lastReal: 297080, hasLast: true,
+			estimated: 50000, lastReal: 297080, hasLast: true,
 			wantLarge: true, wantEffective: 297080,
 		},
 		{
 			// 真实值本身没到阈值时，仍按小活处理 —— 兜底不能反过来把正常请求推成大活。
 			name:      "上一单真实值也不足阈值_保持小活",
-			estimated: 151024, lastReal: 238524, hasLast: true,
-			wantLarge: false, wantEffective: 238524,
+			estimated: 50000, lastReal: 100000, hasLast: true,
+			wantLarge: false, wantEffective: 100000,
 		},
 		{
 			name:      "上一单真实值兜底_超过阈值判大",
@@ -74,28 +83,28 @@ func TestResolveRequestSizeRouting(t *testing.T) {
 			wantLarge: true, wantEffective: 300000,
 		},
 		{
-			// 滞回：上一单在大活池，本轮估算掉到 21 万（仍在 256k 线下），
-			// 不得立刻回小池，否则会在阈值线上反复换号、清缓存。
-			name:      "滞回_大活池内小幅回落仍留大池",
-			estimated: 210000, lastReal: 300000, hasLast: true,
+			// 上一单在大活池（真实值 30 万），本轮估算掉到 21 万：
+			// effective 取真实值 30 万 ⇒ 仍判大活，不因估算回落而换号、清缓存。
+			name:      "大活池内估算回落_仍留大池",
+			estimated: 200000, lastReal: 300000, hasLast: true,
 			wantLarge: true, wantEffective: 300000,
 		},
 		{
-			// 真实压缩（客户端把历史压掉）后才允许回小池。
-			name:      "滞回_真实回落到下沿以下才回小池",
+			// 真实压缩（客户端把历史压掉）后，真实值本身也回落 ⇒ 回小活池。
+			name:      "真实值也回落后才回小池",
 			estimated: 80000, lastReal: 80000, hasLast: true,
 			wantLarge: false, wantEffective: 80000,
 		},
 		{
 			name:      "小活涨成大活_正常分流",
-			estimated: 260000, lastReal: 90000, hasLast: true,
-			wantLarge: true, wantEffective: 260000,
+			estimated: 150000, lastReal: 90000, hasLast: true,
+			wantLarge: true, wantEffective: 150000,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			effective, isLarge := ResolveRequestSizeRouting(tc.estimated, tc.lastReal, tc.hasLast, LargeRequestOnlyInputThreshold)
+			effective, isLarge := ResolveRequestSizeRouting(tc.estimated, tc.lastReal, tc.hasLast, testRequestSizeRoutingThreshold)
 			if effective != tc.wantEffective {
 				t.Fatalf("effective = %d, want %d", effective, tc.wantEffective)
 			}
@@ -107,8 +116,8 @@ func TestResolveRequestSizeRouting(t *testing.T) {
 }
 
 // TestResolveRequestSizeRouting_ThresholdBoundary 钉死阈值作为入参后的边界语义：
-// 严格大于才判大（等于阈值判小）；上一单真实值落在阈值与滞回下沿之间时，
-// 不触发滞回提前返回，最终仍由 effective > threshold 判大。
+// 严格大于才判大（等于阈值判小）；上一单真实值高于阈值时，
+// 由 effective > threshold 判大。
 func TestResolveRequestSizeRouting_ThresholdBoundary(t *testing.T) {
 	const threshold = 128000
 	cases := []struct {
@@ -130,9 +139,8 @@ func TestResolveRequestSizeRouting_ThresholdBoundary(t *testing.T) {
 			wantLarge: true, wantEffective: 128001,
 		},
 		{
-			// 上一单真实值 15 万：高于阈值但未达滞回下沿 20 万，
-			// 不走「已在大活池」的提前返回，最终按 effective > threshold 判大。
-			name:      "上一单真实值落在阈值与滞回下沿之间_仍按阈值判大",
+			// 上一单真实值 15 万：高于阈值，按 effective > threshold 判大。
+			name:      "上一单真实值高于阈值_按阈值判大",
 			estimated: 150000, lastReal: 150000, hasLast: true,
 			wantLarge: true, wantEffective: 150000,
 		},
@@ -206,4 +214,43 @@ func TestRememberAndLastSessionInputTokens(t *testing.T) {
 		t.Fatal("无缓存实现时应按无数据处理")
 	}
 	bare.rememberSessionInputTokens(ctx, &groupID, "sess-1", 123) // 不得 panic
+}
+
+// TestResolveRequestSizeRouting_UnknownThresholdDoesNotSplit 验证「阈值不可知」
+// （threshold=RequestSizeRoutingThresholdUnknown，即配置读不到）时不判定大小。
+//
+// 这是防止事故的核心防线：阈值读不到时若被当成「小请求」，调用方会去排除
+// 「只接大请求」的账号，大活候选池被清空，大请求只能落到只接小请求的账号上，
+// 复现 11-12「长活细节丢失」事故。正确行为是「不分流」。
+func TestResolveRequestSizeRouting_UnknownThresholdDoesNotSplit(t *testing.T) {
+	cases := []struct {
+		name        string
+		estimated   int
+		lastReal    int
+		hasLastReal bool
+	}{
+		{name: "只有本地估算", estimated: 5000},
+		{name: "估算很大", estimated: 500000},
+		{name: "有上一单真实值", estimated: 1000, lastReal: 300000, hasLastReal: true},
+		{name: "上一单真实值很大", estimated: 10, lastReal: 900000, hasLastReal: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			effective, isLarge := ResolveRequestSizeRouting(
+				tc.estimated, tc.lastReal, tc.hasLastReal, RequestSizeRoutingThresholdUnknown)
+
+			// effective 仍然要如实回报（用于对账落库）。
+			wantEffective := tc.estimated
+			if tc.hasLastReal && tc.lastReal > wantEffective {
+				wantEffective = tc.lastReal
+			}
+			if effective != wantEffective {
+				t.Fatalf("effective=%d, want %d", effective, wantEffective)
+			}
+			// 阈值不可知时绝不判为大请求（否则会误排除只接小请求的账号）。
+			if isLarge {
+				t.Fatal("阈值不可知时不得判为大请求")
+			}
+		})
+	}
 }

@@ -1013,12 +1013,13 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		}
 	}
 
-	result.RequestSizeRoutingThreshold = LargeRequestOnlyInputThreshold
+	// 请求规模分流阈值：唯一来源是 settings 表这一行，不带任何代码内默认值。
+	// 行缺失或取值非法时留 0（= 阈值不可知，本轮不做规模分流）。
 	if raw := strings.TrimSpace(settings[SettingKeyRequestSizeRoutingThreshold]); raw != "" {
 		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
 			result.RequestSizeRoutingThreshold = v
 		} else {
-			slog.Warn("[Setting] parseSettings: invalid request_size_routing_threshold, keep default", "raw", raw)
+			slog.Warn("[Setting] parseSettings: invalid request_size_routing_threshold, treat as unknown", "raw", raw)
 		}
 	}
 

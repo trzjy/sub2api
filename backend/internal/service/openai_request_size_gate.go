@@ -9,7 +9,7 @@ import (
 
 // 请求规模分流的判定事实源（2026-11-15）。
 //
-// 背景：分流阈值 LargeRequestOnlyInputThreshold(256000) 是硬线，但线画在一把
+// 背景：分流阈值（后台配置 request_size_routing_threshold）是硬线，但线画在一把
 // 与上游不同源的尺子上 —— 判定用的是本地 tiktoken 估算（openai_gateway_count_tokens.go），
 // 各上游真实分词器数出来的 token 数普遍更大。生产实测（11-12~11-15）：
 //
@@ -27,11 +27,6 @@ import (
 // 本文件把判定收敛为一处：**同一会话上一单上游回报的真实输入 token 优先于本地估算**。
 // 该值本来就随每个请求落库（usage_logs），只是此前没有回到判定路径上。
 const (
-	// requestSizeHysteresisFloorTokens 是「回小活池」的回落阈值（滞回下沿）。
-	// 已在大活池的会话必须跌破该值才允许回小池：实测大活轮次里上下文会在 25.6 万线上
-	// 反复抖动（同一会话 6059 单出现 349 次跨线），每次跨线都换号、清缓存。
-	requestSizeHysteresisFloorTokens = 200000
-
 	// requestSizeLastInputTTL 与粘性会话同寿命（openaiStickySessionTTL = 1h）：
 	// 会话粘多久，「上一单真实值」就该记多久，两者必须同步滑动，否则出现
 	// 「粘在同一个号上但预判值已过期」的假象。
@@ -85,13 +80,15 @@ func RequestSizeSessionHash(ctx context.Context) string {
 // 入参：
 //   - estimated：本地 tiktoken 估算的输入 token（既有唯一估算来源）
 //   - lastRealTokens / hasLastReal：同一会话上一单上游回报的真实输入 token（含缓存读写）
-//   - threshold：本轮判定用的大活阈值（由调用方按配置注入，默认 LargeRequestOnlyInputThreshold）
+//   - threshold：本轮判定用的大活阈值（由调用方按后台配置注入；
+//     传 RequestSizeRoutingThresholdUnknown(0) 表示「阈值不可知」）
 //
-// 规则（两条，缺一不可）：
+// 规则：
 //  1. 上一单真实值是本轮的下界。上下文在同一会话内只会增长，本地估算又系统性偏低，
 //     两者取大等于用「已经确认过的真实值」兜住估算的下限 —— 这是根因修复。
-//  2. 滞回：已经在大活池的会话，只有跌破 requestSizeHysteresisFloorTokens 才回小池。
-//     避免估算在 256k 线附近 ±1% 抖动导致来回换号（换号 = prompt cache 全废）。
+//  2. 阈值不可知（threshold<=0）时不判定大小：返回 (effective, false)。
+//     调用方必须同时跳过按规模的账号排除（不得据此缩小候选池），
+//     否则「不可知」会被误当成「小请求」，把只接大请求的账号全部踢出候选。
 //
 // 返回：用于对账落库的 effective 估算值，以及是否按大活处理。
 func ResolveRequestSizeRouting(estimated, lastRealTokens int, hasLastReal bool, threshold int) (int, bool) {
@@ -99,12 +96,13 @@ func ResolveRequestSizeRouting(estimated, lastRealTokens int, hasLastReal bool, 
 	if hasLastReal && lastRealTokens > effective {
 		effective = lastRealTokens
 	}
-	if hasLastReal && lastRealTokens > threshold {
-		// 上一单已在大活池：除非真实回落到滞回下沿以下（客户端压缩/换子任务），否则留在大活池。
-		if effective >= requestSizeHysteresisFloorTokens {
-			return effective, true
-		}
+	if threshold <= 0 {
+		// 阈值不可知：不做大小判定，由调用方负责跳过规模排除。
+		return effective, false
 	}
+	// 大活判定只看 effective（已含上一单真实值下界）。
+	// 上下文在同一会话内只增不减，用真实值兜住估算下限后，阈值线附近的抖动
+	// 不会再造成来回换号（换号 = prompt cache 全废），无需额外滞回下沿。
 	return effective, effective > threshold
 }
 

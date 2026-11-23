@@ -57,7 +57,7 @@ func TestChatCompletionsLargeRequestOnlySmallRequestExcludesEnabledAccount(t *te
 		largeRequestOnlyRepoStub{accounts: []service.Account{*enabled, *plain}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 
 	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
 	failedAccountIDs := make(map[int64]struct{})
@@ -72,7 +72,7 @@ func TestChatCompletionsLargeRequestOnlySmallRequestExcludesEnabledAccount(t *te
 
 	// 对账口径：入口把 gate 返回值原样填进 RoutingEstimatedInputTokens / LargeRequestReroute。
 	require.Greater(t, estimated, 0, "小请求估算必须成功，供 RoutingEstimatedInputTokens 对账")
-	require.LessOrEqual(t, estimated, service.LargeRequestOnlyInputThreshold)
+	require.LessOrEqual(t, estimated, testRequestSizeRoutingThreshold)
 	require.True(t, reroute, "发生排除时 LargeRequestReroute 必须为 true")
 }
 
@@ -89,7 +89,7 @@ func TestChatCompletionsLargeRequestOnlyLargeRequestKeepsAll(t *testing.T) {
 		largeRequestOnlyRepoStub{accounts: []service.Account{*enabled, *plain}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 
 	huge := strings.Repeat("hello world ", 200000)
 	bigBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`, huge))
@@ -99,7 +99,7 @@ func TestChatCompletionsLargeRequestOnlyLargeRequestKeepsAll(t *testing.T) {
 
 	require.Empty(t, adds, "大请求不得排除任何「仅接大请求」账号")
 	require.Empty(t, failedAccountIDs, "大请求下 failedAccountIDs 必须保持为空")
-	require.Greater(t, estimated, service.LargeRequestOnlyInputThreshold, "大请求估算须超过阈值")
+	require.Greater(t, estimated, testRequestSizeRoutingThreshold, "大请求估算须超过阈值")
 	require.False(t, reroute, "未发生排除时 LargeRequestReroute 必须为 false")
 }
 
@@ -113,7 +113,7 @@ func TestChatCompletionsLargeRequestOnlyEstimateFailureFailOpen(t *testing.T) {
 		largeRequestOnlyRepoStub{accounts: []service.Account{*enabled}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 
 	var estimated int
 	var reroute bool

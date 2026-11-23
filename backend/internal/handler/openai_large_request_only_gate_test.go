@@ -48,7 +48,7 @@ func newLargeRequestOnlyTestAccount(id int64, enabled bool) *service.Account {
 	}
 }
 
-// TestApplyLargeRequestOnlyExclusionSmallRequest 验证估算 input <= 阈值（256000，
+// TestApplyLargeRequestOnlyExclusionSmallRequest 验证估算 input <= 阈值（testRequestSizeRoutingThreshold，
 // 小请求）时：开启「仅接大请求」开关的账号必须进入排除集合，未开启账号保留。
 func TestApplyLargeRequestOnlyExclusionSmallRequest(t *testing.T) {
 	t.Parallel()
@@ -60,17 +60,17 @@ func TestApplyLargeRequestOnlyExclusionSmallRequest(t *testing.T) {
 		largeRequestOnlyRepoStub{accounts: []service.Account{*enabled, *plain}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 	reqLog := zap.NewNop()
 
-	// 不含图短请求：估算远低于 256000 阈值。
+	// 不含图短请求：估算远低于 testRequestSizeRoutingThreshold 阈值。
 	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
 	estimated, excluded := h.applyRequestSizeScopeExclusion(
 		context.Background(), nil, reqLog, nil, service.PlatformCursor, "gpt-4o",
 		service.TierRoutingProtocolChatCompletions, "", smallBody)
 
 	require.Greater(t, estimated, 0, "estimate must succeed for a small request")
-	require.LessOrEqual(t, estimated, service.LargeRequestOnlyInputThreshold, "small request estimate must stay below the threshold")
+	require.LessOrEqual(t, estimated, testRequestSizeRoutingThreshold, "small request estimate must stay below the threshold")
 	require.Len(t, excluded, 1, "exactly one large-request-only account must be excluded")
 	_, ok := excluded[101]
 	require.True(t, ok, "large-request-only account 101 must be excluded for a small request")
@@ -90,17 +90,17 @@ func TestApplyLargeRequestOnlyExclusionLargeRequest(t *testing.T) {
 		largeRequestOnlyRepoStub{accounts: []service.Account{*enabled, *plain}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 	reqLog := zap.NewNop()
 
-	// 重复短语会被 BPE 高效压缩，放大到与 sensenova 测试同量级确保远超 256000 阈值。
+	// 重复短语会被 BPE 高效压缩，放大到与 sensenova 测试同量级确保远超 testRequestSizeRoutingThreshold 阈值。
 	huge := strings.Repeat("hello world ", 200000)
 	bigBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`, huge))
 	estimated, excluded := h.applyRequestSizeScopeExclusion(
 		context.Background(), nil, reqLog, nil, service.PlatformCursor, "gpt-4o",
 		service.TierRoutingProtocolChatCompletions, "", bigBody)
 
-	require.Greater(t, estimated, service.LargeRequestOnlyInputThreshold, "large request estimate must exceed the threshold")
+	require.Greater(t, estimated, testRequestSizeRoutingThreshold, "large request estimate must exceed the threshold")
 	require.Empty(t, excluded, "large request must not exclude any large-request-only account")
 }
 
@@ -115,7 +115,7 @@ func TestApplyLargeRequestOnlyExclusionEstimateFailed(t *testing.T) {
 		largeRequestOnlyRepoStub{accounts: []service.Account{*enabled}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 	reqLog := zap.NewNop()
 
 	badBody := []byte("{not valid json")
@@ -149,17 +149,17 @@ func TestApplyRequestSizeScopeExclusionLargeRequestSkipsSmallOnly(t *testing.T) 
 		largeRequestOnlyRepoStub{accounts: []service.Account{*smallOnly, *plain}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 	reqLog := zap.NewNop()
 
-	// 构造超过 256000 阈值的估算：重复长文本。
+	// 构造超过 testRequestSizeRoutingThreshold 阈值的估算：重复长文本。
 	largeBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`,
 		strings.Repeat("word ", 500000)))
 	estimated, excluded := h.applyRequestSizeScopeExclusion(
 		context.Background(), nil, reqLog, nil, service.PlatformCursor, "gpt-4o",
 		service.TierRoutingProtocolChatCompletions, "", largeBody)
 
-	require.Greater(t, estimated, service.LargeRequestOnlyInputThreshold, "用例前提：必须被判为大请求")
+	require.Greater(t, estimated, testRequestSizeRoutingThreshold, "用例前提：必须被判为大请求")
 	require.Len(t, excluded, 1, "大请求只能排除仅接小请求的账号")
 	_, ok := excluded[303]
 	require.True(t, ok, "small-only 账号 303 必须在大请求时被排除")
@@ -189,7 +189,7 @@ func TestApplyRequestSizeScopeExclusionSmallRequestSkipsLargeOnly(t *testing.T) 
 		largeRequestOnlyRepoStub{accounts: []service.Account{*largeOnly, *smallOnly}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 	reqLog := zap.NewNop()
 
 	smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
@@ -230,7 +230,7 @@ func TestApplyRequestSizeScopeExclusionDirtyDoubleTruePrecedence(t *testing.T) {
 		largeRequestOnlyRepoStub{accounts: []service.Account{*dirty, *plain}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 	reqLog := zap.NewNop()
 
 	// 小请求：脏数据归一化为 large_only，应被排除。
@@ -254,7 +254,7 @@ func TestApplyRequestSizeScopeExclusionDirtyDoubleTruePrecedence(t *testing.T) {
 // TestApplyRequestSizeScopeExclusionExemptPlatforms 验证 L5 三平台豁免：
 // anthropic/openai/gemini 即使账号标记 large_request_only=true，小请求也不返回
 // 任何排除集合（保持原模型质量，不参与大小请求分流）。
-// h.settingService 保持 nil，覆盖运行时阈值的默认值降级路径。
+// 注入显式阈值，走「阈值可知」的正常分流路径。
 func TestApplyRequestSizeScopeExclusionExemptPlatforms(t *testing.T) {
 	t.Parallel()
 
@@ -272,17 +272,17 @@ func TestApplyRequestSizeScopeExclusionExemptPlatforms(t *testing.T) {
 				largeRequestOnlyRepoStub{accounts: []service.Account{*enabled}},
 				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 			)
-			h := &OpenAIGatewayHandler{gatewayService: gw}
+			h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 			reqLog := zap.NewNop()
 
-			// 同一小请求 body（估算远低于 256000）；非豁免平台下该标记账号本应被排除。
+			// 同一小请求 body（估算远低于 testRequestSizeRoutingThreshold）；非豁免平台下该标记账号本应被排除。
 			smallBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
 			estimated, excluded := h.applyRequestSizeScopeExclusion(
 				context.Background(), nil, reqLog, nil, platform, "gpt-4o",
 				service.TierRoutingProtocolChatCompletions, "", smallBody)
 
 			require.Greater(t, estimated, 0, "small request estimate must succeed")
-			require.LessOrEqual(t, estimated, service.LargeRequestOnlyInputThreshold,
+			require.LessOrEqual(t, estimated, testRequestSizeRoutingThreshold,
 				"small request estimate must stay below the default threshold")
 			require.Empty(t, excluded, "exempt platform %s must return an empty exclusion set", platform)
 		})
@@ -326,10 +326,10 @@ func TestApplyRequestSizeScopeExclusionExemptPlatformsLargeSmallOnly(t *testing.
 		largeRequestOnlyRepoStub{accounts: []service.Account{*smallOnly}},
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 	reqLog := zap.NewNop()
 
-	// 复用现有大请求构造量级：估算远超 256000 阈值，确保判为大请求。
+	// 复用现有大请求构造量级：估算远超 testRequestSizeRoutingThreshold 阈值，确保判为大请求。
 	largeBody := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":%q}]}`,
 		strings.Repeat("word ", 500000)))
 
@@ -342,7 +342,7 @@ func TestApplyRequestSizeScopeExclusionExemptPlatformsLargeSmallOnly(t *testing.
 			context.Background(), nil, reqLog, nil, platform, "gpt-4o",
 			service.TierRoutingProtocolChatCompletions, "", largeBody)
 
-		require.Greater(t, estimated, service.LargeRequestOnlyInputThreshold,
+		require.Greater(t, estimated, testRequestSizeRoutingThreshold,
 			"用例前提：平台 %s 必须把该请求判为大请求", platform)
 		require.Empty(t, excluded, "豁免平台 %s 在大请求下不得排除 small-only 账号", platform)
 	}
@@ -373,7 +373,7 @@ func TestApplyRequestSizeScopeExclusionEffectiveReconciliation(t *testing.T) {
 		nil, nil, nil, nil, nil,
 		nil, nil,
 	)
-	h := &OpenAIGatewayHandler{gatewayService: gw}
+	h := &OpenAIGatewayHandler{gatewayService: gw, settingService: newSettingServiceWithThreshold(testRequestSizeRoutingThreshold)}
 	reqLog := zap.NewNop()
 
 	// 本地估算约 2 万（远低于真实值 180000），确保 effective 必须用真实值校正。

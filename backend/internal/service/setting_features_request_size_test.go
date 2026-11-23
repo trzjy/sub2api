@@ -31,19 +31,22 @@ func newSettingServiceForRequestSizeRoutingThresholdTest(t *testing.T, seed map[
 	return NewSettingService(repo, &config.Config{})
 }
 
-// 组 1：service 本身是 nil、或 settingRepo 是 nil，都直接回退默认阈值，
-// 不去读 repo，也不碰缓存。
+// 组 1：service 本身是 nil、或 settingRepo 是 nil，都拿不到可信阈值，
+// 返回 ok=false（= 阈值不可知），不去读 repo，也不碰缓存。
+// 语义要点：拿不到就说不知道，绝不编一个默认数字出来。
 func TestGetRequestSizeRoutingThreshold_NilServiceAndRepo(t *testing.T) {
 	resetRequestSizeRoutingThresholdCacheForTest()
 	t.Cleanup(resetRequestSizeRoutingThresholdCacheForTest)
 
 	var nilSvc *SettingService
-	require.Equal(t, LargeRequestOnlyInputThreshold,
-		nilSvc.GetRequestSizeRoutingThreshold(context.Background()))
+	value, ok := nilSvc.GetRequestSizeRoutingThreshold(context.Background())
+	require.False(t, ok, "nil service 必须报告阈值不可知")
+	require.Equal(t, RequestSizeRoutingThresholdUnknown, value)
 
 	svc := &SettingService{} // settingRepo 为 nil
-	require.Equal(t, LargeRequestOnlyInputThreshold,
-		svc.GetRequestSizeRoutingThreshold(context.Background()))
+	value, ok = svc.GetRequestSizeRoutingThreshold(context.Background())
+	require.False(t, ok, "nil settingRepo 必须报告阈值不可知")
+	require.Equal(t, RequestSizeRoutingThresholdUnknown, value)
 }
 
 // 组 2：repo 返回合法正整数，按配置值返回。
@@ -52,28 +55,32 @@ func TestGetRequestSizeRoutingThreshold_ValidStoredValue(t *testing.T) {
 		SettingKeyRequestSizeRoutingThreshold: "128000",
 	})
 
-	require.Equal(t, 128000, svc.GetRequestSizeRoutingThreshold(context.Background()))
+	value, ok := svc.GetRequestSizeRoutingThreshold(context.Background())
+	require.True(t, ok)
+	require.Equal(t, 128000, value)
 }
 
-// 组 3：0、负数、非数字都是非法值，一律回退默认阈值。
-func TestGetRequestSizeRoutingThreshold_InvalidStoredValuesFallBack(t *testing.T) {
+// 组 3：0、负数、非数字都是非法值，一律报告「不可知」（不编默认数）。
+func TestGetRequestSizeRoutingThreshold_InvalidStoredValuesAreUnknown(t *testing.T) {
 	for _, raw := range []string{"0", "-1", "abc"} {
 		t.Run(raw, func(t *testing.T) {
 			svc := newSettingServiceForRequestSizeRoutingThresholdTest(t, map[string]string{
 				SettingKeyRequestSizeRoutingThreshold: raw,
 			})
 
-			require.Equal(t, LargeRequestOnlyInputThreshold,
-				svc.GetRequestSizeRoutingThreshold(context.Background()))
+			value, ok := svc.GetRequestSizeRoutingThreshold(context.Background())
+			require.False(t, ok, "非法值必须报告阈值不可知")
+			require.Equal(t, RequestSizeRoutingThresholdUnknown, value)
 		})
 	}
 }
 
-// 组 4：设置不存在（ErrSettingNotFound）时回退默认阈值。
-func TestGetRequestSizeRoutingThreshold_SettingNotFoundFallsBack(t *testing.T) {
+// 组 4：设置不存在（ErrSettingNotFound）时同样报告「不可知」。
+func TestGetRequestSizeRoutingThreshold_SettingNotFoundIsUnknown(t *testing.T) {
 	svc := newSettingServiceForRequestSizeRoutingThresholdTest(t, nil)
 	svc.settingRepo.(*mockSettingRepo).getValueErr = ErrSettingNotFound
 
-	require.Equal(t, LargeRequestOnlyInputThreshold,
-		svc.GetRequestSizeRoutingThreshold(context.Background()))
+	value, ok := svc.GetRequestSizeRoutingThreshold(context.Background())
+	require.False(t, ok, "配置行缺失必须报告阈值不可知")
+	require.Equal(t, RequestSizeRoutingThresholdUnknown, value)
 }

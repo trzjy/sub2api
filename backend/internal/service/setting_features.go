@@ -1253,7 +1253,13 @@ func (s *SettingService) GetDefaultPlatformQuotas(ctx context.Context) (map[stri
 }
 
 // requestSizeRoutingThresholdCache / requestSizeRoutingThresholdSF 缓存请求规模分流阈值。
-// 缓存值为 *cachedRequestSizeRoutingThreshold，失败/非法一律回退 LargeRequestOnlyInputThreshold。
+// 缓存值为 *cachedRequestSizeRoutingThreshold。
+//
+// 唯一事实源是 settings 表的 request_size_routing_threshold 一行。
+// 这里不再保留任何硬编码兜底常量：兜底值与线上真实配置一旦不一致，
+// 就会在配置读取失败的瞬间把「大/小请求」分界悄悄改成另一个数，
+// 让大请求被误判成小请求落进只接小请求的账号（11-12 事故形态）。
+// 读不到就是读不到，由调用方按「不做规模分流」处理。
 var (
 	requestSizeRoutingThresholdCache atomic.Value // *cachedRequestSizeRoutingThreshold
 	requestSizeRoutingThresholdSF    singleflight.Group
@@ -1271,14 +1277,19 @@ type cachedRequestSizeRoutingThreshold struct {
 }
 
 // GetRequestSizeRoutingThreshold 返回请求规模分流阈值（整数 token）。
-// 热路径读取：atomic.Value 缓存 + singleflight 合并回源 + TTL；失败/非法回退默认值。
-func (s *SettingService) GetRequestSizeRoutingThreshold(ctx context.Context) int {
+//
+// 返回值 ok=false 表示「当前拿不到可信阈值」（SettingService 缺席、配置行缺失、
+// 取值非法、读取失败）。调用方必须把 ok=false 视为「本轮不做规模分流」，
+// 而不是自行套用某个默认数字——那等于把第二份事实引进系统。
+//
+// 热路径读取：atomic.Value 缓存 + singleflight 合并回源 + TTL。
+func (s *SettingService) GetRequestSizeRoutingThreshold(ctx context.Context) (int, bool) {
 	if s == nil || s.settingRepo == nil {
-		return LargeRequestOnlyInputThreshold
+		return 0, false
 	}
 	if cached, ok := requestSizeRoutingThresholdCache.Load().(*cachedRequestSizeRoutingThreshold); ok {
 		if cached != nil && time.Now().UnixNano() < cached.expiresAt {
-			return cached.value
+			return cached.value, true
 		}
 	}
 
@@ -1289,48 +1300,52 @@ func (s *SettingService) GetRequestSizeRoutingThreshold(ctx context.Context) int
 			}
 		}
 
-		threshold := LargeRequestOnlyInputThreshold
 		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requestSizeRoutingThresholdDBTimeout)
 		defer cancel()
 
 		raw, err := s.settingRepo.GetValue(dbCtx, SettingKeyRequestSizeRoutingThreshold)
 		if err != nil {
 			if errors.Is(err, ErrSettingNotFound) {
+				// 配置行不存在：缓存一个「无值」标记，避免每请求都打 DB。
 				requestSizeRoutingThresholdCache.Store(&cachedRequestSizeRoutingThreshold{
-					value:     threshold,
+					value:     0,
 					expiresAt: time.Now().Add(requestSizeRoutingThresholdCacheTTL).UnixNano(),
 				})
-				return threshold, nil
+				return 0, nil
 			}
-			slog.Warn("failed to get request size routing threshold, falling back to default", "error", err)
+			slog.Warn("failed to get request size routing threshold", "error", err)
 			requestSizeRoutingThresholdCache.Store(&cachedRequestSizeRoutingThreshold{
-				value:     threshold,
+				value:     0,
 				expiresAt: time.Now().Add(requestSizeRoutingThresholdErrorTTL).UnixNano(),
 			})
-			return threshold, nil
+			return 0, nil
 		}
 
-		if trimmed := strings.TrimSpace(raw); trimmed != "" {
-			if parsed, parseErr := strconv.Atoi(trimmed); parseErr == nil && parsed > 0 {
-				threshold = parsed
-			} else {
-				slog.Warn("invalid request size routing threshold, falling back to default", "raw", trimmed)
-			}
+		trimmed := strings.TrimSpace(raw)
+		parsed, parseErr := strconv.Atoi(trimmed)
+		if parseErr != nil || parsed <= 0 {
+			slog.Warn("invalid request size routing threshold", "raw", trimmed)
+			requestSizeRoutingThresholdCache.Store(&cachedRequestSizeRoutingThreshold{
+				value:     0,
+				expiresAt: time.Now().Add(requestSizeRoutingThresholdErrorTTL).UnixNano(),
+			})
+			return 0, nil
 		}
 
 		requestSizeRoutingThresholdCache.Store(&cachedRequestSizeRoutingThreshold{
-			value:     threshold,
+			value:     parsed,
 			expiresAt: time.Now().Add(requestSizeRoutingThresholdCacheTTL).UnixNano(),
 		})
-		return threshold, nil
+		return parsed, nil
 	})
 	if err != nil {
-		return LargeRequestOnlyInputThreshold
+		return 0, false
 	}
-	if value, ok := result.(int); ok {
-		return value
+	value, ok := result.(int)
+	if !ok || value <= 0 {
+		return 0, false
 	}
-	return LargeRequestOnlyInputThreshold
+	return value, true
 }
 
 // GetAccountSchedulingThresholds returns per-platform auto-pause thresholds (1..100).

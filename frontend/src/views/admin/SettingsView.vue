@@ -5405,7 +5405,7 @@
                       step="1"
                       class="input sm:w-56"
                       data-testid="request-size-routing-threshold"
-                      placeholder="256000"
+                      placeholder="未配置"
                     />
                   </div>
                 </div>
@@ -10365,7 +10365,7 @@ const form = reactive<SettingsForm>({
   default_balance: 0,
   default_platform_quotas: normalizePlatformQuotasMap() as DefaultPlatformQuotasMap,
   account_scheduling_thresholds: normalizeAccountSchedulingThresholdsMap(),
-  request_size_routing_threshold: 256000,
+  request_size_routing_threshold: 0,
   affiliate_rebate_rate: 20,
   affiliate_rebate_freeze_hours: 0,
   affiliate_rebate_duration_days: 0,
@@ -11715,8 +11715,9 @@ async function loadSettings() {
     form.account_scheduling_thresholds = normalizeAccountSchedulingThresholdsMap(
       settings.account_scheduling_thresholds,
     );
+    // 阈值唯一来源是后端配置；后端返回 0 表示「阈值不可知」，不做兜底编造。
     form.request_size_routing_threshold = Number(
-      settings.request_size_routing_threshold ?? 256000,
+      settings.request_size_routing_threshold ?? 0,
     );
     form.backend_mode_enabled = settings.backend_mode_enabled;
     form.default_subscriptions = normalizeDefaultSubscriptionSettings(

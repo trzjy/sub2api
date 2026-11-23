@@ -578,11 +578,13 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		updates[SettingKeyAccountSchedulingThresholds] = string(blob)
 	}
 
-	threshold := settings.RequestSizeRoutingThreshold
-	if threshold <= 0 {
-		threshold = LargeRequestOnlyInputThreshold
+	// 请求规模分流阈值：只写后台显式给出的合法正值。
+	// <=0 表示「没有可信阈值」，此时不写这个键，保留库中原值（可能不存在）。
+	// 绝不能在这里编一个默认数字塞进配置行——那等于把第二份事实写进数据库，
+	// 让配置行与运行时实际生效值漂移。
+	if threshold := settings.RequestSizeRoutingThreshold; threshold > 0 {
+		updates[SettingKeyRequestSizeRoutingThreshold] = strconv.Itoa(threshold)
 	}
-	updates[SettingKeyRequestSizeRoutingThreshold] = strconv.Itoa(threshold)
 
 	updates[SettingKeyAllowUserViewErrorRequests] = strconv.FormatBool(settings.AllowUserViewErrorRequests)
 
