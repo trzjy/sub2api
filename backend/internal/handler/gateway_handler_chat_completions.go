@@ -212,6 +212,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	// 3. Account selection + failover loop
 	fs := newChatCompletionsFailoverState(c, groupPlatform, h.maxAccountSwitchesGemini)
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 
 	for {
 		if failoverClientGone(c) {
@@ -317,7 +318,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				default:
 					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 						h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
-					} else if slotFullCount > 0 {
+					} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 						// 不能落到 502 分支——那会破坏账号并发终点契约。
 						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
@@ -330,6 +331,11 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			account = selection.Account
 			setOpsSelectedAccount(c, account.ID, account.Platform)
 
+			// 归属不合格的复合候选在抢槽/转发前排除：释放选号器已占槽、排除出本请求候选、
+			// 登记独立计数；不递增 slotFullCount、不消耗本次请求唯一一次等待。
+			if h.concurrencyHelper.RejectCompositeIneligible(c, selection, fs.FailedAccountIDs, &ownershipRejectedCount) {
+				continue
+			}
 			// 3. 获取账号并发槽位（统一入口，方案 §4.3）。
 			// 已持槽直接接管、未持槽立即抢一次、未等过且有等待计划时等一次的判定全部
 			// 收敛到 AcquireAccountSlotForSelection，调用点不再自写等待分支。

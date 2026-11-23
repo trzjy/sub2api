@@ -214,6 +214,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	// 3. Account selection + failover loop
 	fs := NewFailoverState(false).BindRequest(c)
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 
 	for {
 		if failoverClientGone(c) {
@@ -268,7 +269,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				default:
 					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 						h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
-					} else if slotFullCount > 0 {
+					} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 						// 不能落到 502 分支——那会破坏账号并发终点契约。
 						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
@@ -328,7 +329,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				default:
 					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 						h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
-					} else if slotFullCount > 0 {
+					} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 						// 不能落到 502 分支——那会破坏账号并发终点契约。
 						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
@@ -340,6 +341,10 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			}
 			account = selection.Account
 			setOpsSelectedAccount(c, account.ID, account.Platform)
+
+			if h.concurrencyHelper.RejectCompositeIneligible(c, selection, fs.FailedAccountIDs, &ownershipRejectedCount) {
+				continue
+			}
 
 			// 4. Acquire account concurrency slot via the unified entry (§4.3).
 			// 统一入口接管选号已持槽的 ReleaseFunc（不重复占槽）；未持槽时先立即

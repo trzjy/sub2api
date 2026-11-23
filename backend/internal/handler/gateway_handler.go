@@ -373,6 +373,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	if platform == service.PlatformGemini {
 		fs := NewFailoverStateCapped(h.maxAccountSwitchesGemini, hasBoundSession).BindRequest(c)
 		slotFullCount := 0
+		ownershipRejectedCount := 0
 
 		// 单账号分组首次 503 就不设模型限流标记，避免设 29s 限流导致后续请求连续快速失败；
 		// 是否单账号分组在 antigravity 账号遇到 503 或模型限流预检查时才判定。
@@ -413,7 +414,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				default: // FailoverExhausted
 					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 						h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformGemini, streamStarted)
-					} else if slotFullCount > 0 {
+					} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 						// 不能落到 502 分支——那会破坏账号并发终点契约。
 						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
@@ -445,6 +446,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// 3. 获取账号并发槽位（统一入口，方案 §4.3）。
 			// 已持槽直接接管、未持槽立即抢一次、未等过且有等待计划时等一次的判定全部
 			// 收敛到 AcquireAccountSlotForSelection，调用点不再自写等待分支。
+			if h.concurrencyHelper.RejectCompositeIneligible(c, selection, fs.FailedAccountIDs, &ownershipRejectedCount) {
+				continue
+			}
 			accountReleaseFunc, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
 				c, selection, slotFullCount > 0, reqStream, &streamStarted)
 			if slotFull {
@@ -746,6 +750,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	// 等超时、之后因 PromptTooLong 触发 fallback 重启外层循环，计数被清零会让
 	// fallback 分组**又等满一次**，总等待时间超过一次超时（外审第四轮 medium）。
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	for {
 		fs := NewFailoverState(hasBoundSession).BindRequest(c)
 		retryWithFallback := false
@@ -825,7 +830,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					default:
 						if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 							h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
-						} else if slotFullCount > 0 {
+						} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 							h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
 						} else {
 							h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, streamStarted)
@@ -897,7 +902,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					default: // FailoverExhausted
 						if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 							h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
-						} else if slotFullCount > 0 {
+						} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 							// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
 							h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
 						} else {
@@ -938,6 +943,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				// 3. 获取账号并发槽位（统一入口，方案 §4.3）。
 				// 已持槽直接接管、未持槽立即抢一次、未等过且有等待计划时等一次的判定全部
 				// 收敛到 AcquireAccountSlotForSelection，调用点不再自写等待分支。
+				if h.concurrencyHelper.RejectCompositeIneligible(c, selection, fs.FailedAccountIDs, &ownershipRejectedCount) {
+					continue
+				}
 				var slotFull bool
 				accountReleaseFunc, slotFull = h.concurrencyHelper.AcquireAccountSlotForSelection(
 					c, selection, slotFullCount > 0, reqStream, &streamStarted)

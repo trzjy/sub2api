@@ -679,6 +679,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	}
 	fs := NewFailoverStateCapped(maxAccountSwitches, hasBoundSession).BindRequest(c)
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 
 	// 单账号分组首次 503 就不设模型限流标记，避免设 29s 限流导致后续请求连续快速失败；
 	// 是否单账号分组在 antigravity 账号遇到 503 或模型限流预检查时才判定。
@@ -793,7 +794,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				failoverClientGone(c)
 				return
 			default: // FailoverExhausted
-				if slotFullCount > 0 {
+				if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 					// 槽位失败导致候选耗尽：走本端点既有的终态
 					// （Google 错误格式 + 无可用账号文案），状态码保持 429。
 					googleError(c, http.StatusTooManyRequests, infraerrors.NoAvailableAccounts)
@@ -838,6 +839,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		} else if sessionBoundAccountID == 0 {
 			// 记录本次请求中首次选择到的账号，便于同一请求内 failover 时检测切换。
 			sessionBoundAccountID = account.ID
+		}
+
+		if geminiConcurrency.RejectCompositeIneligible(c, selection, fs.FailedAccountIDs, &ownershipRejectedCount) {
+			continue
 		}
 
 		// 4) account concurrency slot（统一入口，方案 §4.3）。

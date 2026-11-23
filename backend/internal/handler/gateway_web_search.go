@@ -138,6 +138,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 
 	failedAccounts := make(map[int64]struct{})
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	var account *service.Account
 	var accountReleaseFunc func()
 	var nativeResp *websearch.SearchResponse
@@ -188,6 +189,10 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 			break
 		}
 
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selected, failedAccounts, &ownershipRejectedCount) {
+			continue
+		}
+
 		release, acquireOK, acquireErr := h.acquireWebSearchAccountSlot(c, selected)
 		if !acquireOK {
 			// 槽位等不到：排除该账号，换同组下一个账号再试。
@@ -235,7 +240,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		account = nil
 	}
 	if err != nil || nativeResp == nil {
-		if lastFailureWasSlot(c) && exhaustedByNoCandidate && slotFullCount > 0 {
+		if lastFailureWasSlot(c) && exhaustedByNoCandidate && NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 			// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 			// 不能落到下面的 502 分支——那会破坏账号并发终点契约。
 			c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{
