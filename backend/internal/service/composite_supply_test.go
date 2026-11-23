@@ -191,8 +191,8 @@ func TestCompositeAccountChainPath(t *testing.T) {
 				CompositeChainOpenAI: {
 					epChat: CompositePathGrok, epResponses: CompositePathGrok,
 					epMessages: CompositePathGrok, epCountTokens: CompositePathGrok,
-					epWS: CompositePathGrok,
-					// images 仅 PlatformOpenAI；video 仅 grok（见 §4.4 向量子测试）。
+					epImages: CompositePathGrok, epWS: CompositePathGrok,
+					// video 仅 grok（见 §4.4 向量子测试）。
 				},
 				CompositeChainAnthropic: {},
 				CompositeChainGemini:    {},
@@ -299,15 +299,30 @@ func TestCompositeAccountChainPathPlanVectors(t *testing.T) {
 		require.False(t, serviceable(zhipu, CompositeEndpointResponsesWS, chain), "zhipu WS %s", chain)
 	}
 
-	// images / embeddings / live / alpha 仅 openai 账号且仅 openai 链。
+	// embeddings / live / alpha 仅 openai 账号且仅 openai 链。
 	for _, endpoint := range []string{
-		CompositeEndpointImages, CompositeEndpointEmbeddings, CompositeEndpointLive,
-		CompositeEndpointAlphaSearch,
+		CompositeEndpointEmbeddings, CompositeEndpointLive, CompositeEndpointAlphaSearch,
 	} {
 		_, ok := CompositeAccountChainPath(CompositeChainOpenAI, endpoint, openai)
 		require.True(t, ok, "openai %s", endpoint)
 		_, ok = CompositeAccountChainPath(CompositeChainOpenAI, endpoint, grok)
 		require.False(t, ok, "grok %s", endpoint)
+	}
+
+	// images 由 Images/GrokImages 两条入口分派：openai / grok 在 openai 链上
+	// 分别走通用 Images 与 handleGrokMedia；其余账号三条链皆不可。
+	imagePath, ok := CompositeAccountChainPath(CompositeChainOpenAI, CompositeEndpointImages, openai)
+	require.True(t, ok, "openai images")
+	require.Equal(t, CompositePathOpenAI, imagePath, "openai images path")
+	imagePath, ok = CompositeAccountChainPath(CompositeChainOpenAI, CompositeEndpointImages, grok)
+	require.True(t, ok, "grok images")
+	require.Equal(t, CompositePathGrok, imagePath, "grok images path")
+	for _, account := range []*Account{zhipu, cursorConnect, antigravity, gemini} {
+		for _, chain := range chains {
+			path, ok := CompositeAccountChainPath(chain, CompositeEndpointImages, account)
+			require.Falsef(t, ok, "%s images %s", account.Platform, chain)
+			require.Emptyf(t, path, "%s images %s path 应为空", account.Platform, chain)
+		}
 	}
 
 	// video 仅 grok 账号且仅 openai 链。

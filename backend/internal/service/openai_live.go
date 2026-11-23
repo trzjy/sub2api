@@ -38,6 +38,8 @@ var liveObserverStoreRetryInterval = time.Second
 // ErrLiveAccountSlotExhausted 表示账号槽等待一次后仍不可用，按无可用账号终态返回。
 var ErrLiveAccountSlotExhausted = errors.New("live account slot exhausted")
 
+var ErrLiveAccountIneligible = errors.New("live selected account cannot serve this endpoint")
+
 var (
 	chatGPTLiveCallsURL        = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
 	chatGPTLiveSidebandBaseURL = "wss://chatgpt.com/backend-api/codex"
@@ -128,6 +130,7 @@ func (s *OpenAIGatewayService) createLiveCall(
 	identity LiveCallIdentity,
 	userMaxConcurrency int,
 	waitSlot func(*AccountSelectionResult) (func(), error),
+	ownershipEndpoint string,
 ) (*LiveCallCreated, error) {
 	if err := ValidateLiveCallRequest(request); err != nil {
 		return nil, err
@@ -150,6 +153,7 @@ func (s *OpenAIGatewayService) createLiveCall(
 	// 防御性装门按文本 D 过滤 Live 账号池且门与计费时刻不同源。
 	ctx = WithOpenAIProfitControlSuppressed(ctx)
 	var lastErr error
+	ineligible := false
 	for attempt := 0; attempt <= 3; attempt++ {
 		selection, _, selectErr := s.SelectAccountWithSchedulerForCapability(
 			ctx,
@@ -173,6 +177,14 @@ func (s *OpenAIGatewayService) createLiveCall(
 		}
 		if selection == nil || selection.Account == nil {
 			return nil, ErrLiveConcurrencyFull
+		}
+		if _, serves := CompositeSelectedAccountServes(ctx, ownershipEndpoint, selection.Account); !serves {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			excluded[selection.Account.ID] = struct{}{}
+			ineligible = true
+			continue
 		}
 		if !selection.Acquired {
 			if waitSlot == nil {
@@ -259,6 +271,9 @@ func (s *OpenAIGatewayService) createLiveCall(
 	if lastErr != nil {
 		return nil, lastErr
 	}
+	if ineligible {
+		return nil, ErrLiveAccountIneligible
+	}
 	return nil, ErrLiveUnavailable
 }
 
@@ -269,8 +284,9 @@ func (s *OpenAIGatewayService) CreateLiveCallWithSlotWaiter(
 	identity LiveCallIdentity,
 	userMaxConcurrency int,
 	waitSlot func(*AccountSelectionResult) (func(), error),
+	ownershipEndpoint string,
 ) (*LiveCallCreated, error) {
-	return s.createLiveCall(ctx, request, identity, userMaxConcurrency, waitSlot)
+	return s.createLiveCall(ctx, request, identity, userMaxConcurrency, waitSlot, ownershipEndpoint)
 }
 
 func (s *OpenAIGatewayService) shouldFailoverLiveCreateError(account *Account, err error) bool {

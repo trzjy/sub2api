@@ -143,8 +143,12 @@ func normalizeCompositeRouteEndpoint(endpoint string) string {
 	}
 }
 
-// CompositeEndpointForInboundPath 把真实请求路径归一为 CompositeEndpoint*。
-// routes 中间件与选号后核对共用此函数，禁止另写第二份映射。
+// CompositeEndpointForInboundPath 把真实请求路径归一为真实线上端点 CompositeEndpoint*，
+// 仅供选号后归属核对 CompositeSelectedAccountServes 使用（alpha_search/live/systemone/video
+// 表示真实线上命中的端点）。
+// 管理端路由注册表的端点域是另一概念，由 routes/gateway.go 的
+// compositeRouteEndpointForPath 维护（alpha/live 归 responses 域），供路由中间件匹配使用。
+// 两者概念不同，禁止合并或互相复用。
 func CompositeEndpointForInboundPath(path string) string {
 	p := strings.TrimSpace(path)
 	switch {

@@ -255,6 +255,8 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 						selected = waitTarget.Account
 						release = waitedRelease
 						selErr = nil
+					} else {
+						recordConcurrencySlotFailure(c, fs.FailedAccountIDs, waitTarget.Account.ID, &slotFullCount)
 					}
 				}
 			}

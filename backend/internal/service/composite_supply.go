@@ -121,8 +121,9 @@ func compositeFactsChainPath(chain, endpoint string, facts compositeAccountFacts
 // routes/gateway.go 的入口平台过滤：
 //   - 文本端点（chat/responses/messages/count_tokens）以 IsOpenAICompatible 为基，
 //     但 /v1/messages 的 web access mode 账号被两条调度器排除，不能服务该端点。
-//   - images/embeddings/live/alpha 仅 PlatformOpenAI（embeddings 由
-//     isOpenAIOnlyEndpointGatewayPlatform 闸控；其余按既有入口平台过滤）。
+//   - images 由 Images/GrokImages 两条入口分派，仅 openai / grok（grok 走
+//     handleGrokMedia，openai 走通用 Images）；embeddings/live/alpha 仅
+//     PlatformOpenAI（embeddings 由 isOpenAIOnlyEndpointGatewayPlatform 闸控）。
 //   - responses_ws 仅 openai / grok；systemone 不可；video 仅 grok。
 func compositeOpenAIChainPath(endpoint string, facts compositeAccountFacts) (string, bool) {
 	platform := facts.Platform
@@ -143,7 +144,17 @@ func compositeOpenAIChainPath(endpoint string, facts compositeAccountFacts) (str
 			return CompositePathOpenAI, true
 		}
 		return "", false
-	case CompositeEndpointImages, CompositeEndpointEmbeddings, CompositeEndpointLive, CompositeEndpointAlphaSearch:
+	case CompositeEndpointImages:
+		// images 由 Images/GrokImages 两条入口分派，仅 openai / grok：
+		// grok 落到 handleGrokMedia，openai 走通用 Images。
+		if platform == PlatformGrok {
+			return CompositePathGrok, true
+		}
+		if platform == PlatformOpenAI {
+			return CompositePathOpenAI, true
+		}
+		return "", false
+	case CompositeEndpointEmbeddings, CompositeEndpointLive, CompositeEndpointAlphaSearch:
 		if platform == PlatformOpenAI {
 			return CompositePathOpenAI, true
 		}

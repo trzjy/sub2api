@@ -289,6 +289,17 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 	)
 }
 
+// SelectAccountForTokenCountWithExclusions 与 SelectAccountForTokenCount 同口径，
+// 额外把本请求已排除的账号挡在候选之外（归属核对拒绝后重选）。
+func (s *OpenAIGatewayService) SelectAccountForTokenCountWithExclusions(
+	ctx context.Context, groupID *int64, sessionHash, requestedModel string,
+	requiredCapability OpenAIEndpointCapability, platform string, excludedIDs map[int64]struct{},
+) (*Account, error) {
+	ctx = WithOpenAIProfitControlSuppressed(ctx)
+	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
+	return s.selectAccountForModelWithExclusions(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, false, 0, requiredCapability, false)
+}
+
 // NormalizeOpenAICompatiblePlatform 保留走 OpenAI 网关的平台原值（grok、多协议 API Key
 // 供应商 kimi/zhipu/deepseek/minimax/opencode-go/command-code/cline，以及本分支自研的
 // codebuddy/other/muse），其他值一律归一为 openai。调度器据此对账号与请求做精确平台匹配：

@@ -256,6 +256,8 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 						selected = waitTarget.Account
 						release = waitRelease
 						selErr = nil
+					} else if slotFull {
+						recordConcurrencySlotFailure(c, fs.FailedAccountIDs, waitTarget.Account.ID, &slotFullCount)
 					}
 				}
 			}
@@ -281,7 +283,15 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 					failoverClientGone(c)
 					return
 				default:
-					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
+						h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+					} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
+						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
+						// 不能落到 502 分支——那会破坏账号并发终点契约。
+						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
+					} else {
+						h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "server_error", infraerrors.AllAccountsExhausted)
+					}
 					return
 				}
 			}

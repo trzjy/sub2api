@@ -732,6 +732,29 @@ func compositeGeminiModelFromParams(c *gin.Context) string {
 	return modelAction
 }
 
+// compositeRouteEndpointForPath 返回管理端路由注册表的端点域（可配置端点集合，
+// 见 docs/COMPOSITE_GROUPS.md 的 Route Registry），不是请求真实命中的线上端点。
+// 选号后的真实归属核对请使用 service.CompositeEndpointForInboundPath。
 func compositeRouteEndpointForPath(path string) string {
-	return service.CompositeEndpointForInboundPath(path)
+	switch {
+	case strings.Contains(path, "/messages/count_tokens"):
+		return service.CompositeRouteEndpointCountTokens
+	case strings.Contains(path, "/messages"):
+		return service.CompositeRouteEndpointMessages
+	case strings.Contains(path, "/responses"),
+		strings.Contains(path, "/alpha/search"),
+		strings.Contains(path, "/realtime/calls"),
+		strings.HasSuffix(strings.TrimRight(path, "/"), "/live"):
+		return service.CompositeRouteEndpointResponses
+	case strings.Contains(path, "/chat/completions"):
+		return service.CompositeRouteEndpointChatCompletions
+	case strings.Contains(path, "/embeddings"):
+		return service.CompositeRouteEndpointEmbeddings
+	case strings.Contains(path, "/images/"):
+		return service.CompositeRouteEndpointImages
+	case strings.Contains(path, "/v1beta/"):
+		return service.CompositeRouteEndpointGemini
+	default:
+		return service.CompositeRouteEndpointAny
+	}
 }

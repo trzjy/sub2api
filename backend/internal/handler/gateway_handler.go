@@ -813,6 +813,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 							selected = waitTarget.Account
 							release = waitedRelease
 							selErr = nil
+						} else {
+							// 等待失败同样是槽位失败：登记该账号，使请求级「槽失败」
+							// 标记成立，终态与等待语义保持一致。
+							_ = recordConcurrencySlotFailure(c, fs.FailedAccountIDs, waitTarget.Account.ID, &slotFullCount)
 						}
 					}
 				}
@@ -2978,23 +2982,28 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	}
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
 
-	// 选择支持该模型的账号
-	account, err := h.gatewayService.SelectAccountForModel(c.Request.Context(), apiKey.GroupID, sessionHash, parsedReq.Model)
-	if err != nil {
-		reqLog.Warn("gateway.count_tokens_select_account_failed", zap.Error(err))
-		cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, parsedReq.Model, parsedReq.Model, service.PlatformAnthropic, err)
-		if !cls.ModelNotFound {
-			markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
+	// 选择支持该模型的账号：归属不合格的候选排除出本请求集合后重选，
+	// 不直接 503——同一请求内可能仍选中另一个可服务账号。
+	failedAccounts := make(map[int64]struct{})
+	var account *service.Account
+	for {
+		var err error
+		account, err = h.gatewayService.SelectAccountForModelWithExclusions(c.Request.Context(), apiKey.GroupID, sessionHash, parsedReq.Model, failedAccounts)
+		if err != nil {
+			reqLog.Warn("gateway.count_tokens_select_account_failed", zap.Error(err))
+			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, parsedReq.Model, parsedReq.Model, service.PlatformAnthropic, err)
+			if !cls.ModelNotFound {
+				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
+			}
+			h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
+			return
 		}
-		h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
-		return
-	}
-
-	// 方案包 B 3.4：选号成功后做一次归属核对，不合格账号不得转发到上游。
-	// infraerrors 与 pkgerrors 同指 internal/pkg/errors，本文件既有别名为 pkgerrors。
-	if h.concurrencyHelper.RejectCompositeIneligible(c, &service.AccountSelectionResult{Account: account}, nil, nil) {
-		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts)
-		return
+		// 方案包 B 3.4：选号成功后做一次归属核对，不合格账号不得转发到上游。
+		// infraerrors 与 pkgerrors 同指 internal/pkg/errors，本文件既有别名为 pkgerrors。
+		if h.concurrencyHelper.RejectCompositeIneligible(c, &service.AccountSelectionResult{Account: account}, failedAccounts, nil) {
+			continue
+		}
+		break
 	}
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 
