@@ -164,6 +164,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	stopJSONKeepalive := func() {}
@@ -204,7 +205,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			}
 			if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
-			} else if slotFullCount > 0 {
+			} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
 				writeConcurrencySlotExhausted(c, h, streamStarted)
 			} else {
@@ -238,6 +239,10 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.images.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
+
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selection, failedAccountIDs, &ownershipRejectedCount) {
+			continue
+		}
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, parsed.Stream, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {

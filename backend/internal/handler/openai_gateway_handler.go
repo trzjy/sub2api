@@ -811,6 +811,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	firstOutputTimeoutSwitchCount := 0
 	profitVetoCount := 0
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
@@ -927,7 +928,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}
 			if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
-			} else if slotFullCount > 0 {
+			} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 				// 不能落到下面的 502 分支——那会破坏账号并发终点契约。
 				writeConcurrencySlotExhausted(c, h, streamStarted)
@@ -1002,6 +1003,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selection, failedAccountIDs, &ownershipRejectedCount) {
+			continue
+		}
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
@@ -1662,6 +1666,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	switchCount := 0
 	profitVetoCount := 0
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
@@ -1773,7 +1778,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			} else {
 				if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
-				} else if slotFullCount > 0 {
+				} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
 					writeConcurrencySlotExhausted(c, h, streamStarted)
 				} else {
@@ -1812,6 +1817,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		_ = scheduleDecision
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selection, failedAccountIDs, &ownershipRejectedCount) {
+			continue
+		}
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
@@ -3366,6 +3374,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	ctx = service.WithOpenAIGuardianParentAffinity(ctx, c, firstMessage, reqModel)
 	switchCount := 0
 	profitVetoCount := 0
+	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
@@ -3545,6 +3554,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			// c.Request.Context() 在 ingress lease 处已换入连接 ctx（见上文），
 			// 与后续 turn 级复用同一上下文，故直接传 gin 上下文。
 			var wsStreamStarted bool
+			if h.concurrencyHelper.RejectCompositeIneligible(c, selection, failedAccountIDs, &ownershipRejectedCount) {
+				continue
+			}
 			fastReleaseFunc, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
 				c, selection, concurrencySlotWaitExhausted(c), false, &wsStreamStarted)
 			if slotFull {

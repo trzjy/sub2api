@@ -124,6 +124,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 
 	profitVetoCount := 0
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	var lastFailoverErr *service.UpstreamFailoverError
 	switchCount := 0
@@ -167,7 +168,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 			}
 			if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 				h.handleFailoverExhausted(c, lastFailoverErr, false)
-			} else if slotFullCount > 0 {
+			} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
 				writeConcurrencySlotExhausted(c, h, streamStarted)
 			} else {
@@ -186,6 +187,9 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 		account := selection.Account
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selection, failedAccountIDs, &ownershipRejectedCount) {
+			continue
+		}
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, "", selection, false, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号；否决次数达上限则按无可用账号终止。

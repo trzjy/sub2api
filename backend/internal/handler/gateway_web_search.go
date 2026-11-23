@@ -240,7 +240,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		account = nil
 	}
 	if err != nil || nativeResp == nil {
-		if lastFailureWasSlot(c) && exhaustedByNoCandidate && NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
+		if exhaustedByNoCandidate && (ownershipRejectedCount > 0 || (lastFailureWasSlot(c) && slotFullCount > 0)) {
 			// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 			// 不能落到下面的 502 分支——那会破坏账号并发终点契约。
 			c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{
