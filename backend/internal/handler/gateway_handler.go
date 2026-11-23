@@ -657,6 +657,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				result.ReasoningEffort = service.DefaultEffortForThinkingEnabled(protocolModel)
 			}
 
+			// 绑定只在转发成功之后写入（方案 §3.3-0/1）：失败转发路径均已 return/continue，
+			// 不会落到这里；本次服务账号写入会话绑定（与既有绑定不同则覆盖）。Cursor 也写。
+			if bindErr := h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionKey, account.ID); bindErr != nil {
+				reqLog.Warn("gateway.messages.gemini.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(bindErr))
+			}
+
 			// §25.17.5 A06：Cursor 账号的账只能走会话终态的唯一结算钩子（上方已注册），
 			// 这里不得再直接提交一次——否则会与终结结算冲突、造成重复计费；多轮会话首轮
 			// 没有完整 usage 时直接提交也会漏账。非 Cursor 账号保持原直接提交路径。
