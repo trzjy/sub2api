@@ -128,6 +128,11 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 		return
 	}
 
+	if h.concurrencyHelper.RejectCompositeIneligible(c, &service.AccountSelectionResult{Account: account}, nil, nil) {
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts)
+		return
+	}
+
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 	if err := h.gatewayService.ForwardResponsesInputTokens(c.Request.Context(), c, account, forwardBody); err != nil {
 		reqLog.Error("openai_input_tokens.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
@@ -300,6 +305,11 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 			markOpsRoutingCapacityLimited(c)
 		}
 		h.anthropicErrorResponse(c, cls.Status, cls.ErrType, cls.Message)
+		return
+	}
+
+	if h.concurrencyHelper.RejectCompositeIneligible(c, &service.AccountSelectionResult{Account: account}, nil, nil) {
+		h.anthropicErrorResponse(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts)
 		return
 	}
 

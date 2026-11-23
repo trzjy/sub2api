@@ -61,33 +61,23 @@ var compositeSelectorChains = [...]string{
 	CompositeChainGemini,
 }
 
-// SelectCompositeCrossChainAccount 按账号优先级 + 同优先级随机，从 A3 多链
-// decision 的 SupplyAccounts 中选出一个本端点可服务的账号，并复用既有并发槽获取逻辑
-// 抢占并发槽，返回所选账号与对应的 release。
-//
-// 所有资格门均复用既有实现，不新增评分公式或平台清单；本方法不写粘性、不记 usage、
-// 不改账号状态。槽满即换号（不排队），读取失败与来源门读取失败一律失败关闭（返回 error）。
-func (s *GatewayService) SelectCompositeCrossChainAccount(
+// compositeCrossChainCandidates 从 supply 构造本端点可服务的候选账号，逐账号执行
+// 全部资格门；读取错误失败关闭，其它不合格账号跳过。分组解析一并在此完成，供
+// accountAdmissionDecision 使用。
+func (s *GatewayService) compositeCrossChainCandidates(
 	ctx context.Context,
 	groupID int64,
 	requestedModel, endpoint string,
 	supply []CompositeOwnershipClaimant,
 	excluded map[int64]struct{},
-) (*Account, func(), error) {
-	if s == nil || s.accountRepo == nil || groupID <= 0 || len(supply) == 0 {
-		return nil, nil, fmt.Errorf("select composite cross-chain account: invalid arguments")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
+) ([]*Account, error) {
 	// 分组上下文：优先复用 ctx 中已解析的 Group，否则回退到 repo；groupID>0 但
 	// group 未解析时由 accountAdmissionDecision 失败关闭。
 	group := s.groupFromContext(ctx, groupID)
 	if group == nil && s.groupRepo != nil {
 		resolved, err := s.resolveGroupByID(ctx, groupID)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		group = resolved
 	}
@@ -97,7 +87,7 @@ func (s *GatewayService) SelectCompositeCrossChainAccount(
 		// 逐账号取新鲜账号；读取错误失败关闭，不存在/不可调度则跳过。
 		account, err := s.getSchedulableAccount(ctx, claim.AccountID)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if account == nil {
 			continue
@@ -125,7 +115,7 @@ func (s *GatewayService) SelectCompositeCrossChainAccount(
 
 		admitted, _, err := accountAdmissionDecision(ctx, account, account.Platform, requestedModel, &groupID, group)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if !admitted {
 			continue
@@ -137,7 +127,7 @@ func (s *GatewayService) SelectCompositeCrossChainAccount(
 
 		reason, err := cursorSupplySourceAvailabilityVetoReason(ctx, account)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if reason != "" {
 			continue
@@ -163,6 +153,33 @@ func (s *GatewayService) SelectCompositeCrossChainAccount(
 		}
 
 		candidates = append(candidates, account)
+	}
+	return candidates, nil
+}
+
+// SelectCompositeCrossChainAccount 按账号优先级 + 同优先级随机，从 A3 多链
+// decision 的 SupplyAccounts 中选出一个本端点可服务的账号，并复用既有并发槽获取逻辑
+// 抢占并发槽，返回所选账号与对应的 release。
+//
+// 所有资格门均复用既有实现，不新增评分公式或平台清单；本方法不写粘性、不记 usage、
+// 不改账号状态。槽满即换号（不排队），读取失败与来源门读取失败一律失败关闭（返回 error）。
+func (s *GatewayService) SelectCompositeCrossChainAccount(
+	ctx context.Context,
+	groupID int64,
+	requestedModel, endpoint string,
+	supply []CompositeOwnershipClaimant,
+	excluded map[int64]struct{},
+) (*Account, func(), error) {
+	if s == nil || s.accountRepo == nil || groupID <= 0 || len(supply) == 0 {
+		return nil, nil, fmt.Errorf("select composite cross-chain account: invalid arguments")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	candidates, err := s.compositeCrossChainCandidates(ctx, groupID, requestedModel, endpoint, supply, excluded)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// blocked = excluded ∪ slotBlocked：本地构造，不修改调用方传入的 excluded。
@@ -210,4 +227,47 @@ func (s *GatewayService) SelectCompositeCrossChainAccount(
 	}
 	// 所有候选均槽满被排除。
 	return nil, nil, fmt.Errorf("%w supporting model: %s", ErrNoAvailableAccounts, requestedModel)
+}
+
+// SelectCompositeCrossChainWaitTarget 返回跨链全满时唯一一次等待的目标与等待计划。
+// 目标优先会话原号（若在合格供给内且未排除），否则取最小优先级档首项；不抢槽。
+func (s *GatewayService) SelectCompositeCrossChainWaitTarget(
+	ctx context.Context,
+	groupID int64,
+	requestedModel, endpoint string,
+	supply []CompositeOwnershipClaimant,
+	excluded map[int64]struct{},
+	sessionHash string,
+) (*AccountSelectionResult, error) {
+	candidates, err := s.compositeCrossChainCandidates(ctx, groupID, requestedModel, endpoint, supply, excluded)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("%w supporting model: %s", ErrNoAvailableAccounts, requestedModel)
+	}
+	var target *Account
+	if sessionHash != "" && s.cache != nil {
+		if id, cacheErr := s.cache.GetSessionAccountID(ctx, groupID, sessionHash); cacheErr == nil && id > 0 {
+			for _, acc := range candidates {
+				if acc.ID == id {
+					target = acc
+					break
+				}
+			}
+		}
+	}
+	if target == nil {
+		target = selectCompositeSupplyByPriority(candidates, excluded, nil)
+	}
+	if target == nil {
+		return nil, fmt.Errorf("%w supporting model: %s", ErrNoAvailableAccounts, requestedModel)
+	}
+	cfg := s.schedulingConfig()
+	return s.newSelectionResult(ctx, target, false, nil, &AccountWaitPlan{
+		AccountID:      target.ID,
+		MaxConcurrency: target.Concurrency,
+		Timeout:        cfg.FallbackWaitTimeout,
+		MaxWaiting:     cfg.FallbackMaxWaiting,
+	})
 }

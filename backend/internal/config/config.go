@@ -2858,8 +2858,6 @@ func setDefaults() {
 	//      留 60s 给上游已比实测慢 4 倍，大请求也不会被误杀。
 	// 原值 120s 会把 125s 墙吃光，排队结束只剩 5s 给上游，必然 524
 	// （2026-11-15 账号 986 线上实证：排队 120s + 上游 125s 超时，客户端白等两分钟）。
-	// 注意：Cursor 平台槽满已改为直接换号、不排队（见 shouldSwitchAccountOnStickySlotFull），
-	// 本值只对保持等待语义的平台（anthropic / antigravity / gemini 等）生效。
 	viper.SetDefault("gateway.scheduling.sticky_session_wait_timeout", 60*time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_wait_timeout", 30*time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_max_waiting", 100)

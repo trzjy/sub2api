@@ -35,6 +35,9 @@ const (
 // liveObserverStoreRetryInterval 是 var 以便测试缩短 store 报错的重试等待。
 var liveObserverStoreRetryInterval = time.Second
 
+// ErrLiveAccountSlotExhausted 表示账号槽等待一次后仍不可用，按无可用账号终态返回。
+var ErrLiveAccountSlotExhausted = errors.New("live account slot exhausted")
+
 var (
 	chatGPTLiveCallsURL        = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
 	chatGPTLiveSidebandBaseURL = "wss://chatgpt.com/backend-api/codex"
@@ -127,6 +130,16 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 	identity LiveCallIdentity,
 	userMaxConcurrency int,
 ) (*LiveCallCreated, error) {
+	return s.createLiveCall(ctx, request, identity, userMaxConcurrency, nil)
+}
+
+func (s *OpenAIGatewayService) createLiveCall(
+	ctx context.Context,
+	request *LiveCallRequest,
+	identity LiveCallIdentity,
+	userMaxConcurrency int,
+	waitSlot func(*AccountSelectionResult) (func(), error),
+) (*LiveCallCreated, error) {
 	if err := ValidateLiveCallRequest(request); err != nil {
 		return nil, err
 	}
@@ -169,11 +182,25 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			}
 			return nil, selectErr
 		}
-		if selection == nil || selection.Account == nil || !selection.Acquired {
-			if selection != nil && selection.ReleaseFunc != nil {
-				selection.ReleaseFunc()
-			}
+		if selection == nil || selection.Account == nil {
 			return nil, ErrLiveConcurrencyFull
+		}
+		if !selection.Acquired {
+			if waitSlot == nil {
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				return nil, ErrLiveConcurrencyFull
+			}
+			release, waitErr := waitSlot(selection)
+			if waitErr != nil {
+				return nil, waitErr
+			}
+			if release == nil {
+				return nil, ErrLiveConcurrencyFull
+			}
+			selection.ReleaseFunc = release
+			selection.Acquired = true
 		}
 
 		account := selection.Account
@@ -244,6 +271,17 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		return nil, lastErr
 	}
 	return nil, ErrLiveUnavailable
+}
+
+// CreateLiveCallWithSlotWaiter 与 CreateLiveCall 相同，但允许调用方在账号槽满时消费一次等待计划。
+func (s *OpenAIGatewayService) CreateLiveCallWithSlotWaiter(
+	ctx context.Context,
+	request *LiveCallRequest,
+	identity LiveCallIdentity,
+	userMaxConcurrency int,
+	waitSlot func(*AccountSelectionResult) (func(), error),
+) (*LiveCallCreated, error) {
+	return s.createLiveCall(ctx, request, identity, userMaxConcurrency, waitSlot)
 }
 
 func (s *OpenAIGatewayService) shouldFailoverLiveCreateError(account *Account, err error) bool {

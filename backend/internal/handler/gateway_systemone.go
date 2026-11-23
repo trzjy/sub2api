@@ -124,6 +124,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 
 	fs := NewFailoverState(false).BindRequest(c)
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	for {
 		if failoverClientGone(c) {
 			return
@@ -155,7 +156,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 			default:
 				if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
 					h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformTypeSafe, false)
-				} else if slotFullCount > 0 {
+				} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
 					h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", false)
 				} else {
@@ -169,6 +170,9 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 		// 3. 获取账号并发槽位（统一入口，方案 §4.3）。
 		// 已持槽直接接管、未持槽立即抢一次、未等过且有等待计划时等一次的判定全部
 		// 收敛到 AcquireAccountSlotForSelection，调用点不再自写等待分支。
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selection, fs.FailedAccountIDs, &ownershipRejectedCount) {
+			continue
+		}
 		accountRelease, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
 			c, selection, slotFullCount > 0, false, &streamStarted)
 		if slotFull {
