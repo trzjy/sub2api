@@ -67,6 +67,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	// let the wait queue flush an SSE ping before the WebSocket handshake succeeds.
 	failed := map[int64]struct{}{}
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	var selection *service.AccountSelectionResult
 	var release func()
 	var token string
@@ -91,6 +92,9 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		account := candidate.Account
 		var streamStarted bool
 		var slotStatus openAISlotAcquireResult
+		if h.concurrencyHelper.RejectCompositeIneligible(c, candidate, failed, &ownershipRejectedCount) {
+			continue
+		}
 		release, slotStatus = h.acquireResponsesAccountSlot(c, apiKey.GroupID, "", candidate, false, &streamStarted, reqLog)
 		if slotStatus != openAISlotAcquireOK {
 			if slotStatus == openAISlotAcquireFailed {
@@ -253,6 +257,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 
 	failed := map[int64]struct{}{}
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	var last *service.UpstreamFailoverError
 	reqLog := requestLogger(c, "handler.openai_gateway.grok_voice", zap.String("endpoint", endpoint))
 	selectionModel := "grok-4.5"
@@ -276,7 +281,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		if selectErr != nil || selection == nil || selection.Account == nil {
 			if last != nil && !lastFailureWasSlot(c) {
 				h.handleFailoverExhausted(c, last, false)
-			} else if slotFullCount > 0 {
+			} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
 				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 			} else {
@@ -286,6 +291,9 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		}
 		account := selection.Account
 		var started bool
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selection, failed, &ownershipRejectedCount) {
+			continue
+		}
 		release, status := h.acquireResponsesAccountSlot(c, apiKey.GroupID, "", selection, false, &started, reqLog)
 		if status == openAISlotAcquireProfitVetoed {
 			failed[account.ID] = struct{}{}
@@ -328,7 +336,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 	}
 	if last != nil && !lastFailureWasSlot(c) {
 		h.handleFailoverExhausted(c, last, false)
-	} else if slotFullCount > 0 {
+	} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 		// 走到循环末尾说明是**固定次数上限用尽**，不是「选号确认无候选」——
 		// 此时写「无可用账号」而不是「并发已满」，避免把次数上限误报成候选耗尽
 		// （外审第五轮 must_fix #1）；但**必须写响应**，否则客户端挂死。

@@ -167,6 +167,7 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 
 	var lastUpstreamErr *service.GeminiCachedContentUpstreamError
 	var ttlRejectedLimit time.Duration
+	ownershipRejectedCount := 0
 	for attempts := 0; attempts < geminiCachedContentCreateMaxAttempts; {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, "", modelName, excluded, "", int64(0))
 		if err != nil {
@@ -177,6 +178,9 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 			break
 		}
 		account := selection.Account
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selection, excluded, &ownershipRejectedCount) {
+			continue
+		}
 		if !service.IsGeminiExplicitCacheAccount(account) {
 			if selection.Acquired && selection.ReleaseFunc != nil {
 				selection.ReleaseFunc()

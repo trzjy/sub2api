@@ -210,6 +210,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	slotFullCount := 0
+	ownershipRejectedCount := 0
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
@@ -305,7 +306,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			}
 			if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 				h.handleFailoverExhausted(c, lastFailoverErr, false)
-			} else if slotFullCount > 0 {
+			} else if NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount) {
 				// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
 				writeConcurrencySlotExhausted(c, h, streamStarted)
 			} else {
@@ -375,6 +376,9 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			admissionSessionHash = ""
 		}
 		var slotResult openAISlotAcquireResult
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selection, failedAccountIDs, &ownershipRejectedCount) {
+			continue
+		}
 		accountReleaseFunc, slotResult = h.acquireResponsesAccountSlot(c, apiKey.GroupID, admissionSessionHash, selection, false, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 媒体路径已显式豁免利润门（suppress 标记），此分支仅防御性兜底，

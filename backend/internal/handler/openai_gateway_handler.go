@@ -3530,6 +3530,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// 等跨分组调度的门只存在于调度栈局部 ctx）；准入成功后并入连接 ctx。
 		admissionCtx := service.ContextWithSelectionProfitGate(ctx, selection)
 		accountReleaseFunc := selection.ReleaseFunc
+		if h.concurrencyHelper.RejectCompositeIneligible(c, selection, failedAccountIDs, &ownershipRejectedCount) {
+			continue
+		}
 		if selection.Acquired {
 			// 调度器已抢槽路径同样终检：选号与抢槽之间账号倍率可能刷新。
 			latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(admissionCtx, account)
@@ -3554,9 +3557,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			// c.Request.Context() 在 ingress lease 处已换入连接 ctx（见上文），
 			// 与后续 turn 级复用同一上下文，故直接传 gin 上下文。
 			var wsStreamStarted bool
-			if h.concurrencyHelper.RejectCompositeIneligible(c, selection, failedAccountIDs, &ownershipRejectedCount) {
-				continue
-			}
 			fastReleaseFunc, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
 				c, selection, concurrencySlotWaitExhausted(c), false, &wsStreamStarted)
 			if slotFull {
