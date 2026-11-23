@@ -1062,25 +1062,11 @@ func (s *GatewayService) bindGatewayStickySessionDuringSelection(ctx context.Con
 }
 
 // BindStickySessionAfterProfitAdmission records a terminally admitted
-// account. Without a profit gate it preserves the pre-existing eager binding
-// behavior at the handler bind points. With a gate it never replaces a
-// different binding that already exists: a temporarily ineligible sticky
-// account remains bound and automatically becomes eligible again if its
-// account rate recovers.
+// account. Bindings are written uniformly after upstream service succeeds and
+// always overwrite any existing value, so the session memory follows the
+// account that actually served the request.
 func (s *GatewayService) BindStickySessionAfterProfitAdmission(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
 	if sessionHash == "" || accountID <= 0 || s.cache == nil {
-		return nil
-	}
-	if !gatewayProfitControlGateActive(ctx) {
-		return s.BindStickySession(ctx, groupID, sessionHash, accountID)
-	}
-	existingAccountID, err := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-	if err != nil && !errors.Is(err, ErrStickySessionNotFound) {
-		// 读失败时无法判断既有绑定，保守跳过而不是冒着覆盖健康绑定的风险写入。
-		slog.Warn("profit_control_sticky_binding_read_failed", "group_id", derefGroupID(groupID), "account_id", accountID, "error", err)
-		return nil
-	}
-	if existingAccountID > 0 && existingAccountID != accountID {
 		return nil
 	}
 	return s.BindStickySession(ctx, groupID, sessionHash, accountID)

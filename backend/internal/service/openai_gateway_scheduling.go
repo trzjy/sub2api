@@ -1515,13 +1515,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 		return nil, false, err
 	}
 
-	// 4. 设置粘性会话绑定（利润门下推迟到 handler 终检通过后再绑定，
-	// 终检否决的账号不得成为新的粘性目标；无门保持既有 eager 绑定与 TTL）
-	// 原绑定账号仍存在时（临时不可用）只借道，不改写绑定，下一轮仍回原账号。
-	// Set sticky session binding (deferred until terminal admission under a profit gate)
-	if sessionHash != "" && !gatewayProfitControlGateActive(ctx) && !s.stickyBindingMustSurviveFallback(ctx, groupID, sessionHash) {
-		_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, selected.ID, openaiStickySessionTTL)
-	}
+	// 4. 选号/抢槽阶段不写会话绑定（方案 §3.3-0）；绑定由 handler 转发成功后统一写入。
 
 	return hydrated, false, nil
 }
@@ -1826,34 +1820,45 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		}
 	}
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {
-		account, stickyHit, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate)
-		if err != nil {
-			return nil, err
+		// 负载感知关闭路径（方案 §3.1/§4.2）：粘性账号抢槽失败后不再原地等待，
+		// 把该账号加入本次请求的排除集合继续选下一个候选；全部候选逐个实际抢槽
+		// 都失败后，才返回唯一一次兜底等待计划（目标账号取最后一个抢槽失败的候选）。
+		candidateExcludedIDs := make(map[int64]struct{}, len(excludedIDs))
+		for id := range excludedIDs {
+			candidateExcludedIDs[id] = struct{}{}
 		}
-		result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
-		if err == nil && result != nil && result.Acquired {
-			selection, selectErr := s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
-			return markStickySessionHit(selection, stickyHit), selectErr
-		}
-		if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
-			waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
-			if waitingCount < cfg.StickySessionMaxWaiting {
-				selection, selectErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-					AccountID:      account.ID,
-					MaxConcurrency: account.Concurrency,
-					Timeout:        cfg.StickySessionWaitTimeout,
-					MaxWaiting:     cfg.StickySessionMaxWaiting,
-				})
+		var lastFailed *Account
+		var lastStickyHit bool
+		var lastErr error
+		for {
+			account, stickyHit, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, candidateExcludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate)
+			if err != nil || account == nil {
+				lastErr = err
+				break
+			}
+			result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
+			if err == nil && result != nil && result.Acquired {
+				selection, selectErr := s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
 				return markStickySessionHit(selection, stickyHit), selectErr
 			}
+			// 抢槽失败：排除该账号，继续下一个候选；不在粘性账号上返回等待计划。
+			lastFailed = account
+			lastStickyHit = stickyHit
+			candidateExcludedIDs[account.ID] = struct{}{}
 		}
-		selection, selectErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-			AccountID:      account.ID,
-			MaxConcurrency: account.Concurrency,
+		if lastFailed == nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, noAvailableOpenAISelectionError(requestedModel, false, "")
+		}
+		selection, selectErr := s.newSelectionResult(ctx, lastFailed, false, nil, &AccountWaitPlan{
+			AccountID:      lastFailed.ID,
+			MaxConcurrency: lastFailed.Concurrency,
 			Timeout:        cfg.FallbackWaitTimeout,
 			MaxWaiting:     cfg.FallbackMaxWaiting,
 		})
-		return markStickySessionHit(selection, stickyHit), selectErr
+		return markStickySessionHit(selection, lastStickyHit), selectErr
 	}
 
 	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
@@ -1942,20 +1947,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	minTierPriority, hasMinTier := minPriorityOfAccounts(candidates)
 
 	// ============ Layer 1: Sticky session ============
-	// 只要会话原本绑定的账号仍然存在，本次回退就只能是「借道」：绑定保持不变，
-	// 下一轮仍回原账号。旧实现只对「等待队列满」一种情形保住绑定，限流、档位漂移、
-	// RPM 红区、渠道限制等临时情形一律删绑定或改写绑定，会话于是被永久迁到
-	// 缓存冷的新账号上（生产实测：换号率 14.8%，其中 47.6% 跨 priority 档）。
-	// 「这条原因该不该销毁绑定」统一由 stickyBindingDroppedOnMiss 回答
-	//（openai_sticky_binding_lifecycle.go），此处只维护「是否已判死」。
-	stickyBindingKept := sessionHash != "" && stickyAccountID > 0
-	if stickyAccountID > 0 && isExcluded(stickyAccountID) {
-		// 尺寸池不匹配（例如 256k 以上的任务必须走「只接大请求」账号，反之小活不进大请求池）：
-		// 这一单注定要换到另一个池，属于「换池」而不是「原号临时接不了」，必须允许把绑定
-		// 改写到目标池的账号，否则该池每一轮都要重新选号，缓存每轮作废。
-		// 临时故障（限流/档位漂移/渠道限制等）不在此列，那些仍然保留绑定。
-		stickyBindingKept = false
-	}
+	// 粘性账号仅在本轮抢槽成功时使用；抢槽失败即放弃粘性命中，由 Layer 2
+	// 候选循环继续选号（方案 §3.1-2）；绑定统一由 handler 转发成功后写入。
 	if sessionHash != "" {
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
@@ -1967,7 +1960,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if s.accountRepo != nil {
 					if gone, lookupErr := s.accountRepo.GetByID(ctx, accountID); lookupErr == nil && gone == nil {
 						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissAccountGone)
-						stickyBindingKept = false
 					}
 				}
 			}
@@ -1976,15 +1968,12 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				// 清理绑定后回落两级池（与 tryStickySessionHit 同一口径）。
 				if account != nil && account.IsWebAccessMode() {
 					s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissWebAccessMode)
-					stickyBindingKept = false
 					return nil, nil
 				}
-				// 临时不可用（限流 / 临时不可调度）不再销毁绑定：本次借道，下一轮回原账号；
-				// 只有永久失效（账号停用/删除）才允许后续重新绑定。
 				clearReason := stickySessionClearReason(account, requestedModel)
 				clearSticky := clearReason != ""
-				if clearSticky && s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, clearReason) {
-					stickyBindingKept = false
+				if clearSticky {
+					s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, clearReason)
 				}
 				// 档位门：粘性命中的账号必须属于当前最小 priority 档，否则放弃本次粘性
 				//（不删绑定，由 Layer 2 选中后改写）。档位门关闭时该判断恒为 true。
@@ -1992,10 +1981,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 					account = s.recheckSelectedOpenAIAccountFromDB(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
 					if account == nil {
 						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissAccountGone)
-						stickyBindingKept = false
 					} else if !s.openAIAccountMatchesSchedulingGroup(account, groupID) {
 						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissGroupMismatch)
-						stickyBindingKept = false
 					} else if s.isOpenAIAccountRequestRuntimeBlocked(account, requestedModel) {
 						// 运行时阻塞是临时态：保留绑定，本次借道。
 						s.releaseStickyBindingOnMiss(ctx, groupID, sessionHash, stickyMissRuntimeBlocked)
@@ -2015,19 +2002,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
 							return markStickySessionHit(selection, true), nil
 						}
-
-						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-						if waitingCount < cfg.StickySessionMaxWaiting {
-							selection, selectErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-								AccountID:      accountID,
-								MaxConcurrency: account.Concurrency,
-								Timeout:        cfg.StickySessionWaitTimeout,
-								MaxWaiting:     cfg.StickySessionMaxWaiting,
-							})
-							return markStickySessionHit(selection, true), selectErr
-						}
-						// 队列满同样是临时态：本次借道，绑定保持不动。
-						stickyBindingKept = true
+						// 粘性账号抢槽失败：不再返回粘性等待计划，继续走 Layer 2
+						// 候选循环；唯一等待出口在 Layer 3 兜底（方案 §4.2）。
 					}
 				}
 			}
@@ -2141,9 +2117,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if selectErr != nil {
 					return nil, true, selectErr
 				}
-				if sessionHash != "" && !stickyBindingKept && !gatewayProfitControlGateActive(ctx) {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
-				}
 				return selection, true, nil
 			}
 		}
@@ -2183,9 +2156,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc)
 				if selectErr != nil {
 					return nil, selectErr
-				}
-				if sessionHash != "" && !stickyBindingKept && !gatewayProfitControlGateActive(ctx) {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
 				}
 				return selection, nil
 			}
