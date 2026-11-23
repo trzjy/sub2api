@@ -24,13 +24,13 @@ func TestConcurrencyErrorResponse(t *testing.T) {
 		wantMessage string
 	}{
 		{
-			name:        "account slot concurrency returns 503 service unavailable",
+			name:        "account slot concurrency returns 503 with no available accounts",
 			err:         &ConcurrencyError{SlotType: "account", IsTimeout: true},
 			slotType:    "user",
 			wantStatus:  http.StatusServiceUnavailable,
 			wantType:    "api_error",
-			wantCode:    gatewayConcurrencyLimitCode,
-			wantMessage: infraerrors.AccountSlotConcurrencyLimit,
+			wantCode:    "",
+			wantMessage: infraerrors.NoAvailableAccounts,
 		},
 		{
 			name:        "user slot concurrency keeps 429 rate limit",

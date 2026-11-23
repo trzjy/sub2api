@@ -29,25 +29,25 @@ func newScopeTestContext(group *service.Group) *gin.Context {
 
 func validSubscriptionGroup(concurrency int) *service.Group {
 	return &service.Group{
-		ID:              7,
-		Name:            "sub-group",
-		Platform:        "anthropic",
-		Status:          service.StatusActive,
-		Hydrated:        true,
+		ID:               7,
+		Name:             "sub-group",
+		Platform:         "anthropic",
+		Status:           service.StatusActive,
+		Hydrated:         true,
 		SubscriptionType: service.SubscriptionTypeSubscription,
-		Concurrency:     concurrency,
+		Concurrency:      concurrency,
 	}
 }
 
 func validMeteringGroup() *service.Group {
 	return &service.Group{
-		ID:              9,
-		Name:            "meter-group",
-		Platform:        "anthropic",
-		Status:          service.StatusActive,
-		Hydrated:        true,
+		ID:               9,
+		Name:             "meter-group",
+		Platform:         "anthropic",
+		Status:           service.StatusActive,
+		Hydrated:         true,
 		SubscriptionType: service.SubscriptionTypeStandard,
-		Concurrency:     0,
+		Concurrency:      0,
 	}
 }
 
@@ -55,49 +55,49 @@ func TestResolveConcurrencyScope(t *testing.T) {
 	sub := &service.UserSubscription{}
 
 	tests := []struct {
-		name        string
-		group       *service.Group
+		name         string
+		group        *service.Group
 		subscription *service.UserSubscription
-		wantKind    string
-		wantMax     int
-		wantGroupID int64
-		wantWord    string
+		wantKind     string
+		wantMax      int
+		wantGroupID  int64
+		wantWord     string
 	}{
 		{
-			name:        "subscription group with subscription resolves to group scope",
-			group:       validSubscriptionGroup(3),
+			name:         "subscription group with subscription resolves to group scope",
+			group:        validSubscriptionGroup(3),
 			subscription: sub,
-			wantKind:    "group",
-			wantMax:     3,
-			wantGroupID: 7,
-			wantWord:    "订阅",
+			wantKind:     "group",
+			wantMax:      3,
+			wantGroupID:  7,
+			wantWord:     "订阅",
 		},
 		{
-			name:        "metering group resolves to user scope even with subscription",
-			group:       validMeteringGroup(),
+			name:         "metering group resolves to user scope even with subscription",
+			group:        validMeteringGroup(),
 			subscription: sub,
-			wantKind:    "user",
-			wantMax:     5,
-			wantGroupID: 0,
-			wantWord:    "用户",
+			wantKind:     "user",
+			wantMax:      5,
+			wantGroupID:  0,
+			wantWord:     "用户",
 		},
 		{
-			name:        "subscription group without subscription resolves to user scope",
-			group:       validSubscriptionGroup(3),
+			name:         "subscription group without subscription resolves to user scope",
+			group:        validSubscriptionGroup(3),
 			subscription: nil,
-			wantKind:    "user",
-			wantMax:     5,
-			wantGroupID: 0,
-			wantWord:    "用户",
+			wantKind:     "user",
+			wantMax:      5,
+			wantGroupID:  0,
+			wantWord:     "用户",
 		},
 		{
-			name:        "no group in context resolves to user scope",
-			group:       nil,
+			name:         "no group in context resolves to user scope",
+			group:        nil,
 			subscription: sub,
-			wantKind:    "user",
-			wantMax:     5,
-			wantGroupID: 0,
-			wantWord:    "用户",
+			wantKind:     "user",
+			wantMax:      5,
+			wantGroupID:  0,
+			wantWord:     "用户",
 		},
 		{
 			name: "invalid (non-hydrated) subscription group resolves to user scope",
@@ -107,10 +107,10 @@ func TestResolveConcurrencyScope(t *testing.T) {
 				// 缺少 Hydrated/Platform/Status → IsGroupContextValid 为 false
 			},
 			subscription: sub,
-			wantKind:    "user",
-			wantMax:     5,
-			wantGroupID: 0,
-			wantWord:    "用户",
+			wantKind:     "user",
+			wantMax:      5,
+			wantGroupID:  0,
+			wantWord:     "用户",
 		},
 	}
 
@@ -129,11 +129,11 @@ func TestResolveConcurrencyScope(t *testing.T) {
 
 func TestRenderConcurrencyLimitMessage(t *testing.T) {
 	tests := []struct {
-		name string
-		tmpl string
-		kind string
+		name  string
+		tmpl  string
+		kind  string
 		limit int
-		want string
+		want  string
 	}{
 		{
 			name:  "empty template falls back to chinese default (user, limit>0)",

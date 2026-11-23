@@ -74,13 +74,13 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 			Message: allAccountsCoolingMessage(selectionErr),
 		}
 	}
-	// 账号本身可用、只是会话/并发槽被占满：与「账号不可用」是两种处置，
-	// 不能共用「暂无可用账号」的说法，否则运维会去查号池而不是查并发。
+	// 账号本身可用、只是会话/并发槽被占满：按统一口径（方案 §1.1-5 / §4.5）
+	// 归入「该分组暂无可用账号」，状态码与 ErrType 保持原样，只换文案。
 	if selectionErr.SessionSlotsFull > 0 {
 		return noAccountErrorClassification{
 			Status:  http.StatusServiceUnavailable,
 			ErrType: "service_unavailable",
-			Message: infraerrors.AccountSlotConcurrencyLimit,
+			Message: infraerrors.NoAvailableAccounts,
 		}
 	}
 	return fallback

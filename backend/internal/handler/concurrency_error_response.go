@@ -73,8 +73,9 @@ func concurrencyErrorResponse(err error, slotType string, concurrencyLimitMessag
 			return http.StatusTooManyRequests, "rate_limit_error", gatewayConcurrencyLimitCode,
 				renderConcurrencyLimitMessage(concurrencyLimitMessage, slotType, concurrencyErr.Limit)
 		}
-		return http.StatusServiceUnavailable, "api_error", gatewayConcurrencyLimitCode,
-			renderConcurrencyLimitMessage(concurrencyLimitMessage, slotType, concurrencyErr.Limit)
+		// 账号维度名额耗尽属我们自己供给不足，不再向上下游暴露并发限额归因：
+		// 保持 503 + api_error，code 置空，message 统一为「该分组暂无可用账号」。
+		return http.StatusServiceUnavailable, "api_error", "", infraerrors.NoAvailableAccounts
 	}
 
 	if errors.Is(err, context.Canceled) {

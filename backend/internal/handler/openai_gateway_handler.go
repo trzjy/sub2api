@@ -1349,6 +1349,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), openAIForwardSucceededForScheduling(result), nil)
 		}
 
+		// 会话绑定只在转发成功之后写入（方案 §3.3-0 / §4.4）：失败转发不得留下或改写
+		// 绑定；本次服务账号与旧绑定不同时由 BindStickySessionAfterProfitAdmission 覆盖。
+		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); err != nil {
+			reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		}
+
 		// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
 		submitResponsesUsage(result)
 		reqLog.Debug("openai.request_completed",
@@ -2092,6 +2098,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, result), true, nil)
 		}
 
+		// 会话绑定只在转发成功之后写入（方案 §3.3-0 / §4.4）：失败转发不得留下或改写
+		// 绑定；本次服务账号与旧绑定不同时由 BindStickySessionAfterProfitAdmission 覆盖。
+		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); err != nil {
+			reqLog.Warn("openai_messages.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		}
+
 		submitMessagesUsage(result)
 		reqLog.Debug("openai_messages.request_completed",
 			zap.Int64("account_id", account.ID),
@@ -2779,7 +2791,7 @@ const (
 	// 未写任何响应；调用方应经 recordOpenAIProfitVeto 把该账号加入本请求排除集
 	// 后重新选号，全池耗尽由下一轮选号返回标准 no available accounts。
 	openAISlotAcquireProfitVetoed
-	// openAISlotAcquireSlotFull：账号并发槽已满（快速抢槽失败，不排队等待）。
+	// openAISlotAcquireSlotFull：账号并发槽已满（统一入口抢槽/等待均未拿到）。
 	// **响应尚未写出**，调用方应经 recordConcurrencySlotFailure 把该账号加入本请求
 	// 排除集后换同组下一个账号再试；候选耗尽时由调用方用 writeConcurrencySlotExhausted
 	// 写出终态 503（与既有槽满出口逐字节一致）。
@@ -2985,75 +2997,39 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	// 本函数是 ChatCompletions/Responses/Messages 三个文本入口共享的选号后处理点，
 	// 调用方在返回后才读取 QuotaPlatform/usage，故此处写回覆盖本次尝试的全部计量。
 	applyCompositeSelectedAccountPlatform(c, account)
+	// 账号槽获取统一入口（方案 §4.3）：已持槽直接接管 ReleaseFunc（不重复抢槽，
+	// 防 Concurrency=1 自锁）；未持槽立即抢一次，抢失败且本次尚未等过且有等待
+	// 计划时等待一次；仍未拿到则返回 slotFull，由调用方排除该账号换下一个候选。
+	var release func()
 	if selection.Acquired {
-		latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
-		if vetoed {
-			if selection.ReleaseFunc != nil {
-				selection.ReleaseFunc()
-			}
-			reqLog.Debug("openai.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
-			return nil, openAISlotAcquireProfitVetoed
+		release = selection.ReleaseFunc
+	} else {
+		var slotFull bool
+		release, slotFull = h.concurrencyHelper.AcquireAccountSlotForSelection(
+			c, selection, concurrencySlotWaitExhausted(c), reqStream, streamStarted)
+		if slotFull {
+			return nil, openAISlotAcquireSlotFull
 		}
-		account = latest
-		selection.Account = latest
-		// 调度器已抢槽路径无门时由选号内部完成 eager 绑定；门下选号内部
-		// 推迟绑定，这里在终检通过后补准入后绑定。
-		if selection.ProfitGateActive() {
-			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, groupID, sessionHash, account.ID); err != nil {
-				reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-			}
-		}
-		if handle := newTransferableRelease(ctx, "account_slot", selection.ReleaseFunc); handle != nil {
-			trackTransferableSlot(c, cursorSlotHandleAccountKey, handle)
-			return handle.Release, openAISlotAcquireOK
-		}
-		return nil, openAISlotAcquireOK
-	}
-	// 槽满即换号（2026-11-20 用户裁定）：快速抢槽失败直接返回槽满，由调用方排除
-	// 该账号并换同组下一个候选，任何候选都不再在账号上排队等待。
-	if selection.WaitPlan == nil {
-		markOpsRoutingCapacityLimited(c)
-		writeError(http.StatusServiceUnavailable, "api_error", "", infraerrors.NoAvailableAccounts)
-		return nil, openAISlotAcquireFailed
 	}
 
-	fastReleaseFunc, fastAcquired, err := h.concurrencyHelper.TryAcquireAccountSlot(
-		ctx,
-		account.ID,
-		selection.WaitPlan.MaxConcurrency,
-	)
-	if err != nil {
-		reqLog.Warn("openai.account_slot_quick_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-		status, errType, code, message := concurrencyErrorResponse(err, "account", "")
-		writeError(status, errType, code, message)
-		return nil, openAISlotAcquireFailed
+	// 分组利润控制：拿到槽后终检。选号与抢槽之间账号倍率可能刷新，越线则释放
+	// 槽位交由调用方排除重选。选号期不写绑定，绑定统一在转发成功分支写入（§3.3-0/§4.4）。
+	latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
+	if vetoed {
+		if release != nil {
+			release()
+		}
+		reqLog.Debug("openai.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
+		return nil, openAISlotAcquireProfitVetoed
 	}
-	if fastAcquired {
-		// 分组利润控制：快速抢槽成功后终检。选号与抢槽之间账号
-		// 倍率可能刷新，越线则释放槽位交由调用方排除重选，不绑定粘连。
-		latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
-		if vetoed {
-			if fastReleaseFunc != nil {
-				fastReleaseFunc()
-			}
-			reqLog.Debug("openai.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
-			return nil, openAISlotAcquireProfitVetoed
-		}
-		account = latest
-		selection.Account = latest
-		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, groupID, sessionHash, account.ID); err != nil {
-			reqLog.Warn("openai.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-		}
-		if handle := newTransferableRelease(ctx, "account_slot", fastReleaseFunc); handle != nil {
-			trackTransferableSlot(c, cursorSlotHandleAccountKey, handle)
-			return handle.Release, openAISlotAcquireOK
-		}
-		return nil, openAISlotAcquireOK
+	account = latest
+	selection.Account = latest
+
+	if handle := newTransferableRelease(ctx, "account_slot", release); handle != nil {
+		trackTransferableSlot(c, cursorSlotHandleAccountKey, handle)
+		return handle.Release, openAISlotAcquireOK
 	}
-	// 槽满即分流（2026-11-20 用户裁定）：组内还有候选时立即换号，不在满载账号上排队等待。
-	// 排队成功的旧路径（AcquireAccountSlotWithWaitTimeout 及其后的终检/绑定/转交）与
-	// 快速抢槽路径（fastAcquired 分支）语义重复，删除后由调用方循环排除该账号并换下一个候选。
-	return nil, openAISlotAcquireSlotFull
+	return nil, openAISlotAcquireOK
 }
 
 // ResponsesWebSocket handles OpenAI Responses API WebSocket ingress endpoint
@@ -3559,25 +3535,18 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			selection.Account = latest
 		}
 		if !selection.Acquired {
-			if selection.WaitPlan == nil {
-				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.WSAccountBusy)
+			// 首次准入走统一抢槽入口（方案 §4.3）：未持槽立即抢一次，抢失败且本次
+			// 尚未等过且有等待计划时等待一次；等不到按无可用账号关闭连接。WS 的
+			// c.Request.Context() 在 ingress lease 处已换入连接 ctx（见上文），
+			// 与后续 turn 级复用同一上下文，故直接传 gin 上下文。
+			var wsStreamStarted bool
+			fastReleaseFunc, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
+				c, selection, concurrencySlotWaitExhausted(c), false, &wsStreamStarted)
+			if slotFull {
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.NoAvailableAccounts)
 				return
 			}
-			fastReleaseFunc, fastAcquired, err := h.concurrencyHelper.TryAcquireAccountSlot(
-				ctx,
-				account.ID,
-				selection.WaitPlan.MaxConcurrency,
-			)
-			if err != nil {
-				reqLog.Warn("openai.websocket_account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				closeOpenAIClientWS(wsConn, coderws.StatusInternalError, infraerrors.ServiceTemporarilyUnavailable)
-				return
-			}
-			if !fastAcquired {
-				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.WSAccountBusy)
-				return
-			}
-			// 分组利润控制：WS 快速抢槽成功后终检，越线则释放
+			// 分组利润控制：WS 抢槽/等待成功后终检，越线则释放
 			// 槽位、排除该账号重新选号，全池耗尽由下一轮选号关闭连接。
 			latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(admissionCtx, account)
 			if vetoed {
