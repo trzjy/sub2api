@@ -464,6 +464,8 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	warnMaxIndex := -1
 	warnSawToolUse := false
 	eventBuffer := &contextWarnEventBuffer{}
+	// eventBufferDrained 使补出幂等：无论从哪个出口触发、触发多少次，都只补出一次。
+	eventBufferDrained := false
 
 	usage := &ClaudeUsage{}
 	audit := &upstreamCompletionAudit{}
@@ -563,12 +565,15 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		return result, s.noteEmptyUpstreamCompletion(ctx, account, model, usage, audit)
 	}
 
-	// drainEventBuffer 在流异常结束、当前事件尚未收到边界空行时，把未闭合缓冲
-	// 原样写出（不注入提醒），随后照常返回给调用方既有的错误/断连处置。
+	// drainEventBuffer 把未闭合的事件缓冲原样写出（不注入提醒），保证终止事件已
+	// 识别但最后空行未到的截断出口不丢尾。函数级 defer 覆盖所有退出路径，分支内
+	// 不再各自调用；eventBufferDrained 保证幂等，客户端断连或缓冲为空时为 no-op。
+	// 写出失败静默返回，不改 clientDisconnected 状态，沿用调用方既有的错误/断连处置。
 	drainEventBuffer := func() {
-		if clientDisconnected || !eventBuffer.active() {
+		if eventBufferDrained || clientDisconnected || !eventBuffer.active() {
 			return
 		}
+		eventBufferDrained = true
 		for _, buffered := range eventBuffer.flush() {
 			if _, werr := io.WriteString(w, buffered); werr != nil {
 				return
@@ -579,6 +584,9 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		}
 		flusher.Flush()
 	}
+	// 唯一退出保证：挂在缓冲与补出函数定义之后、主循环之前，覆盖 EOF、读错误、
+	// 超时、正常结束等全部 return 路径。
+	defer drainEventBuffer()
 
 	// writePassthroughLine 原样写出一行（含换行）；写出失败置 clientDisconnected
 	// 并沿用既有日志，返回是否写出成功。
@@ -605,8 +613,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					flusher.Flush()
 				}
 				if !sawTerminalEvent {
-					// 缓冲未闭合即结束：把未闭合事件原样补出，不注入提醒。
-					drainEventBuffer()
+					// 未闭合缓冲由函数级 defer 统一补出，不注入提醒。
 					if clientDisconnected && streamInterval > 0 {
 						lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
 						if time.Since(lastRead) >= streamInterval {
@@ -621,8 +628,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 				if sawTerminalEvent {
 					return finishUpstreamStream()
 				}
-				// 缓冲未闭合即读错误：原样补出已缓冲行，再沿用既有错误处置。
-				drainEventBuffer()
+				// 未闭合缓冲由函数级 defer 统一补出，这里沿用既有错误处置。
 				if clientDisconnected {
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after disconnect: %w", ev.err)
 				}
@@ -705,8 +711,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			if time.Since(lastRead) < streamInterval {
 				continue
 			}
-			// 缓冲未闭合即超时：原样补出已缓冲行，再沿用既有超时处置。
-			drainEventBuffer()
+			// 未闭合缓冲由函数级 defer 统一补出，这里沿用既有超时处置。
 			if clientDisconnected {
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after timeout")
 			}

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -535,4 +536,75 @@ func TestContextWarnPassthroughStreamWarningBeforeMessageDelta(t *testing.T) {
 	if !warnBefore {
 		t.Fatalf("warning block (index 1) not found before message_delta:\n%s", out)
 	}
+}
+
+// ---------- 外审第 4 轮 must_fix：终止事件已识别、最后空行未到的截断出口 ----------
+
+// ctxWarnFailReader 在数据读尽后返回预设错误，用于驱动"读错误结束"的截断出口。
+type ctxWarnFailReader struct{ err error }
+
+func (r ctxWarnFailReader) Read([]byte) (int, error) { return 0, r.err }
+
+// ctxWarnTruncatedSSE 构造缺最后空行的 SSE：event 行 + data 行后直接结束，
+// 终止事件已被识别，但事件边界空行未到，缓冲仍处于未闭合状态。
+func ctxWarnTruncatedSSE() string {
+	return strings.Join([]string{
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+	}, "\n")
+}
+
+// ctxWarnRunPassthroughTruncated 用真实透传处理器驱动截断流，返回写给客户端的原文与
+// 处理器错误。终止事件已识别时走 finishUpstreamStream，空 usage 下它返回
+// empty-completion 错误，与本卡关注的缓冲补出无关，故此处不因 err 失败，只核对字节。
+func ctxWarnRunPassthroughTruncated(t *testing.T, body io.Reader, sessionHash string, accountID int64) (string, error) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ctx := WithRequestSizeSessionHash(ctxWarnTestContext(), sessionHash)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(body),
+	}
+	s := &GatewayService{}
+	result, err := s.handleStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, &Account{ID: accountID}, time.Now(), "claude-test")
+	_ = result
+	return rec.Body.String(), err
+}
+
+// ctxWarnAssertTruncatedDrained 按原始字节与事件边界核对未闭合 message_stop 被原样补出：
+// 两行逐字节一致、同属一个事件且行序未被拆散、且不注入任何提醒事件。
+func ctxWarnAssertTruncatedDrained(t *testing.T, out string) {
+	t.Helper()
+	const want = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n"
+	if out != want {
+		t.Fatalf("unclosed buffer not drained verbatim:\n got=%q\nwant=%q", out, want)
+	}
+	events := ctxWarnParseSSEEvents(out)
+	if len(events) != 1 || events[0].eventName() != "message_stop" || events[0].dataType() != "message_stop" {
+		t.Fatalf("drained event not intact at event boundary: %+v", events)
+	}
+	if len(events[0].lines) != 2 || events[0].lines[0] != "event: message_stop" ||
+		events[0].lines[1] != `data: {"type":"message_stop"}` {
+		t.Fatalf("drained event lines reordered/rewritten: %q", events[0].lines)
+	}
+	if strings.Contains(out, "已达 80 万") {
+		t.Fatalf("truncated drain must not inject warning:\n%s", out)
+	}
+}
+
+func TestContextWarnPassthroughTruncatedAtEOF(t *testing.T) {
+	ctxWarnResetState(t)
+	out, _ := ctxWarnRunPassthroughTruncated(t, strings.NewReader(ctxWarnTruncatedSSE()), "sess-pt-trunc-eof", 9020)
+	ctxWarnAssertTruncatedDrained(t, out)
+}
+
+func TestContextWarnPassthroughTruncatedByReadError(t *testing.T) {
+	ctxWarnResetState(t)
+	boom := errors.New("synthetic upstream read error")
+	body := io.MultiReader(strings.NewReader(ctxWarnTruncatedSSE()), ctxWarnFailReader{err: boom})
+	out, _ := ctxWarnRunPassthroughTruncated(t, body, "sess-pt-trunc-readerr", 9021)
+	ctxWarnAssertTruncatedDrained(t, out)
 }
