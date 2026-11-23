@@ -105,12 +105,6 @@ var webConsoleQuotaProviderEndpointTable = map[string]webConsoleQuotaProviderEnd
 		// 适配器 _do_login 会先点该 Tab 再填密码，故密码是可选加速项而非唯一入口。
 		loginModes: []string{webConsoleQuotaLoginModeSMS, webConsoleQuotaLoginModePassword},
 	},
-	providerSensenova: {
-		loginURL:         "https://platform.sensenova.cn/login",
-		successURLPrefix: "https://platform.sensenova.cn/console",
-		// 联网实测（2026-11-12）：默认「手机号登录/注册」，另有「账号密码登录」Tab。
-		loginModes: []string{webConsoleQuotaLoginModeSMS, webConsoleQuotaLoginModePassword},
-	},
 	providerLongcat: {
 		loginURL:         "https://longcat.chat/platform/usage",
 		successURLPrefix: "https://longcat.chat/platform/",
