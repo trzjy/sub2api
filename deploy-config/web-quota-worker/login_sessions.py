@@ -3,7 +3,7 @@
 
 背景
 ----
-longcat 只有扫码 / 短信登录，compshare / sensenova 的默认页也是短信登录；
+longcat 只有扫码 / 短信登录，compshare 的默认页也是短信登录；
 这三家都无法由 worker 静默完成登录。既有实现把这件事推给用户本机的
 ``local_captcha_helper``（桌面通知 + 有头浏览器），代价是「必须在装了 helper
 的那台电脑上操作，服务器上点不动」。

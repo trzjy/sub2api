@@ -375,7 +375,7 @@ def _resolve_adapter_class(module):
     唯一事实源是「这个模块实现了 BaseAdapter」，不是「类必须叫 Adapter」。
     旧实现按固定名字 ``getattr(module, "Adapter")`` 取，而三个模块里分别叫
     ``LongcatAdapter`` / ``CompshareAdapter`` / ``SensenovaAdapter``，
-    结果 longcat / compshare / sensenova 全部 503 adapter not implemented
+    结果 longcat / compshare 全部 503 adapter not implemented
     （2026-11-13 实测确认）——名字约定属于实现细节，不该成为加载契约。
     """
     for name in dir(module):
@@ -510,7 +510,7 @@ async def probe(request: Request):
 # ---------------------------------------------------------------------------
 # 服务端登录会话（扫码 / 短信 / 滑块）
 #
-# 为什么要这一层：longcat 只有扫码与短信登录，compshare / sensenova 的默认页
+# 为什么要这一层：longcat 只有扫码与短信登录，compshare 的默认页
 # 也是短信登录。它们都必须由真人完成，worker 无法静默登录。既有实现把这件事
 # 推给用户本机的 local_captcha_helper；本层把它搬回服务端——worker 打开登录页，
 # 管理端网页显示画面，点击 / 输入 / 回车全部转发回同一个页面上下文，登录成功后

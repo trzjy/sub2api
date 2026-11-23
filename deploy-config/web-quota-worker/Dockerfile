@@ -1,5 +1,5 @@
 # web-quota-worker: 无状态 Playwright Sidecar 服务
-# 负责三家上游（compshare / sensenova / longcat）Web 控制台用量采集与自动重登。
+# 负责上游（compshare / longcat）Web 控制台用量采集与自动重登。
 # 设计约束：无状态，不落盘任何凭据；只回传刷新后的 storageState 与结构化用量。
 #
 # 2026-11-20 用户裁定「根治部署重复下载」：基础环境（Playwright 运行时 + 中文字体 +

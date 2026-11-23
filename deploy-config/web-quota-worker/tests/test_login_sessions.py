@@ -303,7 +303,7 @@ def test_actions_forward_to_same_page():
 def test_capture_returns_base64_without_data_prefix():
     async def case():
         registry = LoginSessionRegistry(_factory(FakeContext(FakePage())))
-        session = await _start(registry, provider="sensenova")
+        session = await _start(registry, provider="compshare")
         shot = await capture(session)
         assert shot == base64.b64encode(FAKE_JPEG).decode("ascii")
         assert not shot.startswith("data:")
