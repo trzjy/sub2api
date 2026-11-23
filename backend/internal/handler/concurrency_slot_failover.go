@@ -267,9 +267,6 @@ func (h *ConcurrencyHelper) AcquireAccountSlotForSelection(
 	return nil, true
 }
 
-// compositeOwnershipRejectedKey 标记本次请求发生过「复合归属不合格」的候选排除。
-const compositeOwnershipRejectedKey = "composite_ownership_rejected"
-
 // RejectCompositeIneligible 在选号后、抢槽/转发前做唯一一次归属核对。
 // 不合格时：释放选号器已占的槽、把账号排除出本请求候选、登记独立计数；
 // 不递增 slotFullCount、不设置「已等过」标记（不得消耗本次请求的唯一一次等待）。
@@ -296,7 +293,6 @@ func (h *ConcurrencyHelper) RejectCompositeIneligible(
 	if rejectedCount != nil {
 		*rejectedCount++
 	}
-	c.Set(compositeOwnershipRejectedKey, true)
 	return true
 }
 
