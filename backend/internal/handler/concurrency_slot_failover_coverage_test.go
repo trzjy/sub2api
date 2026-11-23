@@ -18,7 +18,8 @@ import (
 // 破坏「账号维度并发终态恒为 503」的契约。
 //
 // 本测试是源码级锁定：凡是调用 recordConcurrencySlotFailure（= 接入了槽位换号）的
-// 文件，必须同时出现「slotFullCount > 0」的耗尽终态分支。
+// 文件，必须同时出现候选耗尽终态分支——既可以是直接判断「slotFullCount > 0」，
+// 也可以是统一的判定助手「NoAvailableBySlotOrOwnership(...)」；两种合法形式都放行。
 // 将来新增入口只写换号、漏写耗尽终态，会在这里被拦住。
 //
 // 已知例外（登记在案，不走本断言）：
@@ -45,9 +46,12 @@ func TestSlotFailureEntryPointsAlsoHandleExhausted(t *testing.T) {
 			continue
 		}
 		checked++
-		require.Contains(t, src, "slotFullCount > 0",
+		hasExhaustedBranch := strings.Contains(src, "slotFullCount > 0") ||
+			strings.Contains(src, "NoAvailableBySlotOrOwnership(")
+		require.True(t, hasExhaustedBranch,
 			"%s 接入了槽位换号(recordConcurrencySlotFailure)却没写候选耗尽终态分支"+
-				"（slotFullCount > 0）——槽位失败导致候选耗尽时会落到 502，破坏账号并发终点契约",
+				"（合法形式二选一：字面量 slotFullCount > 0，或统一判定助手 NoAvailableBySlotOrOwnership(...)）"+
+				"——槽位失败导致候选耗尽时会落到 502，破坏账号并发终点契约",
 			name)
 	}
 	require.Greater(t, checked, 0, "未找到任何接入槽位换号的文件，测试本身失效")

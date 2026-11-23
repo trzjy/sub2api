@@ -102,7 +102,7 @@ func TestClassifySelectionFailureError_ModelCoolingCarriesRecovery(t *testing.T)
 	require.Contains(t, got.Message, "3 小时 20 分钟")
 }
 
-// 账号可用、只是会话槽位占满：按统一口径返回「该分组暂无可用账号」，状态码保持 503。
+// 账号可用、只是会话槽位占满：按统一口径返回「该分组暂无可用账号」，状态码保持 503；errType 已按契约统一为 api_error。
 func TestClassifySelectionFailureError_SessionSlotsFull(t *testing.T) {
 	fallback := noAccountErrorClassification{Status: http.StatusServiceUnavailable, ErrType: "api_error", Message: infraerrors.NoAvailableAccounts}
 
@@ -112,7 +112,7 @@ func TestClassifySelectionFailureError_SessionSlotsFull(t *testing.T) {
 	)
 
 	require.Equal(t, http.StatusServiceUnavailable, got.Status)
-	require.Equal(t, "service_unavailable", got.ErrType)
+	require.Equal(t, "api_error", got.ErrType)
 	require.Equal(t, infraerrors.NoAvailableAccounts, got.Message)
 }
 
