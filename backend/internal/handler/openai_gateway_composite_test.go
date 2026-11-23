@@ -9,6 +9,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
@@ -383,4 +385,52 @@ func TestOpenAICompatibleRequestPlatform(t *testing.T) {
 		// 非 composite 且无盖章：使用分组平台。
 		require.Equal(t, service.PlatformGrok, openAICompatibleRequestPlatform(context.Background(), apiKey))
 	})
+}
+
+// TestOpenAIMessagesSizeExclusionAddsLogging 验证派发单 C25/C26 取证日志：规模排除规则
+// 命中的 accountID 集合与数量被结构化打印（id 升序，空集也记录），使生产日志中的
+// excluded=N 可精确归因到具体规则与账号。纯日志用例，不依赖 DB/网关桩。
+func TestOpenAIMessagesSizeExclusionAddsLogging(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	reqLog := zap.New(core)
+	gid := int64(118)
+
+	logMessagesSizeExclusionAdds(reqLog, "self_host", &gid, service.PlatformZhipu, "glm-5.3-flash",
+		map[int64]struct{}{104: {}, 101: {}})
+	logMessagesSizeExclusionAdds(reqLog, "sensenova", &gid, service.PlatformZhipu, "glm-5.3-flash",
+		map[int64]struct{}{})
+	logMessagesSizeExclusionAdds(reqLog, "request_size_scope", &gid, service.PlatformZhipu, "glm-5.3-flash",
+		map[int64]struct{}{205: {}, 203: {}, 204: {}})
+
+	entries := observed.All()
+	require.Len(t, entries, 3, "三条规则各记录一条")
+
+	byRule := make(map[string]map[string]interface{}, len(entries))
+	for _, e := range entries {
+		require.Equal(t, "openai_messages.size_exclusion_adds", e.Message)
+		ctx := e.ContextMap()
+		require.Equal(t, int64(118), ctx["group_id"])
+		require.Equal(t, service.PlatformZhipu, ctx["platform"])
+		require.Equal(t, "glm-5.3-flash", ctx["model"])
+		byRule[ctx["rule"].(string)] = ctx
+	}
+
+	self := byRule["self_host"]
+	require.Equal(t, int64(2), self["count"])
+	selfIDs := self["account_ids"].([]interface{})
+	require.Len(t, selfIDs, 2)
+	require.EqualValues(t, 101, selfIDs[0])
+	require.EqualValues(t, 104, selfIDs[1])
+
+	sense := byRule["sensenova"]
+	require.Equal(t, int64(0), sense["count"])
+	require.Empty(t, sense["account_ids"])
+
+	scope := byRule["request_size_scope"]
+	require.Equal(t, int64(3), scope["count"])
+	scopeIDs := scope["account_ids"].([]interface{})
+	require.Len(t, scopeIDs, 3)
+	require.EqualValues(t, 203, scopeIDs[0])
+	require.EqualValues(t, 204, scopeIDs[1])
+	require.EqualValues(t, 205, scopeIDs[2])
 }
