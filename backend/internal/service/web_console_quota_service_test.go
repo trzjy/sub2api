@@ -762,7 +762,7 @@ func TestWebConsoleQuotaService_NeedsInteractiveAuthKeepsHistoricalValues(t *tes
 }
 
 func TestWebConsoleQuotaService_AuthFailedKeepsHistoricalValues(t *testing.T) {
-	body := `{"status":"auth_failed","provider":"sensenova","error":"bad password"}`
+	body := `{"status":"auth_failed","provider":"compshare","error":"bad password"}`
 	worker := wcqNewFakeWorker(t, http.StatusOK, body)
 	repo := &wcqRepoStub{}
 	svc := NewWebConsoleQuotaService(repo, wcqConfig(worker.server.URL))
