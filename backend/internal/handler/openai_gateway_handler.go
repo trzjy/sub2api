@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"runtime/debug"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1706,9 +1705,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// 任何账号。估算 input 与是否触发排除由 usage 对账字段透传（RoutingEstimatedInputTokens /
 	// LargeRequestReroute）。估算模型用映射后的 estimateModel（与既有三门派发单同口径）。
 	routingEstimatedInputTokens, largeRequestOnlyAdds := h.applyRequestSizeScopeExclusion(c.Request.Context(), c, reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, sessionHash, body)
-	// 取证日志（派发单 C25/C26）：逐规则打印命中的 accountID 集合与数量，供生产定位
-	// excluded=N 的精确来源；仅新增观测，不改变任何排除/选号行为。
-	logMessagesSizeExclusionAdds(reqLog, "request_size_scope", apiKey.GroupID, requestPlatform, estimateModel, largeRequestOnlyAdds)
 	for id := range largeRequestOnlyAdds {
 		failedAccountIDs[id] = struct{}{}
 	}
@@ -5634,41 +5630,6 @@ func (h *OpenAIGatewayHandler) applyRequestSizeScopeExclusion(
 		return effective, empty
 	}
 	return effective, excluded
-}
-
-// logMessagesSizeExclusionAdds 记录 messages 选号前单条规模排除规则命中的账号 id 集合与数量。
-//
-// 派发单 C25 取证用：每条 apply...Exclusion 各自调用一次，输出结构化字段
-// rule/group_id/platform/model/count/account_ids（id 升序便于比对），使生产日志中的
-// "excluded=N" 可精确归因到具体规则与具体账号。空集合同样记录（count=0），用于区分
-// "规则未命中"与"日志缺失"。本函数纯观测，不改动任何集合或选号行为。
-func logMessagesSizeExclusionAdds(
-	reqLog *zap.Logger,
-	rule string,
-	groupID *int64,
-	platform string,
-	model string,
-	ids map[int64]struct{},
-) {
-	if reqLog == nil {
-		return
-	}
-	groupIDVal := int64(0)
-	if groupID != nil {
-		groupIDVal = *groupID
-	}
-	accountIDs := make([]int64, 0, len(ids))
-	for id := range ids {
-		accountIDs = append(accountIDs, id)
-	}
-	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
-	reqLog.Info("openai_messages.size_exclusion_adds",
-		zap.String("rule", rule),
-		zap.Int64("group_id", groupIDVal),
-		zap.String("platform", platform),
-		zap.String("model", model),
-		zap.Int("count", len(accountIDs)),
-		zap.Int64s("account_ids", accountIDs))
 }
 
 // attachCursorEstimatedInputTokens 对 cursor 平台请求（含 kn-cy 等 OpenAI 兼容反代），
