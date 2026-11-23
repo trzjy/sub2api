@@ -638,6 +638,13 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, result), true, nil)
 		}
 
+		// 会话绑定只在转发成功之后写入（方案 §3.3-0 / §4.4）：失败转发不得留下或改写
+		// 绑定；本次服务账号与旧绑定不同时由 BindStickySessionAfterProfitAdmission 覆盖。
+		// 共享抢槽 helper 已不在选号期提前绑定，故在此成功分支补写，换号后绑定跟随。
+		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); err != nil {
+			reqLog.Warn("openai_chat.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		}
+
 		submitChatUsage(result)
 		reqLog.Debug("openai_chat_completions.request_completed",
 			zap.Int64("account_id", account.ID),
