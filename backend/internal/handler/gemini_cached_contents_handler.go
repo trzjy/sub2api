@@ -617,34 +617,10 @@ func (h *GatewayHandler) resolveGeminiCachedContentBinding(c *gin.Context, reqLo
 
 // acquireGeminiCachedContentAccountSlot 获取选中账号的并发槽（含等待计划）；返回 false 表示已写出错误响应。
 func (h *GatewayHandler) acquireGeminiCachedContentAccountSlot(c *gin.Context, reqLog *zap.Logger, helper *ConcurrencyHelper, selection *service.AccountSelectionResult) (func(), bool) {
-	if selection.Acquired {
-		release := selection.ReleaseFunc
-		if release == nil {
-			release = func() {}
-		}
-		return wrapReleaseOnDone(c.Request.Context(), release), true
-	}
-	account := selection.Account
-	if selection.WaitPlan == nil {
-		markOpsRoutingCapacityLimited(c)
-		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts")
-		return nil, false
-	}
-	canWait, err := helper.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
-	if err != nil {
-		reqLog.Warn("gemini.cached_content.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-	} else if !canWait {
-		googleError(c, http.StatusTooManyRequests, "Too many pending requests, please retry later")
-		return nil, false
-	}
 	streamStarted := false
-	release, acquireErr := helper.AcquireAccountSlotWithWaitTimeout(c, account.ID, selection.WaitPlan.MaxConcurrency, selection.WaitPlan.Timeout, false, &streamStarted)
-	if err == nil {
-		helper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-	}
-	if acquireErr != nil {
-		reqLog.Warn("gemini.cached_content.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(acquireErr))
-		googleConcurrencyError(c, acquireErr, "account")
+	release, slotFull := helper.AcquireAccountSlotForSelection(c, selection, concurrencySlotWaitExhausted(c), false, &streamStarted)
+	if slotFull {
+		googleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account")
 		return nil, false
 	}
 	if release == nil {
