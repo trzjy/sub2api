@@ -49,28 +49,6 @@ func TestResolveWebConsoleQuotaProvider(t *testing.T) {
 			expected: providerCompshare,
 		},
 		{
-			name: "sensenova token hits",
-			account: Account{
-				Type:     AccountTypeAPIKey,
-				Platform: PlatformOpenAI,
-				Credentials: map[string]any{
-					"base_url": "https://token.sensenova.cn/v1",
-				},
-			},
-			expected: providerSensenova,
-		},
-		{
-			name: "sensenova platform hits",
-			account: Account{
-				Type:     AccountTypeAPIKey,
-				Platform: PlatformOpenAI,
-				Credentials: map[string]any{
-					"base_url": "https://platform.sensenova.cn",
-				},
-			},
-			expected: providerSensenova,
-		},
-		{
 			name: "longcat api hits",
 			account: Account{
 				Type:     AccountTypeAPIKey,
@@ -262,8 +240,6 @@ func TestWebConsoleHostMatches(t *testing.T) {
 		{"CP.Compshare.CN", "compshare.cn", true},
 		{"  compshare.cn  ", "compshare.cn", true},
 		{"evilcompshare.cn", "compshare.cn", false},
-		{"sensenova.cn", "sensenova.cn", true},
-		{"token.sensenova.cn", "sensenova.cn", true},
 		{"longcat.chat", "longcat.chat", true},
 		{"api.longcat.chat", "longcat.chat", true},
 	}
