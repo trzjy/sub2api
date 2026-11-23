@@ -1,6 +1,9 @@
 package handler
 
-import "github.com/gin-gonic/gin"
+import (
+	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
+)
 
 // 账号槽位等待失败 → 换同组下一个账号。
 //
@@ -175,4 +178,58 @@ func lastFailureWasSlot(c *gin.Context) bool {
 		return false
 	}
 	return c.GetBool(failoverLastFailureWasSlotKey)
+}
+
+// AcquireAccountSlotForSelection 统一账号槽获取入口（方案 §4.3）。
+//
+// alreadyWaited 表示本次请求是否已经等待过一次（== slotFullCount > 0）。
+// 返回 release 为 nil 且 slotFull=true 时，调用方应记录槽位失败并换下一个候选。
+//
+// 行为严格按 §4.3 第 0-4 步：已持槽直接接管 ReleaseFunc 不重复抢槽；未持槽先立即
+// 抢一次；抢失败且本次尚未等过且有等待计划则等待一次；其余抢失败返回 slotFull=true。
+func (h *ConcurrencyHelper) AcquireAccountSlotForSelection(
+	c *gin.Context,
+	selection *service.AccountSelectionResult,
+	alreadyWaited bool,
+	isStream bool,
+	streamStarted *bool,
+) (release func(), slotFull bool) {
+	// 0. 无选号结果交给调用方既有逻辑处理；已持槽直接接管，不再次抢槽
+	//    （防 Concurrency=1 时自锁与重复占槽）。
+	if selection == nil {
+		return nil, false
+	}
+	if selection.Acquired {
+		return selection.ReleaseFunc, false
+	}
+
+	// 未持槽：账号取选号结果；maxConcurrency 有等待计划时取计划值，否则取账号并发。
+	var accountID int64
+	maxConcurrency := 0
+	if selection.Account != nil {
+		accountID = selection.Account.ID
+		maxConcurrency = selection.Account.Concurrency
+	}
+	if wp := selection.WaitPlan; wp != nil {
+		maxConcurrency = wp.MaxConcurrency
+	}
+
+	// 1. 立即抢一次。
+	release, acquired, err := h.TryAcquireAccountSlot(c.Request.Context(), accountID, maxConcurrency)
+	if err == nil && acquired {
+		return release, false
+	}
+
+	// 2. 抢失败且本次尚未等过且有等待计划 → 等待一次。
+	if !alreadyWaited && selection.WaitPlan != nil {
+		wp := selection.WaitPlan
+		waitRelease, waitErr := h.AcquireAccountSlotWithWaitTimeout(c, accountID, wp.MaxConcurrency, wp.Timeout, isStream, streamStarted)
+		if waitErr == nil && waitRelease != nil {
+			return waitRelease, false
+		}
+		return nil, true
+	}
+
+	// 3. 抢失败且（已等过 或 无等待计划）→ slotFull。
+	return nil, true
 }

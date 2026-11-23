@@ -3,8 +3,10 @@ package handler
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,4 +49,97 @@ func TestConcurrencySlotExhaustedResponse_MatchesAccountSlotError(t *testing.T) 
 	require.Equal(t, directType, exhaustedType)
 	require.Equal(t, directCode, exhaustedCode)
 	require.Equal(t, directMessage, exhaustedMessage)
+}
+
+// TestAcquireAccountSlotForSelection 覆盖统一抢槽入口 §4.3 第 0-4 步的五种情形。
+func TestAcquireAccountSlotForSelection(t *testing.T) {
+	newSelection := func() *service.AccountSelectionResult {
+		return &service.AccountSelectionResult{
+			Account: &service.Account{ID: 101, Concurrency: 3},
+		}
+	}
+	newHelper := func(cache *helperConcurrencyCacheStub) *ConcurrencyHelper {
+		return NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Millisecond)
+	}
+
+	t.Run("already_acquired_reuses_release_without_reacquire", func(t *testing.T) {
+		cache := &helperConcurrencyCacheStub{accountSeq: []bool{true}}
+		helper := newHelper(cache)
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+		called := false
+		wantRelease := func() { called = true }
+		selection := newSelection()
+		selection.Acquired = true
+		selection.ReleaseFunc = wantRelease
+
+		release, slotFull := helper.AcquireAccountSlotForSelection(c, selection, false, false, nil)
+		require.False(t, slotFull)
+		require.NotNil(t, release)
+		release()
+		require.True(t, called, "已持槽必须返回同一 ReleaseFunc")
+		require.Equal(t, 0, cache.accountAcquireCalls, "已持槽不得再次抢槽")
+	})
+
+	t.Run("not_acquired_immediate_success", func(t *testing.T) {
+		cache := &helperConcurrencyCacheStub{accountSeq: []bool{true}}
+		helper := newHelper(cache)
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+		release, slotFull := helper.AcquireAccountSlotForSelection(c, newSelection(), false, false, nil)
+		require.False(t, slotFull)
+		require.NotNil(t, release)
+		require.Equal(t, 1, cache.accountAcquireCalls, "未持槽应只做一次立即抢槽")
+		release()
+	})
+
+	t.Run("not_acquired_no_wait_plan_slot_full", func(t *testing.T) {
+		cache := &helperConcurrencyCacheStub{accountSeq: []bool{false}}
+		helper := newHelper(cache)
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+		release, slotFull := helper.AcquireAccountSlotForSelection(c, newSelection(), false, false, nil)
+		require.Nil(t, release)
+		require.True(t, slotFull)
+		require.Equal(t, 1, cache.accountAcquireCalls, "无等待计划时不得进入等待")
+	})
+
+	t.Run("not_acquired_wait_success", func(t *testing.T) {
+		// 第一次立即抢槽失败，等待路径的立即抢槽成功（无需真实退避等待）。
+		cache := &helperConcurrencyCacheStub{accountSeq: []bool{false, true}}
+		helper := newHelper(cache)
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+		selection := newSelection()
+		selection.WaitPlan = &service.AccountWaitPlan{
+			AccountID:      101,
+			MaxConcurrency: 3,
+			Timeout:        2 * time.Second,
+		}
+		streamStarted := false
+		release, slotFull := helper.AcquireAccountSlotForSelection(c, selection, false, false, &streamStarted)
+		require.False(t, slotFull)
+		require.NotNil(t, release)
+		require.Equal(t, 2, cache.accountAcquireCalls, "应先立即抢槽一次，再进入等待一次")
+		require.False(t, streamStarted, "准入等待阶段不得把 streamStarted 置真")
+		release()
+	})
+
+	t.Run("already_waited_only_immediate_then_slot_full", func(t *testing.T) {
+		// 已等过时只做立即抢槽（accountSeq 仅一个 false）；若误入等待会多一次 acquire。
+		cache := &helperConcurrencyCacheStub{accountSeq: []bool{false}}
+		helper := newHelper(cache)
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+		selection := newSelection()
+		selection.WaitPlan = &service.AccountWaitPlan{
+			AccountID:      101,
+			MaxConcurrency: 3,
+			Timeout:        2 * time.Second,
+		}
+		release, slotFull := helper.AcquireAccountSlotForSelection(c, selection, true, false, nil)
+		require.Nil(t, release)
+		require.True(t, slotFull)
+		require.Equal(t, 1, cache.accountAcquireCalls, "已等过时只做一次立即抢槽，不得再等待")
+	})
 }
