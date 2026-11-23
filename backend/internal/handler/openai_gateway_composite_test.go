@@ -349,3 +349,38 @@ func TestCompositeWSRequiredTransport(t *testing.T) {
 			compositeWSRequiredTransport(service.CompositeRouteDecision{}, service.PlatformOpenAI))
 	})
 }
+
+func TestOpenAICompatibleRequestPlatform(t *testing.T) {
+	t.Run("composite with resolved zhipu uses concrete platform", func(t *testing.T) {
+		apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+		ctx := service.WithCompositeRouteDecision(context.Background(), service.CompositeRouteDecision{
+			Matched:        true,
+			TargetPlatform: service.PlatformZhipu,
+		})
+		require.Equal(t, service.PlatformZhipu, openAICompatibleRequestPlatform(ctx, apiKey))
+	})
+
+	t.Run("composite with resolved deepseek uses concrete platform", func(t *testing.T) {
+		apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+		ctx := service.WithCompositeRouteDecision(context.Background(), service.CompositeRouteDecision{
+			Matched:        true,
+			TargetPlatform: service.PlatformDeepseek,
+		})
+		require.Equal(t, service.PlatformDeepseek, openAICompatibleRequestPlatform(ctx, apiKey))
+	})
+
+	t.Run("composite without resolved platform keeps existing behavior", func(t *testing.T) {
+		apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+		// 无盖章时回退到分组平台归一：composite 未解析前仍收敛为 openai。
+		require.Equal(t, service.PlatformOpenAI, openAICompatibleRequestPlatform(context.Background(), apiKey))
+	})
+
+	t.Run("non composite group keeps existing behavior", func(t *testing.T) {
+		apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformGrok}}
+		// 非 composite：即便 ctx 盖章国产平台，仍走既有归一分支（归一后保留原值）。
+		ctx := service.WithResolvedTargetPlatform(context.Background(), service.PlatformZhipu)
+		require.Equal(t, service.PlatformZhipu, openAICompatibleRequestPlatform(ctx, apiKey))
+		// 非 composite 且无盖章：使用分组平台。
+		require.Equal(t, service.PlatformGrok, openAICompatibleRequestPlatform(context.Background(), apiKey))
+	})
+}

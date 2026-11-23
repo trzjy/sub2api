@@ -294,6 +294,13 @@ func wrapUsageRecordTaskContext(parent context.Context, task service.UsageRecord
 
 func openAICompatibleRequestPlatform(ctx context.Context, apiKey *service.APIKey) string {
 	if platform, ok := service.ResolvedTargetPlatformFromContext(ctx); ok {
+		// composite 分组：A5 已解析的具体平台必须直接作为选号平台。若在此处
+		// 归一成 openai（composite 代表平台），zhipu/deepseek 等国产兼容账号会被
+		// 平台过滤排除，导致 /v1/messages 选号失败 502（生产实测组118/key868）。
+		// 无解析值时才回退到分组平台归一，保持非 composite 语义不变。
+		if apiKey != nil && apiKey.Group != nil && apiKey.Group.Platform == service.PlatformComposite {
+			return platform
+		}
 		// 保留 grok 与国产供应商原值，其他归一为 openai（与调度器精确匹配语义一致）。
 		return service.NormalizeOpenAICompatiblePlatform(platform)
 	}
