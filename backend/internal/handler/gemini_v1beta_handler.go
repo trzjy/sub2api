@@ -647,7 +647,6 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 					if sessionKey == "" {
 						sessionKey = service.GenerateGeminiDigestSessionKey(geminiPrefixHash, foundUUID)
 					}
-					_ = h.gatewayService.BindStickySession(c.Request.Context(), apiKey.GroupID, sessionKey, foundAccountID)
 				} else {
 					// 生成新的会话 UUID
 					geminiSessionUUID = uuid.New().String()
@@ -795,9 +794,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				return
 			default: // FailoverExhausted
 				if slotFullCount > 0 {
-					// 槽位失败导致候选耗尽：走本端点既有的账号槽终态
-					// （Google 错误格式 + 账号槽并发文案），状态码口径不变。
-					googleError(c, http.StatusTooManyRequests, infraerrors.AccountSlotConcurrencyLimit)
+					// 槽位失败导致候选耗尽：走本端点既有的终态
+					// （Google 错误格式 + 无可用账号文案），状态码保持 429。
+					googleError(c, http.StatusTooManyRequests, infraerrors.NoAvailableAccounts)
 					return
 				}
 				h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
@@ -841,77 +840,20 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			sessionBoundAccountID = account.ID
 		}
 
-		// 4) account concurrency slot
-		accountReleaseFunc := selection.ReleaseFunc
-		if !selection.Acquired {
-			if selection.WaitPlan == nil {
-				markOpsRoutingCapacityLimited(c)
-				googleError(c, http.StatusServiceUnavailable, infraerrors.NoAvailableAccounts)
-				return
+		// 4) account concurrency slot（统一入口，方案 §4.3）。
+		// 已持槽直接接管、未持槽立即抢一次、未等过且有等待计划时等一次的判定全部
+		// 收敛到 AcquireAccountSlotForSelection，调用点不再自写等待分支。
+		accountReleaseFunc, slotFull := geminiConcurrency.AcquireAccountSlotForSelection(
+			c, selection, slotFullCount > 0, stream, &streamStarted)
+		if slotFull {
+			reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", account.ID))
+			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+			// 候选耗尽走终态：429 + 无可用账号文案（Gemini 状态码口径不变）。
+			if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
+				continue
 			}
-			waitTimeout := selection.WaitPlan.Timeout
-			if slotFullCount > 0 {
-				// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-				// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-				// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-				// 抢不到就立刻失败、走下面的排除分支换下一个。
-				// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-				waitTimeout = 0
-			}
-			accountWaitCounted := false
-			canWait, err := geminiConcurrency.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
-			if err != nil {
-				reqLog.Warn("gemini.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-			} else if !canWait {
-				reqLog.Info("gemini.account_wait_queue_full",
-					zap.Int64("account_id", account.ID),
-					zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
-				)
-				googleError(c, http.StatusTooManyRequests, infraerrors.GatewayQueueFull)
-				return
-			}
-			if err == nil && canWait {
-				accountWaitCounted = true
-			}
-			defer func() {
-				if accountWaitCounted {
-					geminiConcurrency.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-				}
-			}()
-
-			accountReleaseFunc, err = geminiConcurrency.AcquireAccountSlotWithWaitTimeout(
-				c,
-				account.ID,
-				selection.WaitPlan.MaxConcurrency,
-				waitTimeout,
-				stream,
-				&streamStarted,
-			)
-			if err != nil {
-				reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
-				// 上限见 maxConcurrencySlotFailoverAttempts；用尽后仍走本端点既有终态
-				// （Google 错误格式 + 账号槽并发文案），本端点的状态码口径不变。
-				if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
-					continue
-				}
-				// ConcurrencyError.Error() 是内部英文标识，不得直接写给下游：
-				// 按类型断言取固定中文文案；HTTP 429 与 googleError 输出格式不变。
-				var slotErr *ConcurrencyError
-				switch {
-				case errors.As(err, &slotErr) && slotErr.IsTimeout:
-					googleError(c, http.StatusTooManyRequests, infraerrors.AccountSlotWaitTimeout)
-				case errors.As(err, &slotErr):
-					googleError(c, http.StatusTooManyRequests, infraerrors.AccountSlotConcurrencyLimit)
-				default:
-					googleError(c, http.StatusTooManyRequests, infraerrors.ConcurrencyFallback)
-				}
-				return
-			}
-			if accountWaitCounted {
-				geminiConcurrency.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-				accountWaitCounted = false
-			}
+			googleError(c, http.StatusTooManyRequests, infraerrors.NoAvailableAccounts)
+			return
 		}
 		// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
 		admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
@@ -936,13 +878,6 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		}
 		account = latest
 		selection.Account = latest
-		// 等待路径保持既有 eager 绑定（无门时 helper 直接绑定）；调度器已抢槽
-		// 的直达路径无门时由选号内部绑定，这里只在门下补准入后绑定。
-		if selection.ProfitGateActive() || !selection.Acquired {
-			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, sessionKey, account.ID); err != nil {
-				reqLog.Warn("gemini.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-			}
-		}
 		// 账号槽位/等待计数需要在超时或断开时安全回收
 		// §25.4：账号槽改用**可转交**句柄（Cursor 分支交给会话持有）。
 		accountSlot := newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
@@ -1034,6 +969,12 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			failoverClientGone(c)
 			reqLog.Error("gemini.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			return
+		}
+
+		// 会话绑定只在转发成功之后写入（方案 §3.3/§4.4）：选号与失败转发都不写，
+		// 本次服务账号与既有绑定不同则覆盖，换号即跟走。Cursor 会话结算不受影响。
+		if err := h.gatewayService.BindStickySession(c.Request.Context(), apiKey.GroupID, sessionKey, account.ID); err != nil {
+			reqLog.Warn("gemini.bind_sticky_session_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		}
 
 		// 保存 Gemini 内容摘要会话（用于 Fallback 匹配）

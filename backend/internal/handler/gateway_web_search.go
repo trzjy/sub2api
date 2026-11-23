@@ -239,8 +239,8 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 			// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
 			// 不能落到下面的 502 分支——那会破坏账号并发终点契约。
 			c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{
-				"type":    gatewayConcurrencyLimitCode,
-				"message": infraerrors.AccountSlotConcurrencyLimit,
+				"type":    "api_error",
+				"message": infraerrors.NoAvailableAccounts,
 			}})
 			return
 		}
@@ -310,63 +310,23 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 	})
 }
 
-// acquireWebSearchAccountSlot resolves an immediate slot or WaitPlan wait.
-// On failure returns (nil, false, err); err is non-nil for concurrency acquire
-// failures so the first hop can map them to HTTP. Wait-queue full returns
-// (nil, false, nil) so failover can try another account.
+// acquireWebSearchAccountSlot 通过统一入口（方案 §4.3）抢账号槽：已持槽直接
+// 接管、未持槽立即抢一次、未等过且有等待计划时等一次，全部收敛到
+// AcquireAccountSlotForSelection，本入口不再自写等待分支与等待计数。
+// 槽满时返回 (nil, false, *ConcurrencyError)，让调用方走既有
+// handleConcurrencyError 换号分支。
 func (h *GatewayHandler) acquireWebSearchAccountSlot(
 	c *gin.Context,
 	selected *service.AccountSelectionResult,
 ) (release func(), ok bool, acquireErr error) {
-	if selected == nil || selected.Account == nil {
+	if selected == nil || selected.Account == nil || h.concurrencyHelper == nil {
 		return nil, false, nil
-	}
-	if selected.Acquired {
-		return selected.ReleaseFunc, true, nil
-	}
-	if selected.WaitPlan == nil || h.concurrencyHelper == nil {
-		return nil, false, nil
-	}
-	account := selected.Account
-	accountWaitCounted := false
-	canWait, waitErr := h.concurrencyHelper.IncrementAccountWaitCount(c.Request.Context(), account.ID, selected.WaitPlan.MaxWaiting)
-	if waitErr != nil {
-		logger.L().Warn("gateway.web_search.account_wait_counter_increment_failed",
-			zap.Int64("account_id", account.ID),
-			zap.Error(waitErr),
-		)
-		// Best-effort wait without counter (same as first-hop legacy path).
-	} else if !canWait {
-		return nil, false, nil
-	} else {
-		accountWaitCounted = true
-	}
-	releaseWait := func() {
-		if accountWaitCounted {
-			h.concurrencyHelper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-			accountWaitCounted = false
-		}
 	}
 	streamStarted := false
-	waitTimeout := selected.WaitPlan.Timeout
-	if concurrencySlotWaitExhausted(c) {
-		// 换号后不等（用户 2026-11-12 裁定）：等待超时设为 0 —— 底层
-		// waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-		// （刚被排除的账号可能刚好释放了槽位），抢不到就立刻失败换下一个。
-		// 否则多个满槽候选会**逐个累加等待时间**（外审第四轮 must_fix #2）。
-		waitTimeout = 0
-	}
-	slotRelease, err := h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
-		c,
-		account.ID,
-		selected.WaitPlan.MaxConcurrency,
-		waitTimeout,
-		false,
-		&streamStarted,
-	)
-	releaseWait()
-	if err != nil {
-		return nil, false, err
+	slotRelease, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
+		c, selected, concurrencySlotWaitExhausted(c), false, &streamStarted)
+	if slotFull {
+		return nil, false, &ConcurrencyError{SlotType: "account"}
 	}
 	return slotRelease, true, nil
 }

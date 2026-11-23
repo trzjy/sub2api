@@ -602,9 +602,6 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			decision.StickyPreviousHit = true
 			decision.SelectedAccountID = selection.Account.ID
 			decision.SelectedAccountType = selection.Account.Type
-			if req.SessionHash != "" {
-				_ = s.service.bindOpenAIStickySessionDuringSelection(ctx, req.GroupID, req.SessionHash, selection.Account.ID)
-			}
 			return selection, decision, nil
 		}
 	}
@@ -788,8 +785,8 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		}), false, nil
 	}
 
-	cfg := s.service.schedulingConfig()
-	// WaitPlan.MaxConcurrency 使用 Concurrency（非 EffectiveLoadFactor），因为 WaitPlan 控制的是 Redis 实际并发槽位等待。
+	// 粘性账号抢槽失败（并发满）不再返回等待计划原地等待；返回 nil 交给上层
+	// 继续在候选内选号，等待统一由兜底出口 finishLoadBalanceSelectionFallback 产生。
 	if s.service.concurrencyService != nil {
 		if escapeCfg.enabled && !req.DisableStickyEscape && acquireErr == nil && result != nil && !result.Acquired {
 			errorRate, ttft, _ := s.stats.snapshot(accountID)
@@ -801,15 +798,6 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 			)
 			return nil, true, nil
 		}
-		return attachSelectionProfitGate(ctx, &AccountSelectionResult{
-			Account: account,
-			WaitPlan: &AccountWaitPlan{
-				AccountID:      accountID,
-				MaxConcurrency: account.Concurrency,
-				Timeout:        cfg.StickySessionWaitTimeout,
-				MaxWaiting:     cfg.StickySessionMaxWaiting,
-			},
-		}), false, nil
 	}
 	return nil, false, nil
 }
@@ -1457,9 +1445,6 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 				continue
 			}
 		}
-		if req.SessionHash != "" && !req.PreserveStickyBinding {
-			_ = s.service.bindOpenAIStickySessionDuringSelection(ctx, req.GroupID, req.SessionHash, fresh.ID)
-		}
 		return attachSelectionProfitGate(ctx, &AccountSelectionResult{
 			Account:     fresh,
 			Acquired:    true,
@@ -1548,27 +1533,13 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 			return nil, acquireErr
 		}
 		if result != nil && result.Acquired {
-			if req.SessionHash != "" && !req.PreserveStickyBinding {
-				_ = s.service.bindOpenAIStickySessionDuringSelection(ctx, req.GroupID, req.SessionHash, account.ID)
-			}
 			return attachSelectionProfitGate(ctx, &AccountSelectionResult{
 				Account:     account,
 				Acquired:    true,
 				ReleaseFunc: result.ReleaseFunc,
 			}), nil
 		}
-		if s.service.concurrencyService != nil {
-			cfg := s.service.schedulingConfig()
-			return attachSelectionProfitGate(ctx, &AccountSelectionResult{
-				Account: account,
-				WaitPlan: &AccountWaitPlan{
-					AccountID:      account.ID,
-					MaxConcurrency: account.Concurrency,
-					Timeout:        cfg.StickySessionWaitTimeout,
-					MaxWaiting:     cfg.StickySessionMaxWaiting,
-				},
-			}), nil
-		}
+		// 粘性账号抢槽失败不再原地等待；继续尝试下一个粘性候选，由上层兜底出口统一产生等待计划。
 	}
 	return nil, nil
 }
@@ -2757,9 +2728,6 @@ func (s *OpenAIGatewayService) selectLegacyAccountByPreviousResponse(
 			selection.ReleaseFunc()
 		}
 		return nil, false, nil
-	}
-	if sessionHash != "" {
-		_ = s.bindOpenAIStickySessionDuringSelection(ctx, groupID, sessionHash, account.ID)
 	}
 	return selection, true, nil
 }

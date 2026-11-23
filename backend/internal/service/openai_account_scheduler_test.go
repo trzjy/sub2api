@@ -1727,7 +1727,8 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_Enabled_EmbeddingsSkips
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 	require.False(t, decision.StickyPreviousHit)
 	require.False(t, decision.StickySessionHit)
-	require.Equal(t, int64(37022), cache.sessionBindings["openai:session_hash_embeddings"])
+	// 选号期不再写会话绑定；绑定由 handler 在转发成功后写入。
+	require.Equal(t, int64(0), cache.sessionBindings["openai:session_hash_embeddings"])
 }
 
 func TestOpenAIGatewayService_OpenAIAccountSchedulerMetrics_DisabledNoOp(t *testing.T) {
@@ -2391,7 +2392,8 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_PreviousResponseSticky(
 	require.Equal(t, account.ID, selection.Account.ID)
 	require.Equal(t, openAIAccountScheduleLayerPreviousResponse, decision.Layer)
 	require.True(t, decision.StickyPreviousHit)
-	require.Equal(t, account.ID, cache.sessionBindings["openai:session_hash_001"])
+	// 选号期不再写会话绑定；绑定由 handler 在转发成功后写入。
+	require.Equal(t, int64(0), cache.sessionBindings["openai:session_hash_001"])
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
@@ -2520,12 +2522,12 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyBusyKeepsS
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
-	require.Equal(t, int64(21001), selection.Account.ID, "busy sticky account should remain selected")
-	require.False(t, selection.Acquired)
-	require.NotNil(t, selection.WaitPlan)
-	require.Equal(t, int64(21001), selection.WaitPlan.AccountID)
-	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
-	require.True(t, decision.StickySessionHit)
+	// 粘性账号抢槽失败不再返回等待计划原地等待：直接换到同档空闲账号。
+	require.Equal(t, int64(21002), selection.Account.ID)
+	require.True(t, selection.Acquired)
+	require.Nil(t, selection.WaitPlan)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	require.False(t, decision.StickySessionHit)
 }
 
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByTTFT(t *testing.T) {
@@ -2730,11 +2732,11 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeDisa
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
-	require.Equal(t, int64(21401), selection.Account.ID)
-	require.NotNil(t, selection.WaitPlan)
-	require.Equal(t, int64(21401), selection.WaitPlan.AccountID)
-	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
-	require.True(t, decision.StickySessionHit)
+	// 粘性账号抢槽失败不再返回等待计划原地等待：直接换到同档空闲账号。
+	require.Equal(t, int64(21402), selection.Account.ID)
+	require.Nil(t, selection.WaitPlan)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	require.False(t, decision.StickySessionHit)
 }
 
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SubscriptionPriorityChoosesSubscriptionPoolFirst(t *testing.T) {
@@ -3264,7 +3266,8 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_ClearsStickyAccountOuts
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 	require.False(t, decision.StickySessionHit)
 	require.Equal(t, 1, cache.deletedSessions["openai:session_hash_removed_group"])
-	require.Equal(t, int64(2402), cache.sessionBindings["openai:session_hash_removed_group"])
+	// 选号期不再写会话绑定；失效绑定已清理，绑定由 handler 在转发成功后写入。
+	require.Equal(t, int64(0), cache.sessionBindings["openai:session_hash_removed_group"])
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
