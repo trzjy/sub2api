@@ -442,71 +442,20 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 
-			// 3. 获取账号并发槽位
-			accountReleaseFunc := selection.ReleaseFunc
-			if !selection.Acquired {
-				if selection.WaitPlan == nil {
-					markOpsRoutingCapacityLimited(c)
-					reqLog.Warn("gateway.select_account_no_slot_no_wait_plan",
-						zap.Int64("account_id", account.ID),
-						zap.String("model", reqModel),
-						zap.String("platform", platform),
-					)
-					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts, streamStarted)
-					return
+			// 3. 获取账号并发槽位（统一入口，方案 §4.3）。
+			// 已持槽直接接管、未持槽立即抢一次、未等过且有等待计划时等一次的判定全部
+			// 收敛到 AcquireAccountSlotForSelection，调用点不再自写等待分支。
+			accountReleaseFunc, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
+				c, selection, slotFullCount > 0, reqStream, &streamStarted)
+			if slotFull {
+				reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID))
+				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
+				if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
+					continue
 				}
-				waitTimeout := selection.WaitPlan.Timeout
-				if slotFullCount > 0 {
-					// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-					// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-					// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-					// 抢不到就立刻失败、走下面的排除分支换下一个。
-					// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-					waitTimeout = 0
-				}
-				accountWaitCounted := false
-				canWait, err := h.concurrencyHelper.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
-				if err != nil {
-					reqLog.Warn("gateway.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				} else if !canWait {
-					reqLog.Info("gateway.account_wait_queue_full",
-						zap.Int64("account_id", account.ID),
-						zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
-					)
-					h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, pkgerrors.GatewayQueueFull, streamStarted)
-					return
-				}
-				if err == nil && canWait {
-					accountWaitCounted = true
-				}
-				releaseWait := func() {
-					if accountWaitCounted {
-						h.concurrencyHelper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-						accountWaitCounted = false
-					}
-				}
-
-				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
-					c,
-					account.ID,
-					selection.WaitPlan.MaxConcurrency,
-					waitTimeout,
-					reqStream,
-					&streamStarted,
-				)
-				if err != nil {
-					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-					releaseWait()
-					// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
-					// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-					if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
-						continue
-					}
-					h.handleConcurrencyError(c, err, "account", streamStarted)
-					return
-				}
-				// Slot acquired: no longer waiting in queue.
-				releaseWait()
+				h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
+				return
 			}
 			// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
 			admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
@@ -987,71 +936,21 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					}
 				}
 
-				// 3. 获取账号并发槽位
-				accountReleaseFunc = selection.ReleaseFunc
-				if !selection.Acquired {
-					if selection.WaitPlan == nil {
-						markOpsRoutingCapacityLimited(c)
-						reqLog.Warn("gateway.select_account_no_slot_no_wait_plan",
-							zap.Int64("account_id", account.ID),
-							zap.String("model", reqModel),
-							zap.String("platform", platform),
-						)
-						h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts, streamStarted)
-						return
+				// 3. 获取账号并发槽位（统一入口，方案 §4.3）。
+				// 已持槽直接接管、未持槽立即抢一次、未等过且有等待计划时等一次的判定全部
+				// 收敛到 AcquireAccountSlotForSelection，调用点不再自写等待分支。
+				var slotFull bool
+				accountReleaseFunc, slotFull = h.concurrencyHelper.AcquireAccountSlotForSelection(
+					c, selection, slotFullCount > 0, reqStream, &streamStarted)
+				if slotFull {
+					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID))
+					// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+					// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
+					if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
+						continue
 					}
-					waitTimeout := selection.WaitPlan.Timeout
-					if slotFullCount > 0 {
-						// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-						// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-						// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-						// 抢不到就立刻失败、走下面的排除分支换下一个。
-						// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-						waitTimeout = 0
-					}
-					accountWaitCounted := false
-					canWait, err := h.concurrencyHelper.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
-					if err != nil {
-						reqLog.Warn("gateway.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-					} else if !canWait {
-						reqLog.Info("gateway.account_wait_queue_full",
-							zap.Int64("account_id", account.ID),
-							zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
-						)
-						h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, pkgerrors.GatewayQueueFull, streamStarted)
-						return
-					}
-					if err == nil && canWait {
-						accountWaitCounted = true
-					}
-					releaseWait := func() {
-						if accountWaitCounted {
-							h.concurrencyHelper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-							accountWaitCounted = false
-						}
-					}
-
-					accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
-						c,
-						account.ID,
-						selection.WaitPlan.MaxConcurrency,
-						waitTimeout,
-						reqStream,
-						&streamStarted,
-					)
-					if err != nil {
-						reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-						releaseWait()
-						// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
-						// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-						if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
-							continue
-						}
-						h.handleConcurrencyError(c, err, "account", streamStarted)
-						return
-					}
-					// Slot acquired: no longer waiting in queue.
-					releaseWait()
+					h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
+					return
 				}
 				// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
 				admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
@@ -2538,10 +2437,11 @@ func (h *GatewayHandler) handleConcurrencyError(c *gin.Context, err error, slotT
 
 // shouldRebindStickyAfterForward 判定转发成功后是否允许覆盖粘性绑定。
 //
-// 原判据只允许"无绑定"或"绑定账号 == 本次账号"；续轮换号重建时本次账号恰好是
-// **替代账号**，必须强制覆盖，否则下一次请求又回到死亡账号（方案 §2.4-6）。
+// 换号即改绑（方案 §3.3、§4.4-4）：绑定只在转发成功之后写入，写入点本身已位于成功
+// 分支，失败的转发不会走到这里、也不会留下或改写绑定。因此转发成功后总是允许写入
+// 本次账号——覆盖旧绑定、刷新同号 TTL、续轮重建强制改绑一律放行。
 func shouldRebindStickyAfterForward(sessionBoundAccountID, accountID int64, rebuild bool) bool {
-	return sessionBoundAccountID == 0 || sessionBoundAccountID == accountID || rebuild
+	return true
 }
 
 // cursorPoolExhaustedMessage 渲染"账号池暂无可用的额度"中文终态（CUR-RES-11）。

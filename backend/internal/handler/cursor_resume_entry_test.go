@@ -559,12 +559,12 @@ func TestServeCursorResumeRebuildSentinelDoesNotReject(t *testing.T) {
 	require.Equal(t, service.CursorQuotaExhaustedReason, info.Reason)
 }
 
-// TestShouldRebindStickyAfterForward 覆盖重建后的 sticky 强制重绑判据：
-// 原逻辑只在"无绑定或绑定账号 == 本次账号"时重绑；重建成功时本次账号是替代账号，
-// 必须强制覆盖，否则下一次请求会被粘性会话钉回死亡账号。
+// TestShouldRebindStickyAfterForward 覆盖换号即改绑判据（方案 §3.3、§4.4-4）：
+// 绑定只在转发成功后写入，写入点位于成功分支，因此成功后总是允许写入本次账号，
+// 负载换号成功后也必须覆盖旧绑定。
 func TestShouldRebindStickyAfterForward(t *testing.T) {
 	require.True(t, shouldRebindStickyAfterForward(0, 8, false), "首次请求创建绑定")
 	require.True(t, shouldRebindStickyAfterForward(7, 7, false), "同一账号刷新 TTL")
-	require.False(t, shouldRebindStickyAfterForward(7, 8, false), "负载换号不得覆盖原绑定")
+	require.True(t, shouldRebindStickyAfterForward(7, 8, false), "负载换号成功后必须覆盖")
 	require.True(t, shouldRebindStickyAfterForward(7, 8, true), "续轮重建必须强制重绑")
 }
