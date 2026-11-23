@@ -35,10 +35,6 @@ const (
 	//（compact_not_supported 语义，非账号池耗尽），与 NoAvailableAccounts 同锚点不同场景。
 	NoAvailableAccountsCompact = "暂无可用账号支持 /responses/compact 请求"
 
-	// 账号槽并发（Gemini 账号槽等待出口；ConcurrencyError.IsTimeout 区分两态）。
-	AccountSlotWaitTimeout      = "上游账号并发等待超时，请稍后重试"
-	AccountSlotConcurrencyLimit = "上游账号并发已达上限，请稍后重试"
-
 	// 用户侧（计费/限流；哨兵错误稳定 code 不变，仅换 message）。
 	InsufficientBalance       = "账户余额不足，请充值后重试"
 	SubscriptionInvalid       = "订阅已失效或过期，请续费后重试"
