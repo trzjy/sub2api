@@ -154,7 +154,8 @@ func (s *OpenAIGatewayService) createLiveCall(
 	ctx = WithOpenAIProfitControlSuppressed(ctx)
 	var lastErr error
 	ineligible := false
-	for attempt := 0; attempt <= 3; attempt++ {
+	attempt := 0
+	for attempt <= 3 {
 		selection, _, selectErr := s.SelectAccountWithSchedulerForCapability(
 			ctx,
 			identity.GroupID,
@@ -173,6 +174,9 @@ func (s *OpenAIGatewayService) createLiveCall(
 			if lastErr != nil {
 				return nil, lastErr
 			}
+			if ineligible {
+				return nil, ErrLiveAccountIneligible
+			}
 			return nil, selectErr
 		}
 		if selection == nil || selection.Account == nil {
@@ -186,6 +190,7 @@ func (s *OpenAIGatewayService) createLiveCall(
 			ineligible = true
 			continue
 		}
+		attempt++
 		if !selection.Acquired {
 			if waitSlot == nil {
 				if selection.ReleaseFunc != nil {

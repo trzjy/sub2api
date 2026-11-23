@@ -120,6 +120,7 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 			}
 			h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
+			service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 			return
 		}
 		if account == nil {
@@ -304,6 +305,7 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 			}
 			h.anthropicErrorResponse(c, cls.Status, cls.ErrType, cls.Message)
+			service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 			return
 		}
 		if account == nil {
