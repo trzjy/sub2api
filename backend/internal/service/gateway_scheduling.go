@@ -160,9 +160,25 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			localExcluded[k] = v
 		}
 
+		// 抢槽失败的候选按尝试顺序暂存；本档候选全部抢槽失败后，才产生唯一一次等待计划。
+		// 与 load-aware 路径统一为 §3.1 的一套规则：先分流、全满才等一次。
+		var waitCandidates []*Account
 		for {
 			account, err := s.SelectAccountForModelWithExclusions(ctx, groupID, sessionHash, requestedModel, localExcluded)
 			if err != nil {
+				// 选号已无候选（本档候选全部抢槽失败并被排除）→ 唯一等待出口。
+				// 目标账号取第一个可等待的候选；会话注册检查保留在产生等待计划之前。
+				for _, acc := range waitCandidates {
+					if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
+						continue
+					}
+					return s.newSelectionResult(ctx, acc, false, nil, &AccountWaitPlan{
+						AccountID:      acc.ID,
+						MaxConcurrency: acc.Concurrency,
+						Timeout:        cfg.FallbackWaitTimeout,
+						MaxWaiting:     cfg.FallbackMaxWaiting,
+					})
+				}
 				return nil, err
 			}
 
@@ -177,37 +193,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
 			}
 
-			// 抢槽失败：Cursor 供给直接换号（排除该号后重选），不排队（见谓词注释）。
-			// 这条路径只在负载感知关闭时生效，但「槽满怎么办」的规则必须与 load-aware 路径
-			// 完全一致，否则同一份口径又会出现两套实现。
-			if shouldSwitchAccountOnStickySlotFull(account) {
-				localExcluded[account.ID] = struct{}{}
-				continue
-			}
-
-			// 对于等待计划的情况，也需要先检查会话限制
-			if !s.checkAndRegisterSession(ctx, account, sessionHash) {
-				localExcluded[account.ID] = struct{}{}
-				continue
-			}
-
-			if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
-				waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
-				if waitingCount < cfg.StickySessionMaxWaiting {
-					return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-						AccountID:      account.ID,
-						MaxConcurrency: account.Concurrency,
-						Timeout:        cfg.StickySessionWaitTimeout,
-						MaxWaiting:     cfg.StickySessionMaxWaiting,
-					})
-				}
-			}
-			return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-				AccountID:      account.ID,
-				MaxConcurrency: account.Concurrency,
-				Timeout:        cfg.FallbackWaitTimeout,
-				MaxWaiting:     cfg.FallbackMaxWaiting,
-			})
+			// 抢槽失败：排除该账号，继续尝试下一个候选；不在此处返回等待计划。
+			localExcluded[account.ID] = struct{}{}
+			waitCandidates = append(waitCandidates, account)
 		}
 	}
 
@@ -414,43 +402,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							}
 
 							if stickyCacheMissReason == "" {
-								// 槽位已满（stickyAccount 是当前命中账号，slot 抢不到走到这里）。
-								//
-								// Cursor 平台：**直接换号，不给等待计划**。理由：
-								//  1. Cursor 的用户槽/账号槽跟着会话走（§25.4），会话在客户端按 esc
-								//     中断后要等 waiting_tools 空闲释放（§2.5，120 秒）或 Redis 侧槽 TTL
-								//     （30 分钟）才归还，期间干等只会把整条链路拖成每 2 分钟一次 429
-								//     （2026-11-04 生产实证）；
-								//  2. Cursor 粘性的收益仅"新会话尽量复用同一账号"——真正的续轮是在
-								//     内存会话表里按 call_id 命中的，不依赖这次选号，换号不会打断会话；
-								//  3. 池内同组还有大量空闲账号，让它们闲着而请求等死是最差解。
-								// 其他平台保持既有等待语义（会话亲和 / 上游 prompt cache 收益更确定）。
-								if shouldSwitchAccountOnStickySlotFull(stickyAccount) {
-									stickyCacheMissReason = "slot_full"
-								} else {
-									waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
-									if waitingCount < cfg.StickySessionMaxWaiting {
-										// 会话数量限制检查（等待计划也需要占用会话配额）
-										if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
-											stickyCacheMissReason = "session_limit"
-											// 会话限制已满，继续到负载感知选择
-										} else {
-											// 必须走 newSelectionResult 以 hydrate 账号凭证：
-											// 调度快照中的账号是精简版（OAuth token 等被剥离），
-											// 直接返回会导致后续转发缺少凭证而鉴权失败。
-											return s.newSelectionResult(ctx, stickyAccount, false, nil, &AccountWaitPlan{
-												AccountID:      stickyAccountID,
-												MaxConcurrency: stickyAccount.Concurrency,
-												Timeout:        cfg.StickySessionWaitTimeout,
-												MaxWaiting:     cfg.StickySessionMaxWaiting,
-											})
-										}
-									} else {
-										stickyCacheMissReason = "wait_queue_full"
-									}
-								}
+								// 粘性账号槽位已满：放弃本次粘性命中，控制流继续到本层路由候选的
+								// 负载选择循环（方案 §3.1-2）。同档还有空闲账号时直接分流，不原地等待。
+								stickyCacheMissReason = "slot_full"
 							}
-							// 粘性账号槽位满且等待队列已满，继续使用负载感知选择
 						} else if !gatePass {
 							stickyCacheMissReason = "gate_check"
 						} else {
@@ -541,30 +496,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					}
 				}
 
-				// 5. 所有路由账号槽位满，尝试返回等待计划（选择负载最低的）
-				// 遍历找到第一个满足会话限制的账号
-				for _, item := range routingAvailable {
-					// Cursor 供给槽满即换号、不排队（见谓词注释）；这里没有更多候选可试，
-					// 直接落到 Layer 2 的整池负载感知选择，而不是原地等这一个账号。
-					if shouldSwitchAccountOnStickySlotFull(item.account) {
-						continue
-					}
-					if !s.checkAndRegisterSession(ctx, item.account, sessionHash) {
-						continue // 会话限制已满，尝试下一个
-					}
-					if s.debugModelRoutingEnabled() {
-						logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routed wait: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), item.account.ID)
-					}
-					return s.newSelectionResult(ctx, item.account, false, nil, &AccountWaitPlan{
-						AccountID:      item.account.ID,
-						MaxConcurrency: item.account.Concurrency,
-						Timeout:        cfg.StickySessionWaitTimeout,
-						MaxWaiting:     cfg.StickySessionMaxWaiting,
-					})
-				}
-				// 所有路由账号会话限制都已满，继续到 Layer 2 回退
+				// 5. 所有路由候选逐个实际抢槽全部失败：不在本层返回等待计划，
+				// 继续落到 Layer 2 整池选择（方案 §3.1-3、§4.1）。
 			}
-			// 路由列表中的账号都不可用（负载率 >= 100），继续到 Layer 2 回退
+			// 路由列表中的账号都不可用（负载率 >= 100 或抢槽全失败），继续到 Layer 2 回退
 			logger.LegacyPrintf("service.gateway", "[ModelRouting] All routed accounts unavailable for model=%s, falling back to normal selection", requestedModel)
 		}
 	}
@@ -648,35 +583,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						)
 					}
 
-					// 槽位已满：Cursor 供给直接换号，不排队（见谓词注释）。判据走全站唯一入口，
-					// 不在这里另写平台判断——2026-11-15 复现的正是「四处排队点只改了一处」。
-					if shouldSwitchAccountOnStickySlotFull(account) {
-						slog.Debug("sticky.layer1_5_no_routing_slot_switch",
-							"account_id", accountID,
-							"session", shortSessionHash(sessionHash),
-							"reason", "cursor_slot_full_switch_account",
-						)
-					} else {
-						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-						if waitingCount < cfg.StickySessionMaxWaiting {
-							// 会话数量限制检查（等待计划也需要占用会话配额）
-							if !s.checkAndRegisterSession(ctx, account, sessionHash) {
-								// 会话限制已满，继续到 Layer 2
-							} else {
-								slog.Debug("sticky.layer1_5_no_routing_hit",
-									"account_id", accountID,
-									"session", shortSessionHash(sessionHash),
-									"result", "wait_plan",
-								)
-								return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-									AccountID:      accountID,
-									MaxConcurrency: account.Concurrency,
-									Timeout:        cfg.StickySessionWaitTimeout,
-									MaxWaiting:     cfg.StickySessionMaxWaiting,
-								})
-							}
-						}
-					}
+					// 粘性账号槽位已满：放弃本次粘性命中，继续到 Layer 2 整池选择（方案 §3.1-2）。
+					// 同档还有空闲账号时直接分流，不在此处原地等待。
 				} else if !clearSticky {
 					slog.Debug("sticky.layer1_5_no_routing_miss",
 						"account_id", accountID,
@@ -850,15 +758,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 
 	// ============ Layer 3: 兜底排队 ============
+	// 经既有初筛（负载快照）后的当前档候选已全部执行过一次实际抢槽且全部失败，
+	// 或初筛后即为空集 → 在此产生唯一一次等待计划（方案 §3.1-5、§4.1）。
 	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
-	waitPlanSkipped := 0
 	for _, acc := range candidates {
-		// Cursor 供给槽满即换号、不排队（见谓词注释）。整池都是 Cursor 且都满时，
-		// 继续往下把「池子忙不过来」如实回报，而不是让客户端白等一轮必然等空的等待。
-		if shouldSwitchAccountOnStickySlotFull(acc) {
-			waitPlanSkipped++
-			continue
-		}
 		// 会话数量限制检查（等待计划也需要占用会话配额）
 		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
 			continue // 会话限制已满，尝试下一个账号
@@ -870,14 +773,6 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			MaxWaiting:     cfg.FallbackMaxWaiting,
 		})
 	}
-	if waitPlanSkipped > 0 {
-		slog.Warn("gateway.fallback_wait_plan_skipped",
-			"group_id", derefGroupID(groupID),
-			"model", requestedModel,
-			"skipped_accounts", waitPlanSkipped,
-			"reason", "cursor_slot_full_switch_account",
-		)
-	}
 	// 走到这里说明候选账号都可用，但会话槽位全部占满——原因必须如实带回下游，
 	// 否则会被误报成「该分组暂无可用账号」。
 	return nil, noAvailableAccountsError(requestedModel, selectionFailureStats{
@@ -885,26 +780,6 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		Eligible:         len(candidates),
 		SessionSlotsFull: len(candidates),
 	})
-}
-
-// shouldSwitchAccountOnStickySlotFull 报告粘性账号槽位已满时是否应**直接换号**而不是原地等待。
-//
-// 只有 Cursor 供给换号：它的并发槽跟着会话走（§25.4），客户端中断后要等 waiting_tools
-// 空闲释放（§2.5，120 秒）或 Redis 槽 TTL（30 分钟）才归还；而 Cursor 的续轮是在内存
-// 会话表里按 call_id 命中，不依赖本次选号，换号不会打断会话。
-// 其他平台保持既有等待语义：会话亲和与上游 prompt cache 的收益更确定，宁可等一会儿。
-//
-// **这是「槽满之后怎么办」的唯一判定入口**：四个会产生等待计划的位置（Layer 1 路由候选、
-// Layer 1.5 有路由粘性、Layer 1.5 无路由粘性、Layer 3 兜底）都必须经它判断，禁止在调用点
-// 再写一份平台分支。
-//
-// 为什么必须收口：2026-11-04 修「Cursor 槽满要换号」时只改了 Layer 1.5 有路由那一条分支，
-// 同一规则在另外三处仍是「排队等 120 秒」。生产恰好走无路由分支（分组没有模型路由配置），
-// 于是 2026-11-15 复现：账号 986 上游不回话、三个并发槽被占死，后续请求全部原地排队 120 秒
-// （而排队上限 120s < 上游失败耗时 125s，排了也必然等空），同组还有 81 个空闲账号能服务
-// 同一模型，一个都没被选中。
-func shouldSwitchAccountOnStickySlotFull(account *Account) bool {
-	return account != nil && account.Platform == PlatformCursor
 }
 
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
