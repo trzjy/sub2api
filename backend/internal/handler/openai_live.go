@@ -121,7 +121,7 @@ func (h *OpenAIGatewayHandler) Live(c *gin.Context) {
 			return nil, service.ErrLiveAccountSlotExhausted
 		}
 		return release, nil
-	})
+	}, service.CompositeEndpointForInboundPath(c.Request.URL.Path))
 	if err != nil {
 		h.writeLiveCreateError(c, err)
 		return
@@ -190,6 +190,8 @@ func (h *OpenAIGatewayHandler) writeLiveCreateError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrLiveConcurrencyFull):
 		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", infraerrors.LiveConcurrencyLimitReached)
 	case errors.Is(err, service.ErrLiveAccountSlotExhausted):
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
+	case errors.Is(err, service.ErrLiveAccountIneligible):
 		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 	case errors.Is(err, service.ErrLiveUnavailable):
 		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.LiveUnavailable)

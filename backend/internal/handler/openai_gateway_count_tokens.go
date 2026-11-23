@@ -101,37 +101,41 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 	requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	requestStart := time.Now()
-	account, err := h.gatewayService.SelectAccountForTokenCount(
-		c.Request.Context(),
-		apiKey.GroupID,
-		sessionHash,
-		routingModel,
-		service.OpenAIEndpointCapabilityChatCompletions,
-		requestPlatform,
-	)
+	failedAccounts := make(map[int64]struct{})
+	var account *service.Account
+	for {
+		account, err = h.gatewayService.SelectAccountForTokenCountWithExclusions(
+			c.Request.Context(),
+			apiKey.GroupID,
+			sessionHash,
+			routingModel,
+			service.OpenAIEndpointCapabilityChatCompletions,
+			requestPlatform,
+			failedAccounts,
+		)
+		if err != nil {
+			reqLog.Warn("openai_input_tokens.account_select_failed", zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)))
+			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, routingModel, reqModel, err)
+			if !cls.ModelNotFound {
+				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
+			}
+			h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
+			return
+		}
+		if account == nil {
+			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, routingModel, reqModel, nil)
+			if !cls.ModelNotFound {
+				markOpsRoutingCapacityLimited(c)
+			}
+			h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
+			return
+		}
+		if h.concurrencyHelper.RejectCompositeIneligible(c, &service.AccountSelectionResult{Account: account}, failedAccounts, nil) {
+			continue
+		}
+		break
+	}
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
-	if err != nil {
-		reqLog.Warn("openai_input_tokens.account_select_failed", zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)))
-		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, routingModel, reqModel, err)
-		if !cls.ModelNotFound {
-			markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
-		}
-		h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
-		return
-	}
-	if account == nil {
-		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, routingModel, reqModel, nil)
-		if !cls.ModelNotFound {
-			markOpsRoutingCapacityLimited(c)
-		}
-		h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
-		return
-	}
-
-	if h.concurrencyHelper.RejectCompositeIneligible(c, &service.AccountSelectionResult{Account: account}, nil, nil) {
-		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts)
-		return
-	}
 
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 	if err := h.gatewayService.ForwardResponsesInputTokens(c.Request.Context(), c, account, forwardBody); err != nil {
@@ -280,38 +284,42 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	if preferredMappedModel != "" {
 		currentRoutingModel = preferredMappedModel
 	}
-	account, err := h.gatewayService.SelectAccountForTokenCount(
-		c.Request.Context(),
-		apiKey.GroupID,
-		sessionHash,
-		currentRoutingModel,
-		service.OpenAIEndpointCapabilityChatCompletions,
-		openAICompatibleRequestPlatform(c.Request.Context(), apiKey),
-	)
+	failedAccounts := make(map[int64]struct{})
+	var account *service.Account
+	for {
+		account, err = h.gatewayService.SelectAccountForTokenCountWithExclusions(
+			c.Request.Context(),
+			apiKey.GroupID,
+			sessionHash,
+			currentRoutingModel,
+			service.OpenAIEndpointCapabilityChatCompletions,
+			openAICompatibleRequestPlatform(c.Request.Context(), apiKey),
+			failedAccounts,
+		)
+		if err != nil {
+			requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
+			reqLog.Warn("openai_count_tokens.account_select_failed", zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)))
+			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel, err)
+			if !cls.ModelNotFound {
+				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
+			}
+			h.anthropicErrorResponse(c, cls.Status, cls.ErrType, cls.Message)
+			return
+		}
+		if account == nil {
+			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel, nil)
+			if !cls.ModelNotFound {
+				markOpsRoutingCapacityLimited(c)
+			}
+			h.anthropicErrorResponse(c, cls.Status, cls.ErrType, cls.Message)
+			return
+		}
+		if h.concurrencyHelper.RejectCompositeIneligible(c, &service.AccountSelectionResult{Account: account}, failedAccounts, nil) {
+			continue
+		}
+		break
+	}
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
-	if err != nil {
-		requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
-		reqLog.Warn("openai_count_tokens.account_select_failed", zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)))
-		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel, err)
-		if !cls.ModelNotFound {
-			markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
-		}
-		h.anthropicErrorResponse(c, cls.Status, cls.ErrType, cls.Message)
-		return
-	}
-	if account == nil {
-		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel, nil)
-		if !cls.ModelNotFound {
-			markOpsRoutingCapacityLimited(c)
-		}
-		h.anthropicErrorResponse(c, cls.Status, cls.ErrType, cls.Message)
-		return
-	}
-
-	if h.concurrencyHelper.RejectCompositeIneligible(c, &service.AccountSelectionResult{Account: account}, nil, nil) {
-		h.anthropicErrorResponse(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts)
-		return
-	}
 
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 	forwardBody := mappedBodyForMessages(channelMapping.Mapped, channelMapping.MappedModel)
