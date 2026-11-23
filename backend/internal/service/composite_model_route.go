@@ -132,8 +132,44 @@ func normalizeCompositeRouteEndpoint(endpoint string) string {
 		CompositeRouteEndpointChatCompletions,
 		CompositeRouteEndpointEmbeddings,
 		CompositeRouteEndpointImages,
-		CompositeRouteEndpointGemini:
+		CompositeRouteEndpointGemini,
+		CompositeEndpointSystemOne,
+		CompositeEndpointVideo,
+		CompositeEndpointLive,
+		CompositeEndpointAlphaSearch:
 		return endpoint
+	default:
+		return CompositeRouteEndpointAny
+	}
+}
+
+// CompositeEndpointForInboundPath 把真实请求路径归一为 CompositeEndpoint*。
+// routes 中间件与选号后核对共用此函数，禁止另写第二份映射。
+func CompositeEndpointForInboundPath(path string) string {
+	p := strings.TrimSpace(path)
+	switch {
+	case strings.Contains(p, "/messages/count_tokens"):
+		return CompositeRouteEndpointCountTokens
+	case strings.Contains(p, "/messages"):
+		return CompositeRouteEndpointMessages
+	case strings.Contains(p, "/systemone"):
+		return CompositeEndpointSystemOne
+	case strings.Contains(p, "/alpha/search"):
+		return CompositeEndpointAlphaSearch
+	case strings.Contains(p, "/realtime/calls"), strings.HasSuffix(strings.TrimRight(p, "/"), "/live"):
+		return CompositeEndpointLive
+	case strings.Contains(p, "/responses"):
+		return CompositeRouteEndpointResponses
+	case strings.Contains(p, "/chat/completions"):
+		return CompositeRouteEndpointChatCompletions
+	case strings.Contains(p, "/embeddings"):
+		return CompositeRouteEndpointEmbeddings
+	case strings.Contains(p, "/images/"):
+		return CompositeRouteEndpointImages
+	case strings.Contains(p, "/videos/"), strings.Contains(p, "/contents/generations/tasks"):
+		return CompositeEndpointVideo
+	case strings.Contains(p, "/v1beta/"):
+		return CompositeRouteEndpointGemini
 	default:
 		return CompositeRouteEndpointAny
 	}
