@@ -114,7 +114,14 @@ func (h *OpenAIGatewayHandler) Live(c *gin.Context) {
 	defer userRelease()
 
 	identity := liveCallIdentity(c, apiKey, subject.UserID, subscription)
-	created, err := h.gatewayService.CreateLiveCall(c.Request.Context(), request, identity, subject.Concurrency)
+	created, err := h.gatewayService.CreateLiveCallWithSlotWaiter(c.Request.Context(), request, identity, subject.Concurrency, func(selection *service.AccountSelectionResult) (func(), error) {
+		var streamStarted bool
+		release, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(c, selection, concurrencySlotWaitExhausted(c), false, &streamStarted)
+		if slotFull {
+			return nil, service.ErrLiveAccountSlotExhausted
+		}
+		return release, nil
+	})
 	if err != nil {
 		h.writeLiveCreateError(c, err)
 		return
@@ -182,6 +189,8 @@ func (h *OpenAIGatewayHandler) writeLiveCreateError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrLiveConcurrencyFull):
 		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", infraerrors.LiveConcurrencyLimitReached)
+	case errors.Is(err, service.ErrLiveAccountSlotExhausted):
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 	case errors.Is(err, service.ErrLiveUnavailable):
 		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.LiveUnavailable)
 	default:

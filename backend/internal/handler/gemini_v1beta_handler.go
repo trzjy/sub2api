@@ -723,6 +723,23 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				}
 				selErr = service.ErrNoAvailableAccounts
 			}
+			// 跨链全满且本请求尚未等过时补一次唯一等待：按同一供给/排除集合取
+			// 等待目标，抢槽成功则 selErr 置 nil 直接进入既有成功路径；失败时
+			// 保留下方原错误处理，不改错误分类/状态码/流式处理。
+			if selErr != nil && errors.Is(selErr, service.ErrNoAvailableAccounts) && !concurrencySlotWaitExhausted(c) {
+				waitTarget, waitErr := h.gatewayService.SelectCompositeCrossChainWaitTarget(
+					c.Request.Context(), derefGroupID(apiKey.GroupID), modelName, service.CompositeEndpointGemini,
+					decision.SupplyAccounts, excludedAccountIDs, sessionKey)
+				if waitErr == nil && waitTarget != nil && waitTarget.Account != nil {
+					waitedRelease, waitedSlotFull := geminiConcurrency.AcquireAccountSlotForSelection(
+						c, waitTarget, concurrencySlotWaitExhausted(c), stream, &streamStarted)
+					if !waitedSlotFull {
+						selected = waitTarget.Account
+						release = waitedRelease
+						selErr = nil
+					}
+				}
+			}
 			if selErr != nil {
 				err = selErr
 			} else {
@@ -978,7 +995,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 		// 会话绑定只在转发成功之后写入（方案 §3.3/§4.4）：选号与失败转发都不写，
 		// 本次服务账号与既有绑定不同则覆盖，换号即跟走。Cursor 会话结算不受影响。
-		if err := h.gatewayService.BindStickySession(c.Request.Context(), apiKey.GroupID, sessionKey, account.ID); err != nil {
+		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionKey, account.ID); err != nil {
 			reqLog.Warn("gemini.bind_sticky_session_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		}
 

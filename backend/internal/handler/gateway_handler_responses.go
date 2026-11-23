@@ -244,6 +244,20 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				requestCtx, groupID, reqModel,
 				service.CompositeEndpointResponses, decision.SupplyAccounts, fs.FailedAccountIDs,
 			)
+			if selErr != nil && errors.Is(selErr, service.ErrNoAvailableAccounts) && !concurrencySlotWaitExhausted(c) {
+				waitTarget, waitErr := h.gatewayService.SelectCompositeCrossChainWaitTarget(
+					requestCtx, groupID, reqModel, service.CompositeEndpointResponses,
+					decision.SupplyAccounts, fs.FailedAccountIDs, sessionHash)
+				if waitErr == nil && waitTarget != nil && waitTarget.Account != nil {
+					waitedRelease, waitedSlotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
+						c, waitTarget, concurrencySlotWaitExhausted(c), reqStream, &streamStarted)
+					if !waitedSlotFull {
+						selected = waitTarget.Account
+						release = waitedRelease
+						selErr = nil
+					}
+				}
+			}
 			if selErr != nil {
 				// 与本入口既有"无可用账号"同口径：不得当成 502 上游错误。
 				if failoverClientGone(c) {

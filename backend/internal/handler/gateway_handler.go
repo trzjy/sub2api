@@ -799,6 +799,23 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					c.Request.Context(), groupID, reqModel,
 					service.CompositeEndpointMessages, supply, fs.FailedAccountIDs,
 				)
+				// 跨链全满且本请求尚未等过时补一次唯一等待：按同一供给/排除集合取
+				// 等待目标，抢槽成功则 selErr 置 nil 直接进入既有成功路径；失败时
+				// 保留下方原错误处理，不改错误分类/状态码/流式处理。
+				if selErr != nil && errors.Is(selErr, service.ErrNoAvailableAccounts) && !concurrencySlotWaitExhausted(c) {
+					waitTarget, waitErr := h.gatewayService.SelectCompositeCrossChainWaitTarget(
+						c.Request.Context(), groupID, reqModel, service.CompositeEndpointMessages,
+						supply, fs.FailedAccountIDs, sessionKey)
+					if waitErr == nil && waitTarget != nil && waitTarget.Account != nil {
+						waitedRelease, waitedSlotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
+							c, waitTarget, concurrencySlotWaitExhausted(c), reqStream, &streamStarted)
+						if !waitedSlotFull {
+							selected = waitTarget.Account
+							release = waitedRelease
+							selErr = nil
+						}
+					}
+				}
 				if selErr != nil {
 					// 与本入口既有"无可用账号"同口径：不得当成 502 上游错误。
 					if failoverClientGone(c) {
@@ -1374,7 +1391,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			//   否则下一次请求会被粘性会话又钉回已停用/额度耗尽的死亡账号。
 			if sessionKey != "" && shouldRebindStickyAfterForward(sessionBoundAccountID, account.ID,
 				service.CursorRebuildRequested(c.Request.Context())) {
-				if err := h.gatewayService.BindStickySession(c.Request.Context(), currentAPIKey.GroupID, sessionKey, account.ID); err != nil {
+				if err := h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), currentAPIKey.GroupID, sessionKey, account.ID); err != nil {
 					reqLog.Warn("gateway.bind_sticky_session_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				}
 			}
@@ -2970,6 +2987,13 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 			markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 		}
 		h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
+		return
+	}
+
+	// 方案包 B 3.4：选号成功后做一次归属核对，不合格账号不得转发到上游。
+	// infraerrors 与 pkgerrors 同指 internal/pkg/errors，本文件既有别名为 pkgerrors。
+	if h.concurrencyHelper.RejectCompositeIneligible(c, &service.AccountSelectionResult{Account: account}, nil, nil) {
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts)
 		return
 	}
 	setOpsSelectedAccount(c, account.ID, account.Platform)

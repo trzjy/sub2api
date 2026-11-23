@@ -242,6 +242,23 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				c.Request.Context(), groupID, reqModel,
 				service.CompositeEndpointChatCompletions, decision.SupplyAccounts, fs.FailedAccountIDs,
 			)
+			// G19：跨链全满（无可用账号）且本请求尚未等过时，按 G17 同型补一次等待。
+			// 仅在选号确认全满时进入；等待/抢槽失败保持本入口原有错误出口不变。
+			if selErr != nil && errors.Is(selErr, service.ErrNoAvailableAccounts) && !concurrencySlotWaitExhausted(c) {
+				waitTarget, waitErr := h.gatewayService.SelectCompositeCrossChainWaitTarget(
+					c.Request.Context(), groupID, reqModel,
+					service.CompositeEndpointChatCompletions, decision.SupplyAccounts, fs.FailedAccountIDs, selectionSessionHash,
+				)
+				if waitErr == nil && waitTarget != nil {
+					waitRelease, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
+						c, waitTarget, concurrencySlotWaitExhausted(c), reqStream, &streamStarted)
+					if !slotFull && waitTarget.Account != nil {
+						selected = waitTarget.Account
+						release = waitRelease
+						selErr = nil
+					}
+				}
+			}
 			if selErr != nil {
 				// 与本入口既有"无可用账号"同口径：不得当成 502 上游错误。
 				if failoverClientGone(c) {
