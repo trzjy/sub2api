@@ -32,6 +32,10 @@ func ensureCompositeTargetPlatform(c *gin.Context, apiKey *service.APIKey, model
 	if _, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
 		return
 	}
+	// 已命中的决策是权威来源，不得再用 Any 重解析覆盖（会丢掉 SupplyAccounts 与真实端点）。
+	if decision, ok := service.CompositeRouteDecisionFromContext(c.Request.Context()); ok && decision.Matched {
+		return
+	}
 	if gatewayCore == nil {
 		return
 	}

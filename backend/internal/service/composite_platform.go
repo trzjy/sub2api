@@ -219,7 +219,7 @@ func DetectModelPlatform(model string) (string, bool) {
 		strings.HasPrefix(normalized, "abab6"),
 		strings.HasPrefix(normalized, "abab7"):
 		return PlatformMiniMax, true
-case normalized == "jev-latest" || strings.HasPrefix(normalized, "jev-"):
+	case normalized == "jev-latest" || strings.HasPrefix(normalized, "jev-"):
 		return PlatformTypeSafe, true
 	case normalized == "space-bunny":
 		// CodeBuddy 的公开模型 ID 无平台词根前缀（不同于 anthropic-/gpt-/kimi- 等），
@@ -286,7 +286,7 @@ func (s *GatewayService) resolveCompositeRouteDecision(ctx context.Context, grou
 // 基座，一旦纳入，codebuddy 账号配了 model_mapping 就会抢先 claim kimi-k3 等模型
 // （用户明确要求「codebuddy 账号不支持 kimi-k3」，kimi-k3 必须恒归 kimi 平台账号）。
 // 故在 domain 判定之上显式排除 codebuddy；codebuddy 仍走 DetectModelPlatform
-//（space-bunny 自动生效），只不经归属层。锁见 composite_other_ownership_test.go。
+// （space-bunny 自动生效），只不经归属层。锁见 composite_other_ownership_test.go。
 func isConcreteRequestPlatform(platform string) bool {
 	if platform == PlatformCodeBuddy {
 		return false
@@ -422,4 +422,38 @@ func ValidateWebZhipuModel(model string) error {
 		}
 	}
 	return fmt.Errorf("zhipu web model %q is not supported", model)
+}
+
+// CompositeSelectedAccountServes 是复合分组「选号后统一核对一次」的唯一实现。
+// endpoint 为真实入站端点归一后的 CompositeEndpoint*。
+// 非复合分组或无已命中决策时返回 ok=true，不改变普通路径。
+func CompositeSelectedAccountServes(ctx context.Context, endpoint string, account *Account) (path string, ok bool) {
+	if account == nil {
+		return "", false
+	}
+	decision, matched := CompositeRouteDecisionFromContext(ctx)
+	if !matched || !decision.Matched {
+		return "", true
+	}
+	ep := normalizeCompositeRouteEndpoint(endpoint)
+	if decision.Source == CompositeRouteSourceAccount {
+		found := false
+		for _, claimant := range decision.SupplyAccounts {
+			if claimant.AccountID == account.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", false
+		}
+	} else if account.Platform != decision.TargetPlatform {
+		return "", false
+	}
+	for _, chain := range []string{CompositeChainOpenAI, CompositeChainAnthropic, CompositeChainGemini} {
+		if p, serves := CompositeAccountChainPath(chain, ep, account); serves {
+			return p, true
+		}
+	}
+	return "", false
 }
