@@ -785,8 +785,10 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		}), false, nil
 	}
 
-	// 粘性账号抢槽失败（并发满）不再返回等待计划原地等待；返回 nil 交给上层
-	// 继续在候选内选号，等待统一由兜底出口 finishLoadBalanceSelectionFallback 产生。
+	// 粘性账号抢槽失败（并发满）：
+	// - 视频绑定查询（PreserveStickyBinding=true）依赖等待计划表达「绑定账号满了但就是它」，
+	//   恢复返回等待计划让调用方原地等待该账号槽位，避免 503 退化为 404。
+	// - 普通路径仍返回 nil 交给上层在候选内选号，等待统一由兜底出口产生。
 	if s.service.concurrencyService != nil {
 		if escapeCfg.enabled && !req.DisableStickyEscape && acquireErr == nil && result != nil && !result.Acquired {
 			errorRate, ttft, _ := s.stats.snapshot(accountID)
@@ -798,6 +800,18 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 			)
 			return nil, true, nil
 		}
+	}
+	if req.PreserveStickyBinding {
+		cfg := s.service.schedulingConfig()
+		return attachSelectionProfitGate(ctx, &AccountSelectionResult{
+			Account: account,
+			WaitPlan: &AccountWaitPlan{
+				AccountID:      accountID,
+				MaxConcurrency: account.Concurrency,
+				Timeout:        cfg.StickySessionWaitTimeout,
+				MaxWaiting:     cfg.StickySessionMaxWaiting,
+			},
+		}), false, nil
 	}
 	return nil, false, nil
 }

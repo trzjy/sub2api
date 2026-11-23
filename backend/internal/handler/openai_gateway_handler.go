@@ -3004,6 +3004,11 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	if selection.Acquired {
 		release = selection.ReleaseFunc
 	} else {
+		if selection.WaitPlan == nil {
+			markOpsRoutingCapacityLimited(c)
+			writeError(http.StatusServiceUnavailable, "api_error", "", infraerrors.NoAvailableAccounts)
+			return nil, openAISlotAcquireFailed
+		}
 		var slotFull bool
 		release, slotFull = h.concurrencyHelper.AcquireAccountSlotForSelection(
 			c, selection, concurrencySlotWaitExhausted(c), reqStream, streamStarted)
