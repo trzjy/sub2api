@@ -1050,17 +1050,6 @@ func (s *GatewayService) BindStickySession(ctx context.Context, groupID *int64, 
 	return s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, accountID, stickySessionTTL)
 }
 
-// bindGatewayStickySessionDuringSelection preserves the normal eager sticky
-// behavior unless a profit gate is installed. Profit-controlled requests bind
-// only after the terminal post-slot check, otherwise a rejected candidate could
-// overwrite a healthy pre-existing sticky binding.
-func (s *GatewayService) bindGatewayStickySessionDuringSelection(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
-	if gatewayProfitControlGateActive(ctx) {
-		return nil
-	}
-	return s.BindStickySession(ctx, groupID, sessionHash, accountID)
-}
-
 // BindStickySessionAfterProfitAdmission records a terminally admitted
 // account. Bindings are written uniformly after upstream service succeeds and
 // always overwrite any existing value, so the session memory follows the
