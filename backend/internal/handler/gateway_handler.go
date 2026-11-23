@@ -475,13 +475,6 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 			account = latest
 			selection.Account = latest
-			// 等待路径保持既有 eager 绑定（无门时 helper 直接绑定）；调度器已
-			// 抢槽的直达路径无门时由选号内部绑定，这里只在门下补准入后绑定。
-			if selection.ProfitGateActive() || !selection.Acquired {
-				if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, sessionKey, account.ID); err != nil {
-					reqLog.Warn("gateway.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				}
-			}
 			// 账号槽位/等待计数需要在超时或断开时安全回收
 			// §25.4：账号槽改用**可转交**句柄（Cursor 分支交给会话持有）。
 			accountSlot := newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
@@ -975,13 +968,6 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				selection.Account = latest
 				// 记录本请求注册过会话槽的账号（profit 准入后账号已定）
 				sessionSlotAccounts[account.ID] = account
-				// 等待路径保持既有 eager 绑定（无门时 helper 直接绑定）；调度器已
-				// 抢槽的直达路径无门时由选号内部绑定，这里只在门下补准入后绑定。
-				if selection.ProfitGateActive() || !selection.Acquired {
-					if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, currentAPIKey.GroupID, sessionKey, account.ID); err != nil {
-						reqLog.Warn("gateway.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-					}
-				}
 				// 账号槽位/等待计数需要在超时或断开时安全回收
 				// §25.4：账号槽改用**可转交**句柄（Cursor 分支交给会话持有）。
 				accountSlot = newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)

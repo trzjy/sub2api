@@ -166,33 +166,20 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 		}
 		account := selection.Account
 
-		accountRelease := selection.ReleaseFunc
-		if !selection.Acquired {
-			if selection.WaitPlan == nil {
-				markOpsRoutingCapacityLimited(c)
-				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
-				return
+		// 3. 获取账号并发槽位（统一入口，方案 §4.3）。
+		// 已持槽直接接管、未持槽立即抢一次、未等过且有等待计划时等一次的判定全部
+		// 收敛到 AcquireAccountSlotForSelection，调用点不再自写等待分支。
+		accountRelease, slotFull := h.concurrencyHelper.AcquireAccountSlotForSelection(
+			c, selection, slotFullCount > 0, false, &streamStarted)
+		if slotFull {
+			reqLog.Warn("systemone.account_slot_acquire_failed", zap.Int64("account_id", account.ID))
+			// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+			// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
+			if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
+				continue
 			}
-			waitTimeout := selection.WaitPlan.Timeout
-			if slotFullCount > 0 {
-				// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-				// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-				// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-				// 抢不到就立刻失败、走下面的排除分支换下一个。
-				// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-				waitTimeout = 0
-			}
-			accountRelease, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(c, account.ID, selection.WaitPlan.MaxConcurrency, waitTimeout, false, &streamStarted)
-			if err != nil {
-				reqLog.Warn("systemone.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
-				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-				if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
-					continue
-				}
-				h.handleConcurrencyError(c, err, "account", false)
-				return
-			}
+			h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
+			return
 		}
 		// 准入终检：与其他网关入口一致，利润控制否决的账号不得承接本次请求。
 		admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
