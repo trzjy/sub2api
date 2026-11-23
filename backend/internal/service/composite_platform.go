@@ -9,6 +9,10 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
 
+// compositeDecisionContextKey 是 CompositeRouteDecision 在 context 中的私有键类型，
+// 与 ctxkey 包的平台/模型盖章键相互独立，不污染既有盖章语义。
+type compositeDecisionContextKey struct{}
+
 // WithResolvedTargetPlatform stores the concrete provider chosen for a request
 // made through a composite group.
 func WithResolvedTargetPlatform(ctx context.Context, platform string) context.Context {
@@ -47,7 +51,56 @@ func WithCompositeRouteDecision(ctx context.Context, decision CompositeRouteDeci
 	if source := strings.TrimSpace(decision.Source); source != "" {
 		ctx = context.WithValue(ctx, ctxkey.CompositeRouteSource, source)
 	}
+	ctx = context.WithValue(ctx, compositeDecisionContextKey{}, decision)
 	return ctx
+}
+
+// CompositeRouteDecisionFromContext 读取 WithCompositeRouteDecision 盖章的完整 decision。
+// 与平台/模型盖章分开存放，供供给门禁读取 SupplyPlatforms/Reason 等判定字段；不存在返回 false。
+func CompositeRouteDecisionFromContext(ctx context.Context) (CompositeRouteDecision, bool) {
+	if ctx == nil {
+		return CompositeRouteDecision{}, false
+	}
+	decision, ok := ctx.Value(compositeDecisionContextKey{}).(CompositeRouteDecision)
+	if !ok {
+		return CompositeRouteDecision{}, false
+	}
+	return decision, true
+}
+
+// CompositeDecisionSupplyExists 报告该 decision 是否命中了供给（Matched）。
+func CompositeDecisionSupplyExists(d CompositeRouteDecision) bool {
+	return d.Matched
+}
+
+// CompositeDecisionAmbiguous 报告该 decision 是否为多平台供给歧义：已命中、理由为
+// CompositeRouteReasonAmbiguous、且 SupplyPlatforms 非空。
+func CompositeDecisionAmbiguous(d CompositeRouteDecision) bool {
+	return d.Matched && d.Reason == CompositeRouteReasonAmbiguous && len(d.SupplyPlatforms) > 0
+}
+
+// CompositeSupplyAllowsPlatform 报告该 decision 的供给是否允许 allowed 中任一平台。
+// 歧义场景按 SupplyPlatforms 求交，否则按 TargetPlatform 判定；两者皆不满足返回 false。
+func CompositeSupplyAllowsPlatform(d CompositeRouteDecision, allowed ...string) bool {
+	if CompositeDecisionAmbiguous(d) {
+		for _, supply := range d.SupplyPlatforms {
+			for _, candidate := range allowed {
+				if supply == candidate {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if d.TargetPlatform == "" {
+		return false
+	}
+	for _, candidate := range allowed {
+		if d.TargetPlatform == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func ResolvedUpstreamModelFromContext(ctx context.Context) (string, bool) {

@@ -26,17 +26,28 @@ const (
 	CompositeRouteSourceAccount  = "account_model"
 )
 
+// CompositeOwnershipClaimant 是归属层保存的账号级声明方摘要，供跨链 selector 使用。
+type CompositeOwnershipClaimant struct {
+	AccountID     int64  `json:"account_id"`
+	Platform      string `json:"platform"`
+	Type          string `json:"type"`
+	Priority      int    `json:"priority"`
+	CursorConnect bool   `json:"cursor_connect"`
+	WebAccessMode bool   `json:"web_access_mode"`
+}
+
 // CompositeModelOwnership identifies the concrete provider that exposes a
 // public model through an account-level exact mapping.
 type CompositeModelOwnership struct {
 	TargetPlatform string
 	Matched        bool
 	Ambiguous      bool
-	// OpenAIGatewayOAuthClaimed 表示声明方中含 OpenAI 网关族平台的 OAuth /
-	// setup-token 凭据。歧义请求无法解析平台，会落到默认的 Anthropic 网关
-	// handler：Anthropic / Gemini / Antigravity 的 OAuth 在那里有原生或兼容
-	// 转发，API Key 上游可能兼容多种格式，唯独这类凭据只能走 OpenAI 网关。
-	OpenAIGatewayOAuthClaimed bool
+	// Platforms 是暴露该公开模型的声明方平台集合，排序去重。
+	// 本单不填充，由后续卡填充。
+	Platforms []string
+	// Claimants 是账号级声明方摘要，供跨链 selector 使用。
+	// 本单不填充，由后续卡填充。
+	Claimants []CompositeOwnershipClaimant
 }
 
 type CompositeModelOwnershipResolver func(context.Context, int64, string) (CompositeModelOwnership, error)
@@ -78,6 +89,15 @@ type CompositeRouteDecision struct {
 	Endpoint       string               `json:"endpoint"`
 	Route          *CompositeModelRoute `json:"route,omitempty"`
 	Reason         string               `json:"reason,omitempty"`
+	// SupplyPlatforms 是本端点可服务的声明方平台集合；本单不填充。
+	SupplyPlatforms []string `json:"supply_platforms,omitempty"`
+	// ServiceChain 是多平台供给的入口/执行链：openai/anthropic/gemini；
+	// 单平台/显式/detector 可留空。
+	ServiceChain string `json:"service_chain,omitempty"`
+	// QualifyingChains 是 eligible 账号涉及的链集合，诊断用，不要求交集。
+	QualifyingChains []string `json:"qualifying_chains,omitempty"`
+	// SupplyAccounts 是本端点可服务的账号摘要，selector 用；本单不填充。
+	SupplyAccounts []CompositeOwnershipClaimant `json:"supply_accounts,omitempty"`
 }
 
 type CompositeRouteInput struct {
@@ -108,6 +128,7 @@ func normalizeCompositeRouteEndpoint(endpoint string) string {
 	case CompositeRouteEndpointMessages,
 		CompositeRouteEndpointCountTokens,
 		CompositeRouteEndpointResponses,
+		CompositeEndpointResponsesWS,
 		CompositeRouteEndpointChatCompletions,
 		CompositeRouteEndpointEmbeddings,
 		CompositeRouteEndpointImages,

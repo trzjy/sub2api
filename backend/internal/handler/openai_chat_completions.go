@@ -206,6 +206,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var lastPlatformQuotaErr error
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	// 本次请求内已整体排除过的上游主机（审核拒绝按主机生效，同源只查一次）。
 	excludedUpstreamHosts := make(map[string]struct{})
@@ -283,6 +284,17 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			} else {
+				if lastPlatformQuotaErr != nil {
+					// 候选因实际平台配额耗尽被逐一排除至耗尽：按计费错误写出，
+					// 不被 "无可用账号"/502 掩盖，且在 lastFailoverErr/槽位/502 分支之前。
+					status, code, message, retryAfter := billingErrorDetails(lastPlatformQuotaErr)
+					if retryAfter > 0 {
+						c.Header("Retry-After", strconv.Itoa(retryAfter))
+					}
+					syncStreamStartedIfResponseCommitted(c, &streamStarted)
+					h.handleStreamingAwareError(c, status, code, message, streamStarted)
+					return
+				}
 				if lastFailoverErr != nil && !lastFailureWasSlot(c) {
 					// F2-b：与下方耗尽分支同型——响应已提交时先对齐 streamStarted，
 					// 否则会把 JSON 错误体塞进已开的 SSE 流。
@@ -307,6 +319,17 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			return
 		}
 		account := selection.Account
+		// composite 同链歧义：选号后按实际账号平台补检 user×platform 配额。
+		// 失败仅排除该账号并重选（释放槽位/不处罚账号），耗尽时由上方错误分支按计费错误写出。
+		if quotaErr := h.checkCompositeSelectedPlatformQuota(c, apiKey, subscription, account); quotaErr != nil {
+			lastPlatformQuotaErr = quotaErr
+			failedAccountIDs[account.ID] = struct{}{}
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			continue
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai_chat_completions.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		_ = scheduleDecision

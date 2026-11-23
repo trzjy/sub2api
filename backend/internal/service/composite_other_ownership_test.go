@@ -61,7 +61,7 @@ func TestCodeBuddyStaysOutOfCompositeOwnership(t *testing.T) {
 
 	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "kimi-k3")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{}, ownership, "codebuddy 账号不得 claim kimi-k3")
+	require.Equal(t, CompositeModelOwnership{Platforms: []string{}}, ownership, "codebuddy 账号不得 claim kimi-k3")
 
 	resolver := NewCompositeRouteResolver(nil)
 	resolver.SetModelOwnershipResolver(svc.resolveCompositeModelOwnership)
@@ -110,7 +110,14 @@ func TestCompositeOwnershipAdmitsOtherPlatformExplicitMapping(t *testing.T) {
 	// 归属层：other 显式映射账号被纳入，盖章平台=other。
 	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "qwen3.8-flash")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformOther, Matched: true}, ownership)
+	require.Equal(t, CompositeModelOwnership{
+		TargetPlatform: PlatformOther,
+		Matched:        true,
+		Platforms:      []string{"other"},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 1, Platform: PlatformOther},
+		},
+	}, ownership)
 
 	// 门禁（resolver Matched 分支守卫）：ownership 产出不被二次拒，放行且盖章 other。
 	resolver := NewCompositeRouteResolver(nil)
@@ -148,7 +155,7 @@ func TestCompositeOwnershipExcludesOtherEmptyMapping(t *testing.T) {
 
 	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "qwen3.8-flash")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{}, ownership, "other 空映射账号不得产生归属")
+	require.Equal(t, CompositeModelOwnership{Platforms: []string{}}, ownership, "other 空映射账号不得产生归属")
 }
 
 // --- 验收口径⑤：other 与具体平台对同别名各自显式映射 → Ambiguous → 门禁 400（不按遍历择一）---
@@ -178,7 +185,14 @@ func TestCompositeOwnershipAmbiguousOtherVsConcretePlatform(t *testing.T) {
 	// 归属层判歧义，不按遍历顺序择一。
 	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "shared-alias")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{Ambiguous: true}, ownership)
+	require.Equal(t, CompositeModelOwnership{
+		Ambiguous: true,
+		Platforms: []string{"deepseek", "other"},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 1, Platform: PlatformOther},
+			{AccountID: 2, Platform: PlatformDeepseek},
+		},
+	}, ownership)
 	require.False(t, ownership.Matched)
 
 	// 门禁：歧义 → 不匹配 → 上层 400。
@@ -186,8 +200,9 @@ func TestCompositeOwnershipAmbiguousOtherVsConcretePlatform(t *testing.T) {
 	resolver.SetModelOwnershipResolver(svc.resolveCompositeModelOwnership)
 	decision, err := resolver.Resolve(context.Background(), groupID, "shared-alias", CompositeRouteEndpointResponses)
 	require.NoError(t, err)
-	require.False(t, decision.Matched)
-	require.Equal(t, "model is exposed by multiple provider platforms", decision.Reason)
+	require.True(t, decision.Matched, "other+deepseek 现为同链 openai，放行选号")
+	require.Equal(t, PlatformOpenAI, decision.TargetPlatform)
+	require.Equal(t, CompositeRouteReasonAmbiguous, decision.Reason)
 }
 
 // --- 验收口径⑥：未知平台（unknownplat）即使有有效 model_mapping，谓词 false、不产生归属、
@@ -210,7 +225,7 @@ func TestCompositeOwnershipRejectsUnknownPlatformWithValidMapping(t *testing.T) 
 
 	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "my-model")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{}, ownership, "未知平台不得产生归属")
+	require.Equal(t, CompositeModelOwnership{Platforms: []string{}}, ownership, "未知平台不得产生归属")
 
 	// 同时不进 A/B 两目录扫描（扫描点 A/B 用同一谓词过滤）。
 	accounts := repo.accounts
@@ -290,4 +305,66 @@ func TestResolveCodexCompositeModelTargetExcludesOtherEmptyMapping(t *testing.T)
 	require.False(t, ok, "扫描点 B 应排除 other 空映射")
 	require.Empty(t, platform)
 	require.Empty(t, upstream)
+}
+
+// TestResolveCompositeModelOwnershipPopulatesClaimants 锁定 A2b：归属循环按查询顺序
+// （priority, account_id）填充账号级声明方摘要，且不改变 Platforms / Matched /
+// Ambiguous / OAuth 既有行为。
+func TestResolveCompositeModelOwnershipPopulatesClaimants(t *testing.T) {
+	groupID := int64(94)
+	const model = "shared-claim-model"
+	repo := &compositeOwnershipAccountRepo{
+		accounts: []Account{
+			{
+				ID:       101,
+				Platform: PlatformZhipu,
+				Type:     AccountTypeAPIKey,
+				Priority: 1,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{model: "glm-api-upstream"},
+				},
+			},
+			{
+				ID:       202,
+				Platform: PlatformCursor,
+				Type:     AccountTypeOAuth,
+				Priority: 2,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{model: "cursor-upstream"},
+				},
+			},
+			{
+				ID:       303,
+				Platform: PlatformZhipu,
+				Type:     AccountTypeAPIKey,
+				Priority: 3,
+				Credentials: map[string]any{
+					"access_mode":   AccountAccessModeWeb,
+					"model_mapping": map[string]any{model: "glm-web-upstream"},
+				},
+			},
+		},
+	}
+	svc := &GatewayService{accountRepo: repo}
+
+	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, model)
+	require.NoError(t, err)
+
+	require.Len(t, ownership.Claimants, 3, "每个命中归属条件的账号都应产生一条摘要")
+	require.Equal(t, CompositeOwnershipClaimant{
+		AccountID: 101, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Priority: 1,
+	}, ownership.Claimants[0])
+	require.Equal(t, CompositeOwnershipClaimant{
+		AccountID: 202, Platform: PlatformCursor, Type: AccountTypeOAuth, Priority: 2,
+		CursorConnect: true,
+	}, ownership.Claimants[1], "cursor 会话 OAuth 账号应标记 CursorConnect")
+	require.Equal(t, CompositeOwnershipClaimant{
+		AccountID: 303, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Priority: 3,
+		WebAccessMode: true,
+	}, ownership.Claimants[2], "zhipu access_mode=web 账号应标记 WebAccessMode")
+
+	// 摘要填充不改变既有平台集合 / 唯一-歧义判定 / OAuth 标记。
+	require.Equal(t, []string{PlatformCursor, PlatformZhipu}, ownership.Platforms)
+	require.True(t, ownership.Ambiguous)
+	require.False(t, ownership.Matched)
 }

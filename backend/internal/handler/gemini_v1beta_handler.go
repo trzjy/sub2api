@@ -699,12 +699,62 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if len(devinExcludedIDs) > 0 {
 			excludedAccountIDs = mergeAccountIDSets(excludedAccountIDs, devinExcludedIDs)
 		}
-		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, excludedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
-		if err == nil && cachedContentBinding != nil && selection.Account.ID != cachedContentBinding.AccountID {
-			if selection.Acquired && selection.ReleaseFunc != nil {
-				selection.ReleaseFunc()
+
+		// A9：跨链 /v1beta（ServiceChain=gemini，多平台供给且未收敛到具体目标平台）
+		// 用 A4b selector 从 SupplyAccounts 选号并取槽/终检；选中账号仍走本入口既有
+		// gemini compat / antigravity / devin 分派。非跨链路径保持原 Gemini compat 选号。
+		decision, decisionOK := service.CompositeRouteDecisionFromContext(c.Request.Context())
+		crossChainGemini := decisionOK && decision.Matched &&
+			decision.ServiceChain == service.CompositeChainGemini &&
+			decision.TargetPlatform == "" &&
+			len(decision.SupplyAccounts) > 0
+
+		var selection *service.AccountSelectionResult
+		var err error
+		if crossChainGemini {
+			selected, release, selErr := h.gatewayService.SelectCompositeCrossChainAccount(
+				c.Request.Context(), derefGroupID(apiKey.GroupID), modelName,
+				service.CompositeEndpointGemini, decision.SupplyAccounts, excludedAccountIDs,
+			)
+			if selErr == nil && cachedContentBinding != nil && selected.ID != cachedContentBinding.AccountID {
+				// 引用显式缓存的请求只能发往绑定账号：释放 selector 已抢到的槽，按既有错误处理。
+				if release != nil {
+					release()
+				}
+				selErr = service.ErrNoAvailableAccounts
 			}
-			err = service.ErrNoAvailableAccounts
+			if selErr != nil {
+				err = selErr
+			} else {
+				// 实际平台回填先于配额/结算：选到账号后立刻盖章，使下方 QuotaPlatform
+				//（约 :930/:1019）、渠道映射与结算都计量到真实平台而非同链代表平台。
+				requestCtx := service.WithResolvedTargetPlatform(c.Request.Context(), selected.Platform)
+				requestCtx = service.WithCompositeActualPlatformResolved(requestCtx)
+				c.Request = c.Request.WithContext(requestCtx)
+				// 标准模式按实际账号平台补检 user×platform 配额；失败释放并换号重选。
+				if quotaErr := h.checkCompositeCrossChainPlatformQuota(c, apiKey, subscription, selected); quotaErr != nil {
+					if release != nil {
+						release()
+					}
+					fs.FailedAccountIDs[selected.ID] = struct{}{}
+					continue
+				}
+				// selector 已抢占并发槽并完成抢槽后终检，构造同型句柄交给下方既有分派：
+				// 不二次抢槽、不写粘性（Acquired=true 且无利润门，终检/粘性绑定自然跳过）。
+				selection = &service.AccountSelectionResult{
+					Account:     selected,
+					Acquired:    true,
+					ReleaseFunc: release,
+				}
+			}
+		} else {
+			selection, err = h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, excludedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
+			if err == nil && cachedContentBinding != nil && selection.Account.ID != cachedContentBinding.AccountID {
+				if selection.Acquired && selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				err = service.ErrNoAvailableAccounts
+			}
 		}
 		if err != nil {
 			if failoverClientGone(c) {

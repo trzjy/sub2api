@@ -1676,6 +1676,17 @@ func (s *GatewayService) GetCursorSupplyModelIDs(ctx context.Context, groupID *i
 	return models, nil
 }
 
+// sortedCompositeOwnershipPlatforms 返回声明方平台集合的排序去重切片；
+// 空集合返回长度为 0 的切片。
+func sortedCompositeOwnershipPlatforms(platforms map[string]struct{}) []string {
+	result := make([]string, 0, len(platforms))
+	for platform := range platforms {
+		result = append(result, platform)
+	}
+	sort.Strings(result)
+	return result
+}
+
 func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, groupID int64, model string) (CompositeModelOwnership, error) {
 	model = strings.TrimSpace(model)
 	if s == nil || s.accountRepo == nil || groupID <= 0 || model == "" {
@@ -1699,6 +1710,7 @@ func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, gro
 	}
 
 	platforms := make(map[string]struct{})
+	var claimants []CompositeOwnershipClaimant
 	ownership := CompositeModelOwnership{}
 	for _, account := range accounts {
 		platform := strings.TrimSpace(account.Platform)
@@ -1707,9 +1719,22 @@ func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, gro
 			continue
 		}
 		platforms[platform] = struct{}{}
-		ownership.OpenAIGatewayOAuthClaimed = ownership.OpenAIGatewayOAuthClaimed ||
-			(account.IsOAuth() && domain.UsesOpenAIGateway(platform))
+		// 账号级声明方摘要按查询顺序（priority, account_id）追加，不额外排序，
+		// 供 A3/A4 跨链 selector 使用。
+		claimants = append(claimants, CompositeOwnershipClaimant{
+			AccountID:     account.ID,
+			Platform:      platform,
+			Type:          string(account.Type),
+			Priority:      account.Priority,
+			CursorConnect: account.IsCursorConnectSessionAccount(),
+			WebAccessMode: account.IsWebAccessMode(),
+		})
 	}
+	ownership.Claimants = claimants
+
+	// 声明方平台集合与唯一/歧义判定无关，任何结果都需带上，供上层在跨服务链
+	// 歧义时判断可用供给平台；此处紧随循环、先于 Matched/Ambiguous 赋值。
+	ownership.Platforms = sortedCompositeOwnershipPlatforms(platforms)
 
 	if len(platforms) == 1 {
 		for platform := range platforms {

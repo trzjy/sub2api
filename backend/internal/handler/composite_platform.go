@@ -10,6 +10,21 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// compositeServiceChainRepresentative 将多链入口链映射为该链的代表平台。
+// 仅 openai/anthropic/gemini 三条链有代表平台，其它（含空串）返回 ""。
+func compositeServiceChainRepresentative(chain string) string {
+	switch chain {
+	case service.CompositeChainOpenAI:
+		return service.PlatformOpenAI
+	case service.CompositeChainAnthropic:
+		return service.PlatformAnthropic
+	case service.CompositeChainGemini:
+		return service.PlatformGemini
+	default:
+		return ""
+	}
+}
+
 func ensureCompositeTargetPlatform(c *gin.Context, apiKey *service.APIKey, model string, gatewayCore *service.GatewayService) {
 	if c == nil || c.Request == nil || apiKey == nil || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformComposite {
 		return
@@ -32,6 +47,9 @@ func compositeTargetPlatformAllowed(c *gin.Context, apiKey *service.APIKey, mode
 		return true
 	}
 	ensureCompositeTargetPlatform(c, apiKey, model, gatewayCore)
+	if decision, ok := service.CompositeRouteDecisionFromContext(c.Request.Context()); ok && service.CompositeDecisionAmbiguous(decision) {
+		return service.CompositeSupplyAllowsPlatform(decision, allowed...)
+	}
 	platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
 	if !ok {
 		return false
@@ -49,6 +67,12 @@ func compositeTargetPlatformResolved(c *gin.Context, apiKey *service.APIKey, mod
 		return true
 	}
 	ensureCompositeTargetPlatform(c, apiKey, model, gatewayCore)
+	// 多链决策以入口链为准：已命中供给且入口链非空即视为"已解析具体平台"，
+	// 放行跨链供给请求，避免其 TargetPlatform 为空被当作未解析而 404。
+	if decision, ok := service.CompositeRouteDecisionFromContext(c.Request.Context()); ok &&
+		service.CompositeDecisionSupplyExists(decision) && strings.TrimSpace(decision.ServiceChain) != "" {
+		return true
+	}
 	_, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
 	return ok
 }
@@ -57,6 +81,11 @@ func effectiveAPIKeyPlatform(c *gin.Context, apiKey *service.APIKey) string {
 	if c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
 			return platform
+		}
+		// 未解析具体平台时，多链决策按入口链代表平台作为有效平台。
+		if decision, ok := service.CompositeRouteDecisionFromContext(c.Request.Context()); ok &&
+			strings.TrimSpace(decision.ServiceChain) != "" {
+			return compositeServiceChainRepresentative(decision.ServiceChain)
 		}
 	}
 	if apiKey == nil || apiKey.Group == nil {

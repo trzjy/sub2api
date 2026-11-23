@@ -589,7 +589,14 @@ func TestResolveCompositeModelOwnershipUsesModelsCacheInvalidation(t *testing.T)
 
 	first, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "company-model")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformDeepseek, Matched: true}, first)
+	require.Equal(t, CompositeModelOwnership{
+		TargetPlatform: PlatformDeepseek,
+		Matched:        true,
+		Platforms:      []string{PlatformDeepseek},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 1, Platform: PlatformDeepseek},
+		},
+	}, first)
 	require.Equal(t, int64(1), repo.listByGroupCalls.Load())
 
 	repo.byGroup[groupID] = []Account{{
@@ -605,7 +612,14 @@ func TestResolveCompositeModelOwnershipUsesModelsCacheInvalidation(t *testing.T)
 	svc.InvalidateAvailableModelsCache(&groupID, PlatformDeepseek)
 	refreshed, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "company-model")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformOpenAI, Matched: true}, refreshed)
+	require.Equal(t, CompositeModelOwnership{
+		TargetPlatform: PlatformOpenAI,
+		Matched:        true,
+		Platforms:      []string{PlatformOpenAI},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 2, Platform: PlatformOpenAI},
+		},
+	}, refreshed)
 	require.Equal(t, int64(2), repo.listByGroupCalls.Load())
 }
 

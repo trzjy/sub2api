@@ -387,3 +387,104 @@ func TestClientRequestedModelUsesCompositePublicModel(t *testing.T) {
 	require.Equal(t, "public-alias", fields.ChannelMappedModel)
 	require.Equal(t, "public-alias\u2192gpt-5", fields.ModelMappingChain)
 }
+
+// C5：歧义 decision 已盖章时，通用平台门禁按 SupplyPlatforms ∩ allowed 判定，
+// 而非只看代表平台 openai。
+func TestCompositeTargetPlatformAllowedUsesSupplyForAmbiguity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c.Request = c.Request.WithContext(service.WithCompositeRouteDecision(c.Request.Context(), service.CompositeRouteDecision{
+		Matched:         true,
+		TargetPlatform:  service.PlatformOpenAI,
+		Reason:          service.CompositeRouteReasonAmbiguous,
+		SupplyPlatforms: []string{service.PlatformZhipu, service.PlatformCursor},
+	}))
+	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+
+	// allowed 含供给平台 zhipu → 放行；仅含代表平台 openai → 拒绝。
+	require.True(t, compositeTargetPlatformAllowed(c, apiKey, "any-model", nil, service.PlatformOpenAI, service.PlatformZhipu))
+	require.False(t, compositeTargetPlatformAllowed(c, apiKey, "any-model", nil, service.PlatformOpenAI))
+}
+
+// C5：concrete decision（无 Reason/SupplyPlatforms）保持既有 ResolvedTargetPlatform 匹配路径。
+func TestCompositeTargetPlatformAllowedKeepsConcretePath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c.Request = c.Request.WithContext(service.WithCompositeRouteDecision(c.Request.Context(), service.CompositeRouteDecision{
+		Matched:        true,
+		TargetPlatform: service.PlatformOpenAI,
+	}))
+	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+
+	require.True(t, compositeTargetPlatformAllowed(c, apiKey, "gpt-5", nil, service.PlatformOpenAI))
+	require.False(t, compositeTargetPlatformAllowed(c, apiKey, "gpt-5", nil, service.PlatformZhipu))
+}
+
+// C5：compositeTargetPlatformResolved 行为不变——歧义 decision 已盖章则代表平台已解析为 true；
+// 未盖章且 gatewayCore=nil 失败关闭为 false。
+func TestCompositeTargetPlatformResolvedForAmbiguity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+
+	stamped, _ := gin.CreateTestContext(httptest.NewRecorder())
+	stamped.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	stamped.Request = stamped.Request.WithContext(service.WithCompositeRouteDecision(stamped.Request.Context(), service.CompositeRouteDecision{
+		Matched:         true,
+		TargetPlatform:  service.PlatformOpenAI,
+		Reason:          service.CompositeRouteReasonAmbiguous,
+		SupplyPlatforms: []string{service.PlatformZhipu, service.PlatformCursor},
+	}))
+	require.True(t, compositeTargetPlatformResolved(stamped, apiKey, "any-model", nil))
+
+	unstamped, _ := gin.CreateTestContext(httptest.NewRecorder())
+	unstamped.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	require.False(t, compositeTargetPlatformResolved(unstamped, apiKey, "gpt-5", nil))
+}
+
+// A5：多链 decision（Matched、TargetPlatform 为空、ServiceChain=anthropic）下，
+// 门禁按入口链视为已解析，有效平台取入口链代表平台。
+func TestCompositeTargetPlatformResolvedForCrossChainSupply(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	c.Request = c.Request.WithContext(service.WithCompositeRouteDecision(c.Request.Context(), service.CompositeRouteDecision{
+		Matched:         true,
+		ServiceChain:    service.CompositeChainAnthropic,
+		SupplyPlatforms: []string{service.PlatformZhipu, service.PlatformAnthropic},
+		Reason:          service.CompositeRouteReasonAmbiguous,
+	}))
+	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+
+	// TargetPlatform 为空 → ResolvedTargetPlatform 不存在；入口链非空 → 视为已解析。
+	require.True(t, compositeTargetPlatformResolved(c, apiKey, "any-model", nil))
+	// 有效平台取入口链代表平台 anthropic，不回退到 composite group。
+	require.Equal(t, service.PlatformAnthropic, effectiveAPIKeyPlatform(c, apiKey))
+}
+
+// A5：多链 decision 的通用平台门禁仍按 C5 的 SupplyPlatforms ∩ allowed 判定。
+func TestCompositeTargetPlatformAllowedForCrossChainSupply(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+
+	newCtx := func(supplyPlatforms ...string) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		c.Request = c.Request.WithContext(service.WithCompositeRouteDecision(c.Request.Context(), service.CompositeRouteDecision{
+			Matched:         true,
+			ServiceChain:    service.CompositeChainAnthropic,
+			SupplyPlatforms: supplyPlatforms,
+			Reason:          service.CompositeRouteReasonAmbiguous,
+		}))
+		return c
+	}
+
+	// supply 含 zhipu+anthropic：allowed 含 openai 族与 zhipu → 交集命中 zhipu → 放行。
+	c := newCtx(service.PlatformZhipu, service.PlatformAnthropic)
+	require.True(t, compositeTargetPlatformAllowed(c, apiKey, "any-model", nil, service.PlatformOpenAI, service.PlatformZhipu))
+
+	// C5 分支：allowed 仅 anthropic，而该 decision 的 supply 无 anthropic → 交集为空 → 拒绝。
+	cNoAnthropic := newCtx(service.PlatformZhipu)
+	require.False(t, compositeTargetPlatformAllowed(cNoAnthropic, apiKey, "any-model", nil, service.PlatformAnthropic))
+}

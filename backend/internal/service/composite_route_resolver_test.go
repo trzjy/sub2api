@@ -80,6 +80,7 @@ func TestCompositeRouteResolverCodexFilteringMatchesProductionPriority(t *testin
 			require.NoError(t, err)
 			require.True(t, decision.Matched)
 			require.Equal(t, decision.TargetPlatform != PlatformTypeSafe, len(models) == 2)
+			require.Equal(t, []string{decision.TargetPlatform}, decision.SupplyPlatforms)
 			exactModels, err := resolver.ListExactPublicModels(context.Background(), 7, CompositeRouteEndpointResponses, false)
 			require.NoError(t, err)
 			if decision.TargetPlatform == PlatformTypeSafe {
@@ -147,6 +148,8 @@ func TestCompositeRouteResolverExplicitExactRouteRewritesModel(t *testing.T) {
 	require.Equal(t, "gpt-5", decision.UpstreamModel)
 	require.NotNil(t, decision.Route)
 	require.Equal(t, int64(10), decision.Route.ID)
+	require.Equal(t, []string{PlatformOpenAI}, decision.SupplyPlatforms)
+	require.Equal(t, CompositeChainOpenAI, decision.ServiceChain)
 }
 
 // Scenario: 唯一平台的精确别名可路由
@@ -155,7 +158,14 @@ func TestCompositeRouteResolverUsesAccountModelOwnershipForUnprefixedAlias(t *te
 	resolver.SetModelOwnershipResolver(func(_ context.Context, groupID int64, model string) (CompositeModelOwnership, error) {
 		require.Equal(t, int64(7), groupID)
 		require.Equal(t, "reasoning-alias", model)
-		return CompositeModelOwnership{TargetPlatform: PlatformDeepseek, Matched: true}, nil
+		return CompositeModelOwnership{
+			TargetPlatform: PlatformDeepseek,
+			Matched:        true,
+			Platforms:      []string{PlatformDeepseek},
+			Claimants: []CompositeOwnershipClaimant{
+				{AccountID: 1, Platform: PlatformDeepseek, Type: AccountTypeAPIKey},
+			},
+		}, nil
 	})
 
 	decision, err := resolver.Resolve(context.Background(), 7, "reasoning-alias", CompositeRouteEndpointChatCompletions)
@@ -165,12 +175,23 @@ func TestCompositeRouteResolverUsesAccountModelOwnershipForUnprefixedAlias(t *te
 	require.Equal(t, CompositeRouteSourceAccount, decision.Source)
 	require.Equal(t, PlatformDeepseek, decision.TargetPlatform)
 	require.Equal(t, "reasoning-alias", decision.UpstreamModel)
+	require.Equal(t, []string{PlatformDeepseek}, decision.SupplyPlatforms)
+	require.Equal(t, CompositeChainOpenAI, decision.ServiceChain)
+	require.Len(t, decision.SupplyAccounts, 1)
+	require.Equal(t, PlatformDeepseek, decision.SupplyAccounts[0].Platform)
 }
 
 func TestCompositeRouteResolverAccountOwnershipOverridesBuiltInDetector(t *testing.T) {
 	resolver := NewCompositeRouteResolver(nil)
 	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
-		return CompositeModelOwnership{TargetPlatform: PlatformDeepseek, Matched: true}, nil
+		return CompositeModelOwnership{
+			TargetPlatform: PlatformDeepseek,
+			Matched:        true,
+			Platforms:      []string{PlatformDeepseek},
+			Claimants: []CompositeOwnershipClaimant{
+				{AccountID: 1, Platform: PlatformDeepseek, Type: AccountTypeAPIKey},
+			},
+		}, nil
 	})
 
 	decision, err := resolver.Resolve(context.Background(), 7, "gpt-5", CompositeRouteEndpointResponses)
@@ -179,6 +200,8 @@ func TestCompositeRouteResolverAccountOwnershipOverridesBuiltInDetector(t *testi
 	require.True(t, decision.Matched)
 	require.Equal(t, CompositeRouteSourceAccount, decision.Source)
 	require.Equal(t, PlatformDeepseek, decision.TargetPlatform)
+	require.Equal(t, []string{PlatformDeepseek}, decision.SupplyPlatforms)
+	require.Equal(t, CompositeChainOpenAI, decision.ServiceChain)
 }
 
 // Scenario: 显式路由保持最高优先级
@@ -206,48 +229,147 @@ func TestCompositeRouteResolverExplicitRouteBeatsAccountOwnership(t *testing.T) 
 	require.Equal(t, CompositeRouteSourceExplicit, decision.Source)
 	require.Equal(t, PlatformOpenAI, decision.TargetPlatform)
 	require.Equal(t, "gpt-5", decision.UpstreamModel)
+	require.Equal(t, []string{PlatformOpenAI}, decision.SupplyPlatforms)
 }
 
-// Scenario: 跨平台同名别名不被猜测
+// Scenario: 同链多平台歧义放行选号（全部平台由 OpenAI 网关服务）
 func TestCompositeRouteResolverDoesNotGuessAmbiguousAccountOwnership(t *testing.T) {
 	resolver := NewCompositeRouteResolver(nil)
 	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
-		return CompositeModelOwnership{Ambiguous: true}, nil
+		return CompositeModelOwnership{
+			Ambiguous: true,
+			Platforms: []string{PlatformZhipu, PlatformCursor},
+			Claimants: []CompositeOwnershipClaimant{
+				{AccountID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey},
+				{AccountID: 2, Platform: PlatformCursor, Type: AccountTypeOAuth, CursorConnect: true},
+			},
+		}, nil
 	})
 
 	decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointChatCompletions)
 
 	require.NoError(t, err)
-	require.False(t, decision.Matched)
-	require.Empty(t, decision.TargetPlatform)
-	require.Equal(t, "model is exposed by multiple provider platforms", decision.Reason)
-	require.False(t, decision.OAuthAmbiguous())
+	require.True(t, decision.Matched)
+	require.Equal(t, CompositeRouteSourceAccount, decision.Source)
+	require.Equal(t, PlatformOpenAI, decision.TargetPlatform)
+	require.Equal(t, "shared-alias", decision.UpstreamModel)
+	require.Equal(t, []string{PlatformCursor, PlatformZhipu}, decision.SupplyPlatforms)
+	require.Equal(t, []string{CompositeChainOpenAI}, decision.QualifyingChains)
+	require.Equal(t, CompositeChainOpenAI, decision.ServiceChain)
+	require.Len(t, decision.SupplyAccounts, 2)
+	require.Equal(t, CompositeRouteReasonAmbiguous, decision.Reason)
 }
 
-// Scenario: 含 OAuth 账号的跨平台歧义必须被识别为需拒绝的配置错误
-func TestCompositeRouteResolverFlagsOAuthAmbiguousOwnership(t *testing.T) {
+// Scenario: 多链 chat（zhipu 走 openai 链，anthropic 走 anthropic 链）按端点入口放行
+func TestCompositeRouteResolverCrossChainAmbiguousOwnership(t *testing.T) {
 	resolver := NewCompositeRouteResolver(nil)
 	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
-		return CompositeModelOwnership{Ambiguous: true, OpenAIGatewayOAuthClaimed: true}, nil
+		return CompositeModelOwnership{
+			Ambiguous: true,
+			Platforms: []string{PlatformZhipu, PlatformAnthropic},
+			Claimants: []CompositeOwnershipClaimant{
+				{AccountID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey},
+				{AccountID: 2, Platform: PlatformAnthropic, Type: AccountTypeAPIKey},
+			},
+		}, nil
 	})
 
-	// gpt-* 可被内置探测器识别，验证歧义不会退化为按模型名猜平台。
+	decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointChatCompletions)
+
+	require.NoError(t, err)
+	require.True(t, decision.Matched, "混链按端点入口放行选号，不再阶段失败关闭")
+	require.Empty(t, decision.TargetPlatform)
+	require.Equal(t, []string{PlatformAnthropic, PlatformZhipu}, decision.SupplyPlatforms)
+	require.Equal(t, []string{CompositeChainAnthropic, CompositeChainOpenAI}, decision.QualifyingChains)
+	require.Equal(t, CompositeChainAnthropic, decision.ServiceChain, "chat 端点 eligible 链含 anthropic，入口为 anthropic")
+	require.Len(t, decision.SupplyAccounts, 2)
+	require.Equal(t, CompositeRouteReasonAmbiguous, decision.Reason)
+	require.Equal(t, "model is exposed by multiple provider platforms", decision.Reason)
+}
+
+// Scenario: 多链 chat（zhipu 走 openai 链，gemini 走 anthropic 链）入口改走 anthropic，
+// 避免落入未装配 gemini 转发服务的 OpenAI handler。
+func TestCompositeRouteResolverCrossChainChatWithGeminiEntersAnthropic(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{
+			Ambiguous: true,
+			Platforms: []string{PlatformZhipu, PlatformGemini},
+			Claimants: []CompositeOwnershipClaimant{
+				{AccountID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey},
+				{AccountID: 2, Platform: PlatformGemini, Type: AccountTypeAPIKey},
+			},
+		}, nil
+	})
+
+	decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointChatCompletions)
+
+	require.NoError(t, err)
+	require.True(t, decision.Matched)
+	require.Empty(t, decision.TargetPlatform)
+	require.Equal(t, []string{PlatformGemini, PlatformZhipu}, decision.SupplyPlatforms)
+	require.Equal(t, []string{CompositeChainAnthropic, CompositeChainOpenAI}, decision.QualifyingChains)
+	require.Equal(t, CompositeChainAnthropic, decision.ServiceChain, "chat 端点 eligible 链含 gemini(anthropic)，入口为 anthropic")
+	require.Len(t, decision.SupplyAccounts, 2)
+	require.Equal(t, CompositeRouteReasonAmbiguous, decision.Reason)
+}
+
+// Scenario: 多链 responses（zhipu 走 openai 链，anthropic 走 anthropic 链）入口改走 anthropic。
+func TestCompositeRouteResolverCrossChainResponsesEntersAnthropic(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{
+			Ambiguous: true,
+			Platforms: []string{PlatformZhipu, PlatformAnthropic},
+			Claimants: []CompositeOwnershipClaimant{
+				{AccountID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey},
+				{AccountID: 2, Platform: PlatformAnthropic, Type: AccountTypeAPIKey},
+			},
+		}, nil
+	})
+
+	decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointResponses)
+
+	require.NoError(t, err)
+	require.True(t, decision.Matched)
+	require.Empty(t, decision.TargetPlatform)
+	require.Equal(t, []string{PlatformAnthropic, PlatformZhipu}, decision.SupplyPlatforms)
+	require.Equal(t, []string{CompositeChainAnthropic, CompositeChainOpenAI}, decision.QualifyingChains)
+	require.Equal(t, CompositeChainAnthropic, decision.ServiceChain, "responses 端点 eligible 链含 anthropic，入口为 anthropic")
+	require.Len(t, decision.SupplyAccounts, 2)
+	require.Equal(t, CompositeRouteReasonAmbiguous, decision.Reason)
+}
+
+// Scenario: 同链多平台 + OAuth 声明方仍放行选号（用户裁定允许同链多平台）
+func TestCompositeRouteResolverAllowsSameChainOAuthClaimant(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{
+			Ambiguous: true,
+			Platforms: []string{PlatformOpenAI, PlatformKimi},
+			Claimants: []CompositeOwnershipClaimant{
+				{AccountID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+				{AccountID: 2, Platform: PlatformKimi, Type: AccountTypeAPIKey},
+			},
+		}, nil
+	})
+
+	// gpt-* 可被内置探测器识别；同链歧义放行 OpenAI 网关，不会误入 Anthropic 管线。
 	decision, err := resolver.Resolve(context.Background(), 7, "gpt-6-astra", CompositeRouteEndpointResponses)
 
 	require.NoError(t, err)
-	require.False(t, decision.Matched)
-	require.Empty(t, decision.TargetPlatform)
-	require.True(t, decision.OAuthAmbiguous())
-	require.Contains(t, decision.AmbiguousMessage(), `"gpt-6-astra"`)
+	require.True(t, decision.Matched)
+	require.Equal(t, PlatformOpenAI, decision.TargetPlatform)
+	require.Equal(t, []string{PlatformKimi, PlatformOpenAI}, decision.SupplyPlatforms)
+	require.Equal(t, []string{CompositeChainOpenAI}, decision.QualifyingChains)
+	require.Equal(t, CompositeChainOpenAI, decision.ServiceChain)
+	require.Equal(t, CompositeRouteReasonAmbiguous, decision.Reason)
 
-	// 兜底按模型名落到 Anthropic（如 OpenAI OAuth 映射 claude-* 给 Claude Code 用）
-	// 或无法兜底的自定义别名：OpenAI 网关 OAuth 不会被选中，保持原有行为。
-	for _, model := range []string{"claude-sonnet-4-6", "team-alias"} {
-		decision, err := resolver.Resolve(context.Background(), 7, model, CompositeRouteEndpointMessages)
-		require.NoError(t, err)
-		require.False(t, decision.OAuthAmbiguous(), "model=%s", model)
-		require.Equal(t, CompositeRouteReasonAmbiguous, decision.Reason, "model=%s", model)
-	}
+	// 自定义别名同样按同链放行。
+	decision, err = resolver.Resolve(context.Background(), 7, "team-alias", CompositeRouteEndpointMessages)
+	require.NoError(t, err)
+	require.True(t, decision.Matched)
+	require.Equal(t, PlatformOpenAI, decision.TargetPlatform)
 }
 
 func TestCompositeRouteResolverOwnershipLookupErrorFallsBackOnlyForDetectableModels(t *testing.T) {
@@ -262,6 +384,8 @@ func TestCompositeRouteResolverOwnershipLookupErrorFallsBackOnlyForDetectableMod
 	require.True(t, detected.Matched)
 	require.Equal(t, CompositeRouteSourceDetector, detected.Source)
 	require.Equal(t, PlatformOpenAI, detected.TargetPlatform)
+	require.Equal(t, []string{PlatformOpenAI}, detected.SupplyPlatforms)
+	require.Equal(t, CompositeChainOpenAI, detected.ServiceChain)
 
 	unknown, err := resolver.Resolve(context.Background(), 7, "company-model", CompositeRouteEndpointResponses)
 	require.ErrorIs(t, err, lookupErr)
@@ -304,6 +428,7 @@ func TestCompositeRouteResolverPrefersEndpointSpecificLongestPrefix(t *testing.T
 	require.Equal(t, "gpt-family", decision.UpstreamModel)
 	require.NotNil(t, decision.Route)
 	require.Equal(t, int64(2), decision.Route.ID)
+	require.Equal(t, []string{PlatformOpenAI}, decision.SupplyPlatforms)
 }
 
 // TestCompositeRouteResolverPrefixEmptyUpstreamPassesThroughRequestedModel 验证：
@@ -332,8 +457,9 @@ func TestCompositeRouteResolverPrefixEmptyUpstreamPassesThroughRequestedModel(t 
 		require.True(t, decision.Matched, "model %q should match prefix route", model)
 		require.Equal(t, CompositeRouteSourceExplicit, decision.Source)
 		require.Equal(t, PlatformOpenAI, decision.TargetPlatform)
-		require.Equal(t, model, decision.UpstreamModel, "model %q should pass through verbatim", model)
-	}
+			require.Equal(t, model, decision.UpstreamModel, "model %q should pass through verbatim", model)
+			require.Equal(t, []string{PlatformOpenAI}, decision.SupplyPlatforms, "model %q", model)
+		}
 }
 
 // TestCompositeRouteResolverPrefixExplicitUpstreamStillFixed 验证：前缀匹配路由显式
@@ -360,6 +486,7 @@ func TestCompositeRouteResolverPrefixExplicitUpstreamStillFixed(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, decision.Matched)
 		require.Equal(t, "deepseek-chat", decision.UpstreamModel)
+		require.Equal(t, []string{PlatformOpenAI}, decision.SupplyPlatforms)
 	}
 }
 
@@ -388,6 +515,8 @@ func TestCompositeRouteResolverIgnoresDisabledRoutesAndFallsBackToDetector(t *te
 	require.Equal(t, PlatformOpenAI, decision.TargetPlatform)
 	require.Equal(t, "gpt-5", decision.UpstreamModel)
 	require.Nil(t, decision.Route)
+	require.Equal(t, []string{PlatformOpenAI}, decision.SupplyPlatforms)
+	require.Equal(t, CompositeChainOpenAI, decision.ServiceChain)
 }
 
 func TestCompositeRouteResolverDetectsKimiCodeBareModels(t *testing.T) {
@@ -402,6 +531,8 @@ func TestCompositeRouteResolverDetectsKimiCodeBareModels(t *testing.T) {
 			require.Equal(t, CompositeRouteSourceDetector, decision.Source)
 			require.Equal(t, PlatformKimi, decision.TargetPlatform)
 			require.Equal(t, model, decision.UpstreamModel)
+			require.Equal(t, []string{PlatformKimi}, decision.SupplyPlatforms)
+			require.Equal(t, CompositeChainOpenAI, decision.ServiceChain)
 		})
 	}
 }
@@ -477,6 +608,110 @@ func TestCompositeRouteResolverExplicitRoutesCoverBucketTwoProviders(t *testing.
 			require.Equal(t, CompositeRouteSourceExplicit, decision.Source)
 			require.Equal(t, tt.wantPlatform, decision.TargetPlatform)
 			require.Equal(t, tt.wantUpstream, decision.UpstreamModel)
+			require.Equal(t, []string{tt.wantPlatform}, decision.SupplyPlatforms)
 		})
 	}
+}
+
+// Scenario: 单链 anthropic（anthropic APIKey + antigravity OAuth）→ 链代表 anthropic
+func TestCompositeRouteResolverOwnershipSupplyAllAnthropicChain(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{
+			Ambiguous: true,
+			Platforms: []string{PlatformAnthropic, PlatformAntigravity},
+			Claimants: []CompositeOwnershipClaimant{
+				{AccountID: 1, Platform: PlatformAnthropic, Type: AccountTypeAPIKey},
+				{AccountID: 2, Platform: PlatformAntigravity, Type: AccountTypeOAuth},
+			},
+		}, nil
+	})
+
+	decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointMessages)
+
+	require.NoError(t, err)
+	require.True(t, decision.Matched)
+	require.Equal(t, CompositeRouteSourceAccount, decision.Source)
+	require.Equal(t, PlatformAnthropic, decision.TargetPlatform)
+	require.Equal(t, CompositeChainAnthropic, decision.ServiceChain)
+	require.Equal(t, []string{CompositeChainAnthropic}, decision.QualifyingChains)
+	require.Equal(t, []string{PlatformAnthropic, PlatformAntigravity}, decision.SupplyPlatforms)
+	require.Len(t, decision.SupplyAccounts, 2)
+	require.Equal(t, CompositeRouteReasonAmbiguous, decision.Reason)
+}
+
+// Scenario: 多链 messages（zhipu 走 openai 链，anthropic 走 anthropic 链）
+func TestCompositeRouteResolverOwnershipSupplyMultiChainMessages(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{
+			Ambiguous: true,
+			Platforms: []string{PlatformZhipu, PlatformAnthropic},
+			Claimants: []CompositeOwnershipClaimant{
+				{AccountID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey},
+				{AccountID: 2, Platform: PlatformAnthropic, Type: AccountTypeAPIKey},
+			},
+		}, nil
+	})
+
+	decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointMessages)
+
+	require.NoError(t, err)
+	require.True(t, decision.Matched)
+	require.Empty(t, decision.TargetPlatform)
+	require.Equal(t, CompositeChainAnthropic, decision.ServiceChain, "messages 端点入口链为 anthropic")
+	require.Equal(t, []string{CompositeChainAnthropic, CompositeChainOpenAI}, decision.QualifyingChains)
+	require.Equal(t, []string{PlatformAnthropic, PlatformZhipu}, decision.SupplyPlatforms)
+	require.Len(t, decision.SupplyAccounts, 2)
+	require.Equal(t, CompositeRouteReasonAmbiguous, decision.Reason)
+}
+
+// Scenario: 端点裁剪 —— responses 端点 gemini 不可服务
+func TestCompositeRouteResolverOwnershipSupplyEndpointPruning(t *testing.T) {
+	t.Run("gemini+anthropic responses keeps only anthropic eligible", func(t *testing.T) {
+		resolver := NewCompositeRouteResolver(nil)
+		resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+			return CompositeModelOwnership{
+				Ambiguous: true,
+				Platforms: []string{PlatformGemini, PlatformAnthropic},
+				Claimants: []CompositeOwnershipClaimant{
+					{AccountID: 1, Platform: PlatformGemini, Type: AccountTypeAPIKey},
+					{AccountID: 2, Platform: PlatformAnthropic, Type: AccountTypeAPIKey},
+				},
+			}, nil
+		})
+
+		decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointResponses)
+
+		require.NoError(t, err)
+		require.True(t, decision.Matched)
+		require.Equal(t, PlatformAnthropic, decision.TargetPlatform, "单平台供给走唯一平台")
+		require.Equal(t, CompositeChainAnthropic, decision.ServiceChain)
+		require.Equal(t, []string{PlatformAnthropic}, decision.SupplyPlatforms, "SupplyPlatforms 只含 eligible 平台")
+		require.Len(t, decision.SupplyAccounts, 1)
+		require.Equal(t, PlatformAnthropic, decision.SupplyAccounts[0].Platform)
+		require.Empty(t, decision.Reason)
+	})
+
+	t.Run("gemini-only responses has no eligible", func(t *testing.T) {
+		resolver := NewCompositeRouteResolver(nil)
+		resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+			return CompositeModelOwnership{
+				Matched:   true,
+				Platforms: []string{PlatformGemini},
+				Claimants: []CompositeOwnershipClaimant{
+					{AccountID: 1, Platform: PlatformGemini, Type: AccountTypeAPIKey},
+				},
+			}, nil
+		})
+
+		decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointResponses)
+
+		require.NoError(t, err)
+		require.False(t, decision.Matched)
+		require.Empty(t, decision.TargetPlatform)
+		require.Equal(t, []string{PlatformGemini}, decision.SupplyPlatforms, "空 eligible 时回落到全部声明平台用于诊断")
+		require.Empty(t, decision.SupplyAccounts)
+		require.Equal(t, "no declared account can serve this endpoint", decision.Reason)
+	})
 }

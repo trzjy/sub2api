@@ -599,6 +599,19 @@ func getGroupPlatform(c *gin.Context) string {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
 			return platform
 		}
+		// 多链 decision 未盖具体平台（TargetPlatform 为空）时，按入口 ServiceChain
+		// 选对应 handler，让 openai/anthropic/gemini 链各自落到原生网关入口。
+		// 未知/空链继续沿用 group.Platform，保持既有默认行为。
+		if decision, ok := service.CompositeRouteDecisionFromContext(c.Request.Context()); ok && decision.ServiceChain != "" {
+			switch decision.ServiceChain {
+			case service.CompositeChainOpenAI:
+				return service.PlatformOpenAI
+			case service.CompositeChainAnthropic:
+				return service.PlatformAnthropic
+			case service.CompositeChainGemini:
+				return service.PlatformGemini
+			}
+		}
 	}
 	return apiKey.Group.Platform
 }
@@ -641,14 +654,6 @@ func compositeTargetPlatformMiddleware(resolver *service.CompositeRouteResolver)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "server_error", "message": infraerrors.CompositeModelRouteFailed}})
 				c.Abort()
-				return
-			}
-			// 含 OAuth 账号的跨平台歧义是分组配置错误：拒绝而不是放行。否则未解析的
-			// 请求落到默认 Anthropic handler，handler 再按模型名前缀另猜平台，
-			// OAuth 凭据被送进不匹配的协议管线（如 ChatGPT token 发往 Anthropic）。
-			if decision.OAuthAmbiguous() {
-				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
-				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "message": decision.AmbiguousMessage()}})
 				return
 			}
 			if decision.Matched {

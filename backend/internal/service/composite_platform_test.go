@@ -42,11 +42,25 @@ func TestResolveCompositeModelOwnershipKeepsProviderAccountsIsolated(t *testing.
 
 	deepSeekOwnership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "reasoning-alias")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformDeepseek, Matched: true}, deepSeekOwnership)
+	require.Equal(t, CompositeModelOwnership{
+		TargetPlatform: PlatformDeepseek,
+		Matched:        true,
+		Platforms:      []string{PlatformDeepseek},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 2, Platform: PlatformDeepseek},
+		},
+	}, deepSeekOwnership)
 
 	openAIOwnership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "gpt-public")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformOpenAI, Matched: true}, openAIOwnership)
+	require.Equal(t, CompositeModelOwnership{
+		TargetPlatform: PlatformOpenAI,
+		Matched:        true,
+		Platforms:      []string{PlatformOpenAI},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 1, Platform: PlatformOpenAI},
+		},
+	}, openAIOwnership)
 }
 
 // Scenario: 通配符和空映射不声明所有权
@@ -75,12 +89,19 @@ func TestResolveCompositeModelOwnershipRequiresNonEmptyExactMappings(t *testing.
 	for _, model := range []string{"gpt-5", "empty-alias", "unknown-alias"} {
 		ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, model)
 		require.NoError(t, err)
-		require.Equal(t, CompositeModelOwnership{}, ownership, "model=%s", model)
+		require.Equal(t, CompositeModelOwnership{Platforms: []string{}}, ownership, "model=%s", model)
 	}
 
 	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "grok-public")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformGrok, Matched: true}, ownership)
+	require.Equal(t, CompositeModelOwnership{
+		TargetPlatform: PlatformGrok,
+		Matched:        true,
+		Platforms:      []string{PlatformGrok},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 2, Platform: PlatformGrok},
+		},
+	}, ownership)
 }
 
 func TestResolveCompositeModelOwnershipAllowsSamePlatformAndRejectsCrossPlatformAliases(t *testing.T) {
@@ -96,11 +117,26 @@ func TestResolveCompositeModelOwnershipAllowsSamePlatformAndRejectsCrossPlatform
 
 	samePlatform, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "shared-openai")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformOpenAI, Matched: true}, samePlatform)
+	require.Equal(t, CompositeModelOwnership{
+		TargetPlatform: PlatformOpenAI,
+		Matched:        true,
+		Platforms:      []string{PlatformOpenAI},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 1, Platform: PlatformOpenAI},
+			{AccountID: 2, Platform: PlatformOpenAI},
+		},
+	}, samePlatform)
 
 	ambiguous, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "ambiguous")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{Ambiguous: true}, ambiguous)
+	require.Equal(t, CompositeModelOwnership{
+		Ambiguous: true,
+		Platforms: []string{PlatformDeepseek, PlatformOpenAI},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 1, Platform: PlatformOpenAI},
+			{AccountID: 3, Platform: PlatformDeepseek},
+		},
+	}, ambiguous)
 }
 
 // Scenario: 只有 OpenAI 网关族的 OAuth 声明方会被标记（API Key 上游可能兼容多协议，
@@ -121,15 +157,36 @@ func TestResolveCompositeModelOwnershipFlagsOpenAIGatewayOAuthClaimants(t *testi
 
 	withOAuth, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "gpt-6-astra")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{Ambiguous: true, OpenAIGatewayOAuthClaimed: true}, withOAuth)
+	require.Equal(t, CompositeModelOwnership{
+		Ambiguous: true,
+		Platforms: []string{PlatformDeepseek, PlatformOpenAI},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+			{AccountID: 2, Platform: PlatformDeepseek, Type: AccountTypeAPIKey},
+		},
+	}, withOAuth)
 
 	apiKeyOnly, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "apikey-only")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{Ambiguous: true}, apiKeyOnly)
+	require.Equal(t, CompositeModelOwnership{
+		Ambiguous: true,
+		Platforms: []string{PlatformDeepseek, PlatformOpenAI},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 2, Platform: PlatformDeepseek, Type: AccountTypeAPIKey},
+			{AccountID: 3, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		},
+	}, apiKeyOnly)
 
 	anthropicFamily, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "claude-opus-4-8")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{Ambiguous: true}, anthropicFamily)
+	require.Equal(t, CompositeModelOwnership{
+		Ambiguous: true,
+		Platforms: []string{PlatformAnthropic, PlatformAntigravity},
+		Claimants: []CompositeOwnershipClaimant{
+			{AccountID: 4, Platform: PlatformAntigravity, Type: AccountTypeOAuth},
+			{AccountID: 5, Platform: PlatformAnthropic, Type: AccountTypeSetupToken},
+		},
+	}, anthropicFamily)
 }
 
 func TestNewGatewayServiceWiresCompositeModelOwnershipResolver(t *testing.T) {
@@ -295,4 +352,84 @@ func TestCompositeConcretePlatformsIncludeCNProviders(t *testing.T) {
 		require.True(t, isConcreteRequestPlatform(platform))
 		require.True(t, canCopyAccountsFromGroupPlatform(PlatformComposite, platform))
 	}
+}
+
+// TestCompositeRouteDecisionContextRoundTrip 校验 WithCompositeRouteDecision 盖章的
+// 完整 decision 可经 CompositeRouteDecisionFromContext 原样取回，无 decision 的 ctx 返回 false。
+func TestCompositeRouteDecisionContextRoundTrip(t *testing.T) {
+	decision := CompositeRouteDecision{
+		Matched:         true,
+		Source:          CompositeRouteSourceDetector,
+		Reason:          CompositeRouteReasonAmbiguous,
+		TargetPlatform:  PlatformOpenAI,
+		SupplyPlatforms: []string{PlatformZhipu, PlatformCursor},
+	}
+	ctx := WithCompositeRouteDecision(context.Background(), decision)
+
+	got, ok := CompositeRouteDecisionFromContext(ctx)
+	require.True(t, ok)
+	require.Equal(t, decision.SupplyPlatforms, got.SupplyPlatforms)
+	require.Equal(t, decision.Reason, got.Reason)
+	require.Equal(t, decision.TargetPlatform, got.TargetPlatform)
+
+	_, ok = CompositeRouteDecisionFromContext(context.Background())
+	require.False(t, ok)
+
+	// Matched=false 不盖章，取回仍应为 false。
+	_, ok = CompositeRouteDecisionFromContext(WithCompositeRouteDecision(context.Background(), CompositeRouteDecision{}))
+	require.False(t, ok)
+}
+
+// TestCompositeSupplyAllowsPlatform 校验歧义场景按 SupplyPlatforms 求交（不得用
+// TargetPlatform 兜底），具体场景按 TargetPlatform 判定，空 decision 失败关闭。
+func TestCompositeSupplyAllowsPlatform(t *testing.T) {
+	ambiguous := CompositeRouteDecision{
+		Matched:         true,
+		Reason:          CompositeRouteReasonAmbiguous,
+		TargetPlatform:  PlatformOpenAI,
+		SupplyPlatforms: []string{PlatformZhipu, PlatformCursor},
+	}
+	require.True(t, CompositeSupplyAllowsPlatform(ambiguous, PlatformOpenAI, PlatformZhipu, PlatformCursor))
+	require.False(t, CompositeSupplyAllowsPlatform(ambiguous, PlatformOpenAI))
+
+	concrete := CompositeRouteDecision{Matched: true, TargetPlatform: PlatformOpenAI}
+	require.True(t, CompositeSupplyAllowsPlatform(concrete, PlatformOpenAI))
+	require.False(t, CompositeSupplyAllowsPlatform(concrete, PlatformZhipu))
+
+	empty := CompositeRouteDecision{}
+	require.False(t, CompositeSupplyAllowsPlatform(empty, PlatformOpenAI))
+
+	// 空 allowed 一律失败关闭。
+	require.False(t, CompositeSupplyAllowsPlatform(ambiguous))
+	require.False(t, CompositeSupplyAllowsPlatform(concrete))
+}
+
+// TestCompositeDecisionHelpers 校验 SupplyExists / Ambiguous 的边界条件。
+func TestCompositeDecisionHelpers(t *testing.T) {
+	// SupplyExists 等价于 Matched。
+	require.False(t, CompositeDecisionSupplyExists(CompositeRouteDecision{}))
+	require.True(t, CompositeDecisionSupplyExists(CompositeRouteDecision{Matched: true}))
+
+	// Ambiguous：Matched=false。
+	require.False(t, CompositeDecisionAmbiguous(CompositeRouteDecision{
+		Reason:          CompositeRouteReasonAmbiguous,
+		SupplyPlatforms: []string{PlatformZhipu},
+	}))
+	// Ambiguous：SupplyPlatforms 空。
+	require.False(t, CompositeDecisionAmbiguous(CompositeRouteDecision{
+		Matched: true,
+		Reason:  CompositeRouteReasonAmbiguous,
+	}))
+	// Ambiguous：Reason 未设置（非 CompositeRouteReasonAmbiguous）。
+	require.False(t, CompositeDecisionAmbiguous(CompositeRouteDecision{
+		Matched:         true,
+		Reason:          "",
+		SupplyPlatforms: []string{PlatformZhipu},
+	}))
+	// Ambiguous：全部满足。
+	require.True(t, CompositeDecisionAmbiguous(CompositeRouteDecision{
+		Matched:         true,
+		Reason:          CompositeRouteReasonAmbiguous,
+		SupplyPlatforms: []string{PlatformZhipu},
+	}))
 }

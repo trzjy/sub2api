@@ -3902,6 +3902,40 @@ func TestDefaultOpenAIAccountScheduler_IsAccountTransportCompatible_Branches(t *
 	require.False(t, scheduler.isAccountTransportCompatible(account, OpenAIUpstreamTransportResponsesWebsocketV2Ingress))
 }
 
+func TestIsOpenAIAccountTransportCompatibleCompositeWS(t *testing.T) {
+	cfg := newSchedulerTestOpenAIWSV2Config()
+	cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
+	svc := &OpenAIGatewayService{cfg: cfg}
+
+	// Grok 账号走 HTTPSSE 桥，允许。
+	grok := &Account{ID: 88601, Platform: PlatformGrok}
+	require.True(t, svc.isOpenAIAccountTransportCompatible(grok, OpenAIUpstreamTransportResponsesWSOrGrokHTTP))
+
+	// OpenAI 账号按既有 WS ingress 模式判定：off 拒绝。
+	cfg.Gateway.OpenAIWS.IngressModeDefault = OpenAIWSIngressModeOff
+	openai := &Account{
+		ID:          88602,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Extra:       map[string]any{},
+	}
+	require.False(t, svc.isOpenAIAccountTransportCompatible(openai, OpenAIUpstreamTransportResponsesWSOrGrokHTTP))
+
+	// 模式允许（按 cfg IngressModeDefault=ctx_pool 构造）→ true。
+	cfg.Gateway.OpenAIWS.IngressModeDefault = OpenAIWSIngressModeCtxPool
+	require.True(t, svc.isOpenAIAccountTransportCompatible(openai, OpenAIUpstreamTransportResponsesWSOrGrokHTTP))
+
+	// 其它平台拒绝。
+	zhipu := &Account{ID: 88603, Platform: PlatformZhipu}
+	require.False(t, svc.isOpenAIAccountTransportCompatible(zhipu, OpenAIUpstreamTransportResponsesWSOrGrokHTTP))
+
+	// nil account 拒绝。
+	require.False(t, svc.isOpenAIAccountTransportCompatible(nil, OpenAIUpstreamTransportResponsesWSOrGrokHTTP))
+}
+
 func int64PtrForTest(v int64) *int64 {
 	return &v
 }

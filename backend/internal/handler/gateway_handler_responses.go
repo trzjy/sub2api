@@ -219,108 +219,193 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		if failoverClientGone(c) {
 			return
 		}
-		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(requestCtx, apiKey.GroupID, sessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
-		if err != nil {
-			if failoverClientGone(c) {
-				reqLog.Info("gateway.responses.account_select_aborted_client_disconnected", zap.Error(err))
-				return
-			}
-			if len(fs.FailedAccountIDs) == 0 {
-				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, effectiveAPIKeyPlatform(c, apiKey), err)
-				if !cls.ModelNotFound {
-					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
-				}
-				message := cls.Message
-				h.responsesErrorResponse(c, cls.Status, cls.ErrType, message)
-				return
-			}
-			action := fs.HandleSelectionExhausted(requestCtx)
-			switch action {
-			case FailoverContinue:
-				continue
-			case FailoverCanceled:
-				failoverClientGone(c)
-				return
-			default:
-				if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
-					h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
-				} else if slotFullCount > 0 {
-					// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
-					// 不能落到 502 分支——那会破坏账号并发终点契约。
-					h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
-				} else {
-					h.responsesErrorResponse(c, http.StatusBadGateway, "server_error", infraerrors.AllAccountsExhausted)
-				}
-				return
-			}
-		}
-		account := selection.Account
-		setOpsSelectedAccount(c, account.ID, account.Platform)
 
-		// 4. Acquire account concurrency slot
-		accountReleaseFunc := selection.ReleaseFunc
-		if !selection.Acquired {
-			if selection.WaitPlan == nil {
-				markOpsRoutingCapacityLimited(c)
-				h.responsesErrorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
-				return
+		// A7b：跨链 responses（ServiceChain=anthropic，多平台供给且未收敛到具体目标
+		// 平台）用 A4b selector 从 SupplyAccounts 选号；选中账号可能来自 OpenAI 或
+		// Anthropic 执行链，按账号链分派既有 Forward。非跨链路径保持原选号逻辑不变。
+		decision, decisionOK := service.CompositeRouteDecisionFromContext(requestCtx)
+		crossChainResponses := decisionOK &&
+			service.CompositeDecisionSupplyExists(decision) &&
+			decision.ServiceChain == service.CompositeChainAnthropic &&
+			decision.TargetPlatform == "" &&
+			len(decision.SupplyAccounts) > 0
+
+		var account *service.Account
+		var accountReleaseFunc func()
+		var accountSlot *transferableRelease
+		var err error
+		if crossChainResponses {
+			groupID := int64(0)
+			if apiKey.GroupID != nil {
+				groupID = *apiKey.GroupID
 			}
-			waitTimeout := selection.WaitPlan.Timeout
-			if slotFullCount > 0 {
-				// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-				// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-				// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-				// 抢不到就立刻失败、走下面的排除分支换下一个。
-				// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-				waitTimeout = 0
-			}
-			accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
-				c,
-				account.ID,
-				selection.WaitPlan.MaxConcurrency,
-				waitTimeout,
-				reqStream,
-				&streamStarted,
+			selected, release, selErr := h.gatewayService.SelectCompositeCrossChainAccount(
+				requestCtx, groupID, reqModel,
+				service.CompositeEndpointResponses, decision.SupplyAccounts, fs.FailedAccountIDs,
 			)
-			if err != nil {
-				reqLog.Warn("gateway.responses.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
-				// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-				if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
-					continue
+			if selErr != nil {
+				// 与本入口既有"无可用账号"同口径：不得当成 502 上游错误。
+				if failoverClientGone(c) {
+					reqLog.Info("gateway.responses.cross_chain_select_aborted_client_disconnected", zap.Error(selErr))
+					return
 				}
-				h.handleConcurrencyError(c, err, "account", streamStarted)
-				return
+				if len(fs.FailedAccountIDs) == 0 {
+					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, effectiveAPIKeyPlatform(c, apiKey), selErr)
+					if !cls.ModelNotFound {
+						markOpsRoutingCapacityLimitedIfNoAvailable(c, selErr)
+					}
+					message := cls.Message
+					h.responsesErrorResponse(c, cls.Status, cls.ErrType, message)
+					return
+				}
+				action := fs.HandleSelectionExhausted(requestCtx)
+				switch action {
+				case FailoverContinue:
+					continue
+				case FailoverCanceled:
+					failoverClientGone(c)
+					return
+				default:
+					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
+						h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+					} else if slotFullCount > 0 {
+						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
+						// 不能落到 502 分支——那会破坏账号并发终点契约。
+						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
+					} else {
+						h.responsesErrorResponse(c, http.StatusBadGateway, "server_error", infraerrors.AllAccountsExhausted)
+					}
+					return
+				}
 			}
-		}
-		// 终检与准入后绑定必须使用选号结果携带的门：门安装在调度栈的局部
-		// ctx 上（composite/fallback 还可能解析出与入口分组不同的门），直接用
-		// requestCtx 会退化为空操作。
-		admissionCtx := service.ContextWithSelectionProfitGate(requestCtx, selection)
-		latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
-		if vetoed {
-			if accountReleaseFunc != nil {
-				accountReleaseFunc()
+			account = selected
+			accountReleaseFunc = release
+			// 与非跨链路径同型：账号槽登记为**可转交**句柄（Cursor 分支交给会话持有）。
+			accountSlot = newTransferableRelease(requestCtx, "account_slot", accountReleaseFunc)
+			if accountSlot != nil {
+				accountReleaseFunc = accountSlot.Release
 			}
-			reqLog.Debug("gateway.responses.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
-			if fs.RecordProfitVeto(account.ID) == FailoverExhausted {
-				reqLog.Warn("gateway.responses.profit_veto_attempts_exhausted", zap.Int("profit_veto_count", fs.ProfitVetoCount()))
-				h.responsesErrorResponse(c, http.StatusServiceUnavailable, "api_error", profitVetoExhaustedMessage)
-				return
+			// 外审 F2：本入口在 :99 提前保存了局部 requestCtx，必须在此回填实际账号平台，
+			// 使下方转发/结算快照/usage/failover 全部读到真实平台（QuotaPlatform 同步生效）。
+			requestCtx = service.WithResolvedTargetPlatform(requestCtx, account.Platform)
+			requestCtx = service.WithCompositeActualPlatformResolved(requestCtx)
+			c.Request = c.Request.WithContext(requestCtx)
+			setOpsSelectedAccount(c, account.ID, account.Platform)
+			// selector 已按既有逻辑抢占并发槽，这里不再二次抢槽，也不写粘性。
+			// 标准模式按实际账号平台补检 user×platform 配额；订阅模式跳过。
+			if quotaErr := h.checkCompositeCrossChainPlatformQuota(c, apiKey, subscription, account); quotaErr != nil {
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				accountReleaseFunc = nil
+				fs.FailedAccountIDs[account.ID] = struct{}{}
+				continue
 			}
-			continue
-		}
-		account = latest
-		selection.Account = latest
-		if selection.ProfitGateActive() {
-			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, sessionHash, account.ID); err != nil {
-				reqLog.Warn("gateway.responses.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		} else {
+			selection, selErr := h.gatewayService.SelectAccountWithLoadAwareness(requestCtx, apiKey.GroupID, sessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
+			err = selErr
+			if err != nil {
+				if failoverClientGone(c) {
+					reqLog.Info("gateway.responses.account_select_aborted_client_disconnected", zap.Error(err))
+					return
+				}
+				if len(fs.FailedAccountIDs) == 0 {
+					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, effectiveAPIKeyPlatform(c, apiKey), err)
+					if !cls.ModelNotFound {
+						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
+					}
+					message := cls.Message
+					h.responsesErrorResponse(c, cls.Status, cls.ErrType, message)
+					return
+				}
+				action := fs.HandleSelectionExhausted(requestCtx)
+				switch action {
+				case FailoverContinue:
+					continue
+				case FailoverCanceled:
+					failoverClientGone(c)
+					return
+				default:
+					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
+						h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+					} else if slotFullCount > 0 {
+						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503，
+						// 不能落到 502 分支——那会破坏账号并发终点契约。
+						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
+					} else {
+						h.responsesErrorResponse(c, http.StatusBadGateway, "server_error", infraerrors.AllAccountsExhausted)
+					}
+					return
+				}
 			}
-		}
-		// §25.4：账号槽同样改为**可转交**句柄（Cursor 分支交给会话持有）。
-		accountSlot := newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
-		if accountSlot != nil {
-			accountReleaseFunc = accountSlot.Release
+			account = selection.Account
+			setOpsSelectedAccount(c, account.ID, account.Platform)
+
+			// 4. Acquire account concurrency slot
+			accountReleaseFunc = selection.ReleaseFunc
+			if !selection.Acquired {
+				if selection.WaitPlan == nil {
+					markOpsRoutingCapacityLimited(c)
+					h.responsesErrorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
+					return
+				}
+				waitTimeout := selection.WaitPlan.Timeout
+				if slotFullCount > 0 {
+					// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
+					// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
+					// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
+					// 抢不到就立刻失败、走下面的排除分支换下一个。
+					// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
+					waitTimeout = 0
+				}
+				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
+					c,
+					account.ID,
+					selection.WaitPlan.MaxConcurrency,
+					waitTimeout,
+					reqStream,
+					&streamStarted,
+				)
+				if err != nil {
+					reqLog.Warn("gateway.responses.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+					// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+					// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
+					if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
+						continue
+					}
+					h.handleConcurrencyError(c, err, "account", streamStarted)
+					return
+				}
+			}
+			// 终检与准入后绑定必须使用选号结果携带的门：门安装在调度栈的局部
+			// ctx 上（composite/fallback 还可能解析出与入口分组不同的门），直接用
+			// requestCtx 会退化为空操作。
+			admissionCtx := service.ContextWithSelectionProfitGate(requestCtx, selection)
+			latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
+			if vetoed {
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				reqLog.Debug("gateway.responses.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
+				if fs.RecordProfitVeto(account.ID) == FailoverExhausted {
+					reqLog.Warn("gateway.responses.profit_veto_attempts_exhausted", zap.Int("profit_veto_count", fs.ProfitVetoCount()))
+					h.responsesErrorResponse(c, http.StatusServiceUnavailable, "api_error", profitVetoExhaustedMessage)
+					return
+				}
+				continue
+			}
+			account = latest
+			selection.Account = latest
+			if selection.ProfitGateActive() {
+				if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, sessionHash, account.ID); err != nil {
+					reqLog.Warn("gateway.responses.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+				}
+			}
+			// §25.4：账号槽同样改为**可转交**句柄（Cursor 分支交给会话持有）。
+			accountSlot = newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
+			if accountSlot != nil {
+				accountReleaseFunc = accountSlot.Release
+			}
 		}
 
 		// 5. Forward request
@@ -369,38 +454,44 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		}
 		var result *service.ForwardResult
 		setActualUpstreamEndpoint(c, "")
-		switch responsesAccountForwardPath(account) {
-		case "devin":
-			// Gemini 分组里的 Devin 账号没有 base_url：gatewayService.ForwardAsResponses
-			// 的普通出口会打到 Devin 边缘并返回 403 "Request not allowed"，账号随后被置
-			// error。Devin 的正确出口是 OpenAIGatewayService.Forward（内部含 Responses→Chat
-			// 归一、identity 回桥与 schema 清洗）。服务未装配时失败关闭，收尾写法与
-			// antigravity 兼容服务为 nil 的现有分支一致。
-			if h.openAIGatewayService == nil {
-				h.responsesErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
-				if accountReleaseFunc != nil {
-					accountReleaseFunc()
+		if crossChainResponses {
+			// A7b：跨链 responses 按选中账号所属执行链分派；无匹配链时明确失败关闭，
+			// 结果/错误进入下方既有 usage/failover 链（FailoverError 用 account.Platform）。
+			result, err = h.forwardCompositeCrossChainResponses(requestCtx, c, account, forwardBody, parsedReq)
+		} else {
+			switch responsesAccountForwardPath(account) {
+			case "devin":
+				// Gemini 分组里的 Devin 账号没有 base_url：gatewayService.ForwardAsResponses
+				// 的普通出口会打到 Devin 边缘并返回 403 "Request not allowed"，账号随后被置
+				// error。Devin 的正确出口是 OpenAIGatewayService.Forward（内部含 Responses→Chat
+				// 归一、identity 回桥与 schema 清洗）。服务未装配时失败关闭，收尾写法与
+				// antigravity 兼容服务为 nil 的现有分支一致。
+				if h.openAIGatewayService == nil {
+					h.responsesErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
+					if accountReleaseFunc != nil {
+						accountReleaseFunc()
+					}
+					return
 				}
-				return
-			}
-			oaRes, oaErr := h.openAIGatewayService.Forward(forwardCtx, c, account, forwardBody)
-			if oaRes != nil && strings.TrimSpace(oaRes.UpstreamEndpoint) != "" {
-				setActualUpstreamEndpoint(c, oaRes.UpstreamEndpoint)
-			}
-			result = forwardResultFromOpenAIResult(oaRes)
-			err = oaErr
-		case "antigravity":
-			if h.antigravityGatewayService == nil {
-				h.responsesErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
-				if accountReleaseFunc != nil {
-					accountReleaseFunc()
+				oaRes, oaErr := h.openAIGatewayService.Forward(forwardCtx, c, account, forwardBody)
+				if oaRes != nil && strings.TrimSpace(oaRes.UpstreamEndpoint) != "" {
+					setActualUpstreamEndpoint(c, oaRes.UpstreamEndpoint)
 				}
-				return
+				result = forwardResultFromOpenAIResult(oaRes)
+				err = oaErr
+			case "antigravity":
+				if h.antigravityGatewayService == nil {
+					h.responsesErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
+					if accountReleaseFunc != nil {
+						accountReleaseFunc()
+					}
+					return
+				}
+				setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
+				result, err = h.antigravityGatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
+			default: // gateway
+				result, err = h.gatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
 			}
-			setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
-			result, err = h.antigravityGatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
-		default: // gateway
-			result, err = h.gatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
 		}
 
 		if accountReleaseFunc != nil {
@@ -538,6 +629,60 @@ func responsesAccountForwardPath(account *service.Account) string {
 		return "gateway"
 	default:
 		return "gateway"
+	}
+}
+
+// compositeCrossChainResponsesForwardKind 返回跨链 responses 请求应按哪个既有转发器分派。
+// 依次以 openai→anthropic 调用 CompositeAccountChainPath（链顺序与 A1 selector 一致；
+// gemini 链在 responses 端点不可服务，A1 对 gemini 账号返回 false，故不纳入候选），
+// 命中首条可服务本端点的链即返回其 kind；两条链都不可时返回空串，调用方必须失败关闭，
+// 不得静默回落到其它链。
+func compositeCrossChainResponsesForwardKind(account *service.Account) string {
+	if account == nil {
+		return ""
+	}
+	for _, candidate := range [...]struct{ chain, kind string }{
+		{service.CompositeChainOpenAI, "openai"},
+		{service.CompositeChainAnthropic, "anthropic"},
+	} {
+		if _, ok := service.CompositeAccountChainPath(candidate.chain, service.CompositeEndpointResponses, account); !ok {
+			continue
+		}
+		return candidate.kind
+	}
+	return ""
+}
+
+// forwardCompositeCrossChainResponses 按 compositeCrossChainResponsesForwardKind 的判定，
+// 把跨链 responses 请求交给与账号所属执行链匹配的既有 Forward。结果按既有路径消费；
+// 无匹配链或服务未注入时返回明确错误，绝不静默回落到其它链。
+func (h *GatewayHandler) forwardCompositeCrossChainResponses(
+	ctx context.Context,
+	c *gin.Context,
+	account *service.Account,
+	forwardBody []byte,
+	parsedReq *service.ParsedRequest,
+) (*service.ForwardResult, error) {
+	switch compositeCrossChainResponsesForwardKind(account) {
+	case "openai":
+		// 该服务已含 cursor/codebuddy/devin/web/CN 等 Responses 分支，
+		// 结果经 forwardResultFromOpenAIResult 归一为 *ForwardResult。
+		if h.openAIGatewayService == nil {
+			return nil, fmt.Errorf("composite cross-chain responses: openai service not configured")
+		}
+		oaRes, oaErr := h.openAIGatewayService.Forward(ctx, c, account, forwardBody)
+		return forwardResultFromOpenAIResult(oaRes), oaErr
+	case "anthropic":
+		if h.gatewayService == nil {
+			return nil, fmt.Errorf("composite cross-chain responses: anthropic service not configured")
+		}
+		return h.gatewayService.ForwardAsResponses(ctx, c, account, forwardBody, parsedReq)
+	default:
+		platform := ""
+		if account != nil {
+			platform = account.Platform
+		}
+		return nil, fmt.Errorf("composite cross-chain responses: no forwarding chain for platform %q", platform)
 	}
 }
 

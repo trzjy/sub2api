@@ -3031,6 +3031,19 @@ func cloneExcludedAccountIDs(excludedIDs map[int64]struct{}) map[int64]struct{} 
 }
 
 func (s *OpenAIGatewayService) isOpenAIAccountTransportCompatible(account *Account, requiredTransport OpenAIUpstreamTransport) bool {
+	if requiredTransport == OpenAIUpstreamTransportResponsesWSOrGrokHTTP {
+		if s == nil || account == nil {
+			return false
+		}
+		switch account.Platform {
+		case PlatformGrok:
+			return true
+		case PlatformOpenAI:
+			return s.isOpenAIAccountTransportCompatible(account, OpenAIUpstreamTransportResponsesWebsocketV2Ingress)
+		default:
+			return false
+		}
+	}
 	if requiredTransport == OpenAIUpstreamTransportAny || requiredTransport == OpenAIUpstreamTransportHTTPSSE {
 		return true
 	}

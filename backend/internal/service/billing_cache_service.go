@@ -1231,6 +1231,12 @@ func circuitStateString(state billingCircuitBreakerState) string {
 	}
 }
 
+// CheckUserPlatformQuotaEligibility 是 checkUserPlatformQuotaEligibility 的导出包装，
+// 供 handler 在 composite 选号后按实际账号平台补检；订阅模式由调用方跳过。
+func (s *BillingCacheService) CheckUserPlatformQuotaEligibility(ctx context.Context, userID int64, platform string) error {
+	return s.checkUserPlatformQuotaEligibility(ctx, userID, platform)
+}
+
 // checkUserPlatformQuotaEligibility 在 standard 模式下检查 user × platform 日/周/月 quota。
 // 返回 nil = 允许；返回 ErrUserPlatform{Daily/Weekly/Monthly}QuotaExhausted = 拒绝（带 window_resets_at metadata）。
 // checkUserPlatformQuotaEligibility 检查用户在指定平台的 USD 配额。

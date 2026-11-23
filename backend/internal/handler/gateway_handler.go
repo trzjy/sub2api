@@ -816,184 +816,279 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				zap.Bool("has_bound_session", hasBoundSession),
 				zap.Int("failed_account_count", len(fs.FailedAccountIDs)),
 			)
-			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, subject.UserID)
-			if err != nil {
-				if failoverClientGone(c) {
-					reqLog.Info("gateway.account_select_aborted_client_disconnected", zap.Error(err))
-					return
-				}
-				// 「号池无可用账号」必须如实报给客户端——包括「已试过若干账号之后才把池子耗空」
-				// 的情况。2026-11-15 线上：失败列表非空时直接落到 handleFailoverExhausted，
-				// 把上一个账号的上游 524 原样翻成 502，客户端只看到「上游错误」、看不到
-				// 「池子里没号了」，于是照着 502 一直重试（9 次 × 每次 2 分钟）。
-				if len(fs.FailedAccountIDs) == 0 || errors.Is(err, service.ErrNoAvailableAccounts) {
-					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform, err)
-					if !cls.ModelNotFound {
-						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
-					}
-					reqLog.Warn("gateway.select_account_no_available",
-						zap.String("model", reqModel),
-						zap.Int64p("group_id", currentAPIKey.GroupID),
-						zap.String("platform", platform),
-						zap.Bool("fallback_used", fallbackUsed),
-						zap.Bool("model_not_found", cls.ModelNotFound),
-						zap.Error(err),
-					)
-					message := cls.Message
-					h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
-					return
-				}
-				action := fs.HandleSelectionExhausted(c.Request.Context())
-				switch action {
-				case FailoverContinue:
-					ctx := service.WithSingleAccountRetry(c.Request.Context(), true, h.metadataBridgeEnabled())
-					c.Request = c.Request.WithContext(ctx)
-					continue
-				case FailoverCanceled:
-					failoverClientGone(c)
-					return
-				default: // FailoverExhausted
-					if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
-						h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
-					} else if slotFullCount > 0 {
-						// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
-						h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
-					} else {
-						h.handleFailoverExhaustedSimple(c, 502, streamStarted)
-					}
-					return
-				}
-			}
-			account := selection.Account
-			setOpsSelectedAccount(c, account.ID, account.Platform)
+			// A8：跨链 messages（ServiceChain=anthropic，多平台供给且未收敛到具体目标
+			// 平台）用 A4b selector 从过滤后的 SupplyAccounts 选号；选中账号可能来自
+			// OpenAI/Anthropic/Gemini 任一执行链，按账号链分派既有 Forward。非跨链路径
+			// 保持原选号逻辑不变。
+			decision, decisionOK := service.CompositeRouteDecisionFromContext(c.Request.Context())
+			crossChainMessages := decisionOK &&
+				service.CompositeDecisionSupplyExists(decision) &&
+				decision.ServiceChain == service.CompositeChainAnthropic &&
+				decision.TargetPlatform == "" &&
+				len(decision.SupplyAccounts) > 0
 
-			// [DEBUG-STICKY] 打印账号选择结果
-			reqLog.Info("sticky.account_selected",
-				zap.Int64("selected_account_id", account.ID),
-				zap.String("account_name", account.Name),
-				zap.Bool("slot_acquired", selection.Acquired),
-				zap.Bool("has_wait_plan", selection.WaitPlan != nil),
-				zap.Int64("sticky_bound_account_id", sessionBoundAccountID),
-				zap.Bool("sticky_honored", sessionBoundAccountID > 0 && sessionBoundAccountID == account.ID),
-			)
-
-			// 检查请求拦截（预热请求、SUGGESTION MODE等）
-			if account.IsInterceptWarmupEnabled() {
-				interceptType := detectInterceptType(body, reqModel, parsedReq.MaxTokens, isClaudeCodeClient)
-				if interceptType != InterceptTypeNone {
-					if selection.Acquired && selection.ReleaseFunc != nil {
-						selection.ReleaseFunc()
-					}
-					if reqStream {
-						sendMockInterceptStream(c, reqModel, interceptType)
-					} else {
-						sendMockInterceptResponse(c, reqModel, interceptType)
-					}
+			var account *service.Account
+			var accountReleaseFunc func()
+			var accountSlot *transferableRelease
+			if crossChainMessages {
+				supply := filterCompositeMessagesSupply(decision, apiKey.Group)
+				if len(supply) == 0 {
+					// messages 权限未授权（组开关关闭且无豁免供给）：按本入口既有
+					// 权限错误写出，绝不落 500/502 上游错误。
+					h.errorResponse(c, http.StatusForbidden, "permission_error", "This group does not allow /v1/messages dispatch")
 					return
 				}
-			}
-
-			// 3. 获取账号并发槽位
-			accountReleaseFunc := selection.ReleaseFunc
-			if !selection.Acquired {
-				if selection.WaitPlan == nil {
-					markOpsRoutingCapacityLimited(c)
-					reqLog.Warn("gateway.select_account_no_slot_no_wait_plan",
-						zap.Int64("account_id", account.ID),
-						zap.String("model", reqModel),
-						zap.String("platform", platform),
-					)
-					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts, streamStarted)
-					return
+				groupID := int64(0)
+				if currentAPIKey.GroupID != nil {
+					groupID = *currentAPIKey.GroupID
 				}
-				waitTimeout := selection.WaitPlan.Timeout
-				if slotFullCount > 0 {
-					// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-					// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-					// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-					// 抢不到就立刻失败、走下面的排除分支换下一个。
-					// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-					waitTimeout = 0
-				}
-				accountWaitCounted := false
-				canWait, err := h.concurrencyHelper.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
-				if err != nil {
-					reqLog.Warn("gateway.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				} else if !canWait {
-					reqLog.Info("gateway.account_wait_queue_full",
-						zap.Int64("account_id", account.ID),
-						zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
-					)
-					h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, pkgerrors.GatewayQueueFull, streamStarted)
-					return
-				}
-				if err == nil && canWait {
-					accountWaitCounted = true
-				}
-				releaseWait := func() {
-					if accountWaitCounted {
-						h.concurrencyHelper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-						accountWaitCounted = false
-					}
-				}
-
-				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
-					c,
-					account.ID,
-					selection.WaitPlan.MaxConcurrency,
-					waitTimeout,
-					reqStream,
-					&streamStarted,
+				selected, release, selErr := h.gatewayService.SelectCompositeCrossChainAccount(
+					c.Request.Context(), groupID, reqModel,
+					service.CompositeEndpointMessages, supply, fs.FailedAccountIDs,
 				)
-				if err != nil {
-					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-					releaseWait()
-					// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
-					// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-					if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
-						continue
+				if selErr != nil {
+					// 与本入口既有"无可用账号"同口径：不得当成 502 上游错误。
+					if failoverClientGone(c) {
+						reqLog.Info("gateway.messages.cross_chain_select_aborted_client_disconnected", zap.Error(selErr))
+						return
 					}
-					h.handleConcurrencyError(c, err, "account", streamStarted)
-					return
+					if len(fs.FailedAccountIDs) == 0 || errors.Is(selErr, service.ErrNoAvailableAccounts) {
+						cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform, selErr)
+						if !cls.ModelNotFound {
+							markOpsRoutingCapacityLimitedIfNoAvailable(c, selErr)
+						}
+						reqLog.Warn("gateway.messages.cross_chain_select_no_available",
+							zap.String("model", reqModel),
+							zap.Int64p("group_id", currentAPIKey.GroupID),
+							zap.String("platform", platform),
+							zap.Error(selErr),
+						)
+						h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
+						return
+					}
+					action := fs.HandleSelectionExhausted(c.Request.Context())
+					switch action {
+					case FailoverContinue:
+						c.Request = c.Request.WithContext(service.WithSingleAccountRetry(c.Request.Context(), true, h.metadataBridgeEnabled()))
+						continue
+					case FailoverCanceled:
+						failoverClientGone(c)
+						return
+					default:
+						if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
+							h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
+						} else if slotFullCount > 0 {
+							h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
+						} else {
+							h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, streamStarted)
+						}
+						return
+					}
 				}
-				// Slot acquired: no longer waiting in queue.
-				releaseWait()
-			}
-			// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
-			admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
-			latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
-			if vetoed {
-				if accountReleaseFunc != nil {
-					accountReleaseFunc()
+				account = selected
+				accountReleaseFunc = release
+				// 账号槽登记为**可转交**句柄（Cursor 分支交给会话持有），与非跨链
+				// 路径同型；selector 已抢槽，这里不二次抢槽、不写粘性。
+				accountSlot = newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
+				if accountSlot != nil {
+					accountReleaseFunc = accountSlot.Release
 				}
-				reqLog.Debug("gateway.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
-				if fs.RecordProfitVeto(account.ID) == FailoverExhausted {
-					reqLog.Warn("gateway.profit_veto_attempts_exhausted", zap.Int("profit_veto_count", fs.ProfitVetoCount()))
-					markOpsRoutingCapacityLimited(c)
-					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", profitVetoExhaustedMessage, streamStarted)
-					return
+				// ctx 实际平台回填必须先于 usage/quota 捕获：选到账号后立刻盖章，
+				// 使下方 submitUsage 的 QuotaPlatform / failover 全部按真实平台计量。
+				requestCtx := service.WithResolvedTargetPlatform(c.Request.Context(), account.Platform)
+				requestCtx = service.WithCompositeActualPlatformResolved(requestCtx)
+				c.Request = c.Request.WithContext(requestCtx)
+				setOpsSelectedAccount(c, account.ID, account.Platform)
+				// 标准模式按实际账号平台补检 user×platform 配额；订阅模式跳过。
+				if quotaErr := h.checkCompositeCrossChainPlatformQuota(c, currentAPIKey, currentSubscription, account); quotaErr != nil {
+					if accountReleaseFunc != nil {
+						accountReleaseFunc()
+					}
+					accountReleaseFunc = nil
+					fs.FailedAccountIDs[account.ID] = struct{}{}
+					continue
 				}
-				// 尝试被否决（从未转发），立即释放该账号的会话注册
-				h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionKey)
-				delete(sessionSlotAccounts, account.ID)
-				continue
-			}
-			account = latest
-			selection.Account = latest
-			// 记录本请求注册过会话槽的账号（profit 准入后账号已定）
-			sessionSlotAccounts[account.ID] = account
-			// 等待路径保持既有 eager 绑定（无门时 helper 直接绑定）；调度器已
-			// 抢槽的直达路径无门时由选号内部绑定，这里只在门下补准入后绑定。
-			if selection.ProfitGateActive() || !selection.Acquired {
-				if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, currentAPIKey.GroupID, sessionKey, account.ID); err != nil {
-					reqLog.Warn("gateway.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+			} else {
+				selection, selErr := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, subject.UserID)
+				err = selErr
+				if err != nil {
+					if failoverClientGone(c) {
+						reqLog.Info("gateway.account_select_aborted_client_disconnected", zap.Error(err))
+						return
+					}
+					// 「号池无可用账号」必须如实报给客户端——包括「已试过若干账号之后才把池子耗空」
+					// 的情况。2026-11-15 线上：失败列表非空时直接落到 handleFailoverExhausted，
+					// 把上一个账号的上游 524 原样翻成 502，客户端只看到「上游错误」、看不到
+					// 「池子里没号了」，于是照着 502 一直重试（9 次 × 每次 2 分钟）。
+					if len(fs.FailedAccountIDs) == 0 || errors.Is(err, service.ErrNoAvailableAccounts) {
+						cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform, err)
+						if !cls.ModelNotFound {
+							markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
+						}
+						reqLog.Warn("gateway.select_account_no_available",
+							zap.String("model", reqModel),
+							zap.Int64p("group_id", currentAPIKey.GroupID),
+							zap.String("platform", platform),
+							zap.Bool("fallback_used", fallbackUsed),
+							zap.Bool("model_not_found", cls.ModelNotFound),
+							zap.Error(err),
+						)
+						message := cls.Message
+						h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
+						return
+					}
+					action := fs.HandleSelectionExhausted(c.Request.Context())
+					switch action {
+					case FailoverContinue:
+						ctx := service.WithSingleAccountRetry(c.Request.Context(), true, h.metadataBridgeEnabled())
+						c.Request = c.Request.WithContext(ctx)
+						continue
+					case FailoverCanceled:
+						failoverClientGone(c)
+						return
+					default: // FailoverExhausted
+						if fs.LastFailoverErr != nil && !lastFailureWasSlot(c) {
+							h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
+						} else if slotFullCount > 0 {
+							// 槽位失败导致候选耗尽：仍按账号维度并发终态写出 503。
+							h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
+						} else {
+							h.handleFailoverExhaustedSimple(c, 502, streamStarted)
+						}
+						return
+					}
 				}
-			}
-			// 账号槽位/等待计数需要在超时或断开时安全回收
-			// §25.4：账号槽改用**可转交**句柄（Cursor 分支交给会话持有）。
-			accountSlot := newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
-			if accountSlot != nil {
-				accountReleaseFunc = accountSlot.Release
+				account = selection.Account
+				setOpsSelectedAccount(c, account.ID, account.Platform)
+
+				// [DEBUG-STICKY] 打印账号选择结果
+				reqLog.Info("sticky.account_selected",
+					zap.Int64("selected_account_id", account.ID),
+					zap.String("account_name", account.Name),
+					zap.Bool("slot_acquired", selection.Acquired),
+					zap.Bool("has_wait_plan", selection.WaitPlan != nil),
+					zap.Int64("sticky_bound_account_id", sessionBoundAccountID),
+					zap.Bool("sticky_honored", sessionBoundAccountID > 0 && sessionBoundAccountID == account.ID),
+				)
+
+				// 检查请求拦截（预热请求、SUGGESTION MODE等）
+				if account.IsInterceptWarmupEnabled() {
+					interceptType := detectInterceptType(body, reqModel, parsedReq.MaxTokens, isClaudeCodeClient)
+					if interceptType != InterceptTypeNone {
+						if selection.Acquired && selection.ReleaseFunc != nil {
+							selection.ReleaseFunc()
+						}
+						if reqStream {
+							sendMockInterceptStream(c, reqModel, interceptType)
+						} else {
+							sendMockInterceptResponse(c, reqModel, interceptType)
+						}
+						return
+					}
+				}
+
+				// 3. 获取账号并发槽位
+				accountReleaseFunc = selection.ReleaseFunc
+				if !selection.Acquired {
+					if selection.WaitPlan == nil {
+						markOpsRoutingCapacityLimited(c)
+						reqLog.Warn("gateway.select_account_no_slot_no_wait_plan",
+							zap.Int64("account_id", account.ID),
+							zap.String("model", reqModel),
+							zap.String("platform", platform),
+						)
+						h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts, streamStarted)
+						return
+					}
+					waitTimeout := selection.WaitPlan.Timeout
+					if slotFullCount > 0 {
+						// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
+						// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
+						// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
+						// 抢不到就立刻失败、走下面的排除分支换下一个。
+						// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
+						waitTimeout = 0
+					}
+					accountWaitCounted := false
+					canWait, err := h.concurrencyHelper.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
+					if err != nil {
+						reqLog.Warn("gateway.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+					} else if !canWait {
+						reqLog.Info("gateway.account_wait_queue_full",
+							zap.Int64("account_id", account.ID),
+							zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
+						)
+						h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, pkgerrors.GatewayQueueFull, streamStarted)
+						return
+					}
+					if err == nil && canWait {
+						accountWaitCounted = true
+					}
+					releaseWait := func() {
+						if accountWaitCounted {
+							h.concurrencyHelper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
+							accountWaitCounted = false
+						}
+					}
+
+					accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
+						c,
+						account.ID,
+						selection.WaitPlan.MaxConcurrency,
+						waitTimeout,
+						reqStream,
+						&streamStarted,
+					)
+					if err != nil {
+						reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+						releaseWait()
+						// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+						// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
+						if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
+							continue
+						}
+						h.handleConcurrencyError(c, err, "account", streamStarted)
+						return
+					}
+					// Slot acquired: no longer waiting in queue.
+					releaseWait()
+				}
+				// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
+				admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
+				latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
+				if vetoed {
+					if accountReleaseFunc != nil {
+						accountReleaseFunc()
+					}
+					reqLog.Debug("gateway.account_slot_profit_vetoed", zap.Int64("account_id", account.ID), zap.String("reason", reason))
+					if fs.RecordProfitVeto(account.ID) == FailoverExhausted {
+						reqLog.Warn("gateway.profit_veto_attempts_exhausted", zap.Int("profit_veto_count", fs.ProfitVetoCount()))
+						markOpsRoutingCapacityLimited(c)
+						h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", profitVetoExhaustedMessage, streamStarted)
+						return
+					}
+					// 尝试被否决（从未转发），立即释放该账号的会话注册
+					h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionKey)
+					delete(sessionSlotAccounts, account.ID)
+					continue
+				}
+				account = latest
+				selection.Account = latest
+				// 记录本请求注册过会话槽的账号（profit 准入后账号已定）
+				sessionSlotAccounts[account.ID] = account
+				// 等待路径保持既有 eager 绑定（无门时 helper 直接绑定）；调度器已
+				// 抢槽的直达路径无门时由选号内部绑定，这里只在门下补准入后绑定。
+				if selection.ProfitGateActive() || !selection.Acquired {
+					if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, currentAPIKey.GroupID, sessionKey, account.ID); err != nil {
+						reqLog.Warn("gateway.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+					}
+				}
+				// 账号槽位/等待计数需要在超时或断开时安全回收
+				// §25.4：账号槽改用**可转交**句柄（Cursor 分支交给会话持有）。
+				accountSlot = newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
+				if accountSlot != nil {
+					accountReleaseFunc = accountSlot.Release
+				}
 			}
 
 			// ===== 用户消息串行队列 START =====
@@ -1115,31 +1210,37 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 			c.Request = c.Request.WithContext(bindCursorHandoverForAttempt(c.Request.Context(), account, attemptHandover))
 			requestCtx = c.Request.Context()
-			switch messagesNonGeminiForwardPath(account) {
-			case "devin":
-				// 非 Gemini 分组里的 Devin 账号没有可用的 GatewayService 出口：
-				// 直接 Forward 会把 Anthropic 请求发到 Devin 边缘并被 CF 403
-				// "Request not allowed" 拒绝，进而把账号置为
-				// account_disabled_auth_error。改走 OpenAIGatewayService 的
-				// ForwardAsAnthropic（内部 Anthropic→Chat→forwardDevin）。服务未
-				// 装配时失败关闭，收尾写法与相邻分支一致。
-				if h.openAIGatewayService == nil {
-					h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", pkgerrors.CompatServiceNotConfigured, streamStarted)
-					if accountReleaseFunc != nil {
-						accountReleaseFunc()
+			if crossChainMessages {
+				// A8：跨链 messages 按选中账号所属执行链分派；无匹配链时明确失败关闭，
+				// 结果/错误进入下方既有 usage/failover 链（FailoverError 用 account.Platform）。
+				result, err = h.forwardCompositeCrossChainMessages(requestCtx, c, account, attemptBody, attemptParsedReq)
+			} else {
+				switch messagesNonGeminiForwardPath(account) {
+				case "devin":
+					// 非 Gemini 分组里的 Devin 账号没有可用的 GatewayService 出口：
+					// 直接 Forward 会把 Anthropic 请求发到 Devin 边缘并被 CF 403
+					// "Request not allowed" 拒绝，进而把账号置为
+					// account_disabled_auth_error。改走 OpenAIGatewayService 的
+					// ForwardAsAnthropic（内部 Anthropic→Chat→forwardDevin）。服务未
+					// 装配时失败关闭，收尾写法与相邻分支一致。
+					if h.openAIGatewayService == nil {
+						h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", pkgerrors.CompatServiceNotConfigured, streamStarted)
+						if accountReleaseFunc != nil {
+							accountReleaseFunc()
+						}
+						return
 					}
-					return
+					oaRes, oaErr := h.openAIGatewayService.ForwardAsAnthropic(requestCtx, c, account, attemptBody, "", "")
+					if oaRes != nil && strings.TrimSpace(oaRes.UpstreamEndpoint) != "" {
+						setActualUpstreamEndpoint(c, oaRes.UpstreamEndpoint)
+					}
+					result = forwardResultFromOpenAIResult(oaRes)
+					err = oaErr
+				case "antigravity":
+					result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
+				default: // gateway
+					result, err = h.gatewayService.Forward(requestCtx, c, account, attemptParsedReq)
 				}
-				oaRes, oaErr := h.openAIGatewayService.ForwardAsAnthropic(requestCtx, c, account, attemptBody, "", "")
-				if oaRes != nil && strings.TrimSpace(oaRes.UpstreamEndpoint) != "" {
-					setActualUpstreamEndpoint(c, oaRes.UpstreamEndpoint)
-				}
-				result = forwardResultFromOpenAIResult(oaRes)
-				err = oaErr
-			case "antigravity":
-				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
-			default: // gateway
-				result, err = h.gatewayService.Forward(requestCtx, c, account, attemptParsedReq)
 			}
 
 			// 兜底释放串行锁（正常情况已通过回调提前释放）
@@ -1391,6 +1492,84 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		if !retryWithFallback {
 			return
 		}
+	}
+}
+
+// compositeCrossChainMessagesForwardKind 返回跨链 messages 请求应按哪个既有转发器
+// 分派。依次以 openai→anthropic→gemini 执行链调用 CompositeAccountChainPath（与 A1
+// selector 链顺序一致），命中首个可服务本端点的链即返回其 kind；三条链都不可时
+// 返回空串，调用方必须失败关闭，不得静默回落到其它链。
+func compositeCrossChainMessagesForwardKind(account *service.Account) string {
+	if account == nil {
+		return ""
+	}
+	for _, candidate := range [...]struct{ chain, kind string }{
+		{service.CompositeChainOpenAI, "openai"},
+		{service.CompositeChainAnthropic, "anthropic"},
+		{service.CompositeChainGemini, "gemini"},
+	} {
+		if _, ok := service.CompositeAccountChainPath(candidate.chain, service.CompositeEndpointMessages, account); !ok {
+			continue
+		}
+		return candidate.kind
+	}
+	return ""
+}
+
+// filterCompositeMessagesSupply 在 composite 分组未开放 messages 派发时，从跨链
+// messages 决策的供给摘要中剔除受组开关约束的 OpenAI 链 claimant。豁免集合与
+// C9 openAIMessagesDispatchExemptPlatform 同口径（grok/CN/other/muse/codebuddy/
+// devin/多协议）；非 OpenAI 链 claimant 不受该开关约束，一律保留。group 为 nil
+// 或组开关打开时原样返回。
+func filterCompositeMessagesSupply(decision service.CompositeRouteDecision, group *service.Group) []service.CompositeOwnershipClaimant {
+	supply := decision.SupplyAccounts
+	if group == nil || group.AllowMessagesDispatch {
+		return supply
+	}
+	filtered := make([]service.CompositeOwnershipClaimant, 0, len(supply))
+	for _, c := range supply {
+		_, openAIChain := service.CompositeClaimantChainPath(service.CompositeChainOpenAI, service.CompositeEndpointMessages, c)
+		if openAIChain && !openAIMessagesDispatchExemptPlatform(c.Platform) {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	return filtered
+}
+
+// forwardCompositeCrossChainMessages 按 compositeCrossChainMessagesForwardKind 的判定，
+// 把跨链 messages 请求交给与账号所属执行链匹配的既有 Forward。结果按既有路径消费；
+// 无匹配链或服务未注入时返回明确错误，绝不静默回落到其它链。
+func (h *GatewayHandler) forwardCompositeCrossChainMessages(
+	ctx context.Context,
+	c *gin.Context,
+	account *service.Account,
+	body []byte,
+	parsedReq *service.ParsedRequest,
+) (*service.ForwardResult, error) {
+	switch compositeCrossChainMessagesForwardKind(account) {
+	case "openai":
+		if h.openAIGatewayService == nil {
+			return nil, fmt.Errorf("composite cross-chain messages: openai service not configured")
+		}
+		oaRes, oaErr := h.openAIGatewayService.ForwardAsAnthropic(ctx, c, account, body, "", "")
+		return forwardResultFromOpenAIResult(oaRes), oaErr
+	case "anthropic":
+		if h.gatewayService == nil {
+			return nil, fmt.Errorf("composite cross-chain messages: anthropic service not configured")
+		}
+		return h.gatewayService.Forward(ctx, c, account, parsedReq)
+	case "gemini":
+		if h.geminiCompatService == nil {
+			return nil, fmt.Errorf("composite cross-chain messages: gemini service not configured")
+		}
+		return h.geminiCompatService.Forward(ctx, c, account, body)
+	default:
+		platform := ""
+		if account != nil {
+			platform = account.Platform
+		}
+		return nil, fmt.Errorf("composite cross-chain messages: no forwarding chain for platform %q", platform)
 	}
 }
 
@@ -1669,11 +1848,30 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 	// 故取我方派生式为准（并集语义在 domain 清单内已覆盖上游全部平台）。
 	platforms := domain.CompositePrecedencePlatformIDs()
 	platforms = append(platforms, service.PlatformOther)
+
+	// 账号映射键只接受已登记平台账号贡献的部分：GetAvailableModels 遍历全组账号、
+	// 不按账号平台过滤，故对候选键按组内实际有账号的已登记平台复核，剔除
+	// unknownplat 等未登记平台账号的键。平台集合仍由 domain SSOT + other 派生。
+	registeredPlatforms := make([]string, 0, len(platforms))
+	staticDefaultModels := make(map[string]struct{})
+	for _, platform := range platforms {
+		for _, model := range defaultModelIDsForPlatform(platform) {
+			staticDefaultModels[model] = struct{}{}
+		}
+		if _, ok := schedulablePlatforms[platform]; ok {
+			registeredPlatforms = append(registeredPlatforms, platform)
+		}
+	}
+	rejectedAccountModels := make(map[string]struct{})
+
 	for _, platform := range platforms {
 		if platform == service.PlatformTypeSafe && !includeSystemOne {
 			continue
 		}
 		platformModels := h.gatewayService.GetAvailableModels(ctx, groupID, platform)
+		// 仅当本轮取到账号映射键时才复核归属；平台静态目录（无映射时的回落）
+		// 与 systemone 托管目录保持原样，不受本过滤影响。
+		accountMappingModels := len(platformModels) > 0
 		if len(platformModels) == 0 && (platform != service.PlatformOpenAI || platformModels == nil) {
 			// CN 供应商没有静态默认模型列表（defaultModelIDsForPlatform 的
 			// default 分支是 Claude 列表），composite 下只暴露账号映射键。
@@ -1688,6 +1886,17 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 			}
 			if _, ok := seen[model]; ok {
 				continue
+			}
+			if accountMappingModels {
+				if _, isStatic := staticDefaultModels[model]; !isStatic {
+					if _, rejected := rejectedAccountModels[model]; rejected {
+						continue
+					}
+					if !h.compositeRegisteredAccountModelAllowed(ctx, groupID, model, registeredPlatforms) {
+						rejectedAccountModels[model] = struct{}{}
+						continue
+					}
+				}
 			}
 			seen[model] = struct{}{}
 			models = append(models, model)
@@ -1704,6 +1913,22 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 		}
 	}
 	return models
+}
+
+// compositeRegisteredAccountModelAllowed 报告 model 是否由组内已登记平台账号的
+// model_mapping 贡献。底层复用 DiagnoseModelAvailabilityForPlatform（既有按平台
+// 查询账号 + 账号映射校验），不另造平台清单或兜底分支；未登记平台账号的键因此
+// 不会进入 composite 聚合模型列表。
+func (h *GatewayHandler) compositeRegisteredAccountModelAllowed(ctx context.Context, groupID *int64, model string, registeredPlatforms []string) bool {
+	if h == nil || h.gatewayService == nil {
+		return false
+	}
+	for _, platform := range registeredPlatforms {
+		if h.gatewayService.DiagnoseModelAvailabilityForPlatform(ctx, groupID, model, platform).HasModelSupport {
+			return true
+		}
+	}
+	return false
 }
 
 func writeModelsList(c *gin.Context, platform string, modelIDs []string) {

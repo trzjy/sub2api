@@ -56,6 +56,34 @@ func TestOpenAICompatibleTextTargetAllowedAdmitsOtherPlatform(t *testing.T) {
 		"接入点5：未知平台不得经 allowed 列表放行")
 }
 
+// platformFilteredAccountRepoStub 在通用 stub 之上补齐 ListModelAvailabilityCandidates
+// 的平台参数过滤（真实 repo 以 forcePlatformFilter 保证，通用 stub 为简化忽略该参数）。
+// composite 聚合按账号平台复核映射键归属时依赖此查询口径，仅补最小 fake，不改断言。
+type platformFilteredAccountRepoStub struct {
+	*gatewayModelsAccountRepoStub
+}
+
+func (s *platformFilteredAccountRepoStub) ListModelAvailabilityCandidates(ctx context.Context, groupID *int64, platforms []string, _ bool) ([]service.Account, error) {
+	if groupID == nil {
+		return nil, nil
+	}
+	accounts, err := s.gatewayModelsAccountRepoStub.ListSchedulableByGroupID(ctx, *groupID)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]struct{}, len(platforms))
+	for _, platform := range platforms {
+		allowed[platform] = struct{}{}
+	}
+	out := make([]service.Account, 0, len(accounts))
+	for _, account := range accounts {
+		if _, ok := allowed[account.Platform]; ok {
+			out = append(out, account)
+		}
+	}
+	return out, nil
+}
+
 // --- 接入点 6（compositeAvailableModels）验收口径⑧ ---
 //
 // compositeAvailableModels 按固定平台切片逐平台取 GetAvailableModels（=账号 model_mapping
@@ -65,21 +93,23 @@ func TestOpenAICompatibleTextTargetAllowedAdmitsOtherPlatform(t *testing.T) {
 func TestCompositeAvailableModelsIncludesOtherMappingExcludesUnknown(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	groupID := int64(94)
-	repo := &gatewayModelsAccountRepoStub{
-		byGroup: map[int64][]service.Account{
-			groupID: {
-				{
-					ID:       1,
-					Platform: service.PlatformOther,
-					Credentials: map[string]any{
-						"model_mapping": map[string]any{"qwen3.8-flash": "qwen3.8-flash:free"},
+	repo := &platformFilteredAccountRepoStub{
+		gatewayModelsAccountRepoStub: &gatewayModelsAccountRepoStub{
+			byGroup: map[int64][]service.Account{
+				groupID: {
+					{
+						ID:       1,
+						Platform: service.PlatformOther,
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{"qwen3.8-flash": "qwen3.8-flash:free"},
+						},
 					},
-				},
-				{
-					ID:       2,
-					Platform: "unknownplat", // 未知平台但配了有效映射
-					Credentials: map[string]any{
-						"model_mapping": map[string]any{"weird-model": "upstream-x"},
+					{
+						ID:       2,
+						Platform: "unknownplat", // 未知平台但配了有效映射
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{"weird-model": "upstream-x"},
+						},
 					},
 				},
 			},

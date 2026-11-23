@@ -105,9 +105,36 @@ func PlatformFromAPIKey(apiKey *APIKey) string {
 	return apiKey.Group.Platform
 }
 
+// compositeActualPlatformResolvedKey 是 actual-resolved 标记在 context 中的私有键，
+// 由 handler 在选号完成后盖章：表示 ResolvedTargetPlatform 已被改写为实际账号平台，
+// 而非同链歧义 decision 的代表平台。
+type compositeActualPlatformResolvedKey struct{}
+
+// WithCompositeActualPlatformResolved 标记当前请求已完成 composite 选号，ctx 中的
+// ResolvedTargetPlatform 已是实际账号平台。供 handler 在选号后调用；nil ctx 原样返回。
+func WithCompositeActualPlatformResolved(ctx context.Context) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, compositeActualPlatformResolvedKey{}, true)
+}
+
+// compositeActualPlatformResolved 报告 handler 是否已盖章实际平台已解析。
+func compositeActualPlatformResolved(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	resolved, _ := ctx.Value(compositeActualPlatformResolvedKey{}).(bool)
+	return resolved
+}
+
 // QuotaPlatform 返回 user×platform 配额计量使用的平台标识。
 // 强制平台路由（如 /antigravity）优先按 ctx 中的 ForcePlatform 计量，否则回退到
 // APIKey 关联 Group 的平台。
+//
+// 同链歧义 composite decision 盖章的 ResolvedTargetPlatform 只是代表平台（如 openai），
+// 选号前不得当作用户平台配额：此时失败关闭返回空串；handler 选到实际账号平台并盖章
+// actual-resolved 后，才按 ResolvedTargetPlatform 计量。
 //
 // 注意：必须用带 ForcePlatform 的请求 context 调用（如 handler 的 c.Request.Context()）。
 // 后扣运行在 worker 池的 background ctx 上没有 ForcePlatform，因此后扣平台由 handler
@@ -117,6 +144,10 @@ func QuotaPlatform(ctx context.Context, apiKey *APIKey) string {
 		if fp, ok := ctx.Value(ctxkey.ForcePlatform).(string); ok && fp != "" {
 			return fp
 		}
+	}
+	if decision, ok := CompositeRouteDecisionFromContext(ctx); ok &&
+		CompositeDecisionAmbiguous(decision) && !compositeActualPlatformResolved(ctx) {
+		return ""
 	}
 	if platform, ok := ResolvedTargetPlatformFromContext(ctx); ok {
 		return platform

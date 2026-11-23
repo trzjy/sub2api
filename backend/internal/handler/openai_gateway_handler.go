@@ -320,6 +320,62 @@ func openAIResponsesRequiredCapabilityForRequest(imageIntent bool, needsResponse
 	return openAIResponsesRequiredCapability(imageIntent, platform)
 }
 
+// openAIMessagesDispatchExemptPlatform 报告给定平台是否属于 /v1/messages 免授权
+// 豁免集合（grok / CN provider / other / muse / codebuddy / devin / 多协议账号）。
+// 与 allowOpenAICompatibleMessagesDispatch 对独立分组的豁免条件保持一致，供
+// composite 同链歧义按整条供给链判定复用（语义须与下方独立分组分支同步）。
+func openAIMessagesDispatchExemptPlatform(platform string) bool {
+	return platform == service.PlatformGrok ||
+		service.IsCNProvider(platform) ||
+		platform == service.PlatformOther ||
+		platform == service.PlatformMuse ||
+		platform == service.PlatformCodeBuddy ||
+		platform == service.PlatformDevin ||
+		service.IsMultiProtocolAPIKeyProvider(platform)
+}
+
+// applyCompositeSelectedAccountPlatform 在 composite 同链歧义选号成功后，把请求 ctx
+// 中由 decision 盖章的代表平台改写为本次实际账号平台，并盖上 actual-resolved 标记，
+// 使后续 QuotaPlatform/usage/渠道计量按真实供给平台进行。nil 安全；无 decision 或
+// concrete decision 时不改写 ctx（原路径语义不变）。
+func applyCompositeSelectedAccountPlatform(c *gin.Context, account *service.Account) {
+	if c == nil || c.Request == nil || account == nil {
+		return
+	}
+	decision, ok := service.CompositeRouteDecisionFromContext(c.Request.Context())
+	if !ok || !service.CompositeDecisionAmbiguous(decision) {
+		return
+	}
+	ctx := service.WithResolvedTargetPlatform(c.Request.Context(), account.Platform)
+	ctx = service.WithCompositeActualPlatformResolved(ctx)
+	c.Request = c.Request.WithContext(ctx)
+}
+
+// checkCompositeSelectedPlatformQuota 在 composite 同链歧义选号成功后，按本次实际账号平台
+// 补检 user × platform 配额，避免 composite 歧义路径跳过平台配额。仅标准/余额模式补检；
+// 订阅模式（订阅分组 + subscription 非 nil）由本 helper 直接放行。nil 安全且降级保持原路径：
+// billingCacheService 或 user 缺失时不检查，绝不 panic。
+func (h *OpenAIGatewayHandler) checkCompositeSelectedPlatformQuota(
+	c *gin.Context, apiKey *service.APIKey, subscription *service.UserSubscription, account *service.Account,
+) error {
+	if c == nil || c.Request == nil || apiKey == nil || account == nil {
+		return nil
+	}
+	decision, ok := service.CompositeRouteDecisionFromContext(c.Request.Context())
+	if !ok || !service.CompositeDecisionAmbiguous(decision) {
+		return nil
+	}
+	if apiKey.Group != nil && apiKey.Group.IsSubscriptionType() && subscription != nil {
+		return nil
+	}
+	if h.billingCacheService == nil || apiKey.User == nil {
+		return nil
+	}
+	return h.billingCacheService.CheckUserPlatformQuotaEligibility(
+		c.Request.Context(), apiKey.User.ID, account.Platform,
+	)
+}
+
 func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKey) bool {
 	if apiKey == nil || apiKey.Group == nil {
 		return true
@@ -351,11 +407,20 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 	// composite 分组解析到 grok/CN/OpenCode Go/codebuddy/muse/devin 目标时与对应独立分组同语义豁免；
 	// 解析到 openai 目标则受 composite 分组自身的可配置开关控制。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
-		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
-			(platform == service.PlatformGrok || service.IsCNProvider(platform) ||
-				platform == service.PlatformOther || platform == service.PlatformMuse ||
-				platform == service.PlatformCodeBuddy || platform == service.PlatformDevin ||
-				service.IsMultiProtocolAPIKeyProvider(platform)) {
+		ctx := c.Request.Context()
+		// 同链歧义：decision 的代表平台不能代表整条供给链，按 SupplyPlatforms 判定——
+		// 任一供给平台属于豁免集合即放行，避免代表平台为 openai 时误拦真实 grok/CN 供给。
+		if decision, ok := service.CompositeRouteDecisionFromContext(ctx); ok &&
+			service.CompositeDecisionAmbiguous(decision) {
+			for _, supply := range decision.SupplyPlatforms {
+				if openAIMessagesDispatchExemptPlatform(supply) {
+					return true
+				}
+			}
+		}
+		// 已收敛到单一目标平台：沿用原豁免判定（改用同一 helper，语义不变）。
+		if platform, ok := service.ResolvedTargetPlatformFromContext(ctx); ok &&
+			openAIMessagesDispatchExemptPlatform(platform) {
 			return true
 		}
 	}
@@ -391,6 +456,42 @@ func isResponsesWebSocketCompositePlatform(platform string) bool {
 	default:
 		return false
 	}
+}
+
+// resolveResponsesWSCompositeDecision 解析 Responses WS 首帧的 composite 决策：
+// 先按 responses 端点解析以保留显式 route 的匹配语义；命中显式 route 则直接采用。
+// 否则按 responses_ws 端点再解析一次，用其 ownership/chain 资格筛出仅 openai/grok
+// 可服务的供给；二者都不可用时返回空决策，由调用方按既有策略拒绝（不会让
+// responses 端点的 anthropic/gemini 供给混入 WS 入口）。
+func resolveResponsesWSCompositeDecision(ctx context.Context, resolver *service.CompositeRouteResolver, groupID int64, model string) (service.CompositeRouteDecision, error) {
+	explicit, err := resolver.Resolve(ctx, groupID, model, service.CompositeRouteEndpointResponses)
+	if err != nil {
+		return service.CompositeRouteDecision{}, err
+	}
+	if explicit.Matched && explicit.Source == service.CompositeRouteSourceExplicit {
+		return explicit, nil
+	}
+	wsDecision, err := resolver.Resolve(ctx, groupID, model, service.CompositeEndpointResponsesWS)
+	if err != nil {
+		return service.CompositeRouteDecision{}, err
+	}
+	if wsDecision.Matched {
+		return wsDecision, nil
+	}
+	return service.CompositeRouteDecision{}, nil
+}
+
+// compositeWSRequiredTransport 决定 Responses WS 入口选账号所需的 transport。
+// composite 多平台供给由调度器逐账号判定（OpenAI 走 WS ingress、Grok 走 HTTPSSE），
+// 故使用统一的新值；其余路径保持既有选择：独立 grok 分组走 HTTPSSE，其余走 WSv2 ingress。
+func compositeWSRequiredTransport(decision service.CompositeRouteDecision, requestPlatform string) service.OpenAIUpstreamTransport {
+	if decision.Matched && len(decision.SupplyAccounts) > 0 && len(decision.SupplyPlatforms) > 1 {
+		return service.OpenAIUpstreamTransportResponsesWSOrGrokHTTP
+	}
+	if requestPlatform == service.PlatformGrok {
+		return service.OpenAIUpstreamTransportHTTPSSE
+	}
+	return service.OpenAIUpstreamTransportResponsesWebsocketV2Ingress
 }
 
 // NewOpenAIGatewayHandler creates a new OpenAIGatewayHandler
@@ -706,6 +807,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var lastPlatformQuotaErr error
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
 	// 本次请求内已整体排除过的上游主机（审核拒绝按主机生效，同源只查一次）。
@@ -788,6 +890,17 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				reqLog.Info("openai.account_select_aborted_client_disconnected", zap.Error(err))
 				return
 			}
+			if lastPlatformQuotaErr != nil {
+				// 候选因实际平台配额耗尽被逐一排除至耗尽：按计费错误写出，不被
+				// "无可用账号" 掩盖。计费错误已含 HTTP 状态/错误码/Retry-After。
+				reqLog.Info("openai.platform_quota_exhausted", zap.Error(lastPlatformQuotaErr))
+				status, code, message, retryAfter := billingErrorDetails(lastPlatformQuotaErr)
+				if retryAfter > 0 {
+					c.Header("Retry-After", strconv.Itoa(retryAfter))
+				}
+				h.handleStreamingAwareError(c, status, code, message, streamStarted)
+				return
+			}
 			reqLog.Warn("openai.account_select_failed",
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
@@ -837,6 +950,22 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
+		// composite 同链歧义：选号后按实际账号平台补检 user×platform 配额。
+		// 失败仅排除该账号并重选（释放槽位/不处罚账号），耗尽时由上方错误分支按计费错误写出。
+		if quotaErr := h.checkCompositeSelectedPlatformQuota(c, apiKey, subscription, account); quotaErr != nil {
+			lastPlatformQuotaErr = quotaErr
+			failedAccountIDs[account.ID] = struct{}{}
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			reqLog.Info("openai.account_skipped_platform_quota",
+				zap.Int64("account_id", account.ID),
+				zap.String("platform", account.Platform),
+				zap.Error(quotaErr),
+			)
+			continue
+		}
 		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !account.IsOpenAIApiKey() {
 			// The public Responses HTTP API supports previous_response_id on API-key
 			// accounts. OAuth/SetupToken upstreams do not, so keep searching instead
@@ -1523,6 +1652,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var lastPlatformQuotaErr error
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	effectiveMappedModel := preferredMappedModel
 	// 本次请求内已整体排除过的上游主机（审核拒绝按主机生效，同源只查一次）。
@@ -1603,6 +1733,17 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				reqLog.Info("openai_messages.account_select_aborted_client_disconnected", zap.Error(err))
 				return
 			}
+			if lastPlatformQuotaErr != nil {
+				// 候选因实际平台配额耗尽被逐一排除至耗尽：按计费错误写出，不被
+				// "无可用账号" 掩盖。计费错误已含 HTTP 状态/错误码/Retry-After。
+				reqLog.Info("openai_messages.platform_quota_exhausted", zap.Error(lastPlatformQuotaErr))
+				status, code, message, retryAfter := billingErrorDetails(lastPlatformQuotaErr)
+				if retryAfter > 0 {
+					c.Header("Retry-After", strconv.Itoa(retryAfter))
+				}
+				h.anthropicStreamingAwareError(c, status, code, message, streamStarted)
+				return
+			}
 			reqLog.Warn("openai_messages.account_select_failed",
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
@@ -1637,6 +1778,22 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			return
 		}
 		account := selection.Account
+		// composite 同链歧义：选号后按实际账号平台补检 user×platform 配额。
+		// 失败仅排除该账号并重选（释放槽位/不处罚账号），耗尽时由上方错误分支按计费错误写出。
+		if quotaErr := h.checkCompositeSelectedPlatformQuota(c, apiKey, subscription, account); quotaErr != nil {
+			lastPlatformQuotaErr = quotaErr
+			failedAccountIDs[account.ID] = struct{}{}
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			reqLog.Info("openai_messages.account_skipped_platform_quota",
+				zap.Int64("account_id", account.ID),
+				zap.String("platform", account.Platform),
+				zap.Error(quotaErr),
+			)
+			continue
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai_messages.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		_ = scheduleDecision
@@ -2817,6 +2974,10 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	// 门只存在于调度栈的局部 ctx，必须经选号结果重放到本函数的 ctx 上。
 	ctx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
 	account := selection.Account
+	// C9：选号成功后写回实际账号平台（仅 composite 同链歧义生效，其余路径 no-op）。
+	// 本函数是 ChatCompletions/Responses/Messages 三个文本入口共享的选号后处理点，
+	// 调用方在返回后才读取 QuotaPlatform/usage，故此处写回覆盖本次尝试的全部计量。
+	applyCompositeSelectedAccountPlatform(c, account)
 	if selection.Acquired {
 		latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
 		if vetoed {
@@ -3023,21 +3184,20 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// Keep the client model in the frame for admission, response identity and usage.
 	// Apply the resolved upstream model through MapRequestModel on every turn.
 	wsRouteModel := reqModel
+	var wsCompositeDecision service.CompositeRouteDecision
 	if apiKey.Group != nil && apiKey.Group.Platform == service.PlatformComposite {
-		decision, resolveErr := h.compositeResolver.Resolve(c.Request.Context(), apiKey.Group.ID, reqModel, service.CompositeRouteEndpointResponses)
+		decision, resolveErr := resolveResponsesWSCompositeDecision(c.Request.Context(), h.compositeResolver, apiKey.Group.ID, reqModel)
 		if resolveErr != nil {
 			reqLog.Error("openai.websocket_composite_route_failed", zap.Error(resolveErr))
 			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, infraerrors.CompositeModelRouteFailed)
 			return
 		}
-		if decision.OAuthAmbiguous() {
-			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
-			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, decision.AmbiguousMessage())
-			return
-		}
 		if decision.Matched {
+			wsCompositeDecision = decision
 			c.Request = c.Request.WithContext(service.WithCompositeRouteDecision(c.Request.Context(), decision))
-			wsRouteModel = decision.UpstreamModel
+			if decision.UpstreamModel != "" {
+				wsRouteModel = decision.UpstreamModel
+			}
 		}
 	}
 	ctx = c.Request.Context()
@@ -3178,10 +3338,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 
 	requestPlatform := openAICompatibleRequestPlatform(ctx, apiKey)
-	requiredTransport := service.OpenAIUpstreamTransportResponsesWebsocketV2Ingress
-	if requestPlatform == service.PlatformGrok {
-		requiredTransport = service.OpenAIUpstreamTransportHTTPSSE
-	}
+	requiredTransport := compositeWSRequiredTransport(wsCompositeDecision, requestPlatform)
 	if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
 		reqLog.Info("openai.websocket_billing_eligibility_check_failed", zap.Error(err))
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.WSBillingCheckFailed)

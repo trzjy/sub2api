@@ -14,25 +14,7 @@ const (
 	// CompositeRouteReasonAmbiguous marks a model whose explicit account
 	// mappings span several provider platforms.
 	CompositeRouteReasonAmbiguous = "model is exposed by multiple provider platforms"
-	// CompositeRouteReasonOAuthAmbiguous is the ambiguous case where a claimant
-	// holds an OAuth / setup-token credential that only the OpenAI gateway can
-	// carry, and the model-name fallback would also pick an OpenAI-gateway
-	// platform. The unresolved request would land in the Anthropic gateway
-	// handler and select those credentials, so this group misconfiguration must
-	// be rejected instead of guessing a platform from the model name.
-	CompositeRouteReasonOAuthAmbiguous = "model is exposed by multiple provider platforms including OAuth accounts"
 )
-
-// OAuthAmbiguous reports whether the request must be rejected because the
-// cross-platform ownership involves OpenAI-gateway OAuth credentials.
-func (d CompositeRouteDecision) OAuthAmbiguous() bool {
-	return !d.Matched && d.Reason == CompositeRouteReasonOAuthAmbiguous
-}
-
-// AmbiguousMessage is the client-facing rejection for an OAuthAmbiguous decision.
-func (d CompositeRouteDecision) AmbiguousMessage() string {
-	return fmt.Sprintf("Model %q is mapped on multiple provider platforms in this group; configure an explicit composite route", d.PublicModel)
-}
 
 type CompositeRouteResolver struct {
 	repo                   CompositeModelRouteRepository
@@ -95,6 +77,117 @@ func filterSystemOneRouteModels(routes []CompositeModelRoute, models []string, e
 	return filtered
 }
 
+// compositeDefaultChain 返回平台默认的执行/入口链：按 domain 登记的 Gateway 映射，
+// antigravity 归入 anthropic；other 与未知平台默认落 openai。
+func compositeDefaultChain(platform string) string {
+	spec, ok := domain.LookupPlatform(platform)
+	if !ok {
+		return CompositeChainOpenAI
+	}
+	switch spec.Gateway {
+	case domain.PlatformGatewayAnthropic, domain.PlatformGatewayAntigravity:
+		return CompositeChainAnthropic
+	case domain.PlatformGatewayGemini:
+		return CompositeChainGemini
+	default:
+		return CompositeChainOpenAI
+	}
+}
+
+// compositeEntryChainForEndpoint 返回多链歧义时按端点选择的入口链：messages /
+// count_tokens 与 systemone 走 anthropic，gemini 走 gemini；chat_completions /
+// responses 若 eligible 链含 anthropic 或 gemini 则走 anthropic（OpenAI handler
+// 未装配 gemini 转发服务，无法承接 Gemini 账号），否则走 openai；其余端点走 openai。
+func compositeEntryChainForEndpoint(endpoint string, chains []string) string {
+	switch endpoint {
+	case CompositeEndpointMessages, CompositeEndpointCountTokens, CompositeEndpointSystemOne:
+		return CompositeChainAnthropic
+	case CompositeEndpointGemini:
+		return CompositeChainGemini
+	case CompositeEndpointChatCompletions, CompositeEndpointResponses:
+		for _, chain := range chains {
+			if chain == CompositeChainAnthropic || chain == CompositeChainGemini {
+				return CompositeChainAnthropic
+			}
+		}
+		return CompositeChainOpenAI
+	default:
+		return CompositeChainOpenAI
+	}
+}
+
+// resolveOwnershipSupply 按账号 × 端点资格从 ownership 的声明方摘要中筛出本端点
+// 可服务的账号，并据此决定入口链与目标平台。每个账号按 openai/anthropic/gemini
+// 顺序取第一条可服务的链；不要求所有账号共享同一条链（允许混链）。
+func resolveOwnershipSupply(decision CompositeRouteDecision, endpoint string, ownership CompositeModelOwnership) CompositeRouteDecision {
+	eligible := make([]CompositeOwnershipClaimant, 0, len(ownership.Claimants))
+	chainsSeen := map[string]struct{}{}
+	platformsSeen := map[string]struct{}{}
+	chains := []string{}
+	eligiblePlatforms := []string{}
+	for _, claimant := range ownership.Claimants {
+		var matchedChain string
+		for _, chain := range []string{CompositeChainOpenAI, CompositeChainAnthropic, CompositeChainGemini} {
+			if _, ok := CompositeClaimantChainPath(chain, endpoint, claimant); ok {
+				matchedChain = chain
+				break
+			}
+		}
+		if matchedChain == "" {
+			continue
+		}
+		eligible = append(eligible, claimant)
+		if _, seen := chainsSeen[matchedChain]; !seen {
+			chainsSeen[matchedChain] = struct{}{}
+			chains = append(chains, matchedChain)
+		}
+		if _, seen := platformsSeen[claimant.Platform]; !seen {
+			platformsSeen[claimant.Platform] = struct{}{}
+			eligiblePlatforms = append(eligiblePlatforms, claimant.Platform)
+		}
+	}
+	if len(eligible) == 0 {
+		decision.Matched = false
+		decision.TargetPlatform = ""
+		decision.SupplyPlatforms = ownership.Platforms
+		decision.Reason = "no declared account can serve this endpoint"
+		decision.SupplyAccounts = nil
+		return decision
+	}
+	sort.Strings(eligiblePlatforms)
+	sort.Strings(chains)
+
+	decision.Matched = true
+	decision.Source = CompositeRouteSourceAccount
+	decision.UpstreamModel = decision.PublicModel
+	decision.SupplyPlatforms = eligiblePlatforms
+	decision.SupplyAccounts = eligible
+	decision.QualifyingChains = chains
+
+	switch {
+	case len(eligiblePlatforms) == 1:
+		decision.TargetPlatform = eligiblePlatforms[0]
+		decision.ServiceChain = compositeDefaultChain(eligiblePlatforms[0])
+		decision.Reason = ""
+	case len(chains) == 1:
+		switch chains[0] {
+		case CompositeChainAnthropic:
+			decision.TargetPlatform = PlatformAnthropic
+		case CompositeChainGemini:
+			decision.TargetPlatform = PlatformGemini
+		default:
+			decision.TargetPlatform = PlatformOpenAI
+		}
+		decision.ServiceChain = chains[0]
+		decision.Reason = CompositeRouteReasonAmbiguous
+	default:
+		decision.TargetPlatform = ""
+		decision.ServiceChain = compositeEntryChainForEndpoint(endpoint, chains)
+		decision.Reason = CompositeRouteReasonAmbiguous
+	}
+	return decision
+}
+
 func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, model, endpoint string) (CompositeRouteDecision, error) {
 	model = strings.TrimSpace(model)
 	endpoint = normalizeCompositeRouteEndpoint(endpoint)
@@ -119,14 +212,16 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 				upstreamModel = model
 			}
 			return CompositeRouteDecision{
-				Matched:        true,
-				Source:         CompositeRouteSourceExplicit,
-				GroupID:        groupID,
-				PublicModel:    model,
-				TargetPlatform: route.TargetPlatform,
-				UpstreamModel:  upstreamModel,
-				Endpoint:       endpoint,
-				Route:          &route,
+				Matched:         true,
+				Source:          CompositeRouteSourceExplicit,
+				GroupID:         groupID,
+				PublicModel:     model,
+				TargetPlatform:  route.TargetPlatform,
+				UpstreamModel:   upstreamModel,
+				Endpoint:        endpoint,
+				Route:           &route,
+				SupplyPlatforms: []string{route.TargetPlatform},
+				ServiceChain:    compositeDefaultChain(route.TargetPlatform),
 			}, nil
 		}
 	}
@@ -139,41 +234,22 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 			if _, detectable := DetectModelPlatform(model); !detectable {
 				return decision, fmt.Errorf("resolve account model ownership: %w", err)
 			}
-		} else if ownership.Ambiguous {
-			decision.Reason = CompositeRouteReasonAmbiguous
-			// 未解析的请求由下游 handler 按模型名前缀兜底选平台；只有兜底落在
-			// OpenAI 网关族时，OpenAI 网关 OAuth 声明方才会被误送进 Anthropic 管线。
-			if guessed, ok := DetectModelPlatform(model); ok && ownership.OpenAIGatewayOAuthClaimed && domain.UsesOpenAIGateway(guessed) {
-				decision.Reason = CompositeRouteReasonOAuthAmbiguous
-			}
-			return decision, nil
-		} else if ownership.Matched {
-			platform := strings.TrimSpace(ownership.TargetPlatform)
-			if !isCompositeOwnableAccountPlatform(platform) {
-				decision.Reason = "account model ownership has no concrete target platform"
-				return decision, nil
-			}
-			return CompositeRouteDecision{
-				Matched:        true,
-				Source:         CompositeRouteSourceAccount,
-				GroupID:        groupID,
-				PublicModel:    model,
-				TargetPlatform: platform,
-				UpstreamModel:  model,
-				Endpoint:       endpoint,
-			}, nil
+		} else if ownership.Ambiguous || ownership.Matched {
+			return resolveOwnershipSupply(decision, endpoint, ownership), nil
 		}
 	}
 
 	if platform, ok := DetectModelPlatform(model); ok {
 		return CompositeRouteDecision{
-			Matched:        true,
-			Source:         CompositeRouteSourceDetector,
-			GroupID:        groupID,
-			PublicModel:    model,
-			TargetPlatform: platform,
-			UpstreamModel:  model,
-			Endpoint:       endpoint,
+			Matched:         true,
+			Source:          CompositeRouteSourceDetector,
+			GroupID:         groupID,
+			PublicModel:     model,
+			TargetPlatform:  platform,
+			UpstreamModel:   model,
+			Endpoint:        endpoint,
+			SupplyPlatforms: []string{platform},
+			ServiceChain:    compositeDefaultChain(platform),
 		}, nil
 	}
 	decision.Reason = "no explicit route or built-in detector match"
