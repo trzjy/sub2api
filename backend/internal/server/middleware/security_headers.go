@@ -18,6 +18,8 @@ const (
 	NonceTemplate = "__CSP_NONCE__"
 	// CloudflareInsightsDomain is the domain for Cloudflare Web Analytics
 	CloudflareInsightsDomain = "https://static.cloudflareinsights.com"
+	// UmamiDomain is the Umami Cloud analytics script and collection endpoint.
+	UmamiDomain = "https://cloud.umami.is"
 	// TencentCaptchaDomain is the Tencent Captcha 2.0 Web SDK domain (Chinese mainland site).
 	TencentCaptchaDomain = "https://turing.captcha.qcloud.com"
 	// TencentCaptchaStaticDomain is the Tencent Captcha static asset domain.
@@ -57,6 +59,8 @@ var requiredCSPDirectiveValues = []struct {
 	// 因此这里只允许 'self' 不会使其他默认 DENY 的管理/API 页面可被嵌入。
 	{"frame-src", "'self'"},
 	{"script-src", CloudflareInsightsDomain},
+	{"script-src", UmamiDomain},
+	{"connect-src", UmamiDomain},
 	{"script-src", TencentCaptchaDomain},
 	{"frame-src", TencentCaptchaDomain},
 	{"style-src", TencentCaptchaStaticDomain},
