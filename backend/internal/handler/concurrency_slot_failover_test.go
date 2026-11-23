@@ -146,6 +146,7 @@ func TestAcquireAccountSlotForSelection(t *testing.T) {
 		require.NotNil(t, release)
 		require.Equal(t, 2, cache.accountAcquireCalls, "应先立即抢槽一次，再进入等待一次")
 		require.False(t, streamStarted, "准入等待阶段不得把 streamStarted 置真")
+		require.True(t, concurrencySlotWaitExhausted(c), "等待成功后也必须设置请求级等待耗尽标记，避免重选再次等待")
 		release()
 	})
 

@@ -574,12 +574,10 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		}
 
 		// 绑定只在转发成功之后写入（方案 §3.3-0/1）：选号期不再写绑定，
-		// 本次账号与既有绑定不一致时由利润门包装器覆盖。Cursor 分支的会话
-		// 转交/结算已有独立语义，此处不得重复写绑定。
-		if !isCursorPlatformAccount(account) {
-			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); err != nil {
-				reqLog.Warn("gateway.responses.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-			}
+		// 本次账号与既有绑定不一致时由利润门包装器覆盖。C25a：所有平台
+		// （含 Cursor）转发成功后都写绑定；Cursor 结算返回前亦经过此写入点。
+		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); err != nil {
+			reqLog.Warn("gateway.responses.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		}
 
 		// 6. Record usage

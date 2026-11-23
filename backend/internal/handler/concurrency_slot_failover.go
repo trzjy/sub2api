@@ -248,13 +248,16 @@ func (h *ConcurrencyHelper) AcquireAccountSlotForSelection(
 			}
 		}()
 
+		// 进入等待前即设置请求级等待耗尽标记：无论等待成功或失败，本次请求都算
+		// 「已等过一次」，后续候选只会做立即抢槽，不再重复完整等待。
+		// （终审：等待成功后未标记，利润终检否决重选会再次等待。）
+		markConcurrencySlotWaitExhausted(c)
+
 		waitRelease, waitErr := h.AcquireAccountSlotWithWaitTimeout(c, accountID, wp.MaxConcurrency, wp.Timeout, isStream, streamStarted)
 		if waitErr == nil && waitRelease != nil {
 			return waitRelease, false
 		}
-		// 等待失败：设置请求级标记，后续候选通过 concurrencySlotWaitExhausted(c)
-		// 读到 true 后只做立即抢槽，不再对每个候选重复完整等待。
-		markConcurrencySlotWaitExhausted(c)
+		// 等待失败：耗尽标记已在等待前设置，此处只返回 slotFull。
 		return nil, true
 	}
 
