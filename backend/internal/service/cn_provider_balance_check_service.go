@@ -129,7 +129,7 @@ type CNProviderBalanceCheckService struct {
 	// TODO(wire, 方案 §4.2)：wire.go 装配时调用 SetQuotaLifecycleHandover 注入
 	// CNQuotaLifecycleService，周期探测的耗尽确认/停调/告警即全量交给状态机。
 	quotaLifecycle cnQuotaLifecycleHandover
-	// webConsoleQuotaService Web 控制台额度采集链（compshare/sensenova/longcat）。
+	// webConsoleQuotaService Web 控制台额度采集链（compshare/longcat）。
 	// 可选注入；未注入时这三家上游不参与周期采集。
 	webConsoleQuotaService *WebConsoleQuotaService
 }

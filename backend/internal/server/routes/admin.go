@@ -658,7 +658,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.PUT("/:id/upstream-billing-probe", h.Admin.Account.SetUpstreamBillingProbeEnabled)
 		accounts.POST("/:id/upstream-billing-probe", h.Admin.Account.ProbeUpstreamBilling)
 		accounts.POST("/:id/request-size-scope", h.Admin.Account.SetRequestSizeScope)
-		// Web 控制台额度上游（compshare / sensenova / longcat）：
+		// Web 控制台额度上游（compshare/longcat）：
 		// 手动探测、发起本地浏览器交互登录、轮询登录状态。
 		// 路径与前端 `frontend/src/api/admin/cnProviders.ts` 冻结契约一致（/admin/accounts/:id/...）。
 		accounts.POST("/:id/web-console-quota/probe", h.Admin.CNProvider.ProbeWebConsoleQuota)

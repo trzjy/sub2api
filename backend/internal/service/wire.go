@@ -518,7 +518,7 @@ func ProvideCNProviderBalanceService(
 	return NewCNProviderBalanceService(accountRepo, proxyRepo, httpUpstream, cfg)
 }
 
-// ProvideWebConsoleQuotaService 构造 Web 控制台额度采集服务（compshare/sensenova/longcat）。
+// ProvideWebConsoleQuotaService 构造 Web 控制台额度采集服务（compshare/longcat）。
 func ProvideWebConsoleQuotaService(
 	accountRepo AccountRepository,
 	cfg *config.Config,
@@ -666,7 +666,7 @@ func ProvideCNProviderBalanceCheckService(
 	// D-TH-04：周期链与手动探针链共用同一 TH 探测实例（同一 6h 会话缓存，
 	// 登录次数减半；懒装配分支因已注入不再触发）。
 	svc.SetTokenHarborPassService(quotaService.THPassService())
-	// Web 控制台额度采集链注入（compshare/sensenova/longcat）。
+	// Web 控制台额度采集链注入（compshare/longcat）。
 	if webConsoleQuotaService != nil {
 		svc.SetWebConsoleQuotaService(webConsoleQuotaService)
 	}

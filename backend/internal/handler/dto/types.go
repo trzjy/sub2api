@@ -419,7 +419,7 @@ type Account struct {
 	BalanceProbeCapable bool `json:"balance_probe_capable,omitempty"`
 	// WebConsoleQuotaProvider 是 service.ResolveWebConsoleQuotaProvider 的只读投影
 	// （唯一事实源在 service 层）：
-	//   "compshare" | "sensenova" | "longcat"；非该链路账号为空并因 omitempty 省略。
+	//   "compshare" | "longcat"；非该链路账号为空并因 omitempty 省略。
 	// 前端据此判定是否渲染 WebConsoleQuotaCell 与控制台凭据区块。
 	WebConsoleQuotaProvider string `json:"web_console_quota_provider,omitempty"`
 	// WebConsoleLoginModes 是该上游实际支持的登录方式（service.ResolveWebConsoleQuotaLoginModes
@@ -556,7 +556,7 @@ type AccountListItem struct {
 	BalanceProbeCapable bool `json:"balance_probe_capable,omitempty"`
 	// WebConsoleQuotaProvider 是 service.ResolveWebConsoleQuotaProvider 的只读投影
 	// （唯一事实源在 service 层）：
-	//   "compshare" | "sensenova" | "longcat"；非该链路账号为空并因 omitempty 省略。
+	//   "compshare" | "longcat"；非该链路账号为空并因 omitempty 省略。
 	// 前端据此判定是否渲染 WebConsoleQuotaCell 与控制台凭据区块。
 	WebConsoleQuotaProvider string `json:"web_console_quota_provider,omitempty"`
 	// WebConsoleLoginModes 与完整 Account DTO 同字段同语义（该上游支持的登录方式）。

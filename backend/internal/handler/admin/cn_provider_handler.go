@@ -31,7 +31,7 @@ type CNProviderHandler struct {
 	quotaService   *service.CNProviderQuotaService
 	balanceService *service.CNProviderBalanceService
 
-	// webConsoleQuotaService / webConsoleAuthService 为 Web 控制台额度链（compshare/sensenova/longcat）。
+	// webConsoleQuotaService / webConsoleAuthService 为 Web 控制台额度链（compshare/longcat）。
 	// 用 Setter 注入，不改既有构造函数签名，避免破坏 wire_gen 既有调用。
 	webConsoleQuotaService *service.WebConsoleQuotaService
 	webConsoleAuthService  *service.WebConsoleAuthService

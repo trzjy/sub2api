@@ -1229,7 +1229,7 @@ func TestRelayProbeTargetURLZhipuExplicitURLEligible(t *testing.T) {
 	require.Equal(t, CNBalanceKindBalance, repo.extraWrites[0]["zhipu_balance_kind"])
 }
 
-// CARD-WCQ-14：Web 控制台额度上游（compshare / sensenova / longcat）不再进入
+// CARD-WCQ-14：Web 控制台额度上游（compshare / longcat）不再进入
 // relay /v1/usage 选路，交由 WebConsoleQuotaService 接管。对这三类 base_url，
 // 无论 balance_probe 是否启用，RelayProbeTargetURL 都必须返回 ("", false)。
 // 同时回归保护：TH / Kira 专用路径优先语义不变。

@@ -279,7 +279,7 @@ func RelayProbeTargetURL(account *Account) (string, bool) {
 	if accountIsTokenHarborBaseURL(account) || accountIsKiraBaseURL(account) {
 		return "", false
 	}
-	// Web 控制台额度上游（compshare / sensenova / longcat）不走 relay /v1/usage 选路：
+	// Web 控制台额度上游（compshare/longcat）不走 relay /v1/usage 选路：
 	// 其用量由 WebConsoleQuotaService 经控制台抓取，通用余额端点在线上只会返回
 	// 429/403（生产实证：cp.compshare.cn 808/811/817 持续 429）。
 	// 与 TH / Kira 同构的专用路径优先语义，用户裁定 2026-11-11。
