@@ -212,7 +212,7 @@ func TestCursorConnectSessionDoesNotDispatchToDataPlane(t *testing.T) {
 func TestCursorProbeModelFallbackAvoidsOauthOnlyKey(t *testing.T) {
 	svc := &AccountHealthRecoveryProbeService{}
 	// 触发模型记为 claude-opus-5-5（只有 oauth 型才有的键），但本账号（apikey 型）的
-	// model_mapping 只有全体都有的 gpt-6.1-sol / claude-fable-5-1。
+	// model_mapping 只有 gpt-6.1-sol / claude-fable-5-1。
 	acc := cursorProbeAccount(71, AccountTypeAPIKey, "https://kn-cy.example/v1", map[string]string{
 		"gpt-6.1-sol":      "gpt-6.1-sol-out",
 		"claude-fable-5-1": "claude-fable-5-1-out",
@@ -230,13 +230,28 @@ func TestCursorProbeModelFallbackAvoidsOauthOnlyKey(t *testing.T) {
 
 	key := svc.cursorProbeModelKey(acc)
 	require.NotEqual(t, "claude-opus-5-5", key, "不得落到只有 oauth 型才有的键")
+	// 回落键必须来自账号自己维护的模型名单（不再是硬编码猜名字）。
 	require.Contains(t, []string{"gpt-6.1-sol", "claude-fable-5-1"}, key,
-		"回落必须选全体账号都有的键（gpt-6.1-sol / claude-fable-5-1 之一）")
+		"回落必须选账号 model_mapping 里的键")
 
 	// 出站模型必须能解析到真实上游名（值，而非键名）。
 	outbound := svc.cursorProbeOutboundModel(acc)
 	require.Contains(t, []string{"gpt-6.1-sol-out", "claude-fable-5-1-out"}, outbound,
 		"出站模型必须是 ResolveMappedModel 的值")
+}
+
+// TestCursorProbeModelKeyUsesAccountModelList 验证 cursor 分支不再用硬编码键名猜模型：
+// 账号 model_mapping 里有哪个键就挑哪个（按字典序可复现），哪怕它既不是
+// gpt-6.1-sol 也不是 claude-fable-5-1。
+func TestCursorProbeModelKeyUsesAccountModelList(t *testing.T) {
+	svc := &AccountHealthRecoveryProbeService{}
+	acc := cursorProbeAccount(72, AccountTypeAPIKey, "https://kn-cy.example/v1", map[string]string{
+		"codex-auto-review": "codex-auto-review-out",
+	})
+	key := svc.cursorProbeModelKey(acc)
+	require.Equal(t, "codex-auto-review", key,
+		"必须挑账号 model_mapping 里的键，不得回落到硬编码键名")
+	require.Equal(t, "codex-auto-review-out", svc.cursorProbeOutboundModel(acc))
 }
 
 // --- Done when #8：补探 burst 并发上限可核验（结构 + 行为）---

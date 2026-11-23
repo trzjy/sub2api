@@ -1002,10 +1002,9 @@ func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, account 
 func (s *AccountTestService) testModelRoutedAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	testModelID := strings.TrimSpace(modelID)
 	if testModelID == "" {
-		testModelID = account.providerDefaultTestModel()
-	}
-	if testModelID == "" {
-		testModelID = openai.DefaultTestModel
+		// 账号自己维护的模型名单（唯一事实源）。不再回落到 openai.DefaultTestModel
+		// （= "gpt-5.4"）：那个模型只在 OpenAI 官方上游存在，打第三方上游恒 404。
+		testModelID = pickProbeModelUpstream(probeModelCandidates(account))
 	}
 	testModelID = account.GetMappedModel(testModelID)
 	if account.IsOpenCodeGo() && IsOpenCodeUnsupportedModel(testModelID) {
@@ -1043,10 +1042,9 @@ func (s *AccountTestService) testModelRoutedResponsesConnection(c *gin.Context, 
 func (s *AccountTestService) testCNProviderChatCompletionsConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	testModelID := strings.TrimSpace(modelID)
 	if testModelID == "" {
-		testModelID = account.providerDefaultTestModel()
-	}
-	if testModelID == "" {
-		testModelID = openai.DefaultTestModel
+		// 账号自己维护的模型名单（唯一事实源）。不再回落到 openai.DefaultTestModel
+		// （= "gpt-5.4"）：国产供应商上游没有这个模型，用它探测恒得 404。
+		testModelID = pickProbeModelUpstream(probeModelCandidates(account))
 	}
 	testModelID = account.GetMappedModel(testModelID)
 
@@ -1822,10 +1820,13 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	ctx := c.Request.Context()
 	mode = normalizeAccountTestMode(mode)
 
-	// Default to openai.DefaultTestModel for OpenAI testing
+	// Default to the account's own model list (unique source of truth).
+	// Never fall back to openai.DefaultTestModel (= "gpt-5.4"): that model only
+	// exists on the OpenAI official upstream, so probing a third-party upstream
+	// with it always yields 404.
 	testModelID := modelID
 	if testModelID == "" {
-		testModelID = openai.DefaultTestModel
+		testModelID = pickProbeModelUpstream(probeModelCandidates(account))
 	}
 
 	// Align test routing with gateway behavior: OpenAI accounts apply normal

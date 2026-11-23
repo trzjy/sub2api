@@ -24,7 +24,6 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/stretchr/testify/require"
@@ -74,13 +73,16 @@ func TestProbeModelForAccount(t *testing.T) {
 	withModel := parkedBreakerAccountWithState(1, 0, 0, "cn-upstream-model")
 	require.Equal(t, "cn-upstream-model", svc.probeModelForAccount(withModel))
 
-	// 2) state 无模型 → 平台默认测试模型；无 profile 时回落全局默认。
-	noModel := parkedBreakerAccount(2, 0)
-	require.Equal(t, openai.DefaultTestModel, svc.probeModelForAccount(noModel))
+	// 2) state 无模型 → 账号自己维护的模型名单（唯一事实源）。
+	withMapping := &Account{ID: 2, Credentials: map[string]any{
+		"model_mapping": map[string]any{"client-a": "upstream-a"},
+	}}
+	require.Equal(t, "upstream-a", svc.probeModelForAccount(withMapping))
 
-	// 3) reason 无法解析 → 仍回落默认模型，不得空手构造请求。
+	// 3) reason 无法解析且账号没维护模型名单 → 空模型（调用方按降级处理），
+	//    绝不回落任何硬编码模型（gpt-5.4 只在 OpenAI 官方上游存在，打第三方恒 404）。
 	plain := &Account{ID: 3}
-	require.Equal(t, openai.DefaultTestModel, svc.probeModelForAccount(plain))
+	require.Empty(t, svc.probeModelForAccount(plain))
 
 	// 4) nil 账号 → 空模型（调用方按降级处理）。
 	require.Empty(t, svc.probeModelForAccount(nil))
@@ -109,7 +111,12 @@ func TestProbeUpstreamDataPlaneUsesChatCompletionsAndJudgesBody(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
 	cand := parkedBreakerAccount(21, 0)
-	cand.Credentials = map[string]any{"api_key": "sk-probe-test"}
+	// 夹具必须配账号自己维护的模型名单：探针只探账号提供的实际模型，
+	// 没有模型 ⇒ 探针拿不到模型 ⇒ 无从验证数据面请求形态。
+	cand.Credentials = map[string]any{
+		"api_key":       "sk-probe-test",
+		"model_mapping": map[string]any{"probe-model": "probe-upstream-model"},
+	}
 	cand.Extra = map[string]any{openai_compat.ExtraKeyResponsesSupported: false}
 	repo := &probeRepoMock{
 		accounts:   map[int64]*Account{21: cand},
@@ -158,8 +165,9 @@ func TestProbeDataPlaneKeepsConcreteEndpointBaseURL(t *testing.T) {
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
 	cand := parkedBreakerAccount(22, 0)
 	cand.Credentials = map[string]any{
-		"api_key":  "sk-probe-test",
-		"base_url": "https://example.com/v1/chat/completions",
+		"api_key":       "sk-probe-test",
+		"base_url":      "https://example.com/v1/chat/completions",
+		"model_mapping": map[string]any{"probe-model": "probe-upstream-model"},
 	}
 	// 前提校验：不带能力标记时 ShouldUseResponsesAPI 确实会返回 true，
 	// 否则这条用例就退化成"本来就选 chat"，测不到派生逻辑。
@@ -220,7 +228,12 @@ func TestProbeUpstreamDataPlaneTransportFailureIsUnhealthy(t *testing.T) {
 		httpUpstream: &failingProbeUpstream{err: errors.New("dial tcp: connection refused")},
 	}
 	cand := parkedBreakerAccount(22, 0)
-	cand.Credentials = map[string]any{"api_key": "sk-probe-test"}
+	// 夹具必须配账号自己维护的模型名单：探针只探账号提供的实际模型，
+	// 没有模型 ⇒ 探针拿不到模型 ⇒ 无从验证"传输失败判不健康"这一语义。
+	cand.Credentials = map[string]any{
+		"api_key":       "sk-probe-test",
+		"model_mapping": map[string]any{"probe-model": "probe-upstream-model"},
+	}
 
 	ok, err := p.probeUpstreamDataPlane(context.Background(), cand)
 	require.NoError(t, err, "传输失败不是降级：不得返回 error")

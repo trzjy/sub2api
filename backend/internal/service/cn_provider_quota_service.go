@@ -678,49 +678,21 @@ func kimiQuotaURL(baseURL string) string {
 // （{base}/v3/chat/completions）发一次最小请求——但注意该响应不携带任何 x-ratelimit-*
 // 头（生产实测），故只能落周/月确定性重置时间，用量档不可得。
 
-// volcanoQuotaProbeDefaultModel 是火山探测回落模型（model_mapping 为空时使用）。
-// 必须取方舟官方支持的通用模型 ID（与火山订阅文档候选一致，如 doubao-seed-2.0-lite /
-// doubao-seed-2.0-mini / doubao-seed-2.1-turbo）；基础版 doubao-seed-2.0 不在官方
-// 候选列表中，回落会得到 model-not-found 导致探测失败。Coding/Agent Plan 账号默认可用。
-const volcanoQuotaProbeDefaultModel = "doubao-seed-2.0-lite"
-
-// volcanoProbeModels 返回探测候选模型（按优先级）：账号 model_mapping 中所有非空上游模型
-// （按 key 确定性排序，避免随机命中不可用模型）后追加默认回落模型，去重。探测时依次尝试，
-// 某个 mapping 模型在当前方舟套餐不可用（model-not-found）时回落到下一个候选，保证最小请求
-// 总能拿到 200/429 与限流响应头（外审 P2）。
+// volcanoProbeModels 返回探测候选模型：账号自己维护的模型名单（credentials.model_mapping）
+// 解析出的全部上游模型（唯一事实源）。探测时依次尝试，某个 mapping 模型在当前方舟套餐
+// 不可用（model-not-found）时回落到下一个候选，保证最小请求总能拿到 200/429 与限流响应头。
+//
+// 这里不再无条件追加 doubao-seed-2.0-lite 兜底：那个模型名是"猜上游有什么"，
+// 猜错了只会多打一次必然失败的请求；账号配了什么模型就探什么。
 func volcanoProbeModels(account *Account) []string {
-	seen := make(map[string]struct{})
-	var models []string
-	if account != nil {
-		if m := account.GetModelMapping(); len(m) > 0 {
-			// model_mapping 为 map，遍历顺序随机；按 key 确定性排序后取所有非空值，
-			// 避免每次探测随机选模型（可能命中不可用模型导致探针失败）。
-			keys := make([]string, 0, len(m))
-			for k := range m {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				if model := strings.TrimSpace(m[k]); model != "" {
-					if _, dup := seen[model]; !dup {
-						seen[model] = struct{}{}
-						models = append(models, model)
-					}
-				}
-			}
-		}
-	}
-	if _, dup := seen[volcanoQuotaProbeDefaultModel]; !dup {
-		models = append(models, volcanoQuotaProbeDefaultModel)
-	}
-	return models
+	return probeModelUpstreams(account)
 }
 
 // volcanoProbeModel 取首个候选（与 volcanoProbeModels()[0] 一致），供测试与单模型路径使用。
 func volcanoProbeModel(account *Account) string {
 	models := volcanoProbeModels(account)
 	if len(models) == 0 {
-		return volcanoQuotaProbeDefaultModel
+		return ""
 	}
 	return models[0]
 }

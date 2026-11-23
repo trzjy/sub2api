@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/stretchr/testify/require"
 )
@@ -23,6 +22,8 @@ func TestProbeOpenAIAPIKeyResponsesSupportUsesCodexProbeHeaders(t *testing.T) {
 		Credentials: map[string]any{
 			"api_key":  "sk-test",
 			"base_url": "https://compat-upstream.example/v1",
+			// 探测只探账号自己维护的模型：没有模型 ⇒ 不出站 ⇒ 无法验证请求头。
+			"model_mapping": map[string]any{"probe-model": "probe-upstream-model"},
 		},
 	}
 	repo := &snapshotUpdateAccountRepo{
@@ -70,7 +71,11 @@ func TestProbeOpenAIAPIKeyResponsesSupportCNProviders(t *testing.T) {
 			updateCalls := make(chan map[string]any, 1)
 			account := Account{
 				ID: tc.id, Platform: tc.platform, Type: AccountTypeAPIKey,
-				Credentials: map[string]any{"api_key": "sk-test", "api_protocol": tc.protocol},
+				Credentials: map[string]any{
+					"api_key":       "sk-test",
+					"api_protocol":  tc.protocol,
+					"model_mapping": map[string]any{"probe-model": "probe-upstream-model"},
+				},
 				Extra: map[string]any{
 					openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceResponses),
 				},
@@ -131,8 +136,10 @@ func TestResponsesProbeBodyHasFunctionCall(t *testing.T) {
 }
 
 func TestSelectResponsesProbeModel(t *testing.T) {
-	// No model_mapping -> fall back to DefaultTestModel (OpenAI official APIKey).
-	require.Equal(t, openai.DefaultTestModel, selectResponsesProbeModel(&Account{}))
+	// No model_mapping -> no candidate. Never fall back to DefaultTestModel
+	// (= "gpt-5.4"): that model only exists on the OpenAI official upstream, so
+	// probing a third-party upstream with it always yields 404.
+	require.Empty(t, selectResponsesProbeModel(&Account{}))
 
 	// model_mapping values are upstream models; pick first by sort for reproducibility.
 	acct := &Account{Credentials: map[string]any{
@@ -153,9 +160,9 @@ func TestSelectResponsesProbeModel(t *testing.T) {
 	}}
 	require.Equal(t, "real-model", selectResponsesProbeModel(acctWild))
 
-	// Only wildcard mappings -> DefaultTestModel.
+	// Only wildcard mappings -> no candidate (no hardcoded fallback).
 	acctAllWild := &Account{Credentials: map[string]any{
 		"model_mapping": map[string]any{"a": "gpt-*"},
 	}}
-	require.Equal(t, openai.DefaultTestModel, selectResponsesProbeModel(acctAllWild))
+	require.Empty(t, selectResponsesProbeModel(acctAllWild))
 }

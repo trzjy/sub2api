@@ -202,26 +202,14 @@ func openAIOAuthProbeCandidates(acc *Account, explicitModel string) []string {
 // **不做任何基于模型名形态的过滤**：名单里的模型名一律可用（管理员可自定义命名，
 // 例如 codex-auto-review 一类非 `gpt-` 命名的模型）。按名字形态丢弃候选会把
 // 「明明有可用模型」变成「无模型可探」⇒ 账号永远回不了池。
+//
+// 候选收集已收敛到全站唯一事实源（probeModelCandidates），本函数只做 OAuth 账号
+// 谓词过滤，避免与通用路径各挑各的。
 func openAIOAuthProbeMappingCandidates(acc *Account) []string {
-	mapping := acc.GetModelMapping()
-	candidates := make([]string, 0, len(mapping))
-	seen := make(map[string]struct{}, len(mapping))
-	for key := range mapping {
-		upstream, matched := acc.ResolveMappedModel(key)
-		upstream = strings.TrimSpace(upstream)
-		if !matched || upstream == "" || strings.Contains(upstream, "*") {
-			continue
-		}
-		if isOpenAIImageGenerationModel(upstream) {
-			continue
-		}
-		if _, dup := seen[upstream]; dup {
-			continue
-		}
-		seen[upstream] = struct{}{}
-		candidates = append(candidates, upstream)
+	if acc == nil || !isOpenAIOAuthProbeAccount(acc) {
+		return nil
 	}
-	return candidates
+	return probeModelUpstreams(acc)
 }
 
 // pickOpenAIOAuthProbeCandidate 在候选里挑一个模型：按字典序取首个以保证可复现

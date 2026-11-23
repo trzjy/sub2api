@@ -1150,7 +1150,7 @@ func TestVolcanoProbeModel(t *testing.T) {
 		},
 	}
 	require.Equal(t, "ark-model-x", volcanoProbeModel(acc))
-	require.Equal(t, volcanoQuotaProbeDefaultModel, volcanoProbeModel(&Account{Platform: PlatformDeepseek}))
+	require.Empty(t, volcanoProbeModel(&Account{Platform: PlatformDeepseek}))
 }
 
 // TestVolcanoExtraUpdatesAndSnapshotReset volcano 快照写 volcano_ 前缀，且

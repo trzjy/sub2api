@@ -22,6 +22,8 @@ func newResponsesProbeAccount(id int64) Account {
 		Credentials: map[string]any{
 			"api_key":  "sk-test",
 			"base_url": "https://compat-upstream.example/v1",
+			// 探测只探账号自己维护的模型：没有模型 ⇒ 不出站 ⇒ 无法验证响应判定。
+			"model_mapping": map[string]any{"probe-model": "probe-upstream-model"},
 		},
 	}
 }

@@ -67,22 +67,26 @@ func (r *volcanoFallbackRepo) UpdateExtra(_ context.Context, _ int64, _ map[stri
 }
 
 // TestVolcanoProbeFallbackOnModelNotFound 验证首个映射模型不可用（model-not-found 4xx）
-// 时回落到默认公开模型并最终成功，且每次候选仅发一次请求。
+// 时回落到下一个候选模型并最终成功，且每次候选仅发一次请求。
 func TestVolcanoProbeFallbackOnModelNotFound(t *testing.T) {
 	repo := &volcanoFallbackRepo{}
 	upstream := &volcanoFallbackUpstream{}
 	cfg := cnProbeAllowlistConfig("ark.cn-beijing.volces.com")
 	svc := NewCNProviderQuotaService(repo, nil, upstream, cfg)
 
+	// 配两个候选：第一个不可用（model-not-found），第二个可用 ⇒ 验证逐候选回退。
 	account := &Account{
 		ID:        1,
 		Platform:  PlatformDeepseek,
 		Type:      AccountTypeAPIKey,
 		Status:    StatusActive,
 		Credentials: map[string]any{
-			"api_key":       "ark-test-key",
-			"base_url":      "https://ark.cn-beijing.volces.com/api/coding",
-			"model_mapping": map[string]any{"gpt-4o": "ark-bad-model"},
+			"api_key":  "ark-test-key",
+			"base_url": "https://ark.cn-beijing.volces.com/api/coding",
+			"model_mapping": map[string]any{
+				"gpt-4o":      "ark-bad-model",
+				"gpt-4o-mini": "ark-good-model",
+			},
 		},
 	}
 
@@ -96,38 +100,31 @@ func TestVolcanoProbeFallbackOnModelNotFound(t *testing.T) {
 	require.Len(t, res.Tiers, 3, "5h + weekly + monthly tiers expected")
 }
 
-// TestVolcanoProbeModels 验证候选模型列表：按 key 确定性排序去重，并追加默认回落模型。
+// TestVolcanoProbeModels 验证候选模型列表：来自账号自己维护的模型名单，
+// 按上游真名确定性排序去重，且不再追加任何硬编码兜底模型。
 func TestVolcanoProbeModels(t *testing.T) {
 	t.Parallel()
-	// 多个映射：按 key 排序（gpt-4o < gpt-4o-mini），默认模型追加在末位。
+	// 多个映射：按上游真名排序（ark-x < ark-y）。
 	acc := &Account{
 		Platform: PlatformDeepseek,
 		Credentials: map[string]any{
 			"model_mapping": map[string]any{"gpt-4o-mini": "ark-y", "gpt-4o": "ark-x"},
 		},
 	}
-	require.Equal(t, []string{"ark-x", "ark-y", volcanoQuotaProbeDefaultModel}, volcanoProbeModels(acc))
+	require.Equal(t, []string{"ark-x", "ark-y"}, volcanoProbeModels(acc))
 
-	// 重复值（不同 key 映射到同一上游模型）去重，默认模型仍追加一次。
+	// 重复值（不同 key 映射到同一上游模型）去重。
 	dup := &Account{
 		Platform: PlatformDeepseek,
 		Credentials: map[string]any{
 			"model_mapping": map[string]any{"a": "ark-x", "b": "ark-x"},
 		},
 	}
-	require.Equal(t, []string{"ark-x", volcanoQuotaProbeDefaultModel}, volcanoProbeModels(dup))
+	require.Equal(t, []string{"ark-x"}, volcanoProbeModels(dup))
 
-	// 默认模型已在映射中：不重复追加。
-	overlap := &Account{
-		Platform: PlatformDeepseek,
-		Credentials: map[string]any{
-			"model_mapping": map[string]any{"a": volcanoQuotaProbeDefaultModel},
-		},
-	}
-	require.Equal(t, []string{volcanoQuotaProbeDefaultModel}, volcanoProbeModels(overlap))
-
-	// 无映射：仅默认模型。
-	require.Equal(t, []string{volcanoQuotaProbeDefaultModel}, volcanoProbeModels(&Account{Platform: PlatformDeepseek}))
+	// 无映射：没有候选（绝不回落硬编码模型）。
+	require.Empty(t, volcanoProbeModels(&Account{Platform: PlatformDeepseek}))
+	require.Empty(t, volcanoProbeModel(&Account{Platform: PlatformDeepseek}))
 }
 
 // TestIsVolcanoModelNotFoundError 验证“模型不可用”类错误的判定（仅 400/404 且 error 指向模型）。

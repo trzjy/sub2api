@@ -18,7 +18,6 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/tidwall/gjson"
@@ -1615,8 +1614,14 @@ func (p *AccountHealthRecoveryProbeService) probeOpenAIOAuthDataPlane(ctx contex
 	return false, nil
 }
 
-// probeModelForAccount 取探测模型：熔断 state 记录的 Model 优先，其次平台默认测试模型，
-// 最后 openai.DefaultTestModel。空模型无法构造真实请求，调用方按降级处理。
+// probeModelForAccount 取探测模型：熔断 state 记录的 Model 优先，其次账号自己维护的
+// 模型名单（credentials.model_mapping）解析出的上游真名。
+//
+// 这里不再回落 openai.DefaultTestModel（= "gpt-5.4"）：那个模型只在 OpenAI 官方上游存在，
+// 第三方上游（商汤/智谱/讯飞…）压根没有 ⇒ 探测恒得 404 model-not-found ⇒ 账号恒判不健康
+// ⇒ 永远卡在"探测中，无法自动回池"（生产实证：商汤账号 1002 卡死 12:04→12:27 反复重排）。
+//
+// 账号没维护模型名单时返回空串，调用方按既有 degraded 语义处理（不伪造失败、不乱猜模型）。
 func (p *AccountHealthRecoveryProbeService) probeModelForAccount(acc *Account) string {
 	if acc == nil {
 		return ""
@@ -1626,21 +1631,18 @@ func (p *AccountHealthRecoveryProbeService) probeModelForAccount(acc *Account) s
 			return m
 		}
 	}
-	if m := strings.TrimSpace(acc.providerDefaultTestModel()); m != "" {
-		return m
-	}
-	return strings.TrimSpace(openai.DefaultTestModel)
+	return pickProbeModelUpstream(probeModelCandidates(acc))
 }
 
-// cursorProbeModelKey 取 cursor 账号探针的入站模型键（model_mapping 的键），保证落在账号
-// model_mapping 全体账号都有的键上（gpt-6.1-sol / claude-fable-5-1，生产 219/219），避免落到
-// 只有 oauth 型才有的 claude-opus-5-5 / gpt-6-astra（apikey 型 134 个全无）⇒ 该账号探不到
-// 可用模型 ⇒ 探针失败关闭 ⇒ 账号停到 9999 哨兵永不解封（E12 的 424 同类风险）。
+// cursorProbeModelKey 取 cursor 账号探针的入站模型键（model_mapping 的键）。
 //
-// 优先级：① 熔断 state 记录的触发模型（若该键在 model_mapping 中存在）；② 平台默认测试模型
-// （同样要求命中 mapping）；③ 回落到全体都有的键 gpt-6.1-sol / claude-fable-5-1；④ 兜底走通用
-// 回落（调用方按降级处理）。本函数只补 cursor 分支的回落，不动 probeModelForAccount 的既有
-// 通用逻辑（那会影响其它平台），也不改 model_mapping 解析。
+// 优先级：① 熔断 state 记录的触发模型（若该键在 model_mapping 中存在）；
+// ② 账号自己维护的模型名单（credentials.model_mapping）解析出的候选键。
+//
+// 这里不再用硬编码键名（gpt-6.1-sol / claude-fable-5-1）挑模型：那是"猜账号有哪些模型"，
+// 猜错了该账号就探不到可用模型 ⇒ 探针失败关闭 ⇒ 账号永远不解封。改为从唯一事实源
+// （probeModelCandidates）取候选键，管理员配了什么就探什么。
+// 仍然要求键命中 mapping（cursorProbeOutboundModel 随后把键解析成出站值）。
 func (p *AccountHealthRecoveryProbeService) cursorProbeModelKey(acc *Account) string {
 	mapping := acc.GetModelMapping()
 	has := func(k string) bool {
@@ -1652,15 +1654,12 @@ func (p *AccountHealthRecoveryProbeService) cursorProbeModelKey(acc *Account) st
 			return m
 		}
 	}
-	if m := strings.TrimSpace(acc.providerDefaultTestModel()); m != "" && has(m) {
-		return m
-	}
-	for _, key := range []string{"gpt-6.1-sol", "claude-fable-5-1"} {
-		if has(key) {
-			return key
+	for _, candidate := range probeModelCandidates(acc) {
+		if has(candidate.InboundKey) {
+			return candidate.InboundKey
 		}
 	}
-	return p.probeModelForAccount(acc)
+	return ""
 }
 
 // cursorProbeOutboundModel 取 cursor Connect 会话型探针的出站模型名（ProbeAgentRun 入参）。

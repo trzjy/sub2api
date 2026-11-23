@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
 )
 
@@ -25,10 +24,9 @@ const accountTestSuppressCompletionContextKey = "account_test_suppress_completio
 func (s *AccountTestService) testCNProviderAdaptiveConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	requestedModelID := strings.TrimSpace(modelID)
 	if requestedModelID == "" {
-		requestedModelID = account.providerDefaultTestModel()
-	}
-	if requestedModelID == "" {
-		requestedModelID = openai.DefaultTestModel
+		// 账号自己维护的模型名单（唯一事实源）。不再回落到 openai.DefaultTestModel
+		// （= "gpt-5.4"）：国产供应商上游没有这个模型，用它探测恒得 404。
+		requestedModelID = pickProbeModelUpstream(probeModelCandidates(account))
 	}
 	testModelID := account.GetMappedModel(requestedModelID)
 
@@ -234,7 +232,10 @@ func (s *AccountTestService) testCNProviderAnthropicConnection(c *gin.Context, a
 
 	testModelID := strings.TrimSpace(modelID)
 	if testModelID == "" {
-		testModelID = claude.DefaultTestModel
+		// 账号自己维护的模型名单（唯一事实源）。不再回落到 claude.DefaultTestModel：
+		// 这里出站的是**国产供应商的 Anthropic 兼容端点**，不是 api.anthropic.com，
+		// 供应商上游通常没有 claude-sonnet-4-5-20250929 ⇒ 探测恒 404。
+		testModelID = pickProbeModelUpstream(probeModelCandidates(account))
 	}
 	testModelID = account.GetMappedModel(testModelID)
 

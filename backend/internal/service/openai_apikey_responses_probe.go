@@ -7,12 +7,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/tidwall/gjson"
 )
@@ -38,10 +36,11 @@ const openaiResponsesProbeMaxOutputTokens = 512
 // kimi-k2.6,只回 reasoning、不产出 function_call)会被这一步暴露出来。
 //
 // Stream=false 便于一次性读取 output 数组判定;不带 instructions 以免干扰。
+//
+// 模型名由调用方传入（selectResponsesProbeModel 选的账号真实模型）。这里不再
+// 自行回落到任何硬编码模型：空模型名发出去只会被上游拒掉，且掩盖了"账号没配模型"
+// 这个真实原因（调用方按无候选语义处理，不发出站请求）。
 func openaiResponsesProbePayload(modelID string) []byte {
-	if strings.TrimSpace(modelID) == "" {
-		modelID = openai.DefaultTestModel
-	}
 	body, _ := json.Marshal(map[string]any{
 		"model": modelID,
 		"input": []map[string]any{
@@ -76,32 +75,16 @@ func openaiResponsesProbePayload(modelID string) []byte {
 // selectResponsesProbeModel 选出用于探测的上游模型。
 //
 // 工具能力探测必须用上游真实存在的模型——用占位模型(DefaultTestModel)打第三方
-// 上游只会拿到 400 model-not-found,无从判定工具能力。优先取账号 model_mapping
-// 的上游模型(值),其中优先通用 GPT 文本模型,同类按字典序取首个具体(非通配符)
-// 模型以保证可复现;无映射时回退
-// DefaultTestModel(适配 OpenAI 官方 APIKey 账号)。
+// 上游只会拿到 400 model-not-found,无从判定工具能力。
+//
+// 候选来自全站唯一事实源（probeModelCandidates）：账号 model_mapping 解析出的
+// 上游真名，已排除空/通配符/图片模型，按字典序取首个。
+//
+// 这里不再优先 `gpt-` 前缀：管理员可以自定义命名（codex-auto-review 一类），
+// 按名字形态挑选会把"明明有可用模型"变成"挑错模型"。也不回退 DefaultTestModel——
+// 那个模型只在 OpenAI 官方上游存在，打第三方上游恒 404。
 func selectResponsesProbeModel(account *Account) string {
-	mapping := account.GetModelMapping()
-	candidates := make([]string, 0, len(mapping))
-	for _, upstream := range mapping {
-		upstream = strings.TrimSpace(upstream)
-		if upstream == "" || strings.Contains(upstream, "*") {
-			continue
-		}
-		candidates = append(candidates, upstream)
-	}
-	if len(candidates) == 0 {
-		return openai.DefaultTestModel
-	}
-	sort.Strings(candidates)
-	// Prefer a general text model over auxiliary entries such as
-	// codex-auto-review or image-only models, which cannot prove tool support.
-	for _, candidate := range candidates {
-		if strings.HasPrefix(candidate, "gpt-") && !isOpenAIImageGenerationModel(candidate) {
-			return candidate
-		}
-	}
-	return candidates[0]
+	return pickProbeModelUpstream(probeModelCandidates(account))
 }
 
 // ProbeOpenAIAPIKeyResponsesSupport 探测 OpenAI APIKey 账号上游是否支持
@@ -180,6 +163,13 @@ func (s *AccountTestService) ProbeOpenAIAPIKeyResponsesSupport(ctx context.Conte
 
 	probeURL := buildOpenAIResponsesURL(normalizedBaseURL)
 	probeModel := selectResponsesProbeModel(account)
+	if strings.TrimSpace(probeModel) == "" {
+		// 账号没维护模型名单 ⇒ 没有可探的模型。此时**不出站**（发空模型名只会得到
+		// 必然失败的响应），也**不写能力结论**（保持 unknown，下次重试或由网关 fallback
+		// 处理），更不阻塞账号创建。
+		logger.LegacyPrintf("service.openai_probe", "probe_no_model_candidate: account_id=%d", accountID)
+		return
+	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, openaiResponsesProbeTimeout)
 	defer cancel()
