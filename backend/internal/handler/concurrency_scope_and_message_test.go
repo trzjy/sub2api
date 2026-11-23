@@ -168,7 +168,7 @@ func TestRenderConcurrencyLimitMessage(t *testing.T) {
 			tmpl:  "自定义{s Limit}",
 			kind:  "account",
 			limit: 5,
-			want:  infraerrors.AccountSlotConcurrencyLimit,
+			want:  infraerrors.NoAvailableAccounts,
 		},
 		{
 			name:  "no limit with {limit} template falls back to chinese no-limit (user), no bare placeholder",

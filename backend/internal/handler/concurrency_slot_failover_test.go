@@ -55,9 +55,9 @@ func TestConcurrencySlotExhaustedResponse(t *testing.T) {
 
 	require.Equal(t, http.StatusServiceUnavailable, status)
 	require.Equal(t, "api_error", errType)
-	require.Equal(t, gatewayConcurrencyLimitCode, code)
-	require.Equal(t, infraerrors.AccountSlotConcurrencyLimit, message,
-		"终态文案必须与既有「槽位等不到」出口逐字节一致")
+	require.Equal(t, "", code)
+	require.Equal(t, infraerrors.NoAvailableAccounts, message,
+		"终态文案必须与账号维度「等不到」出口逐字节一致")
 }
 
 // TestConcurrencySlotExhaustedResponse_MatchesAccountSlotError 锁定「换号耗尽」与

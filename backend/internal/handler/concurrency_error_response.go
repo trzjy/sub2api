@@ -19,7 +19,7 @@ const (
 
 // renderConcurrencyLimitMessage 渲染并发超限文案（仅 user/group 维度；account 维度不得调用）。
 // 规则（契约，写进代码注释以稳定验收）：
-//  1. account 或非 user/group → 返回中文账号槽并发文案（infraerrors.AccountSlotConcurrencyLimit），
+//  1. account 或非 user/group → 返回无可用账号文案（infraerrors.NoAvailableAccounts），
 //     绝不渲染可配模板；
 //  2. user/group 且 tmpl 为空（trim 后）→ 渲染中文默认模板 ConcurrencyDefaultTemplate（{scope}/{limit} 照常）；
 //  3. {scope} → "订阅"（group）/ "用户"（user）；
@@ -27,9 +27,9 @@ const (
 //     绝不出现裸 {limit}；
 //  5. 其他花括号原样保留。
 func renderConcurrencyLimitMessage(tmpl string, kind string, limit int) string {
-	// account 维度（或非 user/group）→ 中文账号槽并发文案，不渲染可配模板。
+	// account 维度（或非 user/group）→ 无可用账号文案，不渲染可配模板。
 	if kind != "user" && kind != "group" {
-		return infraerrors.AccountSlotConcurrencyLimit
+		return infraerrors.NoAvailableAccounts
 	}
 	if strings.TrimSpace(tmpl) == "" {
 		// 未配置可配文案 → 渲染中文默认模板（{scope}/{limit} 占位符照常）。
