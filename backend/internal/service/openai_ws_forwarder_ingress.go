@@ -1849,6 +1849,18 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if result == nil {
 			return errors.New("websocket turn result is nil")
 		}
+		// 每轮真实成功后即写会话粘性绑定：首轮成功但客户端连接仍存活时，
+		// 绑定不应等到整条连接结束（handler 侧）才改写到本轮账号。
+		// 失败/取消轮次走不到这里，不会误写；失败轮次由调用方在连接结束时处理。
+		if bindErr := s.BindStickySessionAfterProfitAdmission(ctx, &groupID, sessionHash, account.ID); bindErr != nil {
+			logOpenAIWSModeWarn(
+				"ingress_ws_bind_sticky_session_after_turn_failed account_id=%d group_id=%d session_hash=%s cause=%s",
+				account.ID,
+				groupID,
+				truncateOpenAIWSLogValue(sessionHash, 12),
+				bindErr.Error(),
+			)
+		}
 		responseID := strings.TrimSpace(result.RequestID)
 		lastTurnResponseID = responseID
 		if contextWindowBoundary.WindowID != "" {
