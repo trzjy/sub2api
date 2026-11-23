@@ -223,7 +223,9 @@ func (h *ConcurrencyHelper) AcquireAccountSlotForSelection(
 	}
 
 	// 2. 抢失败且本次尚未等过且有等待计划 → 等待一次。
-	if !alreadyWaited && selection.WaitPlan != nil {
+	//    「已等过」取参数与请求级标记的并集：调用方即使只传 slotFullCount>0（参数 false），
+	//    入口也自行读取标记，避免重选再次等待。
+	if !alreadyWaited && !concurrencySlotWaitExhausted(c) && selection.WaitPlan != nil {
 		wp := selection.WaitPlan
 
 		// 等待前维护账号等待计数（方案 §3.1-5、§4.3），排队上限 MaxWaiting 由此生效。

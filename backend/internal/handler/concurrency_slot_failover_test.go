@@ -168,6 +168,28 @@ func TestAcquireAccountSlotForSelection(t *testing.T) {
 		require.Equal(t, 1, cache.accountAcquireCalls, "已等过时只做一次立即抢槽，不得再等待")
 	})
 
+	t.Run("context_marker_prevents_wait_even_when_already_waited_false", func(t *testing.T) {
+		// 参数 alreadyWaited=false（调用方只传 slotFullCount>0），但上下文已设置等待耗尽标记：
+		// 入口内部自行取并集，不得进入等待，只做一次立即抢槽后直接 slotFull。
+		cache := &helperConcurrencyCacheStub{accountSeq: []bool{false}}
+		helper := newHelper(cache)
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+		markConcurrencySlotWaitExhausted(c)
+		require.True(t, concurrencySlotWaitExhausted(c), "前置条件：上下文等待耗尽标记已设置")
+
+		selection := newSelection()
+		selection.WaitPlan = &service.AccountWaitPlan{
+			AccountID:      101,
+			MaxConcurrency: 3,
+			MaxWaiting:     2,
+			Timeout:        2 * time.Second,
+		}
+		release, slotFull := helper.AcquireAccountSlotForSelection(c, selection, false, false, nil)
+		require.Nil(t, release)
+		require.True(t, slotFull, "上下文标记已等过时不得再等待，直接 slotFull")
+		require.Equal(t, 1, cache.accountAcquireCalls, "标记已等过时只做一次立即抢槽，不得再进入等待")
+	})
+
 	t.Run("wait_queue_full_returns_slot_full_without_waiting", func(t *testing.T) {
 		// 等待计数达到上限（canWait=false）→ 直接 slotFull，不进入等待，也不减数。
 		base := &helperConcurrencyCacheStub{accountSeq: []bool{false}}
