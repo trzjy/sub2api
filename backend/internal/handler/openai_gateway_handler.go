@@ -737,20 +737,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	stopCF524Guard := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
 	defer stopCF524Guard()
 
-	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
-	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
-	// 门控/目标判定与 token 估算共用请求侧模型（forwardModel 即请求侧名，无映射时等于
-	// 请求侧名；token 估算用映射后模型，二者一致）。
-	gateOpen := func(m string) (bool, error) {
-		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
-	}
-	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, forwardModel, forwardModel, service.TierRoutingProtocolResponses, body, gateOpen)
-	if err != nil {
-		// 分层路由估算失败不阻断请求：Fail-Open 仅告警并继续原路径转发（派发单 CARD-07）。
-		reqLog.Warn("openai.responses.kimi_tier_estimate_failed", zap.Error(err))
-	} else {
-		c.Request = c.Request.WithContext(tierCtx)
-	}
 	// KC-19B：cursor 平台（kn-cy 等 OpenAI 兼容反代）请求在选号前用既有本地估算 SSOT
 	// 装好估算 input，供 RecordUsage 透传为 EstimatedInputTokens 以对冲上游 prompt_tokens 虚高。
 	attachCursorEstimatedInputTokens(c, reqLog, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body)
@@ -761,22 +747,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 看见刚被标记失败的账号）。
 	c.Request = c.Request.WithContext(service.WithSizeExclusionCandidateCache(c.Request.Context()))
 
-	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
-	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
-	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body); len(adds) > 0 {
-		for id := range adds {
-			failedAccountIDs[id] = struct{}{}
-		}
-	}
 
-	// 商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）：超大请求（>256K）
-	// 将商汤账号并入 failedAccountIDs，自动顺延至备用大容量上游；≤256K 或估算失败
-	// （失败开放）时不排除任何账号。
-	if adds := h.applySensenovaSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body); len(adds) > 0 {
-		for id := range adds {
-			failedAccountIDs[id] = struct{}{}
-		}
-	}
 
 	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
 	// 「仅接大请求」开关的账号从小请求（估算 input <= 运行时阈值（默认 256000，后台可配置））
@@ -1583,16 +1554,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	if preferredMappedModel != "" {
 		estimateModel = preferredMappedModel
 	}
-	gateOpen := func(m string) (bool, error) {
-		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
-	}
-	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, routingModel, estimateModel, service.TierRoutingProtocolMessages, body, gateOpen)
-	if err != nil {
-		// 分层路由估算失败不阻断请求：Fail-Open 仅告警并继续原路径转发（派发单 CARD-07）。
-		reqLog.Warn("openai_messages.kimi_tier_estimate_failed", zap.Error(err))
-	} else {
-		c.Request = c.Request.WithContext(tierCtx)
-	}
 	// KC-19B：cursor 平台（kn-cy 等 OpenAI 兼容反代）请求在选号前用既有本地估算 SSOT
 	// 装好估算 input，供 RecordUsage 透传为 EstimatedInputTokens 以对冲上游 prompt_tokens 虚高。
 	attachCursorEstimatedInputTokens(c, reqLog, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body)
@@ -1603,23 +1564,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// 看见刚被标记失败的账号）。
 	c.Request = c.Request.WithContext(service.WithSizeExclusionCandidateCache(c.Request.Context()))
 
-	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
-	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
-	// 估算模型用映射后的 estimateModel（与 applyTierRouting 同口径）。
-	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body); len(adds) > 0 {
-		for id := range adds {
-			failedAccountIDs[id] = struct{}{}
-		}
-	}
 
-	// 商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）：超大请求（>256K）
-	// 将商汤账号并入 failedAccountIDs，自动顺延至备用大容量上游；≤256K 或估算失败
-	// （失败开放）时不排除任何账号。
-	if adds := h.applySensenovaSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body); len(adds) > 0 {
-		for id := range adds {
-			failedAccountIDs[id] = struct{}{}
-		}
-	}
 
 	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
 	// 「仅接大请求」开关的账号从小请求（估算 input <= 运行时阈值（默认 256000，后台可配置））
@@ -3367,19 +3312,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		h.withOpenAIProfitSuppressedForImage(ctx, firstMessage), apiKey.GroupID)
 	ctx = wsPricingCtx
 
-	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
-	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
-	// 门控/目标判定与 token 估算共用请求侧模型（wsForwardModel 即请求侧名）。
-	gateOpen := func(m string) (bool, error) {
-		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
-	}
-	tierCtx, err := applyTierRouting(c, ctx, reqLog, wsForwardModel, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage, gateOpen)
-	if err != nil {
-		// 分层路由估算失败不关连接：Fail-Open 仅告警并继续原路径转发（派发单 CARD-07）。
-		reqLog.Warn("openai.websocket.kimi_tier_estimate_failed", zap.Error(err))
-	} else {
-		ctx = tierCtx
-	}
 
 	// 下面三条按规模的排除规则（自建站点大请求 / 商汤与账号自设上限 / 仅接大或仅接小）
 	// 共用同一份候选快照：以前每条规则各读一遍全量候选，一次请求读三遍，而且三份结果
@@ -3387,22 +3319,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 看见刚被标记失败的账号）。WS 路径用的是局部 ctx 变量，不是 c.Request。
 	ctx = service.WithSizeExclusionCandidateCache(ctx)
 
-	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
-	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
-	if adds := h.applySelfHostSizeExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage); len(adds) > 0 {
-		for id := range adds {
-			failedAccountIDs[id] = struct{}{}
-		}
-	}
 
-	// 商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）：超大请求（>256K）
-	// 将商汤账号并入 failedAccountIDs，自动顺延至备用大容量上游；≤256K 或估算失败
-	// （失败开放）时不排除任何账号。
-	if adds := h.applySensenovaSizeExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage); len(adds) > 0 {
-		for id := range adds {
-			failedAccountIDs[id] = struct{}{}
-		}
-	}
 
 	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
 	// 「仅接大请求」开关的账号从小请求（估算 input <= 运行时阈值（默认 256000，后台可配置））
@@ -5441,58 +5358,6 @@ func summarizeWSCloseErrorForLog(err error) (string, string) {
 	return closeStatus, closeReason
 }
 
-// tierRoutingTargetModels 是分层路由泛化（派发单 OC-T1）的精确目标模型集合：
-// 仅当请求侧模型名精确匹配其中一项（判定 SSOT）才进入分层路由评估。
-// 这些模型各自存在「伪装线池（mask_upstream_identity）」候选，门控语义见下。
-// 2026-11-01 用户裁定：伪装号覆盖 deepseek/kimi/glm 家族在售全部模型（以订阅组 allowlist 为准）。
-var tierRoutingTargetModels = map[string]struct{}{
-	"kimi-k3":                  {},
-	"kimi-k3.1":                {},
-	"kimi-k3.1-pro":            {},
-	"kimi-k2.7-code":           {},
-	"deepseek-v4.1-flash":      {},
-	"deepseek-v4.1-flash-1017": {},
-	"deepseek-flash":           {},
-	"deepseek-v4-pro":          {},
-	"deepseek-v4-pro-0813":     {},
-	"glm-5.3-flash":            {},
-	"glm-5.3":                  {},
-}
-
-// isTierRoutingTargetModel 判定请求模型是否属于分层路由目标集合（请求侧模型名精确匹配）。
-func isTierRoutingTargetModel(model string) bool {
-	_, ok := tierRoutingTargetModels[model]
-	return ok
-}
-
-// applyTierRouting 是派发单 OC-T1 泛化后的分层路由接入点：对「请求侧模型 ∈ 目标集合
-// 且动态门控开启」的请求，在选号前用既有本地估算链
-// （service.EstimateTierRoutingInputTokens，复用 estimateOpenAIInputTokens 同一 SSOT——
-// 纯本地、不发上游请求）估算 input token，按 docs-local/model-source-tier-routing-plan.md
-// §2 分档装门（small → 伪装线池 / big → 星思池，=阈值判小），并输出一行结构化日志
-// （request_id + 估算 input + 分档 small/big）作为验证窗载体。
-//
-// 模型语义拆分（FIX-2）：
-//   - routingModel：门控判定 / 目标集合判定 / model_mapping 键查询，一律用请求侧模型名；
-//   - estimateModel：token 估算用映射后模型名（无映射时等于请求侧模型名）。
-//     二者由调用方分别传入，禁止用映射后模型做目标集合判定。
-//
-// 动态门控（派发单 OC-T1）：对目标模型 M，门开启当且仅当 gateOpen(M)==true，即存在账号
-// A 满足管理态 schedulable=true（以调度快照管理态为准）且 extra.mask_upstream_identity=true
-// 且 A.model_mapping 含键 M。未开启（gateOpen 返回 false，或模型不在目标集合）→ 直接返回
-// 原 baseCtx，原路径零行为变化；估算失败（解析/转换/非标）返回错误，由调用方 fail-closed
-// （禁止默认大档、禁止隐式转其他档）。运行态不可用（熔断/配额暂停/临时停调）不改管理态
-// schedulable，故不关门。
-//
-// 调用方须把返回的 ctx 装回 c.Request（或等价 ctx 变量），供后续选号循环（含 failover
-// 重入与跨档重试）共用同一分档门。gateOpen 由调用方注入（生产侧经调度快照查询一次）。
-// selfHostSizeExcludeThresholdTokens 与分层路由共用 3000 input token 阈值
-// （input-only：仅统计请求 input，不含将要生成的 output）。
-// 估算 <= 阈值视为小/中请求，参与调度、不排除任何自建账号；估算 > 阈值视为大请求，
-// 调用 GatewayService.SelfHostedExcludedIDs 取该分组可调度候选中的自建站点账号并入
-// failedAccountIDs。阈值只允许集中常量（禁区：不新增字段/配置项/环境变量）。
-const selfHostSizeExcludeThresholdTokens = service.TierRoutingInputThreshold
-
 // requestAborted 报告本次请求的上下文是否已结束（客户端断开 / 超时 / 被取消）。
 //
 // 三个「按规模排除候选」的入口都用它做前置短路：这类排除的唯一产出是「候选账号 id
@@ -5501,124 +5366,6 @@ const selfHostSizeExcludeThresholdTokens = service.TierRoutingInputThreshold
 // 事的情况下仍会列举两遍全量候选。
 func requestAborted(ctx context.Context) bool {
 	return ctx != nil && ctx.Err() != nil
-}
-
-// applySelfHostSizeExclusion 实现订阅组大请求动态排除自建账号（派发单 D-SHS-001）。
-//
-// 在选号循环之前调用：先估算本次请求的 input token（input-only），估算失败 → 失败开放
-// 返回空集（绝不因估算失败拦请求）；估算 <= selfHostSizeExcludeThresholdTokens 视为
-// 小/中请求，参与调度、不排除任何自建账号；估算 > 阈值视为大请求，调用
-// GatewayService.SelfHostedExcludedIDs 取该分组可调度候选中承载地址含自建站点标识
-// （selfHostBaseURLMarker）的账号 id 集合。
-//
-// 失败开放兜底：§1 列举候选或上下文异常一律按空集处理（不缩小候选），与既有选号路径
-// 零行为变化。返回集合由调用方并入各函数自持的 failedAccountIDs。
-//
-// 注：platform 为 §1 SelfHostedExcludedIDs 列举候选所需的平台维度；ctx/groupID/model/
-// protocol/body 与 applyTierRouting 同来源（body 为选号侧已持有的请求体）。
-func (h *OpenAIGatewayHandler) applySelfHostSizeExclusion(
-	ctx context.Context,
-	reqLog *zap.Logger,
-	groupID *int64,
-	platform string,
-	model string,
-	protocol service.TierRoutingRequestProtocol,
-	body []byte,
-) map[int64]struct{} {
-	empty := make(map[int64]struct{})
-	groupIDVal := int64(0)
-	if groupID != nil {
-		groupIDVal = *groupID
-	}
-	if requestAborted(ctx) {
-		return empty
-	}
-
-	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
-	if err != nil {
-		// 估算失败 → 失败开放：不排除任何账号，仅告警，绝不因估算失败拦请求。
-		reqLog.Warn("selfhost_size_exclusion_estimate_failed",
-			zap.Int64("group_id", groupIDVal),
-			zap.String("platform", platform),
-			zap.String("model", model),
-			zap.Error(err))
-		return empty
-	}
-
-	if estimated <= selfHostSizeExcludeThresholdTokens {
-		// 小/中请求：参与调度，不排除自建账号。区间 ≤3000 参与。
-		return empty
-	}
-
-	// 大请求：取该分组可调度候选中的自建站点账号 id，交由调用方并入 failedAccountIDs。
-	excluded, err := h.gatewayService.SelfHostedExcludedIDs(ctx, groupID, platform)
-	if err != nil {
-		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
-		reqLog.Warn("selfhost_size_exclusion_list_failed",
-			zap.Int64("group_id", groupIDVal),
-			zap.String("platform", platform),
-			zap.Int("estimated_input_tokens", estimated),
-			zap.Error(err))
-		return empty
-	}
-	return excluded
-}
-
-// applySensenovaSizeExclusion 实现商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）。
-//
-// 在选号循环之前调用：先估算本次请求的 input token（input-only），估算失败 → 失败开放
-// 返回空集（绝不因估算失败拦请求）；估算 <= service.SensenovaContextWindowCap（262144，
-// 即 256K）视为中小请求，参与调度、不排除任何商汤账号；估算 > 262144 视为超大请求，
-// 调用 GatewayService.SensenovaExcludedIDs 取该分组可调度候选中的商汤账号并入
-// failedAccountIDs，请求自动顺延至 Priority 更高的备用大容量上游（GoAIChat 500K / 星思 1000K）。
-//
-// 失败开放兜底：列举候选或上下文异常一律按空集处理（不缩小候选），与既有选号路径
-// 零行为变化。返回集合由调用方并入各函数自持的 failedAccountIDs。
-//
-// 注：platform 为 SensenovaExcludedIDs 列举候选所需的平台维度；ctx/groupID/model/
-// protocol/body 与 applySelfHostSizeExclusion 同来源。
-func (h *OpenAIGatewayHandler) applySensenovaSizeExclusion(
-	ctx context.Context,
-	reqLog *zap.Logger,
-	groupID *int64,
-	platform string,
-	model string,
-	protocol service.TierRoutingRequestProtocol,
-	body []byte,
-) map[int64]struct{} {
-	empty := make(map[int64]struct{})
-	groupIDVal := int64(0)
-	if groupID != nil {
-		groupIDVal = *groupID
-	}
-	if requestAborted(ctx) {
-		return empty
-	}
-
-	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
-	if err != nil {
-		// 估算失败 → 失败开放：不排除任何账号，仅告警，绝不因估算失败拦请求。
-		reqLog.Warn("sensenova_size_exclusion_estimate_failed",
-			zap.Int64("group_id", groupIDVal),
-			zap.String("platform", platform),
-			zap.String("model", model),
-			zap.Error(err))
-		return empty
-	}
-
-	// 按本次估算 input 统一计算排除集合：商汤账号的 256K 物理上限 + 任意账号
-	// extra.max_input_tokens 自设上限。未声明上限的账号零行为变化。
-	excluded, err := h.gatewayService.SizeExcludedIDs(ctx, groupID, platform, estimated)
-	if err != nil {
-		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
-		reqLog.Warn("sensenova_size_exclusion_list_failed",
-			zap.Int64("group_id", groupIDVal),
-			zap.String("platform", platform),
-			zap.Int("estimated_input_tokens", estimated),
-			zap.Error(err))
-		return empty
-	}
-	return excluded
 }
 
 // isRequestSizeRoutingExemptPlatform 判断平台是否豁免请求规模分流（L5）。
@@ -5758,41 +5505,3 @@ func attachCursorEstimatedInputTokens(
 	c.Request = c.Request.WithContext(service.WithEstimatedInputTokens(c.Request.Context(), estimated))
 }
 
-func applyTierRouting(
-	c *gin.Context,
-	baseCtx context.Context,
-	reqLog *zap.Logger,
-	routingModel string,
-	estimateModel string,
-	protocol service.TierRoutingRequestProtocol,
-	body []byte,
-	gateOpen func(model string) (bool, error),
-) (context.Context, error) {
-	if !isTierRoutingTargetModel(routingModel) {
-		return baseCtx, nil
-	}
-	open, err := gateOpen(routingModel)
-	if err != nil {
-		// 门控查询自身失败（基础设施）不装门，回落原路径零行为变化（运行态不可用不关门，
-		// 但此处是查询链路异常，保守按关门处理，避免把请求卡在分层路由上）。沿用既有
-		// reqLog 体系，从 Debug 提到 Warn 提升可观测（FIX-5）。
-		reqLog.Warn("tier_routing_gate_query_failed", zap.String("model", routingModel), zap.Error(err))
-		return baseCtx, nil
-	}
-	if !open {
-		return baseCtx, nil
-	}
-	estimated, err := service.EstimateTierRoutingInputTokens(estimateModel, protocol, body)
-	if err != nil {
-		return nil, fmt.Errorf("tier routing input estimate failed: %w", err)
-	}
-	class := service.TierRoutingClassForEstimate(estimated)
-	ctx := service.WithTierRouting(baseCtx, class, estimated)
-	requestID, _ := c.Request.Context().Value(ctxkey.RequestID).(string)
-	reqLog.Info("kimi_tier_routing_decision",
-		zap.String("request_id", requestID),
-		zap.Int("estimated_input_tokens", estimated),
-		zap.String("tier", string(class)),
-	)
-	return ctx, nil
-}

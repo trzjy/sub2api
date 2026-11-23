@@ -206,7 +206,6 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	}
 	upstreamBody = applyOllamaCloudRawChatCompletionsRequest(account, upstreamBody)
 	upstreamBody = clampOllamaCloudUpstreamMaxTokens(account, upstreamBody)
-	upstreamBody = clampSensenovaUpstreamMaxTokens(account, upstreamBody)
 	// 国产厂商（deepseek/kimi/zhipu/minimax）不做 max_tokens 夹取：
 	// 2026-10-14 用户裁定「上限报错都不要」，2026-11-06 用户裁定全撤（A）。
 	// 夹取会静默把思考型模型的输出预算砍到 65536（思考与正文共用预算），
@@ -253,8 +252,6 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	// 7. Handle error response with failover
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
-		// 临时取证：sensenova 400 inference request is invalid，取证结束后删除
-		observeSensenovaInvalidRequest(account, "chat_completions_raw", resp.StatusCode, upstreamBody, respBody)
 		if account.Platform == PlatformGrok {
 			kind := "http_error"
 			if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {

@@ -781,9 +781,6 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 			return "account_model_not_owned"
 		}
 	}
-	if !openAIAccountEligibleForTierPool(ctx, account) {
-		return "tier_pool_mismatch"
-	}
 	if account.Platform != platform {
 		requirement, ok := ctx.Value(openAIGroupPrivacyRequirementContextKey{}).(openAIGroupPrivacyRequirement)
 		var groupID int64
@@ -864,36 +861,6 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 		return "compact_unsupported"
 	}
 	return ""
-}
-
-func openAIAccountEligibleForTierPool(ctx context.Context, account *Account) bool {
-	// 判定逻辑单点在 tierRoutingPoolAdmitsAccount：本函数只负责从请求 ctx 取分档状态，
-	// 不再自己维护一份 switch。历史上这里独立写了一份 pool 判定，新增池常量时容易漏改，
-	// 漏改的后果是未知池走 default 放行 → 大档被伪装号抢走。
-	return tierRoutingPoolAdmitsAccount(
-		tierRoutingPoolFromContext(ctx),
-		tierRoutingEstimatedInputFromContext(ctx),
-		account,
-	)
-}
-
-func codeBuddyTierPlatformMismatchAllowed(account *Account, platform string, requestedModel string, groupID int64, group *Group, tierPool string) bool {
-	if account == nil || group == nil || groupID <= 0 || account.Platform != PlatformCodeBuddy || !account.IsOpenAICompatible() {
-		return false
-	}
-	platform = NormalizeOpenAICompatiblePlatform(platform)
-	if group.ID != groupID || NormalizeOpenAICompatiblePlatform(group.Platform) != platform {
-		return false
-	}
-	// 伪装号（mask_upstream_identity=true）只允许在小档（masked 池）承接：未装门（pool=""）
-	// 或大档时一律拒绝——HY3 伪装线不扛大上下文（§2 风险线口径，2026-10-07 用户裁定）。
-	if IsIdentityMaskedAccount(account) && tierPool != tierRoutingPoolMasked {
-		return false
-	}
-	if !openAIStickyAccountMatchesGroup(account, &groupID) {
-		return false
-	}
-	return requestedModel != "" && account.IsModelSupported(requestedModel)
 }
 
 type openAIQuotaAutoPauseDecision struct {
@@ -2372,20 +2339,6 @@ func (s *OpenAIGatewayService) listSchedulableAccountsForSizeExclusion(ctx conte
 	}
 	snapshot.byQuery[key] = accounts
 	return accounts, nil
-}
-
-// SelfHostedExcludedIDs 列举该分组可调度候选中自建站点账号 id 集合（派发单 D-SHS-001）。
-//
-// 语义：复用 OpenAIGatewayService.listSchedulableAccounts 的候选列举，返回
-// GetOpenAIBaseURL() 含 selfHostBaseURLMarker 的账号 id。仅供 handler 侧选号前
-// 大请求动态排除使用，不改任何既有选号/调度函数签名与行为；列举候选失败返回 error，
-// 由调用方失败开放处理。
-func (s *OpenAIGatewayService) SelfHostedExcludedIDs(ctx context.Context, groupID *int64, platform string) (map[int64]struct{}, error) {
-	accounts, err := s.listSchedulableAccountsForSizeExclusion(ctx, groupID, platform)
-	if err != nil {
-		return nil, err
-	}
-	return selfHostedAccountIDs(accounts), nil
 }
 
 func (s *OpenAIGatewayService) tryAcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int) (*AcquireResult, error) {

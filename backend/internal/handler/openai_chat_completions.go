@@ -43,25 +43,6 @@ func syncStreamStartedIfResponseCommitted(c *gin.Context, streamStarted *bool) {
 	}
 }
 
-// applyTierRoutingFailOpen 封装分层路由的 Fail-Open 语义（派发单 CARD-06）。
-// applyTierRouting 仅在 token 估算失败时返回 error；此时不阻断用户请求、不回 400，
-// 保留基础 context 按原路径正常转发。门控查询失败等路径在 applyTierRouting 内已回落
-// baseCtx 并返回 nil error，本封装对其无副作用（tierCtx == baseCtx）。
-func (h *OpenAIGatewayHandler) applyTierRoutingFailOpen(
-	c *gin.Context,
-	reqLog *zap.Logger,
-	routingModel, estimateModel string,
-	protocol service.TierRoutingRequestProtocol,
-	body []byte,
-	gateOpen func(string) (bool, error),
-) context.Context {
-	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, routingModel, estimateModel, protocol, body, gateOpen)
-	if err != nil {
-		reqLog.Warn("openai_chat_completions.kimi_tier_estimate_failed", zap.Error(err))
-		return c.Request.Context()
-	}
-	return tierCtx
-}
 
 // ChatCompletions handles OpenAI Chat Completions API requests.
 // POST /v1/chat/completions
@@ -244,16 +225,6 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	cf524StopHeartbeat := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
 	defer cf524StopHeartbeat()
 
-	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
-	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
-	// 门控/目标判定与 token 估算共用请求侧模型（forwardModel 即请求侧名）。
-	gateOpen := func(m string) (bool, error) {
-		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
-	}
-	// 分层路由 Fail-Open（派发单 CARD-06）：token 预估失败不应阻断用户请求，
-	// 不回 400，打 Warn 日志并保留基础 context 按原路径正常转发。
-	tierCtx := h.applyTierRoutingFailOpen(c, reqLog, forwardModel, forwardModel, service.TierRoutingProtocolChatCompletions, body, gateOpen)
-	c.Request = c.Request.WithContext(tierCtx)
 	// KC-19B：cursor 平台（kn-cy 等 OpenAI 兼容反代）请求在选号前用既有本地估算 SSOT
 	// 装好估算 input，供 RecordUsage 透传为 EstimatedInputTokens 以对冲上游 prompt_tokens 虚高。
 	attachCursorEstimatedInputTokens(c, reqLog, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body)
@@ -264,22 +235,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	// 看见刚被标记失败的账号）。
 	c.Request = c.Request.WithContext(service.WithSizeExclusionCandidateCache(c.Request.Context()))
 
-	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
-	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
-	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body); len(adds) > 0 {
-		for id := range adds {
-			failedAccountIDs[id] = struct{}{}
-		}
-	}
 
-	// 商汤 256K 物理上下文上限动态排除（派发单 SENSENOVA-256K-01）：超大请求（>256K）
-	// 将商汤账号并入 failedAccountIDs，自动顺延至备用大容量上游；≤256K 或估算失败
-	// （失败开放）时不排除任何账号。
-	if adds := h.applySensenovaSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body); len(adds) > 0 {
-		for id := range adds {
-			failedAccountIDs[id] = struct{}{}
-		}
-	}
 
 	// 订阅组「只接大请求」动态排除（派发单 LRO-06，方案 §3.3）：选号循环前将本分组中
 	// 开启「仅接大请求」开关的账号在小请求上并入 failedAccountIDs；估算 > 阈值（大请求）、

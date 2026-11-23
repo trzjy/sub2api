@@ -99,16 +99,6 @@ type OpenAIAccountScheduleRequest struct {
 	// 集合，且仍叠加 §3.4 的 vision_not_supported 能力过滤（只收窄、不豁免）。
 	// 由选号入口每次请求最多读取一次后透传，避免候选循环内重复查库。
 	VisionRoutingTargets []int64
-	// TierRoutingPool 是分层路由（派发单 OC-T1 泛化，docs-local/model-source-tier-routing-plan.md
-	// §2）的分档候选约束："masked" 仅伪装线小档池（extra.mask_upstream_identity=true 且未声明
-	// extra.masked_input_band），"masked_large" 仅伪装线大档池（声明了 masked_input_band 且估算
-	// input 落在区间内），"upstream" 仅非伪装池（星思）。空值不约束——handler 未对请求装分档门时
-	// 零行为变化，装门后平台无关（不限于 kimi）。由 selectAccountWithSchedulerOnce 按请求 ctx
-	// 中的分档状态装门。
-	TierRoutingPool string
-	// TierRoutingEstimatedInput 是本次请求的估算 input tokens（与分档判定同源），
-	// 供 masked_large 池按账号声明的 masked_input_band 做区间过滤。
-	TierRoutingEstimatedInput int
 	ExcludedIDs               map[int64]struct{}
 }
 
@@ -2232,14 +2222,6 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 		}
 		// unknown：放行（保守），等待管理端检测收敛为 known。
 	}
-	// 分层路由候选约束：小档仅伪装线小档池，大档仅伪装线大档池（按账号声明的区间
-	// masked_input_band 收窄），星思池要求非伪装；空值不约束（非分层目标模型零行为变化）。
-	// 判定逻辑单点在 tierRoutingPoolAdmitsAccount，不在此处重写 switch。
-	// 换号不出档——同档内换号走既有熔断/重试，跨档只发生在 selectAccountWithScheduler
-	// 的整池无可用重试（告警）。
-	if !tierRoutingPoolAdmitsAccount(req.TierRoutingPool, req.TierRoutingEstimatedInput, account) {
-		return false, "tier_pool_excluded"
-	}
 	// 分组利润控制：不合格账号在候选过滤与抢槽后终检阶段即被排除，
 	// 排序/评分/粘性/熔断只在合格账号之间工作；named reason 进入 filter stats。
 	if vetoed, reason := openAIProfitControlVetoReason(ctx, account); vetoed {
@@ -2534,129 +2516,11 @@ func resetOpenAIAdvancedSchedulerSettingCacheForTest() {
 	openAIAdvancedSchedulerSettingSF = singleflight.Group{}
 }
 
-// TierRoutingClass 是分层路由（派发单 B2）的分档结果：估算 input ≤ 阈值判小
-// （small → 伪装线小档池），> 阈值判大（big → 伪装线大档池，整池无可用再跨到星思池）。
-type TierRoutingClass string
-
-const (
-	TierRoutingSmall TierRoutingClass = "small"
-	TierRoutingBig   TierRoutingClass = "big"
-)
-
-// TierRoutingInputThreshold 是分层路由的 input-only 估算阈值（含边界：估算值
-// 恰好等于阈值判小），统一采用 10000 input tokens。input-only 口径沿用
-// 2026-10-07 用户裁定（docs-local/model-source-tier-routing-plan.md §2）。
-//
-// 阈值沿革：2026-10-19 统一为 3000（当时伪装线只有 qwen，专吃小请求）；
-// 2026-11-04 用户裁定提到 10000——让伪装线把 1 万以下的体量吃满，把 1 万以上
-// 留给 kiro 中转（kiro 侧按 token 线性扣积分，1 万以下的小活由不花钱的 qwen
-// 伪装线承接更划算）。
-const TierRoutingInputThreshold = 10000
-
-// TierRoutingMaskedInputCeilingTokens 是伪装线大档的全局估算 input 上限：估算值
-// 超过它的请求一律直接回星思池，不进任何伪装线账号。
-//
-// 取值依据：kiro-go 对非 Claude 模型按 20 万上下文窗口返回（proxy/kiro.go
-// getContextWindowSize），超出后上游静默截断（不报错、直接丢上下文，用户看到的
-// 是模型突然"忘事"）。150000 留出约 25% 余量覆盖输出 tokens 与估算误差。
-const TierRoutingMaskedInputCeilingTokens = 150000
-
-// TierRoutingClassForEstimate 按估算 input 值分档；=阈值判小。
-func TierRoutingClassForEstimate(estimatedInputTokens int) TierRoutingClass {
-	if estimatedInputTokens <= TierRoutingInputThreshold {
-		return TierRoutingSmall
-	}
-	return TierRoutingBig
-}
-
-// kimi 分档候选池取值（OpenAIAccountScheduleRequest.TierRoutingPool）。
-const (
-	tierRoutingPoolMasked      = "masked"       // 伪装线小档池（未声明区间的伪装账号）
-	tierRoutingPoolMaskedLarge = "masked_large" // 伪装线大档池（声明了 masked_input_band 且区间命中）
-	tierRoutingPoolUpstream    = "upstream"     // 非伪装池（星思）
-)
-
 type tierRoutingContextKey struct{}
 
-// tierRoutingState 是请求级分档状态。crossPool 在本档伪装池整池无可用后由跨档重试
-// 置位：小档从伪装线小档池跨到星思池，大档从伪装线大档池跨到星思池。两个方向都只跨
-// 一次，且永不反向——大请求绝不会被塞回小档池。
+// tierRoutingState 只承载本地估算 input tokens（KC-19B 透传），不参与任何分档或池约束。
 type tierRoutingState struct {
-	class          TierRoutingClass
 	estimatedInput int
-	crossPool      bool
-}
-
-// WithTierRouting 把分层路由的分档结果与估算 input 装入请求 ctx；handler 在选号前、
-// 估算判定后调用。空 class 不装门。estimatedInputTokens 供 masked_large 池按账号声明
-// 的 masked_input_band 做区间过滤，同时用于全局大档上限判定。
-func WithTierRouting(ctx context.Context, class TierRoutingClass, estimatedInputTokens int) context.Context {
-	if ctx == nil || class == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, tierRoutingContextKey{}, tierRoutingState{
-		class:          class,
-		estimatedInput: estimatedInputTokens,
-	})
-}
-
-// tierRoutingPoolFromContext 解析请求 ctx 中的分档状态为候选池约束；未装门返回 ""。
-func tierRoutingPoolFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	st, ok := ctx.Value(tierRoutingContextKey{}).(tierRoutingState)
-	if !ok {
-		return ""
-	}
-	if st.crossPool {
-		return tierRoutingPoolUpstream
-	}
-	switch st.class {
-	case TierRoutingSmall:
-		return tierRoutingPoolMasked
-	case TierRoutingBig:
-		// 超过伪装线大档全局上限的请求一律直回星思池：kiro 侧上下文窗口 20 万，
-		// 超了会被上游静默截断（不报错、直接丢上下文），宁可多花钱也不能让用户
-		// 拿到一个"忘了前文"的答案。
-		if st.estimatedInput > TierRoutingMaskedInputCeilingTokens {
-			return tierRoutingPoolUpstream
-		}
-		return tierRoutingPoolMaskedLarge
-	default:
-		return ""
-	}
-}
-
-// tierRoutingPoolAdmitsAccount 是分层路由「池准入」的唯一判定实现。候选过滤
-// （isAccountRequestCompatibleReason）与资格复核（openAIAccountEligibleForTierPool）
-// 共用本函数——两处各写一份 switch 必然漂移：新增 masked_large 时若只改一处，另一处
-// 会把它当未知池放行，表现为大档被伪装号抢走 / 大档号被挤回小档。
-//
-// estimatedInputTokens 取本次请求的估算 input（与分档判定同源），用于大档区间判定。
-// 空 pool 表示未装分档门，一律放行（零行为变化）。
-func tierRoutingPoolAdmitsAccount(pool string, estimatedInputTokens int, account *Account) bool {
-	if pool == "" {
-		return true
-	}
-	masked := IsIdentityMaskedAccount(account)
-	switch pool {
-	case tierRoutingPoolMasked:
-		// 小档：只收未声明区间的大档号退出小档——1 万以下的小活由不花钱的 qwen
-		// 伪装线承接更划算，让 kiro 的积分只烧在 1 万以上的大请求上。
-		_, hasBand := MaskedInputBandOf(account)
-		return masked && !hasBand
-	case tierRoutingPoolMaskedLarge:
-		// 大档：只收声明了区间、且本次估算 input 落在区间内的伪装账号。区间上界由账号
-		// 自己声明（kiro 侧受 20 万上下文约束，声明到 15 万），超出上界的账号在这一档
-		// 直接出局，请求顺势跨到星思池。
-		band, hasBand := MaskedInputBandOf(account)
-		return masked && hasBand && band.Contains(estimatedInputTokens)
-	case tierRoutingPoolUpstream:
-		return !masked
-	default:
-		return true
-	}
 }
 
 // tierRoutingEstimatedInputFromContext 取本次请求的估算 input tokens。未装门返回 0；
@@ -2694,69 +2558,6 @@ func WithEstimatedInputTokens(ctx context.Context, estimatedInputTokens int) con
 // 只读：不改 WithTierRouting / tierRoutingPoolFromContext 等任何既有语义。
 func TierRoutingEstimatedInputTokens(ctx context.Context) int {
 	return tierRoutingEstimatedInputFromContext(ctx)
-}
-
-// TierRoutingGateOpen 是派发单 OC-T1 的动态门控判定：对目标模型 model，门开启当且仅当
-// 存在账号 A 满足「管理态 schedulable=true（以调度快照的管理态为准，忽略运行态熔断/
-// 配额暂停/临时停调——它们不改管理态 schedulable）且 extra.mask_upstream_identity=true
-// 且 A.model_mapping 含键 model」。未开启（无满足条件的账号）→ 返回 false，调用方不装
-// 分档门（原路径零行为变化）；运行态不可用不关门。
-//
-// 账号候选经调度快照（含 DB fallback）取出：schedulerSnapshot 非空时走与选号路径同源的
-// ListSchedulableAccounts（snapshot 已带 mask/mapping，选号器的 IsIdentityMaskedAccount /
-// IsModelSupported 过滤同源消费，生产已证；hasForcePlatform 取选号同款 false）；snapshot
-// 为 nil 时回退既有 repo 查询 ListModelAvailabilityCandidates（与选号器 nil-snapshot 回退
-// 同构）。两类候选最终都由纯函数 tierRoutingGateOpenForAccounts 按上述条件判定，便于单测。
-func (s *OpenAIGatewayService) TierRoutingGateOpen(ctx context.Context, groupID *int64, platform, model string) (bool, error) {
-	if s == nil {
-		return false, nil
-	}
-	if s.schedulerSnapshot != nil {
-		// 与选号路径同源：listSchedulableAccounts 对 OpenAI 兼容入口固定 hasForcePlatform=false。
-		accounts, _, err := s.schedulerSnapshot.ListSchedulableAccounts(ctx, groupID, platform, false)
-		if err != nil {
-			return false, err
-		}
-		return tierRoutingGateOpenForAccounts(accounts, model), nil
-	}
-	if s.accountRepo == nil {
-		return false, nil
-	}
-	// nil-snapshot 回退：与选号器 nil-snapshot 回退同构（仅管理态候选，忽略运行态瞬态）。
-	accounts, err := s.accountRepo.ListModelAvailabilityCandidates(ctx, groupID, []string{platform}, true)
-	if err != nil {
-		return false, err
-	}
-	return tierRoutingGateOpenForAccounts(accounts, model), nil
-}
-
-// tierRoutingGateOpenForAccounts 是动态门控的判定纯函数（派发单 OC-T1）：任一账号满足
-// 「管理态 schedulable=true 且掩码（mask_upstream_identity=true）且 model_mapping 含
-// model（含其模型名别名族写法）」即开门。运行态不可用（熔断/配额暂停/临时停调）一律
-// 不关门——这里只看管理态 Schedulable 字段，绝不调用运行态 IsSchedulable()。
-//
-// 模型名必须按别名族匹配（见 model_name_alias.go）：用户裁定「上游的
-// deepseek-v4.1-flash-1017 一律归一化成 deepseek-v4.1-flash 再提供给下游」，因此下游
-// 只会用统一写法请求，而账号映射里可能只配了族内历史写法（例如 450 只配
-// deepseek-v4.1-flash、其值为上游真名 -1017）。若此处做精确 map 查表，统一写法请求
-// 就命中不了这类账号，门被判成关闭，请求绕过分档直接回落真上游——与归一化裁定冲突。
-func tierRoutingGateOpenForAccounts(accounts []Account, model string) bool {
-	for i := range accounts {
-		a := &accounts[i]
-		if !a.IsActive() || !a.Schedulable {
-			continue
-		}
-		if !IsIdentityMaskedAccount(a) {
-			continue
-		}
-		mapping := a.GetModelMapping()
-		for _, alias := range ModelNameAliases(model) {
-			if _, ok := mapping[alias]; ok {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (s *OpenAIGatewayService) SelectAccountWithScheduler(
@@ -2842,29 +2643,6 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	requireVision bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	selection, decision, err := s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost, requireVision)
-	// 分层路由跨档（派发单 OC-T1 泛化）：请求所在的伪装线档位整池无可用时，按既有熔断
-	// 语义跨档走星思池一次并告警。小档从伪装线小档池跨、大档从伪装线大档池跨；跨档只发生
-	// 一次（crossPool 置位后不再重入），且请求本来就在星思池时不做无意义的空转重试。
-	// 依据 ctx 中的分档状态判定，不再以平台为门。双侧均无可用时 err 原样返回，
-	// 沿 noAvailableOpenAISelectionError 路径 fail-closed——不隐式转其他档。
-	// 跨档故障态优先于 session 粘性（方案 §2 职责隔离）。
-	if err != nil &&
-		(errors.Is(err, ErrNoAvailableAccounts) || errors.Is(err, ErrNoAvailableCompactAccounts)) {
-		if st, ok := ctx.Value(tierRoutingContextKey{}).(tierRoutingState); ok && !st.crossPool {
-			if from := tierRoutingPoolFromContext(ctx); from != "" && from != tierRoutingPoolUpstream {
-				slog.Warn("kimi_tier_cross_pool_failover",
-					"model", requestedModel,
-					"from_pool", from,
-					"to_pool", tierRoutingPoolUpstream,
-					"reason", "masked_pool_exhausted",
-					"estimated_input_tokens", st.estimatedInput,
-				)
-				st.crossPool = true
-				ctx = context.WithValue(ctx, tierRoutingContextKey{}, st)
-				selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost, requireVision)
-			}
-		}
-	}
 	if err == nil || openAIProxyStreamQuarantineBypassed(ctx) {
 		return selection, decision, err
 	}
@@ -2971,11 +2749,6 @@ func (s *OpenAIGatewayService) selectLegacyAccountByPreviousResponse(
 		RequiredCapability:      requiredCapability,
 		RequiredImageCapability: requiredImageCapability,
 		RequireCompact:          requireCompact,
-		// 续轮（previous_response_id）也必须吃分层路由的候选池约束，否则会话一旦
-		// 粘在伪装线账号上，后续超长请求会绕过区间判定被继续送上 kiro，触发上游
-		// 静默截断；估算值同源取自请求 ctx。
-		TierRoutingPool:           tierRoutingPoolFromContext(ctx),
-		TierRoutingEstimatedInput: tierRoutingEstimatedInputFromContext(ctx),
 		ExcludedIDs:               excludedIDs,
 		RequirePrivacySet:         s.openAIGroupRequiresPrivacySet(ctx, groupID),
 	})
@@ -3019,11 +2792,6 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
-	// 分层路由泛化（派发单 OC-T1）：消费请求 ctx 中由 handler 按目标模型 + 动态门装好的
-	// 分档状态（平台无关）；只要 ctx 中分档状态非空即透传候选池约束进本请求全部选号路径
-	// （粘性/负载均衡/failover 重入共用同一 req），调度器侧不再以平台为门。
-	tierRoutingPool := tierRoutingPoolFromContext(ctx)
-	tierRoutingEstimatedInput := tierRoutingEstimatedInputFromContext(ctx)
 	// §3.8 全局视觉路由 kill-switch（vision_routing_enabled，默认开启）：关闭后
 	// RequireVision 恒为 false，行为回到 v1 现状（普通路由）。单点收口于此，
 	// 同时覆盖 §3.4 能力过滤与 §3.7 候选池收窄：置 false 后
@@ -3082,8 +2850,6 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 				RequireCompact:            requireCompact,
 				RequireVision:             requireVision,
 				VisionRoutingTargets:      visionRoutingTargets,
-				TierRoutingPool:           tierRoutingPool,
-				TierRoutingEstimatedInput: tierRoutingEstimatedInput,
 				ExcludedIDs:               excludedIDs,
 				RequirePrivacySet:         s.openAIGroupRequiresPrivacySet(ctx, groupID),
 			})
@@ -3197,8 +2963,6 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		RequireCompact:            requireCompact,
 		RequireVision:             requireVision,
 		VisionRoutingTargets:      visionRoutingTargets,
-		TierRoutingPool:           tierRoutingPool,
-		TierRoutingEstimatedInput: tierRoutingEstimatedInput,
 
 		ExcludedIDs: excludedIDs,
 	})
