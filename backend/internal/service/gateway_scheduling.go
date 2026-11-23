@@ -755,6 +755,20 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	// 经既有初筛（负载快照）后的当前档候选已全部执行过一次实际抢槽且全部失败，
 	// 或初筛后即为空集 → 在此产生唯一一次等待计划（方案 §3.1-5、§4.1）。
 	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
+	// 全组满时粘性原号优先（方案 §3.1-5）：若 sessionHash 绑定的账号仍在本档候选
+	// 集合内且未被排除，把它提到兜底排序首位作为等待目标；否则沿用排序首项。
+	// 候选已过档位门，这里只在档内调整等待目标，不改档位归属与兜底排序本身。
+	if stickyAccountID > 0 && !isExcluded(stickyAccountID) {
+		for i, acc := range candidates {
+			if acc.ID == stickyAccountID {
+				if i > 0 {
+					copy(candidates[1:], candidates[:i])
+					candidates[0] = acc
+				}
+				break
+			}
+		}
+	}
 	for _, acc := range candidates {
 		// 会话数量限制检查（等待计划也需要占用会话配额）
 		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {

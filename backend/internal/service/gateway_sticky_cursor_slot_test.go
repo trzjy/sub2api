@@ -13,6 +13,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -91,6 +92,28 @@ func TestAnthropicStickySlotFullKeepsWaitPlan(t *testing.T) {
 		require.NotNil(t, result.WaitPlan, "同档候选全部抢槽失败后必须产生唯一一次等待计划")
 		require.Contains(t, []int64{1, 2}, result.WaitPlan.AccountID, "等待目标必须在本档候选内")
 		require.Equal(t, 5, result.WaitPlan.MaxConcurrency)
+	})
+
+	t.Run("full_group_prefers_sticky_original_over_fallback_first", func(t *testing.T) {
+		svc, accounts := newAnthropicSlotTestService("sticky-anthropic-priority", 1,
+			map[int64]bool{1: false, 2: false}, // 同档 A(1)、B(2) 都满
+			map[int64]int{1: 0, 2: 0})
+
+		// 兜底排序按 LastUsedAt 升序：让 B(2) 排在 A(1) 前面；两者相差 1 小时
+		// 避开同组 shuffle。粘性绑定为 A，期望等待目标仍是 A 而非排序首项 B。
+		newer := time.Now()
+		older := newer.Add(-time.Hour)
+		accounts[0].LastUsedAt = &newer // A(1) 最近使用 → 排序靠后
+		accounts[1].LastUsedAt = &older // B(2) 更早使用 → 排序靠前
+
+		result, err := svc.SelectAccountWithLoadAwareness(
+			context.Background(), nil, "sticky-anthropic-priority", "claude-3-5-sonnet-20241022", nil, "", int64(0))
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.NotNil(t, result.WaitPlan, "同档候选全部抢槽失败后必须产生唯一一次等待计划")
+		require.Equal(t, int64(1), result.WaitPlan.AccountID,
+			"粘性原号仍在候选内时，等待目标必须是原号 A，而非兜底排序首项 B")
 	})
 }
 
