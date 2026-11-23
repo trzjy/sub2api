@@ -341,43 +341,24 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			account = selection.Account
 			setOpsSelectedAccount(c, account.ID, account.Platform)
 
-			// 4. Acquire account concurrency slot
-			accountReleaseFunc = selection.ReleaseFunc
-			if !selection.Acquired {
-				if selection.WaitPlan == nil {
-					markOpsRoutingCapacityLimited(c)
-					h.responsesErrorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
-					return
+			// 4. Acquire account concurrency slot via the unified entry (§4.3).
+			// 统一入口接管选号已持槽的 ReleaseFunc（不重复占槽）；未持槽时先立即
+			// 抢一次，仅当本次尚未等过且有等待计划才等待一次（换号后不再等待）。
+			var slotFull bool
+			accountReleaseFunc, slotFull = h.concurrencyHelper.AcquireAccountSlotForSelection(
+				c, selection, slotFullCount > 0, reqStream, &streamStarted,
+			)
+			if slotFull {
+				reqLog.Warn("gateway.responses.account_slot_acquire_failed", zap.Int64("account_id", account.ID))
+				// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
+				// 候选耗尽由下一轮选号「无候选」出口按账号并发终态写出。
+				if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
+					continue
 				}
-				waitTimeout := selection.WaitPlan.Timeout
-				if slotFullCount > 0 {
-					// 换号后不等（用户 2026-11-12 裁定）：把等待超时设为 0 ——
-					// 底层 waitForSlotWithPingTimeout 的 tryImmediate 路径会**先立即抢一次槽**
-					// （刚被排除的账号可能刚好释放了槽位，直接放弃会漏掉它），
-					// 抢不到就立刻失败、走下面的排除分支换下一个。
-					// 不排队、不等；总等待时长 = 一次超时，不会放大成 N 倍。
-					waitTimeout = 0
-				}
-				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
-					c,
-					account.ID,
-					selection.WaitPlan.MaxConcurrency,
-					waitTimeout,
-					reqStream,
-					&streamStarted,
-				)
-				if err != nil {
-					reqLog.Warn("gateway.responses.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-					// 槽位等不到（响应尚未写出）：排除该账号，换同组下一个账号再试。
-					// 上限见 maxConcurrencySlotFailoverAttempts；用尽时仍走既有 503 出口。
-					if recordConcurrencySlotFailure(c, fs.FailedAccountIDs, account.ID, &slotFullCount) {
-						continue
-					}
-					h.handleConcurrencyError(c, err, "account", streamStarted)
-					return
-				}
+				h.handleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account", streamStarted)
+				return
 			}
-			// 终检与准入后绑定必须使用选号结果携带的门：门安装在调度栈的局部
+			// 利润终检必须使用选号结果携带的门：门安装在调度栈的局部
 			// ctx 上（composite/fallback 还可能解析出与入口分组不同的门），直接用
 			// requestCtx 会退化为空操作。
 			admissionCtx := service.ContextWithSelectionProfitGate(requestCtx, selection)
@@ -396,11 +377,6 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			}
 			account = latest
 			selection.Account = latest
-			if selection.ProfitGateActive() {
-				if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, sessionHash, account.ID); err != nil {
-					reqLog.Warn("gateway.responses.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				}
-			}
 			// §25.4：账号槽同样改为**可转交**句柄（Cursor 分支交给会话持有）。
 			accountSlot = newTransferableRelease(c.Request.Context(), "account_slot", accountReleaseFunc)
 			if accountSlot != nil {
@@ -595,6 +571,15 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				submitForwardUsage(result)
 			}
 			return
+		}
+
+		// 绑定只在转发成功之后写入（方案 §3.3-0/1）：选号期不再写绑定，
+		// 本次账号与既有绑定不一致时由利润门包装器覆盖。Cursor 分支的会话
+		// 转交/结算已有独立语义，此处不得重复写绑定。
+		if !isCursorPlatformAccount(account) {
+			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); err != nil {
+				reqLog.Warn("gateway.responses.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+			}
 		}
 
 		// 6. Record usage
