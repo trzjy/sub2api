@@ -238,9 +238,13 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	}
 	// 当账号为 Cursor APIKey 渠道（或显式标记 recount_input_tokens）时，本地重算输入
 	// Token 计费，对冲第三方 Cursor 网关（如 kn-cy.com）上游 prompt_tokens 1.6~2.5 倍虚高。
-	// 本地重算的唯一来源是 handler 侧既有估算：service.EstimateTierRoutingInputTokens
-	// → service.WithTierRouting 装进请求 ctx → 透传为 input.EstimatedInputTokens。本文件
-	// 不再持有第二份重算实现（既有 KC-12 的「按请求体本地重算」入口已删除）。
+	// 本地重算的唯一来源是 handler 侧估算：service.EstimateTierRoutingInputTokens
+	// → service.WithEstimatedInputTokens 装进请求 ctx → 透传为 input.EstimatedInputTokens。
+	// 2026-11-23 分层路由下线后，该 ctx 写入只由 cursor 平台入口
+	//（attachCursorEstimatedInputTokens）装配；非 cursor 请求的 EstimatedInputTokens 恒为 0，
+	// 此时 recount_input_tokens 标记不生效并回落上游输入数（生产全库无该标记账号，
+	// 实际使用本地重算的只有 cursor 渠道）。本文件不持有第二份重算实现
+	//（既有 KC-12 的「按请求体本地重算」入口已删除）。
 	// EstimatedInputTokens > 0 时覆盖上游 prompt_tokens；== 0 时回落上游 actualInputTokens
 	//（既有默认，不新增兜底值、不改变计费语义）。
 	if account != nil && (account.IsCursorOpenAICompatibleAccount() || account.GetCredential("recount_input_tokens") == "true") {

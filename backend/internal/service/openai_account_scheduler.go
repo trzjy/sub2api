@@ -99,7 +99,7 @@ type OpenAIAccountScheduleRequest struct {
 	// 集合，且仍叠加 §3.4 的 vision_not_supported 能力过滤（只收窄、不豁免）。
 	// 由选号入口每次请求最多读取一次后透传，避免候选循环内重复查库。
 	VisionRoutingTargets []int64
-	ExcludedIDs               map[int64]struct{}
+	ExcludedIDs          map[int64]struct{}
 }
 
 type OpenAIAccountScheduleDecision struct {
@@ -2749,8 +2749,8 @@ func (s *OpenAIGatewayService) selectLegacyAccountByPreviousResponse(
 		RequiredCapability:      requiredCapability,
 		RequiredImageCapability: requiredImageCapability,
 		RequireCompact:          requireCompact,
-		ExcludedIDs:               excludedIDs,
-		RequirePrivacySet:         s.openAIGroupRequiresPrivacySet(ctx, groupID),
+		ExcludedIDs:             excludedIDs,
+		RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
 	})
 	if !s.openAIAccountMatchesSchedulingGroup(account, groupID) || !compatible || !scheduler.isAccountTransportCompatible(account, requiredTransport) {
 		if selection.ReleaseFunc != nil {
@@ -2838,20 +2838,20 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 			}
 			fallbackScheduler := &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
 			selection, _, err := fallbackScheduler.selectBySessionHash(ctx, OpenAIAccountScheduleRequest{
-				GroupID:                   groupID,
-				Platform:                  platform,
-				SessionHash:               sessionHash,
-				StickyAccountID:           guardianParentAccountID,
-				PreserveStickyBinding:     true,
-				RequestedModel:            requestedModel,
-				RequiredTransport:         requiredTransport,
-				RequiredCapability:        requiredCapability,
-				RequiredImageCapability:   requiredImageCapability,
-				RequireCompact:            requireCompact,
-				RequireVision:             requireVision,
-				VisionRoutingTargets:      visionRoutingTargets,
-				ExcludedIDs:               excludedIDs,
-				RequirePrivacySet:         s.openAIGroupRequiresPrivacySet(ctx, groupID),
+				GroupID:                 groupID,
+				Platform:                platform,
+				SessionHash:             sessionHash,
+				StickyAccountID:         guardianParentAccountID,
+				PreserveStickyBinding:   true,
+				RequestedModel:          requestedModel,
+				RequiredTransport:       requiredTransport,
+				RequiredCapability:      requiredCapability,
+				RequiredImageCapability: requiredImageCapability,
+				RequireCompact:          requireCompact,
+				RequireVision:           requireVision,
+				VisionRoutingTargets:    visionRoutingTargets,
+				ExcludedIDs:             excludedIDs,
+				RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
 			})
 			if err != nil {
 				return nil, decision, err
@@ -2943,26 +2943,26 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 
 	return scheduler.Select(ctx, OpenAIAccountScheduleRequest{
-		GroupID:                   groupID,
-		Platform:                  platform,
-		SessionHash:               sessionHash,
-		StickyAccountID:           stickyAccountID,
-		GuardianParentAccountID:   guardianParentAccountID,
-		StickyPreviousAccountID:   stickyPreviousAccountID,
-		StickyWeighted:            stickyWeighted,
-		SubscriptionPriority:      subscriptionPriority,
-		PreserveStickyBinding:     preserveGuardianParentBinding,
-		RequirePrivacySet:         s.openAIGroupRequiresPrivacySet(ctx, groupID),
-		PreviousResponseID:        previousResponseID,
-		PreviousResponseCanMove:   previousResponseCanMove,
-		UseUpstreamTokenCost:      useUpstreamTokenCost,
-		RequestedModel:            requestedModel,
-		RequiredTransport:         requiredTransport,
-		RequiredCapability:        requiredCapability,
-		RequiredImageCapability:   requiredImageCapability,
-		RequireCompact:            requireCompact,
-		RequireVision:             requireVision,
-		VisionRoutingTargets:      visionRoutingTargets,
+		GroupID:                 groupID,
+		Platform:                platform,
+		SessionHash:             sessionHash,
+		StickyAccountID:         stickyAccountID,
+		GuardianParentAccountID: guardianParentAccountID,
+		StickyPreviousAccountID: stickyPreviousAccountID,
+		StickyWeighted:          stickyWeighted,
+		SubscriptionPriority:    subscriptionPriority,
+		PreserveStickyBinding:   preserveGuardianParentBinding,
+		RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
+		PreviousResponseID:      previousResponseID,
+		PreviousResponseCanMove: previousResponseCanMove,
+		UseUpstreamTokenCost:    useUpstreamTokenCost,
+		RequestedModel:          requestedModel,
+		RequiredTransport:       requiredTransport,
+		RequiredCapability:      requiredCapability,
+		RequiredImageCapability: requiredImageCapability,
+		RequireCompact:          requireCompact,
+		RequireVision:           requireVision,
+		VisionRoutingTargets:    visionRoutingTargets,
 
 		ExcludedIDs: excludedIDs,
 	})

@@ -43,7 +43,6 @@ func syncStreamStartedIfResponseCommitted(c *gin.Context, streamStarted *bool) {
 	}
 }
 
-
 // ChatCompletions handles OpenAI Chat Completions API requests.
 // POST /v1/chat/completions
 func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
@@ -234,8 +233,6 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	// 可能来自不同快照。快照只服务排除判断，选号本身仍取新鲜候选（failover 重选必须
 	// 看见刚被标记失败的账号）。
 	c.Request = c.Request.WithContext(service.WithSizeExclusionCandidateCache(c.Request.Context()))
-
-
 
 	// 订阅组「只接大请求」动态排除（派发单 LRO-06，方案 §3.3）：选号循环前将本分组中
 	// 开启「仅接大请求」开关的账号在小请求上并入 failedAccountIDs；估算 > 阈值（大请求）、

@@ -747,8 +747,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 看见刚被标记失败的账号）。
 	c.Request = c.Request.WithContext(service.WithSizeExclusionCandidateCache(c.Request.Context()))
 
-
-
 	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
 	// 「仅接大请求」开关的账号从小请求（估算 input <= 运行时阈值（默认 256000，后台可配置））
 	// 候选并入 failedAccountIDs；估算 > 阈值（大请求）或估算失败（失败开放）时不排除
@@ -1563,8 +1561,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// 可能来自不同快照。快照只服务排除判断，选号本身仍取新鲜候选（failover 重选必须
 	// 看见刚被标记失败的账号）。
 	c.Request = c.Request.WithContext(service.WithSizeExclusionCandidateCache(c.Request.Context()))
-
-
 
 	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
 	// 「仅接大请求」开关的账号从小请求（估算 input <= 运行时阈值（默认 256000，后台可配置））
@@ -3312,14 +3308,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		h.withOpenAIProfitSuppressedForImage(ctx, firstMessage), apiKey.GroupID)
 	ctx = wsPricingCtx
 
-
 	// 下面三条按规模的排除规则（自建站点大请求 / 商汤与账号自设上限 / 仅接大或仅接小）
 	// 共用同一份候选快照：以前每条规则各读一遍全量候选，一次请求读三遍，而且三份结果
 	// 可能来自不同快照。快照只服务排除判断，选号本身仍取新鲜候选（failover 重选必须
 	// 看见刚被标记失败的账号）。WS 路径用的是局部 ctx 变量，不是 c.Request。
 	ctx = service.WithSizeExclusionCandidateCache(ctx)
-
-
 
 	// 「只接大请求」账号动态排除（派发单 LRO-05，方案 §3.2）：选号循环前将开启
 	// 「仅接大请求」开关的账号从小请求（估算 input <= 运行时阈值（默认 256000，后台可配置））
@@ -5504,4 +5497,3 @@ func attachCursorEstimatedInputTokens(
 	}
 	c.Request = c.Request.WithContext(service.WithEstimatedInputTokens(c.Request.Context(), estimated))
 }
-
