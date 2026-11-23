@@ -188,6 +188,7 @@ func lastFailureWasSlot(c *gin.Context) bool {
 //
 // 行为严格按 §4.3 第 0-4 步：已持槽直接接管 ReleaseFunc 不重复抢槽；未持槽先立即
 // 抢一次；抢失败且本次尚未等过且有等待计划则等待一次；其余抢失败返回 slotFull=true。
+// 等待分支失败（含排队上限）时设置请求级等待耗尽标记，后续候选只做立即抢槽。
 func (h *ConcurrencyHelper) AcquireAccountSlotForSelection(
 	c *gin.Context,
 	selection *service.AccountSelectionResult,
@@ -234,6 +235,8 @@ func (h *ConcurrencyHelper) AcquireAccountSlotForSelection(
 		if waitCountErr != nil {
 			logger.LegacyPrintf("handler.concurrency_slot", "increment account wait count failed: account_id=%d err=%v", accountID, waitCountErr)
 		} else if !canWait {
+			// 排队上限已达，等待机会用尽：后续候选只做立即抢槽，不再重试等待。
+			markConcurrencySlotWaitExhausted(c)
 			return nil, true
 		} else {
 			accountWaitCounted = true
@@ -249,6 +252,9 @@ func (h *ConcurrencyHelper) AcquireAccountSlotForSelection(
 		if waitErr == nil && waitRelease != nil {
 			return waitRelease, false
 		}
+		// 等待失败：设置请求级标记，后续候选通过 concurrencySlotWaitExhausted(c)
+		// 读到 true 后只做立即抢槽，不再对每个候选重复完整等待。
+		markConcurrencySlotWaitExhausted(c)
 		return nil, true
 	}
 

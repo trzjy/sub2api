@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -620,7 +621,7 @@ func (h *GatewayHandler) acquireGeminiCachedContentAccountSlot(c *gin.Context, r
 	streamStarted := false
 	release, slotFull := helper.AcquireAccountSlotForSelection(c, selection, concurrencySlotWaitExhausted(c), false, &streamStarted)
 	if slotFull {
-		googleConcurrencyError(c, &ConcurrencyError{SlotType: "account"}, "account")
+		googleError(c, http.StatusTooManyRequests, infraerrors.NoAvailableAccounts)
 		return nil, false
 	}
 	if release == nil {

@@ -101,6 +101,7 @@ func TestAcquireAccountSlotForSelection(t *testing.T) {
 		release()
 		require.True(t, called, "已持槽必须返回同一 ReleaseFunc")
 		require.Equal(t, 0, cache.accountAcquireCalls, "已持槽不得再次抢槽")
+		require.False(t, concurrencySlotWaitExhausted(c), "已持槽分支不得设置等待耗尽标记")
 	})
 
 	t.Run("not_acquired_immediate_success", func(t *testing.T) {
@@ -112,6 +113,7 @@ func TestAcquireAccountSlotForSelection(t *testing.T) {
 		require.False(t, slotFull)
 		require.NotNil(t, release)
 		require.Equal(t, 1, cache.accountAcquireCalls, "未持槽应只做一次立即抢槽")
+		require.False(t, concurrencySlotWaitExhausted(c), "立即抢槽成功分支不得设置等待耗尽标记")
 		release()
 	})
 
@@ -185,6 +187,7 @@ func TestAcquireAccountSlotForSelection(t *testing.T) {
 		require.Equal(t, 1, cache.increments, "等待前应计数一次")
 		require.Equal(t, 0, cache.decrements, "未成功计数不得减数")
 		require.Equal(t, 1, base.accountAcquireCalls, "不可等待时不得进入等待路径（只做一次立即抢槽）")
+		require.True(t, concurrencySlotWaitExhausted(c), "排队上限达到（等待机会用尽）也应设置标记")
 	})
 
 	t.Run("wait_success_decrements_wait_count_once", func(t *testing.T) {
@@ -208,5 +211,63 @@ func TestAcquireAccountSlotForSelection(t *testing.T) {
 		require.Equal(t, 2, base.accountAcquireCalls, "先立即抢槽一次，再等待抢槽一次")
 		require.Equal(t, 1, cache.increments, "等待前应计数一次")
 		require.Equal(t, 1, cache.decrements, "等待结束后计数必须减回一次")
+	})
+
+	t.Run("wait_failure_marks_wait_exhausted", func(t *testing.T) {
+		// 立即抢槽失败 + 等待超时 → 必须设置请求级等待耗尽标记，
+		// 让同一请求的后续候选只做立即抢槽，不再重复完整等待。
+		base := &helperConcurrencyCacheStub{accountSeq: []bool{false, false}}
+		cache := &waitCountingCacheStub{helperConcurrencyCacheStub: base, canWait: true}
+		helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Millisecond)
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+		selection := newSelection()
+		selection.WaitPlan = &service.AccountWaitPlan{
+			AccountID:      101,
+			MaxConcurrency: 3,
+			MaxWaiting:     2,
+			Timeout:        10 * time.Millisecond,
+		}
+		release, slotFull := helper.AcquireAccountSlotForSelection(c, selection, false, false, nil)
+		require.Nil(t, release)
+		require.True(t, slotFull, "等待超时必须返回 slotFull")
+		require.True(t, concurrencySlotWaitExhausted(c), "等待失败后必须设置请求级等待耗尽标记")
+		require.Equal(t, 2, base.accountAcquireCalls, "立即抢槽一次 + 等待入口立即抢槽一次")
+		require.Equal(t, 1, cache.increments, "等待前应计数一次")
+		require.Equal(t, 1, cache.decrements, "等待失败后计数必须减回一次")
+	})
+
+	t.Run("wait_exhausted_marker_prevents_second_wait", func(t *testing.T) {
+		// 端到端：第一次候选等待失败设置标记；后续候选通过 concurrencySlotWaitExhausted(c)
+		// 读到 true 作为 alreadyWaited，只做立即抢槽，不再进入等待。
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+		firstCache := &helperConcurrencyCacheStub{accountSeq: []bool{false, false}}
+		firstHelper := newHelper(firstCache)
+		firstSelection := newSelection()
+		firstSelection.WaitPlan = &service.AccountWaitPlan{
+			AccountID:      101,
+			MaxConcurrency: 3,
+			Timeout:        10 * time.Millisecond,
+		}
+		_, firstSlotFull := firstHelper.AcquireAccountSlotForSelection(c, firstSelection, false, false, nil)
+		require.True(t, firstSlotFull, "前置条件：第一个候选等待失败")
+		require.True(t, concurrencySlotWaitExhausted(c), "前置条件：请求级等待耗尽标记已设置")
+
+		// 第二个候选换用全新 helper/cache，仅通过请求上下文传递标记，
+		// 模拟调用方把 concurrencySlotWaitExhausted(c) 作为 alreadyWaited 传入。
+		secondCache := &helperConcurrencyCacheStub{accountSeq: []bool{false}}
+		secondHelper := newHelper(secondCache)
+		secondSelection := newSelection()
+		secondSelection.WaitPlan = &service.AccountWaitPlan{
+			AccountID:      102,
+			MaxConcurrency: 3,
+			Timeout:        10 * time.Millisecond,
+		}
+		release, slotFull := secondHelper.AcquireAccountSlotForSelection(
+			c, secondSelection, concurrencySlotWaitExhausted(c), false, nil)
+		require.Nil(t, release)
+		require.True(t, slotFull)
+		require.Equal(t, 1, secondCache.accountAcquireCalls, "已等过时只做一次立即抢槽，不得再次进入等待")
 	})
 }
