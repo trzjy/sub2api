@@ -1820,15 +1820,17 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		}
 	}
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {
-		// 负载感知关闭路径（方案 §3.1/§4.2）：粘性账号抢槽失败后不再原地等待，
+		// 负载感知关闭路径（方案 §3.1/§4.2/§3.1-5）：粘性账号抢槽失败后不再原地等待，
 		// 把该账号加入本次请求的排除集合继续选下一个候选；全部候选逐个实际抢槽
-		// 都失败后，才返回唯一一次兜底等待计划（目标账号取最后一个抢槽失败的候选）。
+		// 都失败后，才返回唯一一次兜底等待计划。等待目标优先粘性原号（若它在候选内
+		// 且已被尝试并因槽满失败），否则取最后一个抢槽失败的候选。
 		candidateExcludedIDs := make(map[int64]struct{}, len(excludedIDs))
 		for id := range excludedIDs {
 			candidateExcludedIDs[id] = struct{}{}
 		}
 		var lastFailed *Account
 		var lastStickyHit bool
+		var stickyFailed *Account // 粘性原号在本轮候选内抢槽失败，优先作为等待目标
 		var lastErr error
 		for {
 			account, stickyHit, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, candidateExcludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate)
@@ -1844,6 +1846,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			// 抢槽失败：排除该账号，继续下一个候选；不在粘性账号上返回等待计划。
 			lastFailed = account
 			lastStickyHit = stickyHit
+			// 粘性原号在本轮候选内被尝试且抢槽（槽满）失败时记住它，作为最终等待目标。
+			if stickyAccountID > 0 && account.ID == stickyAccountID {
+				stickyFailed = account
+			}
 			candidateExcludedIDs[account.ID] = struct{}{}
 		}
 		if lastFailed == nil {
@@ -1852,13 +1858,20 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			}
 			return nil, noAvailableOpenAISelectionError(requestedModel, false, "")
 		}
-		selection, selectErr := s.newSelectionResult(ctx, lastFailed, false, nil, &AccountWaitPlan{
-			AccountID:      lastFailed.ID,
-			MaxConcurrency: lastFailed.Concurrency,
+		// 等待目标优先粘性原号；否则保持既有最后失败账号（方案 §3.1-5）。
+		waitTarget := lastFailed
+		waitStickyHit := lastStickyHit
+		if stickyFailed != nil {
+			waitTarget = stickyFailed
+			waitStickyHit = true
+		}
+		selection, selectErr := s.newSelectionResult(ctx, waitTarget, false, nil, &AccountWaitPlan{
+			AccountID:      waitTarget.ID,
+			MaxConcurrency: waitTarget.Concurrency,
 			Timeout:        cfg.FallbackWaitTimeout,
 			MaxWaiting:     cfg.FallbackMaxWaiting,
 		})
-		return markStickySessionHit(selection, lastStickyHit), selectErr
+		return markStickySessionHit(selection, waitStickyHit), selectErr
 	}
 
 	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
