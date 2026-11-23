@@ -3820,6 +3820,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if result == nil {
 					return
 				}
+				// 成功终态轮次在 AfterTurn 回调内写粘连绑定：连接正常关闭并不代表最后
+				// 一个 turn 成功（终审 C29a），失败/取消终态不写，连接结束也不写。
+				if openAIForwardSucceededForScheduling(result) {
+					if bindErr := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, apiKey.GroupID, sessionHash, account.ID); bindErr != nil {
+						reqLog.Warn("openai.websocket_bind_sticky_session_after_profit_admission_failed",
+							zap.Int64("account_id", account.ID), zap.Error(bindErr))
+					}
+				}
 				result.BillingModel = openAIWSTurnBillingModel(result, turnMapping, turnRequestedModel, turnUpstreamModel)
 				reqLog.Debug("openai.websocket_turn_billing",
 					zap.Int("turn", turn),
@@ -3897,10 +3905,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		for {
 			err := h.gatewayService.ProxyResponsesWebSocketFromClient(ctx, c, wsConn, account, token, wsFirstMessage, hooks)
 			if err == nil {
-				// 实际转发成功后才写绑定：凭证获取后、连接/请求失败路径均不得改写粘连账号。
-				if bindErr := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, apiKey.GroupID, sessionHash, account.ID); bindErr != nil {
-					reqLog.Warn("openai.websocket_bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(bindErr))
-				}
+				// 绑定在 AfterTurn 按成功终态写入，连接正常关闭本身不代表成功（终审 C29a）。
 				reqLog.Info("openai.websocket_ingress_closed", zap.Int64("account_id", account.ID))
 				return
 			}
