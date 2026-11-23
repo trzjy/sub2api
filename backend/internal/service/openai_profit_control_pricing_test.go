@@ -186,11 +186,8 @@ func TestOpenAIProfitControlStickyBindingOccursOnlyAfterTerminalAdmission(t *tes
 		threshold: 0.5,
 	})
 
-	require.NoError(t, svc.bindOpenAIStickySessionDuringSelection(ctx, &groupID, sessionHash, cheapID))
-	require.Equal(t, expensiveID, cache.sessionBindings[cacheKey], "选号阶段不得覆盖原粘性绑定")
-
 	require.NoError(t, svc.BindStickySessionAfterProfitAdmission(ctx, &groupID, sessionHash, cheapID))
-	require.Equal(t, expensiveID, cache.sessionBindings[cacheKey], "终检通过的 fallback 账号不得覆盖原粘性绑定")
+	require.Equal(t, cheapID, cache.sessionBindings[cacheKey], "服务成功后的改绑允许覆盖既有粘性绑定")
 
 	cache.sessionBindings[cacheKey] = 0
 	require.NoError(t, svc.BindStickySessionAfterProfitAdmission(ctx, &groupID, sessionHash, cheapID))
