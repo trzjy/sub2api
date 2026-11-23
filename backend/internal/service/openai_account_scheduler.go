@@ -1989,6 +1989,44 @@ func (s *defaultOpenAIAccountScheduler) finishLoadBalanceSelectionFallback(
 
 	cfg := s.service.schedulingConfig()
 	compactBlocked := attempt.compactBlocked
+	// 等待目标优先会话原号：pass 过滤会跳过已尝试/已知满载的候选，
+	// 因此不能只调 selectionOrder 顺序；在进入 pass 循环前单独复核原号一次。
+	if req.StickyAccountID > 0 {
+		excluded := false
+		if req.ExcludedIDs != nil {
+			_, excluded = req.ExcludedIDs[req.StickyAccountID]
+		}
+		if !excluded {
+			for _, candidate := range attempt.selectionOrder {
+				if candidate.account == nil || candidate.account.ID != req.StickyAccountID {
+					continue
+				}
+				fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.Platform, req.RequestedModel, false, req.RequiredCapability)
+				if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
+					break
+				}
+				if !s.consumeOpenAISelectionDBRecheck(budget) {
+					return nil, candidateCount, topK, loadSkew, noAvailableOpenAISelectionError(req.RequestedModel, compactBlocked, filterStats.summary("sticky_wait_target_budget"))
+				}
+				fresh = s.service.recheckSelectedOpenAIAccountFromDB(ctx, fresh, req.GroupID, req.Platform, req.RequestedModel, false, req.RequiredCapability)
+				if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
+					break
+				}
+				if req.RequireCompact && openAICompactSupportTier(fresh) == 0 {
+					break
+				}
+				return attachSelectionProfitGate(ctx, &AccountSelectionResult{
+					Account: fresh,
+					WaitPlan: &AccountWaitPlan{
+						AccountID:      fresh.ID,
+						MaxConcurrency: fresh.Concurrency,
+						Timeout:        cfg.FallbackWaitTimeout,
+						MaxWaiting:     cfg.FallbackMaxWaiting,
+					},
+				}), candidateCount, topK, loadSkew, nil
+			}
+		}
+	}
 	// WaitPlan.MaxConcurrency 使用 Concurrency（非 EffectiveLoadFactor），因为 WaitPlan 控制的是 Redis 实际并发槽位等待。
 	passes := 1
 	if budget != nil && budget.limited {

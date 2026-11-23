@@ -266,3 +266,42 @@ func (h *ConcurrencyHelper) AcquireAccountSlotForSelection(
 	// 3. 抢失败且（已等过 或 无等待计划）→ slotFull。
 	return nil, true
 }
+
+// compositeOwnershipRejectedKey 标记本次请求发生过「复合归属不合格」的候选排除。
+const compositeOwnershipRejectedKey = "composite_ownership_rejected"
+
+// RejectCompositeIneligible 在选号后、抢槽/转发前做唯一一次归属核对。
+// 不合格时：释放选号器已占的槽、把账号排除出本请求候选、登记独立计数；
+// 不递增 slotFullCount、不设置「已等过」标记（不得消耗本次请求的唯一一次等待）。
+// 返回 true 表示调用方应 continue 换下一个候选。
+func (h *ConcurrencyHelper) RejectCompositeIneligible(
+	c *gin.Context,
+	selection *service.AccountSelectionResult,
+	failed map[int64]struct{},
+	rejectedCount *int,
+) bool {
+	if c == nil || selection == nil || selection.Account == nil {
+		return false
+	}
+	endpoint := service.CompositeEndpointForInboundPath(c.Request.URL.Path)
+	if _, ok := service.CompositeSelectedAccountServes(c.Request.Context(), endpoint, selection.Account); ok {
+		return false
+	}
+	if selection.Acquired && selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+	if failed != nil {
+		failed[selection.Account.ID] = struct{}{}
+	}
+	if rejectedCount != nil {
+		*rejectedCount++
+	}
+	c.Set(compositeOwnershipRejectedKey, true)
+	return true
+}
+
+// NoAvailableBySlotOrOwnership 汇总两类候选耗尽原因：槽满 或 归属不合格。
+// 各入口终态分支用它替换原来的 slotFullCount > 0 判断。
+func NoAvailableBySlotOrOwnership(slotFullCount, ownershipRejectedCount int) bool {
+	return slotFullCount > 0 || ownershipRejectedCount > 0
+}

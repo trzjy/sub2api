@@ -79,7 +79,7 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	if selectionErr.SessionSlotsFull > 0 {
 		return noAccountErrorClassification{
 			Status:  http.StatusServiceUnavailable,
-			ErrType: "service_unavailable",
+			ErrType: "api_error",
 			Message: infraerrors.NoAvailableAccounts,
 		}
 	}

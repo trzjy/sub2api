@@ -733,25 +733,5 @@ func compositeGeminiModelFromParams(c *gin.Context) string {
 }
 
 func compositeRouteEndpointForPath(path string) string {
-	switch {
-	case strings.Contains(path, "/messages/count_tokens"):
-		return service.CompositeRouteEndpointCountTokens
-	case strings.Contains(path, "/messages"):
-		return service.CompositeRouteEndpointMessages
-	case strings.Contains(path, "/responses"),
-		strings.Contains(path, "/alpha/search"),
-		strings.Contains(path, "/realtime/calls"),
-		strings.HasSuffix(strings.TrimRight(path, "/"), "/live"):
-		return service.CompositeRouteEndpointResponses
-	case strings.Contains(path, "/chat/completions"):
-		return service.CompositeRouteEndpointChatCompletions
-	case strings.Contains(path, "/embeddings"):
-		return service.CompositeRouteEndpointEmbeddings
-	case strings.Contains(path, "/images/"):
-		return service.CompositeRouteEndpointImages
-	case strings.Contains(path, "/v1beta/"):
-		return service.CompositeRouteEndpointGemini
-	default:
-		return service.CompositeRouteEndpointAny
-	}
+	return service.CompositeEndpointForInboundPath(path)
 }

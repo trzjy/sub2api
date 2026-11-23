@@ -2202,6 +2202,19 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		candidates = prioritizeOpenAICompactAccounts(candidates)
 	}
 	partitionFreeRemainingFirst(candidates)
+	// 等待目标优先会话原号（与 Anthropic 主链 Layer 3 同型）：原号仍在候选且未排除时提到遍历首位。
+	// 只调整等待目标，不改档位与抢槽排序。
+	if stickyAccountID > 0 && !isExcluded(stickyAccountID) {
+		for i, acc := range candidates {
+			if acc.ID == stickyAccountID {
+				if i > 0 {
+					copy(candidates[1:], candidates[:i])
+					candidates[0] = acc
+				}
+				break
+			}
+		}
+	}
 	for _, acc := range candidates {
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 		if fresh == nil {
