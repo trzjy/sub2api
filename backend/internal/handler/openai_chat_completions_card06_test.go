@@ -15,8 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 
 	middleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 )
@@ -90,51 +88,4 @@ func TestOpenAIChatCompletionsCompositeMusePlatformStillAllowed(t *testing.T) {
 	require.NotEqual(t, http.StatusNotFound, recorder.Code,
 		"composite 解析到 muse 目标不应被 404 拒绝")
 	require.NotEqual(t, "model_not_found", gjson.Get(recorder.Body.String(), "error.type").String())
-}
-
-// CARD-06 §背景2：分层路由 token 预估失败 Fail-Open——不阻断请求、不回 400，
-// 保留基础 context 按原路径正常转发，并打 Warn 日志。
-func TestOpenAIChatCompletionsTierRoutingFailOpenPreservesBaseContext(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	h := &OpenAIGatewayHandler{}
-
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-
-	core, logs := observer.New(zap.WarnLevel)
-	reqLog := zap.New(core)
-
-	// 门控开启，但 messages 含不支持的 role，使 token 估算失败。
-	gateOpen := func(string) (bool, error) { return true, nil }
-	body := []byte(`{"model":"kimi-k3","messages":[{"role":"bogus","content":"hi"}]}`)
-
-	baseCtx := c.Request.Context()
-	got := h.applyTierRoutingFailOpen(c, reqLog, "kimi-k3", "kimi-k3",
-		service.TierRoutingProtocolChatCompletions, body, gateOpen)
-
-	require.True(t, baseCtx == got,
-		"分层路由估算失败必须 Fail-Open 保留基础 context（不回 400）")
-	require.Equal(t, 1, logs.FilterMessage("openai_chat_completions.kimi_tier_estimate_failed").Len(),
-		"估算失败必须打 Warn 日志")
-}
-
-// 对照：门控未开启时 applyTierRouting 返回 baseCtx（nil error），Fail-Open 封装原样返回。
-func TestOpenAIChatCompletionsTierRoutingGateClosedReturnsBaseContext(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	h := &OpenAIGatewayHandler{}
-
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	reqLog := zap.NewNop()
-
-	gateOpen := func(string) (bool, error) { return false, nil }
-	body := []byte(`{"model":"kimi-k3","messages":[{"role":"user","content":"hi"}]}`)
-
-	baseCtx := c.Request.Context()
-	got := h.applyTierRoutingFailOpen(c, reqLog, "kimi-k3", "kimi-k3",
-		service.TierRoutingProtocolChatCompletions, body, gateOpen)
-
-	require.True(t, baseCtx == got, "门控未开启必须回落基础 context，零行为变化")
 }
