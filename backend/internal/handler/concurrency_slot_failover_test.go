@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -9,6 +10,27 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
+
+// waitCountingCacheStub 在 helperConcurrencyCacheStub 之上记录账号等待计数的增减调用，
+// 用于验证统一抢槽入口的排队上限语义。仅扩展计数字段/方法，不改生产接口。
+type waitCountingCacheStub struct {
+	*helperConcurrencyCacheStub
+
+	canWait    bool
+	waitErr    error
+	increments int
+	decrements int
+}
+
+func (s *waitCountingCacheStub) IncrementAccountWaitCount(_ context.Context, _ int64, _ int) (bool, error) {
+	s.increments++
+	return s.canWait, s.waitErr
+}
+
+func (s *waitCountingCacheStub) DecrementAccountWaitCount(_ context.Context, _ int64) error {
+	s.decrements++
+	return nil
+}
 
 func TestRecordConcurrencySlotFailure(t *testing.T) {
 	failed := map[int64]struct{}{}
@@ -141,5 +163,50 @@ func TestAcquireAccountSlotForSelection(t *testing.T) {
 		require.Nil(t, release)
 		require.True(t, slotFull)
 		require.Equal(t, 1, cache.accountAcquireCalls, "已等过时只做一次立即抢槽，不得再等待")
+	})
+
+	t.Run("wait_queue_full_returns_slot_full_without_waiting", func(t *testing.T) {
+		// 等待计数达到上限（canWait=false）→ 直接 slotFull，不进入等待，也不减数。
+		base := &helperConcurrencyCacheStub{accountSeq: []bool{false}}
+		cache := &waitCountingCacheStub{helperConcurrencyCacheStub: base, canWait: false}
+		helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Millisecond)
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+		selection := newSelection()
+		selection.WaitPlan = &service.AccountWaitPlan{
+			AccountID:      101,
+			MaxConcurrency: 3,
+			MaxWaiting:     2,
+			Timeout:        2 * time.Second,
+		}
+		release, slotFull := helper.AcquireAccountSlotForSelection(c, selection, false, false, nil)
+		require.Nil(t, release)
+		require.True(t, slotFull, "排队上限达到时必须直接 slotFull")
+		require.Equal(t, 1, cache.increments, "等待前应计数一次")
+		require.Equal(t, 0, cache.decrements, "未成功计数不得减数")
+		require.Equal(t, 1, base.accountAcquireCalls, "不可等待时不得进入等待路径（只做一次立即抢槽）")
+	})
+
+	t.Run("wait_success_decrements_wait_count_once", func(t *testing.T) {
+		// 立即抢槽失败、计数成功、等待路径抢槽成功 → 计数必须被减回一次。
+		base := &helperConcurrencyCacheStub{accountSeq: []bool{false, true}}
+		cache := &waitCountingCacheStub{helperConcurrencyCacheStub: base, canWait: true}
+		helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Millisecond)
+		c, _ := newHelperTestContext(http.MethodPost, "/v1/messages")
+
+		selection := newSelection()
+		selection.WaitPlan = &service.AccountWaitPlan{
+			AccountID:      101,
+			MaxConcurrency: 3,
+			MaxWaiting:     2,
+			Timeout:        2 * time.Second,
+		}
+		release, slotFull := helper.AcquireAccountSlotForSelection(c, selection, false, false, nil)
+		require.False(t, slotFull)
+		require.NotNil(t, release)
+		release()
+		require.Equal(t, 2, base.accountAcquireCalls, "先立即抢槽一次，再等待抢槽一次")
+		require.Equal(t, 1, cache.increments, "等待前应计数一次")
+		require.Equal(t, 1, cache.decrements, "等待结束后计数必须减回一次")
 	})
 }

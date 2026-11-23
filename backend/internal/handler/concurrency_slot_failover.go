@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -223,6 +224,27 @@ func (h *ConcurrencyHelper) AcquireAccountSlotForSelection(
 	// 2. 抢失败且本次尚未等过且有等待计划 → 等待一次。
 	if !alreadyWaited && selection.WaitPlan != nil {
 		wp := selection.WaitPlan
+
+		// 等待前维护账号等待计数（方案 §3.1-5、§4.3），排队上限 MaxWaiting 由此生效。
+		// 与既有 handler 语义一致：err != nil 仅记录、不拒绝（仍尝试等待）；
+		// canWait=false（超过上限）直接返回 slotFull。计数成功时由 defer 保证
+		// 等待结束（成功或失败）只减一次。
+		accountWaitCounted := false
+		canWait, waitCountErr := h.IncrementAccountWaitCount(c.Request.Context(), accountID, wp.MaxWaiting)
+		if waitCountErr != nil {
+			logger.LegacyPrintf("handler.concurrency_slot", "increment account wait count failed: account_id=%d err=%v", accountID, waitCountErr)
+		} else if !canWait {
+			return nil, true
+		} else {
+			accountWaitCounted = true
+		}
+		defer func() {
+			if accountWaitCounted {
+				h.DecrementAccountWaitCount(c.Request.Context(), accountID)
+				accountWaitCounted = false
+			}
+		}()
+
 		waitRelease, waitErr := h.AcquireAccountSlotWithWaitTimeout(c, accountID, wp.MaxConcurrency, wp.Timeout, isStream, streamStarted)
 		if waitErr == nil && waitRelease != nil {
 			return waitRelease, false
