@@ -7,11 +7,11 @@ package service
 // 定向单测。
 //
 // 本轮裁定（派发单 CURSOR-A）：
-//   - 派发顺序严格为 f10 → f36 → f11 → 11 类原生拒绝 → 已证 metadata → fail-close。
-//   - 11 类原生 exec（f2/f3/f4/f5/f7/f8/f9/f14/f16/f20/f23）一律按协议拒绝，不执行、不配对、
-//     不做 shell fallback；只有 f11 mcp_args 走客户端声明工具执行。
+//   - 派发顺序严格为 f10 → f36 → f11 → 11 类原生 exec → 已证 metadata → fail-close。
+//   - 11 类原生 exec（f2/f3/f4/f5/f7/f8/f9/f14/f16/f20/f23）一律返回协议错误、零回包，
+//     不执行、不配对、不做 shell fallback；只有 f11 mcp_args 走客户端声明工具执行。
 //   - 服务端 metadata 白名单只含 f1/f15/f19/f55/f57；f39/f45 不再被当作 metadata 忽略，
-//     f45（pi_read_args）未实现必须走 unsupported fail-close。
+//     未知 exec 字段（含 f45 pi_read_args）一律返回协议错误、零回包。
 //   - respondContext 不再伪造服务器 GOOS / "UTC" 环境。
 //
 // 注意：本文件自带所需的 schema 字面量，不跨文件依赖 cursor_native_fs_bridge_test.go
@@ -98,7 +98,7 @@ func TestCursorExecMetaOnlyIgnored(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ② 未知非元数据字段（f99，wire=2/bytes）→ 派发单 D 阶段 2：回通用错误结果帧，整轮继续，不 502
+// ② 未知非元数据字段（f99，wire=2/bytes）→ 协议错误、零回包（CUR-SVC2 新语义）
 // ---------------------------------------------------------------------------
 
 func TestCursorExecUnknownFieldStillFailsClosed(t *testing.T) {
@@ -109,17 +109,17 @@ func TestCursorExecUnknownFieldStillFailsClosed(t *testing.T) {
 	execMsg = cursorAppendBytesField(execMsg, 99, []byte("unknown-exec"))
 
 	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
-	// 派发单 D 阶段 2 契约：未知 exec 字段不再 502，而是回通用错误结果帧并继续整轮。
-	require.NoError(t, err, "未知 exec 字段不得 502（派发单 D：回通用错误帧，整轮继续）")
+	// v9 §5/§8.2：未知 exec 字段一律为协议错误，不再伪造通用错误结果帧。
+	require.Error(t, err, "未知 exec 字段必须返回协议错误")
 	require.False(t, done, "未知 exec 字段不是终态")
 	require.Equal(t, 1, phaseCount(logs, "exec_unsupported_fields"), "必须保留 exec_unsupported_fields 取证日志")
 	nums := fmt.Sprint(logs.FilterField(zap.String("phase", "exec_unsupported_fields")).All()[0].ContextMap()["field_numbers"])
 	require.Contains(t, nums, "99", "取证日志必须含未知字段号")
 	require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"), "含未知字段时不得按元数据忽略")
 	require.Equal(t, 0, phaseCount(logs, "close"), "连接不得被终止")
-	// 必须写出通用错误结果帧 {field:{f2:{f2:text}}}。
 	cleanup()
-	cursorStage2ExpectGenericReject(t, buf, 99, cursorGenericUnknownExecRejectText)
+	// 协议错误路径不得写出任何结果帧。
+	require.Empty(t, buf.Len(), "未知 exec 字段必须零回包")
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ func TestCursorExecMetaMachineIDOnlyIgnored(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ④ 元数据与未知字段混排 → 未知字段回通用帧继续，不 502（白名单不掩盖未知字段）
+// ④ 元数据与未知字段混排 → 未知字段返回协议错误、零回包（白名单不掩盖未知字段）
 // ---------------------------------------------------------------------------
 
 func TestCursorExecMetaMixedWithUnknownFailsClosed(t *testing.T) {
@@ -152,16 +152,16 @@ func TestCursorExecMetaMixedWithUnknownFailsClosed(t *testing.T) {
 	execMsg = cursorAppendBytesField(execMsg, 99, []byte("unknown-exec"))
 
 	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
-	// 派发单 D 阶段 2：元数据照旧忽略，未知字段回通用帧继续，整轮不得 502。
-	require.NoError(t, err, "元数据 + 未知字段混排：未知字段回通用帧继续，不得 502")
+	// 元数据照旧忽略，未知字段返回协议错误、零回包。
+	require.Error(t, err, "元数据 + 未知字段混排：未知字段必须返回协议错误")
 	require.False(t, done)
 	require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"), "含未知字段时不得按元数据忽略")
 	cleanup()
-	cursorStage2ExpectGenericReject(t, buf, 99, cursorGenericUnknownExecRejectText)
+	require.Empty(t, buf.Len(), "未知 exec 字段必须零回包")
 }
 
 // ---------------------------------------------------------------------------
-// ⑤ f45（pi_read_args，未实现，wire=2/bytes）→ 派发单 D 阶段 2：回通用错误帧，不 502
+// ⑤ f45（pi_read_args，未实现，wire=2/bytes）→ 协议错误、零回包
 // ---------------------------------------------------------------------------
 
 func TestCursorExecF45FailsClosed(t *testing.T) {
@@ -172,16 +172,16 @@ func TestCursorExecF45FailsClosed(t *testing.T) {
 	execMsg = cursorAppendBytesField(execMsg, 45, []byte("pi-read-args"))
 
 	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
-	require.NoError(t, err, "f45 未知 exec 字段不得 502（派发单 D：回通用错误帧继续）")
+	require.Error(t, err, "f45 未知 exec 字段必须返回协议错误")
 	require.False(t, done)
 	require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"), "f45 不得按 metadata 忽略")
 	require.Equal(t, 1, phaseCount(logs, "exec_unsupported_fields"))
 	cleanup()
-	cursorStage2ExpectGenericReject(t, buf, 45, cursorGenericUnknownExecRejectText)
+	require.Empty(t, buf.Len(), "未知 exec 字段必须零回包")
 }
 
 // ---------------------------------------------------------------------------
-// ⑥ f39（local_execution_time_ms，客户端方向，wire=2/bytes）→ 派发单 D：回通用错误帧，不 502
+// ⑥ f39（local_execution_time_ms，客户端方向，wire=2/bytes）→ 协议错误、零回包
 // ---------------------------------------------------------------------------
 
 func TestCursorExecF39NotMetadata(t *testing.T) {
@@ -191,12 +191,12 @@ func TestCursorExecF39NotMetadata(t *testing.T) {
 	execMsg = cursorAppendBytesField(execMsg, 39, []byte("local-time"))
 
 	done, err := d.respond(cursorExecMetaTestPayload(execMsg))
-	require.NoError(t, err, "f39 未知 exec 字段不得 502（派发单 D：回通用错误帧继续）")
+	require.Error(t, err, "f39 未知 exec 字段必须返回协议错误")
 	require.False(t, done)
 	require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"))
 	require.Equal(t, 1, phaseCount(logs, "exec_unsupported_fields"))
 	cleanup()
-	cursorStage2ExpectGenericReject(t, buf, 39, cursorGenericUnknownExecRejectText)
+	require.Empty(t, buf.Len(), "未知 exec 字段必须零回包")
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ func TestCursorExecMetadataFieldWhitelist(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ⑧ 11 类原生 exec 字段各自命中拒绝路径（不是委托、不是 unsupported）
+// ⑧ 11 类原生 exec 字段各自返回协议错误且零回包（不是委托、不是 unsupported、不再伪造拒绝帧）
 // ---------------------------------------------------------------------------
 
 func TestCursorExecNativeRejectAllElevenFields(t *testing.T) {
@@ -239,17 +239,15 @@ func TestCursorExecNativeRejectAllElevenFields(t *testing.T) {
 			execMsg = cursorAppendBytesField(execMsg, field, nil)
 
 			done, err := d.respond(cursorExecMetaTestPayload(execMsg))
-			require.NoError(t, err, "原生 exec 必须按拒绝处理，不得失败关闭")
+			require.Error(t, err, "原生 exec 必须返回协议错误（v9 §5/§8.2）")
 			require.False(t, done)
 			cleanup()
 
-			require.NotEmpty(t, buf.Len(), "拒绝帧必须写出")
-			ents := logs.FilterField(zap.String("phase", "native_exec_rejected")).All()
-			require.Len(t, ents, 1, "必须记一条 native_exec_rejected")
-			require.EqualValues(t, field, ents[0].ContextMap()["field"], "拒绝日志的 field 必须命中正确字段号")
+			require.Empty(t, buf.Len(), "协议错误路径必须零回包，不得伪造拒绝帧")
+			require.Equal(t, 0, phaseCount(logs, "native_exec_rejected"), "不得再写 native_exec_rejected 日志")
 			require.Equal(t, 0, phaseCount(logs, "exec_unsupported_fields"), "原生 exec 不得走 unsupported")
 			require.Equal(t, 0, phaseCount(logs, "exec_metadata_only"), "原生 exec 不得被当作 metadata")
-			require.Empty(t, d.delegations.snapshot(), "拒绝不得登记委托（不是 fs/shell 委托）")
+			require.Empty(t, d.delegations.snapshot(), "协议错误不得登记委托")
 		})
 	}
 }
