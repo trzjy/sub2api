@@ -44,7 +44,9 @@ func (c *cursorOutboundCapture) snapshot() (http.Header, string) {
 func newCursorOutboundForwarder(t *testing.T) (*CursorUpstreamForwarder, *cursorOutboundCapture) {
 	t.Helper()
 	capture := &cursorOutboundCapture{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// AgentRun 的请求体是永不关闭的 io.Pipe，需 HTTP/2 全双工才能边发请求体边读响应；
+	// HTTP/1.1 会等请求体结束才读响应导致永久挂起，故用 HTTP/2 TLS 测试上游与生产同形。
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 只做一次读：AgentRun 的请求体是 io.Pipe（不会自行关闭），ReadAll 会一直等；
 		// duplex 在 Do 中已把 initial 帧写入 pipe，一次 Read 即可截获该帧。
 		buf := make([]byte, 8192)
@@ -55,7 +57,12 @@ func newCursorOutboundForwarder(t *testing.T) (*CursorUpstreamForwarder, *cursor
 		capture.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
 	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 
 	nodes := NewCursorUpstreamNodesResolver(WithCursorNodesCacheTTL(time.Minute))
