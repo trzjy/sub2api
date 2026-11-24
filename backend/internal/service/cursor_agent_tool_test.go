@@ -154,11 +154,16 @@ func cursorToolTestBuildMcpArgs(tcID, toolName string, entries []cursorToolTestM
 	}
 	obj.WriteByte('}')
 
+	// 每条 entry 先组成 {f1 key, f2 Value.string(v)}，再作为 McpArgs 的 f2 字段。
 	var mcpArgs []byte
-	mcpArgs = cursorAppendStringField(mcpArgs, 1, cursorTransportToolNameKey)
-	mcpArgs = cursorAppendBytesField(mcpArgs, 2, cursorAppendStringField(nil, 3, toolName))
-	mcpArgs = cursorAppendStringField(mcpArgs, 1, cursorTransportArgumentsKey)
-	mcpArgs = cursorAppendBytesField(mcpArgs, 2, cursorAppendStringField(nil, 3, obj.String()))
+	toolNameEntry := cursorAppendStringField(nil, 1, cursorTransportToolNameKey)
+	toolNameEntry = cursorAppendBytesField(toolNameEntry, 2, cursorAppendStringField(nil, 3, toolName))
+	mcpArgs = cursorAppendBytesField(mcpArgs, 2, toolNameEntry)
+
+	argsEntry := cursorAppendStringField(nil, 1, cursorTransportArgumentsKey)
+	argsEntry = cursorAppendBytesField(argsEntry, 2, cursorAppendStringField(nil, 3, obj.String()))
+	mcpArgs = cursorAppendBytesField(mcpArgs, 2, argsEntry)
+
 	mcpArgs = cursorAppendStringField(mcpArgs, 3, tcID)
 	mcpArgs = cursorAppendStringField(mcpArgs, 5, cursorTransportToolName)
 	return mcpArgs
