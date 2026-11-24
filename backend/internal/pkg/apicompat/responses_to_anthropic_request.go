@@ -309,7 +309,7 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 			// 内容里只有网关不认识的分片时，sanitize 会得到空串。Anthropic 拒收
 			// 空内容消息（"all messages must have non-empty content"），整条丢掉
 			// 比发一条必然 400 的消息更可用。
-			if anthropicContentIsEmpty(content) {
+			if anthropicContentIsEmpty(content) || anthropicContentIsOnlyBlankText(content) {
 				continue
 			}
 			messages = append(messages, AnthropicMessage{
