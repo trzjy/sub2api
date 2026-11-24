@@ -1551,6 +1551,13 @@ func extractCustomToolCallInput(arguments string) string {
 // 的调用会还原为 tool_search_call 项；namespaceTools 是 namespace 子工具的摊平名
 // 映射（见 NamespaceToolNames），命中的调用还原为带 namespace 字段的 function_call 项。
 func ChatCompletionsResponseToResponses(resp *ChatCompletionsResponse, model string, customTools, functionTools map[string]bool, toolSearch bool, namespaceTools map[string]NamespacedToolName) *ResponsesResponse {
+	return ChatCompletionsResponseToResponsesWithOptions(resp, model, customTools, functionTools, toolSearch, namespaceTools, ChatResponseConversionOptions{})
+}
+
+// ChatCompletionsResponseToResponsesWithOptions 是 ChatCompletionsResponseToResponses
+// 的带选项版本。opts 供 Cursor writer 等调用方显式禁用 DSML 恢复；零值行为与原
+// 入口完全一致，其它调用方不受影响。
+func ChatCompletionsResponseToResponsesWithOptions(resp *ChatCompletionsResponse, model string, customTools, functionTools map[string]bool, toolSearch bool, namespaceTools map[string]NamespacedToolName, opts ChatResponseConversionOptions) *ResponsesResponse {
 	id := ""
 	if resp != nil {
 		id = resp.ID
@@ -1587,7 +1594,7 @@ func ChatCompletionsResponseToResponses(resp *ChatCompletionsResponse, model str
 
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
-		out.Output = chatMessageToResponsesOutput(choice.Message, customTools, functionTools, toolSearch, namespaceTools)
+		out.Output = chatMessageToResponsesOutput(choice.Message, customTools, functionTools, toolSearch, namespaceTools, opts)
 		if choice.FinishReason == "length" {
 			out.Status = "incomplete"
 			out.IncompleteDetails = &ResponsesIncompleteDetails{Reason: "max_output_tokens"}
@@ -1660,18 +1667,23 @@ func (s *ChatCompletionsToResponsesStreamState) announceDSMLToolItem(toolCall *C
 	return announceChatToolItem(s, idx, &stored, true)
 }
 
-func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTools map[string]bool, toolSearch bool, namespaceTools map[string]NamespacedToolName) []ResponsesOutput {
+func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTools map[string]bool, toolSearch bool, namespaceTools map[string]NamespacedToolName, opts ChatResponseConversionOptions) []ResponsesOutput {
 	var outputs []ResponsesOutput
 	reasoning := message.reasoningText()
 
 	// DeepSeek 官方 DSML 方言：上游可能把工具调用写成 DSML 文本。按官方规范
 	// 还原成标准工具调用输出，并把 DSML 原文摘干净（不让协议标签外泄）。
-	dsmlCalls := ParseDSMLToolCalls(reasoning)
-	if len(dsmlCalls) == 0 {
-		dsmlCalls = ParseDSMLToolCalls(chatMessageContentText(message.Content))
-	}
-	if len(dsmlCalls) > 0 {
-		reasoning = StripDSML(reasoning)
+	// Cursor writer 显式禁用时整段跳过：dsmlCalls 保持 nil、reasoning 原样，
+	// 正文/推理按原文交付，结构化 ToolCalls 照常转换。
+	var dsmlCalls []DSMLToolCall
+	if !opts.DisableDSMLToolCalls {
+		dsmlCalls = ParseDSMLToolCalls(reasoning)
+		if len(dsmlCalls) == 0 {
+			dsmlCalls = ParseDSMLToolCalls(chatMessageContentText(message.Content))
+		}
+		if len(dsmlCalls) > 0 {
+			reasoning = StripDSML(reasoning)
+		}
 	}
 
 	if reasoning != "" {
@@ -1685,7 +1697,10 @@ func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTool
 		})
 	}
 
-	text := StripDSML(chatMessageContentText(message.Content))
+	text := chatMessageContentText(message.Content)
+	if !opts.DisableDSMLToolCalls {
+		text = StripDSML(text)
+	}
 	if text == "" && strings.TrimSpace(reasoning) != "" && len(message.ToolCalls) == 0 && len(dsmlCalls) == 0 {
 		text = reasoning
 	}
@@ -1905,6 +1920,12 @@ type ChatCompletionsToResponsesStreamState struct {
 	// codex 按 namespace+name 路由。
 	NamespaceTools map[string]NamespacedToolName
 
+	// ConversionOptions 控制本次流转换的客户端协议细节（见
+	// ChatResponseConversionOptions）。零值保持既有行为，不改变其它调用方；
+	// Cursor writer 显式传 DisableDSMLToolCalls=true，禁止把模型文本里的 DSML
+	// 还原成没有真实 f11/ExecID 关联的工具调用。
+	ConversionOptions ChatResponseConversionOptions
+
 	// toolIsCustom 记录每个工具调用宣告时的类型判定，保证 added/done 事件的
 	// 项类型一致。
 	toolIsCustom map[int]bool
@@ -2018,10 +2039,15 @@ func ChatCompletionsChunkToResponsesEvents(
 		// empty-string reasoning delta upstreams send is filtered out.
 		reasoning := choice.Delta.reasoningText()
 		if reasoning != nil && *reasoning != "" {
-			// DeepSeek 官方 DSML 方言：还原出的调用转成标准 function_call 输出，
-			// DSML 原文不再透传。
-			plain, dsmlCalls := state.dsmlBuffer.Feed(*reasoning)
-			events = append(events, state.dsmlResponsesToolCallEvents(dsmlCalls)...)
+			// Cursor writer 显式禁用时推理按原文透传，不喂 DSML 缓冲、不还原调用。
+			plain := *reasoning
+			if !state.ConversionOptions.DisableDSMLToolCalls {
+				// DeepSeek 官方 DSML 方言：还原出的调用转成标准 function_call 输出，
+				// DSML 原文不再透传。
+				var dsmlCalls []DSMLToolCall
+				plain, dsmlCalls = state.dsmlBuffer.Feed(*reasoning)
+				events = append(events, state.dsmlResponsesToolCallEvents(dsmlCalls)...)
+			}
 			if plain != "" {
 				events = append(events, ensureChatReasoningItem(state)...)
 				_, _ = state.Reasoning.WriteString(plain)
@@ -2034,24 +2060,30 @@ func ChatCompletionsChunkToResponsesEvents(
 			}
 		}
 		if choice.Delta.Content != nil && *choice.Delta.Content != "" {
-			// 正文里也可能带 DSML（上游两种位置都出现过）。
-			plain, dsmlCalls := state.dsmlBuffer.Feed(*choice.Delta.Content)
-			events = append(events, state.dsmlResponsesToolCallEvents(dsmlCalls)...)
-			if plain == "" {
-				continue
+			// Cursor writer 显式禁用时正文按原文透传，不喂 DSML 缓冲、不还原调用。
+			plain := *choice.Delta.Content
+			if !state.ConversionOptions.DisableDSMLToolCalls {
+				// 正文里也可能带 DSML（上游两种位置都出现过）。
+				var dsmlCalls []DSMLToolCall
+				plain, dsmlCalls = state.dsmlBuffer.Feed(*choice.Delta.Content)
+				events = append(events, state.dsmlResponsesToolCallEvents(dsmlCalls)...)
 			}
+			// 不能用 `if plain == "" { continue }`：那会跳过同一 chunk 里的真实
+			// Delta.ToolCalls。只在正文非空时发射正文事件，随后照常处理 ToolCalls。
 			// First real content closes the reasoning item, then opens the
 			// message item and its output_text content part.
-			events = append(events, closeChatReasoningItem(state)...)
-			events = append(events, ensureChatToResponsesMessageItem(state)...)
-			events = append(events, ensureChatToResponsesTextPart(state)...)
-			_, _ = state.Text.WriteString(plain)
-			events = append(events, chatToResponsesEvent(state, "response.output_text.delta", &ResponsesStreamEvent{
-				OutputIndex:  state.MessageIndex,
-				ContentIndex: 0,
-				Delta:        plain,
-				ItemID:       state.MessageItemID,
-			}))
+			if plain != "" {
+				events = append(events, closeChatReasoningItem(state)...)
+				events = append(events, ensureChatToResponsesMessageItem(state)...)
+				events = append(events, ensureChatToResponsesTextPart(state)...)
+				_, _ = state.Text.WriteString(plain)
+				events = append(events, chatToResponsesEvent(state, "response.output_text.delta", &ResponsesStreamEvent{
+					OutputIndex:  state.MessageIndex,
+					ContentIndex: 0,
+					Delta:        plain,
+					ItemID:       state.MessageItemID,
+				}))
+			}
 		}
 		for _, toolCall := range choice.Delta.ToolCalls {
 			idx := 0
@@ -2121,9 +2153,12 @@ func FinalizeChatCompletionsResponsesStream(state *ChatCompletionsToResponsesStr
 	events = append(events, ensureChatToResponsesCreated(state)...)
 
 	// 收口 DSML 缓冲：完整调用还原成 function_call；残片丢弃（不外泄协议标签）。
-	if calls, dropped := state.dsmlBuffer.Flush(); len(calls) > 0 || dropped > 0 {
-		state.dsmlDropped += dropped
-		events = append(events, state.dsmlResponsesToolCallEvents(calls)...)
+	// Cursor writer 显式禁用时整段跳过，计数保持 0/0，残片也不再记账。
+	if !state.ConversionOptions.DisableDSMLToolCalls {
+		if calls, dropped := state.dsmlBuffer.Flush(); len(calls) > 0 || dropped > 0 {
+			state.dsmlDropped += dropped
+			events = append(events, state.dsmlResponsesToolCallEvents(calls)...)
+		}
 	}
 
 	// Close a reasoning item that never transitioned to content (reasoning-only

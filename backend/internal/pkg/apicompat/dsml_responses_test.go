@@ -71,7 +71,7 @@ func TestChatCompletionsResponseToResponses_DSMLInReasoning(t *testing.T) {
 		},
 	}
 
-	out := chatMessageToResponsesOutput(resp.Choices[0].Message, nil, nil, false, nil)
+	out := chatMessageToResponsesOutput(resp.Choices[0].Message, nil, nil, false, nil, ChatResponseConversionOptions{})
 
 	var fnCall *ResponsesOutput
 	for i := range out {
