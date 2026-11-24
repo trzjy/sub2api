@@ -53,6 +53,12 @@ const (
 	cursorJgModelHeader = "x-jg-model"
 	// cursorJgModelHeaderValue 是 x-jg-model 的取值（isMaster=true 时）。
 	cursorJgModelHeaderValue = "1"
+
+	// cursorAgentAllowedToolsHeader 是 AgentRun 出站携带的 MCP 工具白名单头名。
+	cursorAgentAllowedToolsHeader = "x-cursor-agent-allowed-tools"
+	// cursorAgentRunMcpAllowedTools 是 AgentRun 路径有工具声明时该头的固定取值
+	// （由真实 f4 决定，逐工具 wire name 改名已由单入口取代）。
+	cursorAgentRunMcpAllowedTools = "mcp_tool_call,get_mcp_tools_tool_call,list_mcp_resources_tool_call,read_mcp_resource_tool_call,mcp_auth_tool_call"
 )
 
 // cursor 出站失败关闭错误（调用方可 errors.Is 识别）。
@@ -137,14 +143,6 @@ type CursorUpstreamRequest struct {
 	// 后写入这里，响应解析层只读取输出，保证同一帧只解码一次。
 	// nil 时双工层使用本地记录（独立场景），不引入第二份共享状态。
 	ToolDelegations *cursorToolDelegations
-
-	// DeclaredToolNames 是**本请求客户端声明的原始工具名**（不是 wire name）。
-	// 仅用于支撑双工层卡 03 的「wire name → 原名」入站映射：双工层据此建反查表，
-	// 把上游按 wire name 回调的工具名映射回客户端原名再交付。
-	// 为空时双工层退化为原样登记（既有语义），不影响无工具或无需改名的请求。
-	// 生产侧由构建 CursorUpstreamRequest 的调用方（cursor_execution_service.go 的
-	// AgentRun 出口）填入 req.Tools 的原始名；本结构体仅承载，不参与任何业务逻辑。
-	DeclaredToolNames []string
 
 	// AuthProvider 是**本次请求**的鉴权材料提供者，覆盖转发器上配置的默认 provider。
 	//
@@ -279,10 +277,6 @@ func (f *CursorUpstreamForwarder) Do(
 		if err != nil {
 			return nil, err
 		}
-		// 卡 03 方向 1：建「wire name → 原名」反查表，上游按 wire name 回调时映射回原名。
-		// DeclaredToolNames 为空（上游转发未注入）→ 反查表为 nil，cursorCaptureMcpArgs
-		// 退化为原样登记（既保持既有语义，也避免没有原始名来源时硬映射）。
-		duplex.declaredToolReverse = cursorWireNameReverse(req.DeclaredToolNames)
 		requestBody = duplex.reader
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, requestBody)
@@ -291,6 +285,16 @@ func (f *CursorUpstreamForwarder) Do(
 	}
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
+	}
+	// 出站 MCP 白名单头只对 AgentRun 路径（duplex != nil）生效，值由真实 f4 的
+	// 声明决定：有工具则固定五名单，无工具则显式空值。不依赖 req.Headers 长度，
+	// 也不猜客户端 tools；非 AgentRun 路径完全不带此头。
+	if duplex != nil {
+		allowed := ""
+		if len(duplex.declaredToolDefs) > 0 {
+			allowed = cursorAgentRunMcpAllowedTools
+		}
+		httpReq.Header.Set(cursorAgentAllowedToolsHeader, allowed)
 	}
 	if httpReq.Header.Get("Content-Type") == "" {
 		httpReq.Header.Set("Content-Type", "application/json")
