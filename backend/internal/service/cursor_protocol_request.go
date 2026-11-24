@@ -65,6 +65,10 @@ const (
 	cursorFldRunMcpTools          = 4  // McpTools（活体样本里是**空 message**，但仍出现）
 	cursorFldRunConversationID    = 5  // string [opt]
 	cursorFldRunPreFetchedBlobs   = 17 // repeated PreFetchedBlob（多轮历史的 KV 载荷）
+	cursorFldRunSystemPromptSpec  = 29 // SystemPromptSpec（候选 B：工具可用性预先告知，2026-11-24；实施方案 §2.1）
+
+	// SystemPromptSpec（AgentRunRequest.f29）内：
+	cursorFldSystemPromptSpecAppend = 2 // string：追加到客户端 system prompt（append 语义，不替换）
 
 	// ConversationStateStructure（Hm）内：
 	cursorFldStateRootPromptBlobs = 1  // repeated bytes：**历史消息的 blob id**
@@ -336,6 +340,13 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 		run = cursorAppendBytesField(run, cursorFldRunPreFetchedBlobs, blob)
 	}
 
+	// 预先告知工具可用性（候选 B，2026-11-24）：f29 system_prompt_spec 的 f2 append，
+	// 追加语义、不覆盖客户端自带 system prompt；即使零声明也发一条告知。
+	wireNames := cursorExtractWireNames(wireMap, declared)
+	promptText := cursorBuildToolAvailabilityPrompt(wireNames)
+	systemPromptSpec := cursorAppendStringField(nil, cursorFldSystemPromptSpecAppend, promptText)
+	run = cursorAppendBytesField(run, cursorFldRunSystemPromptSpec, systemPromptSpec)
+
 	outer := cursorAppendBytesField(nil, cursorFldAgentRunRequest, run)
 	return cursorEncodeEnvelope(outer), conversationID, nil
 }
@@ -574,6 +585,38 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool, wireMap map[string]string, 
 		mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
 	}
 	return mcp, nil
+}
+
+// cursorExtractWireNames 从 wireMap 和声明的工具列表中提取 wire name 列表。
+// 去重且保序（按声明顺序），供候选 B 的预先告知文案列出本轮可用工具。
+func cursorExtractWireNames(wireMap map[string]string, declared []apicompat.ChatTool) []string {
+	seen := make(map[string]bool)
+	var names []string
+	for _, t := range declared {
+		if t.Function == nil || t.Function.Name == "" {
+			continue
+		}
+		wireName := cursorWireToolNameOf(wireMap, t.Function.Name)
+		if !seen[wireName] {
+			seen[wireName] = true
+			names = append(names, wireName)
+		}
+	}
+	return names
+}
+
+// cursorBuildToolAvailabilityPrompt 构造工具可用性告知文本（写入 f29 append）。
+func cursorBuildToolAvailabilityPrompt(wireNames []string) string {
+	if len(wireNames) == 0 {
+		return "Native execution tools are not available in this environment. " +
+			"The client declared no tools."
+	}
+	return fmt.Sprintf(
+		"Native execution tools (such as shell_stream, read, write, grep) are not available in this environment. "+
+			"Instead, use the following client-declared tools: %s. "+
+			"Do not attempt to use native execution tools.",
+		strings.Join(wireNames, ", "),
+	)
 }
 
 // cursorTurnImage 是一张已解出原始字节的图片（来自 content-part 的 data URI）。

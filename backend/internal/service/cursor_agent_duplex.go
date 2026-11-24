@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,9 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // Client 3.24.12 L_v/P_v and live Standard probes 01-version-checksum-only
@@ -231,6 +235,11 @@ type cursorAgentDuplex struct {
 	// 未注入时用本地记录（独立双工场景），保证任何路径都只有一个解码点。
 	delegations *cursorToolDelegations
 
+	// firstRoundSchemaSnapshot 是首轮工具 schema 快照，只增不减（候选 C-1，2026-11-24）。
+	// key = wire name, value = normalized schema (json.RawMessage)。
+	firstRoundSchemaSnapshot map[string]json.RawMessage
+	snapshotMutex            sync.RWMutex
+
 	// writeMu 串行化对原生 pipe writer 的所有写（读循环回包 + 跨 HTTP 真实结果回写
 	// 共用同一连接，禁止并发写同一 pipe —— io.Pipe 不保证并发写安全）。
 	writeMu sync.Mutex
@@ -298,6 +307,8 @@ func newCursorAgentDuplex(initial []byte, delegations *cursorToolDelegations) (*
 				d.declaredToolDefs = append(d.declaredToolDefs, raw)
 			}
 		}
+		// 建立首轮 schema 快照（候选 C-1，2026-11-24）
+		d.maintainFirstRoundSchemaSnapshot(d.declaredToolDefs)
 	}
 	// The server may request history even when run_request already carries it as
 	// pre_fetched_blobs. Seed the same store used for later KV set/get messages.
@@ -598,36 +609,36 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 					zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
 				return false, nil
 			}
-		d.logPhase(zapcore.WarnLevel, "exec_unsupported_fields", "",
-			zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
-		// 派发单 D 阶段 2：未知 exec 字段不再以 502 打死整轮，而是对每个「承载 message 的
-		// 字段」（wire=2/bytes）回一个通用错误结果帧 {field:{f2:{f2:text}}}，让模型换条路继续；
-		// varint 字段（wire=0）不承载 message，不回包（施工图 W1：只有承载 message 的字段必须
-		// 回包）；元数据白名单字段已在上方 cursorExecMetadataOnly 分支忽略。无论哪种都继续处理
-		// 本轮，不 502、不断流。绝不使用 sendExecStreamClose（关流会让上游永远等不到应答，
-		// 把「本轮 502」换成「流卡死」，更糟）；stream_close 只在确实完成流式执行时才发。
-		for _, f := range parts {
-			if cursorExecMetadataFieldOK(f.Number) {
-				continue
+			d.logPhase(zapcore.WarnLevel, "exec_unsupported_fields", "",
+				zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
+			// 派发单 D 阶段 2：未知 exec 字段不再以 502 打死整轮，而是对每个「承载 message 的
+			// 字段」（wire=2/bytes）回一个通用错误结果帧 {field:{f2:{f2:text}}}，让模型换条路继续；
+			// varint 字段（wire=0）不承载 message，不回包（施工图 W1：只有承载 message 的字段必须
+			// 回包）；元数据白名单字段已在上方 cursorExecMetadataOnly 分支忽略。无论哪种都继续处理
+			// 本轮，不 502、不断流。绝不使用 sendExecStreamClose（关流会让上游永远等不到应答，
+			// 把「本轮 502」换成「流卡死」，更糟）；stream_close 只在确实完成流式执行时才发。
+			for _, f := range parts {
+				if cursorExecMetadataFieldOK(f.Number) {
+					continue
+				}
+				if f.Wire != cursorWireBytes {
+					// varint 字段不承载 message，不回包，仅忽略（施工图 W1）。
+					continue
+				}
+				// 施工图 W7 unknown_field_replied：未知字段被应答的观测点（判断「客户跑没跑」）。
+				// 只记字段号 / wire type / 形状种类，绝不记字段字节内容（可能含客户数据）。
+				// 未知字段这一路恒为「兜底形状」——精确形状只属于 11 类原生 exec 拒绝
+				// （cursor_native_exec_reject.go，由别的卡负责），不在此链路内，故不制造分叉。
+				d.logPhase(zapcore.InfoLevel, "unknown_field_replied", "",
+					zap.Int("field", f.Number),
+					zap.Int("wire_type", f.Wire),
+					zap.String("shape", cursorUnknownFieldReplyShape))
+				frame := cursorEncodeExecGenericUnknownFieldReject(execID, idField, f.Number, cursorGenericUnknownExecRejectText)
+				if err := d.send(cursorFldClientMessage, frame); err != nil {
+					return false, err
+				}
 			}
-			if f.Wire != cursorWireBytes {
-				// varint 字段不承载 message，不回包，仅忽略（施工图 W1）。
-				continue
-			}
-			// 施工图 W7 unknown_field_replied：未知字段被应答的观测点（判断「客户跑没跑」）。
-			// 只记字段号 / wire type / 形状种类，绝不记字段字节内容（可能含客户数据）。
-			// 未知字段这一路恒为「兜底形状」——精确形状只属于 11 类原生 exec 拒绝
-			// （cursor_native_exec_reject.go，由别的卡负责），不在此链路内，故不制造分叉。
-			d.logPhase(zapcore.InfoLevel, "unknown_field_replied", "",
-				zap.Int("field", f.Number),
-				zap.Int("wire_type", f.Wire),
-				zap.String("shape", cursorUnknownFieldReplyShape))
-			frame := cursorEncodeExecGenericUnknownFieldReject(execID, idField, f.Number, cursorGenericUnknownExecRejectText)
-			if err := d.send(cursorFldClientMessage, frame); err != nil {
-				return false, err
-			}
-		}
-		return false, nil
+			return false, nil
 		}
 	}
 	if q, ok := cursorFindField(fields, cursorFldServerInteractionQuery); ok {
@@ -1044,7 +1055,8 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 	// declaredToolDefs 里是 **wire name**（卡 01 改名后），上游回传的 name 也是 wire name，
 	// 所以这里的 name 仍用 wire name 去匹配 schema —— 不改。
 	var failReason cursorRetypeErrReason
-	retyped, rerr := cursorRetypeArgsByToolDefs(id, name, argsJSON, d.declaredToolDefs,
+	mergedDefs := d.buildMergedDefsFromSnapshot(d.declaredToolDefs)
+	retyped, rerr := cursorRetypeArgsByToolDefs(id, name, argsJSON, mergedDefs,
 		func(reason cursorRetypeErrReason) {
 			failReason = reason
 			d.logPhase(zapcore.WarnLevel, "mcp_args_retype_failed", "",
@@ -1099,4 +1111,92 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 	d.logPhase(zapcore.DebugLevel, "tool_call_captured", "",
 		zap.String("tool_call_id", id), zap.String("tool_name", name))
 	return tc, nil
+}
+
+// maintainFirstRoundSchemaSnapshot 维护首轮 schema 快照（候选 C-1，2026-11-24）。
+func (d *cursorAgentDuplex) maintainFirstRoundSchemaSnapshot(defs [][]byte) {
+	d.snapshotMutex.Lock()
+	defer d.snapshotMutex.Unlock()
+
+	if d.firstRoundSchemaSnapshot == nil {
+		d.firstRoundSchemaSnapshot = make(map[string]json.RawMessage)
+	}
+
+	for _, def := range defs {
+		name, schema := cursorExtractToolNameAndSchema(def)
+		if name == "" {
+			continue
+		}
+		if _, exists := d.firstRoundSchemaSnapshot[name]; !exists {
+			d.firstRoundSchemaSnapshot[name] = schema
+		}
+	}
+}
+
+// cursorExtractToolNameAndSchema 从工具定义字节中提取 wire name 和 schema。
+func cursorExtractToolNameAndSchema(def []byte) (string, json.RawMessage) {
+	fields, err := cursorDecodeProtobuf(def)
+	if err != nil {
+		return "", nil
+	}
+
+	nameField, ok := cursorFindField(fields, cursorFldMcpToolDefName)
+	if !ok {
+		return "", nil
+	}
+	name := string(nameField.Bytes)
+
+	schemaField, ok := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
+	if !ok {
+		return name, json.RawMessage("{}")
+	}
+
+	value := &structpb.Value{}
+	if err := proto.Unmarshal(schemaField.Bytes, value); err != nil {
+		return name, nil
+	}
+
+	schemaJSON, err := protojson.Marshal(value)
+	if err != nil {
+		return name, nil
+	}
+
+	return name, json.RawMessage(schemaJSON)
+}
+
+// buildMergedDefsFromSnapshot 从快照重建 defs 并追加当前轮 defs。
+func (d *cursorAgentDuplex) buildMergedDefsFromSnapshot(currentDefs [][]byte) [][]byte {
+	d.snapshotMutex.RLock()
+	defer d.snapshotMutex.RUnlock()
+
+	if d.firstRoundSchemaSnapshot == nil {
+		return currentDefs
+	}
+
+	snapshotDefs := make([][]byte, 0, len(d.firstRoundSchemaSnapshot))
+	for name, schema := range d.firstRoundSchemaSnapshot {
+		def := cursorRebuildToolDef(name, schema)
+		snapshotDefs = append(snapshotDefs, def)
+	}
+
+	return append(snapshotDefs, currentDefs...)
+}
+
+// cursorRebuildToolDef 从 name 和 schema 重建工具定义字节流（protobuf 格式）。
+func cursorRebuildToolDef(name string, schema json.RawMessage) []byte {
+	// schema 已经是 JSON 格式（protojson.Marshal 的输出），需要转回 protobuf.Value
+	value := &structpb.Value{}
+	if err := protojson.Unmarshal(schema, value); err != nil {
+		return nil
+	}
+	valBytes, err := proto.Marshal(value)
+	if err != nil {
+		return nil
+	}
+
+	// 按 cursorBuildMcpTools 同样的格式构造 McpToolDefinition 字节流
+	var def []byte
+	def = cursorAppendStringField(def, cursorFldMcpToolDefName, name)
+	def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, valBytes)
+	return def
 }
