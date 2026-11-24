@@ -2591,11 +2591,16 @@ func newCursorProtocolWriter(
 	switch mode {
 	case cursorProtocolAnthropic:
 		w.anthState = apicompat.NewChatCompletionsToAnthropicStreamState(model)
+		// Cursor AgentRun 输出不得把正文/推理里的 DSML 文本还原成工具调用（无真实
+		// f11/ExecID 关联）。只在本 writer 的 state 上禁用，共享 constructor 零值不变。
+		w.anthState.ConversionOptions.DisableDSMLToolCalls = true
 		if w.responseID != "" {
 			w.anthState.ResponseID = w.responseID
 		}
 	case cursorProtocolResponses:
 		w.respState = cursorResponsesStreamState(model, tools)
+		// 同上：Responses 流式出口同样禁用 DSML 还原，仅作用于本 writer。
+		w.respState.ConversionOptions.DisableDSMLToolCalls = true
 		if w.responseID != "" {
 			w.respState.ResponseID = w.responseID
 		}
@@ -3006,15 +3011,19 @@ func (w *cursorProtocolWriter) finalizeCompletion() error {
 	}
 	resp.Usage = cursorBridgedChatUsage(body)
 
+	// Cursor AgentRun 非流式出口与流式 state 同口径：禁止把正文/推理里的 DSML
+	// 文本还原成工具调用。只在本 writer 的转换入口传禁用选项，其它调用方零值不变。
+	convOpts := apicompat.ChatResponseConversionOptions{DisableDSMLToolCalls: true}
 	var out any
 	switch w.mode {
 	case cursorProtocolAnthropic:
-		out = apicompat.ChatCompletionsResponseToAnthropic(&resp, w.model)
+		out = apicompat.ChatCompletionsResponseToAnthropicWithOptions(&resp, w.model, convOpts)
 	case cursorProtocolResponses:
 		// 工具映射必须传齐（§24.2-5），否则 custom/namespace 工具类型丢失。
-		built := apicompat.ChatCompletionsResponseToResponses(
+		built := apicompat.ChatCompletionsResponseToResponsesWithOptions(
 			&resp, w.model,
 			w.tools.customTools, w.tools.functionTools, w.tools.toolSearch, w.tools.namespaceTools,
+			convOpts,
 		)
 		// §25.17.2「实际ID」：非流式 item ID 从**实际构建的响应对象**取（不读 stream
 		// respState，也不另生成一份），保证索引里登记的就是客户端真的收到的那个 ID。
