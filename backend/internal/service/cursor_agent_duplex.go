@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,9 +15,6 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // Client 3.24.12 L_v/P_v and live Standard probes 01-version-checksum-only
@@ -208,63 +204,17 @@ type cursorAgentDuplex struct {
 	// **原始字节**（repeated 逐项原样保存，与请求侧 AgentRunRequest.f4 声明逐字节相同）。
 	// 由 newCursorAgentDuplex 从 AgentRun 请求体 f4 解出，供 mcp_state 回包 f5 原样回传
 	// （字节级保真，依据活体探针 T7：f5 内层即完整 McpToolDefinition 五字段，不可只回工具名）。
-	//
-	// 注意：卡 01 已经把 f4 里的工具名改成 wire name（撞 Cursor 内置名时加 "_"），所以
-	// 这里的字节里是 wire name，不是客户端原名。
+	// 同时作为 cursorDecodeMcpArgs 的声明工具定义来源（运输帧 tool_name enum 校验）。
 	declaredToolDefs [][]byte
-
-	// declaredToolReverse 是「wire name → 客户端原名」的反查表，**只在本请求的声明集合内
-	// 有效**（不同请求工具集不同，wire name 撞了也只在本请求内有意义）。由 newCursorAgentDuplex
-	// 从本请求的**原始**工具名集合正向算 wire map（复用卡 01 的 cursorWireToolNamesFromNames）
-	// 再反转得到。
-	//
-	// 用途（卡 03 方向 1）：上游按 wire name 回调工具时，cursorCaptureMcpArgs 据此把名字映射
-	// 回客户端原名再交付——否则客户端会收到一个自己从没声明过的名字（卡 01 改名后，
-	// Read → Read_，上游回调 Read_，客户端只认识 Read）。
-	//
-	// 反查唯一性：卡 01 的 taken（归一化键）保证两个不同的原名绝不会算出同一个 wire name，
-	// 故反查不会多对一，是单射。即便极端出现多对一（正常不应发生），下面建表时取字典序
-	// 最小的原名，保证结果确定。
-	//
-	// 反查为空（未注入原始名，例如独立解析路径 / 测试未注入）时，cursorCaptureMcpArgs
-	// 保持原样（既有语义，不扩大改动）。
-	declaredToolReverse map[string]string
 
 	// delegations 是本轮工具委托的**唯一**记录（§24.2-6）：duplex 解码 mcp_args
 	// 一次并写入这里，parser 只读取输出，绝不再各自保留一份列表。
 	// 未注入时用本地记录（独立双工场景），保证任何路径都只有一个解码点。
 	delegations *cursorToolDelegations
 
-	// firstRoundSchemaSnapshot 是首轮工具 schema 快照，只增不减（候选 C-1，2026-11-24）。
-	// key = wire name, value = normalized schema (json.RawMessage)。
-	firstRoundSchemaSnapshot map[string]json.RawMessage
-	snapshotMutex            sync.RWMutex
-
 	// writeMu 串行化对原生 pipe writer 的所有写（读循环回包 + 跨 HTTP 真实结果回写
 	// 共用同一连接，禁止并发写同一 pipe —— io.Pipe 不保证并发写安全）。
 	writeMu sync.Mutex
-}
-
-// cursorWireNameReverse 由本请求的**原始**工具名集合正向算 wire map（复用卡 01 的
-// cursorWireToolNamesFromNames）再反转为「wire name → 原名」反查表。
-//
-// 单射保证：卡 01 的 taken（归一化键）保证两个不同原名绝不会算出同一个归一化 wire 形态，
-// 故 wire name 字符串本身也不重复，反查不会多对一。即便极端出现多对一（正常不应发生），
-// 这里取字典序最小的原名，保证结果确定、与卡 01 去重口径一致。
-//
-// originals 为空时返回 nil（双工层据此退化为原样登记，保持既有语义）。
-func cursorWireNameReverse(originals []string) map[string]string {
-	if len(originals) == 0 {
-		return nil
-	}
-	wireMap := cursorWireToolNamesFromNames(originals)
-	reverse := make(map[string]string, len(wireMap))
-	for orig, wire := range wireMap {
-		if cur, ok := reverse[wire]; !ok || orig < cur {
-			reverse[wire] = orig
-		}
-	}
-	return reverse
 }
 
 // newCursorAgentDuplex 构造双工层。
@@ -307,8 +257,6 @@ func newCursorAgentDuplex(initial []byte, delegations *cursorToolDelegations) (*
 				d.declaredToolDefs = append(d.declaredToolDefs, raw)
 			}
 		}
-		// 建立首轮 schema 快照（候选 C-1，2026-11-24）
-		d.maintainFirstRoundSchemaSnapshot(d.declaredToolDefs)
 	}
 	// The server may request history even when run_request already carries it as
 	// pre_fetched_blobs. Seed the same store used for later KV set/get messages.
@@ -334,41 +282,6 @@ func newCursorAgentDuplex(initial []byte, delegations *cursorToolDelegations) (*
 	r, w := io.Pipe()
 	d.reader, d.writer = r, w
 	return d, nil
-}
-
-// declaredToolNames 从 declaredToolDefs 提取每条工具定义的工具名，经 declaredToolReverse
-// 反查回**客户端原名**后返回，用于拒绝消息和日志。
-//
-// 为什么必须反查：卡 01 之后 f4 里存的是 wire name（撞 Cursor 内置名时加 "_"，如 Read → Read_），
-// 但客户端只认识自己声明的原名。拒绝文本点名要点的就是客户端认识的名字，日志同理——
-// 否则运维看到 `Read_` 会误以为客户端声明了这个名字。
-//
-// 查不到反查表（nil / 该名未登记，例如独立解析路径没有原始名来源，或上游回调了未声明的名字）
-// → 保持原样（wire name），既有语义不变、不报错。反查是单射（卡 03 保证），不会错配。
-//
-// 返回按声明顺序排列的工具名切片；解析失败的条目跳过（不中断提取）。
-func (d *cursorAgentDuplex) declaredToolNames() []string {
-	if len(d.declaredToolDefs) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(d.declaredToolDefs))
-	for _, raw := range d.declaredToolDefs {
-		fields, err := cursorDecodeProtobuf(raw)
-		if err != nil {
-			continue
-		}
-		for _, f := range fields {
-			if f.Number == cursorFldMcpToolDefToolName {
-				name := f.String()
-				if orig, ok := d.declaredToolReverse[name]; ok {
-					name = orig
-				}
-				names = append(names, name)
-				break
-			}
-		}
-	}
-	return names
 }
 
 func (d *cursorAgentDuplex) start(initial []byte) {
@@ -506,13 +419,6 @@ func (b *cursorAgentResponseBody) Read(p []byte) (int, error) {
 	return b.frame.Read(p)
 }
 
-// cursorUnknownFieldReplyShape 是 unknown_field_replied 日志的 shape 取值（施工图 W7）。
-// 未知 exec 字段这条链路只有「兜底形状」一种：回 {field:{f2:{f2:text}}} 通用错误结果帧
-// （cursorEncodeExecGenericUnknownFieldReject）。不存在「精确形状」分支——精确形状只属于 11 类
-// 原生 exec 拒绝（cursor_native_exec_reject.go，由别的卡负责），与未知字段链路无关。本常量仅用于
-// 让日志字段与测试断言引用同一字面量，避免拼写漂移，不引入任何新机制。
-const cursorUnknownFieldReplyShape = "兜底形状"
-
 func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 	fields, err := cursorDecodeProtobuf(payload)
 	if err != nil {
@@ -575,33 +481,22 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				zap.Uint64("exec_id", execID), zap.String("tool_name", tc.Name))
 			return false, nil
 		case hasNative:
-			// 11 类原生 exec 字段（f2 shell / f3 write / f4 delete / f5 grep / f7 read /
-			// f8 ls / f9 diagnostics / f14 shell_stream / f16 background_shell_spawn /
-			// f20 fetch / f23 write_shell_stdin）：按本轮裁定一律按协议拒绝形状回写，
-			// 不执行服务器工具、不按工具名配对、不 FS→shell、不做 shell fallback。
-			// 拒绝入口在 cursor_native_exec_reject.go（由别的卡负责接线与修正），本卡只调用。
-			if err := d.cursorRejectNativeExec(parts, nativeField, execID, idField); err != nil {
-				return false, err
-			}
-			return false, nil
+			// 意外 native exec：记一条 Warn（exec_id/field，不含参数），返回既有协议错误，
+			// 由原 owner 终止。不发任何结果/拒绝/stream_close 帧、不发猜测结果帧。
+			d.logPhase(zapcore.WarnLevel, "native_exec_unexpected", "",
+				zap.Uint64("exec_id", execID), zap.Int("field", nativeField))
+			return false, cursorFrameErrorf(cursorFrameDuplex, "unexpected native exec field %d", nativeField)
 		default:
-			// 未处理的 exec 子字段：先按字段号取证，再区分"纯元数据"与"真未知执行"。
-			//
-			// 只记字段号（不记内容）：真实客户端（CodeBuddy / Claude Code / Codex）会发起
-			// 我们尚未实现的 exec 类型，没有这个字段号就只能盲猜。安全字段 = exec 内层
-			// 全部 field number 与 wire type，不含任何业务数据。
+			// 未处理的 exec 子字段：只记字段号与 wire type（纯协议结构，不含任何业务内容）。
+			// 纯元数据消息忽略（不承载执行指令）；其余一律返回既有协议错误、由原 owner 终止。
+			// 不再回通用未知字段帧，也不再静默忽略 varint 未知字段。
 			nums := make([]int, 0, len(parts))
+			wires := make([]int, 0, len(parts))
 			for _, f := range parts {
 				nums = append(nums, f.Number)
+				wires = append(wires, f.Wire)
 			}
 			sort.Ints(nums)
-			if cursorExecImplementedSubfieldOK(parts) {
-				// 已实现的 exec 子字段本应被上方 switch 命中；落到这里说明分支顺序被破坏，
-				// 属内部逻辑错误，保持失败关闭（绝不静默忽略真实执行请求）。
-				d.logPhase(zapcore.ErrorLevel, "exec_dispatch_internal_error", "",
-					zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
-				return false, cursorFrameErrorf(cursorFrameDuplex, "AgentRun exec dispatch ordering broken")
-			}
 			if cursorExecMetadataOnly(parts) {
 				// 纯元数据伴随消息（仅服务端方向已证字段 f1/f15/f19/f55/f57）：不承载执行指令，
 				// 忽略即可，连接保持、不失败（生产 [1,15,19,55] / [1,15,57] 即此类）。
@@ -610,35 +505,8 @@ func (d *cursorAgentDuplex) respond(payload []byte) (bool, error) {
 				return false, nil
 			}
 			d.logPhase(zapcore.WarnLevel, "exec_unsupported_fields", "",
-				zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums))
-			// 派发单 D 阶段 2：未知 exec 字段不再以 502 打死整轮，而是对每个「承载 message 的
-			// 字段」（wire=2/bytes）回一个通用错误结果帧 {field:{f2:{f2:text}}}，让模型换条路继续；
-			// varint 字段（wire=0）不承载 message，不回包（施工图 W1：只有承载 message 的字段必须
-			// 回包）；元数据白名单字段已在上方 cursorExecMetadataOnly 分支忽略。无论哪种都继续处理
-			// 本轮，不 502、不断流。绝不使用 sendExecStreamClose（关流会让上游永远等不到应答，
-			// 把「本轮 502」换成「流卡死」，更糟）；stream_close 只在确实完成流式执行时才发。
-			for _, f := range parts {
-				if cursorExecMetadataFieldOK(f.Number) {
-					continue
-				}
-				if f.Wire != cursorWireBytes {
-					// varint 字段不承载 message，不回包，仅忽略（施工图 W1）。
-					continue
-				}
-				// 施工图 W7 unknown_field_replied：未知字段被应答的观测点（判断「客户跑没跑」）。
-				// 只记字段号 / wire type / 形状种类，绝不记字段字节内容（可能含客户数据）。
-				// 未知字段这一路恒为「兜底形状」——精确形状只属于 11 类原生 exec 拒绝
-				// （cursor_native_exec_reject.go，由别的卡负责），不在此链路内，故不制造分叉。
-				d.logPhase(zapcore.InfoLevel, "unknown_field_replied", "",
-					zap.Int("field", f.Number),
-					zap.Int("wire_type", f.Wire),
-					zap.String("shape", cursorUnknownFieldReplyShape))
-				frame := cursorEncodeExecGenericUnknownFieldReject(execID, idField, f.Number, cursorGenericUnknownExecRejectText)
-				if err := d.send(cursorFldClientMessage, frame); err != nil {
-					return false, err
-				}
-			}
-			return false, nil
+				zap.Uint64("exec_id", execID), zap.Ints("field_numbers", nums), zap.Ints("wire_types", wires))
+			return false, cursorFrameErrorf(cursorFrameDuplex, "unsupported exec fields")
 		}
 	}
 	if q, ok := cursorFindField(fields, cursorFldServerInteractionQuery); ok {
@@ -748,12 +616,9 @@ const (
 	cursorFldInteractionReplaceEnvSetupLogs    = 2
 )
 
-// cursorGenericUnknownInteractionRejectText 是「未知 interaction 类型」通用 rejected 应答文本
-// （人话：这种交互在本环境不支持）。与已知交互类型的精确 rejected 文本互不干扰。
-const cursorGenericUnknownInteractionRejectText = "This interaction type is not supported in this environment."
-
 // respondInteractionQuery 按方案 §1.2 应答表回写 InteractionResponse（AgentClientMessage.f6）。
-// 不支持的询问（f12 generate_image / 未知字段 / 缺 oneof）回通用 rejected 继续，不写帧、不 502。
+// 已知 10 类按精确形状应答；未知 oneof 字段或缺失/非 bytes 一律记 Warn（query_id/field）并
+// 返回既有协议错误、由原 owner 终止，不发任何猜测应答帧。
 // 日志只记 query_id / query_field / answer，不记 args 正文。
 func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error) {
 	fields, err := cursorDecodeProtobuf(payload)
@@ -769,28 +634,13 @@ func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error
 		}
 	}
 	field := query.Number
-	// 派发单 D 阶段 2：未知 interaction 类型不再以 502 打死整轮，而是回一个通用 rejected 应答
-	// 让模型换条路继续（绝不 sendExecStreamClose 关流）。形状遵循已知类型的 rejected：
-	// {field:{f2:{f1:reason}}}。元数据/已知类型仍按既有逻辑在下方分派。
-	unsupported := func() (bool, error) {
+	// 已知交互询问类型（10 类）全部登记在统一字段表中；未知字段（field==0）、缺 oneof
+	// 或非 bytes（oneof 必须是 message）一律失败关闭：记 Warn（query_id/field）、返回既有
+	// 协议错误、由原 owner 终止，不发任何猜测应答帧。
+	if cursorFieldClassOf(cursorDomainInteraction, field) != cursorFieldInteraction || query.Wire != cursorWireBytes {
 		d.logPhase(zapcore.WarnLevel, "interaction_query_unsupported", "",
 			zap.Uint64("query_id", id), zap.Int("query_field", field))
-		result := cursorAppendBytesField(nil, cursorFldInteractionRespRejected,
-			cursorAppendStringField(nil, cursorFldInteractionRejectedReason, cursorGenericUnknownInteractionRejectText))
-		resp := cursorAppendVarintField(nil, cursorFldInteractionID, id)
-		resp = cursorAppendBytesField(resp, field, result)
-		serr := d.send(cursorFldClientInteractionResponse, resp)
-		d.logPhase(zapcore.InfoLevel, "interaction_query_answered", cursorHTTPErrClass(serr),
-			zap.Uint64("query_id", id), zap.Int("query_field", field), zap.String("answer", "rejected-unknown"))
-		return false, serr
-	}
-	// 已知交互询问类型（10 类）全部登记在统一字段表中；查表判定而非各自写一份清单。
-	// 未知类型走 unsupported（派发单 D 阶段 2：回通用 rejected，不再 502 失败关闭）。
-	if cursorFieldClassOf(cursorDomainInteraction, field) != cursorFieldInteraction {
-		return unsupported()
-	}
-	if query.Wire != cursorWireBytes {
-		return false, cursorFrameErrorf(cursorFrameMessage, "interaction query field %d is not a message", field)
+		return false, cursorFrameErrorf(cursorFrameMessage, "unsupported interaction query field %d", field)
 	}
 	sub, err := cursorDecodeProtobuf(query.Bytes)
 	if err != nil {
@@ -805,8 +655,7 @@ func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error
 	var result []byte
 	var answer string
 	// 本段是「已知交互类型各自怎么应答」，不是第二份判定清单：未知类型已在上方
-	// （cursorFieldClassOf(cursorDomainInteraction, field) 判定段）统一拦截并走
-	// unsupported 失败关闭，故这里只需按类型分派应答，不重复判定。
+	// 统一失败关闭，故这里只需按类型分派应答，不重复判定。
 	switch field {
 	case cursorFldInteractionWebSearch, cursorFldInteractionWebFetch:
 		result, answer = approved(), "approved"
@@ -866,11 +715,6 @@ func (d *cursorAgentDuplex) respondInteractionQuery(payload []byte) (bool, error
 	d.logPhase(zapcore.InfoLevel, "interaction_query_answered", cursorHTTPErrClass(serr),
 		zap.Uint64("query_id", id), zap.Int("query_field", field), zap.String("answer", answer))
 	return false, serr
-}
-
-// sendExecStreamClose 把 exec 终止控制帧写入当前 AgentRun（AgentClientMessage.f5）。
-func (d *cursorAgentDuplex) sendExecStreamClose(execID uint64) error {
-	return d.send(cursorFldClientControlMessage, cursorEncodeExecStreamClose(execID))
 }
 
 // cursorFindFieldOK 是 cursorFindField 的 bool 便捷版（仅判断字段是否存在）。
@@ -1038,67 +882,20 @@ func (d *cursorAgentDuplex) cursorMcpStateReply(execID uint64, idField []byte) (
 
 // cursorCaptureMcpArgs 从 exec 内层 f11（mcp_args）捕获工具调用。
 //
-// 解析 McpArgs：f3 tool_call_id、f5 tool_name、f2 args（protobuf map<string,Value>，
-// 每个 entry = {f1 key, f2 value}，Value：f1 null / f2 number / f3 string）。ArgsJSON
-// 为对象 JSON 字符串。同时捕获承载本委托的 exec_id / idField（回写真实结果时原样带回）。
+// 解码统一走 cursorDecodeMcpArgs(payload, declaredToolDefs)：上游只回调单入口运输工具，
+// 工具名 / ArgsJSON 原字节由它给出，本层直接登记原工具名与原 ArgsJSON，不做 retype /
+// fallback / 反查映射。execID / idField 原样带回，供续轮回写真实结果关联原 exec。
 // **不终止连接**——写入唯一的委托记录供续轮回写通道收尾。
 func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID uint64, idField []byte) (cursorToolCallCapture, error) {
 	argsField, ok := cursorFindField(parts, 11)
 	if !ok {
 		return cursorToolCallCapture{}, cursorFrameErrorf(cursorFrameDelegation, "mcp_args without f11")
 	}
-	id, name, argsJSON, err := cursorDecodeMcpArgs(argsField.Bytes)
+	id, name, argsJSON, err := cursorDecodeMcpArgs(argsField.Bytes, d.declaredToolDefs)
 	if err != nil {
 		return cursorToolCallCapture{}, err
 	}
-	// 按 schema 还原（r15 方案 §3）：schema 来源必须是 f4 原始字节（d.declaredToolDefs）。
-	// declaredToolDefs 里是 **wire name**（卡 01 改名后），上游回传的 name 也是 wire name，
-	// 所以这里的 name 仍用 wire name 去匹配 schema —— 不改。
-	var failReason cursorRetypeErrReason
-	mergedDefs := d.buildMergedDefsFromSnapshot(d.declaredToolDefs)
-	retyped, rerr := cursorRetypeArgsByToolDefs(id, name, argsJSON, mergedDefs,
-		func(reason cursorRetypeErrReason) {
-			failReason = reason
-			d.logPhase(zapcore.WarnLevel, "mcp_args_retype_failed", "",
-				zap.String("retype_error", string(reason)),
-				zap.String("tool_name", name),
-				zap.String("call_id", id))
-		})
-	if rerr != nil {
-		if !cursorRetypeDegradable(failReason) {
-			// schema 侧不可解析（schema_absent / invalid / unresolvable /
-			// projection_unresolvable）：与 parser 侧同口径，必须按上游失败终止本轮。
-			// 注：缺必填（missing_required）派发单 D 阶段 2 起已纳入可降级，不再走到这里
-			// （见 cursorRetypeDegradable）；诊断字段（missing_fields / present_fields /
-			// missing_depth）只含字段名与深度，用于区分真空缺与命名错位，见 cursorArgsDiagFields。
-			fields := []zap.Field{
-				zap.String("retype_error", string(failReason)),
-				zap.String("tool_name", name),
-				zap.String("call_id", id),
-			}
-			fields = append(fields, cursorArgsDiagFields(rerr)...)
-			d.logPhase(zapcore.ErrorLevel, "mcp_args_incomplete_rejected", "", fields...)
-			return cursorToolCallCapture{}, fmt.Errorf("%w: tool %q args incomplete (%s)",
-				ErrCursorArgsIncomplete, name, failReason)
-		}
-		// 与 parser 侧同口径：形状差异类重打失败不断流，降级交付上游原始参数。
-		// fail-closed 会把一次参数形状不合升级成 502 + 会话终结（见 parser 侧注释）。
-		d.logPhase(zapcore.WarnLevel, "mcp_args_retype_fallback", "",
-			zap.String("tool_name", name),
-			zap.String("call_id", id))
-		retyped = argsJSON
-	}
-	// 方向 1（入站映射）：上游按 wire name 回调 → 映射回客户端原名（卡 03）。
-	// 反查只在本请求的声明集合内进行（declaredToolReverse）；查不到（上游回调了没声明的
-	// 名字）→ 保持原样（既有语义，不扩大改动）。
-	//
-	// 注意：交付给客户端的名字必须用原名；上面的 schema 还原已用 wire name 完成匹配，
-	// 这里只在最后一步改写 tc.Name，绝不回头影响 schema 查找。
-	origName := name
-	if mapped, ok := d.declaredToolReverse[name]; ok {
-		origName = mapped
-	}
-	tc := cursorToolCallCapture{ID: id, Name: origName, ArgsJSON: retyped, ExecID: execID, IDField: append([]byte(nil), idField...)}
+	tc := cursorToolCallCapture{ID: id, Name: name, ArgsJSON: argsJSON, ExecID: execID, IDField: append([]byte(nil), idField...)}
 	delegations := d.delegations
 	if delegations == nil {
 		delegations = newLocalCursorToolDelegations()
@@ -1109,94 +906,6 @@ func (d *cursorAgentDuplex) cursorCaptureMcpArgs(parts []cursorPBField, execID u
 	}
 	// 结构化日志（call_id/tool_name），不记 args 明文（可能含账号会话数据）。
 	d.logPhase(zapcore.DebugLevel, "tool_call_captured", "",
-		zap.String("tool_call_id", id), zap.String("tool_name", name))
+		zap.String("call_id", id), zap.String("tool_name", name))
 	return tc, nil
-}
-
-// maintainFirstRoundSchemaSnapshot 维护首轮 schema 快照（候选 C-1，2026-11-24）。
-func (d *cursorAgentDuplex) maintainFirstRoundSchemaSnapshot(defs [][]byte) {
-	d.snapshotMutex.Lock()
-	defer d.snapshotMutex.Unlock()
-
-	if d.firstRoundSchemaSnapshot == nil {
-		d.firstRoundSchemaSnapshot = make(map[string]json.RawMessage)
-	}
-
-	for _, def := range defs {
-		name, schema := cursorExtractToolNameAndSchema(def)
-		if name == "" {
-			continue
-		}
-		if _, exists := d.firstRoundSchemaSnapshot[name]; !exists {
-			d.firstRoundSchemaSnapshot[name] = schema
-		}
-	}
-}
-
-// cursorExtractToolNameAndSchema 从工具定义字节中提取 wire name 和 schema。
-func cursorExtractToolNameAndSchema(def []byte) (string, json.RawMessage) {
-	fields, err := cursorDecodeProtobuf(def)
-	if err != nil {
-		return "", nil
-	}
-
-	nameField, ok := cursorFindField(fields, cursorFldMcpToolDefName)
-	if !ok {
-		return "", nil
-	}
-	name := string(nameField.Bytes)
-
-	schemaField, ok := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
-	if !ok {
-		return name, json.RawMessage("{}")
-	}
-
-	value := &structpb.Value{}
-	if err := proto.Unmarshal(schemaField.Bytes, value); err != nil {
-		return name, nil
-	}
-
-	schemaJSON, err := protojson.Marshal(value)
-	if err != nil {
-		return name, nil
-	}
-
-	return name, json.RawMessage(schemaJSON)
-}
-
-// buildMergedDefsFromSnapshot 从快照重建 defs 并追加当前轮 defs。
-func (d *cursorAgentDuplex) buildMergedDefsFromSnapshot(currentDefs [][]byte) [][]byte {
-	d.snapshotMutex.RLock()
-	defer d.snapshotMutex.RUnlock()
-
-	if d.firstRoundSchemaSnapshot == nil {
-		return currentDefs
-	}
-
-	snapshotDefs := make([][]byte, 0, len(d.firstRoundSchemaSnapshot))
-	for name, schema := range d.firstRoundSchemaSnapshot {
-		def := cursorRebuildToolDef(name, schema)
-		snapshotDefs = append(snapshotDefs, def)
-	}
-
-	return append(snapshotDefs, currentDefs...)
-}
-
-// cursorRebuildToolDef 从 name 和 schema 重建工具定义字节流（protobuf 格式）。
-func cursorRebuildToolDef(name string, schema json.RawMessage) []byte {
-	// schema 已经是 JSON 格式（protojson.Marshal 的输出），需要转回 protobuf.Value
-	value := &structpb.Value{}
-	if err := protojson.Unmarshal(schema, value); err != nil {
-		return nil
-	}
-	valBytes, err := proto.Marshal(value)
-	if err != nil {
-		return nil
-	}
-
-	// 按 cursorBuildMcpTools 同样的格式构造 McpToolDefinition 字节流
-	var def []byte
-	def = cursorAppendStringField(def, cursorFldMcpToolDefName, name)
-	def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, valBytes)
-	return def
 }

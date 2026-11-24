@@ -9,7 +9,6 @@ package service
 import (
 	"bytes"
 	"encoding/json"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,13 +30,11 @@ func cursorTestFieldString(fields []cursorPBField, n int) string {
 }
 
 // cursorTestRestoreF3Schema 把解码后的 McpToolDefinition 字段里 f3（google.protobuf.Value）
-// 还原为规范 JSON 字符串，并断言 f3 存在、f6 不存在（字节级：新生产构造只写 f3）。
+// 还原为规范 JSON 字符串，并断言 f3 存在（单入口运输定义只写 f3）。
 func cursorTestRestoreF3Schema(t *testing.T, fields []cursorPBField) string {
 	t.Helper()
 	f3, ok := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
 	require.True(t, ok, "f3 input_schema Value must be present")
-	_, hasF6 := cursorFindField(fields, cursorFldMcpToolDefInputSchemaLegacy)
-	require.False(t, hasF6, "f6 must NOT be written in production construction")
 	v := &structpb.Value{}
 	require.NoError(t, proto.Unmarshal(f3.Bytes, v))
 	out, err := protojson.Marshal(v)
@@ -118,55 +115,52 @@ type cursorToolTestMcpArgEntry struct {
 	val  string
 }
 
-// cursorToolTestBuildMcpArgs 构造 McpArgs 字节（exec 内层 f11 的载荷）。
+// cursorToolTestBuildMcpArgs 构造运输 f11（mcp_args）载荷，签名保持不变。
 //
-// 字段号：f3 tool_call_id、f5 tool_name、f2 args（map<string,Value>，protobuf 编码为
-// repeated 字段 2，**每条 f2 字段本身就是一条 map entry**：{f1 key, f2 value(Value)}；
-// Value 六支：f1 null / f2 number(double) / f3 string / f4 bool / f5 Struct / f6 ListValue。
-// 全部 Value 一律用官方 protobuf 编码器（proto.Marshal(structpb.New*Value)）生成，线格式
-// 与上游真实字节一致。
+// 上游只回调单入口 invoke_client_tool：f3 tool_call_id、f5 固定 cursorTransportToolName，
+// f2 两条 entry（每条 = {f1 key string, f2 value structpb.Value string}）：
+//   - tool_name      = 工具名（真实原名，由 f4 的 enum 校验）
+//   - arguments_json = 由 entries 按原顺序拼出的 JSON 对象字符串
 //
-// 线格式须与上游真实字节一致——每条 entry 直作为 McpArgs 的一个 f2，不再额外包一层 f2
-// （旧构造多包一层，与 cursorDecodeMcpArgs 解析错位同源，已在 O11-C3 修复）。
+// arguments_json 中 string 值用 json.Marshal 正确转义，number/bool/null 用原字面量，
+// 不做 map 往返 / 数值归一化，保证与 cursorDecodeMcpArgs 的原字节口径一致。
 func cursorToolTestBuildMcpArgs(tcID, toolName string, entries []cursorToolTestMcpArgEntry) []byte {
-	var mcpArgs []byte
-	for _, e := range entries {
-		var val []byte
+	var obj strings.Builder
+	obj.WriteByte('{')
+	for i, e := range entries {
+		if i > 0 {
+			obj.WriteByte(',')
+		}
+		key, err := json.Marshal(e.key)
+		if err != nil {
+			panic("bad arg key: " + err.Error())
+		}
+		obj.Write(key)
+		obj.WriteByte(':')
 		switch e.kind {
 		case "string":
-			val = cursorAppendStringField(nil, 3, e.val)
-		case "number":
-			// 官方编码：number_value 是 double，固定 64 位（wire 1）。旧构造写 varint
-			// 不是合法的 number_value 编码，会被新解码（proto.Unmarshal）当作未知字段丢弃。
-			f, err := strconv.ParseFloat(e.val, 64)
+			v, err := json.Marshal(e.val)
 			if err != nil {
-				panic("bad number value: " + e.val)
+				panic("bad string value: " + err.Error())
 			}
-			val, err = proto.Marshal(structpb.NewNumberValue(f))
-			if err != nil {
-				panic("marshal number value: " + err.Error())
-			}
+			obj.Write(v)
+		case "number", "bool":
+			obj.WriteString(e.val)
 		case "null":
-			// 合法 NullValue：f1 varint 0。旧构造写空字节是"kind 未设置"，会被新解码
-			// 失败关闭（ErrCursorProtocol），而非 JSON null。
-			val = cursorAppendVarintField(nil, 1, 0)
-		case "bool":
-			b, err := strconv.ParseBool(e.val)
-			if err != nil {
-				panic("bad bool value: " + e.val)
-			}
-			val, err = proto.Marshal(structpb.NewBoolValue(b))
-			if err != nil {
-				panic("marshal bool value: " + err.Error())
-			}
+			obj.WriteString("null")
+		default:
+			panic("unknown arg kind: " + e.kind)
 		}
-		entry := cursorAppendStringField(nil, 1, e.key)
-		entry = cursorAppendBytesField(entry, 2, val)
-		// 每条 entry 直作为 McpArgs 的一个 f2 字段（map entry 直内联）。
-		mcpArgs = cursorAppendBytesField(mcpArgs, 2, entry)
 	}
+	obj.WriteByte('}')
+
+	var mcpArgs []byte
+	mcpArgs = cursorAppendStringField(mcpArgs, 1, cursorTransportToolNameKey)
+	mcpArgs = cursorAppendBytesField(mcpArgs, 2, cursorAppendStringField(nil, 3, toolName))
+	mcpArgs = cursorAppendStringField(mcpArgs, 1, cursorTransportArgumentsKey)
+	mcpArgs = cursorAppendBytesField(mcpArgs, 2, cursorAppendStringField(nil, 3, obj.String()))
 	mcpArgs = cursorAppendStringField(mcpArgs, 3, tcID)
-	mcpArgs = cursorAppendStringField(mcpArgs, 5, toolName)
+	mcpArgs = cursorAppendStringField(mcpArgs, 5, cursorTransportToolName)
 	return mcpArgs
 }
 
@@ -220,8 +214,64 @@ func cursorTestDeclaredToolDefs(t *testing.T, req *apicompat.ChatCompletionsRequ
 	return defs
 }
 
+// cursorTestTransportDefs 用生产构造 cursorBuildMcpTools 生成真实 f4 单入口运输定义，
+// 返回其每条 McpToolDefinition 原始字节。f4 只有一条（invoke_client_tool），f5
+// tool_name enum 即 names；mcp_state 回包必须逐字节回显这些定义。
+func cursorTestTransportDefs(t *testing.T, names ...string) [][]byte {
+	t.Helper()
+	tools := make([]apicompat.ChatTool, 0, len(names))
+	for _, name := range names {
+		tools = append(tools, apicompat.ChatTool{
+			Type: "function",
+			Function: &apicompat.ChatFunction{
+				Name:       name,
+				Parameters: json.RawMessage(`{"type":"object"}`),
+			},
+		})
+	}
+	f4, err := cursorBuildMcpTools(tools, cursorSkipLedger{})
+	require.NoError(t, err)
+	fields, err := cursorDecodeProtobuf(f4)
+	require.NoError(t, err)
+	defs := make([][]byte, 0)
+	for _, f := range cursorAllFields(fields, cursorFldMcpToolsTool) {
+		defs = append(defs, f.Bytes)
+	}
+	return defs
+}
+
+// cursorTestTransportEnum 从单入口 f4 定义的 f3 input_schema 解出 properties.tool_name.enum。
+func cursorTestTransportEnum(t *testing.T, fields []cursorPBField) []string {
+	t.Helper()
+	var schema struct {
+		Properties map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(cursorTestRestoreF3Schema(t, fields)), &schema))
+	return schema.Properties[cursorTransportToolNameKey].Enum
+}
+
+// cursorTestBuildToolDef 构造一条 McpToolDefinition 原始字节（f1 名 / f2 description /
+// f4 provider / f5 tool_name / f3 input_schema(google.protobuf.Value)），与
+// cursorBuildMcpTools 生产构造同形（仅用于测试夹具，不重新序列化 req.Tools）。
+func cursorTestBuildToolDef(t *testing.T, toolName, schema string) []byte {
+	t.Helper()
+	v := &structpb.Value{}
+	require.NoError(t, protojson.Unmarshal([]byte(schema), v))
+	b, err := proto.Marshal(v)
+	require.NoError(t, err)
+	var def []byte
+	def = cursorAppendStringField(def, cursorFldMcpToolDefName, toolName)
+	def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, "desc-"+toolName)
+	def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
+	def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, toolName)
+	def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, b)
+	return def
+}
+
 // ---------------------------------------------------------------------------
-// 1. 声明编码：tools[2] → f4 存在、McpToolDefinition 五字段齐、repeated 逐项
+// 1. 声明编码：单入口运输 f4 只有一条定义，enum 列出全部客户端工具
 // ---------------------------------------------------------------------------
 
 func TestCursorToolDeclarationEncoding(t *testing.T) {
@@ -244,25 +294,23 @@ func TestCursorToolDeclarationEncoding(t *testing.T) {
 	require.True(t, ok, "f4 (McpTools) must be present")
 	require.NotEmpty(t, mcp.Bytes)
 
-	// repeated 逐项：必须解出**两条** McpToolDefinition（f1 每条工具）。
+	// 单入口运输：无论客户端声明多少工具，f4 只有一条 McpToolDefinition
+	// （invoke_client_tool）；真实工具名进 f3 input_schema 的 tool_name enum。
 	mcpFields, e := cursorDecodeProtobuf(mcp.Bytes)
 	require.NoError(t, e)
 	defs := cursorAllFields(mcpFields, cursorFldMcpToolsTool)
-	require.Len(t, defs, 2, "two tools must be encoded as two repeated f1 entries")
+	require.Len(t, defs, 1, "all client tools share one transport definition")
 
-	for i, def := range defs {
-		fields, e := cursorDecodeProtobuf(def.Bytes)
-		require.NoError(t, e)
-		name := cursorTestFieldString(fields, cursorFldMcpToolDefName)
-		require.Equal(t, []string{"get_weather", "search"}[i], name)
-		// 五字段齐全断言。
-		require.Equal(t, name, cursorTestFieldString(fields, cursorFldMcpToolDefToolName), "f5 tool_name must equal f1 name")
-		require.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(fields, cursorFldMcpToolDefProvider))
-		require.NotEmpty(t, cursorTestFieldString(fields, cursorFldMcpToolDefDescription))
-		// input_schema 走 f3（google.protobuf.Value）：还原为 JSON 后与原 schema 相等。
-		require.JSONEq(t, []string{`{"type":"object"}`, `{"type":"object","x":1}`}[i],
-			cursorTestRestoreF3Schema(t, fields))
-	}
+	fields, e := cursorDecodeProtobuf(defs[0].Bytes)
+	require.NoError(t, e)
+	require.Equal(t, cursorTransportToolName, cursorTestFieldString(fields, cursorFldMcpToolDefName))
+	require.Equal(t, cursorTransportToolName, cursorTestFieldString(fields, cursorFldMcpToolDefToolName))
+	require.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(fields, cursorFldMcpToolDefProvider))
+	desc := cursorTestFieldString(fields, cursorFldMcpToolDefDescription)
+	require.Contains(t, desc, "get_weather")
+	require.Contains(t, desc, `"x":1`)
+	// enum 准确：恰好两个原名、顺序与声明一致。
+	require.Equal(t, []string{"get_weather", "search"}, cursorTestTransportEnum(t, fields))
 }
 
 // ---------------------------------------------------------------------------
@@ -281,48 +329,33 @@ func TestCursorToolChoiceSemantics(t *testing.T) {
 			ToolChoice: choice,
 		}
 	}
-	countDeclared := func(t *testing.T, req *apicompat.ChatCompletionsRequest) int {
-		body, err := cursorConvertRequest(req, "grok-4.7")
-		require.NoError(t, err)
-		run := cursorAgentRunOf(t, body)
-		mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
-		require.True(t, ok)
-		if len(mcp.Bytes) == 0 {
-			return 0
+	// 单入口运输下，tool_choice 决定 f3 tool_name enum 的内容（f4 恒为一条）。
+	transportEnum := func(t *testing.T, req *apicompat.ChatCompletionsRequest) []string {
+		defs := cursorTestDeclaredToolDefs(t, req)
+		if len(defs) == 0 {
+			return nil
 		}
-		mcpFields, e := cursorDecodeProtobuf(mcp.Bytes)
-		require.NoError(t, e)
-		return len(cursorAllFields(mcpFields, cursorFldMcpToolsTool))
+		require.Len(t, defs, 1, "单入口运输：f4 只有一条定义")
+		fields, err := cursorDecodeProtobuf(defs[0])
+		require.NoError(t, err)
+		return cursorTestTransportEnum(t, fields)
 	}
 
 	t.Run("省略/auto → 全部声明", func(t *testing.T) {
-		require.Equal(t, 2, countDeclared(t, base(nil)))
-		require.Equal(t, 2, countDeclared(t, base(json.RawMessage(`"auto"`))))
+		require.Equal(t, []string{"a", "b"}, transportEnum(t, base(nil)))
+		require.Equal(t, []string{"a", "b"}, transportEnum(t, base(json.RawMessage(`"auto"`))))
 	})
 	t.Run("required → 全部声明", func(t *testing.T) {
-		require.Equal(t, 2, countDeclared(t, base(json.RawMessage(`"required"`))))
+		require.Equal(t, []string{"a", "b"}, transportEnum(t, base(json.RawMessage(`"required"`))))
 	})
 	t.Run("none → 不声明（等价无 tools）", func(t *testing.T) {
-		require.Equal(t, 0, countDeclared(t, base(json.RawMessage(`"none"`))))
+		require.Empty(t, transportEnum(t, base(json.RawMessage(`"none"`))))
 	})
 	t.Run("指定函数 → 仅声明该函数", func(t *testing.T) {
-		req := base(json.RawMessage(`{"type":"function","function":{"name":"b"}}`))
-		body, err := cursorConvertRequest(req, "grok-4.7")
-		require.NoError(t, err)
-		run := cursorAgentRunOf(t, body)
-		mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
-		require.True(t, ok)
-		require.NotEmpty(t, mcp.Bytes)
-		mcpFields, e := cursorDecodeProtobuf(mcp.Bytes)
-		require.NoError(t, e)
-		defs := cursorAllFields(mcpFields, cursorFldMcpToolsTool)
-		require.Len(t, defs, 1)
-		fields, _ := cursorDecodeProtobuf(defs[0].Bytes)
-		require.Equal(t, "b", cursorTestFieldString(fields, cursorFldMcpToolDefName))
+		require.Equal(t, []string{"b"}, transportEnum(t, base(json.RawMessage(`{"type":"function","function":{"name":"b"}}`))))
 	})
 	t.Run("指定函数不在列表 → 回落全部（不凭空声明）", func(t *testing.T) {
-		req := base(json.RawMessage(`{"type":"function","function":{"name":"missing"}}`))
-		require.Equal(t, 2, countDeclared(t, req))
+		require.Equal(t, []string{"a", "b"}, transportEnum(t, base(json.RawMessage(`{"type":"function","function":{"name":"missing"}}`))))
 	})
 }
 
@@ -345,7 +378,7 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 	d, err := newCursorAgentDuplex(initBody, nil)
 	require.NoError(t, err)
 	defer d.close(nil)
-	require.Len(t, d.declaredToolDefs, 2)
+	require.Len(t, d.declaredToolDefs, 1, "单入口运输：f4 只有一条定义")
 
 	// 期望：回包 f5 与请求 f4 的每条 McpToolDefinition 原始字节逐字节一致（字节级保真，依据 T7）。
 	runForExpect := cursorAgentRunOf(t, initBody)
@@ -357,7 +390,7 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 	for _, def := range cursorAllFields(mcpFieldsForExpect, cursorFldMcpToolsTool) {
 		defRaw = append(defRaw, def.Bytes)
 	}
-	require.Len(t, defRaw, 2, "init request must carry two McpToolDefinition raw bytes")
+	require.Len(t, defRaw, 1, "单入口运输：f4 只有一条 McpToolDefinition 原始字节")
 
 	frame := cursorToolTestExecFrame(false, nil) // f36 mcp_state（respond 吃 envelope 剥离后的 payload）
 	// 先起并发读取，再调 respond：d.send 走 io.Pipe 会阻塞直到被读，避免死锁。
@@ -400,16 +433,13 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 	// 请求 f4 的 McpToolDefinition 原始字节逐字节一致（字节级保真，依据活体探针 T7）。
 	toolEntries := cursorAllFields(serverFields, 5)
 	require.Len(t, toolEntries, len(defRaw), "f5 must have one entry per declared tool")
-	names := map[string]bool{}
 	for i, te := range toolEntries {
 		require.Equal(t, defRaw[i], te.Bytes,
 			"f5 entry %d must equal request McpToolDefinition raw bytes (byte-level fidelity)", i)
-		tf, e := cursorDecodeProtobuf(te.Bytes)
-		require.NoError(t, e)
-		names[cursorTestFieldString(tf, 1)] = true
 	}
-	require.True(t, names["get_weather"])
-	require.True(t, names["search"])
+	tf, e := cursorDecodeProtobuf(toolEntries[0].Bytes)
+	require.NoError(t, e)
+	require.Equal(t, cursorTransportToolName, cursorTestFieldString(tf, cursorFldMcpToolDefName))
 }
 
 // ---------------------------------------------------------------------------
@@ -417,27 +447,23 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCursorDecodeMcpArgsMap(t *testing.T) {
+	defs := cursorTestTransportDefs(t, "get_weather")
 	t.Run("string/number/null 用例", func(t *testing.T) {
 		args := cursorToolTestBuildMcpArgs("call_42", "get_weather", []cursorToolTestMcpArgEntry{
 			{key: "city", kind: "string", val: "Beijing"},
 			{key: "days", kind: "number", val: "3"},
 			{key: "verbose", kind: "null"},
 		})
-		id, name, argsJSON, err := cursorDecodeMcpArgs(args)
+		id, name, argsJSON, err := cursorDecodeMcpArgs(args, defs)
 		require.NoError(t, err)
 		require.Equal(t, "call_42", id)
 		require.Equal(t, "get_weather", name)
-		var obj map[string]json.RawMessage
-		require.NoError(t, json.Unmarshal([]byte(argsJSON), &obj))
-		require.Len(t, obj, 3)
-		require.Equal(t, `"Beijing"`, string(obj["city"]))
-		require.Equal(t, `3`, string(obj["days"]))
-		require.Equal(t, `null`, string(obj["verbose"]))
+		require.Equal(t, `{"city":"Beijing","days":3,"verbose":null}`, argsJSON)
 	})
 
 	t.Run("空 args 返回空对象", func(t *testing.T) {
-		args := cursorToolTestBuildMcpArgs("c", "t", nil)
-		_, _, argsJSON, err := cursorDecodeMcpArgs(args)
+		args := cursorToolTestBuildMcpArgs("c", "get_weather", nil)
+		_, _, argsJSON, err := cursorDecodeMcpArgs(args, defs)
 		require.NoError(t, err)
 		require.Equal(t, "{}", argsJSON)
 	})
@@ -470,6 +496,8 @@ func TestCursorDuplexMcpArgsCapturedNotAnswered(t *testing.T) {
 	require.Equal(t, "call_99", snapshot[0].ID)
 	require.Equal(t, "get_weather", snapshot[0].Name)
 	require.Equal(t, `{"city":"Shanghai"}`, snapshot[0].ArgsJSON)
+	require.Equal(t, uint64(7), snapshot[0].ExecID, "exec_id 原样带回")
+	require.Equal(t, []byte("exec-id"), snapshot[0].IDField, "id 原值原样带回")
 
 	// 零回包（§24.3 旧链已斩）：委托阶段**绝不**回 McpResult（尤其不得回
 	// McpResult.error 诱导模型结束）。真实结果只能在续轮经由 CursorSessionIntake
