@@ -57,9 +57,6 @@ const (
 	// cursorFrameDelegation：委托登记/封口簿记层——重复委托 ID、缺 tool_call_id、
 	// mcp_args 缺 f11、listed 计数为负、wire id 分配耗尽、nil stream。
 	cursorFrameDelegation cursorFrameClass = "frame_delegation"
-
-	// cursorFrameInlineToolCall：上游把工具调用写进了正文（未走结构化委托帧）。
-	cursorFrameInlineToolCall cursorFrameClass = "frame_inline_tool_call"
 )
 
 // cursorProtocolFramePrefix 是 `ErrCursorProtocol` 的固定前缀，逐字保持与改造前一致。
@@ -114,12 +111,6 @@ func cursorFrameClassify(err error) (class cursorFrameClass, index int, ok bool)
 	var fe *cursorFrameError
 	if errors.As(err, &fe) && fe != nil {
 		return fe.class, fe.index, true
-	}
-	// *cursorRetypeError 是既有结构化错误（Unwrap 到 ErrCursorProtocol，带 §3.5 原因枚举），
-	// 它本身没有帧序号；归入 mcp_args 家族，避免退化回 protocol_frame 兜底。
-	var re *cursorRetypeError
-	if errors.As(err, &re) && re != nil {
-		return cursorFrameMcpArgs, -1, true
 	}
 	return "", -1, false
 }

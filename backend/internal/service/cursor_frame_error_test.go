@@ -63,17 +63,6 @@ func TestCursorFrameClassifyMcpArgs(t *testing.T) {
 	require.Equal(t, "cursor: malformed protocol frame (fail closed): mcp value has no kind set", err.Error())
 }
 
-// TestCursorFrameClassifyRetype retype 结构化错误（既有 cursorRetypeError）也归 frame_mcp_args，
-// 不再退化为 protocol_frame 兜底。
-func TestCursorFrameClassifyRetype(t *testing.T) {
-	err := cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-	require.ErrorIs(t, err, ErrCursorProtocol)
-	class, index, ok := cursorFrameClassify(err)
-	require.True(t, ok)
-	require.Equal(t, cursorFrameMcpArgs, class)
-	require.Equal(t, -1, index)
-}
-
 // TestCursorFrameClassifyEndStreamPayload EndStream payload 非 JSON 归独立类别。
 func TestCursorFrameClassifyEndStreamPayload(t *testing.T) {
 	_, _, err := cursorParseEndStream([]byte("not-json"))
@@ -166,7 +155,6 @@ func TestCursorFrameErrClassFamilyCoverage(t *testing.T) {
 		{cursorFrameMcpArgs, "protocol_frame:frame_mcp_args"},
 		{cursorFrameDuplex, "protocol_frame:frame_duplex"},
 		{cursorFrameDelegation, "protocol_frame:frame_delegation"},
-		{cursorFrameInlineToolCall, "protocol_frame:frame_inline_tool_call"},
 	} {
 		t.Run(string(tc.class), func(t *testing.T) {
 			err := cursorFrameErrorf(tc.class, "probe")
