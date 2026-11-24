@@ -223,13 +223,6 @@ type CursorExecutionService struct {
 	//
 	// 未注入（nil）时退化为只换号、不停号。
 	accountRateLimitedHandler func(ctx context.Context, accountID int64, reason string)
-	// accountProtocolFailureHandler 是「上游协议污染」回调（2026-11-04 活体补装）。
-	//
-	// 与额度耗尽不同：这类故障不是账号没额度，而是账号背后的真实模型被上游随机
-	// 轮换，某一轮把工具调用吐进正文、且救不回来。此时本轮已经无法交付有效结果，
-	// 但账号本身没坏——用短冷却把它移出候选池，让下一次请求换号即可，不能像额度
-	// 耗尽那样长时间摘号，也不能什么都不做（粘性会话会一直粘着它）。
-	accountProtocolFailureHandler func(ctx context.Context, accountID int64, reason string)
 	// accountKeyRejectedHandler 是「上游拒钥」回调（CURSOR-PROBE-001-A3）。
 	//
 	// 拒钥 = 上游明确不要这个号了（凭据过期/额度耗尽被拒，见 *CursorKeyRejectedError）。
@@ -278,19 +271,6 @@ func (s *CursorExecutionService) SetAccountRateLimitedHandler(fn func(ctx contex
 		return
 	}
 	s.accountRateLimitedHandler = fn
-}
-
-// SetAccountProtocolFailureHandler 注入「上游协议污染」回调。
-//
-// 触发场景：本轮产物里出现工具调用暗号但一个都解析不出来（InlineToolCallSuspected）。
-// 这一刻客户端已经拿到了一轮"看起来正常、实际什么都没有"的结束，用户侧只会看到
-// 模型答应了却没动静。粘性会话会把用户继续摁在同一个账号上反复复现，所以必须让
-// 该账号短暂退出候选池。未注入时 no-op，行为与注入前一致。
-func (s *CursorExecutionService) SetAccountProtocolFailureHandler(fn func(ctx context.Context, accountID int64, reason string)) {
-	if s == nil {
-		return
-	}
-	s.accountProtocolFailureHandler = fn
 }
 
 // SetAccountKeyRejectedHandler 注入「上游拒钥」回调，与 SetAccountExhaustedHandler 同型。
@@ -1317,7 +1297,7 @@ func cursorWriteAll(w io.Writer, p []byte) error {
 // 只用**本 HTTP 实际写出的字节**（同一 writer 语义），因此不会把上一 HTTP 的正文或已交付
 // 工具批重播；id 取本 HTTP 实际响应 ID（chunk 内已由解析器写入）。
 //
-// ctx 只用于落阶段事件（正文含开标记却认不出形态时的 warn），不参与聚合语义。
+// ctx 仅为签名兼容保留，不参与聚合语义。
 func cursorAggregateSSEToCompletion(ctx context.Context, sseBody []byte) ([]byte, error) {
 	id, model := "", ""
 	content := strings.Builder{}
@@ -1375,27 +1355,6 @@ func cursorAggregateSSEToCompletion(ctx context.Context, sseBody []byte) ([]byte
 	}
 
 	body := content.String()
-	inline, rest, recognized := cursorParseInlineToolCalls(body)
-	if !recognized {
-		// 含开标记却认不出形态：此前的行为是完全静默的「未识别 → 原文透传」，
-		// 既不记归一成功也不记拒绝，线上看不到。这类样本最可能变成「工具静默
-		// 丢失」（客户端只收到一段话），故补一条 warn（只记形态与开标记个数）。
-		if marks := strings.Count(body, cursorInlineToolCallOpen); marks > 0 {
-			cursorPhaseLogInlineToolCallUnrecognized(ctx, model, cursorInlineToolCallShapeOf(body), marks)
-		}
-	}
-	if recognized && len(inline) == 0 {
-		// 识别到内联形态但解析不出参数 → 失败关闭：不得把原文透传成正文
-		// （静默透传正是本缺陷的成因：客户端拿不到 tool_calls，工具静默不执行）。
-		return nil, fmt.Errorf("%w: inline tool call present but unparsable", ErrCursorProtocolBridgeUnavailable)
-	}
-	if len(calls) == 0 && len(inline) > 0 {
-		// 结构化委托优先：仅在无结构化调用时用内联形态补位。
-		for _, tc := range inline {
-			calls = append(calls, &callAcc{id: tc.ID, name: tc.Name, args: tc.Arguments})
-		}
-		body = rest
-	}
 
 	message := map[string]any{"role": "assistant"}
 	if len(calls) == 0 {
@@ -1876,6 +1835,12 @@ func cursorSafeResponseHeader(resp *CursorUpstreamResponse) http.Header {
 	return header
 }
 
+// cursorAgentRunSDKClientVersion 是 AgentRun 出站使用的 SDK 身份版本。
+//
+// 与全局 cursorClientVersion（模型目录同步仍报 3.24.12）不是一回事：
+// 出站对话链路改报 SDK 身份，模型目录同步的 IDE 身份保持不变。
+const cursorAgentRunSDKClientVersion = "sdk-1.5.0"
+
 // cursorAgentRunHeaders 组装 AgentRun 出站头（鉴权 + 客户端上下文形态）。
 //
 // 客户端上下文 11 项头逐字取活体全通探针 headers()：缺客户端上下文头时带
@@ -1886,10 +1851,10 @@ func cursorAgentRunHeaders(bearer, device string, now time.Time) map[string]stri
 		"Connect-Protocol-Version": "1",
 		// 用户级身份：账号已存 access_token（不是换来的 session token）。
 		"Authorization":           "Bearer " + bearer,
-		"x-cursor-client-version": cursorClientVersion,
+		"x-cursor-client-version": cursorAgentRunSDKClientVersion,
 		"x-cursor-checksum":       cursorClientChecksum(device, now),
 
-		"x-cursor-client-type":        "ide",
+		"x-cursor-client-type":        "sdk",
 		"x-cursor-client-layout":      "unifiedAgent",
 		"x-cursor-client-os":          "linux",
 		"x-cursor-client-arch":        "x64",
@@ -8612,7 +8577,7 @@ func cursorGeminiToolChoiceMode(body []byte) (string, string, error) {
 		return "", "", nil
 	}
 	cfg := doc.ToolConfig.FunctionCallingConfig
-	declared := cursorGeminiDeclaredToolNames(doc.Tools)
+	declared := cursorGeminiToolNamesFromDoc(doc.Tools)
 	declaredSet := make(map[string]struct{}, len(declared))
 	for _, name := range declared {
 		declaredSet[name] = struct{}{}
@@ -8655,8 +8620,8 @@ func cursorGeminiToolChoiceMode(body []byte) (string, string, error) {
 	}
 }
 
-// cursorGeminiDeclaredToolNames 返回 tools[].functionDeclarations[].name（保持声明顺序）。
-func cursorGeminiDeclaredToolNames(raw json.RawMessage) []string {
+// cursorGeminiToolNamesFromDoc 返回 tools[].functionDeclarations[].name（保持声明顺序）。
+func cursorGeminiToolNamesFromDoc(raw json.RawMessage) []string {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil
 	}
@@ -9736,47 +9701,10 @@ func (r *cursorSessionRecord) batchConsumed() bool {
 	return r.pending != nil && r.pending.consumed
 }
 
-// cursorDeclaredOriginalToolNames 收集本请求客户端声明的**原始**工具名（保持声明顺序）。
-//
-// 出站 f4 里的工具名是 wire name（撞 Cursor 上游内置名时加了后缀，见
-// cursorWireToolNameSet）。上游按 wire name 回调工具时，双工层需要把它映射回
-// **客户端原名**再交付 —— 否则客户端收到一个自己从没声明过的名字。
-//
-// 这里给出原始名集合，双工层据此正向算 wire map 再反转（cursorWireNameReverse），
-// 保证「改名」与「反查」用的是同一份规则（cursorWireToolNamesFromNames），
-// 不会出现两边算出不同名字的情况。
-//
-// 没有工具、没有名字的工具都跳过（返回 nil）—— 双工层据此退化为原样登记，
-// 保持既有语义。
-func cursorDeclaredOriginalToolNames(chat *apicompat.ChatCompletionsRequest) []string {
-	if chat == nil || len(chat.Tools) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(chat.Tools))
-	for _, t := range chat.Tools {
-		if t.Function == nil {
-			continue
-		}
-		if name := strings.TrimSpace(t.Function.Name); name != "" {
-			out = append(out, name)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 // cursorBuildAgentRunUpstreamRequest 构造 AgentRun 的出站请求描述。
 //
-// 除了转发所需的基本材料，它还带上**客户端声明的原始工具名**
-// （cursorDeclaredOriginalToolNames）—— 出站 f4 里的工具名是 wire name
-// （撞 Cursor 上游内置名时加了后缀），上游按 wire name 回调时，双工层要靠这份
-// 原始名把它映射回客户端原名再交付。
-//
-// 单独成函数是为了让「原始名有没有真的被带上」这一条**可被单测直接覆盖**：
-// mutation 掉这里的赋值，单测立刻红（2026-11-07 mutation 反证得出：
-// 只测纯函数的话，生产路径漏填了测试照样绿）。
+// 单独成函数是为了让出站请求描述的构造**可被单测直接覆盖**：单测走真实
+// build→Do 路径截获出站头，mutation 掉这里的字段立刻红。
 func cursorBuildAgentRunUpstreamRequest(
 	req *CursorExecutionRequest,
 	payload []byte,
@@ -9786,12 +9714,11 @@ func cursorBuildAgentRunUpstreamRequest(
 	headers map[string]string,
 ) *CursorUpstreamRequest {
 	return &CursorUpstreamRequest{
-		Path:              cursorPathAgentRun,
-		Body:              payload,
-		AuthProvider:      authProvider,
-		Model:             upstreamModel,
-		ToolDelegations:   delegations,
-		Headers:           headers,
-		DeclaredToolNames: cursorDeclaredOriginalToolNames(req.Chat),
+		Path:            cursorPathAgentRun,
+		Body:            payload,
+		AuthProvider:    authProvider,
+		Model:           upstreamModel,
+		ToolDelegations: delegations,
+		Headers:         headers,
 	}
 }

@@ -378,7 +378,7 @@ func TestCursorStreamRejectionIsTerminalNeverSuccess(t *testing.T) {
 func TestCursorOutboundHeadersAlignToolProbe(t *testing.T) {
 	// 活体全通探针的客户端上下文头（值逐字对齐，O11-C1 修法唯一清单）。
 	wantClientContextHeaders := map[string]string{
-		"x-cursor-client-type":        "ide",
+		"x-cursor-client-type":        "sdk",
 		"x-cursor-client-layout":      "unifiedAgent",
 		"x-cursor-client-os":          "linux",
 		"x-cursor-client-arch":        "x64",
@@ -413,7 +413,13 @@ func TestCursorOutboundHeadersAlignToolProbe(t *testing.T) {
 	require.Equal(t, "application/connect+proto", captured.Get("Content-Type"))
 	require.Equal(t, "1", captured.Get("Connect-Protocol-Version"))
 	require.Equal(t, "Bearer BEARER-ACCOUNT-A", captured.Get("Authorization"))
-	require.Equal(t, cursorClientVersion, captured.Get("x-cursor-client-version"))
+	require.Equal(t, "sdk-1.5.0", captured.Get("x-cursor-client-version"))
 	require.NotEmpty(t, captured.Get("x-cursor-checksum"), "x-cursor-checksum 必须由设备级材料派生")
 	require.NotEmpty(t, captured.Get("x-jg-auth"), "x-jg-auth 必须仍由鉴权注入")
+
+	// 本请求无工具：allowed-tools 头必须显式存在且值为空串（不是缺失）。
+	allowedKey := http.CanonicalHeaderKey(cursorAgentAllowedToolsHeader)
+	allowedVals, present := captured[allowedKey]
+	require.True(t, present, "无工具请求也必须携带 x-cursor-agent-allowed-tools 头")
+	require.Equal(t, []string{""}, allowedVals)
 }
