@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// cursorDSMLSample 是一段完整、可被官方解析器还原的 DeepSeek DSML 工具调用。
-func cursorDSMLSample() string {
+// cursorDSMLSampleResponses 是一段完整、可被官方解析器还原的 DeepSeek DSML 工具调用。
+func cursorDSMLSampleResponses() string {
 	return "<｜DSML｜tool_calls><｜DSML｜invoke name=\"Bash\">" +
 		"<｜DSML｜parameter name=\"command\" string=\"true\">ls -la /tmp</｜DSML｜parameter>" +
 		"</｜DSML｜invoke></｜DSML｜tool_calls>"
@@ -23,7 +23,7 @@ func TestCursorDSMLDisabledResponsesStream(t *testing.T) {
 
 		// 把一段完整 DSML 调用切成两帧（在标记中间切开），验证逐字跨帧拼接。
 		reasoningPart1 := "思考前半 <｜DS"
-		reasoningPart2 := "ML｜" + strings.TrimPrefix(cursorDSMLSample(), "<｜DSML｜") + " 思考后半"
+		reasoningPart2 := "ML｜" + strings.TrimPrefix(cursorDSMLSampleResponses(), "<｜DSML｜") + " 思考后半"
 		reasoningFull := reasoningPart1 + reasoningPart2
 
 		// 残片：只有 invoke 开标签、没有外层 tool_calls 与闭合，默认路径会清掉。
@@ -134,7 +134,7 @@ func TestCursorDSMLDisabledResponsesStream(t *testing.T) {
 // DSML 原文作为 message output_text 保留、reasoning 原样、无 DSML function_call；
 // 真实 message.ToolCalls 按 custom/namespace/tool_search 映射照常转换。
 func TestCursorDSMLDisabledResponsesNonStream(t *testing.T) {
-	dsml := cursorDSMLSample()
+	dsml := cursorDSMLSampleResponses()
 	content, _ := json.Marshal("正文 " + dsml + " 尾")
 	reasoning := "思考 " + dsml
 
@@ -262,7 +262,7 @@ func TestCursorDSMLDisabledResponsesNonStream(t *testing.T) {
 // 原入口（不传选项）仍按既有行为恢复 DSML，其它平台零值路径不变；
 // 同时锁定流式 content 分支在 DSML 解析出空 plain 时不得跳过同一 chunk 的真实 ToolCalls。
 func TestCursorDSMLDisabledResponsesDefaultZeroValue(t *testing.T) {
-	dsml := cursorDSMLSample()
+	dsml := cursorDSMLSampleResponses()
 
 	resp := &ChatCompletionsResponse{
 		ID:    "chatcmpl-default-zero",
