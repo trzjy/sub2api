@@ -2,11 +2,9 @@
 
 package service
 
-// 派发单 D 阶段 2：cursor_agent_duplex.go 两处「未知字段 → CUR-EXEC-02 / 502 失败关闭」产生点
-// 已改为「回通用应答、整轮继续、不 502」。本文件把原「带码 CursorRequestError」定向测试改为
-// 断言新契约：未知 exec 字段回 {field:{f2:{f2:text}}} 通用错误帧，未知 interaction 类型回
-// 通用 rejected，二者都不得 502、不得返回 error（施工图 §10 E：契约从「必须失败关闭」翻转为
-// 「必须永远应答」）。
+// 派发单 CUR-TFIX6：原先两个子用例断言「未知 exec / 未知 interaction 回猜测拒绝帧继续」，
+// 该契约已翻转。生产现改为返回协议错误、零回包、不登记委托（失败关闭），原先依赖的
+// 通用拒绝助手与通用拒绝文本均已删除。本文件把两个子用例改为失败关闭断言。
 
 import (
 	"testing"
@@ -23,23 +21,29 @@ func TestTestCursorDuplexRequestErrorCodes(t *testing.T) {
 		d, buf, _, cleanup := cursorExecRejectTestDuplex(t)
 		defer cleanup()
 
-		_, err := d.respond(cursorExecMetaTestPayload(unknownExec))
-		// 派发单 D：未知 exec 字段不得 502、不得返回 error；必须回通用错误结果帧继续。
-		require.NoError(t, err, "未知 exec 字段不得 502（派发单 D：回通用错误帧，整轮继续）")
+		done, err := d.respond(cursorExecMetaTestPayload(unknownExec))
+		// 失败关闭：返回协议错误、不得标记终态、不得登记 MCP 委托。
+		require.Error(t, err, "未知 exec 字段必须失败关闭返回协议错误")
+		require.ErrorContains(t, err, "unsupported exec fields")
+		require.False(t, done, "失败关闭不由本层标记终态")
+		require.Empty(t, d.delegations.snapshot(), "失败关闭不得登记 MCP 委托")
 		// 必须在读取 buf 前关闭 pipe 并等待排干完成（保证断言 buf 时已落盘全部字节）。
 		cleanup()
-		cursorStage2ExpectGenericReject(t, buf, 99, cursorGenericUnknownExecRejectText)
+		require.Zero(t, buf.Len(), "失败关闭不得写任何回包")
 	})
 
 	t.Run("interaction_query_unsupported_field", func(t *testing.T) {
 		d, buf, _, cleanup := cursorExecRejectTestDuplex(t)
 		defer cleanup()
 
-		_, err := d.respond(cursorIQTestQuery(5, 12, cursorIQTestArgs("draw")))
-		// 派发单 D：未知 interaction 类型不得 502、不得返回 error；必须回通用 rejected 继续。
-		require.NoError(t, err, "未知 interaction 类型不得 502（派发单 D：回通用 rejected，整轮继续）")
+		done, err := d.respond(cursorIQTestQuery(5, 12, cursorIQTestArgs("draw")))
+		// 失败关闭：返回协议错误、零回包，不再回通用 rejected 帧。
+		require.Error(t, err, "未知 interaction 字段必须失败关闭返回协议错误")
+		require.ErrorContains(t, err, "unsupported interaction query field")
+		require.False(t, done, "失败关闭不由本层标记终态")
+		require.Empty(t, d.delegations.snapshot(), "失败关闭不得登记 MCP 委托")
 		// 必须在读取 buf 前关闭 pipe 并等待排干完成（保证断言 buf 时已落盘全部字节）。
 		cleanup()
-		cursorStage2ExpectInteractionRejected(t, buf)
+		require.Zero(t, buf.Len(), "失败关闭不得写任何回包")
 	})
 }
