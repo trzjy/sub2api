@@ -32,13 +32,10 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -183,59 +180,18 @@ func (s *cursorSSEStream) next() (err error) {
 		}
 		if ev.Kind == cursorEventText {
 			// content 只收可见正文（对外交付），rawContent 收原始文本：上游注入的
-			// 拒付 / 模型暂不可用模板与内联 tool call 都按原始文本判定，剥离 think
-			// 不能改变这些终态判定的灵敏度。
+			// 拒付 / 模型暂不可用模板按原始文本判定，剥离 think 不能改变这些终态判定
+			// 的灵敏度。正文就是正文——不再从正文里识别/还原工具调用。
 			s.parser.content += ev.Text
 			if err := cursorMatchKeyRejected(s.parser.rawContent); err != nil {
 				return err
 			}
-			// 正文内联 tool call：上游没走结构化委托帧，把调用写进了正文。
-			//
-			// 命中形态即转入 inlineMode：此后不再写正文，done 时统一还原成
-			// tool_calls（与非流式 cursorAggregateSSEToCompletion 同口径）。
-			// 半闭合形态（并行连发漏闭标记）同样走这条路径。
-			//
-			// 短路：正文里没有开标记就不必调解析器（长正文避免 O(n²)）。
-			if !s.parser.inlineMode && strings.Contains(s.parser.rawContent, cursorInlineToolCallOpen) {
-				calls, _, recognized := cursorParseInlineToolCalls(s.parser.rawContent)
-				switch {
-				case recognized && len(calls) > 0:
-					s.parser.inlineMode = true
-					s.parser.inlineCalls = calls
-					// 丢弃尚未写出的尾巴：那里面可能正含标记前缀（如 "<tool_c"）。
-					s.parser.textTail = ""
-					s.parser.logPhase(zapcore.InfoLevel, cursorPhaseInlineToolCallNormalized, "",
-						cursorInlineToolCallNormalizedFields(
-							cursorInlineToolCallShapeOf(s.parser.rawContent), len(calls))...)
-				case recognized:
-					// 识别到形态但一个可执行调用都解不出：失败关闭，绝不把原文
-					// 当正文透传（那等于让工具调用静默消失、助手继续空转）。
-					s.parser.logPhase(zapcore.WarnLevel, cursorPhaseInlineToolCallRejected, "",
-						cursorInlineToolCallRejectedFields(
-							cursorInlineToolCallShapeOf(s.parser.rawContent),
-							cursorInlineRejectReasonStreamHit)...)
-					return cursorFrameErrorf(cursorFrameInlineToolCall, "inline tool call present in stream")
-				default:
-					// 含开标记但形态不成形：按正文放行（宁可漏判也不误判）。此路径此前
-					// 完全静默，而它正是「模型写了调用但格式不成立 → 工具静默丢失」的
-					// 高危形态，故每条请求补一条 warn（只记形态与开标记个数，不含正文）。
-					if !s.parser.inlineUnrecognizedLogged {
-						s.parser.inlineUnrecognizedLogged = true
-						s.parser.logPhase(zapcore.WarnLevel, cursorPhaseInlineToolCallUnrecognized, "",
-							cursorInlineToolCallUnrecognizedFields(
-								cursorInlineToolCallShapeOf(s.parser.rawContent),
-								strings.Count(s.parser.rawContent, cursorInlineToolCallOpen))...)
-					}
-				}
+			// 双通道发射：思考走 reasoning_content，正文走 content，二者都即时到达。
+			if ev.Reasoning != "" {
+				s.emitStreamReasoning(ev.Reasoning)
 			}
-			if !s.parser.inlineMode {
-				// 双通道发射：思考走 reasoning_content，正文走 content，二者都即时到达。
-				if ev.Reasoning != "" {
-					s.emitStreamReasoning(ev.Reasoning)
-				}
-				if ev.Text != "" {
-					s.emitStreamText(ev.Text)
-				}
+			if ev.Text != "" {
+				s.emitStreamText(ev.Text)
 			}
 		}
 		s.done = s.parser.usage.Seen
@@ -278,25 +234,6 @@ func (s *cursorSSEStream) next() (err error) {
 		}
 	}
 	if s.done {
-		// 内联 tool call 归一（流式）：与非流式 cursorAggregateSSEToCompletion 同口径 —
-		// 结构化委托优先，只有本 HTTP 没有结构化委托时才用正文内联补位。
-		//
-		// 走这条路径时**不写正文**：命中形态那一刻已停止写出，保留的短尾也已丢弃，
-		// 客户端拿到的就是"前言 + 完整 tool_calls"，不会看到半截标记或不可执行的正文。
-		if s.parser.inlineMode && len(s.parser.inlineCalls) > 0 && len(s.parser.capturedToolCalls()) == 0 {
-			if !s.parser.started {
-				s.buffer.WriteString(s.parser.cursorSSERoleChunk())
-				s.parser.started = true
-			}
-			for i, call := range s.parser.inlineCalls {
-				capture := cursorToolCallCapture{ID: call.ID, Name: call.Name, ArgsJSON: call.Arguments}
-				s.buffer.WriteString(s.parser.cursorSSEToolCallNameChunk(i, capture))
-				s.buffer.WriteString(s.parser.cursorSSEToolCallArgsChunk(i, capture))
-			}
-			s.buffer.WriteString(s.parser.cursorSSEFinishChunkWithReason("tool_calls"))
-			s.buffer.WriteString("data: [DONE]\n\n")
-			return nil
-		}
 		// 收尾尾段：<think> 剥离的跨帧缓冲（双通道）在这里吐完。
 		// 必须在 finish 之前写出，否则正文/思考末尾几个字符会丢。
 		// 顺序：先 reasoning 尾巴再 text 尾巴（二者通常互斥，这里按通道分别落盘）。
@@ -314,9 +251,6 @@ func (s *cursorSSEStream) next() (err error) {
 				s.buffer.WriteString(s.parser.cursorSSETextChunk(tTail))
 			}
 		}
-		// 正文短尾：未命中内联形态时把 emitStreamText 保留的尾巴冲出，
-		// 否则普通正文的最后几个字符会留在缓冲里丢掉。
-		s.flushStreamTextTail()
 		// 交付侧 id 重写（派发单 CALLID）：在写出**任何** tool_calls 字节之前决定出站 id。
 		// 失败即返回错误（本 HTTP 不交出带 id 的工具批），绝不发原 id 冒充新调用。
 		if err := s.parser.assignToolCallWireIDs(); err != nil {
@@ -356,35 +290,10 @@ func (s *cursorSSEStream) next() (err error) {
 	return nil
 }
 
-// emitStreamText 写出正文增量，并对**可能是内联标记前缀的尾部**做极短扣留。
-//
-// 为什么要扣留：内联 tool call 标记可能**跨帧**到达（第一帧尾巴是 "<tool_c"、
-// 第二帧才是 "all>"）。逐帧立即写出会把标记碎片漏给客户端，而这些字节一旦写出
-// 就收不回。
-//
-// 为什么不整段扣留固定长度：流式正文必须**即时到达**（上游边生成边交付，客户端
-// 靠首字判断链路是否活着）。固定扣留 N 字节会让短文本（不足 N 字节）一直躺在
-// 缓冲里等 turn_ended，表现为"卡住不吐字"。因此只扣留**确实是标记前缀**的那几个
-// 字节：普通正文 hold=0 立即写出，只有尾部像 "<"、"<to"、"<tool_call" 时才延迟。
-//
-// 未命中形态时，被扣住的尾巴由 flushStreamTextTail 在 done 处冲出，不会丢字。
+// emitStreamText 写出正文增量：正文就是正文，即时全额写出，不扣留、不改写。
+// 首包带 role、markFirstToken 记录首 token 耗时，空增量直接跳过。
 func (s *cursorSSEStream) emitStreamText(delta string) {
-	pending := s.parser.textTail + delta
-	hold := cursorInlineMarkerPrefixSuffixLen(pending)
-	if hold >= len(pending) {
-		s.parser.textTail = pending
-		return
-	}
-	cut := len(pending) - hold
-	// 按字节切会把多字节字符（中文 3 字节）劈成非法 UTF-8，切点回退到字符边界。
-	// cut == len(pending) 表示整段都要写出，本来就是合法边界，不必回退（也不能
-	// 越界访问 pending[cut]）。
-	for cut > 0 && cut < len(pending) && !utf8.RuneStart(pending[cut]) {
-		cut--
-	}
-	emit := pending[:cut]
-	s.parser.textTail = pending[cut:]
-	if emit == "" {
+	if delta == "" {
 		return
 	}
 	if !s.parser.started {
@@ -392,7 +301,7 @@ func (s *cursorSSEStream) emitStreamText(delta string) {
 		s.parser.started = true
 	}
 	s.parser.markFirstToken()
-	s.buffer.WriteString(s.parser.cursorSSETextChunk(emit))
+	s.buffer.WriteString(s.parser.cursorSSETextChunk(delta))
 }
 
 // emitStreamReasoning 写出思考增量 chunk（reasoning_content 通道）。
@@ -409,38 +318,6 @@ func (s *cursorSSEStream) emitStreamReasoning(delta string) {
 	}
 	s.parser.markFirstToken()
 	s.buffer.WriteString(s.parser.cursorSSEReasoningChunk(delta))
-}
-
-// cursorInlineMarkerPrefixSuffixLen 返回 text 末尾与开标记**前缀**匹配的最大字节数
-// （即需要扣留、暂不写出的长度）。匹配不上（普通正文）返回 0。
-//
-// 例：text 以 "<tool_c" 结尾、开标记是 "<tool_call>" → 返回 7；以 "他说" 结尾 → 0。
-func cursorInlineMarkerPrefixSuffixLen(text string) int {
-	maxN := len(cursorInlineToolCallOpen) - 1
-	if len(text) < maxN {
-		maxN = len(text)
-	}
-	for n := maxN; n > 0; n-- {
-		if strings.HasSuffix(text, cursorInlineToolCallOpen[:n]) {
-			return n
-		}
-	}
-	return 0
-}
-
-// flushStreamTextTail 冲出保留的正文尾巴（仅未进入 inlineMode 时使用）。
-func (s *cursorSSEStream) flushStreamTextTail() {
-	if s.parser.inlineMode || s.parser.textTail == "" {
-		return
-	}
-	tail := s.parser.textTail
-	s.parser.textTail = ""
-	if !s.parser.started {
-		s.buffer.WriteString(s.parser.cursorSSERoleChunk())
-		s.parser.started = true
-	}
-	s.parser.markFirstToken()
-	s.buffer.WriteString(s.parser.cursorSSETextChunk(tail))
 }
 
 // agent.v1.AgentServerMessage（32 号证据：KW）的 oneof 字段号。
@@ -1079,22 +956,6 @@ type cursorStreamParser struct {
 	usage cursorTurnUsage
 	// rejected 命中流内注入模板（拒付 / 模型暂不可用）后的结构化错误（非 nil 即终态失败）。
 	rejected error
-	// inlineUnrecognizedLogged 保证「正文含开标记但形态不成形」的 warn 每条请求只落一次
-	// （该判定逐帧执行，不去重会按帧刷屏）。
-	inlineUnrecognizedLogged bool
-	// textTail 是尚未写出的正文尾巴（最多 len(开标记)-1 字节）。
-	//
-	// 内联标记可能**跨帧**（第一帧尾巴是 "<tool_c"，第二帧才是 "all>"），逐帧立即写出
-	// 会把标记碎片漏给客户端；保留一个短尾、只在确认安全时写出，才能保证客户端要么看到
-	// 完整正文、要么看到完整的 tool_calls，不会看到半截标记。
-	textTail string
-	// inlineMode 表示本轮正文已命中内联 tool call 形态（含半闭合）：此后不再写出正文，
-	// 统一在 done 时还原成结构化 tool_calls（与非流式 cursorAggregateSSEToCompletion
-	// 同口径，避免"流式直接报错、非流式能归一"的两套语义）。
-	inlineMode bool
-	// inlineCalls 是 inlineMode 下从正文还原出的调用（按正文顺序）。
-	inlineCalls []cursorInlineToolCall
-
 	// delegations 是本轮工具委托的**唯一**记录（§24.2-6）。
 	//
 	// duplex 解码 mcp_args 后写入这里，parser 只读取并输出，不再对同一帧二次解码；
@@ -1103,8 +964,8 @@ type cursorStreamParser struct {
 
 	// declaredToolDefs 是本请求 f4（McpTools）的每条 McpToolDefinition 原始字节，
 	// 由 attachToolSchemas 注入（来源必须是请求体 f4 原始字节，与 duplex 路径同源）。
-	// 供独立解析路径（非 duplex）按 tool_name 取回 input_schema 做 schema 还原；
-	// 为空表示本路径拿不到 f4 原始字节 → 装配缺陷，失败关闭。
+	// 供独立解析路径（非 duplex）从真实 f4 的 f3 schema 取出 tool_name enum
+	// （本站允许接收的工具名白名单）；为空表示本路径拿不到 f4 原始字节 → 装配缺陷，失败关闭。
 	declaredToolDefs [][]byte
 
 	// lg 是解析器阶段事件的结构化 logger（不可变、并发安全）。可为 nil，
@@ -1546,54 +1407,21 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 		if argsField, ok := cursorFindField(execParts, 11); ok {
 			delegations := p.toolDelegations()
 			if !delegations.isShared() {
-				id, name, argsJSON, derr := cursorDecodeMcpArgs(argsField.Bytes)
+				// 同一 exec 帧补齐关联字段：f1 exec_id、f15 id 原值（回写真实结果时用）。
+				execID := cursorVarintField(execParts, 1)
+				var idField []byte
+				if idF, exists := cursorFindField(execParts, 15); exists {
+					idField = append([]byte(nil), idF.Bytes...)
+				}
+				id, name, argsJSON, derr := cursorDecodeMcpArgs(argsField.Bytes, p.declaredToolDefs)
 				if derr != nil {
 					return cursorStreamEvent{}, derr
 				}
-				// 按 schema 还原（r15 方案 §3）：schema 来源必须是 f4 原始字节。
-				var failReason cursorRetypeErrReason
-				retyped, rerr := cursorRetypeArgsByToolDefs(id, name, argsJSON, p.declaredToolDefs,
-					func(reason cursorRetypeErrReason) {
-						failReason = reason
-						p.logPhase(zapcore.WarnLevel, "mcp_args_retype_failed", "",
-							zap.String("retype_error", string(reason)),
-							zap.String("tool_name", name),
-							zap.String("call_id", id))
-					})
-				if rerr != nil {
-					if !cursorRetypeDegradable(failReason) {
-						// schema 侧不可解析（schema_absent / invalid / unresolvable /
-						// projection_unresolvable）：连「上游给的是什么工具」都判定不了，
-						// 必须按上游失败终止本轮。诊断字段（missing_fields / present_fields /
-						// missing_depth）只含字段名与深度，用于区分真空缺与命名错位，
-						// 见 cursorArgsDiagFields。
-						// 注：缺必填（missing_required）派发单 D 阶段 2 起已纳入可降级，
-						// 不再走到这里（见 cursorRetypeDegradable）。
-						fields := []zap.Field{
-							zap.String("retype_error", string(failReason)),
-							zap.String("tool_name", name),
-							zap.String("call_id", id),
-						}
-						fields = append(fields, cursorArgsDiagFields(rerr)...)
-						p.logPhase(zapcore.ErrorLevel, "mcp_args_incomplete_rejected", "", fields...)
-						return cursorStreamEvent{}, fmt.Errorf("%w: tool %q args incomplete (%s)",
-							ErrCursorArgsIncomplete, name, failReason)
-					}
-					// 重打失败**不再断流**：fail-closed 会把一次参数形状不合直接升级成
-					// 502 + 会话终结（11-03 03:42 活体：Write 带 additional property →
-					// mcp_args_retype_failed → frame_handle_failed → CUR-RES-99/502，
-					// 随后 6 次工具结果回填全被 CUR-RES-01 拒绝）。
-					//
-					// 降级口径（仅限形状差异，见 cursorRetypeDegradable）：按上游原始参数
-					// 交付，由客户端自行决定接受或报错；失败原因仍以
-					// mcp_args_retype_failed(warn) + 本事件的降级标记留痕。
-					p.logPhase(zapcore.WarnLevel, "mcp_args_retype_fallback", "",
-						zap.String("tool_name", name),
-						zap.String("call_id", id))
-					retyped = argsJSON
-				}
+				// 无损交付：argsJSON 是与上游 arguments_json 原始字节一致的对象 JSON，
+				// 不再做 map 往返 / schema retype / 旧格式 fallback。
 				if derr := delegations.noteDelegation("", cursorToolCallCapture{
-					ID: id, Name: name, ArgsJSON: retyped,
+					ID: id, Name: name, ArgsJSON: argsJSON,
+					ExecID: execID, IDField: idField,
 				}); derr != nil {
 					return cursorStreamEvent{}, derr
 				}
@@ -1821,27 +1649,38 @@ func (p *cursorStreamParser) noteToolRequestsListed(b []byte) error {
 	return nil
 }
 
-// cursorDecodeMcpArgs 解析 exec 内层 f11（mcp_args）的 McpArgs 消息。
+// cursorDecodeMcpArgs 解析 exec 内层 f11（mcp_args）的 **运输帧**。
 //
-// 字段号（派发单 §2）：f3 tool_call_id、f5 tool_name、f2 args。
-// args 是 protobuf map<string, Value>：在 McpArgs 内编码为 repeated 字段 2，每条
-// f2 字段**本身就是一条 map entry**（f1 key(string) 与 f2 value(Value 消息) 直内联，
-// 不是"f2 的列表"）。上游实拍字节 `0a0463697479 12091a074265696a696e67` 即是单条
-// entry：f1="city"、f2=Value{f3:"Beijing"}。
-// Value oneof（派发单 §2）：f1 null / f2 number(double) / f3 string / f4 bool /
-// f5 Struct / f6 ListValue；六种分支都按 google.protobuf.Value 标准语义解码。
-// 非有限数值（NaN/±Inf）与未设置 kind 一律失败关闭（见 cursorDecodeMcpValue）。
-// 返回 (tool_call_id, tool_name, argsJSON, error)。
-func cursorDecodeMcpArgs(payload []byte) (string, string, string, error) {
+// 上游只回调一个工具 f5=cursorTransportToolName（invoke_client_tool），其 f2 map 只含
+// 两个字符串值：f1=cursorTransportToolNameKey（客户端原工具名，必须属于真实 f4 的
+// tool_name enum）、f1=cursorTransportArgumentsKey（完整参数 JSON 对象字符串）。
+//
+// 无损纪律：arguments_json 只做 TrimSpace / 合法性校验，原字节直接返回，
+// 绝不转 map、不补 null、不猜类型、不做 schema retype、不接受旧直接参数格式。
+//
+// 返回 (call_id, tool_name, trimmedArgsJSON, error)。duplex 与独立 parser 共用本实现。
+func cursorDecodeMcpArgs(payload []byte, declaredToolDefs [][]byte) (string, string, string, error) {
 	fields, err := cursorDecodeProtobuf(payload)
 	if err != nil {
 		return "", "", "", err
 	}
 	idF, _ := cursorFindField(fields, 3)
 	nameF, _ := cursorFindField(fields, 5)
-	// 顶层全部 f2 字段，每条即一条 map entry（cursorFindField 只取最后一条，
-	// 这里必须逐条取——map<string,Value> 在 protobuf 里是 repeated 的 entry）。
-	obj := make(map[string]json.RawMessage)
+	if nameF.String() != cursorTransportToolName {
+		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "unexpected mcp tool %q", nameF.String())
+	}
+	allowed, err := cursorTransportAllowedToolNames(declaredToolDefs)
+	if err != nil {
+		return "", "", "", err
+	}
+	if len(allowed) == 0 {
+		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "empty transport tool declaration")
+	}
+
+	// 顶层全部 f2 字段，每条即一条 map entry（{f1 key, f2 Value}）；只接受
+	// tool_name / arguments_json 两个键，缺键 / 多键 / 重复键都失败关闭。
+	var toolName, argsJSON string
+	seenTool, seenArgs := false, false
 	for _, f := range fields {
 		if f.Number != 2 {
 			continue
@@ -1852,23 +1691,54 @@ func cursorDecodeMcpArgs(payload []byte) (string, string, string, error) {
 		}
 		keyF, ok := cursorFindField(entryInner, 1)
 		if !ok {
-			continue
+			return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "mcp args entry has no key")
 		}
 		valF, ok := cursorFindField(entryInner, 2)
 		if !ok {
-			continue
+			return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "mcp args entry has no value")
 		}
 		v, e := cursorDecodeMcpValue(valF.Bytes)
 		if e != nil {
 			return "", "", "", e
 		}
-		obj[keyF.String()] = json.RawMessage(v)
+		var s string
+		if e := json.Unmarshal([]byte(v), &s); e != nil {
+			return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "mcp arg %q is not a string", keyF.String())
+		}
+		switch keyF.String() {
+		case cursorTransportToolNameKey:
+			if seenTool {
+				return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "duplicate mcp arg %q", cursorTransportToolNameKey)
+			}
+			seenTool = true
+			toolName = s
+		case cursorTransportArgumentsKey:
+			if seenArgs {
+				return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "duplicate mcp arg %q", cursorTransportArgumentsKey)
+			}
+			seenArgs = true
+			argsJSON = s
+		default:
+			return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "unexpected mcp arg key %q", keyF.String())
+		}
 	}
-	b, err := json.Marshal(obj)
-	if err != nil {
-		return "", "", "", cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "marshal mcp args: %v", err)
+	if !seenTool || !seenArgs {
+		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "missing transport mcp args key")
 	}
-	return idF.String(), nameF.String(), string(b), nil
+
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = true
+	}
+	if !allowedSet[toolName] {
+		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "undeclared tool name %q", toolName)
+	}
+
+	trimmed := strings.TrimSpace(argsJSON)
+	if trimmed == "" || trimmed[0] != '{' || !json.Valid([]byte(trimmed)) {
+		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "invalid arguments_json")
+	}
+	return idF.String(), toolName, trimmed, nil
 }
 
 // cursorDecodeMcpValue 解析 McpArgs args 的单个 Value。
@@ -1911,1173 +1781,70 @@ func cursorDecodeMcpValue(b []byte) (string, error) {
 	return buf.String(), nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Cursor McpArgs 按 schema 还原（派发单 r15 方案 §3）
+// cursorTransportAllowedToolNames 从本请求 f4（McpTools）的真实 McpToolDefinition
+// 字节里取出运输工具的 tool_name enum——本站允许接收的客户端工具名白名单。
 //
-// 核心原则：只判定"该位置的声明类型是不是 array"。不实现 JSON Schema 语义引擎，
-// 不做 conforms 全量校验，不解析 anyOf/oneOf/$ref/allOf。任一不可判定 → 失败关闭。
-// ─────────────────────────────────────────────────────────────────────────────
-
-// cursorRetypeErrReason 是 retype 失败关闭的结构化原因枚举（与方案 §3.5 一一对应）。
-type cursorRetypeErrReason string
-
-const (
-	cursorRetypeSchemaInvalid          cursorRetypeErrReason = "schema_invalid"
-	cursorRetypeSchemaAbsent           cursorRetypeErrReason = "schema_absent"
-	cursorRetypeSchemaUnresolvable     cursorRetypeErrReason = "schema_unresolvable"
-	cursorRetypeProjectionUnresolvable cursorRetypeErrReason = "projection_unresolvable"
-	cursorRetypeItemsNotAllowed        cursorRetypeErrReason = "items_not_allowed"
-	cursorRetypeItemsSubSchemaInvalid  cursorRetypeErrReason = "items_sub_schema_invalid"
-	cursorRetypeAdditionalPropPresent  cursorRetypeErrReason = "additional_property_present"
-	cursorRetypeObjectTypeMismatch     cursorRetypeErrReason = "object_type_mismatch"
-	cursorRetypeNumericOutOfRange      cursorRetypeErrReason = "numeric_out_of_range"
-	// cursorRetypeMissingRequired 表示还原结果缺 schema 声明的必填字段（参数不完整）。
-	// 派发单 D 阶段 2 起纳入可降级：缺必填不再打死整轮，而是原样把上游原始参数交付客户端
-	// （见 cursorRetypeDegradable）。
-	cursorRetypeMissingRequired cursorRetypeErrReason = "missing_required"
-)
-
-// cursorRetypeDegradable 报告某类 retype 失败是否允许"降级交付上游原始参数"。
-//
-// 形状差异类（additionalProperties 多给字段 / 类型标记与值不一致 / 数值越界 / 不允许的 items）
-// 可以降级：参数本身是完整的，客户端能自行判定取舍（11-03 03:42 活体：Write 带额外字段，
-// 降级后客户端正常执行）。
-//
-// 缺必填（missing_required）派发单 D 阶段 2 起**纳入可降级**：旧口径把它打死整轮，等于把
-// 一次上游残缺升级成 502 + 会话终结、违反「不报错给客户」。现改为原样把上游原始参数交付
-// 客户端（retyped = argsJSON，绝不补默认值——Bash 的 command 补空串会真去执行一条空命令，
-// 拿客户机器冒险），由客户端自行决定接受或报错。
-//
-// schema 侧不可解析（schema_absent / schema_invalid / schema_unresolvable /
-// projection_unresolvable）仍**不可降级**：那时连「上游给的是什么工具」都判定不了，
-// 原样交付只会把未定义行为甩给客户端，必须按上游失败终止本轮。
-func cursorRetypeDegradable(reason cursorRetypeErrReason) bool {
-	switch reason {
-	case cursorRetypeAdditionalPropPresent,
-		cursorRetypeObjectTypeMismatch,
-		cursorRetypeNumericOutOfRange,
-		cursorRetypeItemsNotAllowed,
-		cursorRetypeMissingRequired:
-		return true
-	default:
-		return false
-	}
-}
-
-// cursorRetypeError 是 retype 失败关闭的结构化错误：Unwrap 到 ErrCursorProtocol，
-// 不含参数明文；Reason 暴露 §3.5 枚举值（供错误返回点日志与安全分类）。
-//
-// 诊断三件套（diag*）只在 missing_required 时填充，且**只记字段名、不记字段值**：
-// 用来区分"上游真的没给"与"上游给了但叫法不同"（如 path vs absolute_path）——
-// 两者在当前实现里都表现为缺必填，但根因与修法完全相反。Error() 刻意不含诊断，
-// 避免字段名混进错误串（错误串会进上游错误日志，也贴近下游响应路径）。
-type cursorRetypeError struct {
-	reason cursorRetypeErrReason
-
-	// diagMissing 是缺失的必填字段名（升序、已去重、超长名已截断）。
-	diagMissing []string
-	// diagPresent 是发生缺失的那一层对象实际携带的字段名（升序，只记名字）。
-	diagPresent []string
-	// diagDepth 是那层对象的嵌套深度：根对象 0，嵌套一层 1，依次递增。
-	diagDepth int
-}
-
-func (e *cursorRetypeError) Error() string                 { return "cursor mcp_args retype: " + string(e.reason) }
-func (e *cursorRetypeError) Unwrap() error                 { return ErrCursorProtocol }
-func (e *cursorRetypeError) Reason() cursorRetypeErrReason { return e.reason }
-
-// MissingFields 返回缺失的必填字段名（仅 missing_required 时非空）。
-func (e *cursorRetypeError) MissingFields() []string { return e.diagMissing }
-
-// PresentFields 返回缺失所在层实际携带的字段名（仅 missing_required 时非空）。
-func (e *cursorRetypeError) PresentFields() []string { return e.diagPresent }
-
-// MissingDepth 返回缺失字段所在的嵌套深度（根对象为 0）。
-func (e *cursorRetypeError) MissingDepth() int { return e.diagDepth }
-
-func cursorRetypeErrorf(reason cursorRetypeErrReason) error {
-	return &cursorRetypeError{reason: reason}
-}
-
-// cursorArgsDiagFields 从 retype 错误里取出脱敏诊断字段，供"缺必填"拒绝日志使用。
-//
-// 只输出**字段名清单**与嵌套深度，绝不输出字段值：这些日志的用途是区分
-// "上游真的没给这个字段"（真空缺，只能让模型重生成）与"上游给了但叫法不同"
-// （如 path vs absolute_path，可做确定性名字对齐），字段值对判断没有帮助，
-// 且可能携带账号/会话数据。
-//
-// 非 missing_required 的失败（schema 侧问题）没有诊断，返回 nil。
-func cursorArgsDiagFields(err error) []zap.Field {
-	var re *cursorRetypeError
-	if !errors.As(err, &re) {
-		return nil
-	}
-	missing := re.MissingFields()
-	if len(missing) == 0 {
-		return nil
-	}
-	return []zap.Field{
-		zap.Strings("missing_fields", missing),
-		zap.Strings("present_fields", re.PresentFields()),
-		zap.Int("missing_depth", re.MissingDepth()),
-	}
-}
-
-// cursorRetypeDiagFieldNameMax / cursorRetypeDiagFieldCountMax 是诊断字段清单的上限：
-// 字段名最多 64 字节、每类清单最多 24 项。上游畸形参数可能塞几十个无关 key，
-// 不设上限会把日志撑爆。
-const (
-	cursorRetypeDiagFieldNameMax  = 64
-	cursorRetypeDiagFieldCountMax = 24
-)
-
-// cursorRetypeMissingRequiredError 构造带脱敏诊断的 missing_required 错误。
-//
-// present 是缺失所在层实际携带的字段名（任意顺序，本函数负责排序去重截断）。
-func cursorRetypeMissingRequiredError(missing []string, present []string, depth int) error {
-	return &cursorRetypeError{
-		reason:      cursorRetypeMissingRequired,
-		diagMissing: cursorRetypeDiagNames(missing),
-		diagPresent: cursorRetypeDiagNames(present),
-		diagDepth:   depth,
-	}
-}
-
-// cursorRetypeDiagNames 归一化诊断字段名清单：去空、截断超长名、排序、去重、限量。
-func cursorRetypeDiagNames(names []string) []string {
-	if len(names) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(names))
-	seen := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		if name == "" {
-			continue
-		}
-		if len(name) > cursorRetypeDiagFieldNameMax {
-			name = name[:cursorRetypeDiagFieldNameMax]
-		}
-		if _, dup := seen[name]; dup {
-			continue
-		}
-		seen[name] = struct{}{}
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	if len(out) > cursorRetypeDiagFieldCountMax {
-		out = out[:cursorRetypeDiagFieldCountMax]
-	}
-	return out
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Cursor schema 组合/引用写法归一化（方案 cursor-schema-composition-plan.md §3）
-//
-// 核心原则：在**不引入猜测**的前提下，把 $ref / allOf / anyOf / oneOf / type 数组
-// 等合法 JSON Schema 组合写法**确定性**归一化为等价的内联 schema（输出只含
-// type/properties/required/items/additionalProperties 五键），再交给既有 retype
-// 逻辑。归一化后仍无法判定唯一类型的（真正多态等），保持 schema_unresolvable
-// 失败关闭；不得把不可判定情形改成"原样透传"。
-// ─────────────────────────────────────────────────────────────────────────────
-
-// cursorSchemaNormalizeMaxDepth 是归一化的递归深度上限（方案 §3 规则 1）。
-// 超限即 schema_unresolvable——防御病态深嵌套（含 $ref 展开链）。
-const cursorSchemaNormalizeMaxDepth = 16
-
-// cursorNormalizeSchema 把一个 schema 节点确定性归一化为只含
-// type/properties/required/items/additionalProperties 的内联形态（方案 §3）。
-//
-//   - node 是当前节点；root 是整份 schema 文档（本地 $ref 的解析起点，可含 $defs
-//     等任意键，但只有五键会进入输出）；
-//   - seen 是**当前 $ref 展开栈**上的 JSON Pointer 路径集合（循环检测）：递归进入
-//     被引用节点前加入、返回后移除——同一目标被菱形引用（两个属性各引用一次）合法，
-//     只有栈上未退出的自引用才算循环；
-//   - depth 为递归深度，上限 cursorSchemaNormalizeMaxDepth。
-//
-// 失败一律 cursorRetypeSchemaUnresolvable（方案 §7：新增失败原因复用该枚举）。
-func cursorNormalizeSchema(node map[string]any, root map[string]any, seen map[string]bool, depth int) (map[string]any, error) {
-	if node == nil {
-		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-	}
-	if depth > cursorSchemaNormalizeMaxDepth {
-		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-	}
-
-	// $ref（规则 2）：只接受本地 "#" 前缀引用，按 RFC 6901 JSON Pointer 解析
-	//（支持 ~1 → '/'、~0 → '~' 转义）。远程引用 / 解析失败 / 循环 → schema_unresolvable。
-	// 兄弟约束键与 $ref 并存属语义不可判定（静默丢兄弟约束等于放行）→ 失败关闭。
-	if _, hasRef := node["$ref"]; hasRef {
-		for _, k := range []string{"type", "properties", "required", "items", "additionalProperties"} {
-			if _, exists := node[k]; exists {
-				return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-			}
-		}
-		ref, ok := node["$ref"].(string)
-		if !ok || !strings.HasPrefix(ref, "#") {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-		ptr := ref[1:]
-		if seen[ptr] {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-		target, ok := cursorResolveSchemaPointer(root, ptr)
-		if !ok {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-		seen[ptr] = true
-		defer delete(seen, ptr)
-		return cursorNormalizeSchema(target, root, seen, depth+1)
-	}
-
-	// allOf（规则 3）：逐分支归一化后合并。外层自身的（非组合）约束一并参与
-	// 合并——AND 语义，防止静默丢弃外层约束（如 additionalProperties:false）。
-	// 与 anyOf/oneOf 并存 → 不可判定。
-	if _, hasAllOf := node["allOf"]; hasAllOf {
-		if _, has := node["anyOf"]; has {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-		if _, has := node["oneOf"]; has {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-		branches, err := cursorNormalizeBranchList(node["allOf"], root, seen, depth)
+// 逐条 f4 定义解码：找 f1 名等于 cursorTransportToolName 的那条；从 f3 的
+// google.protobuf.Value 取 properties.tool_name.enum 字符串列表。没有运输定义返回
+// nil（调用方据此判空拒绝）；找到运输定义但 schema 畸形 → 错误。
+func cursorTransportAllowedToolNames(defs [][]byte) ([]string, error) {
+	for _, def := range defs {
+		fields, err := cursorDecodeProtobuf(def)
 		if err != nil {
-			return nil, err
+			return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "decode tool definition: %v", err)
 		}
-		outer, err := cursorNormalizeSchemaShape(node, root, seen, depth+1)
-		if err != nil {
-			return nil, err
-		}
-		return cursorMergeSchemaBranches(append(branches, outer))
-	}
-
-	// anyOf / oneOf（规则 4）：先过滤 {"type":"null"} 分支（nullable 形态）；
-	// 剩 1 个用它；全部同 type 合并；否则 schema_unresolvable。两键并存 → 不可判定。
-	for _, key := range []string{"anyOf", "oneOf"} {
-		if _, has := node[key]; !has {
+		nameF, _ := cursorFindField(fields, cursorFldMcpToolDefName)
+		if nameF.String() != cursorTransportToolName {
 			continue
 		}
-		other := "oneOf"
-		if key == "oneOf" {
-			other = "anyOf"
-		}
-		if _, has := node[other]; has {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-		list, ok := node[key].([]any)
+		schemaF, ok := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
 		if !ok {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool has no input schema")
 		}
-		branches, err := cursorNormalizeBranchList(node[key], root, seen, depth)
-		if err != nil {
-			return nil, err
+		v := &structpb.Value{}
+		if err := proto.Unmarshal(schemaF.Bytes, v); err != nil {
+			return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "decode transport schema: %v", err)
 		}
-		kept := make([]map[string]any, 0, len(branches))
-		for _, b := range branches {
-			if t, _ := b["type"].(string); t == "null" {
-				continue // nullable 形态：{"type":"null"} 分支过滤
-			}
-			kept = append(kept, b)
-		}
-		var result map[string]any
-		switch {
-		case len(kept) == 1:
-			result = kept[0]
-		case len(kept) > 1:
-			result, err = cursorMergeSameTypeBranches(kept)
-			if err != nil {
-				return nil, err
-			}
-		default:
-			// 过滤后为空：原列表非空 → 全部被 null 过滤，不可判定；原列表为空 → 无约束。
-			if len(list) > 0 {
-				return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-			}
-			result = map[string]any{}
-		}
-		// 与外层自身约束 AND 合并（防静默丢弃外层约束）。
-		outer, err := cursorNormalizeSchemaShape(node, root, seen, depth+1)
-		if err != nil {
-			return nil, err
-		}
-		return cursorMergeSchemaBranches([]map[string]any{outer, result})
-	}
-
-	// 无组合关键字：type 收敛（规则 5）+ 五键收集（规则 6）。
-	return cursorNormalizeSchemaShape(node, root, seen, depth)
-}
-
-// cursorNormalizeBranchList 归一化组合关键字的分支列表（allOf/anyOf/oneOf 的值）；
-// 列表非数组、分支非对象 → 不可判定。
-func cursorNormalizeBranchList(raw any, root map[string]any, seen map[string]bool, depth int) ([]map[string]any, error) {
-	list, ok := raw.([]any)
-	if !ok {
-		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-	}
-	branches := make([]map[string]any, 0, len(list))
-	for _, b := range list {
-		bm, ok := b.(map[string]any)
+		root, ok := v.GetKind().(*structpb.Value_StructValue)
 		if !ok {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
+			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport schema is not an object")
 		}
-		n, err := cursorNormalizeSchema(bm, root, seen, depth+1)
-		if err != nil {
-			return nil, err
-		}
-		branches = append(branches, n)
-	}
-	return branches, nil
-}
-
-// cursorMergeSameTypeBranches 合并 anyOf/oneOf 过滤 null 后、归一化后 type 相同的
-// 多个分支（方案 §3 规则 4）：
-//   - object：同 allOf 的合并规则（cursorMergeSchemaBranches）；
-//   - array：items 全等价才保留，否则省略 items（元素原样，不做投影）；
-//   - 其它类型：值无需结构投影（retype 对 string/number/integer/boolean 只做标量
-//     字面量还原，其余约束与还原无关），收敛为 {"type": t}。
-func cursorMergeSameTypeBranches(branches []map[string]any) (map[string]any, error) {
-	t0, _ := branches[0]["type"].(string)
-	for _, b := range branches[1:] {
-		if t, _ := b["type"].(string); t != t0 {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-	}
-	switch t0 {
-	case "array":
-		out := map[string]any{"type": "array"}
-		items0, hasItems := branches[0]["items"]
-		if !hasItems {
-			return out, nil
-		}
-		for _, b := range branches[1:] {
-			if !reflect.DeepEqual(items0, b["items"]) {
-				return out, nil // items 不全等价 → 省略，元素原样
-			}
-		}
-		out["items"] = items0
-		return out, nil
-	case "object", "":
-		// object：同 allOf 规则合并；全部分支无 type（必无 properties）时合并
-		// 结果同样无 type（retype 原样放行，与现状一致）。
-		return cursorMergeSchemaBranches(branches)
-	default:
-		return map[string]any{"type": t0}, nil
-	}
-}
-
-// cursorMergeSchemaBranches 按 allOf 语义（AND）合并已归一化的分支（方案 §3 规则 3）。
-//
-//	type 非空值必须唯一（缺失视为无声明）；properties 取并集且同名属性须归一化
-//	结果深等价；required 取并集（按字典序输出，保证确定性）；items 两侧都有时
-//	须深等价、单侧有取单侧；additionalProperties 取更严（false > schema 对象
-//	（多个须深等价）> true/缺失 → 省略，retype 对 true 与缺失行为等价）。
-func cursorMergeSchemaBranches(branches []map[string]any) (map[string]any, error) {
-	unresolvable := cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-	out := map[string]any{}
-
-	var typeVal string
-	haveType := false
-	for _, b := range branches {
-		tv, exists := b["type"]
-		if !exists {
-			continue
-		}
-		t, ok := tv.(string)
+		propsVal, ok := root.StructValue.GetFields()["properties"]
 		if !ok {
-			return nil, unresolvable
+			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport schema has no properties")
 		}
-		if haveType && t != typeVal {
-			return nil, unresolvable
-		}
-		typeVal, haveType = t, true
-	}
-	if haveType {
-		out["type"] = typeVal
-	}
-
-	haveProps := false
-	props := map[string]any{}
-	for _, b := range branches {
-		pv, exists := b["properties"]
-		if !exists {
-			continue
-		}
-		pm, ok := pv.(map[string]any)
+		props, ok := propsVal.GetKind().(*structpb.Value_StructValue)
 		if !ok {
-			return nil, unresolvable
+			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport properties is not an object")
 		}
-		haveProps = true
-		for k, v := range pm {
-			if prev, dup := props[k]; dup {
-				if !reflect.DeepEqual(prev, v) {
-					return nil, unresolvable
-				}
-				continue
-			}
-			props[k] = v
-		}
-	}
-	if haveProps {
-		out["properties"] = props
-	}
-
-	var reqs []string
-	reqSeen := map[string]bool{}
-	for _, b := range branches {
-		rv, exists := b["required"]
-		if !exists {
-			continue
-		}
-		ra, ok := rv.([]any)
+		toolNameVal, ok := props.StructValue.GetFields()[cursorTransportToolNameKey]
 		if !ok {
-			return nil, unresolvable
+			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport schema has no tool_name property")
 		}
-		for _, e := range ra {
-			s, ok := e.(string)
+		toolNameSchema, ok := toolNameVal.GetKind().(*structpb.Value_StructValue)
+		if !ok {
+			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool_name property is not an object")
+		}
+		enumVal, ok := toolNameSchema.StructValue.GetFields()["enum"]
+		if !ok {
+			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool_name has no enum")
+		}
+		list, ok := enumVal.GetKind().(*structpb.Value_ListValue)
+		if !ok {
+			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool_name enum is not a list")
+		}
+		values := list.ListValue.GetValues()
+		allowed := make([]string, 0, len(values))
+		for _, ev := range values {
+			s, ok := ev.GetKind().(*structpb.Value_StringValue)
 			if !ok {
-				return nil, unresolvable
+				return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool_name enum has non-string member")
 			}
-			if reqSeen[s] {
-				continue
-			}
-			reqSeen[s] = true
-			reqs = append(reqs, s)
+			allowed = append(allowed, s.StringValue)
 		}
+		return allowed, nil
 	}
-	if len(reqs) > 0 {
-		sort.Strings(reqs)
-		reqOut := make([]any, len(reqs))
-		for i, s := range reqs {
-			reqOut[i] = s
-		}
-		out["required"] = reqOut
-	}
-
-	var items any
-	haveItems := false
-	for _, b := range branches {
-		iv, exists := b["items"]
-		if !exists {
-			continue
-		}
-		if haveItems {
-			if !reflect.DeepEqual(items, iv) {
-				return nil, unresolvable
-			}
-			continue
-		}
-		items, haveItems = iv, true
-	}
-	if haveItems {
-		out["items"] = items
-	}
-
-	var apSchema map[string]any
-	haveAP := false
-	apFalse := false
-	for _, b := range branches {
-		av, exists := b["additionalProperties"]
-		if !exists {
-			continue
-		}
-		switch ap := av.(type) {
-		case bool:
-			if !ap {
-				apFalse = true
-			}
-		case map[string]any:
-			if haveAP {
-				if !reflect.DeepEqual(apSchema, ap) {
-					return nil, unresolvable
-				}
-				continue
-			}
-			apSchema, haveAP = ap, true
-		default:
-			return nil, unresolvable
-		}
-	}
-	switch {
-	case apFalse:
-		out["additionalProperties"] = false
-	case haveAP:
-		out["additionalProperties"] = apSchema
-	}
-
-	return out, nil
-}
-
-// cursorNormalizeSchemaShape 处理无 $ref/allOf/anyOf/oneOf 组合关键字的节点：
-// type 收敛（规则 5）与五键收集（规则 6）。畸形子节点（如 properties 的值不是
-// schema 对象、items 非对象非布尔）**原样透传**——归一化不抢答 retype 的既有
-// 失败码（schema_invalid / items_sub_schema_invalid 等），保证直接走
-// cursorRetypeMcpArgs 与经索引归一化两条路径失败行为一致。
-func cursorNormalizeSchemaShape(node map[string]any, root map[string]any, seen map[string]bool, depth int) (map[string]any, error) {
-	out := map[string]any{}
-	var typeStr string
-	haveType := false
-	switch tv := node["type"].(type) {
-	case string:
-		typeStr, haveType = tv, true
-	case []any:
-		// type 数组（规则 5）：去掉 "null"；剩 1 个 → 作为 type；剩 0 → 视为纯 null
-		//（原样、无投影）；>1（真正多态）→ schema_unresolvable。
-		var nonNull []string
-		for _, e := range tv {
-			s, ok := e.(string)
-			if !ok {
-				return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-			}
-			if s == "null" {
-				continue
-			}
-			nonNull = append(nonNull, s)
-		}
-		switch len(nonNull) {
-		case 1:
-			typeStr, haveType = nonNull[0], true
-		case 0:
-			typeStr, haveType = "null", true
-		default:
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-	case nil:
-		// 无 type 但有 properties → 按 object 处理（规则 6）。
-		if pm, ok := node["properties"].(map[string]any); ok && pm != nil {
-			typeStr, haveType = "object", true
-		}
-	default:
-		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-	}
-	if haveType {
-		out["type"] = typeStr
-	}
-	// 纯 null：无投影语义（retype 对 "null" 原样返回），其余键与投影无关。
-	if haveType && typeStr == "null" {
-		return out, nil
-	}
-
-	// properties：子 schema 递归归一化；非对象形态原样透传（保 retype 既有失败码）。
-	if pm, ok := node["properties"].(map[string]any); ok && pm != nil {
-		nprops := make(map[string]any, len(pm))
-		for k, v := range pm {
-			if vm, ok := v.(map[string]any); ok {
-				nv, err := cursorNormalizeSchema(vm, root, seen, depth+1)
-				if err != nil {
-					return nil, err
-				}
-				nprops[k] = nv
-				continue
-			}
-			nprops[k] = v
-		}
-		out["properties"] = nprops
-	} else if pv, exists := node["properties"]; exists && pv != nil {
-		out["properties"] = pv
-	}
-
-	// required：原样保留（retype 不消费 required；仅组合合并阶段才校验/并集）。
-	if rv, exists := node["required"]; exists && rv != nil {
-		out["required"] = rv
-	}
-
-	// items：布尔原样；对象递归归一化；其它形态原样透传（retype 报 items_sub_schema_invalid）。
-	if iv, exists := node["items"]; exists && iv != nil {
-		switch items := iv.(type) {
-		case bool:
-			out["items"] = items
-		case map[string]any:
-			nv, err := cursorNormalizeSchema(items, root, seen, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			out["items"] = nv
-		default:
-			out["items"] = iv
-		}
-	}
-
-	// additionalProperties：布尔原样；对象递归归一化；其它形态原样透传（retypeObject 忽略）。
-	if av, exists := node["additionalProperties"]; exists && av != nil {
-		switch ap := av.(type) {
-		case bool:
-			out["additionalProperties"] = ap
-		case map[string]any:
-			nv, err := cursorNormalizeSchema(ap, root, seen, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			out["additionalProperties"] = nv
-		default:
-			out["additionalProperties"] = av
-		}
-	}
-	return out, nil
-}
-
-// cursorResolveSchemaPointer 按 RFC 6901 JSON Pointer 从 root 解析本地 $ref 目标
-// （支持 ~1 → '/'、~0 → '~' 转义）。只下钻对象键——$ref 目标必须是 schema 对象，
-// 数组索引不支持 → 解析失败失败关闭。空指针解析为 root 本身。
-func cursorResolveSchemaPointer(root map[string]any, ptr string) (map[string]any, bool) {
-	cur := root
-	if ptr == "" {
-		return cur, true
-	}
-	if !strings.HasPrefix(ptr, "/") {
-		return nil, false
-	}
-	for _, tok := range strings.Split(ptr[1:], "/") {
-		tok = strings.ReplaceAll(tok, "~1", "/")
-		tok = strings.ReplaceAll(tok, "~0", "~")
-		next, ok := cur[tok]
-		if !ok {
-			return nil, false
-		}
-		nm, ok := next.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		cur = nm
-	}
-	return cur, true
-}
-
-// cursorToolSchemaIndex 从 f4（McpTools）的每条 McpToolDefinition 原始字节解出
-// f5 tool_name → input_schema JSON。来源必须是请求体 f4 原始字节（经
-// cursorBuildMcpTools 实际发出的字节），不得改用 req.Tools 重新序列化。
-//
-// input_schema 的还原优先走 f3（google.protobuf.Value）：经 proto.Unmarshal 解回
-// structpb.Value，再 protojson.Marshal + 归一化还原为 JSON。**仅为历史夹具兼容**
-// 才回落读 f6（旧 input_schema_json 字符串）；新生产构造只写 f3，不写 f6。
-//
-// 入索引前每条 schema 先做确定性归一化（方案 §4：$ref/allOf/anyOf/oneOf/type 数组
-// 展开为等价内联形态）。归一化失败**不静默丢弃**、**不回退原 schema 放行**：记
-// schema_normalize_failed（只含 tool_name 与 reason，不含 schema 内容），在索引中
-// 放 nil 哨兵——该工具后续在 cursorRetypeArgsByToolDefs 按既有 schema_unresolvable
-// 失败关闭。
-func cursorToolSchemaIndex(defs [][]byte) map[string][]byte {
-	idx := make(map[string][]byte, len(defs))
-	for _, raw := range defs {
-		fields, err := cursorDecodeProtobuf(raw)
-		if err != nil {
-			continue
-		}
-		var name string
-		var f3Val []byte
-		var f6Legacy string
-		for _, f := range fields {
-			switch f.Number {
-			case cursorFldMcpToolDefToolName:
-				name = f.String()
-			case cursorFldMcpToolDefInputSchemaValue:
-				f3Val = f.Bytes
-			case cursorFldMcpToolDefInputSchemaLegacy:
-				f6Legacy = f.String()
-			}
-		}
-		if name == "" {
-			continue
-		}
-		// 优先 f3（google.protobuf.Value），历史夹具无 f3 才回落 f6。
-		if schema, ok := cursorSchemaFromF3(f3Val); ok {
-			idx[name] = cursorNormalizeIndexedSchema(name, schema)
-			continue
-		}
-		if f6Legacy != "" {
-			idx[name] = cursorNormalizeIndexedSchema(name, []byte(f6Legacy))
-		}
-	}
-	return idx
-}
-
-// cursorToolDeclaredWithoutSchema 判断该工具名是否**已被客户端声明、但没有 input_schema**。
-//
-// custom / freeform 工具（codex 的 exec 就是这种：参数是一段自由文本 JavaScript）
-// 本来就不带 parameters，因此索引里查不到 schema 属正常形态，和"根本没声明这个工具"
-// 是两件完全不同的事：
-//   - 声明过、无 schema → 没有必填可校验，参数原样交付；
-//   - 没声明过 → 上游在调一个我们没下发的工具，才是真异常（schema_absent）。
-//
-// 两者混为一谈时，codex 的每一次 exec 调用都会被判"参数残缺"整轮终止
-// （2026-11-06 线上：CUR-EXEC-10，模型明明发了完整 JS）。
-//
-// 与 cursorToolSchemaIndex 共用同一段 f4 解码口径（同名字段、同一回落顺序）。
-func cursorToolDeclaredWithoutSchema(defs [][]byte, name string) bool {
-	if name == "" {
-		return false
-	}
-	for _, raw := range defs {
-		fields, err := cursorDecodeProtobuf(raw)
-		if err != nil {
-			continue
-		}
-		declaredName := ""
-		hasSchema := false
-		for _, f := range fields {
-			switch f.Number {
-			case cursorFldMcpToolDefToolName:
-				declaredName = f.String()
-			case cursorFldMcpToolDefInputSchemaValue:
-				if _, ok := cursorSchemaFromF3(f.Bytes); ok {
-					hasSchema = true
-				}
-			case cursorFldMcpToolDefInputSchemaLegacy:
-				if f.String() != "" {
-					hasSchema = true
-				}
-			}
-		}
-		if declaredName == name && !hasSchema {
-			return true
-		}
-	}
-	return false
-}
-
-// cursorNormalizeIndexedSchema 对入索引的 schema 做确定性归一化（方案 §4）。
-// 归一化失败（含 schema 非 JSON 对象）记 schema_normalize_failed 事件并返回
-// nil 哨兵：该工具后续按既有 schema_unresolvable 失败关闭。
-func cursorNormalizeIndexedSchema(toolName string, schemaJSON []byte) []byte {
-	var root map[string]any
-	if err := json.Unmarshal(schemaJSON, &root); err != nil || root == nil {
-		cursorLogSchemaNormalizeFailed(toolName)
-		return nil
-	}
-	normalized, err := cursorNormalizeSchema(root, root, make(map[string]bool), 0)
-	if err != nil {
-		cursorLogSchemaNormalizeFailed(toolName)
-		return nil
-	}
-	out, err := json.Marshal(normalized)
-	if err != nil {
-		cursorLogSchemaNormalizeFailed(toolName)
-		return nil
-	}
-	return out
-}
-
-// cursorLogSchemaNormalizeFailed 记 schema_normalize_failed 事件（方案 §4）：
-// 只含 tool_name 与 reason，不含 schema 内容（schema 携带工具业务语义，与既有
-// mcp_args_retype_failed 的脱敏口径一致）。
-func cursorLogSchemaNormalizeFailed(toolName string) {
-	logger.L().Warn("schema_normalize_failed",
-		zap.String("tool_name", toolName),
-		zap.String("reason", string(cursorRetypeSchemaUnresolvable)))
-}
-
-// cursorSchemaFromF3 把 f3（google.protobuf.Value）的 protobuf 字节还原为规范 JSON。
-// 还原失败（非法 Value / protojson 异常 / 不可压缩）返回 (nil, false)，交由调用方
-// 回落读取历史 f6 兜底。
-func cursorSchemaFromF3(b []byte) ([]byte, bool) {
-	if len(b) == 0 {
-		return nil, false
-	}
-	v := &structpb.Value{}
-	if err := proto.Unmarshal(b, v); err != nil {
-		return nil, false
-	}
-	out, err := protojson.Marshal(v)
-	if err != nil {
-		return nil, false
-	}
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, out); err != nil {
-		return nil, false
-	}
-	return buf.Bytes(), true
-}
-
-// isJSONNumberLiteral 按 RFC 8259 数字语法做词法校验（不含解析）。
-// 拒绝 JSON 之外的写法（"0x1p2"、"NaN"、"Inf"、前导零 "01"、"1."、省略指数的 "1e" 等）。
-func isJSONNumberLiteral(s string) bool {
-	n := len(s)
-	if n == 0 {
-		return false
-	}
-	i := 0
-	if s[i] == '-' {
-		i++
-		if i == n {
-			return false
-		}
-	}
-	switch {
-	case s[i] == '0':
-		i++
-	case s[i] >= '1' && s[i] <= '9':
-		i++
-		for i < n && s[i] >= '0' && s[i] <= '9' {
-			i++
-		}
-	default:
-		return false
-	}
-	if i < n && s[i] == '.' {
-		i++
-		if i == n || s[i] < '0' || s[i] > '9' {
-			return false
-		}
-		for i < n && s[i] >= '0' && s[i] <= '9' {
-			i++
-		}
-	}
-	if i < n && (s[i] == 'e' || s[i] == 'E') {
-		i++
-		if i < n && (s[i] == '+' || s[i] == '-') {
-			i++
-		}
-		if i == n || s[i] < '0' || s[i] > '9' {
-			return false
-		}
-		for i < n && s[i] >= '0' && s[i] <= '9' {
-			i++
-		}
-	}
-	return i == n
-}
-
-// cursorRetypeMcpArgs 把 argsJSON（对象 JSON）按 schemaJSON（工具 input_schema）做
-// 类型驱动的最小结构变换。根对象整体走 OBJECT 分支（复用 retypeValue）。
-// 任一不可判定 → 返回 ErrCursorProtocol 包裹的结构化原因。
-func cursorRetypeMcpArgs(argsJSON, schemaJSON []byte) ([]byte, error) {
-	return cursorRetypeMcpArgsOptions(argsJSON, schemaJSON, true)
-}
-
-// cursorRetypeMcpArgsOptions 是 cursorRetypeMcpArgs 的可配置版本：enforceRequired 为
-// false 时不消费根 schema 的 required（仅用于本站合成的降级壳，见
-// cursorIsSyntheticDowngradeShell）。形状投影与其余校验完全一致。
-func cursorRetypeMcpArgsOptions(argsJSON, schemaJSON []byte, enforceRequired bool) ([]byte, error) {
-	var args any
-	if err := json.Unmarshal(argsJSON, &args); err != nil {
-		return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "parse mcp args: %v", err)
-	}
-	var root map[string]any
-	if err := json.Unmarshal(schemaJSON, &root); err != nil {
-		return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "parse tool schema: %v", err)
-	}
-	if root == nil {
-		return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
-	}
-	if !enforceRequired {
-		// 降级壳：required 是本站为引导模型而编的，不构成"上游参数残缺"的依据。
-		delete(root, "required")
-	}
-	// 根对象必须声明为 object 类型，否则无结构可投影（§3.3 形态校验）。
-	// type 缺省（如空 schema "{}"）→ 无 type 声明，不存在 array 投影，原样返回。
-	if rawType, ok := root["type"]; ok {
-		t, ok := rawType.(string)
-		if !ok || t != "object" {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-	}
-	out, err := retypeValue(args, root, 0)
-	if err != nil {
-		return nil, err
-	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "marshal retyped mcp args: %v", err)
-	}
-	return b, nil
-}
-
-// cursorRetypeArgsByToolDefs 按 f4 原始字节集合为某个工具调用还原 ArgsJSON：
-// 先按 tool_name 取回 input_schema，再走 cursorRetypeMcpArgs；
-// 失败关闭（返回 ErrCursorProtocol，不含参数明文），并在 onFail 回调里记结构化日志。
-// 双工路径与独立解析路径共用本函数，保证两路径行为一致（§B 两路径一致）。
-func cursorRetypeArgsByToolDefs(id, name, argsJSON string, defs [][]byte, onFail func(reason cursorRetypeErrReason)) (string, error) {
-	idx := cursorToolSchemaIndex(defs)
-	schemaJSON, ok := idx[name]
-	if !ok {
-		// 声明过、但没有 input_schema：custom / freeform 工具的正常形态，
-		// 参数是自由文本，没有必填项可校验 → 原样交付，不算残缺。
-		if cursorToolDeclaredWithoutSchema(defs, name) {
-			return argsJSON, nil
-		}
-		if onFail != nil {
-			onFail(cursorRetypeSchemaAbsent)
-		}
-		return "", cursorRetypeErrorf(cursorRetypeSchemaAbsent)
-	}
-	// 归一化失败哨兵（nil）：该工具 schema 含不可归一化的组合/引用写法，按既有
-	// schema_unresolvable 失败关闭（方案 §4），不回退原 schema 放行、不静默丢弃。
-	if schemaJSON == nil {
-		if onFail != nil {
-			onFail(cursorRetypeSchemaUnresolvable)
-		}
-		return "", cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-	}
-	// 本站自己合成的降级壳（custom/freeform 与 tool_search 降级为普通 function 时，
-	// 由 apicompat 编出来的 {"input":...} / {"query":...} 壳）：壳里的 required 是
-	// 我们为引导模型而编的，不是客户端真实参数契约，上游模型本来就看不到原始形态，
-	// 拿这个壳去判"上游参数残缺"只会把正常 custom 调用一律打成 missing_required。
-	// 该路径不做必填校验（其余形状投影照旧），见 cursorIsSyntheticDowngradeShell。
-	enforceRequired := !cursorIsSyntheticDowngradeShell(schemaJSON)
-	retyped, err := cursorRetypeMcpArgsOptions([]byte(argsJSON), schemaJSON, enforceRequired)
-	if err != nil {
-		reason := cursorRetypeErrReason("unknown")
-		var re *cursorRetypeError
-		if errors.As(err, &re) {
-			reason = re.reason
-		}
-		if onFail != nil {
-			onFail(reason)
-		}
-		return "", err
-	}
-	return string(retyped), nil
-}
-
-// cursorIsSyntheticDowngradeShell 报告归一化后的 schema 是否等于本站合成的降级壳。
-//
-// 判据是归一化字节相等——壳是常量，客户端真实声明的 schema 不可能与之逐字节相同
-// （normalize 是确定性函数，同一输入必得同一输出）。命中即说明该工具在 chat 侧是
-// 本端降级造出来的，required 不可作为"上游参数残缺"的依据。
-func cursorIsSyntheticDowngradeShell(normalizedSchema []byte) bool {
-	if len(normalizedSchema) == 0 {
-		return false
-	}
-	cursorSyntheticShellsOnce.Do(func() {
-		cursorSyntheticShells = make(map[string]struct{}, 2)
-		for _, raw := range []string{
-			apicompat.CustomToolInputSchema,
-			apicompat.ToolSearchProxySchema,
-		} {
-			if n := cursorNormalizeIndexedSchema("", []byte(raw)); len(n) > 0 {
-				cursorSyntheticShells[string(n)] = struct{}{}
-			}
-		}
-	})
-	_, ok := cursorSyntheticShells[string(normalizedSchema)]
-	return ok
-}
-
-var (
-	cursorSyntheticShellsOnce sync.Once
-	cursorSyntheticShells     map[string]struct{}
-)
-
-// retypeValue 递归地按 schema 还原单个 value（方案 §3.3 算法）。
-//
-// depth 是该节点在参数树里的嵌套深度（根对象 0），只用于 missing_required 的
-// 脱敏诊断（区分顶层缺字段与嵌套缺字段），不参与任何投影/校验决策。
-func retypeValue(value any, schema map[string]any, depth int) (any, error) {
-	// 0. schema 形态
-	if schema == nil {
-		return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
-	}
-	if _, ok := schema["$ref"]; ok {
-		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-	}
-	for _, k := range []string{"anyOf", "oneOf", "allOf"} {
-		if _, ok := schema[k]; ok {
-			return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable)
-		}
-	}
-	rawTypeVal, ok := schema["type"]
-	if !ok {
-		return value, nil // 无 type 声明 → 不存在 array 投影，原样
-	}
-	rawType, ok := rawTypeVal.(string)
-	if !ok {
-		return nil, cursorRetypeErrorf(cursorRetypeSchemaUnresolvable) // type 为数组等
-	}
-	switch rawType {
-	case "string", "null":
-		return value, nil
-	case "array":
-		return retypeArray(value, schema, depth)
-	case "object":
-		return retypeObject(value, schema, depth)
-	case "number", "integer", "boolean":
-		return retypeScalar(value, rawType)
-	default:
-		return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
-	}
-}
-
-func retypeArray(value any, schema map[string]any, depth int) (any, error) {
-	var seq []any
-	switch v := value.(type) {
-	case []any:
-		seq = v
-	case map[string]any:
-		if len(v) == 1 {
-			if itemVal, ok := v["item"]; ok {
-				if iv, ok := itemVal.([]any); ok {
-					seq = iv
-				} else {
-					seq = []any{itemVal}
-				}
-			}
-		}
-	}
-	if seq == nil {
-		// 既不是 list 也不是单键 {item} → 失败关闭（不是透传）。
-		return nil, cursorRetypeErrorf(cursorRetypeProjectionUnresolvable)
-	}
-	itemsVal, hasItems := schema["items"]
-	if !hasItems {
-		return seq, nil // 元素原样
-	}
-	switch items := itemsVal.(type) {
-	case bool:
-		if items {
-			return seq, nil // items:true → 元素原样
-		}
-		// items:false
-		if len(seq) == 0 {
-			return []any{}, nil
-		}
-		return nil, cursorRetypeErrorf(cursorRetypeItemsNotAllowed)
-	case map[string]any:
-		out := make([]any, len(seq))
-		for i, e := range seq {
-			r, err := retypeValue(e, items, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			out[i] = r
-		}
-		return out, nil
-	default:
-		return nil, cursorRetypeErrorf(cursorRetypeItemsSubSchemaInvalid)
-	}
-}
-
-func retypeObject(value any, schema map[string]any, depth int) (any, error) {
-	v, ok := value.(map[string]any)
-	if !ok {
-		return nil, cursorRetypeErrorf(cursorRetypeObjectTypeMismatch)
-	}
-	propsVal, _ := schema["properties"]
-	props, _ := propsVal.(map[string]any)
-	apVal, hasAP := schema["additionalProperties"]
-	var apSchema map[string]any
-	apFalse := false
-	if hasAP {
-		switch ap := apVal.(type) {
-		case map[string]any:
-			apSchema = ap
-		case bool:
-			if !ap {
-				apFalse = true
-			}
-		}
-	}
-	out := make(map[string]any, len(v))
-	for k, vv := range v {
-		if p, ok := props[k]; ok {
-			sub, ok := p.(map[string]any)
-			if !ok {
-				// 属性 schema 不是对象（null/字面量）→ 不可作为投影依据。
-				return nil, cursorRetypeErrorf(cursorRetypeSchemaInvalid)
-			}
-			r, err := retypeValue(vv, sub, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			out[k] = r
-			continue
-		}
-		switch {
-		case apSchema != nil:
-			r, err := retypeValue(vv, apSchema, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			out[k] = r
-		case apFalse:
-			return nil, cursorRetypeErrorf(cursorRetypeAdditionalPropPresent)
-		default: // additionalProperties 缺失或 true：原样保留
-			out[k] = vv
-		}
-	}
-	// required 消费（11-03 修复）：schema 里声明的必填字段必须在还原结果中出现。
-	//
-	// 旧实现把 required 原样保留却从不消费，等于对"参数是否完整"完全没有门禁：
-	// 上游只发一个空 args（活体 11-03 04:45 的 Bash input={}）也照样重打成功，
-	// 我们便把空壳调用交付给客户端。必填缺失 → missing_required，由调用点按
-	// cursorRetypeDegradable 判定为不可降级，改走上游失败。
-	//
-	// 诊断口径：缺失字段名与该层实际携带的字段名一并带出（只记名字、不记值），
-	// 供调用点区分"上游真没给"与"上游给了但叫法不同"。原始 v 的 key 才是上游给的
-	// 字段名（out 是投影结果，会因 additionalProperties:false 少项）。
-	if err := cursorCheckRetypeRequired(out, schema, depth, v); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// cursorCheckRetypeRequired 校验还原结果是否齐备 schema.required 声明的字段。
-//
-// 只做"存在性"判定（含显式 null），不做值域判定：值是否合法由客户端按同一 schema
-// 复核，本层只负责不让**残缺**调用流出。
-//
-// raw 是上游传进该层的原始对象，只用于诊断：缺失时把（缺的字段名、raw 实际携带的
-// 字段名、嵌套深度）一并带进错误，绝不把字段值写入错误或日志。
-func cursorCheckRetypeRequired(out map[string]any, schema map[string]any, depth int, raw map[string]any) error {
-	rv, exists := schema["required"]
-	if !exists || rv == nil {
-		return nil
-	}
-	var declared []string
-	switch reqList := rv.(type) {
-	case []any:
-		declared = make([]string, 0, len(reqList))
-		for _, item := range reqList {
-			name, ok := item.(string)
-			if !ok {
-				return cursorRetypeErrorf(cursorRetypeSchemaInvalid)
-			}
-			declared = append(declared, name)
-		}
-	case []string:
-		declared = reqList
-	default:
-		return cursorRetypeErrorf(cursorRetypeSchemaInvalid)
-	}
-	// 收集**全部**缺失字段（不是第一个就返回）：诊断需要完整清单，才能一眼看出
-	// 是整体空对象（模型压根没填）还是只错位了一两个名字（命名风格不一致）。
-	var missing []string
-	for _, name := range declared {
-		if _, present := out[name]; !present {
-			missing = append(missing, name)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	present := make([]string, 0, len(raw))
-	for k := range raw {
-		present = append(present, k)
-	}
-	return cursorRetypeMissingRequiredError(missing, present, depth)
-}
-
-func retypeScalar(value any, rawType string) (any, error) {
-	s, ok := value.(string)
-	if !ok {
-		return value, nil // 已是数字/布尔 → 原样
-	}
-	if rawType == "boolean" {
-		switch s {
-		case "true":
-			return true, nil
-		case "false":
-			return false, nil
-		default:
-			return s, nil // 非布尔字面量保持原样（不报错、不改写）
-		}
-	}
-	// number / integer：先词法校验，再转 float64；溢出/非有限 → 失败关闭。
-	if !isJSONNumberLiteral(s) {
-		return s, nil // 词法不合法（如 "abc"）→ 原样保留（可能本来就是字符串值）
-	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
-		return nil, cursorRetypeErrorf(cursorRetypeNumericOutOfRange)
-	}
-	return f, nil
+	return nil, nil
 }
 
 // cursorCheckFiniteValue 递归校验 structpb.Value 内的全部数值是否为有限值。

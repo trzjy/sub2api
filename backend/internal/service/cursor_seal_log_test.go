@@ -65,12 +65,11 @@ func TestCursorSealLogWritesBlockedReasonOnUnsealedTermination(t *testing.T) {
 
 	// ③ 帧序列：started + mcp_args 委托（有 delegation 但缺 listed）→ 应触发 sealable 失败；
 	//    随后 EOF → pump 终止（不交接、不提前结束，沿用 B8 既有帧辅助）。
-	argsA := cursorToolTestBuildMcpArgs("call_a", "get_weather", []cursorToolTestMcpArgEntry{
-		{key: "city", kind: "string", val: "Beijing"}})
+	argsA := cursorSDKTransportBuildMcpArgs("call_a", "get_weather", `{"city":"Beijing"}`)
 
 	var frames []byte
 	frames = append(frames, cursorSealDiagEnvelope(cursorSealDiagStartedFrame(t, "call_a", "mc1"))...)
-	frames = append(frames, cursorSealDiagEnvelope(cursorToolTestExecFrame(true, argsA))...)
+	frames = append(frames, cursorSealDiagEnvelope(cursorSDKTransportExecFrame(argsA))...)
 
 	resp := &CursorUpstreamResponse{Body: io.NopCloser(bytes.NewReader(frames))}
 	parser := cursorNewStreamParser("m")
@@ -78,11 +77,10 @@ func TestCursorSealLogWritesBlockedReasonOnUnsealedTermination(t *testing.T) {
 	//     本路径挂载**原始 f4 tool definition 字节**（与 duplex 路径同源：取
 	//     cursorConvertRequest 实际发出的 f4，而非按 req.Tools 重新序列化）。
 	//
-	//     不挂载的后果（本用例的原失败形态）：f11 exec.mcp_args 在 schema 还原处按
-	//     schema_absent 失败关闭 → 该帧解析提前返回错误 → 交接判定处
-	//     sealableDelegations() 根本没被执行 → lastSealErr 保持 nil → 终态日志
-	//     response_parse_done 不带 seal_blocked_reason（断言取到空串）。
-	//     故此处只补齐 schema 注入，不放宽 schema_absent 语义。
+	//     不挂载的后果：f11 exec.mcp_args 因拿不到 f4 真实 tool_name enum 而失败关闭
+	//     → 该帧解析提前返回错误 → 交接判定处 sealableDelegations() 根本没被执行
+	//     → lastSealErr 保持 nil → 终态日志 response_parse_done 不带 seal_blocked_reason
+	//     （断言取到空串）。故此处只补齐真实 f4 注入，不放宽运输校验语义。
 	parser.attachToolSchemas(cursorTestDeclaredToolDefs(t, &apicompat.ChatCompletionsRequest{
 		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 		Tools: []apicompat.ChatTool{{Type: "function", Function: &apicompat.ChatFunction{

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -124,25 +123,18 @@ func TestCursorDecodeMcpValueFailure(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. 整条 McpArgs 类型保真：经 cursorDecodeMcpArgs 后 Go 具体类型正确
+// 4. 整条运输帧保真：arguments_json 原字节返回，不转 map、不改类型
 // ---------------------------------------------------------------------------
 
 func TestCursorDecodeMcpArgs(t *testing.T) {
-	entries := map[string]*structpb.Value{
-		"i":    structpb.NewNumberValue(7),
-		"neg":  structpb.NewNumberValue(-42),
-		"frac": structpb.NewNumberValue(1.25),
-		"s":    structpb.NewStringValue("hi"),
-		"b":    structpb.NewBoolValue(true),
-		"o":    cursorTestVal(t, map[string]interface{}{"x": 1.0}),
-		"arr":  cursorTestVal(t, []any{1.0, "a"}),
-		"n":    structpb.NewNullValue(),
-	}
-	args := cursorTestBuildMcpArgsOfficial(t, "call_77", "get_weather", entries)
-	id, name, argsJSON, err := cursorDecodeMcpArgs(args)
+	defs := cursorSDKTransportDeclaredDefs(t, "get_weather")
+	const originalJSON = `{"i":7,"neg":-42,"frac":1.25,"s":"hi","b":true,"o":{"x":1},"arr":[1,"a"],"n":null}`
+	args := cursorSDKTransportBuildMcpArgs("call_77", "get_weather", originalJSON)
+	id, name, argsJSON, err := cursorDecodeMcpArgs(args, defs)
 	require.NoError(t, err)
 	require.Equal(t, "call_77", id)
 	require.Equal(t, "get_weather", name)
+	require.Equal(t, originalJSON, argsJSON, "arguments_json 必须逐字节原样返回")
 
 	var obj map[string]any
 	require.NoError(t, json.Unmarshal([]byte(argsJSON), &obj))
@@ -164,28 +156,18 @@ func TestCursorDecodeMcpArgs(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. 字节稳定性：同一份 args 连续解码 64 次逐次完全相同，且不含 ", "
+// 5. 字节稳定性：同一份运输帧连续解码 64 次逐次与 fixture 完全相同
 // ---------------------------------------------------------------------------
 
 func TestCursorValueTypes(t *testing.T) {
-	entries := map[string]*structpb.Value{
-		"i":   structpb.NewNumberValue(7),
-		"s":   structpb.NewStringValue("Beijing"),
-		"b":   structpb.NewBoolValue(true),
-		"o":   cursorTestVal(t, map[string]interface{}{"x": 1.0, "y": []any{1, 2}}),
-		"arr": cursorTestVal(t, []any{1.0, "a"}),
-	}
-	args := cursorTestBuildMcpArgsOfficial(t, "call_1", "t", entries)
+	defs := cursorSDKTransportDeclaredDefs(t, "get_weather")
+	const originalJSON = `{"i":7,"s":"Beijing","b":true,"o":{"x":1,"y":[1,2]},"arr":[1,"a"]}`
+	args := cursorSDKTransportBuildMcpArgs("call_1", "get_weather", originalJSON)
 
-	var first string
 	for i := 0; i < 64; i++ {
-		_, _, argsJSON, err := cursorDecodeMcpArgs(args)
+		_, _, argsJSON, err := cursorDecodeMcpArgs(args, defs)
 		require.NoError(t, err)
-		if i == 0 {
-			first = argsJSON
-		}
-		require.Equal(t, first, argsJSON, "第 %d 次解码结果必须与首次一致", i)
-		require.NotContains(t, argsJSON, ", ", "protojson 随机空格必须被 json.Compact 去除")
+		require.Equal(t, originalJSON, argsJSON, "第 %d 次解码结果必须与输入逐字节一致", i)
 	}
 }
 
@@ -194,22 +176,12 @@ func TestCursorValueTypes(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCursorDuplex(t *testing.T) {
-	args := cursorToolTestBuildMcpArgs("call_42", "get_weather", []cursorToolTestMcpArgEntry{
-		{key: "city", kind: "string", val: "Beijing"},
-		{key: "days", kind: "number", val: "3"},
-		{key: "flag", kind: "bool", val: "true"},
-	})
+	const originalJSON = `{"city":"Beijing","days":3,"flag":true}`
+	args := cursorSDKTransportBuildMcpArgs("call_42", "get_weather", originalJSON)
 
 	// 本请求真实声明的工具：f4 原始字节的唯一来源（cursorConvertRequest 实际发出的字节），
 	// duplex 与独立 parser 共用同一份，绝不另起编码器、绝不用 req.Tools 重新序列化。
-	req := &apicompat.ChatCompletionsRequest{
-		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
-		Tools: []apicompat.ChatTool{{Type: "function", Function: &apicompat.ChatFunction{
-			Name: "get_weather",
-			Parameters: json.RawMessage(`{"type":"object","properties":{` +
-				`"city":{"type":"string"},"days":{"type":"number"},"flag":{"type":"boolean"}}}`),
-		}}},
-	}
+	req := cursorSDKTransportRequest("get_weather")
 	initBody, err := cursorConvertRequest(req, "grok-4.7")
 	require.NoError(t, err)
 
@@ -219,7 +191,7 @@ func TestCursorDuplex(t *testing.T) {
 	defer d.close(nil)
 	require.Len(t, d.declaredToolDefs, 1, "AgentRun 请求 f4 必须携带 get_weather 的原始 McpToolDefinition")
 
-	frame := cursorToolTestExecFrame(true, args) // f11 mcp_args，respond 吃剥离 envelope 的 payload
+	frame := cursorSDKTransportExecFrame(args) // f11 mcp_args，respond 吃剥离 envelope 的 payload
 	done, err := d.respond(frame)
 	require.NoError(t, err)
 	require.False(t, done, "mcp_args 委托不得终结双向连接")
@@ -228,11 +200,11 @@ func TestCursorDuplex(t *testing.T) {
 	require.Len(t, snapshot, 1, "duplex 侧委托记录必须恰好一条（唯一解码点）")
 	require.Equal(t, "call_42", snapshot[0].ID)
 	require.Equal(t, "get_weather", snapshot[0].Name)
-	require.Equal(t, `{"city":"Beijing","days":3,"flag":true}`, snapshot[0].ArgsJSON)
+	require.Equal(t, originalJSON, snapshot[0].ArgsJSON, "arguments_json 必须逐字节原样交付")
 
 	// parser 消费同一帧与 turn_ended 帧，attach 同一份共享记录 → 不得二次解码。
 	body := cursorToolTestStreamBody(
-		cursorToolTestExecFrame(true, args),
+		cursorSDKTransportExecFrame(args),
 		cursorToolTestTurnEndedFrame(10, 5),
 	)
 	p := cursorNewStreamParser("grok-4.7")

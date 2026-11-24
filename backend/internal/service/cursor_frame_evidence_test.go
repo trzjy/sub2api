@@ -188,7 +188,7 @@ func TestFrameEvidenceUserErrorCarriesFrameClass(t *testing.T) {
 // TestFrameEvidenceNoFrameContentLeak 帧级诊断绝不含帧内容明文。
 func TestFrameEvidenceNoFrameContentLeak(t *testing.T) {
 	const marker = "SECRET-PAYLOAD-MARKER"
-	// 构造一帧：payload 是会被判定为 inline tool call 的正文（含 marker）。
+	// 构造一帧：payload 是正文（正文就是正文，不再做 inline tool call 识别）。
 	payload := cursorAppendStringField(nil,
 		cursorFldTextDeltaText, marker+" <function_calls>")
 	delta := cursorAppendBytesField(nil, cursorFldUpdateTextDelta, payload)
