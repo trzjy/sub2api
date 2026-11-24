@@ -74,7 +74,7 @@ func TestAnthropicChatBridge_ReasoningSurvivesOutboundInboundRoundTrip(t *testin
 	}
 
 	// 出站：Chat 响应 → Anthropic content blocks
-	blocks := chatMessageToAnthropicBlocks(upstream)
+	blocks := chatMessageToAnthropicBlocks(upstream, ChatResponseConversionOptions{})
 	require.Equal(t, "thinking", blocks[0].Type)
 	require.Equal(t, upstream.ReasoningContent, blocks[0].Thinking)
 

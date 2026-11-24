@@ -456,6 +456,13 @@ func joinResponsesContentPartText(parts []ResponsesContentPart) string {
 // ResponsesResponse. It is semantically equivalent to composing
 // ChatCompletionsResponseToResponses + ResponsesToAnthropic.
 func ChatCompletionsResponseToAnthropic(resp *ChatCompletionsResponse, model string) *AnthropicResponse {
+	return ChatCompletionsResponseToAnthropicWithOptions(resp, model, ChatResponseConversionOptions{})
+}
+
+// ChatCompletionsResponseToAnthropicWithOptions is the options-aware form of
+// ChatCompletionsResponseToAnthropic. Zero-value opts keeps the existing DSML
+// semantics; only the Cursor AgentRun writer sets DisableDSMLToolCalls.
+func ChatCompletionsResponseToAnthropicWithOptions(resp *ChatCompletionsResponse, model string, opts ChatResponseConversionOptions) *AnthropicResponse {
 	out := &AnthropicResponse{
 		Type:  "message",
 		Role:  "assistant",
@@ -470,7 +477,7 @@ func ChatCompletionsResponseToAnthropic(resp *ChatCompletionsResponse, model str
 
 		if len(resp.Choices) > 0 {
 			choice := resp.Choices[0]
-			out.Content = chatMessageToAnthropicBlocks(choice.Message)
+			out.Content = chatMessageToAnthropicBlocks(choice.Message, opts)
 			out.StopReason = AnthropicStopReasonPtr(chatFinishReasonToAnthropicStopReason(choice.FinishReason, out.Content))
 			// "length" → "max_tokens" is handled by chatFinishReasonToAnthropicStopReason;
 			// Anthropic conveys max-tokens via stop_reason only, no incomplete_details field.
@@ -502,19 +509,22 @@ func ChatCompletionsResponseToAnthropic(resp *ChatCompletionsResponse, model str
 // Anthropic content blocks. Reasoning content → thinking block; text content →
 // text block; tool_calls → tool_use blocks. Mirrors chatMessageToResponsesOutput
 // + the reasoning→thinking mapping in ResponsesToAnthropic.
-func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
+func chatMessageToAnthropicBlocks(message ChatMessage, opts ChatResponseConversionOptions) []AnthropicContentBlock {
 	var blocks []AnthropicContentBlock
 	reasoning := message.reasoningText()
 
-	// DeepSeek 官方 DSML 方言：上游可能把工具调用写成 DSML 文本放在
-	// reasoning_content / content 里。按官方规范还原成标准 tool_use 块，
-	// 并把 DSML 原文摘干净（不让协议标签外泄给客户端）。
-	dsmlCalls := ParseDSMLToolCalls(reasoning)
-	if len(dsmlCalls) == 0 {
-		dsmlCalls = ParseDSMLToolCalls(chatMessageContentText(message.Content))
-	}
-	if len(dsmlCalls) > 0 {
-		reasoning = StripDSML(reasoning)
+	var dsmlCalls []DSMLToolCall
+	if !opts.DisableDSMLToolCalls {
+		// DeepSeek 官方 DSML 方言：上游可能把工具调用写成 DSML 文本放在
+		// reasoning_content / content 里。按官方规范还原成标准 tool_use 块，
+		// 并把 DSML 原文摘干净（不让协议标签外泄给客户端）。
+		dsmlCalls = ParseDSMLToolCalls(reasoning)
+		if len(dsmlCalls) == 0 {
+			dsmlCalls = ParseDSMLToolCalls(chatMessageContentText(message.Content))
+		}
+		if len(dsmlCalls) > 0 {
+			reasoning = StripDSML(reasoning)
+		}
 	}
 
 	if reasoning != "" {
@@ -525,7 +535,9 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
 	}
 
 	text := chatMessageContentText(message.Content)
-	text = StripDSML(text)
+	if !opts.DisableDSMLToolCalls {
+		text = StripDSML(text)
+	}
 	// DeepSeek reasoning-only fallback: when there is no text and no tool calls,
 	// surface the reasoning content as visible text so the turn isn't empty.
 	//
@@ -659,6 +671,11 @@ type ChatCompletionsToAnthropicStreamState struct {
 	MessageStartSent bool
 	MessageStopSent  bool
 
+	// ConversionOptions 控制本响应的客户端协议细节。零值保持既有 DSML 语义；
+	// Cursor AgentRun writer 显式禁用 DSML 工具调用还原（那些调用没有真实
+	// f11/ExecID 关联，无法回填原 exec）。构造后本 HTTP 内不切换。
+	ConversionOptions ChatResponseConversionOptions
+
 	// Current content block lifecycle.
 	ContentBlockIndex   int
 	ContentBlockOpen    bool
@@ -765,8 +782,12 @@ func ChatCompletionsChunkToAnthropicEvents(
 		// 里。先过 DSML 缓冲：还原出的调用转成标准 tool_use 块；DSML 原文不再透传。
 		reasoning := choice.Delta.reasoningText()
 		if reasoning != nil && *reasoning != "" {
-			plain, calls := state.dsmlBuffer.Feed(*reasoning)
-			events = append(events, state.dsmlToolCallEvents(calls)...)
+			plain := *reasoning
+			if !state.ConversionOptions.DisableDSMLToolCalls {
+				var calls []DSMLToolCall
+				plain, calls = state.dsmlBuffer.Feed(*reasoning)
+				events = append(events, state.dsmlToolCallEvents(calls)...)
+			}
 			if plain != "" {
 				events = append(events, ensureCCAnthropicThinkingBlock(state)...)
 				events = append(events, ccAnthropicDelta(state, &AnthropicDelta{
@@ -836,8 +857,12 @@ func handleCCAnthropicTextDelta(state *ChatCompletionsToAnthropicStreamState, de
 
 	// 先过 DSML 缓冲：上游可能把工具调用写成 DSML 文本放在 content 里。
 	// 还原出的调用转成标准 tool_use 块；DSML 原文不会透传到正文。
-	delta, dsmlCalls := state.dsmlBuffer.Feed(delta)
-	events := state.dsmlToolCallEvents(dsmlCalls)
+	var events []AnthropicStreamEvent
+	if !state.ConversionOptions.DisableDSMLToolCalls {
+		var dsmlCalls []DSMLToolCall
+		delta, dsmlCalls = state.dsmlBuffer.Feed(delta)
+		events = state.dsmlToolCallEvents(dsmlCalls)
+	}
 	if delta == "" {
 		return events
 	}
@@ -879,9 +904,11 @@ func FinalizeChatCompletionsAnthropicStream(state *ChatCompletionsToAnthropicStr
 	var events []AnthropicStreamEvent
 
 	// 收口 DSML 缓冲：完整调用还原成 tool_use；残片直接丢弃（不外泄协议标签）。
-	if calls, dropped := state.dsmlBuffer.Flush(); len(calls) > 0 || dropped > 0 {
-		state.dsmlDropped += dropped
-		events = append(events, state.dsmlToolCallEvents(calls)...)
+	if !state.ConversionOptions.DisableDSMLToolCalls {
+		if calls, dropped := state.dsmlBuffer.Flush(); len(calls) > 0 || dropped > 0 {
+			state.dsmlDropped += dropped
+			events = append(events, state.dsmlToolCallEvents(calls)...)
+		}
 	}
 
 	// 冲出跨帧缓冲里残留的 think 尾段

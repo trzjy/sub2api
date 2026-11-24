@@ -37,7 +37,7 @@ func TestChatMessageToAnthropicBlocks_ReasoningFallbackSanitized(t *testing.T) {
 		Role:             "assistant",
 		ReasoningContent: "<thinking>(reasoning not retained)</thinking>\n巡检完成：AGG-UPSTREAM 正常",
 	}
-	blocks := chatMessageToAnthropicBlocks(msg)
+	blocks := chatMessageToAnthropicBlocks(msg, ChatResponseConversionOptions{})
 	require.Len(t, blocks, 2, "thinking 块 + text 块")
 	require.Equal(t, "thinking", blocks[0].Type)
 	require.Equal(t, "text", blocks[1].Type)
@@ -49,7 +49,7 @@ func TestChatMessageToAnthropicBlocks_ReasoningFallbackSanitized(t *testing.T) {
 // 只有占位、没有真正正文时，不得把占位当正文输出（空轮好过泄漏）。
 func TestChatMessageToAnthropicBlocks_PlaceholderOnlyYieldsEmptyText(t *testing.T) {
 	msg := ChatMessage{Role: "assistant", ReasoningContent: "(reasoning not retained)"}
-	blocks := chatMessageToAnthropicBlocks(msg)
+	blocks := chatMessageToAnthropicBlocks(msg, ChatResponseConversionOptions{})
 	require.Len(t, blocks, 2)
 	require.Equal(t, "", blocks[1].Text)
 	raw, err := json.Marshal(blocks[1])
