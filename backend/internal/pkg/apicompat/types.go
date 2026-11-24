@@ -910,3 +910,19 @@ func (d ChatDelta) reasoningText() *string {
 const DefaultMinMaxOutputTokens = 128
 
 const minMaxOutputTokens = DefaultMinMaxOutputTokens
+
+// ---------------------------------------------------------------------------
+// Chat → client-protocol conversion options
+// ---------------------------------------------------------------------------
+
+// ChatResponseConversionOptions 控制 Chat Completions → Anthropic/Responses
+// 转换过程中的客户端协议细节。零值保持既有行为，不改变其它调用方。
+//
+// 唯一已知用途：Cursor AgentRun 的文本不得被 DSML 恢复成可执行工具调用
+// （那些调用没有真实 f11/ExecID 关联，无法回填原 exec）。只在实际 writer
+// 边界传入该值，不新增产品配置、环境变量或按客户端/UA 的分支。
+type ChatResponseConversionOptions struct {
+	// DisableDSMLToolCalls 为 true 时，转换器不再解析/剥离正文或 reasoning 里的
+	// DSML 工具调用文本：正文按原文交付，结构化 ToolCalls 照常转换。
+	DisableDSMLToolCalls bool
+}
