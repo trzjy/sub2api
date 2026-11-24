@@ -35,7 +35,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -43,9 +42,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -115,14 +111,24 @@ const (
 	// google.protobuf.Value 承载（AgentRun 真实出站同形）。新生产构造**只写 f3**，
 	// 不再写 f6 字符串。
 	cursorFldMcpToolDefInputSchemaValue = 3
-	// cursorFldMcpToolDefInputSchemaLegacy 是旧字段 f6（input_schema_json 字符串）。
-	// 仅供 cursorToolSchemaIndex 解析既有历史夹具（按 f6 编码的字节）时回落读取；
-	// 新生产路径不写 f6。
-	cursorFldMcpToolDefInputSchemaLegacy = 6
 )
 
 // cursorMcpProviderIdentifier 是本层声明 MCP 工具时固定的 provider 标识。
 const cursorMcpProviderIdentifier = "sub2api"
+
+// Cursor ShareAI AgentRun 上游只声明一个 MCP 工具：invoke_client_tool。
+//
+// 客户端原规范工具名放进 tool_name（enum = 本请求最终有效子集），完整参数 JSON
+// 对象序列化成字符串放进 arguments_json（本站解码时保留原字节）。请求侧的历史
+// assistant tool_call / tool result 也用同一运输形状，保证「声明什么、历史重放什么」
+// 完全一致。响应侧不再解析内联标记，标记只用于请求历史文本化。
+const (
+	cursorTransportToolName     = "invoke_client_tool"
+	cursorTransportToolNameKey  = "tool_name"
+	cursorTransportArgumentsKey = "arguments_json"
+	cursorInlineToolCallOpen    = "<tool_call>"
+	cursorInlineToolCallClose   = "</tool_call>"
+)
 
 // cursorConversationModeAgent 是 ConversationMode 的取值（= agent.v1.AgentMode）。
 //
@@ -167,63 +173,7 @@ func cursorConvertRequestWithContext(ctx context.Context, req *apicompat.ChatCom
 		return nil, err
 	}
 	skipped.log(ctx, "chat_messages_dropped", upstreamModel)
-	// W7 观测缺口：记一条 wire_name_renamed，让线上能区分"修好了"和"客户跑了"——
-	// 现有 native_exec_rejected 只记客户端原名与计数，看不出改名条数与原名↔wire 对照。
-	// 改名规则的唯一来源仍是 cursorWireToolNameSet / cursorWireToolNameOf，本函数只负责
-	// 把"本次实际声明并编码上线的工具"与它们的 wire name 对照算出来落盘，不另写一份规则。
-	cursorLogWireNameRenamed(ctx, req, upstreamModel)
 	return body, nil
-}
-
-// cursorPhaseWireNameRenamed 是"工具名重名隔离改名对照"的 phase 名（施工图 W7 要求新增的
-// 三个日志点之一）。一次出站请求只记一条（即使多个工具被改名）。
-const cursorPhaseWireNameRenamed = "wire_name_renamed"
-
-// cursorLogWireNameRenamed 记一条 wire_name_renamed 观测日志（W7 缺口）。
-//
-// 改名规则的唯一来源是 cursorWireToolNameSet / cursorWireToolNameOf（铁律 2：规则只有一个
-// 来源，不为日志另写一份改名规则）。本函数只复用那张 wire map 把"本次实际声明并编码进 f4
-// 的工具"与它们的 wire name 对照算出来并落盘；一次请求一条。
-//
-// 字段（与施工图 §2.4 W7 一致，且只记工具名、不记 description / schema / 参数值）：
-//   - renamed_count：原名 != wire name 的工具条数；
-//   - renamed_tools：改名前后对照，格式 `原名→wire名` 用 `,` 连接，只列被改名的；
-//   - total_count：本次实际声明并编码的工具总数（空 Function.Name 的工具不计入编码，也不计入）。
-//
-// renamed_count == 0 也要记一条（renamed_tools 为空串），以便用"日志存在"确认没有改名发生，
-// 而不是靠日志缺失来猜。
-//
-// 落点说明：cursorBuildMcpTools 是纯函数、无 logger 句柄，且其签名被既有测试锁定（不可改）；
-// 同样 cursorBuildAgentRun 的签名也被 cursor_image_input_test.go 等锁定。故日志放在持有 ctx
-// 的生产入口 cursorConvertRequestWithContext（与 skipped.log 同处），用传入的 req.Tools 复用
-// 同一份 wire map 规则算出对照——这是"选项 (b)：在调用方用 wireMap 算出对照并记日志"的落点。
-func cursorLogWireNameRenamed(ctx context.Context, req *apicompat.ChatCompletionsRequest, model string) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	// 复用与 cursorBuildAgentRun 完全相同的规则算 wire map，保证对照与实际上线字节一致。
-	wireMap := cursorWireToolNameSet(req.Tools)
-	declared := cursorResolveDeclaredTools(req)
-	var renamed []string
-	total := 0
-	for _, t := range declared {
-		if t.Function == nil || t.Function.Name == "" {
-			continue
-		}
-		total++
-		wireName := cursorWireToolNameOf(wireMap, t.Function.Name)
-		if wireName != t.Function.Name {
-			renamed = append(renamed, t.Function.Name+"→"+wireName)
-		}
-	}
-	// 排序保证日志可对比、用例可稳定断言（对照顺序不依赖工具声明顺序，与 wire map 的
-	// 排序键口径一致——顺序只影响日志文本，不影响计算结果）。
-	sort.Strings(renamed)
-	cursorPhaseLog(ctx, zapcore.InfoLevel, cursorPhaseWireNameRenamed, model,
-		zap.Int("renamed_count", len(renamed)),
-		zap.String("renamed_tools", strings.Join(renamed, ",")),
-		zap.Int("total_count", total),
-	)
 }
 
 // cursorBuildAgentRun 构造 AgentRun 请求体，并回传本次的 conversation_id。
@@ -241,13 +191,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 		return nil, "", newCursorRequestError(infraerrors.CursorExecModelMappingInvalidCode, http.StatusInternalServerError, "empty upstream model")
 	}
 
-	// wire map（原名 → wire name）在「选子集用原名匹配」之前算好，供历史重放（上面这行
-	// cursorConvertMessages）与下面的声明改名共用，保证同一份规则、回程（入站映射那张卡）
-	// 才能对得齐。顺序绝不能倒（W4）：cursorResolveDeclaredTools 仍用原名匹配 tool_choice
-	// 选子集，改名只在编码与历史重放时发生。
-	wireMap := cursorWireToolNameSet(req.Tools)
-
-	turns, err := cursorConvertMessages(req.Messages, wireMap, skipped)
+	turns, err := cursorConvertMessages(req.Messages, skipped)
 	if err != nil {
 		return nil, "", err
 	}
@@ -326,9 +270,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// f4（McpTools）声明给上游；否则保持空 message（f4 字段存在、长度 0，与活体样本
 	// 同形——既满足"无 tools 时零变化"的纯文本链回归保护，也保住 33/63 号黄金字节）。
 	declared := cursorResolveDeclaredTools(req)
-	// W4 顺序护栏：声明子集仍用原名匹配（上面 cursorResolveDeclaredTools），wire map
-	// 已在函数顶部算好，这里直接复用、只负责改名编码。
-	mcpTools, err := cursorBuildMcpTools(declared, wireMap, skipped)
+	mcpTools, err := cursorBuildMcpTools(declared, skipped)
 	if err != nil {
 		return nil, "", err
 	}
@@ -342,8 +284,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 
 	// 预先告知工具可用性（候选 B，2026-11-24）：f29 system_prompt_spec 的 f2 append，
 	// 追加语义、不覆盖客户端自带 system prompt；即使零声明也发一条告知。
-	wireNames := cursorExtractWireNames(wireMap, declared)
-	promptText := cursorBuildToolAvailabilityPrompt(wireNames)
+	promptText := cursorBuildToolAvailabilityPrompt()
 	systemPromptSpec := cursorAppendStringField(nil, cursorFldSystemPromptSpecAppend, promptText)
 	run = cursorAppendBytesField(run, cursorFldRunSystemPromptSpec, systemPromptSpec)
 
@@ -405,218 +346,109 @@ func cursorFunctionTools(tools []apicompat.ChatTool) []apicompat.ChatTool {
 	return out
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 工具名重名隔离（出站侧 + 出站历史侧）。本卡只做这两个方向；入站映射（wire name →
-// 原名）由另一张卡落在 cursor_agent_duplex.go，两卡必须用**同一份规则**算 wire name，
-// 否则入站映射回来对不齐。**规则必须与另一张卡逐字一致**。
-// ─────────────────────────────────────────────────────────────────────────────
-
-// cursorBuiltinToolNames 是 Cursor 上游自带的内置工具名（归一化后比较）。
-// 客户端工具名撞上这些名字 → 上游拒绝整个请求（社区实测），必须改名避开。
-// 取值来自社区 cursor2api/session.py 的 BUILTIN_TOOLS：
+// cursorBuildMcpTools 把本轮最终有效工具子集编码为 AgentRunRequest.f4（McpTools）。
 //
-//	read write ls delete grep glob shell web_search web_fetch
-var cursorBuiltinToolNames = map[string]bool{
-	"read": true, "write": true, "ls": true, "delete": true, "grep": true,
-	"glob": true, "shell": true, "web_search": true, "web_fetch": true,
-}
-
-// 工具名归一化（camelCase → snake_case、'-'/'_' → '_'、全小写）的**唯一实现**
-// 在 cursor_native_exec_reject.go 的 cursorNormaliseToolName。
+// 上游只声明一个 MCP 工具 invoke_client_tool：客户端原规范工具名放进 tool_name（enum =
+// 本请求最终有效子集），完整参数 JSON 对象序列化成字符串放进 arguments_json。因此无论
+// 客户端声明多少工具，f4 里都只有**一条** McpToolDefinition；每条工具的原始 schema 作为
+// 目录（catalog）写进 f2 description，f3 input_schema 只约束这两个运输字段。
 //
-// 本文件（改名路径）与那处（点名路径）必须用**同一份**归一化规则：
-// 两者都在比较「工具名是否等于 Cursor 内置名/客户端等价名」，规则一旦分叉，
-// 就会出现「改名时算撞名、点名时算不撞」这种对不上的情况。
-// 社区同名函数是 _normalise（cursor2api/session.py:82）。
-
-// cursorWireToolName 返回该工具名发给上游时用的 wire name（**纯函数**）。
+// f3 用 structpb 直接构造（不经 map[string]any/float64），保证 number / null / 大整数等
+// 原 schema 文本只在 catalog 里以原文出现，绝不被 float64 改写或丢精度。
 //
-// 规则（施工图 W3，与入站映射那张卡逐字一致）：
-//
-//	归一化后不撞内置名 → wire name == 原名（绝大多数工具走这条）；
-//	撞内置名 → 原名后加 "_"，重复直到归一化后不撞内置名。
-//
-// 注意：本纯函数只处理「撞内置名」这一条；「与本批其它工具不重复」的去重（W3 规则 2
-// 的第二段）依赖整批工具集合，由 cursorWireToolNameSet 负责。历史重放与声明改名都从
-// 同一份 wire map 取数（cursorWireToolNameOf），保证回程对得齐。
-func cursorWireToolName(name string) string {
-	w := name
-	for cursorBuiltinToolNames[cursorNormaliseToolName(w)] {
-		w += "_"
+// 非法 schema 的处置沿用既有口径：丢掉这一个工具、记 tool_schema_invalid，不整轮 400。
+// 全部工具都无效（或工具集为空）时返回 nil，f4 保持空 message，与活体样本同形。
+func cursorBuildMcpTools(tools []apicompat.ChatTool, skipped cursorSkipLedger) ([]byte, error) {
+	type cursorToolCatalogEntry struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
 	}
-	return w
-}
 
-// cursorWireToolNameSet 计算一批工具名各自的 wire name（**选择 (b)：排序后去重**）。
-//
-// **W3 选择 (b)**：先把整批工具名按「原始字符串字节序升序」排序，再依序累加 taken 集合
-// 去重，所以**最终每个工具名的 wire name 只依赖「工具名集合」、与声明顺序无关**。
-// 历史重放时只要工具名集合相同，算出的 wire name 就与当初声明时一致，入站映射（落在
-// cursor_agent_duplex.go 的另一张卡）用同一套排序键即可对齐。
-//
-// **排序键**：按工具名原始字符串的 Go 默认 < 比较（即字节序升序，非归一化、非大小写
-// 折叠）。两卡都必须用这一排序键。
-//
-// 去重规则：依序处理，每个工具先取 cursorWireToolName(原名) 作为候选；若该候选的归一化
-// 形态已在 taken（撞内置名或撞本批其它工具的 wire name），就继续在末尾加 "_" 直到归一化
-// 形态既不在内置集、也不在 taken。taken 以**归一化形态**为键（大小写不敏感，与 Cursor
-// 归一化比较口径一致），保证两个不同原名不会算出同一个 wire name。
-//
-// 入参是工具列表（按 Function.Name 过滤空名）；空集合返回空 map、不 panic。
-func cursorWireToolNameSet(tools []apicompat.ChatTool) map[string]string {
-	names := make([]string, 0, len(tools))
-	for _, t := range tools {
-		if t.Function != nil && t.Function.Name != "" {
-			names = append(names, t.Function.Name)
-		}
-	}
-	return cursorWireToolNamesFromNames(names)
-}
-
-// cursorWireToolNamesFromNames 是 cursorWireToolNameSet 的纯名字重载（便于单测复用）。
-func cursorWireToolNamesFromNames(names []string) map[string]string {
-	out := make(map[string]string, len(names))
-	if len(names) == 0 {
-		return out
-	}
-	sorted := append([]string(nil), names...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	taken := map[string]bool{}
-	for _, name := range sorted {
-		w := cursorWireToolName(name)
-		for {
-			norm := cursorNormaliseToolName(w)
-			if !cursorBuiltinToolNames[norm] && !taken[norm] {
-				taken[norm] = true
-				break
-			}
-			w += "_"
-		}
-		out[name] = w
-	}
-	return out
-}
-
-// cursorWireToolNameOf 按原名从 wire map 取 wire name（声明改名 / 历史重放统一入口）。
-// wire map 缺失该原名（极端情况：声明时已无此工具）时回落到纯函数 cursorWireToolName，
-// 保证任何情况下都能给出一个确定、可复算的 wire name。
-func cursorWireToolNameOf(wireMap map[string]string, name string) string {
-	if w, ok := wireMap[name]; ok {
-		return w
-	}
-	return cursorWireToolName(name)
-}
-
-// cursorBuildMcpTools 把一组 function 工具编码为 AgentRunRequest.f4（McpTools）内容。
-//
-// 每个函数生成一条 McpToolDefinition（McpTools.f1 repeated），五个字段都要写：
-// f1 name / f2 description / f4 provider_identifier="sub2api" / f5 tool_name /
-// f3 input_schema（google.protobuf.Value，由 function.parameters 的 JSON 经
-// structpb + proto.Marshal 编码，与 AgentRun 真实出站同形；schema 缺失补空 Struct）。
-// 返回空切片表示"无声明"（f4 保持空 message，与活体样本同形）。
-//
-// **方向 1（改名）**：f1（name）与 f5（tool_name）写 **wire name**（cursorWireToolNameOf
-// 取数），f2 description 与 f4 provider 不变。原名若撞 Cursor 内置名（如 Read/Write/Glob/
-// Grep/Bash/WebFetch…），上游会拒绝整个请求（社区实测），必须改成不撞的 wire name 发出；
-// 回程由另一张卡（cursor_agent_duplex.go）把 wire name 映射回原名。
-//
-// 非法 schema 的处置（2026-11-06 口径修正）：**丢掉这一个工具并记账**，不再整轮 400。
-// 客户端的 schema 写错是它自己的 bug；但为一个坏 schema 把整轮打成"模型不稳定"，
-// 是更坏的交换——少一个工具本轮还能答，400 则什么都答不了。
-func cursorBuildMcpTools(tools []apicompat.ChatTool, wireMap map[string]string, skipped cursorSkipLedger) ([]byte, error) {
-	var mcp []byte
+	var entries []cursorToolCatalogEntry
+	var names []string
 	for _, t := range tools {
 		if t.Function == nil || t.Function.Name == "" {
 			continue
 		}
-		// 方向 1：f1/f5 用 wire name，避免撞 Cursor 内置名被整请求拒绝。
-		wireName := cursorWireToolNameOf(wireMap, t.Function.Name)
-		var def []byte
-		def = cursorAppendStringField(def, cursorFldMcpToolDefName, wireName)
-		def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, t.Function.Description)
-		def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
-		def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, wireName)
-		// custom/freeform 工具（如 codex 的 exec）：有降级壳 schema 时必须写进 f3。
-		//
-		// 2026-11-14 根因修复：原实现一律不写 f3，上游模型没有形状约束 →
-		// 自行发明 {"code":"..."} 包装 → 回程抽不出裸文本 → codex 的 exec 报
-		// SyntaxError（见 apicompat.responsesToolsToChatTools 同源注释）。
-		// 仍保留"schema 为空则不写 f3"的分支：客户端真的没给 schema 时，
-		// 硬写一个空 schema 反而会误导模型。
-		if t.Custom {
-			schema := ""
-			if t.Function != nil {
-				schema = string(t.Function.Parameters)
-			}
-			if strings.TrimSpace(schema) == "" || schema == "null" {
-				mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
-				continue
-			}
-			value := &structpb.Value{}
-			if err := protojson.Unmarshal([]byte(schema), value); err != nil {
-				skipped.note(cursorSkipToolSchemaInvalid)
-				continue
-			}
-			valBytes, err := proto.Marshal(value)
-			if err != nil {
-				skipped.note(cursorSkipToolSchemaInvalid)
-				continue
-			}
-			def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, valBytes)
-			mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
-			continue
-		}
-		schema := string(t.Function.Parameters)
-		if strings.TrimSpace(schema) == "" || schema == "null" {
+		schema := strings.TrimSpace(string(t.Function.Parameters))
+		if schema == "" || schema == "null" {
 			schema = "{}"
 		}
-		// schema 必须是合法 JSON 对象，才能编码进 google.protobuf.Value。
-		value := &structpb.Value{}
-		if err := protojson.Unmarshal([]byte(schema), value); err != nil {
+		if !json.Valid([]byte(schema)) {
 			skipped.note(cursorSkipToolSchemaInvalid)
 			continue
 		}
-		valBytes, err := proto.Marshal(value)
-		if err != nil {
-			skipped.note(cursorSkipToolSchemaInvalid)
-			continue
-		}
-		def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, valBytes)
-		mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
+		entries = append(entries, cursorToolCatalogEntry{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			Parameters:  json.RawMessage(schema),
+		})
+		names = append(names, t.Function.Name)
 	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+
+	catalog, _ := json.Marshal(entries)
+	description := "Invoke a client-declared tool. Required wire format: {tool_name: exact tool name, " +
+		"arguments_json: string containing the complete original arguments object}. " +
+		"Do not pass the original argument keys at the top level. Tool catalog: " + string(catalog)
+
+	enumValues := make([]*structpb.Value, 0, len(names))
+	for _, n := range names {
+		enumValues = append(enumValues, structpb.NewStringValue(n))
+	}
+	inputSchema := &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			"type": structpb.NewStringValue("object"),
+			"properties": structpb.NewStructValue(&structpb.Struct{
+				Fields: map[string]*structpb.Value{
+					cursorTransportToolNameKey: structpb.NewStructValue(&structpb.Struct{
+						Fields: map[string]*structpb.Value{
+							"type": structpb.NewStringValue("string"),
+							"enum": structpb.NewListValue(&structpb.ListValue{Values: enumValues}),
+						},
+					}),
+					cursorTransportArgumentsKey: structpb.NewStructValue(&structpb.Struct{
+						Fields: map[string]*structpb.Value{
+							"type":        structpb.NewStringValue("string"),
+							"description": structpb.NewStringValue("The complete arguments object serialized as a JSON string, preserving all types and nulls."),
+						},
+					}),
+				},
+			}),
+			"required": structpb.NewListValue(&structpb.ListValue{Values: []*structpb.Value{
+				structpb.NewStringValue(cursorTransportToolNameKey),
+				structpb.NewStringValue(cursorTransportArgumentsKey),
+			}}),
+			"additionalProperties": structpb.NewBoolValue(false),
+		},
+	}
+	// f3 承载的是 google.protobuf.Value（object 即 struct_value），不是裸 Struct。
+	schemaBytes, err := proto.Marshal(structpb.NewStructValue(inputSchema))
+	if err != nil {
+		return nil, err
+	}
+
+	var def []byte
+	def = cursorAppendStringField(def, cursorFldMcpToolDefName, cursorTransportToolName)
+	def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, description)
+	def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
+	def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, cursorTransportToolName)
+	def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, schemaBytes)
+
+	var mcp []byte
+	mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
 	return mcp, nil
 }
 
-// cursorExtractWireNames 从 wireMap 和声明的工具列表中提取 wire name 列表。
-// 去重且保序（按声明顺序），供候选 B 的预先告知文案列出本轮可用工具。
-func cursorExtractWireNames(wireMap map[string]string, declared []apicompat.ChatTool) []string {
-	seen := make(map[string]bool)
-	var names []string
-	for _, t := range declared {
-		if t.Function == nil || t.Function.Name == "" {
-			continue
-		}
-		wireName := cursorWireToolNameOf(wireMap, t.Function.Name)
-		if !seen[wireName] {
-			seen[wireName] = true
-			names = append(names, wireName)
-		}
-	}
-	return names
-}
-
 // cursorBuildToolAvailabilityPrompt 构造工具可用性告知文本（写入 f29 append）。
-func cursorBuildToolAvailabilityPrompt(wireNames []string) string {
-	if len(wireNames) == 0 {
-		return "Native execution tools are not available in this environment. " +
-			"The client declared no tools."
-	}
-	return fmt.Sprintf(
-		"Native execution tools (such as shell_stream, read, write, grep) are not available in this environment. "+
-			"Instead, use the following client-declared tools: %s. "+
-			"Do not attempt to use native execution tools.",
-		strings.Join(wireNames, ", "),
-	)
+// 只说明运输形状，不再宣称"native 被禁用"——禁用与否是上游/客户端的事。
+func cursorBuildToolAvailabilityPrompt() string {
+	return "MCP wire transport: The sole MCP tool invoke_client_tool accepts tool_name plus arguments_json " +
+		"string. Serialize the original client arguments as that string, including null, boolean, nested values. " +
+		"Do not pass original argument keys at the top level. Tool results are real client execution results."
 }
 
 // cursorTurnImage 是一张已解出原始字节的图片（来自 content-part 的 data URI）。
@@ -781,7 +613,7 @@ func cursorMarshalBlobJSON(v any) ([]byte, error) {
 // 因此：system 文本按出现顺序拼到**第一条 user** 消息的开头，标记行分隔；
 // 若整段对话没有任何 user（纯 system+assistant），则新建一条 user 承载
 // （否则请求会被上游判为空对话）。
-func cursorConvertMessages(msgs []apicompat.ChatMessage, wireMap map[string]string, skipped cursorSkipLedger) ([]cursorAgentTurn, error) {
+func cursorConvertMessages(msgs []apicompat.ChatMessage, skipped cursorSkipLedger) ([]cursorAgentTurn, error) {
 	turns := make([]cursorAgentTurn, 0, len(msgs))
 	var systemParts []string
 	sawUser := false
@@ -827,12 +659,12 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage, wireMap map[string]stri
 			}
 			// assistant 可能携带 tool_calls：原 content（可空）+ 每块一个
 			// <tool_call> blob（见 §4 续轮文本化）。
-			turns = append(turns, cursorAgentTurn{role: "assistant", text: cursorAssistantText(m, text, wireMap), images: images})
+			turns = append(turns, cursorAgentTurn{role: "assistant", text: cursorAssistantText(m, text), images: images})
 		case "tool", "function":
 			// 工具结果 → user turn（Cursor 历史仅 user/assistant 两种落点，见 §4）。
 			// 文本化失败关闭（含非文本 part 时与多模态口径一致）；图片挂到该
 			// user turn 上（若有，走 history rich blob）。
-			tt, tImages, err := cursorToolResultText(m, wireMap, skipped)
+			tt, tImages, err := cursorToolResultText(m, skipped)
 			if err != nil {
 				return nil, err
 			}
@@ -890,16 +722,34 @@ func cursorJoinSystem(parts []string) string {
 	return b.String()
 }
 
+// cursorJSONStringNoEscape 把字符串编码为 JSON 字符串字面量，且关闭 HTML 转义。
+//
+// 请求历史里的 tool_name / arguments_json 必须与声明时的原字节一致：< > & 不能被
+// 改写成 \u003c 之类。json.Encoder 的 SetEscapeHTML(false) 正是这个语义。
+func cursorJSONStringNoEscape(s string) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(s); err != nil {
+		return `""`
+	}
+	out := buf.Bytes()
+	if len(out) > 0 && out[len(out)-1] == '\n' {
+		out = out[:len(out)-1]
+	}
+	return string(out)
+}
+
 // cursorAssistantText 把 assistant 消息（含可选 tool_calls）拼成一段文本。
 //
 // 续轮文本化（§4）：原 content（可空）+ 每个 tool_call 一块
-// `\n<tool_call>\n{"id":...,"name":...,"arguments":{...}}\n</tool_call>`，
-// arguments 保留原 JSON 字符串（空则补 "{}"）。
 //
-// **方向 2（历史重放改名）**：tool_call 的 "name" 必须写 **wire name**（cursorWireToolNameOf
-// 取数），与当初出站声明一致——否则上游会看到一个它从未声明过的工具名，回程映射对不齐。
-// 工具名不撞内置名时 wire name == 原名，行为不变。
-func cursorAssistantText(m apicompat.ChatMessage, base string, wireMap map[string]string) string {
+//	\n<tool_call>\n{"id":...,"name":"invoke_client_tool","arguments":{"tool_name":...,"arguments_json":...}}\n</tool_call>
+//
+// 上游只认单入口运输：name 固定 invoke_client_tool，客户端原工具名进 tool_name，
+// 完整参数 JSON 字符串进 arguments_json（空 / null 按 {}）。字符串值一律用
+// cursorJSONStringNoEscape 编码，保证原字节与 f4 声明完全一致。
+func cursorAssistantText(m apicompat.ChatMessage, base string) string {
 	text := base
 	if len(m.ToolCalls) == 0 {
 		return text
@@ -914,9 +764,12 @@ func cursorAssistantText(m apicompat.ChatMessage, base string, wireMap map[strin
 			args = "{}"
 		}
 		b.WriteString("\n" + cursorInlineToolCallOpen + "\n")
-		b.WriteString(`{"id":` + cursorJSONString(tc.ID) +
-			`,"name":` + cursorJSONString(cursorWireToolNameOf(wireMap, tc.Function.Name)) +
-			`,"arguments":` + args + `}`)
+		b.WriteString(`{"id":` + cursorJSONStringNoEscape(tc.ID) +
+			`,"name":` + cursorJSONStringNoEscape(cursorTransportToolName) +
+			`,"arguments":{` + cursorJSONStringNoEscape(cursorTransportToolNameKey) + `:` +
+			cursorJSONStringNoEscape(tc.Function.Name) + `,` +
+			cursorJSONStringNoEscape(cursorTransportArgumentsKey) + `:` +
+			cursorJSONStringNoEscape(args) + `}}`)
 		b.WriteString("\n" + cursorInlineToolCallClose)
 	}
 	return b.String()
@@ -930,9 +783,8 @@ func cursorAssistantText(m apicompat.ChatMessage, base string, wireMap map[strin
 // **丢弃并记账**（tool result 无图片落点，见下），远程 URL / file / 未知 part
 // 在内容层已按「丢这个 part」处理，不再上抛。
 //
-// **方向 2（历史重放改名）**：name 属性必须写 **wire name**（cursorWireToolNameOf 取数），
-// 与当初出站声明一致——否则上游会看到一个它从未声明过的工具名，回程映射对不齐。
-func cursorToolResultText(m apicompat.ChatMessage, wireMap map[string]string, skipped cursorSkipLedger) (string, []cursorTurnImage, error) {
+// name 属性与 f4 声明同源，固定写 invoke_client_tool；其余 id / content 逻辑不变。
+func cursorToolResultText(m apicompat.ChatMessage, skipped cursorSkipLedger) (string, []cursorTurnImage, error) {
 	content, images, err := cursorMessageContent(m, skipped)
 	if err != nil {
 		return "", nil, err
@@ -944,23 +796,17 @@ func cursorToolResultText(m apicompat.ChatMessage, wireMap map[string]string, sk
 		images = nil
 	}
 	id := m.ToolCallID
-	name := m.Name
 	if strings.EqualFold(strings.TrimSpace(m.Role), "function") && strings.TrimSpace(id) == "" {
 		// legacy function 消息没有 tool_call_id：无法与本轮工具调用对上号。
 		// 2026-11-06 口径：不拒，落成一条**不带 id 的结果文本**（模型仍能读到内容），
 		// 记账即可——拒掉整轮换来的只是"客户看到 400"。
 		skipped.note(cursorSkipLegacyFunctionNoID)
 	}
-	if name == "" && m.FunctionCall != nil {
-		name = m.FunctionCall.Name
-	}
-	// 方向 2：name 用 wire name（不撞内置名时 == 原名，行为不变）。
-	wireName := cursorWireToolNameOf(wireMap, name)
 	var b strings.Builder
 	b.WriteString("<tool_result tool_call_id=")
 	b.WriteString(cursorJSONString(id))
 	b.WriteString(" name=")
-	b.WriteString(cursorJSONString(wireName))
+	b.WriteString(cursorJSONStringNoEscape(cursorTransportToolName))
 	b.WriteString(">\n<content>\n")
 	b.WriteString(content)
 	b.WriteString("\n</tool_result>")

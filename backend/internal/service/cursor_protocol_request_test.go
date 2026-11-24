@@ -11,6 +11,7 @@ package service
 // 63-agent-run-request.bin（多轮历史，活体 200，回包 "ORCHID" 证明历史被消费）。
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,7 +19,9 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zaptest/observer"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // cursorAllFields 取出某个字段号的**全部**出现（repeated 字段需要）。
@@ -30,6 +33,62 @@ func cursorAllFields(fields []cursorPBField, number int) []cursorPBField {
 		}
 	}
 	return out
+}
+
+// cursorTestF3SchemaOf 解码 McpToolDefinition.f3（google.protobuf.Value）为规范 JSON。
+// 这里自带解码而不复用 cursorTestRestoreF3Schema：后者还检查旧 f6 字段，本卡已删除该常量。
+func cursorTestF3SchemaOf(t *testing.T, fields []cursorPBField) string {
+	t.Helper()
+	f3, ok := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
+	require.True(t, ok, "f3 input_schema Value must be present")
+	v := &structpb.Value{}
+	require.NoError(t, proto.Unmarshal(f3.Bytes, v))
+	out, err := protojson.Marshal(v)
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	require.NoError(t, json.Compact(&buf, out))
+	return buf.String()
+}
+
+// cursorTestSingleMcpDefOf 取出 f4 里唯一一条 McpToolDefinition 的字段列表。
+// 上游只声明 invoke_client_tool，f4 必须恰好一条，不能逐工具展开。
+func cursorTestSingleMcpDefOf(t *testing.T, body []byte) []cursorPBField {
+	t.Helper()
+	run := cursorAgentRunOf(t, body)
+	mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
+	require.True(t, ok, "mcp_tools field must be present")
+	mcpFields, err := cursorDecodeProtobuf(mcp.Bytes)
+	require.NoError(t, err)
+	defs := cursorAllFields(mcpFields, cursorFldMcpToolsTool)
+	require.Len(t, defs, 1, "exactly one invoke_client_tool definition must be declared")
+	fields, err := cursorDecodeProtobuf(defs[0].Bytes)
+	require.NoError(t, err)
+	return fields
+}
+
+// cursorTestTransportSchema 解析单入口 f3，返回 type / required / enum / additionalProperties / properties。
+func cursorTestTransportSchema(t *testing.T, def []cursorPBField) (string, []string, []string, bool, map[string]any) {
+	t.Helper()
+	var obj map[string]any
+	require.NoError(t, json.Unmarshal([]byte(cursorTestF3SchemaOf(t, def)), &obj), "f3 must be a JSON object")
+	typ, _ := obj["type"].(string)
+	props, _ := obj["properties"].(map[string]any)
+	var required []string
+	if arr, ok := obj["required"].([]any); ok {
+		for _, v := range arr {
+			required = append(required, v.(string))
+		}
+	}
+	var enum []string
+	if toolName, ok := props[cursorTransportToolNameKey].(map[string]any); ok {
+		if arr, ok := toolName["enum"].([]any); ok {
+			for _, v := range arr {
+				enum = append(enum, v.(string))
+			}
+		}
+	}
+	additional, _ := obj["additionalProperties"].(bool)
+	return typ, required, enum, additional, props
 }
 
 // cursorAgentRunOf 拆出 envelope → AgentClientMessage → AgentRunRequest 的字段列表。
@@ -257,7 +316,7 @@ func indexOfSub(s, sub string) int {
 // 注意：本卡（O11-B）已实现工具闭环，tools 不再"丢弃"而是翻译进 f4；tool 结果消息
 // 也不再丢弃，而是文本化为 user turn 的 <tool_result>。下方子测试已相应更新为新语义。
 func TestCursorProtocolRequestDropsOutOfScopeFields(t *testing.T) {
-	t.Run("请求侧 tools 翻译为 f4 声明（五字段齐全）", func(t *testing.T) {
+	t.Run("请求侧 tools 编码为唯一单入口 invoke_client_tool", func(t *testing.T) {
 		req := &apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)},
 				{Role: "user", Content: json.RawMessage(`"again"`)}},
@@ -272,24 +331,30 @@ func TestCursorProtocolRequestDropsOutOfScopeFields(t *testing.T) {
 		}
 		body, err := cursorConvertRequest(req, "grok-4.7")
 		require.NoError(t, err)
-		// f4 必须出现且承载工具名（不再是丢弃）。
-		require.Contains(t, string(body), "get_weather", "tools must be translated into f4, not dropped")
-		run := cursorAgentRunOf(t, body)
-		mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
-		require.True(t, ok)
-		mcpFields, e := cursorDecodeProtobuf(mcp.Bytes)
-		require.NoError(t, e)
-		defs := cursorAllFields(mcpFields, cursorFldMcpToolsTool)
-		require.Len(t, defs, 1)
-		def, err := cursorDecodeProtobuf(defs[0].Bytes)
-		require.NoError(t, err)
-		require.Equal(t, "get_weather", cursorTestFieldString(def, cursorFldMcpToolDefName))
-		require.Equal(t, "get_weather", cursorTestFieldString(def, cursorFldMcpToolDefToolName))
+		def := cursorTestSingleMcpDefOf(t, body)
+		require.Equal(t, cursorTransportToolName, cursorTestFieldString(def, cursorFldMcpToolDefName))
+		require.Equal(t, cursorTransportToolName, cursorTestFieldString(def, cursorFldMcpToolDefToolName))
 		require.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(def, cursorFldMcpToolDefProvider))
-		require.Equal(t, "Get the weather.", cursorTestFieldString(def, cursorFldMcpToolDefDescription))
-		// input_schema 走 f3（google.protobuf.Value）：还原为 JSON 后与原始 schema 相等。
-		require.JSONEq(t, `{"type":"object","properties":{"city":{"type":"string"}}}`,
-			cursorTestRestoreF3Schema(t, def))
+
+		// f2 description 含工具目录（原名 + 原 schema 文本），且只说明运输形状。
+		desc := cursorTestFieldString(def, cursorFldMcpToolDefDescription)
+		require.Contains(t, desc, "Tool catalog:")
+		require.Contains(t, desc, `"name":"get_weather"`)
+		require.Contains(t, desc, `"parameters":{"type":"object","properties":{"city":{"type":"string"}}}`)
+
+		// f3 只约束两个运输字段：object / required 两项 / additionalProperties=false。
+		typ, required, enum, additional, props := cursorTestTransportSchema(t, def)
+		require.Equal(t, "object", typ)
+		require.ElementsMatch(t, []string{cursorTransportToolNameKey, cursorTransportArgumentsKey}, required)
+		require.False(t, additional)
+		require.ElementsMatch(t, []string{"get_weather"}, enum)
+		toolName, ok := props[cursorTransportToolNameKey].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "string", toolName["type"])
+		args, ok := props[cursorTransportArgumentsKey].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "string", args["type"])
+		require.Equal(t, "The complete arguments object serialized as a JSON string, preserving all types and nulls.", args["description"])
 	})
 
 	t.Run("tool_choice=none 时不声明工具（等价无 tools）", func(t *testing.T) {
@@ -328,7 +393,7 @@ func TestCursorProtocolRequestDropsOutOfScopeFields(t *testing.T) {
 		// 文本化边界必须存在（blob 是 JSON 字符串，内部引号会被 JSON 转义为 \"）。
 		require.Contains(t, string(body), "<tool_result")
 		require.Contains(t, string(body), `tool_call_id=\"call_1\"`)
-		require.Contains(t, string(body), `name=\"get_weather\"`)
+		require.Contains(t, string(body), `name=\"invoke_client_tool\"`)
 		require.Contains(t, string(body), "sunny")
 	})
 }
@@ -412,13 +477,17 @@ func TestCursorProtocolRequestModelGateRejectsF1(t *testing.T) {
 func TestCursorProtocolRequestMatchesLiveAgentRunSamples(t *testing.T) {
 	t.Run("33 号单轮样本（149 字节，活体 200，回包 OK）", func(t *testing.T) {
 		// 注：候选 B（2026-11-24）新增 f29 system_prompt_spec.append 告知工具可用性，
-		// 请求体从 149 字节增至 240 字节，这是预期的协议扩展。
-		const golden = "00000000f00aed010a02500112530a510a4f0a255265706c792077697468204f4b206f6e6c792e20446f206e6f742075" +
+		// 本卡（CUR-SVC1）把 f29 文本改为单入口运输说明，请求体增至 455 字节。
+		const golden = "00000001c20aed010a02500112530a510a4f0a255265706c792077697468204f4b206f6e6c792e20446f206e6f742075" +
 			"736520746f6f6c732e122433393239663737322d376531312d346664622d396661382d30323261616566323863636220" +
 			"011a0a0a0867726f6b2d342e3722002a2436363762386131622d383266652d343963622d616431642d63613833386232" +
-			"3939636434ea015d125b4e617469766520657865637574696f6e20746f6f6c7320617265206e6f7420617661696c6162" +
-			"6c6520696e207468697320656e7669726f6e6d656e742e2054686520636c69656e74206465636c61726564206e6f2074" +
-			"6f6f6c732e"
+			"3939636434ea01ad0212ab024d43502077697265207472616e73706f72743a2054686520736f6c65204d435020746f6f" +
+			"6c20696e766f6b655f636c69656e745f746f6f6c206163636570747320746f6f6c5f6e616d6520706c75732061726775" +
+			"6d656e74735f6a736f6e20737472696e672e2053657269616c697a6520746865206f726967696e616c20636c69656e74" +
+			"20617267756d656e7473206173207468617420737472696e672c20696e636c7564696e67206e756c6c2c20626f6f6c65" +
+			"616e2c206e65737465642076616c7565732e20446f206e6f742070617373206f726967696e616c20617267756d656e74" +
+			"206b6579732061742074686520746f70206c6576656c2e20546f6f6c20726573756c747320617265207265616c20636c" +
+			"69656e7420657865637574696f6e20726573756c74732e"
 		want, err := hex.DecodeString(golden)
 		require.NoError(t, err)
 
@@ -435,8 +504,8 @@ func TestCursorProtocolRequestMatchesLiveAgentRunSamples(t *testing.T) {
 
 	t.Run("63 号多轮样本（500 字节，活体 200，回包 ORCHID）", func(t *testing.T) {
 		// 注：候选 B（2026-11-24）新增 f29 system_prompt_spec.append 告知工具可用性，
-		// 请求体从 500 字节增至 597 字节，这是预期的协议扩展。
-		const golden = "00000001ef0aec030a4650010a2081ff990a60f004dce704c6c48d416b63619bc8b5668f5724b6eaa3841eae110f0a20" +
+		// 本卡（CUR-SVC1）把 f29 文本改为单入口运输说明，请求体增至 806 字节。
+		const golden = "00000003210aec030a4650010a2081ff990a60f004dce704c6c48d416b63619bc8b5668f5724b6eaa3841eae110f0a20" +
 			"bca0f709942ce5c35b912c254c19daf3a0743993730c4ef386f4db35f6aa03cd12760a740a720a485768617420776173" +
 			"2074686520636f646520776f72643f205265706c7920776974682074686520636f646520776f7264206f6e6c792e2044" +
 			"6f206e6f742075736520746f6f6c732e122463333764366265652d393032652d343835632d623432312d336234383262" +
@@ -446,9 +515,13 @@ func TestCursorProtocolRequestMatchesLiveAgentRunSamples(t *testing.T) {
 			"434849442e2052656d656d6265722069742e227d8a018c010a20bca0f709942ce5c35b912c254c19daf3a0743993730c" +
 			"4ef386f4db35f6aa03cd12687b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b22747970" +
 			"65223a2274657874222c2274657874223a22492077696c6c2072656d656d6265722074686520636f646520776f726420" +
-			"4f52434849442e227d5d2c226964223a2231227dea015d125b4e617469766520657865637574696f6e20746f6f6c7320" +
-			"617265206e6f7420617661696c61626c6520696e207468697320656e7669726f6e6d656e742e2054686520636c69656e" +
-			"74206465636c61726564206e6f20746f6f6c732e"
+			"4f52434849442e227d5d2c226964223a2231227dea01ad0212ab024d43502077697265207472616e73706f72743a2054" +
+			"686520736f6c65204d435020746f6f6c20696e766f6b655f636c69656e745f746f6f6c206163636570747320746f6f6c" +
+			"5f6e616d6520706c757320617267756d656e74735f6a736f6e20737472696e672e2053657269616c697a652074686520" +
+			"6f726967696e616c20636c69656e7420617267756d656e7473206173207468617420737472696e672c20696e636c7564" +
+			"696e67206e756c6c2c20626f6f6c65616e2c206e65737465642076616c7565732e20446f206e6f742070617373206f72" +
+			"6967696e616c20617267756d656e74206b6579732061742074686520746f70206c6576656c2e20546f6f6c2072657375" +
+			"6c747320617265207265616c20636c69656e7420657865637574696f6e20726573756c74732e"
 		want, err := hex.DecodeString(golden)
 		require.NoError(t, err)
 
@@ -491,9 +564,9 @@ func TestCursorProtocolRequestReturnsConversationID(t *testing.T) {
 // 「上游偶发吐在正文里的内联 tool call」形态**同形** → 上游学去这个输出形态 →
 // 产出正文 blob 而不是结构化委托帧 → 站点解析不出结构化 tool_calls → 工具不执行。
 //
-// 本卡把请求侧文本化用的标记**收口到与响应侧同一处**（cursorInlineToolCallOpen /
-// cursorInlineToolCallClose，即 TC-01R2 导出的裸字节常量），断掉「喂 A、学 A、
-// 吐 A」的回路。
+// 本卡（CUR-SVC1）把历史 tool_call 文本化改为单入口运输形状：name 固定
+// invoke_client_tool，客户端原工具名进 tool_name，完整参数 JSON 字符串进
+// arguments_json（字符串值不做 HTML 转义，保留原字节）。
 //
 // **核心护栏是「逐字一致」**：上游按字节解析续轮历史，标记或换行动一个字节都会
 // 让续轮历史不匹配。故这里的期望值用**码点转义**拼出（源码里没有位置可以藏进
@@ -522,12 +595,12 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 				},
 			}},
 		}
-		got := cursorAssistantText(msg, "let me check", nil)
+		got := cursorAssistantText(msg, "let me check")
 		want := "let me check" + "\n" +
 			tc03ProdOpen + "\n" +
-			`{"id":"call_1","name":"get_weather","arguments":{"city":"Beijing"}}` + "\n" +
+			`{"id":"call_1","name":"invoke_client_tool","arguments":{"tool_name":"get_weather","arguments_json":"{\"city\":\"Beijing\"}"}}` + "\n" +
 			tc03ProdClose
-		require.Equal(t, want, got, "request-side text must stay byte-for-byte identical")
+		require.Equal(t, want, got, "request-side history must use the single-entry transport shape")
 	})
 
 	t.Run("逐字一致：多条 tool_call 按序拼接", func(t *testing.T) {
@@ -541,13 +614,13 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 					Name: "b", Arguments: `{}`}},
 			},
 		}
-		got := cursorAssistantText(msg, "y", nil)
+		got := cursorAssistantText(msg, "y")
 		want := "y" + "\n" +
 			tc03ProdOpen + "\n" +
-			`{"id":"call_a","name":"a","arguments":{"k":1}}` + "\n" +
+			`{"id":"call_a","name":"invoke_client_tool","arguments":{"tool_name":"a","arguments_json":"{\"k\":1}"}}` + "\n" +
 			tc03ProdClose + "\n" +
 			tc03ProdOpen + "\n" +
-			`{"id":"call_b","name":"b","arguments":{}}` + "\n" +
+			`{"id":"call_b","name":"invoke_client_tool","arguments":{"tool_name":"b","arguments_json":"{}"}}` + "\n" +
 			tc03ProdClose
 		require.Equal(t, want, got, "each tool_call must render one blob, in order")
 	})
@@ -565,11 +638,11 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 				},
 			}},
 		}
-		got := cursorAssistantText(msg, "x", nil)
-		require.Contains(t, got, `"arguments":{}`, "empty arguments must fall back to {}")
+		got := cursorAssistantText(msg, "x")
+		require.Contains(t, got, `"arguments_json":"{}"`, "empty arguments must fall back to {}")
 		want := "x" + "\n" +
 			tc03ProdOpen + "\n" +
-			`{"id":"call_e","name":"noop","arguments":{}}` + "\n" +
+			`{"id":"call_e","name":"invoke_client_tool","arguments":{"tool_name":"noop","arguments_json":"{}"}}` + "\n" +
 			tc03ProdClose
 		require.Equal(t, want, got)
 	})
@@ -587,7 +660,7 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 				},
 			}},
 		}
-		got := cursorAssistantText(msg, "let me check", nil)
+		got := cursorAssistantText(msg, "let me check")
 		require.True(t, len(got) > len("let me check"), "output must carry the blob")
 		require.Equal(t, "let me check", got[:len("let me check")],
 			"original content must come first, unchanged")
@@ -599,7 +672,7 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 
 	t.Run("无 tool_calls：只输出原 content，不产生 blob（回归）", func(t *testing.T) {
 		msg := apicompat.ChatMessage{Role: "assistant", Content: json.RawMessage(`"plain"`)}
-		got := cursorAssistantText(msg, "plain", nil)
+		got := cursorAssistantText(msg, "plain")
 		require.Equal(t, "plain", got, "no tool_calls means no blob at all")
 		require.NotContains(t, got, tc03ProdOpen, "no blob marker must be emitted")
 	})
@@ -615,88 +688,108 @@ func TestCursorProtocolRequestAssistantTextInlineToolCall(t *testing.T) {
 		require.NotContains(t, cursorInlineToolCallClose, "\u200b",
 			"close marker must be bare bytes (no U+200B)")
 	})
+
+	t.Run("字符串值不做 HTML 转义：参数里的 < > & 原字节保留", func(t *testing.T) {
+		msg := apicompat.ChatMessage{
+			Role: "assistant",
+			ToolCalls: []apicompat.ChatToolCall{{
+				ID: "call_html", Type: "function",
+				Function: apicompat.ChatFunctionCall{
+					Name: "html_tool", Arguments: `{"x":"<a>&b"}`,
+				},
+			}},
+		}
+		got := cursorJSONStringNoEscape(msg.ToolCalls[0].Function.Arguments)
+		require.Equal(t, `"{\"x\":\"<a>&b\"}"`, got,
+			"no \u003c-style escapes may enter arguments_json")
+		require.Contains(t, cursorAssistantText(msg, ""), `<a>&b`)
+	})
+
+	t.Run("tool 结果名固定 invoke_client_tool，id/content 不变", func(t *testing.T) {
+		msg := apicompat.ChatMessage{
+			Role: "tool", ToolCallID: "call_7", Name: "get_weather",
+			Content: json.RawMessage(`"sunny"`),
+		}
+		got, images, err := cursorToolResultText(msg, cursorSkipLedger{})
+		require.NoError(t, err)
+		require.Empty(t, images)
+		require.Equal(t, `<tool_result tool_call_id="call_7" name="invoke_client_tool">`+"\n<content>\n"+
+			"sunny"+"\n</tool_result>", got)
+		require.NotContains(t, got, "get_weather", "original tool name must not leak into the transport name")
+	})
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// W7 观测点：wire_name_renamed（工具名重名隔离改名对照）。
-//
-// 落点：cursorConvertRequestWithContext（持有 ctx 的生产入口，与 skipped.log 同处），
-// 复用 cursorWireToolNameSet / cursorWireToolNameOf 这唯一一份规则算对照，不另写规则。
-// ─────────────────────────────────────────────────────────────────────────────
-
-// cursorWireRenamedEntry 取出唯一一条 wire_name_renamed 观测日志（一次请求一条）。
-func cursorWireRenamedEntry(t *testing.T, logs *observer.ObservedLogs) observer.LoggedEntry {
-	t.Helper()
-	var found *observer.LoggedEntry
-	count := 0
-	for i := range logs.All() {
-		e := logs.All()[i]
-		if e.ContextMap()["phase"] == cursorPhaseWireNameRenamed {
-			count++
-			f := e
-			found = &f
+// TestCursorMcpToolsTransportSchema 钉死单入口 f3 的形状与 enum 子集口径。
+func TestCursorMcpToolsTransportSchema(t *testing.T) {
+	tool := func(name, schema string) apicompat.ChatTool {
+		return apicompat.ChatTool{
+			Type: "function",
+			Function: &apicompat.ChatFunction{
+				Name: name, Parameters: json.RawMessage(schema),
+			},
 		}
 	}
-	require.Equal(t, 1, count, "wire_name_renamed must be logged exactly once per request")
-	require.NotNil(t, found)
-	return *found
-}
-
-// TestCursorBuildMcpToolsWireNameRenamedLogged 覆盖改名实际发生时：
-// 记一条日志、字段齐全（renamed_count / renamed_tools / total_count），
-// renamed_tools 格式为 `原名→wire名` 逗号分隔、只含被改名的工具。
-func TestCursorBuildMcpToolsWireNameRenamedLogged(t *testing.T) {
-	ctx, logs := cursorPhaseObserverCtx(t, "req-wire-rename")
-	req := &apicompat.ChatCompletionsRequest{
-		Model: "gpt-4o",
-		Messages: []apicompat.ChatMessage{
-			{Role: "user", Content: json.RawMessage(`"use tools"`)},
-		},
-		Tools: []apicompat.ChatTool{
-			{Type: "function", Function: &apicompat.ChatFunction{Name: "Read"}},
-			{Type: "function", Function: &apicompat.ChatFunction{Name: "Write"}},
-			{Type: "function", Function: &apicompat.ChatFunction{Name: "WebFetch"}},
-			{Type: "function", Function: &apicompat.ChatFunction{Name: "Bash"}},
-			{Type: "function", Function: &apicompat.ChatFunction{Name: "MyTool"}},
-		},
-		ToolChoice: json.RawMessage(`"auto"`),
+	newReq := func(choice string, tools ...apicompat.ChatTool) *apicompat.ChatCompletionsRequest {
+		return &apicompat.ChatCompletionsRequest{
+			Messages:   []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+			Tools:      tools,
+			ToolChoice: json.RawMessage(choice),
+		}
 	}
 
-	_, err := cursorConvertRequestWithContext(ctx, req, "gpt-4o")
-	require.NoError(t, err)
+	t.Run("全部工具：enum 等于原工具名集合（原名，不改名）", func(t *testing.T) {
+		body, err := cursorConvertRequest(newReq(`"auto"`,
+			tool("Read", `{}`), tool("get_weather", `{}`), tool("WebFetch", `{}`)), "grok-4.7")
+		require.NoError(t, err)
+		def := cursorTestSingleMcpDefOf(t, body)
+		typ, required, enum, additional, _ := cursorTestTransportSchema(t, def)
+		require.Equal(t, "object", typ)
+		require.ElementsMatch(t, []string{cursorTransportToolNameKey, cursorTransportArgumentsKey}, required)
+		require.False(t, additional)
+		require.ElementsMatch(t, []string{"Read", "get_weather", "WebFetch"}, enum,
+			"enum must carry the exact original client tool names, no wire renaming")
+	})
 
-	entry := cursorWireRenamedEntry(t, logs)
-	m := entry.ContextMap()
-	require.EqualValues(t, 3, m["renamed_count"], "three builtin-collision tools renamed")
-	require.EqualValues(t, 5, m["total_count"], "all five declared tools counted")
-	require.Equal(t, "Read→Read_,WebFetch→WebFetch_,Write→Write_", m["renamed_tools"],
-		"renamed_tools must be 'orig→wire' comma-joined, sorted, only renamed")
-	// 只含被改名的工具：原名不变的工具（Bash / MyTool）不得出现在列表里。
-	require.NotContains(t, m["renamed_tools"], "Bash", "unchanged tool must not appear")
-	require.NotContains(t, m["renamed_tools"], "MyTool", "unchanged tool must not appear")
-}
+	t.Run("具名子集：enum 只含被选中的工具", func(t *testing.T) {
+		body, err := cursorConvertRequest(newReq(
+			`{"type":"function","function":{"name":"get_weather"}}`,
+			tool("get_weather", `{}`), tool("get_time", `{}`)), "grok-4.7")
+		require.NoError(t, err)
+		_, _, enum, _, _ := cursorTestTransportSchema(t, cursorTestSingleMcpDefOf(t, body))
+		require.Equal(t, []string{"get_weather"}, enum)
+	})
 
-// TestCursorBuildMcpToolsWireNameRenamedZero 覆盖 renamed_count==0 时也要记一条
-// （renamed_tools 为空串）：用"日志存在"确认没有改名，而不是靠日志缺失猜。
-func TestCursorBuildMcpToolsWireNameRenamedZero(t *testing.T) {
-	ctx, logs := cursorPhaseObserverCtx(t, "req-wire-no-rename")
-	req := &apicompat.ChatCompletionsRequest{
-		Model: "gpt-4o",
-		Messages: []apicompat.ChatMessage{
-			{Role: "user", Content: json.RawMessage(`"hi"`)},
-		},
-		Tools: []apicompat.ChatTool{
-			{Type: "function", Function: &apicompat.ChatFunction{Name: "MyTool"}},
-		},
-		ToolChoice: json.RawMessage(`"auto"`),
-	}
+	t.Run("none：f4 为空 message，不声明任何工具", func(t *testing.T) {
+		body, err := cursorConvertRequest(newReq(`"none"`, tool("get_weather", `{}`)), "grok-4.7")
+		require.NoError(t, err)
+		run := cursorAgentRunOf(t, body)
+		mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
+		require.True(t, ok)
+		require.Empty(t, mcp.Bytes, "tool_choice=none must leave f4 empty")
+		require.NotContains(t, string(body), "get_weather")
+	})
 
-	_, err := cursorConvertRequestWithContext(ctx, req, "gpt-4o")
-	require.NoError(t, err)
+	t.Run("无工具：f4 为空 message", func(t *testing.T) {
+		body, err := cursorConvertRequest(newReq(`"auto"`), "grok-4.7")
+		require.NoError(t, err)
+		run := cursorAgentRunOf(t, body)
+		mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
+		require.True(t, ok)
+		require.Empty(t, mcp.Bytes)
+	})
 
-	entry := cursorWireRenamedEntry(t, logs)
-	m := entry.ContextMap()
-	require.EqualValues(t, 0, m["renamed_count"], "no collision means zero renames")
-	require.EqualValues(t, 1, m["total_count"])
-	require.Equal(t, "", m["renamed_tools"], "empty list when nothing renamed")
+	t.Run("运输 schema 的 number/null/数组/大整数只经原 schema 文本，不经 float64", func(t *testing.T) {
+		const schema = `{"type":"object","properties":{"n":{"type":"number"},"nil":{"type":"null"},` +
+			`"arr":{"type":"array","items":{"type":"integer"}},"big":{"type":"integer","default":9007199254740993}}}`
+		body, err := cursorConvertRequest(newReq(`"auto"`, tool("precise", schema)), "grok-4.7")
+		require.NoError(t, err)
+		def := cursorTestSingleMcpDefOf(t, body)
+		desc := cursorTestFieldString(def, cursorFldMcpToolDefDescription)
+		require.Contains(t, desc, schema,
+			"the original schema text (including big int 9007199254740993) must survive verbatim in the catalog")
+		f3 := cursorTestF3SchemaOf(t, def)
+		require.NotContains(t, f3, "9007199254740993",
+			"f3 constrains only tool_name/arguments_json; it must not carry client schema numbers")
+		require.NotContains(t, f3, "float")
+	})
 }

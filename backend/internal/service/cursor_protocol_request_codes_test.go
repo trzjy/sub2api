@@ -78,10 +78,10 @@ func TestCursorProtocolRequestDropsWhatItCannotForward(t *testing.T) {
 	}
 
 	cases := []struct {
-		name     string
-		req      *apicompat.ChatCompletionsRequest
-		kind     string
-		atLeast  int
+		name    string
+		req     *apicompat.ChatCompletionsRequest
+		kind    string
+		atLeast int
 	}{
 		// 未知 / 空角色：只丢这一条（原本整轮 400）。
 		{"message without role", withHead(msg("", `"hi"`)), cursorSkipEmptyRole, 1},
