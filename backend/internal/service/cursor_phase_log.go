@@ -13,11 +13,9 @@ package service
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
-	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -33,141 +31,6 @@ const cursorPhaseComponent = "cursor.upstream"
 func cursorPhaseLog(ctx context.Context, lvl zapcore.Level, phase, model string, extra ...zap.Field) {
 	reqID, _ := ctx.Value(ctxkey.RequestID).(string)
 	cursorPhaseLogFields(logger.FromContext(ctx), lvl, phase, model, reqID, extra...)
-}
-
-// cursorInlineToolCallShapeOf 判定正文里内联 tool call 的**形态标识**（稳定短串）。
-//
-// 判据与 cursor_inline_tool_call.go 的两种实测形态一一对应：
-//   - 形态 A（站点自身 blob 形态）：片段正文是**合法 JSON 对象** → "site_blob"；
-//   - 形态 B（上游私有标记形态）：片段正文是 JSON **非法**的标签信封，且带
-//     "<toolName>" 标签 → "upstream_private"；
-//   - 其余（形态不成对、或形态无法归类）→ "unknown"。
-//
-// 只回稳定短串，**绝不含正文原文**（正文可能带用户数据与工具参数）。
-func cursorInlineToolCallShapeOf(content string) string {
-	segments, _, ok := cursorInlineScanSegments(content)
-	if !ok || len(segments) == 0 {
-		return cursorInlineShapeUnknown
-	}
-	for _, seg := range segments {
-		body := strings.TrimSpace(seg.body)
-		if json.Valid([]byte(body)) {
-			return cursorInlineShapeSiteBlob
-		}
-	}
-	for _, seg := range segments {
-		if strings.Contains(seg.body, "<toolName>") {
-			return cursorInlineShapeUpstreamPrivate
-		}
-	}
-	return cursorInlineShapeUnknown
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 内联 tool call 的 phase 事件（TC-02：正文内联 tool call 的归一 / 失败关闭）
-//
-// 事件名：
-//   - inline_tool_call_normalized：识别到内联形态并**归一成功**（还原成结构化
-//     tool_calls）。流式与非流式共用：流式在收尾时统一还原，不再失败关闭；
-//   - inline_tool_call_rejected：识别到内联形态但**不可交付**（一个可执行调用都
-//     解不出 → 失败关闭，不把原文当正文透传）；
-//   - inline_tool_call_unrecognized：正文含开标记但**形态不成形**（按正文放行）。
-//     这条此前完全没有日志，而它正是「工具静默丢失」的高危形态，故单独记一条。
-//
-// 字段：
-//   - normalized：inline_shape（形态标识）、inline_tool_count（工具条数）；
-//   - rejected：inline_shape（形态标识）、inline_reason（失败原因，稳定短串枚举）；
-//   - unrecognized：inline_shape（形态标识）、inline_open_marks（开标记个数）。
-//
-// 脱敏（硬性）：**不记 args 明文、不记工具返回内容、不记正文原文**。
-// 形态标识与失败原因都是稳定短串枚举，正文只进判定不进日志。
-// ─────────────────────────────────────────────────────────────────────────────
-
-// 内联 tool call 的 phase 事件名。
-const (
-	// cursorPhaseInlineToolCallNormalized 是"内联 tool call 归一成功"的 phase 名。
-	cursorPhaseInlineToolCallNormalized = "inline_tool_call_normalized"
-	// cursorPhaseInlineToolCallRejected 是"识别到内联形态但不可交付"的 phase 名。
-	cursorPhaseInlineToolCallRejected = "inline_tool_call_rejected"
-	// cursorPhaseInlineToolCallUnrecognized 是"正文含开标记但形态不成形、按正文放行"
-	// 的 phase 名。
-	//
-	// 这类样本此前**完全静默**：走的是「未识别 → 原样透传」路径，既不记归一成功也不记
-	// 拒绝，线上看不到。而它恰恰是工具静默丢失的高危形态（模型写了调用但格式不成立），
-	// 故单独记一条 warn，便于按 inline_open_marks 分布回捞样本。
-	cursorPhaseInlineToolCallUnrecognized = "inline_tool_call_unrecognized"
-)
-
-// 内联 tool call 的形态标识（稳定短串；不含正文原文）。
-const (
-	// cursorInlineShapeSiteBlob 是形态 A（站点自身 blob 形态，JSON 合法）。
-	cursorInlineShapeSiteBlob = "site_blob"
-	// cursorInlineShapeUpstreamPrivate 是形态 B（上游私有标记形态，JSON 非法）。
-	cursorInlineShapeUpstreamPrivate = "upstream_private"
-	// cursorInlineShapeUnknown 是形态无法判定（正文里没有成对标记）。
-	cursorInlineShapeUnknown = "unknown"
-)
-
-// 内联 tool call 被拒绝的失败原因（稳定短串枚举）。
-const (
-	// cursorInlineRejectReasonUnparsable 是"识别到形态但解析不出可执行调用"。
-	cursorInlineRejectReasonUnparsable = "unparsable"
-	// cursorInlineRejectReasonStreamHit 是"流式下正文命中内联形态，失败关闭"。
-	cursorInlineRejectReasonStreamHit = "stream_hit"
-)
-
-// cursorInlineToolCallNormalizedFields 组装"归一成功"事件的字段（脱敏：只含形态标识与条数）。
-func cursorInlineToolCallNormalizedFields(shape string, toolCount int) []zap.Field {
-	return []zap.Field{
-		zap.String("inline_shape", shape),
-		zap.Int("inline_tool_count", toolCount),
-	}
-}
-
-// cursorInlineToolCallRejectedFields 组装"被拒绝"事件的字段（脱敏：只含形态标识与原因）。
-func cursorInlineToolCallRejectedFields(shape, reason string) []zap.Field {
-	return []zap.Field{
-		zap.String("inline_shape", shape),
-		zap.String("inline_reason", reason),
-	}
-}
-
-// cursorPhaseLogInlineToolCallNormalized 落盘"内联 tool call 归一成功"事件（带 ctx 的同步调用点）。
-//
-// shape 是形态标识（稳定短串），toolCount 是归一出的工具条数。
-//
-// 归一路径在**非流式**侧落点（cursor_execution_service.go，TC-02A 负责）；本卡只提供
-// 事件名、字段与落盘通道。
-func cursorPhaseLogInlineToolCallNormalized(ctx context.Context, model, shape string, toolCount int) {
-	cursorPhaseLog(ctx, zapcore.InfoLevel, cursorPhaseInlineToolCallNormalized, model,
-		cursorInlineToolCallNormalizedFields(shape, toolCount)...)
-}
-
-// cursorPhaseLogInlineToolCallRejected 落盘"识别到内联形态但不可交付"事件（带 ctx 的同步调用点）。
-//
-// shape 是形态标识，reason 是失败原因（稳定短串枚举：unparsable / stream_hit）。
-func cursorPhaseLogInlineToolCallRejected(ctx context.Context, model, shape, reason string) {
-	cursorPhaseLog(ctx, zapcore.WarnLevel, cursorPhaseInlineToolCallRejected, model,
-		cursorInlineToolCallRejectedFields(shape, reason)...)
-}
-
-// cursorInlineToolCallUnrecognizedFields 组装"含开标记但形态不成形"事件的字段。
-//
-// 脱敏（硬性）：只含形态标识与开标记**个数**，不含正文原文、不含工具参数。
-func cursorInlineToolCallUnrecognizedFields(shape string, openMarks int) []zap.Field {
-	return []zap.Field{
-		zap.String("inline_shape", shape),
-		zap.Int("inline_open_marks", openMarks),
-	}
-}
-
-// cursorPhaseLogInlineToolCallUnrecognized 落盘"正文含开标记但形态不成形、按正文放行"事件。
-//
-// 这条事件的用途：这类样本此前完全没有日志（既不归一也不拒绝，直接透传），
-// 是工具静默丢失的高危形态。记一条 warn 便于线上按 inline_open_marks 回捞。
-func cursorPhaseLogInlineToolCallUnrecognized(ctx context.Context, model, shape string, openMarks int) {
-	cursorPhaseLog(ctx, zapcore.WarnLevel, cursorPhaseInlineToolCallUnrecognized, model,
-		cursorInlineToolCallUnrecognizedFields(shape, openMarks)...)
 }
 
 // cursorPhaseLogFields 是底层落盘：调用方已捕获不可变标识（logger / model / request_id），
