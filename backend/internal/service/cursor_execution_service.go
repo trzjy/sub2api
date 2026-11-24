@@ -4025,11 +4025,6 @@ type cursorToolBatch struct {
 	// delegations 是本批已解码的 f11 委托。
 	delegations []cursorToolCallCapture
 	sealed      bool
-	// rejected 是本批**本地已拒绝**的对外 call_id（客户端没有对应工具：shell/f14、原生文件
-	// exec 等）。这类调用不会有委托，但上游的 started/listed 计数仍然包含它；若不在此登记，
-	// checkSealableLocked 的"每条 started 都要有委托"会永假 → 批不封口
-	// （外审 B1）。登记后封口谓词跳过它们，交付集合里也不含它们（它们从未写入 delegations）。
-	rejected map[string]struct{}
 	// wireDecided 是本批**已决定出站 id** 的委托数（batch.delegations 的前缀长度，由
 	// assignWireIDsLocked 处理完整批后推进；delegations 只追加、不重排，因此前缀稳定）。
 	//
@@ -4039,10 +4034,6 @@ type cursorToolBatch struct {
 	// 与已写出的字节不一致。
 	wireDecided int
 }
-
-// cursorRejectionTombstone 是会话级"本地已拒绝"墓碑：拒绝先到、started 后到时，
-// 让本地拒绝在 started 到达前也不丢；它在 started 到达时原子消费。
-type cursorRejectionTombstone struct{}
 
 // cursorToolDelegations 是一次 AgentRun 内工具委托的**唯一**记录。
 //
@@ -4075,33 +4066,24 @@ type cursorToolDelegations struct {
 	idRewrite map[string]string
 	// shared 表示本记录由 duplex 拥有解码权（parser 不再解码同一帧）。
 	shared bool
-	// rejectionTombstones 是会话级"本地已拒绝"墓碑集合：键=对外 call_id，值=登记时刻。
-	// 解决"拒绝先到、started 后到"的竞态：noteRejectedCall 无条件登记墓碑，待
-	// tool_call_started 到达时由 noteToolCallStarted 在持锁下原子消费（消费即删，
-	// 不跨批/跨会话复用），把该 call 记入所属批的 rejected 集合，于是封口谓词跳过它。
-	// 本集合随本会话的 delegations 一起释放，绝不跨会话复用；登记/消费都在同一把
-	// d.mu 下完成，不留竞态窗口。
-	rejectionTombstones map[string]cursorRejectionTombstone
 }
 
 // newCursorToolDelegations 构造由 duplex 解码、parser 读取的共享记录。
 func newCursorToolDelegations() *cursorToolDelegations {
 	return &cursorToolDelegations{
-		open:                make(map[string]*cursorToolBatch),
-		deliveredIDs:        make(map[string]struct{}),
-		idRewrite:           make(map[string]string),
-		shared:              true,
-		rejectionTombstones: make(map[string]cursorRejectionTombstone),
+		open:         make(map[string]*cursorToolBatch),
+		deliveredIDs: make(map[string]struct{}),
+		idRewrite:    make(map[string]string),
+		shared:       true,
 	}
 }
 
 // newLocalCursorToolDelegations 构造由 parser 自己解码的本地记录（无 duplex 的场景）。
 func newLocalCursorToolDelegations() *cursorToolDelegations {
 	return &cursorToolDelegations{
-		open:                make(map[string]*cursorToolBatch),
-		deliveredIDs:        make(map[string]struct{}),
-		idRewrite:           make(map[string]string),
-		rejectionTombstones: make(map[string]cursorRejectionTombstone),
+		open:         make(map[string]*cursorToolBatch),
+		deliveredIDs: make(map[string]struct{}),
+		idRewrite:    make(map[string]string),
 	}
 }
 
@@ -4256,25 +4238,6 @@ func (d *cursorToolDelegations) noteToolCallStarted(modelCallID, callID string, 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	batch, err := d.batchFor(modelCallID)
-	// 墓碑消费必须在同一把锁内、在任何提前 return 之前完成：拒绝先到、started 后到时，
-	// 这里把它原子消费（删即消费，不跨批/跨会话复用）并记入所属批 rejected；无法
-	// 归属则失败关闭（错误含 call_id），绝不静默忽略。
-	if _, ok := d.rejectionTombstones[callID]; ok {
-		delete(d.rejectionTombstones, callID)
-		if err != nil {
-			// batchFor 无法把 started 归到唯一开放批（如多个无 ID 开放批）→ 墓碑无法归属。
-			return fmt.Errorf("%w: rejection tombstone for call_id %q arrived but cannot be attributed to any batch (%s)",
-				ErrCursorBatchAmbiguous, callID, modelCallID)
-		}
-		if batch.sealed {
-			return fmt.Errorf("%w: rejection tombstone for call_id %q belongs to an already-sealed batch (unattributable)",
-				ErrCursorBatchIncomplete, callID)
-		}
-		if batch.rejected == nil {
-			batch.rejected = make(map[string]struct{}, 1)
-		}
-		batch.rejected[callID] = struct{}{}
-	}
 	if err != nil {
 		return err
 	}
@@ -4330,47 +4293,6 @@ func (d *cursorToolDelegations) noteDelegationLocked(tc cursorToolCallCapture) e
 	}
 	batch.delegations = append(batch.delegations, tc)
 	return nil
-}
-
-// noteRejectedCall 登记"客户端无对应工具、本地已拒绝执行"的对外 call_id（外审 B1）。
-//
-// 分两步：
-//  1. 若该 call_id 此刻已出现在某个未封口批的 started 列表里（"started 先到、拒绝后到"），
-//     就地标记该批的 rejected 集合并返回，**不登记墓碑**——否则墓碑残留，同会话后续批
-//     复用同一 call_id 时会被 noteToolCallStarted 消费，把新的真实调用误当成本地拒绝。
-//  2. 遍历后仍未命中（"拒绝先到、started 后到"），才登记会话级墓碑：旧实现只在已
-//     started 的批里标记，拒绝先到时落空，该批永远封不了口。墓碑随后
-//     由 noteToolCallStarted 在持锁下原子消费（消费即删，不跨批/跨会话复用），把该 call
-//     记入所属批的 rejected 集合。
-//
-// 不改 delegations、不改交付集合、不改计数字段：封口语义仍以 listed 为准。
-func (d *cursorToolDelegations) noteRejectedCall(callID string) {
-	if d == nil || callID == "" {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	// 1. 若该 call_id 已出现在某个未封口批的 started 列表里，就地标记该批 rejected，不写墓碑。
-	for _, batch := range d.all {
-		if batch.sealed {
-			continue
-		}
-		for _, id := range batch.started {
-			if id != callID {
-				continue
-			}
-			if batch.rejected == nil {
-				batch.rejected = make(map[string]struct{}, 1)
-			}
-			batch.rejected[callID] = struct{}{}
-			return
-		}
-	}
-	// 2. 未命中任何未封口批的 started：登记墓碑，留待 started 到达时消费。
-	if d.rejectionTombstones == nil {
-		d.rejectionTombstones = make(map[string]cursorRejectionTombstone)
-	}
-	d.rejectionTombstones[callID] = cursorRejectionTombstone{}
 }
 
 // snapshot 返回按到达顺序的全部委托（parser 输出 tool_calls 用）。
@@ -4565,10 +4487,6 @@ func (d *cursorToolDelegations) checkSealableLocked() error {
 		}
 		for _, callID := range batch.started {
 			if _, ok := delegated[callID]; !ok {
-				// 外审 B1：本地已拒绝（客户端无对应工具）的调用不会有委托，封口时按已满足处理。
-				if _, rej := batch.rejected[callID]; rej {
-					continue
-				}
 				return fmt.Errorf("%w: batch %q call %q has no complete mcp_args delegation",
 					ErrCursorBatchIncomplete, batch.modelCallID, callID)
 			}
