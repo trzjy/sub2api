@@ -11,6 +11,7 @@ package service
 // 既有常量（cursorFldClientMsg* / cursorFldServerMsg* / cursorFldShellStream* 等）。
 
 import (
+	"encoding/json"
 	"strings"
 	"unicode"
 
@@ -98,30 +99,38 @@ func cursorNativeExecRejectField(parts []cursorPBField) (int, bool) {
 
 // cursorNativeEquivalent 是「原生字段号 → 客户端等价工具名（已归一化为小写下划线形式）」表。
 //
-// 仅收录本卡已实现且 V2 实测有证据的 7 个字段：f2/f3/f4/f5/f7/f8/f14。
+// 收录全部 11 类原生字段：f2/f3/f4/f5/f7/f8/f9/f14/f16/f20/f23。
 // 来源：社区 BUILTIN_EQUIVALENT（session.py:89）的等价别名列表。
 //
-// 刻意不收录：
-//   - f29 / f52：V2 实测无证据（施工图 W12），本卡不做。
-//   - f9(diagnostics) / f16(background_shell_spawn) / f20(fetch) / f23(write_shell_stdin)：
-//     在我们的代码里对应「无客户端等价工具」场景，不收录（命中即退回列清单）。
+// 候选 A（原生工具自动翻译）：等价表的作用从「点名重定向」扩展为「翻译命中」——
+// 命中等价表且客户端声明了对应工具时，走 cursorTranslateNativeExecToMcpArgs 翻译为
+// 客户端工具调用（mcp_args / f11 委派）；翻译失败或无声明仍降级到既有拒绝路径。
+// 新增的 4 类（f9/f16/f20/f23）沿用同一机制；当某个字段的原生参数不足以可靠翻译时，
+// 由参数映射函数返回错误触发降级，不在这里做「有表就一定能翻译」的假设。
+//
+// 刻意不收录 f29 / f52：V2 实测无证据（施工图 W12），本卡不做。
 //
 // 等价名一律以小写下划线形式登记（community 给的就是这种形态），与客户端声明名经
 // cursorNormaliseToolName 归一化后再比较——不归一就永远匹配不上（客户端工具名是大写开头驼峰）。
 var cursorNativeEquivalent = map[int][]string{
-	cursorFldNativeRejectShellArgs:       {"shell", "bash", "terminal", "run_command"}, // f2  shell_args
-	cursorFldNativeRejectWriteArgs:       {"write", "write_file", "create_file", "edit"}, // f3  write_args
-	cursorFldNativeRejectDeleteArgs:      {"remove", "delete_file"},                     // f4  delete_args
+	cursorFldNativeRejectShellArgs:  {"shell", "bash", "terminal", "run_command"},   // f2  shell_args
+	cursorFldNativeRejectWriteArgs:  {"write", "write_file", "create_file", "edit"}, // f3  write_args
+	cursorFldNativeRejectDeleteArgs: {"remove", "delete_file"},                      // f4  delete_args
 	// f5 grep_args：等价名**必须含 grep 自身** —— Claude Code 声明的工具就叫 grep
 	// （生产实测声明集：question,bash,read,glob,grep,edit,write,…）。
 	// 只列 search/ripgrep（社区表的形态，它假设客户端不叫 grep）会导致：
 	// 客户端明明声明了 grep，我们却点不出它的名 → 拒绝文本退回「列出全部工具」，
 	// 模型还是挑不出来 → 继续瞎试原生工具。
-	cursorFldNativeRejectGrepArgs:        {"grep", "search", "ripgrep"},                 // f5  grep_args
-	cursorFldNativeRejectReadArgs:        {"read", "read_file", "view", "cat"},          // f7  read_args
+	cursorFldNativeRejectGrepArgs: {"grep", "search", "ripgrep"},        // f5  grep_args
+	cursorFldNativeRejectReadArgs: {"read", "read_file", "view", "cat"}, // f7  read_args
 	// f8 ls_args：等价名含 ls 自身（同 f5 的理由：客户端可能就叫 ls）。
-	cursorFldNativeRejectLsArgs:          {"ls", "list_dir", "glob", "list_files"},        // f8  ls_args
-	cursorFldNativeRejectShellStreamArgs: {"shell", "bash", "terminal", "run_command"},  // f14 shell_stream_args
+	cursorFldNativeRejectLsArgs:          {"ls", "list_dir", "glob", "list_files"},     // f8  ls_args
+	cursorFldNativeRejectDiagnosticsArgs: {"diagnostics", "check_diagnostics"},         // f9  diagnostics_args（候选 A 补全）
+	cursorFldNativeRejectShellStreamArgs: {"shell", "bash", "terminal", "run_command"}, // f14 shell_stream_args
+	// f16 background_shell_spawn_args：与 shell 同族（后台启动也是执行命令）。
+	cursorFldNativeRejectBackgroundShellSpawnArgs: {"shell", "bash", "terminal", "run_command", "background_shell_spawn"}, // f16（候选 A 补全）
+	cursorFldNativeRejectFetchArgs:                {"fetch", "web_fetch", "http_get"},                                     // f20 fetch_args（候选 A 补全）
+	cursorFldNativeRejectWriteShellStdinArgs:      {"write_shell_stdin", "shell_stdin"},                                   // f23 write_shell_stdin_args（候选 A 补全）
 }
 
 // cursorNormaliseToolName 把工具名归一化到小写下划线形式，用于与 cursorNativeEquivalent 比较：
@@ -167,11 +176,11 @@ func cursorNormaliseToolName(name string) string {
 //   - declared 为空：「Tool not available in this environment. The client declared no tools.」
 //   - declared 非空，且被拒的原生字段 field 在等价表中命中了「某个客户端声明过的等价工具」
 //     → 点名那一个（用 wire name，不是客户端原名）：
-//       "This tool is not connected to the user's machine. Call the tool 'Read_' instead."
+//     "This tool is not connected to the user's machine. Call the tool 'Read_' instead."
 //   - 命中多个等价工具时，按客户端声明顺序点第一个（declared 切片已是声明顺序；见下方
 //     遍历顺序，不另排序）。
 //   - 没命中任何等价工具 → 退回列清单（清单里也用 wire name）：
-//       "Tool not available in this environment. Use only the client-provided tools: A_, B_."
+//     "Tool not available in this environment. Use only the client-provided tools: A_, B_."
 //
 // 入参：
 //   - declared：客户端**原名**切片（按声明顺序），仅用于等价表匹配（经 cursorNormaliseToolName
@@ -227,6 +236,196 @@ func cursorNativeExecRejectHit(field int, declared []string) (int, bool) {
 func cursorNativeExecRejectReason(field int, declared, wireNames []string) string {
 	reason, _, _ := cursorNativeExecRejectReasonInfo(field, declared, wireNames)
 	return reason
+}
+
+// ---------------------------------------------------------------------------
+// 候选 A：原生 exec 参数 → 客户端工具 mcp_args 翻译
+// ---------------------------------------------------------------------------
+
+// cursorTranslateMcpValueString 构造 google.protobuf.Value 的 string oneof（f3）。
+// 与 cursorTestBuildMcpArgsOfficial / cursorDecodeMcpArgs 的 Value.f3 口径逐字段对称。
+func cursorTranslateMcpValueString(s string) []byte {
+	return cursorAppendStringField(nil, 3, s)
+}
+
+// cursorTranslateBuildMcpArgs 组装一条 McpArgs 载荷：f2 repeated map entry
+// {f1 key, f2 Value}、f3 tool_call_id、f5 tool_name。形状与上游 f11 一致，
+// 使客户端把它当成一条普通的 mcp_args 工具调用执行。
+func cursorTranslateBuildMcpArgs(toolCallID, toolName string, params [][2]string) []byte {
+	var out []byte
+	for _, kv := range params {
+		entry := cursorAppendStringField(nil, 1, kv[0])
+		entry = cursorAppendBytesField(entry, 2, cursorTranslateMcpValueString(kv[1]))
+		out = cursorAppendBytesField(out, 2, entry)
+	}
+	out = cursorAppendStringField(out, 3, toolCallID)
+	out = cursorAppendStringField(out, 5, toolName)
+	return out
+}
+
+// cursorTranslateArgsJSON 把键值对编成工具参数对象 JSON 字符串（委派记录 ArgsJSON 用）。
+func cursorTranslateArgsJSON(params [][2]string) (string, error) {
+	obj := make(map[string]string, len(params))
+	for _, kv := range params {
+		obj[kv[0]] = kv[1]
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "", cursorFrameErrorf(cursorFrameMcpArgs, "marshal translated mcp args: %v", err)
+	}
+	return string(b), nil
+}
+
+// cursorTranslateAdd 只在 value 非空时追加一对参数（proto3 默认省略空串）。
+func cursorTranslateAdd(params [][2]string, key, value string) [][2]string {
+	if value == "" {
+		return params
+	}
+	return append(params, [2]string{key, value})
+}
+
+// cursorTranslateNotSupported 是「原生参数不足以可靠翻译」的统一降级错误。
+// 调用方据此降级到既有拒绝路径，绝不向客户端发出不完整的工具调用。
+func cursorTranslateNotSupported(kind string) error {
+	return cursorFrameErrorf(cursorFrameMcpArgs, "native %s args not safely translatable", kind)
+}
+
+// 以下 11 个函数一一对应 11 类原生 exec 字段，返回 (tool_call_id, 参数键值对, error)。
+// 参数名取社区等价工具的通行命名（command / working_directory / path / url）。
+// 对缺少关键语义参数的字段（write 的 content、grep 的 pattern、write_shell_stdin 的
+// 内容与 tool_call_id）明确返回错误降级——宁可保留既有拒绝路径，也不向客户端发出
+// 会写空文件 / 做空模式匹配的不完整调用。
+func cursorTranslateShellArgs(args []byte) (string, [][2]string, error) {
+	sub, err := cursorDecodeProtobuf(args)
+	if err != nil {
+		return "", nil, err
+	}
+	tcid := cursorNativeRejectArgString(sub, cursorFldNativeRejectArgToolCallIDShell)
+	var p [][2]string
+	p = cursorTranslateAdd(p, "command", cursorNativeRejectArgString(sub, cursorFldNativeRejectArgCommand))
+	p = cursorTranslateAdd(p, "working_directory", cursorNativeRejectArgString(sub, cursorFldNativeRejectArgWorkingDirectory))
+	return tcid, p, nil
+}
+
+// f14 shell_stream_args 与 f2 shell_args 同形（tool_call_id 同为 f4）。
+func cursorTranslateShellStreamArgs(args []byte) (string, [][2]string, error) {
+	return cursorTranslateShellArgs(args)
+}
+
+func cursorTranslateBackgroundShellSpawnArgs(args []byte) (string, [][2]string, error) {
+	sub, err := cursorDecodeProtobuf(args)
+	if err != nil {
+		return "", nil, err
+	}
+	tcid := cursorNativeRejectArgString(sub, cursorFldNativeRejectArgToolCallIDBackground)
+	var p [][2]string
+	p = cursorTranslateAdd(p, "command", cursorNativeRejectArgString(sub, cursorFldNativeRejectArgCommand))
+	p = cursorTranslateAdd(p, "working_directory", cursorNativeRejectArgString(sub, cursorFldNativeRejectArgWorkingDirectory))
+	return tcid, p, nil
+}
+
+func cursorTranslateWriteArgs(args []byte) (string, [][2]string, error) {
+	return "", nil, cursorTranslateNotSupported("write_args")
+}
+
+func cursorTranslateDeleteArgs(args []byte) (string, [][2]string, error) {
+	sub, err := cursorDecodeProtobuf(args)
+	if err != nil {
+		return "", nil, err
+	}
+	tcid := cursorNativeRejectArgString(sub, cursorFldNativeRejectArgToolCallIDDelete)
+	p := cursorTranslateAdd(nil, "path", cursorNativeRejectArgString(sub, cursorFldNativeRejectArgPath))
+	return tcid, p, nil
+}
+
+func cursorTranslateGrepArgs(args []byte) (string, [][2]string, error) {
+	return "", nil, cursorTranslateNotSupported("grep_args")
+}
+
+func cursorTranslateReadArgs(args []byte) (string, [][2]string, error) {
+	sub, err := cursorDecodeProtobuf(args)
+	if err != nil {
+		return "", nil, err
+	}
+	tcid := cursorNativeRejectArgString(sub, cursorFldNativeRejectArgToolCallIDRead)
+	p := cursorTranslateAdd(nil, "path", cursorNativeRejectArgString(sub, cursorFldNativeRejectArgPath))
+	return tcid, p, nil
+}
+
+func cursorTranslateLsArgs(args []byte) (string, [][2]string, error) {
+	sub, err := cursorDecodeProtobuf(args)
+	if err != nil {
+		return "", nil, err
+	}
+	tcid := cursorNativeRejectArgString(sub, cursorFldNativeRejectArgToolCallIDLs)
+	p := cursorTranslateAdd(nil, "path", cursorNativeRejectArgString(sub, cursorFldNativeRejectArgPath))
+	return tcid, p, nil
+}
+
+func cursorTranslateDiagnosticsArgs(args []byte) (string, [][2]string, error) {
+	sub, err := cursorDecodeProtobuf(args)
+	if err != nil {
+		return "", nil, err
+	}
+	tcid := cursorNativeRejectArgString(sub, cursorFldNativeRejectArgToolCallIDDiagnostics)
+	p := cursorTranslateAdd(nil, "path", cursorNativeRejectArgString(sub, cursorFldNativeRejectArgPath))
+	return tcid, p, nil
+}
+
+func cursorTranslateFetchArgs(args []byte) (string, [][2]string, error) {
+	sub, err := cursorDecodeProtobuf(args)
+	if err != nil {
+		return "", nil, err
+	}
+	tcid := cursorNativeRejectArgString(sub, cursorFldNativeRejectArgToolCallIDFetch)
+	p := cursorTranslateAdd(nil, "url", cursorNativeRejectArgString(sub, cursorFldNativeRejectArgURL))
+	return tcid, p, nil
+}
+
+func cursorTranslateWriteShellStdinArgs(args []byte) (string, [][2]string, error) {
+	return "", nil, cursorTranslateNotSupported("write_shell_stdin_args")
+}
+
+// cursorTranslateNativeExecArgs 按字段号分派到 11 个映射函数之一。
+// 返回 (tool_call_id, 参数键值对, 原生工具标签, error)。
+func cursorTranslateNativeExecArgs(field int, args []byte) (string, [][2]string, string, error) {
+	switch field {
+	case cursorFldNativeRejectShellArgs:
+		id, p, e := cursorTranslateShellArgs(args)
+		return id, p, "shell_args", e
+	case cursorFldNativeRejectShellStreamArgs:
+		id, p, e := cursorTranslateShellStreamArgs(args)
+		return id, p, "shell_stream_args", e
+	case cursorFldNativeRejectBackgroundShellSpawnArgs:
+		id, p, e := cursorTranslateBackgroundShellSpawnArgs(args)
+		return id, p, "background_shell_spawn_args", e
+	case cursorFldNativeRejectWriteArgs:
+		id, p, e := cursorTranslateWriteArgs(args)
+		return id, p, "write_args", e
+	case cursorFldNativeRejectDeleteArgs:
+		id, p, e := cursorTranslateDeleteArgs(args)
+		return id, p, "delete_args", e
+	case cursorFldNativeRejectGrepArgs:
+		id, p, e := cursorTranslateGrepArgs(args)
+		return id, p, "grep_args", e
+	case cursorFldNativeRejectReadArgs:
+		id, p, e := cursorTranslateReadArgs(args)
+		return id, p, "read_args", e
+	case cursorFldNativeRejectLsArgs:
+		id, p, e := cursorTranslateLsArgs(args)
+		return id, p, "ls_args", e
+	case cursorFldNativeRejectDiagnosticsArgs:
+		id, p, e := cursorTranslateDiagnosticsArgs(args)
+		return id, p, "diagnostics_args", e
+	case cursorFldNativeRejectFetchArgs:
+		id, p, e := cursorTranslateFetchArgs(args)
+		return id, p, "fetch_args", e
+	case cursorFldNativeRejectWriteShellStdinArgs:
+		id, p, e := cursorTranslateWriteShellStdinArgs(args)
+		return id, p, "write_shell_stdin_args", e
+	default:
+		return "", nil, "", cursorFrameErrorf(cursorFrameDuplex, "unsupported native exec translate field %d", field)
+	}
 }
 
 // cursorNativeRejectArgString 从已解出的 args 字段集取回某个字符串子字段（不存在回 ""）。
@@ -359,6 +558,40 @@ func (d *cursorAgentDuplex) cursorRejectNativeExec(parts []cursorPBField, field 
 	// declared（原名）仅用于等价表匹配；wireNames（wire name）写进拒绝文本，模型才认识。
 	declared := d.declaredToolNames()
 	wireNames := d.declaredWireToolNames()
+
+	// 候选 A：等价表命中且客户端声明了等价工具时，把原生参数翻译成客户端工具的
+	// mcp_args 调用发出，让客户端直接执行（不再回拒绝帧）。翻译失败 / 无 tool_call_id
+	// / 委派登记失败时，降级到下方既有拒绝路径，不让无效翻译卡住客户端。
+	//
+	// 仅对 shared delegations（生产 duplex 的会话级委托记录）启用：local 记录用于
+	// 独立解析与既有拒绝形状测试，那里没有真实客户端执行通道，翻译无从落地。
+	if idx, hit := cursorNativeExecRejectHit(field, declared); hit && d.delegations.isShared() {
+		toTool := declared[idx] // 交付客户端用原名（与 cursorCaptureMcpArgs 同口径）
+		if tcID, params, fromTool, terr := cursorTranslateNativeExecArgs(field, argsField.Bytes); terr == nil && tcID != "" {
+			if argsJSON, jerr := cursorTranslateArgsJSON(params); jerr == nil {
+				tc := cursorToolCallCapture{
+					ID: tcID, Name: toTool, ArgsJSON: argsJSON,
+					ExecID: execID, IDField: append([]byte(nil), idField...),
+				}
+				if derr := d.delegations.noteDelegation("", tc); derr == nil {
+					// mcp_args（f11）帧：以 ExecServerMessage.f11 形状发出，客户端按普通
+					// mcp_args 工具调用执行；结果由 noteDelegation 登记的 ExecID/IDField
+					// 关联回本 exec，与上游 f11 路径同形。
+					mcpArgs := cursorTranslateBuildMcpArgs(tcID, toTool, params)
+					execFrame := cursorAppendBytesField(nil, 11, mcpArgs)
+					if serr := d.send(cursorFldServerExecMessage, execFrame); serr == nil {
+						d.logPhase(zapcore.InfoLevel, "native_exec_auto_translated", "",
+							zap.Int("field", field),
+							zap.String("from_tool", fromTool),
+							zap.String("to_tool", toTool),
+							zap.String("tool_call_id", tcID))
+						return nil
+					}
+				}
+			}
+		}
+	}
+
 	reason, redirectedTool, equivalentHit := cursorNativeExecRejectReasonInfo(field, declared, wireNames)
 	resultField, payload, toolCallID, err := cursorEncodeNativeExecRejection(field, argsField.Bytes, reason)
 	if err != nil {
