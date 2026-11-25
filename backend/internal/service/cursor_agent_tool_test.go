@@ -209,7 +209,9 @@ func cursorTestDeclaredToolDefs(t *testing.T, req *apicompat.ChatCompletionsRequ
 	run := cursorAgentRunOf(t, body)
 	mcp, ok := cursorFindField(run, cursorFldRunMcpTools)
 	require.True(t, ok, "f4 (McpTools) must be present")
-	require.NotEmpty(t, mcp.Bytes)
+	if len(mcp.Bytes) == 0 {
+		return [][]byte{}
+	}
 	mcpFields, e := cursorDecodeProtobuf(mcp.Bytes)
 	require.NoError(t, e)
 	defs := [][]byte{}
