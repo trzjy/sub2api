@@ -27,7 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // cursorExecMetaLocalReadSchema 是本卡自带的 read 工具 schema 字面量（不依赖被删夹具）。
@@ -298,12 +297,11 @@ func TestCursorExecDispatchNoCrossTalkF36(t *testing.T) {
 }
 
 func TestCursorExecDispatchNoCrossTalkF11(t *testing.T) {
-	schema := `{"type":"object","properties":{"x":{"type":"string"}}}`
-	defs := [][]byte{cursorTestBuildToolDef(t, "my_tool", schema)}
+	defs := cursorTestTransportDefs(t, "my_tool")
 	d, buf, logs, cleanup := cursorExecRejectTestDuplex(t, defs...)
 
-	mcpArgs := cursorTestBuildMcpArgsOfficial(t, "call-1", "my_tool",
-		map[string]*structpb.Value{"x": cursorTestVal(t, "hello")})
+	mcpArgs := cursorToolTestBuildMcpArgs("call-1", "my_tool",
+		[]cursorToolTestMcpArgEntry{{key: "x", kind: "string", val: "hello"}})
 	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 1)
 	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-1"))
 	execMsg = cursorAppendBytesField(execMsg, 11, mcpArgs) // f11 mcp_args

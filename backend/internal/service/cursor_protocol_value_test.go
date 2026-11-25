@@ -8,12 +8,15 @@ package service
 // 期望值写死 JSON 字面量——绝不用被测实现自身的输出当期望值。
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -34,19 +37,57 @@ func cursorTestMarshalValue(t *testing.T, v *structpb.Value) []byte {
 	return b
 }
 
-// cursorTestBuildMcpArgsOfficial 用官方 Value 编码组装一条真实 McpArgs 字节
-// （f3 tool_call_id / f5 tool_name / f2 args，每条 entry = f1 key + f2 Value 直内联）。
+// cursorTestBuildMcpArgsOfficial 用官方 Value 编码组装一条真实运输帧 McpArgs 字节。
+//
+// 生产已改为单入口：f3 tool_call_id、f5 固定 cursorTransportToolName，
+// f2 两条 entry（每条 = {f1 key string, f2 Value.string}）：
+//   - tool_name      = toolName（客户端原工具名，由真实 f4 的 enum 校验）
+//   - arguments_json = entries 按 key 排序拼出的 JSON 对象字符串
+//
+// entry 的 value 经官方 Value 字节 → protojson → json.Compact 还原原值 JSON 文本，
+// 不经 map[string]any / float64 往返，避免数值失真；key 用 json.Marshal 正确转义。
 func cursorTestBuildMcpArgsOfficial(t *testing.T, tcID, toolName string, entries map[string]*structpb.Value) []byte {
 	t.Helper()
-	var mcpArgs []byte
-	for k, v := range entries {
-		valBytes := cursorTestMarshalValue(t, v)
-		entry := cursorAppendStringField(nil, 1, k)
-		entry = cursorAppendBytesField(entry, 2, valBytes)
-		mcpArgs = cursorAppendBytesField(mcpArgs, 2, entry)
+
+	keys := make([]string, 0, len(entries))
+	for k := range entries {
+		keys = append(keys, k)
 	}
+	sort.Strings(keys)
+
+	var obj strings.Builder
+	obj.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			obj.WriteByte(',')
+		}
+		keyJSON, err := json.Marshal(k)
+		require.NoError(t, err)
+		obj.Write(keyJSON)
+		obj.WriteByte(':')
+
+		v := &structpb.Value{}
+		require.NoError(t, proto.Unmarshal(cursorTestMarshalValue(t, entries[k]), v))
+		raw, err := protojson.Marshal(v)
+		require.NoError(t, err)
+		var compact bytes.Buffer
+		require.NoError(t, json.Compact(&compact, raw))
+		obj.Write(compact.Bytes())
+	}
+	obj.WriteByte('}')
+
+	// 每条 entry 先组成 {f1 key, f2 Value.string}，再作为 McpArgs 的 f2 字段。
+	var mcpArgs []byte
+	toolNameEntry := cursorAppendStringField(nil, 1, cursorTransportToolNameKey)
+	toolNameEntry = cursorAppendBytesField(toolNameEntry, 2, cursorAppendStringField(nil, 3, toolName))
+	mcpArgs = cursorAppendBytesField(mcpArgs, 2, toolNameEntry)
+
+	argsEntry := cursorAppendStringField(nil, 1, cursorTransportArgumentsKey)
+	argsEntry = cursorAppendBytesField(argsEntry, 2, cursorAppendStringField(nil, 3, obj.String()))
+	mcpArgs = cursorAppendBytesField(mcpArgs, 2, argsEntry)
+
 	mcpArgs = cursorAppendStringField(mcpArgs, 3, tcID)
-	mcpArgs = cursorAppendStringField(mcpArgs, 5, toolName)
+	mcpArgs = cursorAppendStringField(mcpArgs, 5, cursorTransportToolName)
 	return mcpArgs
 }
 

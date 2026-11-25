@@ -606,8 +606,11 @@ func TestCursorContinuationToolCallAndResult(t *testing.T) {
 			c := cursorTestBlobContent(t, b)
 			if strings.Contains(c, "<tool_call>") &&
 				strings.Contains(c, `"id":"call_1"`) &&
-				strings.Contains(c, `"name":"get_weather"`) &&
-				strings.Contains(c, `"arguments":{"city":"Beijing"}`) {
+				strings.Contains(c, `"name":"invoke_client_tool"`) &&
+				strings.Contains(c, `"tool_name":"get_weather"`) &&
+				strings.Contains(c, `"arguments_json"`) &&
+				strings.Contains(c, `"city"`) &&
+				strings.Contains(c, "Beijing") {
 				found = true
 			}
 		}
@@ -629,7 +632,7 @@ func TestCursorContinuationToolCallAndResult(t *testing.T) {
 		action := cursorActionTextOf(t, run)
 		require.Contains(t, action, "<tool_result")
 		require.Contains(t, action, `tool_call_id="call_1"`)
-		require.Contains(t, action, `name="get_weather"`)
+		require.Contains(t, action, `name="invoke_client_tool"`)
 		require.Contains(t, action, "sunny")
 		// 历史 blob 含 "q" 与 "done"（不含被丢弃）。
 		blobs := cursorBlobsOf(t, run)
