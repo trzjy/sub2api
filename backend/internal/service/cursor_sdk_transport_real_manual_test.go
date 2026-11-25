@@ -83,7 +83,7 @@ func TestCursorSDKTransportRealUpstreamManual(t *testing.T) {
 	resumeBody := `{"model":"real-chat","stream":true,"messages":[` +
 		`{"role":"user","content":` + strconv.Quote(prompt) + `},` +
 		`{"role":"assistant","content":null,"tool_calls":[{"id":` + strconv.Quote(tcID) +
-		`,"type":"function","function":{"name":"echo_value","arguments":` + strconv.Quote(tcArgs) + `}}]},` +
+		`,"type":"function","function":{"name":"echo_value","arguments":` + strconv.Quote(string(tcArgs)) + `}}]},` +
 		`{"role":"tool","tool_call_id":` + strconv.Quote(tcID) + `,"content":` + strconv.Quote(nonce) + `}],` +
 		`"tools":[{"type":"function","function":{"name":"echo_value","description":"Echo a value","parameters":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}}]}`
 	probe, err := CursorProbeResumeRequest(CursorResumeProtocolChat, []byte(resumeBody))
