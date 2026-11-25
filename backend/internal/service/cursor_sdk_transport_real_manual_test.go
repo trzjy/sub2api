@@ -60,6 +60,17 @@ func cursorRealSSEText(t *testing.T, body string) string {
 	return sb.String()
 }
 
+func (s *cursorFullChainSettlement) completeEvent() (CursorSettlementEvent, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ev := range s.events {
+		if ev.UsageComplete {
+			return ev, true
+		}
+	}
+	return CursorSettlementEvent{}, false
+}
+
 func TestCursorSDKTransportRealUpstreamManual(t *testing.T) {
 	bearer := os.Getenv("CURSOR_REAL_BEARER")
 	code := os.Getenv("CURSOR_REAL_CODE")
@@ -135,9 +146,16 @@ func TestCursorSDKTransportRealUpstreamManual(t *testing.T) {
 	require.GreaterOrEqual(t, calls, 1)
 	require.Equal(t, 1, complete, "exactly one real-usage settlement")
 
+	ev, ok := settle.completeEvent()
+	require.True(t, ok, "must have a complete real-usage settlement event")
+	require.NotNil(t, ev.Result)
+	u := ev.Result.Usage
+	require.Greater(t, u.InputTokens, 0)
+	require.Greater(t, u.OutputTokens, 0)
+	t.Logf("EVENT usages input=%d output=%d cache_read=%d cache_write=%d", u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+
 	sum := sha256.Sum256([]byte(tcArgs))
 	t.Logf("EVENT tool_call name=%s args_sha256=%s", tcName, hex.EncodeToString(sum[:8]))
 	t.Logf("EVENT resume nonce_echoed=%v", strings.Contains(finalText, nonce))
 	t.Logf("EVENT settlement calls=%d complete=%d", calls, complete)
-	t.Logf("EVENT usages input=%d output=%d cache_read=%d cache_write=%d", res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CacheReadInputTokens, res.Usage.CacheCreationInputTokens)
 }
