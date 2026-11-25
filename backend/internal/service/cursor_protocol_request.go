@@ -371,10 +371,10 @@ type cursorAgentToolCall struct {
 }
 
 // cursorAgentToolResult 是 tool 历史里的一条结果：callID 与对应调用一致，text 为真实结果文本。
-// 入站 ChatMessage 没有 is_error 字段，历史结果一律按成功形状表达，不猜错误。
 type cursorAgentToolResult struct {
-	callID string
-	text   string
+	callID  string
+	text    string
+	isError bool
 }
 
 // cursorAgentTurn 是一条已归一化的对话轮次（角色 + 文本 + 可选图片 + 结构化工具调用/结果）。
@@ -449,9 +449,7 @@ type cursorHistoryCallToolArgs struct {
 //	 "toolName":"CallDynamicTool","result":"<文本>",
 //	 "experimental_content":[{"type":"text","text":"<同一文本>"}]}],
 //	 "id":"call_…","providerOptions":{"cursor":{"highLevelToolCallResult":{
-//	 "output":{"success":{"content":[{"text":{"text":"<同一文本>"}}]}},"isError":false}}}}
-//
-// 入站 ChatMessage 没有 is_error 字段，历史结果一律按成功形状表达，不猜错误。
+//	 "output":{"success":{"content":[{"text":{"text":"<同一文本>"}}],"isError":true}},"isError":true}}}}
 type cursorHistoryToolBlob struct {
 	Role            string                        `json:"role"`
 	Content         []cursorHistoryToolResultPart `json:"content"`
@@ -486,6 +484,7 @@ type cursorHistoryToolOutput struct {
 
 type cursorHistoryToolSuccess struct {
 	Content []cursorHistorySuccessContent `json:"content"`
+	IsError bool                          `json:"isError,omitempty"`
 }
 
 type cursorHistorySuccessContent struct {
@@ -584,6 +583,7 @@ func cursorHistoryBlobs(history []cursorAgentTurn, skipped cursorSkipLedger) ([]
 			content := make([]cursorHistoryToolResultPart, 0, len(turn.toolResults))
 			successContent := make([]cursorHistorySuccessContent, 0, len(turn.toolResults))
 			resultID := ""
+			isError := false
 			for _, r := range turn.toolResults {
 				content = append(content, cursorHistoryToolResultPart{
 					Type:       "tool-result",
@@ -597,6 +597,7 @@ func cursorHistoryBlobs(history []cursorAgentTurn, skipped cursorSkipLedger) ([]
 				successContent = append(successContent, cursorHistorySuccessContent{
 					Text: cursorHistorySuccessText{Text: r.text},
 				})
+				isError = isError || r.isError
 				if resultID == "" {
 					resultID = r.callID
 				}
@@ -610,9 +611,9 @@ func cursorHistoryBlobs(history []cursorAgentTurn, skipped cursorSkipLedger) ([]
 					Cursor: cursorHistoryToolCursorOpts{
 						HighLevelToolCallResult: cursorHistoryToolHighLevelResult{
 							Output: cursorHistoryToolOutput{
-								Success: cursorHistoryToolSuccess{Content: successContent},
+								Success: cursorHistoryToolSuccess{Content: successContent, IsError: isError},
 							},
-							IsError: false,
+							IsError: isError,
 						},
 					},
 				},
@@ -739,7 +740,7 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage, skipped cursorSkipLedge
 				role:        "tool",
 				text:        text,
 				images:      images,
-				toolResults: []cursorAgentToolResult{{callID: m.ToolCallID, text: text}},
+				toolResults: []cursorAgentToolResult{{callID: m.ToolCallID, text: text, isError: m.IsError}},
 			})
 		case "":
 			// 没有角色的消息：丢这一条，不整轮拒（2026-11-06 产品口径：

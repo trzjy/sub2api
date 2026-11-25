@@ -5307,10 +5307,18 @@ func cursorGeminiRequestToChatCompletions(body []byte, model string, stream bool
 				if payload == "" || payload == "null" {
 					payload = "{}"
 				}
+				responseText := payload
+				if err := json.Unmarshal([]byte(payload), &responseText); err != nil {
+					responseText = payload
+				}
+				content, err := json.Marshal(responseText)
+				if err != nil {
+					return nil, fmt.Errorf("cursor: encode gemini functionResponse: %w", err)
+				}
 				messages = append(messages, apicompat.ChatMessage{
 					Role:       "tool",
 					ToolCallID: callID,
-					Content:    []byte(payload),
+					Content:    content,
 				})
 				continue
 			}

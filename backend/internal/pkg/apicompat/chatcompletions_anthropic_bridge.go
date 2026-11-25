@@ -229,6 +229,7 @@ func anthropicUserToChatMessages(raw json.RawMessage) ([]ChatMessage, error) {
 		out = append(out, ChatMessage{
 			Role:       "tool",
 			Content:    content,
+			IsError:    b.IsError,
 			ToolCallID: b.ToolUseID,
 		})
 		for _, ip := range imageParts {

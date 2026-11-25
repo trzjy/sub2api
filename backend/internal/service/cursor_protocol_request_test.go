@@ -375,6 +375,49 @@ func TestCursorProtocolRequestFailsClosed(t *testing.T) {
 	}
 }
 
+func TestCursorHistoryPreservesAnthropicToolResultError(t *testing.T) {
+	request := &apicompat.AnthropicRequest{
+		Model: "cursor-test-model",
+		Messages: []apicompat.AnthropicMessage{
+			{Role: "user", Content: json.RawMessage(`"question"`)},
+			{Role: "assistant", Content: json.RawMessage(`[{
+				"type":"tool_use","id":"call_error","name":"lookup","input":{}
+			}]`)},
+			{Role: "user", Content: json.RawMessage(`[{
+				"type":"tool_result","tool_use_id":"call_error","is_error":true,"content":"denied"
+			}]`)},
+			{Role: "user", Content: json.RawMessage(`"continue"`)},
+		},
+	}
+	converted, err := apicompat.AnthropicToChatCompletionsRequest(request)
+	require.NoError(t, err)
+	turns, err := cursorConvertMessages(converted.Messages, cursorSkipLedger{})
+	require.NoError(t, err)
+	blobs, err := cursorHistoryBlobs(turns[:3], cursorSkipLedger{})
+	require.NoError(t, err)
+	require.Len(t, blobs, 3)
+	require.JSONEq(t, `{"role":"tool","content":[{"type":"tool-result","toolCallId":"call_error","toolName":"CallDynamicTool","result":"denied","experimental_content":[{"type":"text","text":"denied"}]}],"id":"call_error","providerOptions":{"cursor":{"highLevelToolCallResult":{"output":{"success":{"content":[{"text":{"text":"denied"}}],"isError":true}},"isError":true}}}}`, string(blobs[2].value))
+}
+
+func TestCursorHistoryPreservesGeminiFunctionResponseObject(t *testing.T) {
+	body := []byte(`{"contents":[
+		{"role":"user","parts":[{"text":"question"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call_error","name":"lookup","args":{}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call_error","name":"lookup","response":{"error":{"code":7,"message":"denied"}}}}]},
+		{"role":"user","parts":[{"text":"continue"}]}
+	]}`)
+	converted, err := cursorGeminiRequestToChatCompletions(body, "cursor-test-model", false)
+	require.NoError(t, err)
+	var request apicompat.ChatCompletionsRequest
+	require.NoError(t, json.Unmarshal(converted, &request))
+	turns, err := cursorConvertMessages(request.Messages, cursorSkipLedger{})
+	require.NoError(t, err)
+	blobs, err := cursorHistoryBlobs(turns[:3], cursorSkipLedger{})
+	require.NoError(t, err)
+	require.Len(t, blobs, 3)
+	require.JSONEq(t, `{"role":"tool","content":[{"type":"tool-result","toolCallId":"call_error","toolName":"CallDynamicTool","result":"{\"error\":{\"code\":7,\"message\":\"denied\"}}","experimental_content":[{"type":"text","text":"{\"error\":{\"code\":7,\"message\":\"denied\"}}"}]}],"id":"call_error","providerOptions":{"cursor":{"highLevelToolCallResult":{"output":{"success":{"content":[{"text":{"text":"{\"error\":{\"code\":7,\"message\":\"denied\"}}"}}]}},"isError":false}}}}`, string(blobs[2].value))
+}
+
 // TestCursorConvertRequestTextPartsAccepted 覆盖纯文本 content-parts 数组降级为字符串。
 func TestCursorProtocolRequestTextPartsAccepted(t *testing.T) {
 	req := &apicompat.ChatCompletionsRequest{
