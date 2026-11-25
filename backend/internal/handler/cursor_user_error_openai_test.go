@@ -246,7 +246,8 @@ func TestCursorUserErrorOpenAIGatewayMessagesStreamStartedKeepsStatus(t *testing
 	out := rec.Body.String()
 	require.Contains(t, out, "event: error")
 	require.Contains(t, out, `"type":"api_error"`)
-	require.Contains(t, out, "错误码 "+infraerrors.CursorExecDeadlineExceeded)
+	require.Contains(t, out, infraerrors.CursorExecDeadlineExceeded)
+	require.NotContains(t, out, "CUR-")
 	require.Contains(t, out, "请求号 "+openAIGatewayCursorTestRequestID)
 }
 
