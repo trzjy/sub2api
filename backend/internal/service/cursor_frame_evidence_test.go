@@ -186,6 +186,39 @@ func TestFrameEvidenceUserErrorCarriesFrameClass(t *testing.T) {
 	require.True(t, found, "cursor_user_error 必须带帧级字段（error_class=protocol_frame:<class> + protocol_frame_class + protocol_frame_index）")
 }
 
+// TestFrameEvidenceMcpParseDetailReachesUserErrorLog 真实原生 MCP 重复键错误到达
+// cursor_user_error 时，日志必须保留可定位的解析原因，不得包含参数正文。
+func TestFrameEvidenceMcpParseDetailReachesUserErrorLog(t *testing.T) {
+	ctx, logs := cursorPhaseObserverCtx(t, "req-frame-mcp-error")
+	defs := cursorSDKTransportDeclaredDefs(t, "Bash")
+	payload := cursorSDKTransportBuildMcpArgsRaw("call-mcp-error", "Bash",
+		cursorSDKTransportArgEntry{key: "command", value: cursorSDKTransportStringValue("echo private-value")},
+		cursorSDKTransportArgEntry{key: "command", value: cursorSDKTransportStringValue("echo second")})
+	_, _, _, err := cursorDecodeMcpArgs(payload, defs)
+	require.Error(t, err)
+
+	account := &Account{ID: 1, Platform: PlatformCursor}
+	c := frameEvidenceGinContext(t, ctx)
+	_, msg, hit := cursorCompatUserError(c, account, err)
+	require.True(t, hit)
+	require.NotEmpty(t, msg)
+
+	var found bool
+	for _, e := range logs.All() {
+		if e.Message != "cursor_user_error" {
+			continue
+		}
+		m := e.ContextMap()
+		if m["protocol_frame_class"] == "frame_mcp_args" {
+			found = true
+			require.Equal(t, "protocol_frame:frame_mcp_args", m["error_class"])
+			require.Equal(t, `duplicate mcp arg "command"`, m["protocol_error_detail"])
+			require.NotContains(t, fmt.Sprint(m), "private-value")
+		}
+	}
+	require.True(t, found, "真实 MCP 参数解析错误应到达 cursor_user_error 诊断日志")
+}
+
 // TestFrameEvidenceNoFrameContentLeak 帧级诊断绝不含帧内容明文。
 func TestFrameEvidenceNoFrameContentLeak(t *testing.T) {
 	const marker = "SECRET-PAYLOAD-MARKER"

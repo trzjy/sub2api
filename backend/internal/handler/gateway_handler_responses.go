@@ -721,7 +721,6 @@ func (h *GatewayHandler) writeResponsesForwardErrorResponse(c *gin.Context, reqL
 		errType = "invalid_request_error"
 	}
 	fields := []zap.Field{
-		zap.String("error_code", code),
 		zap.Int("status", status),
 		zap.String("error_class", service.CursorStreamErrClassForLog(err)),
 	}

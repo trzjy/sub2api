@@ -2281,7 +2281,6 @@ func openAICursorUserError(c *gin.Context, reqLog *zap.Logger, account *service.
 	}
 	if reqLog != nil {
 		fields := []zap.Field{
-			zap.String("error_code", code),
 			zap.Int("status", status),
 			zap.String("error_class", service.CursorStreamErrClassForLog(err)),
 		}

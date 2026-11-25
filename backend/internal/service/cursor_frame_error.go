@@ -14,8 +14,8 @@ package service
 //     `CursorUserFacingError` → `CUR-EXEC-03` 的映射完全不变。
 //  3. **不丢底层原因**：需要保留 `%w` 链的（如读流时的 io 错误）走 `cursorFrameErrorWrapf`，
 //     用 `Unwrap() []error` 同时暴露哨兵与 cause。
-//  4. 日志只保留解析原因；非法 arguments_json 另外只保留长度、指纹和有限脱敏片段，
-//     不把完整工具参数无限制写进日志。
+//  4. 日志只保留解析原因，不写原始工具参数；参数值解码失败时也只记录有限的
+//     脱敏错误摘要，避免把完整输入无限制写进日志。
 
 import (
 	"errors"

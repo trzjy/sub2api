@@ -123,7 +123,8 @@ func TestCursorAnnotateFrame(t *testing.T) {
 	require.Nil(t, cursorAnnotateFrame(nil, 3))
 }
 
-// TestCursorFrameErrFields 渲染 zap 字段：只出枚举与整数，无帧内容。
+// TestCursorFrameErrFields 渲染 zap 字段：帧级类别、MCP 解析原因与序号可见，
+// 但不写原始参数正文。
 func TestCursorFrameErrFields(t *testing.T) {
 	require.Nil(t, cursorFrameErrFields(nil))
 	require.Nil(t, cursorFrameErrFields(errors.New("plain")))
@@ -138,8 +139,17 @@ func TestCursorFrameErrFields(t *testing.T) {
 
 	// 无序号时不输出 index 字段。
 	fields = cursorFrameErrFields(cursorFrameErrorf(cursorFrameMcpArgs, "mcp value has no kind set"))
-	require.Len(t, fields, 1)
+	require.Len(t, fields, 2)
 	require.Equal(t, "protocol_frame_class", fields[0].Key)
+	require.Equal(t, "protocol_error_detail", fields[1].Key)
+	require.Equal(t, "mcp value has no kind set", fields[1].String)
+
+	fields = cursorFrameErrFields(cursorFrameErrorf(cursorFrameMcpArgs,
+		`decode mcp args: api_key="secret-value" command="echo ok"`))
+	require.Len(t, fields, 2)
+	require.Equal(t, "protocol_error_detail", fields[1].Key)
+	require.Contains(t, fields[1].String, `command="echo ok"`)
+	require.NotContains(t, fields[1].String, "secret-value")
 }
 
 // TestCursorFrameErrClassFamilyCoverage 钉死"每一类都有出口"：全部帧级构造点产出的
