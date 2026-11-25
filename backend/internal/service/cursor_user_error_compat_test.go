@@ -3,7 +3,7 @@
 package service
 
 // M3e：Gemini 兼容服务三个 Cursor 出口（Messages / Chat Completions / 原生 v1beta）
-// 在 Cursor 账号上按 CursorUserFacingError 写回中文提示与对应状态码（方案 §2.2.2、§2.3 M3）；
+// 在 Cursor 账号上按 CursorUserFacingError 写回中文提示与对应状态码；
 // 非 Cursor 账号保持改前行为。直接驱动三个写回函数（出口的唯一错误写回点）。
 
 import (
@@ -85,7 +85,6 @@ type cursorUserErrorCompatCase struct {
 	name    string
 	err     error
 	status  int
-	code    string
 	zh      string
 	msgType string // Messages / Chat 出口 4xx 期望的 error.type
 }
@@ -95,22 +94,22 @@ func cursorUserErrorCompatCases() []cursorUserErrorCompatCase {
 		{
 			name:   "resume_unknown_association",
 			err:    &CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"},
-			status: http.StatusBadRequest, code: infraerrors.CursorResUnknownAssociation, zh: infraerrors.CursorResUnknownAssociation,
+			status: http.StatusBadRequest, zh: infraerrors.CursorResUnknownAssociation,
 		},
 		{
 			name:   "request_invalid_image",
 			err:    newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqUnsupportedMessage, "request content cannot be converted"),
-			status: http.StatusBadRequest, code: infraerrors.CursorReqUnsupportedMessage, zh: infraerrors.CursorReqUnsupportedMessage,
+			status: http.StatusBadRequest, zh: infraerrors.CursorReqUnsupportedMessage,
 		},
 		{
 			name:   "deadline_exceeded",
 			err:    context.DeadlineExceeded,
-			status: http.StatusGatewayTimeout, code: infraerrors.CursorExecDeadlineExceeded, zh: infraerrors.CursorExecDeadlineExceeded,
+			status: http.StatusGatewayTimeout, zh: infraerrors.CursorExecDeadlineExceeded,
 		},
 	}
 }
 
-// TestCursorUserErrorCompatCursorAccount：Cursor 账号三出口按映射写回状态码 + 中文 + 错误码 + 请求号。
+// TestCursorUserErrorCompatCursorAccount：Cursor 账号三出口按映射写回状态码 + 中文提示 + 请求号。
 func TestCursorUserErrorCompatCursorAccount(t *testing.T) {
 	account := &Account{ID: 1, Platform: PlatformCursor}
 	for _, exit := range cursorUserErrorCompatExits() {
@@ -122,7 +121,7 @@ func TestCursorUserErrorCompatCursorAccount(t *testing.T) {
 				require.Equal(t, tc.status, w.Code)
 				msg, errType := exit.parse(t, w.Body.Bytes())
 				require.Contains(t, msg, tc.zh)
-				require.Contains(t, msg, "错误码 "+tc.code)
+				require.NotContains(t, msg, "CUR-")
 				require.Contains(t, msg, "请求号 "+cursorUserErrorCompatRequestID)
 				require.NotContains(t, msg, "cursor:", "英文内部细节不得给用户")
 				switch exit.name {
