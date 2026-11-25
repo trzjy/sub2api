@@ -609,7 +609,7 @@ func TestCursorContinuationToolCallAndResult(t *testing.T) {
 				strings.Contains(c, `"name":"invoke_client_tool"`) &&
 				strings.Contains(c, `"tool_name":"get_weather"`) &&
 				strings.Contains(c, `"arguments_json"`) &&
-				strings.Contains(c, `"city"`) &&
+				strings.Contains(c, "city") &&
 				strings.Contains(c, "Beijing") {
 				found = true
 			}

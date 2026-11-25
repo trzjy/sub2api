@@ -67,7 +67,7 @@ func cursorTextOnlyBody(t *testing.T, withRealCall bool) []byte {
 	if withRealCall {
 		// f11 mcp_args：exec_id=7、f15 id=exec-id、tool=get_weather。
 		args := cursorSDKTransportBuildMcpArgs("call_real_f11", "get_weather", `{"city":"Beijing"}`)
-		frames = append(frames, cursorSDKTransportExecFrame(args)...)
+		frames = append(frames, cursorEncodeEnvelope(cursorSDKTransportExecFrame(args))...)
 	}
 	for _, text := range cursorTextOnlyContentFrames(t) {
 		frames = append(frames, cursorTextDeltaFrame(t, text)...)
