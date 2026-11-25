@@ -2,9 +2,9 @@
 
 package service
 
-// Cursor custom 工具的单入口运输契约：client 声明的 custom 工具原名与原 schema
-// 必须出现在 f4 唯一一条定义的工具目录里；回程 f11 经 cursorDecodeMcpArgs 解码后
-// 回到原名与原参数字节。逐工具 schema / retype / synthetic-shell 机制已移除。
+// Cursor custom 工具目录与原生回程契约：client 声明的 custom 工具原名与原 schema
+// 出现在 f4 的工具目录里；回程 f11 按第三方原生 mcp_args 经 cursorDecodeMcpArgs
+// 解码后回到真实工具名与逐 Value 解码的参数。请求侧声明改造由后续卡负责。
 
 import (
 	"encoding/json"
@@ -16,10 +16,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCursorSDKTransportCustomToolCatalog 钉住单入口运输下 custom 工具的目录与回程契约：
-//   - f4 只有一条定义（invoke_client_tool）；
-//   - f2 description 的工具目录保留 custom 工具原名与原 schema；
-//   - 运输 f11 解码后回到原名与原参数字节。
+// TestCursorSDKTransportCustomToolCatalog 钉住 custom 工具的目录与原生回程契约：
+//   - 当前 f4 仍只有一条定义（invoke_client_tool），目录在 f2 description；
+//   - 目录保留 custom 工具原名与原 schema；
+//   - 原生 f11 解码后回到真实工具名与原参数值。
 func TestCursorSDKTransportCustomToolCatalog(t *testing.T) {
 	const customSchema = `{"type":"object","properties":{"input":{"type":"string"}}}`
 	req := &apicompat.ChatCompletionsRequest{
@@ -56,9 +56,9 @@ func TestCursorSDKTransportCustomToolCatalog(t *testing.T) {
 	fields, e := cursorDecodeProtobuf(defs[0].Bytes)
 	require.NoError(t, e)
 
-	// f1 name / f5 tool_name 都是单入口 invoke_client_tool。
-	assert.Equal(t, cursorTransportToolName, cursorTestFieldString(fields, cursorFldMcpToolDefName))
-	assert.Equal(t, cursorTransportToolName, cursorTestFieldString(fields, cursorFldMcpToolDefToolName))
+	// 当前请求侧 f4 仍是单入口包装（声明改造属后续卡），用字面量避免引用将被删除的常量。
+	assert.Equal(t, "invoke_client_tool", cursorTestFieldString(fields, cursorFldMcpToolDefName))
+	assert.Equal(t, "invoke_client_tool", cursorTestFieldString(fields, cursorFldMcpToolDefToolName))
 
 	// f2 description 中 "Tool catalog: " 之后是 JSON 数组，保留每个工具的原名与原 schema。
 	desc := cursorTestFieldString(fields, cursorFldMcpToolDefDescription)
@@ -78,15 +78,17 @@ func TestCursorSDKTransportCustomToolCatalog(t *testing.T) {
 	require.Contains(t, byName, "wait", "目录必须保留普通 function 工具原名")
 	assert.Contains(t, string(byName["exec"]), `"input"`, "custom 工具的原 schema 文本必须出现在目录里")
 
-	// 运输 f11：tool_name=exec，arguments_json={"input":"echo hi"}，解码后回原名与原字节。
+	// 原生 f11：f5=真实工具名 exec，f2 map entry 的键是客户自有参数 input；
+	// 声明夹具用本地 f4 定义（f5=exec），请求侧声明改造属后续卡。
 	const argsJSON = `{"input":"echo hi"}`
 	mcpArgs := cursorToolTestBuildMcpArgs("call_exec", "exec", []cursorToolTestMcpArgEntry{
 		{key: "input", kind: "string", val: "echo hi"},
 	})
-	_, toolName, outArgsJSON, err := cursorDecodeMcpArgs(mcpArgs, [][]byte{defs[0].Bytes})
+	nativeDef := cursorTestBuildToolDef(t, "exec", customSchema)
+	_, toolName, outArgsJSON, err := cursorDecodeMcpArgs(mcpArgs, [][]byte{nativeDef})
 	require.NoError(t, err)
-	assert.Equal(t, "exec", toolName)
-	assert.Equal(t, argsJSON, outArgsJSON, "arguments_json 必须逐字节原样返回")
+	assert.Equal(t, "exec", toolName, "真实工具名来自 f5")
+	assert.Equal(t, argsJSON, outArgsJSON, "参数按 Value 解码后逐字节一致")
 }
 
 // TestCursorF4Custom_FlattenCollisionErrors 钉住冲突语义：namespace 子工具摊平名与顶层

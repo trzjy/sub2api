@@ -1417,8 +1417,8 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 				if derr != nil {
 					return cursorStreamEvent{}, derr
 				}
-				// 无损交付：argsJSON 是与上游 arguments_json 原始字节一致的对象 JSON，
-				// 不再做 map 往返 / schema retype / 旧格式 fallback。
+				// 无损交付：argsJSON 由原生 Value 逐项标准解码后组装的对象 JSON，
+				// 不再做 map[string]any 往返 / schema retype / 旧格式 fallback。
 				if derr := delegations.noteDelegation("", cursorToolCallCapture{
 					ID: id, Name: name, ArgsJSON: argsJSON,
 					ExecID: execID, IDField: idField,
@@ -1664,38 +1664,35 @@ func (p *cursorStreamParser) noteToolRequestsListed(b []byte) error {
 	return nil
 }
 
-// cursorDecodeMcpArgs 解析 exec 内层 f11（mcp_args）的 **运输帧**。
+// cursorDecodeMcpArgs 按第三方真实格式读取 exec 内层 f11（mcp_args）：
+//   - f3 = tool_call_id（string）；
+//   - f5 = 真实工具名（string，客户端原工具，不再限定任何本站包装工具名）；
+//   - 顶层每条 f2 = 一条 map entry（f1 key string、f2 google.protobuf.Value）。
 //
-// 上游只回调一个工具 f5=cursorTransportToolName（invoke_client_tool），其 f2 map 只含
-// 两个字符串值：f1=cursorTransportToolNameKey（客户端原工具名，必须属于真实 f4 的
-// tool_name enum）、f1=cursorTransportArgumentsKey（完整参数 JSON 对象字符串）。
+// 每个 Value 逐条经 cursorDecodeMcpValue 标准解码为 JSON 字节，收进
+// map[string]json.RawMessage，再用 json.Marshal 组装完整对象（空参数集为合法 {}）；
+// 不为组装把参数解成 map[string]any/float64，不猜类型、不补值、不做旧壳兼容。
+// 重复 key 明确失败关闭，绝不静默覆盖。
 //
-// 无损纪律：arguments_json 只做 TrimSpace / 合法性校验，原字节直接返回，
-// 绝不转 map、不补 null、不猜类型、不做 schema retype、不接受旧直接参数格式。
-//
-// 返回 (call_id, tool_name, trimmedArgsJSON, error)。duplex 与独立 parser 共用本实现。
+// 声明校验：declaredToolDefs 每条 McpToolDefinition 的 f5 是真实工具名；集合为空
+// 或本次 f5 不在集合内一律失败关闭。duplex 与独立 parser 共用本实现。
 func cursorDecodeMcpArgs(payload []byte, declaredToolDefs [][]byte) (string, string, string, error) {
 	fields, err := cursorDecodeProtobuf(payload)
 	if err != nil {
 		return "", "", "", err
 	}
 	idF, _ := cursorFindField(fields, 3)
+	if idF.Wire != cursorWireBytes {
+		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "mcp args call id has wrong wire type")
+	}
 	nameF, _ := cursorFindField(fields, 5)
-	if nameF.String() != cursorTransportToolName {
-		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "unexpected mcp tool %q", nameF.String())
+	if nameF.Wire != cursorWireBytes {
+		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "mcp args tool name has wrong wire type")
 	}
-	allowed, err := cursorTransportAllowedToolNames(declaredToolDefs)
-	if err != nil {
-		return "", "", "", err
-	}
-	if len(allowed) == 0 {
-		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "empty transport tool declaration")
-	}
+	toolName := nameF.String()
 
-	// 顶层全部 f2 字段，每条即一条 map entry（{f1 key, f2 Value}）；只接受
-	// tool_name / arguments_json 两个键，缺键 / 多键 / 重复键都失败关闭。
-	var toolName, argsJSON string
-	seenTool, seenArgs := false, false
+	// 原生参数：顶层全部 f2 字段，每条即一条 map entry（{f1 key, f2 Value}）。
+	args := make(map[string]json.RawMessage)
 	for _, f := range fields {
 		if f.Number != 2 {
 			continue
@@ -1705,55 +1702,43 @@ func cursorDecodeMcpArgs(payload []byte, declaredToolDefs [][]byte) (string, str
 			return "", "", "", e
 		}
 		keyF, ok := cursorFindField(entryInner, 1)
-		if !ok {
+		if !ok || keyF.Wire != cursorWireBytes {
 			return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "mcp args entry has no key")
 		}
 		valF, ok := cursorFindField(entryInner, 2)
-		if !ok {
+		if !ok || valF.Wire != cursorWireBytes {
 			return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "mcp args entry has no value")
+		}
+		key := keyF.String()
+		if _, exists := args[key]; exists {
+			return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "duplicate mcp arg %q", key)
 		}
 		v, e := cursorDecodeMcpValue(valF.Bytes)
 		if e != nil {
 			return "", "", "", e
 		}
-		var s string
-		if e := json.Unmarshal([]byte(v), &s); e != nil {
-			return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "mcp arg %q is not a string", keyF.String())
-		}
-		switch keyF.String() {
-		case cursorTransportToolNameKey:
-			if seenTool {
-				return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "duplicate mcp arg %q", cursorTransportToolNameKey)
-			}
-			seenTool = true
-			toolName = s
-		case cursorTransportArgumentsKey:
-			if seenArgs {
-				return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "duplicate mcp arg %q", cursorTransportArgumentsKey)
-			}
-			seenArgs = true
-			argsJSON = s
-		default:
-			return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "unexpected mcp arg key %q", keyF.String())
-		}
+		args[key] = json.RawMessage(v)
 	}
-	if !seenTool || !seenArgs {
-		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "missing transport mcp args key")
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return "", "", "", cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "marshal mcp args: %v", err)
 	}
 
-	allowedSet := make(map[string]bool, len(allowed))
-	for _, name := range allowed {
-		allowedSet[name] = true
+	// 声明校验：集合为空或本次真实工具名未被声明都失败关闭。
+	declared := make(map[string]bool, len(declaredToolDefs))
+	for _, def := range declaredToolDefs {
+		defFields, e := cursorDecodeProtobuf(def)
+		if e != nil {
+			return "", "", "", cursorFrameErrorWrapf(cursorFrameMcpArgs, e, "decode tool definition: %v", e)
+		}
+		if name, ok := cursorFindField(defFields, cursorFldMcpToolDefToolName); ok {
+			declared[name.String()] = true
+		}
 	}
-	if !allowedSet[toolName] {
+	if !declared[toolName] {
 		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "undeclared tool name %q", toolName)
 	}
-
-	trimmed := strings.TrimSpace(argsJSON)
-	if trimmed == "" || trimmed[0] != '{' || !json.Valid([]byte(trimmed)) {
-		return "", "", "", cursorFrameErrorf(cursorFrameMcpArgs, "invalid arguments_json")
-	}
-	return idF.String(), toolName, trimmed, nil
+	return idF.String(), toolName, string(argsJSON), nil
 }
 
 // cursorDecodeMcpValue 解析 McpArgs args 的单个 Value。
@@ -1794,72 +1779,6 @@ func cursorDecodeMcpValue(b []byte) (string, error) {
 		return "", cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "compact mcp value: %v", err)
 	}
 	return buf.String(), nil
-}
-
-// cursorTransportAllowedToolNames 从本请求 f4（McpTools）的真实 McpToolDefinition
-// 字节里取出运输工具的 tool_name enum——本站允许接收的客户端工具名白名单。
-//
-// 逐条 f4 定义解码：找 f1 名等于 cursorTransportToolName 的那条；从 f3 的
-// google.protobuf.Value 取 properties.tool_name.enum 字符串列表。没有运输定义返回
-// nil（调用方据此判空拒绝）；找到运输定义但 schema 畸形 → 错误。
-func cursorTransportAllowedToolNames(defs [][]byte) ([]string, error) {
-	for _, def := range defs {
-		fields, err := cursorDecodeProtobuf(def)
-		if err != nil {
-			return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "decode tool definition: %v", err)
-		}
-		nameF, _ := cursorFindField(fields, cursorFldMcpToolDefName)
-		if nameF.String() != cursorTransportToolName {
-			continue
-		}
-		schemaF, ok := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
-		if !ok {
-			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool has no input schema")
-		}
-		v := &structpb.Value{}
-		if err := proto.Unmarshal(schemaF.Bytes, v); err != nil {
-			return nil, cursorFrameErrorWrapf(cursorFrameMcpArgs, err, "decode transport schema: %v", err)
-		}
-		root, ok := v.GetKind().(*structpb.Value_StructValue)
-		if !ok {
-			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport schema is not an object")
-		}
-		propsVal, ok := root.StructValue.GetFields()["properties"]
-		if !ok {
-			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport schema has no properties")
-		}
-		props, ok := propsVal.GetKind().(*structpb.Value_StructValue)
-		if !ok {
-			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport properties is not an object")
-		}
-		toolNameVal, ok := props.StructValue.GetFields()[cursorTransportToolNameKey]
-		if !ok {
-			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport schema has no tool_name property")
-		}
-		toolNameSchema, ok := toolNameVal.GetKind().(*structpb.Value_StructValue)
-		if !ok {
-			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool_name property is not an object")
-		}
-		enumVal, ok := toolNameSchema.StructValue.GetFields()["enum"]
-		if !ok {
-			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool_name has no enum")
-		}
-		list, ok := enumVal.GetKind().(*structpb.Value_ListValue)
-		if !ok {
-			return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool_name enum is not a list")
-		}
-		values := list.ListValue.GetValues()
-		allowed := make([]string, 0, len(values))
-		for _, ev := range values {
-			s, ok := ev.GetKind().(*structpb.Value_StringValue)
-			if !ok {
-				return nil, cursorFrameErrorf(cursorFrameMcpArgs, "transport tool_name enum has non-string member")
-			}
-			allowed = append(allowed, s.StringValue)
-		}
-		return allowed, nil
-	}
-	return nil, nil
 }
 
 // cursorCheckFiniteValue 递归校验 structpb.Value 内的全部数值是否为有限值。
