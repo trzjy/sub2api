@@ -418,7 +418,9 @@ func TestCursorGeminiToolConfigAndFunctionPartsMapping(t *testing.T) {
 	require.JSONEq(t, `{"city":"hz"}`, req.Messages[1].ToolCalls[0].Function.Arguments)
 	require.Equal(t, "tool", req.Messages[2].Role)
 	require.Equal(t, "call_9", req.Messages[2].ToolCallID)
-	require.JSONEq(t, `{"temp":25}`, string(req.Messages[2].Content))
+	var response string
+	require.NoError(t, json.Unmarshal(req.Messages[2].Content, &response))
+	require.JSONEq(t, `{"temp":25}`, response)
 }
 
 // ===========================================================================
