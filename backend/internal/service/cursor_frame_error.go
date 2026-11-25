@@ -14,12 +14,14 @@ package service
 //     `CursorUserFacingError` → `CUR-EXEC-03` 的映射完全不变。
 //  3. **不丢底层原因**：需要保留 `%w` 链的（如读流时的 io 错误）走 `cursorFrameErrorWrapf`，
 //     用 `Unwrap() []error` 同时暴露哨兵与 cause。
-//  4. 只输出枚举值，绝不把帧内容写进类别或日志（帧里可能有上游错误文案/账号信息）。
+//  4. 日志只保留解析原因；非法 arguments_json 另外只保留长度、指纹和有限脱敏片段，
+//     不把完整工具参数无限制写进日志。
 
 import (
 	"errors"
 	"fmt"
 
+	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
 	"go.uber.org/zap"
 )
 
@@ -134,13 +136,23 @@ func cursorAnnotateFrame(err error, index int) error {
 
 // cursorFrameErrFields 把帧级诊断渲染成 zap 安全字段（供日志附加，无帧级信息时返回 nil）。
 //
-// 只写枚举与整数，帧内容一概不落盘。
+// 写解析错误类别与具体原因，不写原始帧 payload。
 func cursorFrameErrFields(err error) []zap.Field {
 	class, index, ok := cursorFrameClassify(err)
 	if !ok {
 		return nil
 	}
 	fields := []zap.Field{zap.String("protocol_frame_class", string(class))}
+	var frameErr *cursorFrameError
+	if class == cursorFrameMcpArgs && errors.As(err, &frameErr) && frameErr != nil {
+		// 具体解析原因可区分协议结构问题；不记录参数正文。
+		detail := logredact.RedactText(frameErr.tail,
+			"api_key", "apikey", "authorization", "token", "secret", "cookie", "credential")
+		if len(detail) > 512 {
+			detail = detail[:512]
+		}
+		fields = append(fields, zap.String("protocol_error_detail", detail))
+	}
 	if index >= 0 {
 		fields = append(fields, zap.Int("protocol_frame_index", index))
 	}
