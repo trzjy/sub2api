@@ -1426,6 +1426,21 @@ func (p *cursorStreamParser) cursorParseMessageFrame(payload []byte) (cursorStre
 					return cursorStreamEvent{}, derr
 				}
 			}
+		} else if !cursorFindFieldOK(execParts, 10) && !cursorFindFieldOK(execParts, 36) {
+			// 不含 f11 mcp_args 的 exec 帧按统一字段表分类（方案 §8.2），不得静默跳过
+			// 未实现的执行：
+			//   - f10 request_context / f36 mcp_state 由 duplex 应答，独立 parser 无应答
+			//     能力，按原职责忽略（上面已排除，继续向下找 InteractionUpdate）；
+			//   - 意外 native exec 明确失败（零事件、零委托登记）；
+			//   - 未知执行字段明确失败；
+			//   - 纯元数据不承载执行指令，忽略。
+			if n, ok := cursorNativeExecRejectField(execParts); ok {
+				return cursorStreamEvent{}, cursorFrameErrorf(cursorFrameMessage,
+					"unexpected native exec field %d", n)
+			}
+			if !cursorExecMetadataOnly(execParts) {
+				return cursorStreamEvent{}, cursorFrameErrorf(cursorFrameMessage, "unsupported exec fields")
+			}
 		}
 	}
 	// 只有 interaction_update（f1）承载文本与 usage；其余分支（exec / kv /

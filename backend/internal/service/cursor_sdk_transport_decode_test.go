@@ -253,3 +253,65 @@ func TestCursorSDKTransportDecodeLegacyFormatRejected(t *testing.T) {
 	require.Error(t, err, "旧直接参数格式必须被拒绝，不得 fallback")
 	require.Empty(t, p.capturedToolCalls(), "拒绝后不得登记任何委托")
 }
+
+// TestCursorSDKTransportParseExecClassification 覆盖独立 parser 对**不含 f11** 的 exec 帧
+// 按统一字段表分类（方案 §8.2：该路径按同一 exec 字段表分类，不静默 skip 未实现执行）：
+// 意外 native / 未知执行字段明确失败且零委托，纯元数据按原职责忽略；合法 f11 行为不变。
+func TestCursorSDKTransportParseExecClassification(t *testing.T) {
+	// buildExec 组装 AgentServerMessage.f2 ExecServerMessage{f1 exec_id, f15 id, extra}。
+	buildExec := func(extra []byte) []byte {
+		exec := cursorAppendVarintField(nil, 1, 7)
+		exec = cursorAppendBytesField(exec, 15, []byte("exec-id"))
+		exec = append(exec, extra...)
+		return cursorAppendBytesField(nil, cursorFldServerExecMessage, exec)
+	}
+
+	cases := []struct {
+		name       string
+		extra      []byte
+		wantErr    bool
+		wantErrMsg string
+	}{
+		{
+			name:       "意外 native exec 明确失败",
+			extra:      cursorAppendBytesField(nil, cursorFldNativeRejectShellArgs, []byte("ls -la")),
+			wantErr:    true,
+			wantErrMsg: "unexpected native exec field 2",
+		},
+		{
+			name:       "未知执行字段明确失败",
+			extra:      cursorAppendBytesField(nil, 40, []byte("unknown")),
+			wantErr:    true,
+			wantErrMsg: "unsupported exec fields",
+		},
+		{
+			name:  "纯元数据按原职责忽略",
+			extra: cursorAppendBytesField(nil, cursorFldExecMetaSpanContext, []byte("span")),
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			p := cursorNewStreamParser("grok-4.7")
+			p.attachToolSchemas(cursorSDKTransportDeclaredDefs(t, "get_weather"))
+			_, err := p.cursorParseMessageFrame(buildExec(c.extra))
+			if c.wantErr {
+				require.Error(t, err, c.name)
+				require.Contains(t, err.Error(), c.wantErrMsg)
+			} else {
+				require.NoError(t, err, c.name)
+			}
+			require.Empty(t, p.capturedToolCalls(), c.name+": 不含 f11 的帧不得登记任何委托")
+		})
+	}
+
+	// 合法 f11 运输帧仍登记 1 条（既有捕获逻辑不变）。
+	p := cursorNewStreamParser("grok-4.7")
+	p.attachToolSchemas(cursorSDKTransportDeclaredDefs(t, "get_weather"))
+	frame := cursorSDKTransportExecFrame(
+		cursorSDKTransportBuildMcpArgs("call_sdk_ok", "get_weather", `{"city":"Beijing"}`))
+	_, err := p.cursorParseMessageFrame(frame)
+	require.NoError(t, err)
+	require.Len(t, p.capturedToolCalls(), 1, "合法 f11 运输帧仍登记 1 条委托")
+}
