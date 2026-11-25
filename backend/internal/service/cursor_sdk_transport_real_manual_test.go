@@ -28,6 +28,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// cursorRealSSEText 将真实上游的 SSE body 按 data: 行解析，拼接
+// choices[0].delta.content。续轮文本可能被拆成多个 delta，原始 body 中
+// 不出现连续 nonce，因此不能直接用 strings.Contains(body, nonce) 断言。
+func cursorRealSSEText(t *testing.T, body string) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			sb.WriteString(choice.Delta.Content)
+		}
+	}
+	return sb.String()
+}
+
 func TestCursorSDKTransportRealUpstreamManual(t *testing.T) {
 	bearer := os.Getenv("CURSOR_REAL_BEARER")
 	code := os.Getenv("CURSOR_REAL_CODE")
@@ -97,15 +129,15 @@ func TestCursorSDKTransportRealUpstreamManual(t *testing.T) {
 		Body: []byte(resumeBody), Stream: true, Identity: cursorFullChainIdentity,
 	})
 	require.NoError(t, err)
-	final := w2.Body.String()
-	require.Contains(t, final, nonce, "model must echo the real tool result")
+	finalText := cursorRealSSEText(t, w2.Body.String())
+	require.Contains(t, finalText, nonce, "model must echo the real tool result")
 	calls, complete := settle.snapshot()
 	require.GreaterOrEqual(t, calls, 1)
 	require.Equal(t, 1, complete, "exactly one real-usage settlement")
 
 	sum := sha256.Sum256([]byte(tcArgs))
 	t.Logf("EVENT tool_call name=%s args_sha256=%s", tcName, hex.EncodeToString(sum[:8]))
-	t.Logf("EVENT resume nonce_echoed=%v", strings.Contains(final, nonce))
+	t.Logf("EVENT resume nonce_echoed=%v", strings.Contains(finalText, nonce))
 	t.Logf("EVENT settlement calls=%d complete=%d", calls, complete)
 	t.Logf("EVENT usages input=%d output=%d cache_read=%d cache_write=%d", res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CacheReadInputTokens, res.Usage.CacheCreationInputTokens)
 }
