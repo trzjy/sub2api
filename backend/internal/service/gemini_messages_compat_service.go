@@ -4742,12 +4742,11 @@ func cursorCompatUserError(c *gin.Context, account *Account, err error) (status 
 		return 0, "", false
 	}
 	ctx := c.Request.Context()
-	status, code, message, ok := CursorUserFacingError(ctx, err)
+	status, message, ok = CursorUserFacingError(ctx, err)
 	if !ok {
 		return 0, "", false
 	}
 	fields := []zap.Field{
-		zap.String("error_code", code),
 		zap.Int("status", status),
 		zap.String("error_class", cursorStreamErrClass(err)),
 	}

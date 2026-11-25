@@ -162,10 +162,10 @@ func cursorConvertRequestWithContext(ctx context.Context, req *apicompat.ChatCom
 // 不再整轮 400——口径见 cursorSkipLedger 的注释。
 func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel string, skipped cursorSkipLedger) ([]byte, string, error) {
 	if req == nil {
-		return nil, "", newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil request")
+		return nil, "", newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil request")
 	}
 	if strings.TrimSpace(upstreamModel) == "" {
-		return nil, "", newCursorRequestError(infraerrors.CursorExecModelMappingInvalidCode, http.StatusInternalServerError, "empty upstream model")
+		return nil, "", newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecModelMappingInvalid, "empty upstream model")
 	}
 
 	turns, err := cursorConvertMessages(req.Messages, skipped)
@@ -184,7 +184,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	}
 
 	if len(turns) == 0 {
-		return nil, "", newCursorRequestError(infraerrors.CursorReqNoContentCode, http.StatusBadRequest, "no convertible messages")
+		return nil, "", newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqNoContent, "no convertible messages")
 	}
 
 	// AgentRun 的已取证入口只有 user_message_action：最后一轮必须是用户消息，
@@ -199,7 +199,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// 本站不支持从助手消息续写、请在末尾补一条用户消息"，不让客户去猜。
 	last := turns[len(turns)-1]
 	if last.role != "user" {
-		return nil, "", newCursorRequestError(infraerrors.CursorReqPrefillCode, http.StatusBadRequest, "conversation must end with a user message")
+		return nil, "", newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqPrefill, "conversation must end with a user message")
 	}
 	history := turns[:len(turns)-1]
 
@@ -625,7 +625,7 @@ func cursorHistoryBlobs(history []cursorAgentTurn, skipped cursorSkipLedger) ([]
 			value, err = cursorMarshalBlobJSON(cursorHistoryUserBlob{Role: "user", Content: turn.text})
 		}
 		if err != nil {
-			return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "marshal history blob: %v", err)
+			return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "marshal history blob: %v", err)
 		}
 		sum := sha256.Sum256(value)
 		out = append(out, cursorHistoryBlob{id: sum[:], value: value})

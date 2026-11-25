@@ -421,7 +421,7 @@ func (s *CursorExecutionService) Execute(
 		return nil, errors.New("cursor: execution requires a cursor platform account")
 	}
 	if req == nil || req.Chat == nil {
-		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "typed chat completions request missing")
+		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "typed chat completions request missing")
 	}
 
 	// §25.17.4（A08）行 5 的准入断言在 2026-11-07 随五道闸退役：
@@ -464,7 +464,7 @@ func (s *CursorExecutionService) Execute(
 		originalModel = strings.TrimSpace(req.Chat.Model)
 	}
 	if originalModel == "" {
-		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "request carries no model")
+		return nil, newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqMissingModel, "request carries no model")
 	}
 
 	// §18.5 T 阶段日志：进入出站阶段。
@@ -1925,7 +1925,7 @@ func cursorExecuteChatAs(
 	}
 	model := strings.TrimSpace(ccReq.Model)
 	if model == "" {
-		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "chat completions request carries no model")
+		return nil, newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqMissingModel, "chat completions request carries no model")
 	}
 	plan, planErr := cursorPlanFromChat(&ccReq, model)
 	if planErr != nil {
@@ -1968,10 +1968,10 @@ func cursorExecuteResponses(
 		return nil, err
 	}
 	if req == nil {
-		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil responses request")
+		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil responses request")
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "responses request carries no model")
+		return nil, newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqMissingModel, "responses request carries no model")
 	}
 	if err := cursorValidateResponsesToolChoice(req); err != nil {
 		return nil, err
@@ -2022,10 +2022,10 @@ func cursorExecuteAnthropic(
 		return nil, err
 	}
 	if req == nil {
-		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil anthropic request")
+		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil anthropic request")
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "anthropic messages request carries no model")
+		return nil, newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqMissingModel, "anthropic messages request carries no model")
 	}
 	plan, planErr := cursorPlanFromMessages(req, req.Model)
 	if planErr != nil {
@@ -2073,7 +2073,7 @@ func cursorExecuteGeminiNative(
 		return nil, err
 	}
 	if strings.TrimSpace(originalModel) == "" {
-		return nil, newCursorRequestError(infraerrors.CursorReqMissingModelCode, http.StatusBadRequest, "native request carries no model")
+		return nil, newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqMissingModel, "native request carries no model")
 	}
 	// ① 原始请求 → 计划（含工具名与 toolConfig 摘要）。
 	plan, planErr := cursorPlanFromGemini(body, originalModel)
@@ -2088,7 +2088,7 @@ func cursorExecuteGeminiNative(
 	// ③ 转执行所需形状（工具声明/调用/结果的真实进入转换，不只进摘要）。
 	ccBody, convErr := cursorGeminiRequestToChatCompletions(body, originalModel, stream)
 	if convErr != nil {
-		return nil, newCursorRequestError(infraerrors.CursorReqUnsupportedMessageCode, http.StatusBadRequest, "%v", convErr)
+		return nil, newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqUnsupportedMessage, "%v", convErr)
 	}
 	var chat apicompat.ChatCompletionsRequest
 	if err := json.Unmarshal(ccBody, &chat); err != nil {
@@ -2374,7 +2374,7 @@ func (s *CursorExecutionService) ProbeAgentRun(
 		return 0, "", "", errors.New("cursor: probe requires a cursor platform account")
 	}
 	if strings.TrimSpace(upstreamModel) == "" {
-		return 0, "", "", newCursorRequestError(infraerrors.CursorExecModelMappingInvalidCode, http.StatusInternalServerError, "empty upstream model")
+		return 0, "", "", newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecModelMappingInvalid, "empty upstream model")
 	}
 	bearer, err := cursorResolveAccountBearer(account)
 	if err != nil {
@@ -6189,7 +6189,7 @@ func cursorChatToolItem(tool apicompat.ChatTool) (cursorContextItem, string, err
 //   - 本批结果：**尾部连续**的 role=tool 消息，按 tool_call_id 匹配（不按工具名）。
 func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*cursorContextPlan, error) {
 	if req == nil {
-		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil chat request")
+		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil chat request")
 	}
 	builder := newCursorConfigBuilder()
 	if err := builder.text("config.model", model); err != nil {
@@ -6517,7 +6517,7 @@ func cursorAnthropicBlockItem(role string, block apicompat.AnthropicContentBlock
 //   - 文本与 is_error 原样保留，不把新增用户文字吞进结果。
 func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cursorContextPlan, error) {
 	if req == nil {
-		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil anthropic request")
+		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil anthropic request")
 	}
 	builder := newCursorConfigBuilder()
 	if err := builder.text("config.model", model); err != nil {
@@ -6817,7 +6817,7 @@ func cursorResponsesItemItem(item apicompat.ResponsesInputItem, skipped cursorSk
 //   - instructions 不继承：首轮非空、续轮省略 => 明确入参错误（由 Resume 判定）。
 func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cursorContextPlan, error) {
 	if req == nil {
-		return nil, newCursorRequestError(infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError, "nil responses request")
+		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil responses request")
 	}
 	builder := newCursorConfigBuilder()
 	if err := builder.text("config.model", model); err != nil {
@@ -8817,7 +8817,7 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 		if err != nil {
 			// 编码失败：整批零发送、失败关闭会话，不重连重放。
 			it.svc.finishCursorSession(it.session, "resume_result_encoding_failure")
-			return newCursorRequestError(infraerrors.CursorExecResultWriteFailedCode, http.StatusBadGateway, "encode tool result: %v", err)
+			return newCursorRequestError(http.StatusBadGateway, infraerrors.CursorExecResultWriteFailed, "encode tool result: %v", err)
 		}
 		frames = append(frames, frame)
 	}
@@ -8825,7 +8825,7 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 	for _, frame := range frames {
 		if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
 			it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
-			return newCursorRequestError(infraerrors.CursorExecResultWriteFailedCode, http.StatusBadGateway, "deliver tool result transport failure: %v", err)
+			return newCursorRequestError(http.StatusBadGateway, infraerrors.CursorExecResultWriteFailed, "deliver tool result transport failure: %v", err)
 		}
 		it.session.noteStage("resume_result_written")
 	}

@@ -37,22 +37,22 @@ func newCursorResumeRejectTestContext(t *testing.T) (*gin.Context, *observer.Obs
 }
 
 // requireCursorResumeRejectLogged 断言恰好一条 cursor_resume_rejected 且字段正确。
-func requireCursorResumeRejectLogged(t *testing.T, logs *observer.ObservedLogs, code, reason string, status int, stage string) {
+func requireCursorResumeRejectLogged(t *testing.T, logs *observer.ObservedLogs, _ string, reason string, status int, stage string) {
 	t.Helper()
 	entries := logs.FilterMessage("cursor_resume_rejected").All()
 	require.Len(t, entries, 1)
 	fields := entries[0].ContextMap()
-	require.Equal(t, code, fields["error_code"])
+	require.NotContains(t, fields, "error_code")
 	require.Equal(t, reason, fields["reason"])
 	require.EqualValues(t, status, fields["status"])
 	require.Equal(t, stage, fields["stage"])
 }
 
 // requireCursorResumeRejectMessage 断言中文提示格式、错误码、请求号，且不含英文 reason。
-func requireCursorResumeRejectMessage(t *testing.T, msg, code, zh, reason string) {
+func requireCursorResumeRejectMessage(t *testing.T, msg, _ string, zh, reason string) {
 	t.Helper()
 	require.True(t, strings.HasPrefix(msg, zh), "message 必须以中文提示开头: %q", msg)
-	require.Contains(t, msg, "错误码 "+code)
+	require.NotContains(t, msg, "CUR-")
 	require.Contains(t, msg, "请求号 "+cursorResumeRejectTestRequestID)
 	require.NotContains(t, msg, reason, "不得外泄英文内部 reason")
 }
@@ -70,9 +70,9 @@ func TestServeCursorResumeRejectMessageIdentifyStage(t *testing.T) {
 	require.True(t, reject.called)
 	require.Equal(t, http.StatusBadRequest, reject.status, "状态码不变")
 	requireCursorResumeRejectMessage(t, reject.msg,
-		pkgerrors.CursorResUnknownAssociationCode, pkgerrors.CursorResUnknownAssociation, "unknown_association")
+		pkgerrors.CursorResUnknownAssociation, pkgerrors.CursorResUnknownAssociation, "unknown_association")
 	requireCursorResumeRejectLogged(t, logs,
-		pkgerrors.CursorResUnknownAssociationCode, "unknown_association", http.StatusBadRequest, "identify")
+		pkgerrors.CursorResUnknownAssociation, "unknown_association", http.StatusBadRequest, "identify")
 }
 
 func TestServeCursorResumeRejectMessageServeFallback(t *testing.T) {
@@ -89,9 +89,9 @@ func TestServeCursorResumeRejectMessageServeFallback(t *testing.T) {
 	require.True(t, reject.called)
 	require.Equal(t, http.StatusBadGateway, reject.status, "status 0 兜底仍为 502")
 	requireCursorResumeRejectMessage(t, reject.msg,
-		pkgerrors.CursorResUnknownCode, pkgerrors.CursorResUnknown, "resume_failed")
+		pkgerrors.CursorResUnknown, pkgerrors.CursorResUnknown, "resume_failed")
 	requireCursorResumeRejectLogged(t, logs,
-		pkgerrors.CursorResUnknownCode, "resume_failed", http.StatusBadGateway, "serve")
+		pkgerrors.CursorResUnknown, "resume_failed", http.StatusBadGateway, "serve")
 }
 
 func TestServeCursorResumeRejectMessageServeTypedError(t *testing.T) {
@@ -109,9 +109,9 @@ func TestServeCursorResumeRejectMessageServeTypedError(t *testing.T) {
 	require.True(t, handled)
 	require.Equal(t, http.StatusForbidden, reject.status)
 	requireCursorResumeRejectMessage(t, reject.msg,
-		pkgerrors.CursorResAccountUnavailableCode, pkgerrors.CursorResAccountUnavailable, "not_schedulable")
+		pkgerrors.CursorResAccountUnavailable, pkgerrors.CursorResAccountUnavailable, "not_schedulable")
 	requireCursorResumeRejectLogged(t, logs,
-		pkgerrors.CursorResAccountUnavailableCode, "not_schedulable", http.StatusForbidden, "serve")
+		pkgerrors.CursorResAccountUnavailable, "not_schedulable", http.StatusForbidden, "serve")
 }
 
 // TestCursorResumeRejectMessageProbeStage：现有探针解码路径不产出 CursorResumeError，
@@ -120,14 +120,14 @@ func TestCursorResumeRejectMessageProbeStage(t *testing.T) {
 	c, logs := newCursorResumeRejectTestContext(t)
 	msg := cursorResumeRejectMessage(c, "probe", http.StatusBadRequest, "undecodable_continuation")
 	requireCursorResumeRejectMessage(t, msg,
-		pkgerrors.CursorResUndecodableCode, pkgerrors.CursorResUndecodable, "undecodable_continuation")
+		pkgerrors.CursorResUndecodable, pkgerrors.CursorResUndecodable, "undecodable_continuation")
 	requireCursorResumeRejectLogged(t, logs,
-		pkgerrors.CursorResUndecodableCode, "undecodable_continuation", http.StatusBadRequest, "probe")
+		pkgerrors.CursorResUndecodable, "undecodable_continuation", http.StatusBadRequest, "probe")
 }
 
 func TestCursorResumeRejectMessageMissingRequestID(t *testing.T) {
 	c := newCursorResumeTestContext(t)
 	msg := cursorResumeRejectMessage(c, "identify", http.StatusBadRequest, "mixed_sessions")
 	require.Contains(t, msg, "请求号 未知")
-	require.Contains(t, msg, "错误码 "+pkgerrors.CursorResInvalidResultsCode)
+	require.NotContains(t, msg, "CUR-")
 }

@@ -95,17 +95,17 @@ func cursorUserErrorCompatCases() []cursorUserErrorCompatCase {
 		{
 			name:   "resume_unknown_association",
 			err:    &CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"},
-			status: http.StatusBadRequest, code: infraerrors.CursorResUnknownAssociationCode, zh: infraerrors.CursorResUnknownAssociation,
+			status: http.StatusBadRequest, code: infraerrors.CursorResUnknownAssociation, zh: infraerrors.CursorResUnknownAssociation,
 		},
 		{
 			name:   "request_invalid_image",
-			err:    newCursorRequestError(infraerrors.CursorReqInvalidImageCode, http.StatusBadRequest, "image data URI payload is empty"),
-			status: http.StatusBadRequest, code: infraerrors.CursorReqInvalidImageCode, zh: infraerrors.CursorReqInvalidImage,
+			err:    newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqUnsupportedMessage, "request content cannot be converted"),
+			status: http.StatusBadRequest, code: infraerrors.CursorReqUnsupportedMessage, zh: infraerrors.CursorReqUnsupportedMessage,
 		},
 		{
 			name:   "deadline_exceeded",
 			err:    context.DeadlineExceeded,
-			status: http.StatusGatewayTimeout, code: infraerrors.CursorExecDeadlineExceededCode, zh: infraerrors.CursorExecDeadlineExceeded,
+			status: http.StatusGatewayTimeout, code: infraerrors.CursorExecDeadlineExceeded, zh: infraerrors.CursorExecDeadlineExceeded,
 		},
 	}
 }

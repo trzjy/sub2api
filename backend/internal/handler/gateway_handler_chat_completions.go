@@ -911,12 +911,11 @@ func (h *GatewayHandler) writeCCCursorUserError(c *gin.Context, reqLog *zap.Logg
 	if errors.Is(c.Request.Context().Err(), context.Canceled) || service.IsResponseCommitted(c) {
 		return false
 	}
-	status, code, message, ok := service.CursorUserFacingError(c.Request.Context(), err)
+	status, message, ok := service.CursorUserFacingError(c.Request.Context(), err)
 	if !ok {
 		return false
 	}
 	fields := []zap.Field{
-		zap.String("error_code", code),
 		zap.Int("status", status),
 		zap.String("error_class", service.CursorStreamErrClassForLog(err)),
 	}

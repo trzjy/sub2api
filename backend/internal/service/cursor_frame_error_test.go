@@ -8,6 +8,7 @@ import (
 	"io"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -164,12 +165,11 @@ func TestCursorFrameErrClassFamilyCoverage(t *testing.T) {
 	}
 }
 
-// TestCursorUserFacingErrorUnchanged 用户可见错误映射仍是 CUR-EXEC-03：拆帧分类不得
-// 影响对外错误码（用户不需要知道是第几帧）。
+// TestCursorUserFacingErrorUnchanged 拆帧分类不得改变用户看到的提示。
 func TestCursorUserFacingErrorUnchanged(t *testing.T) {
 	_, _, envErr := cursorReadEnvelopeFrame([]byte{0x00, 0x00}, 0)
-	status, code, _, ok := CursorUserFacingError(t.Context(), envErr)
+	status, message, ok := CursorUserFacingError(t.Context(), envErr)
 	require.True(t, ok)
 	require.Equal(t, 502, status)
-	require.Equal(t, "CUR-EXEC-03", code)
+	require.Contains(t, message, infraerrors.CursorExecUpstreamProtocol)
 }

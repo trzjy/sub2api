@@ -409,7 +409,6 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 	return nil, nil
 }
 
-
 // waitForSlotWithRetry 是 user/account/group 三种维度共用的退避等待核心实现。
 // acquireSlot 闭包负责按具体维度占槽；slotType 仅用于错误上报与可配文案的 {scope} 占位符。
 //
@@ -1211,13 +1210,12 @@ func serveCursorResumeIfRequested(
 // （§2.1/§2.3 M2：带错误码与请求号），并落一条定位日志；不记录请求正文。
 // stage 取 probe / identify / serve，标明拒绝发生在哪一步。
 func cursorResumeRejectMessage(c *gin.Context, stage string, status int, reason string) string {
-	code, msg := infraerrors.CursorResumeReasonCode(reason)
+	msg := infraerrors.CursorResumeReasonMessage(reason)
 	requestID, _ := c.Request.Context().Value(ctxkey.RequestID).(string)
 	logger.FromContext(c.Request.Context()).Warn("cursor_resume_rejected",
-		zap.String("error_code", code),
 		zap.String("reason", reason),
 		zap.Int("status", status),
 		zap.String("stage", stage),
 	)
-	return infraerrors.CursorUserMessage(code, msg, requestID)
+	return infraerrors.CursorUserMessage(msg, requestID)
 }

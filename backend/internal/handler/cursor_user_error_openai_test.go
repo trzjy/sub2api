@@ -81,7 +81,6 @@ type openAIGatewayCursorErrCase struct {
 	name   string
 	err    error
 	status int
-	code   string
 	zh     string
 }
 
@@ -91,24 +90,21 @@ func openAIGatewayCursorErrCases() []openAIGatewayCursorErrCase {
 			name:   "resume_unknown_association",
 			err:    &service.CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"},
 			status: http.StatusBadRequest,
-			code:   infraerrors.CursorResUnknownAssociationCode,
 			zh:     infraerrors.CursorResUnknownAssociation,
 		},
 		{
 			name: "request_invalid_image",
 			err: &service.CursorRequestError{
-				Code: infraerrors.CursorReqInvalidImageCode, Status: http.StatusBadRequest,
+				Message: infraerrors.CursorReqUnsupportedMessage, Status: http.StatusBadRequest,
 				Detail: "image data URI payload is empty",
 			},
 			status: http.StatusBadRequest,
-			code:   infraerrors.CursorReqInvalidImageCode,
-			zh:     infraerrors.CursorReqInvalidImage,
+			zh:     infraerrors.CursorReqUnsupportedMessage,
 		},
 		{
 			name:   "deadline_exceeded",
 			err:    context.DeadlineExceeded,
 			status: http.StatusGatewayTimeout,
-			code:   infraerrors.CursorExecDeadlineExceededCode,
 			zh:     infraerrors.CursorExecDeadlineExceeded,
 		},
 	}
@@ -117,7 +113,7 @@ func openAIGatewayCursorErrCases() []openAIGatewayCursorErrCase {
 func openAIGatewayNonCursorErrs() []error {
 	return []error{
 		&service.CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"},
-		&service.CursorRequestError{Code: infraerrors.CursorReqInvalidImageCode, Status: http.StatusBadRequest, Detail: "x"},
+		&service.CursorRequestError{Message: infraerrors.CursorReqUnsupportedMessage, Status: http.StatusBadRequest, Detail: "x"},
 		context.DeadlineExceeded,
 	}
 }
@@ -125,7 +121,7 @@ func openAIGatewayNonCursorErrs() []error {
 func requireOpenAIGatewayCursorMessage(t *testing.T, msg string, tc openAIGatewayCursorErrCase) {
 	t.Helper()
 	require.Contains(t, msg, strings.TrimSuffix(tc.zh, "。"))
-	require.Contains(t, msg, "错误码 "+tc.code)
+	require.NotContains(t, msg, "CUR-")
 	require.Contains(t, msg, "请求号 "+openAIGatewayCursorTestRequestID)
 	require.NotContains(t, msg, "image data URI", "英文细节不得给用户")
 }
@@ -135,7 +131,7 @@ func requireOpenAIGatewayCursorLog(t *testing.T, logs *observer.ObservedLogs, tc
 	entries := logs.FilterMessage("cursor_user_error").All()
 	require.Len(t, entries, 1)
 	fields := entries[0].ContextMap()
-	require.Equal(t, tc.code, fields["error_code"])
+	require.NotContains(t, fields, "error_code")
 	require.EqualValues(t, tc.status, fields["status"])
 }
 
@@ -175,7 +171,7 @@ func TestCursorUserErrorOpenAIGatewayResponsesStreamStartedKeepsStatus(t *testin
 	require.Equal(t, http.StatusOK, rec.Code, "已提交响应后不得重写状态码")
 	out := rec.Body.String()
 	require.Contains(t, out, "response.failed")
-	require.Contains(t, out, "错误码 "+infraerrors.CursorExecDeadlineExceededCode)
+	require.NotContains(t, out, "CUR-")
 	require.Contains(t, out, "请求号 "+openAIGatewayCursorTestRequestID)
 }
 
@@ -250,7 +246,7 @@ func TestCursorUserErrorOpenAIGatewayMessagesStreamStartedKeepsStatus(t *testing
 	out := rec.Body.String()
 	require.Contains(t, out, "event: error")
 	require.Contains(t, out, `"type":"api_error"`)
-	require.Contains(t, out, "错误码 "+infraerrors.CursorExecDeadlineExceededCode)
+	require.Contains(t, out, "错误码 "+infraerrors.CursorExecDeadlineExceeded)
 	require.Contains(t, out, "请求号 "+openAIGatewayCursorTestRequestID)
 }
 

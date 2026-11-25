@@ -87,106 +87,29 @@ func TestDownstreamMessages_FirstByteFamily_NoForbiddenSubstrings(t *testing.T) 
 	}
 }
 
-// cursorResumeReasonTable 逐字照抄方案 §2.2 续轮（CUR-RES）表的 reason 列。
-var cursorResumeReasonTable = map[string][]string{
-	"CUR-RES-01": {"unknown_association", "invalid_ticket", "unknown_call_id", "unknown_previous_response_id", "unexpected_result_id", "stale_call_id"},
-	"CUR-RES-02": {"duplicate_result_id", "mixed_sessions", "result_type_mismatch", "missing_results"},
-	"CUR-RES-03": {"session_finished", "not_waiting_tools", "no_pending_batch", "no_delivered_batch", "stale_batch", "stale_previous_response_id", "batch_not_delivered"},
-	"CUR-RES-04": {"model_changed", "model_mapping_changed", "tool_set_changed", "config_changed", "instructions_withdrawn", "history_mismatch", "protocol_mismatch"},
-	"CUR-RES-05": {"already_consumed", "session_busy"},
-	"CUR-RES-06": {"undecodable_continuation", "unknown_protocol"},
-	"CUR-RES-07": {"tool_choice_invalid", "tool_choice_required_without_tools", "tool_choice_undeclared"},
-	"CUR-RES-08": {"account_unavailable", "account_changed", "source_changed", "source_fingerprint_unavailable", "platform_not_admitted", "group_not_allowed",
-		"not_schedulable", "model_rate_limited", "quota_key_source_unbound", "quota_key_expired", "quota_key_state_unavailable",
-		"quota_key_usage_unobserved", "quota_key_usage_observation_failed", "quota_key_usage_stale", "quota_key_usage_incomplete", "quota_key_usage_exhausted"},
-	"CUR-RES-09": {"identity_mismatch"},
-	"CUR-RES-10": {"execution_unavailable", "intake_unavailable", "source_unavailable"},
-	"CUR-RES-11": {"account_pool_exhausted"},
-}
-
-// cursorCodeMessages 列出 Cursor 段全部码与中文常量对。
-var cursorCodeMessages = [][2]string{
-	{CursorResUnknownAssociationCode, CursorResUnknownAssociation},
-	{CursorResInvalidResultsCode, CursorResInvalidResults},
-	{CursorResSessionEndedCode, CursorResSessionEnded},
-	{CursorResRequestChangedCode, CursorResRequestChanged},
-	{CursorResAlreadySubmittedCode, CursorResAlreadySubmitted},
-	{CursorResUndecodableCode, CursorResUndecodable},
-	{CursorResToolChoiceInvalidCode, CursorResToolChoiceInvalid},
-	{CursorResAccountUnavailableCode, CursorResAccountUnavailable},
-	{CursorResIdentityMismatchCode, CursorResIdentityMismatch},
-	{CursorResServiceUnavailableCode, CursorResServiceUnavailable},
-	{CursorResPoolExhaustedCode, CursorResPoolExhausted},
-	{CursorResUnknownCode, CursorResUnknown},
-	{CursorExecDeadlineExceededCode, CursorExecDeadlineExceeded},
-	{CursorExecUnsupportedCode, CursorExecUnsupported},
-	{CursorExecUpstreamProtocolCode, CursorExecUpstreamProtocol},
-	{CursorExecBatchIncompleteCode, CursorExecBatchIncomplete},
-	{CursorExecResultWriteFailedCode, CursorExecResultWriteFailed},
-	{CursorExecUpstreamAuthFailedCode, CursorExecUpstreamAuthFailed},
-	{CursorReqMissingModelCode, CursorReqMissingModel},
-	{CursorReqInvalidImageCode, CursorReqInvalidImage},
-	{CursorReqImageOutsideUserCode, CursorReqImageOutsideUser},
-	{CursorReqUnsupportedMessageCode, CursorReqUnsupportedMessage},
-	{CursorReqInvalidToolSchemaCode, CursorReqInvalidToolSchema},
-	{CursorReqNoContentCode, CursorReqNoContent},
-	{CursorReqPrefillCode, CursorReqPrefill},
-	{CursorExecModelMappingInvalidCode, CursorExecModelMappingInvalid},
-	{CursorExecInternalErrorCode, CursorExecInternalError},
-	{CursorExecModelUnavailableCode, CursorExecModelUnavailable},
-}
-
-func TestCursorResumeReasonCode_PlanTable(t *testing.T) {
-	total := 0
-	for wantCode, reasons := range cursorResumeReasonTable {
-		for _, reason := range reasons {
-			total++
-			code, msg := CursorResumeReasonCode(reason)
-			require.Equalf(t, wantCode, code, "reason %q", reason)
-			require.NotEqualf(t, CursorResUnknownCode, code, "reason %q 不应落入兜底码", reason)
-			require.NotEmptyf(t, msg, "reason %q", reason)
-		}
+func TestCursorResumeReasonMessage(t *testing.T) {
+	knownReasons := []string{
+		"unknown_association", "duplicate_result_id", "session_finished", "model_changed",
+		"already_consumed", "undecodable_continuation", "tool_choice_invalid",
+		"account_unavailable", "identity_mismatch", "execution_unavailable", "account_pool_exhausted",
 	}
-	require.Equal(t, 52, total)
-}
-
-func TestCursorResumeReasonCode_Fallback(t *testing.T) {
+	for _, reason := range knownReasons {
+		require.NotEmptyf(t, CursorResumeReasonMessage(reason), "reason %q", reason)
+	}
 	for _, reason := range []string{"resume_failed", "", "something_new"} {
-		code, msg := CursorResumeReasonCode(reason)
-		require.Equalf(t, "CUR-RES-99", code, "reason %q", reason)
-		require.Equal(t, CursorResUnknown, msg)
+		require.Equalf(t, CursorResUnknown, CursorResumeReasonMessage(reason), "reason %q", reason)
 	}
 }
 
 func TestCursorUserMessage_Format(t *testing.T) {
 	require.Equal(t,
-		"服务暂时不可用，请稍后重试。（错误码 CUR-RES-10，请求号 req-123）",
-		CursorUserMessage(CursorResServiceUnavailableCode, CursorResServiceUnavailable, "  req-123 "))
+		"服务暂时不可用，请稍后重试。（请求号 req-123）",
+		CursorUserMessage(CursorResServiceUnavailable, "  req-123 "))
 	require.Equal(t,
-		"服务暂时不可用，请稍后重试。（错误码 CUR-RES-10，请求号 未知）",
-		CursorUserMessage(CursorResServiceUnavailableCode, CursorResServiceUnavailable, "   "))
+		"服务暂时不可用，请稍后重试。（请求号 未知）",
+		CursorUserMessage(CursorResServiceUnavailable, "   "))
 	require.Equal(t,
-		"服务暂时不可用。（错误码 CUR-RES-10，请求号 req-1）",
-		CursorUserMessage(CursorResServiceUnavailableCode, "服务暂时不可用。", "req-1"))
-}
-
-func TestCursorCodeMessages_UniqueAndClean(t *testing.T) {
-	var reasons []string
-	for _, rs := range cursorResumeReasonTable {
-		reasons = append(reasons, rs...)
-	}
-	reasons = append(reasons, "resume_failed")
-
-	seenCode := map[string]bool{}
-	for _, pair := range cursorCodeMessages {
-		code, msg := pair[0], pair[1]
-		require.Falsef(t, seenCode[code], "错误码重复：%s", code)
-		seenCode[code] = true
-		require.Truef(t, strings.HasPrefix(code, "CUR-RES-") || strings.HasPrefix(code, "CUR-EXEC-") || strings.HasPrefix(code, "CUR-REQ-"), "错误码格式：%s", code)
-		require.NotContainsf(t, msg, "{", "%s 文案含占位符：%q", code, msg)
-		for _, reason := range reasons {
-			require.NotContainsf(t, msg, reason, "%s 文案含 reason 原文 %q", code, reason)
-		}
-	}
-	require.Len(t, seenCode, 28)
+		"服务暂时不可用。（请求号 req-1）",
+		CursorUserMessage("服务暂时不可用。", "req-1"))
+	require.NotContains(t, CursorUserMessage(CursorResServiceUnavailable, "req-1"), "CUR-")
 }

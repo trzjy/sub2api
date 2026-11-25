@@ -836,14 +836,11 @@ func (h *OpenAIGatewayHandler) writeOpenAIChatCursorUserError(c *gin.Context, re
 	if errors.Is(c.Request.Context().Err(), context.Canceled) || service.IsResponseCommitted(c) {
 		return false
 	}
-	status, code, message, ok := service.CursorUserFacingError(c.Request.Context(), err)
+	status, message, ok := service.CursorUserFacingError(c.Request.Context(), err)
 	if !ok {
 		return false
 	}
-	reqLog.Warn("cursor_user_error",
-		zap.String("error_code", code),
-		zap.Int("status", status),
-	)
+	reqLog.Warn("cursor_user_error", zap.Int("status", status))
 	errType := "upstream_error"
 	if status >= 400 && status < 500 {
 		errType = "invalid_request_error"

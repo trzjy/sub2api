@@ -28,41 +28,41 @@ import (
 
 func TestCursorProtocolRequestRejectsOnlyUnsendable(t *testing.T) {
 	cases := []struct {
-		name   string
-		req    *apicompat.ChatCompletionsRequest
-		model  string
-		code   string
-		status int
+		name    string
+		req     *apicompat.ChatCompletionsRequest
+		model   string
+		message string
+		status  int
 	}{
 		// CUR-EXEC-08（500）：调用方不变量破坏（不是客户输入问题）。
 		{"nil request", nil, "grok-4.7",
-			infraerrors.CursorExecInternalErrorCode, http.StatusInternalServerError},
+			infraerrors.CursorExecInternalError, http.StatusInternalServerError},
 		// CUR-EXEC-07（500）：管理员模型映射为空（配置问题，不是客户输入问题）。
 		{"empty upstream model", &apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
-		}, "   ", infraerrors.CursorExecModelMappingInvalidCode, http.StatusInternalServerError},
+		}, "   ", infraerrors.CursorExecModelMappingInvalid, http.StatusInternalServerError},
 		// CUR-REQ-06（400）：整轮没有可发送内容 —— 真的没东西可发。
 		{"no messages at all", &apicompat.ChatCompletionsRequest{}, "grok-4.7",
-			infraerrors.CursorReqNoContentCode, http.StatusBadRequest},
+			infraerrors.CursorReqNoContent, http.StatusBadRequest},
 		{"only empty messages", &apicompat.ChatCompletionsRequest{Messages: []apicompat.ChatMessage{
 			{Role: "user", Content: json.RawMessage(`""`)},
 			{Role: "user", Content: json.RawMessage(`"   "`)},
-		}}, "grok-4.7", infraerrors.CursorReqNoContentCode, http.StatusBadRequest},
+		}}, "grok-4.7", infraerrors.CursorReqNoContent, http.StatusBadRequest},
 		// CUR-REQ-07（400）：以助手消息结尾的续写请求 —— 唯一因为**形状**而必须拒的入站。
 		{"ends with assistant prefill", &apicompat.ChatCompletionsRequest{Messages: []apicompat.ChatMessage{
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
 			{Role: "assistant", Content: json.RawMessage(`"prefill"`)},
-		}}, "grok-4.7", infraerrors.CursorReqPrefillCode, http.StatusBadRequest},
+		}}, "grok-4.7", infraerrors.CursorReqPrefill, http.StatusBadRequest},
 		// 孤立工具结果同样不是 user 轮：不凭历史新建 AgentRun（末尾非 user 仍拒）。
 		{"ends with isolated tool result", &apicompat.ChatCompletionsRequest{Messages: []apicompat.ChatMessage{
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
 			{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: json.RawMessage(`"sunny"`)},
-		}}, "grok-4.7", infraerrors.CursorReqPrefillCode, http.StatusBadRequest},
+		}}, "grok-4.7", infraerrors.CursorReqPrefill, http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := cursorConvertRequest(c.req, c.model)
-			assertCursorRequestErrorCode(t, err, c.code, c.status)
+			assertCursorRequestError(t, err, c.message, c.status)
 		})
 	}
 }
@@ -179,12 +179,12 @@ func TestCursorProtocolRequestDropsWhatItCannotForward(t *testing.T) {
 	})
 }
 
-func assertCursorRequestErrorCode(t *testing.T, err error, code string, status int) {
+func assertCursorRequestError(t *testing.T, err error, message string, status int) {
 	t.Helper()
 	require.Error(t, err)
 	var reqErr *CursorRequestError
 	require.True(t, errors.As(err, &reqErr), "error must be *CursorRequestError, got %T: %v", err, err)
-	require.Equal(t, code, reqErr.Code)
+	require.Equal(t, message, reqErr.Message)
 	require.Equal(t, status, reqErr.Status)
 	require.True(t, errors.Is(err, ErrCursorUnsupportedRequest), "must still unwrap to the sentinel")
 }

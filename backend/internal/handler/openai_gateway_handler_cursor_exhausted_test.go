@@ -37,7 +37,7 @@ func TestCursorKeyRejectedOpenAIGatewayExhausted(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	// 复用的既有 cursor 池耗尽中文终态文案与稳定 code（CUR-RES-11）。
 	require.Contains(t, body, infraerrors.CursorResPoolExhausted)
-	require.Contains(t, body, infraerrors.CursorResPoolExhaustedCode)
+	require.Contains(t, body, infraerrors.CursorResPoolExhausted)
 	require.Contains(t, body, `"type":"server_error"`)
 	// 绝不落通用耗尽文案（无可用账号）。
 	require.NotContains(t, body, "无可用账号")
@@ -63,7 +63,7 @@ func TestCursorKeyRejectedOpenAIGatewayExhaustedStreaming(t *testing.T) {
 
 	body := recorder.Body.String()
 	require.Contains(t, body, infraerrors.CursorResPoolExhausted)
-	require.Contains(t, body, infraerrors.CursorResPoolExhaustedCode)
+	require.Contains(t, body, infraerrors.CursorResPoolExhausted)
 	require.Contains(t, body, `"type":"server_error"`)
 }
 
@@ -124,7 +124,7 @@ func TestCursorQuotaExhaustedUnchangedOpenAIGateway(t *testing.T) {
 	body := recorder.Body.String()
 	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Contains(t, body, infraerrors.CursorResPoolExhausted)
-	require.Contains(t, body, infraerrors.CursorResPoolExhaustedCode)
+	require.Contains(t, body, infraerrors.CursorResPoolExhausted)
 	require.Contains(t, body, `"type":"server_error"`)
 }
 
@@ -150,7 +150,7 @@ func TestNonCursorReasonOpenAIGatewayNotCursorTerminal(t *testing.T) {
 	body := recorder.Body.String()
 	// 必须不进入 cursor 池耗尽分支。
 	require.NotContains(t, body, infraerrors.CursorResPoolExhausted)
-	require.NotContains(t, body, infraerrors.CursorResPoolExhaustedCode)
+	require.NotContains(t, body, infraerrors.CursorResPoolExhausted)
 	// 普通平台路径仍按通用上游错误映射（502 → upstream_error）。
 	require.Contains(t, body, `"type":"upstream_error"`)
 	require.False(t, strings.Contains(body, "CUR-RES-11"))

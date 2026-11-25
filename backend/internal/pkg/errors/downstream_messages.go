@@ -405,41 +405,31 @@ const (
 	UpstreamProviderOperationFailed      = "上游处理失败，请稍后重试"
 )
 
-// ===== Cursor 反代：面向用户的中文报错 + 定位码 =====
-// SSOT：docs-local/cursor-tool-failure-user-diagnosis-plan-20261101.md §2.1、§2.2。
-// 写回格式：<中文>。（错误码 <CODE>，请求号 <X-Request-ID>），由 CursorUserMessage 渲染。
-// 一个码只对应一个触发语义；HTTP 状态码、error.type、内部 reason 码不受影响。
+// ===== Cursor 反代：面向用户的中文报错 =====
 const (
 	// 触发条件：reason=unknown_association / invalid_ticket / unknown_call_id /
 	// unknown_previous_response_id / unexpected_result_id / stale_call_id
-	CursorResUnknownAssociationCode = "CUR-RES-01"
-	CursorResUnknownAssociation     = "工具结果与本次调用对不上（调用编号无效或已过期），请重新发起请求"
+	CursorResUnknownAssociation = "工具结果与本次调用对不上（调用编号无效或已过期），请重新发起请求"
 
 	// 触发条件：reason=duplicate_result_id / mixed_sessions / result_type_mismatch / missing_results
-	CursorResInvalidResultsCode = "CUR-RES-02"
-	CursorResInvalidResults     = "提交的工具结果不完整或格式不正确，请检查客户端后重新发起请求"
+	CursorResInvalidResults = "提交的工具结果不完整或格式不正确，请检查客户端后重新发起请求"
 
 	// 触发条件：reason=session_finished / not_waiting_tools / no_pending_batch / no_delivered_batch /
 	// stale_batch / stale_previous_response_id / batch_not_delivered
-	CursorResSessionEndedCode = "CUR-RES-03"
-	CursorResSessionEnded     = "本轮会话已结束或已超时（单轮上限 180 秒），请重新发起请求"
+	CursorResSessionEnded = "本轮会话已结束或已超时（单轮上限 180 秒），请重新发起请求"
 
 	// 触发条件：reason=model_changed / model_mapping_changed / tool_set_changed / config_changed /
 	// instructions_withdrawn / history_mismatch / protocol_mismatch
-	CursorResRequestChangedCode = "CUR-RES-04"
-	CursorResRequestChanged     = "工具续轮时请求内容被改动（模型、工具列表、参数或历史不一致），请重新发起请求"
+	CursorResRequestChanged = "工具续轮时请求内容被改动（模型、工具列表、参数或历史不一致），请重新发起请求"
 
 	// 触发条件：reason=already_consumed / session_busy
-	CursorResAlreadySubmittedCode = "CUR-RES-05"
-	CursorResAlreadySubmitted     = "该工具结果已经提交过，请勿重复提交"
+	CursorResAlreadySubmitted = "该工具结果已经提交过，请勿重复提交"
 
 	// 触发条件：reason=undecodable_continuation / unknown_protocol
-	CursorResUndecodableCode = "CUR-RES-06"
-	CursorResUndecodable     = "无法解析提交的工具结果，请检查客户端版本后重试"
+	CursorResUndecodable = "无法解析提交的工具结果，请检查客户端版本后重试"
 
 	// 触发条件：reason=tool_choice_invalid / tool_choice_required_without_tools / tool_choice_undeclared
-	CursorResToolChoiceInvalidCode = "CUR-RES-07"
-	CursorResToolChoiceInvalid     = "请求的工具选择设置无效（指定了未声明的工具或在无工具时要求必须调用），请修改请求后重试"
+	CursorResToolChoiceInvalid = "请求的工具选择设置无效（指定了未声明的工具或在无工具时要求必须调用），请修改请求后重试"
 
 	// 触发条件：reason=account_unavailable / account_changed / source_changed /
 	// source_fingerprint_unavailable / platform_not_admitted / group_not_allowed；
@@ -447,93 +437,59 @@ const (
 	// quota_key_source_unbound / quota_key_expired / quota_key_state_unavailable /
 	// quota_key_usage_unobserved / quota_key_usage_observation_failed /
 	// quota_key_usage_stale / quota_key_usage_incomplete / quota_key_usage_exhausted
-	CursorResAccountUnavailableCode = "CUR-RES-08"
-	CursorResAccountUnavailable     = "本轮会话使用的账号已不可用，请重新发起请求"
+	CursorResAccountUnavailable = "本轮会话使用的账号已不可用，请重新发起请求"
 
 	// 触发条件：reason=identity_mismatch
-	CursorResIdentityMismatchCode = "CUR-RES-09"
-	CursorResIdentityMismatch     = "该会话不属于当前 API Key，请使用发起会话的同一个 Key"
+	CursorResIdentityMismatch = "该会话不属于当前 API Key，请使用发起会话的同一个 Key"
 
 	// 触发条件：reason=execution_unavailable / intake_unavailable / source_unavailable
-	CursorResServiceUnavailableCode = "CUR-RES-10"
-	CursorResServiceUnavailable     = "服务暂时不可用，请稍后重试"
+	CursorResServiceUnavailable = "服务暂时不可用，请稍后重试"
 
 	// 触发条件：续轮换号重建期间，本请求内所有候选账号都因额度耗尽/拒付被排除
 	// （reason=account_pool_exhausted）。这是池子容量问题，不是用户请求问题；
 	// 绝不把上游原文或 unknown_association 暴露给用户。HTTP 状态沿用换号错误自带的
 	// ClientStatusCode（cursor 额度耗尽场景为 429 + 可重试提示），仅替换 message。
-	CursorResPoolExhaustedCode = "CUR-RES-11"
-	CursorResPoolExhausted     = "账号池暂无可用的额度，请稍后重试"
+	CursorResPoolExhausted = "账号池暂无可用的额度，请稍后重试"
 
 	// 触发条件：其它未映射 reason（含 handler 兜底 resume_failed、空串）
-	CursorResUnknownCode = "CUR-RES-99"
-	CursorResUnknown     = "工具续轮处理失败，请重新发起请求"
+	CursorResUnknown = "工具续轮处理失败，请重新发起请求"
 
 	// 触发条件：180 秒总期限到达（terminal_reason=deadline_exceeded）
-	CursorExecDeadlineExceededCode = "CUR-EXEC-01"
-	CursorExecDeadlineExceeded     = "本轮执行超过 180 秒上限，已终止，请拆小任务后重试"
+	CursorExecDeadlineExceeded = "本轮执行超过 180 秒上限，已终止，请拆小任务后重试"
 
 	// 触发条件：哨兵=ErrCursorUnsupportedRequest（含上游请求了未支持的 exec / InteractionQuery）
-	CursorExecUnsupportedCode = "CUR-EXEC-02"
-	CursorExecUnsupported     = "上游请求了本站暂不支持的操作，本轮已终止，请重试或换用其他模型"
+	CursorExecUnsupported = "上游请求了本站暂不支持的操作，本轮已终止，请重试或换用其他模型"
 
 	// 触发条件：哨兵=ErrCursorProtocol / ErrCursorMissingEndStream / ErrCursorUpstreamStream
-	CursorExecUpstreamProtocolCode = "CUR-EXEC-03"
-	CursorExecUpstreamProtocol     = "上游返回了异常数据，本轮已终止，请稍后重试"
+	CursorExecUpstreamProtocol = "上游返回了异常数据，本轮已终止，请稍后重试"
 
 	// 触发条件：哨兵=ErrCursorBatchIncomplete / ErrCursorBatchAmbiguous
-	CursorExecBatchIncompleteCode = "CUR-EXEC-04"
-	CursorExecBatchIncomplete     = "模型发起的工具调用不完整，本轮已终止，请重新发起请求"
+	CursorExecBatchIncomplete = "模型发起的工具调用不完整，本轮已终止，请重新发起请求"
 
 	// 触发条件：工具结果写回上游失败
-	CursorExecResultWriteFailedCode = "CUR-EXEC-05"
-	CursorExecResultWriteFailed     = "工具结果回传上游失败，本轮已终止，请重新发起请求"
+	CursorExecResultWriteFailed = "工具结果回传上游失败，本轮已终止，请重新发起请求"
 
 	// 触发条件：哨兵=ErrCursorKeyRejectedUpstream / ErrCursorRelayAuthRejected / ErrCursorAuthMaterialUnavailable
-	CursorExecUpstreamAuthFailedCode = "CUR-EXEC-06"
-	CursorExecUpstreamAuthFailed     = "上游渠道认证失败，请联系管理员"
+	CursorExecUpstreamAuthFailed = "上游渠道认证失败，请联系管理员"
 
 	// ----- §2.2.1 请求类错误码（在 newCursorRequestError 产生点标码）-----
 
 	// 触发条件（400）：请求缺少模型名（chat completions / responses / anthropic messages / 原生请求 carries no model）
-	CursorReqMissingModelCode = "CUR-REQ-01"
-	CursorReqMissingModel     = "请求缺少模型名，请在请求中填写 model 后重试"
-
-	// ===== 以下 CUR-REQ-02 / 03 / 05 三个码自 2026-11-06 起**不再产生** =====
-	//
-	// 口径变更：图片格式不合规（02）、图片落在非 user 消息（03）、工具 schema 非法（05）
-	// 三类一律改为「丢掉那张图 / 那个工具 + 记账」，不再整轮 400（见 cursorSkipLedger）。
-	// 码位与文案保留，供历史日志与老客户端对照，不制造码表空洞。
-	// 若将来某条规则升级为"必须拒绝"，复用这三个码位，不要新开。
-
-	// 触发条件（历史，现已不再产生）：图片 data URI 格式/大小/远程链接不合规。
-	CursorReqInvalidImageCode = "CUR-REQ-02"
-	CursorReqInvalidImage     = "图片格式不正确（仅支持 base64 内嵌的 data URI 图片，不支持远程链接，且不能为空或超过大小限制），请修改后重试"
-
-	// 触发条件（历史，现已不再产生）：system/developer、assistant、tool 消息里带了图片。
-	CursorReqImageOutsideUserCode = "CUR-REQ-03"
-	CursorReqImageOutsideUser     = "图片只能放在用户消息中（系统、助手和工具消息里不能带图片），请修改后重试"
+	CursorReqMissingModel = "请求缺少模型名，请在请求中填写 model 后重试"
 
 	// 触发条件（400）：请求内容无法解析成可发送的消息。
 	//
 	// 2026-11-06 起只剩两类会产生本码：① Gemini 原生 contents 转换失败；
 	// ② 内容层构造彻底失败（既读不出文本也读不出 parts）。
 	// 「不认识的条目 / 坏 part / 坏图片」都已在更早的层被丢弃，不会走到这里。
-	CursorReqUnsupportedMessageCode = "CUR-REQ-04"
-	CursorReqUnsupportedMessage     = "请求内容无法解析成可发送的消息（消息结构或内容格式不受支持），请检查客户端构造请求的方式后重试"
-
-	// 触发条件（历史，现已不再产生）：工具 input_schema JSON 无效。
-	// 2026-11-06 起坏 schema 只丢那一个工具。
-	CursorReqInvalidToolSchemaCode = "CUR-REQ-05"
-	CursorReqInvalidToolSchema     = "工具参数定义（input_schema）无效，请检查客户端声明的工具后重试"
+	CursorReqUnsupportedMessage = "请求内容无法解析成可发送的消息（消息结构或内容格式不受支持），请检查客户端构造请求的方式后重试"
 
 	// 触发条件（400）：整轮没有任何可发送内容（消息全被过滤成空轮，或请求体里
 	// 只有空消息 / 只有被丢弃的旁支内容）。
 	//
 	// 这是**真的没东西可发**：上游没有"提问"可接收，只能拒。文案要告诉客户
 	// 到底缺什么、下一步怎么做，不能丢一个 400 让他猜。
-	CursorReqNoContentCode = "CUR-REQ-06"
-	CursorReqNoContent     = "这次请求里没有可以发送的内容（消息为空，或内容都无法识别），请在末尾补一条有内容的用户消息后重试"
+	CursorReqNoContent = "这次请求里没有可以发送的内容（消息为空，或内容都无法识别），请在末尾补一条有内容的用户消息后重试"
 
 	// 触发条件（400）：最后一轮是助手消息（prefill / 续写请求），本层无处接收
 	// "当前这一轮的提问"。
@@ -541,34 +497,28 @@ const (
 	// 这是全链路**唯一因为形状而必须拒**的入站：把助手文本当用户指令发出去会得到
 	// 答非所问的结果，比明确拒更难排查。文案必须说清"你发的是续写请求、我们暂不
 	// 支持、请在末尾补一条用户消息"。
-	CursorReqPrefillCode = "CUR-REQ-07"
-	CursorReqPrefill     = "这次请求以助手消息结尾（属于续写 / prefill 请求），本通道暂不支持从助手消息续写，请在最后补一条用户消息后重试"
+	CursorReqPrefill = "这次请求以助手消息结尾（属于续写 / prefill 请求），本通道暂不支持从助手消息续写，请在最后补一条用户消息后重试"
 
 	// 触发条件（500）：分组模型映射后上游模型为空（empty upstream model，含探针入口）
-	CursorExecModelMappingInvalidCode = "CUR-EXEC-07"
-	CursorExecModelMappingInvalid     = "该分组的模型映射配置有误，请联系管理员"
+	CursorExecModelMappingInvalid = "该分组的模型映射配置有误，请联系管理员"
 
 	// 触发条件（500）：内部调用方不变量破坏（nil 请求 / typed 请求缺失 / marshal history blob 失败）
-	CursorExecInternalErrorCode = "CUR-EXEC-08"
-	CursorExecInternalError     = "服务内部错误，请稍后重试或联系管理员"
-	// CursorExecSessionNotWaitingCode（CUR-EXEC-13）：上游在工具结果关联前就结束了会话，
+	CursorExecInternalError = "服务内部错误，请稍后重试或联系管理员"
+	// 上游在工具结果关联前就结束了会话，
 	// 本地按「会话已不在等待工具结果」失败关闭。2026-11-22 用户裁定：不得再兜底成内部错误，
 	// 如实告诉客户端让用户反馈。
-	CursorExecSessionNotWaitingCode = "CUR-EXEC-13"
-	CursorExecSessionNotWaiting     = "上游会话提前终止（工具结果返回前会话已结束），本轮已终止，请重新发起请求"
+	CursorExecSessionNotWaiting = "上游会话提前终止（工具结果返回前会话已结束），本轮已终止，请重新发起请求"
 
 	// 触发条件（502）：上游正文注入「当前模型暂不可用，请发送 继续 或新开对话 (ts-hex)」
 	// （哨兵=ErrCursorUpstreamModelUnavailable，换号重试不成立或已用尽时）
-	CursorExecModelUnavailableCode = "CUR-EXEC-09"
-	CursorExecModelUnavailable     = "上游模型暂时不可用，请重试或换用其他模型"
+	CursorExecModelUnavailable = "上游模型暂时不可用，请重试或换用其他模型"
 
 	// 触发条件（502）：上游交来的工具调用参数不完整（按客户端声明的 input_schema
 	// 缺少 required 必填字段，如 Bash 只给空对象）。哨兵=ErrCursorArgsIncomplete。
 	// 本层拦截后按上游失败终止本轮，绝不把残缺调用交付给客户端。
-	CursorExecArgsIncompleteCode = "CUR-EXEC-10"
-	CursorExecArgsIncomplete     = "模型返回的工具参数不完整，本轮已终止，请重试"
+	CursorExecArgsIncomplete = "模型返回的工具参数不完整，本轮已终止，请重试"
 
-	// CUR-EXEC-11：上游对单个账号回了「今日额度已用完」这句挡板文案。
+	// 上游对单个账号回了「今日额度已用完」这句挡板文案。
 	//
 	// 2026-11-06 定性更正（重要）：这句文案**不是余额判定**。生产数据三重排他——
 	//   1. 命中时累计用量从 0 到 405 万 token 不等（差 16 倍），其中一次该号 24 小时
@@ -579,62 +529,56 @@ const (
 	// 状态异常的挡板话术。
 	//
 	// 因此对外文案不得再声称"额度已用完"——那是误报，会让用户误以为该充钱。
-	// 错误码 CUR-EXEC-11 保持不变（客户端/前端可能已按码覆盖文案），只改语义与文案。
-	// 真·额度/凭据耗尽走 CUR-EXEC-12（上游带"请续费"语义的拒付模板）。
-	CursorExecQuotaExhaustedCode = "CUR-EXEC-11"
-	CursorExecQuotaExhausted     = "当前账号暂时不可用，已自动切换账号，请重新发起请求"
+	CursorExecQuotaExhausted = "当前账号暂时不可用，已自动切换账号，请重新发起请求"
 
-	// CUR-EXEC-12：上游拒付——正文注入「密钥已过期或额度耗尽，请续费后使用」模板。
+	// 上游拒付——正文注入「密钥已过期或额度耗尽，请续费后使用」模板。
 	//
 	// 这才是**可信的额度/凭据耗尽信号**：它带"请续费"语义，且属于密钥级终态，与
-	// CUR-EXEC-11 那句挡板话术完全不是一回事。客户端见到的不能是上游原文
+	// 账号暂时不可用的挡板话术完全不是一回事。客户端见到的不能是上游原文
 	// （原文含账号卡 ID，会泄露号池身份）。
-	CursorExecAccountRejectedCode = "CUR-EXEC-12"
-	CursorExecAccountRejected     = "当前账号额度或凭据已失效，已自动切换账号，请重新发起请求"
+	CursorExecAccountRejected = "当前账号额度或凭据已失效，已自动切换账号，请重新发起请求"
 )
 
-// CursorResumeReasonCode 把 newCursorResumeError 的 reason 映射到 §2.2 续轮码表；
-// 未列出的 reason（含 "resume_failed"、空串）一律归 CUR-RES-99。
-func CursorResumeReasonCode(reason string) (code, message string) {
+// CursorResumeReasonMessage 根据续轮失败原因返回已有的中文提示。
+func CursorResumeReasonMessage(reason string) (message string) {
 	switch reason {
 	case "unknown_association", "invalid_ticket", "unknown_call_id",
 		"unknown_previous_response_id", "unexpected_result_id", "stale_call_id":
-		return CursorResUnknownAssociationCode, CursorResUnknownAssociation
+		return CursorResUnknownAssociation
 	case "duplicate_result_id", "mixed_sessions", "result_type_mismatch", "missing_results":
-		return CursorResInvalidResultsCode, CursorResInvalidResults
+		return CursorResInvalidResults
 	case "session_finished", "not_waiting_tools", "no_pending_batch", "no_delivered_batch",
 		"stale_batch", "stale_previous_response_id", "batch_not_delivered":
-		return CursorResSessionEndedCode, CursorResSessionEnded
+		return CursorResSessionEnded
 	case "model_changed", "model_mapping_changed", "tool_set_changed", "config_changed",
 		"instructions_withdrawn", "history_mismatch", "protocol_mismatch":
-		return CursorResRequestChangedCode, CursorResRequestChanged
+		return CursorResRequestChanged
 	case "already_consumed", "session_busy":
-		return CursorResAlreadySubmittedCode, CursorResAlreadySubmitted
+		return CursorResAlreadySubmitted
 	case "undecodable_continuation", "unknown_protocol":
-		return CursorResUndecodableCode, CursorResUndecodable
+		return CursorResUndecodable
 	case "tool_choice_invalid", "tool_choice_required_without_tools", "tool_choice_undeclared":
-		return CursorResToolChoiceInvalidCode, CursorResToolChoiceInvalid
+		return CursorResToolChoiceInvalid
 	case "account_unavailable", "account_changed", "source_changed",
 		"source_fingerprint_unavailable", "platform_not_admitted", "group_not_allowed",
 		"not_schedulable", "model_rate_limited",
 		"quota_key_source_unbound", "quota_key_expired", "quota_key_state_unavailable",
 		"quota_key_usage_unobserved", "quota_key_usage_observation_failed",
 		"quota_key_usage_stale", "quota_key_usage_incomplete", "quota_key_usage_exhausted":
-		return CursorResAccountUnavailableCode, CursorResAccountUnavailable
+		return CursorResAccountUnavailable
 	case "identity_mismatch":
-		return CursorResIdentityMismatchCode, CursorResIdentityMismatch
+		return CursorResIdentityMismatch
 	case "execution_unavailable", "intake_unavailable", "source_unavailable":
-		return CursorResServiceUnavailableCode, CursorResServiceUnavailable
+		return CursorResServiceUnavailable
 	case "account_pool_exhausted":
-		return CursorResPoolExhaustedCode, CursorResPoolExhausted
+		return CursorResPoolExhausted
 	default:
-		return CursorResUnknownCode, CursorResUnknown
+		return CursorResUnknown
 	}
 }
 
-// CursorUserMessage 按 §2.1 渲染面向用户的报错：
-// <message>。（错误码 <code>，请求号 <requestID>）；请求号为空时写"未知"。
-func CursorUserMessage(code, message, requestID string) string {
+// CursorUserMessage 为面向用户的提示附上可用于查日志的请求号。
+func CursorUserMessage(message, requestID string) string {
 	rid := strings.TrimSpace(requestID)
 	if rid == "" {
 		rid = "未知"
@@ -642,5 +586,5 @@ func CursorUserMessage(code, message, requestID string) string {
 	if !strings.HasSuffix(message, "。") {
 		message += "。"
 	}
-	return message + "（错误码 " + code + "，请求号 " + rid + "）"
+	return message + "（请求号 " + rid + "）"
 }

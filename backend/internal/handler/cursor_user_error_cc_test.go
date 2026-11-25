@@ -56,25 +56,22 @@ func TestCursorUserErrorChatCompletions(t *testing.T) {
 		wantStatus int
 		wantType   string
 		wantZh     string
-		wantCode   string
 	}{
 		{
 			name:       "resume unknown_association",
 			err:        &service.CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"},
 			wantStatus: http.StatusBadRequest,
 			wantType:   "invalid_request_error",
-			wantCode:   infraerrors.CursorResUnknownAssociationCode,
 		},
 		{
-			name: "request error CUR-REQ-02",
+			name: "unsupported request message",
 			err: &service.CursorRequestError{
-				Code: infraerrors.CursorReqInvalidImageCode, Status: http.StatusBadRequest,
+				Message: infraerrors.CursorReqUnsupportedMessage, Status: http.StatusBadRequest,
 				Detail: "image data URI payload is empty",
 			},
 			wantStatus: http.StatusBadRequest,
 			wantType:   "invalid_request_error",
-			wantZh:     infraerrors.CursorReqInvalidImage,
-			wantCode:   infraerrors.CursorReqInvalidImageCode,
+			wantZh:     infraerrors.CursorReqUnsupportedMessage,
 		},
 		{
 			name:       "deadline exceeded",
@@ -82,7 +79,6 @@ func TestCursorUserErrorChatCompletions(t *testing.T) {
 			wantStatus: http.StatusGatewayTimeout,
 			wantType:   "upstream_error",
 			wantZh:     infraerrors.CursorExecDeadlineExceeded,
-			wantCode:   infraerrors.CursorExecDeadlineExceededCode,
 		},
 	}
 	cursorAccount := &service.Account{ID: 9501, Platform: service.PlatformCursor}
@@ -99,10 +95,10 @@ func TestCursorUserErrorChatCompletions(t *testing.T) {
 			require.Equal(t, tc.wantType, body.Error.Type)
 			wantZh := tc.wantZh
 			if wantZh == "" {
-				_, wantZh = infraerrors.CursorResumeReasonCode("unknown_association")
+				wantZh = infraerrors.CursorResumeReasonMessage("unknown_association")
 			}
 			require.Contains(t, body.Error.Message, strings.TrimSuffix(wantZh, "。"))
-			require.Contains(t, body.Error.Message, "错误码 "+tc.wantCode)
+			require.NotContains(t, body.Error.Message, "CUR-")
 			require.Contains(t, body.Error.Message, "请求号 "+ccCursorTestRequestID)
 			require.NotContains(t, body.Error.Message, "image data URI", "英文细节不得给用户")
 		})
@@ -122,7 +118,7 @@ func TestCursorUserErrorChatCompletionsStreamStarted(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	out := rec.Body.String()
 	require.Contains(t, out, `"type":"error"`)
-	require.Contains(t, out, "错误码 "+infraerrors.CursorExecDeadlineExceededCode)
+	require.NotContains(t, out, "CUR-")
 	require.Contains(t, out, "请求号 "+ccCursorTestRequestID)
 }
 
@@ -130,7 +126,7 @@ func TestCursorUserErrorChatCompletionsStreamStarted(t *testing.T) {
 func TestCursorUserErrorChatCompletionsNonCursorUnchanged(t *testing.T) {
 	errs := []error{
 		&service.CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"},
-		&service.CursorRequestError{Code: infraerrors.CursorReqInvalidImageCode, Status: http.StatusBadRequest, Detail: "x"},
+		&service.CursorRequestError{Message: infraerrors.CursorReqUnsupportedMessage, Status: http.StatusBadRequest, Detail: "x"},
 		context.DeadlineExceeded,
 	}
 	for _, platform := range []string{service.PlatformAnthropic, service.PlatformGemini} {

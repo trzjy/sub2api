@@ -2465,7 +2465,7 @@ func shouldRebindStickyAfterForward(sessionBoundAccountID, accountID int64, rebu
 	return true
 }
 
-// cursorPoolExhaustedMessage 渲染"账号池暂无可用的额度"中文终态（CUR-RES-11）。
+// cursorPoolExhaustedMessage 渲染账号池耗尽时已有的中文提示。
 //
 // 续轮换号重建期间，本请求内所有候选账号都可能因额度耗尽/拒付被排除。此时绝不能把
 // unknown_association 或上游原文暴露给用户（2026-11-04 方案 §2.4-7）。
@@ -2475,10 +2475,8 @@ func cursorPoolExhaustedMessage(c *gin.Context) string {
 		ctx = c.Request.Context()
 	}
 	requestID, _ := ctx.Value(ctxkey.RequestID).(string)
-	logger.FromContext(ctx).Warn("cursor_resume_pool_exhausted",
-		zap.String("error_code", pkgerrors.CursorResPoolExhaustedCode))
-	return pkgerrors.CursorUserMessage(pkgerrors.CursorResPoolExhaustedCode,
-		pkgerrors.CursorResPoolExhausted, requestID)
+	logger.FromContext(ctx).Warn("cursor_resume_pool_exhausted")
+	return pkgerrors.CursorUserMessage(pkgerrors.CursorResPoolExhausted, requestID)
 }
 
 // cursorPoolExhaustedStatus 返回 Cursor 池子真耗尽时写回下游的 HTTP 状态码。
@@ -2504,12 +2502,12 @@ func cursorPoolExhaustedStatus(failoverErr *service.UpstreamFailoverError) int {
 
 func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, platform string, streamStarted bool) {
 	if failoverErr != nil && service.IsCursorQuotaExhaustedReason(failoverErr.Reason) {
-		// 池子真耗尽（全是额度耗尽/拒付账号）：只换中文终态 message，状态码沿用换号错误自带值。
+		// 池子真耗尽（全是额度耗尽/拒付账号）：返回现有中文提示，状态码沿用换号错误自带值。
 		message := cursorPoolExhaustedMessage(c)
 		status := cursorPoolExhaustedStatus(failoverErr)
 		service.SetOpsUpstreamError(c, status, message, "")
 		h.handleStreamingAwareErrorWithCode(c, status, "api_error",
-			pkgerrors.CursorResPoolExhaustedCode, message, streamStarted)
+			"", message, streamStarted)
 		return
 	}
 	statusCode := failoverErr.StatusCode

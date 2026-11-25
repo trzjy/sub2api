@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest/observer"
@@ -159,10 +160,10 @@ func TestFrameEvidenceUserErrorCarriesFrameClass(t *testing.T) {
 	_, _, envErr := cursorReadEnvelopeFrame([]byte{0x00, 0x00}, 0)
 	annotated := cursorAnnotateFrame(envErr, 5)
 
-	status, code, _, ok := CursorUserFacingError(ctx, annotated)
+	status, message, ok := CursorUserFacingError(ctx, annotated)
 	require.True(t, ok)
 	require.Equal(t, 502, status)
-	require.Equal(t, "CUR-EXEC-03", code, "拆帧不得改变对外错误码")
+	require.Contains(t, message, infraerrors.CursorExecUpstreamProtocol, "拆帧不得改变对外提示")
 
 	// 直接驱动 service 侧出口，确认它真的把帧级字段写进 cursor_user_error。
 	account := &Account{ID: 1, Platform: PlatformCursor}

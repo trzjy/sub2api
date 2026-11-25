@@ -64,9 +64,9 @@ func TestCursorUserErrorGatewayMessagesUnknownAssociation(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Equal(t, "invalid_request_error", body.Error.Type)
-	_, wantZh := infraerrors.CursorResumeReasonCode("unknown_association")
+	wantZh := infraerrors.CursorResumeReasonMessage("unknown_association")
 	require.Contains(t, body.Error.Message, strings.TrimSuffix(wantZh, "。"))
-	require.Contains(t, body.Error.Message, "错误码 "+infraerrors.CursorResUnknownAssociationCode)
+	require.NotContains(t, body.Error.Message, "CUR-")
 	require.Contains(t, body.Error.Message, "请求号 "+m3fRequestID)
 	require.NotEqual(t, infraerrors.UpstreamRequestFailed, body.Error.Message)
 }

@@ -703,7 +703,7 @@ func (h *GatewayHandler) writeResponsesForwardErrorResponse(c *gin.Context, reqL
 	if !isCursorPlatformAccount(account) || c == nil || c.Writer == nil || c.Request == nil {
 		return h.ensureForwardErrorResponse(c, streamStarted)
 	}
-	status, code, message, ok := service.CursorUserFacingError(c.Request.Context(), err)
+	status, message, ok := service.CursorUserFacingError(c.Request.Context(), err)
 	if !ok {
 		return h.ensureForwardErrorResponse(c, streamStarted)
 	}
@@ -720,7 +720,7 @@ func (h *GatewayHandler) writeResponsesForwardErrorResponse(c *gin.Context, reqL
 	if status >= 400 && status < 500 {
 		errType = "invalid_request_error"
 	}
-	reqLog.Warn("cursor_user_error", zap.String("error_code", code), zap.Int("status", status))
+	reqLog.Warn("cursor_user_error", zap.Int("status", status))
 	h.handleStreamingAwareError(c, status, errType, message, streamStarted)
 	return true
 }
@@ -750,7 +750,7 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 		// 此时即使 streamStarted 为 false 也只能写流内终止事件，不能再走 JSON 错误体。
 		if gatewayResponseCommitted(c, streamStarted) {
 			service.MarkOpsStreamError(c, "server_error", message, status)
-			writeResponsesFailedSSE(c, "server_error", infraerrors.CursorResPoolExhaustedCode, message)
+			writeResponsesFailedSSE(c, "server_error", "server_error", message)
 			return
 		}
 		h.responsesErrorResponse(c, status, "server_error", message)

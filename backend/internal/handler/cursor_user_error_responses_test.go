@@ -4,7 +4,7 @@ package handler
 
 // 本文件钉死 /v1/responses（GatewayHandler.Responses）Execute 出口的 Cursor 用户报错（派发单 M3b，
 // SSOT：docs-local/cursor-tool-failure-user-diagnosis-plan-20261101.md §2.2.2、§2.3 M3）：
-// Cursor 账号的执行错误经 service.CursorUserFacingError 映射为正确状态码 + 中文提示（带错误码与请求号），
+// Cursor 账号的执行错误经 service.CursorUserFacingError 映射为正确状态码 + 中文提示（带请求号），
 // 并落一条 cursor_user_error Warn 日志；非 Cursor 账号保持原 502 兜底不变。
 
 import (
@@ -58,7 +58,6 @@ func TestCursorUserErrorResponsesMapsCursorErrors(t *testing.T) {
 		err     error
 		status  int
 		errType string
-		code    string
 		zh      string
 	}{
 		{
@@ -66,23 +65,20 @@ func TestCursorUserErrorResponsesMapsCursorErrors(t *testing.T) {
 			err:     &service.CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"},
 			status:  http.StatusBadRequest,
 			errType: "invalid_request_error",
-			code:    pkgerrors.CursorResUnknownAssociationCode,
 			zh:      pkgerrors.CursorResUnknownAssociation,
 		},
 		{
-			name:    "request_invalid_image",
-			err:     &service.CursorRequestError{Code: pkgerrors.CursorReqInvalidImageCode, Status: http.StatusBadRequest, Detail: "image data URI missing mime type"},
+			name:    "request_unsupported_message",
+			err:     &service.CursorRequestError{Message: pkgerrors.CursorReqUnsupportedMessage, Status: http.StatusBadRequest, Detail: "image data URI missing mime type"},
 			status:  http.StatusBadRequest,
 			errType: "invalid_request_error",
-			code:    pkgerrors.CursorReqInvalidImageCode,
-			zh:      pkgerrors.CursorReqInvalidImage,
+			zh:      pkgerrors.CursorReqUnsupportedMessage,
 		},
 		{
 			name:    "deadline_exceeded",
 			err:     context.DeadlineExceeded,
 			status:  http.StatusGatewayTimeout,
 			errType: "upstream_error",
-			code:    pkgerrors.CursorExecDeadlineExceededCode,
 			zh:      pkgerrors.CursorExecDeadlineExceeded,
 		},
 	}
@@ -99,13 +95,13 @@ func TestCursorUserErrorResponsesMapsCursorErrors(t *testing.T) {
 			errType, msg := decodeCursorUserErrorResponsesBody(t, rec)
 			require.Equal(t, tc.errType, errType)
 			require.True(t, strings.HasPrefix(msg, tc.zh), "message 必须以中文提示开头: %q", msg)
-			require.Contains(t, msg, "错误码 "+tc.code)
+			require.NotContains(t, msg, "CUR-")
 			require.Contains(t, msg, "请求号 "+cursorUserErrorResponsesRequestID)
 
 			entries := logs.FilterMessage("cursor_user_error").All()
 			require.Len(t, entries, 1)
 			fields := entries[0].ContextMap()
-			require.Equal(t, tc.code, fields["error_code"])
+			require.NotContains(t, fields, "error_code")
 			require.EqualValues(t, tc.status, fields["status"])
 		})
 	}
@@ -114,7 +110,7 @@ func TestCursorUserErrorResponsesMapsCursorErrors(t *testing.T) {
 func TestCursorUserErrorResponsesNonCursorAccountUnchanged(t *testing.T) {
 	errs := []error{
 		&service.CursorResumeError{Status: http.StatusBadRequest, Reason: "unknown_association"},
-		&service.CursorRequestError{Code: pkgerrors.CursorReqInvalidImageCode, Status: http.StatusBadRequest, Detail: "image data URI missing mime type"},
+		&service.CursorRequestError{Message: pkgerrors.CursorReqUnsupportedMessage, Status: http.StatusBadRequest, Detail: "image data URI missing mime type"},
 		context.DeadlineExceeded,
 	}
 	for _, err := range errs {
@@ -161,6 +157,6 @@ func TestCursorUserErrorResponsesStreamStartedKeepsStatus(t *testing.T) {
 	body := rec.Body.String()
 	require.Contains(t, body, "event: response.failed")
 	require.Contains(t, body, pkgerrors.CursorExecDeadlineExceeded)
-	require.Contains(t, body, "错误码 "+pkgerrors.CursorExecDeadlineExceededCode)
+	require.NotContains(t, body, "CUR-")
 	require.Contains(t, body, "请求号 "+cursorUserErrorResponsesRequestID)
 }
