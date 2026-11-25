@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -159,4 +160,109 @@ func TestUpstreamJitterProbeChannelAPIKeySkipsConnectProbe(t *testing.T) {
 	require.False(t, ok)
 	require.Error(t, err, "无 api_key 凭据时数据面探测 fast-fail，不伪造成功")
 	require.False(t, errors.Is(err, errUnsupportedModelProbe), "cursor 平台整体不再返回不支持错误")
+}
+
+// --- JIT-27: probeModelScope 抖动分支的失败重排 / 成功版本化清除 ---
+
+type jitterProbeLockFake struct{}
+
+func (jitterProbeLockFake) TryAcquireLeaderLock(context.Context, string, string, time.Duration) (bool, error) {
+	return true, nil
+}
+func (jitterProbeLockFake) ReleaseLeaderLock(context.Context, string, string) error { return nil }
+
+// jitterProbeRepoAll 合并本卡两处赋值所需的接口：
+//   - AccountHealthRecoveryProbeService.accountRepo: accountHealthProbeRepository
+//   - RateLimitService.accountRepo（用例 2 成功分支）: AccountRepository
+//
+// 派发单骨架仅嵌入 accountHealthProbeRepository，无法满足 rateLimit 的 AccountRepository
+// 字段；只嵌入 AccountRepository 又缺 ClearRecoveryProbeComponent 等 probe 窄面方法。
+// Go 1.14+ 允许嵌入方法集重叠的接口（同名方法签名一致），故用组合接口一次覆盖。
+type jitterProbeRepoAll interface {
+	AccountRepository
+	accountHealthProbeRepository
+}
+
+type jitterProbeRepoFake struct {
+	jitterProbeRepoAll // 嵌入 nil 大接口：只满足类型，测试只触达下面显式实现的方法
+	patches            []ModelProbePatch
+	applied            int
+}
+
+func (r *jitterProbeRepoFake) PatchModelRateLimitEntry(_ context.Context, _ int64, _ string, _ int64, p ModelProbePatch) (bool, error) {
+	r.patches = append(r.patches, p)
+	return true, nil
+}
+func (r *jitterProbeRepoFake) WithModelRateLimitAccountLock(ctx context.Context, _ int64, fn func(context.Context) error) error {
+	return fn(ctx)
+}
+func (r *jitterProbeRepoFake) GetModelRateLimitMeta(context.Context, int64, string) (time.Time, int64, bool, error) {
+	return time.Time{}, 0, false, nil
+}
+func (r *jitterProbeRepoFake) CommitModelRateLimitObservationIfVersion(context.Context, int64, string, map[string]any, bool, time.Time, int64, string) (bool, error) {
+	r.applied++
+	return true, nil
+}
+
+// 以下两个方法补齐 modelRateLimitObservationRepository 窄面（共 5 个方法）：
+// RateLimitService.observationRepo() 要求整个窄面都实现，否则成功分支的
+// ApplyModelRateLimitObservationIfVersion 失败关闭、applied 恒为 0，用例 2 无法断言
+// 「成功经版本化入口清除」。写法照 openai_apikey_health_breaker_test.go 的
+// probeRateLimitRepo 先例：内存成功桩，嵌入的 accountHealthProbeRepository 为 nil 不被触达。
+// 这两个方法派发单骨架未列出，属接口签名补齐，不放宽任何断言。
+func (r *jitterProbeRepoFake) GetModelRateLimitEntry(context.Context, int64, string) (map[string]any, error) {
+	return nil, nil
+}
+func (r *jitterProbeRepoFake) CommitModelRateLimitObservation(context.Context, int64, string, map[string]any, bool, time.Time, int64) error {
+	return nil
+}
+
+func TestUpstreamJitterProbeChannelJitterBranchReschedules15s(t *testing.T) {
+	repo := &jitterProbeRepoFake{}
+	probe := &AccountHealthRecoveryProbeService{
+		accountRepo:  repo,
+		recoveryLock: jitterProbeLockFake{},
+		cursorExec:   &CursorExecutionService{},
+		cursorAgentRunProbe: func(context.Context, *CursorExecutionService, *Account, string, int) (int, string, string, error) {
+			return 500, "boom", "", nil
+		},
+	}
+	acc := &Account{ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth}
+	task := ModelProbeTask{AccountID: 1, Scope: "m-model", Entry: map[string]any{
+		"reason": UpstreamJitterModelRateLimitReason, "probe_gen": int64(7),
+	}}
+	probe.probeModelScope(context.Background(), acc, task, "owner")
+
+	var reschedules []ModelProbePatch
+	for _, p := range repo.patches {
+		if p.Op == ModelProbePatchReschedule {
+			reschedules = append(reschedules, p)
+		}
+	}
+	require.Len(t, reschedules, 1, "失败分支必须且仅重排一次；PatchModelRateLimitEntry 签名不匹配则本断言失败")
+	require.WithinDuration(t, time.Now().Add(UpstreamJitterProbeCadence), reschedules[0].Due, 3*time.Second)
+	require.Zero(t, repo.applied, "失败分支不得触发版本化清除；CommitModelRateLimitObservationIfVersion 签名不匹配则本断言失败")
+}
+
+func TestUpstreamJitterProbeChannelJitterBranchClears(t *testing.T) {
+	repo := &jitterProbeRepoFake{}
+	probe := &AccountHealthRecoveryProbeService{
+		accountRepo:  repo,
+		recoveryLock: jitterProbeLockFake{},
+		cursorExec:   &CursorExecutionService{},
+		rateLimit:    &RateLimitService{accountRepo: repo},
+		cursorAgentRunProbe: func(context.Context, *CursorExecutionService, *Account, string, int) (int, string, string, error) {
+			return 200, "", "hello", nil
+		},
+	}
+	acc := &Account{ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth}
+	task := ModelProbeTask{AccountID: 1, Scope: "m-model", Entry: map[string]any{
+		"reason": UpstreamJitterModelRateLimitReason, "probe_gen": int64(7),
+	}}
+	probe.probeModelScope(context.Background(), acc, task, "owner")
+
+	require.Equal(t, 1, repo.applied, "成功分支必须经版本化入口清除该 scope；CommitModelRateLimitObservationIfVersion 签名不匹配则本断言失败")
+	for _, p := range repo.patches {
+		require.NotEqual(t, ModelProbePatchReschedule, p.Op, "成功分支不得重排")
+	}
 }

@@ -155,16 +155,22 @@ func (g *UpstreamJitterGuard) Observe(ctx context.Context, accountID int64, mode
 		upstreamKey = "host:" + strings.ToLower(strings.TrimSpace(host))
 	}
 
-	if err := g.repo.SetModelRateLimit(ctx, acc.ID, modelScope, time.Now().Add(upstreamJitterEntryObservationWindow), UpstreamJitterModelRateLimitReason); err != nil {
-		logger.L().Warn("upstream_jitter_stop_write_failed",
-			zap.Int64("account_id", acc.ID),
-			zap.String("model_scope", modelScope),
-			zap.Error(err),
-		)
-		return false, nil
+	scopes := []string{strings.TrimSpace(modelScope)}
+	if mapped := strings.TrimSpace(ChannelMappedModelFromContext(ctx)); mapped != "" && mapped != scopes[0] {
+		scopes = append(scopes, mapped)
+	}
+	for _, scope := range scopes {
+		if err := g.repo.SetModelRateLimit(ctx, acc.ID, scope, time.Now().Add(upstreamJitterEntryObservationWindow), UpstreamJitterModelRateLimitReason); err != nil {
+			logger.L().Warn("upstream_jitter_stop_write_failed",
+				zap.Int64("account_id", acc.ID),
+				zap.String("model_scope", scope),
+				zap.Error(err),
+			)
+			return false, nil
+		}
 	}
 
-	key := upstreamKey + "|" + modelScope
+	key := upstreamKey + "|" + scopes[0]
 	if g.failedByUpstream[key] == nil {
 		g.failedByUpstream[key] = make(map[int64]struct{})
 	}
@@ -173,6 +179,7 @@ func (g *UpstreamJitterGuard) Observe(ctx context.Context, accountID int64, mode
 		zap.Int64("account_id", acc.ID),
 		zap.String("upstream_key", upstreamKey),
 		zap.String("model_scope", modelScope),
+		zap.Int("model_scopes", len(scopes)),
 		zap.Int("upstream_status", fe.StatusCode),
 		zap.String("reason", string(fe.Reason)),
 	)

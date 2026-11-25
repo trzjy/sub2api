@@ -23,10 +23,11 @@ type upstreamJitterRepoStub struct {
 	siblingCalls int
 	setCalls     []upstreamJitterSetCall
 
-	getErr     error
-	listErr    error
-	setErr     error
-	siblingErr error
+	getErr        error
+	listErr       error
+	setErr        error
+	setErrByScope map[string]error
+	siblingErr    error
 }
 
 type upstreamJitterSetCall struct {
@@ -61,6 +62,9 @@ func (s *upstreamJitterRepoStub) SetModelRateLimit(_ context.Context, id int64, 
 		resetAt:   resetAt,
 		reason:    append([]string(nil), reason...),
 	})
+	if err, ok := s.setErrByScope[scope]; ok {
+		return err
+	}
 	return s.setErr
 }
 
@@ -250,4 +254,70 @@ func TestUpstreamJitterNewGuardNilSafety(t *testing.T) {
 	// accountRepo 为 nil 接口时，类型断言不成立，返回 nil 而非 panic。
 	require.Nil(t, (&GatewayService{}).NewUpstreamJitterGuard(1))
 	require.Nil(t, (&OpenAIGatewayService{}).NewUpstreamJitterGuard(1))
+}
+
+func TestUpstreamJitterObserveChannelMappedModelScopes(t *testing.T) {
+	const quotaKeyID int64 = 101
+	const groupID int64 = 13
+	fe := &UpstreamFailoverError{StatusCode: 500}
+
+	// ctx 带渠道映射：主 scope 与映射后 scope 都要写停调。
+	stub := &upstreamJitterRepoStub{
+		accounts:     map[int64]*Account{1: jitterCursorAccount(1, quotaKeyID)},
+		siblingsByQK: map[int64][]int64{quotaKeyID: {1, 2}},
+	}
+	g := newUpstreamJitterGuard(stub, groupID)
+	ctx := WithChannelMappedModel(context.Background(), "mapped-b")
+	admitted, _ := g.Observe(ctx, 1, "mapped-a", fe)
+	require.True(t, admitted)
+	require.Len(t, stub.setCalls, 2)
+	require.Equal(t, "mapped-a", stub.setCalls[0].scope)
+	require.Equal(t, "mapped-b", stub.setCalls[1].scope)
+
+	// ctx 无渠道映射：只写主 scope 一次。
+	stubNoMapping := &upstreamJitterRepoStub{
+		accounts:     map[int64]*Account{1: jitterCursorAccount(1, quotaKeyID)},
+		siblingsByQK: map[int64][]int64{quotaKeyID: {1, 2}},
+	}
+	gNoMapping := newUpstreamJitterGuard(stubNoMapping, groupID)
+	admitted, _ = gNoMapping.Observe(context.Background(), 1, "mapped-a", fe)
+	require.True(t, admitted)
+	require.Len(t, stubNoMapping.setCalls, 1)
+	require.Equal(t, "mapped-a", stubNoMapping.setCalls[0].scope)
+}
+
+func TestUpstreamJitterObserveSecondScopeWriteFailure(t *testing.T) {
+	const quotaKeyID int64 = 88
+	fe := &UpstreamFailoverError{StatusCode: 500}
+
+	// 第二个 scope 写入失败：拒绝准入，且不 panic。
+	stub := &upstreamJitterRepoStub{
+		accounts: map[int64]*Account{1: jitterCursorAccount(1, quotaKeyID)},
+		siblingsByQK: map[int64][]int64{
+			quotaKeyID: {1, 2},
+		},
+		setErrByScope: map[string]error{
+			"mapped-b": errors.New("second stop write failed"),
+		},
+	}
+	g := newUpstreamJitterGuard(stub, 3)
+	ctx := WithChannelMappedModel(context.Background(), "mapped-b")
+	require.NotPanics(t, func() {
+		admitted, excludeIDs := g.Observe(ctx, 1, "mapped-a", fe)
+		require.False(t, admitted, "第二个 scope 写入失败必须拒绝准入")
+		require.Nil(t, excludeIDs)
+	})
+	require.Len(t, stub.setCalls, 2, "两个 scope 均尝试写入")
+
+	// 主 scope 写入失败：不再继续写后续的渠道映射 scope。
+	stubFirst := &upstreamJitterRepoStub{
+		accounts:      map[int64]*Account{1: jitterCursorAccount(1, quotaKeyID)},
+		siblingsByQK:  map[int64][]int64{quotaKeyID: {1, 2}},
+		setErrByScope: map[string]error{"mapped-a": errors.New("first stop write failed")},
+	}
+	gFirst := newUpstreamJitterGuard(stubFirst, 3)
+	admitted, excludeIDs := gFirst.Observe(ctx, 1, "mapped-a", fe)
+	require.False(t, admitted)
+	require.Nil(t, excludeIDs)
+	require.Len(t, stubFirst.setCalls, 1, "主 scope 失败后不得继续写后续 scope")
 }

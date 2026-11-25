@@ -126,6 +126,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 	slotFullCount := 0
 	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	jitter := upstreamJitterGuardFor(h.gatewayService, apiKey)
 	var lastFailoverErr *service.UpstreamFailoverError
 	switchCount := 0
 	routingStart := time.Now()
@@ -254,6 +255,13 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				}
 				h.gatewayService.RecordOpenAIAccountSwitch()
 				failedAccountIDs[account.ID] = struct{}{}
+				if jitter != nil {
+					if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(forwardModel), failoverErr); len(excludeIDs) > 0 {
+						for _, id := range excludeIDs {
+							failedAccountIDs[id] = struct{}{}
+						}
+					}
+				}
 				lastFailoverErr = failoverErr
 				markFailoverUpstreamFailure(c)
 				switchCount++

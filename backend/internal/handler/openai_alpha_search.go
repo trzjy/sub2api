@@ -128,6 +128,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	slotFullCount := 0
 	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	jitter := upstreamJitterGuardFor(h.gatewayService, apiKey)
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	switchCount := 0
@@ -275,6 +276,13 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		}
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
+		if jitter != nil {
+			if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(openAIChannelForwardModel(channelMapping, requestedModel)), failoverErr); len(excludeIDs) > 0 {
+				for _, id := range excludeIDs {
+					failedAccountIDs[id] = struct{}{}
+				}
+			}
+		}
 		lastFailoverErr = failoverErr
 		markFailoverUpstreamFailure(c)
 		switchCount++
