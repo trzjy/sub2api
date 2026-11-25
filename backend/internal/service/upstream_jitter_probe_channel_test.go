@@ -183,10 +183,18 @@ type jitterProbeRepoAll interface {
 	accountHealthProbeRepository
 }
 
+// jitterProbeApplyCall 捕获版本化清除入口的实参，供成功用例断言 clear/scope/expected version。
+type jitterProbeApplyCall struct {
+	scope    string
+	clear    bool
+	expected string
+}
+
 type jitterProbeRepoFake struct {
 	jitterProbeRepoAll // 嵌入 nil 大接口：只满足类型，测试只触达下面显式实现的方法
 	patches            []ModelProbePatch
 	applied            int
+	applies            []jitterProbeApplyCall
 }
 
 func (r *jitterProbeRepoFake) PatchModelRateLimitEntry(_ context.Context, _ int64, _ string, _ int64, p ModelProbePatch) (bool, error) {
@@ -199,8 +207,9 @@ func (r *jitterProbeRepoFake) WithModelRateLimitAccountLock(ctx context.Context,
 func (r *jitterProbeRepoFake) GetModelRateLimitMeta(context.Context, int64, string) (time.Time, int64, bool, error) {
 	return time.Time{}, 0, false, nil
 }
-func (r *jitterProbeRepoFake) CommitModelRateLimitObservationIfVersion(context.Context, int64, string, map[string]any, bool, time.Time, int64, string) (bool, error) {
+func (r *jitterProbeRepoFake) CommitModelRateLimitObservationIfVersion(_ context.Context, _ int64, scope string, _ map[string]any, clear bool, _ time.Time, _ int64, expectedLastEventAt string) (bool, error) {
 	r.applied++
+	r.applies = append(r.applies, jitterProbeApplyCall{scope: scope, clear: clear, expected: expectedLastEventAt})
 	return true, nil
 }
 
@@ -262,7 +271,32 @@ func TestUpstreamJitterProbeChannelJitterBranchClears(t *testing.T) {
 	probe.probeModelScope(context.Background(), acc, task, "owner")
 
 	require.Equal(t, 1, repo.applied, "成功分支必须经版本化入口清除该 scope；CommitModelRateLimitObservationIfVersion 签名不匹配则本断言失败")
+	require.Len(t, repo.applies, 1)
+	require.Equal(t, "m-model", repo.applies[0].scope)
+	require.True(t, repo.applies[0].clear)
+	require.Equal(t, task.MetaLastEventAt, repo.applies[0].expected)
 	for _, p := range repo.patches {
 		require.NotEqual(t, ModelProbePatchReschedule, p.Op, "成功分支不得重排")
 	}
+}
+
+// --- JIT-36: 渠道别名 scope 探测必须按账号映射解析到真实上游模型 ---
+
+func TestUpstreamJitterProbeChannelResolvesMappedScope(t *testing.T) {
+	var gotModel string
+	probe := &AccountHealthRecoveryProbeService{
+		cursorExec: &CursorExecutionService{},
+		cursorAgentRunProbe: func(_ context.Context, _ *CursorExecutionService, _ *Account, model string, _ int) (int, string, string, error) {
+			gotModel = model
+			return 200, "", "ok", nil
+		},
+	}
+	acc := &Account{
+		ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"model_mapping": map[string]any{"scope-b": "scope-c"}},
+	}
+	ok, err := probe.probeCursorModelScopeUpstream(context.Background(), acc, "scope-b")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "scope-c", gotModel, "探测必须使用账号映射后的真实上游模型")
 }

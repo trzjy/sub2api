@@ -89,6 +89,9 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	}
 
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, requestedModel)
+	if channelMapping.Mapped && channelMapping.MappedModel != requestedModel {
+		c.Request = c.Request.WithContext(service.WithChannelMappedModel(c.Request.Context(), channelMapping.MappedModel))
+	}
 	forwardBody := openAIModelMappedBody(body, channelMapping.Mapped, channelMapping.MappedModel, h.gatewayService.ReplaceModelInBody)
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
@@ -277,7 +280,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		if jitter != nil {
-			if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(openAIChannelForwardModel(channelMapping, requestedModel)), failoverErr); len(excludeIDs) > 0 {
+			if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(requestedModel), failoverErr); len(excludeIDs) > 0 {
 				for _, id := range excludeIDs {
 					failedAccountIDs[id] = struct{}{}
 				}

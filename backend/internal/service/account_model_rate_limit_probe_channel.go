@@ -354,7 +354,11 @@ func (p *AccountHealthRecoveryProbeService) probeCursorModelScopeUpstream(ctx co
 		if fn == nil {
 			fn = ProbeCursorAccountHealth
 		}
-		status, _, text, err := fn(ctx, p.cursorExec, acc, scope, cursorAccountHealthProbeMinBudget)
+		model := resolveOpenAIAccountUpstreamModelForRequest(acc, scope, false)
+		if strings.TrimSpace(model) == "" {
+			model = scope
+		}
+		status, _, text, err := fn(ctx, p.cursorExec, acc, model, cursorAccountHealthProbeMinBudget)
 		if err != nil {
 			return false, err
 		}
