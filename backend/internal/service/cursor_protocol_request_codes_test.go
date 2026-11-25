@@ -53,6 +53,11 @@ func TestCursorProtocolRequestRejectsOnlyUnsendable(t *testing.T) {
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
 			{Role: "assistant", Content: json.RawMessage(`"prefill"`)},
 		}}, "grok-4.7", infraerrors.CursorReqPrefillCode, http.StatusBadRequest},
+		// 孤立工具结果同样不是 user 轮：不凭历史新建 AgentRun（末尾非 user 仍拒）。
+		{"ends with isolated tool result", &apicompat.ChatCompletionsRequest{Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+			{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: json.RawMessage(`"sunny"`)},
+		}}, "grok-4.7", infraerrors.CursorReqPrefillCode, http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -109,7 +114,7 @@ func TestCursorProtocolRequestDropsWhatItCannotForward(t *testing.T) {
 			apicompat.ChatMessage{Role: "assistant", Content: json.RawMessage(`"x"`),
 				FunctionCall: &apicompat.ChatFunctionCall{Name: "f", Arguments: "{}"}},
 			msg("user", `"again"`)), cursorSkipLegacyFunctionCall, 1},
-		// legacy function 消息没有 tool_call_id：不拒，落成无 id 的结果文本。
+		// legacy function 消息没有 tool_call_id：不拒，落成无 id 的 tool 历史轮并记账。
 		{"legacy function without call id", withHead(
 			msg("function", `"sunny"`), msg("user", `"again"`)), cursorSkipLegacyFunctionNoID, 1},
 		// 尾部空 assistant（prefill 占位）：丢掉它本轮照常发。

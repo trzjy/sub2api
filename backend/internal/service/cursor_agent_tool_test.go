@@ -7,7 +7,6 @@ package service
 // 断言以字节级回读为主（不只断言"不报错"），确保字段号与嵌套层级真的写对了。
 
 import (
-	"bytes"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -30,19 +29,15 @@ func cursorTestFieldString(fields []cursorPBField, n int) string {
 	return f.String()
 }
 
-// cursorTestRestoreF3Schema 把解码后的 McpToolDefinition 字段里 f3（google.protobuf.Value）
-// 还原为规范 JSON 字符串，并断言 f3 存在（单入口运输定义只写 f3）。
-func cursorTestRestoreF3Schema(t *testing.T, fields []cursorPBField) string {
+// cursorTestF6SchemaOf 取出逐工具原生定义的 f6 input_schema_json 原文本，并断言 f3 不存在。
+// 本 helper 与 cursor_protocol_request_test.go 共用（同包）。
+func cursorTestF6SchemaOf(t *testing.T, fields []cursorPBField) string {
 	t.Helper()
-	f3, ok := cursorFindField(fields, cursorFldMcpToolDefInputSchemaValue)
-	require.True(t, ok, "f3 input_schema Value must be present")
-	v := &structpb.Value{}
-	require.NoError(t, proto.Unmarshal(f3.Bytes, v))
-	out, err := protojson.Marshal(v)
-	require.NoError(t, err)
-	var buf bytes.Buffer
-	require.NoError(t, json.Compact(&buf, out))
-	return buf.String()
+	_, hasF3 := cursorFindField(fields, 3)
+	require.False(t, hasF3, "native tool definition must not carry f3 schema encoding")
+	f6, ok := cursorFindField(fields, cursorFldMcpToolDefInputSchemaJSON)
+	require.True(t, ok, "f6 input_schema_json must be present")
+	return f6.String()
 }
 
 // cursorDuplexReadReplyAsync 启动一个并发读取 goroutine 并返回结果通道。
@@ -150,7 +145,7 @@ func cursorToolTestNativeValue(e cursorToolTestMcpArgEntry) []byte {
 
 // cursorToolTestBuildMcpArgs 构造第三方原生 f11（mcp_args）载荷：f3 tool_call_id、
 // f5 真实工具名，每条 f2 = 一条 map entry（{f1 原参数键, f2 Value}）。签名保持不变，
-// 不引入任何 tool_name / arguments_json 两键包装。
+// 参数键为客户端自有键，不引入包装二键。
 func cursorToolTestBuildMcpArgs(tcID, toolName string, entries []cursorToolTestMcpArgEntry) []byte {
 	var mcpArgs []byte
 	for _, e := range entries {
@@ -216,9 +211,8 @@ func cursorTestDeclaredToolDefs(t *testing.T, req *apicompat.ChatCompletionsRequ
 }
 
 // cursorTestTransportDefs 构造本地 f4 定义夹具：每条 McpToolDefinition 的 f5 是
-// 真实工具名（names），与第三方原生 mcp_args.f5 的声明校验同源。请求侧声明迁到
-// 原生多工具由后续卡负责；解码测试不依赖仍为包装形状的生产 f4。
-// 注意：mcp_state 字节级回显测试不调用本函数，它仍用真实 f4 原始字节。
+// 真实工具名（names），与第三方原生 mcp_args.f5 的声明校验同源。仅用于解码测试；
+// mcp_state 字节级回显测试不调用本函数，它用真实 f4 原始字节。
 func cursorTestTransportDefs(t *testing.T, names ...string) [][]byte {
 	t.Helper()
 	defs := make([][]byte, 0, len(names))
@@ -228,41 +222,39 @@ func cursorTestTransportDefs(t *testing.T, names ...string) [][]byte {
 	return defs
 }
 
-// cursorTestTransportEnum 从单入口 f4 定义的 f3 input_schema 解出 properties.tool_name.enum。
-func cursorTestTransportEnum(t *testing.T, fields []cursorPBField) []string {
+// cursorTestDeclaredToolNames 从真实 f4 定义里按声明顺序取工具名（f1）。
+func cursorTestDeclaredToolNames(t *testing.T, req *apicompat.ChatCompletionsRequest) []string {
 	t.Helper()
-	var schema struct {
-		Properties map[string]struct {
-			Enum []string `json:"enum"`
-		} `json:"properties"`
+	defs := cursorTestDeclaredToolDefs(t, req)
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		fields, err := cursorDecodeProtobuf(def)
+		require.NoError(t, err)
+		names = append(names, cursorTestFieldString(fields, cursorFldMcpToolDefName))
 	}
-	require.NoError(t, json.Unmarshal([]byte(cursorTestRestoreF3Schema(t, fields)), &schema))
-	return schema.Properties["tool_name"].Enum
+	return names
 }
 
 // cursorTestBuildToolDef 构造一条 McpToolDefinition 原始字节（f1 名 / f2 description /
-// f4 provider / f5 tool_name / f3 input_schema(google.protobuf.Value)），与
-// cursorBuildMcpTools 生产构造同形（仅用于测试夹具，不重新序列化 req.Tools）。
+// f4 provider / f5 tool_name / f6 input_schema_json 原文本），与 cursorBuildMcpTools
+// 生产构造同形（仅用于测试夹具，不重新序列化 req.Tools）。
 func cursorTestBuildToolDef(t *testing.T, toolName, schema string) []byte {
 	t.Helper()
-	v := &structpb.Value{}
-	require.NoError(t, protojson.Unmarshal([]byte(schema), v))
-	b, err := proto.Marshal(v)
-	require.NoError(t, err)
 	var def []byte
 	def = cursorAppendStringField(def, cursorFldMcpToolDefName, toolName)
 	def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, "desc-"+toolName)
 	def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
 	def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, toolName)
-	def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, b)
+	def = cursorAppendStringField(def, cursorFldMcpToolDefInputSchemaJSON, schema)
 	return def
 }
 
 // ---------------------------------------------------------------------------
-// 1. 声明编码：单入口运输 f4 只有一条定义，enum 列出全部客户端工具
+// 1. 声明编码：每个真实工具一条原生定义（f1/f2/f4/f5/f6，无 f3）
 // ---------------------------------------------------------------------------
 
 func TestCursorToolDeclarationEncoding(t *testing.T) {
+	const schema2 = `{"type":"object","x":1,"big":9007199254740993}`
 	req := &apicompat.ChatCompletionsRequest{
 		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 		Tools: []apicompat.ChatTool{
@@ -271,7 +263,7 @@ func TestCursorToolDeclarationEncoding(t *testing.T) {
 				Parameters: json.RawMessage(`{"type":"object"}`)}},
 			{Type: "function", Function: &apicompat.ChatFunction{
 				Name: "search", Description: "d2",
-				Parameters: json.RawMessage(`{"type":"object","x":1}`)}},
+				Parameters: json.RawMessage(schema2)}},
 		},
 	}
 	body, err := cursorConvertRequest(req, "grok-4.7")
@@ -282,27 +274,32 @@ func TestCursorToolDeclarationEncoding(t *testing.T) {
 	require.True(t, ok, "f4 (McpTools) must be present")
 	require.NotEmpty(t, mcp.Bytes)
 
-	// 单入口运输：无论客户端声明多少工具，f4 只有一条 McpToolDefinition
-	// （invoke_client_tool）；真实工具名进 f3 input_schema 的 tool_name enum。
 	mcpFields, e := cursorDecodeProtobuf(mcp.Bytes)
 	require.NoError(t, e)
 	defs := cursorAllFields(mcpFields, cursorFldMcpToolsTool)
-	require.Len(t, defs, 1, "all client tools share one transport definition")
+	require.Len(t, defs, 2, "N tools must produce N native definitions")
 
-	fields, e := cursorDecodeProtobuf(defs[0].Bytes)
-	require.NoError(t, e)
-	require.Equal(t, "invoke_client_tool", cursorTestFieldString(fields, cursorFldMcpToolDefName))
-	require.Equal(t, "invoke_client_tool", cursorTestFieldString(fields, cursorFldMcpToolDefToolName))
-	require.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(fields, cursorFldMcpToolDefProvider))
-	desc := cursorTestFieldString(fields, cursorFldMcpToolDefDescription)
-	require.Contains(t, desc, "get_weather")
-	require.Contains(t, desc, `"x":1`)
-	// enum 准确：恰好两个原名、顺序与声明一致。
-	require.Equal(t, []string{"get_weather", "search"}, cursorTestTransportEnum(t, fields))
+	want := []struct{ name, desc, schema string }{
+		{"get_weather", "d1", `{"type":"object"}`},
+		{"search", "d2", schema2},
+	}
+	// f29 教学提示不得再出现。
+	_, hasF29 := cursorFindField(run, 29)
+	require.False(t, hasF29, "f29 system_prompt_spec teaching prompt must be removed")
+	for i, def := range defs {
+		fields, e := cursorDecodeProtobuf(def.Bytes)
+		require.NoError(t, e)
+		require.Equal(t, want[i].name, cursorTestFieldString(fields, cursorFldMcpToolDefName), "f1 name")
+		require.Equal(t, want[i].name, cursorTestFieldString(fields, cursorFldMcpToolDefToolName), "f5 tool_name")
+		require.Equal(t, want[i].desc, cursorTestFieldString(fields, cursorFldMcpToolDefDescription), "f2 description")
+		require.Equal(t, cursorMcpProviderIdentifier, cursorTestFieldString(fields, cursorFldMcpToolDefProvider), "f4 provider")
+		require.Equal(t, want[i].schema, cursorTestF6SchemaOf(t, fields), "f6 input_schema_json must be the original schema bytes")
+		require.NotContains(t, want[i].schema, "float64")
+	}
 }
 
 // ---------------------------------------------------------------------------
-// 2/7. tool_choice 四值语义
+// 2/7. tool_choice 四值语义（逐工具声明的子集）
 // ---------------------------------------------------------------------------
 
 func TestCursorToolChoiceSemantics(t *testing.T) {
@@ -317,33 +314,22 @@ func TestCursorToolChoiceSemantics(t *testing.T) {
 			ToolChoice: choice,
 		}
 	}
-	// 单入口运输下，tool_choice 决定 f3 tool_name enum 的内容（f4 恒为一条）。
-	transportEnum := func(t *testing.T, req *apicompat.ChatCompletionsRequest) []string {
-		defs := cursorTestDeclaredToolDefs(t, req)
-		if len(defs) == 0 {
-			return nil
-		}
-		require.Len(t, defs, 1, "单入口运输：f4 只有一条定义")
-		fields, err := cursorDecodeProtobuf(defs[0])
-		require.NoError(t, err)
-		return cursorTestTransportEnum(t, fields)
-	}
 
 	t.Run("省略/auto → 全部声明", func(t *testing.T) {
-		require.Equal(t, []string{"a", "b"}, transportEnum(t, base(nil)))
-		require.Equal(t, []string{"a", "b"}, transportEnum(t, base(json.RawMessage(`"auto"`))))
+		require.Equal(t, []string{"a", "b"}, cursorTestDeclaredToolNames(t, base(nil)))
+		require.Equal(t, []string{"a", "b"}, cursorTestDeclaredToolNames(t, base(json.RawMessage(`"auto"`))))
 	})
 	t.Run("required → 全部声明", func(t *testing.T) {
-		require.Equal(t, []string{"a", "b"}, transportEnum(t, base(json.RawMessage(`"required"`))))
+		require.Equal(t, []string{"a", "b"}, cursorTestDeclaredToolNames(t, base(json.RawMessage(`"required"`))))
 	})
 	t.Run("none → 不声明（等价无 tools）", func(t *testing.T) {
-		require.Empty(t, transportEnum(t, base(json.RawMessage(`"none"`))))
+		require.Empty(t, cursorTestDeclaredToolNames(t, base(json.RawMessage(`"none"`))))
 	})
 	t.Run("指定函数 → 仅声明该函数", func(t *testing.T) {
-		require.Equal(t, []string{"b"}, transportEnum(t, base(json.RawMessage(`{"type":"function","function":{"name":"b"}}`))))
+		require.Equal(t, []string{"b"}, cursorTestDeclaredToolNames(t, base(json.RawMessage(`{"type":"function","function":{"name":"b"}}`))))
 	})
 	t.Run("指定函数不在列表 → 回落全部（不凭空声明）", func(t *testing.T) {
-		require.Equal(t, []string{"a", "b"}, transportEnum(t, base(json.RawMessage(`{"type":"function","function":{"name":"missing"}}`))))
+		require.Equal(t, []string{"a", "b"}, cursorTestDeclaredToolNames(t, base(json.RawMessage(`{"type":"function","function":{"name":"missing"}}`))))
 	})
 }
 
@@ -366,7 +352,7 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 	d, err := newCursorAgentDuplex(initBody, nil)
 	require.NoError(t, err)
 	defer d.close(nil)
-	require.Len(t, d.declaredToolDefs, 1, "单入口运输：f4 只有一条定义")
+	require.Len(t, d.declaredToolDefs, 2, "逐工具声明：f4 有两条定义")
 
 	// 期望：回包 f5 与请求 f4 的每条 McpToolDefinition 原始字节逐字节一致（字节级保真，依据 T7）。
 	runForExpect := cursorAgentRunOf(t, initBody)
@@ -378,7 +364,7 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 	for _, def := range cursorAllFields(mcpFieldsForExpect, cursorFldMcpToolsTool) {
 		defRaw = append(defRaw, def.Bytes)
 	}
-	require.Len(t, defRaw, 1, "单入口运输：f4 只有一条 McpToolDefinition 原始字节")
+	require.Len(t, defRaw, 2, "逐工具声明：f4 有两条 McpToolDefinition 原始字节")
 
 	frame := cursorToolTestExecFrame(false, nil) // f36 mcp_state（respond 吃 envelope 剥离后的 payload）
 	// 先起并发读取，再调 respond：d.send 走 io.Pipe 会阻塞直到被读，避免死锁。
@@ -427,7 +413,8 @@ func TestCursorDuplexMcpStateReply(t *testing.T) {
 	}
 	tf, e := cursorDecodeProtobuf(toolEntries[0].Bytes)
 	require.NoError(t, e)
-	require.Equal(t, "invoke_client_tool", cursorTestFieldString(tf, cursorFldMcpToolDefName))
+	require.Equal(t, "get_weather", cursorTestFieldString(tf, cursorFldMcpToolDefName))
+	require.Equal(t, "get_weather", cursorTestFieldString(tf, cursorFldMcpToolDefToolName))
 }
 
 // ---------------------------------------------------------------------------
@@ -530,8 +517,7 @@ func TestCursorDuplexMcpArgsCapturedNotAnswered(t *testing.T) {
 	d, err := newCursorAgentDuplex(initBody, nil)
 	require.NoError(t, err)
 	defer d.close(nil)
-	// 请求侧 f4 仍是旧包装；本卡只改读取侧，测试注入与原生 f5 同名的本地声明夹具。
-	d.declaredToolDefs = cursorTestTransportDefs(t, "get_weather")
+	// 请求侧 f4 已是逐工具原生定义（f5=get_weather），declaredToolDefs 直接取自真实 f4，不再注入夹具。
 
 	args := cursorToolTestBuildMcpArgs("call_99", "get_weather", []cursorToolTestMcpArgEntry{
 		{key: "city", kind: "string", val: "Shanghai"}})
@@ -572,9 +558,14 @@ func TestCursorFinishReasonWithToolCall(t *testing.T) {
 		cursorToolTestTurnEndedFrame(10, 5),
 	)
 
-	// 独立解析路径（非 duplex）注入与原生 f5 同名的本地声明夹具；请求侧 f4 仍为
-	// 旧包装，由后续卡改造。两解析路径共用同一个 cursorDecodeMcpArgs。
-	defs := cursorTestTransportDefs(t, "get_weather")
+	// 独立解析路径（非 duplex）用请求侧真实 f4 声明；两解析路径共用同一解码函数。
+	defs := cursorTestDeclaredToolDefs(t, &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools: []apicompat.ChatTool{{Type: "function", Function: &apicompat.ChatFunction{
+			Name:       "get_weather",
+			Parameters: json.RawMessage(`{"type":"object"}`),
+		}}},
+	})
 
 	// 非流式：tool_calls 字段 + finish_reason=tool_calls。
 	p := cursorNewStreamParser("grok-4.7")
@@ -622,11 +613,39 @@ func TestCursorFinishReasonNoToolCall(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 6. 续轮文本化：assistant.tool_calls + tool 消息 → blob 文本含边界
+// 6. 历史按真实结构：assistant.tool_calls + tool 消息 → 原生 tool-call/tool-result
 // ---------------------------------------------------------------------------
 
 func TestCursorContinuationToolCallAndResult(t *testing.T) {
-	t.Run("assistant.tool_calls → <tool_call> blob", func(t *testing.T) {
+	t.Run("文本+两个调用 → content 顺序 text,tool-call,tool-call", func(t *testing.T) {
+		req := &apicompat.ChatCompletionsRequest{
+			Messages: []apicompat.ChatMessage{
+				{Role: "user", Content: json.RawMessage(`"weather?"`)},
+				{Role: "assistant", Content: json.RawMessage(`"let me check"`), ToolCalls: []apicompat.ChatToolCall{
+					{ID: "call_a", Type: "function", Function: apicompat.ChatFunctionCall{
+						Name: "a", Arguments: `{"k":1}`}},
+					{ID: "call_b", Type: "function", Function: apicompat.ChatFunctionCall{
+						Name: "b", Arguments: `{}`}},
+				}},
+				{Role: "user", Content: json.RawMessage(`"continue"`)},
+			},
+		}
+		body, err := cursorConvertRequest(req, "grok-4.7")
+		require.NoError(t, err)
+		run := cursorAgentRunOf(t, body)
+		require.Equal(t, "continue", cursorActionTextOf(t, run))
+		blobs := cursorBlobsOf(t, run)
+		require.Len(t, blobs, 2, "first user + assistant history")
+		require.JSONEq(t,
+			`{"role":"assistant","content":[
+				{"type":"text","text":"let me check"},
+				{"type":"tool-call","toolCallId":"call_a","toolName":"CallDynamicTool","args":{"arguments":{"k":1},"namespace":"sub2api","toolName":"a"}},
+				{"type":"tool-call","toolCallId":"call_b","toolName":"CallDynamicTool","args":{"arguments":{},"namespace":"sub2api","toolName":"b"}}
+			],"id":"1"}`,
+			string(blobs[1][1]), "history must use the real tool-call structure")
+	})
+
+	t.Run("仅工具调用的 assistant 不被裁剪", func(t *testing.T) {
 		req := &apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{
 				{Role: "user", Content: json.RawMessage(`"weather?"`)},
@@ -638,48 +657,42 @@ func TestCursorContinuationToolCallAndResult(t *testing.T) {
 		}
 		body, err := cursorConvertRequest(req, "grok-4.7")
 		require.NoError(t, err)
-		run := cursorAgentRunOf(t, body)
-		require.Equal(t, "continue", cursorActionTextOf(t, run))
-		// assistant 历史 blob 必须含 <tool_call> 边界与 arguments（解码后断言）。
-		found := false
-		for _, b := range cursorBlobsOf(t, run) {
-			c := cursorTestBlobContent(t, b)
-			if strings.Contains(c, "<tool_call>") &&
-				strings.Contains(c, `"id":"call_1"`) &&
-				strings.Contains(c, `"name":"invoke_client_tool"`) &&
-				strings.Contains(c, `"tool_name":"get_weather"`) &&
-				strings.Contains(c, `"arguments_json"`) &&
-				strings.Contains(c, "city") &&
-				strings.Contains(c, "Beijing") {
-				found = true
-			}
-		}
-		require.True(t, found, "assistant tool_calls must be text-ified into <tool_call> blob")
+		blobs := cursorBlobsOf(t, cursorAgentRunOf(t, body))
+		require.Len(t, blobs, 2, "tool-calls-only assistant must not be trimmed as an empty tail")
+		require.JSONEq(t,
+			`{"role":"assistant","content":[{"type":"tool-call","toolCallId":"call_1","toolName":"CallDynamicTool","args":{"arguments":{"city":"Beijing"},"namespace":"sub2api","toolName":"get_weather"}}],"id":"1"}`,
+			string(blobs[1][1]))
 	})
 
-	t.Run("tool 消息 → user turn 的 <tool_result>（落为 action 或历史）", func(t *testing.T) {
+	t.Run("tool 消息 → role=tool 的历史 blob（逐字段）", func(t *testing.T) {
 		req := &apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{
 				{Role: "user", Content: json.RawMessage(`"q"`)},
 				{Role: "assistant", Content: json.RawMessage(`"done"`)},
 				{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: json.RawMessage(`"sunny"`)},
+				{Role: "user", Content: json.RawMessage(`"next"`)},
 			},
 		}
 		body, err := cursorConvertRequest(req, "grok-4.7")
 		require.NoError(t, err)
 		run := cursorAgentRunOf(t, body)
-		// 末轮 tool 结果成为 user turn → 是 action；其文本含 <tool_result> 边界。
-		action := cursorActionTextOf(t, run)
-		require.Contains(t, action, "<tool_result")
-		require.Contains(t, action, `tool_call_id="call_1"`)
-		require.Contains(t, action, `name="invoke_client_tool"`)
-		require.Contains(t, action, "sunny")
-		// 历史 blob 含 "q" 与 "done"（不含被丢弃）。
+		require.Equal(t, "next", cursorActionTextOf(t, run))
 		blobs := cursorBlobsOf(t, run)
-		require.Len(t, blobs, 2)
-		joined := cursorTestBlobContent(t, blobs[0]) + "|" + cursorTestBlobContent(t, blobs[1])
-		require.Contains(t, joined, "q")
-		require.Contains(t, joined, "done")
+		require.Len(t, blobs, 3)
+		require.JSONEq(t,
+			`{"role":"tool","content":[{"type":"tool-result","toolCallId":"call_1","toolName":"CallDynamicTool","result":"sunny","experimental_content":[{"type":"text","text":"sunny"}]}],"id":"call_1","providerOptions":{"cursor":{"highLevelToolCallResult":{"output":{"success":{"content":[{"text":{"text":"sunny"}}]}},"isError":false}}}}`,
+			string(blobs[2][1]), "tool result must use the real structure with id and providerOptions")
+	})
+
+	t.Run("孤立工具结果不能新建 AgentRun（最后一轮非 user 仍拒绝）", func(t *testing.T) {
+		_, err := cursorConvertRequest(&apicompat.ChatCompletionsRequest{
+			Messages: []apicompat.ChatMessage{
+				{Role: "user", Content: json.RawMessage(`"q"`)},
+				{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: json.RawMessage(`"sunny"`)},
+			},
+		}, "grok-4.7")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "conversation must end with a user message")
 	})
 }
 
@@ -694,8 +707,14 @@ func TestCursorBillingAfterToolDeferral(t *testing.T) {
 		cursorToolTestExecFrame(true, args),
 		cursorToolTestTurnEndedFrame(123, 4),
 	)
-	// 独立解析路径注入与原生 f5 同名的本地声明夹具（请求侧声明改造属后续卡）。
-	defs := cursorTestTransportDefs(t, "get_weather")
+	// 独立解析路径用请求侧真实 f4 声明，工具名/参数经同一解码函数读取。
+	defs := cursorTestDeclaredToolDefs(t, &apicompat.ChatCompletionsRequest{
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools: []apicompat.ChatTool{{Type: "function", Function: &apicompat.ChatFunction{
+			Name:       "get_weather",
+			Parameters: json.RawMessage(`{"type":"object"}`),
+		}}},
+	})
 
 	p := cursorNewStreamParser("grok-4.7")
 	p.attachToolSchemas(defs)
@@ -708,15 +727,15 @@ func TestCursorBillingAfterToolDeferral(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 9. 续轮文本化含 is_error 场景（工具失败后模型继续）
+// 9. 历史工具结果为错误文本时仍按成功形状表达（入站无 is_error，不猜错误）
 // ---------------------------------------------------------------------------
 
 func TestCursorContinuationToolError(t *testing.T) {
-	// 工具结果内容是一段错误文本，仍应被文本化为 user turn（不失败关闭）。
+	const errText = "Error: upstream timeout"
 	req := &apicompat.ChatCompletionsRequest{
 		Messages: []apicompat.ChatMessage{
 			{Role: "user", Content: json.RawMessage(`"q"`)},
-			{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: json.RawMessage(`"Error: upstream timeout"`)},
+			{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: json.RawMessage(`"` + errText + `"`)},
 			{Role: "assistant", Content: json.RawMessage(`"I will retry."`)},
 			{Role: "user", Content: json.RawMessage(`"ok"`)},
 		},
@@ -725,8 +744,9 @@ func TestCursorContinuationToolError(t *testing.T) {
 	require.NoError(t, err)
 	run := cursorAgentRunOf(t, body)
 	require.Equal(t, "ok", cursorActionTextOf(t, run))
-	// 含错误文本的工具结果必须落为 user turn，且不得被当作失败关闭。
 	tails := cursorBlobsOf(t, run)
 	require.Len(t, tails, 3)
-	require.Contains(t, string(tails[1][1]), "Error: upstream timeout")
+	require.JSONEq(t,
+		`{"role":"tool","content":[{"type":"tool-result","toolCallId":"call_1","toolName":"CallDynamicTool","result":"Error: upstream timeout","experimental_content":[{"type":"text","text":"Error: upstream timeout"}]}],"id":"call_1","providerOptions":{"cursor":{"highLevelToolCallResult":{"output":{"success":{"content":[{"text":{"text":"Error: upstream timeout"}}]}},"isError":false}}}}`,
+		string(tails[1][1]), "inbound has no is_error: keep the success shape even for error text")
 }

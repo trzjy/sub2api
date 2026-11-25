@@ -17,13 +17,13 @@ package service
 //     且 blob id = sha256(value)（已用 63 号样本的两条 blob 逐字节复核一致）
 //   - 40-extra-schemas.json / 41-turn-ended-decoded.json：TurnEnded usage 字段号
 //
-// 首版范围（沿用 E6 卡的用户裁定，**纯文本**）：
-//   - 请求侧 `tools` / `tool_choice` **丢弃**（Cursor 无对等结构；AgentRun 侧唯一
-//     形似的是 mcp_tools，自造映射风险高于收益）。
-//   - 多模态：历史 blob 的 content 只有 text 一种落点，图片只在**当前轮 user**
-//     有落点（selected_context）。协议没有落点的图**丢掉并记账**，绝不为一张图
-//     把整轮打成 400（口径见 cursorSkipLedger）。
-//   - 不新增任何非文本 action（工具/执行/多模态一律不发）。
+// 当前范围（按第三方实际收发对齐）：
+//   - 请求侧 `tools` / `tool_choice` 决定声明子集：每个真实工具一条原生
+//     McpToolDefinition（原名 / 原 description / 原 schema 文本），不再造单入口包装。
+//   - 历史按真实结构表达：assistant 的 tool_calls 写 tool-call 内容项，tool 消息写
+//     tool-result 内容项；普通文本与图片沿用既有落点。
+//   - 图片只在**当前轮 user** 有落点（selected_context）；历史带图 user 走 rich blob，
+//     assistant/tool 无图片落点则**丢掉并记账**，绝不为一张图把整轮打成 400。
 
 import (
 	"bytes"
@@ -42,8 +42,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // Cursor AgentRun 协议字段号（全部来自已取证 schema，**不得臆造**）。
@@ -61,10 +59,6 @@ const (
 	cursorFldRunMcpTools          = 4  // McpTools（活体样本里是**空 message**，但仍出现）
 	cursorFldRunConversationID    = 5  // string [opt]
 	cursorFldRunPreFetchedBlobs   = 17 // repeated PreFetchedBlob（多轮历史的 KV 载荷）
-	cursorFldRunSystemPromptSpec  = 29 // SystemPromptSpec（候选 B：工具可用性预先告知，2026-11-24；实施方案 §2.1）
-
-	// SystemPromptSpec（AgentRunRequest.f29）内：
-	cursorFldSystemPromptSpecAppend = 2 // string：追加到客户端 system prompt（append 语义，不替换）
 
 	// ConversationStateStructure（Hm）内：
 	cursorFldStateRootPromptBlobs = 1  // repeated bytes：**历史消息的 blob id**
@@ -102,33 +96,16 @@ const (
 // 字段号**全部来自派发单显式规格**（04/05/06 号 schema dump 在本环境缺失，
 // 以派发单为准；缺失 name 或 f5 会导致上游显示 unnamed tool，五个字段都要写）。
 const (
-	cursorFldMcpToolsTool          = 1 // McpTools.f1 = repeated McpToolDefinition
-	cursorFldMcpToolDefName        = 1 // McpToolDefinition.f1 = name
-	cursorFldMcpToolDefDescription = 2 // McpToolDefinition.f2 = description
-	cursorFldMcpToolDefProvider    = 4 // McpToolDefinition.f4 = provider_identifier
-	cursorFldMcpToolDefToolName    = 5 // McpToolDefinition.f5 = tool_name
-	// cursorFldMcpToolDefInputSchemaValue 是 McpToolDefinition.f3：input_schema 以
-	// google.protobuf.Value 承载（AgentRun 真实出站同形）。新生产构造**只写 f3**，
-	// 不再写 f6 字符串。
-	cursorFldMcpToolDefInputSchemaValue = 3
+	cursorFldMcpToolsTool              = 1 // McpTools.f1 = repeated McpToolDefinition
+	cursorFldMcpToolDefName            = 1 // McpToolDefinition.f1 = name
+	cursorFldMcpToolDefDescription     = 2 // McpToolDefinition.f2 = description
+	cursorFldMcpToolDefProvider        = 4 // McpToolDefinition.f4 = provider_identifier
+	cursorFldMcpToolDefToolName        = 5 // McpToolDefinition.f5 = tool_name
+	cursorFldMcpToolDefInputSchemaJSON = 6 // McpToolDefinition.f6 = input_schema_json 字符串
 )
 
 // cursorMcpProviderIdentifier 是本层声明 MCP 工具时固定的 provider 标识。
 const cursorMcpProviderIdentifier = "sub2api"
-
-// Cursor ShareAI AgentRun 上游只声明一个 MCP 工具：invoke_client_tool。
-//
-// 客户端原规范工具名放进 tool_name（enum = 本请求最终有效子集），完整参数 JSON
-// 对象序列化成字符串放进 arguments_json（本站解码时保留原字节）。请求侧的历史
-// assistant tool_call / tool result 也用同一运输形状，保证「声明什么、历史重放什么」
-// 完全一致。响应侧不再解析内联标记，标记只用于请求历史文本化。
-const (
-	cursorTransportToolName     = "invoke_client_tool"
-	cursorTransportToolNameKey  = "tool_name"
-	cursorTransportArgumentsKey = "arguments_json"
-	cursorInlineToolCallOpen    = "<tool_call>"
-	cursorInlineToolCallClose   = "</tool_call>"
-)
 
 // cursorConversationModeAgent 是 ConversationMode 的取值（= agent.v1.AgentMode）。
 //
@@ -199,7 +176,9 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// 尾部的**空** assistant 是 prefill 最常见的形态：客户端先塞一条空的助手占位
 	// （或把上一轮的空回复原样带回来）。它不含任何内容，丢掉本轮就能正常发出去。
 	// 只削尾部、且保留至少一轮，所以不会把 [assistant, 空 assistant] 削成空对话。
-	for len(turns) > 1 && turns[len(turns)-1].role == "assistant" && strings.TrimSpace(turns[len(turns)-1].text) == "" {
+	// 仅含工具调用（text 空）的 assistant 必须保留：工具调用是结构化内容，不是空占位。
+	for len(turns) > 1 && turns[len(turns)-1].role == "assistant" &&
+		strings.TrimSpace(turns[len(turns)-1].text) == "" && len(turns[len(turns)-1].toolCalls) == 0 {
 		skipped.note(cursorSkipEmptyAssistantTail)
 		turns = turns[:len(turns)-1]
 	}
@@ -282,12 +261,6 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 		run = cursorAppendBytesField(run, cursorFldRunPreFetchedBlobs, blob)
 	}
 
-	// 预先告知工具可用性（候选 B，2026-11-24）：f29 system_prompt_spec 的 f2 append，
-	// 追加语义、不覆盖客户端自带 system prompt；即使零声明也发一条告知。
-	promptText := cursorBuildToolAvailabilityPrompt()
-	systemPromptSpec := cursorAppendStringField(nil, cursorFldSystemPromptSpecAppend, promptText)
-	run = cursorAppendBytesField(run, cursorFldRunSystemPromptSpec, systemPromptSpec)
-
 	outer := cursorAppendBytesField(nil, cursorFldAgentRunRequest, run)
 	return cursorEncodeEnvelope(outer), conversationID, nil
 }
@@ -346,27 +319,17 @@ func cursorFunctionTools(tools []apicompat.ChatTool) []apicompat.ChatTool {
 	return out
 }
 
-// cursorBuildMcpTools 把本轮最终有效工具子集编码为 AgentRunRequest.f4（McpTools）。
+// cursorBuildMcpTools 把本轮最终有效工具子集逐条编码为 AgentRunRequest.f4（McpTools）。
 //
-// 上游只声明一个 MCP 工具 invoke_client_tool：客户端原规范工具名放进 tool_name（enum =
-// 本请求最终有效子集），完整参数 JSON 对象序列化成字符串放进 arguments_json。因此无论
-// 客户端声明多少工具，f4 里都只有**一条** McpToolDefinition；每条工具的原始 schema 作为
-// 目录（catalog）写进 f2 description，f3 input_schema 只约束这两个运输字段。
-//
-// f3 用 structpb 直接构造（不经 map[string]any/float64），保证 number / null / 大整数等
-// 原 schema 文本只在 catalog 里以原文出现，绝不被 float64 改写或丢精度。
+// 每个真实工具单独一条 McpToolDefinition（不再拼成单入口包装）：f1 name=真实名、
+// f2 description=原描述、f4 provider_identifier=cursorMcpProviderIdentifier、
+// f5 tool_name=真实名、f6 input_schema_json=原 schema 文本。f6 用 cursorAppendStringField
+// 写原字节，禁止经 map[string]any/float64 重序列化，number / null / 大整数一律保真。
 //
 // 非法 schema 的处置沿用既有口径：丢掉这一个工具、记 tool_schema_invalid，不整轮 400。
 // 全部工具都无效（或工具集为空）时返回 nil，f4 保持空 message，与活体样本同形。
 func cursorBuildMcpTools(tools []apicompat.ChatTool, skipped cursorSkipLedger) ([]byte, error) {
-	type cursorToolCatalogEntry struct {
-		Name        string          `json:"name"`
-		Description string          `json:"description"`
-		Parameters  json.RawMessage `json:"parameters"`
-	}
-
-	var entries []cursorToolCatalogEntry
-	var names []string
+	var mcp []byte
 	for _, t := range tools {
 		if t.Function == nil || t.Function.Name == "" {
 			continue
@@ -379,76 +342,18 @@ func cursorBuildMcpTools(tools []apicompat.ChatTool, skipped cursorSkipLedger) (
 			skipped.note(cursorSkipToolSchemaInvalid)
 			continue
 		}
-		entries = append(entries, cursorToolCatalogEntry{
-			Name:        t.Function.Name,
-			Description: t.Function.Description,
-			Parameters:  json.RawMessage(schema),
-		})
-		names = append(names, t.Function.Name)
+		var def []byte
+		def = cursorAppendStringField(def, cursorFldMcpToolDefName, t.Function.Name)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, t.Function.Description)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, t.Function.Name)
+		def = cursorAppendStringField(def, cursorFldMcpToolDefInputSchemaJSON, schema)
+		mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
 	}
-	if len(entries) == 0 {
+	if len(mcp) == 0 {
 		return nil, nil
 	}
-
-	catalog, _ := json.Marshal(entries)
-	description := "Invoke a client-declared tool. Required wire format: {tool_name: exact tool name, " +
-		"arguments_json: string containing the complete original arguments object}. " +
-		"Do not pass the original argument keys at the top level. Tool catalog: " + string(catalog)
-
-	enumValues := make([]*structpb.Value, 0, len(names))
-	for _, n := range names {
-		enumValues = append(enumValues, structpb.NewStringValue(n))
-	}
-	inputSchema := &structpb.Struct{
-		Fields: map[string]*structpb.Value{
-			"type": structpb.NewStringValue("object"),
-			"properties": structpb.NewStructValue(&structpb.Struct{
-				Fields: map[string]*structpb.Value{
-					cursorTransportToolNameKey: structpb.NewStructValue(&structpb.Struct{
-						Fields: map[string]*structpb.Value{
-							"type": structpb.NewStringValue("string"),
-							"enum": structpb.NewListValue(&structpb.ListValue{Values: enumValues}),
-						},
-					}),
-					cursorTransportArgumentsKey: structpb.NewStructValue(&structpb.Struct{
-						Fields: map[string]*structpb.Value{
-							"type":        structpb.NewStringValue("string"),
-							"description": structpb.NewStringValue("The complete arguments object serialized as a JSON string, preserving all types and nulls."),
-						},
-					}),
-				},
-			}),
-			"required": structpb.NewListValue(&structpb.ListValue{Values: []*structpb.Value{
-				structpb.NewStringValue(cursorTransportToolNameKey),
-				structpb.NewStringValue(cursorTransportArgumentsKey),
-			}}),
-			"additionalProperties": structpb.NewBoolValue(false),
-		},
-	}
-	// f3 承载的是 google.protobuf.Value（object 即 struct_value），不是裸 Struct。
-	schemaBytes, err := proto.Marshal(structpb.NewStructValue(inputSchema))
-	if err != nil {
-		return nil, err
-	}
-
-	var def []byte
-	def = cursorAppendStringField(def, cursorFldMcpToolDefName, cursorTransportToolName)
-	def = cursorAppendStringField(def, cursorFldMcpToolDefDescription, description)
-	def = cursorAppendStringField(def, cursorFldMcpToolDefProvider, cursorMcpProviderIdentifier)
-	def = cursorAppendStringField(def, cursorFldMcpToolDefToolName, cursorTransportToolName)
-	def = cursorAppendBytesField(def, cursorFldMcpToolDefInputSchemaValue, schemaBytes)
-
-	var mcp []byte
-	mcp = cursorAppendBytesField(mcp, cursorFldMcpToolsTool, def)
 	return mcp, nil
-}
-
-// cursorBuildToolAvailabilityPrompt 构造工具可用性告知文本（写入 f29 append）。
-// 只说明运输形状，不再宣称"native 被禁用"——禁用与否是上游/客户端的事。
-func cursorBuildToolAvailabilityPrompt() string {
-	return "MCP wire transport: The sole MCP tool invoke_client_tool accepts tool_name plus arguments_json " +
-		"string. Serialize the original client arguments as that string, including null, boolean, nested values. " +
-		"Do not pass original argument keys at the top level. Tool results are real client execution results."
 }
 
 // cursorTurnImage 是一张已解出原始字节的图片（来自 content-part 的 data URI）。
@@ -457,10 +362,25 @@ type cursorTurnImage struct {
 	mimeType string // 如 "image/png"
 }
 
-// cursorAgentTurn 是一条已归一化的对话轮次（角色 + 纯文本 + 可选图片）。
+// cursorAgentToolCall 是 assistant 历史里的一条结构化工具调用。
+// args 是原始参数 JSON **对象**（空/null 归一为 {}），不得再编码成字符串。
+type cursorAgentToolCall struct {
+	callID string
+	name   string
+	args   json.RawMessage
+}
+
+// cursorAgentToolResult 是 tool 历史里的一条结果：callID 与对应调用一致，text 为真实结果文本。
+// 入站 ChatMessage 没有 is_error 字段，历史结果一律按成功形状表达，不猜错误。
+type cursorAgentToolResult struct {
+	callID string
+	text   string
+}
+
+// cursorAgentTurn 是一条已归一化的对话轮次（角色 + 文本 + 可选图片 + 结构化工具调用/结果）。
 type cursorAgentTurn struct {
-	// role 只有两种取值："user" / "assistant"（AgentRun 的历史 blob 只有这两种
-	// role 落点，见 62-kv-value-shapes.json 的活体值形状）。
+	// role 取值："user" / "assistant" / "tool"。历史 blob 按真实客户端结构表达：
+	// assistant 携带 tool-call 内容项，tool 携带 tool-result 内容项（不再是纯文本包装）。
 	role string
 	text string
 	// images 是当前轮携带的图片（user/assistant/tool 均可能带图）。图片落点：
@@ -468,6 +388,10 @@ type cursorAgentTurn struct {
 	//   - 历史轮 user → history blob 的 content 数组（改动 D）。
 	// 纯文本轮 images 为空；system/developer 含图则失败关闭（无落点）。
 	images []cursorTurnImage
+	// toolCalls 仅 assistant 使用，按原顺序与 text 一起写入同一个 content 数组。
+	toolCalls []cursorAgentToolCall
+	// toolResults 仅 tool 使用，按原顺序写入 tool-result 内容项。
+	toolResults []cursorAgentToolResult
 }
 
 // cursorHistoryBlob 是一条历史消息的 KV 载荷（内容寻址）。
@@ -476,7 +400,7 @@ type cursorHistoryBlob struct {
 	// sha256(value) == root_prompt_messages_json 里的 blob id。
 	id []byte
 	// value 是历史消息的 JSON 序列化（形状见 cursorHistoryUserBlob /
-	// cursorHistoryAssistantBlob）。
+	// cursorHistoryAssistantBlob / cursorHistoryToolBlob）。
 	value []byte
 }
 
@@ -486,16 +410,89 @@ type cursorHistoryUserBlob struct {
 	Content string `json:"content"`
 }
 
-// cursorHistoryAssistantBlob 是助手侧历史消息的值形状（证据 62/63 活体样本：
-// `{"role":"assistant","content":[{"type":"text","text":"…"}],"id":"1"}`）。
+// cursorHistoryCallDynamicToolName 是第三方已观察的内部历史操作名。它只出现在历史
+// content 里，不向客户端暴露，也不新声明第二个可执行工具。
+const cursorHistoryCallDynamicToolName = "CallDynamicTool"
+
+// cursorHistoryAssistantBlob 是助手侧历史消息的值形状（真实客户端原件）：
+//
+//	{"role":"assistant","content":[{"type":"text","text":"…"},
+//	 {"type":"tool-call","toolCallId":"call_…","toolName":"CallDynamicTool",
+//	  "args":{"arguments":{ },"namespace":"<provider>","toolName":"Read"}}],"id":"1"}
 type cursorHistoryAssistantBlob struct {
-	Role    string                           `json:"role"`
-	Content []cursorHistoryAssistantTextPart `json:"content"`
-	ID      string                           `json:"id"`
+	Role    string                       `json:"role"`
+	Content []cursorHistoryAssistantPart `json:"content"`
+	ID      string                       `json:"id"`
 }
 
-type cursorHistoryAssistantTextPart struct {
-	Type string `json:"type"`
+// cursorHistoryAssistantPart 是 assistant content 数组里的一项：type 互斥。
+// text 项仅在文本非空时写；tool-call 项按原顺序跟在 text 之后，多个调用各一项。
+type cursorHistoryAssistantPart struct {
+	Type       string                     `json:"type"`
+	Text       string                     `json:"text,omitempty"`
+	ToolCallID string                     `json:"toolCallId,omitempty"`
+	ToolName   string                     `json:"toolName,omitempty"`
+	Args       *cursorHistoryCallToolArgs `json:"args,omitempty"`
+}
+
+// cursorHistoryCallToolArgs 是 tool-call.args 的形状：arguments 是原参数 JSON 对象
+// （RawMessage，不再编码成字符串），namespace 用现有 provider 常量，toolName 是真实名。
+type cursorHistoryCallToolArgs struct {
+	Arguments json.RawMessage `json:"arguments"`
+	Namespace string          `json:"namespace"`
+	ToolName  string          `json:"toolName"`
+}
+
+// cursorHistoryToolBlob 是工具结果历史消息的值形状（真实客户端原件）：
+//
+//	{"role":"tool","content":[{"type":"tool-result","toolCallId":"call_…",
+//	 "toolName":"CallDynamicTool","result":"<文本>",
+//	 "experimental_content":[{"type":"text","text":"<同一文本>"}]}],
+//	 "id":"call_…","providerOptions":{"cursor":{"highLevelToolCallResult":{
+//	 "output":{"success":{"content":[{"text":{"text":"<同一文本>"}}]}},"isError":false}}}}
+//
+// 入站 ChatMessage 没有 is_error 字段，历史结果一律按成功形状表达，不猜错误。
+type cursorHistoryToolBlob struct {
+	Role            string                        `json:"role"`
+	Content         []cursorHistoryToolResultPart `json:"content"`
+	ID              string                        `json:"id"`
+	ProviderOptions cursorHistoryToolProviderOpts `json:"providerOptions"`
+}
+
+type cursorHistoryToolResultPart struct {
+	Type                string                       `json:"type"`
+	ToolCallID          string                       `json:"toolCallId"`
+	ToolName            string                       `json:"toolName"`
+	Result              string                       `json:"result"`
+	ExperimentalContent []cursorHistoryAssistantPart `json:"experimental_content"`
+}
+
+type cursorHistoryToolProviderOpts struct {
+	Cursor cursorHistoryToolCursorOpts `json:"cursor"`
+}
+
+type cursorHistoryToolCursorOpts struct {
+	HighLevelToolCallResult cursorHistoryToolHighLevelResult `json:"highLevelToolCallResult"`
+}
+
+type cursorHistoryToolHighLevelResult struct {
+	Output  cursorHistoryToolOutput `json:"output"`
+	IsError bool                    `json:"isError"`
+}
+
+type cursorHistoryToolOutput struct {
+	Success cursorHistoryToolSuccess `json:"success"`
+}
+
+type cursorHistoryToolSuccess struct {
+	Content []cursorHistorySuccessContent `json:"content"`
+}
+
+type cursorHistorySuccessContent struct {
+	Text cursorHistorySuccessText `json:"text"`
+}
+
+type cursorHistorySuccessText struct {
 	Text string `json:"text"`
 }
 
@@ -543,34 +540,87 @@ func cursorHistoryUserRichBlobOf(turn cursorAgentTurn) cursorHistoryUserRichBlob
 }
 
 // cursorHistoryBlobs 把历史轮次序列化为内容寻址的 KV 载荷（保序）。
+// assistant / tool 按真实客户端结构输出结构化 content；纯文本与带图 user 的形状不变。
 func cursorHistoryBlobs(history []cursorAgentTurn, skipped cursorSkipLedger) ([]cursorHistoryBlob, error) {
 	out := make([]cursorHistoryBlob, 0, len(history))
 	assistantSeq := 0
 	for _, turn := range history {
 		var value []byte
 		var err error
-		if turn.role == "assistant" {
-			// assistant 历史侧无 image 落点（agent.v1.ConversationHistoryAssistantContent
-			// 仅 text / reasoning / redacted_reasoning / tool_call）。
-			//
-			// 2026-11-06 口径修正：带图时**丢图保文本**并记账，不再整轮 400。
-			// "协议没有图片落点"是我们这一侧的限制，不该让客户为此收到一个错误——
-			// 图丢了只是少一点上下文，400 是整轮白跑。
+		switch {
+		case turn.role == "assistant":
+			// assistant 历史侧无 image 落点：带图时丢图保文本并记账。
 			if len(turn.images) > 0 {
 				skipped.note(cursorSkipImageOutsideUser)
-				turn.images = nil
 			}
 			assistantSeq++
+			content := make([]cursorHistoryAssistantPart, 0, 1+len(turn.toolCalls))
+			if turn.text != "" {
+				content = append(content, cursorHistoryAssistantPart{Type: "text", Text: turn.text})
+			}
+			for _, call := range turn.toolCalls {
+				content = append(content, cursorHistoryAssistantPart{
+					Type:       "tool-call",
+					ToolCallID: call.callID,
+					ToolName:   cursorHistoryCallDynamicToolName,
+					Args: &cursorHistoryCallToolArgs{
+						Arguments: call.args,
+						Namespace: cursorMcpProviderIdentifier,
+						ToolName:  call.name,
+					},
+				})
+			}
 			value, err = cursorMarshalBlobJSON(cursorHistoryAssistantBlob{
 				Role:    "assistant",
-				Content: []cursorHistoryAssistantTextPart{{Type: "text", Text: turn.text}},
-				// id 取**助手消息的序号**（活体样本里首条 assistant 的 id 为 "1"）。
+				Content: content,
+				// id 取**助手消息的序号**（真实客户端样本里首条 assistant 的 id 为 "1"）。
 				ID: strconv.Itoa(assistantSeq),
 			})
-		} else if len(turn.images) > 0 {
+		case turn.role == "tool":
+			// tool 结果同样没有图片落点：丢图保结果文本并记账。
+			if len(turn.images) > 0 {
+				skipped.note(cursorSkipImageOutsideUser)
+			}
+			content := make([]cursorHistoryToolResultPart, 0, len(turn.toolResults))
+			successContent := make([]cursorHistorySuccessContent, 0, len(turn.toolResults))
+			resultID := ""
+			for _, r := range turn.toolResults {
+				content = append(content, cursorHistoryToolResultPart{
+					Type:       "tool-result",
+					ToolCallID: r.callID,
+					ToolName:   cursorHistoryCallDynamicToolName,
+					Result:     r.text,
+					ExperimentalContent: []cursorHistoryAssistantPart{{
+						Type: "text", Text: r.text,
+					}},
+				})
+				successContent = append(successContent, cursorHistorySuccessContent{
+					Text: cursorHistorySuccessText{Text: r.text},
+				})
+				if resultID == "" {
+					resultID = r.callID
+				}
+			}
+			value, err = cursorMarshalBlobJSON(cursorHistoryToolBlob{
+				Role:    "tool",
+				Content: content,
+				// id 取原 call ID；legacy function 无 ID 时保持空，不自动配对。
+				ID: resultID,
+				ProviderOptions: cursorHistoryToolProviderOpts{
+					Cursor: cursorHistoryToolCursorOpts{
+						HighLevelToolCallResult: cursorHistoryToolHighLevelResult{
+							Output: cursorHistoryToolOutput{
+								Success: cursorHistoryToolSuccess{Content: successContent},
+							},
+							IsError: false,
+						},
+					},
+				},
+			})
+		case len(turn.images) > 0:
 			// 带图 user 轮 → rich blob（content 数组），纯文本路径永不到这。
 			value, err = cursorMarshalBlobJSON(cursorHistoryUserRichBlobOf(turn))
-		} else {
+		default:
 			value, err = cursorMarshalBlobJSON(cursorHistoryUserBlob{Role: "user", Content: turn.text})
 		}
 		if err != nil {
@@ -584,9 +634,8 @@ func cursorHistoryBlobs(history []cursorAgentTurn, skipped cursorSkipLedger) ([]
 
 // cursorMarshalBlobJSON 序列化历史 blob 值，**关闭 HTML 转义**（< > & 保持字面量）。
 //
-// 协议 blob 是 Cursor 会 JSON 解析的 bytes 载荷；§4 续轮文本化的
-// <tool_call>/<tool_result> 标记必须以字面量出现（而非 \u003c…），与派发单边界一致；
-// 两侧 JSON 解析功能等价，但钉字节测试要求字面量，且避免把标记变成不可读的转义序列。
+// 协议 blob 是 Cursor 会 JSON 解析的 bytes 载荷；关闭转义让工具调用参数里的
+// < > & 以原字节出现，避免钉字节测试看到 \u003c 之类改写。
 func cursorMarshalBlobJSON(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -604,9 +653,8 @@ func cursorMarshalBlobJSON(v any) ([]byte, error) {
 // cursorConvertMessages 把 OpenAI messages 归一化成有序轮次。
 //
 // **system 消息的处理（沿用 E6 卡的用户裁定：合并进首个 user）**——依据：
-//  1. AgentRun 的历史 blob 与 UserMessage 都只有 user / assistant 两种落点，
-//     **无 system 角色**（32 号 schema：ConversationHistory 只有
-//     user / assistant / tool 三种消息）。
+//  1. AgentRun 的 UserMessage 只有 user 一种落点，**无 system 角色**；历史 blob
+//     则按真实客户端结构表达 user / assistant / tool 三种消息（tool 有独立角色）。
 //  2. 丢弃会**静默改变语义**：绝大多数客户端把 system 当硬约束，丢了会得到完全不同
 //     的回答，且用户无从察觉——比"格式略不理想"危险得多。
 //
@@ -657,18 +705,41 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage, skipped cursorSkipLedge
 				skipped.note(cursorSkipImageOutsideUser)
 				images = nil
 			}
-			// assistant 可能携带 tool_calls：原 content（可空）+ 每块一个
-			// <tool_call> blob（见 §4 续轮文本化）。
-			turns = append(turns, cursorAgentTurn{role: "assistant", text: cursorAssistantText(m, text), images: images})
-		case "tool", "function":
-			// 工具结果 → user turn（Cursor 历史仅 user/assistant 两种落点，见 §4）。
-			// 文本化失败关闭（含非文本 part 时与多模态口径一致）；图片挂到该
-			// user turn 上（若有，走 history rich blob）。
-			tt, tImages, err := cursorToolResultText(m, skipped)
-			if err != nil {
-				return nil, err
+			// assistant 的 tool_calls 登记为结构化调用（空/null 参数按 {}），与文本
+			// 保序写入同一个 content 数组；仅含工具调用的 assistant 不是空占位。
+			toolCalls := make([]cursorAgentToolCall, 0, len(m.ToolCalls))
+			for _, tc := range m.ToolCalls {
+				args := tc.Function.Arguments
+				if strings.TrimSpace(args) == "" || args == "null" {
+					args = "{}"
+				}
+				toolCalls = append(toolCalls, cursorAgentToolCall{
+					callID: tc.ID,
+					name:   tc.Function.Name,
+					args:   json.RawMessage(args),
+				})
 			}
-			turns = append(turns, cursorAgentTurn{role: "user", text: tt, images: tImages})
+			turns = append(turns, cursorAgentTurn{
+				role: "assistant", text: text, images: images, toolCalls: toolCalls,
+			})
+		case "tool", "function":
+			// 工具结果 → role=tool 的历史 turn（真实结构含 tool-result 与
+			// providerOptions）。图片无落点 → 丢图保文本并记账。
+			if len(images) > 0 {
+				skipped.note(cursorSkipImageOutsideUser)
+				images = nil
+			}
+			if strings.EqualFold(strings.TrimSpace(m.Role), "function") && strings.TrimSpace(m.ToolCallID) == "" {
+				// legacy function 消息没有 tool_call_id：无法与调用配对。
+				// 既有记账保留，历史按空 id 表达，不自动配对、不整轮拒。
+				skipped.note(cursorSkipLegacyFunctionNoID)
+			}
+			turns = append(turns, cursorAgentTurn{
+				role:        "tool",
+				text:        text,
+				images:      images,
+				toolResults: []cursorAgentToolResult{{callID: m.ToolCallID, text: text}},
+			})
 		case "":
 			// 没有角色的消息：丢这一条，不整轮拒（2026-11-06 产品口径：
 			// 客户把 400 当成"模型不稳定"，宁可少一条也不能整轮失败）。
@@ -720,97 +791,6 @@ func cursorJoinSystem(parts []string) string {
 		b.WriteString("\n</system>")
 	}
 	return b.String()
-}
-
-// cursorJSONStringNoEscape 把字符串编码为 JSON 字符串字面量，且关闭 HTML 转义。
-//
-// 请求历史里的 tool_name / arguments_json 必须与声明时的原字节一致：< > & 不能被
-// 改写成 \u003c 之类。json.Encoder 的 SetEscapeHTML(false) 正是这个语义。
-func cursorJSONStringNoEscape(s string) string {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(s); err != nil {
-		return `""`
-	}
-	out := buf.Bytes()
-	if len(out) > 0 && out[len(out)-1] == '\n' {
-		out = out[:len(out)-1]
-	}
-	return string(out)
-}
-
-// cursorAssistantText 把 assistant 消息（含可选 tool_calls）拼成一段文本。
-//
-// 续轮文本化（§4）：原 content（可空）+ 每个 tool_call 一块
-//
-//	\n<tool_call>\n{"id":...,"name":"invoke_client_tool","arguments":{"tool_name":...,"arguments_json":...}}\n</tool_call>
-//
-// 上游只认单入口运输：name 固定 invoke_client_tool，客户端原工具名进 tool_name，
-// 完整参数 JSON 字符串进 arguments_json（空 / null 按 {}）。字符串值一律用
-// cursorJSONStringNoEscape 编码，保证原字节与 f4 声明完全一致。
-func cursorAssistantText(m apicompat.ChatMessage, base string) string {
-	text := base
-	if len(m.ToolCalls) == 0 {
-		return text
-	}
-	var b strings.Builder
-	if text != "" {
-		b.WriteString(text)
-	}
-	for _, tc := range m.ToolCalls {
-		args := tc.Function.Arguments
-		if strings.TrimSpace(args) == "" || args == "null" {
-			args = "{}"
-		}
-		b.WriteString("\n" + cursorInlineToolCallOpen + "\n")
-		b.WriteString(`{"id":` + cursorJSONStringNoEscape(tc.ID) +
-			`,"name":` + cursorJSONStringNoEscape(cursorTransportToolName) +
-			`,"arguments":{` + cursorJSONStringNoEscape(cursorTransportToolNameKey) + `:` +
-			cursorJSONStringNoEscape(tc.Function.Name) + `,` +
-			cursorJSONStringNoEscape(cursorTransportArgumentsKey) + `:` +
-			cursorJSONStringNoEscape(args) + `}}`)
-		b.WriteString("\n" + cursorInlineToolCallClose)
-	}
-	return b.String()
-}
-
-// cursorToolResultText 把 tool / function 角色消息文本化为一条 user turn。
-//
-// 续轮文本化（§4）：Cursor 历史仅 user/assistant 两种落点，工具结果无处可去，
-// 故包成 `<tool_result tool_call_id="..." name="...">\n<content>\n...\n</tool_result>`
-// 落为 user。content 为字符串或纯 text part 拼接；image_url（data URI）解出图片后
-// **丢弃并记账**（tool result 无图片落点，见下），远程 URL / file / 未知 part
-// 在内容层已按「丢这个 part」处理，不再上抛。
-//
-// name 属性与 f4 声明同源，固定写 invoke_client_tool；其余 id / content 逻辑不变。
-func cursorToolResultText(m apicompat.ChatMessage, skipped cursorSkipLedger) (string, []cursorTurnImage, error) {
-	content, images, err := cursorMessageContent(m, skipped)
-	if err != nil {
-		return "", nil, err
-	}
-	if len(images) > 0 {
-		// tool 结果无图片落点：协议里 tool result 不能承载图片，丢图保文本
-		// （2026-11-06 口径：图丢了只是少一点上下文，整轮 400 是白跑）。
-		skipped.note(cursorSkipImageOutsideUser)
-		images = nil
-	}
-	id := m.ToolCallID
-	if strings.EqualFold(strings.TrimSpace(m.Role), "function") && strings.TrimSpace(id) == "" {
-		// legacy function 消息没有 tool_call_id：无法与本轮工具调用对上号。
-		// 2026-11-06 口径：不拒，落成一条**不带 id 的结果文本**（模型仍能读到内容），
-		// 记账即可——拒掉整轮换来的只是"客户看到 400"。
-		skipped.note(cursorSkipLegacyFunctionNoID)
-	}
-	var b strings.Builder
-	b.WriteString("<tool_result tool_call_id=")
-	b.WriteString(cursorJSONString(id))
-	b.WriteString(" name=")
-	b.WriteString(cursorJSONStringNoEscape(cursorTransportToolName))
-	b.WriteString(">\n<content>\n")
-	b.WriteString(content)
-	b.WriteString("\n</tool_result>")
-	return b.String(), images, nil
 }
 
 // cursorMessageContent 从一条 OpenAI 消息取（文本 + 图片）。
