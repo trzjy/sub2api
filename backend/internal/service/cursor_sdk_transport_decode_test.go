@@ -10,10 +10,18 @@ package service
 // 共用同一份解码实现与同一份真实 f4 定义。
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -314,4 +322,336 @@ func TestCursorSDKTransportParseExecClassification(t *testing.T) {
 	_, err := p.cursorParseMessageFrame(frame)
 	require.NoError(t, err)
 	require.Len(t, p.capturedToolCalls(), 1, "合法 f11 运输帧仍登记 1 条委托")
+}
+
+// ---- CUR-PREC4P：参数精度贯穿四协议实际输出 ----
+//
+// 复用 textonly 的四协议真实 writer 驱动与"混入真实 f11"路径，只把运输参数换成
+// cursorSDKTransportArgsFixture（大整数 / null / false / 0 / 空串 / 嵌套数组 /
+// 中文 HTML / 转义引号），再按每协议真实交付形态断言：Chat/Responses 交付的
+// arguments 字符串逐字节相等；Messages/Gemini 的 input/args 对象用 UseNumber
+// 逐字段语义相等（大整数不得被 float64 改成 9007199254740992）。
+
+// cursorPrecisionDrive 与 cursorTextOnlyDrive 同构，唯一差异是 f11 委托携带
+// cursorSDKTransportArgsFixture 而非固定 {"city":"Beijing"}。协议解析/回桥/输出
+// 读取全部复用既有 helper，不另造协议解析。
+func cursorPrecisionDrive(t *testing.T, mode cursorProtocol, stream bool) cursorTextOnlyRun {
+	t.Helper()
+
+	delegations := newCursorToolDelegations()
+	stamp := fmt.Sprintf("prec-p%d-s%t", mode, stream)
+	session := &cursorSessionRecord{
+		id:          "sess-" + stamp,
+		spec:        cursorSessionSpec{protocol: mode},
+		state:       cursorSessionRunning,
+		toolCallIDs: make(map[string]struct{}),
+		pending:     &cursorPendingBatch{batchID: "batch-" + stamp},
+	}
+	session.attachDelegations(delegations)
+
+	initBody, err := cursorConvertRequest(cursorSDKTransportRequest("get_weather"), "m")
+	require.NoError(t, err)
+	d, err := newCursorAgentDuplex(initBody, delegations)
+	require.NoError(t, err)
+	defer d.close(nil)
+
+	p := cursorNewStreamParser("m")
+	p.attachToolDelegations(delegations)
+	p.attachToolSchemas(d.declaredToolDefs)
+
+	// 真实 f11：exec_id=7 / f15 id=exec-id / 工具 get_weather / fixture 参数。
+	f11 := cursorSDKTransportExecFrame(
+		cursorSDKTransportBuildMcpArgs("call_real_f11", "get_weather", cursorSDKTransportArgsFixture))
+	done, err := d.respond(f11)
+	require.NoError(t, err)
+	require.False(t, done, "f11 委托不得终结双向连接")
+
+	// 与 textonly 混合路径同构的流体：reasoning 文本 + 真实 f11 envelope +
+	// content 文本 + turn_ended。
+	var frames []byte
+	for _, text := range cursorTextOnlyReasoningFrames(t) {
+		frames = append(frames, cursorTextDeltaFrame(t, text)...)
+	}
+	frames = append(frames, cursorEncodeEnvelope(f11)...)
+	for _, text := range cursorTextOnlyContentFrames(t) {
+		frames = append(frames, cursorTextDeltaFrame(t, text)...)
+	}
+	frames = append(frames, cursorTurnEndedFrame(t, [2]uint64{1, 10}, [2]uint64{2, 5})...)
+
+	s := &cursorSSEStream{source: io.NopCloser(bytes.NewReader(frames)), parser: p}
+	sseBody, err := io.ReadAll(s)
+	require.NoError(t, err, "parser 必须成功产出 Chat Completions SSE")
+	require.Contains(t, string(sseBody), "data:")
+
+	// 非空 svc/session：与既有驱动同构。
+	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{}}
+	svc := newCursorTestExecutionService(t, repo, NewCursorTestEncryptor(),
+		cursorTestDeviceIDs(repo), NewCursorUpstreamForwarder())
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	w := newCursorProtocolWriter(c.Writer, stream, mode, "m", cursorResponsesToolMeta{},
+		"resp-prec", svc, session)
+
+	if mode == cursorProtocolChat {
+		if stream {
+			_, err = io.WriteString(w.ResponseWriter, string(sseBody))
+		} else {
+			var completion []byte
+			completion, err = cursorAggregateSSEToCompletion(context.Background(), sseBody)
+			require.NoError(t, err)
+			_, err = io.WriteString(w.ResponseWriter, string(completion))
+		}
+	} else {
+		if stream {
+			_, err = w.Write(sseBody)
+		} else {
+			var completion []byte
+			completion, err = cursorAggregateSSEToCompletion(context.Background(), sseBody)
+			require.NoError(t, err)
+			_, err = w.Write(completion)
+		}
+		require.NoError(t, err)
+		require.NoError(t, w.finalize())
+	}
+	require.NoError(t, err)
+
+	for _, call := range delegations.snapshot() {
+		session.toolCallIDs[call.wireID()] = struct{}{}
+	}
+	return cursorTextOnlyRun{body: rec.Body.String(), writer: w,
+		calls: p.capturedToolCalls(), session: session}
+}
+
+// cursorPrecisionDecodeObject 用 UseNumber 解码，避免大整数被 float64 改写。
+func cursorPrecisionDecodeObject(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var out map[string]any
+	require.NoError(t, dec.Decode(&out), "参数必须是对象 JSON（UseNumber 解码）")
+	return out
+}
+
+// cursorPrecisionAssertObjectArgs 按 UseNumber 语义逐字段比对 fixture。
+func cursorPrecisionAssertObjectArgs(t *testing.T, got map[string]any, label string) {
+	t.Helper()
+	want := cursorPrecisionDecodeObject(t, cursorSDKTransportArgsFixture)
+	require.Equal(t, want, got, label+": UseNumber 逐字段必须等于 fixture")
+	require.Equal(t, json.Number("9007199254740993"), got["big"],
+		label+": big 必须精确等于 9007199254740993，不得变成 9007199254740992")
+	require.Contains(t, got, "null")
+	require.Nil(t, got["null"], label+": null 必须保留")
+	require.Equal(t, false, got["false"], label+": false 必须保留")
+	require.Equal(t, json.Number("0"), got["zero"], label+": 0 必须保留")
+	require.Equal(t, "", got["empty"], label+": 空串必须保留")
+}
+
+// cursorPrecisionAssertDelegation 四协议共同的委托底线：仅 1 条真实 f11，元数据原样，
+// 输出与委托均不出现 DSML 调用。
+func cursorPrecisionAssertDelegation(t *testing.T, run cursorTextOnlyRun) {
+	t.Helper()
+	snap := run.session.delegations.snapshot()
+	require.Len(t, snap, 1, "仅 1 条真实 f11 委托")
+	require.Equal(t, "get_weather", snap[0].Name)
+	require.Equal(t, uint64(7), snap[0].ExecID)
+	require.Equal(t, []byte("exec-id"), snap[0].IDField)
+	require.Equal(t, cursorSDKTransportArgsFixture, snap[0].ArgsJSON, "委托 ArgsJSON 逐字节原样")
+	require.NotContains(t, snap[0].ID, "call_dsml_", "委托不得带 DSML 前缀")
+	require.Equal(t, snap, run.calls, "parser 与会话读取同一份委托记录")
+	cursorTextOnlyAssertNoDSML(t, run.body)
+}
+
+// cursorPrecisionChatArgs 取 Chat 实际交付的 tool_calls[].function.arguments。
+// 流式按 index 累加分片，非流式直接读 message.tool_calls。
+func cursorPrecisionChatArgs(t *testing.T, stream bool, body string) (string, string) {
+	t.Helper()
+	var args, name string
+	if stream {
+		byIndex := make(map[int]string)
+		for _, data := range cursorTextOnlySSEData(body) {
+			var e apicompat.ChatCompletionsChunk
+			require.NoError(t, json.Unmarshal([]byte(data), &e))
+			for _, ch := range e.Choices {
+				for _, tc := range ch.Delta.ToolCalls {
+					idx := 0
+					if tc.Index != nil {
+						idx = *tc.Index
+					}
+					byIndex[idx] += tc.Function.Arguments
+					if tc.Function.Name != "" {
+						name = tc.Function.Name
+					}
+				}
+			}
+		}
+		require.Len(t, byIndex, 1, "Chat 流式只交付 1 个 tool_calls 项")
+		args = byIndex[0]
+	} else {
+		var resp apicompat.ChatCompletionsResponse
+		require.NoError(t, json.Unmarshal([]byte(body), &resp))
+		require.Len(t, resp.Choices, 1)
+		tcs := resp.Choices[0].Message.ToolCalls
+		require.Len(t, tcs, 1, "Chat 非流式只交付 1 个 tool_calls 项")
+		args = tcs[0].Function.Arguments
+		name = tcs[0].Function.Name
+	}
+	return name, args
+}
+
+// cursorPrecisionResponsesArgs 取 Responses 实际交付的 function_call.arguments。
+func cursorPrecisionResponsesArgs(t *testing.T, stream bool, body string) (string, string) {
+	t.Helper()
+	var args, name string
+	if stream {
+		var delta strings.Builder
+		var done string
+		// added/done 成对描述同一 item，按 item ID 去重后才是一条交付项。
+		items := make(map[string]string)
+		for _, data := range cursorTextOnlySSEData(body) {
+			var e apicompat.ResponsesStreamEvent
+			require.NoError(t, json.Unmarshal([]byte(data), &e))
+			switch e.Type {
+			case "response.function_call_arguments.delta":
+				delta.WriteString(e.Delta)
+			case "response.function_call_arguments.done":
+				done = e.Arguments
+			case "response.output_item.added", "response.output_item.done":
+				if e.Item != nil && e.Item.Type == "function_call" {
+					key := e.Item.ID
+					if key == "" {
+						key = e.Item.CallID
+					}
+					items[key] = e.Item.Name
+				}
+			}
+		}
+		require.Len(t, items, 1, "Responses 流式只交付 1 个 function_call 项")
+		for _, itemName := range items {
+			name = itemName
+		}
+		require.Equal(t, delta.String(), done, "done.arguments 必须等于流式 delta 累加值")
+		args = done
+	} else {
+		var resp apicompat.ResponsesResponse
+		require.NoError(t, json.Unmarshal([]byte(body), &resp))
+		var items []apicompat.ResponsesOutput
+		for _, item := range resp.Output {
+			if item.Type == "function_call" {
+				items = append(items, item)
+			}
+		}
+		require.Len(t, items, 1, "Responses 非流式只交付 1 个 function_call 项")
+		args = items[0].Arguments
+		name = items[0].Name
+	}
+	return name, args
+}
+
+// cursorPrecisionAnthropicTool 取 Messages 实际交付的 tool_use.input（流式由
+// input_json_delta 分片还原），返回 ID/Name/input JSON 原文。
+func cursorPrecisionAnthropicTool(t *testing.T, stream bool, body string) (string, string, string) {
+	t.Helper()
+	var id, name, input string
+	if stream {
+		for _, data := range cursorTextOnlySSEData(body) {
+			var e apicompat.AnthropicStreamEvent
+			require.NoError(t, json.Unmarshal([]byte(data), &e))
+			if e.Type == "content_block_start" && e.ContentBlock != nil && e.ContentBlock.Type == "tool_use" {
+				id = e.ContentBlock.ID
+				name = e.ContentBlock.Name
+			}
+			if e.Type == "content_block_delta" && e.Delta != nil && e.Delta.Type == "input_json_delta" {
+				input += e.Delta.PartialJSON
+			}
+		}
+	} else {
+		var resp apicompat.AnthropicResponse
+		require.NoError(t, json.Unmarshal([]byte(body), &resp))
+		var blocks []apicompat.AnthropicContentBlock
+		for _, b := range resp.Content {
+			if b.Type == "tool_use" {
+				blocks = append(blocks, b)
+			}
+		}
+		require.Len(t, blocks, 1, "Messages 非流式只交付 1 个 tool_use 块")
+		id = blocks[0].ID
+		name = blocks[0].Name
+		input = string(blocks[0].Input)
+	}
+	require.NotEmpty(t, input, "tool_use.input 不得为空")
+	return id, name, input
+}
+
+// cursorPrecisionGeminiCalls 从一帧 Gemini 输出里取所有 functionCall。
+func cursorPrecisionGeminiCalls(t *testing.T, data string) []map[string]any {
+	t.Helper()
+	frame := cursorPrecisionDecodeObject(t, data)
+	cands, _ := frame["candidates"].([]any)
+	var out []map[string]any
+	for _, c := range cands {
+		cm, _ := c.(map[string]any)
+		content, _ := cm["content"].(map[string]any)
+		parts, _ := content["parts"].([]any)
+		for _, p := range parts {
+			pm, _ := p.(map[string]any)
+			if fc, ok := pm["functionCall"].(map[string]any); ok {
+				out = append(out, fc)
+			}
+		}
+	}
+	return out
+}
+
+// TestCursorSDKTransportArgsPrecisionAcrossProtocols 把 cursorSDKTransportArgsFixture
+// 贯穿 Chat/Messages/Responses/Gemini × 流/非流的真实 writer 输出，按各协议真实交付
+// 形态断言精度不丢、不被 float64 改写。
+func TestCursorSDKTransportArgsPrecisionAcrossProtocols(t *testing.T) {
+	for _, c := range cursorTextOnlyCases() {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			run := cursorPrecisionDrive(t, c.mode, c.stream)
+			cursorPrecisionAssertDelegation(t, run)
+
+			switch c.mode {
+			case cursorProtocolChat:
+				name, args := cursorPrecisionChatArgs(t, c.stream, run.body)
+				require.Equal(t, "get_weather", name)
+				require.NotContains(t, name, "Bash")
+				require.Equal(t, cursorSDKTransportArgsFixture, args,
+					"Chat tool_calls[].function.arguments 必须与 fixture 逐字节相等")
+			case cursorProtocolResponses:
+				name, args := cursorPrecisionResponsesArgs(t, c.stream, run.body)
+				require.Equal(t, "get_weather", name)
+				require.NotContains(t, name, "Bash")
+				require.Equal(t, cursorSDKTransportArgsFixture, args,
+					"Responses function_call.arguments 必须与 fixture 逐字节相等")
+			case cursorProtocolAnthropic:
+				id, name, input := cursorPrecisionAnthropicTool(t, c.stream, run.body)
+				require.Equal(t, "get_weather", name)
+				require.NotContains(t, id, "call_dsml_")
+				cursorPrecisionAssertObjectArgs(t, cursorPrecisionDecodeObject(t, input),
+					"Messages tool_use.input")
+			case cursorProtocolGemini:
+				var calls []map[string]any
+				if c.stream {
+					for _, data := range cursorTextOnlySSEData(run.body) {
+						calls = append(calls, cursorPrecisionGeminiCalls(t, data)...)
+					}
+				} else {
+					calls = cursorPrecisionGeminiCalls(t, run.body)
+				}
+				require.Len(t, calls, 1, "Gemini 只交付 1 个 functionCall")
+				name, _ := calls[0]["name"].(string)
+				require.Equal(t, "get_weather", name)
+				id, _ := calls[0]["id"].(string)
+				require.NotContains(t, id, "call_dsml_")
+				args, ok := calls[0]["args"].(map[string]any)
+				require.True(t, ok, "Gemini functionCall.args 必须是对象")
+				cursorPrecisionAssertObjectArgs(t, args, "Gemini functionCall.args")
+			}
+			t.Logf("[PREC/%s] body=%d bytes args preserved (big=9007199254740993)",
+				c.name, len(run.body))
+		})
+	}
 }
