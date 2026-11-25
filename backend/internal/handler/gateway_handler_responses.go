@@ -216,6 +216,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 
 	// 3. Account selection + failover loop
 	fs := NewFailoverState(false).BindRequest(c)
+	fs.Jitter = upstreamJitterGuardFor(h.gatewayService, apiKey)
 	slotFullCount := 0
 	ownershipRejectedCount := 0
 
@@ -562,7 +563,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 					h.handleResponsesFailoverExhausted(c, failoverErr, true)
 					return
 				}
-				action := fs.HandleFailoverError(requestCtx, h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				action := fs.HandleFailoverError(requestCtx, h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr, account.GetMappedModel(reqModel))
 				switch action {
 				case FailoverContinue:
 					continue

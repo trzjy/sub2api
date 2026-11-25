@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -218,6 +219,19 @@ func (p *AccountHealthRecoveryProbeService) probeModelScope(ctx context.Context,
 			zap.Int64("account_id", acc.ID), zap.String("scope", task.Scope))
 	}
 
+	// 上游抖动停调：只看真实调用探测，不查额度/余额（额度剩余 ≠ 该模型恢复），
+	// 失败按 15 秒续探；成功走既有版本化清除。
+	if reason, _ := task.Entry["reason"].(string); reason == UpstreamJitterModelRateLimitReason {
+		upOK, upErr := p.probeModelScopeUpstream(ctx, acc, task.Scope)
+		if upErr != nil || !upOK {
+			observeAttempt()
+			reschedule(UpstreamJitterProbeCadence)
+			return
+		}
+		clearScope()
+		return
+	}
+
 	if !accountHasQuotaEntrance(acc) {
 		// 无额度入口：到点实际调用，2xx 才清除；失败/不确定 30s 续探。
 		upOK, upErr := p.probeModelScopeUpstream(ctx, acc, task.Scope)
@@ -311,8 +325,10 @@ func (p *AccountHealthRecoveryProbeService) probeModelScopeUpstream(ctx context.
 	// antigravity 无可用实际调用构造；cursor/devin 多模型遍历、codebuddy 直绑只有
 	// billing 面——均无法按 scope 精确指定模型，保留 due 重排，不伪造桩实现。
 	switch acc.Platform {
-	case PlatformAntigravity, PlatformCursor, PlatformDevin, PlatformCodeBuddy:
+	case PlatformAntigravity, PlatformDevin, PlatformCodeBuddy:
 		return false, errUnsupportedModelProbe
+	case PlatformCursor:
+		return p.probeCursorModelScopeUpstream(ctx, acc, scope)
 	}
 
 	// 其它 OpenAI 协议族：按 scope 解析实际上游模型，空则直接用 scope。
@@ -321,6 +337,30 @@ func (p *AccountHealthRecoveryProbeService) probeModelScopeUpstream(ctx context.
 		model = scope
 	}
 	return p.probeUpstreamDataPlaneWithProtocolForModel(ctx, acc, model, false)
+}
+
+// probeCursorModelScopeUpstream 对 cursor 平台按指定上游模型发一次最小真实调用。
+// Connect 会话号走既有原生 AgentRun 探针；apikey 反代走既有数据面探测（强制 CC，
+// 与真实转发同判据）。cannot-probe 时返回 error，由调用方保留 due 重排、不误清。
+func (p *AccountHealthRecoveryProbeService) probeCursorModelScopeUpstream(ctx context.Context, acc *Account, scope string) (bool, error) {
+	if acc == nil {
+		return false, errors.New("probe account is nil")
+	}
+	if acc.IsCursorConnectSessionAccount() {
+		if p.cursorExec == nil {
+			return false, errors.New("cursor execution service not configured for connect-session model scope probe")
+		}
+		fn := p.cursorAgentRunProbe
+		if fn == nil {
+			fn = ProbeCursorAccountHealth
+		}
+		status, _, text, err := fn(ctx, p.cursorExec, acc, scope, cursorAccountHealthProbeMinBudget)
+		if err != nil {
+			return false, err
+		}
+		return status == http.StatusOK && strings.TrimSpace(text) != "", nil
+	}
+	return p.probeUpstreamDataPlaneWithProtocolForModel(ctx, acc, scope, true)
 }
 
 // patchModelProbe 是 PatchModelRateLimitEntry 的窄面薄封装：未实现时 Warn 并返回，不 panic。

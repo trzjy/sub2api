@@ -205,6 +205,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	slotFullCount := 0
 	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	jitter := upstreamJitterGuardFor(h.gatewayService, apiKey)
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	var lastPlatformQuotaErr error
@@ -560,6 +561,13 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 					}
 					failedAccountIDs[account.ID] = struct{}{}
+					if jitter != nil {
+						if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(forwardModel), failoverErr); len(excludeIDs) > 0 {
+							for _, id := range excludeIDs {
+								failedAccountIDs[id] = struct{}{}
+							}
+						}
+					}
 					// 同源整体排除：审核拒绝按上游主机生效，只排除当前账号会让下一个
 					// 候选又落回同一家，切换预算全耗在同一面墙上。
 					h.excludeUpstreamSiblings(c.Request.Context(), apiKey, failoverErr, failedAccountIDs, excludedUpstreamHosts, reqLog)

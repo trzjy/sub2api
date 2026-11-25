@@ -813,6 +813,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	slotFullCount := 0
 	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	jitter := upstreamJitterGuardFor(h.gatewayService, apiKey)
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	var lastPlatformQuotaErr error
@@ -1268,6 +1269,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 					}
 					failedAccountIDs[account.ID] = struct{}{}
+					if jitter != nil {
+						if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(forwardModel), failoverErr); len(excludeIDs) > 0 {
+							for _, id := range excludeIDs {
+								failedAccountIDs[id] = struct{}{}
+							}
+						}
+					}
 					// 同源整体排除：审核拒绝按上游主机生效，只排除当前账号会让下一个
 					// 候选又落回同一家，切换预算全耗在同一面墙上。
 					h.excludeUpstreamSiblings(c.Request.Context(), apiKey, failoverErr, failedAccountIDs, excludedUpstreamHosts, reqLog)
@@ -1668,6 +1676,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	slotFullCount := 0
 	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	jitter := upstreamJitterGuardFor(h.gatewayService, apiKey)
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	var lastPlatformQuotaErr error
@@ -2044,6 +2053,13 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						h.gatewayService.PenalizeSessionAccountForCapacityShed(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID)
 					}
 					failedAccountIDs[account.ID] = struct{}{}
+					if jitter != nil {
+						if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(currentRoutingModel), failoverErr); len(excludeIDs) > 0 {
+							for _, id := range excludeIDs {
+								failedAccountIDs[id] = struct{}{}
+							}
+						}
+					}
 					// 同源整体排除：审核拒绝按上游主机生效（同一供应商的多把 key 共享
 					// 同一套策略），只排除当前账号会 419→416→426 连撞三面同一堵墙。
 					h.excludeUpstreamSiblings(c.Request.Context(), apiKey, failoverErr, failedAccountIDs, excludedUpstreamHosts, reqLog)
@@ -3381,6 +3397,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	profitVetoCount := 0
 	ownershipRejectedCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	jitter := upstreamJitterGuardFor(h.gatewayService, apiKey)
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
@@ -3425,6 +3442,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
+		if jitter != nil {
+			if _, excludeIDs := jitter.Observe(ctx, account.ID, account.GetMappedModel(wsForwardModel), failoverErr); len(excludeIDs) > 0 {
+				for _, id := range excludeIDs {
+					failedAccountIDs[id] = struct{}{}
+				}
+			}
+		}
 		lastFailoverErr = failoverErr
 		// 这次失败来自上游：清「最后一次失败来自槽位」标记（外审 R8 must_fix #2）。
 		markFailoverUpstreamFailure(c)

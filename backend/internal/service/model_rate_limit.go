@@ -122,6 +122,11 @@ func ModelProbeDue(acc *Account, scope, reason string, resetAt time.Time, precis
 	if acc == nil || !isModelProbeOwned(scope, map[string]any{"reason": reason}, acc) {
 		return false, time.Time{}
 	}
+	// 上游抖动停调：解除只认真实调用探测成功，节奏固定 15 秒，与额度入口无关
+	// （额度剩余不等于该模型恢复，不得沿用额度路径的 5 分钟节奏）。
+	if reason == UpstreamJitterModelRateLimitReason {
+		return true, now.Add(UpstreamJitterProbeCadence)
+	}
 	hasQuota := accountHasQuotaEntrance(acc)
 	switch {
 	case hasQuota && precise:

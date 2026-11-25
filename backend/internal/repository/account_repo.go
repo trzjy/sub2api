@@ -2414,6 +2414,46 @@ func (r *accountRepository) ListSchedulableCapacityByGroupIDs(ctx context.Contex
 	return out, nil
 }
 
+// SiblingAccountIDsByCursorUpstreamKey 返回同分组内与给定激活码同一上游
+// （quota_keys.upstream_key）的账号 ID（含入参账号所属激活码名下的账号）。
+// 上游按模型整体抖动时用它一次性摘掉整片同源账号；查询失败由调用方按「不排除」处理。
+func (r *accountRepository) SiblingAccountIDsByCursorUpstreamKey(ctx context.Context, groupID, quotaKeyID int64) ([]int64, error) {
+	if r == nil || r.sql == nil {
+		return nil, fmt.Errorf("account repository SQL executor is not configured")
+	}
+	if groupID <= 0 || quotaKeyID <= 0 {
+		return nil, nil
+	}
+	rows, err := r.sql.QueryContext(ctx, `
+		SELECT a.id
+		FROM accounts a
+		JOIN account_groups ag ON ag.account_id = a.id AND ag.group_id = $1
+		JOIN quota_keys qk ON qk.id = a.quota_key_id AND qk.deleted_at IS NULL
+		WHERE a.deleted_at IS NULL
+		  AND qk.upstream_key = (
+			SELECT upstream_key FROM quota_keys WHERE id = $2 AND deleted_at IS NULL
+		  )
+		ORDER BY a.id
+	`, groupID, quotaKeyID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 func (r *accountRepository) ListSchedulableByPlatform(ctx context.Context, platform string) ([]service.Account, error) {
 	now := time.Now()
 	accounts, err := r.client.Account.Query().

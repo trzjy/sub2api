@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +17,33 @@ import (
 // GatewayService 隐式实现此接口。
 type TempUnscheduler interface {
 	TempUnscheduleRetryableError(ctx context.Context, accountID int64, failoverErr *service.UpstreamFailoverError)
+}
+
+// upstreamJitterGuardProvider 由 service.GatewayService / service.OpenAIGatewayService 实现。
+type upstreamJitterGuardProvider interface {
+	NewUpstreamJitterGuard(groupID int64) *service.UpstreamJitterGuard
+}
+
+// upstreamJitterObserver 是 FailoverState 对抖动守门器的窄依赖（便于单测替身）。
+type upstreamJitterObserver interface {
+	Observe(ctx context.Context, accountID int64, modelScope string, fe *service.UpstreamFailoverError) (admitted bool, excludeIDs []int64)
+}
+
+// upstreamJitterGuardFor 按 API Key 的分组构造请求内守门器；服务或守门器不可用时返回 nil
+// （nil 接口而不是 typed-nil，保证调用方 != nil 判断准确）。
+func upstreamJitterGuardFor(provider upstreamJitterGuardProvider, apiKey *service.APIKey) upstreamJitterObserver {
+	if provider == nil {
+		return nil
+	}
+	var groupID int64
+	if apiKey != nil && apiKey.GroupID != nil {
+		groupID = *apiKey.GroupID
+	}
+	guard := provider.NewUpstreamJitterGuard(groupID)
+	if guard == nil {
+		return nil
+	}
+	return guard
 }
 
 // FailoverAction 表示 failover 错误处理后的下一步动作
@@ -137,6 +165,9 @@ type FailoverState struct {
 	// 从 5 分钟降为 30 秒（上游集体劣化时，停那么久会把账号池摘空）。
 	CursorUpstreamFailedAccountIDs map[int64]struct{}
 
+	// Jitter 是本请求内的上游抖动守门器（nil = 不启用，行为与改前逐字一致）。
+	Jitter upstreamJitterObserver
+
 	// profitVetoCount 本次请求累计的利润否决次数，用于 maxProfitVetoAttempts 上限。
 	profitVetoCount int
 }
@@ -208,6 +239,7 @@ func (s *FailoverState) HandleFailoverError(
 	platform string,
 	retryLimit int,
 	failoverErr *service.UpstreamFailoverError,
+	modelScope ...string,
 ) FailoverAction {
 	// 客户端已断开：failover 只会用已取消的 context 重新选号并必然失败，
 	// 不应再被当成账号耗尽处理（误报 502）。
@@ -219,6 +251,11 @@ func (s *FailoverState) HandleFailoverError(
 	markFailoverUpstreamFailure(s.C)
 	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() {
 		return FailoverExhausted
+	}
+
+	scope := ""
+	if len(modelScope) > 0 {
+		scope = strings.TrimSpace(modelScope[0])
 	}
 
 	// 同账号重试不算切换账号，粘性会话仅在实际切换时强制缓存计费。
@@ -244,6 +281,17 @@ func (s *FailoverState) HandleFailoverError(
 			return FailoverCanceled
 		}
 		return FailoverContinue
+	}
+
+	// 上游抖动守门：准入成立时只写「账号 × 模型」停调并累计同上游失败，
+	// 达到阈值后把该上游剩余账号并入本请求排除集；此时不再整号停调。
+	jitterAdmitted := false
+	if s.Jitter != nil {
+		admitted, excludeIDs := s.Jitter.Observe(ctx, accountID, scope, failoverErr)
+		jitterAdmitted = admitted
+		for _, id := range excludeIDs {
+			s.FailedAccountIDs[id] = struct{}{}
+		}
 	}
 
 	// cursor 上游账号级失败的集体抽风判定：同一请求内已失败的不同账号数达到
@@ -289,10 +337,10 @@ func (s *FailoverState) HandleFailoverError(
 	// 请求持续打到同一批已耗尽账号、池里别的有额度账号却没被轮询到）。
 	// 故与 CursorUpstreamAccountFailureReason 同列，共用同一停号原语（冷却到期自动回池，
 	// 若上游已重置则正常服务、仍未重置则再次命中本分支继续冷却）。
-	if failoverErr.RetryableOnSameAccount ||
+	if !jitterAdmitted && (failoverErr.RetryableOnSameAccount ||
 		failoverErr.Reason == service.CursorUpstreamAccountFailureReason ||
 		service.IsCursorQuotaExhaustedReason(failoverErr.Reason) ||
-		failoverErr.Reason == service.CursorRateLimitedReason {
+		failoverErr.Reason == service.CursorRateLimitedReason) {
 		gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
 	}
 

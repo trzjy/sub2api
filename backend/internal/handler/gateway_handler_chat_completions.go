@@ -211,6 +211,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	// 3. Account selection + failover loop
 	fs := newChatCompletionsFailoverState(c, groupPlatform, h.maxAccountSwitchesGemini)
+	fs.Jitter = upstreamJitterGuardFor(h.gatewayService, apiKey)
 	slotFullCount := 0
 	ownershipRejectedCount := 0
 
@@ -598,7 +599,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 					h.handleCCFailoverExhausted(c, failoverErr, true)
 					return
 				}
-				action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr, account.GetMappedModel(reqModel))
 				switch action {
 				case FailoverContinue:
 					continue
