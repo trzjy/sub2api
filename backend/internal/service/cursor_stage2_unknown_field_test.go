@@ -109,14 +109,14 @@ func TestCursorStage2UnknownInteractionFailsClosed(t *testing.T) {
 }
 
 // ⑤ 工具参数缺必填 → 原样把上游原始参数交付客户端，整轮继续，不 502，不补默认值。
+// 新语义：运输边界只做语法校验，不按 schema 补默认值；上游原始参数逐字节交付。
 func TestCursorStage2MissingRequiredDegradesToClient(t *testing.T) {
-	schema := `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}`
-	defs := [][]byte{cursorTestBuildToolDef(t, "bash", schema)}
+	defs := cursorTestTransportDefs(t, "bash")
 	d, _, logs, cleanup := cursorExecRejectTestDuplex(t, defs...)
 	defer cleanup()
 
 	// 上游只交来空参数（缺必填 command）：不得打死整轮，必须原样交付 {}。
-	mcpArgs := cursorTestBuildMcpArgsOfficial(t, "call-1", "bash", nil)
+	mcpArgs := cursorToolTestBuildMcpArgs("call-1", "bash", nil)
 	execMsg := cursorAppendVarintField(nil, cursorFldExecMetaID, 1)
 	execMsg = cursorAppendBytesField(execMsg, cursorFldExecMetaExecID, []byte("exec-1"))
 	execMsg = cursorAppendBytesField(execMsg, 11, mcpArgs)
@@ -129,6 +129,7 @@ func TestCursorStage2MissingRequiredDegradesToClient(t *testing.T) {
 	require.Len(t, snap, 1, "缺必填必须仍登记委托（降级交付，不是拒绝）")
 	require.Equal(t, "bash", snap[0].Name)
 	require.Equal(t, "{}", snap[0].ArgsJSON, "缺必填必须原样交付上游参数，绝不补默认值（command 不得补成空串）")
-	require.Equal(t, 1, phaseCount(logs, "mcp_args_retype_fallback"), "缺必填必须走 mcp_args_retype_fallback 降级通道")
-	require.Equal(t, 0, phaseCount(logs, "mcp_args_incomplete_rejected"), "缺必填不得走 rejected 拒绝")
+	// 旧事件已不存在：运输边界不按 schema 校验/补默认值，故既不产生降级日志，也不产生拒绝日志。
+	require.Zero(t, phaseCount(logs, "mcp_args_retype_fallback"), "新语义不再产生 mcp_args_retype_fallback 降级日志")
+	require.Zero(t, phaseCount(logs, "mcp_args_incomplete_rejected"), "新语义不再产生 mcp_args_incomplete_rejected 拒绝日志")
 }
