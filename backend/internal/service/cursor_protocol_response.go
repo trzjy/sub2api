@@ -964,8 +964,8 @@ type cursorStreamParser struct {
 
 	// declaredToolDefs 是本请求 f4（McpTools）的每条 McpToolDefinition 原始字节，
 	// 由 attachToolSchemas 注入（来源必须是请求体 f4 原始字节，与 duplex 路径同源）。
-	// 供独立解析路径（非 duplex）从真实 f4 的 f3 schema 取出 tool_name enum
-	// （本站允许接收的工具名白名单）；为空表示本路径拿不到 f4 原始字节 → 装配缺陷，失败关闭。
+	// 供独立解析路径（非 duplex）从真实 f4 的 f5 tool_name 取出已声明工具名；
+	// 为空表示本路径拿不到 f4 原始字节 → 装配缺陷，失败关闭。
 	declaredToolDefs [][]byte
 
 	// lg 是解析器阶段事件的结构化 logger（不可变、并发安全）。可为 nil，

@@ -15,6 +15,9 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // Client 3.24.12 L_v/P_v and live Standard probes 01-version-checksum-only
@@ -27,9 +30,9 @@ const cursorClientVersion = "3.24.12"
 // 真实结果回到原 AgentRun 的 exec 关联（W2-F CursorSessionIntake 生产实现），字节级形状：
 //
 //	ExecClientMessage{f1 id(exec_id, varint), f15 id(exec_id 原值, bytes), f11 = McpResult}
-//	  McpResult{f1 success = McpSuccess | f2 error = McpError}
-//	    McpSuccess / McpError{f1 content = repeated McpToolResultContentItem, f2 structured_content}
-//	      McpToolResultContentItem{f1 text = McpTextContent}
+//	  McpResult{f1 success = McpSuccess}
+//	    McpSuccess{f1 content = repeated McpToolResultContentItem, f2 bool is_error, f3 Struct structured_content}
+//	      McpToolResultContentItem{f1 text = McpTextContent | f2 image = McpImageContent}
 //	        McpTextContent{f1 text(string)}
 //
 // 字段号双轨、绝对不可混用（本单 B4 证据）：
@@ -43,8 +46,10 @@ const cursorClientVersion = "3.24.12"
 //     （~/.sub2api-acceptance/sub2api-cursor-targeted-20261024/02-native-tools.cjs：fld(11,mcpResult)）
 //     均能让上游在同一连接继续并正常 turn_ended。故内层 McpResult 必须为 11，绝非 2。
 //
-// McpResult.f1 成功 / f2 错误：客户端明确 is_error 的结果走 f2 保留错误语义，绝不把本机失败
-// 写成成功。structured_content 用实际类型（f2）。
+// 字段按第三方 SDK 与真实客户端原件定义：McpResult.f1=success，McpResult.f2 是另一类
+// McpError（f1 错误字符串，不承载内容项），本结果路径不使用；McpSuccess.f1=content，
+// f2=bool is_error，f3=Struct structured_content。工具"执行了但失败"仍走成功载体的
+// is_error=true——载体名称与执行结果是两回事，不得谎报成功，也不得把错误切到 McpResult.f2。
 const (
 	// cursorFldClientMessage 是**信封**里 ExecClientMessage 的消息类型字段（=2）。
 	// 仅用于 it.duplex.send 包裹外层；不得用于 ExecClientMessage 内层承载 McpResult（见 B4）。
@@ -59,13 +64,14 @@ const (
 	cursorFldClientMsgID     = 1  // f1 id（exec_id，varint）
 	cursorFldClientMsgExecID = 15 // f15 id（exec_id 原值，bytes）
 
-	// McpResult 字段。
-	cursorFldMcpResultSuccess = 1 // f1 success
-	cursorFldMcpResultError   = 2 // f2 error（is_error 语义）
+	// McpResult 字段：真实结果载体恒为 f1 success；f2 是另一类 McpError，本路径不用。
+	cursorFldMcpResultSuccess = 1 // f1 success（McpSuccess）
+	cursorFldMcpResultError   = 2 // f2 error（McpError；仅保留定义作字段对照，回写路径不使用）
 
-	// McpSuccess / McpError 字段。
+	// McpSuccess 字段（第三方真实定义）。
 	cursorFldMcpSuccessContent           = 1 // f1 content（repeated McpToolResultContentItem）
-	cursorFldMcpSuccessStructuredContent = 2 // f2 structured_content（实际结构化 JSON 类型）
+	cursorFldMcpSuccessIsError           = 2 // f2 is_error（bool varint；工具执行失败在此表达）
+	cursorFldMcpSuccessStructuredContent = 3 // f3 structured_content（protobuf Struct）
 
 	// McpToolResultContentItem 字段（oneof content）：
 	//   f1 text  = McpTextContent
@@ -100,8 +106,11 @@ const (
 // cursorEncodeMcpToolResult 把一条真实工具结果编码为 ExecClientMessage 字节。
 //
 // callID 仅用于日志/诊断（上游靠 ExecID + IDField 关联 exec 关联）；execID / idField 必须
-// 是原 mcp_args 委托捕获时带回的原值，否则上游无法把结果关联到对应 exec。is_error 走
-// McpResult.f2（错误语义），结构化 JSON 走 McpSuccess.f2（structured_content）。
+// 是原 mcp_args 委托捕获时带回的原值，否则上游无法把结果关联到对应 exec。
+// 结果载体永远是 McpResult.f1 success：is_error=true 时写 McpSuccess.f2 布尔 true，
+// 不切到 McpResult.f2（那是另一类 McpError，f1 为错误字符串、不承载内容项）。
+// structured 非空时必须按标准 protojson 解为 structpb.Struct 再 proto.Marshal 写
+// McpSuccess.f3（protobuf Struct），非法 JSON 直接返回错误，不补空 Struct、不继续发送。
 // images 是本次工具结果携带的图片（如客户端工具读到图片文件）：每张图独立成一条
 // McpSuccess.f1 内容项，走 McpToolResultContentItem.f2（McpImageContent{f1 data bytes,
 // f2 mime_type}），排在全部文本项之后——与历史侧「先文本后图片」的顺序同一口径。
@@ -109,7 +118,7 @@ const (
 func cursorEncodeMcpToolResult(
 	execID uint64, idField []byte, callID string,
 	texts []string, images []cursorTurnImage, structured []byte, isError bool,
-) []byte {
+) ([]byte, error) {
 	// 每条文本结果项独立成**一条** McpSuccess.f1（repeated McpToolResultContentItem）：
 	// 每个 ContentItem 各自一个 f1 tag-value，**不得**把多条编码拼进同一个 length-delimited
 	// 载荷（那样整段会被当作一个 ContentItem 解析，除最后一条外全部丢失）。
@@ -137,17 +146,25 @@ func cursorEncodeMcpToolResult(
 		item := cursorAppendBytesField(nil, cursorFldContentItemImage, imageContent)
 		payload = cursorAppendBytesField(payload, cursorFldMcpSuccessContent, item)
 	}
-	// McpSuccess / McpError{f1 content, f2 structured_content}。
-	if len(structured) > 0 {
-		payload = cursorAppendBytesField(payload, cursorFldMcpSuccessStructuredContent, structured)
-	}
-	// McpResult{f1 success} 或 {f2 error}。
-	var result []byte
+	// 工具执行失败仍走成功载体：McpSuccess.f2 = bool true（varint 1）。
 	if isError {
-		result = cursorAppendBytesField(nil, cursorFldMcpResultError, payload)
-	} else {
-		result = cursorAppendBytesField(nil, cursorFldMcpResultSuccess, payload)
+		payload = cursorAppendVarintField(payload, cursorFldMcpSuccessIsError, 1)
 	}
+	// structured_content 必须是 protobuf Struct（f3），不是原始 JSON 字节，也不占 f2。
+	// 非空但不合法时明确报错，由调用方整批失败关闭；绝不补空 Struct、不继续发送。
+	if len(structured) > 0 {
+		st := &structpb.Struct{}
+		if err := protojson.Unmarshal(structured, st); err != nil {
+			return nil, fmt.Errorf("decode structured_content as Struct: %w", err)
+		}
+		stBytes, err := proto.Marshal(st)
+		if err != nil {
+			return nil, fmt.Errorf("encode structured_content Struct: %w", err)
+		}
+		payload = cursorAppendBytesField(payload, cursorFldMcpSuccessStructuredContent, stBytes)
+	}
+	// 结果载体永远 McpResult.f1 success；is_error 已在 McpSuccess.f2 表达。
+	result := cursorAppendBytesField(nil, cursorFldMcpResultSuccess, payload)
 	// ExecClientMessage{f1 id, f15 id(原值), f11 McpResult}：内层 McpResult 必须用 f11，
 	// 绝非信封字段 cursorFldClientMessage(=2)（B4 修正；证据见常量块）。
 	msg := cursorAppendVarintField(nil, cursorFldClientMsgID, execID)
@@ -155,7 +172,7 @@ func cursorEncodeMcpToolResult(
 		msg = cursorAppendBytesField(msg, cursorFldClientMsgExecID, idField)
 	}
 	msg = cursorAppendBytesField(msg, cursorFldClientMsgMcpResult, result)
-	return msg
+	return msg, nil
 }
 
 // cursorEncodeExecStreamClose 把一个 exec 的终止控制帧编码为 ExecClientControlMessage 载荷。

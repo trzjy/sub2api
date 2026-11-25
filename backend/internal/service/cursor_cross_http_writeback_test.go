@@ -4,9 +4,10 @@ package service
 
 // 本文件是 **§25.3 / §24.3 跨 HTTP 真实结果回写通道（W2-F）** 的组件级定向测试。
 //
-// 形状以证据 26/27/28 为蓝本：四层编码字节形状（成功 / is_error / 结构化）、单工具
-// 写回原生双工、同名并行两工具各自配对、传输失败关闭会话零重放、未知 ID 失败关闭、
-// 未装配回写通道即 intake_unavailable。
+// 形状以证据 26/27/28 与第三方真实字段定义为蓝本：四层编码字节形状（恒 McpResult.f1
+// success / is_error 走 McpSuccess.f2 / 结构化走 McpSuccess.f3 Struct）、整批预编码后零发送
+// 原子性、单工具写回原生双工、同名并行两工具各自配对、传输失败关闭会话零重放、未知 ID
+// 失败关闭、未装配回写通道即 intake_unavailable。
 //
 // 全部走**真实生产实现**：cursorAgentRunIntake（CursorSessionIntake 生产实现）+
 // cursorEncodeMcpToolResult（§25.3 四层编码）。旧链语义（文本补历史 / 伪 McpError /
@@ -107,19 +108,22 @@ func splitWritebackEnvelopes(t *testing.T, wire []byte) [][]byte {
 
 // cursorWritebackDecoded 是一条回写帧的解码结果。
 type cursorWritebackDecoded struct {
-	execID     uint64
-	idField    []byte
-	texts      []string
-	structured []byte
-	isError    bool
+	execID        uint64
+	idField       []byte
+	texts         []string
+	structured    []byte // McpSuccess.f3 原始 Struct 字节
+	hasErrorField bool   // McpResult.f2（McpError）是否存在——恒应为 false
+	isErrorFlag   bool   // McpSuccess.f2 是否存在
+	isErrorRaw    uint64
+	isError       bool
 }
 
 // decodeWritebackExec 把一条 **ExecClientMessage 载荷**（envelope.Data）按 §25.3 四层编码解码。
 //
 // 字节级层次：ExecClientMessage{f1 exec_id, f15 id, f11 McpResult}
 //
-//	→ McpResult{f1 success | f2 error}
-//	→ McpSuccess/Error{f1 content(repeated ContentItem), f2 structured_content}
+//	→ McpResult{f1 success}（f2 是另一类 McpError，不得承载工具结果）
+//	→ McpSuccess{f1 content(repeated ContentItem), f2 bool is_error, f3 Struct structured_content}
 //	→ ContentItem{f1 text=McpTextContent} → McpTextContent{f1 text(string)}
 func decodeWritebackExec(t *testing.T, execPayload []byte) cursorWritebackDecoded {
 	t.Helper()
@@ -135,16 +139,16 @@ func decodeWritebackExec(t *testing.T, execPayload []byte) cursorWritebackDecode
 	mcpFields, err := cursorDecodeProtobuf(mcpResult.Bytes)
 	require.NoError(t, err)
 	succ, hasSucc := cursorFindField(mcpFields, cursorFldMcpResultSuccess)
-	errField, hasErr := cursorFindField(mcpFields, cursorFldMcpResultError)
-	require.True(t, hasSucc != hasErr, "McpResult 必须且只能携带 success 或 error 之一")
-	out.isError = hasErr
+	_, hasErrField := cursorFindField(mcpFields, cursorFldMcpResultError)
+	require.True(t, hasSucc, "结果载体必须恒为 McpResult.f1 success")
+	require.False(t, hasErrField, "McpResult.f2(McpError) 不得承载工具执行结果")
+	out.hasErrorField = hasErrField
 
-	payload := succ
-	if hasErr {
-		payload = errField
-	}
-	inner, err := cursorDecodeProtobuf(payload.Bytes)
+	inner, err := cursorDecodeProtobuf(succ.Bytes)
 	require.NoError(t, err)
+	_, out.isErrorFlag = cursorFindField(inner, cursorFldMcpSuccessIsError)
+	out.isErrorRaw = cursorVarintField(inner, cursorFldMcpSuccessIsError)
+	out.isError = out.isErrorRaw != 0
 	for _, f := range inner {
 		switch f.Number {
 		case cursorFldMcpSuccessContent:
@@ -181,30 +185,39 @@ func decodeWritebackStream(t *testing.T, wire []byte) []cursorWritebackDecoded {
 
 // TestCursorWritebackFourLayerEncoding 固定 §25.3 四层编码字节形状（成功 / is_error / 结构化）。
 //
-// 这是证据 26/27 修正后编码的真实落点：ExecClientMessage{f1 id, f15 id, f11 McpResult}、
-// McpResult.f1 成功 / f2 错误、McpSuccess.f2 走 structured_content 实际类型。
+// 真实字段落点：ExecClientMessage{f1 id, f15 id, f11 McpResult}、结果载体恒为
+// McpResult.f1 success、失败由 McpSuccess.f2 bool is_error 表达、结构化内容是
+// McpSuccess.f3 的 protobuf Struct。
 func TestCursorWritebackFourLayerEncoding(t *testing.T) {
 	// 成功 + 文本 + 结构化。
-	okPayload := cursorEncodeMcpToolResult(7, []byte("exec-id-7"), "call_1",
+	okPayload, err := cursorEncodeMcpToolResult(7, []byte("exec-id-7"), "call_1",
 		[]string{"sunny, 25C"}, nil, []byte(`{"temp":25}`), false)
+	require.NoError(t, err)
 	ok := decodeWritebackExec(t, okPayload)
+	require.False(t, ok.hasErrorField, "McpResult.f2 必须不存在")
 	require.False(t, ok.isError, "成功结果不得走错误分支")
+	require.False(t, ok.isErrorFlag, "成功结果不得写 McpSuccess.f2")
 	require.EqualValues(t, 7, ok.execID, "必须原样带回原 exec_id")
 	require.Equal(t, []byte("exec-id-7"), ok.idField, "必须原样带回原 f15 id 字节")
 	require.Equal(t, []string{"sunny, 25C"}, ok.texts)
-	require.JSONEq(t, `{"temp":25}`, string(ok.structured))
+	require.JSONEq(t, `{"temp":25}`, cursorTestStructJSON(t, ok.structured))
 
-	// is_error：必须走 McpResult.f2（错误语义），绝不把失败写成成功。
-	errPayload := cursorEncodeMcpToolResult(9, []byte("exec-id-9"), "call_2",
+	// is_error：结果载体仍是 McpResult.f1 success，失败由 McpSuccess.f2=true 表达。
+	errPayload, err := cursorEncodeMcpToolResult(9, []byte("exec-id-9"), "call_2",
 		[]string{"boom"}, nil, nil, true)
+	require.NoError(t, err)
 	errDecoded := decodeWritebackExec(t, errPayload)
+	require.False(t, errDecoded.hasErrorField, "错误不得走 McpResult.f2")
+	require.True(t, errDecoded.isErrorFlag, "McpSuccess.f2 必须存在")
+	require.EqualValues(t, 1, errDecoded.isErrorRaw, "McpSuccess.f2 必须是 bool true")
 	require.True(t, errDecoded.isError, "is_error 结果必须保留错误语义")
 	require.Equal(t, []string{"boom"}, errDecoded.texts)
 	require.Empty(t, errDecoded.structured, "错误结果不携带 structured_content")
 
 	// 多文本项：每条文本独立成一条 ContentItem（repeated），顺序保留。
-	multiPayload := cursorEncodeMcpToolResult(3, nil, "call_3",
+	multiPayload, err := cursorEncodeMcpToolResult(3, nil, "call_3",
 		[]string{"line-a", "line-b"}, nil, nil, false)
+	require.NoError(t, err)
 	multi := decodeWritebackExec(t, multiPayload)
 	require.False(t, multi.isError)
 	require.Equal(t, []string{"line-a", "line-b"}, multi.texts)
@@ -238,7 +251,7 @@ func TestCursorWritebackSingleToolDeliversToDuplex(t *testing.T) {
 	require.Len(t, frames, 1)
 	require.False(t, frames[0].isError)
 	require.Equal(t, []string{"sunny"}, frames[0].texts)
-	require.JSONEq(t, `{"ok":true}`, string(frames[0].structured))
+	require.JSONEq(t, `{"ok":true}`, cursorTestStructJSON(t, frames[0].structured))
 	require.EqualValues(t, 7, frames[0].execID)
 	require.Equal(t, []byte{0xaa, 0xbb}, frames[0].idField)
 }
@@ -265,8 +278,47 @@ func TestCursorWritebackIsErrorPreserved(t *testing.T) {
 
 	frames := decodeWritebackStream(t, wire)
 	require.Len(t, frames, 1)
-	require.True(t, frames[0].isError, "is_error 必须保留错误语义（McpResult.f2）")
+	require.False(t, frames[0].hasErrorField, "错误不得走 McpResult.f2（McpError）")
+	require.True(t, frames[0].isErrorFlag, "McpSuccess.f2 必须存在")
+	require.EqualValues(t, 1, frames[0].isErrorRaw, "McpSuccess.f2 必须是 bool true")
+	require.True(t, frames[0].isError, "is_error 必须保留错误语义（McpSuccess.f2=true）")
 	require.Equal(t, []string{"tool failed: timeout"}, frames[0].texts)
+}
+
+// TestCursorWritebackBatchEncodingFailureZeroSends 覆盖整批原子性：两条结果中第二条
+// structured_content 非法 → 整批编码失败、零发送（reader 捕获字节为空），会话失败关闭。
+// 不新增生产测试钩子：用现有 io.Pipe reader 的写入捕获做零发送断言。
+func TestCursorWritebackBatchEncodingFailureZeroSends(t *testing.T) {
+	svc := newCursorLifecycleTestService()
+	record := startCursorLifecycleTestSession(t, svc)
+	delegations := newCursorToolDelegations()
+	require.NoError(t, delegations.noteDelegation("",
+		cursorToolCallCapture{ID: "c1", Name: "get_weather", ExecID: 1, IDField: []byte{0x01}}))
+	require.NoError(t, delegations.noteDelegation("",
+		cursorToolCallCapture{ID: "c2", Name: "get_weather", ExecID: 2, IDField: []byte{0x02}}))
+
+	pr, pw := io.Pipe()
+	d := newWritebackDuplex(pr, pw, delegations)
+	require.NoError(t, svc.installIntake(record.id, &cursorAgentRunIntake{
+		svc: svc, session: record, duplex: d, delegations: delegations,
+	}))
+
+	stop := captureDuplex(t, d)
+	err := record.intake.DeliverToolResults(context.Background(), record.id, cursorSessionLevelBatchID,
+		[]CursorToolResult{
+			{CallID: "c1", Text: []string{"first result is valid"}},
+			{CallID: "c2", Text: []string{"second has bad struct"}, Structured: []byte(`{"broken":`)},
+		})
+	require.Error(t, err, "第二条编码失败必须返回错误")
+	require.ErrorContains(t, err, "encode tool result", "错误必须来自编码阶段")
+
+	wire := stop()
+	require.Empty(t, wire, "整批编码失败必须零发送（第一条也不得写出）")
+
+	record.mu.Lock()
+	state := record.state
+	record.mu.Unlock()
+	require.Equal(t, cursorSessionClosed, state, "编码失败必须失败关闭会话")
 }
 
 // TestCursorWritebackParallelSameNameTwoTools 覆盖证据 28：同名并行两工具各自独立配对、各自回写。

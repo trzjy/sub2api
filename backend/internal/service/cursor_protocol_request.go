@@ -710,7 +710,8 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage, skipped cursorSkipLedge
 			toolCalls := make([]cursorAgentToolCall, 0, len(m.ToolCalls))
 			for _, tc := range m.ToolCalls {
 				args := tc.Function.Arguments
-				if strings.TrimSpace(args) == "" || args == "null" {
+				trimmedArgs := strings.TrimSpace(args)
+				if trimmedArgs == "" || trimmedArgs == "null" {
 					args = "{}"
 				}
 				toolCalls = append(toolCalls, cursorAgentToolCall{

@@ -112,8 +112,9 @@ func TestCursorToolResultUnknownBlockIsKeptAsMarker(t *testing.T) {
 // 且排在文本项之后；无图时字节形状与旧实现完全一致。
 func TestCursorMcpResultFrameCarriesImageItem(t *testing.T) {
 	img := cursorTurnImage{data: cursorTestImageBytes(t), mimeType: "image/png"}
-	frame := cursorEncodeMcpToolResult(11, []byte("exec-11"), "call_11",
+	frame, err := cursorEncodeMcpToolResult(11, []byte("exec-11"), "call_11",
 		[]string{"see attached"}, []cursorTurnImage{img}, nil, false)
+	require.NoError(t, err)
 
 	outer, err := cursorDecodeProtobuf(frame)
 	require.NoError(t, err)
@@ -155,7 +156,8 @@ func TestCursorMcpResultFrameCarriesImageItem(t *testing.T) {
 	require.Equal(t, 1, imageItems, "每张图必须独立成一条 ContentItem 的 f2 image")
 
 	// 无图：字节形状必须与旧实现（只有 text 项）完全一致。
-	plain := cursorEncodeMcpToolResult(11, []byte("exec-11"), "call_11", []string{"see attached"}, nil, nil, false)
+	plain, err := cursorEncodeMcpToolResult(11, []byte("exec-11"), "call_11", []string{"see attached"}, nil, nil, false)
+	require.NoError(t, err)
 	plainOuter, err := cursorDecodeProtobuf(plain)
 	require.NoError(t, err)
 	require.NotEqual(t, frame, plain, "带图与不带图的编码必须不同")

@@ -664,6 +664,25 @@ func TestCursorContinuationToolCallAndResult(t *testing.T) {
 			string(blobs[1][1]))
 	})
 
+	t.Run("带空白的 null 参数也归一成空对象", func(t *testing.T) {
+		req := &apicompat.ChatCompletionsRequest{
+			Messages: []apicompat.ChatMessage{
+				{Role: "user", Content: json.RawMessage(`"weather?"`)},
+				{Role: "assistant", ToolCalls: []apicompat.ChatToolCall{
+					{ID: "call_null", Type: "function", Function: apicompat.ChatFunctionCall{
+						Name: "get_weather", Arguments: " \t null \n"}}}},
+				{Role: "user", Content: json.RawMessage(`"continue"`)},
+			},
+		}
+		body, err := cursorConvertRequest(req, "grok-4.7")
+		require.NoError(t, err)
+		blobs := cursorBlobsOf(t, cursorAgentRunOf(t, body))
+		require.Len(t, blobs, 2)
+		require.JSONEq(t,
+			`{"role":"assistant","content":[{"type":"tool-call","toolCallId":"call_null","toolName":"CallDynamicTool","args":{"arguments":{},"namespace":"sub2api","toolName":"get_weather"}}],"id":"1"}`,
+			string(blobs[1][1]))
+	})
+
 	t.Run("tool 消息 → role=tool 的历史 blob（逐字段）", func(t *testing.T) {
 		req := &apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{

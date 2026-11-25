@@ -8765,9 +8765,10 @@ func (s *CursorExecutionService) installIntake(sessionID string, intake CursorSe
 // cursorAgentRunIntake 是 CursorSessionIntake 的生产实现（W2-F / §24.3）。
 //
 // 把整批校验后的真实结果按 §25.3 四层编码写回原 AgentRun 的 exec 关联（经由原生双工
-// writer，串行写、writeMu 保护）。is_error 走 McpResult.f2（错误语义，绝不把失败写成成功）；
-// 结构化 JSON 走 McpSuccess.f2（structured_content 实际类型）。发送中传输失败 → 关闭会话
-// （finalizer），禁止重连重放结果。
+// writer，串行写、writeMu 保护）。结果载体恒为 McpResult.f1 success，失败由 McpSuccess.f2
+// 的 bool is_error 表达（绝不谎报成功）；结构化 JSON 编码为 McpSuccess.f3 的 Struct。
+// 整批先编码再发送：任一编码失败前发送数为 0。发送中传输失败 → 关闭会话（finalizer），
+// 禁止重连重放结果。
 type cursorAgentRunIntake struct {
 	svc         *CursorExecutionService
 	session     *cursorSessionRecord
@@ -8781,6 +8782,9 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 		return ErrCursorResumeIntakeUnavailable
 	}
 	caps := it.delegations.snapshot()
+	// 先把整批编码到临时帧切片：任何一条（含结构化内容）编码失败时发送数必须为 0。
+	// 这是 §25.3 既有的整批编码义务，不新增重放缓存/状态/重试。
+	frames := make([][]byte, 0, len(results))
 	for _, r := range results {
 		var cap cursorToolCallCapture
 		found := false
@@ -8809,9 +8813,17 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 		}
 		// callID 只用于日志/诊断（上游靠 ExecID + IDField 关联 exec）；这里用**上游原 id**，
 		// 不用客户端回传的可见 id，避免日志与上游锚点口径不一致。
-		frame := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, cap.ID, r.Text, r.Images, r.Structured, r.IsError)
+		frame, err := cursorEncodeMcpToolResult(cap.ExecID, cap.IDField, cap.ID, r.Text, r.Images, r.Structured, r.IsError)
+		if err != nil {
+			// 编码失败：整批零发送、失败关闭会话，不重连重放。
+			it.svc.finishCursorSession(it.session, "resume_result_encoding_failure")
+			return newCursorRequestError(infraerrors.CursorExecResultWriteFailedCode, http.StatusBadGateway, "encode tool result: %v", err)
+		}
+		frames = append(frames, frame)
+	}
+	// 全部编码成功后才逐条串行发送；发送中传输失败仍走既有失败关闭，不重连不重放。
+	for _, frame := range frames {
 		if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
-			// 发送中传输失败 → 关闭会话（finalizer），禁止重连重放。
 			it.svc.finishCursorSession(it.session, "resume_write_transport_failure")
 			return newCursorRequestError(infraerrors.CursorExecResultWriteFailedCode, http.StatusBadGateway, "deliver tool result transport failure: %v", err)
 		}

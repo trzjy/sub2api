@@ -771,10 +771,12 @@ type ChatTool struct {
 
 	// Custom 标记该工具原本是 Responses 的 custom/freeform 工具（参数是一段自由文本，
 	// 不是 JSON 参数对象）。它在 chat 侧被降级成 function 形态承载，但这个标记必须
-	// 跟着走：下游 cursorBuildMcpTools 据此决定写不写 input_schema（f3）。
+	// 跟着走，以便 Responses 回程仍输出 custom_tool_call。Cursor 请求侧把 Parameters 写入
+	// McpToolDefinition.f6 input_schema_json；custom 桥接工具用的 {"input":"<text>"} schema
+	// 是把自由文本安全地装进 function 参数的已有约定。
 	//
-	// custom 工具**没有** schema：写了 schema 上游就会按 JSON 对象发参，与自由文本
-	// 语义冲突（codex 的 exec 参数是一段自由文本 JS）。
+	// 原始 Responses custom 工具本身没有 JSON schema；这里的桥接 schema 不代表改变其
+	// 自由文本语义，回程仍从 input 字段中取回原文本。
 	Custom bool `json:"-"`
 
 	// type=x_search
