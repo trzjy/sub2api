@@ -2068,22 +2068,25 @@ func ChatCompletionsChunkToResponsesEvents(
 				plain, dsmlCalls = state.dsmlBuffer.Feed(*choice.Delta.Content)
 				events = append(events, state.dsmlResponsesToolCallEvents(dsmlCalls)...)
 			}
-			// 不能用 `if plain == "" { continue }`：那会跳过同一 chunk 里的真实
-			// Delta.ToolCalls。只在正文非空时发射正文事件，随后照常处理 ToolCalls。
+			// 零值默认调用方保持基线控制流：正文被 DSML 完整吸收（plain 为空）时
+			// 跳过后续正文与同一 chunk 的 ToolCalls 处理，避免真实调用把参数追加到
+			// 已还原的 DSML 调用上拼出两份 JSON 串联的非法参数。Cursor 禁用路径
+			// plain 为原正文（外层已保证非空），不会进入此 continue。
+			if plain == "" {
+				continue
+			}
 			// First real content closes the reasoning item, then opens the
 			// message item and its output_text content part.
-			if plain != "" {
-				events = append(events, closeChatReasoningItem(state)...)
-				events = append(events, ensureChatToResponsesMessageItem(state)...)
-				events = append(events, ensureChatToResponsesTextPart(state)...)
-				_, _ = state.Text.WriteString(plain)
-				events = append(events, chatToResponsesEvent(state, "response.output_text.delta", &ResponsesStreamEvent{
-					OutputIndex:  state.MessageIndex,
-					ContentIndex: 0,
-					Delta:        plain,
-					ItemID:       state.MessageItemID,
-				}))
-			}
+			events = append(events, closeChatReasoningItem(state)...)
+			events = append(events, ensureChatToResponsesMessageItem(state)...)
+			events = append(events, ensureChatToResponsesTextPart(state)...)
+			_, _ = state.Text.WriteString(plain)
+			events = append(events, chatToResponsesEvent(state, "response.output_text.delta", &ResponsesStreamEvent{
+				OutputIndex:  state.MessageIndex,
+				ContentIndex: 0,
+				Delta:        plain,
+				ItemID:       state.MessageItemID,
+			}))
 		}
 		for _, toolCall := range choice.Delta.ToolCalls {
 			idx := 0

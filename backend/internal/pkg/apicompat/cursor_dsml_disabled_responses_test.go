@@ -293,11 +293,13 @@ func TestCursorDSMLDisabledResponsesDefaultZeroValue(t *testing.T) {
 		t.Fatalf("默认零值入口仍应恢复 DSML 调用（其它平台不变）")
 	}
 
-	// DSML 解析后 plain == ""，但同一 chunk 里的真实 ToolCalls 仍必须产出。
-	// 用 Index=1 避开 DSML 还原调用占用的 0 号槽位。
+	// 零值默认路径：正文被 DSML 完整吸收（plain 为空）时，基线控制流跳过同一
+	// chunk 的真实 ToolCalls。DSML 还原调用占用 0 号槽位，若再叠加真实 Index=0
+	// 调用就会把两份参数拼成两份 JSON 串联的非法参数，baseline 的 continue 正是
+	// 为了阻止该碰撞。
 	state := NewChatCompletionsToResponsesStreamState("m")
 	content := dsml
-	idx := 1
+	idx := 0
 	events := ChatCompletionsChunkToResponsesEvents(&ChatCompletionsChunk{
 		Choices: []ChatChunkChoice{{Delta: ChatDelta{
 			Content: &content,
@@ -314,14 +316,124 @@ func TestCursorDSMLDisabledResponsesDefaultZeroValue(t *testing.T) {
 	}, state)
 	events = append(events, FinalizeChatCompletionsResponsesStream(state)...)
 
-	sawReal := false
+	sawDSMLCall, sawReal := false, false
 	for _, e := range events {
+		if e.Item != nil && e.Item.Type == "function_call" {
+			if strings.HasPrefix(e.Item.CallID, "call_dsml_") {
+				sawDSMLCall = true
+			}
+			if e.Item.CallID == "call-real-zero" {
+				sawReal = true
+			}
+		}
+	}
+	if !sawDSMLCall {
+		t.Fatalf("零值默认路径仍应产出 DSML 还原调用")
+	}
+	if sawReal {
+		t.Fatalf("正文被 DSML 完整吸收后，基线控制流不得产出同一 chunk 的真实 call-real-zero")
+	}
+	assertFunctionCallArgsJSON(t, events)
+}
+
+// assertFunctionCallArgsJSON 断言流式事件里出现的每个 function_call 参数都是
+// 合法 JSON（空参数表示尚未下发，跳过），防止两份 JSON 串联这类非法参数。
+func assertFunctionCallArgsJSON(t *testing.T, events []ResponsesStreamEvent) {
+	t.Helper()
+	check := func(args, where string) {
+		if args == "" {
+			return
+		}
+		if !json.Valid([]byte(args)) {
+			t.Fatalf("%s 的 function_call 参数不是合法 JSON: %q", where, args)
+		}
+	}
+	for _, e := range events {
+		if e.Type == "response.function_call_arguments.done" {
+			check(e.Arguments, "function_call_arguments.done")
+		}
+		if e.Item != nil && e.Item.Type == "function_call" {
+			check(e.Item.Arguments, "output_item "+e.Type)
+		}
+		if e.Response != nil {
+			for _, o := range e.Response.Output {
+				if o.Type == "function_call" {
+					check(o.Arguments, "response.completed output")
+				}
+			}
+		}
+	}
+}
+
+// TestCursorDSMLDisabledResponsesContentPassthroughWithRealToolCall 是零值基线
+// 碰撞用例的禁用对照：禁用 DSML 时，同一 chunk 的完整 DSML 文本按正文原样输出、
+// 不还原成工具调用；真实 Index=0 调用独立宣告，参数与输入逐字相等且合法 JSON。
+func TestCursorDSMLDisabledResponsesContentPassthroughWithRealToolCall(t *testing.T) {
+	state := NewChatCompletionsToResponsesStreamState("m")
+	state.ConversionOptions.DisableDSMLToolCalls = true
+
+	content := cursorDSMLSampleResponses()
+	realArgs := `{"command":"echo real"}`
+	idx := 0
+	events := ChatCompletionsChunkToResponsesEvents(&ChatCompletionsChunk{
+		Choices: []ChatChunkChoice{{Delta: ChatDelta{
+			Content: &content,
+			ToolCalls: []ChatToolCall{{
+				Index: &idx,
+				ID:    "call-real-zero",
+				Type:  "function",
+				Function: ChatFunctionCall{
+					Name:      "Bash",
+					Arguments: realArgs,
+				},
+			}},
+		}}},
+	}, state)
+	events = append(events, FinalizeChatCompletionsResponsesStream(state)...)
+
+	var textDelta string
+	sawReal, sawDSML := false, false
+	doneCount := 0
+	for _, e := range events {
+		if e.Type == "response.output_text.delta" {
+			textDelta += e.Delta
+		}
+		if e.Item != nil && strings.HasPrefix(e.Item.CallID, "call_dsml_") {
+			sawDSML = true
+		}
 		if e.Type == "response.output_item.added" && e.Item != nil &&
 			e.Item.Type == "function_call" && e.Item.CallID == "call-real-zero" {
 			sawReal = true
 		}
+		if e.Type == "response.output_item.done" && e.Item != nil &&
+			e.Item.Type == "function_call" && e.Item.CallID == "call-real-zero" {
+			doneCount++
+			if e.Item.Arguments != realArgs {
+				t.Fatalf("真实调用收尾参数应与输入逐字相等: got %q want %q", e.Item.Arguments, realArgs)
+			}
+		}
+		if e.Response != nil {
+			for _, o := range e.Response.Output {
+				if strings.HasPrefix(o.CallID, "call_dsml_") {
+					sawDSML = true
+				}
+				if o.Type == "function_call" && o.CallID == "call-real-zero" && o.Arguments != realArgs {
+					t.Fatalf("completed 里真实调用参数应与输入逐字相等: got %q want %q", o.Arguments, realArgs)
+				}
+			}
+		}
+	}
+	if textDelta != content {
+		t.Fatalf("禁用 DSML 时正文应按原文输出:\n got %q\nwant %q", textDelta, content)
+	}
+	if sawDSML {
+		t.Fatalf("禁用 DSML 时不应产出 DSML 还原调用")
 	}
 	if !sawReal {
-		t.Fatalf("DSML 空 plain 不得跳过同一 chunk 的真实 Delta.ToolCalls")
+		t.Fatalf("禁用 DSML 时同一 chunk 的真实 Index=0 调用应正常宣告")
 	}
+	if doneCount != 1 {
+		t.Fatalf("真实调用应恰好收尾一次，实际 %d", doneCount)
+	}
+	assertFunctionCallArgsJSON(t, events)
 }
