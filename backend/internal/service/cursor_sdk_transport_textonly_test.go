@@ -267,7 +267,7 @@ func cursorTextOnlyCheckResponsesCompletion(t *testing.T, body, _ string, wantTe
 func TestCursorSDKTransportTextOnlyDSML(t *testing.T) {
 	reason := cursorTextOnlyReasoningFrames(t)
 	content := cursorTextOnlyContentFrames(t)
-	wantReason := reason[0] + reason[1]
+	wantReason := strings.ReplaceAll(strings.ReplaceAll(reason[0]+reason[1], "<think>", ""), "</think>", "")
 	wantText := content[0] + content[1]
 
 	type checkFn func(*testing.T, string, string, string)
@@ -303,7 +303,7 @@ func TestCursorSDKTransportTextOnlyDSML(t *testing.T) {
 func TestCursorSDKTransportTextOnlyMixedRealCall(t *testing.T) {
 	reason := cursorTextOnlyReasoningFrames(t)
 	content := cursorTextOnlyContentFrames(t)
-	wantReason := reason[0] + reason[1]
+	wantReason := strings.ReplaceAll(strings.ReplaceAll(reason[0]+reason[1], "<think>", ""), "</think>", "")
 	wantText := content[0] + content[1]
 
 	assertDelegation := func(t *testing.T, run cursorTextOnlyRun) {
