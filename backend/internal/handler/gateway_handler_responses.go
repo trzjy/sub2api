@@ -157,6 +157,9 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		}, "") {
 		return
 	}
+	// The probe also binds the authenticated identity for fresh Cursor sessions.
+	// Retain it when deriving the selection and forwarding contexts below.
+	requestCtx = c.Request.Context()
 
 	userReleaseFunc, err := h.concurrencyHelper.AcquireScopedUserSlot(c, scope, subject.UserID)
 	if err != nil {
