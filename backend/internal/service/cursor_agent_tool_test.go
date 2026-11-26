@@ -8,12 +8,14 @@ package service
 
 import (
 	"encoding/json"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -703,15 +705,14 @@ func TestCursorContinuationToolCallAndResult(t *testing.T) {
 			string(blobs[2][1]), "tool result must use the real structure with id and providerOptions")
 	})
 
-	t.Run("孤立工具结果不能新建 AgentRun（最后一轮非 user 仍拒绝）", func(t *testing.T) {
+	t.Run("孤立工具结果缺少原调用，不能重建 AgentRun", func(t *testing.T) {
 		_, err := cursorConvertRequest(&apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{
 				{Role: "user", Content: json.RawMessage(`"q"`)},
 				{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: json.RawMessage(`"sunny"`)},
 			},
 		}, "grok-4.7")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "conversation must end with a user message")
+		assertCursorRequestError(t, err, infraerrors.CursorResUnknownAssociation, http.StatusBadRequest)
 	})
 }
 

@@ -239,7 +239,7 @@ func cursorBuildAgentRunFromSemantic(sem []cursorSemanticMessage, upstreamModel 
 	} else if last.role != "user" {
 		// 以实质内容结尾的 assistant（prefill / 续写）没有协议落点：硬发出去等于把
 		// "模型该续写的内容"当成"用户新指令"。CUR-REQ-07 文案说清如何修正。
-		return nil, "", newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqPrefill, "conversation must end with a user message")
+		return nil, "", newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqPrefill, "assistant prefill is not supported by the native AgentRun action")
 	}
 
 	conversationID := cursorNewUUID()
