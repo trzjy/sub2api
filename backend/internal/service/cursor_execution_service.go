@@ -6406,9 +6406,21 @@ func cursorDecodeResponsesSemantic(req *apicompat.ResponsesRequest) ([]cursorSem
 			kind := strings.ToLower(strings.TrimSpace(item.Type))
 			switch kind {
 			case "function_call", "custom_tool_call", "tool_search_call":
-				args := item.Arguments
-				if kind == "custom_tool_call" {
-					args = item.Input
+				name, args := item.Name, item.Arguments
+				switch kind {
+				case "function_call":
+					// namespace 子工具按共享桥同一规则摊平，与声明侧同源。
+					if item.Namespace != "" {
+						name = apicompat.FlattenNamespaceToolName(item.Namespace, item.Name)
+					}
+				case "custom_tool_call":
+					// custom 的 input 是自由文本、不是 JSON 参数：原样包进单字段对象，
+					// 不 trim、不重解释，空串/空白/字面 null 都照原样保留。
+					packed, _ := json.Marshal(map[string]string{"input": item.Input})
+					args = string(packed)
+				case "tool_search_call":
+					// tool_search 服务端工具已降级为同名 function 壳。
+					name = apicompat.ToolSearchProxyName
 				}
 				trimmed := strings.TrimSpace(args)
 				if trimmed == "" || trimmed == "null" {
@@ -6420,7 +6432,7 @@ func cursorDecodeResponsesSemantic(req *apicompat.ResponsesRequest) ([]cursorSem
 					ToolCalls: []apicompat.ChatToolCall{{
 						ID:       strings.TrimSpace(item.CallID),
 						Type:     "function",
-						Function: apicompat.ChatFunctionCall{Name: item.Name, Arguments: args},
+						Function: apicompat.ChatFunctionCall{Name: name, Arguments: args},
 					}},
 				}
 			case "reasoning":
