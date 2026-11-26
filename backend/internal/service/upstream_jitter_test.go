@@ -35,6 +35,7 @@ type upstreamJitterSetCall struct {
 	scope     string
 	resetAt   time.Time
 	reason    []string
+	extra     map[string]any
 }
 
 var _ UpstreamJitterRepo = (*upstreamJitterRepoStub)(nil)
@@ -55,12 +56,13 @@ func (s *upstreamJitterRepoStub) ListByGroup(_ context.Context, _ int64) ([]Acco
 	return s.groupAccounts, nil
 }
 
-func (s *upstreamJitterRepoStub) SetModelRateLimit(_ context.Context, id int64, scope string, resetAt time.Time, reason ...string) error {
+func (s *upstreamJitterRepoStub) SetModelRateLimitWithExtra(_ context.Context, id int64, scope string, resetAt time.Time, reason string, extra map[string]any) error {
 	s.setCalls = append(s.setCalls, upstreamJitterSetCall{
 		accountID: id,
 		scope:     scope,
 		resetAt:   resetAt,
-		reason:    append([]string(nil), reason...),
+		reason:    []string{reason},
+		extra:     extra,
 	})
 	if err, ok := s.setErrByScope[scope]; ok {
 		return err
@@ -256,68 +258,70 @@ func TestUpstreamJitterNewGuardNilSafety(t *testing.T) {
 	require.Nil(t, (&OpenAIGatewayService{}).NewUpstreamJitterGuard(1))
 }
 
-func TestUpstreamJitterObserveChannelMappedModelScopes(t *testing.T) {
+// jitterMappedAccount 造一个带账号级映射的账号：pub-a→mapped-a，chan-b→mapped-c。
+func jitterMappedAccount(id, quotaKeyID int64) *Account {
+	acc := jitterCursorAccount(id, quotaKeyID)
+	acc.Credentials = map[string]any{
+		"model_mapping": map[string]any{
+			"pub-a":  "mapped-a",
+			"chan-b": "mapped-c",
+		},
+	}
+	return acc
+}
+
+func TestUpstreamJitterObserveProbeInput(t *testing.T) {
 	const quotaKeyID int64 = 101
 	const groupID int64 = 13
 	fe := &UpstreamFailoverError{StatusCode: 500}
 
-	// ctx 带渠道映射：主 scope 与映射后 scope 都要写停调。
+	// 无 ctx 渠道映射：selection="pub-a" 经账号映射得到停调 scope="mapped-a"，
+	// extra.probe_input 保留原始选号输入 "pub-a"，且只写一条。
 	stub := &upstreamJitterRepoStub{
-		accounts:     map[int64]*Account{1: jitterCursorAccount(1, quotaKeyID)},
+		accounts:     map[int64]*Account{1: jitterMappedAccount(1, quotaKeyID)},
 		siblingsByQK: map[int64][]int64{quotaKeyID: {1, 2}},
 	}
 	g := newUpstreamJitterGuard(stub, groupID)
-	ctx := WithChannelMappedModel(context.Background(), "mapped-b")
-	admitted, _ := g.Observe(ctx, 1, "mapped-a", fe)
+	admitted, _ := g.Observe(context.Background(), 1, "pub-a", fe)
 	require.True(t, admitted)
-	require.Len(t, stub.setCalls, 2)
+	require.Len(t, stub.setCalls, 1)
 	require.Equal(t, "mapped-a", stub.setCalls[0].scope)
-	require.Equal(t, "mapped-b", stub.setCalls[1].scope)
+	require.Equal(t, "pub-a", stub.setCalls[0].extra[UpstreamJitterProbeInputKey])
 
-	// ctx 无渠道映射：只写主 scope 一次。
-	stubNoMapping := &upstreamJitterRepoStub{
-		accounts:     map[int64]*Account{1: jitterCursorAccount(1, quotaKeyID)},
+	// 有 ctx 渠道映射 "chan-b"：停调 scope 与 probe_input 都直接取渠道映射名 "chan-b"，
+	// 不与账号映射结果 "mapped-c" 混淆，且只写一条（不再写主 key）。
+	stubChan := &upstreamJitterRepoStub{
+		accounts:     map[int64]*Account{1: jitterMappedAccount(1, quotaKeyID)},
 		siblingsByQK: map[int64][]int64{quotaKeyID: {1, 2}},
 	}
-	gNoMapping := newUpstreamJitterGuard(stubNoMapping, groupID)
-	admitted, _ = gNoMapping.Observe(context.Background(), 1, "mapped-a", fe)
+	gChan := newUpstreamJitterGuard(stubChan, groupID)
+	ctx := WithChannelMappedModel(context.Background(), "chan-b")
+	admitted, _ = gChan.Observe(ctx, 1, "pub-a", fe)
 	require.True(t, admitted)
-	require.Len(t, stubNoMapping.setCalls, 1)
-	require.Equal(t, "mapped-a", stubNoMapping.setCalls[0].scope)
+	require.Len(t, stubChan.setCalls, 1)
+	require.Equal(t, "chan-b", stubChan.setCalls[0].scope)
+	require.Equal(t, "chan-b", stubChan.setCalls[0].extra[UpstreamJitterProbeInputKey])
+	require.NotEqual(t, "mapped-c", stubChan.setCalls[0].scope)
 }
 
-func TestUpstreamJitterObserveSecondScopeWriteFailure(t *testing.T) {
+func TestUpstreamJitterObserveMappedStopWriteFailure(t *testing.T) {
 	const quotaKeyID int64 = 88
 	fe := &UpstreamFailoverError{StatusCode: 500}
 
-	// 第二个 scope 写入失败：拒绝准入，且不 panic。
+	// 渠道映射下的停调写入失败：拒绝准入、不排除兄弟，且只尝试写一条。
 	stub := &upstreamJitterRepoStub{
-		accounts: map[int64]*Account{1: jitterCursorAccount(1, quotaKeyID)},
-		siblingsByQK: map[int64][]int64{
-			quotaKeyID: {1, 2},
-		},
-		setErrByScope: map[string]error{
-			"mapped-b": errors.New("second stop write failed"),
-		},
-	}
-	g := newUpstreamJitterGuard(stub, 3)
-	ctx := WithChannelMappedModel(context.Background(), "mapped-b")
-	require.NotPanics(t, func() {
-		admitted, excludeIDs := g.Observe(ctx, 1, "mapped-a", fe)
-		require.False(t, admitted, "第二个 scope 写入失败必须拒绝准入")
-		require.Nil(t, excludeIDs)
-	})
-	require.Len(t, stub.setCalls, 2, "两个 scope 均尝试写入")
-
-	// 主 scope 写入失败：不再继续写后续的渠道映射 scope。
-	stubFirst := &upstreamJitterRepoStub{
 		accounts:      map[int64]*Account{1: jitterCursorAccount(1, quotaKeyID)},
 		siblingsByQK:  map[int64][]int64{quotaKeyID: {1, 2}},
-		setErrByScope: map[string]error{"mapped-a": errors.New("first stop write failed")},
+		setErrByScope: map[string]error{"chan-b": errors.New("stop write failed")},
 	}
-	gFirst := newUpstreamJitterGuard(stubFirst, 3)
-	admitted, excludeIDs := gFirst.Observe(ctx, 1, "mapped-a", fe)
-	require.False(t, admitted)
-	require.Nil(t, excludeIDs)
-	require.Len(t, stubFirst.setCalls, 1, "主 scope 失败后不得继续写后续 scope")
+	g := newUpstreamJitterGuard(stub, 3)
+	ctx := WithChannelMappedModel(context.Background(), "chan-b")
+	require.NotPanics(t, func() {
+		admitted, excludeIDs := g.Observe(ctx, 1, "pub-a", fe)
+		require.False(t, admitted, "停调写入失败必须拒绝准入")
+		require.Nil(t, excludeIDs)
+	})
+	require.Len(t, stub.setCalls, 1, "有渠道映射时只写一条，失败即返回")
+	require.Equal(t, "chan-b", stub.setCalls[0].scope)
+	require.Equal(t, "chan-b", stub.setCalls[0].extra[UpstreamJitterProbeInputKey])
 }

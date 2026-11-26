@@ -14,6 +14,10 @@ const UpstreamJitterModelRateLimitReason = "upstream_jitter"
 const UpstreamJitterProbeCadence = 15 * time.Second
 const upstreamJitterEntryObservationWindow = 5 * time.Minute
 
+// UpstreamJitterProbeInputKey 是停调条目 extra 中存放「原始选号输入」的 key。
+// 探测时按当前账号映射重新解析该输入，避免条目绑定易变的上游真名。
+const UpstreamJitterProbeInputKey = "probe_input"
+
 // IsUpstreamJitterError 判定一条换号错误是否属于「上游整体抖动」——即故障因素
 // 坐落于上游账号/主机而非客户端请求，值得按 (上游, 模型 scope) 维度做请求内守门。
 // 本函数是唯一判定源：命中的错误才会进入 UpstreamJitterGuard.Observe。
@@ -72,7 +76,7 @@ func CanProbeModelScope(acc *Account) bool {
 type UpstreamJitterRepo interface {
 	GetByID(ctx context.Context, id int64) (*Account, error)
 	ListByGroup(ctx context.Context, groupID int64) ([]Account, error)
-	SetModelRateLimit(ctx context.Context, id int64, scope string, resetAt time.Time, reason ...string) error
+	SetModelRateLimitWithExtra(ctx context.Context, id int64, scope string, resetAt time.Time, reason string, extra map[string]any) error
 	SiblingAccountIDsByCursorUpstreamKey(ctx context.Context, groupID, quotaKeyID int64) ([]int64, error)
 }
 
@@ -100,6 +104,10 @@ func newUpstreamJitterGuard(repo UpstreamJitterRepo, groupID int64) *UpstreamJit
 
 // Observe 记录一次抖动失败：先写模型级停调，再按 (上游, scope) 计数；
 // 达到阈值时返回应排除的兄弟账号 ID（只返回一次）。
+//
+// modelScope 是「传给选号器的模型（原始选号输入）」，不是上游真名：有 ctx 渠道映射时
+// 停调 scope 直接取渠道映射名；否则按当前账号映射解析一次得到停调 scope，原始输入
+// 保存在条目 extra 的 UpstreamJitterProbeInputKey 中供探测阶段重新解析。
 func (g *UpstreamJitterGuard) Observe(ctx context.Context, accountID int64, modelScope string, fe *UpstreamFailoverError) (admitted bool, excludeIDs []int64) {
 	if fe == nil || !IsUpstreamJitterError(fe) || strings.TrimSpace(modelScope) == "" {
 		return false, nil
@@ -155,22 +163,29 @@ func (g *UpstreamJitterGuard) Observe(ctx context.Context, accountID int64, mode
 		upstreamKey = "host:" + strings.ToLower(strings.TrimSpace(host))
 	}
 
-	scopes := []string{strings.TrimSpace(modelScope)}
-	if mapped := strings.TrimSpace(ChannelMappedModelFromContext(ctx)); mapped != "" && mapped != scopes[0] {
-		scopes = append(scopes, mapped)
+	selectionModel := strings.TrimSpace(modelScope)
+	alias := strings.TrimSpace(ChannelMappedModelFromContext(ctx))
+	var stopScope, probeInput string
+	if alias != "" {
+		stopScope = alias
+		probeInput = alias
+	} else {
+		stopScope = strings.TrimSpace(acc.GetMappedModel(selectionModel))
+		probeInput = selectionModel
 	}
-	for _, scope := range scopes {
-		if err := g.repo.SetModelRateLimit(ctx, acc.ID, scope, time.Now().Add(upstreamJitterEntryObservationWindow), UpstreamJitterModelRateLimitReason); err != nil {
-			logger.L().Warn("upstream_jitter_stop_write_failed",
-				zap.Int64("account_id", acc.ID),
-				zap.String("model_scope", scope),
-				zap.Error(err),
-			)
-			return false, nil
-		}
+	if stopScope == "" {
+		return false, nil
+	}
+	if err := g.repo.SetModelRateLimitWithExtra(ctx, acc.ID, stopScope, time.Now().Add(upstreamJitterEntryObservationWindow), UpstreamJitterModelRateLimitReason, map[string]any{UpstreamJitterProbeInputKey: probeInput}); err != nil {
+		logger.L().Warn("upstream_jitter_stop_write_failed",
+			zap.Int64("account_id", acc.ID),
+			zap.String("model_scope", stopScope),
+			zap.Error(err),
+		)
+		return false, nil
 	}
 
-	key := upstreamKey + "|" + scopes[0]
+	key := upstreamKey + "|" + stopScope
 	if g.failedByUpstream[key] == nil {
 		g.failedByUpstream[key] = make(map[int64]struct{})
 	}
@@ -178,8 +193,8 @@ func (g *UpstreamJitterGuard) Observe(ctx context.Context, accountID int64, mode
 	logger.L().Warn("upstream_jitter_stop",
 		zap.Int64("account_id", acc.ID),
 		zap.String("upstream_key", upstreamKey),
-		zap.String("model_scope", modelScope),
-		zap.Int("model_scopes", len(scopes)),
+		zap.String("model_scope", stopScope),
+		zap.String("probe_input", probeInput),
 		zap.Int("upstream_status", fe.StatusCode),
 		zap.String("reason", string(fe.Reason)),
 	)

@@ -280,7 +280,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		if jitter != nil {
-			if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(requestedModel), failoverErr); len(excludeIDs) > 0 {
+			if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, requestedModel, failoverErr); len(excludeIDs) > 0 {
 				for _, id := range excludeIDs {
 					failedAccountIDs[id] = struct{}{}
 				}

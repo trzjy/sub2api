@@ -256,7 +256,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				h.gatewayService.RecordOpenAIAccountSwitch()
 				failedAccountIDs[account.ID] = struct{}{}
 				if jitter != nil {
-					if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(forwardModel), failoverErr); len(excludeIDs) > 0 {
+					if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, forwardModel, failoverErr); len(excludeIDs) > 0 {
 						for _, id := range excludeIDs {
 							failedAccountIDs[id] = struct{}{}
 						}

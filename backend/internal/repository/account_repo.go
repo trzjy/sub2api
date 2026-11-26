@@ -2808,6 +2808,12 @@ func (r *accountRepository) SetModelRateLimitWithPreciseReset(ctx context.Contex
 	return r.commitModelRateLimitSet(ctx, id, scope, resetAt, reason, map[string]any{"precise_reset": preciseReset})
 }
 
+// SetModelRateLimitWithExtra 与 SetModelRateLimit 同构，额外并入调用方给定的条目键
+// （如抖动停调的 probe_input），仍走 commitModelRateLimitSet 的事件裁决与提交路径。
+func (r *accountRepository) SetModelRateLimitWithExtra(ctx context.Context, id int64, scope string, resetAt time.Time, reason string, extra map[string]any) error {
+	return r.commitModelRateLimitSet(ctx, id, scope, resetAt, reason, extra)
+}
+
 // commitModelRateLimitSet 是 SetModelRateLimit 与 SetModelRateLimitWithPreciseReset 共享的
 // 收敛写 helper：把「读 meta -> 严格更旧整体 no-op -> 单语句原子提交条目+meta」的事件裁决逻辑
 // 收敛到唯一实现（E37 收敛，消除绕过 meta 的第二条直写路径）。extra 为附加键（precise_reset

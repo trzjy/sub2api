@@ -1270,7 +1270,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					}
 					failedAccountIDs[account.ID] = struct{}{}
 					if jitter != nil {
-						if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(forwardModel), failoverErr); len(excludeIDs) > 0 {
+						if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, forwardModel, failoverErr); len(excludeIDs) > 0 {
 							for _, id := range excludeIDs {
 								failedAccountIDs[id] = struct{}{}
 							}
@@ -2054,7 +2054,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					}
 					failedAccountIDs[account.ID] = struct{}{}
 					if jitter != nil {
-						if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, account.GetMappedModel(currentRoutingModel), failoverErr); len(excludeIDs) > 0 {
+						if _, excludeIDs := jitter.Observe(c.Request.Context(), account.ID, currentRoutingModel, failoverErr); len(excludeIDs) > 0 {
 							for _, id := range excludeIDs {
 								failedAccountIDs[id] = struct{}{}
 							}
@@ -3443,7 +3443,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		if jitter != nil {
-			if _, excludeIDs := jitter.Observe(ctx, account.ID, account.GetMappedModel(wsForwardModel), failoverErr); len(excludeIDs) > 0 {
+			if _, excludeIDs := jitter.Observe(ctx, account.ID, wsForwardModel, failoverErr); len(excludeIDs) > 0 {
 				for _, id := range excludeIDs {
 					failedAccountIDs[id] = struct{}{}
 				}
