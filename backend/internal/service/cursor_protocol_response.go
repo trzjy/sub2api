@@ -196,6 +196,11 @@ func (s *cursorSSEStream) next() (err error) {
 		}
 		s.done = s.parser.usage.Seen
 	}
+	if s.done {
+		if err := cursorMatchParameterUnsupported(s.parser.httpRawContent()); err != nil {
+			return err
+		}
+	}
 	// 委托检查点（§25.3）：模型在本轮 HTTP 内发出 mcp_args 委托并暂停等待真实结果
 	// （usage 尚未见到，故 s.done 原本为 false）。此时必须**主动**吐出 tool_calls +
 	// finish + [DONE] 给当前 HTTP（不再依赖旧链回 McpResult.error 诱导模型结束），并把
@@ -223,6 +228,7 @@ func (s *cursorSSEStream) next() (err error) {
 				// 挂死。只清解析器本地归属计数，不碰 cursorToolDelegations（封口
 				// 记录按代维护、续轮开新批，见 TestCursorBatchSealedBatchNotReused）。
 				s.parser.resetBatchGeneration()
+				s.parser.beginHTTPTurn()
 			} else {
 				// 交接判定处 sealable 失败：仅记录原因、不改变任何控制流——仍不交接、不
 				// dountil、不提前结束，继续等后续帧。外审建议 S1：原本此处把错误直接丢弃，
@@ -437,6 +443,10 @@ var (
 	// 真·额度/凭据耗尽走拒付模板 ErrCursorKeyRejectedUpstream（CUR-EXEC-12）。
 	// 命中仍是终态错误：不得当模型成功、不得伪造 usage、不得把上游原文（含卡 ID）透传。
 	ErrCursorQuotaExhaustedInStream = errors.New("cursor: upstream claimed account daily quota exhausted (unverified)")
+
+	// ErrCursorUpstreamParameterUnsupported 表示上游完整回复了固定的模型参数拒绝模板。
+	// 该终态不能继续当作成功回复或进入正常结算。
+	ErrCursorUpstreamParameterUnsupported = errors.New("cursor: upstream model parameters unsupported")
 )
 
 // cursorUpstreamStreamError 是 ErrCursorUpstreamStream 的结构化载体，携带上游 EndStream 的
@@ -527,6 +537,23 @@ func (e *CursorKeyRejectedError) Error() string {
 // Unwrap 让 errors.Is(err, ErrCursorKeyRejectedUpstream) 成立（契约 0.2）。
 func (e *CursorKeyRejectedError) Unwrap() error { return ErrCursorKeyRejectedUpstream }
 
+// CursorParameterUnsupportedError 是 ErrCursorUpstreamParameterUnsupported 的结构化载体。
+type CursorParameterUnsupportedError struct {
+	Template string
+	EventID  string
+}
+
+func (e *CursorParameterUnsupportedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return "cursor: upstream model parameters unsupported: " + e.Template
+}
+
+func (e *CursorParameterUnsupportedError) Unwrap() error {
+	return ErrCursorUpstreamParameterUnsupported
+}
+
 // cursorUpstreamModelUnavailableTemplate 是上游注入的**固定**"模型暂不可用"模板（不含动态后缀）。
 //
 // 来源证据：55-toolerr-r5-turn5.raw、sub2api-cursor-inline-toolcall-20261030 外审第 8 次
@@ -606,6 +633,20 @@ func cursorMatchKeyRejected(text string) error {
 		return &CursorQuotaExhaustedError{Template: fragment, TurnID: turnID}
 	}
 	return nil
+}
+
+// cursorMatchParameterUnsupported 只接受整条回复为固定模板及其合法后缀。
+// 普通正文中的引用或子串命中不得改变成功语义。
+func cursorMatchParameterUnsupported(text string) error {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || !strings.HasPrefix(trimmed, cursorParameterNoticeTemplate) {
+		return nil
+	}
+	eventID, ok := cursorParameterNoticeEventID(strings.TrimPrefix(trimmed, cursorParameterNoticeTemplate))
+	if !ok {
+		return nil
+	}
+	return &CursorParameterUnsupportedError{Template: trimmed, EventID: eventID}
 }
 
 // cursorMatchInjectedTemplate 定位固定模板，截取到换行为止的片段，并解析括号内的轮次标识。
@@ -985,12 +1026,14 @@ type cursorStreamParser struct {
 	idSource func() string
 	// fallbackID 是未提供 idSource 时（独立解析场景）本解析器自用的唯一 ID。
 	fallbackID string
-	// httpTextBase / httpCallBase 是本 HTTP 附着的起点（content 偏移 / 已捕获调用条数）。
+	// httpTextBase / httpRawTextBase / httpCallBase 是本 HTTP 附着的起点
+	// （可见正文偏移 / 原始正文偏移 / 已捕获调用条数）。
 	//
 	// 只用于**非流式**当前 HTTP 的聚合：续轮的第二个 HTTP 不能把上一 HTTP 的正文/调用
 	// 再输出一遍（§25.17.2「聚合器在交接后释放，不重播」）。
-	httpTextBase int
-	httpCallBase int
+	httpTextBase    int
+	httpRawTextBase int
+	httpCallBase    int
 
 	// ---- §25.3 listed 归属判定用的本地计数（仅用于归属，不参与封口/输出）----
 	//
@@ -1027,6 +1070,7 @@ func (p *cursorStreamParser) beginHTTPTurn() {
 		return
 	}
 	p.httpTextBase = len(p.content)
+	p.httpRawTextBase = len(p.rawContent)
 	p.httpCallBase = len(p.capturedToolCalls())
 	p.started = false
 }
@@ -1059,6 +1103,22 @@ func (p *cursorStreamParser) httpContent() string {
 		return ""
 	}
 	return p.content[p.httpTextBase:]
+}
+
+// httpRawContent 返回本 HTTP 产生的原始文本，用于严格的整条回复 matcher。
+// 原始文本必须按 HTTP 边界切片，否则跨 HTTP 续轮会把上一轮正文拼进当前回复，
+// 使完整参数拒绝模板被误判为普通正文。
+func (p *cursorStreamParser) httpRawContent() string {
+	if p == nil {
+		return ""
+	}
+	if p.httpRawTextBase <= 0 {
+		return p.rawContent
+	}
+	if p.httpRawTextBase >= len(p.rawContent) {
+		return ""
+	}
+	return p.rawContent[p.httpRawTextBase:]
 }
 
 // httpToolCalls 返回**本 HTTP**捕获的对外工具调用（不重播已交付批次）。
@@ -1346,6 +1406,9 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 	// 流内拒付是终态失败：**优先于**任何成功收尾判定。
 	if p.rejected != nil {
 		return nil, p.rejected
+	}
+	if err := cursorMatchParameterUnsupported(p.rawContent); err != nil {
+		return nil, err
 	}
 	if !p.usage.Seen && !p.endStreamSeen {
 		// 既没有 turn_ended 也没有 EndStream：被取消或截断的流。绝不按成功收尾

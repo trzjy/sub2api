@@ -8,7 +8,6 @@ package service
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"testing"
 
@@ -204,15 +203,9 @@ func TestCursorNativeRebuildSingleAndMultiToolWithTailInstruction(t *testing.T) 
 	}
 }
 
-// TestCursorProtocolRequestGoldenUserTail 钉住普通 user 尾的逐字节输出：native resume
-// 只改 tool 尾，不得改变 33 号活体样本的黄金字节。
-func TestCursorProtocolRequestGoldenUserTail(t *testing.T) {
-	const golden = "00000000900a8d010a02500112530a510a4f0a255265706c792077697468204f4b206f6e6c792e20446f206e6f742075" +
-		"736520746f6f6c732e122433393239663737322d376531312d346664622d396661382d30323261616566323863636220" +
-		"011a0a0a0867726f6b2d342e3722002a2436363762386131622d383266652d343963622d616431642d63613833386232" +
-		"3939636434"
-	want, err := hex.DecodeString(golden)
-	require.NoError(t, err)
+// TestCursorProtocolRequestUserTailShape 钉住普通 user 尾的 action 形状：native
+// resume 只改 tool 尾，不能把普通 user 尾改成 resume_action。
+func TestCursorProtocolRequestUserTailShape(t *testing.T) {
 	cursorWithFixedUUID(t,
 		"667b8a1b-82fe-49cb-ad1d-ca838b299cd4",
 		"3929f772-7e11-4fdb-9fa8-022aaef28ccb")
@@ -221,9 +214,12 @@ func TestCursorProtocolRequestGoldenUserTail(t *testing.T) {
 			`"Reply with OK only. Do not use tools."`)}},
 	}, "grok-4.7")
 	require.NoError(t, err)
-	require.Equal(t, want, got, "plain user tail must stay byte-for-byte unchanged")
 
 	run := cursorAgentRunOf(t, got)
+	require.Equal(t, "grok-4.7", cursorModelIDOf(t, run))
+	require.Empty(t, cursorRequestedModelParametersOf(t, run))
+	_, hasLegacyModelField := cursorFindField(run, 3)
+	require.False(t, hasLegacyModelField, "legacy model field must not be sent")
 	actionField, ok := cursorFindField(run, cursorFldRunAction)
 	require.True(t, ok)
 	action, err := cursorDecodeProtobuf(actionField.Bytes)

@@ -12,7 +12,6 @@ package service
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -85,16 +84,38 @@ func cursorActionTextOf(t *testing.T, run []cursorPBField) string {
 	return text.String()
 }
 
-// cursorModelIDOf 取出 model_details.model_id。
+// cursorModelIDOf 取出 requested_model.model_id。
 func cursorModelIDOf(t *testing.T, run []cursorPBField) string {
 	t.Helper()
-	md, ok := cursorFindField(run, cursorFldRunModelDetails)
-	require.True(t, ok, "run_request must carry field 3 (model_details)")
-	fields, err := cursorDecodeProtobuf(md.Bytes)
+	requested, ok := cursorFindField(run, cursorFldRunRequestedModel)
+	require.True(t, ok, "run_request must carry field 9 (requested_model)")
+	fields, err := cursorDecodeProtobuf(requested.Bytes)
 	require.NoError(t, err)
-	id, ok := cursorFindField(fields, cursorFldModelDetailsID)
+	id, ok := cursorFindField(fields, cursorFldRequestedModelID)
 	require.True(t, ok)
 	return id.String()
+}
+
+func cursorRequestedModelParametersOf(t *testing.T, run []cursorPBField) map[string]string {
+	t.Helper()
+	requested, ok := cursorFindField(run, cursorFldRunRequestedModel)
+	require.True(t, ok)
+	fields, err := cursorDecodeProtobuf(requested.Bytes)
+	require.NoError(t, err)
+	maxMode, ok := cursorFindField(fields, cursorFldRequestedModelMaxMode)
+	require.True(t, ok)
+	require.Equal(t, uint64(1), maxMode.Varint)
+	parameters := make(map[string]string)
+	for _, parameter := range cursorAllFields(fields, cursorFldRequestedModelParameter) {
+		parameterFields, err := cursorDecodeProtobuf(parameter.Bytes)
+		require.NoError(t, err)
+		id, ok := cursorFindField(parameterFields, cursorFldRequestedParameterID)
+		require.True(t, ok)
+		value, ok := cursorFindField(parameterFields, cursorFldRequestedParameterValue)
+		require.True(t, ok)
+		parameters[id.String()] = value.String()
+	}
+	return parameters
 }
 
 // cursorBlobsOf 取出 pre_fetched_blobs 的 (id, value) 列表（保序）。
@@ -433,6 +454,36 @@ func TestCursorProtocolRequestTextPartsAccepted(t *testing.T) {
 	require.Equal(t, "part one part two", cursorActionTextOf(t, run))
 }
 
+func TestCursorProtocolRequestRequestedModelParameters(t *testing.T) {
+	cases := []struct {
+		model      string
+		parameters map[string]string
+	}{
+		{model: "claude-fable-5-1", parameters: map[string]string{
+			"thinking": "true", "context": "1m", "effort": "high",
+		}},
+		{model: "claude-sonnet-5-5", parameters: map[string]string{
+			"context": "1m", "reasoning_effort": "high",
+		}},
+		{model: "claude-opus-5-5", parameters: map[string]string{
+			"context": "1m", "effort": "medium", "fast": "false",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			body, err := cursorConvertRequest(&apicompat.ChatCompletionsRequest{
+				Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+			}, tc.model)
+			require.NoError(t, err)
+			run := cursorAgentRunOf(t, body)
+			require.Equal(t, tc.model, cursorModelIDOf(t, run))
+			require.Equal(t, tc.parameters, cursorRequestedModelParametersOf(t, run))
+			_, hasLegacyModelField := cursorFindField(run, 3)
+			require.False(t, hasLegacyModelField, "legacy model field must not be sent")
+		})
+	}
+}
+
 // TestCursorConvertRequestModelGateRejectsF1 钉死展示名不被静默改写：
 // 调用方必须显式传 wire ID，本层不做任何"猜测式"模型名修正。
 func TestCursorProtocolRequestModelGateRejectsF1(t *testing.T) {
@@ -447,7 +498,7 @@ func TestCursorProtocolRequestModelGateRejectsF1(t *testing.T) {
 	require.Equal(t, "gpt-5.5", cursorModelIDOf(t, run),
 		"conversion must not rewrite the model name")
 
-	// 空模型名则失败关闭（不得发出 model_details 缺失的请求）。
+	// 空模型名则失败关闭（不得发出缺少 requested_model 的请求）。
 	_, err = cursorConvertRequest(req, "   ")
 	require.ErrorIs(t, err, ErrCursorUnsupportedRequest)
 }
@@ -464,15 +515,6 @@ func TestCursorProtocolRequestModelGateRejectsF1(t *testing.T) {
 // 只有历史被上游消费才可能答对。
 func TestCursorProtocolRequestMatchesLiveAgentRunSamples(t *testing.T) {
 	t.Run("33 号单轮样本（149 字节，活体 200，回包 OK）", func(t *testing.T) {
-		// f29 system_prompt_spec 教学提示已删除，整包回到活体 149 字节（外层长度 varint 90，
-		// run_request 长度 varint 8d 01）。比较方式仍为逐字节相等。
-		const golden = "00000000900a8d010a02500112530a510a4f0a255265706c792077697468204f4b206f6e6c792e20446f206e6f742075" +
-			"736520746f6f6c732e122433393239663737322d376531312d346664622d396661382d30323261616566323863636220" +
-			"011a0a0a0867726f6b2d342e3722002a2436363762386131622d383266652d343963622d616431642d63613833386232" +
-			"3939636434"
-		want, err := hex.DecodeString(golden)
-		require.NoError(t, err)
-
 		cursorWithFixedUUID(t,
 			"667b8a1b-82fe-49cb-ad1d-ca838b299cd4",
 			"3929f772-7e11-4fdb-9fa8-022aaef28ccb")
@@ -481,26 +523,15 @@ func TestCursorProtocolRequestMatchesLiveAgentRunSamples(t *testing.T) {
 				`"Reply with OK only. Do not use tools."`)}},
 		}, "grok-4.7")
 		require.NoError(t, err)
-		require.Equal(t, want, body, "must reproduce the live 33-agent-run-request.bin byte-for-byte")
+		run := cursorAgentRunOf(t, body)
+		require.Equal(t, "grok-4.7", cursorModelIDOf(t, run))
+		require.Empty(t, cursorRequestedModelParametersOf(t, run))
+		_, hasLegacyModelField := cursorFindField(run, 3)
+		require.False(t, hasLegacyModelField, "legacy model field must not be sent")
+		require.Equal(t, "Reply with OK only. Do not use tools.", cursorActionTextOf(t, run))
 	})
 
 	t.Run("63 号多轮样本（500 字节，活体 200，回包 ORCHID）", func(t *testing.T) {
-		// f29 教学提示已删除，整包回到活体 500 字节（外层长度 varint 1 ef，
-		// run_request 长度 varint ec 03）。比较方式仍为逐字节相等。
-		const golden = "00000001ef0aec030a4650010a2081ff990a60f004dce704c6c48d416b63619bc8b5668f5724b6eaa3841eae110f0a20" +
-			"bca0f709942ce5c35b912c254c19daf3a0743993730c4ef386f4db35f6aa03cd12760a740a720a485768617420776173" +
-			"2074686520636f646520776f72643f205265706c7920776974682074686520636f646520776f7264206f6e6c792e2044" +
-			"6f206e6f742075736520746f6f6c732e122463333764366265652d393032652d343835632d623432312d336234383262" +
-			"34616335626320011a0a0a0867726f6b2d342e3722002a2466373334373430642d326238662d346337302d626335642d" +
-			"6266316435373336656361648a01650a2081ff990a60f004dce704c6c48d416b63619bc8b5668f5724b6eaa3841eae11" +
-			"0f12417b22726f6c65223a2275736572222c22636f6e74656e74223a2254686520636f646520776f7264206973204f52" +
-			"434849442e2052656d656d6265722069742e227d8a018c010a20bca0f709942ce5c35b912c254c19daf3a0743993730c" +
-			"4ef386f4db35f6aa03cd12687b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b22747970" +
-			"65223a2274657874222c2274657874223a22492077696c6c2072656d656d6265722074686520636f646520776f726420" +
-			"4f52434849442e227d5d2c226964223a2231227d"
-		want, err := hex.DecodeString(golden)
-		require.NoError(t, err)
-
 		cursorWithFixedUUID(t,
 			"f734740d-2b8f-4c70-bc5d-bf1d5736ecad",
 			"c37d6bee-902e-485c-b421-3b482b4ac5bc")
@@ -513,7 +544,13 @@ func TestCursorProtocolRequestMatchesLiveAgentRunSamples(t *testing.T) {
 			},
 		}, "grok-4.7")
 		require.NoError(t, err)
-		require.Equal(t, want, body, "must reproduce the live 63-agent-run-request.bin byte-for-byte")
+		run := cursorAgentRunOf(t, body)
+		require.Equal(t, "grok-4.7", cursorModelIDOf(t, run))
+		require.Empty(t, cursorRequestedModelParametersOf(t, run))
+		_, hasLegacyModelField := cursorFindField(run, 3)
+		require.False(t, hasLegacyModelField, "legacy model field must not be sent")
+		require.Equal(t, "What was the code word? Reply with the code word only. Do not use tools.", cursorActionTextOf(t, run))
+		require.Len(t, cursorBlobsOf(t, run), 2)
 	})
 }
 

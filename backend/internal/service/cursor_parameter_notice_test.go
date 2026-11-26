@@ -169,13 +169,15 @@ func TestCursorToolResultWireEvidenceRealWritebackFieldsAndHash(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// pump 终态：upstream_parameter_notice（固定模板 + 严格事件号 + 原响应不变）
+// pump 终态：upstream_parameter_notice（固定模板 + 严格事件号 + 失败关闭）
 // ---------------------------------------------------------------------------
 
-func TestCursorParameterNoticeStreamAndNonStreamPreserveResponse(t *testing.T) {
+func TestCursorParameterNoticeStreamAndNonStreamFailClosed(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
 			ctx, logs := cursorPhaseObserverCtx(t, "req-notice-evidence")
+			settlement := &cursorFullChainSettlement{}
+			ctx = WithCursorSessionHandover(ctx, &cursorTestHandover{settlement: settlement.hook})
 			up := &cursorOutboundUpstream{body: cursorNoticeBody(t, cursorNoticeWithEvent)}
 			repo := newCursorOutboundRepo(map[int64]*ent.QuotaKey{11: {ID: 11, CodeEncrypted: "ACTIVATION-CODE-ELEVEN"}})
 			svc, _ := newCursorOutboundTestService(t, up.handler(), repo, cursorTestDeviceIDs(repo))
@@ -184,11 +186,9 @@ func TestCursorParameterNoticeStreamAndNonStreamPreserveResponse(t *testing.T) {
 			c, _ := gin.CreateTestContext(w)
 			res, err := executeCursorForTest(t, svc, ctx, c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"),
 				cursorRLStopRequestBody(stream), "cursor-sonnet", stream, time.Now())
-			require.NoError(t, err)
-			require.NotNil(t, res)
-			require.Contains(t, w.Body.String(), cursorNoticeTemplateOnly, "原响应正文必须原样保留")
-			require.EqualValues(t, 11, res.Usage.InputTokens)
-			require.EqualValues(t, 7, res.Usage.OutputTokens)
+			require.ErrorIs(t, err, ErrCursorUpstreamParameterUnsupported)
+			require.Nil(t, res, "参数拒绝不得返回成功结果")
+			require.NotContains(t, w.Body.String(), string(cursorSSEDoneSentinel), "参数拒绝不得发成功终结")
 
 			require.Equal(t, 1, phaseCount(logs, "upstream_parameter_notice"))
 			require.Equal(t, "true", frameEvidencePhaseField(logs, "upstream_parameter_notice", "notice_is_entire_reply"))
@@ -202,6 +202,11 @@ func TestCursorParameterNoticeStreamAndNonStreamPreserveResponse(t *testing.T) {
 			require.NotEmpty(t, frameEvidencePhaseField(logs, "upstream_parameter_notice", "session_id"))
 			require.Equal(t, "upstream-sonnet", frameEvidencePhaseField(logs, "upstream_parameter_notice", "upstream_model"))
 			require.Equal(t, 1, phaseCount(logs, "response_parse_done"))
+			require.Equal(t, "parameter_unsupported", frameEvidencePhaseField(logs, "response_parse_done", "outcome"))
+			require.Eventually(t, func() bool {
+				calls, complete := settlement.snapshot()
+				return calls == 1 && complete == 0
+			}, time.Second, time.Millisecond, "parameter rejection must skip normal settlement")
 			require.Less(t, phaseIndex(logs, "upstream_parameter_notice"), phaseIndex(logs, "response_parse_done"))
 		})
 	}
@@ -219,8 +224,8 @@ func TestCursorParameterNoticeCrossFrameAccumulatedText(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	_, err := executeCursorForTest(t, svc, ctx, c, cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A"),
 		cursorRLStopRequestBody(false), "cursor-sonnet", false, time.Now())
-	require.NoError(t, err)
-	require.Contains(t, w.Body.String(), cursorNoticeTemplateOnly)
+	require.ErrorIs(t, err, ErrCursorUpstreamParameterUnsupported)
+	require.NotContains(t, w.Body.String(), string(cursorSSEDoneSentinel))
 	require.Equal(t, 1, phaseCount(logs, "upstream_parameter_notice"))
 	require.Equal(t, "true", frameEvidencePhaseField(logs, "upstream_parameter_notice", "notice_is_entire_reply"))
 	require.Equal(t, "1795667813078-ac3caa14", frameEvidencePhaseField(logs, "upstream_parameter_notice", "event_id"))
@@ -285,8 +290,8 @@ func TestCursorAgentRunWireEvidenceResumeActionAndParseFailure(t *testing.T) {
 	action := cursorAppendBytesField(nil, cursorFldActionResumeAction, nil)
 	run := cursorAppendBytesField(nil, cursorFldRunConversationState, state)
 	run = cursorAppendBytesField(run, cursorFldRunAction, action)
-	run = cursorAppendBytesField(run, cursorFldRunModelDetails,
-		cursorAppendStringField(nil, cursorFldModelDetailsID, "wire-model-id"))
+	run = cursorAppendBytesField(run, cursorFldRunRequestedModel,
+		cursorAppendStringField(nil, cursorFldRequestedModelID, "wire-model-id"))
 	run = cursorAppendBytesField(run, cursorFldRunMcpTools, nil)
 	payload := cursorEncodeEnvelope(cursorAppendBytesField(nil, cursorFldAgentRunRequest, run))
 
