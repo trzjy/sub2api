@@ -6464,18 +6464,63 @@ func cursorDecodeResponsesSemantic(req *apicompat.ResponsesRequest) ([]cursorSem
 				out = append(out, sem)
 				continue
 			default:
-				text, terr := cursorChatContentText(item.Content, cursorSkipLedger{})
-				if terr != nil {
-					// 内容畸形：保留角色与空文本，工具调用/结果能力不受影响。
-					text = ""
-				}
 				sem.role = cursorClassifySemanticRole(item.Role)
-				sem.raw = apicompat.ChatMessage{Role: item.Role, Content: mustCursorJSON(text)}
+				sem.raw = apicompat.ChatMessage{Role: item.Role,
+					Content: cursorResponsesMessageContent(item.Content, nil)}
 			}
 		}
 		out = append(out, sem)
 	}
 	return out, nil
+}
+
+// cursorResponsesMessageContent maps source content parts to the existing native
+// builder's content shape. Responses input_image.image_url is a string, whereas
+// Chat image_url is an object. Decoding the entire array as ChatContentPart loses
+// both the image and its sibling text. Roles and source indices stay with the
+// source decoder; text parts retain their original boundaries and whitespace.
+func cursorResponsesMessageContent(raw json.RawMessage, skipped cursorSkipLedger) json.RawMessage {
+	var parts []json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		// String content is already compatible. Other invalid top-level shapes
+		// remain visible to the existing content parser and its skip ledger.
+		return raw
+	}
+	converted := make([]apicompat.ChatContentPart, 0, len(parts))
+	for _, rawPart := range parts {
+		var kind struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(rawPart, &kind); err != nil {
+			skipped.note(cursorSkipBadContent)
+			continue
+		}
+		var part apicompat.ChatContentPart
+		if kind.Type == "input_image" {
+			var image apicompat.ResponsesContentPart
+			if err := json.Unmarshal(rawPart, &image); err != nil {
+				skipped.note(cursorSkipBadContent)
+				continue
+			}
+			part.Type = "image_url"
+			part.ImageURL = &apicompat.ChatImageURL{URL: image.ImageURL}
+		} else {
+			if err := json.Unmarshal(rawPart, &part); err != nil {
+				skipped.note(cursorSkipBadContent)
+				continue
+			}
+			if part.Type == "input_text" || part.Type == "output_text" || part.Type == "" {
+				part.Type = "text"
+			}
+		}
+		converted = append(converted, part)
+	}
+	encoded, err := json.Marshal(converted)
+	if err != nil {
+		skipped.note(cursorSkipBadContent)
+		return nil
+	}
+	return encoded
 }
 
 // cursorDecodeGeminiSemantic 从原始类型化 Gemini body 生成语义序列。
@@ -7243,7 +7288,7 @@ func cursorResponsesItemItem(item apicompat.ResponsesInputItem, skipped cursorSk
 		default:
 			return cursorContextItem{}, fmt.Errorf("%w: responses message role %q", ErrCursorResumeUnsupportedContent, item.Role)
 		}
-		text, err := cursorChatContentText(item.Content, skipped)
+		text, err := cursorChatContentText(cursorResponsesMessageContent(item.Content, skipped), skipped)
 		if err != nil {
 			return cursorContextItem{}, err
 		}
@@ -7454,7 +7499,7 @@ func cursorPlanFromResponsesCore(sem []cursorSemanticMessage, analysis cursorSem
 		// **Responses 是唯一漏网的一条**，本改动把四条路径对齐到同一语义。
 		if t := strings.ToLower(strings.TrimSpace(item.Type)); t == "" || t == "message" {
 			if role := strings.ToLower(strings.TrimSpace(item.Role)); role == "system" || role == "developer" {
-				text, err := cursorChatContentText(item.Content, plan.skippedItems)
+				text, err := cursorChatContentText(cursorResponsesMessageContent(item.Content, plan.skippedItems), plan.skippedItems)
 				if err != nil {
 					plan.noteSkippedItem("responses_system_undecodable")
 					continue
