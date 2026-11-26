@@ -282,7 +282,7 @@ func TestCursorAgentRunWireEvidenceResumeActionAndParseFailure(t *testing.T) {
 
 	// 构造真实 wire 形状的 resume AgentRun（action.f2 空 message）。
 	state := cursorAppendVarintField(nil, cursorFldStateMode, cursorConversationModeAgent)
-	action := cursorAppendBytesField(nil, cursorEvidenceActionResumeField, nil)
+	action := cursorAppendBytesField(nil, cursorFldActionResumeAction, nil)
 	run := cursorAppendBytesField(nil, cursorFldRunConversationState, state)
 	run = cursorAppendBytesField(run, cursorFldRunAction, action)
 	run = cursorAppendBytesField(run, cursorFldRunModelDetails,

@@ -10168,11 +10168,6 @@ func cursorBuildAgentRunUpstreamRequest(
 // ---------------------------------------------------------------------------
 
 const (
-	// ConversationStateStructure.f8 turns（只计数，不读内容；builder 侧新增的原生恢复锚点）。
-	cursorEvidenceStateTurnsField = 8
-	// ConversationAction.f2 resume_action（f1 user_message_action 已有常量）。
-	cursorEvidenceActionResumeField = 2
-
 	// 已观察的上游固定参数拒绝文案：允许末尾可选 " [8] (<13 位毫秒>-<8 位 hex>)"，
 	// 绝不截取或落盘周围的任意正文。
 	cursorParameterNoticeTemplate = "该模型参数暂不支持，请切换其他模型使用；若仍提示，则切换模型+新开对话"
@@ -10227,7 +10222,7 @@ func cursorAgentRunWireEvidenceFields(payload []byte) []zap.Field {
 				switch f.Number {
 				case cursorFldStateRootPromptBlobs:
 					roots++
-				case cursorEvidenceStateTurnsField:
+				case cursorFldStateTurns:
 					turns++
 				case cursorFldStateMode:
 					if f.Wire == cursorWireVarint {
@@ -10296,7 +10291,7 @@ func cursorAgentRunWireAction(fields []cursorPBField) string {
 	if _, ok := cursorFindField(inner, cursorFldActionUserMessage); ok {
 		return "user_message"
 	}
-	if _, ok := cursorFindField(inner, cursorEvidenceActionResumeField); ok {
+	if _, ok := cursorFindField(inner, cursorFldActionResumeAction); ok {
 		return "resume"
 	}
 	return "unknown"

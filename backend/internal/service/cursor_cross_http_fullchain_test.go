@@ -1495,3 +1495,73 @@ func TestCursorRebuildOrphanFullHistoryStartsFreshAgentRun(t *testing.T) {
 		return svc.sessions.indexCount() == 0
 	}, 5*time.Second, 5*time.Millisecond, "真实终态后 finalizer 必须清理全部索引关联")
 }
+
+// A rebuilt native session can delegate a new tool and consume its result on the
+// same connection. The notice after that result belongs to the second HTTP only.
+func TestCursorNativeRebuildContinuesNewToolAndNoticeEvidence(t *testing.T) {
+	old := []cursorFullChainCall{{CallID: "old_call", Name: "get_weather", City: "hangzhou"}}
+	next := []cursorFullChainCall{{CallID: "next_call", Name: "get_weather", City: "shanghai", ExecID: 202, IDField: []byte("exec-next")}}
+	up := newCursorFullChainUpstream(cursorFullChainScript{calls: next, afterText: cursorNoticeWithEvent, usage: [4]uint64{901, 27, 11, 3}})
+	svc := newCursorNativeResumeService(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, err := cursorNativeResumeReadFirstFrame(r.Body)
+		if err != nil {
+			http.Error(w, "invalid resume envelope", http.StatusBadRequest)
+			return
+		}
+		result, err := cursorNativeResumeValidate(payload)
+		if err != nil || !strings.Contains(result, "OLD-RESULT-NONCE") {
+			http.Error(w, "invalid complete history", http.StatusBadRequest)
+			return
+		}
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(cursorEncodeEnvelope(payload)), r.Body), r.Body}
+		up.handler().ServeHTTP(w, r)
+	}))
+	var req apicompat.ChatCompletionsRequest
+	require.NoError(t, json.Unmarshal([]byte(cursorFullChainResumeBody(old, map[string]string{"old_call": "OLD-RESULT-NONCE"})), &req))
+	plan, err := cursorPlanFromChat(&req, "cursor-sonnet")
+	require.NoError(t, err)
+	ctx, logs := cursorPhaseObserverCtx(t, "req-rebuilt-initial")
+	settlement := &cursorFullChainSettlement{}
+	ctx = WithCursorSessionHandover(ctx, &cursorTestHandover{settlement: settlement.hook})
+	w1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(w1)
+	_, err = svc.Execute(ctx, c1, cursorFullChainAccount(), &CursorExecutionRequest{
+		Chat: &req, SemanticMessages: cursorDecodeChatSemantic(&req), Model: "cursor-sonnet", Stream: true,
+		StartTime: time.Now(), Protocol: cursorProtocolChat, Identity: cursorFullChainIdentity, Plan: plan,
+	})
+	require.NoError(t, err)
+	require.Contains(t, w1.Body.String(), "next_call")
+	require.NotContains(t, w1.Body.String(), "old_call")
+	require.Equal(t, "resume", frameEvidencePhaseField(logs, "agent_run_wire_evidence", "action"))
+	require.Equal(t, "1", frameEvidencePhaseField(logs, "agent_run_wire_evidence", "state_turns"))
+	require.Zero(t, phaseCount(logs, "upstream_parameter_notice"))
+	var tail apicompat.ChatCompletionsRequest
+	require.NoError(t, json.Unmarshal([]byte(cursorFullChainResumeBody(next, map[string]string{"next_call": "NEW-RESULT-NONCE"})), &tail))
+	req.Messages = append(req.Messages, tail.Messages[1:]...)
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+	probe, err := CursorProbeResumeRequest(CursorResumeProtocolChat, body)
+	require.NoError(t, err)
+	ticket, err := svc.IdentifyResume(probe)
+	require.NoError(t, err)
+	require.NotNil(t, ticket)
+	current, currentLogs := cursorPhaseObserverCtx(t, "req-rebuilt-tool-result")
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	res, err := svc.ResumeCursorSession(current, c2, ticket, cursorFullChainAccount(), CursorResumeServeInput{Body: body, Stream: true, Identity: cursorFullChainIdentity})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Contains(t, w2.Body.String(), cursorNoticeTemplateOnly)
+	require.NotContains(t, w2.Body.String(), `"tool_calls"`)
+	require.Equal(t, 1, up.runCount())
+	writes := up.writebackPayloads()
+	require.Len(t, writes, 1)
+	require.Equal(t, []string{"NEW-RESULT-NONCE"}, decodeWritebackExec(t, writes[0]).texts)
+	require.Equal(t, 1, phaseCount(currentLogs, "tool_result_wire_evidence"))
+	require.Equal(t, "req-rebuilt-tool-result", frameEvidencePhaseField(currentLogs, "upstream_parameter_notice", "request_id"))
+	require.Equal(t, 1, phaseCount(currentLogs, "upstream_parameter_notice"))
+	require.Eventually(t, func() bool { n, complete := settlement.snapshot(); return n == 1 && complete == 1 }, time.Second, time.Millisecond)
+}
