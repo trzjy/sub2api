@@ -28,7 +28,7 @@
         data-test="cn-provider-quota-aliyun-detail"
       >
         <span v-if="aliyunSnapshot.plan_name" class="font-medium">
-          {{ aliyunSnapshot.plan_name }}
+          {{ aliyunPlanLabel(aliyunSnapshot.plan_name) }}
         </span>
         <!-- 官方给的月额度总量（quota-config 的 monthly / 席位版的 SeatCredits）。 -->
         <span v-if="aliyunSnapshot.monthly_credit > 0">
@@ -257,6 +257,23 @@ const snapshotData = computed<CNProviderQuotaProbeResult | null>(() => {
 type AliyunTokenPlanUsageSnapshot = AliyunTokenPlanUsage
 
 const ALIYUN_SNAPSHOT_KEY = 'aliyun_token_plan_usage_snapshot'
+
+// 官方档位名（quota-config 的 key，standard / lite / essential / pro）→ 展示名。
+//
+// 只在展示层做美化：后端存的是**官方原值**（standard），这里转成「Standard」给人看。
+// 未知档位原样透传（官方将来加新档位时前端不会显示成空白）。
+const ALIYUN_PLAN_LABELS: Record<string, string> = {
+  standard: 'Standard',
+  lite: 'Lite',
+  essential: 'Essential',
+  pro: 'Pro',
+  max: 'Max'
+}
+
+const aliyunPlanLabel = (planName: string): string => {
+  if (!planName) return ''
+  return ALIYUN_PLAN_LABELS[planName.toLowerCase()] ?? planName
+}
 
 // 探测结果里带回的阿里快照（点「查询」当场生效，不必等列表刷新拿新 extra）。
 const probedAliyun = ref<AliyunTokenPlanUsageSnapshot | null>(null)

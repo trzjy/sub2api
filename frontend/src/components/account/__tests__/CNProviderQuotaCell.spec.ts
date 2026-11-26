@@ -143,6 +143,37 @@ describe('CNProviderQuotaCell', () => {
     expect(wrapper.get('[data-test="cn-provider-quota-aliyun-pool"]').text()).toContain('3')
   })
 
+  // 官方档位名是**小写**的 quota-config key（standard / lite / essential / pro），
+  // 后端存原值，前端只做展示层美化 ⇒ 页面要显示「Standard」而不是「standard」。
+  // 未知档位原样透传（官方将来加新档位，前端不能显示成空白）。
+  it('pretty prints the official lowercase plan name', async () => {
+    queryQuota.mockResolvedValue({
+      success: true,
+      provider: 'aliyun',
+      aliyun_usage: {
+        plan_name: 'standard',
+        monthly_credit: 80000,
+        used_credit: 1234.5,
+        remaining_credit: 78765.5,
+        used_percent: 1.5431,
+        five_hour_credit: 3000,
+        reset_at: '2026-12-01T00:00:00+08:00',
+        exhausted: false,
+        pool_account_count: 1,
+        data_source: 'official_quota_config',
+        fetched_at: new Date().toISOString()
+      }
+    })
+    const wrapper = mount(CNProviderQuotaCell, {
+      props: { account: { ...aliyunAccount, id: 1015 } as Account }
+    })
+    await flushPromises()
+
+    const detail = wrapper.get('[data-test="cn-provider-quota-aliyun-detail"]')
+    expect(detail.text()).toContain('Standard')
+    expect(detail.text()).not.toContain('standard')
+  })
+
   // 官方只给百分比、没给绝对量时（个人版读不到绝对已用），不能显示成 0%——
   // 要么显示官方百分比，要么什么都不显示，不能假装"用得很少"。
   //
