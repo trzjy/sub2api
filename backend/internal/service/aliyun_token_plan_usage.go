@@ -2,17 +2,11 @@ package service
 
 import (
 	"context"
-	"encoding/base64"
-	"crypto/hmac"
-	"crypto/md5"
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -118,94 +112,6 @@ func aliyunTokenPlanRegionForHost(host string) string {
 	default:
 		return "cn-beijing"
 	}
-}
-
-// aliyunRPCSigner 是 ModelStudio「老 RPC」签名器（HMAC-SHA1）。
-//
-// 用于 /modelstudio/billing/* 这类仍用老签名的接口。
-// 订阅与用量 OpenAPI 用的是 ACS3-HMAC-SHA256，见 aliyun_token_plan_official.go。
-type aliyunRPCSigner struct {
-	AccessKeyID     string
-	AccessKeySecret string
-	Region          string
-	Version         string
-}
-
-// aliyunSignedRequest 是老 RPC 签名的输入。
-type aliyunSignedRequest struct {
-	Method string
-	Path   string
-	Query  url.Values
-}
-
-// aliyunCanonicalResource 生成老 RPC 签名的 resource 段。
-//
-// 口径：query 按 key 字母序，值用**解码后的原始值**。
-func aliyunCanonicalResource(path string, query url.Values) string {
-	keys := make([]string, 0, len(query))
-	for k := range query {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var sb strings.Builder
-	sb.WriteString(path)
-	for _, k := range keys {
-		vs := query[k]
-		decoded := make([]string, 0, len(vs))
-		for _, v := range vs {
-			if unescaped, err := url.QueryUnescape(v); err == nil {
-				decoded = append(decoded, unescaped)
-				continue
-			}
-			decoded = append(decoded, v)
-		}
-		sort.Strings(decoded)
-		for _, v := range decoded {
-			sb.WriteString("\n")
-			sb.WriteString(k)
-			sb.WriteString(":")
-			sb.WriteString(v)
-		}
-	}
-	return sb.String()
-}
-
-// aliyunSign 计算老 RPC 签名，返回要写到请求上的头。
-func (s *aliyunRPCSigner) aliyunSign(req aliyunSignedRequest) (map[string]string, error) {
-	if s == nil || s.AccessKeyID == "" || s.AccessKeySecret == "" {
-		return nil, fmt.Errorf("aliyun signer is not configured")
-	}
-	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	canonicalResource := aliyunCanonicalResource(req.Path, req.Query)
-	stringToSign := strings.Join([]string{
-		req.Method,
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		"",
-		canonicalResource,
-	}, "\n")
-	mac := hmac.New(sha1.New, []byte(s.AccessKeySecret+"&"))
-	mac.Write([]byte(stringToSign))
-	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-	return map[string]string{
-		"Accept":         "application/json",
-		"Content-MD5":    "",
-		"Content-Type":   "application/x-www-form-urlencoded",
-		"Date":           now,
-		"x-acs-signature": "method:" + req.Method + ",signature:" + signature,
-		"x-acs-version":  s.Version,
-	}, nil
-}
-
-// computeMD5 计算请求体 MD5（老 RPC 签名需要）。
-func computeMD5(body []byte) []byte {
-	sum := md5.Sum(body)
-	return sum[:]
 }
 
 // aliyunQuotaSnapshot 是阿里 Token Plan 用量快照（落 account.Extra 与前端展示共用）。
@@ -401,7 +307,7 @@ func aliyunIsInsufficientQuota(body []byte) bool {
 func (s *CNProviderQuotaService) aliyunFetchSubscriptionFee(
 	ctx context.Context,
 	account *Account,
-	signer *aliyunRPCSigner,
+	signer *aliyunACS3Signer,
 	host string,
 	billMonth string,
 ) (float64, bool, error) {
@@ -441,11 +347,20 @@ func (s *CNProviderQuotaService) aliyunFetchSubscriptionFee(
 	return fee, isSolo, nil
 }
 
-// aliyunCallModelStudio 调一次 ModelStudio 老 RPC 接口（/modelstudio/models、/billing/*）。
+// aliyunCallModelStudio 调一次 ModelStudio OpenAPI（/modelstudio/billing/* 等）。
+//
+// 签名统一用 ACS3-HMAC-SHA256（见 aliyun_token_plan_official.go）：
+// 2026-11-26 生产实测 —— 老 RPC 签名（HMAC-SHA1 + Date 头）**整条路都不通**：
+//   - Date 头要 RFC1123（ISO8601 ⇒ 服务端报 InvalidDate）
+//   - 即便用 RFC1123，服务端回显的 stringToSign 是 RPC 风格
+//     （Accept / Content-MD5 / Content-Type / Date 各占一行），
+//     与老 RPC 的 ROA 风格不同，怎么试都对不上
+//   - 同一个接口换 ACS3（x-acs-date = ISO8601）⇒ HTTP 200 直接拿到账单数据
+// ⇒ 全站只保留 ACS3 一套签名，不再有"两套签名各写一份"的认知分裂。
 func (s *CNProviderQuotaService) aliyunCallModelStudio(
 	ctx context.Context,
 	account *Account,
-	signer *aliyunRPCSigner,
+	signer *aliyunACS3Signer,
 	host string,
 	path string,
 	query url.Values,
@@ -467,31 +382,33 @@ func (s *CNProviderQuotaService) aliyunCallModelStudio(
 	if err != nil {
 		return 0, nil, fmt.Errorf("aliyun probe url rejected: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, validatedURL, nil)
-	if err != nil {
-		return 0, nil, fmt.Errorf("build aliyun request: %w", err)
-	}
-	headers, err := signer.aliyunSign(aliyunSignedRequest{
-		Method: http.MethodGet,
-		Path:   path,
-		Query:  query,
-	})
-	if err != nil {
-		return 0, nil, err
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	account.ApplyHeaderOverrides(req.Header)
-
 	proxyURL := s.resolveProxyURL(ctx, account)
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
-	if err != nil {
-		return 0, nil, fmt.Errorf("aliyun request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := readAllLimited(resp.Body, aliyunQuotaMaxBodyBytes)
-	return resp.StatusCode, body, nil
+	// 网络层瞬时故障做有界退避重试（业务错误不重试）。
+	return aliyunRetryOnTransient(ctx, 3, func() (int, []byte, error) {
+		req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, validatedURL, nil)
+		if rerr != nil {
+			return 0, nil, fmt.Errorf("build aliyun request: %w", rerr)
+		}
+		// billing 这类接口按路径寻址，不带 x-acs-action（带了会 404 InvalidAction.NotFound）。
+		headers, herr := signer.aliyunACS3Sign(http.MethodGet, host, path, query, map[string]string{
+			"x-acs-version": aliyunModelStudioVersion,
+		}, nil, time.Now())
+		if herr != nil {
+			return 0, nil, herr
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		account.ApplyHeaderOverrides(req.Header)
+
+		resp, derr := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+		if derr != nil {
+			return 0, nil, fmt.Errorf("aliyun request failed: %w", derr)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := readAllLimited(resp.Body, aliyunQuotaMaxBodyBytes)
+		return resp.StatusCode, body, nil
+	})
 }
 
 // readAllLimited 读响应体（限长）。
@@ -565,12 +482,6 @@ func (s *CNProviderQuotaService) aliyunProbeTokenPlan(ctx context.Context, accou
 		return result, nil
 	}
 	acs3 := &aliyunACS3Signer{AccessKeyID: ak, AccessKeySecret: sk}
-	rpc := &aliyunRPCSigner{
-		AccessKeyID:     ak,
-		AccessKeySecret: sk,
-		Region:          aliyunTokenPlanRegionForHost(host),
-		Version:         aliyunModelStudioVersion,
-	}
 
 	// 额度池归并：同一份订阅被拆成多个账号时，官方把它们算作**同一个池子**
 	// （同一订阅的多个 sk-sp- Key 扣的是同一份额度）。
@@ -606,7 +517,7 @@ func (s *CNProviderQuotaService) aliyunProbeTokenPlan(ctx context.Context, accou
 	if tierErr != nil {
 		slog.Warn("aliyun_quota_config_failed", "account_id", account.ID, "error", tierErr)
 	}
-	planName, monthlyCredit, fiveHourCredit := s.aliyunResolvePersonalTier(ctx, account, rpc, host, tierTable, tierErr)
+	planName, monthlyCredit, fiveHourCredit := s.aliyunResolvePersonalTier(ctx, account, acs3, host, tierTable, tierErr)
 	if planName == "" {
 		result.Error = "aliyun subscription tier is unknown (official quota-config and billing did not resolve a plan)"
 		result.ErrorCode = aliyunErrTierUnknown
@@ -676,7 +587,7 @@ func (s *CNProviderQuotaService) aliyunProbeTokenPlan(ctx context.Context, accou
 func (s *CNProviderQuotaService) aliyunResolvePersonalTier(
 	ctx context.Context,
 	account *Account,
-	rpc *aliyunRPCSigner,
+	signer *aliyunACS3Signer,
 	host string,
 	tierTable aliyunOfficialTierQuotaTable,
 	tierErr error,
@@ -685,7 +596,7 @@ func (s *CNProviderQuotaService) aliyunResolvePersonalTier(
 		return "", 0, 0
 	}
 	billMonth := time.Now().In(aliyunTokenPlanLoc()).Format("2006-01")
-	fee, _, err := s.aliyunFetchSubscriptionFee(ctx, account, rpc, host, billMonth)
+	fee, _, err := s.aliyunFetchSubscriptionFee(ctx, account, signer, host, billMonth)
 	if err != nil {
 		slog.Warn("aliyun_billing_read_failed", "account_id", account.ID, "error", err)
 		return "", 0, 0
@@ -780,9 +691,4 @@ func (s *CNProviderQuotaService) aliyunFinishProbe(
 		FetchedAt:   snapshot.FetchedAt,
 	}
 	return result, nil
-}
-
-// aliyunHexDigest 取 body 的 MD5 十六进制（老 RPC 签名备用）。
-func aliyunHexDigest(body []byte) string {
-	return hex.EncodeToString(computeMD5(body))
 }

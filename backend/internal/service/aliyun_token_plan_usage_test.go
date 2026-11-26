@@ -1,8 +1,11 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,46 +17,40 @@ import (
 // 阿里 Token Plan 用量（读官方数据）的单测。
 //
 // 覆盖三块：
-//  1. 签名：老 RPC（HMAC-SHA1）与 ACS3（HMAC-SHA256）两套都要正确。
+//  1. 签名：ACS3（HMAC-SHA256）。**全站只有这一套签名**（老 RPC 签名已删）。
 //  2. 官方响应解析：团队席位额度、个人版档位配额表、个人版用量窗口。
 //  3. 口径辅助：base_url 识别、额度池归组键、订阅月区间、错误码、快照序列化。
 
 // ---------------------------------------------------------------- 签名
 
-func TestAliyunRPCSignMatchesOfficialCLI(t *testing.T) {
-	signer := &aliyunRPCSigner{
-		AccessKeyID:     "test-access-key-id",
-		AccessKeySecret: "test-access-key-secret",
-		Region:          "cn-beijing",
-		Version:         "2026-02-10",
-	}
-	headers, err := signer.aliyunSign(aliyunSignedRequest{
-		Method: "GET",
-		Path:   "/modelstudio/billing/overview",
-		Query:  url.Values{"billMonth": {"2026-11"}},
-	})
+func TestAliyunACS3SignUsesISO8601Date(t *testing.T) {
+	// 2026-11-26 生产事故回归：老 RPC 签名把 Date 写成 ISO8601，
+	// 官方 billing 接口报 "Specified parameter Date is not valid"（InvalidDate）。
+	// 切到 ACS3 后 x-acs-date 必须是 ISO8601（RFC1123 会报 InvalidTimeStamp.Format）。
+	// 这条锁住「x-acs-date 的格式」这个最容易再犯的点。
+	signer := &aliyunACS3Signer{AccessKeyID: "ak", AccessKeySecret: "sk"}
+	headers, err := signer.aliyunACS3Sign(
+		"GET", "modelstudio.cn-beijing.aliyuncs.com", "/modelstudio/billing/overview",
+		url.Values{"billMonth": {"2026-11"}},
+		map[string]string{"x-acs-version": aliyunModelStudioVersion},
+		nil, time.Now(),
+	)
 	require.NoError(t, err)
-	require.Equal(t, "application/json", headers["Accept"])
-	require.NotEmpty(t, headers["x-acs-signature"])
-	require.Contains(t, headers["x-acs-signature"], "method:GET,signature:")
-	require.Equal(t, "2026-02-10", headers["x-acs-version"])
-	// Date 必须是 ISO8601 Z 结尾。
-	require.Regexp(t, `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`, headers["Date"])
+	require.Regexp(t, `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`, headers["x-acs-date"])
+	require.NotContains(t, headers, "Date", "ACS3 用 x-acs-date，不该再发老式 Date 头")
 }
 
-func TestAliyunRPCSignQuerySortedAndDecoded(t *testing.T) {
-	// query 段必须按 key 字母序，值用解码后的原始值。
-	resource := aliyunCanonicalResource("/x", url.Values{
-		"b": {"2"},
-		"a": {"1"},
-	})
-	require.Equal(t, "/x\na:1\nb:2", resource)
-
-	// 编码过的值要还原成原始值再拼。
-	resource2 := aliyunCanonicalResource("/x", url.Values{
+func TestAliyunACS3SignCanonicalQueryIsSortedAndEncoded(t *testing.T) {
+	// 规范化查询串：key 字母序、值 RFC3986 编码（空格 %20，'[' → %5B）。
+	q := url.Values{
+		"b":        {"2"},
+		"a":        {"1"},
 		"groupBy": {`[{"code":"ARTICLE_CODE"}]`},
-	})
-	require.Contains(t, resource2, `groupBy:[{"code":"ARTICLE_CODE"}]`)
+	}
+	canonical := aliyunACS3CanonicalQuery(q)
+	require.Equal(t,
+		`a=1&b=2&groupBy=%5B%7B%22code%22%3A%22ARTICLE_CODE%22%7D%5D`,
+		canonical)
 }
 
 func TestAliyunACS3SignProducesRequiredHeaders(t *testing.T) {
@@ -416,4 +413,96 @@ func TestAliyunSnapshotHasNoLocalComputationFields(t *testing.T) {
 		require.NotContains(t, strings.ToLower(string(raw)), forbidden,
 			"快照里不该再有实算字段：%s", forbidden)
 	}
+}
+
+// ------------------------------------------------- 2026-11-26 生产回归锁
+
+func TestAliyunTransientNetErrorOnlyMatchesTransportFailures(t *testing.T) {
+	// 网络层瞬时故障 ⇒ 该重试（阿里网关对高频请求会 RST）。
+	for _, msg := range []string{
+		"aliyun console request failed: read tcp 172.19.0.5:53746->182.92.29.13:443: read: connection reset by peer",
+		"aliyun v3 request failed: dial tcp: i/o timeout",
+		"aliyun request failed: unexpected EOF",
+		"aliyun v3 request failed: lookup modelstudio.cn-beijing.aliyuncs.com: no such host",
+	} {
+		require.True(t, aliyunTransientNetError(errors.New(msg)), "应判为可重试：%s", msg)
+	}
+	// 业务错误 ⇒ **不**重试（重试也没用，只会把真正的答案冲淡）。
+	for _, msg := range []string{
+		"aliyun console http 400: BailianGateway.Team.NotAuthorised",
+		"aliyun billing http 400: InvalidDate",
+		"aliyun subscription tier is unknown",
+	} {
+		require.False(t, aliyunTransientNetError(errors.New(msg)), "不应判为可重试：%s", msg)
+	}
+	require.False(t, aliyunTransientNetError(nil))
+}
+
+func TestAliyunRetryOnTransientRetriesThenSucceeds(t *testing.T) {
+	// 前两次是网络层瞬时故障，第三次成功 ⇒ 必须重试到成功。
+	calls := 0
+	status, body, err := aliyunRetryOnTransient(context.Background(), 3, func() (int, []byte, error) {
+		calls++
+		if calls < 3 {
+			return 0, nil, errors.New("connection reset by peer")
+		}
+		return 200, []byte("ok"), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 200, status)
+	require.Equal(t, "ok", string(body))
+	require.Equal(t, 3, calls)
+}
+
+func TestAliyunRetryOnTransientDoesNotRetryBusinessErrors(t *testing.T) {
+	// 业务错误一次都不该重试。
+	calls := 0
+	_, _, err := aliyunRetryOnTransient(context.Background(), 3, func() (int, []byte, error) {
+		calls++
+		return 0, nil, errors.New("BailianGateway.Team.NotAuthorised")
+	})
+	require.Error(t, err)
+	require.Equal(t, 1, calls, "业务错误不该重试")
+}
+
+func TestAliyunRetryOnTransientGivesUpAfterAttempts(t *testing.T) {
+	calls := 0
+	_, _, err := aliyunRetryOnTransient(context.Background(), 2, func() (int, []byte, error) {
+		calls++
+		return 0, nil, errors.New("connection reset by peer")
+	})
+	require.Error(t, err)
+	require.Equal(t, 2, calls)
+}
+
+func TestAliyunBillingResponseShapeIsOfficial(t *testing.T) {
+	// 官方 billing/overview 的真实响应形状（2026-11-26 生产实测）：
+	// {"data":{"pretaxAmount":"139.00","groups":[{"name":"sfm_tokenplansolo_public_cn",
+	//   "amount":"139.00","articleCodes":["sfm_tokenplansolo_public_cn"]}],...}}
+	// 这条锁住解析口径：金额取 groups[].amount，solo 商品码取 articleCodes[]。
+	body := []byte(`{"data":{"pretaxAmount":"139.00","groups":[{"name":"sfm_tokenplansolo_public_cn",` +
+		`"amount":"139.00","articleCodes":["sfm_tokenplansolo_public_cn"],"key":"sfm_tokenplansolo_public_cn",` +
+		`"percentage":"1.000000"}],"totalAmount":"139.00","currency":"CNY","taxAmount":"0.00"}}`)
+	require.Equal(t, "139.00", gjson.GetBytes(body, "data.pretaxAmount").String())
+
+	fee := 0.0
+	isSolo := false
+	for _, group := range gjson.GetBytes(body, "data.groups").Array() {
+		if amount := group.Get("amount"); amount.Exists() {
+			parsed, perr := strconv.ParseFloat(amount.String(), 64)
+			require.NoError(t, perr)
+			fee += parsed
+		}
+		for _, code := range group.Get("articleCodes").Array() {
+			if strings.EqualFold(code.String(), aliyunTokenPlanSoloProductCode) {
+				isSolo = true
+			}
+		}
+	}
+	require.Equal(t, 139.00, fee)
+	require.True(t, isSolo, "个人版商品码必须被认出来")
+	// 139 元 ⇒ 官方公布的 Standard 档。
+	name, found := aliyunTierNameByOfficialFee(fee)
+	require.True(t, found)
+	require.Equal(t, "standard", name)
 }

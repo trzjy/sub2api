@@ -261,30 +261,33 @@ func (s *CNProviderQuotaService) aliyunCallOpenAPIv3(
 	if err != nil {
 		return 0, nil, fmt.Errorf("aliyun probe url rejected: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, validatedURL, nil)
-	if err != nil {
-		return 0, nil, fmt.Errorf("build aliyun v3 request: %w", err)
-	}
-	headers, err := signer.aliyunACS3Sign(method, host, path, query, map[string]string{
-		"x-acs-action":  action,
-		"x-acs-version": aliyunModelStudioVersion,
-	}, nil, time.Now())
-	if err != nil {
-		return 0, nil, err
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	account.ApplyHeaderOverrides(req.Header)
-
 	proxyURL := s.resolveProxyURL(ctx, account)
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
-	if err != nil {
-		return 0, nil, fmt.Errorf("aliyun v3 request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, aliyunQuotaMaxBodyBytes))
-	return resp.StatusCode, body, nil
+	// 网络层瞬时故障做有界退避重试（业务错误不重试）。
+	return aliyunRetryOnTransient(ctx, 3, func() (int, []byte, error) {
+		req, rerr := http.NewRequestWithContext(ctx, method, validatedURL, nil)
+		if rerr != nil {
+			return 0, nil, fmt.Errorf("build aliyun v3 request: %w", rerr)
+		}
+		headers, herr := signer.aliyunACS3Sign(method, host, path, query, map[string]string{
+			"x-acs-action":  action,
+			"x-acs-version": aliyunModelStudioVersion,
+		}, nil, time.Now())
+		if herr != nil {
+			return 0, nil, herr
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		account.ApplyHeaderOverrides(req.Header)
+
+		resp, derr := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+		if derr != nil {
+			return 0, nil, fmt.Errorf("aliyun v3 request failed: %w", derr)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, aliyunQuotaMaxBodyBytes))
+		return resp.StatusCode, body, nil
+	})
 }
 
 // aliyunOfficialSeatQuota 是官方团队席位版额度（零计算，直接来自官方响应）。
@@ -516,28 +519,37 @@ func (s *CNProviderQuotaService) aliyunConsoleCall(
 	if err != nil {
 		return nil, fmt.Errorf("aliyun console url rejected: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, validatedURL,
-		strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("build aliyun console request: %w", err)
-	}
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	account.ApplyHeaderOverrides(req.Header)
-
 	proxyURL := s.resolveProxyURL(ctx, account)
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	// 网络层瞬时故障（connection reset / timeout）做有界退避重试：
+	// 阿里网关对短时间高频请求会 RST，一次抖动不该让整次探测失败。
+	// 业务错误（阿里返回的 4xx/5xx）不在重试范围 —— 那是答案不是故障。
+	status, body, err := aliyunRetryOnTransient(ctx, 3, func() (int, []byte, error) {
+		retryReq, rerr := http.NewRequestWithContext(ctx, http.MethodPost, validatedURL,
+			strings.NewReader(form.Encode()))
+		if rerr != nil {
+			return 0, nil, fmt.Errorf("build aliyun console request: %w", rerr)
+		}
+		retryReq.Header.Set("Accept", "*/*")
+		retryReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if token != "" {
+			retryReq.Header.Set("Authorization", "Bearer "+token)
+		}
+		account.ApplyHeaderOverrides(retryReq.Header)
+
+		resp, derr := s.httpUpstream.Do(retryReq, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+		if derr != nil {
+			return 0, nil, fmt.Errorf("aliyun console request failed: %w", derr)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, aliyunQuotaMaxBodyBytes))
+		return resp.StatusCode, raw, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("aliyun console request failed: %w", err)
+		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, aliyunQuotaMaxBodyBytes))
-	if resp.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		return body, fmt.Errorf("aliyun console http %d: %s",
-			resp.StatusCode, truncate(strings.TrimSpace(string(body)), 240))
+			status, truncate(strings.TrimSpace(string(body)), 240))
 	}
 	return body, nil
 }
@@ -552,6 +564,85 @@ func aliyunConsoleErrorCode(body []byte) string {
 		return code
 	}
 	return strings.TrimSpace(gjson.GetBytes(body, "data.errorMsg").String())
+}
+
+// aliyunTransientNetError 判断错误是不是**网络层瞬时故障**（值得重试）。
+//
+// 2026-11-26 生产实测：连续探测三个账号时，第二个账号的 console 网关调用报
+// `read tcp ...: connection reset by peer`（阿里网关对短时间高频请求会 RST），
+// 同一对凭据在别的账号上一次就通 ⇒ 这是**瞬时网络抖动**，不是权限或签名问题。
+//
+// 口径：只认「连接被重置 / 超时 / 连接被关闭 / EOF / 临时 DNS 失败」这类
+// 传输层错误。**不重试**业务错误（4xx/5xx 带阿里错误码）—— 那些重试也没用，
+// 只会浪费时间并把真正的错误冲淡。
+func aliyunTransientNetError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection reset by peer",
+		"connection refused",
+		"broken pipe",
+		"unexpected eof",
+		"eof",
+		"timeout",
+		"deadline exceeded",
+		"i/o timeout",
+		"no such host",
+		"temporary failure in name resolution",
+		"server closed idle connection",
+		"tls handshake timeout",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// aliyunRetryOnTransient 对**网络层瞬时故障**做有界退避重试。
+//
+// 为什么需要：额度探测是「读官方数据」的关键一环，一次 RST 就让整次探测失败、
+// 页面显示不出数字，而根因只是网络抖动。重试 2 次（1s / 3s 退避）足以覆盖
+// 阿里网关的瞬时 RST，又不会把探测拖成长任务。
+//
+// 业务错误（阿里返回的 4xx/5xx）**不重试** —— 那些是「答案」，不是「故障」。
+func aliyunRetryOnTransient(
+	ctx context.Context,
+	attempts int,
+	fn func() (int, []byte, error),
+) (int, []byte, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	backoffs := []time.Duration{0, time.Second, 3 * time.Second}
+	status := 0
+	var body []byte
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			idx := i
+			if idx >= len(backoffs) {
+				idx = len(backoffs) - 1
+			}
+			select {
+			case <-ctx.Done():
+				return 0, nil, ctx.Err()
+			case <-time.After(backoffs[idx]):
+			}
+		}
+		st, raw, err := fn()
+		if err == nil {
+			return st, raw, nil
+		}
+		lastErr = err
+		if !aliyunTransientNetError(err) {
+			return 0, nil, err
+		}
+		status, body = st, raw
+	}
+	return status, body, lastErr
 }
 
 // aliyunOfficialPersonalUsage 是官方个人版用量窗口（官方直接给百分比与重置时间）。
