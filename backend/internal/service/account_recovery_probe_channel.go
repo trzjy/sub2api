@@ -302,6 +302,24 @@ func (a accountRecoveryProbeRepoAdapter) RescheduleRecoveryProbeComponent(ctx co
 	return false, ErrRecoveryLockUnavailable
 }
 
+func (a accountRecoveryProbeRepoAdapter) ListModelRateLimitProbeDue(ctx context.Context, now time.Time, limit int) ([]ModelProbeTask, error) {
+	if repo, ok := a.AccountRepository.(interface {
+		ListModelRateLimitProbeDue(ctx context.Context, now time.Time, limit int) ([]ModelProbeTask, error)
+	}); ok {
+		return repo.ListModelRateLimitProbeDue(ctx, now, limit)
+	}
+	return nil, ErrRecoveryLockUnavailable
+}
+
+func (a accountRecoveryProbeRepoAdapter) PatchModelRateLimitEntry(ctx context.Context, accountID int64, scope string, expectedGen int64, patch ModelProbePatch) (bool, error) {
+	if repo, ok := a.AccountRepository.(interface {
+		PatchModelRateLimitEntry(ctx context.Context, accountID int64, scope string, expectedGen int64, patch ModelProbePatch) (bool, error)
+	}); ok {
+		return repo.PatchModelRateLimitEntry(ctx, accountID, scope, expectedGen, patch)
+	}
+	return false, ErrRecoveryLockUnavailable
+}
+
 // acquireAccountProbeLock 获取账号级探测锁（三条探测路径共用）。
 //
 // 未注入恢复锁时（单实例部署或未接线）退回“无锁执行”，保持既有 marker 路径
