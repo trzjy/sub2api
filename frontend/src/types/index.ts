@@ -1891,7 +1891,7 @@ export interface GrokMediaEligibilityState {
  * 取值来自后端模板目录（/admin/identity-disguise/profiles）——
  * 前端不硬编码模板正文，正文是后端的唯一事实源。
  */
-export type IdentityDisguiseProfile = 'none' | 'kimi' | 'deepseek'
+export type IdentityDisguiseProfile = 'none' | 'kimi' | 'deepseek' | 'glm'
 
 export interface IdentityDisguiseProfileOption {
   id: IdentityDisguiseProfile

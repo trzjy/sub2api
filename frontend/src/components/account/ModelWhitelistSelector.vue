@@ -160,6 +160,7 @@ import ModelIcon from '@/components/common/ModelIcon.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { allModels, getModelsByPlatform } from '@/composables/useModelWhitelist'
 import { filterUpstreamModelsByPlatform } from '@/constants/platforms'
+import { isAliyunTokenPlanBaseURL } from './credentialsBuilder'
 import { extractApiErrorMessage } from '@/utils/apiError'
 
 const { t } = useI18n()
@@ -463,11 +464,17 @@ const syncUpstreamModels = async () => {
     // 按账号平台过滤聚合上游混回的跨平台无关模型：只自动加入平台相关模型；
     // 全量模型已登记进下拉，需要跨平台模型时仍可手动搜索添加。
     // 创建流程（preview）的平台以 syncCredentials.platform 为准，编辑流程用账号平台。
+    const syncBaseURL = (props.baseUrl ?? props.syncCredentials?.base_url ?? '').trim()
+    // 阿里 Token Plan 是聚合订阅（一份套餐同时给 qwen/glm/deepseek/kimi 等全家族模型），
+    // 账号挂哪个分组只是路由/伪装身份，按分组词根过滤会把大部分模型丢掉。此类账号跳过
+    // 平台过滤，全量加入白名单（与火山订阅号的聚合语义一致）。
+    const isAggregatedSubscription = isAliyunTokenPlanBaseURL(syncBaseURL)
     const filterPlatforms = props.syncCredentials?.platform
       ? [props.syncCredentials.platform]
       : normalizedPlatforms.value
-    const { kept: platformModels, skipped: skippedModels, filterApplied } =
-      filterUpstreamModelsByPlatform(upstreamModels, filterPlatforms)
+    const { kept: platformModels, skipped: skippedModels, filterApplied } = isAggregatedSubscription
+      ? { kept: upstreamModels, skipped: [], filterApplied: false }
+      : filterUpstreamModelsByPlatform(upstreamModels, filterPlatforms)
     const newModels = [...props.modelValue]
     let addedCount = 0
     for (const model of platformModels) {
