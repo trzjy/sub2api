@@ -46,6 +46,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
@@ -521,10 +522,13 @@ func (s *CursorExecutionService) Execute(
 	sem := req.SemanticMessages
 	skipped := cursorSkipLedger{}
 	payload, _, err := cursorBuildAgentRunFromSemantic(sem, upstreamModel, req.Chat.Tools, req.Chat.ToolChoice, skipped)
+	skipped.log(ctx, "chat_messages_dropped", upstreamModel)
 	if err != nil {
+		fields := cursorSemanticShapeFields(sem)
+		fields = append(fields, zap.Int64("account_id", account.ID))
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "request_conversion_failed", upstreamModel, fields...)
 		return nil, err
 	}
-	skipped.log(ctx, "chat_messages_dropped", upstreamModel)
 	if _, err := authProvider.CursorUpstreamAuth(ctx); err != nil {
 		return nil, err
 	}
@@ -1787,6 +1791,18 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 			// protocol_frame_class / protocol_frame_index，直接把"哪一类帧、第几帧"写进
 			// 终态日志；非帧级错误不追加任何字段。
 			parseDoneFields = append(parseDoneFields, cursorFrameErrFields(rerr)...)
+			// Retain structured EndStream evidence before error mapping and failover,
+			// including business errors and errors after a resumed tool round.
+			if code, ok := cursorUpstreamStreamErrorCode(rerr); ok {
+				message, _ := cursorUpstreamStreamErrorMessage(rerr)
+				message = logredact.RedactText(message,
+					"api_key", "apikey", "authorization", "token", "secret", "cookie", "credential")
+				parseDoneFields = append(parseDoneFields,
+					zap.String("upstream_code", truncateOpenAIWSLogValue(code, 240)),
+					zap.String("upstream_message", truncateOpenAIWSLogValue(message, 240)),
+					zap.Int64("account_id", session.spec.accountID),
+					zap.String("upstream_model", session.spec.upstreamModel))
+			}
 			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_parse_done", opts.model,
 				parseDoneFields...)
 			// cursorSessionStreamResult 内部会取 session.mu 读取最终 usage，不得在持锁时调用
@@ -2013,7 +2029,7 @@ func cursorExecuteResponses(
 	if err != nil {
 		return nil, fmt.Errorf("cursor: convert responses to chat completions: %w", err)
 	}
-	return exec.Execute(ctx, c, account, &CursorExecutionRequest{
+	result, err := exec.Execute(ctx, c, account, &CursorExecutionRequest{
 		Chat:             ccReq,
 		SemanticMessages: sem,
 		Model:            req.Model,
@@ -2026,6 +2042,12 @@ func cursorExecuteResponses(
 		ToolChoiceMode:   mode,
 		ToolChoiceName:   name,
 	})
+	if err != nil {
+		fields := cursorResponsesShapeFields(req.Input)
+		fields = append(fields, cursorSemanticShapeFields(sem)...)
+		cursorPhaseLog(ctx, zapcore.WarnLevel, "responses_request_failed", req.Model, fields...)
+	}
+	return result, err
 }
 
 // cursorExecuteAnthropic 用**已解码**的 Anthropic Messages 请求走唯一转换 + 执行实现。

@@ -13,6 +13,7 @@ package service
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -25,6 +26,66 @@ import (
 
 // cursorPhaseComponent 是阶段事件固定 component 字段，便于在现有运行日志里聚合检索。
 const cursorPhaseComponent = "cursor.upstream"
+
+// Diagnostic tails contain bounded protocol labels only, never message text,
+// tool names, arguments, schemas, IDs supplied in input items, or credentials.
+func cursorDiagnosticRole(role string) string {
+	switch role {
+	case "user", "assistant", "system", "developer", "tool", "function", "instruction", "unknown":
+		return role
+	case "":
+		return "unspecified"
+	default:
+		return "other"
+	}
+}
+
+func cursorSemanticShapeFields(messages []cursorSemanticMessage) []zap.Field {
+	start := max(0, len(messages)-8)
+	tail := make([]string, 0, len(messages)-start)
+	for _, msg := range messages[start:] {
+		tail = append(tail, cursorDiagnosticRole(msg.role))
+	}
+	return []zap.Field{zap.Int("semantic_message_count", len(messages)), zap.Strings("semantic_tail_roles", tail)}
+}
+
+func cursorResponsesShapeFields(input json.RawMessage) []zap.Field {
+	var items []struct {
+		Type  string `json:"type"`
+		Role  string `json:"role"`
+		Phase string `json:"phase"`
+	}
+	if json.Unmarshal(input, &items) != nil || items == nil {
+		return []zap.Field{zap.Bool("responses_input_array", false)}
+	}
+	start := max(0, len(items)-8)
+	tail := make([]string, 0, len(items)-start)
+	for _, item := range items[start:] {
+		kind := item.Type
+		switch kind {
+		case "", "message":
+			kind = "message"
+		case "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output",
+			"tool_search_call", "tool_search_output", "reasoning", "additional_tools", "compaction":
+		default:
+			kind = "other"
+		}
+		phase := "unspecified"
+		switch item.Phase {
+		case "commentary", "final_answer":
+			phase = item.Phase
+		case "":
+		default:
+			phase = "other"
+		}
+		tail = append(tail, kind+":"+cursorDiagnosticRole(item.Role)+":"+phase)
+	}
+	return []zap.Field{
+		zap.Bool("responses_input_array", true),
+		zap.Int("responses_input_items", len(items)),
+		zap.Strings("responses_input_tail", tail),
+	}
+}
 
 // cursorPhaseLog 记录一次阶段事件：从 ctx 取请求级 logger 与 request_id，
 // 同步调用点（forwardCursor / Do 主流程 / duplex.respond）直接传入 request ctx 即可。
