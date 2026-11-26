@@ -1768,9 +1768,12 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 				prepared = nil
 				continue
 			}
-			// 真实终态：turn_ended / 传输错误 / 客户端断连。记录 usage 并关闭
-			// 会话（finalizer）。usage 只可能来自真实 turn_ended：没见到就不结算、不写零值。
-			session.noteTurnUsage(parser.usage, "pump_terminal")
+			// 真实终态：turn_ended / 传输错误 / 客户端断连。参数拒绝虽可能携带
+			// turn_ended，但它不是成功回复，不能把该 usage 交给正常结算链。
+			// 其它终态仍只接纳真实 turn_ended usage。
+			if !errors.Is(rerr, ErrCursorUpstreamParameterUnsupported) {
+				session.noteTurnUsage(parser.usage, "pump_terminal")
+			}
 			// 本 HTTP 的原生读取到此结束（stream 与 nonstream 同一条读循环）。
 			// 外审建议 S1：把"最近一次封口失败原因"落到终态日志安全字段 seal_blocked_reason，
 			// 供事故复盘区分"缺 listed / 计数不等 / 某 started 无委派"。原因已在 next() 的
@@ -10294,14 +10297,24 @@ func cursorAgentRunWireEvidenceFields(payload []byte) []zap.Field {
 		fields = append(fields, zap.Bool("state_parse_ok", false))
 	}
 
-	if md, ok := cursorFindField(runFields, cursorFldRunModelDetails); ok && md.Wire == cursorWireBytes {
-		mdFields, err := cursorDecodeProtobuf(md.Bytes)
+	if requested, ok := cursorFindField(runFields, cursorFldRunRequestedModel); ok && requested.Wire == cursorWireBytes {
+		requestedFields, err := cursorDecodeProtobuf(requested.Bytes)
 		if err != nil {
 			fields = append(fields, zap.Bool("model_id_parse_ok", false))
-		} else if id, ok := cursorFindField(mdFields, cursorFldModelDetailsID); ok && id.Wire == cursorWireBytes {
-			fields = append(fields, zap.Bool("model_id_parse_ok", true), zap.String("model_id", string(id.Bytes)))
 		} else {
-			fields = append(fields, zap.Bool("model_id_parse_ok", false))
+			id, idOK := cursorFindField(requestedFields, cursorFldRequestedModelID)
+			if !idOK || id.Wire != cursorWireBytes {
+				fields = append(fields, zap.Bool("model_id_parse_ok", false))
+			} else {
+				parameterCount := 0
+				for _, parameter := range requestedFields {
+					if parameter.Number == cursorFldRequestedModelParameter {
+						parameterCount++
+					}
+				}
+				fields = append(fields, zap.Bool("model_id_parse_ok", true), zap.String("model_id", string(id.Bytes)),
+					zap.Int("requested_model_parameter_count", parameterCount))
+			}
 		}
 	} else {
 		fields = append(fields, zap.Bool("model_id_parse_ok", false))

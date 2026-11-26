@@ -209,6 +209,43 @@ func TestCursorProtocolResponseRejectWithoutSuffix(t *testing.T) {
 	require.Empty(t, rejected.TurnID)
 }
 
+func TestCursorProtocolResponseParameterUnsupportedRequiresWholeReply(t *testing.T) {
+	for _, text := range []string{
+		cursorParameterNoticeTemplate,
+		cursorParameterNoticeTemplate + " [8]",
+		cursorParameterNoticeTemplate + " (1795667813078-ac3caa14)",
+		cursorParameterNoticeTemplate + " [8] (1795667813078-ac3caa14)",
+	} {
+		t.Run(text, func(t *testing.T) {
+			var stream []byte
+			stream = append(stream, cursorTextDeltaFrame(t, text)...)
+			stream = append(stream, cursorTurnEndedFrame(t,
+				[2]uint64{cursorFldTurnEndedInputTokens, 1},
+				[2]uint64{cursorFldTurnEndedOutputTokens, 1},
+				[2]uint64{cursorFldTurnEndedCacheReadTokens, 0},
+				[2]uint64{cursorFldTurnEndedCacheWriteTokens, 0})...)
+			_, err := cursorNewStreamParser("m").cursorParseStream(stream)
+			require.ErrorIs(t, err, ErrCursorUpstreamParameterUnsupported)
+			var unsupported *CursorParameterUnsupportedError
+			require.ErrorAs(t, err, &unsupported)
+		})
+	}
+
+	for _, text := range []string{
+		"模型先说：" + cursorParameterNoticeTemplate,
+		cursorParameterNoticeTemplate + " [8] (123-abc) 后续正文",
+		"普通正文引用 \"" + cursorParameterNoticeTemplate + "\" 后继续回答",
+	} {
+		t.Run("ordinary="+text, func(t *testing.T) {
+			var stream []byte
+			stream = append(stream, cursorTextDeltaFrame(t, text)...)
+			stream = append(stream, cursorTurnEndedFrame(t)...)
+			_, err := cursorNewStreamParser("m").cursorParseStream(stream)
+			require.NoError(t, err)
+		})
+	}
+}
+
 // TestCursorParseStreamRequiresTerminalMarker 钉死终态标记的强制性
 // （取消 / 截断的流绝不按成功收尾）。
 func TestCursorProtocolResponseRequiresTerminalMarker(t *testing.T) {

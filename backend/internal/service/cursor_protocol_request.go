@@ -55,9 +55,9 @@ const (
 	// AgentRunRequest（rjs）内：
 	cursorFldRunConversationState = 1  // ConversationStateStructure
 	cursorFldRunAction            = 2  // ConversationAction
-	cursorFldRunModelDetails      = 3  // ModelDetails（旧；上游真实客户端 2026-10-26 抓包用 f9）
 	cursorFldRunMcpTools          = 4  // McpTools（活体样本里是**空 message**，但仍出现）
 	cursorFldRunConversationID    = 5  // string [opt]
+	cursorFldRunRequestedModel    = 9  // InferenceRequestedModel（官方桌面 wire）
 	cursorFldRunPreFetchedBlobs   = 17 // repeated PreFetchedBlob（多轮历史的 KV 载荷）
 
 	// ConversationStateStructure（Hm）内：
@@ -90,8 +90,14 @@ const (
 	cursorFldSelectedImageData     = 8 // bytes（原始图片字节，由 data URI 解出）
 	cursorFldSelectedImageMimeType = 7 // string
 
-	// ModelDetails（ode）内：
-	cursorFldModelDetailsID = 1 // string，**必须填 wire ID**（活体填展示名会被拒）
+	// InferenceRequestedModel（官方桌面 wire）内：
+	cursorFldRequestedModelID        = 1 // string
+	cursorFldRequestedModelMaxMode   = 2 // bool
+	cursorFldRequestedModelParameter = 3 // repeated InferenceModelParameterValue
+
+	// InferenceModelParameterValue 内：
+	cursorFldRequestedParameterID    = 1 // string
+	cursorFldRequestedParameterValue = 2 // string
 
 	// PreFetchedBlob（ijs）内：
 	cursorFldBlobID    = 1 // bytes，32 字节 = sha256(value)
@@ -275,13 +281,11 @@ func cursorBuildAgentRunFromSemantic(sem []cursorSemanticMessage, upstreamModel 
 		action = cursorAppendBytesField(nil, cursorFldActionResumeAction, nil)
 	}
 
-	// 3) 其余字段按活体样本的**出现顺序**编码（33/63 均为
-	//    conversation_state → action → model_details → mcp_tools →
+	// 3) 其余字段按活体样本的**出现顺序**编码（官方桌面 wire 为
+	//    conversation_state → action → mcp_tools → requested_model →
 	//    conversation_id → pre_fetched_blobs…）。
 	run := cursorAppendBytesField(nil, cursorFldRunConversationState, state)
 	run = cursorAppendBytesField(run, cursorFldRunAction, action)
-	run = cursorAppendBytesField(run, cursorFldRunModelDetails,
-		cursorAppendStringField(nil, cursorFldModelDetailsID, upstreamModel))
 	// mcp_tools：请求携带 tools 且 tool_choice != "none" 时，把 function 工具编码进
 	// f4（McpTools）声明给上游；否则保持空 message（f4 字段存在、长度 0，与活体样本
 	// 同形——既满足"无 tools 时零变化"的纯文本链回归保护，也保住 33/63 号黄金字节）。
@@ -291,6 +295,8 @@ func cursorBuildAgentRunFromSemantic(sem []cursorSemanticMessage, upstreamModel 
 		return nil, "", err
 	}
 	run = cursorAppendBytesField(run, cursorFldRunMcpTools, mcpTools)
+	run = cursorAppendBytesField(run, cursorFldRunRequestedModel,
+		cursorEncodeRequestedModel(upstreamModel))
 	run = cursorAppendStringField(run, cursorFldRunConversationID, conversationID)
 	for _, b := range blobs {
 		blob := cursorAppendBytesField(nil, cursorFldBlobID, b.id)
@@ -300,6 +306,46 @@ func cursorBuildAgentRunFromSemantic(sem []cursorSemanticMessage, upstreamModel 
 
 	outer := cursorAppendBytesField(nil, cursorFldAgentRunRequest, run)
 	return cursorEncodeEnvelope(outer), conversationID, nil
+}
+
+type cursorRequestedModelParameter struct {
+	id    string
+	value string
+}
+
+func cursorRequestedModelParameters(upstreamModel string) []cursorRequestedModelParameter {
+	switch upstreamModel {
+	case "claude-fable-5-1":
+		return []cursorRequestedModelParameter{
+			{id: "thinking", value: "true"},
+			{id: "context", value: "1m"},
+			{id: "effort", value: "high"},
+		}
+	case "claude-sonnet-5-5":
+		return []cursorRequestedModelParameter{
+			{id: "context", value: "1m"},
+			{id: "reasoning_effort", value: "high"},
+		}
+	case "claude-opus-5-5":
+		return []cursorRequestedModelParameter{
+			{id: "context", value: "1m"},
+			{id: "effort", value: "medium"},
+			{id: "fast", value: "false"},
+		}
+	default:
+		return nil
+	}
+}
+
+func cursorEncodeRequestedModel(upstreamModel string) []byte {
+	requested := cursorAppendStringField(nil, cursorFldRequestedModelID, upstreamModel)
+	requested = cursorAppendVarintField(requested, cursorFldRequestedModelMaxMode, 1)
+	for _, parameter := range cursorRequestedModelParameters(upstreamModel) {
+		value := cursorAppendStringField(nil, cursorFldRequestedParameterID, parameter.id)
+		value = cursorAppendStringField(value, cursorFldRequestedParameterValue, parameter.value)
+		requested = cursorAppendBytesField(requested, cursorFldRequestedModelParameter, value)
+	}
+	return requested
 }
 
 // cursorEncodeUserMessage encodes the current-turn UserMessage wire bytes:
