@@ -228,20 +228,33 @@ func (r *jitterProbeRepoFake) CommitModelRateLimitObservation(context.Context, i
 
 func TestUpstreamJitterProbeChannelJitterBranchReschedules15s(t *testing.T) {
 	repo := &jitterProbeRepoFake{}
+	probeCalls := 0
+	var gotModel string
 	probe := &AccountHealthRecoveryProbeService{
 		accountRepo:  repo,
 		recoveryLock: jitterProbeLockFake{},
 		cursorExec:   &CursorExecutionService{},
-		cursorAgentRunProbe: func(context.Context, *CursorExecutionService, *Account, string, int) (int, string, string, error) {
+		cursorAgentRunProbe: func(_ context.Context, _ *CursorExecutionService, _ *Account, model string, _ int) (int, string, string, error) {
+			probeCalls++
+			gotModel = model
 			return 500, "boom", "", nil
 		},
 	}
-	acc := &Account{ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth}
+	// 失败用例同样带 probe_input 与账号映射：探测输入与 scope 不同，仍按当前映射解析一次。
+	acc := &Account{
+		ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"scope-b": "scope-c"},
+		},
+	}
 	task := ModelProbeTask{AccountID: 1, Scope: "m-model", Entry: map[string]any{
 		"reason": UpstreamJitterModelRateLimitReason, "probe_gen": int64(7),
+		UpstreamJitterProbeInputKey: "scope-b",
 	}}
 	probe.probeModelScope(context.Background(), acc, task, "owner")
 
+	require.Equal(t, 1, probeCalls, "失败分支仍必须发出一次真实调用探测")
+	require.Equal(t, "scope-c", gotModel, "失败分支也须按 probe_input 的当前映射解析一次")
 	var reschedules []ModelProbePatch
 	for _, p := range repo.patches {
 		if p.Op == ModelProbePatchReschedule {
@@ -255,37 +268,53 @@ func TestUpstreamJitterProbeChannelJitterBranchReschedules15s(t *testing.T) {
 
 func TestUpstreamJitterProbeChannelJitterBranchClears(t *testing.T) {
 	repo := &jitterProbeRepoFake{}
+	var gotModel string
 	probe := &AccountHealthRecoveryProbeService{
 		accountRepo:  repo,
 		recoveryLock: jitterProbeLockFake{},
 		cursorExec:   &CursorExecutionService{},
 		rateLimit:    &RateLimitService{accountRepo: repo},
-		cursorAgentRunProbe: func(context.Context, *CursorExecutionService, *Account, string, int) (int, string, string, error) {
+		cursorAgentRunProbe: func(_ context.Context, _ *CursorExecutionService, _ *Account, model string, _ int) (int, string, string, error) {
+			gotModel = model
 			return 200, "", "hello", nil
 		},
 	}
-	acc := &Account{ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth}
-	task := ModelProbeTask{AccountID: 1, Scope: "m-model", Entry: map[string]any{
+	// 成功用例：probe_input 与 scope 不同，账号映射把 scope-b 解析为 scope-c。
+	acc := &Account{
+		ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"scope-b": "scope-c"},
+		},
+	}
+	task := ModelProbeTask{AccountID: 1, Scope: "m-model", MetaLastEventAt: "v1", Entry: map[string]any{
 		"reason": UpstreamJitterModelRateLimitReason, "probe_gen": int64(7),
+		UpstreamJitterProbeInputKey: "scope-b",
 	}}
 	probe.probeModelScope(context.Background(), acc, task, "owner")
 
+	require.Equal(t, "scope-c", gotModel, "探针必须收到 probe_input 按当前映射解析后的模型（只映射一次）")
 	require.Equal(t, 1, repo.applied, "成功分支必须经版本化入口清除该 scope；CommitModelRateLimitObservationIfVersion 签名不匹配则本断言失败")
 	require.Len(t, repo.applies, 1)
-	require.Equal(t, "m-model", repo.applies[0].scope)
+	require.Equal(t, "m-model", repo.applies[0].scope, "清除的仍是条目 scope，不是探测用的模型")
 	require.True(t, repo.applies[0].clear)
-	require.Equal(t, task.MetaLastEventAt, repo.applies[0].expected)
+	require.Equal(t, "v1", repo.applies[0].expected, "版本化清除必须带条目非空 MetaLastEventAt")
 	for _, p := range repo.patches {
 		require.NotEqual(t, ModelProbePatchReschedule, p.Op, "成功分支不得重排")
 	}
 }
 
-// --- JIT-36: 渠道别名 scope 探测必须按账号映射解析到真实上游模型 ---
+// --- JIT-36 / JIT-50: 渠道别名经 probe_input 在 probeModelScope 按当前映射解析一次 ---
+// JIT-50 起映射解析上移，probeCursorModelScopeUpstream 不再做二次映射；本用例改从
+// probeModelScope 入口验证「映射后的真实上游模型」这一断言，语义不变、层次更正。
 
 func TestUpstreamJitterProbeChannelResolvesMappedScope(t *testing.T) {
+	repo := &jitterProbeRepoFake{}
 	var gotModel string
 	probe := &AccountHealthRecoveryProbeService{
-		cursorExec: &CursorExecutionService{},
+		accountRepo:  repo,
+		recoveryLock: jitterProbeLockFake{},
+		cursorExec:   &CursorExecutionService{},
+		rateLimit:    &RateLimitService{accountRepo: repo},
 		cursorAgentRunProbe: func(_ context.Context, _ *CursorExecutionService, _ *Account, model string, _ int) (int, string, string, error) {
 			gotModel = model
 			return 200, "", "ok", nil
@@ -295,8 +324,72 @@ func TestUpstreamJitterProbeChannelResolvesMappedScope(t *testing.T) {
 		ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth,
 		Credentials: map[string]any{"model_mapping": map[string]any{"scope-b": "scope-c"}},
 	}
-	ok, err := probe.probeCursorModelScopeUpstream(context.Background(), acc, "scope-b")
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, "scope-c", gotModel, "探测必须使用账号映射后的真实上游模型")
+	task := ModelProbeTask{AccountID: 1, Scope: "m-model", Entry: map[string]any{
+		"reason": UpstreamJitterModelRateLimitReason, "probe_gen": int64(7),
+		UpstreamJitterProbeInputKey: "scope-b",
+	}}
+	probe.probeModelScope(context.Background(), acc, task, "owner")
+	require.Equal(t, "scope-c", gotModel, "渠道别名经 probe_input 按当前账号映射解析为真实上游模型")
+}
+
+// --- JIT-51: 映射可随时改变，每次探测按当前映射解析，不缓存旧模型 ---
+
+func TestUpstreamJitterProbeChannelJitterBranchUsesCurrentMapping(t *testing.T) {
+	repo := &jitterProbeRepoFake{}
+	var gotModels []string
+	probe := &AccountHealthRecoveryProbeService{
+		accountRepo:  repo,
+		recoveryLock: jitterProbeLockFake{},
+		cursorExec:   &CursorExecutionService{},
+		rateLimit:    &RateLimitService{accountRepo: repo},
+		cursorAgentRunProbe: func(_ context.Context, _ *CursorExecutionService, _ *Account, model string, _ int) (int, string, string, error) {
+			gotModels = append(gotModels, model)
+			return 200, "", "ok", nil
+		},
+	}
+	acc := &Account{
+		ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"scope-b": "scope-c"},
+		},
+	}
+	task := ModelProbeTask{AccountID: 1, Scope: "m-model", Entry: map[string]any{
+		"reason": UpstreamJitterModelRateLimitReason, "probe_gen": int64(7),
+		UpstreamJitterProbeInputKey: "scope-b",
+	}}
+	probe.probeModelScope(context.Background(), acc, task, "owner")
+	require.Equal(t, []string{"scope-c"}, gotModels, "首次探测按当前映射解析为 scope-c")
+
+	// 模拟映射随时改变：整体换一个新 map（指针与内容同时变化，规避账号热路径缓存）。
+	acc.Credentials["model_mapping"] = map[string]any{"scope-b": "scope-d"}
+	task.Entry["probe_gen"] = int64(8)
+	probe.probeModelScope(context.Background(), acc, task, "owner")
+	require.Equal(t, []string{"scope-c", "scope-d"}, gotModels, "映射改动后必须按当前映射解析，不缓存旧模型")
+}
+
+// --- JIT-51: 未设置 probe_input 的旧条目回落到 scope 本身，不 panic ---
+
+func TestUpstreamJitterProbeChannelJitterBranchWithoutProbeInputFallsBackToScope(t *testing.T) {
+	repo := &jitterProbeRepoFake{}
+	var gotModel string
+	probe := &AccountHealthRecoveryProbeService{
+		accountRepo:  repo,
+		recoveryLock: jitterProbeLockFake{},
+		cursorExec:   &CursorExecutionService{},
+		rateLimit:    &RateLimitService{accountRepo: repo},
+		cursorAgentRunProbe: func(_ context.Context, _ *CursorExecutionService, _ *Account, model string, _ int) (int, string, string, error) {
+			gotModel = model
+			return 200, "", "ok", nil
+		},
+	}
+	// 旧条目没有 probe_input；账号也无映射，按现有语义回落到 task.Scope 本身。
+	acc := &Account{ID: 1, Platform: PlatformCursor, Type: AccountTypeOAuth}
+	task := ModelProbeTask{AccountID: 1, Scope: "m-model", Entry: map[string]any{
+		"reason": UpstreamJitterModelRateLimitReason, "probe_gen": int64(7),
+	}}
+	require.NotPanics(t, func() {
+		probe.probeModelScope(context.Background(), acc, task, "owner")
+	})
+	require.Equal(t, "m-model", gotModel, "未设置 probe_input 时回落到 scope 本身")
+	require.Equal(t, 1, repo.applied, "回落 scope 的探测仍可成功清除")
 }

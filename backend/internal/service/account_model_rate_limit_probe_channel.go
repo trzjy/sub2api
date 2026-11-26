@@ -222,7 +222,20 @@ func (p *AccountHealthRecoveryProbeService) probeModelScope(ctx context.Context,
 	// 上游抖动停调：只看真实调用探测，不查额度/余额（额度剩余 ≠ 该模型恢复），
 	// 失败按 15 秒续探；成功走既有版本化清除。
 	if reason, _ := task.Entry["reason"].(string); reason == UpstreamJitterModelRateLimitReason {
-		upOK, upErr := p.probeModelScopeUpstream(ctx, acc, task.Scope)
+		probeInput := strings.TrimSpace(task.Scope)
+		if raw, ok := task.Entry[UpstreamJitterProbeInputKey].(string); ok && strings.TrimSpace(raw) != "" {
+			probeInput = strings.TrimSpace(raw)
+		}
+		model := ""
+		if acc.IsCursorConnectSessionAccount() {
+			model = strings.TrimSpace(acc.GetMappedModel(probeInput))
+		} else {
+			model = strings.TrimSpace(resolveOpenAIAccountUpstreamModelForRequest(acc, probeInput, false))
+		}
+		if model == "" {
+			model = probeInput
+		}
+		upOK, upErr := p.probeModelScopeResolvedModel(ctx, acc, model)
 		if upErr != nil || !upOK {
 			observeAttempt()
 			reschedule(UpstreamJitterProbeCadence)
@@ -339,6 +352,21 @@ func (p *AccountHealthRecoveryProbeService) probeModelScopeUpstream(ctx context.
 	return p.probeUpstreamDataPlaneWithProtocolForModel(ctx, acc, model, false)
 }
 
+// probeModelScopeResolvedModel 对已解析为实际上游模型的 model 发出最小真实调用。
+// 调用方负责把 scope / probe_input 解析成 model（映射只做一次），本函数不再做二次映射。
+func (p *AccountHealthRecoveryProbeService) probeModelScopeResolvedModel(ctx context.Context, acc *Account, model string) (bool, error) {
+	if acc == nil {
+		return false, errors.New("probe account is nil")
+	}
+	switch acc.Platform {
+	case PlatformAntigravity, PlatformDevin, PlatformCodeBuddy:
+		return false, errUnsupportedModelProbe
+	case PlatformCursor:
+		return p.probeCursorModelScopeUpstream(ctx, acc, model)
+	}
+	return p.probeUpstreamDataPlaneWithProtocolForModel(ctx, acc, model, false)
+}
+
 // probeCursorModelScopeUpstream 对 cursor 平台按指定上游模型发一次最小真实调用。
 // Connect 会话号走既有原生 AgentRun 探针；apikey 反代走既有数据面探测（强制 CC，
 // 与真实转发同判据）。cannot-probe 时返回 error，由调用方保留 due 重排、不误清。
@@ -354,11 +382,7 @@ func (p *AccountHealthRecoveryProbeService) probeCursorModelScopeUpstream(ctx co
 		if fn == nil {
 			fn = ProbeCursorAccountHealth
 		}
-		model := resolveOpenAIAccountUpstreamModelForRequest(acc, scope, false)
-		if strings.TrimSpace(model) == "" {
-			model = scope
-		}
-		status, _, text, err := fn(ctx, p.cursorExec, acc, model, cursorAccountHealthProbeMinBudget)
+		status, _, text, err := fn(ctx, p.cursorExec, acc, scope, cursorAccountHealthProbeMinBudget)
 		if err != nil {
 			return false, err
 		}
