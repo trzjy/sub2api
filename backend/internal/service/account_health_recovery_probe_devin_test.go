@@ -50,9 +50,11 @@ func devinProbeWithAuth(t *testing.T, jwt, base string) {
 }
 
 type devinProbeUpstream struct {
-	status int
-	body   []byte
-	err    error
+	status      int
+	body        []byte
+	err         error
+	lastBody    []byte
+	lastRequest string
 }
 
 func (u *devinProbeUpstream) response() (*http.Response, error) {
@@ -66,11 +68,16 @@ func (u *devinProbeUpstream) response() (*http.Response, error) {
 	}, nil
 }
 
-func (u *devinProbeUpstream) Do(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
-	return u.response()
+func (u *devinProbeUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	return u.DoWithTLS(req, "", 0, 0, nil)
 }
 
-func (u *devinProbeUpstream) DoWithTLS(_ *http.Request, _ string, _ int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+func (u *devinProbeUpstream) DoWithTLS(req *http.Request, _ string, _ int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	u.lastRequest = req.URL.String()
+	if req.Body != nil {
+		u.lastBody, _ = io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(u.lastBody))
+	}
 	return u.response()
 }
 
@@ -149,6 +156,27 @@ func TestProbeDevinUpstreamFailClosedBeforeAuth(t *testing.T) {
 		require.False(t, ok)
 		require.ErrorContains(t, err, "no mapped upstream model")
 	})
+}
+
+func TestProbeDevinModelScopeUsesAlreadyMappedScope(t *testing.T) {
+	devinProbeWithAuth(t, "jwt", "https://custom.example")
+	upstream := &devinProbeUpstream{status: http.StatusOK, body: devinOKStream()}
+	p := newDevinProbeService(upstream)
+	account := newDevinProbeAccount(77, "token", map[string]any{
+		"request-model": "mapped-scope",
+		"mapped-scope":  "wrong-remapped-uid",
+	})
+
+	ok, err := p.probeDevinUpstreamForModel(context.Background(), account, "mapped-scope")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "https://custom.example"+DevinChatMessagePath, upstream.lastRequest)
+	require.GreaterOrEqual(t, len(upstream.lastBody), 5)
+	uncompressed, err := tryGunzipResponse(upstream.lastBody[5:])
+	require.NoError(t, err)
+	fields := scanFields(t, uncompressed)
+	require.Equal(t, "mapped-scope", string(fieldsOfNum(fields, 21)[0].data),
+		"Devin model scope is already mapped and must not be remapped")
 }
 
 // 鉴权后聊天阶段的成功/失败判定。

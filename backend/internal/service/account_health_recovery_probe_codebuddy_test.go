@@ -4,8 +4,8 @@ package service
 
 // AC-B1 探测侧接线回归测试（方案 §三 卡 B）：
 //   - 直绑 CodeBuddy 账号（platform=codebuddy、parent_account_id=nil、type=oauth）
-//     进入 probeUpstream 后走 billing-meter 探测：不落 buildOpenAIAPIKeyModelsRequest
-//     的 apikey 检查，也不依赖 extra.shadow_model；2xx → 恢复，401/403 → 仍停调。
+//     进入 probeUpstream 后走真实 chat 探测：不落 billing-meter 或 /models 检查，
+//     使用账号自身配置模型与凭证；有效完成 SSE → 恢复，401/403 → 仍停调。
 //   - 影子账号路径不回归（仍走 chat 探测 + 解析母账号凭据）。
 //   - probeRecoverableMarkers 含 oauth_401_recoverable；卡 A 写入的 JSON reason
 //     使 isHealthBreakerTrip 返回 true；MatchedKeyword 填上游错误全文时负例不识别。
@@ -40,19 +40,21 @@ func acB1DirectCodeBuddyAccount(id int64) *Account {
 	}
 	reason, _ := json.Marshal(state)
 	return &Account{
-		ID:                      id,
-		Platform:                PlatformCodeBuddy,
-		Type:                    AccountTypeOAuth,
-		Concurrency:             1,
-		Credentials:             map[string]any{"access_token": "DIRECT_TOKEN_SECRET"},
+		ID:          id,
+		Platform:    PlatformCodeBuddy,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token":  "DIRECT_TOKEN_SECRET",
+			"model_mapping": map[string]any{"probe-model": "codebuddy-probe-model"},
+		},
 		TempUnschedulableUntil:  &until,
 		TempUnschedulableReason: string(reason),
 	}
 }
 
-// TestCodeBuddyDirectProbeUsesBillingMeterNotModels 直绑账号进入 probeUpstream 后
-// 必须走 billing-meter 探测，不落 /models 的 apikey 检查、也不依赖 shadow_model。
-func TestCodeBuddyDirectProbeUsesBillingMeterNotModels(t *testing.T) {
+// TestCodeBuddyDirectProbeUsesChatDataPlane 直绑账号恢复必须验证自身 chat 数据面。
+func TestCodeBuddyDirectProbeUsesChatDataPlane(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
 	direct := acB1DirectCodeBuddyAccount(258)
@@ -61,7 +63,7 @@ func TestCodeBuddyDirectProbeUsesBillingMeterNotModels(t *testing.T) {
 		accounts:   map[int64]*Account{258: direct},
 		candidates: []*Account{direct},
 	}
-	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, `{"code":0}`)
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, codeBuddyProbeValidSSE)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 	setFastProbeRetry(p)
 
@@ -69,21 +71,19 @@ func TestCodeBuddyDirectProbeUsesBillingMeterNotModels(t *testing.T) {
 	p.RunOnce(context.Background())
 	p.wg.Wait()
 
-	require.Equal(t, 1, repo.clearTempIfReasonCalls, "直绑 billing 探测连续 2xx 必须恢复停调")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "直绑 chat 探测连续成功必须恢复停调")
 	rec := upstream.lastRecord(t)
 	require.Equal(t, http.MethodPost, rec.Method)
-	require.Equal(t, codeBuddyBillingMeterPath, rec.Path, "直绑必须走 billing-meter 端点，而非 chat 或 /models")
-	require.NotEqual(t, "/v1/models", rec.Path, "直绑不得落到 apikey /models 路径（否则触发 apikey 检查/降级）")
+	require.Equal(t, codeBuddyChatCompletionsPath, rec.Path, "直绑必须走真实 chat 端点")
 	require.Equal(t, "Bearer DIRECT_TOKEN_SECRET", rec.Header.Get("Authorization"), "直绑用自身凭据")
 	require.Equal(t, "SaaS", rec.Header.Get("X-Product"))
 	require.Equal(t, CodeBuddyClientUA, rec.Header.Get("User-Agent"))
-	// 身份头占位：直绑无 uid/enterprise_id/domain 时用 X-No-*: 1 占位。
-	require.Equal(t, "1", rec.Header.Get("X-No-User-Id"))
-	require.Equal(t, "1", rec.Header.Get("X-No-Enterprise-Id"))
-	require.Equal(t, "1", rec.Header.Get("X-No-Domain"))
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body, &body))
+	require.Equal(t, "codebuddy-probe-model", body["model"])
 }
 
-// TestCodeBuddyDirectProbe401KeepsParked 直绑 billing 探测遇 401/403 仍停调
+// TestCodeBuddyDirectProbe401KeepsParked 直绑 chat 探测遇 401/403 仍停调
 // （卡 B 判定：401/403 = 仍停调），不得恢复也不得误触降级到期。
 func TestCodeBuddyDirectProbe401KeepsParked(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
@@ -93,7 +93,7 @@ func TestCodeBuddyDirectProbe401KeepsParked(t *testing.T) {
 		accounts:   map[int64]*Account{259: direct},
 		candidates: []*Account{direct},
 	}
-	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusUnauthorized, `{"code":40101}`)
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusUnauthorized, `{"error":{"message":"unauthorized"}}`)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 	setFastProbeRetry(p)
 	// 永久失败：第 2 次探测请求后取消 ctx 划定补探边界（C1 补探无轮数上限）。
@@ -104,7 +104,7 @@ func TestCodeBuddyDirectProbe401KeepsParked(t *testing.T) {
 	p.RunOnce(ctx)
 	p.wg.Wait() // 等待异步补探按 ctx 取消收敛（AC-C1）
 
-	require.Zero(t, repo.clearTempIfReasonCalls, "直绑 billing 探测 401 不得恢复停调")
+	require.Zero(t, repo.clearTempIfReasonCalls, "直绑 chat 探测 401 不得恢复停调")
 	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "失败后 attempt 计数 +1（首探 + 1 次补探，代际守卫 BumpTempUnschedulableReasonIfGeneration）")
 }
 
@@ -184,9 +184,8 @@ func TestCodeBuddyOAuth401MarkerNegativeFullErrorMessage(t *testing.T) {
 		"MatchedKeyword 填上游错误全文时不得被识别为可恢复 marker（负例）")
 }
 
-// TestCodeBuddyDirectProbe2xxBodyFailureKeepsParked 直绑 billing-meter 探测收到 HTTP 200
-// 但响应体业务校验不过（AC-G2R-1：复用 evaluateCodeBuddyProbeBody 判据）→ 探测失败、
-// 保持停调，不得仅凭状态码误清熔断。
+// TestCodeBuddyDirectProbe2xxBodyFailureKeepsParked 直绑 chat 探测收到 HTTP 200
+// 但 SSE 内容无有效 completion → 保持停调，不得仅凭状态码误清熔断。
 func TestCodeBuddyDirectProbe2xxBodyFailureKeepsParked(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
@@ -195,7 +194,7 @@ func TestCodeBuddyDirectProbe2xxBodyFailureKeepsParked(t *testing.T) {
 		accounts:   map[int64]*Account{263: direct},
 		candidates: []*Account{direct},
 	}
-	// 2xx 但业务信封 code 非 0（认证/业务错误随 200 返回）：不得判恢复。
+	// 2xx 但返回 JSON 业务错误而非 chat SSE：不得判恢复。
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, `{"code":40101,"message":"unauthorized"}`)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 	setFastProbeRetry(p)
@@ -211,8 +210,8 @@ func TestCodeBuddyDirectProbe2xxBodyFailureKeepsParked(t *testing.T) {
 	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "2xx+body 失败应仍走失败簿记（首探 + 补探）")
 }
 
-// TestCodeBuddyDirectProbe2xxEmptyBodyKeepsParked 直绑 billing-meter 探测收到 HTTP 200
-// 但空 body（AC-G2R-1 同源缺陷：空 body 被 gjson 误判为健康）→ 探测失败、保持停调。
+// TestCodeBuddyDirectProbe2xxEmptyBodyKeepsParked 直绑 chat 探测收到 HTTP 200
+// 但空 body → 探测失败、保持停调。
 func TestCodeBuddyDirectProbe2xxEmptyBodyKeepsParked(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)

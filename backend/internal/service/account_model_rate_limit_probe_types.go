@@ -23,6 +23,8 @@ const (
 	ModelProbePatchObserve ModelProbePatchOp = "observe"
 	// ModelProbePatchDeleteScope 删除该 scope 条目（AICredits / 管理员单 scope 清除）。
 	ModelProbePatchDeleteScope ModelProbePatchOp = "delete-scope"
+	// ModelProbePatchDropSchedule 仅删除通用探针的 due/gen，保留 scope 限流及 reset 状态。
+	ModelProbePatchDropSchedule ModelProbePatchOp = "drop-schedule"
 )
 
 // ModelProbePatch 是 PatchModelRateLimitEntry 的载荷。

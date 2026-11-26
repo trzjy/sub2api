@@ -5,19 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"go.uber.org/zap"
 )
 
 // errUnsupportedModelProbe 表示当前平台无法按 scope 精确指定模型发出最小实际调用。
-// 调用方据此保留 due 重排，不误清除该 scope 的限流（方案 §2.6 / 残余风险 2）。
+// 调用方据此保留 due 重排，不误清除该 scope 的限流。
 var errUnsupportedModelProbe = errors.New("model rate limit probe: scoped upstream probe unsupported for this platform")
 
 const (
@@ -33,7 +31,8 @@ const (
 	modelRateLimitProbeUnavailableCadence = 30 * time.Second
 )
 
-// accountHasQuotaEntrance 判定账号是否具备额度探测入口（方案 §2.4 / §2.6）。
+// accountHasQuotaEntrance describes which accounts can enter the existing quota-aware
+// model limit policy. Model recovery still requires a scope-specific signal.
 func accountHasQuotaEntrance(acc *Account) bool {
 	return acc.BalanceProbeConfig().Enabled ||
 		acc.Platform == PlatformAntigravity ||
@@ -41,8 +40,9 @@ func accountHasQuotaEntrance(acc *Account) bool {
 }
 
 // RunModelRateLimitRecoveryChannel 是批 2 模型级限流恢复通道：按 probe_due_at 取候选，
-// 逐 (accountID, scope) 加锁，按「有/无额度入口 × 有/无回显」四格分支探测，成功经
-// 事件版本化入口清除该 scope，失败按代际条件重排。
+// 逐 (accountID, scope) 加锁，由该 scope 对应的上游数据面或专用额度来源验证恢复，
+// 成功经事件版本化入口清除该 scope，失败按代际条件重排。已转由其它来源持有的旧候选
+// 只删除通用探针排程字段，不改变其限流状态。
 //
 // 与批 1 账号级通道共用同一把账号锁（recovery:probe:<accountID>），但 leader 锁与
 // 候选来源独立；两者互不影响。
@@ -119,8 +119,10 @@ dispatch:
 		if acc == nil {
 			continue
 		}
-		// 归属过滤在 Go 侧只做一次（写入侧已有同一判据）。
+		// 归属过滤在 Go 侧只做一次（写入侧已有同一判据）。历史候选若已转由专用来源
+		// 持有，仅按原 probe_gen 移除通用排程字段，保留限流 scope 与 reset 状态。
 		if !isModelProbeOwned(task.Scope, task.Entry, acc) {
+			p.dropModelProbeSchedule(roundCtx, task)
 			continue
 		}
 		limit := modelRateLimitProbeConcurrency
@@ -147,7 +149,15 @@ dispatch:
 	wg.Wait()
 }
 
-// probeModelScope 对单条 (accountID, scope) 候选执行四格分支探测。
+func (p *AccountHealthRecoveryProbeService) dropModelProbeSchedule(ctx context.Context, task ModelProbeTask) {
+	expectedGen, ok := modelProbeExpectedGen(task.Entry)
+	if !ok {
+		return
+	}
+	p.patchModelProbe(ctx, task.AccountID, task.Scope, expectedGen, ModelProbePatch{Op: ModelProbePatchDropSchedule})
+}
+
+// probeModelScope 对单条 (accountID, scope) 候选执行来源专属的恢复探测。
 func (p *AccountHealthRecoveryProbeService) probeModelScope(ctx context.Context, acc *Account, task ModelProbeTask, owner string) {
 	if p == nil || acc == nil {
 		return
@@ -156,7 +166,6 @@ func (p *AccountHealthRecoveryProbeService) probeModelScope(ctx context.Context,
 	if !ok {
 		return
 	}
-	precise, _ := task.Entry["precise_reset"].(bool)
 
 	lockKey := fmt.Sprintf("recovery:probe:%d", acc.ID)
 	locked, err := tryAcquireRedisLeaderLock(ctx, p.recoveryLock, lockKey, owner, modelRateLimitProbeLockTTL)
@@ -245,111 +254,73 @@ func (p *AccountHealthRecoveryProbeService) probeModelScope(ctx context.Context,
 		return
 	}
 
-	if !accountHasQuotaEntrance(acc) {
-		// 无额度入口：到点实际调用，2xx 才清除；失败/不确定 30s 续探。
-		upOK, upErr := p.probeModelScopeUpstream(ctx, acc, task.Scope)
-		if upErr != nil || !upOK {
-			observeAttempt()
-			reschedule(modelRateLimitProbeUnavailableCadence)
-			return
-		}
-		clearScope()
-		return
-	}
-
-	// 有额度入口：先走额度信号；无回显（precise=false）额度通过即清除。
-	quotaOK, quotaErr := p.probeQuotaSignal(ctx, acc)
-	if quotaErr != nil || !quotaOK {
-		observeAttempt()
-		reschedule(modelRateLimitProbeQuotaCadence)
-		return
-	}
-	if !precise {
-		clearScope()
-		return
-	}
-	// 有回显：额度 + 实际调用两项都过才清除，任一项失败 5min 重排。
+	// 模型 scope 必须由该模型自己的上游信号证明恢复。precise_reset 只描述
+	// reset_at 是否精确，不改变观测证据的作用域；账号余额和 Cursor 激活码额度
+	// 不能单独证明普通模型已恢复。
 	upOK, upErr := p.probeModelScopeUpstream(ctx, acc, task.Scope)
 	if upErr != nil || !upOK {
 		observeAttempt()
-		reschedule(modelRateLimitProbeQuotaCadence)
+		cadence := modelRateLimitProbeUnavailableCadence
+		if acc.Platform == PlatformAntigravity {
+			cadence = modelRateLimitProbeQuotaCadence
+		}
+		reschedule(cadence)
 		return
 	}
 	clearScope()
 }
 
-// probeModelScopeUpstream 对能精确指定 scope 模型的平台发出最小实际调用。
-// 不能精确指定的平台返回 errUnsupportedModelProbe，由调用方保留 due 重排、不误清除。
+// probeModelScopeUpstream 使用传入的模型 scope 选择该平台对应的数据面或用户额度观测。
 func (p *AccountHealthRecoveryProbeService) probeModelScopeUpstream(ctx context.Context, acc *Account, scope string) (bool, error) {
 	if p == nil || acc == nil {
-		return false, errUnsupportedModelProbe
+		return false, errors.New("model rate limit probe: account is nil")
 	}
 
-	if isCodeBuddyShadowAccount(acc) {
-		body, err := PrepareCodeBuddyBody(codeBuddyShadowProbeBody(scope), CodeBuddyRewriteOptions{
-			Sanitize: p.codeBuddyProbeSanitizeEnabled(),
-			Model:    scope,
-		})
-		if err != nil {
-			return false, fmt.Errorf("prepare model scope codebuddy probe body: %w", err)
-		}
-		// 影子→母账号凭证解析：取法与 probeCodeBuddyShadowUpstream 一致（fail-closed）。
-		credAccount := acc
-		if acc.ParentAccountID != nil {
-			parent, err := p.accountRepo.GetByID(ctx, *acc.ParentAccountID)
-			if err != nil {
-				return false, fmt.Errorf("resolve codebuddy shadow parent: %w", err)
-			}
-			if parent == nil || parent.IsShadow() {
-				return false, fmt.Errorf("codebuddy shadow parent %d missing or itself a shadow", *acc.ParentAccountID)
-			}
-			if !(parent.IsCodeBuddy() && (parent.Type == AccountTypeOAuth || parent.Type == AccountTypeAPIKey)) {
-				return false, fmt.Errorf("codebuddy shadow parent %d is not a codebuddy OAuth/APIKey account", parent.ID)
-			}
-			credAccount = parent
-		}
-		token := codeBuddyTestAccessToken(credAccount)
-		if token == "" {
-			return false, errors.New("codebuddy credential account is missing access_token credential")
-		}
-		req, err := buildCodeBuddyShadowProbeRequest(ctx, credAccount, body, token, p.cfg)
-		if err != nil {
-			return false, fmt.Errorf("build model scope codebuddy probe request: %w", err)
+	if acc.Platform == PlatformAntigravity {
+		if p.antigravityQuota == nil || p.antigravityTokens == nil {
+			return false, errors.New("antigravity model quota probe is not wired")
 		}
 		proxyURL := ""
-		if acc.ProxyID != nil && acc.Proxy != nil {
+		if acc.Proxy != nil {
 			proxyURL = acc.Proxy.URL()
 		}
-		var tlsProfile *tlsfingerprint.Profile
-		if p.tlsFPProfileService != nil {
-			tlsProfile = p.tlsFPProfileService.ResolveTLSProfile(acc)
+		if scope == creditsExhaustedKey {
+			return p.antigravityQuota.ProbeAICredits(ctx, acc, proxyURL, p.antigravityTokens)
 		}
-		callCtx, cancel := context.WithTimeout(ctx, codeBuddyShadowProbeTimeout)
-		defer cancel()
-		resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
+		return p.antigravityQuota.ProbeUserQuota(ctx, acc, proxyURL, scope, p.antigravityTokens)
+	}
+	if acc.Platform == PlatformOpenAI && scope == openAIImageGenerationRateLimitKey {
+		if p.balanceProbe == nil {
+			return false, errors.New("openai image balance probe is not wired")
+		}
+		result, err := p.balanceProbe.Query(ctx, acc.ID)
 		if err != nil {
-			return false, nil
+			return false, err
 		}
-		defer func() { _ = resp.Body.Close() }()
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, codeBuddyShadowProbeMaxBodyBytes))
-		return evaluateCodeBuddyShadowProbeResponse(resp.StatusCode, raw), nil
+		if result == nil {
+			return false, errors.New("openai image balance probe returned nil result")
+		}
+		return result.Success && result.Valid && result.Remaining != nil && *result.Remaining > 0, nil
 	}
 
-	// antigravity 无可用实际调用构造；cursor/devin 多模型遍历、codebuddy 直绑只有
-	// billing 面——均无法按 scope 精确指定模型，保留 due 重排，不伪造桩实现。
-	switch acc.Platform {
-	case PlatformAntigravity, PlatformDevin, PlatformCodeBuddy:
-		return false, errUnsupportedModelProbe
-	case PlatformCursor:
-		return p.probeCursorModelScopeUpstream(ctx, acc, scope)
+	if isCodeBuddyPlatformAccount(acc) || isCodeBuddyShadowAccount(acc) {
+		return p.probeCodeBuddyChatUpstream(ctx, acc, scope)
 	}
 
-	// 其它 OpenAI 协议族：按 scope 解析实际上游模型，空则直接用 scope。
-	model := resolveOpenAIAccountUpstreamModelForRequest(acc, scope, false)
-	if strings.TrimSpace(model) == "" {
-		model = scope
+	if acc.Platform == PlatformCursor {
+		if acc.IsCursorConnectSessionAccount() {
+			return p.runCursorConnectProbeForModel(ctx, acc, strings.TrimSpace(scope))
+		}
+		return p.probeUpstreamDataPlaneWithProtocolForModel(ctx, acc, scope,
+			shouldForwardOpenAIResponsesViaRawChatCompletions(acc))
 	}
-	return p.probeUpstreamDataPlaneWithProtocolForModel(ctx, acc, model, false)
+
+	if acc.Platform == PlatformDevin {
+		return p.probeDevinUpstreamForModel(ctx, acc, scope)
+	}
+
+	// scope 已是模型限流写入端保存的映射后名称；不得再按账号 model_mapping 映射一次。
+	return p.probeUpstreamDataPlaneWithProtocolForModel(ctx, acc, scope, false)
 }
 
 // probeModelScopeResolvedModel 对已解析为实际上游模型的 model 发出最小真实调用。

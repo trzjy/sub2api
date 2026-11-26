@@ -85,12 +85,11 @@ func (a *Account) isRateLimitBlockingForKey(key string) bool {
 	return true
 }
 
-// ModelProbeReasonExcluded 报告该 (scope, reason) 是否**仅凭 reason** 即可判定
-// 不属于批 2 探测链（404/401/plan-gated 模型不支持、TokenHarbor 免费档）。
-// 返回 true 表示写入路径无需读取账号即可跳过排程、照常提交条目。
-// 判定与 isModelProbeOwned 中的 reason 分支逐字一致（复用同一组常量与前缀）。
-// scope 参与签名但不参与判定：是否排除完全由 reason 决定，与 scope/账号无关；
-// 生图 scope 能否接管取决于账号余额探测开关，无法仅凭 reason 判定，故返回 false。
+// ModelProbeReasonExcluded 报告该 (scope, reason) 是否可在不读取账号的前提下判定
+// 不属于通用模型探测链（不支持模型、TokenHarbor 免费档或来源专属 scope）。
+// 返回 true 表示写入路径无需读取账号即可跳过通用模型探针排程、照常提交条目。
+// 特殊 scope 或 reason 的恢复由其来源专属链路负责；其余需账号配置的情况仍由
+// ModelProbeDue / isModelProbeOwned 按账号能力判定。
 func ModelProbeReasonExcluded(scope, reason string) bool {
 	switch reason {
 	case upstreamModelNotFoundReason, upstreamModelNotFound401Reason, upstreamCodexPlanGatedModelReason:
@@ -99,18 +98,31 @@ func ModelProbeReasonExcluded(scope, reason string) bool {
 	if strings.HasPrefix(reason, tokenHarborFreeTierReasonPrefix) {
 		return true
 	}
+	switch scope {
+	case clinePassRateLimitKey, clineCreditsRateLimitKey:
+		// Cline 钱包不是模型数据面；支持账号由 CNProviderQuotaService 恢复，其他账号
+		// 保留各自有限 cooldown，避免把钱包键作为模型名发送。
+		return true
+	case openAIImageGenerationRateLimitKey:
+		// 只有余额不足能由专用余额探针证明；API rate limit、能力和 OAuth 冷却按
+		// 各自的有限 reset/cooldown 到期，不可被余额探测或文本 chat 代替。
+		return reason != openAIImagesBalanceRateLimitReason
+	}
 	return false
 }
 
 // isModelProbeOwned 判定某条模型限流是否由本模型恢复探测链负责：
-// 404/401/plan-gated 与 tokenharbor 免费档由其它状态机负责；生图在无余额入口时不接管。
+// 404/401/plan-gated、TokenHarbor 免费档和 Cline 钱包由来源专属链路处理；OpenAI
+// 生图只有不足额且配置余额探针时由专用余额信号处理，其它图片冷却按 reset 到期。
 func isModelProbeOwned(scope string, entry map[string]any, account *Account) bool {
 	reason, _ := entry["reason"].(string)
 	if ModelProbeReasonExcluded(scope, reason) {
 		return false
 	}
-	if scope == openAIImageGenerationRateLimitKey && (account == nil || !account.BalanceProbeConfig().Enabled) {
-		return false
+	if scope == openAIImageGenerationRateLimitKey {
+		if account == nil || account.Platform != PlatformOpenAI || !account.BalanceProbeConfig().Enabled {
+			return false
+		}
 	}
 	return true
 }

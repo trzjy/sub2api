@@ -53,6 +53,111 @@ func TestNormalizeTier(t *testing.T) {
 func aqfBoolPtr(v bool) *bool { return &v }
 func aqfIntPtr(v int) *int    { return &v }
 
+func TestAntigravityUserQuotaHasAvailableModelScope(t *testing.T) {
+	quotas := map[string]antigravity.UserQuotaUsage{
+		"claude-sonnet-4-5": {ModelID: "claude-sonnet-4-5", RemainingFraction: 0},
+		"claude-opus-4-5":   {ModelID: "claude-opus-4-5", RemainingFraction: 0.7},
+		"gemini-3-flash":    {ModelID: "gemini-3-flash", RemainingFraction: 0.4},
+	}
+
+	require.False(t, antigravityUserQuotaHasAvailableModel(quotas, "claude-sonnet-4-5"),
+		"another Claude model's available bucket must not recover this scope")
+	require.True(t, antigravityUserQuotaHasAvailableModel(quotas, "claude-opus-4-5"))
+	require.True(t, antigravityUserQuotaHasAvailableModel(quotas, antigravityGeminiModelRateLimitKey),
+		"the existing Gemini family scope is proven by an available Gemini bucket")
+	require.True(t, antigravityUserQuotaHasAvailableModel(quotas, ""),
+		"account-level quota keeps its existing any-user-bucket semantics")
+	require.False(t, antigravityUserQuotaHasAvailableModel(map[string]antigravity.UserQuotaUsage{
+		"claude-opus-4-5": {ModelID: "claude-opus-4-5", RemainingFraction: 0.7},
+	}, antigravityGeminiModelRateLimitKey), "non-Gemini quota must not recover Gemini family scope")
+	require.False(t, antigravityUserQuotaHasAvailableModel(map[string]antigravity.UserQuotaUsage{
+		"gemini-3-image": {ModelID: "gemini-3-image", RemainingFraction: 0.7},
+	}, antigravityGeminiModelRateLimitKey), "Gemini image quota must not recover the non-image Gemini family scope")
+}
+
+func TestAntigravityEnabledCreditAvailable(t *testing.T) {
+	cases := []struct {
+		name    string
+		credits []antigravity.AvailableCredit
+		want    bool
+		wantErr bool
+	}{
+		{
+			name: "enabled credit above minimum",
+			credits: []antigravity.AvailableCredit{{
+				CreditType:                  antigravityAICreditType,
+				CreditAmount:                "25.5",
+				MinimumCreditAmountForUsage: "5",
+			}},
+			want: true,
+		},
+		{
+			name: "amount equals minimum",
+			credits: []antigravity.AvailableCredit{{
+				CreditType:                  antigravityAICreditType,
+				CreditAmount:                "5",
+				MinimumCreditAmountForUsage: "5",
+			}},
+			want: true,
+		},
+		{
+			name: "amount below minimum",
+			credits: []antigravity.AvailableCredit{{
+				CreditType:                  antigravityAICreditType,
+				CreditAmount:                "4.99",
+				MinimumCreditAmountForUsage: "5",
+			}},
+		},
+		{
+			name: "zero balance",
+			credits: []antigravity.AvailableCredit{{
+				CreditType:                  antigravityAICreditType,
+				CreditAmount:                "0",
+				MinimumCreditAmountForUsage: "0",
+			}},
+		},
+		{
+			name: "unrelated credit type",
+			credits: []antigravity.AvailableCredit{{
+				CreditType:                  "OTHER_CREDIT",
+				CreditAmount:                "25",
+				MinimumCreditAmountForUsage: "5",
+			}},
+		},
+		{
+			name: "missing amount fails closed",
+			credits: []antigravity.AvailableCredit{{
+				CreditType:                  antigravityAICreditType,
+				MinimumCreditAmountForUsage: "5",
+			}},
+			wantErr: true,
+		},
+		{
+			name: "invalid amount fails closed",
+			credits: []antigravity.AvailableCredit{{
+				CreditType:                  antigravityAICreditType,
+				CreditAmount:                "NaN",
+				MinimumCreditAmountForUsage: "5",
+			}},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := antigravityEnabledCreditAvailable(&antigravity.LoadCodeAssistResponse{
+				PaidTier: &antigravity.PaidTierInfo{AvailableCredits: tc.credits},
+			}, antigravityAICreditType)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestBuildUsageInfo_BasicModels(t *testing.T) {
 	fetcher := &AntigravityQuotaFetcher{}
 

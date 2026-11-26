@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,18 +138,88 @@ func (f *AntigravityQuotaFetcher) ProbeUserQuota(ctx context.Context, account *A
 	if len(aggregated) == 0 {
 		return false, fmt.Errorf("antigravity quota probe: empty aggregated buckets")
 	}
+	return antigravityUserQuotaHasAvailableModel(aggregated, model), nil
+}
+
+// ProbeAICredits checks the credit source used by Antigravity's enabledCreditTypes
+// retry. User model quota buckets do not prove that this separate credit balance is
+// usable.
+func (f *AntigravityQuotaFetcher) ProbeAICredits(ctx context.Context, account *Account, proxyURL string, tokens *AntigravityTokenProvider) (bool, error) {
+	if f == nil || account == nil {
+		return false, fmt.Errorf("antigravity AI credits probe: account is nil")
+	}
+	if tokens == nil {
+		return false, fmt.Errorf("antigravity AI credits probe: token provider is nil")
+	}
+	accessToken, err := tokens.GetAccessToken(ctx, account)
+	if err != nil {
+		return false, fmt.Errorf("antigravity AI credits probe: get access token: %w", err)
+	}
+	if strings.TrimSpace(accessToken) == "" {
+		return false, fmt.Errorf("antigravity AI credits probe: empty access token")
+	}
+	client, err := antigravity.NewClient(proxyURL)
+	if err != nil {
+		return false, fmt.Errorf("antigravity AI credits probe: create client: %w", err)
+	}
+	loadResp, _, err := client.LoadCodeAssist(ctx, accessToken)
+	if err != nil {
+		return false, fmt.Errorf("antigravity AI credits probe: load code assist: %w", err)
+	}
+	if loadResp == nil {
+		return false, fmt.Errorf("antigravity AI credits probe: empty response")
+	}
+	return antigravityEnabledCreditAvailable(loadResp, antigravityAICreditType)
+}
+
+func antigravityEnabledCreditAvailable(response *antigravity.LoadCodeAssistResponse, creditType string) (bool, error) {
+	if response == nil {
+		return false, fmt.Errorf("antigravity AI credits probe: empty response")
+	}
+	for _, credit := range response.GetAvailableCredits() {
+		if !strings.EqualFold(strings.TrimSpace(credit.CreditType), strings.TrimSpace(creditType)) {
+			continue
+		}
+		amountRaw := strings.TrimSpace(credit.CreditAmount)
+		minimumRaw := strings.TrimSpace(credit.MinimumCreditAmountForUsage)
+		if amountRaw == "" || minimumRaw == "" {
+			return false, fmt.Errorf("antigravity AI credits probe: credit amount fields missing")
+		}
+		amount, err := strconv.ParseFloat(amountRaw, 64)
+		if err != nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
+			return false, fmt.Errorf("antigravity AI credits probe: invalid credit amount")
+		}
+		minimum, err := strconv.ParseFloat(minimumRaw, 64)
+		if err != nil || math.IsNaN(minimum) || math.IsInf(minimum, 0) || minimum < 0 {
+			return false, fmt.Errorf("antigravity AI credits probe: invalid minimum credit amount")
+		}
+		return amount > 0 && amount >= minimum, nil
+	}
+	return false, nil
+}
+
+func antigravityUserQuotaHasAvailableModel(aggregated map[string]antigravity.UserQuotaUsage, model string) bool {
 	target := normalizeAntigravityModelName(strings.TrimSpace(model))
 	if target != "" {
-		if bucket, ok := aggregated[target]; ok {
-			return bucket.RemainingFraction > 0, nil
+		if target == antigravityGeminiModelRateLimitKey {
+			for modelID, bucket := range aggregated {
+				if isAntigravityGeminiModel(modelID) && !isAntigravityGeminiImageModel(modelID) && bucket.RemainingFraction > 0 {
+					return true
+				}
+			}
+			return false
 		}
+		if bucket, ok := aggregated[target]; ok {
+			return bucket.RemainingFraction > 0
+		}
+		return false
 	}
 	for _, bucket := range aggregated {
 		if bucket.RemainingFraction > 0 {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // applyUserQuota 调 retrieveUserQuota 取该账号本人的订阅配额，覆盖 AntigravityQuota 里的使用率。

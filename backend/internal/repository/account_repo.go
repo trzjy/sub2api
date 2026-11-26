@@ -2877,12 +2877,12 @@ func (r *accountRepository) commitModelRateLimitSet(ctx context.Context, id int6
 			payload[k] = v
 		}
 		// 探测排程：归属本探测链时写入 probe_due_at / probe_gen（方案 §2.4）。
-		// 仅凭 reason 即可判定非探测链时（404/401/plan-gated/tokenharbor）跳过账号读取，
-		// 不排程、照常提交条目；其余（受管条目）仍走失败关闭：读账号失败或账号不存在时
-		// 整笔写入失败（不提交条目）——否则会持久化「无 probe_due_at」的限流条目，
-		// reset_at 到期即放行，违反「到期不放行」。
+		// reason/scope 判定由其他恢复链持有时（404/401/plan-gated/tokenharbor、Cline
+		// 钱包、非不足额的 OpenAI 生图冷却）跳过账号读取，不排程、照常提交条目；其余
+		//（通用探针持有的条目）仍走失败关闭：读账号失败或账号不存在时整笔写入失败，
+		// 避免持久化未排程的通用限流条目后在 reset_at 到期时未经探测放行。
 		if service.ModelProbeReasonExcluded(scope, reason) {
-			// 仅凭 reason 判定非探测链（404/401/plan-gated/tokenharbor）：不排程、照常提交，无需读账号。
+			// reason/scope 判定为其他来源持有：不排程、照常提交，无需读账号。
 		} else {
 			acc, aerr := r.GetByID(ctx, id)
 			if aerr != nil {

@@ -1,8 +1,8 @@
 //go:build unit
 
 // B2-D11a：ModelProbeReasonExcluded 的定向单测。
-// 锁定"仅凭 reason 即可排除"的判据：三个 404/401/plan-gated reason 与
-// tokenharbor 前缀 → true；空 reason、普通模型、生图 scope + 非排除 reason → false。
+// 锁定显式的 reason/scope 所有权排除：404/401/plan-gated、tokenharbor、Cline 钱包
+// 与无需余额探测的生图冷却跳过通用模型探针；普通模型和生图不足额仍进入对应探针。
 package service
 
 import (
@@ -26,7 +26,10 @@ func TestModelProbeReasonExcluded(t *testing.T) {
 		{"tokenharbor-prefix", modelScope, tokenHarborFreeTierReasonPrefix + ":x", true},
 		{"empty-reason", modelScope, "", false},
 		{"normal-model", modelScope, "rate_limit", false},
-		{"image-scope-normal-reason", openAIImageGenerationRateLimitKey, "rate_limit", false},
+		{"image-insufficient-balance-is-owned", openAIImageGenerationRateLimitKey, openAIImagesBalanceRateLimitReason, false},
+		{"image-rate-limit-uses-natural-reset", openAIImageGenerationRateLimitKey, openAIImageRateLimitReason, true},
+		{"cline-pass-wallet-is-owned-by-quota-service", clinePassRateLimitKey, clinePassLimitReason, true},
+		{"cline-credits-wallet-is-owned-by-quota-service", clineCreditsRateLimitKey, clineCreditsLowReason, true},
 	}
 
 	for _, tc := range cases {

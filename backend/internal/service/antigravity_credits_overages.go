@@ -16,6 +16,7 @@ const (
 	// creditsExhaustedKey 是 model_rate_limits 中标记积分耗尽的特殊 key。
 	// 与普通模型限流完全同构：通过 SetModelRateLimit / isRateLimitActiveForKey 读写。
 	creditsExhaustedKey      = "AICredits"
+	antigravityAICreditType  = "GOOGLE_ONE_AI"
 	creditsExhaustedDuration = 5 * time.Hour
 )
 
@@ -142,7 +143,7 @@ func injectEnabledCreditTypes(body []byte) []byte {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil
 	}
-	payload["enabledCreditTypes"] = []string{"GOOGLE_ONE_AI"}
+	payload["enabledCreditTypes"] = []string{antigravityAICreditType}
 	result, err := json.Marshal(payload)
 	if err != nil {
 		return nil

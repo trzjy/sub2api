@@ -59,7 +59,7 @@ func TestModelRateLimitBlockingForKey(t *testing.T) {
 func TestModelProbeOwned(t *testing.T) {
 	withBalanceProbe := &Account{Credentials: map[string]any{
 		BalanceProbeConfigCredentialKey: map[string]any{"enabled": true},
-	}}
+	}, Platform: PlatformOpenAI}
 	withoutBalanceProbe := &Account{}
 
 	cases := []struct {
@@ -73,9 +73,13 @@ func TestModelProbeOwned(t *testing.T) {
 		{"upstream-401", "m-model", upstreamModelNotFound401Reason, withoutBalanceProbe, false},
 		{"codex-plan-gated", "m-model", upstreamCodexPlanGatedModelReason, withoutBalanceProbe, false},
 		{"tokenharbor-prefix", "m-model", tokenHarborFreeTierReasonPrefix + ":x", withoutBalanceProbe, false},
-		{"image-no-balance-probe", openAIImageGenerationRateLimitKey, "rate_limit", withoutBalanceProbe, false},
-		{"image-nil-account", openAIImageGenerationRateLimitKey, "rate_limit", nil, false},
-		{"image-with-balance-probe", openAIImageGenerationRateLimitKey, "rate_limit", withBalanceProbe, true},
+		{"image-insufficient-balance-without-balance-probe", openAIImageGenerationRateLimitKey, openAIImagesBalanceRateLimitReason, withoutBalanceProbe, false},
+		{"image-insufficient-balance-nil-account", openAIImageGenerationRateLimitKey, openAIImagesBalanceRateLimitReason, nil, false},
+		{"image-insufficient-balance-with-balance-probe", openAIImageGenerationRateLimitKey, openAIImagesBalanceRateLimitReason, withBalanceProbe, true},
+		{"image-rate-limit-not-owned-by-balance-probe", openAIImageGenerationRateLimitKey, openAIImageRateLimitReason, withBalanceProbe, false},
+		{"image-capability-loss-not-owned-by-balance-probe", openAIImageGenerationRateLimitKey, openAIImageCapabilityLossReason, withBalanceProbe, false},
+		{"cline-pass-wallet-not-model-probe", clinePassRateLimitKey, clinePassLimitReason, &Account{Platform: PlatformCline}, false},
+		{"cline-credits-wallet-not-model-probe", clineCreditsRateLimitKey, clineCreditsLowReason, &Account{Platform: PlatformCline}, false},
 		{"normal-model", "m-model", "rate_limit", withoutBalanceProbe, true},
 		{"normal-model-nil-reason", "m-model", "", withoutBalanceProbe, true},
 	}
@@ -145,6 +149,22 @@ func TestModelProbeDue(t *testing.T) {
 	require.True(t, due.IsZero())
 
 	ok, due = ModelProbeDue(accs[0].acc, "m-model", upstreamModelNotFoundReason, resetAt, false, now)
+	require.False(t, ok)
+	require.True(t, due.IsZero())
+
+	// 图片专用 scope 只排程可由余额接口验证的不足额状态；其它图片冷却按 reset 到期。
+	ok, due = ModelProbeDue(accs[0].acc, openAIImageGenerationRateLimitKey, openAIImageRateLimitReason, resetAt, false, now)
+	require.False(t, ok)
+	require.True(t, due.IsZero())
+
+	ok, due = ModelProbeDue(&Account{Platform: PlatformOpenAI, Credentials: map[string]any{
+		BalanceProbeConfigCredentialKey: map[string]any{"enabled": true},
+	}}, openAIImageGenerationRateLimitKey, openAIImagesBalanceRateLimitReason, resetAt, false, now)
+	require.True(t, ok)
+	require.Equal(t, now.Add(5*time.Minute), due)
+
+	// Cline 钱包冷却由周期额度服务写入/解除，不进入通用模型探针。
+	ok, due = ModelProbeDue(&Account{Platform: PlatformCline}, clinePassRateLimitKey, clinePassLimitReason, resetAt, false, now)
 	require.False(t, ok)
 	require.True(t, due.IsZero())
 }

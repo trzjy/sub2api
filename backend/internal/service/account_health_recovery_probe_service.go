@@ -1134,8 +1134,8 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 	if acc != nil && acc.Platform == PlatformCursor {
 		return p.probeCursorUpstream(ctx, acc)
 	}
-	// AC-B1：CodeBuddy 平台账号（影子或直绑）有专用探测面——改派 CodeBuddy 探测分发器
-	//（影子走既有 chat 探测、直绑走 billing-meter 探测）。判定用
+	// CodeBuddy 平台账号（影子或直绑）统一走按账号形态选模型的实际 chat 探测。
+	// 判定用
 	// isCodeBuddyPlatformAccount（直绑 platform=codebuddy）|| isCodeBuddyShadowAccount
 	//（存量影子），二者均复用既有函数，不得新写判定（方案 §三 卡 B）。
 	if isCodeBuddyPlatformAccount(acc) || isCodeBuddyShadowAccount(acc) {
@@ -1163,6 +1163,10 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 // 继续下一个候选，逐个试完；全部失败才返回错误（含尝试数与最后一个错误原因），避免
 // 某个模型被禁就误判整账号 status=error。
 func (p *AccountHealthRecoveryProbeService) probeDevinUpstream(ctx context.Context, acc *Account) (bool, error) {
+	return p.probeDevinUpstreamForModel(ctx, acc, "")
+}
+
+func (p *AccountHealthRecoveryProbeService) probeDevinUpstreamForModel(ctx context.Context, acc *Account, requestedModel string) (bool, error) {
 	token := strings.TrimSpace(acc.GetDevinToken())
 	if token == "" {
 		return false, errors.New("devin account has no api key")
@@ -1180,22 +1184,26 @@ func (p *AccountHealthRecoveryProbeService) probeDevinUpstream(ctx context.Conte
 		keys = append(keys, trimmed)
 	}
 	sort.Strings(keys)
-	if len(keys) == 0 {
+	if len(keys) == 0 && strings.TrimSpace(requestedModel) == "" {
 		return false, errors.New("devin account has no testable model")
 	}
-	if len(keys) > devinProbeMaxCandidates {
+	if strings.TrimSpace(requestedModel) == "" && len(keys) > devinProbeMaxCandidates {
 		keys = keys[:devinProbeMaxCandidates]
 	}
 
 	// 每个候选经 ResolveMappedModel 解析为上游 uid；解析不到或为空则跳过。
 	// 全部解析不到则在鉴权前失败关闭（保持既有失败关闭语义）。
 	upstreamUIDs := make([]string, 0, len(keys))
-	for _, key := range keys {
-		uid, matched := acc.ResolveMappedModel(key)
-		if !matched || strings.TrimSpace(uid) == "" {
-			continue
+	if strings.TrimSpace(requestedModel) != "" {
+		upstreamUIDs = append(upstreamUIDs, strings.TrimSpace(requestedModel))
+	} else {
+		for _, key := range keys {
+			uid, matched := acc.ResolveMappedModel(key)
+			if !matched || strings.TrimSpace(uid) == "" {
+				continue
+			}
+			upstreamUIDs = append(upstreamUIDs, uid)
 		}
-		upstreamUIDs = append(upstreamUIDs, uid)
 	}
 	if len(upstreamUIDs) == 0 {
 		return false, errors.New("devin account has no mapped upstream model")
@@ -1348,6 +1356,13 @@ func (p *AccountHealthRecoveryProbeService) runCursorConnectProbe(ctx context.Co
 		// 无可用出站模型属配置错误，降级到到期恢复（既有 degraded 语义），不伪造失败。
 		return false, errors.New("cursor connect probe has no model to probe")
 	}
+	return p.runCursorConnectProbeForModel(ctx, acc, upstreamModel)
+}
+
+func (p *AccountHealthRecoveryProbeService) runCursorConnectProbeForModel(ctx context.Context, acc *Account, upstreamModel string) (bool, error) {
+	if p.cursorExec == nil {
+		return false, errors.New("cursor execution service not configured for connect-session probe")
+	}
 	fn := p.cursorAgentRunProbe
 	if fn == nil {
 		fn = ProbeCursorAccountHealth
@@ -1406,25 +1421,18 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolFo
 		// 无可用凭据属配置错误，降级到到期恢复（既有 degraded 语义），不伪造失败。
 		return false, errors.New("probe account has no api key")
 	}
-	// 探测模型：优先用熔断时记录的触发模型（TempUnschedState.Model），
-	// 空则回落平台默认测试模型，再空回落 openai.DefaultTestModel。cursor 平台账号额外
-	// 从 model_mapping 全体都有的键（gpt-6.1-sol / claude-fable-5-1）回落，避免落到只有
-	// oauth 型才有的 claude-opus-5-5 / gpt-6-astra（apikey 型 134 个全无）⇒ 探不到可用
-	// 模型 ⇒ 账号永不解封（E12 的 424 同类风险）。非 cursor 账号走既有通用回落，逐字不变。
-	// 批 2：调用方显式传入非空 model 时直接采用，不再执行下列回落（含 cursor 分支）。
+	// 显式 model 和 probeModelForAccount 都是已解析的上游模型名。Cursor 账号级探针
+	// 单独从其 model_mapping 取一个入站键，再解析为相同的上游名。
 	if model == "" {
 		model = p.probeModelForAccount(acc)
 		if acc.Platform == PlatformCursor {
-			model = p.cursorProbeModelKey(acc)
+			model = p.cursorProbeOutboundModel(acc)
 		}
 	}
 	if model == "" {
 		return false, errors.New("probe account has no model to probe")
 	}
-	upstreamModel := resolveOpenAIAccountUpstreamModelForRequest(acc, model, false)
-	if strings.TrimSpace(upstreamModel) == "" {
-		upstreamModel = model
-	}
+	upstreamModel := normalizeOpenAIModelForUpstream(acc, model)
 
 	baseURL := acc.GetOpenAIBaseURL()
 	if strings.TrimSpace(baseURL) == "" {
@@ -1734,23 +1742,25 @@ func evaluateProbeDataPlaneResponse(statusCode int, body []byte, useResponses bo
 // ---------------------------------------------------------------------------
 
 // probeCodeBuddyUpstream 是 CodeBuddy 平台账号（影子或直绑）的探测分发器：
-//   - 影子（isCodeBuddyShadowAccount）：走既有最小流式 chat 探测
-//     probeCodeBuddyShadowUpstream（零改动，请求/判定同源转发链）；
-//   - 直绑（isCodeBuddyPlatformAccount 命中、非影子）：走新增 billing-meter 探测
-//     probeCodeBuddyDirectUpstream——直绑账号无 extra.shadow_model，复用 chat 探测
-//     必因缺模型键降级（r4 阻塞1 回修），故直绑单独用配额面。
+//   - 影子账号使用其 shadow_model 与母账号凭证；
+//   - 直绑账号使用自身配置模型与凭证。
+//
+// 两者都以最小流式 chat 完成证据确认数据面恢复。
 //
 // 调用方 probeUpstream 已在进入本函数前用 isCodeBuddyPlatformAccount ||
 // isCodeBuddyShadowAccount 收窄，故此处只需按影子/直绑二分。
 func (p *AccountHealthRecoveryProbeService) probeCodeBuddyUpstream(ctx context.Context, acc *Account) (bool, error) {
+	model := ""
 	if isCodeBuddyShadowAccount(acc) {
-		return p.probeCodeBuddyShadowUpstream(ctx, acc)
+		model = strings.TrimSpace(acc.GetExtraString(ShadowModelExtraKey))
+	} else {
+		model = p.probeModelForAccount(acc)
 	}
-	return p.probeCodeBuddyDirectUpstream(ctx, acc)
+	return p.probeCodeBuddyChatUpstream(ctx, acc, model)
 }
 
 // ---------------------------------------------------------------------------
-// CodeBuddy 影子流式 chat 探测（方案 T4，R2-F1/R3-F2）
+// CodeBuddy 流式 chat 探测（方案 T4，R2-F1/R3-F2）
 // ---------------------------------------------------------------------------
 
 // codeBuddyShadowProbeTimeout 单次探测超时，与既有 /models 探测同款（15s）。
@@ -1764,26 +1774,10 @@ const codeBuddyShadowProbeMaxBodyBytes = 256 << 10
 // 规则 3b 要求首条消息为 system）；内容保持极短且不含任何框架指纹。
 const codeBuddyShadowProbeSystemMessage = "health probe"
 
-// probeCodeBuddyShadowUpstream 对 CodeBuddy 影子账号发一次最小流式 chat 探测。
-//
-// AC-B1 起本函数语义收窄为「影子型专用」子路径：由 probeCodeBuddyUpstream 按
-// isCodeBuddyShadowAccount 分派而来，直绑账号改走 probeCodeBuddyDirectUpstream
-// （billing-meter 探测，直绑无 extra.shadow_model，复用本函数必降级）。
-//
-// 协议约束（R2-F1）：上游强制 stream:true（codebuddy_upstream.go 规则 1，非流式直发
-// 会被拒绝导致探测永远失败），故探测请求必须 stream:true 并复用既有本地 SSE 聚合
-// （aggregateOpenAIChatCompletionsSSE）后再判定。端点用 chat completions（站点 SSOT
-// codebuddy_site.go + codeBuddyChatCompletionsPath），明确不复用 testCodeBuddyAccountConnection
-// 的 billing meter 端点（只读配额面，不经过 chat 上游，探不出 chat 链路健康）。
-//
-// 传输栈与转发链同源：token 解析 codeBuddyTestAccessToken 同口径、影子→母账号凭证
-// 透传（resolveCredentialAccount 同语义，走探测窄仓库）、站点 SSOT、UA/代理/TLS 与
-// buildCodeBuddyChatRequest 一致。
-//
-// 成功判定为四条件（R3-F2，缺一即探测失败、保持停调）：HTTP 2xx + 聚合体为有效
-// chat completion（choices 非空、无业务错误信封）+ 原始 SSE 含 data: [DONE] 正常
-// 终止 + 全程无错误帧。构造/凭证类错误返回 error → 调用方降级到期恢复（既有语义）。
-func (p *AccountHealthRecoveryProbeService) probeCodeBuddyShadowUpstream(ctx context.Context, acc *Account) (bool, error) {
+// probeCodeBuddyChatUpstream verifies the model data plane for direct and shadow accounts.
+// CodeBuddy requires stream=true. The shared probe also checks the aggregated
+// completion, [DONE] terminator, and absence of upstream error frames.
+func (p *AccountHealthRecoveryProbeService) probeCodeBuddyChatUpstream(ctx context.Context, acc *Account, model string) (bool, error) {
 	if p.accountRepo == nil {
 		return false, errors.New("probe account repo not configured")
 	}
@@ -1805,10 +1799,10 @@ func (p *AccountHealthRecoveryProbeService) probeCodeBuddyShadowUpstream(ctx con
 		credAccount = parent
 	}
 
-	// 模型取影子 extra.shadow_model（转发链权威模型）；缺失则无法构造 chat 探测 → 降级。
-	shadowModel := strings.TrimSpace(acc.GetExtraString(ShadowModelExtraKey))
-	if shadowModel == "" {
-		return false, errors.New("codebuddy shadow has no shadow_model to probe")
+	// 模型来自影子 extra.shadow_model，或直绑/模型级调用方指定的真实 scope。
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false, errors.New("codebuddy account has no model to probe")
 	}
 
 	token := codeBuddyTestAccessToken(credAccount)
@@ -1820,9 +1814,9 @@ func (p *AccountHealthRecoveryProbeService) probeCodeBuddyShadowUpstream(ctx con
 	// PrepareCodeBuddyBody 归一，保证全部协议规则（强制 stream、tool_choice 归一、
 	// DeepSeek thinking 注入等）与转发链一致。探测体不设 reasoning_effort，
 	// SupportedEfforts 留空（规则 5 对无该字段的请求是 no-op）。
-	probeBody, err := PrepareCodeBuddyBody(codeBuddyShadowProbeBody(shadowModel), CodeBuddyRewriteOptions{
+	probeBody, err := PrepareCodeBuddyBody(codeBuddyShadowProbeBody(model), CodeBuddyRewriteOptions{
 		Sanitize: p.codeBuddyProbeSanitizeEnabled(),
-		Model:    shadowModel,
+		Model:    model,
 	})
 	if err != nil {
 		return false, fmt.Errorf("prepare codebuddy probe body: %w", err)
@@ -1853,121 +1847,6 @@ func (p *AccountHealthRecoveryProbeService) probeCodeBuddyShadowUpstream(ctx con
 
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, codeBuddyShadowProbeMaxBodyBytes))
 	return evaluateCodeBuddyShadowProbeResponse(resp.StatusCode, raw), nil
-}
-
-// ---------------------------------------------------------------------------
-// CodeBuddy 直绑 billing-meter 探测（方案 §三 卡 B，AC-B1；r4 阻塞1 回修）
-// ---------------------------------------------------------------------------
-
-// probeCodeBuddyDirectUpstream 对 CodeBuddy 直绑账号（platform=codebuddy、非影子）
-// 发一次 billing-meter 配额面探测。
-//
-// 背景（r4 阻塞1）：存量 probeCodeBuddyShadowUpstream 硬依赖 extra.shadow_model，
-// 直绑账号无此键，复用必失败降级。直绑用自身凭据与自身站点（acc.CodeBuddySite()，
-// 不查母账号），请求形态逐字段对齐 testCodeBuddyAccountConnection
-// （account_test_service.go）：POST {BillingBase}/v2/billing/meter/get-user-resource、
-// body {}、CodeBuddyClientUA、Origin/Referer、X-Product: SaaS、X-User-Id/
-// X-No-Enterprise-Id/X-Domain、Bearer codeBuddyTestAccessToken(acc)、15s 超时
-// （复用 codeBuddyShadowProbeTimeout）。
-//
-// 判定（卡 B 明示）：2xx = 恢复；401/403 与任何非 2xx 一律保持停调（fail-closed），
-// 与 /models 探测同语义——返回 (false, nil) 而非 error，避免误触降级到期恢复。
-func (p *AccountHealthRecoveryProbeService) probeCodeBuddyDirectUpstream(ctx context.Context, acc *Account) (bool, error) {
-	if p.httpUpstream == nil || p.cfg == nil {
-		return false, errors.New("probe transport not configured")
-	}
-	token := codeBuddyTestAccessToken(acc)
-	if token == "" {
-		return false, errors.New("codebuddy direct account is missing access_token credential")
-	}
-
-	req, err := buildCodeBuddyDirectBillingProbeRequest(ctx, acc)
-	if err != nil {
-		return false, fmt.Errorf("build codebuddy direct probe request: %w", err)
-	}
-
-	proxyURL := ""
-	if acc.ProxyID != nil && acc.Proxy != nil {
-		proxyURL = acc.Proxy.URL()
-	}
-	var tlsProfile *tlsfingerprint.Profile
-	if p.tlsFPProfileService != nil {
-		tlsProfile = p.tlsFPProfileService.ResolveTLSProfile(acc)
-	}
-
-	callCtx, cancel := context.WithTimeout(ctx, codeBuddyShadowProbeTimeout)
-	defer cancel()
-	resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
-	if err != nil {
-		// 传输失败与 /models、chat 探测同语义：上游不可达即不健康，保持停调（非降级）。
-		return false, nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// 卡 B 判定（AC-G2R-1 整改）：2xx ≠ 恢复。直绑 billing-meter 配额面与 web 探活
-	// 同源缺陷（account_test_service.go:evaluateCodeBuddyProbeBody）——认证/业务错误
-	// 随 HTTP 200 返回，空 body 也可能被误判。必须按响应体内容判定后才算恢复：仅当
-	// 2xx 且 evaluateCodeBuddyProbeBody 返回 ""（健康）才清停调；2xx 但业务校验不过 =
-	// 探测失败（保持停调，fail-closed，返回 false, nil 而非 error，以免误触降级到期恢复）。
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, nil
-	}
-	if reason := evaluateCodeBuddyProbeBody(raw); reason != "" {
-		logger.L().Warn("openai.apikey_health_probe_codebuddy_direct_body_rejected",
-			zap.Int64("account_id", acc.ID),
-			zap.String("reason", reason),
-		)
-		return false, nil
-	}
-	return true, nil
-}
-
-// buildCodeBuddyDirectBillingProbeRequest 构造 CodeBuddy 直绑 billing-meter 探测请求，
-// 请求形状与 testCodeBuddyAccountConnection（account_test_service.go）同源：
-// POST {BillingBase}/v2/billing/meter/get-user-resource、body {}、指纹头
-// （Content-Type/Accept/X-Requested-With/Origin/Referer/UA/X-Product）、
-// Authorization: Bearer + token、身份头 X-User-Id/X-No-*: 1 占位（取自账号自身，
-// 直绑不查母账号）、账号级 ApplyHeaderOverrides 最后应用。
-func buildCodeBuddyDirectBillingProbeRequest(ctx context.Context, acc *Account) (*http.Request, error) {
-	ep := codeBuddyEndpointsFor(acc.CodeBuddySite())
-	targetURL := strings.TrimRight(ep.BillingBase, "/") + codeBuddyBillingMeterPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader([]byte("{}")))
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", ep.OriginReferer)
-	req.Header.Set("Referer", ep.OriginReferer+"/")
-	req.Header.Set("User-Agent", CodeBuddyClientUA)
-	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("Authorization", "Bearer "+codeBuddyTestAccessToken(acc))
-
-	uid := acc.GetCredential("uid")
-	enterpriseID := acc.GetCredential("enterprise_id")
-	domain := acc.GetCredential("domain")
-	if uid != "" {
-		req.Header.Set("X-User-Id", uid)
-	} else {
-		req.Header.Set("X-No-User-Id", "1")
-	}
-	if enterpriseID != "" {
-		req.Header.Set("X-Enterprise-Id", enterpriseID)
-	} else {
-		req.Header.Set("X-No-Enterprise-Id", "1")
-	}
-	if domain != "" {
-		req.Header.Set("X-Domain", domain)
-	} else {
-		req.Header.Set("X-No-Domain", "1")
-	}
-
-	acc.ApplyHeaderOverrides(req.Header)
-	return req, nil
 }
 
 // codeBuddyShadowProbeBody 构造最小探测请求体（构造失败返回 nil，由

@@ -325,7 +325,7 @@ func (r *accountRepository) ListModelRateLimitProbeDue(ctx context.Context, now 
 	return out, nil
 }
 
-// modelProbePatchGuardCTE 是 PatchModelRateLimitEntry 三分支共用的来源守卫：仅当目标行
+// modelProbePatchGuardCTE 是 PatchModelRateLimitEntry 各分支共用的来源守卫：仅当目标行
 // 未删除、且目标 scope 条目的 probe_gen 仍等于 expectedGen（FOR UPDATE 锁定读）时，
 // 才在数据库当前行上落笔。任一支均只动目标 scope，不写 meta、不碰兄弟 scope。
 const modelProbePatchGuardCTE = `WITH cur AS (
@@ -341,7 +341,8 @@ const modelProbePatchGuardCTE = `WITH cur AS (
 // PatchModelRateLimitEntry 在代际匹配时对单个 (accountID, scope) 条目做最小改动：
 //   - reschedule：合并 probe_due_at/probe_gen（失败重排，gen 取新值）；
 //   - observe：合并 {$4: $5}（ObserveKey/Observe，观测写回）；
-//   - delete-scope：从 model_rate_limits 桶移除该 scope（不清除 meta）。
+//   - delete-scope：从 model_rate_limits 桶移除该 scope（不清除 meta）；
+//   - drop-schedule：仅移除该 scope 的 probe_due_at / probe_gen，保留限流状态。
 //
 // 零写入返回 (false, nil)；成功落笔后复用批 1 的调度副作用并返回 (true, nil)。
 func (r *accountRepository) PatchModelRateLimitEntry(ctx context.Context, accountID int64, scope string, expectedGen int64, patch service.ModelProbePatch) (bool, error) {
@@ -386,6 +387,19 @@ func (r *accountRepository) PatchModelRateLimitEntry(ctx context.Context, accoun
 				COALESCE(a.extra, '{}'::jsonb),
 				ARRAY['model_rate_limits'],
 				COALESCE(a.extra->'model_rate_limits', '{}'::jsonb) - $2::text,
+				true
+			)`
+		args = []any{accountID, scope, expectedGen}
+	case service.ModelProbePatchDropSchedule:
+		extraExpr = `jsonb_set(
+				COALESCE(a.extra, '{}'::jsonb),
+				ARRAY['model_rate_limits'],
+				jsonb_set(
+					COALESCE(a.extra->'model_rate_limits', '{}'::jsonb),
+					ARRAY[$2]::text[],
+					(COALESCE(a.extra->'model_rate_limits'->$2::text, '{}'::jsonb) - 'probe_due_at' - 'probe_gen'),
+					true
+				),
 				true
 			)`
 		args = []any{accountID, scope, expectedGen}

@@ -224,7 +224,8 @@ func (p *AccountHealthRecoveryProbeService) probeQuotaSignal(ctx context.Context
 		if acc.Proxy != nil {
 			proxyURL = acc.Proxy.URL()
 		}
-		return p.antigravityQuota.ProbeUserQuota(ctx, acc, proxyURL, p.probeModelForAccount(acc), p.antigravityTokens)
+		// 账号级停调由账号任一真实用户额度 bucket 证明；模型级恢复会单独传入精确 scope。
+		return p.antigravityQuota.ProbeUserQuota(ctx, acc, proxyURL, "", p.antigravityTokens)
 	case acc.Platform == PlatformCursor && acc.QuotaKeyID != nil && *acc.QuotaKeyID > 0:
 		if p.cursorEntry == nil {
 			return false, fmt.Errorf("cursor quota probe is not wired")
@@ -233,13 +234,29 @@ func (p *AccountHealthRecoveryProbeService) probeQuotaSignal(ctx context.Context
 		if err != nil {
 			return false, err
 		}
-		if info == nil || info.TodayRemainingCent == nil {
-			return false, fmt.Errorf("cursor quota observation missing today_remaining")
-		}
-		return *info.TodayRemainingCent > 0, nil
+		return cursorQuotaObservationAvailable(info)
 	}
 	// 无额度入口：退化为实际调用（用户裁定 5）。
 	return p.probeUpstream(ctx, acc)
+}
+
+func cursorQuotaObservationAvailable(info *KeyQuotaLookupInfo) (bool, error) {
+	if info == nil {
+		return false, fmt.Errorf("cursor quota observation is nil")
+	}
+	if info.Unit != "" && info.Unit != "usd_cent" {
+		return false, fmt.Errorf("cursor quota observation has unknown unit %q", info.Unit)
+	}
+	if info.Unit == "usd_cent" && info.TodayRemainingCent == nil {
+		return false, fmt.Errorf("cursor quota observation missing today_remaining")
+	}
+	snapshot := QuotaKeyUsageSnapshot{
+		Total:              &info.Max,
+		Used:               &info.Used,
+		TodayRemainingCent: info.TodayRemainingCent,
+		Unit:               info.Unit,
+	}
+	return !QuotaKeyUsageExhausted(snapshot), nil
 }
 
 func (p *AccountHealthRecoveryProbeService) rescheduleComponent(ctx context.Context, accountID int64, component string, gen int64, due time.Time) {
