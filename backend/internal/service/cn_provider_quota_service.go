@@ -58,6 +58,14 @@ const (
 // CN 额度探测链路内部识别，与 GetCodingPlanProvider 的返回一致。
 const providerVolcano = "volcano"
 
+// providerAliyun 标识阿里云百炼 Token Plan 订阅账号，作为 CN 额度探测链路内部
+// 供应商 token 参与额度快照键与调度路由。
+//
+// 它不是 accounts.platform 平台枚举（阿里号平台常被存为 glm/deepseek/kimi，
+// 伪装身份 + 路由分组），只用于额度探测链路内部识别，与 resolveCNQuotaProvider
+// 的返回一致。判定依据是 **base_url**（阿里 Token Plan 入口主机），不是 platform。
+const providerAliyun = "aliyun"
+
 // cnExtraKey 拼接 provider 维度的 extra 键。
 func cnExtraKey(provider, suffix string) string { return provider + "_" + suffix }
 
@@ -87,6 +95,12 @@ func isVolcanoBaseURL(baseURL string) bool {
 // Kimi 结构的 0% 周用量且缺失 5h/月档。凭据 base_url 才是火山订阅号的唯一事实源，
 // 故先用 GetBaseURL()（= ark.cn-beijing.volces.com）强制识别为火山。
 func resolveCNQuotaProvider(account *Account) string {
+	// 阿里云百炼 Token Plan 优先：这类账号 platform 常被存为 glm/deepseek/kimi
+	//（伪装身份 + 路由分组），但真实上游是阿里，且阿里是**聚合订阅**（一份套餐给
+	// qwen/glm/deepseek/kimi 全家族模型），按 platform 分发必错。base_url 才是事实源。
+	if isAliyunTokenPlanBaseURL(account.GetBaseURL()) || isAliyunTokenPlanBaseURL(account.GetOpenAIBaseURL()) {
+		return providerAliyun
+	}
 	// Kira（kiraai.vn）优先：这类账号 platform 常被存为 kimi/deepseek/zhipu，
 	// base_url 才是上游事实源（详见 cn_provider_kira.go），不能按 platform /
 	// 官方域名分发。
@@ -182,9 +196,21 @@ type CNProviderQuotaProbeResult struct {
 	FetchedAt  int64                     `json:"fetched_at"`
 	Persisted  bool                      `json:"persisted"`
 	Error      string                    `json:"error,omitempty"`
+	// ErrorCode 是稳定的机器可读错误码（前端据此显示中文提示，不解析 Error 文案）。
+	// 阿里分支的码见 aliyun 段的 ALIYUN_ERR_* 常量。
+	ErrorCode string `json:"error_code,omitempty"`
 
 	// Balance 为同一次探测得到的余额（Command Code 积分与窗口同源），其余供应商为空。
 	Balance *CNProviderBalanceResult `json:"balance,omitempty"`
+
+	// AliyunUsage 是阿里 Token Plan 的用量快照（阿里分支填充，其余供应商为空）。
+	//
+	// 为什么单独挂一份而不是让前端只读 account.extra：
+	// 探测成功后快照确实写进了 extra，但**列表页手里那份 account 对象还是探测前的旧
+	// extra** ⇒ 爹点了「查询」之后，格子里的数字纹丝不动，必须手动刷新整个列表才变。
+	// 把同一份快照随探测结果直接返回，前端当场就能渲染出真实数字。
+	// 口径与 extra 里那份完全一致（同一个 aliyunQuotaSnapshot 结构、同一份数据）。
+	AliyunUsage *aliyunQuotaSnapshot `json:"aliyun_usage,omitempty"`
 }
 
 // CNProviderQuotaService 探测 Kimi / Zhipu / MiniMax / 火山方舟 / Kira Coding Plan、
@@ -296,6 +322,12 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	}
 	if provider == PlatformCline {
 		return s.queryClineUsage(ctx, account)
+	}
+	// 阿里 Token Plan：读官方数据（团队席位版直读官方剩余额度；个人版读官方
+	// quota-config 档位配额 + 官方 usage 接口的百分比/重置时间），不做本地实算。
+	// 实证见 aliyun_token_plan_official.go 文件头。
+	if provider == providerAliyun {
+		return s.aliyunProbeTokenPlan(ctx, account)
 	}
 	if provider != PlatformKimi && provider != PlatformZhipu && provider != PlatformMiniMax && provider != providerVolcano && provider != providerKira && provider != PlatformOpenCodeGo {
 		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/minimax/volcano/kira/opencode go coding plan account")
@@ -632,8 +664,12 @@ func validateCodingPlanAccount(account *Account) error {
 	// 火山订阅号账号（platform=deepseek，base_url=ark.cn-beijing.volces.com）保存为
 	// payg 时同样具备可探测的 Coding/Agent Plan 额度，放行非 coding；Kira（kiraai.vn）
 	// 账号无论 payg/coding 都有 dashboard 用量端点（cn_provider_kira.go），同样放行；
+	// 阿里 Token Plan 订阅号（base_url=token-plan.*.maas.aliyuncs.com）同理按
+	// base_url 放行（其 platform 恒为 glm/deepseek/kimi，与订阅语义无关）；
 	// 其余 CN 供应商仍仅限 coding。
-	if !account.IsCodingPlan() && !isVolcanoBaseURL(account.GetOpenAIBaseURL()) && !accountIsKiraBaseURL(account) {
+	if !account.IsCodingPlan() && !isVolcanoBaseURL(account.GetOpenAIBaseURL()) &&
+		!accountIsKiraBaseURL(account) && !isAliyunTokenPlanBaseURL(account.GetBaseURL()) &&
+		!isAliyunTokenPlanBaseURL(account.GetOpenAIBaseURL()) {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a coding plan account")
 	}
 	return nil

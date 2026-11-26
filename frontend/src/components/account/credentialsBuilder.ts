@@ -701,6 +701,24 @@ export function resolveAccountBaseURL(credentials: Record<string, unknown> | und
 // 避免字符串 Contains 把带相似子串的主机（如 evil-ark.cn-beijing.volces.com、
 // https://evil.example/?next=ark.cn-beijing.volces.com）误判为火山订阅号，造成
 // 可见性/配额探测/AK-SK 录入前后端不一致。
+// 阿里云百炼 Token Plan 订阅号（sk-sp- 专属 Key）。这是聚合订阅——一个套餐同时提供
+// qwen / glm / deepseek / kimi 等多家族模型，账号挂哪个分组只是路由/伪装身份，不能
+// 按分组词根过滤上游模型（会把 qwen 等模型全丢掉）。用 URL 主机名精确判定，与后端
+// isAliyunTokenPlanBaseURL 对齐。覆盖华北2（cn-beijing）与国际站（ap-southeast-1）。
+export function isAliyunTokenPlanBaseURL(baseURL: string): boolean {
+  const raw = (baseURL || '').trim()
+  if (!raw) return false
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return false
+  }
+  return /(^|\.)token-plan\.(cn-beijing|ap-southeast-1)\.maas\.aliyuncs\.com$/.test(
+    parsed.hostname.toLowerCase()
+  )
+}
+
 export function isVolcanoBaseURL(baseURL: string): boolean {
   const raw = (baseURL || '').trim()
   if (!raw) return false
@@ -728,6 +746,10 @@ export function isTokenHarborAccount(account: {
 }
 
 export function cnQuotaProviderPrefix(platform: string, baseURL: string): string {
+  // 阿里 Token Plan：聚合订阅（qwen/glm/deepseek/kimi 全家族），按 base_url 识别，
+  // 与 platform 解耦（账号平台恒为 glm/deepseek/kimi，与真实上游无关）。
+  // 与后端 resolveCNQuotaProvider 的阿里优先识别保持一致。
+  if (isAliyunTokenPlanBaseURL(baseURL)) return 'aliyun'
   if (isVolcanoBaseURL(baseURL)) return 'volcano'
   if (platform === 'kimi') return 'kimi'
   if (platform === 'zhipu') return 'zhipu'
@@ -760,6 +782,9 @@ export function cnQuotaCellVisible(
   baseURL: string = '',
   type: string = ''
 ): boolean {
+  // 阿里 Token Plan 优先：账号平台恒为 glm/deepseek/kimi（伪装/路由身份），
+  // 若走下面的平台分支会被 kimi/zhipu 的 coding 判定拦住，故 base_url 判定必须最先。
+  if (isAliyunTokenPlanBaseURL(baseURL)) return true
   // Command Code / Cline：订阅窗口与积分由一次探测同时刷新；仅官方主机上的 apikey 账号可见。
   if (OFFICIAL_ACCOUNT_API_PLATFORMS.includes(platform)) {
     return type === 'apikey' && isOfficialAccountAPIHost(platform, accountMode, baseURL)

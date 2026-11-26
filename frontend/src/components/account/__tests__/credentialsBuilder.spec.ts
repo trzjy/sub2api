@@ -15,6 +15,8 @@ import {
   cloneOpenCodeGoProtocolRules,
   cnBalanceCellVisible,
   cnQuotaCellVisible,
+  cnQuotaProviderPrefix,
+  isAliyunTokenPlanBaseURL,
   defaultCNBaseUrl,
   defaultOpenCodeProtocolRules,
   isCustomGrokBaseUrl,
@@ -744,5 +746,39 @@ describe('cnQuotaCellVisible / cnBalanceCellVisible merged visibility', () => {
       }
     }
     expect(cnQuotaCellVisible(nonAdaptive)).toBe(false)
+  })
+})
+
+describe('isAliyunTokenPlanBaseURL', () => {
+  it('识别华北2与国际站的 Token Plan 专属端点', () => {
+    expect(isAliyunTokenPlanBaseURL('https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1')).toBe(true)
+    expect(isAliyunTokenPlanBaseURL('https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic')).toBe(true)
+  })
+
+  it('大小写与尾斜杠归一化', () => {
+    expect(isAliyunTokenPlanBaseURL('HTTPS://TOKEN-PLAN.CN-BEIJING.MAAS.ALIYUNCS.COM/')).toBe(true)
+  })
+
+  it('相似域名与普通百炼端点不算', () => {
+    expect(isAliyunTokenPlanBaseURL('https://evil-token-plan.cn-beijing.maas.aliyuncs.com/v1')).toBe(false)
+    expect(isAliyunTokenPlanBaseURL('https://dashscope.aliyuncs.com/compatible-mode/v1')).toBe(false)
+    expect(isAliyunTokenPlanBaseURL('')).toBe(false)
+  })
+})
+
+describe('cnQuotaProviderPrefix / cnQuotaCellVisible 对阿里 Token Plan', () => {
+  it('按 base_url 识别阿里，与 platform 解耦', () => {
+    const base = 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
+    // 阿里号平台恒为 glm/deepseek/kimi（伪装/路由身份），必须靠 base_url 识别。
+    expect(cnQuotaProviderPrefix('glm', base)).toBe('aliyun')
+    expect(cnQuotaProviderPrefix('deepseek', base)).toBe('aliyun')
+    expect(cnQuotaProviderPrefix('kimi', base)).toBe('aliyun')
+  })
+
+  it('阿里账号显示用量列', () => {
+    const base = 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
+    expect(cnQuotaCellVisible('glm', 'coding', base)).toBe(true)
+    expect(cnQuotaCellVisible('deepseek', 'coding', base)).toBe(true)
+    expect(cnQuotaCellVisible('kimi', 'coding', base)).toBe(true)
   })
 })

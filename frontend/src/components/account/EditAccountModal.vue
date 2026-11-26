@@ -289,6 +289,63 @@
           <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
         </div>
 
+        <!-- 阿里云百炼 Token Plan 订阅号：读官方单价表（算 Credits 消耗）与账单（反查档位）
+             需要 AK/SK。官方对个人版不开放额度查询接口，缺 AK 时用量列显示"未配置"。 -->
+        <div v-if="isAliyunTokenPlanSubscription && !isWebEditAccount" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.cnProviders.aliyunAkSkHint') }}
+          </p>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.accessKey') }}
+              <a
+                href="https://ram.console.aliyun.com/manage/ak"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="ml-1 text-xs font-normal text-blue-600 hover:underline dark:text-blue-400"
+              >{{ t('admin.accounts.cnProviders.aliyunAkSkGetLink') }}</a>
+            </label>
+            <input
+              v-model="aliyunAccessKey"
+              type="password"
+              class="input font-mono"
+              autocomplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
+              data-bwignore="true"
+              :placeholder="t('admin.accounts.cnProviders.accessKeyPlaceholder')"
+            />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.secretKey') }}</label>
+            <input
+              v-model="aliyunSecretKey"
+              type="password"
+              class="input font-mono"
+              autocomplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
+              data-bwignore="true"
+              :placeholder="t('admin.accounts.cnProviders.secretKeyPlaceholder')"
+            />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.aliyunConsoleCookieLabel') }}</label>
+            <input
+              v-model="aliyunConsoleCookie"
+              type="password"
+              class="input font-mono"
+              autocomplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
+              data-bwignore="true"
+              :placeholder="t('admin.accounts.cnProviders.aliyunConsoleCookiePlaceholder')"
+            />
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.cnProviders.aliyunConsoleCookieHint') }}
+            </p>
+          </div>
+        </div>
+
         <!-- 火山方舟订阅号：SigV4 签名需要访问密钥，否则用量探测会报 access_key/secret_key is empty -->
         <div v-if="isVolcanoSubscription && !isWebEditAccount" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
           <p class="text-xs text-gray-500 dark:text-gray-400">
@@ -3923,6 +3980,7 @@ import {
   defaultCNBaseUrl,
   resolveAccountBaseURL,
   isVolcanoBaseURL,
+  isAliyunTokenPlanBaseURL,
   isCNProviderPlatform,
   HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY,
   HEADER_OVERRIDES_CREDENTIAL_KEY,
@@ -4459,6 +4517,17 @@ const isVolcanoSubscription = computed(() => {
 })
 const volcanoAccessKey = ref('')
 const volcanoSecretKey = ref('')
+// 阿里云百炼 Token Plan 订阅号：AK/SK 用于读官方单价表（算 Credits 消耗）与账单
+//（反查档位月额度）。官方对个人版不开放额度查询接口。
+const isAliyunTokenPlanSubscription = computed(() => {
+  const cc = (editAdaptiveBaseUrls.value.chat_completions || '').trim()
+  const base = (editBaseUrl.value || '').trim()
+  const url = editApiProtocol.value === 'adaptive' ? (cc || base) : base
+  return isAliyunTokenPlanBaseURL(url)
+})
+const aliyunAccessKey = ref('')
+const aliyunSecretKey = ref('')
+const aliyunConsoleCookie = ref('')
 // ── Web 控制台额度上游（compshare/sensenova/longcat）控制台登录凭据 ──
 // 是否需要该区块只认 account.web_console_quota_provider（后端唯一事实源投影），
 // 前端不复制 base_url 主机名判定。密码永不回显：留空即保留原值（后端
@@ -7010,6 +7079,14 @@ const handleSubmit = async () => {
       if (isVolcanoBaseURL(String(newCredentials.base_url))) {
         if (volcanoAccessKey.value.trim()) newCredentials.access_key = volcanoAccessKey.value.trim()
         if (volcanoSecretKey.value.trim()) newCredentials.secret_key = volcanoSecretKey.value.trim()
+      }
+      // 阿里云百炼 Token Plan 订阅号：AK/SK 用于读官方额度数据；
+      // 留空不覆盖（依赖后端 MergePreservingSensitiveCreds 保留已有值）。
+      if (isAliyunTokenPlanBaseURL(String(newCredentials.base_url))) {
+        if (aliyunAccessKey.value.trim()) newCredentials.access_key = aliyunAccessKey.value.trim()
+        if (aliyunSecretKey.value.trim()) newCredentials.secret_key = aliyunSecretKey.value.trim()
+        // 个人版的官方用量接口只认浏览器登录态（Cookie + sec_token）。
+        if (aliyunConsoleCookie.value.trim()) newCredentials.console_cookie = aliyunConsoleCookie.value.trim()
       }
 
       // Web 控制台凭据：仅非空才写入（密码留空不带该键，后端 MergePreservingSensitiveCreds

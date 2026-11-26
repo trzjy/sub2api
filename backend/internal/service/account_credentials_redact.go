@@ -23,6 +23,9 @@ var SensitiveCredentialKeys = []string{
 	// Web 控制台用量采集凭据（2026-11 web-console-quota）：控制台登录密码与
 	// Playwright storageState（含 Cookie/localStorage）均为秘密，绝不可回显明文。
 	"console_password", "console_storage_state",
+	// 百炼控制台登录态（2026-11 阿里 Token Plan 用量探测）：个人版的官方用量接口
+	// 只认浏览器登录态，Cookie 与 sec_token 都是账号级秘密，绝不可回显明文。
+	"console_cookie", "console_sec_token",
 }
 
 var sensitiveCredentialKeySet = func() map[string]struct{} {

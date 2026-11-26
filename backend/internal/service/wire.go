@@ -499,6 +499,9 @@ func ProvideGrokQuotaService(
 }
 
 // ProvideCNProviderQuotaService 构造国产供应商 Coding Plan 额度探测服务。
+//
+// 阿里 Token Plan 分支只读官方接口（官方 quota-config / usage / 席位额度），
+// 不按本仓调用日志实算 Credits ⇒ 不需要 usage_logs 读取器，构造参数里也没有它。
 func ProvideCNProviderQuotaService(
 	accountRepo AccountRepository,
 	proxyRepo ProxyRepository,

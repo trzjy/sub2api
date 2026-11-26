@@ -8,6 +8,13 @@ const { queryQuota } = vi.hoisted(() => ({
   queryQuota: vi.fn()
 }))
 
+// mock i18n 用的文案表：模拟真 i18n 的查表行为。
+const MOCK_I18N_MESSAGES: Record<string, string> = {
+  'admin.accounts.cnProviders.aliyunErrors.ALIYUN_NO_CREDENTIAL':
+    '这个账号还没填阿里云 AccessKey 和 SecretKey，填上才能查用量',
+  'admin.accounts.cnProviders.aliyunSharedPool': '该订阅含 {count} 个账号，用量按额度池合计'
+}
+
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     cnProviders: { queryQuota }
@@ -21,7 +28,18 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      // 模拟真 i18n：命中文案表返回文案（带插值），未命中返回 key。
+      //
+      // ⚠️ 别偷懒只返回 key：组件的错误提示走「按错误码查文案，查不到就回落原始文案」
+      // 这条路，mock 若恒返回 key ⇒ 回落分支永远命中 ⇒ 测试测的是回落而不是中文提示，
+      // 等于没测（这是本轮实际踩到的坑）。
+      t: (key: string, params?: Record<string, unknown>) => {
+        const template = MOCK_I18N_MESSAGES[key]
+        if (template === undefined) return key
+        return template.replace(/\{(\w+)\}/g, (match, name) =>
+          params && name in params ? String(params[name]) : match
+        )
+      }
     })
   }
 })
@@ -59,9 +77,119 @@ const volcanoAccount = {
   }
 } as Account
 
+// 阿里 Token Plan 订阅号：platform=glm（伪装身份），靠 base_url 认成阿里。
+// extra 里**故意不放**快照：验证「点查询 → 当场显示数字」不依赖列表刷新。
+const aliyunAccount = {
+  id: 1012,
+  platform: 'glm',
+  type: 'apikey',
+  credentials: {
+    account_mode: 'coding',
+    base_url: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
+  },
+  extra: {}
+} as Account
+
+// 组件有模块级 5 分钟自动探测去抖（同一 account.id 短时间内只探一次），
+// 所以每个需要触发探测的用例必须用**不同的 account.id**，否则第二个用例探不到。
+const aliyunAccount2 = {
+  ...aliyunAccount,
+  id: 1013
+} as Account
+
 describe('CNProviderQuotaCell', () => {
   beforeEach(() => {
     queryQuota.mockReset()
+  })
+
+  // 阿里 Token Plan：点「查询」后数字必须**当场**显示出来。
+  //
+  // 回归点：快照写进了 account.extra，但列表页手里那份 account 还是探测前的旧 extra
+  // ⇒ 爹点了按钮格子纹丝不动，必须手动刷新整个列表才变。修法是探测结果把同一份
+  // 快照带回来（result.aliyun_usage），前端优先用它渲染。
+  //
+  // 口径（2026-11-26 改为「读官方数据」）：主显示是**官方月额度**与**官方已用百分比**，
+  // Credits 数只是参考（个人版那个数是官方百分比 × 官方档位上限折算出来的）。
+  it('renders aliyun official quota and used percent from the probe result immediately', async () => {
+    queryQuota.mockResolvedValue({
+      success: true,
+      provider: 'aliyun',
+      aliyun_usage: {
+        plan_name: 'Standard',
+        monthly_credit: 80000,
+        used_credit: 1234.5,
+        remaining_credit: 78765.5,
+        used_percent: 1.5431,
+        five_hour_credit: 3000,
+        reset_at: '2026-12-01T00:00:00+08:00',
+        exhausted: false,
+        pool_account_count: 3,
+        data_source: 'official_quota_config',
+        fetched_at: new Date().toISOString()
+      }
+    })
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: aliyunAccount } })
+    await flushPromises()
+
+    const detail = wrapper.get('[data-test="cn-provider-quota-aliyun-detail"]')
+    expect(detail.text()).toContain('Standard')
+    // 官方月额度（quota-config 的 monthly）
+    expect(detail.text()).toContain('80,000')
+    // 官方已用百分比（usage 接口原值，一位小数）
+    expect(detail.text()).toContain('1.5%')
+    // Credits 数作为参考值保留（个人版是官方百分比 × 官方档位上限折算）
+    expect(detail.text()).toContain('1,234.5')
+    // 共享额度池提示（同一订阅拆成 3 个账号）
+    expect(wrapper.get('[data-test="cn-provider-quota-aliyun-pool"]').text()).toContain('3')
+  })
+
+  // 官方只给百分比、没给绝对量时（个人版读不到绝对已用），不能显示成 0%——
+  // 要么显示官方百分比，要么什么都不显示，不能假装"用得很少"。
+  //
+  // ⚠️ 必须用**独立的 account.id**：组件有模块级 5 分钟自动探测去抖，
+  // 同一 id 短时间内只探一次 ⇒ 复用 id 会探不到，mock 结果用不上。
+  it('does not show a fake zero percent when official usage is unavailable', async () => {
+    queryQuota.mockResolvedValue({
+      success: true,
+      provider: 'aliyun',
+      aliyun_usage: {
+        plan_name: 'Standard',
+        monthly_credit: 80000,
+        used_credit: 0,
+        remaining_credit: 80000,
+        used_percent: 0,
+        exhausted: false,
+        fetched_at: new Date().toISOString()
+      }
+    })
+    const wrapper = mount(CNProviderQuotaCell, {
+      props: { account: { ...aliyunAccount, id: 1014 } as Account }
+    })
+    await flushPromises()
+
+    const detail = wrapper.get('[data-test="cn-provider-quota-aliyun-detail"]')
+    // 官方月额度仍然要显示（这是官方 quota-config 给的）
+    expect(detail.text()).toContain('80,000')
+    // 百分比不该凭空出现
+    expect(detail.text()).not.toContain('0.0%')
+  })
+
+  // 阿里失败分支：后端给稳定错误码，前端按码显示中文（不能把英文文案甩给爹）。
+  it('shows a chinese message for the aliyun missing-credential error code', async () => {
+    queryQuota.mockResolvedValue({
+      success: false,
+      provider: 'aliyun',
+      error: 'aliyun access key is not configured for this account',
+      error_code: 'ALIYUN_NO_CREDENTIAL'
+    })
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: aliyunAccount2 } })
+    await flushPromises()
+
+    const err = wrapper.get('[data-test="cn-provider-quota"] .text-red-600')
+    // 按错误码查到的中文提示
+    expect(err.text()).toContain('这个账号还没填阿里云 AccessKey 和 SecretKey')
+    // 英文原文不该出现在界面上
+    expect(err.text()).not.toContain('aliyun access key is not configured')
   })
 
   it('renders tier rows through the shared UsageProgressBar inside the account table cell', async () => {

@@ -1686,6 +1686,51 @@
           </div>
         </div>
 
+        <!-- 阿里云百炼 Token Plan 订阅号：读官方额度数据需要 AK/SK；
+             个人版的官方用量接口只认浏览器登录态，还需要百炼控制台 Cookie。 -->
+        <div v-if="isAliyunTokenPlanSubscription" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.cnProviders.aliyunAkSkHint') }}
+          </p>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.accessKey') }}
+              <a
+                href="https://ram.console.aliyun.com/manage/ak"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="ml-1 text-xs font-normal text-blue-600 hover:underline dark:text-blue-400"
+              >{{ t('admin.accounts.cnProviders.aliyunAkSkGetLink') }}</a>
+            </label>
+            <input
+              v-model="aliyunAccessKey"
+              type="password"
+              class="input font-mono"
+              :placeholder="t('admin.accounts.cnProviders.accessKeyPlaceholder')"
+            />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.secretKey') }}</label>
+            <input
+              v-model="aliyunSecretKey"
+              type="password"
+              class="input font-mono"
+              :placeholder="t('admin.accounts.cnProviders.secretKeyPlaceholder')"
+            />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.aliyunConsoleCookieLabel') }}</label>
+            <input
+              v-model="aliyunConsoleCookie"
+              type="password"
+              class="input font-mono"
+              :placeholder="t('admin.accounts.cnProviders.aliyunConsoleCookiePlaceholder')"
+            />
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.cnProviders.aliyunConsoleCookieHint') }}
+            </p>
+          </div>
+        </div>
+
         <!-- 上游倍率自动探测：仅探测资格平台显示（isUpstreamBillingProbeEligible
              与后端 IsUpstreamBillingProbeIdentity 同名单）；网页接入模式（平台归并后
              平台为官方值但无静态密钥）/other/codebuddy 等非资格平台隐藏开关且不发送该字段。 -->
@@ -4403,6 +4448,7 @@ import {
   cnSupportsNativeResponses,
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
+  isAliyunTokenPlanBaseURL,
   isCNProviderPlatform,
   isHeaderOverrideCapable,
   isUpstreamBillingProbeEligible,
@@ -4691,6 +4737,18 @@ const isVolcanoSubscription = computed(() => {
 })
 const volcanoAccessKey = ref('')
 const volcanoSecretKey = ref('')
+
+// 阿里云百炼 Token Plan 订阅号：用 AK/SK 读官方逐模型单价表与账单（官方对个人版
+// 不开放额度查询接口，实算 Credits 需要官方单价；档位月额度由账单金额反查）。
+const isAliyunTokenPlanSubscription = computed(() => {
+  const cc = (adaptiveBaseUrls.value.chat_completions || '').trim()
+  const base = (apiKeyBaseUrl.value || '').trim()
+  const url = apiProtocol.value === 'adaptive' ? (cc || base) : base
+  return isAliyunTokenPlanBaseURL(url)
+})
+const aliyunAccessKey = ref('')
+const aliyunSecretKey = ref('')
+const aliyunConsoleCookie = ref('')
 // CnBaseUrlPresets 的 platform prop 是平台字面量联合类型，模板里不能写
 // `as` 断言（其中的 `|` 会被 eslint 误判为 Vue2 filter 语法），经此 computed 传递。
 const cnPresetPlatform = computed<CnProviderPlatform>(() => {
@@ -6643,6 +6701,13 @@ const handleSubmit = async () => {
     if (isVolcanoBaseURL(resolvedCNBase)) {
       if (volcanoAccessKey.value.trim()) credentials.access_key = volcanoAccessKey.value.trim()
       if (volcanoSecretKey.value.trim()) credentials.secret_key = volcanoSecretKey.value.trim()
+    }
+    // 阿里云百炼 Token Plan 订阅号：AK/SK 用于读官方单价表与账单（实算 Credits 消耗）。
+    if (isAliyunTokenPlanBaseURL(resolvedCNBase)) {
+      if (aliyunAccessKey.value.trim()) credentials.access_key = aliyunAccessKey.value.trim()
+      if (aliyunSecretKey.value.trim()) credentials.secret_key = aliyunSecretKey.value.trim()
+      // 个人版的官方用量接口只认浏览器登录态（Cookie + sec_token）。
+      if (aliyunConsoleCookie.value.trim()) credentials.console_cookie = aliyunConsoleCookie.value.trim()
     }
     // 智谱团队版 Coding Plan：组织/项目 ID 写入凭据（非空才写）
     if (form.platform === 'zhipu' && accountMode.value === 'coding') {

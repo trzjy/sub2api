@@ -83,6 +83,24 @@ export interface KiraUsageSnapshot {
   fetched_at?: string
 }
 
+/** 阿里 Token Plan 用量快照（阿里分支填充，其余供应商为空）。 */
+export interface AliyunTokenPlanUsage {
+  plan_name: string
+  monthly_credit: number
+  used_credit: number
+  remaining_credit: number
+  used_percent: number
+  /** 官方 5 小时窗口额度（quota-config 的 five_hour）。 */
+  five_hour_credit?: number
+  reset_at?: string
+  exhausted: boolean
+  uncovered_models?: string[]
+  pool_account_count?: number
+  /** 这批数字来自哪个官方接口（official_subscription_stats / official_quota_config）。 */
+  data_source?: string
+  fetched_at: string
+}
+
 /** 额度探测结果（Coding Plan / OpenCode Go / Command Code），对齐后端 CNProviderQuotaProbeResult。 */
 export interface CNProviderQuotaProbeResult {
   provider: string
@@ -95,8 +113,15 @@ export interface CNProviderQuotaProbeResult {
   fetched_at: number
   persisted: boolean
   error?: string
+  /** 稳定错误码（前端据此显示中文提示，不解析 error 文案）。 */
+  error_code?: string
   /** 同一次探测得到的余额（Command Code 积分与窗口同源），其余供应商为空。 */
   balance?: CNProviderBalanceResult
+  /**
+   * 阿里 Token Plan 用量快照：探测成功后随结果一起返回，
+   * 前端点了「查询」就能当场显示数字，不必等列表刷新。
+   */
+  aliyun_usage?: AliyunTokenPlanUsage
 }
 
 /** 单币种余额明细（deepseek 双币种账号含 CNY + USD 两条）。 */
