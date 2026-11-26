@@ -212,7 +212,8 @@ func (g *UpstreamJitterGuard) Observe(ctx context.Context, accountID int64, mode
 		logger.L().Warn("upstream_jitter_skip_upstream",
 			zap.Int64("group_id", g.groupID),
 			zap.String("upstream_key", upstreamKey),
-			zap.String("model_scope", modelScope),
+			zap.String("model_scope", stopScope),
+			zap.String("probe_input", probeInput),
 			zap.Int("excluded_count", len(excludeIDs)),
 		)
 	}
