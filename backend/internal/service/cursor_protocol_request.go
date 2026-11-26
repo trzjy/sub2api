@@ -63,9 +63,16 @@ const (
 	// ConversationStateStructure（Hm）内：
 	cursorFldStateRootPromptBlobs = 1  // repeated bytes：**历史消息的 blob id**
 	cursorFldStateMode            = 10 // enum ConversationMode
+	cursorFldStateTurns           = 8  // repeated bytes：native resume 的 turn blob id（SDK 1.5.0）
 
-	// ConversationAction（x1）内：oneof action = 1 user_message_action | …
-	cursorFldActionUserMessage = 1
+	// ConversationAction（x1）内：oneof action = 1 user_message_action | 2 resume_action | …
+	cursorFldActionUserMessage  = 1
+	cursorFldActionResumeAction = 2 // resume_action：零长 message，必须写出（不可省略）
+
+	// ConversationTurnStructure.f1 → AgentConversationTurnStructure.f1 → UserMessage blob id
+	// （native resume 的真实 user 锚点，SDK 1.5.0）。
+	cursorFldTurnAgentConversationTurn = 1
+	cursorFldAgentTurnUserMessageBlob  = 1
 
 	// UserMessageAction（PMe）内：
 	cursorFldUserMsgActionMessage = 1 // UserMessage
@@ -216,21 +223,24 @@ func cursorBuildAgentRunFromSemantic(sem []cursorSemanticMessage, upstreamModel 
 		return nil, "", newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqNoContent, "no convertible messages")
 	}
 
-	// AgentRun 的已取证入口只有 user_message_action：最后一轮必须是用户消息，
-	// 否则上游无处接收"当前这一轮的提问"。
-	//
-	// **这是整条链路上唯一必须拒的入站形状**：以实质内容结尾的 assistant
-	// （prefill / 续写请求）在我们这边的协议里没有落点。硬把它当用户话发出去，
-	// 等于把"模型该续写的内容"当成"用户新下的指令"，语义彻底错乱——客户拿到的是
-	// 答非所问，比一个明确的拒绝更难排查。
-	//
-	// 所以这里拒，但**拒要说清**：CUR-REQ-07（prefill）的对客文案直接写明"最后一条
-	// 是助手消息、本站不支持从助手消息续写、请在末尾补一条用户消息"，不让客户去猜。
+	// 尾部形状由唯一的语义 analyzer 判定（与执行服务的续轮计划共用同一判据）。
+	// user 尾走原有黄金字节路径；完整历史的 tool 结果尾走 native resume；
+	// 真 assistant 续写仍按 CUR-REQ-07 拒。
 	last := turns[len(turns)-1]
-	if last.role != "user" {
+	history := turns[:len(turns)-1]
+	resume := last.role == "tool"
+	if resume {
+		last, err = cursorRebuildUserAnchor(turns, sem)
+		if err != nil {
+			return nil, "", err
+		}
+		// Completed results remain in the history; the anchor is not a new question.
+		history = turns
+	} else if last.role != "user" {
+		// 以实质内容结尾的 assistant（prefill / 续写）没有协议落点：硬发出去等于把
+		// "模型该续写的内容"当成"用户新指令"。CUR-REQ-07 文案说清如何修正。
 		return nil, "", newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqPrefill, "conversation must end with a user message")
 	}
-	history := turns[:len(turns)-1]
 
 	conversationID := cursorNewUUID()
 	messageID := cursorNewUUID()
@@ -249,23 +259,21 @@ func cursorBuildAgentRunFromSemantic(sem []cursorSemanticMessage, upstreamModel 
 	}
 
 	// 2) action.user_message_action.user_message：当前这一轮的提问。
-	userMessage := cursorAppendStringField(nil, cursorFldUserMsgText, last.text)
-	userMessage = cursorAppendStringField(userMessage, cursorFldUserMsgMessageID, messageID)
-	userMessage = cursorAppendVarintField(userMessage, cursorFldUserMsgMode, cursorConversationModeAgent)
-	// 当前轮图片（若有）→ UserMessage.f3 selected_context（SelectedContext）。
-	// 空 images 时不写 f3，保持纯文本路径出站字节逐字节不变。
-	if len(last.images) > 0 {
-		var selCtx []byte
-		for _, img := range last.images {
-			var selImg []byte
-			selImg = cursorAppendBytesField(selImg, cursorFldSelectedImageData, img.data)
-			selImg = cursorAppendStringField(selImg, cursorFldSelectedImageMimeType, img.mimeType)
-			selCtx = cursorAppendBytesField(selCtx, cursorFldSelectedContextImages, selImg)
-		}
-		userMessage = cursorAppendBytesField(userMessage, cursorFldUserMsgSelectedContext, selCtx)
-	}
+	userMessage := cursorEncodeUserMessage(last.text, messageID, last.images)
 	userMsgAction := cursorAppendBytesField(nil, cursorFldUserMsgActionMessage, userMessage)
 	action := cursorAppendBytesField(nil, cursorFldActionUserMessage, userMsgAction)
+	if resume {
+		userID := cursorContentAddress(userMessage)
+		agentTurn := cursorAppendBytesField(nil, cursorFldAgentTurnUserMessageBlob, userID)
+		turnValue := cursorAppendBytesField(nil, cursorFldTurnAgentConversationTurn, agentTurn)
+		turnID := cursorContentAddress(turnValue)
+		blobs = append(blobs,
+			cursorHistoryBlob{id: userID, value: userMessage},
+			cursorHistoryBlob{id: turnID, value: turnValue})
+		state = cursorAppendBytesField(state, cursorFldStateTurns, turnID)
+		// A present, zero-length message selects the native resume oneof.
+		action = cursorAppendBytesField(nil, cursorFldActionResumeAction, nil)
+	}
 
 	// 3) 其余字段按活体样本的**出现顺序**编码（33/63 均为
 	//    conversation_state → action → model_details → mcp_tools →
@@ -292,6 +300,77 @@ func cursorBuildAgentRunFromSemantic(sem []cursorSemanticMessage, upstreamModel 
 
 	outer := cursorAppendBytesField(nil, cursorFldAgentRunRequest, run)
 	return cursorEncodeEnvelope(outer), conversationID, nil
+}
+
+// cursorEncodeUserMessage encodes the current-turn UserMessage wire bytes:
+// text / message id / mode / optional selected_context images. Shared by the
+// normal user tail and the native-resume user anchor so both use one encoding.
+func cursorEncodeUserMessage(text, messageID string, images []cursorTurnImage) []byte {
+	userMessage := cursorAppendStringField(nil, cursorFldUserMsgText, text)
+	userMessage = cursorAppendStringField(userMessage, cursorFldUserMsgMessageID, messageID)
+	userMessage = cursorAppendVarintField(userMessage, cursorFldUserMsgMode, cursorConversationModeAgent)
+	// Empty images must not write f3: keep the plain-text outbound bytes unchanged.
+	if len(images) > 0 {
+		var selCtx []byte
+		for _, img := range images {
+			var selImg []byte
+			selImg = cursorAppendBytesField(selImg, cursorFldSelectedImageData, img.data)
+			selImg = cursorAppendStringField(selImg, cursorFldSelectedImageMimeType, img.mimeType)
+			selCtx = cursorAppendBytesField(selCtx, cursorFldSelectedContextImages, selImg)
+		}
+		userMessage = cursorAppendBytesField(userMessage, cursorFldUserMsgSelectedContext, selCtx)
+	}
+	return userMessage
+}
+
+// cursorContentAddress returns the 32-byte sha256 of a blob value.
+func cursorContentAddress(value []byte) []byte {
+	sum := sha256.Sum256(value)
+	return sum[:]
+}
+
+// cursorRebuildUserAnchor checks the existing full-history criterion and finds
+// the original user for a native resume. It neither encodes a second AgentRun
+// nor converts completed tool results into new user instructions.
+func cursorRebuildUserAnchor(turns []cursorAgentTurn, sem []cursorSemanticMessage) (cursorAgentTurn, error) {
+	reject := func(detail string) (cursorAgentTurn, error) {
+		return cursorAgentTurn{}, newCursorRequestError(http.StatusBadRequest,
+			infraerrors.CursorResUnknownAssociation, "%s", detail)
+	}
+	analysis := cursorAnalyzeSemanticMessages(sem)
+	if len(analysis.results) == 0 {
+		return reject("tool result tail carries no analyzable results")
+	}
+	// Call IDs of assistant tool_calls in the history prefix. Tail containers are
+	// excluded so a result can never prove its own call.
+	historyCallIDs := make(map[string]struct{})
+	for _, m := range sem {
+		if _, inTail := analysis.tailContainers[m.sourceContainerIndex]; inTail {
+			continue
+		}
+		if m.role != cursorSemanticAssistant {
+			continue
+		}
+		for _, call := range m.raw.ToolCalls {
+			if id := strings.TrimSpace(call.ID); id != "" {
+				historyCallIDs[id] = struct{}{}
+			}
+		}
+	}
+	batchResults := make([]CursorToolResult, 0, len(analysis.results))
+	for _, ref := range analysis.results {
+		batchResults = append(batchResults, CursorToolResult{CallID: ref.callID})
+	}
+	if !cursorHistoryComplete(batchResults, historyCallIDs) {
+		return reject("tool result tail is missing its original assistant call")
+	}
+	// Most recent real user becomes the resume anchor; never fabricate one from results.
+	for i := len(turns) - 1; i >= 0; i-- {
+		if turns[i].role == "user" {
+			return turns[i], nil
+		}
+	}
+	return reject("tool result tail has no real user anchor")
 }
 
 // cursorResolveDeclaredTools 按 §21.4-2 统一语义决定本轮要声明的工具子集。
@@ -656,8 +735,7 @@ func cursorHistoryBlobs(history []cursorAgentTurn, skipped cursorSkipLedger) ([]
 		if err != nil {
 			return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "marshal history blob: %v", err)
 		}
-		sum := sha256.Sum256(value)
-		out = append(out, cursorHistoryBlob{id: sum[:], value: value})
+		out = append(out, cursorHistoryBlob{id: cursorContentAddress(value), value: value})
 	}
 	return out, nil
 }

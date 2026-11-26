@@ -18,7 +18,9 @@ package service
 // **反证**：一旦回退到"收到 mcp_args 就回 McpResult.error 或直接收尾"，下列断言立刻红。
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1176,22 +1178,257 @@ func TestCursorResumeGateDeniedAfterCompleteUsageSettlesOnce(t *testing.T) {
 // 反证（historyComplete=false：只有孤儿 tool 结果、正文无对应 tool_calls）已在
 // cursor_resume_digest_test.go 的 TestCursorResumeRestartOrphanAllProtocolsRejected
 // 覆盖（四协议均 400 ErrCursorResumeUnknownAssociation），此处不重复。
+// ---------------------------------------------------------------------------
+// 孤儿重建专用上游：先解析验证 native resume 锚点，再从真实结果生成文本
+// ---------------------------------------------------------------------------
+
+// cursorNativeResumeUpstream 只服务下面的孤儿重建用例。与通用剧本上游不同，它**不预设**
+// "模型会说什么"：文本只能由请求里真实存在的最后一条 tool-result 派生；锚点校验不通过
+// 就落 validateErr，绝不无条件返回预设成功文本。
+type cursorNativeResumeUpstream struct {
+	mu          sync.Mutex
+	runs        int
+	validateErr error
+	resultText  string
+}
+
+func (u *cursorNativeResumeUpstream) validationError() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.validateErr
+}
+
+func (u *cursorNativeResumeUpstream) runCount() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.runs
+}
+
+func (u *cursorNativeResumeUpstream) writeFrames(w http.ResponseWriter, flusher http.Flusher, payload []byte) {
+	_, _ = w.Write(payload)
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
+func (u *cursorNativeResumeUpstream) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/Run") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		u.mu.Lock()
+		u.runs++
+		u.mu.Unlock()
+
+		payload, err := cursorNativeResumeReadFirstFrame(r.Body)
+		if err == nil {
+			var resultText string
+			resultText, err = cursorNativeResumeValidate(payload)
+			if err == nil {
+				u.mu.Lock()
+				u.resultText = resultText
+				u.mu.Unlock()
+			}
+		}
+		u.mu.Lock()
+		u.validateErr = err
+		u.mu.Unlock()
+		// Drain the rest of the client stream without blocking the response.
+		go func() { _, _ = io.Copy(io.Discard, r.Body); _ = r.Body.Close() }()
+
+		w.Header().Set("Content-Type", cursorConnectContentType)
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		if err != nil {
+			u.writeFrames(w, flusher, append(joinFrames(
+				fcTextDelta("VALIDATION-FAILED:"+err.Error()),
+				fcTurnEnded(1, 1, 1, 1)), fcEndStream()...))
+			return
+		}
+		// The tool was already completed in the previous session: deliver no tool frame.
+		// The text is derived from the real result in the request, never from a preset.
+		u.writeFrames(w, flusher, append(joinFrames(
+			fcTextDelta("RESUMED-FROM-RESULT:"+u.resultText),
+			fcTurnEnded(9101, 23, 11, 3)), fcEndStream()...))
+	})
+}
+
+// cursorNativeResumeReadFirstFrame 同步读第一条 AgentRun envelope，避免把整个双向流 ReadAll 到 EOF。
+func cursorNativeResumeReadFirstFrame(r io.Reader) ([]byte, error) {
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 4096)
+	for len(buf) < 4<<20 {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+			if frame, _, ferr := cursorReadEnvelopeFrame(buf, 0); ferr == nil {
+				return append([]byte(nil), frame.Data...), nil
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read first AgentRun frame: %w", err)
+		}
+	}
+	return nil, errors.New("first AgentRun frame exceeds 4 MiB")
+}
+
+// cursorNativeResumeValidate 校验 native resume 三层锚点，返回最后一条真实 tool-result 文本。
+// 任何一步不成立都报错：上游不会用预设文本掩盖错误的 builder 输出。
+func cursorNativeResumeValidate(payload []byte) (string, error) {
+	fail := func(format string, args ...any) (string, error) {
+		return "", fmt.Errorf("native resume validation: "+format, args...)
+	}
+	outer, err := cursorDecodeProtobuf(payload)
+	if err != nil {
+		return fail("outer: %v", err)
+	}
+	runField, ok := cursorFindField(outer, cursorFldAgentRunRequest)
+	if !ok {
+		return fail("missing run_request")
+	}
+	run, err := cursorDecodeProtobuf(runField.Bytes)
+	if err != nil {
+		return fail("run: %v", err)
+	}
+
+	stateField, ok := cursorFindField(run, cursorFldRunConversationState)
+	if !ok {
+		return fail("missing conversation_state")
+	}
+	state, err := cursorDecodeProtobuf(stateField.Bytes)
+	if err != nil {
+		return fail("state: %v", err)
+	}
+	if mode, ok := cursorFindField(state, cursorFldStateMode); !ok || mode.Varint != cursorConversationModeAgent {
+		return fail("state mode is not agent")
+	}
+	roots := cursorAllFields(state, cursorFldStateRootPromptBlobs)
+	turns := cursorAllFields(state, cursorFldStateTurns)
+	if len(roots) < 3 {
+		return fail("full root history missing: %d blobs", len(roots))
+	}
+	if len(turns) != 1 {
+		return fail("native turn anchor missing: %d", len(turns))
+	}
+
+	actionField, ok := cursorFindField(run, cursorFldRunAction)
+	if !ok {
+		return fail("missing action")
+	}
+	action, err := cursorDecodeProtobuf(actionField.Bytes)
+	if err != nil {
+		return fail("action: %v", err)
+	}
+	if _, ok := cursorFindField(action, cursorFldActionUserMessage); ok {
+		return fail("resume must not carry user_message_action")
+	}
+	resume, ok := cursorFindField(action, cursorFldActionResumeAction)
+	if !ok || len(resume.Bytes) != 0 {
+		return fail("resume_action f2 must be an empty message")
+	}
+
+	blobs := make(map[string][]byte)
+	for _, f := range cursorAllFields(run, cursorFldRunPreFetchedBlobs) {
+		fields, err := cursorDecodeProtobuf(f.Bytes)
+		if err != nil {
+			return fail("blob: %v", err)
+		}
+		id, ok1 := cursorFindField(fields, cursorFldBlobID)
+		value, ok2 := cursorFindField(fields, cursorFldBlobValue)
+		if !ok1 || !ok2 {
+			return fail("blob missing id/value")
+		}
+		sum := sha256.Sum256(value.Bytes)
+		if !bytes.Equal(sum[:], id.Bytes) {
+			return fail("blob id is not sha256(value)")
+		}
+		blobs[string(id.Bytes)] = value.Bytes
+	}
+	for _, root := range roots {
+		if _, ok := blobs[string(root.Bytes)]; !ok {
+			return fail("root blob not prefetched")
+		}
+	}
+	turnBlob, ok := blobs[string(turns[0].Bytes)]
+	if !ok {
+		return fail("turn blob not prefetched")
+	}
+	turnFields, err := cursorDecodeProtobuf(turnBlob)
+	if err != nil {
+		return fail("turn blob: %v", err)
+	}
+	agentTurn, ok := cursorFindField(turnFields, cursorFldTurnAgentConversationTurn)
+	if !ok {
+		return fail("turn blob missing ConversationTurnStructure.f1")
+	}
+	agentFields, err := cursorDecodeProtobuf(agentTurn.Bytes)
+	if err != nil {
+		return fail("agent turn: %v", err)
+	}
+	userID, ok := cursorFindField(agentFields, cursorFldAgentTurnUserMessageBlob)
+	if !ok {
+		return fail("agent turn missing user blob id")
+	}
+	userBlob, ok := blobs[string(userID.Bytes)]
+	if !ok {
+		return fail("user blob not prefetched")
+	}
+	userFields, err := cursorDecodeProtobuf(userBlob)
+	if err != nil {
+		return fail("user blob: %v", err)
+	}
+	text, ok := cursorFindField(userFields, cursorFldUserMsgText)
+	if !ok || !strings.Contains(text.String(), "weather please") {
+		return fail("user anchor is not the real user message")
+	}
+
+	// The last root blob must be the final real tool result, not a rewritten user instruction.
+	var last cursorHistoryToolBlob
+	if err := json.Unmarshal(blobs[string(roots[len(roots)-1].Bytes)], &last); err != nil {
+		return fail("last root blob is not a tool result: %v", err)
+	}
+	if last.Role != "tool" || len(last.Content) == 0 || strings.TrimSpace(last.Content[0].Result) == "" {
+		return fail("final real tool result missing from history")
+	}
+	return last.Content[0].Result, nil
+}
+
+// newCursorNativeResumeService 装配指向专用上游的执行部件（与生产同构，仅 transport 为替身）。
+func newCursorNativeResumeService(t *testing.T, handler http.Handler) *CursorExecutionService {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	ts := httptest.NewUnstartedServer(handler)
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
+
+	nodes := NewCursorUpstreamNodesResolver(WithCursorNodesCacheTTL(time.Hour))
+	nodes.cached = CursorUpstreamNodes{HTTP1Base: ts.URL, HTTP2Base: ts.URL}
+	nodes.cachedAt = time.Now()
+	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{
+		7: {ID: 7, CodeEncrypted: "ACTIVATION-CODE-7"},
+	}}
+	return newCursorTestExecutionService(t, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo),
+		NewCursorUpstreamForwarder(
+			WithCursorUpstreamNodes(nodes),
+			WithCursorUpstreamHTTPClient(ts.Client()),
+		))
+}
+
 func TestCursorRebuildOrphanFullHistoryStartsFreshAgentRun(t *testing.T) {
+	const resultNonce = "orphan-result-NONCE-5c19"
 	calls := []cursorFullChainCall{{
 		CallID: "call_1", Name: "get_weather", City: "hangzhou", ExecID: 101, IDField: []byte("exec-101"),
 	}}
-	upstream := newCursorFullChainUpstream(cursorFullChainScript{
-		calls:     calls,
-		afterText: "Hangzhou is sunny, 25C",
-		usage:     [4]uint64{12601, 15, 128, 0},
-	})
-	svc := newCursorFullChainService(t, upstream)
+	upstream := &cursorNativeResumeUpstream{}
+	svc := newCursorNativeResumeService(t, upstream.handler())
 
 	// 关键前提：新服务实例的会话表为空 —— 这是"本站没有任何会话登记"的孤儿形状。
 	require.Zero(t, svc.sessions.sessionCount(), "用例前提：会话表必须为空")
 	require.Zero(t, svc.sessions.indexCount(), "用例前提：统一索引必须为空")
 
-	body := cursorFullChainResumeBody(calls, map[string]string{"call_1": "sunny, 25C"})
+	body := cursorFullChainResumeBody(calls, map[string]string{"call_1": "sunny, 25C " + resultNonce})
 	var ccReq apicompat.ChatCompletionsRequest
 	require.NoError(t, json.Unmarshal([]byte(body), &ccReq))
 	plan, planErr := cursorPlanFromChat(&ccReq, "cursor-sonnet")
@@ -1199,9 +1436,10 @@ func TestCursorRebuildOrphanFullHistoryStartsFreshAgentRun(t *testing.T) {
 	require.True(t, plan.claimsContinuation(), "正文必须声明续轮（携带本批工具结果）")
 	require.True(t, plan.historySupportsRebuild(), "正文必须携带可独立重建的完整历史")
 
-	// 用有界 ctx 收尾：即便上游在交付批次后等待写回，也不让用例挂到上游的 10s 兜底。
+	settlement := &cursorFullChainSettlement{}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
+	ctx = WithCursorSessionHandover(ctx, &cursorTestHandover{settlement: settlement.hook})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -1216,30 +1454,44 @@ func TestCursorRebuildOrphanFullHistoryStartsFreshAgentRun(t *testing.T) {
 		Plan:             plan,
 	})
 
-	// ① 不得按"未知关联"拒绝；更不得以 400 失败关闭。
+	// ① 上游必须先真的解析并验证 native resume / 完整 root / 真实 user 锚点成功。
+	// 校验失败时上游返回的是 VALIDATION-FAILED 文本，下面 nonce 断言会立刻变红。
+	require.NoError(t, upstream.validationError(), "上游必须先验证 native resume 锚点成功")
+	require.Contains(t, upstream.resultText, resultNonce, "上游文本必须来自请求里的真实结果")
+
+	// ② 不得按"未知关联"拒绝；更不得以 400 失败关闭。
 	require.NotErrorIs(t, execErr, ErrCursorResumeUnknownAssociation,
 		"完整历史的孤儿续轮不得返回 ErrCursorResumeUnknownAssociation")
 	if execErr != nil {
 		status, _ := CursorResumeHTTPStatus(execErr)
 		require.NotEqual(t, http.StatusBadRequest, status, "完整历史的孤儿续轮不得按 400 拒绝")
 	}
-	require.NoError(t, execErr, "完整历史的孤儿续轮必须真的重建并交付工具批")
+	require.NoError(t, execErr, "完整历史的孤儿续轮必须真的重建并向原上游发起新 AgentRun")
 	require.NotNil(t, result)
 
-	// ② 真的发起了新 AgentRun（不是复用/空转）。
+	// ③ 真的发起了新 AgentRun（不是复用/空转）。
 	require.Equal(t, 1, upstream.runCount(), "孤儿重建必须真的向原上游发起一次新 AgentRun")
 
-	// ③ 客户端拿得到本轮工具交接。
+	// ④ 客户端拿到的是真实结果 nonce，且已完成工具没有被重复委派。
 	out := w.Body.String()
-	require.Contains(t, out, `"tool_calls"`, "客户端响应必须包含本轮工具交接")
-	require.Contains(t, out, `"call_1"`)
-	require.Contains(t, out, `"finish_reason":"tool_calls"`)
+	require.Contains(t, out, "RESUMED-FROM-RESULT:sunny, 25C "+resultNonce,
+		"客户端文本必须由上游从真实 tool-result 生成，不能是预设文本")
+	require.NotContains(t, out, `"tool_calls"`, "已完成工具不得重复委派")
+	require.NotContains(t, out, "call_1", "已完成工具 ID 不得在新 AgentRun 重播")
+	require.NotContains(t, out, `"finish_reason":"tool_calls"`, "恢复后不得再吐工具交接")
 
-	// ④ 会话已登记，且处于等待工具结果的真实存活态（不是只留墓碑）。
-	require.Greater(t, svc.sessions.sessionCount(), 0, "重建后必须登记新会话")
-	record := onlySession(t, svc)
-	record.mu.Lock()
-	state := record.state
-	record.mu.Unlock()
-	require.Equal(t, cursorSessionWaitingTools, state, "工具批交付后会话必须进入 waiting_tools")
+	// ⑤ 真实 usage 触发唯一结算，且非零。
+	callsN, complete := settlement.snapshot()
+	require.Equal(t, 1, callsN, "整条链只允许一次结算事件")
+	require.Equal(t, 1, complete, "必须带完整真实 usage 结算一次")
+	settlement.mu.Lock()
+	settled := settlement.events[0]
+	settlement.mu.Unlock()
+	require.NotZero(t, settled.Result.Usage.InputTokens, "结算必须含真实 input usage")
+	require.NotZero(t, settled.Result.Usage.OutputTokens, "结算必须含真实 output usage")
+
+	// ⑥ 恢复后无新工具批：会话走真实终态唯一收口，不留在 waiting_tools 空转。
+	require.Eventually(t, func() bool {
+		return svc.sessions.indexCount() == 0
+	}, 5*time.Second, 5*time.Millisecond, "真实终态后 finalizer 必须清理全部索引关联")
 }
