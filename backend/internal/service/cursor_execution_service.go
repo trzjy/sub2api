@@ -769,16 +769,16 @@ func (s *CursorExecutionService) Execute(
 			zap.Int64("account_id", account.ID),
 			zap.Bool("body_published", session.bodyPublished),
 			zap.Int("delivered_batches", int(session.deliveredBatchSeq)))
-		if !session.bodyPublished && session.deliveredBatchSeq == 0 {
-			err = &UpstreamFailoverError{
-				StatusCode:        503,
-				Stage:             GatewayFailureStage("upstream"),
-				Scope:             GatewayFailureScopeAccount,
-				Reason:            GatewayFailureReason("cursor_model_unavailable"),
-				NextAccountAction: NextAccountRetry,
-				ClientStatusCode:  503,
-				ClientMessage:     infraerrors.CursorExecModelUnavailable,
-			}
+		// ModelUnavailable 无条件转成可换号错误，交由 handler failover 逻辑决策
+		// 是否真的换号或断连。这样避免"流已开始"这个条件彻底卡死分流机制。
+		err = &UpstreamFailoverError{
+			StatusCode:        503,
+			Stage:             GatewayFailureStage("upstream"),
+			Scope:             GatewayFailureScopeAccount,
+			Reason:            GatewayFailureReason("cursor_model_unavailable"),
+			NextAccountAction: NextAccountRetry,
+			ClientStatusCode:  503,
+			ClientMessage:     infraerrors.CursorExecModelUnavailable,
 		}
 	}()
 
