@@ -76,10 +76,11 @@ func executeCursorForTest(
 		return nil, err
 	}
 	return gateway.cursorExecution.Execute(ctx, c, account, &CursorExecutionRequest{
-		Chat:      &ccReq,
-		Model:     model,
-		Stream:    stream,
-		StartTime: startTime,
-		Protocol:  cursorProtocolChat,
+		Chat:             &ccReq,
+		SemanticMessages: cursorDecodeChatSemantic(&ccReq),
+		Model:            model,
+		Stream:           stream,
+		StartTime:        startTime,
+		Protocol:         cursorProtocolChat,
 	})
 }

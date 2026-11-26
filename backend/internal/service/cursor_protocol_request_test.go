@@ -14,9 +14,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -240,22 +242,23 @@ func TestCursorProtocolRequestSystemMerge(t *testing.T) {
 		require.Contains(t, cursorActionTextOf(t, run), "DEV")
 	})
 
-	t.Run("尾部 system 新建 user 轮次承载而非丢弃", func(t *testing.T) {
+	t.Run("尾部 instruction 合入最近真实 user（不新建 action）", func(t *testing.T) {
 		req := &apicompat.ChatCompletionsRequest{
 			Messages: []apicompat.ChatMessage{
-				{Role: "user", Content: json.RawMessage(`"q"`)},
+				{Role: "user", Content: json.RawMessage(`"q1"`)},
 				{Role: "assistant", Content: json.RawMessage(`"a"`)},
+				{Role: "user", Content: json.RawMessage(`"q2"`)},
 				{Role: "system", Content: json.RawMessage(`"TAIL"`)},
 			},
 		}
 		body, err := cursorConvertRequest(req, "grok-4.7")
 		require.NoError(t, err)
 		run := cursorAgentRunOf(t, body)
-		// 末轮是 system 新建的 user 轮：它成为 action，前两轮进历史。
-		require.Contains(t, cursorActionTextOf(t, run), "TAIL")
+		// TAIL 合入最近的真实 user（q2），不是新建的 user action。
+		require.Equal(t, "q2TAIL", cursorActionTextOf(t, run))
 		blobs := cursorBlobsOf(t, run)
-		require.Len(t, blobs, 2)
-		require.Contains(t, string(blobs[0][1]), "q")
+		require.Len(t, blobs, 2, "instruction 不得成为独立的历史/action 轮")
+		require.Contains(t, string(blobs[0][1]), "q1")
 		require.Contains(t, string(blobs[1][1]), "a")
 	})
 }
@@ -666,4 +669,300 @@ func mustConvert(t *testing.T, req *apicompat.ChatCompletionsRequest) []byte {
 	body, err := cursorConvertRequest(req, "grok-4.7")
 	require.NoError(t, err)
 	return body
+}
+
+// cursorTextMsg 构造一条纯文本消息（role 由调用方给定）。
+func cursorTextMsg(role, text string) apicompat.ChatMessage {
+	return apicompat.ChatMessage{Role: role, Content: json.RawMessage(`"` + text + `"`)}
+}
+
+// TestCursorProtocolRequestInstructionPositions 覆盖请求期 instruction 的首/中/尾
+// 三种位置：一律合入最近真实 user 的文本，永不生成独立 user action。
+func TestCursorProtocolRequestInstructionPositions(t *testing.T) {
+	t.Run("首 instruction 合入首条真实 user", func(t *testing.T) {
+		turns, err := cursorConvertMessages([]apicompat.ChatMessage{
+			cursorTextMsg("system", "HEAD"),
+			cursorTextMsg("user", "q"),
+		}, cursorSkipLedger{})
+		require.NoError(t, err)
+		require.Len(t, turns, 1, "instruction 不得成为独立轮次")
+		require.Equal(t, "user", turns[0].role)
+		require.Equal(t, "HEADq", turns[0].text)
+	})
+
+	t.Run("中 instruction 合入其后最近真实 user", func(t *testing.T) {
+		turns, err := cursorConvertMessages([]apicompat.ChatMessage{
+			cursorTextMsg("user", "q1"),
+			cursorTextMsg("developer", "MID"),
+			cursorTextMsg("assistant", "a"),
+			cursorTextMsg("user", "q2"),
+		}, cursorSkipLedger{})
+		require.NoError(t, err)
+		require.Len(t, turns, 3, "instruction 永不生成 user action")
+		require.Equal(t, "q1", turns[0].text)
+		require.Equal(t, "a", turns[1].text)
+		require.Equal(t, "MIDq2", turns[2].text)
+	})
+
+	t.Run("尾 instruction 合入最近真实 user", func(t *testing.T) {
+		turns, err := cursorConvertMessages([]apicompat.ChatMessage{
+			cursorTextMsg("user", "q1"),
+			cursorTextMsg("assistant", "a"),
+			cursorTextMsg("user", "q2"),
+			cursorTextMsg("system", "TAIL"),
+		}, cursorSkipLedger{})
+		require.NoError(t, err)
+		require.Len(t, turns, 3, "尾部 instruction 不得新建 user action")
+		require.Equal(t, "q2TAIL", turns[2].text)
+	})
+}
+
+// TestCursorProtocolRequestInstructionAfterToolResult 覆盖 [tool_result, instruction]：
+// instruction 只合入随后的真实 user；前置 assistant tool-call 与 tool result 的
+// call ID / 内容 / 错误标志 / 顺序全部保留到历史 blob。
+func TestCursorProtocolRequestInstructionAfterToolResult(t *testing.T) {
+	turns, err := cursorConvertMessages([]apicompat.ChatMessage{
+		cursorTextMsg("user", "q"),
+		{Role: "assistant", ToolCalls: []apicompat.ChatToolCall{
+			{ID: "call_1", Type: "function", Function: apicompat.ChatFunctionCall{
+				Name: "lookup", Arguments: `{"k":1}`}},
+		}},
+		{Role: "tool", ToolCallID: "call_1", Name: "lookup",
+			Content: json.RawMessage(`"denied"`), IsError: true},
+		cursorTextMsg("system", "TAIL"),
+		cursorTextMsg("user", "next"),
+	}, cursorSkipLedger{})
+	require.NoError(t, err)
+
+	// 角色与顺序：user, assistant(tool-call), tool(tool-result), user；
+	// 中间的 system instruction 不生成任何轮次。
+	require.Len(t, turns, 4)
+	require.Equal(t, "user", turns[0].role)
+	require.Equal(t, "assistant", turns[1].role)
+	require.Equal(t, "tool", turns[2].role)
+	require.Equal(t, "user", turns[3].role)
+	require.Equal(t, "TAILnext", turns[3].text)
+
+	// assistant tool-call：call ID / 名称 / 原始参数对象保真。
+	require.Len(t, turns[1].toolCalls, 1)
+	require.Equal(t, "call_1", turns[1].toolCalls[0].callID)
+	require.Equal(t, "lookup", turns[1].toolCalls[0].name)
+	require.JSONEq(t, `{"k":1}`, string(turns[1].toolCalls[0].args))
+
+	// tool result：call ID / 结果文本 / isError 保真。
+	require.Len(t, turns[2].toolResults, 1)
+	require.Equal(t, "call_1", turns[2].toolResults[0].callID)
+	require.Equal(t, "denied", turns[2].toolResults[0].text)
+	require.True(t, turns[2].toolResults[0].isError)
+
+	// 落到真实历史 blob 形状后仍然保真，错误标志进入 providerOptions。
+	blobs, err := cursorHistoryBlobs(turns[1:3], cursorSkipLedger{})
+	require.NoError(t, err)
+	require.Len(t, blobs, 2)
+	require.Contains(t, string(blobs[0].value), `"toolCallId":"call_1"`)
+	require.Contains(t, string(blobs[0].value), `"toolName":"lookup"`)
+	require.Contains(t, string(blobs[1].value), `"toolCallId":"call_1"`)
+	require.Contains(t, string(blobs[1].value), `"result":"denied"`)
+	require.Contains(t, string(blobs[1].value), `"isError":true`)
+}
+
+// TestCursorProtocolRequestAssistantToolCallsKeepOrder 覆盖 assistant 文本 +
+// 多条 tool-call 的保序落点（text 在前，调用按原顺序跟随）。
+func TestCursorProtocolRequestAssistantToolCallsKeepOrder(t *testing.T) {
+	turns, err := cursorConvertMessages([]apicompat.ChatMessage{
+		cursorTextMsg("user", "q"),
+		{Role: "assistant", Content: json.RawMessage(`"thinking"`), ToolCalls: []apicompat.ChatToolCall{
+			{ID: "c2", Type: "function", Function: apicompat.ChatFunctionCall{Name: "B", Arguments: `{"b":2}`}},
+			{ID: "c1", Type: "function", Function: apicompat.ChatFunctionCall{Name: "A", Arguments: `{"a":1}`}},
+		}},
+	}, cursorSkipLedger{})
+	require.NoError(t, err)
+	require.Len(t, turns, 2)
+	require.Equal(t, "thinking", turns[1].text)
+	require.Len(t, turns[1].toolCalls, 2)
+	require.Equal(t, "c2", turns[1].toolCalls[0].callID)
+	require.Equal(t, "c1", turns[1].toolCalls[1].callID)
+	require.Equal(t, "B", turns[1].toolCalls[0].name)
+	require.Equal(t, "A", turns[1].toolCalls[1].name)
+
+	blobs, err := cursorHistoryBlobs(turns[1:], cursorSkipLedger{})
+	require.NoError(t, err)
+	require.Len(t, blobs, 1)
+	got := string(blobs[0].value)
+	require.Contains(t, got, `[{"type":"text","text":"thinking"},{"type":"tool-call","toolCallId":"c2"`)
+	require.Less(t, indexOfSub(got, `"c2"`), indexOfSub(got, `"c1"`), "tool-call 顺序必须保留")
+}
+
+// TestCursorProtocolRequestInstructionWithoutRealUserRejected 覆盖"没有真实 user"：
+// instruction 永不生成 user action，因此这类入站由既有 CUR-REQ-06 拒绝。
+func TestCursorProtocolRequestInstructionWithoutRealUserRejected(t *testing.T) {
+	cases := map[string]*apicompat.ChatCompletionsRequest{
+		"只有 instruction": {Messages: []apicompat.ChatMessage{
+			cursorTextMsg("system", "SYS"),
+		}},
+		"instruction + assistant": {Messages: []apicompat.ChatMessage{
+			cursorTextMsg("system", "SYS"),
+			cursorTextMsg("assistant", "a"),
+		}},
+	}
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := cursorConvertRequest(req, "grok-4.7")
+			assertCursorRequestError(t, err, infraerrors.CursorReqNoContent, http.StatusBadRequest)
+		})
+	}
+}
+
+// TestCursorProtocolRequestInstructionRoleIsInstruction 钉死 role="instruction"
+// 经唯一分类 helper 得到 instruction 规范角色：不进 unknown、不被丢弃。
+func TestCursorProtocolRequestInstructionRoleIsInstruction(t *testing.T) {
+	require.Equal(t, cursorSemanticInstruction, cursorClassifySemanticRole("instruction"))
+	require.Equal(t, cursorSemanticInstruction, cursorClassifySemanticRole(" Instruction "))
+	require.Equal(t, cursorSemanticInstruction, cursorClassifySemanticRole("SYSTEM"))
+	require.Equal(t, cursorSemanticInstruction, cursorClassifySemanticRole("developer"))
+	require.Equal(t, cursorSemanticUnknown, cursorClassifySemanticRole("wizard"))
+
+	sem := cursorDecodeSemanticMessages([]apicompat.ChatMessage{
+		cursorTextMsg("instruction", "RULE"),
+		cursorTextMsg("user", "q"),
+	})
+	require.Len(t, sem, 2)
+	require.Equal(t, cursorSemanticInstruction, sem[0].role)
+	require.Equal(t, cursorSemanticUser, sem[1].role)
+
+	skipped := cursorSkipLedger{}
+	body, _, err := cursorBuildAgentRunFromSemantic(sem, "grok-4.7", nil, nil, skipped)
+	require.NoError(t, err)
+	text := cursorActionTextOf(t, cursorAgentRunOf(t, body))
+	require.Contains(t, text, "RULE")
+	require.Contains(t, text, "q")
+	require.Zero(t, skipped[cursorSkipUnknownRole], "instruction 不得进 unknown 账本")
+}
+
+// TestCursorProtocolRequestResultContainerMarkerFromDecodeInput 证明源容器完整性标记
+// 取自解码输入本身，而不是对展开后的消息做尾部扫描/结果块扁平化猜出来的。
+func TestCursorProtocolRequestResultContainerMarkerFromDecodeInput(t *testing.T) {
+	// Chat 单条 tool/function 消息是完整结果容器。
+	toolSem := cursorDecodeSemanticMessages([]apicompat.ChatMessage{
+		{Role: "tool", ToolCallID: "call_1", Name: "lookup", Content: json.RawMessage(`"sunny"`)},
+	})
+	require.Len(t, toolSem, 1)
+	require.Equal(t, cursorSemanticTool, toolSem[0].role)
+	require.Equal(t, cursorContainerAllToolResults, toolSem[0].container)
+	require.Equal(t, "call_1", toolSem[0].raw.ToolCallID)
+
+	// 含普通正文的是混合容器。
+	userSem := cursorDecodeSemanticMessages([]apicompat.ChatMessage{cursorTextMsg("user", "hi")})
+	require.Equal(t, cursorContainerMixed, userSem[0].container)
+
+	// 文本为空、尾部是 tool_calls 的 assistant 仍是混合容器：不能因为它是最后一条、
+	// 或内容形似结果块，就反推成纯结果容器（这正是"尾部扫描猜测"要防的错）。
+	assistantSem := cursorDecodeSemanticMessages([]apicompat.ChatMessage{{
+		Role: "assistant",
+		ToolCalls: []apicompat.ChatToolCall{{
+			ID: "c1", Type: "function",
+			Function: apicompat.ChatFunctionCall{Name: "lookup", Arguments: `{}`},
+		}},
+	}})
+	require.Equal(t, cursorSemanticAssistant, assistantSem[0].role)
+	require.Equal(t, cursorContainerMixed, assistantSem[0].container)
+
+	// 标记按消息逐条取自输入，不因上下文（后面跟了 user）而改变。
+	seq := cursorDecodeSemanticMessages([]apicompat.ChatMessage{
+		{Role: "tool", ToolCallID: "call_2", Name: "lookup", Content: json.RawMessage(`"x"`)},
+		cursorTextMsg("user", "next"),
+	})
+	require.Equal(t, cursorContainerAllToolResults, seq[0].container)
+	require.Equal(t, cursorContainerMixed, seq[1].container)
+}
+
+// TestCursorProtocolRequestSemanticSourceContainerIndex 证明 Chat 解码时每条语义消息的
+// sourceContainerIndex 等于其在原始输入 msgs 中的下标，与语义切片下标是两个独立字段；
+// 且既有的 role/container 标记不受影响。首项显式断言 0，防止零值默认掩盖"未赋值"。
+func TestCursorProtocolRequestSemanticSourceContainerIndex(t *testing.T) {
+	msgs := []apicompat.ChatMessage{
+		cursorTextMsg("system", "HEAD"),
+		cursorTextMsg("user", "q"),
+		{Role: "tool", ToolCallID: "call_1", Name: "lookup", Content: json.RawMessage(`"sunny"`)},
+		cursorTextMsg("assistant", "a"),
+	}
+
+	sem := cursorDecodeSemanticMessages(msgs)
+	require.Len(t, sem, len(msgs))
+
+	// 首项必须显式为 0：若解码时忘记赋值，零值默认也会"碰巧"通过，故单独钉死。
+	require.Equal(t, 0, sem[0].sourceContainerIndex)
+	require.Equal(t, cursorSemanticInstruction, sem[0].role)
+	require.Equal(t, cursorContainerMixed, sem[0].container)
+
+	// 逐条等于原始输入下标（含后续递增值与 tool 消息）。
+	for i := range msgs {
+		require.Equal(t, i, sem[i].sourceContainerIndex, "第 %d 条的源容器索引应等于原始输入下标", i)
+	}
+
+	require.Equal(t, cursorSemanticUser, sem[1].role)
+	require.Equal(t, cursorContainerMixed, sem[1].container)
+
+	// tool 消息：索引等于原始下标 2，且保留 tool 角色与纯结果容器标记、原始 call ID。
+	require.Equal(t, 2, sem[2].sourceContainerIndex)
+	require.Equal(t, cursorSemanticTool, sem[2].role)
+	require.Equal(t, cursorContainerAllToolResults, sem[2].container)
+	require.Equal(t, "call_1", sem[2].raw.ToolCallID)
+
+	require.Equal(t, 3, sem[3].sourceContainerIndex)
+	require.Equal(t, cursorSemanticAssistant, sem[3].role)
+	require.Equal(t, cursorContainerMixed, sem[3].container)
+}
+
+// TestCursorProtocolRequestSemanticBuilderCoversAll 用同一语义 builder 覆盖
+// 首/中/尾 instruction、无真实 user、工具调用保序与 tool-result 的 ID/内容/isError。
+func TestCursorProtocolRequestSemanticBuilderCoversAll(t *testing.T) {
+	sem := []cursorSemanticMessage{
+		{role: cursorSemanticInstruction, raw: cursorTextMsg("system", "HEAD")},
+		{role: cursorSemanticUser, raw: cursorTextMsg("user", "q1")},
+		{role: cursorSemanticAssistant, raw: apicompat.ChatMessage{
+			Role: "assistant",
+			ToolCalls: []apicompat.ChatToolCall{
+				{ID: "call_z", Type: "function", Function: apicompat.ChatFunctionCall{Name: "B", Arguments: `{"b":2}`}},
+				{ID: "call_a", Type: "function", Function: apicompat.ChatFunctionCall{Name: "A", Arguments: `{"a":1}`}},
+			},
+		}},
+		{role: cursorSemanticTool, container: cursorContainerAllToolResults, raw: apicompat.ChatMessage{
+			Role: "tool", ToolCallID: "call_z", Name: "B", Content: json.RawMessage(`"z-res"`), IsError: true,
+		}},
+		{role: cursorSemanticTool, container: cursorContainerAllToolResults, raw: apicompat.ChatMessage{
+			Role: "tool", ToolCallID: "call_a", Name: "A", Content: json.RawMessage(`"a-res"`),
+		}},
+		{role: cursorSemanticInstruction, raw: cursorTextMsg("developer", "MID")},
+		{role: cursorSemanticUser, raw: cursorTextMsg("user", "q2")},
+		{role: cursorSemanticInstruction, raw: cursorTextMsg("instruction", "TAIL")},
+	}
+
+	body, _, err := cursorBuildAgentRunFromSemantic(sem, "grok-4.7", nil, nil, cursorSkipLedger{})
+	require.NoError(t, err)
+	run := cursorAgentRunOf(t, body)
+	require.Equal(t, "MIDq2TAIL", cursorActionTextOf(t, run),
+		"尾 instruction 合入最近真实 user，不生成 user action")
+
+	// instruction 不生成任何独立轮次：user, assistant, tool, tool 共 4 条历史。
+	blobs := cursorBlobsOf(t, run)
+	require.Len(t, blobs, 4)
+	require.Contains(t, string(blobs[0][1]), "HEADq1", "首 instruction 合入首条真实 user")
+
+	assistantBlob := string(blobs[1][1])
+	require.Less(t, indexOfSub(assistantBlob, `"call_z"`), indexOfSub(assistantBlob, `"call_a"`),
+		"assistant tool-call 必须保序")
+	require.Contains(t, string(blobs[2][1]), `"toolCallId":"call_z"`)
+	require.Contains(t, string(blobs[2][1]), `"result":"z-res"`)
+	require.Contains(t, string(blobs[2][1]), `"isError":true`)
+	require.Contains(t, string(blobs[3][1]), `"toolCallId":"call_a"`)
+	require.Contains(t, string(blobs[3][1]), `"result":"a-res"`)
+	require.NotContains(t, string(blobs[3][1]), `"isError":true`)
+
+	t.Run("没有真实 user 时失败关闭", func(t *testing.T) {
+		_, _, err := cursorBuildAgentRunFromSemantic([]cursorSemanticMessage{
+			{role: cursorSemanticInstruction, raw: cursorTextMsg("instruction", "ONLY")},
+		}, "grok-4.7", nil, nil, cursorSkipLedger{})
+		assertCursorRequestError(t, err, infraerrors.CursorReqNoContent, http.StatusBadRequest)
+	})
 }

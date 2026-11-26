@@ -12,6 +12,235 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestCursorSemanticProtocolDecoderMatrix 钉死四协议“原始字段 → 语义序列”的唯一解码：
+// 规范角色、源顺序、源容器索引（消息数组零基 / 顶层指令 -1）、工具调用与结果的
+// ID / 内容 / 错误标记全部保真；同一原容器展开出的语义项共享索引与完整性标记。
+func TestCursorSemanticProtocolDecoderMatrix(t *testing.T) {
+	t.Run("chat", func(t *testing.T) {
+		req := &apicompat.ChatCompletionsRequest{Messages: []apicompat.ChatMessage{
+			{Role: "system", Content: json.RawMessage(`"SYS"`)},
+			{Role: "user", Content: json.RawMessage(`"q"`)},
+			{Role: "assistant", ToolCalls: []apicompat.ChatToolCall{{
+				ID: "call_1", Type: "function",
+				Function: apicompat.ChatFunctionCall{Name: "lookup", Arguments: `{}`},
+			}}},
+			{Role: "tool", ToolCallID: "call_1", Content: json.RawMessage(`"sunny"`), IsError: true},
+		}}
+		sem := cursorDecodeChatSemantic(req)
+		require.Len(t, sem, 4)
+		require.Equal(t, []string{cursorSemanticInstruction, cursorSemanticUser, cursorSemanticAssistant, cursorSemanticTool},
+			[]string{sem[0].role, sem[1].role, sem[2].role, sem[3].role})
+		for i := range sem {
+			require.Equal(t, i, sem[i].sourceContainerIndex, "Chat 消息下标即源容器下标")
+		}
+		require.Equal(t, "call_1", sem[2].raw.ToolCalls[0].ID, "assistant 工具调用 ID 保真")
+		require.Equal(t, cursorContainerMixed, sem[2].container)
+		require.Equal(t, "call_1", sem[3].raw.ToolCallID, "工具结果 call ID 保真")
+		require.True(t, sem[3].raw.IsError, "工具结果错误标记保真")
+		require.Equal(t, cursorContainerAllToolResults, sem[3].container)
+	})
+
+	t.Run("anthropic messages", func(t *testing.T) {
+		req := &apicompat.AnthropicRequest{
+			System: json.RawMessage(`"SYS"`),
+			Messages: []apicompat.AnthropicMessage{
+				{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"q"}]`)},
+				{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_a","name":"lookup","input":{}}]`)},
+				{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_a","content":[{"type":"text","text":"sunny"}],"is_error":true},{"type":"tool_result","tool_use_id":"call_b","content":"rainy"}]`)},
+			},
+		}
+		sem, err := cursorDecodeMessagesSemantic(req)
+		require.NoError(t, err)
+		require.Len(t, sem, 5)
+		require.Equal(t, cursorSemanticInstruction, sem[0].role)
+		require.Equal(t, -1, sem[0].sourceContainerIndex, "顶层 system 是前导容器 -1")
+		require.Equal(t, 0, sem[1].sourceContainerIndex, "消息数组从 0 起算，不被 -1 平移")
+		require.Less(t, sem[0].sourceContainerIndex, sem[1].sourceContainerIndex)
+		require.Equal(t, cursorSemanticUser, sem[1].role)
+		require.Equal(t, cursorSemanticAssistant, sem[2].role)
+		require.Equal(t, "call_a", sem[2].raw.ToolCalls[0].ID)
+		// 同一原容器展开出的两个 tool_result 共享索引 2 与纯结果标记。
+		require.Equal(t, cursorSemanticTool, sem[3].role)
+		require.Equal(t, 2, sem[3].sourceContainerIndex)
+		require.Equal(t, 2, sem[4].sourceContainerIndex)
+		require.Equal(t, cursorContainerAllToolResults, sem[3].container)
+		require.Equal(t, cursorContainerAllToolResults, sem[4].container)
+		require.Equal(t, "call_a", sem[3].raw.ToolCallID)
+		require.True(t, sem[3].raw.IsError)
+		require.Equal(t, "call_b", sem[4].raw.ToolCallID)
+		require.False(t, sem[4].raw.IsError)
+
+		emptyContainerReq := &apicompat.AnthropicRequest{Messages: []apicompat.AnthropicMessage{
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_a","content":"a"}]`)},
+			{Role: "assistant", Content: json.RawMessage(`[]`)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_b","content":"b"}]`)},
+		}}
+		emptySem, err := cursorDecodeMessagesSemantic(emptyContainerReq)
+		require.NoError(t, err)
+		require.Len(t, emptySem, 3, "空内容源容器必须保留 Mixed 占位")
+		emptyAnalysis := cursorAnalyzeSemanticMessages(emptySem)
+		require.Len(t, emptyAnalysis.results, 1)
+		require.Equal(t, "call_b", emptyAnalysis.results[0].callID)
+	})
+
+	t.Run("responses", func(t *testing.T) {
+		req := &apicompat.ResponsesRequest{
+			Instructions: "SYS",
+			Input: json.RawMessage(`[
+				{"type":"message","role":"user","content":"q"},
+				{"type":"function_call","call_id":"call_r","name":"lookup","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_r","output":"sunny"}
+			]`),
+		}
+		sem, err := cursorDecodeResponsesSemantic(req)
+		require.NoError(t, err)
+		require.Len(t, sem, 4)
+		require.Equal(t, cursorSemanticInstruction, sem[0].role)
+		require.Equal(t, -1, sem[0].sourceContainerIndex, "顶层 instructions 是前导容器 -1")
+		require.Equal(t, 0, sem[1].sourceContainerIndex)
+		require.Equal(t, cursorSemanticUser, sem[1].role)
+		require.Equal(t, cursorSemanticAssistant, sem[2].role)
+		require.Equal(t, "call_r", sem[2].raw.ToolCalls[0].ID)
+		require.Equal(t, cursorSemanticTool, sem[3].role)
+		require.Equal(t, 2, sem[3].sourceContainerIndex)
+		require.Equal(t, "call_r", sem[3].raw.ToolCallID)
+		require.Equal(t, cursorContainerAllToolResults, sem[3].container)
+		// ResultType 由 plan 按源容器下标映射回原始 item，不靠 call ID 猜测。
+		plan, err := cursorPlanFromResponses(req, "cursor-test-model")
+		require.NoError(t, err)
+		require.Len(t, plan.results, 1)
+		require.Equal(t, "function_call_output", plan.results[0].ResultType)
+		require.Equal(t, "call_r", plan.results[0].CallID)
+
+		withDeclaration := &apicompat.ResponsesRequest{
+			Input: json.RawMessage(`[
+				{"type":"function_call","call_id":"call_old","name":"lookup","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_old","output":"sunny"},
+				{"type":"additional_tools","tools":[]}
+			]`),
+		}
+		declarationSem, err := cursorDecodeResponsesSemantic(withDeclaration)
+		require.NoError(t, err)
+		declarationAnalysis := cursorAnalyzeSemanticMessages(declarationSem)
+		require.Empty(t, declarationAnalysis.results, "a declaration/ordinary item after a result stops the shared tail analyzer")
+
+		withSystemRole := []byte(`{"contents":[{"role":"system","parts":[{"text":"inline instruction"}]}]}`)
+		systemSem, err := cursorDecodeGeminiSemantic(withSystemRole)
+		require.NoError(t, err)
+		require.Len(t, systemSem, 1)
+		require.Equal(t, cursorSemanticInstruction, systemSem[0].role)
+	})
+
+	t.Run("gemini native", func(t *testing.T) {
+		body := []byte(`{
+			"systemInstruction":{"parts":[{"text":"SYS"}]},
+			"contents":[
+				{"role":"user","parts":[{"text":"q"}]},
+				{"role":"model","parts":[{"functionCall":{"id":"call_g","name":"lookup","args":{}}}]},
+				{"role":"user","parts":[{"functionResponse":{"id":"call_g","name":"lookup","response":{"result":"sunny"}}}]}
+			]
+		}`)
+		sem, err := cursorDecodeGeminiSemantic(body)
+		require.NoError(t, err)
+		require.Len(t, sem, 4)
+		require.Equal(t, cursorSemanticInstruction, sem[0].role)
+		require.Equal(t, -1, sem[0].sourceContainerIndex, "systemInstruction 是前导容器 -1")
+		require.Equal(t, 0, sem[1].sourceContainerIndex)
+		require.Equal(t, cursorSemanticUser, sem[1].role)
+		require.Equal(t, cursorSemanticAssistant, sem[2].role, "model 源角色是 assistant，不从桥接输出反推")
+		require.Equal(t, "call_g", sem[2].raw.ToolCalls[0].ID)
+		require.Equal(t, cursorSemanticTool, sem[3].role)
+		require.Equal(t, 2, sem[3].sourceContainerIndex)
+		require.Equal(t, "call_g", sem[3].raw.ToolCallID)
+		require.Equal(t, cursorContainerAllToolResults, sem[3].container)
+
+		emptyBody := []byte(`{"contents":[
+			{"role":"user","parts":[{"functionResponse":{"id":"call_a","response":{"result":"a"}}}]},
+			{"role":"model","parts":[]},
+			{"role":"user","parts":[{"functionResponse":{"id":"call_b","response":{"result":"b"}}}]}
+		]}`)
+		emptyGeminiSem, err := cursorDecodeGeminiSemantic(emptyBody)
+		require.NoError(t, err)
+		require.Len(t, emptyGeminiSem, 3, "空 parts 源容器必须保留 Mixed 占位")
+		emptyGeminiAnalysis := cursorAnalyzeSemanticMessages(emptyGeminiSem)
+		require.Len(t, emptyGeminiAnalysis.results, 1)
+		require.Equal(t, "call_b", emptyGeminiAnalysis.results[0].callID)
+	})
+}
+
+// TestCursorSemanticTailAnalysisMatrix 覆盖唯一尾部分析器的分组/截断边界：
+// instruction 可跨越、完整结果容器保序收集；普通 user/assistant/混合/unknown 立即截断。
+func TestCursorSemanticTailAnalysisMatrix(t *testing.T) {
+	tool := func(idx int, id string) cursorSemanticMessage {
+		return cursorSemanticMessage{
+			role: cursorSemanticTool, container: cursorContainerAllToolResults,
+			sourceContainerIndex: idx,
+			raw:                  apicompat.ChatMessage{Role: "tool", ToolCallID: id},
+		}
+	}
+	instruction := func(idx int) cursorSemanticMessage {
+		return cursorSemanticMessage{
+			role: cursorSemanticInstruction, sourceContainerIndex: idx,
+			raw: apicompat.ChatMessage{Role: "system"},
+		}
+	}
+	user := func(idx int) cursorSemanticMessage {
+		return cursorSemanticMessage{
+			role: cursorSemanticUser, container: cursorContainerMixed, sourceContainerIndex: idx,
+			raw: apicompat.ChatMessage{Role: "user"},
+		}
+	}
+	assistant := func(idx int) cursorSemanticMessage {
+		return cursorSemanticMessage{
+			role: cursorSemanticAssistant, container: cursorContainerMixed, sourceContainerIndex: idx,
+			raw: apicompat.ChatMessage{Role: "assistant"},
+		}
+	}
+	mixed := func(idx int) cursorSemanticMessage {
+		m := user(idx)
+		m.container = cursorContainerMixed
+		return m
+	}
+	unknown := func(idx int) cursorSemanticMessage {
+		return cursorSemanticMessage{
+			role: cursorSemanticUnknown, container: cursorContainerMixed, sourceContainerIndex: idx,
+			raw: apicompat.ChatMessage{Role: "critic"},
+		}
+	}
+	ids := func(a cursorSemanticAnalysis) []string {
+		out := make([]string, 0, len(a.results))
+		for _, r := range a.results {
+			out = append(out, r.callID)
+		}
+		return out
+	}
+
+	cases := []struct {
+		name    string
+		sem     []cursorSemanticMessage
+		wantIDs []string
+	}{
+		{name: "结果后跟指令", sem: []cursorSemanticMessage{tool(0, "c1"), instruction(-1)}, wantIDs: []string{"c1"}},
+		{name: "指令后跟结果", sem: []cursorSemanticMessage{instruction(-1), tool(0, "c1")}, wantIDs: []string{"c1"}},
+		{name: "多结果容器保序", sem: []cursorSemanticMessage{tool(0, "c1"), tool(1, "c2"), tool(2, "c3")}, wantIDs: []string{"c1", "c2", "c3"}},
+		{name: "同容器多结果保序", sem: []cursorSemanticMessage{tool(2, "c1"), tool(2, "c2")}, wantIDs: []string{"c1", "c2"}},
+		{name: "结果后普通用户截断", sem: []cursorSemanticMessage{tool(0, "c1"), user(1)}, wantIDs: nil},
+		{name: "结果后助手截断", sem: []cursorSemanticMessage{tool(0, "c1"), assistant(1)}, wantIDs: nil},
+		{name: "结果后混合正文容器截断", sem: []cursorSemanticMessage{tool(0, "c1"), mixed(1)}, wantIDs: nil},
+		{name: "结果后未知容器截断", sem: []cursorSemanticMessage{tool(0, "c1"), unknown(1)}, wantIDs: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ids(cursorAnalyzeSemanticMessages(tc.sem))
+			if len(tc.wantIDs) == 0 {
+				require.Empty(t, got)
+			} else {
+				require.Equal(t, tc.wantIDs, got)
+			}
+		})
+	}
+}
+
 func TestCursorMessagesPlanPreservesOfficialSystemMessage(t *testing.T) {
 	req := &apicompat.AnthropicRequest{
 		Model: "cursor-test-model",

@@ -156,6 +156,11 @@ var ErrCursorContentWhileWaitingTools = errors.New("cursor: model emitted new co
 type CursorExecutionRequest struct {
 	// Chat 是已归一为 Chat Completions 形状的请求（非 nil）。
 	Chat *apicompat.ChatCompletionsRequest
+	// SemanticMessages is the request-scoped canonical semantic sequence decoded once
+	// from the raw source protocol. Plan/analyzer and the AgentRun builder share this
+	// one slice; Chat remains the wire-adapter shape used only by the response bridge
+	// and non-message configuration. It is never persisted.
+	SemanticMessages []cursorSemanticMessage
 	// Model 是客户端可见的原始模型名（回写 chunk / 响应使用）。
 	Model string
 	// Stream 是客户端是否要求流式。
@@ -511,11 +516,15 @@ func (s *CursorExecutionService) Execute(
 		return nil, err
 	}
 
-	// ④ 请求转换（带丢弃记账：本层不支持的形状一律丢弃并落日志，不整轮 400）。
-	payload, err := cursorConvertRequestWithContext(ctx, req.Chat, upstreamModel)
+	// ④ 请求转换：请求期唯一语义序列直接交给唯一的 AgentRun builder。
+	// Chat wire 适配结果只供响应回桥与非消息配置使用，不再被二次分类/复制回消息。
+	sem := req.SemanticMessages
+	skipped := cursorSkipLedger{}
+	payload, _, err := cursorBuildAgentRunFromSemantic(sem, upstreamModel, req.Chat.Tools, req.Chat.ToolChoice, skipped)
 	if err != nil {
 		return nil, err
 	}
+	skipped.log(ctx, "chat_messages_dropped", upstreamModel)
 	if _, err := authProvider.CursorUpstreamAuth(ctx); err != nil {
 		return nil, err
 	}
@@ -1927,7 +1936,9 @@ func cursorExecuteChatAs(
 	if model == "" {
 		return nil, newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqMissingModel, "chat completions request carries no model")
 	}
-	plan, planErr := cursorPlanFromChat(&ccReq, model)
+	sem := cursorDecodeChatSemantic(&ccReq)
+	analysis := cursorAnalyzeSemanticMessages(sem)
+	plan, planErr := cursorPlanFromChatCore(sem, analysis, &ccReq, model)
 	if planErr != nil {
 		if errors.Is(planErr, ErrCursorResumeUnsupportedContent) {
 			return nil, newCursorResumeError(http.StatusBadRequest, "unsupported_content", planErr)
@@ -1939,16 +1950,17 @@ func cursorExecuteChatAs(
 		return nil, modeErr
 	}
 	return exec.Execute(ctx, c, account, &CursorExecutionRequest{
-		Chat:           &ccReq,
-		Model:          model,
-		Stream:         ccReq.Stream,
-		StartTime:      time.Now(),
-		Protocol:       protocol,
-		IndexProtocol:  indexProtocol,
-		Identity:       CursorSessionIdentityFromContext(ctx),
-		Plan:           plan,
-		ToolChoiceMode: mode,
-		ToolChoiceName: name,
+		Chat:             &ccReq,
+		SemanticMessages: sem,
+		Model:            model,
+		Stream:           ccReq.Stream,
+		StartTime:        time.Now(),
+		Protocol:         protocol,
+		IndexProtocol:    indexProtocol,
+		Identity:         CursorSessionIdentityFromContext(ctx),
+		Plan:             plan,
+		ToolChoiceMode:   mode,
+		ToolChoiceName:   name,
 	})
 }
 
@@ -1980,7 +1992,12 @@ func cursorExecuteResponses(
 	if err != nil {
 		return nil, err
 	}
-	plan, planErr := cursorPlanFromResponses(req, req.Model)
+	sem, semErr := cursorDecodeResponsesSemantic(req)
+	if semErr != nil {
+		return nil, semErr
+	}
+	analysis := cursorAnalyzeSemanticMessages(sem)
+	plan, planErr := cursorPlanFromResponsesCore(sem, analysis, req, req.Model)
 	if planErr != nil {
 		if errors.Is(planErr, ErrCursorResumeUnsupportedContent) {
 			return nil, newCursorResumeError(http.StatusBadRequest, "unsupported_content", planErr)
@@ -1992,21 +2009,22 @@ func cursorExecuteResponses(
 	if modeErr != nil {
 		return nil, modeErr
 	}
-	ccReq, err := apicompat.ResponsesToChatCompletionsRequest(req)
+	ccReq, err := apicompat.ResponsesToChatCompletionsRequestWithOptions(req, &apicompat.ResponsesToChatOptions{PreserveInstructions: true})
 	if err != nil {
 		return nil, fmt.Errorf("cursor: convert responses to chat completions: %w", err)
 	}
 	return exec.Execute(ctx, c, account, &CursorExecutionRequest{
-		Chat:           ccReq,
-		Model:          req.Model,
-		Stream:         req.Stream,
-		StartTime:      time.Now(),
-		Protocol:       cursorProtocolResponses,
-		Tools:          tools,
-		Identity:       CursorSessionIdentityFromContext(ctx),
-		Plan:           plan,
-		ToolChoiceMode: mode,
-		ToolChoiceName: name,
+		Chat:             ccReq,
+		SemanticMessages: sem,
+		Model:            req.Model,
+		Stream:           req.Stream,
+		StartTime:        time.Now(),
+		Protocol:         cursorProtocolResponses,
+		Tools:            tools,
+		Identity:         CursorSessionIdentityFromContext(ctx),
+		Plan:             plan,
+		ToolChoiceMode:   mode,
+		ToolChoiceName:   name,
 	})
 }
 
@@ -2027,7 +2045,12 @@ func cursorExecuteAnthropic(
 	if strings.TrimSpace(req.Model) == "" {
 		return nil, newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqMissingModel, "anthropic messages request carries no model")
 	}
-	plan, planErr := cursorPlanFromMessages(req, req.Model)
+	sem, semErr := cursorDecodeMessagesSemantic(req)
+	if semErr != nil {
+		return nil, semErr
+	}
+	analysis := cursorAnalyzeSemanticMessages(sem)
+	plan, planErr := cursorPlanFromMessagesCore(sem, analysis, req, req.Model)
 	if planErr != nil {
 		if errors.Is(planErr, ErrCursorResumeUnsupportedContent) {
 			return nil, newCursorResumeError(http.StatusBadRequest, "unsupported_content", planErr)
@@ -2038,20 +2061,21 @@ func cursorExecuteAnthropic(
 	if modeErr != nil {
 		return nil, modeErr
 	}
-	ccReq, err := apicompat.AnthropicToChatCompletionsRequest(req)
+	ccReq, err := apicompat.AnthropicToCursorChatCompletionsRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("cursor: convert anthropic messages request: %w", err)
 	}
 	return exec.Execute(ctx, c, account, &CursorExecutionRequest{
-		Chat:           ccReq,
-		Model:          req.Model,
-		Stream:         req.Stream,
-		StartTime:      time.Now(),
-		Protocol:       cursorProtocolAnthropic,
-		Identity:       CursorSessionIdentityFromContext(ctx),
-		Plan:           plan,
-		ToolChoiceMode: mode,
-		ToolChoiceName: name,
+		Chat:             ccReq,
+		SemanticMessages: sem,
+		Model:            req.Model,
+		Stream:           req.Stream,
+		StartTime:        time.Now(),
+		Protocol:         cursorProtocolAnthropic,
+		Identity:         CursorSessionIdentityFromContext(ctx),
+		Plan:             plan,
+		ToolChoiceMode:   mode,
+		ToolChoiceName:   name,
 	})
 }
 
@@ -2075,8 +2099,13 @@ func cursorExecuteGeminiNative(
 	if strings.TrimSpace(originalModel) == "" {
 		return nil, newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqMissingModel, "native request carries no model")
 	}
-	// ① 原始请求 → 计划（含工具名与 toolConfig 摘要）。
-	plan, planErr := cursorPlanFromGemini(body, originalModel)
+	// ① 原始请求 → 语义序列 → 唯一分析 → 计划（含工具名与 toolConfig 摘要）。
+	sem, semErr := cursorDecodeGeminiSemantic(body)
+	if semErr != nil {
+		return nil, semErr
+	}
+	analysis := cursorAnalyzeSemanticMessages(sem)
+	plan, planErr := cursorPlanFromGeminiCore(sem, analysis, body, originalModel)
 	if planErr != nil {
 		return nil, planErr
 	}
@@ -2098,16 +2127,17 @@ func cursorExecuteGeminiNative(
 		return nil, err
 	}
 	return exec.Execute(ctx, c, account, &CursorExecutionRequest{
-		Chat:           &chat,
-		Model:          originalModel,
-		Stream:         stream,
-		StartTime:      time.Now(),
-		Protocol:       cursorProtocolGemini,
-		IndexProtocol:  string(CursorResumeProtocolGemini),
-		Identity:       CursorSessionIdentityFromContext(ctx),
-		Plan:           plan,
-		ToolChoiceMode: mode,
-		ToolChoiceName: name,
+		Chat:             &chat,
+		SemanticMessages: sem,
+		Model:            originalModel,
+		Stream:           stream,
+		StartTime:        time.Now(),
+		Protocol:         cursorProtocolGemini,
+		IndexProtocol:    string(CursorResumeProtocolGemini),
+		Identity:         CursorSessionIdentityFromContext(ctx),
+		Plan:             plan,
+		ToolChoiceMode:   mode,
+		ToolChoiceName:   name,
 	})
 }
 
@@ -6180,6 +6210,395 @@ func cursorChatToolItem(tool apicompat.ChatTool) (cursorContextItem, string, err
 	return cursorContextItem{itemType: "config.tool", canonical: encoded}, name, nil
 }
 
+// ---------------------------------------------------------------------------
+// 请求期语义解码与唯一尾部分析（CS5B）
+//
+// 每个入口只把自身原始协议字段解码一次到 []cursorSemanticMessage；源容器索引在
+// 拆分/展开之前固定：消息数组项用原始零基下标，各协议的单个顶层指令容器用 -1。
+// 语义切片按源顺序追加，所有下游（plan / analyzer / AgentRun）只消费这一份。
+// ---------------------------------------------------------------------------
+
+// cursorDecodeChatSemantic 是 Chat 原始请求的语义解码器：沿用唯一的 Chat 薄解码，
+// 源容器索引即消息原始下标（每条消息自成一个容器）。
+func cursorDecodeChatSemantic(req *apicompat.ChatCompletionsRequest) []cursorSemanticMessage {
+	if req == nil {
+		return nil
+	}
+	return cursorDecodeSemanticMessages(req.Messages)
+}
+
+// cursorDecodeMessagesSemantic 从原始 Anthropic Messages 请求生成语义序列。
+// 顶层 system 是单个前导容器（保留索引 -1）；messages 数组项按零基下标成为源容器，
+// 同一消息展开出的所有语义项共享该下标与容器完整性标记。
+func cursorDecodeMessagesSemantic(req *apicompat.AnthropicRequest) ([]cursorSemanticMessage, error) {
+	if req == nil {
+		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil anthropic request")
+	}
+	out := make([]cursorSemanticMessage, 0, len(req.Messages)+1)
+	if len(bytes.TrimSpace(req.System)) > 0 {
+		blocks, err := cursorAnthropicBlocks(req.System)
+		if err != nil {
+			// 与既有 plan 一致：system 读不出来就丢整段，不整轮拒。
+			out = append(out, cursorSemanticMessage{
+				role:                 cursorSemanticInstruction,
+				raw:                  apicompat.ChatMessage{Role: "system", Content: json.RawMessage(`""`)},
+				sourceContainerIndex: -1,
+			})
+		} else {
+			for _, block := range blocks {
+				out = append(out, cursorSemanticMessage{
+					role:                 cursorSemanticInstruction,
+					raw:                  apicompat.ChatMessage{Role: "system", Content: mustCursorJSON(block.Text)},
+					sourceContainerIndex: -1,
+				})
+			}
+		}
+	}
+	for i, msg := range req.Messages {
+		blocks, err := cursorAnthropicBlocks(msg.Content)
+		if err != nil {
+			out = append(out, cursorSemanticMessage{
+				role:                 cursorClassifySemanticRole(msg.Role),
+				raw:                  apicompat.ChatMessage{Role: msg.Role},
+				container:            cursorContainerMixed,
+				sourceContainerIndex: i,
+			})
+			continue
+		}
+		if len(blocks) == 0 {
+			// 空/null 内容仍是一个真实源容器：保留 Mixed 占位，防止 analyzer
+			// 跨过该容器把更早的 tool_result 错收进当前批。
+			out = append(out, cursorSemanticMessage{
+				role:                 cursorClassifySemanticRole(msg.Role),
+				raw:                  apicompat.ChatMessage{Role: msg.Role},
+				container:            cursorContainerMixed,
+				sourceContainerIndex: i,
+			})
+			continue
+		}
+		allResults := len(blocks) > 0
+		for _, block := range blocks {
+			if block.Type != "tool_result" {
+				allResults = false
+				break
+			}
+		}
+		for _, block := range blocks {
+			sem := cursorSemanticMessage{sourceContainerIndex: i}
+			marker := cursorContainerMixed
+			if allResults {
+				marker = cursorContainerAllToolResults
+			}
+			sem.container = marker
+			switch block.Type {
+			case "tool_result":
+				inner, _ := cursorAnthropicBlocks(block.Content)
+				text, _, _ := cursorToolResultContent(inner, false, cursorSkipLedger{})
+				sem.role = cursorSemanticTool
+				sem.raw = apicompat.ChatMessage{
+					Role:       "tool",
+					ToolCallID: block.ToolUseID,
+					Content:    mustCursorJSON(text),
+					IsError:    block.IsError,
+				}
+			case "tool_use":
+				args := strings.TrimSpace(string(block.Input))
+				if args == "" || args == "null" {
+					args = "{}"
+				}
+				sem.role = cursorSemanticAssistant
+				sem.raw = apicompat.ChatMessage{
+					Role: "assistant",
+					ToolCalls: []apicompat.ChatToolCall{{
+						ID:       block.ID,
+						Type:     "function",
+						Function: apicompat.ChatFunctionCall{Name: block.Name, Arguments: args},
+					}},
+				}
+			case "text", "":
+				sem.role = cursorClassifySemanticRole(msg.Role)
+				sem.raw = apicompat.ChatMessage{Role: msg.Role, Content: mustCursorJSON(block.Text)}
+			default:
+				// thinking/image 等块在 AgentRun 无原生落点：按既有“丢字段保文本”口径，
+				// 序列化成定位标记文本，不伪造工具结果、不整轮拒。
+				encoded, jerr := json.Marshal(block)
+				if jerr != nil {
+					continue
+				}
+				sem.role = cursorClassifySemanticRole(msg.Role)
+				sem.raw = apicompat.ChatMessage{Role: msg.Role, Content: mustCursorJSON("\x00block:" + string(encoded))}
+			}
+			out = append(out, sem)
+		}
+	}
+	return out, nil
+}
+
+// cursorDecodeResponsesSemantic 从原始 Responses 请求生成语义序列。
+// 顶层 instructions 是单个前导容器（-1）；input 数组项按其零基下标成为源容器。
+// 桥接器的 .Messages 不参与：这里只读原始字段，故不会把被改写过的角色当事实源。
+func cursorDecodeResponsesSemantic(req *apicompat.ResponsesRequest) ([]cursorSemanticMessage, error) {
+	if req == nil {
+		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil responses request")
+	}
+	out := make([]cursorSemanticMessage, 0, 4)
+	if strings.TrimSpace(req.Instructions) != "" {
+		out = append(out, cursorSemanticMessage{
+			role:                 cursorSemanticInstruction,
+			raw:                  apicompat.ChatMessage{Role: "system", Content: mustCursorJSON(req.Instructions)},
+			sourceContainerIndex: -1,
+		})
+	}
+	items, err := cursorResponsesInputItems(req.Input)
+	if err != nil {
+		items = nil
+	}
+	for i, item := range items {
+		sem := cursorSemanticMessage{sourceContainerIndex: i}
+		switch apicompat.ClassifyResponsesInputItem(item) {
+		case apicompat.ResponsesInputItemDeclaration:
+			// 声明项不进入 AgentRun，但必须留在统一语义序列中作为尾部边界：
+			// 若它出现在结果之后，分析器不得越过它把更早结果误认成本批结果。
+			sem.role = cursorSemanticUnknown
+			sem.container = cursorContainerMixed
+			sem.raw = apicompat.ChatMessage{Role: item.Type}
+			out = append(out, sem)
+			continue
+		case apicompat.ResponsesInputItemIgnorable, apicompat.ResponsesInputItemUnknown:
+			// 旁支/未知条目不是对话内容：保留为 unknown 语义项，builder 按既有账本丢字段，
+			// 同时让唯一分析器在其处停止，绝不越过它把更早的结果误当本批续轮。
+			sem.role = cursorSemanticUnknown
+			sem.container = cursorContainerMixed
+			sem.raw = apicompat.ChatMessage{Role: item.Type}
+			out = append(out, sem)
+			continue
+		case apicompat.ResponsesInputItemResult:
+			sem.role = cursorSemanticTool
+			sem.container = cursorContainerAllToolResults
+			sem.raw = apicompat.ChatMessage{
+				Role:       "tool",
+				ToolCallID: strings.TrimSpace(item.CallID),
+				Content:    mustCursorJSON(cursorResponsesItemResultOutput(item)),
+			}
+		case apicompat.ResponsesInputItemConversation:
+			kind := strings.ToLower(strings.TrimSpace(item.Type))
+			switch kind {
+			case "function_call", "custom_tool_call", "tool_search_call":
+				args := item.Arguments
+				if kind == "custom_tool_call" {
+					args = item.Input
+				}
+				trimmed := strings.TrimSpace(args)
+				if trimmed == "" || trimmed == "null" {
+					args = "{}"
+				}
+				sem.role = cursorSemanticAssistant
+				sem.raw = apicompat.ChatMessage{
+					Role: "assistant",
+					ToolCalls: []apicompat.ChatToolCall{{
+						ID:       strings.TrimSpace(item.CallID),
+						Type:     "function",
+						Function: apicompat.ChatFunctionCall{Name: item.Name, Arguments: args},
+					}},
+				}
+			case "reasoning":
+				// 加密推理无 Chat/AgentRun 落点：作为 unknown 停止项保留顺序，
+				// builder 丢字段记账，尾部分析在其处停止。
+				sem.role = cursorSemanticUnknown
+				sem.container = cursorContainerMixed
+				sem.raw = apicompat.ChatMessage{Role: "reasoning"}
+				out = append(out, sem)
+				continue
+			default:
+				text, terr := cursorChatContentText(item.Content, cursorSkipLedger{})
+				if terr != nil {
+					// 内容畸形：保留角色与空文本，工具调用/结果能力不受影响。
+					text = ""
+				}
+				sem.role = cursorClassifySemanticRole(item.Role)
+				sem.raw = apicompat.ChatMessage{Role: item.Role, Content: mustCursorJSON(text)}
+			}
+		}
+		out = append(out, sem)
+	}
+	return out, nil
+}
+
+// cursorDecodeGeminiSemantic 从原始类型化 Gemini body 生成语义序列。
+// systemInstruction 是单个前导容器（-1）；contents 数组项按零基下标成为源容器。
+// 角色由原始 role + function 部件决定，不从 Gemini→Chat 桥接输出反推。
+func cursorDecodeGeminiSemantic(body []byte) ([]cursorSemanticMessage, error) {
+	var doc struct {
+		SystemInstruction json.RawMessage       `json:"systemInstruction"`
+		Contents          []cursorGeminiContent `json:"contents"`
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, fmt.Errorf("%w: empty gemini request", ErrCursorResumeUnsupportedContent)
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("%w: undecodable gemini request", ErrCursorResumeUnsupportedContent)
+	}
+	out := make([]cursorSemanticMessage, 0, len(doc.Contents)+1)
+	if len(bytes.TrimSpace(doc.SystemInstruction)) > 0 {
+		var sys struct {
+			Parts []map[string]json.RawMessage `json:"parts"`
+		}
+		if err := json.Unmarshal(doc.SystemInstruction, &sys); err == nil {
+			for _, part := range sys.Parts {
+				if text, ok := cursorGeminiPartText(part); ok {
+					out = append(out, cursorSemanticMessage{
+						role:                 cursorSemanticInstruction,
+						raw:                  apicompat.ChatMessage{Role: "system", Content: mustCursorJSON(text)},
+						sourceContainerIndex: -1,
+					})
+				}
+			}
+		}
+	}
+	for i, content := range doc.Contents {
+		role := strings.ToLower(strings.TrimSpace(content.Role))
+		if role == "" {
+			role = "user"
+		}
+		if role == "assistant" {
+			role = "model"
+		}
+		if len(content.Parts) == 0 {
+			placeholderRole := cursorClassifySemanticRole(role)
+			wireRole := role
+			if role == "model" {
+				placeholderRole = cursorSemanticAssistant
+				wireRole = "assistant"
+			}
+			out = append(out, cursorSemanticMessage{
+				role:                 placeholderRole,
+				raw:                  apicompat.ChatMessage{Role: wireRole},
+				container:            cursorContainerMixed,
+				sourceContainerIndex: i,
+			})
+			continue
+		}
+		allResponses := len(content.Parts) > 0
+		for _, part := range content.Parts {
+			if _, _, _, ok := cursorGeminiPartTool(part, "functionResponse"); !ok {
+				allResponses = false
+				break
+			}
+		}
+		for _, part := range content.Parts {
+			sem := cursorSemanticMessage{sourceContainerIndex: i}
+			marker := cursorContainerMixed
+			if allResponses {
+				marker = cursorContainerAllToolResults
+			}
+			sem.container = marker
+			if id, _, _, ok := cursorGeminiPartTool(part, "functionResponse"); ok {
+				sem.role = cursorSemanticTool
+				sem.raw = apicompat.ChatMessage{
+					Role:       "tool",
+					ToolCallID: id,
+					Content:    mustCursorJSON(string(part["functionResponse"])),
+				}
+			} else if id, name, args, ok := cursorGeminiPartTool(part, "functionCall"); ok {
+				trimmed := strings.TrimSpace(string(args))
+				if trimmed == "" || trimmed == "null" {
+					trimmed = "{}"
+				}
+				sem.role = cursorSemanticAssistant
+				sem.raw = apicompat.ChatMessage{
+					Role: "assistant",
+					ToolCalls: []apicompat.ChatToolCall{{
+						ID:       id,
+						Type:     "function",
+						Function: apicompat.ChatFunctionCall{Name: name, Arguments: trimmed},
+					}},
+				}
+			} else if text, ok := cursorGeminiPartText(part); ok {
+				wireRole := "user"
+				sem.role = cursorSemanticUser
+				if role == "model" {
+					wireRole = "assistant"
+					sem.role = cursorSemanticAssistant
+				} else if role == "system" {
+					wireRole = "system"
+					sem.role = cursorSemanticInstruction
+				}
+				sem.raw = apicompat.ChatMessage{Role: wireRole, Content: mustCursorJSON(text)}
+			} else {
+				sem.role = cursorClassifySemanticRole(role)
+				sem.raw = apicompat.ChatMessage{Role: role}
+			}
+			out = append(out, sem)
+		}
+	}
+	return out, nil
+}
+
+// cursorSemanticResultRef 是分析器给出的一个尾部结果引用：源容器下标 + 原调用 ID。
+// 文本/图片/错误标记/Responses ResultType 由 plan 适配器按源容器下标映射回原始协议
+// 条目取得——既不靠 call ID 猜类型，也不在计划层重扫尾部。
+type cursorSemanticResultRef struct {
+	sourceContainerIndex int
+	callID               string
+}
+
+// cursorSemanticAnalysis 是唯一尾部分析的输出：results 为源顺序的全部尾部结果引用，
+// tailContainers 为这些结果所属的源容器下标集合（供 plan 历史摘要跳过当前批）。
+type cursorSemanticAnalysis struct {
+	results []cursorSemanticResultRef
+	// tailContainers includes accepted result containers and instruction containers
+	// skipped while reaching them. Plan adapters use this exact suffix boundary.
+	tailContainers map[int]struct{}
+}
+
+// cursorAnalyzeSemanticMessages 是四协议共用的唯一尾部续轮分析。
+//
+// 从语义序列末尾向前：instruction 跳过且不截断；只纳入“完整由 tool-result 组成”
+// 的已标记源容器（容器完整性由解码器在展开前写入，绝不从扁平化后的消息数推断）；
+// 容器及容器内结果保持源顺序；遇普通 user/assistant/混合正文/unknown 立即停止。
+func cursorAnalyzeSemanticMessages(sem []cursorSemanticMessage) cursorSemanticAnalysis {
+	out := cursorSemanticAnalysis{tailContainers: make(map[int]struct{})}
+	i := len(sem)
+	for i > 0 {
+		// 指令项跳过，既不算结果也不截断结果搜索。
+		for i > 0 && sem[i-1].role == cursorSemanticInstruction {
+			idx := sem[i-1].sourceContainerIndex
+			out.tailContainers[idx] = struct{}{}
+			i--
+		}
+		if i == 0 {
+			break
+		}
+		idx := sem[i-1].sourceContainerIndex
+		j := i
+		for j > 0 && sem[j-1].sourceContainerIndex == idx && sem[j-1].role != cursorSemanticInstruction {
+			j--
+		}
+		group := sem[j:i]
+		allResults := len(group) > 0
+		for _, m := range group {
+			if m.role != cursorSemanticTool || m.container != cursorContainerAllToolResults {
+				allResults = false
+				break
+			}
+		}
+		if !allResults {
+			break
+		}
+		groupRefs := make([]cursorSemanticResultRef, 0, len(group))
+		for _, m := range group {
+			groupRefs = append(groupRefs, cursorSemanticResultRef{
+				sourceContainerIndex: idx,
+				callID:               strings.TrimSpace(m.raw.ToolCallID),
+			})
+		}
+		out.results = append(groupRefs, out.results...)
+		out.tailContainers[idx] = struct{}{}
+		i = j
+	}
+	return out
+}
+
 // cursorPlanFromChat 按 §25.14-D「Chat」表示生成上下文计划。
 //
 // 规则：
@@ -6188,6 +6607,14 @@ func cursorChatToolItem(tool apicompat.ChatTool) (cursorContextItem, string, err
 //     assistant 的空 content 与省略统一为空文本；
 //   - 本批结果：**尾部连续**的 role=tool 消息，按 tool_call_id 匹配（不按工具名）。
 func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*cursorContextPlan, error) {
+	sem := cursorDecodeChatSemantic(req)
+	analysis := cursorAnalyzeSemanticMessages(sem)
+	return cursorPlanFromChatCore(sem, analysis, req, model)
+}
+
+// cursorPlanFromChatCore 是 Chat 计划核心：只消费已解码语义序列与同一分析结果，
+// 保留原配置/历史摘要与账本规则，不再自行按角色扫描尾部。
+func cursorPlanFromChatCore(sem []cursorSemanticMessage, analysis cursorSemanticAnalysis, req *apicompat.ChatCompletionsRequest, model string) (*cursorContextPlan, error) {
 	if req == nil {
 		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil chat request")
 	}
@@ -6243,21 +6670,23 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 		return nil, err
 	}
 
-	// 尾部连续工具结果 = 本批结果。
+	// 尾部结果容器/边界来自唯一 analyzer；本层只把带源容器下标的结果引用映射回
+	// 原始 Chat 消息取值，不再自行按角色扫描尾部。
 	start := len(req.Messages)
 	for start > 0 {
-		role := strings.ToLower(strings.TrimSpace(req.Messages[start-1].Role))
-		if role != "tool" && role != "function" {
-			break
+		if _, ok := analysis.tailContainers[start-1]; ok {
+			start--
+			continue
 		}
-		start--
+		break
 	}
-	for _, msg := range req.Messages[start:] {
+	for _, ref := range analysis.results {
+		if ref.sourceContainerIndex < 0 || ref.sourceContainerIndex >= len(req.Messages) {
+			continue
+		}
+		msg := req.Messages[ref.sourceContainerIndex]
 		// 计划层只负责"这批结果是什么"，不做准入（2026-11-06 口径：能丢就丢）。
-		// 读不出来的部分一律跳过记账；只有"结果缺 call_id、无法与本轮任何调用对上号"
-		// 才放弃这一条（它本来就无法回写，留着只会污染摘要）。
 		if len(msg.ToolCalls) > 0 || msg.FunctionCall != nil {
-			// 结果消息里出现 assistant 专属的调用字段：丢弃这些字段，结果文本照用。
 			plan.noteSkippedItem("chat_result_call_fields")
 		}
 		callID := strings.TrimSpace(msg.ToolCallID)
@@ -6276,8 +6705,11 @@ func cursorPlanFromChat(req *apicompat.ChatCompletionsRequest, model string) (*c
 	// （后者是 Responses 的 resultsReplayHistory 专用口径，其它协议填空避免改变既有
 	// "声明续轮"判定）。
 	historyCalls := make(map[string]struct{}, 4)
-	for _, msg := range req.Messages[:start] {
+	for i, msg := range req.Messages {
 		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		if i >= start && (role == "tool" || role == "function") {
+			continue
+		}
 		switch role {
 		case "system", "developer":
 			text, err := cursorChatContentText(msg.Content, plan.skippedItems)
@@ -6516,6 +6948,16 @@ func cursorAnthropicBlockItem(role string, block apicompat.AnthropicContentBlock
 //   - 仅为同一批结果的单/多条容器分组差异规范化（多容器按块顺序拼平）；
 //   - 文本与 is_error 原样保留，不把新增用户文字吞进结果。
 func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cursorContextPlan, error) {
+	sem, err := cursorDecodeMessagesSemantic(req)
+	if err != nil {
+		return nil, err
+	}
+	analysis := cursorAnalyzeSemanticMessages(sem)
+	return cursorPlanFromMessagesCore(sem, analysis, req, model)
+}
+
+// cursorPlanFromMessagesCore 是 Messages 计划核心：只消费已解码语义序列与同一分析结果。
+func cursorPlanFromMessagesCore(sem []cursorSemanticMessage, analysis cursorSemanticAnalysis, req *apicompat.AnthropicRequest, model string) (*cursorContextPlan, error) {
 	if req == nil {
 		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil anthropic request")
 	}
@@ -6589,43 +7031,31 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 		return nil, err
 	}
 
-	// 尾部连续的"全部为 tool_result 的 user 消息" = 本批结果容器（单/多容器统一规范化）。
+	// 尾部结果容器/边界来自唯一 analyzer；按源容器下标映射回原始消息与 tool_result 块。
 	start := len(req.Messages)
 	for start > 0 {
-		msg := req.Messages[start-1]
-		if strings.ToLower(strings.TrimSpace(msg.Role)) != "user" {
-			break
+		if _, ok := analysis.tailContainers[start-1]; ok {
+			start--
+			continue
 		}
-		blocks, berr := cursorAnthropicBlocks(msg.Content)
-		if berr != nil {
-			// 读不出来就当作"不是结果容器"，交给历史处理（2026-11-06 口径）。
-			break
-		}
-		if len(blocks) == 0 {
-			break
-		}
-		allResults := true
-		for _, block := range blocks {
-			if block.Type != "tool_result" {
-				allResults = false
-				break
-			}
-		}
-		if !allResults {
-			break
-		}
-		start--
+		break
 	}
-	for _, msg := range req.Messages[start:] {
+	for _, ref := range analysis.results {
+		if ref.sourceContainerIndex < 0 || ref.sourceContainerIndex >= len(req.Messages) {
+			continue
+		}
+		msg := req.Messages[ref.sourceContainerIndex]
 		blocks, berr := cursorAnthropicBlocks(msg.Content)
 		if berr != nil {
 			plan.noteSkippedItem("messages_result_undecodable")
 			continue
 		}
 		for _, block := range blocks {
+			if block.Type != "tool_result" || strings.TrimSpace(block.ToolUseID) != ref.callID {
+				continue
+			}
 			if strings.TrimSpace(block.ToolUseID) == "" {
-				// 无 tool_use_id 的结果无法与本轮任何调用配对：丢这一条并记账，
-				// 不整轮拒（客户少一条结果，也比整轮 400 好）。
+				// 无 tool_use_id 的结果无法配对：丢这一条并记账，不整轮拒。
 				plan.noteSkippedItem("messages_result_without_tool_use_id")
 				continue
 			}
@@ -6634,9 +7064,7 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 				plan.noteSkippedItem("messages_result_content_undecodable")
 				continue
 			}
-			// 与历史项规范化共用同一表示（cursorToolResultContent）：图片不再整轮
-			// 失败，而是解成可出站字节随结果发给上游（工具读图场景），文本里保留
-			// 与历史前缀完全一致的定位标记；未知块类型仍失败关闭。
+			// 与历史项规范化共用同一表示：图片解成可出站字节，文本保留定位标记。
 			text, images, terr := cursorToolResultContent(inner, true, plan.skippedItems)
 			if terr != nil {
 				plan.noteSkippedItem("messages_result_content_undecodable")
@@ -6653,7 +7081,22 @@ func cursorPlanFromMessages(req *apicompat.AnthropicRequest, model string) (*cur
 	// historyCalls 只服务"正文是否携带完整历史"的判定；不写入 plan.historyCallIDs
 	// （后者仅供 Responses 的 resultsReplayHistory 使用）。
 	historyCalls := make(map[string]struct{}, 4)
-	for _, msg := range req.Messages[:start] {
+	for i, msg := range req.Messages {
+		if i >= start && strings.EqualFold(strings.TrimSpace(msg.Role), "user") {
+			blocks, berr := cursorAnthropicBlocks(msg.Content)
+			if berr == nil && len(blocks) > 0 {
+				allResults := true
+				for _, block := range blocks {
+					if block.Type != "tool_result" {
+						allResults = false
+						break
+					}
+				}
+				if allResults {
+					continue
+				}
+			}
+		}
 		role := strings.ToLower(strings.TrimSpace(msg.Role))
 		if role != "user" && role != "assistant" && role != "system" {
 			// 未知角色：丢这一条（2026-11-06 口径），不整轮拒。
@@ -6715,14 +7158,6 @@ func cursorResponsesInputItems(raw json.RawMessage) ([]apicompat.ResponsesInputI
 		return nil, fmt.Errorf("%w: undecodable responses input", ErrCursorResumeUnsupportedContent)
 	}
 	return items, nil
-}
-
-// cursorResponsesItemIsOutput 判断条目是否为客户端工具结果（本批候选）。
-//
-// 分类口径归口 apicompat.ClassifyResponsesInputItemType（唯一事实源），
-// 本文件不再维护第二份"我认识的类型"清单。
-func cursorResponsesItemIsOutput(item apicompat.ResponsesInputItem) bool {
-	return apicompat.IsResponsesInputResult(item.Type)
 }
 
 // cursorResponsesItemResultOutput 取工具结果条目的可摘要输出文本。
@@ -6816,6 +7251,16 @@ func cursorResponsesItemItem(item apicompat.ResponsesInputItem, skipped cursorSk
 //     必须整段摘要匹配（不把任意短前缀当完整历史）；
 //   - instructions 不继承：首轮非空、续轮省略 => 明确入参错误（由 Resume 判定）。
 func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cursorContextPlan, error) {
+	sem, err := cursorDecodeResponsesSemantic(req)
+	if err != nil {
+		return nil, err
+	}
+	analysis := cursorAnalyzeSemanticMessages(sem)
+	return cursorPlanFromResponsesCore(sem, analysis, req, model)
+}
+
+// cursorPlanFromResponsesCore 是 Responses 计划核心：只消费已解码语义序列与同一分析结果。
+func cursorPlanFromResponsesCore(sem []cursorSemanticMessage, analysis cursorSemanticAnalysis, req *apicompat.ResponsesRequest, model string) (*cursorContextPlan, error) {
 	if req == nil {
 		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil responses request")
 	}
@@ -6908,13 +7353,14 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		plan.noteSkippedItem("responses_input_undecodable")
 		items = nil
 	}
-	// 只剥离**尾部连续**的 output 条目（当前批），前缀必须完整匹配。
+	// 尾部结果容器/边界来自唯一 analyzer：只剥离当前批 output 条目，前缀完整匹配。
 	start := len(items)
 	for start > 0 {
-		if !cursorResponsesItemIsOutput(items[start-1]) {
-			break
+		if _, ok := analysis.tailContainers[start-1]; ok {
+			start--
+			continue
 		}
-		start--
+		break
 	}
 	// 前缀里被丢弃的调用：结果条目要**跟着一起丢**，否则上游会看到
 	// "有结果、找不到对应调用"的畸形历史（那才是真会让模型答错的东西）。
@@ -6989,7 +7435,13 @@ func cursorPlanFromResponses(req *apicompat.ResponsesRequest, model string) (*cu
 		}
 	}
 	// 本批结果：只收**本站真的会投递**的结果类型，且调用没被丢弃。
-	for _, item := range items[start:] {
+	// ResultType 由 analyzer 的源容器下标映射回原始 Responses item，不靠 call ID 猜测，
+	// 也不在计划层重扫尾部。
+	for _, ref := range analysis.results {
+		if ref.sourceContainerIndex < 0 || ref.sourceContainerIndex >= len(items) {
+			continue
+		}
+		item := items[ref.sourceContainerIndex]
 		callID := strings.TrimSpace(item.CallID)
 		if !apicompat.IsResponsesInputResult(item.Type) || callID == "" {
 			// 宿主工具结果（local_shell_call_output 等）本来就没有被转发过的调用；
@@ -7035,7 +7487,7 @@ func cursorHistoryComplete(results []CursorToolResult, historyCallIDs map[string
 //
 // 只认工具调用类条目（function_call / custom_tool_call / local_shell_call /
 // tool_search_call / mcp_call / image_generation_call）；output 类条目是结果侧，
-// 由 cursorResponsesItemIsOutput 判定，不在此列。
+// 由 apicompat.IsResponsesInputResult 判定，不在此列。
 func cursorResponsesItemCallID(item apicompat.ResponsesInputItem) string {
 	switch strings.ToLower(strings.TrimSpace(item.Type)) {
 	case "function_call", "custom_tool_call", "tool_search_call":
@@ -7093,6 +7545,16 @@ func cursorGeminiPartTool(part map[string]json.RawMessage, key string) (id, name
 //   - 只将本批并行结果的容器差异规范化（多容器按 parts 顺序拼平），按 call ID 配对；
 //   - 同名并行缺 ID 明确拒绝歧义（不凭名字重排历史）。
 func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error) {
+	sem, err := cursorDecodeGeminiSemantic(body)
+	if err != nil {
+		return nil, err
+	}
+	analysis := cursorAnalyzeSemanticMessages(sem)
+	return cursorPlanFromGeminiCore(sem, analysis, body, model)
+}
+
+// cursorPlanFromGeminiCore 是 Gemini 计划核心：只消费已解码语义序列与同一分析结果。
+func cursorPlanFromGeminiCore(sem []cursorSemanticMessage, analysis cursorSemanticAnalysis, body []byte, model string) (*cursorContextPlan, error) {
 	var doc struct {
 		SystemInstruction json.RawMessage       `json:"systemInstruction"`
 		Contents          []cursorGeminiContent `json:"contents"`
@@ -7158,49 +7620,34 @@ func cursorPlanFromGemini(body []byte, model string) (*cursorContextPlan, error)
 	}
 	plan.tools = tools
 
-	// 尾部连续"全部为 functionResponse 的 content" = 本批结果容器。
+	// 尾部结果容器/边界来自唯一 analyzer；按源容器下标映射回原始 contents 部件。
 	start := len(doc.Contents)
 	for start > 0 {
-		content := doc.Contents[start-1]
-		if len(content.Parts) == 0 {
-			break
+		if _, ok := analysis.tailContainers[start-1]; ok {
+			start--
+			continue
 		}
-		allResponses := true
-		for _, part := range content.Parts {
-			if _, _, _, ok := cursorGeminiPartTool(part, "functionResponse"); !ok {
-				allResponses = false
-				break
-			}
-		}
-		if !allResponses {
-			break
-		}
-		start--
+		break
 	}
-	// 精确配对所需的 model turn 函数调用（用于同名并行缺 ID 的歧义判定）。
-	nameCount := make(map[string]int, 8)
-	if start > 0 {
-		for _, part := range doc.Contents[start-1].Parts {
-			if _, name, _, ok := cursorGeminiPartTool(part, "functionCall"); ok && name != "" {
-				nameCount[name]++
-			}
+	for _, ref := range analysis.results {
+		if ref.sourceContainerIndex < 0 || ref.sourceContainerIndex >= len(doc.Contents) {
+			continue
 		}
-	}
-	for _, content := range doc.Contents[start:] {
-		batchNames := make(map[string]int, 4)
+		content := doc.Contents[ref.sourceContainerIndex]
 		for _, part := range content.Parts {
-			id, name, _, ok := cursorGeminiPartTool(part, "functionResponse")
-			if !ok {
+			id, _, _, ok := cursorGeminiPartTool(part, "functionResponse")
+			if !ok || strings.TrimSpace(id) != ref.callID {
 				continue
 			}
-			batchNames[name]++
-			if id == "" {
-				// 缺 ID 时只有"同名调用唯一"才能配对；否则丢这一条结果并记账，
-				// 不整轮拒（2026-11-06 口径）。
+			if strings.TrimSpace(id) == "" {
+				// 缺 ID 时无法配对：丢这一条结果并记账，不整轮拒。
 				plan.noteSkippedItem("gemini_function_response_without_id")
 				continue
 			}
-			plan.results = append(plan.results, CursorToolResult{CallID: id, Text: []string{string(part["functionResponse"])}})
+			plan.results = append(plan.results, CursorToolResult{
+				CallID: strings.TrimSpace(id),
+				Text:   []string{string(part["functionResponse"])},
+			})
 		}
 	}
 	// historyCalls 只服务"正文是否携带完整历史"的判定；不写入 plan.historyCallIDs

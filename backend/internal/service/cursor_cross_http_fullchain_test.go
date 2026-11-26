@@ -518,13 +518,14 @@ func runFirstHTTP(
 		ctx = WithCursorSessionHandover(ctx, handover)
 	}
 	result, err := svc.Execute(ctx, c, cursorFullChainAccount(), &CursorExecutionRequest{
-		Chat:      &ccReq,
-		Model:     "cursor-sonnet",
-		Stream:    true,
-		StartTime: time.Now(),
-		Protocol:  cursorProtocolChat,
-		Identity:  cursorFullChainIdentity,
-		Plan:      plan,
+		Chat:             &ccReq,
+		SemanticMessages: cursorDecodeChatSemantic(&ccReq),
+		Model:            "cursor-sonnet",
+		Stream:           true,
+		StartTime:        time.Now(),
+		Protocol:         cursorProtocolChat,
+		Identity:         cursorFullChainIdentity,
+		Plan:             plan,
 	})
 	return w, result, err
 }
@@ -1205,13 +1206,14 @@ func TestCursorRebuildOrphanFullHistoryStartsFreshAgentRun(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	result, execErr := svc.Execute(ctx, c, cursorFullChainAccount(), &CursorExecutionRequest{
-		Chat:      &ccReq,
-		Model:     "cursor-sonnet",
-		Stream:    true,
-		StartTime: time.Now(),
-		Protocol:  cursorProtocolChat,
-		Identity:  cursorFullChainIdentity,
-		Plan:      plan,
+		Chat:             &ccReq,
+		SemanticMessages: cursorDecodeChatSemantic(&ccReq),
+		Model:            "cursor-sonnet",
+		Stream:           true,
+		StartTime:        time.Now(),
+		Protocol:         cursorProtocolChat,
+		Identity:         cursorFullChainIdentity,
+		Plan:             plan,
 	})
 
 	// ① 不得按"未知关联"拒绝；更不得以 400 失败关闭。

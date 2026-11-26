@@ -132,10 +132,16 @@ var cursorNewUUID = func() string { return uuid.NewString() }
 // cursorConvertRequest 把 OpenAI Chat Completions 请求转换为 AgentRun 出站请求体
 // （**已含 envelope**，可直接作为 CursorUpstreamRequest.Body）。
 //
+// 本函数是薄解码适配器：只把 Chat 消息解码成语义消息，随后交给唯一的语义 builder。
+//
 // upstreamModel 必须是 **wire ID**（如 `grok-4.7`）——填展示名会被上游拒
 // ERROR_BAD_MODEL_NAME；本层不做任何"猜测式"模型名修正。
 func cursorConvertRequest(req *apicompat.ChatCompletionsRequest, upstreamModel string) ([]byte, error) {
-	body, _, err := cursorBuildAgentRun(req, upstreamModel, nil)
+	sem, err := cursorDecodeRequestSemantic(req)
+	if err != nil {
+		return nil, err
+	}
+	body, _, err := cursorBuildAgentRunFromSemantic(sem, upstreamModel, req.Tools, req.ToolChoice, nil)
 	return body, err
 }
 
@@ -144,8 +150,12 @@ func cursorConvertRequest(req *apicompat.ChatCompletionsRequest, upstreamModel s
 //
 // 与 cursorConvertRequest 的区别只有记账：后者给探针/单测用（不需要日志，也不关心丢了多少）。
 func cursorConvertRequestWithContext(ctx context.Context, req *apicompat.ChatCompletionsRequest, upstreamModel string) ([]byte, error) {
+	sem, err := cursorDecodeRequestSemantic(req)
+	if err != nil {
+		return nil, err
+	}
 	skipped := cursorSkipLedger{}
-	body, _, err := cursorBuildAgentRun(req, upstreamModel, skipped)
+	body, _, err := cursorBuildAgentRunFromSemantic(sem, upstreamModel, req.Tools, req.ToolChoice, skipped)
 	if err != nil {
 		return nil, err
 	}
@@ -153,22 +163,41 @@ func cursorConvertRequestWithContext(ctx context.Context, req *apicompat.ChatCom
 	return body, nil
 }
 
-// cursorBuildAgentRun 构造 AgentRun 请求体，并回传本次的 conversation_id。
+// cursorDecodeRequestSemantic 是 Chat 请求的解码薄入口：只做 nil 校验与语义解码，
+// 不在这里做角色归类或容器猜测（归类统一在 cursorClassifySemanticRole）。
+func cursorDecodeRequestSemantic(req *apicompat.ChatCompletionsRequest) ([]cursorSemanticMessage, error) {
+	if req == nil {
+		return nil, newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil request")
+	}
+	return cursorDecodeSemanticMessages(req.Messages), nil
+}
+
+// cursorBuildAgentRun 是**旧 Chat 测试入口**：只做解码并调用唯一的语义 builder。
+// 保留签名只为兼容既有调用点，本函数内不含任何 AgentRun 编码逻辑。
+func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel string, skipped cursorSkipLedger) ([]byte, string, error) {
+	sem, err := cursorDecodeRequestSemantic(req)
+	if err != nil {
+		return nil, "", err
+	}
+	return cursorBuildAgentRunFromSemantic(sem, upstreamModel, req.Tools, req.ToolChoice, skipped)
+}
+
+// cursorBuildAgentRunFromSemantic 是**唯一的** AgentRun 语义 builder。
+//
+// 它只消费 []cursorSemanticMessage，不再直接吃 Chat 消息：Chat 解码入口与日后
+// 的复合源协议解码器都把各自的消息喂给同一个 builder，不存在第二套编码实现。
 //
 // 回传 conversation_id 的目的：它是这一轮对话在上游的唯一标识，调用方可据此把
 // 流内事件（含 P1-A1 的拒付哨兵）关联回具体请求。
 //
 // skipped 是丢弃账本（可为 nil）：本层所有「协议没有落点」的形状一律丢弃记账，
 // 不再整轮 400——口径见 cursorSkipLedger 的注释。
-func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel string, skipped cursorSkipLedger) ([]byte, string, error) {
-	if req == nil {
-		return nil, "", newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecInternalError, "nil request")
-	}
+func cursorBuildAgentRunFromSemantic(sem []cursorSemanticMessage, upstreamModel string, tools []apicompat.ChatTool, toolChoice json.RawMessage, skipped cursorSkipLedger) ([]byte, string, error) {
 	if strings.TrimSpace(upstreamModel) == "" {
 		return nil, "", newCursorRequestError(http.StatusInternalServerError, infraerrors.CursorExecModelMappingInvalid, "empty upstream model")
 	}
 
-	turns, err := cursorConvertMessages(req.Messages, skipped)
+	turns, err := cursorSemanticMessagesToTurns(sem, skipped)
 	if err != nil {
 		return nil, "", err
 	}
@@ -195,8 +224,8 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// 等于把"模型该续写的内容"当成"用户新下的指令"，语义彻底错乱——客户拿到的是
 	// 答非所问，比一个明确的拒绝更难排查。
 	//
-	// 所以这里拒，但**拒要说清**：CUR-REQ-06 的对客文案直接写明"最后一条是助手消息、
-	// 本站不支持从助手消息续写、请在末尾补一条用户消息"，不让客户去猜。
+	// 所以这里拒，但**拒要说清**：CUR-REQ-07（prefill）的对客文案直接写明"最后一条
+	// 是助手消息、本站不支持从助手消息续写、请在末尾补一条用户消息"，不让客户去猜。
 	last := turns[len(turns)-1]
 	if last.role != "user" {
 		return nil, "", newCursorRequestError(http.StatusBadRequest, infraerrors.CursorReqPrefill, "conversation must end with a user message")
@@ -248,7 +277,7 @@ func cursorBuildAgentRun(req *apicompat.ChatCompletionsRequest, upstreamModel st
 	// mcp_tools：请求携带 tools 且 tool_choice != "none" 时，把 function 工具编码进
 	// f4（McpTools）声明给上游；否则保持空 message（f4 字段存在、长度 0，与活体样本
 	// 同形——既满足"无 tools 时零变化"的纯文本链回归保护，也保住 33/63 号黄金字节）。
-	declared := cursorResolveDeclaredTools(req)
+	declared := cursorResolveDeclaredTools(&apicompat.ChatCompletionsRequest{Tools: tools, ToolChoice: toolChoice})
 	mcpTools, err := cursorBuildMcpTools(declared, skipped)
 	if err != nil {
 		return nil, "", err
@@ -651,48 +680,132 @@ func cursorMarshalBlobJSON(v any) ([]byte, error) {
 	return out, nil
 }
 
-// cursorConvertMessages 把 OpenAI messages 归一化成有序轮次。
+// cursorSemanticRole 是请求期消息的唯一规范角色集合。
 //
-// **system 消息的处理（沿用 E6 卡的用户裁定：合并进首个 user）**——依据：
-//  1. AgentRun 的 UserMessage 只有 user 一种落点，**无 system 角色**；历史 blob
-//     则按真实客户端结构表达 user / assistant / tool 三种消息（tool 有独立角色）。
-//  2. 丢弃会**静默改变语义**：绝大多数客户端把 system 当硬约束，丢了会得到完全不同
-//     的回答，且用户无从察觉——比"格式略不理想"危险得多。
-//
-// 因此：system 文本按出现顺序拼到**第一条 user** 消息的开头，标记行分隔；
-// 若整段对话没有任何 user（纯 system+assistant），则新建一条 user 承载
-// （否则请求会被上游判为空对话）。
-func cursorConvertMessages(msgs []apicompat.ChatMessage, skipped cursorSkipLedger) ([]cursorAgentTurn, error) {
-	turns := make([]cursorAgentTurn, 0, len(msgs))
-	var systemParts []string
-	sawUser := false
+// system / developer / instruction 统一归为 instruction：它们都是"对模型的指令"，
+// 在 Cursor 协议里都没有独立落点，只能合入真实 user；除此之外的角色按既有语义归类。
+const (
+	cursorSemanticInstruction = "instruction"
+	cursorSemanticUser        = "user"
+	cursorSemanticAssistant   = "assistant"
+	cursorSemanticTool        = "tool"
+	cursorSemanticUnknown     = "unknown"
+)
 
-	for _, m := range msgs {
+// cursorResultContainerKind 显式标记"原源容器"是否完全由工具结果组成。
+//
+// 标记来自解码输入（见 cursorDecodeSemanticMessages），**不是**对展开后的若干 Chat
+// 消息做尾部扫描猜出来的。日后的复合源协议解码器必须能显式把一条语义消息标成
+// 混合容器，避免先把结果块扁平化之后再误判成纯结果容器。
+type cursorResultContainerKind uint8
+
+const (
+	// cursorContainerMixed 表示源容器可能含普通正文（默认）。
+	cursorContainerMixed cursorResultContainerKind = iota
+	// cursorContainerAllToolResults 表示源容器完全由工具结果组成。
+	cursorContainerAllToolResults
+)
+
+// cursorSemanticMessage 是请求期的语义消息：规范角色 + 原始字段载体 + 消息顺序 +
+// 源容器归属 + 源容器完整性标记。语义切片的切片下标承载消息顺序（语义序列中的先后）；
+// sourceContainerIndex 承载原始容器归属，即该语义消息来自原请求的第几个源容器——二者
+// 含义不同：多个展开后的语义消息仍可归属于同一个源容器。raw 保留解码前的原始字段，
+// 任何下游解码器都能在不改变规范角色的前提下携带自己的专有字段。
+type cursorSemanticMessage struct {
+	role                 string
+	raw                  apicompat.ChatMessage
+	container            cursorResultContainerKind
+	sourceContainerIndex int
+}
+
+// cursorClassifySemanticRole 是角色分类的唯一权威 helper。
+//
+// system/developer/instruction → instruction；user/human、assistant/ai、tool/function
+// 按既有语义归类；其它角色 → unknown（由调用方按既有账本丢弃）。
+func cursorClassifySemanticRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "system", "developer", "instruction":
+		return cursorSemanticInstruction
+	case "user", "human":
+		return cursorSemanticUser
+	case "assistant", "ai":
+		return cursorSemanticAssistant
+	case "tool", "function":
+		return cursorSemanticTool
+	default:
+		return cursorSemanticUnknown
+	}
+}
+
+// cursorDecodeSemanticMessages 是 Chat 消息的薄解码适配器：保留顺序与原始字段，
+// 用唯一分类 helper 定规范角色，并把容器标记取自本条解码输入。
+//
+// Chat 的一条 tool/function 消息本身就是一个完整的结果容器，因此标记纯结果；
+// 其它角色（包括"文本为空但带 tool_calls 的 assistant"）都是混合容器——绝不能
+// 因为它是最后一条或内容形似结果块就反过来猜成纯结果容器。
+// sourceContainerIndex 在解码时直接取自 msgs 的原始下标，每条 Chat 消息各自构成一个
+// 源容器；该位置在展开或适配前即固定，后续扫描不得重算或猜测。
+func cursorDecodeSemanticMessages(msgs []apicompat.ChatMessage) []cursorSemanticMessage {
+	out := make([]cursorSemanticMessage, 0, len(msgs))
+	for i, m := range msgs {
+		sem := cursorSemanticMessage{
+			role:                 cursorClassifySemanticRole(m.Role),
+			raw:                  m,
+			sourceContainerIndex: i,
+		}
+		if sem.role == cursorSemanticTool {
+			sem.container = cursorContainerAllToolResults
+		}
+		out = append(out, sem)
+	}
+	return out
+}
+
+// cursorConvertMessages 是**旧 Chat 测试入口**：薄解码适配器，不含归一化逻辑。
+func cursorConvertMessages(msgs []apicompat.ChatMessage, skipped cursorSkipLedger) ([]cursorAgentTurn, error) {
+	return cursorSemanticMessagesToTurns(cursorDecodeSemanticMessages(msgs), skipped)
+}
+
+// cursorSemanticMessagesToTurns 把语义消息归一化为有序轮次（唯一的归一化实现）。
+//
+// **instruction 消息的处理（沿用 E6 卡的用户裁定：合并进 user）**——依据：
+//  1. AgentRun 的 UserMessage 只有 user 一种落点，**无 instruction 角色**；历史 blob
+//     则按真实客户端结构表达 user / assistant / tool 三种消息（tool 有独立角色）。
+//  2. 丢弃会**静默改变语义**：绝大多数客户端把 instruction 当硬约束，丢了会得到完全
+//     不同的回答，且用户无从察觉——比"格式略不理想"危险得多。
+//
+// 因此：instruction 文本按出现顺序拼到最近的一条真实 user 上，永不生成 user
+// turn/action；若整段对话没有任何真实 user，则失败关闭（既有 CUR-REQ-06）。
+func cursorSemanticMessagesToTurns(sem []cursorSemanticMessage, skipped cursorSkipLedger) ([]cursorAgentTurn, error) {
+	turns := make([]cursorAgentTurn, 0, len(sem))
+	var instructionParts []string
+
+	for _, msg := range sem {
+		m := msg.raw
 		text, images, err := cursorMessageContent(m, skipped)
 		if err != nil {
 			// 内容层已改成「解析不了的只丢这一条」，正常路径不再有可预期错误；
 			// 返回位留给真正的内部失败（不吞，避免把 bug 伪装成"丢了一条"）。
 			return nil, err
 		}
-		switch strings.ToLower(strings.TrimSpace(m.Role)) {
-		case "system", "developer":
-			// system/developer 无图片落点 → 丢图保文本并记账（2026-11-06 口径）。
+		switch msg.role {
+		case cursorSemanticInstruction:
+			// instruction 无图片落点 → 丢图保文本并记账（2026-11-06 口径）。
 			if len(images) > 0 {
 				skipped.note(cursorSkipImageOutsideUser)
 				images = nil
 			}
 			if text != "" {
-				systemParts = append(systemParts, text)
+				instructionParts = append(instructionParts, text)
 			}
-		case "user", "human":
-			// 首条 user 承载此前累积的 system（时序最自然：约束在最前）。
-			if !sawUser && len(systemParts) > 0 {
-				text = cursorJoinSystem(systemParts) + text
-				systemParts = nil
+		case cursorSemanticUser:
+			// instruction 只进入最近的真实 user 上下文，永不生成新的 user action。
+			if len(instructionParts) > 0 {
+				text = cursorJoinSystem(instructionParts) + text
+				instructionParts = nil
 			}
 			turns = append(turns, cursorAgentTurn{role: "user", text: text, images: images})
-			sawUser = true
-		case "assistant", "ai":
+		case cursorSemanticAssistant:
 			if m.FunctionCall != nil {
 				// legacy function_call：旧版 OpenAI 的 deprecated 字段，Cursor 协议里
 				// 没有对应落点。2026-11-06 口径：**丢掉这个字段、保留本条文本**并记账，
@@ -724,9 +837,10 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage, skipped cursorSkipLedge
 			turns = append(turns, cursorAgentTurn{
 				role: "assistant", text: text, images: images, toolCalls: toolCalls,
 			})
-		case "tool", "function":
-			// 工具结果 → role=tool 的历史 turn（真实结构含 tool-result 与
-			// providerOptions）。图片无落点 → 丢图保文本并记账。
+		case cursorSemanticTool:
+			// 容器标记取自解码输入：Chat 单条 tool/function 消息是完整结果容器，
+			// 按 tool-result 内容项表达（call ID / 文本 / isError 全保序）。日后的
+			// 复合源若显式标为混合容器，不会被当成纯结果块处理。
 			if len(images) > 0 {
 				skipped.note(cursorSkipImageOutsideUser)
 				images = nil
@@ -742,24 +856,38 @@ func cursorConvertMessages(msgs []apicompat.ChatMessage, skipped cursorSkipLedge
 				images:      images,
 				toolResults: []cursorAgentToolResult{{callID: m.ToolCallID, text: text, isError: m.IsError}},
 			})
-		case "":
-			// 没有角色的消息：丢这一条，不整轮拒（2026-11-06 产品口径：
-			// 客户把 400 当成"模型不稳定"，宁可少一条也不能整轮失败）。
-			skipped.note(cursorSkipEmptyRole)
-			continue
-		default:
-			// 未知角色（critic / narrator 之类客户端自定义）：按 user 处理会把
-			// assistant 语义搞错，按 assistant 处理又会篡改轮次；因此**丢掉这一条**
-			// 继续本轮，而不是把整个请求 400 掉。
-			skipped.note(cursorSkipUnknownRole)
+		case cursorSemanticUnknown:
+			// 空角色与未知角色都归为 unknown，但保留既有两笔不同的账。
+			if strings.TrimSpace(m.Role) == "" {
+				// 没有角色的消息：丢这一条，不整轮拒（2026-11-06 产品口径：
+				// 客户把 400 当成"模型不稳定"，宁可少一条也不能整轮失败）。
+				skipped.note(cursorSkipEmptyRole)
+			} else {
+				// 未知角色（critic / narrator 之类客户端自定义）：按 user 处理会把
+				// assistant 语义搞错，按 assistant 处理又会篡改轮次；因此**丢掉这一条**
+				// 继续本轮，而不是把整个请求 400 掉。
+				skipped.note(cursorSkipUnknownRole)
+			}
 			continue
 		}
 	}
 
-	// 收尾：system 出现在最后（如 [user, assistant, system]）时无处可合并。
-	// 此时新建一条 user 承载——保证 system 文本不丢，且不篡改既有轮次顺序。
-	if len(systemParts) > 0 {
-		turns = append(turns, cursorAgentTurn{role: "user", text: cursorJoinSystem(systemParts)})
+	// 收尾：尾部 instruction 合入最近一条真实 user；不新建 user action。
+	if len(instructionParts) > 0 {
+		merged := false
+		for i := len(turns) - 1; i >= 0; i-- {
+			if turns[i].role == "user" {
+				turns[i].text = turns[i].text + cursorJoinSystem(instructionParts)
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			// 没有真实 user 承载 instruction：不新建 user action（instruction
+			// 永不成为用户提问），交给既有 CUR-REQ-06 明确拒绝，不静默丢文本。
+			return nil, newCursorRequestError(http.StatusBadRequest,
+				infraerrors.CursorReqNoContent, "instruction without a real user message")
+		}
 	}
 
 	// 丢弃可能把某条消息变成"空轮"（文本空 + 无图）：发上去等于一个空提问，

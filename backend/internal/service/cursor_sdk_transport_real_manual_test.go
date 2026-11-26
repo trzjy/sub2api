@@ -109,7 +109,8 @@ func TestCursorSDKTransportRealUpstreamManual(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	res, err := svc.Execute(ctx, c, account, &CursorExecutionRequest{
-		Chat: &ccReq, Model: "real-chat", Stream: true, StartTime: time.Now(),
+		Chat: &ccReq, SemanticMessages: cursorDecodeChatSemantic(&ccReq),
+		Model: "real-chat", Stream: true, StartTime: time.Now(),
 		Protocol: cursorProtocolChat, Identity: cursorFullChainIdentity, Plan: plan, ToolChoiceMode: "required",
 	})
 	require.NoError(t, err)

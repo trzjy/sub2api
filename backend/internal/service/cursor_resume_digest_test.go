@@ -1113,11 +1113,12 @@ func TestCursorResumeExecuteAdmissionAllUnknownResults(t *testing.T) {
 	var ccReq apicompat.ChatCompletionsRequest
 	require.NoError(t, json.Unmarshal([]byte(cursorResumeTestChatResume), &ccReq))
 	_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
-		Chat:     &ccReq,
-		Model:    "cursor-test-model",
-		Protocol: cursorProtocolChat,
-		Identity: cursorResumeTestIdentity,
-		Plan:     plan,
+		Chat:             &ccReq,
+		SemanticMessages: cursorDecodeChatSemantic(&ccReq),
+		Model:            "cursor-test-model",
+		Protocol:         cursorProtocolChat,
+		Identity:         cursorResumeTestIdentity,
+		Plan:             plan,
 	})
 	require.Error(t, execErr, "依赖未装配 → 准入放行后按原链路失败关闭")
 	require.False(t, errors.Is(execErr, ErrCursorResumeUnknownAssociation),
@@ -1178,11 +1179,12 @@ func TestCursorResumeExecuteAdmissionPlainRequestAllowed(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(cursorResumeTestChatFirst), &ccReq))
 	// 没有 forwarder 装配 → 走到出站阶段前的失败是装配错误，而不是未知关联拒绝。
 	_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
-		Chat:     &ccReq,
-		Model:    "cursor-test-model",
-		Protocol: cursorProtocolChat,
-		Identity: cursorResumeTestIdentity,
-		Plan:     plan,
+		Chat:             &ccReq,
+		SemanticMessages: cursorDecodeChatSemantic(&ccReq),
+		Model:            "cursor-test-model",
+		Protocol:         cursorProtocolChat,
+		Identity:         cursorResumeTestIdentity,
+		Plan:             plan,
 	})
 	require.Error(t, execErr, "普通请求不被准入断言拒绝，但会因依赖未装配失败关闭")
 	require.False(t, errors.Is(execErr, ErrCursorResumeUnknownAssociation),
@@ -1293,11 +1295,12 @@ func TestCursorResumeRestartOrphanAllProtocolsRejected(t *testing.T) {
 			var ccReq apicompat.ChatCompletionsRequest
 			require.NoError(t, json.Unmarshal([]byte(cursorResumeTestChatFirst), &ccReq))
 			_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
-				Chat:     &ccReq,
-				Model:    "cursor-test-model",
-				Protocol: cursorResumeWriterProtocol(protocol),
-				Identity: cursorResumeTestIdentity,
-				Plan:     plan,
+				Chat:             &ccReq,
+				SemanticMessages: cursorDecodeChatSemantic(&ccReq),
+				Model:            "cursor-test-model",
+				Protocol:         cursorResumeWriterProtocol(protocol),
+				Identity:         cursorResumeTestIdentity,
+				Plan:             plan,
 			})
 			// Execute 不再因「历史不完整」拒绝（Execute 拿不到 ticket，分不清孤儿与官方用法）。
 			// 孤儿批的拒绝在 IdentifyResume（前半段已断言）。
@@ -1332,13 +1335,16 @@ func TestCursorResumeResponsesReplayHistoryIsOrdinaryRequest(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &req))
 	ccReq, convErr := apicompat.ResponsesToChatCompletionsRequest(&req)
 	require.NoError(t, convErr)
+	semResponses, semErr := cursorDecodeResponsesSemantic(&req)
+	require.NoError(t, semErr)
 	// 没有 forwarder/鉴权依赖 → 走到出站前的装配错误；关键是**不是**未知关联拒绝。
 	_, execErr := svc.Execute(context.Background(), nil, cursorResumeTestAccount(), &CursorExecutionRequest{
-		Chat:     ccReq,
-		Model:    "cursor-test-model",
-		Protocol: cursorProtocolResponses,
-		Identity: cursorResumeTestIdentity,
-		Plan:     plan,
+		Chat:             ccReq,
+		SemanticMessages: semResponses,
+		Model:            "cursor-test-model",
+		Protocol:         cursorProtocolResponses,
+		Identity:         cursorResumeTestIdentity,
+		Plan:             plan,
 	})
 	require.Error(t, execErr)
 	require.False(t, errors.Is(execErr, ErrCursorResumeUnknownAssociation),

@@ -44,9 +44,20 @@ func AnthropicToChatCompletionsRequest(req *AnthropicRequest) (*ChatCompletionsR
 	return AnthropicToChatCompletionsRequestWithMinOutputTokens(req, DefaultMinMaxOutputTokens)
 }
 
+// AnthropicToCursorChatCompletionsRequest preserves source instruction roles for
+// Cursor's AgentRun adapter. The regular Chat bridge keeps its strict-upstream
+// normalization behavior.
+func AnthropicToCursorChatCompletionsRequest(req *AnthropicRequest) (*ChatCompletionsRequest, error) {
+	return anthropicToChatCompletionsRequest(req, DefaultMinMaxOutputTokens, true)
+}
+
 // AnthropicToChatCompletionsRequestWithMinOutputTokens converts an Anthropic
 // Messages request using the supplied max_completion_tokens floor.
 func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest, minOutputTokens int) (*ChatCompletionsRequest, error) {
+	return anthropicToChatCompletionsRequest(req, minOutputTokens, false)
+}
+
+func anthropicToChatCompletionsRequest(req *AnthropicRequest, minOutputTokens int, preserveInstructions bool) (*ChatCompletionsRequest, error) {
 	if req == nil {
 		return nil, fmt.Errorf("anthropic request is nil")
 	}
@@ -56,7 +67,7 @@ func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest,
 	// 回传；否则后续请求漏传即 400。无 tools 请求行为不变（见
 	// anthropicThinkingToReasoningContent 的 withTools 判据）。
 	requestHasTools := len(req.Tools) > 0
-	messages, err := anthropicToChatMessages(req.System, req.Messages, requestHasTools)
+	messages, err := anthropicToChatMessagesWithOptions(req.System, req.Messages, requestHasTools, preserveInstructions)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +135,10 @@ func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest,
 // into Chat Completions messages. It mirrors convertAnthropicToResponsesInput +
 // responsesInputToChatMessages but produces ChatMessage directly.
 func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage, requestHasTools bool) ([]ChatMessage, error) {
+	return anthropicToChatMessagesWithOptions(system, msgs, requestHasTools, false)
+}
+
+func anthropicToChatMessagesWithOptions(system json.RawMessage, msgs []AnthropicMessage, requestHasTools, preserveInstructions bool) ([]ChatMessage, error) {
 	var messages []ChatMessage
 
 	// System prompt → system message. parseAnthropicSystemContentParts handles
@@ -161,7 +176,11 @@ func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage, re
 	// 处理方式与 Responses→Chat 路径共用同一实现（normalizeChatInstructionsToHead）：
 	// 前导 system 合并为一条，中途的 system 降级为 user 消息以保留文本。
 	// 不在这里另写一份判定 —— 两条入站路径必须收敛到同一个函数。
-	return normalizeChatInstructionsToHead(normalizeChatMessages(messages)), nil
+	result := normalizeChatMessages(messages)
+	if preserveInstructions {
+		return result, nil
+	}
+	return normalizeChatInstructionsToHead(result), nil
 }
 
 // anthropicMsgToChatMessages converts one Anthropic message into one or more

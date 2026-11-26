@@ -32,6 +32,9 @@ type ResponsesToChatOptions struct {
 	// longer provide. Return "" on a miss. A nil lookup keeps the original
 	// behavior.
 	ReasoningContentByID func(itemID string) string
+	// PreserveInstructions keeps system/developer roles for protocol adapters
+	// whose downstream semantics are not strict Chat wire semantics.
+	PreserveInstructions bool
 }
 
 // ResponsesToChatCompletionsRequest converts a Responses API request into a
@@ -429,6 +432,9 @@ func responsesInputToChatMessagesWithOptions(instructions string, inputRaw json.
 		return nil, err
 	}
 	normalized := normalizeChatMessagesWithToolOutputMedia(built, mediaByCallID)
+	if opts != nil && opts.PreserveInstructions {
+		return normalized, nil
+	}
 	return normalizeChatInstructionsToHead(normalized), nil
 }
 

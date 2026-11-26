@@ -47,14 +47,15 @@ func runFirstHTTPMode(
 		ctx = WithCursorSessionHandover(ctx, handover)
 	}
 	result, err := svc.Execute(ctx, c, cursorFullChainAccount(), &CursorExecutionRequest{
-		Chat:           &ccReq,
-		Model:          "cursor-sonnet",
-		Stream:         stream,
-		StartTime:      time.Now(),
-		Protocol:       cursorProtocolChat,
-		Identity:       cursorFullChainIdentity,
-		Plan:           plan,
-		ToolChoiceMode: toolChoiceMode,
+		Chat:             &ccReq,
+		SemanticMessages: cursorDecodeChatSemantic(&ccReq),
+		Model:            "cursor-sonnet",
+		Stream:           stream,
+		StartTime:        time.Now(),
+		Protocol:         cursorProtocolChat,
+		Identity:         cursorFullChainIdentity,
+		Plan:             plan,
+		ToolChoiceMode:   toolChoiceMode,
 	})
 	return w, result, err
 }
