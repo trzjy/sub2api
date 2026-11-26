@@ -31,8 +31,10 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -529,6 +531,14 @@ func (s *CursorExecutionService) Execute(
 		cursorPhaseLog(ctx, zapcore.WarnLevel, "request_conversion_failed", upstreamModel, fields...)
 		return nil, err
 	}
+	// §3.2 出站边界①：builder 成功后立刻记录不可逆 wire 元数据（此时尚无 session）。
+	// 只读 wire 结构，不读 prompt / 工具名 / 参数 / schema / 凭据；解析失败仅落 false 枚举。
+	agentRunFields := []zap.Field{
+		zap.Int64("account_id", account.ID),
+		zap.String("upstream_model", upstreamModel),
+	}
+	agentRunFields = append(agentRunFields, cursorAgentRunWireEvidenceFields(payload)...)
+	cursorPhaseLog(ctx, zapcore.InfoLevel, "agent_run_wire_evidence", upstreamModel, agentRunFields...)
 	if _, err := authProvider.CursorUpstreamAuth(ctx); err != nil {
 		return nil, err
 	}
@@ -1802,6 +1812,16 @@ func (s *CursorExecutionService) runCursorAgentRunPump(
 					zap.String("upstream_message", truncateOpenAIWSLogValue(message, 240)),
 					zap.Int64("account_id", session.spec.accountID),
 					zap.String("upstream_model", session.spec.upstreamModel))
+			}
+			// §3.2 参数拒绝通知取证：只看本 HTTP 累积文本，命中固定模板才落一条诊断事件。
+			// 引用/子串命中把 notice_is_entire_reply 标 false，绝不改变输出、错误分类或换号。
+			if noticeFields, ok := cursorParameterNoticeEvidenceFields(parser.httpContent(), parser.usage); ok {
+				noticeFields = append(noticeFields,
+					zap.Int64("account_id", session.spec.accountID),
+					zap.String("session_id", session.id),
+					zap.String("upstream_model", session.spec.upstreamModel))
+				cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "upstream_parameter_notice", opts.model,
+					noticeFields...)
 			}
 			cursorPhaseLog(session.phaseContext(), zapcore.InfoLevel, "response_parse_done", opts.model,
 				parseDoneFields...)
@@ -9290,6 +9310,14 @@ func (it *cursorAgentRunIntake) DeliverToolResults(ctx context.Context, sessionI
 		}
 		frames = append(frames, frame)
 	}
+	// §3.2 出站边界②：整批编码成功后、任何发送前记录不可逆 wire 摘要。
+	// ctx 来自本次续轮，request_id 挂当前 HTTP；不打印 call_id / exec_id，不改发送逻辑。
+	toolFields := []zap.Field{
+		zap.Int64("account_id", it.session.spec.accountID),
+		zap.String("upstream_model", it.session.spec.upstreamModel),
+	}
+	toolFields = append(toolFields, cursorToolResultWireEvidenceFields(sessionID, batchID, results, frames)...)
+	cursorPhaseLog(ctx, zapcore.InfoLevel, "tool_result_wire_evidence", it.session.spec.upstreamModel, toolFields...)
 	// 全部编码成功后才逐条串行发送；发送中传输失败仍走既有失败关闭，不重连不重放。
 	for _, frame := range frames {
 		if err := it.duplex.send(cursorFldClientMessage, frame); err != nil {
@@ -10129,4 +10157,237 @@ func cursorBuildAgentRunUpstreamRequest(
 		ToolDelegations: delegations,
 		Headers:         headers,
 	}
+}
+
+// ---------------------------------------------------------------------------
+// §3.2 定向调试：出站 wire 不可逆摘要 + 上游参数拒绝通知取证
+//
+// 全部 helper 都是纯读：不缓存、不建表、不引入依赖或配置；解析失败只产出枚举/false
+// 字段，绝不返回错误、绝不改变输出/错误分类/重试/换号/计费。只输出真实 wire 元数据
+// 与固定模板，不输出 prompt、工具名、参数、schema、headers、bearer、device 或 KV 内容。
+// ---------------------------------------------------------------------------
+
+const (
+	// ConversationStateStructure.f8 turns（只计数，不读内容；builder 侧新增的原生恢复锚点）。
+	cursorEvidenceStateTurnsField = 8
+	// ConversationAction.f2 resume_action（f1 user_message_action 已有常量）。
+	cursorEvidenceActionResumeField = 2
+
+	// 已观察的上游固定参数拒绝文案：允许末尾可选 " [8] (<13 位毫秒>-<8 位 hex>)"，
+	// 绝不截取或落盘周围的任意正文。
+	cursorParameterNoticeTemplate = "该模型参数暂不支持，请切换其他模型使用；若仍提示，则切换模型+新开对话"
+)
+
+// cursorEvidenceSHA256 返回字节串的十六进制 SHA256，用于不可逆的帧凭证比对。
+func cursorEvidenceSHA256(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// cursorAgentRunWireEvidenceFields 从已编码的 AgentRun envelope 读取真实 wire 元数据。
+// 解析失败只在字段里记 false/枚举，绝不向上返回错误、绝不影响请求。
+func cursorAgentRunWireEvidenceFields(payload []byte) []zap.Field {
+	fields := []zap.Field{
+		zap.Int("payload_bytes", len(payload)),
+		zap.String("payload_sha256", cursorEvidenceSHA256(payload)),
+	}
+	frame, off, err := cursorReadEnvelopeFrame(payload, 0)
+	if err != nil || off != len(payload) {
+		return append(fields, zap.Bool("agent_run_parse_ok", false))
+	}
+	clientFields, err := cursorDecodeProtobuf(frame.Data)
+	if err != nil {
+		return append(fields, zap.Bool("agent_run_parse_ok", false))
+	}
+	// envelope payload 是 AgentClientMessage，run_request 在 f1；再解一层才是 AgentRun。
+	runMsg, ok := cursorFindField(clientFields, cursorFldAgentRunRequest)
+	if !ok || runMsg.Wire != cursorWireBytes {
+		return append(fields, zap.Bool("agent_run_parse_ok", false))
+	}
+	runFields, err := cursorDecodeProtobuf(runMsg.Bytes)
+	if err != nil {
+		return append(fields, zap.Bool("agent_run_parse_ok", false))
+	}
+	fields = append(fields, zap.Bool("agent_run_parse_ok", true))
+
+	top := make([]string, 0, len(runFields))
+	for _, f := range runFields {
+		top = append(top, fmt.Sprintf("%d:%d", f.Number, f.Wire))
+	}
+	fields = append(fields, zap.Strings("wire_fields", top))
+	fields = append(fields, zap.String("action", cursorAgentRunWireAction(runFields)))
+
+	if state, ok := cursorFindField(runFields, cursorFldRunConversationState); ok && state.Wire == cursorWireBytes {
+		stateFields, err := cursorDecodeProtobuf(state.Bytes)
+		if err != nil {
+			fields = append(fields, zap.Bool("state_parse_ok", false))
+		} else {
+			roots, turns, mode := 0, 0, -1
+			for _, f := range stateFields {
+				switch f.Number {
+				case cursorFldStateRootPromptBlobs:
+					roots++
+				case cursorEvidenceStateTurnsField:
+					turns++
+				case cursorFldStateMode:
+					if f.Wire == cursorWireVarint {
+						mode = int(f.Varint)
+					}
+				}
+			}
+			fields = append(fields, zap.Bool("state_parse_ok", true),
+				zap.Int("state_root_blobs", roots), zap.Int("state_turns", turns), zap.Int("state_mode", mode))
+		}
+	} else {
+		fields = append(fields, zap.Bool("state_parse_ok", false))
+	}
+
+	if md, ok := cursorFindField(runFields, cursorFldRunModelDetails); ok && md.Wire == cursorWireBytes {
+		mdFields, err := cursorDecodeProtobuf(md.Bytes)
+		if err != nil {
+			fields = append(fields, zap.Bool("model_id_parse_ok", false))
+		} else if id, ok := cursorFindField(mdFields, cursorFldModelDetailsID); ok && id.Wire == cursorWireBytes {
+			fields = append(fields, zap.Bool("model_id_parse_ok", true), zap.String("model_id", string(id.Bytes)))
+		} else {
+			fields = append(fields, zap.Bool("model_id_parse_ok", false))
+		}
+	} else {
+		fields = append(fields, zap.Bool("model_id_parse_ok", false))
+	}
+
+	if mcp, ok := cursorFindField(runFields, cursorFldRunMcpTools); ok && mcp.Wire == cursorWireBytes {
+		mcpFields, err := cursorDecodeProtobuf(mcp.Bytes)
+		if err != nil {
+			fields = append(fields, zap.Bool("mcp_parse_ok", false))
+		} else {
+			count := 0
+			for _, f := range mcpFields {
+				if f.Number == cursorFldMcpToolsTool {
+					count++
+				}
+			}
+			fields = append(fields, zap.Bool("mcp_parse_ok", true), zap.Int("mcp_tool_count", count),
+				zap.Int("mcp_def_bytes", len(mcp.Bytes)), zap.String("mcp_def_sha256", cursorEvidenceSHA256(mcp.Bytes)))
+		}
+	} else {
+		fields = append(fields, zap.Bool("mcp_parse_ok", false))
+	}
+
+	blobs := 0
+	for _, f := range runFields {
+		if f.Number == cursorFldRunPreFetchedBlobs {
+			blobs++
+		}
+	}
+	fields = append(fields, zap.Int("prefetched_blob_count", blobs))
+	return fields
+}
+
+// cursorAgentRunWireAction 只读 action 的字段号，输出稳定枚举，不读任何消息内容。
+func cursorAgentRunWireAction(fields []cursorPBField) string {
+	action, ok := cursorFindField(fields, cursorFldRunAction)
+	if !ok || action.Wire != cursorWireBytes {
+		return "parse_failed"
+	}
+	inner, err := cursorDecodeProtobuf(action.Bytes)
+	if err != nil {
+		return "parse_failed"
+	}
+	if _, ok := cursorFindField(inner, cursorFldActionUserMessage); ok {
+		return "user_message"
+	}
+	if _, ok := cursorFindField(inner, cursorEvidenceActionResumeField); ok {
+		return "resume"
+	}
+	return "unknown"
+}
+
+// cursorToolResultWireEvidenceFields 汇总本批已编码帧的不可逆摘要与计数。
+// 不打印 call_id / exec_id / 工具结果正文，只输出 bytes/SHA256 与结构化计数。
+func cursorToolResultWireEvidenceFields(sessionID, batchID string, results []CursorToolResult, frames [][]byte) []zap.Field {
+	isError, images, structured := 0, 0, 0
+	for _, r := range results {
+		if r.IsError {
+			isError++
+		}
+		if len(r.Images) > 0 {
+			images++
+		}
+		if len(r.Structured) > 0 {
+			structured++
+		}
+	}
+	digests := make([]string, 0, len(frames))
+	for _, f := range frames {
+		digests = append(digests, fmt.Sprintf("%d:%s", len(f), cursorEvidenceSHA256(f)))
+	}
+	return []zap.Field{
+		zap.String("session_id", sessionID),
+		zap.String("batch_id", batchID),
+		zap.Int("result_count", len(results)),
+		zap.Int("frame_count", len(frames)),
+		zap.Int("is_error_count", isError),
+		zap.Int("images_count", images),
+		zap.Int("structured_count", structured),
+		zap.Strings("frame_bytes_sha256", digests),
+	}
+}
+
+// cursorParameterNoticeEventID 严格解析固定文案后的可选事件号。
+// 只接受 "[8] (<13 位毫秒时间戳>-<8 位十六进制>)"；任何偏离都当无事件号，
+// 绝不把周围正文当事件号落盘。ok=false 表示整体格式不符。
+func cursorParameterNoticeEventID(rest string) (string, bool) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", true
+	}
+	if strings.HasPrefix(rest, "[8]") {
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, "[8]"))
+		if rest == "" {
+			return "", true
+		}
+	}
+	if len(rest) < 4 || rest[0] != '(' || rest[len(rest)-1] != ')' {
+		return "", false
+	}
+	inner := rest[1 : len(rest)-1]
+	parts := strings.Split(inner, "-")
+	if len(parts) != 2 || len(parts[0]) != 13 || len(parts[1]) != 8 {
+		return "", false
+	}
+	for _, c := range parts[0] {
+		if c < '0' || c > '9' {
+			return "", false
+		}
+	}
+	for _, c := range parts[1] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return "", false
+		}
+	}
+	return inner, true
+}
+
+// cursorParameterNoticeEvidenceFields 只在文本包含固定模板时返回诊断字段。
+// entire 为 true 仅当整条回复（去空白后）恰为模板 + 严格事件号；子串/引用命中
+// 仍留 candidate，但标 false，绝不把周围正文截断成 error 或改变任何控制流。
+func cursorParameterNoticeEvidenceFields(text string, usage cursorTurnUsage) ([]zap.Field, bool) {
+	if text == "" || !strings.Contains(text, cursorParameterNoticeTemplate) {
+		return nil, false
+	}
+	trimmed := strings.TrimSpace(text)
+	entire, eventID := false, ""
+	if strings.HasPrefix(trimmed, cursorParameterNoticeTemplate) {
+		if id, ok := cursorParameterNoticeEventID(strings.TrimPrefix(trimmed, cursorParameterNoticeTemplate)); ok {
+			entire, eventID = true, id
+		}
+	}
+	return []zap.Field{
+		zap.String("template", cursorParameterNoticeTemplate),
+		zap.String("event_id", eventID),
+		zap.Bool("notice_is_entire_reply", entire),
+		zap.Bool("usage_seen", usage.Seen),
+		zap.Int("usage_input", usage.Input),
+		zap.Int("usage_output", usage.Output),
+	}, true
 }
