@@ -53,11 +53,27 @@ func TestCursorProtocolRequestRejectsOnlyUnsendable(t *testing.T) {
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
 			{Role: "assistant", Content: json.RawMessage(`"prefill"`)},
 		}}, "grok-4.7", infraerrors.CursorReqPrefill, http.StatusBadRequest},
-		// 孤立工具结果同样不是 user 轮：不凭历史新建 AgentRun（末尾非 user 仍拒）。
+		// 孤立工具结果：历史里找不到原 assistant 调用，无法独立重建 → UnknownAssociation，
+		// 不再误报成 assistant prefill（二者对客下一步动作完全不同）。
 		{"ends with isolated tool result", &apicompat.ChatCompletionsRequest{Messages: []apicompat.ChatMessage{
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
 			{Role: "tool", ToolCallID: "call_1", Name: "get_weather", Content: json.RawMessage(`"sunny"`)},
-		}}, "grok-4.7", infraerrors.CursorReqPrefill, http.StatusBadRequest},
+		}}, "grok-4.7", infraerrors.CursorResUnknownAssociation, http.StatusBadRequest},
+		// 结果有原调用但没有真实 user 锚点：同样不能凭空编造用户 → UnknownAssociation。
+		{"tool result without real user", &apicompat.ChatCompletionsRequest{Messages: []apicompat.ChatMessage{
+			{Role: "assistant", ToolCalls: []apicompat.ChatToolCall{{
+				ID: "call_1", Type: "function", Function: apicompat.ChatFunctionCall{
+					Name: "get_weather", Arguments: `{}`}}}},
+			{Role: "tool", ToolCallID: "call_1", Content: json.RawMessage(`"sunny"`)},
+		}}, "grok-4.7", infraerrors.CursorResUnknownAssociation, http.StatusBadRequest},
+		// 本批结果的 call ID 与历史里的调用不一致：历史不完整 → UnknownAssociation。
+		{"tool result call id not in history", &apicompat.ChatCompletionsRequest{Messages: []apicompat.ChatMessage{
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+			{Role: "assistant", ToolCalls: []apicompat.ChatToolCall{{
+				ID: "call_9", Type: "function", Function: apicompat.ChatFunctionCall{
+					Name: "get_weather", Arguments: `{}`}}}},
+			{Role: "tool", ToolCallID: "call_1", Content: json.RawMessage(`"sunny"`)},
+		}}, "grok-4.7", infraerrors.CursorResUnknownAssociation, http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
