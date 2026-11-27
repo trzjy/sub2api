@@ -321,7 +321,12 @@ func TestProbeAPIKeyAccountUsesDataPlane(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
 	cand := parkedBreakerAccount(7, 0)
-	cand.Credentials = map[string]any{"api_key": "sk-probe-test"}
+	// 夹具必须配账号自己维护的模型名单：探针只探账号提供的实际模型，无模型则降级
+	// （probe account has no model to probe）⇒ 补探永远不恢复、wg.Wait 挂死。
+	cand.Credentials = map[string]any{
+		"api_key":       "sk-probe-test",
+		"model_mapping": map[string]any{"probe-model": "probe-upstream-model"},
+	}
 	// 探测确认不支持 Responses 的账号 → 数据面走 chat/completions（CC 直转路径）。
 	cand.Extra = map[string]any{openai_compat.ExtraKeyResponsesSupported: false}
 	repo := &probeRepoMock{
@@ -352,7 +357,11 @@ func TestProbeAPIKeyAccountDataPlaneResponsesByDefault(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
 	cand := parkedBreakerAccount(7, 0)
-	cand.Credentials = map[string]any{"api_key": "sk-probe-test"}
+	// 同上：账号模型名单是探针唯一模型来源，缺它则本用例恒降级挂死。
+	cand.Credentials = map[string]any{
+		"api_key":       "sk-probe-test",
+		"model_mapping": map[string]any{"probe-model": "probe-upstream-model"},
+	}
 	repo := &probeRepoMock{
 		accounts:   map[int64]*Account{7: cand},
 		candidates: []*Account{cand},

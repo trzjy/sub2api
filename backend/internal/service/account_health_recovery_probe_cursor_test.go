@@ -111,8 +111,9 @@ func TestProbeUpstreamNonCursorDispatchUnchanged(t *testing.T) {
 	// 默认按走 Responses 处理，打到不存在的路径永久失败、账号永不恢复）。
 	openaiCand := parkedBreakerAccount(51, 0)
 	openaiCand.Credentials = map[string]any{
-		"api_key":  "sk-openai-probe-test",
-		"base_url": "https://api.openai.com/v1/chat/completions",
+		"api_key":       "sk-openai-probe-test",
+		"base_url":      "https://api.openai.com/v1/chat/completions",
+		"model_mapping": map[string]any{"probe-model": "probe-upstream-model"},
 	}
 	repo := &probeRepoMock{
 		accounts:   map[int64]*Account{51: openaiCand},

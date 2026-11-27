@@ -819,6 +819,16 @@ func (p *AccountHealthRecoveryProbeService) probeRetryInterval() time.Duration {
 	return accountHealthProbeRetryInterval
 }
 
+// probeQuotaRetryInterval 返回 429/额度耗尽类停调的补探间隔，与 probeRetryInterval
+// 共用同一个快进开关 retryInterval：生产零值回落 5min 常量（行为逐字不变），测试
+// 注入毫秒级间隔时慢类分支同样快进，不会把补探循环拖进 5 分钟等待。
+func (p *AccountHealthRecoveryProbeService) probeQuotaRetryInterval() time.Duration {
+	if p != nil && p.retryInterval > 0 {
+		return p.retryInterval
+	}
+	return accountHealthProbeQuotaRetryInterval
+}
+
 // isQuotaExhaustedTrip 判定一次可探测停调是否属 429/额度耗尽类（慢类，长间隔补探）。
 // 健康熔断仅把 429/500/503/504 计入（openai_apikey_health_breaker.go），401 冷却与
 // oauth401/pool401 的 StatusCode=401 均不属慢类，保持秒级现状。
@@ -946,8 +956,8 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 		}
 	}()
 	// nextAt 维护每个账号的下次探测时间（零值=立即）：429/额度耗尽类失败写入
-	// accountHealthProbeQuotaRetryInterval（5min），其余失败与「首成功后加速」写入
-	// accountHealthProbeRetryInterval（5s，可被测试注入 retryInterval 覆盖）。
+	// probeQuotaRetryInterval（默认 5min），其余失败与「首成功后加速」写入
+	// probeRetryInterval（默认 5s）；两者共用 retryInterval 快进开关，生产零值不变。
 	nextAt := make(map[int64]time.Time, len(pending))
 	stay := make([]*Account, 0, len(pending))
 	stay = append(stay, pending...)
@@ -1063,7 +1073,7 @@ func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Conte
 							if st.ConsecutiveSuccesses > 0 {
 								chosen = p.probeRetryInterval()
 							} else if p.isQuotaExhaustedTrip(reread) {
-								chosen = accountHealthProbeQuotaRetryInterval
+								chosen = p.probeQuotaRetryInterval()
 							} else {
 								chosen = p.probeRetryInterval()
 							}
