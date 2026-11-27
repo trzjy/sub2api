@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -95,4 +96,48 @@ func TestAccountHealthRecoveryProbeOAuthEmptyCompletedFrameIsUnhealthy(t *testin
 	ok, err := p.probeUpstreamDataPlaneWithProtocol(context.Background(), acc, false)
 	require.NoError(t, err, "空 completed 帧是响应内容问题，不是传输/配置错误")
 	require.False(t, ok, "空 completed 帧（上游静默拒绝）必须判不健康，不得解除停调")
+}
+
+// TestAccountHealthRecoveryProbeOAuthTruncatedStreamIsUnhealthy 是 OAuth 流读取错误
+// blocker 的回归用例：先给一段合法的 response.completed 帧（足以让
+// probeOpenAIOAuthResponseOK 判成功），随后注入非 EOF 读错误。若探针忽略 io.ReadAll
+// 的错误，就会拿已读到的合法终态帧判伪恢复、误清停调；必须失败关闭（ok=false）。
+func TestAccountHealthRecoveryProbeOAuthTruncatedStreamIsUnhealthy(t *testing.T) {
+	completedSSE := "event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_probe\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":11,\"output_tokens\":5,\"total_tokens\":16}}}\n\n" +
+		"data: [DONE]\n\n"
+	body := &truncatedProbeBody{
+		payload: []byte(completedSSE),
+		err:     errors.New("simulated oauth stream interruption after completed frame"),
+	}
+	upstream := &truncatedProbeUpstream{status: http.StatusOK, body: body}
+	p := &AccountHealthRecoveryProbeService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+		accountRepo:  &oauthProbeFakeRepo{},
+	}
+	acc := &Account{
+		ID:       990,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "oauth-probe-token",
+			"model_mapping": map[string]any{
+				"gpt-6-astra": "gpt-6-astra",
+			},
+		},
+		Concurrency: 1,
+	}
+
+	// 前提坐实：这段 payload 单独判定时确实是健康成功体，否则测试无法证明
+	// 「忽略读错误 ⇒ 伪恢复」这条因果链。
+	require.True(t, probeOpenAIOAuthResponseOK(http.StatusOK, []byte(completedSSE)),
+		"注入的 completed 帧本身必须是合法成功体")
+
+	ok, err := p.probeUpstreamDataPlaneWithProtocol(context.Background(), acc, false)
+	require.NoError(t, err, "读错误与传输失败同语义，不是配置/降级错误")
+	require.False(t, ok, "合法 completed 帧后跟非 EOF 读错误必须失败关闭，不得伪恢复")
+
+	require.Equal(t, 1, upstream.calls, "探测必须真实发出")
+	require.True(t, body.errored, "必须实际触发注入的读错误，避免测试空过")
 }

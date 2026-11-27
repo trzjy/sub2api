@@ -74,6 +74,32 @@ func TestModelScopeProbeDoesNotRemapScope(t *testing.T) {
 	require.Equal(t, scope, body["model"], "scope 不得被 GetMappedModel 二次映射")
 }
 
+// Gemini OAuth 不在可直连探测族（仅 apikey/upstream 可探）：family 为空 → 明确
+// error 失败关闭，不发任何请求、不清除停调；不做 OpenAI fallback。
+func TestGeminiOAuthRecoveryProbeFailsClosed(t *testing.T) {
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, `{"choices":[]}`)
+	p := anthropicProbeService(upstream)
+	acc := &Account{
+		ID:       703,
+		Platform: PlatformGemini,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":  "fake-gemini-oauth-token",
+			"model_mapping": map[string]any{"gemini-x": "gemini-upstream-x"},
+		},
+		Concurrency: 1,
+	}
+
+	// 前提坐实：OAuth 型 Gemini 确实没有安全数据面能力（family 为空）。
+	require.Empty(t, probeProtocolFamily(acc))
+
+	ok, err := p.probeUpstream(context.Background(), acc)
+	require.Error(t, err, "Gemini OAuth 必须返回明确 error（family 为空，失败关闭）")
+	require.Contains(t, err.Error(), "unsupported account")
+	require.False(t, ok)
+	require.Zero(t, anthropicProbeRecordCount(upstream), "失败关闭不得发 OpenAI fallback 请求")
+}
+
 // Antigravity transport 无安全已有数据面能力：family 为空 → 明确 error 失败关闭，
 // 不发出任何请求、不清除停调；不做 OpenAI fallback。
 func TestAntigravityTransportProbeFailsClosed(t *testing.T) {

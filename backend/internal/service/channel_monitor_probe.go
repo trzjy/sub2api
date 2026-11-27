@@ -355,23 +355,25 @@ func isAPIKeyOrUpstream(acc *Account) bool {
 	return acc.Type == AccountTypeAPIKey || acc.Type == AccountTypeUpstream
 }
 
-// openAIProbeBaseURL 返回 OpenAI 兼容探测共用的 base（含 Grok 专用回退）。
-// 直连探测器与恢复链共用本 helper，恢复链不再自行取 GetOpenAIBaseURL。
+// openAIProbeBaseURL 返回 OpenAI 兼容探测共用的 base。
+// Grok 是独立凭据体系：先按 IsGrok 分支，只读 GetGrokBaseURL，
+// 绝不先调 GetOpenAIBaseURL()（Grok 号在 OpenAI helper 里恒为空，语义上也不属于它）。
+// 非 Grok 保持既有行为。直连探测器与恢复链共用本 helper。
 func openAIProbeBaseURL(acc *Account) string {
-	base := strings.TrimSpace(acc.GetOpenAIBaseURL())
-	if acc.IsGrok() && base == "" {
-		base = strings.TrimSpace(acc.GetGrokBaseURL())
+	if acc.IsGrok() {
+		return strings.TrimSpace(acc.GetGrokBaseURL())
 	}
-	return base
+	return strings.TrimSpace(acc.GetOpenAIBaseURL())
 }
 
-// openAIProbeAPIKey 返回 OpenAI 兼容探测共用的 api key（含 Grok 专用回退）。
+// openAIProbeAPIKey 返回 OpenAI 兼容探测共用的 api key。
+// Grok 只读 credentials.api_key，绝不先调 GetOpenAIProtocolAPIKey()；
+// 非 Grok 保持既有行为。
 func openAIProbeAPIKey(acc *Account) string {
-	key := strings.TrimSpace(acc.GetOpenAIProtocolAPIKey())
-	if acc.IsGrok() && key == "" {
-		key = strings.TrimSpace(acc.GetCredential("api_key"))
+	if acc.IsGrok() {
+		return strings.TrimSpace(acc.GetCredential("api_key"))
 	}
-	return key
+	return strings.TrimSpace(acc.GetOpenAIProtocolAPIKey())
 }
 
 // buildOpenAIProbeSpec 是 OpenAI 兼容族请求构造的唯一事实源：base/凭据/Grok 回退、

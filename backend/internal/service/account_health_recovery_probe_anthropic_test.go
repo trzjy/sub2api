@@ -13,6 +13,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -163,6 +164,29 @@ func TestRecoveryProbeGeminiAPIKeyUsesGenerateContent(t *testing.T) {
 	require.NotContains(t, body, "messages", "不得落 OpenAI chat 形状")
 }
 
+// Gemini Upstream 型账号与 APIKey 同属可探测族：同样走 streamGenerateContent，
+// 不得因 Type=upstream 落 OpenAI 分支或失败关闭。
+func TestRecoveryProbeGeminiUpstreamUsesGenerateContent(t *testing.T) {
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK,
+		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"h\"}]}}]}\n\n")
+	p := anthropicProbeService(upstream)
+	acc := geminiAPIKeyRecoveryProbeAccount(416)
+	acc.Type = AccountTypeUpstream
+
+	ok, err := p.probeUpstream(context.Background(), acc)
+	require.NoError(t, err)
+	require.True(t, ok, "Gemini Upstream 文本增量必须判健康")
+
+	rec := upstream.lastRecord(t)
+	require.Equal(t, "/v1beta/models/gemini-upstream-x:streamGenerateContent", rec.Path,
+		"Upstream 型 Gemini 必须走 generateContent，不得落 OpenAI 端点")
+	require.Empty(t, rec.Header.Get("Authorization"), "Gemini key 走 query，不是 OpenAI Bearer")
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body, &body))
+	require.Contains(t, body, "contents")
+	require.NotContains(t, body, "messages")
+}
+
 // Grok APIKey：共享 builder 必须用 GetGrokBaseURL + credentials.api_key，
 // 端点 /v1/responses（能力标记缺省），body.model 不二次映射。
 func TestRecoveryProbeGrokAPIKeyUsesGrokEndpointAndKey(t *testing.T) {
@@ -182,6 +206,16 @@ func TestRecoveryProbeGrokAPIKeyUsesGrokEndpointAndKey(t *testing.T) {
 	require.Equal(t, "grok-upstream-x", body["model"])
 	require.Contains(t, body, "input")
 	require.NotContains(t, body, "messages")
+
+	// 凭据/端点必须来自 Grok 专用源，不得依赖 OpenAI helper 先试再 fallback：
+	// 直接断言共享 helper 的取值与 GetGrokBaseURL/credentials.api_key 逐字一致。
+	acc := grokAPIKeyRecoveryProbeAccount(415)
+	require.Equal(t, strings.TrimSpace(acc.GetGrokBaseURL()), openAIProbeBaseURL(acc),
+		"Grok base 必须取自 GetGrokBaseURL，不得先取 GetOpenAIBaseURL")
+	require.Equal(t, strings.TrimSpace(acc.GetCredential("api_key")), openAIProbeAPIKey(acc),
+		"Grok key 必须取自 credentials.api_key，不得先取 GetOpenAIProtocolAPIKey")
+	require.Empty(t, acc.GetOpenAIBaseURL(), "前提坐实：Grok 号在 OpenAI base helper 上为空")
+	require.Empty(t, acc.GetOpenAIProtocolAPIKey(), "前提坐实：Grok 号在 OpenAI key helper 上为空")
 }
 
 // 200 但无文本增量（只有 message_start / [DONE]）→ 失败关闭。
@@ -291,4 +325,47 @@ func TestAnthropicRecoveryProbeFailsOnTruncatedStream(t *testing.T) {
 
 	require.Equal(t, 1, upstream.calls, "探测必须真实发出")
 	require.True(t, body.errored, "必须实际触发注入的读错误，避免测试空过")
+}
+
+// 模型级 scope 已是上游模型名：Gemini 的 generateContent 路径不得再按账号
+// model_mapping 二次映射，否则会打到 WRONG-DOUBLE-MAPPED 这个不存在的模型。
+func TestModelScopeGeminiProbeDoesNotRemapScope(t *testing.T) {
+	const scope = "gemini-upstream-x"
+	acc := geminiAPIKeyRecoveryProbeAccount(417)
+	acc.Credentials["model_mapping"] = map[string]any{
+		"gemini-x": scope,
+		scope:      "WRONG-DOUBLE-MAPPED",
+	}
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK,
+		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"h\"}]}}]}\n\n")
+	p := anthropicProbeService(upstream)
+
+	ok, err := p.probeModelScopeUpstream(context.Background(), acc, scope)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	rec := upstream.lastRecord(t)
+	require.Equal(t, "/v1beta/models/"+scope+":streamGenerateContent", rec.Path,
+		"scope 不得被二次映射成 WRONG-DOUBLE-MAPPED")
+}
+
+// 同上，Grok 模型级 scope 请求 body.model 必须等于写入的 scope，不二次映射。
+func TestModelScopeGrokProbeDoesNotRemapScope(t *testing.T) {
+	const scope = "grok-upstream-x"
+	acc := grokAPIKeyRecoveryProbeAccount(418)
+	acc.Credentials["model_mapping"] = map[string]any{
+		"grok-x": scope,
+		scope:    "WRONG-DOUBLE-MAPPED",
+	}
+	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, `{"id":"resp-1","object":"response"}`)
+	p := anthropicProbeService(upstream)
+
+	ok, err := p.probeModelScopeUpstream(context.Background(), acc, scope)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	rec := upstream.lastRecord(t)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body, &body))
+	require.Equal(t, scope, body["model"], "scope 不得被 GetMappedModel 二次映射")
 }

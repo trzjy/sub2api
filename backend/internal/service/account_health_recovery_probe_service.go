@@ -1584,9 +1584,14 @@ func (p *AccountHealthRecoveryProbeService) probeOpenAIOAuthDataPlane(ctx contex
 			// 传输错误是账号级失败（换模型也没用）⇒ 不再试其它候选。
 			return false, nil
 		}
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
 		_ = resp.Body.Close()
 		cancel()
+		if readErr != nil {
+			// 合法 completed 帧后若跟非 EOF 读错误，与传输失败同语义：不健康、保持停调。
+			// 不得拿已读到的部分字节判恢复成功（伪恢复证明）。
+			return false, nil
+		}
 
 		if probeOpenAIOAuthResponseOK(resp.StatusCode, raw) {
 			return true, nil
