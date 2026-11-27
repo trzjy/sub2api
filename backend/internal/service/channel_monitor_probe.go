@@ -296,6 +296,23 @@ func isAnthropicProbeTarget(acc *Account) bool {
 	return acc != nil && (acc.IsAnthropicProtocol() || acc.Platform == PlatformAnthropic)
 }
 
+// probeProtocolFamily 是账号探测协议族的唯一判定源（"anthropic" | "openai" |
+// "gemini"，空串=无安全数据面能力）。canDirectProbe / buildProbeRequestSpec /
+// probeFamilyOf / buildRecoveryProbeRequestSpec 全部经本函数，禁止在任何探测分量里
+// 再写一份等价平台判断——多份判定随协议族扩展而分叉，正是 anthropic 账号长期不被
+// 探测的生产事故根因。
+func probeProtocolFamily(acc *Account) string {
+	switch {
+	case isAnthropicProbeTarget(acc):
+		return "anthropic"
+	case acc != nil && acc.IsOpenAICompatible():
+		return "openai"
+	case acc != nil && acc.IsGemini() && isAPIKeyOrUpstream(acc):
+		return "gemini"
+	}
+	return ""
+}
+
 // canDirectProbe 是"账号是否可被直连探测"的单一事实源：与原语 buildProbeRequestSpec 的
 // switch 完全同条件。候选账号选取与原语构造都通过本判定把关，禁止在别处再写一份等价条件，
 // 否则两处会随协议族扩展而悄然分叉（本次生产事故的根因）。
@@ -311,9 +328,7 @@ func canDirectProbe(acc *Account) bool {
 	if acc != nil && acc.Platform == PlatformCursor {
 		return false
 	}
-	return acc != nil && (isAnthropicProbeTarget(acc) ||
-		acc.IsOpenAICompatible() ||
-		(acc.IsGemini() && isAPIKeyOrUpstream(acc)))
+	return probeProtocolFamily(acc) != ""
 }
 
 // buildProbeRequestSpec 按协议族构造最简直连请求。unsupported 时返回 error（由原语转
@@ -323,12 +338,12 @@ func buildProbeRequestSpec(acc *Account, model string) (*probeReqSpec, error) {
 	if !canDirectProbe(acc) {
 		return nil, fmt.Errorf("unsupported account platform=%q type=%q for direct probe", acc.Platform, acc.Type)
 	}
-	switch {
-	case isAnthropicProbeTarget(acc):
+	switch probeProtocolFamily(acc) {
+	case "anthropic":
 		return buildAnthropicMessagesSpec(acc, model)
-	case acc.IsOpenAICompatible():
+	case "openai":
 		return buildOpenAIChatCompletionsSpec(acc, model)
-	case acc.IsGemini() && isAPIKeyOrUpstream(acc):
+	case "gemini":
 		return buildGeminiGenerateContentSpec(acc, model)
 	default:
 		// 不可达：canDirectProbe 已确保覆盖上述三种可探测协议族。
@@ -340,47 +355,98 @@ func isAPIKeyOrUpstream(acc *Account) bool {
 	return acc.Type == AccountTypeAPIKey || acc.Type == AccountTypeUpstream
 }
 
-// buildOpenAIChatCompletionsSpec 构造 OpenAI 兼容 chat/completions 最简请求。
-func buildOpenAIChatCompletionsSpec(acc *Account, model string) (*probeReqSpec, error) {
+// openAIProbeBaseURL 返回 OpenAI 兼容探测共用的 base（含 Grok 专用回退）。
+// 直连探测器与恢复链共用本 helper，恢复链不再自行取 GetOpenAIBaseURL。
+func openAIProbeBaseURL(acc *Account) string {
 	base := strings.TrimSpace(acc.GetOpenAIBaseURL())
+	if acc.IsGrok() && base == "" {
+		base = strings.TrimSpace(acc.GetGrokBaseURL())
+	}
+	return base
+}
+
+// openAIProbeAPIKey 返回 OpenAI 兼容探测共用的 api key（含 Grok 专用回退）。
+func openAIProbeAPIKey(acc *Account) string {
 	key := strings.TrimSpace(acc.GetOpenAIProtocolAPIKey())
-	if acc.IsGrok() {
-		// GetOpenAIBaseURL / GetOpenAIProtocolAPIKey 对 grok 返回空，单独取 grok 端点与 api_key。
-		if base == "" {
-			base = strings.TrimSpace(acc.GetGrokBaseURL())
-		}
-		if key == "" {
-			key = strings.TrimSpace(acc.GetCredential("api_key"))
-		}
+	if acc.IsGrok() && key == "" {
+		key = strings.TrimSpace(acc.GetCredential("api_key"))
+	}
+	return key
+}
+
+// buildOpenAIProbeSpec 是 OpenAI 兼容族请求构造的唯一事实源：base/凭据/Grok 回退、
+// 版本感知 URL 与认证头在此收敛。stream 与 maxTokens 由调用方按链路语义指定：
+// 直连探测器复用原流式形状，恢复链使用原非流式形状，逐字保留各自既有行为。
+func buildOpenAIProbeSpec(acc *Account, upstreamModel string, useResponses, stream bool, maxTokens int) (*probeReqSpec, error) {
+	base := openAIProbeBaseURL(acc)
+	key := openAIProbeAPIKey(acc)
+	// 凭据先于 base 校验：与恢复链既有语义一致（无凭据优先报配置错误），
+	// 也保证 Anthropic 账号误落 OpenAI 分支时暴露 "probe account has no api key" 根因。
+	if key == "" {
+		return nil, errors.New("probe account has no api key")
 	}
 	if base == "" {
 		return nil, fmt.Errorf("unsupported: no upstream base url (platform=%s)", acc.Platform)
 	}
-	if key == "" {
-		return nil, fmt.Errorf("unsupported: no api key (platform=%s)", acc.Platform)
-	}
 	// 复用业务同源版本感知 helper：base 已含版本段（如 /v1、/v4）时只追加相对路径，
 	// 避免裸拼 "/v1/chat/completions" 造成 /v1/v1 双段 404（对齐 openai_endpoint_url.go）。
-	u := buildOpenAIEndpointURL(base, "/v1/chat/completions")
-	m := acc.GetMappedModel(model)
-	if strings.TrimSpace(m) == "" {
-		m = model
+	// base 已写死具体端点时由 helper 的结尾判定原样返回，再由调用方的 concrete 判据定协议。
+	var u string
+	var body []byte
+	if useResponses {
+		u = openAIResponsesURLForBase(acc.Platform, base)
+		body = probeMustJSON(map[string]any{
+			"model":             upstreamModel,
+			"input":             "hi",
+			"max_output_tokens": maxTokens,
+			"stream":            false,
+		})
+	} else {
+		u = openAIChatCompletionsURLForBase(base)
+		body = probeMustJSON(map[string]any{
+			"model":      upstreamModel,
+			"messages":   []map[string]any{{"role": "user", "content": "hi"}},
+			"max_tokens": maxTokens,
+			"stream":     stream,
+		})
 	}
 	return &probeReqSpec{
 		method:  http.MethodPost,
 		url:     u,
 		headers: map[string]string{"Authorization": "Bearer " + key},
-		body: probeMustJSON(map[string]any{
-			"model":      m,
-			"messages":   []map[string]any{{"role": "user", "content": "hi"}},
-			"max_tokens": 5,
-			"stream":     true,
-		}),
+		body:    body,
 	}, nil
 }
 
+// buildOpenAIChatCompletionsSpec 构造直连探测器的 OpenAI 兼容 chat 请求。
+// 委托公共构造器但保留既有流式形状（stream=true、max_tokens=5），行为逐字不变。
+func buildOpenAIChatCompletionsSpec(acc *Account, model string) (*probeReqSpec, error) {
+	mapped := acc.GetMappedModel(model)
+	if strings.TrimSpace(mapped) == "" {
+		mapped = model
+	}
+	return buildOpenAIProbeSpec(acc, mapped, false, true, 5)
+}
+
+// buildOpenAIProbeSpecWithModel 构造恢复链的 OpenAI 兼容探测请求：非流式、输出上限复用
+// 数据面探测常量；upstreamModel 已是上游模型名，本函数不再做 GetMappedModel 二次映射。
+func buildOpenAIProbeSpecWithModel(acc *Account, upstreamModel string, useResponses bool) (*probeReqSpec, error) {
+	return buildOpenAIProbeSpec(acc, upstreamModel, useResponses, false, accountHealthProbeDataPlaneMaxTokens)
+}
+
 // buildAnthropicMessagesSpec 构造 anthropic /v1/messages 最简请求（apikey 或 oauth）。
+// 直连探测器用：模型先经 GetMappedModel 映射，再交给 WithModel 变体构造请求。
 func buildAnthropicMessagesSpec(acc *Account, model string) (*probeReqSpec, error) {
+	m := acc.GetMappedModel(model)
+	if strings.TrimSpace(m) == "" {
+		m = model
+	}
+	return buildAnthropicMessagesSpecWithModel(acc, m)
+}
+
+// buildAnthropicMessagesSpecWithModel 是 /v1/messages 请求构造事实源；
+// upstreamModel 已是上游模型名，不再二次映射。
+func buildAnthropicMessagesSpecWithModel(acc *Account, upstreamModel string) (*probeReqSpec, error) {
 	h := http.Header{}
 	var base, key string
 	if isAPIKeyOrUpstream(acc) {
@@ -410,10 +476,6 @@ func buildAnthropicMessagesSpec(acc *Account, model string) (*probeReqSpec, erro
 	// 复用业务同源版本感知 helper（对齐上方 openai 分支）：base 已含版本段（如 /v1、/v4）时
 	// 只追加相对路径，避免裸拼 "/v1/messages" 造成 /v1/v1 双段 404（对齐 openai_endpoint_url.go）。
 	u := buildVersionedEndpointURL(endpointFamilyAnthropic, base, "/v1/messages") + "?beta=true"
-	m := acc.GetMappedModel(model)
-	if strings.TrimSpace(m) == "" {
-		m = model
-	}
 	headers := map[string]string{"anthropic-version": "2023-06-01"}
 	for k := range h {
 		headers[k] = h.Get(k)
@@ -423,7 +485,7 @@ func buildAnthropicMessagesSpec(acc *Account, model string) (*probeReqSpec, erro
 		url:     u,
 		headers: headers,
 		body: probeMustJSON(map[string]any{
-			"model":      m,
+			"model":      upstreamModel,
 			"max_tokens": 16,
 			"stream":     true,
 			"messages":   []map[string]any{{"role": "user", "content": "hi"}},
@@ -433,6 +495,16 @@ func buildAnthropicMessagesSpec(acc *Account, model string) (*probeReqSpec, erro
 
 // buildGeminiGenerateContentSpec 构造 gemini apikey generateContent 最简请求（流式 SSE）。
 func buildGeminiGenerateContentSpec(acc *Account, model string) (*probeReqSpec, error) {
+	m := acc.GetMappedModel(model)
+	if strings.TrimSpace(m) == "" {
+		m = model
+	}
+	return buildGeminiGenerateContentSpecWithModel(acc, m)
+}
+
+// buildGeminiGenerateContentSpecWithModel 是 generateContent 请求构造事实源；
+// upstreamModel 已是上游模型名，不再二次映射。
+func buildGeminiGenerateContentSpecWithModel(acc *Account, upstreamModel string) (*probeReqSpec, error) {
 	key := strings.TrimSpace(acc.GetCredential("api_key"))
 	if key == "" {
 		return nil, fmt.Errorf("unsupported: no api key for gemini account")
@@ -441,16 +513,12 @@ func buildGeminiGenerateContentSpec(acc *Account, model string) (*probeReqSpec, 
 	if base == "" {
 		base = defaultGeminiBaseURL
 	}
-	m := acc.GetMappedModel(model)
-	if strings.TrimSpace(m) == "" {
-		m = model
-	}
 	// 复用业务同源版本感知 helper（对齐上方 openai 分支）：base 已含 /v1beta 时
 	// 只追加相对路径，避免裸拼 "/v1beta/models" 造成 /v1beta/v1beta 双段 404。
 	// 版本段只拼到 /v1beta/models 为止：model 段由调用方 PathEscape 后裸拼，若把已转义的
 	// model 交给原语，其内部 url.Parse→String() 会对已转义段二次转义（%2F→%252F）导致 404。
 	u := buildVersionedEndpointURL(endpointFamilyGemini, base, "/v1beta/models") +
-		"/" + url.PathEscape(m) + ":streamGenerateContent?alt=sse&key=" + url.QueryEscape(key)
+		"/" + url.PathEscape(upstreamModel) + ":streamGenerateContent?alt=sse&key=" + url.QueryEscape(key)
 	return &probeReqSpec{
 		method:  http.MethodPost,
 		url:     u,
@@ -464,6 +532,31 @@ func buildGeminiGenerateContentSpec(acc *Account, model string) (*probeReqSpec, 
 	}, nil
 }
 
+// buildRecoveryProbeRequestSpec 是三个恢复分量（账号 transport / 账号 quota / 模型
+// rate-limit）唯一的协议分派入口：family 由 probeProtocolFamily 给出，请求体由对应
+// *WithModel 变体构造（upstreamModel 已是上游名，绝不再映射一次）。family 为空或
+// 账号为空时返回明确 error，调用方失败关闭、不清除停调。
+func buildRecoveryProbeRequestSpec(acc *Account, upstreamModel string, useResponses bool) (*probeReqSpec, string, error) {
+	if acc == nil {
+		return nil, "", errors.New("unsupported nil account for recovery probe")
+	}
+	family := probeProtocolFamily(acc)
+	switch family {
+	case "anthropic":
+		spec, err := buildAnthropicMessagesSpecWithModel(acc, upstreamModel)
+		return spec, family, err
+	case "openai":
+		spec, err := buildOpenAIProbeSpecWithModel(acc, upstreamModel, useResponses)
+		return spec, family, err
+	case "gemini":
+		spec, err := buildGeminiGenerateContentSpecWithModel(acc, upstreamModel)
+		return spec, family, err
+	default:
+		return nil, "", fmt.Errorf("unsupported account platform=%q type=%q protocol=%q for recovery probe",
+			acc.Platform, acc.Type, acc.GetAPIProtocol())
+	}
+}
+
 func probeMustJSON(v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -475,16 +568,9 @@ func probeMustJSON(v any) []byte {
 
 // probeFamilyOf 将账号归一到流式解析族（"openai" | "anthropic" | "gemini"），
 // 与 buildProbeRequestSpec 的可探测协议族一致，驱动首个文本增量的判定规则。
+// 委托 probeProtocolFamily，确保协议族判定只有一个事实源。
 func probeFamilyOf(acc *Account) string {
-	switch {
-	case isAnthropicProbeTarget(acc):
-		return "anthropic"
-	case acc.IsOpenAICompatible():
-		return "openai"
-	case acc.IsGemini() && isAPIKeyOrUpstream(acc):
-		return "gemini"
-	}
-	return ""
+	return probeProtocolFamily(acc)
 }
 
 // probeStreamRead 读取上游流式响应并测量 TTFT / total 计时（B3，方案审锁定定义）。

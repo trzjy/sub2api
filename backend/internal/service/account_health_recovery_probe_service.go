@@ -1142,17 +1142,14 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 		return p.probeCodeBuddyUpstream(ctx, acc)
 	}
 	// DEVIN-PROBE：devin（Cascade）账号的 api_key 是 session token，不在
-	// GetOpenAIProtocolAPIKey() 中 ⇒ 落数据面会报 "probe account has no api key" 而
+	// OpenAI 协议凭据解析中 ⇒ 落通用数据面会报 "probe account has no api key" 而
 	// 永远解封不了。改派 devin 专用探针（GetUserJwt + GetChatMessage connect 帧）。
 	if acc != nil && acc.Platform == PlatformDevin {
 		return p.probeDevinUpstream(ctx, acc)
 	}
-	// 原生 Anthropic 平台账号必须走 /v1/messages 探测：GetOpenAIProtocolAPIKey()
-	// 不覆盖 Anthropic 平台，落 OpenAI 数据面会误报 "probe account has no api key"
-	// 并重排 probe_due_at，导致账号永不回调度池（412 / 1006 根因）。
-	if isAnthropicProbeTarget(acc) {
-		return p.probeAnthropicDataPlane(ctx, acc, "")
-	}
+	// 其余平台统一走 probeUpstreamDataPlane → probeUpstreamDataPlaneWithProtocolForModel，
+	// 由 buildRecoveryProbeRequestSpec 按 probeProtocolFamily 分派协议；专用链路（cursor /
+	// codebuddy / devin）已在上方收窄，不会被通用分派抢走。
 	return p.probeUpstreamDataPlane(ctx, acc)
 }
 
@@ -1409,23 +1406,23 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocol(c
 	return p.probeUpstreamDataPlaneWithProtocolForModel(ctx, acc, "", forceChatCompletions)
 }
 
-// probeUpstreamDataPlaneWithProtocolForModel 是数据面探测的实际实现：model 非空时直接使用
-// 传入模型（跳过 probeModelForAccount 与 cursor 分支回落）；为空时沿用既有取值逻辑。
+// probeUpstreamDataPlaneWithProtocolForModel 是三个恢复分量（账号 transport / 账号
+// quota / 模型 rate-limit）共用的数据面探测实际实现：协议判定统一收敛到
+// probeProtocolFamily + buildRecoveryProbeRequestSpec，本函数只负责发送细节与响应判定，
+// 不再自写平台判断。model 非空时直接使用传入模型（跳过 probeModelForAccount 与 cursor
+// 分支回落）；为空时沿用既有取值逻辑。
+//
+// 传输（DoWithTLS + proxy + TLS 指纹 + 45s 超时 + 读上限 + 头覆写 + OpenCode 会话头 +
+// muse UA）与 CAS/generation/probe_due_at/lock 节奏逐字保留。
 func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolForModel(ctx context.Context, acc *Account, model string, forceChatCompletions bool) (bool, error) {
 	if acc == nil {
 		return false, errors.New("probe account is nil")
 	}
-	// OpenAI OAuth/SetupToken 订阅号的 GetOpenAIProtocolAPIKey() 恒为空（type!=apikey），
+	// OpenAI OAuth/SetupToken 订阅号的 OpenAI APIKey 凭据恒为空（type!=apikey），
 	// 落原 APIKey 分支会报 "probe account has no api key" 走 degraded 到期恢复，账号
-	// 永远探不通。在取 apiKey 前分流到 OAuth 凭据路径（access_token + Codex 端点）。
-	// 其余账号（APIKey/cursor/CodeBuddy/devin 等）继续走下方原有路径，逐字不变。
+	// 永远探不通。保留 OAuth 专用凭据路径（access_token + Codex 端点）。
 	if isOpenAIOAuthProbeAccount(acc) {
 		return p.probeOpenAIOAuthDataPlane(ctx, acc, model)
-	}
-	apiKey := strings.TrimSpace(acc.GetOpenAIProtocolAPIKey())
-	if apiKey == "" {
-		// 无可用凭据属配置错误，降级到到期恢复（既有 degraded 语义），不伪造失败。
-		return false, errors.New("probe account has no api key")
 	}
 	// 显式 model 和 probeModelForAccount 都是已解析的上游模型名。Cursor 账号级探针
 	// 单独从其 model_mapping 取一个入站键，再解析为相同的上游名。
@@ -1440,74 +1437,40 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolFo
 	}
 	upstreamModel := normalizeOpenAIModelForUpstream(acc, model)
 
-	baseURL := acc.GetOpenAIBaseURL()
-	if strings.TrimSpace(baseURL) == "" {
-		if acc.Platform == PlatformOther {
-			return false, errors.New("probe account (platform other) has no base_url")
-		}
-		baseURL = "https://api.openai.com"
+	// 具体端点优先于能力标记：base 已写死 .../chat/completions 或 .../responses 时必须
+	// 照用，否则会拼出 /v1/chat/completions/v1/responses 这种不存在的路径（生产实证）。
+	// base 获取走共享 helper（含 Grok 回退），恢复链不再自行取 OpenAI base。
+	useResponses := !forceChatCompletions && openai_compat.ShouldUseResponsesAPI(acc.SnapshotExtra())
+	if concrete, concreteIsResponses := probeConcreteEndpoint(openAIProbeBaseURL(acc)); concrete {
+		useResponses = concreteIsResponses
 	}
-	normalizedBase, err := cnValidateProbeURL(p.cfg, baseURL)
+	// 恢复链唯一协议分派入口：family 为空（如 Antigravity transport / Gemini OAuth）时
+	// 返回明确 error，调用方失败关闭、保持停调，绝不 OpenAI fallback。
+	spec, family, err := buildRecoveryProbeRequestSpec(acc, upstreamModel, useResponses)
 	if err != nil {
-		return false, fmt.Errorf("invalid probe base url: %w", err)
+		return false, err
+	}
+	// URL 安全校验放在拿到 spec.url 之后：Anthropic/Gemini/Grok 不能依赖 OpenAI base，
+	// base 获取与端点派生已全部交给共享 builder。
+	validated, err := cnValidateProbeURL(p.cfg, spec.url)
+	if err != nil {
+		return false, fmt.Errorf("invalid probe url: %w", err)
 	}
 
-	// base_url 若已经写到具体端点（…/v1/chat/completions、…/v1/responses），它就
-	// 是管理员写死的真实端点，探测必须照用、不得再按能力标记派生别的端点（见
-	// probeConcreteEndpoint 的生产实证）。该优先级高于协议判据（R4 发现 1）。
-	concreteEndpoint, concreteIsResponses := probeConcreteEndpoint(normalizedBase)
-	useResponses := concreteIsResponses
-	if !concreteEndpoint {
-		if forceChatCompletions {
-			// cursor APIKey 反代等：转发侧已固定走原始 Chat Completions，探针须一致。
-			useResponses = false
-		} else {
-			useResponses = openai_compat.ShouldUseResponsesAPI(acc.SnapshotExtra())
-		}
-	}
-	var targetURL string
-	var payload []byte
-	if useResponses {
-		if concreteEndpoint {
-			targetURL = normalizedBase
-		} else {
-			targetURL = openAIResponsesURLForBase(acc.Platform, normalizedBase)
-		}
-		payload, err = json.Marshal(map[string]any{
-			"model":             upstreamModel,
-			"input":             "hi",
-			"max_output_tokens": accountHealthProbeDataPlaneMaxTokens,
-			"stream":            false,
-		})
-	} else {
-		if concreteEndpoint {
-			targetURL = normalizedBase
-		} else {
-			targetURL = openAIChatCompletionsURLForBase(normalizedBase)
-		}
-		payload, err = json.Marshal(map[string]any{
-			"model":      upstreamModel,
-			"messages":   []map[string]any{{"role": "user", "content": "hi"}},
-			"max_tokens": accountHealthProbeDataPlaneMaxTokens,
-			"stream":     false,
-		})
-	}
-	if err != nil {
-		return false, fmt.Errorf("build probe payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, spec.method, validated, bytes.NewReader(spec.body))
 	if err != nil {
 		return false, fmt.Errorf("build probe request: %w", err)
 	}
+	for k, v := range spec.headers {
+		req.Header.Set(k, v)
+	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
 	// 账号级 header 覆写：与真实转发最终头同源
 	acc.ApplyHeaderOverrides(req.Header)
 	// 伪装账号（OpenCode Go 端点）必需会话头。探测无入站 gin.Context，
 	// resolveOpenCodeSessionID 走 generate 分支生成 UUID；body 参与解析以复用
 	// prompt_cache_key 等稳定会话键。
-	applyOpenCodeSessionHeader(nil, acc, targetURL, req.Header, payload)
+	applyOpenCodeSessionHeader(nil, acc, validated, req.Header, spec.body)
 	// muse 系 / OpenCode 官方主机需要网关中继 UA（与转发链同源）
 	if acc.Platform == PlatformMuse || isOpenCodeHostURL(strings.TrimSpace(acc.GetCredential("base_url"))) {
 		req.Header.Set("User-Agent", museRelayUserAgent)
@@ -1529,79 +1492,27 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolFo
 	defer cancel()
 	resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
 	if err != nil {
-		// 传输失败与既有 /models 探测同语义：上游不可达即不健康，保持停调（非降级）。
-		return false, nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
-	return evaluateProbeDataPlaneResponse(resp.StatusCode, raw, useResponses), nil
-}
-
-// probeAnthropicDataPlane 对原生 Anthropic 平台账号做真实数据面探测。
-//
-// GetOpenAIProtocolAPIKey() 不覆盖 Anthropic 平台，这类账号若落 OpenAI 数据面会误报
-// "probe account has no api key" 并重排 probe_due_at，导致账号永不回调度池（412 / 1006
-// 根因）。这里复用 channel_monitor_probe.go 的 Anthropic 请求构造与 SSE 文本判定单一
-// 事实源：/v1/messages + content_block_delta 文本增量才算健康（2xx 但无文本增量失败关闭）。
-// 发送路径（DoWithTLS + proxy + tlsProfile + 超时 + 读取上限）与既有数据面探测逐字同源。
-func (p *AccountHealthRecoveryProbeService) probeAnthropicDataPlane(ctx context.Context, acc *Account, model string) (bool, error) {
-	if acc == nil {
-		return false, errors.New("probe account is nil")
-	}
-	if model == "" {
-		model = p.probeModelForAccount(acc)
-	}
-	if model == "" {
-		return false, errors.New("probe account has no model to probe")
-	}
-	spec, err := buildAnthropicMessagesSpec(acc, model)
-	if err != nil {
-		return false, err
-	}
-	validated, err := cnValidateProbeURL(p.cfg, spec.url)
-	if err != nil {
-		return false, err
-	}
-	req, err := http.NewRequestWithContext(ctx, spec.method, validated, bytes.NewReader(spec.body))
-	if err != nil {
-		return false, err
-	}
-	for k, v := range spec.headers {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	acc.ApplyHeaderOverrides(req.Header)
-
-	proxyURL := ""
-	if acc.ProxyID != nil && acc.Proxy != nil {
-		proxyURL = acc.Proxy.URL()
-	}
-	var tlsProfile *tlsfingerprint.Profile
-	if p.tlsFPProfileService != nil {
-		tlsProfile = p.tlsFPProfileService.ResolveTLSProfile(acc)
-	}
-
-	callCtx, cancel := context.WithTimeout(ctx, accountHealthProbeDataPlaneTimeout)
-	defer cancel()
-	resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
-	if err != nil {
 		// 传输失败与既有数据面探测同语义：上游不可达即不健康，保持停调（非降级）。
 		return false, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	// 成功判定按 family：anthropic/gemini 为 2xx + SSE 文本增量；openai 沿用
+	// evaluateProbeDataPlaneResponse（2xx + 合法 JSON + 无 error 信封 + 协议成功体）。
+	// 2xx 无文本增量/无成功体一律失败关闭。
+	if family == "anthropic" || family == "gemini" {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return false, nil
+		}
+		for _, line := range bytes.Split(raw, []byte("\n")) {
+			if probeSSEDataHasText(family, string(line)) {
+				return true, nil
+			}
+		}
 		return false, nil
 	}
-	for _, line := range bytes.Split(raw, []byte("\n")) {
-		if probeSSEDataHasText("anthropic", string(line)) {
-			return true, nil
-		}
-	}
-	// 2xx 但没有 content_block_delta 文本 = 失败关闭。
-	return false, nil
+	return evaluateProbeDataPlaneResponse(resp.StatusCode, raw, useResponses), nil
 }
 
 // probeOpenAIOAuthDataPlane 对 OpenAI OAuth/SetupToken 订阅号做真实数据面探测。
