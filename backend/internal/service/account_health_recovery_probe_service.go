@@ -1147,6 +1147,12 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 	if acc != nil && acc.Platform == PlatformDevin {
 		return p.probeDevinUpstream(ctx, acc)
 	}
+	// 原生 Anthropic 平台账号必须走 /v1/messages 探测：GetOpenAIProtocolAPIKey()
+	// 不覆盖 Anthropic 平台，落 OpenAI 数据面会误报 "probe account has no api key"
+	// 并重排 probe_due_at，导致账号永不回调度池（412 / 1006 根因）。
+	if isAnthropicProbeTarget(acc) {
+		return p.probeAnthropicDataPlane(ctx, acc, "")
+	}
 	return p.probeUpstreamDataPlane(ctx, acc)
 }
 
@@ -1530,6 +1536,72 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolFo
 
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
 	return evaluateProbeDataPlaneResponse(resp.StatusCode, raw, useResponses), nil
+}
+
+// probeAnthropicDataPlane 对原生 Anthropic 平台账号做真实数据面探测。
+//
+// GetOpenAIProtocolAPIKey() 不覆盖 Anthropic 平台，这类账号若落 OpenAI 数据面会误报
+// "probe account has no api key" 并重排 probe_due_at，导致账号永不回调度池（412 / 1006
+// 根因）。这里复用 channel_monitor_probe.go 的 Anthropic 请求构造与 SSE 文本判定单一
+// 事实源：/v1/messages + content_block_delta 文本增量才算健康（2xx 但无文本增量失败关闭）。
+// 发送路径（DoWithTLS + proxy + tlsProfile + 超时 + 读取上限）与既有数据面探测逐字同源。
+func (p *AccountHealthRecoveryProbeService) probeAnthropicDataPlane(ctx context.Context, acc *Account, model string) (bool, error) {
+	if acc == nil {
+		return false, errors.New("probe account is nil")
+	}
+	if model == "" {
+		model = p.probeModelForAccount(acc)
+	}
+	if model == "" {
+		return false, errors.New("probe account has no model to probe")
+	}
+	spec, err := buildAnthropicMessagesSpec(acc, model)
+	if err != nil {
+		return false, err
+	}
+	validated, err := cnValidateProbeURL(p.cfg, spec.url)
+	if err != nil {
+		return false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, spec.method, validated, bytes.NewReader(spec.body))
+	if err != nil {
+		return false, err
+	}
+	for k, v := range spec.headers {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	acc.ApplyHeaderOverrides(req.Header)
+
+	proxyURL := ""
+	if acc.ProxyID != nil && acc.Proxy != nil {
+		proxyURL = acc.Proxy.URL()
+	}
+	var tlsProfile *tlsfingerprint.Profile
+	if p.tlsFPProfileService != nil {
+		tlsProfile = p.tlsFPProfileService.ResolveTLSProfile(acc)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, accountHealthProbeDataPlaneTimeout)
+	defer cancel()
+	resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
+	if err != nil {
+		// 传输失败与既有数据面探测同语义：上游不可达即不健康，保持停调（非降级）。
+		return false, nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, nil
+	}
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if probeSSEDataHasText("anthropic", string(line)) {
+			return true, nil
+		}
+	}
+	// 2xx 但没有 content_block_delta 文本 = 失败关闭。
+	return false, nil
 }
 
 // probeOpenAIOAuthDataPlane 对 OpenAI OAuth/SetupToken 订阅号做真实数据面探测。
