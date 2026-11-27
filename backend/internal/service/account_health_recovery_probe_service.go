@@ -1497,7 +1497,12 @@ func (p *AccountHealthRecoveryProbeService) probeUpstreamDataPlaneWithProtocolFo
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, accountHealthProbeDataPlaneMaxBodyBytes))
+	if err != nil {
+		// 读取失败（如流出文本增量后连接中断）与传输失败同语义：不健康，保持停调。
+		// 不得拿已读到的部分字节判恢复成功，那是伪恢复证明。
+		return false, nil
+	}
 	// 成功判定按 family：anthropic/gemini 为 2xx + SSE 文本增量；openai 沿用
 	// evaluateProbeDataPlaneResponse（2xx + 合法 JSON + 无 error 信封 + 协议成功体）。
 	// 2xx 无文本增量/无成功体一律失败关闭。

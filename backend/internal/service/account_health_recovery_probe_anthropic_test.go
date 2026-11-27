@@ -10,11 +10,14 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/stretchr/testify/require"
 )
 
@@ -228,4 +231,64 @@ func TestOpenAIApiKeyRecoveryProbeUnchanged(t *testing.T) {
 	require.Equal(t, "/v1/chat/completions", rec.Path, "OpenAI 账号端点不变")
 	require.Equal(t, "Bearer sk-openai-probe-test-only", rec.Header.Get("Authorization"))
 	require.Empty(t, rec.Header.Get("anthropic-version"), "OpenAI 探测不得带 anthropic 头")
+}
+
+// truncatedProbeBody 先吐出 payload 字节，随后返回非 EOF 读错误，
+// 模拟「已给出文本增量、但流中途连接中断」的截断 SSE 响应。
+type truncatedProbeBody struct {
+	payload []byte
+	off     int
+	err     error
+	errored bool
+}
+
+func (b *truncatedProbeBody) Read(p []byte) (int, error) {
+	if b.off < len(b.payload) {
+		n := copy(p, b.payload[b.off:])
+		b.off += n
+		return n, nil
+	}
+	b.errored = true
+	return 0, b.err
+}
+
+func (b *truncatedProbeBody) Close() error { return nil }
+
+// truncatedProbeUpstream 直接回放一个固定状态的响应，不经过 httptest 真网络栈，
+// 便于往 body 里注入读错误。
+type truncatedProbeUpstream struct {
+	status int
+	body   io.ReadCloser
+	calls  int
+}
+
+func (s *truncatedProbeUpstream) Do(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	return s.response(), nil
+}
+
+func (s *truncatedProbeUpstream) DoWithTLS(_ *http.Request, _ string, _ int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return s.response(), nil
+}
+
+func (s *truncatedProbeUpstream) response() *http.Response {
+	s.calls++
+	return &http.Response{StatusCode: s.status, Header: make(http.Header), Body: s.body}
+}
+
+// FIX-1 对齐：SSE 先给出合法 content_block_delta 文本帧、随后读取报错的截断流
+// 必须失败关闭（ok=false）；否则会把部分字节里的文本增量误判为恢复成功并清除停调。
+func TestAnthropicRecoveryProbeFailsOnTruncatedStream(t *testing.T) {
+	body := &truncatedProbeBody{
+		payload: []byte(anthropicTextSSE),
+		err:     errors.New("simulated upstream stream interruption"),
+	}
+	upstream := &truncatedProbeUpstream{status: http.StatusOK, body: body}
+	p := anthropicProbeService(upstream)
+
+	ok, err := p.probeUpstream(context.Background(), anthropicRecoveryProbeAccount(412, true))
+	require.NoError(t, err)
+	require.False(t, ok, "截断流即便先吐出文本增量也必须失败关闭，不得清除停调")
+
+	require.Equal(t, 1, upstream.calls, "探测必须真实发出")
+	require.True(t, body.errored, "必须实际触发注入的读错误，避免测试空过")
 }
