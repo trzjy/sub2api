@@ -56,6 +56,13 @@ func TestEvaluateProbeDataPlaneResponse(t *testing.T) {
 		{"responses 2xx error envelope", http.StatusOK, `{"error":{"message":"upstream first byte timeout"}}`, true, false},
 		{"responses 2xx empty body", http.StatusOK, ``, true, false},
 		{"responses 2xx without id/object", http.StatusOK, `{"status":"completed"}`, true, false},
+		// error:null 误判回归：显式 null 不是错误信封，正常响应应判成功。
+		{"responses success with error:null", http.StatusOK, `{"id":"resp-1","object":"response","status":"completed","error":null}`, true, true},
+		{"chat success with error:null", http.StatusOK, `{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"content":"hi"}}],"error":null}`, false, true},
+		{"error object still fails", http.StatusOK, `{"id":"resp-1","object":"response","error":{"message":"first byte timeout"}}`, true, false},
+		{"error:null without id/object fails", http.StatusOK, `{"status":"completed","error":null}`, true, false},
+		{"error empty object fails", http.StatusOK, `{"id":"resp-1","object":"response","error":{}}`, true, false},
+		{"error string fails", http.StatusOK, `{"id":"resp-1","object":"response","error":"text"}`, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

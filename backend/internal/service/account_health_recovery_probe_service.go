@@ -1729,7 +1729,10 @@ func evaluateProbeDataPlaneResponse(statusCode int, body []byte, useResponses bo
 	if !gjson.ValidBytes(trimmed) {
 		return false
 	}
-	if gjson.GetBytes(trimmed, "error").Exists() {
+	// error 字段显式为 null（百炼/OpenAI Responses 正常响应常带 "error":null）不是错误信封，
+	// 只有存在且非 null 才算错误；否则正常响应被误判失败，账号永久卡在探测态。
+	errNode := gjson.GetBytes(trimmed, "error")
+	if errNode.Exists() && errNode.Type != gjson.Null {
 		return false
 	}
 	if useResponses {
