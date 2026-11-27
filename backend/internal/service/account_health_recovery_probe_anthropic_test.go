@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -368,4 +369,315 @@ func TestModelScopeGrokProbeDoesNotRemapScope(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body, &body))
 	require.Equal(t, scope, body["model"], "scope 不得被 GetMappedModel 二次映射")
+}
+
+// ---------- Anthropic 探针协议族误分派修复：Bedrock / Vertex ServiceAccount 排除 ----------
+
+// anthropicBedrockProbeAccount 构造 PlatformAnthropic + Bedrock 账号（真实出站走
+// forwardBedrock 的 SigV4 专用链路，不属于普通 /v1/messages 探测的能力面）。
+func anthropicBedrockProbeAccount(id int64) *Account {
+	acc := anthropicRecoveryProbeAccount(id, true)
+	acc.Type = AccountTypeBedrock
+	return acc
+}
+
+// anthropicServiceAccountProbeAccount 构造 PlatformAnthropic + ServiceAccount（Vertex）账号，
+// 真实出站走 buildUpstreamRequestAnthropicVertex（服务账号 OAuth2）。
+func anthropicServiceAccountProbeAccount(id int64) *Account {
+	acc := anthropicRecoveryProbeAccount(id, true)
+	acc.Type = AccountTypeServiceAccount
+	return acc
+}
+
+// 协议族矩阵：普通 Anthropic APIKey/Upstream 与显式 api_protocol=anthropic 仍为 anthropic 族；
+// Bedrock / ServiceAccount 必须归空族，渠道直连与恢复探针共用同一判定。
+func TestAnthropicProbeProtocolFamilyExcludesBedrockAndServiceAccount(t *testing.T) {
+	upstreamAcc := func() *Account {
+		// Upstream 型 GetBaseURL() 恒为空，base 只经 GetAnthropicProtocolBaseURL 取得，
+		// 而该 getter 要求 IsAnthropicProtocol() 为真（多协议平台显式 api_protocol=anthropic）。
+		// 平台原生 anthropic 的 GetAPIProtocol 恒回落 chat_completions，不是本用例的形态。
+		acc := multiProtocolAnthropicAccount(2)
+		acc.Type = AccountTypeUpstream
+		return acc
+	}
+	cases := []struct {
+		name      string
+		acc       *Account
+		family    string
+		canDirect bool
+	}{
+		{"anthropic apikey", anthropicRecoveryProbeAccount(1, true), "anthropic", true},
+		{"anthropic upstream", upstreamAcc(), "anthropic", true},
+		{"explicit anthropic apikey", multiProtocolAnthropicAccount(3), "anthropic", true},
+		{"bedrock", anthropicBedrockProbeAccount(4), "", false},
+		{"service account", anthropicServiceAccountProbeAccount(5), "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.family, probeProtocolFamily(tc.acc))
+			require.Equal(t, tc.canDirect, canDirectProbe(tc.acc))
+
+			spec, err := buildProbeRequestSpec(tc.acc, "claude-x")
+			recoverSpec, family, recoverErr := buildRecoveryProbeRequestSpec(tc.acc, "claude-upstream-x", false)
+			if tc.canDirect {
+				require.NoError(t, err)
+				require.NotNil(t, spec)
+				require.Contains(t, spec.url, "/v1/messages")
+				require.NoError(t, recoverErr)
+				require.Equal(t, "anthropic", family)
+				require.NotNil(t, recoverSpec)
+				return
+			}
+			require.Error(t, err, "被排除类型不得构造普通直连请求")
+			require.Nil(t, spec)
+			require.Error(t, recoverErr, "被排除类型恢复探针必须失败关闭")
+			require.Contains(t, recoverErr.Error(), "unsupported")
+			require.Empty(t, family)
+			require.Nil(t, recoverSpec)
+		})
+	}
+}
+
+// 构造器设防：即便绕过 probeProtocolFamily，也不得为 Bedrock / ServiceAccount 拼出
+// 普通 /v1/messages；错误必须带 platform/type 便于定位。
+func TestAnthropicMessagesSpecRejectsBedrockAndServiceAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		acc  *Account
+	}{
+		{"bedrock", anthropicBedrockProbeAccount(6)},
+		{"service account", anthropicServiceAccountProbeAccount(7)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := buildAnthropicMessagesSpec(tc.acc, "claude-x")
+			require.Error(t, err)
+			require.Nil(t, spec)
+			require.Contains(t, err.Error(), "unsupported")
+			require.Contains(t, err.Error(), tc.acc.Platform)
+			require.Contains(t, err.Error(), string(tc.acc.Type))
+
+			spec, err = buildAnthropicMessagesSpecWithModel(tc.acc, "claude-upstream-x")
+			require.Error(t, err)
+			require.Nil(t, spec)
+			require.Contains(t, err.Error(), "unsupported")
+			require.Contains(t, err.Error(), string(tc.acc.Type))
+		})
+	}
+}
+
+// 假上游断言：被排除类型经 probeUpstream 不发出任何请求（记录数为 0）。
+func TestAnthropicRecoveryProbeExcludedTypesSendNoRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		acc  *Account
+	}{
+		{"bedrock", anthropicBedrockProbeAccount(8)},
+		{"service account", anthropicServiceAccountProbeAccount(9)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, anthropicTextSSE)
+			p := anthropicProbeService(upstream)
+			ok, err := p.probeUpstream(context.Background(), tc.acc)
+			require.Error(t, err, "被排除类型必须失败关闭（unsupported）")
+			require.False(t, ok)
+			require.Zero(t, anthropicProbeRecordCount(upstream), "不得向假上游发出任何请求")
+		})
+	}
+}
+
+// anthropicProtoRecorderRepo 是恢复探针窄接口的测试替身（仅本文件使用）。本文件无 build tag，
+// 故不嵌入 //go:build unit 文件里的 oauthProbeFakeRepo——那样会让默认构建编译失败。
+// 只记录清除/重排调用，不连真实 DB，不引入生产桩或新恢复机制。
+type anthropicProtoRecorderRepo struct {
+	accounts        map[int64]*Account
+	clearCalls      int
+	rescheduleCalls int
+	lastComponent   string
+}
+
+func (r *anthropicProtoRecorderRepo) GetByID(_ context.Context, id int64) (*Account, error) {
+	if acc, ok := r.accounts[id]; ok {
+		return acc, nil
+	}
+	return nil, errors.New("account not found")
+}
+
+func (r *anthropicProtoRecorderRepo) ListTempUnschedulableAccounts(context.Context, time.Time, int) ([]*Account, error) {
+	return nil, nil
+}
+
+func (r *anthropicProtoRecorderRepo) ClearTempUnschedulableIfGeneration(context.Context, int64, time.Time) (bool, error) {
+	return false, nil
+}
+
+func (r *anthropicProtoRecorderRepo) BumpTempUnschedulableReasonIfGeneration(context.Context, int64, time.Time, string) (bool, error) {
+	return false, nil
+}
+
+func (r *anthropicProtoRecorderRepo) ListProbeDueAccounts(context.Context, time.Time, int) ([]*Account, error) {
+	return nil, nil
+}
+
+func (r *anthropicProtoRecorderRepo) ClearRecoveryProbeComponent(context.Context, int64, string, int64) (bool, error) {
+	r.clearCalls++
+	return false, nil
+}
+
+func (r *anthropicProtoRecorderRepo) RescheduleRecoveryProbeComponent(_ context.Context, _ int64, component string, _ int64, _ time.Time) (bool, error) {
+	r.rescheduleCalls++
+	r.lastComponent = component
+	return true, nil
+}
+
+// 恢复失败路径不清除停调：构造处于停调窗口的目标账号，走既有 runTransportComponent，
+// 断言 clear=0、reschedule=1（既有机制，不改状态机）。
+func TestAnthropicRecoveryProbeExcludedTypeReschedulesWithoutClear(t *testing.T) {
+	const gen int64 = 11
+	for _, tc := range []struct {
+		name string
+		acc  *Account
+	}{
+		{"bedrock", anthropicBedrockProbeAccount(10)},
+		{"service account", anthropicServiceAccountProbeAccount(11)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acc := tc.acc
+			until := time.Now().Add(5 * time.Minute)
+			acc.TempUnschedulableUntil = &until
+			upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, anthropicTextSSE)
+			repo := &anthropicProtoRecorderRepo{accounts: map[int64]*Account{acc.ID: acc}}
+			p := &AccountHealthRecoveryProbeService{cfg: &config.Config{}, httpUpstream: upstream, accountRepo: repo}
+
+			p.runTransportComponent(context.Background(), acc, gen, recoveryModeTransient)
+
+			require.Zero(t, repo.clearCalls, "失败关闭时不得清除停调")
+			require.Equal(t, 1, repo.rescheduleCalls, "失败关闭必须走既有重排机制")
+			require.Equal(t, recoveryProbeComponentTransport, repo.lastComponent)
+			require.Zero(t, anthropicProbeRecordCount(upstream), "不得发出普通 /v1/messages 请求")
+		})
+	}
+}
+
+// ---------- Anthropic OAuth / SetupToken 按 unsupported 收口（非普通直连探测族） ----------
+
+// anthropicOAuthProbeAccount 构造 PlatformAnthropic + OAuth 账号。credentials 必须带
+// access_token：若未收口，构造器会走裸 Bearer 分支成功构造，测试才能坐实收口生效，
+// 而不是因为缺凭据碰巧失败。
+func anthropicOAuthProbeAccount(id int64) *Account {
+	acc := anthropicRecoveryProbeAccount(id, true)
+	acc.Type = AccountTypeOAuth
+	acc.Credentials["access_token"] = "fake-anthropic-oauth-access-token"
+	return acc
+}
+
+// anthropicSetupTokenProbeAccount 构造 PlatformAnthropic + SetupToken 账号（同样带
+// access_token，确保测的是协议族收口而非凭据缺失）。
+func anthropicSetupTokenProbeAccount(id int64) *Account {
+	acc := anthropicRecoveryProbeAccount(id, true)
+	acc.Type = AccountTypeSetupToken
+	acc.Credentials["access_token"] = "fake-anthropic-setup-access-token"
+	return acc
+}
+
+// 协议族矩阵扩展：Anthropic OAuth / SetupToken 归空族、canDirectProbe=false；
+// 渠道直连构造器与恢复探针构造器都失败关闭，错误含 unsupported。
+func TestAnthropicProbeProtocolFamilyExcludesOAuthAndSetupToken(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		acc  *Account
+	}{
+		{"anthropic oauth", anthropicOAuthProbeAccount(20)},
+		{"anthropic setup token", anthropicSetupTokenProbeAccount(21)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Empty(t, probeProtocolFamily(tc.acc))
+			require.False(t, canDirectProbe(tc.acc))
+
+			spec, err := buildProbeRequestSpec(tc.acc, "claude-x")
+			require.Error(t, err, "收口类型不得构造普通直连请求")
+			require.Nil(t, spec)
+
+			recoverSpec, family, recoverErr := buildRecoveryProbeRequestSpec(tc.acc, "claude-upstream-x", false)
+			require.Error(t, recoverErr, "恢复探针必须失败关闭")
+			require.Contains(t, recoverErr.Error(), "unsupported")
+			require.Empty(t, family)
+			require.Nil(t, recoverSpec)
+		})
+	}
+}
+
+// 构造器设防：绕过 probeProtocolFamily 直接调用，OAuth / SetupToken 也必须被拦下，
+// 错误含 unsupported + platform/type 便于定位。
+func TestAnthropicMessagesSpecRejectsOAuthAndSetupToken(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		acc  *Account
+	}{
+		{"anthropic oauth", anthropicOAuthProbeAccount(22)},
+		{"anthropic setup token", anthropicSetupTokenProbeAccount(23)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := buildAnthropicMessagesSpec(tc.acc, "claude-x")
+			require.Error(t, err)
+			require.Nil(t, spec)
+			require.Contains(t, err.Error(), "unsupported")
+			require.Contains(t, err.Error(), tc.acc.Platform)
+			require.Contains(t, err.Error(), string(tc.acc.Type))
+
+			spec, err = buildAnthropicMessagesSpecWithModel(tc.acc, "claude-upstream-x")
+			require.Error(t, err)
+			require.Nil(t, spec)
+			require.Contains(t, err.Error(), "unsupported")
+			require.Contains(t, err.Error(), string(tc.acc.Type))
+		})
+	}
+}
+
+// 假上游断言：OAuth / SetupToken 经 probeUpstream 不发出任何请求（记录数为 0）。
+func TestAnthropicRecoveryProbeExcludedOAuthTypesSendNoRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		acc  *Account
+	}{
+		{"anthropic oauth", anthropicOAuthProbeAccount(24)},
+		{"anthropic setup token", anthropicSetupTokenProbeAccount(25)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, anthropicTextSSE)
+			p := anthropicProbeService(upstream)
+			ok, err := p.probeUpstream(context.Background(), tc.acc)
+			require.Error(t, err, "收口类型必须失败关闭（unsupported）")
+			require.False(t, ok)
+			require.Zero(t, anthropicProbeRecordCount(upstream), "不得向假上游发出任何裸请求")
+		})
+	}
+}
+
+// 恢复失败不清除停调：复用 recorder stub 走 runTransportComponent，
+// 断言 clear=0、reschedule=1（既有状态机，不改停调时长/清除条件）。
+func TestAnthropicRecoveryProbeExcludedOAuthTypeReschedulesWithoutClear(t *testing.T) {
+	const gen int64 = 12
+	for _, tc := range []struct {
+		name string
+		acc  *Account
+	}{
+		{"anthropic oauth", anthropicOAuthProbeAccount(26)},
+		{"anthropic setup token", anthropicSetupTokenProbeAccount(27)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acc := tc.acc
+			until := time.Now().Add(5 * time.Minute)
+			acc.TempUnschedulableUntil = &until
+			upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, anthropicTextSSE)
+			repo := &anthropicProtoRecorderRepo{accounts: map[int64]*Account{acc.ID: acc}}
+			p := &AccountHealthRecoveryProbeService{cfg: &config.Config{}, httpUpstream: upstream, accountRepo: repo}
+
+			p.runTransportComponent(context.Background(), acc, gen, recoveryModeTransient)
+
+			require.Zero(t, repo.clearCalls, "失败关闭时不得清除停调")
+			require.Equal(t, 1, repo.rescheduleCalls, "失败关闭必须走既有重排机制")
+			require.Equal(t, recoveryProbeComponentTransport, repo.lastComponent)
+			require.Zero(t, anthropicProbeRecordCount(upstream), "不得发出裸 Bearer 请求")
+		})
+	}
 }

@@ -228,9 +228,10 @@ var defaultProbeHTTPClient = &http.Client{Timeout: probeHardTimeout}
 //   - unsupported：非权威标记——账号不可直连探测（协议族不支持或凭据缺失）。调用方遇
 //     unsupported 时**绝不**写终态失败行（保持"无数据"语义），因为这是"无法探测"而非"渠道故障"。
 //
-// 协议族：OpenAI 兼容（/v1/chat/completions）、anthropic（/v1/messages）、gemini apikey
-// （generateContent）。其余（OAuth 令牌刷新依赖、agent identity、vertex、bedrock 等）落
-// unsupported——保守标记，不触碰令牌刷新/账号写路径。
+// 协议族：OpenAI 兼容（/v1/chat/completions）、anthropic（/v1/messages，仅 apikey/upstream；
+// Anthropic OAuth/SetupToken 不在直连探测族）、gemini apikey（generateContent）。其余
+// （Bedrock / Vertex ServiceAccount / 令牌刷新依赖 / agent identity 等）落 unsupported——
+// 保守标记，不触碰令牌刷新/账号写路径。
 func ProbeAccountDirect(
 	ctx context.Context,
 	accountRepo AccountRepository,
@@ -285,6 +286,28 @@ func ProbeAccountDirect(
 	return false, fmt.Sprintf("upstream status=%d", resp.StatusCode), false, fTok, tot
 }
 
+// isUnsupportedAnthropicProbeType 是「PlatformAnthropic 下不走普通 /v1/messages 探测
+// 的账号类型」的单一判定，供协议族判定与请求构造器共同复用：判定只留一处，防止渠道
+// 直连与恢复探针各自加平行平台判断而分叉（本次事故根因）。
+//
+// 排除三类：
+//   - Bedrock：真实出站走 forwardBedrock（SigV4 签名）；
+//   - Vertex ServiceAccount：走 buildUpstreamRequestAnthropicVertex（服务账号 OAuth2）；
+//   - OAuth / SetupToken：真实网关转发走 CCH 签名/指纹/mimic 链路，普通探针发出的裸
+//     Bearer access_token 请求与真实出站完全不同源，探活结果不可靠。
+//
+// 这些类型的凭据与端点来源均与 apikey/upstream 不同源，按 anthropic 族探测只会构造出
+// 错误请求，统一按 unsupported 收口：不发裸请求、不清停调。仅匹配 PlatformAnthropic，
+// 不影响 OpenAI 等其他平台的 OAuth 账号。
+func isUnsupportedAnthropicProbeType(acc *Account) bool {
+	if acc == nil {
+		return false
+	}
+	return acc.IsBedrock() ||
+		(acc.Platform == PlatformAnthropic && acc.Type == AccountTypeServiceAccount) ||
+		acc.IsAnthropicOAuthOrSetupToken()
+}
+
 // isAnthropicProbeTarget 是"账号是否走 anthropic 直连探测（/v1/messages）"的单一事实源，
 // 供 canDirectProbe 与 buildProbeRequestSpec 的 switch 共用，禁止在别处再写一份等价判定
 // （否则两处会随协议族扩展而悄然分叉，本次 anthropic 永不被探测事故的根因）。
@@ -292,8 +315,13 @@ func ProbeAccountDirect(
 // 含 Platform == PlatformAnthropic：原生 anthropic 平台账号 GetAPIProtocol 默认回落
 // chat_completions（见 account.go GetAPIProtocol），导致 IsAnthropicProtocol 为假、长期
 // 无法被直连探测——这是本次生产事故的直接根因。
+// 但 PlatformAnthropic 下的 Bedrock / ServiceAccount / OAuth / SetupToken 必须排除
+// （判定见上方 helper）：它们走专用转发链路，不属于普通 /v1/messages 探测的数据面能力。
 func isAnthropicProbeTarget(acc *Account) bool {
-	return acc != nil && (acc.IsAnthropicProtocol() || acc.Platform == PlatformAnthropic)
+	if acc == nil || isUnsupportedAnthropicProbeType(acc) {
+		return false
+	}
+	return acc.IsAnthropicProtocol() || acc.Platform == PlatformAnthropic
 }
 
 // probeProtocolFamily 是账号探测协议族的唯一判定源（"anthropic" | "openai" |
@@ -436,7 +464,8 @@ func buildOpenAIProbeSpecWithModel(acc *Account, upstreamModel string, useRespon
 	return buildOpenAIProbeSpec(acc, upstreamModel, useResponses, false, accountHealthProbeDataPlaneMaxTokens)
 }
 
-// buildAnthropicMessagesSpec 构造 anthropic /v1/messages 最简请求（apikey 或 oauth）。
+// buildAnthropicMessagesSpec 构造 anthropic /v1/messages 最简请求（仅 apikey/upstream；
+// OAuth/SetupToken 已按 unsupported 收口，见 WithModel 变体设防）。
 // 直连探测器用：模型先经 GetMappedModel 映射，再交给 WithModel 变体构造请求。
 func buildAnthropicMessagesSpec(acc *Account, model string) (*probeReqSpec, error) {
 	m := acc.GetMappedModel(model)
@@ -448,7 +477,16 @@ func buildAnthropicMessagesSpec(acc *Account, model string) (*probeReqSpec, erro
 
 // buildAnthropicMessagesSpecWithModel 是 /v1/messages 请求构造事实源；
 // upstreamModel 已是上游模型名，不再二次映射。
+// 对 PlatformAnthropic 下的 Bedrock / ServiceAccount / OAuth / SetupToken 返回 unsupported
+// （设防见函数体，与 probeProtocolFamily 共用 isUnsupportedAnthropicProbeType 判定）。
 func buildAnthropicMessagesSpecWithModel(acc *Account, upstreamModel string) (*probeReqSpec, error) {
+	// 设防：即便调用方绕过 probeProtocolFamily 直接调用本构造器，也不得为 Bedrock /
+	// Vertex ServiceAccount / OAuth / SetupToken 拼出普通 /v1/messages：它们走专用出站
+	// 链路（SigV4 / 服务账号 OAuth2 / CCH 签名+mimic），凭据与端点来源均不同，普通请求
+	// 构造出来也是错的；尤其 OAuth 的裸 Bearer access_token 与真实网关转发完全不同源。
+	if isUnsupportedAnthropicProbeType(acc) {
+		return nil, fmt.Errorf("unsupported: anthropic /v1/messages probe does not support platform=%q type=%q (bedrock/vertex/oauth/setup_token use dedicated forward path)", acc.Platform, acc.Type)
+	}
 	h := http.Header{}
 	var base, key string
 	if isAPIKeyOrUpstream(acc) {
@@ -467,13 +505,11 @@ func buildAnthropicMessagesSpecWithModel(acc *Account, upstreamModel string) (*p
 		}
 		setAnthropicAPIKeyAuthHeader(h, acc, key, base)
 	} else {
-		// OAuth（api.anthropic.com）：令牌可能过期，直连仅作最佳努力探活，失败关闭为 !ok。
-		base = "https://api.anthropic.com"
-		key = strings.TrimSpace(acc.GetCredential("access_token"))
-		if key == "" {
-			return nil, fmt.Errorf("unsupported: no access token for anthropic oauth account")
-		}
-		h.Set("Authorization", "Bearer "+key)
+		// 不可达设防：上方 isUnsupportedAnthropicProbeType 已排除 Anthropic OAuth /
+		// SetupToken；真实网关转发这类账号走 CCH 签名/指纹/mimic 链路，裸 Bearer
+		// access_token 请求与真实出站完全不同源，探活结果不可靠。这里只做失败关闭，
+		// 不构造任何裸请求（也防止其他平台 OAuth 误落 anthropic 协议族时发错请求）。
+		return nil, fmt.Errorf("unsupported: anthropic /v1/messages probe does not support platform=%q type=%q (oauth/setup_token use dedicated forward path)", acc.Platform, acc.Type)
 	}
 	// 复用业务同源版本感知 helper（对齐上方 openai 分支）：base 已含版本段（如 /v1、/v4）时
 	// 只追加相对路径，避免裸拼 "/v1/messages" 造成 /v1/v1 双段 404（对齐 openai_endpoint_url.go）。

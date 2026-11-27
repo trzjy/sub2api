@@ -1019,3 +1019,104 @@ func TestChannelMonitorProbe_SSELineLimitExceeded(t *testing.T) {
 		t.Fatalf("expected detail to contain 'sse line limit exceeded', got %q", detail)
 	}
 }
+
+// ---------- 测试：Anthropic Bedrock / Vertex ServiceAccount 在渠道监控保持 unsupported（非权威） ----------
+
+func TestChannelMonitorProbe_AnthropicBedrockServiceAccountUnsupported(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  string
+	}{
+		{"bedrock", AccountTypeBedrock},
+		{"service account", AccountTypeServiceAccount},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acc := &Account{
+				ID:       1,
+				Platform: PlatformAnthropic,
+				Type:     tc.typ,
+				Status:   StatusActive,
+				Credentials: map[string]any{
+					"base_url":      "http://fake",
+					"api_key":       "k",
+					"model_mapping": map[string]any{"claude-x": "claude-upstream-x"},
+				},
+			}
+			if canDirectProbe(acc) {
+				t.Fatalf("expected canDirectProbe=false for platform=%q type=%q", acc.Platform, acc.Type)
+			}
+			if family := probeProtocolFamily(acc); family != "" {
+				t.Fatalf("expected empty protocol family for platform=%q type=%q, got %q", acc.Platform, acc.Type, family)
+			}
+			ok, detail, unsupported, _, _ := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc, "claude-x", nil)
+			if !unsupported {
+				t.Fatalf("expected unsupported=true, got ok=%v detail=%q", ok, detail)
+			}
+			if ok {
+				t.Fatalf("unsupported probe must not report ok=true, got detail=%q", detail)
+			}
+		})
+	}
+}
+
+// ---------- 测试：Anthropic OAuth / SetupToken 直连探测按 unsupported 收口，不发裸请求 ----------
+
+// countingProbeTransport 记录 RoundTrip 调用次数，用于断言 unsupported 类型不发任何请求。
+type countingProbeTransport struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *countingProbeTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return nil, fmt.Errorf("unexpected probe HTTP request")
+}
+
+func TestChannelMonitorProbe_AnthropicOAuthSetupTokenUnsupported(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  string
+	}{
+		{"oauth", AccountTypeOAuth},
+		{"setup token", AccountTypeSetupToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// 带 access_token：确保收口由协议族判定而非缺凭据触发。
+			acc := &Account{
+				ID:       1,
+				Platform: PlatformAnthropic,
+				Type:     tc.typ,
+				Status:   StatusActive,
+				Credentials: map[string]any{
+					"base_url":      "http://fake",
+					"api_key":       "k",
+					"access_token":  "fake-oauth-access-token",
+					"model_mapping": map[string]any{"claude-x": "claude-upstream-x"},
+				},
+			}
+			if canDirectProbe(acc) {
+				t.Fatalf("expected canDirectProbe=false for platform=%q type=%q", acc.Platform, acc.Type)
+			}
+			if family := probeProtocolFamily(acc); family != "" {
+				t.Fatalf("expected empty protocol family for platform=%q type=%q, got %q", acc.Platform, acc.Type, family)
+			}
+			tr := &countingProbeTransport{}
+			ok, detail, unsupported, _, _ := ProbeAccountDirect(
+				context.Background(), &recordingAccountRepo{}, acc, "claude-x", &http.Client{Transport: tr})
+			if !unsupported {
+				t.Fatalf("expected unsupported=true, got ok=%v detail=%q", ok, detail)
+			}
+			if ok {
+				t.Fatalf("unsupported probe must not report ok=true, got detail=%q", detail)
+			}
+			tr.mu.Lock()
+			calls := tr.calls
+			tr.mu.Unlock()
+			if calls != 0 {
+				t.Fatalf("unsupported 类型不得发出裸 Bearer 请求，实际调用 %d 次", calls)
+			}
+		})
+	}
+}
