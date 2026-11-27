@@ -983,6 +983,10 @@ func (s *CursorExecutionService) executeHTTP(
 	if resp.Duplex != nil {
 		parser.attachToolSchemas(resp.Duplex.declaredToolDefs)
 	}
+	// CallDynamicTool 私有块只按**本次 HTTP 实际声明的工具**归一（含参数 schema）。
+	// 绝不用历史工具、账号默认值或模型名猜测；流式与缓冲路径共用这一份归一器。
+	parser.attachInlineDeclaredTools(req.Chat.Tools)
+	parser.attachInlineToolChoice(req.ToolChoiceMode, req.ToolChoiceName)
 	// 本 HTTP 的 chunk 一律使用该 HTTP 的实际响应 ID（不是固定常量）。
 	parser.attachOutputIDSource(session.output.responseID)
 

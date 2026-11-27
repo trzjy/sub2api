@@ -179,10 +179,14 @@ func (s *cursorSSEStream) next() (err error) {
 			return err
 		}
 		if ev.Kind == cursorEventText {
-			// content 只收可见正文（对外交付），rawContent 收原始文本：上游注入的
-			// 拒付 / 模型暂不可用模板按原始文本判定，剥离 think 不能改变这些终态判定
-			// 的灵敏度。正文就是正文——不再从正文里识别/还原工具调用。
-			s.parser.content += ev.Text
+			// content 只收**归一后**的可见正文：CallDynamicTool 私有块在文本帧边界
+			// 被扣留并转成结构化调用，不再作为正文交付。rawContent 仍收原始文本，
+			// 保证上游注入的拒付/模型暂不可用模板判定灵敏度不变。
+			safeText, inlineErr := s.parser.consumeInlineText(ev.Text)
+			if inlineErr != nil {
+				return inlineErr
+			}
+			s.parser.content += safeText
 			if err := cursorMatchKeyRejected(s.parser.rawContent); err != nil {
 				return err
 			}
@@ -190,8 +194,8 @@ func (s *cursorSSEStream) next() (err error) {
 			if ev.Reasoning != "" {
 				s.emitStreamReasoning(ev.Reasoning)
 			}
-			if ev.Text != "" {
-				s.emitStreamText(ev.Text)
+			if safeText != "" {
+				s.emitStreamText(safeText)
 			}
 		}
 		s.done = s.parser.usage.Seen
@@ -240,10 +244,21 @@ func (s *cursorSSEStream) next() (err error) {
 		}
 	}
 	if s.done {
+		// 归一器的扣留尾段先收口：开标记已识别但闭标记始终未到 → 失败关闭，
+		// 绝不把半成品控制块当正文交付，也不正常 end_turn。
+		inlineTail, inlineErr := s.parser.finishInlineText()
+		if inlineErr != nil {
+			return inlineErr
+		}
 		// 收尾尾段：<think> 剥离的跨帧缓冲（双通道）在这里吐完。
 		// 必须在 finish 之前写出，否则正文/思考末尾几个字符会丢。
 		// 顺序：先 reasoning 尾巴再 text 尾巴（二者通常互斥，这里按通道分别落盘）。
-		if rTail, tTail := s.parser.flushThinkTail(); rTail != "" || tTail != "" {
+		rTail, tTail := s.parser.flushThinkTail()
+		if inlineTail != "" {
+			tTail += inlineTail
+			s.parser.content += inlineTail
+		}
+		if rTail != "" || tTail != "" {
 			if !s.parser.started {
 				s.buffer.WriteString(s.parser.cursorSSERoleChunk())
 				s.parser.started = true
@@ -276,13 +291,29 @@ func (s *cursorSSEStream) next() (err error) {
 		// 而本 HTTP 没有 index=0），非流式聚合会为 index 0 补一条空壳调用，客户端收到
 		// `{id:"",name:"",arguments:"{}"}` 的幽灵工具调用——既无法回传结果，又会让续轮
 		// 摘要与交付侧不一致（history_mismatch）。
-		if calls := s.parser.capturedToolCalls(); len(calls) > s.emittedCalls {
-			for i := s.emittedCalls; i < len(calls); i++ {
-				localIndex := i - s.emittedCalls
-				s.buffer.WriteString(s.parser.cursorSSEToolCallNameChunk(localIndex, calls[i]))
-				s.buffer.WriteString(s.parser.cursorSSEToolCallArgsChunk(localIndex, calls[i]))
+		allCalls := s.parser.capturedToolCalls()
+		nativeThisHTTP := len(allCalls) - s.emittedCalls
+		if nativeThisHTTP > 0 {
+			for i := 0; i < nativeThisHTTP; i++ {
+				s.buffer.WriteString(s.parser.cursorSSEToolCallNameChunk(i, allCalls[s.emittedCalls+i]))
+				s.buffer.WriteString(s.parser.cursorSSEToolCallArgsChunk(i, allCalls[s.emittedCalls+i]))
 			}
-			s.emittedCalls = len(calls)
+			s.emittedCalls = len(allCalls)
+			handoffThisFinish = true
+		}
+		// 内联调用与原生调用共用本 HTTP 的 tool_choice 输出闸门；纯内联响应不会
+		// 经过原生委托检查点，必须在这里校验，否则 none/具名选择会被绕过。
+		if err := s.parser.enforceInlineToolChoice(allCalls); err != nil {
+			return err
+		}
+		// 正文内联归一出的调用：与普通委托同形输出结构化 tool_calls，但**不进入**
+		// cursorToolDelegations（无 ExecID/IDField，不假装有原生结果回写锚点）。
+		// 下一轮由客户端真实 tool_use + tool_result 完整历史走既有重建/续轮。
+		inlineChunks := s.parser.cursorInlineToolCallChunks(nativeThisHTTP)
+		for _, chunk := range inlineChunks {
+			s.buffer.WriteString(chunk)
+		}
+		if len(inlineChunks) > 0 {
 			handoffThisFinish = true
 		}
 		if handoffThisFinish {
@@ -1009,6 +1040,18 @@ type cursorStreamParser struct {
 	// 为空表示本路径拿不到 f4 原始字节 → 装配缺陷，失败关闭。
 	declaredToolDefs [][]byte
 
+	// inlineNorm 是 Cursor 文本帧边界唯一的 CallDynamicTool 私有块归一器。
+	// 流式（cursorSSEStream.next）与缓冲/独立解析（cursorParseStream）共用它，
+	// 绝不维护两套规则。declared 来源必须是本次 HTTP 实际声明的工具。
+	inlineNorm *cursorCDTNormalizer
+	// inlineCalls 是本轮从正文归一出的结构化调用；它们**不进入** cursorToolDelegations，
+	// 也没有 ExecID/IDField，按完整历史续轮消费，不伪造原生结果回写。
+	inlineCalls []cursorInlineCDTCall
+	// toolChoiceMode / toolChoiceName 是本次 HTTP 的工具选择，与原生委托共用同一
+	// 输出校验（cursorEnforceToolChoiceOnOutput）。来源只取本 HTTP 的 session 选项。
+	toolChoiceMode string
+	toolChoiceName string
+
 	// lg 是解析器阶段事件的结构化 logger（不可变、并发安全）。可为 nil，
 	// 底层落盘函数会在 nil 时回退到全局 logger。
 	lg *zap.Logger
@@ -1319,6 +1362,83 @@ func (p *cursorStreamParser) attachToolSchemas(defs [][]byte) {
 	p.declaredToolDefs = defs
 }
 
+// attachInlineDeclaredTools 注入本次 HTTP 实际声明的工具（含参数 schema）。
+// 来源必须是当前请求的 Chat.Tools，绝不用历史工具、账号默认值或模型名猜测。
+func (p *cursorStreamParser) attachInlineDeclaredTools(tools []apicompat.ChatTool) {
+	if p == nil {
+		return
+	}
+	p.inlineNorm = newCursorCDTNormalizer(tools)
+}
+
+// consumeInlineText 在文本帧边界归一 CallDynamicTool 私有块。
+// 流式与缓冲路径共用：返回可安全交付的正文；识别到损坏块/未声明工具/schema
+// 不符时返回错误，调用方必须失败关闭。
+func (p *cursorStreamParser) consumeInlineText(delta string) (string, error) {
+	if p == nil {
+		return delta, nil
+	}
+	if p.inlineNorm == nil {
+		p.inlineNorm = newCursorCDTNormalizer(nil)
+	}
+	safe, calls, err := p.inlineNorm.consume(delta)
+	if err != nil {
+		return "", err
+	}
+	p.inlineCalls = append(p.inlineCalls, calls...)
+	return safe, nil
+}
+
+// finishInlineText 在流收尾时交付归一器扣留的正文尾段。
+func (p *cursorStreamParser) finishInlineText() (string, error) {
+	if p == nil {
+		return "", nil
+	}
+	if p.inlineNorm == nil {
+		p.inlineNorm = newCursorCDTNormalizer(nil)
+	}
+	return p.inlineNorm.finish()
+}
+
+// attachInlineToolChoice 注入本次 HTTP 的工具选择，供内联调用交付前与原生调用
+// 一起校验。缺省（空 mode）即 auto，对既有调用方零行为变化。
+func (p *cursorStreamParser) attachInlineToolChoice(mode, name string) {
+	if p == nil {
+		return
+	}
+	p.toolChoiceMode = mode
+	p.toolChoiceName = name
+}
+
+// enforceInlineToolChoice 在**写出内联 tool_calls 之前**按本 HTTP 的 tool_choice
+// 校验原生 + 内联调用的整体集合。纯内联响应没有原生委托批，不会经过
+// cursorDeliverBatchCheckpoint，因此必须在这里补上同一条输出闸门。
+func (p *cursorStreamParser) enforceInlineToolChoice(nativeCalls []cursorToolCallCapture) error {
+	if p == nil || len(p.inlineCalls) == 0 {
+		return nil
+	}
+	all := append([]cursorToolCallCapture(nil), nativeCalls...)
+	for _, call := range p.inlineCalls {
+		all = append(all, cursorToolCallCapture{ID: call.ID, WireID: call.ID, Name: call.Name})
+	}
+	return cursorEnforceToolChoiceOnOutput(p.toolChoiceMode, p.toolChoiceName, all)
+}
+
+// cursorInlineToolCallChunks 把归一出的调用渲染成普通 Chat tool_calls delta。
+// startIndex 必须是**本 HTTP 已输出的原生调用条数**：聚合器与 Anthropic 流式
+// 转换器都按 index 归并，两类调用共用序号会把 ID/名称覆盖、参数拼在一起。
+func (p *cursorStreamParser) cursorInlineToolCallChunks(startIndex int) []string {
+	if p == nil || len(p.inlineCalls) == 0 {
+		return nil
+	}
+	out := make([]string, 0, 2*len(p.inlineCalls))
+	for i, call := range p.inlineCalls {
+		tc := cursorToolCallCapture{ID: call.ID, WireID: call.ID, Name: call.Name, ArgsJSON: call.ArgsJSON}
+		out = append(out, p.cursorSSEToolCallNameChunk(startIndex+i, tc), p.cursorSSEToolCallArgsChunk(startIndex+i, tc))
+	}
+	return out
+}
+
 // logPhase 是解析器阶段事件的统一落盘入口（logger 不可变、并发安全，直接落盘）。
 func (p *cursorStreamParser) logPhase(lvl zapcore.Level, phase, outcome string, extra ...zap.Field) {
 	cursorPhaseLogFields(p.lg, lvl, phase, p.model, "", extra...)
@@ -1383,18 +1503,22 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 			// 首版范围外：丢弃（用户裁定），不算协议错误。
 			continue
 		}
+		safeText, inlineErr := p.consumeInlineText(ev.Text)
+		if inlineErr != nil {
+			return nil, inlineErr
+		}
 		if !p.started {
 			p.started = true
 			sseLines = append(sseLines, p.cursorSSERoleChunk())
 		}
-		p.content += ev.Text
+		p.content += safeText
 		p.markFirstToken()
 		// 双通道发射：思考先走 reasoning_content，正文走 content，二者互不污染。
 		if ev.Reasoning != "" {
 			sseLines = append(sseLines, p.cursorSSEReasoningChunk(ev.Reasoning))
 		}
-		if ev.Text != "" {
-			sseLines = append(sseLines, p.cursorSSETextChunk(ev.Text))
+		if safeText != "" {
+			sseLines = append(sseLines, p.cursorSSETextChunk(safeText))
 		}
 		// 拒付模板可能跨帧：每收到一段就在**累加结果**上匹配一次。
 		// 判定用原始文本（含 <think> 段），与流式侧同口径。
@@ -1420,8 +1544,19 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 		sseLines = append(sseLines, p.cursorSSERoleChunk())
 		p.started = true
 	}
+	// 归一器尾段先收口：已识别开标记但无闭标记 → 失败关闭，不把控制块泄漏为正文。
+	inlineTail, inlineErr := p.finishInlineText()
+	if inlineErr != nil {
+		return nil, inlineErr
+	}
 	// 收尾尾段：<think> 剥离的双通道缓冲在这里吐完（reasoning 与 text 各自收口）。
-	if rTail, tTail := p.flushThinkTail(); rTail != "" || tTail != "" {
+	rTail, tTail := p.flushThinkTail()
+	if inlineTail != "" {
+		tTail += inlineTail
+		// 只并入 tTail，由下方唯一的 p.content += tTail 落账；
+		// 这里再追加一次会把尾段在 parser.content 里记两遍。
+	}
+	if rTail != "" || tTail != "" {
 		if !p.started {
 			sseLines = append(sseLines, p.cursorSSERoleChunk())
 			p.started = true
@@ -1436,7 +1571,8 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 		}
 	}
 	// 工具委托捕获：在 finish 前吐 tool_calls delta（流式与 cursorParseStreamToSSE 同口径）。
-	if calls := p.capturedToolCalls(); len(calls) > 0 {
+	calls := p.capturedToolCalls()
+	if len(calls) > 0 {
 		// 交付侧 id 重写：本地解析路径（无 duplex 的共享记录）同样必须先决定出站 id。
 		if err := p.assignToolCallWireIDs(); err != nil {
 			return nil, err
@@ -1447,7 +1583,17 @@ func (p *cursorStreamParser) cursorParseStream(body []byte) ([]string, error) {
 			sseLines = append(sseLines, p.cursorSSEToolCallArgsChunk(i, tc))
 		}
 	}
-	sseLines = append(sseLines, p.cursorSSEFinishChunk())
+	if err := p.enforceInlineToolChoice(calls); err != nil {
+		return nil, err
+	}
+	// 正文内联归一出的调用：同形输出结构化 tool_calls，但不进委托记录。
+	// 序号从原生调用条数之后起，避免两类调用在 index 上互相覆盖。
+	sseLines = append(sseLines, p.cursorInlineToolCallChunks(len(calls))...)
+	if len(p.inlineCalls) > 0 {
+		sseLines = append(sseLines, p.cursorSSEFinishChunkWithReason("tool_calls"))
+	} else {
+		sseLines = append(sseLines, p.cursorSSEFinishChunk())
+	}
 	return sseLines, nil
 }
 
