@@ -10308,6 +10308,7 @@ func cursorAgentRunWireEvidenceFields(payload []byte) []zap.Field {
 			} else {
 				parameterCount := 0
 				parameterIDs := make([]string, 0, len(requestedFields))
+				parameterPairs := make([]string, 0, len(requestedFields))
 				for _, parameter := range requestedFields {
 					if parameter.Number != cursorFldRequestedModelParameter {
 						continue
@@ -10316,8 +10317,9 @@ func cursorAgentRunWireEvidenceFields(payload []byte) []zap.Field {
 					if parameter.Wire != cursorWireBytes {
 						continue
 					}
-					// 第二层：InferenceModelParameterValue.f1 = 参数键名；f2 是参数值，绝不读取。
-					// 解析失败沿用既有安全降级（跳过该键、不 panic、不动任何既有字段语义）。
+					// 第二层：InferenceModelParameterValue.f1 = 参数键名，f2 = 参数值；
+					// 键名与值均记入证据字段（仅限 requested_model 推理参数，不涉及凭据/提示正文）。
+					// 解析失败沿用既有安全降级（跳过该键对、不 panic、不动任何既有字段语义）。
 					parameterFields, paramErr := cursorDecodeProtobuf(parameter.Bytes)
 					if paramErr != nil {
 						continue
@@ -10326,11 +10328,18 @@ func cursorAgentRunWireEvidenceFields(payload []byte) []zap.Field {
 					if !ok || parameterID.Wire != cursorWireBytes {
 						continue
 					}
-					parameterIDs = append(parameterIDs, string(parameterID.Bytes))
+					parameterValue, valueOK := cursorFindField(parameterFields, cursorFldRequestedParameterValue)
+					if !valueOK || parameterValue.Wire != cursorWireBytes {
+						continue
+					}
+					key := string(parameterID.Bytes)
+					parameterIDs = append(parameterIDs, key)
+					parameterPairs = append(parameterPairs, key+"="+string(parameterValue.Bytes))
 				}
 				fields = append(fields, zap.Bool("model_id_parse_ok", true), zap.String("model_id", string(id.Bytes)),
 					zap.Int("requested_model_parameter_count", parameterCount),
-					zap.Strings("requested_model_parameter_ids", parameterIDs))
+					zap.Strings("requested_model_parameter_ids", parameterIDs),
+					zap.Strings("requested_model_parameter_pairs", parameterPairs))
 			}
 		}
 	} else {
