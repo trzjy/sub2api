@@ -53,6 +53,23 @@
         {{ displayPercent }}
       </span>
 
+      <!-- Remaining percentage & exhausted badge（订阅型窗口：已用/剩余并列，耗尽单独标注）。
+           放在百分比列之后，确保既有的 `.h-1\\.5 + span` 断言仍指向已用百分比列。 -->
+      <span
+        v-if="hasRemainingPercent"
+        data-test="usage-progress-remaining"
+        class="shrink-0 text-[10px] font-medium text-gray-500 dark:text-gray-400"
+      >
+        {{ t('admin.accounts.usageWindow.devinRemaining', { percent: displayRemainingPercent }) }}
+      </span>
+      <span
+        v-if="exhausted"
+        data-test="usage-progress-exhausted"
+        class="shrink-0 rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/40 dark:text-red-300"
+      >
+        {{ t('admin.accounts.usageWindow.devinExhaustedShort') }}
+      </span>
+
       <!-- Stale annotation (方案 §3.4 v24)：unknown 但数值存在时，灰度进度条旁附
            observed_at 相对时间陈旧标注；与 unknownUsage 的「—」路径互斥。 -->
       <span
@@ -82,6 +99,10 @@ const props = withDefaults(
   defineProps<{
     label: string
     utilization: number // Percentage (0-100+)
+    /** 订阅型窗口的剩余百分比（0-100）；提供时与已用百分比并列展示。缺省不渲染。 */
+    remainingPercent?: number | null
+    /** 该窗口已耗尽：条与百分比强制红色，并附「已耗尽」徽标。 */
+    exhausted?: boolean
     /** 用量上游不可得（如火山周/月窗口）：条置灰、百分比显示 “—” 而非假 0。 */
     unknownUsage?: boolean
     /** 已探测但维度 status=unknown（探针间隔内、数值存在）：条降灰 + 仍显示真实百分比
@@ -154,6 +175,8 @@ const labelSizeClass = computed(() =>
 
 // Progress bar color based on utilization
 const barClass = computed(() => {
+  // 已耗尽是确认的事实（不是缺数据），优先于 stale/unknown 的灰度处理。
+  if (props.exhausted) return 'bg-red-500'
   // stale：已探测但 status=unknown → 灰度（降不透明度），仍显示真实百分比
   if (props.stale) return 'bg-gray-400/70 dark:bg-gray-500/70'
   if (props.unknownUsage) return 'bg-gray-300 dark:bg-gray-600'
@@ -176,6 +199,7 @@ const barClass = computed(() => {
 
 // Text color based on utilization
 const textClass = computed(() => {
+  if (props.exhausted) return 'text-red-600 dark:text-red-400'
   // stale：灰度文字（与 unknownUsage 的隐藏数字路径区分，stale 仍显示真实百分比）
   if (props.stale) return 'text-gray-500 dark:text-gray-400'
   if (props.remainingCapacity) {
@@ -197,12 +221,26 @@ const textClass = computed(() => {
 
 // Bar width (capped at 100%)
 const barWidth = computed(() => {
+  if (props.exhausted) return '100%'
   if (props.unknownUsage) return '0%'
   return `${Math.min(Math.max(props.utilization, 0), 100)}%`
 })
 
+// 剩余百分比列：只在数值真实存在时渲染，缺失时由调用方显示「数据未获取」文本行，
+// 不在这里补 0 冒充正常额度。
+const hasRemainingPercent = computed(
+  () => typeof props.remainingPercent === 'number' && Number.isFinite(props.remainingPercent)
+)
+const displayRemainingPercent = computed(() => {
+  const value = props.remainingPercent as number
+  const rounded = Math.round(Math.min(Math.max(value, 0), 100))
+  if (rounded === 0 && value > 0) return '<1'
+  return String(rounded)
+})
+
 // Display percentage (cap at 999% for readability)
 const displayPercent = computed(() => {
+  if (props.exhausted) return '100%'
   if (props.unknownUsage) return '—'
   const percent = Math.round(
     props.remainingCapacity

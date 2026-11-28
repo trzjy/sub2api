@@ -262,7 +262,7 @@ export default {
         ungrouped: '未分组',
         hint: '显示格式为“分组名 / 基础分 / 粘性加分”。基础分按当前筛选条件限定的候选账号计算，包含优先级、负载、排队、错误率、首包延迟、重置窗口、额度余量、计费倍率等因子；粘性加分只在开启粘性加权时用于 previous_response_id 或 session_hash。分数越大越优先。'
       },
-      usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。',
+      usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。Devin 账号使用独立的“每日 / 每周”窗口；上游额度耗尽会让账号停调，本地 active/schedulable 不代表额度可用。',
       ollamaCloud: {
         title: 'Ollama Cloud 用量',
         sessionSecurityHint: '浏览器会话会加密落库，且只发送到固定的 Ollama 官方设置页。',
@@ -942,7 +942,28 @@ export default {
         estimatedTotalCost: '预计总费用 ${cost}',
         estimatedTotalCostTooltip: '根据当前窗口费用和使用率估算达到 100% 使用率时的总费用',
         musePaused: '已暂停',
-        museResumeAt: '恢复于 {time}'
+        museResumeAt: '恢复于 {time}',
+        // Devin 用量窗口：上游真实返回的是「每日 / 每周」两个独立窗口（不是 5h/7d）。
+        devinDaily: '每日窗口',
+        devinWeekly: '每周窗口',
+        devinDailyTooltip: 'Devin 上游每日额度窗口。已用/剩余百分比来自 GetUserStatus，重置时间由上游下发。',
+        devinWeeklyTooltip: 'Devin 上游每周额度窗口。该窗口耗尽时账号会被停调，即使本地仍显示 active/可调度。',
+        devinLocalState: '本地状态：active={active} · schedulable={schedulable}',
+        devinUpstreamState: '上游额度：{state}',
+        devinUpstreamAvailable: '有额度',
+        devinUpstreamExhausted: '已耗尽',
+        devinUpstreamUnknown: '未知',
+        devinQuotaExhausted: '上游额度耗尽 · 已暂停调度',
+        devinQuotaExhaustedHint: '上游对话流返回 failed_precondition / quota has been exhausted。账号已停调，只有恢复探针真实成功才会重新调度；下方重置时间是下一次探测时间，不是额度恢复时间。',
+        devinExhaustedReason: '已耗尽窗口：{windows}',
+        devinExhaustedWindowUnknown: '窗口未知',
+        devinWindowUnknown: '{window}数据未获取',
+        devinNoData: '额度数据未获取',
+        devinQueryFailed: '查询失败：{reason}',
+        devinFetchedAt: '获取于 {time}',
+        devinStale: '数据已过期',
+        devinExhaustedShort: '已耗尽',
+        devinRemaining: '余 {percent}%'
       },
       tokenHarbor: {
         rateLimitedPrefix: '限流至',

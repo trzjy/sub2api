@@ -481,53 +481,125 @@
       </div>
     </template>
 
-    <!-- Devin accounts: error → amber text; else devin_usage → plan / balance / resets; else placeholder -->
+    <!-- Devin：上游真实返回「每日 / 每周」两个独立窗口。本地状态、上游额度、
+         额度耗尽导致的停调、数据新鲜度分开展示，禁止用 active/schedulable 推断额度。 -->
     <template v-else-if="account.platform === 'devin'">
-      <div
-        v-if="error || usageInfo?.error"
-        class="truncate text-xs text-amber-600 dark:text-amber-400 max-w-[200px]"
-        :title="error || usageInfo?.error"
-      >
-        {{ error || usageInfo?.error }}
-      </div>
-      <div v-else-if="usageInfo?.devin_usage" class="space-y-1">
+      <div class="space-y-1" data-test="devin-usage-cell">
+        <!-- 上游额度耗尽导致的持续停调：与本地 schedulable 开关无关，必须最先看到 -->
         <div
-          v-if="account.temp_unschedulable_active"
+          v-if="devinQuotaExhausted"
+          data-test="devin-quota-exhausted"
+          class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
+          :title="t('admin.accounts.usageWindow.devinQuotaExhaustedHint')"
+        >
+          <span class="inline-block h-1.5 w-1.5 rounded-full bg-red-500" />
+          {{ t('admin.accounts.usageWindow.devinQuotaExhausted') }}
+        </div>
+        <div
+          v-else-if="account.temp_unschedulable_active"
+          data-test="devin-temp-unschedulable"
           class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
           :title="account.temp_unschedulable_reason || undefined"
         >
           <span class="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
           {{ t('admin.accounts.status.tempUnschedulable') }} · {{ t('admin.accounts.status.tempUnschedulableProbing') }}
         </div>
-        <span
-          v-if="devinPlan"
-          class="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300"
+
+        <!-- 本地状态 vs 上游额度：两个不同事实源 -->
+        <div
+          data-test="devin-state-split"
+          class="flex flex-wrap items-center gap-x-1.5 text-[10px] text-gray-500 dark:text-gray-400"
         >
-          {{ devinPlan }}
-        </span>
-        <div class="text-[10px] text-gray-500 dark:text-gray-400">
-          {{ devinBalance }}
+          <span>
+            {{ t('admin.accounts.usageWindow.devinLocalState', { active: devinLocalActiveLabel, schedulable: devinLocalSchedulableLabel }) }}
+          </span>
+          <span :title="devinQuotaExhausted ? t('admin.accounts.usageWindow.devinQuotaExhaustedHint') : undefined">
+            {{ t('admin.accounts.usageWindow.devinUpstreamState', { state: devinUpstreamStateLabel }) }}
+          </span>
         </div>
+
+        <!-- 套餐 / 余额：查询失败时也如实显示「未获取」，不伪造 0 -->
+        <template v-if="devinUsage">
+          <span
+            v-if="devinPlan"
+            class="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300"
+          >
+            {{ devinPlan }}
+          </span>
+          <div class="text-[10px] text-gray-500 dark:text-gray-400">
+            {{ devinBalance }}
+          </div>
+        </template>
+        <div v-else data-test="devin-no-data" class="text-[10px] text-gray-400">
+          {{ t('admin.accounts.usageWindow.devinNoData') }}
+        </div>
+
+        <!-- 每日窗口：已用 / 剩余 / 重置 / 耗尽状态 -->
         <UsageProgressBar
           v-if="devinDailyBar"
           label="Daily"
+          :title="t('admin.accounts.usageWindow.devinDailyTooltip')"
           :utilization="devinDailyBar.utilization"
+          :remaining-percent="devinDailyBar.remainingPercent"
+          :exhausted="devinDailyBar.exhausted"
+          :stale="Boolean(devinQueryError)"
           :resets-at="devinDailyBar.resetsAt"
           color="indigo"
         />
-        <div v-else-if="devinDailyReset" class="text-[10px] text-gray-500 dark:text-gray-400">
-          Daily reset: {{ devinDailyReset }}
+        <div v-else data-test="devin-daily-unknown" class="text-[10px] text-gray-400">
+          {{ t('admin.accounts.usageWindow.devinWindowUnknown', { window: t('admin.accounts.usageWindow.devinDaily') }) }}
         </div>
+
+        <!-- 每周窗口：已用 / 剩余 / 重置 / 耗尽状态 -->
         <UsageProgressBar
           v-if="devinWeeklyBar"
           label="Weekly"
+          :title="t('admin.accounts.usageWindow.devinWeeklyTooltip')"
           :utilization="devinWeeklyBar.utilization"
+          :remaining-percent="devinWeeklyBar.remainingPercent"
+          :exhausted="devinWeeklyBar.exhausted"
+          :stale="Boolean(devinQueryError)"
           :resets-at="devinWeeklyBar.resetsAt"
           color="emerald"
         />
-        <div v-else-if="devinWeeklyReset" class="text-[10px] text-gray-500 dark:text-gray-400">
-          Weekly reset: {{ devinWeeklyReset }}
+        <div v-else data-test="devin-weekly-unknown" class="text-[10px] text-gray-400">
+          {{ t('admin.accounts.usageWindow.devinWindowUnknown', { window: t('admin.accounts.usageWindow.devinWeekly') }) }}
         </div>
+
+        <!-- 哪个窗口耗尽：以权威额度数据为准，不从上游 trailer 文本猜词 -->
+        <div
+          v-if="devinExhaustedWindows.length"
+          data-test="devin-exhausted-reason"
+          class="text-[10px] text-red-600 dark:text-red-400"
+          :title="t('admin.accounts.usageWindow.devinQuotaExhaustedHint')"
+        >
+          {{ t('admin.accounts.usageWindow.devinExhaustedReason', { windows: devinExhaustedWindows.join('、') }) }}
+        </div>
+
+        <!-- 查询失败与「确实耗尽」是两回事，单独一行展示，不吞掉错误 -->
+        <div
+          v-if="devinQueryError"
+          data-test="devin-query-error"
+          class="truncate text-[10px] text-amber-600 dark:text-amber-400"
+          :title="devinQueryError"
+        >
+          {{ t('admin.accounts.usageWindow.devinQueryFailed', { reason: devinQueryError }) }}
+        </div>
+
+        <!-- 数据新鲜度：获取时间 + 是否过期 -->
+        <div
+          v-if="devinFetchedAtLabel"
+          data-test="devin-freshness"
+          class="text-[10px] text-gray-400"
+          :title="devinFetchedAtLabel"
+        >
+          {{ t('admin.accounts.usageWindow.devinFetchedAt', { time: devinFetchedAtLabel }) }}
+          <span v-if="devinDataStale" class="text-amber-600 dark:text-amber-400">
+            · {{ t('admin.accounts.usageWindow.devinStale') }}
+          </span>
+        </div>
+
+        <!-- 本站折算费用 -->
         <div
           v-if="devinLocalCost"
           class="text-[10px] text-gray-500 dark:text-gray-400"
@@ -536,7 +608,6 @@
           {{ devinLocalCost.text }}{{ devinLocalCost.unpricedText }}
         </div>
       </div>
-      <div v-else class="text-xs text-gray-400">-</div>
     </template>
 
     <!-- CN providers (Kimi / Zhipu / DeepSeek / MiniMax / 火山方舟订阅号 base_url 命中 volces): coding-plan quota or payg balance -->
@@ -1474,6 +1545,9 @@ const aiCreditsDisplay = computed(() => {
 const museUsage = computed(() => usageInfo.value?.muse_usage ?? null)
 
 // ===== Devin 用量（后端透传 usageInfo.devin_usage） =====
+// 上游 GetUserStatus 的真实窗口是「每日 / 每周」（protobuf billing block
+// #1.13.14/15 剩余百分比、#1.13.17/18 重置时间），不是 5h/7d。后端 DTO 的
+// daily_/weekly_ 字段如实保留，前端不得改标签伪装成 5h。
 const devinUsage = computed(() => usageInfo.value?.devin_usage ?? null)
 const devinPlan = computed(() => devinUsage.value?.plan || '')
 const devinBalance = computed(() => {
@@ -1481,12 +1555,46 @@ const devinBalance = computed(() => {
   return balance != null ? `$${balance.toFixed(2)}` : '—'
 })
 
-// 订阅型窗口条：后端下发的是「剩余百分比」，utilization 为 0–100 百分数（共享组件契约）。
-// percent 缺失（undefined / 非有限数）时不渲染，由模板回退到重置时间文本行。
-function devinWindowBar(remainingPercent: number | undefined, resetsAt: string | null | undefined) {
+// 停调 marker：后端已投影为 devin_quota_exhausted；同时兼容未带该字段的旧后端/快照，
+// 直接检查 temp_unschedulable_reason 中的机器标记（不解析自由文本）。
+function hasDevinQuotaMarker(reason: string | null | undefined): boolean {
+  if (!reason) return false
+  if (reason.includes('devin_upstream_quota_exhausted')) return true
+  try {
+    const parsed = JSON.parse(reason) as { matched_keyword?: string }
+    return parsed?.matched_keyword === 'devin_upstream_quota_exhausted'
+  } catch {
+    return false
+  }
+}
+const devinQuotaExhausted = computed(
+  () =>
+    props.account.platform === 'devin' &&
+    (props.account.devin_quota_exhausted === true ||
+      hasDevinQuotaMarker(props.account.temp_unschedulable_reason))
+)
+
+// 订阅型窗口条：后端下发「剩余百分比」，utilization 为 0–100 已用百分数（共享组件契约）。
+// 剩余百分比缺失（undefined / 非有限数）时不构造进度条 —— 模板显示「数据未获取」，
+// 绝不把缺失数据渲染成看似正常的 0% 或 100%。
+interface DevinWindowBar {
+  utilization: number
+  remainingPercent: number
+  resetsAt: string | null
+  exhausted: boolean
+}
+function devinWindowBar(
+  remainingPercent: number | undefined,
+  resetsAt: string | null | undefined
+): DevinWindowBar | null {
   if (typeof remainingPercent !== 'number' || !Number.isFinite(remainingPercent)) return null
-  const utilization = Math.min(100, Math.max(0, 100 - remainingPercent))
-  return { utilization, resetsAt: resetsAt ?? null }
+  const remaining = Math.min(100, Math.max(0, remainingPercent))
+  return {
+    utilization: Math.min(100, Math.max(0, 100 - remaining)),
+    remainingPercent: remaining,
+    resetsAt: resetsAt ?? null,
+    exhausted: remaining <= 0
+  }
 }
 
 const devinDailyBar = computed(() =>
@@ -1496,13 +1604,47 @@ const devinWeeklyBar = computed(() =>
   devinWindowBar(devinUsage.value?.weekly_remaining_percent, devinUsage.value?.weekly_reset_at)
 )
 
-const devinDailyReset = computed(() => {
-  const value = devinUsage.value?.daily_reset_at
-  return value ? new Date(value).toLocaleString() : ''
+// 哪个窗口耗尽：以权威额度数据为准；marker 为真但数据不可读时如实标注「窗口未知」。
+const devinExhaustedWindows = computed(() => {
+  const windows: string[] = []
+  if (devinDailyBar.value?.exhausted) windows.push(t('admin.accounts.usageWindow.devinDaily'))
+  if (devinWeeklyBar.value?.exhausted) windows.push(t('admin.accounts.usageWindow.devinWeekly'))
+  if (windows.length === 0 && devinQuotaExhausted.value) {
+    windows.push(t('admin.accounts.usageWindow.devinExhaustedWindowUnknown'))
+  }
+  return windows
 })
-const devinWeeklyReset = computed(() => {
-  const value = devinUsage.value?.weekly_reset_at
-  return value ? new Date(value).toLocaleString() : ''
+
+// 本地状态与上游额度状态分开呈现，避免管理员从 active/schedulable 推断额度可用。
+const devinLocalActiveLabel = computed(() => (props.account.status === 'active' ? 'true' : 'false'))
+const devinLocalSchedulableLabel = computed(() => (props.account.schedulable ? 'true' : 'false'))
+const devinUpstreamStateLabel = computed(() => {
+  if (devinExhaustedWindows.value.length > 0) return t('admin.accounts.usageWindow.devinUpstreamExhausted')
+  if (devinDailyBar.value || devinWeeklyBar.value) return t('admin.accounts.usageWindow.devinUpstreamAvailable')
+  return t('admin.accounts.usageWindow.devinUpstreamUnknown')
+})
+
+// 查询失败与「确实耗尽」必须区分：任何一层错误都单独展示，不吞掉。
+const devinQueryError = computed(() => {
+  const fromUsage = usageInfo.value?.error?.trim()
+  if (fromUsage) return fromUsage
+  const local = error.value?.trim()
+  return local || null
+})
+
+// 数据新鲜度：fetched_at 是 GetUserStatus 探测时间；超过阈值视为过期，不冒充实时额度。
+const DEVIN_USAGE_STALE_MS = 30 * 60 * 1000
+const devinFetchedAt = computed(() => devinUsage.value?.fetched_at ?? null)
+const devinFetchedAtLabel = computed(() => {
+  const raw = devinFetchedAt.value
+  if (!raw) return null
+  return Number.isFinite(new Date(raw).getTime()) ? new Date(raw).toLocaleString() : null
+})
+const devinDataStale = computed(() => {
+  const raw = devinFetchedAt.value
+  if (!raw) return false
+  const time = new Date(raw).getTime()
+  return Number.isFinite(time) && Date.now() - time > DEVIN_USAGE_STALE_MS
 })
 
 // 本站折算费用：官方单价 × 本网关记录 token（后端 devin_usage.local_cost 透传）。

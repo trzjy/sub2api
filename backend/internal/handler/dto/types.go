@@ -315,6 +315,11 @@ type Account struct {
 	// until 未过期，或 reason 带 Devin 额度耗尽 marker（持续停调到探针恢复）。
 	// 与调度判定同口径（IsSchedulable），供管理端如实展示停调状态。
 	TempUnschedulableActive bool `json:"temp_unschedulable_active"`
+	// DevinQuotaExhausted 专指 Devin 账号因上游额度耗尽（对话流 trailer 的
+	// failed_precondition / quota has been exhausted）被持续停调。它与本地开关
+	// Schedulable 是两个概念：本字段为真时账号实际不参与调度，即使
+	// status=active 且 schedulable=true。唯一解除路径是恢复探针真实成功。
+	DevinQuotaExhausted bool `json:"devin_quota_exhausted,omitempty"`
 
 	SessionWindowStart  *time.Time `json:"session_window_start"`
 	SessionWindowEnd    *time.Time `json:"session_window_end"`
@@ -491,6 +496,11 @@ type AccountListItem struct {
 	// until 未过期，或 reason 带 Devin 额度耗尽 marker（持续停调到探针恢复）。
 	// 与调度判定同口径（IsSchedulable），供管理端如实展示停调状态。
 	TempUnschedulableActive bool `json:"temp_unschedulable_active"`
+	// DevinQuotaExhausted 专指 Devin 账号因上游额度耗尽（对话流 trailer 的
+	// failed_precondition / quota has been exhausted）被持续停调。它与本地开关
+	// Schedulable 是两个概念：本字段为真时账号实际不参与调度，即使
+	// status=active 且 schedulable=true。唯一解除路径是恢复探针真实成功。
+	DevinQuotaExhausted bool `json:"devin_quota_exhausted,omitempty"`
 
 	SessionWindowStart  *time.Time `json:"session_window_start"`
 	SessionWindowEnd    *time.Time `json:"session_window_end"`
