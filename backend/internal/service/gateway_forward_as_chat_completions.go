@@ -240,7 +240,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	var handleErr error
 	if clientStream {
 		writerSizeBeforeStream := c.Writer.Size()
-		result, handleErr = s.handleCCStreamingFromAnthropic(resp, c, originalModel, mappedModel, reasoningEffort, startTime)
+		result, handleErr = s.handleCCStreamingFromAnthropic(resp, c, account, originalModel, mappedModel, reasoningEffort, startTime)
 		var sseErr *sseStreamErrorEventError
 		switch {
 		case errors.As(handleErr, &sseErr):
@@ -416,6 +416,7 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 func (s *GatewayService) handleCCStreamingFromAnthropic(
 	resp *http.Response,
 	c *gin.Context,
+	account *Account,
 	originalModel string,
 	mappedModel string,
 	reasoningEffort *string,
@@ -445,6 +446,18 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 
 	stream := newAnthropicCompatStream(s.cfg, c, resp, "forward_as_cc", requestID)
 	defer stream.stop()
+	diagnostics := newAnthropicStreamDiagnostics()
+	diagnostics.emptyOutputAuditResult = "not_applied"
+	partialEventPending := false
+	clientWriteFailed := false
+	logContext := context.Background()
+	if c.Request != nil {
+		logContext = c.Request.Context()
+	}
+	defer func() {
+		diagnostics.log(logContext, c, resp, account, originalModel, mappedModel, "forward_as_cc", false,
+			&usage, firstTokenMs, stream.clientDisconnected || clientWriteFailed, partialEventPending)
+	}()
 
 	resultWithUsage := func() *ForwardResult {
 		return &ForwardResult{
@@ -532,6 +545,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 		if !ok {
 			break
 		}
+		diagnostics.observeCompatLine(stream, line)
 		// 与缓冲路径一致：接受 SSE 紧凑格式（冒号后无空格，#4653 同根因）。
 		if _, ok := extractOpenAISSEEventLine(line); !ok {
 			continue
@@ -539,8 +553,10 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 
 		dataLine, ok := stream.nextLine()
 		if !ok {
+			partialEventPending = true
 			break
 		}
+		diagnostics.observeCompatLine(stream, dataLine)
 		payload, ok := extractOpenAISSEDataLine(dataLine)
 		if !ok {
 			continue
@@ -562,9 +578,14 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 		processAnthropicEvent(&event)
 	}
 
+	diagnostics.finishCompatStream(stream)
 	if failure := stream.failure(); failure != nil {
 		return finishAnthropicCompatStreamFailure(c, writerSizeBeforeStream, failure, resultWithUsage(), func() {
+			before := c.Writer.Size()
 			writeAnthropicCompatCCStreamFailure(c, failure)
+			if c.Writer.Size() > before {
+				diagnostics.terminalEventForwarded = true
+			}
 		})
 	}
 	if stream.clientDisconnected {
@@ -585,7 +606,11 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	}
 
 	// Write [DONE] marker
-	fmt.Fprint(c.Writer, "data: [DONE]\n\n") //nolint:errcheck
+	if _, err := fmt.Fprint(c.Writer, "data: [DONE]\n\n"); err == nil {
+		diagnostics.terminalEventForwarded = true
+	} else {
+		clientWriteFailed = true
+	}
 	c.Writer.Flush()
 
 	return resultWithUsage(), nil

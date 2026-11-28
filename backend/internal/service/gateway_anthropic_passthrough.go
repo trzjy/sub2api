@@ -23,6 +23,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type anthropicPassthroughForwardInput struct {
@@ -32,6 +33,221 @@ type anthropicPassthroughForwardInput struct {
 	OriginalModel string
 	RequestStream bool
 	StartTime     time.Time
+}
+
+const maxRecentAnthropicStreamEvents = 16
+
+type anthropicStreamDiagnostics struct {
+	startedAt                time.Time
+	audit                    *upstreamCompletionAudit
+	terminalEventSeen        bool
+	terminalEventForwarded   bool
+	terminalSignal           string
+	terminationReason        string
+	readErrorCategory        string
+	emptyOutputAuditResult   string
+	sseLineCount             int
+	dataEventCount           int
+	contentBlockStartEvents  int
+	textDeltaEvents          int
+	thinkingDeltaEvents      int
+	toolInputJSONDeltaEvents int
+	textOutputBytes          int
+	toolInputJSONBytes       int
+	eventTypeCounts          map[string]int
+	recentEventTypes         []string
+}
+
+func newAnthropicStreamDiagnostics() *anthropicStreamDiagnostics {
+	return &anthropicStreamDiagnostics{
+		startedAt:              time.Now(),
+		audit:                  &upstreamCompletionAudit{},
+		terminationReason:      "handler_exit_without_outcome",
+		readErrorCategory:      "none",
+		emptyOutputAuditResult: "not_evaluated",
+		eventTypeCounts:        make(map[string]int),
+		recentEventTypes:       make([]string, 0, maxRecentAnthropicStreamEvents),
+	}
+}
+
+func (d *anthropicStreamDiagnostics) observeData(data string) {
+	d.dataEventCount++
+	eventType := gjson.Get(data, "type").String()
+	diagnosticType := anthropicStreamDiagnosticEventType(eventType)
+	d.eventTypeCounts[diagnosticType]++
+	if len(d.recentEventTypes) == maxRecentAnthropicStreamEvents {
+		copy(d.recentEventTypes, d.recentEventTypes[1:])
+		d.recentEventTypes[len(d.recentEventTypes)-1] = diagnosticType
+	} else {
+		d.recentEventTypes = append(d.recentEventTypes, diagnosticType)
+	}
+
+	if d.terminalSignal == "" {
+		switch strings.TrimSpace(data) {
+		case "[DONE]":
+			d.terminalSignal = "done_marker"
+		default:
+			if eventType == "message_stop" {
+				d.terminalSignal = "message_stop_payload"
+			}
+		}
+	}
+
+	switch eventType {
+	case "content_block_start":
+		d.contentBlockStartEvents++
+	case "content_block_delta":
+		switch gjson.Get(data, "delta.type").String() {
+		case "text_delta":
+			d.textDeltaEvents++
+			d.textOutputBytes += len(gjson.Get(data, "delta.text").String())
+		case "thinking_delta":
+			d.thinkingDeltaEvents++
+		case "input_json_delta":
+			d.toolInputJSONDeltaEvents++
+			d.toolInputJSONBytes += len(gjson.Get(data, "delta.partial_json").String())
+		}
+	}
+	d.audit.observeAnthropicSSE(data)
+}
+
+func (d *anthropicStreamDiagnostics) observeEventName(eventName string) {
+	if anthropicStreamEventIsTerminal(eventName, "") {
+		if d.terminalSignal == "" {
+			d.terminalSignal = "message_stop_event"
+		}
+	}
+}
+
+func (d *anthropicStreamDiagnostics) observeCompatLine(stream *anthropicCompatStream, line string) {
+	d.sseLineCount++
+	if eventName, ok := parseAnthropicSSEField(line, "event"); ok {
+		d.observeEventName(eventName)
+	}
+	if data, ok := extractOpenAISSEDataLine(line); ok {
+		data = strings.TrimSpace(data)
+		d.observeData(data)
+		if d.terminalSignal == "" && gjson.Get(data, "type").String() == "message_delta" && gjson.Get(data, "delta.stop_reason").String() != "" {
+			d.terminalSignal = "message_delta_stop_reason"
+		}
+	}
+	if stream.sawTerminal {
+		d.terminalEventSeen = true
+	}
+}
+
+func (d *anthropicStreamDiagnostics) finishCompatStream(stream *anthropicCompatStream) {
+	d.terminalEventSeen = stream.sawTerminal
+	switch {
+	case stream.upstreamErrType != "":
+		d.terminationReason = "upstream_sse_error_event"
+	case errors.Is(stream.readErr, errAnthropicNativeStreamIdle):
+		d.terminationReason = "stream_data_interval_timeout"
+		d.readErrorCategory = "stream_idle_timeout"
+	case stream.readErr != nil && !errors.Is(stream.readErr, io.EOF):
+		d.readErrorCategory = anthropicStreamReadErrorCategory(stream.readErr)
+		if stream.clientDisconnected {
+			d.terminationReason = "upstream_read_error_after_client_disconnect"
+		} else {
+			d.terminationReason = "upstream_read_error"
+		}
+	case errors.Is(stream.readErr, io.EOF) && stream.sawTerminal:
+		d.terminationReason = "upstream_eof_after_terminal_event"
+	case errors.Is(stream.readErr, io.EOF):
+		d.terminationReason = "eof_missing_terminal_event"
+	case stream.clientDisconnected:
+		d.terminationReason = "client_disconnect_before_upstream_end"
+	}
+}
+
+func (d *anthropicStreamDiagnostics) log(
+	ctx context.Context,
+	c *gin.Context,
+	resp *http.Response,
+	account *Account,
+	model string,
+	upstreamModel string,
+	forwardingMode string,
+	mimicClaudeCode bool,
+	usage *ClaudeUsage,
+	firstTokenMs *int,
+	clientDisconnected bool,
+	partialEventPending bool,
+) {
+	responseBytes := -1
+	responseStatus := 0
+	requestMethod := ""
+	requestPath := ""
+	if c != nil && c.Writer != nil {
+		responseBytes = c.Writer.Size()
+		responseStatus = c.Writer.Status()
+	}
+	if c != nil && c.Request != nil {
+		requestMethod = c.Request.Method
+		if c.Request.URL != nil {
+			requestPath = c.Request.URL.Path
+		}
+	}
+	firstTokenSeen := firstTokenMs != nil
+	firstTokenValue := 0
+	if firstTokenSeen {
+		firstTokenValue = *firstTokenMs
+	}
+	var accountID int64
+	var accountPlatform string
+	var accountType string
+	if account != nil {
+		accountID = account.ID
+		accountPlatform = account.Platform
+		accountType = account.Type
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	logger.FromContext(ctx).Info("anthropic_stream_termination",
+		zap.Int64("account_id", accountID),
+		zap.String("account_platform", accountPlatform),
+		zap.String("account_type", accountType),
+		zap.String("forwarding_mode", forwardingMode),
+		zap.String("request_method", requestMethod),
+		zap.String("request_path", requestPath),
+		zap.String("model", model),
+		zap.String("upstream_model", upstreamModel),
+		zap.Bool("claude_code_client", IsClaudeCodeClient(ctx)),
+		zap.Bool("mimic_claude_code", mimicClaudeCode),
+		zap.Int("upstream_status", resp.StatusCode),
+		zap.Int("client_response_status", responseStatus),
+		zap.String("upstream_request_id", resp.Header.Get("x-request-id")),
+		zap.String("termination_reason", d.terminationReason),
+		zap.String("read_error_category", d.readErrorCategory),
+		zap.String("empty_output_audit_result", d.emptyOutputAuditResult),
+		zap.Bool("terminal_event_seen", d.terminalEventSeen),
+		zap.Bool("terminal_event_forwarded", d.terminalEventForwarded),
+		zap.String("terminal_signal", d.terminalSignal),
+		zap.String("stop_reason", anthropicStreamDiagnosticStopReason(d.audit.stopReason)),
+		zap.Int("sse_line_count", d.sseLineCount),
+		zap.Int("data_event_count", d.dataEventCount),
+		zap.Any("data_event_type_counts", d.eventTypeCounts),
+		zap.Strings("recent_data_event_types", d.recentEventTypes),
+		zap.Int("content_block_start_events", d.contentBlockStartEvents),
+		zap.Int("text_delta_events", d.textDeltaEvents),
+		zap.Int("text_output_bytes", d.textOutputBytes),
+		zap.Int("tool_use_count", d.audit.toolUses),
+		zap.Int("tool_input_json_delta_events", d.toolInputJSONDeltaEvents),
+		zap.Int("tool_input_json_bytes", d.toolInputJSONBytes),
+		zap.Int("thinking_delta_events", d.thinkingDeltaEvents),
+		zap.Bool("thinking_seen", d.audit.thinkingSeen),
+		zap.Int("usage_input_tokens", usage.InputTokens),
+		zap.Int("usage_output_tokens", usage.OutputTokens),
+		zap.Int("usage_cache_read_input_tokens", usage.CacheReadInputTokens),
+		zap.Int("usage_cache_creation_input_tokens", usage.CacheCreationInputTokens),
+		zap.Bool("client_disconnected", clientDisconnected),
+		zap.Bool("partial_event_pending", partialEventPending),
+		zap.Int("client_response_bytes", responseBytes),
+		zap.Bool("first_token_seen", firstTokenSeen),
+		zap.Int("first_token_ms", firstTokenValue),
+		zap.Int64("stream_elapsed_ms", time.Since(d.startedAt).Milliseconds()),
+	)
 }
 
 func (s *GatewayService) forwardAnthropicAPIKeyPassthrough(
@@ -425,6 +641,18 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	startTime time.Time,
 	model string,
 ) (*streamingResult, error) {
+	diagnostics := newAnthropicStreamDiagnostics()
+	usage := &ClaudeUsage{}
+	audit := diagnostics.audit
+	var firstTokenMs *int
+	clientDisconnected := false
+	eventBuffer := &contextWarnEventBuffer{}
+	inPartialEvent := false
+	defer func() {
+		diagnostics.log(ctx, c, resp, account, model, model, "api_key_passthrough", false,
+			usage, firstTokenMs, clientDisconnected, inPartialEvent || eventBuffer.active())
+	}()
+
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -454,6 +682,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	w := c.Writer
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		diagnostics.terminationReason = "streaming_unsupported"
 		return nil, errors.New("streaming not supported")
 	}
 
@@ -463,15 +692,8 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	// 兼容 event: 在 data: 之前、之后以及缺失 event: 三种行序；message_stop 不再注入。
 	warnMaxIndex := -1
 	warnSawToolUse := false
-	eventBuffer := &contextWarnEventBuffer{}
 	// eventBufferDrained 使补出幂等：无论从哪个出口触发、触发多少次，都只补出一次。
 	eventBufferDrained := false
-
-	usage := &ClaudeUsage{}
-	audit := &upstreamCompletionAudit{}
-	var firstTokenMs *int
-	clientDisconnected := false
-	sawTerminalEvent := false
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -552,17 +774,21 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		}
 		keepaliveTimer.Reset(keepaliveInterval)
 	}
-	inPartialEvent := false
-
 	// finishUpstreamStream 是「流正常结束」的唯一出口。
 	// 先判「上游空完成」再当成功返回：判据与处置都只在 upstreamCompletionAudit 里实现，
 	// 这里不允许再就地写一套「内容为空」的判断（否则就是同一规则的第二份实现）。
 	finishUpstreamStream := func() (*streamingResult, error) {
 		result := &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}
-		if clientDisconnected || !audit.isEmptyCompletion(usage) {
+		if clientDisconnected {
+			diagnostics.emptyOutputAuditResult = "skipped_client_disconnect"
 			return result, nil
 		}
-		return result, s.noteEmptyUpstreamCompletion(ctx, account, model, usage, audit)
+		if audit.isEmptyCompletion(usage) {
+			diagnostics.emptyOutputAuditResult = "empty_output"
+			return result, s.noteEmptyUpstreamCompletion(ctx, account, model, usage, audit)
+		}
+		diagnostics.emptyOutputAuditResult = "non_empty_output"
+		return result, nil
 	}
 
 	// drainEventBuffer 把未闭合的事件缓冲原样写出（不注入提醒），保证终止事件已
@@ -574,15 +800,24 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			return
 		}
 		eventBufferDrained = true
+		terminalEvent := eventBuffer.isTerminal()
+		allLinesWritten := true
 		for _, buffered := range eventBuffer.flush() {
 			if _, werr := io.WriteString(w, buffered); werr != nil {
-				return
+				allLinesWritten = false
+				break
 			}
 			if _, werr := io.WriteString(w, "\n"); werr != nil {
-				return
+				allLinesWritten = false
+				break
 			}
 		}
-		flusher.Flush()
+		if allLinesWritten {
+			if terminalEvent {
+				diagnostics.terminalEventForwarded = true
+			}
+			flusher.Flush()
+		}
 	}
 	// 唯一退出保证：挂在缓冲与补出函数定义之后、主循环之前，覆盖 EOF、读错误、
 	// 超时、正常结束等全部 return 路径。
@@ -612,42 +847,56 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					// 兜底补刷，确保最后一个未以空行结尾的事件也能及时送达客户端。
 					flusher.Flush()
 				}
-				if !sawTerminalEvent {
+				if !diagnostics.terminalEventSeen {
 					// 未闭合缓冲由函数级 defer 统一补出，不注入提醒。
 					if clientDisconnected && streamInterval > 0 {
 						lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
 						if time.Since(lastRead) >= streamInterval {
+							diagnostics.terminationReason = "client_disconnect_usage_timeout"
 							return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after timeout")
 						}
 					}
+					diagnostics.terminationReason = "eof_missing_terminal_event"
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, fmt.Errorf("stream usage incomplete: missing terminal event")
 				}
+				diagnostics.terminationReason = "upstream_eof_after_terminal_event"
 				return finishUpstreamStream()
 			}
 			if ev.err != nil {
-				if sawTerminalEvent {
+				diagnostics.readErrorCategory = anthropicStreamReadErrorCategory(ev.err)
+				if diagnostics.terminalEventSeen {
+					diagnostics.terminationReason = "upstream_read_error_after_terminal_event"
 					return finishUpstreamStream()
 				}
 				// 未闭合缓冲由函数级 defer 统一补出，这里沿用既有错误处置。
 				if clientDisconnected {
+					diagnostics.terminationReason = "upstream_read_error_after_client_disconnect"
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after disconnect: %w", ev.err)
 				}
 				if errors.Is(ev.err, context.Canceled) || errors.Is(ev.err, context.DeadlineExceeded) {
+					diagnostics.terminationReason = "upstream_context_canceled"
+					if errors.Is(ev.err, context.DeadlineExceeded) {
+						diagnostics.terminationReason = "upstream_context_deadline_exceeded"
+					}
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete: %w", ev.err)
 				}
 				if errors.Is(ev.err, bufio.ErrTooLong) {
+					diagnostics.terminationReason = "sse_line_too_long"
 					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, ev.err)
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs}, ev.err
 				}
+				diagnostics.terminationReason = "upstream_read_error"
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs}, fmt.Errorf("stream read error: %w", ev.err)
 			}
 
 			line := ev.line
+			diagnostics.sseLineCount++
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				trimmed := strings.TrimSpace(data)
+				diagnostics.observeData(trimmed)
 				observer.ObserveAnthropic([]byte(trimmed))
 				if anthropicStreamEventIsTerminal("", trimmed) {
-					sawTerminalEvent = true
+					diagnostics.terminalEventSeen = true
 				}
 				if firstTokenMs == nil && trimmed != "" && trimmed != "[DONE]" {
 					ms := int(time.Since(startTime).Milliseconds())
@@ -663,11 +912,14 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 						warnSawToolUse = true
 					}
 				}
-				audit.observeAnthropicSSE(trimmed)
 			} else {
 				trimmed := strings.TrimSpace(line)
-				if strings.HasPrefix(trimmed, "event:") && anthropicStreamEventIsTerminal(strings.TrimSpace(strings.TrimPrefix(trimmed, "event:")), "") {
-					sawTerminalEvent = true
+				if strings.HasPrefix(trimmed, "event:") {
+					eventName := strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+					diagnostics.observeEventName(eventName)
+					if anthropicStreamEventIsTerminal(eventName, "") {
+						diagnostics.terminalEventSeen = true
+					}
 				}
 			}
 
@@ -690,10 +942,16 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 							flusher.Flush()
 						}
 					}
+					terminalEvent := eventBuffer.isTerminal()
+					allLinesWritten := true
 					for _, buffered := range eventBuffer.flush() {
 						if !writePassthroughLine(string(reverseToolNamesIfPresent(c, []byte(buffered)))) {
+							allLinesWritten = false
 							break
 						}
+					}
+					if allLinesWritten && terminalEvent {
+						diagnostics.terminalEventForwarded = true
 					}
 					if !clientDisconnected {
 						flusher.Flush()
@@ -713,8 +971,10 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			}
 			// 未闭合缓冲由函数级 defer 统一补出，这里沿用既有超时处置。
 			if clientDisconnected {
+				diagnostics.terminationReason = "client_disconnect_usage_timeout"
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after timeout")
 			}
+			diagnostics.terminationReason = "stream_data_interval_timeout"
 			logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Stream data interval timeout: account=%d model=%s interval=%s", account.ID, model, streamInterval)
 			if s.rateLimitService != nil {
 				s.rateLimitService.HandleStreamTimeout(ctx, account, model)
@@ -754,6 +1014,26 @@ type contextWarnEventBuffer struct {
 	lines     []string
 }
 
+func anthropicStreamDiagnosticEventType(eventType string) string {
+	switch eventType {
+	case "message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop", "ping", "error":
+		return eventType
+	case "":
+		return "untyped"
+	default:
+		return "other"
+	}
+}
+
+func anthropicStreamDiagnosticStopReason(stopReason string) string {
+	switch strings.TrimSpace(stopReason) {
+	case "", "end_turn", "max_tokens", "stop_sequence", "tool_use", "refusal", "pause_turn", "model_context_window_exceeded":
+		return strings.TrimSpace(stopReason)
+	default:
+		return "other"
+	}
+}
+
 // add 收下一行；若当前不在缓冲中则以该行开启新事件缓冲。返回该行是否为事件
 // 边界空行（此时整段事件已缓冲完毕，等待调用方判定与写出）。
 func (g *contextWarnEventBuffer) add(line string) bool {
@@ -786,6 +1066,39 @@ func (g *contextWarnEventBuffer) dataType() string {
 		}
 	}
 	return ""
+}
+
+func (g *contextWarnEventBuffer) isTerminal() bool {
+	return anthropicSSEEventLinesAreTerminal(g.lines)
+}
+
+func anthropicSSEEventLinesAreTerminal(lines []string) bool {
+	var eventName string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "event:") {
+			eventName = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+		}
+		if data, ok := extractAnthropicSSEDataLine(line); ok && anthropicStreamEventIsTerminal("", data) {
+			return true
+		}
+	}
+	return anthropicStreamEventIsTerminal(eventName, "")
+}
+
+func anthropicStreamReadErrorCategory(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "context_deadline_exceeded"
+	case errors.Is(err, bufio.ErrTooLong):
+		return "sse_line_too_long"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "unexpected_eof"
+	default:
+		return "other"
+	}
 }
 
 // flush 返回缓冲的全部行并复位状态。

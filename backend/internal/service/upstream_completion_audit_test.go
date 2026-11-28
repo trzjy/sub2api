@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,8 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 )
@@ -22,6 +26,175 @@ import (
 // 线上背景（2026-11-06）：账号 137 三天内 163 次「200 + 完整终态 + 零正文」，
 // 占其 /v1/messages 流量 12.5%，同分组另外三个账号 0 次。这些请求既没有错误码、
 // 也不进 ops 错误表，客户只看到「模型不说话」。判据一旦失效，问题就回到不可见状态。
+
+func anthropicStreamTerminationLogTestContext(t *testing.T) (*gin.Context, context.Context, *observer.ObservedLogs, *httptest.ResponseRecorder) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	core, logs := observer.New(zap.InfoLevel)
+	ctx := logger.IntoContext(context.Background(), zap.New(core).With(zap.String("request_id", "client-request-123")))
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+	return c, ctx, logs, rec
+}
+
+type anthropicStreamReadErrorBody struct {
+	err error
+}
+
+func (b *anthropicStreamReadErrorBody) Read([]byte) (int, error) { return 0, b.err }
+func (b *anthropicStreamReadErrorBody) Close() error             { return nil }
+
+func TestAnthropicPassthroughStreamTerminationLogContainsSafeDiagnostics(t *testing.T) {
+	c, ctx, logs, rec := anthropicStreamTerminationLogTestContext(t)
+	const privateOutput = "private-output-canary"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+			"X-Request-Id": []string{"upstream-request-456"},
+		},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			"event: message_start",
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":11}}}`,
+			"",
+			"event: content_block_delta",
+			`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"` + privateOutput + `"}}`,
+			"",
+			"event: message_delta",
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`,
+			"",
+			"event: message_stop",
+			`data: {"type":"message_stop"}`,
+			"",
+			"",
+		}, "\n"))),
+	}
+	svc := &GatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+
+	_, err := svc.handleStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, &Account{ID: 41}, time.Now(), "claude-test")
+	require.NoError(t, err)
+
+	entries := logs.FilterMessage("anthropic_stream_termination").All()
+	require.Len(t, entries, 1)
+	fields := entries[0].ContextMap()
+	require.Equal(t, "api_key_passthrough", fields["forwarding_mode"])
+	require.Equal(t, "/v1/messages", fields["request_path"])
+	require.EqualValues(t, http.StatusOK, fields["client_response_status"])
+	require.Equal(t, "client-request-123", fields["request_id"])
+	require.Equal(t, "upstream-request-456", fields["upstream_request_id"])
+	require.Equal(t, "upstream_eof_after_terminal_event", fields["termination_reason"])
+	require.Equal(t, "message_stop_event", fields["terminal_signal"])
+	require.Equal(t, "end_turn", fields["stop_reason"])
+	require.Equal(t, "non_empty_output", fields["empty_output_audit_result"])
+	require.EqualValues(t, 1, fields["text_delta_events"])
+	require.EqualValues(t, len(privateOutput), fields["text_output_bytes"])
+	require.EqualValues(t, 4, fields["usage_output_tokens"])
+	require.True(t, fields["terminal_event_forwarded"].(bool))
+	require.Contains(t, rec.Body.String(), privateOutput)
+
+	for _, entry := range logs.All() {
+		require.NotContains(t, entry.Message, privateOutput)
+		for _, value := range entry.ContextMap() {
+			require.NotContains(t, fmt.Sprint(value), privateOutput)
+		}
+	}
+}
+
+func TestAnthropicPassthroughStreamTerminationLogReportsMissingTerminal(t *testing.T) {
+	c, ctx, logs, _ := anthropicStreamTerminationLogTestContext(t)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":11}}}` + "\n\n")),
+	}
+	svc := &GatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+
+	_, err := svc.handleStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, &Account{ID: 42}, time.Now(), "claude-test")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "missing terminal event")
+
+	entries := logs.FilterMessage("anthropic_stream_termination").All()
+	require.Len(t, entries, 1)
+	fields := entries[0].ContextMap()
+	require.Equal(t, "eof_missing_terminal_event", fields["termination_reason"])
+	require.Equal(t, false, fields["terminal_event_seen"])
+	require.Equal(t, "not_evaluated", fields["empty_output_audit_result"])
+}
+
+func TestAnthropicPassthroughStreamTerminationLogClassifiesReadError(t *testing.T) {
+	c, ctx, logs, _ := anthropicStreamTerminationLogTestContext(t)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       &anthropicStreamReadErrorBody{err: io.ErrUnexpectedEOF},
+	}
+	svc := &GatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+
+	_, err := svc.handleStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, &Account{ID: 43}, time.Now(), "claude-test")
+	require.Error(t, err)
+
+	entries := logs.FilterMessage("anthropic_stream_termination").All()
+	require.Len(t, entries, 1)
+	fields := entries[0].ContextMap()
+	require.Equal(t, "upstream_read_error", fields["termination_reason"])
+	require.Equal(t, "unexpected_eof", fields["read_error_category"])
+	require.Equal(t, false, fields["terminal_event_seen"])
+}
+
+func TestAnthropicGatewayStreamTerminationLogCapturesEndTurn(t *testing.T) {
+	c, ctx, logs, rec := anthropicStreamTerminationLogTestContext(t)
+	const privateOutput = "gateway-output-canary"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+			"X-Request-Id": []string{"gateway-upstream-789"},
+		},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			"event: message_start",
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":12}}}`,
+			"",
+			"event: content_block_delta",
+			`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"` + privateOutput + `"}}`,
+			"",
+			"event: message_delta",
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`,
+			"",
+			"event: message_stop",
+			`data: {"type":"message_stop"}`,
+			"",
+			"",
+		}, "\n"))),
+	}
+	svc := &GatewayService{
+		cfg:              &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}},
+		rateLimitService: &RateLimitService{},
+	}
+
+	_, err := svc.handleStreamingResponse(ctx, resp, c, &Account{ID: 44, Platform: PlatformAnthropic}, time.Now(), "claude-test", "claude-test", true)
+	require.NoError(t, err)
+	require.Contains(t, rec.Body.String(), privateOutput)
+
+	entries := logs.FilterMessage("anthropic_stream_termination").All()
+	require.Len(t, entries, 1)
+	fields := entries[0].ContextMap()
+	require.Equal(t, "gateway_service", fields["forwarding_mode"])
+	require.Equal(t, "/v1/messages", fields["request_path"])
+	require.EqualValues(t, http.StatusOK, fields["client_response_status"])
+	require.Equal(t, "client-request-123", fields["request_id"])
+	require.Equal(t, "gateway-upstream-789", fields["upstream_request_id"])
+	require.Equal(t, "upstream_eof_after_terminal_event", fields["termination_reason"])
+	require.Equal(t, "message_stop_event", fields["terminal_signal"])
+	require.Equal(t, "end_turn", fields["stop_reason"])
+	require.True(t, fields["terminal_event_forwarded"].(bool))
+	for _, entry := range entries {
+		for _, value := range entry.ContextMap() {
+			require.NotContains(t, fmt.Sprint(value), privateOutput)
+		}
+	}
+}
 
 func TestUpstreamCompletionAudit_ThinkingOnlyIsEmpty(t *testing.T) {
 	audit := &upstreamCompletionAudit{}

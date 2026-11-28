@@ -756,6 +756,18 @@ func orderedContextWarningDeltaBlocks(maxIndex int, warningText string, deltaBlo
 }
 
 func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string, mimicClaudeCode bool) (*streamingResult, error) {
+	diagnostics := newAnthropicStreamDiagnostics()
+	diagnostics.emptyOutputAuditResult = "not_applied"
+	usage := &ClaudeUsage{}
+	var firstTokenMs *int
+	clientDisconnected := false
+	pendingEventLines := make([]string, 0, 4)
+
+	defer func() {
+		diagnostics.log(ctx, c, resp, account, originalModel, mappedModel, "gateway_service", mimicClaudeCode,
+			usage, firstTokenMs, clientDisconnected, len(pendingEventLines) > 0)
+	}()
+
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -781,12 +793,11 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	w := c.Writer
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		diagnostics.terminationReason = "streaming_unsupported"
 		return nil, errors.New("streaming not supported")
 	}
 
-	usage := &ClaudeUsage{}
 	warnState := &contextWarnAppendState{maxIndex: -1}
-	var firstTokenMs *int
 	scanner := bufio.NewScanner(resp.Body)
 	// 设置更大的buffer以处理长行
 	maxLineSize := defaultMaxLineSize
@@ -900,13 +911,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	}
 
 	needModelReplace := originalModel != mappedModel
-	clientDisconnected := false // 客户端断开标志，断开后继续读取上游以获取完整usage
-	sawTerminalEvent := false
 	useNoopDeltaKeepalive := c != nil && c.Request != nil && shouldUseClaudeCodeNoopDeltaKeepalive(c.GetHeader("User-Agent"))
 	noopDeltaKeepaliveBlockIndex := -1
 	noopDeltaKeepaliveDeltaType := ""
-
-	pendingEventLines := make([]string, 0, 4)
 
 	processSSEEvent := func(lines []string) ([]string, string, *sseUsagePatch, error) {
 		if len(lines) == 0 {
@@ -935,7 +942,10 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 		}
 
 		if dataLine == "[DONE]" {
-			sawTerminalEvent = true
+			diagnostics.terminalEventSeen = true
+			if diagnostics.terminalSignal == "" {
+				diagnostics.terminalSignal = "done_marker"
+			}
 			block := ""
 			if eventName != "" {
 				block = "event: " + eventName + "\n"
@@ -1039,7 +1049,10 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 
 		usagePatch := s.extractSSEUsagePatch(event)
 		if anthropicStreamEventIsTerminal(eventName, dataLine) {
-			sawTerminalEvent = true
+			diagnostics.terminalEventSeen = true
+			if diagnostics.terminalSignal == "" {
+				diagnostics.terminalSignal = "message_stop_payload"
+			}
 		}
 		if !eventChanged {
 			block := ""
@@ -1074,25 +1087,35 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 		case ev, ok := <-events:
 			if !ok {
 				// 上游完成，返回结果
-				if !sawTerminalEvent {
+				if !diagnostics.terminalEventSeen {
+					diagnostics.terminationReason = "eof_missing_terminal_event"
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, fmt.Errorf("stream usage incomplete: missing terminal event")
 				}
+				diagnostics.terminationReason = "upstream_eof_after_terminal_event"
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
 			}
 			if ev.err != nil {
-				if sawTerminalEvent {
+				diagnostics.readErrorCategory = anthropicStreamReadErrorCategory(ev.err)
+				if diagnostics.terminalEventSeen {
+					diagnostics.terminationReason = "upstream_read_error_after_terminal_event"
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
 				}
 				// 检测 context 取消（客户端断开会导致 context 取消，进而影响上游读取）
 				if errors.Is(ev.err, context.Canceled) || errors.Is(ev.err, context.DeadlineExceeded) {
+					diagnostics.terminationReason = "upstream_context_canceled"
+					if errors.Is(ev.err, context.DeadlineExceeded) {
+						diagnostics.terminationReason = "upstream_context_deadline_exceeded"
+					}
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete: %w", ev.err)
 				}
 				// 客户端已通过写入失败检测到断开，上游也出错了，返回已收集的 usage
 				if clientDisconnected {
+					diagnostics.terminationReason = "upstream_read_error_after_client_disconnect"
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after disconnect: %w", ev.err)
 				}
 				// 客户端未断开，正常的错误处理
 				if errors.Is(ev.err, bufio.ErrTooLong) {
+					diagnostics.terminationReason = "sse_line_too_long"
 					logger.LegacyPrintf("service.gateway", "SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, ev.err)
 					sendErrorEvent("response_too_large", infraerrors.UpstreamResponseLineTooLong)
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs}, ev.err
@@ -1105,6 +1128,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				// 仅在下方 LegacyPrintf 内部日志中保留供运维诊断。
 				disconnectMsg := "upstream stream disconnected: " + sanitizeStreamError(ev.err)
 				if !c.Writer.Written() {
+					diagnostics.terminationReason = "upstream_read_error_before_client_output"
 					logger.LegacyPrintf("service.gateway", "Upstream stream read error before any client output (account=%d), failing over: %v", account.ID, ev.err)
 					body, _ := json.Marshal(map[string]any{
 						"type": "error",
@@ -1119,6 +1143,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 						RetryableOnSameAccount: true,
 					}
 				}
+				diagnostics.terminationReason = "upstream_read_error"
 				sendErrorEvent("stream_read_error", disconnectMsg)
 				// 登记 ops 上游上下文（对齐 recordOpenAIRawStreamTruncation 的双设）：
 				// 此前本分支只 sendErrorEvent + 返回错误，attempt 级遥测
@@ -1130,18 +1155,28 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			}
 			line := ev.line
 			trimmed := strings.TrimSpace(line)
+			diagnostics.sseLineCount++
+			if data, ok := extractAnthropicSSEDataLine(line); ok {
+				diagnostics.observeData(strings.TrimSpace(data))
+			} else if strings.HasPrefix(trimmed, "event:") {
+				eventName := strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+				diagnostics.observeEventName(eventName)
+			}
 
 			if trimmed == "" {
 				if len(pendingEventLines) == 0 {
 					continue
 				}
 
+				terminalEvent := anthropicSSEEventLinesAreTerminal(pendingEventLines)
 				outputBlocks, data, usagePatch, err := processSSEEvent(pendingEventLines)
 				pendingEventLines = pendingEventLines[:0]
 				if err != nil {
 					if clientDisconnected {
+						diagnostics.terminationReason = "client_disconnect_during_sse_error_event"
 						return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
 					}
+					diagnostics.terminationReason = "upstream_sse_error_event"
 					return nil, err
 				}
 
@@ -1163,11 +1198,13 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 					orderedBlocks = orderedContextWarningDeltaBlocks(warnState.maxIndex, warningText, outputBlocks)
 				}
 
+				terminalEventWritten := terminalEvent && !clientDisconnected && len(orderedBlocks) > 0
 				for _, block := range orderedBlocks {
 					if !clientDisconnected {
 						restored := reverseToolNamesIfPresent(c, []byte(block))
 						if _, werr := fmt.Fprint(w, string(restored)); werr != nil {
 							clientDisconnected = true
+							terminalEventWritten = false
 							logger.LegacyPrintf("service.gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
 							// 不 break：客户端断开后仍需继续合并本事件及后续事件的 usage，
 							// 否则会漏计当前事件携带的 usage 导致少计费。后续写入由
@@ -1188,6 +1225,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 						}
 					}
 				}
+				if terminalEventWritten {
+					diagnostics.terminalEventForwarded = true
+				}
 				continue
 			}
 
@@ -1199,8 +1239,10 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				continue
 			}
 			if clientDisconnected {
+				diagnostics.terminationReason = "client_disconnect_usage_timeout"
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after timeout")
 			}
+			diagnostics.terminationReason = "stream_data_interval_timeout"
 			logger.LegacyPrintf("service.gateway", "Stream data interval timeout: account=%d model=%s interval=%s", account.ID, originalModel, streamInterval)
 			// 处理流超时，可能标记账户为临时不可调度或错误状态
 			if s.rateLimitService != nil {

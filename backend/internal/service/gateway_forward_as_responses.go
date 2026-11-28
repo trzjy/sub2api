@@ -254,7 +254,7 @@ func (s *GatewayService) ForwardAsResponses(
 	var handleErr error
 	if clientStream {
 		writerSizeBeforeStream := c.Writer.Size()
-		result, handleErr = s.handleResponsesStreamingResponse(resp, c, originalModel, mappedModel, reasoningEffort, startTime, clientToolMapping)
+		result, handleErr = s.handleResponsesStreamingResponse(resp, c, account, originalModel, mappedModel, reasoningEffort, startTime, clientToolMapping)
 		var sseErr *sseStreamErrorEventError
 		switch {
 		case errors.As(handleErr, &sseErr):
@@ -591,6 +591,7 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 func (s *GatewayService) handleResponsesStreamingResponse(
 	resp *http.Response,
 	c *gin.Context,
+	account *Account,
 	originalModel string,
 	mappedModel string,
 	reasoningEffort *string,
@@ -619,6 +620,18 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 
 	stream := newAnthropicCompatStream(s.cfg, c, resp, "forward_as_responses", requestID)
 	defer stream.stop()
+	diagnostics := newAnthropicStreamDiagnostics()
+	diagnostics.emptyOutputAuditResult = "not_applied"
+	partialEventPending := false
+	clientWriteFailed := false
+	logContext := context.Background()
+	if c.Request != nil {
+		logContext = c.Request.Context()
+	}
+	defer func() {
+		diagnostics.log(logContext, c, resp, account, originalModel, mappedModel, "forward_as_responses", false,
+			&usage, firstTokenMs, stream.clientDisconnected || clientWriteFailed, partialEventPending)
+	}()
 
 	resultWithUsage := func() *ForwardResult {
 		return &ForwardResult{
@@ -687,6 +700,9 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 					stream.markClientDisconnected()
 					return
 				}
+				if openAIStreamEventTypeIsTerminal(eventType) {
+					diagnostics.terminalEventForwarded = true
+				}
 			}
 		}
 		if len(events) > 0 {
@@ -695,9 +711,14 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	}
 
 	finalizeStream := func() (*ForwardResult, error) {
+		diagnostics.finishCompatStream(stream)
 		if failure := stream.failure(); failure != nil {
 			return finishAnthropicCompatStreamFailure(c, writerSizeBeforeStream, failure, resultWithUsage(), func() {
+				before := c.Writer.Size()
 				writeAnthropicCompatResponsesStreamFailure(c, state, clientToolRestorer, failure)
+				if c.Writer.Size() > before {
+					diagnostics.terminalEventForwarded = true
+				}
 			})
 		}
 		if stream.clientDisconnected {
@@ -710,7 +731,11 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 					continue
 				}
 				out := string(reverseToolNamesIfPresent(c, []byte(sse)))
-				fmt.Fprint(c.Writer, out) //nolint:errcheck
+				if _, err := fmt.Fprint(c.Writer, out); err != nil {
+					clientWriteFailed = true
+				} else if openAIStreamEventTypeIsTerminal(evt.Type) {
+					diagnostics.terminalEventForwarded = true
+				}
 			}
 			c.Writer.Flush()
 		}
@@ -723,6 +748,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 		if !ok {
 			break
 		}
+		diagnostics.observeCompatLine(stream, line)
 		eventType, ok := parseAnthropicSSEField(line, "event")
 		if !ok {
 			continue
@@ -731,8 +757,10 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 		// Read data line
 		dataLine, ok := stream.nextLine()
 		if !ok {
+			partialEventPending = true
 			break
 		}
+		diagnostics.observeCompatLine(stream, dataLine)
 		payload, ok := parseAnthropicSSEField(dataLine, "data")
 		if !ok {
 			continue
