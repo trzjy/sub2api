@@ -943,27 +943,21 @@ export default {
         estimatedTotalCostTooltip: '根据当前窗口费用和使用率估算达到 100% 使用率时的总费用',
         musePaused: '已暂停',
         museResumeAt: '恢复于 {time}',
-        // Devin 用量窗口：上游真实返回的是「每日 / 每周」两个独立窗口（不是 5h/7d）。
-        devinDaily: '每日窗口',
-        devinWeekly: '每周窗口',
-        devinDailyTooltip: 'Devin 上游每日额度窗口。已用/剩余百分比来自 GetUserStatus，重置时间由上游下发。',
-        devinWeeklyTooltip: 'Devin 上游每周额度窗口。该窗口耗尽时账号会被停调，即使本地仍显示 active/可调度。',
-        devinLocalState: '本地状态：active={active} · schedulable={schedulable}',
-        devinUpstreamState: '上游额度：{state}',
-        devinUpstreamAvailable: '有额度',
-        devinUpstreamExhausted: '已耗尽',
-        devinUpstreamUnknown: '未知',
-        devinQuotaExhausted: '上游额度耗尽 · 已暂停调度',
-        devinQuotaExhaustedHint: '上游对话流返回 failed_precondition / quota has been exhausted。账号已停调，只有恢复探针真实成功才会重新调度；下方重置时间是下一次探测时间，不是额度恢复时间。',
-        devinExhaustedReason: '已耗尽窗口：{windows}',
-        devinExhaustedWindowUnknown: '窗口未知',
-        devinWindowUnknown: '{window}数据未获取',
-        devinNoData: '额度数据未获取',
-        devinQueryFailed: '查询失败：{reason}',
-        devinFetchedAt: '获取于 {time}',
-        devinStale: '数据已过期',
-        devinExhaustedShort: '已耗尽',
-        devinRemaining: '余 {percent}%'
+        // 订阅型用量窗口通用文案：窗口 token 保留上游原值（daily/weekly），只翻译展示层。
+        // Devin 的 Daily/Weekly 复用此映射，不改成 5h/7d。
+        windows: {
+          daily: '每日',
+          weekly: '每周'
+        },
+        remaining: '余 {percent}%',
+        exhausted: '已耗尽',
+        upstreamQuotaExhausted: '上游额度耗尽',
+        upstreamQuotaExhaustedHint: '上游返回 failed_precondition / quota has been exhausted。是否耗尽以最新额度窗口快照为准；停调由恢复探针决定，重置时间不是额度恢复时间。',
+        exhaustedWindows: '已耗尽窗口：{windows}',
+        windowDataUnavailable: '窗口数据未获取',
+        queryFailed: '查询失败：{reason}',
+        fetchedAt: '获取于 {time}',
+        stale: '数据已过期'
       },
       tokenHarbor: {
         rateLimitedPrefix: '限流至',

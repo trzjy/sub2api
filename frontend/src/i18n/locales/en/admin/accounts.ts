@@ -2106,28 +2106,21 @@ export default {
         estimatedTotalCostTooltip: 'Estimated total cost at 100% utilization, based on current window cost and utilization',
         musePaused: 'Paused',
         museResumeAt: 'Resumes at {time}',
-        // Devin usage windows: the upstream really returns "daily" and "weekly"
-        // as two independent windows (not 5h/7d).
-        devinDaily: 'Daily window',
-        devinWeekly: 'Weekly window',
-        devinDailyTooltip: 'Devin upstream daily quota window. Used/remaining percentages come from GetUserStatus; the reset time is provided by the upstream.',
-        devinWeeklyTooltip: 'Devin upstream weekly quota window. When this window is exhausted the account is parked, even if local state still shows active/schedulable.',
-        devinLocalState: 'Local state: active={active} · schedulable={schedulable}',
-        devinUpstreamState: 'Upstream quota: {state}',
-        devinUpstreamAvailable: 'Available',
-        devinUpstreamExhausted: 'Exhausted',
-        devinUpstreamUnknown: 'Unknown',
-        devinQuotaExhausted: 'Upstream quota exhausted · scheduling paused',
-        devinQuotaExhaustedHint: 'The upstream chat stream returned failed_precondition / quota has been exhausted. The account is parked and only resumes after a real recovery probe succeeds; the reset time below is the next probe time, not quota recovery time.',
-        devinExhaustedReason: 'Exhausted windows: {windows}',
-        devinExhaustedWindowUnknown: 'Unknown window',
-        devinWindowUnknown: '{window} data unavailable',
-        devinNoData: 'Quota data unavailable',
-        devinQueryFailed: 'Query failed: {reason}',
-        devinFetchedAt: 'Fetched at {time}',
-        devinStale: 'Data stale',
-        devinExhaustedShort: 'Exhausted',
-        devinRemaining: '{percent}% left'
+        // Generic subscription-window copy. Window tokens stay as upstream values
+        // (daily/weekly); only the display layer is translated. Devin reuses this.
+        windows: {
+          daily: 'Daily',
+          weekly: 'Weekly'
+        },
+        remaining: '{percent}% left',
+        exhausted: 'Exhausted',
+        upstreamQuotaExhausted: 'Upstream quota exhausted',
+        upstreamQuotaExhaustedHint: 'The upstream returned failed_precondition / quota has been exhausted. Exhaustion is decided by the latest quota-window snapshot; parking is decided by the recovery probe, and the reset time is not quota recovery time.',
+        exhaustedWindows: 'Exhausted windows: {windows}',
+        windowDataUnavailable: 'Window data unavailable',
+        queryFailed: 'Query failed: {reason}',
+        fetchedAt: 'Fetched at {time}',
+        stale: 'Data stale'
       },
       tokenHarbor: {
         rateLimitedPrefix: 'Until',

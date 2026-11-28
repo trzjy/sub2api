@@ -3,6 +3,19 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import AccountsView from '../AccountsView.vue'
 
+const autoRefreshCallbacks: Array<{ cb: () => unknown; interval: number }> = []
+
+vi.mock('@vueuse/core', async () => {
+  const actual = await vi.importActual<typeof import('@vueuse/core')>('@vueuse/core')
+  return {
+    ...actual,
+    useIntervalFn: vi.fn((cb: () => unknown, interval: number) => {
+      autoRefreshCallbacks.push({ cb, interval })
+      return { pause: vi.fn(), resume: vi.fn() }
+    })
+  }
+})
+
 const {
   listAccounts,
   listWithEtag,
@@ -75,8 +88,9 @@ const DataTableStub = {
           <slot :name="'header-' + column.key" :column="column" />
         </div>
       </template>
-      <div v-for="row in data" :key="row.id" data-test="account-rate">
-        <slot name="cell-rate_multiplier" :row="row" />
+      <div v-for="row in data" :key="row.id">
+        <div data-test="account-rate"><slot name="cell-rate_multiplier" :row="row" /></div>
+        <slot name="cell-usage" :row="row" />
       </div>
     </div>
   `
@@ -86,6 +100,13 @@ const DataTableStub = {
 const HelpTooltipStub = {
   props: ['content', 'widthClass'],
   template: '<span data-test="usage-windows-hint">{{ content }}</span>'
+}
+
+// Expose the manual-refresh token handed to each usage cell so the auto-refresh
+// path can be asserted without rendering the real cell.
+const UsageCellStub = {
+  props: ['account', 'todayStats', 'manualRefreshToken', 'batchedUsage'],
+  template: '<div data-test="usage-cell" :data-refresh-token="manualRefreshToken"></div>'
 }
 
 function mountView() {
@@ -124,7 +145,7 @@ function mountView() {
         AccountStatusIndicator: true,
         AccountTodayStatsCell: true,
         AccountGroupsCell: true,
-        AccountUsageCell: true,
+        AccountUsageCell: UsageCellStub,
         Icon: true
       }
     }
@@ -134,6 +155,7 @@ function mountView() {
 describe('admin AccountsView usage windows hint', () => {
   beforeEach(() => {
     localStorage.clear()
+    autoRefreshCallbacks.length = 0
 
     listAccounts.mockReset()
     listWithEtag.mockReset()
@@ -204,6 +226,64 @@ describe('admin AccountsView usage windows hint', () => {
     )).toBe(true)
     const columns = wrapper.getComponent(DataTableStub).props('columns') as Array<{ key: string; sortable: boolean }>
     expect(columns.find(column => column.key === 'upstream_billing_rate')?.sortable).toBe(true)
+  })
+
+  it('auto refresh also advances the usage refresh token so Devin batch quota is refetched', async () => {
+    localStorage.setItem(
+      'account-auto-refresh',
+      JSON.stringify({ enabled: true, interval_seconds: 5 })
+    )
+    listAccounts.mockResolvedValue({
+      items: [{
+        id: 992,
+        name: 'devin-992',
+        platform: 'devin',
+        type: 'apikey',
+        status: 'active',
+        schedulable: true,
+        created_at: '2026-11-28T00:00:00Z',
+        updated_at: '2026-11-28T00:00:00Z'
+      }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    listWithEtag.mockResolvedValue({
+      notModified: false,
+      etag: 'etag-1',
+      data: {
+        items: [{
+          id: 992,
+          name: 'devin-992',
+          platform: 'devin',
+          type: 'apikey',
+          status: 'active',
+          schedulable: true,
+          created_at: '2026-11-28T00:00:00Z',
+          updated_at: '2026-11-28T00:00:00Z'
+        }],
+        total: 1,
+        page: 1,
+        page_size: 20,
+        pages: 1
+      }
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    const tokenBefore = Number(wrapper.get('[data-test="usage-cell"]').attributes('data-refresh-token'))
+
+    const tick = autoRefreshCallbacks.find((entry) => entry.interval === 1000)
+    expect(tick).toBeDefined()
+    // Countdown starts at 5s; 6 one-second ticks cross zero and trigger the refresh.
+    for (let i = 0; i < 6; i += 1) {
+      await tick!.cb()
+      await flushPromises()
+    }
+
+    const tokenAfter = Number(wrapper.get('[data-test="usage-cell"]').attributes('data-refresh-token'))
+    expect(tokenAfter).toBeGreaterThan(tokenBefore)
   })
 
   it('shows account multipliers with enough precision to match declared rates', async () => {

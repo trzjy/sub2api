@@ -60,14 +60,14 @@
         data-test="usage-progress-remaining"
         class="shrink-0 text-[10px] font-medium text-gray-500 dark:text-gray-400"
       >
-        {{ t('admin.accounts.usageWindow.devinRemaining', { percent: displayRemainingPercent }) }}
+        {{ t('admin.accounts.usageWindow.remaining', { percent: displayRemainingPercent }) }}
       </span>
       <span
         v-if="exhausted"
         data-test="usage-progress-exhausted"
         class="shrink-0 rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/40 dark:text-red-300"
       >
-        {{ t('admin.accounts.usageWindow.devinExhaustedShort') }}
+        {{ t('admin.accounts.usageWindow.exhausted') }}
       </span>
 
       <!-- Stale annotation (方案 §3.4 v24)：unknown 但数值存在时，灰度进度条旁附
@@ -175,10 +175,9 @@ const labelSizeClass = computed(() =>
 
 // Progress bar color based on utilization
 const barClass = computed(() => {
-  // 已耗尽是确认的事实（不是缺数据），优先于 stale/unknown 的灰度处理。
-  if (props.exhausted) return 'bg-red-500'
-  // stale：已探测但 status=unknown → 灰度（降不透明度），仍显示真实百分比
+  // stale（过期/查询失败）时数据不可信：先置灰，与文字状态保持一致。
   if (props.stale) return 'bg-gray-400/70 dark:bg-gray-500/70'
+  if (props.exhausted) return 'bg-red-500'
   if (props.unknownUsage) return 'bg-gray-300 dark:bg-gray-600'
   if (props.remainingCapacity) {
     if (props.utilization <= 20) {
@@ -199,9 +198,8 @@ const barClass = computed(() => {
 
 // Text color based on utilization
 const textClass = computed(() => {
-  if (props.exhausted) return 'text-red-600 dark:text-red-400'
-  // stale：灰度文字（与 unknownUsage 的隐藏数字路径区分，stale 仍显示真实百分比）
   if (props.stale) return 'text-gray-500 dark:text-gray-400'
+  if (props.exhausted) return 'text-red-600 dark:text-red-400'
   if (props.remainingCapacity) {
     if (props.utilization <= 20) {
       return 'text-red-600 dark:text-red-400'

@@ -1705,6 +1705,9 @@ const refreshAccountsIncrementally = async () => {
     upstreamBillingNow.value = Date.now()
 
     await refreshTodayStatsBatch()
+    // 用量批量结果（含 Devin Daily/Weekly 快照）必须随账号列表一起刷新，
+    // 否则账号行仍显示上一轮额度，且 fetched_at 不会前进。
+    usageManualRefreshToken.value += 1
   } catch (error) {
     console.error('Auto refresh failed:', error)
   } finally {
