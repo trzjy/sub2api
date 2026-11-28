@@ -152,6 +152,137 @@ func TestCNProviderBalanceCheckRunOnceSkipsOllamaCloudUsageAccounts(t *testing.T
 	require.Empty(t, loadRepo.getByIDIDs, "ollama 账号不得进入 payg 检查队列")
 }
 
+// aliyunTokenPlanCaptureUpstream 记录所有出站（relay 的 /usage 与 probe 的
+// /chat/completions 都记），用于断言阿里云 Token Plan 账号被整体跳过。
+type aliyunTokenPlanCaptureUpstream struct {
+	mu       sync.Mutex
+	status   int
+	body     string
+	callIDs  []int64
+	paths    []string
+}
+
+func (u *aliyunTokenPlanCaptureUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	u.mu.Lock()
+	u.callIDs = append(u.callIDs, accountID)
+	u.paths = append(u.paths, req.URL.Path)
+	u.mu.Unlock()
+	return &http.Response{
+		StatusCode: u.status,
+		Body:       io.NopCloser(strings.NewReader(u.body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func (u *aliyunTokenPlanCaptureUpstream) DoWithTLS(req *http.Request, proxy string, accountID int64, attempts int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxy, accountID, attempts)
+}
+
+// cnTokenPlanPauseRepo 在 cnProbeRunOnceRepo 上记录 SetTempUnschedulable 调用，
+// 用于锁定 Token Plan 账号不会因残留的智谱窗口快照被错误停调。
+type cnTokenPlanPauseRepo struct {
+	*cnProbeRunOnceRepo
+	pauseIDs []int64
+}
+
+func (r *cnTokenPlanPauseRepo) SetTempUnschedulable(_ context.Context, id int64, _ time.Time, _ string) error {
+	r.pauseIDs = append(r.pauseIDs, id)
+	return nil
+}
+
+// 阿里云 Token Plan 账号（生产 1014 同款：platform=zhipu，
+// base_url=token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1，
+// balance_probe.enabled=true / url=""）不进 relay / payg / probe 任一目标；
+// 其它平台账号的既有分流保持不变。
+// F1：Extra 里残留未过期且超阈值的 zhipu_5h_* 窗口字段时，Token Plan 账号
+// 只刷新官方快照，不得被通用调度阈值误停调；同款残留字段的普通 zhipu coding
+// 账号（对照组）仍应被阈值停调，证明阈值评估在本用例里确实生效。
+func TestCNProviderBalanceCheckRunOnceSkipsAliyunTokenPlan(t *testing.T) {
+	// F1 场景：Extra 里残留未过期且超阈值的智谱窗口字段（JSONB 合并会保留旧键），
+	// 普通 zhipu 账号会被通用调度阈值停调，Token Plan 账号不得被误停调。
+	resetAt := time.Now().UTC().Add(6 * time.Hour)
+	residualWindows := map[string]any{
+		cnExtraKey(PlatformZhipu, cnExtraSuffix5hUsed):  100,
+		cnExtraKey(PlatformZhipu, cnExtraSuffix5hReset): resetAt.Format(time.RFC3339),
+	}
+	// 对照组：kimi coding 账号仍进额度探测。
+	kimiCoding := Account{ID: 1, Platform: PlatformKimi, Type: AccountTypeAPIKey, Status: StatusActive,
+		Credentials: map[string]any{"account_mode": "coding"}}
+	// 阿里云 Token Plan（coding 模式，覆盖外审指出的触发场景）：url="" 时旧 relay
+	// 会按 base_url 拼出 /compatible-mode/v1/usage 被上游当成模型调用返回 400（model missing）。
+	// Token Plan 分支在 IsCodingPlan() 之前，必须仍进官方额度快照探测路径。
+	aliyunTokenPlan := Account{ID: 2, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{
+			"account_mode":                  "coding",
+			"api_key":                       "sk-tokenplan",
+			"base_url":                      "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+			BalanceProbeConfigCredentialKey: map[string]any{"enabled": true, "url": ""},
+		},
+		Extra: residualWindows}
+	// 对照组：普通 zhipu relay 账号（非 Token Plan）仍进 relay 刷新目标。
+	zhipuRelay := Account{ID: 3, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{
+			"api_key":                       "sk-zhipu-relay",
+			"base_url":                      "https://relay.example.com/v1",
+			BalanceProbeConfigCredentialKey: map[string]any{"enabled": true, "url": "https://relay.example.com/v1/usage"},
+		}}
+	// 对照组：普通 zhipu payg 账号仍进最小完成请求探测。
+	zhipuPayg := Account{ID: 4, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{"api_key": "sk-zhipu-payg"}}
+	// 对照组：普通 zhipu coding 账号带同样的残留窗口字段，必须仍被阈值停调，
+	// 证明本用例中阈值评估确实生效（不是因为没配阈值而"假通过"）。
+	zhipuCodingResidual := Account{ID: 5, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{"account_mode": "coding", "api_key": "sk-zhipu-coding"},
+		Extra:       residualWindows}
+
+	repo := &cnProbeRunOnceRepo{
+		byPlatform: map[string][]Account{
+			PlatformKimi:  {kimiCoding},
+			PlatformZhipu: {aliyunTokenPlan, zhipuRelay, zhipuPayg, zhipuCodingResidual},
+		},
+		byID: map[int64]*Account{
+			1: &kimiCoding, 2: &aliyunTokenPlan, 3: &zhipuRelay, 4: &zhipuPayg, 5: &zhipuCodingResidual,
+		},
+	}
+	pauseRepo := &cnTokenPlanPauseRepo{cnProbeRunOnceRepo: repo}
+	prober := &fakeCNQuotaProber{}
+	upstream := &aliyunTokenPlanCaptureUpstream{
+		status: http.StatusOK,
+		body:   `{"choices":[{"message":{"content":"hi"}}]}`,
+	}
+	// 内存 SettingsRepository 配置 zhipu 阈值 99%，让通用调度阈值评估真实生效。
+	settingRepo := &cnProbeSettingsRepo{data: map[string]string{
+		SettingKeyAccountSchedulingThresholds: `{"zhipu":99}`,
+	}}
+	accountSchedulingThresholdsSF.Forget(SettingKeyAccountSchedulingThresholds)
+	accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
+	rl := NewRateLimitService(pauseRepo, nil, &config.Config{}, nil, nil)
+	rl.SetSettingService(NewSettingService(settingRepo, &config.Config{}))
+	svc := &CNProviderBalanceCheckService{
+		accountRepo:    pauseRepo,
+		balanceService: NewCNProviderBalanceService(pauseRepo, nil, upstream, &config.Config{}),
+		quotaService:   prober,
+		rateLimitSvc:   rl,
+		httpUpstream:   upstream,
+		cfg:            &config.Config{},
+	}
+
+	svc.runOnce()
+
+	require.ElementsMatch(t, []int64{1, 2, 5}, prober.probed, "kimi coding、Token Plan coding 与普通 zhipu coding 均进官方额度快照探测")
+	require.Contains(t, prober.probed, int64(2), "阿里云 Token Plan coding 账号必须进官方额度快照探测路径（quotaTargets）")
+	require.Contains(t, upstream.callIDs, int64(3), "普通 zhipu relay 账号仍进 relay 刷新目标")
+	require.Contains(t, upstream.callIDs, int64(4), "普通 zhipu payg 账号仍进最小完成请求探测")
+	require.NotContains(t, upstream.callIDs, int64(2), "阿里云 Token Plan 账号不得进 relay/payg/probe 任一目标")
+	// 阈值评估确实生效：普通 zhipu coding 对照组被停调；Token Plan 不得因残留快照被误停调。
+	require.Contains(t, pauseRepo.pauseIDs, int64(5), "普通 zhipu coding 残留快照仍须被阈值停调")
+	require.NotContains(t, pauseRepo.pauseIDs, int64(2), "Token Plan 不得因残留 zhipu 窗口被调度阈值停调")
+	require.True(t, aliyunTokenPlan.IsSchedulable(), "Token Plan 账号仍须可调度")
+	require.Nil(t, aliyunTokenPlan.TempUnschedulableUntil, "Token Plan 不得被写入临时停调时间")
+	require.Empty(t, aliyunTokenPlan.TempUnschedulableReason, "Token Plan 不得被写入阈值停调原因")
+	require.False(t, zhipuCodingResidual.IsSchedulable(), "普通 zhipu coding 对照组应被阈值停调")
+}
+
 // 双币种（deepseek CNY+USD）停调判定：任一币种达标即不停调，全部低于阈值才停；
 // 无明细时退回主币种（兼容旧结果）。
 func TestAllCNBalancesBelowThreshold(t *testing.T) {

@@ -407,6 +407,16 @@ func (s *CursorExecutionService) bindHTTPResponseOwner(c *gin.Context, responseI
 	}
 }
 
+// isCursorErrorOpenAICode 把 ERROR_OPENAI 作为「业务码中的基础设施故障」例外：
+// Cursor 上游 EndStream 回吐的 ERROR_OPENAI 文案是上游自身故障（如
+// `Cannot read properties of undefined` / `Unable to reach the model provider`），
+// 属账号当下无法服务，应走既有账号级故障的换号 + 冷却路径，而不是当普通业务码
+// 把 502 直接甩给用户。仅此一个码例外；其余 ERROR_ 业务码（限流/模型名错/鉴权）
+// 语义不变。大小写与首尾空白不敏感。
+func isCursorErrorOpenAICode(code string) bool {
+	return strings.EqualFold(strings.TrimSpace(code), "ERROR_OPENAI")
+}
+
 // Execute 是 Cursor 出站与响应回写的唯一实现。
 //
 // 五步，任一步失败即失败关闭（绝不降级、绝不换上游、绝不伪造 usage）：
@@ -738,10 +748,11 @@ func (s *CursorExecutionService) Execute(
 		// 替换为可换号错误，由既有 failover 循环换到本组下一个 cursor 账号；本组 cursor 池
 		// 轮询完后由既有选号器继续走组内备用渠道（anthropic 等）。
 		// 业务码（ERROR_ 前缀，如 ERROR_PRO_USER_RATE_LIMIT_EXCEEDED / ERROR_BAD_MODEL_NAME）
-		// 各自有专门语义，绝不在此吞掉。
+		// 各自有专门语义，绝不在此吞掉。唯一例外：ERROR_OPENAI 虽带 ERROR_ 前缀，
+		// 但文案是上游自身故障（账号当下无法服务），按账号级故障处理。
 		var mu *CursorModelUnavailableError
 		if code, ok := cursorUpstreamStreamErrorCode(err); ok &&
-			!isCursorBusinessErrorCode(code) && !errors.As(err, &mu) {
+			(!isCursorBusinessErrorCode(code) || isCursorErrorOpenAICode(code)) && !errors.As(err, &mu) {
 			// 透传上游 message（已脱敏，见 cursorParseEndStream + cursorRedactSecrets）：
 			// 让「上游自身故障」与「我们的请求触发上游 bug」可区分。取不到时记空串，
 			// 不填占位符 —— 「没有」与「有但是空的」要能区分开。
@@ -1132,12 +1143,14 @@ func (s *CursorExecutionService) cursorResumeRebuildError(
 		reason = cursorKeyRejectedReason
 		matched = true
 	default:
-		if code, ok := cursorUpstreamStreamErrorCode(err); ok && !isCursorBusinessErrorCode(code) {
+		if code, ok := cursorUpstreamStreamErrorCode(err); ok &&
+			(!isCursorBusinessErrorCode(code) || isCursorErrorOpenAICode(code)) {
 			// 与 Execute 的非业务码分支同语义：账号当下无法服务，换号 + 冷却，不停号。
 			reason = CursorUpstreamAccountFailureReason
 			matched = true
 		}
 	}
+			// ERROR_OPENAI 是本分支的唯一业务码例外（上游自身故障，非请求侧问题）。
 	if !matched {
 		return nil
 	}

@@ -309,6 +309,15 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			if IsOllamaCloudUsageAccount(account) {
 				continue
 			}
+			// 阿里云 Token Plan 账号的用量/额度由官方数据快照负责
+			//（CNProviderQuotaService.providerAliyun → aliyunProbeTokenPlan 落
+			// aliyun_token_plan_usage_snapshot）。base_url 命中 Token Plan 入口时
+			// 不进 relay/payg/probe 任一目标（旧 relay /v1/usage 会被上游当成
+			// 模型调用返回 400 model missing），但必须进官方额度快照探测路径。
+			if isAliyunTokenPlanBaseURL(account.GetBaseURL()) || isAliyunTokenPlanBaseURL(account.GetOpenAIBaseURL()) {
+				quotaTargets = append(quotaTargets, quotaTarget{id: account.ID, platform: account.Platform})
+				continue
+			}
 			// Web 控制台额度上游分流（方案 §3.2）：先于 IsCodingPlan / RelayProbeTargetURL / payg 分流，
 			// 避免其通用余额探测被误打。只要求 IsActive()，不要求 Schedulable 且不排除
 			// TempUnschedulable——已被额度停调的账号必须继续采集，否则补额/重置后无法自动恢复。
@@ -470,6 +479,12 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				account := &allAccounts[i]
 				// Ollama Cloud 用量账号由 Ollama 窗口负责，排除。
 				if IsOllamaCloudUsageAccount(account) {
+					continue
+				}
+				// 阿里云 Token Plan 同 collect 前置跳过：用量由官方数据快照负责，
+				// 旧 relay /v1/usage 会被当成模型调用返回 400。B2 补收轮经
+				// ListActive 取全量，不跳过则 Token Plan 账号仍会补进 relayTargets。
+				if isAliyunTokenPlanBaseURL(account.GetBaseURL()) || isAliyunTokenPlanBaseURL(account.GetOpenAIBaseURL()) {
 					continue
 				}
 				// Schedulable 门槛（与 relay 目标同口径；F3 暂停账号 schedulable=false 自然排除）。
@@ -969,6 +984,13 @@ func (s *CNProviderBalanceCheckService) probeQuota(ctx context.Context, accountI
 		fresh, getErr := s.accountRepo.GetByID(ctx, accountID)
 		if getErr != nil {
 			log.Printf("[CNBalance] quota probe reload account %d (%s) failed: %v", accountID, platform, getErr)
+			return
+		}
+		// 阿里云 Token Plan 账号的额度由官方配额快照负责刷新，platform 常被存成 zhipu。
+		// Extra 是 JSONB 合并会保留旧键，若账号残留未过期且超阈值的 zhipu_5h_* /
+		// zhipu_weekly_* 窗口字段，通用调度阈值会把它们误当作当前额度而错误停调
+		// payg Token Plan 账号；故此处只保留官方快照刷新，跳过通用阈值评估。
+		if isAliyunTokenPlanBaseURL(fresh.GetBaseURL()) || isAliyunTokenPlanBaseURL(fresh.GetOpenAIBaseURL()) {
 			return
 		}
 		if s.rateLimitSvc.ApplyAccountSchedulingThreshold(ctx, fresh) {

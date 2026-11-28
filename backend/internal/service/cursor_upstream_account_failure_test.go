@@ -302,6 +302,148 @@ func TestTempUnscheduleCursorUpstreamFailureSingleFailureCooldown(t *testing.T) 
 	})
 }
 
+// ---------------------------------------------------------------------------
+// 2026-11-28：ERROR_OPENAI 例外（业务码中的基础设施故障）
+// ---------------------------------------------------------------------------
+
+// cursorErrorOpenAIErrorPayload 复刻生产实测的 ERROR_OPENAI 报文：业务码放在
+// details[].debug.error，文案是上游自身故障（Unable to reach the model provider）。
+const cursorErrorOpenAIErrorPayload = `{"error":{"code":"unauthenticated",` +
+	`"message":"We encountered an issue when using your API key: Cannot read properties of undefined (reading 'length')",` +
+	`"details":[{"type":"aiserver.v1.ErrorDetails","debug":{"error":"ERROR_OPENAI",` +
+	`"details":{"title":"","detail":"Unable to reach the model provider"}}}]}}`
+
+func cursorErrorOpenAIStreamBody(t *testing.T, withBody bool) []byte {
+	t.Helper()
+	var out []byte
+	if withBody {
+		out = append(out, cursorTextDeltaFrame(t, "Hi")...)
+	}
+	out = append(out, cursorTestEndStream(t, cursorErrorOpenAIErrorPayload)...)
+	return out
+}
+
+// TestCursorERROR_OPENAIErrorSwitchesAccount 是本单核心回归：ERROR_OPENAI 虽带 ERROR_
+// 前缀，但文案是上游自身故障，必须走既有账号级故障的换号 + 冷却路径，而不是把 502
+// 直接甩给用户。流式与非流式两条出口都要覆盖。
+func TestCursorERROR_OPENAIErrorSwitchesAccount(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		svc, c := newCursorRLStopService(t, cursorErrorOpenAIStreamBody(t, false))
+		ctx, logs := cursorPhaseObserverCtx(t, "req-error-openai")
+
+		acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+		res, err := executeCursorForTest(t, svc, ctx, c, acc,
+			cursorRLStopRequestBody(stream), "cursor-sonnet", stream, time.Now())
+		require.Error(t, err, "stream=%v", stream)
+		require.Nil(t, res)
+
+		var fe *UpstreamFailoverError
+		require.ErrorAs(t, err, &fe, "ERROR_OPENAI 必须按账号级故障换号，stream=%v", stream)
+		require.Equal(t, 502, fe.StatusCode)
+		require.Equal(t, CursorUpstreamAccountFailureReason, fe.Reason)
+		require.Equal(t, GatewayFailureScopeAccount, fe.Scope)
+		require.Equal(t, NextAccountRetry, fe.NextAccountAction)
+		require.Equal(t, 502, fe.ClientStatusCode)
+		require.True(t, fe.ShouldRetryNextAccount())
+		require.False(t, fe.RetryableOnSameAccount, "账号级故障不得走同账号重试")
+		require.Equal(t, "ERROR_OPENAI", fe.CursorUpstreamErrorCode)
+		require.Equal(t, "Unable to reach the model provider", fe.CursorUpstreamErrorMessage)
+
+		// 诊断日志必须落 cursor_upstream_account_failure，并透传上游原文。
+		got := cursorUpstreamAccountFailureLogField(t, logs, "upstream_message")
+		require.Equal(t, "Unable to reach the model provider", got, "stream=%v", stream)
+	}
+}
+
+// TestCursorERROR_OPENAIErrorWithBodyKeepsOriginalError 锁定红线：正文已发布后不得换号，
+// 否则会重复输出。ERROR_OPENAI 例外不解除该门禁。
+func TestCursorERROR_OPENAIErrorWithBodyKeepsOriginalError(t *testing.T) {
+	svc, c := newCursorRLStopService(t, cursorErrorOpenAIStreamBody(t, true))
+
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+	_, err := executeCursorForTest(t, svc, context.Background(), c, acc,
+		cursorRLStopRequestBody(true), "cursor-sonnet", true, time.Now())
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrCursorUpstreamStream), "已发布正文必须原样返回上游错误")
+	var fe *UpstreamFailoverError
+	require.False(t, errors.As(err, &fe), "已发布正文不得 mid-stream 换号")
+}
+
+// TestCursorERROR_OPENAIOtherBusinessCodesUnchanged 锁定红线：其它 ERROR_ 业务码语义逐字不变。
+// 限流仍有自己的 429 + CursorRateLimitedReason 路径，绝不能被 ERROR_OPENAI 例外带到
+// CursorUpstreamAccountFailureReason。
+func TestCursorERROR_OPENAIOtherBusinessCodesUnchanged(t *testing.T) {
+	svc, c := newCursorRLStopService(t,
+		cursorRLStopStreamBody(t, "ERROR_PRO_USER_RATE_LIMIT_EXCEEDED", false))
+	ctx, logs := cursorPhaseObserverCtx(t, "req-rate-limit")
+
+	acc := cursorOutboundAccount(1, 11, "BEARER-ACCOUNT-A")
+	_, err := executeCursorForTest(t, svc, ctx, c, acc,
+		cursorRLStopRequestBody(false), "cursor-sonnet", false, time.Now())
+	require.Error(t, err)
+
+	var fe *UpstreamFailoverError
+	require.ErrorAs(t, err, &fe)
+	require.Equal(t, 429, fe.StatusCode)
+	require.Equal(t, CursorRateLimitedReason, fe.Reason)
+	require.NotEqual(t, CursorUpstreamAccountFailureReason, fe.Reason)
+	require.Empty(t, fe.CursorUpstreamErrorCode, "业务码不得写上游码字段")
+	require.Zero(t, logs.FilterField(zap.String("phase", "cursor_upstream_account_failure")).Len(),
+		"限流不得写账号级故障诊断日志")
+}
+
+// TestCursorResumeERROR_OPENAIRebuildAllowed 覆盖 resume 停号判定分支：续轮场景下
+// ERROR_OPENAI 同样命中 CursorUpstreamAccountFailureReason，口径与 Execute 一致。
+func TestCursorResumeERROR_OPENAIRebuildAllowed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		code    string
+		wantHit bool
+	}{
+		{"ERROR_OPENAI 命中账号级故障", "ERROR_OPENAI", true},
+		{"其它业务码不命中", "ERROR_BAD_MODEL_NAME", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &CursorExecutionService{sessions: newCursorSessionStore()}
+			session := &cursorSessionRecord{
+				id:           "resume-error-openai",
+				spec:         cursorSessionSpec{accountID: 11, requestedModel: "cursor-sonnet"},
+				state:        cursorSessionRunning,
+				finalizeDone: make(chan struct{}),
+				logCtx:       context.Background(),
+			}
+			err := &cursorUpstreamStreamError{Code: tc.code, Message: "Unable to reach the model provider"}
+
+			rebuild := svc.cursorResumeRebuildError(session, err, false)
+			if tc.wantHit {
+				require.NotNil(t, rebuild, "ERROR_OPENAI 续轮必须可换号重建")
+				require.Equal(t, CursorUpstreamAccountFailureReason, rebuild.Reason)
+				require.Equal(t, int64(11), rebuild.DeadAccountID)
+			} else {
+				require.Nil(t, rebuild, "其它业务码不得命中账号级故障重建")
+			}
+		})
+	}
+}
+
+// TestIsCursorERROR_OPENAICode 覆盖局部例外判据的边界：只认 ERROR_OPENAI，大小写与
+// 首尾空白不敏感；其它 ERROR_ 业务码一律不命中。
+func TestIsCursorERROR_OPENAICode(t *testing.T) {
+	cases := map[string]bool{
+		"ERROR_OPENAI":                       true,
+		"error_openai":                       true,
+		"  ERROR_OPENAI  ":                   true,
+		"ERROR_BAD_MODEL_NAME":               false,
+		"ERROR_PRO_USER_RATE_LIMIT_EXCEEDED": false,
+		"ERROR_UNAUTHORIZED":                 false,
+		"internal":                           false,
+		"":                                   false,
+	}
+	for code, want := range cases {
+		require.Equal(t, want, isCursorErrorOpenAICode(code), "code=%q", code)
+	}
+}
+
 // TestTempUnscheduleCursorUpstreamFailureProtocolPollutionCooldown 覆盖协议污染路径：
 // 该路径没有上游 code/message，与「上游集体抽风」无关，必须仍是 5 分钟 + 原 reason。
 // 这里直接调用既有 helper（未被抽风改动触碰）与协议污染入口各验一次。
